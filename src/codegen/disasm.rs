@@ -1675,11 +1675,10 @@ impl<'a> Dec<'a> {
                         imm_len = 1;
                     }
                 },
-                0xF7 => {
-                    if reg == 0 {
+                0xF7
+                    if reg == 0 => {
                         imm_len = 4;
-                    }
-                },
+                    },
                 _ => {},
             }
 
@@ -1744,11 +1743,10 @@ impl<'a> Dec<'a> {
         pos += 1;
         let mod_ = modrm >> 6;
         let rm = modrm & 7;
-        if mod_ != 3 && rm == 4 {
-            if pos < len {
+        if mod_ != 3 && rm == 4
+            && pos < len {
                 pos += 1; // SIB
             }
-        }
         match mod_ {
             0 => {
                 if rm == 5 {
@@ -2025,8 +2023,8 @@ fn consume_modrm_and_optional_parts(code: &[u8], pos: usize) -> usize {
     let rm = modrm & 7;
 
     // Check for SIB byte
-    if rm == 4 && mod_ != 0 {
-        if pos + 1 < code.len() {
+    if rm == 4 && mod_ != 0
+        && pos + 1 < code.len() {
             len += 1; // SIB
             let sib = code[pos + 1];
             let base = sib & 7;
@@ -2035,7 +2033,6 @@ fn consume_modrm_and_optional_parts(code: &[u8], pos: usize) -> usize {
                 len += 4;
             }
         }
-    }
 
     // Displacement
     if mod_ == 1 && pos + len < code.len() {
@@ -2054,11 +2051,10 @@ fn consume_optional_disp_imm(code: &[u8], pos: usize, opcode: u8) -> usize {
     let mut len = 0;
 
     // Some ALU and MOV instructions have immediate operand
-    if matches!(opcode, 0x81 | 0x83 | 0xC7) {
-        if pos + 4 <= code.len() {
+    if matches!(opcode, 0x81 | 0x83 | 0xC7)
+        && pos + 4 <= code.len() {
             len += 4; // imm32
         }
-    }
 
     len.min(code.len() - pos)
 }

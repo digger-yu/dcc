@@ -53,10 +53,29 @@ impl Codegen {
         if Self::type_has_vla(ty) {
             return true;
         }
+        // `_Complex` 恒以缓冲区交付：它的**值模型**是「内存对 (+ SSE 内型时
+        // xmm0=实部)」，永远不可能是单寄存器标量。注意这与“字节从哪个区读”
+        // 那条轴（`abi_classes`）正交：放开 float/double 复数的分类后，其变参
+        // 字节来自 FP 保存区的 1~2 个 16 字节槽（`[Sse]` / `[Sse,Sse]`），必须
+        // 由按分类逐 eightbyte 搬运的聚合路径装载；单块 xmm 路径
+        // (`gen_va_arg_fp`) 只能交付一个寄存器，装不下两分量。
+        if matches!(ty, Type::Complex(..)) {
+            return true;
+        }
         if !matches!(ty, Type::Struct(..) | Type::Union(..) | Type::Array(..) | Type::Vector(..)) {
             return false;
         }
         !(ty.size() <= 8 && matches!(Self::abi_classes(ty).as_slice(), [AbiClass::Integer]))
+    }
+
+    /// 缓冲区交付的 `va_arg` 是否**不**占用 `alloc_sret_slot`，而是直接落在
+    /// 帧底固定的复数物化带 [`Codegen::complex_result_off`]（即上面那条
+    /// “`_Complex` 恒以缓冲区交付”的分支）。
+    ///
+    /// 帧静态扫描 (`sret_bytes_expr`) 与实际装载代码必须对“本表达式到底分不分
+    /// 槽”同源，否则扫描会为不复用的槽推高水位、真正复用的槽却算轻。
+    pub(crate) fn va_arg_result_in_cx_band(ty: &Type) -> bool {
+        matches!(ty, Type::Complex(..))
     }
 
     /// eightbyte 分类表 → 本对象实际占用的 `(GP 寄存器数, XMM 寄存器数)`。
@@ -732,7 +751,6 @@ impl Codegen {
         let has_memory = classes.iter().any(|c| {
             matches!(c, AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87)
         });
-        let (n_gp, n_fp) = Self::va_arg_reg_counts(&classes);
 
         // 从 va_list 结构体 [rcx] 加载字段:
         //   rax = gp_offset, rdx = fp_offset, r8 = overflow_arg_area
@@ -751,105 +769,86 @@ impl Codegen {
         self.emit(&[0x49, 0x89, 0xCB]); // mov r11, rcx (保存 va_list 指针)
         self.emit(&[0x48, 0x8B, 0x49, 0x10]); // mov rcx, [rcx+16] = reg_save_area
 
-        let overflow = self.fresh_label();
-        let regs = self.fresh_label();
-        let done = self.fresh_label();
-        // 对高对齐 struct (>16 byte align) 强制走溢出区路径
-        // 因为这通常意味着它在 caller 的 stack layout 中有特殊对齐要求
-        if has_memory || align >= 16 {
-            self.jmp_rel32(&overflow, JumpKind::Jmp);
-        } else {
-            self.emit(&[0x3D]); // cmp eax, imm32
-            self.emit(&(48 - 8 * n_gp).to_le_bytes());
-            self.jmp_rel32(&overflow, JumpKind::Jg);
-            if n_fp > 0 {
-                self.emit(&[0x81, 0xFA]); // cmp edx, imm32
-                self.emit(&(176 - 16 * n_fp).to_le_bytes());
-                self.jmp_rel32(&overflow, JumpKind::Jg);
-            }
-            self.jmp_rel32(&regs, JumpKind::Jmp);
-        }
-
-        // ---- 溢出区路径 ----
-        self.label(&overflow);
-        if align > 8 {
-            // r8 = (r8 + align-1) & ~(align-1)
-            self.emit(&[0x4D, 0x8D, 0x88]); // lea r9, [r8+disp32]
-            self.emit(&(align - 1).to_le_bytes());
-            self.emit(&[0x4D, 0x89, 0xC8]); // mov r8, r9
-            self.emit(&[0x49, 0x81, 0xE0]); // and r8, imm32
-            self.emit(&(!(align - 1)).to_le_bytes());
-        }
-        self.emit(&[0x4C, 0x89, 0xC6]); // mov rsi, r8
-        self.emit(&[0xFC]); // cld
-        self.emit(&[0x48, 0xC7, 0xC1]); // mov rcx, sz
-        self.emit(&(sz as u32).to_le_bytes());
-        self.emit(&[0xF3, 0xA4]); // rep movsb
-        self.emit(&[0x49, 0x81, 0xC0]); // add r8, step
-        self.emit(&step.to_le_bytes());
-        // 写回 overflow_arg_area 到 va_list 结构体
-        self.emit(&[0x4D, 0x89, 0x43, 0x08]); // mov [r11+8], r8
-        self.jmp_rel32(&done, JumpKind::Jmp);
-
-        // ---- 寄存器保存区路径 ----
-        self.label(&regs);
-        self.emit_va_arg_reg_save_load(&classes);
-        // 回写推进后的偏移到 va_list 结构体
-        self.emit(&[0x41, 0x89, 0x03]); // mov [r11], eax
-        self.emit(&[0x41, 0x89, 0x53, 0x04]); // mov [r11+4], edx
+        // 与 named / global 两个落点共用同一决策体。旧副本在此额外加了
+        // `align >= 16` 的“高对齐 struct 强制走溢出区”近似：GCC 的判据只看
+        // 分类，于是 `__m128d`（align 16、分类 [Sse, SseUp]）在本可从保存区
+        // 取时被强行推到 overflow_arg_area，而 caller 把它留在 xmm 里。
+        self.emit_va_arg_agg_body(&classes, sz, align, step, None, has_memory, (11, 0));
 
         // 恢复 va_list 指针
-        self.label(&done);
         self.pop(3); // pop r11
     }
-    pub(crate) fn gen_va_arg_struct(&mut self, ap_name: &str, arg_ty: &Type) {
-        // 全局 va_list: 直接 rip 相对访问 (r10 基址)
-        if self.is_global_not_local(ap_name) {
-            self.gen_va_arg_struct_global(ap_name, arg_ty);
-            return;
+    /// 32 位寄存器写入 `[base+disp]`（`va_list` 的 `gp_offset`/`fp_offset` 回写）。
+    /// 与 `emit_store_reg_mem` 同构，只是不带 REX.W：三个字段的宽度不同（两个
+    /// `u32` + 一个指针），按 `emit_store_reg_mem` 直接存 64 位会越界写坏相邻
+    /// 字段。三个落点的偏移回写收敛到这里，基址/偏移由 `wb` 描述。
+    fn emit_store_reg32_mem(&mut self, base: u8, disp: i32, src: u8) {
+        let mut rex: u8 = 0x40;
+        if src >= 8 {
+            rex |= 0x04; // REX.R
         }
-        let ap_off = self.var_offset(ap_name);
-        let has_vla = Self::type_has_vla(arg_ty);
-        let mut sz = arg_ty.size();
-        let align = (arg_ty.align() as i32).max(8);
-        let step = ((sz + 7) & !7) as i32; // 计算编译期步长，非VLA使用
-
-        // 处理 VLA: 使用运行时尺寸
-        if has_vla {
-            self.gen_sizeof_runtime(arg_ty, 1); // 运行时尺寸存入寄存器1 (rcx)
-            sz = 0; // 临时占位，后续从 rcx 获取
+        if base >= 8 {
+            rex |= 0x01; // REX.B
         }
-        
-        let classes = Self::abi_classes(arg_ty);
-        let has_memory = classes.iter().any(|c| {
-            matches!(c, AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87)
-        });
-        let (n_gp, n_fp) = Self::va_arg_reg_counts(&classes);
+        let rm = base & 7;
+        if disp == 0 && rm != 5 {
+            self.emit(&[rex, 0x89, ((src & 7) << 3) | rm]);
+        } else if disp.abs() < 128 {
+            self.emit(&[rex, 0x89, 0x40 | ((src & 7) << 3) | rm]);
+            self.emit(&(disp as i8).to_le_bytes());
+        } else {
+            self.emit(&[rex, 0x89, 0x80 | ((src & 7) << 3) | rm]);
+            self.emit(&disp.to_le_bytes());
+        }
+    }
 
-        // 加载 va_list 字段: rax=gp_offset, rdx=fp_offset,
-        // rcx=reg_save_area, r8=overflow_arg_area
-        self.emit(&[0x41, 0x8B, 0x85]);
-        self.emit(&(ap_off as i32).to_le_bytes());
-        self.emit(&[0x41, 0x8B, 0x95]);
-        self.emit(&((ap_off + 4) as i32).to_le_bytes());
-        self.emit(&[0x49, 0x8B, 0x8D]);
-        self.emit(&((ap_off + 16) as i32).to_le_bytes());
-        self.emit(&[0x4D, 0x8B, 0x85]);
-        self.emit(&((ap_off + 8) as i32).to_le_bytes());
-
+    /// 聚合变参装载的**唯一**决策体 + 两路装载体（named 局部 / 全局 / 已退化为
+    /// 指针的 `va_list` 三个落点共用）。
+    ///
+    /// 调用前寄存器约定（由各落点自行准备，见三个 `gen_va_arg_*struct*`）：
+    ///   `rax` = gp_offset、`rdx` = fp_offset、`rcx` = reg_save_area、
+    ///   `r8` = overflow_arg_area、`rdi` = 聚合目的缓冲区。
+    /// `wb = (base, off)` 描述游标回写地址：`gp_offset = [base+off]`、
+    /// `fp_offset = [base+off+4]`、`overflow_arg_area = [base+off+8]`。
+    ///
+    /// 四条轴在此收敛为同一真源：判定用 `va_arg_reg_counts`（**XMM 寄存器个数**
+    /// 而非 eightbyte 个数）、装载槽布局用 `va_arg_sse_disp`（`Sse` 开新 16 字节
+    /// 槽、`SseUp` 续用前槽高半）、溢出区对齐用调用点传入的 `align`、游标推进用
+    /// `step = (size+7)&!7`。历史上这三个落点各持一份逐字副本，单点修复会静默
+    /// 失效，且副本间已实际漂移：
+    /// - named 副本在溢出路径末尾**漏了 `jmp done`**（还把 `done` 标号提前
+    ///   注册在这里），于是溢出装载完直接落进寄存器装载体，用被 `rep movsb`
+    ///   清零的 `rcx` 继续解引用 → SIGSEGV；
+    /// - named/global 两份把 `mov r11, step`（立即数）写成 `49 89 C3`
+    ///   = `mov r11, rax`，又把 `add r8, r11` 写成 `49 01 D0` = `add r8, rdx`
+    ///   （ModRM reg 字段错），于是溢出游标按 gp/fp_offset 乱走。
+    fn emit_va_arg_agg_body(
+        &mut self,
+        classes: &[AbiClass],
+        sz: usize,
+        align: i32,
+        step: i32,
+        vla_size_reg: Option<u8>,
+        force_mem: bool,
+        wb: (u8, i32),
+    ) {
+        let (n_gp, n_xmm) = Self::va_arg_reg_counts(classes);
+        let (wb_base, wb_off) = wb;
         let overflow = self.fresh_label();
         let regs = self.fresh_label();
         let done = self.fresh_label();
-        if has_memory {
+        if force_mem {
             self.jmp_rel32(&overflow, JumpKind::Jmp);
         } else {
-            // gp_offset > 48 - 8*ngp 或 fp_offset > 176 - 16*nfp → 溢出区
+            // 本对象占用的**每一个**槽都必须还在保存区内：
+            // `offset > MAX - n*step` → 溢出（GCC 真值 `cmpl $175/159; ja`，与
+            // caller 侧 `fits_fp = fp + need_fp <= 8` 是同一判据的两侧）。
             self.emit(&[0x3D]); // cmp eax, imm32
             self.emit(&(48 - 8 * n_gp).to_le_bytes());
             self.jmp_rel32(&overflow, JumpKind::Jg);
-            if n_fp > 0 {
+            if n_xmm > 0 {
                 self.emit(&[0x81, 0xFA]); // cmp edx, imm32
-                self.emit(&(176 - 16 * n_fp).to_le_bytes());
+                self.emit(&(176 - 16 * n_xmm).to_le_bytes());
                 self.jmp_rel32(&overflow, JumpKind::Jg);
             }
             self.jmp_rel32(&regs, JumpKind::Jmp);
@@ -859,61 +858,117 @@ impl Codegen {
         // SysV ABI: caller (emit_sysv_call) force_mem 的参数按其声明对齐放置.
         // callee 必须在 overflow_arg_area 上做相同对齐, 否则中间有 padding
         // 时 (如 align=16 的 agg 前面有 force_mem int) 会错位.
+        // GCC 实测：align<=8 的 `struct sd` 不做任何 rounding，align=16 的
+        // `__m128d` 才 `addq $15; andq $-16` —— 故只在 align>8 时插入对齐。
         self.label(&overflow);
         if align > 8 {
             // r8 = (r8 + align - 1) & ~(align - 1)  — 向上对齐到 agg align
-            self.emit(&[0x49, 0x81, 0xC0]);
+            self.emit(&[0x49, 0x81, 0xC0]); // add r8, imm32
             self.emit(&(align - 1).to_le_bytes());
             let mask: i32 = !(align - 1);
-            self.emit(&[0x49, 0x81, 0xE0]);
+            self.emit(&[0x49, 0x81, 0xE0]); // and r8, imm32
             self.emit(&mask.to_le_bytes());
         }
         self.emit(&[0x4C, 0x89, 0xC6]); // mov rsi, r8
         self.emit(&[0xFC]); // cld
-        // 处理 VLA: 运行时尺寸从寄存器1 (rcx) 获取，否则使用编译期尺寸
-        if has_vla {
-            // 计算 step = (rcx +7) & ~7 (按8字节对齐，与非VLA一致)
-            self.emit(&[0x48, 0x8D, 0x41, 0x07]); // lea rax, [rcx+7] (尺寸+7，用于8字节对齐)
-            self.emit(&[0x48, 0x83, 0xE0, 0xF8]); // and rax, -8 (对齐到8字节边界)
-            // step 是新的对齐后尺寸
-            self.emit(&[0x49, 0x89, 0xC3]); // mov r11, rax (暂存step)
-            self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax (rep movsb的计数是对齐后的运行时尺寸)
-        } else {
-            self.emit(&[0x48, 0xC7, 0xC1]); // mov rcx, sz
-            self.emit(&(sz as u32).to_le_bytes());
-            self.emit(&[0x49, 0x89, 0xC3]); // mov r11, step (暂存已计算的step)
+        match vla_size_reg {
+            // VLA: 运行时尺寸在 `sr`（不能放 rcx/rax：rcx = reg_save_area 已在
+            // 字段装载时占用，而 `mov rcx, sz` 本身是 `rep movsb` 的计数）。
+            Some(sr) => {
+                self.emit(&[0x49, 0x8D, 0x40 | (sr & 7)]); // lea rax, [sr+7]
+                self.emit(&[0x07]);
+                self.emit(&[0x48, 0x83, 0xE0, 0xF8]); // and rax, -8
+                self.emit(&[0x49, 0x89, 0xC3]); // mov r11, rax (暂存 step)
+                self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax (计数 = 对齐后尺寸)
+            },
+            None => {
+                self.emit(&[0x48, 0xC7, 0xC1]); // mov rcx, imm32 (= sz)
+                self.emit(&(sz as u32).to_le_bytes());
+            },
         }
         self.emit(&[0xF3, 0xA4]); // rep movsb
-                                    // 推进 overflow_arg_area: 当前对齐位置 + step, 再对齐到下一步
-                                    // 这样 callee 能跳过 caller 可能插入的 padding
-        // 计算 step: (size +7) & ~7，VLA 使用运行时计算后的尺寸
-        self.emit(&[0x49, 0x01, 0xD0]); // add r8, r11 (统一使用暂存的r11，不管是VLA还是非VLA)
-        self.emit(&[0x4D, 0x89, 0x85]); // mov [r13+disp32], r8
-        self.emit(&((ap_off + 8) as i32).to_le_bytes());
-        self.label(&done);
+        // 推进 overflow_arg_area: 当前对齐位置 + step。step 要么是编译期常量
+        // (imm32)，要么在 r11 (VLA)；两者编码必须分开写——旧副本用同一条
+        // `49 01 D0`（= `add r8, rdx`）冒充两者，两路都错。
+        match vla_size_reg {
+            Some(_) => {
+                self.emit(&[0x4C, 0x01, 0xD8]); // add r8, r11
+            },
+            None => {
+                self.emit(&[0x49, 0x81, 0xC0]); // add r8, imm32
+                self.emit(&step.to_le_bytes());
+            },
+        }
+        // mov [wb_base + wb_off + 8], r8
+        self.emit_store_reg_mem(wb_base, wb_off + 8, 8);
+        // 溢出装载已完成，必须跳出：旧 named 副本缺这条 `jmp done`（且把
+        // `done` 标号注册在此处），于是 fall through 进寄存器装载体。
+        self.jmp_rel32(&done, JumpKind::Jmp);
 
-        // ---- 寄存器保存区路径：逐 eightbyte 搬运，每次读取后推进基址 ----
+        // ---- 寄存器保存区路径：按分类逐 eightbyte 搬运 ----
         self.label(&regs);
-
-        // GCC 调用约定保证 variadic argument buffers (rdi) 至少有 16 字节对齐
-        // 对于 >16 字节对齐的结构体（align >= 32），caller 应已正确对齐目标缓冲区
-        // 如需显式对齐可添加：rdi = (rdi + align - 1) & ~(align - 1)
-        // 此处简化假设 caller 已正确处理
-
-        self.emit_va_arg_reg_save_load(&classes);
-        // 回写推进后的偏移 (rax/rdx 已累加到最终值)
-        self.emit(&[0x41, 0x89, 0x85]); // mov [r13+ap_off], eax
-        self.emit(&(ap_off as i32).to_le_bytes());
-        self.emit(&[0x41, 0x89, 0x95]); // mov [r13+ap_off+4], edx
-        self.emit(&((ap_off + 4) as i32).to_le_bytes());
+        self.emit_va_arg_reg_save_load(classes);
+        // 回写推进后的游标 (rax/rdx 已是最终值)
+        self.emit_store_reg32_mem(wb_base, wb_off, 0); // [wb] = eax (gp_offset)
+        self.emit_store_reg32_mem(wb_base, wb_off + 4, 2); // [wb+4] = edx (fp_offset)
         self.label(&done);
+    }
+
+    /// named 变体公共前置：把 `va_list` 四字段装进 rax/rdx/rcx/r8。
+    fn emit_va_list_fields_slot(&mut self, ap_off: i32) {
+        self.emit(&[0x41, 0x8B, 0x85]); // mov eax, [r13+disp32] (gp_offset)
+        self.emit(&ap_off.to_le_bytes());
+        self.emit(&[0x41, 0x8B, 0x95]); // mov edx, [r13+disp32] (fp_offset)
+        self.emit(&(ap_off + 4).to_le_bytes());
+        self.emit(&[0x49, 0x8B, 0x8D]); // mov rcx, [r13+disp32] (reg_save_area)
+        self.emit(&(ap_off + 16).to_le_bytes());
+        self.emit(&[0x4D, 0x8B, 0x85]); // mov r8, [r13+disp32] (overflow_arg_area)
+        self.emit(&(ap_off + 8).to_le_bytes());
+    }
+    pub(crate) fn gen_va_arg_struct(&mut self, ap_name: &str, arg_ty: &Type) {
+        // 全局 va_list: 直接 rip 相对访问 (r10 基址)
+        if self.is_global_not_local(ap_name) {
+            self.gen_va_arg_struct_global(ap_name, arg_ty);
+            return;
+        }
+        let ap_off = self.var_offset(ap_name);
+        let has_vla = Self::type_has_vla(arg_ty);
+        let sz = arg_ty.size();
+        let align = (arg_ty.align() as i32).max(8);
+        let step = ((sz + 7) & !7) as i32; // 计算编译期步长，非VLA使用
+
+        // 处理 VLA: 使用运行时尺寸（存 r9，避开下面被 reg_save_area 占用的 rcx）
+        if has_vla {
+            self.gen_sizeof_runtime(arg_ty, 9);
+        }
+
+        let classes = Self::abi_classes(arg_ty);
+        let has_memory = classes.iter().any(|c| {
+            matches!(c, AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87)
+        });
+        // GCC 实测：判据只看分类（`long double`/聚合走溢出），**不看对齐**。旧
+        // 指针变体额外加了 `align >= 16` 的近似，于是 16 字节对齐的
+        // `__m128d`/`_Alignas(16)` 聚合在本可走保存区时被强行推到溢出区。
+        self.emit_va_list_fields_slot(ap_off as i32);
+        self.emit_va_arg_agg_body(
+            &classes,
+            sz,
+            align,
+            step,
+            if has_vla {
+                Some(9)
+            } else {
+                None
+            },
+            has_memory,
+            (13, ap_off as i32),
+        );
     }
     fn gen_va_arg_struct_global(&mut self, ap_name: &str, arg_ty: &Type) {
         let has_vla = Self::type_has_vla(arg_ty);
-        let mut sz = arg_ty.size();
+        let sz = arg_ty.size();
         if has_vla {
-            self.gen_sizeof_runtime(arg_ty, 1); // 运行时尺寸存入 rax
-            sz = 0; // 临时占位，后续从 rax 获取
+            self.gen_sizeof_runtime(arg_ty, 9); // 运行时尺寸存 r9 (见 named 变体说明)
         }
         let align = (arg_ty.align() as i32).max(8);
         let step = ((sz + 7) & !7) as i32;
@@ -921,7 +976,6 @@ impl Codegen {
         let has_memory = classes.iter().any(|c| {
             matches!(c, AbiClass::Memory | AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87)
         });
-        let (n_gp, n_fp) = Self::va_arg_reg_counts(&classes);
 
         // 加载 va_list 字段: rax=gp_offset, rdx=fp_offset,
         // rcx=reg_save_area, r8=overflow_arg_area, r10=&va_list
@@ -931,61 +985,19 @@ impl Codegen {
         self.emit(&[0x49, 0x8B, 0x4A, 0x10]); // mov rcx, [r10+16]
         self.emit(&[0x4D, 0x8B, 0x42, 0x08]); // mov r8, [r10+8]
 
-        let overflow = self.fresh_label();
-        let regs = self.fresh_label();
-        let done = self.fresh_label();
-        if has_memory {
-            self.jmp_rel32(&overflow, JumpKind::Jmp);
-        } else {
-            self.emit(&[0x3D]); // cmp eax, imm32
-            self.emit(&(48 - 8 * n_gp).to_le_bytes());
-            self.jmp_rel32(&overflow, JumpKind::Jg);
-            if n_fp > 0 {
-                self.emit(&[0x81, 0xFA]); // cmp edx, imm32
-                self.emit(&(176 - 16 * n_fp).to_le_bytes());
-                self.jmp_rel32(&overflow, JumpKind::Jg);
-            }
-            self.jmp_rel32(&regs, JumpKind::Jmp);
-        }
-
-        // ---- 溢出区路径 ----
-        self.label(&overflow);
-        if align > 8 {
-            self.emit(&[0x4D, 0x8D, 0x88]); // lea r9, [r8+disp32]
-            self.emit(&(align - 1).to_le_bytes());
-            self.emit(&[0x4D, 0x89, 0xC8]); // mov r8, r9
-            self.emit(&[0x49, 0x81, 0xE0]); // and r8, imm32
-            self.emit(&(!(align - 1)).to_le_bytes());
-        }
-        self.emit(&[0x4C, 0x89, 0xC6]); // mov rsi, r8
-        self.emit(&[0xFC]); // cld
-        
-        // 处理VLA，与本地函数逻辑一致，尺寸在寄存器1 (rcx)
-        if has_vla {
-            // 计算step = (rcx +7) & ~7 (按8字节对齐，与非VLA一致)
-            self.emit(&[0x48, 0x8D, 0x41, 0x07]); // lea rax, [rcx+7] (尺寸+7，用于8字节对齐)
-            self.emit(&[0x48, 0x83, 0xE0, 0xF8]); // and rax, -8 (对齐到8字节边界)
-            self.emit(&[0x49, 0x89, 0xC3]); // mov r11, rax (暂存step)
-            self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax (rep movsb计数为对齐后的运行时尺寸)
-        } else {
-            self.emit(&[0x48, 0xC7, 0xC1]); // mov rcx, sz
-            self.emit(&(sz as u32).to_le_bytes());
-            self.emit(&[0x49, 0x89, 0xC3]); // mov r11, step (暂存已计算step)
-        }
-        
-        self.emit(&[0xF3, 0xA4]); // rep movsb
-        // 推进overflow，统一使用暂存的r11
-        self.emit(&[0x49, 0x01, 0xD0]); // add r8, r11
-        self.emit(&[0x4D, 0x89, 0x42, 0x08]); // mov [r10+8], r8
-        self.jmp_rel32(&done, JumpKind::Jmp);
-
-        // ---- 寄存器保存区路径 ----
-        self.label(&regs);
-        self.emit_va_arg_reg_save_load(&classes);
-        // 回写推进后的偏移
-        self.emit(&[0x41, 0x89, 0x02]); // mov [r10], eax
-        self.emit(&[0x41, 0x89, 0x52, 0x04]); // mov [r10+4], edx
-        self.label(&done);
+        self.emit_va_arg_agg_body(
+            &classes,
+            sz,
+            align,
+            step,
+            if has_vla {
+                Some(9)
+            } else {
+                None
+            },
+            has_memory,
+            (10, 0),
+        );
     }
     pub(crate) fn resolve_va_list_addr(&mut self, ap: &Expr) -> VaListAddress {
         let ap_is_ptr = matches!(ap.ty(), Type::Ptr(_));

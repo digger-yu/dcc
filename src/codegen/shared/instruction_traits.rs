@@ -68,22 +68,19 @@ pub trait InstructionEncoder {
 
 /// Assembly mode enumeration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum AssemblyMode {
     /// 32-bit protected mode
     Mode32,
 
     /// 64-bit long mode
+    #[default]
     Mode64,
 
     /// 16-bit real mode
     Mode16,
 }
 
-impl Default for AssemblyMode {
-    fn default() -> Self {
-        AssemblyMode::Mode64
-    }
-}
 
 /// Operand types for instructions
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +93,7 @@ pub enum Operand {
 
 /// Memory operand structure
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub struct MemoryOperand {
     pub base_reg: Option<u8>,
     pub index_reg: Option<u8>,
@@ -103,13 +101,3 @@ pub struct MemoryOperand {
     pub displacement: i64,
 }
 
-impl Default for MemoryOperand {
-    fn default() -> Self {
-        MemoryOperand {
-            base_reg: None,
-            index_reg: None,
-            scale: 0,
-            displacement: 0,
-        }
-    }
-}

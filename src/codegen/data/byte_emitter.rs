@@ -86,6 +86,12 @@ impl Default for MemoryAddress {
 /// Byte emitter for data-driven instruction encoding
 pub struct ByteEmitter;
 
+impl Default for ByteEmitter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ByteEmitter {
     /// Create new emitter instance
     pub fn new() -> Self {

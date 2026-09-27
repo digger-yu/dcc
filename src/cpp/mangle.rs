@@ -50,6 +50,20 @@ pub enum MangleType {
     /// 定长数组 `T[N]`（元素类型 + 元素个数）。
     /// 用于局部/全局数组声明的语义化，native 后端据此分配栈/静态存储。
     Array(Box<MangleType>, usize),
+    /// 函数类型 `R(Args...)`。**只能出现在 `Pointer(...)` 里**（C++ 中
+    /// 除声明/定义外没处能放一个函数对象），用法是
+    /// `Pointer(Box::new(MangleType::Function{..}))` 表示 `R(*)(Args...)`。
+    ///
+    /// 为什么需要它（而不是把 `T (*f)(U)` 近似成 `Pointer(T)`）：
+    /// native sema 的重载决议要把实参类型和形参类型逐字段比等。标准库的
+    /// manipulator 重载（`istream& operator>>(istream& (*)(istream&))`、
+    /// `ostream& operator<<(ostream& (*)(ostream&))`）的形参是**函数指针**，
+    /// 丢了 `(U)` 部分后类型永远不相等，候选全部不可行，`is >> std::ws`
+    /// 会退化成**内建 `>>`**（对流对象做 `shr`），得到垃圾 `this` → 运行期段错。
+    Function {
+        ret: Box<MangleType>,
+        params: Vec<MangleType>,
+    },
     Class(String),
     Ellipsis,
     /// `auto` 占位 - 由 lower 阶段基于 init 表达式推导真实类型
@@ -124,6 +138,18 @@ impl MangleType {
                 out.push_str(&n.to_string());
                 out.push('_');
                 t.encode(out);
+            },
+            // Itanium: 函数类型 = `F <d-type> E <p-type>* E`，所以指针指向
+            // 函数 (`Pointer(Function)`) 自然编出 `PF...E...E`，与 GCC 对
+            // `R(*)(Args)` 的编码一致。
+            Self::Function { ret, params } => {
+                out.push('F');
+                ret.encode(out);
+                out.push('E');
+                for p in params {
+                    p.encode(out);
+                }
+                out.push('E');
             },
             Self::Class(n) => {
                 out.push_str(&format!("{}N{}E", n.len(), n));
@@ -284,6 +310,15 @@ pub fn mangle_global_function(name: &str, params: &[MangleType]) -> String {
     out
 }
 
+/// 全局变量 (命名空间作用域, 无类作用域) 修饰: _Z<name>
+///
+/// Itanium ABI 里变量不参与重载, 因此 <unqualified-name> 之后不跟类型编码
+/// (只有静态数据成员才追加 <d-name> 之外的类型)。M28.6 用它做模块导出
+/// 变量的发射符号名, 与同名全局函数 / 类成员区分。
+pub fn mangle_global_variable(name: &str) -> String {
+    format!("_Z{}{}", name.len(), name)
+}
+
 /// 运算符 (二元 / 一元 / 转型 / 函数调用)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operator {
@@ -440,6 +475,9 @@ impl Operator {
             "^=" => Self::XorAssign,
             "++" => Self::Inc,
             "--" => Self::Dec,
+            // 一元 `!` / `~` (字面量组合路径, 与 from_tok_kind 保持一致)
+            "!" => Self::LNot,
+            "~" => Self::Not,
             "()" => Self::Call,
             "[]" => Self::Index,
             "->" => Self::Arrow,
@@ -489,6 +527,15 @@ pub fn from_tok_kind(kind: &TokKind) -> Option<Operator> {
         TokKind::LBracket => Op::Index,
         TokKind::Arrow => Op::Arrow,
         TokKind::Comma => Op::Comma,
+        // 自增/自减与一元 `~` / `!`: lexer 会把它们合成单 token
+        // (PlusPlus/MinusMinus/Tilde/Not), 之前缺映射导致
+        // `C& operator++() { ... }` 在 parse_operator_name 里失败,
+        // 进而整条成员声明 (含其后的数据成员) 退化成 Opaque.
+        TokKind::PlusPlus => Op::Inc,
+        TokKind::MinusMinus => Op::Dec,
+        TokKind::Tilde => Op::Not,
+        TokKind::Not => Op::LNot,
+        TokKind::DotStar => Op::ArrowStar,
         _ => return None,
     })
 }
@@ -525,12 +572,33 @@ pub fn mangle_operator_global(op: Operator, params: &[MangleType]) -> String {
 
 /// vtable 符号: _ZTV<name>
 pub fn mangle_vtable(name: &str) -> String {
-    format!("_ZTV{}{}", name.len(), name)
+    format!("_ZTV{}", encode_type_name(name))
 }
 
 /// typeinfo 符号: _ZTI<name>
 pub fn mangle_typeinfo(name: &str) -> String {
-    format!("_ZTI{}{}", name.len(), name)
+    format!("_ZTI{}", encode_type_name(name))
+}
+
+/// 把源语言类型名编码成 Itanium `<unqualified-name>` / `<nested-name>`。
+///
+/// * `Foo` -> `3Foo`
+/// * `Outer::Inner` -> `N5Outer5InnerE`
+///
+/// 模板实例名 (`__dcc_template_...`) 等非标准名按字面长度前缀处理，
+/// 只保证符号唯一且合法，不与 libstdc++ 交换 RTTI。
+pub fn encode_type_name(name: &str) -> String {
+    let parts: Vec<&str> = name.split("::").collect();
+    if parts.len() <= 1 {
+        let seg = parts.first().copied().unwrap_or("");
+        return format!("{}{}", seg.len(), seg);
+    }
+    let mut out = String::from("N");
+    for p in parts {
+        out.push_str(&format!("{}{}", p.len(), p));
+    }
+    out.push('E');
+    out
 }
 
 /// operator new(size_t) Itanium 名字: _Znwm
@@ -685,5 +753,35 @@ mod tests {
         // pair<int,int> 编码为 N4pairIiiE (两 int 直接拼接)
         // vector<pair<int,int>> 编码为 N6vectorIN4pairIiiEE
         assert_eq!(s, "N6vectorIN4pairIiiEE");
+    }
+
+    /// 回归 (cpp98_iterator_traits 兼查出的前端缺陷): lexer 会把 `++` / `--` /
+    /// `!` / `~` / `.*` 合成单 token, 而 `from_tok_kind` 缺这些映射时
+    /// `parse_operator_name` 直接失败 -> 类成员循环把整条声明连同其后的数据
+    /// 成员一起降级成 Opaque (`int* p_;` 就此消失, sizeof(类) 少 8 字节,
+    /// 成员函数体里报 "undeclared identifier: p_").
+    #[test]
+    fn from_tok_kind_covers_multi_char_and_unary_ops() {
+        assert_eq!(from_tok_kind(&TokKind::PlusPlus), Some(Operator::Inc));
+        assert_eq!(from_tok_kind(&TokKind::MinusMinus), Some(Operator::Dec));
+        assert_eq!(from_tok_kind(&TokKind::Tilde), Some(Operator::Not));
+        assert_eq!(from_tok_kind(&TokKind::Not), Some(Operator::LNot));
+        assert_eq!(from_tok_kind(&TokKind::DotStar), Some(Operator::ArrowStar));
+        // 命中的运算符必须落入正确的 Itanium 编码槽
+        assert_eq!(Operator::Inc.encode_name(), "pp");
+        assert_eq!(Operator::Dec.encode_name(), "mm");
+        assert_eq!(Operator::Not.encode_name(), "co");
+        assert_eq!(Operator::LNot.encode_name(), "nt");
+        assert_eq!(Operator::ArrowStar.encode_name(), "pm");
+    }
+
+    /// 字符拼接路径 (单 token 未被 lexer 合并时) 也要认 `!` / `~`.
+    #[test]
+    fn operator_from_token_unary_spellings() {
+        assert_eq!(Operator::from_token("++"), Some(Operator::Inc));
+        assert_eq!(Operator::from_token("--"), Some(Operator::Dec));
+        assert_eq!(Operator::from_token("!"), Some(Operator::LNot));
+        assert_eq!(Operator::from_token("~"), Some(Operator::Not));
+        assert_eq!(mangle_operator_global(Operator::Inc, &[]), "_Zppv");
     }
 }

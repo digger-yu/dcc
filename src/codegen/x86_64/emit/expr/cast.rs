@@ -5,13 +5,13 @@
 // 新方法 `gen_expr_cast`, 语义 diff 为 0。旧影子 `gen_cast_expr` 自由函数一并作废。
 
 use crate::ast::{Expr, Type};
-use crate::codegen::x86_64::Codegen;
+use crate::codegen::x86_64::{AggDst, Codegen};
 
 impl Codegen {
     /// gen_expr 中 Expr::Cast arm 的搬迁体, 逐字复制, 未改逻辑。
-    pub fn gen_expr_cast(&mut self, ty: &Type, e: &Box<Expr>, dst: u8) {
+    pub fn gen_expr_cast(&mut self, ty: &Type, e: &Expr, dst: u8) {
         // (v4si){...} 复合字面量：parser 降级为 Cast + InitList
-        if let (Type::Vector(elem_ty, n), Expr::InitList { inits, .. }) = (ty, e.as_ref()) {
+        if let (Type::Vector(elem_ty, n), Expr::InitList { inits, .. }) = (ty, e) {
             self.gen_vector_init_rvalue(inits, &elem_ty.base, *n, 0);
             // rax 指向临时槽, 供后续 aggregate_assign 或向量操作使用
             let vec_size = elem_ty.base.size() * n;
@@ -84,6 +84,40 @@ impl Codegen {
                     self.mov(dst, 0);
                 }
                 return;
+            }
+        }
+        // ── _Complex → _Complex: 逐分量算术转换 (C6.3.1.8p4) ────────────────
+        // 复数的**元素类型参与值表示**, 不像对象表示那样可整体位拷贝/位重铸:
+        // `_Complex float` 拓宽到 `_Complex double` 必须对实部、虚部各做一次
+        // cvtss2sd。旧实现在这条轴上没有任何臂: 同宽 (如 `_Complex int` →
+        // `_Complex float`) 落 `gen_same_size_bitcast` 做位重铸, 不同宽落末尾
+        // `_ => {}` 空操作 —— 两者都是「把源分量的位模式当成目标分量的位模
+        // 式」, 于是 `cimag(zf)` (libm 形参是 `_Complex double`) 把 1.25f 与
+        // 2.5f 的位模式读成一个 double (5.39e-315)。
+        // 动作只有一个: 按目标复数类型**赋值**一次。分量宽度与精度转换全部
+        // 委托 `gen_aggregate_assign_to` (复数分量转换的单一真源, 与 `=` 运算
+        // 共用), 本站点不重复实现任何宽度/精度判据; 交付沿用 complex rvalue
+        // 统一约定 (`finish_complex_assign_value`: 实部 @ `complex_result_off`、
+        // 虚部 @ +inner、rax = 该带地址、f/d 再按目标内型重载实部到 xmm0)。
+        if let Type::Complex(ref dst_c) = ty {
+            let src_inner = match src_ty {
+                Type::Complex(ref c) | Type::Imaginary(ref c) => Some(c.base.clone()),
+                _ => None,
+            };
+            if let Some(si) = src_inner {
+                if si != dst_c.base {
+                    let slot = self.alloc_sret_slot(ty.size().max(16));
+                    let cdst = AggDst::Local {
+                        off: slot,
+                        vla: None,
+                    };
+                    self.gen_aggregate_assign_to(&cdst, ty, e);
+                    self.finish_complex_assign_value(&cdst, ty);
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
+                    return;
+                }
             }
         }
         if self.gen_same_size_bitcast(e, ty, dst) {
@@ -244,7 +278,7 @@ impl Codegen {
             },
             (Type::Complex(inner), Type::Int | Type::Long | Type::Char | Type::Short) => {
                 let is_f32 = matches!(&inner.base, Type::Float);
-                match e.as_ref() {
+                match e {
                     Expr::Binop { .. } => {
                         // gen_complex_binop 已将实部留在 xmm0
                     },
@@ -309,74 +343,25 @@ impl Codegen {
                 self.emit_ulong_to_float(dst, true);
             },
             // float/double → unsigned int (<=32bit):
-            // 先用 cvttss2si/cvttsd2si 转到 signed int64,
-            // 负值 (float<0) 钳位到 0, 然后截断到目标宽度.
-            (Type::Float, Type::Bool | Type::UChar | Type::UShort | Type::UInt) => {
-                // cvttss2si dst, xmm0 (REX.W 64 位结果)
-                let rex = 0x48 | (if dst >= 8 { 0x04 } else { 0 });
-                self.emit(&[0xF3, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
-                // 负值钳位到 0: 先 zero_reg=0 (xor 会破坏 flags),
-                // 再 test dst, dst 设置 SF, 最后 cmovs 选择.
-                let zero_reg = if dst == 0 { 2 } else { 0 };
-                self.emit(&[0x48, 0x31, 0xC0 | ((zero_reg & 7) << 3) | (zero_reg & 7)]);
-                let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
-                self.emit(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
-                let rex_cmov = 0x48 | if dst >= 8 { 0x04 } else { 0 };
-                self.emit(&[
-                    rex_cmov,
-                    0x0F,
-                    0x48,
-                    0xC0 | ((dst & 7) << 3) | (zero_reg & 7),
-                ]);
-                // 截断到目标宽度
-                self.emit_truncate_to_unsigned(dst, ty);
-            },
-            (Type::Double, Type::Bool | Type::UChar | Type::UShort | Type::UInt) => {
-                // cvttsd2si dst, xmm0 (REX.W 64 位结果)
-                let rex = 0x48 | (if dst >= 8 { 0x04 } else { 0 });
-                self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
-                let zero_reg = if dst == 0 { 2 } else { 0 };
-                self.emit(&[0x48, 0x31, 0xC0 | ((zero_reg & 7) << 3) | (zero_reg & 7)]);
-                let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
-                self.emit(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
-                let rex_cmov = 0x48 | if dst >= 8 { 0x04 } else { 0 };
-                self.emit(&[
-                    rex_cmov,
-                    0x0F,
-                    0x48,
-                    0xC0 | ((dst & 7) << 3) | (zero_reg & 7),
-                ]);
-                self.emit_truncate_to_unsigned(dst, ty);
-            },
-            (Type::LongDouble, Type::Bool | Type::UChar | Type::UShort | Type::UInt) => {
+            // 单一真源 `emit_float_to_unsigned` —— 用 64 位有符号截断转换再按
+            // 目标宽度截断 (旧实现在此手写 32 位 cvtt + 饱和, 会把 [2^31,2^32)
+            // 夹成 INT_MAX), 负源值钳 0。
+            (
+                src @ (Type::Float | Type::Double | Type::LongDouble),
+                Type::Bool | Type::UChar | Type::UShort | Type::UInt,
+            ) => {
                 // long double 内部为 double, 值已在 xmm0
-                let rex = 0x48 | (if dst >= 8 { 0x04 } else { 0 });
-                self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
-                let zero_reg = if dst == 0 { 2 } else { 0 };
-                self.emit(&[0x48, 0x31, 0xC0 | ((zero_reg & 7) << 3) | (zero_reg & 7)]);
-                let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
-                self.emit(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
-                let rex_cmov = 0x48 | if dst >= 8 { 0x04 } else { 0 };
-                self.emit(&[
-                    rex_cmov,
-                    0x0F,
-                    0x48,
-                    0xC0 | ((dst & 7) << 3) | (zero_reg & 7),
-                ]);
-                self.emit_truncate_to_unsigned(dst, ty);
+                self.emit_float_to_unsigned(dst, src, ty);
             },
             // float/double → ulong/ulonglong:
             // cvttss2si/cvttsd2si 结果若为非负即正确;
             // 若为负 (说明原值 > INT64_MAX), 加 2^64 校正.
-            (Type::Float, Type::ULong | Type::ULongLong) => {
-                self.emit_float_to_ulong(dst, false);
-            },
-            (Type::Double, Type::ULong | Type::ULongLong) => {
-                self.emit_float_to_ulong(dst, true);
-            },
-            (Type::LongDouble, Type::ULong | Type::ULongLong) => {
+            (
+                src @ (Type::Float | Type::Double | Type::LongDouble),
+                Type::ULong | Type::ULongLong,
+            ) => {
                 // long double 内部为 double, 值已在 xmm0
-                self.emit_float_to_ulong(dst, true);
+                self.emit_float_to_unsigned(dst, src, ty);
             },
             // 整数窄化转换: 源类型宽度 > 目标类型宽度时需要截断
             (src, dst_ty) if src.size() > dst_ty.size() => {

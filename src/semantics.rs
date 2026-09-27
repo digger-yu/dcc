@@ -114,6 +114,14 @@ pub enum AddressBase {
     GlobalSymbolLoad { symbol_key: String },
     /// Upvar 加载: base = LOAD(FP + upvar_offset)
     UpvarLoad { offset: i64 },
+    /// 基址是一个**指针值 rvalue** (不是 lvalue): 直接求值该表达式即得地址。
+    /// 例如 `*(p + 2)[i]` / `f()[i]` 的下标基址 —— 旧实现在这里返回
+    /// `StackFrame { offset: 0 }` 占位描述符, 后端把它当成真帧基址物化,
+    /// 于是静默读到栈底垃圾。
+    ComputedAddr { expr: Box<Expr> },
+    /// 语义层无法给出基址 (既不是 lvalue 也不是指针 rvalue)。后端遇到它
+    /// 必须整体退回自己的旧路径, 不允许用占位地址静默发指令。
+    Unknown,
     /// 来自另一个表达式的地址 (递归, 如 s.arr[i])
     ExprAddr { sub: Box<AddressDescriptor> },
     /// 子表达式是指针 lvalue: 先取其地址并加载指针值作为基址。
@@ -125,10 +133,34 @@ pub enum AddressBase {
 pub enum ByteOffset {
     /// 编译期常量偏移
     Constant(i64),
-    /// 运行时: index_reg * stride + constant_addend
-    Runtime { stride: usize, addend: i64 },
-    /// VLA 运行时 stride: stride 在运行时才知道 (需要从 VLA 元数据槽加载)
-    VlaRuntime { addend: i64 },
+    /// 运行时下标项序列 (**外 → 内** 顺序, 至少一项) + 常量补数。
+    ///
+    /// 每一项描述 `Expr::Index` 链上**一层**运行时下标 (stride + 该层下标
+    /// 表达式)。旧表示只有一个运行时槽 (`Runtime { stride, addend }`),
+    /// `add_byte_offsets` 遇到第二个运行时项只能保留第一个并静默丢弃后者,
+    /// 于是多维下标 (`a[i][j][k]` / `a[i][2][k]` / `a[i][j][3]`) 的地址直接
+    /// 算错 —— 行 stride 塌缩。现在描述符自描述每一项, 后端按序累加,
+    /// 调用点不再需要「本层 idx 是否就是那个运行时下标」这类猜测。
+    Runtime {
+        terms: Vec<RuntimeIndexTerm>,
+        addend: i64,
+    },
+    /// VLA 运行时 stride: stride 在运行时才知道 (需要从 VLA 元数据槽加载)。
+    /// 只描述**单层** VLA 下标; 与其它运行时项共存时合并为
+    /// [`ByteOffset::Unsupported`]。
+    VlaRuntime { index: Box<Expr>, addend: i64 },
+    /// 语义层无法表达的偏移组合 (两个 VLA 层共存等)。后端遇到它必须整体
+    /// 退回自己的旧路径 —— 不允许像旧实现那样静默丢弃一个下标项。
+    Unsupported,
+}
+
+/// [`ByteOffset::Runtime`] 的一项: `a[...][idx]` 中某一层运行时下标。
+#[derive(Debug, Clone)]
+pub struct RuntimeIndexTerm {
+    /// 该层元素大小 (下标每加一递增的字节数)
+    pub stride: usize,
+    /// 该层的下标表达式 (运行时求值)
+    pub index: Expr,
 }
 
 /// 元素信息: 地址计算完成后, 元素是什么类型。
@@ -217,11 +249,20 @@ pub struct AddressContext {
 ///
 /// 递归处理: Ident, Index, Member, Deref, Cast 的组合。
 /// 这是 C 语义的核心: arr[i].field->member[j] 的地址计算。
+///
+/// `ctx` 只携带 `is_nested` (为嵌套函数 upvar 查找预留), 当前地址计算
+/// 并不读取它, 故不再沿递归透传 (递归实体见私有 `lvalue_address`),
+/// 保留该形参只为不改动后端现有调用点。
 pub fn compute_lvalue_address<R: ObjectResolver>(
     resolver: &R,
     expr: &Expr,
-    ctx: &AddressContext,
+    _ctx: &AddressContext,
 ) -> AddressDescriptor {
+    lvalue_address(resolver, expr)
+}
+
+/// `compute_lvalue_address` 的递归实现: 只携带真正参与地址计算的参数。
+fn lvalue_address<R: ObjectResolver>(resolver: &R, expr: &Expr) -> AddressDescriptor {
     match expr {
         Expr::Ident { name, ty, .. } => {
             let id = resolver.resolve_identity(&name.name);
@@ -237,7 +278,7 @@ pub fn compute_lvalue_address<R: ObjectResolver>(
         } => {
             // 数组/向量对象下标: 基址就是对象地址。
             // 指针成员下标 (如 s.p[i]): 先读取成员中保存的指针值。
-            let mut base_addr = compute_lvalue_address(resolver, arr, ctx);
+            let mut base_addr = lvalue_address(resolver, arr);
             if matches!(arr.as_ref(), Expr::Member { .. }) && matches!(arr.ty(), Type::Ptr(_)) {
                 base_addr = AddressDescriptor {
                     base: AddressBase::PointerValue {
@@ -260,7 +301,7 @@ pub fn compute_lvalue_address<R: ObjectResolver>(
         } => {
             if *is_arrow {
                 // ptr->field: 先加载指针值, 再加字段偏移
-                let ptr_addr = compute_lvalue_address(resolver, base, ctx);
+                let ptr_addr = lvalue_address(resolver, base);
                 let field_offset = member_field_offset(base, field);
                 let combined = add_constant_offset(ptr_addr, field_offset);
                 AddressDescriptor {
@@ -269,7 +310,7 @@ pub fn compute_lvalue_address<R: ObjectResolver>(
                 }
             } else {
                 // s.field: 在结构体地址上加字段偏移
-                let struct_addr = compute_lvalue_address(resolver, base, ctx);
+                let struct_addr = lvalue_address(resolver, base);
                 let field_offset = member_field_offset(base, field);
                 let combined = add_constant_offset(struct_addr, field_offset);
                 AddressDescriptor {
@@ -281,7 +322,7 @@ pub fn compute_lvalue_address<R: ObjectResolver>(
 
         Expr::Deref { e, ty, .. } => {
             // *p: p 的值就是目标地址。
-            let ptr_addr = compute_lvalue_address(resolver, e, ctx);
+            let ptr_addr = lvalue_address(resolver, e);
             AddressDescriptor {
                 base: AddressBase::ExprAddr {
                     sub: Box::new(ptr_addr),
@@ -293,7 +334,7 @@ pub fn compute_lvalue_address<R: ObjectResolver>(
 
         Expr::Cast { e, ty, .. } => {
             // (T)e 作为 lvalue: 穿透 cast, 直接计算内层地址
-            let inner = compute_lvalue_address(resolver, e, ctx);
+            let inner = lvalue_address(resolver, e);
             AddressDescriptor {
                 element_info: element_info_from_type(ty),
                 ..inner
@@ -301,10 +342,25 @@ pub fn compute_lvalue_address<R: ObjectResolver>(
         },
 
         _ => {
-            // 不应该到达这里: 只有 lvalue 表达式才会被传入。
-            // 对于非 lvalue, 返回一个零偏移的占位描述符。
+            // 不是 lvalue: 若它是个指针 rvalue, 其**值**就是目标地址
+            // (`*(e + 2)` / `f()[i]` 等形态的下标基址)。
+            if matches!(expr.ty(), Type::Ptr(_)) {
+                return AddressDescriptor {
+                    base: AddressBase::ComputedAddr {
+                        expr: Box::new(expr.clone()),
+                    },
+                    offset: ByteOffset::Constant(0),
+                    element_info: ElementInfo {
+                        size: expr.ty().size(),
+                        kind: ElementKind::Scalar,
+                    },
+                };
+            }
+            // 其余非 lvalue: 明确标记为无法物化, 让后端退回旧路径
+            // (旧实现返回 `StackFrame { offset: 0 }` 占位符 —— 那是个看起来
+            // 合法的地址, 会把错误静默地编译进去)。
             AddressDescriptor {
-                base: AddressBase::StackFrame { offset: 0 },
+                base: AddressBase::Unknown,
                 offset: ByteOffset::Constant(0),
                 element_info: ElementInfo {
                     size: expr.ty().size(),
@@ -327,11 +383,20 @@ pub fn compute_index_offset(idx: &Expr, elem_ty: &Type) -> ByteOffset {
         return ByteOffset::Constant(byte_off);
     }
 
-    // 运行时偏移
+    // 运行时偏移: 每项记住自己的下标表达式 (见 [`ByteOffset::Runtime`] 的根因说明)
     match elem_ty {
         // VLA 元素: stride 在运行时才知道
-        _ if elem_ty.has_vla() => ByteOffset::VlaRuntime { addend: 0 },
-        _ => ByteOffset::Runtime { stride, addend: 0 },
+        _ if elem_ty.has_vla() => ByteOffset::VlaRuntime {
+            index: Box::new(idx.clone()),
+            addend: 0,
+        },
+        _ => ByteOffset::Runtime {
+            terms: vec![RuntimeIndexTerm {
+                stride,
+                index: idx.clone(),
+            }],
+            addend: 0,
+        },
     }
 }
 
@@ -399,24 +464,46 @@ fn combine_address(
     base_addr
 }
 
-/// 两个字节偏移相加。
+/// 两个字节偏移相加 (`a` = 已累加的外层, `b` = 新加入的内层)。
 fn add_byte_offsets(a: ByteOffset, b: ByteOffset) -> ByteOffset {
+    use ByteOffset::*;
     match (a, b) {
-        (ByteOffset::Constant(x), ByteOffset::Constant(y)) => ByteOffset::Constant(x + y),
-        (ByteOffset::Constant(c), ByteOffset::Runtime { stride, addend })
-        | (ByteOffset::Runtime { stride, addend }, ByteOffset::Constant(c)) => {
-            ByteOffset::Runtime {
-                stride,
+        (Constant(x), Constant(y)) => Constant(x + y),
+        (Constant(c), Runtime { terms, addend }) | (Runtime { terms, addend }, Constant(c)) => {
+            Runtime {
+                terms,
                 addend: addend + c,
             }
         },
-        (ByteOffset::Constant(c), ByteOffset::VlaRuntime { addend })
-        | (ByteOffset::VlaRuntime { addend }, ByteOffset::Constant(c)) => {
-            ByteOffset::VlaRuntime { addend: addend + c }
+        // 两个运行时项序列: 按 外 → 内 顺序拼接, 常量补数相加
+        (
+            Runtime {
+                terms: mut outer,
+                addend: a1,
+            },
+            Runtime {
+                terms: inner,
+                addend: a2,
+            },
+        ) => {
+            outer.extend(inner);
+            Runtime {
+                terms: outer,
+                addend: a1 + a2,
+            }
         },
-        // 两个运行时偏移不能简单合并 (需要两个寄存器)
-        // 保留第一个, 第二个由物化阶段处理
-        (other, _) => other,
+        (Constant(c), VlaRuntime { index, addend })
+        | (VlaRuntime { index, addend }, Constant(c)) => VlaRuntime {
+            index,
+            addend: addend + c,
+        },
+        // VLA 层与任何其它运行时项共存: 现有物化协议只有一个 VLA stride 槽,
+        // 无法表达第二层动态 stride —— 明确标记为不支持, 让后端整体退回
+        // 旧路径 (旧实现是保留第一个 + 丢弃第二个, 即静默算错地址)。
+        (VlaRuntime { .. }, Runtime { .. })
+        | (Runtime { .. }, VlaRuntime { .. })
+        | (VlaRuntime { .. }, VlaRuntime { .. }) => Unsupported,
+        (Unsupported, _) | (_, Unsupported) => Unsupported,
     }
 }
 

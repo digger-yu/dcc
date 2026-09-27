@@ -22,7 +22,17 @@ namespace std {
         ostream& operator<<(const void* p) { return *this; }
         ostream& operator<<(bool v) { return *this; }
 
+        // manipulator: `os << std::endl` / `os << std::flush` 之类.
+        // 没有这一条重载时 `<< std::endl` 会退化成 `operator<<(const void*)`
+        // (GCC 直接报歧义), 因此 libstdc++ 也提供同名重载.
+        // NOTE: 真实实现应写 `return f(*this);`, 但经函数指针形参的间接调用在
+        // 本后端尚未支持 (sema: "indirect/ctor/dtor calls"), 且本头的成员体
+        // 本来全是无副作用占位 (flush() 也是空体), 故这里保持同样的占位语义.
+        ostream& operator<<(ostream& (*f)(ostream&)) { return *this; }
+
         void flush() {}
+        ostream& put(char c) { return *this; }
+        ostream& write(const char* s, long n) { return *this; }
     };
 
     class istream {
@@ -40,9 +50,17 @@ namespace std {
         istream& operator>>(double& v) { return *this; }
         istream& operator>>(float& v) { return *this; }
         istream& operator>>(char& c) { return *this; }
+        istream& operator>>(char* s) { return *this; }
+
+        // manipulator: `is >> std::ws` (跳过前导空白).
+        // 同上: 间接调用未支持, 体为空占位 (get()/peek() 也是占位).
+        istream& operator>>(istream& (*f)(istream&)) { return *this; }
 
         int get() { return 0; }
         int eof() { return 0; }
+        int peek() { return 0; }
+        istream& getline(char* s, long n) { return *this; }
+        void ignore() {}
     };
 
     inline ostream& cout() {
@@ -63,6 +81,12 @@ namespace std {
     }
 
     inline ostream& endl(ostream& os) {
+        return os;
+    }
+
+    // ends / flush manipulator (与 libstdc++ 同名, 便于 `<< std::flush`)
+    inline ostream& flush(ostream& os) {
+        os.flush();
         return os;
     }
 

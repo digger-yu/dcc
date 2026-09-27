@@ -125,7 +125,7 @@ pub fn push_reg(cg: &mut Codegen, reg: u8) {
             let code = push_codes[reg as usize];
             if code >= 0x41 {
                 // r8-r12 with REX prefixes
-                cg.emit(&[0x41, code & 0xFF]);
+                cg.emit(&[0x41, code]);
             } else {
                 cg.emit(&[code]);
             }

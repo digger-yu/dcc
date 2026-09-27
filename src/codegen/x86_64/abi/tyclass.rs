@@ -36,19 +36,28 @@ mod tests {
         assert!(Codegen::is_sseup_128_aggregate(&v2df()));
     }
 
-    /// 向量含 4 个 eightbyte（32B）时只有首槽是 Sse，其余均为延续。
+    /// 32 字节向量（`vector_size(32)`，自然对齐 32）必须是 `Memory`：GCC 实测
+    /// (`gcc -O0 -s` 对 `probe(int, ...)` 传 `v4df`) 在溢出区以
+    /// `addq $31; andq $-32` 对齐后整体入栈，不进 XMM 寄存器组。
+    /// 旧断言 `[Sse, SseUp, SseUp, SseUp]` 把本应整体入栈的对象当成“一个 XMM
+    /// 寄存器 + 三个延续”，调用方只存低 16 字节、`va_arg` 也只读一个槽，
+    /// 高半永久丢失。与 `Type::Vector` 的自然对齐修正同属一个根因。
     #[test]
-    fn v4df_classifies_as_sse_followed_by_sseup() {
+    fn v4df_over_16byte_alignment_classifies_as_memory() {
         let v4df = Type::Vector(Box::new(QualType::new(Type::Double)), 4);
-        assert_eq!(
-            Codegen::abi_classes(&v4df),
-            vec![
-                AbiClass::Sse,
-                AbiClass::SseUp,
-                AbiClass::SseUp,
-                AbiClass::SseUp
-            ]
-        );
+        assert_eq!(v4df.align(), 32);
+        assert_eq!(Codegen::abi_classes(&v4df), vec![AbiClass::Memory]);
+    }
+
+    /// `double[2]`（与 `struct { double a; double b; }` 同形）与 `__m128d` 同为
+    /// 16 字节，但分类不同：前者 `[Sse, Sse]` 占**两个** XMM 寄存器（两个
+    /// 16 字节槽），后者 `[Sse, SseUp]` 只占一个。这条差异是
+    /// `va_arg_sse_disp` / `va_arg_reg_counts` 的判据来源。
+    #[test]
+    fn two_independent_doubles_occupy_two_xmm_regs() {
+        let d2 = Type::Array(Box::new(QualType::new(Type::Double)), ArraySize::Const(2));
+        assert_eq!(Codegen::abi_classes(&d2), vec![AbiClass::Sse, AbiClass::Sse]);
+        assert!(!Codegen::is_sseup_128_aggregate(&d2));
     }
 }
 impl Codegen {
@@ -61,17 +70,39 @@ impl Codegen {
         // (6 GP + 8 XMM 共 64 字节), 直接强制 Memory 类.
         // long double (x86 80-bit) 标量也强制 Memory.
         //
-        // 除 `_Complex long double` 之外的所有 _Complex (float/double/
-        // 整数) 在 dcc 现有后端里统一按内存 (sret/栈槽) 交付, 维持此
-        // 既有约定, 避免它们落入下方 SSE/整数分类路径而回归。
+        // 除 `_Complex long double` 之外的所有 _Complex 在旧实现里统一按内存
+        // (sret/栈槽) 交付。但 SysV ABI 3.2.3 的真值是：`_Complex float` 是
+        // **单个** 8 字节 SSE eightbyte (实部/虚部各 4 字节打包其中)，`_Complex
+        // double` 是 `[Sse, Sse]` 两个独立 SSE eightbyte。gcc -O0 实测 (与 dcc
+        // 交叉验证的唯一真值)：`f(_Complex float z)` 装 `movq %rax,%xmm0`、
+        // `f(_Complex double z)` 装 `xmm0`+`xmm1`，变参则占 1~2 个 16 字节 FP
+        // 保存区槽。一刀切成 Memory 使两侧与 gcc 都不互操作 (变参读回垃圾位型)。
+        //
+        // 整数 _Complex 暂维持既有 Memory 约定：dcc 的整数 complex rvalue 与形参
+        // 机制整体按“内存对 + rax/rdx”交付，与本轴的寄存器交付不同轴（见
+        // `leaf_abi_class` 的 complex-6 注记），放开需独立改造。
         let is_complex_ld = matches!(
             ty,
             Type::Complex(c) if matches!(&c.base, Type::LongDouble)
         );
+        let is_complex_sse = matches!(
+            ty,
+            Type::Complex(c) if matches!(&c.base, Type::Float | Type::Double)
+        );
+        // 对齐 **大于 16 字节** 的类型整体走内存: SysV ABI 3.2.3p2 的
+        // "如果对齐超过 16 字节, 则归类为 MEMORY" 与 GCC `classify_argument`
+        // 里的 `if (align > 128) return CLASS_MEMORY;` (GCC 4.6 起的 ABI 变更)。
+        // 产物: `__attribute__((vector_size(32)))` 之类 AVX 向量、含这类向量
+        // 成员的聚合、`__attribute__((aligned(32)))` 的结构。把它们分类成
+        // `[Sse, SseUp...]` 会让调用方只搬 16 字节、`va_arg` 只消耗一个 XMM 槽,
+        // 高 16 字节直接丢失; 正确行为是与 GCC 一致地整体入栈。
+        // `_Complex long double` (32B, 对齐 32) 是本规则的例外: 它本就不经
+        // SSE/GP 路径 (见下方 X87 分类), 不能让此规则抢先压成 Memory。
         let force_memory = size > 64
             || matches!(ty, Type::LongDouble)
-            || (matches!(ty, Type::Complex(_)) && !is_complex_ld)
-            || Self::type_has_vla(ty);
+            || (matches!(ty, Type::Complex(_)) && !is_complex_ld && !is_complex_sse)
+            || Self::type_has_vla(ty)
+            || (ty.align() > 16 && !is_complex_ld);
         if force_memory {
             return vec![AbiClass::Memory];
         }
@@ -291,7 +322,21 @@ impl Codegen {
         }
         // 1. 源地址 → rsi (reg 6)
         let mut got_src = false;
-        if matches!(e, Expr::Call { .. }) {
+        if Self::complex_src_needs_convert(&declared_ret, e.ty()) {
+            // 声明返回 `_Complex` 而源不是同内型复数 (标量 / 异内型 `_Complex`):
+            // 下面的交付是**对象表示的字节拷贝**, 必须先按声明类型物化出正确的
+            // 内存对。转换在此不存在: `ci f(int n){ return n; }` (整数内型复数
+            // 被 `leaf_abi_class` force 成 Memory 类) 把 int 的低 4 字节加上栈上
+            // 高位垃圾灌进 `_Complex int` 缓冲区, 调用方读出 16/64 这类地址味
+            // 道值。物化委派 `materialize_value_slot` (与赋值 / 形参侧同源的
+            // `complex_src_needs_convert` + `gen_aggregate_assign_to`), 本站点只
+            // 把已落地的对象表示当源地址。
+            let slot = self.materialize_value_slot(&declared_ret, e);
+            self.emit_lea_r13(6, slot); // rsi = 已按声明类型物化的源
+            self.load_stack(7, sret_off);
+            self.emit_agg_copy_to_sret(declared_ret.size());
+            return;
+        } else if matches!(e, Expr::Call { .. }) {
             // sret/寄存器返回调用: gen_expr 后 rax = &内部 sret 槽
             self.gen_expr(e, 0);
             self.mov(6, 0);
@@ -308,6 +353,12 @@ impl Codegen {
         // 2. 目标地址 → rdi (reg 7)
         self.load_stack(7, sret_off);
         // 3. rep movsq + rep movsb 拷贝
+        self.emit_agg_copy_to_sret(sz);
+    }
+
+    /// `rsi` → sret 缓冲区 (`[rdi]`) 的定长拷贝: qword 优先, 尾数回退到
+    /// `rep movsb`。`gen_sret_return` 的两条源路径 (直接取址 / 先物化) 共用。
+    fn emit_agg_copy_to_sret(&mut self, sz: usize) {
         let qwords = sz / 8;
         let remainder = sz % 8;
         if qwords > 0 {
@@ -437,6 +488,34 @@ impl Codegen {
     /// 绝不能按整数类从 GP 区取。按分类判定才与对象的**书写形态**无关。
     pub(crate) fn classes_force_mem(classes: &[AbiClass]) -> bool {
         Self::classes_contain_memory_class(classes) || classes.len() > 2
+    }
+
+    /// SysV AMD64 ABI 3.5.1 的 **all-or-nothing** 装参判据：一个对象的所有
+    /// eightbyte 必须能**同时**放进剩余的参数寄存器；只要有一个放不下，整个
+    /// 对象一次性走内存，且它本来会占用的寄存器**留给下一个参数**（不推进游标）。
+    ///
+    /// 这是 caller (`emit_sysv_call`) 与 callee (`gen_func` 形参采集) 的**唯一**
+    /// 拆分真源。两侧曾各写一套判据：caller 用本规则整体入栈、callee 却逐
+    /// eightbyte 拆分（“部分进寄存器 + 部分进栈”），于是
+    /// `f(int a,..,int e, struct {long,long} p)` 场景 caller 把两个 eightbyte 都
+    /// 放进 overflow 区，callee 却从 r9 取低半、从 overflow 首槽取高半 —— 被调方
+    /// 读到的 `p.a` 是垃圾、`p.b` 是 `p.a`。gcc 真值（-O0 反汇编）证实整体入栈：
+    /// `push q.b; push q.a` 后 callee 从 `0x10(rbp)`/`0x18(rbp)` 两次取字，
+    /// 而后续参数 `z` 仍进 r9。
+    ///
+    /// `gp_avail`/`fp_avail` 是两侧各自的剩余 GP / XMM 寄存器数；判据只看分类，
+    /// 不看对象的书写形态（struct / `__int128` / 向量一视同仁）。
+    pub(crate) fn aggregate_forces_memory(
+        classes: &[AbiClass],
+        gp_avail: usize,
+        fp_avail: usize,
+    ) -> bool {
+        let need_gp = classes.iter().filter(|c| **c == AbiClass::Integer).count();
+        // SseUp 是前一个 Sse 所在 xmm 高 64 位的延续，不单独占寄存器。
+        let need_fp = classes.iter().filter(|c| **c == AbiClass::Sse).count();
+        Self::classes_contain_memory_class(classes)
+            || gp_avail < need_gp
+            || fp_avail < need_fp
     }
 
     /// 该类型是否**整体**由 SSE 类构成（可全部从 16 字节 FP 槽按宽度读出）。

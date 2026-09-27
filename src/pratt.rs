@@ -19,10 +19,11 @@
 //     的公开 API, 保证可单独编译与测试.
 //
 // 公开 API:
-//   * `PrattParser::parse_expression(tokens) -> Result<(Expr, Vec<Diagnostic>), ()>`
+//   * `PrattParser::parse_expression(tokens) -> Result<(Expr, Vec<Diagnostic>), PrattParseError>`
 //   * 输入: 已经由 lexer 产生的 `Vec<Tok>`. 调用方负责 lex (维持
 //     与现有 parser 入口的对称性).
-//   * 输出: 单条 `ast::Expr` + 累积诊断 (非致命错误).
+//   * 输出: 单条 `ast::Expr` + 累积诊断 (非致命错误); 失败时由
+//     `PrattParseError` 携带全部累积诊断 (含触发失败的那条).
 //
 // 已知简化 (A/B 测试范围内可接受):
 //   * 不做完整类型推导. Expr 节点的 `ty` 字段填合理默认值
@@ -34,6 +35,37 @@
 use crate::ast::{self, BinOp, Expr, FloatConst, Ident, Type, UnOp};
 use crate::diagnostics::{Diagnostic, Span};
 use crate::tokens::{Tok, TokKind};
+use std::fmt;
+
+/// `PrattParser::parse_expression` 的致命解析错误。
+///
+/// 取代原先的 `Result<_, ()>`: 失败原因不再被丢弃。每个错误点都先向
+/// `PrattParser::diagnostics` 推入一条带 code/span 的 `Diagnostic` 再返回
+/// Err, 因此在顶层边界把整份累积诊断随错误返回, 调用方可直接渲染。
+#[derive(Debug, Clone, Default)]
+pub struct PrattParseError {
+    /// 直到失败为止累积的诊断; 最后一条即触发失败的致命错误。
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl PrattParseError {
+    /// 触发失败的那条诊断 (累积列表的末尾)。
+    pub fn fatal(&self) -> Option<&Diagnostic> {
+        self.diagnostics.last()
+    }
+}
+
+impl fmt::Display for PrattParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.fatal() {
+            // `Diagnostic` 自带 GitHub 风格渲染, 直接转发
+            Some(d) => writeln!(f, "{d}"),
+            None => f.write_str("pratt parse error"),
+        }
+    }
+}
+
+impl std::error::Error for PrattParseError {}
 
 /// Pratt 解析器: 持有 token 流与游标, 在调用 parse_expr 时推进.
 pub struct PrattParser {
@@ -48,19 +80,27 @@ impl PrattParser {
     /// 设计要点:
     ///   * 此函数是 `PrattParser` 的静态门面, 方便上层像调用
     ///     普通函数一样使用, 不必显式构造.
-    ///   * 返回 `Result<(Expr, Vec<Diagnostic>), ()>`:
-    ///       - 成功: 解析出的 Expr 与非致命诊断 (例如未消费 token).
-    ///       - 失败: 不可恢复的语法错误, 调用方应中止.
+    ///   * 返回 `Result<(Expr, Vec<Diagnostic>), PrattParseError>`:
+    ///       - 成功: 解析出的 Expr 与非致命诊断 (例如未消费 token)。
+    ///       - 失败: 不可恢复的语法错误 (错误原因在 `PrattParseError`
+    ///         的累积诊断里, 最后一条即致命错误), 调用方应中止。
     ///   * 当前实现允许 token 流末尾保留 Eof; 也允许 Eof 之后还有
-    ///     额外 token (留给 statement 解析后续使用).
-    pub fn parse_expression(tokens: Vec<Tok>) -> Result<(ast::Expr, Vec<Diagnostic>), ()> {
+    ///     额外 token (留给 statement 解析后续使用)。
+    pub fn parse_expression(
+        tokens: Vec<Tok>,
+    ) -> Result<(ast::Expr, Vec<Diagnostic>), PrattParseError> {
         let mut pp = PrattParser {
             tokens,
             pos: 0,
             diagnostics: Vec::new(),
         };
-        let expr = pp.parse_expr(0)?;
-        Ok((expr, pp.diagnostics))
+        match pp.parse_expr(0) {
+            Ok(expr) => Ok((expr, pp.diagnostics)),
+            // 内部各错误点已把诊断推入 pp.diagnostics, 随错误一起交出。
+            Err(()) => Err(PrattParseError {
+                diagnostics: pp.diagnostics,
+            }),
+        }
     }
 
     /// 偷看当前 token (不消费). 越界返回 Eof 哨兵.

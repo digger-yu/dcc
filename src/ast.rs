@@ -1328,7 +1328,11 @@ impl Type {
             Type::Int128 | Type::UInt128 => 16,
             Type::Array(elem, ArraySize::Const(_)) => elem.align(),
             Type::Array(elem, ArraySize::Var(_)) => elem.align(),
-            Type::Vector(_, _) => 16, // SIMD 向量 16 字节对齐
+            // SIMD 向量的自然对齐 = 其总字节数 (GCC: V16QI=128b, V8DF=256b,
+            // V16SF=512b)。旧实现硬编码 16 会让 32/64 字节向量在 ABI 分类里
+            // 逃过 "对齐 > 16 字节 ⇒ 整体走内存" 规则 (SysV ABI 3.2.3 与 GCC
+            // `classify_argument` 的 `if (align > 128) return CLASS_MEMORY`)。
+            Type::Vector(elem, n) => (elem.size() * n).max(1),
             Type::LongDouble => 16,
             Type::Complex(inner) => inner.align(),
             Type::Imaginary(inner) => inner.align(),
@@ -1394,6 +1398,103 @@ impl Type {
                     | Type::Complex(_)
                     | Type::Imaginary(_)
             )
+    }
+
+    /// 整数提升 (C11 6.3.1.1p2): 比 `int` 秩低的整数类型一律转为 `int`
+    /// (或 `unsigned int`, 当 `int` 无法表示其全部值时)。
+    ///
+    /// 非整数类型原样返回, 便于在混合表达式里直接套用。
+    pub fn int_promotion(&self) -> Type {
+        match self {
+            Type::Bool
+            | Type::Char
+            | Type::SChar
+            | Type::UChar
+            | Type::Char8
+            | Type::Short
+            | Type::UShort => Type::Int,
+            other => other.clone(),
+        }
+    }
+
+    /// C11 6.3.1.8「通常算术转换」的整数部分: 两个操作数的公共类型。
+    ///
+    /// 全项目**单一真源** —— C 前端 (`parser.rs`)、SSA→AST 重建
+    /// (`ssa.rs::infer_binop_type`) 与 codegen 共用本函数, 避免任一
+    /// 路径自己拍一个「结果都是 int」的近似口径 —— 那会把 `long * int`
+    /// 降格成 32 位运算, 后续 `long` 赋值变成 sext(i32), 高 32 位静默丢失。
+    ///
+    /// 秩表按 ISO C 由低到高; 浮点/复数/指针不在本函数职责内 (调用方需
+    /// 先判别, 非整数类型只会在同秩时命中「返回自身」这条保守路径)。
+    pub fn usual_arith_type(&self, other: &Type) -> Type {
+        use Type::*;
+        let a = self.int_promotion();
+        let b = other.int_promotion();
+        let rank = |t: &Type| -> i32 {
+            match t {
+                Bool | Char | SChar | UChar => 1,
+                Short | UShort => 2,
+                Int | UInt => 3,
+                Long | ULong => 4,
+                LongLong | ULongLong => 5,
+                Int128 | UInt128 => 6,
+                _ => 0,
+            }
+        };
+        let is_uns =
+            |t: &Type| -> bool { matches!(t, UChar | UShort | UInt | ULong | ULongLong | UInt128) };
+        let a = &a;
+        let b = &b;
+        if std::mem::discriminant(a) == std::mem::discriminant(b) {
+            return a.clone();
+        }
+        let ra = rank(a);
+        let rb = rank(b);
+        let (higher, lower) = if ra >= rb { (a, b) } else { (b, a) };
+        if is_uns(higher) {
+            return higher.clone();
+        }
+        if !is_uns(lower) {
+            return higher.clone();
+        }
+        if rank(higher) > rank(lower) {
+            return higher.clone();
+        }
+        // 同秩时: 有符号无法表示无符号的全部值, 转为对应无符号类型
+        match higher {
+            Int => UInt,
+            Long => ULong,
+            LongLong => ULongLong,
+            Int128 => UInt128,
+            _ => higher.clone(),
+        }
+    }
+
+    /// 复数 / 虚数算术的**实型**公共类型 (C11 6.3.1.8 + G.6.4.4)。
+    ///
+    /// `_Complex` / `_Imaginary` 运算的结果 shape 由它的**实型**决定, 而实型
+    /// 就是两侧实型参加通常算术转换的结果 —— 浮点秩高于任何整数秩, 故只要
+    /// 一侧是浮点, 公共实型必为两者中较宽的浮点族类型; 两侧皆整数时退回
+    /// 整数【usual_arith_type】这条单一真源。本函数是前端 `_Complex` /
+    /// `_Imaginary` 推导与标量浮点臂共用的唯一口径。
+    ///
+    /// 旧写法在复数/虚数推导里按 `size()` 比较内型, 而 `int` 与 `float` 同为
+    /// 4 字节 —— `4 * _Complex_I` 的实型被判成 `int`, 于是浮点分量的**位模式**
+    /// 当成整数值 (`zf = 3 + 4*_Complex_I` 虚部读出 0x40800000 = 1082130432)。
+    pub fn common_real_type(&self, other: &Type) -> Type {
+        let frank = |t: &Type| -> i32 {
+            match t {
+                Type::LongDouble => 3,
+                Type::Double => 2,
+                Type::Float => 1,
+                _ => 0,
+            }
+        };
+        if frank(self) > 0 || frank(other) > 0 {
+            // 至少一侧是浮点: 整数侧的值表示必须先进入浮点域, 不得当候选实型
+            return if frank(self) >= frank(other) { self.clone() } else { other.clone() };
+        }
+        self.usual_arith_type(other)
     }
 
     pub fn layout_struct(fields: &mut [Field], is_union: bool) {

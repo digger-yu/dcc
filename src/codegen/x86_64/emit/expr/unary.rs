@@ -10,10 +10,10 @@ use crate::codegen::x86_64::{Codegen, JumpKind};
 
 impl Codegen {
     /// gen_expr 中 Expr::Unary arm 的搬迁体, 逐字复制, 未改逻辑。
-    pub fn gen_expr_unary_ops(&mut self, op: &UnOp, e: &Box<Expr>, dst: u8) {
+    pub fn gen_expr_unary_ops(&mut self, op: &UnOp, e: &Expr, dst: u8) {
         // 浮点字面量取负: 编译期折叠, 直接生成相反值的 Float 表达式
         if matches!(op, UnOp::Neg) {
-            if let Expr::Float { c, ty, span, .. } = e.as_ref() {
+            if let Expr::Float { c, ty, span, .. } = e {
                 let negated = Expr::Float {
                     c: c.negate(),
                     ty: ty.clone(),
@@ -143,7 +143,7 @@ impl Codegen {
             } else {
                 // rvalue: gen_expr 后 xmm0=实部
                 self.gen_expr(e, 0);
-                if matches!(e.as_ref(), Expr::Call { .. }) {
+                if matches!(e, Expr::Call { .. }) {
                     // SSE 返回: 虚部在 xmm1, 物化到临时区
                     self.emit(&[pfx, 0x41, 0x0F, 0x11]);
                     if (result_off + inner_sz).abs() < 128 {

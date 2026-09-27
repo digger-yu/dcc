@@ -145,6 +145,164 @@ fn run_exe(path: &std::path::Path) -> i32 {
         .unwrap_or(-1)
 }
 
+/// GCC 交叉验证: 同一份 C 源分别用 `gcc -O0` 与 dcc 编译链接并运行, 要求
+/// **退出码相同**且 **stdout 逐字节一致**, 然后返回该退出码供调用方再断言具体值。
+///
+/// 为什么变参 ABI 用例必须这样测: 只断言"dcc 产物返回 0"时, caller 与 callee
+/// 若把某一类参数错放到同一个位置 (两侧同错), 夹具依然自洽通过 —— 而这正是
+/// ABI 互操作性最坏的失效形态。外部权威实现 (gcc) 的逐字节输出对照能把这类
+/// "内部一致但与世不符"的错误照出来。
+///
+/// 注: 本机系统 gcc 尚无 `-std=gnu23`, 用 `-std=gnu2x` 对应 dcc 的默认 `gnu23`;
+/// 两边链接都用主机 cc, 因而 libc 的 `printf` 格式化行为一致。
+fn run_gcc_cross_check(name: &str, source: &str) -> i32 {
+    let dir = std::env::temp_dir();
+    let gsrc = dir.join(format!("dcc-xcheck-{name}-{}.c", std::process::id()));
+    let gexe = dir.join(format!("dcc-xcheck-{name}-{}.gcc", std::process::id()));
+    fs::write(&gsrc, source).expect("write C fixture for gcc");
+    let gbuild = Command::new("gcc")
+        .args(["-O0", "-std=gnu2x", "-w", "-o"])
+        .arg(&gexe)
+        .arg(&gsrc)
+        .output()
+        .expect("run gcc");
+    let (dcompile, dexe) = run_compile_and_run(name, source);
+    let _ = fs::remove_file(&gsrc);
+    assert!(
+        gbuild.status.success(),
+        "gcc 应能编译 {name}: {}",
+        String::from_utf8_lossy(&gbuild.stderr)
+    );
+    assert!(
+        dcompile.status.success(),
+        "dcc 应能编译 {name}: {}",
+        String::from_utf8_lossy(&dcompile.stderr)
+    );
+    let grun = Command::new(&gexe).output().expect("run gcc-built exe");
+    let drun = Command::new(&dexe).output().expect("run dcc-built exe");
+    let _ = fs::remove_file(&gexe);
+    let _ = fs::remove_file(&dexe);
+    let gcode = grun.status.code().unwrap_or(-1);
+    let dcode = drun.status.code().unwrap_or(-1);
+    assert_eq!(
+        String::from_utf8_lossy(&grun.stdout),
+        String::from_utf8_lossy(&drun.stdout),
+        "{name}: gcc 与 dcc 的 stdout 不一致 (gcc_rc={gcode} dcc_rc={dcode})"
+    );
+    assert_eq!(gcode, dcode, "{name}: gcc 与 dcc 的退出码不一致");
+    dcode
+}
+
+/// 跨 TU ABI 互操作对照: 同一对 C 源 (provider 无 main, consumer 有 main)
+/// 用 gcc / dcc **各自单独编译**后由主机 gcc 链接, 要求四种组合的 stdout
+/// 逐字节一致且退出码相同:
+///  (gcc|gcc) 参照基准、(dcc|dcc) 全 dcc、(gcc|dcc) 与 (dcc|gcc) 混合。
+///
+/// 为什么必须是四种而不是两个单文件对照: `run_gcc_cross_check` 里 caller 与
+/// callee 由同一个编译器产出, 两侧**对称地**错 (例如把 `_Complex double` 的两个
+/// SSE eightbyte 都塞进 xmm0, 或把聚合的第二字读漏) 时程序内部依然自洽、
+/// 退出码依然 0 —— 只有让一侧的对象表示由另一个实现负责, ABI 约定才成为
+/// 被检验的对象。混合链接正是 `_Complex` / 聚合传参这类缺陷的唯一真判据。
+#[cfg(unix)]
+fn run_gcc_two_tu_cross_check(name: &str, provider: &str, consumer: &str) -> i32 {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let psrc = dir.join(format!("dcc-2tu-{name}-{pid}-p.c"));
+    let csrc = dir.join(format!("dcc-2tu-{name}-{pid}-c.c"));
+    fs::write(&psrc, provider).expect("write provider");
+    fs::write(&csrc, consumer).expect("write consumer");
+
+    // obj 前缀 "g" = gcc 产出, "d" = dcc 产出
+    let dcc_bin = env!("CARGO_BIN_EXE_dcc");
+    let mut objs: Vec<(char, std::path::PathBuf)> = Vec::new();
+    for (compiler, tag, extra) in [
+        ("gcc", 'g', vec!["-O0", "-std=gnu2x", "-w"]),
+        (dcc_bin, 'd', vec!["-std=gnu23"]),
+    ] {
+        for (src, which) in [(&psrc, "p"), (&csrc, "c")] {
+            let obj = dir.join(format!("dcc-2tu-{name}-{pid}-{tag}-{which}.o"));
+            let mut cmd = Command::new(compiler);
+            for f in &extra {
+                cmd.arg(f);
+            }
+            let out = cmd
+                .args(["-c", "-o"])
+                .arg(&obj)
+                .arg(src)
+                .output()
+                .unwrap_or_else(|e| panic!("{compiler} 编译 {name} 失败: {e}"));
+            assert!(
+                out.status.success(),
+                "{compiler} 应能编译 {name} ({which}): {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            objs.push((tag, obj));
+        }
+    }
+    let g = |tag: char, which: &str| -> &std::path::Path {
+        objs.iter()
+            .find(|(t, p)| *t == tag && p.file_name().unwrap().to_string_lossy().ends_with(&format!("-{which}.o")))
+            .map(|(_, p)| p.as_path())
+            .expect("object produced above")
+    };
+
+    let run = |combo: &[&std::path::Path]| -> (i32, String) {
+        let exe = dir.join(format!("dcc-2tu-{name}-{pid}-link.bin"));
+        let mut cmd = Command::new("gcc");
+        cmd.arg("-w");
+        for o in combo {
+            cmd.arg(o);
+        }
+        cmd.arg("-o").arg(&exe);
+        let link = cmd.output().expect("host gcc link");
+        assert!(
+            link.status.success(),
+            "{name}: 链接 {:?} 失败: {}",
+            combo
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            String::from_utf8_lossy(&link.stderr)
+        );
+        let run = Command::new(&exe).output().expect("run linked exe");
+        let _ = fs::remove_file(&exe);
+        (
+            run.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&run.stdout).into_owned(),
+        )
+    };
+
+    // (gcc|gcc) 为参照, 其余三种都必须与它逐字节一致
+    let want = run(&[g('g', "p"), g('g', "c")]);
+    for (label, combo) in [
+        ("dcc|dcc", vec![g('d', "p"), g('d', "c")]),
+        ("gcc|dcc", vec![g('g', "p"), g('d', "c")]),
+        ("dcc|gcc", vec![g('d', "p"), g('g', "c")]),
+    ] {
+        let got = run(&combo);
+        assert_eq!(
+            want.1, got.1,
+            "{name}: {label} 组合的 stdout 与 gcc|gcc 参照不一致"
+        );
+        assert_eq!(want.0, got.0, "{name}: {label} 组合的退出码与参照不一致");
+    }
+    for (_, obj) in &objs {
+        let _ = fs::remove_file(obj);
+    }
+    let _ = fs::remove_file(&psrc);
+    let _ = fs::remove_file(&csrc);
+    want.0
+}
+
+/// C++ 夹具的 g++ 逐字节 + 退出码对照。实现**完全委派**
+/// [`cpp_coroutine_cross_check`] (同一真源: g++ -std=c++20 参照、`dcc -c`、
+/// 主机 gcc 链接、3 轮自洽), 只是换个与协程无关的名字 —— 块名/迭代序
+/// 驱动的后端 (switch `case_<v>` 前缀匹配) 同样需要多轮自洽。
+#[cfg(unix)]
+fn cpp_gcc_cross_check(name: &str, source: &str) {
+    cpp_coroutine_cross_check(name, source)
+}
+
 #[cfg(unix)]
 fn run_sanitized_binary(
     name: &str,
@@ -377,13 +535,25 @@ fn elf64_dynamic_needed(data: &[u8]) -> Vec<String> {
     out
 }
 
-/// 极简 ELF64 符号表解析: 返回定义型函数符号 (STT_FUNC, 有节) 的
-/// (名称, st_value, st_size). 用于验证函数符号 st_size 非零.
-fn elf64_func_symbols(data: &[u8]) -> Vec<(String, u64, u64)> {
-    fn read_cstr(b: &[u8]) -> String {
-        let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
-        String::from_utf8_lossy(&b[..end]).to_string()
-    }
+/// ELF64 符号表条目 (极简解析用): 名字 + 绑定 + 类型 + 节 + 值 + 尺寸
+struct Elf64Sym {
+    name: String,
+    /// ELF_ST_BIND(st_info): 0=LOCAL, 1=GLOBAL, 2=WEAK
+    bind: u8,
+    /// ELF_ST_TYPE(st_info): 2=FUNC, 1=OBJECT
+    stype: u8,
+    shndx: u16,
+    value: u64,
+    size: u64,
+}
+
+fn elf64_read_cstr(b: &[u8]) -> String {
+    let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+    String::from_utf8_lossy(&b[..end]).to_string()
+}
+
+/// 极简 ELF64 符号表解析: 返回 `.symtab` 里的全部条目
+fn elf64_syms(data: &[u8]) -> Vec<Elf64Sym> {
     let mut out = Vec::new();
     if data.len() < 64 {
         return out;
@@ -406,7 +576,7 @@ fn elf64_func_symbols(data: &[u8]) -> Vec<(String, u64, u64)> {
     for i in 0..e_shnum {
         let off = e_shoff as usize + i * e_shentsize;
         let name_off = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
-        let name = read_cstr(&data[shstr_off + name_off..]);
+        let name = elf64_read_cstr(&data[shstr_off + name_off..]);
         if name == ".symtab" {
             let size = u64::from_le_bytes(data[off + 32..off + 40].try_into().unwrap());
             let entsize = u64::from_le_bytes(data[off + 56..off + 64].try_into().unwrap());
@@ -427,71 +597,37 @@ fn elf64_func_symbols(data: &[u8]) -> Vec<(String, u64, u64)> {
         let off = sec_off as usize + i as usize * entsize as usize;
         let st_name = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
         let st_info = data[off + 4];
-        let st_type = st_info & 0xf;
         let st_shndx = u16::from_le_bytes(data[off + 6..off + 8].try_into().unwrap());
         let st_value = u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap());
         let st_size = u64::from_le_bytes(data[off + 16..off + 24].try_into().unwrap());
-        if st_type == 2 && st_shndx != 0 && st_shndx != 0xfff1 && st_name > 0 {
-            let name = read_cstr(&data[strtab_off + st_name..]);
-            out.push((name, st_value, st_size));
-        }
+        out.push(Elf64Sym {
+            name: if st_name > 0 { elf64_read_cstr(&data[strtab_off + st_name..]) } else { String::new() },
+            bind: st_info >> 4,
+            stype: st_info & 0xf,
+            shndx: st_shndx,
+            value: st_value,
+            size: st_size,
+        });
     }
     out
 }
 
+/// 定义型函数符号 (STT_FUNC, 有节) 的 (名称, st_value, st_size).
+/// 用于验证函数符号 st_size 非零.
+fn elf64_func_symbols(data: &[u8]) -> Vec<(String, u64, u64)> {
+    elf64_syms(data)
+        .into_iter()
+        .filter(|s| s.stype == 2 && s.shndx != 0 && s.shndx != 0xfff1 && !s.name.is_empty())
+        .map(|s| (s.name, s.value, s.size))
+        .collect()
+}
+
 fn elf64_undefined_symbols(data: &[u8]) -> Vec<String> {
-    fn read_cstr(b: &[u8]) -> String {
-        let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
-        String::from_utf8_lossy(&b[..end]).to_string()
-    }
-    let mut out = Vec::new();
-    if data.len() < 64 {
-        return out;
-    }
-    let e_shoff = u64::from_le_bytes(data[40..48].try_into().unwrap());
-    let e_shentsize = u16::from_le_bytes(data[58..60].try_into().unwrap()) as usize;
-    let e_shnum = u16::from_le_bytes(data[60..62].try_into().unwrap()) as usize;
-    let e_shstrndx = u16::from_le_bytes(data[62..64].try_into().unwrap()) as usize;
-    if e_shentsize < 64 || e_shoff as usize + e_shentsize * e_shnum > data.len() {
-        return out;
-    }
-    let shstr = e_shoff as usize + e_shstrndx * e_shentsize;
-    let shstr_off = u64::from_le_bytes(data[shstr + 24..shstr + 32].try_into().unwrap()) as usize;
-    let shstr_size = u64::from_le_bytes(data[shstr + 32..shstr + 40].try_into().unwrap()) as usize;
-    if shstr_off + shstr_size > data.len() {
-        return out;
-    }
-    let mut symtab = None;
-    let mut strtab_off = 0usize;
-    for i in 0..e_shnum {
-        let off = e_shoff as usize + i * e_shentsize;
-        let name_off = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
-        let name = read_cstr(&data[shstr_off + name_off..]);
-        if name == ".symtab" {
-            let size = u64::from_le_bytes(data[off + 32..off + 40].try_into().unwrap());
-            let entsize = u64::from_le_bytes(data[off + 56..off + 64].try_into().unwrap());
-            let sec_off = u64::from_le_bytes(data[off + 24..off + 32].try_into().unwrap());
-            symtab = Some((sec_off, size, entsize));
-        } else if name == ".strtab" {
-            strtab_off = u64::from_le_bytes(data[off + 24..off + 32].try_into().unwrap()) as usize;
-        }
-    }
-    let Some((sec_off, size, entsize)) = symtab else {
-        return out;
-    };
-    if entsize < 24 || sec_off as usize + size as usize > data.len() {
-        return out;
-    }
-    let n = size / entsize;
-    for i in 0..n {
-        let off = sec_off as usize + i as usize * entsize as usize;
-        let st_name = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
-        let st_shndx = u16::from_le_bytes(data[off + 6..off + 8].try_into().unwrap());
-        if st_shndx == 0 && st_name > 0 {
-            out.push(read_cstr(&data[strtab_off + st_name..]));
-        }
-    }
-    out
+    elf64_syms(data)
+        .into_iter()
+        .filter(|s| s.shndx == 0 && !s.name.is_empty())
+        .map(|s| s.name)
+        .collect()
 }
 
 /// C++ 前端集成测试: 编译 .cpp 到 .o (m17_* fixture 用)
@@ -509,6 +645,66 @@ fn run_cpp_object_test(name: &str, source: &str) -> (std::process::Output, std::
         .expect("run dcc");
     let _ = fs::remove_file(source_path);
     (output, object_path)
+}
+
+/// M51: 用主机 g++ 把 dcc 产出的 .o 链接成可执行文件并运行, 返回退出码.
+/// 链接失败返回 -2, 主机没有 g++ 返回 -100 (便于和夹具自身的断言退出码区分).
+#[allow(dead_code)]
+fn host_link_cpp_object_and_run(name: &str, object: &std::path::Path) -> i32 {
+    if Command::new("g++").arg("--version").output().is_err() {
+        return -100;
+    }
+    let dir = std::env::temp_dir();
+    let exe = dir.join(format!("dcc-m51-link-{name}-{}.bin", std::process::id()));
+    let link = Command::new("g++")
+        .arg("-o")
+        .arg(&exe)
+        .arg(object)
+        .output()
+        .expect("run g++");
+    if !link.status.success() {
+        let _ = fs::remove_file(&exe);
+        eprintln!("g++ link failed: {}", String::from_utf8_lossy(&link.stderr));
+        return -2;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&exe, fs::Permissions::from_mode(0o755));
+    }
+    let run = Command::new(&exe).output().expect("run exe");
+    let _ = fs::remove_file(&exe);
+    run.status.code().unwrap_or(-3)
+}
+
+/// M51 配套真值: 用主机 g++ **原生**编译并运行同一 C++ 夹具, 返回退出码.
+/// 与 `host_link_cpp_object_and_run` 配对使用: 后者跑的是 dcc 产出的代码,
+/// 前者是 g++ 自己的代码, 两者退出码必须相等. 主机无 g++ 返回 -100,
+/// g++ 编译失败返回 -4 (与 dcc 侧的 -1/-2/-3 区分).
+#[allow(dead_code)]
+fn gxx_native_cpp_exit_code(name: &str, source: &str) -> i32 {
+    if Command::new("g++").arg("--version").output().is_err() {
+        return -100;
+    }
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-gxx-native-{name}-{}.cpp", std::process::id()));
+    let exe = dir.join(format!("dcc-gxx-native-{name}-{}.bin", std::process::id()));
+    fs::write(&src, source).expect("write g++ fixture");
+    let compile = Command::new("g++")
+        .arg("-std=c++17")
+        .arg(&src)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("run g++");
+    let _ = fs::remove_file(&src);
+    if !compile.status.success() {
+        eprintln!("g++ native compile failed: {}", String::from_utf8_lossy(&compile.stderr));
+        return -4;
+    }
+    let run = Command::new(&exe).output().expect("run exe");
+    let _ = fs::remove_file(&exe);
+    run.status.code().unwrap_or(-3)
 }
 
 /// dcc -c + 主机 gcc 链接 + 运行. 用于验证运行时行为 (libc 调用等).
@@ -679,19 +875,43 @@ fn array_decay_and_nested_block_redecl_compile() {
     let _ = fs::remove_file(object);
 }
 
-/// M7 libdecnumber combined TU 编译回归: 仅在远程 gcc-src 存在时
-/// 跑；本地 CI 直接 skip。组合 TU 把 decSingle/Double/Quad 三套
+/// 解析外部 GCC 源码树位置 (供 M7 libdecnumber / M26.6 cc1plus 两个集成用例共用).
+///
+/// 契约 (不留"静默绿"缺口):
+///   - `GCC_SRC` 指向真实源码树且含 `required_subdir` → `Some(tree)`;
+///   - 否则: 默认模式打印一行 SKIP 并返回 `None` (本机无 GCC 树时 `cargo test` 仍全绿,
+///     与仓内其他依赖外部工具的用例同一写法);
+///   - 打开 cargo feature `gcc_src` 即**严格模式**: 缺树直接失败, 因为该 feature 的
+///     存在意义就是"我有源码树, 必须真跑", 不能让环境缺失伪装成通过.
+#[cfg(unix)]
+fn gcc_src_tree_or_skip(required_subdir: &str) -> Option<std::path::PathBuf> {
+    let tree = std::env::var("GCC_SRC").ok().map(std::path::PathBuf::from);
+    if let Some(p) = tree {
+        if p.join(required_subdir).exists() {
+            return Some(p);
+        }
+    }
+    let reason = format!(
+        "GCC source tree with `{required_subdir}/` not found (GCC_SRC={:?})",
+        std::env::var("GCC_SRC").ok()
+    );
+    if cfg!(feature = "gcc_src") {
+        panic!("`gcc_src` feature requires GCC_SRC to point at a real GCC source tree: {reason}");
+    }
+    eprintln!("SKIP: {reason}");
+    None
+}
+
+/// M7 libdecnumber combined TU 编译回归: 需要宿主 GCC 源码树 (见
+/// [`gcc_src_tree_or_skip`]). 组合 TU 把 decSingle/Double/Quad 三套
 /// 符号收敛到一个 .o, 避免 GCC configure 阶段 11 个 SKIP.
 #[test]
-#[cfg_attr(not(feature = "gcc_src"), ignore = "needs GCC source tree")]
+#[cfg(unix)]
 fn libdecnumber_combined_tu_compiles() {
-    let gcc_src = match std::env::var("GCC_SRC") {
-        Ok(p) => std::path::PathBuf::from(p),
-        Err(_) => return, // 没设 GCC_SRC 就当 SKIP
+    let gcc_src = match gcc_src_tree_or_skip("libdecnumber") {
+        Some(p) => p,
+        None => return,
     };
-    if !gcc_src.join("libdecnumber").exists() {
-        return;
-    }
     let stub_dir =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gcc_tools");
     let combined = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -729,18 +949,12 @@ fn libdecnumber_combined_tu_compiles() {
 ///   - xfail 时必须产出进度报告 cc1plus_progress.txt (对象数/错误数/
 ///     首批失败文件), 供跟踪 dcc 对 GCC 主体的 bootstrap 收敛
 #[test]
-#[cfg_attr(
-    not(feature = "gcc_src"),
-    ignore = "needs GCC source tree (--features gcc_src + GCC_SRC)"
-)]
+#[cfg(unix)]
 fn gcc_cc1plus_bootstrap_gate() {
-    let gcc_src = match std::env::var("GCC_SRC") {
-        Ok(p) => std::path::PathBuf::from(p),
-        Err(_) => return, // 没设 GCC_SRC 就当 SKIP
+    let gcc_src = match gcc_src_tree_or_skip("gcc") {
+        Some(p) => p,
+        None => return,
     };
-    if !gcc_src.join("gcc").exists() {
-        return;
-    }
     let script =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/cc1plus_bootstrap.sh");
     let build_dir = std::env::temp_dir().join(format!("dcc-cc1plus-gate-{}", std::process::id()));
@@ -3448,7 +3662,7 @@ fn s_output_roundtrips_through_gas_for_small_vector() {
                 }
                 // 去掉地址/字节列，只保留 mnemonic + operands。
                 // objdump 行格式: "<addr>: <bytes>\t<mnemonic> <operands>"
-                let after_colon = trimmed.splitn(2, ':').nth(1)?;
+                let after_colon = trimmed.split_once(':')?.1;
                 let after_colon = after_colon.trim_start();
                 // 跳过字节列（由 2 位十六进制 token 组成）
                 let mut idx = 0usize;
@@ -7606,12 +7820,34 @@ fn cpp_member_ptr_deref() {
 /// M27: typeid 动态 RTTI (多态类 vtable RTTI slot)
 #[test]
 #[cfg(unix)]
-#[ignore = "TODO: native path needs runtime/stdlib support"]
 fn cpp_typeid_dynamic_rtti() {
+    // typeid(e) 对多态 glvalue 必须经 vptr[-1] (typeinfo slot) 取**运行时**类型:
+    // `PolyAnimal* p = &dog; typeid(*p) == typeid(Dog)`. dcc -c + host gcc 链接运行,
+    // 夹具 main 在四个子检查任一不符时返回非 0.
     let src = include_str!("fixtures/cpp/typeid_rtti.cpp");
-    let (out, _obj) = run_cpp_object_test("cpp-typeid-dynamic-rtti", src);
+    let (out, obj) = run_cpp_object_test("cpp-typeid-dynamic-rtti", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
-    let _ = fs::remove_file(_obj);
+    let dir = std::env::temp_dir();
+    let exe = dir.join(format!("dcc-cpp-typeid-dynamic-rtti-{}", std::process::id()));
+    let link = std::process::Command::new("gcc")
+        .arg(&obj)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("host gcc link");
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
+    let run = std::process::Command::new(&exe)
+        .output()
+        .expect("run typeid-dynamic-rtti binary");
+    let _ = fs::remove_file(obj);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(
+        run.status.code().unwrap_or(-1),
+        0,
+        "cpp_typeid_dynamic_rtti exit={:?} stderr={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
 
 /// M27: 模板偏特化 specialization 排序
@@ -7758,16 +7994,13 @@ fn cpp_ssa_volatile_semantics() {
 
 /// M17.0: vtable/typeinfo/member-offset 符号多文件链接不重复定义
 /// 两个 TU 包含相同 class 定义，链接器应通过 weak 解析而非报 multiple definition
-#[cfg(unix)]
-#[ignore = "TODO: native path needs runtime/stdlib support"]
-/// M17: Weak vtable symbols - compile-only smoke test
 #[test]
+#[cfg(unix)]
 fn cpp_weak_vtable_multifile_link() {
     let dir = std::env::temp_dir();
     let pid = std::process::id();
     // 共享 class 定义（含 virtual + 数据成员 + 显式构造）
-    let class_def = "\"
-class Foo {\n\
+    let class_def = "class Foo {\n\
 public:\n\
     Foo() : x(0) {}\n\
     virtual int val() const { return 42; }\n\
@@ -7776,18 +8009,19 @@ public:\n\
     // TU1: 定义 Foo + helper() 使用 val() 和 x
     let tu1 = format!(
         "{class_def}\
-int helper() {{ Foo f; f.x = 1; return f.val(); }}\n"
+int helper() {{ Foo f; f.x = 1; return f.val() + f.x; }}\n"
     );
-    // TU2: 同样定义 Foo + main() 也使用 val() 和 x
+    // TU2: 同样定义 Foo + main() 也使用 val()/x, 并跨 TU 调用 helper()
     let tu2 = format!(
         "{class_def}\
-int main() {{ Foo g; g.x = 2; return g.val() - 42; }}\n"
+extern int helper();\n\
+int main() {{ Foo g; g.x = 2; if (helper() != 43) return 1; return g.val() + g.x - 44; }}\n"
     );
     let p1 = dir.join(format!("dcc-cpp-weak-tu1-{pid}.cpp"));
     let p2 = dir.join(format!("dcc-cpp-weak-tu2-{pid}.cpp"));
     let o1 = dir.join(format!("dcc-cpp-weak-tu1-{pid}.o"));
     let o2 = dir.join(format!("dcc-cpp-weak-tu2-{pid}.o"));
-    let _exe = dir.join(format!("dcc-cpp-weak-{pid}"));
+    let exe = dir.join(format!("dcc-cpp-weak-{pid}"));
     fs::write(&p1, &tu1).unwrap();
     fs::write(&p2, &tu2).unwrap();
     let dcc = env!("CARGO_BIN_EXE_dcc");
@@ -7798,7 +8032,6 @@ int main() {{ Foo g; g.x = 2; return g.val() - 42; }}\n"
         .arg(&p1)
         .output()
         .expect("dcc");
-    let _ = fs::remove_file(&p1);
     assert!(c1.status.success(), "tu1 compile: {}", String::from_utf8_lossy(&c1.stderr));
     // 编译 TU2
     let c2 = Command::new(dcc)
@@ -7807,10 +8040,38 @@ int main() {{ Foo g; g.x = 2; return g.val() - 42; }}\n"
         .arg(&p2)
         .output()
         .expect("dcc");
+    let _ = fs::remove_file(&p1);
     let _ = fs::remove_file(&p2);
     assert!(c2.status.success(), "tu2 compile: {}", String::from_utf8_lossy(&c2.stderr));
-    // Compile-only: verify compilation succeeds without linking
-    // The actual weak vtable multi-file linking is still TODO (Phase 2)
+    // 真实多 TU 链接: 两个 TU 都发射 Foo 的 vtable / typeinfo / typeinfo name /
+    // 构造/析构/虚成员函数, 这些符号必须是 weak(GC-section 可合并), 否则
+    // host gcc 会报 multiple definition.
+    let link = Command::new("gcc")
+        .arg(&o1)
+        .arg(&o2)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("host gcc link");
+    let link_stderr = String::from_utf8_lossy(&link.stderr).to_string();
+    assert!(
+        !link_stderr.contains("multiple definition"),
+        "weak vtable/typeinfo symbols collided across TUs: {link_stderr}"
+    );
+    assert!(link.status.success(), "link: {link_stderr}");
+    let run = Command::new(&exe)
+        .output()
+        .expect("run weak-vtable multifile binary");
+    let _ = fs::remove_file(&o1);
+    let _ = fs::remove_file(&o2);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(
+        run.status.code().unwrap_or(-1),
+        0,
+        "cpp_weak_vtable_multifile_link exit={:?} stderr={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
 
 // =========================================================================
@@ -7870,13 +8131,121 @@ fn cpp_expected() {
     let _ = fs::remove_file(_obj);
 }
 
+/// M52: `<flat_map>` 不仅要不报 "unknown class type: flat_map_ii", 夹具里的
+/// 行为断言 (`at` / `key_at` / `contains` / `erase` / 排序不变量) 也必须成立:
+/// 夹具用 `return 1..13` 编码失败点, 所以这里链接并**运行**它, 要求退出码 0.
 #[test]
 #[cfg(unix)]
 fn cpp_flat_map() {
     let src = include_str!("fixtures/cpp/flat_map.cpp");
-    let (out, _obj) = run_cpp_object_test("cpp-flat-map", src);
+    let (out, obj) = run_cpp_object_test("cpp-flat-map", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
-    let _ = fs::remove_file(_obj);
+    let code = host_link_cpp_object_and_run("cpp-flat-map", &obj);
+    let _ = fs::remove_file(&obj);
+    assert_eq!(code, 0, "flat_map 夹具退出码 {} (非 0 = 某条断言失败)", code);
+}
+
+/// M53: 模板 / 别名模板 / 协程-awaitor 夹具的统一交叉验证.
+///
+/// 与 `gxx_native_cpp_exit_code` 的区别: 那个固定用 `-std=c++17`, 而本域夹具都是
+/// C++20 语法 (模板别名 / concepts / 协程). 流程:
+///   1. `g++ -std=c++20` 必须**接受**夹具 (否则夹具只是 dcc 方言, 失去意义);
+///   2. `g++ -std=c++20` 编译运行得参照退出码;
+///   3. `dcc -c` + host g++ 链接 + 运行, 退出码必须与参照相等.
+///
+/// 夹具把每个验证点编成 `return N`, 所以退出码相等就是逐条语义一致.
+/// 主机无 g++ 时降级为"dcc 侧必须 exit 0".
+#[cfg(unix)]
+fn cpp_std20_exit_code_cross_check(name: &str, source: &str) {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-cpp-{name}-{}.cpp", std::process::id()));
+    fs::write(&src, source).expect("write fixture");
+    let reference: Option<i32> = if Command::new("g++").arg("--version").output().is_ok() {
+        let exe = dir.join(format!("dcc-cpp-{name}-{}-ref.bin", std::process::id()));
+        let g = Command::new("g++")
+            .args(["-std=c++20", "-o"])
+            .arg(&exe)
+            .arg(&src)
+            .output()
+            .expect("run g++");
+        assert!(
+            g.status.success(),
+            "{name}: g++ -std=c++20 必须接受该夹具: {}",
+            String::from_utf8_lossy(&g.stderr)
+        );
+        let run = Command::new(&exe).output().expect("run g++ reference binary");
+        let _ = fs::remove_file(&exe);
+        Some(run.status.code().unwrap_or(-3))
+    } else {
+        None
+    };
+    let _ = fs::remove_file(&src);
+
+    let (out, obj) = run_cpp_object_test(name, source);
+    assert!(
+        out.status.success(),
+        "{name}: dcc -c 失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let got = host_link_cpp_object_and_run(name, &obj);
+    let _ = fs::remove_file(&obj);
+    match reference {
+        Some(want) => assert_eq!(
+            got, want,
+            "{name}: dcc 退出码 {got} 与 g++ -std=c++20 的 {want} 不一致 (夹具内 `return N` 逐条对应验证点)"
+        ),
+        None => assert_eq!(got, 0, "{name}: 无 g++ 参照, dcc 侧必须 exit 0 (实得 {got})"),
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_template_nttp_member_use() {
+    // M53 任务 2: `template <int N> struct S { int n() const { return N; } };` ——
+    // 非类型形参在**成员函数体**里的替换 (曾在实例化时报 undeclared identifier: N),
+    // 含括号常量表达式实参 `S<(2 + 5)>` 与多个实例并存.
+    let src = include_str!("fixtures/cpp/template_nttp_member_use.cpp");
+    cpp_std20_exit_code_cross_check("cpp-template-nttp-member-use", src);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_alias_template_expansion() {
+    // M53 任务 3: 别名模板展开 ([temp.alias]) —— `using X = ...` 含模板别名.
+    // `std::enable_if_t<cond, T>` / `std::conditional_t` / 限定名别名返回类型都
+    // 必须在使用点展开成目标类型, 而不是当未知类型名.
+    let src = include_str!("fixtures/cpp/alias_template_expansion.cpp");
+    cpp_std20_exit_code_cross_check("cpp-alias-template-expansion", src);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_template_braced_init_var() {
+    // M53 任务 4: 类模板对象的花括号初始化 `wrap<int> x{5};` (曾被读成
+    // `(wrap<int>) x < 5 ...` 比较表达式), 同时锁住反向情形: 未知类型名开头的
+    // `l < r` 与 `if (n < 4) { ... }` 仍是表达式/复合语句 —— 消歧只用"已知类型名
+    // 集合"这一真源.
+    let src = include_str!("fixtures/cpp/template_braced_init_var.cpp");
+    cpp_std20_exit_code_cross_check("cpp-template-braced-init-var", src);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_template_nested_call_arg() {
+    // M53 任务 5: 嵌套函数模板调用 `pick(pick(5))` —— 实参本身是待实例化调用,
+    // 实例化工作表必须递归收内层 (modules 专家移交: 无模块的普通 TU 同样需要).
+    let src = include_str!("fixtures/cpp/template_nested_call_arg.cpp");
+    cpp_std20_exit_code_cross_check("cpp-template-nested-call-arg", src);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_coroutine_std_qualified_awaiter_return() {
+    // M53 任务 7: promise 成员函数直接用**限定名**返回 awaiter
+    // (`std::suspend_always initial_suspend()`), 不借道 typedef 绕法.
+    // 走协程专用的三轮自洽 + stdout 对照骨架 (状态机对发射顺序敏感).
+    let src = include_str!("fixtures/cpp/coroutine_std_qualified_awaiter_return.cpp");
+    cpp_coroutine_cross_check("cpp-coroutine-std-qualified-awaiter", src);
 }
 
 #[test]
@@ -7899,22 +8268,48 @@ fn cpp_regex() {
 
 #[test]
 #[cfg(unix)]
-#[ignore = "TODO: native path needs runtime/stdlib support"]
 fn cpp_ranges() {
+    // `<ranges>` 头里的 `at()` 直接调 memcpy 且不声明原型: native pipeline 必须
+    // 把 libc 内存/字符串 builtin 当第一类隐式声明注入 (src/cpp/builtins.rs)。
+    // 证据: 产出的 .o 里确实有 memcpy/memset/memmove/strlen/strncpy 的 PLT32
+    // 重定位 (`nm -u`), 即 builtin 不是"解析成个名字就完事", 而是真降到 libc 调用。
     let src = include_str!("fixtures/cpp/ranges.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-ranges", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let undefined = String::from_utf8_lossy(
+        &std::process::Command::new("nm")
+            .arg("-u")
+            .arg(&_obj)
+            .output()
+            .expect("nm -u ranges object")
+            .stdout,
+    )
+    .to_string();
+    for sym in ["memcpy", "memset", "memmove", "strlen"] {
+        assert!(
+            undefined.contains(sym),
+            "ranges.cpp 应把 {sym} 降到真实 libc 外调用, nm -u 输出: {undefined}"
+        );
+    }
     let _ = fs::remove_file(_obj);
 }
 
 #[test]
 #[cfg(unix)]
-#[ignore = "TODO: native path needs runtime/stdlib support"]
 fn cpp_concept() {
     let src = include_str!("fixtures/cpp/concept.cpp");
     let (out, _obj) = run_cpp_object_test("cpp-concept", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    // M51: 夹具自带运行断言 `identity(42) == 42`. concept 约束被误判不满足
+    // (候选整体被 SFINAE 剔除) 或实例化丢失, 都只在链接/运行期暴露,
+    // 所以必须真正跑起来, 而不只是"编译过".
+    let code = host_link_cpp_object_and_run("cpp-concept", &_obj);
     let _ = fs::remove_file(_obj);
+    assert_eq!(
+        code,
+        0,
+        "concept.cpp 运行断言失败 (1=identity<int> 结果不对, -2=链接失败, -100=无 g++)"
+    );
 }
 
 #[test]
@@ -9561,14 +9956,7 @@ fn va_arg_sseup_shares_one_slot() {
 #[test]
 fn va_arg_xmm_reg_count_not_eightbyte_count() {
     let src = include_str!("fixtures/c/va_arg/xmm_reg_count_not_eightbyte_count.c");
-    let (output, exe) = run_compile_and_run("va-xmm-reg-count", src);
-    assert!(
-        output.status.success(),
-        "compile stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let code = run_exe(&exe);
-    let _ = fs::remove_file(exe);
+    let code = run_gcc_cross_check("va-xmm-reg-count", src);
     assert_eq!(code, 0, "XMM 寄存器计数判据 fixture failed (返回值为首个读错的序号)");
 }
 
@@ -9577,18 +9965,72 @@ fn va_arg_xmm_reg_count_not_eightbyte_count() {
 #[test]
 fn va_arg_sse_vs_sseup_slot_layout() {
     let src = include_str!("fixtures/c/va_arg/sse_vs_sseup_slot_layout.c");
-    let (output, exe) = run_compile_and_run("va-sse-slot-layout", src);
-    assert!(
-        output.status.success(),
-        "compile stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let code = run_exe(&exe);
-    let _ = fs::remove_file(exe);
+    let code = run_gcc_cross_check("va-sse-slot-layout", src);
     assert_eq!(
         code, 0,
         "[Sse,Sse] vs [Sse,SseUp] 槽布局 fixture failed (返回值为首个读错的序号)"
     );
+}
+
+/// D3 第三半（新增边界用例）: 命名 `va_list` 上把 double / `struct{double,double}`
+/// / `__m128d` / `v4sf` / `struct{int,double}` / `struct{double,double,double}`
+/// / `long double` / `int` 混成一条长流, 逐值与 gcc 对照。
+///
+/// 单一类型的夹具只能证明"那种类型自洽"; 游标错位必须在混合流里才累积暴露。
+#[test]
+fn va_arg_mixed_sse_pipeline_named() {
+    let src = include_str!("fixtures/c/va_arg/mixed_sse_pipeline_named.c");
+    let code = run_gcc_cross_check("va-mixed-sse-named", src);
+    assert_eq!(code, 0, "命名 va_list 混合 SSE 流水线 fixture failed");
+}
+
+/// 同一批混合 SSE 类对象改经**已退化为指针**的 `va_list` 形参读取。
+/// 三种 `va_list` 落点必须共用同一份 ABI 判定（历史上它们各持一份副本, 单点
+/// 修复会在另一份里静默失效）。
+#[test]
+fn va_arg_mixed_sse_via_valist_param() {
+    let src = include_str!("fixtures/c/va_arg/mixed_sse_via_valist_param.c");
+    let code = run_gcc_cross_check("va-mixed-sse-ptr", src);
+    assert_eq!(code, 0, "指针落点 va_list 混合 SSE 聚合 fixture failed");
+}
+
+/// 同一批混合 SSE 类对象改经**全局** `va_list` 在另一个函数里读取, 并跨过 XMM
+/// 保存区末端（>8 槽后转入 overflow_arg_area）。
+#[test]
+fn va_arg_global_valist_sse_agg() {
+    let src = include_str!("fixtures/c/va_arg/global_valist_sse_agg.c");
+    let code = run_gcc_cross_check("va-global-sse", src);
+    assert_eq!(code, 0, "全局 va_list + SSE 聚合跨函数读取 fixture failed");
+}
+
+/// `va_copy` 后两份游标各自独立推进, 副本与原件对同一串 SSE 类聚合的读出必须
+/// 逐值相同（且都等于 gcc 的输出）。
+#[test]
+fn va_arg_vacopy_sse_agg() {
+    let src = include_str!("fixtures/c/va_arg/vacopy_sse_agg.c");
+    let code = run_gcc_cross_check("va-vacopy-sse", src);
+    assert_eq!(code, 0, "va_copy + SSE 聚合双游标 fixture failed");
+}
+
+/// `__int128`（2 个 GP eightbyte）与 SSE 类聚合交替读取: GP 与 XMM 游标必须
+/// 互相独立, 且 `__int128` 装不下时"整体上栈、gp_offset 不推进"不得因中间插了
+/// SSE 读取而被破坏。
+#[test]
+fn va_arg_int128_sse_interleave() {
+    let src = include_str!("fixtures/c/va_arg/int128_sse_interleave.c");
+    let code = run_gcc_cross_check("va-i128-sse-mix", src);
+    assert_eq!(code, 0, "__int128 与 SSE 聚合交替 fixture failed");
+}
+
+/// 对齐 **大于 16 字节** 的对象（`vector_size(32)` 的 v4df/v8sf、
+/// `aligned(32)` 的结构）必须整体走内存（SysV ABI 3.2.3p2 + GCC 4.6 的 ABI
+/// 变更: `classify_argument` 里 `if (align > 128) return CLASS_MEMORY`）。
+/// 分类错会把高 16 字节永久丢失。
+#[test]
+fn va_arg_align32_vector_memory() {
+    let src = include_str!("fixtures/c/va_arg/align32_vector_mem.c");
+    let code = run_gcc_cross_check("va-align32-mem", src);
+    assert_eq!(code, 0, ">16 字节对齐参数整体走内存 fixture failed");
 }
 
 /// D1 + D4: 通过已退化为指针的 `va_list` 形参读聚合变参, 并按值返回.
@@ -10668,17 +11110,519 @@ fn cpp_member_ptr_dotstar() {
 /// 而非 M8 简化版的 `((_ZTI*)(((void*)e)->__vptr + 0))` stub.
 #[test]
 #[cfg(unix)]
-#[ignore = "TODO: native path needs runtime/stdlib support"]
 fn cpp_typeid_rtti() {
+    // 静态路径 `typeid(T)` / 非多态 `typeid(e)` 取 `_ZTI<T>` 符号地址,
+    // 动态路径取 vtable 的 typeinfo slot; 两者对同一多态对象必须能互相比较.
+    // 因此这里不仅编译, 还要 host gcc 链接后运行, 退出码 0 才算通过.
     let src = include_str!("fixtures/cpp/typeid_rtti.cpp");
     let (out, obj) = run_cpp_object_test("cpp-typeid-rtti", src);
-    let _ = fs::remove_file(&obj);
     assert!(
         out.status.success(),
         "cpp_typeid_rtti compile failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let dir = std::env::temp_dir();
+    let exe = dir.join(format!("dcc-cpp-typeid-rtti-{}", std::process::id()));
+    let link = std::process::Command::new("gcc")
+        .arg(&obj)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("host gcc link");
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
+    let run = std::process::Command::new(&exe)
+        .output()
+        .expect("run typeid-rtti binary");
+    let _ = fs::remove_file(obj);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(
+        run.status.code().unwrap_or(-1),
+        0,
+        "cpp_typeid_rtti exit={:?} stderr={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
+
+/// Stage 7 任务 3: 构造/析构期虚派发绑定当前类 vtable.
+/// ctor/dtor 体内对虚函数的调用必须绑定"当前正在构造/析构的类"的 vtable
+/// (而非最派生类). 用 dcc 产出的 .o 经 g++ 链接后运行, 退出码必须为 0, 且与
+/// g++ 原生编译运行的退出码交叉一致 (证明语义等价).
+#[test]
+#[cfg(unix)]
+fn cpp_ctor_dtor_virtual_dispatch() {
+    let src = include_str!("fixtures/cpp/ctor_dtor_virtual_dispatch.cpp");
+    // 1) dcc 编译为 .o
+    let (out, obj) = run_cpp_object_test("cpp-ctor-dtor-vd", src);
+    assert!(
+        out.status.success(),
+        "cpp_ctor_dtor_virtual_dispatch compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // 2) g++ 链接 dcc 的 .o 并运行 (dcc 产物需与 libstdc++ 运行期共存自洽)
+    let dcc_exit = host_link_cpp_object_and_run("cpp-ctor-dtor-vd", &obj);
+    let _ = fs::remove_file(&obj);
+    // 3) g++ 原生编译运行同一夹具作为真值
+    let gxx_dir = std::env::temp_dir();
+    let gxx_src = gxx_dir.join(format!("dcc-ctor-dtor-vd-{}.cpp", std::process::id()));
+    let gxx_exe = gxx_dir.join(format!("dcc-ctor-dtor-vd-{}.bin", std::process::id()));
+    fs::write(&gxx_src, src).expect("write gxx src");
+    let gxx_exit = if Command::new("g++").arg("--version").output().is_err() {
+        -100
+    } else {
+        let c = Command::new("g++")
+            .arg("-std=c++17")
+            .arg(&gxx_src)
+            .arg("-o")
+            .arg(&gxx_exe)
+            .output()
+            .expect("g++ compile");
+        if c.status.success() {
+            let r = Command::new(&gxx_exe).output().expect("run gxx");
+            let _ = fs::remove_file(&gxx_exe);
+            r.status.code().unwrap_or(-3)
+        } else {
+            -4
+        }
+    };
+    let _ = fs::remove_file(&gxx_src);
+    assert_eq!(
+        dcc_exit, gxx_exit,
+        "dcc(g++ 链接) 退出码 {} 应与 g++ 原生 {} 一致",
+        dcc_exit, gxx_exit
+    );
+    assert_eq!(dcc_exit, 0, "构造/析构期虚派发断言未通过");
+}
+
+/// Stage 5/7: `delete p` 必须先跑析构再释放存储 ([expr.delete]/3).
+///
+/// 三层证据:
+///   1) 符号层 (nm): 最派生类的 complete 析构以 weak 定义发射, `operator new` /
+///      `operator delete` 以未定义外部符号引用 (由 libstdc++ 提供) —— 否则
+///      `delete` 只会退化成 `free()`;
+///   2) 布局层 (readelf 重定位): 派生类主 vtable 的**虚析构槽**必须指向
+///      `Derived_dtor_complete` (而非继承来的 `Base_dtor_complete`) —— 这是
+///      `delete (Base*)pd` 能跑到派生析构的根因, 也是 sema 为 `Derived` 合成的
+///      隐式虚析构登记进 `virtual_methods` 的佐证;
+///   3) 行为层: dcc .o 经 g++ 链接运行的退出码与 g++ 原生编译一致 (0), 夹具内
+///      同时覆盖多态点型虚派发 / 派生点型 / 非多态类直调三条路径, 并用相邻 `int`
+///      全局捕获窄对象被 8 字节 store 越界写。
+#[test]
+#[cfg(unix)]
+fn cpp_delete_runs_virtual_dtor() {
+    let src = include_str!("fixtures/cpp/delete_virtual_dtor.cpp");
+    // 1) dcc 编译为 .o
+    let (out, obj) = run_cpp_object_test("cpp-del-vdtor", src);
+    assert!(
+        out.status.success(),
+        "cpp_delete_runs_virtual_dtor compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let obj_data = fs::read(&obj).expect("read dcc object");
+    let syms = elf64_syms(&obj_data);
+    let sym_value = |name: &str| -> Option<u64> {
+        syms.iter().find(|s| s.name == name).map(|s| s.value)
+    };
+    for name in ["Derived_dtor_complete", "Base_dtor_complete", "Plain_dtor_complete"] {
+        assert!(
+            sym_value(name).is_some(),
+            "dcc 产物应发射析构函数 {} (delete 的调用目标): {:?}",
+            name,
+            syms.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+    let undef = elf64_undefined_symbols(&obj_data);
+    for mangled in ["_Znwm", "_ZdlPv"] {
+        assert!(
+            undef.iter().any(|s| s == mangled),
+            "new/delete 应引用 libstdc++ 的 {} (未定义外部符号), 实际: {:?}",
+            mangled,
+            undef
+        );
+    }
+
+    // 2) 布局层: `_ZTV7Derived` = [offset-to-top][typeinfo][dtor][tag],
+    //    即 address point = 符号 + 0x10, 虚析构在 (vptr) 位置 = 符号 + 0x10。
+    let relocs = readelf_relocations(&obj);
+    let reloc_at = |addr: u64| -> String {
+        relocs
+            .lines()
+            .find(|l| {
+                let mut it = l.split_whitespace();
+                match (it.next(), it.nth(1)) {
+                    (Some(off), Some(ty)) => {
+                        ty == "R_X86_64_64" && u64::from_str_radix(off, 16).ok() == Some(addr)
+                    },
+                    _ => false,
+                }
+            })
+            .unwrap_or("")
+            .to_string()
+    };
+    let derived_vt = sym_value("_ZTV7Derived").expect("_ZTV7Derived 应已发射");
+    assert!(
+        reloc_at(derived_vt + 8).contains("_ZTI7Derived"),
+        "派生类 vtable 的 typeinfo 槽 (vptr-8) 必须指向 _ZTI7Derived, 实际: {}",
+        reloc_at(derived_vt + 8)
+    );
+    assert!(
+        reloc_at(derived_vt + 0x10).contains("Derived_dtor_complete"),
+        "派生类主 vtable 的虚析构槽必须是 Derived_dtor_complete (重写基类槽), 实际: {}",
+        reloc_at(derived_vt + 0x10)
+    );
+    let base_vt = sym_value("_ZTV4Base").expect("_ZTV4Base 应已发射");
+    assert!(
+        reloc_at(base_vt + 0x10).contains("Base_dtor_complete"),
+        "基类 vtable 的虚析构槽应是 Base_dtor_complete, 实际: {}",
+        reloc_at(base_vt + 0x10)
+    );
+
+    // 3) 行为层: g++ 链接 dcc 的 .o 并运行 (与 libstdc++ 的 operator delete 共存)
+    let dcc_exit = host_link_cpp_object_and_run("cpp-del-vdtor", &obj);
+    let _ = fs::remove_file(&obj);
+    // 4) g++ 原生编译运行同一夹具作为真值
+    let dir = std::env::temp_dir();
+    let gxx_src = dir.join(format!("dcc-del-vdtor-{}.cpp", std::process::id()));
+    let gxx_exe = dir.join(format!("dcc-del-vdtor-{}.bin", std::process::id()));
+    fs::write(&gxx_src, src).expect("write gxx src");
+    let gxx_exit = if Command::new("g++").arg("--version").output().is_err() {
+        -100
+    } else {
+        let c = Command::new("g++")
+            .arg("-std=c++17")
+            .arg(&gxx_src)
+            .arg("-o")
+            .arg(&gxx_exe)
+            .output()
+            .expect("g++ compile");
+        if c.status.success() {
+            let r = Command::new(&gxx_exe).output().expect("run gxx");
+            let _ = fs::remove_file(&gxx_exe);
+            r.status.code().unwrap_or(-3)
+        } else {
+            -4
+        }
+    };
+    let _ = fs::remove_file(&gxx_src);
+    assert_eq!(
+        dcc_exit, gxx_exit,
+        "dcc(g++ 链接) 退出码 {} 应与 g++ 原生 {} 一致",
+        dcc_exit, gxx_exit
+    );
+    assert_eq!(dcc_exit, 0, "`delete` 的析构语义运行断言未通过");
+}
+
+/// Stage 7 任务 4: **非限定继承成员调用** (C++ [basic.lookup.unqual]/1 +
+/// [class.member.lookup]/1): 成员函数体里的裸名字除词法作用域外必须沿
+/// 「本类 → 全部基类 (含虚基, 逐层)」查找, 且隐式 `this` 必须转换到
+/// **成员所属子对象** (非虚基 → 编译期偏移, 虚基 → vbtable 运行期偏移)。
+/// 旧行为: `return prot();` 在派生类里直接 `undeclared identifier: prot`;
+/// 名字修好后 MI 次基类 / 虚基类方法又收到最派生对象首地址 (实测
+/// dcc 47 / g++ 43, 虚基 dcc 100 / g++ 103)。
+/// 三层证据: nm (基类实现只一份 + 调用点存在) + readelf (次基类 vtable chunk
+/// 被本 TU 引用 = 虚调用槽来源) + g++ 链接 dcc .o 与 g++ 原生退出码对照.
+#[test]
+#[cfg(unix)]
+fn cpp_derived_member_unqualified_lookup() {
+    let src = include_str!("fixtures/cpp/derived_member_unqualified_lookup.cpp");
+    let (out, obj) = run_cpp_object_test("cpp-unqual-base", src);
+    assert!(
+        out.status.success(),
+        "cpp_derived_member_unqualified_lookup compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let obj_data = fs::read(&obj).expect("read dcc object");
+    let funcs = elf64_func_symbols(&obj_data);
+    let defined = |n: &str| funcs.iter().filter(|(name, _, _)| name == n).count();
+
+    // 1) 基类成员的实现各**只有一份** (派生类成员只是调用, 不得复制体)
+    for name in [
+        "Base_prot",
+        "Base_tag",
+        "Mid_bump",
+        "Mid_mid_only",
+        "Side_get_s",
+        "Side_stag",
+        "VB_vfoo",
+    ] {
+        assert_eq!(
+            defined(name),
+            1,
+            "基类成员实现 {} 应被发射且仅发射一次: {:?}",
+            name,
+            funcs.iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>()
+        );
+    }
+    // 2) 非限定调用点所在的派生成员都已发射
+    for name in [
+        "Der_probe_prot",
+        "Der_probe_tag",
+        "Der_probe_bump",
+        "Multi_probe_side_call",
+        "Multi_probe_side_virt",
+        "VDer_probe_virt",
+    ] {
+        assert_eq!(defined(name), 1, "派生类成员 {} 应已发射", name);
+    }
+
+    // 3) MI 次基类子对象必须有**自己的** vtable chunk, 且被本 TU 引用:
+    //    `Multi::probe_side_virt` 的 this 先 +16 折到 Side 子对象, 再从该子对象
+    //    的 vptr 取槽 —— 槽来源就是这份 chunk。
+    let syms = elf64_syms(&obj_data);
+    assert!(
+        syms.iter().any(|s| s.name == "_ZTVMulti::baseSide"),
+        "应发射 MI 次基类 vtable chunk `_ZTVMulti::baseSide`: {:?}",
+        syms.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
+    );
+    let relocs = readelf_relocations(&obj);
+    assert!(
+        relocs.contains("_ZTVMulti::baseSide"),
+        "次基类 vtable chunk 必须被 Multi 的构造器引用 (否则虚调用无从取槽), 实际重定位:\n{}",
+        relocs
+    );
+
+    // 4) 行为层: dcc 产物 (g++ 链接) 与 g++ 原生退出码必须一致且为 0
+    let dcc_exit = host_link_cpp_object_and_run("cpp-unqual-base", &obj);
+    let _ = fs::remove_file(&obj);
+    let gxx_exit = gxx_native_cpp_exit_code("cpp-unqual-base", src);
+    assert_eq!(
+        dcc_exit, gxx_exit,
+        "dcc(g++ 链接) 退出码 {} 应与 g++ 原生 {} 一致",
+        dcc_exit, gxx_exit
+    );
+    assert_eq!(
+        dcc_exit, 0,
+        "非限定继承成员调用 (单继承链 / MI 次基类 / 虚基类) 运行断言未通过"
+    );
+}
+
+/// Stage 7 任务 2: type_info 对象的 name() / before() 运行期语义.
+/// dcc 发射的 typeinfo 对象按 Itanium ABI 叠层 (偏移 0 = type_info 虚表槽,
+/// 偏移 8 = __name 指向 mangled 类型名字符串), 因此 `name()` 必须读到与 g++
+/// 在同一个 `_ZTI<T>` 对象上读到的同一个字符串; `before()` 则是该字符串的
+/// 字典序。用 dcc 产出的 .o 经 g++ 链接后运行, 与 g++ 原生编译运行对照退出码.
+#[test]
+#[cfg(unix)]
+fn cpp_typeid_rtti_name_before() {
+    let src = include_str!("fixtures/cpp/typeid_rtti_name_before.cpp");
+    // 1) dcc 编译为 .o
+    let (out, obj) = run_cpp_object_test("cpp-typeid-nb", src);
+    assert!(
+        out.status.success(),
+        "cpp_typeid_rtti_name_before compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // 2) nm 佐证: 命名空间类的 RTTI 符号必须是限定名编码 (不是 `_ZTI6Widget`),
+    //    且 type_info 虚表以 weak 符号发射 (与 libstdc++ 共存时可让位)
+    let nm = Command::new("nm")
+        .arg(&obj)
+        .output()
+        .expect("nm on dcc object");
+    let nm_text = String::from_utf8_lossy(&nm.stdout);
+    assert!(
+        nm_text.contains("_ZTIN2ns6WidgetE"),
+        "ns::Widget 的 typeinfo 符号应为限定名 _ZTIN2ns6WidgetE, 实际:\n{}",
+        nm_text
+    );
+    assert!(
+        !nm_text.contains("_ZTI6Widget\n"),
+        "不应再发射丢掉命名空间前缀的 _ZTI6Widget:\n{}",
+        nm_text
+    );
+    assert!(
+        nm_text.contains("dcc_ti_class_vtable"),
+        "typeinfo 对象的 vptr 必须指向真实虚表 dcc_ti_class_vtable:\n{}",
+        nm_text
+    );
+    // 3) g++ 链接 dcc 的 .o 并运行
+    let dcc_exit = host_link_cpp_object_and_run("cpp-typeid-nb", &obj);
+    let _ = fs::remove_file(&obj);
+    // 4) g++ 原生编译运行同一夹具作为真值
+    let dir = std::env::temp_dir();
+    let gxx_src = dir.join(format!("dcc-typeid-nb-{}.cpp", std::process::id()));
+    let gxx_exe = dir.join(format!("dcc-typeid-nb-{}.bin", std::process::id()));
+    fs::write(&gxx_src, src).expect("write gxx src");
+    let gxx_exit = if Command::new("g++").arg("--version").output().is_err() {
+        -100
+    } else {
+        let c = Command::new("g++")
+            .arg("-std=c++17")
+            .arg(&gxx_src)
+            .arg("-o")
+            .arg(&gxx_exe)
+            .output()
+            .expect("g++ compile");
+        if c.status.success() {
+            let r = Command::new(&gxx_exe).output().expect("run gxx");
+            let _ = fs::remove_file(&gxx_exe);
+            r.status.code().unwrap_or(-3)
+        } else {
+            -4
+        }
+    };
+    let _ = fs::remove_file(&gxx_src);
+    assert_eq!(
+        dcc_exit, gxx_exit,
+        "dcc(g++ 链接) 退出码 {} 应与 g++ 原生 {} 一致",
+        dcc_exit, gxx_exit
+    );
+    assert_eq!(dcc_exit, 0, "type_info name()/before() 运行断言未通过");
+}
+
+/// Stage 7 任务 2: `dynamic_cast<T*>` 与 libstdc++ 运行期互操作.
+///
+/// dcc 只把 `dynamic_cast` 降级为对 `__dynamic_cast(src, src_ti, dst_ti, hint)`
+/// 的调用, 类型遍历完全由 libstdc++ 按 Itanium ABI 读 dcc 发射的 typeinfo 对象
+/// (`__class_type_info`/`__si_class_type_info`/`__vmi_class_type_info`) 与其 vptr
+/// 指向的 type_info 虚表完成. 因此两侧必须同时成立:
+///   1) 符号层: `_ZTI<T>`/`_ZTV<T>` weak 发射 + `U __dynamic_cast` 引用;
+///   2) 字层: typeinfo 对象首槽重定位到对应形态的 type_info 虚表, 次槽指向
+///      `_ZTS<T>` 名字串, 基类槽指向基类 `_ZTI`; vtable 的 typeinfo 槽在 vptr-8,
+///      重写后的虚函数实现落在基类同槽上 (多继承下不同基链各自成槽);
+///   3) 行为层: upcast/downcast/crosscast/null 四分支退出码与 g++ 原生一致.
+#[test]
+#[cfg(unix)]
+fn cpp_dynamic_cast_runtime_interop() {
+    let src = include_str!("fixtures/cpp/dynamic_cast_basic.cpp");
+    // 1) dcc 编译为 .o
+    let (out, obj) = run_cpp_object_test("cpp-dyncast", src);
+    assert!(
+        out.status.success(),
+        "cpp_dynamic_cast_runtime_interop compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let obj_data = fs::read(&obj).expect("read dcc object");
+    // 2) nm 佐证: 多继承类的 typeinfo / vtable / secondary vtable 均 weak 发射,
+    //    `__dynamic_cast` 以未定义外部符号引用 (由 libstdc++ 提供实现)
+    let syms = elf64_syms(&obj_data);
+    let sym_value = |name: &str| -> Option<u64> {
+        syms.iter().find(|s| s.name == name).map(|s| s.value)
+    };
+    for name in [
+        "_ZTI4Base",
+        "_ZTI3Mid",
+        "_ZTI5Other",
+        "_ZTI4Leaf",
+        "_ZTS4Leaf",
+        "_ZTV4Leaf",
+        "_ZTVLeaf::baseOther",
+        "dcc_ti_class_vtable",
+        "dcc_ti_si_vtable",
+        "dcc_ti_vmi_vtable",
+    ] {
+        assert!(
+            sym_value(name).is_some(),
+            "dcc 产物应发射 RTTI 符号 {}: {:?}",
+            name,
+            syms.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+    assert!(
+        elf64_undefined_symbols(&obj_data).iter().any(|s| s == "__dynamic_cast"),
+        "dynamic_cast 应降级为对 libstdc++ `__dynamic_cast` 的引用"
+    );
+
+    // 3) 重定位层: `_ZTI4Leaf` 是 __vmi_class_type_info (双非虚基), 槽序必须是
+    //    [vptr, __name, flags|base_count, bases[0].typeinfo, bases[0].offset_flags,
+    //     bases[1].typeinfo, ...]; `_ZTV4Leaf` 的 typeinfo 槽在 vptr-8 (= +0x10),
+    //    虚函数槽从 vptr 开始: slot0 = 继承的虚析构, slot1 = Leaf_id (重写 Mid/Base
+    //    的 id) —— 多继承下 `Leaf::oid` 占自己的槽, 不得顶掉 `Leaf::id`.
+    let relocs = readelf_relocations(&obj);
+    // readelf 的偏移列宽随节大小变化, 按数值解析而非字符串宽度对齐。
+    let reloc_at = |addr: u64| -> String {
+        relocs
+            .lines()
+            .find(|l| {
+                let mut it = l.split_whitespace();
+                match (it.next(), it.nth(1)) {
+                    (Some(off), Some(ty)) => {
+                        ty == "R_X86_64_64" && u64::from_str_radix(off, 16).ok() == Some(addr)
+                    },
+                    _ => false,
+                }
+            })
+            .unwrap_or("")
+            .to_string()
+    };
+    let leaf_ti = sym_value("_ZTI4Leaf").unwrap();
+    assert!(
+        reloc_at(leaf_ti).contains("dcc_ti_vmi_vtable"),
+        "_ZTI4Leaf 首槽 (vptr) 必须指向 __vmi_class_type_info 虚表, 实际: {}",
+        reloc_at(leaf_ti)
+    );
+    assert!(
+        reloc_at(leaf_ti + 8).contains("_ZTS4Leaf"),
+        "_ZTI4Leaf 的 __name 槽必须指向 _ZTS4Leaf, 实际: {}",
+        reloc_at(leaf_ti + 8)
+    );
+    assert!(
+        reloc_at(leaf_ti + 0x18).contains("_ZTI3Mid"),
+        "__vmi_class_type_info.__bases[0].typeinfo 必须是 _ZTI3Mid, 实际: {}",
+        reloc_at(leaf_ti + 0x18)
+    );
+    assert!(
+        reloc_at(leaf_ti + 0x28).contains("_ZTI5Other"),
+        "__vmi_class_type_info.__bases[1].typeinfo 必须是 _ZTI5Other, 实际: {}",
+        reloc_at(leaf_ti + 0x28)
+    );
+    let leaf_vt = sym_value("_ZTV4Leaf").unwrap();
+    assert!(
+        reloc_at(leaf_vt + 8).contains("_ZTI4Leaf"),
+        "vtable 的 typeinfo 槽 (vptr-8) 必须指向本类 _ZTI, 实际: {}",
+        reloc_at(leaf_vt + 8)
+    );
+    assert!(
+        reloc_at(leaf_vt + 0x18).contains("Leaf_id"),
+        "Leaf 主 vtable 的 id 槽必须是重写实现 Leaf_id (不是 Mid_id), 实际: {}",
+        reloc_at(leaf_vt + 0x18)
+    );
+    // Other 子对象的 secondary vtable: 自己的虚函数序 (dtor, oid), 与 Other
+    // 自身主 vtable 同序 —— 这是 static_cast<Other*> 后能正确虚派发的根因。
+    let leaf_sec = sym_value("_ZTVLeaf::baseOther").unwrap();
+    assert!(
+        reloc_at(leaf_sec + 0x18).contains("Leaf_oid"),
+        "Leaf 的 Other 子对象 secondary vtable 的 oid 槽必须是 Leaf_oid, 实际: {}",
+        reloc_at(leaf_sec + 0x18)
+    );
+
+    // 4) g++ 链接 dcc 的 .o 并运行 (走 libstdc++ 真 `__dynamic_cast`)
+    let dcc_exit = host_link_cpp_object_and_run("cpp-dyncast", &obj);
+    let _ = fs::remove_file(&obj);
+    // 5) g++ 原生编译运行同一夹具作为真值
+    let dir = std::env::temp_dir();
+    let gxx_src = dir.join(format!("dcc-dyncast-{}.cpp", std::process::id()));
+    let gxx_exe = dir.join(format!("dcc-dyncast-{}.bin", std::process::id()));
+    fs::write(&gxx_src, src).expect("write gxx src");
+    let gxx_exit = if Command::new("g++").arg("--version").output().is_err() {
+        -100
+    } else {
+        let c = Command::new("g++")
+            .arg("-std=c++17")
+            .arg(&gxx_src)
+            .arg("-o")
+            .arg(&gxx_exe)
+            .output()
+            .expect("g++ compile");
+        if c.status.success() {
+            let r = Command::new(&gxx_exe).output().expect("run gxx");
+            let _ = fs::remove_file(&gxx_exe);
+            r.status.code().unwrap_or(-3)
+        } else {
+            -4
+        }
+    };
+    let _ = fs::remove_file(&gxx_src);
+    assert_eq!(
+        dcc_exit, gxx_exit,
+        "dcc(g++ 链接) 退出码 {} 应与 g++ 原生 {} 一致",
+        dcc_exit, gxx_exit
+    );
+    assert_eq!(
+        dcc_exit, 0,
+        "dynamic_cast upcast/downcast/crosscast/null 四分支运行断言未通过"
+    );
+}
+
 /// P2.3: C++ 模板实参语法 T<U> (Section 6 表格 模板实例化行).
 /// 验证 dcc cpp 解析器 `parse_mangle_type` (M18 阶段实装)
 /// 在 ident 后识别 `<` 触发 `MangleType::Template` 分支，接受
@@ -10717,32 +11661,71 @@ fn cpp_template_depth_ok() {
 /// (C0004), 而非挂起/栈溢出。
 #[test]
 #[cfg(unix)]
-#[ignore] // FIXME: 解析器处理超深嵌套模板时性能问题，待优化
-/// M18.x: 模板深度限制验证
-/// M18.x: 模板深度限制验证 (compile-only smoke test)
+/// M18.x: 模板深度限制验证 (正常深度 vs 超限深度的双向断言)
 fn cpp_template_depth_limit_rejected() {
     let dir = std::env::temp_dir();
-    let source_path = dir.join(format!("dcc-cpp-depth-limit-{}.cpp", std::process::id()));
-    let object_path = dir.join(format!("dcc-cpp-depth-limit-{}.o", std::process::id()));
-    // 超过默认模板深度作为形参类型 (走 parse_mangle_type 深度检查)
-    let depth = 50usize; // Reduced for practical compilation testing
-    let mut src = String::from("template <class T> struct Wrap { T v; };\n");
-    src.push_str("int take(");
-    src.push_str(&"Wrap<".repeat(depth));
-    src.push_str("int");
-    src.push_str(&">".repeat(depth));
-    src.push_str("* p) { return p != 0; }\n");
-    src.push_str("int main() { return 0; }\n");
-    fs::write(&source_path, &src).expect("write C++ fixture");
-    let _output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-c", "-o"])
-        .arg(&object_path)
-        .arg(&source_path)
-        .output()
-        .expect("run dcc");
-    let _ = fs::remove_file(&source_path);
-    let _ = fs::remove_file(&object_path);
-    // Compile-only: verify it compiles or fails gracefully without hard assertion
+    let pid = std::process::id();
+    // `Wrap<Wrap<...int...>>` 形式的具体参类型: 嵌套层数 = depth
+    let build = |depth: usize| -> String {
+        let mut src = String::from("template <class T> struct Wrap { T v; };\n");
+        src.push_str("int take(");
+        src.push_str(&"Wrap<".repeat(depth));
+        src.push_str("int");
+        src.push_str(&">".repeat(depth));
+        src.push_str("* p) { return p != 0; }\n");
+        src.push_str("int main() { return 0; }\n");
+        src
+    };
+    let compile = |label: &str, depth: usize| -> (std::process::Output, std::time::Duration) {
+        let source_path = dir.join(format!("dcc-cpp-depth-{label}-{pid}.cpp"));
+        let object_path = dir.join(format!("dcc-cpp-depth-{label}-{pid}.o"));
+        fs::write(&source_path, build(depth)).expect("write C++ fixture");
+        let start = std::time::Instant::now();
+        let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["-c", "-o"])
+            .arg(&object_path)
+            .arg(&source_path)
+            .output()
+            .expect("run dcc");
+        let elapsed = start.elapsed();
+        let _ = fs::remove_file(&source_path);
+        let _ = fs::remove_file(&object_path);
+        (output, elapsed)
+    };
+
+    // 1. 正常深度 (远低于 900) 必须编译通过, 并且是毫秒级 ——
+    //    实例化工作表曾经对超深类型二次/三次方爆炸 (百秒级).
+    let (ok, ok_elapsed) = compile("ok", 64);
+    assert!(
+        ok.status.success(),
+        "depth=64 应在模板深度限制内编译通过: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    assert!(
+        ok_elapsed < std::time::Duration::from_secs(20),
+        "depth=64 耗时 {ok_elapsed:?}, 模板实例化存在超线性膨胀"
+    );
+
+    // 2. 超过 MAX_TEMPLATE_DEPTH(900) 必须硬报错 (而非静默接受/容错成 Opaque),
+    //    且诊断必须带 C0004 + 深度提示.
+    let (bad, bad_elapsed) = compile("over", 950);
+    assert!(
+        !bad.status.success(),
+        "depth=950 超过 MAX_TEMPLATE_DEPTH, 应当报错退出"
+    );
+    let err = String::from_utf8_lossy(&bad.stderr);
+    assert!(
+        err.contains("C0004"),
+        "超限应报 C0004 诊断码, 实际输出: {err}"
+    );
+    assert!(
+        err.contains("template nesting depth") && err.contains("exceeds limit"),
+        "C0004 应说明模板嵌套深度超限, 实际输出: {err}"
+    );
+    assert!(
+        bad_elapsed < std::time::Duration::from_secs(20),
+        "超限路径应早停而不是先花 {bad_elapsed:?} 展开全部嵌套"
+    );
 }
 
 /// M18.x: SFINAE 简化支持 - 匿名默认类型形参 (`typename = T`,
@@ -10750,15 +11733,22 @@ fn cpp_template_depth_limit_rejected() {
 /// 求值层 (enable_if 条件 / trait 检测) 由 feature_degrade.rs 单元测试覆盖.
 #[test]
 #[cfg(unix)]
-#[ignore = "TODO: native path needs runtime/stdlib support"]
 fn cpp_sfinae_smoke() {
     let src = include_str!("fixtures/cpp/sfinae.cpp");
     let (out, obj) = run_cpp_object_test("cpp-sfinae", src);
-    let _ = fs::remove_file(&obj);
     assert!(
         out.status.success(),
         "cpp_sfinae_smoke compile failed: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+    // M51: 夹具自带运行断言 (匿名默认形参 / 默认模板实参 / 多形参推导).
+    // 候选被 SFINAE 误剔 or 重载选错都会改变运行结果, 因此必须实跑.
+    let code = host_link_cpp_object_and_run("cpp-sfinae", &obj);
+    let _ = fs::remove_file(&obj);
+    assert_eq!(
+        code,
+        0,
+        "sfinae.cpp 运行断言失败 (1/2/3=对应断言不成立, -2=链接失败, -100=无 g++)"
     );
 }
 
@@ -11732,24 +12722,225 @@ fn c23_typeof_unqual() {
 }
 
 // ====== M26: 协程真状态机 / modules BMF / GCC ABI 运行时 ======
-#[test]
-#[cfg(unix)]
-#[ignore = "TODO Phase 2: implement Duff's device lowering (current: compile-only smoke test)"]
-fn cpp_coroutine_state_machine() {
-    let src = include_str!("fixtures/cpp/coroutine_state.cpp");
-    let (out, _obj) = run_cpp_object_test("cpp-coroutine-state", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
-    let _ = fs::remove_file(_obj);
+
+/// C++20 协程三测试共用的交叉验证骨架.
+///
+/// 流程: 夹具先经 `g++ -std=c++20` 编译并运行作为**参照基准** (宿主无 g++ 则降级为
+/// 只看 dcc 自己), 然后 `dcc -c` + host gcc 链接 + 运行, 比对退出码与 stdout.
+///
+/// 为什么还跑 **3 遍** dcc: 协程状态机是一个多臂 switch CFG, 一旦后端某处用
+/// HashMap 迭代序驱动块名匹配 (`case_<v>` 前缀查找就是实测踩到的坑), 同一份源码
+/// 每次进程会得到不同代码而退出码随机翻转. 只跑一遍能偶然对上 g++, 掩盖这类 bug.
+fn cpp_coroutine_cross_check(name: &str, source: &str) {
+    let dir = std::env::temp_dir();
+    let src_path = dir.join(format!("dcc-cpp-{name}-{}.cpp", std::process::id()));
+    fs::write(&src_path, source).expect("write C++ coroutine fixture");
+
+    let mut reference: Option<(i32, String)> = None;
+    if Command::new("g++").arg("--version").output().is_ok() {
+        let ref_bin = dir.join(format!("dcc-cpp-{name}-{}-ref.bin", std::process::id()));
+        let g = Command::new("g++")
+            .args(["-std=c++20", "-o"])
+            .arg(&ref_bin)
+            .arg(&src_path)
+            .output()
+            .expect("run g++");
+        // 夹具必须是标准 C++20: g++ 拒收即夹具退化成方言子集, 直接失败.
+        assert!(
+            g.status.success(),
+            "{name}: g++ -std=c++20 必须接受该夹具: {}",
+            String::from_utf8_lossy(&g.stderr)
+        );
+        let grun = Command::new(&ref_bin).output().expect("run g++ reference binary");
+        let _ = fs::remove_file(&ref_bin);
+        reference = Some((
+            grun.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&grun.stdout).to_string(),
+        ));
+    }
+
+    let obj = dir.join(format!("dcc-cpp-{name}-{}.o", std::process::id()));
+    let mut dcc_run: Option<(i32, String)> = None;
+    for round in 0..3 {
+        let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["-c", "-o"])
+            .arg(&obj)
+            .arg(&src_path)
+            .output()
+            .expect("run dcc");
+        assert!(
+            out.status.success(),
+            "{name}: dcc -c 失败 (round {round}): {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let exe = dir.join(format!("dcc-cpp-{name}-{}.bin", std::process::id()));
+        let link = Command::new("gcc")
+            .arg(&obj)
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .expect("host gcc link");
+        assert!(
+            link.status.success(),
+            "{name}: link 失败: {}",
+            String::from_utf8_lossy(&link.stderr)
+        );
+        let run = Command::new(&exe).output().expect("run coroutine binary");
+        let _ = fs::remove_file(&exe);
+        let got = (
+            run.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&run.stdout).to_string(),
+        );
+        if let Some(prev) = &dcc_run {
+            assert_eq!(
+                prev,
+                &got,
+                "{name}: dcc 自洽性破坏 (round {round} 与 round 0 结果不同, 通常是后端顺序依赖)"
+            );
+        }
+        dcc_run = Some(got);
+    }
+    let _ = fs::remove_file(&obj);
+    let _ = fs::remove_file(&src_path);
+    let got = dcc_run.expect("dcc run result");
+    match reference {
+        Some(want) => {
+            assert_eq!(
+                want.0, got.0,
+                "{name}: dcc 退出码 {} 与 g++ {} 不一致 (夹具内 `return N` 逐条对应验证点)",
+                got.0,
+                want.0
+            );
+            assert_eq!(want.1, got.1, "{name}: dcc stdout 与 g++ 不一致");
+        }
+        None => assert_eq!(got.0, 0, "{name}: 无 g++ 参照, dcc 侧必须 exit 0"),
+    }
 }
 
 #[test]
 #[cfg(unix)]
-#[ignore = "TODO Phase 1: Implement module system (BMF format + import/export parser + ODR validation)"]
+fn cpp_coroutine_state_machine() {
+    // 升级背景: 原本 compile-only + #[ignore] ("current: compile-only smoke test").
+    // 现在 native 后端真做协程降级 (src/cpp/coroutine_lower.rs): 协程帧 == promise 对象,
+    // 局部状态提升为帧成员, 挂起点重排为 switch+fallthrough 状态机, 故按夹具注释的
+    // 完整意图跑起来: ramp 后停在 initial_suspend, 每个 next() 恰好推进一个 co_yield,
+    // co_return 后 final_suspend 挂起 => done(), 终态重复驱动不再执行主体, 两次调用
+    // 得到独立帧. 退出码逐条与 g++ -std=c++20 对照.
+    let src = include_str!("fixtures/cpp/coroutine_state.cpp");
+    cpp_coroutine_cross_check("cpp-coroutine-state", src);
+}
+
+#[test]
+#[cfg(unix)]
 fn cpp_modules_bmf() {
+    // M26.4/M26.5: BMF 格式 + export/import 解析 + ODR 校验.
+    // fixture 是 `export module bmf_test;` 的接口单元:
+    //   1) 编译时经 --emit-module-file 写出模块接口 (M / E F / E C 记录);
+    //   2) 另起导入 TU 从该 BMF 回放声明 (只引用符号, 不重复定义);
+    //   3) 与本接口冲突 (同名不同签名) 的另一模块同时 import 必须被拒;
+    //   4) fixture 自身可链接运行 (add(1,2)-3 == 0).
     let src = include_str!("fixtures/cpp/modules_bmf.cpp");
-    let (out, _obj) = run_cpp_object_test("cpp-modules-bmf", src);
+    let dir = std::env::temp_dir().join(format!("dcc-bmf-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let mod_src = dir.join("bmf_test.cpp");
+    let mod_obj = dir.join("bmf_test.o");
+    let iface = dir.join("bmf_test.bmf");
+    fs::write(&mod_src, src).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&mod_obj)
+        .arg(&mod_src)
+        .arg(format!("--emit-module-file={}", iface.display()))
+        .output()
+        .expect("run dcc on module TU");
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
-    let _ = fs::remove_file(_obj);
+    assert!(mod_obj.exists(), "object not emitted");
+    assert!(iface.exists(), "BMF interface not emitted");
+    let text = fs::read_to_string(&iface).unwrap();
+    assert!(text.starts_with("DCC_BMF_V1\n"), "magic: {}", text);
+    assert!(text.contains("M bmf_test"), "{}", text);
+    assert!(text.contains("E F add"), "{}", text);
+    // M28.3/M28.5/M28.6: `E C` 布局首 token 是 class/struct/union 标记,
+    // public 字段不写访问标记; `E F` 签名里带 mangled 链接名
+    assert!(text.contains("E C Point @class int x; int y;"), "类布局: {}", text);
+    assert!(text.contains("int _Z3addii(int, int)"), "mangled 签名: {}", text);
+    assert!(!text.contains("main"), "main 不是模块导出: {}", text);
+
+    // 导入 TU: 声明自 BMF 回放 -> `add` 为外部引用 (M28.6: 按 mangled 名),
+    // 本 TU 不重复定义
+    let use_src = dir.join("use.cpp");
+    fs::write(&use_src, "import bmf_test;\nint use_point(Point* p) { return add(p->x, p->y); }\n")
+        .unwrap();
+    let use_obj = dir.join("use.o");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(&use_obj)
+        .arg(&use_src)
+        .output()
+        .expect("run dcc on import TU");
+    assert!(out.status.success(), "import compile: {}", String::from_utf8_lossy(&out.stderr));
+    let bytes = fs::read(&use_obj).unwrap();
+    let undef = elf64_undefined_symbols(&bytes);
+    assert!(
+        undef.iter().any(|s| s == "_Z3addii"),
+        "add 应为 mangled 外部引用: {:?}",
+        undef
+    );
+    let defined: Vec<String> = elf64_func_symbols(&bytes).into_iter().map(|(n, _, _)| n).collect();
+    assert!(
+        !defined.iter().any(|s| s == "_Z3addii"),
+        "导入端不得重复定义 add: {:?}",
+        defined
+    );
+
+    // ODR 校验 (M28.6): 另一模块导出**同名同类但布局不同**的 `Point` ——
+    // 这是真实 ODR 违例 (同类型在两个 TU 里布局不一致). 函数重载
+    // (`add(int,int)` vs `add(int)`) 反而不再撞键: mangled 名不同 = 不同实体.
+    let other_src = dir.join("other.cpp");
+    fs::write(
+        &other_src,
+        "export module other;\nexport class Point {\npublic:\n    int x;\n    long y;\n};\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(dir.join("other.o"))
+        .arg(&other_src)
+        .arg(format!("--emit-module-file={}", dir.join("other.bmf").display()))
+        .output()
+        .expect("run dcc on conflicting module");
+    assert!(out.status.success(), "other module: {}", String::from_utf8_lossy(&out.stderr));
+    let bad_src = dir.join("odr.cpp");
+    fs::write(&bad_src, "import bmf_test;\nimport other;\nint main() { return 0; }\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(dir.join("odr.o"))
+        .arg(&bad_src)
+        .output()
+        .expect("run dcc on conflicting imports");
+    assert!(!out.status.success(), "ODR 冲突应被拒绝");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("ODR violations"), "stderr: {}", stderr);
+    assert!(stderr.contains("Point"), "stderr: {}", stderr);
+
+    // fixture 自身链接运行 (接口单元带 main, add(1,2)-3 == 0)
+    let exe = dir.join("bmf_run");
+    let link = Command::new("gcc")
+        .arg(&mod_obj)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("host gcc link");
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
+    let run = Command::new(&exe).output().expect("run bmf binary");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        run.status.success(),
+        "run: exit={:?} stderr={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
 
 #[test]
@@ -11812,7 +13003,6 @@ fn cpp_member_parser_runtime() {
 
 #[test]
 #[cfg(unix)]
-#[ignore = "TODO: native path needs runtime/stdlib support"]
 fn cpp_auto_deduction_runtime() {
     // auto 从 函数调用 / 成员调用 / 成员访问 / new 推导真实类型.
     let src = include_str!("fixtures/cpp/auto_deduction.cpp");
@@ -11871,38 +13061,20 @@ fn cpp_noexcept_expr_runtime() {
 
 #[test]
 #[cfg(unix)]
-#[ignore = "TODO Phase 2: implement Duff's device lowering (current: compile-only smoke test)"]
 fn cpp_coroutine_runtime() {
-    // 协程 co_yield/co_return 降级为 Duff's device 状态机，状态跨调用
-    // 保持 (文件作用域 static 全局); dcc -c 后 host gcc 链接并运行.
+    // 协程 co_yield/co_return 降级为状态机后, 挂起位置必须跨调用保持.
+    // 升级背景: 原本 #[ignore] 只要求能编译. 现在夹具把形参 (n) 与局部量 (i/total/k)
+    // 提升进协程帧 (即 promise 对象尾部追加的帧字段), 把 while / for 循环体内的
+    // 挂起点与回边重排成 switch+fallthrough 状态机 (等价 CFG 变换), 并用 20 条
+    // `if (...) return N` 断言两个交错推进的 Generator 帧互不干扰、死分支里的
+    // co_yield 不污染状态机、co_return 后重复驱动仍为 done.
+    // dcc -c + host gcc 链接运行, 退出码与 g++ -std=c++20 逐条对照.
     let src = include_str!("fixtures/cpp/coroutine_runtime.cpp");
-    let (out, obj) = run_cpp_object_test("cpp-coroutine-runtime", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
-    let dir = std::env::temp_dir();
-    let exe = dir.join(format!("dcc-cpp-coroutine-runtime-{}", std::process::id()));
-    let link = std::process::Command::new("gcc")
-        .arg(&obj)
-        .arg("-o")
-        .arg(&exe)
-        .output()
-        .expect("host gcc link");
-    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
-    let run = std::process::Command::new(&exe)
-        .output()
-        .expect("run coroutine binary");
-    let _ = fs::remove_file(obj);
-    let _ = fs::remove_file(&exe);
-    assert!(
-        run.status.success(),
-        "run: exit={:?} stderr={}",
-        run.status.code(),
-        String::from_utf8_lossy(&run.stderr)
-    );
+    cpp_coroutine_cross_check("cpp-coroutine-runtime", src);
 }
 
 #[test]
 #[cfg(unix)]
-#[ignore = "TODO: native path needs runtime/stdlib support"]
 fn cpp_virtual_inheritance_runtime() {
     // 菱形虚继承 Itanium ABI 布局：vbtable + vbptr + 尾部共享虚基子对象，
     // 成员访问与上转型经 vbtable this-adjust; dcc -c + host gcc 链接运行.
@@ -11933,7 +13105,6 @@ fn cpp_virtual_inheritance_runtime() {
 
 #[test]
 #[cfg(unix)]
-#[ignore = "TODO Phase 1: Implement module system (BMF format + import/export parser + cross-TU symbol resolution)"]
 fn cpp_module_cross_tu_import() {
     // M26.4: 跨 TU module import.
     // 导出 TU (export module) 经 --emit-module-file 写出 BMF 接口;
@@ -12017,7 +13188,6 @@ int main() {
 
 #[test]
 #[cfg(unix)]
-#[ignore = "TODO Phase 1: Implement partition module support (.partx BMF format + cross-partition linking)"]
 fn cpp_module_partition_import_runtime() {
     // M26.4: module partition 跨 TU.
     // part TU `export module mymod:part;` -> mymod.part.bmf (P 行);
@@ -12108,39 +13278,619 @@ fn cpp_module_partition_import_runtime() {
 
 #[test]
 #[cfg(unix)]
-#[ignore = "TODO Phase 1: Implement module ODR validation (detect cross-module symbol conflicts + emit E0103 errors)"]
+fn cpp_module_export_single_declaration_private_fragment_runtime() {
+    // M53 任务 6: **声明级** export (`export int f();` 不带 `export { }` 块) 与
+    // `export { int g(); }` 块路径必须同形: 两条都进 BMF `E F` 记录, 都保持外部
+    // 链接, 导入 TU 能链接能跑. 接手前的基线会把裸 export 声明的标记丢掉
+    // (parse_export_decl 透传不落逐声明标记), 于是 "接口里声明 + 私有片段里
+    // 定义" 被误降为内部链接, 导入端得到 undefined reference.
+    // g++ -std=c++20 -fmodules-ts 对照: 同样的裸 `export int f();` 写法 (定义放
+    // 在 purview 里) 编译+链接+运行 exit 0 (支持); 而 `module :private;` 本身
+    // 在 g++ 13.3 上是 "sorry, unimplemented: private module fragment", 所以
+    // 私有片段那半只能按 dcc 侧 BMF 与链接自洽验证.
+    let dir = std::env::temp_dir().join(format!("dcc-mod-expdecl-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+
+    let out = dcc_compile_module(
+        &dir,
+        "decl_export_mod",
+        r#"export module decl_export_mod;
+export int via_single_decl();
+export {
+    int via_export_block();
+}
+module :private;
+int via_single_decl() { return 3; }
+int via_export_block() { return 4; }
+"#,
+        true,
+    );
+    assert!(
+        out.status.success(),
+        "iface compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // BMF 文件名按 TU 名 (`<name>.bmf`), 这里 TU 名与模块名同.
+    let bmf = fs::read_to_string(dir.join("decl_export_mod.bmf")).unwrap();
+    assert!(
+        bmf.contains("E F via_single_decl "),
+        "裸 `export int f();` 必须作为导出实体进 BMF: {}",
+        bmf
+    );
+    assert!(
+        bmf.contains("E F via_export_block "),
+        "`export {{ }}` 块里的声明不得回退: {}",
+        bmf
+    );
+
+    let out = dcc_compile_module(
+        &dir,
+        "use",
+        r#"import decl_export_mod;
+int main() {
+    if (via_single_decl() != 3) return 1;
+    if (via_export_block() != 4) return 2;
+    if (via_single_decl() + via_export_block() != 7) return 3;
+    return 0;
+}
+"#,
+        false,
+    );
+    assert!(
+        out.status.success(),
+        "use compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let exit = host_link_objects_and_run(
+        &dir.join("run"),
+        &[&dir.join("decl_export_mod.o"), &dir.join("use.o")],
+        true,
+    );
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        exit, 0,
+        "两种 export 拼写的跨 TU 链接必须一致 (退出码 {})",
+        exit
+    );
+}
+
+/// M28: 在 `dir` 里写 `<name>.cpp` 并用 dcc 编译为 `<name>.o`.
+/// `emit_bmf` = true 时附 `--emit-module-file=<dir>/<name>.bmf`.
+/// 返回子进程 Output (调用方自行断言 status / 读 stderr).
+#[cfg(unix)]
+fn dcc_compile_module(dir: &std::path::Path, name: &str, src: &str, emit_bmf: bool) -> std::process::Output {
+    let sp = dir.join(format!("{}.cpp", name));
+    fs::write(&sp, src).unwrap_or_else(|e| panic!("write {}: {}", sp.display(), e));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+    cmd.args(["-c", "-o"]).arg(dir.join(format!("{}.o", name))).arg(&sp);
+    if emit_bmf {
+        cmd.arg(format!("--emit-module-file={}", dir.join(format!("{}.bmf", name)).display()));
+    }
+    cmd.output().unwrap_or_else(|e| panic!("run dcc on {}: {}", name, e))
+}
+
+/// M28: 用 host gcc 链接若干 .o 并运行, 返回退出码 (链接失败 = -2).
+#[cfg(unix)]
+fn host_link_objects_and_run(exe: &std::path::Path, objs: &[&std::path::Path], cxx: bool) -> i32 {
+    let linker = if cxx { "g++" } else { "gcc" };
+    let mut cmd = Command::new(linker);
+    for o in objs {
+        cmd.arg(o);
+    }
+    cmd.arg("-o").arg(exe);
+    let link = cmd.output().unwrap_or_else(|e| panic!("run {}: {}", linker, e));
+    if !link.status.success() {
+        eprintln!("{} link failed: {}", linker, String::from_utf8_lossy(&link.stderr));
+        return -2;
+    }
+    let run = Command::new(exe).output().unwrap_or_else(|e| panic!("run {}: {}", exe.display(), e));
+    run.status.code().unwrap_or(-1)
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_module_import_not_found_diagnostic() {
+    // M28.1: `import foo;` 找不到 BMF 接口文件时必须给明确诊断 (旧行为是
+    // 静默当普通外部符号处理 -> 未声明实体全程不报错, ODR 冲突也就无从校验).
+    // g++ -fmodules-ts 对照: `error: failed to read compiled module: ...` +
+    // 非零退出, 同样是硬诊断 (无逃生门), dcc 侧对应 E0104.
+    let dir = std::env::temp_dir().join(format!("dcc-mod-notfound-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let out = dcc_compile_module(
+        &dir,
+        "uses_missing",
+        "import nosuchmod;\nint main() { return 0; }\n",
+        false,
+    );
+    assert!(!out.status.success(), "missing module import must be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("E0104"), "stderr: {}", stderr);
+    assert!(stderr.contains("nosuchmod"), "stderr: {}", stderr);
+    assert!(stderr.contains("nosuchmod.bmf"), "stderr 要列出候选文件名: {}", stderr);
+    // 诊断带 import 所在行 (夹具里是第 1 行), 便于定位
+    assert!(stderr.contains("uses_missing.cpp:1:1"), "stderr: {}", stderr);
+
+    // 分区 import 同样诊断, 且候选名用 `模块.分区.bmf` 约定
+    let out = dcc_compile_module(
+        &dir,
+        "uses_missing_part",
+        "export module mymod;\nimport :ghost;\nexport int f() { return 1; }\n",
+        false,
+    );
+    let _ = fs::remove_dir_all(&dir);
+    assert!(!out.status.success(), "missing partition import must be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("E0104"), "stderr: {}", stderr);
+    assert!(stderr.contains("mymod.ghost.bmf"), "stderr: {}", stderr);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_module_private_fragment_internal_linkage() {
+    // M28.2: `module :private;` 片段里的实体必须是模块内部链接 (STB_LOCAL),
+    // 不得以全局符号 `T` 泄漏到导出 TU 的 .o; 也不得进入 BMF 接口
+    // (否则导入端会重放出指向 LOCAL 定义的 extern).
+    let dir = std::env::temp_dir().join(format!("dcc-mod-privfrag-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let mod_obj = dir.join("privmod.o");
+    let out = dcc_compile_module(
+        &dir,
+        "privmod",
+        r#"export module privmod;
+int hidden_helper();
+export int visible() { return hidden_helper() + 1; }
+module :private;
+int hidden_helper() { return 41; }
+"#,
+        true,
+    );
+    assert!(out.status.success(), "module compile: {}", String::from_utf8_lossy(&out.stderr));
+    let bmf = fs::read_to_string(dir.join("privmod.bmf")).unwrap();
+    assert!(bmf.contains("E F visible"), "{}", bmf);
+    assert!(!bmf.contains("hidden_helper"), "私有片段实体不得入接口: {}", bmf);
+
+    // nm 断言: 读 ELF 符号表, hidden_helper 必须是 LOCAL 绑定 (bind==0),
+    // 而 visible 必须是 GLOBAL (bind==1)
+    let bytes = fs::read(&mod_obj).unwrap();
+    let syms = elf64_syms(&bytes);
+    let hidden: Vec<&Elf64Sym> = syms.iter().filter(|s| s.name.contains("hidden_helper")).collect();
+    assert!(
+        !hidden.is_empty(),
+        "私有片段函数应仍在本 TU 发射: {:?}",
+        syms.iter().map(|s| s.name.clone()).collect::<Vec<_>>()
+    );
+    for s in &hidden {
+        assert_eq!(s.bind, 0, "hidden_helper 必须是 STB_LOCAL (0), 实得 {}: {}", s.bind, s.name);
+        assert_eq!(s.stype, 2, "hidden_helper 仍为函数符号: {:?}", s.name);
+    }
+    // 对应 `nm` 输出里不得出现大写 `T hidden_helper` (全局已定义函数)
+    assert!(
+        !syms.iter().any(|s| s.name.contains("hidden_helper") && s.bind == 1),
+        "hidden_helper 不得作为全局符号 (nm `T`) 泄漏: {:?}",
+        syms.iter().map(|s| (&s.name, s.bind)).collect::<Vec<_>>()
+    );
+    let vis = syms.iter().find(|s| s.name.contains("visible")).expect("visible 符号");
+    assert_eq!(vis.bind, 1, "visible 必须是 STB_GLOBAL");
+
+    // 导入端不得看见私有实体名 (g++ 对照: `'hidden_helper' was not declared
+    // in this scope`; gcc 13 不能直接跑 `module :private;`, 故用非导出的
+    // purview 实体等价实测)
+    let out = dcc_compile_module(&dir, "privbad", "import privmod;\nint main() { return hidden_helper() != 41; }\n", false);
+    assert!(!out.status.success(), "导入端不得引用私有片段实体");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("hidden_helper"), "stderr: {}", stderr);
+
+    // 导入端只用导出实体, 跨 TU 链接运行结果正确 (41 + 1 == 42)
+    let use_obj = dir.join("privuse.o");
+    let out = dcc_compile_module(&dir, "privuse", "import privmod;\nint main() { return visible() != 42; }\n", false);
+    assert!(out.status.success(), "import compile: {}", String::from_utf8_lossy(&out.stderr));
+    let exit = host_link_objects_and_run(&dir.join("privrun"), &[&mod_obj, &use_obj], false);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(exit, 0, "私有片段不影响导出实体的跨 TU 调用");
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_module_cross_tu_private_access_rejected() {
+    // M28.3: BMF 现在逐成员记录访问级 (`E C` 布局里的 `@private` 尾标记,
+    // `E F` 尾部的 `@private`/`@protected`/`@const`), 导入端回放时还原
+    // public/protected/private 与 const 限定. 跨 TU 访问 private/protected
+    // 成员必须被拒, public/const 成员必须可用.
+    // g++ -std=c++20 -fmodules-ts 对照: 同一声明顺序的普通多 TU 写法同样
+    // 报 "is private within this context"; 访问级不同不构成 ODR 冲突.
+    let dir = std::env::temp_dir().join(format!("dcc-mod-priv-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let out = dcc_compile_module(
+        &dir,
+        "catmod",
+        r#"export module catmod;
+export class Cat {
+public:
+    Cat(int s) : secret(s) {}
+    int reveal() const { return secret; }
+protected:
+    int mask() { return 7; }
+private:
+    int secret;
+};
+"#,
+        true,
+    );
+    assert!(out.status.success(), "module compile: {}", String::from_utf8_lossy(&out.stderr));
+    let bmf = fs::read_to_string(dir.join("catmod.bmf")).unwrap();
+    assert!(bmf.contains("E C Cat @class @private int secret;"), "private 字段入 BMF: {}", bmf);
+    // public 成员不写访问标记 (向后兼容: 旧 BMF 文本逐字仍可读), 但 const 要写
+    assert!(
+        bmf.contains("E F Cat::reveal int _ZN3Cat6revealEv(struct Cat*) @const"),
+        "const 成员函数: {}",
+        bmf
+    );
+    assert!(bmf.contains("@protected"), "protected 成员函数入 BMF: {}", bmf);
+
+    // 跨 TU 读 private 成员 -> 必须拒绝
+    let out = dcc_compile_module(
+        &dir,
+        "catbad",
+        "import catmod;\nint main() { Cat c(9); return c.secret != 9; }\n",
+        false,
+    );
+    assert!(!out.status.success(), "跨 TU 访问 private 成员必须被拒");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("secret"), "stderr 要点出成员名: {}", stderr);
+    assert!(stderr.contains("private"), "stderr 要点出访问级: {}", stderr);
+
+    // 跨 TU 调 protected 成员 -> 同样拒绝 (非派生路径上下文)
+    let out = dcc_compile_module(
+        &dir,
+        "catprot",
+        "import catmod;\nint main() { Cat c(9); return c.mask() != 7; }\n",
+        false,
+    );
+    assert!(!out.status.success(), "跨 TU 访问 protected 成员必须被拒");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("protected"), "stderr: {}", stderr);
+
+    // 走 public const 接口则一切正常 (链接 + 运行 exit 0)
+    let out = dcc_compile_module(
+        &dir,
+        "catok",
+        "import catmod;\nint main() { const Cat c(9); return c.reveal() != 9; }\n",
+        false,
+    );
+    assert!(out.status.success(), "public const 路径: {}", String::from_utf8_lossy(&out.stderr));
+    let exit = host_link_objects_and_run(
+        &dir.join("catrun"),
+        &[&dir.join("catmod.o"), &dir.join("catok.o")],
+        true,
+    );
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(exit, 0, "public 成员跨 TU 调用结果应为 9");
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_module_cross_tu_template_runtime() {
+    // M28.4: BMF 随 `E T` 带走模板原文 (`@body=`), 导入端注入解析 ->
+    // 实例化管线能重建成员. 任务书指定场景: Box<int> b; b.v=3; return b.get()!=3.
+    // g++ -std=c++20 -fmodules-ts 对照: 同一夹具编译+链接+运行 exit 0 (支持).
+    // 注意: 必须写 `export template` (裸 `template` 在 purview 里不导出,
+    // 两侧语义一致).
+    // 同模块内再放一个**函数模板** `pick`: `@body=` 按模板名逐个提取,
+    // 两条 `E T` 记录不得互相污染 (类模板 + 函数模板共存回归).
+    let dir = std::env::temp_dir().join(format!("dcc-mod-tpl-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let out = dcc_compile_module(
+        &dir,
+        "boxmod",
+        r#"export module boxmod;
+export template<class T> struct Box { T v; T get() { return v; } };
+export template<class T> T pick(T x) { return x; }
+"#,
+        true,
+    );
+    assert!(out.status.success(), "module compile: {}", String::from_utf8_lossy(&out.stderr));
+    let bmf = fs::read_to_string(dir.join("boxmod.bmf")).unwrap();
+    assert!(
+        bmf.contains("E T Box T @body=template<class T> struct Box { T v; T get() { return v; } };"),
+        "模板体随 `E T` 序列化: {}",
+        bmf
+    );
+    assert!(
+        bmf.contains("E T pick T @body=template<class T> T pick(T x) { return x; }"),
+        "函数模板体也随 `E T` 序列化: {}",
+        bmf
+    );
+
+    let out = dcc_compile_module(
+        &dir,
+        "boxuse",
+        r#"import boxmod;
+int main() {
+    Box<int> b;
+    b.v = 3;
+    if (b.get() != 3) return 1;
+    if (pick(5) != 5) return 2;
+    if (pick(pick(5)) != 5) return 3;
+    long L = 7;
+    if (pick(pick(L)) != 7) return 4;
+    return 0;
+}
+"#,
+        false,
+    );
+    assert!(out.status.success(), "import compile: {}", String::from_utf8_lossy(&out.stderr));
+    let exit = host_link_objects_and_run(
+        &dir.join("boxrun"),
+        &[&dir.join("boxmod.o"), &dir.join("boxuse.o")],
+        true,
+    );
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(exit, 0, "跨 TU 类模板成员 + 函数模板调用必须各自返回预期值");
+    // M53 转正: **嵌套**函数模板调用 `pick(pick(5))` (实参本身就是待实例化调用)
+    // 现已走通 —— 实例化工作表会递归收内层 (无模块的单 TU 见
+    // `cpp_template_nested_call_arg`)。这里连同内层类型不同的 `pick(pick(L))`
+    // 一起验证跨模块回放后的模板也能逐层实例化。
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_module_cross_tu_virtual_runtime() {
+    // M28.5: 虚函数类跨 TU. BMF 要记录基类/virtuality (`@base:` + `@virtual`),
+    // 导入端回放后虚调用必须打到派生类 override; 本 TU 不得发射空壳
+    // `_ZTV`/`_ZTI`/`_ZTS` (否则链接期与导出 TU 的 weak 副本随机二选一 -> 段错).
+    // g++ -std=c++20 -fmodules-ts 对照: 同一夹具 (含 new/delete 多态)
+    // 编译+链接+运行 exit 0 (支持).
+    let dir = std::env::temp_dir().join(format!("dcc-mod-virt-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let out = dcc_compile_module(
+        &dir,
+        "shapemod",
+        r#"export module shapemod;
+export class Shape {
+public:
+    virtual int area() { return 0; }
+    virtual ~Shape() {}
+};
+export class Rect : public Shape {
+public:
+    Rect(int w, int h) : w(w), h(h) {}
+    int area() { return w * h; }
+private:
+    int w;
+    int h;
+};
+export int poly(Shape* s) { return s->area(); }
+"#,
+        true,
+    );
+    assert!(out.status.success(), "module compile: {}", String::from_utf8_lossy(&out.stderr));
+    let bmf = fs::read_to_string(dir.join("shapemod.bmf")).unwrap();
+    assert!(bmf.contains("E C Rect @class @base:public:-:Shape"), "基类入布局: {}", bmf);
+    assert!(bmf.contains("E F Rect::area ") && bmf.contains("@virtual"), "virtuality 传递: {}", bmf);
+
+    let out = dcc_compile_module(
+        &dir,
+        "shapeuse",
+        r#"import shapemod;
+int main() {
+    Rect r(3, 4);
+    if (poly(&r) != 12) return 1;
+    Shape* p = new Rect(2, 5);
+    int n = p->area();
+    delete p;
+    return n != 10;
+}
+"#,
+        false,
+    );
+    assert!(out.status.success(), "import compile: {}", String::from_utf8_lossy(&out.stderr));
+    // 导入 TU 不得发射 RTTI/虚表
+    let syms = elf64_syms(&fs::read(dir.join("shapeuse.o")).unwrap());
+    let leaked: Vec<&String> = syms
+        .iter()
+        .map(|s| &s.name)
+        .filter(|n| n.starts_with("_ZTV") || n.starts_with("_ZTI") || n.starts_with("_ZTS"))
+        .collect();
+    assert!(leaked.is_empty(), "导入 TU 不得发射虚表/typeinfo: {:?}", leaked);
+    // 导出 TU 才发射 (weak)
+    let exp = elf64_syms(&fs::read(dir.join("shapemod.o")).unwrap());
+    assert!(
+        exp.iter().any(|s| s.name == "_ZTV4Rect" && s.bind == 2),
+        "导出 TU 应发射 weak _ZTV4Rect"
+    );
+    // new/delete 在 libstdc++, 用 g++ 链接
+    let exit = host_link_objects_and_run(
+        &dir.join("shaperun"),
+        &[&dir.join("shapemod.o"), &dir.join("shapeuse.o")],
+        true,
+    );
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(exit, 0, "跨 TU 虚函数多态调用必须返回 12 / 10");
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_module_imported_polymorphic_ctor_not_duplicated() {
+    // M28.5 补: 导入 TU 不得**定义**导入多态类的隐式 ctor/dtor.
+    // 缺陷形状: 重放出的类是纯声明, native 管线合成的本地隐式 ctor 不写 vptr
+    // (虚表不在本 TU), 却与导出 TU 的 weak 定义**同名不同内容** —— weak 符号
+    // 链接期任选其一, 选中本地副本时在导入 TU 里构造的对象 vptr 未初始化,
+    // 虚调用直接段错, 表现形式是“只在导入 TU 排前时挂” (链接顺序敏感).
+    // 修法: 链接计划把导入多态类的 ctor/dtor 外部化 (只引用不定义).
+    let dir = std::env::temp_dir().join(format!("dcc-mod-ctor-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let out = dcc_compile_module(
+        &dir,
+        "shapemod",
+        r#"export module shapemod;
+export class Shape {
+public:
+    virtual int area() { return 0; }
+    virtual ~Shape() {}
+};
+export class Rect : public Shape {
+public:
+    Rect(int w, int h) : w(w), h(h) {}
+    int area() { return w * h; }
+private:
+    int w;
+    int h;
+};
+"#,
+        true,
+    );
+    assert!(out.status.success(), "module compile: {}", String::from_utf8_lossy(&out.stderr));
+    // 导入 TU 默认构造多态基类对象 + 虚调用
+    let out = dcc_compile_module(
+        &dir,
+        "shapebase",
+        r#"import shapemod;
+int main() {
+    Shape s;
+    if (s.area() != 0) return 1;
+    Rect r(2, 3);
+    Shape* p = &r;
+    return p->area() != 6;
+}
+"#,
+        false,
+    );
+    assert!(out.status.success(), "import compile: {}", String::from_utf8_lossy(&out.stderr));
+    // 关键断言: 导入 TU 对 ctor 只能有**引用** (shndx == 0 = SHN_UNDEF),
+    // 不得有定义; 定义必须在导出 TU.
+    let imp = elf64_syms(&fs::read(dir.join("shapebase.o")).unwrap());
+    let defined: Vec<&Elf64Sym> = imp
+        .iter()
+        .filter(|s| s.name.contains("ctor") && s.shndx != 0)
+        .collect();
+    assert!(
+        defined.is_empty(),
+        "导入 TU 不得定义导入类的 ctor: {:?}",
+        defined.iter().map(|s| (&s.name, s.bind)).collect::<Vec<_>>()
+    );
+    assert!(
+        imp.iter().any(|s| s.name.contains("ctor") && s.shndx == 0),
+        "导入 TU 应以外部引用形式调 ctor"
+    );
+    let exp = elf64_syms(&fs::read(dir.join("shapemod.o")).unwrap());
+    assert!(
+        exp.iter().any(|s| s.name.contains("ctor") && s.shndx != 0),
+        "导出 TU 必须发射 ctor 定义"
+    );
+    // 两种链接顺序都得跑通 (weak 去重后语义一致)
+    let a = host_link_objects_and_run(
+        &dir.join("run_mod_first"),
+        &[&dir.join("shapemod.o"), &dir.join("shapebase.o")],
+        true,
+    );
+    let b = host_link_objects_and_run(
+        &dir.join("run_use_first"),
+        &[&dir.join("shapebase.o"), &dir.join("shapemod.o")],
+        true,
+    );
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(a, 0, "mod-first 链接顺序下多态对象必须可用");
+    assert_eq!(b, 0, "use-first 链接顺序下多态对象必须可用 (旧缺陷在此段错)");
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_module_mangled_linkage_no_name_collision() {
+    // M28.6: 模块导出/导入实体统一走 mangled 链接名. 旧缺陷: `Widget::get`
+    // 与全局 `get` 在发射层面重名 (都用源名 `get`), 链接期相互吃掉.
+    // g++ -std=c++20 -fmodules-ts 对照: 同一夹具运行 exit 0 (支持;
+    // g++ 额外把模块作用域也编进名字 `_ZW5wmod...`, dcc 暂不模拟, 见报告).
+    let dir = std::env::temp_dir().join(format!("dcc-mod-mangle-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let out = dcc_compile_module(
+        &dir,
+        "wmod",
+        "export module wmod;\nexport class Widget {\npublic:\n    int id;\n    int get() { return id * 2; }\n};\n",
+        true,
+    );
+    assert!(out.status.success(), "module compile: {}", String::from_utf8_lossy(&out.stderr));
+    let bmf = fs::read_to_string(dir.join("wmod.bmf")).unwrap();
+    assert!(bmf.contains("_ZN6Widget3getEv"), "成员函数 mangled 名入 BMF: {}", bmf);
+    // 导出 TU 的发射符号名就是 mangled 名
+    let names: Vec<String> = elf64_func_symbols(&fs::read(dir.join("wmod.o")).unwrap())
+        .into_iter()
+        .map(|(n, _, _)| n)
+        .collect();
+    assert!(names.iter().any(|n| n == "_ZN6Widget3getEv"), "发射名=mangled: {:?}", names);
+
+    // 导入端同时定义同名的全局函数 -> 两个符号必须共存
+    let out = dcc_compile_module(
+        &dir,
+        "wuse",
+        r#"import wmod;
+int get() { return 7; }
+int main() {
+    Widget w; w.id = 5;
+    int a = w.get();
+    int b = get();
+    return (a == 10 && b == 7) ? 0 : 1;
+}
+"#,
+        false,
+    );
+    assert!(out.status.success(), "import compile: {}", String::from_utf8_lossy(&out.stderr));
+    let undef = elf64_undefined_symbols(&fs::read(dir.join("wuse.o")).unwrap());
+    assert!(undef.iter().any(|s| s == "_ZN6Widget3getEv"), "成员调用按 mangled 引用: {:?}", undef);
+    let exit = host_link_objects_and_run(
+        &dir.join("wrun"),
+        &[&dir.join("wmod.o"), &dir.join("wuse.o")],
+        true,
+    );
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(exit, 0, "Widget::get 与全局 get 不得相互冲突");
+}
+
+#[test]
+#[cfg(unix)]
 fn cpp_odr_conflict_rejected() {
-    // M26.5: 两个模块导出同名 `foo` 但定义 (签名) 不同, 同时 import 二者
-    // 时 driver 必须报 E0103 ODR violations, 而不是静默生成代码.
+    // M26.5/M28.6: 两个模块导出**同一链接身份但定义不同**的实体, 同时 import
+    // 二者时 driver 必须报 E0103 ODR violations, 而不是静默生成代码.
+    //
+    // 为什么改夹具: M28.6 把 ODR 比较键从源名切到 mangled 链接名后,
+    // 旧形式 (`int foo()` vs `int foo(int)`) 是 `_Z3foov` / `_Z3fooi` ——
+    // 两个不同的合法重载实体, 不该被拒 (见下面 cpp_odr_overload_not_conflict).
+    // 现在用两种真实 ODR 违例:
+    //   1) 同名同类 `Point` 但**布局不同** (字段数不同 -> 对象尺寸不同);
+    //   2) 同名同模板形参表 `Box<T>` 但**定义体不同** (M28.4 随 `E T` 带走原文,
+    //      因而可比较). Itanium 不把返回类型编进 mangled 名, 同名的两个
+    //      实体只能靠签名/布局文本才能区分.
+    //
+    // g++ -std=c++20 -fmodules-ts 对照: 同名类不同布局的两模块同时 import
+    // 仍编译通过 (exit 0) —— g++ 不做这项检查, dcc 按任务书要求主动报 E0103
+    // (比 g++ 更严, 不会误拒合法程序: 参照下面 cpp_odr_overload_not_conflict).
     let dir = std::env::temp_dir().join(format!("dcc-odr-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
 
-    // 模块 A: foo() 返回 int
-    fs::write(dir.join("moda.cpp"), "export module moda;\nexport int foo() { return 1; }\n")
-        .unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-c", "-o"])
-        .arg(dir.join("moda.o"))
-        .arg(dir.join("moda.cpp"))
-        .arg(format!("--emit-module-file={}", dir.join("moda.bmf").display()))
-        .output()
-        .expect("run dcc on moda");
-    assert!(out.status.success(), "moda: {}", String::from_utf8_lossy(&out.stderr));
+    let compile_module = |name: &str, src: &str| {
+        let sp = dir.join(format!("{}.cpp", name));
+        fs::write(&sp, src).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["-c", "-o"])
+            .arg(dir.join(format!("{}.o", name)))
+            .arg(&sp)
+            .arg(format!("--emit-module-file={}", dir.join(format!("{}.bmf", name)).display()))
+            .output()
+            .expect("run dcc on module");
+        assert!(out.status.success(), "{}: {}", name, String::from_utf8_lossy(&out.stderr));
+    };
 
-    // 模块 B: foo(int) 接受参数, 与模块 A 的 foo 同名不同定义
-    fs::write(
-        dir.join("modb.cpp"),
-        "export module modb;\nexport int foo(int x) { return x; }\n",
-    )
-    .unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-c", "-o"])
-        .arg(dir.join("modb.o"))
-        .arg(dir.join("modb.cpp"))
-        .arg(format!("--emit-module-file={}", dir.join("modb.bmf").display()))
-        .output()
-        .expect("run dcc on modb");
-    assert!(out.status.success(), "modb: {}", String::from_utf8_lossy(&out.stderr));
+    // 模块 A: Point{int x} / Box<T>{T v}
+    compile_module(
+        "moda",
+        "export module moda;\nexport class Point {\npublic:\n    int x;\n};\n\
+         export template<class T> struct Box { T v; };\n",
+    );
+    // 模块 B: 同名但布局/定义体都不同
+    compile_module(
+        "modb",
+        "export module modb;\nexport class Point {\npublic:\n    int x;\n    int y;\n};\n\
+         export template<class T> struct Box { T v; int pad; };\n",
+    );
 
     // 导入 TU 同时 import moda + modb -> ODR 冲突必须被拒绝
     fs::write(dir.join("main.cpp"), "import moda;\nimport modb;\nint main() { return 0; }\n")
@@ -12154,9 +13904,58 @@ fn cpp_odr_conflict_rejected() {
     let _ = fs::remove_dir_all(&dir);
     assert!(!out.status.success(), "cpp_odr_conflict_rejected should be rejected");
     let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("E0103"), "stderr: {}", stderr);
     assert!(stderr.contains("ODR violations"), "stderr: {}", stderr);
-    assert!(stderr.contains("foo"), "stderr: {}", stderr);
+    // 布局不同的类与定义体不同的模板都要被点出来
+    assert!(stderr.contains("Point"), "stderr: {}", stderr);
+    assert!(stderr.contains("Box"), "stderr: {}", stderr);
     assert!(stderr.contains("moda") && stderr.contains("modb"), "stderr: {}", stderr);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_odr_overload_not_conflict() {
+    // M28.6: ODR 检测随 mangling 调整 —— `foo()` 与 `foo(int)` 分属两个
+    // 模块时不再“撞名”, 因为比较键是 mangled 链接名 (`_Z3foov` vs `_Z3fooi`).
+    // 同时验证两个模块的发射符号名就是 mangled 名 (类名前缀不丢).
+    // g++ -std=c++20 -fmodules-ts 对照: 同一夹具三 TU 全部编译通过 (exit 0).
+    let dir = std::env::temp_dir().join(format!("dcc-odr-ovl-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+
+    let compile_module = |name: &str, src: &str| {
+        let sp = dir.join(format!("{}.cpp", name));
+        fs::write(&sp, src).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["-c", "-o"])
+            .arg(dir.join(format!("{}.o", name)))
+            .arg(&sp)
+            .arg(format!("--emit-module-file={}", dir.join(format!("{}.bmf", name)).display()))
+            .output()
+            .expect("run dcc on module");
+        assert!(out.status.success(), "{}: {}", name, String::from_utf8_lossy(&out.stderr));
+    };
+
+    compile_module("moda", "export module moda;\nexport int foo() { return 1; }\n");
+    compile_module("modb", "export module modb;\nexport int foo(int x) { return x; }\n");
+    let a_bmf = fs::read_to_string(dir.join("moda.bmf")).unwrap();
+    let b_bmf = fs::read_to_string(dir.join("modb.bmf")).unwrap();
+    assert!(a_bmf.contains("int _Z3foov()"), "{}", a_bmf);
+    assert!(b_bmf.contains("int _Z3fooi(int)"), "{}", b_bmf);
+
+    fs::write(dir.join("main.cpp"), "import moda;\nimport modb;\nint main() { return 0; }\n")
+        .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "-o"])
+        .arg(dir.join("main.o"))
+        .arg(dir.join("main.cpp"))
+        .output()
+        .expect("run dcc on import TU");
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "重载不得误判为 ODR 冲突: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
@@ -12468,16 +14267,16 @@ fn pie_builtin_linker_emits_interp_segment() {
     );
 }
 
-/// C++ 模板 vector: 验证 std::vector<int> 模板实例化能编译通过
+/// C++ 模板 vector: 验证 std::vector<int> 实例化路径真正工作
 #[test]
-#[ignore = "TODO: native path needs runtime/stdlib support"]
-/// C++ 模板 vector: 简化为 compile-only smoke test
 fn cpp_template_vector_int_instantiation() {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-cpp-vec-int-{}.cpp", std::process::id()));
     let asm_path = dir.join(format!("dcc-cpp-vec-int-{}.s", std::process::id()));
-    // stdlib 头文件由 dcc++ 自动包含，无需显式 #include
+    // M51: dcc 只把 src/cpp/stdlib/headers 加进 include 搜索路径, 不会预包含,
+    // 所以必须像真实 C++ 一样写 `#include <vector>` (g++ 同样要求).
     let source = "\
+#include <vector>
 int main() {
     std::vector<int> v;
     int x = 42;
@@ -12486,16 +14285,30 @@ int main() {
 }
 ";
     fs::write(&source_path, source).expect("write C++ fixture");
-    let _output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-S", "-o"])
         .arg(&asm_path)
         .arg(&source_path)
         .output()
         .expect("run dcc");
+    let asm = fs::read_to_string(&asm_path).unwrap_or_default();
     let _ = fs::remove_file(&source_path);
     let _ = fs::remove_file(&asm_path);
-    // Compile-only: verify compilation succeeds without asserting template instantiation details
-    // The actual vector<T> instantiation engine is still TODO (Phase 3)
+    assert!(
+        output.status.success(),
+        "std::vector<int> + push_back 编译失败: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // 真实断言: 类模板确实被单态化成具体类, 且成员 push_back 也进入了产出.
+    // (实例化类名形式见 template::instantiated_class_name)
+    assert!(
+        asm.contains("__dcc_template_vector_int"),
+        "未生成 std::vector<int> 的单态化类符号, 实例化路径未打通:\n{asm}"
+    );
+    assert!(
+        asm.contains("push_back"),
+        "成员函数 push_back 未被实例化/发射:\n{asm}"
+    );
 }
 
 /// C++ 模板 vector: 验证 vector 头文件声明为模板类 (compile-only)
@@ -15407,31 +17220,20 @@ fn windows_darwin_triple_object_format() {
 // ====== Semantic run tests: enum + type traits ======
 #[test]
 #[cfg(unix)]
-#[ignore = "TODO: native path needs runtime/stdlib support"]
-/// Semantic enum: type traits runtime - compile-only smoke test
+/// Semantic enum: type traits runtime - 链接 + 运行, 逐条校验枚举类型属性.
+///
+/// 升级背景: 本测试原本只 compile-only + #[ignore] ("enum type traits runtime
+/// 仍 TODO"). 夹具 tests/fixtures/cpp/semantic_run.cpp 现在把 underlying_type /
+/// is_enum 退化成整数、底层类型尺寸与符号性、枚举量作数组维度等语义都写成
+/// 运行期断言 (错一个就返回非 0), 因此与 cpp_enum_semantics_runtime 同构:
+/// dcc -c -> host gcc 链接 -> 运行必须 exit 0.
 fn semantic_enum_type_traits_runtime() {
     // Semantic run test: enum values, scoped enum, sizeof type properties
     let src = include_str!("fixtures/cpp/semantic_run.cpp");
     let (out, obj) = run_cpp_object_test("semantic-enum-runtime", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
-    let _ = fs::remove_file(obj);
-    // Compile-only: verify compilation succeeds without linking/running
-    // The actual enum type traits runtime support is still TODO
-}
-
-// ====== Coroutine co_await smoke test ======
-#[test]
-#[cfg(unix)]
-#[ignore = "TODO Phase 2: implement promise object + awaitable protocol (current: compile-only smoke test)"]
-fn cpp_coroutine_co_await_runtime() {
-    // Coroutine co_await state machine runtime test
-    // Verifies: co_await suspends and resumes correctly
-    // dcc -c + host gcc link + execute
-    let src = include_str!("fixtures/cpp/coroutine_co_await.cpp");
-    let (out, obj) = run_cpp_object_test("cpp-coroutine-coawait-runtime", src);
-    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let dir = std::env::temp_dir();
-    let exe = dir.join(format!("dcc-cpp-coroutine-coawait-runtime-{}", std::process::id()));
+    let exe = dir.join(format!("dcc-semantic-enum-runtime-{}", std::process::id()));
     let link = std::process::Command::new("gcc")
         .arg(&obj)
         .arg("-o")
@@ -15441,7 +17243,7 @@ fn cpp_coroutine_co_await_runtime() {
     assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
     let run = std::process::Command::new(&exe)
         .output()
-        .expect("run coroutine binary");
+        .expect("run semantic enum binary");
     let _ = fs::remove_file(obj);
     let _ = fs::remove_file(&exe);
     assert!(
@@ -15450,6 +17252,39 @@ fn cpp_coroutine_co_await_runtime() {
         run.status.code(),
         String::from_utf8_lossy(&run.stderr)
     );
+}
+
+// ====== Coroutine co_await runtime: promise + awaiter 协议 ======
+#[test]
+#[cfg(unix)]
+fn cpp_coroutine_co_await_runtime() {
+    // co_await 真挂起/真恢复: 夹具用一个把事件序列压成十进制指纹的 awaiter,
+    // 因此 `trace` 单个整数就唯一固定了协议钩子的调用次序与次数:
+    //   initial_suspend 挂起 => ramp 不执行主体; promise::await_transform 把 co_await
+    //   操作数转成 awaiter; await_ready 为真 => 跳过 await_suspend 但当次仍调
+    //   await_resume 并继续往下跑; await_ready 为假 => 调 await_suspend 后精确挂起;
+    //   awaiter 携带的帧内累加器指针跨挂起点存活; co_return 值经 return_value 落帧,
+    //   final_suspend 挂起即 done. 退出码与 g++ -std=c++20 逐条对照.
+    //
+    // 夹具故意包含**两个共用同一 promise_type 的协程函数** (awaitable / second) 并
+    // 交错驱动: 本实现的帧模型是"帧 == promise 对象", handle 只能按 promise 类型找
+    // 入口, 所以状态机归属必须经帧内 `dcc_coro_fn` 标签路由. 只写一个协程函数时这条
+    // 路径整块不被覆盖, 而两帧的状态号一旦串扰就会当场错轨迹/错 done.
+    let src = include_str!("fixtures/cpp/coroutine_co_await.cpp");
+    cpp_coroutine_cross_check("cpp-coroutine-coawait-runtime", src);
+}
+
+// ====== Coroutine shared promise: 多协程函数共用 promise_type 的帧归属路由 ======
+#[test]
+#[cfg(unix)]
+fn cpp_coroutine_shared_promise_runtime() {
+    // 帧 == promise 对象 → 一个 promise 类只有一份帧布局, 而 handle 只能按 promise
+    // 类型找入口. 夹具用 a(int)/b(int)/c() 三个共用同一 promise_type 的协程函数 (其中
+    // a/b 带循环回边 => 各自 ≥10 臂) 轮转驱动 30 轮, 逐条断言每个帧的最后产出值/
+    // 成功推进次数/累加指纹, 以及终态后重复驱动不再推进 —— 归属标签一旦接错, 跳板
+    // 会把帧送到别人的状态机, 这三组指纹立即不一致. 退出码与 g++ -std=c++20 对照.
+    let src = include_str!("fixtures/cpp/coroutine_shared_promise.cpp");
+    cpp_coroutine_cross_check("cpp-coroutine-shared-promise-runtime", src);
 }
 
 // ====== GNU hash / EH frame hdr deep content validation ======
@@ -21091,12 +22926,39 @@ fn c23_attributes_compile_and_run() {
 /// Phase 5.1: C++98 iostream - clog and ws manipulator
 #[test]
 #[cfg(unix)]
-#[ignore = "TODO: native path needs runtime/stdlib support"]
 fn cpp98_iostream_clog_ws_compile() {
+    // 不只是能编译: 链成可执行文件并运行, 验证夹具里每一个独立失败分支
+    // (clog 链式写入 / cerr 与 clog 不合并 / ws+ignore+peek+get 消耗前导空白 /
+    // istream 成员函数 / 三个标准流互不相同) 都返回 0。
+    // 历史缺陷: `std::cin >> x` 把 x 的**值**(0) 当地址传给 `>>`(void*&) 形参,
+    // 于是 `&x` 被写坏 -> SIGSEGV (exit 139); 引用 ABI 修复后才稳定返回 0。
     let src = include_str!("fixtures/cpp/iostream_basic.cpp");
     let (out, obj) = run_cpp_object_test("cpp98-iostream", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let dir = std::env::temp_dir();
+    let exe = dir.join(format!("dcc-cpp98-iostream-{}", std::process::id()));
+    // 必须用 g++ 链接: 函数局部 static 流对象 emit 了 `__cxa_guard_acquire`/`__cxa_guard_release`
+    // (Itanium C++ ABI 的正确形式), 它们由 libstdc++ 提供。
+    let link = std::process::Command::new("g++")
+        .arg(&obj)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("host g++ link");
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
+    // 夹具不向 stdout 写任何东西 (以便与 g++ 逐字节对照), stdin 给空输入。
+    let run = std::process::Command::new(&exe)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run cpp98-iostream binary");
     let _ = fs::remove_file(obj);
+    let _ = fs::remove_file(&exe);
+    assert!(
+        run.status.success(),
+        "run: exit={:?} stderr={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
 
 /// Phase 5.2: C++98/11 implicit destructor noexcept
@@ -21109,15 +22971,41 @@ fn cpp98_dtor_implicit_noexcept_compile() {
     let _ = fs::remove_file(obj);
 }
 
-/// Phase 5.3: C++98 iterator_traits and iterator category tags
+/// Phase 5.2/5.3: C++98 iterator_traits and iterator category tags
 #[test]
 #[cfg(unix)]
-#[ignore = "TODO: native path needs runtime/stdlib support"]
 fn cpp98_iterator_traits_compile() {
+    // 不只是能编译: 链成可执行文件并运行, 让 traits 的**嵌套依赖成员类型**
+    // (iterator_traits<I>::category_type/value_type/difference_type) 在运行期
+    // 真的参与完成正确的重载/循环/标签选择 —— 夹具里 16 个独立错误退出码,
+    // 任何一个解析错都会返回非 0, 所以不会空过。
+    // 历史缺陷: `typename T::type` 被当作值类型而非类型; 成员模板指针偏特化
+    // (`CharPtrTraits : iterator_traits<char*>`) 的模板参数实参丢失 -> 偏特化
+    // 不匹配 -> 嵌套名解不开。
     let src = include_str!("fixtures/cpp/iterator_traits.cpp");
     let (out, obj) = run_cpp_object_test("cpp98-iterator-traits", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let dir = std::env::temp_dir();
+    let exe = dir.join(format!("dcc-cpp98-iterator-traits-{}", std::process::id()));
+    let link = std::process::Command::new("g++")
+        .arg(&obj)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("host g++ link");
+    assert!(link.status.success(), "link: {}", String::from_utf8_lossy(&link.stderr));
+    let run = std::process::Command::new(&exe)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run cpp98-iterator-traits binary");
     let _ = fs::remove_file(obj);
+    let _ = fs::remove_file(&exe);
+    assert!(
+        run.status.success(),
+        "run: exit={:?} stderr={}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
 
 /// Phase 6.5: C++11 using type alias (using Name = Type;)
@@ -22084,7 +23972,7 @@ fn riscv64_cross_call_preserves_ra() {
             .arg("-o")
             .arg(&start_o)
             .status()
-            .map_or(false, |s| s.success()),
+            .is_ok_and(|s| s.success()),
         "as failed"
     );
 
@@ -22106,7 +23994,7 @@ fn riscv64_cross_call_preserves_ra() {
     let mut ld = Command::new("riscv64-linux-gnu-ld");
     ld.arg("-static").arg("--no-warn-mismatch");
     ld.arg(&start_o).arg(&obj_f).arg("-o").arg(&exe);
-    assert!(ld.status().map_or(false, |s| s.success()), "cross link failed");
+    assert!(ld.status().is_ok_and(|s| s.success()), "cross link failed");
 
     let st = Command::new("qemu-riscv64-static")
         .arg(&exe)
@@ -22121,4 +24009,319 @@ fn riscv64_cross_call_preserves_ra() {
     // WORKS CORRECTLY. TODO: Either implement .riscv attrs emission in dcc,
     // or accept objdump disassembly as proof-of-correctness for now.
     let _rc = st.code().unwrap_or(-1);
+}
+
+// ====== x86_64 后端缺陷清单收口 (缺陷 1-8) 的运行期对照 ======
+// 每条测试都指向一个真实失效形态, 夹具名即缺陷类别; 严禁在编译器或本文件
+// 按夹具名特判 (根因修复 + 单一真源, 见各实现处注释)。
+
+/// 缺陷 1: C++ switch 下降按 `starts_with("case_<v>")` 匹配块名, ≥10 个 case 时
+/// `case_1` 会命中 `case_11` 的块 (HashMap 迭代序决定命中哪一个, 故随机错编译)。
+/// 夹具含 0..19 共 20 个 case 与跨 2^31 的乘加, 逐字节对照 g++。
+#[test]
+#[cfg(unix)]
+fn cpp_switch_case_prefix_exact_gcc_cross_check() {
+    let src = include_str!("fixtures/cpp/switch_case_prefix_exact.cpp");
+    cpp_gcc_cross_check("cpp-switch-case-prefix-exact", src);
+}
+
+/// 缺陷 2: C++ native `long` 乘加跨 2^31 被按 32 位截断
+/// (`long fp = 103060990L; fp = fp * 100 + -10;` 得负数)。
+#[test]
+#[cfg(unix)]
+fn cpp_long_mul_wide_const_gcc_cross_check() {
+    let src = include_str!("fixtures/cpp/long_mul_wide_const.cpp");
+    cpp_gcc_cross_check("cpp-long-mul-wide-const", src);
+}
+
+/// 缺陷 3: `long double` 参与整型隐式转换缺失 (`int r = 2030 + 12.0L;` 得 0,
+/// 显式 `(int)` 却正确) —— 隐式转换与显式转换必须是同一条 80-bit 值模型臂。
+#[test]
+#[cfg(unix)]
+fn c_ld_implicit_truncate_gcc_cross_check() {
+    let src = include_str!("fixtures/c/ld_implicit_truncate.c");
+    let rc = run_gcc_cross_check("c-ld-implicit-truncate", src);
+    assert_eq!(rc, 0, "ld_implicit_truncate: 每条断言对应一个 return 值");
+}
+
+/// 缺陷 4: static 存储期聚合按值传参时读出的是对象地址的前几个字节
+/// (`static big x = {"abc"}; g(x, "z")` 里 callee 看到指针字节)。
+#[test]
+#[cfg(unix)]
+fn c_static_agg_by_value_gcc_cross_check() {
+    let src = include_str!("fixtures/c/static_agg_by_value.c");
+    let rc = run_gcc_cross_check("c-static-agg-by-value", src);
+    assert_eq!(rc, 0, "static_agg_by_value: 每条断言对应一个 return 值");
+}
+
+/// 缺陷 5: 聚合形参跨寄存器/栈边界拆分放置错 (5 个 int 之后的聚合被整体推到栈上,
+/// 或前半进 rdi 后半留在栈, callee 按同一错误布局读回 → f={1,0} g=0)。
+#[test]
+#[cfg(unix)]
+fn c_agg_param_reg_stack_split_gcc_cross_check() {
+    let src = include_str!("fixtures/c/agg_param_reg_stack_split.c");
+    let rc = run_gcc_cross_check("c-agg-param-reg-stack-split", src);
+    assert_eq!(rc, 0, "agg_param_reg_stack_split: 每条断言对应一个 return 值");
+}
+
+/// 缺陷 6: 全局二维数组索引塌缩 (`static long long e[10][2]` 的每一行都读出
+/// e[9] —— 行 stride 被按元素类型宽度而非行宽度算)。
+#[test]
+#[cfg(unix)]
+fn c_array2d_global_stride_gcc_cross_check() {
+    let src = include_str!("fixtures/c/array2d_global_stride.c");
+    let rc = run_gcc_cross_check("c-array2d-global-stride", src);
+    assert_eq!(rc, 0, "array2d_global_stride: 每条断言对应一个 return 值");
+}
+
+/// 缺陷 8 (后端轴): 多 quad 聚合值装载漏第二字 —— >16 字节的聚合值加载只搬
+/// 第一个 16 字节, 第二个 quad 丢失 (协程 awaiter >8 字节因此被长期禁止)。
+#[test]
+#[cfg(unix)]
+fn c_agg_wide_value_load_gcc_cross_check() {
+    let src = include_str!("fixtures/c/agg_wide_value_load.c");
+    let rc = run_gcc_cross_check("c-agg-wide-value-load", src);
+    assert_eq!(rc, 0, "agg_wide_value_load: 每条断言对应一个 return 值");
+}
+
+/// 缺陷 7: `_Complex float` / `_Complex double` 与 gcc 不互操作。
+/// SysV ABI 3.2.3 把它们分类为 [Sse] (两个 float 打包进一个 eightbyte) 与
+/// [Sse, Sse], 旧实现一刀切成 Memory。这里用**跨 TU 混合链接**做真判据:
+/// provider 与 consumer 各由 gcc 或 dcc 编译, 四种组合的 stdout 必须逐字节一致。
+/// 覆盖面: 恒等搬运、分量转换 float↔double、整型→复数隐式转换 (return / 实参
+/// 两个上下文)、7 个整型形参之后的 SSE 对、callee 内取地址回读、跨 TU 全局复数
+/// 数组、函数指针返回复数、复数聚合整体赋值。
+#[test]
+#[cfg(unix)]
+fn c_complex_component_conv_cross_tu_gcc_interop() {
+    let provider = include_str!("fixtures/c/complex_component_conv_provider.c");
+    let consumer = include_str!("fixtures/c/complex_component_conv_consumer.c");
+    let rc = run_gcc_two_tu_cross_check("c-complex-component-conv", provider, consumer);
+    assert_eq!(rc, 0, "complex_component_conv: 夹具内 bad 计数即退出码");
+}
+
+/// 缺陷 8 (C++ 协程轴): awaiter 槽尺寸限制 ≤8 字节。根因是降级器把帧槽拷进
+/// step 函数的局部量并在副本上调三个协议钩子, 违反 [basic.coro.await] 的
+/// "三钩子同一对象" —— `await_suspend` 对 awaiter 自身字段的写随臂消失。
+/// 夹具用 24/32 字节 awaiter (第二对 quad 正是后端装载轴) 改写自身分量并在
+/// `await_resume` 校验, 三个协程交错驱动, 逐字节对照 g++。
+#[test]
+#[cfg(unix)]
+fn cpp_coroutine_fat_awaiter_slot_run() {
+    let src = include_str!("fixtures/cpp/coroutine_fat_awaiter_slot.cpp");
+    cpp_coroutine_cross_check("cpp-coroutine-fat-awaiter-slot", src);
+}
+
+/// C++ 前端缺陷: 一条声明里的多个 init-declarator 不支持 ([dcl.dcl]/[stmt.pre]).
+/// 根因: `parse_local_var_decl` 只解析**一个** declarator, 遇到 `,` 就落到失败
+/// 路径, `parse_body` 的容错把整段原文塞进 `CppStmt::OpaqueStmt`; 全局路径同样
+/// 抛 "unsupported opaque declaration"。现在一条声明 = 共享 decl-specifier
+/// (`DeclSpec`) + init-declarator 列表 (`InitDeclarator`), 指针/引用/数组层级
+/// 归每个 declarator 自己 ([dcl.name]: `int *p, q;` 的 q 是 int)。
+/// 五个夹具分别锁住五条路径: 函数体局部 / for-init / 全局 / 函数内 static /
+/// 类成员。退出码必须与 g++ -std=c++20 真值相等 (夹具内 `return N` 逐条对应验证点)。
+#[test]
+#[cfg(unix)]
+fn cpp_multi_declarator_local() {
+    // 局部声明: 带初值 / 无初值 / 指针混合 `int *p, q = 6;` (q 必须是 int)。
+    let src = include_str!("fixtures/cpp/multi_declarator_local.cpp");
+    cpp_std20_exit_code_cross_check("cpp-multi-declarator-local", src);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_multi_declarator_for_init() {
+    // for-init 只能是**单个** declaration-statement ([stmt.init]), 所以
+    // `for (int i = 0, j = n - 1; i < j; i++, j--)` 必须作为一条语句降级。
+    let src = include_str!("fixtures/cpp/multi_declarator_for_init.cpp");
+    cpp_std20_exit_code_cross_check("cpp-multi-declarator-for-init", src);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_multi_declarator_global() {
+    // 全局声明按 declarator 展开成 N 个 `CppDecl::GlobalVar`, 每个对象独立、
+    // 类型正确 (含 const / static / volatile)。
+    let src = include_str!("fixtures/cpp/multi_declarator_global.cpp");
+    cpp_std20_exit_code_cross_check("cpp-multi-declarator-global", src);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_multi_declarator_static_local() {
+    // `static int a = 1, b = 2;` —— 共享 static 存储期, 但每个对象各自只做
+    // 一次线程安全初始化 ([stmt.dcl]), 跨调用各保留各的值。
+    let src = include_str!("fixtures/cpp/multi_declarator_static_local.cpp");
+    cpp_std20_exit_code_cross_check("cpp-multi-declarator-static-local", src);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_multi_declarator_member() {
+    // 类成员声明展开成 N 个字段 (旧行为: 只留第一个名字, `m_b` 静默消失 ->
+    // "member 'm_b' not found"), 外加成员函数体内的多 declarator。
+    let src = include_str!("fixtures/cpp/multi_declarator_member.cpp");
+    cpp_std20_exit_code_cross_check("cpp-multi-declarator-member", src);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_multi_declarator_typedef() {
+    // `typedef int C, *P;` 同属「decl-specifier + init-declarator 列表」:
+    // 必须展开成两个别名, 且指针/数组层级只属于各自的 declarator。
+    let src = include_str!("fixtures/cpp/multi_declarator_typedef.cpp");
+    cpp_std20_exit_code_cross_check("cpp-multi-declarator-typedef", src);
+}
+
+// ===== M54: C++ 嵌套循环 SSA→AST 重建栈溢出根因回归 =====
+// 旧缺陷: `rebuild_bb` 在循环内模式下不识别嵌套内层循环的 header (回边被
+// 当普通边递归), 任意两层 for/while 嵌套的 C++ 程序无限互递归直到栈溢出;
+// 修后又暴露出单 latch 循环体收集漏掉 `continue` 分支区域的第二层根因。
+// 以 `cpp_std20_exit_code_cross_check` 与 g++ -std=c++20 逐用例对照退出码。
+
+#[test]
+#[cfg(unix)]
+fn cpp_nested_for_two_level_run() {
+    // 复现用例本体: 两层 for, 累加结果必须正确 (不只是不崩)。
+    let src = include_str!("fixtures/cpp/nested_for_two_level.cpp");
+    cpp_std20_exit_code_cross_check("cpp-nested-for-two-level", src);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_nested_for_three_level_break_continue_run() {
+    // 三层 for + break/continue (覆盖 continue-latch 区域被误发 break 的缺陷)。
+    let src = include_str!("fixtures/cpp/nested_for_three_level_break_continue.cpp");
+    cpp_std20_exit_code_cross_check("cpp-nested-for-three-level-break-continue", src);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_nested_for_while_and_while_dowhile_run() {
+    // for 嵌套 while、while 嵌套 do-while 的混合循环形状。
+    let src = include_str!("fixtures/cpp/nested_for_while_and_while_dowhile.cpp");
+    cpp_std20_exit_code_cross_check("cpp-nested-for-while-and-while-dowhile", src);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_nested_loop_member_call_run() {
+    // 循环体里调用成员函数: 调用点把真实 CFG 回边撑活, 不会被折叠成直线。
+    let src = include_str!("fixtures/cpp/nested_loop_member_call.cpp");
+    cpp_std20_exit_code_cross_check("cpp-nested-loop-member-call", src);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_nested_loop_deep_stress_run() {
+    // 8 层 for + 6 层混合 + 5 层 while 嵌套 do-while 压力: 确保修复是收敛性
+    // 的, 不是靠循环层数上限报错混过去。
+    let src = include_str!("fixtures/cpp/nested_loop_deep_stress.cpp");
+    cpp_std20_exit_code_cross_check("cpp-nested-loop-deep-stress", src);
+}
+
+#[test]
+#[cfg(unix)]
+fn c_nested_loops_run_gcc_cross_check() {
+    // C 侧同构用例: 根因修复动了两条路径共用的 `find_loop_body`/重建代码,
+    // 用 gcc -O0 退出码 + stdout 逐字节对照证明 C 路径不退化。
+    let src = include_str!("fixtures/c/nested_loops_run.c");
+    let code = run_gcc_cross_check("c-nested-loops-run", src);
+    assert_eq!(code, 0, "C 嵌套循环夹具的所有校验点必须全部通过 (return N 编码失败点)");
+}
+
+// === M54: C++ 路径全局 / 命名空间作用域对象的建模与发射 ===
+
+#[test]
+#[cfg(unix)]
+fn cpp_global_array_dims_and_sizeof_run() {
+    // 缺陷 1+4: 全局数组的**维度**必须进到类型里 (`int g[10]` 的对象尺寸是 40 不是
+    // 4), `sizeof(g)` / `&g[3]-g` 等下标算术常量都依赖它。
+    let src = include_str!("fixtures/cpp/global_array_dims_and_sizeof.cpp");
+    cpp_std20_exit_code_cross_check("cpp-global-array-dims-and-sizeof", src);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_global_array_init_and_access_run() {
+    // 缺陷 1+2+3: 全局数组写入/读回、部分初始化 `{1,2}`、多维聚合、以及
+    // `char s[] = "abc";` 由初值长度推出维度。
+    let src = include_str!("fixtures/cpp/global_array_init_and_access.cpp");
+    cpp_std20_exit_code_cross_check("cpp-global-array-init-and-access", src);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_global_static_initializers_run() {
+    // 缺陷 3: 全局变量的静态初值必须真的发射 (整型/const/constexpr/浮点/负浮点/
+    // 取址初值/数组衰减/结构体聚合对象), 不能落进 .bss 读回 0。
+    let src = include_str!("fixtures/cpp/global_static_initializers.cpp");
+    cpp_std20_exit_code_cross_check("cpp-global-static-initializers", src);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_constexpr_call_folds_in_constant_context_run() {
+    // 缺陷 4: constexpr 函数调用必须在常量上下文里编译期求值 —— 数组维度、
+    // `static_assert`、`switch case` 标签、enum 数、局部数组维度。
+    let src = include_str!("fixtures/cpp/constexpr_call_folds_in_constant_context.cpp");
+    cpp_std20_exit_code_cross_check("cpp-constexpr-call-folds-in-constant-context", src);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_namespace_array_and_extern_pairing_run() {
+    // 命名空间作用域数组 (`namespace ns { int a[5]; }`) 的尺寸/下标/初值, 以及
+    // `extern` 声明与后文定义配对成同一个对象 (含不完整数组声明由定义补全维度)。
+    let src = include_str!("fixtures/cpp/global_namespace_array_and_extern.cpp");
+    cpp_std20_exit_code_cross_check("cpp-namespace-array-and-extern-pairing", src);
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_global_object_symbol_sizes_in_object_file() {
+    // 缺陷 1 的**目标文件层**回归: 退出码相等只能证明代码读写一致, 符号表里的
+    // 对象尺寸错了意味着真实内存踩踏 (旧行为: `int g[10]` 发成 4 字节)。
+    // 这里直接卡 `objdump -t` 的 size 字段, 并与 g++ 产物的尺寸逐项对照。
+    let src = "int g[10];\n\
+               int two[2][3];\n\
+               char s[] = \"abc\";\n\
+               double darr[2];\n\
+               struct P { int x; int y; };\n\
+               P parr[3];\n\
+               int main() { return 0; }\n";
+    let want: [(&str, u64); 5] = [("g", 40), ("two", 24), ("s", 4), ("darr", 16), ("parr", 24)];
+    let (out, obj) = run_cpp_object_test("cpp-global-symbol-sizes", src);
+    assert!(out.status.success(), "dcc -c 失败: {}", String::from_utf8_lossy(&out.stderr));
+    let dump = Command::new("objdump")
+        .args(["-t"])
+        .arg(&obj)
+        .output()
+        .expect("objdump -t");
+    let text = String::from_utf8_lossy(&dump.stdout).to_string();
+    let _ = fs::remove_file(&obj);
+    for (name, size) in want {
+        let got = object_symbol_size(&text, name)
+            .unwrap_or_else(|| panic!("符号 {} 未出现在对象文件符号表里:\n{}", name, text));
+        assert_eq!(got, size, "全局对象 `{}` 的发射尺寸应为 {} 字节（维度必须进类型）", name, size);
+    }
+}
+
+/// 从 `objdump -t` 文本里取名为 `name` 的对象符号尺寸。
+#[cfg(unix)]
+fn object_symbol_size(dump: &str, name: &str) -> Option<u64> {
+    dump.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        // 形如: `<value> <l|g|w> <O|DF> <section> <size-hex> <name>`
+        match (fields.first(), fields.last()) {
+            (Some(_), Some(sym)) if *sym == name => {
+                if fields.len() < 5 || fields[2] != "O" {
+                    return None;
+                }
+                let idx = fields.len() - 2;
+                u64::from_str_radix(fields[idx], 16).ok()
+            },
+            _ => None,
+        }
+    })
 }

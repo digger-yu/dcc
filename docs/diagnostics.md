@@ -72,6 +72,7 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 | `E00xx` | 0001–0015 | Parser（语法/声明） | `src/parser.rs` |
 | `W00xx` | 0001–0007 | Parser 警告 | `src/parser.rs`, `src/format_check.rs` |
 | `E01xx` | 0100–0102 | Driver（I/O、汇编） | `src/driver.rs` |
+| `E01xx` | 0103–0104 | C++20 Modules（ODR / 接口缺失） | `src/driver.rs`, `src/cpp/modules.rs` |
 | `E02xx` | 0200–0209 | Preprocessor（`#` 指令） | `src/preproc.rs` |
 | `W02xx` | 0200–0201 | Preprocessor 警告 | `src/preproc.rs` |
 | `E03xx` | 0300–0311 | 目标/代码生成/链接 | `src/driver.rs`, `src/codegen/x86_64.rs`, `src/link/mod.rs` |
@@ -135,21 +136,27 @@ SARIF 输出经 `render_sarif` 统一序列化，消息体走 JSON 转义（`"` 
 
 ---
 
-## 4. Driver：`E0100`–`E0102`、`E0300`–`E0311`
+## 4. Driver：`E0100`–`E0104`、`E0300`–`E0311`
 
-驱动层：读源、写产物、调汇编器、目标选项、代码生成后端。
+驱动层：读源、写产物、调汇编器、目标选项、代码生成后端，以及 C++20 Modules 接口装载/ODR。
 
 | 码 | 消息（典型） | 含义 | 触发条件 | Snapshot |
 |----|--------------|------|----------|----------|
 | **E0100** | `no input file` / `cannot read …` | 输入缺失或不可读 | 无参数（Diagnostic 形式为后者）；打开失败 | `e0100_*` 测试 |
 | **E0101** | `cannot write …` | 写文件失败 | `.o`/`.s`/`.d`/dep 文件写入失败 | `e0101.stderr.snap` |
 | **E0102** | `cannot invoke assembler` / `assembler failed` | 汇编器失败 | 调 `as` 失败或非零退出 | `e0102.stderr.snap` |
+| **E0103** | `C++20 modules: ODR violations detected` | 多个模块接口对同一链接身份给出不同签名/布局 | `import` 集合（含本 TU 自有接口）里出现 同键不同实体 | `cpp_odr_conflict_rejected` |
+| **E0104** | `import of module 'm' failed: no module interface file 'm.bmf' found` | 模块接口文件定位不到（不保留“忽略缺失”逃生门） | `import m;` / `import :part;` 在 `--emit-module-file` 父目录→源文件同目录→`.`→`-I` 均无对应 BMF | `cpp_module_import_not_found_diagnostic` |
 | **E0300** | `floating-point code requires SSE…` | SSE 与浮点代码冲突 | `-mno-sse` 且 TU 含 float/double | `e0300.stderr.snap` |
 | **E0301** | `dcc C backend failed for …` / `cannot write …` | 代码生成后端失败或写输出失败 | dcc C 后端非零退出；输出文件写入失败 | — |
 | **E0310** | `a __global__ function '…' cannot also be __host__ or __device__` | CUDA 函数限定符冲突 | `__global__` 与 `__host__`/`__device__` 同时出现 | — |
 | **E0311** | `unsupported inline asm instruction …` / `… needs …` | mini-asm 编码失败 | 未识别 mnemonic 或已识别指令的不合法操作数 | `mini_asm_*_is_hard_error` 测试 |
 
 **CLI 形式的 E0100**：无输入文件时，`cli.rs` 直接输出 `dcc: error: no input file`（无 `[E0100]`），exit 2。语义等价于 Diagnostic E0100。
+
+**E0103/E0104 的 snapshot 形式**：两者只能由多 TU 模块场景触发（需先 `--emit-module-file` 产出 BMF），
+因此不用 `tests/fixtures/errors/*.c` 单文件快照，而由 `tests/integration.rs` 里的
+`cpp_module*` / `cpp_odr_*` 集成测试直接断言 stderr 文本与退出码。
 
 ---
 

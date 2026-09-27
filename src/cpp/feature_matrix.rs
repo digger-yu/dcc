@@ -174,31 +174,37 @@ impl CppPath {
 
 /// C++ native 模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum CxxNativeMode {
     /// 始终走 legacy 路径
     Off,
     /// 始终走 native 路径，不支持的特性报错
     On,
     /// 优先 native，不支持的特性自动 fallback 到 legacy
+    #[default]
     Auto,
 }
 
-impl Default for CxxNativeMode {
-    fn default() -> Self {
-        // Stage 10: 默认走 Auto，优先 native，不支持的特性自动 fallback 到 legacy
-        Self::Auto
-    }
-}
 
 impl CxxNativeMode {
     /// 从字符串解析
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "off" | "0" => Some(Self::Off),
             "on" | "1" => Some(Self::On),
             "auto" => Some(Self::Auto),
             _ => None,
         }
+    }
+}
+
+/// 标准库 `FromStr` 入口: 与 [`CxxNativeMode::parse`] 同一映射,
+/// 但把无法识别的文本作为 `Err(String)` 回传 (便于 CLI 报错原文).
+impl std::str::FromStr for CxxNativeMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or_else(|| format!("unknown C++ native mode: {s}"))
     }
 }
 
@@ -252,9 +258,12 @@ mod tests {
 
     #[test]
     fn cxx_native_mode_from_str() {
-        assert_eq!(CxxNativeMode::from_str("off"), Some(CxxNativeMode::Off));
-        assert_eq!(CxxNativeMode::from_str("on"), Some(CxxNativeMode::On));
-        assert_eq!(CxxNativeMode::from_str("auto"), Some(CxxNativeMode::Auto));
-        assert_eq!(CxxNativeMode::from_str("bogus"), None);
+        assert_eq!(CxxNativeMode::parse("off"), Some(CxxNativeMode::Off));
+        assert_eq!(CxxNativeMode::parse("on"), Some(CxxNativeMode::On));
+        assert_eq!(CxxNativeMode::parse("auto"), Some(CxxNativeMode::Auto));
+        assert_eq!(CxxNativeMode::parse("bogus"), None);
+        // FromStr 入口与 parse 保持同一映射
+        assert_eq!("1".parse::<CxxNativeMode>().unwrap(), CxxNativeMode::On);
+        assert!("bogus".parse::<CxxNativeMode>().is_err());
     }
 }

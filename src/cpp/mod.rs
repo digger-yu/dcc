@@ -31,7 +31,10 @@
 //!   - lower.rs:  C++ AST → dcc C 风格声明 / 函数
 //!   - feature_degrade.rs: 高级特性降级 (SFINAE / concept / 偏特化 / 协程 / RTTI 等)
 //!   - template.rs: 模板完整单态化 (M26: 类/函数模板实例化 + 缓存)
-//!   - coroutine.rs: 协程真状态机 (M26: Duff's device 挂起/恢复)
+//!   - coroutine.rs: 协程降级 (legacy 字符串模板路径, 非 native 后端)
+//!   - coroutine_lower.rs: C++20 协程 native 降级 (M52: 协程帧 + 挂起点 CFG→状态机
+//!     + promise/awaiter 协议), 在通用 native 管线之前把 co_await/co_yield/co_return
+//!       重写为普通函数 + switch 状态机
 //!   - bmf.rs:      C++20 modules BMF 序列化 (M26: 模块接口文本格式)
 //!   - gcc_compat.rs: GCC ABI 兼容运行时 (M26: __cxa_guard / typeinfo / dynamic_cast)
 //!   - std/:      M11 C++ 标准库 (头 + C 运行时)
@@ -47,7 +50,10 @@
 pub mod abi_layout;
 pub mod adl;
 pub mod bmf;
+pub mod builtins;
+pub mod const_text;
 pub mod coroutine;
+pub mod coroutine_lower;
 pub mod cpp_const_eval;
 pub mod driver;
 pub mod feature_degrade;
@@ -61,6 +67,7 @@ pub mod lower_ir;
 pub mod mangle;
 pub mod modules;
 pub mod native;
+pub mod pack_expand;
 pub mod parser;
 pub mod runtime;
 pub mod sema;

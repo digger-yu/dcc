@@ -6,6 +6,13 @@
 //   - std::format 降级为 snprintf 到 std::string.
 //   - 格式字符串中的 {} 占位符在编译期转换.
 
+// 本头内部把 std::print/std::format 降级为 printf/snprintf 系列, 并用到
+// std::string / size_t, 故必须自己拉进这些声明 (真实 libstdc++ 的 <print>
+// 同样传递依赖 <cstdio>); 否则模板体里的 `printf` 在实例化点就是未声明名.
+#include <cstddef>
+#include <cstdio>
+#include <string>
+
 namespace std {
 
     // format_context: 格式化上下文 (简化)

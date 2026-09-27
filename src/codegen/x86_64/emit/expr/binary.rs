@@ -15,8 +15,8 @@ impl Codegen {
         &mut self,
         e: &Expr,
         op: &BinOp,
-        l: &Box<Expr>,
-        r: &Box<Expr>,
+        l: &Expr,
+        r: &Expr,
         binop_ty: &Type,
         dst: u8,
     ) {
@@ -371,8 +371,8 @@ impl Codegen {
             } else {
                 Self::expr_bitfield_width(r)
             };
-            let r_is_const = matches!(r.as_ref(), Expr::Int { .. });
-            let l_is_const = matches!(l.as_ref(), Expr::Int { .. });
+            let r_is_const = matches!(r, Expr::Int { .. });
+            let l_is_const = matches!(l, Expr::Int { .. });
             // 两个操作数都是位域: 掩码到 max 宽度
             // 一个位域 + 一个常量: 掩码到位域宽度
             // 移位 + 左操作数位域: 掩码到位域宽度

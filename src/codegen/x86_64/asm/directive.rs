@@ -44,6 +44,13 @@ pub struct AsmDirectiveExpander {
     alt_macro: bool,
 }
 
+impl Default for AsmDirectiveExpander {
+    /// 默认状态与 [`AsmDirectiveExpander::new`] 一致: AT&T 语法 / 空宏表 / 非 altmacro.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AsmDirectiveExpander {
     /// Create new directive expander with default settings
     ///
@@ -223,11 +230,12 @@ impl AsmDirectiveExpander {
     /// Some(count) if valid, None otherwise
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust
+    /// use dcc::codegen::x86_64::AsmDirectiveExpander;
     /// assert_eq!(AsmDirectiveExpander::parse_rept(".rept 5"), Some(5));
     /// assert_eq!(AsmDirectiveExpander::parse_rept("mov eax, 1"), None);
     /// ```
-    fn parse_rept(line: &str) -> Option<usize> {
+    pub fn parse_rept(line: &str) -> Option<usize> {
         let t = line.trim();
         let rest = t.strip_prefix(".rept")?;
         let rest = rest.trim();
@@ -243,12 +251,13 @@ impl AsmDirectiveExpander {
     /// Some((symbol_name, value_list))
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust
+    /// use dcc::codegen::x86_64::AsmDirectiveExpander;
     /// let result = AsmDirectiveExpander::parse_irp(".irp x, 1, 2, 3").unwrap();
     /// assert_eq!(result.0, "x");
     /// assert_eq!(result.1, vec!["1", "2", "3"]);
     /// ```
-    fn parse_irp(line: &str) -> Option<(String, Vec<String>)> {
+    pub fn parse_irp(line: &str) -> Option<(String, Vec<String>)> {
         let t = line.trim();
         let rest = t.strip_prefix(".irp")?;
         let rest = rest.trim();
@@ -268,12 +277,13 @@ impl AsmDirectiveExpander {
     /// Some((symbol_name, character_string))
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust
+    /// use dcc::codegen::x86_64::AsmDirectiveExpander;
     /// let result = AsmDirectiveExpander::parse_irpc(".irpc c, ABC").unwrap();
     /// assert_eq!(result.0, "c");
     /// assert_eq!(result.1, "ABC");
     /// ```
-    fn parse_irpc(line: &str) -> Option<(String, String)> {
+    pub fn parse_irpc(line: &str) -> Option<(String, String)> {
         let t = line.trim();
         let rest = t.strip_prefix(".irpc")?;
         let rest = rest.trim();
@@ -292,12 +302,14 @@ impl AsmDirectiveExpander {
     /// Some((macro_name, parameter_names))
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust
+    /// use dcc::codegen::x86_64::AsmDirectiveExpander;
+    /// // GNU as 的宏名区分大小写, 原样返回 (不做任何规范化)
     /// let result = AsmDirectiveExpander::parse_macro_def(".macro add a, b").unwrap();
-    /// assert_eq!(result.0, "ADD");
+    /// assert_eq!(result.0, "add");
     /// assert_eq!(result.1, vec!["a", "b"]);
     /// ```
-    fn parse_macro_def(line: &str) -> Option<(String, Vec<String>)> {
+    pub fn parse_macro_def(line: &str) -> Option<(String, Vec<String>)> {
         let t = line.trim();
         let rest = t.strip_prefix(".macro")?;
         let rest = rest.trim();

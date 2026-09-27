@@ -10,7 +10,7 @@ use crate::codegen::x86_64::Codegen;
 
 impl Codegen {
     /// gen_expr 中 Expr::Assign arm 的搬迁体, 逐字复制, 未改逻辑。
-    pub fn gen_expr_assign(&mut self, l: &Box<Expr>, r: &Box<Expr>, dst: u8) {
+    pub fn gen_expr_assign(&mut self, l: &Expr, r: &Expr, dst: u8) {
         // 检测 compound assignment 模式: Assign { l: target, r: Binop { l: read, r: rhs } }
         // 其中 target 和 read 结构相同 (由 parser desugaring 产生).
         // 如果 lvalue 含副作用 (如 *--ptr += 1), 必须只求值一次.
@@ -20,7 +20,7 @@ impl Codegen {
             op: binop_op,
             r: ref binop_r,
             ..
-        } = **r
+        } = *r
         {
             // 检测 compound pattern: target 和 binop 的某个操作数结构相同
             // 注意: parser 对可交换运算符会交换操作数 (RHS 在左, read 在右)
@@ -43,7 +43,7 @@ impl Codegen {
         // sanitizer 插桩可能把 LHS 包成 Comma(check, lvalue):
         // 先执行 check 调用, 再对真实 lvalue 走 store 路径, 否则
         // 形态匹配失败会导致 store 静默丢失 (KASAN 下 *p = v 空操作)
-        let mut lv: &Expr = l.as_ref();
+        let mut lv: &Expr = l;
         while let Expr::Comma {
             l: check, r: inner, ..
         } = lv
@@ -64,7 +64,7 @@ impl Codegen {
             // 与向量临时槽基址不是一个地方)。无条件按向量临时槽读源会把
             // 装载器填好的值用错误源整体覆盖, 故先按约定把真源压栈,
             // 取完 LHS 地址 (会覆写 rax) 再弹出作 rsi。
-            let rax_is_agg_addr = match &**r {
+            let rax_is_agg_addr = match r {
                 Expr::VaArg { ty, .. } => Self::va_arg_result_in_memory(ty),
                 _ => false,
             };
@@ -116,7 +116,7 @@ impl Codegen {
                         | Type::Array(_, ArraySize::Const(_))
                         | Type::Atomic(_)
                         | Type::Vector(_, _)
-                ) && (sz > 8 || matches!(r.as_ref(), Expr::CompoundLit { .. }) || l_ty.has_vla());
+                ) && (sz > 8 || matches!(r, Expr::CompoundLit { .. }) || l_ty.has_vla());
             if is_aggregate {
                 // struct/array 整体赋值: 逐块拷贝
                 self.gen_aggregate_assign(&name.name, l_ty, r);
@@ -162,9 +162,7 @@ impl Codegen {
                 // integer but LHS is float (e.g. `ping = 0;`).
                 // The integer result sits in eax; convert it to
                 // xmm0 before gen_float_store.
-                if matches!(l_ty, Type::Float | Type::Double)
-                    && Self::is_integer_type(&r_ty)
-                {
+                if matches!(l_ty, Type::Float | Type::Double) && Self::is_integer_type(&r_ty) {
                     self.emit_scalar_to_xmm0_if_needed(r, l_ty);
                 }
                 // 赋值表达式的值是左值转换后的值 (C11 6.5.16p3),
@@ -270,21 +268,10 @@ impl Codegen {
                 is_nested: self.current_func_is_nested,
             };
 
-            // 嵌套运行时索引: 退回旧路径 (语义层会丢失第二个运行时偏移)
-            let is_nested_runtime_index = matches!(arr.as_ref(), Expr::Index { .. })
-                && crate::const_eval::eval(idx).is_err()
-                && match arr.as_ref() {
-                    Expr::Index { idx: inner_idx, .. } => {
-                        crate::const_eval::eval(inner_idx).is_err()
-                    },
-                    _ => false,
-                };
-
-            let desc = if !is_nested_runtime_index {
-                Some(compute_lvalue_address(self, lv, &ctx))
-            } else {
-                None
-            };
+            // 描述符自描述多维下标链 (`ByteOffset::Runtime.terms` 逐项携带
+            // 自己的下标表达式), 旧的「嵌套运行时索引」浅层试探已删除:
+            // 无法表达的形状由 materialize_address 返回 false, 落到下面旧路径。
+            let desc = Some(compute_lvalue_address(self, lv, &ctx));
 
             let es = elem_ty.size() as i32;
 
@@ -471,10 +458,10 @@ impl Codegen {
                 let agg_sz = assign_l_ty.size();
                 // 1. Get source address into rsi
                 let rhs_is_lvalue =
-                    matches!(&**r, Expr::Member { .. } | Expr::Index { .. } | Expr::Deref { .. });
-                let rhs_is_ident = matches!(&**r, Expr::Ident { .. });
-                let rhs_is_compound = matches!(&**r, Expr::CompoundLit { .. });
-                let rhs_is_call = matches!(&**r, Expr::Call { ty: ref cty, .. }
+                    matches!(r, Expr::Member { .. } | Expr::Index { .. } | Expr::Deref { .. });
+                let rhs_is_ident = matches!(r, Expr::Ident { .. });
+                let rhs_is_compound = matches!(r, Expr::CompoundLit { .. });
+                let rhs_is_call = matches!(r, Expr::Call { ty: ref cty, .. }
                             if Self::needs_memory_return(cty));
                 if rhs_is_compound {
                     // CompoundLit: gen_expr builds on stack,
@@ -488,7 +475,7 @@ impl Codegen {
                     self.gen_expr(r, 0);
                     self.mov(6, 0); // rsi = rax (source addr)
                 } else if rhs_is_ident {
-                    if let Expr::Ident { name, .. } = &**r {
+                    if let Expr::Ident { name, .. } = r {
                         if self.is_global_not_local(&name.name) {
                             self.emit_global_addr(6, &name.name);
                         } else {
@@ -546,7 +533,7 @@ impl Codegen {
                 } else {
                     self.gen_expr(r, 0); // rax = val
                     self.pop(1); // rcx = addr
-                    // __seg_gs/__seg_fs 指针存储: 发射段前缀 (%gs:/%fs:)
+                                 // __seg_gs/__seg_fs 指针存储: 发射段前缀 (%gs:/%fs:)
                     if let Some(seg) = seg_prefix {
                         self.emit(&[seg]);
                     }
@@ -791,12 +778,10 @@ impl Codegen {
                     // gen_expr does NOT materialize the struct value in
                     // rax:rdx (struct > 8B has no scalar rvalue). Instead
                     // we must use gen_lvalue_addr to get the address.
-                    let rhs_is_lvalue = matches!(
-                        &**r,
-                        Expr::Member { .. } | Expr::Index { .. } | Expr::Deref { .. }
-                    );
-                    let rhs_is_ident = matches!(&**r, Expr::Ident { .. });
-                    let rhs_is_compound = matches!(&**r, Expr::CompoundLit { .. });
+                    let rhs_is_lvalue =
+                        matches!(r, Expr::Member { .. } | Expr::Index { .. } | Expr::Deref { .. });
+                    let rhs_is_ident = matches!(r, Expr::Ident { .. });
+                    let rhs_is_compound = matches!(r, Expr::CompoundLit { .. });
                     self.push(0); // save target address
                     if rhs_is_lvalue {
                         // Lvalue RHS: get source address directly
@@ -805,7 +790,7 @@ impl Codegen {
                         self.emit(&[0x48, 0x89, 0xC6]); // mov rsi, rax
                     } else if rhs_is_ident {
                         // Ident RHS: struct variable address via LEA
-                        if let Expr::Ident { name, .. } = &**r {
+                        if let Expr::Ident { name, .. } = r {
                             if self.is_global_not_local(&name.name) {
                                 self.emit_global_addr(6, &name.name); // rsi = global addr
                             } else {
@@ -862,37 +847,38 @@ impl Codegen {
                                 self.mov_imm(1, (isz * 2) as i128);
                                 self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
                             } else if matches!(fty, Type::Float | Type::Double | Type::LongDouble) {
-                                self.emit_store_scalar_float_at(&r.ty(), fty, 1); // 单一真源：收浮影子副本
+                                self.emit_store_scalar_float_at(&r.ty(), fty, 1);
+                            // 单一真源：收浮影子副本
                             } else {
                                 match size {
                                     1 => self.emit(&[0x88, 0x01]),
                                     2 => self.emit(&[0x66, 0x89, 0x01]),
                                     4 => self.emit(&[0x89, 0x01]),
+                                    8 => self.emit(&[0x48, 0x89, 0x01]),
+                                    16 => {
+                                        // __int128: rax:rdx → [rcx]:[rcx+8]
+                                        self.emit(&[0x48, 0x89, 0x01]); // mov [rcx], rax
+                                        self.emit(&[0x48, 0x89, 0x51, 0x08]); // mov [rcx+8], rdx
+                                    },
+                                    _ => {},
+                                }
+                            }
+                        } else {
+                            match size {
+                                1 => self.emit(&[0x88, 0x01]),
+                                2 => self.emit(&[0x66, 0x89, 0x01]),
+                                4 => self.emit(&[0x89, 0x01]),
                                 8 => self.emit(&[0x48, 0x89, 0x01]),
                                 16 => {
-                                    // __int128: rax:rdx → [rcx]:[rcx+8]
                                     self.emit(&[0x48, 0x89, 0x01]); // mov [rcx], rax
                                     self.emit(&[0x48, 0x89, 0x51, 0x08]); // mov [rcx+8], rdx
                                 },
                                 _ => {},
                             }
                         }
-                    } else {
-                        match size {
-                            1 => self.emit(&[0x88, 0x01]),
-                            2 => self.emit(&[0x66, 0x89, 0x01]),
-                            4 => self.emit(&[0x89, 0x01]),
-                            8 => self.emit(&[0x48, 0x89, 0x01]),
-                            16 => {
-                                self.emit(&[0x48, 0x89, 0x01]); // mov [rcx], rax
-                                self.emit(&[0x48, 0x89, 0x51, 0x08]); // mov [rcx+8], rdx
-                            },
-                            _ => {},
-                        }
                     }
                 }
             }
-        }
         } else if let Expr::Real { e: ce, .. } | Expr::Imag { e: ce, .. } = lv {
             // __real__/__imag__ 赋值: 写 _Complex 变量的分量.
             // 分量偏移: 实部 0, 虚部 +inner_sz (LongDouble 为 -8-inner_sz)

@@ -54,6 +54,12 @@ pub struct OperandAnalysis {
 /// Smart encoding selector engine
 pub struct SmartEncodingSelector;
 
+impl Default for SmartEncodingSelector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SmartEncodingSelector {
     /// Create new selector instance
     pub fn new() -> Self {
@@ -106,8 +112,7 @@ impl SmartEncodingSelector {
 
         let mut total_score: f64 = 0.0;
 
-        for (_i, (pattern_part, analysis)) in pattern_parts.iter().zip(operands.iter()).enumerate()
-        {
+        for (pattern_part, analysis) in pattern_parts.iter().zip(operands.iter()) {
             let match_score = self.match_operand_type(pattern_part, analysis);
             total_score += match_score;
         }

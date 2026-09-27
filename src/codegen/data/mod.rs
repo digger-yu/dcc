@@ -14,28 +14,44 @@
 //!
 //! ## Usage Example
 //!
-//! ```rust,ignore
-//! use crate::codegen::data::*;
+//! ```rust
+//! use dcc::codegen::data::{
+//!     bytes_to_hex, ByteEmitter, InstructionLoader, OperandAnalysis, SmartEncodingSelector,
+//! };
 //!
-//! // Load all instructions from directory
+//! // Load all instructions from the TOML spec directory
 //! let mut loader = InstructionLoader::new("src/codegen/data/x86_instructions");
-//! let specs = loader.load_all_instructions()?;
+//! let specs = loader.load_all_instructions().expect("load TOML specs");
 //!
 //! // Get specific instruction
-//! let add_instr = specs.get("add").unwrap();
+//! let add_instr = specs.get("add").expect("add.toml exists");
 //!
-//! // Select best encoding for given operands
+//! // Select best encoding for given operands: `add r64, r64`
 //! let selector = SmartEncodingSelector::new();
-//! let analysis = vec![
-//!     OperandAnalysis { op_type: "reg".to_string(), size_bits: Some(64), ... },
-//!     OperandAnalysis { op_type: "reg".to_string(), size_bits: Some(64), ... },
-//! ];
-//! let selected = selector.select_format(add_instr, &analysis)?;
+//! let reg_rw = OperandAnalysis {
+//!     op_type: "reg".to_string(),
+//!     size_bits: Some(64),
+//!     is_readonly: false,
+//!     is_writeonly: true,
+//!     is_readwrite: false,
+//! };
+//! let reg_ro = OperandAnalysis {
+//!     op_type: "reg".to_string(),
+//!     size_bits: Some(64),
+//!     is_readonly: true,
+//!     is_writeonly: false,
+//!     is_readwrite: false,
+//! };
+//! let selected = selector
+//!     .select_format(add_instr, &[reg_rw, reg_ro])
+//!     .expect("reg/reg must match a format");
+//! assert!(selected.confidence > 0.5, "高置信度匹配");
 //!
-//! // Emit actual bytes
+//! // Emit actual bytes and format them as hex text
 //! let emitter = ByteEmitter::new();
-//! let bytes = emitter.emit(&selected)?;
-//! println!("Encoded: {}", bytes_to_hex(&bytes));
+//! let bytes = emitter.emit(&selected).expect("emit machine code");
+//! assert!(!bytes.is_empty(), "至少包含 opcode");
+//! assert!(bytes_to_hex(&bytes).starts_with(&format!("{:02X}", bytes[0])));
 //! ```
 //!
 //! ## TOML vs JSON Migration

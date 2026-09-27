@@ -10,14 +10,62 @@
 //! 设计原则: 实例化 = 纯 AST 变换, 不依赖 lower 上下文;
 //! 隐式推导需要调用点类型信息, 由 lower 计算好实参类型后调用.
 
+use crate::cpp::feature_degrade::SfinaeCtx;
 use crate::cpp::mangle::MangleType;
-use crate::cpp::parser::{ClassDecl, CppBody, CppDecl, CppExpr, CppStmt, SizeofArg, TemplateArgs};
+use crate::cpp::parser::{
+    ClassDecl, CppBody, CppDecl, CppExpr, CppStmt, DeclSpec, InitDeclarator, SizeofArg,
+    TemplateArgs,
+};
+
+/// 按字节切分顶层模板实参列表 (逗号在 `<>` / `()` 内不算分隔符)
+fn split_template_args(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, b) in text.bytes().enumerate() {
+        match b {
+            b'<' | b'(' | b'[' => depth += 1,
+            b'>' | b')' | b']' => depth -= 1,
+            b',' if depth == 0 => {
+                out.push(text[start..i].to_string());
+                start = i + 1;
+            },
+            _ => {},
+        }
+    }
+    let last = text[start..].to_string();
+    if !last.trim().is_empty() || !out.is_empty() {
+        out.push(last);
+    }
+    out
+}
+
+/// 从 `open` 指向的 `<` 起找到配对的 `>` 下标 (字符串结束找不到返回 None)
+fn find_angle_end(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, &b) in bytes.iter().enumerate().skip(open) {
+        match b {
+            b'<' => depth += 1,
+            b'>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            },
+            _ => {},
+        }
+    }
+    None
+}
 
 /// G13: Result of template matching with priority resolution
 #[derive(Debug, Clone)]
 pub enum BestMatchResult<'a> {
     FullSpec(&'a FullSpecEntry),
-    PartialSpec((CppDecl, Vec<String>, Vec<MangleType>)),
+    /// 偏特化命中: (实例化后的声明, 形参名表, 实参表).
+    /// `CppDecl` 远大于其它 variant 的负载, 故整体 `Box` 化以免
+    /// `BestMatchResult` 被撑大 (变体尺寸差 > clippy 阈值).
+    PartialSpec(Box<(CppDecl, Vec<String>, Vec<MangleType>)>),
     Primary(&'a TemplateDecl),
     NotFound,
 }
@@ -39,6 +87,37 @@ pub struct TemplateDecl {
     pub is_variadic_param: Vec<bool>, // matches param_names
     /// G11: 原始模板参数定义（用于识别模板模板参数）
     pub template_params: Vec<crate::cpp::parser::TemplateParam>,
+}
+
+impl TemplateDecl {
+    /// M51: 模板去重指纹: 名称 + 形参名表 + requires + 函数签名.
+    /// 只在同名模板冲突时计算, 用来区分"重复 include 的同一个模板"(指纹相同,
+    /// 后者覆盖) 和"同名重载模板" (指纹不同, 两个候选都保留).
+    pub fn fingerprint(&self) -> String {
+        let mut s = String::new();
+        s.push_str(&self.name);
+        s.push('|');
+        s.push_str(&self.param_names.join(","));
+        s.push('|');
+        s.push_str(self.requires.as_deref().unwrap_or(""));
+        s.push('|');
+        match &self.decl {
+            CppDecl::FreeFn { ret, params, .. } => {
+                s.push_str("fn(");
+                for (n, t) in params {
+                    s.push_str(n);
+                    s.push(':');
+                    s.push_str(&type_key(t));
+                    s.push(',');
+                }
+                s.push_str("):");
+                s.push_str(&type_key(ret));
+            }
+            CppDecl::Class(_) => s.push_str("class"),
+            _ => s.push_str("other"),
+        }
+        s
+    }
 }
 
 /// 偏特化条目：`template <typename T> class Foo<T*> { ... }`
@@ -73,6 +152,17 @@ pub struct TemplateRegistry {
     pub inst_order: Vec<String>,
     /// M26: 概念定义注册表 (concept name -> body_text)
     pub concepts: std::collections::HashMap<String, String>,
+    /// M51: 概念的形参名表 (concept name -> [T, U, ...]), 用于把概念体中的
+    /// 形参正确绑定到使用点实参 (概念形参名与外层模板形参名不必一致)
+    pub concept_params: std::collections::HashMap<String, Vec<String>>,
+    /// M51: 模板/概念定义在顶层声明序列中的锚点 (前缀存活声明数),
+    /// 实例化结果按此锚点插回定义点之后, 保持 C++ 的"定义先于使用"顺序
+    pub anchors: std::collections::HashMap<String, usize>,
+    /// G12/M52: 参数包摊平失败的首个原因.
+    ///
+    /// 必须向调用方报硬错: 不能把"摊平失败"退化成 `None` —— 那会被上游误判为
+    /// "候选集为空 (SFINAE)", 把实现缺陷伪装成合法的重载决议失败.
+    pub pack_expand_error: Option<String>,
 }
 
 /// 把 MangleType 编码为实例化缓存 key (与 C 标识符命名一致)
@@ -133,6 +223,16 @@ pub fn type_key(ty: &MangleType) -> String {
         // M30.1: 非类型实参 key `n<值>` (n0/n1/n42); 偏特化 pattern
         // 字面量 (true/false/整数) 由 pick_partial 解析后与之比较
         MangleType::Array(t, n) => format!("arr{}_{}", n, type_key(t)),
+        // 函数类型 key: 保留完整签名，使 `void(*)(int)` 与
+        // `void(*)(long)` 不会撞同一个实例化缓存 key。
+        MangleType::Function { ret, params } => {
+            let mut s = format!("fn_{}", type_key(ret));
+            for p in params {
+                s.push('_');
+                s.push_str(&type_key(p));
+            }
+            s
+        },
         MangleType::NonType(v) => format!("n{}", v),
         MangleType::Ellipsis => "ellipsis".into(),
         MangleType::Auto => "auto".into(),
@@ -168,7 +268,7 @@ pub fn expand_pack(ty: &MangleType) -> Vec<MangleType> {
 
 /// 合并多个类型的包展开 (处理 `args...` 在实参列表中的情况)
 pub fn merge_expanded_args(args: &[MangleType]) -> Vec<MangleType> {
-    args.iter().flat_map(|a| expand_pack(a)).collect()
+    args.iter().flat_map(expand_pack).collect()
 }
 
 impl TemplateRegistry {
@@ -205,58 +305,30 @@ impl TemplateRegistry {
             || self.partials.iter().any(|p| p.pattern_text.contains("..."))
     }
 
-    /// G12: resolve args when variadic packs are involved
-    /// Handle the case where some params are packs and need special matching
+    /// G12: resolve args when variadic packs are involved.
+    ///
+    /// M52: 已废弃 —— 包形参的吃实参规则并入 `resolve_args` (真正的根因位置:
+    /// 它之前无条件 `args.to_vec()` 旁路了默认实参填充与 `requires` 求值, 并以
+    /// `has_variadic()` 这个**全局开关**影响所有模板, 一个变参声明就会把整仓库
+    /// 的实参解析降级到那条简化路径).
+    #[deprecated(note = "use resolve_args, it is pack-aware now")]
     pub fn resolve_args_with_variadic(
         &self,
         td: &TemplateDecl,
         args: &[MangleType],
     ) -> Option<Vec<MangleType>> {
-        // Check if this template has variadic parameters
-        let has_pack = td.is_variadic_param.iter().any(|&p| p);
-
-        if !has_pack {
-            // Non-variadic template, simple passthrough
-            return Some(args.to_vec());
-        }
-
-        // Variadic template scenario
-        // Need to match args against params where some are packs
-        // e.g., template<typename... T> foo<int, double, char>
-        // params: ["T"] (is_variadic_param: [true])
-        // args: [int, double, char]
-
-        // Special handling for last pack param
-        let mut resolved = Vec::new();
-        let mut arg_idx = 0;
-
-        for (_param_idx, is_pack) in td.is_variadic_param.iter().enumerate() {
-            if *is_pack {
-                // This parameter is a pack
-                // Collect all remaining args into a VariadicPack
-                let remaining_args: Vec<MangleType> = args[arg_idx..].to_vec();
-                resolved.push(MangleType::VariadicPack(remaining_args));
-                arg_idx = args.len();
-            } else {
-                // Regular parameter - consume one arg
-                if arg_idx < args.len() {
-                    resolved.push(args[arg_idx].clone());
-                    arg_idx += 1;
-                }
-            }
-        }
-
-        if arg_idx == args.len() {
-            Some(resolved)
-        } else {
-            None // Mismatched count
-        }
+        self.resolve_args(td, args)
     }
 
-    /// 注册模板声明 (重复注册同名模板: 后者覆盖, 便于 stdlib 头重复 include)
+    /// 注册模板声明 (重复注册同一模板: 后者覆盖, 便于 stdlib 头重复 include)
+    ///
+    /// M51: 只对"完全同一模板"去重 (名称 + 形参表 + requires + 函数签名),
+    /// 同名但签名不同的**重载函数模板**必须共存, 否则隐式推导时只剩一个候选,
+    /// 无法实现"替换失败的候选被静默剔除、其余候选仍可选中"的 SFINAE 语义.
     pub fn register(&mut self, targs: &TemplateArgs, requires: &Option<String>, decl: &CppDecl) {
         if let Some(td) = Self::decl_from(targs, requires, decl.clone()) {
-            self.templates.retain(|t| t.name != td.name);
+            let fp = td.fingerprint();
+            self.templates.retain(|t| t.fingerprint() != fp);
             self.templates.push(td);
         }
     }
@@ -296,6 +368,183 @@ impl TemplateRegistry {
         self.templates.iter().find(|t| t.name == name)
     }
 
+    /// `name<args>` **已实例化**后的类名; 未实例化则 None.
+    ///
+    /// M52: 显式实参可以省略带默认值的尾部形参
+    /// (`template <class K, class V, class C = int>` 用 `fm<int, int>`),
+    /// 而实例缓存与实例类名都以 `resolve_args` 补全后的实参为准. 直接拿调用点
+    /// 实参算 `instantiated_class_name` 会得到少一段的
+    /// `__dcc_template_fm_int_int`, 与真正登记的 `__dcc_template_fm_int_int_int`
+    /// 不是同一个符号 —— 类型替换静默不发生, 最后在 sema 变成
+    /// `unknown class type`. 本函数以**缓存里的实例声明名**为唯一真值.
+    pub fn instance_class_name(&self, name: &str, args: &[MangleType]) -> Option<String> {
+        let mut keys = vec![Self::key_for(name, args)];
+        if let Some(td) = self.find(name) {
+            if let Some(resolved) = self.resolve_args(td, args) {
+                let rk = Self::key_for(name, &resolved);
+                if !keys.contains(&rk) {
+                    keys.push(rk);
+                }
+            }
+        }
+        for k in keys {
+            if let Some(CppDecl::Class(c)) = self.inst_cache.get(&k) {
+                return Some(c.name.clone());
+            }
+        }
+        None
+    }
+
+    /// M51: 按名取**全部**候选模板 (重载集) 及其在主表中的下标;
+    /// 下标是同一 name+args 不同候选的区分符 (见 `fn_inst_key`).
+    pub fn candidates_named(&self, name: &str) -> Vec<(usize, &TemplateDecl)> {
+        self.templates
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.name == name)
+            .collect()
+    }
+
+    /// M51: 是否存在某个函数/类模板注册表项可作为隐式推导候选
+    pub fn has_template_named(&self, name: &str) -> bool {
+        self.templates.iter().any(|t| t.name == name)
+    }
+
+    /// M51: 该名字是否**只**由函数模板承载 (至少一个函数模板候选, 且无类模板同名).
+    ///
+    /// 用于"无匹配函数"硬报错的门控: 类模板名出现在调用位置
+    /// (`std::vector<int>(other)` 这种临时量构造 / 函数式类型转换) 不是
+    /// 函数调用, 按候选决议失败报错会把合法代码拒之门外.
+    pub fn only_fn_templates_named(&self, name: &str) -> bool {
+        let mut saw_fn = false;
+        for t in &self.templates {
+            if t.name != name {
+                continue;
+            }
+            match &t.decl {
+                CppDecl::FreeFn { .. } => saw_fn = true,
+                _ => return false,
+            }
+        }
+        saw_fn
+    }
+
+    /// M51: 注册 C++20 概念 `concept C = constraint;`
+    /// `params` 是包裹它的 `template <typename T, ...>` 形参名列表.
+    pub fn register_concept(&mut self, name: &str, params: &[String], body: &str) {
+        self.concepts.insert(name.to_string(), body.to_string());
+        self.concept_params.insert(name.to_string(), params.to_vec());
+    }
+
+    /// M51: 记录模板/概念定义锚点 (取首次出现的顶层位置)
+    pub fn set_anchor(&mut self, name: &str, anchor: usize) {
+        self.anchors.entry(name.to_string()).or_insert(anchor);
+    }
+
+    /// M51: 查询定义锚点 (未登记时返回 usize::MAX, 由调用方按"追加到末尾"处理)
+    pub fn anchor_of(&self, name: &str) -> usize {
+        self.anchors.get(name).copied().unwrap_or(usize::MAX)
+    }
+
+    /// M51: 展开约束文本中的概念引用 `C<args...>` → `(概念体[形参:=实参])`.
+    ///
+    /// 与 `feature_degrade::expand_concepts` 的"只认单形参且固定叫 T"不同,
+    /// 这里按概念自己的形参名逐个绑定, 因此
+    ///   - 多形参概念 (`same_as<T, U>`) 能正确替换两个形参;
+    ///   - 概念形参与外层模板形参同名/不同名都不会串味;
+    ///   - 概念嵌套引用概念会在下一轮循环里继续展开 (上限 8 层防环).
+    pub fn expand_concept_refs(&self, cond: &str) -> String {
+        let mut cur = crate::cpp::feature_degrade::normalize_constraint(cond);
+        for _ in 0..8 {
+            let Some((start, lt, close, name)) = self.find_concept_ref(&cur) else {
+                break;
+            };
+            // M51: 实参区间位于左尖括号与右尖括号之间, 而不是 名字起点+1 .
+            // Small<T> 的名字占 5 个字符, 用 start+1 会切出 mall<T 这种垃圾,
+            // 概念形参随即被绑成错误文本, 展开出的约束体整个失真.
+            let args_txt: Vec<String> = split_template_args(&cur[lt + 1..close])
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .collect();
+            let body = &self.concepts[&name];
+            let mut ctx = crate::cpp::feature_degrade::SfinaeCtx::new();
+            if let Some(params) = self.concept_params.get(&name) {
+                for (p, a) in params.iter().zip(args_txt.iter()) {
+                    ctx.bind(p.clone(), a.clone());
+                }
+            }
+            let expanded = crate::cpp::feature_degrade::try_substitute(body, &ctx)
+                .unwrap_or_else(|_| body.clone());
+            cur.replace_range(start..=close, &format!("({})", expanded));
+        }
+        crate::cpp::feature_degrade::normalize_constraint(&cur)
+    }
+
+    /// 在 (已规范化的) 约束文本里找第一个概念引用:
+    /// 返回 (名字起点, 左尖括号位置, 右尖括号位置, 概念名).
+    ///
+    /// 三个下标语义必须和调用方对齐: 名字区间 [start, lt), 实参区间 (lt, close).
+    fn find_concept_ref(&self, text: &str) -> Option<(usize, usize, usize, String)> {
+        let bytes = text.as_bytes();
+        let is_ident_start = |b: u8| b.is_ascii_alphabetic() || b == b'_';
+        let is_ident_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if !is_ident_start(bytes[i]) || (i > 0 && (is_ident_cont(bytes[i - 1]) || bytes[i - 1] == b':'))
+            {
+                i += 1;
+                continue;
+            }
+            let mut j = i;
+            while j < bytes.len() && is_ident_cont(bytes[j]) {
+                j += 1;
+            }
+            // 允许限定名 `std::Foo<...>`
+            let mut name_end = j;
+            while name_end + 1 < bytes.len() && &bytes[name_end..name_end + 2] == b"::" {
+                let mut k = name_end + 2;
+                while k < bytes.len() && is_ident_cont(bytes[k]) {
+                    k += 1;
+                }
+                name_end = k;
+            }
+            if name_end < bytes.len() && bytes[name_end] == b'<' {
+                let raw = text.get(i..name_end).unwrap_or("");
+                // 依次按全名 / 去限定符短名查概念表 (parser 常把 `std::C` 降为 `C`)
+                let key = if self.concepts.contains_key(raw) {
+                    Some(raw.to_string())
+                } else {
+                    let short = raw.rsplit("::").next().unwrap_or(raw).to_string();
+                    if self.concepts.contains_key(&short) {
+                        Some(short)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(name) = key {
+                    if let Some(close) = find_angle_end(bytes, name_end) {
+                        return Some((i, name_end, close, name));
+                    }
+                }
+            }
+            i = name_end.max(j);
+        }
+        None
+    }
+
+    /// M51: 求值 `requires` 约束表达式.
+    ///
+    /// 先展开概念引用 (`Integral<T>` → 概念体), 再交给 trait 求值器;
+    /// 返回 Some(false) 表示约束不满足 —— 调用方必须按 SFINAE 静默剔除该
+    /// 候选, 而不是当硬错误; None 表示无法判定 (保守放行).
+    pub fn evaluate_constraint(&self, cond: &str, ctx: &SfinaeCtx) -> Option<bool> {
+        let expanded = self.expand_concept_refs(cond);
+        if expanded.trim().is_empty() {
+            return None;
+        }
+        crate::cpp::feature_degrade::evaluate_trait_condition(&expanded, ctx)
+    }
+
     /// 实例化 key: `name<type_key(arg0),...>`
     pub fn key_for(name: &str, args: &[MangleType]) -> String {
         let mut s = format!("{}<", name);
@@ -313,9 +562,34 @@ impl TemplateRegistry {
     /// 失败返回 None (约束不满足 / 实参个数不足) → SFINAE 跳过
     pub fn resolve_args(&self, td: &TemplateDecl, args: &[MangleType]) -> Option<Vec<MangleType>> {
         let mut resolved: Vec<MangleType> = Vec::new();
+        // G12/M52: 包形参**吃掉多个实参** (`foo<int, double>` 对一个
+        // `typename... T` 形参是 2 个实参 1 个形参), 故按形参逐个消耗实参游标,
+        // 不能用 `args.get(i)` 按下标对齐 (那会把包后面的实参全部弄丢).
+        let mut ai = 0usize;
         for (i, _p) in td.param_names.iter().enumerate() {
-            if let Some(a) = args.get(i) {
+            let is_pack = td.is_variadic_param.get(i).copied().unwrap_or(false);
+            if is_pack {
+                // 包后面的非包形参还得给他们留够实参 (zip 规则的最小实现)
+                let tail = td.param_names.len() - i - 1;
+                let end = args.len().saturating_sub(tail);
+                if end < ai {
+                    return None; // 实参不足以覆盖后面的形参
+                }
+                let packed = if end == ai + 1
+                    && matches!(args.get(ai), Some(MangleType::VariadicPack(_)))
+                {
+                    // 已经是一个包 (如 `Types...` 模板实参 / 隐式推导结果): 直接吃下
+                    args[ai].clone()
+                } else {
+                    MangleType::VariadicPack(args[ai..end].to_vec())
+                };
+                resolved.push(packed);
+                ai = end;
+                continue;
+            }
+            if let Some(a) = args.get(ai) {
                 resolved.push(a.clone());
+                ai += 1;
             } else if let Some(d) = td.defaults.get(i).cloned().flatten() {
                 resolved.push(d);
             } else if i == 0 && args.is_empty() && !td.defaults.is_empty() {
@@ -325,18 +599,28 @@ impl TemplateRegistry {
                 return None; // 实参不足且无默认值
             }
         }
+        if ai != args.len() {
+            // 实参多于形参: 不是本模板的合法调用 (SFINAE 剔除该候选)
+            return None;
+        }
         let _ = td;
-        // requires 约束求值 (概念过滤)
+        // requires 约束求值 (概念过滤): 不满足 → 替换失败 → SFINAE 剔除候选
         if let Some(cond) = &td.requires {
             let mut ctx = crate::cpp::feature_degrade::SfinaeCtx::new();
             for (pn, pa) in td.param_names.iter().zip(resolved.iter()) {
                 ctx.bind(pn.clone(), type_key(pa));
             }
-            // M26: 展开 requires 子句中的概念引用
-            let expanded = crate::cpp::feature_degrade::expand_concepts(cond, &self.concepts);
-            if !crate::cpp::feature_degrade::evaluate_trait_condition(&expanded, &ctx)
-                .unwrap_or(true)
-            {
+            let verdict = self.evaluate_constraint(cond, &ctx);
+            if std::env::var_os("DCC_TPL_DEBUG").is_some() {
+                eprintln!(
+                    "[tpl] requires {:?} 于 {}<{:?}> => {:?}",
+                    cond,
+                    td.name,
+                    resolved.iter().map(type_key).collect::<Vec<_>>(),
+                    verdict
+                );
+            }
+            if !verdict.unwrap_or(true) {
                 return None;
             }
         }
@@ -345,39 +629,176 @@ impl TemplateRegistry {
 
     /// 从调用实参类型推导模板实参 (隐式实例化)
     /// call_arg_tys: 调用点实参的 MangleType (由 lower 计算)
+    ///
+    /// 遵循 C++ `[temp.deduct.call]` 的关键子集:
+    ///   1. 实参个数必须与函数形参个数一致 (否则不是本模板的合法调用);
+    ///   2. 同一形参从不同实参推出不同结果 → 推导失败 (SFINAE 剔除候选);
+    ///   3. 推不出的形参用默认实参兜底; 既推不出又无默认 → 失败;
+    ///   4. 最后交给 `resolve_args` 填充默认 + 求值 `requires` (不满足 → None).
     pub fn deduce_args(
         &self,
         td: &TemplateDecl,
         call_arg_tys: &[MangleType],
     ) -> Option<Vec<MangleType>> {
-        // 已有全部默认实参的模板 (无参模板函数 `sfinae_default_arg`) → 直接取默认
-        if td.defaults.iter().all(|d| d.is_some()) {
-            let mut args: Vec<MangleType> = Vec::new();
-            for d in &td.defaults {
-                args.push(d.clone().unwrap());
-            }
-            return self.resolve_args(td, &args);
-        }
         // 从函数参数类型推导: 形参类型中出现的形参名 ← 实参类型
         let fn_params: Vec<MangleType> = match &td.decl {
             CppDecl::FreeFn { params, .. } => params.iter().map(|(_, t)| t.clone()).collect(),
             _ => return None,
         };
+        if fn_params.len() != call_arg_tys.len()
+            && !fn_params
+                .iter()
+                .any(|t| matches!(t, MangleType::VariadicPack(_)))
+        {
+            return None;
+        }
+        // G12/M52: 形参逐个消耗实参游标; `Args... args` 形态的包形参吃掉
+        // 它后面的所有实参 (除留给后面非包形参的那些).
         let mut bindings: Vec<(String, MangleType)> = Vec::new();
-        for (pt, at) in fn_params.iter().zip(call_arg_tys.iter()) {
-            collect_bindings(pt, at, &td.param_names, &mut bindings);
+        let mut pi = 0usize;
+        let mut ci = 0usize;
+        while pi < fn_params.len() {
+            if let MangleType::VariadicPack(pat) = &fn_params[pi] {
+                let tail = fn_params.len() - pi - 1;
+                let end = call_arg_tys.len().saturating_sub(tail);
+                if end < ci {
+                    return None;
+                }
+                bind_pack(pat, &call_arg_tys[ci..end], &td.param_names, &mut bindings);
+                ci = end;
+            } else {
+                if ci >= call_arg_tys.len() {
+                    return None;
+                }
+                collect_bindings(&fn_params[pi], &call_arg_tys[ci], &td.param_names, &mut bindings);
+                ci += 1;
+            }
+            pi += 1;
+        }
+        if ci != call_arg_tys.len() {
+            // 实参多于形参 (且没有包形参吃掉他们): 不是本模板的合法调用
+            return None;
         }
         // 生成实参 (按形参顺序; 未推导出的用默认或失败)
         let mut args: Vec<MangleType> = Vec::new();
         for (i, pn) in td.param_names.iter().enumerate() {
-            if let Some((_, a)) = bindings.iter().rev().find(|(b, _)| b == pn) {
-                args.push(a.clone());
-            } else {
-                let d = td.defaults.get(i).cloned().flatten()?;
-                args.push(d);
+            match Self::deduced_for(&bindings, pn) {
+                Some(a) => args.push(a),
+                None => {
+                    // G12: 包形参未被推导 = **空包** (`f()` 对 `A... a` 合法),
+                    // 不能当成"推不出"而剔除候选.
+                    if td.is_variadic_param.get(i).copied().unwrap_or(false) {
+                        args.push(MangleType::VariadicPack(Vec::new()));
+                        continue;
+                    }
+                    let d = td.defaults.get(i).cloned().flatten()?;
+                    args.push(d);
+                }
             }
         }
         self.resolve_args(td, &args)
+    }
+
+    /// 取某个形参的推导结果; 多处以不同结果被绑定则返回 None (推导冲突).
+    fn deduced_for(bindings: &[(String, MangleType)], name: &str) -> Option<MangleType> {
+        let mut found: Option<MangleType> = None;
+        for (b, a) in bindings {
+            if b != name {
+                continue;
+            }
+            match &found {
+                None => found = Some(a.clone()),
+                Some(prev) if prev == a => {}
+                Some(_) => return None,
+            }
+        }
+        found
+    }
+
+    /// M51: 显式模板实参规范化: 填充默认实参 + 求值 `requires`.
+    /// 返回 `(候选下标, 实参表)`; None 表示该名字下所有候选都不可行
+    /// (约束不满足 / 实参过多或不足且无默认), 调用方必须按 SFINAE 静默跳过,
+    /// 不得报硬错误.
+    pub fn normalize_args(&self, name: &str, args: &[MangleType]) -> Option<(usize, Vec<MangleType>)> {
+        self.candidates_named(name)
+            .into_iter()
+            .find_map(|(i, td)| self.resolve_args(td, args).map(|r| (i, r)))
+    }
+
+    /// M51: 函数模板实例的缓存 key: **必须带候选下标**.
+    ///
+    /// 同一名字的多个重载候选可能推出一字不差的实参表 (如
+    /// `template<Small<T>> int tag(T)` 与 `template<> int tag(T)`, 两者都推
+    /// 出 `T=int`), 只用 `name<args>` 做键会让第二个候选被第一个的缓存命中
+    /// “冒充”, 重载选择结果错误 (g++ 交叉验证时发现).
+    pub fn fn_inst_key(idx: usize, name: &str, args: &[MangleType]) -> String {
+        format!("#{}:{}", idx, Self::key_for(name, args))
+    }
+
+    /// M51: 查 `name<args>` 中**已实例化过**的首个候选下标 (供后面的
+    /// 名字重写阶段反查, 它手上只有名字+实参, 没有推导时的候选信息).
+    pub fn cached_fn_candidate(&self, name: &str, args: &[MangleType]) -> Option<usize> {
+        self.candidates_named(name)
+            .into_iter()
+            .map(|(i, _)| i)
+            .find(|i| self.inst_cache.contains_key(&Self::fn_inst_key(*i, name, args)))
+    }
+
+    /// 实例化产物的统一收尾: **参数包摊平** (见 `pack_expand` 模块).
+    ///
+    /// 失败时保留原树但记下原因 (`pack_expand_error`), 由调用端 (native 后端 /
+    /// lower) 硬报错 —— 静默交出去就会在背深处变成莫名的符号错误.
+    fn finish_inst(&mut self, mut inst: CppDecl, params: &[String], args: &[MangleType]) -> CppDecl {
+        if let Err(msg) = crate::cpp::pack_expand::expand_packs_in(&mut inst, params, args) {
+            if self.pack_expand_error.is_none() {
+                self.pack_expand_error = Some(msg);
+            }
+        }
+        inst
+    }
+
+    /// M51: 实例化**指定候选**的函数模板 (重载集里的那个下标).
+    /// 与 `instantiate_fn` 的区别: 不重新选候选, 保证调用点重写出的 C 名
+    /// (`tplfn_c_name(name, idx, args)`) 与这里产出的符号一致.
+    pub fn instantiate_fn_at(&mut self, idx: usize, name: &str, args: &[MangleType]) -> Option<CppDecl> {
+        let td = self.templates.get(idx)?.clone();
+        if td.name != name {
+            return None;
+        }
+        let resolved = self.resolve_args(&td, args)?;
+        let key = Self::fn_inst_key(idx, name, &resolved);
+        if let Some(cached) = self.inst_cache.get(&key) {
+            return Some(cached.clone());
+        }
+        let primary_params = td.template_params.clone();
+        let inst = instantiate_decl_with_template_params(
+            &td.decl,
+            &td.param_names,
+            &resolved,
+            None,
+            &primary_params,
+        );
+        let inst = self.finish_inst(inst, &td.param_names, &resolved);
+        self.inst_cache.insert(key.clone(), inst.clone());
+        self.inst_order.push(key);
+        Some(inst)
+    }
+
+    /// M51: 对 `name` 的全部重载候选逐个做隐式实参推导, 返回首个成功的
+    /// `(候选下标, 实参表)`.
+    ///
+    /// 这就是 SFINAE 的候选集语义: 某个候选推导失败 / `requires` 不满足 /
+    /// 推导冲突, 都**静默**跳过 (不报硬错误), 只有全部候选都失败才返回 None.
+    pub fn deduce_for_call(
+        &self,
+        name: &str,
+        call_arg_tys: &[MangleType],
+    ) -> Option<(usize, Vec<MangleType>)> {
+        self.templates
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.name == name)
+            .find_map(|(i, td)| self.deduce_args(td, call_arg_tys).map(|r| (i, r)))
     }
 
     /// G13: 实例化模板类 - 优先匹配全特化 > 偏特化 > 主模板
@@ -396,18 +817,15 @@ impl TemplateRegistry {
                 return Some(cached.clone());
             }
             let inst = instantiate_decl(&decl, &param_names, &bound, Some(name), args);
+            let inst = self.finish_inst(inst, &param_names, &bound);
             self.inst_cache.insert(key.clone(), inst.clone());
             self.inst_order.push(key);
             return Some(inst);
         }
 
         // Fallback to primary template
-        let td = self.find(name)?;
-        let resolved = if self.has_variadic() {
-            self.resolve_args_with_variadic(&td, args)?
-        } else {
-            self.resolve_args(&td, args)?
-        };
+        let td = self.find(name).cloned()?;
+        let resolved = self.resolve_args(&td, args)?;
         let key = Self::key_for(name, &resolved);
         if let Some(cached) = self.inst_cache.get(&key) {
             return Some(cached.clone());
@@ -423,33 +841,53 @@ impl TemplateRegistry {
             Some(&inst_name),
             primary_params,
         );
+        let inst = self.finish_inst(inst, &td.param_names, &resolved);
         self.inst_cache.insert(key.clone(), inst.clone());
         self.inst_order.push(key);
         Some(inst)
     }
 
     /// 实例化模板函数 `name<args>`; 返回实例化后的 FreeFn 声明
+    ///
+    /// M51: 同名重载模板逐个尝试 `resolve_args` (填充默认 + 求值 requires),
+    /// 某个候选替换失败时不报错, 静默尝试下一个 (SFINAE 候选集语义).
     pub fn instantiate_fn(&mut self, name: &str, args: &[MangleType]) -> Option<CppDecl> {
-        let td = self.find(name)?;
-        // G12: Use variadic-aware arg resolution
-        let resolved = if self.has_variadic() {
-            self.resolve_args_with_variadic(&td, args)?
-        } else {
-            self.resolve_args(&td, args)?
-        };
+        let candidates: Vec<usize> = self
+            .templates
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.name == name)
+            .map(|(i, _)| i)
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        // 先选定能完成实参解析的那个候选 (及其解析后的实参)
+        let mut chosen: Option<(usize, Vec<MangleType>)> = None;
+        for &idx in &candidates {
+            let td = &self.templates[idx];
+            let resolved = self.resolve_args(td, args);
+            if let Some(r) = resolved {
+                chosen = Some((idx, r));
+                break;
+            }
+        }
+        let (idx, resolved) = chosen?;
         let key = Self::key_for(name, &resolved);
         if let Some(cached) = self.inst_cache.get(&key) {
             return Some(cached.clone());
         }
         // G11: 使用模板模板参数增强的实例化
-        let primary_params = &td.template_params;
+        let primary_params = self.templates[idx].template_params.clone();
+        let tpl_params = self.templates[idx].param_names.clone();
         let inst = instantiate_decl_with_template_params(
-            &td.decl,
-            &td.param_names,
+            &self.templates[idx].decl,
+            &self.templates[idx].param_names,
             &resolved,
             None,
-            primary_params,
+            &primary_params,
         );
+        let inst = self.finish_inst(inst, &tpl_params, &resolved);
         self.inst_cache.insert(key.clone(), inst.clone());
         self.inst_order.push(key);
         Some(inst)
@@ -489,12 +927,16 @@ impl TemplateRegistry {
                 let pat = pat.trim();
                 let pat_key = pat.replace('*', "").trim().to_string();
                 // 检查/记录形参绑定; 同名二次出现时实参必须一致
+                // `arg_key` 是本次参与比较的实参键: 通配符分支部它就是整个
+                // 实参的键, 指针分支部则是剔掉一层 `*` 后的键 (与绑定的
+                // 形参类型保持一致, 否则同一个 `T` 出现两次时永不可能相等).
                 let bind_check = |bindings: &mut Vec<(String, MangleType)>,
                                   name: &str,
                                   arg_ty: &MangleType,
+                                  arg_key: &str,
                                   all_match: &mut bool| {
                     if let Some((_, prev)) = bindings.iter().find(|(n, _)| n == name) {
-                        if type_key(prev) != *arg {
+                        if type_key(prev) != arg_key {
                             *all_match = false;
                         }
                     } else {
@@ -505,8 +947,30 @@ impl TemplateRegistry {
                     // 指针模式：`T*` 匹配 `p_<T>` 编码
                     if pat_key == "T" || arg.contains(&pat_key) {
                         specificity += 2; // 指针模式比通配符更特化
-                        if Self::is_param_name_internal(pat, &p.param_names) {
-                            bind_check(&mut bindings, &pat_key, arg_ty, &mut all_match);
+                        // 注意必须用**去掉 `*` 后**的 `pat_key` 判断形参名:
+                        // pattern 文本是 `T*`, 形参表里是 `T`, 直接拿 `T*`
+                        // 去比对永远不相等, 于是 `T` 根本没有绑定, 后面的
+                        // `bound` 兜底逻辑会塞进**整个指针实参**, 使得
+                        // `iterator_traits<T*>::value_type` 的 `T` 变成 `int*`
+                        // (sizeof 从 4 变 8), 指针特化整体失效.
+                        if Self::is_param_name_internal(&pat_key, &p.param_names) {
+                            // 形参 `T` 绑的是**被指对象**, 不是整个指针:
+                            // `iterator_traits<T*>` 里 `typedef T value_type` 对
+                            // `int*` 必须得到 `int` (绑成 `int*` 则 sizeof 从 4
+                            // 变成 8, 指针特化整体失效).
+                            let (bound_ty, bound_key) = match arg_ty {
+                                MangleType::Pointer(inner) => {
+                                    ((**inner).clone(), arg.trim_start_matches("p_").to_string())
+                                },
+                                other => (other.clone(), arg.clone()),
+                            };
+                            bind_check(
+                                &mut bindings,
+                                &pat_key,
+                                &bound_ty,
+                                &bound_key,
+                                &mut all_match,
+                            );
                         }
                     } else {
                         all_match = false;
@@ -532,7 +996,7 @@ impl TemplateRegistry {
                     }
                 } else if Self::is_param_name_internal(pat, &p.param_names) {
                     // 通配符: 匹配任意类型, 最不特化; 需绑定一致
-                    bind_check(&mut bindings, &pat_key, arg_ty, &mut all_match);
+                    bind_check(&mut bindings, &pat_key, arg_ty, arg, &mut all_match);
                     specificity += 1;
                 } else {
                     all_match = false;
@@ -608,7 +1072,7 @@ impl TemplateRegistry {
 
         // Then try partial specs
         if let Some(partial) = self.pick_partial(name, args) {
-            return BestMatchResult::PartialSpec(partial);
+            return BestMatchResult::PartialSpec(Box::new(partial));
         }
 
         // Finally fallback to primary template
@@ -665,6 +1129,7 @@ impl TemplateRegistry {
             is_union: false,
             bases: vec![],
             members,
+            member_access: vec![],
         })
     }
 }
@@ -712,14 +1177,49 @@ fn collect_bindings(
             out.push((n.clone(), at.clone()));
         },
         (MangleType::Pointer(a), MangleType::Pointer(b)) => collect_bindings(a, b, names, out),
-        (MangleType::Reference(a), MangleType::Pointer(b)) => collect_bindings(a, b, names, out),
-        (MangleType::Reference(a), MangleType::Reference(b)) => collect_bindings(a, b, names, out),
         (MangleType::Template { args: pa, .. }, MangleType::Template { args: aa, .. }) => {
             for (x, y) in pa.iter().zip(aa.iter()) {
                 collect_bindings(x, y, names, out);
             }
         },
+        // 引用形参: 按 [temp.deduct.call]/1 先剥掉参考再推 (`const T&` ← `int` 值实参)
+        (MangleType::Reference(a), MangleType::Reference(b)) => collect_bindings(a, b, names, out),
+        (MangleType::Reference(a), _) => collect_bindings(a, at, names, out),
         _ => {},
+    }
+}
+
+/// G12/M52: 从**包形参**的 N 个实参推导出包模板形参.
+///
+/// `template <typename... A> void f(A... a)` 以 `(int, double)` 调用:
+/// 模式 `A` 对每个实参单独推导, 同名结果按实参顺序归并成
+/// `A = VariadicPack([int, double])`. 多包同模式 (`pair<A,B>...`) 同样成立:
+/// 每个名字各自归并, 长度不一致时由 `pack_expand` 按 zip 规则硬报错.
+fn bind_pack(
+    pat: &[MangleType],
+    pack_tys: &[MangleType],
+    names: &[String],
+    out: &mut Vec<(String, MangleType)>,
+) {
+    for elem in pat {
+        let mut per: Vec<(String, MangleType)> = Vec::new();
+        for at in pack_tys {
+            collect_bindings(elem, at, names, &mut per);
+        }
+        let mut seen: Vec<String> = Vec::new();
+        for (n, _) in &per {
+            if !seen.iter().any(|s| s == n) {
+                seen.push(n.clone());
+            }
+        }
+        for n in seen {
+            let tys: Vec<MangleType> = per
+                .iter()
+                .filter(|(bn, _)| bn == &n)
+                .map(|(_, t)| t.clone())
+                .collect();
+            out.push((n, MangleType::VariadicPack(tys)));
+        }
     }
 }
 
@@ -727,38 +1227,47 @@ fn collect_bindings(
 
 /// 把类型中的模板形参替换为实参
 pub fn substitute_type(ty: &MangleType, params: &[String], args: &[MangleType]) -> MangleType {
+    substitute_type_ex(ty, params, args, false)
+}
+
+/// G12/M52: `in_pattern` = 当前正处在一个**展开模式** (`VariadicPack` 的 payload)
+/// 内部. 该语境下引用**包形参**的名字必须原样保留 —— 它是 [`pack_expand`]
+/// 后面要 zip 的那个包; 若在这里就换成整条实参表, 模式会失去包身份
+/// (`A... args` 变成 `{int,double}... args`), 摊平就无从下手.
+/// 绑定到**非包**实参的形参在两种语境下都照常替换.
+fn substitute_type_ex(
+    ty: &MangleType,
+    params: &[String],
+    args: &[MangleType],
+    in_pattern: bool,
+) -> MangleType {
+    let sub = |t: &MangleType| substitute_type_ex(t, params, args, in_pattern);
     match ty {
         MangleType::Class(n) => {
             if let Some(idx) = params.iter().position(|p| p == n) {
                 if let Some(a) = args.get(idx) {
+                    if in_pattern && matches!(a, MangleType::VariadicPack(_)) {
+                        return ty.clone();
+                    }
                     return a.clone();
                 }
             }
             ty.clone()
         },
-        // G12: 参数包展开 - 如果是 pack 形参，返回整个包
-        MangleType::Class(n) if params.len() != args.len() => {
-            // 检查是否是 pack 形参的引用 (需要特殊处理)
-            // 这里简化处理：如果 param count 不等于 arg count，可能是 pack 场景
-            // 实际应在 TemplateParam 中记录 is_pack 标志
-            ty.clone()
-        },
-        MangleType::Pointer(t) => MangleType::Pointer(Box::new(substitute_type(t, params, args))),
-        MangleType::Reference(t) => {
-            MangleType::Reference(Box::new(substitute_type(t, params, args)))
-        },
-        MangleType::Array(t, n) => {
-            MangleType::Array(Box::new(substitute_type(t, params, args)), *n)
-        },
-        MangleType::Template { name, args: tas } => {
-            let new_args: Vec<MangleType> = tas
+        // G12/M52: 包类型本身 recurse 到元素 (之前由下面的 `other => clone()`
+        // 直接原样返回, 导致 `A...` 里的 `A` 永远替换不掉), 并进入模式语境.
+        MangleType::VariadicPack(packed) => MangleType::VariadicPack(
+            packed
                 .iter()
-                .map(|a| substitute_type(a, params, args))
-                .collect();
-            MangleType::Template {
-                name: name.clone(),
-                args: new_args,
-            }
+                .map(|t| substitute_type_ex(t, params, args, true))
+                .collect(),
+        ),
+        MangleType::Pointer(t) => MangleType::Pointer(Box::new(sub(t))),
+        MangleType::Reference(t) => MangleType::Reference(Box::new(sub(t))),
+        MangleType::Array(t, n) => MangleType::Array(Box::new(sub(t)), *n),
+        MangleType::Template { name, args: tas } => MangleType::Template {
+            name: name.clone(),
+            args: tas.iter().map(sub).collect(),
         },
         // M30: `Tpl<Args>::member` 的实参递归替换; name/member 保留
         // (typedef 展开由 lower 在查 inst_typedefs 时完成)
@@ -766,16 +1275,10 @@ pub fn substitute_type(ty: &MangleType, params: &[String], args: &[MangleType]) 
             name,
             args: tas,
             member,
-        } => {
-            let new_args: Vec<MangleType> = tas
-                .iter()
-                .map(|a| substitute_type(a, params, args))
-                .collect();
-            MangleType::TplMember {
-                name: name.clone(),
-                args: new_args,
-                member: member.clone(),
-            }
+        } => MangleType::TplMember {
+            name: name.clone(),
+            args: tas.iter().map(sub).collect(),
+            member: member.clone(),
         },
         other => other.clone(),
     }
@@ -968,13 +1471,16 @@ pub fn substitute_expr(e: &CppExpr, params: &[String], args: &[MangleType]) -> C
             closure_name: lam.closure_name.clone(),
         }),
         // 模板**类型**参数在值语境中以类型名使用时 (如 `new T` 的类型段、
-        // 类型位置引用) 替换为实际类名。标量/非类型模板参数是值, 不得替换
-        // (否则会把 `template<int N>` 里的 `N` 等静默归零); `T(实参)` 形式的
-        // 函数式类型转换由上面的 Call 分支单独处理, 此处不介入。
+        // 类型位置引用) 替换为实际类名。非类型形参 (`template<int N>` 里的
+        // `N`) 在值语境里就是那个常量: 不替换会让实例化出来的成员体留下
+        // 裸 `N`, sema 报 `undeclared identifier: N` (g++ 同一位置正常)。
+        // 标量**类型**实参 (如 `MangleType::Int`) 仍不替换 —— 它是类型不是值。
         CppExpr::Ident(name) => {
             if let Some(idx) = params.iter().position(|p| p == name) {
-                if let Some(MangleType::Class(n)) = args.get(idx) {
-                    return CppExpr::Ident(n.clone());
+                match args.get(idx) {
+                    Some(MangleType::Class(n)) => return CppExpr::Ident(n.clone()),
+                    Some(MangleType::NonType(v)) => return CppExpr::IntLit(*v),
+                    _ => {}
                 }
             }
             e.clone()
@@ -1031,11 +1537,23 @@ pub fn substitute_stmt(s: &CppStmt, params: &[String], args: &[MangleType]) -> C
             name,
             init,
             is_volatile,
-        } => CppStmt::LocalVar {
-            ty: substitute_type(ty, params, args),
-            name: name.clone(),
-            init: init.as_ref().map(|x| substitute_expr(x, params, args)),
-            is_volatile: *is_volatile,
+        } => {
+            // M53: 局部变量**遮蔽**同名模板形参时整条不再替换 (`int N = 1;` 的
+            // 初始化式按 C++ 作用域规则已经指向新变量)。
+            if params.iter().any(|p| p == name) {
+                return CppStmt::LocalVar {
+                    ty: ty.clone(),
+                    name: name.clone(),
+                    init: init.clone(),
+                    is_volatile: *is_volatile,
+                };
+            }
+            CppStmt::LocalVar {
+                ty: substitute_type(ty, params, args),
+                name: name.clone(),
+                init: init.as_ref().map(|x| substitute_expr(x, params, args)),
+                is_volatile: *is_volatile,
+            }
         },
         CppStmt::StaticLocal {
             ty,
@@ -1047,6 +1565,32 @@ pub fn substitute_stmt(s: &CppStmt, params: &[String], args: &[MangleType]) -> C
             name: name.clone(),
             init: init.as_ref().map(|x| substitute_expr(x, params, args)),
             is_volatile: *is_volatile,
+        },
+        CppStmt::LocalVarList { spec, declarators } => {
+            // 共享的 decl-specifier 替换一次; 每个 declarator 只替换自己的初始化式
+            // (`*` / `&` / `[N]` 层级不携带模板名, 原样保留)。
+            // M53: 某个 declarator 的**名字遮蔽**了同名模板形参时, 它的初始化式
+            // 按 C++ 作用域规则已经指向新变量, 那条不再替换。
+            CppStmt::LocalVarList {
+                spec: DeclSpec {
+                    ty: substitute_type(&spec.ty, params, args),
+                    is_static: spec.is_static,
+                    is_volatile: spec.is_volatile,
+                },
+                declarators: declarators
+                    .iter()
+                    .map(|d| InitDeclarator {
+                        layers: d.layers.clone(),
+                        array_dims: d.array_dims.clone(),
+                        name: d.name.clone(),
+                        init: if params.iter().any(|p| p == &d.name) {
+                            d.init.clone()
+                        } else {
+                            d.init.as_ref().map(|x| substitute_expr(x, params, args))
+                        },
+                    })
+                    .collect(),
+            }
         },
         CppStmt::Try { body, catches } => CppStmt::Try {
             body: Box::new(substitute_body(body, params, args)),
@@ -1082,6 +1626,26 @@ pub fn substitute_body(b: &CppBody, params: &[String], args: &[MangleType]) -> C
     }
 }
 
+/// M51: 类模板的**注入类名**候选集合.
+///
+/// C++ 里类模板 `std::vector` 的类体内, 名字 `vector` 本身就是个类型名
+/// (injected-class-name), 等价于 `std::vector<T>`. 它**不是**模板形参,
+/// 因此通用的形参替换覆盖不到. 实例化时必须把它也绑到实例类名,
+/// 否则 `vector(const vector& other)` 会留下裸的 `Class("vector")`,
+/// sema 报 "unknown class type: vector".
+///
+/// 返回全名 + (若带命名空间限定) 去限定符短名, 因为 parser 对
+/// `std::vector` 与 `vector` 两种写法可能产出不同的名字形态.
+fn injected_class_names(name: &str) -> Vec<String> {
+    let mut out = vec![name.to_string()];
+    if let Some(short) = name.rsplit("::").next() {
+        if short != name && !short.is_empty() {
+            out.push(short.to_string());
+        }
+    }
+    out
+}
+
 /// 递归替换声明内的模板形参类型
 /// class_rename: 类模板实例化时新的类名 (成员函数/ctor 的 class 字段同步改写)
 pub fn substitute_decl(
@@ -1090,11 +1654,62 @@ pub fn substitute_decl(
     args: &[MangleType],
     class_rename: Option<&str>,
 ) -> CppDecl {
+    /// M53: 把被函数形参**遮蔽**的模板形参从替换表里摘掉 (params/args 下标
+    /// 对齐关系保持不变): `template<int N> struct S { int f(int N) { return N; } }`
+    /// 体里的 `N` 是那个形参, 不是模板实参.
+    fn shield_params(
+        params: &[String],
+        args: &[MangleType],
+        shadowing: &[String],
+    ) -> (Vec<String>, Vec<MangleType>) {
+        let mut p = Vec::with_capacity(params.len());
+        let mut a = Vec::with_capacity(params.len());
+        for (i, name) in params.iter().enumerate() {
+            if shadowing.iter().any(|s| s == name) {
+                continue;
+            }
+            if let Some(x) = args.get(i) {
+                p.push(name.clone());
+                a.push(x.clone());
+            }
+        }
+        (p, a)
+    }
+
+    /// 函数体替换表 = 原表去掉被形参遮蔽的条目
+    fn body_subst(
+        params: &[String],
+        args: &[MangleType],
+        fn_ps: &[(String, MangleType)],
+    ) -> (Vec<String>, Vec<MangleType>) {
+        let names: Vec<String> = fn_ps.iter().map(|(n, _)| n.clone()).collect();
+        shield_params(params, args, &names)
+    }
+
     match d {
         CppDecl::Class(c) => {
             let new_name = class_rename
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| c.name.clone());
+            // M51: 类模板实例化时把**注入类名** (injected-class-name) 也绑到
+            // 实例名: `vector(const vector& other)` 里的 `vector` 不是模板形参,
+            // 不绑就漏下 `Class("vector")`, sema 报 "unknown class type: vector".
+            // 追加在形参表末尾 → 原有 T/U → 实参 的下标对齐关系不变.
+            let (mem_params, mem_args) = match class_rename {
+                Some(new) => {
+                    let mut p = params.to_vec();
+                    let mut a = args.to_vec();
+                    for n in injected_class_names(&c.name) {
+                        if p.contains(&n) {
+                            continue;
+                        }
+                        p.push(n);
+                        a.push(MangleType::Class(new.to_string()));
+                    }
+                    (p, a)
+                },
+                None => (params.to_vec(), args.to_vec()),
+            };
             CppDecl::Class(ClassDecl {
                 name: new_name,
                 is_struct: c.is_struct,
@@ -1103,8 +1718,9 @@ pub fn substitute_decl(
                 members: c
                     .members
                     .iter()
-                    .map(|m| substitute_decl(m, params, args, class_rename))
+                    .map(|m| substitute_decl(m, &mem_params, &mem_args, class_rename))
                     .collect(),
+                member_access: c.member_access.clone(),
             })
         },
         CppDecl::FreeFn {
@@ -1122,7 +1738,10 @@ pub fn substitute_decl(
                 .iter()
                 .map(|(n, t)| (n.clone(), substitute_type(t, params, args)))
                 .collect(),
-            body: substitute_body(body, params, args),
+            body: {
+                let (bp, ba) = body_subst(params, args, ps);
+                substitute_body(body, &bp, &ba)
+            },
             is_noexcept: *is_noexcept,
             trailing_ret_type: trailing_ret_type.clone(),
         },
@@ -1152,7 +1771,10 @@ pub fn substitute_decl(
                     .iter()
                     .map(|(n, t)| (n.clone(), substitute_type(t, params, args)))
                     .collect(),
-                body: substitute_body(body, params, args),
+                body: {
+                    let (bp, ba) = body_subst(params, args, ps);
+                    substitute_body(body, &bp, &ba)
+                },
                 is_virtual: *is_virtual,
                 is_override: *is_override,
                 is_const: *is_const,
@@ -1181,11 +1803,17 @@ pub fn substitute_decl(
                     .iter()
                     .map(|(n, t)| (n.clone(), substitute_type(t, params, args)))
                     .collect(),
-                inits: inits
-                    .iter()
-                    .map(|(n, e)| (n.clone(), substitute_expr(e, params, args)))
-                    .collect(),
-                body: substitute_body(body, params, args),
+                inits: {
+                    let (bp, ba) = body_subst(params, args, ps);
+                    inits
+                        .iter()
+                        .map(|(n, e)| (n.clone(), substitute_expr(e, &bp, &ba)))
+                        .collect()
+                },
+                body: {
+                    let (bp, ba) = body_subst(params, args, ps);
+                    substitute_body(body, &bp, &ba)
+                },
                 is_virtual: *is_virtual,
                 is_explicit: *is_explicit,
                 is_noexcept: *is_noexcept,
@@ -1358,7 +1986,7 @@ mod tests {
         assert_ne!(type_key(&p), type_key(&r));
         // 嵌套模板 vector<vector<int>> 保持递归结构
         let inner = t("vector", &[M::Int]);
-        let outer = t("vector", &[inner.clone()]);
+        let outer = t("vector", std::slice::from_ref(&inner));
         let flat = t("vector", &[M::Int]);
         assert_ne!(type_key(&outer), type_key(&flat));
         assert_eq!(type_key(&inner), "t_vector_int");
@@ -1411,6 +2039,7 @@ mod tests {
             is_struct: true,
             is_union: false,
             bases: vec![],
+            member_access: vec![],
             members: vec![
                 CppDecl::MemberVar {
                     ty: MangleType::Class("T".to_string()),
@@ -1600,15 +2229,51 @@ mod tests {
                 is_struct: true,
                 is_union: false,
                 bases: vec![],
+                member_access: vec![],
                 members: vec![],
             }),
         });
         // int* 匹配 T*
-        assert!(reg
-            .pick_partial("Foo", &[MangleType::Pointer(Box::new(MangleType::Int))])
-            .is_some());
+        let picked = reg.pick_partial("Foo", &[MangleType::Pointer(Box::new(MangleType::Int))]);
+        assert!(picked.is_some());
         // int 不匹配
         assert!(reg.pick_partial("Foo", &[MangleType::Int]).is_none());
+    }
+
+    /// 指针偏特化的形参必须绑定到**被指对象**, 而不是整个指针类型.
+    /// 回归: `iterator_traits<T*>` 的 `typedef T value_type` 对 `int*`
+    /// 曾错误地得到 `int*` (尺寸 8), 半个 STL 迭代器 traits 因此失效.
+    #[test]
+    fn partial_spec_pointer_binds_pointee_not_pointer() {
+        let mut reg = TemplateRegistry::default();
+        reg.partials.push(PartialSpecEntry {
+            name: "traits".to_string(),
+            param_names: vec!["T".to_string()],
+            pattern_text: "T*".to_string(),
+            decl: CppDecl::Class(ClassDecl {
+                name: "traits".to_string(),
+                is_struct: true,
+                is_union: false,
+                bases: vec![],
+                member_access: vec![],
+                members: vec![CppDecl::Typedef {
+                    target: MangleType::Class("T".to_string()),
+                    name: "value_type".to_string(),
+                }],
+            }),
+        });
+        let p = |t: MangleType| MangleType::Pointer(Box::new(t));
+        for (arg, expect) in [
+            (p(MangleType::Int), MangleType::Int),
+            (p(MangleType::Char), MangleType::Char),
+            (p(p(MangleType::Int)), p(MangleType::Int)),
+        ] {
+            let (_, names, bound) = reg.pick_partial("traits", &[arg]).expect("T* 应匹配");
+            assert_eq!(names, vec!["T".to_string()]);
+            assert_eq!(bound, vec![expect], "形参 T 的绑定应是被指对象本身");
+        }
+        // 非指针实参不匹配 `T*`
+        assert!(reg.pick_partial("traits", &[MangleType::Int]).is_none());
     }
 }
 
@@ -1685,6 +2350,7 @@ mod g14_tests {
             is_struct: true,
             is_union: false,
             bases: vec![],
+            member_access: vec![],
             members: vec![CppDecl::MemberVar {
                 ty: MangleType::Class("T".to_string()),
                 name: "payload".to_string(),
@@ -1742,6 +2408,7 @@ mod g14_tests {
             is_struct: true,
             is_union: false,
             bases: vec![],
+            member_access: vec![],
             members: vec![CppDecl::Typedef {
                 target: MangleType::TplMember {
                     name: "_Iterator".to_string(),
@@ -1772,7 +2439,7 @@ mod g14_tests {
             args: vec![MangleType::Int],
         };
 
-        let result = reg.instantiate_class("reverse_iterator", &[iterator_type.clone()]);
+        let result = reg.instantiate_class("reverse_iterator", std::slice::from_ref(&iterator_type));
         assert!(result.is_some());
 
         let inst = result.unwrap();
@@ -1921,6 +2588,7 @@ fn substitute_template_refs_in_decl(
                 is_struct: c.is_struct,
                 is_union: c.is_union,
                 bases: c.bases.clone(),
+                member_access: c.member_access.clone(),
                 members: new_members,
             })
         },
@@ -1961,3 +2629,155 @@ pub fn instantiate_decl_with_template_params(
 }
 
 // ===== END OF G11 CODE =====
+
+// ===== M51: concept / requires / SFINAE 候选集语义回归测试 =====
+
+#[cfg(test)]
+mod m51_tests {
+    use super::*;
+
+    /// 造一个自由函数模板体 (只用于注册候选, 不要求可执行)
+    fn fn_tpl(name: &str, params: Vec<(String, MangleType)>, ret: MangleType) -> CppDecl {
+        CppDecl::FreeFn {
+            ret,
+            name: name.to_string(),
+            params,
+            body: CppBody {
+                stmts: vec![CppStmt::Return(Some(CppExpr::IntLit(0)))],
+                is_decl: false,
+            },
+            is_noexcept: false,
+            trailing_ret_type: None,
+        }
+    }
+
+    /// 造 `template <typename A, typename B = ..., ...>` 形参表
+    fn tparams(names: &[&str], defaults: &[Option<MangleType>]) -> TemplateArgs {
+        TemplateArgs {
+            params: names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| crate::cpp::parser::TemplateParam {
+                    template_params: None,
+                    name: (*n).to_string(),
+                    default: defaults.get(i).cloned().flatten(),
+                    non_type: None,
+                    is_pack: false,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn concept_ref_expansion_slices_at_angle_bracket() {
+        // `Small<T>`: 名字占 5 个字符. 旧实现按 `start + 1..end` 取实参,
+        // 会切出 `mall<T`, 概念形参被绑成垃圾, 展开结果整个失真.
+        let mut reg = TemplateRegistry::default();
+        reg.register_concept("Small", &["T".to_string()], "sizeof(T) <= 4");
+        let expanded = reg.expand_concept_refs("Small<T>");
+        assert!(!expanded.contains("mall"), "实参切片错位: {expanded}");
+        assert!(expanded.contains("sizeof"), "概念体未被代入: {expanded}");
+        let mut ctx = SfinaeCtx::new();
+        ctx.bind("T".to_string(), "int".to_string());
+        assert_eq!(reg.evaluate_constraint("Small<T>", &ctx), Some(true));
+        ctx.bind("T".to_string(), "long long".to_string());
+        assert_eq!(reg.evaluate_constraint("Small<T>", &ctx), Some(false));
+    }
+
+    #[test]
+    fn multi_param_concept_binds_all_params() {
+        // 形参不只一个、且不叫 T 的概念: 逐个按名字绑定, 不与外层形参串味
+        let mut reg = TemplateRegistry::default();
+        reg.register_concept(
+            "SameAs",
+            &["A".to_string(), "B".to_string()],
+            "is_same<A, B>::value",
+        );
+        let mut ctx = SfinaeCtx::new();
+        ctx.bind("T".to_string(), "int".to_string());
+        assert_eq!(reg.evaluate_constraint("SameAs<T, int>", &ctx), Some(true));
+        ctx.bind("T".to_string(), "long".to_string());
+        assert_eq!(reg.evaluate_constraint("SameAs<T, int>", &ctx), Some(false));
+    }
+
+    #[test]
+    fn overloaded_candidates_keep_their_index() {
+        // `requires` 版 + 无约束版同名重载: 推导必须返回**候选下标**,
+        // 否则两个不同函数会共用一个实例化缓存键 / 一个 C 符号.
+        let mut reg = TemplateRegistry::default();
+        reg.register_concept("Small", &["T".to_string()], "sizeof(T) <= 4");
+        let one = tparams(&["T"], &[]);
+        reg.register(
+            &one,
+            &Some("Small<T>".to_string()),
+            &fn_tpl("tag", vec![("x".to_string(), MangleType::Class("T".to_string()))], MangleType::Int),
+        );
+        reg.register(
+            &one,
+            &None,
+            &fn_tpl("tag", vec![("y".to_string(), MangleType::Class("T".to_string()))], MangleType::Int),
+        );
+        assert_eq!(reg.candidates_named("tag").len(), 2);
+        // int 满足 Small → 候选 0; long long 不满足 → 静默换下一个 → 候选 1
+        let hit = reg.deduce_for_call("tag", &[MangleType::Int]).expect("int");
+        assert_eq!(hit.0, 0);
+        let hit2 = reg
+            .deduce_for_call("tag", &[MangleType::LongLong])
+            .expect("long long");
+        assert_eq!(hit2.0, 1);
+        // 名字+实参相同、候选不同 → 缓存键必须不同
+        assert_ne!(
+            TemplateRegistry::fn_inst_key(0, "tag", &[MangleType::Int]),
+            TemplateRegistry::fn_inst_key(1, "tag", &[MangleType::Int])
+        );
+    }
+
+    #[test]
+    fn anonymous_default_param_is_filled_by_resolution() {
+        // `template <typename T, typename = void> int sfinae_anon(T)`
+        let mut reg = TemplateRegistry::default();
+        let args = tparams(&["T", ""], &[None, Some(MangleType::Void)]);
+        reg.register(
+            &args,
+            &None,
+            &fn_tpl("sfinae_anon", vec![("x".to_string(), MangleType::Class("T".to_string()))], MangleType::Int),
+        );
+        let (idx, resolved) = reg
+            .normalize_args("sfinae_anon", &[MangleType::Int])
+            .expect("匿名默认形参应被填充");
+        assert_eq!(idx, 0);
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0], MangleType::Int);
+        assert_eq!(resolved[1], MangleType::Void);
+    }
+
+    #[test]
+    fn no_match_diagnostic_is_gated_on_function_templates() {
+        let mut reg = TemplateRegistry::default();
+        let one = tparams(&["T"], &[]);
+        reg.register(&one, &None, &fn_tpl("pick", vec![], MangleType::Int));
+        assert!(reg.only_fn_templates_named("pick"));
+        assert!(!reg.only_fn_templates_named("nowhere"));
+        // 类模板同名时, 调用位置是临时量构造而不是函数调用 → 不得报"无匹配函数"
+        reg.register(
+            &one,
+            &None,
+            &CppDecl::Class(ClassDecl {
+                name: "pick".to_string(),
+                is_struct: true,
+                is_union: false,
+                bases: vec![],
+                member_access: vec![],
+                members: vec![],
+            }),
+        );
+        assert!(!reg.only_fn_templates_named("pick"));
+    }
+
+    #[test]
+    fn injected_class_names_covers_qualified_and_short() {
+        assert_eq!(injected_class_names("Box"), vec!["Box".to_string()]);
+        let names = injected_class_names("std::vector");
+        assert_eq!(names, vec!["std::vector".to_string(), "vector".to_string()]);
+    }
+}

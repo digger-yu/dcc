@@ -522,7 +522,7 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
             // after evaluation, so that parent expression can continue constant folding.
             // Side effects (storing to LValue) cannot be done in compile-time constant evaluation,
             // so they will be handled at runtime. We just need to return the value of RHS.
-            return eval_full(&*r, fenv_access);
+            eval_full(r, fenv_access)
         },
         _ => Err(ConstEvalError::NotConstant),
     }

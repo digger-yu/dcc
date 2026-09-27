@@ -14,13 +14,18 @@ use crate::codegen::riscv64;
 use crate::codegen::{aarch64, arm};
 
 /// Backend implementation wrapper for type erasure
+///
+/// 各 arch 的 `Codegen` 本体都是带完整节表/符号表的胖结构 (x86_64 达 3.7 KB),
+/// 直接内嵌会让本枚举按最大变体取尺寸, 每次 `Box::new(AnyBackend::..)` 装箱
+/// 都要搬运整块负载。统一 `Box` 化后枚举只剩指针, 构造/匹配处机械加一层
+/// `Box::new` / 自动解引用, 行为与 `Backend` trait 调用语义完全不变。
 pub enum AnyBackend {
-    X86_64(x86_64::Codegen),
-    AArch64(aarch64::Aarch64Codegen),
-    Arm(arm::ArmCodegen),
-    Mips(mips::MipsCodegen),
-    Mips64(mips64::Mips64Codegen),
-    RiscV64(riscv64::Riscv64Codegen),
+    X86_64(Box<x86_64::Codegen>),
+    AArch64(Box<aarch64::Aarch64Codegen>),
+    Arm(Box<arm::ArmCodegen>),
+    Mips(Box<mips::MipsCodegen>),
+    Mips64(Box<mips64::Mips64Codegen>),
+    RiscV64(Box<riscv64::Riscv64Codegen>),
 }
 
 impl Backend for AnyBackend {
@@ -106,24 +111,26 @@ pub fn backend_for(
     relocatable: bool,
 ) -> Option<Box<dyn Backend + 'static>> {
     match arch {
-        Arch::X86_64 => Some(Box::new(AnyBackend::X86_64(x86_64::Codegen::new(target.clone())))),
-        Arch::AArch64 => Some(Box::new(AnyBackend::AArch64(aarch64::Aarch64Codegen::new(
-            target.clone(),
-            relocatable,
-        )))),
-        Arch::Arm => {
-            Some(Box::new(AnyBackend::Arm(arm::ArmCodegen::new(target.clone(), relocatable))))
+        Arch::X86_64 => {
+            Some(Box::new(AnyBackend::X86_64(Box::new(x86_64::Codegen::new(target.clone())))))
         },
-        Arch::Mips => {
-            Some(Box::new(AnyBackend::Mips(mips::MipsCodegen::new(target.clone(), relocatable))))
-        },
-        Arch::Mips64 => Some(Box::new(AnyBackend::Mips64(mips64::Mips64Codegen::new(
-            target.clone(),
-            relocatable,
+        Arch::AArch64 => Some(Box::new(AnyBackend::AArch64(Box::new(
+            aarch64::Aarch64Codegen::new(target.clone(), relocatable),
         )))),
-        Arch::RiscV64 => Some(Box::new(AnyBackend::RiscV64(riscv64::Riscv64Codegen::new(
+        Arch::Arm => Some(Box::new(AnyBackend::Arm(Box::new(arm::ArmCodegen::new(
             target.clone(),
             relocatable,
+        ))))),
+        Arch::Mips => Some(Box::new(AnyBackend::Mips(Box::new(mips::MipsCodegen::new(
+            target.clone(),
+            relocatable,
+        ))))),
+        Arch::Mips64 => Some(Box::new(AnyBackend::Mips64(Box::new(mips64::Mips64Codegen::new(
+            target.clone(),
+            relocatable,
+        ))))),
+        Arch::RiscV64 => Some(Box::new(AnyBackend::RiscV64(Box::new(
+            riscv64::Riscv64Codegen::new(target.clone(), relocatable),
         )))),
 
         // Disabled backends:

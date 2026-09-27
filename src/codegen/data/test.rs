@@ -69,7 +69,7 @@ mod tests {
         ];
 
         let selected = selector
-            .select_format(&add_instr, &operands)
+            .select_format(add_instr, &operands)
             .expect("Failed to select format");
 
         println!(
@@ -141,7 +141,7 @@ mod tests {
         ];
 
         let selected = selector
-            .select_format(&mov_instr, &operands)
+            .select_format(mov_instr, &operands)
             .expect("Failed to select");
         let bytes = emitter.emit(&selected).expect("Failed to emit");
 

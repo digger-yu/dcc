@@ -5107,7 +5107,7 @@ impl Preprocessor {
                         let d = EXPAND_DEPTH.with(|c| c.get());
                         eprintln!("[pp-debug] PAINT_BLUE asm_inline depth={} file={} dis={:?} text_hdr={:?}", d, self.file, disabled, &text[..text.len().min(60)]);
                     }
-                    out.push_str(&ident);
+                    out.push_str(ident);
                     continue;
                 }
 
@@ -5323,11 +5323,11 @@ impl Preprocessor {
                                     )
                                 };
                                 self.diags.push(self.err_at("E0211", msg, map.line(nl)));
-                                out.push_str(&ident);
+                                out.push_str(ident);
                             }
                             i = j;
                         } else {
-                            out.push_str(&ident);
+                            out.push_str(ident);
                         }
                     } else {
                         self.expanded_macros.borrow_mut().insert(ident.to_string());

@@ -31,8 +31,8 @@ namespace std {
                 v_ = dccpp_view_filter_int(src, pred);
             }
             ~filter_view() { if (v_) dccpp_view_free(v_); }
-            filter_view(const filter_view&) = 0;
-            filter_view& operator=(const filter_view&) = 0;
+            filter_view(const filter_view&) = delete;
+            filter_view& operator=(const filter_view&) = delete;
 
             size_t size() const { return dccpp_view_size(v_); }
             int    empty() const { return dccpp_view_empty(v_); }
@@ -52,8 +52,8 @@ namespace std {
                 v_ = dccpp_view_transform_int(src, fn);
             }
             ~transform_view() { if (v_) dccpp_view_free(v_); }
-            transform_view(const transform_view&) = 0;
-            transform_view& operator=(const transform_view&) = 0;
+            transform_view(const transform_view&) = delete;
+            transform_view& operator=(const transform_view&) = delete;
 
             size_t size() const { return dccpp_view_size(v_); }
             int    at(size_t i) const {
@@ -70,8 +70,8 @@ namespace std {
             take_view() : v_(0) {}
             take_view(dccpp_view* src, size_t n) : v_(dccpp_view_take(src, n)) {}
             ~take_view() { if (v_) dccpp_view_free(v_); }
-            take_view(const take_view&) = 0;
-            take_view& operator=(const take_view&) = 0;
+            take_view(const take_view&) = delete;
+            take_view& operator=(const take_view&) = delete;
 
             size_t size() const { return dccpp_view_size(v_); }
             int    at(size_t i) const {
@@ -88,8 +88,8 @@ namespace std {
             reverse_view() : v_(0) {}
             reverse_view(dccpp_view* src) : v_(dccpp_view_reverse(src)) {}
             ~reverse_view() { if (v_) dccpp_view_free(v_); }
-            reverse_view(const reverse_view&) = 0;
-            reverse_view& operator=(const reverse_view&) = 0;
+            reverse_view(const reverse_view&) = delete;
+            reverse_view& operator=(const reverse_view&) = delete;
 
             size_t size() const { return dccpp_view_size(v_); }
             int    at(size_t i) const {

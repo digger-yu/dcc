@@ -111,17 +111,11 @@ impl Codegen {
                     is_nested: self.current_func_is_nested,
                 };
 
-                // 嵌套运行时索引: 退回旧路径 (语义层会丢失第二个运行时偏移)
-                let is_nested_runtime_index = matches!(arr.as_ref(), Expr::Index { .. })
-                    && crate::const_eval::eval(idx).is_err()
-                    && match arr.as_ref() {
-                        Expr::Index { idx: inner_idx, .. } => {
-                            crate::const_eval::eval(inner_idx).is_err()
-                        },
-                        _ => false,
-                    };
-
-                if !is_nested_runtime_index {
+                // 描述符自描述多维下标链 (`ByteOffset::Runtime.terms` 逐项
+                // 携带自己的下标表达式), 旧的「嵌套运行时索引」浅层试探已
+                // 删除: 无法表达的形状由 materialize_address 返回 false,
+                // 落到下面旧路径。
+                {
                     let desc = compute_lvalue_address(self, e, &ctx);
 
                     if self.materialize_address(
@@ -204,39 +198,62 @@ impl Codegen {
     /// gen_expr 取地址分支 (batch F6 逐字搬迁: Expr::AddrOf arm, 188 行)。
     /// &var / &struct.field / &ptr->field / *ptr: 计算地址到 dst。
     pub fn gen_expr_addrof(&mut self, e: &Expr, dst: u8) {
-        match e {
-            Expr::AddrOf { e, .. } => {
-                // &var / &struct.field / &ptr->field / *ptr: 计算地址到 dst
-                if let Expr::Ident {
-                    name, ty: id_ty, ..
-                } = e.as_ref()
-                {
-                    if matches!(id_ty, Type::Func(_, _)) && !self.var_map.contains_key(&name.name) {
-                        // &func: 函数地址
-                        // 沿作用域链解析嵌套函数引用 (支持兄弟/祖先定义)
-                        if let Some((unique, hops, offs)) = self.resolve_nested_func_ref(&name.name)
-                        {
-                            self.load_trampoline_addr(dst, &unique, hops, &offs);
-                        } else {
-                            let effective_name = self
-                                .nested_func_renames
-                                .get(&self.current_func_name)
-                                .and_then(|m| m.get(&name.name))
-                                .cloned()
-                                .unwrap_or_else(|| name.name.clone());
-                            self.emit_func_addr(dst, &effective_name);
-                        }
-                    } else if self.is_global_not_local(&name.name) {
+        if let Expr::AddrOf { e, .. } = e {
+            // &var / &struct.field / &ptr->field / *ptr: 计算地址到 dst
+            if let Expr::Ident {
+                name, ty: id_ty, ..
+            } = e.as_ref()
+            {
+                if matches!(id_ty, Type::Func(_, _)) && !self.var_map.contains_key(&name.name) {
+                    // &func: 函数地址
+                    // 沿作用域链解析嵌套函数引用 (支持兄弟/祖先定义)
+                    if let Some((unique, hops, offs)) = self.resolve_nested_func_ref(&name.name)
+                    {
+                        self.load_trampoline_addr(dst, &unique, hops, &offs);
+                    } else {
+                        let effective_name = self
+                            .nested_func_renames
+                            .get(&self.current_func_name)
+                            .and_then(|m| m.get(&name.name))
+                            .cloned()
+                            .unwrap_or_else(|| name.name.clone());
+                        self.emit_func_addr(dst, &effective_name);
+                    }
+                } else if self.is_global_not_local(&name.name) {
+                    self.emit_global_addr(dst, &name.name);
+                } else if let Some(&off) = self.vla_offsets.get(&name.name) {
+                    // VLA/VM struct 变量: 取地址 = 数据区基址 (元数
+                    // 据槽), 与数组名衰减语义一致 (C11 6.5.3.2: &
+                    // 返回对象首地址, 非元数据槽)
+                    self.load_stack(dst, off);
+                } else {
+                    let off = self.var_offset(&name.name);
+                    // REX.W + REX.B (r13) + REX.R (当 dst >= 8, 编码 r10/r11/r12/...)
+                    let rex = 0x48u8 | 0x01 | (if dst >= 8 { 0x04 } else { 0 });
+                    self.emit(&[rex, 0x8D]);
+                    if off.abs() < 128 {
+                        self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
+                    } else {
+                        self.emit(&[0x85 | ((dst & 7) << 3)]);
+                        self.emit(&(off as i32).to_le_bytes());
+                    }
+                }
+            } else if let Expr::Member {
+                expr,
+                field,
+                is_arrow,
+                ..
+            } = e.as_ref()
+            {
+                // &struct.field: 基址 + 字段偏移 (不加载值)
+                if *is_arrow {
+                    self.gen_expr(expr, dst);
+                } else if let Expr::Ident { name, .. } = expr.as_ref() {
+                    if self.is_global_not_local(&name.name) {
                         self.emit_global_addr(dst, &name.name);
-                    } else if let Some(&off) = self.vla_offsets.get(&name.name) {
-                        // VLA/VM struct 变量: 取地址 = 数据区基址 (元数
-                        // 据槽), 与数组名衰减语义一致 (C11 6.5.3.2: &
-                        // 返回对象首地址, 非元数据槽)
-                        self.load_stack(dst, off);
                     } else {
                         let off = self.var_offset(&name.name);
-                        // REX.W + REX.B (r13) + REX.R (当 dst >= 8, 编码 r10/r11/r12/...)
-                        let rex = 0x48u8 | 0x01 | (if dst >= 8 { 0x04 } else { 0 });
+                        let rex = 0x49u8;
                         self.emit(&[rex, 0x8D]);
                         if off.abs() < 128 {
                             self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
@@ -245,174 +262,145 @@ impl Codegen {
                             self.emit(&(off as i32).to_le_bytes());
                         }
                     }
-                } else if let Expr::Member {
-                    expr,
-                    field,
-                    is_arrow,
-                    ..
-                } = e.as_ref()
-                {
-                    // &struct.field: 基址 + 字段偏移 (不加载值)
-                    if *is_arrow {
+                } else {
+                    // 通用路径: 基址来自任意 lvalue (如 &s.a.b, &s.i[k].f)
+                    if !self.gen_lvalue_addr(expr, dst) {
                         self.gen_expr(expr, dst);
-                    } else if let Expr::Ident { name, .. } = expr.as_ref() {
-                        if self.is_global_not_local(&name.name) {
-                            self.emit_global_addr(dst, &name.name);
-                        } else {
-                            let off = self.var_offset(&name.name);
-                            let rex = 0x49u8;
-                            self.emit(&[rex, 0x8D]);
-                            if off.abs() < 128 {
-                                self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
-                            } else {
-                                self.emit(&[0x85 | ((dst & 7) << 3)]);
-                                self.emit(&(off as i32).to_le_bytes());
-                            }
-                        }
-                    } else {
-                        // 通用路径: 基址来自任意 lvalue (如 &s.a.b, &s.i[k].f)
-                        if !self.gen_lvalue_addr(expr, dst) {
-                            self.gen_expr(expr, dst);
-                        }
-                    }
-                    // 注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段偏移
-                    let expr_ty = expr.ty();
-                    let target_ty =
-                        self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty, *is_arrow));
-                    let field_info = match &target_ty {
-                        Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
-                            find_field(fields, &field.name).map(|(f, extra)| {
-                                let mut fc = f.clone();
-                                fc.offset += extra;
-                                fc
-                            })
-                        },
-                        _ => None,
-                    };
-                    if let Some(ref f) = field_info {
-                        let field_off = f.offset as i32;
-                        if field_off != 0 {
-                            let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-                            self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
-                            self.emit(&field_off.to_le_bytes());
-                        }
-                    }
-                } else if let Expr::Deref { e: inner, .. } = e.as_ref() {
-                    // *ptr: 地址就是指针值
-                    self.gen_expr(inner, dst);
-                } else if let Expr::Index {
-                    arr,
-                    idx,
-                    ty: elem_ty,
-                    ..
-                } = e.as_ref()
-                {
-                    // &arr[i]: 基址 + i * elem_size
-                    let es = elem_ty.size() as i32;
-                    if let Expr::Ident {
-                        name: arr_name,
-                        ty: arr_ty,
-                        ..
-                    } = arr.as_ref()
-                    {
-                        if self.is_global_not_local(&arr_name.name) {
-                            // 全局数组 → 取地址; 全局指针 → 加载值
-                            if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
-                                self.emit_global_addr(0, &arr_name.name);
-                            } else {
-                                self.emit_global_load(0, &arr_name.name);
-                            }
-                        } else if self.vla_offsets.contains_key(&arr_name.name) {
-                            let off = self.var_offset(&arr_name.name);
-                            self.load_stack(0, off);
-                        } else if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
-                            // 局部数组: LEA 取地址
-                            let off = self.var_offset(&arr_name.name);
-                            self.emit_lea_r13(0, off);
-                        } else {
-                            // 局部指针: 加载指针值
-                            let off = self.var_offset(&arr_name.name);
-                            self.load_stack(0, off);
-                        }
-                    } else {
-                        // 通用路径: 基址来自任意 lvalue/指针表达式 (如 &s.i[k])
-                        let arr_ty = arr.ty();
-                        if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
-                            if !self.gen_lvalue_addr(arr, 0) {
-                                self.gen_expr(arr, 0);
-                            }
-                        } else {
-                            self.gen_expr(arr, 0);
-                        }
-                    }
-                    self.push(0);
-                    self.gen_expr(idx, 1);
-                    self.pop(0);
-                    self.emit_index_scale(es, arr, elem_ty);
-                    self.emit(&[0x48, 0x01, 0xC8]); // add rax, rcx
-                    if dst != 0 {
-                        self.mov(dst, 0);
-                    }
-                } else if matches!(e.as_ref(), Expr::CompoundLit { .. }) {
-                    // &CompoundLit: 复合字面量的值已经是地址, 直接使用
-                    self.gen_expr(e, dst);
-                } else if let Expr::Real { e: inner, .. } = e.as_ref() {
-                    // &(__real expr): 实部地址 = 复数变量地址 (实部在偏移 0)
-                    if let Expr::Ident { name, .. } = inner.as_ref() {
-                        if self.is_global_not_local(&name.name) {
-                            self.emit_global_addr(dst, &name.name);
-                        } else {
-                            let off = self.var_offset(&name.name);
-                            self.emit_lea_r13(dst, off);
-                        }
-                    } else if !self.gen_lvalue_addr(inner, dst) {
-                        self.gen_expr(inner, dst);
-                    }
-                    // 实部在偏移 0, 无需加偏移
-                } else if let Expr::Imag { e: inner, .. } = e.as_ref() {
-                    // &(__imag expr): 虚部地址 = 复数变量地址 + inner_size
-                    let inner_ty = inner.ty();
-                    let inner_sz = match &inner_ty {
-                        Type::Complex(ref c) => c.base.size() as i64,
-                        _ => inner_ty.size() as i64,
-                    };
-                    if let Expr::Ident { name, .. } = inner.as_ref() {
-                        if self.is_global_not_local(&name.name) {
-                            self.emit_global_addr(dst, &name.name);
-                        } else {
-                            let off = self.var_offset(&name.name);
-                            self.emit_lea_r13(dst, off);
-                        }
-                    } else if !self.gen_lvalue_addr(inner, dst) {
-                        self.gen_expr(inner, dst);
-                    }
-                    // 加上虚部偏移
-                    if inner_sz != 0 {
-                        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-                        self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
-                        self.emit(&(inner_sz as i32).to_le_bytes());
                     }
                 }
-            },
-            _ => {},
+                // 注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段偏移
+                let expr_ty = expr.ty();
+                let target_ty =
+                    self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty, *is_arrow));
+                let field_info = match &target_ty {
+                    Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
+                        find_field(fields, &field.name).map(|(f, extra)| {
+                            let mut fc = f.clone();
+                            fc.offset += extra;
+                            fc
+                        })
+                    },
+                    _ => None,
+                };
+                if let Some(ref f) = field_info {
+                    let field_off = f.offset as i32;
+                    if field_off != 0 {
+                        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                        self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
+                        self.emit(&field_off.to_le_bytes());
+                    }
+                }
+            } else if let Expr::Deref { e: inner, .. } = e.as_ref() {
+                // *ptr: 地址就是指针值
+                self.gen_expr(inner, dst);
+            } else if let Expr::Index {
+                arr,
+                idx,
+                ty: elem_ty,
+                ..
+            } = e.as_ref()
+            {
+                // &arr[i]: 基址 + i * elem_size
+                let es = elem_ty.size() as i32;
+                if let Expr::Ident {
+                    name: arr_name,
+                    ty: arr_ty,
+                    ..
+                } = arr.as_ref()
+                {
+                    if self.is_global_not_local(&arr_name.name) {
+                        // 全局数组 → 取地址; 全局指针 → 加载值
+                        if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
+                            self.emit_global_addr(0, &arr_name.name);
+                        } else {
+                            self.emit_global_load(0, &arr_name.name);
+                        }
+                    } else if self.vla_offsets.contains_key(&arr_name.name) {
+                        let off = self.var_offset(&arr_name.name);
+                        self.load_stack(0, off);
+                    } else if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
+                        // 局部数组: LEA 取地址
+                        let off = self.var_offset(&arr_name.name);
+                        self.emit_lea_r13(0, off);
+                    } else {
+                        // 局部指针: 加载指针值
+                        let off = self.var_offset(&arr_name.name);
+                        self.load_stack(0, off);
+                    }
+                } else {
+                    // 通用路径: 基址来自任意 lvalue/指针表达式 (如 &s.i[k])
+                    let arr_ty = arr.ty();
+                    if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
+                        if !self.gen_lvalue_addr(arr, 0) {
+                            self.gen_expr(arr, 0);
+                        }
+                    } else {
+                        self.gen_expr(arr, 0);
+                    }
+                }
+                self.push(0);
+                self.gen_expr(idx, 1);
+                self.pop(0);
+                self.emit_index_scale(es, arr, elem_ty);
+                self.emit(&[0x48, 0x01, 0xC8]); // add rax, rcx
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+            } else if matches!(e.as_ref(), Expr::CompoundLit { .. }) {
+                // &CompoundLit: 复合字面量的值已经是地址, 直接使用
+                self.gen_expr(e, dst);
+            } else if let Expr::Real { e: inner, .. } = e.as_ref() {
+                // &(__real expr): 实部地址 = 复数变量地址 (实部在偏移 0)
+                if let Expr::Ident { name, .. } = inner.as_ref() {
+                    if self.is_global_not_local(&name.name) {
+                        self.emit_global_addr(dst, &name.name);
+                    } else {
+                        let off = self.var_offset(&name.name);
+                        self.emit_lea_r13(dst, off);
+                    }
+                } else if !self.gen_lvalue_addr(inner, dst) {
+                    self.gen_expr(inner, dst);
+                }
+                // 实部在偏移 0, 无需加偏移
+            } else if let Expr::Imag { e: inner, .. } = e.as_ref() {
+                // &(__imag expr): 虚部地址 = 复数变量地址 + inner_size
+                let inner_ty = inner.ty();
+                let inner_sz = match &inner_ty {
+                    Type::Complex(ref c) => c.base.size() as i64,
+                    _ => inner_ty.size() as i64,
+                };
+                if let Expr::Ident { name, .. } = inner.as_ref() {
+                    if self.is_global_not_local(&name.name) {
+                        self.emit_global_addr(dst, &name.name);
+                    } else {
+                        let off = self.var_offset(&name.name);
+                        self.emit_lea_r13(dst, off);
+                    }
+                } else if !self.gen_lvalue_addr(inner, dst) {
+                    self.gen_expr(inner, dst);
+                }
+                // 加上虚部偏移
+                if inner_sz != 0 {
+                    let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                    self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
+                    self.emit(&(inner_sz as i32).to_le_bytes());
+                }
+            }
         }
     }
 
     /// gen_expr `&&label` 标签地址分支 (batch F10 逐字搬迁: Expr::LabelAddr arm)。
     pub fn gen_expr_label_addr(&mut self, e: &Expr, dst: u8) {
-        match e {
-            Expr::LabelAddr { label, .. } => {
-                // &&label: 加载标签地址到 dst (GNU 扩展)
-                // 使用 LEA dst, [RIP + disp32] + label_addr_refs 延迟解析
-                // 前缀标签名以避免与函数符号名冲突
-                let label_name = Codegen::c_label_to_asm(&label.name);
-                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-                let modrm = 0x05 | ((dst & 7) << 3);
-                self.emit(&[rex, 0x8D, modrm, 0, 0, 0, 0]);
-                let disp32_pos = self.pos() - 4;
-                self.label_addr_refs.push((disp32_pos, label_name));
-            },
-            _ => {},
+        if let Expr::LabelAddr { label, .. } = e {
+            // &&label: 加载标签地址到 dst (GNU 扩展)
+            // 使用 LEA dst, [RIP + disp32] + label_addr_refs 延迟解析
+            // 前缀标签名以避免与函数符号名冲突
+            let label_name = Codegen::c_label_to_asm(&label.name);
+            let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+            let modrm = 0x05 | ((dst & 7) << 3);
+            self.emit(&[rex, 0x8D, modrm, 0, 0, 0, 0]);
+            let disp32_pos = self.pos() - 4;
+            self.label_addr_refs.push((disp32_pos, label_name));
         }
     }
 }

@@ -3,7 +3,7 @@
 
 use crate::ast::*;
 use crate::codegen::shared::elf as shared_elf;
-use crate::codegen::x86_64::{Codegen, JumpKind, VaListAddress};
+use crate::codegen::x86_64::{AggDst, Codegen, JumpKind, VaListAddress};
 use crate::const_eval;
 
 impl Codegen {
@@ -539,6 +539,26 @@ impl Codegen {
                         self.pop(6); // LHS 地址不可得, 落回下方通用路径: 保持栈平衡
                     }
                 }
+                // 聚合 rvalue → **运行时地址**目标 (成员 / 下标 / 解引用):
+                // 与上面 Vector 分支同一条轴 —— 该类型的值装不进一个标量寄存器,
+                // 必须整块拷贝。旧分发只把「具名变量」当聚合赋值目标, 这类 LHS
+                // 会落到下方恒 8 字节的标量 store, 而聚合 rvalue 的值模型是
+                // **地址** (sret 缓冲 / 物化槽), 于是只有第一字被写 (且写的是
+                // 源地址), 其余字保留栈上残值 —— `s.f = g()` 掉第二 quad、
+                // 协程 awaiter 帧槽 >8B 失效皆此根因。
+                // 目标地址先存进一个帧槽, 由 `AggDst::Indirect` 解释; 源侧的
+                // 全部物化契约 (Call/sret/va_arg/CompoundLit/整体拷贝) 仍由
+                // `gen_aggregate_assign_to` 单一实现承担, 这里不重写任何判据。
+                if !matches!(lv, Expr::Ident { .. }) && Self::value_is_whole_copy(&assign_l_ty)
+                    && self.gen_lvalue_addr(lv, 0) {
+                        let addr_slot = self.alloc_sret_slot(8);
+                        self.store_stack(0, addr_slot); // [slot] = 目标地址
+                        let agg_dst = AggDst::Indirect { addr_slot };
+                        self.gen_aggregate_assign_to(&agg_dst, &assign_l_ty, r);
+                        // 赋值表达式的值 = 左值转换后的值: 聚合按地址交付
+                        self.load_stack(dst, addr_slot);
+                        return;
+                    }
                 // _Complex lvalue 赋值 (非 Ident): 统一走物化+分量拷贝。
                 // 下方 Index/Deref/Member 的标量 store 会把 rax 恒 8 字节
                 // 直接写入: 标量 RHS 污染虚部 (a[i] = -1 得 (-1,-1) 而非
@@ -727,21 +747,11 @@ impl Codegen {
                         is_nested: self.current_func_is_nested,
                     };
 
-                    // 嵌套运行时索引: 退回旧路径 (语义层会丢失第二个运行时偏移)
-                    let is_nested_runtime_index = matches!(arr.as_ref(), Expr::Index { .. })
-                        && crate::const_eval::eval(idx).is_err()
-                        && match arr.as_ref() {
-                            Expr::Index { idx: inner_idx, .. } => {
-                                crate::const_eval::eval(inner_idx).is_err()
-                            },
-                            _ => false,
-                        };
-
-                    let desc = if !is_nested_runtime_index {
-                        Some(compute_lvalue_address(self, lv, &ctx))
-                    } else {
-                        None
-                    };
+                    // 描述符自描述多维下标链 (`ByteOffset::Runtime.terms` 逐项
+                    // 携带自己的下标表达式), 旧的「嵌套运行时索引」浅层试探已
+                    // 删除: 无法表达的形状由 materialize_address 返回 false,
+                    // 落到下面旧路径。
+                    let desc = Some(compute_lvalue_address(self, lv, &ctx));
 
                     let es = elem_ty.size() as i32;
 

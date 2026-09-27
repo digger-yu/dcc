@@ -19,7 +19,9 @@ use crate::cpp::bmf::{BmfExport, BmfKind, BmfModule};
 use crate::cpp::coroutine::{
     body_has_coro, coro_fn_decls, coro_fn_epilogue, coro_fn_prologue, coro_return, coro_suspend,
 };
-use crate::cpp::cpp_const_eval::{eval_cpp_const_full, ConstexprContext};
+use crate::cpp::cpp_const_eval::{
+    eval_cpp_const_full, eval_cpp_const_full_with_calls, ConstexprContext, ConstexprFunction,
+};
 use crate::cpp::gcc_compat::runtime_prologue as gcc_runtime_prologue;
 use crate::cpp::mangle::{
     mangle_ctor, mangle_dtor, mangle_global_function, mangle_member_function, mangle_op_delete,
@@ -148,6 +150,13 @@ pub struct Lower {
     /// 用于将 `MangleType::Class("linenum_arith_t")` 等误判为类的
     /// typedef 名解析到底层类型, 避免生成 `struct` 前缀和构造函数调用.
     pub typedef_aliases: std::collections::HashMap<String, MangleType>,
+    /// M54: constexpr 自由函数表 (parser 登记, driver 交接给本降级器).
+    ///
+    /// 静态存储的初始化器必须是**编译期**可表示的量: C 后端对静态初始化里的
+    /// 函数调用直接报错, 所以 `int a[2][2] = {{square(1), 2}, {3, 4}};` 这类
+    /// 初值必须先按 constexpr 表折成字面量再输出 (见
+    /// [`Self::fold_static_init_expr`]). 表为空时折叠整体失效, 初值原样透传.
+    pub constexpr_fns: std::collections::HashMap<String, ConstexprFunction>,
 }
 
 // === 特性提交检查清单 ===
@@ -8354,6 +8363,11 @@ pub fn mangle_to_c(ty: &MangleType) -> String {
         // 数组类型: C 端声明形如 `T name[N]`, 因此这里只返回元素类型,
         // 具体的 `[N]` 由 emit_local_var / emit_global_var 单独输出.
         MangleType::Array(t, _n) => mangle_to_c(t),
+        // 函数类型: 旧 C 发射器一直把 `T (*f)(U)` 近似成 `T* f`（形参从不当
+        // 作可调用对象使用）。这里只输出返回类型，从而 `Pointer(Function)`
+        // 的产物与改动前的 `Pointer(ret)` **逐字一致**，不改变 legacy 后端
+        // 行为；native 路径 (sema::convert_type) 则使用完整的函数类型。
+        MangleType::Function { ret, params: _ } => mangle_to_c(ret),
         MangleType::Class(n) => {
             // enum/struct/union 前缀: 保留原始关键字而非一律加 struct
             if n.starts_with("enum ") || n.starts_with("union ") || n.starts_with("struct ") {
@@ -8419,6 +8433,16 @@ fn template_arg_to_c(ty: &MangleType) -> String {
             s
         },
         MangleType::Array(t, n) => format!("arr{}_{}", n, template_arg_to_c(t)),
+        // 函数类型在模板实参/类型名里用一个可辨标识 (带完整签名, 以便
+        // `void(*)(int)` 与 `void(*)(long)` 不会撞同一个 typedef 名)。
+        MangleType::Function { ret, params } => {
+            let mut s = format!("fn_{}", template_arg_to_c(ret));
+            for p in params {
+                s.push('_');
+                s.push_str(&template_arg_to_c(p));
+            }
+            s
+        },
         MangleType::Schar => "schar".into(),
         MangleType::Uchar => "uchar".into(),
         MangleType::Short => "short".into(),
@@ -8594,8 +8618,139 @@ impl Lower {
             module_partition: None,
             module_part_imports: vec![],
             typedef_aliases: std::collections::HashMap::new(),
+            constexpr_fns: std::collections::HashMap::new(),
         }
     }
+
+    /// M54: 带上 constexpr 函数表的构造器 (driver 在 AST 交接处调用).
+    pub fn with_constexpr_fns(fns: std::collections::HashMap<String, ConstexprFunction>) -> Self {
+        let mut l = Self::new();
+        l.constexpr_fns = fns;
+        l
+    }
+
+    /// M54: 把数组类型拆成 (元素类型, 维度列表).
+    ///
+    /// `MangleType::Array` 存的是**最外层**维度 (parser 套层时由内向外),
+    /// 所以逐层剥壳得到的顺序就是 C declarator `T name[N][M]` 的书写顺序;
+    /// `mangle_to_c` 故意不输出数组性 (它服务 mangled 名), `[N]` 必须由
+    /// 调用点补上 —— 与局部变量路径 `emit_local_var` 的反解写法同一真源.
+    fn peel_array_dims(ty: &MangleType) -> (MangleType, Vec<usize>) {
+        let mut dims: Vec<usize> = Vec::new();
+        let mut cur = ty.clone();
+        while let MangleType::Array(inner, n) = cur {
+            dims.push(n);
+            cur = *inner;
+        }
+        (cur, dims)
+    }
+
+    /// M54: `Call` 的被调名 —— 只有裸标识符 / 限定名末段 / 模板名才可能
+    /// 命中 constexpr 函数表 (函数指针调用、成员调用不折).
+    fn constexpr_callee_name(callee: &CppExpr) -> Option<String> {
+        match callee {
+            CppExpr::Ident(n) => Some(n.clone()),
+            CppExpr::QualifiedAccess(_, last) => Some(last.clone()),
+            CppExpr::TemplateIdent { name, .. } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    /// M54: 用 constexpr 函数表 + 已知整型常量池求值一个调用表达式.
+    fn eval_constexpr_call(&self, call: &CppExpr) -> Option<i128> {
+        let mut ctx =
+            ConstexprContext::with_functions(true, &self.const_local_i128, &self.constexpr_fns);
+        eval_cpp_const_full_with_calls(call, &mut ctx)
+    }
+
+    /// M54: 把静态初始化器里的 constexpr 函数调用折成字面量.
+    ///
+    /// C 的静态初始化只接受常量表达式, 函数调用会被 C 前端拒掉; 而
+    /// `int a[4] = {square(2), 1, 2, 3};` 在 C++ 里合法。本函数递归改写
+    /// **能折**的 `Call` 节点, 其它子结构 (取址 `&g`、字符串字面量、
+    /// 嵌套大括号) 原样保留 —— 折不动时宁可让后端报错, 也不臆造初值
+    /// (超出 `i64` 范围的结果同样不改写, 绝不默默截断)。
+    fn fold_static_init_expr(&self, e: &CppExpr) -> CppExpr {
+        match e {
+            CppExpr::Call(callee, args) => {
+                let folded: Vec<CppExpr> =
+                    args.iter().map(|a| self.fold_static_init_expr(a)).collect();
+                if Self::constexpr_callee_name(callee)
+                    .map(|n| self.constexpr_fns.contains_key(&n))
+                    .unwrap_or(false)
+                {
+                    let cand = CppExpr::Call(callee.clone(), folded.clone());
+                    if let Some(v) = self.eval_constexpr_call(&cand) {
+                        if let Ok(iv) = i64::try_from(v) {
+                            return CppExpr::IntLit(iv);
+                        }
+                    }
+                }
+                CppExpr::Call(callee.clone(), folded)
+            },
+            CppExpr::BinOp(k, a, b) => CppExpr::BinOp(
+                *k,
+                Box::new(self.fold_static_init_expr(a)),
+                Box::new(self.fold_static_init_expr(b)),
+            ),
+            CppExpr::UnaryOp(k, a) => {
+                CppExpr::UnaryOp(*k, Box::new(self.fold_static_init_expr(a)))
+            },
+            CppExpr::Ref(a) => CppExpr::Ref(Box::new(self.fold_static_init_expr(a))),
+            CppExpr::AddrOf(a) => CppExpr::AddrOf(Box::new(self.fold_static_init_expr(a))),
+            CppExpr::Cast(t, a) => CppExpr::Cast(t.clone(), Box::new(self.fold_static_init_expr(a))),
+            CppExpr::StaticCast { ty, expr } => CppExpr::StaticCast {
+                ty: ty.clone(),
+                expr: Box::new(self.fold_static_init_expr(expr)),
+            },
+            CppExpr::ConstCast { ty, expr } => CppExpr::ConstCast {
+                ty: ty.clone(),
+                expr: Box::new(self.fold_static_init_expr(expr)),
+            },
+            CppExpr::ReinterpretCast { ty, expr } => CppExpr::ReinterpretCast {
+                ty: ty.clone(),
+                expr: Box::new(self.fold_static_init_expr(expr)),
+            },
+            CppExpr::InitList(v) => {
+                CppExpr::InitList(v.iter().map(|a| self.fold_static_init_expr(a)).collect())
+            },
+            CppExpr::TypedInitList { ty, elems } => CppExpr::TypedInitList {
+                ty: ty.clone(),
+                elems: elems.iter().map(|a| self.fold_static_init_expr(a)).collect(),
+            },
+            CppExpr::Ternary { cond, then, els } => CppExpr::Ternary {
+                cond: Box::new(self.fold_static_init_expr(cond)),
+                then: Box::new(self.fold_static_init_expr(then)),
+                els: Box::new(self.fold_static_init_expr(els)),
+            },
+            CppExpr::Comma(v) => {
+                CppExpr::Comma(v.iter().map(|a| self.fold_static_init_expr(a)).collect())
+            },
+            other => other.clone(),
+        }
+    }
+
+    /// M54: 发射静态初始化器.
+    ///
+    /// `emit_expr` 对 [`CppExpr::InitList`] 默认生成 `(int){...}` 复合字面量,
+    /// 那在 C 的静态初始化位置不合法 (只能出现在表达式里); 数组/聚合全局
+    /// 变量必须直接发 `{a, b, c}`。嵌套列表递归同构处理。
+    fn emit_static_init(&mut self, e: &CppExpr) {
+        match e {
+            CppExpr::InitList(v) | CppExpr::TypedInitList { elems: v, .. } => {
+                self.out.push('{');
+                for (i, elem) in v.iter().enumerate() {
+                    if i > 0 {
+                        self.out.push_str(", ");
+                    }
+                    self.emit_static_init(elem);
+                }
+                self.out.push('}');
+            },
+            other => self.emit_expr(other),
+        }
+    }
+
     pub fn with_options(_opt: LowerOptions) -> Self {
         Self::new()
     }
@@ -8788,7 +8943,9 @@ impl Lower {
             | CppExpr::AddrOf(o)
             | CppExpr::Delete(o)
             | CppExpr::DeleteArr(o)
-            | CppExpr::Noexcept(o) => self.expr_can_throw(o),
+            | CppExpr::Noexcept(o)
+            // pack 展开: 递归到展开体 (单态化后等价于普通表达式)
+            | CppExpr::PackExpansion(o) => self.expr_can_throw(o),
             CppExpr::BinOp(_, l, r) => self.expr_can_throw(l) || self.expr_can_throw(r),
             CppExpr::Ternary { cond, then, els } => {
                 self.expr_can_throw(cond) || self.expr_can_throw(then) || self.expr_can_throw(els)
@@ -10040,6 +10197,19 @@ impl Lower {
                     self.scan_expr_types(e);
                 }
             },
+            // 多 declarator 的共享 decl-specifier + 每个 declarator 自己的层级,
+            // 都要扫到 (只扫第一个会漏掉 `int a[4], *p;` 里的 Array / Pointer).
+            CppStmt::LocalVarList {
+                spec,
+                declarators,
+            } => {
+                for d in declarators {
+                    self.scan_ty(&d.full_ty(spec));
+                    if let Some(e) = &d.init {
+                        self.scan_expr_types(e);
+                    }
+                }
+            },
             CppStmt::Try { body, catches } => {
                 self.scan_body_types(body);
                 for c in catches {
@@ -10358,6 +10528,9 @@ impl Lower {
                     || self.body_needs_system_headers(body)
             },
             CppStmt::LocalVar { init: Some(e), .. } => self.expr_needs_system_headers(e),
+            CppStmt::LocalVarList { declarators, .. } => declarators
+                .iter()
+                .any(|d| d.init.as_ref().is_some_and(|e| self.expr_needs_system_headers(e))),
             CppStmt::Switch { expr, arms, .. } => {
                 self.expr_needs_system_headers(expr)
                     || arms.iter().any(|(_, b)| self.body_needs_system_headers(b))
@@ -10426,16 +10599,32 @@ impl Lower {
                 is_static,
                 is_volatile: _,
             } => {
-                let ty_c = self.mangle_to_c_ns(ty);
+                // M54: 数组维度必须补成 declarator 后缀. `mangle_to_c` 故意丢掉
+                // 数组性 (它服务 mangled 名), 旧实现因此把 `int g[10];` 发成
+                // `int g;` —— 降级路径下全局数组只有元素大小的存储 (与 native
+                // 路径修复前的同一个错).
+                let (elem_ty, dims) = Self::peel_array_dims(ty);
+                let ty_c = self.mangle_to_c_ns(&elem_ty);
                 let st = if *is_static { "static " } else { "" };
+                self.out.push_str(st);
+                self.out.push_str(&ty_c);
+                self.out.push(' ');
+                self.out.push_str(name);
+                for n in &dims {
+                    self.out.push_str(&format!("[{}]", n));
+                }
                 match init {
                     Some(e) => {
-                        self.out.push_str(&format!("{}{} {} = ", st, ty_c, name));
-                        self.emit_expr(e);
+                        // M54: 静态初始化先折 constexpr 调用再交给 C 后端
+                        // (C 拒绝静态初始化里的函数调用), 聚合初值直接发
+                        // 大括号列表而不是复合字面量.
+                        let folded = self.fold_static_init_expr(e);
+                        self.out.push_str(" = ");
+                        self.emit_static_init(&folded);
                         self.out.push_str(";\n");
                     },
                     None => {
-                        self.out.push_str(&format!("{}{} {};\n", st, ty_c, name));
+                        self.out.push_str(";\n");
                     },
                 }
             },
@@ -11733,6 +11922,199 @@ impl Lower {
         self.current_class = None;
     }
 
+    /// 输出一条**共享 decl-specifier 的多 declarator** 局部声明.
+    ///
+    /// 输出形态 (整条声明只生成**一个** C declaration):
+    /// ```c
+    /// int *p, q = 1;          /* int *p, q = 1;  */
+    /// int i = 0, j = n;       /* for-init 里同样合法: for (int i = 0, j = n; ...) */
+    /// static int a, b;        /* static: 声明与初始化分离, 初始化走 guard 块 */
+    /// ```
+    /// 为什么必须保持一条语句: `for` 的 init 位置只能放单个 declaration,
+    /// 拆成 `int i = 0;` `int j = n;` 两条会直接生成非法的 `for (int i = 0; int j = n;;)`.
+    ///
+    /// 指针/引用层级属于**每个 declarator 自己** ([dcl.ptr]): `int *p, q;` 里只有 `p`
+    /// 前多打一个 `*`, `q` 仍是标量 —— 这与 [`CppStmt::LocalVarList`] 的类型建模一致。
+    fn emit_local_var_list(
+        &mut self,
+        spec: &DeclSpec,
+        declarators: &[InitDeclarator],
+    ) {
+        // `auto` / `decltype(auto)`: 整条声明共享同一个推导结果
+        // ([dcl.type.auto.deduct] 要求列表里每个 init-declarator 推得同一类型),
+        // 取第一个带初始化式的; 全都没有则同单变量路径退化成 int.
+        let mut base = spec.ty.clone();
+        if base.is_unresolved() {
+            base = declarators
+                .iter()
+                .find_map(|d| d.init.as_ref())
+                .map(|e| self.infer_type(e, matches!(spec.ty, MangleType::DecltypeAuto)))
+                .unwrap_or(MangleType::Int);
+        }
+        base = self.resolve_typedef_chain(&base);
+        // decl-specifier 的类型部分换成推导后的 base, 其余存储期/cv 不变;
+        // 下面每个 declarator 的完整类型都由它叠加自己的层级得到。
+        let resolved_spec = DeclSpec {
+            ty: base.clone(),
+            is_static: spec.is_static,
+            is_volatile: spec.is_volatile,
+        };
+        // 逐个 declarator: 记录类型 + 生成声明符文本 + 收集 ctor 调用
+        let mut decl_text: Vec<String> = Vec::with_capacity(declarators.len());
+        // (变量名, ctor 实参)
+        let mut ctor_calls: Vec<(String, Vec<CppExpr>)> = Vec::new();
+        let mut default_ctors: Vec<(String, String)> = Vec::new();
+        for d in declarators {
+            let full = d.full_ty(&resolved_spec);
+            self.local_var_types.insert(d.name.clone(), full.clone());
+            if let Some(e) = &d.init {
+                if let Some(v) =
+                    crate::cpp::cpp_const_eval::eval_cpp_const(e, &self.const_local_i128)
+                {
+                    self.const_local_i128.insert(d.name.clone(), v);
+                }
+            }
+            let mut text = String::new();
+            // Pointer 与 Reference 在 C 降级里都是多一层间接 (`mangle_to_c` 对两者
+            // 同样输出 `T*`), 故统一打 `*`; 层级属于本 declarator, 不波及同条声明其
+            // 它变量 (`int *p, q;` 里 `q` 前没有 `*`).
+            for _ in 0..d.layers.len() {
+                text.push('*');
+            }
+            text.push_str(&d.name);
+            for n in &d.array_dims {
+                text.push_str(&format!("[{}]", n));
+            }
+            // 类构造 `T x(args)` 在 C 里是「声明 + 显式调 ctor」两步: 声明处只占位,
+            // 初始化式里的 ctor 调用挪到整条声明之后逐个发射 (与单变量路径同构).
+            let is_class_ctor_init = matches!(&d.init,
+                Some(CppExpr::Call(f, _))
+                    if matches!(&**f, CppExpr::Ident(n) if self.classes.contains(n)
+                        || self.templates.find(n).is_some()));
+            if is_class_ctor_init {
+                text.push_str(" = 0 /*ctor*/");
+                if let Some(CppExpr::Call(_, args)) = &d.init {
+                    ctor_calls.push((d.name.clone(), args.clone()));
+                }
+            } else if let Some(e) = &d.init {
+                // static 局部: 初始化式挪到下面的 guard 块里单次执行, 声明处不带初值.
+                if !spec.is_static {
+                    if matches!(e, CppExpr::InitList(_)) {
+                        // 聚合初始化在声明处需要手写 `{...}`, 不能走 emit_expr
+                        // (它会生成 `(int){...}` 复合字面量).
+                        text.push_str(" = ");
+                        if let CppExpr::InitList(elems) = e {
+                            text.push('{');
+                            for (i, elem) in elems.iter().enumerate() {
+                                if i > 0 {
+                                    text.push_str(", ");
+                                }
+                                // emit_expr 写的是 self.out, 这里借道暂存区再拼回声明符.
+                                let saved = std::mem::take(&mut self.out);
+                                self.emit_expr(elem);
+                                text.push_str(&self.out);
+                                self.out = saved;
+                            }
+                            text.push('}');
+                        }
+                    } else {
+                        let saved = std::mem::take(&mut self.out);
+                        self.emit_expr(e);
+                        text.push_str(" = ");
+                        text.push_str(&self.out);
+                        self.out = saved;
+                    }
+                }
+            }
+            if !spec.is_static && !is_class_ctor_init {
+                if let Some(inst_class) = Self::inst_class_of(&full) {
+                    if !Self::is_known_typedef(&inst_class) {
+                        default_ctors.push((d.name.clone(), inst_class));
+                    }
+                }
+            }
+            decl_text.push(text);
+        }
+        let prefix = if spec.is_static { "static " } else { "" };
+        let c_base = if matches!(
+            &base,
+            MangleType::Class(_) | MangleType::TplMember { .. }
+        ) {
+            self.mangle_to_c_ns(&base)
+        } else {
+            mangle_to_c(&base)
+        };
+        self.out.push_str(prefix);
+        self.out.push_str(&c_base);
+        self.out.push(' ');
+        for (i, t) in decl_text.iter().enumerate() {
+            if i > 0 {
+                self.out.push_str(", ");
+            }
+            self.out.push_str(t);
+        }
+        self.out.push_str(";\n");
+        // 类类型: 显式调 ctor (与单 declarator 路径同一套 mangle 规则)
+        for (name, args) in ctor_calls {
+            let full = declarators
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| d.full_ty(&resolved_spec))
+                .unwrap_or_else(|| base.clone());
+            let class = match &full {
+                MangleType::Class(c) => c.clone(),
+                _ => name.clone(),
+            };
+            let inst_class = match &full {
+                MangleType::Template { name: tn, args: ta } => instantiated_class_name(tn, ta),
+                _ => self.qualify_name(&class),
+            };
+            let n = NestedName::from_dotted(vec![inst_class]);
+            let param_tys: Vec<MangleType> = args
+                .iter()
+                .map(|a| match self.infer_type(a, false) {
+                    MangleType::Reference(inner) => *inner,
+                    ty => ty,
+                })
+                .collect();
+            let m = mangle_ctor(&n, &param_tys, 1);
+            self.out.push_str(&format!("    {}(&{}", m, name));
+            for a in &args {
+                self.out.push_str(", ");
+                self.emit_expr(a);
+            }
+            self.out.push_str(");\n");
+        }
+        for (name, inst_class) in default_ctors {
+            let n = NestedName::from_dotted(vec![inst_class]);
+            let m = mangle_ctor(&n, &[], 1);
+            self.out.push_str(&format!("    {}(&{});\n", m, name));
+        }
+        // static: 每个变量各自走一次 __cxa_guard_* 单次初始化块.
+        if spec.is_static {
+            for d in declarators {
+                let full = d.full_ty(&resolved_spec);
+                self.out
+                    .push_str(&format!("static unsigned char _cxa_guard_{} = 0;\n", d.name));
+                self.out
+                    .push_str(&format!("if (_cxa_guard_acquire(&_cxa_guard_{})) {{\n", d.name));
+                if let Some(e) = &d.init {
+                    self.out.push_str(&format!("    {} = ", d.name));
+                    self.emit_expr(e);
+                    self.out.push_str(";\n");
+                }
+                if let Some(inst_class) = Self::inst_class_of(&full) {
+                    let n = NestedName::from_dotted(vec![inst_class]);
+                    let m = mangle_ctor(&n, &[], 1);
+                    self.out.push_str(&format!("    {}(&{});\n", m, d.name));
+                }
+                self.out
+                    .push_str(&format!("    _cxa_guard_release(&_cxa_guard_{});\n", d.name));
+                self.out.push_str("}\n");
+            }
+        }
+    }
+
     fn emit_stmt(&mut self, s: &CppStmt) {
         match s {
             CppStmt::Return(None) => self.out.push_str("return;\n"),
@@ -11967,6 +12349,14 @@ impl Lower {
                 self.out
                     .push_str(&format!("    _cxa_guard_release(&_cxa_guard_{});\n", name));
                 self.out.push_str("}\n");
+            },
+            CppStmt::LocalVarList {
+                spec,
+                declarators,
+            } => {
+                // 一条声明里的多个 init-declarator: 必须整体输出成**单个** C
+                // declaration, 才能在 for-init 位置成立 (见 emit_local_var_list).
+                self.emit_local_var_list(spec, declarators);
             },
             CppStmt::StructuredBinding {
                 names,
@@ -12710,6 +13100,8 @@ impl Lower {
                 match arg {
                     SizeofArg::Type(t) => self.out.push_str(&self.mangle_to_c_ns(t)),
                     SizeofArg::Expr(x) => self.emit_expr(x),
+                    // sizeof...(pack) 应由 template 层单态化替成字面量; 兜底防编译中断
+                    SizeofArg::Pack(_) => self.out.push('0'),
                 }
                 self.out.push(')');
             },
@@ -12873,6 +13265,8 @@ impl Lower {
                     self.out.push('1');
                 }
             },
+            // 兜底: pack 展开应由 template 层单态化消化, 残留时递归发射展开体
+            CppExpr::PackExpansion(x) => self.emit_expr(x),
             // M18.0: C++23 多维下标 `obj[i, j, k]` 改写为
             // `__dcc_multi_index_N(obj, i, j, k)` C 辅助函数
             // (N = 2..4, 真实实现在 dccpp_runtime.c)
@@ -12937,7 +13331,7 @@ impl Lower {
                     self.emit_static_assert_condition(rhs);
                     self.out.push(')');
                 } else {
-                    self.out.push_str("?"); // placeholder
+                    self.out.push('?'); // placeholder
                 }
             },
             crate::cpp::parser::CppExpr::Ident(name) => {
@@ -12965,10 +13359,15 @@ impl Lower {
                         self.out.push_str(&format!("{:?}", t))
                     },
                     crate::cpp::parser::SizeofArg::Expr(x) => self.emit_static_assert_condition(x),
+                    // sizeof...(pack) 应由 template 层单态化替成字面量; 兜底
+                    crate::cpp::parser::SizeofArg::Pack(_) => self.out.push('0'),
                 }
                 self.out.push(')');
             },
-            crate::cpp::parser::CppExpr::Noexcept(_) => self.out.push_str("1"),
+            crate::cpp::parser::CppExpr::Noexcept(e) => {
+                // M26.1: 与表达式发射路径同一真源 (expr_can_throw), 不再恒为 1
+                self.out.push_str(if self.expr_can_throw(e) { "0" } else { "1" });
+            },
             crate::cpp::parser::CppExpr::Ternary { cond, then, els } => {
                 self.out.push('(');
                 self.emit_static_assert_condition(cond);
@@ -13231,6 +13630,26 @@ mod tests {
         assert!(s.contains("struct Foo"), "{}", s);
         assert!(s.contains("_ZN3FooC1Ei"), "{}", s);
         assert!(s.contains("x = v"), "{}", s);
+    }
+
+    /// 一条声明里的多个 init-declarator 必须降成**单个** C declaration:
+    /// for-init 位置只容得下一个 declaration-statement ([stmt.init]), 而指针
+    /// 层级只属于带 `*` 的那个 declarator ([dcl.name]).
+    #[test]
+    fn lower_multi_declarator_list_is_one_c_declaration() {
+        let src = b"int f() { int a = 0, *p, q = 1; for (int i = 0, j = 3; i < j; i++, j--) { q = i; } static int s1 = 1, s2 = 2; return q + a; }";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        let mut l = Lower::new();
+        l.lower_decls(&decls);
+        let s = l.finish();
+        // 整条声明一行输出, `*` 只在 `p` 前 (`q` 仍是标量 int).
+        assert!(s.contains("int a = 0, *p, q = 1;"), "{}", s);
+        // for-init 是一个 declaration-statement, 拆成两行就是非法 C.
+        assert!(s.contains("for (int i = 0, j = 3;"), "{}", s);
+        // static: 声明单行多 declarator, 初值挖到**每个变量自己的** guard 块.
+        assert!(s.contains("static int s1, s2;"), "{}", s);
+        assert!(s.contains("_cxa_guard_s1") && s.contains("_cxa_guard_s2"), "{}", s);
     }
 
     #[test]
@@ -13883,7 +14302,9 @@ mod tests {
 
     #[test]
     fn lower_odr_check_conflicting_imports() {
-        // M26.5: 两个导入模块导出同名函数但定义不同 -> ODR 违规
+        // M26.5/M28.6: 两个导入模块导出**同一链接身份** (`_ZN3fooEv`) 但类型
+        // 文本不同的实体 -> ODR 违规. (mangled 名已是比较键, 所以 `foo()` 与
+        // `foo(int)` 这类重载不再算冲突 —— 那是两个不同的合法实体)
         let mut l = Lower::new();
         l.imported_modules = vec![
             BmfModule {
@@ -13903,7 +14324,7 @@ mod tests {
                 exports: vec![BmfExport {
                     kind: BmfKind::Function,
                     name: "foo".to_string(),
-                    signature: "int _ZN3fooEi(int)".to_string(),
+                    signature: "int _ZN3fooEv(int)".to_string(),
                     layout: None,
                 }],
                 imports: vec![],
@@ -14070,8 +14491,12 @@ mod tests {
         assert!(s.contains("RED"), "{}", s);
         assert!(s.contains("GREEN = 5"), "{}", s);
         assert!(s.contains("BLUE"), "{}", s);
-        // scoped + 底层类型保留
-        assert!(s.contains("typedef enum : unsigned char { A = 1, B = A + 2 } Scoped;"), "{}", s);
+        // scoped + 底层类型保留 (枚举量初值已由 parser 折成字面量: `B = A + 2` => `B = 3`)
+        assert!(
+            s.contains("typedef enum : unsigned char { A = 1, B = 3 } Scoped;"),
+            "{}",
+            s
+        );
         // 匿名枚举只产常量, 不产类型名
         assert!(s.contains("enum { ANON_X = 42 };"), "{}", s);
         // 不应再出现 typedef int 降级

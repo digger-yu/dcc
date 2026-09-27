@@ -221,3 +221,177 @@ fn stdlib_iostream_cout_usage_parses() {
     });
     assert!(has_main, "expected main function");
 }
+
+// ============================================================================
+// 头部「非空过」守卫: Opaque 降级检测
+//
+// 类成员循环遇到无法识别的声明时, 会把从该点起的**整段剩余文本**降级成
+// `CppDecl::Opaque` 占位, 而 `parse_top_level()` 照样返回 Ok —— 只看 Ok 的
+// 头文件测试会静默空过 (字段/方法就这样丢了)。真实回归:
+//   - `<iostream>` 的 manipulator 重载 `ostream& operator<<(ostream& (*)(ostream&))`
+//     被吞 -> 夹具 iostream_basic.cpp 报 "this used outside member function";
+//   - `int operator++()` / `operator!` / `operator~` 之后的数据成员被吞
+//     -> 夹具 iterator_traits.cpp 的 `CountIt::p_` 报 "undeclared identifier".
+// ============================================================================
+
+use crate::cpp::parser::CppDecl;
+
+fn parse_decls(name: &str, src: &str) -> Vec<CppDecl> {
+    let mut p = CppParser::new(src.as_bytes(), name);
+    match p.parse_top_level() {
+        Ok(d) => d,
+        Err(e) => panic!("{name} parse error: {e:?}"),
+    }
+}
+
+/// 递归收集所有被降级成 Opaque 的片段 (类成员 / 命名空间体 / 模板体).
+fn collect_opaque(decls: &[CppDecl], out: &mut Vec<String>) {
+    for d in decls {
+        match d {
+            CppDecl::Opaque(s) => out.push(s.clone()),
+            CppDecl::Class(c) => collect_opaque(&c.members, out),
+            CppDecl::Namespace { body, .. } => collect_opaque(body, out),
+            CppDecl::Template { decl, .. } | CppDecl::PartialSpec { decl, .. } => {
+                collect_opaque(std::slice::from_ref(&**decl), out)
+            },
+            CppDecl::AnonAggr { members, .. } => collect_opaque(members, out),
+            _ => {},
+        }
+    }
+}
+
+/// 把 AST 里所有类成员按 (类名, 成员名/运算符名) 扫出来.
+fn class_member_names(decls: &[CppDecl], out: &mut Vec<(String, String)>) {
+    for d in decls {
+        match d {
+            CppDecl::Class(c) => {
+                for m in &c.members {
+                    match m {
+                        CppDecl::MemberFn { name, .. } => {
+                            out.push((c.name.clone(), name.clone()))
+                        },
+                        CppDecl::OperatorFn { op, .. } => {
+                            out.push((c.name.clone(), format!("operator{op:?}")))
+                        },
+                        CppDecl::MemberVar { name, .. } => {
+                            out.push((c.name.clone(), name.clone()))
+                        },
+                        _ => {},
+                    }
+                }
+            },
+            CppDecl::Namespace { body, .. } => class_member_names(body, out),
+            CppDecl::Template { decl, .. } | CppDecl::PartialSpec { decl, .. } => {
+                class_member_names(std::slice::from_ref(&**decl), out)
+            },
+            _ => {},
+        }
+    }
+}
+
+#[test]
+fn header_iostream_declares_every_member_without_opaque() {
+    let src = std::fs::read_to_string("src/cpp/stdlib/headers/iostream").expect("read iostream");
+    let decls = parse_decls("iostream", &src);
+    let mut opaque = Vec::new();
+    collect_opaque(&decls, &mut opaque);
+    assert!(opaque.is_empty(), "<iostream> 中被降级的片段: {opaque:?}");
+
+    let mut names = Vec::new();
+    class_member_names(&decls, &mut names);
+    // clog/ws 用例依赖的流成员与 manipulator 重载必须真的存在
+    for want in ["flush", "put", "write", "get", "peek", "getline", "ignore", "eof"] {
+        assert!(
+            names.iter().any(|(_, n)| n == want),
+            "<iostream> 缺流成员 {want}: {names:?}"
+        );
+    }
+    // `<< std::endl` / `>> std::ws` 的 manipulator 重载 (函数指针形参)
+    let shl = names
+        .iter()
+        .filter(|(c, n)| c == "ostream" && n.contains("Shl"))
+        .count();
+    let shr = names
+        .iter()
+        .filter(|(c, n)| c == "istream" && n.contains("Shr"))
+        .count();
+    assert!(shl >= 13, "ostream operator<< 重载数 {shl} 应含全部内建类型 + manipulator");
+    assert!(shr >= 11, "istream operator>> 重载数 {shr} 应含数值/char*/manipulator");
+}
+
+#[test]
+fn deleted_copy_members_are_parsed_not_swallowed() {
+    // `<ranges>` 的 view 类都写 `X(const X&) = delete;` + `X& operator=(const X&) = delete;`
+    // 来禁止拷贝。这两形状必须解析成真实成员 (不降成 CppDecl::Opaque), 否则
+    // 头里的类在 sema 眼里就没这些函数, 用户写 `filter_view f2 = f;` 时既不会
+    // 报错也拿不到删除信息 (实测整个头被静默吃掉一半)。
+    let src = "class V {
+public:
+    V() : n_(0) {}
+    V(const V&) = delete;
+    V& operator=(const V&) = delete;
+    int size() const { return n_; }
+private:
+    int n_;
+};";
+    let decls = parse_decls("deleted_copy", src);
+    let mut opaque = Vec::new();
+    collect_opaque(&decls, &mut opaque);
+    assert!(opaque.is_empty(), "= delete 成员被降级: {opaque:?}");
+    let mut names = Vec::new();
+    class_member_names(&decls, &mut names);
+    assert!(
+        names.iter().any(|(c, n)| c == "V" && n == "size"),
+        "= delete 之后的成员丢了: {names:?}"
+    );
+    assert!(
+        names.iter().any(|(_, n)| n.contains("Assign")),
+        "operator= 的 = delete 形式没被识别: {names:?}"
+    );
+}
+
+#[test]
+fn header_ranges_and_iterator_have_no_opaque_swallow() {
+    for h in ["ranges", "iterator"] {
+        let path = format!("src/cpp/stdlib/headers/{h}");
+        let src = std::fs::read_to_string(&path).expect("read header");
+        let decls = parse_decls(h, &src);
+        let mut opaque = Vec::new();
+        collect_opaque(&decls, &mut opaque);
+        assert!(opaque.is_empty(), "<{h}> 中被降级的片段: {opaque:?}");
+    }
+}
+
+/// 一元 operator (自增/自减/! / ~) 之后的数据成员不得丢失 —— 这既是
+/// `<iterator>` 用户自定义迭代器 (CountIt) 的形状, 也是成员函数体能引用
+/// 后置字段的前提。占 operator 名映射表 (mangle::from_tok_kind) 的回归。
+#[test]
+fn unary_operator_member_keeps_following_field() {
+    let src = "class It {
+    public:
+        explicit It(int* p) : p_(p) {}
+        int operator*() const { return *p_; }
+        It& operator++() { ++p_; return *this; }
+        int operator~() const { return 0; }
+        int logical() const { return !p_; }
+    private:
+        int* p_;
+    };";
+    let decls = parse_decls("unary_op_field", src);
+    let mut opaque = Vec::new();
+    collect_opaque(&decls, &mut opaque);
+    assert!(opaque.is_empty(), "类成员被降级: {opaque:?}");
+    let mut names = Vec::new();
+    class_member_names(&decls, &mut names);
+    assert!(
+        names.iter().any(|(c, n)| c == "It" && n == "p_"),
+        "后置字段 p_ 丢了: {names:?}"
+    );
+    // operator++ (Inc) / operator* (Mul) / operator~ (Not) 都必须成类成员
+    for op in ["Inc", "Mul", "Not"] {
+        assert!(
+            names.iter().any(|(_, n)| n.contains(op)),
+            "operator {op} 没被识别: {names:?}"
+        );
+    }
+}

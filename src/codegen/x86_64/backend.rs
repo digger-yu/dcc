@@ -356,10 +356,10 @@ fn build_debug_sections(
     cg.extra_sections.extend(debug::dwarf_elf_sections(&dbg));
 
     // .rela.debug_* —— 为 debug 节里的函数地址生成绝对重定位
-    let relocs: [(&[(u64, String)], &str, u32); 3] = [
-        (&dbg.debug_info_relocs, ".debug_info", 8),
-        (&dbg.debug_line_relocs, ".debug_line", 10),
-        (&dbg.debug_aranges_relocs, ".debug_aranges", 9),
+    let relocs = [
+        (&dbg.debug_info_relocs, ".debug_info", 8_u32),
+        (&dbg.debug_line_relocs, ".debug_line", 10_u32),
+        (&dbg.debug_aranges_relocs, ".debug_aranges", 9_u32),
     ];
     for (src, sec_name, fallback_idx) in relocs.iter() {
         if src.is_empty() {

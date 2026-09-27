@@ -405,12 +405,9 @@ impl Codegen {
         // 物化操作数到临时槽
         let l_slot = result_slot + 1;
         let r_slot = result_slot + 2;
-        let l_off: i64;
-        let r_off: i64;
-
-        if l_is_vec {
+        let l_off: i64 = if l_is_vec {
             self.gen_vector_load_into_slot(l, l_slot);
-            l_off = self.vector_temp_base(l_slot, vec_size);
+            self.vector_temp_base(l_slot, vec_size)
         } else {
             self.gen_expr(l, 0);
             let t_off = self.vector_temp_base(l_slot, 16);
@@ -418,20 +415,20 @@ impl Codegen {
                                           // 标量可能只有 rax (如 int 常量), 需确保 rdx=0
             self.emit(&[0x48, 0x31, 0xD2]); // xor rdx, rdx
             self.emit_store(2, t_off + 8, 8); // [r13+t_off+8] = rdx (high)
-            l_off = t_off;
-        }
+            t_off
+        };
 
-        if r_is_vec {
+        let r_off: i64 = if r_is_vec {
             self.gen_vector_load_into_slot(r, r_slot);
-            r_off = self.vector_temp_base(r_slot, vec_size);
+            self.vector_temp_base(r_slot, vec_size)
         } else {
             self.gen_expr(r, 0);
             let t_off = self.vector_temp_base(r_slot, 16);
             self.emit_store(0, t_off, 8);
             self.emit(&[0x48, 0x31, 0xD2]); // xor rdx, rdx
             self.emit_store(2, t_off + 8, 8);
-            r_off = t_off;
-        }
+            t_off
+        };
 
         for _i in 0..count {
             // 加载操作数到 GP 寄存器对:

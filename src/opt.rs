@@ -714,9 +714,7 @@ fn fold_expr(e: Expr, fenv_access: bool) -> Expr {
                     // 留给后端 x87 运行时按目标舍入模式求值。
                     if lc.is_long_double() || rc.is_long_double() {
                         // fall through, keep original expression
-                    } else if let Some(v) =
-                        eval_float_binop(op, lc.as_f64(), rc.as_f64())
-                    {
+                    } else if let Some(v) = eval_float_binop(op, lc.as_f64(), rc.as_f64()) {
                         // 结果精度必须匹配目标类型: Float 结果截为 f32
                         let c = if matches!(ty, crate::ast::Type::Float) {
                             crate::ast::FloatConst::F32(v as f32)
@@ -1661,11 +1659,7 @@ fn rename_idents_in_expr(e: &mut Expr, map: &HashMap<String, String>) {
 
 fn rename_idents_in_stmt(s: &mut Stmt, map: &HashMap<String, String>) {
     match s {
-        Stmt::Return { val, .. } => {
-            if let Some(e) = val {
-                rename_idents_in_expr(e, map);
-            }
-        },
+        Stmt::Return { val: Some(e), .. } => rename_idents_in_expr(e, map),
         Stmt::Expr { e, .. } => rename_idents_in_expr(e, map),
         Stmt::If {
             cond, then_, else_, ..
@@ -1770,21 +1764,18 @@ fn try_stmt_inline_call(
 ) -> bool {
     // 提取调用点 (return f(...) 或表达式语句 f(...))
     let (callee_name, args, in_return) = match s {
-        Stmt::Expr { e, .. } => match e {
-            Expr::Call { callee, args, .. } => match callee.as_ref() {
-                Expr::Ident { name, .. } => (name.name.clone(), args.clone(), false),
-                _ => return false,
-            },
+        Stmt::Expr {
+            e: Expr::Call { callee, args, .. },
+            ..
+        } => match callee.as_ref() {
+            Expr::Ident { name, .. } => (name.name.clone(), args.clone(), false),
             _ => return false,
         },
         Stmt::Return {
-            val: Some(e),
-            span: _rspan,
-        } => match e {
-            Expr::Call { callee, args, .. } => match callee.as_ref() {
-                Expr::Ident { name, .. } => (name.name.clone(), args.clone(), true),
-                _ => return false,
-            },
+            val: Some(Expr::Call { callee, args, .. }),
+            ..
+        } => match callee.as_ref() {
+            Expr::Ident { name, .. } => (name.name.clone(), args.clone(), true),
             _ => return false,
         },
         _ => return false,

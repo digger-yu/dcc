@@ -46,7 +46,7 @@ impl PipelineState {
         self.current_phase = Some(phase);
         self.phase_stats
             .entry(phase)
-            .or_insert_with(PhaseStats::new);
+            .or_default();
     }
 
     pub fn increment_stat(&mut self, stat: &str) {
@@ -213,7 +213,7 @@ impl OptimizationPassStage {
 
 impl PipelineStage for OptimizationPassStage {
     fn name(&self) -> &'static str {
-        &self.pass_name
+        self.pass_name
     }
 
     fn execute(&self, _input: &PipelineInput) -> Result<PipelineOutput, Vec<Diagnostic>> {

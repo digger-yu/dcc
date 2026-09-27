@@ -1,55 +1,71 @@
-// <coroutine> - dcc++ C++ 标准库
-// C++20 协程支持: coroutine_handle, coroutine_traits.
+// <coroutine> - dcc++ C++20 协程标准库桩头
+// 协程支持: coroutine_handle, coroutine_traits, suspend_always, suspend_never.
 //
-// 语义说明:
-//   - dcc 协程降级为 Duff's device 状态机.
-//   - coroutine_handle 封装状态机指针.
-//   - coroutine_traits 从返回类型提取 promise 类型.
+// 语义说明 (native 后端, 见 src/cpp/coroutine_lower.rs):
+//   - dcc 把协程在 AST 上降级为 "协程帧 == promise 对象" 的状态机:
+//     `std::coroutine_handle<P>` 类型被改写为 `P*`, 因此本头里的
+//     coroutine_handle 模板 **永远不会被实例化**; 它的成员故意只声明不定义,
+//     万一真的被调用, 链接期会以未定义符号响亮失败, 而不是像
+//     `int done() { return 0; }` 那样静默返回错误值.
+//   - h.resume() / h.done() / h.destroy() / h.address() / h.promise() 与
+//     coroutine_handle<P>::from_promise(p) / ::from_address(a) 被改写为对
+//     dcc_coro_step_<P>() / dcc_coro_done_<P>() / dcc_coro_destroy_<P>() 的调用.
+//   - suspend_always / suspend_never 的 awaiter 三件套在类内定义, 因而可直接
+//     充当 initial_suspend / final_suspend / yield_value 的返回类型.
+//     类内成员函数签名上**可以**直接用限定名返回类型 (`std::suspend_always
+//     initial_suspend()` 解析正常), 不需要 `typedef std::suspend_always Susp;`
+//     那类绕法 (早期解析器会把这种签名退化为 unparse, 该限制已解除; 见夹具
+//     tests/fixtures/cpp/coroutine_std_qualified_awaiter_return.cpp).
+//     写 awaiter 时用 `return {};` 而不是 `return std::suspend_always();`:
+//     后者是纯聚合体的 value-init, 会引用未合成的隐式默认构造定义而在链接期
+//     响亮失败 (`suspend_always_ctor_complete` 未定义), 与名字解析无关.
 
 namespace std {
 
-    // coroutine_handle: opaque handle to coroutine frame
+    // coroutine_handle: 指向协程帧 (即 promise 对象) 的句柄
+    template <typename Promise>
     struct coroutine_handle {
-        void* ptr;
+        typedef Promise promise_type;
+
+        Promise* ptr;
 
         coroutine_handle() : ptr(0) {}
 
-        static coroutine_handle from_address(void* p) {
-            coroutine_handle h;
-            h.ptr = p;
-            return h;
-        }
+        // 以下成员由协程降级 pass 在 AST 上改写, 不提供定义 (调用即链接失败).
+        static coroutine_handle from_address(void* a);
+        static coroutine_handle from_promise(Promise& p);
 
-        void* address() const { return ptr; }
-        operator void*() const { return ptr; }
-
-        int done() const { return 0; }  // 简化: 需状态机查询
-        void resume() const { /* 状态机步进 */ }
-        void destroy() const { /* 释放帧 */ }
-
-        static coroutine_handle from_promise(void*) {
-            return coroutine_handle();
-        }
+        void* address() const;
+        Promise& promise() const;
+        void resume() const;
+        void operator()() const;
+        bool done() const;
+        void destroy() const;
     };
 
-    // coroutine_traits: extract promise_type from return type
-    template <typename R, typename... Args>
+    // coroutine_traits: 从协程返回类型提取 promise_type (声明期协议, dcc 用
+    // R::promise_type 直接查找, 本模板只占位以保持名字可见).
+    template <typename R>
     struct coroutine_traits {
-        // typedef R::promise_type promise_type;
+        typedef R promise_type;
     };
 
-    // suspend_always: awaitable that always suspends
+    // suspend_always: 总是挂起的 awaitable.
+    // await_suspend 收 `void*` 而非成员模板 `template<class H> await_suspend(H)`:
+    // dcc 的 native 后端目前不能调用类内成员函数模板, 而协程降级 pass 在调用点
+    // 会把帧指针 (promise*) 转成 (void*) 传入, 语义等价.
     struct suspend_always {
-        int await_ready() const { return 0; }
-        void await_suspend(coroutine_handle) const {}
-        void await_resume() const {}
+        bool await_ready() noexcept { return false; }
+        void await_suspend(void* h) noexcept { (void)h; }
+        void await_resume() noexcept {}
     };
 
-    // suspend_never: awaitable that never suspends
+    // suspend_never: 从不挂起的 awaitable (await_ready 为真 => 跳过 await_suspend,
+    // 但当次仍调用 await_resume, 这点由降级 pass 的状态机精确保证)
     struct suspend_never {
-        int await_ready() const { return 1; }
-        void await_suspend(coroutine_handle) const {}
-        void await_resume() const {}
+        bool await_ready() noexcept { return true; }
+        void await_suspend(void* h) noexcept { (void)h; }
+        void await_resume() noexcept {}
     };
 
 }  // namespace std

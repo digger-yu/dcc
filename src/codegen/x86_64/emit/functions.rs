@@ -355,11 +355,25 @@ impl Codegen {
                     }
                     let mut local_gp = gp_idx;
                     let mut local_fp = fp_idx;
+                    // SysV 3.5.1 all-or-nothing: 任一 eightbyte 放不进剩余寄存器,
+                    // 整个对象一次性走 overflow 区。必须与 caller `emit_sysv_call`
+                    // 共用同一真源 (aggregate_forces_memory), 否则两侧对同一聚合
+                    // 得出不同的拆分方案: caller 整体入栈、callee 却按"低半进
+                    // r9 + 高半进栈"取参, 被调方读到的低半是垃圾。
+                    let force_mem_agg =
+                        Self::aggregate_forces_memory(&classes, 6 - local_gp, 8 - local_fp);
                     // 上一个 Sse chunk 的位置, SseUp 复用之 (同一 xmm 的高半)。
                     // Some((reg, off)): 在寄存器; Some((None, off)): 在栈。
                     let mut prev_sse: Option<(Option<u8>, i64)> = None;
                     for c in 0..chunks {
-                        let cls = classes.get(c).copied().unwrap_or(AbiClass::Memory);
+                        let raw_cls = classes.get(c).copied().unwrap_or(AbiClass::Memory);
+                        // 整体走内存时把首 chunk 的分类改写成 Memory, 由下方
+                        // Memory 分支一次性排好 chunks 个 overflow 槽并 break。
+                        let cls = if force_mem_agg {
+                            AbiClass::Memory
+                        } else {
+                            raw_cls
+                        };
                         let chunk_off = base_off + c as i64 * 8;
                         match cls {
                             AbiClass::Integer => {
@@ -528,6 +542,9 @@ impl Codegen {
             // 栈位导致 pr114207.c 等测试 segfault/abort)
             let param_slots = param_used_total / 8;
             self.var_map_total_slots = self.var_map_total_slots.saturating_add(param_slots);
+            // 与上面同一根因、同一条轴: 复合字面量 / VM 尺寸元信息等只在代码生成
+            // 时才 `register_var` 的对象也走变量区, 需在定 `sret_region_base` 前预扣。
+            self.reserve_late_var_slots(f.body.as_ref());
             // frame_size = 变量实际字节 + 16(保存寄存器) + temp_slots*8
             // 包含 padding 条目, 每个占 8 字节. 使用累加器替代 O(n) 遍历.
             let var_bytes: i64 = self.var_map_total_slots.saturating_mul(8);
@@ -546,6 +563,10 @@ impl Codegen {
             // 需要更深的操作数槽 (XMM 路径每层 2 槽), 128 字节只够
             // 3 层嵌套, 深链式表达式会溢出到变量区 (pr23135)
             let vec_reserve: i64 = 512;
+            // 帧底复数/16B 聚合 rvalue 物化带 (见 `CX_FRAME_BAND`)。本函数其余
+            // 帧底偏移一律从带**之上**起算, 使 `-frame_size+8` 的复数内存对既不
+            // 落在变参 GP 保存槽里, 也不与向量临时槽 0 重叠。
+            let cx_band = Self::CX_FRAME_BAND;
             // 位域 RMW 临时槽: 预留 32 字节 (2 级嵌套, 每级 16 字节)
             let bf_rmw_reserve: i64 = 32;
             // 嵌套函数 trampoline 空间: 预留 256 字节 (最多 8 个 trampoline, 每个 32 字节)
@@ -557,6 +578,7 @@ impl Codegen {
                 .saturating_add(hdr)
                 .saturating_add(sret_need)
                 .saturating_add(sc_slot)
+                .saturating_add(cx_band)
                 .saturating_add(va_slots)
                 .saturating_add(vec_reserve)
                 .saturating_add(bf_rmw_reserve)
@@ -566,7 +588,8 @@ impl Codegen {
             // sret/物化槽区顶界: 紧邻变量区底 (变量区占 -(hdr+var_bytes))。
             self.sret_region_base = -(hdr + var_bytes);
             // vec 区下移 sret 槽深度, 使槽区夹在变量区与 vec 区之间。
-            self.vec_temp_off = -self.frame_size + va_slots + sc_slot + 8;
+            // 帧底先留出复数物化带 (cx_band), 变参 save area 紧随其后。
+            self.vec_temp_off = -self.frame_size + cx_band + va_slots + sc_slot + 8;
             if self.frame_size > 0 {
                 if self.target.stack_clash_protection && self.frame_size > 4096 {
                     self.emit_stack_clash_probes(self.frame_size);
@@ -622,11 +645,14 @@ impl Codegen {
             //   r13-16..-48 callee-saved 保存区 (rbx/r12/r14/r15)
             //   r13-48..-(48+temp_slots*8) binop temp_slots (槽 d 在 -(48+d*8))
             //   r13-(48+temp_slots*8)..-(48+temp_slots*8+var_bytes) 变量
-            //   r13-frame_size..r13-frame_size+va_slots 变参 reg save area
+            //   r13-frame_size..r13-frame_size+cx_band 复数 rvalue 物化带 (见 CX_FRAME_BAND)
+            //   r13-frame_size+cx_band..+cx_band+va_slots 变参 reg save area
             // 关键: save area 必须在变量下方, 否则 XMM 槽位会与
             //       变量 (尤其 for-init 的 i) 重叠, 导致变参读取
-            //       错误返回循环变量值.
-            self.variadic_reg_save_offset = -self.frame_size;
+            //       错误返回循环变量值. 而 save area 下方还要留出复数物化带,
+            //       否则复数内存对会写坏 GP 槽 1 (保存的 rsi), 使后续
+            //       `va_arg` 从 gp_offset=8 读回复数位模式。
+            self.variadic_reg_save_offset = -self.frame_size + cx_band;
             if f.is_variadic {
                 for (i, reg) in arg_regs.iter().enumerate() {
                     self.store_stack(*reg, self.variadic_reg_save_offset + i as i64 * 8);
@@ -740,7 +766,7 @@ impl Codegen {
             // A1: 保存 sret 指针 (rdi) 到帧底部专用槽, 供返回时写回聚合结果
             if has_sret {
                 // 位于变参保存区之上、向量临时区之下 (静态链同位置, 二者互斥)
-                let sret_off = -self.frame_size + va_slots + sc_slot;
+                let sret_off = -self.frame_size + cx_band + va_slots + sc_slot;
                 self.store_stack(7, sret_off);
                 self.current_sret_offset = Some(sret_off);
             }
@@ -757,6 +783,7 @@ impl Codegen {
                 );
             }
             // 包含 padding 条目, 每个占 8 字节. 使用累加器替代 O(n) 遍历.
+            self.reserve_late_var_slots(f.body.as_ref());
             let var_bytes: i64 = self.var_map_total_slots.saturating_mul(8);
             // 帧头: 16 (saved r13 + ret addr) + 32 (callee-saved) + temp_slots*8
             let hdr: i64 = 48 + temp_slots as i64 * 8;
@@ -764,13 +791,15 @@ impl Codegen {
             let raw = var_bytes
                 .saturating_add(hdr)
                 .saturating_add(sret_need)
+                .saturating_add(Self::CX_FRAME_BAND) // 帧底复数 rvalue 物化带
                 .saturating_add(512) // 向量临时槽区 (嵌套 binop 操作数槽)
                 .saturating_add(tramp_reserve)
                 .saturating_add(self.stack_reserve_bytes());
             self.frame_size = (raw + 15) & !15;
             // sret/物化槽区顶界: 紧邻变量区底 (变量区占 -(hdr+var_bytes))。
             self.sret_region_base = -(hdr + var_bytes);
-            self.vec_temp_off = -self.frame_size + 8;
+            // 向量临时区从复数物化带之上开始 (`-frame_size+8` 属于复数内存对)。
+            self.vec_temp_off = -self.frame_size + Self::CX_FRAME_BAND + 8;
             if self.frame_size > 0 {
                 if self.target.stack_clash_protection && self.frame_size > 4096 {
                     self.emit_stack_clash_probes(self.frame_size);

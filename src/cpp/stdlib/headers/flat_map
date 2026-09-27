@@ -16,7 +16,11 @@ namespace std {
         typedef Value mapped_type;
         typedef size_t size_type;
 
-        flat_map() : keys_(0), vals_(0), size_(0), cap_(0) {}
+        // 降级策略 (与同头 flat_multimap / flat_set 一致): 定长数组做存储,
+        // 不动态扩容. 超出容量时 insert/erase 以返回值告知调用方.
+        // 之前这里是 `Key* keys_; ... cap_(0)` —— 构造后指针为空、容量恒 0,
+        // insert 因 `size_ < cap_` 永远不成立, 容器**静默丢弃全部元素**.
+        flat_map() : size_(0) {}
 
         ~flat_map() {
             // 简化: 不释放 (栈分配或外部管理)
@@ -25,64 +29,128 @@ namespace std {
         // Capacity
         size_t size() const { return size_; }
         int empty() const { return size_ == 0; }
+        size_t max_size() const { return 1024; }
 
-        // Lookup
-        Value& at(const Key& k) {
-            for (size_t i = 0; i < size_; ++i) {
-                if (keys_[i] == k) return vals_[i];
+        // 二分 lower_bound: 第一个不小于 k 的下标.
+        // 语义对齐 runtime 的 dccpp_flat_map_lower (排序不变量的唯一来源).
+        size_t bound_index(const Key& k) const {
+            size_t lo = 0;
+            size_t hi = size_;
+            while (lo < hi) {
+                size_t mid = (lo + hi) / 2;
+                if (keys_[mid] < k) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
             }
-            return vals_[0];  // 简化: 未找到返回第一个
+            return lo;
         }
 
-        const Value& at(const Key& k) const {
-            for (size_t i = 0; i < size_; ++i) {
-                if (keys_[i] == k) return vals_[i];
+        // ---- 低层辅助 (公开: dcc 要成员在使用前声明, 不能再往尾部 private 区放) ----
+
+        // 在已定位的下标 i 处插入 (k, v), 把 i..size_-1 整体后移一格.
+        int insert_at(size_t i, const Key& k, const Value& v) {
+            if (size_ >= 1024) return 0;
+            size_t j = size_;
+            while (j > i) {
+                keys_[j] = keys_[j - 1];
+                vals_[j] = vals_[j - 1];
+                j = j - 1;
             }
+            keys_[i] = k;
+            vals_[i] = v;
+            size_ = size_ + 1;
+            return 1;
+        }
+
+        // 删除下标 i 处的元素, 平移后续元素维持排序不变量.
+        int erase_at(size_t i) {
+            if (i >= size_) return 0;
+            size_t j = i;
+            while (j + 1 < size_) {
+                keys_[j] = keys_[j + 1];
+                vals_[j] = vals_[j + 1];
+                j = j + 1;
+            }
+            size_ = size_ - 1;
+            return 1;
+        }
+
+        // Lookup
+        //
+        // 返回类型偏离标准之处 (真值: C++23 flat_map::at 返回 `mapped_type&`):
+        // dcc 后端目前**不消费引用返回值** —— 调用点拿到的是被引用对象的地址
+        // 而不是值 (最小复现见报告: `int& gv(){ return v; }` 打印出地址),
+        // 且 `return vals_[i];` 这类"引用返回 + 下标"在 callee 侧报
+        // "address of non-addressable object". 因此这里按**值**返回,
+        // 需要可写元素时用 ptr_at() 取地址 (与 <vector>::at
+        // 返回 `T*` 的既有降级约定同源).
+        Value at(const Key& k) const {
+            size_t i = bound_index(k);
+            // 简化: 未找到不抛 out_of_range, 返回首元素 (与降级容器一致)
+            if (i < size_ && keys_[i] == k) { return vals_[i]; }
             return vals_[0];
         }
 
-        Value& operator[](const Key& k) {
-            for (size_t i = 0; i < size_; ++i) {
-                if (keys_[i] == k) return vals_[i];
+        // 可写槽位 (dcc 扩展): 返回键 k 对应元素的地址, 不存在则先插入默认值.
+        // `*m.ptr_at(k) = v;` 是 `m.at(k) = v` 的等价写法.
+        Value* ptr_at(const Key& k) {
+            size_t i = bound_index(k);
+            if (!(i < size_ && keys_[i] == k)) {
+                Value dummy = Value();
+                insert_at(i, k, dummy);
             }
-            // 插入新元素
-            insert(k, Value());
-            return vals_[size_ - 1];
+            return vals_ + i;
+        }
+
+        // 存在则取值, 不存在则插入默认值再取 (insert-or-access).
+        Value operator[](const Key& k) {
+            size_t i = bound_index(k);
+            if (!(i < size_ && keys_[i] == k)) {
+                Value dummy = Value();
+                insert_at(i, k, dummy);
+            }
+            return vals_[i];
         }
 
         int contains(const Key& k) const {
-            for (size_t i = 0; i < size_; ++i) {
-                if (keys_[i] == k) return 1;
-            }
-            return 0;
+            size_t i = bound_index(k);
+            return (i < size_ && keys_[i] == k) ? 1 : 0;
         }
 
         int count(const Key& k) const {
             return contains(k);
         }
 
+        // 范围遍历 (按下标; dcc 扩展, 与 runtime dccpp_flat_map_key_at 对应)
+        Key key_at(size_t i) const { return keys_[i]; }
+        Value val_at(size_t i) const { return vals_[i]; }
+
         // Modifiers
-        void insert(const Key& k, const Value& v) {
-            if (size_ < cap_) {
-                keys_[size_] = k;
-                vals_[size_] = v;
-                ++size_;
+        //
+        // C++23 [map.notes]: flat_map 的 insert **不覆盖** 已有同键元素.
+        // 返回 1 = 真的插入了新元素, 0 = 键已存在 / 容器已满.
+        int insert(const Key& k, const Value& v) {
+            size_t i = bound_index(k);
+            if (i < size_ && keys_[i] == k) return 0;
+            return insert_at(i, k, v);
+        }
+
+        // 覆盖式插入 (C++23 flat_map::insert_or_assign), 返回 1 = 新建元素.
+        int insert_or_assign(const Key& k, const Value& v) {
+            size_t i = bound_index(k);
+            if (i < size_ && keys_[i] == k) {
+                vals_[i] = v;
+                return 0;
             }
+            return insert_at(i, k, v);
         }
 
         int erase(const Key& k) {
-            for (size_t i = 0; i < size_; ++i) {
-                if (keys_[i] == k) {
-                    // 移动后续元素
-                    for (size_t j = i; j + 1 < size_; ++j) {
-                        keys_[j] = keys_[j + 1];
-                        vals_[j] = vals_[j + 1];
-                    }
-                    --size_;
-                    return 1;
-                }
-            }
-            return 0;
+            size_t i = bound_index(k);
+            if (i >= size_ || !(keys_[i] == k)) return 0;
+            return erase_at(i);
         }
 
         void clear() { size_ = 0; }
@@ -94,11 +162,16 @@ namespace std {
         const Value* end_vals() const { return vals_ + size_; }
 
     private:
-        Key* keys_;
-        Value* vals_;
+        Key keys_[1024];
+        Value vals_[1024];
         size_t size_;
-        size_t cap_;
     };
+
+    // int -> int 便捷别名 (docs/roadmap.md M18: "flat_map_ii (int → int) 做完整
+    // 接口: insert/get/contains/erase/clear, 范围遍历通过 key_at(i) / val_at(i)").
+    // 别名走 `using Name = Type;` (parser 的 CppDecl::Typedef), 使
+    // `std::flat_map_ii m;` 与 `std::flat_map<int, int> m;` 完全等价.
+    using flat_map_ii = flat_map<int, int>;
 
     // flat_multimap: 允许重复键
     template <typename Key, typename Value>

@@ -18,6 +18,9 @@ use crate::cpp::sema::{Access, ClassId, CxxSymbol, CxxSymbolKind, CxxType, Symbo
 use crate::diagnostics::Span;
 use crate::ssa::{BasicBlock, Function, Inst, InstKind, Operand, Phi, SsaVar, Terminator};
 
+/// `switch` 语句的标签收集结果: `(常量 case 值 → 目标 BB 名, default 目标 BB 名)`。
+type SwitchTargets = (Vec<(i128, String)>, Option<String>);
+
 // === LowerIrOutput ===
 
 /// vtable 数据条目
@@ -29,6 +32,23 @@ pub enum VTableEntry {
     SymAddr(String),
 }
 
+/// 需要发射**定义**的静态存储对象 (函数局部 `static` 对象 + 它的
+/// thread-safe 初始化 guard 变量)。
+///
+/// 根因: `LowerIrOutput::globals` 只是一个名字列表, `native::build_program`
+/// 从来不为它生成任何 `Decl::Var` —— native 路径因此根本没有全局/静态存储。
+/// 后果不是编译失败而是**静默错值/段错误**: SSA→AST 重建出的
+/// `__dcc_static_guard_0` 是个未声明标识符, C 前端按隐式 int **局部**处理,
+/// `__cxa_guard_acquire` 于是收到一个未初始化的栈槽内容 (实测 iostream
+/// 夹具在 `std::cout()` 里 SIGSEGV)。这里带上类型, 让发射端能分配真实存储。
+#[derive(Debug, Clone)]
+pub struct StaticObjectDef {
+    /// 链接名 (`__dcc_static_<n>` / `__dcc_static_guard_<n>`)
+    pub name: String,
+    /// 已 ABI 降级的对象类型
+    pub ty: Type,
+}
+
 /// Lowering 结果
 #[derive(Debug, Default)]
 pub struct LowerIrOutput {
@@ -36,6 +56,8 @@ pub struct LowerIrOutput {
     pub functions: Vec<Function>,
     /// 生成的全局变量
     pub globals: Vec<String>,
+    /// 需要发射定义的静态存储对象 (见 `StaticObjectDef`)
+    pub static_objects: Vec<StaticObjectDef>,
     /// 生成的 vtable / RTTI 等只读数据（符号名列表）
     pub rodata: Vec<String>,
     /// vtable 全局数据（符号名 + 条目列表）
@@ -46,6 +68,78 @@ pub struct LowerIrOutput {
 
 /// 指针大小（x86_64 / LP64）
 const POINTER_SIZE: u64 = 8;
+
+/// 构造函数 variant 的链接名约定: `<class>_ctor_{complete,base,allocating}`.
+///
+/// 定义侧 (`IrLowerer::symbol_name` 对 `CxxSymbolKind::Constructor`) 与所有
+/// 调用侧 (`lower_construct` / new 表达式 / 基类与成员初始化) 共用此函数,
+/// 避免命名漂移导致 `undefined reference to <class>_ctor_complete`.
+pub fn ctor_variant_name(class: &str, variant: CtorVariant) -> String {
+    match variant {
+        CtorVariant::Complete => format!("{}_ctor_complete", class),
+        CtorVariant::Base => format!("{}_ctor_base", class),
+        CtorVariant::Allocating => format!("{}_ctor_allocating", class),
+    }
+}
+
+/// 成员函数 (非虚/虚) 的链接名约定: `<class>_<method>`.
+///
+/// 定义侧 (`symbol_link_name`)、调用侧 (`lower_call`) 与 vtable slot
+/// (`native.rs` 注册方法时) 必须用同一个名字, 否则:
+///   * 不同类的同名方法 (`PolyAnimal::speak` / `Dog::speak`) 会撞成同一个
+///     符号 —— 多个 strong 定义 (multiple definition) 或 weak 合并后
+///     vtable 全部指向其中一个实现;
+///   * slot 里的地址与实际发射的函数符号对不上。
+pub fn member_func_symbol(class: &str, method: &str) -> String {
+    format!("{}_{}", class, method)
+}
+
+/// 析构函数 variant 的链接名约定: `<class>_dtor_{complete,base,deleting}`.
+/// 与 `lower_destroy` / `lower_dtor_epilogue` 的调用侧同一约定。
+pub fn dtor_variant_name(class: &str, variant: DtorVariant) -> String {
+    match variant {
+        DtorVariant::Complete => format!("{}_dtor_complete", class),
+        DtorVariant::Base => format!("{}_dtor_base", class),
+        DtorVariant::Deleting => format!("{}_dtor_deleting", class),
+    }
+}
+
+/// 类符号的链接名 (命名空间内的类带 `ns_` 前缀, 全局类就是源名)。
+fn class_symbol_link_name(symbols: &[CxxSymbol], id: SymbolId) -> Option<String> {
+    symbols
+        .get(id.0)
+        .map(|c| c.linkage_name.clone().unwrap_or_else(|| c.name.clone()))
+}
+
+/// 一个符号在目标文件里实际使用的链接名 —— **唯一定义点**。
+///
+/// `IrLowerer::symbol_name` (定义/调用侧) 与 `native.rs` (vtable slot /
+/// struct 字段 / 外部声明原型查找) 都走这里, 避免命名漂移。
+pub fn symbol_link_name(symbols: &[CxxSymbol], sym: &CxxSymbol) -> String {
+    // 显式 linkage_name 优先: 构造/析构的多个 ABI 变体 (C1/C2) 共享同一个
+    // 所属类, 只能靠符号上的明确名字区分。
+    if let Some(ln) = &sym.linkage_name {
+        return ln.clone();
+    }
+    let base = sym.name.clone();
+    let owner = sym.owner.and_then(|o| class_symbol_link_name(symbols, o));
+    match sym.kind {
+        CxxSymbolKind::Constructor => {
+            ctor_variant_name(owner.as_deref().unwrap_or(&base), CtorVariant::Complete)
+        },
+        CxxSymbolKind::Destructor => {
+            // sema 用 `~Class` 作为析构符号名; 调用侧约定是 `<class>_dtor_*`.
+            let cls = owner
+                .unwrap_or_else(|| base.strip_prefix('~').unwrap_or(base.as_str()).to_string());
+            dtor_variant_name(&cls, DtorVariant::Complete)
+        },
+        CxxSymbolKind::Method => match owner {
+            Some(c) => member_func_symbol(&c, &base),
+            None => base,
+        },
+        _ => base,
+    }
+}
 
 // === LowerIrError ===
 
@@ -116,12 +210,31 @@ impl<'a> IrLowerer<'a> {
         self.emit_vtables();
 
         // 收集全局变量 (HIR 顶层声明中的 Variable)
+        //
+        // 其中带 `linkage_name` 的是**静态存储对象** (函数局部 static 与其
+        // thread-safe guard): 除了登记名字, 还必须带上 ABI 降级后的类型, 由
+        // native 发射端分配真实存储, 否则它们在目标文件里根本不存在。
         for decl in &self.hir.top_level {
             if let HirTopLevelDecl::Variable(sym_id) = decl {
                 let sym = self.get_symbol(*sym_id)?;
                 let name = self.symbol_name(sym);
+                let need_definition =
+                    matches!(sym.kind, CxxSymbolKind::Variable) && sym.linkage_name.is_some();
+                let obj_ty = if need_definition {
+                    Some(self.lower_type(&sym.ty)?)
+                } else {
+                    None
+                };
+                drop(sym);
                 if !self.output.globals.contains(&name) {
-                    self.output.globals.push(name);
+                    self.output.globals.push(name.clone());
+                }
+                if let Some(ty) = obj_ty {
+                    if !self.output.static_objects.iter().any(|o| o.name == name) {
+                        self.output
+                            .static_objects
+                            .push(StaticObjectDef { name, ty });
+                    }
                 }
             }
         }
@@ -187,8 +300,45 @@ impl<'a> IrLowerer<'a> {
     }
 
     /// 获取符号的有效名称（优先使用 linkage_name，否则用 name）
+    ///
+    /// 构造函数特殊处理: 用户写出的 ctor 定义在 dcc native ABI 里就是
+    /// complete-object 构造, 其链接名为 `<class>_ctor_complete` —— 与所有
+    /// 调用侧 (lower_construct / new 表达式 / 成员默认构造) 使用同一个约定,
+    /// 否则调用侧引用 `<class>_ctor_complete` 而定义侧发 `<class>`.
     fn symbol_name(&self, sym: &CxxSymbol) -> String {
-        sym.linkage_name.clone().unwrap_or_else(|| sym.name.clone())
+        symbol_link_name(self.symbols, sym)
+    }
+
+    /// 函数类型出现在**值**上下文（[conv.func] 退化后）时的 `ast::Type` 形态。
+    ///
+    /// C 前端把 `Expr::Ident{ty: Type::Func(..)}` 认定为「函数名退化成的地址」
+    /// （`gen_expr_ident_rvalue` / `gen_expr_addrof` 都按 `Type::Func` 判定并
+    /// 发 `lea sym(%rip)`）；而 `Type::Ptr(Void)` 会被当成普通标量变量 —— 名字
+    /// 既不在 `var_map` 也不在 `globals_raw` 时退化成「隐式局部变量」栈槽，
+    /// 读到未初始化内存。`lower_type(CxxType::Function)` 为了 ABI 尺寸统一
+    /// 降成 `void*`，所以值上下文必须用这个与形式不同、尺寸相同（8 字节，
+    /// 见 `size_of_type` 的 `Type::Func => POINTER_SIZE`）的形态。
+    /// 形参/返回不可降级时退化为 `void`（只影响类型标注，不影响地址发射）。
+    pub fn lower_func_value_type(&self, ty: &CxxType) -> Type {
+        let (ret, params) = match ty {
+            CxxType::Function { ret, params, .. } => (ret, params),
+            _ => return Type::Func(Box::new(QualType::new(Type::Void)), Vec::new()),
+        };
+        Type::Func(
+            Box::new(QualType::new(self.lower_type(ret).unwrap_or(Type::Void))),
+            params
+                .iter()
+                .map(|p| QualType::new(self.lower_type(p).unwrap_or(Type::Void)))
+                .collect(),
+        )
+    }
+
+    /// 符号是否是「函数名可退化为函数指针」的函数（[conv.func] 的定义域）。
+    ///
+    /// 真源仍是 sema 的符号表（kind + 类型），不按符号名/夹具名匹配。
+    pub fn is_function_value_symbol(sym: &CxxSymbol) -> bool {
+        matches!(sym.kind, CxxSymbolKind::Function | CxxSymbolKind::Method)
+            || matches!(sym.ty, CxxType::Function { .. })
     }
 
     // === type conversion: CxxType -> ast::Type ===
@@ -305,31 +455,18 @@ impl<'a> IrLowerer<'a> {
     /// 递归收集类及其所有基类的字段，展平成单一字段列表。
     /// 基类字段按基类偏移重新计算最终偏移。
     /// Stage 6: 也包含虚基类字段。
+    ///
+    /// 展平顺序与偏移全部由布局层 ([`ClassAbi::flatten_fields`]) 决定，
+    /// 这里只把 `FlatField` 翻译成 `ast::Field`（补上类型）。
     fn collect_flattened_fields(
         &self,
-        class_id: &ClassId,
+        _class_id: &ClassId,
         abi: &ClassAbi,
         base_offset: u64,
         fields: &mut Vec<crate::ast::Field>,
     ) -> Result<(), LowerIrError> {
-        // 先处理非虚基类（按声明顺序）
-        for (_i, base_layout) in abi.bases.iter().enumerate() {
-            let base_abi = self.abis.get(&base_layout.base).ok_or_else(|| {
-                LowerIrError::Internal(format!(
-                    "ABI for base class {} not found",
-                    base_layout.base.0
-                ))
-            })?;
-            self.collect_flattened_fields(
-                &base_layout.base,
-                base_abi,
-                base_offset + base_layout.offset,
-                fields,
-            )?;
-        }
-        // 再处理自身字段
-        for f in &abi.fields {
-            let field_ty = self.field_type_by_name(*class_id, f.name.as_str())?;
+        for f in abi.flatten_fields(&self.abis) {
+            let field_ty = self.field_type_by_name(f.owner, f.name.as_str())?;
             fields.push(crate::ast::Field {
                 name: f.name.clone(),
                 ty: field_ty,
@@ -341,40 +478,6 @@ impl<'a> IrLowerer<'a> {
                 field_align: None,
                 field_packed: false,
             });
-        }
-        // 最后处理虚基类字段 (Stage 6)
-        // 虚基类的偏移从 vtable 的 VBaseOffset 条目中获取
-        for vb_layout in &abi.virtual_bases {
-            let vb_abi = self.abis.get(&vb_layout.base).ok_or_else(|| {
-                LowerIrError::Internal(format!(
-                    "ABI for virtual base class {} not found",
-                    vb_layout.base.0
-                ))
-            })?;
-            // 从 primary vtable 中查找 vbase offset 值
-            let vbase_offset = abi
-                .vtables
-                .first()
-                .and_then(|vt| {
-                    vt.components.iter().find_map(|comp| {
-                        if let VTableComponent::VBaseOffset { target, offset } = comp {
-                            if *target == vb_layout.base {
-                                Some(*offset as u64)
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .unwrap_or(0);
-            self.collect_flattened_fields(
-                &vb_layout.base,
-                vb_abi,
-                base_offset + vbase_offset,
-                fields,
-            )?;
         }
         Ok(())
     }
@@ -408,11 +511,52 @@ impl<'a> IrLowerer<'a> {
         Ok(None)
     }
 
+    /// 基类子对象在 `class_id` 对象里的字节偏移（包括**虚基类**）。
+    ///
+    /// 与 `find_base_layout` 的区别: 后者只回答非虚继承链上的固定偏移（用于
+    /// 非虚基的 this-adjust，虚基必须走运行期 vbtable），而构造函数里
+    /// 「最派生对象直接构造它的虚基子对象」用的就是布局层 Step 2.5 算好的
+    /// 尾部静态偏移 (`VirtualBaseLayout::static_offset`)，所以这里也查它。
+    pub fn base_subobject_offset(
+        &self,
+        class_id: ClassId,
+        base_id: ClassId,
+    ) -> Result<Option<u64>, LowerIrError> {
+        if let Some(b) = self.find_base_layout(class_id, base_id)? {
+            return Ok(Some(b.offset));
+        }
+        let abi = self.abis.get(&class_id).ok_or_else(|| {
+            LowerIrError::Internal(format!("ABI for class {} not found", class_id.0))
+        })?;
+        Ok(abi
+            .virtual_bases
+            .iter()
+            .find(|vb| vb.base == base_id)
+            .map(|vb| vb.static_offset))
+    }
+
     /// 检查字段是否属于某个基类（非当前类自身字段）。
     fn field_belongs_to_base(&self, _class_id: ClassId, _field_name: &str) -> Option<ClassId> {
         // Stage 4 简化：字段展平后统一通过 MemberLoad 访问，
         // 不需要区分是否属于基类。
         None
+    }
+
+    /// 查字段在对象里的偏移 (字节)。布局层是唯一真源。
+    fn field_offset_in_class(&self, class_id: ClassId, name: &str) -> Result<u64, LowerIrError> {
+        let abi = self.abis.get(&class_id).ok_or_else(|| {
+            LowerIrError::Internal(format!("ABI for class {} not found", class_id.0))
+        })?;
+        abi.flatten_fields(&self.abis)
+            .into_iter()
+            .find(|f| f.name == name)
+            .map(|f| f.offset)
+            .ok_or_else(|| {
+                LowerIrError::Internal(format!(
+                    "field '{}' not in layout of class {}",
+                    name, class_id.0
+                ))
+            })
     }
 
     fn field_type_by_name(&self, class_id: ClassId, name: &str) -> Result<Type, LowerIrError> {
@@ -428,6 +572,41 @@ impl<'a> IrLowerer<'a> {
         }
         // 兜底：字段不在符号表中时用 Int（保持旧行为）
         Ok(Type::Int)
+    }
+}
+
+/// 具名引用变量 (`int& r = x;` / 形参 `T& p`) 的**所指标量类型**。
+///
+/// 返回 `Some` 的条件刻意限制在非聚合所指类型: 聚合 (class/数组) 引用已经有
+/// 一套按「地址」使用成员访问的约定 (`deref_object_for_member` 走 arrow 基址),
+/// 在那里插入整聚合载入会回归。见 `lower_expr` / `lower_assign` 的调用点。
+fn scalar_ref_referent(ty: &CxxType) -> Option<CxxType> {
+    match ty {
+        CxxType::LValueRef(inner) | CxxType::RValueRef(inner) => match inner.as_ref() {
+            CxxType::Class(_)
+            | CxxType::Array(..)
+            | CxxType::Function { .. }
+            | CxxType::MemberPointer { .. }
+            | CxxType::Dependent(_)
+            | CxxType::Alias(_)
+            | CxxType::Void => None,
+            other => Some(other.clone()),
+        },
+        _ => None,
+    }
+}
+
+/// 取成员访问基对象类型里的类 id: `Class(C)` / `C*` / `C&` 都归到 `C`。
+fn class_of_object_type(ty: &CxxType) -> Option<ClassId> {
+    match ty {
+        CxxType::Class(id) => Some(*id),
+        CxxType::Pointer(inner) | CxxType::LValueRef(inner) | CxxType::RValueRef(inner) => {
+            match inner.as_ref() {
+                CxxType::Class(id) => Some(*id),
+                other => class_of_object_type(other),
+            }
+        },
+        _ => None,
     }
 }
 
@@ -492,6 +671,43 @@ fn type_size(ty: &Type) -> u64 {
 
 // === Function lowerer ===
 
+/// 一个 `switch` 的 `case`/`default` 标签 → 入口块名 **精确** 映射。
+///
+/// 为什么需要它 (根因修复): 块名由
+/// [`FuncLowerer::unique_bb`] 生成为 `case_<值>.<计数器>`,
+/// 而旧实现在下跳阶段用 `ssa.blocks.keys().find(|k|
+/// k.starts_with("case_<值>"))` 反查块。`blocks` 是
+/// `HashMap` (迭代序随进程随机), 匹配又是 **前缀** 匹配, 于是
+/// `case_1` 会命中 `case_11.x`: 含 ≥ 10 个 case 的函数每次编译可能把
+/// 不同的 case 接到同一入口 —— 静默错编译 (无诊断、可重现率随机)。
+///
+/// 现在反查全部取消: `collect_switch_cases` 在建块时就记下
+/// 值 → 块名, 下跳阶段只直查本表。嵌套 `switch` 各自持有自己的
+/// 一张表 (作为参数下传), 内层不会误命中外层标签。
+pub struct SwitchLabels {
+    /// `case` 常量值 → 入口块名 (重复值按源顺序保留首个)
+    cases: HashMap<i128, String>,
+    /// `default` 入口块名
+    default_bb: Option<String>,
+}
+
+impl SwitchLabels {
+    fn new(cases: Vec<(i128, String)>, default_bb: Option<String>) -> Self {
+        let mut map: HashMap<i128, String> = HashMap::with_capacity(cases.len());
+        for (v, bb) in cases {
+            map.entry(v).or_insert(bb);
+        }
+        Self {
+            cases: map,
+            default_bb,
+        }
+    }
+
+    fn lookup(&self, value: i128) -> Option<&String> {
+        self.cases.get(&value)
+    }
+}
+
 /// 单个函数的 lowering 上下文
 struct FuncLowerer<'a, 'b> {
     lowerer: &'a mut IrLowerer<'b>,
@@ -505,6 +721,13 @@ struct FuncLowerer<'a, 'b> {
     return_bb: String,
     /// SSA 版本计数器（每个基名一个）
     versions: HashMap<String, u32>,
+    /// 基名 -> 该基名已承载过的类型形状。
+    ///
+    /// SSA 临时值以 **base 名** 为单位共享一个 C 局部变量
+    /// (`ssa::rebuild_block` 的 `all_def_order`/`all_def_types`, 首个定义的类型胜出),
+    /// 所以同一 base 下混入两种不同 `ty` 会让后一种被前一种的存储宽度截断。
+    /// 见 `dedup_base` 的详细说明。
+    base_types: HashMap<String, Vec<Type>>,
     /// BB 计数器
     bb_counter: u32,
     /// break 目标栈（循环/switch 退出块）
@@ -515,6 +738,12 @@ struct FuncLowerer<'a, 'b> {
     label_map: HashMap<String, String>,
     /// init_list 临时变量计数器
     init_list_counter: u32,
+    /// M53: 引用形参绑定右值时物化的临时量计数器 (每个函数独立)
+    ref_temp_counter: u32,
+    /// 合成临时值 (`fresh_syn`) 的全局序号, 每个函数独立
+    temp_seq: u32,
+    /// 短路求值 (`&&` / `||`) 结果变量的全局序号, 每个函数独立
+    logical_seq: u32,
 }
 
 impl<'a, 'b> FuncLowerer<'a, 'b> {
@@ -612,6 +841,15 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
         let current_bb = ssa.entry.clone();
 
+        // 预登记所有已有明确类型的局部名 (this / 形参 / original locals):
+        // `rebuild_block` 取声明类型时 `local_types` 优先于指令推导, 因此这些
+        // 名字一旦被合成临时值复用而又形状不同, 就会产生静默截断。预登记后
+        // `dedup_base` 会让合成临时值改用别的 base。
+        let mut base_types: HashMap<String, Vec<Type>> = HashMap::new();
+        for (n, t) in ssa.local_types.iter() {
+            base_types.insert(n.clone(), vec![t.clone()]);
+        }
+
         Ok(Self {
             lowerer,
             func,
@@ -620,11 +858,15 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             locals,
             return_bb,
             versions,
+            base_types,
             bb_counter: 0,
             break_stack: Vec::new(),
             continue_stack: Vec::new(),
             label_map: HashMap::new(),
             init_list_counter: 0,
+            ref_temp_counter: 0,
+            temp_seq: 0,
+            logical_seq: 0,
         })
     }
 
@@ -733,13 +975,229 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
     // === SSA var helpers ===
 
     fn fresh_var(&mut self, base: &str, ty: Type) -> SsaVar {
-        let version = self.versions.get(base).copied().unwrap_or(0);
-        self.versions.insert(base.to_string(), version + 1);
+        let base = self.dedup_base(base, &ty);
+        let version = self.versions.get(&base).copied().unwrap_or(0);
+        self.versions.insert(base.clone(), version + 1);
         SsaVar {
-            base: base.to_string(),
+            base,
             version,
             ty,
             span: dummy_span(),
+        }
+    }
+
+    /// 生产一个**合成临时值**的 SSA 变量 (与 `fresh_var` 相对)。
+    ///
+    /// 根因 (三个叠加, 都来自 `ssa::rebuild_block` 的 SSA->C 局部坍缩规则):
+    /// 1. 回写 C AST 时只取 `base` 名 (`resolve_operand` / `emit_inst_resolved`
+    ///    用 `d.base` 而不是 `d.name()`), 因此同一 base 的不同 SSA 版本会**坍缩
+    ///    成同一个 C 变量**。这对源码局部变量 (需要"破坏性更新"语义) 是对的,
+    ///    但合成临时值经常有多个同 base 版本同时活跃 —— 二元运算的两个操作数
+    ///    就是典型:
+    ///    ```text
+    ///    field = p->a; field = p->b;   // 坍缩后同一个局部
+    ///    if (field <= field)           // => 恒真 (实测 p->a <= p->b 算错)
+    ///    ```
+    /// 2. 同一 base 的存储类型取首个定义 (`all_def_types` 首值胜出), 于是指针
+    ///    会被前面的 int 定义按 4 字节截断 (见 `dedup_base`)。
+    /// 3. `rebuild_block` 对 `_` 开头的名字**跳过声明** (假定它们一定被单次使用
+    ///    内联掉), 一旦没被内联就变成隐式量, 读值/回边全部错乱。
+    ///
+    /// 所以合成临时值的 base 必须**全局唯一且不带下划线前缀**: 三个问题一次消除,
+    /// 而且每个临时值都有独立栈槽与独立类型。重名候选 (例如用户变量恰好叫
+    /// `dcc_t1_field`) 直接跳过。用户局部变量仍走 `fresh_var`, 命名与栈布局不变。
+    fn fresh_syn(&mut self, base: &str, ty: Type) -> SsaVar {
+        loop {
+            self.temp_seq += 1;
+            let cand = format!("dcc_t{}_{}", self.temp_seq, base);
+            if !self.base_types.contains_key(&cand) {
+                self.base_types.insert(cand.clone(), vec![ty.clone()]);
+                return SsaVar {
+                    base: cand,
+                    version: 0,
+                    ty,
+                    span: dummy_span(),
+                };
+            }
+        }
+    }
+
+    /// 求一个**全局符号的地址** (vtable / typeinfo / 静态局部等)。
+    ///
+    /// 不能用 `Operand::SymAddr`: 它在 SSA→AST 重建时生成 `Expr::Ident{ty}`,
+    /// codegen 按标量全局**取值** (`mov sym(%rip),%rax`)。而 native 发射的
+    /// vtable/typeinfo 都是 `void*[]` **数组**全局, 数组名在表达式里应衰减为
+    /// 地址; codegen 不看声明类型只看 `ty` 标注, 于是取到第 0 个槽的内容。
+    /// `InstKind::AddrOf` 重建为 `&sym` → `lea sym(%rip)`, 才是符号地址。
+    fn lower_sym_addr(&mut self, sym: String, ptr_ty: Type) -> Operand {
+        let dest = self.fresh_syn("sym_addr", ptr_ty);
+        self.push_inst(Inst {
+            dest: Some(dest.clone()),
+            kind: InstKind::AddrOf { base: sym },
+            span: dummy_span(),
+        });
+        Operand::Var(dest)
+    }
+
+    /// 把值写回一个**静态存储对象** (`lname` 为其链接名)。
+    ///
+    /// 形状与 volatile 标量完全一致 (`AddrOf → Store`), 只是基址是全局符号而不是
+    /// 栈上局部: `InstKind::AddrOf` 重建为 `&sym` => `lea sym(%rip)`。
+    /// 聚合类型 (class/union/数组) 的整体赋值需要结构体拷贝, 本后端的 `Store`
+    /// 不携带结构体宽度语义, 因此明确报 unsupported (不静默降级为按标量存)。
+    fn lower_static_storage_store(
+        &mut self,
+        lname: String,
+        ty: Type,
+        src: Operand,
+    ) -> Result<Operand, LowerIrError> {
+        if matches!(ty, Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) {
+            return Err(LowerIrError::Unsupported(format!(
+                "assignment to static aggregate object '{}' by value",
+                lname
+            )));
+        }
+        let ptr_ty = Type::Ptr(Box::new(QualType::new(ty.clone())));
+        let addr = self.lower_sym_addr(lname, ptr_ty);
+        let val = self.fresh_syn("static_store", ty.clone());
+        self.push_inst(Inst {
+            dest: Some(val.clone()),
+            kind: InstKind::Cast {
+                ty: ty.clone(),
+                e: src,
+            },
+            span: dummy_span(),
+        });
+        self.push_inst(Inst {
+            dest: None,
+            kind: InstKind::Store {
+                e: addr,
+                src: Operand::Var(val.clone()),
+                is_volatile: false,
+            },
+            span: dummy_span(),
+        });
+        Ok(Operand::Var(val))
+    }
+
+    /// 静态存储对象上的自增/自减: `AddrOf → Load → Bin → Store`。
+    ///
+    /// 与 `lower_incdec_local` 的 volatile 分支同构, 但必须走全局符号:
+    /// 静态存储的旧值不在本函数的 SSA 里 (也不应在 —— 它要能跳调用/跳函数
+    /// 保持), 旧实现只查 `self.locals` 于是直接 `local variable not found`.
+    fn lower_incdec_static_storage(
+        &mut self,
+        lname: String,
+        op: UnaryOp,
+        ty: &Type,
+    ) -> Result<Operand, LowerIrError> {
+        use UnaryOp::*;
+        if matches!(ty, Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) {
+            return Err(LowerIrError::Unsupported(
+                "increment/decrement of static aggregate object".to_string(),
+            ));
+        }
+        let ptr_ty = Type::Ptr(Box::new(QualType::new(ty.clone())));
+        let addr = self.lower_sym_addr(lname, ptr_ty);
+        let old = self.fresh_syn("static_load", ty.clone());
+        self.push_inst(Inst {
+            dest: Some(old.clone()),
+            kind: InstKind::Load {
+                e: addr.clone(),
+                ty: ty.clone(),
+                is_volatile: false,
+            },
+            span: dummy_span(),
+        });
+        let ast_op = match op {
+            PreInc | PostInc => BinOp::Add,
+            PreDec | PostDec => BinOp::Sub,
+            _ => unreachable!(),
+        };
+        let new_val = self.fresh_syn("static_inc", ty.clone());
+        self.push_inst(Inst {
+            dest: Some(new_val.clone()),
+            kind: InstKind::Bin {
+                op: ast_op,
+                l: Operand::Var(old.clone()),
+                r: Operand::Int(1),
+            },
+            span: dummy_span(),
+        });
+        self.push_inst(Inst {
+            dest: None,
+            kind: InstKind::Store {
+                e: addr,
+                src: Operand::Var(new_val.clone()),
+                is_volatile: false,
+            },
+            span: dummy_span(),
+        });
+        if matches!(op, PreInc | PreDec) {
+            Ok(Operand::Var(new_val))
+        } else {
+            // 后置形态的值是**修改前**的旧值
+            let post = self.fresh_syn("static_postinc", ty.clone());
+            self.push_inst(Inst {
+                dest: Some(post.clone()),
+                kind: InstKind::Bin {
+                    op: BinOp::Add,
+                    l: Operand::Var(old),
+                    r: Operand::Int(0),
+                },
+                span: dummy_span(),
+            });
+            Ok(Operand::Var(post))
+        }
+    }
+
+    /// 为 `base` 选一个与 `ty` 形状相容的基名。
+    ///
+    /// 背景 (根因): SSA -> C 局部变量的重建在 `ssa::rebuild_block` 里按
+    /// **base 名** 收集 `all_def_order`/`all_def_types`, 同一 base 的多个 SSA
+    /// 版本共用一个 C 局部变量, 其类型取首个定义 (`or_insert` 语义, 首个胜出)。
+    /// 而 `fresh_var` 的合成基名 (`call_result` / `field` / `cast` / `deref` …)
+    /// 在同一函数里会被反复使用且类型各不相同, 于是后面的定义被前面的存储
+    /// 宽度截断。实测:
+    /// ```text
+    /// int v = f();                        // call_result  : int (4B)
+    /// G* p = (G*)malloc(sizeof(G));       // 同一个 int 局部 => 指针只留低 32 位
+    /// p->a = 5;                           // movslq 符号扩展 => 野指针 => SIGSEGV
+    /// ```
+    /// 即 `mov %eax,-0x58(%rbp)` + `movslq -0x58(%rbp),%rax`, 160(0xa0) 之类的
+    /// 截断地址写回, 直接段错误。
+    ///
+    /// 这里在生产端保证「一个 base 只承载一种形状」: 形状相同照旧复用 base,
+    /// 形状不同则改用 `base_t1`/`base_t2`… 作为新 base。用户局部变量类型唯一,
+    /// base 名保持不变 => 现有代码的局部变量命名、声明序与栈槽偏移都不受影响。
+    fn dedup_base(&mut self, base: &str, ty: &Type) -> String {
+        // 先登记/比对原 base
+        match self.base_types.get_mut(base) {
+            None => {
+                self.base_types.insert(base.to_string(), vec![ty.clone()]);
+                return base.to_string();
+            },
+            Some(list) => {
+                if list.iter().any(|t| t == ty) {
+                    return base.to_string();
+                }
+            },
+        }
+        let mut idx = 1usize;
+        loop {
+            let cand = format!("{}_t{}", base, idx);
+            match self.base_types.get_mut(&cand) {
+                None => {
+                    self.base_types.insert(cand.clone(), vec![ty.clone()]);
+                    return cand;
+                },
+                Some(list) => {
+                    if list.iter().any(|t| t == ty) {
+                        return cand;
+                    }
+                },
+            }
+            idx += 1;
         }
     }
 
@@ -752,6 +1210,19 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
         match &expr.kind {
             HirExprKind::IntLiteral(v) => Ok(Operand::Int(*v)),
+
+            // 字符串字面量: 解码转义 + 补 [lex.string] 终止符后交给
+            // `Operand::Str`, 它在 SSA→AST 重建里变回 `Expr::String`, 由
+            // codegen 落 .rodata 并发 `lea .Lstr(%rip)`。
+            //
+            // 以前 sema 把字面量占位成 `IntLiteral(0)`, 于是 `strlen("abc")`
+            // 实际传空指针 (ranges 夹具运行期 SIGSEGV), `puts("...")` 之类
+            // 同理不可用。
+            HirExprKind::StringLiteral(text) => {
+                let mut bytes = crate::cpp::const_text::decode_string_escapes(text);
+                bytes.push(0);
+                Ok(Operand::Str(bytes))
+            },
 
             HirExprKind::FloatLiteral(s) => {
                 // C++ HIR 浮点字面量按 double 建模（显式 f 后缀在 HIR
@@ -772,24 +1243,56 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 let linkage_name = sym.linkage_name.clone();
                 drop(sym);
 
-                // 如果有 linkage_name，说明是静态局部变量的引用，走全局变量路径
+                // 有 linkage_name => **静态存储对象** (函数局部 static 及其 guard).
+                //
+                // 一律经地址访问, 三条规则都建立在「引用表达式的 ABI 表示就是
+                // 所指对象的地址」(与 lower_object_lvalue_addr / lower_address_of
+                // 的判定同源) 上:
+                //   1. 表达式类型是 `T&`/`T&&` (如 `ostream& cout(){ static ostream
+                //      os; return os; }`): 值就是对象地址, 发 `&lname`;
+                //   2. 聚合 (class/union/数组) 按对象使用: 直接以全局符号名充当
+                //      对象, 重建出 `__dcc_static_<n>.field` 形态, codegen 按已
+                //      声明的全局 struct 解算 `lea sym(%rip)+off`;
+                //   3. 标量: 从 `&lname` load。
+                //
+                // 原先统一用 `Operand::SymAddr(lname, Ptr)`: 它重建为
+                // `Expr::Ident{ty: Ptr}` 而非 `&sym`, codegen 按标量全局「取值」
+                // (`mov sym(%rip),%rax`); 再加上这些对象从未被发射定义, 名字退化成
+                // 隐式 int 局部量, 读到的就是未初始化栈槽 —— `__cxa_guard_acquire`
+                // 收到垃圾指针, <iostream> 夹具一调用 std::cout() 即 SIGSEGV。
                 if let Some(lname) = linkage_name {
                     let lowered_ty = self.lowerer.lower_type(&sym_ty)?;
                     let ptr_ty = Type::Ptr(Box::new(QualType::new(lowered_ty.clone())));
-                    let addr = Operand::SymAddr(lname, ptr_ty);
-                    // 加载值
-                    let dest = self.fresh_var("static_load", lowered_ty.clone());
-                    let load_inst = Inst {
-                        dest: Some(dest.clone()),
-                        kind: InstKind::Load {
-                            e: addr,
-                            ty: lowered_ty,
-                            is_volatile: sym_is_volatile,
+                    if matches!(expr.ty, CxxType::LValueRef(_) | CxxType::RValueRef(_)) {
+                        return Ok(self.lower_sym_addr(lname, ptr_ty));
+                    }
+                    match lowered_ty {
+                        Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => {
+                            // 聚合对象本体: 名字即全局符号 (见上面规则 2)
+                            return Ok(Operand::Var(SsaVar {
+                                base: lname,
+                                version: 0,
+                                ty: lowered_ty,
+                                span: dummy_span(),
+                            }));
                         },
-                        span: dummy_span(),
-                    };
-                    self.push_inst(load_inst);
-                    return Ok(Operand::Var(dest));
+                        _ => {
+                            let addr = self.lower_sym_addr(lname, ptr_ty);
+                            // 加载值
+                            let dest = self.fresh_syn("static_load", lowered_ty.clone());
+                            let load_inst = Inst {
+                                dest: Some(dest.clone()),
+                                kind: InstKind::Load {
+                                    e: addr,
+                                    ty: lowered_ty,
+                                    is_volatile: sym_is_volatile,
+                                },
+                                span: dummy_span(),
+                            };
+                            self.push_inst(load_inst);
+                            return Ok(Operand::Var(dest));
+                        },
+                    }
                 }
 
                 if let Some(var) = self.locals.get(&name) {
@@ -807,14 +1310,14 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                             _ => {},
                         }
                         let addr =
-                            self.fresh_var("vaddr", Type::Ptr(Box::new(QualType::new(ty.clone()))));
+                            self.fresh_syn("vaddr", Type::Ptr(Box::new(QualType::new(ty.clone()))));
                         let addr_inst = Inst {
                             dest: Some(addr.clone()),
                             kind: InstKind::AddrOf { base: name.clone() },
                             span: dummy_span(),
                         };
                         self.push_inst(addr_inst);
-                        let dest = self.fresh_var("vload", ty);
+                        let dest = self.fresh_syn("vload", ty);
                         let load_inst = Inst {
                             dest: Some(dest.clone()),
                             kind: InstKind::Load {
@@ -827,7 +1330,27 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                         self.push_inst(load_inst);
                         return Ok(Operand::Var(dest));
                     }
-                    Ok(Operand::Var(var.clone()))
+                    // **引用变量的 lvalue→rvalue 转换** (`int& r = gx; if (r == 9)`
+                    // / `int v = r;` / `f(r)` 按值形参 / `return r;`):
+                    // 它在栈上存放的是被引用对象的**地址**, 出现在值位置时必须
+                    // 经由该地址间接读。直接返回 SSA 变量等于把地址当值 —— 实测
+                    // `int& r = gx; return r == 9 ? 0 : 1;` 恒为假 (静默错值)。
+                    let var_owned = var.clone();
+                    if let Some(referent) = scalar_ref_referent(&sym_ty) {
+                        let val_ty = self.lowerer.lower_type(&referent)?;
+                        let dest = self.fresh_syn("ref_rvalue", val_ty.clone());
+                        self.push_inst(Inst {
+                            dest: Some(dest.clone()),
+                            kind: InstKind::Load {
+                                e: Operand::Var(var_owned),
+                                ty: val_ty,
+                                is_volatile: sym_is_volatile,
+                            },
+                            span: dummy_span(),
+                        });
+                        return Ok(Operand::Var(dest));
+                    }
+                    Ok(Operand::Var(var_owned))
                 } else {
                     Err(LowerIrError::Internal(format!("local variable '{}' not found", name)))
                 }
@@ -836,8 +1359,33 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             HirExprKind::Global(sym_id) => {
                 let sym = self.lowerer.get_symbol(*sym_id)?;
                 let name = self.lowerer.symbol_name(sym);
-                let ty = self.lowerer.lower_type(&sym.ty)?;
-                // 全局变量地址
+                // [conv.func]: 函数名出现在**值**位置 (作实参 / 初始化或赋值给
+                // 函数指针 / return ...) 时, 值就是函数自身地址。必须用
+                // `Operand::FnAddr(name, Type::Func(..))`: SSA→AST 重建把它变成
+                // `Expr::Ident{ty: Func}`, C 前端据此发 `lea sym(%rip)`。
+                //
+                // 原先落回 `Operand::SymAddr(name, Ptr(Void))` 时, codegen 认不出
+                // 这个自由符号, 名字退化成「隐式 int 局部量」—— 实参搬运变成无
+                // 重定位的 `movslq slot(%r13)` 读未初始化栈槽。ranges 夹具把
+                // `is_even`/`triple` 传给 filter/transform view 即按此垃圾指针
+                // 调用而 SIGSEGV。`lower_sym_addr`(AddrOf) 也不行: 它重建出的
+                // `Ident` 类型被硬编码成 `Void`, `gen_expr_addrof` 的 `Type::Func`
+                // 判定不命中, 同样落到栈槽 (实测 `lea -0xb8(%r13)`)。
+                let is_func_value = IrLowerer::is_function_value_symbol(sym);
+                let func_val_ty = if is_func_value {
+                    self.lowerer.lower_func_value_type(&sym.ty)
+                } else {
+                    Type::Void
+                };
+                let ty = if is_func_value {
+                    func_val_ty
+                } else {
+                    self.lowerer.lower_type(&sym.ty)?
+                };
+                if is_func_value {
+                    return Ok(Operand::SymAddr(name, ty));
+                }
+                // 全局变量: 值语义 = 按符号取值
                 Ok(Operand::SymAddr(name, ty))
             },
 
@@ -907,8 +1455,11 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 if !self.lowerer.output.rodata.contains(&sym_name) {
                     self.lowerer.output.rodata.push(sym_name.clone());
                 }
-                Ok(Operand::SymAddr(sym_name, ty))
+                // typeid 的结果是 `const std::type_info*`, 即 typeinfo **对象的地址**
+                Ok(self.lower_sym_addr(sym_name, ty))
             },
+
+            HirExprKind::TypeInfoDyn(object) => self.lower_typeinfo_dyn(*object),
 
             HirExprKind::DynamicCast { object, src, dst } => {
                 self.lower_dynamic_cast(*object, src, dst, &expr_ty)
@@ -936,7 +1487,11 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 is_array,
             } => self.lower_new(ty, args, placement.as_deref(), *is_array),
 
-            HirExprKind::Delete { ptr, is_array } => self.lower_delete(*ptr, *is_array),
+            HirExprKind::Delete {
+                ptr,
+                is_array,
+                dtor,
+            } => self.lower_delete(*ptr, *is_array, *dtor),
 
             HirExprKind::Conditional {
                 cond,
@@ -947,7 +1502,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 let cond = self.lower_expr(*cond)?;
                 let then_val = self.lower_expr(*then_expr)?;
                 let else_val = self.lower_expr(*else_expr)?;
-                let result = self.fresh_var("__cond", expr_ty.clone());
+                let result = self.fresh_syn("__cond", expr_ty.clone());
                 self.push_inst(Inst {
                     dest: Some(result.clone()),
                     kind: InstKind::Select {
@@ -1053,7 +1608,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             _ => return Err(LowerIrError::Unsupported(format!("binary op {:?}", op))),
         };
 
-        let dest = self.fresh_var("_tmp", result_ty.clone());
+        let dest = self.fresh_syn("_tmp", result_ty.clone());
         let inst = Inst {
             dest: Some(dest.clone()),
             kind: InstKind::Bin {
@@ -1089,7 +1644,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     LogicalNot => UnOp::Not,
                     _ => unreachable!(),
                 };
-                let dest = self.fresh_var("unary", result_ty.clone());
+                let dest = self.fresh_syn("unary", result_ty.clone());
                 self.push_inst(Inst {
                     dest: Some(dest.clone()),
                     kind: InstKind::Un {
@@ -1105,19 +1660,17 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 match &operand_expr.kind {
                     HirExprKind::Local(sid) => {
                         // 局部变量: 走完整的 SSA 重绑定或 volatile 路径
-                        return self.lower_incdec_local(*sid, op, result_ty);
+                        self.lower_incdec_local(*sid, op, result_ty)
                     },
                     HirExprKind::FieldAccess { object, field } => {
                         // 成员字段: 走 load-op-store 路径 (总是内存路径,
                         // 因为对象可能是 lvalue/const/pointer 等任意形态)
-                        return self.lower_incdec_field(*object, *field, op, result_ty);
+                        self.lower_incdec_field(*object, *field, op, result_ty)
                     },
-                    _ => {
-                        return Err(LowerIrError::Unsupported(
-                            "increment/decrement of non-local object".to_string(),
-                        ))
-                    },
-                };
+                    _ => Err(LowerIrError::Unsupported(
+                        "increment/decrement of non-local object".to_string(),
+                    )),
+                }
             },
         }
     }
@@ -1135,7 +1688,14 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let name = sym.name.clone();
         let sym_is_volatile = sym.is_volatile;
         let sym_ty = sym.ty.clone();
+        let linkage_name = sym.linkage_name.clone();
         let ty = self.lowerer.lower_type(&sym_ty)?;
+
+        // 静态存储对象 (`static int n; ++n;`): 走内存读-改-写。
+        // 下面的 `self.locals` 重绑定模对它是错的: 名字根本不在 self.locals 里。
+        if let Some(lname) = linkage_name {
+            return self.lower_incdec_static_storage(lname, op, &ty);
+        }
 
         // volatile 标量局部变量: 走内存路径 (load -> op -> store)
         if sym_is_volatile {
@@ -1143,14 +1703,14 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => {},
                 _ => {
                     let addr =
-                        self.fresh_var("vaddr", Type::Ptr(Box::new(QualType::new(ty.clone()))));
+                        self.fresh_syn("vaddr", Type::Ptr(Box::new(QualType::new(ty.clone()))));
                     let addr_inst = Inst {
                         dest: Some(addr.clone()),
                         kind: InstKind::AddrOf { base: name.clone() },
                         span: dummy_span(),
                     };
                     self.push_inst(addr_inst);
-                    let load_dest = self.fresh_var("vload", ty.clone());
+                    let load_dest = self.fresh_syn("vload", ty.clone());
                     let load_inst = Inst {
                         dest: Some(load_dest.clone()),
                         kind: InstKind::Load {
@@ -1266,7 +1826,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             PreDec | PostDec => BinOp::Sub,
             _ => unreachable!(),
         };
-        let new_var = self.fresh_var("field_inc", result_ty.clone());
+        let new_var = self.fresh_syn("field_inc", result_ty.clone());
         self.push_inst(Inst {
             dest: Some(new_var.clone()),
             kind: InstKind::Bin {
@@ -1298,12 +1858,41 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         }
     }
 
+    /// 生产一个 **`&&` / `||` 短路结果变量** 的基名.
+    ///
+    /// 不能用 `fresh_syn` (`dcc_t<N>_` 前缀): 该前缀在 `ssa::rebuild_block` 里被
+    /// 识别为「合成临时值」, 单次使用就在 merge 处被内联成一个表达式; 而短路结果
+    /// 必然在**两条路径里各写一次**, 内联后只剩一条路径的写入, 另一条路径落到未
+    /// 初始化的栈槽. 也不能用 `_` 前缀: 那些名字根本不会被声明.
+    /// 因此用 `dcc_land<N>` / `dcc_lor<N>` —— 重建后是一个真实的 C 局部变量,
+    /// 两条路径各赋值一次, 语义与源码的短路求值逐位对应.
+    fn fresh_logical_base(&mut self, tag: &str) -> String {
+        loop {
+            self.logical_seq += 1;
+            let cand = format!("dcc_{}{}", tag, self.logical_seq);
+            if !self.base_types.contains_key(&cand) {
+                return cand;
+            }
+        }
+    }
+
+    /// 把短路结果写进基名为 `base` 的结果变量 (两条路径各调用一次).
+    fn push_logical_result(&mut self, base: &str, e: Operand) -> SsaVar {
+        let dest = self.fresh_var(base, Type::Bool);
+        self.push_inst(Inst {
+            dest: Some(dest.clone()),
+            kind: InstKind::Cast { ty: Type::Bool, e },
+            span: dummy_span(),
+        });
+        dest
+    }
+
     fn lower_logical_and(
         &mut self,
         lhs_id: HirExprId,
         rhs_id: HirExprId,
     ) -> Result<Operand, LowerIrError> {
-        // a && b: if a { if b { true } else { false } } else { false }
+        // a && b: if a { res = (bool)b } else { res = false }
         let then_bb = self.unique_bb("and_then");
         let else_bb = self.unique_bb("and_else");
         let merge_bb = self.unique_bb("and_merge");
@@ -1316,45 +1905,29 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             f: else_bb.clone(),
         });
 
-        // then 块：计算 rhs
+        let result_base = self.fresh_logical_base("land");
+
+        // then 块：计算 rhs 并写入结果
         self.current_bb = then_bb.clone();
         let rhs = self.lower_expr(rhs_id)?;
+        self.push_logical_result(&result_base, rhs);
         self.set_term(Terminator::Jump(merge_bb.clone()));
 
-        // else 块：直接 false
+        // else 块：短路, 结果 false
         self.current_bb = else_bb.clone();
+        self.push_logical_result(&result_base, Operand::Int(0));
         self.set_term(Terminator::Jump(merge_bb.clone()));
 
-        // merge 块：phi 节点
-        self.current_bb = merge_bb.clone();
-        let result = self.fresh_var("and_result", Type::Bool);
-        let phi = Phi {
-            dest: result.clone(),
-            incoming: vec![
-                (
-                    rhs.into_var().unwrap_or_else(|| SsaVar {
-                        base: "false".to_string(),
-                        version: 0,
-                        ty: Type::Bool,
-                        span: dummy_span(),
-                    }),
-                    then_bb.clone(),
-                ),
-                (
-                    SsaVar {
-                        base: "false".to_string(),
-                        version: 0,
-                        ty: Type::Bool,
-                        span: dummy_span(),
-                    },
-                    else_bb.clone(),
-                ),
-            ],
-        };
-        // 简化：直接用 select 代替
-        self.ssa.blocks.get_mut(&merge_bb).unwrap().phis.push(phi);
-
-        Ok(Operand::Var(result))
+        // merge 块：读结果变量. 这里的 SsaVar 只是**名字载体** (version 0 不
+        // 对应任何定义): 两条路径的写入在 SSA→AST 重建时都会坍缩到同一个 C
+        // 局部 `base`, 读取按 base 落回它, 因此不需要 phi.
+        self.current_bb = merge_bb;
+        Ok(Operand::Var(SsaVar {
+            base: result_base,
+            version: 0,
+            ty: Type::Bool,
+            span: dummy_span(),
+        }))
     }
 
     fn lower_logical_or(
@@ -1362,7 +1935,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         lhs_id: HirExprId,
         rhs_id: HirExprId,
     ) -> Result<Operand, LowerIrError> {
-        // a || b: if a { true } else { if b { true } else { false } }
+        // a || b: if a { res = true } else { res = (bool)b }
         let then_bb = self.unique_bb("or_then");
         let else_bb = self.unique_bb("or_else");
         let merge_bb = self.unique_bb("or_merge");
@@ -1374,44 +1947,26 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             f: else_bb.clone(),
         });
 
-        // then 块：直接 true
+        let result_base = self.fresh_logical_base("lor");
+
+        // then 块：短路, 结果 true
         self.current_bb = then_bb.clone();
+        self.push_logical_result(&result_base, Operand::Int(1));
         self.set_term(Terminator::Jump(merge_bb.clone()));
 
-        // else 块：计算 rhs
+        // else 块：计算 rhs 并写入结果
         self.current_bb = else_bb.clone();
         let rhs = self.lower_expr(rhs_id)?;
+        self.push_logical_result(&result_base, rhs);
         self.set_term(Terminator::Jump(merge_bb.clone()));
 
-        // merge 块
-        self.current_bb = merge_bb.clone();
-        let result = self.fresh_var("or_result", Type::Bool);
-        let phi = Phi {
-            dest: result.clone(),
-            incoming: vec![
-                (
-                    SsaVar {
-                        base: "true".to_string(),
-                        version: 0,
-                        ty: Type::Bool,
-                        span: dummy_span(),
-                    },
-                    then_bb.clone(),
-                ),
-                (
-                    rhs.into_var().unwrap_or_else(|| SsaVar {
-                        base: "false".to_string(),
-                        version: 0,
-                        ty: Type::Bool,
-                        span: dummy_span(),
-                    }),
-                    else_bb.clone(),
-                ),
-            ],
-        };
-        self.ssa.blocks.get_mut(&merge_bb).unwrap().phis.push(phi);
-
-        Ok(Operand::Var(result))
+        self.current_bb = merge_bb;
+        Ok(Operand::Var(SsaVar {
+            base: result_base,
+            version: 0,
+            ty: Type::Bool,
+            span: dummy_span(),
+        }))
     }
 
     // --- assignment ---
@@ -1425,7 +1980,46 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 let name = sym.name.clone();
                 let sym_is_volatile = sym.is_volatile;
                 let sym_ty = sym.ty.clone();
+                let linkage_name = sym.linkage_name.clone();
                 let ty = self.lowerer.lower_type(&sym_ty)?;
+
+                // 静态存储对象 (`static int n; n = 5;`): 必须写回它的全局存储。
+                // 这里不能走「SSA 版本重绑定 + self.locals.insert」: 名字根本不在
+                // self.locals 里 (它不是自动局部变量), 而且同一符号在其他函数 /
+                // 其他调用点看到的是同一块存储, 版本重绑定只会把新值留在栈上,
+                // 跨调用丢失持久性 (静默错值)。
+                if let Some(lname) = linkage_name {
+                    return self.lower_static_storage_store(lname, ty, rhs);
+                }
+
+                // **对引用变量赋值** (`int& r = x; r = 9;` / `void f(int& p){ p = 9; }`):
+                // 引用不可 reseated, 赋值的语义是「写它所指的对象」。上面的 SSA
+                // 版本重绑定会把 9 直接写进存放地址的那个槽 —— 实测 `setref(r)`
+                // 里 `p = 9` 之后全局 `gx` 仍是 1 (静默错值), 且指针槽被踩成 9。
+                // 与 `lower_expr` 的 `ref_rvalue` 读路径严格对称。
+                if let Some(referent) = scalar_ref_referent(&sym_ty) {
+                    let val_ty = self.lowerer.lower_type(&referent)?;
+                    let slot = self.locals.get(&name).cloned().ok_or_else(|| {
+                        LowerIrError::Internal(format!("local variable '{}' not found", name))
+                    })?;
+                    let casted = self.fresh_syn("ref_store_val", val_ty.clone());
+                    self.push_inst(Inst {
+                        dest: Some(casted.clone()),
+                        kind: InstKind::Cast { ty: val_ty, e: rhs },
+                        span: dummy_span(),
+                    });
+                    self.push_inst(Inst {
+                        dest: None,
+                        kind: InstKind::Store {
+                            e: Operand::Var(slot),
+                            src: Operand::Var(casted.clone()),
+                            is_volatile: sym_is_volatile,
+                        },
+                        span: dummy_span(),
+                    });
+                    return Ok(Operand::Var(casted));
+                }
+
                 let new_var = self.fresh_var(&name, ty.clone());
 
                 let inst = Inst {
@@ -1494,12 +2088,18 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 let arr = self.lower_expr(*array)?;
                 let idx = self.lower_expr(*index)?;
                 let is_volatile = self.index_is_volatile(*array);
+                // 元素类型 = `a[i]` 这个左值自身的类型 (不是 `a` 的类型):
+                // 它决定 C 后端的元素字节步长与存宽。以前丢给 SSA 后重建为
+                // `Expr::Index{ty: Type::Int}` 硬编码, `char[]` 下标会按 4 字节发射。
+                let lhs_expr = self.get_expr(lhs_id)?;
+                let elem_ty = self.lowerer.lower_type(&lhs_expr.ty)?;
                 let inst = Inst {
                     dest: None,
                     kind: InstKind::IndexStore {
                         arr,
                         idx,
                         src: rhs,
+                        ty: elem_ty,
                         is_volatile,
                     },
                     span: dummy_span(),
@@ -1552,6 +2152,113 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
     // --- call ---
 
+    /// 取函数符号的**显式形参类型表** (单一真源: sema 的 `CxxType::Function.params`)。
+    ///
+    /// 实参的 ABI 适配必须以它为依据, 而不能依赖夹具名/函数名特例。
+    fn function_params(&mut self, sym_id: SymbolId) -> Vec<CxxType> {
+        match self.lowerer.symbols.get(sym_id.0) {
+            Some(s) => match &s.ty {
+                CxxType::Function { params, .. } => params.clone(),
+                _ => vec![],
+            },
+            None => vec![],
+        }
+    }
+
+    /// 表达式是否是**可取地址的具名左值** (glvalue 且存放位置是别的对象)。
+    fn is_addressable_glvalue(kind: &HirExprKind) -> bool {
+        matches!(
+            kind,
+            HirExprKind::Local(_)
+                | HirExprKind::Global(_)
+                | HirExprKind::FieldAccess { .. }
+                | HirExprKind::Dereference(_)
+                | HirExprKind::UnaryOp {
+                    op: UnaryOp::Deref,
+                    ..
+                }
+        )
+    }
+
+    /// 按**被调形参类型**降低一个实参。
+    ///
+    /// 引用形参 (`T&` / `T&&`) 的 ABI 表示就是所指对象的**地址** —— 与
+    /// `IrLowerer::lower_type` 把 `LValueRef` 降成 `Ptr` 同源。sema 传进来的 HIR
+    /// 实参表达式类型仍是被引用对象的值类型 (`Class` / `Integer`, 不插隐式取址),
+    /// 若这里一律 `lower_expr`, 就会把整个对象**按值**塞进一个指针槽:
+    /// 被调函数解引用到的"地址"其实是对象的头几个字节 —— 实测
+    /// `void set(P& a){ a.x = 9; } set(p);` 直接 SIGSEGV。
+    ///
+    /// 只对具名左值做隐式取址; 字面量/临时量绑定 `const T&` 需要临时量物化
+    /// (见 `materialize_ref_temp`), 类类型的临时量需拷贝构造, 保持原路径不新增硬错。
+    fn lower_call_arg(
+        &mut self,
+        param_ty: Option<&CxxType>,
+        arg_id: HirExprId,
+    ) -> Result<Operand, LowerIrError> {
+        if matches!(param_ty, Some(CxxType::LValueRef(_)) | Some(CxxType::RValueRef(_))) {
+            let arg_expr = self.get_expr(arg_id)?;
+            // 实参**自身是引用变量** (`int& r = x; f(r)`): 它已经按 ABI 存放
+            // 为地址, 直接传那个存放值 —— 走 `lower_expr` 会插入一次载入
+            // (引用现在被建模为「按地址间接访问的对象'), 被调函数收到
+            // 对象值当指针用 —— 实测 `ti.before(ti)` SIGSEGV。
+            if let Some(addr) = self.named_ref_slot_addr(arg_id) {
+                return Ok(addr);
+            }
+            if Self::is_addressable_glvalue(&arg_expr.kind) {
+                return self.lower_object_lvalue_addr(arg_id);
+            }
+            // M53: 走到这里 = 实参是**右值** (字面量 / 表达式结果), 而形参是引用.
+            // C++ 要在调用方的栈上物化一个临时对象再把它的地址传过去.
+            let inner = match param_ty {
+                Some(CxxType::LValueRef(t)) | Some(CxxType::RValueRef(t)) => t.clone(),
+                _ => unreachable!(),
+            };
+            if matches!(&*inner, CxxType::Class(_)) {
+                // 类类型临时量要跑拷贝构造 (对象模型侧的事), 不在此跨界
+                return self.lower_expr(arg_id);
+            }
+            let ir_ty = self.lowerer.lower_type(&inner)?;
+            let value = self.lower_expr(arg_id)?;
+            return self.materialize_ref_temp(value, &ir_ty);
+        }
+        self.lower_expr(arg_id)
+    }
+
+    /// M53: 把一个**已算好的标量值**存进一个新物化的局部临时量, 返回它的地址.
+    ///
+    /// 这是 `f(7)` 绑定 `const int&` 缺的那一步: 之前直接把值 7 塞进指针槽,
+    /// 被调函数解引用地址 7 -> SIGSEGV (`std::flat_map` 夹具里每条
+    /// `m.insert(3, 30)` 全踩这条)。栈槽只经 `AddrOf` 取址 + `Store` 写入,
+    /// 不注册进 `self.locals` (它根本不参与名字查找)。
+    fn materialize_ref_temp(
+        &mut self,
+        value: Operand,
+        ir_ty: &Type,
+    ) -> Result<Operand, LowerIrError> {
+        let name = format!("__ref_temp_{}", self.ref_temp_counter);
+        self.ref_temp_counter += 1;
+        self.ssa.local_types.insert(name.clone(), ir_ty.clone());
+        self.ssa.original_locals.insert(name.clone());
+        let ptr_ty = Type::Ptr(Box::new(QualType::new(ir_ty.clone())));
+        let addr = self.fresh_syn("ref_temp_addr", ptr_ty);
+        self.push_inst(Inst {
+            dest: Some(addr.clone()),
+            kind: InstKind::AddrOf { base: name },
+            span: dummy_span(),
+        });
+        self.push_inst(Inst {
+            dest: None,
+            kind: InstKind::Store {
+                e: Operand::Var(addr.clone()),
+                src: value,
+                is_volatile: false,
+            },
+            span: dummy_span(),
+        });
+        Ok(Operand::Var(addr))
+    }
+
     fn lower_call(
         &mut self,
         callee: &HirCallee,
@@ -1569,13 +2276,15 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     sym.kind,
                     CxxSymbolKind::Method | CxxSymbolKind::Constructor | CxxSymbolKind::Destructor
                 ) && sym.owner.is_some();
+                let this_owner = sym.owner.unwrap_or(SymbolId(0));
+                // 形参类型表必须在 `sym` 借用结束后再取 (它要 &mut self)。
+                let param_tys = self.function_params(*sym_id);
 
                 let mut lowered_args = Vec::with_capacity(args.len());
 
                 if is_member {
                     // 成员函数调用：第一个参数是 this 指针
                     // 需要判断 this 是否需要调整（调用基类方法时）
-                    let this_owner = sym.owner.unwrap();
                     let this_owner_class = ClassId::from(this_owner);
 
                     // 当前函数的 owner class（如果有）
@@ -1635,22 +2344,34 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
                     lowered_args.push(adjusted_this);
 
-                    // 其余参数
-                    for arg_id in &args[1..] {
-                        lowered_args.push(self.lower_expr(*arg_id)?);
+                    // 其余参数: 按形参类型做 ABI 适配。
+                    // sema 的 `Function.params` 通常**不**含 this (lower_ir 在
+                    // `FuncLowerer::new` 里注入), 但运行时/合成符号可能含;
+                    // 用长度关系判定偏移, 不靠符号名猜。
+                    let param_offset = if param_tys.len() + 1 == args.len() {
+                        0
+                    } else if param_tys.len() == args.len() {
+                        1
+                    } else {
+                        0
+                    };
+                    for (i, arg_id) in args[1..].iter().enumerate() {
+                        let pt = param_tys.get(i + param_offset);
+                        lowered_args.push(self.lower_call_arg(pt, *arg_id)?);
                     }
                 } else {
                     // 非成员函数
-                    for arg_id in args {
-                        lowered_args.push(self.lower_expr(*arg_id)?);
+                    for (i, arg_id) in args.iter().enumerate() {
+                        let pt = param_tys.get(i);
+                        lowered_args.push(self.lower_call_arg(pt, *arg_id)?);
                     }
                 }
 
                 // 如果符号是 dccpp_* runtime symbol，需要注册为 external
-                if fn_name.starts_with("dccpp_") || fn_name.starts_with("__dcc_") {
-                    if !self.lowerer.output.external_symbols.contains(&fn_name) {
-                        self.lowerer.output.external_symbols.push(fn_name.clone());
-                    }
+                if (fn_name.starts_with("dccpp_") || fn_name.starts_with("__dcc_"))
+                    && !self.lowerer.output.external_symbols.contains(&fn_name)
+                {
+                    self.lowerer.output.external_symbols.push(fn_name.clone());
                 }
 
                 let callee_op = Operand::FnAddr(fn_name, fn_ty);
@@ -1668,7 +2389,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     self.push_inst(inst);
                     Ok(Operand::Void)
                 } else {
-                    let dest = self.fresh_var("call_result", ret_ty.clone());
+                    let dest = self.fresh_syn("call_result", ret_ty.clone());
                     let inst = Inst {
                         dest: Some(dest.clone()),
                         kind: InstKind::Call {
@@ -1689,6 +2410,76 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             } => self.lower_virtual_call(*method, *slot, this_adjust, args, ret_ty),
             _ => Err(LowerIrError::Unsupported("indirect/ctor/dtor calls".to_string())),
         }
+    }
+
+    /// 从「已调整到 vptr 所在子对象」的指针出发, 取 `vtable[slot]` 的函数指针。
+    ///
+    /// `vptr_ptr` 须已是 `vptr_ptr_type()` (字节指针) 形态。槽号由调用方向布局层
+    /// (`ClassAbi::vcall_slot`) 查得 —— 发射侧不自己数槽, 保证 vtable 布局与
+    /// 调用点只有一个真源。虚函数调用与 `delete` 的虚析构派发共用本链。
+    fn load_vtable_entry(
+        &mut self,
+        vptr_ptr: &Operand,
+        slot: usize,
+    ) -> Result<SsaVar, LowerIrError> {
+        // 1. 从 vptr 加载 vtable 指针（vptr 类型为 *const *const u8）
+        let vtable_ptr_ty = self.lowerer.vtable_entry_type();
+        let vtable_ptr = self.fresh_syn("vtable_ptr", vtable_ptr_ty.clone());
+        self.push_inst(Inst {
+            dest: Some(vtable_ptr.clone()),
+            kind: InstKind::Load {
+                e: vptr_ptr.clone(),
+                ty: vtable_ptr_ty,
+                is_volatile: false,
+            },
+            span: dummy_span(),
+        });
+
+        // 2. vtable_ptr + slot * sizeof(pointer) -> 槽地址
+        let slot_offset = (slot as i128) * (POINTER_SIZE as i128);
+        let byte_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::SChar)));
+        let vt_byte_ptr = self.fresh_syn("vt_byte_ptr", byte_ptr_ty.clone());
+        self.push_inst(Inst {
+            dest: Some(vt_byte_ptr.clone()),
+            kind: InstKind::Cast {
+                ty: byte_ptr_ty.clone(),
+                e: Operand::Var(vtable_ptr),
+            },
+            span: dummy_span(),
+        });
+        let slot_byte_ptr = self.fresh_syn("vt_slot_ptr", byte_ptr_ty.clone());
+        self.push_inst(Inst {
+            dest: Some(slot_byte_ptr.clone()),
+            kind: InstKind::Bin {
+                op: BinOp::Add,
+                l: Operand::Var(vt_byte_ptr),
+                r: Operand::Int(slot_offset),
+            },
+            span: dummy_span(),
+        });
+
+        // 3. 加载函数指针（类型为 void*，后续通过调用使用）
+        let fn_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+        let fn_ptr_var = self.fresh_syn("fn_ptr", fn_ptr_ty.clone());
+        self.push_inst(Inst {
+            dest: Some(fn_ptr_var.clone()),
+            kind: InstKind::Cast {
+                ty: fn_ptr_ty.clone(),
+                e: Operand::Var(slot_byte_ptr),
+            },
+            span: dummy_span(),
+        });
+        let fp_var = self.fresh_syn("vcall_fp", fn_ptr_ty.clone());
+        self.push_inst(Inst {
+            dest: Some(fp_var.clone()),
+            kind: InstKind::Load {
+                e: Operand::Var(fn_ptr_var),
+                ty: fn_ptr_ty,
+                is_volatile: false,
+            },
+            span: dummy_span(),
+        });
+        Ok(fp_var)
     }
 
     /// 虚函数调用 lowering：通过 vtable 间接调用。
@@ -1715,9 +2506,9 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let object_expr = args[0];
         let object = self.lower_expr(object_expr)?;
 
-        // 获取对象类型的 class（用于确定 vptr 类型）
+        // 获取对象类型的 class（用于确定 vptr 类型与虚槽号）
         let object_expr_data = self.get_expr(object_expr)?;
-        let _object_class = match &object_expr_data.ty {
+        let object_class = match &object_expr_data.ty {
             CxxType::Pointer(inner) => match inner.as_ref() {
                 CxxType::Class(cid) => Some(*cid),
                 _ => None,
@@ -1733,7 +2524,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         // 2. 应用 this_adjust（非虚偏移）：调整到对应 vptr 所在的子对象
         let adjusted_this = if this_adjust.non_virtual != 0 {
             let byte_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::SChar)));
-            let byte_ptr = self.fresh_var("vcall_byte_ptr", byte_ptr_ty.clone());
+            let byte_ptr = self.fresh_syn("vcall_byte_ptr", byte_ptr_ty.clone());
             let cast_to_byte = Inst {
                 dest: Some(byte_ptr.clone()),
                 kind: InstKind::Cast {
@@ -1744,7 +2535,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             };
             self.push_inst(cast_to_byte);
 
-            let adj_byte = self.fresh_var("vcall_adj_byte", byte_ptr_ty.clone());
+            let adj_byte = self.fresh_syn("vcall_adj_byte", byte_ptr_ty.clone());
             let gep = Inst {
                 dest: Some(adj_byte.clone()),
                 kind: InstKind::Bin {
@@ -1758,7 +2549,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
             // 转回 void* 用于 vptr 加载
             let vptr_ptr_ty = self.lowerer.vptr_ptr_type();
-            let vptr_ptr = self.fresh_var("vcall_vptr_ptr", vptr_ptr_ty.clone());
+            let vptr_ptr = self.fresh_syn("vcall_vptr_ptr", vptr_ptr_ty.clone());
             let cast_back = Inst {
                 dest: Some(vptr_ptr.clone()),
                 kind: InstKind::Cast {
@@ -1783,7 +2574,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             if obj_ty == vptr_ptr_ty {
                 object.clone()
             } else {
-                let vptr_ptr = self.fresh_var("vcall_vptr_ptr", vptr_ptr_ty.clone());
+                let vptr_ptr = self.fresh_syn("vcall_vptr_ptr", vptr_ptr_ty.clone());
                 let cast_inst = Inst {
                     dest: Some(vptr_ptr.clone()),
                     kind: InstKind::Cast {
@@ -1797,71 +2588,25 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             }
         };
 
-        // 3. 从 vptr 加载 vtable 指针（vptr 类型为 *const *const u8）
-        let vtable_ptr_ty = self.lowerer.vtable_entry_type();
-        let vtable_ptr = self.fresh_var("vtable_ptr", vtable_ptr_ty.clone());
-        let load_vptr = Inst {
-            dest: Some(vtable_ptr.clone()),
-            kind: InstKind::Load {
-                e: adjusted_this.clone(),
-                ty: vtable_ptr_ty.clone(),
-                is_volatile: false,
-            },
-            span: dummy_span(),
-        };
-        self.push_inst(load_vptr);
-
-        // 4. 从 vtable[slot] 加载函数指针
-        // 计算 vtable[slot] 的地址：vtable_ptr + slot * sizeof(pointer)
-        let slot_offset = (slot as i128) * (POINTER_SIZE as i128);
-        let byte_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::SChar)));
-        let vt_byte_ptr = self.fresh_var("vt_byte_ptr", byte_ptr_ty.clone());
-        let cast_vt_byte = Inst {
-            dest: Some(vt_byte_ptr.clone()),
-            kind: InstKind::Cast {
-                ty: byte_ptr_ty.clone(),
-                e: Operand::Var(vtable_ptr),
-            },
-            span: dummy_span(),
-        };
-        self.push_inst(cast_vt_byte);
-
-        let slot_byte_ptr = self.fresh_var("vt_slot_ptr", byte_ptr_ty.clone());
-        let slot_gep = Inst {
-            dest: Some(slot_byte_ptr.clone()),
-            kind: InstKind::Bin {
-                op: BinOp::Add,
-                l: Operand::Var(vt_byte_ptr),
-                r: Operand::Int(slot_offset),
-            },
-            span: dummy_span(),
-        };
-        self.push_inst(slot_gep);
-
-        // 加载函数指针（类型为 void*，后续通过调用使用）
-        let fn_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
-        let fn_ptr_var = self.fresh_var("fn_ptr", fn_ptr_ty.clone());
-        let cast_fn_ptr = Inst {
-            dest: Some(fn_ptr_var.clone()),
-            kind: InstKind::Cast {
-                ty: fn_ptr_ty.clone(),
-                e: Operand::Var(slot_byte_ptr),
-            },
-            span: dummy_span(),
-        };
-        self.push_inst(cast_fn_ptr);
-
-        let fp_var = self.fresh_var("vcall_fp", fn_ptr_ty.clone());
-        let load_fp = Inst {
-            dest: Some(fp_var.clone()),
-            kind: InstKind::Load {
-                e: Operand::Var(fn_ptr_var),
-                ty: fn_ptr_ty.clone(),
-                is_volatile: false,
-            },
-            span: dummy_span(),
-        };
-        self.push_inst(load_fp);
+        // 3~4. 取 `vtable[slot]` 的函数指针。抽成 `load_vtable_entry` 后, 虚函数
+        // 调用与 `delete` 的虚析构派发共用同一条发射链。
+        //
+        // **槽号以布局层为单一真源**: `ClassAbi::vcall_slot` 按 this 指针静态类型
+        // 类的主 vtable 函数序返号。sema 解析期的槽号由「本类 virtual_methods
+        // 登记顺序」给出 (继承未重写的虚函数不进入该表), 与真实布局系统性
+        // 错位 —— 实测 `M : B{virtual ~B(); id;} { bar; }` 里 `m->bar()` 拿到
+        // slot 0, 而 slot 0 是虚析构槽。查不到时 (单测里手搓 ClassAbi、
+        // 非多态类等) 回退 sema 槽号, 保持旧行为。
+        let method_name = self
+            .lowerer
+            .get_symbol(method)
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
+        let slot = object_class
+            .and_then(|cid| self.lowerer.abis.get(&cid))
+            .and_then(|abi| abi.vcall_slot(&method_name))
+            .unwrap_or(slot);
+        let fp_var = self.load_vtable_entry(&adjusted_this, slot)?;
 
         // 5. 构造参数列表：第一个参数是 this（调整后）
         let method_sym = self.lowerer.get_symbol(method)?;
@@ -1879,7 +2624,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 let owner_ptr_ty = self
                     .lowerer
                     .lower_type(&CxxType::Pointer(Box::new(CxxType::Class(owner_class))))?;
-                let this_var = self.fresh_var("vcall_this", owner_ptr_ty.clone());
+                let this_var = self.fresh_syn("vcall_this", owner_ptr_ty.clone());
                 let cast_this = Inst {
                     dest: Some(this_var.clone()),
                     kind: InstKind::Cast {
@@ -1901,9 +2646,18 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let mut lowered_args = Vec::with_capacity(args.len());
         lowered_args.push(this_arg);
 
-        // 其余参数
-        for arg_id in &args[1..] {
-            lowered_args.push(self.lower_expr(*arg_id)?);
+        // 其余参数: 与直接调用同源, 按形参类型做 ABI 适配 (引用形参取实参地址)。
+        let param_tys = self.function_params(method);
+        let param_offset = if param_tys.len() + 1 == args.len() {
+            0
+        } else if param_tys.len() == args.len() {
+            1
+        } else {
+            0
+        };
+        for (i, arg_id) in args[1..].iter().enumerate() {
+            let pt = param_tys.get(i + param_offset);
+            lowered_args.push(self.lower_call_arg(pt, *arg_id)?);
         }
 
         // 6. 通过函数指针间接调用
@@ -1922,7 +2676,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             self.push_inst(inst);
             Ok(Operand::Void)
         } else {
-            let dest = self.fresh_var("vcall_result", ret_ty.clone());
+            let dest = self.fresh_syn("vcall_result", ret_ty.clone());
             let inst = Inst {
                 dest: Some(dest.clone()),
                 kind: InstKind::Call {
@@ -1971,13 +2725,12 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         field_id: SymbolId,
         result_ty: &Type,
     ) -> Result<Operand, LowerIrError> {
-        let object = self.lower_expr(object_id)?;
+        let (object, obj_ty, object_is_arrow) = self.lower_member_object(object_id)?;
         let field_sym = self.lowerer.get_symbol(field_id)?;
         let field_name = field_sym.name.clone();
-        let (object, obj_ty, object_is_arrow) = self.deref_object_for_member(object_id, object)?;
         let obj_is_volatile = self.obj_base_is_volatile(object_id);
 
-        let dest = self.fresh_var("field", result_ty.clone());
+        let dest = self.fresh_syn("field", result_ty.clone());
         let inst = Inst {
             dest: Some(dest.clone()),
             kind: InstKind::MemberLoad {
@@ -2001,10 +2754,14 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         field_id: SymbolId,
         src: Operand,
     ) -> Result<Operand, LowerIrError> {
-        let object = self.lower_expr(object_id)?;
+        let (object, obj_ty, object_is_arrow) = self.lower_member_object(object_id)?;
         let field_sym = self.lowerer.get_symbol(field_id)?;
         let field_name = field_sym.name.clone();
-        let (object, obj_ty, object_is_arrow) = self.deref_object_for_member(object_id, object)?;
+        // 字段类型 = 符号表里声明的类型 (单一真源): MemberStore 携带它,
+        // SSA→AST 重建出的 `Expr::Member{ty}` 才是真实形态, 后端据此判定
+        // 「聚合字段按值整体拷贝」。
+        let field_ty = self.lowerer.lower_type(&field_sym.ty)?;
+        drop(field_sym);
         let obj_is_volatile = self.obj_base_is_volatile(object_id);
 
         let inst = Inst {
@@ -2014,6 +2771,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 obj_ty,
                 field: field_name,
                 src,
+                ty: field_ty,
                 is_volatile: obj_is_volatile,
                 is_arrow: object_is_arrow,
             },
@@ -2022,6 +2780,49 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         self.push_inst(inst);
 
         Ok(Operand::Void)
+    }
+
+    /// 降级成员访问的基对象: 返回 `(obj operand, 结构体类型, obj 是否为箭头基址)`.
+    ///
+    /// 关键: C++ 的 `p->m` 在 sema 里被合成为 `Member(UnaryOp{Deref, p}, m)`,
+    /// 于是对象表达式的类型已经是 pointee class 而不是指针, 仅靠
+    /// `deref_object_for_member` 的类型判定会把它当成"类值"处理 ——
+    /// `lower_expr` 对 `UnaryOp{Deref}` 发射 `InstKind::Load`, 即**整结构体按值
+    /// 载入**, 随后的 MemberStore 便写到那个临时副本上, 写入丢失
+    /// (`p->field = v` 完全不生效, 跨函数也不可见)。
+    ///
+    /// 这里在求值之前先识别解引用包装: 若被解引用的操作数本身是
+    /// "class 指针", 就直接把指针交出去并标记 is_arrow = true, 让成员访问
+    /// 走 `ptr->field` 的内存路径 (与 `this->field` 一致)。引用成员
+    /// (`T&` 的 Deref) 与其它形态仍走原有语义。
+    fn lower_member_object(
+        &mut self,
+        object_id: HirExprId,
+    ) -> Result<(Operand, Type, bool), LowerIrError> {
+        let obj_expr = self.get_expr(object_id)?;
+        let inner_id = match &obj_expr.kind {
+            HirExprKind::UnaryOp {
+                op: UnaryOp::Deref,
+                operand,
+            } => *operand,
+            HirExprKind::Dereference(inner) => *inner,
+            _ => {
+                // 非解引用包装: 按对象表达式自身形态处理
+                let object = self.lower_expr(object_id)?;
+                return self.deref_object_for_member(object_id, object);
+            },
+        };
+        let inner_expr = self.get_expr(inner_id)?;
+        if let CxxType::Pointer(pointee) = &inner_expr.ty {
+            if matches!(pointee.as_ref(), CxxType::Class(_)) {
+                let pointee_ty = self.lowerer.lower_type(pointee)?;
+                let ptr = self.lower_expr(inner_id)?;
+                return Ok((ptr, pointee_ty, true));
+            }
+        }
+        // 解引用的不是 class 指针 (例如引用类型的隐式解引用): 保持原行为
+        let object = self.lower_expr(object_id)?;
+        self.deref_object_for_member(object_id, object)
     }
 
     /// 成员访问的对象若是 class 指针 (如 this), MemberLoad 的 obj
@@ -2038,9 +2839,132 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 let pointee_ty = self.lowerer.lower_type(inner)?;
                 Ok((object, pointee_ty, true))
             },
+            // 具名引用变量 (`P& r = ...; r.x`): 引用在 ABI 层的表示就是所指对象的
+            // 地址, 所以成员访问必须走 `r->x` 形态。归到下面的 `_` 分支会把
+            // `obj_ty` 降为 `Ptr(Struct)` 而 `is_arrow=false`, codegen 于是把**存放
+            // 地址的栈槽**当作对象本体 (`lea -0x48(%r13)`), 读写都落在局部上
+            // (实测 `P& r = ref(); r.x = 7;` 不生效)。
+            CxxType::LValueRef(inner) | CxxType::RValueRef(inner)
+                if matches!(inner.as_ref(), CxxType::Class(_)) =>
+            {
+                let pointee_ty = self.lowerer.lower_type(inner)?;
+                Ok((object, pointee_ty, true))
+            },
             _ => {
                 let obj_ty = self.lowerer.lower_type(&obj_expr.ty)?;
                 Ok((object, obj_ty, false))
+            },
+        }
+    }
+
+    /// 若 `expr_id` 是**自身即引用**的具名局部变量 (`int& r = x;` / 形参 `T& p`),
+    /// 返回它所存放的那个地址 (不做间接访问)。否则 None。
+    ///
+    /// 判定基于**符号类型**而不是表达式类型: dcc 的 HIR 里引用变量的每次使用
+    /// 都带 `T&`, 而「要值」(lvalue→rvalue, 见 `lower_expr`) 与「要地址」
+    /// (绑定到引用、取 `&r`、作引用实参) 是两种不同的降级。单一真源在此。
+    fn named_ref_slot_addr(&mut self, expr_id: HirExprId) -> Option<Operand> {
+        let expr = self.get_expr(expr_id).ok()?;
+        let sym_id = match &expr.kind {
+            HirExprKind::Local(sym_id) => *sym_id,
+            _ => return None,
+        };
+        let sym_ty = self.lowerer.get_symbol(sym_id).ok()?.ty.clone();
+        if !matches!(sym_ty, CxxType::LValueRef(_) | CxxType::RValueRef(_)) {
+            return None;
+        }
+        let name = self.lowerer.get_symbol(sym_id).ok()?.name.clone();
+        let var = self.locals.get(&name).cloned()?;
+        Some(Operand::Var(var))
+    }
+
+    /// 按**被初始化对象的类型**降低初始化式。
+    ///
+    /// 引用 (`T& r = obj;` / `T& ri = x;`) 绑定的是对象的**地址**, 不能按值拷贝:
+    ///   - 初始化式本身已是引用 (如 `P& r2 = r;`、`P& r = f();`): 它的 ABI 表示就是
+    ///     地址, 直接 `lower_expr`;
+    ///   - 初始化式是一个左值 (具名对象 / 成员 / 解引用): 取它的左值地址。
+    ///
+    /// 缺这个判定时 `P& r = p;` 会把整个 struct 按值写到一个指针槽里 (实测段错误)。
+    fn lower_init_value(
+        &mut self,
+        sym_ty: &CxxType,
+        init_id: HirExprId,
+    ) -> Result<Operand, LowerIrError> {
+        if matches!(sym_ty, CxxType::LValueRef(_) | CxxType::RValueRef(_)) {
+            let init_expr = self.get_expr(init_id)?;
+            if !matches!(init_expr.ty, CxxType::LValueRef(_) | CxxType::RValueRef(_)) {
+                return self.lower_object_lvalue_addr(init_id);
+            }
+        }
+        self.lower_expr(init_id)
+    }
+
+    /// 求 class **左值对象**的地址 (用于 `&obj.field`)。
+    ///
+    /// 与 `lower_member_object` 的区别: 后者面向 `MemberLoad`/`MemberStore`,
+    /// 对 class 值对象返回结构体值操作数 (codegen 在成员访问里隐式取其地址);
+    /// 而这里要的是可参与指针算术的**地址值**，必须自己发射 `&sym`。
+    fn lower_object_lvalue_addr(&mut self, object_id: HirExprId) -> Result<Operand, LowerIrError> {
+        let obj_expr = self.get_expr(object_id)?;
+        let void_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+        match &obj_expr.kind {
+            // `p->m` / `(*p).m`: 对象地址就是指针本身 (引用 `T&` 在 ABI 层也是指针)
+            HirExprKind::Dereference(inner) => self.lower_expr(*inner),
+            HirExprKind::UnaryOp {
+                op: UnaryOp::Deref,
+                operand,
+            } => self.lower_expr(*operand),
+            // `this->m`: this 形参已是指针
+            HirExprKind::This => {
+                if self.ssa.params.is_empty() {
+                    return Err(LowerIrError::Internal(
+                        "this used in non-member function".to_string(),
+                    ));
+                }
+                Ok(Operand::Var(self.ssa.params[0].clone()))
+            },
+            // 具名左值: 局部变量 / 静态局部 (linkage_name 指向其真名) / 全局对象
+            HirExprKind::Local(sym_id) | HirExprKind::Global(sym_id) => {
+                // 具名**引用**变量 (`P& a` 形参 / `int& r = x;` 局部): 它的存放
+                // 就是被引用对象的地址, 取它的左值地址 = 读那个存放值。不能走
+                // `lower_expr`: 引用变量的值语义现在是「载入所指对象」(见
+                // `ref_rvalue` 分支), 两者必须分开。
+                if let Some(addr) = self.named_ref_slot_addr(object_id) {
+                    return Ok(addr);
+                }
+                // 具名**引用** (`P& a` 形参 / `P& r = x;` 局部): 它在 ABI 层已经是
+                // 地址, 再发 `&a` 会取到存放地址的那个**槽** (双重间接) —— 实测
+                // `P& pick(P& a, P& b){ return a; }` 因此返回栈槽地址。
+                if matches!(obj_expr.ty, CxxType::LValueRef(_) | CxxType::RValueRef(_)) {
+                    return self.lower_expr(object_id);
+                }
+                let sym = self.lowerer.get_symbol(*sym_id)?;
+                let name = match obj_expr.kind {
+                    HirExprKind::Local(_) => {
+                        sym.linkage_name.clone().unwrap_or_else(|| sym.name.clone())
+                    },
+                    _ => self.lowerer.symbol_name(sym),
+                };
+                Ok(self.lower_sym_addr(name, void_ptr_ty))
+            },
+            // 嵌套成员 `&a.b.c`: 先递归求 `&a.b`, 再加 `c` 在 `b` 类里的偏移
+            HirExprKind::FieldAccess { object, field } => {
+                let obj_expr = self.get_expr(*object)?;
+                let class_id = class_of_object_type(&obj_expr.ty).ok_or_else(|| {
+                    LowerIrError::Unsupported("address of field of non-class object".to_string())
+                })?;
+                let field_name = self.lowerer.get_symbol(*field)?.name.clone();
+                let offset = self.lowerer.field_offset_in_class(class_id, &field_name)?;
+                let base = self.lower_object_lvalue_addr(*object)?;
+                self.compute_member_ptr(base, offset, &void_ptr_ty)
+            },
+            // 其余额式类型是引用: 它的 ABI 表示就 是地址
+            _ => {
+                if matches!(obj_expr.ty, CxxType::LValueRef(_) | CxxType::RValueRef(_)) {
+                    return self.lower_expr(object_id);
+                }
+                Err(LowerIrError::Unsupported("address of non-addressable object".to_string()))
             },
         }
     }
@@ -2066,10 +2990,15 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
         match &inner_expr.kind {
             HirExprKind::Local(sym_id) => {
+                // `&r` (r 是引用变量): 结果就是被引用对象的地址 —— 即 r 存放的
+                // 那个值。发 `AddrOf{base: r}` 会取到**栈槽** (双重间接)。
+                if let Some(addr) = self.named_ref_slot_addr(inner_id) {
+                    return Ok(addr);
+                }
                 let sym = self.lowerer.get_symbol(*sym_id)?;
                 let name = sym.name.clone();
                 // 局部变量地址 → AddrOf 指令
-                let dest = self.fresh_var("addr", result_ty.clone());
+                let dest = self.fresh_syn("addr", result_ty.clone());
                 let inst = Inst {
                     dest: Some(dest.clone()),
                     kind: InstKind::AddrOf { base: name },
@@ -2080,13 +3009,59 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             },
             HirExprKind::Global(sym_id) => {
                 let sym = self.lowerer.get_symbol(*sym_id)?;
-                Ok(Operand::SymAddr(sym.name.clone(), result_ty.clone()))
+                let name = self.lowerer.symbol_name(sym);
+                // `&fn` 与 `fn` 是同一个值 ([conv.func]): 走与 `lower_expr` 的
+                // Global 分支同一真源。不能用 `lower_sym_addr`: AddrOf 重建出的
+                // `Ident` 类型硬编码为 `Void`, `gen_expr_addrof` 只认
+                // `Type::Func` 才发 `lea sym(%rip)`。标量全局对象仍按 `SymAddr`
+                // 占位 (codegen 按全局名解析)。
+                if IrLowerer::is_function_value_symbol(sym) {
+                    let fty = self.lowerer.lower_func_value_type(&sym.ty);
+                    return Ok(Operand::SymAddr(name, fty));
+                }
+                Ok(Operand::SymAddr(name, result_ty.clone()))
             },
             HirExprKind::Dereference(inner_inner) => {
                 // &*e → e (恒等)
                 self.lower_expr(*inner_inner)
             },
-            _ => Err(LowerIrError::Unsupported("address of complex expression".to_string())),
+            // &(*p) 的另一种编码: sema 把 `p->m()` 合成为
+            // `Member(UnaryOp(Deref, p), m)`, 取 this 时得到
+            // `AddressOf(UnaryOp{Deref})`. 语义与上面 Dereference 分支一致:
+            // 地址即指针本身 (否则 `p->method()` 无法降级).
+            HirExprKind::UnaryOp {
+                op: UnaryOp::Deref,
+                operand,
+            } => self.lower_expr(*operand),
+            // `&obj.field` / `&p->field`: 对象基址 + 字段偏移。
+            // 偏移只从布局层查询 (ClassAbi::flatten_fields), 不在这里重算，
+            // 因而虚基共享子对象的 `&o.__vb_Base` 与同类成员访问用的是
+            // 同一个真值。
+            //
+            // 基址必须走 `lower_object_lvalue_addr` 而不是 `lower_member_object`:
+            // 后者对 class **值**对象返回结构体值操作数 (MemberLoad 会隐式
+            // 取地址), 直接当指针做 `+ off` 会先载入结构体首 8 字节,
+            // 得到 vptr 而不是对象地址。
+            HirExprKind::FieldAccess { object, field } => {
+                let obj_expr = self.get_expr(*object)?;
+                let class_id = class_of_object_type(&obj_expr.ty).ok_or_else(|| {
+                    LowerIrError::Unsupported("address of field of non-class object".to_string())
+                })?;
+                let field_name = self.lowerer.get_symbol(*field)?.name.clone();
+                let offset = self.lowerer.field_offset_in_class(class_id, &field_name)?;
+                let object_op = self.lower_object_lvalue_addr(*object)?;
+                self.compute_member_ptr(object_op, offset, result_ty)
+            },
+            // `&f()` / `&a[i]` 等: 只要表达式的**静态类型是左值引用**, 它在 ABI 层
+            // 就已经是所指对象的地址, 取地址是恒等. 这一条让
+            // `get_stream().method()` (sema 为 `this` 生成 AddressOf) 能降级,
+            // 否则整个链式成员调用报 "address of complex expression".
+            _ => {
+                if matches!(inner_expr.ty, CxxType::LValueRef(_) | CxxType::RValueRef(_)) {
+                    return self.lower_expr(inner_id);
+                }
+                Err(LowerIrError::Unsupported("address of complex expression".to_string()))
+            },
         }
     }
 
@@ -2098,14 +3073,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
     /// 下标读取都写到同一个槽)。临时值因此必须带自增序号, 与 C 前端
     /// `Builder::fresh` 的 `_t<n>_<base>` 命名保持一致。
     fn fresh_tmp(&mut self, base: &str, ty: Type) -> SsaVar {
-        let n = self.versions.get("__tmp_seq").copied().unwrap_or(0) + 1;
-        self.versions.insert("__tmp_seq".to_string(), n);
-        SsaVar {
-            base: format!("_t{}_{}", n, base),
-            version: 0,
-            ty,
-            span: dummy_span(),
-        }
+        self.fresh_syn(base, ty)
     }
 
     /// 判断下标访问 `a[i]` 是否为 volatile 访问。
@@ -2137,7 +3105,11 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         }
     }
 
-    /// 降低下标访问 `a[i]`（读）→ `IndexLoad`
+    /// 降低下标访问 `a[i]`（读）→ `IndexLoad`。
+    ///
+    /// `result_ty` 就是**元素类型**（`HirExprKind::Index` 节点的 `ty`），必须
+    /// 随 `InstKind::IndexLoad{ty}` 一路带到 SSA→AST 重建，否则元素内存步长会
+    /// 默认按 `int` (4 字节) 计算。
     fn lower_index(
         &mut self,
         array_id: HirExprId,
@@ -2153,6 +3125,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             kind: InstKind::IndexLoad {
                 arr,
                 idx,
+                ty: result_ty.clone(),
                 is_volatile,
             },
             span: dummy_span(),
@@ -2169,7 +3142,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let ptr = self.lower_expr(inner_id)?;
         let inner_expr = self.get_expr(inner_id)?;
         let is_volatile = inner_expr.ty.is_volatile();
-        let dest = self.fresh_var("deref", result_ty.clone());
+        let dest = self.fresh_syn("deref", result_ty.clone());
         let inst = Inst {
             dest: Some(dest.clone()),
             kind: InstKind::Load {
@@ -2199,7 +3172,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             return Ok(src);
         }
 
-        let dest = self.fresh_var("cast", target_ty.clone());
+        let dest = self.fresh_syn("cast", target_ty.clone());
         let inst = Inst {
             dest: Some(dest.clone()),
             kind: InstKind::Cast {
@@ -2251,7 +3224,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             if src_ty == *result_ty {
                 return Ok(object);
             }
-            let dest = self.fresh_var("base_cast", result_ty.clone());
+            let dest = self.fresh_syn("base_cast", result_ty.clone());
             let inst = Inst {
                 dest: Some(dest.clone()),
                 kind: InstKind::Cast {
@@ -2267,7 +3240,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         // 非 primary base：需要加偏移
         // 1. 转成 i8* 指针
         let byte_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::SChar)));
-        let byte_ptr = self.fresh_var("base_byte_ptr", byte_ptr_ty.clone());
+        let byte_ptr = self.fresh_syn("base_byte_ptr", byte_ptr_ty.clone());
         let cast_to_byte = Inst {
             dest: Some(byte_ptr.clone()),
             kind: InstKind::Cast {
@@ -2280,7 +3253,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
         // 2. 加上偏移
         let offset_op = Operand::Int(offset as i128);
-        let adjusted_byte_ptr = self.fresh_var("base_adj_byte", byte_ptr_ty.clone());
+        let adjusted_byte_ptr = self.fresh_syn("base_adj_byte", byte_ptr_ty.clone());
         let gep_inst = Inst {
             dest: Some(adjusted_byte_ptr.clone()),
             kind: InstKind::Bin {
@@ -2293,7 +3266,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         self.push_inst(gep_inst);
 
         // 3. 转回目标指针类型
-        let dest = self.fresh_var("base_cast", result_ty.clone());
+        let dest = self.fresh_syn("base_cast", result_ty.clone());
         let cast_back = Inst {
             dest: Some(dest.clone()),
             kind: InstKind::Cast {
@@ -2340,33 +3313,28 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             LowerIrError::Internal(format!("ABI for class {} not found", from_class.0))
         })?;
 
-        // 查找虚基类的 vbase_index
-        let vbase_idx = from_abi
+        // 虚基子对象的 vbtable 布局数据由布局层唯一给定, 这里只查询不重算:
+        //   vbase_index    —— 该虚基在 vbtable 里的槽序
+        //   vtable_offset  —— 该槽相对 vptr (address point) 的字节偏移 (负值)
+        // vtable 布局（从低地址到高地址）:
+        //   [vbase_offset_0] ... [vbase_offset_n-1] [offset_to_top] [typeinfo] [vfunc_0] ...
+        //                                                                     ^ address_point
+        let vbase = from_abi
             .virtual_bases
             .iter()
             .find(|vb| vb.base == to_class)
-            .map(|vb| vb.vbase_index)
             .ok_or_else(|| {
                 LowerIrError::Internal(format!(
                     "virtual base class {} not found in class {}",
                     to_class.0, from_class.0
                 ))
             })?;
-
-        // 计算 vbase offset 在 vtable 中的相对偏移（相对于 address point）
-        // vtable 布局（从低地址到高地址）:
-        //   [vbase_offset_0] [vbase_offset_1] ... [offset_to_top] [typeinfo] [vfunc_0] [vfunc_1] ...
-        //                                                                   ^
-        //                                                            address_point (vptr 指向这里)
-        // 所以 vbase_offset_i 的地址 = vptr - (vbase_count - i) * 8 - 16
-        let vbase_count = from_abi.virtual_bases.len() as i64;
-        let vtable_offset_bytes =
-            -(vbase_count - vbase_idx as i64) * POINTER_SIZE as i64 - 2 * POINTER_SIZE as i64;
+        let vtable_offset_bytes = vbase.vtable_offset;
 
         let byte_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::SChar)));
 
         // 1. 将对象指针转换为 byte 指针（保存一份用于后面加偏移）
-        let obj_byte_ptr = self.fresh_var("obj_byte_ptr", byte_ptr_ty.clone());
+        let obj_byte_ptr = self.fresh_syn("obj_byte_ptr", byte_ptr_ty.clone());
         let cast_obj_to_byte = Inst {
             dest: Some(obj_byte_ptr.clone()),
             kind: InstKind::Cast {
@@ -2380,7 +3348,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         // 2. 将对象指针转换为 *const *const u8 (vptr 的类型)
         let vptr_ptr_ty =
             Type::Ptr(Box::new(QualType::new(Type::Ptr(Box::new(QualType::new(Type::UChar))))));
-        let vptr_ptr = self.fresh_var("vptr_ptr", vptr_ptr_ty.clone());
+        let vptr_ptr = self.fresh_syn("vptr_ptr", vptr_ptr_ty.clone());
         let cast_to_vptr_ptr = Inst {
             dest: Some(vptr_ptr.clone()),
             kind: InstKind::Cast {
@@ -2393,7 +3361,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
         // 3. 从 vptr 加载 vtable 指针
         let vtable_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::UChar)));
-        let vtable_ptr = self.fresh_var("vtable_ptr", vtable_ptr_ty.clone());
+        let vtable_ptr = self.fresh_syn("vtable_ptr", vtable_ptr_ty.clone());
         let load_vtable = Inst {
             dest: Some(vtable_ptr.clone()),
             kind: InstKind::Load {
@@ -2406,7 +3374,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         self.push_inst(load_vtable);
 
         // 4. 计算 vbase offset 槽的地址
-        let vtable_byte_ptr = self.fresh_var("vtable_byte", byte_ptr_ty.clone());
+        let vtable_byte_ptr = self.fresh_syn("vtable_byte", byte_ptr_ty.clone());
         let cast_vtable_to_byte = Inst {
             dest: Some(vtable_byte_ptr.clone()),
             kind: InstKind::Cast {
@@ -2417,7 +3385,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         };
         self.push_inst(cast_vtable_to_byte);
 
-        let vbase_slot_ptr = self.fresh_var("vbase_slot", byte_ptr_ty.clone());
+        let vbase_slot_ptr = self.fresh_syn("vbase_slot", byte_ptr_ty.clone());
         let gep_vbase_slot = Inst {
             dest: Some(vbase_slot_ptr.clone()),
             kind: InstKind::Bin {
@@ -2432,7 +3400,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         // 5. 从 vtable 加载 vbase offset (i64)
         let vbase_offset_ty = Type::Long; // i64
         let vbase_offset_ptr_ty = Type::Ptr(Box::new(QualType::new(vbase_offset_ty.clone())));
-        let vbase_offset_ptr = self.fresh_var("vbase_offset_ptr", vbase_offset_ptr_ty.clone());
+        let vbase_offset_ptr = self.fresh_syn("vbase_offset_ptr", vbase_offset_ptr_ty.clone());
         let cast_to_vbase_offset_ptr = Inst {
             dest: Some(vbase_offset_ptr.clone()),
             kind: InstKind::Cast {
@@ -2443,7 +3411,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         };
         self.push_inst(cast_to_vbase_offset_ptr);
 
-        let vbase_offset = self.fresh_var("vbase_offset", vbase_offset_ty.clone());
+        let vbase_offset = self.fresh_syn("vbase_offset", vbase_offset_ty.clone());
         let load_vbase_offset = Inst {
             dest: Some(vbase_offset.clone()),
             kind: InstKind::Load {
@@ -2456,7 +3424,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         self.push_inst(load_vbase_offset);
 
         // 6. 将 vbase offset 加到对象指针上
-        let adjusted_byte_ptr = self.fresh_var("vbase_adj_byte", byte_ptr_ty.clone());
+        let adjusted_byte_ptr = self.fresh_syn("vbase_adj_byte", byte_ptr_ty.clone());
         let add_vbase_offset = Inst {
             dest: Some(adjusted_byte_ptr.clone()),
             kind: InstKind::Bin {
@@ -2469,7 +3437,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         self.push_inst(add_vbase_offset);
 
         // 7. 转换为结果类型
-        let dest = self.fresh_var("vbase_adjust", result_ty.clone());
+        let dest = self.fresh_syn("vbase_adjust", result_ty.clone());
         let cast_back = Inst {
             dest: Some(dest.clone()),
             kind: InstKind::Cast {
@@ -2484,6 +3452,88 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
     }
 
     // --- dynamic_cast ---
+
+    /// `typeid(e)` 的动态路径 (Itanium ABI)。
+    ///
+    /// vtable 布局: `[VBaseOffset×n][offset_to_top][typeinfo][vfunc_0]...`，
+    /// vptr 指向 address point (即 typeinfo 后一个slot)，所以
+    /// **typeinfo 槽就在 `vptr - 8`**。读取它得到的就是最派生对象的
+    /// `type_info` 对象地址，与 `typeid(T)` 静态路径的 `_ZTI{T}` 同一符号
+    /// ——这是 typeid 比较能成立的根。
+    fn lower_typeinfo_dyn(&mut self, object_id: HirExprId) -> Result<Operand, LowerIrError> {
+        let void_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+        let byte_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::SChar)));
+        let vptr_ty = Type::Ptr(Box::new(QualType::new(Type::UChar)));
+
+        // 1. 对象左值地址 → `(uchar**)&obj`
+        let obj_addr = self.lower_object_lvalue_addr(object_id)?;
+        let vptr_pp_ty = Type::Ptr(Box::new(QualType::new(vptr_ty.clone())));
+        let vptr_pp = self.fresh_syn("ti_vptr_pp", vptr_pp_ty.clone());
+        self.push_inst(Inst {
+            dest: Some(vptr_pp.clone()),
+            kind: InstKind::Cast {
+                ty: vptr_pp_ty,
+                e: obj_addr,
+            },
+            span: dummy_span(),
+        });
+
+        // 2. vptr = *vptr_pp
+        let vptr = self.fresh_syn("ti_vptr", vptr_ty.clone());
+        self.push_inst(Inst {
+            dest: Some(vptr.clone()),
+            kind: InstKind::Load {
+                e: Operand::Var(vptr_pp),
+                ty: vptr_ty.clone(),
+                is_volatile: false,
+            },
+            span: dummy_span(),
+        });
+
+        // 3. typeinfo 槽地址 = (char*)vptr - 8
+        let vptr_byte = self.fresh_syn("ti_vptr_byte", byte_ptr_ty.clone());
+        self.push_inst(Inst {
+            dest: Some(vptr_byte.clone()),
+            kind: InstKind::Cast {
+                ty: byte_ptr_ty.clone(),
+                e: Operand::Var(vptr),
+            },
+            span: dummy_span(),
+        });
+        let ti_slot = self.fresh_syn("ti_slot", byte_ptr_ty.clone());
+        self.push_inst(Inst {
+            dest: Some(ti_slot.clone()),
+            kind: InstKind::Bin {
+                op: BinOp::Sub,
+                l: Operand::Var(vptr_byte),
+                r: Operand::Int(POINTER_SIZE as i128),
+            },
+            span: dummy_span(),
+        });
+
+        // 4. ti = *(void**)ti_slot
+        let ti_slot_ptr_ty = Type::Ptr(Box::new(QualType::new(void_ptr_ty.clone())));
+        let ti_slot_ptr = self.fresh_syn("ti_slot_ptr", ti_slot_ptr_ty.clone());
+        self.push_inst(Inst {
+            dest: Some(ti_slot_ptr.clone()),
+            kind: InstKind::Cast {
+                ty: ti_slot_ptr_ty,
+                e: Operand::Var(ti_slot),
+            },
+            span: dummy_span(),
+        });
+        let ti = self.fresh_syn("ti_dyn", void_ptr_ty.clone());
+        self.push_inst(Inst {
+            dest: Some(ti.clone()),
+            kind: InstKind::Load {
+                e: Operand::Var(ti_slot_ptr),
+                ty: void_ptr_ty,
+                is_volatile: false,
+            },
+            span: dummy_span(),
+        });
+        Ok(Operand::Var(ti))
+    }
 
     /// dynamic_cast lowering。
     ///
@@ -2550,7 +3600,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         if !src_abi.is_polymorphic() {
             // 简化：直接做指针 cast（非多态类型只能向上转型，且偏移为 0 或已知）
             // 这里我们直接返回 cast 后的结果
-            let dest = self.fresh_var("dyn_cast_static", result_ty.clone());
+            let dest = self.fresh_syn("dyn_cast_static", result_ty.clone());
             let inst = Inst {
                 dest: Some(dest.clone()),
                 kind: InstKind::Cast {
@@ -2596,7 +3646,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         // 构造参数
         // 1. object 指针（转为 void*）
         let void_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
-        let obj_void_ptr = self.fresh_var("dyn_cast_obj", void_ptr_ty.clone());
+        let obj_void_ptr = self.fresh_syn("dyn_cast_obj", void_ptr_ty.clone());
         let cast_obj = Inst {
             dest: Some(obj_void_ptr.clone()),
             kind: InstKind::Cast {
@@ -2608,10 +3658,10 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         self.push_inst(cast_obj);
 
         // 2. src typeinfo
-        let src_ti_op = Operand::SymAddr(src_typeinfo, typeinfo_ptr_ty.clone());
+        let src_ti_op = self.lower_sym_addr(src_typeinfo, typeinfo_ptr_ty.clone());
 
         // 3. dst typeinfo
-        let dst_ti_op = Operand::SymAddr(dst_typeinfo, typeinfo_ptr_ty.clone());
+        let dst_ti_op = self.lower_sym_addr(dst_typeinfo, typeinfo_ptr_ty.clone());
 
         // 4. src2dst hint (简化为 0，表示无提示)
         let hint_op = Operand::Int(0);
@@ -2620,19 +3670,18 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let fn_name = CxxRuntimeSymbol::DynamicCast.name().to_string();
 
         // 如果是 runtime symbol，需要注册为 external
-        if fn_name.starts_with("dccpp_")
+        if (fn_name.starts_with("dccpp_")
             || fn_name.starts_with("__dcc_")
             || fn_name.starts_with("__cxa_")
-            || fn_name == "__dynamic_cast"
+            || fn_name == "__dynamic_cast")
+            && !self.lowerer.output.external_symbols.contains(&fn_name)
         {
-            if !self.lowerer.output.external_symbols.contains(&fn_name) {
-                self.lowerer.output.external_symbols.push(fn_name.clone());
-            }
+            self.lowerer.output.external_symbols.push(fn_name.clone());
         }
 
         let fn_addr = Operand::FnAddr(fn_name, dyn_cast_fn_ty);
 
-        let result_void_ptr = self.fresh_var("dyn_cast_result", void_ptr_ty.clone());
+        let result_void_ptr = self.fresh_syn("dyn_cast_result", void_ptr_ty.clone());
         let call_inst = Inst {
             dest: Some(result_void_ptr.clone()),
             kind: InstKind::Call {
@@ -2645,7 +3694,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         self.push_inst(call_inst);
 
         // 将结果转换为目标类型
-        let dest = self.fresh_var("dyn_cast_final", result_ty.clone());
+        let dest = self.fresh_syn("dyn_cast_final", result_ty.clone());
         let cast_result = Inst {
             dest: Some(dest.clone()),
             kind: InstKind::Cast {
@@ -2674,11 +3723,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
         // 构造函数名：<class>_<variant>
         let class_name = self.lowerer.symbol_name(class_sym);
-        let ctor_name = match variant {
-            CtorVariant::Complete => format!("{}_ctor_complete", class_name),
-            CtorVariant::Base => format!("{}_ctor_base", class_name),
-            CtorVariant::Allocating => format!("{}_ctor_allocating", class_name),
-        };
+        let ctor_name = ctor_variant_name(&class_name, variant);
 
         let fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
 
@@ -2789,7 +3834,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     CxxRuntimeSymbol::AllocException.name().to_string(),
                     alloc_fn_ty.clone(),
                 );
-                let exn_ptr_var = self.fresh_var("exn_ptr", void_ptr_ty.clone());
+                let exn_ptr_var = self.fresh_syn("exn_ptr", void_ptr_ty.clone());
                 let alloc_call = Inst {
                     dest: Some(exn_ptr_var.clone()),
                     kind: InstKind::Call {
@@ -2838,10 +3883,10 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 let fn_name = "__dcc_eh_throw".to_string();
 
                 // 如果是 runtime symbol，需要注册为 external
-                if fn_name.starts_with("dccpp_") || fn_name.starts_with("__dcc_") {
-                    if !self.lowerer.output.external_symbols.contains(&fn_name) {
-                        self.lowerer.output.external_symbols.push(fn_name.clone());
-                    }
+                if (fn_name.starts_with("dccpp_") || fn_name.starts_with("__dcc_"))
+                    && !self.lowerer.output.external_symbols.contains(&fn_name)
+                {
+                    self.lowerer.output.external_symbols.push(fn_name.clone());
                 }
 
                 let throw_callee = Operand::FnAddr(fn_name, throw_fn_ty);
@@ -2889,16 +3934,17 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             // 返回值就是 placement 地址（cast 到目标类型指针）
             let ptr_val = self.lower_expr(place_args[0])?;
 
-            // 如果是类类型且有构造参数，调用构造函数
+            // 如果是类类型则调用构造函数。早期只在 `!args.is_empty()` 时构造,
+            // 于是 `new (buf) T()` 不跑默认构造 (vptr/成员都不初始化)。
             if let CxxType::Class(class_id) = ty {
-                if !args.is_empty() {
+                if !args.is_empty() || self.has_ctor_definition(*class_id, CtorVariant::Complete) {
                     // 构造函数需要 this 指针，placement ptr 就是 this
                     self.lower_construct(*class_id, place_args[0], args, CtorVariant::Complete)?;
                 }
             }
 
             // 把 void* / 其他指针类型 cast 到目标类型指针
-            let typed_ptr_var = self.fresh_var("new_result", ret_ty.clone());
+            let typed_ptr_var = self.fresh_syn("new_result", ret_ty.clone());
             let cast_inst = Inst {
                 dest: Some(typed_ptr_var.clone()),
                 kind: InstKind::Cast {
@@ -2921,7 +3967,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             let elem_size = self.compute_type_size(ty)?;
             let count_val = self.lower_expr(args[0])?;
             let elem_size_op = Operand::Int(elem_size as i128);
-            let size_var = self.fresh_var("alloc_size", Type::ULong);
+            let size_var = self.fresh_syn("alloc_size", Type::ULong);
             let mul_inst = Inst {
                 dest: Some(size_var.clone()),
                 kind: InstKind::Bin {
@@ -2949,19 +3995,18 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let fn_name = op_sym.name().to_string();
 
         // 如果是 runtime symbol，需要注册为 external
-        if fn_name.starts_with("dccpp_")
+        if (fn_name.starts_with("dccpp_")
             || fn_name.starts_with("__dcc_")
             || fn_name.starts_with("__cxa_")
             || fn_name == "__dynamic_cast"
-            || fn_name.starts_with("_Z")
+            || fn_name.starts_with("_Z"))
+            && !self.lowerer.output.external_symbols.contains(&fn_name)
         {
-            if !self.lowerer.output.external_symbols.contains(&fn_name) {
-                self.lowerer.output.external_symbols.push(fn_name.clone());
-            }
+            self.lowerer.output.external_symbols.push(fn_name.clone());
         }
 
         let new_callee = Operand::FnAddr(fn_name, new_fn_ty.clone());
-        let raw_ptr_var = self.fresh_var("raw_new", void_ptr_ty.clone());
+        let raw_ptr_var = self.fresh_syn("raw_new", void_ptr_ty.clone());
         let new_call = Inst {
             dest: Some(raw_ptr_var.clone()),
             kind: InstKind::Call {
@@ -2973,20 +4018,26 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         };
         self.push_inst(new_call);
 
-        // 如果是类类型且有构造参数，调用构造函数（scalar new  only）
+        // 如果是类类型则调用构造函数（scalar new only）。
+        //
+        // 早期只在 `!args.is_empty()` 时构造: `new D` / `new D()` 连 vptr 都不写,
+        // 对象处于未构造状态 —— 之后 `delete (Base*)d` 读 vptr 即段错误。
+        // 现在只要该类确有已登记的 `<class>_ctor_complete` 定义就调用; 没有定义
+        // (纯聚合 `new P`) 保持只分配, 不凭空引入 undefined symbol。
         if !is_array {
             if let CxxType::Class(class_id) = ty {
-                if !args.is_empty() {
+                let has_ctor_definition =
+                    self.has_ctor_definition(*class_id, CtorVariant::Complete);
+                if !args.is_empty() || has_ctor_definition {
                     // 构造函数需要 this 指针
                     // 先把 raw_ptr 转成目标类型指针
-                    let typed_ptr_var = self.fresh_var(
-                        "typed_new",
-                        Type::Ptr(Box::new(QualType::new(self.lowerer.lower_type(ty)?))),
-                    );
+                    let target_ptr_ty =
+                        Type::Ptr(Box::new(QualType::new(self.lowerer.lower_type(ty)?)));
+                    let typed_ptr_var = self.fresh_syn("typed_new", target_ptr_ty.clone());
                     let cast_inst = Inst {
                         dest: Some(typed_ptr_var.clone()),
                         kind: InstKind::Cast {
-                            ty: Type::Ptr(Box::new(QualType::new(self.lowerer.lower_type(ty)?))),
+                            ty: target_ptr_ty,
                             e: Operand::Var(raw_ptr_var.clone()),
                         },
                         span: dummy_span(),
@@ -2997,7 +4048,10 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     // 注意：这里需要用 HirExprId 来表示指针，但我们只有 Operand
                     // 简化：直接生成构造函数调用，this 指针就是 typed_ptr_var
                     let class_sym = self.lowerer.get_symbol(class_id.as_symbol())?;
-                    let ctor_name = format!("{}_ctor_complete", class_sym.name);
+                    let ctor_name = ctor_variant_name(
+                        &self.lowerer.symbol_name(class_sym),
+                        CtorVariant::Complete,
+                    );
                     let fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
                     let mut ctor_args = vec![Operand::Var(typed_ptr_var)];
                     for arg_id in args {
@@ -3019,7 +4073,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         }
 
         // 把 void* 转成目标类型指针
-        let result_var = self.fresh_var("new_result", ret_ty.clone());
+        let result_var = self.fresh_syn("new_result", ret_ty.clone());
         let cast_inst = Inst {
             dest: Some(result_var.clone()),
             kind: InstKind::Cast {
@@ -3036,10 +4090,82 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
     ///
     /// - scalar delete: 调用 operator delete(void*)
     /// - array delete: 调用 operator delete[](void*)
-    fn lower_delete(&mut self, ptr: HirExprId, is_array: bool) -> Result<Operand, LowerIrError> {
-        use crate::cpp::runtime::CxxRuntimeSymbol;
-
+    fn lower_delete(
+        &mut self,
+        ptr: HirExprId,
+        is_array: bool,
+        dtor: Option<crate::cpp::hir::HirDeleteDtor>,
+    ) -> Result<Operand, LowerIrError> {
+        // 指针表达式**只求值一次**: 析构与释放共用同一个值。
         let ptr_val = self.lower_expr(ptr)?;
+
+        // C++ [expr.delete]/3: 先跑析构, 再调 operator delete。
+        if let Some(dtor) = dtor {
+            self.emit_delete_dtor(dtor, &ptr_val)?;
+        }
+
+        self.emit_delete_free(ptr_val, is_array)?;
+
+        Ok(Operand::Void)
+    }
+
+    /// 发射 `delete` 前的析构调用 (与析构后的 `operator delete` 共用同一 this 值)。
+    fn emit_delete_dtor(
+        &mut self,
+        dtor: crate::cpp::hir::HirDeleteDtor,
+        ptr_val: &Operand,
+    ) -> Result<(), LowerIrError> {
+        use crate::cpp::hir::HirDeleteDtor;
+
+        let fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+        let callee = match dtor {
+            HirDeleteDtor::Direct { class } => {
+                // 非多态点型: 编译期绑定本类 D1 `<class>_dtor_complete`
+                // (与 `lower_destroy` 同一命名约定)。
+                let class_sym = self.lowerer.get_symbol(class.as_symbol())?;
+                let class_name = self.lowerer.symbol_name(class_sym);
+                Operand::FnAddr(dtor_variant_name(&class_name, DtorVariant::Complete), fn_ty)
+            },
+            HirDeleteDtor::VirtualDtor { class, slot } => {
+                // 多态点型: 经该静态点型主 vtable 的**析构槽**虚派发,
+                // 使 `delete (Base*)derived` 销毁完整派生对象。
+                let vptr_ptr_ty = self.lowerer.vptr_ptr_type();
+                let vptr_ptr = self.fresh_syn("del_vptr_ptr", vptr_ptr_ty.clone());
+                self.push_inst(Inst {
+                    dest: Some(vptr_ptr.clone()),
+                    kind: InstKind::Cast {
+                        ty: vptr_ptr_ty,
+                        e: ptr_val.clone(),
+                    },
+                    span: dummy_span(),
+                });
+                // 槽号仍以布局层为真源 (析构槽在基/派生类里是同一条),
+                // 查不到时回退 sema 登记值。
+                let slot = self
+                    .lowerer
+                    .abis
+                    .get(&class)
+                    .and_then(|abi| abi.vcall_slot("~"))
+                    .unwrap_or(slot);
+                let fp = self.load_vtable_entry(&Operand::Var(vptr_ptr), slot)?;
+                Operand::Var(fp)
+            },
+        };
+        self.push_inst(Inst {
+            dest: None,
+            kind: InstKind::Call {
+                callee,
+                args: vec![ptr_val.clone()],
+                ret_ty: Type::Void,
+            },
+            span: dummy_span(),
+        });
+        Ok(())
+    }
+
+    /// 发射 `operator delete`(ptr) / `operator delete[]`(ptr) 调用。
+    fn emit_delete_free(&mut self, ptr_val: Operand, is_array: bool) -> Result<(), LowerIrError> {
+        use crate::cpp::runtime::CxxRuntimeSymbol;
 
         let op_sym = if is_array {
             CxxRuntimeSymbol::DeleteArray
@@ -3052,21 +4178,20 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let fn_name = op_sym.name().to_string();
 
         // 如果是 runtime symbol，需要注册为 external
-        if fn_name.starts_with("dccpp_")
+        if (fn_name.starts_with("dccpp_")
             || fn_name.starts_with("__dcc_")
             || fn_name.starts_with("__cxa_")
             || fn_name == "__dynamic_cast"
-            || fn_name.starts_with("_Z")
+            || fn_name.starts_with("_Z"))
+            && !self.lowerer.output.external_symbols.contains(&fn_name)
         {
-            if !self.lowerer.output.external_symbols.contains(&fn_name) {
-                self.lowerer.output.external_symbols.push(fn_name.clone());
-            }
+            self.lowerer.output.external_symbols.push(fn_name.clone());
         }
 
         let delete_callee = Operand::FnAddr(fn_name, delete_fn_ty);
 
         // 把指针转成 void*
-        let void_ptr_var = self.fresh_var("del_void", void_ptr_ty.clone());
+        let void_ptr_var = self.fresh_syn("del_void", void_ptr_ty.clone());
         let cast_inst = Inst {
             dest: Some(void_ptr_var.clone()),
             kind: InstKind::Cast {
@@ -3088,7 +4213,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         };
         self.push_inst(delete_call);
 
-        Ok(Operand::Void)
+        Ok(())
     }
 
     /// 花括号初始化列表 lowering。
@@ -3115,6 +4240,10 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         self.locals.insert(tmp_name.clone(), var.clone());
 
         // 逐个存储元素
+        let elem_ty = match arr_ty {
+            Type::Array(inner, _) => inner.base.clone(),
+            other => other.clone(),
+        };
         for (i, elem_id) in elems.iter().enumerate() {
             let elem_val = self.lower_expr(*elem_id)?;
             let idx_op = Operand::Int(i as i128);
@@ -3124,6 +4253,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     arr: Operand::Var(var.clone()),
                     idx: idx_op,
                     src: elem_val,
+                    ty: elem_ty.clone(),
                     is_volatile: false,
                 },
                 span: dummy_span(),
@@ -3137,7 +4267,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             _ => QualType::new(arr_ty.clone()),
         };
         let ptr_ty = Type::Ptr(Box::new(elem_qt));
-        let addr_var = self.fresh_var("init_list_ptr", ptr_ty.clone());
+        let addr_var = self.fresh_syn("init_list_ptr", ptr_ty.clone());
         let addr_inst = Inst {
             dest: Some(addr_var.clone()),
             kind: InstKind::AddrOf { base: tmp_name },
@@ -3148,8 +4278,38 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         Ok(Operand::Var(addr_var))
     }
 
+    /// 该类是否有**已登记的构造器定义** (`<class>_ctor_{complete,base}`)。
+    ///
+    /// `new` / placement new 发不发构造调用以此为准: sema 只为「需要初始化的类」
+    /// 合成隐式默认构造 (`synthesize_implicit_default_ctor`), 对纯聚合体没有定义
+    /// 就不发调用, 免得凭空引入 undefined symbol。
+    fn has_ctor_definition(&self, class: ClassId, variant: CtorVariant) -> bool {
+        let Ok(sym) = self.lowerer.get_symbol(class.as_symbol()) else {
+            return false;
+        };
+        let ctor_name = ctor_variant_name(&self.lowerer.symbol_name(sym), variant);
+        self.lowerer.hir.functions.iter().any(|f| {
+            self.lowerer
+                .get_symbol(f.symbol)
+                .map(|s| self.lowerer.symbol_name(s) == ctor_name)
+                .unwrap_or(false)
+        })
+    }
+
     /// 计算类型的大小（字节）
     fn compute_type_size(&mut self, ty: &CxxType) -> Result<u64, LowerIrError> {
+        // 类类型的**对象大小**直取布局层 `ClassAbi::size` (单一真源)。
+        // 不能走 `lower_type` 后的 `type_size(&ast::Type)`: `Type::Struct` 的字段
+        // 列表只含数据成员 (`ClassAbi::flatten_fields`), **不含 vptr**, 于是
+        // `struct B { virtual ~B(); };` 算成 size=1 —— `new B` 只分 1 字节,
+        // 构造函数写 vptr 就是堆溢出 (实测 `delete (B*)d` 段错误)。
+        if let CxxType::Class(id) = ty {
+            if let Some(abi) = self.lowerer.abis.get(id) {
+                if abi.size > 0 {
+                    return Ok(abi.size);
+                }
+            }
+        }
         let ir_ty = self.lowerer.lower_type(ty)?;
         Ok(type_size(&ir_ty))
     }
@@ -3208,7 +4368,30 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             },
 
             HirStmtKind::Return(Some(expr_id)) => {
-                let val = self.lower_expr(*expr_id)?;
+                // 函数返回**引用** (`T& f() { return obj; }`): 引用的 ABI 表示就
+                // 是所指对象的地址, 所以必须按「左值地址」降级, 而不是取对象的值。
+                // 漏掉这一步的现场: `<iostream>` 的 `std::cout()/cerr()/clog()/
+                // cin()` 全部是 `inline ostream& cout(){ static ostream os; return
+                // os; }` —— 返回类型是 `ostream&`, 而被返回的 `os` 表达式类型只是
+                // `Class`, 于是走「聚合静态对象」读路径按全局符号取**第 0 个字**
+                // (`mov __dcc_static_0(%rip),%rax`), 调用方拿到 0 当指针用。
+                let val =
+                    if matches!(self.func.ret_ty, CxxType::LValueRef(_) | CxxType::RValueRef(_)) {
+                        let ret_ty = self.lowerer.lower_type(&self.func.ret_ty)?;
+                        let addr = self.lower_object_lvalue_addr(*expr_id)?;
+                        let dest = self.fresh_syn("ref_ret", ret_ty.clone());
+                        self.push_inst(Inst {
+                            dest: Some(dest.clone()),
+                            kind: InstKind::Cast {
+                                ty: ret_ty,
+                                e: addr,
+                            },
+                            span: dummy_span(),
+                        });
+                        Operand::Var(dest)
+                    } else {
+                        self.lower_expr(*expr_id)?
+                    };
                 // ret_val 已移除: 直接在当前块返回, 不经过统一 return_bb.
                 self.set_term(Terminator::Ret { val: Some(val) });
                 Ok(())
@@ -3217,6 +4400,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             HirStmtKind::Decl { symbol, init } => {
                 let sym = self.lowerer.get_symbol(*symbol)?;
                 let name = sym.name.clone();
+                let sym_cxx_ty = sym.ty.clone();
                 let ty = self.lowerer.lower_type(&sym.ty)?;
                 let sym_is_volatile = sym.is_volatile;
                 drop(sym);
@@ -3233,7 +4417,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 self.ssa.local_quals.insert(name.clone(), decl_quals);
 
                 if let Some(init_id) = init {
-                    let init_val = self.lower_expr(*init_id)?;
+                    let init_val = self.lower_init_value(&sym_cxx_ty, *init_id)?;
                     // 赋值
                     let assign_inst = Inst {
                         dest: Some(var.clone()),
@@ -3258,12 +4442,12 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 use crate::cpp::runtime::CxxRuntimeSymbol;
 
                 let var_sym = self.lowerer.get_symbol(*symbol)?;
-                let var_name = self.lowerer.symbol_name(&var_sym);
+                let var_name = self.lowerer.symbol_name(var_sym);
                 let var_ty = self.lowerer.lower_type(&var_sym.ty)?;
                 drop(var_sym);
 
                 let guard_sym = self.lowerer.get_symbol(*guard_symbol)?;
-                let guard_name = self.lowerer.symbol_name(&guard_sym);
+                let guard_name = self.lowerer.symbol_name(guard_sym);
                 drop(guard_sym);
 
                 // guard 变量类型: i64* (指针)
@@ -3272,14 +4456,19 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 let guard_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Int)));
 
                 // 获取 guard 变量地址
-                let guard_addr = Operand::SymAddr(guard_name, guard_ptr_ty.clone());
+                //
+                // 必须是 `InstKind::AddrOf` 形式而不能用 `Operand::SymAddr`:
+                // 前者重建为 `&__dcc_static_guard_<n>` => `lea sym(%rip)` (地址),
+                // 后者重建为 `Ident{ty: Ptr}` => codegen 按标量全局取值, 于是
+                // `__cxa_guard_acquire` 拿到的不是 guard 地址而是它的内容。
+                let guard_addr = self.lower_sym_addr(guard_name, guard_ptr_ty.clone());
 
                 // 调用 __cxa_guard_acquire(guard_ptr)
                 let acquire_callee = Operand::FnAddr(
                     CxxRuntimeSymbol::GuardAcquire.name().to_string(),
                     guard_fn_ty.clone(),
                 );
-                let acquire_result = self.fresh_var("guard_acquire", Type::Int);
+                let acquire_result = self.fresh_syn("guard_acquire", Type::Int);
                 let acquire_call = Inst {
                     dest: Some(acquire_result.clone()),
                     kind: InstKind::Call {
@@ -3309,9 +4498,9 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 if let Some(init_id) = init {
                     // 计算初始化值
                     let init_val = self.lower_expr(*init_id)?;
-                    // 获取静态变量地址
+                    // 获取静态变量地址 (同样走 AddrOf, 理由同上)
                     let var_ptr_ty = Type::Ptr(Box::new(QualType::new(var_ty.clone())));
-                    let var_addr = Operand::SymAddr(var_name.clone(), var_ptr_ty.clone());
+                    let var_addr = self.lower_sym_addr(var_name.clone(), var_ptr_ty);
                     // 存储初始化值到静态变量
                     let store_inst = Inst {
                         dest: None,
@@ -3387,7 +4576,11 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 self.lower_ctor_init_member(*member, args)
             },
 
-            HirStmtKind::SetVTablePtr { class, place } => self.lower_set_vtable_ptr(*class, *place),
+            HirStmtKind::SetVTablePtr {
+                class,
+                place,
+                complete,
+            } => self.lower_set_vtable_ptr(*class, *place, *complete),
 
             HirStmtKind::Try { body, handlers } => self.lower_try(*body, handlers),
 
@@ -3453,10 +4646,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
     }
 
     /// 扫描 switch body 收集 case/default 标签，为每个标签创建 BB
-    fn collect_switch_cases(
-        &mut self,
-        stmt: &HirStmt,
-    ) -> Result<(Vec<(i128, String)>, Option<String>), LowerIrError> {
+    fn collect_switch_cases(&mut self, stmt: &HirStmt) -> Result<SwitchTargets, LowerIrError> {
         let mut cases: Vec<(i128, String)> = Vec::new();
         let mut default: Option<String> = None;
 
@@ -3506,51 +4696,46 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
     }
 
     /// Lower switch body: 遇到 case/default 切换到对应 BB，其他语句正常 lower
-    fn lower_switch_body(&mut self, body_id: HirStmtId) -> Result<(), LowerIrError> {
+    ///
+    /// `labels` 是 `collect_switch_cases` 一次性建好的**精确**标签→BB 映射,
+    /// 见 [`SwitchLabels`] 的说明 (不得再从块名反推 case 值)。
+    fn lower_switch_body(
+        &mut self,
+        body_id: HirStmtId,
+        labels: &SwitchLabels,
+    ) -> Result<(), LowerIrError> {
         let body_stmt = self.get_stmt(body_id)?;
         match &body_stmt.kind {
             HirStmtKind::Compound(stmts) => {
                 // 找到第一个 case/default 作为起始 BB
                 // 先找到第一个标签的 BB 作为当前 BB
-                let first_label_bb = self.find_first_case_bb(&body_stmt)?;
+                let first_label_bb = self.find_first_case_bb(&body_stmt, labels)?;
                 if let Some(bb) = first_label_bb {
                     self.current_bb = bb;
                 }
                 for sid in stmts {
-                    self.lower_switch_stmt(*sid)?;
+                    self.lower_switch_stmt(*sid, labels)?;
                 }
             },
             _ => {
-                self.lower_switch_stmt(body_id)?;
+                self.lower_switch_stmt(body_id, labels)?;
             },
         }
         Ok(())
     }
 
-    fn find_first_case_bb(&mut self, stmt: &HirStmt) -> Result<Option<String>, LowerIrError> {
+    fn find_first_case_bb(
+        &self,
+        stmt: &HirStmt,
+        labels: &SwitchLabels,
+    ) -> Result<Option<String>, LowerIrError> {
         match &stmt.kind {
-            HirStmtKind::Case { value, .. } => {
-                let name = format!("case_{}", value);
-                // 从已创建的 BB 中找
-                for (bb_name, _) in &self.ssa.blocks {
-                    if bb_name.starts_with(&name) {
-                        return Ok(Some(bb_name.clone()));
-                    }
-                }
-                Ok(None)
-            },
-            HirStmtKind::Default(_) => {
-                for (bb_name, _) in &self.ssa.blocks {
-                    if bb_name.starts_with("case_default") {
-                        return Ok(Some(bb_name.clone()));
-                    }
-                }
-                Ok(None)
-            },
+            HirStmtKind::Case { value, .. } => Ok(labels.lookup(*value).cloned()),
+            HirStmtKind::Default(_) => Ok(labels.default_bb.clone()),
             HirStmtKind::Compound(stmts) => {
                 for sid in stmts {
                     let s = self.get_stmt(*sid)?;
-                    if let Some(bb) = self.find_first_case_bb(&s)? {
+                    if let Some(bb) = self.find_first_case_bb(&s, labels)? {
                         return Ok(Some(bb));
                     }
                 }
@@ -3560,19 +4745,20 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         }
     }
 
-    fn lower_switch_stmt(&mut self, stmt_id: HirStmtId) -> Result<(), LowerIrError> {
+    fn lower_switch_stmt(
+        &mut self,
+        stmt_id: HirStmtId,
+        labels: &SwitchLabels,
+    ) -> Result<(), LowerIrError> {
         let stmt = self.get_stmt(stmt_id)?;
         match &stmt.kind {
             HirStmtKind::Case { value, body } => {
-                // 切换到 case 对应的 BB
-                let name = format!("case_{}", value);
-                let bb = self
-                    .ssa
-                    .blocks
-                    .keys()
-                    .find(|k| k.starts_with(&name))
-                    .cloned()
-                    .unwrap_or_else(|| self.unique_bb(&name));
+                // 切换到 case 对应的 BB (直查 collect 阶段建好的映射;
+                // 查不到只可能是 collect 未覆盖的新标签形态, 兜底新建)
+                let bb = match labels.lookup(*value) {
+                    Some(bb) => bb.clone(),
+                    None => self.unique_bb(&format!("case_{}", value)),
+                };
                 // 如果当前块没有 terminator，且当前块不是目标块本身，
                 // fallthrough 到这个 case（第一个 case 已经是 current_bb，
                 // 不需要跳转）
@@ -3584,16 +4770,13 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     }
                 }
                 self.current_bb = bb;
-                self.lower_switch_stmt(*body)?;
+                self.lower_switch_stmt(*body, labels)?;
             },
             HirStmtKind::Default(body) => {
-                let bb = self
-                    .ssa
-                    .blocks
-                    .keys()
-                    .find(|k| k.starts_with("case_default"))
-                    .cloned()
-                    .unwrap_or_else(|| self.unique_bb("case_default"));
+                let bb = match labels.default_bb {
+                    Some(ref bb) => bb.clone(),
+                    None => self.unique_bb("case_default"),
+                };
                 let cur = self.current_bb.clone();
                 if cur != bb {
                     let cur_term = self.ssa.blocks[&cur].term.clone();
@@ -3602,11 +4785,11 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     }
                 }
                 self.current_bb = bb;
-                self.lower_switch_stmt(*body)?;
+                self.lower_switch_stmt(*body, labels)?;
             },
             HirStmtKind::Compound(stmts) => {
                 for sid in stmts {
-                    self.lower_switch_stmt(*sid)?;
+                    self.lower_switch_stmt(*sid, labels)?;
                     let cur = self.current_bb.clone();
                     let cur_term = self.ssa.blocks[&cur].term.clone();
                     if !matches!(cur_term, Terminator::Unreachable) {
@@ -3843,6 +5026,10 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let body_stmt = self.get_stmt(body_id)?;
         let (cases, default_bb) = self.collect_switch_cases(&body_stmt)?;
 
+        // case 值 → 入口块名的**精确**映射: body 下跳阶段只直查它,
+        // 不再从块名反推 (见 [`SwitchLabels`] 的根因说明)。
+        let labels = SwitchLabels::new(cases.clone(), default_bb.clone());
+
         // switch 分发块
         self.current_bb = switch_bb.clone();
         let values: Vec<i128> = cases.iter().map(|(v, _)| *v).collect();
@@ -3861,11 +5048,21 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         // 为了正确处理 fallthrough，我们需要按顺序 lower body，
         // 遇到 case/default 标签时切换到对应 BB。
         self.break_stack.push(end_bb.clone());
-        self.lower_switch_body(body_id)?;
+        self.lower_switch_body(body_id, &labels)?;
         self.break_stack.pop();
 
-        // 如果最后一个 case/default 块没有 terminator，跳到 end
-        // (lower_switch_body 已经处理了)
+        // switch 体末尾 (最后一个 case/default 之后没有别的标签) 若没有
+        // terminator, 控制流按 C 语义**落出 switch** 到 switch_end。缺这条边
+        // 时 switch_end 变成从 entry 不可达的孤块: 后端 SSA→AST 重建的前驱集
+        // 初值是 ⊤, 不可达块的出边会被误判成回边, 于是凭空生成
+        // `while(1) {}` —— 嵌套 switch 的运行期死循环即此根因.
+        let cur = self.current_bb.clone();
+        if cur != end_bb {
+            let cur_term = self.ssa.blocks[&cur].term.clone();
+            if matches!(cur_term, Terminator::Unreachable) {
+                self.set_term(Terminator::Jump(end_bb.clone()));
+            }
+        }
 
         self.current_bb = end_bb;
         Ok(())
@@ -3911,7 +5108,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             Box::new(QualType::new(Type::UChar)),
             crate::ast::ArraySize::Const(ctx_size),
         );
-        let ctx_var = self.fresh_var("__eh_ctx", ctx_ty.clone());
+        let ctx_var = self.fresh_syn("__eh_ctx", ctx_ty.clone());
         self.ssa
             .local_types
             .insert("__eh_ctx".to_string(), ctx_ty.clone());
@@ -3923,7 +5120,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
         // 获取上下文指针（数组名退化为指针）
         let ctx_ptr_var =
-            self.fresh_var("__eh_ctx_ptr", Type::Ptr(Box::new(QualType::new(Type::UChar))));
+            self.fresh_syn("__eh_ctx_ptr", Type::Ptr(Box::new(QualType::new(Type::UChar))));
         let ctx_addr_inst = Inst {
             dest: Some(ctx_ptr_var.clone()),
             kind: InstKind::Cast {
@@ -3951,7 +5148,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         // 调用 __dcc_eh_setjmp(ctx)，返回值决定是否异常发生
         let setjmp_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Int)));
         let setjmp_callee = Operand::FnAddr("__dcc_eh_setjmp".to_string(), setjmp_fn_ty.clone());
-        let setjmp_result = self.fresh_var("__eh_setjmp_res", int_ty.clone());
+        let setjmp_result = self.fresh_syn("__eh_setjmp_res", int_ty.clone());
         let setjmp_call = Inst {
             dest: Some(setjmp_result.clone()),
             kind: InstKind::Call {
@@ -4007,7 +5204,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             Type::Ptr(Box::new(QualType::new(Type::Ptr(Box::new(QualType::new(Type::Void))))));
         let get_exn_callee =
             Operand::FnAddr("__dcc_eh_get_exception".to_string(), get_exn_fn_ty.clone());
-        let exn_ptr_var = self.fresh_var("__eh_exn_ptr", void_ptr_ty.clone());
+        let exn_ptr_var = self.fresh_syn("__eh_exn_ptr", void_ptr_ty.clone());
         let get_exn_call = Inst {
             dest: Some(exn_ptr_var.clone()),
             kind: InstKind::Call {
@@ -4053,7 +5250,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 let type_match_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Int)));
                 let type_match_callee =
                     Operand::FnAddr("__dcc_eh_type_match".to_string(), type_match_fn_ty);
-                let match_result = self.fresh_var("__eh_type_match", int_ty.clone());
+                let match_result = self.fresh_syn("__eh_type_match", int_ty.clone());
                 let match_call = Inst {
                     dest: Some(match_result.clone()),
                     kind: InstKind::Call {
@@ -4101,7 +5298,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 // 对于引用类型：直接绑定指针（引用即指针）
                 // 对于值类型：解引用拷贝
                 let typed_ptr_ty = Type::Ptr(Box::new(QualType::new(param_ir_ty.clone())));
-                let typed_ptr_var = self.fresh_var("__catch_typed_ptr", typed_ptr_ty.clone());
+                let typed_ptr_var = self.fresh_syn("__catch_typed_ptr", typed_ptr_ty.clone());
                 let cast_inst = Inst {
                     dest: Some(typed_ptr_var.clone()),
                     kind: InstKind::Cast {
@@ -4202,23 +5399,21 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         };
 
         // 计算基类子对象地址
-        let base_layout = self
+        let offset = self
             .lowerer
-            .find_base_layout(owner_class, base_class)?
+            .base_subobject_offset(owner_class, base_class)?
             .ok_or_else(|| {
                 LowerIrError::Internal(format!(
                     "base class {} not found in class {}",
                     base_class.0, owner_class.0
                 ))
-            })?;
-
-        let offset = base_layout.offset as i64;
+            })? as i64;
         let base_ptr = if offset == 0 {
             // primary base: 直接 cast
             if self.ssa.params[0].ty == base_ptr_ty {
                 this.clone()
             } else {
-                let dest = self.fresh_var("base_this", base_ptr_ty.clone());
+                let dest = self.fresh_syn("base_this", base_ptr_ty.clone());
                 let cast_inst = Inst {
                     dest: Some(dest.clone()),
                     kind: InstKind::Cast {
@@ -4233,7 +5428,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         } else {
             // 非 primary base: 加偏移
             let byte_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::SChar)));
-            let byte_ptr = self.fresh_var("ctor_byte_ptr", byte_ptr_ty.clone());
+            let byte_ptr = self.fresh_syn("ctor_byte_ptr", byte_ptr_ty.clone());
             let cast_to_byte = Inst {
                 dest: Some(byte_ptr.clone()),
                 kind: InstKind::Cast {
@@ -4244,7 +5439,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             };
             self.push_inst(cast_to_byte);
 
-            let adj_byte = self.fresh_var("ctor_adj_byte", byte_ptr_ty.clone());
+            let adj_byte = self.fresh_syn("ctor_adj_byte", byte_ptr_ty.clone());
             let gep_inst = Inst {
                 dest: Some(adj_byte.clone()),
                 kind: InstKind::Bin {
@@ -4256,7 +5451,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             };
             self.push_inst(gep_inst);
 
-            let dest = self.fresh_var("base_this", base_ptr_ty.clone());
+            let dest = self.fresh_syn("base_this", base_ptr_ty.clone());
             let cast_back = Inst {
                 dest: Some(dest.clone()),
                 kind: InstKind::Cast {
@@ -4271,7 +5466,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
         // 调用基类构造函数（base variant）
         let base_sym = self.lowerer.get_symbol(base_class.as_symbol())?;
-        let ctor_name = format!("{}_ctor_base", base_sym.name);
+        let ctor_name = ctor_variant_name(&self.lowerer.symbol_name(base_sym), CtorVariant::Base);
         let fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
 
         let mut lowered_args = Vec::with_capacity(1 + args.len());
@@ -4299,19 +5494,31 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
     ///
     /// 用于构造/析构函数中更新对象的虚表指针。
     /// 多继承时每个基类子对象都有自己的 vptr，需要分别设置。
+    ///
+    /// `complete = false` (基子对象构造 C2 / 析构) 时跳过 `complete_only`
+    /// 的 vptr: 那些是虚基子对象的 secondary vbptr, 只有在构造完整对象时
+    /// 才能用最派生类的 secondary vbtable 写入。
     fn lower_set_vtable_ptr(
         &mut self,
         class: ClassId,
         place_id: HirExprId,
+        complete: bool,
     ) -> Result<(), LowerIrError> {
         let place = self.lower_expr(place_id)?;
-        let abi = self.lowerer.abis.get(&class).cloned().ok_or_else(|| {
-            LowerIrError::Internal(format!("ABI for class {} not found", class.0))
-        })?;
+        // 未登记布局 → 该类没有对象模型 (例如仅前向声明就被用到的类),
+        // 没有 vptr 槽, 写入自然为空。sema 侧现在**无条件**发射
+        // SetVTablePtr (解析期无法知道类是否多态), 因此这里必须能跳过,
+        // 不能当成内部错误。
+        let Some(abi) = self.lowerer.abis.get(&class).cloned() else {
+            return Ok(());
+        };
 
         let vptr_ptr_ty = self.lowerer.vptr_ptr_type();
 
         for vptr in &abi.vptrs {
+            if !complete && vptr.complete_only {
+                continue;
+            }
             let vtable = match abi.vtables.get(vptr.vtable_index) {
                 Some(vt) => vt,
                 None => continue,
@@ -4323,7 +5530,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 match &place {
                     Operand::Var(v) if v.ty == vptr_ptr_ty => place.clone(),
                     _ => {
-                        let dest = self.fresh_var("vptr_addr", vptr_ptr_ty.clone());
+                        let dest = self.fresh_syn("vptr_addr", vptr_ptr_ty.clone());
                         let cast = Inst {
                             dest: Some(dest.clone()),
                             kind: InstKind::Cast {
@@ -4338,7 +5545,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 }
             } else {
                 let byte_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::SChar)));
-                let byte_ptr = self.fresh_var("vptr_byte_ptr", byte_ptr_ty.clone());
+                let byte_ptr = self.fresh_syn("vptr_byte_ptr", byte_ptr_ty.clone());
                 let cast_byte = Inst {
                     dest: Some(byte_ptr.clone()),
                     kind: InstKind::Cast {
@@ -4349,7 +5556,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 };
                 self.push_inst(cast_byte);
 
-                let adj_byte = self.fresh_var("vptr_adj_byte", byte_ptr_ty.clone());
+                let adj_byte = self.fresh_syn("vptr_adj_byte", byte_ptr_ty.clone());
                 let gep = Inst {
                     dest: Some(adj_byte.clone()),
                     kind: InstKind::Bin {
@@ -4361,7 +5568,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 };
                 self.push_inst(gep);
 
-                let dest = self.fresh_var("vptr_addr", vptr_ptr_ty.clone());
+                let dest = self.fresh_syn("vptr_addr", vptr_ptr_ty.clone());
                 let cast_back = Inst {
                     dest: Some(dest.clone()),
                     kind: InstKind::Cast {
@@ -4376,16 +5583,22 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
             // vptr 指向 vtable 的 address point（第一个虚函数槽）
             // vtable 全局符号是 vtable 起点，vptr = &vtable + address_point
+            //
+            // 必须用 `AddrOf` 而不是 `SymAddr`: vtable 在 native.rs 里发射为
+            // `void*[]` 数组全局, 而 `SymAddr(name, ty)` 在 SSA→AST 重建时生成
+            // `Expr::Ident{ty}`, codegen 按标量全局**取值** (`mov sym(%rip),%rax`),
+            // 拿到的是 vtable 第 0 个槽的内容 (VBaseOffset / offset-to-top),
+            // 于是 vptr 变成一个几十字的小地址, 任何虚调用都段错误。
+            // `AddrOf` 重建为 `&sym` → `lea sym(%rip)`, 才是真正的符号地址。
             let vtable_symbol = vtable.symbol.clone();
             let address_point = vtable.address_point;
 
             let vt_base_ty = self.lowerer.vtable_entry_type();
-            let vt_base = self.fresh_var("vt_base", vt_base_ty.clone());
+            let vt_base = self.fresh_syn("vt_base", vt_base_ty.clone());
             let base_addr = Inst {
                 dest: Some(vt_base.clone()),
-                kind: InstKind::Cast {
-                    ty: vt_base_ty.clone(),
-                    e: Operand::SymAddr(vtable_symbol, vt_base_ty.clone()),
+                kind: InstKind::AddrOf {
+                    base: vtable_symbol.clone(),
                 },
                 span: dummy_span(),
             };
@@ -4395,7 +5608,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 Operand::Var(vt_base)
             } else {
                 let byte_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::SChar)));
-                let byte_ptr = self.fresh_var("vt_byte_ptr", byte_ptr_ty.clone());
+                let byte_ptr = self.fresh_syn("vt_byte_ptr", byte_ptr_ty.clone());
                 let cast_byte = Inst {
                     dest: Some(byte_ptr.clone()),
                     kind: InstKind::Cast {
@@ -4406,7 +5619,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 };
                 self.push_inst(cast_byte);
 
-                let adj_byte = self.fresh_var("vt_adj_byte", byte_ptr_ty.clone());
+                let adj_byte = self.fresh_syn("vt_adj_byte", byte_ptr_ty.clone());
                 let gep = Inst {
                     dest: Some(adj_byte.clone()),
                     kind: InstKind::Bin {
@@ -4418,7 +5631,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 };
                 self.push_inst(gep);
 
-                let dest = self.fresh_var("vptr_val", vptr_ptr_ty.clone());
+                let dest = self.fresh_syn("vptr_val", vptr_ptr_ty.clone());
                 let cast_back = Inst {
                     dest: Some(dest.clone()),
                     kind: InstKind::Cast {
@@ -4431,11 +5644,33 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 Operand::Var(dest)
             };
 
-            // 存储 vptr
+            // 存储 vptr。
+            //
+            // store 宽度真源 = **被写对象的类型**, 这里那是一个 vtable 指针槽
+            // (`vtable_entry_type()`, 8 字节)。上面算出的 `vptr_addr` 类型是
+            // `vptr_ptr_type()` —— 本后端当「不透明对象指针」用的 `*const u8`,
+            // 直接拿它当 store 地址会被 SSA→AST 重建解成 1 字节 pointee,
+            // vptr 只写最低一字节 (`mov %al,(%rcx)`), 对象 vptr 变垃圾指针,
+            // 任何虚调用/`delete` 立刻段错误。故存前显式抬成「指向指针的指针」。
+            let slot_addr_ty = Type::Ptr(Box::new(QualType::new(self.lowerer.vtable_entry_type())));
+            let vptr_slot_addr = if slot_addr_ty == vptr_ptr_ty {
+                vptr_addr
+            } else {
+                let slot_addr = self.fresh_syn("vptr_slot_addr", slot_addr_ty.clone());
+                self.push_inst(Inst {
+                    dest: Some(slot_addr.clone()),
+                    kind: InstKind::Cast {
+                        ty: slot_addr_ty,
+                        e: vptr_addr,
+                    },
+                    span: dummy_span(),
+                });
+                Operand::Var(slot_addr)
+            };
             let store = Inst {
                 dest: None,
                 kind: InstKind::Store {
-                    e: vptr_addr,
+                    e: vptr_slot_addr,
                     src: vptr_val,
                     is_volatile: false,
                 },
@@ -4485,7 +5720,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
                 // 调用成员构造函数
                 let class_sym = self.lowerer.get_symbol(member_class.as_symbol())?;
-                let ctor_name = format!("{}_ctor_complete", class_sym.name);
+                let ctor_name =
+                    ctor_variant_name(&self.lowerer.symbol_name(class_sym), CtorVariant::Complete);
                 let fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
 
                 let mut lowered_args = Vec::with_capacity(1 + args.len());
@@ -4548,6 +5784,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 let is_volatile = fn_sym.ty.is_volatile();
                 drop(fn_sym);
                 let obj_ty = self.lowerer.lower_type(&CxxType::Class(owner_class))?;
+                let field_ty = self.lowerer.lower_type(&member_ty)?;
                 let inst = Inst {
                     dest: None,
                     kind: InstKind::MemberStore {
@@ -4555,6 +5792,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                         obj_ty,
                         field: member_name,
                         src: init_val,
+                        ty: field_ty,
                         is_volatile,
                         is_arrow: true,
                     },
@@ -4621,7 +5859,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             if base_ptr_ty == *target_ty {
                 return Ok(base_ptr);
             }
-            let dest = self.fresh_var("member_ptr", target_ty.clone());
+            let dest = self.fresh_syn("member_ptr", target_ty.clone());
             let inst = Inst {
                 dest: Some(dest.clone()),
                 kind: InstKind::Cast {
@@ -4635,7 +5873,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         }
 
         let byte_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::SChar)));
-        let byte_ptr = self.fresh_var("member_byte_ptr", byte_ptr_ty.clone());
+        let byte_ptr = self.fresh_syn("member_byte_ptr", byte_ptr_ty.clone());
         let cast_to_byte = Inst {
             dest: Some(byte_ptr.clone()),
             kind: InstKind::Cast {
@@ -4646,7 +5884,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         };
         self.push_inst(cast_to_byte);
 
-        let adj_byte = self.fresh_var("member_adj_byte", byte_ptr_ty.clone());
+        let adj_byte = self.fresh_syn("member_adj_byte", byte_ptr_ty.clone());
         let gep_inst = Inst {
             dest: Some(adj_byte.clone()),
             kind: InstKind::Bin {
@@ -4658,7 +5896,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         };
         self.push_inst(gep_inst);
 
-        let dest = self.fresh_var("member_ptr", target_ty.clone());
+        let dest = self.fresh_syn("member_ptr", target_ty.clone());
         let cast_back = Inst {
             dest: Some(dest.clone()),
             kind: InstKind::Cast {
@@ -5391,6 +6629,7 @@ mod tests {
             class_id: base_id,
             size: 4,
             align: 4,
+            non_virtual_size: 4,
             fields: vec![FieldLayout {
                 name: "x".to_string(),
                 offset: 0,
@@ -5407,6 +6646,8 @@ mod tests {
             field_init_order: vec!["x".to_string()],
             dtor_order: vec![DtorStep::Member("x".to_string())],
             this_adjust_map: std::collections::HashMap::new(),
+            needs_vptr: false,
+            has_virtual_functions: false,
         };
         lowerer.register_abi(base_id, base_abi);
 
@@ -5416,6 +6657,7 @@ mod tests {
             class_id: derived_id,
             size: 8,
             align: 4,
+            non_virtual_size: 8,
             fields: vec![FieldLayout {
                 name: "y".to_string(),
                 offset: 4,
@@ -5440,6 +6682,8 @@ mod tests {
                 m.insert(base_id, crate::cpp::abi_layout::ThisAdjust::offset(0));
                 m
             },
+            needs_vptr: false,
+            has_virtual_functions: false,
         };
         lowerer.register_abi(derived_id, derived_abi);
     }
@@ -5655,6 +6899,7 @@ mod tests {
             class_id: a_id,
             size: 4,
             align: 4,
+            non_virtual_size: 4,
             fields: vec![FieldLayout {
                 name: "a".to_string(),
                 offset: 0,
@@ -5671,6 +6916,8 @@ mod tests {
             field_init_order: vec!["a".to_string()],
             dtor_order: vec![DtorStep::Member("a".to_string())],
             this_adjust_map: std::collections::HashMap::new(),
+            needs_vptr: false,
+            has_virtual_functions: false,
         };
         lowerer.register_abi(a_id, a_abi);
 
@@ -5679,6 +6926,7 @@ mod tests {
             class_id: b_id,
             size: 8,
             align: 8,
+            non_virtual_size: 8,
             fields: vec![FieldLayout {
                 name: "b".to_string(),
                 offset: 0,
@@ -5695,6 +6943,8 @@ mod tests {
             field_init_order: vec!["b".to_string()],
             dtor_order: vec![DtorStep::Member("b".to_string())],
             this_adjust_map: std::collections::HashMap::new(),
+            needs_vptr: false,
+            has_virtual_functions: false,
         };
         lowerer.register_abi(b_id, b_abi);
 
@@ -5707,6 +6957,7 @@ mod tests {
             class_id: c_id,
             size: 24,
             align: 8,
+            non_virtual_size: 24,
             fields: vec![FieldLayout {
                 name: "c".to_string(),
                 offset: 16,
@@ -5743,6 +6994,8 @@ mod tests {
                 m.insert(b_id, crate::cpp::abi_layout::ThisAdjust::offset(8));
                 m
             },
+            needs_vptr: false,
+            has_virtual_functions: false,
         };
         lowerer.register_abi(c_id, c_abi);
 
@@ -5857,6 +7110,7 @@ mod tests {
             class_id: a_id,
             size: 4,
             align: 4,
+            non_virtual_size: 4,
             fields: vec![FieldLayout {
                 name: "a".to_string(),
                 offset: 0,
@@ -5873,6 +7127,8 @@ mod tests {
             field_init_order: vec!["a".to_string()],
             dtor_order: vec![DtorStep::Member("a".to_string())],
             this_adjust_map: std::collections::HashMap::new(),
+            needs_vptr: false,
+            has_virtual_functions: false,
         };
         lowerer.register_abi(a_id, a_abi);
 
@@ -5880,6 +7136,7 @@ mod tests {
             class_id: b_id,
             size: 8,
             align: 8,
+            non_virtual_size: 8,
             fields: vec![FieldLayout {
                 name: "b".to_string(),
                 offset: 0,
@@ -5896,6 +7153,8 @@ mod tests {
             field_init_order: vec!["b".to_string()],
             dtor_order: vec![DtorStep::Member("b".to_string())],
             this_adjust_map: std::collections::HashMap::new(),
+            needs_vptr: false,
+            has_virtual_functions: false,
         };
         lowerer.register_abi(b_id, b_abi);
 
@@ -5903,6 +7162,7 @@ mod tests {
             class_id: c_id,
             size: 24,
             align: 8,
+            non_virtual_size: 24,
             fields: vec![FieldLayout {
                 name: "c".to_string(),
                 offset: 16,
@@ -5939,6 +7199,8 @@ mod tests {
                 m.insert(b_id, crate::cpp::abi_layout::ThisAdjust::offset(8));
                 m
             },
+            needs_vptr: false,
+            has_virtual_functions: false,
         };
         lowerer.register_abi(c_id, c_abi);
     }
@@ -6065,10 +7327,10 @@ mod tests {
             .insts
             .iter()
             .filter_map(|inst| match &inst.kind {
-                InstKind::Call { callee, .. } => match callee {
-                    Operand::FnAddr(name, _) => Some(name.as_str()),
-                    _ => None,
-                },
+                InstKind::Call {
+                    callee: Operand::FnAddr(name, _),
+                    ..
+                } => Some(name.as_str()),
                 _ => None,
             })
             .collect();
@@ -6198,10 +7460,10 @@ mod tests {
             .insts
             .iter()
             .filter_map(|inst| match &inst.kind {
-                InstKind::Call { callee, .. } => match callee {
-                    Operand::FnAddr(name, _) => Some(name.as_str()),
-                    _ => None,
-                },
+                InstKind::Call {
+                    callee: Operand::FnAddr(name, _),
+                    ..
+                } => Some(name.as_str()),
                 _ => None,
             })
             .collect();
@@ -6484,6 +7746,7 @@ mod tests {
             kind: HirStmtKind::SetVTablePtr {
                 class: class_id,
                 place: HirExprId(0),
+                complete: true,
             },
         });
 
@@ -6507,7 +7770,7 @@ mod tests {
         make_virtual_class_abi(&mut calc, class_id, &[("vfunc", true)], vec![], vec![]);
         let abi = calc.compute_class(class_id);
 
-        for (_i, _v) in abi.vptrs.iter().enumerate() {}
+        for _v in abi.vptrs.iter() {}
 
         let mut lowerer = IrLowerer::new(&hir, &symbols);
         lowerer.register_abi(class_id, abi);
@@ -6725,6 +7988,6 @@ mod tests {
             .iter()
             .filter(|(name, _)| name.contains("Class2"))
             .collect();
-        assert!(c_vtables.len() >= 1, "C should have at least primary vtable");
+        assert!(!c_vtables.is_empty(), "C should have at least primary vtable");
     }
 }

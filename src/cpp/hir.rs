@@ -61,6 +61,26 @@ impl DependentInfo {
 
 // === 析构变体 ===
 
+/// `delete p` 前的析构调用形态 (C++ [expr.delete]/3)。
+///
+/// 为何单独建模而不是复用 [`HirExprKind::Destroy`]: `Destroy` 拿的是「对象地址」
+/// 表达式 id, 而 `delete` 的指针表达式必须**只求值一次** (析构与释放共用同一个
+/// 值)。把析构信息挂在 Delete 上, 由 lowering 侧一次 lower 指针后依次发射。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HirDeleteDtor {
+    /// 非多态点型: 编译期直接调 `<class>_dtor_complete`。
+    Direct {
+        class: ClassId,
+    },
+    /// 多态点型: 经该静态点型主 vtable 的**析构槽**虚派发, 以便
+    /// `delete (Base*)derived` 销毁完整派生对象。`slot` 是 sema 登记值,
+    /// 发射前由 `ClassAbi::vcall_slot` 以布局层为真源校正。
+    VirtualDtor {
+        class: ClassId,
+        slot: usize,
+    },
+}
+
 /// 析构函数变体（Itanium ABI）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DtorVariant {
@@ -174,6 +194,9 @@ pub enum HirExprKind {
     },
     /// 整型字面量
     IntLiteral(i128),
+    /// 字符串字面量（已完成相邻字面量拼接、已去引号，**转义序列未解码**，
+    /// 由 lowering 层按 C++ [lex.string] 解码后落 rodata）。
+    StringLiteral(String),
     /// 浮点字面量（字符串保留精度）
     FloatLiteral(String),
     /// 布尔字面量
@@ -218,6 +241,10 @@ pub enum HirExprKind {
     },
     /// typeid 表达式
     TypeInfoRef(ClassId),
+    /// `typeid(e)` 的**动态**路径: `e` 是多态类 (有虚函数) 的 glvalue。
+    /// Itanium ABI 下从对象的 vptr 往前一个槽 (`vptr - 8`) 读取真实 typeinfo,
+    /// 而不是静态类型的 `TypeInfoRef`。操作数是对象**左值**表达式。
+    TypeInfoDyn(HirExprId),
     /// dynamic_cast
     DynamicCast {
         object: HirExprId,
@@ -237,7 +264,13 @@ pub enum HirExprKind {
         is_array: bool,
     },
     /// delete 表达式
-    Delete { ptr: HirExprId, is_array: bool },
+    Delete {
+        ptr: HirExprId,
+        is_array: bool,
+        /// C++ [expr.delete]/3: 点型需要析构时由 sema 记下的析构调用形态。
+        /// `None` = 点型是标量 / 平凡可析构聚合, 只释放内存。
+        dtor: Option<HirDeleteDtor>,
+    },
     /// sizeof 表达式
     SizeOf(CxxType),
     /// 逗号表达式
@@ -398,6 +431,10 @@ pub enum HirStmtKind {
     SetVTablePtr {
         class: ClassId,
         place: HirExprId,
+        /// 是否正在构造**最派生完整对象** (C1)。
+        /// false = 基子对象构造 (C2): 不能写只属于完整对象的
+        /// 虚基子对象 secondary vbptr (`VPtrLayout::complete_only`)。
+        complete: bool,
     },
 }
 

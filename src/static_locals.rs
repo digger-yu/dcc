@@ -53,16 +53,29 @@ pub struct StaticLocalMap {
 }
 
 impl StaticLocalMap {
-    /// 查询变量的 mangled 名 (从后向前扫描, 内层作用域优先).
-    /// 如果 name 不是 static local, 返回 None.
-    pub fn resolve(&self, func_name: &str, source_name: &str) -> Option<&str> {
-        self.rename_map.get(func_name).and_then(|entries| {
+    /// 在 rename_map 里查源码名对应的 mangled 名 (从后向前, 内层作用域优先).
+    ///
+    /// 把查找逻辑收敛成只借用 `rename_map` 一个字段的辅助函数: 这样调用方
+    /// 可以在持有返回借用的同时可变借用 `by_mangled` 等其它字段 (不相交
+    /// 字段), 无需先把键复制一份 String.
+    fn lookup_mangled<'m>(
+        rename_map: &'m HashMap<String, Vec<(String, String)>>,
+        func_name: &str,
+        source_name: &str,
+    ) -> Option<&'m str> {
+        rename_map.get(func_name).and_then(|entries| {
             entries
                 .iter()
                 .rev()
                 .find(|(src, _)| src == source_name)
                 .map(|(_, mangled)| mangled.as_str())
         })
+    }
+
+    /// 查询变量的 mangled 名 (从后向前扫描, 内层作用域优先).
+    /// 如果 name 不是 static local, 返回 None.
+    pub fn resolve(&self, func_name: &str, source_name: &str) -> Option<&str> {
+        Self::lookup_mangled(&self.rename_map, func_name, source_name)
     }
 
     /// 判断某源码名在某函数中是否是 static local.
@@ -86,14 +99,13 @@ impl StaticLocalMap {
 
     /// 标记某 static local 需要运行时初始化 (由后端注册阶段调用).
     pub fn mark_runtime_init(&mut self, func_name: &str, source_name: &str) {
-        // 更新 StaticLocalInfo
-        if let Some(info) = self.by_mangled.get_mut(
-            &self
-                .resolve(func_name, source_name)
-                .unwrap_or("")
-                .to_string(),
-        ) {
-            info.needs_runtime_init = true;
+        // 更新 StaticLocalInfo: `lookup_mangled` 只借用 rename_map, 与下面对
+        // by_mangled 的可变借用不相交, 故直接拿 &str 当键, 不必 to_string().
+        // (非 static local 时查不到 mangled 名, 自然跳过回填.)
+        if let Some(mangled) = Self::lookup_mangled(&self.rename_map, func_name, source_name) {
+            if let Some(info) = self.by_mangled.get_mut(mangled) {
+                info.needs_runtime_init = true;
+            }
         }
         // 更新 runtime_init 索引
         self.runtime_init
@@ -109,6 +121,7 @@ impl StaticLocalMap {
     ///   1. static local 在 `.data` / `.bss` / `.rodata` 内的布局偏移
     ///      (x86_64 经 `pre_register_static_locals`，其余 arch 经 `ir.rs` 的 globals 降低)
     ///   2. `.symtab` / `.strtab` 条目序
+    ///
     /// —— 不排序则同一输入两次编译产出不同字节，不可复现构建。
     /// 按 `order`(源码出现序) 排，而不是按名字字典序，是为了与 mangled 名前缀
     /// `.Lsl<N>` 的语义一致、便于比对与调试。

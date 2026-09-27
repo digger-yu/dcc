@@ -373,6 +373,12 @@ pub struct AsmMem {
     pub width_hint: Option<OperandWidth>,
 }
 
+impl Default for AsmMem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AsmMem {
     pub fn new() -> Self {
         Self {
@@ -444,26 +450,6 @@ pub enum AsmData {
     Align(u32),
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_asm_mnemonic_to_str() {
-        assert_eq!(AsmMnemonic::Mov.to_str(), "mov");
-        assert_eq!(AsmMnemonic::Jmp.to_str(), "jmp");
-        assert_eq!(AsmMnemonic::Movd.to_str(), "movd");
-    }
-
-    #[test]
-    fn test_operand_width_suffix() {
-        assert_eq!(OperandWidth::Bit8.suffix_char(), 'b');
-        assert_eq!(OperandWidth::Bit16.suffix_char(), 'w');
-        assert_eq!(OperandWidth::Bit32.suffix_char(), 'l');
-        assert_eq!(OperandWidth::Bit64.suffix_char(), 'q');
-    }
-}
-
 /// AT&T/GAS text formatter for AsmEvent events
 pub struct AsmFormatter {
     /// Track current position for label references
@@ -490,7 +476,7 @@ impl AsmFormatter {
         match event {
             AsmEvent::Section { name, flags } => {
                 if name == ".text" {
-                    format!("\t.text\n")
+                    "\t.text\n".to_string()
                 } else {
                     format!("\t.section {name},\"{flags}\"\n")
                 }
@@ -668,7 +654,7 @@ fn format_register(class: RegClass, index: u8, width: OperandWidth) -> String {
         RegClass::Control => format!("cr{}", index),
         RegClass::Debug => format!("dr{}", index),
     };
-    format!("{}", prefix)
+    prefix.to_string()
 }
 
 fn get_gp_name_8bit(idx: u8) -> &'static str {
@@ -738,7 +724,7 @@ fn format_memory(mem: &AsmMem, _symbol_addrs: &std::collections::HashMap<String,
     if let Some(base) = &mem.base {
         let base_reg = match base {
             RegClass::Gp => format!("%r{}", get_gp_name_64bit(13)), // Use r13 as r13 convention
-            _ => format!("%invalid"),
+            _ => "%invalid".to_string(),
         };
         parts.push(base_reg);
     } else if mem.rip_relative && mem.symbol.is_none() {
@@ -765,15 +751,17 @@ fn format_memory(mem: &AsmMem, _symbol_addrs: &std::collections::HashMap<String,
         }
     } else {
         // Handle complex addressing
-        let disp_part = if parts[0].contains('+') || parts[0].contains('-') {
-            format!("({},", parts[0])
-        } else if !parts[0].starts_with('%') {
-            format!("({},", parts[0])
-        } else {
-            "(".to_string()
-        };
+        // parts[0] 是位移 (符号 / 常量 / 带 +/- 的符号偏移) 时前置 `disp,`;
+        // 是以 `%` 开头的寄存器则只留 `(`。两种判定本意相同 (「不是寄存器」),
+        // 故合并为单一条件。
+        let disp_part =
+            if parts[0].contains('+') || parts[0].contains('-') || !parts[0].starts_with('%') {
+                format!("({},", parts[0])
+            } else {
+                "(".to_string()
+            };
 
-        let remaining: Vec<String> = parts[1..].iter().map(|p| p.clone()).collect();
+        let remaining: Vec<String> = parts[1..].to_vec();
         format!("{}{})", disp_part, remaining.join(","))
     }
 }
@@ -799,5 +787,25 @@ fn format_data(data: &AsmData) -> String {
         AsmData::Align(n) => {
             format!("\t.align {}", n)
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_asm_mnemonic_to_str() {
+        assert_eq!(AsmMnemonic::Mov.to_str(), "mov");
+        assert_eq!(AsmMnemonic::Jmp.to_str(), "jmp");
+        assert_eq!(AsmMnemonic::Movd.to_str(), "movd");
+    }
+
+    #[test]
+    fn test_operand_width_suffix() {
+        assert_eq!(OperandWidth::Bit8.suffix_char(), 'b');
+        assert_eq!(OperandWidth::Bit16.suffix_char(), 'w');
+        assert_eq!(OperandWidth::Bit32.suffix_char(), 'l');
+        assert_eq!(OperandWidth::Bit64.suffix_char(), 'q');
     }
 }

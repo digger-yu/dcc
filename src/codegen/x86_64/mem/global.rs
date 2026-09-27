@@ -10,9 +10,9 @@ use std::collections::HashMap;
 /// Evaluate an lvalue expression to (base_global_name, byte_offset).
 /// Handles Ident, Index (with constant indices), Member, and Deref chains.
 /// Returns None if the expression cannot be evaluated at compile time.
-pub fn eval_global_lvalue_offset<'a>(
+pub fn eval_global_lvalue_offset(
     e: &Expr,
-    globals_raw: &'a HashMap<String, GlobalVar>,
+    globals_raw: &HashMap<String, GlobalVar>,
 ) -> Option<(String, i64)> {
     match e {
         Expr::Ident { name, .. } => {
@@ -36,9 +36,9 @@ pub fn eval_global_lvalue_offset<'a>(
             // Array indexing: arr[i]
             if let Some((base_name, base_off)) = eval_global_lvalue_offset(arr, globals_raw) {
                 if let Ok(const_idx) = const_eval::eval(idx) {
-                    let array_ty = match globals_raw.get(&base_name) {
-                        Some(g) => g.ty.get_array_element_type()?,
-                        None => return None,
+                    let array_ty = {
+                        let g = globals_raw.get(&base_name)?;
+                        g.ty.get_array_element_type()?
                     };
                     let elem_size = array_ty.size();
                     // const_idx is already i128 from eval()

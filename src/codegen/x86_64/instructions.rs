@@ -773,6 +773,20 @@ impl Codegen {
     // Local variable registration / slot allocation
     // ========================================================================
 
+    /// 帧头字节数: 16 (保存的 r13 + 返回地址) + 32 (callee-saved) + temp_slots*8。
+    /// 变量区与 sret/物化槽区都从帧头之下向下生长, 两条边界必须同口径。
+    pub fn frame_hdr(&self) -> i64 {
+        48i64 + self.temp_slots as i64 * 8
+    }
+
+    /// **变量区**当前已占用的最低字节地址: 其它帧区只允许排在它之下。
+    ///
+    /// 变量区由 `pre_register_vars` (规划期) 与 `register_var` (运行期, 见其注释)
+    /// 共同向下生长, 长度就是 `var_map_total_slots * 8`。
+    pub fn var_arena_floor(&self) -> i64 {
+        -(self.var_map_total_slots * 8) - self.frame_hdr() + 8
+    }
+
     pub fn register_var(&mut self, name: &str, ty: &Type) -> i64 {
         if let Some(entry) = self.var_map.get(name) {
             // 变量已存在 (外层作用域同名变量或 pre_register_vars 预分配).
@@ -792,11 +806,34 @@ impl Codegen {
         }
         // 分配口径与 pre_register_vars 共用单一真源 var_alloc_slots
         let slots = Self::var_alloc_slots(ty);
-        let used = self.var_map_total_slots.saturating_mul(8);
-        let hdr = 48i64 + self.temp_slots as i64 * 8;
+        let hdr = self.frame_hdr();
+        // 变量区与 sret/物化槽区**都**自帧头向下生长, 而 `sret_region_base` 是按
+        // 规划期的 `var_bytes` 一次性定界的。`pre_register_vars` 看不见运行时才冒出来
+        // 的名字 (`__compound_lit_<pos>`、`__vmsize_<tag>`、懒注册的 `var_offset`),
+        // 它们在这里继续压低变量区。不夹逼就会让新变量直接压在**活着**的 sret 槽上:
+        // `a[i] = (struct S){...}` 里 `a[i]` 的目标地址槽正是被字面量内容覆盖,
+        // 随后 `rep movsq` 把一个分量值 (如 112) 当目的地址解引用 → SIGSEGV。
+        // 夹逼条件: 新区间 [off, off+slots*8) 整体落在已分配 sret 区之下。
+        let sret_low = self.sret_region_base - self.sret_watermark;
+        let mut used = self.var_map_total_slots.saturating_mul(8);
+        // sret 区尚未分配任何槽时, 它的顶 (锚点) 本来就是变量区, 只要求新变量
+        // 不越过锚点 (否则下面那条锚点下移会把已发出的槽坐标推高)。
+        let min_used = if self.sret_watermark == 0 {
+            -self.sret_region_base - hdr
+        } else {
+            8 - sret_low - hdr
+        };
+        let min_used = (min_used + 7) & !7;
+        if used < min_used {
+            used = min_used;
+        }
         let off = -(used + hdr) - (slots.saturating_sub(1) * 8);
         self.var_map.insert(name.to_string(), (off, ty.clone()));
-        self.var_map_total_slots = self.var_map_total_slots.saturating_add(slots);
+        self.var_map_total_slots = (used + slots * 8) / 8;
+        // 反方向不变量: sret 区此后也只能排在变量区之下。锚点单调下移保证后续
+        // sret 槽之间同样互不重叠 (第 k 个槽的顶 = anchor_k - cur_{k-1} ≤
+        // anchor_{k-1} - cur_{k-1} = 第 k-1 个槽的底)。
+        self.sret_region_base = self.sret_region_base.min(self.var_arena_floor());
         off
     }
 
@@ -812,6 +849,29 @@ impl Codegen {
     /// Allocate a local variable slot (generic name).
     pub fn alloc_local(&mut self, sz: usize) -> i64 {
         self.alloc_sret_slot(sz)
+    }
+
+    /// 帧底「复数 / 16 字节聚合 rvalue 物化带」的字节宽度。
+    ///
+    /// 后端有 90 余处按 `complex rvalue 的内存对固定在 -frame_size + 8` 这一契约
+    /// 直接寻址（实部 @ off、虚部 @ off + inner_size；`_Complex long double` 是
+    /// 两个 16 字节 tbyte 槽 → 用到 off+32）。帧规划必须为这条带**预留**空间并让
+    /// 变参 reg save area / 向量临时区从带之上开始，否则：
+    /// - 变参函数的 GP 保存槽 `+8..+16`（保存的 `rsi`）会被复数物化写坏，随后
+    ///   `va_arg(ap, int)` 从 `gp_offset=8` 读回复数位模式；
+    /// - `_Complex float/double` 变参自身也无处可存 —— `va_arg` 的装载结果按同一
+    ///   契约必须落在该带内（消费端 `gen_complex_part` / `gen_complex_init` /
+    ///   `spill_complex_operand` 一律按该地址回读，不信任寄存器残值）。
+    ///
+    /// 宽度取 48（16 对齐，覆盖 off+8..off+40 并留下 guard）。
+    pub(crate) const CX_FRAME_BAND: i64 = 48;
+
+    /// 复数 rvalue 内存对的槽偏移（帧底带内，见 [`Self::CX_FRAME_BAND`]）。
+    ///
+    /// 该地址对**所有**函数成立：帧规划把带从寄存器保存区/向量临时区里划了
+    /// 出来，所以既不会被 `va_start` 的游标踩到，也不会被嵌套调用的临时槽覆盖。
+    pub fn complex_result_off(&self) -> i64 {
+        -self.frame_size + 8
     }
 
     /// 保存当前 sret 槽水位 (用于嵌套求值作用域)。配合
@@ -882,6 +942,14 @@ impl Codegen {
 
     pub fn store_xmm128_stack(&mut self, xmm: u8, off: i64) {
         self.emit_xmm_r13_disp(0x00, 0x11, xmm, off);
+    }
+
+    /// [`Self::store_xmm128_stack`] 的反向动作: `movups xmm, [r13 + off]`,
+    /// 一次读回帧槽里的完整 128 位。16 字节 `[Sse, SseUp]` 聚合的返回端必须
+    /// 用它, 而不是只读低 8 字节的 `movsd` —— `SseUp` 是**同一** xmm 寄存器高
+    /// 64 位的延续, 不是第二个寄存器, 也不是第二个内存操作数。
+    pub fn load_xmm128_stack(&mut self, xmm: u8, off: i64) {
+        self.emit_xmm_r13_disp(0x00, 0x10, xmm, off);
     }
 
     pub fn store_xmm64_stack(&mut self, xmm: u8, off: i64) {

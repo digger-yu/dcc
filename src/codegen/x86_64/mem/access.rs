@@ -33,7 +33,10 @@ impl Codegen {
         use crate::semantics::{AddressBase, ByteOffset};
 
         // 先检查是否能完整处理: 运行时偏移无法物化, 必须整体退回
-        if matches!(&desc.offset, ByteOffset::Runtime { .. } | ByteOffset::VlaRuntime { .. }) {
+        if matches!(
+            &desc.offset,
+            ByteOffset::Runtime { .. } | ByteOffset::VlaRuntime { .. } | ByteOffset::Unsupported
+        ) {
             return false;
         }
         // Upvar 暂未实现
@@ -58,8 +61,21 @@ impl Codegen {
             AddressBase::UpvarLoad { .. } => {
                 return false;
             },
+            AddressBase::ComputedAddr { expr } => {
+                self.gen_expr(expr, dst);
+            },
+            AddressBase::Unknown => {
+                return false;
+            },
             AddressBase::ExprAddr { sub } => {
-                return self.emit_address_descriptor(sub, original_expr, dst);
+                // `*p` 形态: 递归物化子描述符得到的就是 `p` 的**值** (目标地址)。
+                // 这里绝不能 `return` 递归结果 —— 本层 `desc.offset` (由内层常量
+                // 下标 / 字段偏移累加而来) 会被整个丢掉: `(*(e + 2))[1]` 的 `+8`
+                // 即此, 表现为内层常量下标被静默抹掉, 恒读到 `[0]`。
+                // 与下方 `PointerValue` 臂同构: 拿到基址后一律落到 Step 2。
+                if !self.emit_address_descriptor(sub, original_expr, dst) {
+                    return false;
+                }
             },
             AddressBase::PointerValue { sub } => {
                 if !self.emit_address_descriptor(sub, original_expr, dst) {
@@ -95,14 +111,18 @@ impl Codegen {
     fn emit_address_descriptor_with_index(
         &mut self,
         desc: &crate::semantics::AddressDescriptor,
-        index_expr: &Expr,
+        original_expr: &Expr,
         dst: u8,
     ) -> bool {
         use crate::semantics::{AddressBase, ByteOffset};
 
         // 先尝试常量偏移快速路径
         if matches!(&desc.offset, ByteOffset::Constant(_)) {
-            return self.emit_address_descriptor(desc, index_expr, dst);
+            return self.emit_address_descriptor(desc, original_expr, dst);
+        }
+        // 语义层无法表达的偏移: 整体退回调用方旧路径
+        if matches!(&desc.offset, ByteOffset::Unsupported) {
+            return false;
         }
         // Upvar 暂未实现
         if matches!(&desc.base, AddressBase::UpvarLoad { .. }) {
@@ -133,23 +153,33 @@ impl Codegen {
             AddressBase::UpvarLoad { .. } => {
                 return false;
             },
+            AddressBase::ComputedAddr { expr } => {
+                self.gen_expr(expr, BASE);
+            },
+            AddressBase::Unknown => {
+                return false;
+            },
             AddressBase::ExprAddr { sub } => {
                 // 递归: 子描述符也可能有运行时偏移, 但我们只处理一层
                 // (两层运行时偏移需要额外临时寄存器, 暂退回 false)
-                if matches!(&sub.offset, ByteOffset::Runtime { .. } | ByteOffset::VlaRuntime { .. })
-                {
+                if matches!(
+                    &sub.offset,
+                    ByteOffset::Runtime { .. } | ByteOffset::VlaRuntime { .. }
+                ) {
                     return false;
                 }
-                if !self.emit_address_descriptor(sub, index_expr, BASE) {
+                if !self.emit_address_descriptor(sub, original_expr, BASE) {
                     return false;
                 }
             },
             AddressBase::PointerValue { sub } => {
-                if matches!(&sub.offset, ByteOffset::Runtime { .. } | ByteOffset::VlaRuntime { .. })
-                {
+                if matches!(
+                    &sub.offset,
+                    ByteOffset::Runtime { .. } | ByteOffset::VlaRuntime { .. }
+                ) {
                     return false;
                 }
-                if !self.emit_address_descriptor(sub, index_expr, BASE) {
+                if !self.emit_address_descriptor(sub, original_expr, BASE) {
                     return false;
                 }
                 self.emit_load_mem(8);
@@ -161,17 +191,34 @@ impl Codegen {
             ByteOffset::Constant(_) => {
                 // 已在上面快速路径处理
             },
-            ByteOffset::Runtime { stride, addend } => {
+            ByteOffset::Unsupported => {
+                return false;
+            },
+            ByteOffset::Runtime { terms, addend } => {
+                // 逐项累加 (`a[i][j][k]` 三层下标 = 3 项) —— 每一项自带下标
+                // 表达式, 不需要调用点猜「本层 idx 是不是那个运行时下标」。
+                if terms.is_empty() {
+                    return false;
+                }
                 // 保存基址, 求值索引到 rcx, 恢复基址到 rax, 计算偏移到 rcx
                 self.push(BASE);
-                self.gen_expr(index_expr, INDEX); // rcx = index
-                self.pop(BASE); // rax = base (不能 pop 回 rcx, 否则覆盖索引)
-                                // rcx *= stride
-                if *stride != 1 {
-                    let stride_i32 = *stride as i32;
-                    self.emit(&[0x48, 0x69, 0xC9]); // imul rcx, rcx, imm32
-                    self.emit(&stride_i32.to_le_bytes());
+                for (k, term) in terms.iter().enumerate() {
+                    self.gen_expr(&term.index, INDEX); // rcx = 本层下标
+                    if term.stride != 1 {
+                        let stride_i32 = term.stride as i32;
+                        self.emit(&[0x48, 0x69, 0xC9]); // imul rcx, rcx, imm32
+                        self.emit(&stride_i32.to_le_bytes());
+                    }
+                    if k > 0 {
+                        // add rcx, [rsp]; add rsp, 8  (合并上一层的部分和)
+                        self.emit(&[0x48, 0x03, 0x0C, 0x24]);
+                        self.emit(&[0x48, 0x83, 0xC4, 0x08]);
+                    }
+                    if k + 1 < terms.len() {
+                        self.push(INDEX); // 部分和入栈, 供下一层合并
+                    }
                 }
+                self.pop(BASE); // rax = base (不能 pop 回 rcx, 否则覆盖索引)
                 // add rcx, addend
                 if *addend != 0 {
                     self.emit(&[0x48, 0x81, 0xC1]); // add rcx, imm32
@@ -179,7 +226,7 @@ impl Codegen {
                 }
                 self.emit(&[0x48, 0x01, 0xC8]); // add rax, rcx
             },
-            ByteOffset::VlaRuntime { addend } => {
+            ByteOffset::VlaRuntime { index, addend } => {
                 // VLA: stride 在运行时确定, 需要从 VLA 元数据槽加载
                 // 先找 VLA stride slot
                 let stride_slot = self.find_vla_stride_slot_from_desc(desc);
@@ -188,7 +235,7 @@ impl Codegen {
                 }
                 let slot = stride_slot.unwrap();
                 self.push(BASE);
-                self.gen_expr(index_expr, INDEX); // rcx = index
+                self.gen_expr(index, INDEX); // rcx = index
                                                   // mov rdx, [r13+slot]; imul rcx, rdx
                 self.emit_mov_mem_r13(2, slot);
                 self.emit(&[0x48, 0x0F, 0xAF, 0xCA]); // imul rcx, rdx
@@ -834,23 +881,25 @@ impl Codegen {
         let key = self.resolve_global_key(source_name);
         self.globals_raw.get(key)
     }
-    pub(crate) fn materialize_address(
+    pub(crate) fn materialize_address<'a>(
         &mut self,
         desc: &crate::semantics::AddressDescriptor,
         action: crate::semantics::MaterializeAction,
-        index_expr: Option<&Expr>,
-        original_expr: &Expr,
-        _arr_expr: Option<&Expr>,
+        _index_expr: Option<&'a Expr>,
+        original_expr: &'a Expr,
+        _arr_expr: Option<&'a Expr>,
         dst: u8,
     ) -> bool {
         use crate::semantics::MaterializeAction as MA;
 
-        // Step 1: 计算地址到 dst (rax)
-        let addr_ok = if let Some(idx) = index_expr {
-            self.emit_address_descriptor_with_index(desc, idx, dst)
-        } else {
-            self.emit_address_descriptor(desc, original_expr, dst)
-        };
+        // 偏移项 (`ByteOffset::Runtime.terms` / `ByteOffset::VlaRuntime.index`)
+        // 自带各层下标表达式 —— 描述符完全自描述, 调用点传来的本层 `idx`
+        // 不再参与寻址。旧实现在这里用 `runtime_index_in_chain` 猜「本层 idx
+        // 是否就是那个运行时下标」, 只能修好单层错配, ≥三层下标与常量/变量
+        // 交错时仍会算错地址 (全局多维数组行 stride 塌缩)。
+        // 无法表达的形状 (`ByteOffset::Unsupported`) 统一返回 false, 由各调用
+        // 点自己的旧路径接管 —— 单一真源在描述符, 不在调用点的浅层试探。
+        let addr_ok = self.emit_address_descriptor_with_index(desc, original_expr, dst);
         if !addr_ok {
             return false;
         }

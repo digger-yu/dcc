@@ -5,7 +5,7 @@
 
 use crate::ast::*;
 use crate::codegen::shared::elf as shared_elf;
-use crate::codegen::x86_64::{AbiClass, Codegen, JumpKind};
+use crate::codegen::x86_64::{AbiClass, AggDst, Codegen, JumpKind};
 
 use crate::const_eval;
 
@@ -39,9 +39,27 @@ impl Codegen {
                         let e_ty = e.ty();
                         self.gen_expr(e, 0);
                         self.emit_operand_to_st0(&e_ty, 0);
-                    } else if (Self::needs_memory_return(&ret_ty) || func_ret_is_ld)
+                    } else if matches!(self.current_func_ret_ty, Type::Complex(_))
+                        && self.current_sret_offset.is_none()
+                    {
+                        // 复数返回的**交付与隐式转换都按声明类型决定**: `ret_ty`
+                        // 只是表达式类型, `cd f(int n){ return n; }` 的它是 int ——
+                        // 若按表达式判分就会把 int 的位模式当复数对交回 (实测
+                        // 分量全 0/垃圾), 且遗漏 C6.3.1.8p1 的标量→复数与
+                        // p4 的异内型逐分量转换。两者都住在 `gen_complex_return`
+                        // 里 (与形参侧共用 `complex_src_needs_convert` 单一真源)。
+                        let cx_ty = self.current_func_ret_ty.clone();
+                        self.gen_complex_return(e, &cx_ty);
+                    } else if (Self::needs_memory_return(&ret_ty)
+                        || func_ret_is_ld
+                        || Self::needs_memory_return(&self.current_func_ret_ty))
                         && self.current_sret_offset.is_some()
                     {
+                        // 同样按**声明**返回类型判分: 整数内型 `_Complex` 被
+                        // `leaf_abi_class` force 成 Memory 类, 而 `cd`/`cf` 的表达式
+                        // 类型可能是标量 (`ci f(int n){return n;}` 的 ret_ty 是 int),
+                        // 只看表达式会整条 sret 臂落空。缓冲区尺寸/转换在
+                        // `gen_sret_return` 内按声明类型处理。
                         self.gen_sret_return(e, &ret_ty);
                     } else {
                         // _Complex float (8B) 同样走 SSE 寄存器返回
@@ -60,48 +78,43 @@ impl Codegen {
                             ) && ret_sz > 8
                         };
                         if is_agg_ret {
-                            if let Type::Complex(inner) = &ret_ty {
-                                if matches!(&inner.base, Type::Float | Type::Double) {
-                                    self.gen_complex_sse_return(e, &inner.base);
-                                } else if matches!(&inner.base, Type::LongDouble) {
-                                    // SysV: _Complex long double 经 x87 返回,
-                                    // st0=real、st1=imag（不走 sret/SSE）。
-                                    self.gen_complex_x87_return(e);
-                                } else {
-                                    self.gen_expr(e, 0);
-                                    let result_off = -self.frame_size + 8;
-                                    self.load_stack(0, result_off);
-                                    if ret_sz > 8 {
-                                        self.load_stack(2, result_off + 8);
-                                    }
-                                }
+                            if let Type::Complex(_) = &ret_ty {
+                                // 交付与隐式转换一并交给复数返回总入口
+                                // (`gen_complex_return`): 返回上下文的标量→复数 /
+                                // 异内型复数→复数转换 (C6.3.1.8) 必须在此发生,
+                                // 否则 callee 把源的位模式当成目标分量交付。
+                                self.gen_complex_return(e, &ret_ty);
                             } else {
                                 // 16B [Sse, SseUp] 聚合返回值 (独立向量或含
                                 // 16B 向量字段/对齐填充的小结构体): SysV ABI
                                 // 全在 xmm0, 不走 rax/rdx → xmm0/xmm1 拆分.
                                 // 直接 movups 16B 到 xmm0.
                                 if Self::is_sseup_128_aggregate(&ret_ty) {
-                                    // 先用 gen_expr 物化结果 (落到 frame bottom temp),
-                                    // 再从 frame bottom temp 整体 movups 到 xmm0.
-                                    // 统一用 frame bottom temp, 避免 vector_temp 槽
-                                    // 与内部递归求值冲突 (如 Cast/Binop 等).
-                                    self.gen_expr(e, 0);
-                                    let slot_off = -self.frame_size + 8;
-                                    // movups xmm0, [r13 + slot_off]
-                                    let off_bytes = slot_off.to_le_bytes();
-                                    let in_disp8 = (-128..=127).contains(&slot_off);
-                                    self.emit(&[0x41, 0x0F, 0x10]);
-                                    if in_disp8 {
-                                        self.emit(&[0x45, off_bytes[0]]);
-                                    } else {
-                                        self.emit(&[
-                                            0x85,
-                                            off_bytes[0],
-                                            off_bytes[1],
-                                            off_bytes[2],
-                                            off_bytes[3],
-                                        ]);
-                                    }
+                                    // 动作只有一个: 把返回表达式的 16 字节**对象表示**
+                                    // 整体装进 xmm0。先物化到一个帧内缓冲, 再一条
+                                    // `movups` 读回 —— 物化契约 (Ident/Member/Index/
+                                    // Deref 取地址、Call 走 ABI 返值、Vector 走
+                                    // `vector_temp_base` 约定) 全部复用聚合赋值的同
+                                    // 一真源 `gen_aggregate_assign_to`, 本站点不得重
+                                    // 写任何形态判据或帧偏移。
+                                    //
+                                    // 旧写法在这里硬编码 `-frame_size + 8` 当作“向量
+                                    // 临时槽”, 并从该处 movups。那只是一个巧合: 非变参
+                                    // 函数的 `vec_temp_off` 历史上恰好等于 `-frame_size
+                                    // + 8`。该巧合如今被两处正规改动打破 (帧规划为复数
+                                    // rvalue 划出 `CX_FRAME_BAND` 固定带、变参函数再另加
+                                    // 176 字节 save area), 硬编码因此变成读复数物化带的
+                                    // 残值 —— `return (v4f){...}` / `return s;` 全栈垃圾。
+                                    // 而 `-frame_size + 8` 的**真**契约是复数内存对, 更不
+                                    // 能说向量临时槽。
+                                    let buf_off = self.alloc_sret_slot(ret_sz.max(16));
+                                    let dst = AggDst::Local {
+                                        off: buf_off,
+                                        vla: None,
+                                    };
+                                    self.gen_aggregate_assign_to(&dst, &ret_ty, e);
+                                    // movups xmm0, [r13 + buf_off]
+                                    self.load_xmm128_stack(0, buf_off);
                                 } else {
                                     // struct 返回: 加载到 rax[:rdx]
                                     if let Expr::Ident { name, .. } = &e {
@@ -270,30 +283,16 @@ impl Codegen {
                             }
                             // Float/double -> integer return:
                             // convert xmm0 to integer in rax.
+                            //
+                            // 直接复用 `emit_implicit_float_to_int` 这一单一真源:
+                            // 旧代码在这里又手写了一遍 cvtt*/cvttsd2si 编码, 并把
+                            // `long double` 当作「已在 xmm0」—— 而它的值通道是 x87
+                            // st(0), 于是 `int f(void){ return ld; }` 读到陈旧 xmm0
+                            // 得 0 (与隐式截断同一根因)。
                             if matches!(&expr_ty, Type::Float | Type::Double | Type::LongDouble)
                                 && func_ret_ty.is_int()
                             {
-                                let wide = matches!(&func_ret_ty, Type::Long | Type::LongLong);
-                                match &expr_ty {
-                                    Type::Float => {
-                                        // cvttss2si rax, xmm0
-                                        let rex = 0x48 | if wide { 0x08 } else { 0 };
-                                        self.emit(&[0xF3, rex, 0x0F, 0x2C, 0xC0]);
-                                    },
-                                    Type::Double => {
-                                        // cvttsd2si rax, xmm0
-                                        let rex = 0x48 | if wide { 0x08 } else { 0 };
-                                        self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0]);
-                                    },
-                                    Type::LongDouble => {
-                                        // long double 内部为 double, 已在 xmm0
-                                        let rex = 0x48 | if wide { 0x08 } else { 0 };
-                                        self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0]);
-                                    },
-                                    _ => {},
-                                }
-                                // Saturate out-of-range results
-                                self.emit_float_to_int_saturate(0, &expr_ty, wide);
+                                self.emit_implicit_float_to_int(0, &expr_ty, &func_ret_ty);
                             }
                             // Truncate return value to the function's
                             // declared return type width. For types smaller
@@ -745,131 +744,128 @@ impl Codegen {
     /// gen_expr 语句表达式分支 (batch F5 逐字搬迁: Expr::StmtExpr arm)。
     /// 值约定: 块内最后一条表达式语句 (或 return) 结果放入 dst。
     pub fn gen_expr_stmt_expr(&mut self, e: &Expr, dst: u8) {
-        match e {
-            Expr::StmtExpr { block, .. } => {
-                // 语句表达式 ({...}): 执行块内语句, 最后表达式值留在 dst
-                let items = &block.items;
-                let last_idx = items.len().saturating_sub(1);
-                for (i, item) in items.iter().enumerate() {
-                    match item {
-                        BlockItem::Stmt(Stmt::Expr { e, .. }) if i == last_idx => {
-                            // 最后一条表达式语句: 结果放入 dst
-                            let e_ty = e.ty();
-                            // 聚合类型 (struct/union) 的 StmtExpr 最后一条处理:
-                            // - lvalue (Ident/Member/Index/Deref): 取地址 + 整体拷贝到 sret 临时槽
-                            //   (不能 gen_expr 加载前 8 字节值, 调用方期望地址:
-                            //    pr c/5354: ({ struct S s; s.a=1; s; }).a)
-                            // - Call: SysV ABI >16B 返回已走 sret 约定 (rax=buffer 地址),
-                            //   否则物化寄存器返回值到临时槽
-                            // - 标量/其他: 正常 gen_expr
-                            if matches!(e_ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) {
-                                let sz = e_ty.size();
-                                if self.gen_lvalue_addr(e, 6) {
-                                    // lvalue 路径: 整体拷贝到 sret 临时槽
-                                    // rsi 已 = 源地址 (gen_lvalue_addr 放到 dst=6 即 rsi)
-                                    let temp_off = self.alloc_sret_slot(sz);
-                                    self.emit_lea_r13(7, temp_off); // rdi = sret 临时槽
-                                    self.mov_imm(1, sz as i128); // rcx = size
-                                    self.emit(&[0xFC]); // cld
-                                    self.emit(&[0xF3, 0xA4]); // rep movsb
-                                    self.emit_lea_r13(dst, temp_off);
-                                } else if Self::needs_memory_return(&e_ty) {
-                                    // Call + >16B: SysV ABI sret, rax 已是返回地址
-                                    self.gen_expr(e, dst);
-                                } else if matches!(e, Expr::Call { .. }) {
-                                    // Call + <=16B: 寄存器返回, 物化到临时槽
-                                    self.gen_expr(e, 0);
-                                    let temp_off = self.alloc_sret_slot(sz);
-                                    if sz <= 8 {
-                                        self.store_stack(0, temp_off);
-                                    } else {
-                                        self.store_stack(0, temp_off);
-                                        self.store_stack(2, temp_off + 8);
-                                    }
-                                    self.emit_lea_r13(dst, temp_off);
+        if let Expr::StmtExpr { block, .. } = e {
+            // 语句表达式 ({...}): 执行块内语句, 最后表达式值留在 dst
+            let items = &block.items;
+            let last_idx = items.len().saturating_sub(1);
+            for (i, item) in items.iter().enumerate() {
+                match item {
+                    BlockItem::Stmt(Stmt::Expr { e, .. }) if i == last_idx => {
+                        // 最后一条表达式语句: 结果放入 dst
+                        let e_ty = e.ty();
+                        // 聚合类型 (struct/union) 的 StmtExpr 最后一条处理:
+                        // - lvalue (Ident/Member/Index/Deref): 取地址 + 整体拷贝到 sret 临时槽
+                        //   (不能 gen_expr 加载前 8 字节值, 调用方期望地址:
+                        //    pr c/5354: ({ struct S s; s.a=1; s; }).a)
+                        // - Call: SysV ABI >16B 返回已走 sret 约定 (rax=buffer 地址),
+                        //   否则物化寄存器返回值到临时槽
+                        // - 标量/其他: 正常 gen_expr
+                        if matches!(e_ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) {
+                            let sz = e_ty.size();
+                            if self.gen_lvalue_addr(e, 6) {
+                                // lvalue 路径: 整体拷贝到 sret 临时槽
+                                // rsi 已 = 源地址 (gen_lvalue_addr 放到 dst=6 即 rsi)
+                                let temp_off = self.alloc_sret_slot(sz);
+                                self.emit_lea_r13(7, temp_off); // rdi = sret 临时槽
+                                self.mov_imm(1, sz as i128); // rcx = size
+                                self.emit(&[0xFC]); // cld
+                                self.emit(&[0xF3, 0xA4]); // rep movsb
+                                self.emit_lea_r13(dst, temp_off);
+                            } else if Self::needs_memory_return(&e_ty) {
+                                // Call + >16B: SysV ABI sret, rax 已是返回地址
+                                self.gen_expr(e, dst);
+                            } else if matches!(e, Expr::Call { .. }) {
+                                // Call + <=16B: 寄存器返回, 物化到临时槽
+                                self.gen_expr(e, 0);
+                                let temp_off = self.alloc_sret_slot(sz);
+                                if sz <= 8 {
+                                    self.store_stack(0, temp_off);
                                 } else {
-                                    // 其他非 lvalue 聚合 (CompoundLit 等): 让 gen_expr 自己处理
-                                    self.gen_expr(e, dst);
+                                    self.store_stack(0, temp_off);
+                                    self.store_stack(2, temp_off + 8);
                                 }
+                                self.emit_lea_r13(dst, temp_off);
                             } else {
+                                // 其他非 lvalue 聚合 (CompoundLit 等): 让 gen_expr 自己处理
                                 self.gen_expr(e, dst);
                             }
-                        },
-                        BlockItem::Stmt(Stmt::Return { val: Some(e), .. }) if i == last_idx => {
+                        } else {
                             self.gen_expr(e, dst);
-                        },
-                        BlockItem::Stmt(s) => self.gen_stmt(s),
-                        BlockItem::Decl(Decl::Var(v)) => {
-                            // static 局部变量已在全局数据段分配
-                            if v.is_static
-                                && self
-                                    .static_local_map
-                                    .is_static_local(&self.current_func_name, &v.name.name)
-                                && !self
-                                    .static_local_map
-                                    .needs_runtime_init(&self.current_func_name, &v.name.name)
-                            {
-                                continue;
-                            }
-                            // static local 需要运行时初始化
-                            if v.is_static
-                                && self
-                                    .static_local_map
-                                    .needs_runtime_init(&self.current_func_name, &v.name.name)
-                            {
-                                if let Some(init) = &v.init {
-                                    self.gen_expr(init, 0);
-                                    self.emit_global_store(0, &v.name.name);
-                                }
-                                continue;
-                            }
-                            self.register_var(&v.name.name, &v.ty);
-                            // 定义+声明一体的 struct/union 类型绑定 +
-                            // VLA/VM struct 变量动态分配 (语句表达式内)
-                            if matches!(v.ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) {
-                                self.gen_vm_type_bind(&v.ty);
-                            }
-                            // VLA/VM struct 变量: 语句表达式内也需动态分配
-                            // 数据区并写元数据槽 (20070919-1: ({ struct S b; ... }))
-                            if Self::type_has_vla(&v.ty) {
-                                self.gen_vla_alloc(v);
-                            }
+                        }
+                    },
+                    BlockItem::Stmt(Stmt::Return { val: Some(e), .. }) if i == last_idx => {
+                        self.gen_expr(e, dst);
+                    },
+                    BlockItem::Stmt(s) => self.gen_stmt(s),
+                    BlockItem::Decl(Decl::Var(v)) => {
+                        // static 局部变量已在全局数据段分配
+                        if v.is_static
+                            && self
+                                .static_local_map
+                                .is_static_local(&self.current_func_name, &v.name.name)
+                            && !self
+                                .static_local_map
+                                .needs_runtime_init(&self.current_func_name, &v.name.name)
+                        {
+                            continue;
+                        }
+                        // static local 需要运行时初始化
+                        if v.is_static
+                            && self
+                                .static_local_map
+                                .needs_runtime_init(&self.current_func_name, &v.name.name)
+                        {
                             if let Some(init) = &v.init {
-                                // 浮点: 结果在 xmm0, 必须用 movsd/movss 存回栈 (同 Stmt::Decl 路径)
-                                if matches!(&v.ty, Type::Float | Type::Double | Type::LongDouble) {
-                                    self.gen_expr(init, 0);
-                                    self.emit_scalar_to_xmm0_if_needed(init, &v.ty);
-                                    self.gen_float_store(&v.name.name, &v.ty);
-                                } else {
-                                    self.gen_expr(init, 0);
-                                    // Implicit float→int conversion when
-                                    // initializer is float but variable is
-                                    // integer (e.g. `int a = 0.0;`).
-                                    let init_ty = init.ty();
-                                    if matches!(
-                                        &init_ty,
-                                        Type::Float | Type::Double | Type::LongDouble
-                                    ) && Self::is_integer_type(&v.ty)
-                                    {
-                                        self.emit_implicit_float_to_int(0, &init_ty, &v.ty);
-                                    }
-                                    self.mov_to_stack(0, &v.name.name);
-                                }
+                                self.gen_expr(init, 0);
+                                self.emit_global_store(0, &v.name.name);
                             }
-                        },
-                        BlockItem::Decl(Decl::StructDef(sd)) => {
-                            // 局部类型声明: 重新绑定 VM struct 大小槽
-                            // (与 gen_block_items 同一语义)
-                            self.gen_vm_struct_bind(sd, false);
-                        },
-                        BlockItem::Decl(Decl::UnionDef(sd)) => {
-                            self.gen_vm_struct_bind(sd, true);
-                        },
-                        _ => {},
-                    }
+                            continue;
+                        }
+                        self.register_var(&v.name.name, &v.ty);
+                        // 定义+声明一体的 struct/union 类型绑定 +
+                        // VLA/VM struct 变量动态分配 (语句表达式内)
+                        if matches!(v.ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) {
+                            self.gen_vm_type_bind(&v.ty);
+                        }
+                        // VLA/VM struct 变量: 语句表达式内也需动态分配
+                        // 数据区并写元数据槽 (20070919-1: ({ struct S b; ... }))
+                        if Self::type_has_vla(&v.ty) {
+                            self.gen_vla_alloc(v);
+                        }
+                        if let Some(init) = &v.init {
+                            // 浮点: 结果在 xmm0, 必须用 movsd/movss 存回栈 (同 Stmt::Decl 路径)
+                            if matches!(&v.ty, Type::Float | Type::Double | Type::LongDouble) {
+                                self.gen_expr(init, 0);
+                                self.emit_scalar_to_xmm0_if_needed(init, &v.ty);
+                                self.gen_float_store(&v.name.name, &v.ty);
+                            } else {
+                                self.gen_expr(init, 0);
+                                // Implicit float→int conversion when
+                                // initializer is float but variable is
+                                // integer (e.g. `int a = 0.0;`).
+                                let init_ty = init.ty();
+                                if matches!(
+                                    &init_ty,
+                                    Type::Float | Type::Double | Type::LongDouble
+                                ) && Self::is_integer_type(&v.ty)
+                                {
+                                    self.emit_implicit_float_to_int(0, &init_ty, &v.ty);
+                                }
+                                self.mov_to_stack(0, &v.name.name);
+                            }
+                        }
+                    },
+                    BlockItem::Decl(Decl::StructDef(sd)) => {
+                        // 局部类型声明: 重新绑定 VM struct 大小槽
+                        // (与 gen_block_items 同一语义)
+                        self.gen_vm_struct_bind(sd, false);
+                    },
+                    BlockItem::Decl(Decl::UnionDef(sd)) => {
+                        self.gen_vm_struct_bind(sd, true);
+                    },
+                    _ => {},
                 }
-            },
-            _ => {},
+            }
         }
     }
 

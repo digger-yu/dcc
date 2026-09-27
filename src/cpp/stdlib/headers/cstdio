@@ -48,10 +48,17 @@ extern "C" {
 }
 
 namespace std {
-    inline int    printf(const char* fmt, ...) { return ::printf(fmt); }
-    inline int    fprintf(FILE* fp, const char* fmt, ...) { return ::fprintf(fp, fmt); }
-    inline int    sprintf(char* s, const char* fmt, ...) { return ::sprintf(s, fmt); }
-    inline int    snprintf(char* s, size_t n, const char* fmt, ...) { return ::snprintf(s, n, fmt); }
+    // M52: 这里**不再**提供 `printf/fprintf/sprintf/snprintf` 的转发包装.
+    //
+    // 之前的写法是 `inline int printf(const char* fmt, ...) { return ::printf(fmt); }`:
+    // C/C++ 无法把一个 `...` 形参直接传给另一个 `...` 形参 (必须走 va_start +
+    // vfprintf), 所以这些包装会**静默丢掉全部可变实参** —— `std::printf("%d\n", 5)`
+    // 在 g++ 下输出 `5`, 在 dcc 下输出未初始化的寄存器 (与真值不一致且无任何诊断).
+    // 保留一个错的实现比不实现更糟, 因此删除: 现在 `std::printf(...)` 会硬报
+    // "'printf' not found in qualified name".
+    // 需要格式化输出的代码请用全局 `::printf` (C++ 允许 [c.headers] 的这份名字)
+    // 或 C++23 的 `std::print`/`std::println` (见 <print>, 由参数包摊平实现).
+    // 非变参的函数照旧转发, 它们的包装是等价的.
 
     inline FILE*  fopen(const char* path, const char* mode) { return ::fopen(path, mode); }
     inline int    fclose(FILE* fp) { return ::fclose(fp); }

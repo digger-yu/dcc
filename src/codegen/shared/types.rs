@@ -143,7 +143,7 @@ impl TypePromotionEngine {
         let align = ty.align();
         let type_class = Self::classify_type(ty);
 
-        TypeInfo::new(size as usize, align as usize, type_class)
+        TypeInfo::new(size, align, type_class)
     }
 
     /// Check if two types are compatible for operations
@@ -239,8 +239,8 @@ impl TypeCoercionEngine {
     /// Integer usual conversions (C11 6.3.1.9)
     fn integer_usual_conversions(&self, lhs: &Type, rhs: &Type) -> Type {
         // Get signedness and rank
-        let lhs_signed = Self::is_signed(&lhs);
-        let rhs_signed = Self::is_signed(&rhs);
+        let lhs_signed = Self::is_signed(lhs);
+        let rhs_signed = Self::is_signed(rhs);
         let lhs_rank = Self::type_rank_integer(lhs);
         let rhs_rank = Self::type_rank_integer(rhs);
 
@@ -254,27 +254,27 @@ impl TypeCoercionEngine {
         // Same rank - handle signedness
         if lhs_signed && rhs_signed {
             // Both signed → left type (or either, they're same size)
-            return lhs.clone();
+            lhs.clone()
         } else if !lhs_signed && !rhs_signed {
             // Both unsigned → left type
-            return lhs.clone();
+            lhs.clone()
         } else {
             // Mixed signedness
             if lhs_signed {
                 // lhs is signed, rhs is unsigned, same rank
                 // If signed type can represent all values of unsigned type, result is signed
                 if self.can_signed_represent_unsigned(lhs) {
-                    return lhs.clone();
+                    lhs.clone()
                 } else {
                     // Otherwise, result is unsigned version
-                    return rhs.clone();
+                    rhs.clone()
                 }
             } else {
                 // lhs is unsigned, rhs is signed
                 if self.can_signed_represent_unsigned(rhs) {
-                    return rhs.clone();
+                    rhs.clone()
                 } else {
-                    return lhs.clone();
+                    lhs.clone()
                 }
             }
         }
@@ -342,17 +342,39 @@ impl TypeCoercionEngine {
 /// * `is_default` - Whether this is the default case
 ///
 /// # Example
-/// ```rust,ignore
-/// // Corresponds to C code:
-/// // switch(x) {
-/// //     case 1: do_something(); break;
-/// //     default: handle_default();
-/// // }
-/// let case_1 = CaseInfo {
-///     value: Expression::Literal(1),
-///     body: vec![Statement::Expr(do_something)],
-///     is_default: false,
+/// ```rust
+/// use dcc::ast::{Expr, Ident, Stmt, Type};
+/// use dcc::codegen::shared::types::CaseInfo;
+/// use dcc::diagnostics::Span;
+///
+/// // 对应 C 代码:
+/// //   switch (x) { case 1: do_something(); break; default: handle_default(); }
+/// let sp = || Span::point("t.c", 1, 1);
+/// let call_stmt = |name: &str| Stmt::Expr {
+///     e: Expr::Call {
+///         callee: Box::new(Expr::Ident {
+///             name: Ident { name: name.to_string(), span: sp() },
+///             span: sp(),
+///             ty: Type::Int,
+///         }),
+///         args: Vec::new(),
+///         span: sp(),
+///         ty: Type::Void,
+///     },
+///     span: sp(),
 /// };
+///
+/// let case_1 = CaseInfo::new(
+///     Expr::Int { v: 1, span: sp(), ty: Type::Int },
+///     vec![call_stmt("do_something"), Stmt::Break { span: sp() }],
+/// );
+/// assert!(!case_1.is_default);
+/// assert_eq!(case_1.body.len(), 2);
+///
+/// // default 分支由 CaseInfo::default_case 构造, is_default 为真.
+/// let default = CaseInfo::default_case(vec![call_stmt("handle_default")]);
+/// assert!(default.is_default);
+/// assert_eq!(default.body.len(), 1);
 /// ```
 #[derive(Debug, Clone)]
 pub struct CaseInfo {

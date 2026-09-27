@@ -119,6 +119,24 @@ impl Codegen {
         }
     }
     pub(crate) fn emit_implicit_float_to_int(&mut self, dst: u8, float_ty: &Type, int_ty: &Type) {
+        // 无符号目标: 不能沿用「有符号截断转换 + INT_MAX 饱和」—— 见
+        // `emit_float_to_unsigned` 的根因说明。值通道与有符号路径同一条
+        // (long double 从 x87 st(0) 落 f64 到 xmm0), 因此先跳一次再分流。
+        if matches!(
+            int_ty,
+            Type::Bool
+                | Type::UChar
+                | Type::UShort
+                | Type::UInt
+                | Type::ULong
+                | Type::ULongLong
+        ) {
+            if matches!(float_ty, Type::LongDouble) {
+                self.emit_x87_to_xmm0();
+            }
+            self.emit_float_to_unsigned(dst, float_ty, int_ty);
+            return;
+        }
         let wide = matches!(int_ty, Type::Long | Type::ULong | Type::LongLong | Type::ULongLong);
         match float_ty {
             Type::Float => {
@@ -132,8 +150,16 @@ impl Codegen {
                 self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
             },
             Type::LongDouble => {
-                // long double 内部为 double, 已在 xmm0
-                // cvttsd2si dst, xmm0
+                // long double 的值通道是 **x87 st(0)** (80-bit 值模型, 见
+                // `Codegen::float_in_st0`), 不在 xmm0 里。旧实现照搬 Double 的
+                // `cvttsd2si %xmm0` —— 读的是一个从未写入的 xmm0, 于是所有
+                // 「常见算术转换后隐式截断成整数」的表达式 (`int r = 2030 + 12.0L;`
+                // `int q = ld;`) 静默得 0, 而显式 `(int)ld` 因为走
+                // `gen_expr_cast` 的 st(0) 分流倒是正确。
+                // 现在与显式转换共用同一个 Layer0 原语: 先把 st(0) 硬件舍入
+                // 落成 f64 到 xmm0, 再走按 xmm0 取值的 cvttsd2si。
+                self.emit_x87_to_xmm0();
+                // cvttsd2si dst, xmm0 (F2 REX 0F 2C /r)
                 let rex = 0x40 | (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x04 } else { 0 });
                 self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
             },
@@ -142,6 +168,45 @@ impl Codegen {
         // Saturate out-of-range results to INT_MAX/INT_MIN
         // instead of x86 "integer indefinite" value.
         self.emit_float_to_int_saturate(dst, float_ty, wide);
+    }
+
+    /// 浮点 → **无符号**整型的唯一实现 (显式转型 `cast.rs` 与初始化/赋值/实参/
+    /// 返回值等隐式收敛转换都走这里)。
+    ///
+    /// 根因: 照带有符号目标那套 `cvttsd2si` (32 位目的地) + INT_MAX 饱和, 会把
+    /// `[2^31, 2^32)` 区间当成溢出静默夹成 `2147483647` —— `unsigned u =
+    /// 4000000000.0L;` 在 gcc 真值里是 `4000000000`, dcc 给 `2147483647`。
+    /// 正解是**用比目标宽一档的有符号截断转换再按目标宽度截断**:
+    ///   * ≤32 位目标 → 64 位 `cvttt*2si` (该区间能精确表示) → 截到低 32 位;
+    ///   * 64 位目标 → 64 位 cvtt 后若为负 (原值 ≥ 2^63) 加 2^64 校正
+    ///     ([`Codegen::emit_float_to_ulong`])。
+    ///
+    /// 调用前浮点值已在 xmm0。负源值转无符号在 C 里是 UB, 保持与旧显式路径
+    /// 一致地钳到 0。
+    pub(crate) fn emit_float_to_unsigned(&mut self, dst: u8, float_ty: &Type, int_ty: &Type) {
+        let is_single = matches!(float_ty, Type::Float);
+        if matches!(int_ty, Type::ULong | Type::ULongLong) {
+            self.emit_float_to_ulong(dst, !is_single);
+            return;
+        }
+        // cvttrunc 到 64 位有符号 (REX.W): [2^31, 2^32) 不会触发 indefinite
+        let pfx = if is_single { 0xF3u8 } else { 0xF2u8 };
+        let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+        self.emit(&[pfx, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+        // 负值钳 0: 先把 scratch 清零 (xor 会破坏 flags), 再 test 设 SF,
+        // 最后 cmovs 选 0。
+        let zero_reg = if dst == 0 { 2 } else { 0 };
+        self.emit(&[0x48, 0x31, 0xC0 | ((zero_reg & 7) << 3) | (zero_reg & 7)]);
+        let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
+        self.emit(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+        let rex_cmov = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+        self.emit(&[
+            rex_cmov,
+            0x0F,
+            0x48,
+            0xC0 | ((dst & 7) << 3) | (zero_reg & 7),
+        ]);
+        self.emit_truncate_to_unsigned(dst, int_ty);
     }
     pub(crate) fn gen_compound_assign_single_eval(
         &mut self,

@@ -348,6 +348,12 @@ impl ScopeChain {
     }
 }
 
+/// struct/union 定义注册项: `(字段列表, 是否 union, 对齐字节数, 是否反转 SSO 序)`。
+///
+/// 键为 `"struct Name"` / `"union Name"` 形式的完整标签名; 字段列表为空表示
+/// 前向声明占位, 待真正的定义出现时再补全 (`resolve_type_latest` 负责回填)。
+type StructDefRecord = (Arc<Vec<Field>>, bool, usize, bool);
+
 pub struct Parser<'a> {
     lex: Lexer<'a>,
     cur: Tok,
@@ -355,7 +361,7 @@ pub struct Parser<'a> {
     diags: Vec<Diagnostic>,
     finished: bool,
     typedefs: HashMap<String, Type>,
-    struct_defs: HashMap<String, (Arc<Vec<Field>>, bool, usize, bool)>,
+    struct_defs: HashMap<String, StructDefRecord>,
     enum_defs: HashMap<String, EnumDef>,
     enum_consts: HashMap<String, (i64, Type)>, // 枚举常量: 值 + C23 底层类型
     locals: ScopeChain,                        // 分层作用域链 (替代单 HashMap + clone)
@@ -1179,53 +1185,11 @@ impl<'a> Parser<'a> {
         Some(ty)
     }
     /// C usual arithmetic conversions: determine common type for integer binops
+    ///
+    /// 实现已上浮到 [`Type::usual_arith_type`] 作为全项目单一真源
+    /// (C 前端 / SSA→AST 重建 / codegen 共用), 这里仅保留调用点写法。
     fn usual_arith_type(a: &Type, b: &Type) -> Type {
-        use Type::*;
-        let rank = |t: &Type| -> i32 {
-            match t {
-                Bool | Char | SChar | UChar => 1,
-                Short | UShort => 2,
-                Int | UInt => 3,
-                Long | ULong => 4,
-                LongLong | ULongLong => 5,
-                Int128 | UInt128 => 6,
-                _ => 0,
-            }
-        };
-        let is_uns =
-            |t: &Type| -> bool { matches!(t, UChar | UShort | UInt | ULong | ULongLong | UInt128) };
-        // integer promotion first
-        let a = match a {
-            Char | SChar | UChar | Short | UShort => &Int,
-            _ => a,
-        };
-        let b = match b {
-            Char | SChar | UChar | Short | UShort => &Int,
-            _ => b,
-        };
-        if std::mem::discriminant(a) == std::mem::discriminant(b) {
-            return a.clone();
-        }
-        let ra = rank(a);
-        let rb = rank(b);
-        let (higher, lower) = if ra >= rb { (a, b) } else { (b, a) };
-        if is_uns(higher) {
-            return higher.clone();
-        }
-        if !is_uns(lower) {
-            return higher.clone();
-        }
-        if rank(higher) > rank(lower) {
-            return higher.clone();
-        }
-        // 同秩时: 有符号无法表示无符号的全部值, 转为对应无符号类型
-        match higher {
-            Int => UInt,
-            Long => ULong,
-            LongLong => ULongLong,
-            Int128 => UInt128,
-            _ => higher.clone(),
-        }
+        a.usual_arith_type(b)
     }
 
     /// 去除字符串字面量两端的引号
@@ -2993,10 +2957,10 @@ impl<'a> Parser<'a> {
             // if/while 等复合语句, 全部路径终止才视为终止.
             Stmt::If { then_, else_, .. } => {
                 Self::stmt_terminates(then_)
-                    && else_.as_ref().map_or(false, |e| Self::stmt_terminates(e))
+                    && else_.as_ref().is_some_and(|e| Self::stmt_terminates(e))
             },
             Stmt::Block { b, .. } => {
-                Self::last_effective_stmt(b).map_or(false, |s| Self::stmt_terminates(s))
+                Self::last_effective_stmt(b).is_some_and(Self::stmt_terminates)
             },
             Stmt::Label { stmt, .. } => Self::stmt_terminates(stmt),
             Stmt::Switch { .. } => true, // switch 内的 break 已在内部处理
@@ -10044,46 +10008,36 @@ impl<'a> Parser<'a> {
                         }
                     } else if is_ca || is_cb {
                         // 复数算术结果仍为复数 (供 Cast 等类型推导):
-                        // 取较宽的内型 (C99 6.3.1.8: _Complex float 与
-                        // _Complex double 运算 → _Complex double)。旧实现
-                        // 任取一侧, Complex(Float) + Complex(Double) 标为
-                        // Complex(Float), codegen 按窄 inner spill/读取宽
-                        // 操作数位模式错位 (complex-6 test_float:
-                        // 1.0 + 2.0i 实部丢失)。
-                        let inner_a = if let Type::Complex(ref i) = lt {
-                            i.base.clone()
-                        } else {
-                            lt.clone()
+                        // 实型取通常算术转换的公共实型 (C11 6.3.1.8 + G.6.4.4,
+                        // `_Complex float` 与 `_Complex double` → `_Complex double`,
+                        // `_Complex int` 与 `float` → `_Complex float`)。旧实现按
+                        // `size()` 比较内型: 任取一侧 (`Complex(Float) +
+                        // Complex(Double)` 标为 `Complex(Float)`, codegen 按窄
+                        // inner spill/读取宽操作数位模式错位 —— complex-6
+                        // test_float: 1.0 + 2.0i 实部丢失), 且 `int` 与 `float`
+                        // 同宽时把整数当候选实型 (`zf = 3 + 4*_Complex_I` 的虚部
+                        // 读出 4.0f 的位模式 1082130432)。
+                        let real_of = |t: &Type| -> Type {
+                            match t {
+                                Type::Complex(ref i) | Type::Imaginary(ref i) => i.base.clone(),
+                                other => other.clone(),
+                            }
                         };
-                        let inner_b = if let Type::Complex(ref i) = rt {
-                            i.base.clone()
-                        } else {
-                            rt.clone()
-                        };
-                        let wider = if inner_a.size() >= inner_b.size() {
-                            inner_a
-                        } else {
-                            inner_b
-                        };
+                        let wider = real_of(&lt).common_real_type(&real_of(&rt));
                         Type::Complex(Box::new(wider.into()))
                     } else if is_ia || is_ib {
-                        // _Imaginary 算术类型推导
-                        let inner_a = if let Type::Imaginary(ref i) = lt {
-                            i.base.clone()
-                        } else {
-                            lt.clone()
+                        // _Imaginary 算术类型推导: 实型同样走
+                        // [`Type::common_real_type`] 单一真源 (旧写法只剥
+                        // `Imaginary` 不剥 `Complex`, 于是 `_Complex double op
+                        // _Imaginary float` 会把 `Complex(Double)` 整个当成内型,
+                        // 造出嵌套复数; 且 size() 比较把 int 与 float 判为同宽)。
+                        let real_of = |t: &Type| -> Type {
+                            match t {
+                                Type::Complex(ref i) | Type::Imaginary(ref i) => i.base.clone(),
+                                other => other.clone(),
+                            }
                         };
-                        let inner_b = if let Type::Imaginary(ref i) = rt {
-                            i.base.clone()
-                        } else {
-                            rt.clone()
-                        };
-                        // 取较宽的内型
-                        let wider = if inner_a.size() >= inner_b.size() {
-                            inner_a
-                        } else {
-                            inner_b
-                        };
+                        let wider = real_of(&lt).common_real_type(&real_of(&rt));
                         match op {
                             BinOp::Add | BinOp::Sub if is_ia && is_ib => {
                                 // imag ± imag → imag
@@ -10104,13 +10058,9 @@ impl<'a> Parser<'a> {
                             _ => wider,
                         }
                     } else if is_fa || is_fb {
-                        if matches!(&lt, Type::LongDouble) || matches!(&rt, Type::LongDouble) {
-                            Type::LongDouble
-                        } else if matches!(&lt, Type::Double) || matches!(&rt, Type::Double) {
-                            Type::Double
-                        } else {
-                            Type::Float
-                        }
+                        // 标量浮点臂: 与复数/虚数推导同一口径 (任一侧浮点 →
+                        // 较宽浮点族, 否则整数 usual_arith_type)。
+                        lt.common_real_type(&rt)
                     } else if matches!(op, BinOp::Add | BinOp::Sub) {
                         if matches!(&lt, Type::Ptr(_)) {
                             lt
@@ -11671,16 +11621,14 @@ impl<'a> Parser<'a> {
                         Some(bits) => FloatConst::LongDouble(bits),
                         None => FloatConst::F64(v_s.parse().unwrap_or(0.0)),
                     },
-                    Type::Float => {
-                        FloatConst::F32(v_s.parse::<f32>().unwrap_or(0.0))
-                    }
+                    Type::Float => FloatConst::F32(v_s.parse::<f32>().unwrap_or(0.0)),
                     _ => {
                         if v_s.starts_with("0x") || v_s.starts_with("0X") {
                             FloatConst::F64(parse_hex_float(v_s))
                         } else {
                             FloatConst::F64(v_s.parse().unwrap_or(0.0))
                         }
-                    }
+                    },
                 };
                 self.advance();
                 if is_imag {

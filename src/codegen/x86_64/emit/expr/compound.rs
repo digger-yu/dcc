@@ -13,98 +13,86 @@ use crate::codegen::x86_64::{Codegen, JumpKind};
 impl Codegen {
     /// gen_expr Comma 分支 (batch F3 逐字搬迁: Expr::Comma arm)。
     pub fn gen_expr_comma(&mut self, e: &Expr, dst: u8) {
-        match e {
-            Expr::Comma { l, r, .. } => {
-                // 逗号运算符: 求值 lhs 丢弃, 求值 rhs 结果放入 dst
-                self.gen_expr(l, 0);
-                self.gen_expr(r, dst);
-            },
-            _ => {},
+        if let Expr::Comma { l, r, .. } = e {
+            // 逗号运算符: 求值 lhs 丢弃, 求值 rhs 结果放入 dst
+            self.gen_expr(l, 0);
+            self.gen_expr(r, dst);
         }
     }
 
     /// gen_expr 三元条件分支 (batch F4 逐字搬迁: Expr::Cond arm)。
     pub fn gen_expr_cond(&mut self, e: &Expr, dst: u8) {
-        match e {
-            Expr::Cond {
+        if let Expr::Cond {
                 cond, then_, else_, ..
-            } => {
-                self.gen_expr(cond, 0);
-                self.emit_truth_flags(&cond.ty());
-                let le = self.fresh_label();
-                let lend = self.fresh_label();
-                self.jmp_rel32(&le, JumpKind::Je);
-                self.gen_expr(then_, dst);
-                self.jmp_rel32(&lend, JumpKind::Jmp);
-                self.label(&le);
-                self.gen_expr(else_, dst);
-                self.label(&lend);
-            },
-            _ => {},
+            } = e {
+            self.gen_expr(cond, 0);
+            self.emit_truth_flags(&cond.ty());
+            let le = self.fresh_label();
+            let lend = self.fresh_label();
+            self.jmp_rel32(&le, JumpKind::Je);
+            self.gen_expr(then_, dst);
+            self.jmp_rel32(&lend, JumpKind::Jmp);
+            self.label(&le);
+            self.gen_expr(else_, dst);
+            self.label(&lend);
         }
     }
 
     /// gen_expr 复合字面量分支 (batch F7 逐字搬迁: Expr::CompoundLit arm)。
     /// (type){...}: 栈上分配可变内存, 初始化后返回地址到 dst。
     pub fn gen_expr_compound_lit(&mut self, e: &Expr, dst: u8) {
-        match e {
-            Expr::CompoundLit { ty, inits, .. } => {
-                if let Type::Vector(elem_ty, n) = ty {
-                    self.gen_vector_init_rvalue(inits, &elem_ty.base, *n, 0);
-                    let vec_size = elem_ty.base.size() * n;
-                    let temp_off = self.vector_temp_base(0, vec_size);
-                    self.emit_lea_r13(dst, temp_off);
-                    return;
-                }
-                // 复合字面量: (type){...} - 在栈上分配可变内存, 初始化后返回地址
-                // 用唯一名称注册到 var_map, 复用 register_var 的栈分配逻辑
-                let compound_name = format!("__compound_lit_{}", self.pos());
-                let base_offset = self.register_var(&compound_name, ty);
-                // 生成初始化代码
-                self.gen_init_list_at(base_offset, ty, inits);
-                // dst = r13 + base_offset (compound lit address)
-                self.emit_lea_r13(dst, base_offset);
-            },
-            _ => {},
+        if let Expr::CompoundLit { ty, inits, .. } = e {
+            if let Type::Vector(elem_ty, n) = ty {
+                self.gen_vector_init_rvalue(inits, &elem_ty.base, *n, 0);
+                let vec_size = elem_ty.base.size() * n;
+                let temp_off = self.vector_temp_base(0, vec_size);
+                self.emit_lea_r13(dst, temp_off);
+                return;
+            }
+            // 复合字面量: (type){...} - 在栈上分配可变内存, 初始化后返回地址
+            // 用唯一名称注册到 var_map, 复用 register_var 的栈分配逻辑
+            let compound_name = format!("__compound_lit_{}", self.pos());
+            let base_offset = self.register_var(&compound_name, ty);
+            // 生成初始化代码
+            self.gen_init_list_at(base_offset, ty, inits);
+            // dst = r13 + base_offset (compound lit address)
+            self.emit_lea_r13(dst, base_offset);
         }
     }
 
     /// gen_expr 初始化列表 rvalue 分支 (batch F7 逐字搬迁: Expr::InitList arm)。
     /// 向量 / 标量 brace 初始化 / 不支持类型 (ud2) 三路由。
     pub fn gen_expr_init_list(&mut self, e: &Expr, dst: u8) {
-        match e {
-            Expr::InitList { inits, .. } => {
-                if let Type::Vector(elem_ty, n) = e.ty() {
-                    self.gen_vector_init_rvalue(inits, &elem_ty.base, n, 0);
-                    // rax 指向临时槽, 供后续 aggregate_assign 使用
-                    let vec_size = elem_ty.base.size() * n;
-                    let temp_off = self.vector_temp_base(0, vec_size);
-                    self.emit_lea_r13(0, temp_off);
-                } else if e.ty().is_arith() || e.ty().is_ptr() || matches!(e.ty(), Type::Bool) {
-                    // 标量初始化列表 (如 `int x = {1};` 或带 brace 的复合字面量):
-                    // 第一个元素就是要赋的值, 后续 (C99 6.7.8/11) 只能是 0
-                    if let Some(first) = inits.first() {
-                        let v = match first {
-                            InitItem::Expr(ex) => ex,
-                            InitItem::Designated { value, .. } => value,
-                        };
-                        self.gen_expr(v, dst);
-                    } else {
-                        self.mov_imm(dst, 0);
-                    }
+        if let Expr::InitList { inits, .. } = e {
+            if let Type::Vector(elem_ty, n) = e.ty() {
+                self.gen_vector_init_rvalue(inits, &elem_ty.base, n, 0);
+                // rax 指向临时槽, 供后续 aggregate_assign 使用
+                let vec_size = elem_ty.base.size() * n;
+                let temp_off = self.vector_temp_base(0, vec_size);
+                self.emit_lea_r13(0, temp_off);
+            } else if e.ty().is_arith() || e.ty().is_ptr() || matches!(e.ty(), Type::Bool) {
+                // 标量初始化列表 (如 `int x = {1};` 或带 brace 的复合字面量):
+                // 第一个元素就是要赋的值, 后续 (C99 6.7.8/11) 只能是 0
+                if let Some(first) = inits.first() {
+                    let v = match first {
+                        InitItem::Expr(ex) => ex,
+                        InitItem::Designated { value, .. } => value,
+                    };
+                    self.gen_expr(v, dst);
                 } else {
-                    self.expr_warn(
-                        e,
-                        &format!(
-                            "codegen unsupported InitList rvalue for {:?}; emitted as ud2",
-                            e.ty()
-                        ),
-                    );
-                    self.emit(&[0x0F, 0x0B]); // ud2
                     self.mov_imm(dst, 0);
                 }
-            },
-            _ => {},
+            } else {
+                self.expr_warn(
+                    e,
+                    &format!(
+                        "codegen unsupported InitList rvalue for {:?}; emitted as ud2",
+                        e.ty()
+                    ),
+                );
+                self.emit(&[0x0F, 0x0B]); // ud2
+                self.mov_imm(dst, 0);
+            }
         }
     }
 

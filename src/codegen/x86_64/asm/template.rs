@@ -168,7 +168,7 @@ impl AsmLocalLabels {
 // Simple string pattern check for local label references (number+f/b)
 fn is_local_label_ref(s: &str) -> bool {
     s.len() >= 2
-        && s.chars().last().unwrap() != 'f'
-        && s.chars().last().unwrap() != 'b'
+        && !s.ends_with('f')
+        && !s.ends_with('b')
         && s[..s.len() - 1].chars().all(|c| c.is_ascii_digit())
 }

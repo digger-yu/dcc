@@ -96,14 +96,171 @@ impl Codegen {
         self.emit(&[0xFC]); // cld
         self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
     }
+    /// 聚合**形态**判据: 结构体/联合体/数组/原子/向量。与「值模型」判据
+    /// [`Self::value_is_whole_copy`] 分开, 两者一起构成聚合赋值分发的全部知识,
+    /// 不允许在调用方重写形状队集。
+    pub(crate) fn is_aggregate_shape(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::Struct(_, _, _, _)
+                | Type::Union(_, _, _, _)
+                | Type::Array(_, ArraySize::Const(_))
+                | Type::Atomic(_)
+                | Type::Vector(_, _)
+        )
+    }
+
+    /// 聚合**值模型**判据: 该类型的值必须整块拷贝, 不能用恒 8 字节的标量
+    /// store 承载 (尺寸装不进一个寄存器, 或者尺寸是运行时值)。这也是
+    /// `va_arg` 缓冲区交付 (`va_arg_result_in_memory`) 与内存返回
+    /// (`needs_memory_return`) 共用的同一条「装不进寄存器」轴。
+    pub(crate) fn value_is_whole_copy(ty: &Type) -> bool {
+        Self::is_aggregate_shape(ty) && (ty.size() > 8 || ty.has_vla())
+    }
+
+    /// 聚合 **rvalue 的交付形态**: `true` = 求值后 rax 里是**缓冲地址**
+    /// (内存交付), `false` = rax(:rdx) 就是**数据** (寄存器交付)。
+    ///
+    /// 与上述三条轴同源: 返回轴 `needs_memory_return`、`va_arg` 交付轴
+    /// `va_arg_result_in_memory`、赋值/语句表达式的「目标地址即值」约定。
+    /// 调用侧按值存实参、下标/成员基址、返值转发等所有「拿 rvalue 当源」
+    /// 的地方都只准问本函数, 不得各自重写形态队集 —— 否则会出现
+    /// 「把缓冲地址当数据存槽」同型错误 (被调方读出指针字节)。
+    pub(crate) fn rvalue_is_buffer_addr(e: &Expr) -> bool {
+        let e = Self::skip_noop_casts(e);
+        let ty = e.ty();
+        if !Self::value_is_whole_copy(&ty) {
+            return false;
+        }
+        match e {
+            Expr::Call { .. } => Self::needs_memory_return(&ty),
+            Expr::VaArg { .. } => Self::va_arg_result_in_memory(&ty),
+            Expr::Assign { .. } | Expr::StmtExpr { .. } | Expr::CompoundLit { .. } => true,
+            // 具名变量 / 成员 / 下标 / 解引用等 lvalue 形态由各自的源分支
+            // (取地址后按块装载) 处理, 不走 rvalue 通道。
+            _ => false,
+        }
+    }
+
+    /// 形态分类视图: 剥掉**同类型** (no-op) 的 `Cast` 包装。
+    ///
+    /// 判据与值模型同源: 类型完全相同的转换既不改变位模式也不改变交付位置
+    /// (`gen_expr_cast` 对它是转发内层), 因此「它是地址还是数据」这个问题
+    /// 只能问剥壳后的真实形态。C++ 的类拷贝/成员赋值会在 rvalue 上留一层
+    /// `Cast{同一类}`, 不剥壳便落入恒 16 字节的通用物化路径, 把 `gen_expr`
+    /// 交付的**缓冲地址**当数据写进目标 (`d = s.f` 第一 quad 是指针字节)。
+    /// 跨类型的转换 (派生→基类、复合字面量重建) 会另建物化缓冲, 包装必须
+    /// 保留 —— 它的地址才是值。
+    pub(crate) fn skip_noop_casts(mut e: &Expr) -> &Expr {
+        while let Expr::Cast { ty, e: inner, .. } = e {
+            if inner.ty() == *ty {
+                e = inner;
+            } else {
+                break;
+            }
+        }
+        e
+    }
+
+    /// 聚合目标地址 → 指定寄存器。[`AggDst`] 四种寻址方式的唯一解释器
+    /// (旧写法在函数内四处重复 `if is_global_dst { global } else { lea }`)。
+    pub(crate) fn emit_agg_dst_addr(&mut self, dst: &AggDst, reg: u8) {
+        match dst {
+            AggDst::Global(name) => self.emit_global_addr(reg, name),
+            // VM struct/VLA: 帧槽存的是数据区基址, 不是数据本体
+            AggDst::Local { vla: Some(slot), .. } => self.load_stack(reg, *slot),
+            AggDst::Local { off, .. } => self.emit_lea_r13(reg, *off),
+            // 运行时地址: 调用方已把它存进帧槽
+            AggDst::Indirect { addr_slot } => self.load_stack(reg, *addr_slot),
+        }
+    }
+
+    /// 具名变量目标入口 (历史签名)。目标寻址方式一律解析成 [`AggDst`]。
     pub(crate) fn gen_aggregate_assign(&mut self, dst_name: &str, dst_ty: &Type, r: &Expr) {
-        let sz = dst_ty.size();
-        let is_global_dst = self.is_global_not_local(dst_name);
-        let dst_off = if is_global_dst {
+        let is_global = self.is_global_not_local(dst_name);
+        let dst_off = if is_global {
             0 // placeholder, not used for global dest
         } else {
             self.var_offset(dst_name)
         };
+        let vla = if is_global {
+            None
+        } else {
+            self.vla_offsets.get(dst_name).copied()
+        };
+        let dst = if is_global {
+            AggDst::Global(dst_name.to_string())
+        } else {
+            AggDst::Local { off: dst_off, vla }
+        };
+        self.gen_aggregate_assign_to(&dst, dst_ty, r);
+    }
+
+    /// `_Complex` 目标的源是否**不是**同内型的复数对象表示 —— 唯一判据点。
+    ///
+    /// C6.3.1.8p1/p4: 任何算术类型都可隐式转成复数类型 (实部 = 转换后的标量,
+    /// 虚部 = +0), 复数→复数则是**逐分量**的。只有「源已经是目标的对象表示」
+    /// (同内型 `_Complex`) 才允许按分量直读或整体字节搬运; 标量源与异内型源
+    /// 一律要先经 [`Self::gen_aggregate_assign_to`] 转换。
+    /// 赋值 / 实参 / 返回三类站点共用本函数, 不得在站点重写宽度或内型判据
+    /// (旧写法在 call.rs 只认 `Complex→Complex` 一条轴, 标量实参 `take(11)`
+    /// 于是按复数对直读物化区, 分量全 0; 返回端同类缺失见
+    /// [`Codegen::gen_complex_return`])。
+    ///
+    /// `_Imaginary` 源: 同内型时沿用既有交付约定 (分量路径各自补零实部),
+    /// 内型不同时同样需要逐分量转换。
+    pub(crate) fn complex_src_needs_convert(dst: &Type, src: Type) -> bool {
+        match dst {
+            Type::Complex(d) => match src {
+                Type::Complex(s) => s.base != d.base,
+                Type::Imaginary(s) => s.base != d.base,
+                _ => true,
+            },
+            _ => false,
+        }
+    }
+
+    /// 把任意表达式按目标类型物化到一个帧内临时槽, 返回槽偏移。
+    /// 这是 [`Self::gen_aggregate_assign_to`] 的「目标是帧内临时槽」特例,
+    /// 供返回 / 实参这类「先按目标类型落地、再按 SysV 分类装载寄存器」的
+    /// 站点复用 —— 转换语义仍然只有 `gen_aggregate_assign_to` 一处。
+    pub(crate) fn materialize_value_slot(&mut self, ty: &Type, r: &Expr) -> i64 {
+        let slot = self.alloc_sret_slot(ty.size().max(16));
+        self.gen_aggregate_assign_to(
+            &AggDst::Local {
+                off: slot,
+                vla: None,
+            },
+            ty,
+            r,
+        );
+        slot
+    }
+
+    pub(crate) fn gen_aggregate_assign_to(&mut self, dst: &AggDst, dst_ty: &Type, r: &Expr) {
+        // 分类与求值都按剥掉 no-op `Cast` 后的形态进行 (单一轴, 见
+        // [`Self::skip_noop_casts`]): no-op 转换对两者都完全透明。
+        let r: &Expr = Self::skip_noop_casts(r);
+        let sz = dst_ty.size();
+        // 语义与历史 `is_global_dst` 一致; 新增的 `Indirect` (运行时地址) 与全局
+        // 同属「不可按帧偏移直存」一类。`dst_off` 对这两类是没意义的占位 0,
+        // 只在 `frame_off()` 为 Some 的分支上才会被读。
+        let staged_dst = dst.needs_staged();
+        let dst_off = dst.frame_off().unwrap_or(0);
+        // `_Complex` 目标能否按**对象表示**整体搬运, 只由一个轴决定: 源的值
+        // 表示是否与目标同宽同型。判据单点在此, 下面 Ident / Deref / Index /
+        // Member 各源形态分支与上方 Call 的 ABI 返回快路径共用同一份
+        // (旧写法只拦得住标量 RHS 一种形态):
+        //  · 标量 RHS (`c = i`): 从 &i 拷 16 字节会把标量的栈上高位垃圾灌进虚部;
+        //  · 内型不同的复数 RHS (`zdd = zff`、`f(zfloat)` 里 `_Complex float` 实参
+        //    → `_Complex double` 形参): C6.3.1.8p4 的复数算术转换是**逐分量**的,
+        //    元素类型参与值表示。整体字节拷贝 (以及按**源**类型 ABI 分类把返回
+        //    寄存器直存) 等于拿源分量的位模式当目标分量的位模式 —— `_Complex
+        //    float` 的两个 float 被当成 `_Complex double` 的低那个 double (实部
+        //    读出 8.0000018961727619171), 虚部则越界读到隔壁槽。
+        // 两者都必须绕到下方 got_src==false 的物化分量转换分支。
+        let complex_needs_component_convert =
+            Self::complex_src_needs_convert(dst_ty, r.ty());
         // 特殊处理: 源是函数调用 (走完整 SysV ABI: 参数分类/暂存/返回值)
         let mut call_sret_handled = false;
         if let Expr::Call {
@@ -113,7 +270,14 @@ impl Codegen {
             ..
         } = r
         {
-            if let Expr::Ident { name, .. } = callee.as_ref() {
+            if complex_needs_component_convert {
+                // 本块的返回端快路径按**源** (`call_ty`) 的 ABI 分类存寄存器,
+                // 而复数分量转换需要的是按**目标**内型重新物化: `_Complex float`
+                // 的返回值是打包在一个 8 字节 eightbyte 里的两个 float, 与
+                // `_Complex double` 的 [double, double] 不是同一对象表示,
+                // 直存即位模式误读 (`my_cimag_d(reassemble_fc(7.5f,8.5f))` 得 3
+                // 而 gcc 得 8.5)。落到下方分量物化路径 (只求值一次)。
+            } else if let Expr::Ident { name, .. } = callee.as_ref() {
                 if name.name.starts_with("__builtin_") && !Self::is_fortify_builtin(&name.name) {
                     // 复数 builtin (conj 系列) 放行到下方 _Complex rvalue
                     // 分量路径: gen_expr 内部走 gen_builtin 成功物化
@@ -134,12 +298,21 @@ impl Codegen {
                     let sret_off = self.alloc_sret_slot(call_ty.size());
                     self.emit_sysv_call(Some(&name.name), None, args, Some(sret_off));
                     self.emit_lea_r13(6, sret_off); // rsi = 源 (sret 槽)
-                    if is_global_dst {
-                        self.emit_global_addr(7, dst_name); // rdi = 全局目标地址
-                    } else {
-                        self.emit_lea_r13(7, dst_off); // rdi = 目标地址
-                    }
+                    self.emit_agg_dst_addr(dst, 7); // rdi = 目标地址
                     call_sret_handled = true;
+                } else if Self::abi_classes(call_ty).iter().any(|cls| {
+                    matches!(
+                        cls,
+                        AbiClass::X87 | AbiClass::X87Up | AbiClass::ComplexX87 | AbiClass::Memory
+                    )
+                }) {
+                    // 返回值不在 rax/xmm 上: 下面那个按分类存寄存器的循环只
+                    // 认识 Integer / Sse / SseUp, 碰上 X87 家族直接 `unreachable!()`
+                    // ICE (`_Complex long double g; g = f();` 的分类是
+                    // [X87, X87Up, ComplexX87, X87Up], 经 st0/st1 交付而
+                    // `needs_memory_return` 对它是 false)。落到函数尾部的通用
+                    // 复数物化路径 —— 那边按 x87 st(0)/st(1) → 内存对处理。
+                    // 判据只问 `abi_classes` 这个真源, 不在此重写形状枚举。
                 } else {
                     // 寄存器返回: 按 abi_classes 存储
                     // (INTEGER→rax:rdx, SSE/SSEUP→xmm0:xmm1)
@@ -157,10 +330,10 @@ impl Codegen {
                     // 漏判而落入逐 chunk 存储（实测 4 元素返回 `1 2 2 0`）。
                     // 两侧共用单一真源后，这类错配不可能再发生。
                     let is_sse_128_single_reg = Self::is_sseup_128_aggregate(call_ty);
-                    if is_global_dst {
-                        // Global destination: dst_off=0 is invalid for
-                        // store_stack (would corrupt return address).
-                        // Store to sret temp, then rep movsb to global.
+                    if staged_dst {
+                        // 不可按帧偏移直存的目标 (全局 / 运行时地址):
+                        // dst_off=0 对 store_stack 非法 (会踩返回地址)。
+                        // 先存进 sret 临时槽, 再 rep movsb 到真实地址。
                         let temp_off = self.alloc_sret_slot(call_ty.size());
                         if is_sse_128_single_reg {
                             self.store_xmm128_stack(0, temp_off);
@@ -181,8 +354,8 @@ impl Codegen {
                             }
                         }
                         self.emit_lea_r13(6, temp_off); // rsi = src
-                        self.emit_global_addr(7, dst_name); // rdi = dst
-                                                            // rep movsb handled below
+                        self.emit_agg_dst_addr(dst, 7); // rdi = dst
+                        // rep movsb handled below
                         call_sret_handled = true;
                     } else {
                         if is_sse_128_single_reg {
@@ -229,15 +402,7 @@ impl Codegen {
             if Self::va_arg_result_in_memory(arg_ty) {
                 let va_addr = self.resolve_va_list_addr(ap);
                 // 设置 rdi = 目标地址 (resolve 之后, 避免被 scratch 覆盖)
-                if is_global_dst {
-                    self.emit_global_addr(7, dst_name); // rdi = 全局目标地址
-                } else if let Some(&vla_off) = self.vla_offsets.get(dst_name) {
-                    // VLA/VM struct 目标: var_offset 指向元数据区,
-                    // 首槽存数据基址, 必须先加载到 rdi
-                    self.load_stack(7, vla_off);
-                } else {
-                    self.emit_lea_r13(7, dst_off); // rdi = 目标地址
-                }
+                self.emit_agg_dst_addr(dst, 7);
                 if let VaListAddress::Named(ref name) = va_addr {
                     self.gen_va_arg_struct(name, arg_ty);
                 } else {
@@ -248,16 +413,11 @@ impl Codegen {
                 return;
             }
         }
-        // 1. 获取源地址到 rsi
-        // _Complex 目标 + 标量 RHS (非 complex/imaginary): 不能把标量
-        // 变量地址当聚合源整体拷贝 (c = i 会从 &i 拷 16 字节, 实部
-        // 混入 i 的栈上高位垃圾), 强制走下方 got_src==false 的物化
-        // 分量转换分支
-        let complex_scalar_rhs = matches!(dst_ty, Type::Complex(_))
-            && !matches!(r.ty(), Type::Complex(_) | Type::Imaginary(_));
+        // 1. 获取源地址到 rsi (复数分量转换判据见函数开头的
+        // `complex_needs_component_convert`, 与上方 Call 快路径同源)
         let got_src = if call_sret_handled {
             true
-        } else if complex_scalar_rhs {
+        } else if complex_needs_component_convert {
             false
         } else {
             match r {
@@ -315,22 +475,84 @@ impl Codegen {
                     let src_float = src_inner.as_ref().is_some_and(|b| {
                         matches!(b, Type::Float | Type::Double | Type::LongDouble)
                     });
+                    // ── 整数内型 `_Complex` 源 → float/double 内型目标 ────────
+                    // C6.3.1.8p4 的复数算术转换是**逐分量**的, 整数分量必须各自
+                    // 转成目标浮点。下面两条通用臂都假定「分量已在 xmm0」
+                    // (`emit_scalar_to_xmm0_if_needed` 把任何 `Complex(_)` 都归入
+                    // “浮点表达式”直接返回, `gen_complex_imag_into_xmm0` 又按浮点
+                    // 位模式读内存对), 对整数内型源整体失效: `zf = zi` 实部恒 0,
+                    // `(_Complex float) zs` 的显式转换 (cast.rs 已把异内型
+                    // `_Complex→_Complex` 全部委托到这里) 同样失效。分量标量转换
+                    // 一律走 `emit_scalar_to_xmm0_if_needed_ty` (整数→浮点的单一
+                    // 真源, 含无符号 64 位的 `emit_ulong_to_float` 臂), 本站点只
+                    // 负责“逐分量”这件事本身; LongDouble 目标不在这里拓
+                    // (需 x87 侧 `fild` 窄宽度支持, 与现有 LD 臂同一缺口)。
+                    let int_cx_src = match (&inner.base, r.ty()) {
+                        (Type::Float | Type::Double, Type::Complex(ref c))
+                            if Self::is_integer_type(&c.base) =>
+                        {
+                            Some(c.base.clone())
+                        },
+                        _ => None,
+                    };
+                    if let Some(si) = int_cx_src {
+                        // 源的 (实部, 虚部) 对由 gen_expr 按 complex rvalue 统一
+                        // 约定物化在复数结果带, stride = 源内型宽度。
+                        let band_off = self.complex_result_off();
+                        self.gen_expr(r, 0);
+                        let src_isz = si.size() as i64;
+                        let d_isz = inner.base.size() as i64;
+                        // 目标地址: staged (全局/运行时地址) 走寄存器间接, 局部
+                        // 走 r13 相对帧槽。两臂之间没有 call, 故 rcx 无需入栈
+                        // 保护 (`store_complex_at_rcx` 的 push/pop 约定只在跨
+                        // 嵌套求值时才必需)。
+                        if staged_dst {
+                            self.emit_agg_dst_addr(dst, 1); // rcx = 目标地址
+                        }
+                        let spfx = if matches!(inner.base, Type::Float) {
+                            0xF3u8
+                        } else {
+                            0xF2u8
+                        };
+                        for part in 0..2i64 {
+                            // 每轮重取物化区基址: load 覆盖 rax。
+                            self.emit_lea_r13(0, band_off);
+                            self.emit_load_mem_typed_disp(si.size(), &si, part * src_isz);
+                            self.emit_scalar_to_xmm0_if_needed_ty(&si, &inner.base);
+                            if staged_dst {
+                                // movss/movsd [rcx + disp8], xmm0
+                                self.emit(&[spfx, 0x0F, 0x11, 0x41]);
+                                self.emit(&[(part * d_isz) as u8]);
+                            } else {
+                                self.gen_float_store_at(dst_off + part * d_isz, &inner.base);
+                            }
+                        }
+                        self.finish_complex_assign_value(dst, dst_ty);
+                        return;
+                    }
                     if dst_float || src_float {
-                        if is_global_dst {
-                            // 全局目标: 分量路径的 gen_float_store_at 是
-                            // r13 栈槽相对, 对全局变量会写到栈顶附近, 必须
-                            // 先取全局地址再按连续布局写入。
+                        if staged_dst {
+                            // 不可按帧偏移直存的目标: 分量路径的 gen_float_store_at 是
+                            // r13 栈槽相对, 必须先取真实地址再按连续布局写入。
                             if matches!(&inner.base, Type::LongDouble) {
                                 // LD 不走 SSE: store_complex_at_rcx 内部单次
                                 // 物化（这里不预 gen_expr，否则带副作用
                                 // rvalue 被求值两次）。
-                                self.emit_global_addr(1, dst_name); // rcx = dst
+                                self.emit_agg_dst_addr(dst, 1); // rcx = dst
                                 self.push(1);
                                 self.store_complex_at_rcx(r, &inner.base);
                             } else {
                                 // f/d 与 int 截断臂: 先 gen_expr 再寻址。
                                 self.gen_expr(r, 0);
-                                self.emit_global_addr(1, dst_name); // rcx = dst
+                                self.emit_agg_dst_addr(dst, 1); // rcx = dst
+                                // [`store_complex_at_rcx`] 的交付约定是「调用方把
+                                // 目标地址 push 入栈, 内部自行 pop」(见其注释) ——
+                                // 地址不能只在寄存器里。`gf` 这类 **全局** `_Complex
+                                // float` 目标经 `emit_agg_dst_addr` 用的是 RIP 相对
+                                // lea, 不碰栈, 少这一次 push 就让 pop 从rsp 上捞出
+                                // 一个与目标毫无关系的值当地址, `movss (%rcx)` 直接
+                                // 段错误 (`gf = gf * 2.0f;` 整程序零输出)。
+                                self.push(1);
                                 if dst_float {
                                     self.store_complex_at_rcx(r, &inner.base);
                                 } else {
@@ -338,6 +560,7 @@ impl Codegen {
                                     // 截断): cvttsd2si 后写 [rcx]/[rcx+isz]
                                     let isz = inner.base.size() as i64;
                                     let result_off = -self.frame_size + 8;
+                                    self.pop(1); // rcx = dst addr
                                     if src_complex {
                                         let si = src_inner.clone().unwrap();
                                         let rpfx = if matches!(si, Type::Float) {
@@ -438,7 +661,7 @@ impl Codegen {
                         }
                         // 赋值表达式值 = 左值转换后的值: 按统一 complex
                         // rvalue 约定物化结果 (960512-1: if (c = f()))
-                        self.finish_complex_assign_value(is_global_dst, dst_name, dst_off, dst_ty);
+                        self.finish_complex_assign_value(dst, dst_ty);
                         return;
                     }
                 }
@@ -473,11 +696,7 @@ impl Codegen {
                         };
                         if src_isz == dst_isz {
                             // 同宽: 目标地址 → rdi, 源 result_off → rsi, 整体拷贝
-                            if is_global_dst {
-                                self.emit_global_addr(7, dst_name);
-                            } else {
-                                self.emit_lea_r13(7, dst_off);
-                            }
+                            self.emit_agg_dst_addr(dst, 7);
                             self.emit_lea_r13(6, result_off);
                             let qwords = sz / 8;
                             let remainder = sz % 8;
@@ -514,11 +733,7 @@ impl Codegen {
                                 );
                                 self.store_stack(0, result_off + (part * dst_isz) as i64);
                             }
-                            if is_global_dst {
-                                self.emit_global_addr(7, dst_name);
-                            } else {
-                                self.emit_lea_r13(7, dst_off);
-                            }
+                            self.emit_agg_dst_addr(dst, 7);
                             self.emit_lea_r13(6, result_off);
                             let qwords = sz / 8;
                             let remainder = sz % 8;
@@ -553,8 +768,14 @@ impl Codegen {
                 } else {
                     // 通用路径: 求值表达式, 存到帧临时区, 然后拷贝
                     self.gen_expr(r, 0);
-                    // 使用目标变量槽上方的安全临时区域
-                    let temp_off = dst_off - ((sz + 7) & !7) as i64; // 在目标下方留临时空间
+                    // 目标有帧槽时用其上方的安全临时区域; 不可直存的目标
+                    // (全局 / 运行时地址) 没有可用帧槽, 现分配一个物化槽
+                    // (旧写法统一用 `dst_off - padded`, 对全局即 `0 - padded`,
+                    // 会踩到帧底的复数物化带)。
+                    let temp_off = match dst.frame_off() {
+                        Some(off) => off - ((sz + 7) & !7) as i64, // 在目标下方留临时空间
+                        None => self.alloc_sret_slot(sz),
+                    };
                     self.store_stack(0, temp_off);
                     if sz > 8 {
                         self.store_stack(2, temp_off + 8); // rdx = 第二部分
@@ -564,14 +785,7 @@ impl Codegen {
             }
         }
         // 2. 取目标地址到 rdi
-        if is_global_dst {
-            self.emit_global_addr(7, dst_name); // rdi = 全局变量地址
-        } else if let Some(&off) = self.vla_offsets.get(dst_name) {
-            // VM struct/VLA 变量: 目标地址 = 数据区基址 (元数据槽)
-            self.load_stack(7, off);
-        } else {
-            self.emit_lea_r13(7, dst_off); // rdi = 目标地址
-        }
+        self.emit_agg_dst_addr(dst, 7);
         // 3. rep movsq + rep movsb 拷贝
         if dst_ty.has_vla() {
             // VM struct/union: 拷贝大小是运行时值 (声明点绑定槽优先,

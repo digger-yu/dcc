@@ -319,7 +319,7 @@ impl MipsFpr {
     /// Calculate double register pair start index
     pub fn as_double_start(&self) -> Option<u8> {
         let idx = self.index();
-        if idx % 2 == 0 && idx < 31 {
+        if idx.is_multiple_of(2) && idx < 31 {
             Some(idx / 2)
         } else {
             None
@@ -491,9 +491,9 @@ mod mips_registers_tests {
         assert_eq!(zero.read(), 0);
 
         // $0 cannot be written to
-        assert_eq!(MipsGpr::Zero.is_special(), true);
-        assert_eq!(MipsGpr::Zero.is_callee_saved(), false);
-        assert_eq!(MipsGpr::Zero.is_caller_saved(), false);
+        assert!(MipsGpr::Zero.is_special());
+        assert!(!MipsGpr::Zero.is_callee_saved());
+        assert!(!MipsGpr::Zero.is_caller_saved());
     }
 
     #[test]
@@ -507,16 +507,16 @@ mod mips_registers_tests {
     #[test]
     fn test_delay_slot_state() {
         let mut state = DelaySlotState::new();
-        assert_eq!(state.filled, false);
+        assert!(!state.filled);
 
         // Simulate filling delay slot
         state.filled = true;
         state.instruction = Some(MipsInstruction::Nop);
         state.has_data_dependency = false;
 
-        assert_eq!(state.filled, true);
+        assert!(state.filled);
 
         state.clear();
-        assert_eq!(state.filled, false);
+        assert!(!state.filled);
     }
 }

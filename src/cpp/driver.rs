@@ -99,7 +99,10 @@ pub fn compile_cpp(
     let decls = parser
         .parse_top_level()
         .map_err(|e| CppError::Diagnostics(vec![e.to_diag(file)]))?;
-    let mut lower = Lower::new();
+    // M54: constexpr 函数表必须随 AST 一起交接给降级器 —— 静态初始化器里的
+    // constexpr 调用要在发射前折成字面量 (C 后端不接受静态初始化里的函数调用)。
+    // 表里只有「能完整转换成解释器语句」的函数, 转换失败的本来就没登记。
+    let mut lower = Lower::with_constexpr_fns(parser.into_constexpr_fns());
     lower.lower_decls(&decls);
     let c_src = lower.finish();
 

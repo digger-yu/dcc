@@ -25,12 +25,26 @@ impl Codegen {
     }
 
     /// gen_expr 中 Expr::Call arm 的搬迁体, 逐字复制, 未改逻辑。
-    pub fn gen_expr_call(&mut self, callee: &Box<Expr>, args: &Vec<Expr>, ty: &Type, dst: u8) {
+    pub fn gen_expr_call(&mut self, callee: &Expr, args: &[Expr], ty: &Type, dst: u8) {
         // C 标准语义: (*fp)(...) 中 * 为函数指示符转换 (no-op),
         // 剥掉 Deref 壳后按内部表达式求值, 不真实解引用函数指针
-        // (否则会双重加载, 把函数体的机器码字节当地址调用).
-        let mut call_target: &Expr = callee.as_ref();
-        while let Expr::Deref { e: inner, .. } = call_target {
+        // (否则会双重加载: 把函数体开头的机器码字节当地址调用).
+        //
+        // 但**只有结果类型是函数**时那个 Deref 才是函数指示符转换。
+        // IR 层的 `Load{addr, ty}` 统一重建为 `Deref{addr, ty}`, 其中
+        // `ty` 非函数 (如 C++ 虚派发从 vtable 槽取出的 `void*` 函数指针,
+        // 或 C 里 `int (**fp)(int)` 的 `(**fp)()`) 时, Deref 是一次**真读取**,
+        // 必须保留: 剥掉它会把槽地址本身当函数入口调用 (直接段错误)。
+        let mut call_target: &Expr = callee;
+        while let Expr::Deref {
+            e: inner,
+            ty: deref_ty,
+            ..
+        } = call_target
+        {
+            if !matches!(deref_ty, Type::Func(..)) {
+                break;
+            }
             call_target = inner.as_ref();
         }
         let sret_off = if Self::needs_memory_return(ty) {
@@ -89,10 +103,7 @@ impl Codegen {
                 // builtin 直接内联。dcc 之前把它们当普通符号生成 `call creall@plt`,
                 // 链接失败; 在此按 builtin 路径 (gen_complex_part) 处理。
                 if let Some(arg) = args.first() {
-                    let is_real = matches!(
-                        name_name.as_str(),
-                        "creall" | "crealf" | "creal"
-                    );
+                    let is_real = matches!(name_name.as_str(), "creall" | "crealf" | "creal");
                     self.gen_complex_part(arg, is_real, ty, dst);
                 } else if dst != 0 {
                     self.mov_imm(dst, 0);

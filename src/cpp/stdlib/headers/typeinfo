@@ -1,39 +1,59 @@
 // <typeinfo> - dcc++ C++ 标准库
-// std::type_info 包装 (无 friend, 简化版)
-
-extern "C" {
-    struct dccpp_typeinfo;
-
-    const char* dccpp_typeinfo_name(const dccpp_typeinfo* ti);
-    int         dccpp_typeinfo_eq(const dccpp_typeinfo* a, const dccpp_typeinfo* b);
-    dccpp_typeinfo* dccpp_typeid_int(void);
-    dccpp_typeinfo* dccpp_typeid_char(void);
-    dccpp_typeinfo* dccpp_typeid_void(void);
-    dccpp_typeinfo* dccpp_typeid_double(void);
-    dccpp_typeinfo* dccpp_typeid_bool(void);
-}
-
+// std::type_info —— Itanium ABI typeinfo 对象的**叠层视图** (overlay)。
+//
+// `typeid(e)` 的结果按 [expr.type.id]/3 是 `const std::type_info&`, 指向编译器
+// 发射的 typeinfo 对象。该对象的二进制形态由 Itanium ABI 固定 (三种具体形态
+// `__class_type_info` / `__si_class_type_info` / `__vmi_class_type_info` 共有的
+// 前缀):
+//   偏移 0: `type_info` 虚表指针 —— dcc 侧由 abi_layout 的 `TypeInfoKind::
+//           vtable_symbol` 发射, 槽位逐个指向 libstdc++ 导出的真实现
+//           (`__do_dyncast` / `__do_catch` / `__do_upcast` / ...)。
+//   偏移 8: `const char* __name` —— 指向 mangled 类型名字符串 (`_ZTS...` 的内容)。
+// 所以这里如实用两个字段描述该布局: `name()` 读到的就是 g++ 在同一对象上读到
+// 的同一个字符串, 两侧可以直接比对 (见夹具 typeid_rtti_name_before.cpp)。
+//
+// 旧版把 type_info 建模成 `const dccpp_typeinfo* impl_` + `dccpp_typeinfo_name()`
+// 运行时包装, 与真实 typeinfo 对象二进制不兼容: `typeid` 只能当不透明指针比较,
+// 既拿不到 name(), 也无法与 libstdc++ 的 `__dynamic_cast` / `__do_catch` 互操作,
+// 故整体移除。
+//
+// 这里故意**不**声明任何虚函数: 一声明虚函数, dcc 就会为本类生成自己的虚表与
+// `_ZTI` 对象, 与 libstdc++ 的 `__cxxabiv1::__class_type_info` 争同一符号位置。
+// 虚表槽改为占位字段 `__vptr_placeholder`, 以保证 `__name` 落在偏移 8。
 namespace std {
+
+    /// `type_info` 比较用的字典序 (`before` / `operator==` 的单一实现)。
+    /// libstdc++ 用 `strcmp`; 这里自带一份, 避免标准库头之间的循环依赖。
+    inline int __dcc_typeinfo_strcmp(const char* a, const char* b) {
+        int i = 0;
+        while (1) {
+            if (a[i] != b[i]) return a[i] - b[i];
+            if (a[i] == 0) return 0;
+            i = i + 1;
+        }
+    }
+
     class type_info {
     public:
-        type_info() : impl_(0) {}
-        const char* name() { return dccpp_typeinfo_name(impl_); }
-        int operator==(type_info& other) {
-            return dccpp_typeinfo_eq(impl_, other.impl_);
-        }
-        int operator!=(type_info& other) {
-            int eq = dccpp_typeinfo_eq(impl_, other.impl_);
-            return !eq;
-        }
-    private:
-        const dccpp_typeinfo* impl_;
-    };
+        const char* name() const { return __name; }
 
-    inline type_info dccpp_typeid_int(void)    { type_info t; return t; }
-    inline type_info dccpp_typeid_char(void)   { type_info t; return t; }
-    inline type_info dccpp_typeid_void(void)   { type_info t; return t; }
-    inline type_info dccpp_typeid_double(void) { type_info t; return t; }
-    inline type_info dccpp_typeid_bool(void)   { type_info t; return t; }
+        /// [type.info]/6: *this 在实现自定义的 collation 序上是否排在 other 前。
+        bool before(const type_info& other) const {
+            return __dcc_typeinfo_strcmp(__name, other.__name) < 0;
+        }
+        bool operator==(const type_info& other) const {
+            return __dcc_typeinfo_strcmp(__name, other.__name) == 0;
+        }
+        bool operator!=(const type_info& other) const {
+            return __dcc_typeinfo_strcmp(__name, other.__name) != 0;
+        }
+
+    protected:
+        // 偏移 0: ABI 虚表槽 (见文件头说明, 只占位, 不由本类使用)。
+        const void* __vptr_placeholder;
+        // 偏移 8: ABI `__name` 字段。
+        const char* __name;
+    };
 
     class bad_cast {
     public:

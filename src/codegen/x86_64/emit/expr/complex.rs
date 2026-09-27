@@ -113,23 +113,15 @@ impl Codegen {
         self.emit(&[load_prefix, 0x0F, op_add, 0xE5]);
         self.emit(&[load_prefix, 0x0F, 0x11, 0x64, 0x24, inner_sz as u8]);
     }
-    pub(crate) fn finish_complex_assign_value(
-        &mut self,
-        is_global_dst: bool,
-        dst_name: &str,
-        dst_off: i64,
-        dst_ty: &Type,
-    ) {
+    /// 赋值表达式的值 = 左值转换后的值: 把已写入目标的结果按统一 complex
+    /// rvalue 约定再物化到帧底复数带 (`complex_result_off`), 以 rax = 该带
+    /// 地址交付。目标寻址方式交给 [`AggDst`] / [`Self::emit_agg_dst_addr`]
+    /// (旧写法在此重复一遍 global/vla/local 三分支, 无法服务运行时地址目标)。
+    pub(crate) fn finish_complex_assign_value(&mut self, dst: &AggDst, dst_ty: &Type) {
         if let Type::Complex(inner) = dst_ty {
             let total = inner.size() * 2;
-            let result_off = -self.frame_size + 8;
-            if let Some(&off) = self.vla_offsets.get(dst_name) {
-                self.load_stack(6, off);
-            } else if is_global_dst {
-                self.emit_global_addr(6, dst_name);
-            } else {
-                self.emit_lea_r13(6, dst_off);
-            }
+            let result_off = self.complex_result_off();
+            self.emit_agg_dst_addr(dst, 6);
             self.emit_lea_r13(7, result_off);
             self.mov_imm(1, total as i128);
             self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
@@ -1163,6 +1155,37 @@ impl Codegen {
             let off = if is_real { result_off } else { result_off + inner_sz };
             self.load_stack(0, off);
         }
+        // ── 分量类型 → 表达式类型 的标量转换 ────────────────────────────────
+        // `creal(z)` / `cimag(z)` 在 C 里是**函数** `double creal(double
+        // _Complex)`: 实参先做复数算术转换, 结果再按返回类型交付。本函数把它
+        // 们内联成 `__real__`/`__imag__` 求值, 省掉的是调用, 不能省掉那两层
+        // 类型转换 —— 否则 `_Complex float` 的 4 字节位模式被下游当成 double
+        // (`cimag(1.0f+1.0fi)` 读出 5.26e-315 而非 1.0)。真值通道只有两条:
+        // 浮点分量在 xmm0, 整数分量在 rax; LongDouble 分量在 st(0) 且其
+        // f80↔f64 折算需要 x87 侧独立支持, 两侧任一为 LongDouble 时不折算
+        // (`creall` 的返回类型就是 long double, 本就无需折算)。
+        if !matches!(inner, Type::LongDouble) && !matches!(ty, Type::LongDouble) {
+            let src_float = matches!(inner, Type::Float | Type::Double);
+            let dst_float = matches!(ty, Type::Float | Type::Double);
+            match (src_float, dst_float) {
+                (true, true) => self.emit_float_convert(&inner, ty),
+                (false, true) => {
+                    // 整数分量 → 浮点返回: cvtsi2s{s,d} xmm0, eax/eax(64)
+                    let pfx = if matches!(ty, Type::Float) { 0xF3u8 } else { 0xF2u8 };
+                    if inner.size() >= 8 {
+                        self.emit(&[pfx, 0x48, 0x0F, 0x2A, 0xC0]);
+                    } else {
+                        self.emit(&[pfx, 0x0F, 0x2A, 0xC0]);
+                    }
+                },
+                (true, false) => {
+                    // 浮点分量 → 整数返回: C6.3.1.7 向零截断
+                    let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
+                    self.emit(&[pfx, 0x48, 0x0F, 0x2C, 0xC0]);
+                },
+                (false, false) => {},
+            }
+        }
         if dst != 0 {
             self.mov(dst, 0);
         }
@@ -1216,6 +1239,74 @@ impl Codegen {
         if is_float {
             // 物化区 [real@0..4][imag@4..8] → 打包 xmm0 (unpcklps: 0F 14)
             self.emit(&[0x0F, 0x14, 0xC1]); // unpcklps xmm0, xmm1
+        }
+    }
+    /// `_Complex` 返回值的交付总入口。先问“源是否已经是目标复数类型的
+    /// **对象表示**” ([`Self::complex_src_needs_convert`] 单一真源): 不是则先按
+    /// 目标类型物化到帧内临时槽 ([`Self::materialize_value_slot`], 内部就是
+    /// 赋值共用的 `gen_aggregate_assign_to`), 再按 SysV 分类装载; 是则直接走
+    /// 原有三条同型交付链。本站点只区分“要不要转换”与“怎么装载”,
+    /// 不得重写任何分量宽度/符号判据。
+    ///
+    /// 旧写法在返回上下文里没有隐式转换这条轴 (与形参侧同类缺失), 实测:
+    ///  · `cd f(int n){ return n; }` 把 int 的位模式当 double → 0;
+    ///  · `cf g(double d){ return d; }` 实部偶然正确, 虚部读穿到隔壁槽;
+    ///  · `cd w(cf z){ return z; }` 两个 float 被当成一个 double (1.5→4);
+    ///  · 整数内型 `ci f(int n){ return n; }` 交回的是地址而非值。
+    pub(crate) fn gen_complex_return(&mut self, e: &Expr, cx_ty: &Type) {
+        let inner = match cx_ty {
+            Type::Complex(c) => c.base.clone(),
+            _ => unreachable!("gen_complex_return 只接受 _Complex 返回类型"),
+        };
+        if Self::complex_src_needs_convert(cx_ty, e.ty()) {
+            let slot = self.materialize_value_slot(cx_ty, e);
+            self.emit_complex_return_from_slot(&inner, slot);
+            return;
+        }
+        if matches!(inner, Type::Float | Type::Double) {
+            self.gen_complex_sse_return(e, &inner);
+        } else if matches!(inner, Type::LongDouble) {
+            // SysV: _Complex long double 经 x87 返回, st0=real、st1=imag。
+            self.gen_complex_x87_return(e);
+        } else {
+            // 整数内型 `_Complex`: 8B 在 rax, 16B 在 rax:rdx (复数 rvalue 统一
+            // 物化在复数结果带, rax=地址约定不可信)。
+            self.gen_expr(e, 0);
+            let result_off = self.complex_result_off();
+            self.load_stack(0, result_off);
+            if cx_ty.size() > 8 {
+                self.load_stack(2, result_off + inner.size() as i64);
+            }
+        }
+    }
+    /// 从“已是目标内型对象表示”的内存对装载返回寄存器 (仅由
+    /// [`Self::gen_complex_return`] 的转换臂调用)。
+    fn emit_complex_return_from_slot(&mut self, inner: &Type, off: i64) {
+        match inner {
+            Type::Float => {
+                // `_Complex float` 是**单个** SSE eightbyte: 槽内
+                // [real@0..4][imag@4..8] 就是打包好的对象表示, movsd 整体装载。
+                self.emit_xmm0_r13_disp(&[0xF2, 0x49, 0x0F, 0x10], off);
+            },
+            Type::LongDouble => {
+                // 先压虚部再压实部 → st0=real、st1=imag。
+                self.emit_x87_fld_at(13, off as i32 + 16, &Type::LongDouble);
+                self.emit_x87_fld_at(13, off as i32, &Type::LongDouble);
+            },
+            other => {
+                let sz = other.size() as i64;
+                if matches!(other, Type::Double) {
+                    // SysV: `_Complex double` 两个独立 SSE eightbyte → xmm0/xmm1
+                    self.emit_xmm_r13_disp(0xF2, 0x10, 0, off);
+                    self.emit_xmm_r13_disp(0xF2, 0x10, 1, off + sz);
+                } else {
+                    // 整数内型: rax[:rdx]
+                    self.load_stack(0, off);
+                    if sz * 2 > 8 {
+                        self.load_stack(2, off + sz);
+                    }
+                }
+            },
         }
     }
     pub(crate) fn gen_complex_store_rcx(&mut self, r: &Expr, l_ty: &Type) {
@@ -1568,24 +1659,35 @@ impl Codegen {
                     // (real|imag) 位模式当一个 double, emit_float_convert
                     // 对整数 no-op → 比较恒不等 (complex-6 test_int)。
                     let cvt_pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
-                    if self.is_global_not_local(&name.name) {
-                        self.emit_global_addr(0, &name.name);
-                        self.emit_load_mem_typed(v_isz as usize, &v_inner);
+                    let v_is_global = self.is_global_not_local(&name.name);
+                    let v_slot_off = if v_is_global { 0 } else { self.var_offset(&name.name) };
+                    // 逐分量一轮: **每轮重取分量基址**。`emit_load_mem_typed{,_disp}`
+                    // 用 rax 同时作基址与结果寄存器, 一轮结束时 rax 已是分量
+                    // 值 (如 -5) 而非地址; 不重取就退化成 `movslq 0x4(%rax)`
+                    // 解引用一个整数 → SIGSEGV (全局 `_Complex int` 参与
+                    // `_Complex double` 加减乘除/比较整片崩)。局部臂本来就
+                    // 每轮 `emit_lea_r13`, 全局臂漏了 —— 收敛成一个循环后
+                    // 这条不变量不可能再被某一侧破坏。
+                    for part in 0..2i64 {
+                        if v_is_global {
+                            self.emit_global_addr(0, &name.name);
+                        } else {
+                            self.emit_lea_r13(0, v_slot_off);
+                        }
+                        if part == 0 {
+                            self.emit_load_mem_typed(v_isz as usize, &v_inner);
+                        } else {
+                            self.emit_load_mem_typed_disp(v_isz as usize, &v_inner, v_isz);
+                        }
                         self.emit(&[cvt_pfx, 0x48, 0x0F, 0x2A, 0xC0]);
-                        self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
-                        self.emit_load_mem_typed_disp(v_isz as usize, &v_inner, v_isz);
-                        self.emit(&[cvt_pfx, 0x48, 0x0F, 0x2A, 0xC0]);
-                        self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]);
-                    } else {
-                        let off = self.var_offset(&name.name);
-                        self.emit_lea_r13(0, off);
-                        self.emit_load_mem_typed(v_isz as usize, &v_inner);
-                        self.emit(&[cvt_pfx, 0x48, 0x0F, 0x2A, 0xC0]);
-                        self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
-                        self.emit_lea_r13(0, off);
-                        self.emit_load_mem_typed_disp(v_isz as usize, &v_inner, v_isz);
-                        self.emit(&[cvt_pfx, 0x48, 0x0F, 0x2A, 0xC0]);
-                        self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]);
+                        self.emit(&[
+                            pfx,
+                            0x0F,
+                            0x11,
+                            0x44,
+                            0x24,
+                            (rsp_slot + part * inner_sz) as u8,
+                        ]);
                     }
                 } else if !v_is_float && !is_float_inner {
                     // 整数 complex 变量参与整数运算: 分量按变量自身宽度
@@ -1762,18 +1864,23 @@ impl Codegen {
         // 统一约定：调用方把目标地址 push 入栈，这里 pop 到 rcx。这样所有
         // 调用点都是 `push(addr); store_complex_at_rcx(...)`，无需在求值 r
         // 与拷贝之间插入 pop（求值可能占用 rcx）。
-        self.pop(1); // rcx = dst addr
         if matches!(inner, Type::LongDouble) {
-            // LD: 不能走 SSE，也不能对 complex rvalue 双求值。先单次物化
-            // 成帧内一对 tbyte（rcx 不被 fld/fstp 破坏），再逐分量
-            // fld tbyte → fstp tbyte [rcx(+16)]。
+            // LD: 不能走 SSE，也不能对 complex rvalue 双求值。物化在本函数
+            // 内部完成 → pop 必须排在物化 **之后**：`r` 自身就是一个 Call 时
+            // (全局 `_Complex long double g; g = f();`)，物化会发起一次嵌套
+            // 调用，而 rcx 按 SysV 是 caller-saved — 先 pop 再物化等于把目标
+            // 地址交给一个注定被毁掉的寄存器，后面的 `fstp tbyte (%rcx)` 就
+            // 写到垃圾地址上，目标恒为 0。push/pop 跨过 call 是安全的：调用
+            // 只写 [rsp] 以下，已压入的槽不会被踩。
             let src = self.gen_complex_ld_materialize(r);
+            self.pop(1); // rcx = dst addr (物化之后才取)
             self.emit_x87_fld_at(13, src as i32, inner);
             self.emit_x87_fstp_at(1, 0, inner);
             self.emit_x87_fld_at(13, src as i32 + 16, inner);
             self.emit_x87_fstp_at(1, isz as i32, inner);
             return;
         }
+        self.pop(1); // rcx = dst addr
         self.emit_scalar_to_xmm0_if_needed(r, inner);
         // 源为不同内型 complex/imaginary 时实部需精度转换
         // (标量源的转换已由 emit_scalar_to_xmm0_if_needed 处理)

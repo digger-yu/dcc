@@ -616,7 +616,7 @@ impl Codegen {
             .chain(
                 self.pushsection_code_ranges
                     .iter()
-                    .map(|(s, sz, i, o)| (*s, *s + *sz, *i as usize, *o)),
+                    .map(|(s, sz, i, o)| (*s, *s + *sz, (*i), *o)),
             )
             .collect();
         for mut rel in self.relocations.drain(..) {
@@ -668,7 +668,7 @@ impl Codegen {
             }
             let src = src.to_vec();
             let dst_start = *sec_off as usize;
-            let dst_end = dst_start + *emitted_size as usize;
+            let dst_end = dst_start + *emitted_size;
             self.extra_sections[*sec_idx as usize].data[dst_start..dst_end].copy_from_slice(&src);
             self.code[src_start..src_end].fill(0x90);
         }

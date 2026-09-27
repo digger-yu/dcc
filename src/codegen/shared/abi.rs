@@ -224,7 +224,7 @@ impl ABILoweringEngine {
                     "R15".to_string(),
                 ]
             },
-            CallingConvention::SystemVAarch64 => vec![
+            CallingConvention::SystemVAarch64 => [
                 "X19".to_string(),
                 "X20".to_string(),
                 "X21".to_string(),
@@ -262,8 +262,8 @@ impl ABILoweringEngine {
         let mut total_size = 0;
 
         for local in locals {
-            let aligned_size = ((local.size + align - 1) / align) * align;
-            total_size += aligned_size.max(local.ty.size() as usize);
+            let aligned_size = local.size.div_ceil(align) * align;
+            total_size += aligned_size.max(local.ty.size());
         }
 
         // Add space for parameters passed on stack
@@ -271,7 +271,7 @@ impl ABILoweringEngine {
         total_size += stack_param_bytes;
 
         // Round to alignment boundary
-        ((total_size + align - 1) / align) * align
+        total_size.div_ceil(align) * align
     }
 }
 
@@ -299,7 +299,7 @@ impl ABIUtils {
 
     /// Check if type should be passed in register
     pub fn should_use_register(ty: &Type, reg_size: usize) -> bool {
-        ty.size() as usize <= reg_size
+        ty.size() <= reg_size
     }
 
     /// Calculate structure return optimization
@@ -337,13 +337,13 @@ mod tests {
         let regs = engine.alloc_params_registers(&params);
 
         // First 8 in registers
-        for i in 0..8 {
-            assert_eq!(regs[i], Some(format!("X{}", i)));
+        for (i, reg) in regs.iter().enumerate().take(8) {
+            assert_eq!(*reg, Some(format!("X{}", i)));
         }
 
         // Rest on stack
-        for i in 8..10 {
-            assert_eq!(regs[i], None);
+        for reg in regs.iter().skip(8) {
+            assert_eq!(*reg, None);
         }
     }
 

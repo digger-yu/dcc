@@ -1299,6 +1299,7 @@ pub enum IntSuffix {
 ///
 /// 内存布局 (`size_of` 在大多数平台上 ≤ 16 字节):
 ///   * tag (discriminant) + 4~8B payload, 紧凑打包.
+///
 /// 字符串原文通过 `Interner` + `SymbolId` 解析; Span 由外部 arena 索引表达.
 ///
 /// 注意: 该类型故意保留 `'static` 生命周期; 通过 `CompactTok<'static>`
@@ -1608,7 +1609,7 @@ mod char_class_tests {
     #[test]
     fn operators_are_punct() {
         // 常见运算符应归类为 PUNCT (5).
-        for &c in &[b'+', b'-', b'*', b'/'] {
+        for &c in b"+-*/" {
             assert_eq!(char_class::classify(c), char_class::PUNCT, "{:?}", c as char);
         }
     }

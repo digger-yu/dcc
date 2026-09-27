@@ -253,7 +253,7 @@ impl Codegen {
             BlockItem::Decl(Decl::Var(v)) => v
                 .init
                 .as_ref()
-                .map_or(0, |e| Self::sret_bytes_expr(e)),
+                .map_or(0, Self::sret_bytes_expr),
             BlockItem::Stmt(s) => Self::sret_bytes_stmt(s),
             _ => 0,
         }
@@ -319,7 +319,12 @@ impl Codegen {
                         .unwrap_or(0)
             },
             Expr::VaArg { ty, ap, .. } => {
-                let own = if Self::va_arg_result_in_memory(ty) {
+                // 只有真正走 `alloc_sret_slot` 的缓冲区交付才占本区；复数
+                // `va_arg` 直接落帧底固定的复数物化带 (与 `gen_expr_va_arg`
+                // 同源，见 `va_arg_result_in_cx_band`)。
+                let own = if Self::va_arg_result_in_memory(ty)
+                    && !Self::va_arg_result_in_cx_band(ty)
+                {
                     (ty.size() as i64 + 15) & !15
                 } else {
                     0
@@ -396,6 +401,161 @@ impl Codegen {
             ty.size()
         };
         ((alloc_sz.saturating_add(7) / 8).max(1)) as i64
+    }
+
+    /// 规划期看不见、只在代码生成时才 `register_var` 的帧槽总量。
+    ///
+    /// 复合字面量临时对象 `__compound_lit_<pos>` (见 `gen_expr_compound_lit`) 与 VM
+    /// struct 的尺寸元信息槽 `__vmsize_<tag>` (见 `gen_vm_type_bind`) 都不在
+    /// `pre_register_vars` 能预知的名字集合里 (键含发射位置 / 类型标签), 但它们与
+    /// 局部变量共用**同一条**向下生长的变量区水位。帧规划必须按同一口径
+    /// (`var_alloc_slots`) 为它们预扣, 否则变量区会越过规划期定下的
+    /// `sret_region_base` 而压住 sret/物化槽区 —— `a[i] = (struct S){...}` 里
+    /// `a[i]` 的目标地址槽被字面量分量覆盖, `rep movsq` 拿 112 当目的地址段错误。
+    pub fn late_var_slots(items: &[BlockItem]) -> i64 {
+        items.iter().map(Self::late_var_slots_block_item).sum()
+    }
+
+    fn late_var_slots_decl(d: &Decl) -> i64 {
+        match d {
+            Decl::Var(v) => {
+                let mut out = 0i64;
+                if Self::type_has_vla(&v.ty) && Self::is_vm_record_ty(&v.ty) {
+                    out += 1;
+                }
+                if let Some(e) = &v.init {
+                    out += Self::late_var_slots_expr(e);
+                }
+                out
+            },
+            _ => 0,
+        }
+    }
+
+    /// 与 `max_sret_bytes` 同骨架的语句遍历 (那条轴算 sret 区, 本条算变量区增量)。
+    fn late_var_slots_stmt(s: &Stmt) -> i64 {
+        match s {
+            Stmt::Expr { e, .. } => Self::late_var_slots_expr(e),
+            Stmt::Return { val, .. } => val.as_ref().map_or(0, Self::late_var_slots_expr),
+            Stmt::If {
+                cond, then_, else_, ..
+            } => Self::late_var_slots_expr(cond)
+                + Self::late_var_slots_stmt(then_)
+                + else_.as_ref().map_or(0, |s| Self::late_var_slots_stmt(s)),
+            Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
+                Self::late_var_slots_expr(cond) + Self::late_var_slots_stmt(body)
+            },
+            Stmt::For {
+                init, cond, step, body, ..
+            } => init
+                .as_ref()
+                .map_or(0, |s| Self::late_var_slots_stmt(s))
+                + cond.as_ref().map_or(0, Self::late_var_slots_expr)
+                + step.as_ref().map_or(0, Self::late_var_slots_expr)
+                + Self::late_var_slots_stmt(body),
+            Stmt::Block { b, .. } => Self::late_var_slots(&b.items),
+            Stmt::GotoIndirect { expr, .. } => Self::late_var_slots_expr(expr),
+            Stmt::Switch { expr, cases, .. } => {
+                Self::late_var_slots_expr(expr)
+                    + cases
+                        .iter()
+                        .map(|c| {
+                            c.body
+                                .items
+                                .iter()
+                                .map(Self::late_var_slots_block_item)
+                                .sum::<i64>()
+                        })
+                        .sum::<i64>()
+            },
+            _ => 0,
+        }
+    }
+
+    fn late_var_slots_block_item(item: &BlockItem) -> i64 {
+        match item {
+            BlockItem::Decl(d) => Self::late_var_slots_decl(d),
+            BlockItem::Stmt(s) => Self::late_var_slots_stmt(s),
+        }
+    }
+
+    /// 表达式树里每个复合字面量站点按其类型扣一份变量区槽位 (站点名含发射位置,
+    /// 一次站点 = 一次 `register_var`); 初始化器与其余子表达式继续递归。
+    fn late_var_slots_expr(e: &Expr) -> i64 {
+        let own = match e {
+            Expr::CompoundLit { ty, inits, .. } => {
+                let vm =
+                    if Self::type_has_vla(ty) && Self::is_vm_record_ty(ty) { 1 } else { 0 };
+                vm + Self::var_alloc_slots(ty)
+                    + inits
+                        .iter()
+                        .map(|it| match it {
+                            InitItem::Expr(ex) => Self::late_var_slots_expr(ex),
+                            InitItem::Designated { value, .. } => {
+                                Self::late_var_slots_expr(value)
+                            },
+                        })
+                        .sum::<i64>()
+            },
+            Expr::InitList { inits, .. } => inits
+                .iter()
+                .map(|it| match it {
+                    InitItem::Expr(ex) => Self::late_var_slots_expr(ex),
+                    InitItem::Designated { value, .. } => Self::late_var_slots_expr(value),
+                })
+                .sum(),
+            Expr::Binop { l, r, .. }
+            | Expr::Assign { l, r, .. }
+            | Expr::Comma { l, r, .. } => {
+                Self::late_var_slots_expr(l) + Self::late_var_slots_expr(r)
+            },
+            Expr::Unary { e: inner, .. }
+            | Expr::Cast { e: inner, .. }
+            | Expr::AddrOf { e: inner, .. }
+            | Expr::Deref { e: inner, .. }
+            | Expr::Real { e: inner, .. }
+            | Expr::Imag { e: inner, .. }
+            | Expr::SizeofExpr { e: inner, .. }
+            | Expr::AlignofExpr { e: inner, .. }
+            | Expr::PostInc { e: inner, .. }
+            | Expr::PostDec { e: inner, .. }
+            | Expr::PreInc { e: inner, .. }
+            | Expr::PreDec { e: inner, .. } => Self::late_var_slots_expr(inner),
+            Expr::Call { callee, args, .. } => {
+                Self::late_var_slots_expr(callee) + args.iter().map(Self::late_var_slots_expr).sum::<i64>()
+            },
+            Expr::Index { arr, idx, .. } => {
+                Self::late_var_slots_expr(arr) + Self::late_var_slots_expr(idx)
+            },
+            Expr::Member { expr, .. } => Self::late_var_slots_expr(expr),
+            Expr::Cond { cond, then_, else_, .. } => Self::late_var_slots_expr(cond)
+                + Self::late_var_slots_expr(then_)
+                + Self::late_var_slots_expr(else_),
+            Expr::StmtExpr { block, .. } => Self::late_var_slots(&block.items),
+            Expr::VaArg { ap, .. } => Self::late_var_slots_expr(ap),
+            Expr::Offsetof { indices, .. } => {
+                indices.iter().map(|i| Self::late_var_slots_expr(i)).sum::<i64>()
+            },
+            Expr::AsmExpr { outputs, inputs, .. } => {
+                outputs.iter().map(Self::late_var_slots_expr).sum::<i64>()
+                    + inputs.iter().map(Self::late_var_slots_expr).sum::<i64>()
+            },
+            _ => 0,
+        };
+        own
+    }
+
+    /// struct / union 记录类型 (VM 尺寸元信息槽只服务于它们)。
+    fn is_vm_record_ty(ty: &Type) -> bool {
+        matches!(ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _))
+    }
+
+    /// 帧规划前把「规划期看不见的运行期临时对象」预扣进变量区水位。
+    /// 两个帧规划分支 (带参数的普通函数 / `main`) 共用本函数, 避免其中一处
+    /// 漏扣后又是一次“变量区压进 sret 区”的定向失效。
+    pub fn reserve_late_var_slots(&mut self, body: Option<&Block>) {
+        let slots = body.map_or(0, |b| Self::late_var_slots(&b.items));
+        self.var_map_total_slots = self.var_map_total_slots.saturating_add(slots);
     }
 
     /// 收集函数体内每个变量名在**所有作用域**中的最大分配需求。

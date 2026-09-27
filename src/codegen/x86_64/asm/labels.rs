@@ -96,7 +96,8 @@ impl AsmLocalLabels {
     /// Some(label_number) if valid numeric label, None otherwise
     ///
     /// # Examples
-    /// ```rust,ignore
+    /// ```rust
+    /// use dcc::codegen::x86_64::AsmLocalLabels;
     /// assert_eq!(AsmLocalLabels::parse_numeric_label("6:"), Some(6));
     /// assert_eq!(AsmLocalLabels::parse_numeric_label("42:"), Some(42));
     /// assert_eq!(AsmLocalLabels::parse_numeric_label("mov $1, $2"), None);  // Not a label

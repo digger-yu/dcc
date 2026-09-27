@@ -736,11 +736,9 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
             Stmt::Continue { .. } => {
                 // TODO: continue handling
             },
-            Stmt::Return { val, .. } => {
+            Stmt::Return { val: Some(v), .. } => {
                 // TODO: return handling
-                if let Some(v) = val {
-                    self.emit_expr_stmt(v);
-                }
+                self.emit_expr_stmt(v);
             },
             _ => {}, // Other statements need ISA-specific handling
         }

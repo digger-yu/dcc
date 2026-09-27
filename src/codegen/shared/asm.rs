@@ -8,18 +8,15 @@ use std::fmt;
 
 /// Assembly instruction encoding format
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub enum EncodingFormat {
     /// Intel syntax (AT&T alternative available)
+    #[default]
     Intel,
     /// AT&T syntax (x86 default)
     Att,
 }
 
-impl Default for EncodingFormat {
-    fn default() -> Self {
-        EncodingFormat::Intel
-    }
-}
 
 /// Assembly operand types
 #[derive(Debug, Clone)]
@@ -192,7 +189,7 @@ impl Operand {
 
     fn fmt_intel(&self) -> String {
         match self {
-            Operand::Register(name, _) => format!("{}", name),
+            Operand::Register(name, _) => name.to_string(),
             Operand::Immediate(val) => format!("${}", val),
             Operand::Memory {
                 base,
@@ -308,6 +305,12 @@ pub enum TypeAttribute {
     Notype,
 }
 
+impl Default for AssemblyBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AssemblyBuilder {
     pub fn new() -> Self {
         Self {
@@ -355,7 +358,7 @@ impl AssemblyBuilder {
 
         // Labels
         for label in &self.labels {
-            text.push_str(&label);
+            text.push_str(label);
             text.push(':');
             text.push('\n');
         }

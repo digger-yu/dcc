@@ -353,6 +353,45 @@ pub enum VaListAddress {
     Lvalue(i32),
 }
 
+/// 聚合赋值**目标**的寻址方式。
+///
+/// 旧实现把目标固定成「一个有名字的变量」(``dst_name`` + ``dst_off`` 两个隐式
+/// 参数), 于是 ``s.f = g()`` / ``a[i] = g()`` / ``*p = g()`` 这类**运行时地址**
+/// 目标在 ``Expr::Assign`` 分发里根本进不到聚合路径, 落入恒 8 字节的标量 store。
+/// 而聚合 rvalue 的值模型是**地址** (sret 缓冲 / 物化槽), 结果第一字被写成源
+/// 地址、其余字保留栈上残值 —— 协程 awaiter 帧槽 >8 字节失效 (「多 quad 聚合值
+/// 加载漏第二字」) 即此根因。
+///
+/// 把目标寻址方式收进枚举后, 目标只剩「怎么把地址放进寄存器」一个问题, 源侧的
+/// 物化契约 (Call/sret/va_arg/_Complex/Vector/整体拷贝) 保持单一实现, 不再随
+/// 目标形态分叉。
+pub enum AggDst {
+    /// 具名局部变量。``off`` = 帧槽 (历史 ``dst_off``); ``vla`` = VM struct/VLA
+    /// 的元数据槽 (其内容才是数据区基址, 历史 ``vla_offsets.get(name)``)。
+    Local { off: i64, vla: Option<i64> },
+    /// 全局变量: 只有符号名, 无帧偏移。
+    Global(String),
+    /// 运行时地址, 已由调用方存进帧槽 ``addr_slot`` (即 ``[r13 + addr_slot]``)。
+    /// 与 [`Self::Global`] 同属「不可按帧偏移直接定址」一类, 因此所有
+    /// 「先物化到临时缓冲再整块写回」的路径都对它们开放。
+    Indirect { addr_slot: i64 },
+}
+
+impl AggDst {
+    /// 可直接按帧偏移定址的目标 (只有 [`Self::Local`])。
+    pub fn frame_off(&self) -> Option<i64> {
+        match self {
+            AggDst::Local { off, .. } => Some(*off),
+            _ => None,
+        }
+    }
+
+    /// 目标无法按帧偏移直接写: 必须先物化到临时缓冲, 再整块拷贝到真实地址。
+    pub fn needs_staged(&self) -> bool {
+        self.frame_off().is_none()
+    }
+}
+
 #[derive(Clone)]
 pub struct ParallelGlobalSnap {
     pub offset: u64,
@@ -1196,10 +1235,9 @@ impl Codegen {
                     continue;
                 }
                 // 自定义 section 变量: 路由到 extra_sections
-                if v.section.is_some() {
-                    let sec_name = v.section.as_ref().unwrap().clone();
+                if let Some(sec_name) = &v.section {
                     let is_writable = !matches!(&v.init, Some(Expr::String { .. }));
-                    let sec_idx = self.ensure_custom_section(&sec_name, false, is_writable);
+                    let sec_idx = self.ensure_custom_section(sec_name, false, is_writable);
                     self.extra_sections[sec_idx].align =
                         self.extra_sections[sec_idx].align.max(align as u64);
                     if v.init.is_none() && self.extra_sections[sec_idx].data.is_empty() {

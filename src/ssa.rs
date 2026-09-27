@@ -77,18 +77,25 @@ pub enum InstKind {
         /// volatile 访问: 不可被 DCE/DSE 消除或重排序
         is_volatile: bool,
     },
-    /// `dest = arr[idx]`
+    /// `dest = arr[idx]` —— 读取元素。
+    ///
+    /// `ty` 是**元素类型**（不是 `arr` 的类型）：下标的字节步长与载入宽度都由
+    /// 它决定。 SSA→AST 重建时必须把它原样带回 `Expr::Index{ty}`，否则 C 后端
+    /// 会按默认的 `Type::Int`（步长 4 / 4 字节载入）发射，`char buf[4]` 的
+    /// `buf[2]` 就会读越界到相邻栈槽。与 `InstKind::Load{ty}` 同一约定。
     IndexLoad {
         arr: Operand,
         idx: Operand,
+        ty: Type,
         /// volatile 访问: 不可被 DCE/DSE 消除或重排序
         is_volatile: bool,
     },
-    /// `arr[idx] = src`
+    /// `arr[idx] = src` —— 写入元素，`ty` 同样是元素类型（决定步长与存宽）。
     IndexStore {
         arr: Operand,
         idx: Operand,
         src: Operand,
+        ty: Type,
         /// volatile 访问: 不可被 DCE/DSE 消除或重排序
         is_volatile: bool,
     },
@@ -118,6 +125,11 @@ pub enum InstKind {
         obj_ty: Type,
         field: String,
         src: Operand,
+        /// 被写字段的类型: SSA→AST 重建 `Expr::Member{ty}` 的**唯一真源**。
+        /// 缺失时重建只能给 `Void`, 后端便认不出「聚合字段按值整体拷贝」
+        /// 形态, 退回恒 8/16 字节的标量物化 —— 多 quad 聚合值漏第二字
+        /// (协程 awaiter 帧槽 >8B 失效) 即此根因。
+        ty: Type,
         /// volatile 访问: 不可被 DCE/DSE 消除或重排序
         is_volatile: bool,
         /// obj 已经是指向结构体的指针 (如 C++ 的 this): 重建为
@@ -205,6 +217,7 @@ pub struct Phi {
 /// 每次编译都会得到不同的栈槽偏移 (`lea -72(%r13)` ↔ `lea -80(%r13)`), 这是
 /// `-O2` 产物字节不可复现的根因。本类型保持**首次插入序** (= 源码声明序),
 /// 同时提供 O(1) 的 `contains`。
+#[derive(Default)]
 pub struct OrderedNameSet {
     names: Vec<String>,
     seen: HashSet<String>,
@@ -221,15 +234,6 @@ impl Clone for OrderedNameSet {
         Self {
             names: self.names.clone(),
             seen: self.seen.clone(),
-        }
-    }
-}
-
-impl Default for OrderedNameSet {
-    fn default() -> Self {
-        Self {
-            names: Vec::new(),
-            seen: HashSet::new(),
         }
     }
 }
@@ -363,7 +367,7 @@ impl Function {
 /// `bb.succs` can become stale after SSA passes mutate terminators
 /// without updating it, so every analysis that needs successors must
 /// derive them from the Terminator directly.
-fn term_succs<'a>(term: &'a Terminator) -> Vec<&'a str> {
+fn term_succs(term: &Terminator) -> Vec<&str> {
     match term {
         Terminator::Jump(t) => vec![t.as_str()],
         Terminator::Branch { t, f, .. } => vec![t.as_str(), f.as_str()],
@@ -436,6 +440,20 @@ pub fn compute_dominators(func: &Function) -> HashMap<String, HashSet<String>> {
                 doms.insert(b.clone(), new);
                 changed = true;
             }
+        }
+    }
+    // 不可达块 (CFG 有断边 / 前端漏连) 不在 rpo 里, 因而永远保留上面的 ⊤ 初值
+    // = 「被所有块支配」。这会让它每条出边都被 `is_back_edge` 判成回边, 后端
+    // SSA→AST 重建于是凭空造出 `while(1) {}` (运行期死循环)。支配关系只对从
+    // entry 可达的块有定义: 定点迭代结束后把不可达块收敛成「只支配自己」。
+    // 必须在定点循环**之后**做: 循环里 ⊤ 是交集的中性元素, 提前收紧会削掉
+    // 可达块真实的支配集。
+    let rpo_set: HashSet<&str> = rpo.iter().map(|s| s.as_str()).collect();
+    for b in func.blocks.keys() {
+        if !rpo_set.contains(b.as_str()) {
+            let mut s = HashSet::new();
+            s.insert(b.clone());
+            doms.insert(b.clone(), s);
         }
     }
     doms
@@ -909,6 +927,7 @@ impl Builder {
                     kind: InstKind::IndexLoad {
                         arr: a,
                         idx: i,
+                        ty: ty.clone(),
                         is_volatile,
                     },
                     span: span.clone(),
@@ -1824,7 +1843,7 @@ fn lower_lvalue(
         let dest = b.fresh("store", ty.clone(), span);
         return Some(dest);
     }
-    if let Expr::Index { arr, idx, .. } = l {
+    if let Expr::Index { arr, idx, ty, .. } = l {
         let a = b.lower_expr(arr);
         let i = b.lower_expr(idx);
         let store_volatile = match arr.ty() {
@@ -1837,6 +1856,7 @@ fn lower_lvalue(
                 arr: a,
                 idx: i,
                 src,
+                ty: ty.clone(),
                 is_volatile: store_volatile,
             },
             span: span.clone(),
@@ -1885,6 +1905,7 @@ fn lower_lvalue(
                     obj_ty: deref_ty,
                     field: field.name.clone(),
                     src,
+                    ty: ty.clone(),
                     is_volatile: member_volatile,
                     is_arrow: false,
                 },
@@ -1898,6 +1919,7 @@ fn lower_lvalue(
                     obj_ty: obj_ty.clone(),
                     field: field.name.clone(),
                     src,
+                    ty: ty.clone(),
                     is_volatile: member_volatile,
                     is_arrow: false,
                 },
@@ -2198,16 +2220,24 @@ fn insert_label_phis(
 /// 返回值按名字排序: 调用方会用它决定 phi 插入序, 直接 `HashSet::into_iter()`
 /// 会把进程随机哈希序泄到下游。
 fn find_loop_body(func: &Function, header: &str, latch: &str) -> Vec<String> {
+    find_loop_body_multi(func, header, std::slice::from_ref(&latch.to_string()))
+}
+
+/// 多 latch 版本的自然循环体收集。
+///
+/// 多个 latch (如 `if (c) continue;` 的 latch 与尾部回边共存) 必须全部参与
+/// 反向 DFS: 只从单个 latch 出发会漏掉其它 latch 所在的分支区域, SSA→AST
+/// 重建时那部分会被误判为“循环外后继”而发成 `break` (continue 语义丢失,
+/// 循环提前终止)。
+fn find_loop_body_multi(func: &Function, header: &str, latches: &[String]) -> Vec<String> {
     let mut body: HashSet<String> = HashSet::new();
     body.insert(header.to_string());
-    if header == latch {
-        // Self-loop: only the header itself
-        let mut v: Vec<String> = body.into_iter().collect();
-        v.sort();
-        return v;
-    }
-    // Reverse DFS from latch, not going through header
-    let mut stack = vec![latch.to_string()];
+    // Reverse DFS from every latch, not going through header
+    let mut stack: Vec<String> = latches
+        .iter()
+        .filter(|l| l.as_str() != header)
+        .cloned()
+        .collect();
     while let Some(bb) = stack.pop() {
         if !body.insert(bb.clone()) {
             continue;
@@ -2719,7 +2749,19 @@ pub fn rebuild_block(func: &Function) -> Block {
             for inst in &bb.insts {
                 if let Some(d) = &inst.dest {
                     let ssa_name = d.name();
-                    let is_temp = d.base.starts_with('_');
+                    // 「合成临时值」的判定必须覆盖生产端的**全部**命名方案:
+                    // `_xxx` (历史上 lower_ir 的临时名) 与 `dcc_t<序号>_xxx`
+                    // (lower_ir::fresh_syn, 为保证 base 全局唯一 / 类型不被同
+                    // base 的不同 SSA 版本坍缩而采用). 漏掉后者不是「少内联一次」,
+                    // 而是**静默错值**: `rebuild_cycle` 在能提出循环条件时会整体
+                    // 丢弃节点头块的普通指令 (那里只有 `cond_expr.is_none()` 才
+                    // emit), 前提是条件操作数已被本表 (subst) 内联成表达式; 判定
+                    // 失效后 `while (i < 3)` 的这次比较连同写入一起消失, 只剩
+                    // `Stmt::While{cond: Ident "dcc_t1__tmp"}` 读一个从未赋值的
+                    // 局部 (0), 循环体一次都不执行.
+                    let is_temp = d.base.starts_with('_')
+                        || (is_lower_ir_temp_base(&d.base)
+                            && !func.original_locals.contains(&d.base));
                     let use_count = used_ssa.get(&ssa_name).map_or(0, |_| {
                         let mut count = 0;
                         for b in func.blocks.values() {
@@ -2747,7 +2789,13 @@ pub fn rebuild_block(func: &Function) -> Block {
                     let side_effect_unused = use_count == 0 && inst_has_side_effect(&inst.kind);
                     let inlineable = is_temp && use_count <= 1 && !side_effect_unused;
                     if inlineable {
-                        let resolved = inst_to_expr_resolved(&inst.kind, &subst, &inst.span, func);
+                        let resolved = inst_to_expr_resolved(
+                            &inst.kind,
+                            &subst,
+                            &inst.span,
+                            func,
+                            inst.dest.as_ref().map(|v| &v.ty),
+                        );
                         subst.insert(ssa_name, Some(resolved));
                     } else {
                         subst.insert(ssa_name, None);
@@ -2758,7 +2806,14 @@ pub fn rebuild_block(func: &Function) -> Block {
     }
 
     let doms = compute_dominators(func);
-    rebuild_bb(&entry, func, &mut items, &mut visited, &mut env, &subst, &doms, None);
+    let mut cx = RebuildCtx {
+        func,
+        doms: &doms,
+        subst: &subst,
+        visited: &mut visited,
+        env: &mut env,
+    };
+    rebuild_bb(&entry, &mut cx, &mut items, None, None);
     Block {
         items,
         span: func.span.clone(),
@@ -2767,6 +2822,25 @@ pub fn rebuild_block(func: &Function) -> Block {
 
 fn phi_name(v: &SsaVar) -> String {
     v.name()
+}
+
+/// 识别 lower_ir `fresh_syn` 产出的合成临时值 base 名: `dcc_t<序号>_<后缀>`.
+///
+/// 这些名字由编译器生成、全局唯一、从不与用户局部变量重名 (`fresh_syn` 会跳过
+/// 重名候选), 因此可以和 `_` 前缀名一样参与「单次使用即内联」的重建: 内联后进
+/// 循环条件的表达式会在每次迭代重算, 语义正确.
+fn is_lower_ir_temp_base(base: &str) -> bool {
+    let rest = match base.strip_prefix("dcc_t") {
+        Some(r) => r,
+        None => return false,
+    };
+    match rest.find('_') {
+        Some(idx) => {
+            let digits = &rest[..idx];
+            !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+        },
+        None => false,
+    }
 }
 
 /// 判断某条 SSA 指令是否为优化 pass 插入的 hint/metadata (不对应真实计算).
@@ -2806,22 +2880,95 @@ fn inst_has_side_effect(kind: &InstKind) -> bool {
     }
 }
 
+/// 循环体重建时判断「自然循环之外、但只能整体返回」的块。
+///
+/// `find_loop_body` 只收集能沿前驱走到 latch 的块 (自然循环定义), 因此**循环体内
+/// 直接 `return`** 的块 (terminator 是 `Ret`, 没有任何后继) 不在 body_set 里。
+/// 旧实现在这种目标上一律发 `Stmt::Break`, 于是
+/// `while (n > 0) { if (n == 3) return 42; n = n - 1; } return 0;`
+/// 被重建成 `if (n==3) break;` —— **返回值 42 静默消失**, 函数返回循环之后的值
+/// (C++ 后端经 `rebuild_block` 走这条路, C 前端直接建 AST 故不受影响)。
+///
+/// 只有当该块 ① 无 phi、② 仅有单一前驱 (即它不是多条路径的汇聚出口, 不存在
+/// 需要按路径合并的值) 时, 才可以原地展开成 `Stmt::Return`; 其余情形仍按
+/// `break` 处理, 保持循环出口汇聚块 (带 phi 的 `while_end`) 的既有正确行为。
+fn is_loop_exit_pure_return(target: &str, func: &Function) -> bool {
+    let Some(bb) = func.blocks.get(target) else {
+        return false;
+    };
+    if !matches!(bb.term, Terminator::Ret { .. }) {
+        return false;
+    }
+    if !bb.phis.is_empty() {
+        return false;
+    }
+    let mut uniq: HashSet<&str> = HashSet::new();
+    for p in &bb.preds {
+        uniq.insert(p.as_str());
+    }
+    uniq.len() == 1
+}
+
+/// SSA→AST 结构化重建 (`rebuild_bb` / `rebuild_cycle`) 的共享上下文。
+///
+/// 把一路沿递归透传的 5 个参数 (`func` / `doms` / `subst` / `visited` /
+/// `env`) 聚成一个结构体, 让两条重建入口的签名不再超长。其中前三个是
+/// 只读视角, 后两个是随重建推进的可变状态。
+///
+/// 分支 / `switch` 的每条路径需要各自独立的 `env`/`subst` 副本, 因此在
+/// 递归调用处就地派生子上下文 (`RebuildCtx { env: &mut path_env, .. }`),
+/// 语义与原先逐参数克隆传递完全一致。
+struct RebuildCtx<'a> {
+    /// 正在重建的 SSA 函数: 块表 / block_order / span 等只读信息
+    func: &'a Function,
+    /// 支配树 (块名 → 支配它的块名集合): 回边与循环识别用, 只读
+    doms: &'a HashMap<String, HashSet<String>>,
+    /// SSA 变量名 → 可内联表达式 (`None` = 已定义但不可内联), 只读
+    subst: &'a HashMap<String, Option<Expr>>,
+    /// 已整体发射过的块; 仅直线条带区 (`loop_ctx.is_none()`) 生效
+    visited: &'a mut HashSet<String>,
+    /// SSA 变量名 → 当前活跃的 SSA 版本, 随 phi / 指令赋值推进
+    env: &'a mut HashMap<String, SsaVar>,
+}
+
 fn rebuild_bb(
     bb_name: &str,
-    func: &Function,
+    cx: &mut RebuildCtx<'_>,
     out: &mut Vec<BlockItem>,
-    visited: &mut HashSet<String>,
-    env: &mut HashMap<String, SsaVar>,
-    subst: &HashMap<String, Option<Expr>>,
-    doms: &HashMap<String, HashSet<String>>,
     loop_ctx: Option<(&str, &HashSet<String>)>,
+    // 直线条带区里的**汇聚点**: 走到它就立即返回, 由调用方 (产生分支的那个
+    // `Terminator::Branch`) 在 If **之后**发射一次。仅在 `loop_ctx.is_none()`
+    // 时有意义 (循环体内两条路径本来各自以 continue/break 结束)。
+    stop_at: Option<&str>,
 ) {
+    // 从上下文取出只读视角: 都是 Copy 的共享引用, 取出后与 `cx` 的可变借用
+    // 互不冲突 (就地派生子上下文时仍可继续使用)。
+    let func = cx.func;
+    let doms = cx.doms;
+    let subst = cx.subst;
     // In loop-internal mode, we rebuild blocks per-path so that join points
     // (e.g. for_inc reached from both branches of an if) are not skipped.
-    // Each path in a structured loop ends with continue or break, so no
-    // infinite recursion is possible within the body.
+    // Each *straight-line* path in a structured loop ends with continue or
+    // break; a nested loop header reached inside the body is a cycle entry
+    // whose back edge would otherwise be followed as a normal edge and
+    // recurse forever (header -> body -> latch -> header -> ...). That case
+    // is converged by the `is_cycle_entry` branch below (nested
+    // `rebuild_cycle`), which is also why the check must run in loop-internal
+    // mode, not only at top level.
     if loop_ctx.is_none() {
-        if !visited.insert(bb_name.to_string()) {
+        // 根因修复: 以前这里直接把汇聚块内联进**第一条**被重建的路径
+        // (`Jump(join)` 递归下去) 并用共享的 `visited` 把它标记成已处理,
+        // 于是另一条路径重建时它返回空 (`else_: None`), If **之后**的所有
+        // 语句只会在条件为真时执行 —— 静默错值/跳初始化后的全部代码.
+        // 典型现场: `if (__cxa_guard_acquire(g)) { init; release; } 后续代码`
+        // 使函数局部 static 只在首次调用时执行函数体 (其余调用直接返回),
+        // `if (c) {...} ...` 同理 (C 路径不受影响, 它不走这个重建)。
+        if let Some(s) = stop_at {
+            if bb_name == s {
+                return;
+            }
+        }
+        if !cx.visited.insert(bb_name.to_string()) {
             return;
         }
     }
@@ -2840,23 +2987,27 @@ fn rebuild_bb(
     }
     // Detect if this block is a cycle entry (target of a back edge).
     // If so, emit a while loop to represent the cyclic CFG.
-    // Skip this check when we are already inside a loop body.
-    if loop_ctx.is_none() {
-        if is_cycle_entry(bb_name, func, doms) {
-            rebuild_cycle(bb_name, func, out, visited, env, subst, doms);
-            return;
-        }
+    //
+    // 这一检查在循环体内同样必须做: 到达当前循环 header 的路径在上面的
+    // `bb_name == lh` 分支已经变成 `continue` 提前返回, 所以循环内模式走到
+    // 这里的块若仍是回边目标, 它必然是**嵌套内层循环**的 header。以前只在
+    // `loop_ctx.is_none()` 时识别环, 内层回边 (latch -> inner header) 被当作
+    // 普通边继续递归展开, `header -> body -> latch -> header -> ...` 无限互
+    // 递归 —— C++ 后端任意两层 for/while 嵌套都栈溢出 (根因修复)。
+    if is_cycle_entry(bb_name, func, doms) {
+        rebuild_cycle(bb_name, cx, out, stop_at, loop_ctx);
+        return;
     }
     let bb = bb.clone();
     // 0. phi 处理: 将前驱的 SSA 值映射到 phi dest 的基础名
     for phi in &bb.phis {
         for (src, pred) in &phi.incoming {
-            if pred == bb_name || env.contains_key(&phi_name(&phi.dest)) {
-                env.insert(phi_name(&phi.dest), src.clone());
+            if pred == bb_name || cx.env.contains_key(&phi_name(&phi.dest)) {
+                cx.env.insert(phi_name(&phi.dest), src.clone());
             }
         }
         if let Some((src, _)) = bb.phis.first().and_then(|p| p.incoming.first()) {
-            env.insert(phi_name(&phi.dest), src.clone());
+            cx.env.insert(phi_name(&phi.dest), src.clone());
         }
     }
     // 1. 翻译指令为 AST 赋值语句
@@ -2871,12 +3022,12 @@ fn rebuild_bb(
             continue;
         }
         if let Some(d) = &inst.dest {
-            env.insert(d.name(), d.clone());
+            cx.env.insert(d.name(), d.clone());
             let ssa_name = d.name();
             if let Some(Some(_)) = subst.get(&ssa_name) {
                 continue;
             }
-            let rhs = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func);
+            let rhs = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func, Some(&d.ty));
             let assign = Expr::Assign {
                 op: crate::ast::BinOp::Add,
                 l: Box::new(Expr::Ident {
@@ -2896,7 +3047,7 @@ fn rebuild_bb(
                 span: inst.span.clone(),
             }));
         } else {
-            let e = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func);
+            let e = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func, None);
             out.push(BlockItem::Stmt(Stmt::Expr {
                 e,
                 span: inst.span.clone(),
@@ -2906,7 +3057,9 @@ fn rebuild_bb(
     // 2. 翻译 terminator -> AST 后, 继续后继
     match &bb.term {
         Terminator::Ret { val } => {
-            let e = val.as_ref().map(|o| resolve_operand(o, env, subst, func));
+            let e = val
+                .as_ref()
+                .map(|o| resolve_operand(o, cx.env, subst, func));
             out.push(BlockItem::Stmt(Stmt::Return {
                 val: e,
                 span: func.span.clone(),
@@ -2919,20 +3072,36 @@ fn rebuild_bb(
                         span: func.span.clone(),
                     }));
                 } else if body_set.contains(t) {
-                    rebuild_bb(t, func, out, visited, env, subst, doms, loop_ctx);
+                    rebuild_bb(t, cx, out, loop_ctx, stop_at);
+                } else if is_loop_exit_pure_return(t, func) {
+                    // 循环体内的 `return` 块 (见 `is_loop_exit_pure_return` 注释):
+                    // 展开成 `Stmt::Return`, 不能发 `break`。
+                    rebuild_bb(t, cx, out, loop_ctx, stop_at);
                 } else {
                     out.push(BlockItem::Stmt(Stmt::Break {
                         span: func.span.clone(),
                     }));
                 }
             } else {
-                rebuild_bb(t, func, out, visited, env, subst, doms, loop_ctx);
+                rebuild_bb(t, cx, out, loop_ctx, stop_at);
             }
         },
         Terminator::Branch { cond, t, f } => {
-            let cond_e = resolve_operand(cond, env, subst, func);
+            // 两条路径的**公共汇聚点** (沿「唯一前驱 + 无条件跳转」链向前走的
+            // 第一个多入边块)。发现后: 两条路径都走到它即返回, If 之后把它作为
+            // 续体发射一次 —— 否则它会被内联进第一条路径, 另一条路径直接跳过
+            // (见函数开头 `stop_at` 处的根因说明)。
+            //
+            // 只在直线条带区做: 循环体内由 rebuild_cycle 自己处理收敛。
+            let join = if loop_ctx.is_none() {
+                branch_join(t, f, func)
+            } else {
+                None
+            };
+            let path_stop = join.as_deref().or(stop_at);
+            let cond_e = resolve_operand(cond, cx.env, subst, func);
             let mut then_items: Vec<BlockItem> = Vec::new();
-            let mut then_env = env.clone();
+            let mut then_env = cx.env.clone();
             let then_subst = subst.clone();
             match loop_ctx {
                 Some((lh, _)) if t == lh => {
@@ -2941,25 +3110,44 @@ fn rebuild_bb(
                     }));
                 },
                 Some((_, body_set)) if !body_set.contains(t) => {
-                    then_items.push(BlockItem::Stmt(Stmt::Break {
-                        span: func.span.clone(),
-                    }));
+                    if is_loop_exit_pure_return(t, func) {
+                        rebuild_bb(
+                            t,
+                            &mut RebuildCtx {
+                                func,
+                                doms,
+                                subst: &then_subst,
+                                visited: &mut *cx.visited,
+                                env: &mut then_env,
+                            },
+                            &mut then_items,
+                            loop_ctx,
+                            path_stop,
+                        );
+                    } else {
+                        then_items.push(BlockItem::Stmt(Stmt::Break {
+                            span: func.span.clone(),
+                        }));
+                    }
                 },
                 _ => {
                     rebuild_bb(
                         t,
-                        func,
+                        &mut RebuildCtx {
+                            func,
+                            doms,
+                            subst: &then_subst,
+                            visited: &mut *cx.visited,
+                            env: &mut then_env,
+                        },
                         &mut then_items,
-                        visited,
-                        &mut then_env,
-                        &then_subst,
-                        doms,
                         loop_ctx,
+                        path_stop,
                     );
                 },
             }
             let mut else_items: Vec<BlockItem> = Vec::new();
-            let mut else_env = env.clone();
+            let mut else_env = cx.env.clone();
             let else_subst = subst.clone();
             match loop_ctx {
                 Some((lh, _)) if f == lh => {
@@ -2968,20 +3156,39 @@ fn rebuild_bb(
                     }));
                 },
                 Some((_, body_set)) if !body_set.contains(f) => {
-                    else_items.push(BlockItem::Stmt(Stmt::Break {
-                        span: func.span.clone(),
-                    }));
+                    if is_loop_exit_pure_return(f, func) {
+                        rebuild_bb(
+                            f,
+                            &mut RebuildCtx {
+                                func,
+                                doms,
+                                subst: &else_subst,
+                                visited: &mut *cx.visited,
+                                env: &mut else_env,
+                            },
+                            &mut else_items,
+                            loop_ctx,
+                            path_stop,
+                        );
+                    } else {
+                        else_items.push(BlockItem::Stmt(Stmt::Break {
+                            span: func.span.clone(),
+                        }));
+                    }
                 },
                 _ => {
                     rebuild_bb(
                         f,
-                        func,
+                        &mut RebuildCtx {
+                            func,
+                            doms,
+                            subst: &else_subst,
+                            visited: &mut *cx.visited,
+                            env: &mut else_env,
+                        },
                         &mut else_items,
-                        visited,
-                        &mut else_env,
-                        &else_subst,
-                        doms,
                         loop_ctx,
+                        path_stop,
                     );
                 },
             }
@@ -3007,6 +3214,13 @@ fn rebuild_bb(
                 },
                 span: func.span.clone(),
             }));
+            // 汇聚点作为 If **之后**的续体发射 (只发一次: `stop_at` 已经阻止任何
+            // 一条路径把它内联进去)。若它就是外层区域的停止点, 则交给外层发射。
+            if let Some(j) = join {
+                if Some(j.as_str()) != stop_at {
+                    rebuild_bb(&j, cx, out, loop_ctx, stop_at);
+                }
+            }
         },
         Terminator::Unreachable => {},
         Terminator::SwitchTable {
@@ -3015,7 +3229,7 @@ fn rebuild_bb(
             targets,
             default,
         } => {
-            let idx_e = resolve_operand(idx, env, subst, func);
+            let idx_e = resolve_operand(idx, cx.env, subst, func);
             let mut cases = Vec::new();
             // Each case branch rebuilds its path independently with its own
             // visited set, so that shared downstream blocks (e.g. switch_end)
@@ -3023,18 +3237,23 @@ fn rebuild_bb(
             // cases due to the first case marking them visited.
             for (v, target) in values.iter().zip(targets.iter()) {
                 let mut target_items: Vec<BlockItem> = Vec::new();
-                let mut target_env = env.clone();
+                let mut target_env = cx.env.clone();
                 let target_subst = subst.clone();
-                let mut case_visited = visited.clone();
+                let mut case_visited = cx.visited.clone();
+                // `None`: 每条 case 自带 visited 副本, 链上的多入边块在各条
+                // case 路径里各自展开 (与旧行为一致), 因此不走 `stop_at` 机制。
                 rebuild_bb(
                     target,
-                    func,
+                    &mut RebuildCtx {
+                        func,
+                        doms,
+                        subst: &target_subst,
+                        visited: &mut case_visited,
+                        env: &mut target_env,
+                    },
                     &mut target_items,
-                    &mut case_visited,
-                    &mut target_env,
-                    &target_subst,
-                    doms,
                     loop_ctx,
+                    None,
                 );
                 cases.push(Case {
                     val: Some(Expr::Int {
@@ -3052,18 +3271,21 @@ fn rebuild_bb(
             }
             // default case
             let mut def_items: Vec<BlockItem> = Vec::new();
-            let mut def_env = env.clone();
+            let mut def_env = cx.env.clone();
             let def_subst = subst.clone();
-            let mut def_visited = visited.clone();
+            let mut def_visited = cx.visited.clone();
             rebuild_bb(
                 default,
-                func,
+                &mut RebuildCtx {
+                    func,
+                    doms,
+                    subst: &def_subst,
+                    visited: &mut def_visited,
+                    env: &mut def_env,
+                },
                 &mut def_items,
-                &mut def_visited,
-                &mut def_env,
-                &def_subst,
-                doms,
                 loop_ctx,
+                None,
             );
             cases.push(Case {
                 val: None,
@@ -3118,21 +3340,28 @@ fn is_cycle_entry(bb_name: &str, func: &Function, doms: &HashMap<String, HashSet
 /// 3. Header instructions are NOT emitted outside the loop; the loop condition
 ///    is resolved via `resolve_operand` which inlines temporary variables.
 /// 4. Body blocks are emitted in order; back edges become `continue`, exits become `break`.
+///
+/// `outer_ctx` 是调用方所处的**外层**循环上下文 (`loop_ctx`, 顶层为 `None`):
+/// 重建嵌套循环时, 循环出口的续体必须回到外层上下文 (外层循环体里的
+/// 后继块仍要按外层循环展开, 落到外层 header 时发 `continue`), 而不是
+/// 当作顶层直线条带。
 fn rebuild_cycle(
     header: &str,
-    func: &Function,
+    cx: &mut RebuildCtx<'_>,
     out: &mut Vec<BlockItem>,
-    visited: &mut HashSet<String>,
-    env: &mut HashMap<String, SsaVar>,
-    subst: &HashMap<String, Option<Expr>>,
-    doms: &HashMap<String, HashSet<String>>,
+    stop_at: Option<&str>,
+    outer_ctx: Option<(&str, &HashSet<String>)>,
 ) {
+    // 同 `rebuild_bb`: 只读视角取出为局部, 与下面的可变上下文互不借用。
+    let func = cx.func;
+    let doms = cx.doms;
+    let subst = cx.subst;
     let header_bb = match func.blocks.get(header) {
         Some(b) => b,
         None => return,
     };
     // Mark header as visited so we don't re-enter it via rebuild_bb
-    visited.insert(header.to_string());
+    cx.visited.insert(header.to_string());
 
     // Find all back edges that target the header (latch -> header).
     let mut latches: Vec<String> = Vec::new();
@@ -3166,14 +3395,10 @@ fn rebuild_cycle(
         // Fall back to rebuilding the header as a normal block.
         return;
     }
-    // Pick the last latch in block_order as the primary latch
-    let latch = latches
-        .into_iter()
-        .max_by_key(|l| func.block_order.iter().position(|b| b == l).unwrap_or(0))
-        .unwrap();
-
-    // Collect loop body blocks via reverse DFS from latch (excluding header).
-    let body_bbs_set: HashSet<String> = find_loop_body(func, header, &latch)
+    // Collect loop body blocks via reverse DFS from **all** latches (excluding
+    // header). 单 latch 会漏掉 continue 类 latch 所在的分支区域 (见
+    // `find_loop_body_multi` 注释)。
+    let body_bbs_set: HashSet<String> = find_loop_body_multi(func, header, &latches)
         .into_iter()
         .filter(|b| b != header)
         .collect();
@@ -3183,7 +3408,7 @@ fn rebuild_cycle(
     // so SSA phi semantics are captured by mutable variable assignments in the body.
     for phi in &header_bb.phis {
         if let Some((entry_src, _)) = phi.incoming.first() {
-            env.insert(phi_name(&phi.dest), entry_src.clone());
+            cx.env.insert(phi_name(&phi.dest), entry_src.clone());
         }
     }
 
@@ -3201,10 +3426,10 @@ fn rebuild_cycle(
             let t_continues = t_in_body || t_back;
             let f_continues = f_in_body || f_back;
             if t_continues && !f_continues {
-                Some(resolve_operand(cond, env, subst, func))
+                Some(resolve_operand(cond, cx.env, subst, func))
             } else if f_continues && !t_continues {
                 // Negate condition
-                let cond_e = resolve_operand(cond, env, subst, func);
+                let cond_e = resolve_operand(cond, cx.env, subst, func);
                 Some(Expr::Unary {
                     op: crate::ast::UnOp::Not,
                     e: Box::new(cond_e),
@@ -3237,15 +3462,11 @@ fn rebuild_cycle(
             if f_in_body && !f_back {
                 body_entries.push(f.clone());
             }
-            if !t_in_body && !t_back {
-                if seen_exit.insert(t.clone()) {
-                    exit_blocks.push(t.clone());
-                }
+            if !t_in_body && !t_back && seen_exit.insert(t.clone()) {
+                exit_blocks.push(t.clone());
             }
-            if !f_in_body && !f_back {
-                if seen_exit.insert(f.clone()) {
-                    exit_blocks.push(f.clone());
-                }
+            if !f_in_body && !f_back && seen_exit.insert(f.clone()) {
+                exit_blocks.push(f.clone());
             }
         },
         Terminator::Jump(t) => {
@@ -3261,18 +3482,14 @@ fn rebuild_cycle(
             for t in targets {
                 if body_bbs_set.contains(t) && !is_back_edge(header, t, doms) {
                     body_entries.push(t.clone());
-                } else if !is_back_edge(header, t, doms) {
-                    if seen_exit.insert(t.clone()) {
-                        exit_blocks.push(t.clone());
-                    }
+                } else if !is_back_edge(header, t, doms) && seen_exit.insert(t.clone()) {
+                    exit_blocks.push(t.clone());
                 }
             }
             if body_bbs_set.contains(default) && !is_back_edge(header, default, doms) {
                 body_entries.push(default.clone());
-            } else if !is_back_edge(header, default, doms) {
-                if seen_exit.insert(default.clone()) {
-                    exit_blocks.push(default.clone());
-                }
+            } else if !is_back_edge(header, default, doms) && seen_exit.insert(default.clone()) {
+                exit_blocks.push(default.clone());
             }
         },
         _ => {},
@@ -3325,21 +3542,24 @@ fn rebuild_cycle(
             if is_pass_hint_inst(&inst.kind) {
                 continue;
             }
-            emit_rebuild_inst(inst, &mut body_items, env, subst, func);
+            emit_rebuild_inst(inst, &mut body_items, cx.env, subst, func);
         }
     }
     for entry in &body_entries {
-        let mut entry_env = env.clone();
+        let mut entry_env = cx.env.clone();
         let entry_subst = subst.clone();
         rebuild_bb(
             entry,
-            func,
+            &mut RebuildCtx {
+                func,
+                doms,
+                subst: &entry_subst,
+                visited: &mut *cx.visited,
+                env: &mut entry_env,
+            },
             &mut body_items,
-            visited,
-            &mut entry_env,
-            &entry_subst,
-            doms,
             Some((header, &body_bbs_set)),
+            stop_at,
         );
     }
     // Emit the while loop
@@ -3359,9 +3579,79 @@ fn rebuild_cycle(
         }),
         span: func.span.clone(),
     }));
-    // Continue from exit block
+    // Continue from exit block (回到外层循环上下文, 顶层调用时 outer_ctx 为 None)
     if let Some(exit) = exit_succ {
-        rebuild_bb(&exit, func, out, visited, env, subst, doms, None);
+        rebuild_bb(&exit, cx, out, outer_ctx, stop_at);
+    }
+}
+
+/// 计算每个块的前驱个数 (含回边; 同一终结符重复的目标只计一次)。
+fn predecessor_counts(func: &Function) -> HashMap<String, usize> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for bb in func.blocks.values() {
+        let mut succs: Vec<&str> = Vec::new();
+        match &bb.term {
+            Terminator::Jump(t) => succs.push(t.as_str()),
+            Terminator::Branch { t, f, .. } => {
+                succs.push(t.as_str());
+                succs.push(f.as_str());
+            },
+            Terminator::SwitchTable {
+                targets, default, ..
+            } => {
+                for tg in targets {
+                    succs.push(tg.as_str());
+                }
+                succs.push(default.as_str());
+            },
+            Terminator::Ret { .. } | Terminator::Unreachable => {},
+        }
+        let mut uniq: HashSet<&str> = HashSet::new();
+        for s in succs {
+            if uniq.insert(s) {
+                *counts.entry(s.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+}
+
+/// 从 `start` 沿「唯一前驱 + 无条件跳转」链向前走, 返回第一个多条入边的块。
+///
+/// 链上没有汇聚点 (碰到 return / 二分支 / 缺失块) 或回到已访问块时返回 `None`。
+fn walk_to_join(
+    start: &str,
+    func: &Function,
+    preds: &HashMap<String, usize>,
+    seen: &mut HashSet<String>,
+) -> Option<String> {
+    let mut cur = start.to_string();
+    loop {
+        if !seen.insert(cur.clone()) {
+            return None;
+        }
+        if preds.get(&cur).copied().unwrap_or(0) > 1 {
+            return Some(cur);
+        }
+        let bb = func.blocks.get(&cur)?;
+        match &bb.term {
+            Terminator::Jump(s) => cur = s.clone(),
+            _ => return None,
+        }
+    }
+}
+
+/// 二路分支 `t` / `f` 两条路径的公共汇聚块 (`t == f` 时就是它自己)。
+fn branch_join(t: &str, f: &str, func: &Function) -> Option<String> {
+    if t == f {
+        return Some(t.to_string());
+    }
+    let preds = predecessor_counts(func);
+    let jt = walk_to_join(t, func, &preds, &mut HashSet::new());
+    let jf = walk_to_join(f, func, &preds, &mut HashSet::new());
+    match (jt, jf) {
+        (Some(a), Some(b)) if a == b => Some(a),
+        _ => None,
     }
 }
 
@@ -3389,7 +3679,7 @@ fn emit_rebuild_inst(
         if let Some(Some(_)) = subst.get(&ssa_name) {
             return;
         }
-        let rhs = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func);
+        let rhs = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func, Some(&d.ty));
         let assign = Expr::Assign {
             op: crate::ast::BinOp::Add,
             l: Box::new(Expr::Ident {
@@ -3409,7 +3699,7 @@ fn emit_rebuild_inst(
             span: inst.span.clone(),
         }));
     } else {
-        let e = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func);
+        let e = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func, None);
         out.push(BlockItem::Stmt(Stmt::Expr {
             e,
             span: inst.span.clone(),
@@ -3455,6 +3745,15 @@ fn resolve_operand(
     }
 }
 
+/// 整数常量的 AST 类型: 与 C++ 字面量类型推导共用 [`crate::cpp::const_text::int_literal_rank_bits`]
+/// 这一份真源 (秩 32 → `Int`, 秩 64 → 64 位整型)。
+pub fn int_const_ty(v: i128) -> Type {
+    match crate::cpp::const_text::int_literal_rank_bits(v) {
+        32 => Type::Int,
+        _ => Type::LongLong,
+    }
+}
+
 /// SSA 重建时修正基址表达式的类型。
 /// 当 SSA 变量的类型与原始结构体类型不一致时 (如变量被简化为 int),
 /// 用原始类型覆盖, 确保后续 IR lowering 能正确解析成员访问。
@@ -3472,9 +3771,23 @@ fn set_expr_ty_if_compatible(expr: &mut Expr, desired_ty: &Type) {
 }
 
 /// 从两个操作数推导 BinOp 的结果类型
-fn infer_binop_type(l: &Expr, r: &Expr) -> Type {
+fn infer_binop_type(op: &BinOp, l: &Expr, r: &Expr) -> Type {
     let lt = l.ty();
     let rt = r.ty();
+    // 指针算术: `ptr ± int` 的结果仍是该指针类型 (C11 6.5.6)。
+    // 必须在这里保留, 否则下游 x86_64 codegen 会按 `Type::Int`(4 字节)
+    // 对加法结果做 movslq 截断, 把 64 位地址的高 32 位丢掉
+    // (栈地址 0x7ffd_XXXX_XXXX 被截成 0xFFFFFFFF_xxxx, 直接段错误)。
+    if matches!(op, BinOp::Add | BinOp::Sub) {
+        let is_ptr = |t: &Type| matches!(t, Type::Ptr(_) | Type::Array(_, _));
+        let is_int_like = |t: &Type| t.is_int();
+        if is_ptr(&lt) && is_int_like(&rt) {
+            return lt;
+        }
+        if is_ptr(&rt) && is_int_like(&lt) {
+            return rt;
+        }
+    }
     // 向量操作: 结果类型与向量操作数相同 (比较也返回向量, 全 1/0 每元素)
     if matches!(&lt, Type::Vector(_, _)) {
         return lt.clone();
@@ -3494,18 +3807,87 @@ fn infer_binop_type(l: &Expr, r: &Expr) -> Type {
         } else {
             Type::Double
         }
+    } else if lt.is_int() && rt.is_int() {
+        // 整数运算。旧实现在这里无条件返回 `Type::Int`, 把 64 位整数运算
+        // 降格成 32 位记账: SSA→AST 重建后, 把该结果存回 `long` 对象时插入的
+        // `Cast{long}` 被当作 sext(i32→i64) 而非原值搬运, 高 32 位静默截掉
+        // (`long fp = 103060990L; fp = fp*100 - 10;` 得 1716164398)。
+        // C++ 前端整条链都走这条重建路径, 故同一段代码 .c 正常、.cpp 错。
+        // 现在与 C 前端共用 [`Type::usual_arith_type`] 单一真源。
+        if matches!(
+            op,
+            BinOp::EqEq
+                | BinOp::Ne
+                | BinOp::Lt
+                | BinOp::Le
+                | BinOp::Gt
+                | BinOp::Ge
+                | BinOp::AndAnd
+                | BinOp::OrOr
+        ) {
+            // C11 6.5.13/6.5.14: 关系与逻辑运算符结果为 `int`。
+            Type::Int
+        } else if matches!(op, BinOp::Shl | BinOp::Shr) {
+            // C11 6.5.7: 移位结果类型 = 左操作数整数提升后的类型
+            // (右操作数仅是移位计数, 不参与通常算术转换)。
+            lt.int_promotion()
+        } else {
+            lt.usual_arith_type(&rt)
+        }
     } else {
+        // 指针差、`_Complex`/`_Imaginary`、枚举等非纯整数情形沿用旧口径
+        // (调用方或下游 codegen 自己处理结果表示)。
         Type::Int
+    }
+}
+
+/// `InstKind::Store` 重建 LHS `Expr::Deref` 时的 **pointee 类型** (store 宽度真源)。
+///
+/// SSA 的 `Store` 不携带「被写对象类型」字段, 旧实现一律重建为
+/// `Expr::Deref { ty: Type::Void }`; 后端按 `lvalue.ty().size()` 选 store 指令,
+/// `Void` 回退 8 字节 ⇒ 恒发 `mov %rax,(%rcx)`。对窄对象就是越界写: 实测 C++
+/// 析构里 `int` 全局 `g_b = g_b + 1` 会把紧邻的 `g_d` 高 4 字节清零
+/// (Itanium 对象模型下 `delete p` 的基类析构计数被抹掉)。
+///
+/// 宽度只能从**地址操作数自身的类型**还原: `lower_ir` 侧所有 `Store` 的地址
+/// 都是 `Ptr(对象类型)` —— 静态存储 (`AddrOf`/`lower_sym_addr`)、引用槽、
+/// `*p = v`、vptr 槽。聚合与 `void` pointee 保持 `Void` 原样: 整体拷贝不走
+/// `Store` (`lower_static_storage_store` 明确报 unsupported), 不在此猜宽度。
+fn store_pointee_ty(addr: &Expr) -> Type {
+    match addr.ty() {
+        Type::Ptr(inner) => match inner.base {
+            Type::Void => Type::Void,
+            Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) | Type::Array(_, _) => Type::Void,
+            t => t,
+        },
+        _ => Type::Void,
+    }
+}
+
+/// `InstKind::AddrOf` 重建 `&base` 的指针类型。
+///
+/// 旧实现恒写 `Ptr(void)`, 丢掉了「`base` 到底是什么类型」这一件信息:
+/// 下游 `*(&sym) = v` (静态存储 / volatile 局部 / 引用槽的回写全部长这样)
+/// 只能看到一个 `Ptr(void)` 地址, store 宽度因此回退到 8 字节 —— 对 `int`
+/// 对象就是越界写邻位。指真类型就在指令自己的 `dest` 上 (`lower_ir` /
+/// `build_from_func` 都以 `Ptr(对象类型)` 声明), 原样带回去即可。
+fn addr_of_ty(dest_ty: Option<&Type>) -> Type {
+    match dest_ty {
+        Some(t @ Type::Ptr(_)) => t.clone(),
+        _ => Type::Ptr(Box::new(QualType::new(Type::Void))),
     }
 }
 
 /// 将 SSA 指令转换为 AST 表达式, 同时应用内联替换。
 /// `inst_span` 是原始 SSA 指令的 span, 用于保留源码位置信息。
+/// `dest_ty` 是该指令 `dest` 变器的 SSA 类型 —— `AddrOf` 重建 `&base` 时
+/// 它是指针指向类型的**唯一真源** (下面 `AddrOf` 分支有详细理由)。
 fn inst_to_expr_resolved(
     kind: &InstKind,
     subst: &HashMap<String, Option<Expr>>,
     inst_span: &Span,
     func: &Function,
+    dest_ty: Option<&Type>,
 ) -> Expr {
     let sp = inst_span.clone();
     let fake_env: HashMap<String, SsaVar> = HashMap::new();
@@ -3513,7 +3895,7 @@ fn inst_to_expr_resolved(
         InstKind::Bin { op, l, r } => {
             let l_expr = resolve_operand(l, &fake_env, subst, func);
             let r_expr = resolve_operand(r, &fake_env, subst, func);
-            let binop_ty = infer_binop_type(&l_expr, &r_expr);
+            let binop_ty = infer_binop_type(op, &l_expr, &r_expr);
             Expr::Binop {
                 op: *op,
                 l: Box::new(l_expr),
@@ -3552,37 +3934,43 @@ fn inst_to_expr_resolved(
                 ty: Type::Void,
             }),
             span: sp.clone(),
-            ty: Type::Ptr(Box::new(QualType::new(Type::Void))),
+            ty: addr_of_ty(dest_ty),
         },
         InstKind::Load { e, ty, .. } => Expr::Deref {
             e: Box::new(resolve_operand(e, &fake_env, subst, func)),
             span: sp.clone(),
             ty: ty.clone(),
         },
-        InstKind::Store { e, src, .. } => Expr::Assign {
-            op: BinOp::Add,
-            l: Box::new(Expr::Deref {
-                e: Box::new(resolve_operand(e, &fake_env, subst, func)),
+        InstKind::Store { e, src, .. } => {
+            let addr = resolve_operand(e, &fake_env, subst, func);
+            let dty = store_pointee_ty(&addr);
+            Expr::Assign {
+                op: BinOp::Add,
+                l: Box::new(Expr::Deref {
+                    e: Box::new(addr),
+                    span: sp.clone(),
+                    ty: dty,
+                }),
+                r: Box::new(resolve_operand(src, &fake_env, subst, func)),
                 span: sp.clone(),
                 ty: Type::Void,
-            }),
-            r: Box::new(resolve_operand(src, &fake_env, subst, func)),
-            span: sp.clone(),
-            ty: Type::Void,
+            }
         },
-        InstKind::IndexLoad { arr, idx, .. } => Expr::Index {
+        InstKind::IndexLoad { arr, idx, ty, .. } => Expr::Index {
             arr: Box::new(resolve_operand(arr, &fake_env, subst, func)),
             idx: Box::new(resolve_operand(idx, &fake_env, subst, func)),
             span: sp.clone(),
-            ty: Type::Int,
+            ty: ty.clone(),
         },
-        InstKind::IndexStore { arr, idx, src, .. } => Expr::Assign {
+        InstKind::IndexStore {
+            arr, idx, src, ty, ..
+        } => Expr::Assign {
             op: BinOp::Add,
             l: Box::new(Expr::Index {
                 arr: Box::new(resolve_operand(arr, &fake_env, subst, func)),
                 idx: Box::new(resolve_operand(idx, &fake_env, subst, func)),
                 span: sp.clone(),
-                ty: Type::Int,
+                ty: ty.clone(),
             }),
             r: Box::new(resolve_operand(src, &fake_env, subst, func)),
             span: sp.clone(),
@@ -3632,6 +4020,7 @@ fn inst_to_expr_resolved(
             obj_ty,
             field,
             src,
+            ty,
             is_arrow,
             ..
         } => {
@@ -3650,12 +4039,13 @@ fn inst_to_expr_resolved(
                         span: sp.clone(),
                     },
                     span: sp.clone(),
-                    ty: Type::Void,
+                    ty: ty.clone(),
                     is_arrow: *is_arrow,
                 }),
                 r: Box::new(resolve_operand(src, &fake_env, subst, func)),
                 span: sp.clone(),
-                ty: Type::Void,
+                // C11 6.5.16p3: 赋值表达式的类型 = 左操作数的类型
+                ty: ty.clone(),
             }
         },
         InstKind::Select { cond, then_, else_ } => Expr::Cond {
@@ -3864,7 +4254,15 @@ fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>, _func: &Function)
         Operand::Int(v) => Expr::Int {
             v: *v,
             span: Span::point("ssa", 0, 0),
-            ty: Type::Int,
+            // 整数常量在 SSA 里是**无类型**的 (`Operand::Int(i128)`), 重建时必须
+            // 还原它的类型 —— 旧实现硬写 `Type::Int`, 于是
+            // ① 立即数按 32 位物化, `10306098990L / 100L` 的高位被截成 1716164398;
+            // ② `infer_binop_type` 从操作数类型推常见算术转换, 整个运算也跟着降格
+            //    成 32 位记账 (与下面 `infer_binop_type` 的根因说明同一轴)。
+            // 类型取「能表示该值的最小秩」(= C++ [lex.icon] 无符号后缀十进制字面量
+            // 的量级规则): 32 位可表示时仍是 `Int`, 现有代码路径零变化; 只有原本就
+            // 被截断的宽常量才升秩。
+            ty: int_const_ty(*v),
         },
         Operand::Float(c, ty) => Expr::Float {
             c: *c,
@@ -3920,7 +4318,7 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
         InstKind::Bin { op, l, r } => {
             let l_expr = operand_to_expr(l, env, func);
             let r_expr = operand_to_expr(r, env, func);
-            let binop_ty = infer_binop_type(&l_expr, &r_expr);
+            let binop_ty = infer_binop_type(op, &l_expr, &r_expr);
             Expr::Binop {
                 op: *op,
                 l: Box::new(l_expr),
@@ -3950,37 +4348,43 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
                 ty: Type::Void,
             }),
             span: sp.clone(),
-            ty: Type::Ptr(Box::new(QualType::new(Type::Void))),
+            ty: addr_of_ty(None),
         },
         InstKind::Load { e, ty, .. } => Expr::Deref {
             e: Box::new(operand_to_expr(e, env, func)),
             span: sp.clone(),
             ty: ty.clone(),
         },
-        InstKind::Store { e, src, .. } => Expr::Assign {
-            op: BinOp::Add,
-            l: Box::new(Expr::Deref {
-                e: Box::new(operand_to_expr(e, env, func)),
+        InstKind::Store { e, src, .. } => {
+            let addr = operand_to_expr(e, env, func);
+            let dty = store_pointee_ty(&addr);
+            Expr::Assign {
+                op: BinOp::Add,
+                l: Box::new(Expr::Deref {
+                    e: Box::new(addr),
+                    span: sp.clone(),
+                    ty: dty,
+                }),
+                r: Box::new(operand_to_expr(src, env, func)),
                 span: sp.clone(),
                 ty: Type::Void,
-            }),
-            r: Box::new(operand_to_expr(src, env, func)),
-            span: sp.clone(),
-            ty: Type::Void,
+            }
         },
-        InstKind::IndexLoad { arr, idx, .. } => Expr::Index {
+        InstKind::IndexLoad { arr, idx, ty, .. } => Expr::Index {
             arr: Box::new(operand_to_expr(arr, env, func)),
             idx: Box::new(operand_to_expr(idx, env, func)),
             span: sp.clone(),
-            ty: Type::Int,
+            ty: ty.clone(),
         },
-        InstKind::IndexStore { arr, idx, src, .. } => Expr::Assign {
+        InstKind::IndexStore {
+            arr, idx, src, ty, ..
+        } => Expr::Assign {
             op: BinOp::Add,
             l: Box::new(Expr::Index {
                 arr: Box::new(operand_to_expr(arr, env, func)),
                 idx: Box::new(operand_to_expr(idx, env, func)),
                 span: sp.clone(),
-                ty: Type::Int,
+                ty: ty.clone(),
             }),
             r: Box::new(operand_to_expr(src, env, func)),
             span: sp.clone(),
@@ -4026,6 +4430,7 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
             obj_ty,
             field,
             src,
+            ty,
             is_arrow,
             ..
         } => {
@@ -4044,12 +4449,13 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
                         span: sp.clone(),
                     },
                     span: sp.clone(),
-                    ty: Type::Void,
+                    ty: ty.clone(),
                     is_arrow: *is_arrow,
                 }),
                 r: Box::new(operand_to_expr(src, env, func)),
                 span: sp.clone(),
-                ty: Type::Void,
+                // C11 6.5.16p3: 赋值表达式的类型 = 左操作数的类型
+                ty: ty.clone(),
             }
         },
         InstKind::Select { cond, then_, else_ } => Expr::Cond {
@@ -4427,5 +4833,34 @@ mod tests {
             asm_label: None,
         };
         assert!(build_from_func(&f).is_none());
+    }
+
+    /// SSA→AST 重建的「单次使用即内联」命名契约。
+    ///
+    /// 这条规则直接决定循环条件/短路结果能不能正确工作:
+    /// 内联意味着值不在每次读时重算, 所以**只有**编译器合成、全局唯一、
+    /// 从不被用户代码引用的 base 才能享受它。`lower_ir::fresh_logical_base`
+    /// 产的短路结果变量 (`dcc_land<N>` / `dcc_lor<N>`) 故意**不**符合本形状:
+    /// 它们在 merge 块被读一次, 但必须在两条分支里各写一次, 一旦被内联进
+    /// 使用点就会丢掉赋值 (历史缺陷: `a==2 || a==3` 恒为假)。
+    #[test]
+    fn lower_ir_temp_base_recognizes_only_fresh_syn_names() {
+        // `fresh_syn` 形状: `dcc_t<序号>_<后缀>`
+        assert!(is_lower_ir_temp_base("dcc_t1_field"));
+        assert!(is_lower_ir_temp_base("dcc_t42_sym_addr"));
+        assert!(is_lower_ir_temp_base("dcc_t7_call_result"));
+        // 序号位必须是纯数字, 且必须带 `_后缀` 分隔符:
+        assert!(!is_lower_ir_temp_base("dcc_ttmp"));
+        assert!(!is_lower_ir_temp_base("dcc_t1"));
+        assert!(!is_lower_ir_temp_base("dcc_table_x"));
+        // C 前端 (`lower.rs`) 的 `_t<N>_<base>` 是另一套命名, 不由本函数识别:
+        assert!(!is_lower_ir_temp_base("_t3_add"));
+        // 短路结果变量是**具名局部**, 必须走真实的声明+赋值路径:
+        assert!(!is_lower_ir_temp_base("dcc_land1"));
+        assert!(!is_lower_ir_temp_base("dcc_lor2"));
+        // 用户/符号名一律不匹配:
+        assert!(!is_lower_ir_temp_base(""));
+        assert!(!is_lower_ir_temp_base("i"));
+        assert!(!is_lower_ir_temp_base("__dcc_static_0"));
     }
 }

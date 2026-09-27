@@ -291,11 +291,10 @@ impl MipsAbi {
         }
 
         // Set up stack pointer
-        if frame_size > 0 {
-            if frame_size <= 65535 {
+        if frame_size > 0
+            && frame_size <= 65535 {
                 instructions.push(format!("addi $sp, $sp, -{}", frame_size));
             }
-        }
 
         // Set up frame pointer (optional, but common)
         if needs_fp {

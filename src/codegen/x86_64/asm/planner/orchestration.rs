@@ -38,7 +38,7 @@ pub struct AsmRegisterPlanner {
 
 impl AsmRegisterPlanner {
     /// Register pool constants for x86_64
-
+    ///
     /// General-purpose register pool: rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8-r11
     /// These are caller-saved registers available for short-lived allocations
     const GP_POOL: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];

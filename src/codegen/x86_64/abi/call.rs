@@ -77,18 +77,13 @@ impl Codegen {
                 continue;
             }
             let classes = Self::abi_classes(&effective_ty);
-            let need_gp = classes.iter().filter(|c| **c == AbiClass::Integer).count();
-            // SseUp 是前一个 Sse 所在 xmm 高 64 位延续, 不单独占用寄存器。
-            let need_fp = classes.iter().filter(|c| **c == AbiClass::Sse).count();
-            // SysV: 一个对象的所有 eightbyte 必须能同时放进**剩余**的参数寄存器；
-            // 装不下就整体走内存，并把它本来要用的寄存器留给下一个参数，
-            // 不得拆成"低半进寄存器 + 高半进栈"。判据只能依赖分类，不能
-            // 依赖书写形态：这里旧代码用 `is_agg`（Struct|Union）作为"多
-            // eightbyte 对象"的代理，于是标量 `__int128` 在只剩 1 个 GP 寄存器时
-            // 会被 r9 与栈拆开承载（实测：gcc callee + dcc caller 读出低半错误）。
-            let fits_gp = gp + need_gp <= gp_regs.len();
-            let fits_fp = fp + need_fp <= 8;
-            let force_mem = Self::classes_contain_memory_class(&classes) || !(fits_gp && fits_fp);
+            // SysV all-or-nothing 拆分的唯一真源 (callee 形参采集共用同一函数):
+            // 见 [`Codegen::aggregate_forces_memory`]。
+            let force_mem = Self::aggregate_forces_memory(
+                &classes,
+                gp_regs.len() - gp,
+                8 - fp,
+            );
             if force_mem {
                 // caller 与 callee 必须用相同的 force_mem 栈参数对齐规则:
                 // 命名参数 (gen_params) 用 agg_align = ty.align().max(8),
@@ -396,13 +391,33 @@ impl Codegen {
                     // _Complex double: 两个 eightbyte → movsd 各装 8 字节。
                     // 不能用 movss: 只装 4 字节会丢虚部 (xmm 高半为垃圾)。
                     let pfx: u8 = 0xF2;
+                    // 实参的**值表示**可以不同形参 (`_Complex float` 实参 →
+                    // `_Complex double` 形参及反之/整数内型/**标量**:
+                    // `take(_Complex double 形参)` 收到 `take(11)` 时 C6.3.1.8p1
+                    // 要求实部 = 11、虚部 = +0)。C6.3.1.8p4 要求复数算术转换是
+                    // **逐分量**的。下面按 inner_sz 直读变量槽会把两个 4 字节
+                    // float 的位模式当成一个 8 字节 double
+                    // (`my_creal(zf)` 得 8.0000019 而 gcc 得 1.25), 标量实参则
+                    // 读穿到隔壁槽 (`take(11)` 两分量皆 0)。转换整体委托
+                    // `materialize_value_slot` (复数分量转换的单一真源, 与 `=`
+                    // 运算共用), 本路径只负责把已按形参类型物化好的对象
+                    // 逐 eightbyte 装到寄存器/栈 —— 不在此重写任何宽度判据。
+                    let needs_component_convert =
+                        Self::complex_src_needs_convert(&effective_ty, arg.ty());
+                    let converted_slot: Option<i64> = if needs_component_convert {
+                        Some(self.materialize_value_slot(&effective_ty, arg))
+                    } else {
+                        None
+                    };
                     // (Call 实参不再特判: Call 返回已统一物化到 result_off,
                     // 与下方"复杂表达式"路径同构 — gen_expr 后从 result_off
                     // 逐分量加载。旧实现直接从 xmm0/xmm1 取分量, 整数
                     // _Complex 的返回在 rax/rdx, xmm 是垃圾。)
                     for (chunk, loc) in arg_locs.iter().enumerate() {
                         let chunk_off = (chunk as i64) * inner_sz;
-                        if let Expr::Ident { name, .. } = arg {
+                        if let Some(so) = converted_slot {
+                            self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], so + chunk_off);
+                        } else if let Expr::Ident { name, .. } = arg {
                             if self.is_global_not_local(&name.name) {
                                 // global complex: lea rcx, [global+chunk_off]; movsd xmm0, [rcx]
                                 // 注意: 必须写入 rcx (寄存器 1), 下方 movsd [rcx] 硬编码 rcx
@@ -448,10 +463,17 @@ impl Codegen {
                         self.load_stack(1, base_off); // rcx = base addr
                     }
                     for (chunk, loc) in arg_locs.iter().enumerate() {
+                        // 三条源路径 (global / VLA / 局部槽) 都必须把 **块的
+                        // 值** 放进 r11, 因为下方统一 `store_rsp_qword(11, ..)`。
+                        // 旧实现 global 分支把 `emit_global_addr(11,..)` 得到的
+                        // **基址** 留在 r11 就存槽 (值虽已 `mov rax,[r11+d]` 取出
+                        // 但被丢弃), 于是被调方读到的 struct 成员是指针字节 ——
+                        // static 存储期聚合按值传参错, auto 存储期反而正常。
                         if self.is_global_not_local(&name.name) {
                             self.emit_global_addr(11, &name.name);
                             self.emit(&[0x49, 0x8B, 0x83]);
                             self.emit(&((chunk * 8) as i32).to_le_bytes());
+                            self.mov(11, 0); // r11 = rax (data), for subsequent store
                         } else if is_vla_local {
                             // VLA: mov rax, [rcx + chunk*8], then move to r11
                             let disp = (chunk * 8) as i32;
@@ -482,34 +504,16 @@ impl Codegen {
                             },
                         }
                     }
-                } else if matches!(arg, Expr::CompoundLit { .. }) {
-                    // CompoundLit: gen_expr builds data on stack and returns
-                    // the ADDRESS in rax.  We must LOAD data from [addr +
-                    // chunk*8], not pass the address itself.
+                } else if matches!(arg, Expr::CompoundLit { .. }) || Self::rvalue_is_buffer_addr(arg) {
+                    // 内存交付的聚合源: gen_expr 后 rax 里是**缓冲地址** (复合字面量 /
+                    // 返 memory 类的 `f()` / 缓冲区交付的 `va_arg` / 链式赋值与
+                    // 语句表达式的目标地址), 必须按 8 字节块从 `[addr + chunk*8]`
+                    // 装载。直接把 rax 当数据存槽, 被调方读到的就是指针字节
+                    // (`f(g()).x` / `f(va_arg(...))` 即此)。
                     self.gen_expr(arg, 0); // rax = address
                     self.mov(1, 0); // rcx = address (safe: no calls
                                     // between chunk loads)
-                    for (chunk, loc) in arg_locs.iter().enumerate() {
-                        // mov rax, [rcx + chunk*8]
-                        let disp = (chunk * 8) as i32;
-                        if disp == 0 {
-                            self.emit(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
-                        } else if disp < 128 {
-                            self.emit(&[0x48, 0x8B, 0x41]); // mov rax, [rcx+disp8]
-                            self.emit(&[disp as u8]);
-                        } else {
-                            self.emit(&[0x48, 0x8B, 0x81]); // mov rax, [rcx+disp32]
-                            self.emit(&disp.to_le_bytes());
-                        }
-                        match *loc {
-                            ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
-                            _ => {
-                                self.store_rsp_qword(0, stage);
-                                staged.push((*loc, stage, false));
-                                stage += 8;
-                            },
-                        }
-                    }
+                    self.stage_agg_chunks_from_mem(arg_locs, &mut staged, &mut stage);
                 } else if matches!(
                     arg,
                     Expr::Index { .. } | Expr::Member { .. } | Expr::Deref { .. }
@@ -519,27 +523,7 @@ impl Codegen {
                     // 元素值 (pr44575: 全局数组元素被当 4 字节标量读),
                     // 须取 lvalue 地址后按 8 字节块装载 (与 CompoundLit
                     // 一致)。gen_lvalue_addr 失败则落入下方 rvalue 路径。
-                    for (chunk, loc) in arg_locs.iter().enumerate() {
-                        // mov rax, [rcx + chunk*8]
-                        let disp = (chunk * 8) as i32;
-                        if disp == 0 {
-                            self.emit(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
-                        } else if disp < 128 {
-                            self.emit(&[0x48, 0x8B, 0x41]); // mov rax, [rcx+disp8]
-                            self.emit(&[disp as u8]);
-                        } else {
-                            self.emit(&[0x48, 0x8B, 0x81]); // mov rax, [rcx+disp32]
-                            self.emit(&disp.to_le_bytes());
-                        }
-                        match *loc {
-                            ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
-                            _ => {
-                                self.store_rsp_qword(0, stage);
-                                staged.push((*loc, stage, false));
-                                stage += 8;
-                            },
-                        }
-                    }
+                    self.stage_agg_chunks_from_mem(arg_locs, &mut staged, &mut stage);
                 } else {
                     // Other rvalue aggregate (e.g. function returning
                     // struct in rax:rdx): gen_expr leaves value in
@@ -746,12 +730,18 @@ impl Codegen {
                         match next_loc {
                             ArgLoc::Xmm(nr) if nr == reg && next_slot == slot + 8 => {
                                 // 合并: movups xmm_reg, [rsp+slot]
+                                // disp32 字段恒为 4 字节：`slot` 是 `usize`，直接
+                                // `to_le_bytes()` 会写出 8 字节（多出的 4 个 0 落在
+                                // 指令流里被当作 `add [rax],al` 执行 → SIGSEGV，
+                                // 且只在 staging 偏移 >= 128（参数多到需要 disp32）
+                                // 时触发，正是变参 SSE 装载的典型规模）。与
+                                // `emit_xmm_load_rsp` 等helper 同用作 `as u32`。
                                 self.emit(&[0x0F, 0x10]);
                                 if slot < 128 {
                                     self.emit(&[0x44 | ((reg & 7) << 3), 0x24, slot as u8]);
                                 } else {
                                     self.emit(&[0x84 | ((reg & 7) << 3), 0x24]);
-                                    self.emit(&slot.to_le_bytes());
+                                    self.emit(&(slot as u32).to_le_bytes());
                                 }
                                 i += 2; // 跳过下一个 entry
                                 continue;
@@ -798,5 +788,37 @@ impl Codegen {
             }
         }
         self.emit_add_rsp(frame_bytes as i64);
+    }
+
+    /// 「缓冲地址已在 rcx」的聚合按值实参装载: 逐 8 字节块从 `[rcx + chunk*8]`
+    /// 装到暂存区/栈槽。所有内存交付的聚合源 (复合字面量 / 内存返回调用 /
+    /// lvalue 聚合 / 链式赋值结果) 共用这一体, 只有取源地址的方式不同。
+    fn stage_agg_chunks_from_mem(
+        &mut self,
+        arg_locs: &[ArgLoc],
+        staged: &mut Vec<(ArgLoc, usize, bool)>,
+        stage: &mut usize,
+    ) {
+        for (chunk, loc) in arg_locs.iter().enumerate() {
+            // mov rax, [rcx + chunk*8]
+            let disp = (chunk * 8) as i32;
+            if disp == 0 {
+                self.emit(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
+            } else if disp < 128 {
+                self.emit(&[0x48, 0x8B, 0x41]); // mov rax, [rcx+disp8]
+                self.emit(&[disp as u8]);
+            } else {
+                self.emit(&[0x48, 0x8B, 0x81]); // mov rax, [rcx+disp32]
+                self.emit(&disp.to_le_bytes());
+            }
+            match *loc {
+                ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
+                _ => {
+                    self.store_rsp_qword(0, *stage);
+                    staged.push((*loc, *stage, false));
+                    *stage += 8;
+                },
+            }
+        }
     }
 }

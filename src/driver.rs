@@ -1796,7 +1796,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
             // 解析成功时也要输出警告（如 -Wimplicit-fallthrough）
             let mut diags = parser.diags.clone();
             enrich_diags(&mut diags, &src, &file_name, input.parent());
-            let dcfg = diag_cfg(&cfg);
+            let dcfg = diag_cfg(cfg);
             for d in &diags {
                 if matches!(d.sev, Severity::Warning) {
                     d.print_with(&dcfg);
@@ -1810,6 +1810,58 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
             return Err(diags);
         },
     };
+
+    // ===== M26.4/M26.5: C++20 modules 接口管道 =====
+    // 1. 收集本 TU 的模块接口 (`export module name;` 之后的导出实体);
+    //    M28.4: 传入预处理后的源码文本, 使导出的模板原文随 `E T` 一起带走.
+    // 2. 按 `import m;` / `import :part;` 在搜索目录定位 .bmf 并加载;
+    //    M28.1: 定位不到 -> error[E0104] (不再静默当普通外部符号放行).
+    // 3. 跨模块 ODR 一致性检查 (同 mangled 签名实体的签名/布局不一致 -> E0103);
+    // 4. 把导入接口还原成纯声明 splice 进 AST, 供 sema 名字查找与
+    //    lower_ir 调用点降级 (定义在导出 TU 的 .o 里, 本 TU 只引用符号).
+    // 5. M28.2/M28.6: 模块 TU 的发射符号统一走 mangled linkage name,
+    //    `module :private;` 片段实体降为内部链接 (STB_LOCAL).
+    let own_interface = crate::cpp::modules::collect_interface_src(&decls, Some(&pp_out.text));
+    let imports =
+        crate::cpp::modules::resolve_imports(&decls, &bmf_search_dirs(cfg, input), &pp_out.text);
+    if !imports.missing.is_empty() {
+        return Err(imports
+            .missing
+            .iter()
+            .map(|m| {
+                let tried = if m.tried.is_empty() {
+                    "<无搜索目录>".to_string()
+                } else {
+                    m.tried
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                Diagnostic::err(
+                    "E0104",
+                    format!(
+                        "import of module '{}' failed: no module interface file '{}' found (searched: {})",
+                        m.name, m.file, tried
+                    ),
+                    crate::diagnostics::Span::point(&file_name, m.line as u32, 1),
+                )
+            })
+            .collect());
+    }
+    let imported_modules = imports.loaded;
+    if let Some(msg) = crate::cpp::modules::odr_conflicts(own_interface.as_ref(), &imported_modules) {
+        return Err(vec![Diagnostic::err(
+            "E0103",
+            format!("C++20 modules: {}", msg),
+            crate::diagnostics::Span::point(&file_name, 0, 0),
+        )]);
+    }
+    // M28.2/M28.6 计划必须在 splice **之前**从用户原始声明推导: 导入的纯声明
+    // 会被 append 到同一棵树, 之后再判断 `module :private;` 区域会误伤导入实体.
+    let linkage_plan =
+        crate::cpp::modules::module_linkage_plan(&decls, own_interface.as_ref(), &imported_modules);
+    let decls = crate::cpp::modules::merge_imported_decls(&decls, &imported_modules);
 
     // -dump-ast: 打印 C++ AST 后退出
     if cfg.dump_ast {
@@ -1851,7 +1903,73 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
         eprintln!("dcc: using C++ native backend path");
     }
 
-    return emit_native_program(cfg, native_out.prog, &file_name, pp_out.line_map.clone());
+    let emitted = {
+        let mut prog = native_out.prog;
+        // M28.2/M28.6: 模块实体发射名切 mangled + 私有片段降内部链接
+        linkage_plan.apply(&mut prog);
+        emit_native_program(cfg, prog, &file_name, pp_out.line_map.clone())
+    };
+
+    // M26.4: 目标文件成功产出后才写出模块接口 (BMF); 编译失败不留下
+    // 过时接口, 避免下游 TU 误用.
+    if emitted.is_ok() {
+        if let (Some(path), Some(bmf)) = (cfg.emit_module_file.as_ref(), own_interface.as_ref()) {
+            write_module_interface(path, bmf, &file_name)?;
+        }
+    }
+    emitted
+}
+
+/// M26.4: BMF (模块接口) 搜索目录.
+///
+/// 优先级: `--emit-module-file` 所在目录 → 源文件同目录 → 工作目录 →
+/// `-I` 目录. 导入端不要求额外参数: 约定接口文件与源文件同目录.
+fn bmf_search_dirs(cfg: &Config, input: &std::path::Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(p) = cfg.emit_module_file.as_ref().and_then(|p| p.parent()) {
+        if !p.as_os_str().is_empty() {
+            dirs.push(p.to_path_buf());
+        }
+    }
+    if let Some(d) = input.parent() {
+        if !d.as_os_str().is_empty() {
+            dirs.push(d.to_path_buf());
+        }
+    }
+    dirs.push(PathBuf::from("."));
+    for i in &cfg.include_paths {
+        dirs.push(PathBuf::from(i));
+    }
+    dirs
+}
+
+/// M26.4: 把模块接口序列化写入 `path` (创建父目录, 失败报 E0101)
+fn write_module_interface(
+    path: &std::path::Path,
+    bmf: &crate::cpp::bmf::BmfModule,
+    file_name: &str,
+) -> Result<(), Vec<Diagnostic>> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = fs::create_dir_all(parent);
+        }
+    }
+    let mut f = fs::File::create(path).map_err(|e| {
+        vec![Diagnostic::err(
+            "E0101",
+            format!("cannot write module interface {}: {}", path.display(), e),
+            crate::diagnostics::Span::point(&path.display().to_string(), 0, 0),
+        )]
+    })?;
+    f.write_all(bmf.serialize().as_bytes()).map_err(|e| {
+        vec![Diagnostic::err(
+            "E0101",
+            format!("cannot write module interface {}: {}", path.display(), e),
+            crate::diagnostics::Span::point(file_name, 0, 0),
+        )]
+    })?;
+    Ok(())
 }
 
 /// C++ 原生后端: 把 ast::Program 直接走 C 主流水线 (ir::lower → 优化 →
@@ -2638,11 +2756,8 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let cfg_saved = cfg.clone();
     // 强制走内置链接器 ≠ 1 路径是上面"递归后"需走的；现在 cfg.built_link
     // 仍是 false，所以 .o 由 run() 末端 codegen 直接输出。
-    let result = run(cfg);
-    if result.is_err() {
-        // 临时 .o / 目录由 _tmp_cleanup 在离开作用域时回收
-        return result;
-    }
+    // 临时 .o / 目录由 _tmp_cleanup 在离开作用域时回收, 因此错误直接上抛即可.
+    run(cfg)?;
     // 2) 检测 .o 中是否包含 IFUNC 符号 (target_clones / __attribute__((ifunc)))
     //    宿主 cc/ld 无法处理 dcc 生成的 IFUNC resolver (resolver 代码在
     //    内置链接器中生成), 此时必须走内置链接器路径.

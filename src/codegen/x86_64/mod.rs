@@ -36,7 +36,7 @@ mod special;
 // All production exports flow through this section.
 // ============================================================================
 pub use self::codegen::{
-    AbiClass, ArgLoc, Codegen, CustomSecRel, DeferredPushsectionFixup, FuncAsmLayout,
+    AbiClass, AggDst, ArgLoc, Codegen, CustomSecRel, DeferredPushsectionFixup, FuncAsmLayout,
     FuncEmitChunk, GlobalVar, JumpKind, ParallelEmitCtx, ParallelGlobalSnap, PendingCodeRel,
     PendingJump, VaListAddress,
 };

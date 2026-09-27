@@ -244,7 +244,7 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
     #[inline]
     pub fn gen_binop_discard(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr) -> ExprResult<()> {
         // Same as gen_binop but discard the result register allocation
-        let _ = self.gen_binop(op, lhs, rhs).map(|_| ())?;
+        self.gen_binop(op, lhs, rhs).map(|_| ())?;
         Ok(())
     }
 
@@ -375,7 +375,7 @@ impl<'a, EE: ExpressionExecutor> ExpressionEmitter<'a, EE> {
                         .shift_left(idx_reg, idx_reg, shift_log2 as u8)?;
                 } else {
                     // General case: multiply
-                    self.executor.imul_imm(idx_reg, idx_reg, elem_size as u64)?;
+                    self.executor.imul_imm(idx_reg, idx_reg, elem_size)?;
                 }
 
                 // Add to base address
@@ -687,8 +687,10 @@ mod tests {
         };
         assert!(is_constant_expr(&int_expr));
 
+        // 3.25 = 13/4, 二进制精确可表示; 避免用 3.14 这类近似 π 的字面量
+        // (clippy::approx_constant), 本用例只关心"浮点常量是否为编译期常量".
         let float_expr = Expr::Float {
-            c: crate::ast::FloatConst::F64(3.14),
+            c: crate::ast::FloatConst::F64(3.25),
             span: Span::point("", 1, 1),
             ty: Type::Double,
         };

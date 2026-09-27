@@ -11,12 +11,31 @@
 //! P <partition-name>          ; 本 TU 属于 `module name:part;`
 //! I <import-name>
 //! X <partition-name>          ; import :part 分区 (其导出并入本模块)
-//! E F <src-name> <full-c-decl>   ; export 函数 (decl 含 mangled 符号, 如
-//!                                  `int _ZN6answerEv()`)
-//! E C <class-name> <body-c>      ; export 类 (body 为单行 C struct 字段体)
+//! E F <src-name> <full-c-decl>   ; export 函数 (decl 含 mangled 链接名, 如
+//!                                  `int _Z6answerv()`)
+//! E C <class-name> <layout>      ; export 类 (M28.3/M28.5 扩展布局描述)
 //! E V <name> <full-c-decl>       ; export 变量
-//! E T <template-name> <params>
+//! E T <template-name> <params>   ; export 模板 (M28.4: 可带原文体)
 //! ```
+//!
+//! ### `E C` layout 字段 (M28.3 / M28.5, 向后兼容的尾标记风格)
+//! ```text
+//! <layout> ::= [@class|@struct|@union] {<base>|<field>}
+//! <base>   ::= @base:<access>:<v|->:<Name>[<args>]
+//! <field>  ::= [<access>] <c-type> <name> ;
+//! ```
+//! 例: `E C Rect @class @base:public:-:Shape @private int w; int h;`.
+//! 无标记的旧文本 (`int x; int y;`) 仍合法 —— 按 `struct` + 成员全 public 解释
+//! (即 M26 的历史行为). `public` 不写标记, 因此 public 类的文本与旧版一致.
+//!
+//! ### `E F` signature 尾部标记
+//! `@virtual` / `@const` / `@private` / `@protected` (M28.3 新增访问级;
+//! 顺序固定为 virtual -> const -> access, public 不写).
+//!
+//! ### `E T` 模板原文 (M28.4)
+//! `<params> @body=<转义后的模板声明原文>`; 原文里 `\`->`\\`、换行->`\n`、
+//! 制表->`\t`、`@`->`\@`, 保证单行且可逆. 导入端把原文重新喂给 parser,
+//! 使跨 TU 模板能参与实例化 (旧文本无 `@body=` -> 仅记名字, 行为同 M26).
 //!
 //! 设计原则: 纯字符串序列化, 不依赖 lower / parser 上下文;
 //! `serialize` / `parse` 互为逆操作 (round-trip).
@@ -38,11 +57,12 @@ pub enum BmfKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BmfExport {
     pub kind: BmfKind,
-    /// 导出名 (mangled 或源名)
+    /// 导出名: **源级名字** (`answer` / `Widget::get` / 类名 / 模板名);
+    /// mangled 链接名在 `signature` 里 (OdrChecker 的比较键由它推导)
     pub name: String,
     /// 函数: 签名文本 `ret(p1,p2)`; 变量: 类型文本; 类: 空
     pub signature: String,
-    /// 类: 成员布局描述 (`name:type, ...`); 其他: None
+    /// 类: 成员布局描述 (见模块文档 `E C` 语法); 其他: None
     pub layout: Option<String>,
 }
 

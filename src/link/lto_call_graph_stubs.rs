@@ -144,7 +144,7 @@ impl CallGraph {
             }
         }
 
-        for (name, _node) in &self.nodes {
+        for name in self.nodes.keys() {
             if !self.reachable.contains(name) {
                 self.dead.insert(name.clone());
             }
@@ -345,7 +345,7 @@ impl CallGraph {
         // 2. High usage count (>3 calls)
         // 3. Small size (we'd need size info - placeholder)
 
-        for (_name, node) in &self.nodes {
+        for node in self.nodes.values() {
             if let CallGraphNode::Function(ref func_name, ref data) = node {
                 // Inline if marked always_inline or hot (high usage)
                 if data.always_inline || data.usage_count > 3 {
@@ -364,12 +364,8 @@ impl CallGraph {
         for (name, node) in &self.nodes {
             if let CallGraphNode::Function(_, ref data) = node {
                 // Simple cost model: size (assumed) + inverse of usage
-                let estimated_size = 10; // Placeholder - would be calculated from IR
-                let cost = if data.usage_count == 0 {
-                    999
-                } else {
-                    estimated_size / data.usage_count
-                };
+                let estimated_size: usize = 10; // Placeholder - would be calculated from IR
+                let cost = estimated_size.checked_div(data.usage_count).unwrap_or(999);
 
                 if cost <= max_cost && !data.noreturn {
                     candidates.push((name.clone(), cost));
@@ -450,8 +446,8 @@ mod tests {
         cg.entry_points.insert("main".to_string());
 
         // Create a simple call chain: main -> used_func (unused_func not called)
-        for name in vec!["main", "used_func"] {
-            let mut data = FunctionNodeData::new(&name);
+        for name in ["main", "used_func"] {
+            let mut data = FunctionNodeData::new(name);
             data.with_body();
             cg.nodes.insert(
                 name.to_string(),
@@ -495,8 +491,8 @@ mod tests {
         cg.entry_points.insert("main".to_string());
 
         // Create functions with multiple callers
-        for name in vec!["main", "helper1", "helper2", "shared_func"] {
-            let mut data = FunctionNodeData::new(&name);
+        for name in ["main", "helper1", "helper2", "shared_func"] {
+            let mut data = FunctionNodeData::new(name);
             data.with_body();
             cg.nodes.insert(
                 name.to_string(),
@@ -529,7 +525,7 @@ mod tests {
         let mut cg = CallGraph::new();
 
         // Create various function types
-        for (name, always_inline) in vec![
+        for (name, always_inline) in [
             ("always_inline_func", true),
             ("hot_func", false),
             ("cold_func", false),

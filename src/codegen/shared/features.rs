@@ -8,10 +8,11 @@
 /// - **Tier-2**: Hello/cross smoke tests (may return E0xxx errors)
 /// - **Disabled**: Removed from registry, has_backend=false
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Feature {
     // Core computational features
-    CoreArith,  // Basic arithmetic operations
+    #[default]
+    CoreArith, // Basic arithmetic operations
     CoreCall,   // Function calls (syscall vs library)
     Float,      // Floating point support
     LongDouble, // 80/128-bit floating point
@@ -72,12 +73,6 @@ pub enum SanKind {
 pub enum ObjectFmt {
     Elf,
     Coff,
-}
-
-impl Default for Feature {
-    fn default() -> Self {
-        Feature::CoreArith
-    }
 }
 
 /// Feature set for a backend implementation
@@ -199,6 +194,7 @@ impl FeatureSet {
     ///   * `LongDouble` ❌ —— `dcc --target riscv64-linux-gnu -c` 一个 `long double`
     ///     取负的 fixture 直接 `error[E0314]: unsupported float IR expression on
     ///     riscv64: Unary(Neg)`（aarch64 同一 fixture 能过）。
+    ///
     /// 其余项与 `tier1_cross()` 实测结果一致（`CoreCall`/`Sanitizer(*)`/`StackProtect`
     /// 同样为 ❌，理由同上）。`RiscVBorrowedRegs` 仅在 RISC-V 上名副其实。
     pub fn riscv64_cross() -> Self {

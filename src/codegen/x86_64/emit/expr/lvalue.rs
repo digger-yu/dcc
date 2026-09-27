@@ -10,7 +10,7 @@ use crate::diagnostics::Span;
 
 impl Codegen {
     /// gen_expr 中 Expr::Deref arm 的搬迁体, 逐字复制, 未改逻辑。
-    pub fn gen_expr_deref_rvalue(&mut self, e: &Box<Expr>, ty: &Type, dst: u8) {
+    pub fn gen_expr_deref_rvalue(&mut self, e: &Expr, ty: &Type, dst: u8) {
         // *e: 求值内部表达式得到地址, 然后按结果类型大小加载
         let load_ty = ty.clone();
         let load_size = load_ty.size().max(1);
@@ -38,8 +38,8 @@ impl Codegen {
     pub fn gen_expr_index_rvalue(
         &mut self,
         e: &Expr,
-        arr: &Box<Expr>,
-        idx: &Box<Expr>,
+        arr: &Expr,
+        idx: &Expr,
         elem_ty: &Type,
         span: &Span,
         dst: u8,
@@ -54,36 +54,36 @@ impl Codegen {
             is_nested: self.current_func_is_nested,
         };
 
-        // 检查是否为嵌套运行时索引: 语义层的 add_byte_offsets 会丢失
-        // 第二个运行时偏移, 这种情况退回旧路径。
-        // 常量内部索引可以正确合并 (Constant + Runtime = Runtime with addend)。
-        let is_nested_runtime_index = matches!(arr.as_ref(), Expr::Index { .. })
-            && crate::const_eval::eval(idx).is_err()
-            && match arr.as_ref() {
-                Expr::Index { idx: inner_idx, .. } => crate::const_eval::eval(inner_idx).is_err(),
-                _ => false,
-            };
-
-        if !is_nested_runtime_index {
+        // 多维/混合下标链由语义层描述符完整表达 (`ByteOffset::Runtime.terms`
+        // 逐项携带自己的下标表达式), 因此这里不需要任何「嵌套运行时索引」
+        // 浅层试探: 物化失败时统一退回下方旧路径。
+        {
             let desc = compute_lvalue_address(self, e, &ctx);
 
             // Step 2: 确定物化动作
             let action = determine_action(elem_ty, true);
 
-            // Step 3: SIB 快速路径优化 (仅全局数组 + 标量加载 + 运行时索引)
+            // Step 3: SIB 快速路径优化 (仅全局数组 + 标量加载 + 单个运行时下标)
             // 这是在语义层解析之后的优化: 使用已解析的 symbol_key
             if matches!(action, MaterializeAction::LoadScalar)
                 && matches!(&desc.base, AddressBase::GlobalSymbolAddr { .. })
                 && matches!(&desc.offset, ByteOffset::Runtime { addend: 0, .. })
             {
                 if let AddressBase::GlobalSymbolAddr { symbol_key } = &desc.base {
-                    if let ByteOffset::Runtime { stride, addend: 0 } = &desc.offset {
-                        let es = *stride as u8;
-                        // 只有 1/2/4/8 字节元素能用 SIB scale
-                        if *stride == 1 || *stride == 2 || *stride == 4 || *stride == 8 {
-                            self.gen_expr(idx, 1);
-                            self.emit_load_global_indexed(dst, 1, symbol_key, es, elem_ty);
-                            return;
+                    if let ByteOffset::Runtime { terms, addend: 0 } = &desc.offset {
+                        // 只有单个运行时下标项才能走 SIB scale
+                        if let [term] = terms.as_slice() {
+                            let es = term.stride as u8;
+                            // 只有 1/2/4/8 字节元素能用 SIB scale
+                            if term.stride == 1
+                                || term.stride == 2
+                                || term.stride == 4
+                                || term.stride == 8
+                            {
+                                self.gen_expr(&term.index, 1);
+                                self.emit_load_global_indexed(dst, 1, symbol_key, es, elem_ty);
+                                return;
+                            }
                         }
                     }
                 }
@@ -142,7 +142,7 @@ impl Codegen {
             name: arr_name,
             ty: arr_ty,
             ..
-        } = arr.as_ref()
+        } = arr
         {
             // 仅全局数组走 SIB 索引快速路径; 全局指针 (char *s = "hello")
             // 的下标访问必须先加载指针值再解引用, 不能对符号本身绝对寻址。
@@ -241,7 +241,7 @@ impl Codegen {
     /// gen_expr 中 Expr::Member arm 的搬迁体, 逐字复制, 未改逻辑。
     pub fn gen_expr_member_rvalue(
         &mut self,
-        expr: &Box<Expr>,
+        expr: &Expr,
         field: &Ident,
         is_arrow: &bool,
         ty: &Type,
@@ -252,7 +252,7 @@ impl Codegen {
         if *is_arrow {
             self.gen_expr(expr, dst);
         } else {
-            if let Expr::Ident { name, .. } = expr.as_ref() {
+            if let Expr::Ident { name, .. } = expr {
                 if self.is_global_not_local(&name.name) {
                     self.emit_global_addr(dst, &name.name);
                 } else {
@@ -285,7 +285,7 @@ impl Codegen {
                     // (the stack slot where it was built), so we can
                     // use dst directly without spilling.
                     let expr_ty = expr.ty();
-                    let is_compound = matches!(expr.as_ref(), Expr::CompoundLit { .. });
+                    let is_compound = matches!(expr, Expr::CompoundLit { .. });
                     if matches!(expr_ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _))
                         && !is_compound
                     {
@@ -634,16 +634,8 @@ impl Codegen {
                     if matches!(inner, Type::LongDouble) {
                         self.emit_global_float_load_x87_offset(&name.name, 0, &inner);
                         self.emit_x87_fstp_at(13, result_off as i32, &inner);
-                        self.emit_global_float_load_x87_offset(
-                            &name.name,
-                            inner_sz as i32,
-                            &inner,
-                        );
-                        self.emit_x87_fstp_at(
-                            13,
-                            (result_off + inner_sz as i64) as i32,
-                            &inner,
-                        );
+                        self.emit_global_float_load_x87_offset(&name.name, inner_sz as i32, &inner);
+                        self.emit_x87_fstp_at(13, (result_off + inner_sz as i64) as i32, &inner);
                     } else {
                         let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                         // 加载实部: global → xmm0 → [r13+result_off]

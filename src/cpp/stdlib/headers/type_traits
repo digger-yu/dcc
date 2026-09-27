@@ -30,6 +30,14 @@ namespace std {
         typedef T type;
     };
 
+    // ===== 别名模板 (`*_t` 家族, [temp.alias]) =====
+    // 与标准库同形: `X_t<Args>` 就是 `typename X<Args>::type`.
+    // dcc 在 parser 的类型解析点就地展开 (见 CppParser::expand_alias_type),
+    // 因此使用点不会去实例化一个名为 `enable_if_t` 的类模板.
+    // (定义一律放在被引用的类模板之后, 与真实头文件一致.)
+    template <bool B, typename T, typename F> using conditional_t = typename conditional<B, T, F>::type;
+    template <bool B, typename T = void> using enable_if_t = typename enable_if<B, T>::type;
+
     // remove_const / remove_reference / remove_pointer:
     // 近似透传 (dcc 类型系统不携带 cv/引用限定参与模板匹配)
     template <typename T> struct remove_const {
@@ -46,6 +54,11 @@ namespace std {
     template <typename T> struct underlying_type {
         typedef T type;
     };
+
+    template <typename T> using remove_const_t = typename remove_const<T>::type;
+    template <typename T> using remove_reference_t = typename remove_reference<T>::type;
+    template <typename T> using remove_pointer_t = typename remove_pointer<T>::type;
+    template <typename T> using underlying_type_t = typename underlying_type<T>::type;
 
     // ===== 类型谓词 (type predicates) =====
 

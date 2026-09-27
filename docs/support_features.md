@@ -343,8 +343,9 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | dcc++ partial specialization | `template <T> class Foo<T*> {}` 偏特化匹配；多形参 pattern |
 | dcc++ 完整 concept 求值 | `sizeof(T)<=N` / `same_as<T,U>` / `derived_from<T,Base>`；解析 + 简化求值；运行时测试 `semantic_enum_type_traits_runtime` |
 | dcc++ enum 语义保留 | 常规 enum / scoped enum (`enum class`) / 匿名 enum；运行时测试验证枚举值与底层类型 |
-| dcc++ coroutines | `co_await` / `co_yield` / `co_return` Duff's device state machine + promise type deduction; runtime tests `cpp_coroutine_runtime` + `cpp_coroutine_co_await_runtime` |
-| dcc++ module BMF serialization | DCC_BMF_V1 text format; `to_bmf`/`from_bmf` round-trip; runtime tests `cpp_modules_bmf` + `cpp_module_cross_tu_import` + `cpp_module_partition_import_runtime` + ODR tests |
+| dcc++ coroutines | `co_await` / `co_yield` / `co_return` 真降级（`src/cpp/coroutine_lower.rs`）：协程帧 == promise 对象、局部状态提升为帧字段、挂起点重排为 switch+fallthrough 状态机、promise_type/awaiter 协议、同一 promise_type 多协程函数经帧内归属号路由；tests `cpp_coroutine_state_machine` + `cpp_coroutine_runtime` + `cpp_coroutine_co_await_runtime` + `cpp_coroutine_shared_promise_runtime`（均与 `g++ -std=c++20` 退出码对照） |
+| dcc++ module BMF 序列化 | `DCC_BMF_V1` 文本接口; `to_bmf`/`from_bmf` round-trip; M28 行格式向后兼容演进 (`E C` 布局带 `@class/@base:` + 逐成员访问级, `E F` 尾部 `@virtual/@const/@private`, `E T ... @body=` 携带模板原文); 导出/导入实体统一用 mangled 链接名作发射符号; tests `cpp_modules_bmf` + `cpp_module_cross_tu_import` + `cpp_module_partition_import_runtime` + `cpp_module_private_fragment_internal_linkage` + `cpp_module_cross_tu_private_access_rejected` + `cpp_module_cross_tu_template_runtime` + `cpp_module_cross_tu_virtual_runtime` + `cpp_module_mangled_linkage_no_name_collision` + `cpp_module_imported_polymorphic_ctor_not_duplicated` + ODR tests |
+| dcc++ 模块导出虚函数跨 TU | M28.5: `E C` 记基类 (`@base:`) 与 `@virtual`（沿基类不动点传播），导入端回放后虚调用打到派生 override；导入 TU **不发射** `_ZTV/_ZTI/_ZTS`、也**不定义**导入多态类的隐式 ctor/dtor（重放副本不写 vptr，会与导出 TU 的 weak 定义同名不同内容 → 链接顺序敏感段错），两者分别由 `ModuleLinkagePlan::drop_data` / `externalize` 执行; tests `cpp_module_cross_tu_virtual_runtime` + `cpp_module_imported_polymorphic_ctor_not_duplicated` |
 | dcc++ GCC 兼容运行时 | `__cxa_guard_acquire/release/abort` / `__dynamic_cast` / `initializer_list`（均 weak，多 TU 安全） |
 | dcc++ operator-> 重载链 | 类型名含 `Ptr` / `Wrapper` / `Iter` 识别 |
 | dcc++ 完整 RTTI dynamic_cast | 跨虚继承通过 vtable RTTI 查找 |
@@ -359,9 +360,9 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | dcc++ 模板偏特化排序 | M27: GCC/Clang 风格 specialization 排序，多候选时选最特化（精确匹配 > 指针模式 > 通配符） |
 | dcc++ 模板基类 | `class Derived : public Base<int>` 模板基类实例化 + 嵌入继承 |
 | dcc++ 模板友元 | `friend class Foo<T>` 模板友元声明解析 + 跳过 |
-| dcc++ `export template` | `export template <T> class Foo` 模板导出 + BMF 序列化 |
+| dcc++ `export template` | `export template <T> class Foo` 模板导出; M28.4: 模板**原文**随 `E T` 的 `@body=` 带走, 导入端注入解析 -> 跨 TU 实例化可调用成员 (test `cpp_module_cross_tu_template_runtime`) |
 | dcc++ concept 与 SFINAE 联动 | concept 定义注册 + requires 子句展开 + SFINAE 约束过滤 |
-| dcc++ module ODR 检查 | M27: `OdrChecker` 跨模块重复定义检测 + 冲突报告；`load_imported_modules` 加载 BMF 后自动执行 ODR 检查，冲突时输出 warning |
+| dcc++ module ODR 检查 | M27/M28.6: `OdrChecker` 比较键 = mangled 链接身份 (`_Z3foov` 与 `_Z3fooi` 不再撞键), 签名/类布局/模板原文不一致时报 **`error[E0103]` 硬错误** (非 warning); `import` 的 BMF 找不到时报 `error[E0104]`; tests `cpp_odr_conflict_rejected` + `cpp_odr_overload_not_conflict` + `cpp_module_import_not_found_diagnostic` |
 | dcc++ `virtual` 继承完整布局 | 传递虚基 DFS 去重、`__vbptr` + `__vbt_<C>` vbtable（vbase_offset 项）、虚基子对象嵌入对象尾部、自动默认 ctor 初始化 vbptr 并调用虚基 ctor、成员访问与上转型经 vbtable 运行时 this-adjust；同时修复 dcc C 后端 `ptr->field` 成员访问偏移 bug |
 | dcc++ 标准库模板实参 | `std::vector<int>` 等限定名模板实参语法解析 + 局部变量声明支持；std::vector<T> 为真正类模板，单态化由 `TemplateRegistry` 完成 |
 | dcc++ 动态 RTTI | typeinfo/vtable 生成 + 继承虚方法检测 + RTTI slot |

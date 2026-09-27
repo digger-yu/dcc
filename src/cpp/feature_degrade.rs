@@ -190,16 +190,100 @@ fn is_template_param(s: &str) -> bool {
         && !s.contains(' ')
 }
 
+/// 归一化约束表达式文本: 折叠连续空白 + 删除紧邻标点的空格.
+///
+/// parser 是按 token 重建 `requires` / concept 体的原文的, 因此约束文本里
+/// 会带着源码中的任意空格 (`sizeof ( T ) <= 8` / `Integral < T >`), 而下面
+/// 的 trait 求值器是**字符串前缀**匹配 (`sizeof(` / `is_same<` / `T::value`).
+/// 只删"至少一侧紧邻标点"的空格, 故 `unsigned int` / `long double` 这类
+/// 词间空格会被保留.
+pub fn normalize_constraint(cond: &str) -> String {
+    let is_punct = |c: char| matches!(c, '(' | ')' | '[' | ']' | ',' | '<' | '>');
+    // 1) 折叠空白 run 为单个空格, 并去掉首尾空白
+    let mut collapsed: Vec<char> = Vec::with_capacity(cond.len());
+    for c in cond.chars() {
+        if c.is_whitespace() {
+            if !collapsed.is_empty() {
+                collapsed.push(' ');
+            }
+            continue;
+        }
+        collapsed.push(c);
+    }
+    while collapsed.last() == Some(&' ') {
+        collapsed.pop();
+    }
+    // 2) 删除紧邻标点的空格
+    let mut out: Vec<char> = Vec::with_capacity(collapsed.len());
+    let mut i = 0usize;
+    while i < collapsed.len() {
+        let c = collapsed[i];
+        if c == ' ' {
+            let prev = *out.last().unwrap_or(&'\0');
+            let mut j = i;
+            while j < collapsed.len() && collapsed[j] == ' ' {
+                j += 1;
+            }
+            let next = collapsed.get(j).copied().unwrap_or('\0');
+            if !(is_punct(prev) || is_punct(next)) {
+                out.push(' ');
+            }
+            i = j;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out.into_iter().collect()
+}
+
+/// 反复剥掉整体被一层平衡括号包裹的括号: `((X))` → `X`.
+/// concept 展开会把引用替换成 `(概念体)`, 故求值前必须先拆这层包装.
+fn strip_wrapping_parens(text: &str) -> String {
+    let mut cur = text.trim().to_string();
+    loop {
+        let chars: Vec<char> = cur.chars().collect();
+        if chars.len() < 2 || chars[0] != '(' || *chars.last().unwrap() != ')' {
+            break;
+        }
+        let mut depth = 0i32;
+        let mut matched = None;
+        for (i, &c) in chars.iter().enumerate() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        matched = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match matched {
+            Some(idx) if idx == chars.len() - 1 => {
+                cur = chars[1..idx].iter().collect::<String>().trim().to_string();
+            }
+            _ => break,
+        }
+    }
+    cur
+}
+
 /// 求值类型 trait 条件 (SFINAE / enable_if 用), 无法判定时返回 None.
 /// 支持 (M18.x 简化，实参先经 ctx 替换):
 ///   - `std::is_same<T, U>::value` / `is_same<T, U>::value`
 ///   - `std::is_integral<T>::value` / `is_pointer<T>` / `is_class<T>` / `is_floating_point<T>`
-///   - `sizeof(T) <= N` / `>= N` / `== N` (复用 type_size_hint)
+///   - `sizeof(T) <= N` / `>= N` / `== N` / `< N` / `> N` / `!= N` (复用 type_size_hint)
 ///   - `T::value` (trait 常量)
 ///   - `!C` / `C && D` / `C || D` 组合
+///
 /// M28: 添加 void_t 检测模式 (`std::void_t<...>` 或 `void_t<...>`)
+/// M51: 入口先归一化空白 + 拆最外层括号, 使 token 重建的约束文本与概念展开
+/// 产生的 `(sizeof(T)<=8)` 都能被下面的前缀匹配识别.
 pub fn evaluate_trait_condition(cond: &str, ctx: &SfinaeCtx) -> Option<bool> {
-    let c = cond.trim();
+    let c = &strip_wrapping_parens(&normalize_constraint(cond));
     // void_t 检测：提取第一个参数并检查其有效性
     if let Some(void_inner) = extract_void_t_args(c) {
         // void_t<T>::value 当 T 有效时返回 true
@@ -225,30 +309,30 @@ pub fn evaluate_trait_condition(cond: &str, ctx: &SfinaeCtx) -> Option<bool> {
     if c == "false" {
         return Some(false);
     }
-    // sizeof(T) <= N / >= N / == N
+    // sizeof(T) <= N / >= N / == N / != N / < N / > N
     if let Some(rest) = c.strip_prefix("sizeof(") {
         if let Some(idx) = rest.find(')') {
             let ty = rest[..idx].trim().to_string();
             let after = rest[idx + 1..].trim();
             let resolved = ctx.lookup(&ty).unwrap_or(ty);
             let size = type_size_hint(&resolved) as isize;
-            if let Some(n) = after
-                .strip_prefix("<=")
-                .and_then(|s| s.trim().parse::<isize>().ok())
-            {
-                return Some(size <= n);
-            }
-            if let Some(n) = after
-                .strip_prefix(">=")
-                .and_then(|s| s.trim().parse::<isize>().ok())
-            {
-                return Some(size >= n);
-            }
-            if let Some(n) = after
-                .strip_prefix("==")
-                .and_then(|s| s.trim().parse::<isize>().ok())
-            {
-                return Some(size == n);
+            // M51: 按"长操作符优先"匹配, 否则 `<=` 会被 `<` 抢先误判.
+            // 缺 `<` / `>` / `!=` 时整条约束会退成 None(不可判定),
+            // 调用方按"保守放行"处理 —— `concept Never = sizeof(T) > 1000`
+            // 就会被当成满足, 本该"无匹配函数"的调用被静默接受.
+            for op in ["<=", ">=", "==", "!=", "<", ">"] {
+                let Some(n) = after.strip_prefix(op).and_then(|s| s.trim().parse::<isize>().ok())
+                else {
+                    continue;
+                };
+                return Some(match op {
+                    "<=" => size <= n,
+                    ">=" => size >= n,
+                    "==" => size == n,
+                    "!=" => size != n,
+                    "<" => size < n,
+                    _ => size > n,
+                });
             }
             return None;
         }
@@ -751,12 +835,16 @@ impl Concept {
 }
 
 /// 类型大小启发式 (M10 简化: 用于 concept 求值)
+///
+/// M51: 按 LP64 (x86_64 / aarch64 Linux, dcc 的 C++ 目标) 取 `long` = 8;
+/// 旧表把 `long` 算成 4 会让 `sizeof(T) <= 4` 之类约束对 `long` 误判为满足.
 fn type_size_hint(ty: &str) -> usize {
     match ty {
-        "char" | "bool" | "int8_t" | "uint8_t" => 1,
-        "short" | "int16_t" | "uint16_t" => 2,
-        "int" | "long" | "float" | "int32_t" | "uint32_t" => 4,
-        "long long" | "double" | "int64_t" | "uint64_t" | "void*" | "T*" => 8,
+        "char" | "bool" | "int8_t" | "uint8_t" | "signed char" | "unsigned char" => 1,
+        "short" | "int16_t" | "uint16_t" | "char16_t" => 2,
+        "int" | "float" | "int32_t" | "uint32_t" | "char32_t" | "wchar_t" => 4,
+        "long" | "long long" | "double" | "int64_t" | "uint64_t" | "void*" | "T*" => 8,
+        "long double" => 16,
         _ if ty.ends_with('*') => 8,
         _ if ty.ends_with("&") => 8,
         _ => 8, // 默认
@@ -1554,6 +1642,53 @@ mod tests {
         assert_eq!(evaluate_trait_condition("sizeof(T) <= 4", &ctx), Some(true));
         assert_eq!(evaluate_trait_condition("sizeof(T) >= 8", &ctx), Some(false));
         assert_eq!(evaluate_trait_condition("sizeof(T) == 4", &ctx), Some(true));
+    }
+
+    #[test]
+    fn sfinae_trait_sizeof_strict_ops() {
+        // M51: 缺 `<` / `>` / `!=` 时这些约束会返 None(不可判定), 调用方保守
+        // 放行 —— `concept Never = sizeof(T) > 1000` 会被当成满足, 本该
+        // "无匹配函数"的调用被静默接受 (g++ 交叉验证时发现).
+        let mut ctx = SfinaeCtx::new();
+        ctx.bind("T".to_string(), "int".to_string());
+        assert_eq!(evaluate_trait_condition("sizeof(T) < 8", &ctx), Some(true));
+        assert_eq!(evaluate_trait_condition("sizeof(T) > 4", &ctx), Some(false));
+        assert_eq!(evaluate_trait_condition("sizeof(T) != 4", &ctx), Some(false));
+        ctx.bind("T".to_string(), "long long".to_string());
+        assert_eq!(evaluate_trait_condition("sizeof(T) > 4", &ctx), Some(true));
+        assert_eq!(evaluate_trait_condition("sizeof(T) > 1000", &ctx), Some(false));
+        // 长操作符优先: `<=` 不得被 `<` 抢先误判
+        assert_eq!(evaluate_trait_condition("sizeof(T) <= 8", &ctx), Some(true));
+        // 空白不敏感 (parser token 重建出的文本带奇形怪状的空格)
+        assert_eq!(evaluate_trait_condition("sizeof( T ) > 4", &ctx), Some(true));
+    }
+
+    #[test]
+    fn type_size_hint_follows_lp64() {
+        // M51: dcc 的 C++ 目标是 LP64, `long` 是 8 字节; 旧表算成 4 会让
+        // `sizeof(T) <= 4` 对 `long` 误判为满足.
+        let mut ctx = SfinaeCtx::new();
+        for (ty, sz) in [("char", 1), ("short", 2), ("int", 4), ("long", 8), ("long double", 16)] {
+            ctx.bind("T".to_string(), ty.to_string());
+            assert_eq!(
+                evaluate_trait_condition(&format!("sizeof(T) == {sz}"), &ctx),
+                Some(true),
+                "{ty} 的大小应为 {sz}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_constraint_tightens_punctuation() {
+        // M51: parser 把约束重建为 token 文本 (逐字符带空格), 概念展开与
+        // trait 求值都靠 `sizeof(` / `is_same<` 这类前缀匹配, 必须先压粘标点.
+        assert_eq!(normalize_constraint("Small < T >"), "Small<T>");
+        assert_eq!(
+            normalize_constraint("  is_same < T , int > ::  value ").replace(' ', ""),
+            "is_same<T,int>::value"
+        );
+        // 标识符之间的空格必须保留, 否则 `long long` 会变成 `longlong`
+        assert_eq!(normalize_constraint("long   long"), "long long");
     }
 
     #[test]
