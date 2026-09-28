@@ -97,7 +97,8 @@ pub struct Config {
     pub parallel_codegen: bool,  // -O2+ 默认多线程并行 emit（DCC_NO_PARALLEL=1 关闭）
     pub jobs: Option<usize>,     // -j<N>: 多文件并行编译线程数 (None=auto)
     pub permissive: bool,        // -fpermissive：未知 typedef 降级为 int
-    pub raw_args: Vec<String>,   // 原始参数（sanitizer/LTO 探测）
+    pub cxx_native_mode: crate::cpp::feature_matrix::CxxNativeMode,
+    pub raw_args: Vec<String>, // 原始参数（sanitizer/LTO 探测）
 
     // 内置链接器相关（-pie / -shared / -flinker-output=）
     pub built_link: bool, // 走 src/link/ 全内置链接器而非 host ld -r
@@ -1299,6 +1300,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut target = TargetTriple::host();
     let mut freestanding = false;
     let mut permissive = false;
+    let mut cxx_native_mode = crate::cpp::feature_matrix::CxxNativeMode::default();
     let mut include_paths: Vec<PathBuf> = vec![];
     let mut system_paths: Vec<PathBuf> = vec![];
     let mut quote_paths: Vec<PathBuf> = vec![];
@@ -2227,6 +2229,17 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-std=gnu++23" | "-std=gnu++2b" => std = StdMode::GnuCpp23,
             "-ffreestanding" => freestanding = true,
             "-fpermissive" => permissive = true,
+            "--cxx-native" => {
+                i += 1;
+                let value = args
+                    .get(i)
+                    .ok_or_else(|| CliError::new("missing value after --cxx-native"))?;
+                cxx_native_mode = value.parse().map_err(|e: String| CliError::new(&e))?;
+            }
+            a if a.starts_with("--cxx-native=") => {
+                let value = &a["--cxx-native=".len()..];
+                cxx_native_mode = value.parse().map_err(|e: String| CliError::new(&e))?;
+            }
             "-I" => {
                 i += 1;
                 include_paths.push(PathBuf::from(
@@ -3067,6 +3080,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             parallel_codegen,
             jobs,
             permissive,
+            cxx_native_mode,
             raw_args: args.to_vec(),
             built_link,
             output_kind,
@@ -3195,6 +3209,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             parallel_codegen,
             jobs,
             permissive,
+            cxx_native_mode,
             raw_args: args.to_vec(),
             built_link: false,
             output_kind: LinkerOutputKind::Executable,
@@ -3336,6 +3351,11 @@ fn print_help() {
     println!("    -std=c99|gnu11|...  C standard (default gnu23)");
     println!("    -ffreestanding      freestanding (no libc)");
     println!("    -dump-ast           print AST and exit");
+    // C++ 原生后端开关 (方案 docs/cpp_native_backend_implementation_plan.md §5.1):
+    // 不在 help 里就等于没有落地 —— 用户与脚本需要能显式选路径并验证 native 覆盖率。
+    println!("    --cxx-native=<mode> C++ backend: auto (default, native C++ path; fallback to legacy if feature matrix says no) | off (legacy C-text) | on");
+    println!("                        on never falls back silently (unsupported => E0500)");
+    println!("                        -v prints the decision, fallback reason and path summary");
     println!("    -v, --verbose       verbose output");
     println!("    --version           show version");
     println!("    -h, --help          show this help");
