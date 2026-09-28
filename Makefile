@@ -11,11 +11,22 @@ all: build test-all kernel-full-build
 build:
 	cargo build --release
 
+# Tier 0 权威清单见 docs/tests_quality_system_plan.md §9，四条缺一即 Tier 0 不成立：
+#   1) cargo build --tests   —— 全部 test target 必须能构建
+#   2) cargo test --release  —— 6 个 target 全部测试通过
+#   3) check_fixtures.sh     —— fixture 门禁本体
+#   4) check_fixtures_selftest.sh —— 元门禁（证明 3 真的会红）
+# 失败即红 —— 不设 `|| true`，不做任何降级。
 test:
+	cargo build --tests
 	cargo test --release
+	DCC_REPO="$(DCC_REPO)" bash scripts/check_fixtures.sh
+	DCC_REPO="$(DCC_REPO)" bash scripts/check_fixtures_selftest.sh
 
+# test-all = Tier 0 全量 + examples 端到端冒烟（scripts/test_all.sh 只做薄编排，
+# 不复制任何断言逻辑；以前它没有任何调用点，此处接入）。门禁不在这里重复跑。
 test-all: test
-	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" bash scripts/check_fixtures.sh
+	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" bash scripts/test_all.sh
 
 torture-setup:
 	bash scripts/setup_torture.sh

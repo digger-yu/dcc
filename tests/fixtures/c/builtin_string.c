@@ -1,5 +1,10 @@
 /* Test: missing __builtin_* string/memory functions */
 
+/* `test_strnlen` / `test_strspn` / `test_strcspn` 的局部量写的是 `size_t`，
+ * 不包含 <stddef.h> 时 gcc 直接报 `unknown type name 'size_t'`（dcc 则预定义
+ * 了它，所以下方差异化用例能跑）—— 补上头文件让两侧都能编译。 */
+#include <stddef.h>
+
 /* __builtin_mempcpy: copy and return dst+n */
 void test_mempcpy(void) {
     char src[] = "hello";

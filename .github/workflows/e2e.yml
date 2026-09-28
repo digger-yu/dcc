@@ -1,8 +1,10 @@
 # 第一性原理: e2e 验证——每个 example 编译+运行，验证退出码
 #
-# 优化: 拆分为 build → test + e2e 三个 job, 并行执行.
-#   - test 失败不阻塞 e2e 验证, 反之亦然.
-#   - e2e 各步骤 continue-on-error, 确保全部执行并汇总到 Summary.
+# 优化: 拆分为 build → test / reproducibility / e2e 四个 job, 并行执行.
+#   - test 失败不阻塞 e2e, 反之亦然 (两个 job 各自独立挡合并).
+#   - e2e 各 step **不设** continue-on-error: 任一 example 编译/运行/退出码不符即 job
+#     变红（方案 §9 Tier 1 把 "End-to-end compile and run" 列为门禁）; Summary step
+#     仍用 `if: always()` 保留全部 rc 明细, 但它不再充当掩盖失败的出口。
 
 name: dcc-e2e
 
@@ -51,8 +53,25 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Tier 0 第 1 项 (§9): 先显式构建全部 test target（含 6 个 integration target
+      # 与 lib test）, 让测试代码的编译错误与断言失败分成两类信号。
+      - name: Build all test targets
+        run: cargo build --tests
+
       - name: Run cargo tests (unit + integration + error snapshots)
         run: cargo test --release
+
+      # Tier 0 硬门禁 (docs/tests_quality_system_plan.md §9): fixture 引用完整性
+      # 门禁本体 + 门禁自身的反向自测（元门禁, §8.3）。
+      # 刻意放在 cargo test 之后: 两个脚本只读源码与 fixture 路径, 不依赖构建产物,
+      # 但门禁一旦 exit 1 就立即终止 job —— 排在后面才能保证 cargo test 的结果先被
+      # 记录, 避免「门禁红」掩盖「测试也红」的诊断信息。
+      # 本 step 不设任何容错/跳过标记（方案 §9: step 级硬失败）—— 任一脚本 exit 1
+      # 即整个 job 变红, 挡合并。
+      - name: Fixture gate + gate selftest
+        run: |
+          bash scripts/check_fixtures.sh
+          bash scripts/check_fixtures_selftest.sh
 
   # 可重现构建门禁: 同一二进制、同一输入连跑多次, 产物字节必须全等。
   # 与人工 golden diff 互补: golden 抓不到"顺序置换"(HashMap 迭代序泄漏会产生
@@ -113,7 +132,6 @@ jobs:
           ./bin/dcc --version
 
       - name: Compile hello.c
-        continue-on-error: true
         id: hello
         run: |
           ./bin/dcc -std=gnu23 -o hello examples/basics/hello.c
@@ -124,7 +142,6 @@ jobs:
           test $rc -eq 42
 
       - name: Compile arith.c
-        continue-on-error: true
         id: arith
         run: |
           ./bin/dcc -std=gnu23 -o arith examples/basics/arith.c
@@ -135,7 +152,6 @@ jobs:
           test $rc -eq 23
 
       - name: Compile control.c
-        continue-on-error: true
         id: control
         run: |
           ./bin/dcc -std=gnu23 -o control examples/basics/control_flow.c
@@ -146,7 +162,6 @@ jobs:
           test $rc -eq 100
 
       - name: Compile call.c
-        continue-on-error: true
         id: call
         run: |
           ./bin/dcc -std=gnu23 -o call examples/pointers/call_by_assign.c
@@ -157,7 +172,6 @@ jobs:
           test $rc -eq 20
 
       - name: Test error diagnostics
-        continue-on-error: true
         id: errdiag
         run: |
           out=$(./bin/dcc -std=gnu23 -o /tmp/should_fail examples/advanced/bad_syntax.c 2>&1 || true)

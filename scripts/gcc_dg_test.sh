@@ -29,7 +29,7 @@ if [[ -d "$DG_DIR/gcc/testsuite/gcc.dg" ]]; then
 fi
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 VERBOSE="${VERBOSE:-}"
-SKIP_FILE="$REPO_ROOT/tests/gcc_dg_skip.txt"
+SKIP_FILE="$REPO_ROOT/tests/skip/gcc_dg_skip.txt"
 SUB="${1:-all}"
 
 # ── 解析命令行参数 ──

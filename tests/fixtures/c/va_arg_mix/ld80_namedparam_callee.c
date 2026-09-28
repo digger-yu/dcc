@@ -1,7 +1,11 @@
 /* 跨编译器传/收具名 long double 形参：槽内编码与返回寄存器两处不符。
  *
  * 本用例由 gcc caller 编译，dcc 编译 callee（`--mix`），另一方向同理。
- * 实测：dcc callee + gcc caller → SIGSEGV(139)；gcc callee + dcc caller → 1。
+ * 实测（三处缺陷全部修复后）：四个方向 —— gcc|gcc、dcc|dcc、dcc callee+gcc
+ * caller、gcc callee+dcc caller —— 退出码均为 0。修复前的历史症状（dcc
+ * callee + gcc caller → SIGSEGV(139)；gcc callee + dcc caller → 1）已由
+ * `tests/integration/c_abi_vararg.rs::va_arg_mix_ld80_namedparam_cross_tu_gcc_interop`
+ * 常驻钉住。
  *
  * GCC 真值（objdump 复核，勿用 dcc -S）：
  *   caller:  lea -0x10(%rsp),%rsp ; fstpt (%rsp)      每个实参 16 字节栈槽，
@@ -25,7 +29,7 @@
  *      须在入口降级：`fldt [入参槽]` → `fstpl [局部槽]` 并把局部槽高 8 字节清零
  *      （dcc 内部仍按"低 8 字节 f64 + 高 8 零"表示，见 `emit_ld80_narrow_to_xmm0`
  *      之外的 float.rs 注释）。
- *   3. 【仍未修，根因已定位】返回值。`abi/tyclass.rs:428` 的
+ *   3. 【已修】返回值。`abi/tyclass.rs:428` 的
  *      `needs_memory_return = classes_force_mem(abi_classes(ty))`，而
  *      `abi_classes(long double) == [X87]`，`classes_force_mem` 把
  *      `Memory | X87 | X87Up | ComplexX87` 归为同一类。但 SysV 不如此：
@@ -42,7 +46,7 @@
  *      消费点有两份：`emit/expr/call.rs:102` 与它在 `dispatch.rs:2118` 的影子
  *      副本，必须同步。-mno-sse 路径下值本就在 st(0)，需单独看，不能直接套用 b/c。
  *
- * 当前状态：第 1、2 点已修（四方向里三个绿），仅余第 3 点。
+ * 当前状态：第 1、2、3 点均已修复，四方向全绿。
  * 判据：callee 把两个形参的整数部分写进全局，caller 逐项判定并返回不同非零码。
  */
 typedef __builtin_va_list va_list;

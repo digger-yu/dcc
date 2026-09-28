@@ -16,14 +16,18 @@ echo "Results will be stored in: $RESULTS_DIR"
 echo ""
 
 # Benchmark categories
+# 路径已对齐到磁盘上真实存在的夹具/示例: 旧的 tests/fixtures/{basic,expressions,control,memory}/
+# 布局早已不存在(门禁报 7 个 MISSING), 本脚本此前对全部 7 项都只走
+# "file not found -> skip" 分支, 一个数据都没采到却仍打印 "Baseline Collection Complete"。
+# 现在逐项按语义等价选型, 全部经 dcc 实验可编译(见下方 rc 判定)。
 BENCHMARKS=(
-    "tests/fixtures/basic/add.c:simple_add"
-    "tests/fixtures/basic/subtract.c:basic_subtract"
-    "tests/fixtures/expressions/binary_ops.c:binary_operations"
-    "tests/fixtures/control/if_test.c:if_else_branching"
-    "tests/fixtures/control/while_loop.c:loop_iteration"
-    "tests/fixtures/expressions/casts.c:type_casting"
-    "tests/fixtures/memory/array_access.c:array_indexing"
+    "examples/basics/arith.c:simple_add"
+    "examples/basics/compound_assign.c:basic_subtract"
+    "examples/basics/logic.c:binary_operations"
+    "examples/basics/switch.c:if_else_branching"
+    "examples/basics/control_flow.c:loop_iteration"
+    "examples/floats/float_cast.c:type_casting"
+    "examples/structs/global_array.c:array_indexing"
 )
 
 echo "Running compilation benchmarks..."

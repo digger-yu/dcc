@@ -1,5 +1,13 @@
 /* 测试: 结构体字段级 __attribute__((aligned(N))) */
 
+/* 注意：本夹具在 gcc 下**故意不可编译** —— 下面的
+ * `_Static_assert(sizeof(struct packed_aligned) == 5)` 记录的是 dcc 当前的
+ * packed/字段 aligned 交互语义（packed 把对齐压到 1，得 5）；gcc 认为字段上的
+ * `aligned(8)` 优先于结构体上的 `packed`，实测给 16（b 落在偏移 8）。除这一个
+ * 结构外，其余八个布局两侧完全一致（basic=12 large=32 default=32 multi=16
+ * ptr=32 array=24 outer=16）。差异已登记为待裁决项，不要为了“能差分”而把
+ * 该断言改成两边都成立的不等式——那会抹掉唯一能抬出这个差异的地方。 */
+
 /* 基本字段对齐: char 自然对齐 1, 但 aligned(4) 强制 4 字节对齐 */
 struct basic {
     char a;
@@ -83,4 +91,11 @@ int test_field_aligned(void) {
     if (((unsigned long)&la.y & 15) != 0) return 2; /* la.y 应该 16 字节对齐 */
     
     return 0;
+}
+
+/* 入口：上面所有布局约束要么在 `_Static_assert`（编译期）里，要么在
+ * `test_field_aligned` 的运行期地址检查里。没有 `main` 时这些运行期检查
+ * 从来没被执行过。 */
+int main(void) {
+    return test_field_aligned();
 }

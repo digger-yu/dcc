@@ -20,15 +20,23 @@ return 1;` 没有触发（rc=0 假绿）。
   所以看似不触发。把 T3 判据改成 `!= 99.0` 后，仅 T3+T8 即可稳定复现。
 
 本文件现位于 `../c/flag_clobber_frame.c`（绿灯夹具），并注册为
-`tests/integration.rs::flag_clobber_frame`，断言 stdout 含 `FAIL:`
+`tests/integration/c_asm.rs::flag_clobber_frame`，断言 stdout 含 `FAIL:`
 （自证 `ok = 0` 执行过）且 **rc == 1**。夹具中的 `!= 99.0` 仍是**故意的
 触发器**，不要"修回" `10.0`，否则 FAIL 分支不执行、测试失去意义。
 
-本目录当前已无 xfail 用例；保留目录与本文档作为后续跨领域已定位未修
-缺陷的存放约定。
+## `ld_global_read.c` —— ✅ 已修复，已迁移到 `c/`
 
-## `ld_global_read.c`（未修）
+原缺陷：`long double` **全局量**的读侧仍发 `movsd`（只取 80-bit 对象的低 8 字节当 f64），
+读回 `-nan`；发射侧当时已修（`.data` 与 gcc 逐字节一致）。判据 `r` 当时 =14（缺 bit0）、rc=1。
 
-`long double` 全局量读侧仍发 `movsd`（只取 80-bit 对象的低 8 字节当 f64），读回 `-nan`。
-发射侧已修：`.data` 现在与 gcc 逐字节一致。判据 r 当前 =14（bit0 缺），修好后应为 15、rc=0。
-根因、两侧反汇编与下一步见 `docs/longdouble_80bit_migration.md`。
+- **现状（2026-09-28 实测）**：读侧已改回 x87 `fldt`，`dcc -std=gnu23` 编译链接运行得
+  `r=15 want=15`、`gh=1.000000000000000000000000000`、无 `-nan`、**rc=0** —— 四项判据全真。
+- **处置**：按本 README 已有的 `flag_clobber_frame.c` 先例，夹具 `git mv` 回 `tests/fixtures/c/ld_global_read.c`，
+  用例从「断言失败」改为「钉住修好后的具体值」的不得回退门（同时管住两侧：`.data` 里必须是真 80-bit
+  位型；`<main>` 与链接产物里读 `<gh>` 必须是 `fldt` 而不是 `movsd`），落点
+  `tests/integration/c_lang.rs::ld_global_read_long_double_uses_80bit_load_and_exact_data`（主体：x87 80-bit
+  数据布局与装载，属通用 C 语义簇）。
+- **历史根因与两侧反汇编对照**见 `docs/longdouble_80bit_migration.md`。
+
+本目录当前已无 xfail 用例（§7.1 的 `c_xfail/` = 已知预期失败）；保留目录与本文档作为
+后续跨领域已定位未修缺陷的存放约定。

@@ -9,13 +9,20 @@
 
 use std::process::Command;
 
-fn dcc() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_dcc"))
-}
+// 驱动启动与夹具路径统一复用公共 harness（§6.2 profile.rs 附项），不再自带一份。
+//
+// `dead_code` 是**结构性的**，不是遗漏：harness 是单一入口、被多个 test target
+// （`integration` 与本 `profile`）共用的真源，而每个 target 只用到其中一部分助手
+// 属预期设计 —— ELF64 解析、C++ 前端对照键等条目不属于 profile 的覆盖面（本文实测
+// 为 63 条 `is never used/constructed`）。unused_imports 已在声明点
+// `tests/common/harness.rs` 就地放宽，此处不再重复压制。
+#[path = "common/harness.rs"]
+#[allow(dead_code)]
+mod harness;
 
-fn fixtures() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
-}
+// 别名保留 profile 原有调用点写法，避免改动任何测试正文与断言。
+use harness::dcc_cmd as dcc;
+use harness::fixtures_dir as fixtures;
 
 fn profile_src() -> std::path::PathBuf {
     fixtures().join("c/profile.c")

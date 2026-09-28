@@ -167,7 +167,7 @@ all_skips=$(echo "$all_skips" | sed '/^$/d')
 if [[ -n "$all_skips" ]]; then
     echo "## Skipped Tests"
     echo ""
-    echo "See [gcc_dg_skip.txt](tests/gcc_dg_skip.txt) for manually skipped items."
+    echo "See [gcc_dg_skip.txt](tests/skip/gcc_dg_skip.txt) for manually skipped items."
     echo ""
 
     # 按 skip 原因分类统计

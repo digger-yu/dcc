@@ -152,3 +152,6 @@ logs/
 *.log
 phase*_analysis_complete.txt
 compile_output.txt
+
+# 本地迁移/调试暂存目录（不进入提交面）
+.work_tmp/

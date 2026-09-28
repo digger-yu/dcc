@@ -381,7 +381,7 @@ bash scripts/setup_torture.sh     # 下载测试集
 bash scripts/torture_test.sh all  # 运行全部测试
 ```
 
-跳过列表: `tests/torture_skip.txt` 包含已知无法修复的测试（多文件测试、缺失 libc 函数等）。
+跳过列表: `tests/skip/torture_skip.txt` 包含已知无法修复的测试（多文件测试、缺失 libc 函数等）。
 
 ## 11. 交叉编译
 

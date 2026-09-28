@@ -12,6 +12,14 @@ template<> struct is_integral<long> : true_type {};
 
 // is_floating_point trait  
 template<typename T> struct is_floating_point : false_type {};
+// 夹具自检修复 (§7.4-B 挂载时发现的夹具自身缺陷): 原先只有主模板 (一律 false),
+// 而 main() 里 `test_enable_if_float(3.14)` 用 double 实例化
+// `typename = typename enable_if<is_floating_point<T>::value, void>::type` 时,
+// `enable_if<false, void>` 没有成员 `type` —— 按 SFINAE ([temp.deduct]/8) 该候选被剔除,
+// 于是没有任何可行候选: g++ -std=c++20 与 dcc native 后端给出**同一**拒收结论。
+// 所以旧文件不是标准 C++, 不能当正例; 补上 double 偏特化后才真的走到
+// "重载集里唯一可行候选被选中" 那一步。
+template<> struct is_floating_point<double> : true_type {};
 template<typename T> struct is_pointer : false_type {};
 template<typename T> struct is_pointer<T*> : true_type {};
 

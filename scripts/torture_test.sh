@@ -18,7 +18,7 @@ DCC="${DCC:-$REPO_ROOT/target/release/dcc}"
 TORTURE_DIR="${TORTURE_DIR:-$REPO_ROOT/tests/gcc-torture}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 VERBOSE="${VERBOSE:-}"
-SKIP_FILE="$REPO_ROOT/tests/torture_skip.txt"
+SKIP_FILE="$REPO_ROOT/tests/skip/torture_skip.txt"
 
 SUB="${1:-all}"
 SUITE_DIR="$TORTURE_DIR/gcc/testsuite/gcc.c-torture"

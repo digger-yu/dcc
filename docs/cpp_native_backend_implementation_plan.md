@@ -629,7 +629,7 @@ pub struct ThisAdjust {
   全特化」两条都命中不同 key。
 - `tests/fixtures/cpp/template_depth.cpp` 的 16 层 `Wrap<Wrap<...>>`
   实例化次数 = 16 (不重复)。
-- 现有 `tests/cpp_hir_legacy_correspondence.rs` 的 legacy 对照路径
+- 现有 `tests/integration/cpp_runtime.rs` 的 legacy 对照路径
   不受影响 (缓存只对 native path 生效)。
 
 风险与缓解:
@@ -851,7 +851,7 @@ pub struct ThisAdjust {
 - 在 `tests/fixtures/cpp/template_arg.cpp` / `concept.cpp` /
   `template_specialization.cpp` / `cpp20_features.cpp` 上各跑一次
   `can_compile_native`,把它们加进
-  `tests/driver_cxx_native_cli_contract.rs` 的
+  `tests/integration/cpp_runtime.rs` 的
   `default_and_on_use_the_native_path` 旁路 (与 `PLAIN_CLASS` 同级)。
 - 把 Stage 8 修过的「依赖名代入」 `NtExpr` / `TplMember` 路径暴露为
   `CppFeature::DependentTemplateArg`,独立登记 (不在 `Concept` 里重复),
@@ -898,7 +898,7 @@ pub struct ThisAdjust {
 - 把 verbose 输出从 `c++ path summary: native=N legacy=L` 扩展为
   `c++ path summary: native=N legacy=L fallback[feature_a: 3, feature_b: 1]`,
   与 `PathStats::summary()` 的格式完全一致;要求
-  `tests/driver_cxx_native_cli_contract.rs::off_forces_legacy_with_visible_decision_and_summary`
+  `tests/integration/cpp_runtime.rs::off_forces_legacy_with_visible_decision_and_summary`
   同步更新断言文本。
 - 在 `path_control::decide` 的 `Auto` 分支记录「矩阵说不能」的具体
   feature 而不只是 `unsupported features: ...`;
@@ -910,7 +910,7 @@ pub struct ThisAdjust {
 
 验收:
 
-- `tests/driver_cxx_native_cli_contract.rs::off_forces_legacy_with_visible_decision_and_summary`
+- `tests/integration/cpp_runtime.rs::off_forces_legacy_with_visible_decision_and_summary`
   在更新后的断言文本下通过。
 - 跑 `tests/fixtures/cpp/` 下所有 `.cpp` (用 `--cxx-native=auto`),
   verbose 输出的 `fallback[]` 为空 (除非显式触发不支持特性)。
@@ -963,9 +963,9 @@ pub struct ThisAdjust {
   `nullptr` 的 C 文本。
 - 默认编译 (无 feature) 下,`strip_cpp_keywords` 不出现在
   `lower_to_c` 调用图上 (`cargo bloat --bin dcc` 或单元测试
-  `tests/legacy_strip_not_in_main_path.rs` 检查
+  `tests/integration/cpp_runtime.rs` 检查
   `cpp::legacy::lower_to_c` 内部不调 `strip_cpp_keywords`)。
-- `tests/driver_cxx_native_cli_contract.rs::off_forces_legacy_with_visible_decision_and_summary`
+- `tests/integration/cpp_runtime.rs::off_forces_legacy_with_visible_decision_and_summary`
   在默认 feature 下走 legacy 仍成功 (off 模式不退化)。
 
 风险与缓解:
@@ -998,7 +998,7 @@ pub struct ThisAdjust {
   `cpp20_features.cpp` / `auto_deduction.cpp` / `template_arg.cpp`
   加入 `tests/integration.rs` 的 C++ 集成测试列表,断言 native 路径下
   编译并退出码 = 0。
-- 在 `tests/driver_cxx_native_cli_contract.rs` 中新增
+- 在 `tests/integration/cpp_runtime.rs` 中新增
   `native_path_passes_all_template_fixtures`: 跑
   `tests/fixtures/cpp_abi_template/` 两个夹具 + 上述顶层 fixture,
   断言全部 `native=1 legacy=0 fallback[]`。
@@ -1070,7 +1070,7 @@ lower 主路径 (仅保留 `legacy::template_text` 的「按 fixture 文本对�
   (保留上一行 `native=N legacy=L fallback[...]`),让 verbose 一眼能看出
   「为何不退回 legacy」——在 `native=100% legacy=0 fallback[]` 时该行
   不打印。
-- `tests/driver_cxx_native_cli_contract.rs::default_and_on_use_the_native_path`
+- `tests/integration/cpp_runtime.rs::default_and_on_use_the_native_path`
   旁加 `default_mode_is_auto_in_help`: 断言 `--help` 输出含
   `auto (default)`。
 
@@ -1078,8 +1078,8 @@ lower 主路径 (仅保留 `legacy::template_text` 的「按 fixture 文本对�
 
 - 默认编译 (无 feature) 下,`cargo build` 产物不再含
   `strip_cpp_keywords` / `remove_template_definitions` 的符号
-  (`nm` 检查或 `tests/legacy_strip_not_in_main_path.rs`)。
-- `tests/driver_cxx_native_cli_contract.rs` 全套通过
+  (`nm` 检查或 `tests/integration/cpp_runtime.rs`)。
+- `tests/integration/cpp_runtime.rs` 全套通过
   (含新增 `default_mode_is_auto_in_help`)。
 - `tests/integration.rs` 全套通过。
 - `scripts/cpp_abi_gcc_cross_check.sh` 全量绿。
@@ -1117,15 +1117,15 @@ lower 主路径 (仅保留 `legacy::template_text` 的「按 fixture 文本对�
 |---|---|---|
 | Stage 0 | 已完成 | 能力矩阵不变式 + `--cxx-native=off/on/auto` + verbose 路径审计 + 回归基线 |
 | Stage 1 | 已完成 | `src/cpp/lower.rs` 从 14235 行降到 ≈7400 行, C 文本主路径的 65 个 pass 按职责搬进 `src/cpp/legacy/`:`text_scan` (字节级扫描原语) / `runtime` (typedef 与运行时符号修补) / `layout` (struct 布局与成员表模拟) / `expr` (表达式与语句形态降级) / `name_flatten` (限定名展平) / `template_text` (模板文本实例化) / `decl_cleanup` (顶层声明区清理)。`Lower::lower_decls` / `legacy::lower_to_c` 入参不变, driver 调用点不变; 搬动后的行为门已验证 (全量测试 + 夹具交叉验证与搬动前一致)。顺带修掉搬动中暴露的一处既存缺陷: `strip_attributes` / `strip_gcc_attributes` 注释承诺保留 `__attribute__((weak))`, 但只比一层括号 -> 规范写法 (双括号) 下从未生效, 现按括号配对再剥一层 (`legacy::decl_cleanup::is_weak_attribute`) |
-| Stage 2 | 已完成 | sema → HIR 入口、`DCC_CXX_HIR_DUMP`/`DCC_CXX_ABI_DUMP`/`DCC_CXX_IR_DUMP` 可用; 类外成员函数/构造/析构定义已绑定 (复用同一符号, 不再分裂成两个虚槽); 自由函数重载已补全: 链接名按签名去重 (`symbol_link_name` + `free_function_has_rival`, 否则两份定义得到同名符号)、调用点按实参类型选定候选 (`pick_best_candidate`, 含 ADL 候选集)、纯 ADL 调用可用 (`find_namespace_scope` 不再是恒 None 的桩, 类参数的关联命名空间由 `adl_namespaces_for_type` 沿作用域链取); **与 legacy 的自动对照已落地**: `tests/cpp_hir_legacy_correspondence.rs` 以同一份 AST 里「写了函数体的实体」为基准集, 双向断言 native 登记 / legacy 发出 / legacy 不得多出 native 不认识的普通命名定义 (链接名不直接比: 两侧命名口径尚不一致, 比对轴取「角色 + 实体基名」); 该轮同时修掉两条真缺口: 解析器只认一段限定名 (`ns::Cls::method(` 整条降级 Opaque, 现由 `looks_like_out_of_class_def` 按 [basic.lookup.qual] 逐段走) 与 sema 把 `ns::f(...)` 的命名空间前缀当成类名 (现按 [basic.def.outside] 分流到 `build_out_of_line_ns_free_fn` 并复用命名空间里那条声明的符号), 见夹具 `cpp_abi_lifecycle/namespace_qualified_out_of_line_definitions.cpp` |
-| Stage 3 | 已完成 | native lower 端到端 + CLI 三态 (真实命令行契约由 `tests/driver_cxx_native_cli_contract.rs` 钉住); `cpp_abi_*` 夹具 28/28 与 g++ 一致 (`scripts/cpp_abi_gcc_cross_check.sh`) |
+| Stage 2 | 已完成 | sema → HIR 入口、`DCC_CXX_HIR_DUMP`/`DCC_CXX_ABI_DUMP`/`DCC_CXX_IR_DUMP` 可用; 类外成员函数/构造/析构定义已绑定 (复用同一符号, 不再分裂成两个虚槽); 自由函数重载已补全: 链接名按签名去重 (`symbol_link_name` + `free_function_has_rival`, 否则两份定义得到同名符号)、调用点按实参类型选定候选 (`pick_best_candidate`, 含 ADL 候选集)、纯 ADL 调用可用 (`find_namespace_scope` 不再是恒 None 的桩, 类参数的关联命名空间由 `adl_namespaces_for_type` 沿作用域链取); **与 legacy 的自动对照已落地**: `tests/integration/cpp_runtime.rs` 以同一份 AST 里「写了函数体的实体」为基准集, 双向断言 native 登记 / legacy 发出 / legacy 不得多出 native 不认识的普通命名定义 (链接名不直接比: 两侧命名口径尚不一致, 比对轴取「角色 + 实体基名」); 该轮同时修掉两条真缺口: 解析器只认一段限定名 (`ns::Cls::method(` 整条降级 Opaque, 现由 `looks_like_out_of_class_def` 按 [basic.lookup.qual] 逐段走) 与 sema 把 `ns::f(...)` 的命名空间前缀当成类名 (现按 [basic.def.outside] 分流到 `build_out_of_line_ns_free_fn` 并复用命名空间里那条声明的符号), 见夹具 `cpp_abi_lifecycle/namespace_qualified_out_of_line_definitions.cpp` |
+| Stage 3 | 已完成 | native lower 端到端 + CLI 三态 (真实命令行契约由 `tests/integration/cpp_runtime.rs` 钉住); `cpp_abi_*` 夹具 28/28 与 g++ 一致 (`scripts/cpp_abi_gcc_cross_check.sh`) |
 | Stage 4 | 已完成 | 单一布局真源 (`sizeof`/填充/虚基提升/primary base 复用); ctor-initializer 保留完整实参列表 (`CppCtorInit`); 隐式构造/析构按成员真实需求合成; 委托构造; 全局对象 `.init_array` + `__cxa_atexit`; **类外构造/析构定义** (`B::B(int a) : x(a) {}` / `B::~B() {}` / `ns::C::C(int)`) 解析并复用同一符号 (解析器按声明符边界停住限定链, 见 `parse_qualified_type_name`); **自动存储期析构**按作用域帧在声明点登记, 块末 / `return` / `break` / `continue` 四条出口共用同一批析构 (见 `sema::DtorFrame`); 类类型局部量的直接初始化不再经过临时量 (避免同一对象析构两次); 见 `cpp_abi_lifecycle` 夹具 (`out_of_line_ctor_dtor`、`automatic_storage_destruction`) |
 | Stage 5 | 已完成 | primary/secondary vtable、offset-to-top、非虚偏移 thunk 全部由布局层分配; 见 `cpp_abi_virtual` 夹具 |
 | Stage 6 | 已完成 | 虚基 vbtable/chain vftable + this-adjust thunk; `hir::ThisAdjust::vbase_index` 已删除, 虚基调整只以 `VBaseAdjust` 表达, lowering 无拒绝路径 |
 | Stage 7 | 已完成 | `typeid` 引用形态 (`const std::type_info&`)、`name()`/`before()`/`operator==`、`dynamic_cast` 命中与落空均与 g++ 一致; 见 `cpp_abi_rtti` 夹具。根因修复: 命名空间按 [namespace.def]/2 重开语义复用同一符号与作用域 |
 | Stage 8 | 进行中 | 模板迁入 sema 已展开为子阶段 8.1-8.7 详细计划 (见正文);锚点: `Sema::register_template_decl` / `register_partial_specialization` / `register_concept` / `pick_partial` / `evaluate_constraint` / `instantiation_worklist` / `instantiate_class` / `instantiate_fn` / `is_dependent_type` / `deduce_function_template_args` / `resolve_overload_for_template_call` / `can_serve_features` 12 个新入口对应源码实体。现有能力已具备基础: 类模板**全特化**完整建模 (`CppDecl::FullSpec { specific_args, class: ClassDecl }` —— 特化实参取自名字之后的 `<...>`、特化体自己的基类子句与全部成员种类原样保留、实例名与主模板路径同一命名), `TplMember`(`X<Args>::typedef成员`) 展开为别名目标类型而非臆造的类名; **模板实例的编译期常量**已可按语义取值 (`sema::tpl_instance_constant_value` / `class_constant_member`: 先按实例化名定位已登记的类符号, 本类找不到就沿基类链向上 —— traits 的 `value` 几乎总是从 `true_type`/`false_type` 继承来的), 并且 `Member(Ident(类名), m)` 形式的**限定名**不再被当对象成员访问; 表达式语境的**依赖名替换**已补齐 (`template::substitute_expr` 已有 `TplStaticAccess`/`TemplateIdent` 分支, 于是 `ptr_rank<int>` 与 `ptr_rank<int*>` 读到正确的替换实参), 实例化触发点已覆盖 global var init / ctor-initializer / expression 三种上下文 (`native::collect_template_refs_from_decl`)。仍缺: (8.1) `TemplateRegistry` 改造为 `Sema` 镜像并避免双源漂移; (8.2) `class_constant_member` 增加 `is_template_param_context` 入参防止依赖名被误折, `MangleType::NtExpr` 的 `substitute_type` 分支补齐; (8.3) `Sema::resolve_overload_for_template_call` 候选形参替换后做 `pick_best_candidate`; (8.4) `Sema::instantiation_worklist` 把 ctor-initializer / global var init 上下文纳入 odr-used 工作集; (8.5) 类与函数用同一张 `inst_cache` 但 key 前缀区分 (`class:` / `fn:`); (8.6) 跨偏特化组 `O(P²)` 的"模板参数推断"次序判断 (现仅同组 specificity 评分); (8.7) concept 体 trait 折叠 (`class_constant_member` 调用) 与简单 `requires` 求值。三处 fixture 缺口: `tests/fixtures/cpp/enhanced_sfinae.cpp` 的 `enable_if<is_pointer<T*>::value, int>::type` 偏特化匹配、`!is_pointer<T>::value` 解析期不降级、stdlib 头 `<deque>` (`tests/fixtures/cpp/g11_template_templates.cpp` 缺头) |
 | Stage 9 | 已完成 | zero-cost EH 全链路替换 SJLJ: IR 有 `Stmt::Invoke`/`Stmt::EhLandingPad` 与 `InstKind::Invoke{unwind, actions}`; x86_64 后端发 `.gcc_except_table`(LSDA) + `.eh_frame` 的 `zPLR` CIE/FDE (personality = `DW.ref.__gxx_personality_v0`, weak 槽) + `.eh_frame_hdr`, 与 g++ 产物逐字节同构; throw = `__cxa_allocate_exception` + ctor(invoke) + `__cxa_throw`; catch = 落地垫 + selector 分派 + `__cxa_begin_catch`/`__cxa_end_catch`; 清理区间按「构造完成语句 → 正常析构语句」的平铺清理链登记 (语法块边界不可靠: sema 把 `D d(1);` 拆成 Decl+Construct, 而 Destroy 发在外层兄弟语句); `_Unwind_Resume` 需 `lp=0/action=0` 裸区间而 `__cxa_rethrow` 需完整 action 链 (均由 libstdc++ 反汇编 + g++ 产物定案)。证据: `cpp_abi_eh` 夹具 6 个 + 16+ 个 EH 场景与 g++ 逐项一致。旧 `gcc_compat.rs` 的 SJLJ C 运行时已删除 (无任何引用点) |
-| Stage 10 | 进行中 | driver 切换与 legacy 删除已展开为子阶段 10.1-10.6 详细计划 (见正文);锚点: `lower_ir::symbol_link_name` 加 `mangled_override` / `ModuleLinkagePlan::mangled_name_of` 反向查询 / `Sema::can_serve_features` 二次校验 / `PathStats::record_unsupported_feature` / `legacy-strip-debug` 与 `legacy-text-lowering` 两组 cargo feature / `cpp::driver::compile_cpp` cfg 门控 / `cpp::legacy::*` 整体 cfg 门控 7 处源码改动。现有能力已具备基础: `--cxx-native=off/on/auto` 三态在 driver 真实落地 (`/root/dcc/src/cpp/driver.rs::run_cpp_driver`), `cpp_abi_*` 28/28 夹具与 g++ 一致 (`scripts/cpp_abi_gcc_cross_check.sh`), CLI 契约由 `tests/driver_cxx_native_cli_contract.rs` 钉住, Stage 9 旧 `gcc_compat.rs` SJLJ C 运行时已删除, `auto` 默认值由 `cxx_native_mode_default_is_auto` 锁住。仍缺: (10.1) `ModuleLinkagePlan::mangled_name_of` 反向查询 + `symbol_link_name` 加 `mangled_override: Option<&str>` 入参, 跨 TU 模块导出/导入的链接冲突实例如 `tests/fixtures/cpp/modules.cpp` + `modules_bmf.cpp` + `modules_odr.cpp` 仍未纳入 `cpp_abi_gcc_cross_check.sh`; (10.2) `Sema::can_serve_features` 二次校验与 `CppFeature::DependentTemplateArg` 新增; (10.3) `PathStats::record_unsupported_feature` 与 verbose `fallback[feature@level: count]` 扩展; (10.4) `strip_cpp_keywords` 主调用入口从 `cpp::legacy::lower_to_c` 移除, 改用 `feature = "legacy-strip-debug"` 门控; (10.5) `cpp_abi_template/*` 两个夹具进 cross-check, `tests/cpp_native_capability.rs` 新增; (10.6) `cpp::legacy::{template_text, decl_cleanup, expr, layout, runtime, name_flatten, text_scan}` 整体 `#[cfg(feature = "legacy-text-lowering")]`, `--cxx-native=off` 在该 feature 未启用时转诊断错误 |
+| Stage 10 | 进行中 | driver 切换与 legacy 删除已展开为子阶段 10.1-10.6 详细计划 (见正文);锚点: `lower_ir::symbol_link_name` 加 `mangled_override` / `ModuleLinkagePlan::mangled_name_of` 反向查询 / `Sema::can_serve_features` 二次校验 / `PathStats::record_unsupported_feature` / `legacy-strip-debug` 与 `legacy-text-lowering` 两组 cargo feature / `cpp::driver::compile_cpp` cfg 门控 / `cpp::legacy::*` 整体 cfg 门控 7 处源码改动。现有能力已具备基础: `--cxx-native=off/on/auto` 三态在 driver 真实落地 (`/root/dcc/src/cpp/driver.rs::run_cpp_driver`), `cpp_abi_*` 28/28 夹具与 g++ 一致 (`scripts/cpp_abi_gcc_cross_check.sh`), CLI 契约由 `tests/integration/cpp_runtime.rs` 钉住, Stage 9 旧 `gcc_compat.rs` SJLJ C 运行时已删除, `auto` 默认值由 `cxx_native_mode_default_is_auto` 锁住。仍缺: (10.1) `ModuleLinkagePlan::mangled_name_of` 反向查询 + `symbol_link_name` 加 `mangled_override: Option<&str>` 入参, 跨 TU 模块导出/导入的链接冲突实例如 `tests/fixtures/cpp/modules.cpp` + `modules_bmf.cpp` + `modules_odr.cpp` 仍未纳入 `cpp_abi_gcc_cross_check.sh`; (10.2) `Sema::can_serve_features` 二次校验与 `CppFeature::DependentTemplateArg` 新增; (10.3) `PathStats::record_unsupported_feature` 与 verbose `fallback[feature@level: count]` 扩展; (10.4) `strip_cpp_keywords` 主调用入口从 `cpp::legacy::lower_to_c` 移除, 改用 `feature = "legacy-strip-debug"` 门控; (10.5) `cpp_abi_template/*` 两个夹具进 cross-check, `tests/cpp_native_capability.rs` 新增; (10.6) `cpp::legacy::{template_text, decl_cleanup, expr, layout, runtime, name_flatten, text_scan}` 整体 `#[cfg(feature = "legacy-text-lowering")]`, `--cxx-native=off` 在该 feature 未启用时转诊断错误 |
 
 ## 6. 已知缺陷 (与分阶段目标正交的既存问题)
 

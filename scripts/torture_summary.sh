@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # scripts/torture_summary.sh — 解析 torture 测试日志并输出 GitHub Actions Summary
 #
 # 用法:
@@ -129,7 +129,7 @@ fi
 if [[ -n "$compile_skips" || -n "$execute_skips" ]]; then
     echo "## Skipped Tests"
     echo ""
-    echo "See [torture_skip.txt](tests/torture_skip.txt) for skip reasons."
+    echo "See [torture_skip.txt](tests/skip/torture_skip.txt) for skip reasons."
     echo ""
     if [[ -n "$compile_skips" ]]; then
         echo "### Compile (${c_skip} skipped)"
