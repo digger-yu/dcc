@@ -846,6 +846,13 @@ fn instrument_stmt(
         },
         Stmt::AsmGoto { .. } => {},
         Stmt::Fallthrough { .. } => {},
+        // C++ 零成本 EH 由 C++ 后端自己生成, 不走 C 消毒插桩; 受保护调用的
+        // 内部调用语句仍需递归插桩 (否则丢越界检查), 落地垫序言的两个槽写入
+        // 是后端直接生成的 store, 不参与插桩。
+        Stmt::Invoke { call, .. } => {
+            instrument_stmt(call, flags, ctx, guard_var, guard_base);
+        },
+        Stmt::EhLandingPad { .. } => {},
     }
 }
 
@@ -865,6 +872,8 @@ fn stmt_span(stmt: &Stmt) -> Span {
         | Stmt::Continue { span }
         | Stmt::Label { span, .. }
         | Stmt::AsmGoto { span, .. }
+        | Stmt::Invoke { span, .. }
+        | Stmt::EhLandingPad { span, .. }
         | Stmt::Fallthrough { span } => span.clone(),
     }
 }

@@ -106,6 +106,10 @@ impl Codegen {
         self.trampoline_total_size = 0;
         // 收集当前函数体内定义的标签 (用于嵌套函数的 non-local goto 检测)
         self.local_labels.clear();
+        // C++ 零成本异常: 受保护调用点与序言信息都是**每函数一份**; 残留上一条
+        // 函数的调用点会让 LSDA 把区间登记到错误的函数 FDE 上。
+        self.eh_sites.clear();
+        self.cur_prologue_end = 0;
         if let Some(body) = &f.body {
             for item in &body.items {
                 if let BlockItem::Stmt(s) = item {
@@ -175,6 +179,9 @@ impl Codegen {
         if self.target.frame_pointer {
             self.emit(&[0x48, 0x89, 0xE5]); // mov rbp, rsp
         }
+        // C++ 零成本异常: 序言到此结束 —— FDE 的 CFA 规则必须从这一偏移之后
+        // 才生效 (之前 rsp 还在变动, CFA 沿用 CIE 的 `rsp + 8`)。
+        self.cur_prologue_end = self.pos() - func_start;
         self.expr_depth = 0;
         self.max_expr_depth = 0;
         self.temp_slots = 0;
@@ -369,11 +376,7 @@ impl Codegen {
                         let raw_cls = classes.get(c).copied().unwrap_or(AbiClass::Memory);
                         // 整体走内存时把首 chunk 的分类改写成 Memory, 由下方
                         // Memory 分支一次性排好 chunks 个 overflow 槽并 break。
-                        let cls = if force_mem_agg {
-                            AbiClass::Memory
-                        } else {
-                            raw_cls
-                        };
+                        let cls = if force_mem_agg { AbiClass::Memory } else { raw_cls };
                         let chunk_off = base_off + c as i64 * 8;
                         match cls {
                             AbiClass::Integer => {
@@ -585,7 +588,7 @@ impl Codegen {
                 .saturating_add(tramp_reserve)
                 .saturating_add(self.stack_reserve_bytes());
             self.frame_size = (raw + 15) & !15; // 16 字节对齐
-            // sret/物化槽区顶界: 紧邻变量区底 (变量区占 -(hdr+var_bytes))。
+                                                // sret/物化槽区顶界: 紧邻变量区底 (变量区占 -(hdr+var_bytes))。
             self.sret_region_base = -(hdr + var_bytes);
             // vec 区下移 sret 槽深度, 使槽区夹在变量区与 vec 区之间。
             // 帧底先留出复数物化带 (cx_band), 变参 save area 紧随其后。
@@ -1077,6 +1080,24 @@ impl Codegen {
         let func_end = self.pos();
         self.func_sizes
             .insert(f.name.name.clone(), func_end - func_start);
+        // C++ 零成本异常: 归档本函数的受保护调用点与 CFI 事实。必须在嵌套函数
+        // 生成之前完成 (嵌套函数会重新 clear `eh_sites`)。
+        if !self.eh_sites.is_empty() {
+            self.eh_funcs
+                .push(crate::codegen::x86_64::eh_tables::EhFuncInfo {
+                    name: f.name.name.clone(),
+                    text_start: func_start,
+                    sites: std::mem::take(&mut self.eh_sites),
+                });
+        }
+        self.func_cfi.insert(
+            f.name.name.clone(),
+            crate::codegen::x86_64::eh_tables::FuncCfi {
+                prologue_end: self.cur_prologue_end,
+                callee_saved_used: self.callee_saved_used,
+                frame_pointer: self.target.frame_pointer,
+            },
+        );
         // 函数体+尾声已生成, callee_saved_used 完整: 回填序言/尾声中
         // 未使用寄存器的保存/恢复指令为 nop. 必须在嵌套函数生成前
         // (嵌套函数会 reset tracker 并追加自己的 sites).

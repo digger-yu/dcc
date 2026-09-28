@@ -2354,6 +2354,17 @@ fn walk_stmt_refs(
         Stmt::GotoIndirect { expr, .. } => {
             walk_expr_refs(expr, func_names, calls, address_taken);
         },
+        // C++ 零成本异常: 被保护调用里的被调函数必须被计入 (否则只在这些调用
+        // 里出现的函数会被误判为未被调用), 落地垫槽位的取址同样要计入。
+        Stmt::Invoke { call, .. } => {
+            walk_stmt_refs(call, func_names, calls, address_taken);
+        },
+        Stmt::EhLandingPad {
+            object, selector, ..
+        } => {
+            walk_expr_refs(object, func_names, calls, address_taken);
+            walk_expr_refs(selector, func_names, calls, address_taken);
+        },
         _ => {},
     }
 }
@@ -2683,6 +2694,25 @@ fn collect_stmt_uses(stmt: &Stmt, out: &mut Vec<String>) {
         },
         Stmt::Label { stmt, .. } => collect_stmt_uses(stmt, out),
         Stmt::GotoIndirect { expr, .. } => collect_expr_uses(expr, out),
+        // C++ 零成本异常: 受保护调用的被调语句包在 `call` 里, 落地垫序言把 %rax/%rdx
+        // 写入两个局部槽。不下降到这里, 只在受保护调用里出现的变量会被当成未使用
+        // (错误 DCE / 存活分析漏记)。
+        Stmt::Invoke {
+            call,
+            landing_pad,
+            actions,
+            ..
+        } => {
+            collect_stmt_uses(call, out);
+            // 落地垫标签与 action 链里的 typeinfo 符号名不是变量引用, 不参与存活。
+            let _ = (landing_pad, actions);
+        },
+        Stmt::EhLandingPad {
+            object, selector, ..
+        } => {
+            collect_expr_uses(object, out);
+            collect_expr_uses(selector, out);
+        },
         Stmt::AsmGoto {
             outputs, inputs, ..
         } => {

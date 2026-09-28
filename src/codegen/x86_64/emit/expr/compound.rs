@@ -23,8 +23,9 @@ impl Codegen {
     /// gen_expr 三元条件分支 (batch F4 逐字搬迁: Expr::Cond arm)。
     pub fn gen_expr_cond(&mut self, e: &Expr, dst: u8) {
         if let Expr::Cond {
-                cond, then_, else_, ..
-            } = e {
+            cond, then_, else_, ..
+        } = e
+        {
             self.gen_expr(cond, 0);
             self.emit_truth_flags(&cond.ty());
             let le = self.fresh_label();

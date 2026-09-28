@@ -24,6 +24,8 @@ mod abi;
 mod asm;
 mod backend;
 mod codegen;
+/// C++ 零成本异常: Itanium LSDA (.gcc_except_table) 字节编码器
+pub mod eh_tables;
 mod elf;
 mod emit;
 mod instructions;

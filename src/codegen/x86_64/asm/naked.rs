@@ -44,7 +44,7 @@ impl Codegen {
                         let mut resolved_asm = asm_str.clone();
                         let label_base = outputs.len() + inputs.len();
                         for (i, label) in goto_labels.iter().enumerate().rev() {
-                            let prefixed = Self::c_label_to_asm(&label.name);
+                            let prefixed = self.c_label_to_asm(&label.name);
                             resolved_asm = Self::asm_replace_label_idx(&resolved_asm, i, &prefixed);
                             resolved_asm = Self::asm_replace_label_idx(
                                 &resolved_asm,

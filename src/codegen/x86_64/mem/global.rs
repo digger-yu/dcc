@@ -169,8 +169,7 @@ fn encode_float_component(c: FloatConst, inner: &Type) -> Vec<u8> {
                 bits
             },
             other => {
-                let mut bits =
-                    crate::float80::from_f64(other.as_f64()).to_vec();
+                let mut bits = crate::float80::from_f64(other.as_f64()).to_vec();
                 bits.resize(16, 0);
                 bits
             },
@@ -192,20 +191,14 @@ pub fn encode_complex_parts_f(re: FloatConst, im: FloatConst, inner: &Type) -> V
 /// 两个同目标宽度浮点常量的加/减组合。
 /// F32/F64 在 f64 域求值后按目标宽度舍回；LongDouble 走真 80-bit
 /// 整数域加/减，全程不经 f64 中转。
-fn combine_float_consts(
-    l: FloatConst,
-    r: FloatConst,
-    subtract: bool,
-    inner: &Type,
-) -> FloatConst {
+fn combine_float_consts(l: FloatConst, r: FloatConst, subtract: bool, inner: &Type) -> FloatConst {
     match inner {
         Type::LongDouble => {
             let (la, lb) = match (l, r) {
                 (FloatConst::LongDouble(a), FloatConst::LongDouble(b)) => (a, b),
-                (a, b) => (
-                    crate::float80::from_f64(a.as_f64()),
-                    crate::float80::from_f64(b.as_f64()),
-                ),
+                (a, b) => {
+                    (crate::float80::from_f64(a.as_f64()), crate::float80::from_f64(b.as_f64()))
+                },
             };
             let out = if subtract {
                 crate::float80::sub(&la, &lb)
@@ -357,14 +350,11 @@ pub fn global_init_bytes(init: &Expr, sz: usize, is_float: bool, ty: &Type) -> O
                 if sz == 32 {
                     // _Complex long double：实部 + 零虚部，每分量 16 字节。
                     let ld = Type::LongDouble;
-                    let mut b =
-                        crate::codegen::x86_64::Codegen::float_data_bytes(f, 16);
-                    b.extend_from_slice(
-                        &crate::codegen::x86_64::Codegen::float_data_bytes(
-                            FloatConst::zero(&ld),
-                            16,
-                        ),
-                    );
+                    let mut b = crate::codegen::x86_64::Codegen::float_data_bytes(f, 16);
+                    b.extend_from_slice(&crate::codegen::x86_64::Codegen::float_data_bytes(
+                        FloatConst::zero(&ld),
+                        16,
+                    ));
                     Some(b)
                 } else {
                     Some(crate::codegen::x86_64::Codegen::float_data_bytes(f, sz))
@@ -379,12 +369,10 @@ pub fn global_init_bytes(init: &Expr, sz: usize, is_float: bool, ty: &Type) -> O
                         FloatConst::from_int(&ld, v),
                         16,
                     );
-                    b.extend_from_slice(
-                        &crate::codegen::x86_64::Codegen::float_data_bytes(
-                            FloatConst::zero(&ld),
-                            16,
-                        ),
-                    );
+                    b.extend_from_slice(&crate::codegen::x86_64::Codegen::float_data_bytes(
+                        FloatConst::zero(&ld),
+                        16,
+                    ));
                     Some(b)
                 } else {
                     Some(crate::codegen::x86_64::Codegen::float_data_bytes(
@@ -416,11 +404,7 @@ pub fn complex_init_bytes(init: &Expr, inner: &Type) -> Option<Vec<u8>> {
             }
             // 浮点常量回退到整数初始化：在 f64 边界显式降级（可审计）。
             let (re, im) = complex_init_parts(init, inner)?;
-            Some(encode_complex_parts_i(
-                re.as_f64() as i128,
-                im.as_f64() as i128,
-                inner,
-            ))
+            Some(encode_complex_parts_i(re.as_f64() as i128, im.as_f64() as i128, inner))
         },
     }
 }

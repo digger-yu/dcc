@@ -9,6 +9,10 @@ license    = "Apache-2.0"
 [features]
 # GCC source tree integration tests (libdecnumber, etc.)
 gcc_src = []
+# Stage 10.4: 启用 strip_cpp_keywords 主路径与 legacy 字符级剥除 pass。
+# 默认编译 (无该 feature) 不再调用 `cpp::lower::strip_cpp_keywords`,
+# 仅在显式打开时保留 (例如 nightly CI 验证 legacy C 文本 fallback)。
+legacy-strip-debug = []
 
 # 历史遗留的空 feature 别名: aarch64/arm/mips/mips64/riscv64 后端现在**无条件**
 # 参与构建(见 src/codegen/mod.rs), 这些名字仅为兼容旧脚本/CI 调用而保留, 不再

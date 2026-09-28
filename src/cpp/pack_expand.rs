@@ -62,10 +62,9 @@ impl PackCtx {
         self.args
             .iter()
             .map(|a| match a {
-                MangleType::VariadicPack(v) => v
-                    .get(k)
-                    .cloned()
-                    .ok_or_else(|| format!("参数包长度不一致: 需要第 {k} 个元素, 包只有 {}", v.len())),
+                MangleType::VariadicPack(v) => v.get(k).cloned().ok_or_else(|| {
+                    format!("参数包长度不一致: 需要第 {k} 个元素, 包只有 {}", v.len())
+                }),
                 other => Ok(other.clone()),
             })
             .collect()
@@ -80,9 +79,9 @@ impl PackCtx {
                     out.push(s);
                 }
             },
-            MangleType::Pointer(t)
-            | MangleType::Reference(t)
-            | MangleType::Array(t, _) => self.pattern_sizes(t, out),
+            MangleType::Pointer(t) | MangleType::Reference(t) | MangleType::Array(t, _) => {
+                self.pattern_sizes(t, out)
+            },
             MangleType::Template { args: ta, .. } | MangleType::VariadicPack(ta) => {
                 for a in ta {
                     self.pattern_sizes(a, out);
@@ -117,7 +116,7 @@ impl PackCtx {
         self.collect_expr_pattern_sizes(pat, &mut sizes);
         if sizes.is_empty() {
             return Err(
-                "参数包展开模式里没有引用任何参数包 (如 `1...`): 展开长度无法确定".to_string(),
+                "参数包展开模式里没有引用任何参数包 (如 `1...`): 展开长度无法确定".to_string()
             );
         }
         unify_pack_len(&sizes, "展开模式")
@@ -196,13 +195,13 @@ impl PackCtx {
         match e {
             CppExpr::Cast(ty, _) => *ty = substitute_type(ty, &self.params, &scalar),
             CppExpr::TypeidType(ty) => *ty = substitute_type(ty, &self.params, &scalar),
-            CppExpr::Sizeof(SizeofArg::Type(ty)) => *ty = substitute_type(ty, &self.params, &scalar),
+            CppExpr::Sizeof(SizeofArg::Type(ty)) => {
+                *ty = substitute_type(ty, &self.params, &scalar)
+            },
             CppExpr::StaticCast { ty, .. }
             | CppExpr::ConstCast { ty, .. }
             | CppExpr::ReinterpretCast { ty, .. }
-            | CppExpr::DynamicCast { ty, .. } => {
-                *ty = substitute_type(ty, &self.params, &scalar)
-            },
+            | CppExpr::DynamicCast { ty, .. } => *ty = substitute_type(ty, &self.params, &scalar),
             CppExpr::TemplateIdent { args, .. } => {
                 for a in args {
                     *a = substitute_type(a, &self.params, &scalar);
@@ -315,7 +314,7 @@ fn expand_decl(d: &mut CppDecl, ctx: &mut PackCtx) -> Result<(), String> {
 fn expand_fn(
     params: &mut Vec<(String, MangleType)>,
     body: Option<&mut CppBody>,
-    inits: Option<&mut Vec<(String, CppExpr)>>,
+    inits: Option<&mut Vec<crate::cpp::parser::CppCtorInit>>,
     ctx: &mut PackCtx,
 ) -> Result<(), String> {
     let old = std::mem::take(params);
@@ -349,8 +348,10 @@ fn expand_fn(
     }
     *params = kept;
     if let Some(inits) = inits {
-        for (_, e) in inits.iter_mut() {
-            expand_expr(e, ctx)?;
+        for entry in inits.iter_mut() {
+            for e in &mut entry.args {
+                expand_expr(e, ctx)?;
+            }
         }
     }
     if let Some(body) = body {
@@ -392,9 +393,7 @@ fn expand_stmt(s: &mut CppStmt, ctx: &mut PackCtx) -> Result<(), String> {
     // 上面的替换没把它当包处理) -> 硬报错, 不静默交给后端.
     if let CppStmt::LocalVar { ty, .. } | CppStmt::StaticLocal { ty, .. } = s {
         if matches!(ty, MangleType::VariadicPack(_)) {
-            return Err(format!(
-                "局部变量声明的类型仍是参数包 ({ty:?}): 模板实例化未处理该语境"
-            ));
+            return Err(format!("局部变量声明的类型仍是参数包 ({ty:?}): 模板实例化未处理该语境"));
         }
     }
     // 多 init-declarator 的共享 decl-specifier 同理 (`Pack... a, b;` 残留
@@ -452,10 +451,7 @@ fn inner_ident_hint(e: &CppExpr) -> String {
 }
 
 fn expand_list(list: &mut Vec<CppExpr>, ctx: &mut PackCtx) -> Result<(), String> {
-    if !list
-        .iter()
-        .any(|e| matches!(e, CppExpr::PackExpansion(_)))
-    {
+    if !list.iter().any(|e| matches!(e, CppExpr::PackExpansion(_))) {
         return Ok(());
     }
     let old = std::mem::take(list);
@@ -480,7 +476,6 @@ fn expand_list(list: &mut Vec<CppExpr>, ctx: &mut PackCtx) -> Result<(), String>
     Ok(())
 }
 
-
 // ===== M52: 参数包摊平单元测试 =====
 
 #[cfg(test)]
@@ -500,7 +495,10 @@ mod pack_expand_tests {
         let mut reg = TemplateRegistry::default();
         for d in &decls {
             if let CppDecl::Template {
-                params, requires, decl, ..
+                params,
+                requires,
+                decl,
+                ..
             } = d
             {
                 reg.register(params, requires, decl);
@@ -580,7 +578,9 @@ mod pack_expand_tests {
         assert!(params.iter().all(|(_, t)| *t == MangleType::Int));
         let dbg = format!("{body:?}");
         assert!(
-            !dbg.contains("VariadicPack") && !dbg.contains("PackExpansion") && !dbg.contains("Pack("),
+            !dbg.contains("VariadicPack")
+                && !dbg.contains("PackExpansion")
+                && !dbg.contains("Pack("),
             "实例里仍残留包形状: {dbg}"
         );
         // `sizeof...(args)` 已折成字面量 3 (仍套在原 `(int)` 转换里)
@@ -630,7 +630,10 @@ mod pack_expand_tests {
             .instantiate_fn_at(
                 idx,
                 "emit",
-                &[MangleType::Pointer(MangleType::Char.into()), pack_of(&[MangleType::Int, MangleType::Double])],
+                &[
+                    MangleType::Pointer(MangleType::Char.into()),
+                    pack_of(&[MangleType::Int, MangleType::Double]),
+                ],
             )
             .expect("实例化成功");
         assert_eq!(reg.pack_expand_error, None);
@@ -654,11 +657,7 @@ mod pack_expand_tests {
                 _ => None,
             })
             .expect("body 里应有 printf 调用");
-        assert_eq!(
-            ident_names(&args),
-            ["fmt", "args_0", "args_1"],
-            "包展开错位: {args:?}"
-        );
+        assert_eq!(ident_names(&args), ["fmt", "args_0", "args_1"], "包展开错位: {args:?}");
     }
 
     /// 没有包实参时本模块必须**一个节点都不改** (非变参模板零影响).
@@ -686,12 +685,8 @@ mod pack_expand_tests {
                 "nope".to_string(),
             ))))],
         );
-        let e = expand_packs_in(
-            &mut d,
-            &["A".to_string()],
-            &[pack_of(&[MangleType::Int])],
-        )
-        .expect_err("应报错");
+        let e = expand_packs_in(&mut d, &["A".to_string()], &[pack_of(&[MangleType::Int])])
+            .expect_err("应报错");
         assert!(e.contains("不是参数包"), "{e}");
     }
 
@@ -759,12 +754,8 @@ mod pack_expand_tests {
                 vec![CppExpr::PackExpansion(Box::new(CppExpr::IntLit(1)))],
             ))],
         );
-        let e = expand_packs_in(
-            &mut d,
-            &["A".to_string()],
-            &[pack_of(&[MangleType::Int])],
-        )
-        .expect_err("应报错");
+        let e = expand_packs_in(&mut d, &["A".to_string()], &[pack_of(&[MangleType::Int])])
+            .expect_err("应报错");
         assert!(e.contains("没有引用任何参数包"), "{e}");
     }
 

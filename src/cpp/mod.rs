@@ -69,11 +69,13 @@ pub mod modules;
 pub mod native;
 pub mod pack_expand;
 pub mod parser;
+pub mod path_control;
 pub mod runtime;
 pub mod sema;
 pub mod stdlib;
 pub mod template;
 pub mod template_depth;
+pub mod typeinfo_mangling;
 
 use crate::diagnostics::Diagnostic;
 use std::path::PathBuf;

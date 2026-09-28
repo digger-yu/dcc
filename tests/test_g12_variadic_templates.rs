@@ -162,10 +162,11 @@ fn test_regular_template_still_works() {
 /// `VariadicPack`, 且整条声明没有被顶层容错降级成 `Opaque`.
 #[test]
 fn test_parse_variadic_fn_template_param_is_pack() {
-    let src =
-        b"template <typename... Args> int sum(char* out, const char* fmt, Args... args);";
+    let src = b"template <typename... Args> int sum(char* out, const char* fmt, Args... args);";
     let mut p = CppParser::new(src, "t.cpp");
-    let ds = p.parse_top_level().expect("variadic fn template must parse");
+    let ds = p
+        .parse_top_level()
+        .expect("variadic fn template must parse");
     assert_eq!(ds.len(), 1, "exactly one decl expected, got {ds:?}");
     let tmpl = match &ds[0] {
         CppDecl::Template {
@@ -175,10 +176,7 @@ fn test_parse_variadic_fn_template_param_is_pack() {
             ..
         } => {
             assert_eq!(params.params.len(), 1);
-            assert!(
-                params.params[0].is_pack,
-                "`typename... Args` must set TemplateParam::is_pack"
-            );
+            assert!(params.params[0].is_pack, "`typename... Args` must set TemplateParam::is_pack");
             assert_eq!(params.params[0].name, "Args");
             (decl, requires)
         },
@@ -190,7 +188,8 @@ fn test_parse_variadic_fn_template_param_is_pack() {
     };
     assert_eq!(name, "sum");
     assert_eq!(fn_params.len(), 3, "out/fmt/args, got {fn_params:?}");
-    assert!(matches!(&fn_params[2].1, MangleType::VariadicPack(inner)
+    assert!(
+        matches!(&fn_params[2].1, MangleType::VariadicPack(inner)
         if matches!(&inner[..], [MangleType::Class(c)] if c == "Args")),
         "`Args... args` must lower to a VariadicPack-typed parameter, got {:?}",
         fn_params[2]
@@ -209,9 +208,7 @@ fn test_parse_pack_expansion_and_sizeof_pack_ast_shape() {
                  if (sizeof...(Args) > 0) return call(fmt, args...); \
                  return 0; }";
     let mut p = CppParser::new(src, "t.cpp");
-    let ds = p
-        .parse_top_level()
-        .expect("pack expansion body must parse");
+    let ds = p.parse_top_level().expect("pack expansion body must parse");
     let dbg = format!("{:?}", ds);
     assert!(
         dbg.contains("PackExpansion"),

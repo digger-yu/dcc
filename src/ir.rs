@@ -1486,6 +1486,20 @@ impl Lowering {
                 span,
             ),
             Stmt::GotoIndirect { expr, span } => (vec![self.lower_expr(expr)], Vec::new(), span),
+            // C++ 零成本 EH: TypedStmt 是表达式导向的、无 kind 的中间层, 异常边
+            // 不在这一层建模 (只有 x86_64 后端从 AST 生成代码时消费)。
+            // 这里只保留语义载荷: 受保护调用降为其内部的调用表达式, 落地垫序言
+            // 降为两个槽的写入表达式, 以便优化 pass 仍能看到副作用。
+            Stmt::Invoke { call, span, .. } => {
+                let inner = self.lower_stmt(call);
+                (inner.expressions, inner.nested, span)
+            },
+            Stmt::EhLandingPad {
+                object,
+                selector,
+                span,
+                ..
+            } => (vec![self.lower_expr(object), self.lower_expr(selector)], Vec::new(), span),
             Stmt::Label { stmt, span, .. } => (Vec::new(), vec![self.lower_stmt(stmt)], span),
             Stmt::AsmGoto {
                 outputs,

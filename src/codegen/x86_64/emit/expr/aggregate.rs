@@ -168,7 +168,9 @@ impl Codegen {
         match dst {
             AggDst::Global(name) => self.emit_global_addr(reg, name),
             // VM struct/VLA: 帧槽存的是数据区基址, 不是数据本体
-            AggDst::Local { vla: Some(slot), .. } => self.load_stack(reg, *slot),
+            AggDst::Local {
+                vla: Some(slot), ..
+            } => self.load_stack(reg, *slot),
             AggDst::Local { off, .. } => self.emit_lea_r13(reg, *off),
             // 运行时地址: 调用方已把它存进帧槽
             AggDst::Indirect { addr_slot } => self.load_stack(reg, *addr_slot),
@@ -259,8 +261,7 @@ impl Codegen {
         //    float` 的两个 float 被当成 `_Complex double` 的低那个 double (实部
         //    读出 8.0000018961727619171), 虚部则越界读到隔壁槽。
         // 两者都必须绕到下方 got_src==false 的物化分量转换分支。
-        let complex_needs_component_convert =
-            Self::complex_src_needs_convert(dst_ty, r.ty());
+        let complex_needs_component_convert = Self::complex_src_needs_convert(dst_ty, r.ty());
         // 特殊处理: 源是函数调用 (走完整 SysV ABI: 参数分类/暂存/返回值)
         let mut call_sret_handled = false;
         if let Expr::Call {
@@ -355,7 +356,7 @@ impl Codegen {
                         }
                         self.emit_lea_r13(6, temp_off); // rsi = src
                         self.emit_agg_dst_addr(dst, 7); // rdi = dst
-                        // rep movsb handled below
+                                                        // rep movsb handled below
                         call_sret_handled = true;
                     } else {
                         if is_sse_128_single_reg {
@@ -545,13 +546,13 @@ impl Codegen {
                                 // f/d 与 int 截断臂: 先 gen_expr 再寻址。
                                 self.gen_expr(r, 0);
                                 self.emit_agg_dst_addr(dst, 1); // rcx = dst
-                                // [`store_complex_at_rcx`] 的交付约定是「调用方把
-                                // 目标地址 push 入栈, 内部自行 pop」(见其注释) ——
-                                // 地址不能只在寄存器里。`gf` 这类 **全局** `_Complex
-                                // float` 目标经 `emit_agg_dst_addr` 用的是 RIP 相对
-                                // lea, 不碰栈, 少这一次 push 就让 pop 从rsp 上捞出
-                                // 一个与目标毫无关系的值当地址, `movss (%rcx)` 直接
-                                // 段错误 (`gf = gf * 2.0f;` 整程序零输出)。
+                                                                // [`store_complex_at_rcx`] 的交付约定是「调用方把
+                                                                // 目标地址 push 入栈, 内部自行 pop」(见其注释) ——
+                                                                // 地址不能只在寄存器里。`gf` 这类 **全局** `_Complex
+                                                                // float` 目标经 `emit_agg_dst_addr` 用的是 RIP 相对
+                                                                // lea, 不碰栈, 少这一次 push 就让 pop 从rsp 上捞出
+                                                                // 一个与目标毫无关系的值当地址, `movss (%rcx)` 直接
+                                                                // 段错误 (`gf = gf * 2.0f;` 整程序零输出)。
                                 self.push(1);
                                 if dst_float {
                                     self.store_complex_at_rcx(r, &inner.base);
@@ -563,11 +564,8 @@ impl Codegen {
                                     self.pop(1); // rcx = dst addr
                                     if src_complex {
                                         let si = src_inner.clone().unwrap();
-                                        let rpfx = if matches!(si, Type::Float) {
-                                            0xF3u8
-                                        } else {
-                                            0xF2u8
-                                        };
+                                        let rpfx =
+                                            if matches!(si, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                                         self.emit_xmm0_r13_disp(
                                             &[rpfx, 0x49, 0x0F, 0x10],
                                             result_off,
@@ -636,15 +634,9 @@ impl Codegen {
                                 let result_off = -self.frame_size + 8;
                                 if src_complex {
                                     let si = src_inner.clone().unwrap();
-                                    let rpfx = if matches!(si, Type::Float) {
-                                        0xF3u8
-                                    } else {
-                                        0xF2u8
-                                    };
-                                    self.emit_xmm0_r13_disp(
-                                        &[rpfx, 0x49, 0x0F, 0x10],
-                                        result_off,
-                                    );
+                                    let rpfx =
+                                        if matches!(si, Type::Float) { 0xF3u8 } else { 0xF2u8 };
+                                    self.emit_xmm0_r13_disp(&[rpfx, 0x49, 0x0F, 0x10], result_off);
                                 }
                                 // cvttsd2si rax, xmm0
                                 self.emit(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]);

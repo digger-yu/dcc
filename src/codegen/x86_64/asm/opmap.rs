@@ -1004,12 +1004,7 @@ impl Codegen {
                     } else {
                         Type::Double
                     };
-                    self.emit_xmm_to_global_float_typed(
-                        reg,
-                        &name.name,
-                        &src_ty,
-                        &effective_ty,
-                    );
+                    self.emit_xmm_to_global_float_typed(reg, &name.name, &src_ty, &effective_ty);
                 } else {
                     self.emit_global_float_store_from_xmm(reg, &name.name, &effective_ty);
                 }

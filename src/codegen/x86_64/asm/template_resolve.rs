@@ -39,8 +39,20 @@ impl Codegen {
         result.push_str(rest);
         result
     }
-    pub(crate) fn c_label_to_asm(name: &str) -> String {
-        format!(".Ll_{}", name)
+    /// 把 AST 里的标签名翻译成汇编标签。
+    ///
+    /// 必须带上**当前函数名**作为命名空间: SSA 回写的块标签 (`eh_lp.2` /
+    /// `label_l1.5` / `for_cond.3`) 的序号是每函数从 0 重计的, 只用 `.Ll_<名>`
+    /// 时不同函数会产生**完全同名**的标签。后果不是汇编报错 (GAS 允许重定义
+    /// `.L` 标签) 而是 `Codegen::labels` 这张全局表被后写的函数覆盖:
+    /// 先发的跳转与后建的表各自指向不同函数的同名标签, 实测零成本异常的 LSDA
+    /// call-site landing pad 指到另一个函数的落地垫上。
+    pub(crate) fn c_label_to_asm(&self, name: &str) -> String {
+        if self.current_func_name.is_empty() {
+            format!(".Ll_{}", name)
+        } else {
+            format!(".Ll_{}_{}", self.current_func_name, name)
+        }
     }
     pub(crate) fn merge_standalone_prefixes(lines: Vec<String>) -> Vec<String> {
         let prefixes = ["lock", "rep", "repz", "repnz", "repe"];

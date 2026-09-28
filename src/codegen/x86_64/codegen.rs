@@ -115,9 +115,30 @@ pub struct Codegen {
     pub extra_sections: Vec<ElfSection>, // 自定义节 (section 属性)
     pub custom_sec_indices: HashMap<String, usize>, // section name → index in extra_sections
     pub func_sizes: HashMap<String, u64>, // 函数名 → 代码大小 (用于符号 size)
+    /// C++ 零成本异常: 当前函数已生成的**受保护调用点** (`Stmt::Invoke` 时追加)。
+    /// 函数结束时整体搬进 `eh_funcs`。
+    pub eh_sites: Vec<crate::codegen::x86_64::eh_tables::EhSite>,
+    /// C++ 零成本异常: 已完成函数的 EH 归档, 由 ELF 组装阶段用来发射
+    /// `.gcc_except_table` 与 FDE 的 LSDA 字段。Vec 而非 HashMap: 发射序必须
+    /// 稳定可复现。
+    pub eh_funcs: Vec<crate::codegen::x86_64::eh_tables::EhFuncInfo>,
+    /// C++ 零成本异常: 每个函数的 **CFI 事实** (序言长度 + 实际使用的
+    /// callee-saved 掩码)。表驱动展开完全依赖 FDE 的 CFA 规则, 猜值会让
+    /// unwinder 走不出本帧 (旧实现对所有函数发同一段常量 ops)。
+    pub func_cfi: HashMap<String, crate::codegen::x86_64::eh_tables::FuncCfi>,
+    /// 序言结束位置 (自函数起点计): `DW_CFA_advance_loc` 的目标
+    pub cur_prologue_end: u64,
+    /// C++ 零成本异常: 函数名 → 其 LSDA 在本模块 `.gcc_except_table` 里的偏移。
+    /// 由 `assemble_eh_lsda` 在**符号表定稿之前**填好 (FDE 的 LSDA 字段需要
+    /// `.gcc_except_table` 节符号, 而局部符号必须在全局符号之前入表)。
+    pub eh_lsda_offsets: HashMap<String, u64>,
+    /// 类型表待解析的重定位: `(.gcc_except_table 内绝对偏移, 符号名)`。
+    pub eh_lsda_relocs: Vec<(u64, String)>,
+    /// `.gcc_except_table` 在 `extra_sections` 里的下标 (None = 本模块无 EH)。
+    pub eh_except_sec_idx: Option<usize>,
     pub variadic_funcs: HashMap<String, bool>, // 函数名 → 是否可变参数
     pub old_style_funcs: std::collections::HashSet<String>, // K&R 风格定义函数名
-    pub variadic_named_params: i32,      // 当前可变参数函数的命名参数数量
+    pub variadic_named_params: i32,            // 当前可变参数函数的命名参数数量
     pub variadic_named_gp: i32,
     pub variadic_named_fp: i32,
     pub variadic_overflow_offset: i64,
@@ -449,6 +470,15 @@ pub struct FuncEmitChunk {
     pub pushsection_code_ranges: Vec<(u64, u64, usize, u64)>,
     pub extra_sections: Vec<elf::ElfSection>,
     pub custom_sec_indices: HashMap<String, usize>,
+    /// C++ 零成本异常: 本 chunk 函数的 **CFI 事实**。
+    ///
+    /// 必须随 chunk 一并合并: 不合并则主 Codegen 没有该函数的序言/寄存器信息,
+    /// `cfi_ops_for` 只能退回旧的同一段常量 CFA 规则 —— 并行与串行产物因此
+    /// 字节不同 (不可复现), 且错规则会让 unwinder 走不出本帧。
+    pub func_cfi: Option<crate::codegen::x86_64::eh_tables::FuncCfi>,
+    /// C++ 零成本异常: 本 chunk 函数的受保护调用点归档 (`compile_func` 已在
+    /// worker 内归档, 偏移相对 chunk 代码起点, 合并时加上落位基址)。
+    pub eh_funcs: Vec<crate::codegen::x86_64::eh_tables::EhFuncInfo>,
     pub disasm_calls: HashMap<u64, String>,
     /// rodata 增量：chunk 编译期间新增的 rodata 数据
     pub new_rodata: Vec<u8>,
@@ -520,6 +550,13 @@ impl Codegen {
             extra_sections: vec![],
             custom_sec_indices: HashMap::new(),
             func_sizes: HashMap::new(),
+            eh_sites: Vec::new(),
+            eh_funcs: Vec::new(),
+            func_cfi: HashMap::new(),
+            cur_prologue_end: 0,
+            eh_lsda_offsets: HashMap::new(),
+            eh_lsda_relocs: Vec::new(),
+            eh_except_sec_idx: None,
             variadic_funcs: HashMap::new(),
             old_style_funcs: std::collections::HashSet::new(),
             variadic_named_params: 0,
@@ -1777,6 +1814,9 @@ impl Codegen {
         // 依赖 pending_code_rels 中的外部符号, 所以必须先于 Phase 2。
         self.patch_local_jumps(&move_ranges);
 
+        // C++ 零成本异常: LSDA 必须在符号表定稿之前落位 —— FDE 的 LSDA 字段要
+        // 引用 `.gcc_except_table` 节符号, 而局部符号只能排在全局符号之前。
+        self.assemble_eh_lsda();
         // Phase 2: 收集所有符号 (STN_UNDEF → LOCAL → GLOBAL)。
         // 自 monolith 恢复的完整 ET_REL symtab 构建 (elf/rel_symbols.rs)：
         // 含 asm 函数符号、alias/target_clones 变体、嵌套函数、__mcount_loc、
@@ -1786,6 +1826,8 @@ impl Codegen {
         // Phase 3 (自 monolith 恢复): 符号表定稿后发射 ET_REL 重定位、
         // init/fini_array 节与自定义节重定位搬迁。
         self.emit_rel_relocations(prog, &custom_func_ranges);
+        // C++ 零成本异常: 类型表重定位按符号名查索引, 因此必须在符号表定稿后。
+        self.emit_eh_relocations();
     }
 
     /// 静态地址常量折叠: &x / (T*)&x / &((arr + i)->f) / arr + n 等

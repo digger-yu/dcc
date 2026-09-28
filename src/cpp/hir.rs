@@ -69,16 +69,11 @@ impl DependentInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HirDeleteDtor {
     /// 非多态点型: 编译期直接调 `<class>_dtor_complete`。
-    Direct {
-        class: ClassId,
-    },
+    Direct { class: ClassId },
     /// 多态点型: 经该静态点型主 vtable 的**析构槽**虚派发, 以便
     /// `delete (Base*)derived` 销毁完整派生对象。`slot` 是 sema 登记值,
     /// 发射前由 `ClassAbi::vcall_slot` 以布局层为真源校正。
-    VirtualDtor {
-        class: ClassId,
-        slot: usize,
-    },
+    VirtualDtor { class: ClassId, slot: usize },
 }
 
 /// 析构函数变体（Itanium ABI）
@@ -94,13 +89,18 @@ pub enum DtorVariant {
 
 // === this 调整 ===
 
-/// this 指针调整（多继承/虚继承用）
+/// this 指针的**静态**调整量 (多继承下基类子对象不在偏移 0)。
+///
+/// 只描述编译期可定的字节偏移。虚继承的 this relocation **不属于**本类型:
+/// 虚基子对象的位置对每个最派生类都不同, 只能运行期从 vbtable 读, 因此 HIR
+/// 用一个独立节点 [`HirExprKind::VBaseAdjust`] 表达「指针转换」, 而不是在
+/// 调用点带一个 `vbase_index`。两者必须分家: 留在调用侧会变成
+/// 「拿不到运行期偏移 -> 只能报错」的死路 (旧 Stage 5 就是这个缺口),
+/// 而转换节点 + vtable 里的静态 thunk 已能完整覆盖 GCC 的全部行为。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ThisAdjust {
     /// 非虚偏移字节数
     pub non_virtual: i64,
-    /// 虚基表索引（虚继承用，None 表示无虚调整）
-    pub vbase_index: Option<usize>,
 }
 
 // === 被调用者 ===
@@ -185,6 +185,11 @@ pub enum HirExprKind {
         place: HirExprId,
         args: Vec<HirExprId>,
         variant: CtorVariant,
+        /// sema 选定具体调哪一个重载构造函数; None = 隐式默认构造。
+        ///
+        /// 必须由 sema 给出: 重载构造函数同名同类, 只有参数类型能区分。
+        /// 让发射层自己猜（按类名拼符号）会把两个重载合并成同一个链接名。
+        ctor: Option<SymbolId>,
     },
     /// 析构调用
     Destroy {
@@ -262,6 +267,8 @@ pub enum HirExprKind {
         args: Vec<HirExprId>,
         placement: Option<Vec<HirExprId>>,
         is_array: bool,
+        /// 点类型是类时 sema 选定的重载构造函数 (None = 隐式默认构造)
+        ctor: Option<SymbolId>,
     },
     /// delete 表达式
     Delete {
@@ -359,15 +366,9 @@ pub enum HirStmtKind {
         else_body: Option<HirStmtId>,
     },
     /// while 循环
-    While {
-        cond: HirExprId,
-        body: HirStmtId,
-    },
+    While { cond: HirExprId, body: HirStmtId },
     /// do-while 循环
-    DoWhile {
-        body: HirStmtId,
-        cond: HirExprId,
-    },
+    DoWhile { body: HirStmtId, cond: HirExprId },
     /// for 循环
     For {
         init: Option<HirStmtId>,
@@ -376,15 +377,9 @@ pub enum HirStmtKind {
         body: HirStmtId,
     },
     /// switch
-    Switch {
-        cond: HirExprId,
-        body: HirStmtId,
-    },
+    Switch { cond: HirExprId, body: HirStmtId },
     /// case 标签
-    Case {
-        value: i128,
-        body: HirStmtId,
-    },
+    Case { value: i128, body: HirStmtId },
     /// default 标签
     Default(HirStmtId),
     /// return
@@ -422,10 +417,16 @@ pub enum HirStmtKind {
     CtorInitMember {
         member: SymbolId,
         args: Vec<HirExprId>,
+        /// 选定的成员类型构造函数 (None = 隐式默认构造)
+        ctor: Option<SymbolId>,
     },
+    /// 构造基类子对象; `base == 本类` 且 `ctor` 指向本类另一个构造时就是
+    /// **委托构造** (GCC 实测委托到目标的 C1 完整对象变体)。
     CtorInitBase {
         base: ClassId,
         args: Vec<HirExprId>,
+        /// 选定的基类/目标构造函数 (None = 隐式默认构造)
+        ctor: Option<SymbolId>,
     },
     /// 设置 vptr 指向指定类的 vtable（构造/析构中更新虚表指针）
     SetVTablePtr {
@@ -440,8 +441,16 @@ pub enum HirStmtKind {
 
 #[derive(Debug, Clone)]
 pub struct HirCatchHandler {
-    /// catch 参数类型
+    /// catch 参数类型; `is_catch_all == true` 时本字段无意义 (省略号捕获没有类型)。
     pub param_ty: CxxType,
+    /// `catch (...)` 的**显式**标记。
+    ///
+    /// 不能用「`param_ty == Void`」来推断: 那会把类型系统里的 `void` 当成哨兵值,
+    /// 于是 lowering 侧要给省略号 handler 发 LSDA 类型表项时只能靠猜。实测后果是
+    /// `catch (...)` 被编成 `catch (void)` (`DW.ref._ZTIv`), 任何异常都不匹配,
+    /// 直接 `std::terminate`。类型表规则 (已对照 g++ 产物): 省略号仍占一个**正**
+    /// filter 索引, 但对应的 4 字节表项是常量 0。
+    pub is_catch_all: bool,
     /// catch 参数符号（如果有名）
     pub param: Option<SymbolId>,
     /// catch 体
@@ -479,6 +488,23 @@ pub struct HirTranslationUnit {
     pub bodies: Vec<HirBody>,
     /// 顶层声明（函数、全局变量、类声明等）
     pub top_level: Vec<HirTopLevelDecl>,
+    /// 命名空间作用域对象的动态初始化条目 (见 `HirGlobalInit`)。
+    pub global_inits: Vec<HirGlobalInit>,
+}
+
+/// 命名空间作用域对象的**动态初始化** ([basic.start.dynamic])。
+///
+/// g++ 为每个需要运行期初始化的全局对象生成一个 `__cxx_global_var_init.N`
+/// 函数并把它的地址放进 `.init_array`。dcc 走同一形态: sema 生成等价的
+/// `HirFunction` 体 (构造 + 析构登记), native 发射端按这里的配对关系发
+/// `.init_array` 条目。不做这一步的后果: `G globalsample;` 的构造函数
+/// 根本不执行 (实测 dcc `global ctor=0` / g++ `1`)。
+#[derive(Debug, Clone)]
+pub struct HirGlobalInit {
+    /// 负责本条初始化的函数 (同时也是 `hir.functions` 里的一条)。
+    pub function: SymbolId,
+    /// 被初始化的对象。
+    pub object: SymbolId,
 }
 
 /// 函数定义的扩展版本（支持依赖名分析）

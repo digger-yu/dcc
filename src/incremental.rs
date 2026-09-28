@@ -416,6 +416,7 @@ mod tests {
             profile_parse: false,
             ipa_sra: crate::ipa_sra::IpaSraConfig::default(),
             profile: crate::profile::ProfileConfig::default(),
+            cxx_native_mode: crate::cpp::feature_matrix::CxxNativeMode::Auto,
         }
     }
 

@@ -72,11 +72,11 @@
 //!   `export_single_declaration_defined_in_private_fragment_stays_exported`)
 
 use crate::cpp::bmf::{BmfExport, BmfKind, BmfModule};
+use crate::cpp::mangle::{encode_type_name, mangle_typeinfo, mangle_vtable};
 use crate::cpp::mangle::{
     mangle_ctor, mangle_dtor, mangle_global_function, mangle_global_variable,
     mangle_member_function, MangleType, NestedName,
 };
-use crate::cpp::mangle::{encode_type_name, mangle_typeinfo, mangle_vtable};
 use crate::cpp::parser::{
     member_decl_access, Access, BaseSpec, ClassDecl, CppBody, CppDecl, CppParser,
 };
@@ -168,9 +168,7 @@ pub fn import_sites(src: &str) -> Vec<ImportSite> {
             } else {
                 // 模块名 (含 `:partition`) 或限定名 `a.b`
                 let start = j;
-                while j < b.len()
-                    && (id_ok(b[j]) || b[j] == b':' || b[j] == b'.' || b[j] == b'<')
-                {
+                while j < b.len() && (id_ok(b[j]) || b[j] == b':' || b[j] == b'.' || b[j] == b'<') {
                     if b[j] == b'<' {
                         // `import std.vector;` 之后的模板参数不属实体名
                         break;
@@ -180,7 +178,11 @@ pub fn import_sites(src: &str) -> Vec<ImportSite> {
                 text = src.get(start..j).unwrap_or("").to_string();
             }
             if !text.is_empty() {
-                out.push(ImportSite { name: text, is_header, line: start_line });
+                out.push(ImportSite {
+                    name: text,
+                    is_header,
+                    line: start_line,
+                });
             }
             i = j;
             continue;
@@ -249,7 +251,12 @@ pub fn resolve_imports(
     // 实现单元 (`module m;` + `import m;`) 不在其中 —— 它必须读接口 BMF.
     let mut self_units: Vec<String> = Vec::new();
     for d in decls {
-        if let CppDecl::Module { name: Some(n), partition, is_export } = d {
+        if let CppDecl::Module {
+            name: Some(n),
+            partition,
+            is_export,
+        } = d
+        {
             if module_name.is_empty() {
                 module_name = n.clone();
             }
@@ -319,7 +326,12 @@ pub fn resolve_imports(
         }
         match found {
             Some((_, m)) => out.loaded.push(m),
-            None => out.missing.push(MissingImport { name, file, line, tried }),
+            None => out.missing.push(MissingImport {
+                name,
+                file,
+                line,
+                tried,
+            }),
         }
     }
     out
@@ -692,7 +704,14 @@ pub fn parse_fn_signature_full(text: &str) -> Option<FnSigInfo> {
             params.push(c_to_ty(a.trim())?);
         }
     }
-    Some(FnSigInfo { ret, params, mangled, is_virtual, is_const, access })
+    Some(FnSigInfo {
+        ret,
+        params,
+        mangled,
+        is_virtual,
+        is_const,
+        access,
+    })
 }
 
 /// 解析 BMF 函数签名 -> (返回类型, 形参类型, 是否 virtual)
@@ -844,10 +863,19 @@ pub fn parse_layout_ex(layout: &str) -> BmfClassLayout {
         let name = tk.pop().unwrap().to_string();
         let ty = tk.join(" ");
         if let Some(t) = c_to_ty(&ty) {
-            fields.push(BmfField { name, ty: t, access });
+            fields.push(BmfField {
+                name,
+                ty: t,
+                access,
+            });
         }
     }
-    BmfClassLayout { is_struct, is_union, bases, fields }
+    BmfClassLayout {
+        is_struct,
+        is_union,
+        bases,
+        fields,
+    }
 }
 
 /// 解析 BMF 类布局文本 `int id; double x;` -> [(字段名, 类型)]
@@ -863,7 +891,10 @@ pub fn parse_layout(layout: &str) -> Vec<(String, MangleType)> {
 
 /// 纯声明 body (`is_decl`): 导入端只声明接口, 定义在导出 TU 的目标文件里
 fn decl_body() -> CppBody {
-    CppBody { stmts: Vec::new(), is_decl: true }
+    CppBody {
+        stmts: Vec::new(),
+        is_decl: true,
+    }
 }
 
 /// 收集本 TU 的模块接口 (BMF). 无 `export module name;` 声明时返回 None.
@@ -888,7 +919,11 @@ pub fn collect_interface_src(decls: &[CppDecl], src: Option<&str>) -> Option<Bmf
     let vidx = build_virtual_index(decls);
     for d in decls {
         match d {
-            CppDecl::Module { name, partition, is_export } => {
+            CppDecl::Module {
+                name,
+                partition,
+                is_export,
+            } => {
                 if let Some(n) = name {
                     bmf.name = n.clone();
                     bmf.partition = partition.clone();
@@ -974,14 +1009,15 @@ fn collect_export_block(
 }
 
 /// 单条顶层声明 -> BMF 导出记录
-fn push_export(
-    d: &CppDecl,
-    out: &mut Vec<BmfExport>,
-    src: Option<&str>,
-    vidx: &VirtualIndex,
-) {
+fn push_export(d: &CppDecl, out: &mut Vec<BmfExport>, src: Option<&str>, vidx: &VirtualIndex) {
     match d {
-        CppDecl::FreeFn { ret, name, params, trailing_ret_type, .. } => {
+        CppDecl::FreeFn {
+            ret,
+            name,
+            params,
+            trailing_ret_type,
+            ..
+        } => {
             if name == "main" {
                 return;
             }
@@ -1003,7 +1039,12 @@ fn push_export(
                 layout: None,
             });
         },
-        CppDecl::Template { decl, is_export, params, .. } => {
+        CppDecl::Template {
+            decl,
+            is_export,
+            params,
+            ..
+        } => {
             if !*is_export {
                 return;
             }
@@ -1054,9 +1095,18 @@ fn class_exports(c: &ClassDecl, vidx: &VirtualIndex) -> Vec<BmfExport> {
         let access = member_decl_access(c, m);
         match m {
             CppDecl::MemberVar { ty, name, .. } => {
-                fields.push(BmfField { name: name.clone(), ty: ty.clone(), access });
+                fields.push(BmfField {
+                    name: name.clone(),
+                    ty: ty.clone(),
+                    access,
+                });
             },
-            CppDecl::Ctor { class, params, is_virtual, .. } => {
+            CppDecl::Ctor {
+                class,
+                params,
+                is_virtual,
+                ..
+            } => {
                 let class = qual(class);
                 let ptys: Vec<MangleType> = params.iter().map(|(_, t)| t.clone()).collect();
                 let this = MangleType::Pointer(Box::new(MangleType::Class(class.clone())));
@@ -1079,7 +1129,9 @@ fn class_exports(c: &ClassDecl, vidx: &VirtualIndex) -> Vec<BmfExport> {
                     layout: None,
                 });
             },
-            CppDecl::Dtor { class, is_virtual, .. } => {
+            CppDecl::Dtor {
+                class, is_virtual, ..
+            } => {
                 let class = qual(class);
                 let this = MangleType::Pointer(Box::new(MangleType::Class(class.clone())));
                 let n = NestedName::from_dotted(vec![class.clone()]);
@@ -1098,7 +1150,15 @@ fn class_exports(c: &ClassDecl, vidx: &VirtualIndex) -> Vec<BmfExport> {
                     layout: None,
                 });
             },
-            CppDecl::MemberFn { class, ret, name, params, is_virtual, is_const, .. } => {
+            CppDecl::MemberFn {
+                class,
+                ret,
+                name,
+                params,
+                is_virtual,
+                is_const,
+                ..
+            } => {
                 let class = qual(class);
                 let ptys: Vec<MangleType> = params.iter().map(|(_, t)| t.clone()).collect();
                 // 成员函数签名首参为 this 指针 (与 legacy Lower 一致); 导入端
@@ -1111,8 +1171,7 @@ fn class_exports(c: &ClassDecl, vidx: &VirtualIndex) -> Vec<BmfExport> {
                 // M28.5: `int area();` 在 `Shape` 已有 `virtual int area()` 时
                 // 仍是虚函数 (override 隐式继承 virtual), 必须记 @virtual,
                 // 否则导入端重建的 vtable 与导出端槽位数不一致.
-                let virt =
-                    *is_virtual || vidx.is_virtual(&class, &vfunc_key(name, &ptys));
+                let virt = *is_virtual || vidx.is_virtual(&class, &vfunc_key(name, &ptys));
                 members.push(BmfExport {
                     kind: BmfKind::Function,
                     name: format!("{}::{}", class, name),
@@ -1179,11 +1238,18 @@ fn build_virtual_index(decls: &[CppDecl]) -> VirtualIndex {
     gather_classes(decls, &mut classes);
     let mut own: std::collections::HashMap<String, std::collections::HashSet<String>> =
         std::collections::HashMap::new();
-    let mut bases: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut bases: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
     for c in &classes {
         let e = own.entry(c.name.clone()).or_default();
         for m in &c.members {
-            if let CppDecl::MemberFn { name, params, is_virtual: v, .. } = m {
+            if let CppDecl::MemberFn {
+                name,
+                params,
+                is_virtual: v,
+                ..
+            } = m
+            {
                 if *v {
                     let ptys: Vec<MangleType> = params.iter().map(|(_, t)| t.clone()).collect();
                     e.insert(vfunc_key(name, &ptys));
@@ -1243,7 +1309,9 @@ pub fn find_template_src(src: &str, name: &str) -> Option<String> {
         if after < b.len() && id_ok(b[after]) {
             continue;
         }
-        let Some(len) = template_decl_len(&src[start..]) else { continue };
+        let Some(len) = template_decl_len(&src[start..]) else {
+            continue;
+        };
         let text = &src[start..start + len];
         // 声明头 (去掉体) 里必须出现该名字, 才是我们要的模板
         let head = match text.find('{') {
@@ -1341,8 +1409,7 @@ pub fn decls_from_bmf(bmf: &BmfModule) -> Vec<CppDecl> {
     }
     // 类名 -> 成员声明 (保持插入顺序)
     let mut order: Vec<String> = Vec::new();
-    let mut classes: std::collections::BTreeMap<String, Replay> =
-        std::collections::BTreeMap::new();
+    let mut classes: std::collections::BTreeMap<String, Replay> = std::collections::BTreeMap::new();
     let mut free: Vec<CppDecl> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     fn entry_of<'a>(
@@ -1379,6 +1446,9 @@ pub fn decls_from_bmf(bmf: &BmfModule) -> Vec<CppDecl> {
                         name: f.name,
                         is_mutable: false,
                         is_volatile: false,
+                        is_const: false,
+                        is_static: false,
+                        init: None,
                     });
                 }
             },
@@ -1444,6 +1514,7 @@ pub fn decls_from_bmf(bmf: &BmfModule) -> Vec<CppDecl> {
                                 is_noexcept: false,
                                 is_volatile: false,
                                 is_friend: false,
+                                is_static: false,
                             },
                         ),
                     };
@@ -1483,6 +1554,7 @@ pub fn decls_from_bmf(bmf: &BmfModule) -> Vec<CppDecl> {
                         init: None,
                         is_static: false,
                         is_volatile: false,
+                        is_const: false,
                     });
                 }
             },
@@ -1578,10 +1650,7 @@ pub fn merge_imported_decls(user: &[CppDecl], imported: &[BmfModule]) -> Vec<Cpp
 /// 避免无必要的全局回归面.
 pub fn is_module_tu(decls: &[CppDecl]) -> bool {
     decls.iter().any(|d| {
-        matches!(
-            d,
-            CppDecl::Module { .. } | CppDecl::Import { .. } | CppDecl::PrivateFragment
-        )
+        matches!(d, CppDecl::Module { .. } | CppDecl::Import { .. } | CppDecl::PrivateFragment)
     })
 }
 
@@ -1592,19 +1661,39 @@ fn class_symbol_names(c: &ClassDecl, out: &mut Vec<String>) {
     for m in &c.members {
         match m {
             CppDecl::Ctor { class, .. } => {
-                let cls = if class.is_empty() { c.name.clone() } else { class.clone() };
-                for v in [CtorVariant::Complete, CtorVariant::Base, CtorVariant::Allocating] {
+                let cls = if class.is_empty() {
+                    c.name.clone()
+                } else {
+                    class.clone()
+                };
+                for v in [
+                    CtorVariant::Complete,
+                    CtorVariant::Base,
+                    CtorVariant::Allocating,
+                ] {
                     out.push(ctor_variant_name(&cls, v));
                 }
             },
             CppDecl::Dtor { class, .. } => {
-                let cls = if class.is_empty() { c.name.clone() } else { class.clone() };
-                for v in [DtorVariant::Complete, DtorVariant::Base, DtorVariant::Deleting] {
+                let cls = if class.is_empty() {
+                    c.name.clone()
+                } else {
+                    class.clone()
+                };
+                for v in [
+                    DtorVariant::Complete,
+                    DtorVariant::Base,
+                    DtorVariant::Deleting,
+                ] {
                     out.push(dtor_variant_name(&cls, v));
                 }
             },
             CppDecl::MemberFn { class, name, .. } => {
-                let cls = if class.is_empty() { c.name.clone() } else { class.clone() };
+                let cls = if class.is_empty() {
+                    c.name.clone()
+                } else {
+                    class.clone()
+                };
                 out.push(member_func_symbol(&cls, name));
             },
             _ => {},
@@ -1635,7 +1724,9 @@ fn exported_interface_names(decls: &[CppDecl]) -> std::collections::HashSet<Stri
         for d in inner {
             match d {
                 CppDecl::ExportBlock(nested) => walk(nested, out),
-                CppDecl::Template { decl, is_export, .. } => {
+                CppDecl::Template {
+                    decl, is_export, ..
+                } => {
                     if *is_export {
                         if let Some(n) = entity_source_name(decl.as_ref()) {
                             out.insert(n);
@@ -1655,7 +1746,9 @@ fn exported_interface_names(decls: &[CppDecl]) -> std::collections::HashSet<Stri
         match d {
             CppDecl::PrivateFragment => break,
             CppDecl::ExportBlock(inner) => walk(inner, &mut out),
-            CppDecl::Template { decl, is_export, .. } if *is_export => {
+            CppDecl::Template {
+                decl, is_export, ..
+            } if *is_export => {
                 if let Some(n) = entity_source_name(decl.as_ref()) {
                     out.insert(n);
                 }
@@ -1915,6 +2008,26 @@ impl ModuleLinkagePlan {
     /// `&sym`) 在这一层都是同一个名字, 一次统一改名不会留下“一半旧名”的
     /// 引用; 而符号名的唯一真源 `lower_ir::symbol_link_name` 属于在途修改区,
     /// 不适合由模块侧擅改.
+    /// Stage 10.1: 给定一个后端约定名 (`Rect_ctor_complete_ii` /
+    /// `poly` / `_ZN4Rect1Ei` 等), 返回对应的 mangled 发射名 (若在
+    /// 本 TU 的改名表里); 非模块 TU 或本符号不在改名表时返回 `None`。
+    ///
+    /// 这是 `add_export_renames` 的反向查询, 让 `lower_ir::symbol_link_name`
+    /// 在模块 TU 上下文里选用 mangled 形式, 而非模块 TU 继续走
+    /// `member_func_symbol` / `ctor_variant_name` / `dtor_variant_name`。
+    ///
+    /// 用途: 跨 TU 链接时, 消费模块按后端约定名 (`Rect_ctor_complete_ii`)
+    /// 引用, 提供模块按 mangled 名 (`_ZN4RectC1Ei`) 发射, 必须经本表
+    /// 反查保证两侧口径一致, 否则 `undefined reference`。
+    pub fn mangled_name_of(&self, backend_name: &str) -> Option<String> {
+        self.rename.get(backend_name).cloned()
+    }
+
+    /// 当前改名表是否非空 (本 TU 是否为模块 TU 的快速判定)。
+    pub fn has_renames(&self) -> bool {
+        !self.rename.is_empty()
+    }
+
     pub fn apply(&self, prog: &mut crate::ast::Program) {
         if self.is_empty() {
             return;
@@ -1994,7 +2107,11 @@ impl ModuleLinkagePlan {
         }
     }
 
-    fn ren_opt(&self, e: &mut Option<crate::ast::Expr>, blocked: &std::collections::HashSet<String>) {
+    fn ren_opt(
+        &self,
+        e: &mut Option<crate::ast::Expr>,
+        blocked: &std::collections::HashSet<String>,
+    ) {
         if let Some(e) = e {
             self.ren_expr(e, blocked);
         }
@@ -2039,11 +2156,7 @@ impl ModuleLinkagePlan {
         }
     }
 
-    fn ren_expr(
-        &self,
-        e: &mut crate::ast::Expr,
-        blocked: &std::collections::HashSet<String>,
-    ) {
+    fn ren_expr(&self, e: &mut crate::ast::Expr, blocked: &std::collections::HashSet<String>) {
         use crate::ast::Expr as E;
         match e {
             E::Ident { name, .. } => self.ren_ident(name, blocked),
@@ -2059,9 +2172,7 @@ impl ModuleLinkagePlan {
             | E::PreInc { e, .. }
             | E::PreDec { e, .. }
             | E::AlignofExpr { e, .. } => self.ren_expr(e, blocked),
-            E::Binop { l, r, .. }
-            | E::Assign { l, r, .. }
-            | E::Comma { l, r, .. } => {
+            E::Binop { l, r, .. } | E::Assign { l, r, .. } | E::Comma { l, r, .. } => {
                 self.ren_expr(l, blocked);
                 self.ren_expr(r, blocked);
             },
@@ -2075,7 +2186,9 @@ impl ModuleLinkagePlan {
                     self.ren_expr(a, blocked);
                 }
             },
-            E::Cond { cond, then_, else_, .. } => {
+            E::Cond {
+                cond, then_, else_, ..
+            } => {
                 self.ren_expr(cond, blocked);
                 self.ren_expr(then_, blocked);
                 self.ren_expr(else_, blocked);
@@ -2086,7 +2199,9 @@ impl ModuleLinkagePlan {
                 self.ren_inits(inits, blocked)
             },
             E::StmtExpr { block, .. } => self.ren_block(block, blocked),
-            E::AsmExpr { outputs, inputs, .. } => {
+            E::AsmExpr {
+                outputs, inputs, ..
+            } => {
                 for x in outputs.iter_mut().chain(inputs.iter_mut()) {
                     self.ren_expr(x, blocked);
                 }
@@ -2103,11 +2218,7 @@ impl ModuleLinkagePlan {
         }
     }
 
-    fn ren_block(
-        &self,
-        b: &mut crate::ast::Block,
-        blocked: &std::collections::HashSet<String>,
-    ) {
+    fn ren_block(&self, b: &mut crate::ast::Block, blocked: &std::collections::HashSet<String>) {
         use crate::ast::{BlockItem, Decl};
         for it in &mut b.items {
             match it {
@@ -2147,16 +2258,14 @@ impl ModuleLinkagePlan {
         }
     }
 
-    fn ren_stmt(
-        &self,
-        s: &mut crate::ast::Stmt,
-        blocked: &std::collections::HashSet<String>,
-    ) {
+    fn ren_stmt(&self, s: &mut crate::ast::Stmt, blocked: &std::collections::HashSet<String>) {
         use crate::ast::Stmt;
         match s {
             Stmt::Return { val, .. } => self.ren_opt(val, blocked),
             Stmt::Expr { e, .. } => self.ren_expr(e, blocked),
-            Stmt::If { cond, then_, else_, .. } => {
+            Stmt::If {
+                cond, then_, else_, ..
+            } => {
                 self.ren_expr(cond, blocked);
                 self.ren_stmt(then_, blocked);
                 if let Some(x) = else_ {
@@ -2171,7 +2280,13 @@ impl ModuleLinkagePlan {
                 self.ren_stmt(body, blocked);
                 self.ren_expr(cond, blocked);
             },
-            Stmt::For { init, cond, step, body, .. } => {
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+                ..
+            } => {
                 if let Some(i) = init {
                     self.ren_stmt(i, blocked);
                 }
@@ -2190,27 +2305,72 @@ impl ModuleLinkagePlan {
             },
             Stmt::Label { stmt, .. } => self.ren_stmt(stmt, blocked),
             Stmt::GotoIndirect { expr, .. } => self.ren_expr(expr, blocked),
-            Stmt::AsmGoto { outputs, inputs, .. } => {
+            Stmt::AsmGoto {
+                outputs, inputs, ..
+            } => {
                 for x in outputs.iter_mut().chain(inputs.iter_mut()) {
                     self.ren_expr(x, blocked);
                 }
             },
-            // Break / Continue / Goto(标签名) / Fallthrough: 无表达式引用
-            _ => {},
+            // C++ 零成本异常: 受保护调用把真正的调用语句包在 `call` 里。以前
+            // 两者都落到下面的「无表达式引用」分支, 于是导入 TU 里任何被
+            // invoke 包住的调用 (构造函数 / 可抛出的析构 / 普通受保护调用) 都不
+            // 会改名 —— 实测链接期报 `undefined reference to 'poly'` / `Rect_ctor_complete_ii`。
+            Stmt::Invoke {
+                call,
+                landing_pad,
+                actions,
+                ..
+            } => {
+                self.ren_stmt(call, blocked);
+                if let Some(pad) = landing_pad {
+                    self.ren_ident(pad, blocked);
+                }
+                for a in actions.iter_mut() {
+                    if let crate::ast::EhAction::Catch {
+                        typeinfo: Some(ti), ..
+                    } = a
+                    {
+                        *ti = self.renamed_name(ti);
+                    }
+                }
+            },
+            // 落地垫序言: `label` 是函数内局部标签 (不参与链接名), 两个槽是普通表达式。
+            Stmt::EhLandingPad {
+                object, selector, ..
+            } => {
+                self.ren_expr(object, blocked);
+                self.ren_expr(selector, blocked);
+            },
+            // Break / Continue / Goto(标签名) / Fallthrough: 不引用任何链接符号。
+            // 这里按变体逐个列出而不是 `_ => {}`: 新增 `Stmt` 变体必须在此处被
+            // 显式分类, 否则会像上面的 Invoke 一样被静默跳过。
+            Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::Goto { .. }
+            | Stmt::Fallthrough { .. } => {},
         }
+    }
+
+    /// 一个符号名在改名表里的发射名 (不在表中则原样返回)。用于 action 链里
+    /// 直接携带的 typeinfo 符号名 (它们不是 `Expr`, 走不到 `ren_ident`)。
+    fn renamed_name(&self, name: &str) -> String {
+        self.rename
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
     }
 }
 
 /// 一条 BMF 导出记录 -> 「后端约定名 -> mangled 发射名」条目.
-fn add_export_renames(
-    map: &mut std::collections::HashMap<String, String>,
-    e: &BmfExport,
-) {
+fn add_export_renames(map: &mut std::collections::HashMap<String, String>, e: &BmfExport) {
     use crate::cpp::hir::{CtorVariant, DtorVariant};
     use crate::cpp::lower_ir::{ctor_variant_name, dtor_variant_name, member_func_symbol};
     match e.kind {
         BmfKind::Function => {
-            let Some(mg) = signature_mangled(&e.signature) else { return };
+            let Some(mg) = signature_mangled(&e.signature) else {
+                return;
+            };
             match e.name.split_once("::") {
                 Some((class, "ctor")) => {
                     map.insert(ctor_variant_name(class, CtorVariant::Complete), mg.clone());
@@ -2259,7 +2419,12 @@ pub fn module_linkage_plan(
     imported: &[BmfModule],
 ) -> ModuleLinkagePlan {
     let mut plan = ModuleLinkagePlan::default();
-    if !is_module_tu(user_decls) {
+    // 「本 TU 是不是模块 TU」不能只看 decl 列表: 导入 TU 的 `import` 记录在 BMF 回放
+    // 阶段已被替换成具体声明, 此时 `is_module_tu` 会假阴性, 于是改名表为空 ——
+    // 实测导入端按后端约定名 (`poly` / `Rect_ctor_complete_ii`) 引用, 导出端按
+    // mangled 名发射, 链接期 undefined reference。模块性由**全部输入**共同判定:
+    // decl 里还有模块标记 / 有自有接口 / 有已加载的导入模块, 任一成立即模块 TU。
+    if !is_module_tu(user_decls) && own.is_none() && imported.is_empty() {
         return plan;
     }
     let mut mods: Vec<&BmfModule> = Vec::new();
@@ -2276,13 +2441,15 @@ pub fn module_linkage_plan(
     // M28.5: 导入 (非本地定义) 的类不得在本 TU 发射虚表/typeinfo
     let local_classes = local_class_names(user_decls);
     for m in imported {
-        plan.drop_data.extend(imported_rtti_symbols(m, &local_classes));
+        plan.drop_data
+            .extend(imported_rtti_symbols(m, &local_classes));
     }
     // M28.5 补: 多态性先按整张模块图 (own + imported) 不动点传接, 再把导入
     // 多态类的 ctor/dtor 外部化 (否则得到一份不写 vptr 的 weak 副本,
     // 链接顺序敏感地盖掉导出 TU 的真定义 -> 虚调用段错)
     let poly = polymorphic_classes(&mods);
-    plan.externalize.extend(imported_ctor_dtor_symbols(imported, &poly, &local_classes));
+    plan.externalize
+        .extend(imported_ctor_dtor_symbols(imported, &poly, &local_classes));
     plan
 }
 
@@ -2375,7 +2542,10 @@ impl OdrChecker {
     pub fn register_module(&mut self, module_name: &str, exports: &[BmfExport]) {
         for e in exports {
             let (key, sig) = odr_key(e);
-            self.definitions.entry(key).or_default().push((module_name.to_string(), sig));
+            self.definitions
+                .entry(key)
+                .or_default()
+                .push((module_name.to_string(), sig));
         }
     }
 
@@ -2428,7 +2598,9 @@ pub fn odr_key(e: &BmfExport) -> (String, String) {
             };
             (key, e.signature.clone())
         },
-        BmfKind::Variable => (format!("V {}", mangle_global_variable(&e.name)), e.signature.clone()),
+        BmfKind::Variable => {
+            (format!("V {}", mangle_global_variable(&e.name)), e.signature.clone())
+        },
         BmfKind::Class => (format!("C {}", e.name), e.layout.clone().unwrap_or_default()),
         BmfKind::Template => (format!("T {}", e.name), e.signature.clone()),
     }
@@ -2542,7 +2714,10 @@ mod tests {
         };
         assert!(odr_conflicts(None, &[mod_of("a", &f0), mod_of("b", &f1)]).is_none());
         // 同 mangled 名但类型文本不同 (Itanium 不编返回类型) = 真实违例
-        let f0_bad = BmfExport { signature: "long _Z3foov()".to_string(), ..f0.clone() };
+        let f0_bad = BmfExport {
+            signature: "long _Z3foov()".to_string(),
+            ..f0.clone()
+        };
         let msg =
             odr_conflicts(None, &[mod_of("a", &f0), mod_of("b", &f0_bad)]).expect("same mangled");
         assert!(msg.contains("_Z3foov"), "{}", msg);
@@ -2627,7 +2802,11 @@ mod tests {
         assert!(text.contains("E F use"), "`export {{}}` 里声明的实体仍导出: {}", text);
         let plan = module_linkage_plan(&decls, Some(&bmf), &[]);
         assert!(!plan.internal.contains("use"), "导出不该被降为内部链接: {:?}", plan.internal);
-        assert!(plan.rename.contains_key("use"), "导出实体要有 mangled 发射名: {:?}", plan.rename);
+        assert!(
+            plan.rename.contains_key("use"),
+            "导出实体要有 mangled 发射名: {:?}",
+            plan.rename
+        );
     }
 
     #[test]
@@ -2642,11 +2821,7 @@ mod tests {
         let decls = parse_decls(src);
         let bmf = collect_interface(&decls).expect("interface");
         let text = bmf.serialize();
-        assert!(
-            text.contains("E F use"),
-            "`export` 修饰的单条声明仍要进接口: {}",
-            text
-        );
+        assert!(text.contains("E F use"), "`export` 修饰的单条声明仍要进接口: {}", text);
         let plan = module_linkage_plan(&decls, Some(&bmf), &[]);
         assert!(
             !plan.internal.contains("use"),
@@ -2658,6 +2833,55 @@ mod tests {
             "导出实体要有 mangled 发射名: {:?}",
             plan.rename
         );
+    }
+
+    #[test]
+    fn mangled_name_of_reverse_lookup_matches_module_export_renames() {
+        // Stage 10.1: 反向查询必须与 `add_export_renames` 正向产出**完全一致**,
+        // 跨 TU 链接 (导出端按 mangled, 消费端按约定名) 才能落地. 三类典型
+        // 实体的反查都要命中, 缺失条目要返回 None 而不是空串 (防止误判).
+        let mod_src = "export module m;\n\
+                       export class Rect {\n\
+                       public: int area();\n\
+                       Rect(int, int);\n\
+                       ~Rect();\n\
+                       };\n\
+                       int poly();\n";
+        let decls = parse_decls(mod_src);
+        let bmf = collect_interface(&decls).expect("interface");
+        let plan = module_linkage_plan(&decls, Some(&bmf), &[]);
+
+        // 自由函数: 后端约定名 `poly` -> mangled `_Z4polyv`
+        let poly_mangled = plan
+            .mangled_name_of("poly")
+            .expect("poly 反查应命中 (Stage 10.1 验收条款)");
+        assert_eq!(poly_mangled, "_Z4polyv");
+
+        // 构造函数: `Rect_ctor_complete_ii` -> `_ZN4RectC1Ei`
+        let ctor_mangled = plan
+            .mangled_name_of("Rect_ctor_complete")
+            .expect("ctor 反查应命中");
+        assert!(ctor_mangled.starts_with("_ZN4RectC1"), "ctor mangled 形如 Itanium C1: {}", ctor_mangled);
+
+        // 析构函数: `Rect_dtor_complete` -> `_ZN4RectD1Ev`
+        let dtor_mangled = plan
+            .mangled_name_of("Rect_dtor_complete")
+            .expect("dtor 反查应命中");
+        assert!(dtor_mangled.starts_with("_ZN4RectD1"), "dtor mangled 形如 Itanium D1: {}", dtor_mangled);
+
+        // 不在改名表里的名字必须返回 None (而不是空串或 panic)
+        assert!(plan.mangled_name_of("unknown_symbol").is_none());
+        assert!(plan.mangled_name_of("Rect::nonexistent_method").is_none());
+        // has_renames 反映本 TU 是不是模块 TU
+        assert!(plan.has_renames());
+    }
+
+    #[test]
+    fn mangled_name_of_empty_plan_returns_none() {
+        // 非模块 TU: `module_linkage_plan` 返回空计划, 反查全部 None
+        let plan = ModuleLinkagePlan::default();
+        assert!(plan.mangled_name_of("anything").is_none());
+        assert!(!plan.has_renames());
     }
 
     #[test]
@@ -2683,13 +2907,22 @@ mod tests {
         assert!(poly.contains("Rect"), "基类虚函数应传接: {:?}", poly);
         assert!(!poly.contains("Box"), "模板类本地实例化: {:?}", poly);
         // 跨模块图外部化: 导入 shape + shape2 的 TU 两个类都不得定义 ctor
-        let use2 = parse_decls("module user2;\nimport shape;\nimport shape2;\nint g() { return 0; }\n");
+        let use2 =
+            parse_decls("module user2;\nimport shape;\nimport shape2;\nint g() { return 0; }\n");
         let plan2 = module_linkage_plan(&use2, None, &[bmf.clone(), dbmf.clone()]);
         assert!(plan2.externalize.contains("Rect_ctor_complete"), "{:?}", plan2.externalize);
         assert!(plan2.externalize.contains("Shape_dtor_complete"), "{:?}", plan2.externalize);
         // 非多态类与模板类不在集合里
-        assert!(!plan.externalize.iter().any(|n| n.starts_with("Point_")), "{:?}", plan.externalize);
-        assert!(!plan.externalize.iter().any(|n| n.starts_with("Box_")), "{:?}", plan.externalize);
+        assert!(
+            !plan.externalize.iter().any(|n| n.starts_with("Point_")),
+            "{:?}",
+            plan.externalize
+        );
+        assert!(
+            !plan.externalize.iter().any(|n| n.starts_with("Box_")),
+            "{:?}",
+            plan.externalize
+        );
         // allocating(C3) / deleting(D0) 由使用侧发射, 不得外部化
         assert!(!plan.externalize.contains("Shape_ctor_allocating"));
         assert!(!plan.externalize.contains("Shape_dtor_deleting"));
@@ -2701,7 +2934,11 @@ mod tests {
         assert!(collect_interface(&parse_decls("int f() { return 1; }\n")).is_none());
         // `module m;` (is_export=false) 也不产出
         let d = vec![
-            CppDecl::Module { name: Some("m".to_string()), partition: None, is_export: false },
+            CppDecl::Module {
+                name: Some("m".to_string()),
+                partition: None,
+                is_export: false,
+            },
             parse_decls("int f() { return 1; }")[0].clone(),
         ];
         let iface = collect_interface(&d).expect("named module yields interface record");
@@ -2722,12 +2959,7 @@ mod tests {
         let again = collect_interface(&decls).expect("re-collect");
         assert_eq!(again.name, bmf.name);
         let key = |e: &BmfExport| {
-            (
-                format!("{:?}", e.kind),
-                e.name.clone(),
-                e.signature.clone(),
-                e.layout.clone(),
-            )
+            (format!("{:?}", e.kind), e.name.clone(), e.signature.clone(), e.layout.clone())
         };
         let mut a: Vec<_> = bmf.exports.iter().map(key).collect();
         let mut b: Vec<_> = again.exports.iter().map(key).collect();
@@ -2748,8 +2980,14 @@ mod tests {
                     n_class += 1;
                     assert_eq!(c.name, "Widget");
                     // 字段 + ctor + 成员函数, 全部为纯声明
-                    assert!(c.members.iter().any(|m| matches!(m, CppDecl::MemberVar { name, .. } if name == "id")));
-                    assert!(c.members.iter().any(|m| matches!(m, CppDecl::Ctor { body, .. } if body.is_decl)));
+                    assert!(c
+                        .members
+                        .iter()
+                        .any(|m| matches!(m, CppDecl::MemberVar { name, .. } if name == "id")));
+                    assert!(c
+                        .members
+                        .iter()
+                        .any(|m| matches!(m, CppDecl::Ctor { body, .. } if body.is_decl)));
                     assert!(c.members.iter().any(
                         |m| matches!(m, CppDecl::MemberFn { name, body, .. } if name == "get" && body.is_decl)
                     ));
@@ -2783,7 +3021,9 @@ mod tests {
         // `ExportBlock([FreeFn])`, 与 `export { int get(); }` 同形). 导入声明必须
         // 注入在它**之前**, 否则函数体里的 `answer()` 先于原型进入 sema 会报
         // undeclared identifier.
-        let user = parse_decls("export module mymod;\nimport :part;\nexport int get() { return answer(); }\n");
+        let user = parse_decls(
+            "export module mymod;\nimport :part;\nexport int get() { return answer(); }\n",
+        );
         let bmf = collect_interface(&parse_decls(EXPORT_TU)).expect("interface");
         let merged = merge_imported_decls(&user, &[bmf]);
         let injected = merged
@@ -2811,7 +3051,9 @@ mod tests {
         let sig = make_fn_signature_ex(
             &MangleType::Int,
             "_ZN5Shape3areav",
-            &[MangleType::Pointer(Box::new(MangleType::Class("Shape".to_string())))],
+            &[MangleType::Pointer(Box::new(MangleType::Class(
+                "Shape".to_string(),
+            )))],
             true,
             true,
         );
@@ -2820,14 +3062,18 @@ mod tests {
         assert_eq!(ret, MangleType::Int);
         assert_eq!(
             params,
-            vec![MangleType::Pointer(Box::new(MangleType::Class("Shape".to_string())))]
+            vec![MangleType::Pointer(Box::new(MangleType::Class(
+                "Shape".to_string()
+            )))]
         );
         assert!(is_v && is_c);
         // 虚/const 差异必须影ODR 比较 (签名文本不同)
         let plain = make_fn_signature(
             &MangleType::Int,
             "_ZN5Shape3areav",
-            &[MangleType::Pointer(Box::new(MangleType::Class("Shape".to_string())))],
+            &[MangleType::Pointer(Box::new(MangleType::Class(
+                "Shape".to_string(),
+            )))],
             false,
         );
         assert_ne!(sig, plain);

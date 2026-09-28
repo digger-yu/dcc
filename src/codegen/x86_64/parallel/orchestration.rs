@@ -140,6 +140,11 @@ impl Codegen {
             pushsection_code_ranges: cg.pushsection_code_ranges,
             extra_sections: cg.extra_sections,
             custom_sec_indices: cg.custom_sec_indices,
+            // C++ 零成本异常: CFI 事实与受保护调用点必须随 chunk 带回主 Codegen,
+            // 否则并行产物与串行产物不一致 (不可复现), 且 FDE 的 CFA 规则会退回
+            // 旧的常量段 —— unwinder 走不出本帧。
+            func_cfi: cg.func_cfi.get(&f.name.name).copied(),
+            eh_funcs: cg.eh_funcs,
             disasm_calls: cg.disasm_calls,
             new_rodata,
             rodata_base,
@@ -161,6 +166,48 @@ impl Codegen {
             self.labels.insert(name.clone(), base + *off);
         }
         self.func_sizes.insert(chunk.name.clone(), chunk.size);
+        // C++ 零成本异常: 归档本 chunk 的 CFI 事实与受保护调用点。
+        // 调用点里的 start/end/落地垫标签偏移都是 chunk 相对值, 落位后必须
+        // 统一加上 `base`; 落地垫标签本身已在上面按 base 平移进 `labels`,
+        // 所以 LSDA 装配时查到的就是最终偏移。
+        if let Some(cfi) = chunk.func_cfi {
+            self.func_cfi.insert(chunk.name.clone(), cfi);
+        }
+        for info in chunk.eh_funcs {
+            let name = info.name.clone();
+            // chunk 内的调用点与函数起点都是 chunk 相对值, 落位后统一加 `base`。
+            let text_start = info.text_start + base;
+            let sites: Vec<_> = info
+                .sites
+                .into_iter()
+                .map(|mut s| {
+                    s.start += base;
+                    s.end += base;
+                    s
+                })
+                .collect();
+            if sites.is_empty() {
+                continue;
+            }
+            // 同一函数名在并行 chunk 里只会出现一次; 若已有条目 (串行路径已经
+            // 归档过同名函数), 合并调用点而不是覆盖。归属判据是「同名字 + 同一段
+            // 发射地址」: 地址不同就是两次独立发射, 合并会把两组调用点编到同一个
+            // LSDA 里, 而 FDE 只能描述其中一份代码。
+            if let Some(existing) = self
+                .eh_funcs
+                .iter_mut()
+                .find(|f| f.name == name && f.text_start == text_start)
+            {
+                existing.sites.extend(sites);
+            } else {
+                self.eh_funcs
+                    .push(crate::codegen::x86_64::eh_tables::EhFuncInfo {
+                        name,
+                        text_start,
+                        sites,
+                    });
+            }
+        }
         self.code.extend_from_slice(&chunk.code);
         for (pos, data) in chunk.string_refs {
             self.string_refs.push((base + pos, data));

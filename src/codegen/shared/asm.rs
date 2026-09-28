@@ -7,8 +7,7 @@
 use std::fmt;
 
 /// Assembly instruction encoding format
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub enum EncodingFormat {
     /// Intel syntax (AT&T alternative available)
     #[default]
@@ -16,7 +15,6 @@ pub enum EncodingFormat {
     /// AT&T syntax (x86 default)
     Att,
 }
-
 
 /// Assembly operand types
 #[derive(Debug, Clone)]

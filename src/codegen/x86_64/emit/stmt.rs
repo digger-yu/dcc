@@ -524,13 +524,71 @@ impl Codegen {
                     self.code.push(0x89);
                     self.code.push(0xD5);
                 }
-                let lbl = Self::c_label_to_asm(&target.name);
+                let lbl = self.c_label_to_asm(&target.name);
                 self.jmp_rel32(&lbl, JumpKind::Jmp);
             },
             Stmt::Label { name, stmt, .. } => {
-                let lbl = Self::c_label_to_asm(&name.name);
+                let lbl = self.c_label_to_asm(&name.name);
                 self.label(&lbl);
                 self.gen_stmt(stmt);
+            },
+            // C++ 零成本异常: 受保护调用。LSDA call-site 区间就是被包装调用语句
+            // 的地址范围 —— 表驱动展开以 PC 为键, 区间越接近「一条调用指令」,
+            // 落地垫能做出的清理决定就越精确 (少算则泄漏, 多算则重复析构)。
+            Stmt::Invoke {
+                call,
+                landing_pad,
+                actions,
+                ..
+            } => {
+                let start = self.pos();
+                self.gen_stmt(call);
+                let end = self.pos();
+                self.eh_sites
+                    .push(crate::codegen::x86_64::eh_tables::EhSite {
+                        start,
+                        end,
+                        landing_pad: landing_pad
+                            .as_ref()
+                            .map(|pad| self.c_label_to_asm(&pad.name)),
+                        actions: actions.clone(),
+                    });
+            },
+            // C++ 零成本异常: 落地垫序言。unwinder 把 IP 直接交到标签处, 此时按
+            // x86-64 C++ ABI: %rax = 异常对象指针, %rdx = type selector。
+            // 这两个寄存器值只在本序列之后仍然有效, 因此贴完标签就立即溢出到槽位;
+            // 剩下的清理 / 按 selector 分派 / `__cxa_begin_catch` 都是普通语句。
+            Stmt::EhLandingPad {
+                label,
+                object,
+                selector,
+                ..
+            } => {
+                let lbl = self.c_label_to_asm(&label.name);
+                self.label(&lbl);
+                let slots = match (&**object, &**selector) {
+                    (Expr::Ident { name: o, .. }, Expr::Ident { name: s, .. }) => {
+                        Some((o.name.clone(), s.name.clone()))
+                    },
+                    _ => None,
+                };
+                let Some((o_name, s_name)) = slots else {
+                    self.diagnostics.push(crate::diagnostics::Diagnostic {
+                        sev: crate::diagnostics::Severity::Error,
+                        code: "E1121",
+                        msg: "exception landing pad slots must be named local variables"
+                            .to_string(),
+                        span: crate::diagnostics::Span::point("<eh>", 0, 0),
+                        hint: Some("后端只能在落地垫第一条指令把 rax/rdx 存入具名栈槽".into()),
+                        source_line: None,
+                    });
+                    return;
+                };
+                // rax = 0, rdx = 2; 两个槽都是指针/整数宽度 (8 字节)
+                let obj_off = self.var_offset(&o_name);
+                self.store_stack(0, obj_off);
+                let sel_off = self.var_offset(&s_name);
+                self.store_stack(2, sel_off);
             },
             Stmt::Switch { expr, cases, .. } => {
                 // switch: 计算表达式, 比较链跳转到对应 case 体.
@@ -701,7 +759,7 @@ impl Codegen {
                 let mut resolved_asm = asm_str.clone();
                 let label_base = outputs.len() + inputs.len();
                 for (i, label) in goto_labels.iter().enumerate().rev() {
-                    let prefixed = Self::c_label_to_asm(&label.name);
+                    let prefixed = self.c_label_to_asm(&label.name);
                     resolved_asm = Self::asm_replace_label_idx(&resolved_asm, i, &prefixed);
                     resolved_asm =
                         Self::asm_replace_label_idx(&resolved_asm, label_base + i, &prefixed);
@@ -844,10 +902,8 @@ impl Codegen {
                                 // initializer is float but variable is
                                 // integer (e.g. `int a = 0.0;`).
                                 let init_ty = init.ty();
-                                if matches!(
-                                    &init_ty,
-                                    Type::Float | Type::Double | Type::LongDouble
-                                ) && Self::is_integer_type(&v.ty)
+                                if matches!(&init_ty, Type::Float | Type::Double | Type::LongDouble)
+                                    && Self::is_integer_type(&v.ty)
                                 {
                                     self.emit_implicit_float_to_int(0, &init_ty, &v.ty);
                                 }
@@ -887,114 +943,113 @@ impl Codegen {
                 if v.is_extern && v.init.is_none() {
                     return;
                 }
-                    // static 局部变量已在全局数据段分配,
-                    // 跳过栈分配 (与函数顶层遍历 L6970 一致)
-                    if v.is_static
-                        && self
-                            .static_local_map
-                            .is_static_local(&self.current_func_name, &v.name.name)
-                        && !self
-                            .static_local_map
-                            .needs_runtime_init(&self.current_func_name, &v.name.name)
-                    {
-                        return;
+                // static 局部变量已在全局数据段分配,
+                // 跳过栈分配 (与函数顶层遍历 L6970 一致)
+                if v.is_static
+                    && self
+                        .static_local_map
+                        .is_static_local(&self.current_func_name, &v.name.name)
+                    && !self
+                        .static_local_map
+                        .needs_runtime_init(&self.current_func_name, &v.name.name)
+                {
+                    return;
+                }
+                if let Some(ref reg_name) = v.register_name {
+                    if let Some(reg_idx) = Self::parse_reg_name(reg_name) {
+                        self.reg_bindings.insert(v.name.name.clone(), reg_idx);
                     }
-                    if let Some(ref reg_name) = v.register_name {
-                        if let Some(reg_idx) = Self::parse_reg_name(reg_name) {
-                            self.reg_bindings.insert(v.name.name.clone(), reg_idx);
-                        }
+                }
+                // P2-9: cleanup 属性变量注册
+                if let Some(ref fn_name) = v.cleanup_fn {
+                    self.cleanup_vars
+                        .push((v.name.name.clone(), fn_name.clone()));
+                }
+                // 定义+声明一体的 struct/union 类型: 变量声明点即类型
+                // 声明点, 触发 VM 槽绑定/静态清除 (parser 不产生独立
+                // StructDef BlockItem)
+                if matches!(v.ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) {
+                    self.gen_vm_type_bind(&v.ty);
+                }
+                // static local 需要运行时初始化: 发射初始化代码到全局地址
+                if v.is_static
+                    && self
+                        .static_local_map
+                        .needs_runtime_init(&self.current_func_name, &v.name.name)
+                {
+                    if let Some(init) = &v.init {
+                        self.gen_expr(init, 0);
+                        self.emit_global_store(0, &v.name.name);
                     }
-                    // P2-9: cleanup 属性变量注册
-                    if let Some(ref fn_name) = v.cleanup_fn {
-                        self.cleanup_vars
-                            .push((v.name.name.clone(), fn_name.clone()));
-                    }
-                    // 定义+声明一体的 struct/union 类型: 变量声明点即类型
-                    // 声明点, 触发 VM 槽绑定/静态清除 (parser 不产生独立
-                    // StructDef BlockItem)
-                    if matches!(v.ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) {
-                        self.gen_vm_type_bind(&v.ty);
-                    }
-                    // static local 需要运行时初始化: 发射初始化代码到全局地址
-                    if v.is_static
-                        && self
-                            .static_local_map
-                            .needs_runtime_init(&self.current_func_name, &v.name.name)
-                    {
-                        if let Some(init) = &v.init {
+                    return;
+                }
+                self.register_var(&v.name.name, &v.ty);
+                if Self::type_has_vla(&v.ty) {
+                    self.gen_vla_alloc(v);
+                } else if let Some(init) = &v.init {
+                    if let Expr::InitList { inits, .. } = init {
+                        self.gen_init_list(&v.name.name, &v.ty, inits);
+                    } else {
+                        let is_agg = matches!(
+                            &v.ty,
+                            Type::Struct(_, _, _, _)
+                                | Type::Union(_, _, _, _)
+                                | Type::Array(_, ArraySize::Const(_))
+                                | Type::Atomic(_)
+                        ) && v.ty.size() > 8;
+                        if matches!(&v.ty, Type::Vector(_, _)) || is_agg {
+                            let dst_ty = v.ty.clone();
+                            let dst_name = v.name.name.clone();
+                            self.gen_aggregate_assign(&dst_name, &dst_ty, init);
+                        } else if let Type::Complex(inner) = &v.ty {
+                            self.gen_complex_init(&v.name.name, &inner.base, init);
+                        } else if let Type::Imaginary(ref inner) = &v.ty {
+                            self.gen_imaginary_init(&v.name.name, &inner.base, init);
+                        } else if matches!(&v.ty, Type::Float | Type::Double | Type::LongDouble) {
+                            // 浮点: xmm0 结果必须用 movsd/movss 存回栈, 不能用整数 mov rax
                             self.gen_expr(init, 0);
-                            self.emit_global_store(0, &v.name.name);
-                        }
-                        return;
-                    }
-                    self.register_var(&v.name.name, &v.ty);
-                    if Self::type_has_vla(&v.ty) {
-                        self.gen_vla_alloc(v);
-                    } else if let Some(init) = &v.init {
-                        if let Expr::InitList { inits, .. } = init {
-                            self.gen_init_list(&v.name.name, &v.ty, inits);
+                            // int 常量初始化浮点变量: 先转换到 xmm0 (double x = 1;)
+                            self.emit_scalar_to_xmm0_if_needed(init, &v.ty);
+                            self.gen_float_store(&v.name.name, &v.ty);
                         } else {
-                            let is_agg = matches!(
-                                &v.ty,
-                                Type::Struct(_, _, _, _)
-                                    | Type::Union(_, _, _, _)
-                                    | Type::Array(_, ArraySize::Const(_))
-                                    | Type::Atomic(_)
-                            ) && v.ty.size() > 8;
-                            if matches!(&v.ty, Type::Vector(_, _)) || is_agg {
-                                let dst_ty = v.ty.clone();
-                                let dst_name = v.name.name.clone();
-                                self.gen_aggregate_assign(&dst_name, &dst_ty, init);
-                            } else if let Type::Complex(inner) = &v.ty {
-                                self.gen_complex_init(&v.name.name, &inner.base, init);
-                            } else if let Type::Imaginary(ref inner) = &v.ty {
-                                self.gen_imaginary_init(&v.name.name, &inner.base, init);
-                            } else if matches!(&v.ty, Type::Float | Type::Double | Type::LongDouble)
+                            self.gen_expr(init, 0);
+                            // Implicit float→int conversion
+                            let init_ty = init.ty();
+                            if matches!(&init_ty, Type::Float | Type::Double | Type::LongDouble)
+                                && Self::is_integer_type(&v.ty)
                             {
-                                // 浮点: xmm0 结果必须用 movsd/movss 存回栈, 不能用整数 mov rax
-                                self.gen_expr(init, 0);
-                                // int 常量初始化浮点变量: 先转换到 xmm0 (double x = 1;)
-                                self.emit_scalar_to_xmm0_if_needed(init, &v.ty);
-                                self.gen_float_store(&v.name.name, &v.ty);
-                            } else {
-                                self.gen_expr(init, 0);
-                                // Implicit float→int conversion
-                                let init_ty = init.ty();
-                                if matches!(&init_ty, Type::Float | Type::Double | Type::LongDouble)
-                                    && Self::is_integer_type(&v.ty)
-                                {
-                                    self.emit_implicit_float_to_int(0, &init_ty, &v.ty);
-                                }
-                                // D7: `__int128` 是 16 字节对象，且 dcc 的值模型把它
-                                // 按 rdx:rax 双寄存器交付。`mov_to_stack` 对任何
-                                // sz >= 8 都只写一个 8 字节 store，于是高半从未落槽：
-                                // 循环体内 `__int128 v = va_arg(...)` 后的 `v >> 64`
-                                // 读到的是栈残值（实测三次迭代全部返回同一个个值）。
-                                // 只在“目标与源都是 128 位整型值”时补高半 store，
-                                // 避开 float→__int128 转换只备 rax 的情形。
-                                let store_hi = matches!(&v.ty, Type::Int128 | Type::UInt128)
-                                    && matches!(&init_ty, Type::Int128 | Type::UInt128)
-                                    && !self.reg_bindings.contains_key(&v.name.name);
-                                self.mov_to_stack(0, &v.name.name);
-                                if store_hi {
-                                    let off = self.var_offset(&v.name.name);
-                                    self.store_stack(2, off + 8); // rdx = 高 8 字节
-                                }
+                                self.emit_implicit_float_to_int(0, &init_ty, &v.ty);
+                            }
+                            // D7: `__int128` 是 16 字节对象，且 dcc 的值模型把它
+                            // 按 rdx:rax 双寄存器交付。`mov_to_stack` 对任何
+                            // sz >= 8 都只写一个 8 字节 store，于是高半从未落槽：
+                            // 循环体内 `__int128 v = va_arg(...)` 后的 `v >> 64`
+                            // 读到的是栈残值（实测三次迭代全部返回同一个个值）。
+                            // 只在“目标与源都是 128 位整型值”时补高半 store，
+                            // 避开 float→__int128 转换只备 rax 的情形。
+                            let store_hi = matches!(&v.ty, Type::Int128 | Type::UInt128)
+                                && matches!(&init_ty, Type::Int128 | Type::UInt128)
+                                && !self.reg_bindings.contains_key(&v.name.name);
+                            self.mov_to_stack(0, &v.name.name);
+                            if store_hi {
+                                let off = self.var_offset(&v.name.name);
+                                self.store_stack(2, off + 8); // rdx = 高 8 字节
                             }
                         }
                     }
-                },
-                // 局部 struct/union 定义声明: 含 VLA 字段时在声明点
-                // 求值总大小存入绑定槽 (C11 6.2.4p7), 供 sizeof(类型)
-                // 读槽 (20041218-2: 声明后 n++ 不影响 sizeof)。
-                // 静态类型 (重)声明则清除残留绑定。
-                BlockItem::Decl(Decl::StructDef(sd)) => {
-                    self.gen_vm_struct_bind(sd, false);
-                },
-                BlockItem::Decl(Decl::UnionDef(sd)) => {
-                    self.gen_vm_struct_bind(sd, true);
-                },
-                _ => {},
-            }
+                }
+            },
+            // 局部 struct/union 定义声明: 含 VLA 字段时在声明点
+            // 求值总大小存入绑定槽 (C11 6.2.4p7), 供 sizeof(类型)
+            // 读槽 (20041218-2: 声明后 n++ 不影响 sizeof)。
+            // 静态类型 (重)声明则清除残留绑定。
+            BlockItem::Decl(Decl::StructDef(sd)) => {
+                self.gen_vm_struct_bind(sd, false);
+            },
+            BlockItem::Decl(Decl::UnionDef(sd)) => {
+                self.gen_vm_struct_bind(sd, true);
+            },
+            _ => {},
+        }
     }
 }

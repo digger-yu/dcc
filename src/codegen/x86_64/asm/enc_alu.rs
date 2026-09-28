@@ -708,11 +708,7 @@ impl Codegen {
                     self.emit(&[0x66]);
                 }
                 self.emit(&[0xF3]);
-                self.emit(&[
-                    Self::rex(w, *d, index.unwrap_or(0), *base),
-                    0x0F,
-                    0xB8,
-                ]);
+                self.emit(&[Self::rex(w, *d, index.unwrap_or(0), *base), 0x0F, 0xB8]);
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             }
             return;

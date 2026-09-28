@@ -233,6 +233,13 @@ fn stmt_refs_volatile(s: &Stmt, vol: &std::collections::HashSet<String>) -> bool
                         .any(|i| block_item_refs_volatile(i, vol))
                 })
         },
+        // C++ 零成本异常: volatile 引用可以只出现在受保护调用里 (例如 `volatile`
+        // 全局当作参)。不下降到这里会让调用点看似不碰 volatile, 参与不该做的移动/
+        // 删除 —— volatile 语义要求按可观察顺序执行, 这类判定必须保守。
+        Stmt::Invoke { call, .. } => stmt_refs_volatile(call, vol),
+        Stmt::EhLandingPad {
+            object, selector, ..
+        } => expr_refs_volatile(object, vol) || expr_refs_volatile(selector, vol),
         _ => false,
     }
 }
@@ -1693,6 +1700,15 @@ fn rename_idents_in_stmt(s: &mut Stmt, map: &HashMap<String, String>) {
             rename_idents_in_stmt(body, map);
         },
         Stmt::Block { b, .. } => rename_idents_in_items(&mut b.items, map),
+        // C++ 零成本异常: 强制内联的改名必须看到受保护调用内部的语句与落地垫槽位,
+        // 否则被内联函数里的同名变量会与该区域内的调用者变量混淆。
+        Stmt::Invoke { call, .. } => rename_idents_in_stmt(call, map),
+        Stmt::EhLandingPad {
+            object, selector, ..
+        } => {
+            rename_idents_in_expr(object, map);
+            rename_idents_in_expr(selector, map);
+        },
         _ => {},
     }
 }
@@ -2328,6 +2344,8 @@ impl StmtSpan for Stmt {
             | Stmt::Label { span, .. }
             | Stmt::Switch { span, .. }
             | Stmt::AsmGoto { span, .. }
+            | Stmt::Invoke { span, .. }
+            | Stmt::EhLandingPad { span, .. }
             | Stmt::Fallthrough { span } => span,
         }
     }

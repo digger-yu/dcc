@@ -172,18 +172,57 @@ fn build_aux_sections(cg: &mut Codegen, input: &CompileInput<'_>) {
         build_debug_sections(cg, module, target, opts);
     }
 
-    if cg.emit_cfi && opts.relocatable && target.unwind_tables {
+    if opts.relocatable && target.unwind_tables {
         // dcc 输出 .eh_frame FDE 需带 .rela.eh_frame relocations 才能在 ld 链接时
         // 正确解析 PC begin / PC range。-fno-asynchronous-unwind-tables 时不生成。
+        //
+        // 这里一直输出到链接期可解析的形式: FDE 的 initial location 是
+        // `DW_EH_PE_pcrel|sdata4`, 汇编期无法知道函数最终地址。没有这些重定位时,
+        // 链接后的 `.eh_frame` 指向错误 PC -> unwinder 找不到帧 -> C++ 异常直接
+        // terminate (这也是旧实现只在 -g 下输出且内容不对的根因)。
         let frames: Vec<debug::FuncFrame> = cg.func_frames(module);
+        let image = debug::build_eh_frame_linked(&frames);
+        let sec_idx = cg.extra_sections.len();
         cg.extra_sections.push(elf::ElfSection {
             name: ".eh_frame".to_string(),
-            data: debug::build_eh_frame(&frames),
+            data: image.bytes,
             ty: elf::SHT_PROGBITS,
             flags: elf::SHF_ALLOC,
             align: 8,
             group_name: None,
         });
+        let mut relocs = Vec::new();
+        for rela in &image.relocs {
+            let sym = match rela.target {
+                debug::EhRelTarget::TextSection => ".text",
+                debug::EhRelTarget::ExceptTableSection => ".gcc_except_table",
+                debug::EhRelTarget::PersonalitySlot => debug::GXX_PERSONALITY_SLOT,
+            };
+            let Some(&sym_index) = cg.sym_index.get(sym) else {
+                cg.diagnostics.push(crate::diagnostics::Diagnostic {
+                    sev: crate::diagnostics::Severity::Error,
+                    code: "E1123",
+                    msg: format!("unwind table needs symbol '{}' but it is missing", sym),
+                    span: crate::diagnostics::Span::point("<eh_frame>", 0, 0),
+                    hint: Some("personality 槽由 C++ 前端作为 weak 全局变量发射".into()),
+                    source_line: None,
+                });
+                continue;
+            };
+            relocs.push(elf::ElfRela {
+                offset: rela.offset,
+                sym_index,
+                rel_type: elf::R_X86_64_PC32,
+                addend: rela.addend,
+            });
+        }
+        if !relocs.is_empty() {
+            cg.extra_rela_sections.push(elf::ExtraRelaSection {
+                name: ".rela.eh_frame".to_string(),
+                relocations: relocs,
+                target_sec_index: 7 + sec_idx as u32,
+            });
+        }
     }
 
     if opts.sanitizers.any() {

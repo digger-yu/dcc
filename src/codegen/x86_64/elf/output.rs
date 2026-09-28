@@ -640,25 +640,102 @@ impl Codegen {
         idx
     }
     pub fn func_frames(&self, module: &crate::ir::Module) -> Vec<crate::debug::FuncFrame> {
+        // 同名重复定义 (weak/comdat 的多个定义、先声明后定义) 在 `labels` 里只
+        // 保留一个偏移, 直接逐个函数生成 FDE 会让多条 FDE 指向**同一段 PC 区间**:
+        // `ld` 建 `.eh_frame_hdr` 搜索表时报 `.eh_frame_hdr refers to overlapping FDEs`
+        // 并拒绝链接。按 PC 去重 (保留首次出现), 每条 FDE 描述一段互不重叠的区间。
+        let mut seen_pc: std::collections::HashSet<u64> = std::collections::HashSet::new();
         module
             .functions
             .iter()
             .filter_map(|f| {
                 let pc = *self.labels.get(&f.name)?;
+                if !seen_pc.insert(pc) {
+                    return None;
+                }
                 let sz = self
                     .func_sizes
                     .get(&f.name)
                     .copied()
                     .unwrap_or_else(|| self.compute_func_size_fallback(&f.name, pc))
                     as u32;
-                let cfi_ops = if self.emit_cfi {
-                    self.build_cfi_ops()
-                } else {
-                    Vec::new()
+                let cfi_ops = self.cfi_ops_for(&f.name);
+                let frame = match self.eh_lsda_offsets.get(&f.name).copied() {
+                    Some(lsda) => crate::debug::FuncFrame::with_lsda(pc, sz, cfi_ops, lsda),
+                    None => crate::debug::FuncFrame::with_cfi(pc, sz, cfi_ops),
                 };
-                Some(crate::debug::FuncFrame::with_cfi(pc, sz, cfi_ops))
+                Some(frame)
             })
             .collect()
+    }
+    /// 按**本函数的真实序言**生成 FDE 的 CFI 指令。
+    ///
+    /// 旧实现对每个函数发同一段常量 (`CFA = rsp + 16`), 只要序言里有
+    /// `sub $N,%rsp` (N != 0) 就是错的 —— 表驱动展开完全依赖 CFA 规则,
+    /// 错规则的后果是 unwinder 走不出本帧 (抛异常直接 terminate)。
+    ///
+    /// 本后端序言固定为 `push %r13; mov %rsp,%r13`, 之后 r13 在全函数不变,
+    /// rsp 可以自由起伏 (call 参数区 / VLA), 所以下面**一条** `CFA = r13 + 16`
+    /// 就能覆盖整个函数体 (含落地垫与所有 `goto` 目标)。
+    fn cfi_ops_for(&self, name: &str) -> Vec<u8> {
+        fn enc_uleb(out: &mut Vec<u8>, mut v: u64) {
+            loop {
+                let mut b = (v & 0x7f) as u8;
+                v >>= 7;
+                if v != 0 {
+                    b |= 0x80;
+                }
+                out.push(b);
+                if v == 0 {
+                    break;
+                }
+            }
+        }
+        // DWARF CFA 主操作码 (dwarf2.h)
+        const DW_CFA_ADVANCE_LOC: u8 = 0x40; // 高 2 位 = 1, 低 6 位 = delta (code_align = 1)
+        const DW_CFA_ADVANCE_LOC2: u8 = 0x03;
+        const DW_CFA_DEF_CFA: u8 = 0x0c;
+        const DW_CFA_OFFSET: u8 = 0x80; // 高 2 位 = 2, 低 6 位 = reg, 后跟 uleb 因子
+        let Some(cfi) = self.func_cfi.get(name).copied() else {
+            // 没有归档 (非 compile_func 路径生成的函数): 保持旧行为, 不改变现有产物。
+            return self.build_cfi_ops();
+        };
+        let mut ops = Vec::new();
+        // 序言期间 CFA 沿用 CIE 默认的 `rsp + 8`, 到序言结束才切换到 r13。
+        let delta = cfi.prologue_end;
+        if delta > 0 {
+            if delta <= 0x3f {
+                ops.push(DW_CFA_ADVANCE_LOC | delta as u8);
+            } else {
+                ops.push(DW_CFA_ADVANCE_LOC2);
+                ops.extend_from_slice(&(delta as u16).to_le_bytes());
+            }
+        }
+        // CFA = r13 + 16 (frame_pointer 时多一层 `push rbp`: r13+8 = 保存的 rbp,
+        // r13+16 = 返回地址, 所以 CFA = r13 + 24)
+        let cfa_off: u64 = if cfi.frame_pointer { 24 } else { 16 };
+        ops.push(DW_CFA_DEF_CFA);
+        enc_uleb(&mut ops, 13);
+        enc_uleb(&mut ops, cfa_off);
+        // r13 自身存在 [r13+0] = CFA-16 -> 因子 16/8 = 2 (data_align = -8)
+        ops.push(DW_CFA_OFFSET | 13);
+        enc_uleb(&mut ops, 2);
+        if cfi.frame_pointer {
+            // rbp 存在 [r13+8] = CFA-16 -> 因子 2
+            ops.push(DW_CFA_OFFSET | 6);
+            enc_uleb(&mut ops, 2);
+        }
+        // 被调用者保存寄存器: 序言把 rbx/r12/r14/r15 存到 [r13-16/-24/-32/-40],
+        // 相对 CFA 即 -(cfa_off + 该偏移)。异常展开必须能恢复它们, 否则调用者
+        // 的寄存器会被本帧的残留值覆盖。
+        const SAVE_SLOTS: [(u8, u64); 4] = [(3, 16), (12, 24), (14, 32), (15, 40)];
+        for (bit, (reg, off)) in SAVE_SLOTS.iter().enumerate() {
+            if cfi.callee_saved_used & (1 << bit) != 0 {
+                ops.push(DW_CFA_OFFSET | reg);
+                enc_uleb(&mut ops, (cfa_off + off) / 8);
+            }
+        }
+        ops
     }
     fn gas_section_flags(&self, name: &str) -> &'static str {
         self.extra_sections

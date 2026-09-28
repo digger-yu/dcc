@@ -490,8 +490,7 @@ fn deserialize_expr(data: &[u8], cur: &mut usize) -> Result<TypedExpr, String> {
                     crate::ast::FloatConst::F64(f64::from_le_bytes(b))
                 },
                 2 => {
-                    let b: [u8; 10] =
-                        data[*cur..*cur + 10].try_into().unwrap();
+                    let b: [u8; 10] = data[*cur..*cur + 10].try_into().unwrap();
                     *cur += 10;
                     crate::ast::FloatConst::LongDouble(b)
                 },
@@ -1403,9 +1402,7 @@ fn fold_binary_op(
                 _ => None,
             };
             if let Some(v) = arith_result {
-                return Some(ExprLiteral::Float(
-                    crate::ast::FloatConst::F64(v),
-                ));
+                return Some(ExprLiteral::Float(crate::ast::FloatConst::F64(v)));
             }
             // Handle comparison operations
             let cmp_result = match op {
@@ -1428,9 +1425,7 @@ fn fold_unary_op(op: crate::ast::UnOp, val: ExprLiteral) -> Option<ExprLiteral> 
     use crate::ast::UnOp;
     match (op, val) {
         (UnOp::Neg, ExprLiteral::Int(v)) => Some(ExprLiteral::Int(v.checked_neg()?)),
-        (UnOp::Neg, ExprLiteral::Float(v)) => {
-            Some(ExprLiteral::Float(v.negate()))
-        },
+        (UnOp::Neg, ExprLiteral::Float(v)) => Some(ExprLiteral::Float(v.negate())),
         (UnOp::Not, ExprLiteral::Int(v)) => Some(ExprLiteral::Int(if v == 0 { 1 } else { 0 })),
         (UnOp::BitNot, ExprLiteral::Int(v)) => Some(ExprLiteral::Int(!v)),
         (UnOp::Plus, lit) => Some(lit),

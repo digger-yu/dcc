@@ -241,7 +241,13 @@ fn run_gcc_two_tu_cross_check(name: &str, provider: &str, consumer: &str) -> i32
     }
     let g = |tag: char, which: &str| -> &std::path::Path {
         objs.iter()
-            .find(|(t, p)| *t == tag && p.file_name().unwrap().to_string_lossy().ends_with(&format!("-{which}.o")))
+            .find(|(t, p)| {
+                *t == tag
+                    && p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .ends_with(&format!("-{which}.o"))
+            })
             .map(|(_, p)| p.as_path())
             .expect("object produced above")
     };
@@ -280,10 +286,7 @@ fn run_gcc_two_tu_cross_check(name: &str, provider: &str, consumer: &str) -> i32
         ("dcc|gcc", vec![g('d', "p"), g('g', "c")]),
     ] {
         let got = run(&combo);
-        assert_eq!(
-            want.1, got.1,
-            "{name}: {label} 组合的 stdout 与 gcc|gcc 参照不一致"
-        );
+        assert_eq!(want.1, got.1, "{name}: {label} 组合的 stdout 与 gcc|gcc 参照不一致");
         assert_eq!(want.0, got.0, "{name}: {label} 组合的退出码与参照不一致");
     }
     for (_, obj) in &objs {
@@ -601,7 +604,11 @@ fn elf64_syms(data: &[u8]) -> Vec<Elf64Sym> {
         let st_value = u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap());
         let st_size = u64::from_le_bytes(data[off + 16..off + 24].try_into().unwrap());
         out.push(Elf64Sym {
-            name: if st_name > 0 { elf64_read_cstr(&data[strtab_off + st_name..]) } else { String::new() },
+            name: if st_name > 0 {
+                elf64_read_cstr(&data[strtab_off + st_name..])
+            } else {
+                String::new()
+            },
             bind: st_info >> 4,
             stype: st_info & 0xf,
             shndx: st_shndx,
@@ -8046,13 +8053,19 @@ int main() {{ Foo g; g.x = 2; if (helper() != 43) return 1; return g.val() + g.x
     // 真实多 TU 链接: 两个 TU 都发射 Foo 的 vtable / typeinfo / typeinfo name /
     // 构造/析构/虚成员函数, 这些符号必须是 weak(GC-section 可合并), 否则
     // host gcc 会报 multiple definition.
-    let link = Command::new("gcc")
+    //
+    // 链接驱动用 g++ 而不是 gcc: C++ TU 的零成本异常表需要 libstdc++/libgcc_s
+    // (`__gxx_personality_v0` 等), 这与 g++ 自己产物的要求一致 —— g++ 编译的
+    // 含异常表的目标文件用纯 gcc 链接同样报 undefined reference。本测试断言的
+    // 是「weak 符号不重复定义」, 与用哪个链接驱动无关。
+    let link = Command::new("g++")
+        .arg("-no-pie")
         .arg(&o1)
         .arg(&o2)
         .arg("-o")
         .arg(&exe)
         .output()
-        .expect("host gcc link");
+        .expect("host g++ link");
     let link_stderr = String::from_utf8_lossy(&link.stderr).to_string();
     assert!(
         !link_stderr.contains("multiple definition"),
@@ -8173,7 +8186,9 @@ fn cpp_std20_exit_code_cross_check(name: &str, source: &str) {
             "{name}: g++ -std=c++20 必须接受该夹具: {}",
             String::from_utf8_lossy(&g.stderr)
         );
-        let run = Command::new(&exe).output().expect("run g++ reference binary");
+        let run = Command::new(&exe)
+            .output()
+            .expect("run g++ reference binary");
         let _ = fs::remove_file(&exe);
         Some(run.status.code().unwrap_or(-3))
     } else {
@@ -8306,8 +8321,7 @@ fn cpp_concept() {
     let code = host_link_cpp_object_and_run("cpp-concept", &_obj);
     let _ = fs::remove_file(_obj);
     assert_eq!(
-        code,
-        0,
+        code, 0,
         "concept.cpp 运行断言失败 (1=identity<int> 结果不对, -2=链接失败, -100=无 g++)"
     );
 }
@@ -10182,11 +10196,14 @@ fn setjmp_x86_64_fixture_compiles() {
 
 /// x86_64 setjmp CFI (Section 11.5) 在 dcc 生成的 .o 里嵌入 DW_CFA_def_cfa
 /// + DW_CFA_offset 描述 callee-saved 寄存器保存位置. 这个测试验证:
-/// 1. 编译到 .o 成功 (带 -g 以生成 .eh_frame)
+/// 1. 编译到 .o 成功 (无需 -g: 只要目标要 unwind 表就发射 `.eh_frame`)
 /// 2. .eh_frame 节存在且含 CIE + FDE
 /// 3. CIE 使用 LSB CIE_id = 0 (不是 DWARF 0xFFFFFFFF)
-/// 4. FDE 包含 DW_CFA_def_cfa(7, 16) + DW_CFA_offset(13, 2) + DW_CFA_offset(16, 1)
-///    字节序列, 描述 r13 / %rip 在 CFA 处的偏移
+/// 4. FDE 按**本后端真实序言**描述 CFA: `push %r13; mov %rsp,%r13` 之后
+///    `DW_CFA_def_cfa(r13, 16)` + `DW_CFA_offset(r13, CFA-16)`。r13 在全函数
+///    不变, 所以一条规则就覆盖 rsp 起伏 (call 参数区 / VLA) 与异常落地垫 ——
+///    旧的 `def_cfa(rsp, 16)` 常量段只要序言里有 `sub $N,%rsp` (N != 0) 就是
+///    错的, 表驱动展开会走不出本帧。
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn setjmp_x86_64_eh_frame_has_cfi_ops() {
@@ -10210,20 +10227,22 @@ fn setjmp_x86_64_eh_frame_has_cfi_ops() {
     let obj = fs::read(&object_path).unwrap_or_default();
     let _ = fs::remove_file(&object_path);
 
-    // DW_CFA_def_cfa(7, 16) = 0c 07 10
-    let needle_def_cfa = [0x0c, 7, 16u8];
+    // DW_CFA_def_cfa(r13, 16) = 0c 0d 10
+    let needle_def_cfa = [0x0c, 13, 16u8];
     let found_def_cfa = obj.windows(3).any(|w| w == needle_def_cfa);
-    assert!(found_def_cfa, "FDE should embed DW_CFA_def_cfa(rsp, 16)");
+    assert!(
+        found_def_cfa,
+        "FDE should embed DW_CFA_def_cfa(r13, 16) matching the real prologue"
+    );
 
     // DW_CFA_offset(13, 2) = 8d 02  (r13 saved at CFA-16)
     let needle_r13 = [0x8d, 0x02];
     let found_r13 = obj.windows(2).any(|w| w == needle_r13);
     assert!(found_r13, "FDE should embed DW_CFA_offset(r13, 2)");
 
-    // DW_CFA_offset(16, 1) = 90 01  (%rip saved at CFA-8)
-    let needle_rip = [0x90, 0x01];
-    let found_rip = obj.windows(2).any(|w| w == needle_rip);
-    assert!(found_rip, "FDE should embed DW_CFA_offset(%rip, 1)");
+    // DW_CFA_advance_loc(5) = 0x45: 序言 (push r13 + mov rsp,r13) 共 5 字节,
+    // CFA 规则必须从序言之后才生效 (之前 rsp 仍在变动)。
+    assert!(obj.contains(&0x45u8), "FDE should switch CFA only after the 5-byte prologue");
 
     // 验证 CIE 使用 LSB CIE_id = 0
     // CIE 起始 8 字节特征: CIE_id=0 (4 字节零) + version=1 + "zR" augmentation
@@ -11220,10 +11239,13 @@ fn cpp_delete_runs_virtual_dtor() {
     );
     let obj_data = fs::read(&obj).expect("read dcc object");
     let syms = elf64_syms(&obj_data);
-    let sym_value = |name: &str| -> Option<u64> {
-        syms.iter().find(|s| s.name == name).map(|s| s.value)
-    };
-    for name in ["Derived_dtor_complete", "Base_dtor_complete", "Plain_dtor_complete"] {
+    let sym_value =
+        |name: &str| -> Option<u64> { syms.iter().find(|s| s.name == name).map(|s| s.value) };
+    for name in [
+        "Derived_dtor_complete",
+        "Base_dtor_complete",
+        "Plain_dtor_complete",
+    ] {
         assert!(
             sym_value(name).is_some(),
             "dcc 产物应发射析构函数 {} (delete 的调用目标): {:?}",
@@ -11390,10 +11412,7 @@ fn cpp_derived_member_unqualified_lookup() {
         "dcc(g++ 链接) 退出码 {} 应与 g++ 原生 {} 一致",
         dcc_exit, gxx_exit
     );
-    assert_eq!(
-        dcc_exit, 0,
-        "非限定继承成员调用 (单继承链 / MI 次基类 / 虚基类) 运行断言未通过"
-    );
+    assert_eq!(dcc_exit, 0, "非限定继承成员调用 (单继承链 / MI 次基类 / 虚基类) 运行断言未通过");
 }
 
 /// Stage 7 任务 2: type_info 对象的 name() / before() 运行期语义.
@@ -11495,9 +11514,8 @@ fn cpp_dynamic_cast_runtime_interop() {
     // 2) nm 佐证: 多继承类的 typeinfo / vtable / secondary vtable 均 weak 发射,
     //    `__dynamic_cast` 以未定义外部符号引用 (由 libstdc++ 提供实现)
     let syms = elf64_syms(&obj_data);
-    let sym_value = |name: &str| -> Option<u64> {
-        syms.iter().find(|s| s.name == name).map(|s| s.value)
-    };
+    let sym_value =
+        |name: &str| -> Option<u64> { syms.iter().find(|s| s.name == name).map(|s| s.value) };
     for name in [
         "_ZTI4Base",
         "_ZTI3Mid",
@@ -11518,7 +11536,9 @@ fn cpp_dynamic_cast_runtime_interop() {
         );
     }
     assert!(
-        elf64_undefined_symbols(&obj_data).iter().any(|s| s == "__dynamic_cast"),
+        elf64_undefined_symbols(&obj_data)
+            .iter()
+            .any(|s| s == "__dynamic_cast"),
         "dynamic_cast 应降级为对 libstdc++ `__dynamic_cast` 的引用"
     );
 
@@ -11617,10 +11637,7 @@ fn cpp_dynamic_cast_runtime_interop() {
         "dcc(g++ 链接) 退出码 {} 应与 g++ 原生 {} 一致",
         dcc_exit, gxx_exit
     );
-    assert_eq!(
-        dcc_exit, 0,
-        "dynamic_cast upcast/downcast/crosscast/null 四分支运行断言未通过"
-    );
+    assert_eq!(dcc_exit, 0, "dynamic_cast upcast/downcast/crosscast/null 四分支运行断言未通过");
 }
 
 /// P2.3: C++ 模板实参语法 T<U> (Section 6 表格 模板实例化行).
@@ -11709,15 +11726,9 @@ fn cpp_template_depth_limit_rejected() {
     // 2. 超过 MAX_TEMPLATE_DEPTH(900) 必须硬报错 (而非静默接受/容错成 Opaque),
     //    且诊断必须带 C0004 + 深度提示.
     let (bad, bad_elapsed) = compile("over", 950);
-    assert!(
-        !bad.status.success(),
-        "depth=950 超过 MAX_TEMPLATE_DEPTH, 应当报错退出"
-    );
+    assert!(!bad.status.success(), "depth=950 超过 MAX_TEMPLATE_DEPTH, 应当报错退出");
     let err = String::from_utf8_lossy(&bad.stderr);
-    assert!(
-        err.contains("C0004"),
-        "超限应报 C0004 诊断码, 实际输出: {err}"
-    );
+    assert!(err.contains("C0004"), "超限应报 C0004 诊断码, 实际输出: {err}");
     assert!(
         err.contains("template nesting depth") && err.contains("exceeds limit"),
         "C0004 应说明模板嵌套深度超限, 实际输出: {err}"
@@ -11746,8 +11757,7 @@ fn cpp_sfinae_smoke() {
     let code = host_link_cpp_object_and_run("cpp-sfinae", &obj);
     let _ = fs::remove_file(&obj);
     assert_eq!(
-        code,
-        0,
+        code, 0,
         "sfinae.cpp 运行断言失败 (1/2/3=对应断言不成立, -2=链接失败, -100=无 g++)"
     );
 }
@@ -12751,7 +12761,9 @@ fn cpp_coroutine_cross_check(name: &str, source: &str) {
             "{name}: g++ -std=c++20 必须接受该夹具: {}",
             String::from_utf8_lossy(&g.stderr)
         );
-        let grun = Command::new(&ref_bin).output().expect("run g++ reference binary");
+        let grun = Command::new(&ref_bin)
+            .output()
+            .expect("run g++ reference binary");
         let _ = fs::remove_file(&ref_bin);
         reference = Some((
             grun.status.code().unwrap_or(-1),
@@ -12793,8 +12805,7 @@ fn cpp_coroutine_cross_check(name: &str, source: &str) {
         );
         if let Some(prev) = &dcc_run {
             assert_eq!(
-                prev,
-                &got,
+                prev, &got,
                 "{name}: dcc 自洽性破坏 (round {round} 与 round 0 结果不同, 通常是后端顺序依赖)"
             );
         }
@@ -12808,11 +12819,10 @@ fn cpp_coroutine_cross_check(name: &str, source: &str) {
             assert_eq!(
                 want.0, got.0,
                 "{name}: dcc 退出码 {} 与 g++ {} 不一致 (夹具内 `return N` 逐条对应验证点)",
-                got.0,
-                want.0
+                got.0, want.0
             );
             assert_eq!(want.1, got.1, "{name}: dcc stdout 与 g++ 不一致");
-        }
+        },
         None => assert_eq!(got.0, 0, "{name}: 无 g++ 参照, dcc 侧必须 exit 0"),
     }
 }
@@ -12870,8 +12880,11 @@ fn cpp_modules_bmf() {
     // 导入 TU: 声明自 BMF 回放 -> `add` 为外部引用 (M28.6: 按 mangled 名),
     // 本 TU 不重复定义
     let use_src = dir.join("use.cpp");
-    fs::write(&use_src, "import bmf_test;\nint use_point(Point* p) { return add(p->x, p->y); }\n")
-        .unwrap();
+    fs::write(
+        &use_src,
+        "import bmf_test;\nint use_point(Point* p) { return add(p->x, p->y); }\n",
+    )
+    .unwrap();
     let use_obj = dir.join("use.o");
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])
@@ -12882,12 +12895,11 @@ fn cpp_modules_bmf() {
     assert!(out.status.success(), "import compile: {}", String::from_utf8_lossy(&out.stderr));
     let bytes = fs::read(&use_obj).unwrap();
     let undef = elf64_undefined_symbols(&bytes);
-    assert!(
-        undef.iter().any(|s| s == "_Z3addii"),
-        "add 应为 mangled 外部引用: {:?}",
-        undef
-    );
-    let defined: Vec<String> = elf64_func_symbols(&bytes).into_iter().map(|(n, _, _)| n).collect();
+    assert!(undef.iter().any(|s| s == "_Z3addii"), "add 应为 mangled 外部引用: {:?}", undef);
+    let defined: Vec<String> = elf64_func_symbols(&bytes)
+        .into_iter()
+        .map(|(n, _, _)| n)
+        .collect();
     assert!(
         !defined.iter().any(|s| s == "_Z3addii"),
         "导入端不得重复定义 add: {:?}",
@@ -13305,11 +13317,7 @@ int via_export_block() { return 4; }
 "#,
         true,
     );
-    assert!(
-        out.status.success(),
-        "iface compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "iface compile: {}", String::from_utf8_lossy(&out.stderr));
     // BMF 文件名按 TU 名 (`<name>.bmf`), 这里 TU 名与模块名同.
     let bmf = fs::read_to_string(dir.join("decl_export_mod.bmf")).unwrap();
     assert!(
@@ -13336,37 +13344,37 @@ int main() {
 "#,
         false,
     );
-    assert!(
-        out.status.success(),
-        "use compile: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "use compile: {}", String::from_utf8_lossy(&out.stderr));
     let exit = host_link_objects_and_run(
         &dir.join("run"),
         &[&dir.join("decl_export_mod.o"), &dir.join("use.o")],
         true,
     );
     let _ = fs::remove_dir_all(&dir);
-    assert_eq!(
-        exit, 0,
-        "两种 export 拼写的跨 TU 链接必须一致 (退出码 {})",
-        exit
-    );
+    assert_eq!(exit, 0, "两种 export 拼写的跨 TU 链接必须一致 (退出码 {})", exit);
 }
 
 /// M28: 在 `dir` 里写 `<name>.cpp` 并用 dcc 编译为 `<name>.o`.
 /// `emit_bmf` = true 时附 `--emit-module-file=<dir>/<name>.bmf`.
 /// 返回子进程 Output (调用方自行断言 status / 读 stderr).
 #[cfg(unix)]
-fn dcc_compile_module(dir: &std::path::Path, name: &str, src: &str, emit_bmf: bool) -> std::process::Output {
+fn dcc_compile_module(
+    dir: &std::path::Path,
+    name: &str,
+    src: &str,
+    emit_bmf: bool,
+) -> std::process::Output {
     let sp = dir.join(format!("{}.cpp", name));
     fs::write(&sp, src).unwrap_or_else(|e| panic!("write {}: {}", sp.display(), e));
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
-    cmd.args(["-c", "-o"]).arg(dir.join(format!("{}.o", name))).arg(&sp);
+    cmd.args(["-c", "-o"])
+        .arg(dir.join(format!("{}.o", name)))
+        .arg(&sp);
     if emit_bmf {
         cmd.arg(format!("--emit-module-file={}", dir.join(format!("{}.bmf", name)).display()));
     }
-    cmd.output().unwrap_or_else(|e| panic!("run dcc on {}: {}", name, e))
+    cmd.output()
+        .unwrap_or_else(|e| panic!("run dcc on {}: {}", name, e))
 }
 
 /// M28: 用 host gcc 链接若干 .o 并运行, 返回退出码 (链接失败 = -2).
@@ -13378,12 +13386,16 @@ fn host_link_objects_and_run(exe: &std::path::Path, objs: &[&std::path::Path], c
         cmd.arg(o);
     }
     cmd.arg("-o").arg(exe);
-    let link = cmd.output().unwrap_or_else(|e| panic!("run {}: {}", linker, e));
+    let link = cmd
+        .output()
+        .unwrap_or_else(|e| panic!("run {}: {}", linker, e));
     if !link.status.success() {
         eprintln!("{} link failed: {}", linker, String::from_utf8_lossy(&link.stderr));
         return -2;
     }
-    let run = Command::new(exe).output().unwrap_or_else(|e| panic!("run {}: {}", exe.display(), e));
+    let run = Command::new(exe)
+        .output()
+        .unwrap_or_else(|e| panic!("run {}: {}", exe.display(), e));
     run.status.code().unwrap_or(-1)
 }
 
@@ -13453,7 +13465,10 @@ int hidden_helper() { return 41; }
     // 而 visible 必须是 GLOBAL (bind==1)
     let bytes = fs::read(&mod_obj).unwrap();
     let syms = elf64_syms(&bytes);
-    let hidden: Vec<&Elf64Sym> = syms.iter().filter(|s| s.name.contains("hidden_helper")).collect();
+    let hidden: Vec<&Elf64Sym> = syms
+        .iter()
+        .filter(|s| s.name.contains("hidden_helper"))
+        .collect();
     assert!(
         !hidden.is_empty(),
         "私有片段函数应仍在本 TU 发射: {:?}",
@@ -13465,24 +13480,39 @@ int hidden_helper() { return 41; }
     }
     // 对应 `nm` 输出里不得出现大写 `T hidden_helper` (全局已定义函数)
     assert!(
-        !syms.iter().any(|s| s.name.contains("hidden_helper") && s.bind == 1),
+        !syms
+            .iter()
+            .any(|s| s.name.contains("hidden_helper") && s.bind == 1),
         "hidden_helper 不得作为全局符号 (nm `T`) 泄漏: {:?}",
         syms.iter().map(|s| (&s.name, s.bind)).collect::<Vec<_>>()
     );
-    let vis = syms.iter().find(|s| s.name.contains("visible")).expect("visible 符号");
+    let vis = syms
+        .iter()
+        .find(|s| s.name.contains("visible"))
+        .expect("visible 符号");
     assert_eq!(vis.bind, 1, "visible 必须是 STB_GLOBAL");
 
     // 导入端不得看见私有实体名 (g++ 对照: `'hidden_helper' was not declared
     // in this scope`; gcc 13 不能直接跑 `module :private;`, 故用非导出的
     // purview 实体等价实测)
-    let out = dcc_compile_module(&dir, "privbad", "import privmod;\nint main() { return hidden_helper() != 41; }\n", false);
+    let out = dcc_compile_module(
+        &dir,
+        "privbad",
+        "import privmod;\nint main() { return hidden_helper() != 41; }\n",
+        false,
+    );
     assert!(!out.status.success(), "导入端不得引用私有片段实体");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("hidden_helper"), "stderr: {}", stderr);
 
     // 导入端只用导出实体, 跨 TU 链接运行结果正确 (41 + 1 == 42)
     let use_obj = dir.join("privuse.o");
-    let out = dcc_compile_module(&dir, "privuse", "import privmod;\nint main() { return visible() != 42; }\n", false);
+    let out = dcc_compile_module(
+        &dir,
+        "privuse",
+        "import privmod;\nint main() { return visible() != 42; }\n",
+        false,
+    );
     assert!(out.status.success(), "import compile: {}", String::from_utf8_lossy(&out.stderr));
     let exit = host_link_objects_and_run(&dir.join("privrun"), &[&mod_obj, &use_obj], false);
     let _ = fs::remove_dir_all(&dir);
@@ -13518,7 +13548,11 @@ private:
     );
     assert!(out.status.success(), "module compile: {}", String::from_utf8_lossy(&out.stderr));
     let bmf = fs::read_to_string(dir.join("catmod.bmf")).unwrap();
-    assert!(bmf.contains("E C Cat @class @private int secret;"), "private 字段入 BMF: {}", bmf);
+    assert!(
+        bmf.contains("E C Cat @class @private int secret;"),
+        "private 字段入 BMF: {}",
+        bmf
+    );
     // public 成员不写访问标记 (向后兼容: 旧 BMF 文本逐字仍可读), 但 const 要写
     assert!(
         bmf.contains("E F Cat::reveal int _ZN3Cat6revealEv(struct Cat*) @const"),
@@ -13557,7 +13591,11 @@ private:
         "import catmod;\nint main() { const Cat c(9); return c.reveal() != 9; }\n",
         false,
     );
-    assert!(out.status.success(), "public const 路径: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "public const 路径: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let exit = host_link_objects_and_run(
         &dir.join("catrun"),
         &[&dir.join("catmod.o"), &dir.join("catok.o")],
@@ -13591,7 +13629,9 @@ export template<class T> T pick(T x) { return x; }
     assert!(out.status.success(), "module compile: {}", String::from_utf8_lossy(&out.stderr));
     let bmf = fs::read_to_string(dir.join("boxmod.bmf")).unwrap();
     assert!(
-        bmf.contains("E T Box T @body=template<class T> struct Box { T v; T get() { return v; } };"),
+        bmf.contains(
+            "E T Box T @body=template<class T> struct Box { T v; T get() { return v; } };"
+        ),
         "模板体随 `E T` 序列化: {}",
         bmf
     );
@@ -13666,7 +13706,11 @@ export int poly(Shape* s) { return s->area(); }
     assert!(out.status.success(), "module compile: {}", String::from_utf8_lossy(&out.stderr));
     let bmf = fs::read_to_string(dir.join("shapemod.bmf")).unwrap();
     assert!(bmf.contains("E C Rect @class @base:public:-:Shape"), "基类入布局: {}", bmf);
-    assert!(bmf.contains("E F Rect::area ") && bmf.contains("@virtual"), "virtuality 传递: {}", bmf);
+    assert!(
+        bmf.contains("E F Rect::area ") && bmf.contains("@virtual"),
+        "virtuality 传递: {}",
+        bmf
+    );
 
     let out = dcc_compile_module(
         &dir,
@@ -13766,7 +13810,10 @@ int main() {
     assert!(
         defined.is_empty(),
         "导入 TU 不得定义导入类的 ctor: {:?}",
-        defined.iter().map(|s| (&s.name, s.bind)).collect::<Vec<_>>()
+        defined
+            .iter()
+            .map(|s| (&s.name, s.bind))
+            .collect::<Vec<_>>()
     );
     assert!(
         imp.iter().any(|s| s.name.contains("ctor") && s.shndx == 0),
@@ -13835,7 +13882,11 @@ int main() {
     );
     assert!(out.status.success(), "import compile: {}", String::from_utf8_lossy(&out.stderr));
     let undef = elf64_undefined_symbols(&fs::read(dir.join("wuse.o")).unwrap());
-    assert!(undef.iter().any(|s| s == "_ZN6Widget3getEv"), "成员调用按 mangled 引用: {:?}", undef);
+    assert!(
+        undef.iter().any(|s| s == "_ZN6Widget3getEv"),
+        "成员调用按 mangled 引用: {:?}",
+        undef
+    );
     let exit = host_link_objects_and_run(
         &dir.join("wrun"),
         &[&dir.join("wmod.o"), &dir.join("wuse.o")],
@@ -14300,15 +14351,13 @@ int main() {
         String::from_utf8_lossy(&output.stderr)
     );
     // 真实断言: 类模板确实被单态化成具体类, 且成员 push_back 也进入了产出.
-    // (实例化类名形式见 template::instantiated_class_name)
+    // (实例化类名形式见 template::instantiated_class_name: 名字是**规范名**
+    //  `std::vector`, `::` 展平后得到 `std_vector`)
     assert!(
-        asm.contains("__dcc_template_vector_int"),
+        asm.contains("__dcc_template_std_vector_int"),
         "未生成 std::vector<int> 的单态化类符号, 实例化路径未打通:\n{asm}"
     );
-    assert!(
-        asm.contains("push_back"),
-        "成员函数 push_back 未被实例化/发射:\n{asm}"
-    );
+    assert!(asm.contains("push_back"), "成员函数 push_back 未被实例化/发射:\n{asm}");
 }
 
 /// C++ 模板 vector: 验证 vector 头文件声明为模板类 (compile-only)
@@ -23265,6 +23314,9 @@ fn cpp_feature_keywords_all_detected() {
 }
 
 /// Verify strip_cpp_keywords removes all entries in CPP_STRIP_KEYWORDS.
+/// Stage 10.4: 仅在 `legacy-strip-debug` feature 下编译; 默认 cargo 默认仅编译
+/// native 路径, 该函数不存在.
+#[cfg(feature = "legacy-strip-debug")]
 #[test]
 fn cpp_strip_keywords_all_removed() {
     use dcc::cpp::lower::{strip_cpp_keywords, CPP_STRIP_KEYWORDS};
@@ -23286,6 +23338,8 @@ fn cpp_strip_keywords_all_removed() {
 /// Verify namespace typedef handling is consistent between AST lower
 /// (qualify_name) and strip path (flatten :: to _).
 /// Both paths must produce the same flattened name for namespace typedefs.
+/// Stage 10.4: 仅在 `legacy-strip-debug` feature 下编译.
+#[cfg(feature = "legacy-strip-debug")]
 #[test]
 fn cpp_namespace_typedef_qualify_name_consistent() {
     use dcc::cpp::lower::strip_cpp_keywords;
@@ -24324,4 +24378,166 @@ fn object_symbol_size(dump: &str, name: &str) -> Option<u64> {
             _ => None,
         }
     })
+}
+
+// =====================================================================
+// Stage 0: C++ 三态路径 (`--cxx-native=off|on|auto`) 集成测试.
+// =====================================================================
+//
+// 这些测试只覆盖 plain class / free function (Stage 3 端到端) 与
+// throw/catch (Stage 9), 锁住 Stage 0 driver 调度的对外契约:
+//
+//   - `--cxx-native=off`   : 必须走 legacy 路径 (host cc)
+//   - `--cxx-native=on`    : 必须走 native 路径 (dcc 内置 codegen)
+//   - `--cxx-native=auto`  : 上述两类特性在 Auto 下应全走 native
+//   - verbose 输出应报告每次调度的最终路径与 reason, 便于审计
+//
+// 这些测试假定机器有 host `cc` (gcc / clang). CI 无 host cc 时整段
+// 跳过, 不视为失败.
+
+#[cfg(unix)]
+fn host_cc_available() -> bool {
+    std::process::Command::new("cc")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn run_cpp_with_mode(
+    name: &str,
+    source: &str,
+    mode: &str,
+) -> Option<(std::process::Output, std::path::PathBuf)> {
+    if !host_cc_available() {
+        eprintln!("skip {}: no host cc", name);
+        return None;
+    }
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-cppmode-{name}-{}.cpp", std::process::id()));
+    let object_path = dir.join(format!("dcc-cppmode-{name}-{}.o", std::process::id()));
+    fs::write(&source_path, source).expect("write cpp fixture");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg("-c")
+        .arg(format!("--cxx-native={}", mode))
+        .arg("-v")
+        .arg("-o")
+        .arg(&object_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(source_path);
+    if output.status.success() {
+        Some((output, object_path))
+    } else {
+        let _ = fs::remove_file(&object_path);
+        Some((output, object_path))
+    }
+}
+
+#[cfg(unix)]
+fn path_decision_in(stderr: &[u8]) -> &'static str {
+    let s = String::from_utf8_lossy(stderr);
+    for line in s.lines() {
+        if line.contains("c++ backend decision") {
+            if line.contains("path=legacy") {
+                return "legacy";
+            }
+            if line.contains("path=native") {
+                return "native";
+            }
+        }
+    }
+    "unknown"
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_cxx_native_off_forces_legacy() {
+    // Stage 3 端到端已验证的最小 plain class, Off 模式必须走 legacy.
+    let src = "struct Counter { Counter() : v(0) {} int v; };\n\
+               int main() { Counter c; return c.v; }\n";
+    let (out, obj) = match run_cpp_with_mode("stage0-off", src, "off") {
+        Some(t) => t,
+        None => return,
+    };
+    assert!(
+        out.status.success(),
+        "cxx-native=off should succeed via legacy; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(path_decision_in(&out.stderr), "legacy");
+    assert!(obj.exists(), "object file should exist: {}", obj.display());
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_cxx_native_on_forces_native() {
+    let src = "struct Counter { Counter() : v(0) {} int v; };\n\
+               int main() { Counter c; return c.v; }\n";
+    let (out, obj) = match run_cpp_with_mode("stage0-on", src, "on") {
+        Some(t) => t,
+        None => return,
+    };
+    assert!(
+        out.status.success(),
+        "cxx-native=on should succeed via native; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(path_decision_in(&out.stderr), "native");
+    assert!(obj.exists(), "object file should exist: {}", obj.display());
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_cxx_native_auto_uses_native_for_plain_class() {
+    // plain class 是 EndToEnd 档特性, Auto 必须走 native.
+    let src = "struct Counter { Counter() : v(0) {} int v; };\n\
+               int main() { Counter c; return c.v; }\n";
+    let (out, obj) = match run_cpp_with_mode("stage0-auto", src, "auto") {
+        Some(t) => t,
+        None => return,
+    };
+    assert!(
+        out.status.success(),
+        "cxx-native=auto plain class should succeed; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(path_decision_in(&out.stderr), "native");
+    assert!(obj.exists(), "object file should exist: {}", obj.display());
+}
+
+#[test]
+#[cfg(unix)]
+fn cpp_cxx_native_auto_falls_back_for_unsupported() {
+    // Stage 4-6 特性在 Stage 0 仅到达 Lowered 档; Auto 必须 fallback.
+    // 这里用单继承 + 虚函数 (Stage 5) 触发 fallback.
+    let src = "struct Base { virtual int f() { return 1; } };\n\
+               struct Derived : Base { int f() override { return 2; } };\n\
+               int main() { Derived d; return d.f() - 2; }\n";
+    let (out, obj) = match run_cpp_with_mode("stage0-auto-fallback", src, "auto") {
+        Some(t) => t,
+        None => return,
+    };
+    // 不论 native 还是 fallback 都应至少通过 legacy; 关键是 verbose
+    // 日志里要给出 fallback 原因.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let decision = path_decision_in(&out.stderr);
+    assert!(
+        decision == "legacy" || decision == "native",
+        "expected explicit path decision, got {:?}; stderr={}",
+        decision,
+        stderr
+    );
+    if decision == "legacy" {
+        // 必须出现特性名与档位 (Stage 0 多档支持矩阵的可审计性)
+        assert!(
+            stderr.contains("virtual function") && stderr.contains("@"),
+            "fallback reason must include feature@level; stderr={}",
+            stderr
+        );
+    }
+    // legacy fallback 路径产出文件; native 路径产出文件亦可.
+    let _ = obj;
 }

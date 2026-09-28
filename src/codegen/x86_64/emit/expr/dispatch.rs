@@ -549,16 +549,18 @@ impl Codegen {
                 // 目标地址先存进一个帧槽, 由 `AggDst::Indirect` 解释; 源侧的
                 // 全部物化契约 (Call/sret/va_arg/CompoundLit/整体拷贝) 仍由
                 // `gen_aggregate_assign_to` 单一实现承担, 这里不重写任何判据。
-                if !matches!(lv, Expr::Ident { .. }) && Self::value_is_whole_copy(&assign_l_ty)
-                    && self.gen_lvalue_addr(lv, 0) {
-                        let addr_slot = self.alloc_sret_slot(8);
-                        self.store_stack(0, addr_slot); // [slot] = 目标地址
-                        let agg_dst = AggDst::Indirect { addr_slot };
-                        self.gen_aggregate_assign_to(&agg_dst, &assign_l_ty, r);
-                        // 赋值表达式的值 = 左值转换后的值: 聚合按地址交付
-                        self.load_stack(dst, addr_slot);
-                        return;
-                    }
+                if !matches!(lv, Expr::Ident { .. })
+                    && Self::value_is_whole_copy(&assign_l_ty)
+                    && self.gen_lvalue_addr(lv, 0)
+                {
+                    let addr_slot = self.alloc_sret_slot(8);
+                    self.store_stack(0, addr_slot); // [slot] = 目标地址
+                    let agg_dst = AggDst::Indirect { addr_slot };
+                    self.gen_aggregate_assign_to(&agg_dst, &assign_l_ty, r);
+                    // 赋值表达式的值 = 左值转换后的值: 聚合按地址交付
+                    self.load_stack(dst, addr_slot);
+                    return;
+                }
                 // _Complex lvalue 赋值 (非 Ident): 统一走物化+分量拷贝。
                 // 下方 Index/Deref/Member 的标量 store 会把 rax 恒 8 字节
                 // 直接写入: 标量 RHS 污染虚部 (a[i] = -1 得 (-1,-1) 而非
@@ -1016,10 +1018,8 @@ impl Codegen {
                             if let Some(seg) = seg_prefix {
                                 self.emit(&[seg]);
                             }
-                            if matches!(
-                                &assign_l_ty,
-                                Type::Float | Type::Double | Type::LongDouble
-                            ) {
+                            if matches!(&assign_l_ty, Type::Float | Type::Double | Type::LongDouble)
+                            {
                                 self.emit_store_scalar_float_at(&r.ty(), &assign_l_ty, 1);
                             } else {
                                 // 按 *ptr 类型宽度选择 store 指令 (截断语义:
@@ -1335,7 +1335,8 @@ impl Codegen {
                                         fty,
                                         Type::Float | Type::Double | Type::LongDouble
                                     ) {
-                                        self.emit_store_scalar_float_at(&r.ty(), fty, 1); // 单一真源：收浮影子副本
+                                        self.emit_store_scalar_float_at(&r.ty(), fty, 1);
+                                    // 单一真源：收浮影子副本
                                     } else {
                                         match size {
                                             1 => self.emit(&[0x88, 0x01]),
@@ -1359,7 +1360,8 @@ impl Codegen {
                                         8 => self.emit(&[0x48, 0x89, 0x01]),
                                         16 => {
                                             self.emit(&[0x48, 0x89, 0x01]); // mov [rcx], rax
-                                            self.emit(&[0x48, 0x89, 0x51, 0x08]); // mov [rcx+8], rdx
+                                            self.emit(&[0x48, 0x89, 0x51, 0x08]);
+                                            // mov [rcx+8], rdx
                                         },
                                         _ => {},
                                     }
@@ -1498,7 +1500,8 @@ impl Codegen {
                         self.gen_expr(r, 0); // rax = val (浮点: xmm0)
                         self.pop(1); // rcx = 目标地址
                         if is_float_ty {
-                            self.emit_store_scalar_float_at(&r.ty(), &assign_l_ty, 1); // 单一真源：收浮影子副本
+                            self.emit_store_scalar_float_at(&r.ty(), &assign_l_ty, 1);
+                        // 单一真源：收浮影子副本
                         } else {
                             match assign_sz {
                                 1 => self.emit(&[0x88, 0x01]),       // mov [rcx], al
@@ -2032,7 +2035,7 @@ impl Codegen {
                 // &&label: 加载标签地址到 dst (GNU 扩展)
                 // 使用 LEA dst, [RIP + disp32] + label_addr_refs 延迟解析
                 // 前缀标签名以避免与函数符号名冲突
-                let label_name = Self::c_label_to_asm(&label.name);
+                let label_name = self.c_label_to_asm(&label.name);
                 let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
                 let modrm = 0x05 | ((dst & 7) << 3);
                 self.emit(&[rex, 0x8D, modrm, 0, 0, 0, 0]);

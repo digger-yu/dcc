@@ -887,9 +887,9 @@ impl Codegen {
             },
         }
         self.emit(&[0xF3, 0xA4]); // rep movsb
-        // 推进 overflow_arg_area: 当前对齐位置 + step。step 要么是编译期常量
-        // (imm32)，要么在 r11 (VLA)；两者编码必须分开写——旧副本用同一条
-        // `49 01 D0`（= `add r8, rdx`）冒充两者，两路都错。
+                                  // 推进 overflow_arg_area: 当前对齐位置 + step。step 要么是编译期常量
+                                  // (imm32)，要么在 r11 (VLA)；两者编码必须分开写——旧副本用同一条
+                                  // `49 01 D0`（= `add r8, rdx`）冒充两者，两路都错。
         match vla_size_reg {
             Some(_) => {
                 self.emit(&[0x4C, 0x01, 0xD8]); // add r8, r11
@@ -955,11 +955,7 @@ impl Codegen {
             sz,
             align,
             step,
-            if has_vla {
-                Some(9)
-            } else {
-                None
-            },
+            if has_vla { Some(9) } else { None },
             has_memory,
             (13, ap_off as i32),
         );
@@ -990,11 +986,7 @@ impl Codegen {
             sz,
             align,
             step,
-            if has_vla {
-                Some(9)
-            } else {
-                None
-            },
+            if has_vla { Some(9) } else { None },
             has_memory,
             (10, 0),
         );

@@ -267,15 +267,11 @@ fn class_member_names(decls: &[CppDecl], out: &mut Vec<(String, String)>) {
             CppDecl::Class(c) => {
                 for m in &c.members {
                     match m {
-                        CppDecl::MemberFn { name, .. } => {
-                            out.push((c.name.clone(), name.clone()))
-                        },
+                        CppDecl::MemberFn { name, .. } => out.push((c.name.clone(), name.clone())),
                         CppDecl::OperatorFn { op, .. } => {
                             out.push((c.name.clone(), format!("operator{op:?}")))
                         },
-                        CppDecl::MemberVar { name, .. } => {
-                            out.push((c.name.clone(), name.clone()))
-                        },
+                        CppDecl::MemberVar { name, .. } => out.push((c.name.clone(), name.clone())),
                         _ => {},
                     }
                 }
@@ -300,11 +296,10 @@ fn header_iostream_declares_every_member_without_opaque() {
     let mut names = Vec::new();
     class_member_names(&decls, &mut names);
     // clog/ws 用例依赖的流成员与 manipulator 重载必须真的存在
-    for want in ["flush", "put", "write", "get", "peek", "getline", "ignore", "eof"] {
-        assert!(
-            names.iter().any(|(_, n)| n == want),
-            "<iostream> 缺流成员 {want}: {names:?}"
-        );
+    for want in [
+        "flush", "put", "write", "get", "peek", "getline", "ignore", "eof",
+    ] {
+        assert!(names.iter().any(|(_, n)| n == want), "<iostream> 缺流成员 {want}: {names:?}");
     }
     // `<< std::endl` / `>> std::ws` 的 manipulator 重载 (函数指针形参)
     let shl = names
@@ -383,15 +378,9 @@ fn unary_operator_member_keeps_following_field() {
     assert!(opaque.is_empty(), "类成员被降级: {opaque:?}");
     let mut names = Vec::new();
     class_member_names(&decls, &mut names);
-    assert!(
-        names.iter().any(|(c, n)| c == "It" && n == "p_"),
-        "后置字段 p_ 丢了: {names:?}"
-    );
+    assert!(names.iter().any(|(c, n)| c == "It" && n == "p_"), "后置字段 p_ 丢了: {names:?}");
     // operator++ (Inc) / operator* (Mul) / operator~ (Not) 都必须成类成员
     for op in ["Inc", "Mul", "Not"] {
-        assert!(
-            names.iter().any(|(_, n)| n.contains(op)),
-            "operator {op} 没被识别: {names:?}"
-        );
+        assert!(names.iter().any(|(_, n)| n.contains(op)), "operator {op} 没被识别: {names:?}");
     }
 }

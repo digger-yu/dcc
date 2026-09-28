@@ -69,21 +69,14 @@ impl Codegen {
                 max_force_align = max_force_align.max(align);
                 let aligned = (stack + align - 1) & !(align - 1);
                 stack = aligned;
-                locs.push(vec![
-                    ArgLoc::Stack(aligned),
-                    ArgLoc::Stack(aligned + 16),
-                ]);
+                locs.push(vec![ArgLoc::Stack(aligned), ArgLoc::Stack(aligned + 16)]);
                 stack += 32;
                 continue;
             }
             let classes = Self::abi_classes(&effective_ty);
             // SysV all-or-nothing 拆分的唯一真源 (callee 形参采集共用同一函数):
             // 见 [`Codegen::aggregate_forces_memory`]。
-            let force_mem = Self::aggregate_forces_memory(
-                &classes,
-                gp_regs.len() - gp,
-                8 - fp,
-            );
+            let force_mem = Self::aggregate_forces_memory(&classes, gp_regs.len() - gp, 8 - fp);
             if force_mem {
                 // caller 与 callee 必须用相同的 force_mem 栈参数对齐规则:
                 // 命名参数 (gen_params) 用 agg_align = ty.align().max(8),
@@ -504,7 +497,9 @@ impl Codegen {
                             },
                         }
                     }
-                } else if matches!(arg, Expr::CompoundLit { .. }) || Self::rvalue_is_buffer_addr(arg) {
+                } else if matches!(arg, Expr::CompoundLit { .. })
+                    || Self::rvalue_is_buffer_addr(arg)
+                {
                     // 内存交付的聚合源: gen_expr 后 rax 里是**缓冲地址** (复合字面量 /
                     // 返 memory 类的 `f()` / 缓冲区交付的 `va_arg` / 链式赋值与
                     // 语句表达式的目标地址), 必须按 8 字节块从 `[addr + chunk*8]`

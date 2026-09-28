@@ -62,29 +62,65 @@ impl BuiltinTy {
         match self {
             BuiltinTy::Void => CxxType::Void,
             BuiltinTy::Bool => CxxType::Bool,
-            BuiltinTy::Char => CxxType::Integer { bits: 8, signed: true },
-            BuiltinTy::SChar => CxxType::Integer { bits: 8, signed: true },
-            BuiltinTy::UChar => CxxType::Integer { bits: 8, signed: false },
-            BuiltinTy::Short => CxxType::Integer { bits: 16, signed: true },
-            BuiltinTy::UShort => CxxType::Integer { bits: 16, signed: false },
-            BuiltinTy::Int => CxxType::Integer { bits: 32, signed: true },
-            BuiltinTy::UInt => CxxType::Integer { bits: 32, signed: false },
-            BuiltinTy::Long => CxxType::Integer { bits: 64, signed: true },
-            BuiltinTy::ULong => CxxType::Integer { bits: 64, signed: false },
-            BuiltinTy::LongLong => CxxType::Integer { bits: 64, signed: true },
-            BuiltinTy::ULongLong => CxxType::Integer { bits: 64, signed: false },
+            BuiltinTy::Char => CxxType::Integer {
+                bits: 8,
+                signed: true,
+            },
+            BuiltinTy::SChar => CxxType::Integer {
+                bits: 8,
+                signed: true,
+            },
+            BuiltinTy::UChar => CxxType::Integer {
+                bits: 8,
+                signed: false,
+            },
+            BuiltinTy::Short => CxxType::Integer {
+                bits: 16,
+                signed: true,
+            },
+            BuiltinTy::UShort => CxxType::Integer {
+                bits: 16,
+                signed: false,
+            },
+            BuiltinTy::Int => CxxType::Integer {
+                bits: 32,
+                signed: true,
+            },
+            BuiltinTy::UInt => CxxType::Integer {
+                bits: 32,
+                signed: false,
+            },
+            BuiltinTy::Long => CxxType::Integer {
+                bits: 64,
+                signed: true,
+            },
+            BuiltinTy::ULong => CxxType::Integer {
+                bits: 64,
+                signed: false,
+            },
+            BuiltinTy::LongLong => CxxType::Integer {
+                bits: 64,
+                signed: true,
+            },
+            BuiltinTy::ULongLong => CxxType::Integer {
+                bits: 64,
+                signed: false,
+            },
             BuiltinTy::Float => CxxType::Float { bits: 32 },
             BuiltinTy::Double => CxxType::Float { bits: 64 },
             BuiltinTy::VoidPtr => CxxType::Pointer(Box::new(CxxType::Void)),
-            BuiltinTy::CharPtr => {
-                CxxType::Pointer(Box::new(CxxType::Integer { bits: 8, signed: true }))
-            },
-            BuiltinTy::SCharPtr => {
-                CxxType::Pointer(Box::new(CxxType::Integer { bits: 8, signed: true }))
-            },
-            BuiltinTy::WCharPtr => {
-                CxxType::Pointer(Box::new(CxxType::Integer { bits: 32, signed: true }))
-            },
+            BuiltinTy::CharPtr => CxxType::Pointer(Box::new(CxxType::Integer {
+                bits: 8,
+                signed: true,
+            })),
+            BuiltinTy::SCharPtr => CxxType::Pointer(Box::new(CxxType::Integer {
+                bits: 8,
+                signed: true,
+            })),
+            BuiltinTy::WCharPtr => CxxType::Pointer(Box::new(CxxType::Integer {
+                bits: 32,
+                signed: true,
+            })),
         }
     }
 }
@@ -107,51 +143,211 @@ use BuiltinTy::*;
 /// 分组: 内存操作 / 字符串操作 / 动态存储。
 pub static BUILTIN_LIBC_FUNCS: &[BuiltinFunc] = &[
     // ===== 内存操作 (memcpy 族) =====
-    BuiltinFunc { name: "memcpy", ret: VoidPtr, params: &[VoidPtr, VoidPtr, ULong] },
-    BuiltinFunc { name: "memmove", ret: VoidPtr, params: &[VoidPtr, VoidPtr, ULong] },
-    BuiltinFunc { name: "memset", ret: VoidPtr, params: &[VoidPtr, Int, ULong] },
-    BuiltinFunc { name: "bzero", ret: Void, params: &[VoidPtr, ULong] },
-    BuiltinFunc { name: "bcopy", ret: Void, params: &[VoidPtr, VoidPtr, ULong] },
-    BuiltinFunc { name: "memcmp", ret: Int, params: &[VoidPtr, VoidPtr, ULong] },
-    BuiltinFunc { name: "memchr", ret: VoidPtr, params: &[VoidPtr, Int, ULong] },
-    BuiltinFunc { name: "memrchr", ret: VoidPtr, params: &[VoidPtr, Int, ULong] },
-    BuiltinFunc { name: "rawmemchr", ret: VoidPtr, params: &[VoidPtr, Int] },
+    BuiltinFunc {
+        name: "memcpy",
+        ret: VoidPtr,
+        params: &[VoidPtr, VoidPtr, ULong],
+    },
+    BuiltinFunc {
+        name: "memmove",
+        ret: VoidPtr,
+        params: &[VoidPtr, VoidPtr, ULong],
+    },
+    BuiltinFunc {
+        name: "memset",
+        ret: VoidPtr,
+        params: &[VoidPtr, Int, ULong],
+    },
+    BuiltinFunc {
+        name: "bzero",
+        ret: Void,
+        params: &[VoidPtr, ULong],
+    },
+    BuiltinFunc {
+        name: "bcopy",
+        ret: Void,
+        params: &[VoidPtr, VoidPtr, ULong],
+    },
+    BuiltinFunc {
+        name: "memcmp",
+        ret: Int,
+        params: &[VoidPtr, VoidPtr, ULong],
+    },
+    BuiltinFunc {
+        name: "memchr",
+        ret: VoidPtr,
+        params: &[VoidPtr, Int, ULong],
+    },
+    BuiltinFunc {
+        name: "memrchr",
+        ret: VoidPtr,
+        params: &[VoidPtr, Int, ULong],
+    },
+    BuiltinFunc {
+        name: "rawmemchr",
+        ret: VoidPtr,
+        params: &[VoidPtr, Int],
+    },
     // wchar 版本 (宽字符为 int32)
-    BuiltinFunc { name: "wmemcpy", ret: WCharPtr, params: &[WCharPtr, WCharPtr, ULong] },
-    BuiltinFunc { name: "wmemmove", ret: WCharPtr, params: &[WCharPtr, WCharPtr, ULong] },
-    BuiltinFunc { name: "wmemset", ret: WCharPtr, params: &[WCharPtr, Int, ULong] },
-    BuiltinFunc { name: "wmemcmp", ret: Int, params: &[WCharPtr, WCharPtr, ULong] },
+    BuiltinFunc {
+        name: "wmemcpy",
+        ret: WCharPtr,
+        params: &[WCharPtr, WCharPtr, ULong],
+    },
+    BuiltinFunc {
+        name: "wmemmove",
+        ret: WCharPtr,
+        params: &[WCharPtr, WCharPtr, ULong],
+    },
+    BuiltinFunc {
+        name: "wmemset",
+        ret: WCharPtr,
+        params: &[WCharPtr, Int, ULong],
+    },
+    BuiltinFunc {
+        name: "wmemcmp",
+        ret: Int,
+        params: &[WCharPtr, WCharPtr, ULong],
+    },
     // ===== 字符串操作 (strlen 族) =====
-    BuiltinFunc { name: "strlen", ret: ULong, params: &[CharPtr] },
-    BuiltinFunc { name: "strnlen", ret: ULong, params: &[CharPtr, ULong] },
-    BuiltinFunc { name: "strcpy", ret: CharPtr, params: &[CharPtr, CharPtr] },
-    BuiltinFunc { name: "strncpy", ret: CharPtr, params: &[CharPtr, CharPtr, ULong] },
-    BuiltinFunc { name: "stpcpy", ret: CharPtr, params: &[CharPtr, CharPtr] },
-    BuiltinFunc { name: "stpncpy", ret: CharPtr, params: &[CharPtr, CharPtr, ULong] },
-    BuiltinFunc { name: "strcat", ret: CharPtr, params: &[CharPtr, CharPtr] },
-    BuiltinFunc { name: "strncat", ret: CharPtr, params: &[CharPtr, CharPtr, ULong] },
-    BuiltinFunc { name: "strcmp", ret: Int, params: &[CharPtr, CharPtr] },
-    BuiltinFunc { name: "strncmp", ret: Int, params: &[CharPtr, CharPtr, ULong] },
-    BuiltinFunc { name: "strcoll", ret: Int, params: &[CharPtr, CharPtr] },
-    BuiltinFunc { name: "strchr", ret: CharPtr, params: &[CharPtr, Int] },
-    BuiltinFunc { name: "strrchr", ret: CharPtr, params: &[CharPtr, Int] },
-    BuiltinFunc { name: "strchrnul", ret: CharPtr, params: &[CharPtr, Int] },
-    BuiltinFunc { name: "strstr", ret: CharPtr, params: &[CharPtr, CharPtr] },
-    BuiltinFunc { name: "strpbrk", ret: CharPtr, params: &[CharPtr, CharPtr] },
-    BuiltinFunc { name: "strdup", ret: CharPtr, params: &[CharPtr] },
-    BuiltinFunc { name: "strndup", ret: CharPtr, params: &[CharPtr, ULong] },
+    BuiltinFunc {
+        name: "strlen",
+        ret: ULong,
+        params: &[CharPtr],
+    },
+    BuiltinFunc {
+        name: "strnlen",
+        ret: ULong,
+        params: &[CharPtr, ULong],
+    },
+    BuiltinFunc {
+        name: "strcpy",
+        ret: CharPtr,
+        params: &[CharPtr, CharPtr],
+    },
+    BuiltinFunc {
+        name: "strncpy",
+        ret: CharPtr,
+        params: &[CharPtr, CharPtr, ULong],
+    },
+    BuiltinFunc {
+        name: "stpcpy",
+        ret: CharPtr,
+        params: &[CharPtr, CharPtr],
+    },
+    BuiltinFunc {
+        name: "stpncpy",
+        ret: CharPtr,
+        params: &[CharPtr, CharPtr, ULong],
+    },
+    BuiltinFunc {
+        name: "strcat",
+        ret: CharPtr,
+        params: &[CharPtr, CharPtr],
+    },
+    BuiltinFunc {
+        name: "strncat",
+        ret: CharPtr,
+        params: &[CharPtr, CharPtr, ULong],
+    },
+    BuiltinFunc {
+        name: "strcmp",
+        ret: Int,
+        params: &[CharPtr, CharPtr],
+    },
+    BuiltinFunc {
+        name: "strncmp",
+        ret: Int,
+        params: &[CharPtr, CharPtr, ULong],
+    },
+    BuiltinFunc {
+        name: "strcoll",
+        ret: Int,
+        params: &[CharPtr, CharPtr],
+    },
+    BuiltinFunc {
+        name: "strchr",
+        ret: CharPtr,
+        params: &[CharPtr, Int],
+    },
+    BuiltinFunc {
+        name: "strrchr",
+        ret: CharPtr,
+        params: &[CharPtr, Int],
+    },
+    BuiltinFunc {
+        name: "strchrnul",
+        ret: CharPtr,
+        params: &[CharPtr, Int],
+    },
+    BuiltinFunc {
+        name: "strstr",
+        ret: CharPtr,
+        params: &[CharPtr, CharPtr],
+    },
+    BuiltinFunc {
+        name: "strpbrk",
+        ret: CharPtr,
+        params: &[CharPtr, CharPtr],
+    },
+    BuiltinFunc {
+        name: "strdup",
+        ret: CharPtr,
+        params: &[CharPtr],
+    },
+    BuiltinFunc {
+        name: "strndup",
+        ret: CharPtr,
+        params: &[CharPtr, ULong],
+    },
     // BSD 别名
-    BuiltinFunc { name: "index", ret: CharPtr, params: &[CharPtr, Int] },
-    BuiltinFunc { name: "rindex", ret: CharPtr, params: &[CharPtr, Int] },
+    BuiltinFunc {
+        name: "index",
+        ret: CharPtr,
+        params: &[CharPtr, Int],
+    },
+    BuiltinFunc {
+        name: "rindex",
+        ret: CharPtr,
+        params: &[CharPtr, Int],
+    },
     // ===== 动态存储 =====
-    BuiltinFunc { name: "malloc", ret: VoidPtr, params: &[ULong] },
-    BuiltinFunc { name: "calloc", ret: VoidPtr, params: &[ULong, ULong] },
-    BuiltinFunc { name: "realloc", ret: VoidPtr, params: &[VoidPtr, ULong] },
-    BuiltinFunc { name: "free", ret: Void, params: &[VoidPtr] },
-    BuiltinFunc { name: "aligned_alloc", ret: VoidPtr, params: &[ULong, ULong] },
+    BuiltinFunc {
+        name: "malloc",
+        ret: VoidPtr,
+        params: &[ULong],
+    },
+    BuiltinFunc {
+        name: "calloc",
+        ret: VoidPtr,
+        params: &[ULong, ULong],
+    },
+    BuiltinFunc {
+        name: "realloc",
+        ret: VoidPtr,
+        params: &[VoidPtr, ULong],
+    },
+    BuiltinFunc {
+        name: "free",
+        ret: Void,
+        params: &[VoidPtr],
+    },
+    BuiltinFunc {
+        name: "aligned_alloc",
+        ret: VoidPtr,
+        params: &[ULong, ULong],
+    },
     // ===== 进程控制 =====
-    BuiltinFunc { name: "abort", ret: Void, params: &[] },
-    BuiltinFunc { name: "exit", ret: Void, params: &[Int] },
+    BuiltinFunc {
+        name: "abort",
+        ret: Void,
+        params: &[],
+    },
+    BuiltinFunc {
+        name: "exit",
+        ret: Void,
+        params: &[Int],
+    },
 ];
 
 /// 按名字查内置函数签名。
@@ -221,12 +417,21 @@ mod tests {
         let ty = cxx_signature(b);
         match ty {
             CxxType::Function { ret, params, .. } => {
-                assert_eq!(*ret, CxxType::Integer { bits: 32, signed: true });
+                assert_eq!(
+                    *ret,
+                    CxxType::Integer {
+                        bits: 32,
+                        signed: true
+                    }
+                );
                 assert_eq!(params.len(), 3);
                 assert_eq!(params[0], CxxType::Pointer(Box::new(CxxType::Void)));
                 assert_eq!(
                     params[2],
-                    CxxType::Integer { bits: 64, signed: false }
+                    CxxType::Integer {
+                        bits: 64,
+                        signed: false
+                    }
                 );
             },
             other => panic!("expected Function type, got {:?}", other),
@@ -239,11 +444,7 @@ mod tests {
     fn builtin_table_agrees_with_cstring_header() {
         let header = include_str!("stdlib/headers/cstring");
         for name in ["memcpy", "memmove", "strcmp", "strlen", "memset", "memcmp"] {
-            assert!(
-                header.contains(name),
-                "<cstring> 头缺少 builtin 同名声明: {}",
-                name
-            );
+            assert!(header.contains(name), "<cstring> 头缺少 builtin 同名声明: {}", name);
             assert!(is_builtin(name), "builtin 表缺少 {}", name);
         }
     }

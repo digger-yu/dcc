@@ -73,8 +73,10 @@ pub fn collect_adl_namespaces_for_type(ty: &CxxType) -> Vec<String> {
 
 /// Extract namespace path from class ID
 fn extract_class_namespace(_class_id: ClassId) -> Vec<String> {
-    // TODO: This needs access to the ClassTable to get the full namespace path
-    // For now, return empty - will be enhanced when ClassTable is integrated
+    // 类类型的关联命名空间需要从符号表 / 作用域链取完整命名空间路径, 而本模块
+    // 只拿到 `ClassId` (不带符号表)。**单一入口**是 `Sema::adl_namespaces_for_type`:
+    // 它在 sema 里查符号所在作用域链上的 `ns_name`, 其余类型才回落到本函数。
+    // 这里继续返回空, 但调用点不得依赖它解析类参数的关联命名空间。
     Vec::new()
 }
 

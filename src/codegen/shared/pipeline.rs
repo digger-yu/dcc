@@ -44,9 +44,7 @@ impl PipelineState {
 
     pub fn set_phase(&mut self, phase: CompilePhase) {
         self.current_phase = Some(phase);
-        self.phase_stats
-            .entry(phase)
-            .or_default();
+        self.phase_stats.entry(phase).or_default();
     }
 
     pub fn increment_stat(&mut self, stat: &str) {

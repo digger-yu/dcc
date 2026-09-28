@@ -161,6 +161,34 @@ pub enum InstKind {
     /// 保留原始变量声明 (含初始化式)。用于 SSA 无法表示的初始化式
     /// (如复合字面量 `{1, 2, 3, 4}`)。重建时直接输出原始 Decl::Var。
     PreservedDecl { var: crate::ast::VarDecl },
+    /// C++ 零成本异常: **受保护调用** (与普通 `Call` 同样的调用序列, 额外带上
+    /// 「本调用指令的地址区间由 landing pad 接管」的异常边)。
+    ///
+    /// 异常边故意**不进 CFG** (`succs` 只含正常后继): unwinder 是按 PC 落在哪个
+    /// 区间里直接跳到落地垫地址, 正常执行流永远不会从这次调用跳到 `unwind`。
+    /// 把它当成普通控制流边会让 SSA→AST 的结构化重建在正常路径上多生成一个
+    /// 跳转 (错值) 或把落地垫内联进 then 分支 (丢代码)。落地垫块因此由
+    /// `Function::eh_unwind_blocks` 单独登记, 在主体重建之后平铺发射。
+    Invoke {
+        callee: Operand,
+        args: Vec<Operand>,
+        ret_ty: Type,
+        /// 落地垫块名 (只由 unwinder 进入)。
+        ///
+        /// `None` = 「受保护但本帧不接管」(LSDA 里 `landing_pad = 0`, `action = 0`)。
+        /// 这不是可有可无的优化: **只要函数有 LSDA, 展开途中落在本函数内却没有
+        /// call-site 区间覆盖的 PC 就会被 libstdc++ 当成「清理代码里二次抛出」而
+        /// `std::terminate`**。`_Unwind_Resume` / `__cxa_rethrow` 正是靠这个区间把
+        /// 「异常继续向外传播」显式声明出来 (与 g++ 产物里 `.LEHBn/.LEHEn` 包住
+        /// `call _Unwind_Resume` 的写法逐字节同构)。
+        unwind: Option<String>,
+        /// 本调用点的 LSDA action 链
+        actions: Vec<crate::ast::EhAction>,
+    },
+    /// C++ 零成本异常: 落地垫序言。必须是其所在块的**第一条**指令。
+    /// `dest` 是接收异常对象指针 (`%rax`) 的变量, `selector` 接收 type
+    /// selector (`%rdx`, 0 = 纯 cleanup)。两个值只在交接后的头几条指令内有效。
+    EhLandingPad { selector: SsaVar },
 }
 
 #[derive(Debug, Clone)]
@@ -299,6 +327,17 @@ pub struct Function {
     /// 函数参数的类型限定符 (volatile/const/restrict),
     /// 用于别名分析利用 restrict 不别名保证
     pub param_quals: HashMap<String, crate::ast::QualifierFlags>,
+    /// C++ 零成本异常: 只由 unwinder 进入的落地垫块 (按 lowering 顺序)。
+    ///
+    /// 它们不在从 entry 可达的正常 CFG 里, `rebuild_block` 的结构化重建走不到;
+    /// 因此主体重建完成后由 `rebuild_eh_blocks` 以
+    /// `Label + 平铺语句 + Goto` 的形式补发射。必须是**保序 Vec** 而不是集合:
+    /// 发射序直接决定落地垫在 .text 中的位置, 进而决定产物字节可复现性。
+    pub eh_unwind_blocks: Vec<String>,
+    /// C++ 零成本异常: 被落地垫区 `goto` 回的正常规块名。
+    /// 这些块在结构体重建时必须额外包一层 `Stmt::Label`, 否则异常路径
+    /// 「继续执行 try 语句之后的代码」无法表达。
+    pub eh_reentry_labels: Vec<String>,
 }
 
 impl Function {
@@ -319,6 +358,8 @@ impl Function {
             local_types: HashMap::new(),
             local_quals: HashMap::new(),
             param_quals: HashMap::new(),
+            eh_unwind_blocks: Vec::new(),
+            eh_reentry_labels: Vec::new(),
         };
         s.add_block("entry".to_string());
         s
@@ -2279,6 +2320,14 @@ fn collect_var_uses_inst(kind: &InstKind, out: &mut HashMap<String, SsaVar>) {
                 collect_var_uses_op(a, out);
             }
         },
+        // C++ 零成本 EH: 受保护调用的操作数与普通调用同构处理 (落地垫不引用
+        // 任何正常路径的 SSA 值, 它自己就是一个新块的开始)。
+        InstKind::Invoke { callee, args, .. } => {
+            collect_var_uses_op(callee, out);
+            for a in args {
+                collect_var_uses_op(a, out);
+            }
+        },
         InstKind::MemberLoad { obj, .. } | InstKind::MemberStore { obj, .. } => {
             collect_var_uses_op(obj, out);
         },
@@ -2787,7 +2836,16 @@ pub fn rebuild_block(func: &Function) -> Block {
                     // use_count==0 时不允许内联: 表达式存入 subst 后没有任何
                     // 使用点消费, 重建时会被跳过, 副作用随之丢失.
                     let side_effect_unused = use_count == 0 && inst_has_side_effect(&inst.kind);
-                    let inlineable = is_temp && use_count <= 1 && !side_effect_unused;
+                    // C++ 零成本 EH: 受保护调用与落地垫序言**永不内联**。
+                    // 内联等于把定义点丢掉、在使用处重算: 前者会让 LSDA 里登记
+                    // 的地址区间指向一条不存在的调用指令 (异常找不到帧), 后者会
+                    // 让落地垫序言不再是一条独立语句 (rax/rdx 被覆盖)。
+                    let is_eh_pinned = matches!(
+                        inst.kind,
+                        InstKind::Invoke { .. } | InstKind::EhLandingPad { .. }
+                    );
+                    let inlineable =
+                        is_temp && use_count <= 1 && !side_effect_unused && !is_eh_pinned;
                     if inlineable {
                         let resolved = inst_to_expr_resolved(
                             &inst.kind,
@@ -2814,9 +2872,218 @@ pub fn rebuild_block(func: &Function) -> Block {
         env: &mut env,
     };
     rebuild_bb(&entry, &mut cx, &mut items, None, None);
+    // C++ 零成本异常: 落地垫区不属于正常 CFG (只由 unwinder 按地址区间进入),
+    // 上面的结构化重建从 entry 出发走不到它们。在函数体末尾以
+    // `Label + 平铺语句 + Goto` 的形式补发射。
+    rebuild_eh_blocks(func, &mut cx, &mut items);
     Block {
         items,
         span: func.span.clone(),
+    }
+}
+
+/// 把一条 SSA 指令翻译成 AST 语句并追加到 `out`。
+///
+/// `rebuild_bb` (结构化重建) 与 `rebuild_eh_blocks` (落地垫平铺发射) 共用同一份
+/// 翻译规则: 否则受保护调用与落地垫序言在两条路径上的语义会漂移 —— 实测只
+/// 在其中一处特殊处理, `Stmt::Invoke` 的包装会时有时无, LSDA 登记的地址区间
+/// 因此指向不存在的调用指令 (抛异常时找不到帧)。
+fn push_inst_stmt(inst: &Inst, bb_name: &str, cx: &mut RebuildCtx<'_>, out: &mut Vec<BlockItem>) {
+    let func = cx.func;
+    let subst = cx.subst;
+    // C++ 零成本异常: 落地垫序言必须是一条**专用语句** (后端要在标签后的第一
+    // 条指令把 %rax/%rdx 溢出到槽位), 不能退化成一次赋值表达式。
+    if let InstKind::EhLandingPad { selector } = &inst.kind {
+        let Some(obj) = inst.dest.as_ref() else {
+            return;
+        };
+        let sel = selector;
+        cx.env.insert(obj.name(), obj.clone());
+        cx.env.insert(sel.name(), sel.clone());
+        let mk_ident = |v: &SsaVar| Expr::Ident {
+            name: crate::ast::Ident {
+                name: v.base.clone(),
+                span: v.span.clone(),
+            },
+            span: v.span.clone(),
+            ty: v.ty.clone(),
+        };
+        out.push(BlockItem::Stmt(Stmt::EhLandingPad {
+            label: crate::ast::Ident {
+                name: bb_name.to_string(),
+                span: func.span.clone(),
+            },
+            object: Box::new(mk_ident(obj)),
+            selector: Box::new(mk_ident(sel)),
+            span: func.span.clone(),
+        }));
+        return;
+    }
+    // 受保护调用: 先按普通调用生成一条语句, 再用 `Stmt::Invoke` 把那条语句整体
+    // 包起来 —— 后端以被包装语句的地址区间作为 LSDA call-site 区间。
+    let eh_wrap: Option<(Option<String>, Vec<crate::ast::EhAction>)> = match &inst.kind {
+        InstKind::Invoke {
+            unwind, actions, ..
+        } => Some((unwind.clone(), actions.clone())),
+        _ => None,
+    };
+    if let Some(d) = &inst.dest {
+        cx.env.insert(d.name(), d.clone());
+        let ssa_name = d.name();
+        if let Some(Some(_)) = subst.get(&ssa_name) {
+            return;
+        }
+        let rhs = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func, Some(&d.ty));
+        let assign = Expr::Assign {
+            op: crate::ast::BinOp::Add,
+            l: Box::new(Expr::Ident {
+                name: crate::ast::Ident {
+                    name: d.base.clone(),
+                    span: d.span.clone(),
+                },
+                span: d.span.clone(),
+                ty: d.ty.clone(),
+            }),
+            r: Box::new(rhs),
+            span: inst.span.clone(),
+            ty: d.ty.clone(),
+        };
+        out.push(BlockItem::Stmt(Stmt::Expr {
+            e: assign,
+            span: inst.span.clone(),
+        }));
+    } else {
+        let e = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func, None);
+        out.push(BlockItem::Stmt(Stmt::Expr {
+            e,
+            span: inst.span.clone(),
+        }));
+    }
+    if let Some((lp, actions)) = eh_wrap {
+        // 上面必定刚追入了一条语句; 取回它并包装。若拿不到 (不是语句形态)
+        // 则保持原样推回, 不牺牲已有代码。
+        let Some(BlockItem::Stmt(call)) = out.pop() else {
+            return;
+        };
+        out.push(BlockItem::Stmt(Stmt::Invoke {
+            call: Box::new(call),
+            landing_pad: lp.map(|name| crate::ast::Ident {
+                name,
+                span: func.span.clone(),
+            }),
+            actions,
+            span: func.span.clone(),
+        }));
+    }
+}
+
+/// 在函数体末尾平铺发射落地垫区。
+///
+/// 发射顺序 = `eh_unwind_blocks` 的登记序 (由 lowering 保证确定), 因为该顺序
+/// 直接决定落地垫在 `.text` 中的位置与 LSDA call-site 表里的 landing pad 偏移,
+/// 必须是产物可复现的单一真源。区内**不**做结构化循环/条件恢复: 每条边都用
+/// 显式 `goto`, 因此一个块只会发射一次, 且跳转目标可以是任意块
+/// (其他落地垫块, 或带 `eh_reentry_labels` 标签的正常规块)。
+fn rebuild_eh_blocks(func: &Function, cx: &mut RebuildCtx<'_>, out: &mut Vec<BlockItem>) {
+    if func.eh_unwind_blocks.is_empty() {
+        return;
+    }
+    // 兜底: 仍有回入点没被发射过就不能留悬空 `goto`。
+    //
+    // 正常情况下的 try 汇合块一定在入口可达的条带上 (lowering 把 `current_bb`
+    // 切到它继续下探)。但整块 try 处于死代码 (如 `if (0) { try{...}catch{...} }`)
+    // 时, 结构化重建从 entry 走不到它, 而落地垫区仍会发 catch 体里的
+    // `goto try_end` —— 链接期就是 undefined reference。这里按平铺模式补发射
+    // 未贴标签的回入点 (`rebuild_bb` 自己负责贴标签, 并已访问的后继直接为空),
+    // 而不是只报错: 死代码不该让编译失败。
+    let missing: Vec<String> = func
+        .eh_reentry_labels
+        .iter()
+        .filter(|name| {
+            func.blocks.contains_key(*name) && !cx.visited.contains(&format!("eh_label#{}", name))
+        })
+        .cloned()
+        .collect();
+    for name in missing {
+        rebuild_bb(&name, cx, out, None, None);
+    }
+    for name in &func.eh_unwind_blocks {
+        let Some(bb) = func.blocks.get(name) else {
+            continue;
+        };
+        let bb = bb.clone();
+        // 同一个落地垫块可能被多个调用点共享, 只发射一次。
+        if !cx.visited.insert(name.clone()) {
+            continue;
+        }
+        let mut items: Vec<BlockItem> = Vec::new();
+        for phi in &bb.phis {
+            if let Some((src, _)) = phi.incoming.first() {
+                cx.env.insert(phi_name(&phi.dest), src.clone());
+            }
+        }
+        for inst in &bb.insts {
+            if is_pass_hint_inst(&inst.kind) {
+                continue;
+            }
+            if let InstKind::PreservedDecl { var } = &inst.kind {
+                items.push(BlockItem::Decl(Decl::Var(var.clone())));
+                continue;
+            }
+            push_inst_stmt(inst, name, cx, &mut items);
+        }
+        match &bb.term {
+            Terminator::Ret { val } => {
+                let e = val
+                    .as_ref()
+                    .map(|o| resolve_operand(o, cx.env, cx.subst, func));
+                items.push(BlockItem::Stmt(Stmt::Return {
+                    val: e,
+                    span: func.span.clone(),
+                }));
+            },
+            Terminator::Jump(t) => items.push(BlockItem::Stmt(Stmt::Goto {
+                target: crate::ast::Ident {
+                    name: t.clone(),
+                    span: func.span.clone(),
+                },
+                span: func.span.clone(),
+            })),
+            Terminator::Branch { cond, t, f } => {
+                let cond_e = resolve_operand(cond, cx.env, cx.subst, func);
+                let mk_goto = |n: &str| Stmt::Goto {
+                    target: crate::ast::Ident {
+                        name: n.to_string(),
+                        span: func.span.clone(),
+                    },
+                    span: func.span.clone(),
+                };
+                items.push(BlockItem::Stmt(Stmt::If {
+                    cond: cond_e,
+                    then_: Box::new(mk_goto(t)),
+                    else_: Some(Box::new(mk_goto(f))),
+                    span: func.span.clone(),
+                }));
+            },
+            // 落地垫区内的 `Unreachable` = 正常永远走不到 (如 `_Unwind_Resume`
+            // 后的填充); 不发任何跳转, 自然落入下一段。
+            // `SwitchTable` 不出现在落地垫区 (分派只按 selector 比较)。
+            Terminator::Unreachable | Terminator::SwitchTable { .. } => {},
+        }
+        out.push(BlockItem::Stmt(Stmt::Label {
+            name: crate::ast::Ident {
+                name: name.clone(),
+                span: func.span.clone(),
+            },
+            stmt: Box::new(Stmt::Block {
+                b: Block {
+                    items,
+                    span: func.span.clone(),
+                },
+                span: func.span.clone(),
+            }),
+            span: func.span.clone(),
+        }));
     }
 }
 
@@ -2869,6 +3136,8 @@ fn is_pass_hint_inst(kind: &InstKind) -> bool {
 fn inst_has_side_effect(kind: &InstKind) -> bool {
     match kind {
         InstKind::Call { .. }
+        | InstKind::Invoke { .. }
+        | InstKind::EhLandingPad { .. }
         | InstKind::Store { .. }
         | InstKind::IndexStore { .. }
         | InstKind::MemberStore { .. } => true,
@@ -2907,6 +3176,56 @@ fn is_loop_exit_pure_return(target: &str, func: &Function) -> bool {
         uniq.insert(p.as_str());
     }
     uniq.len() == 1
+}
+
+/// 循环体外目标块能不能就地展开成「本块语句 + 逐出循环」。
+///
+/// 背景: `rebuild_cycle` 按**路径**重建循环体, 目标是「不在循环体内」的分支目标
+/// 会直接射成 `break`。当该目标块自己带语句时 (实测
+/// `for (...) { if (i == 1) { printf("X"); break; } printf("L"); }`), 那些语句随
+/// 目标块一起被丢弃 —— dcc 只打 `L`, g++ 打 `LX`。判据:
+///   * 本块没有自己的语句 → 与 `break` 完全等价, 不展开 (避免无意义的重复)。
+///   * header 的直接出口不展开: 那是循环的**正常后继**, 由循环之后的续体发射一次;
+///     展开会让它的语句在 break 路径与落出路径上各跑一遍 (双份执行)。
+///   * 任何 latch (含非回边后继的循环体块) 的后继也不展开: do-while / 带尾判的
+///     循环里「正常落出」不经过 header, 落出块同样由循环之后的续体发射一次。
+///   * 前驱必须全在循环内 (含 header): 否则循环外的路径也会进入本块, 同样双份执行。
+///
+/// 展开后本块的 terminator (跳出循环的 Jump) 会自然递归成 `break`, 因此不会把循环
+/// 出口块的内容带进来。
+fn should_inline_loop_exit_target(
+    target: &str,
+    func: &Function,
+    header: &str,
+    body: &HashSet<String>,
+) -> bool {
+    let Some(bb) = func.blocks.get(target) else {
+        return false;
+    };
+    if bb.insts.iter().all(|i| is_pass_hint_inst(&i.kind)) {
+        return false;
+    }
+    if let Some(h) = func.blocks.get(header) {
+        if h.succs.iter().any(|s| s == target && !body.contains(s)) {
+            return false;
+        }
+    }
+    // do-while 这类「条件在尾部」的循环: 正常落出由 latch 的非回边后继完成,
+    // 那个落出块同样属于循环之后的续体, 内联会双份执行。
+    for (name, b) in func.blocks.iter() {
+        if name == header || !body.contains(name) {
+            continue;
+        }
+        if !b.succs.iter().any(|s| s == header) {
+            continue;
+        }
+        if b.succs.iter().any(|s| s == target) {
+            return false;
+        }
+    }
+    bb.preds
+        .iter()
+        .all(|p| p.as_str() == header || body.contains(p.as_str()))
 }
 
 /// SSA→AST 结构化重建 (`rebuild_bb` / `rebuild_cycle`) 的共享上下文。
@@ -2994,6 +3313,54 @@ fn rebuild_bb(
     // `loop_ctx.is_none()` 时识别环, 内层回边 (latch -> inner header) 被当作
     // 普通边继续递归展开, `header -> body -> latch -> header -> ...` 无限互
     // 递归 —— C++ 后端任意两层 for/while 嵌套都栈溢出 (根因修复)。
+    // C++ 零成本 EH: 落地垫 / catch 区用 `goto` 回入正常规块, 这些块因此必须留下标签。
+    //
+    // 标签挂在**空块**上: 后端发射 `label:` 后紧跟空块不产生任何指令, 所以正常
+    // 执行流照常落到本块的第一条语句, `goto label` 也恰好落到同一位置 —— 两者
+    // 共用同一个入口点, 不需要把整个块的内容包进一层嵌套 (那会改变块内变量的
+    // 作用域)。
+    //
+    // 重复标签 = 汇编器错误, 所以单独用一个带命名空间前缀的 `visited` key 记录
+    // 「已贴过标签」, 而不是只处理直线条带区:
+    //   * 直线条带区本来就由上面的 `visited` 保证每个块只展开一次, 于是这里也只会
+    //     贴一次标签。
+    //   * 循环体内 (`loop_ctx.is_some()`) 由 `rebuild_cycle` 按**路径**分别重建 ——
+    //     这是为了让循环里的汇聚点不被某条路径吃掉, 代价是同一个汇聚块会被展开多次。
+    //     以前只在这种模式下不贴标签, 于是「循环体内的 try 正常走完」的回入点成为
+    //     悬空 `goto` (链接期 undefined reference)。现在按第一次贴标签并就地展开,
+    //     后续路径改成 `goto label`: 两条路径本就是同一个汇聚块, 落到同一份后续代码
+    //     正是它们应有的语义。
+    //
+    // 本检查必须在 `is_cycle_entry` 之前: 回入点恰好是循环头 (如 `while (true)` 里
+    // 最后一句是 try) 时, 标签仍要发在循环之前, `goto` 才能正确重入循环。
+    if func.eh_reentry_labels.iter().any(|n| n == bb_name) {
+        let label_key = format!("eh_label#{}", bb_name);
+        if cx.visited.insert(label_key) {
+            out.push(BlockItem::Stmt(Stmt::Label {
+                name: crate::ast::Ident {
+                    name: bb_name.to_string(),
+                    span: func.span.clone(),
+                },
+                stmt: Box::new(Stmt::Block {
+                    b: Block {
+                        items: Vec::new(),
+                        span: func.span.clone(),
+                    },
+                    span: func.span.clone(),
+                }),
+                span: func.span.clone(),
+            }));
+        } else if loop_ctx.is_some() {
+            out.push(BlockItem::Stmt(Stmt::Goto {
+                target: crate::ast::Ident {
+                    name: bb_name.to_string(),
+                    span: func.span.clone(),
+                },
+                span: func.span.clone(),
+            }));
+            return;
+        }
+    }
     if is_cycle_entry(bb_name, func, doms) {
         rebuild_cycle(bb_name, cx, out, stop_at, loop_ctx);
         return;
@@ -3021,38 +3388,7 @@ fn rebuild_bb(
             out.push(BlockItem::Decl(Decl::Var(var.clone())));
             continue;
         }
-        if let Some(d) = &inst.dest {
-            cx.env.insert(d.name(), d.clone());
-            let ssa_name = d.name();
-            if let Some(Some(_)) = subst.get(&ssa_name) {
-                continue;
-            }
-            let rhs = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func, Some(&d.ty));
-            let assign = Expr::Assign {
-                op: crate::ast::BinOp::Add,
-                l: Box::new(Expr::Ident {
-                    name: crate::ast::Ident {
-                        name: d.base.clone(),
-                        span: d.span.clone(),
-                    },
-                    span: d.span.clone(),
-                    ty: d.ty.clone(),
-                }),
-                r: Box::new(rhs),
-                span: inst.span.clone(),
-                ty: d.ty.clone(),
-            };
-            out.push(BlockItem::Stmt(Stmt::Expr {
-                e: assign,
-                span: inst.span.clone(),
-            }));
-        } else {
-            let e = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func, None);
-            out.push(BlockItem::Stmt(Stmt::Expr {
-                e,
-                span: inst.span.clone(),
-            }));
-        }
+        push_inst_stmt(inst, bb_name, cx, out);
     }
     // 2. 翻译 terminator -> AST 后, 继续后继
     match &bb.term {
@@ -3073,9 +3409,13 @@ fn rebuild_bb(
                     }));
                 } else if body_set.contains(t) {
                     rebuild_bb(t, cx, out, loop_ctx, stop_at);
-                } else if is_loop_exit_pure_return(t, func) {
-                    // 循环体内的 `return` 块 (见 `is_loop_exit_pure_return` 注释):
-                    // 展开成 `Stmt::Return`, 不能发 `break`。
+                } else if is_loop_exit_pure_return(t, func)
+                    || should_inline_loop_exit_target(t, func, lh, body_set)
+                {
+                    // 循环体内的 `return` 块 (见 `is_loop_exit_pure_return` 注释),
+                    // 或「先做事再跳出循环」的 break 路径块 (见
+                    // `should_inline_loop_exit_target` 注释): 展开成对应语句, 不能只发
+                    // `break` / `return` 把本块的代码丢掉。
                     rebuild_bb(t, cx, out, loop_ctx, stop_at);
                 } else {
                     out.push(BlockItem::Stmt(Stmt::Break {
@@ -3109,8 +3449,10 @@ fn rebuild_bb(
                         span: func.span.clone(),
                     }));
                 },
-                Some((_, body_set)) if !body_set.contains(t) => {
-                    if is_loop_exit_pure_return(t, func) {
+                Some((lh, body_set)) if !body_set.contains(t) => {
+                    if is_loop_exit_pure_return(t, func)
+                        || should_inline_loop_exit_target(t, func, lh, body_set)
+                    {
                         rebuild_bb(
                             t,
                             &mut RebuildCtx {
@@ -3155,8 +3497,10 @@ fn rebuild_bb(
                         span: func.span.clone(),
                     }));
                 },
-                Some((_, body_set)) if !body_set.contains(f) => {
-                    if is_loop_exit_pure_return(f, func) {
+                Some((lh, body_set)) if !body_set.contains(f) => {
+                    if is_loop_exit_pure_return(f, func)
+                        || should_inline_loop_exit_target(f, func, lh, body_set)
+                    {
                         rebuild_bb(
                             f,
                             &mut RebuildCtx {
@@ -3989,6 +4333,30 @@ fn inst_to_expr_resolved(
             span: sp.clone(),
             ty: ret_ty.clone(),
         },
+        // C++ 零成本 EH: 受保护调用的**正常路径**与普通调用完全同形 (落地垫由
+        // unwinder 按地址区间进入, 不是表达式的一部分)。`rebuild_bb` 会先把这条
+        // 指令拦下来包成 `Stmt::Invoke`, 这里只负责调用表达式本身。
+        InstKind::Invoke {
+            callee,
+            args,
+            ret_ty,
+            ..
+        } => Expr::Call {
+            callee: Box::new(resolve_operand(callee, &fake_env, subst, func)),
+            args: args
+                .iter()
+                .map(|a| resolve_operand(a, &fake_env, subst, func))
+                .collect(),
+            span: sp.clone(),
+            ty: ret_ty.clone(),
+        },
+        // 落地垫序言由 `rebuild_bb` 拦截成 `Stmt::EhLandingPad`, 不会走到这里;
+        // 保留一个无副作用占位, 以免新增 InstKind 被误当成可内联的纯计算。
+        InstKind::EhLandingPad { .. } => Expr::Int {
+            v: 0,
+            span: sp.clone(),
+            ty: Type::Int,
+        },
         InstKind::MemberLoad {
             obj,
             obj_ty,
@@ -4144,6 +4512,13 @@ fn collect_op_uses(kind: &InstKind, out: &mut HashSet<String>) {
                 collect_op_uses_op(a, out);
             }
         },
+        // C++ 零成本 EH: 同 `collect_var_uses_op`。
+        InstKind::Invoke { callee, args, .. } => {
+            collect_op_uses_op(callee, out);
+            for a in args {
+                collect_op_uses_op(a, out);
+            }
+        },
         InstKind::MemberLoad { obj, .. } => collect_op_uses_op(obj, out),
         InstKind::MemberStore { obj, src, .. } => {
             collect_op_uses_op(obj, out);
@@ -4194,6 +4569,13 @@ fn op_count_in_kind(kind: &InstKind, name: &str) -> usize {
             count += op_count_in_op(src, name);
         },
         InstKind::Call { callee, args, .. } => {
+            count += op_count_in_op(callee, name);
+            for a in args {
+                count += op_count_in_op(a, name);
+            }
+        },
+        // C++ 零成本 EH: 受保护调用的操作数必须计入使用次数。
+        InstKind::Invoke { callee, args, .. } => {
             count += op_count_in_op(callee, name);
             for a in args {
                 count += op_count_in_op(a, name);
@@ -4399,6 +4781,24 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
             args: args.iter().map(|a| operand_to_expr(a, env, func)).collect(),
             span: sp.clone(),
             ty: ret_ty.clone(),
+        },
+        // C++ 零成本 EH: 同 `inst_to_expr_resolved`, 受保护调用的正常路径就是
+        // 一次普通调用; 落地垫序言由 `rebuild_bb` 拦截, 此处仅占位。
+        InstKind::Invoke {
+            callee,
+            args,
+            ret_ty,
+            ..
+        } => Expr::Call {
+            callee: Box::new(operand_to_expr(callee, env, func)),
+            args: args.iter().map(|a| operand_to_expr(a, env, func)).collect(),
+            span: sp.clone(),
+            ty: ret_ty.clone(),
+        },
+        InstKind::EhLandingPad { .. } => Expr::Int {
+            v: 0,
+            span: sp.clone(),
+            ty: Type::Int,
         },
         InstKind::MemberLoad {
             obj,

@@ -513,9 +513,7 @@ impl Codegen {
         let need_gp = classes.iter().filter(|c| **c == AbiClass::Integer).count();
         // SseUp 是前一个 Sse 所在 xmm 高 64 位的延续，不单独占寄存器。
         let need_fp = classes.iter().filter(|c| **c == AbiClass::Sse).count();
-        Self::classes_contain_memory_class(classes)
-            || gp_avail < need_gp
-            || fp_avail < need_fp
+        Self::classes_contain_memory_class(classes) || gp_avail < need_gp || fp_avail < need_fp
     }
 
     /// 该类型是否**整体**由 SSE 类构成（可全部从 16 字节 FP 槽按宽度读出）。

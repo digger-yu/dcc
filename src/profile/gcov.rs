@@ -440,6 +440,8 @@ fn stmt_span(s: &Stmt) -> &Span {
         | Stmt::Label { span, .. }
         | Stmt::Switch { span, .. }
         | Stmt::AsmGoto { span, .. }
+        | Stmt::Invoke { span, .. }
+        | Stmt::EhLandingPad { span, .. }
         | Stmt::Fallthrough { span } => span,
     }
 }

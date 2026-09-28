@@ -1850,7 +1850,8 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
             .collect());
     }
     let imported_modules = imports.loaded;
-    if let Some(msg) = crate::cpp::modules::odr_conflicts(own_interface.as_ref(), &imported_modules) {
+    if let Some(msg) = crate::cpp::modules::odr_conflicts(own_interface.as_ref(), &imported_modules)
+    {
         return Err(vec![Diagnostic::err(
             "E0103",
             format!("C++20 modules: {}", msg),
@@ -1875,29 +1876,123 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     }
 
     // Feature detection verbose output (用于诊断)
+    let features = crate::cpp::native::detect_features(&decls);
     if cfg.verbose {
-        let features = crate::cpp::native::detect_features(&decls);
         let mut sorted: Vec<&crate::cpp::feature_matrix::CppFeature> = features.iter().collect();
         sorted.sort_by_key(|f| f.name());
         eprintln!("dcc: C++ feature detection: {} features found", sorted.len());
         for f in &sorted {
-            let status = if f.native_supported() {
-                "[native]"
+            let status = if f.end_to_end_supported() {
+                format!("[native@{}]", f.level().name())
             } else {
-                "[unsupported]"
+                format!("[legacy@{}]", f.level().name())
             };
             eprintln!("dcc:   {} {}", status, f.name());
         }
     }
 
-    // 3. Native lower → 进程内直接走 C 主流水线
-    let native_out = crate::cpp::native::lower_decls_native(&decls).map_err(|e| {
-        vec![Diagnostic::err(
-            "E0500",
-            format!("C++ native backend: {}", e),
-            crate::diagnostics::Span::point(&file_name, 0, 0),
-        )]
-    })?;
+    // === Stage 0: 三态路径决策 + capability tracing ===
+    //
+    // Off  → 强制 legacy, 永远走 C 文本降级, 不允许静默 fallback
+    // On   → 强制 native; 若任何特性低于 EndToEnd 档, 报 E0502 拒绝编译
+    // Auto → EndToEnd 档走 native; 否则 fallback legacy, 并记录原因
+    //
+    // path_control 的 PathDecision 是单一决策源, driver 严格按其结果分派.
+    let decision = crate::cpp::path_control::decide(
+        cfg.cxx_native_mode,
+        &features.iter().copied().collect::<Vec<_>>(),
+    );
+    let use_legacy = matches!(
+        decision,
+        crate::cpp::path_control::PathDecision::Legacy { .. }
+            | crate::cpp::path_control::PathDecision::Auto {
+                all_native: false,
+                ..
+            }
+    );
+    if cfg.verbose {
+        eprintln!(
+            "dcc: c++ backend decision: path={} reason={}",
+            decision.path_name(),
+            decision
+                .fallback_reason()
+                .unwrap_or_else(|| "<none>".to_string())
+        );
+    }
+    // 进程级路径统计 (Stage 0 capability tracing): 按**实际走的**路径计数。
+    // native 计数推迟到真实 lowering 成功之后 —— Auto 下 native lowering 拒绝该 TU
+    // 而回落 legacy 的, 必须记成 legacy + fallback 原因 (Stage 10 的验收读的就是这里)。
+    let stats = crate::cpp::path_control::global_stats();
+    if use_legacy {
+        stats.record_legacy();
+        if let Some(reason) = decision.fallback_reason() {
+            stats.record_fallback(&reason);
+        }
+    }
+    if use_legacy {
+        if cfg.verbose {
+            eprintln!("dcc: using C++ legacy backend path");
+        }
+        // Legacy 路径: 走 stable entry `cpp::legacy::lower_to_c`,
+        // 把降级后的 C 源码写到临时文件, 走标准 C driver 流水线.
+        // parser 在解析后已经 unmoved, 借用 constexpr_fns() 是安全的.
+        let constexpr_fns = parser.constexpr_fns().clone();
+        let r = run_cpp_legacy_backend(cfg, input, &decls, constexpr_fns);
+        log_cpp_path_summary(cfg, stats);
+        return r;
+    }
+    if cfg.verbose && cfg.cxx_native_mode == crate::cpp::feature_matrix::CxxNativeMode::On {
+        eprintln!("dcc: using C++ native backend path (forced)");
+    }
+
+    // Native lower → 进程内直接走 C 主流水线
+    let native_out = match crate::cpp::native::lower_decls_native(&decls) {
+        Ok(out) => out,
+        Err(e) if cfg.cxx_native_mode == crate::cpp::feature_matrix::CxxNativeMode::On => {
+            // `On` 不得静默 fallback (方案 §5.1): native 覆盖率要能被测试
+            // 直接量化, 静默回落会把「没接住」伪装成「接住了」。
+            stats.record_native();
+            log_cpp_path_summary(cfg, stats);
+            return Err(vec![Diagnostic::err(
+                "E0500",
+                format!("C++ native backend: {}", e),
+                crate::diagnostics::Span::point(&file_name, 0, 0),
+            )]);
+        },
+        // Auto: 静态能力矩阵说这份 TU 可以 native, 但真实 lowering 仍可能拒它
+        // (闭包、特殊初始化形式等矩阵尚未建模的写法)。方案 §5.1 要求 Auto
+        // 保留兼容性, 且 fallback 在 verbose 里**可见** —— 记录原因后回落 legacy。
+        Err(e) => {
+            let reason = format!("native lowering rejected TU: {}", e);
+            stats.record_legacy();
+            stats.record_fallback(&reason);
+            if cfg.verbose {
+                eprintln!("dcc: c++ auto fallback: {}", reason);
+                eprintln!("dcc: using C++ legacy backend path after native rejection");
+            }
+            let constexpr_fns = parser.constexpr_fns().clone();
+            return match run_cpp_legacy_backend(cfg, input, &decls, constexpr_fns) {
+                Ok(()) => {
+                    log_cpp_path_summary(cfg, stats);
+                    Ok(())
+                },
+                // 回落也接不住时, 不能只报「host cc 失败」: native 那条才是语义级
+                // 诊断 (例如跳 TU 访问 private 成员、模块私有片段)。两条都给,
+                // native 在前 —— 兼容以前的诊断口径, 又不丢回落现场的细节。
+                Err(mut legacy_diags) => {
+                    let mut diags = vec![Diagnostic::err(
+                        "E0500",
+                        format!("C++ native backend: {}", e),
+                        crate::diagnostics::Span::point(&file_name, 0, 0),
+                    )];
+                    diags.append(&mut legacy_diags);
+                    log_cpp_path_summary(cfg, stats);
+                    Err(diags)
+                },
+            }
+        },
+    };
+    stats.record_native();
 
     if cfg.verbose {
         eprintln!("dcc: using C++ native backend path");
@@ -1917,7 +2012,19 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
             write_module_interface(path, bmf, &file_name)?;
         }
     }
+    log_cpp_path_summary(cfg, stats);
     emitted
+}
+
+/// Stage 0/10: verbose 下的 C++ 路径审计摘要。
+///
+/// 方案 §5.1 要求 verbose 输出包含 path / fallback reason / unsupported feature,
+/// Stage 10 的验收判据「fallback 数量在 verbose summary 中为 0」读的就是这一行。
+/// 计数是**进程级**的 (一次调用编多个 TU 时累加), 因此这里印的是累计值。
+fn log_cpp_path_summary(cfg: &Config, stats: &crate::cpp::path_control::PathStats) {
+    if cfg.verbose {
+        eprintln!("dcc: c++ path summary: {}", stats.summary());
+    }
 }
 
 /// M26.4: BMF (模块接口) 搜索目录.
@@ -1941,6 +2048,156 @@ fn bmf_search_dirs(cfg: &Config, input: &std::path::Path) -> Vec<PathBuf> {
         dirs.push(PathBuf::from(i));
     }
     dirs
+}
+
+/// Stage 0: C++ legacy backend.
+///
+/// 通过稳定入口 `cpp::legacy::lower_to_c` 把 `decls` 降到 C 源码, 写到
+/// 临时 `.c` 文件, 然后调 host `cc -c` 编译到 `cfg.output`. 这是
+/// `--cxx-native=off` / Auto fallback 路径的真实落地.
+///
+/// 设计要点:
+/// - 临时 `.c` 落在目标 `.o` 同目录下, basename 含源文件名 + 进程 PID,
+///   避免 `-j` 并发碰撞.
+/// - 输出 `.o` 由 host cc 产出, 与 GCC `g++ -c` 行为对齐 (legacy 阶段
+///   不依赖 dcc 内置 codegen 对 C++ 文本降级产物的支持).
+/// - `-E` / `-fsyntax-only` 已在 `run_cpp_driver` 上层处理, 本函数只在
+///   真正要生成产物时被调用.
+fn run_cpp_legacy_backend(
+    cfg: &Config,
+    input: &std::path::Path,
+    decls: &[crate::cpp::parser::CppDecl],
+    constexpr_fns: std::collections::HashMap<String, crate::cpp::cpp_const_eval::ConstexprFunction>,
+) -> Result<(), Vec<Diagnostic>> {
+    let file_name = input.display().to_string();
+
+    let c_src = match crate::cpp::legacy::lower_to_c_with_runtime(decls, constexpr_fns) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(vec![Diagnostic::err(
+                "E0503",
+                format!("C++ legacy backend lowering failed: {}", e),
+                crate::diagnostics::Span::point(&file_name, 0, 0),
+            )]);
+        },
+    };
+
+    // 选择临时 .c 路径: 与 cfg.output 同目录, basename 由源文件名 + PID 组成.
+    let out_path = &cfg.output;
+    let tmp_dir = out_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let _ = fs::create_dir_all(&tmp_dir);
+    let stem = input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("cpp_legacy");
+    let tmp_c = tmp_dir.join(format!(".dcc-legacy-{}-{}.c", stem, std::process::id()));
+
+    fs::write(&tmp_c, c_src.as_bytes()).map_err(|e| {
+        vec![Diagnostic::err(
+            "E0101",
+            format!("cannot write temporary C source {}: {}", tmp_c.display(), e),
+            crate::diagnostics::Span::point(&tmp_c.display().to_string(), 0, 0),
+        )]
+    })?;
+
+    // 选取 host cc
+    let cc = match std::env::var("CC") {
+        Ok(v)
+            if v != std::env::current_exe()
+                .ok()
+                .and_then(|p| p.to_str().map(String::from))
+                .unwrap_or_default() =>
+        {
+            v
+        },
+        _ => "cc".to_string(),
+    };
+    let mut cmd = std::process::Command::new(&cc);
+    cmd.arg("-c").arg(&tmp_c).arg("-o").arg(out_path);
+    // C++ legacy 后端: 注入目标, 沿用 dcc 的 target triple.
+    if let Some(triple) = target_triple_arg(&cfg.target) {
+        cmd.arg(format!("-target{}", triple));
+    }
+    // 透传优化 / 调试 / 包含路径, 让 host cc 行为与 dcc 一致
+    if cfg.opt > 0 {
+        cmd.arg(format!("-O{}", cfg.opt));
+    }
+    if cfg.debug_level > 0 {
+        cmd.arg(format!("-g{}", cfg.debug_level));
+    }
+    for inc in &cfg.include_paths {
+        cmd.arg(format!("-I{}", inc.display()));
+    }
+    for d in &cfg.defines {
+        let _ = match &d.1 {
+            Some(v) => cmd.arg(format!("-D{}={}", d.0, v)),
+            None => cmd.arg(format!("-D{}", d.0)),
+        };
+    }
+    // dcc 自带 C++ runtime 标准库
+    if let Some(inc) = crate::cpp::driver::default_stdlib_include() {
+        cmd.arg(format!("-I{}", inc.display()));
+    }
+    if let Some(inc) = crate::cpp::driver::default_stdlib_include() {
+        cmd.arg(format!("-I{}", inc.display()));
+    }
+    // dcc C++ runtime 已经 inline 到 lowering 产物里; libstdc++ 由最终
+    // host link 阶段注入, 这里不再追加.
+    if cfg.verbose {
+        eprintln!("dcc: legacy backend invoking: {:?}", cmd);
+    }
+    let result = cmd.output();
+    // 不论成败, 都清理临时文件 (失败时也避免留垃圾)
+    let _ = fs::remove_file(&tmp_c);
+    match result {
+        Ok(out) => {
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                return Err(vec![Diagnostic::err(
+                    "E0504",
+                    format!(
+                        "C++ legacy backend host-cc failed: {}{}",
+                        stderr,
+                        if stdout.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\n{}", stdout)
+                        }
+                    ),
+                    crate::diagnostics::Span::point(&file_name, 0, 0),
+                )]);
+            }
+            if cfg.verbose {
+                eprintln!(
+                    "dcc: legacy backend wrote {} ({} bytes)",
+                    out_path.display(),
+                    fs::metadata(out_path).map(|m| m.len()).unwrap_or(0)
+                );
+            }
+            Ok(())
+        },
+        Err(e) => Err(vec![Diagnostic::err(
+            "E0202",
+            format!("cannot invoke host cc for legacy backend: {}", e),
+            crate::diagnostics::Span::point(&file_name, 0, 0),
+        )]),
+    }
+}
+
+/// 把 `cli::TargetTriple` 翻译成 host cc 接受的 `-target` 字符串 (无 host 默认).
+fn target_triple_arg(t: &crate::cli::TargetTriple) -> Option<String> {
+    // 仅当用户显式配置非 host target 时透传, 避免 host cc 因找不到
+    // cross sysroot 而失败.
+    let host = crate::cli::TargetTriple::host();
+    if t.arch == host.arch && t.os == host.os {
+        return None;
+    }
+    Some(t.as_str())
 }
 
 /// M26.4: 把模块接口序列化写入 `path` (创建父目录, 失败报 E0101)

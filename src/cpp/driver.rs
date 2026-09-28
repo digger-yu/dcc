@@ -44,6 +44,10 @@ pub fn default_stdlib_include() -> Option<PathBuf> {
 }
 
 /// 编译 C++ 源到 .o
+/// Stage 10.4: 该函数仅在 `--features legacy-strip-debug` 启用时才走
+/// `strip_cpp_keywords` 的 legacy C 文本路径. 默认编译下, C++ 后端
+/// 直接走 native (sema → hir → lower_ir), 不再产生剥离后的 C 文本.
+/// `DCC_KEEP_TEMP` 行为保持不变.
 pub fn compile_cpp(
     cpp_src: &Path,
     obj_out: &Path,

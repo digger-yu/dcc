@@ -109,6 +109,20 @@ impl Codegen {
                 out.insert(name.name.clone());
                 Self::collect_local_labels_stmt(stmt, out);
             },
+            // C++ 零成本异常: 落地垫标签同样是本函数内定义的标签
+            // (`goto` 可以指向它), 必须计入 non-local goto 判定。
+            Stmt::EhLandingPad { label, .. } => {
+                out.insert(label.name.clone());
+            },
+            Stmt::Invoke {
+                call, landing_pad, ..
+            } => {
+                // `landing_pad == None` 是 lp=0 的「本帧不接管」区间, 没有标签可登记。
+                if let Some(pad) = landing_pad {
+                    out.insert(pad.name.clone());
+                }
+                Self::collect_local_labels_stmt(call, out);
+            },
             Stmt::Block { b, .. } => {
                 for item in &b.items {
                     if let BlockItem::Stmt(s) = item {
@@ -250,10 +264,7 @@ impl Codegen {
 
     fn sret_bytes_block_item(item: &BlockItem) -> i64 {
         match item {
-            BlockItem::Decl(Decl::Var(v)) => v
-                .init
-                .as_ref()
-                .map_or(0, Self::sret_bytes_expr),
+            BlockItem::Decl(Decl::Var(v)) => v.init.as_ref().map_or(0, Self::sret_bytes_expr),
             BlockItem::Stmt(s) => Self::sret_bytes_stmt(s),
             _ => 0,
         }
@@ -272,7 +283,11 @@ impl Codegen {
                 Self::sret_bytes_expr(cond).max(Self::sret_bytes_stmt(body))
             },
             Stmt::For {
-                init, cond, step, body, ..
+                init,
+                cond,
+                step,
+                body,
+                ..
             } => init
                 .iter()
                 .map(|s| Self::sret_bytes_stmt(s))
@@ -302,7 +317,9 @@ impl Codegen {
     /// 表达式求值期间不释放任何槽, 故对各分配站点与其子树求和。
     fn sret_bytes_expr(e: &Expr) -> i64 {
         let own = match e {
-            Expr::Call { ty, callee, args, .. } => {
+            Expr::Call {
+                ty, callee, args, ..
+            } => {
                 let sret = if Self::needs_memory_return(ty) {
                     (ty.size() as i64 + 15) & !15
                 } else {
@@ -311,24 +328,22 @@ impl Codegen {
                 // _Complex long double 返回 (经 x87, needs_memory_return
                 // == false) 仍在调用侧复制到固定 result_off, 不经过
                 // alloc_sret_slot, 故不占本区。
-                sret
-                    + std::iter::once(callee.as_ref())
-                        .map(Self::sret_bytes_expr)
-                        .chain(args.iter().map(Self::sret_bytes_expr))
-                        .max()
-                        .unwrap_or(0)
+                sret + std::iter::once(callee.as_ref())
+                    .map(Self::sret_bytes_expr)
+                    .chain(args.iter().map(Self::sret_bytes_expr))
+                    .max()
+                    .unwrap_or(0)
             },
             Expr::VaArg { ty, ap, .. } => {
                 // 只有真正走 `alloc_sret_slot` 的缓冲区交付才占本区；复数
                 // `va_arg` 直接落帧底固定的复数物化带 (与 `gen_expr_va_arg`
                 // 同源，见 `va_arg_result_in_cx_band`)。
-                let own = if Self::va_arg_result_in_memory(ty)
-                    && !Self::va_arg_result_in_cx_band(ty)
-                {
-                    (ty.size() as i64 + 15) & !15
-                } else {
-                    0
-                };
+                let own =
+                    if Self::va_arg_result_in_memory(ty) && !Self::va_arg_result_in_cx_band(ty) {
+                        (ty.size() as i64 + 15) & !15
+                    } else {
+                        0
+                    };
                 own + Self::sret_bytes_expr(ap)
             },
             Expr::Binop { l, r, .. } => {
@@ -337,9 +352,7 @@ impl Codegen {
                 Self::complex_ld_sret_binop(e)
                     + Self::sret_bytes_expr(l).max(Self::sret_bytes_expr(r))
             },
-            Expr::Assign { l, r, .. } => {
-                Self::sret_bytes_expr(l) + Self::sret_bytes_expr(r)
-            },
+            Expr::Assign { l, r, .. } => Self::sret_bytes_expr(l) + Self::sret_bytes_expr(r),
             Expr::StmtExpr { block, ty, .. } => {
                 // 聚合 StmtExpr 分配一个类型槽; 内部块另算
                 let own = if ty.size() > 0 {
@@ -349,9 +362,7 @@ impl Codegen {
                 };
                 own + Self::max_sret_bytes(&block.items)
             },
-            Expr::Comma { l, r, .. } => {
-                Self::sret_bytes_expr(l).max(Self::sret_bytes_expr(r))
-            },
+            Expr::Comma { l, r, .. } => Self::sret_bytes_expr(l).max(Self::sret_bytes_expr(r)),
             Expr::Unary { e: inner, .. }
             | Expr::Cast { e: inner, .. }
             | Expr::AddrOf { e: inner, .. }
@@ -439,20 +450,26 @@ impl Codegen {
             Stmt::Return { val, .. } => val.as_ref().map_or(0, Self::late_var_slots_expr),
             Stmt::If {
                 cond, then_, else_, ..
-            } => Self::late_var_slots_expr(cond)
-                + Self::late_var_slots_stmt(then_)
-                + else_.as_ref().map_or(0, |s| Self::late_var_slots_stmt(s)),
+            } => {
+                Self::late_var_slots_expr(cond)
+                    + Self::late_var_slots_stmt(then_)
+                    + else_.as_ref().map_or(0, |s| Self::late_var_slots_stmt(s))
+            },
             Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
                 Self::late_var_slots_expr(cond) + Self::late_var_slots_stmt(body)
             },
             Stmt::For {
-                init, cond, step, body, ..
-            } => init
-                .as_ref()
-                .map_or(0, |s| Self::late_var_slots_stmt(s))
-                + cond.as_ref().map_or(0, Self::late_var_slots_expr)
-                + step.as_ref().map_or(0, Self::late_var_slots_expr)
-                + Self::late_var_slots_stmt(body),
+                init,
+                cond,
+                step,
+                body,
+                ..
+            } => {
+                init.as_ref().map_or(0, |s| Self::late_var_slots_stmt(s))
+                    + cond.as_ref().map_or(0, Self::late_var_slots_expr)
+                    + step.as_ref().map_or(0, Self::late_var_slots_expr)
+                    + Self::late_var_slots_stmt(body)
+            },
             Stmt::Block { b, .. } => Self::late_var_slots(&b.items),
             Stmt::GotoIndirect { expr, .. } => Self::late_var_slots_expr(expr),
             Stmt::Switch { expr, cases, .. } => {
@@ -484,16 +501,17 @@ impl Codegen {
     fn late_var_slots_expr(e: &Expr) -> i64 {
         let own = match e {
             Expr::CompoundLit { ty, inits, .. } => {
-                let vm =
-                    if Self::type_has_vla(ty) && Self::is_vm_record_ty(ty) { 1 } else { 0 };
+                let vm = if Self::type_has_vla(ty) && Self::is_vm_record_ty(ty) {
+                    1
+                } else {
+                    0
+                };
                 vm + Self::var_alloc_slots(ty)
                     + inits
                         .iter()
                         .map(|it| match it {
                             InitItem::Expr(ex) => Self::late_var_slots_expr(ex),
-                            InitItem::Designated { value, .. } => {
-                                Self::late_var_slots_expr(value)
-                            },
+                            InitItem::Designated { value, .. } => Self::late_var_slots_expr(value),
                         })
                         .sum::<i64>()
             },
@@ -504,9 +522,7 @@ impl Codegen {
                     InitItem::Designated { value, .. } => Self::late_var_slots_expr(value),
                 })
                 .sum(),
-            Expr::Binop { l, r, .. }
-            | Expr::Assign { l, r, .. }
-            | Expr::Comma { l, r, .. } => {
+            Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } | Expr::Comma { l, r, .. } => {
                 Self::late_var_slots_expr(l) + Self::late_var_slots_expr(r)
             },
             Expr::Unary { e: inner, .. }
@@ -522,21 +538,29 @@ impl Codegen {
             | Expr::PreInc { e: inner, .. }
             | Expr::PreDec { e: inner, .. } => Self::late_var_slots_expr(inner),
             Expr::Call { callee, args, .. } => {
-                Self::late_var_slots_expr(callee) + args.iter().map(Self::late_var_slots_expr).sum::<i64>()
+                Self::late_var_slots_expr(callee)
+                    + args.iter().map(Self::late_var_slots_expr).sum::<i64>()
             },
             Expr::Index { arr, idx, .. } => {
                 Self::late_var_slots_expr(arr) + Self::late_var_slots_expr(idx)
             },
             Expr::Member { expr, .. } => Self::late_var_slots_expr(expr),
-            Expr::Cond { cond, then_, else_, .. } => Self::late_var_slots_expr(cond)
-                + Self::late_var_slots_expr(then_)
-                + Self::late_var_slots_expr(else_),
+            Expr::Cond {
+                cond, then_, else_, ..
+            } => {
+                Self::late_var_slots_expr(cond)
+                    + Self::late_var_slots_expr(then_)
+                    + Self::late_var_slots_expr(else_)
+            },
             Expr::StmtExpr { block, .. } => Self::late_var_slots(&block.items),
             Expr::VaArg { ap, .. } => Self::late_var_slots_expr(ap),
-            Expr::Offsetof { indices, .. } => {
-                indices.iter().map(|i| Self::late_var_slots_expr(i)).sum::<i64>()
-            },
-            Expr::AsmExpr { outputs, inputs, .. } => {
+            Expr::Offsetof { indices, .. } => indices
+                .iter()
+                .map(|i| Self::late_var_slots_expr(i))
+                .sum::<i64>(),
+            Expr::AsmExpr {
+                outputs, inputs, ..
+            } => {
                 outputs.iter().map(Self::late_var_slots_expr).sum::<i64>()
                     + inputs.iter().map(Self::late_var_slots_expr).sum::<i64>()
             },
@@ -590,7 +614,9 @@ impl Codegen {
                         },
                     }
                 },
-                BlockItem::Stmt(s) => Self::collect_var_alloc_maxima_stmt(s, static_local_map, func_name, out),
+                BlockItem::Stmt(s) => {
+                    Self::collect_var_alloc_maxima_stmt(s, static_local_map, func_name, out)
+                },
                 _ => {},
             }
         }
@@ -612,9 +638,7 @@ impl Codegen {
                     Self::collect_var_alloc_maxima_stmt(e, static_local_map, func_name, out);
                 }
             },
-            Stmt::While { body, .. }
-            | Stmt::For { body, .. }
-            | Stmt::Do { body, .. } => {
+            Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Do { body, .. } => {
                 Self::collect_var_alloc_maxima_stmt(body, static_local_map, func_name, out);
             },
             Stmt::Switch { cases, .. } => {

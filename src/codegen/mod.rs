@@ -127,6 +127,10 @@ fn validate_inline_asm_stmt(stmt: &Stmt, diags: &mut Vec<Diagnostic>) {
         Stmt::Block { b, .. } => validate_inline_asm_block(b, diags),
         Stmt::GotoIndirect { expr, .. } => validate_inline_asm_expr(expr, diags),
         Stmt::Label { stmt, .. } => validate_inline_asm_stmt(stmt, diags),
+        // C++ 零成本 EH: 受保护调用的内部调用语句仍按普通语句递归校验,
+        // 落地垫序言只含两个栈槽写入, 不含内联汇编。
+        Stmt::Invoke { call, .. } => validate_inline_asm_stmt(call, diags),
+        Stmt::EhLandingPad { .. } => {},
         Stmt::Switch { expr, cases, .. } => {
             validate_inline_asm_expr(expr, diags);
             for case in cases {

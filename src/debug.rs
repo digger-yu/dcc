@@ -179,7 +179,7 @@ pub struct LineEntry {
 }
 
 /// 函数 PC 与大小（供 eh_frame FDE / DWARF DW_AT_low_pc 生成）
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FuncFrame {
     pub pc: u64,
     pub size: u32,
@@ -188,6 +188,10 @@ pub struct FuncFrame {
     /// 字节流内: DW_CFA_def_cfa / DW_CFA_def_cfa_offset /
     /// DW_CFA_offset / DW_CFA_restore 等 uleb128 编码指令按顺序串接.
     pub cfi_ops: Vec<u8>,
+    /// C++ 零成本异常: 本函数 LSDA 在 `.gcc_except_table` 里的起始偏移。
+    /// `Some` 时 FDE 必须引用带 `zPLR` 增强的 CIE 并在末尾写入 LSDA 字段;
+    /// `None` 时仍用旧的 `zR` CIE (零开销: 不影响无异常处理的函数)。
+    pub lsda_offset: Option<u64>,
 }
 
 impl FuncFrame {
@@ -197,11 +201,217 @@ impl FuncFrame {
             pc,
             size,
             cfi_ops: Vec::new(),
+            lsda_offset: None,
         }
     }
     /// 构造带 CFI ops 的 FuncFrame.
     pub fn with_cfi(pc: u64, size: u32, cfi_ops: Vec<u8>) -> Self {
-        Self { pc, size, cfi_ops }
+        Self {
+            pc,
+            size,
+            cfi_ops,
+            lsda_offset: None,
+        }
+    }
+    /// 同上并带上 LSDA 偏移 (需要 `zPLR` CIE 与 FDE LSDA 字段)。
+    pub fn with_lsda(pc: u64, size: u32, cfi_ops: Vec<u8>, lsda_offset: u64) -> Self {
+        Self {
+            pc,
+            size,
+            cfi_ops,
+            lsda_offset: Some(lsda_offset),
+        }
+    }
+}
+
+/// `.eh_frame` 里需要链接期解析的字段。
+///
+/// 目标地址在汇编期不可知 (函数会被移到最终 `.text` 里, LSDA 在另一个节),
+/// 必须像 GCC 一样以重定位表达: pc 字段 = PC32 vs `.text` 节符号 + 函数偏移,
+/// LSDA 字段 = PC32 vs `.gcc_except_table` 节符号 + LSDA 偏移,
+/// personality = PC32 vs `DW.ref.__gxx_personality_v0`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EhRelTarget {
+    /// `.text` 节符号 (addend = 函数在 .text 内的偏移)
+    TextSection,
+    /// `.gcc_except_table` 节符号 (addend = LSDA 在该节内的偏移)
+    ExceptTableSection,
+    /// `DW.ref.__gxx_personality_v0` 全局符号 (addend = 0)
+    PersonalitySlot,
+}
+
+/// `.eh_frame` 的一条重定位 (偏移相对 `.eh_frame` 节本身)。
+#[derive(Debug, Clone, Copy)]
+pub struct EhFrameRela {
+    pub offset: u64,
+    pub target: EhRelTarget,
+    pub addend: i64,
+}
+
+/// 一个完整的 `.eh_frame` 镜像: 字节 + 重定位。
+#[derive(Debug, Clone, Default)]
+pub struct EhFrameImage {
+    pub bytes: Vec<u8>,
+    pub relocs: Vec<EhFrameRela>,
+}
+
+/// personality 槽名 (GCC 同构): 该全局符号存的是 `&__gxx_personality_v0`。
+pub const GXX_PERSONALITY_SLOT: &str = "DW.ref.__gxx_personality_v0";
+
+/// 生成 x86_64 的 `.eh_frame`, 含 C++ 零成本异常所需的 `zPLR` 增强与重定位。
+///
+/// 与 GCC 产物逐字段对齐 (`readelf --debug-dump=frames` / `-r` 可直接比对):
+///
+/// - 两个 CIE: `zR` (无 LSDA 的函数) 与 `zPLR` (有 LSDA 的函数)。FDE 只能引用
+///   它之前的 CIE, 所先先出 `zR` 再出 `zPLR`。
+/// - `zPLR` 的 augmentation data = `[P 编码 0x9b, P 值 sdata4(PC32 重定位),
+///   L 编码 0x1b, R 编码 0x1b]` (顺串与 g++ 一致: 先 personality, 后 L/R 编码字节)。
+/// - FDE augmentation data = LSDA 指针本身 (编码由 CIE 的 L 字节描述), 所
+///   augmentation data length = 4。
+pub fn build_eh_frame_linked(frames: &[FuncFrame]) -> EhFrameImage {
+    let arch = ArchKind::X86_64;
+    let mut out = EhFrameImage::default();
+    let eh = &mut out.bytes;
+
+    // ---- CIE #1: "zR" (无 LSDA) ----
+    let cie_plain_pos = eh.len();
+    push_cie(eh, b"zR", arch, false, &mut out.relocs);
+
+    // ---- CIE #2: "zPLR" (有 LSDA, 带 personality) ----
+    // 只在确实有带 LSDA 的函数时才发射: 纯 C 模块不该凭空依赖
+    // `DW.ref.__gxx_personality_v0` 这个 libstdc++ 符号。
+    let cie_lsda_pos = if frames.iter().any(|f| f.lsda_offset.is_some()) {
+        push_cie(eh, b"zPLR", arch, true, &mut out.relocs)
+    } else {
+        cie_plain_pos
+    };
+
+    for func in frames {
+        let cie_pos = if func.lsda_offset.is_some() {
+            cie_lsda_pos
+        } else {
+            cie_plain_pos
+        };
+        push_fde(eh, func, cie_pos, &mut out.relocs);
+    }
+    out
+}
+
+/// 发射一个 CIE, 返回它在节内的起始偏移。
+fn push_cie(
+    eh: &mut Vec<u8>,
+    augmentation: &[u8],
+    arch: ArchKind,
+    with_personality: bool,
+    relocs: &mut Vec<EhFrameRela>,
+) -> usize {
+    let cie_len_pos = eh.len();
+    eh.extend_from_slice(&[0u8; 4]); // length 占位
+    eh.extend_from_slice(&0u32.to_le_bytes()); // CIE id = 0 (LSB .eh_frame 约定)
+    eh.push(1); // version
+    eh.extend_from_slice(augmentation); // "zR" / "zPLR" (无结尾 0, 下面是显式 NUL)
+    eh.push(0); // null-terminate augmentation
+    write_uleb128(eh, 1); // code_alignment_factor
+    write_sleb128_value(eh, -8); // data_alignment_factor
+    write_uleb128(eh, arch.dwarf_reg_ra() as u64); // return address column
+                                                   // augmentation data (先算长度): zPLR = L 编码? 顺序与 g++ 一致:
+                                                   //   [P 编码字节, P 值(4B), L 编码字节(0x1b), R 编码字节(0x1b)]
+                                                   //   zR           = [R 编码字节(0x1b)]
+    let aug_data_len_pos = eh.len();
+    if with_personality {
+        eh.push(7); // augmentation data length
+        eh.push(0x9b); // personality 编码: pcrel | indirect | sdata4
+        let p_pos = eh.len() as u64;
+        eh.extend_from_slice(&0i32.to_le_bytes()); // DW.ref.__gxx_personality_v0 - P
+        relocs.push(EhFrameRela {
+            offset: p_pos,
+            target: EhRelTarget::PersonalitySlot,
+            addend: 0,
+        });
+        eh.push(0x1b); // LSDA 字段编码: pcrel | sdata4
+        eh.push(0x1b); // FDE PC 字段编码: pcrel | sdata4
+    } else {
+        eh.push(1);
+        eh.push(0x1b);
+    }
+    let _ = aug_data_len_pos;
+    // CIE 的**初始行** (initial_instructions): 与 GCC 逐字节一致地建立
+    // `CFA = rsp + 8` 与 `ret.addr @ CFA-8`。这不是可省的样板: FDE 里的
+    // `DW_CFA_def_cfa(r13, 16)` 只接管 CFA 规则, 返回地址列 (16) 的保存位置
+    // 仍要从这一行继承; 缺了它, 展开器只能用上一帧的 CFA 去猜 rip 的位置,
+    // 穿越一个**本帧不抛异常**的中间帧 (无 LSDA 的函数) 时就会拿到错的返回
+    // 地址并在 libgcc_s 里 SEGV (实测: `void ff(){throw 9;}` + 外层 catch)。
+    eh.push(DW_CFA_def_cfa);
+    write_uleb128(eh, 7); // rsp
+    write_uleb128(eh, 8);
+    // DW_CFA_offset = 0x80 | 列号, 操作数 = uleb(偏移因子个数, 数据对齐因子为 -8)
+    eh.push(DW_CFA_offset | arch.dwarf_reg_ra());
+    write_uleb128(eh, 1);
+    // 下一个记录 (FDE) 起点需 4 字节对齐 (相对本节)
+    while !(eh.len() - cie_len_pos - 4).is_multiple_of(4) {
+        eh.push(0);
+    }
+    let cie_len = (eh.len() - cie_len_pos - 4) as u32;
+    eh[cie_len_pos..cie_len_pos + 4].copy_from_slice(&cie_len.to_le_bytes());
+    cie_len_pos
+}
+
+/// 发射一个 FDE (引用 `cie_pos` 处的 CIE)。
+fn push_fde(eh: &mut Vec<u8>, func: &FuncFrame, cie_pos: usize, relocs: &mut Vec<EhFrameRela>) {
+    let fde_start = eh.len();
+    eh.extend_from_slice(&[0u8; 4]); // length 占位
+                                     // CIE_pointer: 与 GCC 逐字节一致 = **本字段地址 - CIE 起始** (对前面的 CIE
+                                     // 恒为正, 读方用 `cie = 本字段地址 - 值` 还原)。写成负值会让展开器算到节外
+                                     // 地址并在读 CIE 时 SEGV。
+    let cie_ptr = ((fde_start + 4) as i64 - cie_pos as i64) as u32;
+    eh.extend_from_slice(&cie_ptr.to_le_bytes());
+    // initial location: pcrel sdata4, 所以值 = func.pc - 本字段地址 —— 由链接器
+    // 完成: PC32 vs `.text` 节符号, addend = 函数在 .text 内的偏移。
+    let pc_pos = eh.len() as u64;
+    eh.extend_from_slice(&0i32.to_le_bytes());
+    relocs.push(EhFrameRela {
+        offset: pc_pos,
+        target: EhRelTarget::TextSection,
+        addend: func.pc as i64,
+    });
+    // address range: 同一节内的常量差, 无需重定位
+    eh.extend_from_slice(&(func.size as u64).to_le_bytes()[..4]);
+    match func.lsda_offset {
+        Some(lsda) => {
+            eh.push(4); // augmentation data length (只有一个 LSDA 字段)
+            let lsda_pos = eh.len() as u64;
+            eh.extend_from_slice(&0i32.to_le_bytes());
+            relocs.push(EhFrameRela {
+                offset: lsda_pos,
+                target: EhRelTarget::ExceptTableSection,
+                addend: lsda as i64,
+            });
+        },
+        None => {
+            eh.push(0); // augmentation data length = 0
+        },
+    }
+    if !func.cfi_ops.is_empty() {
+        eh.extend_from_slice(&func.cfi_ops);
+    }
+    // 每条记录按 8 字节对齐
+    while !eh.len().is_multiple_of(8) {
+        eh.push(0);
+    }
+    let fde_len = (eh.len() - fde_start - 4) as u32;
+    eh[fde_start..fde_start + 4].copy_from_slice(&fde_len.to_le_bytes());
+}
+
+/// sleb128 (供 CIE 的 data_alignment_factor = -8 使用)。
+fn write_sleb128_value(out: &mut Vec<u8>, mut v: i64) {
+    loop {
+        let b = (v & 0x7f) as u8;
+        v >>= 7;
+        let done = (v == 0 && b & 0x40 == 0) || (v == -1 && b & 0x40 != 0);
+        out.push(if done { b } else { b | 0x80 });
+        if done {
+            break;
+        }
     }
 }
 

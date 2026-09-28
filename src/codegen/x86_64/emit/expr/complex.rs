@@ -125,8 +125,8 @@ impl Codegen {
             self.emit_lea_r13(7, result_off);
             self.mov_imm(1, total as i128);
             self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
-            // f/d rvalue 约定 xmm0=实部; LD rvalue 约定是帧内存+rax,
-            // 消费端用 fld tbyte 读, 不碰 xmm0。
+                                            // f/d rvalue 约定 xmm0=实部; LD rvalue 约定是帧内存+rax,
+                                            // 消费端用 fld tbyte 读, 不碰 xmm0。
             if matches!(inner.base, Type::Float | Type::Double) {
                 let pfx = if matches!(inner.base, Type::Float) {
                     0xF3u8
@@ -469,14 +469,7 @@ impl Codegen {
     /// - EqEq/Ne：fucomip 逐分量比较。
     /// 结果整体 fstpt 物化为帧 result_off 的两个 16 字节槽（共 32 字节），
     /// 并按 dcc complex rvalue 约定把 rax 置为 result_off。
-    fn gen_complex_ld_binop(
-        &mut self,
-        op: BinOp,
-        l: &Expr,
-        r: &Expr,
-        dst: u8,
-        result_off: i64,
-    ) {
+    fn gen_complex_ld_binop(&mut self, op: BinOp, l: &Expr, r: &Expr, dst: u8, result_off: i64) {
         match op {
             BinOp::EqEq | BinOp::Ne => {
                 self.gen_complex_ld_compare(op, l, r, dst);
@@ -500,7 +493,7 @@ impl Codegen {
                     [0xDE, 0xE9]
                 };
                 self.emit(&real_op); // 弹出后 st0=real
-                // 虚部同理, 结果压在 real 之上: st0=imag, st1=real
+                                     // 虚部同理, 结果压在 real 之上: st0=imag, st1=real
                 self.emit_x87_fld_at(4, 16, &Type::LongDouble);
                 self.emit_x87_fld_at(4, 48, &Type::LongDouble);
                 let imag_op = real_op;
@@ -545,7 +538,7 @@ impl Codegen {
                 }
                 self.emit_call_extern(helper);
                 self.emit(&[0x48, 0x83, 0xC4, 0x40]); // add rsp, 64
-                // 返回 st0=real, st1=imag（fadd 分支同序，统一收尾）
+                                                      // 返回 st0=real, st1=imag（fadd 分支同序，统一收尾）
             },
             _ => return,
         }
@@ -1021,32 +1014,32 @@ impl Codegen {
             self.emit_x87_fld_at(0, isz as i32, &inner);
             self.emit_x87_fstp_at(13, (result_off + isz) as i32, &inner);
         } else {
-        match &inner {
-            t @ (Type::Float | Type::Double) => {
-                let pfx = if matches!(t, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-                // 实部: xmm0 = [rax] → result_off
-                self.emit(&[pfx, 0x0F, 0x10, 0x00]);
-                self.gen_float_store_at(result_off, t);
-                // 虚部: xmm0 = [rax+isz] → result_off+isz
-                self.emit_load_mem_typed_disp(isz as usize, t, isz);
-                self.gen_float_store_at(result_off + isz, t);
-                // xmm0 = 实部
-                self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
-            },
-            _ => {
-                // 整数内型: 分量按类型宽度读取.
-                // 布局: 实部 @ result_off, 虚部 @ result_off + isz
-                // (与全局 result_off + inner_sz 约定一致).
-                // 使用 emit_store(isz) 而非 store_stack(8B), 避免
-                // isz < 8 时 8B 写覆盖相邻虚部槽.
-                self.push(0); // save base address (&complex_var)
-                self.emit_load_mem_typed(isz as usize, &inner);
-                self.emit_store(0, result_off, isz as usize);
-                self.pop(0); // restore base address
-                self.emit_load_mem_typed_disp(isz as usize, &inner, isz);
-                self.emit_store(0, result_off + isz, isz as usize);
-            },
-        }
+            match &inner {
+                t @ (Type::Float | Type::Double) => {
+                    let pfx = if matches!(t, Type::Float) { 0xF3u8 } else { 0xF2u8 };
+                    // 实部: xmm0 = [rax] → result_off
+                    self.emit(&[pfx, 0x0F, 0x10, 0x00]);
+                    self.gen_float_store_at(result_off, t);
+                    // 虚部: xmm0 = [rax+isz] → result_off+isz
+                    self.emit_load_mem_typed_disp(isz as usize, t, isz);
+                    self.gen_float_store_at(result_off + isz, t);
+                    // xmm0 = 实部
+                    self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
+                },
+                _ => {
+                    // 整数内型: 分量按类型宽度读取.
+                    // 布局: 实部 @ result_off, 虚部 @ result_off + isz
+                    // (与全局 result_off + inner_sz 约定一致).
+                    // 使用 emit_store(isz) 而非 store_stack(8B), 避免
+                    // isz < 8 时 8B 写覆盖相邻虚部槽.
+                    self.push(0); // save base address (&complex_var)
+                    self.emit_load_mem_typed(isz as usize, &inner);
+                    self.emit_store(0, result_off, isz as usize);
+                    self.pop(0); // restore base address
+                    self.emit_load_mem_typed_disp(isz as usize, &inner, isz);
+                    self.emit_store(0, result_off + isz, isz as usize);
+                },
+            }
         }
         // rax = result_off (dcc complex rvalue 约定, 供 spill/整体拷贝)
         self.emit_lea_r13(0, result_off);
@@ -1137,11 +1130,7 @@ impl Codegen {
             if matches!(inner, Type::LongDouble) {
                 // LD: 实部/虚部各在 16 字节 tbyte 槽 (result_off / +16),
                 // fld tbyte 把该分量留在 st(0)（x87 标量通道）。
-                let read_off = if is_real {
-                    result_off
-                } else {
-                    result_off + inner_sz
-                };
+                let read_off = if is_real { result_off } else { result_off + inner_sz };
                 self.emit_x87_fld_at(13, read_off as i32, &inner);
             } else {
                 let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
@@ -1324,7 +1313,7 @@ impl Codegen {
                 self.emit_lea_r13(7, result_off);
                 self.mov_imm(1, (inner.size() * 2) as i128);
                 self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
-                // LD rvalue 消费端用 fld tbyte, 不经 xmm0 (见上)。
+                                                // LD rvalue 消费端用 fld tbyte, 不经 xmm0 (见上)。
                 if matches!(inner.base, Type::Float | Type::Double) {
                     let pfx = if matches!(inner.base, Type::Float) {
                         0xF3u8

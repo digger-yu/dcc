@@ -162,10 +162,8 @@ impl Codegen {
             AddressBase::ExprAddr { sub } => {
                 // 递归: 子描述符也可能有运行时偏移, 但我们只处理一层
                 // (两层运行时偏移需要额外临时寄存器, 暂退回 false)
-                if matches!(
-                    &sub.offset,
-                    ByteOffset::Runtime { .. } | ByteOffset::VlaRuntime { .. }
-                ) {
+                if matches!(&sub.offset, ByteOffset::Runtime { .. } | ByteOffset::VlaRuntime { .. })
+                {
                     return false;
                 }
                 if !self.emit_address_descriptor(sub, original_expr, BASE) {
@@ -173,10 +171,8 @@ impl Codegen {
                 }
             },
             AddressBase::PointerValue { sub } => {
-                if matches!(
-                    &sub.offset,
-                    ByteOffset::Runtime { .. } | ByteOffset::VlaRuntime { .. }
-                ) {
+                if matches!(&sub.offset, ByteOffset::Runtime { .. } | ByteOffset::VlaRuntime { .. })
+                {
                     return false;
                 }
                 if !self.emit_address_descriptor(sub, original_expr, BASE) {
@@ -219,7 +215,7 @@ impl Codegen {
                     }
                 }
                 self.pop(BASE); // rax = base (不能 pop 回 rcx, 否则覆盖索引)
-                // add rcx, addend
+                                // add rcx, addend
                 if *addend != 0 {
                     self.emit(&[0x48, 0x81, 0xC1]); // add rcx, imm32
                     self.emit(&(*addend as i32).to_le_bytes());
@@ -236,7 +232,7 @@ impl Codegen {
                 let slot = stride_slot.unwrap();
                 self.push(BASE);
                 self.gen_expr(index, INDEX); // rcx = index
-                                                  // mov rdx, [r13+slot]; imul rcx, rdx
+                                             // mov rdx, [r13+slot]; imul rcx, rdx
                 self.emit_mov_mem_r13(2, slot);
                 self.emit(&[0x48, 0x0F, 0xAF, 0xCA]); // imul rcx, rdx
                 self.pop(BASE); // rax = base
@@ -395,12 +391,7 @@ impl Codegen {
     /// 全局量的实/虚部分量加载）。前置：ra 已无需由本函数准备；
     /// 本函数自取全局地址加偏移后发 `fld [addr]`，结果交付 st(0)。
     /// float=`D9 /0`、double=`DD /0`、long double=`DB /5 m80`。
-    pub(crate) fn emit_global_float_load_x87_offset(
-        &mut self,
-        name: &str,
-        offset: i32,
-        ty: &Type,
-    ) {
+    pub(crate) fn emit_global_float_load_x87_offset(&mut self, name: &str, offset: i32, ty: &Type) {
         self.emit_global_addr(0, name);
         if offset != 0 {
             if (-128..=127).contains(&offset) {
@@ -491,9 +482,7 @@ impl Codegen {
     /// long double：RIP fldt → 栈 scratch fstpt → 按 xmm 宽度
     /// fld/fstp 单步舍入 → movss/movsd；f32/f64 直接 RIP movss/movsd。
     /// 旧写法对 long double 发 RIP movsd/movq，读低 8 字节当 double。
-    pub(crate) fn emit_global_float_to_xmm_typed(
-        &mut self, xmm: u8, name: &str, ty: &Type,
-    ) {
+    pub(crate) fn emit_global_float_to_xmm_typed(&mut self, xmm: u8, name: &str, ty: &Type) {
         let effective_ty = if let Type::Imaginary(ref inner) = ty {
             &inner.base
         } else {
@@ -501,7 +490,7 @@ impl Codegen {
         };
         if self.float_in_st0(effective_ty) {
             self.emit(&[0x48, 0x83, 0xEC, 0x10]); // sub rsp,16
-            // fld tbyte [rip+x]
+                                                  // fld tbyte [rip+x]
             let (opcode, modrm) = match effective_ty {
                 Type::Float => (0xD9u8, 0x05u8),
                 Type::LongDouble => (0xDBu8, 0x2Du8),
@@ -529,7 +518,11 @@ impl Codegen {
     /// 写回）：栈 scratch mov → fld 拓宽 → RIP fstpt。
     /// 旧写法发 RIP movsd，把 f64 位型写进 80-bit 对象（读回 -nan）。
     pub(crate) fn emit_xmm_to_global_float_typed(
-        &mut self, xmm: u8, name: &str, src_ty: &Type, dst_ty: &Type,
+        &mut self,
+        xmm: u8,
+        name: &str,
+        src_ty: &Type,
+        dst_ty: &Type,
     ) {
         let effective_dst = if let Type::Imaginary(ref inner) = dst_ty {
             &inner.base

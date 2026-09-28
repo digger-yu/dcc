@@ -31,6 +31,7 @@ use crate::cpp::parser::{BinOpKind, CppExpr, SizeofArg, UnaryOpKind};
 // ============================================================================
 
 /// Represents a constexpr function definition available for evaluation
+#[derive(Clone)]
 pub struct ConstexprFunction {
     /// Function name
     pub name: String,
@@ -129,12 +130,16 @@ struct LocalsStack {
 impl LocalsStack {
     /// 空栈 (仅一个顶层空帧).
     fn new() -> Self {
-        Self { frames: vec![HashMap::new()] }
+        Self {
+            frames: vec![HashMap::new()],
+        }
     }
 
     /// 以外部已知常量为顶层帧建栈 (克隆, 因此 callee 的改写不回流).
     fn with_base(base: &HashMap<String, i128>) -> Self {
-        Self { frames: vec![base.clone()] }
+        Self {
+            frames: vec![base.clone()],
+        }
     }
 
     /// 进入一个新词法作用域.
@@ -244,8 +249,7 @@ fn decode_mutation(e: &CppExpr) -> Option<(String, MutKind)> {
         CppExpr::BinOp(op, lhs, rhs) => {
             let name = ident_name(lhs)?;
             // 复合赋值: 剥出普通二元运算符后交给 `MutKind::Compound`
-            assign_base_op(*op)
-                .map(|base| (name.clone(), MutKind::Compound(base, (**rhs).clone())))
+            assign_base_op(*op).map(|base| (name.clone(), MutKind::Compound(base, (**rhs).clone())))
         },
         _ => None,
     }
@@ -681,9 +685,7 @@ impl ConstexprContext<'_> {
         match flow? {
             StmtFlow::Return(value) => Ok(value),
             // 整条路径跑完仍无 return: 不是常量表达式
-            StmtFlow::Finish => {
-                Err("constexpr function must have a return value".to_string())
-            },
+            StmtFlow::Finish => Err("constexpr function must have a return value".to_string()),
             // 顶层的 break/continue 无循环可跳 → 在 C++ 里就是语法错误,
             // 这里同样不能当成"正常跑完"交付结果.
             StmtFlow::Break | StmtFlow::Continue => Err(format!(
@@ -727,11 +729,7 @@ impl ConstexprContext<'_> {
     }
 
     /// 执行单条语句 —— 所有 `CppStmt` 变体的唯一派发点.
-    fn run_one_stmt(
-        &mut self,
-        stmt: &CppStmt,
-        sc: &mut LocalsStack,
-    ) -> ConstEvalResult<StmtFlow> {
+    fn run_one_stmt(&mut self, stmt: &CppStmt, sc: &mut LocalsStack) -> ConstEvalResult<StmtFlow> {
         match stmt {
             CppStmt::Expr(expr) => self.run_expr_stmt(expr, sc),
 
@@ -781,13 +779,9 @@ impl ConstexprContext<'_> {
                 self.eval_body_scoped(arm, sc)
             },
 
-            CppStmt::For(init, cond, step, body_stmts) => self.run_for_loop(
-                init.as_deref(),
-                cond.as_ref(),
-                step.as_deref(),
-                body_stmts,
-                sc,
-            ),
+            CppStmt::For(init, cond, step, body_stmts) => {
+                self.run_for_loop(init.as_deref(), cond.as_ref(), step.as_deref(), body_stmts, sc)
+            },
 
             CppStmt::While(condition, body_stmts) => {
                 self.run_while_loop(condition.as_ref(), body_stmts, sc)
@@ -853,11 +847,7 @@ impl ConstexprContext<'_> {
 
     /// 执行表达式语句: 先尝试就地改写 (`a = b` / `++i` / `sum += x`),
     /// 不命中再按纯表达式求值.
-    fn run_expr_stmt(
-        &mut self,
-        expr: &CppExpr,
-        sc: &mut LocalsStack,
-    ) -> ConstEvalResult<StmtFlow> {
+    fn run_expr_stmt(&mut self, expr: &CppExpr, sc: &mut LocalsStack) -> ConstEvalResult<StmtFlow> {
         if let Some((name, kind)) = decode_mutation(expr) {
             self.apply_mutation(&name, &kind, sc)?;
             return Ok(StmtFlow::Finish);
@@ -894,11 +884,7 @@ impl ConstexprContext<'_> {
 
     /// 求分支/循环条件的真假; 算不出来时**报错** (旧实现直接跳过整个 if/while,
     /// 分支里的副作用会静默丢失). 条件为 0 即假, 非 0 即真.
-    fn eval_branch_taken(
-        &mut self,
-        cond: &CppExpr,
-        sc: &mut LocalsStack,
-    ) -> ConstEvalResult<bool> {
+    fn eval_branch_taken(&mut self, cond: &CppExpr, sc: &mut LocalsStack) -> ConstEvalResult<bool> {
         let value = self.eval_expr_required(cond, sc)?;
         Ok(value != 0)
     }
@@ -1026,7 +1012,7 @@ impl ConstexprContext<'_> {
             Some(expr) => self.eval_expr_required(expr, sc)?,
             None => {
                 return Err(
-                    "switch without a condition cannot be evaluated at constexpr time".to_string(),
+                    "switch without a condition cannot be evaluated at constexpr time".to_string()
                 )
             },
         };
@@ -1067,11 +1053,7 @@ impl ConstexprContext<'_> {
     ///
     /// 返回 `Ok(None)` 表示"折叠后仍非常量" (legacy 语义, 不新增错误);
     /// `Err` 只在命中 func_table 但被调函数无法完成求值时出现.
-    fn eval_expr_in(
-        &mut self,
-        e: &CppExpr,
-        sc: &mut LocalsStack,
-    ) -> ConstEvalResult<Option<i128>> {
+    fn eval_expr_in(&mut self, e: &CppExpr, sc: &mut LocalsStack) -> ConstEvalResult<Option<i128>> {
         let folded = self.fold_constexpr_calls(e, sc)?;
         let merged = sc.merged();
         Ok(eval_cpp_const(&folded, &merged))
@@ -1079,11 +1061,7 @@ impl ConstexprContext<'_> {
 
     /// 求值表达式并要求它**必须**是常量 (用于影响结果的语境: 初始化式 /
     /// 分支与循环条件 / return 表达式 / 复合赋值的右值).
-    fn eval_expr_required(
-        &mut self,
-        e: &CppExpr,
-        sc: &mut LocalsStack,
-    ) -> ConstEvalResult<i128> {
+    fn eval_expr_required(&mut self, e: &CppExpr, sc: &mut LocalsStack) -> ConstEvalResult<i128> {
         let value = self.eval_expr_in(e, sc)?;
         match value {
             Some(v) => Ok(v),
@@ -1191,15 +1169,24 @@ impl ConstexprContext<'_> {
             },
             CppExpr::StaticCast { ty, expr } => {
                 let folded_inner = self.fold_constexpr_calls(expr, sc)?;
-                CppExpr::StaticCast { ty: ty.clone(), expr: Box::new(folded_inner) }
+                CppExpr::StaticCast {
+                    ty: ty.clone(),
+                    expr: Box::new(folded_inner),
+                }
             },
             CppExpr::ConstCast { ty, expr } => {
                 let folded_inner = self.fold_constexpr_calls(expr, sc)?;
-                CppExpr::ConstCast { ty: ty.clone(), expr: Box::new(folded_inner) }
+                CppExpr::ConstCast {
+                    ty: ty.clone(),
+                    expr: Box::new(folded_inner),
+                }
             },
             CppExpr::ReinterpretCast { ty, expr } => {
                 let folded_inner = self.fold_constexpr_calls(expr, sc)?;
-                CppExpr::ReinterpretCast { ty: ty.clone(), expr: Box::new(folded_inner) }
+                CppExpr::ReinterpretCast {
+                    ty: ty.clone(),
+                    expr: Box::new(folded_inner),
+                }
             },
             CppExpr::Comma(exprs) => {
                 let mut folded_elems = Vec::with_capacity(exprs.len());
@@ -1293,7 +1280,7 @@ pub fn eval_cpp_const(e: &CppExpr, locals: &HashMap<String, i128>) -> Option<i12
         CppExpr::BinOp(op, lhs, rhs) => {
             let l = eval_cpp_const(lhs, locals)?;
             let r = eval_cpp_const(rhs, locals)?;
-            
+
             match op {
                 BinOpKind::Add => Some(l + r),
                 BinOpKind::Sub => Some(l - r),
@@ -1383,6 +1370,88 @@ pub fn eval_cpp_const(e: &CppExpr, locals: &HashMap<String, i128>) -> Option<i12
             _ => locals.get(name).copied(),
         },
         _ => None,
+    }
+}
+
+/// [temp.dep.constexpr]: 对**已折成常量叶子**的依赖非类型子式求值。
+///
+/// `MangleType::NtExpr(op, operands)` 的叶子在单态化代入实参后由
+/// `TemplateRegistry::fold_args` 逐级变成 `NonType`, 这里把运算符语义解释一次。
+/// 语义与 [`eval_cpp_const`] (表达式语境) 同一口径: 除零 / 移位越界不猜值,
+/// 返 None 表示“仍求不出来”。
+pub fn eval_nt_expr(op: crate::cpp::mangle::NtOp, operands: &[crate::cpp::mangle::MangleType]) -> Option<i64> {
+    use crate::cpp::mangle::MangleType as M;
+    use crate::cpp::mangle::NtOp;
+    if operands.len() != op.arity() {
+        return None;
+    }
+    let val = |i: usize| match &operands[i] {
+        M::NonType(v) => Some(*v),
+        _ => None,
+    };
+    match op {
+        // `sizeof(T)`: 操作数是类型而不是值
+        NtOp::Sizeof => match &operands[0] {
+            M::NonType(_) => None,
+            ty => sizeof_mangle_type(ty).map(|v| v as i64),
+        },
+        NtOp::LNot => Some(if val(0)? == 0 { 1 } else { 0 }),
+        NtOp::Not => Some(!val(0)?),
+        NtOp::Neg => Some(val(0)?.wrapping_neg()),
+        NtOp::Cond => {
+            let c = val(0)?;
+            if c != 0 {
+                val(1)
+            } else {
+                val(2)
+            }
+        },
+        NtOp::Add => Some(val(0)?.wrapping_add(val(1)?)),
+        NtOp::Sub => Some(val(0)?.wrapping_sub(val(1)?)),
+        NtOp::Mul => Some(val(0)?.wrapping_mul(val(1)?)),
+        NtOp::Div => {
+            let (a, b) = (val(0)?, val(1)?);
+            if b == 0 {
+                None
+            } else {
+                Some(a.wrapping_div(b))
+            }
+        },
+        NtOp::Mod => {
+            let (a, b) = (val(0)?, val(1)?);
+            if b == 0 {
+                None
+            } else {
+                Some(a.wrapping_rem(b))
+            }
+        },
+        NtOp::Shl => {
+            let (a, b) = (val(0)?, val(1)?);
+            if !(0..64).contains(&b) {
+                None
+            } else {
+                Some(a.wrapping_shl(b as u32))
+            }
+        },
+        NtOp::Shr => {
+            let (a, b) = (val(0)?, val(1)?);
+            if !(0..64).contains(&b) {
+                None
+            } else {
+                Some(a.wrapping_shr(b as u32))
+            }
+        },
+        NtOp::Lt => Some(if val(0)? < val(1)? { 1 } else { 0 }),
+        NtOp::Le => Some(if val(0)? <= val(1)? { 1 } else { 0 }),
+        NtOp::Gt => Some(if val(0)? > val(1)? { 1 } else { 0 }),
+        NtOp::Ge => Some(if val(0)? >= val(1)? { 1 } else { 0 }),
+        NtOp::Eq => Some(if val(0)? == val(1)? { 1 } else { 0 }),
+        NtOp::Ne => Some(if val(0)? != val(1)? { 1 } else { 0 }),
+        NtOp::Land => Some(if val(0)? != 0 && val(1)? != 0 { 1 } else { 0 }),
+        NtOp::Lor => Some(if val(0)? != 0 || val(1)? != 0 { 1 } else { 0 }),
+        NtOp::BitAnd => Some(val(0)? & val(1)?),
+        NtOp::BitOr => Some(val(0)? | val(1)?),
+        NtOp::BitXor => Some(val(0)? ^ val(1)?),
     }
 }
 
@@ -1577,7 +1646,10 @@ mod tests {
     }
 
     fn assign(n: &str, value: CppExpr) -> CppStmt {
-        CppStmt::Assign { name: n.to_string(), value }
+        CppStmt::Assign {
+            name: n.to_string(),
+            value,
+        }
     }
 
     fn ret(e: CppExpr) -> CppStmt {
@@ -1609,16 +1681,18 @@ mod tests {
             Some(boxed(decl("i", lit(0)))),
             Some(bin(BinOpKind::Lt, var("i"), var("n"))),
             // 步进 `++i`: 解释器在表达式语句里识别就地改写并写回声明帧
-            Some(boxed(CppStmt::Expr(CppExpr::UnaryOp(
-                UnaryOpKind::PreInc,
-                Box::new(var("i")),
-            )))),
+            Some(boxed(CppStmt::Expr(CppExpr::UnaryOp(UnaryOpKind::PreInc, Box::new(var("i")))))),
             loop_body,
         );
         func(
             "fib",
             &["n"],
-            vec![decl("a", lit(0)), decl("b", lit(1)), for_stmt, ret(var("a"))],
+            vec![
+                decl("a", lit(0)),
+                decl("b", lit(1)),
+                for_stmt,
+                ret(var("a")),
+            ],
         )
     }
 
@@ -1651,10 +1725,7 @@ mod tests {
                 bin(
                     BinOpKind::Div,
                     var("a"),
-                    CppExpr::Call(
-                        Box::new(var("gcd")),
-                        vec![var("a"), var("b")],
-                    ),
+                    CppExpr::Call(Box::new(var("gcd")), vec![var("a"), var("b")]),
                 ),
                 var("b"),
             ))],
@@ -1666,10 +1737,7 @@ mod tests {
         // M26.1: 无符号表上下文时的语法三态判定 (调用需异常规范 → None)
         assert_eq!(noexcept_operand_status(&CppExpr::IntLit(1)), Some(false));
         assert_eq!(noexcept_operand_status(&CppExpr::This), Some(false));
-        assert_eq!(
-            noexcept_operand_status(&CppExpr::New("int".into(), vec![])),
-            Some(true)
-        );
+        assert_eq!(noexcept_operand_status(&CppExpr::New("int".into(), vec![])), Some(true));
         assert_eq!(
             noexcept_operand_status(&CppExpr::BinOp(
                 BinOpKind::Add,
@@ -1949,7 +2017,8 @@ mod tests {
         let outer = HashMap::new();
         let mut ctx = ConstexprContext::with_functions(true, &outer, &funcs);
         assert_eq!(
-            ctx.eval_constexpr_function_body(&funcs["fib"], &[10]).unwrap(),
+            ctx.eval_constexpr_function_body(&funcs["fib"], &[10])
+                .unwrap(),
             55
         );
     }
@@ -1960,11 +2029,13 @@ mod tests {
         let outer = HashMap::new();
         let mut ctx = ConstexprContext::with_functions(true, &outer, &funcs);
         assert_eq!(
-            ctx.eval_constexpr_function_body(&funcs["gcd"], &[48, 18]).unwrap(),
+            ctx.eval_constexpr_function_body(&funcs["gcd"], &[48, 18])
+                .unwrap(),
             6
         );
         assert_eq!(
-            ctx.eval_constexpr_function_body(&funcs["gcd"], &[270, 192]).unwrap(),
+            ctx.eval_constexpr_function_body(&funcs["gcd"], &[270, 192])
+                .unwrap(),
             6
         );
     }
@@ -1976,7 +2047,8 @@ mod tests {
         let outer = HashMap::new();
         let mut ctx = ConstexprContext::with_functions(true, &outer, &funcs);
         assert_eq!(
-            ctx.eval_constexpr_function_body(&funcs["lcm"], &[4, 6]).unwrap(),
+            ctx.eval_constexpr_function_body(&funcs["lcm"], &[4, 6])
+                .unwrap(),
             12
         );
     }
@@ -2086,10 +2158,7 @@ mod tests {
             &[],
             vec![
                 decl("x", lit(1)),
-                CppStmt::Block(vec![
-                    boxed(assign("x", lit(5))),
-                    boxed(decl("y", lit(7))),
-                ]),
+                CppStmt::Block(vec![boxed(assign("x", lit(5))), boxed(decl("y", lit(7)))]),
                 ret(var("x")),
             ],
         );
@@ -2106,11 +2175,7 @@ mod tests {
             (None, vec![boxed(ret(lit(-1)))]),
             (Some(lit(2)), vec![boxed(ret(lit(20)))]),
         ];
-        let f = func(
-            "pick",
-            &["k"],
-            vec![CppStmt::Switch(Some(var("k")), arms), ret(lit(0))],
-        );
+        let f = func("pick", &["k"], vec![CppStmt::Switch(Some(var("k")), arms), ret(lit(0))]);
         let outer = HashMap::new();
         let mut ctx = ConstexprContext::new(true, &outer);
         assert_eq!(ctx.eval_constexpr_function_body(&f, &[2]).unwrap(), 20);
@@ -2135,11 +2200,7 @@ mod tests {
         let outer = HashMap::new();
         let mut ctx = ConstexprContext::new(true, &outer);
         let err = ctx.eval_constexpr_function_body(&f, &[]).unwrap_err();
-        assert!(
-            err.contains("iteration bound"),
-            "unexpected: {}",
-            err
-        );
+        assert!(err.contains("iteration bound"), "unexpected: {}", err);
     }
 
     #[test]
@@ -2187,11 +2248,7 @@ mod tests {
         let err = ctx
             .eval_constexpr_function_body(&funcs["user"], &[3])
             .unwrap_err();
-        assert!(
-            err.contains("must be evaluated at compile time"),
-            "unexpected: {}",
-            err
-        );
+        assert!(err.contains("must be evaluated at compile time"), "unexpected: {}", err);
     }
 
     #[test]
@@ -2206,12 +2263,10 @@ mod tests {
         assert!(err.contains("argument"), "unexpected: {}", err);
         // 路径上没有 return
         let no_return = func("noret", &[], vec![decl("x", lit(1))]);
-        let err = ctx.eval_constexpr_function_body(&no_return, &[]).unwrap_err();
-        assert!(
-            err.contains("must have a return value"),
-            "unexpected: {}",
-            err
-        );
+        let err = ctx
+            .eval_constexpr_function_body(&no_return, &[])
+            .unwrap_err();
+        assert!(err.contains("must have a return value"), "unexpected: {}", err);
     }
 
     #[test]
@@ -2232,21 +2287,14 @@ mod tests {
         // 入口之间不得串状态: 走过带调用的入口后, legacy 入口结果照旧
         assert_eq!(eval_cpp_const_full(&cond, &ctx_with), Some(1));
         // legacy 入口对除零仍返回 None
-        assert_eq!(
-            eval_cpp_const(&bin(BinOpKind::Div, lit(1), lit(0)), &locals),
-            None
-        );
+        assert_eq!(eval_cpp_const(&bin(BinOpKind::Div, lit(1), lit(0)), &locals), None);
     }
 
     #[test]
     fn test_eval_cpp_const_full_with_calls_folds_square() {
         // 生产路径入口: `square(12)` 命中函数表 → 折叠成 144
         // (`constexpr int sq12 = square(12);` 数组维度用的就是这条通道)
-        let square = func(
-            "square",
-            &["x"],
-            vec![ret(bin(BinOpKind::Mul, var("x"), var("x")))],
-        );
+        let square = func("square", &["x"], vec![ret(bin(BinOpKind::Mul, var("x"), var("x")))]);
         let funcs = table_of(vec![square]);
         let outer = HashMap::new();
         let mut ctx = ConstexprContext::with_functions(true, &outer, &funcs);

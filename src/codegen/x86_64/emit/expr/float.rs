@@ -367,11 +367,11 @@ impl Codegen {
                 self.emit(&[0xDD, 0x04, 0x24]); // fld qword [rsp]
             }
             self.emit(&[0x48, 0x83, 0xC4, 16]); // add rsp, 16
-            // 执行运算: st(0) = 左, st(1) = 右
-            // x87 的 fxxxp 是 st(1) op st(0), 然后 pop
-            // 当前: st(0) = l, st(1) = r
-            // 对于加法/乘法: 可交换, 直接做
-            // 对于减法/除法: 需要用反向版本 fsubrp/fdivrp
+                                                // 执行运算: st(0) = 左, st(1) = 右
+                                                // x87 的 fxxxp 是 st(1) op st(0), 然后 pop
+                                                // 当前: st(0) = l, st(1) = r
+                                                // 对于加法/乘法: 可交换, 直接做
+                                                // 对于减法/除法: 需要用反向版本 fsubrp/fdivrp
             match op {
                 BinOp::Add => self.emit(&[0xDE, 0xC1]), // faddp: st(1) = st(1) + st(0), pop
                 BinOp::Mul => self.emit(&[0xDE, 0xC9]), // fmulp: st(1) = st(1) * st(0), pop

@@ -164,6 +164,7 @@ fn decl_local(ty: MangleType, name: &str) -> CppStmt {
         name: name.to_string(),
         init: None,
         is_volatile: false,
+        is_const: false,
     }
 }
 fn member_var(ty: MangleType, name: &str) -> CppDecl {
@@ -172,6 +173,9 @@ fn member_var(ty: MangleType, name: &str) -> CppDecl {
         name: name.to_string(),
         is_mutable: false,
         is_volatile: false,
+        is_const: false,
+        is_static: false,
+        init: None,
     }
 }
 fn free_fn_decl(ret: MangleType, name: &str, params: Vec<(String, MangleType)>) -> CppDecl {

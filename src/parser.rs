@@ -2966,6 +2966,9 @@ impl<'a> Parser<'a> {
             Stmt::Switch { .. } => true, // switch 内的 break 已在内部处理
             Stmt::While { .. } | Stmt::For { .. } | Stmt::Do { .. } | Stmt::AsmGoto { .. } => false,
             Stmt::Expr { .. } => false,
+            // C++ 零成本 EH: 受保护调用正常返回后落到下一条语句, 落地垫序言
+            // 本身也不是终止语句, 两者都不影响 fallthrough 判定.
+            Stmt::Invoke { .. } | Stmt::EhLandingPad { .. } => false,
         }
     }
 

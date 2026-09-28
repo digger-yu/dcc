@@ -681,6 +681,22 @@ impl Codegen {
             });
         }
 
+        // C++ 零成本异常: `.gcc_except_table` 的节符号 (LOCAL)。FDE 里的 LSDA
+        // 字段是 `DW_EH_PE_pcrel|sdata4`, 与 GCC 同构地以该节符号 + 节内偏移作
+        // addend; 链接器合并节之后 `S - P` 仍然成立 (两者同在一个输出节内平移)。
+        if let Some(sec_idx) = self.eh_except_sec_idx {
+            let sec = &self.extra_sections[sec_idx];
+            local_syms.push(ElfSym {
+                name: sec.name.clone(),
+                section: (7 + sec_idx) as u16,
+                value: 0,
+                size: sec.data.len() as u64,
+                bind: STB_LOCAL,
+                ty: STT_SECTION,
+                visibility: STV_DEFAULT,
+            });
+        }
+
         // .pushsection 非文本节: 为数字标签引用创建本地符号
         for rel in &self.pending_custom_sec_rels {
             if !self.sym_index.contains_key(&rel.symbol) {

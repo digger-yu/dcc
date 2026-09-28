@@ -56,6 +56,10 @@ pub enum CxxRuntimeSymbol {
     EndCatch,
     /// `__gxx_personality_v0`
     PersonalityV0,
+    /// `_Unwind_Resume` —— 落地垫做完清理后把同一个异常继续往外抛。
+    /// 它属于 libgcc_s 的最低层展开接口 (不是 `__cxa_*`), 但 zero-cost EH 的
+    /// cleanup-only 区域必须有它才能既执行本帧析构又不吞掉异常。
+    UnwindResume,
 
     // --- RTTI ---
     /// `__cxa_bad_cast`
@@ -110,6 +114,7 @@ impl CxxRuntimeSymbol {
             Self::BeginCatch => "__cxa_begin_catch",
             Self::EndCatch => "__cxa_end_catch",
             Self::PersonalityV0 => "__gxx_personality_v0",
+            Self::UnwindResume => "_Unwind_Resume",
             Self::BadCast => "__cxa_bad_cast",
             Self::BadTypeid => "__cxa_bad_typeid",
             Self::DynamicCast => "__dynamic_cast",

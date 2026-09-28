@@ -78,7 +78,11 @@ pub struct NativeLowered {
 fn tplfn_c_name(name: &str, cand: usize, args: &[MangleType]) -> String {
     use crate::cpp::template::type_key;
     let keys: Vec<String> = args.iter().map(type_key).collect();
-    format!("__dcc_tplfn_{}_{}_{}", name, cand, keys.join("_"))
+    // 名字是**规范名** (可能带命名空间, 如 `std::print`), 而这里要的是一个 C
+    // 标识符: `::` 必须展平 (与 `template::instantiated_class_name` 同一规则),
+    // 否则产出 `__dcc_tplfn_std::print_...` 这种非法符号。
+    let flat = name.replace("::", "_");
+    format!("__dcc_tplfn_{}_{}_{}", flat, cand, keys.join("_"))
 }
 
 /// 从声明列表中收集所有模板声明, 构建 TemplateRegistry.
@@ -92,7 +96,7 @@ fn collect_templates(decls: &[CppDecl]) -> TemplateRegistry {
     let mut reg = TemplateRegistry::default();
     let mut live = 0usize;
     for d in decls {
-        collect_templates_from_decl(d, live, &mut reg);
+        collect_templates_from_decl(d, live, "", &mut reg);
         if !is_template_like_decl(d) {
             live += 1;
         }
@@ -118,7 +122,25 @@ fn template_entity_name(d: &CppDecl) -> Option<String> {
 }
 
 /// 递归从单个声明中收集模板
-fn collect_templates_from_decl(d: &CppDecl, anchor: usize, reg: &mut TemplateRegistry) {
+///
+/// `ns_prefix` 是当前所在的**限定前缀** (命名空间 / 外层类, `::` 连接, 可为空)。
+/// 它有两个用途: 模板名按源码书写形态登记 (`std::vector` 与 `vector` 是两个键,
+/// 使用点写哪个就查哪个), 普通类的编译期常量表同理 (`<type_traits>` 里的
+/// `true_type` 要靠它折 `is_pointer<T*>::value`)。
+fn collect_templates_from_decl(
+    d: &CppDecl,
+    anchor: usize,
+    ns_prefix: &str,
+    reg: &mut TemplateRegistry,
+) {
+    /// 拼接限定前缀 (`""` + `"std"` = `"std"`, `"std"` + `"vector"` = `"std::vector"`)
+    fn join_prefix(prefix: &str, name: &str) -> String {
+        if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}::{name}")
+        }
+    }
     match d {
         CppDecl::Template {
             params,
@@ -142,12 +164,23 @@ fn collect_templates_from_decl(d: &CppDecl, anchor: usize, reg: &mut TemplateReg
             if let CppDecl::Typedef { .. } = &**decl {
                 return;
             }
-            reg.register(params, requires, decl);
+            // 模板名按**限定形态**补登记一份: 注册表主键是不带前缀的短名
+            // (`parser::parse_template_decl` 的既有口径), 而 `std::is_pointer<…>`
+            // 这类使用点写的是限定名; 两个键指向同一条模板声明才不会出现
+            // 「短名能实例化、限定名不能」的分裂。
+            reg.register_with_prefix(ns_prefix, params, requires, decl);
             if let Some(n) = template_entity_name(decl) {
                 reg.set_anchor(&n, anchor);
+                if !ns_prefix.is_empty() {
+                    reg.set_anchor(&join_prefix(ns_prefix, &n), anchor);
+                }
             }
             // 递归收集嵌套模板
-            collect_templates_from_decl(decl, anchor, reg);
+            let inner_prefix = match &**decl {
+                CppDecl::Class(c) => join_prefix(ns_prefix, &c.name),
+                _ => ns_prefix.to_string(),
+            };
+            collect_templates_from_decl(decl, anchor, &inner_prefix, reg);
         },
         CppDecl::Concept { name, body_text } => {
             // 无模板头的裸概念 (形式上合法, 无自变量可绑定)
@@ -163,26 +196,57 @@ fn collect_templates_from_decl(d: &CppDecl, anchor: usize, reg: &mut TemplateReg
                 let names: Vec<String> = params.params.iter().map(|p| p.name.clone()).collect();
                 reg.register_partial(c.name.clone(), &names, pattern_text.clone(), decl);
                 reg.set_anchor(&c.name, anchor);
+                if !ns_prefix.is_empty() {
+                    let q = join_prefix(ns_prefix, &c.name);
+                    reg.register_partial(q.clone(), &names, pattern_text.clone(), decl);
+                    reg.set_anchor(&q, anchor);
+                }
             }
         },
         // G13: Collect full specializations
         CppDecl::FullSpec {
-            primary_name,
             specific_args,
-            body,
+            class,
         } => {
-            reg.register_full(primary_name.clone(), specific_args.clone(), body);
-            reg.set_anchor(primary_name, anchor);
+            reg.register_full(class.name.clone(), specific_args.clone(), class);
+            reg.set_anchor(&class.name, anchor);
+            if !ns_prefix.is_empty() {
+                let q = join_prefix(ns_prefix, &class.name);
+                reg.register_full(q.clone(), specific_args.clone(), class);
+                reg.set_anchor(&q, anchor);
+            }
         },
-        CppDecl::Namespace { body, .. } => {
-            for inner in body {
-                collect_templates_from_decl(inner, anchor, reg);
+        CppDecl::Namespace { name, body } => {
+            let inner = match name {
+                Some(n) => join_prefix(ns_prefix, n),
+                // 匿名命名空间不引入可书写的限定前缀
+                None => ns_prefix.to_string(),
+            };
+            for d in body {
+                collect_templates_from_decl(d, anchor, &inner, reg);
             }
         },
         CppDecl::Class(c) => {
+            // 普通 (非模板) 类的编译期常量表: 模板实参位置的 `Cls::value`
+            // 靠它折叠 (见 `TemplateRegistry::fold_args`)。
+            reg.index_plain_class(ns_prefix, c);
+            let inner = join_prefix(ns_prefix, &c.name);
             for m in &c.members {
-                collect_templates_from_decl(m, anchor, reg);
+                // 类体内的 typedef 是**依赖名** (`enable_if` 里的 `typedef T type;`
+                // 含义随实例实参变化), 不能当全局别名登记: 收进全局表后所有
+                // `X::type` 共用一个目标类型, [temp.deduct]/8 的“依赖名是否存在”
+                // 判据反而失真。名字本身已由 `collect_member_names` 记录。
+                if matches!(m, CppDecl::Typedef { .. }) {
+                    continue;
+                }
+                collect_templates_from_decl(m, anchor, &inner, reg);
             }
+        },
+        // typedef / using 别名: 记下名字 → 目标类型, 供常量折叠和成员查找展开
+        // 继承链 (`: true_type` 里的 `true_type` 不是类名, 见
+        // `TemplateRegistry::type_aliases`)。
+        CppDecl::Typedef { name, target } => {
+            reg.index_type_alias(ns_prefix, name, target);
         },
         _ => {},
     }
@@ -539,6 +603,15 @@ impl<'a> TplResolver<'a> {
     /// 实例化一个类模板引用; 已处理过 / 名字不是类模板时跳过,
     /// **已知类模板实例化失败** 报硬错误 (见函数尾的 M52 注释).
     fn instantiate_class_ref(&mut self, name: &str, args: &[MangleType]) {
+        // 名字先归一: `vector<int>` 与 `std::vector<int>` 是同一个类型, 必须得到
+        // 同一个实例名与同一个去重 key (否则同一个类体会被发两次)。
+        let canon = self.reg.canonical_name(name);
+        let name = canon.as_str();
+        // [temp.arg.nontype]: 实参表里的依赖常量子式 (`is_pointer<T*>::value`) 必须先
+        // 折成 `NonType`, 否则它既匹配不到 `enable_if<true, T>` 这类偏特化, 又把整棵
+        // 子式编码进实例名。key / 实例名 / typedef 展开三处都从同一份折叠后实参出发。
+        let folded = self.reg.fold_args(args);
+        let args = folded.as_slice();
         let key = TemplateRegistry::key_for(name, args);
         if !self.seen_class.insert(key) {
             return;
@@ -590,6 +663,10 @@ impl<'a> TplResolver<'a> {
     /// M51: `idx` 是重载集里选定的**候选下标**. 它必须参与去重 key 和实例
     /// C 名: 同名同实参的不同候选 (约束版 vs 无约束版) 是两个不同的函数.
     fn ensure_fn_instance(&mut self, name: &str, idx: usize, args: &[MangleType]) {
+        let canon = self.reg.canonical_name(name);
+        let name = canon.as_str();
+        let folded = self.reg.fold_args(args);
+        let args = folded.as_slice();
         let key = TemplateRegistry::fn_inst_key(idx, name, args);
         if !self.seen_fn.insert(key) {
             return;
@@ -623,8 +700,12 @@ impl<'a> TplResolver<'a> {
                 },
             };
             let (idx, resolved) = resolved;
-            self.ensure_fn_instance(&name, idx, &resolved);
-            *f = CppExpr::Ident(tplfn_c_name(&name, idx, &resolved));
+            // 实例名与候选下标都由**规范名**得出: 调用点重写出的 C 链接名必须与
+            // `ensure_fn_instance` 产出的定义名一字不差。
+            let canon = self.reg.canonical_name(&name);
+            let name = canon.as_str();
+            self.ensure_fn_instance(name, idx, &resolved);
+            *f = CppExpr::Ident(tplfn_c_name(name, idx, &resolved));
             return;
         }
         // (b) 隐式实参推导 `identity(42)` / `std::print(fmt, args...)`
@@ -680,8 +761,10 @@ impl<'a> TplResolver<'a> {
             self.note_no_match(&name, &tys);
             return;
         };
-        self.ensure_fn_instance(&name, idx, &resolved);
-        *f = CppExpr::Ident(tplfn_c_name(&name, idx, &resolved));
+        let canon = self.reg.canonical_name(&name);
+        let name = canon.as_str();
+        self.ensure_fn_instance(name, idx, &resolved);
+        *f = CppExpr::Ident(tplfn_c_name(name, idx, &resolved));
     }
 
     /// M51: 记录一个"全部候选被剔除"的调用点.
@@ -745,8 +828,10 @@ impl<'a> TplResolver<'a> {
                 for (n, t) in params.iter() {
                     self.env.declare(n.clone(), t.clone());
                 }
-                for (_, e) in inits.iter_mut() {
-                    self.expr(e);
+                for entry in inits.iter_mut() {
+                    for e in &mut entry.args {
+                        self.expr(e);
+                    }
                 }
                 self.body(body);
                 self.env.pop_scope();
@@ -1089,8 +1174,14 @@ fn collect_template_refs_from_decl(
     out: &mut Vec<(String, Vec<MangleType>)>,
 ) {
     match d {
-        CppDecl::GlobalVar { ty, .. } => {
+        CppDecl::GlobalVar { ty, init, .. } => {
             collect_template_refs_from_type(ty, done, out);
+            // 初始化式里的模板实例 (`int a = is_pointer<int*>::value;`) 同样是**使用点**:
+            // 不走表达式遍历就不会触发实例化, sema 随后找不到那个类符号,
+            // 只能报 `undeclared tpl static access: value`。
+            if let Some(e) = init {
+                collect_template_refs_from_expr(e, done, out);
+            }
         },
         CppDecl::FreeFn {
             ret, params, body, ..
@@ -1124,9 +1215,15 @@ fn collect_template_refs_from_decl(
             }
             collect_template_refs_from_body(body, done, out);
         },
-        CppDecl::Ctor { params, body, .. } => {
+        CppDecl::Ctor { params, inits, body, .. } => {
             for (_, t) in params {
                 collect_template_refs_from_type(t, done, out);
+            }
+            // 构造初始化列表的实参 (`X() : v(is_pointer<int*>::value) {}`)
+            for i in inits {
+                for a in &i.args {
+                    collect_template_refs_from_expr(a, done, out);
+                }
             }
             collect_template_refs_from_body(body, done, out);
         },
@@ -1182,6 +1279,13 @@ fn collect_template_refs_from_type(
                 collect_template_refs_from_type(a, done, out);
             }
             out.push((name.clone(), args.clone()));
+        },
+        // [temp.dep.constexpr]: 依赖非类型子式的操作数可能引用类模板
+        // (`enable_if<!is_pointer<T>::value, int>`), 不递进就会漏开实例化。
+        MangleType::NtExpr(_, operands) => {
+            for a in operands {
+                collect_template_refs_from_type(a, done, out);
+            }
         },
         _ => {},
     }
@@ -1325,6 +1429,7 @@ fn replace_template_types_in_decl(d: &CppDecl, reg: &TemplateRegistry) -> CppDec
             init,
             is_static,
             is_volatile,
+            is_const,
         } => CppDecl::GlobalVar {
             ty: replace_template_type(ty, reg),
             name: name.clone(),
@@ -1333,6 +1438,7 @@ fn replace_template_types_in_decl(d: &CppDecl, reg: &TemplateRegistry) -> CppDec
                 .map(|e| replace_template_types_in_expr(e, reg)),
             is_static: *is_static,
             is_volatile: *is_volatile,
+            is_const: *is_const,
         },
         CppDecl::FreeFn {
             ret,
@@ -1391,11 +1497,17 @@ fn replace_template_types_in_decl(d: &CppDecl, reg: &TemplateRegistry) -> CppDec
             name,
             is_mutable,
             is_volatile,
+            is_const,
+            is_static,
+            init,
         } => CppDecl::MemberVar {
             ty: replace_template_type(ty, reg),
             name: name.clone(),
             is_mutable: *is_mutable,
             is_volatile: *is_volatile,
+            is_const: *is_const,
+            is_static: *is_static,
+            init: init.clone(),
         },
         CppDecl::MemberFn {
             class,
@@ -1410,6 +1522,7 @@ fn replace_template_types_in_decl(d: &CppDecl, reg: &TemplateRegistry) -> CppDec
             is_noexcept,
             is_volatile,
             is_friend,
+            is_static,
         } => CppDecl::MemberFn {
             class: class.clone(),
             ret: replace_template_type(ret, reg),
@@ -1426,6 +1539,7 @@ fn replace_template_types_in_decl(d: &CppDecl, reg: &TemplateRegistry) -> CppDec
             is_noexcept: *is_noexcept,
             is_volatile: *is_volatile,
             is_friend: *is_friend,
+            is_static: *is_static,
         },
         CppDecl::Ctor {
             class,
@@ -1443,7 +1557,15 @@ fn replace_template_types_in_decl(d: &CppDecl, reg: &TemplateRegistry) -> CppDec
                 .collect(),
             inits: inits
                 .iter()
-                .map(|(n, e)| (n.clone(), replace_template_types_in_expr(e, reg)))
+                .map(|i| crate::cpp::parser::CppCtorInit {
+                    name: i.name.clone(),
+                    args: i
+                        .args
+                        .iter()
+                        .map(|e| replace_template_types_in_expr(e, reg))
+                        .collect(),
+                    braces: i.braces,
+                })
                 .collect(),
             body: replace_template_types_in_body(body, reg),
             is_virtual: *is_virtual,
@@ -1566,11 +1688,17 @@ fn bind_dependent_names(decl: &CppDecl, params: &[String], args: &[MangleType]) 
             name,
             is_mutable,
             is_volatile,
+            is_const,
+            is_static,
+            init,
         } => CppDecl::MemberVar {
             ty: b(ty),
             name: name.clone(),
             is_mutable: *is_mutable,
             is_volatile: *is_volatile,
+            is_const: *is_const,
+            is_static: *is_static,
+            init: init.clone(),
         },
         CppDecl::GlobalVar {
             ty,
@@ -1578,12 +1706,14 @@ fn bind_dependent_names(decl: &CppDecl, params: &[String], args: &[MangleType]) 
             init,
             is_static,
             is_volatile,
+            is_const,
         } => CppDecl::GlobalVar {
             ty: b(ty),
             name: name.clone(),
             init: init.clone(),
             is_static: *is_static,
             is_volatile: *is_volatile,
+            is_const: *is_const,
         },
         CppDecl::FreeFn {
             ret,
@@ -1613,6 +1743,7 @@ fn bind_dependent_names(decl: &CppDecl, params: &[String], args: &[MangleType]) 
             is_noexcept,
             is_volatile,
             is_friend,
+            is_static,
         } => CppDecl::MemberFn {
             class: class.clone(),
             ret: b(ret),
@@ -1626,6 +1757,7 @@ fn bind_dependent_names(decl: &CppDecl, params: &[String], args: &[MangleType]) 
             is_noexcept: *is_noexcept,
             is_volatile: *is_volatile,
             is_friend: *is_friend,
+            is_static: *is_static,
         },
         CppDecl::Ctor {
             class,
@@ -1698,6 +1830,10 @@ fn bind_dependent_names(decl: &CppDecl, params: &[String], args: &[MangleType]) 
 fn replace_template_type(ty: &MangleType, reg: &TemplateRegistry) -> MangleType {
     match ty {
         MangleType::Template { name, args } => {
+            // [temp.arg.nontype]: 依赖常量子式先折成 `NonType` 再查实例名 (与
+            // `instantiate_class_ref` 的 key 同源, 否则类型替换静默不发生)
+            let folded = reg.fold_args(args);
+            let args = folded.as_slice();
             // 检查是否是已实例化的类模板
             //
             // M52: 类名必须取自**缓存里的实例声明** (`instance_class_name`),
@@ -1708,8 +1844,10 @@ fn replace_template_type(ty: &MangleType, reg: &TemplateRegistry) -> MangleType 
                 return MangleType::Class(inst_name);
             }
             // 未实例化，递归替换参数后保留
-            let new_args: Vec<MangleType> =
-                args.iter().map(|a| replace_template_type(a, reg)).collect();
+            let new_args: Vec<MangleType> = args
+                .iter()
+                .map(|a| replace_template_type(a, reg))
+                .collect();
             MangleType::Template {
                 name: name.clone(),
                 args: new_args,
@@ -1718,19 +1856,47 @@ fn replace_template_type(ty: &MangleType, reg: &TemplateRegistry) -> MangleType 
         MangleType::Pointer(t) => MangleType::Pointer(Box::new(replace_template_type(t, reg))),
         MangleType::Reference(t) => MangleType::Reference(Box::new(replace_template_type(t, reg))),
         MangleType::TplMember { name, args, member } => {
+            // 先按**常量**试折: `is_pointer<int*>::value` 是值而不是类型,
+            // 把它当成嵌套类名折成 `Class("实例::value")` 只能得到一个不存在的类。
+            if let MangleType::NonType(v) = reg.fold_constant(ty) {
+                return MangleType::NonType(v);
+            }
             // 模板成员访问：先替换模板类名
+            //
+            // M55: 嵌套 **typedef 成员** (`enable_if<B,T>::type`) 必须展开成别名
+            // 的目标类型: 早前无条件折成 `Class("<实例名>::type")`, 而那个“类”
+            // 根本不存在, 下游只能报 `unknown class type: ..._enable_if_...::type`。
+            //
+            // 实参表先折叠 (`enable_if<is_pointer<T*>::value,int>::type` 的首实参
+            // 是个常量子式), 折叠后的 key 才与实例化时登记的一致。
+            let folded = reg.fold_args(args);
+            let args = folded.as_slice();
+            if let Some(target) = reg.instance_typedef(name, args, member) {
+                // 目标自身仍可能是模板引用 (`typedef A<T> type;`) -> 递归展开
+                return replace_template_type(&target, reg);
+            }
             if let Some(inst) = reg.instance_class_name(name, args) {
-                // 简化：转为普通类成员访问类型
+                // 嵌套**类**成员 (`X<T>::node`) 才是“实例名::成员”这个类名
                 MangleType::Class(format!("{}::{}", inst, member))
             } else {
-                let new_args: Vec<MangleType> =
-                    args.iter().map(|a| replace_template_type(a, reg)).collect();
+                let new_args: Vec<MangleType> = args
+                    .iter()
+                    .map(|a| replace_template_type(a, reg))
+                    .collect();
                 MangleType::TplMember {
                     name: name.clone(),
                     args: new_args,
                     member: member.clone(),
                 }
             }
+        },
+        // [temp.dep.constexpr]: 依赖非类型子式。操作数先递归展开 (内层可能本身就是
+        // 一个能折的 `X<Args>::member`), 然后整棵试折 —— 叶子全成常量时子式就得到
+        // `NonType`, 否则保留结构 (下一次实例化代入更多实参后再折)。
+        MangleType::NtExpr(op, operands) => {
+            let new_ops: Vec<MangleType> =
+                operands.iter().map(|a| replace_template_type(a, reg)).collect();
+            reg.fold_constant(&MangleType::NtExpr(*op, new_ops))
         },
         other => other.clone(),
     }
@@ -1756,6 +1922,7 @@ fn replace_template_types_in_stmt(s: &CppStmt, reg: &TemplateRegistry) -> CppStm
             name,
             init,
             is_volatile,
+            is_const,
         } => CppStmt::LocalVar {
             ty: replace_template_type(ty, reg),
             name: name.clone(),
@@ -1763,12 +1930,14 @@ fn replace_template_types_in_stmt(s: &CppStmt, reg: &TemplateRegistry) -> CppStm
                 .as_ref()
                 .map(|e| replace_template_types_in_expr(e, reg)),
             is_volatile: *is_volatile,
+            is_const: *is_const,
         },
         CppStmt::StaticLocal {
             ty,
             name,
             init,
             is_volatile,
+            is_const,
         } => CppStmt::StaticLocal {
             ty: replace_template_type(ty, reg),
             name: name.clone(),
@@ -1776,6 +1945,7 @@ fn replace_template_types_in_stmt(s: &CppStmt, reg: &TemplateRegistry) -> CppStm
                 .as_ref()
                 .map(|e| replace_template_types_in_expr(e, reg)),
             is_volatile: *is_volatile,
+            is_const: *is_const,
         },
         CppStmt::LocalVarList { spec, declarators } => {
             // 只替换共享的 decl-specifier 类型部分; 每个 declarator 的 `*`/`&`/`[N]`
@@ -1785,6 +1955,7 @@ fn replace_template_types_in_stmt(s: &CppStmt, reg: &TemplateRegistry) -> CppStm
                     ty: replace_template_type(&spec.ty, reg),
                     is_static: spec.is_static,
                     is_volatile: spec.is_volatile,
+                    is_const: spec.is_const,
                 },
                 declarators: declarators
                     .iter()
@@ -1998,6 +2169,11 @@ pub fn lower_decls_native(decls: &[CppDecl]) -> Result<NativeLowered, NativeErro
 
     // Step 1: 构建 Sema + HIR
     let mut sema = Sema::new();
+    // Stage 8.1/8.4/8.5: 把 Stage 8 之前的 `collect_templates` 注册表迁入 sema,
+    // 让 sema 成为模板元信息的单一真源 (`sema.templates`)。这一步只是
+    // 搬迁对象, 不再做一遍注册 —— 后续 `register_template_decl` 等新方法
+    // 用来在 parser 走完时统一登记。
+    sema.templates = std::mem::take(&mut reg);
     if let Err(e) = sema.build_hir_from_decls(&all_decls) {
         return Err(NativeError::Unsupported(e));
     }
@@ -2143,6 +2319,9 @@ fn build_class_abis(
             .get_class_info(cid)
             .map(|info| info.virtual_methods.iter().any(|vm| vm.symbol == sym.id))
             .unwrap_or(false);
+        // `owner_class` 在布局层只用来识别「同一条虚槽」(重写的基方法属于哪个
+        // 子对象)。当本类的 `virtual_methods` 条目已被重写者顶掉时, 该条目的
+        // `overrides` 指向的其实是**自己**, 这时必须回落到本类 cid。
         let owner_class = sema
             .get_class_info(cid)
             .and_then(|info| {
@@ -2151,10 +2330,15 @@ fn build_class_abis(
                     .find(|vm| vm.symbol == sym.id)
                     .and_then(|vm| vm.overrides)
             })
+            .filter(|base_method| *base_method != sym.id)
             .and_then(|base_method| symbols.iter().find(|s| s.id == base_method))
             .and_then(|base_sym| base_sym.owner)
             .map(ClassId::from)
             .unwrap_or(cid);
+        // 实现符号的**声明类**: 就是符号自己的 owner。布局层拿不到符号表,
+        // 而虚基链 vftable 算 this 调整时需要它 (登记类 / 被覆写基类都不能
+        // 回答「函数体按哪个子对象布局访问 this」)。
+        let declared_in = sym.owner.map(ClassId::from);
         // 布局层用**方法名**识别「同一条虚槽」: 析构函数在每个类里叫 `~C`,
         // 但沿继承链它是同一个槽 (Itanium: 一个对象只有一个析构)。传规范名 `~`
         // 下去, `collect_virtual_methods` 才能把派生类析构识别为基类析构的重写;
@@ -2165,7 +2349,7 @@ fn build_class_abis(
         } else {
             sym.name.clone()
         };
-        calc.register_method_with_symbol(
+        calc.register_method_with_decl(
             cid,
             layout_method_name,
             // vtable slot 里存的是函数符号地址, 必须用后端真正发射的名字
@@ -2174,6 +2358,7 @@ fn build_class_abis(
             symbol_link_name(symbols, sym),
             is_virtual,
             owner_class,
+            declared_in,
         );
     }
 
@@ -2264,9 +2449,7 @@ fn build_program(
         let Some(e) = global_inits.get(&sym.id) else {
             continue;
         };
-        obj_inits
-            .entry(symbol_link_name(symbols, sym))
-            .or_insert(e);
+        obj_inits.entry(symbol_link_name(symbols, sym)).or_insert(e);
     }
     for so in &output.static_objects {
         // M54: 「有初值但发不出来」绝不能退化成零初始化 —— 那会让 `int ga = 7;`
@@ -2286,7 +2469,7 @@ fn build_program(
                     )));
                 }
                 folded
-            }
+            },
             None => None,
         };
         prog.decls.push(ast::Decl::Var(ast::VarDecl {
@@ -2336,6 +2519,66 @@ fn build_program(
     for func in &output.functions {
         let decl = build_func_decl(func, &member_fns)?;
         prog.decls.push(decl);
+    }
+
+    // 命名空间作用域类对象的动态初始化: 每个 `HirGlobalInit` 的初始化函数地址
+    // 放进 `.init_array` (一个条目一个变量, 与 g++ 的
+    // `.init_array.<symbol>` 形态一致), 由 libc 在 `main` 之前依次调用。
+    // 没有这一步时全局对象虽然定义了存储, 构造函数却从不执行。
+    let init_fn_ty = ast::Type::Ptr(Box::new(ast::QualType::new(ast::Type::Void)));
+    for (idx, gi) in hir.global_inits.iter().enumerate() {
+        let Some(fn_sym) = symbols.get(gi.function.0) else {
+            continue;
+        };
+        let fn_name = symbol_link_name(symbols, fn_sym);
+        let arr_ty = ast::Type::Array(
+            Box::new(ast::QualType::new(init_fn_ty.clone())),
+            ast::ArraySize::Const(1),
+        );
+        let entry = ast::Expr::AddrOf {
+            e: Box::new(ast::Expr::Ident {
+                name: ast::Ident {
+                    name: fn_name,
+                    span: dummy_span(),
+                },
+                span: dummy_span(),
+                ty: init_fn_ty.clone(),
+            }),
+            span: dummy_span(),
+            ty: init_fn_ty.clone(),
+        };
+        prog.decls.push(ast::Decl::Var(ast::VarDecl {
+            name: ast::Ident {
+                name: format!("__dcc_init_array_{idx}"),
+                span: dummy_span(),
+            },
+            ty: arr_ty.clone(),
+            init: Some(ast::Expr::InitList {
+                inits: vec![ast::InitItem::Expr(entry)],
+                span: dummy_span(),
+                ty: arr_ty,
+            }),
+            span: dummy_span(),
+            is_extern: false,
+            is_static: false,
+            section: Some(".init_array".to_string()),
+            alignment: Some(8),
+            is_weak: false,
+            visibility: None,
+            is_unused: false,
+            register_name: None,
+            cleanup_fn: None,
+            is_thread_local: false,
+            no_sanitize: Vec::new(),
+            alias_name: None,
+            copy_fn: None,
+            is_retain: false,
+            is_used_attr: false,
+            quals: ast::QualifierFlags::NONE,
+            addr_space: ast::AddrSpace::None,
+            tls_model: None,
+            asm_label: None,
+        }));
     }
 
     // vtable / vbtable 真实数据 (Stage 5/7): lower_ir 已按布局层的组件顺序
@@ -2506,6 +2749,61 @@ fn build_program(
         ));
     }
 
+    // zero-cost EH: 非类 `throw`/`catch` 类型 (基本类型、指针、枚举) 的 typeinfo。
+    //
+    // 布局层 (`ClassAbi::rtti`) 只能给出**类**类型的 `_ZTI`; 但 `throw 1;` 要传
+    // `_ZTIi`, `catch (int)` 的类型表项也要指它。基本类型在 Itanium 里就是
+    // `__class_type_info` 形态的两字对象 (vptr + `__name`), 没有基类字;
+    // `__class_type_info::__do_catch` 只比 `__name` 字符串, 所以这一份与 g++ 发的
+    // `_ZTIi` 在异常匹配上等价。同样必须 weak: 多个 TU 都会引用它。
+    for bi in &output.builtin_typeinfos {
+        if emitted_rtti.contains(&bi.typeinfo_symbol) {
+            continue;
+        }
+        emitted_rtti.insert(bi.typeinfo_symbol.clone());
+        emitted_rtti.insert(bi.name_symbol.clone());
+        rtti_defs.insert(bi.typeinfo_symbol.clone());
+        rtti_defs.insert(bi.name_symbol.clone());
+        // `_ZTS<enc>`: 内容就是编码本身 (补 NUL), 与类路径同一形状。
+        let mut bytes = bi.encoding.as_bytes().to_vec();
+        bytes.push(0);
+        let str_ty = ast::Type::Array(
+            Box::new(ast::QualType::new(ast::Type::Char)),
+            ast::ArraySize::Const(bytes.len()),
+        );
+        prog.decls.push(weak_static_var(
+            &bi.name_symbol,
+            str_ty.clone(),
+            ast::Expr::String {
+                data: bytes,
+                span: dummy_span(),
+                ty: str_ty,
+            },
+        ));
+        // vptr 需要 `__class_type_info` 虚表: 登记 kind, 由下面统一发射。
+        let class_kind = crate::cpp::abi_layout::TypeInfoKind::Class;
+        if !used_ti_kinds.contains(&class_kind) {
+            used_ti_kinds.push(class_kind);
+        }
+        let inits = vec![
+            addr_init(class_kind.vtable_symbol().to_string()),
+            addr_init(bi.name_symbol.clone()),
+        ];
+        let ti_arr = ast::Type::Array(
+            Box::new(ast::QualType::new(slot_ty.clone())),
+            ast::ArraySize::Const(inits.len()),
+        );
+        prog.decls.push(weak_static_var(
+            &bi.typeinfo_symbol,
+            ti_arr.clone(),
+            ast::Expr::InitList {
+                inits,
+                span: dummy_span(),
+                ty: ti_arr,
+            },
+        ));
+    }
+
     // `type_info` 虚表: 每种被用到的具体形态发一张 weak 虚表, 9 个槽逐个指向
     // libstdc++ 导出的真实实现 (`__do_dyncast` / `__do_catch` / `__do_upcast` ...)。
     //
@@ -2642,6 +2940,41 @@ fn build_program(
         prog.decls.push(build_extern_func_decl(sym, symbols));
     }
     let _ = hir; // 当前未直接读 (已通过 lower_ir 用过), 保留参数便于扩展
+
+    // zero-cost EH 的 `DW.ref.<sym>` 间接槽。
+    //
+    // LSDA 类型表与 FDE 的 personality 字段都是 `DW_EH_PE_pcrel | DW_EH_PE_indirect`,
+    // 即表项存的是**槽的地址**, 由槽再指向真正的 typeinfo / 函数。这既是 g++ 的
+    // 默认形态 (让引用别的 DSO 里的 `std::bad_alloc` 等 typeinfo 能在链接期解析),
+    // 也保证与 g++ 产物混合链接时同名 weak 槽合并到同一处。
+    //
+    // 形状用「单元素指针数组 + InitList」而不是 `void* p = &f;`: 前者与已经跑通的
+    // vtable / `.init_array` 发射共用同一条实现路径, 产出的就是 `.quad <sym>` +
+    // `R_X86_64_64`, 字节上与 g++ 的 `.quad` 完全一致。
+    for slot in &output.eh_ref_slots {
+        let Some(target) = slot.strip_prefix("DW.ref.") else {
+            continue;
+        };
+        if target.is_empty() || emitted_rtti.contains(slot) {
+            continue;
+        }
+        emitted_rtti.insert(slot.clone());
+        let slot_ptr_ty = ast::Type::Ptr(Box::new(ast::QualType::new(ast::Type::UChar)));
+        let inits = vec![addr_init(target.to_string())];
+        let arr_ty = ast::Type::Array(
+            Box::new(ast::QualType::new(slot_ptr_ty.clone())),
+            ast::ArraySize::Const(1),
+        );
+        prog.decls.push(weak_static_var(
+            slot,
+            arr_ty.clone(),
+            ast::Expr::InitList {
+                inits,
+                span: dummy_span(),
+                ty: arr_ty,
+            },
+        ));
+    }
     Ok(prog)
 }
 
@@ -3455,6 +3788,12 @@ fn detect_features_from_type(ty: &MangleType, features: &mut HashSet<CppFeature>
         MangleType::TplMember { args, .. } => {
             features.insert(CppFeature::ClassTemplate);
             for a in args {
+                detect_features_from_type(a, features);
+            }
+        },
+        MangleType::NtExpr(_, operands) => {
+            features.insert(CppFeature::ClassTemplate);
+            for a in operands {
                 detect_features_from_type(a, features);
             }
         },
@@ -4320,9 +4659,12 @@ int test() {
             .decls
             .iter()
             .find_map(|d| match d {
+                // 成员函数链接名 = `<实例类>_<方法名><重载后缀>`: `int n() const`
+                // 的重载身份含 const 限定, 后缀就是 `_K` (见
+                // `lower_ir::overload_signature`), 所以这里用包含匹配而非后缀匹配。
                 ast::Decl::Func(f)
                     if f.name.name.starts_with("__dcc_template_S")
-                        && f.name.name.ends_with("_n") =>
+                        && f.name.name.contains("_n") =>
                 {
                     Some(f)
                 },
@@ -4810,5 +5152,228 @@ concept Foo = true;
         let mut p = CppParser::new(src, "test.cpp");
         let decls = p.parse_top_level().expect("parse");
         assert!(can_compile_native(&decls).is_ok());
+    }
+
+    // ===== Stage 8: 模板实参位置的依赖常量表达式 / SFINAE / 规范名 =====
+
+    /// 收集测试源码的模板注册表 (与真实管道同一个 `collect_templates`)。
+    fn registry_of(src: &[u8]) -> TemplateRegistry {
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().expect("parse top level");
+        for d in &decls {
+            if let CppDecl::Opaque(text) = d {
+                panic!("夹具里有声明被降级成 Opaque: {text:?}");
+            }
+        }
+        collect_templates(&decls)
+    }
+
+    const TRAITS_SRC: &[u8] = b"\
+struct true_type { enum { value = 1 }; };
+struct false_type { enum { value = 0 }; };
+template<typename T> struct is_pointer : false_type {};
+template<typename T> struct is_pointer<T*> : true_type {};
+template<typename T, typename U> struct is_same : false_type {};
+template<typename T> struct is_same<T,T> : true_type {};
+template<bool B, typename T = void> struct enable_if {};
+template<typename T> struct enable_if<true, T> { typedef T type; };
+";
+
+    #[test]
+    fn fold_folds_trait_constant_inherited_from_base() {
+        // [temp.arg.nontype]: `is_pointer<int*>::value` 是继承来的常量, 必须折成
+        // NonType(1); 非指针实例则沿基类链拿到 0。
+        let reg = registry_of(TRAITS_SRC);
+        let args = vec![MangleType::TplMember {
+            name: "is_pointer".to_string(),
+            args: vec![MangleType::Pointer(Box::new(MangleType::Int))],
+            member: "value".to_string(),
+        }];
+        assert_eq!(reg.fold_args(&args), vec![MangleType::NonType(1)]);
+        let args_np = vec![MangleType::TplMember {
+            name: "is_pointer".to_string(),
+            args: vec![MangleType::Int],
+            member: "value".to_string(),
+        }];
+        assert_eq!(reg.fold_args(&args_np), vec![MangleType::NonType(0)]);
+    }
+
+    #[test]
+    fn fold_resolves_value_through_typedef_alias_chain() {
+        // traits 的取值链可以穿过 **typedef 别名** 与 **非类型形参代入**:
+        // ```cpp
+        // template<typename T, T v> struct integral_constant { static const T value = v; };
+        // typedef integral_constant<bool, true> true_type;
+        // template<typename T> struct is_pointer<T*> : true_type {};
+        // ```
+        // `true_type` 不是类名而是别名, `value` 的初值又是个裸形参名, 两者都要能
+        // 展开, 否则整个 `<type_traits>` 惯用法在实参折叠里都是 0。
+        let reg = registry_of(b"\
+template<typename T, T v> struct integral_constant {
+  static const T value = v;
+  typedef T value_type;
+};
+typedef integral_constant<bool, true> true_type;
+typedef integral_constant<bool, false> false_type;
+template<typename T> struct is_pointer : false_type {};
+template<typename T> struct is_pointer<T*> : true_type {};
+");
+        let ptr = MangleType::TplMember {
+            name: "is_pointer".to_string(),
+            args: vec![MangleType::Pointer(Box::new(MangleType::Int))],
+            member: "value".to_string(),
+        };
+        assert_eq!(reg.fold_constant(&ptr), MangleType::NonType(1));
+        let nonptr = MangleType::TplMember {
+            name: "is_pointer".to_string(),
+            args: vec![MangleType::Int],
+            member: "value".to_string(),
+        };
+        assert_eq!(reg.fold_constant(&nonptr), MangleType::NonType(0));
+        // 直接取别名指向的实例常量: `integral_constant<int, 42>::value`
+        let ic = MangleType::TplMember {
+            name: "integral_constant".to_string(),
+            args: vec![MangleType::Int, MangleType::NonType(42)],
+            member: "value".to_string(),
+        };
+        assert_eq!(reg.fold_constant(&ic), MangleType::NonType(42));
+    }
+
+    #[test]
+    fn fold_leaves_typedef_member_alone_as_a_type() {
+        // `X<Args>::type` 是**类型**而不是值: 不能被当成常量折掉 (否则 enable_if
+        // 的别名展开就失去了目标类型)。
+        let reg = registry_of(TRAITS_SRC);
+        let args = vec![MangleType::TplMember {
+            name: "enable_if".to_string(),
+            args: vec![MangleType::NonType(1), MangleType::Int],
+            member: "type".to_string(),
+        }];
+        let folded = reg.fold_args(&args);
+        assert!(
+            matches!(&folded[0], MangleType::TplMember { member, .. } if member == "type"),
+            "typedef 成员被误折成常量: {folded:?}"
+        );
+    }
+
+    #[test]
+    fn fold_negated_and_composed_dependent_subexpressions() {
+        // [temp.dep.constexpr]: `!is_pointer<int*>::value` -> 0,
+        // `is_same<int,int>::value || is_same<int,long>::value` -> 1。
+        let reg = registry_of(TRAITS_SRC);
+        use crate::cpp::mangle::NtOp;
+        let is_ptr = |arg: MangleType| MangleType::TplMember {
+            name: "is_pointer".to_string(),
+            args: vec![arg],
+            member: "value".to_string(),
+        };
+        let neg = vec![MangleType::NtExpr(
+            NtOp::LNot,
+            vec![is_ptr(MangleType::Pointer(Box::new(MangleType::Int)))],
+        )];
+        assert_eq!(reg.fold_args(&neg), vec![MangleType::NonType(0)]);
+        let same_ii = MangleType::TplMember {
+            name: "is_same".to_string(),
+            args: vec![MangleType::Int, MangleType::Int],
+            member: "value".to_string(),
+        };
+        let same_il = MangleType::TplMember {
+            name: "is_same".to_string(),
+            args: vec![MangleType::Int, MangleType::Long],
+            member: "value".to_string(),
+        };
+        let either = vec![MangleType::NtExpr(NtOp::Lor, vec![same_ii, same_il])];
+        assert_eq!(reg.fold_args(&either), vec![MangleType::NonType(1)]);
+    }
+
+    #[test]
+    fn enable_if_partial_spec_is_selected_by_folded_arg() {
+        // 折叠后的实参参与实例化: `enable_if<is_pointer<int*>::value, int>` 必须
+        // 命中偏特化 `enable_if<true, T>` 并拿到 `typedef int type`。
+        let mut reg = registry_of(TRAITS_SRC);
+        let args = vec![
+            MangleType::TplMember {
+                name: "is_pointer".to_string(),
+                args: vec![MangleType::Pointer(Box::new(MangleType::Int))],
+                member: "value".to_string(),
+            },
+            MangleType::Int,
+        ];
+        let inst = reg.instantiate_class("enable_if", &args).expect("实例化");
+        let CppDecl::Class(c) = &inst else {
+            panic!("期望类实例, 得到 {inst:?}")
+        };
+        assert_eq!(c.name, "__dcc_template_enable_if_n1_int");
+        // 未折叠的实参表也必须得到同一个实例 (折叠是入口的必做步骤)
+        assert_eq!(
+            reg.instance_typedef("enable_if", &args, "type"),
+            Some(MangleType::Int)
+        );
+        assert_eq!(
+            reg.instance_class_name("enable_if", &args),
+            Some("__dcc_template_enable_if_n1_int".to_string())
+        );
+    }
+
+    #[test]
+    fn sfinae_drops_candidate_whose_nested_name_is_missing() {
+        // [temp.deduct]/8: 两个 `pick` 候选只用返回类型里的依赖名区别。
+        // 指针实参选到 `is_pointer` 为真的那个, 非指针实参选到取反那个 ——
+        // 另一个候选必须被**静默剔除**, 而不是拉去报 unknown class type。
+        let src: &[u8] = b"\
+struct true_type { enum { value = 1 }; };
+struct false_type { enum { value = 0 }; };
+template<typename T> struct is_pointer : false_type {};
+template<typename T> struct is_pointer<T*> : true_type {};
+template<bool B, typename T = void> struct enable_if {};
+template<typename T> struct enable_if<true, T> { typedef T type; };
+
+template<typename T> typename enable_if<is_pointer<T>::value, int>::type pick(T) { return 1; }
+template<typename T> typename enable_if<!is_pointer<T>::value, int>::type pick(T) { return 2; }
+";
+        let reg = registry_of(src);
+        // 候选下标是注册表主表的全局位置 (前面还有 traits 模板), 按重载集自己取
+        let picks: Vec<usize> = reg.candidates_named("pick").into_iter().map(|(i, _)| i).collect();
+        assert_eq!(picks.len(), 2, "两个 pick 候选应全部在候选集里: {picks:?}");
+        let ptr_arg = MangleType::Pointer(Box::new(MangleType::Int));
+        let (idx_ptr, _) = reg.deduce_for_call("pick", &[ptr_arg]).expect("指针候选可选");
+        let (idx_val, _) = reg
+            .deduce_for_call("pick", &[MangleType::Int])
+            .expect("非指针候选可选");
+        assert_ne!(
+            idx_ptr, idx_val,
+            "SFINAE 没有剔除不可行候选 (两个实参选了同一个)"
+        );
+        assert_eq!(idx_ptr, picks[0], "指针实参应选到 is_pointer 为真的那个候选");
+        assert_eq!(idx_val, picks[1], "非标量实参应选到取反子式为真的那个候选");
+    }
+
+    #[test]
+    fn canonical_name_unifies_qualified_and_short_spellings() {
+        // `namespace std` 里的模板按限定名登记, 而短名使用点必须拿到同一个规范名
+        // (同一个实例名 / 同一个缓存 key)。
+        let src: &[u8] = b"\
+namespace std {
+template<typename T> struct wrapper { T v; };
+}
+";
+        let reg = registry_of(src);
+        assert_eq!(reg.canonical_name("std::wrapper"), "std::wrapper");
+        assert_eq!(reg.canonical_name("wrapper"), "std::wrapper");
+        assert!(reg.has_template_named("wrapper"));
+        // 完全不认识的名字不得被误归一
+        assert_eq!(reg.canonical_name("other::wrapper"), "other::wrapper");
+    }
+
+    #[test]
+    fn canonical_name_does_not_merge_different_namespaces() {
+        // 两个命名空间里各有一个 `vector`: 短名使用点本身不明确, 不能猜。
+        let src: &[u8] = b"\
+namespace a { template<typename T> struct vector { T v; }; }
+namespace b { template<typename T> struct vector { T v; }; }
+";
+        let reg = registry_of(src);
+        assert_eq!(reg.canonical_name("vector"), "vector");
+        assert_eq!(reg.canonical_name("a::vector"), "a::vector");
     }
 }

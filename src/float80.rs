@@ -356,9 +356,7 @@ pub fn from_decimal(text: &str) -> Option<Bits> {
         None => (s, 0i32),
     };
     let (int_s, frac_s) = split_dot(mant_s)?;
-    if !int_s.bytes().all(|c| c.is_ascii_digit())
-        || !frac_s.bytes().all(|c| c.is_ascii_digit())
-    {
+    if !int_s.bytes().all(|c| c.is_ascii_digit()) || !frac_s.bytes().all(|c| c.is_ascii_digit()) {
         return None;
     }
     // value = (int_frac 拼成的整数 M) × 10^(exp10 - frac_s.len())
@@ -584,11 +582,7 @@ pub fn i128_to_f64(i: i128) -> f64 {
     let e = bits - 1 + bump; // 无偏指数
     let biased = if e >= 1024 { 0x7FF } else { (e + 1023) as u64 };
     // e >= 1024：上溢 → ±inf（指数全 1、分数 0）。
-    let frac = if biased == 0x7FF {
-        0
-    } else {
-        mant & ((1u64 << 52) - 1)
-    };
+    let frac = if biased == 0x7FF { 0 } else { mant & ((1u64 << 52) - 1) };
     let raw = ((neg as u64) << 63) | (biased << 52) | frac;
     f64::from_bits(raw)
 }
@@ -604,11 +598,7 @@ pub fn i128_to_f32(i: i128) -> f32 {
     let (mant, bump) = round_uint_to_mant(mag, bits, 24);
     let e = bits - 1 + bump;
     let biased = if e >= 128 { 0xFFu64 } else { (e + 127) as u64 };
-    let frac = if biased == 0xFF {
-        0
-    } else {
-        mant & ((1u64 << 23) - 1)
-    };
+    let frac = if biased == 0xFF { 0 } else { mant & ((1u64 << 23) - 1) };
     let raw = ((neg as u64) << 31) | (biased << 23) | frac;
     f32::from_bits(raw as u32)
 }
@@ -755,7 +745,11 @@ fn unpack(b: &Bits) -> Unpacked {
         sig <<= k;
         exp -= k as i64;
     }
-    Unpacked { exp, sig, neg: sign_bit(b) }
+    Unpacked {
+        exp,
+        sig,
+        neg: sign_bit(b),
+    }
 }
 
 /// 定点尾数右移 `d` 位；所有被移出位折叠为 sticky（bit0）。
@@ -1102,18 +1096,10 @@ mod tests {
         // carry_mant 特殊构造
         let big = from_i128(18446744073709551615);
         let half = from_decimal("0.5L").unwrap();
-        assert_eq!(
-            add(&big, &half),
-            parse_hex10("00000000000000803f40"),
-            "(2^64-1)+0.5"
-        );
+        assert_eq!(add(&big, &half), parse_hex10("00000000000000803f40"), "(2^64-1)+0.5");
         // 两个非规格化最小数相加 → 次小非规格化
         let t = parse_hex10("01000000000000000000");
-        assert_eq!(
-            add(&t, &t),
-            parse_hex10("02000000000000000000"),
-            "subnormal min + min"
-        );
+        assert_eq!(add(&t, &t), parse_hex10("02000000000000000000"), "subnormal min + min");
         // 含 0 的边界
         assert_eq!(add(&zero_bits(true), &zero_bits(true)), zero_bits(true));
         let five = from_decimal("5.0L").unwrap();
@@ -1149,7 +1135,6 @@ mod tests {
         assert_eq!(sub(&inf, &inf), nan);
     }
 
-
     #[test]
     fn digit_separators_and_forms_accepted() {
         assert_eq!(from_decimal("1'000.5"), from_decimal("1000.5"));
@@ -1161,7 +1146,17 @@ mod tests {
     #[test]
     fn from_f64_is_exact_widening() {
         // f64 的值总能被 80-bit 精确表示
-        for v in [0.0f64, 1.0, -1.0, 0.5, 2.0, 3.0, 1e300, 1e-300, f64::MIN_POSITIVE] {
+        for v in [
+            0.0f64,
+            1.0,
+            -1.0,
+            0.5,
+            2.0,
+            3.0,
+            1e300,
+            1e-300,
+            f64::MIN_POSITIVE,
+        ] {
             let b = from_f64(v);
             assert_eq!(to_f64(&b), v, "f64 往返 {v}");
         }
@@ -1211,5 +1206,3 @@ mod tests {
         }
     }
 }
-
-

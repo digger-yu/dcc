@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use crate::ast::{BinOp, FloatConst, QualType, QualifierFlags, Type, UnOp};
 use crate::cpp::abi_layout::{BaseLayout, ClassAbi, DtorStep, ThisAdjust, VTableComponent};
 use crate::cpp::hir::*;
+use crate::cpp::runtime::CxxRuntimeSymbol;
 use crate::cpp::sema::{Access, ClassId, CxxSymbol, CxxSymbolKind, CxxType, SymbolId};
 use crate::diagnostics::Span;
 use crate::ssa::{BasicBlock, Function, Inst, InstKind, Operand, Phi, SsaVar, Terminator};
@@ -64,6 +65,314 @@ pub struct LowerIrOutput {
     pub vtables: Vec<(String, Vec<VTableEntry>)>,
     /// 需要导出的外部 runtime symbol（如 dccpp_*）
     pub external_symbols: Vec<String>,
+    /// zero-cost EH 需要的 `DW.ref.<sym>` 间接槽。
+    ///
+    /// LSDA 类型表与 FDE 的 personality 字段都用 `DW_EH_PE_indirect` 编码,
+    /// 表项指向这些 8 字节槽而不是直接指向目标符号 (与 g++ 产物同构, 才能在
+    /// 动态链接下由 PLT/GOT 正常解析)。槽的**定义**由 `native.rs` 发射。
+    pub eh_ref_slots: Vec<String>,
+    /// 需要由本 TU 合成的**非类类型** typeinfo (`_ZTIi` / `_ZTSi` 等)。
+    ///
+    /// 布局层 (`ClassAbi::rtti`) 只覆盖类类型; `throw 1;` / `catch (int)` 的
+    /// 类型匹配同样需要一个真实存在的 `_ZTI` 对象, 否则链入后是 undefined weak
+    /// (值 0), `__do_catch` 解引用空指针。
+    pub builtin_typeinfos: Vec<crate::cpp::typeinfo_mangling::BuiltinTypeinfoSymbols>,
+}
+
+// === zero-cost EH: 作用域模型 ===
+
+/// 一条清理动作。
+#[derive(Debug, Clone)]
+enum EhCleanupKind {
+    /// 重放 sema 为该局部量生成的析构语句 (与正常路径作用域末尾**同一条**语句,
+    /// 因此清理语义只有单一真源, 不会与 sema 的析构规则漂移)。
+    Destroy(HirStmtId),
+    /// 离开 `catch` 体: `__cxa_end_catch()`。异常从 catch 体内穿出时必须执行,
+    /// 否则 libstdc++ 的 handler 计数泄漏。
+    EndCatch,
+    /// `throw` 的异常对象**构造**抛出: `__cxa_free_exception(buf)`。
+    ///
+    /// 缓冲区已经分配但对象没构造成功, 不释放就是每次抛出泄漏一块内存;
+    /// 实测 g++ 同样把构造调用包进受保护区间, 其落地垫先 `__cxa_free_exception`
+    /// 再做局部清理。
+    FreeException(SsaVar),
+}
+
+/// 带稳定 key 的清理项。
+///
+/// key 参与落地垫共享判定: 清理集合相同 ⇒ 生成的清理代码相同 ⇒ 可以共用同一个
+/// 落地垫块 (与 GCC 按 region 合并落地垫同构)。
+#[derive(Debug, Clone)]
+struct EhCleanup {
+    key: u64,
+    kind: EhCleanupKind,
+}
+
+/// 一个 `catch` 子句在 EH 侧的描述。
+#[derive(Debug, Clone)]
+struct EhHandler {
+    /// LSDA 类型表索引 (1-based, 本函数内单调分配); 也是落地垫里比较的 selector。
+    type_index: u32,
+    /// typeinfo 符号名; `None` = `catch (...)` (类型表里是值为 0 的空表项)。
+    typeinfo: Option<String>,
+    /// 该 handler 的入口块 (只由落地垫进入, 不在正常 CFG 里)。
+    catch_bb: String,
+}
+
+/// EH 清理链的一项。栈内序 = 由外向内。
+///
+/// 用**一条平铺链**而不是「按语法块分组的帧栈」: 一个清理的生效区间不是语法块,
+/// 而是「构造完成」到「正常析构语句」之间 —— 与 GCC `finish_expr` 在建构调用之后
+/// 才把 cleanup 挂上清理链完全同一语义。sema 把析构语句物化在**所属作用域**的末尾,
+/// 那个位置往往是外层兄弟语句 (实测 `void f(){ D a(1); throw 9; }` 的 HIR 形状是
+/// `body = [Compound[Decl a, Expr Construct(a)], Expr Throw, Expr Destroy(a)]`),
+/// 按 Compound 边界收帧会提前丢掉清理集合 —— 抛点因此完全不被保护 (实测表现:
+/// 异常穿过本帧不执行析构, 外层也没登记 handler, 直接 `std::terminate`)。
+/// 直接以构造/析构语句为进出界就不依赖任何语法形状, 也不会漏。
+///
+/// 链序就是 Itanium 异常展开要求的顺序: 先尝试最近的 handler, 每离开一个更外层的
+/// 存活对象插入一条 cleanup 记录, 再尝试更外层的 handler —— 与 g++ 产物的 action
+/// 链逐条一致。
+#[derive(Debug, Clone)]
+enum EhChainEntry {
+    /// 一个仍存活的对象/状态在展开路径上必须执行的清理动作。
+    Cleanup(EhCleanup),
+    /// `try` 体: 离开时按源码序尝试的 handler。
+    Try {
+        try_id: u32,
+        handlers: Vec<EhHandler>,
+    },
+}
+
+/// 作用域快照里的一项 (自内向外), 用于落地垫代码生成。
+///
+/// 从 `eh_scope` **克隆**出来而不是借用: 生成落地垫要改写 `self` 的块与指令,
+/// 借用 `self.eh_scope` 会与之冲突; 克隆同时天然形成快照, 正是缓存需要的语义。
+#[derive(Debug, Clone)]
+enum EhChainItem {
+    /// 一个 try 的 handler 组 (源码序)。
+    Try {
+        try_id: u32,
+        handlers: Vec<EhHandler>,
+    },
+    /// 一个块作用域的清理组。
+    Cleanups(Vec<EhCleanup>),
+}
+
+/// 落地垫缓存的 key: 与作用域快照一一对应但可哈希。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum EhChainKeyFrame {
+    Try(u32),
+    Block(Vec<u64>),
+}
+
+/// 预扫第二遍: 为每个需析构的局部量定位「构造完成语句」与「正常析构语句」。
+///
+/// - `activate_at`: 该语句执行**完之后**对象才进入清理集合。构造调用自身抛出时
+///   对象还不存在, 不能析构 —— 所以激活点不能放在 `Decl` 上: sema 把 `D a(1);`
+///   拆成 `Compound[Decl a, Expr Construct(a)]`, 于是激活点要往后看到那条
+///   `Construct` 兄弟语句; 没有这种兄弟时 (声明即构造完成) 激活点就是 `Decl` 本身。
+/// - `retire_at`: 正常路径的析构语句执行**之前**把清理撤掉。对象已死, 之后再抛出
+///   不该再析构它; 同时这条析构调用自身要受「更外层清理」保护 (析构中途再抛时外层
+///   对象仍要销毁), 先撤再发正好得到这个区间。
+///
+/// 递归覆盖的语句形态必须与 [`eh_collect_dtor_stmts`] 一致, 否则会出现「第一遍找到
+/// 析构、第二遍找不到激活点」的静默漏清理。
+fn eh_collect_cleanup_sites(
+    hir: &HirTranslationUnit,
+    stmts: &[HirStmtId],
+    dtor_of: &HashMap<SymbolId, HirStmtId>,
+    activate_at: &mut HashMap<HirStmtId, SymbolId>,
+    retire_at: &mut HashMap<HirStmtId, SymbolId>,
+    depth: u32,
+) {
+    // 与第一遍同一个深度上限: 只防环状畸形输入。
+    if depth > 512 {
+        return;
+    }
+    for (i, sid) in stmts.iter().enumerate() {
+        let Some(stmt) = hir.stmts.get(sid.0) else {
+            continue;
+        };
+        match &stmt.kind {
+            HirStmtKind::Decl { symbol, .. } => {
+                if !dtor_of.contains_key(symbol) {
+                    continue;
+                }
+                let constructed_next = stmts
+                    .get(i + 1)
+                    .and_then(|n| hir.stmts.get(n.0))
+                    .and_then(|n| match &n.kind {
+                        HirStmtKind::Expr(e) => Some(*e),
+                        _ => None,
+                    })
+                    .and_then(|e| hir.exprs.get(e.0))
+                    .and_then(|ex| match &ex.kind {
+                        HirExprKind::Construct { place, .. } => Some(*place),
+                        _ => None,
+                    })
+                    .and_then(|place| eh_place_local_of(hir, place))
+                    == Some(*symbol);
+                if constructed_next {
+                    activate_at.insert(stmts[i + 1], *symbol);
+                } else {
+                    activate_at.insert(*sid, *symbol);
+                }
+            },
+            HirStmtKind::Expr(e) => {
+                if let Some(sym) =
+                    eh_destroy_local_of(hir, *e).filter(|sym| dtor_of.contains_key(sym))
+                {
+                    retire_at.insert(*sid, sym);
+                }
+            },
+            HirStmtKind::Compound(inner) => {
+                eh_collect_cleanup_sites(hir, inner, dtor_of, activate_at, retire_at, depth + 1);
+            },
+            HirStmtKind::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                let one = [*then_body];
+                eh_collect_cleanup_sites(hir, &one, dtor_of, activate_at, retire_at, depth + 1);
+                if let Some(eb) = else_body {
+                    let one = [*eb];
+                    eh_collect_cleanup_sites(hir, &one, dtor_of, activate_at, retire_at, depth + 1);
+                }
+            },
+            HirStmtKind::While { body, .. }
+            | HirStmtKind::DoWhile { body, .. }
+            | HirStmtKind::Switch { body, .. } => {
+                let one = [*body];
+                eh_collect_cleanup_sites(hir, &one, dtor_of, activate_at, retire_at, depth + 1);
+            },
+            HirStmtKind::For { init, body, .. } => {
+                if let Some(id) = init {
+                    let one = [*id];
+                    eh_collect_cleanup_sites(hir, &one, dtor_of, activate_at, retire_at, depth + 1);
+                }
+                let one = [*body];
+                eh_collect_cleanup_sites(hir, &one, dtor_of, activate_at, retire_at, depth + 1);
+            },
+            HirStmtKind::Try { body, handlers } => {
+                let one = [*body];
+                eh_collect_cleanup_sites(hir, &one, dtor_of, activate_at, retire_at, depth + 1);
+                for h in handlers {
+                    let one = [h.body];
+                    eh_collect_cleanup_sites(hir, &one, dtor_of, activate_at, retire_at, depth + 1);
+                }
+            },
+            _ => {},
+        }
+    }
+}
+
+/// 预扫 HIR 语句树, 收集「 sema 为哪个局部量发了析构语句」。
+///
+/// 只认 sema 自己的形状 (`build_dtor_stmts` 发的
+/// `Expr(Destroy { place: AddressOf(Local(sym)), variant: Complete })`)。
+/// 同一符号多条出口 (块末 + break 出口域) 时保留首条: 它们的 place 与
+/// 析构变体完全相同, 重放哪一条产生的清理代码都一样。
+///
+/// 不递归进表达式树: 自动存储期析构在 HIR 里**只**以语句形态出现, 往表达式
+/// 里钻只会误把 `delete` 的析构当成局部量清理。
+fn eh_collect_dtor_stmts(
+    hir: &HirTranslationUnit,
+    stmt_id: HirStmtId,
+    out: &mut HashMap<SymbolId, HirStmtId>,
+    depth: u32,
+) {
+    // HIR 是一棵树, 但递归深度受源码嵌套约束; 上限只防住环状的畸形输入。
+    if depth > 512 {
+        return;
+    }
+    let Some(stmt) = hir.stmts.get(stmt_id.0) else {
+        return;
+    };
+    let kind = stmt.kind.clone();
+    let rec = |out: &mut HashMap<SymbolId, HirStmtId>, s: HirStmtId| {
+        eh_collect_dtor_stmts(hir, s, out, depth + 1)
+    };
+    match &kind {
+        HirStmtKind::Expr(e) => {
+            if let Some(sym) = eh_destroy_local_of(hir, *e) {
+                out.entry(sym).or_insert(stmt_id);
+            }
+        },
+        HirStmtKind::Compound(ss) => {
+            for s in ss {
+                rec(out, *s);
+            }
+        },
+        HirStmtKind::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            rec(out, *then_body);
+            if let Some(eb) = else_body {
+                rec(out, *eb);
+            }
+        },
+        HirStmtKind::While { body, .. } | HirStmtKind::Switch { body, .. } => rec(out, *body),
+        HirStmtKind::DoWhile { body, .. } => rec(out, *body),
+        HirStmtKind::For { init, body, .. } => {
+            if let Some(i) = init {
+                rec(out, *i);
+            }
+            rec(out, *body);
+        },
+        HirStmtKind::Case { body, .. } | HirStmtKind::Default(body) => rec(out, *body),
+        HirStmtKind::Label(_, body) => rec(out, *body),
+        HirStmtKind::Try { body, handlers } => {
+            rec(out, *body);
+            for h in handlers {
+                rec(out, h.body);
+            }
+        },
+        // 以下形态不会包含局部量析构语句: 空语句 / 跳转 / 声明自身 /
+        // 静态存储对象 (走 __cxa_atexit) / ctor-init / vptr 写入。
+        HirStmtKind::Null
+        | HirStmtKind::Return(_)
+        | HirStmtKind::Break
+        | HirStmtKind::Continue
+        | HirStmtKind::Fallthrough
+        | HirStmtKind::Goto(_)
+        | HirStmtKind::Decl { .. }
+        | HirStmtKind::StaticDecl { .. }
+        | HirStmtKind::CtorInitMember { .. }
+        | HirStmtKind::CtorInitBase { .. }
+        | HirStmtKind::SetVTablePtr { .. } => {},
+    }
+}
+
+/// 若 `expr_id` 是 `Destroy(AddressOf(Local(sym)))` 形态, 返回该局部符号。
+/// 解出「对象所在地」表达式指向的局部符号: `Local(sym)` 与 `AddressOf(Local(sym))`
+/// 两种形态。sema 对 `Construct` / `Destroy` 的 `place` 用的都是后一种 (要的是对象
+/// 地址), 只认前一种会静默认不出激活点, 于是清理区间整体前移到 `Decl` ——
+/// 构造调用自身抛出时就会对一个还不存在的对象跑析构。
+fn eh_place_local_of(hir: &HirTranslationUnit, place_id: HirExprId) -> Option<SymbolId> {
+    let expr = hir.exprs.get(place_id.0)?;
+    match &expr.kind {
+        HirExprKind::Local(sym) => Some(*sym),
+        HirExprKind::AddressOf(inner) => {
+            let inner_expr = hir.exprs.get(inner.0)?;
+            match &inner_expr.kind {
+                HirExprKind::Local(sym) => Some(*sym),
+                _ => None,
+            }
+        },
+        _ => None,
+    }
+}
+
+fn eh_destroy_local_of(hir: &HirTranslationUnit, expr_id: HirExprId) -> Option<SymbolId> {
+    let expr = hir.exprs.get(expr_id.0)?;
+    let HirExprKind::Destroy { place, .. } = &expr.kind else {
+        return None;
+    };
+    eh_place_local_of(hir, *place)
 }
 
 /// 指针大小（x86_64 / LP64）
@@ -116,17 +425,55 @@ fn class_symbol_link_name(symbols: &[CxxSymbol], id: SymbolId) -> Option<String>
 /// `IrLowerer::symbol_name` (定义/调用侧) 与 `native.rs` (vtable slot /
 /// struct 字段 / 外部声明原型查找) 都走这里, 避免命名漂移。
 pub fn symbol_link_name(symbols: &[CxxSymbol], sym: &CxxSymbol) -> String {
+    symbol_link_name_with_plan(symbols, sym, None, None)
+}
+
+/// Stage 10.1: 与 [`symbol_link_name`] 同语义, 但在模块 TU 上下文里
+/// 优先走 [`crate::cpp::modules::ModuleLinkagePlan::mangled_name_of`] 反查的
+/// mangled 名; 非模块 TU 或不在改名表里时与原版完全等价。
+///
+/// `mangled_override` 非空时短路直接返回 (供 Stage 10.5 等需要「显式
+/// 链接名覆盖」的接入点使用)。
+pub fn symbol_link_name_with_plan(
+    symbols: &[CxxSymbol],
+    sym: &CxxSymbol,
+    mangled_override: Option<&str>,
+    plan: Option<&crate::cpp::modules::ModuleLinkagePlan>,
+) -> String {
+    // Stage 10.1: 如果是模块 TU 且存在反向映射, 使用 mangled 名
+    if let Some(plan) = plan {
+        let backend_name = symbol_link_name(symbols, sym);
+        if let Some(mangled) = plan.mangled_name_of(&backend_name) {
+            return mangled;
+        }
+    }
+    if let Some(m) = mangled_override {
+        return m.to_string();
+    }
     // 显式 linkage_name 优先: 构造/析构的多个 ABI 变体 (C1/C2) 共享同一个
     // 所属类, 只能靠符号上的明确名字区分。
     if let Some(ln) = &sym.linkage_name {
+        // 命名空间内自由函数的 `linkage_name` (sema `compute_linkage_name`) 只到
+        // 「命名空间 + 名字」一级, 不含参数类型 —— 同名异签重载因此会拿到完全
+        // 相同的符号名, 必须在这里补上签名后缀 (见下方 Function 分支说明)。
+        if sym.kind == CxxSymbolKind::Function {
+            let sig = func_symbol_signature(symbols, sym);
+            if !sig.is_empty() && free_function_has_rival(symbols, sym, &sig) {
+                return format!("{ln}{sig}");
+            }
+        }
         return ln.clone();
     }
     let base = sym.name.clone();
     let owner = sym.owner.and_then(|o| class_symbol_link_name(symbols, o));
+    // 重载后缀: 同名的多个重载必须得到不同链接名 (见 `overload_signature`)。
+    let sig = func_symbol_signature(symbols, sym);
     match sym.kind {
-        CxxSymbolKind::Constructor => {
-            ctor_variant_name(owner.as_deref().unwrap_or(&base), CtorVariant::Complete)
-        },
+        CxxSymbolKind::Constructor => format!(
+            "{}{}",
+            ctor_variant_name(owner.as_deref().unwrap_or(&base), CtorVariant::Complete),
+            sig
+        ),
         CxxSymbolKind::Destructor => {
             // sema 用 `~Class` 作为析构符号名; 调用侧约定是 `<class>_dtor_*`.
             let cls = owner
@@ -134,10 +481,134 @@ pub fn symbol_link_name(symbols: &[CxxSymbol], sym: &CxxSymbol) -> String {
             dtor_variant_name(&cls, DtorVariant::Complete)
         },
         CxxSymbolKind::Method => match owner {
-            Some(c) => member_func_symbol(&c, &base),
-            None => base,
+            Some(c) => format!("{}{}", member_func_symbol(&c, &base), sig),
+            None => format!("{base}{sig}"),
+        },
+        // 全局作用域的自由函数: `linkage_name` 为空, 默认链接名就是源名 ——
+        // `printf` / `main` 这类与 C 运行时互操作的符号必须保持原名 (本后端
+        // 不做 Itanium mangling)。但同名异签重载必须区分: 否则两份定义生成
+        // 同名符号 (`multiple definition`), 且 ELF 层的 `labels`/`func_cfi`/`eh_funcs`
+        // 全按名字索引 → 后一份覆盖前一份, 前一份代码永远不可达。
+        CxxSymbolKind::Function => {
+            if !sig.is_empty() && free_function_has_rival(symbols, sym, &sig) {
+                format!("{base}{sig}")
+            } else {
+                base
+            }
         },
         _ => base,
+    }
+}
+
+/// 函数符号的签名后缀 (零参数且非 const 时为空串)。
+fn func_symbol_signature(symbols: &[CxxSymbol], sym: &CxxSymbol) -> String {
+    let (params, is_const) = match &sym.ty {
+        CxxType::Function {
+            params, is_const, ..
+        } => (params.clone(), *is_const),
+        _ => (Vec::new(), false),
+    };
+    overload_signature(symbols, &params, is_const)
+}
+
+/// 本 TU 里是否存在与 `sym` **同名但签名不同**的自由函数符号。
+///
+/// 只比名字而不比命名空间前缀就足够: `compute_linkage_name` 把命名空间拼进了
+/// `name`/`linkage_name`, 不同命名空间的同名重载不会撞到同一个链接名上。
+/// 同签名的重复声明 (原型 + 定义) 不触发后缀, 因此不会改变既有单一函数
+/// (包括全部 libc 声明) 的符号名。
+fn free_function_has_rival(symbols: &[CxxSymbol], sym: &CxxSymbol, sig: &str) -> bool {
+    symbols.iter().any(|other| {
+        other.id != sym.id
+            && other.kind == CxxSymbolKind::Function
+            && other.name == sym.name
+            && func_symbol_signature(symbols, other) != sig
+    })
+}
+
+/// 重载区分用的链接名后缀: `_` + 逐参数类型码 (+ const 限定标记)。
+///
+/// 为什么必须有: `member_func_symbol` / `ctor_variant_name` 只到「类 + 名字」
+/// 一级, 同名重载 (`S::S()` 与 `S::S(int)`) 因此得到**同一个**链接名 ——
+/// 两个定义被链接器合并成一个, 另一个静默消失 (实测 `S s; S t(2);` 打出
+/// `491541736 2` 而不是 `1 2`: 默认构造的定义被 `S(int)` 覆盖, 无参调用
+/// 跑进了带参实现) 。C++ 里重载的身份就是「名字 + 参数类型序列 + const」,
+/// 所以这里按同一口径编码。
+///
+/// 零参数不产生后缀, 与已有单重载类的名字完全兼容。
+pub fn overload_signature(symbols: &[CxxSymbol], params: &[CxxType], is_const: bool) -> String {
+    if params.is_empty() && !is_const {
+        return String::new();
+    }
+    let mut out = String::from("_");
+    for p in params {
+        out.push_str(&type_sig(symbols, p));
+    }
+    if is_const {
+        out.push('K');
+    }
+    out
+}
+
+/// 单个参数类型的短码 (只需保证唯一且可过 C lexer, 不要求与 Itanium 同名)。
+fn type_sig(symbols: &[CxxSymbol], ty: &CxxType) -> String {
+    match ty {
+        CxxType::Void => "v".to_string(),
+        CxxType::Bool => "b".to_string(),
+        CxxType::Integer { bits, signed } => match (bits, signed) {
+            (8, true) => "c".to_string(),
+            (8, false) => "h".to_string(),
+            (16, true) => "s".to_string(),
+            (16, false) => "t".to_string(),
+            (32, true) => "i".to_string(),
+            (32, false) => "j".to_string(),
+            (64, true) => "l".to_string(),
+            (64, false) => "m".to_string(),
+            (128, true) => "a".to_string(),
+            (128, false) => "b128u".to_string(),
+            _ => format!("I{bits}{}", if *signed { 's' } else { 'u' }),
+        },
+        CxxType::Float { bits } => match bits {
+            32 => "f".to_string(),
+            64 => "d".to_string(),
+            80 | 128 => "e".to_string(),
+            _ => format!("F{bits}"),
+        },
+        CxxType::Pointer(inner) => format!("P{}", type_sig(symbols, inner)),
+        CxxType::LValueRef(inner) => format!("R{}", type_sig(symbols, inner)),
+        CxxType::RValueRef(inner) => format!("O{}", type_sig(symbols, inner)),
+        CxxType::Array(inner, len) => {
+            format!("A{}{}", len.unwrap_or(0), type_sig(symbols, inner))
+        },
+        CxxType::Class(id) => format!(
+            "C{}",
+            class_symbol_link_name(symbols, id.as_symbol()).unwrap_or_else(|| format!("K{}", id.0))
+        ),
+        CxxType::Enum(id) => format!("E{}", id.0),
+        CxxType::MemberPointer { class, .. } => {
+            format!("M{}", class_symbol_link_name(symbols, class.as_symbol()).unwrap_or_default())
+        },
+        CxxType::Function { ret, params, .. } => {
+            let mut s = format!("F{}", type_sig(symbols, ret));
+            for p in params {
+                s.push_str(&type_sig(symbols, p));
+            }
+            s
+        },
+        CxxType::Alias(id) => match symbols.get(id.0) {
+            Some(s) => type_sig(symbols, &s.ty),
+            None => format!("T{}", id.0),
+        },
+        CxxType::Dependent(name) => {
+            let mut s = String::from("D");
+            for c in name.chars() {
+                if c.is_ascii_alphanumeric() {
+                    s.push(c);
+                }
+            }
+            s.push_str(&format!("{}", name.len()));
+            s
+        },
     }
 }
 
@@ -243,6 +714,9 @@ impl<'a> IrLowerer<'a> {
             let ssa_func = self.lower_function(func)?;
             self.output.functions.push(ssa_func);
         }
+        // vtable 槽若指向 this-adjust thunk, 必须真把那个入口函数发出来,
+        // 否则 vtable 里就是一个未定义符号 (运行期跳转落空)。
+        self.emit_thunks()?;
         Ok(())
     }
 
@@ -266,8 +740,13 @@ impl<'a> IrLowerer<'a> {
                         VTableComponent::TypeInfo(sym) => {
                             entries.push(VTableEntry::SymAddr(sym.clone()));
                         },
-                        VTableComponent::Function { symbol, .. } => {
-                            entries.push(VTableEntry::SymAddr(symbol.clone()));
+                        VTableComponent::Function {
+                            symbol, adjustment, ..
+                        } => {
+                            // 需要 this 调整时, vtable 槽存的是 thunk 入口而非
+                            // 最终实现 —— 入口名由布局层唯一分配。
+                            let entry = vtable.entry_symbol_for(symbol, adjustment);
+                            entries.push(VTableEntry::SymAddr(entry));
                         },
                         VTableComponent::VCallOffset(v) => entries.push(VTableEntry::Int(*v)),
                         VTableComponent::VBaseOffset { offset, .. } => {
@@ -282,6 +761,172 @@ impl<'a> IrLowerer<'a> {
                 }
             }
         }
+    }
+
+    /// 发射 this-adjust thunk 作为真实函数符号 (Stage 5/6)。
+    ///
+    /// 一个 thunk 就是 Itanium ABI 里 vtable 槽实际指向的入口: 把 `this`
+    /// 从基类子对象调回最终覆写者期望的子对象, 再尾调用实现。以前
+    /// secondary vtable 的槽直接写实现符号, 多继承下 `B* p; p->fb()` 会拿
+    /// 着 B 子对象的 `this` 去读 `C::b` (实测 gcc 220 / dcc 110)。
+    ///
+    /// 偏移 / 入口名 / 目标全部取自 ABI 描述符 (`ClassAbi::thunks`), 本函数
+    /// 不重算任何布局数据; 参数类型取自目标函数自身的签名。
+    ///
+    /// 本后端的架构约定: 虚基带来的 this relocation 由 HIR 的
+    /// `VBaseAdjust` 节点在**指针转换**处完成 (运行期读 vbtable), vtable 里的
+    /// 槽只可能是固定偏移 thunk。因此布局层不得产出 virtual thunk; 真到了
+    /// 这一步就是布局层的不变式被破坏, 报 Internal 而不是当作
+    /// 「未实现特性」降级 (后者会把缺陷当成能力边界长期背在身上)。
+    fn emit_thunks(&mut self) -> Result<(), LowerIrError> {
+        let mut class_ids: Vec<ClassId> = self.abis.keys().copied().collect();
+        class_ids.sort_by_key(|c| c.0);
+
+        // 先快照 thunk 描述符: 避免在下发循环里持有 self.abis 的不可变借用。
+        let mut pending: Vec<crate::cpp::abi_layout::ThunkDesc> = Vec::new();
+        for cid in class_ids {
+            let abi = &self.abis[&cid];
+            for t in &abi.thunks {
+                if !pending.iter().any(|p| p.symbol == t.symbol) {
+                    pending.push(t.clone());
+                }
+            }
+        }
+
+        for thunk in pending {
+            if thunk.this_adjust.vbase_index.is_some() {
+                return Err(LowerIrError::Internal(format!(
+                    "layout layer emitted a virtual thunk {} (vbase-relative this adjustment); \
+                     vbase relocation must be expressed as a HIR VBaseAdjust instead",
+                    thunk.symbol
+                )));
+            }
+            if self.output.functions.iter().any(|f| f.name == thunk.symbol) {
+                continue;
+            }
+            let offset = thunk.this_adjust.non_virtual;
+            if offset == 0 {
+                continue;
+            }
+            // 目标实现必须在本 TU 里已有定义, 否则拿不到签名也无法尾调用。
+            // vtable 已经引用了 thunk 入口, 静默跳过会在目标文件里留下
+            // 未定义符号 (链接期才报 *ABS*, 运行期直接跳空) —— 必须响。
+            let target_idx = match self
+                .output
+                .functions
+                .iter()
+                .position(|f| f.name == thunk.target_symbol)
+            {
+                Some(i) => i,
+                None => {
+                    return Err(LowerIrError::Internal(format!(
+                        "thunk {} targets {}, which has no definition in this TU",
+                        thunk.symbol, thunk.target_symbol
+                    )));
+                },
+            };
+            let params: Vec<SsaVar> = self.output.functions[target_idx]
+                .params
+                .clone()
+                .into_iter()
+                .enumerate()
+                .map(|(i, p)| SsaVar {
+                    base: format!("__thunk_p{}", i),
+                    version: 0,
+                    ty: p.ty,
+                    span: dummy_span(),
+                })
+                .collect();
+            let ret_ty = self.output.functions[target_idx].ret_ty.clone();
+            // `FnAddr` 的类型只需给出返回值宽度供调用点取返回类型; 形参类型
+            // 取自目标函数自己的签名 (下面拼 `call_args` 时逐一对应)。
+            let call_ty = Type::Func(Box::new(QualType::new(ret_ty.clone())), Vec::new());
+
+            let mut f = Function::new(thunk.symbol.clone(), ret_ty.clone(), dummy_span());
+            f.params = params.clone();
+            let byte_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::SChar)));
+            let adjusted_var = SsaVar {
+                base: "__thunk_adj_byte".to_string(),
+                version: 0,
+                ty: byte_ptr_ty.clone(),
+                span: dummy_span(),
+            };
+            let mut insts = Vec::new();
+            // 1. `this` 先转成字节指针 (Operand 侧不接受内联 cast, 必须先落到 SSA 名)
+            let this_byte_var = SsaVar {
+                base: "__thunk_this_byte".to_string(),
+                version: 0,
+                ty: byte_ptr_ty.clone(),
+                span: dummy_span(),
+            };
+            insts.push(Inst {
+                dest: Some(this_byte_var.clone()),
+                kind: InstKind::Cast {
+                    ty: byte_ptr_ty.clone(),
+                    e: Operand::Var(params[0].clone()),
+                },
+                span: dummy_span(),
+            });
+            // 2. 按字节偏移到最终覆写者的子对象
+            insts.push(Inst {
+                dest: Some(adjusted_var.clone()),
+                kind: InstKind::Bin {
+                    op: BinOp::Add,
+                    l: Operand::Var(this_byte_var),
+                    r: Operand::Int(offset as i128),
+                },
+                span: dummy_span(),
+            });
+            // 3. 调回目标类型 (与目标函数首参一致)
+            let typed_var = SsaVar {
+                base: "__thunk_adj".to_string(),
+                version: 0,
+                ty: params[0].ty.clone(),
+                span: dummy_span(),
+            };
+            insts.push(Inst {
+                dest: Some(typed_var.clone()),
+                kind: InstKind::Cast {
+                    ty: params[0].ty.clone(),
+                    e: Operand::Var(adjusted_var),
+                },
+                span: dummy_span(),
+            });
+            // 4. 尾调用最终实现
+            let mut call_args = vec![Operand::Var(typed_var)];
+            call_args.extend(params[1..].iter().cloned().map(Operand::Var));
+            let dest = if matches!(ret_ty, Type::Void) {
+                None
+            } else {
+                Some(SsaVar {
+                    base: "__thunk_ret".to_string(),
+                    version: 0,
+                    ty: ret_ty.clone(),
+                    span: dummy_span(),
+                })
+            };
+            insts.push(Inst {
+                dest: dest.clone(),
+                kind: InstKind::Call {
+                    callee: Operand::FnAddr(thunk.target_symbol.clone(), call_ty),
+                    args: call_args,
+                    ret_ty: ret_ty.clone(),
+                },
+                span: dummy_span(),
+            });
+            let term = match dest {
+                Some(v) => Terminator::Ret {
+                    val: Some(Operand::Var(v)),
+                },
+                None => Terminator::Ret { val: None },
+            };
+            if let Some(bb) = f.blocks.get_mut("entry") {
+                bb.insts = insts;
+                bb.term = term;
+            }
+            self.output.functions.push(f);
+        }
+        Ok(())
     }
 
     /// 消费 lowerer，返回输出
@@ -307,6 +952,41 @@ impl<'a> IrLowerer<'a> {
     /// 否则调用侧引用 `<class>_ctor_complete` 而定义侧发 `<class>`.
     fn symbol_name(&self, sym: &CxxSymbol) -> String {
         symbol_link_name(self.symbols, sym)
+    }
+
+    /// 某个类的构造变体在链接期的实际名字。
+    ///
+    /// `ctor` = sema 已经选定的重载构造函数符号。它不可省: 重载构造同名同类,
+    /// 只按类名拼符号会把两个定义合并成一个 (见 `overload_signature`)。
+    /// None 代表隐式默认构造 (零参数, 无后缀)。
+    ///
+    /// C1 (Complete) 直接复用定义侧的 `symbol_link_name`, 保证两边同源;
+    /// 其他变体 (C2 / allocating) 是 sema 另行登记的符号, 名字 =
+    /// `<class>_ctor_<variant>` + **同一段**重载后缀。
+    pub fn ctor_link_name(
+        &self,
+        class: ClassId,
+        variant: CtorVariant,
+        ctor: Option<SymbolId>,
+    ) -> Result<String, LowerIrError> {
+        let class_sym = self.get_symbol(class.as_symbol())?;
+        let class_name = self.symbol_name(class_sym);
+        let Some(ctor) = ctor else {
+            return Ok(ctor_variant_name(&class_name, variant));
+        };
+        let sym = self.get_symbol(ctor)?;
+        if matches!(variant, CtorVariant::Complete) {
+            return Ok(self.symbol_name(sym));
+        }
+        let params: Vec<CxxType> = match &sym.ty {
+            CxxType::Function { params, .. } => params.clone(),
+            _ => Vec::new(),
+        };
+        Ok(format!(
+            "{}{}",
+            ctor_variant_name(&class_name, variant),
+            overload_signature(self.symbols, &params, false)
+        ))
     }
 
     /// 函数类型出现在**值**上下文（[conv.func] 退化后）时的 `ast::Type` 形态。
@@ -441,6 +1121,33 @@ impl<'a> IrLowerer<'a> {
         // 收集所有字段（包括从基类继承的，展平到一个 struct 中）
         let mut fields = Vec::new();
         self.collect_flattened_fields(id, abi, 0, &mut fields)?;
+
+        // C 侧类型尺寸 = 「字段最大结束偏移」, 而 ABI 对象尺寸还含尾部填充
+        // 与 vptr 槽: `struct S { virtual int f(); }` 一个字段都没有, 但
+        // standalone 尺寸是 8 (仅 vptr)。不补齐就会少分栈槽 / `new` 字节数,
+        // 成员写入越界 (实测 sizeof(S) dcc=1 / gcc=8, sizeof(U) dcc=12 / gcc=16)。
+        // 尺寸单一真源仍是布局层 `ClassAbi::size`, 这里只是把它表达进
+        // `ast::Type`; 用 `size-1` 处的单字节占位, 不改动任何用户字段偏移。
+        if !is_union && abi.size > 0 {
+            let covered = fields
+                .iter()
+                .map(|f| f.offset as u64 + type_size(&f.ty))
+                .max()
+                .unwrap_or(0);
+            if covered < abi.size {
+                fields.push(crate::ast::Field {
+                    name: format!("__dcc_obj_tail_{}", id.0),
+                    ty: Type::UChar,
+                    offset: (abi.size - 1) as usize,
+                    bit_width: None,
+                    bit_offset: 0,
+                    quals: crate::ast::QualifierFlags::NONE,
+                    ptr_quals: Vec::new(),
+                    field_align: None,
+                    field_packed: false,
+                });
+            }
+        }
 
         use std::sync::Arc;
         let fields_arc = Arc::new(fields);
@@ -744,6 +1451,51 @@ struct FuncLowerer<'a, 'b> {
     temp_seq: u32,
     /// 短路求值 (`&&` / `||`) 结果变量的全局序号, 每个函数独立
     logical_seq: u32,
+    // === zero-cost EH 状态 (每个函数独立) ===
+    /// EH 清理链, 由外向内; 既含存活对象的清理项也含 `try` 的 handler 组。
+    eh_chain: Vec<EhChainEntry>,
+    /// 语句 -> 该语句执行完后进入清理集合的局部量 (构造完成点)。
+    eh_activate_at: HashMap<HirStmtId, SymbolId>,
+    /// 语句 -> 该语句执行前撤掉清理的局部量 (正常析构点)。
+    eh_retire_at: HashMap<HirStmtId, SymbolId>,
+    /// 已由 `eh_activate_at` 接管激活的符号 (避免 `Decl` 兜底路径重复登记)。
+    eh_activated_syms: std::collections::HashSet<SymbolId>,
+    /// 仍存活的局部量 -> 它在 `eh_chain` 里的清理项 key。
+    eh_cleanup_key_of: HashMap<SymbolId, u64>,
+    /// 需要自动析构的局部量: 符号 -> sema 生成的那条 `Destroy` 语句。
+    ///
+    /// 整函数预扫一次得到, 因为「哪些局部量需要清理」的真源是 sema 的
+    /// `DtorFrame` (已物化成块末 / 循环初始化域收尾 / return/break 出口处的
+    /// `Destroy` 语句), 而不是 lower_ir 自己再推一遍类型规则 —— 后者会在
+    /// `automatic_destructor_needed` 的两个例外 (聚合 / 含虚基) 上漂移。
+    eh_dtor_of: HashMap<SymbolId, HirStmtId>,
+    /// `try` 语句序号 (分配 `try_id`)
+    eh_try_seq: u32,
+    /// 清理项序号 (分配稳定的 cleanup key)
+    eh_cleanup_seq: u64,
+    /// catch 类型 -> LSDA 类型表索引 (1-based)
+    eh_type_index: HashMap<String, u32>,
+    /// 下一个可用的类型表索引
+    eh_type_next: u32,
+    /// 作用域快照 -> 落地垫块名
+    eh_lp_cache: HashMap<Vec<EhChainKeyFrame>, String>,
+    /// 只由 unwinder 进入的块 (落地垫区) 根, 按登记序
+    eh_roots: Vec<String>,
+    /// 全部归 EH 机件所有的块。`unreachable_blocks()` 必须排除它们: 那里的
+    /// 「隐式落通」修补会把 `_Unwind_Resume` 之后的 `Unreachable` 改写成
+    /// `Jump(循环增量块)`, 从而把清理链搅成正常控制流。
+    eh_owned_blocks: std::collections::HashSet<String>,
+    /// 共享的 `_Unwind_Resume` 块
+    eh_resume_bb: Option<String>,
+    /// 正在生成落地垫代码: 其中的调用**不再**升级成 invoke (否则递归生成)。
+    ///
+    /// 清理动作在展开途中再次抛出按 `std::terminate` 处理, 本就不该有落地垫。
+    in_eh_emit: bool,
+    /// 异常对象指针槽 (`%rax`) 与 selector 槽 (`%rdx`) 的函数级局部
+    eh_exc_obj: Option<SsaVar>,
+    eh_exc_sel: Option<SsaVar>,
+    /// 落地垫生成过程中遇到的首个错误 (由 `finish()` 报出)。
+    eh_error: Option<String>,
 }
 
 impl<'a, 'b> FuncLowerer<'a, 'b> {
@@ -867,6 +1619,24 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             ref_temp_counter: 0,
             temp_seq: 0,
             logical_seq: 0,
+            eh_chain: Vec::new(),
+            eh_activate_at: HashMap::new(),
+            eh_retire_at: HashMap::new(),
+            eh_activated_syms: std::collections::HashSet::new(),
+            eh_cleanup_key_of: HashMap::new(),
+            eh_dtor_of: HashMap::new(),
+            eh_try_seq: 0,
+            eh_cleanup_seq: 0,
+            eh_type_index: HashMap::new(),
+            eh_type_next: 0,
+            eh_lp_cache: HashMap::new(),
+            eh_roots: Vec::new(),
+            eh_owned_blocks: std::collections::HashSet::new(),
+            eh_resume_bb: None,
+            in_eh_emit: false,
+            eh_exc_obj: None,
+            eh_exc_sel: None,
+            eh_error: None,
         })
     }
 
@@ -883,6 +1653,15 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
         // 计算 CFG 边
         self.compute_cfg_edges();
+
+        // zero-cost EH: 把只由 unwinder 进入的块归集到 `eh_unwind_blocks`,
+        // 并把落地垫区指向正常块的那条边登记成重入标签。
+        self.finish_eh_blocks();
+
+        // 落地垫生成失败不能只当内部提示吞掉: 那会让异常静默跳过本帧的析构。
+        if let Some(msg) = self.eh_error.take() {
+            return Err(LowerIrError::Internal(msg));
+        }
 
         Ok(self.ssa)
     }
@@ -957,10 +1736,14 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
     /// Collect all blocks whose terminator is Unreachable.
     /// Used to find implicit fall-through exits after lowering a statement.
+    ///
+    /// 排除 `eh_owned_blocks`: 那些块属于零成本异常的落地垫区, 它们的
+    /// `Unreachable` 是**有意**的终态 (如 `_Unwind_Resume` 永不返回), 不能
+    /// 被循环/switch 的「隐式落通」修补改成正常跳转。
     fn unreachable_blocks(&self) -> Vec<String> {
         let mut result = Vec::new();
         for (name, bb) in &self.ssa.blocks {
-            if matches!(bb.term, Terminator::Unreachable) {
+            if matches!(bb.term, Terminator::Unreachable) && !self.eh_owned_blocks.contains(name) {
                 result.push(name.clone());
             }
         }
@@ -968,6 +1751,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
     }
 
     fn push_inst(&mut self, inst: Inst) {
+        let inst = self.eh_protect_call(inst);
         let bb = self.current_bb.clone();
         self.ssa.blocks.get_mut(&bb).unwrap().insts.push(inst);
     }
@@ -1470,7 +2254,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 place,
                 args,
                 variant,
-            } => self.lower_construct(*class, *place, args, *variant),
+                ctor,
+            } => self.lower_construct(*class, *place, args, *variant, *ctor),
 
             HirExprKind::Destroy {
                 class,
@@ -1485,7 +2270,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 args,
                 placement,
                 is_array,
-            } => self.lower_new(ty, args, placement.as_deref(), *is_array),
+                ctor,
+            } => self.lower_new(ty, args, placement.as_deref(), *is_array, *ctor),
 
             HirExprKind::Delete {
                 ptr,
@@ -2491,13 +3277,12 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         args: &[HirExprId],
         ret_ty: &Type,
     ) -> Result<Operand, LowerIrError> {
-        // 虚基调整不支持（Stage 5 仅非虚继承）
-        if this_adjust.vbase_index.is_some() {
-            return Err(LowerIrError::Unsupported(
-                "virtual base adjustment in virtual call".to_string(),
-            ));
-        }
-
+        // this 调整量已由指针转换 (`BaseCast` / `VBaseAdjust`) 与 vtable 里的
+        // thunk 入口完整承担: `this` 进来时就是callee 期望的子对象。
+        // 旧这里有一个 `vbase_index.is_some() => Unsupported` 的拒绝分支,
+        // 但 HIR 已不再在调用点携带虚基索引 (虚基调整只能运行期读 vbtable,
+        // 属于转换而不是调用), 那个分支永远不会命中 —— 留着只会把缺陷
+        // 伪装成未实现特性。
         if args.is_empty() {
             return Err(LowerIrError::Internal("virtual call missing this argument".to_string()));
         }
@@ -3010,16 +3795,19 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             HirExprKind::Global(sym_id) => {
                 let sym = self.lowerer.get_symbol(*sym_id)?;
                 let name = self.lowerer.symbol_name(sym);
+                let is_fn = IrLowerer::is_function_value_symbol(sym);
                 // `&fn` 与 `fn` 是同一个值 ([conv.func]): 走与 `lower_expr` 的
-                // Global 分支同一真源。不能用 `lower_sym_addr`: AddrOf 重建出的
-                // `Ident` 类型硬编码为 `Void`, `gen_expr_addrof` 只认
-                // `Type::Func` 才发 `lea sym(%rip)`。标量全局对象仍按 `SymAddr`
-                // 占位 (codegen 按全局名解析)。
-                if IrLowerer::is_function_value_symbol(sym) {
+                // Global 分支同一真源 (SymAddr + `Type::Func`)。
+                if is_fn {
                     let fty = self.lowerer.lower_func_value_type(&sym.ty);
                     return Ok(Operand::SymAddr(name, fty));
                 }
-                Ok(Operand::SymAddr(name, result_ty.clone()))
+                // 数据对象的 `&g` 必须是**符号地址**: `InstKind::AddrOf` 重建为
+                // `&g` => `lea g(%rip)` (与 `lower_static_storage_store` 同一形态)。
+                // `Operand::SymAddr` 在运行期操作数位置会被求成「载入 g 的值」,
+                // 于是 `B gb;` 的全局构造拿到的是 gb 的头 8 字节而不是 &gb,
+                // 构造函数往垃圾指针里写 => 段错误。
+                Ok(self.lower_sym_addr(name, result_ty.clone()))
             },
             HirExprKind::Dereference(inner_inner) => {
                 // &*e → e (恒等)
@@ -3717,13 +4505,12 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         place_id: HirExprId,
         args: &[HirExprId],
         variant: CtorVariant,
+        ctor: Option<SymbolId>,
     ) -> Result<Operand, LowerIrError> {
         let place = self.lower_expr(place_id)?;
-        let class_sym = self.lowerer.get_symbol(class.as_symbol())?;
 
-        // 构造函数名：<class>_<variant>
-        let class_name = self.lowerer.symbol_name(class_sym);
-        let ctor_name = ctor_variant_name(&class_name, variant);
+        // 构造函数名: sema 选定的重载 + 变体 (`ctor_link_name` 与定义侧同源)
+        let ctor_name = self.lowerer.ctor_link_name(class, variant, ctor)?;
 
         let fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
 
@@ -3786,126 +4573,747 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         Ok(Operand::Void)
     }
 
-    /// 降低 throw 表达式（SJLJ 风格异常处理）
+    // ==================================================================
+    // zero-cost EH: 作用域栈 / 受保护调用 / 落地垫
+    // ==================================================================
+
+    /// 函数作用域入口: 预扫「哪些局部量需要在异常路径清理」及其进出界语句。
     ///
-    /// 流程:
-    /// 1. rethrow (throw;)：调用 __dcc_eh_rethrow
-    /// 2. throw expr：
-    ///    - 计算抛出对象大小
-    ///    - 调用 __cxa_allocate_exception 分配异常内存
-    ///    - 把对象拷贝到异常内存
-    ///    - 调用 __dcc_eh_throw 抛出异常（SJLJ 风格，内部 longjmp）
+    /// 必须在下探函数体之前做: 函数级局部量的清理集合要能被体内第一个受保护调用
+    /// 看到, 否则异常穿出本帧时不执行析构 (GCC 会)。
+    fn eh_begin_function_scope(&mut self, body: &HirBody) {
+        let mut dtor_of: HashMap<SymbolId, HirStmtId> = HashMap::new();
+        for id in body.ctor_initializers.iter().chain(body.stmts.iter()) {
+            eh_collect_dtor_stmts(self.lowerer.hir, *id, &mut dtor_of, 0);
+        }
+        let mut activate_at = HashMap::new();
+        let mut retire_at = HashMap::new();
+        eh_collect_cleanup_sites(
+            self.lowerer.hir,
+            &body.stmts,
+            &dtor_of,
+            &mut activate_at,
+            &mut retire_at,
+            0,
+        );
+        let activated: std::collections::HashSet<SymbolId> =
+            activate_at.values().copied().collect();
+        self.eh_dtor_of = dtor_of;
+        self.eh_activate_at = activate_at;
+        self.eh_retire_at = retire_at;
+        self.eh_activated_syms = activated;
+    }
+
+    /// 函数作用域收尾: 清空清理链。
+    ///
+    /// 正常情况下每个对象都在自己的析构语句处退休, 这里只是防御性收尾 (例如
+    /// `[[noreturn]]` 出口没生成析构语句), 不让上一个函数的状态漏进下一个函数。
+    fn eh_end_function_scope(&mut self) {
+        self.eh_chain.clear();
+        self.eh_cleanup_key_of.clear();
+    }
+
+    /// 登记一条清理, 返回它的稳定 key (供显式退休用)。
+    fn eh_add_cleanup(&mut self, kind: EhCleanupKind) -> u64 {
+        let key = self.eh_cleanup_seq;
+        self.eh_cleanup_seq += 1;
+        self.eh_chain
+            .push(EhChainEntry::Cleanup(EhCleanup { key, kind }));
+        key
+    }
+
+    /// 局部量构造完成: 从此刻起它进入清理集合。
+    fn eh_activate_cleanup(&mut self, symbol: SymbolId) {
+        if self.eh_cleanup_key_of.contains_key(&symbol) {
+            return;
+        }
+        let Some(dtor_stmt) = self.eh_dtor_of.get(&symbol).copied() else {
+            return;
+        };
+        let key = self.eh_add_cleanup(EhCleanupKind::Destroy(dtor_stmt));
+        self.eh_cleanup_key_of.insert(symbol, key);
+    }
+
+    /// 局部量正常析构 (或 glue 状态结束): 把它从清理集合里撤掉。
+    fn eh_retire_cleanup(&mut self, symbol: SymbolId) {
+        let Some(key) = self.eh_cleanup_key_of.remove(&symbol) else {
+            return;
+        };
+        self.eh_remove_cleanup(key);
+    }
+
+    /// 按 key 撤掉一条清理 (显式配对的 glue 清理用)。
+    fn eh_remove_cleanup(&mut self, key: u64) {
+        if let Some(pos) = self
+            .eh_chain
+            .iter()
+            .rposition(|e| matches!(e, EhChainEntry::Cleanup(c) if c.key == key))
+        {
+            self.eh_chain.remove(pos);
+        }
+    }
+
+    /// 当前清理链快照 (自内向外), 跳过没有 handler 的 `try` 帧。
+    fn eh_chain_items(&self) -> Vec<EhChainItem> {
+        let mut out = Vec::new();
+        for entry in self.eh_chain.iter().rev() {
+            match entry {
+                EhChainEntry::Try { try_id, handlers } => {
+                    if !handlers.is_empty() {
+                        out.push(EhChainItem::Try {
+                            try_id: *try_id,
+                            handlers: handlers.clone(),
+                        });
+                    }
+                },
+                EhChainEntry::Cleanup(c) => out.push(EhChainItem::Cleanups(vec![c.clone()])),
+            }
+        }
+        out
+    }
+
+    /// 快照的哈希 key (与落地垫内容一一对应)。
+    fn eh_chain_key(items: &[EhChainItem]) -> Vec<EhChainKeyFrame> {
+        items
+            .iter()
+            .map(|it| match it {
+                EhChainItem::Try { try_id, .. } => EhChainKeyFrame::Try(*try_id),
+                EhChainItem::Cleanups(cs) => {
+                    EhChainKeyFrame::Block(cs.iter().map(|c| c.key).collect())
+                },
+            })
+            .collect()
+    }
+
+    /// 快照 -> LSDA action 链。与 [`Self::eh_build_landing_pad`] 生成的代码
+    /// **必须同一顺序**: 表描述的和代码做的就是 libstdc++ 依赖的同一件事。
+    fn eh_actions(items: &[EhChainItem]) -> Vec<crate::ast::EhAction> {
+        let mut out = Vec::new();
+        for it in items {
+            match it {
+                EhChainItem::Try { handlers, .. } => {
+                    for h in handlers {
+                        out.push(crate::ast::EhAction::Catch {
+                            type_index: h.type_index,
+                            typeinfo: h.typeinfo.clone(),
+                        });
+                    }
+                },
+                EhChainItem::Cleanups(_) => out.push(crate::ast::EhAction::Cleanup),
+            }
+        }
+        out
+    }
+
+    /// 把「可能抛出的普通调用」升级为受保护调用 (invoke)。
+    ///
+    /// 单一拦截点设在 [`Self::push_inst`]: 所有调用 (普通/成员/虚/构造/析构/runtime
+    /// glue) 都经由它发射, 因此不存在「某条路径漏加保护」的结构性缺口。
+    fn eh_protect_call(&mut self, inst: Inst) -> Inst {
+        if self.in_eh_emit {
+            return inst;
+        }
+        let (callee, args, ret_ty) = match &inst.kind {
+            InstKind::Call {
+                callee,
+                args,
+                ret_ty,
+            } => (callee.clone(), args.clone(), ret_ty.clone()),
+            _ => return inst,
+        };
+        let items = self.eh_chain_items();
+        if items.is_empty() {
+            return inst;
+        }
+        let key = Self::eh_chain_key(&items);
+        let unwind = match self.eh_lp_cache.get(&key) {
+            Some(u) => u.clone(),
+            None => {
+                match self.eh_build_landing_pad(items.clone()) {
+                    Ok(u) => {
+                        self.eh_lp_cache.insert(key, u.clone());
+                        u
+                    },
+                    // 生成落地垫失败必须报错, 不能默默退回普通调用:
+                    // 那样异常会直接跳过本帧的析构与 handler, 是个错答案而不是
+                    // 一个编译失败。
+                    Err(e) => {
+                        self.eh_note_error(&e);
+                        return inst;
+                    },
+                }
+            },
+        };
+        Inst {
+            dest: inst.dest,
+            kind: InstKind::Invoke {
+                callee,
+                args,
+                ret_ty,
+                unwind: Some(unwind),
+                actions: Self::eh_actions(&items),
+            },
+            span: inst.span,
+        }
+    }
+
+    /// 记录一个「只能在下一次 `finish()` 时才能报出」的 EH 错误。
+    ///
+    /// `push_inst` 的签名是 `()` (全站数百个调用点), 无法就地返回 `Result`; 先记
+    /// 住首个错因, `finish()` 把它当成编译失败报出, 绝不静默降级成错代码。
+    fn eh_note_error(&mut self, e: &LowerIrError) {
+        if self.eh_error.is_none() {
+            self.eh_error = Some(e.to_string());
+        }
+    }
+
+    /// 新建一个只由 unwinder 进入的块并登记归属。
+    fn eh_new_block(&mut self, prefix: &str) -> String {
+        let bb = self.unique_bb(prefix);
+        self.eh_owned_blocks.insert(bb.clone());
+        bb
+    }
+
+    /// 异常对象指针槽 (`%rax`) 与 selector 槽 (`%rdx`): 函数级共用两个具名局部。
+    ///
+    /// 必须是**具名非临时**局部: 后端在落地垫标签后的第一条指令里把它们溢出到
+    /// 栈槽 (见 `emit/stmt.rs` 的 `Stmt::EhLandingPad`), 而 SSA 临时值会被
+    /// `rebuild_block` 的 `subst` 内联掉, 槽就没了。名字也不以 `_` 开头,
+    /// 以保证 `rebuild_block` 会为其生成声明。
+    fn eh_exc_slots(&mut self) -> (SsaVar, SsaVar) {
+        if let (Some(o), Some(s)) = (self.eh_exc_obj.clone(), self.eh_exc_sel.clone()) {
+            return (o, s);
+        }
+        let void_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+        let obj = SsaVar {
+            base: "dcc_eh_object".to_string(),
+            version: 0,
+            ty: void_ptr_ty.clone(),
+            span: dummy_span(),
+        };
+        let sel = SsaVar {
+            base: "dcc_eh_selector".to_string(),
+            version: 0,
+            ty: Type::LongLong,
+            span: dummy_span(),
+        };
+        for (var, ty) in [(obj.clone(), void_ptr_ty), (sel.clone(), Type::LongLong)] {
+            self.ssa.local_types.insert(var.base.clone(), ty);
+            self.ssa.original_locals.insert(var.base.clone());
+            self.ssa
+                .local_quals
+                .insert(var.base.clone(), QualifierFlags::NONE);
+            self.locals.insert(var.base.clone(), var);
+        }
+        self.eh_exc_obj = Some(obj.clone());
+        self.eh_exc_sel = Some(sel.clone());
+        (obj, sel)
+    }
+
+    /// 共享的 `_Unwind_Resume(exc_object)` 块。
+    ///
+    /// 所有「清理完但无人接」的落地垫尾都跳到它: 一个函数里只发一条 resume 调用,
+    /// 与 GCC 的 `try/before/finally` 合并同理, 也保证 `eh_owned_blocks` 里那个
+    /// 永返终态的块只有一份。
+    fn eh_resume_block(&mut self) -> String {
+        if let Some(b) = &self.eh_resume_bb {
+            return b.clone();
+        }
+        let prev = self.current_bb.clone();
+        let bb = self.eh_new_block("eh_resume");
+        let obj = self.eh_exc_slots().0;
+        self.current_bb = bb.clone();
+        // `_Unwind_Resume` 必须登记成 `lp=0 / action=0` 的受保护区间 (而不是不登记):
+        // 本函数已经有 LSDA, 而清理阶段里「PC 落在本函数内却没有区间覆盖」会被
+        // libstdc++ 当成清理代码二次抛出 -> `std::terminate`, 外层 handler 永远
+        // 进不去 (实测: 中间帧析构跑完后直接 terminate)。
+        self.eh_emit_propagate_call(CxxRuntimeSymbol::UnwindResume, vec![Operand::Var(obj)]);
+        self.set_term(Terminator::Unreachable);
+        self.current_bb = prev;
+        self.eh_resume_bb = Some(bb.clone());
+        self.eh_roots.push(bb.clone());
+        bb
+    }
+
+    /// 为一个作用域快照生成落地垫块。
+    ///
+    /// 块内形状与 g++ 产物逐块一致 (已用 `tmp_eh/nested.cpp` 等样本比对):
+    /// ```text
+    /// lp:
+    ///   <exc_object, exc_selector> = [%rax, %rdx]
+    ///   if (selector == f1) goto catch_1      ; 最近的 handler 先试
+    /// next:
+    ///   if (selector == f2) goto catch_2
+    /// next:
+    ///   <清理动作>                             ; 只有比它更外层的 handler 才需要
+    ///   if (selector == f3) goto catch_3
+    /// next:
+    ///   goto resume
+    /// ```
+    /// 「handler 在对象作用域之内则不清理」这一关键语义就体现在比较与清理的
+    /// 前后次序上, 所以 action 链与这段代码必须同源 (`eh_actions` / 本函数走同一
+    /// 个 `items`)。
+    fn eh_build_landing_pad(&mut self, items: Vec<EhChainItem>) -> Result<String, LowerIrError> {
+        let (obj, sel) = self.eh_exc_slots();
+        let saved_bb = self.current_bb.clone();
+        let saved_flag = std::mem::replace(&mut self.in_eh_emit, true);
+        let lp = self.eh_new_block("eh_lp");
+        self.eh_roots.push(lp.clone());
+        // 本函数现在有异常交接点: FDE 需要 `zPLR` 增强与 personality 槽。
+        self.eh_require_personality();
+        self.current_bb = lp.clone();
+        self.push_inst(Inst {
+            dest: Some(obj),
+            kind: InstKind::EhLandingPad { selector: sel },
+            span: dummy_span(),
+        });
+        for it in &items {
+            match it {
+                EhChainItem::Try { handlers, .. } => {
+                    for h in handlers {
+                        let cur = self.current_bb.clone();
+                        let cond = self.eh_selector_is(h.type_index);
+                        let next = self.eh_new_block("eh_lp_next");
+                        self.ssa.blocks.get_mut(&cur).unwrap().term = Terminator::Branch {
+                            cond,
+                            t: h.catch_bb.clone(),
+                            f: next.clone(),
+                        };
+                        self.current_bb = next;
+                    }
+                },
+                EhChainItem::Cleanups(cs) => {
+                    for c in cs {
+                        match c.kind.clone() {
+                            EhCleanupKind::Destroy(stmt) => self.lower_stmt(stmt)?,
+                            EhCleanupKind::EndCatch => {
+                                self.eh_call_runtime(CxxRuntimeSymbol::EndCatch, vec![])
+                            },
+                            EhCleanupKind::FreeException(buf) => self.eh_call_runtime(
+                                CxxRuntimeSymbol::FreeException,
+                                vec![Operand::Var(buf)],
+                            ),
+                        }
+                    }
+                },
+            }
+        }
+        let resume = self.eh_resume_block();
+        self.set_term(Terminator::Jump(resume));
+        self.in_eh_emit = saved_flag;
+        self.current_bb = saved_bb;
+        Ok(lp)
+    }
+
+    /// `selector == type_index` 比较。
+    ///
+    /// libstdc++ 递上来的 selector 就是 action 链里那个**正的 filter 值**
+    /// (实测 g++ 落地垫直接 `cmpq $2, %rdx`), 所比较量就是 `type_index`。
+    fn eh_selector_is(&mut self, type_index: u32) -> Operand {
+        let sel = self.eh_exc_slots().1;
+        let res = self.fresh_syn("eh_test", Type::Int);
+        self.push_inst(Inst {
+            dest: Some(res.clone()),
+            kind: InstKind::Bin {
+                op: BinOp::EqEq,
+                l: Operand::Var(sel),
+                r: Operand::Int(type_index as i128),
+            },
+            span: dummy_span(),
+        });
+        Operand::Var(res)
+    }
+
+    /// 登记 personality 与它的 `DW.ref` 间接槽。
+    fn eh_require_personality(&mut self) {
+        let name = CxxRuntimeSymbol::PersonalityV0.name().to_string();
+        if !self.lowerer.output.external_symbols.contains(&name) {
+            self.lowerer.output.external_symbols.push(name.clone());
+        }
+        let slot = format!("DW.ref.{}", name);
+        if !self.lowerer.output.eh_ref_slots.contains(&slot) {
+            self.lowerer.output.eh_ref_slots.push(slot);
+        }
+    }
+
+    /// 发射一个 `void f(...)` 形态的 runtime 调用 (并补上外部声明)。
+    fn eh_call_runtime(&mut self, sym: CxxRuntimeSymbol, args: Vec<Operand>) {
+        let name = self.register_runtime(sym.name());
+        let fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+        self.push_inst(Inst {
+            dest: None,
+            kind: InstKind::Call {
+                callee: Operand::FnAddr(name, fn_ty),
+                args,
+                ret_ty: Type::Void,
+            },
+            span: dummy_span(),
+        });
+    }
+
+    /// 发射一个「把当前异常继续向外递」的 runtime 调用 (`_Unwind_Resume` /
+    /// `__cxa_rethrow`): 登记为 `landing_pad = None` 的受保护调用。
+    ///
+    /// 直接构造 `InstKind::Invoke` 而不是普通 `Call`, 是为了绕开
+    /// [`Self::eh_protect_call`] 的自动升级 —— 那里给出的落地垫会让本帧在展开途中
+    /// 重新接管同一个异常 (二次展开), 而这两个调用按 ABI 只是把异常交回运行时。
+    fn eh_emit_propagate_call(&mut self, sym: CxxRuntimeSymbol, args: Vec<Operand>) {
+        let name = self.register_runtime(sym.name());
+        let fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+        self.ssa
+            .blocks
+            .get_mut(&self.current_bb.clone())
+            .unwrap()
+            .insts
+            .push(Inst {
+                dest: None,
+                kind: InstKind::Invoke {
+                    callee: Operand::FnAddr(name, fn_ty),
+                    args,
+                    ret_ty: Type::Void,
+                    unwind: None,
+                    actions: Vec::new(),
+                },
+                span: dummy_span(),
+            });
+    }
+
+    /// 把一个 runtime 符号登记为外部引用 (native 发射端负责任的声明它)。
+    fn register_runtime(&mut self, name: &str) -> String {
+        let name = name.to_string();
+        if !self.lowerer.output.external_symbols.contains(&name) {
+            self.lowerer.output.external_symbols.push(name.clone());
+        }
+        name
+    }
+
+    /// catch 类型 -> LSDA 类型表索引 (1-based, 同一类型在同一函数里共用一个索引)。
+    ///
+    /// `None` = `catch (...)`: 仍占一个正索引, 但类型表项是值为 0 的空表项
+    /// (g++ 对 `catch (...)` 正是这样发的)。
+    fn eh_type_index_for(&mut self, typeinfo: Option<String>) -> u32 {
+        let key = typeinfo.clone().unwrap_or_else(|| "...".to_string());
+        if let Some(idx) = self.eh_type_index.get(&key) {
+            return *idx;
+        }
+        self.eh_type_next += 1;
+        let idx = self.eh_type_next;
+        self.eh_type_index.insert(key, idx);
+        if let Some(sym) = typeinfo {
+            // 类型表用 `DW_EH_PE_indirect`, 所以需要一个 `DW.ref.<sym>` 槽。
+            let slot = format!("DW.ref.{}", sym);
+            if !self.lowerer.output.eh_ref_slots.contains(&slot) {
+                self.lowerer.output.eh_ref_slots.push(slot);
+            }
+        }
+        idx
+    }
+
+    /// 该抛/捕类型的 typeinfo **符号名**。
+    ///
+    /// 类类型走布局层 (`ClassAbi::rtti`, 带命名空间限定名); 其余类型由
+    /// `typeinfo_mangling` 给出 Itanium 编码, 并把需要合成定义的 `_ZTI`/`_ZTS`
+    /// 登记给 `native.rs`。引用形抛/捕类型 (`catch (X&)`) 的 typeinfo 是**所指
+    /// 类型**的, 所以先脱引用。
+    fn eh_typeinfo_symbol(&mut self, ty: &CxxType) -> Result<Option<String>, LowerIrError> {
+        let stripped = ty.remove_reference().clone();
+        match &stripped {
+            CxxType::Class(id) => {
+                let abi = self.lowerer.abis.get(id).ok_or_else(|| {
+                    LowerIrError::Internal(format!(
+                        "ABI for class {} not found while building the catch/throw type table",
+                        id.0
+                    ))
+                })?;
+                let sym_name = abi.rtti.typeinfo_symbol.clone();
+                if !self.lowerer.output.rodata.contains(&sym_name) {
+                    self.lowerer.output.rodata.push(sym_name.clone());
+                }
+                Ok(Some(sym_name))
+            },
+            CxxType::Enum(id) => {
+                let sym = self.lowerer.get_symbol(id.as_symbol())?;
+                let enc = crate::cpp::mangle::encode_type_name(&sym.name.clone());
+                drop(sym);
+                Ok(Some(self.eh_register_synthesized_typeinfo(&enc)))
+            },
+            other => {
+                let Some(info) = crate::cpp::typeinfo_mangling::builtin_typeinfo_symbols(other)
+                else {
+                    return Ok(None);
+                };
+                if !self
+                    .lowerer
+                    .output
+                    .builtin_typeinfos
+                    .iter()
+                    .any(|b| b.typeinfo_symbol == info.typeinfo_symbol)
+                {
+                    self.lowerer.output.builtin_typeinfos.push(info.clone());
+                }
+                Ok(Some(info.typeinfo_symbol))
+            },
+        }
+    }
+
+    /// 登记一个按 mangled 编码合成的 typeinfo (目前用于枚举), 返回 `_ZTI` 符号。
+    fn eh_register_synthesized_typeinfo(&mut self, encoding: &str) -> String {
+        let info = crate::cpp::typeinfo_mangling::named_typeinfo_symbols(encoding);
+        if !self
+            .lowerer
+            .output
+            .builtin_typeinfos
+            .iter()
+            .any(|b| b.typeinfo_symbol == info.typeinfo_symbol)
+        {
+            self.lowerer.output.builtin_typeinfos.push(info.clone());
+        }
+        info.typeinfo_symbol
+    }
+
+    /// 把落地垫区归集到 `Function::eh_unwind_blocks`, 并登记重入标签。
+    ///
+    /// 分类规则是图论的而不是登记的: 「从 entry 沿正常边到不了」就是 EH 区。
+    /// 这样任何新增的正常边 (循环、switch、goto) 都不需要知道 EH 的存在,
+    /// 也不会因为某个地方漏登记而把落地垫发射两遍或干脆不发。
+    fn finish_eh_blocks(&mut self) {
+        if self.eh_roots.is_empty() {
+            return;
+        }
+        let mut normal: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut stack = vec![self.ssa.entry.clone()];
+        while let Some(b) = stack.pop() {
+            if !normal.insert(b.clone()) {
+                continue;
+            }
+            if let Some(bb) = self.ssa.blocks.get(&b) {
+                stack.extend(bb.succs.iter().cloned());
+            }
+        }
+        let mut order: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for root in self.eh_roots.clone() {
+            let mut stack = vec![root];
+            while let Some(b) = stack.pop() {
+                if normal.contains(&b) || !seen.insert(b.clone()) {
+                    continue;
+                }
+                order.push(b.clone());
+                if let Some(bb) = self.ssa.blocks.get(&b) {
+                    stack.extend(bb.succs.iter().cloned());
+                }
+            }
+        }
+        let mut reentry: Vec<String> = Vec::new();
+        let mut seen_re: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for b in &order {
+            if let Some(bb) = self.ssa.blocks.get(b) {
+                for s in &bb.succs {
+                    if normal.contains(s) && seen_re.insert(s.clone()) {
+                        reentry.push(s.clone());
+                    }
+                }
+            }
+        }
+        self.ssa.eh_unwind_blocks = order;
+        self.ssa.eh_reentry_labels = reentry;
+    }
+
+    /// 降低 `throw` 为 zero-cost EH 的抛出序列 (无 setjmp)。
+    ///
+    /// 与 g++ 产物同构 (对照样本 `tmp_eh/throwlocal.cpp`):
+    ///
+    /// ```text
+    ///   buf  = __cxa_allocate_exception(sizeof T)
+    ///   [受保护] 在 buf 上构造抛出对象      ; 构造抛出 ⇒ __cxa_free_exception(buf)
+    ///   [受保护] __cxa_throw(buf, & _ZTI_T, dtor)
+    ///   unreachable
+    /// ```
+    ///
+    /// 三个不能省的细节:
+    ///
+    /// * **构造抛出必须释放缓冲区**。缓冲区已拿到但对象没构造成功, 不 `free`
+    ///   就是每次抛出泄漏一块内存; g++ 正是把构造调用包进受保护区间, 其落地垫
+    ///   先 `__cxa_free_exception` 再做局部清理。
+    /// * **`__cxa_throw` 本身也要是受保护调用**。`try { throw X(); } catch (X)`
+    ///   在同一个帧里就必须能接住 —— 展开器从本帧的 LSDA 开始找 handler, 没有
+    ///   这条 call-site 记录就永远找不到。
+    /// * **第三参数是该类型的析构函数指针**, 平凡可析构时传 0。传错会让
+    ///   `__cxa_end_catch` 不销毁异常对象 (泄漏) 或对平凡类型误调析构。
     fn lower_throw(
         &mut self,
         object: Option<HirExprId>,
         ty: &CxxType,
     ) -> Result<Operand, LowerIrError> {
-        use crate::cpp::runtime::CxxRuntimeSymbol;
-
         let void_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+        let fn_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
 
-        match object {
-            None => {
-                // rethrow: 调用 __dcc_eh_rethrow
-                let rethrow_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
-                let callee_op = Operand::FnAddr("__dcc_eh_rethrow".to_string(), rethrow_fn_ty);
-                let inst = Inst {
+        // --- rethrow: `throw;` ---
+        let Some(obj_id) = object else {
+            // `throw;` 走 `__cxa_rethrow`, 而且**必须**照普通抛出一样受本帧剩余
+            // action 链保护 (与 `_Unwind_Resume` 不同): 重抛的异常要被**同一帧更
+            // 外层**的 try 接住, 还要先跑掉本 catch 体的 `__cxa_end_catch` 清理。
+            // g++ 产物实测: `__cxa_rethrow` 被 `.LEHBn/.LEHEn` 包住, 其区间的 action
+            // 链就是 [end_catch 清理, 外层 handler]。
+            self.eh_call_runtime(CxxRuntimeSymbol::Rethrow, vec![]);
+            self.set_term(Terminator::Unreachable);
+            return Ok(Operand::Void);
+        };
+
+        // 1. 异常缓冲区 (堆上, 由 `__cxa_end_catch`/`__cxa_free_exception` 释放)
+        let size = self.compute_type_size(ty)?;
+        let alloc_name = self.register_runtime(CxxRuntimeSymbol::AllocException.name());
+        let buf = self.fresh_syn("exn_buf", void_ptr_ty.clone());
+        self.push_inst(Inst {
+            dest: Some(buf.clone()),
+            kind: InstKind::Call {
+                callee: Operand::FnAddr(alloc_name, fn_ptr_ty.clone()),
+                args: vec![Operand::Int(size as i128)],
+                ret_ty: void_ptr_ty.clone(),
+            },
+            span: dummy_span(),
+        });
+
+        // 2. 在缓冲区上构造抛出对象
+        let value_ty = ty.remove_reference().clone();
+        if let CxxType::Class(class_id) = value_ty {
+            let copy_ctor = self.eh_resolve_copy_ctor(class_id);
+            let ctor_name =
+                self.lowerer
+                    .ctor_link_name(class_id, CtorVariant::Complete, copy_ctor)?;
+            if copy_ctor.is_some() {
+                // 有用户声明的拷贝构造: 必须真调它 (可观察行为)。
+                let src = self.lower_object_lvalue_addr(obj_id)?;
+                // 拷贝构造自身抛出时缓冲区还没交给运行时, 必须自己回收。
+                let free_key = self.eh_add_cleanup(EhCleanupKind::FreeException(buf.clone()));
+                self.push_inst(Inst {
                     dest: None,
                     kind: InstKind::Call {
-                        callee: callee_op,
-                        args: vec![],
+                        callee: Operand::FnAddr(ctor_name, fn_ptr_ty.clone()),
+                        args: vec![Operand::Var(buf.clone()), src],
                         ret_ty: Type::Void,
                     },
                     span: dummy_span(),
-                };
-                self.push_inst(inst);
-                // throw 不返回，标记当前块为不可达
-                self.set_term(Terminator::Unreachable);
-                Ok(Operand::Void)
-            },
-            Some(obj_id) => {
-                // 计算抛出对象大小
-                let obj_size = self.compute_type_size(ty)?;
-                let size_op = Operand::Int(obj_size as i128);
-
-                // 调用 __cxa_allocate_exception(size)
-                let alloc_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
-                let alloc_callee = Operand::FnAddr(
-                    CxxRuntimeSymbol::AllocException.name().to_string(),
-                    alloc_fn_ty.clone(),
-                );
-                let exn_ptr_var = self.fresh_syn("exn_ptr", void_ptr_ty.clone());
-                let alloc_call = Inst {
-                    dest: Some(exn_ptr_var.clone()),
-                    kind: InstKind::Call {
-                        callee: alloc_callee,
-                        args: vec![size_op],
-                        ret_ty: void_ptr_ty.clone(),
-                    },
-                    span: dummy_span(),
-                };
-                self.push_inst(alloc_call);
-
-                // 把抛出对象的值拷贝到异常内存
-                let obj_val = self.lower_expr(obj_id)?;
-                let obj_ir_ty = self.lowerer.lower_type(ty)?;
-                // 把 void* 转为目标类型指针
-                let typed_ptr_var = self
-                    .fresh_var("exn_typed", Type::Ptr(Box::new(QualType::new(obj_ir_ty.clone()))));
-                let cast_inst = Inst {
-                    dest: Some(typed_ptr_var.clone()),
+                });
+                self.eh_remove_cleanup(free_key);
+            } else {
+                // 隐式拷贝: 按聚合值整体写入缓冲区, 与按值传参同一语义。
+                let ir_ty = self.lowerer.lower_type(&value_ty)?;
+                let typed_ptr_ty = Type::Ptr(Box::new(QualType::new(ir_ty.clone())));
+                let typed = self.fresh_syn("exn_typed", typed_ptr_ty.clone());
+                self.push_inst(Inst {
+                    dest: Some(typed.clone()),
                     kind: InstKind::Cast {
-                        ty: Type::Ptr(Box::new(QualType::new(obj_ir_ty.clone()))),
-                        e: Operand::Var(exn_ptr_var.clone()),
+                        ty: typed_ptr_ty,
+                        e: Operand::Var(buf.clone()),
                     },
                     span: dummy_span(),
-                };
-                self.push_inst(cast_inst);
-
-                // 存储值到异常内存
-                let store_inst = Inst {
+                });
+                let val = self.lower_expr(obj_id)?;
+                // 写出这一步理论上不抛, 但抛出表达式的求值可能带用户代码; 分配与
+                // 写出之间的任何展开都得回收缓冲区。
+                let free_key = self.eh_add_cleanup(EhCleanupKind::FreeException(buf.clone()));
+                self.push_inst(Inst {
                     dest: None,
                     kind: InstKind::Store {
-                        e: Operand::Var(typed_ptr_var),
-                        src: obj_val,
+                        e: Operand::Var(typed),
+                        src: val,
                         is_volatile: false,
                     },
                     span: dummy_span(),
-                };
-                self.push_inst(store_inst);
-
-                // 调用 __dcc_eh_throw(exn_ptr, typeinfo)
-                // 简化：typeinfo 暂时传 null，SJLJ 运行时用类型名匹配
-                // 先获取 typeinfo（如果是类类型）
-                let typeinfo_op = self.get_typeinfo_for(ty)?;
-
-                let throw_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
-                let fn_name = "__dcc_eh_throw".to_string();
-
-                // 如果是 runtime symbol，需要注册为 external
-                if (fn_name.starts_with("dccpp_") || fn_name.starts_with("__dcc_"))
-                    && !self.lowerer.output.external_symbols.contains(&fn_name)
-                {
-                    self.lowerer.output.external_symbols.push(fn_name.clone());
-                }
-
-                let throw_callee = Operand::FnAddr(fn_name, throw_fn_ty);
-                let throw_call = Inst {
-                    dest: None,
-                    kind: InstKind::Call {
-                        callee: throw_callee,
-                        args: vec![Operand::Var(exn_ptr_var), typeinfo_op],
-                        ret_ty: Type::Void,
-                    },
-                    span: dummy_span(),
-                };
-                self.push_inst(throw_call);
-
-                // throw 不返回
-                self.set_term(Terminator::Unreachable);
-                Ok(Operand::Void)
-            },
+                });
+                self.eh_remove_cleanup(free_key);
+            }
+        } else {
+            let ir_ty = self.lowerer.lower_type(&value_ty)?;
+            let typed_ptr_ty = Type::Ptr(Box::new(QualType::new(ir_ty.clone())));
+            let typed = self.fresh_syn("exn_typed", typed_ptr_ty.clone());
+            self.push_inst(Inst {
+                dest: Some(typed.clone()),
+                kind: InstKind::Cast {
+                    ty: typed_ptr_ty,
+                    e: Operand::Var(buf.clone()),
+                },
+                span: dummy_span(),
+            });
+            let val = self.lower_expr(obj_id)?;
+            self.push_inst(Inst {
+                dest: None,
+                kind: InstKind::Store {
+                    e: Operand::Var(typed),
+                    src: val,
+                    is_volatile: false,
+                },
+                span: dummy_span(),
+            });
         }
+
+        // 3. typeinfo 与析构函数指针
+        //
+        // 两个参数都必须是**符号地址**: `Operand::SymAddr` 的语义是「按名字读这个
+        // 全局」, 而 `_ZTIi` 被发射成 `uchar*[2]`, 读它拿到的是**首槽 (vptr)**。
+        // 实测 g++ 链入后 `__cxa_throw` 收到的就是这个 vptr, 于是
+        // `__gxx_personality_v0` 在 vptr 上再取一级虚表直接 SIGSEGV。取址走
+        // `InstKind::AddrOf` (`lea sym(%rip)`) 才是 ABI 要的 `const type_info*`。
+        let typeinfo = self.eh_typeinfo_symbol(ty)?;
+        let ti_operand = match &typeinfo {
+            Some(sym) => {
+                if !self.lowerer.output.rodata.contains(sym) {
+                    self.lowerer.output.rodata.push(sym.clone());
+                }
+                self.lower_sym_addr(sym.clone(), void_ptr_ty.clone())
+            },
+            // 编码不出来 (依赖类型等): 传 null。`__cxa_throw` 会照原样把异常
+            // 递出去, 任何 typed catch 都不匹配 —— 与「该类型不可被命名捕获」
+            // 的语义一致, 且 `catch (...)` 仍然有效。
+            None => Operand::Int(0),
+        };
+        let dtor_operand = self.eh_exception_dtor_operand(ty, fn_ptr_ty.clone());
+
+        // 4. `__cxa_throw(buf, typeinfo, dtor)` —— 不返回。
+        let throw_name = self.register_runtime(CxxRuntimeSymbol::Throw.name());
+        self.push_inst(Inst {
+            dest: None,
+            kind: InstKind::Call {
+                callee: Operand::FnAddr(throw_name, fn_ptr_ty),
+                args: vec![Operand::Var(buf), ti_operand, dtor_operand],
+                ret_ty: Type::Void,
+            },
+            span: dummy_span(),
+        });
+        self.set_term(Terminator::Unreachable);
+        Ok(Operand::Void)
+    }
+
+    /// 抛出类型的析构函数指针 (`__cxa_throw` 第三参数)。
+    ///
+    /// 真源是符号表: 类**有**析构函数符号 (用户写的或 sema 按成员需求合成的)
+    /// 才传 D1, 否则传 0。这样平凡可析构类型不会被凭空引入一个不存在的
+    /// `<class>_dtor_complete` 引用, 而需要销毁的类型也不会泄漏异常对象。
+    fn eh_exception_dtor_operand(&mut self, ty: &CxxType, fn_ptr_ty: Type) -> Operand {
+        let CxxType::Class(class_id) = ty.remove_reference().clone() else {
+            return Operand::Int(0);
+        };
+        let owner = class_id.as_symbol();
+        let has_dtor = self
+            .lowerer
+            .symbols
+            .iter()
+            .any(|s| matches!(s.kind, CxxSymbolKind::Destructor) && s.owner == Some(owner));
+        if !has_dtor {
+            return Operand::Int(0);
+        }
+        let class_name = {
+            let class_sym = match self.lowerer.symbols.get(owner.0) {
+                Some(s) => s,
+                None => return Operand::Int(0),
+            };
+            self.lowerer.symbol_name(class_sym)
+        };
+        // 与 `lower_destroy` 的调用侧同一个名字约定 (`symbol_name` + `dtor_variant_name`);
+        // 同样要的是**函数地址**, 所以走 `AddrOf` 而不是 `SymAddr`。
+        let dtor_name = dtor_variant_name(&class_name, DtorVariant::Complete);
+        self.lower_sym_addr(dtor_name, fn_ptr_ty)
     }
 
     // --- new / delete ---
@@ -3921,6 +5329,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         args: &[HirExprId],
         placement: Option<&[HirExprId]>,
         is_array: bool,
+        ctor: Option<SymbolId>,
     ) -> Result<Operand, LowerIrError> {
         use crate::cpp::runtime::CxxRuntimeSymbol;
 
@@ -3939,7 +5348,13 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             if let CxxType::Class(class_id) = ty {
                 if !args.is_empty() || self.has_ctor_definition(*class_id, CtorVariant::Complete) {
                     // 构造函数需要 this 指针，placement ptr 就是 this
-                    self.lower_construct(*class_id, place_args[0], args, CtorVariant::Complete)?;
+                    self.lower_construct(
+                        *class_id,
+                        place_args[0],
+                        args,
+                        CtorVariant::Complete,
+                        ctor,
+                    )?;
                 }
             }
 
@@ -4044,14 +5459,12 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     };
                     self.push_inst(cast_inst);
 
-                    // 调用构造函数
+                    // 调用构造函数 (重载由 sema 选定)
                     // 注意：这里需要用 HirExprId 来表示指针，但我们只有 Operand
                     // 简化：直接生成构造函数调用，this 指针就是 typed_ptr_var
-                    let class_sym = self.lowerer.get_symbol(class_id.as_symbol())?;
-                    let ctor_name = ctor_variant_name(
-                        &self.lowerer.symbol_name(class_sym),
-                        CtorVariant::Complete,
-                    );
+                    let ctor_name =
+                        self.lowerer
+                            .ctor_link_name(*class_id, CtorVariant::Complete, ctor)?;
                     let fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
                     let mut ctor_args = vec![Operand::Var(typed_ptr_var)];
                     for arg_id in args {
@@ -4343,6 +5756,34 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
     fn lower_stmt(&mut self, stmt_id: HirStmtId) -> Result<(), LowerIrError> {
         let stmt = self.get_stmt(stmt_id)?;
 
+        // zero-cost EH 退休点: 正常析构语句执行**之前**把该对象的清理撤掉。
+        // 撤早了会让这条析构调用不被自己保护 (重复析构), 撤晚了会让已死对象
+        // 参与后续异常的清理 (二次析构) —— 这里正是 GCC 清理链的进出界次序。
+        //
+        // `in_eh_emit` 期间必须跳过: 生成落地垫要**重放**这些析构语句, 而链此时
+        // 是受保护调用那一刻的快照, 重放不能把它改写 (实测后果: 建完落地垫后
+        // 快照里的对象已从链上消失, 同一作用域后面的抛出因此完全不被保护)。
+        if !self.in_eh_emit {
+            if let Some(sym) = self.eh_retire_at.get(&stmt_id).copied() {
+                self.eh_retire_cleanup(sym);
+            }
+        }
+
+        let r = self.lower_stmt_inner(stmt_id, &stmt);
+
+        // zero-cost EH 激活点: 构造完成之后该对象才进入清理集合 (同上, 落地垫
+        // 重放期间不改链)。
+        if !self.in_eh_emit {
+            if let Some(sym) = self.eh_activate_at.get(&stmt_id).copied() {
+                self.eh_activate_cleanup(sym);
+            }
+        }
+        r
+    }
+
+    /// 语句降级的本体 (与 EH 进出界挂钩分开, 让挂钩能包住**整条**语句)。
+    fn lower_stmt_inner(&mut self, stmt_id: HirStmtId, stmt: &HirStmt) -> Result<(), LowerIrError> {
+        let _ = stmt_id;
         match &stmt.kind {
             HirStmtKind::Expr(expr_id) => {
                 let _ = self.lower_expr(*expr_id)?;
@@ -4350,6 +5791,10 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             },
 
             HirStmtKind::Compound(stmts) => {
+                // zero-cost EH: 清理集合的边界**不是**语法块, 而是每个对象的
+                // 构造完成点与正常析构点 (见 `eh_collect_cleanup_sites`)。sema 把
+                // 析构语句发在外层兄弟位置, 按块收帧会提前丢掉清理集合 (实测导致
+                // 抛点完全不被保护), 所以这里不开帧。
                 for s in stmts {
                     self.lower_stmt(*s)?;
                     // 如果当前块已经有终结符（return/break/continue），
@@ -4431,6 +5876,14 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 }
 
                 self.locals.insert(name, var);
+
+                // zero-cost EH 兜底: 预扫第二遍没能定位该对象的构造完成点
+                // (出现新的语句形态时才会这样) 就退回「`Decl` 一结束即激活」。
+                // 正常路径由 `eh_activate_at` 在正确的语句之后激活, 不会走到这里。
+                if self.eh_dtor_of.contains_key(symbol) && !self.eh_activated_syms.contains(symbol)
+                {
+                    self.eh_activate_cleanup(*symbol);
+                }
                 Ok(())
             },
 
@@ -4570,10 +6023,12 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
             HirStmtKind::Fallthrough => Ok(()),
 
-            HirStmtKind::CtorInitBase { base, args } => self.lower_ctor_init_base(*base, args),
+            HirStmtKind::CtorInitBase { base, args, ctor } => {
+                self.lower_ctor_init_base(*base, args, *ctor)
+            },
 
-            HirStmtKind::CtorInitMember { member, args } => {
-                self.lower_ctor_init_member(*member, args)
+            HirStmtKind::CtorInitMember { member, args, ctor } => {
+                self.lower_ctor_init_member(*member, args, *ctor)
             },
 
             HirStmtKind::SetVTablePtr {
@@ -4919,6 +6374,10 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         before_set.insert(inc_bb.clone()); // we set its Jump to cond
         before_set.insert(end_bb.clone()); // left as fall-through
 
+        // zero-cost EH: `for` 初始化域里声明的类局部量, 其析构语句在循环**后面**的
+        // 兄弟语句里; 清理链按「构造完成 → 正常析构」进出界, 所以整个循环期间它们都
+        // 留在集合里, 出了循环由那条析构语句自动撤掉, 不需要额外的作用域帧。
+
         // init
         if let Some(init_id) = init {
             self.lower_stmt(init_id)?;
@@ -5068,308 +6527,256 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         Ok(())
     }
 
-    /// 降低 try/catch 语句（SJLJ 风格异常处理）
+    /// 降低 try/catch 为 **zero-cost EH** (表驱动展开, 无 setjmp)。
     ///
-    /// 生成的伪代码:
-    /// ```c
-    /// __dcc_eh_context_t __eh_ctx;
-    /// __dcc_eh_push_context(&__eh_ctx);
-    /// if (__dcc_eh_setjmp(&__eh_ctx) == 0) {
-    ///     // try body
-    ///     __dcc_eh_pop_context();
-    /// } else {
-    ///     // exception thrown
-    ///     void* exn = __dcc_eh_get_exception(&__eh_ctx);
-    ///     // 逐个检查 catch handler
-    ///     if (type matches handler 0) {
-    ///         // catch body 0
-    ///     } else if (type matches handler 1) {
-    ///         // catch body 1
-    ///     } else {
-    ///         __dcc_eh_rethrow();
-    ///     }
-    ///     __dcc_eh_end_catch(&__eh_ctx);
-    /// }
+    /// 生成的形状与 g++ 产物逐块对齐 (对照样本 `tmp_eh/nested.cpp`):
+    ///
+    /// ```text
+    /// ; 正常路径
+    ///   <try body>            ; 体内每个可能抛出的调用都被登记成 invoke
+    ///   goto try_end
+    /// ; 落地垫区 (只由 unwinder 按 LSDA call-site 区间进入)
+    /// eh_lp.N:  <对象, selector> = [%rax, %rdx]
+    ///           if (selector == <本 try 的 handler 索引>) goto catch_i
+    ///           ...
+    ///           goto eh_resume
+    /// catch_i:  p = __cxa_begin_catch(exc_object); <绑定参数>; <catch 体>
+    ///           __cxa_end_catch(); goto try_end
     /// ```
+    ///
+    /// 关键设计点:
+    ///
+    /// * **handler 入口块在下探 body 之前并压栈**。落地垫是由
+    ///   body 里第一个受保护调用触发生成的, 那时它必须已经能引用到本 try 的
+    ///   各 catch 入口块。
+    /// * try body 与 catch 体是**两条独立的路径**, 所以 catch 体里再抛出的异常
+    ///   只由**更外层**的帧/区域接管 (本 try 的 Try 帧此时已弹出), 与 C++ 的
+    ///   「catch 体不在自己的 try 作用域内」一致。
+    /// * catch 体必须登记 `__cxa_end_catch` 清理: 异常从体内穿出时不调用它,
+    ///   libstdc++ 的 handler 计数会永久泄漏 (`std::uncaught_exceptions()` 与
+    ///   后续 rethrow 全错)。
     fn lower_try(
         &mut self,
         body_id: HirStmtId,
         handlers: &[HirCatchHandler],
     ) -> Result<(), LowerIrError> {
-        let void_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
-        let int_ty = Type::Int;
+        let try_id = self.eh_try_seq;
+        self.eh_try_seq += 1;
 
-        // 创建异常上下文变量（栈上分配）
-        // 大小必须足以容纳运行时 __dcc_eh_context_t (含 jmp_buf)：
-        // x86-64 SysV 上 jmp_buf ≈ 200B，整结构体约 256B + padding
-        // 取 512 字节作为保守上限，16 字节对齐以满足 jmp_buf 要求
-        let ctx_size: usize = 512;
-        let ctx_ty = Type::Array(
-            Box::new(QualType::new(Type::UChar)),
-            crate::ast::ArraySize::Const(ctx_size),
-        );
-        let ctx_var = self.fresh_syn("__eh_ctx", ctx_ty.clone());
-        self.ssa
-            .local_types
-            .insert("__eh_ctx".to_string(), ctx_ty.clone());
-        self.ssa.original_locals.insert("__eh_ctx".to_string());
-        self.ssa
-            .local_quals
-            .insert("__eh_ctx".to_string(), QualifierFlags::NONE);
-        self.locals.insert("__eh_ctx".to_string(), ctx_var.clone());
-
-        // 获取上下文指针（数组名退化为指针）
-        let ctx_ptr_var =
-            self.fresh_syn("__eh_ctx_ptr", Type::Ptr(Box::new(QualType::new(Type::UChar))));
-        let ctx_addr_inst = Inst {
-            dest: Some(ctx_ptr_var.clone()),
-            kind: InstKind::Cast {
-                ty: Type::Ptr(Box::new(QualType::new(Type::UChar))),
-                e: Operand::Var(ctx_var.clone()),
-            },
-            span: dummy_span(),
-        };
-        self.push_inst(ctx_addr_inst);
-
-        // 调用 __dcc_eh_push_context(ctx)
-        let push_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
-        let push_callee = Operand::FnAddr("__dcc_eh_push_context".to_string(), push_fn_ty.clone());
-        let push_call = Inst {
-            dest: None,
-            kind: InstKind::Call {
-                callee: push_callee,
-                args: vec![Operand::Var(ctx_ptr_var.clone())],
-                ret_ty: Type::Void,
-            },
-            span: dummy_span(),
-        };
-        self.push_inst(push_call);
-
-        // 调用 __dcc_eh_setjmp(ctx)，返回值决定是否异常发生
-        let setjmp_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Int)));
-        let setjmp_callee = Operand::FnAddr("__dcc_eh_setjmp".to_string(), setjmp_fn_ty.clone());
-        let setjmp_result = self.fresh_syn("__eh_setjmp_res", int_ty.clone());
-        let setjmp_call = Inst {
-            dest: Some(setjmp_result.clone()),
-            kind: InstKind::Call {
-                callee: setjmp_callee,
-                args: vec![Operand::Var(ctx_ptr_var.clone())],
-                ret_ty: int_ty.clone(),
-            },
-            span: dummy_span(),
-        };
-        self.push_inst(setjmp_call);
-
-        // 创建基本块
-        let try_bb = self.unique_bb("try_body");
-        let catch_bb = self.unique_bb("catch_dispatch");
-        let end_bb = self.unique_bb("try_end");
-
-        // 分支：setjmp 返回 0 进入 try body，非 0 进入 catch
-        let cond = Operand::Var(setjmp_result.clone());
-        // setjmp == 0 走 try，否则走 catch
-        self.set_term(Terminator::Branch {
-            cond: cond.clone(),
-            t: catch_bb.clone(), // 非 0 (true) -> catch
-            f: try_bb.clone(),   // 0 (false) -> try body
-        });
-
-        // === try body 块 ===
-        self.current_bb = try_bb.clone();
-        self.lower_stmt(body_id)?;
-        // try body 正常结束：pop context，跳到 end
-        let try_term = self.ssa.blocks[&try_bb].term.clone();
-        if matches!(try_term, Terminator::Unreachable) {
-            // 调用 __dcc_eh_pop_context
-            let pop_callee =
-                Operand::FnAddr("__dcc_eh_pop_context".to_string(), push_fn_ty.clone());
-            let pop_call = Inst {
-                dest: None,
-                kind: InstKind::Call {
-                    callee: pop_callee,
-                    args: vec![],
-                    ret_ty: Type::Void,
-                },
-                span: dummy_span(),
+        // 1. 先建每个 handler 的入口块与类型表索引 (下探 body 之前)。
+        let mut eh_handlers = Vec::with_capacity(handlers.len());
+        for h in handlers {
+            let catch_bb = self.eh_new_block("catch");
+            // 省略号 handler: typeinfo = None => 类型表里发值为 0 的空表项,
+            // 但索引仍是正的 (libstdc++ 靠「filter > 0 且表项为 0」识别 catch-all)。
+            let typeinfo = if h.is_catch_all {
+                None
+            } else {
+                self.eh_typeinfo_symbol(&h.param_ty)?
             };
-            self.push_inst(pop_call);
-            self.ssa.blocks.get_mut(&try_bb).unwrap().term = Terminator::Jump(end_bb.clone());
+            let type_index = self.eh_type_index_for(typeinfo.clone());
+            eh_handlers.push(EhHandler {
+                type_index,
+                typeinfo,
+                catch_bb,
+            });
+        }
+        // catch 体正常结束后的汇合块: 属于**正常** CFG, 落地垫用 `goto` 重入它
+        // (由 `finish_eh_blocks` 自动登记成 `eh_reentry_labels`)。
+        let after_bb = self.unique_bb("try_end");
+
+        // 2. 压 Try 帧 → 下探 body → 弹帧。body 里的受保护调用因此看到
+        //    「本 try 的 handler 在前、更外层块作用域的清理在后」的 action 链。
+        self.eh_chain.push(EhChainEntry::Try {
+            try_id,
+            handlers: eh_handlers.clone(),
+        });
+        self.lower_stmt(body_id)?;
+        self.eh_chain.pop();
+
+        // 3. try body 正常走完 → 汇合块 (body 以 return/throw 结尾时不补跳转)。
+        let cur = self.current_bb.clone();
+        if matches!(self.ssa.blocks[&cur].term.clone(), Terminator::Unreachable) {
+            self.set_term(Terminator::Jump(after_bb.clone()));
         }
 
-        // === catch dispatch 块 ===
-        self.current_bb = catch_bb.clone();
+        // 4. 各 catch 体。
+        for (i, handler) in handlers.iter().enumerate() {
+            let catch_bb = eh_handlers[i].catch_bb.clone();
+            self.current_bb = catch_bb.clone();
 
-        // 获取异常对象指针
-        let get_exn_fn_ty =
-            Type::Ptr(Box::new(QualType::new(Type::Ptr(Box::new(QualType::new(Type::Void))))));
-        let get_exn_callee =
-            Operand::FnAddr("__dcc_eh_get_exception".to_string(), get_exn_fn_ty.clone());
-        let exn_ptr_var = self.fresh_syn("__eh_exn_ptr", void_ptr_ty.clone());
-        let get_exn_call = Inst {
-            dest: Some(exn_ptr_var.clone()),
-            kind: InstKind::Call {
-                callee: get_exn_callee,
-                args: vec![Operand::Var(ctx_ptr_var.clone())],
-                ret_ty: void_ptr_ty.clone(),
+            // 4a. `__cxa_begin_catch(exc_object)`: 交出异常对象 (对类类型还要
+            //     做「已捕获」登记), 返回值即对象地址。
+            let void_ptr_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+            let fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+            let obj = self.eh_exc_slots().0;
+            let caught = self.fresh_syn("eh_caught", void_ptr_ty.clone());
+            let begin_name = self.register_runtime(CxxRuntimeSymbol::BeginCatch.name());
+            self.push_inst(Inst {
+                dest: Some(caught.clone()),
+                kind: InstKind::Call {
+                    callee: Operand::FnAddr(begin_name, fn_ty),
+                    args: vec![Operand::Var(obj)],
+                    ret_ty: void_ptr_ty,
+                },
+                span: dummy_span(),
+            });
+
+            // 4b. 绑定 catch 形参 (引用 / 按值类 / 标量三条路)。
+            if let Some(param) = handler.param {
+                self.eh_bind_catch_param(param, &handler.param_ty, &caught)?;
+            }
+
+            // 4c. catch 体自身的作用域: 体内再抛出必须先 `__cxa_end_catch`。
+            let end_key = self.eh_add_cleanup(EhCleanupKind::EndCatch);
+            self.lower_stmt(handler.body)?;
+            self.eh_remove_cleanup(end_key);
+
+            // 4d. 体正常结束: end_catch → 汇合块。
+            let cur = self.current_bb.clone();
+            if matches!(self.ssa.blocks[&cur].term.clone(), Terminator::Unreachable) {
+                self.eh_call_runtime(CxxRuntimeSymbol::EndCatch, vec![]);
+                self.set_term(Terminator::Jump(after_bb.clone()));
+            }
+        }
+
+        self.current_bb = after_bb;
+        Ok(())
+    }
+
+    /// 把 `catch` 形参绑定到 `__cxa_begin_catch` 返回的异常对象地址。
+    ///
+    /// 三条路径按 C++ [exception.propagation]/1 与 Itanium ABI 划分:
+    ///   * `catch (T& e)` / `catch (T&& e)`: 引用的 ABI 表示**就是**对象地址,
+    ///     直接把指针值绑进去。旧的统一 `Load` 写法对引用会多解一层, 把对象的
+    ///     第一个字当成指针用。
+    ///   * `catch (T e)` 且 T 是类: 从异常对象**拷贝构造**局部量 (有用户声明的
+    ///     拷贝构造就必须调它, 这是可观察行为); 没有 (隐式拷贝) 时退回聚合整体
+    ///     载入, 与按值传参的隐式拷贝语义一致。
+    ///   * `catch (int e)` 等标量: 解引用载入。
+    fn eh_bind_catch_param(
+        &mut self,
+        param: SymbolId,
+        param_ty: &CxxType,
+        caught: &SsaVar,
+    ) -> Result<(), LowerIrError> {
+        let sym = self.lowerer.get_symbol(param)?;
+        let name = sym.name.clone();
+        let is_volatile = sym.is_volatile;
+        drop(sym);
+        // 类型真源用 HIR 上的 `handler.param_ty`: 符号表里的 `sym.ty` 与它是同一个
+        // 声明的两份副本, 一旦哪边漏了限定符就会不一致。
+        let ir_ty = self.lowerer.lower_type(param_ty)?;
+        let var = self.fresh_var(&name, ir_ty.clone());
+        self.ssa.local_types.insert(name.clone(), ir_ty.clone());
+        self.ssa.original_locals.insert(name.clone());
+        self.ssa.local_quals.insert(
+            name.clone(),
+            if is_volatile {
+                QualifierFlags::VOLATILE
+            } else {
+                QualifierFlags::NONE
+            },
+        );
+
+        let is_ref = matches!(param_ty, CxxType::LValueRef(_) | CxxType::RValueRef(_));
+        // 值形态 (引用脱掉后的那一层) 决定指针类型与是否需要拷贝构造。
+        let value_ty = match param_ty {
+            CxxType::LValueRef(t) | CxxType::RValueRef(t) => (**t).clone(),
+            other => other.clone(),
+        };
+        let value_ir_ty = self.lowerer.lower_type(&value_ty)?;
+        let typed_ptr_ty = Type::Ptr(Box::new(QualType::new(value_ir_ty.clone())));
+        let typed = self.fresh_syn("eh_typed", typed_ptr_ty.clone());
+        self.push_inst(Inst {
+            dest: Some(typed.clone()),
+            kind: InstKind::Cast {
+                ty: typed_ptr_ty.clone(),
+                e: Operand::Var(caught.clone()),
             },
             span: dummy_span(),
-        };
-        self.push_inst(get_exn_call);
+        });
 
-        // 逐个处理 catch handler
-        // 对于每个 handler，生成: if (type_match) { handler body } else { next handler }
-        let mut current_bb = catch_bb.clone();
-        let mut next_handler_bbs: Vec<String> = Vec::new();
-
-        for (i, handler) in handlers.iter().enumerate() {
-            let handler_bb = self.unique_bb(&format!("catch_handler_{}", i));
-            let next_bb = if i + 1 < handlers.len() {
-                let bb = self.unique_bb(&format!("catch_next_{}", i));
-                next_handler_bbs.push(bb.clone());
-                bb
-            } else {
-                // 最后一个 handler 不匹配则 rethrow
-                let bb = self.unique_bb("catch_rethrow");
-                next_handler_bbs.push(bb.clone());
-                bb
-            };
-
-            self.current_bb = current_bb.clone();
-
-            // 检查类型是否匹配
-            // 简化：对于基本类型，用 typeinfo 指针比较
-            // catch (...) 总是匹配
-            let is_catch_all = matches!(handler.param_ty, CxxType::Void) && handler.param.is_none();
-
-            if is_catch_all {
-                // catch (...)：直接进入 handler
-                self.set_term(Terminator::Jump(handler_bb.clone()));
-            } else {
-                // 调用 __dcc_eh_type_match(exn, typeinfo)
-                let typeinfo_op = self.get_typeinfo_for(&handler.param_ty)?;
-                let type_match_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Int)));
-                let type_match_callee =
-                    Operand::FnAddr("__dcc_eh_type_match".to_string(), type_match_fn_ty);
-                let match_result = self.fresh_syn("__eh_type_match", int_ty.clone());
-                let match_call = Inst {
-                    dest: Some(match_result.clone()),
-                    kind: InstKind::Call {
-                        callee: type_match_callee,
-                        args: vec![Operand::Var(exn_ptr_var.clone()), typeinfo_op],
-                        ret_ty: int_ty.clone(),
-                    },
-                    span: dummy_span(),
-                };
-                self.push_inst(match_call);
-
-                // 匹配则进入 handler，否则进入下一个
-                self.set_term(Terminator::Branch {
-                    cond: Operand::Var(match_result),
-                    t: handler_bb.clone(),
-                    f: next_bb.clone(),
-                });
-            }
-
-            // handler body
-            self.current_bb = handler_bb.clone();
-
-            // 如果有 catch 参数，把异常对象绑定到参数
-            if let Some(param_sym_id) = handler.param {
-                let param_sym = self.lowerer.get_symbol(param_sym_id)?;
-                let param_name = param_sym.name.clone();
-                let param_is_volatile = param_sym.is_volatile;
-                drop(param_sym);
-                let param_ir_ty = self.lowerer.lower_type(&handler.param_ty)?;
-
-                // 创建参数变量
-                let param_var = self.fresh_var(&param_name, param_ir_ty.clone());
-                self.ssa
-                    .local_types
-                    .insert(param_name.clone(), param_ir_ty.clone());
-                self.ssa.original_locals.insert(param_name.clone());
-                let catch_quals = if param_is_volatile {
-                    QualifierFlags::VOLATILE
-                } else {
-                    QualifierFlags::NONE
-                };
-                self.ssa.local_quals.insert(param_name.clone(), catch_quals);
-
-                // 把 void* 异常指针转为参数类型并赋值
-                // 对于引用类型：直接绑定指针（引用即指针）
-                // 对于值类型：解引用拷贝
-                let typed_ptr_ty = Type::Ptr(Box::new(QualType::new(param_ir_ty.clone())));
-                let typed_ptr_var = self.fresh_syn("__catch_typed_ptr", typed_ptr_ty.clone());
-                let cast_inst = Inst {
-                    dest: Some(typed_ptr_var.clone()),
-                    kind: InstKind::Cast {
-                        ty: typed_ptr_ty,
-                        e: Operand::Var(exn_ptr_var.clone()),
-                    },
-                    span: dummy_span(),
-                };
-                self.push_inst(cast_inst);
-
-                // 解引用得到值
-                let load_inst = Inst {
-                    dest: Some(param_var.clone()),
-                    kind: InstKind::Load {
-                        e: Operand::Var(typed_ptr_var),
-                        ty: param_ir_ty.clone(),
-                        is_volatile: false,
-                    },
-                    span: dummy_span(),
-                };
-                self.push_inst(load_inst);
-
-                self.locals.insert(param_name, param_var);
-            }
-
-            // 执行 catch body
-            self.lower_stmt(handler.body)?;
-
-            // catch body 结束后，调用 __dcc_eh_end_catch 并跳到 end
-            let handler_term = self.ssa.blocks[&handler_bb].term.clone();
-            if matches!(handler_term, Terminator::Unreachable) {
-                let end_catch_callee =
-                    Operand::FnAddr("__dcc_eh_end_catch".to_string(), push_fn_ty.clone());
-                let end_catch_call = Inst {
+        if is_ref {
+            // 引用形参的存放就是被引用对象的地址: 直接绑指针, 不载入。
+            self.push_inst(Inst {
+                dest: Some(var.clone()),
+                kind: InstKind::Cast {
+                    ty: ir_ty.clone(),
+                    e: Operand::Var(typed),
+                },
+                span: dummy_span(),
+            });
+        } else if let CxxType::Class(class_id) = value_ty {
+            // 按值捕获类对象: 优先走用户声明的拷贝构造函数。
+            let copy_ctor = self.eh_resolve_copy_ctor(class_id);
+            if let Some(ctor) = copy_ctor {
+                let ctor_name =
+                    self.lowerer
+                        .ctor_link_name(class_id, CtorVariant::Complete, Some(ctor))?;
+                let place_addr = self.lower_sym_addr(var.base.clone(), typed_ptr_ty);
+                let fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
+                self.push_inst(Inst {
                     dest: None,
                     kind: InstKind::Call {
-                        callee: end_catch_callee,
-                        args: vec![Operand::Var(ctx_ptr_var.clone())],
+                        callee: Operand::FnAddr(ctor_name, fn_ty),
+                        args: vec![place_addr, Operand::Var(typed)],
                         ret_ty: Type::Void,
                     },
                     span: dummy_span(),
-                };
-                self.push_inst(end_catch_call);
-                self.ssa.blocks.get_mut(&handler_bb).unwrap().term =
-                    Terminator::Jump(end_bb.clone());
+                });
+            } else {
+                // 隐式拷贝 (平凡/聚合): 整体载入到局部量。
+                self.push_inst(Inst {
+                    dest: Some(var.clone()),
+                    kind: InstKind::Load {
+                        e: Operand::Var(typed),
+                        ty: value_ir_ty,
+                        is_volatile: false,
+                    },
+                    span: dummy_span(),
+                });
             }
-
-            current_bb = next_bb.clone();
-        }
-
-        // 最后一个 handler 不匹配：rethrow
-        if !handlers.is_empty() {
-            let rethrow_bb = next_handler_bbs.last().unwrap().clone();
-            self.current_bb = rethrow_bb.clone();
-            let rethrow_fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
-            let rethrow_callee = Operand::FnAddr("__dcc_eh_rethrow".to_string(), rethrow_fn_ty);
-            let rethrow_call = Inst {
-                dest: None,
-                kind: InstKind::Call {
-                    callee: rethrow_callee,
-                    args: vec![],
-                    ret_ty: Type::Void,
+        } else {
+            self.push_inst(Inst {
+                dest: Some(var.clone()),
+                kind: InstKind::Load {
+                    e: Operand::Var(typed),
+                    ty: value_ir_ty,
+                    is_volatile: false,
                 },
                 span: dummy_span(),
-            };
-            self.push_inst(rethrow_call);
-            self.ssa.blocks.get_mut(&rethrow_bb).unwrap().term = Terminator::Unreachable;
+            });
         }
 
-        self.current_bb = end_bb;
+        self.locals.insert(name, var);
         Ok(())
+    }
+
+    /// 找该类**用户声明**的拷贝构造函数 (单参、脱引用后是本类)。
+    ///
+    /// 只认用户声明的: dcc 不合成隐式拷贝构造符号 (见 `synthesize_implicit_*`),
+    /// 找不到时调用方退回聚合整体拷贝 —— 与按值传参/返回的隐式拷贝同一语义。
+    fn eh_resolve_copy_ctor(&self, class_id: ClassId) -> Option<SymbolId> {
+        let owner = class_id.as_symbol();
+        for sym in self.lowerer.symbols.iter() {
+            if !matches!(sym.kind, CxxSymbolKind::Constructor) {
+                continue;
+            }
+            if sym.owner != Some(owner) {
+                continue;
+            }
+            let CxxType::Function { params, .. } = &sym.ty else {
+                continue;
+            };
+            if params.len() != 1 {
+                continue;
+            }
+            if matches!(params[0].remove_reference(), CxxType::Class(c) if *c == class_id) {
+                return Some(sym.id);
+            }
+        }
+        None
     }
 
     // --- ctor initializer lowering ---
@@ -5379,6 +6786,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         &mut self,
         base_class: ClassId,
         args: &[HirExprId],
+        ctor: Option<SymbolId>,
     ) -> Result<(), LowerIrError> {
         // this 指针
         let this = Operand::Var(self.ssa.params[0].clone());
@@ -5398,16 +6806,32 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             self.lowerer.lower_type(&base_ty)?
         };
 
+        // `base_class == owner_class` 时不是构造基类, 而是**委托构造**:
+        // GCC 实测 `S::C2(int)` 委托时 `call _ZN1SC1Ev` —— 叫目标的完整对象
+        // 变体 (C1), 因为委托构造负责把整个对象 (含虚基/vptr) 建完。
+        // 委托时 this 就是目标对象, 不查基类子对象偏移 (本类不在自己的
+        // `bases` 里, 查了会报 "base class N not found in class N")。
+        let delegating = base_class == owner_class;
+        let variant = if delegating {
+            CtorVariant::Complete
+        } else {
+            CtorVariant::Base
+        };
+        let ctor_name = self.lowerer.ctor_link_name(base_class, variant, ctor)?;
+
         // 计算基类子对象地址
-        let offset = self
-            .lowerer
-            .base_subobject_offset(owner_class, base_class)?
-            .ok_or_else(|| {
-                LowerIrError::Internal(format!(
-                    "base class {} not found in class {}",
-                    base_class.0, owner_class.0
-                ))
-            })? as i64;
+        let offset = if delegating {
+            0
+        } else {
+            self.lowerer
+                .base_subobject_offset(owner_class, base_class)?
+                .ok_or_else(|| {
+                    LowerIrError::Internal(format!(
+                        "base class {} not found in class {}",
+                        base_class.0, owner_class.0
+                    ))
+                })? as i64
+        };
         let base_ptr = if offset == 0 {
             // primary base: 直接 cast
             if self.ssa.params[0].ty == base_ptr_ty {
@@ -5464,9 +6888,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             Operand::Var(dest)
         };
 
-        // 调用基类构造函数（base variant）
-        let base_sym = self.lowerer.get_symbol(base_class.as_symbol())?;
-        let ctor_name = ctor_variant_name(&self.lowerer.symbol_name(base_sym), CtorVariant::Base);
+        // 调用基类构造函数（base variant）/ 委托构造 (complete variant)
         let fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
 
         let mut lowered_args = Vec::with_capacity(1 + args.len());
@@ -5687,6 +7109,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         &mut self,
         member_sym_id: SymbolId,
         args: &[HirExprId],
+        ctor: Option<SymbolId>,
     ) -> Result<(), LowerIrError> {
         let member_sym = self.lowerer.get_symbol(member_sym_id)?;
         let member_name = member_sym.name.clone();
@@ -5718,10 +7141,10 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
                 let member_ptr = self.compute_member_ptr(this, member_offset, &member_ptr_ty)?;
 
-                // 调用成员构造函数
-                let class_sym = self.lowerer.get_symbol(member_class.as_symbol())?;
+                // 调用成员构造函数 (重载由 sema 选定)
                 let ctor_name =
-                    ctor_variant_name(&self.lowerer.symbol_name(class_sym), CtorVariant::Complete);
+                    self.lowerer
+                        .ctor_link_name(*member_class, CtorVariant::Complete, ctor)?;
                 let fn_ty = Type::Ptr(Box::new(QualType::new(Type::Void)));
 
                 let mut lowered_args = Vec::with_capacity(1 + args.len());
@@ -5918,6 +7341,11 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         let is_destructor = matches!(fn_sym.kind, CxxSymbolKind::Destructor);
         drop(fn_sym); // 释放借用
 
+        // zero-cost EH: 函数也是一个作用域。预扫出「哪些局部量需要异常清理」
+        // 并开一个块帧, 否则 `void f(){ A a; g(); }` 里 `g()` 抛出时 `A a` 不会被
+        // 析构 (GCC 会) —— 函数级局部量没有包在 Compound 里, 只能在这里登记。
+        self.eh_begin_function_scope(&body);
+
         // 构造函数：先执行初始化列表（基类构造 + 成员初始化）
         if is_constructor {
             for init_id in &body.ctor_initializers {
@@ -5942,6 +7370,8 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
         if is_destructor {
             self.lower_dtor_epilogue()?;
         }
+
+        self.eh_end_function_scope();
 
         Ok(())
     }
@@ -6645,6 +8075,10 @@ mod tests {
             base_ctor_order: vec![],
             field_init_order: vec!["x".to_string()],
             dtor_order: vec![DtorStep::Member("x".to_string())],
+            thunks: Vec::new(),
+            has_direct_virtual_bases: false,
+            vbase_embedded_vptr: 0,
+            vbase_own_vptr_slots: Vec::new(),
             this_adjust_map: std::collections::HashMap::new(),
             needs_vptr: false,
             has_virtual_functions: false,
@@ -6677,6 +8111,10 @@ mod tests {
             base_ctor_order: vec![base_id],
             field_init_order: vec!["y".to_string()],
             dtor_order: vec![DtorStep::Member("y".to_string()), DtorStep::Base(base_id)],
+            thunks: Vec::new(),
+            has_direct_virtual_bases: false,
+            vbase_embedded_vptr: 0,
+            vbase_own_vptr_slots: Vec::new(),
             this_adjust_map: {
                 let mut m = std::collections::HashMap::new();
                 m.insert(base_id, crate::cpp::abi_layout::ThisAdjust::offset(0));
@@ -6780,6 +8218,7 @@ mod tests {
             linkage_name: None,
             scope: crate::cpp::sema::ScopeId(0),
             is_volatile: false,
+            is_const: false,
         });
         symbols.push(CxxSymbol {
             id: fn_sym,
@@ -6797,6 +8236,7 @@ mod tests {
             linkage_name: None,
             scope: crate::cpp::sema::ScopeId(0),
             is_volatile: false,
+            is_const: false,
         });
 
         let mut lowerer = IrLowerer::new(&hir, &symbols);
@@ -6915,6 +8355,10 @@ mod tests {
             base_ctor_order: vec![],
             field_init_order: vec!["a".to_string()],
             dtor_order: vec![DtorStep::Member("a".to_string())],
+            thunks: Vec::new(),
+            has_direct_virtual_bases: false,
+            vbase_embedded_vptr: 0,
+            vbase_own_vptr_slots: Vec::new(),
             this_adjust_map: std::collections::HashMap::new(),
             needs_vptr: false,
             has_virtual_functions: false,
@@ -6942,6 +8386,10 @@ mod tests {
             base_ctor_order: vec![],
             field_init_order: vec!["b".to_string()],
             dtor_order: vec![DtorStep::Member("b".to_string())],
+            thunks: Vec::new(),
+            has_direct_virtual_bases: false,
+            vbase_embedded_vptr: 0,
+            vbase_own_vptr_slots: Vec::new(),
             this_adjust_map: std::collections::HashMap::new(),
             needs_vptr: false,
             has_virtual_functions: false,
@@ -6988,6 +8436,10 @@ mod tests {
                 DtorStep::Base(b_id),
                 DtorStep::Base(a_id),
             ],
+            thunks: Vec::new(),
+            has_direct_virtual_bases: false,
+            vbase_embedded_vptr: 0,
+            vbase_own_vptr_slots: Vec::new(),
             this_adjust_map: {
                 let mut m = std::collections::HashMap::new();
                 m.insert(a_id, crate::cpp::abi_layout::ThisAdjust::offset(0));
@@ -7058,6 +8510,7 @@ mod tests {
             linkage_name: None,
             scope: crate::cpp::sema::ScopeId(0),
             is_volatile: false,
+            is_const: false,
         };
         let fn_symbol = CxxSymbol {
             id: fn_sym,
@@ -7075,6 +8528,7 @@ mod tests {
             linkage_name: None,
             scope: crate::cpp::sema::ScopeId(0),
             is_volatile: false,
+            is_const: false,
         };
 
         // Use take_symbols() from sema
@@ -7126,6 +8580,10 @@ mod tests {
             base_ctor_order: vec![],
             field_init_order: vec!["a".to_string()],
             dtor_order: vec![DtorStep::Member("a".to_string())],
+            thunks: Vec::new(),
+            has_direct_virtual_bases: false,
+            vbase_embedded_vptr: 0,
+            vbase_own_vptr_slots: Vec::new(),
             this_adjust_map: std::collections::HashMap::new(),
             needs_vptr: false,
             has_virtual_functions: false,
@@ -7152,6 +8610,10 @@ mod tests {
             base_ctor_order: vec![],
             field_init_order: vec!["b".to_string()],
             dtor_order: vec![DtorStep::Member("b".to_string())],
+            thunks: Vec::new(),
+            has_direct_virtual_bases: false,
+            vbase_embedded_vptr: 0,
+            vbase_own_vptr_slots: Vec::new(),
             this_adjust_map: std::collections::HashMap::new(),
             needs_vptr: false,
             has_virtual_functions: false,
@@ -7193,6 +8655,10 @@ mod tests {
                 DtorStep::Base(b_id),
                 DtorStep::Base(a_id),
             ],
+            thunks: Vec::new(),
+            has_direct_virtual_bases: false,
+            vbase_embedded_vptr: 0,
+            vbase_own_vptr_slots: Vec::new(),
             this_adjust_map: {
                 let mut m = std::collections::HashMap::new();
                 m.insert(a_id, crate::cpp::abi_layout::ThisAdjust::offset(0));
@@ -7266,6 +8732,7 @@ mod tests {
             id: HirStmtId(0),
             kind: HirStmtKind::CtorInitBase {
                 base: a_id,
+                ctor: None,
                 args: vec![],
             },
         };
@@ -7276,6 +8743,7 @@ mod tests {
             id: HirStmtId(1),
             kind: HirStmtKind::CtorInitBase {
                 base: b_id,
+                ctor: None,
                 args: vec![],
             },
         };
@@ -7632,10 +9100,7 @@ mod tests {
                 callee: HirCallee::Virtual {
                     method: method_sym,
                     slot: 0,
-                    this_adjust: crate::cpp::hir::ThisAdjust {
-                        non_virtual: 0,
-                        vbase_index: None,
-                    },
+                    this_adjust: crate::cpp::hir::ThisAdjust { non_virtual: 0 },
                 },
                 args: vec![HirExprId(0)],
             },
@@ -7670,7 +9135,8 @@ mod tests {
 
         let mut lowerer = IrLowerer::new(&hir, &symbols);
         lowerer.register_abi(class_id, abi);
-        assert!(lowerer.lower().is_ok(), "lowering should succeed");
+        let lr = lowerer.lower();
+        assert!(lr.is_ok(), "lowering should succeed: {:?}", lr.err());
 
         let out = lowerer.finish();
         assert_eq!(out.functions.len(), 1);
@@ -7774,7 +9240,8 @@ mod tests {
 
         let mut lowerer = IrLowerer::new(&hir, &symbols);
         lowerer.register_abi(class_id, abi);
-        assert!(lowerer.lower().is_ok(), "lowering should succeed");
+        let lr = lowerer.lower();
+        assert!(lr.is_ok(), "lowering should succeed: {:?}", lr.err());
 
         let out = lowerer.finish();
         assert_eq!(out.functions.len(), 1);
@@ -7901,6 +9368,31 @@ mod tests {
             Access::Public,
         );
 
+        // B 链 secondary vtable 的槽指向 `Class2::b_func` 的 this-adjust
+        // thunk (GCC 实测 `_ZThn16_N1C6b_funcEv`: `subq $16,%rdi; jmp`)。
+        // thunk 的签名取自目标函数, 所以实现要与调用方在同一 TU ——
+        // 与真实流水线 (native 把类的所有方法一发下发) 一致。
+        let c_ptr_ty = CxxType::Pointer(Box::new(CxxType::Class(c_id)));
+        let impl_ty = CxxType::Function {
+            ret: Box::new(CxxType::Void),
+            params: vec![c_ptr_ty.clone()],
+            is_const: false,
+            is_volatile: false,
+            ref_qual: None,
+        };
+        let impl_sym = sema.add_symbol(
+            "Class2::b_func".into(),
+            CxxSymbolKind::Function,
+            impl_ty,
+            Access::Public,
+        );
+        let impl_this = sema.add_symbol(
+            "__impl_this".into(),
+            CxxSymbolKind::Variable,
+            c_ptr_ty,
+            Access::Public,
+        );
+
         let symbols = sema.take_symbols();
         let mut hir = HirTranslationUnit::new();
 
@@ -7920,7 +9412,6 @@ mod tests {
                     slot: 0,
                     this_adjust: crate::cpp::hir::ThisAdjust {
                         non_virtual: 16, // from C to B subobject
-                        vbase_index: None,
                     },
                 },
                 args: vec![HirExprId(0)],
@@ -7948,17 +9439,33 @@ mod tests {
             params: vec![param_sym],
             ret_ty: CxxType::Void,
         });
+        hir.bodies.push(HirBody {
+            id: HirBodyId(1),
+            stmts: vec![],
+            ctor_initializers: vec![],
+        });
+        hir.functions.push(HirFunction {
+            symbol: impl_sym,
+            body: HirBodyId(1),
+            params: vec![impl_this],
+            ret_ty: CxxType::Void,
+        });
 
         let mut lowerer = IrLowerer::new(&hir, &symbols);
         lowerer.register_abi(a_id, calc.compute_class(a_id));
         lowerer.register_abi(b_id, calc.compute_class(b_id));
         lowerer.register_abi(c_id, abi_c);
 
-        assert!(lowerer.lower().is_ok(), "lowering should succeed");
+        let lr = lowerer.lower();
+        assert!(lr.is_ok(), "lowering should succeed: {:?}", lr.err());
 
         let out = lowerer.finish();
-        assert_eq!(out.functions.len(), 1);
-        let func = &out.functions[0];
+        // 本 TU 里的函数: test_adjust + Class2::b_func 实现 + 它的 thunk
+        let func = out
+            .functions
+            .iter()
+            .find(|f| f.name == "test_adjust")
+            .expect("test_adjust 应当已下发");
         let entry = &func.blocks[&func.entry];
 
         // 应该有 Add 指令（调整 this 指针到 B subobject）
@@ -7989,5 +9496,29 @@ mod tests {
             .filter(|(name, _)| name.contains("Class2"))
             .collect();
         assert!(!c_vtables.is_empty(), "C should have at least primary vtable");
+
+        // thunk 入口必须是真发出来的函数, 并且与 vtable 里写的名字一致
+        // (否则 vtable 槽指向一个不存在的符号, 运行期直接跳空)。
+        let b_chain = out
+            .vtables
+            .iter()
+            .find(|(name, _)| name.contains("Class2") && name.contains("Class1"))
+            .expect("B 链的 secondary vtable");
+        let thunk_entry = b_chain
+            .1
+            .iter()
+            .filter_map(|e| match e {
+                crate::cpp::lower_ir::VTableEntry::SymAddr(s) if s.starts_with("dcc_thunk_") => {
+                    Some(s.clone())
+                },
+                _ => None,
+            })
+            .next()
+            .expect("secondary vtable 应写入 thunk 入口");
+        assert!(
+            out.functions.iter().any(|f| f.name == thunk_entry),
+            "thunk {} 必须有定义",
+            thunk_entry
+        );
     }
 }

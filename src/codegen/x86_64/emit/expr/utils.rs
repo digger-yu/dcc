@@ -378,11 +378,7 @@ impl Codegen {
             },
         }
     }
-    fn encode_complex_parts_f(
-        re: FloatConst,
-        im: FloatConst,
-        inner: &Type,
-    ) -> Vec<u8> {
+    fn encode_complex_parts_f(re: FloatConst, im: FloatConst, inner: &Type) -> Vec<u8> {
         crate::codegen::x86_64::mem::global::encode_complex_parts_f(re, im, inner)
     }
     fn encode_complex_parts_i(re: i128, im: i128, inner: &Type) -> Vec<u8> {
@@ -391,9 +387,7 @@ impl Codegen {
     pub(crate) fn eval_asm_operand(expr: &Expr) -> Option<String> {
         match const_eval::eval_full(expr, false) {
             Ok(ConstValue::Int(v)) => return Some(v.to_string()),
-            Ok(ConstValue::Float(f)) => {
-                return Some((f.as_f64() as i128).to_string())
-            },
+            Ok(ConstValue::Float(f)) => return Some((f.as_f64() as i128).to_string()),
             Ok(ConstValue::Addr { name, offset }) => {
                 return Some(Self::format_asm_symbol_immediate(&name, offset));
             },
@@ -462,24 +456,18 @@ impl Codegen {
             for v in [*real, *imag] {
                 match inner {
                     Type::Float => {
-                        data.extend_from_slice(
-                            &(v.as_f64() as f32).to_bits().to_le_bytes(),
-                        )
+                        data.extend_from_slice(&(v.as_f64() as f32).to_bits().to_le_bytes())
                     },
                     Type::LongDouble => {
                         // 真 80-bit 编码（16B 槽 = 10 字节 + 6 字节 padding）
                         let mut bits = match v {
                             FloatConst::LongDouble(b) => b.to_vec(),
-                            other => {
-                                crate::float80::from_f64(other.as_f64()).to_vec()
-                            },
+                            other => crate::float80::from_f64(other.as_f64()).to_vec(),
                         };
                         bits.resize(16, 0);
                         data.extend_from_slice(&bits);
                     },
-                    Type::Double => {
-                        data.extend_from_slice(&v.as_f64().to_bits().to_le_bytes())
-                    },
+                    Type::Double => data.extend_from_slice(&v.as_f64().to_bits().to_le_bytes()),
                     _ => {
                         let b = (v.as_f64() as i128).to_le_bytes();
                         data.extend_from_slice(&b[..comp_sz.min(16)]);
@@ -501,7 +489,7 @@ impl Codegen {
             let size = width.max(8);
             if let Some((off, sec)) = rel {
                 let rel_type = if width <= 4 { R_X86_64_32 } else { R_X86_64_64 };
-                let prefixed = Self::c_label_to_asm(&label.name);
+                let prefixed = self.c_label_to_asm(&label.name);
                 self.pending_data64_rels
                     .push((off, prefixed, sec, rel_type, 0));
             }
@@ -519,8 +507,8 @@ impl Codegen {
         {
             let (la, lb) = (Self::extract_label_addr(l), Self::extract_label_addr(r));
             if let (Some(label_a), Some(label_b)) = (la, lb) {
-                let prefixed_a = Self::c_label_to_asm(&label_a);
-                let prefixed_b = Self::c_label_to_asm(&label_b);
+                let prefixed_a = self.c_label_to_asm(&label_a);
+                let prefixed_b = self.c_label_to_asm(&label_b);
                 if let Some((off, _sec)) = rel {
                     let size = width.max(4);
                     self.pending_label_diff_rels
@@ -697,7 +685,7 @@ impl Codegen {
                     // Prefix label name to avoid collision with function symbols
                     if let Some((off, sec)) = rel {
                         let rel_type = if width <= 4 { R_X86_64_32 } else { R_X86_64_64 };
-                        let prefixed = Self::c_label_to_asm(&label.name);
+                        let prefixed = self.c_label_to_asm(&label.name);
                         self.pending_data64_rels
                             .push((off, prefixed, sec, rel_type, 0));
                     }
@@ -1029,9 +1017,7 @@ impl Codegen {
         // 单一真源：全局/静态初始化字节一律由 mem/global.rs 负责，
         // 这里仅保留关联函数入口供 elf/init_list.rs 调用，避免再出现
         // 一份经 f64 中转的副本（见 global.rs 中的根因注释）。
-        crate::codegen::x86_64::mem::global::global_init_bytes(
-            init, sz, is_float, ty,
-        )
+        crate::codegen::x86_64::mem::global::global_init_bytes(init, sz, is_float, ty)
     }
     pub(crate) fn gp_reg_name_bits(idx: u8, bits: u8) -> Option<&'static str> {
         Some(match (idx, bits) {

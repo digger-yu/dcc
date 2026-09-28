@@ -3,7 +3,9 @@
 //! parser、typed IR 验证和后端必须共享同一套规则，避免某个阶段把
 //! “无法求值”误当成数值 0。
 
-use crate::ast::{find_field, ArraySize, BinOp, Block, BlockItem, Decl, Expr, FloatConst, Stmt, Type, UnOp};
+use crate::ast::{
+    find_field, ArraySize, BinOp, Block, BlockItem, Decl, Expr, FloatConst, Stmt, Type, UnOp,
+};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -457,7 +459,11 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
         },
         Expr::ComplexIntLit { real, imag, .. } => {
             // 整型复数字面量：返回虚部整数（实部由 __real__ 直接取字段）。
-            if *imag != 0 { Ok(ConstValue::Int(*imag)) } else { Ok(ConstValue::Int(*real)) }
+            if *imag != 0 {
+                Ok(ConstValue::Int(*imag))
+            } else {
+                Ok(ConstValue::Int(*real))
+            }
         },
         Expr::Real { e, .. } => {
             // __real__ expr: 提取实部
@@ -1048,10 +1054,7 @@ where
     if fenv_access || a.is_long_double() || b.is_long_double() {
         return Err(ConstEvalError::NotConstant);
     }
-    Ok(ConstValue::Float(FloatConst::F64(f(
-        a.as_f64(),
-        b.as_f64(),
-    ))))
+    Ok(ConstValue::Float(FloatConst::F64(f(a.as_f64(), b.as_f64()))))
 }
 
 fn add_values(
@@ -1063,10 +1066,14 @@ fn add_values(
         (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a.wrapping_add(b))),
         (ConstValue::Float(a), ConstValue::Float(b)) => fold_float(a, b, fenv_access, |x, y| x + y),
         (ConstValue::Int(a), ConstValue::Float(b)) => {
-            fold_float(FloatConst::F64(crate::float80::i128_to_f64(a)), b, fenv_access, |x, y| x + y)
+            fold_float(FloatConst::F64(crate::float80::i128_to_f64(a)), b, fenv_access, |x, y| {
+                x + y
+            })
         },
         (ConstValue::Float(a), ConstValue::Int(b)) => {
-            fold_float(a, FloatConst::F64(crate::float80::i128_to_f64(b)), fenv_access, |x, y| x + y)
+            fold_float(a, FloatConst::F64(crate::float80::i128_to_f64(b)), fenv_access, |x, y| {
+                x + y
+            })
         },
         _ => Err(ConstEvalError::NotConstant),
     }
@@ -1080,10 +1087,14 @@ fn sub_values(
         (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a.wrapping_sub(b))),
         (ConstValue::Float(a), ConstValue::Float(b)) => fold_float(a, b, fenv_access, |x, y| x - y),
         (ConstValue::Int(a), ConstValue::Float(b)) => {
-            fold_float(FloatConst::F64(crate::float80::i128_to_f64(a)), b, fenv_access, |x, y| x - y)
+            fold_float(FloatConst::F64(crate::float80::i128_to_f64(a)), b, fenv_access, |x, y| {
+                x - y
+            })
         },
         (ConstValue::Float(a), ConstValue::Int(b)) => {
-            fold_float(a, FloatConst::F64(crate::float80::i128_to_f64(b)), fenv_access, |x, y| x - y)
+            fold_float(a, FloatConst::F64(crate::float80::i128_to_f64(b)), fenv_access, |x, y| {
+                x - y
+            })
         },
         _ => Err(ConstEvalError::NotConstant),
     }
@@ -1097,10 +1108,14 @@ fn mul_values(
         (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a.wrapping_mul(b))),
         (ConstValue::Float(a), ConstValue::Float(b)) => fold_float(a, b, fenv_access, |x, y| x * y),
         (ConstValue::Int(a), ConstValue::Float(b)) => {
-            fold_float(FloatConst::F64(crate::float80::i128_to_f64(a)), b, fenv_access, |x, y| x * y)
+            fold_float(FloatConst::F64(crate::float80::i128_to_f64(a)), b, fenv_access, |x, y| {
+                x * y
+            })
         },
         (ConstValue::Float(a), ConstValue::Int(b)) => {
-            fold_float(a, FloatConst::F64(crate::float80::i128_to_f64(b)), fenv_access, |x, y| x * y)
+            fold_float(a, FloatConst::F64(crate::float80::i128_to_f64(b)), fenv_access, |x, y| {
+                x * y
+            })
         },
         _ => Err(ConstEvalError::NotConstant),
     }
@@ -1118,10 +1133,14 @@ fn div_values(
             .ok_or(ConstEvalError::Overflow),
         (ConstValue::Float(a), ConstValue::Float(b)) => fold_float(a, b, fenv_access, |x, y| x / y),
         (ConstValue::Int(a), ConstValue::Float(b)) => {
-            fold_float(FloatConst::F64(crate::float80::i128_to_f64(a)), b, fenv_access, |x, y| x / y)
+            fold_float(FloatConst::F64(crate::float80::i128_to_f64(a)), b, fenv_access, |x, y| {
+                x / y
+            })
         },
         (ConstValue::Float(a), ConstValue::Int(b)) => {
-            fold_float(a, FloatConst::F64(crate::float80::i128_to_f64(b)), fenv_access, |x, y| x / y)
+            fold_float(a, FloatConst::F64(crate::float80::i128_to_f64(b)), fenv_access, |x, y| {
+                x / y
+            })
         },
         _ => Err(ConstEvalError::NotConstant),
     }

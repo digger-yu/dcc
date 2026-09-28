@@ -124,12 +124,7 @@ impl Codegen {
         // (long double 从 x87 st(0) 落 f64 到 xmm0), 因此先跳一次再分流。
         if matches!(
             int_ty,
-            Type::Bool
-                | Type::UChar
-                | Type::UShort
-                | Type::UInt
-                | Type::ULong
-                | Type::ULongLong
+            Type::Bool | Type::UChar | Type::UShort | Type::UInt | Type::ULong | Type::ULongLong
         ) {
             if matches!(float_ty, Type::LongDouble) {
                 self.emit_x87_to_xmm0();

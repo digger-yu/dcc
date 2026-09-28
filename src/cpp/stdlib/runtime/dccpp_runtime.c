@@ -832,6 +832,12 @@ void dccpp_mutex_lock(struct dccpp_mutex* m)   { pthread_mutex_lock(&m->m); }
 int  dccpp_mutex_trylock(struct dccpp_mutex* m) { return pthread_mutex_trylock(&m->m) == 0; }
 void dccpp_mutex_unlock(struct dccpp_mutex* m) { pthread_mutex_unlock(&m->m); }
 
+/* 兼容 runtime symbol table: 与 dccpp_mutex_new/free 等价.
+ * CxxRuntimeSymbol::ThreadMutexCreate/Destroy 用这两个名字, 允许 C++ 端
+ * 通过统一调度访问 mutex 而不必区分 _new/_free 与 _create/_destroy. */
+struct dccpp_mutex* dccpp_mutex_create(void)    { return dccpp_mutex_new(); }
+void               dccpp_mutex_destroy(struct dccpp_mutex* m) { dccpp_mutex_free(m); }
+
 struct dccpp_recursive_mutex {
     pthread_mutex_t m;
 };
@@ -1731,53 +1737,5 @@ int __dcc_multi_index_3(int* obj, int i, int j, int k) {
 }
 void __dcc_multi_index_4(int* obj, int i, int j, int k, int l) {
     (void)obj; (void)i; (void)j; (void)k; (void)l;
-    return 0;
-}
-
-/* =========================================================================
- * Part 20: Threading Support (C++11) - <thread>, <mutex>
- * 
- * 提供基本的线程同步原语
- * ========================================================================= */
-
-#include <pthread.h>
-
-struct dccpp_mutex {
-    pthread_mutex_t handle;
-};
-
-void* dccpp_mutex_create(void) {
-    struct dccpp_mutex* m = (struct dccpp_mutex*)malloc(sizeof(*m));
-    if (!m) abort();
-    if (pthread_mutex_init(&m->handle, NULL) != 0) {
-        free(m);
-        abort();
-    }
-    return m;
-}
-
-void dccpp_mutex_destroy(void* ptr) {
-    struct dccpp_mutex* m = (struct dccpp_mutex*)ptr;
-    if (m) {
-        pthread_mutex_destroy(&m->handle);
-        free(m);
-    }
-}
-
-void dccpp_mutex_lock(void* ptr) {
-    struct dccpp_mutex* m = (struct dccpp_mutex*)ptr;
-    if (m) pthread_mutex_lock(&m->handle);
-}
-
-void dccpp_mutex_unlock(void* ptr) {
-    struct dccpp_mutex* m = (struct dccpp_mutex*)ptr;
-    if (m) pthread_mutex_unlock(&m->handle);
-}
-
-int dccpp_mutex_trylock(void* ptr) {
-    struct dccpp_mutex* m = (struct dccpp_mutex*)ptr;
-    if (!m) return 0;
-    int rc = pthread_mutex_trylock(&m->handle);
-    return (rc == 0) ? 0 : 1;  // 返回 0 表示成功，非 0 表示失败
 }
 

@@ -342,6 +342,61 @@ pub enum Stmt {
     Fallthrough {
         span: Span,
     },
+    /// C++ 零成本异常 (zero-cost EH) 的**受保护调用** (LLVM `invoke` 的等价物)。
+    ///
+    /// `call` 是一次可能抛出异常的调用 (参数求值与调用序列完全复用普通
+    /// `Stmt::Expr(Expr::Call{..})` 的生成); `landing_pad` 是 unwinder 在
+    /// 「本调用点抛出并需要交接给当前帧」时**直接跳转**进来的标签; `actions`
+    /// 是本调用点在 LSDA call-site 表里的 action 链。
+    ///
+    /// 为什么必须把「哪一次调用受保护」建模成语句而不是 CFG 的一条边: 表驱动
+    /// 展开以 **PC 地址区间** 为键 —— unwinder 只看抛出时的 PC 落在哪个区间,
+    /// 因此「区间 = 一条调用指令」就是清理级别的唯一真源。每个调用点有独立的
+    /// 区间, 落地垫才能只析构**该点仍然存活**的对象 (少则泄漏, 多则二次析构)。
+    Invoke {
+        call: Box<Stmt>,
+        /// 落地垫标签; `None` = LSDA 里 `landing_pad = 0` 且 `action = 0` 的区间
+        /// (受保护但本帧不接管, `_Unwind_Resume` / `__cxa_rethrow` 用)。
+        landing_pad: Option<Ident>,
+        actions: Vec<EhAction>,
+        span: Span,
+    },
+    /// C++ 零成本异常的**落地垫序言**: `label:` + 把 unwinder 交接的寄存器存入
+    /// 两个局部槽。
+    ///
+    /// x86-64 C++ ABI 规定 personality 返回 `_URC_HANDLER_FOUND` 后, 控制被直接
+    /// 交到 landing pad, 此时 `%rax` = 异常对象指针, `%rdx` = type selector
+    /// (LSDA 类型表索引, 0 = 纯 cleanup)。这两个值只在落地垫的前几条指令内有效
+    /// (后续语句可能覆盖 rax/rdx), 所以后端必须在**标签后的第一条指令**把它们
+    /// 溢出到槽位; 之后的分派 (按 selector 比较) / 清理 / `__cxa_begin_catch`
+    /// 全是普通 AST 语句。
+    EhLandingPad {
+        label: Ident,
+        object: Box<Expr>,
+        selector: Box<Expr>,
+        span: Span,
+    },
+}
+
+/// 受保护调用的 LSDA action 链条目 (按处理顺序排列, 首条即链入口)。
+///
+/// 与 libstdc++ `__gxx_personality_v0` 读取的 action record 一一对应:
+/// 每条记录是 `(sleb128 filter, sleb128 next)`, `next` 是链上下一条记录的
+/// **自相对偏移** (从 `next` 字段自身的位置起算, 0 = 链尾); call-site 表里的
+/// `action` 是链首记录相对 action 表的 **1-based** 字节偏移 (0 = 无 action)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EhAction {
+    /// filter 0: 栈对象析构清理。进入落地垫做完清理后把异常继续交给链上下一条
+    /// (因此「先 cleanup 再候选 handler」是析构顺序的唯一真源)。
+    Cleanup,
+    /// filter > 0: 候选 handler。`type_index` 是本函数 LSDA 类型表 (1-based,
+    /// 从表尾向前计数) 的索引; `typeinfo` 是该表项指向的 typeinfo 对象链接名,
+    /// `None` = 空表项 (`catch (...)` 无条件捕获任意异常)。
+    /// 命中时 personality 把 selector = `type_index` 交给落地垫。
+    Catch {
+        type_index: u32,
+        typeinfo: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -399,9 +454,7 @@ impl FloatConst {
         match self {
             FloatConst::F32(f) => FloatConst::F32(-f),
             FloatConst::F64(f) => FloatConst::F64(-f),
-            FloatConst::LongDouble(b) => {
-                FloatConst::LongDouble(crate::float80::negate(b))
-            }
+            FloatConst::LongDouble(b) => FloatConst::LongDouble(crate::float80::negate(b)),
         }
     }
 
@@ -410,9 +463,7 @@ impl FloatConst {
     pub fn zero(ty: &Type) -> FloatConst {
         match ty {
             Type::Float => FloatConst::F32(0.0),
-            Type::LongDouble => {
-                FloatConst::LongDouble(crate::float80::from_f64(0.0))
-            },
+            Type::LongDouble => FloatConst::LongDouble(crate::float80::from_f64(0.0)),
             _ => FloatConst::F64(0.0),
         }
     }
@@ -425,9 +476,7 @@ impl FloatConst {
     pub fn from_int(ty: &Type, i: i128) -> FloatConst {
         match ty {
             Type::Float => FloatConst::F32(crate::float80::i128_to_f32(i)),
-            Type::LongDouble => {
-                FloatConst::LongDouble(crate::float80::from_i128(i))
-            },
+            Type::LongDouble => FloatConst::LongDouble(crate::float80::from_i128(i)),
             _ => FloatConst::F64(crate::float80::i128_to_f64(i)),
         }
     }
@@ -1492,7 +1541,11 @@ impl Type {
         };
         if frank(self) > 0 || frank(other) > 0 {
             // 至少一侧是浮点: 整数侧的值表示必须先进入浮点域, 不得当候选实型
-            return if frank(self) >= frank(other) { self.clone() } else { other.clone() };
+            return if frank(self) >= frank(other) {
+                self.clone()
+            } else {
+                other.clone()
+            };
         }
         self.usual_arith_type(other)
     }

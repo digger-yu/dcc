@@ -257,14 +257,14 @@ fn strip_wrapping_parens(text: &str) -> String {
                         matched = Some(i);
                         break;
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
         match matched {
             Some(idx) if idx == chars.len() - 1 => {
                 cur = chars[1..idx].iter().collect::<String>().trim().to_string();
-            }
+            },
             _ => break,
         }
     }
@@ -321,7 +321,9 @@ pub fn evaluate_trait_condition(cond: &str, ctx: &SfinaeCtx) -> Option<bool> {
             // 调用方按"保守放行"处理 —— `concept Never = sizeof(T) > 1000`
             // 就会被当成满足, 本该"无匹配函数"的调用被静默接受.
             for op in ["<=", ">=", "==", "!=", "<", ">"] {
-                let Some(n) = after.strip_prefix(op).and_then(|s| s.trim().parse::<isize>().ok())
+                let Some(n) = after
+                    .strip_prefix(op)
+                    .and_then(|s| s.trim().parse::<isize>().ok())
                 else {
                     continue;
                 };
@@ -1668,7 +1670,13 @@ mod tests {
         // M51: dcc 的 C++ 目标是 LP64, `long` 是 8 字节; 旧表算成 4 会让
         // `sizeof(T) <= 4` 对 `long` 误判为满足.
         let mut ctx = SfinaeCtx::new();
-        for (ty, sz) in [("char", 1), ("short", 2), ("int", 4), ("long", 8), ("long double", 16)] {
+        for (ty, sz) in [
+            ("char", 1),
+            ("short", 2),
+            ("int", 4),
+            ("long", 8),
+            ("long double", 16),
+        ] {
             ctx.bind("T".to_string(), ty.to_string());
             assert_eq!(
                 evaluate_trait_condition(&format!("sizeof(T) == {sz}"), &ctx),
