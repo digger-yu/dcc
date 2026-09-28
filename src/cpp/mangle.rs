@@ -98,11 +98,112 @@ pub enum MangleType {
     /// 用于 `template<typename T, template<typename> class Container> Adapter<T, Container>`
     /// 中的 `Container` 形参，实际传入时绑定到 `std::vector` 等模板符号
     TemplateParam(SymbolId),
+    /// [temp.dep.constexpr]: 模板**实参位置**的依赖常量表达式。
+    ///
+    /// `enable_if<!is_pointer<T>::value, int>` 的首实参含模板形参, 解析期求不出值;
+    /// 旧实现直接报 Err, 整条声明被顶层容错降级成 Opaque。现在把子式按结构保留
+    /// (`op` + 递归 `operands`, 叶子是 `NonType` / `Class(形参名)` / `TplMember`),
+    /// 单态化把形参代入为具体实参后由 `TemplateRegistry::fold_args` 折成 `NonType`。
+    /// 只能是**类型**的表达式 (如取地址、函数调用) 不进这里 —— 那不是合法的
+    /// 非类型实参, 保留解析期硬错。
+    NtExpr(NtOp, Vec<MangleType>),
+}
+
+/// [`MangleType::NtExpr`] 的运算符。枚举而不是文本: 两个实例是否同一表达式
+/// 取决于**运算语义** (`a<b` 与 `a< b` 是同一个), 文本比较会把它们当成两个。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NtOp {
+    /// `!x`
+    LNot,
+    /// `~x`
+    Not,
+    /// `-x` (一元负)
+    Neg,
+    /// `a + b`
+    Add,
+    /// `a - b`
+    Sub,
+    /// `a * b`
+    Mul,
+    /// `a / b`
+    Div,
+    /// `a % b`
+    Mod,
+    /// `a << b`
+    Shl,
+    /// `a >> b`
+    Shr,
+    /// `a < b`
+    Lt,
+    /// `a <= b`
+    Le,
+    /// `a > b`
+    Gt,
+    /// `a >= b`
+    Ge,
+    /// `a == b`
+    Eq,
+    /// `a != b`
+    Ne,
+    /// `a && b`
+    Land,
+    /// `a || b`
+    Lor,
+    /// `a & b`
+    BitAnd,
+    /// `a | b`
+    BitOr,
+    /// `a ^ b`
+    BitXor,
+    /// `cond ? a : b` (三个操作数)
+    Cond,
+    /// `sizeof(T)` (操作数是类型)
+    Sizeof,
 }
 
 /// G11: 模板模板参数符号 ID - 引用一个模板名称
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolId(pub String);
+
+impl NtOp {
+    /// 运算符的稳定短名 (参与实例 key / C 标识符片段 / 符号唯一性编码)
+    pub fn key(self) -> &'static str {
+        match self {
+            NtOp::LNot => "lnot",
+            NtOp::Not => "not",
+            NtOp::Neg => "neg",
+            NtOp::Add => "add",
+            NtOp::Sub => "sub",
+            NtOp::Mul => "mul",
+            NtOp::Div => "div",
+            NtOp::Mod => "mod",
+            NtOp::Shl => "shl",
+            NtOp::Shr => "shr",
+            NtOp::Lt => "lt",
+            NtOp::Le => "le",
+            NtOp::Gt => "gt",
+            NtOp::Ge => "ge",
+            NtOp::Eq => "eq",
+            NtOp::Ne => "ne",
+            NtOp::Land => "land",
+            NtOp::Lor => "lor",
+            NtOp::BitAnd => "band",
+            NtOp::BitOr => "bor",
+            NtOp::BitXor => "bxor",
+            NtOp::Cond => "cond",
+            NtOp::Sizeof => "sizeoff",
+        }
+    }
+
+    /// 该运算符期望的操作数个数 (`Cond` 三个, `Sizeof` 一个, 二元两个, 一元一个)
+    pub fn arity(self) -> usize {
+        match self {
+            NtOp::Cond => 3,
+            NtOp::LNot | NtOp::Not | NtOp::Neg | NtOp::Sizeof => 1,
+            _ => 2,
+        }
+    }
+}
 
 impl MangleType {
     /// 写出 Itanium 类型编码 (不含 <len> 前缀)
@@ -193,6 +294,15 @@ impl MangleType {
             Self::VariadicPack(packed) => {
                 for ty in packed {
                     ty.encode(out);
+                }
+            },
+            // [temp.dep.constexpr]: 依赖非类型子式。真正的 Itanium 编码把折叠后的
+            // 常量写成 `Li<值>E`; 未折叠时只能按结构编码, 目的是**符号唯一性**
+            // (同一表达式两个实例必须拿到同一个名字, 不同表达式必须不同)。
+            Self::NtExpr(op, operands) => {
+                out.push_str(&format!("2{}", op.key()));
+                for a in operands {
+                    a.encode(out);
                 }
             },
         }

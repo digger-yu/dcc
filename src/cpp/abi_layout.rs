@@ -85,6 +85,13 @@ pub struct VPtrLayout {
     /// 虚基子对象的 vbptr 属于此类: 它指向的是「本类作为最派生类时为该
     /// 子对象准备的 secondary vbtable」, 基类构造变体 (C2) 不得写它。
     pub complete_only: bool,
+    /// vptr 应写入的具体字节地址: `vtable.symbol + address_point_override`。
+    ///
+    /// `None` = 用该 vtable 自己的 `address_point` (主 vftable 的情形)。
+    /// 一个 vtable symbol 可以同时承载多张表 (主 vftable + 各 chain 的
+    /// secondary vftable + vbtable), 每个被写入的指针指向不同的 address
+    /// point, 所以下标 `vtable_index` 不够用, 必须显式给出。
+    pub address_point_override: Option<i64>,
 }
 
 /// 类 ABI 描述符
@@ -108,9 +115,17 @@ pub struct ClassAbi {
     pub dtor_order: Vec<DtorStep>,
     /// 每个基类对应的 this 调整量（非虚偏移）
     pub this_adjust_map: HashMap<ClassId, ThisAdjust>,
+    /// 本类的 vtable 需要发射的 this-adjust thunk 列表。
+    ///
+    /// 多继承下非 primary 基子对象的 vtable 槽若指向本类的覆写实现,
+    /// 必须经 thunk 把 `this` 从基子对象调回完整对象, 否则实现会读到
+    /// 错位的成员 (实测 `C : A, B` 里 `B* p; p->fb()` 读到 `A::a`)。
+    pub thunks: Vec<ThunkDesc>,
     /// 对象里是否需要 vptr。它**不等于**「有虚函数」: 虚继承即使没有虚函数
     /// 也需要 vbptr 来承载 vbtable (Itanium 把 vbtable 放在 vtable 的负偏移区)。
     pub needs_vptr: bool,
+    /// 本类是否有**直接**虚基类 (决定 standalone 布局偏移 0 处是否放 vbptr)。
+    pub has_direct_virtual_bases: bool,
     /// 是否是多态类 (有虚函数)。`typeid(e)` 的动态路径只对该类成立。
     pub has_virtual_functions: bool,
     /// **非虚部分**大小: 不含本类自己的虚基子对象。
@@ -120,6 +135,21 @@ pub struct ClassAbi {
     /// 字节; 若误用 `size` (该类作为独立完整对象时的大小, 含其虚基尾部),
     /// 会把后续子对象错位/重叠。`0` 表示尚未计算。
     pub non_virtual_size: u64,
+    /// 多态类作为**虚基子对象**嵌入时的首 vptr 槽大小 (0 或 8)。
+    ///
+    /// GCC 实测 (`M : virtual V{virtual fv}`):
+    ///   M 布局 = [M.vptr][m][pad] | V 子对象 = [V 在 M 内的 vptr][v]
+    ///   M ctor 写 `object+16 = &_ZTV1M[+56]` —— 虚基子对象**自己有一个**
+    ///   vptr 槽, 由最派生类指向「本类为该链准备的 secondary vftable」。
+    /// 该槽不属于 standalone 布局 (standalone V 的 vptr 在偏移 0), 所以单独
+    /// 记账, 只用于虚基嵌入尺寸计算 (槽位本身由 `ClassAbi::vptrs` 逐条登记)。
+    pub vbase_embedded_vptr: u64,
+    /// 每个虚基子对象**自己的** vptr 槽位置: `(虚基类, 完整对象内偏移)`。
+    ///
+    /// 语义需求: 没有这个槽, `V* p; p->fv()` 只能读到 V 自己构造函数写的
+    /// `_ZTV1V`, 最终覆写者被静默丢失 (实测 gcc 107 / dcc 7)。偏移已考虑
+    /// 子对象内的 vbptr (vbptr 在 0, vptr 紧随其后)。
+    pub vbase_own_vptr_slots: Vec<(ClassId, u64)>,
 }
 
 /// 展平后的字段描述（偏移相对对象首地址）。
@@ -160,6 +190,58 @@ pub struct VTableLayout {
     pub components: Vec<VTableComponent>,
     /// 此 vtable 对应的基类 subobject（None 表示 primary/complete vtable）
     pub for_base: Option<ClassId>,
+    /// 每个虚槽对应的 **chain** (即该槽属于哪条基类子对象链)。
+    ///
+    /// `chains[slot] = Some(base)` 表示第 `slot` 个虚函数槽属于 `base`
+    /// 的 secondary chain; `None` = primary chain。
+    ///
+    /// 语义需求 (Itanium + GCC 实测): `V* p; p->fv()` 在 GCC 里不是从
+    /// `&d` 的主 vftable 取槽, 而是从 V 子对象自己的 vptr (= 本 symbol 内
+    /// V chain 的 address point) 取槽, 那里放的是带 virtual thunk 的入口。
+    /// 发射端必须按「this 静态类型所属 chain」选槽, 因此 chain 归属要落在
+    /// 描述符里, 不能靠名字猜。
+    pub chains: Vec<Option<ClassId>>,
+}
+
+/// this 调整量 (`ThisAdjust`) 到 thunk 入口符号的映射。
+///
+/// Itanium ABI 规定: 当一个虚槽的实现需要先调整 `this` 才能进入最终
+/// 覆写函数时, vtable 里存的不是实现本身而是它的 **thunk 入口**。
+/// - 只含固定非虚偏移 → non-virtual thunk
+/// - `this` 位于虚基子对象内 → virtual thunk, 入口还要从 vbtable 读
+///   vcall/vbase offset (偏移存在 vbtable 里, 对每个最派生类都不同,
+///   无法在链接期折叠成常量)
+///
+/// 命名: 采用 `dcc_thunk_<p|m><|offset>_<target>` 而不是 Itanium 的
+/// `_ZThn8_...`, 因为 thunk 在本后端是**真实的函数定义** (走
+/// `ast::FuncDecl` → C 前端 → codegen), 符号必须是合法的 C 标识符;
+/// Itanium 形式在负偏移时会出现 `-`, 无法过 lexer。入口地址与
+/// GCC 逐字节一致 (同一 vtable 槽指向同一调整后入口), 只是名字不同 ——
+/// thunk 名字不会跳 TU 引用, 不影响二进制布局兼容。
+pub fn non_virtual_thunk_symbol(final_symbol: &str, non_virtual: i64) -> Option<String> {
+    if non_virtual == 0 {
+        return None;
+    }
+    let (sign, abs) = if non_virtual < 0 {
+        ('m', -non_virtual)
+    } else {
+        ('p', non_virtual)
+    };
+    Some(format!("dcc_thunk_{}{}_{}", sign, abs, final_symbol))
+}
+
+/// 生成 thunk 入口符号。`vbase_index` 为 `Some` 时产出 virtual thunk 名。
+pub fn thunk_symbol_for(
+    final_symbol: &str,
+    non_virtual: i64,
+    vbase_index: Option<usize>,
+) -> Option<String> {
+    match vbase_index {
+        // virtual thunk: 偏移部分是 vcall offset 在 vtable 里的槽序 (见
+        // `VTableComponent::VCallOffset`), 与静态字节偏移不同轴, 单独编码。
+        Some(idx) => Some(format!("dcc_vthunk_{}_{}_{}", idx, non_virtual, final_symbol)),
+        None => non_virtual_thunk_symbol(final_symbol, non_virtual),
+    }
 }
 
 /// vtable 条目
@@ -223,6 +305,29 @@ impl VTableLayout {
                 _ => None,
             })
             .collect()
+    }
+
+    /// 某个虚槽在 vtable 里**实际存放的地址**对应的符号。
+    ///
+    /// 需要 `this` 调整时返回 thunk 入口, 否则返回最终覆写的实现符号。
+    /// 发射 (`lower_ir::emit_vtables`) 与 thunk 定义侧都走这里, 保证
+    /// 「vtable 里填的入口」与「发射出来的函数」同源。
+    pub fn entry_symbol_at(&self, comp_index: usize) -> Option<String> {
+        let comp = self.components.get(comp_index)?;
+        match comp {
+            VTableComponent::Function {
+                symbol, adjustment, ..
+            } => Some(self.entry_symbol_for(symbol, adjustment)),
+            _ => None,
+        }
+    }
+
+    /// 给定虚槽的实现符号, 返回它在本 vtable 里应写入的入口符号
+    /// (需要 `this` 调整时是 thunk 入口)。与 [`Self::components`]
+    /// 的登记顺序无关, 供发射与 thunk 定义两侧共用。
+    pub fn entry_symbol_for(&self, symbol: &str, adjustment: &ThisAdjust) -> String {
+        thunk_symbol_for(symbol, adjustment.non_virtual, adjustment.vbase_index)
+            .unwrap_or_else(|| symbol.to_string())
     }
 }
 
@@ -365,10 +470,8 @@ impl TypeInfoKind {
     pub fn slot_symbols(self) -> [&'static str; 9] {
         const IS_PTR: &str = "_ZNKSt9type_info14__is_pointer_pEv";
         const IS_FN: &str = "_ZNKSt9type_info15__is_function_pEv";
-        const DO_CATCH: &str =
-            "_ZNK10__cxxabiv117__class_type_info10__do_catchEPKSt9type_infoPPvj";
-        const DO_UPCAST2: &str =
-            "_ZNK10__cxxabiv117__class_type_info11__do_upcastEPKS0_PPv";
+        const DO_CATCH: &str = "_ZNK10__cxxabiv117__class_type_info10__do_catchEPKSt9type_infoPPvj";
+        const DO_UPCAST2: &str = "_ZNK10__cxxabiv117__class_type_info11__do_upcastEPKS0_PPv";
         match self {
             Self::Class => [
                 "_ZN10__cxxabiv117__class_type_infoD1Ev",
@@ -443,9 +546,16 @@ impl RttiLayout {
 // === Thunk ===
 
 /// thunk 描述符
+///
+/// 布局层是 thunk 的唯一分配者: `compute_vtables` 在发现某个虚槽的实现需要
+/// `this` 调整时登记一条 `ThunkDesc`, 并把 vtable 槽的入口切成
+/// [`non_virtual_thunk_symbol`] 生成的 thunk 符号。发射端 (`lower_ir`) 只按
+/// 本表逐条生成真实函数符号, 不再自行推导偏移。
 #[derive(Debug, Clone)]
 pub struct ThunkDesc {
+    /// thunk 入口符号 (写进 vtable 的那个地址)
     pub symbol: String,
+    /// 最终覆写实现的符号 (thunk 尾调用的目标)
     pub target_symbol: String,
     pub this_adjust: ThisAdjust,
     /// 返回值调整（多用于协变返回类型）
@@ -495,10 +605,7 @@ impl ClassAbi {
     /// - 子对象（`embedded == true`）内部的 `__vb_*` 句柄字段与其虚基类字段
     ///   **不**参入展平——那些虚基类是共享的，已出现在最外层对象尾部；
     /// - 同名字段只保留首个（共享子对象只有一份实例）。
-    pub fn flatten_fields(
-        &self,
-        abi_map: &HashMap<ClassId, ClassAbi>,
-    ) -> Vec<FlatField> {
+    pub fn flatten_fields(&self, abi_map: &HashMap<ClassId, ClassAbi>) -> Vec<FlatField> {
         let mut out = Vec::new();
         self.flatten_fields_into(abi_map, 0, false, &mut out);
         let mut seen: Vec<String> = Vec::new();
@@ -520,9 +627,26 @@ impl ClassAbi {
         embedded: bool,
         out: &mut Vec<FlatField>,
     ) {
+        self.flatten_fields_into_shifted(abi_map, base_offset, 0, embedded, out)
+    }
+
+    /// 字段展平主体。
+    ///
+    /// `field_shift`: 本类的字段相对 `base_offset` 还要往后推的字节数。
+    /// 它只在一个场景非零 —— 多态类作为**虚基子对象**嵌入时, 子对象头部
+    /// 被最派生类用来放它自己的 vptr (GCC 实测 `V` 嵌入形态 = [vptr][v]),
+    /// 因此字段不能按 standalone 的偏移 0 排放, 否则成员访问会读到 vptr 槽。
+    fn flatten_fields_into_shifted(
+        &self,
+        abi_map: &HashMap<ClassId, ClassAbi>,
+        base_offset: u64,
+        field_shift: u64,
+        embedded: bool,
+        out: &mut Vec<FlatField>,
+    ) {
         for base in &self.bases {
             if let Some(babi) = abi_map.get(&base.base) {
-                babi.flatten_fields_into(abi_map, base_offset + base.offset, true, out);
+                babi.flatten_fields_into_shifted(abi_map, base_offset + base.offset, 0, true, out);
             }
         }
         for f in &self.fields {
@@ -531,7 +655,7 @@ impl ClassAbi {
             }
             out.push(FlatField {
                 name: f.name.clone(),
-                offset: base_offset + f.offset,
+                offset: base_offset + field_shift + f.offset,
                 size: f.size,
                 align: f.align,
                 owner: self.class_id,
@@ -544,7 +668,16 @@ impl ClassAbi {
             let Some(vbabi) = abi_map.get(&vb.base) else {
                 continue;
             };
-            vbabi.flatten_fields_into(abi_map, base_offset + vb.static_offset, true, out);
+            // 虚基子对象的字段要跳过嵌入时**额外**预留的头部槽; 复用
+            // standalone 布局时不偏移 (否则会把字段往后多推 8 字节)。
+            let shift = vb_embedded_extra_head(vbabi);
+            vbabi.flatten_fields_into_shifted(
+                abi_map,
+                base_offset + vb.static_offset,
+                shift,
+                true,
+                out,
+            );
         }
     }
 
@@ -592,6 +725,23 @@ impl ClassAbi {
 /// 输入类定义，输出 ClassAbi 描述符。
 pub trait AbiCalculator {
     fn compute_class(&self, class: ClassId) -> ClassAbi;
+}
+
+/// 一个虚函数槽的展开结果 (由 `collect_virtual_methods` 按 vtable 顺序产出)。
+///
+/// - `symbol` / `owner`: **最终覆写者**的实现符号与它所属的类 (查 this 调整量用)
+/// - `declaring`: **声明这条虚槽**的类 —— 槽的不变身份。多个继承路径共享
+///   同一个虚基 (菱形) 时, 只有按 `declaring` 去重才能得到与 GCC 一致的槽序。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VSlot {
+    /// 虚函数名 (析构函数为 `~Class`)
+    pub name: String,
+    /// 最终实现的符号名
+    pub symbol: String,
+    /// 提供实现的类
+    pub owner: ClassId,
+    /// 声明这条虚槽的类
+    pub declaring: ClassId,
 }
 
 // === Itanium ABI 计算器 ===
@@ -648,6 +798,14 @@ struct ClassDef {
     fields: Vec<(String, CxxType)>,
     /// 方法（按声明顺序）
     methods: Vec<MethodInfo>,
+    /// 实现符号 -> **声明该类**的映射。
+    ///
+    /// `MethodInfo::owner_class` 写的是「被覆写的基类方法」(供同槽识别),
+    /// 不能拿来回答「函数体按哪个类的子对象布局访问 this」。后者需要
+    /// 声明类: 它就是发射这个符号的那个类。虚基链的 vftable 要用它算
+    /// this 调整 (否则给未覆写的基实现插上一个莫须有的 -vbase_off thunk,
+    /// vtable 里出现未定义符号, 运行期跳空指针)。
+    symbol_decl: HashMap<String, ClassId>,
     /// 是否有虚函数（影响 primary base 判定和 vptr）
     has_virtual: bool,
 }
@@ -775,10 +933,7 @@ impl ItaniumAbiCalculator {
 
     /// 本 TU 里该类的 typeinfo 名字符串符号 (`_ZTS<encoding>`)。
     pub fn typeinfo_name_symbol(&self, class: ClassId) -> String {
-        format!(
-            "_ZTS{}",
-            crate::cpp::mangle::encode_type_name(&self.class_mangle_name(class))
-        )
+        format!("_ZTS{}", crate::cpp::mangle::encode_type_name(&self.class_mangle_name(class)))
     }
 
     /// 虚基子对象 `base` 在 `class` 里的 secondary vbtable 符号名。
@@ -787,11 +942,7 @@ impl ItaniumAbiCalculator {
     /// 对同一对 (class, virtual base) 在所有 TU 里稳定, 否则多 TU weak
     /// 链接无法合并, 所以用真实类名而非 ClassId 下标拼接。
     fn sub_vbtable_symbol(&self, class: ClassId, base: ClassId) -> String {
-        format!(
-            "_ZTV{}::vb{}",
-            self.class_name(class),
-            self.class_name(base)
-        )
+        format!("_ZTV{}::vb{}", self.class_name(class), self.class_name(base))
     }
 
     /// 注册一个类的定义信息（带真实类名）。
@@ -829,6 +980,7 @@ impl ItaniumAbiCalculator {
                 virtual_bases,
                 fields,
                 methods: Vec::new(),
+                symbol_decl: HashMap::new(),
                 has_virtual,
             },
         );
@@ -872,6 +1024,9 @@ impl ItaniumAbiCalculator {
             if is_virtual {
                 def.has_virtual = true;
             }
+            if class_id == owner_class {
+                def.symbol_decl.insert(symbol.clone(), class_id);
+            }
             def.methods.push(MethodInfo {
                 name,
                 symbol,
@@ -884,7 +1039,7 @@ impl ItaniumAbiCalculator {
 
     /// 注册一个带自定义符号名的方法。
     ///
-    /// - `class_id`: 方法所属类
+    /// - `class_id`: 方法登记所在的类 (可能是「继承同名虚槽」的派生类)
     /// - `name`: 方法名
     /// - `symbol`: 方法的全局符号名
     /// - `is_virtual`: 是否为虚函数
@@ -897,9 +1052,36 @@ impl ItaniumAbiCalculator {
         is_virtual: bool,
         owner_class: ClassId,
     ) {
+        self.register_method_with_decl(class_id, name, symbol, is_virtual, owner_class, None);
+    }
+
+    /// 同上, 额外登记「这个实现符号由哪个类声明」。
+    ///
+    /// 布局层已有信息区分不了二者: `class_id` 是槽位的登记地, `owner_class`
+    /// 是被覆写的基方法所属类。声明类只能由调用方 (拿得到符号表的 native
+    /// 组装层) 显式告知。
+    pub fn register_method_with_decl(
+        &mut self,
+        class_id: ClassId,
+        name: String,
+        symbol: String,
+        is_virtual: bool,
+        owner_class: ClassId,
+        declared_in: Option<ClassId>,
+    ) {
         if let Some(def) = self.classes.get_mut(&class_id) {
             if is_virtual {
                 def.has_virtual = true;
+            }
+            // 只有本类自己声明的实现才能登记为它的声明地: `class_id ==
+            // owner_class` 说明该条目没被任何基类方法占位 (新虚函数或本类
+            // 声明), 或者调用方直接给出了声明类。
+            if let Some(d) = declared_in {
+                if d == class_id {
+                    def.symbol_decl.insert(symbol.clone(), d);
+                }
+            } else if class_id == owner_class {
+                def.symbol_decl.insert(symbol.clone(), class_id);
             }
             def.methods.push(MethodInfo {
                 name,
@@ -944,47 +1126,53 @@ impl ItaniumAbiCalculator {
         !self.collect_all_virtual_bases(class_id).is_empty()
     }
 
-    /// 收集虚函数列表（按 vtable 顺序）。
+    /// 收集虚函数槽 (按 vtable 顺序展平)。
     ///
-    /// 返回 Vec<(method_name, method_symbol, owner_class)>，owner_class 是最终提供实现的类。
-    /// 重写的虚函数 owner 和 symbol 为派生类的。
+    /// 返回每一项是一条虚槽的【最终实现】与【槽身份】; 重写的虚函数
+    /// `symbol`/`owner` 为派生类的, `declaring` 仍是被声明的那条槽。
     /// Stage 6: 支持虚继承场景。
-    fn collect_virtual_methods(&self, class_id: ClassId) -> Vec<(String, String, ClassId)> {
+    fn collect_virtual_methods(&self, class_id: ClassId) -> Vec<VSlot> {
         let def = match self.classes.get(&class_id) {
             Some(d) => d,
             None => return Vec::new(),
         };
 
-        let mut methods: Vec<(String, String, ClassId)> = Vec::new();
+        let mut methods: Vec<VSlot> = Vec::new();
 
-        // 先收集非虚基类的虚函数（按基类声明顺序）
-        for &base in &def.bases {
+        // 先收集非虚基类的虚函数（按基类声明顺序），再收集虚基类的
+        // (按虚基类声明顺序) —— Itanium 的虚槽序就是这个次序。
+        //
+        // 去重键 = (名字, **声明该虚槽的类**)。不能只按名字: 同一个名字在
+        // `X{virtual f}` 与 `Y{virtual f}` 里是两个独立槽; 也不能不兼面
+        // 到共享: `Diamond : Left, Right` 且 Left/Right 都 `virtual V` 时,
+        // V::fv 只会存在**一份** V 子对象, 只占一个槽 (按名字去重会
+        // 丢掉 X/Y 两槽; 不去重则 `_ZTV7Diamond` 把 fv 发两遍, 槽号与
+        // GCC 不一致, 虚调用绑到错的实现)。
+        for &base in def.bases.iter().chain(def.virtual_bases.iter()) {
             let base_methods = self.collect_virtual_methods(base);
-            for (name, base_symbol, base_owner) in base_methods {
-                // 检查派生类是否重写
-                if let Some(m) = def.methods.iter().find(|m| m.is_virtual && m.name == name) {
-                    // 重写: 使用派生类的 symbol 和 owner
-                    methods.push((name, m.symbol.clone(), class_id));
-                } else {
-                    // 未重写: 继承基类的
-                    methods.push((name, base_symbol, base_owner));
-                }
-            }
-        }
-
-        // 再收集虚基类的虚函数（按虚基类声明顺序）
-        for &base in &def.virtual_bases {
-            let base_methods = self.collect_virtual_methods(base);
-            for (name, base_symbol, base_owner) in base_methods {
-                // 检查是否已经在 methods 中（避免重复，因为虚基类可能被多个路径共享）
-                if methods.iter().any(|(n, _, _)| n == &name) {
+            for slot in base_methods {
+                if methods
+                    .iter()
+                    .any(|s| s.name == slot.name && s.declaring == slot.declaring)
+                {
                     continue;
                 }
                 // 检查派生类是否重写
-                if let Some(m) = def.methods.iter().find(|m| m.is_virtual && m.name == name) {
-                    methods.push((name, m.symbol.clone(), class_id));
+                if let Some(m) = def
+                    .methods
+                    .iter()
+                    .find(|m| m.is_virtual && m.name == slot.name)
+                {
+                    // 重写: 实现换成派生类的 symbol, 但**槽身份不变**
+                    methods.push(VSlot {
+                        name: slot.name.clone(),
+                        symbol: m.symbol.clone(),
+                        owner: class_id,
+                        declaring: slot.declaring,
+                    });
                 } else {
-                    methods.push((name, base_symbol, base_owner));
+                    // 未重写: 继承基类的
+                    methods.push(slot);
                 }
             }
         }
@@ -992,13 +1180,43 @@ impl ItaniumAbiCalculator {
         // 再添加派生类自己新增的虚函数
         // 新增: owner_class == class_id 且未在基类虚函数中出现
         for m in &def.methods {
-            if m.is_virtual && m.owner_class == class_id
-                && !methods.iter().any(|(n, _, _)| n == &m.name) {
-                    methods.push((m.name.clone(), m.symbol.clone(), class_id));
-                }
+            if m.is_virtual
+                && m.owner_class == class_id
+                && !methods.iter().any(|s| s.name == m.name)
+            {
+                methods.push(VSlot {
+                    name: m.name.clone(),
+                    symbol: m.symbol.clone(),
+                    owner: class_id,
+                    declaring: class_id,
+                });
+            }
         }
 
         methods
+    }
+
+    /// 虚基子对象在最派生对象里使用的 secondary vftable 符号名。
+    ///
+    /// 与 GCC 写在 `_ZTV<D>` 里的 V 链那段对应 (本后端把它拆成独立符号,
+    /// 因为发射层一个 `Decl::Var` 对应一个符号; 内容布局与 GCC 的 chain 段
+    /// 逐字节一致: [offset-to-top] [typeinfo for D] [虚槽...])。
+    fn vbase_vftable_symbol(&self, class_id: ClassId, vbase: ClassId) -> String {
+        format!("_ZTV{}::vbase{}", self.class_name(class_id), self.class_name(vbase))
+    }
+
+    /// 在登记信息里找实现符号 `symbol` 的**声明类**。
+    ///
+    /// `MethodInfo::owner_class` 记的是「该虚槽实现被谁覆写」(供同槽识别),
+    /// 不能拿来回答「函数体按哪个类的布局访问 this」。声明类才是后者: 它就是
+    /// 发射这个符号的那个类, 由 `ClassDef::symbol_decl` 在登记时直接记下。
+    pub fn declaring_class_of(&self, symbol: &str) -> Option<ClassId> {
+        for def in self.classes.values() {
+            if let Some(cid) = def.symbol_decl.get(symbol) {
+                return Some(*cid);
+            }
+        }
+        None
     }
 
     /// 计算 vtable 布局列表。
@@ -1055,10 +1273,10 @@ impl ItaniumAbiCalculator {
         // typeinfo 指针
         components.push(VTableComponent::TypeInfo(typeinfo_sym.clone()));
         // 虚函数槽（从 address point 开始）
-        for (name, symbol, _owner) in &vmethods {
+        for slot in &vmethods {
             components.push(VTableComponent::Function {
-                name: name.clone(),
-                symbol: symbol.clone(),
+                name: slot.name.clone(),
+                symbol: slot.symbol.clone(),
                 adjustment: ThisAdjust::default(),
             });
         }
@@ -1069,6 +1287,7 @@ impl ItaniumAbiCalculator {
         vtables.push(VTableLayout {
             symbol: vtable_sym.clone(),
             address_point,
+            chains: chain_tags(&components, None),
             components,
             for_base: None,
         });
@@ -1083,8 +1302,19 @@ impl ItaniumAbiCalculator {
                 continue;
             }
 
-            // 计算从 base subobject 到 complete object 的 this 调整
-            let base_offset = self.direct_base_offset(class_id, base_id).unwrap_or(0);
+            // 计算从 base subobject 到 complete object 的 this 调整。
+            // 直取 Step 1 已算好的 `abi.bases` 偏移: 早前这里调
+            // `direct_base_offset` 走另一套估算 (`estimate_class_size`), 而它
+            // 不知道「虚基子对象会被抬到最派生对象尾部」, 于是把 primary base
+            // 的**整块**尺寸算进去, 得到 32 而不是真实的 16; secondary vbtable
+            // 的 vbase offset 就变成 32-32=0 —— 经二级基指针取虚基直接落到
+            // 子对象头部 (实测 off_right=16 / gcc 32)。
+            let base_offset = abi
+                .bases
+                .iter()
+                .find(|b| b.base == base_id)
+                .map(|b| b.offset as i64)
+                .unwrap_or(0);
 
             let base_methods = self.collect_virtual_methods(base_id);
 
@@ -1103,7 +1333,8 @@ impl ItaniumAbiCalculator {
             components.push(VTableComponent::OffsetToTop(-base_offset));
             components.push(VTableComponent::TypeInfo(typeinfo_sym.clone()));
 
-            for (name, _base_symbol, base_owner) in &base_methods {
+            for slot in &base_methods {
+                let name = &slot.name;
                 // 检查派生类是否重写
                 if let Some(m) = def.methods.iter().find(|m| m.is_virtual && m.name == *name) {
                     // 派生类重写: 需要 thunk 调整 this 指针（从 base 到 complete object）
@@ -1113,16 +1344,14 @@ impl ItaniumAbiCalculator {
                         adjustment: ThisAdjust::offset(-base_offset),
                     });
                 } else {
-                    // 未重写: 使用基类的函数
-                    let base_def = &self.classes[base_owner];
+                    // 未重写: 使用提供实现的类 (`slot.owner`) 的函数
+                    let base_def = &self.classes[&slot.owner];
                     let sym = base_def
                         .methods
                         .iter()
                         .find(|bm| bm.is_virtual && bm.name == *name)
                         .map(|bm| bm.symbol.clone())
-                                .unwrap_or_else(|| {
-                                    format!("{}::{}", self.class_name(*base_owner), name)
-                                });
+                        .unwrap_or_else(|| format!("{}::{}", self.class_name(slot.owner), name));
                     components.push(VTableComponent::Function {
                         name: name.clone(),
                         symbol: sym,
@@ -1136,6 +1365,7 @@ impl ItaniumAbiCalculator {
             vtables.push(VTableLayout {
                 symbol: format!("_ZTV{}::base{}", class_name, self.class_name(base_id)),
                 address_point,
+                chains: chain_tags(&components, Some(base_id)),
                 components,
                 for_base: Some(base_id),
             });
@@ -1176,11 +1406,9 @@ impl ItaniumAbiCalculator {
             components.push(VTableComponent::OffsetToTop(-sub_offset));
             components.push(VTableComponent::TypeInfo(typeinfo_sym.clone()));
             if self.class_has_virtual(vb.base) {
-                for (name, _sym, owner) in self.collect_virtual_methods(vb.base) {
-                    let m = def
-                        .methods
-                        .iter()
-                        .find(|m| m.is_virtual && m.name == name);
+                for slot in self.collect_virtual_methods(vb.base) {
+                    let name = &slot.name;
+                    let m = def.methods.iter().find(|m| m.is_virtual && m.name == *name);
                     match m {
                         Some(m) => components.push(VTableComponent::Function {
                             name: name.clone(),
@@ -1188,14 +1416,14 @@ impl ItaniumAbiCalculator {
                             adjustment: ThisAdjust::offset(-sub_offset),
                         }),
                         None => {
-                            let owner_def = &self.classes[&owner];
+                            let owner_def = &self.classes[&slot.owner];
                             let sym = owner_def
                                 .methods
                                 .iter()
-                                .find(|bm| bm.is_virtual && bm.name == name)
+                                .find(|bm| bm.is_virtual && bm.name == *name)
                                 .map(|bm| bm.symbol.clone())
                                 .unwrap_or_else(|| {
-                                    format!("{}::{}", self.class_name(owner), name)
+                                    format!("{}::{}", self.class_name(slot.owner), name)
                                 });
                             components.push(VTableComponent::Function {
                                 name: name.clone(),
@@ -1210,6 +1438,7 @@ impl ItaniumAbiCalculator {
             vtables.push(VTableLayout {
                 symbol: self.sub_vbtable_symbol(class_id, vb.base),
                 address_point,
+                chains: chain_tags(&components, Some(vb.base)),
                 components,
                 for_base: Some(vb.base),
             });
@@ -1218,90 +1447,30 @@ impl ItaniumAbiCalculator {
         vtables
     }
 
-    /// 从布局计算虚基类的实际偏移（不依赖 vtable，避免循环依赖）。
-    fn compute_vbase_offset_from_layout(&self, derived: ClassId, vbase: ClassId) -> i64 {
-        let derived_def = match self.classes.get(&derived) {
-            Some(d) => d,
-            None => return 0,
-        };
-
-        // 先计算非虚部分的大小（非虚基类 + 字段）
-        let mut non_virtual_size: u64 = 0;
-        let mut max_align: u64 = 1;
-        let has_virtual = self.class_needs_vptr(derived);
-
-        // vptr 大小
-        let primary_base = derived_def.bases.first().copied();
-        let primary_has_virtual = primary_base
-            .map(|b| self.class_needs_vptr(b))
-            .unwrap_or(false);
-        if has_virtual && !primary_has_virtual {
-            non_virtual_size = POINTER_SIZE;
-            max_align = POINTER_ALIGN;
+    /// 非虚基类子对象在派生对象里占用的字节数。
+    ///
+    /// 与基类自己的 standalone `size` 不同, 两种情况下会变小 (GCC 实测):
+    /// 1. **基类有虚基类**: 虚基子对象不属于该基类子对象, 它被抬到最派生
+    ///    对象的尾部由所有派生者共享。`M : virtual V{fv,gv;int v} {int m}`
+    ///    standalone 是 32 (nv 12 + V@16), 而 `E : M {int e1,e2,e3,e4}` 的
+    ///    e1 在 **12**、V 在 **32**、sizeof(E)=48; `F : M {double e}` e@16、
+    ///    V@24、sizeof(F)=40。只按 32 算就会把 V 复制两份 (实测 sizeof(D)=56
+    ///    vs gcc 32), 且两份实例谁都不是「唯一共享的那一份」。
+    /// 2. **多态 primary base 的尾部填充可复用**: `C{virtual ~C(); int i}`
+    ///    size 16, 而 `D : C {char d}` 的 d 在 **12**、sizeof(D)=16。非多态
+    ///    POD 基则保留填充: `A{int i; char c}` size 8, `B : A {char d}` 的 d
+    ///    在 **8**。secondary (非 primary) 基一律不共享填充, 仍按整块排布
+    ///    —— `C : A, B` 里 B 必须从 A 的整块之后开始 (offset-to-top = -16)。
+    ///
+    /// 「多态」在这里是「非 POD」的可检测代理: 布局层当前只掌握虚函数信息,
+    /// 用户声明构造/析构带来的非平凡性未登记。判据集中在这一个函数里,
+    /// 后续补平凡性跟踪时只需在这里扩展。
+    fn embedded_base_footprint(&self, base_abi: &ClassAbi, is_primary: bool) -> u64 {
+        if !base_abi.virtual_bases.is_empty() || (is_primary && base_abi.has_virtual_functions) {
+            base_abi.non_virtual_size
+        } else {
+            base_abi.size
         }
-
-        // 非虚基类
-        for (i, &base_id) in derived_def.bases.iter().enumerate() {
-            let base_size = self.estimate_class_size(base_id);
-            let base_align = self.estimate_class_align(base_id);
-            let is_primary = i == 0 && primary_base.is_some();
-
-            let offset = if is_primary {
-                0
-            } else {
-                align_up(non_virtual_size, base_align)
-            };
-            if base_size > 0 {
-                non_virtual_size = offset + base_size;
-            }
-            max_align = max_align.max(base_align);
-        }
-
-        // 字段
-        for (_, ty) in &derived_def.fields {
-            let (fsize, falign) = type_size_align(ty, self);
-            let offset = align_up(non_virtual_size, falign);
-            if fsize > 0 {
-                non_virtual_size = offset + fsize;
-            }
-            max_align = max_align.max(falign);
-        }
-
-        // 查找虚基类的偏移
-        let all_vbases = self.collect_all_virtual_bases(derived);
-        let mut current_offset = non_virtual_size;
-        for &vb_id in &all_vbases {
-            let vb_align = self.estimate_class_align(vb_id);
-            let vb_size = self.estimate_class_size(vb_id);
-            let vb_offset = align_up(current_offset, vb_align);
-            if vb_id == vbase {
-                return vb_offset as i64;
-            }
-            if vb_size > 0 {
-                current_offset = vb_offset + vb_size;
-            }
-            max_align = max_align.max(vb_align);
-        }
-
-        // 如果不是直接虚基类，可能是间接的（通过虚基类的虚基类）
-        // 递归查找
-        for &vb_id in &all_vbases {
-            let vb_offset = self.compute_vbase_offset_from_layout(derived, vb_id);
-            let inner_offset = self.compute_vbase_offset_from_layout(vb_id, vbase);
-            if inner_offset != 0 || self.is_direct_vbase(vb_id, vbase) {
-                return vb_offset + inner_offset;
-            }
-        }
-
-        0
-    }
-
-    /// 检查 vbase 是否是 derived 的直接虚基类。
-    fn is_direct_vbase(&self, derived: ClassId, vbase: ClassId) -> bool {
-        self.classes
-            .get(&derived)
-            .map(|d| d.virtual_bases.contains(&vbase))
-            .unwrap_or(false)
     }
 
     /// 收集所有虚基类（包括间接的），按声明顺序去重。
@@ -1337,177 +1506,20 @@ impl ItaniumAbiCalculator {
 
     /// 计算从 complete object 到指定虚基类 subobject 的偏移（字节）。
     /// 如果该类不是虚基类，返回 None。
+    ///
+    /// 单一真源: `compute_class` 的 Step 2.5 已经按传递闭包把**全部**虚基
+    /// 子对象在最派生对象里的静态偏移登记进 `virtual_bases`, primary vftable
+    /// 里的 `VBaseOffset` 槽写的就是同一个值。曾经这里有一套独立的
+    /// `compute_vbase_offset_from_layout` 估算 (只会把虚基接在非虚部分后面),
+    /// 不知道「非虚基类的虚基会被抬到本对象尾部」, 与真实布局分叉 ——
+    /// 两套答案时谁对无法判定, 故删除。
     pub fn compute_vbase_offset(&self, derived: ClassId, vbase: ClassId) -> Option<i64> {
         let derived_abi = self.compute_class(derived);
-        // 直接虚基类
-        for vb in &derived_abi.virtual_bases {
-            if vb.base == vbase {
-                // 从 vtable 组件中查找 vbase offset 值
-                if let Some(vtable) = derived_abi.vtables.first() {
-                    for comp in &vtable.components {
-                        if let VTableComponent::VBaseOffset { target, offset } = comp {
-                            if *target == vbase {
-                                return Some(*offset);
-                            }
-                        }
-                    }
-                }
-                // 如果没有 vtable（无虚函数），则从布局计算
-                return Some(self.compute_vbase_offset_from_layout(derived, vbase));
-            }
-        }
-        // 间接虚基类：通过直接虚基类递归查找
-        for vb in &derived_abi.virtual_bases {
-            if let Some(inner) = self.compute_vbase_offset(vb.base, vbase) {
-                let outer = self.compute_vbase_offset(derived, vb.base)?;
-                return Some(outer + inner);
-            }
-        }
-        // 也检查非虚基类的虚基类
-        for base in &derived_abi.bases {
-            if let Some(inner) = self.compute_vbase_offset(base.base, vbase) {
-                return Some(base.offset as i64 + inner);
-            }
-        }
-        None
-    }
-
-    /// 计算直接基类的偏移（基于类定义，不触发完整的 compute_class）。
-    ///
-    /// 用于避免 compute_vtables → compute_this_adjust → compute_class → compute_vtables 的递归循环。
-    /// 仅处理直接非虚基类，返回该基类在 derived 中的字节偏移。
-    fn direct_base_offset(&self, derived: ClassId, base: ClassId) -> Option<i64> {
-        let derived_def = self.classes.get(&derived)?;
-
-        // primary base 判定:
-        // - 第一个有虚函数的基类是 primary base (offset 0)
-        // - 如果没有有虚函数的基类，则第一个基类是 primary base
-        let primary_base = derived_def
-            .bases
+        derived_abi
+            .virtual_bases
             .iter()
-            .copied()
-            .find(|&b| self.class_has_virtual(b))
-            .or_else(|| derived_def.bases.first().copied());
-
-        if primary_base == Some(base) {
-            return Some(0);
-        }
-
-        // 累计偏移
-        let mut current_offset: u64 = if self.class_needs_vptr(derived) && primary_base.is_none() {
-            POINTER_SIZE // vptr
-        } else {
-            0
-        };
-        let mut max_align: u64 = 1;
-
-        for &base_id in &derived_def.bases {
-            let base_size = self.estimate_class_size(base_id);
-            let base_align = self.estimate_class_align(base_id);
-
-            if Some(base_id) == primary_base {
-                // primary base at offset 0
-                if base_size > 0 {
-                    current_offset = base_size;
-                }
-                max_align = max_align.max(base_align);
-                continue;
-            }
-
-            if base_id == base {
-                // 找到了目标基类
-                let offset = align_up(current_offset, base_align);
-                return Some(offset as i64);
-            }
-
-            let offset = align_up(current_offset, base_align);
-            max_align = max_align.max(base_align);
-            if base_size > 0 {
-                current_offset = offset + base_size;
-            }
-        }
-
-        None
-    }
-
-    /// 粗略估算类的大小（基于类定义，用于 direct_base_offset）。
-    fn estimate_class_size(&self, class_id: ClassId) -> u64 {
-        let def = match self.classes.get(&class_id) {
-            Some(d) => d,
-            None => return 0,
-        };
-
-        let has_virtual = self.class_needs_vptr(class_id);
-        let mut size = if has_virtual { POINTER_SIZE } else { 0 };
-        let mut max_align = if has_virtual { POINTER_ALIGN } else { 1 };
-
-        // 累加非虚基类大小（假设 primary base 在 offset 0）
-        let primary_base = def
-            .bases
-            .iter()
-            .copied()
-            .find(|&b| self.class_has_virtual(b));
-        let has_primary = primary_base.is_some();
-
-        for (i, &base_id) in def.bases.iter().enumerate() {
-            let base_size = self.estimate_class_size(base_id);
-            let base_align = self.estimate_class_align(base_id);
-            if i == 0 && has_primary {
-                // primary base at offset 0
-                size = base_size.max(size);
-            } else {
-                size = align_up(size, base_align) + base_size;
-            }
-            max_align = max_align.max(base_align);
-        }
-
-        // 累加字段大小
-        for (_, ty) in &def.fields {
-            let (fsize, falign) = type_size_align(ty, self);
-            size = align_up(size, falign) + fsize;
-            max_align = max_align.max(falign);
-        }
-
-        // 累加虚基类大小（放在对象末尾）
-        let all_vbases = self.collect_all_virtual_bases(class_id);
-        for &vb_id in &all_vbases {
-            let vb_size = self.estimate_class_size(vb_id);
-            let vb_align = self.estimate_class_align(vb_id);
-            size = align_up(size, vb_align) + vb_size;
-            max_align = max_align.max(vb_align);
-        }
-
-        if size == 0 {
-            1
-        } else {
-            align_up(size, max_align)
-        }
-    }
-
-    /// 粗略估算类的对齐（用于 direct_base_offset）。
-    fn estimate_class_align(&self, class_id: ClassId) -> u64 {
-        let def = match self.classes.get(&class_id) {
-            Some(d) => d,
-            None => return 1,
-        };
-
-        let has_virtual = self.class_needs_vptr(class_id);
-        let mut max_align = if has_virtual { POINTER_ALIGN } else { 1 };
-
-        for &base_id in &def.bases {
-            max_align = max_align.max(self.estimate_class_align(base_id));
-        }
-        for (_, ty) in &def.fields {
-            let (_, falign) = type_size_align(ty, self);
-            max_align = max_align.max(falign);
-        }
-        // 虚基类也影响对齐
-        let all_vbases = self.collect_all_virtual_bases(class_id);
-        for &vb_id in &all_vbases {
-            max_align = max_align.max(self.estimate_class_align(vb_id));
-        }
-
-        max_align.max(1)
+            .find(|vb| vb.base == vbase)
+            .map(|vb| vb.static_offset as i64)
     }
 
     /// 计算从 derived 到 base 的 this 调整。
@@ -1613,6 +1625,116 @@ impl ItaniumAbiCalculator {
     }
 }
 
+/// 虚基子对象嵌入形态相比 standalone 布局需要**额外**预留的头部字节。
+///
+/// GCC 实测 (LP64):
+/// - `V{virtual fv; int v}` standalone = [vptr][v] = 16; 作为虚基嵌入时
+///   仍是 [vptr][v] (那个 vptr 由最派生类改写成链 vftable) → 额外 0 字节
+/// - `Base{int b}` (非多态) standalone = 4; 被多态类当虚基时子对象是
+///   [vptr][b] = 12 (`sizeof(Mid2{virtual Base; int m2; virtual f()}) == 16`)
+///   → 额外 8 字节
+///
+/// 判据是「本类自己有没有 vptr 放在偏移 0」: 有则嵌入时复用同一个槽,
+/// 没有才新留一个。误加 8 会把尾部所有子对象往后推 (实测 sizeof(M)=36 vs
+/// gcc 32, 且多出的空间被当对象读)。
+pub fn vb_embedded_extra_head(vb_abi: &ClassAbi) -> u64 {
+    if vb_abi.vbase_embedded_vptr == 0 {
+        return 0;
+    }
+    // 本类的 vptr 就在偏移 0 (无 primary base 共享、自身多态)
+    let vptr_at_zero = vb_abi.vptrs.iter().any(|p| p.offset == 0);
+    if vptr_at_zero {
+        0
+    } else {
+        POINTER_SIZE
+    }
+}
+
+/// 虚基子对象嵌入形态的头部指针槽大小 (相对字段起始地址之前)。
+///
+/// = 本类 standalone 已有的 vptr 槽 + 嵌入时额外预留的槽。
+pub fn vb_embedded_head(vb_abi: &ClassAbi) -> u64 {
+    let own_vptr = if vb_abi.vbase_embedded_vptr > 0 && vb_abi.vptrs.iter().any(|p| p.offset == 0) {
+        POINTER_SIZE
+    } else {
+        0
+    };
+    own_vptr + vb_embedded_extra_head(vb_abi)
+}
+
+/// 虚基子对象嵌入形态的大小。
+///
+/// 两种情形:
+/// - **复用 standalone 布局** (本类的 vptr 就在偏移 0): 大小 = standalone
+///   全尺寸 (`size`, 含该类自己作为完整对象时的虚基尾部)。
+///   GCC 实测: `V{virtual fv; int v}` = 16 → 嵌在 M 尾部也是 16
+///   (sizeof(M)=32)。若错用 `non_virtual_size` (不含 V 的虚基尾),
+///   嵌套虚基 (D→M→V 与 V→X) 的尾部会被挤掉, sizeof 直接少 8/16。
+/// - **额外预留头部** (本类非多态但有链 vftable 要写): 大小 = 头部 + 非虚部分。
+///   GCC 实测: `Base{int b}` 被多态 Mid2 当虚基 → 子对象 [vptr][b] = 12。
+pub fn vb_embedded_size(vb_abi: &ClassAbi) -> u64 {
+    let extra = vb_embedded_extra_head(vb_abi);
+    if extra == 0 {
+        return vb_abi.size;
+    }
+    let body = if vb_abi.non_virtual_size > 0 {
+        vb_abi.non_virtual_size
+    } else {
+        vb_abi.size
+    };
+    align_up(extra + body, vb_abi.align.max(1))
+}
+
+/// 为一组 vtable 分量生成「虚槽 → chain」标签序列。
+///
+/// 只对 `Function` 分量计数 (offset-to-top / typeinfo / vcall / vbase offset
+/// 不占虚槽序), 每一项都是 `chain`: `None` = primary chain, `Some(base)` =
+/// 该 vtable 属于 `base` 子对象的 secondary chain。
+///
+/// 发射端 (`lower_ir::lower_virtual_call`) 根据 this 指针静态类型在这张表里
+/// 选槽, 因此 chain 归属必须由布局层给出, 不能靠符号名前缀猜。
+pub fn chain_tags(components: &[VTableComponent], chain: Option<ClassId>) -> Vec<Option<ClassId>> {
+    components
+        .iter()
+        .filter(|c| matches!(c, VTableComponent::Function { .. }))
+        .map(|_| chain)
+        .collect()
+}
+
+/// 从已算好的 vtable 分量里提取需要发射的 this-adjust thunk 列表。
+///
+/// 单一真源: 偏移量只读 `VTableComponent::Function::adjustment` (布局层
+/// 已在 secondary vtable / 虚基子对象 vbtable 上算好), 这里不再重算,
+/// 只负责把「需要调整的槽」翻译成 thunk 描述符, 并按入口符号去重
+/// (同一入口可能出现在多张 secondary vtable 里)。
+pub fn collect_thunks_from_vtables(vtables: &[VTableLayout]) -> Vec<ThunkDesc> {
+    let mut thunks: Vec<ThunkDesc> = Vec::new();
+    for vt in vtables {
+        for comp in &vt.components {
+            if let VTableComponent::Function {
+                symbol, adjustment, ..
+            } = comp
+            {
+                if let Some(entry) =
+                    thunk_symbol_for(symbol, adjustment.non_virtual, adjustment.vbase_index)
+                {
+                    if thunks.iter().any(|t| t.symbol == entry) {
+                        continue;
+                    }
+                    thunks.push(ThunkDesc {
+                        symbol: entry,
+                        target_symbol: symbol.clone(),
+                        this_adjust: *adjustment,
+                        return_adjust: None,
+                        kind: ThunkKind::Virtual,
+                    });
+                }
+            }
+        }
+    }
+    thunks
+}
+
 impl AbiCalculator for ItaniumAbiCalculator {
     fn compute_class(&self, class: ClassId) -> ClassAbi {
         let def = match self.classes.get(&class) {
@@ -1634,6 +1756,7 @@ impl AbiCalculator for ItaniumAbiCalculator {
         let has_virtual = self.class_has_virtual(class);
         let needs_vptr = self.class_needs_vptr(class);
         abi.needs_vptr = needs_vptr;
+        abi.has_direct_virtual_bases = !def.virtual_bases.is_empty();
         abi.has_virtual_functions = has_virtual;
         // primary base: 第一个非虚基类（无论是否有虚函数都是 primary base
         // 如果有虚函数且基类也有虚函数，则共享 vptr
@@ -1653,6 +1776,7 @@ impl AbiCalculator for ItaniumAbiCalculator {
                 offset: 0,
                 vtable_index: 0,
                 complete_only: false,
+                address_point_override: None,
             });
             current_offset = POINTER_SIZE;
             max_align = POINTER_ALIGN;
@@ -1662,7 +1786,9 @@ impl AbiCalculator for ItaniumAbiCalculator {
         for (i, &base_id) in def.bases.iter().enumerate() {
             let base_abi = self.compute_class(base_id);
             let base_align = base_abi.align.max(1);
-            let base_size = base_abi.size;
+            // 基类子对象在本对象里实际占用的字节数 (可能小于它的 standalone
+            // 尺寸, 见 `embedded_base_footprint`)。
+            let footprint = self.embedded_base_footprint(&base_abi, i == 0);
 
             // primary base 判定：第一个有虚函数的基类是 primary base
             // （如果基类有虚函数，则它作为 primary base 共享 vptr）
@@ -1691,14 +1817,17 @@ impl AbiCalculator for ItaniumAbiCalculator {
             if Some(base_id) == primary_base {
                 abi.primary_base = Some(base_id);
                 // primary base 共享 vptr（仅当类有虚函数时）
-                if has_virtual && primary_has_virtual
-                    && !abi.vptrs.iter().any(|v| v.offset == base_offset) {
-                        abi.vptrs.push(VPtrLayout {
-                            offset: base_offset,
-                            vtable_index: 0,
-                            complete_only: false,
-                        });
-                    }
+                if has_virtual
+                    && primary_has_virtual
+                    && !abi.vptrs.iter().any(|v| v.offset == base_offset)
+                {
+                    abi.vptrs.push(VPtrLayout {
+                        offset: base_offset,
+                        vtable_index: 0,
+                        complete_only: false,
+                        address_point_override: None,
+                    });
+                }
             } else if self.class_has_virtual(base_id) {
                 // 非 primary base 但有虚函数，有自己的 vptr（对应 secondary vtable）
                 // 找到对应的 secondary vtable index
@@ -1711,6 +1840,7 @@ impl AbiCalculator for ItaniumAbiCalculator {
                     offset: base_offset,
                     vtable_index: vtable_idx,
                     complete_only: false,
+                    address_point_override: None,
                 });
             }
 
@@ -1720,9 +1850,9 @@ impl AbiCalculator for ItaniumAbiCalculator {
             }
 
             // 推进 offset
-            let end_offset = base_offset + base_size;
+            let end_offset = base_offset + footprint;
             // 空基类（size 0）不推进 offset（避免无谓推进）
-            if base_size > 0 {
+            if footprint > 0 {
                 current_offset = end_offset;
             }
         }
@@ -1757,22 +1887,20 @@ impl AbiCalculator for ItaniumAbiCalculator {
         // 虚基类放在对象的末尾（非虚部分之后）
         // 按声明顺序排列，每个虚基类只出现一次（去重）
         // 先快照非虚部分大小: 本类作为子对象嵌入其它对象时只占这段空间。
-        let non_virtual_size = if current_offset == 0 {
-            1
-        } else {
-            align_up(current_offset, max_align.max(1))
-        };
+        //
+        // 这里存的是**未取整**的已用字节数: GCC 实测 `M{virtual V; int m}` 的
+        // nv_end = 12 (size 因 8 对齐取整到 32 含虚基), 而 `E : M {int e1..}`
+        // 的 e1 落在 **12** —— 派生类从基类的已用字节末尾继续分配。
+        let non_virtual_size = current_offset;
         let all_virtual_bases = self.collect_all_virtual_bases(class);
         for (vbase_idx, &vb_id) in all_virtual_bases.iter().enumerate() {
             let vb_abi = self.compute_class(vb_id);
             let vb_align = vb_abi.align.max(1);
-            // 子对象尺寸 = 虚基类的**非虚部分**大小。它的虚基子对象由本类
-            // (作为最派生类) 在尾部统一定位, 不在该子对象内重复出现。
-            let vb_size = if vb_abi.non_virtual_size > 0 {
-                vb_abi.non_virtual_size
-            } else {
-                vb_abi.size
-            };
+            // 子对象尺寸 = 虚基类的**虚基嵌入形态**大小 (首 vptr 槽 + 非虚部分)。
+            // GCC 实测 `M : virtual V`: V 子对象在 M 内是 [vptr][v], 那个 vptr
+            // 由最派生构造函数写成 M 为 V 链准备的 secondary vftable; 若无此
+            // 空间, 写入会踩到对象外的栈上相邻变量 (直接段错误)。
+            let vb_size = vb_embedded_size(&vb_abi);
 
             // 对齐当前 offset
             let vb_offset = align_up(current_offset, vb_align);
@@ -1787,13 +1915,20 @@ impl AbiCalculator for ItaniumAbiCalculator {
                 subobject_field: subobject_field.clone(),
             });
 
-            // 为虚基子对象暴露具名句柄字段，字段展平与 `&o.__vb_Base` 均以此为地址
+            // 为虚基子对象暴露具名句柄字段，字段展平与 `&o.__vb_Base` 均以此为地址。
+            // 句柄 = 子对象**首地址** (含头部指针槽), 与 GCC 的 `&o.__vb_Base`
+            // 语义一致; 大小用嵌入形态全尺寸。
             abi.fields.push(FieldLayout {
                 name: subobject_field,
                 offset: vb_offset,
                 size: vb_size,
                 align: vb_align,
             });
+            // 记下子对象自己的 vptr 槽位置 (头部第一个指针槽就是 vptr;
+            // 若子对象另有 vbptr, vbptr 在偏移 0, vptr 紧随其后)。
+            if vb_abi.vbase_embedded_vptr > 0 {
+                abi.vbase_own_vptr_slots.push((vb_id, vb_offset));
+            }
 
             // 记录 this 调整（虚基类，使用 vbase_index）
             abi.this_adjust_map.insert(
@@ -1818,6 +1953,13 @@ impl AbiCalculator for ItaniumAbiCalculator {
         // --- Step 3: 计算最终 size 和 align ---
         abi.align = max_align;
         abi.non_virtual_size = non_virtual_size;
+        // 多态类作为虚基子对象嵌入时要预留首 vptr 槽 (见 `vb_embedded_size`)。
+        // 注意用**本类自己**是否多态 (`def.has_virtual`), 不能用继承来的
+        // `has_virtual`: `struct Base { int b; }` 被多态类当虚基时, GCC 实测
+        // `sizeof(Mid1{virtual Base; int m1;}) == 16` —— Base 子对象就是
+        // `int` (4 字节), 头部没有任何指针槽; 误加 8 字节会把整个尾部
+        // 往后推, 成员访问/子对象句柄全部错位。
+        abi.vbase_embedded_vptr = if def.has_virtual { POINTER_SIZE } else { 0 };
         abi.size = if current_offset == 0 {
             // 空类（无基类无字段）: Itanium ABI 规定大小为 1
             1
@@ -1828,7 +1970,6 @@ impl AbiCalculator for ItaniumAbiCalculator {
         // --- Step 4: 计算 vtable / vbtable 布局 ---
         if needs_vptr {
             abi.vtables = self.compute_vtables(class, &abi);
-
             // 从 primary vtable 中提取 vbase offset 值，更新到 virtual_bases
             if let Some(primary_vtable) = abi.vtables.first() {
                 // vbase offset 槽相对 vptr (address point) 的字节偏移:
@@ -1872,6 +2013,108 @@ impl AbiCalculator for ItaniumAbiCalculator {
                 }
             }
 
+            // --- 虚基子对象自己的 vftable (Stage 6 chain 模型) ---
+            //
+            // GCC 实测 (`M : virtual V{fv,gv}; D : M{fv override}` 的 `_ZTV1D`):
+            //   V 子对象在**最派生对象**里的 vptr 不指向 V 自己的 vtable,
+            //   而指向最派生 vtable 里一段属于 V 这条 chain 的 secondary vftable:
+            //     [offset-to-top = -(vbase 子对象偏移)] [typeinfo for D] [V 链的虚槽...]
+            //   槽里放的是最终覆写者 (可能被 virtual thunk 包一层)。
+            // 之前的实现不给虚基子对象写 vptr, 于是 V 子对象停留在 V 自己
+            // 构造函数写的 `_ZTV1V` 上 —— `V* p; p->fv()` 静默调到 `V::fv`
+            // (实测 gcc 107 / dcc 7)。
+            for vb in &abi.virtual_bases {
+                if !self.class_has_virtual(vb.base) {
+                    continue;
+                }
+                let sym = self.vbase_vftable_symbol(class, vb.base);
+                if abi.vtables.iter().any(|v| v.symbol == sym) {
+                    continue;
+                }
+                let vbase_off = vb.static_offset as i64;
+                let mut comps = vec![
+                    VTableComponent::OffsetToTop(-vbase_off),
+                    VTableComponent::TypeInfo(self.typeinfo_symbol(class)),
+                ];
+                // 该链的虚槽顺寻必须按「以 vb.base 为完整对象」的虚方法表算,
+                // 再把实现换成本类 (最派生类) 的最终覆写者 —— 与 GCC 在
+                // `_ZTV<D>` 里给 V 链放 D 覆写 (+thunk) 的行为一致。
+                let chain_slots = self.collect_virtual_methods(vb.base);
+                let overrides = self.collect_virtual_methods(class);
+                for slot in chain_slots {
+                    // 在本类的虚槽表里按【槽身份】(名字 + 声明类) 找最终实现。
+                    // 不能只按名字: 多继承下同名虚函数可以属于两条不同的槽。
+                    let resolved = overrides
+                        .iter()
+                        .find(|s| s.name == slot.name && s.declaring == slot.declaring)
+                        .unwrap_or(&slot);
+                    let impl_sym = resolved.symbol.clone();
+                    // 调用时传入的是**虚基子对象**的 this, 而实现期望的是它
+                    // 提供类 (`VSlot::owner`) 子对象的 this: 差值 = owner_off - vbase_off。
+                    // 用 `owner` 而不是 `symbol_decl` 名字表: 后者只能回答「这个
+                    // 符号在哪注册过」, 而 override 后的实现符号属于谁必须由虚槽
+                    // 展开给出。误判会插一个莫须有的 -vbase_off thunk, vtable 里
+                    // 留下未定义符号 (实测运行期跳空指针直接段错误)。
+                    let owner_off = if resolved.owner == class {
+                        // 实现就是本类 (完整对象) 自己的: this = 对象首地址
+                        0
+                    } else if resolved.owner == vb.base {
+                        // 实现在虚基子对象自己 (或它的某个基子对象) 里:
+                        // 从该虚基子对象进来的调用已经拿到正确的 this。
+                        vbase_off
+                    } else {
+                        abi.this_adjust_map
+                            .get(&resolved.owner)
+                            .map(|a| a.non_virtual)
+                            .unwrap_or(vbase_off)
+                    };
+                    let adj = if owner_off == vbase_off {
+                        ThisAdjust::default()
+                    } else {
+                        ThisAdjust::offset(owner_off - vbase_off)
+                    };
+                    comps.push(VTableComponent::Function {
+                        name: slot.name.clone(),
+                        symbol: impl_sym,
+                        adjustment: adj,
+                    });
+                }
+                let address_point = 2 * POINTER_SIZE as i64;
+                let n_slots = comps
+                    .iter()
+                    .filter(|c| matches!(c, VTableComponent::Function { .. }))
+                    .count();
+                let chains = vec![Some(vb.base); n_slots];
+                abi.vtables.push(VTableLayout {
+                    symbol: sym,
+                    address_point,
+                    components: comps,
+                    for_base: Some(vb.base),
+                    chains,
+                });
+            }
+            // 为虚基子对象登记一个只在完整对象构造时写入的 vptr。
+            let mut vbase_vptrs: Vec<VPtrLayout> = Vec::new();
+            for &(vb_id, slot) in &abi.vbase_own_vptr_slots {
+                let sym = self.vbase_vftable_symbol(class, vb_id);
+                let idx = match abi.vtables.iter().position(|v| v.symbol == sym) {
+                    Some(i) => i,
+                    None => continue,
+                };
+                if vbase_vptrs.iter().any(|v| v.offset == slot)
+                    || abi.vptrs.iter().any(|v| v.offset == slot)
+                {
+                    continue;
+                }
+                vbase_vptrs.push(VPtrLayout {
+                    offset: slot,
+                    vtable_index: idx,
+                    complete_only: true,
+                    address_point_override: None,
+                });
+            }
+            abi.vptrs.extend(vbase_vptrs);
+
             // 虚基子对象自己的 vbptr: 最派生构造函数末尾必须把它指向本类的
             // secondary vbtable (否则从子对象视角读 vbtable 会拿到错位的
             // vbase offsets)。这些条目 offset > 0, 只在 complete-object
@@ -1896,9 +2139,19 @@ impl AbiCalculator for ItaniumAbiCalculator {
                     offset: vb.static_offset,
                     vtable_index: idx,
                     complete_only: true,
+                    address_point_override: None,
                 });
             }
             abi.vptrs.extend(sub_vptrs);
+
+            // thunk 登记: 任何「实现需要先调 this 才能进入最终覆写」的虚槽,
+            // 入口必须切成 thunk 符号。偏移由 vtable 分量携带的
+            // `ThisAdjust` 唯一决定, 这里只按它分配名字与目标。
+            //
+            // 必须放在**所有** vtable (primary / secondary / 虚基 chain) 都
+            // 登记完之后: 早于 chain vftable 收集会让覆写虚基槽的 thunk 入口
+            // 写进 vtable 却没有对应定义 (链接期 *ABS* 未定义, 运行期跳空)。
+            abi.thunks = collect_thunks_from_vtables(&abi.vtables);
         }
 
         // --- Step 5: 构造/析构顺序 ---
@@ -2624,7 +2877,9 @@ mod tests {
 
         // 第三个组件: foo (slot 0)
         match &vtable.components[2] {
-            VTableComponent::Function { symbol, adjustment, .. } => {
+            VTableComponent::Function {
+                symbol, adjustment, ..
+            } => {
                 assert!(symbol.ends_with("::foo"));
                 assert!(adjustment.is_zero());
             },
@@ -2633,7 +2888,9 @@ mod tests {
 
         // 第四个组件: bar (slot 1)
         match &vtable.components[3] {
-            VTableComponent::Function { symbol, adjustment, .. } => {
+            VTableComponent::Function {
+                symbol, adjustment, ..
+            } => {
                 assert!(symbol.ends_with("::bar"));
                 assert!(adjustment.is_zero());
             },
@@ -2706,7 +2963,9 @@ mod tests {
 
         // slot 0: foo (被 Derived 重写)
         match &vtable.components[2] {
-            VTableComponent::Function { symbol, adjustment, .. } => {
+            VTableComponent::Function {
+                symbol, adjustment, ..
+            } => {
                 assert!(
                     symbol.contains("Class1") && symbol.ends_with("::foo"),
                     "expected Derived::foo, got {}",
@@ -2719,7 +2978,9 @@ mod tests {
 
         // slot 1: bar (继承自 Base)
         match &vtable.components[3] {
-            VTableComponent::Function { symbol, adjustment, .. } => {
+            VTableComponent::Function {
+                symbol, adjustment, ..
+            } => {
                 assert!(
                     symbol.contains("Class0") && symbol.ends_with("::bar"),
                     "expected Base::bar, got {}",
@@ -2732,7 +2993,9 @@ mod tests {
 
         // slot 2: baz (Derived 新增)
         match &vtable.components[4] {
-            VTableComponent::Function { symbol, adjustment, .. } => {
+            VTableComponent::Function {
+                symbol, adjustment, ..
+            } => {
                 assert!(
                     symbol.contains("Class1") && symbol.ends_with("::baz"),
                     "expected Derived::baz, got {}",
@@ -2843,7 +3106,9 @@ mod tests {
 
         // slot 0: C::a_func (无调整，primary)
         match &primary.components[2] {
-            VTableComponent::Function { symbol, adjustment, .. } => {
+            VTableComponent::Function {
+                symbol, adjustment, ..
+            } => {
                 assert!(symbol.ends_with("::a_func"), "expected a_func, got {}", symbol);
                 assert!(adjustment.is_zero());
             },
@@ -2852,7 +3117,9 @@ mod tests {
 
         // slot 1: C::b_func (在 primary vtable 中无调整)
         match &primary.components[3] {
-            VTableComponent::Function { symbol, adjustment, .. } => {
+            VTableComponent::Function {
+                symbol, adjustment, ..
+            } => {
                 assert!(symbol.ends_with("::b_func"), "expected b_func, got {}", symbol);
                 assert!(adjustment.is_zero());
             },
@@ -2873,7 +3140,9 @@ mod tests {
 
         // b_func: 重写，需要 this-adjust thunk (-16)
         match &secondary.components[2] {
-            VTableComponent::Function { symbol, adjustment, .. } => {
+            VTableComponent::Function {
+                symbol, adjustment, ..
+            } => {
                 assert!(symbol.ends_with("::b_func"), "expected b_func, got {}", symbol);
                 assert_eq!(adjustment.non_virtual, -16, "expected thunk adjust -16");
                 assert!(adjustment.vbase_index.is_none());
@@ -2966,7 +3235,9 @@ mod tests {
 
         // b 在 secondary vtable 中未被重写，应该使用基类函数且无 thunk
         match &secondary.components[2] {
-            VTableComponent::Function { symbol, adjustment, .. } => {
+            VTableComponent::Function {
+                symbol, adjustment, ..
+            } => {
                 assert_eq!(symbol, "Class1::b");
                 assert!(adjustment.is_zero(), "inherited method should have zero adjustment");
             },
@@ -3060,8 +3331,19 @@ mod tests {
 
         // 验证有虚函数（继承的）
         assert!(abi.is_polymorphic());
-        assert_eq!(abi.vptrs.len(), 1);
+        // GCC 实测 (`Derived : virtual Base{virtual foo; int x;}`):
+        //   Derived 不是 Base 的非虚派生者, 拿不到 primary base,
+        //   所以自己有 vptr@0; 而虚基 Base 子对象在 +16 处**还有一份
+        //   自己的 vptr**, 由最派生构造写成 Base 链的 secondary vftable。
+        //   (只有 Derived 的完整对象构造才写后者, 故 complete_only)
+        assert_eq!(abi.vptrs.len(), 2, "Derived.vptr@0 + Base 子对象 vptr@16");
         assert_eq!(abi.vptrs[0].offset, 0);
+        let vb_vptr = abi
+            .vptrs
+            .iter()
+            .find(|p| p.offset == 16)
+            .expect("虚基子对象自己的 vptr 槽");
+        assert!(vb_vptr.complete_only);
 
         // 验证非虚基类为空
         assert!(abi.bases.is_empty());
@@ -3082,7 +3364,7 @@ mod tests {
         assert_eq!(user_fields.len(), 1);
         assert_eq!(user_fields[0].name, "y");
         assert_eq!(user_fields[0].offset, 8); // vptr (8 bytes) 之后
-        // 虚基子对象句柄字段存在且偏移与 vbtable 里的静态偏移一致
+                                              // 虚基子对象句柄字段存在且偏移与 vbtable 里的静态偏移一致
         let vb_field = abi
             .fields
             .iter()
@@ -3095,7 +3377,8 @@ mod tests {
         assert_eq!(abi.align, 8);
 
         // 验证 vtable 中有 VBaseOffset 条目
-        assert_eq!(abi.vtables.len(), 1);
+        // primary + 虚基子对象的 chain vftable (Stage 6)
+        assert_eq!(abi.vtables.len(), 2);
         let vtable = &abi.vtables[0];
         let vbase_offsets: Vec<_> = vtable
             .components
@@ -3115,6 +3398,20 @@ mod tests {
 
         // address_point = vbase_offset(1) * 8 + offset-to-top(8) + typeinfo(8) = 8 + 16 = 24
         assert_eq!(vtable.address_point, 24);
+
+        // 虚基子对象的 chain vftable: [offset-to-top = -16][typeinfo][foo 槽]
+        let chain = abi
+            .vtables
+            .iter()
+            .find(|v| v.for_base == Some(base_id) && v.symbol.contains("::vbase"))
+            .expect("虚基子对象的 chain vftable");
+        assert_eq!(chain.address_point, 16);
+        assert!(matches!(chain.components[0], VTableComponent::OffsetToTop(-16)));
+        assert_eq!(chain.vfunc_slots().len(), 1);
+        assert!(abi
+            .vbase_own_vptr_slots
+            .iter()
+            .any(|&(c, off)| c == base_id && off == 16),);
     }
 
     /// 虚基数量 ≠ 2 时校验 vbtable 槽偏移的**通用式** `pos*8 - address_point`。
@@ -3132,18 +3429,15 @@ mod tests {
         for (id, name) in [(v1, "V1"), (v2, "V2"), (v3, "V3"), (derived, "D")] {
             calc.register_class_name(id, name);
         }
-        let i32_ty = CxxType::Integer { bits: 32, signed: true };
+        let i32_ty = CxxType::Integer {
+            bits: 32,
+            signed: true,
+        };
         for id in [v1, v2, v3] {
             calc.register_class(id, vec![], vec![], vec![("x".into(), i32_ty.clone())], true);
             calc.register_method(id, "foo".into(), true, id);
         }
-        calc.register_class(
-            derived,
-            vec![],
-            vec![v1, v2, v3],
-            vec![("m".into(), i32_ty)],
-            false,
-        );
+        calc.register_class(derived, vec![], vec![v1, v2, v3], vec![("m".into(), i32_ty)], false);
 
         let abi = calc.compute_class(derived);
         assert_eq!(abi.virtual_bases.len(), 3);
@@ -3631,8 +3925,8 @@ mod tests {
         assert_eq!(base.offset, 0); // primary base
         assert!(!base.is_virtual);
         assert_eq!(base.flags & RTTI_BASE_PUBLIC_MASK, RTTI_BASE_PUBLIC_MASK); // public=0x2
-        // g++ 真值对照 (`struct B : A` 且 A 为公有非虚基):
-        //   objdump -r .data.rel.ro._ZTI1B 与 `__offset_flags` 均给 0x2。
+                                                                               // g++ 真值对照 (`struct B : A` 且 A 为公有非虚基):
+                                                                               //   objdump -r .data.rel.ro._ZTI1B 与 `__offset_flags` 均给 0x2。
         assert_eq!(base.offset_flags(), 0x2);
     }
 
@@ -3775,7 +4069,13 @@ mod tests {
             "Animals::Dog",
             vec![],
             vec![],
-            vec![("age".into(), CxxType::Integer { bits: 32, signed: true })],
+            vec![(
+                "age".into(),
+                CxxType::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )],
             true,
         );
         calc.register_method(id, "speak".into(), true, id);
@@ -3868,5 +4168,174 @@ mod tests {
         assert_eq!(d_abi.vcall_slot("~D"), Some(1), "本类析构名要能查到共用的析构槽");
         assert_eq!(d_abi.vcall_slot("f"), Some(0), "未被重写的基虚函数保持原槽");
         assert_eq!(d_abi.vcall_slot("g"), Some(2));
+    }
+
+    // === Stage 6: 虚基子对象自己的 vftable (chain 模型) ===
+
+    /// GCC 实测真值来源 (`g++ -std=c++17 -O0 -S`, LP64):
+    ///   V  = { vptr@0, v@8 }                     size 16
+    ///   M  = { M.vptr@0, m@8, V.vptr@16, v@24 }  size 32
+    ///   `_ZTV1M` = [vbase 16][ott 0][ti M][M::fm] | [ott -16][ti M][V::fv]
+    ///   `_ZTV1M` 的 V 链段 address point = +56; M ctor 写 obj+16 = 该地址
+    #[test]
+    fn vbase_subobject_gets_its_own_vftable_and_slot() {
+        let mut calc = ItaniumAbiCalculator::new();
+        let (v_id, m_id) = (ClassId(5), ClassId(6));
+        calc.register_class_name(v_id, "V");
+        calc.register_class_name(m_id, "M");
+        let i32 = CxxType::Integer {
+            bits: 32,
+            signed: true,
+        };
+        // V: 自己声明 fv (声明地 = V, 未被任何类覆写)
+        calc.register_class_with_name(
+            v_id,
+            "V",
+            vec![],
+            vec![],
+            vec![("v".into(), i32.clone())],
+            true,
+        );
+        calc.register_method_with_decl(
+            v_id,
+            "fv".into(),
+            "V_fv".to_string(),
+            true,
+            v_id,
+            Some(v_id),
+        );
+        // M: 虚继 V, 自己新增 fm
+        calc.register_class_with_name(
+            m_id,
+            "M",
+            vec![],
+            vec![v_id],
+            vec![("m".into(), i32.clone())],
+            true,
+        );
+        calc.register_method_with_decl(
+            m_id,
+            "fm".into(),
+            "M_fm".to_string(),
+            true,
+            m_id,
+            Some(m_id),
+        );
+
+        let m_abi = calc.compute_class(m_id);
+        // 虚基尾部子对象 = [vptr][v] = 16 字节 → M 布局 vptr@0, m@8, V 子对象@16
+        let vb = m_abi
+            .virtual_bases
+            .iter()
+            .find(|x| x.base == v_id)
+            .expect("V is virtual base of M");
+        assert_eq!(vb.static_offset, 16, "V 子对象偏移: {vb:?}");
+
+        // 为 V 子对象专供的 secondary vftable 必须存在, 且它的槽不调 this
+        let chain = m_abi
+            .vtables
+            .iter()
+            .find(|v| v.symbol == "_ZTVM::vbaseV")
+            .expect("V 链的 secondary vftable 必须发射");
+        assert!(
+            matches!(chain.components[0], VTableComponent::OffsetToTop(-16)),
+            "offset-to-top 是从 V 子对象回到完整对象的负偏移: {:?}",
+            chain.components[0]
+        );
+        assert_eq!(chain.address_point, 16, "V 链的 vptr 指向其自己段的开头");
+        match &chain.components[2] {
+            VTableComponent::Function {
+                symbol, adjustment, ..
+            } => {
+                assert_eq!(symbol, "V_fv");
+                assert!(
+                    adjustment.is_zero(),
+                    "V::fv 没被覆写, 从 V 子对象进来时 this 已正确, 不该插 thunk: {adjustment:?}"
+                );
+            },
+            other => panic!("expected Function, got {other:?}"),
+        }
+
+        // 完整对象构造必须把 V 子对象的 vptr 写成这张 chain vftable
+        assert!(
+            m_abi
+                .vptrs
+                .iter()
+                .any(|p| p.offset == 16 && p.complete_only),
+            "V 子对象的 vptr 槽没登记: {:?}",
+            m_abi.vptrs
+        );
+    }
+
+    /// 虚基被本类覆写时, V 链的槽必须指向**本类实现 + this-adjust thunk**。
+    #[test]
+    fn vbase_chain_overridden_slot_uses_this_adjust_thunk() {
+        let mut calc = ItaniumAbiCalculator::new();
+        let (v_id, m_id) = (ClassId(0), ClassId(1));
+        calc.register_class_name(v_id, "V");
+        calc.register_class_name(m_id, "M");
+        let i32 = CxxType::Integer {
+            bits: 32,
+            signed: true,
+        };
+        calc.register_class_with_name(
+            v_id,
+            "V",
+            vec![],
+            vec![],
+            vec![("v".into(), i32.clone())],
+            true,
+        );
+        calc.register_method_with_decl(
+            v_id,
+            "fv".into(),
+            "V_fv".to_string(),
+            true,
+            v_id,
+            Some(v_id),
+        );
+        calc.register_class_with_name(m_id, "M", vec![], vec![v_id], vec![("m".into(), i32)], true);
+        // M 覆写 fv: 实现符号属于 M, 登记的虚槽条目指向被覆写的 V::fv
+        calc.register_method_with_decl(
+            m_id,
+            "fv".into(),
+            "M_fv".to_string(),
+            true,
+            v_id,
+            Some(m_id),
+        );
+
+        let m_abi = calc.compute_class(m_id);
+        let v_off = m_abi
+            .virtual_bases
+            .iter()
+            .find(|x| x.base == v_id)
+            .map(|x| x.static_offset as i64)
+            .unwrap();
+        let chain = m_abi
+            .vtables
+            .iter()
+            .find(|v| v.symbol == "_ZTVM::vbaseV")
+            .expect("chain vftable");
+        match &chain.components[2] {
+            VTableComponent::Function {
+                symbol, adjustment, ..
+            } => {
+                assert_eq!(symbol, "M_fv", "被覆写的槽必须绑到派生实现");
+                assert_eq!(
+                    adjustment.non_virtual,
+                    -(v_off),
+                    "覆写实现按完整对象 this 写, 从 V 子对象进来要调回对象开头"
+                );
+            },
+            other => panic!("expected Function, got {other:?}"),
+        }
+        // thunk 入口必须同时出现在 vtable 引用与 thunk 登记表里 (不留未定义符号)
+        let thunk = m_abi
+            .thunks
+            .iter()
+            .find(|t| t.target_symbol == "M_fv")
+            .expect("覆写槽的 thunk 必须由布局层分配");
+        assert_eq!(thunk.symbol, chain.entry_symbol_at(2).unwrap());
     }
 }

@@ -119,6 +119,7 @@ impl FnSym {
             access,
             owner: None,
             is_const: false,
+            is_static: false,
             existing: None,
         }
     }
@@ -148,6 +149,7 @@ impl FnSym {
             access,
             owner: Some(owner),
             is_const: false,
+            is_static: false,
             existing: None,
         }
     }
@@ -159,6 +161,7 @@ impl FnSym {
             access,
             owner: Some(owner),
             is_const: false,
+            is_static: false,
             existing: Some(sym),
         }
     }
@@ -170,6 +173,7 @@ impl FnSym {
             access,
             owner: Some(owner),
             is_const: false,
+            is_static: false,
             existing: None,
         }
     }
@@ -181,6 +185,7 @@ impl FnSym {
             access,
             owner: Some(owner),
             is_const: false,
+            is_static: false,
             existing: Some(sym),
         }
     }
@@ -5524,6 +5529,7 @@ impl Sema {
         params: &[(String, crate::cpp::mangle::MangleType)],
         body: &CppBody,
         is_const: bool,
+        is_static: bool,
     ) -> Result<(), String> {
         let class_id = match self.resolve_class_path(class) {
             Some(id) => id,
@@ -5549,7 +5555,7 @@ impl Sema {
             &param_tys.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>(),
             is_const,
         );
-        let props = FnSym::method(Access::Public, owner, is_const);
+        let props = FnSym::method(Access::Public, owner, is_const, is_static);
         let props = match existing {
             Some(sym) => props.on_existing(sym),
             None => props,
@@ -5899,6 +5905,7 @@ impl Sema {
             owner,
             is_const,
             existing,
+            ..
         } = props;
         // 构建函数类型
         let fn_ty = CxxType::Function {
@@ -7181,7 +7188,7 @@ impl Sema {
                         ret_ty,
                         &param_tys,
                         body,
-                        FnSym::method(Access::Public, owner, false),
+                        FnSym::method(Access::Public, owner, false, false),
                     )?;
                     self.current_class = saved_class;
                     if let Some(info) = self.get_class_info_mut(class_id) {
@@ -7332,8 +7339,9 @@ impl Sema {
                 params,
                 body,
                 is_const,
+                is_static,
                 ..
-            } => self.build_out_of_line_member_fn(class, name, ret, params, body, *is_const),
+            } => self.build_out_of_line_member_fn(class, name, ret, params, body, *is_const, *is_static),
             CppDecl::Ctor {
                 class,
                 params,
@@ -7442,6 +7450,7 @@ impl Sema {
                 is_const,
                 is_virtual,
                 is_override,
+                is_static,
                 ..
             } => {
                 let ret_ty = self.convert_type(ret)?;
@@ -7457,7 +7466,7 @@ impl Sema {
                     ret_ty,
                     &param_tys,
                     body,
-                    FnSym::method(access, owner, *is_const, is_static),
+                    FnSym::method(access, owner, *is_const, *is_static),
                 )?;
 
                 // 添加到类的方法列表
