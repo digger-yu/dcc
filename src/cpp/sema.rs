@@ -191,6 +191,18 @@ impl FnSym {
     }
 }
 
+/// `build_out_of_line_member_fn` 尾部的两个限定标量: 与 [`FnSym`] 同一做法,
+/// 把 `is_const` / `is_static` 打包成一个结构体, 使单函数参数个数不超过
+/// clippy::too_many_arguments 阈值 (7)。字段语义与原逐参数传递完全一致,
+/// 不改变任何登记行为。
+#[derive(Debug, Clone, Copy)]
+struct MemberFnQuals {
+    /// 是否 const 成员函数
+    is_const: bool,
+    /// 是否静态成员函数 (无 this 指针)
+    is_static: bool,
+}
+
 // === CxxType ===
 
 /// C++ 类型。与 legacy lower 的 `MangleType` 不同，这里保留完整
@@ -5528,8 +5540,7 @@ impl Sema {
         ret: &crate::cpp::mangle::MangleType,
         params: &[(String, crate::cpp::mangle::MangleType)],
         body: &CppBody,
-        is_const: bool,
-        is_static: bool,
+        quals: MemberFnQuals,
     ) -> Result<(), String> {
         let class_id = match self.resolve_class_path(class) {
             Some(id) => id,
@@ -5553,9 +5564,9 @@ impl Sema {
             name,
             CxxSymbolKind::Method,
             &param_tys.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>(),
-            is_const,
+            quals.is_const,
         );
-        let props = FnSym::method(Access::Public, owner, is_const, is_static);
+        let props = FnSym::method(Access::Public, owner, quals.is_const, quals.is_static);
         let props = match existing {
             Some(sym) => props.on_existing(sym),
             None => props,
@@ -7341,7 +7352,17 @@ impl Sema {
                 is_const,
                 is_static,
                 ..
-            } => self.build_out_of_line_member_fn(class, name, ret, params, body, *is_const, *is_static),
+            } => self.build_out_of_line_member_fn(
+                class,
+                name,
+                ret,
+                params,
+                body,
+                MemberFnQuals {
+                    is_const: *is_const,
+                    is_static: *is_static,
+                },
+            ),
             CppDecl::Ctor {
                 class,
                 params,
@@ -8609,7 +8630,7 @@ impl Sema {
                 continue;
             }
             let specificity = crate::cpp::template::score_partial_pattern(&entry.pattern_text);
-            if best.as_ref().map_or(true, |b| specificity > b.0) {
+            if best.as_ref().is_none_or(|b| specificity > b.0) {
                 best = Some((
                     specificity,
                     entry.name.clone(),
@@ -10880,7 +10901,8 @@ fn test_instantiate_class() {
     #[test]
     fn test_pick_partial_exists() {
         // 简化: 验证 pick_partial 方法存在且不 panic 于空模板集合
-        let mut sema = Sema::new();
+        // pick_partial 只读符号表/模板注册表, 无需 mutable 绑定
+        let sema = Sema::new();
         // 调用 pick_partial 对不存在的模板名
         let result = sema.pick_partial("NonExistent", &[MangleType::Int]);
         // 应返回 None, 而非 panic
@@ -10890,7 +10912,8 @@ fn test_instantiate_class() {
     #[test]
     fn test_evaluate_constraint_basic() {
         // 简化: 验证 evaluate_constraint 方法存在且不 panic
-        let mut sema = Sema::new();
+        // evaluate_constraint 只读模板注册表, 无需 mutable 绑定
+        let sema = Sema::new();
         // 调用 evaluate_constraint 使用简单文本
         let result = sema.evaluate_constraint("true", &[], &[]);
         // 空约束应返回 Some(true)
