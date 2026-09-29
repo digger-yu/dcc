@@ -67,25 +67,38 @@
 | 指令格式化 | 将占位符 `%0/%1` 替换为实际操作数字符串/机器码 |
 | 标签处理 | 处理跳转标签位置 |
 
-**数据结构设计**：
+**数据结构设计（已否决，理由见文末《前提修正》第 3 条；保留原文以便追溯当时的判断）**：
+现有 `src/codegen/shared/mini_asm.rs` 已提供多架构指令解析能力，可基于此扩展公共操作数分配模型，核心数据结构设计如下：
 ```rust
-// 公共指令表示，包含所有操作数分配结果
+// 公共指令表示，整合所有架构通用属性
 pub struct Instruction {
-    pub mnemonic: String,
-    pub operands: Vec<Operand>,
-    pub size: usize,
+    pub mnemonic: String,    // 指令助记符（小写，兼容GAS语法）
+    pub operands: Vec<Operand>, // 统一操作数类型（适配各架构寄存器/立即数等）
+    pub arch_specific: ArchData, // 架构专属扩展（如NEON/SVE向量信息）
+    pub size: usize,        // 预估机器码大小
 }
 
+// 统一操作数类型，覆盖所有架构场景
 pub enum Operand {
-    Reg(usize),                // 物理寄存器编号
-    Imm(i64, usize),           // 立即数，值 + 大小（字节）
-    Mem(i64, Option<usize>),   // 内存操作数，偏移 + 基址寄存器
-    Reloc(SymbolId),           // 符号重定位
-    Label(LabelId),            // 标签引用
+    Reg(u8),                // 物理寄存器编号（匹配mini_asm中parse_*_reg返回值）
+    Imm(i64, u8),          // 立即数（值 + 字节数）
+    Mem(i64, Option<u8>), // 内存操作数（偏移 + 基址寄存器编号）
+    Reloc(SymbolId),       // 符号重定位（保持原IR中的Symbol引用）
+    Label(LabelId),        // 标签引用
+    Vector(VecElement),    // 向量操作数（对应NEON/SVE等）
+}
+
+// 架构专属扩展数据，避免公共模块过度耦合
+pub enum ArchData {
+    AArch64(AArch64Insn),
+    RISCv64(RISCVInsn),
+    ARM(ARMInsn),
+    MIPS(MIPSInsn),
+    None,
 }
 ```
 
-所有输出路径都基于同一个 `Vec<Instruction>` 结果输出，消除分配不一致。
+该设计与现有代码中的寄存器解析（如 `parse_aarch64_reg`、`parse_riscv_reg`）、指令编码逻辑完全兼容，可直接复用mini_asm中的解析能力，避免重复实现。
 
 #### 步骤 2：重构现有发射器适配公共模块
 - `codegen/x86_64.rs` 中，保留现有指令选择逻辑，操作数分配改为调用公共模块
@@ -94,23 +107,25 @@ pub enum Operand {
 - 所有架构（aarch64/riscv64/arm/mips）都同步重构，统一架构
 
 #### 步骤 3：Driver 层透传降级逻辑实现
-在 `src/driver.rs` 中增加 TU 级降级判断：
-1. 编译开始时，记录是否遇到未知助记符
-2. 遇到未知助记符：
-   - 如果配置了 `--hostlink`（即会用 host cc 链接）：设置标志位，整个 TU 输出文本 `.s`，交给 host cc 汇编链接
-   - 如果没有配置 `--hostlink`（纯独立编译，如内核）：输出硬错误，提示用户：
+当前 `src/codegen/shared/mini_asm.rs` 已提供 `encode_asm_lines_for_arch` 函数，该函数会遍历指令列表并返回**未识别助记符列表**（Err类型），为降级逻辑提供直接依据：
+1. 在 `src/driver.rs` 中，调用 `encode_asm_lines_for_arch` 时，检查返回结果是否为 `Err(unrecognized)`
+2. 遇到未知助记符时：
+   - 如果配置了 `--hostlink`：立即标记当前 TU 为需降级，切换输出模式为文本 `.s`，后续全部指令按 GAS 语法输出
+   - 如果未配置 `--hostlink`：直接抛出编译错误，包含所有未知助记符列表，提示用户添加支持或启用 `--hostlink`
      ```
-     error: unknown instruction mnemonic 'foo'
-     hint: enable --hostlink to fallback to GAS assembly, or add the mnemonic to dcc's instruction table
+     error: 2 unknown instruction mnemonics:
+     - foo: bar
+     - baz
+     hint: enable --hostlink to fallback to GAS assembly, or add the mnemonics to dcc's instruction table
      ```
-3. 只有全程没有未知助记符，才输出直发 `.o` 文件
+3. 只有当所有指令都被成功编码，且无未知助记符时，才输出直发 `.o` 文件，确保一致性
 
 #### 步骤 4：文本语法对齐验证
-遍历所有 dcc 自己生成的指令类型（通用指令、参数传递、va_arg 处理等），验证：
-1. 寄存器命名与 GAS 一致（如 `rax` 不是 `%rax`，语法要对齐 GAS）
-2. 内存偏移语法正确（如 `0(%rsp)` 符合 GAS 要求）
-3. 指令后缀格式正确（如 `movsd` 不是 `mov sd`）
-4. 修正所有不一致，保证所有指令能被 GAS 正确汇编
+基于现有 `mini_asm.rs` 中的架构实现，遍历 dcc 自己生成的指令类型，重点验证：
+1. **寄存器命名一致性**：代码中已支持标准架构寄存器名（如 AArch64 的 `x0`/`w0`、RISC-V 的 `a0`/`sp`），需确保输出文本直接复用这些名称，无需添加前缀（如不会输出 `%x0`，与 GAS 语法一致）
+2. **内存操作数语法**：参考 `parse_*_reg` 中对寄存器基址的处理，确保输出格式如 `0(x0)`（AArch64）、`0(a0)`（RISC-V）等，匹配 GAS 要求
+3. **指令后缀与格式**：如 NEON 向量指令（`fadd v0.2d, v1.2d, v2.2d`）需保持与 GAS 一致的后缀格式，参考代码中 `encode_aarch64` 对向量指令的实现
+4. **错误验证**：可复用 `test_encode_*_unrecognized` 系列测试用例，确保所有生成的指令都能通过 GAS 汇编验证
 
 ---
 
@@ -170,3 +185,67 @@ pub enum Operand {
 
 ## 总结
 通过抽离公共操作数分配模块，实现一次分配多处复用，可以彻底解决一致性问题。Driver 层 TU 级透传降级满足增量开发需求，自动化比对验证保证长期一致性。整个重构工作量可控，完成后可彻底解决当前双模式架构存在的问题。
+
+---
+
+## 实施落地与前提修正
+
+本节记录代码落地时对上文前提的核实结果。原文有三处判断与仓库实际不符，已按事实重新定位；未改动的部分仍成立。
+
+### 前提修正
+
+1. **“ELF 路径与文本路径的操作数分配两处分别实现”——对 x86_64 不成立。**
+   x86_64 的 `-S` 从不重跑 codegen：`compile_module()` 一次生成字节，`elf/output.rs` 事后按
+   `func_asm_layout` 切出每个函数的字节片，交给 `disasm::disassemble_range()` 反汇编成文本。
+   寄存器绑定、栈槽物化、分支布局、重定位**已经只发生一次**。所以 x86_64 不存在“两套分配”，
+   真正的风险在别处（见下）。
+
+2. **“交叉后端的两条路径可能不一致”——低估了：交叉后端的文本侧根本没有分配结果。**
+   `aarch64/riscv64/arm/mips` 的 `build_asm_output` 曾是占位桩，函数体只写
+   `// IR lowering, N bytes` 加一个裸 `ret`；riscv64 用的 `//` 还是真 GAS 拒绝的注释符。
+   即交叉目标的 `-S` **从未产出可汇编的文件**，“两模式一致性”在此前提下无从谈起。
+   这是本方案真正的硬缺口（尚未闭合，见“待办”）。
+
+3. **“新建 `asm_common.rs` 承载 `Instruction/Operand/ArchData`”——会造出第四份同族抽象。**
+   `shared/asm.rs`（0 引用）、`shared/instruction_traits.rs`（x86 中心、死码）、
+   `codegen/asm_event.rs`（x86 中心、0 producer）已各有一份 `Instruction`/`Operand`；
+   且 `ArchData{AArch64(..), RISCv64(..), …}` 让公共层反向依赖 arch 层，违反分层方向。
+   故**不新建该抽象**；公共层的 ISA 差异一律用数据参数化（沿用 `AsmArch`/`AsmIsa` +
+   `asm_constraints` 的 reg pool 模式），失败信息用结构化记录承载。
+
+4. **“用 `--hostlink` 表示未知助记符降级”——与既有语义正面冲突。**
+   `hostlink` 在本仓库已专指“dcc 只出 `.o`，最终链接交 host cc”
+   （`driver::run_with_host_link`、产物名 `dcc-hostlink-*`、`tests/reproducibility.rs` 对其
+   名字有断言）。它是**链接期**概念，只作用于可执行输出；而透传降级是 **codegen 内**的
+   编码能力缺口，两者时机与对象都不同。新能力因此命名为 `--asm-fallback=gas|error`。
+
+### 已落地
+
+| 目标 | 落点 | 判据 |
+|---|---|---|
+| 一次分配、多处复用 | `Backend::render_asm_from_state(&mut self, module)`：降级与 `build_object()` 消费**同一次** `compile()`；交叉后端 `-S` 不再重跑 codegen（`asm_text_mode` 双模式轴已从 4 个后端删除） | `asm_fallback_output_is_deterministic` |
+| 公共操作数/指令构建下沉 | `shared/asm_source.rs`：词法（按 ISA 的注释符）、分类、编码、透传判据；`shared/asm_text.rs`：`.s` 骨架与方言（注释符、`@`/`%`、段标志） | `asm_source`/`asm_text` 单元测试 |
+| 消除 5 份重复发射器 | 4 个交叉后端的 `encode_and_emit_asm` 变成 `record_asm_stmt` 的薄壳；x86_64 经 `note_backend_reject` 复用同一记录类型 | E0311 现在全仓只有一处生成 |
+| Driver 透传降级 | `codegen::emit()` 返回 `Emitted::{Object,Text}`；`--asm-fallback` 在**一处**决定报错还是降级；文本产物改名 `.s`、不拿执行位 | `asm_fallback_*` 7 条用例 |
+| 自动化一致性验证 | 降级产物喂真 `as` + `objdump` 验证指令确实存在；`mini_asm` 编码行为差分冻结基线（62 万条输入→字节摘要） | `asm_fallback_gas_text_assembles_through_real_as`、`encode_freeze_is_byte_identical` |
+
+落地过程中修掉的三个 silent bug（都属于本方案要消灭的“两模式行为分叉”家族）：
+
+1. **`msr`/`mrs`、`cache`/`pref` 被静默编码成 NOP**。内核 barrier/系统寄存器代码会默默丢指令。
+   现在返回 `None` → 记为透传，由 `as` 接手（`cross_msr_mrs_is_hard_error_not_silent_nop`）。
+2. **20 处 `operands.get(i).and_then(parse).unwrap_or(0)`**。把“操作数缺失”与“操作数存在但解析不出”
+   抹平成寄存器 0：`blr xN` 静默编成 `blr x0`，`ld1w z0.s, [x3]` 静默丢掉基址。现在分为
+   `req_*`（缺失或非法一律 `None`）与 `opt_*`（仅缺省时用默认值）。
+3. **交叉后端整条丢弃语句位置的内联汇编**。`Stmt::Expr` 只看 `ir.expressions`，而 `__asm__`
+   在 IR 里没有对应形态 → 指令不进 `.text`（naked 因不走 IR 才侥幸正确）。现在按 AST 形态分流
+   （`cross_statement_position_inline_asm_lands_in_object`）。
+
+### 待办（能力边界，非分阶段缺口）
+
+`--asm-fallback=gas` 目前在 **x86_64 端到端可用**。交叉后端声明
+`Feature::GasTextOutput = false`，对其使用该选项会明确报 **E0312**，而不是写一个
+汇编不过的 `.s` 冒充成功。要把它翻成 `true`，需要为 aarch64/riscv64/arm/mips 各补一个
+“机器码 → GAS 文本”的定长 ISA 解码器（与 x86_64 同构），并把 `build_asm_output`
+的占位桩换成按 pc 拼接的真渲染。完成判据是机器可检的，而非主观声明：遍历 fixture 语料
+对每个后端产出的 `.text` **逐字喂解码器，要求 100% 命中**，任一解不出的字即硬失败并打印
+offset + word。该闸门同时定义了“编码表还缺哪些助记符”，因此补齐过程会顺带扩大内联汇编能力。
