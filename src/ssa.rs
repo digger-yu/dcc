@@ -3434,7 +3434,7 @@ fn rebuild_bb(
             //
             // 只在直线条带区做: 循环体内由 rebuild_cycle 自己处理收敛。
             let join = if loop_ctx.is_none() {
-                branch_join(t, f, func)
+                branch_join(bb_name, t, f, func)
             } else {
                 None
             };
@@ -3985,18 +3985,153 @@ fn walk_to_join(
     }
 }
 
-/// 二路分支 `t` / `f` 两条路径的公共汇聚块 (`t == f` 时就是它自己)。
-fn branch_join(t: &str, f: &str, func: &Function) -> Option<String> {
+/// 二路分支的公共汇聚块: 先走「唯一前驱 + 无条件跳转」快路径, 不行再取
+/// 分支块的**直接后支配者** (见 [`compute_ipdoms`])。
+///
+/// `from` 是发出这个 `Terminator::Branch` 的块名。
+fn branch_join(from: &str, t: &str, f: &str, func: &Function) -> Option<String> {
     if t == f {
         return Some(t.to_string());
     }
     let preds = predecessor_counts(func);
     let jt = walk_to_join(t, func, &preds, &mut HashSet::new());
     let jf = walk_to_join(f, func, &preds, &mut HashSet::new());
-    match (jt, jf) {
-        (Some(a), Some(b)) if a == b => Some(a),
-        _ => None,
+    if let (Some(a), Some(b)) = (&jt, &jf) {
+        if a == b {
+            return Some(a.clone());
+        }
     }
+    // 快路径判不出凝聚点 (典型: 某一条路径自己又是一个分支 —— 嵌套三元
+    // `a ? b : c ? d : e`, 或三元分支里的 `&&`/`||` 短路链), 用后支配者这个
+    // 正确判据。它比启发式宽, 因此必须同时要求凝聚点不是分支块自己。
+    let ipdom = compute_ipdoms(func);
+    let j = ipdom.get(from)?;
+    if j == from {
+        return None;
+    }
+    Some(j.clone())
+}
+
+/// 反向 CFG 的直接后支配者 (`ipdom[b] = j`: 从 `b` 走到函数出口的**全部**路径
+/// 都必经过的、离 `b` 最近的那个块)。
+///
+/// 为什么需要它: 旧的 `branch_join` 只沿「唯一前驱 + 无条件跳转」链前进, 碰到
+/// 二分支就放弃。于是「分支的某一条路径本身又是一个分支」时凝聚点被判为不存在,
+/// `rebuild_bb` 就把凝聚块内联进**第一条**展开的路径并用共享的 `visited` 把它标成
+/// 已处理 —— 另一条路径重建时它返回空, `If` 之后的所有语句只在条件为真时执行。
+/// 实测: `x = a > 10 ? 1 : (a > 3 && a < 9);` 编译后整个主函数在赋值之后就提前
+/// 返回, 后面的 `printf` 一句也不执行 (静默丢代码, 不是编不过)。
+///
+/// 算法: Cooper–Harvey–Kennedy 不动点迭代在反向 CFG (以虚拟出口为根) 上求支配树,
+/// 即原 CFG 的后支配树。`Unreachable` / 不可达出口的块不进入结果。
+fn compute_ipdoms(func: &Function) -> HashMap<String, String> {
+    /// 虚拟出口: 所有 `return` 块的共同后继。
+    const EXIT: &str = "\u{1}[postdom-exit]";
+    // 1. 正向后继 (`Ret` 额外指向虚拟出口)
+    let mut succs: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (name, bb) in &func.blocks {
+        let mut v: Vec<&str> = term_succs(&bb.term);
+        if matches!(bb.term, Terminator::Ret { .. }) {
+            v.push(EXIT);
+        }
+        succs.insert(name.as_str(), v);
+    }
+    // 2. 反向边
+    let mut rev: HashMap<&str, Vec<&str>> = HashMap::new();
+    rev.entry(EXIT).or_default();
+    for (from, ss) in &succs {
+        for s in ss {
+            rev.entry(s).or_default().push(from);
+        }
+    }
+    // 3. 反向 CFG 的逆后序 (RPO) 与编号
+    let mut post: Vec<&str> = Vec::new();
+    let mut visited: HashSet<&str> = HashSet::new();
+    visited.insert(EXIT);
+    let mut stack: Vec<(&str, usize)> = vec![(EXIT, 0)];
+    loop {
+        let Some(&(n, idx)) = stack.last() else { break };
+        let children: &[&str] = match rev.get(n) {
+            Some(v) => v.as_slice(),
+            None => &[],
+        };
+        if idx < children.len() {
+            let c = children[idx];
+            // 只能在子列表不再被借用时才拿可变引用
+            let need_push = visited.insert(c);
+            if let Some(top) = stack.last_mut() {
+                top.1 += 1;
+            }
+            if need_push {
+                stack.push((c, 0));
+            }
+        } else {
+            post.push(n);
+            stack.pop();
+        }
+    }
+    post.reverse();
+    let num: HashMap<&str, usize> = post.iter().copied().enumerate().map(|(i, n)| (n, i)).collect();
+    // 4. 不动点迭代 (Cooper–Harvey–Kennedy)
+    //
+    // 注意两张表用途不同:**遍历序**用反向图的邻接 (`rev`, 即从出口能走到谁),
+    // 而求 `n` 的直接后支配者要看的是反向图的**前驱** = 正向 CFG 的**后继**
+    // (`succs[n]`) —— 混用 `rev` 会把所有块的 idom 算成空。
+    let mut idom: HashMap<&str, &str> = HashMap::new();
+    idom.insert(EXIT, EXIT);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for n in post.iter().skip(1) {
+            let forward_succs: &[&str] = match succs.get(n) {
+                Some(v) => v.as_slice(),
+                None => &[],
+            };
+            let mut cand: Option<&str> = None;
+            for p in forward_succs {
+                if !idom.contains_key(p) {
+                    continue;
+                }
+                cand = Some(match cand {
+                    None => *p,
+                    Some(x) => intersect_post_dom(x, *p, &idom, &num),
+                });
+            }
+            if let Some(d) = cand {
+                if idom.get(n) != Some(&d) {
+                    idom.insert(n, d);
+                    changed = true;
+                }
+            }
+        }
+    }
+    // 5. 去掉虚拟出口与自己, 只留真实块名的后支配关系
+    let mut out: HashMap<String, String> = HashMap::new();
+    for (n, d) in idom {
+        if n == EXIT || d == EXIT || n == d {
+            continue;
+        }
+        out.insert(n.to_string(), d.to_string());
+    }
+    out
+}
+
+/// 在 RPO 编号上取两个候选后支配者的最近公共祖先。
+fn intersect_post_dom<'a>(
+    mut a: &'a str,
+    mut b: &'a str,
+    idom: &HashMap<&'a str, &'a str>,
+    num: &HashMap<&'a str, usize>,
+) -> &'a str {
+    while a != b {
+        while num[a] < num[b] {
+            b = idom[b];
+        }
+        while num[b] < num[a] {
+            a = idom[a];
+        }
+    }
+    a
 }
 
 /// Check if edge from→to is a back edge (to dominates from).
@@ -4138,6 +4273,30 @@ fn infer_binop_type(op: &BinOp, l: &Expr, r: &Expr) -> Type {
     }
     if matches!(&rt, Type::Vector(_, _)) {
         return rt.clone();
+    }
+    if matches!(
+        op,
+        BinOp::EqEq
+            | BinOp::Ne
+            | BinOp::Lt
+            | BinOp::Le
+            | BinOp::Gt
+            | BinOp::Ge
+            | BinOp::AndAnd
+            | BinOp::OrOr
+    ) && !matches!(&lt, Type::Vector(_, _))
+        && !matches!(&rt, Type::Vector(_, _))
+    {
+        // [expr.rel] / [expr.eq] / C11 6.5.13: **关系、相等、逻辑运算符的结果类型是
+        // `int`**, 与操作数是不是浮点无关。必须排在浮点分支之前:
+        // C 前端 (`src/parser.rs::parse_binary`) 就是先判关系再算算术类型, 后端
+        // 则从**两个操作数自己的类型**选出 `ucomisd` / x87 比较。重建时若把
+        // 比较节点标成浮点, 消费端 (赋值 / 存栈槽) 会认为需要一次浮点→整数转换,
+        // 于是 `int r = (d < 0.4);` 在 `ucomisd/setb/movzbq` 之后又多一条
+        // `cvttsd2si %xmm0,%eax`, 把已算好的 0/1 用残留的浮操作数盖掉
+        // (实测 dcc r=0 / g++ r=1; `d < 0.4` 直接作变量用时得到 2)。
+        // 向量比较是 GNU 扩展的例外: 结果逐元素为全 1/全 0, 类型同操作数。
+        return Type::Int;
     }
     if matches!(&lt, Type::Float | Type::Double | Type::LongDouble)
         || matches!(&rt, Type::Float | Type::Double | Type::LongDouble)
@@ -4937,6 +5096,60 @@ pub fn dump_function(func: &Function) -> String {
 mod tests {
     use super::*;
     use crate::diagnostics::Span;
+
+    /// 手搭一个「二路分支的其中一条路径本身又是二路分支」的 CFG —— 嵌套三元
+    /// (`a ? b : c ? d : e`)、三元分支里的 `&&`/`||`、以及语句级
+    /// `if (x) {...} else { if (y) {...} }` 降级后都是这个形状。
+    ///
+    /// ```text
+    /// entry: if c1 -> A, B
+    /// A:     goto M
+    /// B:     if c2 -> B1, B2      <- 汇聚点不在「唯一前驱+无条件跳转」链上
+    /// B1:    goto M2
+    /// B2:    goto M2
+    /// M2:    goto M
+    /// M:     goto E
+    /// E:     return
+    /// ```
+    fn nested_branch_cfg() -> Function {
+        let span = Span::point("t.c", 1, 1);
+        let mut f = Function::new("f".into(), Type::Int, span);
+        for b in ["A", "B", "B1", "B2", "M", "M2", "E"] {
+            f.add_block(b.to_string());
+        }
+        let c = Operand::Int(1);
+        f.blocks.get_mut("entry").unwrap().term = Terminator::Branch {
+            cond: c.clone(),
+            t: "A".into(),
+            f: "B".into(),
+        };
+        f.blocks.get_mut("A").unwrap().term = Terminator::Jump("M".into());
+        f.blocks.get_mut("B").unwrap().term = Terminator::Branch {
+            cond: c,
+            t: "B1".into(),
+            f: "B2".into(),
+        };
+        f.blocks.get_mut("B1").unwrap().term = Terminator::Jump("M2".into());
+        f.blocks.get_mut("B2").unwrap().term = Terminator::Jump("M2".into());
+        f.blocks.get_mut("M2").unwrap().term = Terminator::Jump("M".into());
+        f.blocks.get_mut("M").unwrap().term = Terminator::Jump("E".into());
+        f.blocks.get_mut("E").unwrap().term = Terminator::Ret { val: Some(Operand::Int(0)) };
+        f
+    }
+
+    /// 后支配者必须把嵌套分支的凝聚点判对: `entry` 的凝聚点是 `M` (而不是内层
+    /// 的 `M2`), `B` 的是 `M2`。`branch_join` 的旧启发式从 `B` 出发直接放弃
+    /// (它是个二分支), 因此 `entry` 这一层只能靠后支配者兜底 —— 判错或直接
+    /// 判空都会让 `M` 被内联进一条路径, `If` 之后的代码在另一条路径上丢失。
+    #[test]
+    fn ipdom_and_branch_join_find_nested_joins() {
+        let f = nested_branch_cfg();
+        let ip = compute_ipdoms(&f);
+        assert_eq!(ip.get("entry").map(|s| s.as_str()), Some("M"), "entry 的后支配者应为 M");
+        assert_eq!(ip.get("B").map(|s| s.as_str()), Some("M2"), "B 的后支配者应为 M2");
+        assert_eq!(branch_join("entry", "A", "B", &f).as_deref(), Some("M"));
+        assert_eq!(branch_join("B", "B1", "B2", &f).as_deref(), Some("M2"));
+    }
 
     #[test]
     fn simple_function_builds_ssa() {

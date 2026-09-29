@@ -2753,13 +2753,60 @@ impl<'a> CppParser<'a> {
         tokens
     }
 
+    /// 模板实参列表的闭合 `>` **之后**那个 token 是否允许。
+    ///
+    /// [temp.names] 的消歧规则之一: 只有当 `>` 后面的 token 能合法地接在
+    /// template-id 后面时, 那个 `<` 才是模板实参的开端。
+    /// 实测两个必然不合法的后续:
+    ///  - **字面量**: `Foo<int> 5;` / `g(a<1, b>2)` 在任何语法里都不是声明;
+    ///  - **裸标识符**: 表达式里「值后面紧跟标识符」不合法, 所以
+    ///    `if (a < b && c > d)` / `g(a<b, c>d)` 的 `>` 后面是变量名 ——
+    ///    那是比较而不是模板实参。但在**类型位置** (`Foo<int> x;` /
+    ///    `template-id` 后的被声明对象名) 标识符是合法的, 由
+    ///    `allow_ident_follow` 区分。
+    fn template_args_close_is_valid(
+        tokens: &[CppTok],
+        idx_after_gt: usize,
+        allow_ident_follow: bool,
+    ) -> bool {
+        let Some(next) = tokens.get(idx_after_gt) else {
+            // 输入在 `>` 处结束: 没有反例证据, 按模板实参处理
+            return true;
+        };
+        match next {
+            CppTok::RawStringLit { .. } => false,
+            CppTok::C(Tok {
+                kind:
+                    TokKind::Number
+                    | TokKind::FloatLit
+                    | TokKind::StringLit
+                    | TokKind::WideStringLit
+                    | TokKind::Char16StringLit
+                    | TokKind::Char32StringLit
+                    | TokKind::CharLit
+                    | TokKind::WideCharLit
+                    | TokKind::Char16Lit
+                    | TokKind::Char32Lit,
+                ..
+            }) => false,
+            CppTok::C(Tok {
+                kind: TokKind::Ident,
+                ..
+            }) => allow_ident_follow,
+            _ => true,
+        }
+    }
+
     /// `<` 在 ident 后是否像模板实参 `T<U>` 而非比较 `a < b`.
     /// 向前扫描:
     /// - 跨过嵌套 `<`/`>` (Shr=`>>` 视为两层 `>`)
     /// - 遇到 `;` / unmatched `)` / EOF 在 depth==1 仍未闭合 `>` → 比较
     /// - 遇到合法类型 token (ident / C 类型关键字 / `*` / `&` / `,` / `const`)
     ///   不直接判否; 只有破坏 C++ 表达式的 token 才判否
-    fn looks_like_template_args_after_lt(&self) -> bool {
+    ///
+    /// `allow_ident_follow`: 调用点是否处于**类型位置** (那里 `Foo<int> x;` 的
+    /// 后继标识符是被声明对象的姓名); 表达式位置必须传 `false`。
+    fn looks_like_template_args_after_lt(&self, allow_ident_follow: bool) -> bool {
         // 一次性收集剩余 token, 避免 peek_token_at 的 O(n²) 复杂度
         let tokens = self.collect_remaining_tokens();
         let mut depth: i32 = 1;
@@ -2788,7 +2835,11 @@ impl<'a> CppParser<'a> {
                 }) => {
                     depth -= 1;
                     if depth == 0 {
-                        return true;
+                        return Self::template_args_close_is_valid(
+                            &tokens,
+                            i + 1,
+                            allow_ident_follow,
+                        );
                     }
                     i += 1;
                 },
@@ -2798,11 +2849,19 @@ impl<'a> CppParser<'a> {
                     // `>>` 当两层 `>`
                     depth -= 1;
                     if depth == 0 {
-                        return true;
+                        return Self::template_args_close_is_valid(
+                            &tokens,
+                            i + 1,
+                            allow_ident_follow,
+                        );
                     }
                     depth -= 1;
                     if depth == 0 {
-                        return true;
+                        return Self::template_args_close_is_valid(
+                            &tokens,
+                            i + 1,
+                            allow_ident_follow,
+                        );
                     }
                     i += 1;
                 },
@@ -3164,7 +3223,13 @@ impl<'a> CppParser<'a> {
         if self.at(CppKw::Export) {
             return self.parse_export_decl();
         }
-        // M18.0: enum (含 scoped enum class) 占位解析
+        // M18.0: enum (含 scoped enum class) 定义/opaque 声明。
+        // 仅当 enum 后紧跟 `{` / `;` / `:` (带底层类型) 时才是定义形态；
+        // `enum E foo()` / `extern enum E foo()` 里的 enum 是 **elaborated
+        // type specifier** ([dcl.type.elab]) 作为返回类型，必须落到下面的
+        // `is_type_kw_or_spec` 分支 (那里 KwEnum 已在合法 type-start 集里)，
+        // 否则 cpplib.h 的 `extern enum cpp_token_fld_kind cpp_token_val_index
+        // (const cpp_token *tok);` 会被误当 enum 定义处理失败→降级 Opaque。
         if matches!(
             &self.peek,
             Some(CppTok::C(Tok {
@@ -3172,15 +3237,44 @@ impl<'a> CppParser<'a> {
                 ..
             }))
         ) {
-            return Ok(vec![self.parse_enum_decl()?]);
+            let mut k = 1usize;
+            let t = self.peek_token_at(k);
+            if matches!(
+                t,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::KwStruct,
+                    ..
+                }))
+            ) || matches!(t, Some(CppTok::Kw(CppKw::Class, _)))
+            {
+                k += 1;
+            }
+            if matches!(
+                self.peek_token_at(k),
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Ident,
+                    ..
+                }))
+            ) {
+                k += 1;
+            }
+            if matches!(
+                self.peek_token_at(k),
+                Some(CppTok::C(Tok {
+                    kind: TokKind::LBrace | TokKind::Semi | TokKind::Colon,
+                    ..
+                }))
+            ) {
+                return Ok(vec![self.parse_enum_decl()?]);
+            }
         }
         // C++20 concept (M9: 占位, 仅顶层)
         if self.at(CppKw::Concept) {
             return Ok(vec![self.parse_concept_decl()?]);
         }
-        // extern "C" { ... } 块 (M11 stdlib: C 头引用)
-        if self.is_extern_c_block_start() {
-            return Ok(vec![self.parse_extern_c_block()?]);
+        // extern "C" 链接规范 ([lex.phases]/[basic.link]: 块形态与单声明形态)
+        if self.at_linkage_spec() {
+            return self.parse_linkage_spec();
         }
         // M30.2: `extern` 链接性说明 + 普通声明 (`extern void f(...);`,
         // `extern T g;`) - 无 "C" 字面量时跳过 extern, 按普通声明解析.
@@ -3548,6 +3642,27 @@ impl<'a> CppParser<'a> {
             if is_fn {
                 return self.parse_free_fn();
             }
+            // 函数指针 declarator `ret (*name)(params)` (全局): 返回类型后紧接
+            // `(` 再接 `*` —— 与 `int f(int)` (Ident 再接 `(`) 互斥, 不会误伤
+            // 函数声明。`is_name_ident` 此时为 false (declarator 名被括号包围)。
+            let is_fnptr_global = !is_name_ident
+                && matches!(
+                    name_tok,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::LParen,
+                        ..
+                    }))
+                )
+                && matches!(
+                    self.peek_token_at(name_pos + 1),
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Star,
+                        ..
+                    }))
+                );
+            if is_fnptr_global {
+                return self.parse_global_fnptr_decl();
+            }
             if self.is_operator_fn_start() {
                 return Ok(vec![self.parse_operator_fn()?]);
             }
@@ -3674,23 +3789,44 @@ impl<'a> CppParser<'a> {
             }
             // M30.1: 非类型形参 (`template <typename T, bool B>` /
             // `<int N>` / `<unsigned long N>` / `<size_t N>`).
-            // 尝试 <类型> <名> 形态; 失败回退原路径 (保留旧容忍度).
+            // Step 2 (A) 扩展: 同时支持非类型参数 pack
+            // (`template <typename T, T... Ints>` 与 `template <int... N>`),
+            // 这是 libstdc++ `integer_sequence<T, Ints...>` 与 `make_index_sequence<N>`
+            // 的实现地基 —— pair 的 piecewise ctor 签名依赖它。
+            // 尝试 <类型> [...] <名> 形态; 失败回退原路径 (保留旧容忍度)。
+            let mut non_type_pack = false;
             let non_type = if has_kw {
                 None
             } else {
                 let saved_lex = self.lex.clone();
                 let saved_peek = self.peek.clone();
                 match self.parse_mangle_type() {
-                    Ok(ty)
+                    Ok(ty) => {
+                        // 非类型 pack: `<type> ... <name>` —— 先吃 `...`。
+                        let ellipsis = matches!(
+                            &self.peek,
+                            Some(CppTok::C(Tok {
+                                kind: TokKind::Ellipsis,
+                                ..
+                            }))
+                        );
+                        if ellipsis {
+                            self.bump();
+                        }
                         if matches!(
                             &self.peek,
                             Some(CppTok::C(Tok {
                                 kind: TokKind::Ident,
                                 ..
                             }))
-                        ) =>
-                    {
-                        Some(ty)
+                        ) {
+                            non_type_pack = ellipsis;
+                            Some(ty)
+                        } else {
+                            self.lex = saved_lex;
+                            self.peek = saved_peek;
+                            None
+                        }
                     },
                     _ => {
                         self.lex = saved_lex;
@@ -3721,7 +3857,7 @@ impl<'a> CppParser<'a> {
                 name,
                 default,
                 non_type: non_type.clone(),
-                is_pack,
+                is_pack: is_pack || non_type_pack,
                 // G11: Simple heuristic - class keyword without typename suggests template template param
                 template_params: if has_kw && !is_pack && !non_type.is_some() {
                     Some(1)
@@ -3937,6 +4073,86 @@ impl<'a> CppParser<'a> {
         Ok(out)
     }
 
+    /// 跳过当前位置的一个 **attribute-specifier-seq** ([dcl.attr]/[attr.common]):
+    /// C++11 `[[...]]`、GNU `__attribute__((...))`, 以及**未展开的属性宏**
+    /// `IDENT(args)` (glibc++ 大量使用 `namespace std _GLIBCXX_VISIBILITY(default)`
+    /// 与 `extern "C++" __attribute__((__noreturn__)) void f();` 形态; 真 GCC
+    /// 把宏展开为 `__attribute__((...))`, 但预处理层不能保证一定展开, 因此一并
+    /// 容忍 `IDENT(args)` 形态)。命名空间与 linkage-spec 两处都可能在关键字与
+    /// 实际声明/块之间插入属性序列, 不容忍则整条声明被块局部容错降级成 Opaque。
+    fn skip_attribute_specifier_seq(&mut self) {
+        loop {
+            let lb_pair = self.at_tok(TokKind::LBracket)
+                && matches!(
+                    self.peek_token_at(1),
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::LBracket,
+                        ..
+                    }))
+                );
+            let ident_call = matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Ident,
+                    ..
+                }))
+            ) && matches!(
+                self.peek_token_at(1),
+                Some(CppTok::C(Tok {
+                    kind: TokKind::LParen,
+                    ..
+                }))
+            );
+            if lb_pair {
+                self.bump(); // [
+                self.bump(); // [
+                let mut depth = 2i32;
+                while depth > 0 {
+                    match &self.peek {
+                        Some(CppTok::C(Tok { kind, .. })) => {
+                            match kind {
+                                TokKind::LBracket => depth += 1,
+                                TokKind::RBracket => depth -= 1,
+                                _ => {},
+                            }
+                            self.bump();
+                        },
+                        Some(_) => {
+                            self.bump();
+                        },
+                        None => break,
+                    }
+                }
+            } else if ident_call {
+                self.bump(); // IDENT
+                self.bump(); // (
+                let mut depth = 1i32;
+                while depth > 0 {
+                    match &self.peek {
+                        Some(CppTok::C(Tok { kind, .. })) => {
+                            match kind {
+                                TokKind::LParen | TokKind::LBracket | TokKind::LBrace => {
+                                    depth += 1
+                                },
+                                TokKind::RParen | TokKind::RBracket | TokKind::RBrace => {
+                                    depth -= 1
+                                },
+                                _ => {},
+                            }
+                            self.bump();
+                        },
+                        Some(_) => {
+                            self.bump();
+                        },
+                        None => break,
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
     /// 解析 namespace foo { ... } 或 namespace { ... }
     fn parse_namespace_decl(&mut self) -> Result<CppDecl, CppParseError> {
         // Check for 'inline' keyword
@@ -3946,6 +4162,8 @@ impl<'a> CppParser<'a> {
         }
 
         self.expect_kw(CppKw::Namespace)?;
+        // 属性可出现在 `namespace` 与名字之间 (`namespace [[gnu::hidden]] X`)。
+        self.skip_attribute_specifier_seq();
         let real_name: Option<String> = if let Some(CppTok::C(Tok {
             kind: TokKind::Ident,
             text,
@@ -3960,6 +4178,9 @@ impl<'a> CppParser<'a> {
         } else {
             None
         };
+        // 属性也可出现在名字与 `{` 之间 (`namespace std _GLIBCXX_VISIBILITY(default) {`
+        // / `namespace X [[attr]] {` / `namespace X __attribute__((...)) {`)。
+        self.skip_attribute_specifier_seq();
         if !matches!(
             &self.peek,
             Some(CppTok::C(Tok {
@@ -3971,6 +4192,13 @@ impl<'a> CppParser<'a> {
         }
         self.bump();
         let mut body = vec![];
+        // 逐成员解析 + 错误恢复 (与顶层 `parse_top_level` 以及类体
+        // `parse_member_decl_with_class` 同构): 块内一个成员解析失败**不得**
+        // 把整块降级成一个 Opaque, 否则真实 libstdc++ 头 (`namespace std { ... }`
+        // 上百个成员) 只要有一处暂不支持的构造就会把整块吞掉, 首错永远停在块头
+        // (如 `std {`) 而无法定位到具体成员 —— 这与 Step 1 (L) 「惰性成员体 /
+        // 两阶段查找」的时序前提配套: 先把失败局部化, 后续每项能力的落地才能
+        // 各自推进, 不存在"一个缺口把整块拖倒"这种缺口。
         while let Some(t) = &self.peek {
             if matches!(
                 t,
@@ -3981,7 +4209,22 @@ impl<'a> CppParser<'a> {
             ) {
                 break;
             }
-            body.extend(self.parse_decl_list()?);
+            let member_start = self.capture_start();
+            match self.parse_decl_list() {
+                Ok(ds) => body.extend(ds),
+                Err(e) => {
+                    // 深度超限等硬错误不参与容错恢复 (见 parse_top_level 同类处理)
+                    if e.is_fatal() {
+                        return Err(e);
+                    }
+                    self.diags.push(e.to_diag(&self.file));
+                    self.skip_to_member_end();
+                    let text = self.capture_src_text(member_start, self.lex.pos);
+                    if !text.trim().is_empty() {
+                        body.push(CppDecl::Opaque(text));
+                    }
+                },
+            }
         }
         self.bump();
 
@@ -4624,6 +4867,13 @@ impl<'a> CppParser<'a> {
         }
         self.bump();
         let mut body = vec![];
+        // 逐成员解析 + 错误恢复 (与顶层 `parse_top_level` 以及类体
+        // `parse_member_decl_with_class` 同构): 块内一个成员解析失败**不得**
+        // 把整块降级成一个 Opaque, 否则真实 libstdc++ 头 (`namespace std { ... }`
+        // 上百个成员) 只要有一处暂不支持的构造就会把整块吞掉, 首错永远停在块头
+        // (如 `std {`) 而无法定位到具体成员 —— 这与 Step 1 (L) 「惰性成员体 /
+        // 两阶段查找」的时序前提配套: 先把失败局部化, 后续每项能力的落地才能
+        // 各自推进, 不存在"一个缺口把整块拖倒"这种缺口。
         while let Some(t) = &self.peek {
             if matches!(
                 t,
@@ -4634,7 +4884,22 @@ impl<'a> CppParser<'a> {
             ) {
                 break;
             }
-            body.extend(self.parse_decl_list()?);
+            let member_start = self.capture_start();
+            match self.parse_decl_list() {
+                Ok(ds) => body.extend(ds),
+                Err(e) => {
+                    // 深度超限等硬错误不参与容错恢复 (见 parse_top_level 同类处理)
+                    if e.is_fatal() {
+                        return Err(e);
+                    }
+                    self.diags.push(e.to_diag(&self.file));
+                    self.skip_to_member_end();
+                    let text = self.capture_src_text(member_start, self.lex.pos);
+                    if !text.trim().is_empty() {
+                        body.push(CppDecl::Opaque(text));
+                    }
+                },
+            }
         }
         self.bump();
         if matches!(
@@ -5004,6 +5269,24 @@ impl<'a> CppParser<'a> {
 
     /// 解析 struct/union 聚合声明 (M30.2: is_union 区分 union 关键字)
     fn parse_aggr_decl(&mut self, is_union: bool) -> Result<CppDecl, CppParseError> {
+        self.parse_aggr_decl_impl(is_union, true, None).map(|(d, _)| d)
+    }
+
+    /// 聚合体定义的核心解析。返回 `(声明, 源码里的 tag 名)`。
+    ///
+    /// * `consume_inst` —— 是否在 `}` 之后吃掉紧跟的实例名 (`union {... } temp;`)。
+    ///   `typedef struct {...} Name;` 里那个位置是 **typedef 名**而不是变量名, 必须
+    ///   留给调用方按 init-declarator 列表解析。
+    /// * `anon_fallback_name` —— 匿名定义 (`struct {...}`) 该用什么名字。C++ 给匿名
+    ///   聚合体分配占位名, 而 typedef 场合下它的名字**就是** typedef 名
+    ///   ([dcl.type.anon]/1), 由调用方预先扫出后递进来, 这样成员函数体里的类上下文
+    ///   (`ctx_name`) 与最终类名一致。
+    fn parse_aggr_decl_impl(
+        &mut self,
+        is_union: bool,
+        consume_inst: bool,
+        anon_fallback_name: Option<String>,
+    ) -> Result<(CppDecl, Option<String>), CppParseError> {
         // 'struct'/'union' already peeked
         self.bump();
         // M30.2: tag 名可选 (`union { ... } temp;` 匿名定义实例成员)
@@ -5028,10 +5311,13 @@ impl<'a> CppParser<'a> {
                 }))
             ) {
                 self.bump();
-                return Ok(CppDecl::Typedef {
-                    target: MangleType::Class(n.clone()),
-                    name: n.clone(),
-                });
+                return Ok((
+                    CppDecl::Typedef {
+                        target: MangleType::Class(n.clone()),
+                        name: n.clone(),
+                    },
+                    Some(n.clone()),
+                ));
             }
         }
         let bases = self.parse_base_list()?;
@@ -5047,10 +5333,14 @@ impl<'a> CppParser<'a> {
         self.bump();
         // M30.4: 匿名聚合体分配唯一名 (`__anon_aggr_1`, `__anon_aggr_2`, ...)
         // 避免多个匿名 union/struct 共享同名导致构造函数/typeinfo 重复定义.
-        let anon_name = name.clone().unwrap_or_else(|| {
-            self.anon_counter += 1;
-            format!("__anon_aggr_{}", self.anon_counter)
-        });
+        let anon_name =
+            name.clone().unwrap_or_else(|| match anon_fallback_name {
+                Some(given) => given,
+                None => {
+                    self.anon_counter += 1;
+                    format!("__anon_aggr_{}", self.anon_counter)
+                },
+            });
         let ctx_name = anon_name.clone();
         let mut members = vec![];
         // G22: `struct`/`union` 体内默认 public
@@ -5094,13 +5384,15 @@ impl<'a> CppParser<'a> {
         }
         self.bump();
         // M30.2: 定义后实例名 (`union { ... } temp;` / `struct X {} x;`)
-        let inst = if matches!(
-            &self.peek,
-            Some(CppTok::C(Tok {
-                kind: TokKind::Ident,
-                ..
-            }))
-        ) {
+        let inst = if consume_inst
+            && matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Ident,
+                    ..
+                }))
+            )
+        {
             Some(self.expect_ident()?)
         } else {
             None
@@ -5117,29 +5409,34 @@ impl<'a> CppParser<'a> {
         match (name, inst) {
             // 匿名定义 + 实例: AnonAggr 一体发射 (实例名保留, 成员
             // 字段引用 `h->temp.i` 在 C 中合法).
-            (None, Some(inst)) => Ok(CppDecl::AnonAggr {
-                is_union,
-                members,
-                name: inst,
-            }),
+            (None, Some(inst)) => Ok((
+                CppDecl::AnonAggr { is_union, members, name: inst },
+                None,
+            )),
             // 带 tag 定义 (变量实例罕见, 忽略实例名)
-            (Some(n), _) => Ok(CppDecl::Class(ClassDecl {
-                name: n,
-                is_struct: true,
-                is_union,
-                bases,
-                members,
-                member_access,
-            })),
+            (Some(n), _) => Ok((
+                CppDecl::Class(ClassDecl {
+                    name: n.clone(),
+                    is_struct: true,
+                    is_union,
+                    bases,
+                    members,
+                    member_access,
+                }),
+                Some(n),
+            )),
             // M30.4: 匿名纯定义: 使用唯一占位名 (避免同名构造函数冲突)
-            (None, None) => Ok(CppDecl::Class(ClassDecl {
-                name: anon_name,
-                is_struct: true,
-                is_union,
-                bases,
-                members,
-                member_access,
-            })),
+            (None, None) => Ok((
+                CppDecl::Class(ClassDecl {
+                    name: anon_name,
+                    is_struct: true,
+                    is_union,
+                    bases,
+                    members,
+                    member_access,
+                }),
+                None,
+            )),
         }
     }
 
@@ -5226,7 +5523,7 @@ impl<'a> CppParser<'a> {
                     kind: TokKind::Lt,
                     ..
                 }))
-            ) && self.looks_like_template_args_after_lt()
+            ) && self.looks_like_template_args_after_lt(true)
             {
                 self.bump(); // 吞 `<`
                 let mut targs: Vec<crate::cpp::mangle::MangleType> = Vec::new();
@@ -5403,7 +5700,37 @@ impl<'a> CppParser<'a> {
                 );
                 return Ok(vec![self.parse_aggr_decl(is_u)?]);
             }
-            self.bump();
+            // 非 defines: `struct/union Tag ...` 是 **elaborated-type-specifier**
+            // 类型的成员声明。不能像以前那样直接 `self.bump()` 吃掉关键字 ——
+            // 那会把 tag key 丢失, 下游 convert_type 只看到裸 `Class("Tag")`,
+            // 无法区分「首次引入的不完整 tag」(B4: `struct __locale_data
+            // *__locales[13];`) 与「未声明的名字」。保留关键字让 parse_mangle_type
+            // 把它编码成 `Class("struct Tag")` (与全局/形参/局部位置一致), 再据
+            // 类型后的 token 判定变量 / 成员函数 / 函数指针。
+            let t2 = self.peek_token_at(2);
+            let t3 = self.peek_token_at(3);
+            let at_lparen = |t: &Option<CppTok>| {
+                matches!(t, Some(CppTok::C(Tok {
+                    kind: TokKind::LParen,
+                    ..
+                })))
+            };
+            let at_ident = |t: &Option<CppTok>| {
+                matches!(t, Some(CppTok::C(Tok {
+                    kind: TokKind::Ident,
+                    ..
+                })))
+            };
+            if at_lparen(&t2) {
+                // `struct Tag (*fp)(...)` 函数指针成员
+                return Ok(vec![self.parse_member_fnptr()?]);
+            }
+            if at_ident(&t2) && at_lparen(&t3) {
+                // `struct Tag f(...)` 返回结构体的成员函数
+                return Ok(vec![self.parse_member_fn_inline()?]);
+            }
+            // 其余 (`struct Tag *p;` / `struct Tag x;` / `struct Tag arr[N];`) 按成员变量
+            return self.parse_member_var();
         }
         if matches!(
             &self.peek,
@@ -5968,9 +6295,14 @@ impl<'a> CppParser<'a> {
         self.parse_member_var()
     }
 
-    /// 判断当前位置是否是 `extern "C" { ... }` 块
-    fn is_extern_c_block_start(&self) -> bool {
-        // extern "C" { ... }
+    /// 判断当前位置是否是链接规范 `extern "C" ...` 的起始。
+    ///
+    /// 只看到 `extern` + 字符串字面量为止: 后面跟 `{` 是**块形态**
+    /// (`extern "C" { ... }`), 否则是**单声明形态** (`extern "C" int f();`)。
+    /// 两种形态必须一起识别, 否则单声明形态会在 `extern` 之后撞上字符串
+    /// 字面量而解析失败, 整条声明被降级成 `CppDecl::Opaque` —— native 后端
+    /// 随即报 "unsupported opaque declaration", 整个 TU 退回 legacy 路径。
+    fn at_linkage_spec(&self) -> bool {
         if !matches!(
             &self.peek,
             Some(CppTok::C(Tok {
@@ -5980,38 +6312,44 @@ impl<'a> CppParser<'a> {
         ) {
             return false;
         }
-        // 第二个 token 必须是字符串字面量 "C" 或 "c"
-        match self.peek_token_at(1) {
+        // 第二个 token 必须是字符串字面量 (链接规范名, 如 "C" / "C++")
+        matches!(
+            self.peek_token_at(1),
             Some(CppTok::C(Tok {
                 kind: TokKind::StringLit,
-                text,
                 ..
-            })) => text == "\"C\"" || text == "\"c\"",
-            _ => false,
-        }
+            }))
+        )
     }
 
-    /// 解析 `extern "C" { ... }` 块
+    /// 解析链接规范: `extern "C" linkage-body` 的两种形态。
     ///
-    /// M11 stdlib: 解析 extern "C" 块内的所有声明, 透传给外层.
-    /// 这些是 C 函数的声明, 会在 lower 阶段作为 extern 转发.
-    fn parse_extern_c_block(&mut self) -> Result<CppDecl, CppParseError> {
-        // M18.0: 透传原文到 lower 输出.
-        // 因为 C 头语法 (struct xxx; 等) 不一定被 dcc++ 完整支持,
-        // 整体保留为字符串, lower 时直接 re-emit.
-        // 记下 `extern` 关键字前的位置, 之后截取时直接拿原文整段
+    /// 块形态 ([link.spec]/3 的第二形式) 透传原文为 [`CppDecl::RawExternC`],
+    /// 因为 C 头语法 (`struct xxx;` 等) 不一定被 dcc++ 完整支持;
+    /// 单声明形态则剥掉 `extern "字符串"` 前缀后按同一条声明继续解析。
+    fn parse_linkage_spec(&mut self) -> Result<Vec<CppDecl>, CppParseError> {
+        // 记下 `extern` 关键字前的位置, 块形态截取原文时直接拿整段
         let full_start = self.lex.pos - "extern".len();
-        // 跳过 `extern`
-        self.bump();
-        // 跳过字符串字面量 (例如 "C")
-        if let Some(CppTok::C(Tok {
-            kind: TokKind::StringLit,
-            ..
-        })) = &self.peek
-        {
-            self.bump();
+        self.bump(); // consume 'extern'
+        // [link.spec]/2: 一个 linkage-specification 可以带多个链接字符串
+        // (`extern "C" "ISO"`), 逐个吃掉。
+        loop {
+            if let Some(CppTok::C(Tok {
+                kind: TokKind::StringLit,
+                ..
+            })) = &self.peek
+            {
+                self.bump();
+            } else {
+                break;
+            }
         }
-        // 期望 `{`
+        // [dcl.attr]: linkage-spec 与内部声明/块之间可以插入属性序列 ——
+        // glibc++ 里大量出现 `extern "C++" __attribute__((__noreturn__,
+        // __always_inline__)) inline void __terminate() noexcept { ... }`
+        // (`<exception>`/`<bits/exception.h>`) 与 `extern "C" __attribute__
+        // ((...))` 形态。不容忍则整条声明被块容错降级 Opaque, libcpp 卡住。
+        self.skip_attribute_specifier_seq();
         if !matches!(
             &self.peek,
             Some(CppTok::C(Tok {
@@ -6019,7 +6357,8 @@ impl<'a> CppParser<'a> {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected("{", format!("{:?}", self.peek), self.span()));
+            // 单声明形态: `extern "C" int f();` / `extern "C" void g() { ... }`
+            return self.parse_decl_list_carrying_spec();
         }
         // 跳过 `extern "C" {` 部分
         self.bump();
@@ -6057,7 +6396,7 @@ impl<'a> CppParser<'a> {
         } else {
             String::new()
         };
-        Ok(CppDecl::RawExternC(full_text))
+        Ok(CppDecl::RawExternC(full_text)).map(|d| vec![d])
     }
 
     /// 解析 typedef <decl-specifier> <init-declarator 列表>; (M11 stdlib)
@@ -6161,10 +6500,14 @@ impl<'a> CppParser<'a> {
                 return Ok(typeof_decls);
             }
         }
+        // `typedef <struct|union|enum> [tag] { ... } Name;` 定义形态必须按**定义**
+        // 处理 (见 [`Self::parse_typedef_aggr_decl`])。
+        if self.at_aggr_definition() {
+            return self.parse_typedef_aggr_decl();
+        }
         // M30: 解析目标类型 (parse_mangle_type 覆盖 builtin/类名/
         // 模板实例/限定名/指针). 失败时回退 lex 状态并退化为旧跳过
-        // 逻辑: 匿名 enum/struct 定义等无法简单解析的 typedef 仍走
-        // no-op 路径 (target 置 Int, 不被引用).
+        // 逻辑: 其余无法简单解析的 typedef 仍走 no-op 路径 (target 置 Int)。
         let saved_lex = self.lex.clone();
         let saved_peek = self.peek.clone();
         let mut fp_name: Option<String> = None;
@@ -6660,6 +7003,208 @@ impl<'a> CppParser<'a> {
                 target: ty,
                 name: d.name.clone(),
             });
+        }
+        Ok(out)
+    }
+
+    /// 当前位置是否是聚合体/枚举**定义** (`struct|union|enum [tag] { ...`)。
+    /// 只有带 `{` 的才是定义; `struct X;` / `union U v;` 是前向声明或变量声明。
+    fn at_aggr_definition(&self) -> bool {
+        let tag_kw = matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum,
+                ..
+            }))
+        );
+        if !tag_kw {
+            return false;
+        }
+        match self.peek_token_at(1) {
+            // `struct { ...` / `enum { ...`
+            Some(CppTok::C(Tok {
+                kind: TokKind::LBrace,
+                ..
+            })) => true,
+            // `struct Tag { ...` / `enum class Tag { ...`
+            Some(CppTok::C(Tok {
+                kind: TokKind::Ident,
+                ..
+            })) => matches!(
+                self.peek_token_at(2),
+                Some(CppTok::C(Tok {
+                    kind: TokKind::LBrace,
+                    ..
+                }))
+            ),
+            _ => false,
+        }
+    }
+
+    /// 只读扫描: 从当前位置 (`struct|union|enum ...`) 找到配对的 `}`, 返回其后
+    /// 第一个标识符 (即 typedef 名), 然后回卷词法状态。
+    ///
+    /// 需要先知道这个名字, 是因为**匿名**聚合体的名字就是 typedef 名, 而成员解析
+    /// 要拿它当类上下文 (`ctx_name`) —— 在成员之后才知道名字就晚了。
+    fn scan_name_after_aggr_body(&mut self) -> Option<String> {
+        let saved_lex = self.lex.clone();
+        let saved_peek = self.peek.clone();
+        let mut out: Option<String> = None;
+        // 走到 `{`
+        loop {
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::LBrace,
+                    ..
+                }))
+            ) {
+                break;
+            }
+            if self.peek.is_none() {
+                self.lex = saved_lex;
+                self.peek = saved_peek;
+                return None;
+            }
+            self.bump();
+        }
+        // 按深度吃到配对的 `}` (成员体内可能有嵌套 `{}`)
+        let mut depth = 0i32;
+        loop {
+            match self.peek.clone() {
+                Some(CppTok::C(Tok {
+                    kind: TokKind::LBrace,
+                    ..
+                })) => {
+                    depth += 1;
+                    self.bump();
+                },
+                Some(CppTok::C(Tok {
+                    kind: TokKind::RBrace,
+                    ..
+                })) => {
+                    depth -= 1;
+                    self.bump();
+                    if depth == 0 {
+                        break;
+                    }
+                },
+                Some(_) => {
+                    self.bump();
+                },
+                None => break,
+            }
+        }
+        if let Some(CppTok::C(Tok {
+            kind: TokKind::Ident,
+            text,
+            ..
+        })) = &self.peek
+        {
+            out = Some(text.clone());
+        }
+        self.lex = saved_lex;
+        self.peek = saved_peek;
+        out
+    }
+
+    /// `typedef <struct|union|enum> [tag] { ... } Name [, Decl2...];`
+    ///
+    /// [dcl.typedef]/1 不 [dcl.type.anon]/1: 匿名聚合体的**名字由 typedef 赋予**。
+    /// 此前这条写法走的是「跳过成员体 + 只记一个 `Typedef{target: Int}` 占位」的
+    /// 退化路径, 后果是:
+    ///  - `typedef struct { int __val[2]; } _G_fpos_t;` (glibc `<stdio.h>`) 的字段
+    ///    整体丢失, 使用点报 `unknown class type: _G_fpos_t` —— GCC 15.3.0
+    ///    `libcpp/*.cc` 全部 16 个翻译单元因此无一能走 native 后端;
+    ///  - `typedef enum { A, B } Kind;` 的枚举量不再存在, 使用点报
+    ///    `undeclared identifier: A`;
+    ///  - `typedef struct Tag { ... } Name;` 连 `Tag` 自身都没登记, 报
+    ///    `unknown class type: Tag`。
+    /// 这些写法在 C/C++ 头文件里无处不在, 所以必须按定义建成真正的类/枚举声明,
+    /// 再叠加 typedef 别名 (多个声明符逐个展开)。
+    fn parse_typedef_aggr_decl(&mut self) -> Result<Vec<CppDecl>, CppParseError> {
+        let is_union = matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::KwUnion,
+                ..
+            }))
+        );
+        let is_enum = matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::KwEnum,
+                ..
+            }))
+        );
+        let first_name = self.scan_name_after_aggr_body();
+        let (aggr, tag) = if is_enum {
+            let mut d = self.parse_enum_decl()?;
+            // parse_enum_decl 对匿名枚举用占位名 `_anon`; typedef 场合下把它换成
+            // 真正赋予的名字, 使 `Kind::A` 这种限定访问与类型名查找都能命中。
+            let t = match &mut d {
+                CppDecl::Enum { name, .. } => {
+                    if name == "_anon" {
+                        if let Some(n) = &first_name {
+                            *name = n.clone();
+                        }
+                        None
+                    } else {
+                        Some(name.clone())
+                    }
+                },
+                _ => None,
+            };
+            (d, t)
+        } else {
+            // 匿名时把 typedef 名作为类名注入 (`anon_fallback_name`), 带 tag 那么
+            // `parse_aggr_decl_impl` 会用 tag, fallback 自然被忽略。
+            self.parse_aggr_decl_impl(is_union, false, first_name.clone())?
+        };
+        // 聚合体自身的类型: 有 tag 用 tag (别名指向 tag), 无 tag 用刚赋予的名字。
+        let class_name = tag.or(first_name).unwrap_or_default();
+        let spec = DeclSpec {
+            ty: MangleType::Class(class_name.clone()),
+            is_static: false,
+            is_volatile: false,
+            is_const: false,
+        };
+        let mut out = vec![aggr];
+        // `} A, *B, C[4];` —— 同一条 typedef 的 init-declarator 列表, 逐个展开。
+        loop {
+            let layers = self.parse_declarator_ptr_layers()?;
+            let name = self.expect_ident()?;
+            self.register_type_name(&name);
+            let d = InitDeclarator {
+                layers,
+                array_dims: Vec::new(),
+                name,
+                init: None,
+            };
+            out.push(CppDecl::Typedef {
+                target: d.full_ty(&spec),
+                name: d.name.clone(),
+            });
+            if matches!(
+                &self.peek,
+                Some(CppTok::C(Tok {
+                    kind: TokKind::Comma,
+                    ..
+                }))
+            ) {
+                self.bump();
+                continue;
+            }
+            break;
+        }
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Semi,
+                ..
+            }))
+        ) {
+            self.bump();
         }
         Ok(out)
     }
@@ -8978,13 +9523,13 @@ impl<'a> CppParser<'a> {
                 ..
             })) = &self.peek
             {
-                // M30.2: `class X` 的 C 输出无 class 关键字 - full_name
-                // 只取类型名 (否则 lower 输出 `struct class X` 非法).
-                full_name = if name == "class" {
-                    text.clone()
-                } else {
-                    format!("{} {}", full_name, text)
-                };
+                // Step 2 (A) 地基: `class` 与 `struct`/`union`/`enum` 一视同仁，
+                // 把 tag key 存进 Class 名 (与下面 enum/struct/union 同形式)，
+                // 下游 sema `convert_type` 才能靠 `elaborated_tag_kind()` 区分
+                // 「首次引入 tag」(B4 按需登记为不完整类) 与「未声明名字」。
+                // 旧注里 “C 输出无 class 关键字” 的 legacy 路径已下线 (native 为唯一后端),
+                // 不再需要为它提前剥除 tag。
+                full_name = format!("{} {}", full_name, text);
                 self.bump();
                 // 也支持限定名: enum ns::Kind
                 while matches!(&self.peek, Some(CppTok::ColonColon(_))) {
@@ -9023,10 +9568,8 @@ impl<'a> CppParser<'a> {
         if self.at(CppKw::Const) {
             self.bump();
         }
-        // M30: 吞组合关键字类型并保留宽度 (`unsigned long` → Ulong,
-        // `long long` → LongLong). 之前仅跳过丢弃, `unsigned long` 被
-        // 降级为 32 位 Uint, 导致形参/展开类型宽度错误.
-        // 仅当首个类型词是内建基类型时才组合 (避免吞类名后的类型词).
+        // M30: 吞组合关键字类型并按 [dcl.type.simple] 归一。
+        // 仅当首个类型词是内建基类型时才组合 (避免吞类名后的类型词)。
         let is_builtin_base = matches!(
             full_name.as_str(),
             "void"
@@ -9040,48 +9583,39 @@ impl<'a> CppParser<'a> {
                 | "signed"
                 | "unsigned"
         );
+        // 收集本次声明里出现的**全部**简单类型说明符词。多词基本类型的含义由
+        // 「符号性 / 长度 / 基准类型」三个维度决定, 与词序无关, 所以这里保留
+        // 多重集合而不是拼写串, 交给 `canonical_simple_type` 判定。
+        // `full_name` 正好是这些词的空格拼接, 组合完成后拆回集合即可。
         if is_builtin_base {
             while let Some(CppTok::C(Tok { kind, .. })) = &self.peek {
-                let txt = match kind {
-                    TokKind::KwLong => " long",
-                    TokKind::KwShort => " short",
-                    TokKind::KwChar => " char",
-                    TokKind::KwInt => " int",
-                    TokKind::KwSigned => " signed",
-                    TokKind::KwUnsigned => " unsigned",
+                let word = match kind {
+                    TokKind::KwLong => "long",
+                    TokKind::KwShort => "short",
+                    TokKind::KwChar => "char",
+                    TokKind::KwInt => "int",
+                    TokKind::KwSigned => "signed",
+                    TokKind::KwUnsigned => "unsigned",
                     // M30.2: `long double` 组合 (strtold 等) - 缺失时
                     // double 被误认为下一个 ident 名.
-                    TokKind::KwDouble => " double",
+                    TokKind::KwDouble => "double",
                     _ => break,
                 };
-                full_name.push_str(txt);
+                full_name.push(' ');
+                full_name.push_str(word);
                 self.bump();
             }
         }
-        let mut ty = match full_name.as_str() {
-            "void" => MangleType::Void,
-            "bool" => MangleType::Bool,
-            "char" => MangleType::Char,
-            "signed char" | "char signed" => MangleType::Schar,
-            "unsigned char" | "char unsigned" => MangleType::Uchar,
-            "short" | "short int" | "int short" => MangleType::Short,
-            "unsigned short" | "short unsigned" | "unsigned short int" => MangleType::Ushort,
-            "int" | "signed" | "signed int" => MangleType::Int,
-            "unsigned" | "unsigned int" => MangleType::Uint,
-            "long" | "long int" | "int long" => MangleType::Long,
-            "unsigned long" | "long unsigned" | "unsigned long int" | "long unsigned int" => {
-                MangleType::Ulong
+        let spec_words: Vec<&str> =
+            if is_builtin_base { full_name.split(' ').collect() } else { Vec::new() };
+        // 先按简单类型说明符集合归一; 不是合法组合 (`auto` / 类名 / `struct X`
+        // 等) 再退回原有的拼写表, 保持那些形态的既有行为不变。
+        let mut ty = match canonical_simple_type(&spec_words) {
+            Some(t) => t,
+            None => match full_name.as_str() {
+                "auto" => MangleType::Auto,
+                other => MangleType::Class(other.to_string()),
             },
-            "long long" | "long long int" => MangleType::LongLong,
-            "unsigned long long" | "long unsigned long" | "unsigned long long int" => {
-                MangleType::UlongLong
-            },
-            "float" => MangleType::Float,
-            "double" => MangleType::Double,
-            "long double" | "double long" => MangleType::LongDouble,
-            // M17.0: `auto` 改为 Auto 占位, 由 lower 阶段基于 init 推导
-            "auto" => MangleType::Auto,
-            other => MangleType::Class(other.to_string()),
         };
         // M18: `T<U1, U2, ...>` 模板实例化语法
         // 判别: ident/类名 后紧跟 `<` 且形参合法 (递归到匹配 `>`)
@@ -9091,7 +9625,7 @@ impl<'a> CppParser<'a> {
                 kind: TokKind::Lt,
                 ..
             }))
-        ) && self.looks_like_template_args_after_lt()
+        ) && self.looks_like_template_args_after_lt(true)
         {
             // 嵌套深度限制: 超限直接报错 (防解析器挂起 / 栈溢出)
             if depth + 1 > MAX_TEMPLATE_DEPTH {
@@ -9371,7 +9905,7 @@ impl<'a> CppParser<'a> {
                     kind: TokKind::Lt,
                     ..
                 }))
-            ) && self.looks_like_template_args_after_lt()
+            ) && self.looks_like_template_args_after_lt(true)
             {
                 self.bump(); // 吞 `<`
                              // 跳过模板实参 (不存储, friend 声明不影响 lower)
@@ -9575,7 +10109,7 @@ impl<'a> CppParser<'a> {
                     kind: TokKind::Lt,
                     ..
                 }))
-            ) && self.looks_like_template_args_after_lt()
+            ) && self.looks_like_template_args_after_lt(true)
             {
                 self.parse_template_id_tail(last)?
             } else {
@@ -9820,6 +10354,138 @@ impl<'a> CppParser<'a> {
         // (`int g[10]` => `Array(Int, 10)`), 否则目标文件里只有元素大小的存储。
         self.finish_global_var(ty, name, quals)
     }
+
+    /// 解析**全局/文件作用域的函数指针变量声明** `ret (*name)(params)` (可带
+    /// `extern`/`static`/`const`/`volatile` 前缀与外层 `**` 指针层)。产出
+    /// `CppDecl::GlobalVar`，类型形状 `Pointer(Function{ret,params})`，与
+    /// [`parse_param_list`] 里形参函数指针尾巴同一实现; sema `convert_type` /
+    /// `require_complete_type` 已支持该形状, 无需改动。
+    ///
+    /// 调用前 peek 必须停在声明起点 (首个限定符/返回类型)。这是修 libcpp
+    /// 「全局函数指针声明被顶层容错静默降级成 Opaque → `unsupported opaque
+    /// declaration: void (*obstack_alloc_failed_handler) (`」缺陷的入口: 之前
+    /// 顶层分发只认「返回类型后接 Ident 再接 `(`」为函数、「接 Ident 再接 `;`」
+    /// 为变量, 对「接 `(` 再接 `*`」的函数指针 declarator 两者都不落, 于是
+    /// 落到 [`parse_global_var_decl`] 的 `expect_ident` 撞 `(` 失败 → Opaque。
+    fn parse_global_fnptr_decl(&mut self) -> Result<Vec<CppDecl>, CppParseError> {
+        let mut quals = GlobalVarQuals::default();
+        loop {
+            if self.at(CppKw::Static) {
+                quals.is_static = true;
+                self.bump();
+            } else if self.at(CppKw::Const) {
+                quals.is_const = true;
+                self.bump();
+            } else if self.at(CppKw::Volatile) {
+                quals.is_volatile = true;
+                self.bump();
+            } else if let Some(cs) = self.at_constexpr_spec() {
+                quals.constexpr = Some(cs);
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        let pend = self.take_pending_decl_spec();
+        quals.is_static |= pend.is_static;
+        quals.is_const |= pend.is_const;
+        if quals.constexpr.is_none() {
+            quals.constexpr = pend.constexpr;
+        }
+        // 返回类型 (可能含 `*`/`const` 等已折进类型); 解析后 peek 应停在 `(`。
+        let ret = self.parse_mangle_type()?;
+        if !matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::LParen,
+                ..
+            }))
+        ) {
+            return Err(CppParseError::Unexpected(
+                "(",
+                format!("{:?}", self.peek),
+                self.span(),
+            ));
+        }
+        self.bump(); // (
+        // declarator 外层指针层: `(*h)` 一层, `(**pp)` 两层。
+        let mut ptr_layers = 0usize;
+        while matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Star,
+                ..
+            }))
+        ) {
+            self.bump();
+            ptr_layers += 1;
+        }
+        let name = self.expect_ident()?;
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::RParen,
+                ..
+            }))
+        ) {
+            self.bump(); // )
+        }
+        // 被指向函数的参数表 (复用 parse_param_list, 它自己消费左右括号)。
+        let mut fn_params: Vec<MangleType> = Vec::new();
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::LParen,
+                ..
+            }))
+        ) {
+            fn_params = self
+                .parse_param_list()?
+                .into_iter()
+                .map(|(_, t)| t)
+                .collect();
+        }
+        // 组装 `Pointer(Function)`; declarator 至少一层指针, 外层 `**` 再叠加。
+        let mut ty = MangleType::Pointer(Box::new(MangleType::Function {
+            ret: Box::new(ret),
+            params: fn_params,
+        }));
+        for _ in 1..ptr_layers.max(1) {
+            ty = MangleType::Pointer(Box::new(ty));
+        }
+        // 可选简单初值 `= &fn` 与结尾 `;` (逗号 declarator 列表为后续项, libcpp
+        // 首错形态均为单 declarator)。
+        let init = if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Assign,
+                ..
+            }))
+        ) {
+            self.bump();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        if matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Semi,
+                ..
+            }))
+        ) {
+            self.bump();
+        }
+        Ok(vec![CppDecl::GlobalVar {
+            ty,
+            name,
+            init,
+            is_static: quals.is_static,
+            is_volatile: quals.is_volatile,
+            is_const: quals.is_const,
+        }])
+    }
+
 
     /// M30: 完成全局变量声明尾部: 名后的 `[...]` / `= init` 与逗号之后的
     /// 其余 declarator, 整条声明按 init-declarator 列表展开成 N 个
@@ -11250,43 +11916,59 @@ impl<'a> CppParser<'a> {
     }
 
     fn parse_expr(&mut self) -> Result<CppExpr, CppParseError> {
-        // 三元: a ? b : c
-        let e = self.parse_assignment()?;
-        if matches!(
+        // [expr]/[expr.cond]: 表达式的语法头是 assignment-expression, 而三元在
+        // conditional-expression 这一层 —— `?:` 的优先级**高于**赋值。
+        self.parse_assignment()
+    }
+
+    /// [expr.cond]: `logical-OR ? expression : conditional-expression`。
+    ///
+    /// 为什么必须单独一层: 早前 `parse_expr` 先做 `parse_assignment` 再看 `?`,
+    /// 于是 `t = a > 3 ? 100 : 200` 被解析成 `(t = (a > 3)) ? 100 : 200`,
+    /// `t` 拿到的是条件的布尔值 1 而不是 100/200 (实测与 g++ 不一致)。按标准
+    /// 文法, 三元的**条件**是 logical-OR 表达式 (不含赋值), 赋值表达式的**右操作数**
+    /// 是 conditional-expression —— 因此三元必须在赋值内层、在 `||` 外层。
+    fn parse_conditional(&mut self) -> Result<CppExpr, CppParseError> {
+        let cond = self.parse_or()?;
+        if !matches!(
             &self.peek,
             Some(CppTok::C(Tok {
                 kind: TokKind::Question,
                 ..
             }))
         ) {
-            self.bump();
-            let then = self.parse_expr()?;
-            if !matches!(
-                &self.peek,
-                Some(CppTok::C(Tok {
-                    kind: TokKind::Colon,
-                    ..
-                }))
-            ) {
-                return Err(CppParseError::Unexpected(
-                    ":",
-                    format!("{:?}", self.peek),
-                    self.span(),
-                ));
-            }
-            self.bump();
-            let els = self.parse_expr()?;
-            return Ok(CppExpr::Ternary {
-                cond: Box::new(e),
-                then: Box::new(then),
-                els: Box::new(els),
-            });
+            return Ok(cond);
         }
-        Ok(e)
+        self.bump();
+        // 中间操作数是完整的 expression (允许赋值与三元嵌套)
+        let then = self.parse_expr()?;
+        if !matches!(
+            &self.peek,
+            Some(CppTok::C(Tok {
+                kind: TokKind::Colon,
+                ..
+            }))
+        ) {
+            return Err(CppParseError::Unexpected(
+                ":",
+                format!("{:?}", self.peek),
+                self.span(),
+            ));
+        }
+        self.bump();
+        // 末尾操作数是 conditional-expression (不含逗号运算符)
+        let els = self.parse_conditional()?;
+        Ok(CppExpr::Ternary {
+            cond: Box::new(cond),
+            then: Box::new(then),
+            els: Box::new(els),
+        })
     }
 
     fn parse_assignment(&mut self) -> Result<CppExpr, CppParseError> {
-        let l = self.parse_or()?;
+        // 左操作数同样是 conditional-expression: 它后面的 `?` 只能属于内层
+        // (赋值左侧要求是 cast-expression, 带三元的左值本身不合法)。
+        let l = self.parse_conditional()?;
         let asop = match &self.peek {
             Some(CppTok::C(Tok {
                 kind: TokKind::Assign,
@@ -12546,7 +13228,12 @@ impl<'a> CppParser<'a> {
                 // cast 检测恢复后 self.peek = LParen, 这里 bump 一下
                 self.bump();
             }
-            let e = self.parse_expr()?;
+            // [expr.comma]/1: 括号里的 `,` 是**逗号运算符**而不是分隔符
+            // (括号自己就构成了一个序列点边界), 所以括号表达式必须按
+            // comma-expression 解析: `x = (a, b);` / `n += (a < b, c > d);`
+            // / `return (a, b) ? 1 : 0;` 都是合法 C++, 早前只走 `parse_expr`
+            // 会让整个语句解析失败并降级成 OpaqueStmt。
+            let e = self.parse_comma_expr()?;
             if !matches!(
                 &self.peek,
                 Some(CppTok::C(Tok {
@@ -12612,7 +13299,7 @@ impl<'a> CppParser<'a> {
                         kind: TokKind::Lt,
                         ..
                     }))
-                ) && self.looks_like_template_args_after_lt()
+                ) && self.looks_like_template_args_after_lt(false)
                 {
                     let last = parts.last().cloned().unwrap_or_default();
                     self.bump(); // 吞 `<`
@@ -12692,7 +13379,7 @@ impl<'a> CppParser<'a> {
                     kind: TokKind::Lt,
                     ..
                 }))
-            ) && self.looks_like_template_args_after_lt()
+            ) && self.looks_like_template_args_after_lt(false)
             {
                 // M26: 解析并保存显式模板实参 (供 lower 阶段实例化模板函数)
                 self.bump(); // 吞 `<`
@@ -13268,6 +13955,48 @@ impl<'a> CppParser<'a> {
             if self.take_deleted_or_pure_specifier(&mut kinds) {
                 continue;
             }
+            // [dcl.fct]: 属性序列可以插在任何后置修饰之后、也之间 ——
+            // glibc++ 大量写 `void terminate() noexcept __attribute__((__noreturn__));`
+            // 与 `[[...]]` 后置形式; 本单一真源把尾缀属性一并循环消化,
+            // 避免每个调用方 (free fn / member fn / ctor / dtor / 局部函数声明)
+            // 各自记得补 skip_gnu_suffixes 导致不一致。
+            let before = self.lex.pos;
+            self.skip_gnu_suffixes();
+            // C++11 `[[...]]` 后置形式 (不包含未展开宏 `IDENT(args)`，那
+            // 会在当前函数尾缀位置与下一个声明的起点同形, 只在 namespace /
+            // linkage-spec 前缀位置才安全)。
+            if self.at_tok(TokKind::LBracket)
+                && matches!(
+                    self.peek_token_at(1),
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::LBracket,
+                        ..
+                    }))
+                )
+            {
+                self.bump(); // [
+                self.bump(); // [
+                let mut depth = 2i32;
+                while depth > 0 {
+                    match &self.peek {
+                        Some(CppTok::C(Tok { kind, .. })) => {
+                            match kind {
+                                TokKind::LBracket => depth += 1,
+                                TokKind::RBracket => depth -= 1,
+                                _ => {}
+                            }
+                            self.bump();
+                        },
+                        Some(_) => {
+                            self.bump();
+                        },
+                        None => break,
+                    }
+                }
+            }
+            if self.lex.pos != before {
+                continue;
+            }
             break;
         }
         kinds
@@ -13521,6 +14250,10 @@ impl<'a> CppParser<'a> {
         // `Foo bar{1};` 只在 `Foo` 确为类型时才是声明, 否则是 `Foo{1}` 函数式转换)
         let mut first_is_known_type = false;
         let mut first_is_deduced = false;
+        // 第一个类型说明符是否是 tag 关键字 (`struct`/`union`/`enum`)。tag 关键字开头
+        // 的词法上**不可能**是表达式, 因此它与内置类型同样可以无歧义地
+        // 允许数组声明符 / 花括号初始化符 (`struct S arr[3];` / `union U u{1};`)。
+        let mut first_is_tag_spec = false;
         // 跳过 static
         let is_static = self.at(CppKw::Static);
         if is_static {
@@ -13643,6 +14376,35 @@ impl<'a> CppParser<'a> {
                 }))
             );
             i += 1;
+            // [dcl.type.elab]: **elaborated type specifier** 是「tag 关键字 + 类型名」
+            // 两个 token (`struct S x;` / `union U u;` / `enum E e;` /
+            // `struct ::ns::T *p;`)。tag 关键字本身不是类型, 必须把紧跟的 tag 名
+            // 一并计入类型部分, 否则 tag 名会被当成变量名, 真正的变量名 (`x`) 落在
+            // 「名字后必须是 `;`/`=`/`(`」的检查上直接失败 —— 局部 `struct S x;`
+            // 因此整条语句降级成 OpaqueStmt (C 代码编成 C++ 时极其常见:
+            // `struct stat st;` / `union {…} u;` / `enum kind k;`)。
+            if matches!(
+                first.as_ref(),
+                Some(CppTok::C(Tok {
+                    kind: TokKind::KwStruct | TokKind::KwUnion | TokKind::KwEnum,
+                    ..
+                }))
+            ) {
+                first_is_tag_spec = true;
+                // `enum class X` / `enum struct X`: scoped enum 的 `class` 也是类型一部分
+                if matches!(self.peek_token_at(i), Some(CppTok::Kw(CppKw::Class, _))) {
+                    i += 1;
+                }
+                if matches!(
+                    self.peek_token_at(i),
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Ident,
+                        ..
+                    }))
+                ) {
+                    i += 1;
+                }
+            }
             // M26: 模板实例化类型 `Holder<int>` / `Holder<Holder<int>>`:
             // 类型名后紧跟 `<` 且尖括号平衡 → 跳过模板实参
             if let Some(after) = self.skip_template_args_at(i) {
@@ -13765,6 +14527,7 @@ impl<'a> CppParser<'a> {
             return true;
         }
         let type_is_identifiable = first_is_builtin
+            || first_is_tag_spec
             || first_is_known_type
             || first_is_deduced
             || starts_with_qualified_name;
@@ -13794,13 +14557,14 @@ impl<'a> CppParser<'a> {
             return true;
         }
         first_is_builtin
-            && matches!(
-                after_name,
-                Some(CppTok::C(Tok {
-                    kind: TokKind::LBracket,
-                    ..
-                }))
-            )
+            || (first_is_tag_spec
+                && matches!(
+                    after_name,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::LBracket,
+                        ..
+                    }))
+                ))
     }
 
     /// 列表初始化 (`T n{a, b}`) / 直接初始化 (`T n(a, b)`) 的初始化式表达式.
@@ -14116,7 +14880,7 @@ impl<'a> CppParser<'a> {
                     kind: TokKind::Lt,
                     ..
                 }))
-            ) && self.looks_like_template_args_after_lt()
+            ) && self.looks_like_template_args_after_lt(true)
             {
                 // M26: 限定名后的模板实参 `std::vector<int>` (M53: 与全局
                 // 声明位置共用 parse_template_id_tail)
@@ -15005,6 +15769,173 @@ fn is_c_type_kw(kind: TokKind) -> bool {
     )
 }
 
+/// [dcl.type.simple]/1: 把「简单类型说明符」的**多重集合**折成唯一的基本类型。
+///
+/// 多词基本类型的含义由三个维度决定 —— 符号性 (`signed`/`unsigned`)、
+/// 长度 (`short` / `long`×N)、基准类型 (`char`/`int`/`float`/`double`/`void`) ——
+/// 并且**与词序无关**: `signed short int`、`short int`、`int signed short` 是
+/// 同一个类型。因此不能按拼写字符串枚举组合: 枚举必然漏 (实测漏了
+/// `signed short int` / `signed long long int`, 未命中时类型名降级为
+/// `MangleType::Class("signed short int")`, sema 报 `unknown class type`,
+/// 整份含 `<stdio.h>` 的 TU 全部退回 legacy 文本降级路径 —— GCC 15.3.0
+/// `libcpp/*.cc` 16 个翻译单元因此无一能通过 native 后端)。
+///
+/// 入参是本次声明中出现的全部简单类型说明符词 (按出现顺序, 允许重复的
+/// `long`)。空集合、含非简单类型说明符的集合、以及标准里不合法的组合都返回
+/// `None`, 由调用方按「不是基本类型」处理。
+fn canonical_simple_type(words: &[&str]) -> Option<MangleType> {
+    if words.is_empty() {
+        return None;
+    }
+    let mut unsigned: Option<bool> = None;
+    let (mut long, mut short, mut char_, mut int_) = (0u8, false, false, false);
+    let (mut double_, mut float_, mut void_, mut bool_) = (false, false, false, false);
+    for w in words {
+        match *w {
+            "signed" => {
+                if unsigned == Some(true) {
+                    return None;
+                }
+                unsigned = Some(false);
+            },
+            "unsigned" => {
+                if unsigned == Some(false) {
+                    return None;
+                }
+                unsigned = Some(true);
+            },
+            "long" => long += 1,
+            "short" => short = true,
+            "char" => char_ = true,
+            "int" => int_ = true,
+            "double" => double_ = true,
+            "float" => float_ = true,
+            "void" => void_ = true,
+            "bool" | "_Bool" => bool_ = true,
+            // 不是简单类型说明符 (类名 / `auto` / tag 名等)
+            _ => return None,
+        }
+    }
+    // `void` / `bool` 只能单独出现
+    if void_ || bool_ {
+        return (words.len() == 1).then(|| if void_ { MangleType::Void } else { MangleType::Bool });
+    }
+    if float_ {
+        // `float` 不与其他说明符组合 (`long float` 在 GNU C 里是警告, C++ 里非法)
+        if long != 0 || double_ || short || char_ || int_ {
+            return None;
+        }
+        return Some(MangleType::Float);
+    }
+    if double_ {
+        // `int double` / `char double` 等不是合法组合
+        if short || char_ || int_ || long > 1 {
+            return None;
+        }
+        return Some(if long == 1 { MangleType::LongDouble } else { MangleType::Double });
+    }
+    // `char` 是三态的: 裸 `char` 是独立类型 (`MangleType::Char`), 与
+    // `signed char` / `unsigned char` 在 [basic.types] 里是三个不同类型。
+    // 其余整数类型的裸书写总是有符号的, 所以用 bool 即可。
+    if char_ {
+        // `char` 与长度/整型说明符不能组合
+        if short || long != 0 || int_ {
+            return None;
+        }
+        return Some(match unsigned {
+            Some(true) => MangleType::Uchar,
+            Some(false) => MangleType::Schar,
+            None => MangleType::Char,
+        });
+    }
+    let unsigned = unsigned == Some(true);
+    if short {
+        if long != 0 {
+            return None;
+        }
+        return Some(if unsigned { MangleType::Ushort } else { MangleType::Short });
+    }
+    match long {
+        0 => Some(if unsigned { MangleType::Uint } else { MangleType::Int }),
+        1 => Some(if unsigned { MangleType::Ulong } else { MangleType::Long }),
+        _ => Some(if unsigned {
+            MangleType::UlongLong
+        } else {
+            MangleType::LongLong
+        }),
+    }
+}
+
+#[cfg(test)]
+mod canonical_simple_type_tests {
+    use super::*;
+
+    fn t(words: &[&str]) -> Option<MangleType> {
+        canonical_simple_type(words)
+    }
+
+    /// 词序无关: 同一个三个维度的集合, 无论怎么写都得同一类型。
+    #[test]
+    fn order_does_not_matter() {
+        let expect = Some(MangleType::Short);
+        for w in [
+            &["short"][..],
+            &["short", "int"][..],
+            &["int", "short"][..],
+            &["signed", "short", "int"][..],
+            &["short", "int", "signed"][..],
+            &["signed", "short"][..],
+        ] {
+            assert_eq!(t(w), expect, "组合 {:?}", w);
+        }
+    }
+
+    /// 此前被拼写表漏掉、导致整个 GCC libcpp 退到 legacy 路径的写法。
+    #[test]
+    fn previously_missing_signed_combinations() {
+        assert_eq!(t(&["signed", "short", "int"]), Some(MangleType::Short));
+        assert_eq!(t(&["signed", "long", "int"]), Some(MangleType::Long));
+        assert_eq!(
+            t(&["signed", "long", "long", "int"]),
+            Some(MangleType::LongLong)
+        );
+        assert_eq!(
+            t(&["unsigned", "long", "long"]),
+            Some(MangleType::UlongLong)
+        );
+    }
+
+    #[test]
+    fn single_and_multi_word_builtins() {
+        assert_eq!(t(&["void"]), Some(MangleType::Void));
+        assert_eq!(t(&["bool"]), Some(MangleType::Bool));
+        assert_eq!(t(&["char"]), Some(MangleType::Char));
+        assert_eq!(t(&["signed", "char"]), Some(MangleType::Schar));
+        assert_eq!(t(&["unsigned", "char"]), Some(MangleType::Uchar));
+        assert_eq!(t(&["int"]), Some(MangleType::Int));
+        assert_eq!(t(&["signed"]), Some(MangleType::Int));
+        assert_eq!(t(&["unsigned"]), Some(MangleType::Uint));
+        assert_eq!(t(&["long"]), Some(MangleType::Long));
+        assert_eq!(t(&["long", "long"]), Some(MangleType::LongLong));
+        assert_eq!(t(&["float"]), Some(MangleType::Float));
+        assert_eq!(t(&["double"]), Some(MangleType::Double));
+        assert_eq!(t(&["long", "double"]), Some(MangleType::LongDouble));
+    }
+
+    /// 非法组合与非简单类型说明符必须返回 None (交给调用方按类名处理)。
+    #[test]
+    fn rejects_illegal_and_non_builtin_sets() {
+        assert_eq!(t(&[]), None);
+        assert_eq!(t(&["auto"]), None);
+        assert_eq!(t(&["MyClass"]), None);
+        assert_eq!(t(&["signed", "unsigned"]), None);
+        assert_eq!(t(&["void", "int"]), None);
+        assert_eq!(t(&["long", "long", "double"]), None);
+        assert_eq!(t(&["short", "long"]), None);
+        assert_eq!(t(&["char", "int"]), None);
+    }
+}
+
 /// M26.1: 解析字符字面量值 (含转义). 失败返回 0.
 fn char_lit_value(s: &str) -> i64 {
     let mut chars = s.chars();
@@ -15153,6 +16084,59 @@ mod tests {
         assert_eq!(vars[0], ("a".to_string(), MangleType::Int));
         assert_eq!(vars[1], ("bp".to_string(), MangleType::Pointer(Box::new(MangleType::Int))));
         assert_eq!(vars[2], ("bv".to_string(), MangleType::Int));
+    }
+
+    /// 缺陷: 全局函数指针变量声明 `ret (*name)(params)` 之前被顶层容错静默
+    /// 降级成 Opaque (libcpp 统一首错 `unsupported opaque declaration:
+    /// void (*obstack_alloc_failed_handler) (`)。修复后必须解析成
+    /// `CppDecl::GlobalVar{ ty: Pointer(Function{...}) }`, 且不得把普通函数
+    /// 声明 `int f(int);` 误抢。
+    #[test]
+    fn global_fnptr_decl_parses_as_global_var_not_opaque() {
+        let src = b"extern void (*h)(void);\n\
+                    int (*cmp)(const void *, const void *);\n\
+                    void (*h2)(int, char);\n\
+                    int (**pp)(void);\n";
+        let mut p = CppParser::new(src, "test.cpp");
+        let decls = p.parse_top_level().unwrap();
+        // 护栏 1: 一条都不许是 Opaque。
+        assert!(
+            decls.iter().all(|d| !matches!(d, CppDecl::Opaque(_))),
+            "全局函数指针被静默降级成 Opaque: {:?}",
+            decls
+        );
+        // 护栏 2: 每条都是 GlobalVar 且类型为 Pointer(Function) (不能退化成 void*)。
+        let tys: Vec<&MangleType> = decls
+            .iter()
+            .filter_map(|d| match d {
+                CppDecl::GlobalVar { ty, .. } => Some(ty),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tys.len(), 4, "实得 {:?}", decls);
+        for ty in &tys {
+            let MangleType::Pointer(inner) = ty else {
+                panic!("函数指针类型顶层应为 Pointer, 实得 {:?}", ty);
+            };
+            // 最内层必须是 Function (允许 `**pp` 多一层 Pointer)。
+            let mut cur = inner.as_ref();
+            while let MangleType::Pointer(n) = cur {
+                cur = n.as_ref();
+            }
+            assert!(
+                matches!(cur, MangleType::Function { .. }),
+                "函数指针所指类型必须是 Function, 实得 {:?}",
+                cur
+            );
+        }
+        // 反护栏: `int f(int);` 仍必须是 FreeFn, 不得被新分支抢走。
+        let mut q = CppParser::new(b"int f(int);", "t.cpp");
+        let d = q.parse_top_level().unwrap();
+        assert!(
+            matches!(&d[0], CppDecl::FreeFn { .. }),
+            "误把函数声明当函数指针: {:?}",
+            d
+        );
     }
 
     /// M54: 全局数组声明符的**维度必须折进类型** —— 旧实现把 `[...]` 整段
@@ -15344,6 +16328,176 @@ mod tests {
                 assert_eq!(body.len(), 1);
             },
             _ => panic!("expected namespace, got {:?}", d[0]),
+        }
+    }
+
+    /// 缺陷: glibc++ 头写 `namespace std _GLIBCXX_VISIBILITY(default) { ... }`,
+    /// 名字与 `{` 之间夹了一个属性说明符 (展开后为 `__attribute__(...)`, 未展开
+    /// 时为 `IDENT(args)`)。之前顶层分发不容忍 → 整条 namespace 降级 Opaque,
+    /// native 硬错。修复后三种属性形态都必须解析成 Namespace 而非 Opaque。
+    #[test]
+    fn parse_namespace_with_attributes() {
+        let cases = [
+            b"namespace std __attribute__((__visibility__(\"default\"))) { struct A {}; }".as_slice(),
+            b"namespace [[gnu::hidden]] bar { struct B {}; }".as_slice(),
+            b"namespace VISIBLE(default) { struct C {}; }".as_slice(),
+        ];
+        for src in cases {
+            let mut p = CppParser::new(src, "test.cpp");
+            let d = p.parse_top_level().unwrap();
+            assert!(
+                matches!(&d[0], CppDecl::Namespace { .. }),
+                "带属性的 namespace 不得降级 Opaque: {:?}",
+                d[0]
+            );
+        }
+    }
+
+    /// Step 1 (L) 架构地基: 命名空间体里一个成员解析失败**不得**把整块
+    /// 降级成一条 Opaque, 而应像顶层 [`parse_top_level`] 与类体
+    /// [`parse_member_decl_with_class`] 同构地逐成员局部恢复。真实 libstdc++ 头
+    /// 的 `namespace std { ... }` 上百个成员, 若整体吞成一个 Opaque, 首错永远
+    /// 停在 `std {`, 无法定位到具体成员 —— 后续每项能力 (A~K) 的增量都失去
+    /// 立足点。测试中 `class ;` 强制让一个成员失败, 好成员 `struct Good`
+    /// 仍必须作为独立 `CppDecl::Class` 存在在命名空间体内。
+    #[test]
+    fn parse_namespace_body_recovers_per_member() {
+        let src = b"namespace N { class ; struct Good { int g; }; } int afterNs() { return 0; }";
+        let mut p = CppParser::new(src, "t.cpp");
+        let d = p.parse_top_level().unwrap_or_default();
+        // 关键不变量: 一个成员失败不得让整块 namespace 变成顶层的一条
+        // Opaque; namespace 之后的顶层声明也必须被继续解析。两者同时验证了
+        // Step 1 (L) 把失败局部化、后续每项能力能各自推进的架构前提。
+        assert!(
+            d.iter().any(|x| matches!(x, CppDecl::Namespace { .. })),
+            "整块 namespace 被降级成顶层 Opaque, 逐成员恢复未生效: {:?}",
+            d
+        );
+        assert!(
+            d.iter().any(|x| matches!(x, CppDecl::FreeFn { .. })),
+            "namespace 之后的顶层声明被拖没: {:?}",
+            d
+        );
+    }
+
+    /// 修复: linkage-spec 与内部声明/块之间可插入属性序列 ([dcl.attr]):
+    /// glibc++ `<exception>` 大量写
+    /// `extern "C++" __attribute__((__noreturn__, __always_inline__))
+    ///  inline void __terminate() noexcept { ... }`。之前 `parse_linkage_spec`
+    /// 只吃字符串字面量后直接要求 `{` 或落到 decl, 属性留在流里→整条降级 Opaque。
+    /// 现在复用 [`skip_attribute_specifier_seq`] (与 namespace 同一真源),
+    /// `[[...]]` / `__attribute__((...))` / 未展开属性宏 `IDENT(args)` 三种形态都容错。
+    #[test]
+    fn extern_linkage_spec_with_attributes() {
+        let cases: &[&[u8]] = &[
+            b"extern \"C++\" __attribute__((__noreturn__)) void f();",
+            b"extern \"C\" __attribute__((__noreturn__, __always_inline__)) void g();",
+            b"extern \"C++\" [[gnu::noreturn]] void h();",
+            b"extern \"C\" __attribute__((__visibility__(\"default\"))) { void k(); }",
+            b"extern \"C++\" VISIBLE_MACRO(args) inline void m() noexcept { }",
+        ];
+        for src in cases {
+            let mut p = CppParser::new(src, "t.cpp");
+            let d = p.parse_top_level().unwrap();
+            assert!(
+                !matches!(&d[0], CppDecl::Opaque(_)),
+                "带属性的 linkage-spec 不得降级 Opaque: {:?}",
+                d[0]
+            );
+        }
+    }
+
+    /// Step 2 (A) 首个增量: 非类型**参数 pack** (`typename T, T... Ints` 与
+    /// `int... N`) 必须能解析。libstdc++ `integer_sequence<T, Ints...>` / `make_index_sequence<N>`
+    /// 与 pair 的 piecewise ctor 签名 (`tuple<_Args1...>&`) 都依赖它 ——
+    /// 修前 `--component=libcpp` 首错直接卡在 `<typename T, T... Ints>`。
+    #[test]
+    fn non_type_parameter_pack_parses() {
+        let cases: &[&[u8]] = &[
+            b"template<typename T, T... Ints> struct seq { };",
+            b"template<int... N> struct iseq { };",
+            b"template<typename T, int... N> struct mix { };",
+        ];
+        for src in cases {
+            let mut p = CppParser::new(src, "t.cpp");
+            let d = p.parse_top_level().unwrap();
+            assert!(
+                !matches!(&d[0], CppDecl::Opaque(_)),
+                "非类型参数 pack 不得降级 Opaque: {:?}",
+                d[0]
+            );
+        }
+    }
+
+    /// Step 8 (F) 地基: `skip_specifiers` 单一真源现在同时消化
+    /// `noexcept` / `override` / `final` 与其后的 GNU 属性 / C++11 `[[...]]`。
+    /// libcpp 卡点形态 `void terminate() noexcept __attribute__((__noreturn__));`
+    /// 直接依赖。修前仅能吃 “属性在 noexcept 之前” 一种顺序。
+    #[test]
+    fn function_declarator_trailing_attributes_parses() {
+        let cases: &[&[u8]] = &[
+            b"void f() noexcept __attribute__((__noreturn__));",
+            b"void g() noexcept [[gnu::noreturn]];",
+            b"struct B { virtual void m() noexcept __attribute__((__pure__)); };",
+            b"void h() override __attribute__((__always_inline__));",
+        ];
+        for src in cases {
+            let mut p = CppParser::new(src, "t.cpp");
+            let d = p.parse_top_level().unwrap();
+            assert!(
+                d.iter().all(|x| !matches!(x, CppDecl::Opaque(_))),
+                "后置属性形态不得降级 Opaque: {:?}",
+                d
+            );
+        }
+    }
+
+    /// cpplib.h 写 `extern enum cpp_token_fld_kind cpp_token_val_index
+    /// (const cpp_token *tok);` —— `enum <Tag>` 作返回类型。修前顶层分发
+    /// 将 `enum ...` 无条件送到 parse_enum_decl → 遇到 `E foo()` 失败→
+    /// 整条降级 Opaque。现在只有定义/opaque 声明形态 (`{`/`;`/`:`) 走定义分支，
+    /// elaborated 用法落到 is_type_kw_or_spec 当类型开头处理。
+    #[test]
+    fn elaborated_enum_return_type_parses() {
+        let cases: &[&[u8]] = &[
+            b"enum E { A }; extern enum E foo();",
+            b"enum E { A }; enum E foo() { return A; }",
+            b"enum E { A }; struct S { enum E member; };",
+        ];
+        for src in cases {
+            let mut p = CppParser::new(src, "t.cpp");
+            let d = p.parse_top_level().unwrap();
+            assert!(
+                d.iter().all(|x| !matches!(x, CppDecl::Opaque(_))),
+                "elaborated enum 类型不得降级 Opaque: {:?}",
+                d
+            );
+        }
+    }
+
+    /// libcpp `internal.h:556` 写 `class mkdeps *deps;` 作类字段, 又写
+    /// `extern class mkdeps *deps_init (void);` 作顶层函数返回类型。
+    /// 修前 `parse_mangle_type` 专意剥除 `class` tag key (legacy C 输出旧
+    /// 需求: 否则拼出 `struct class mkdeps`), 但 legacy 路径已下线且 tag
+    /// key 丢失使 sema `elaborated_tag_kind()` 无法区分「首次引入 tag」(B4
+    /// 按需登记为不完整类) 与「未声明名字」。现在 `class` 与 `struct`/
+    /// `union`/`enum` 同形式保留 tag key，下面三种形态都不再报 `unknown class type: mkdeps`。
+    #[test]
+    fn elaborated_class_tag_preserved_end_to_end() {
+        let cases: &[&[u8]] = &[
+            b"class mkdeps *get(void);",
+            b"extern class mkdeps *get(void);",
+            b"void h(class mkdeps *d);",
+            b"struct S { class mkdeps *deps; };",
+        ];
+        for src in cases {
+            let mut p = CppParser::new(src, "t.cpp");
+            let d = p.parse_top_level().unwrap();
+            assert!(
+                d.iter().all(|x| !matches!(x, CppDecl::Opaque(_))),
+                "elaborated class tag 形态不得降级 Opaque: {:?}",
+                d
+            );
         }
     }
 

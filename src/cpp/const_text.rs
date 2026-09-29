@@ -330,6 +330,47 @@ pub fn split_int_lit_suffix(text: &str) -> (&str, &str) {
     (&text[..i], &text[i..])
 }
 
+/// 剥开浮点字面量的后缀: 返回 (数值部分, 后缀部分)。
+///
+/// [lex.fcon]: 后缀只表**精度** —— `f`/`F` 是 `float`, `l`/`L` 是
+/// `long double`, 无后缀是 `double`。十六进制浮点 (`0x1p3`) 的后缀同样在末尾。
+/// 全字都是后缀时不当成字面量 (返回原文与空后缀)。
+fn split_float_lit_suffix(text: &str) -> (&str, &str) {
+    let bytes = text.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 && matches!(bytes[i - 1], b'f' | b'F' | b'l' | b'L') {
+        i -= 1;
+    }
+    if i == 0 {
+        return (text, "");
+    }
+    (&text[..i], &text[i..])
+}
+
+/// 浮点字面量的类型宽度 (32 / 64 / 80 位), 单一真源。
+///
+/// 早前 C++ 前端把所有浮点常量按 double 建模并在语义入口剥掉后缀, 于是
+/// `long double a = 1.0L / 3.0L` 的两个操作数都是 double, 结果只有 53 位精度
+/// (实测 dcc `0.333333333333333315` / g++ `0.333333333333333333`), 且
+/// `float` 字面量也一样失去 `float` 类型。后缀携带的是**类型**信息, 必须在
+/// 语义层用掉而不是丢弃。
+pub fn float_literal_bits(text: &str) -> u16 {
+    let suffix = split_float_lit_suffix(text).1;
+    // `f` = float, `l` = long double; 空后缀 = double。同时出现两个后缀
+    // (`1.0fl`) 不是合法字面量, 按 double 处理即可。
+    match suffix {
+        "f" | "F" => 32,
+        "l" | "L" => 80,
+        _ => 64,
+    }
+}
+
+/// 剥掉浮点字面量后缀, 返回可被 `f64::from_str` / [`crate::float80::from_decimal`]
+/// 接受的数值部分。
+pub fn float_literal_digits(text: &str) -> String {
+    split_float_lit_suffix(text).0.to_string()
+}
+
 /// 解码字符串字面量**内容** (已去引号) 为真实字节序列。
 ///
 /// 未转义部分按原字节保留 (包括 UTF-8 多字节序列); 无法识别的转义丢弃

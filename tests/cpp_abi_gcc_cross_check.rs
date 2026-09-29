@@ -213,6 +213,17 @@ fn cpp_abi_template_group() {
     check_group("cpp_abi_template");
 }
 
+/// C 风格声明形态 (匿名 struct/union/enum 的 typedef、多词基本类型、
+/// `extern "C"` 单声明形态、`<stdarg.h>` 的 va_list) 与 g++ 的运行期对照。
+///
+/// 这一组的价值在于: 这些形态是**任何**真实 C++ 程序包含系统头文件后都会走到的
+/// 路径, 任一形态解析失败, 整个翻译单元就退回 legacy 文本降级 (对 GCC 源码树
+/// 的探测里, libcpp 的 16 个 TU 全部卡在这类形态上)。
+#[test]
+fn cpp_abi_c_style_decls_group() {
+    check_group("cpp_abi_c_style_decls");
+}
+
 /// 新增分组目录必须同时出现在上面的分组测试清单里, 否则交叉验证会漏跑。
 #[test]
 fn cpp_abi_groups_are_all_covered() {
@@ -223,6 +234,7 @@ fn cpp_abi_groups_are_all_covered() {
         "cpp_abi_rtti",
         "cpp_abi_eh",
         "cpp_abi_template",
+        "cpp_abi_c_style_decls",
     ];
     let missing: Vec<String> = all_groups()
         .into_iter()

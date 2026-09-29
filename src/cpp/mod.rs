@@ -50,6 +50,7 @@
 pub mod abi_layout;
 pub mod adl;
 pub mod bmf;
+pub mod builtin_decls_prelude;
 pub mod builtins;
 pub mod const_text;
 pub mod coroutine;

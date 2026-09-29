@@ -268,6 +268,74 @@ impl CxxType {
         )
     }
 
+    /// [expr.arith.conv] + [conv.prom]: 通常算术转换 (usual arithmetic conversions)
+    /// 的**复合类型** —— 二元算术/位运算应该按哪个类型记账。
+    ///
+    /// 为什么不能像旧实现那样直接拿「左操作数类型」当结果类型: sema 一旦把结果
+    /// 类型标错, 下游会在赋值处插一个并不存在的隐式转换。实测
+    /// `int r = (d < 0.4);` 旧实现把比较结果标成 `double`, 于是发射出
+    /// `ucomisd / setb / movzbq` 算出正确的 0/1 之后, 又追加一条
+    /// `cvttsd2si %xmm0,%eax` 拿浮操作数覆盖它 (dcc r=0 / g++ r=1)。
+    ///
+    /// 规则 (只覆盖内建标量; 任一侧不是标量时返回 `None`, 由调用方按原有
+    /// 语义处理 —— 指针算术、重载运算符等各有各的类型规则):
+    ///  - 两侧同浮: 取较宽者 (32 < 64 < 80);
+    ///  - 一浮一整: 取该浮点类型;
+    ///  - 两侧整: 宽度不等取较宽者 (保留其符号); 等宽时任一无符号则结果无符号。
+    pub fn usual_arith_type(&self, other: &CxxType) -> Option<CxxType> {
+        /// 标量属于哪个族: 整数族记 (宽度, 是否有符号), 浮点族记宽度。
+        enum Fam {
+            Int(u16, bool),
+            Flt(u16),
+        }
+        let fam = |t: &CxxType| -> Option<Fam> {
+            match t {
+                // [conv.prom]: bool 先提升为 int
+                CxxType::Bool => Some(Fam::Int(32, true)),
+                CxxType::Integer { bits, signed } => Some(Fam::Int(*bits, *signed)),
+                CxxType::Float { bits } => Some(Fam::Flt(*bits)),
+                _ => None,
+            }
+        };
+        let (a, b) = match (fam(self), fam(other)) {
+            (Some(a), Some(b)) => (a, b),
+            _ => return None,
+        };
+        Some(match (a, b) {
+            // 两侧浮: 取较宽者 (float < double < long double)
+            (Fam::Flt(x), Fam::Flt(y)) => CxxType::Float {
+                bits: x.max(y),
+            },
+            // 一浮一整: 浮点族吸收整点族 ([expr.arith.conv]/1)
+            (Fam::Flt(x), Fam::Int(..)) | (Fam::Int(..), Fam::Flt(x)) => {
+                CxxType::Float { bits: x }
+            },
+            (Fam::Int(x, xs), Fam::Int(y, ys)) => {
+                if x != y {
+                    // 宽度不等: 取较宽者的秩与符号
+                    let (bits, signed) = if x > y { (x, xs) } else { (y, ys) };
+                    CxxType::Integer { bits, signed }
+                } else {
+                    // 等宽: 任一侧无符号则结果无符号
+                    CxxType::Integer {
+                        bits: x,
+                        signed: xs && ys,
+                    }
+                }
+            },
+        })
+    }
+
+    /// 关系/相等/逻辑运算符的结果类型: `int` ([expr.rel] / [expr.eq] /
+    /// [expr.log.and])。注意即使操作数是浮点, 结果仍然是 `int` 而不是浮点 ——
+    /// 这是上面 `usual_arith_type` 要单独区分开的根因。
+    fn relational_result_type() -> CxxType {
+        CxxType::Integer {
+            bits: 32,
+            signed: true,
+        }
+    }
+
     /// 脱去引用（如果是引用类型，返回被引用类型；否则返回自身）
     pub fn remove_reference(&self) -> &CxxType {
         match self {
@@ -436,6 +504,26 @@ pub struct ClassInfo {
     pub virtual_methods: Vec<VirtualMethodInfo>,
     /// 是否为抽象类（含有纯虚函数）
     pub is_abstract: bool,
+    /// 源码写的是 `union` 还是 `struct`/`class` ([class.union])。
+    ///
+    /// 必须从**声明**上记下来并传给布局层: union 的字段全部重叠在偏移 0,
+    /// 与 struct 的顺序布局不同。之前这个信息在 native 路径完全丢失, 于是
+    /// `sizeof(union)` 按各字段累加算大, 且写一个成员会踩到另一个成员的位置。
+    pub is_union: bool,
+    /// 类是否已被**完整定义** (有类体)。
+    ///
+    /// [basic.types] 允许「指向不完整类型的指针/引用」, 但 `sizeof` / 按值对象
+    /// 定义 / 成员访问 / 按值形参与返回 / 继承基类 / `new` / `delete` / `typeid`
+    /// / `dynamic_cast` 等都要求**完整类型**。前向声明 (`struct X;`) 与由
+    /// elaborated-type-specifier (`struct X *p;` 中首次引入的 `X`) 按需登记的
+    /// 类都是不完整的 (false), 直到其类体被处理才置真 (complete-class context:
+    /// 在进入类成员处理时点置真, 使类内联成员函数体能合法访问自身成员)。
+    ///
+    /// 注意: **不能**用 `class_scope(cid).is_some()` 反推完整性 —— `pop_scope`
+    /// 不把作用域从 `scopes` 里移除, 前向声明路径 (`register_class` 后立刻
+    /// `pop_scope`) 留下的作用域仍在表里, 会让前向声明被误判为完整。因此完整性
+    /// 只有这一个显式真源字段。
+    pub is_complete: bool,
 }
 
 // === 符号 ===
@@ -2054,6 +2142,101 @@ impl Sema {
         None
     }
 
+    /// 类是否已**完整定义** (有类体)。这是完整性的唯一真源 (见
+    /// [`ClassInfo::is_complete`] 注释: 不能用 `class_scope().is_some()` 反推)。
+    pub fn is_class_complete(&self, class: ClassId) -> bool {
+        self.class_infos.get(class.0).map(|c| c.is_complete).unwrap_or(false)
+    }
+
+    /// 不完整类型的可读诊断名 (`'struct Foo'` / `'Foo'`)。
+    fn incomplete_type_name(&self, class: ClassId) -> String {
+        self.symbols
+            .get(class.0)
+            .map(|s| s.name.clone())
+            .unwrap_or_default()
+    }
+
+    /// 要求 `ty` (及其数组元素类型递归) 在当前点是**完整类型**。
+    ///
+    /// 指针 / 引用 (`Pointer` / `LValueRef` / `RValueRef`) 永远不需要所指类型
+    /// 完整 ([basic.types]), 故不递归进入; 只有出现在按值语境 (对象定义 /
+    /// sizeof / 成员访问 / 按值形参返回 / 继承 / new / delete / typeid /
+    /// dynamic_cast) 的 `Class` 才要求完整。
+    fn require_complete_type(&self, ty: &CxxType) -> Result<(), String> {
+        match ty {
+            CxxType::Class(c) => {
+                if self.is_class_complete(*c) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "invalid use of incomplete type '{}'",
+                        self.incomplete_type_name(*c)
+                    ))
+                }
+            },
+            // 数组的**元素**必须完整 (T[N] 要能求出尺寸)。指针元素天然完整。
+            CxxType::Array(inner, _) => self.require_complete_type(inner),
+            _ => Ok(()),
+        }
+    }
+
+    /// 最近的**包围命名空间 / 全局作用域**: 从 `self.current_scope` 沿父链上
+    /// 溯, 跳过 Class / Function / Block 作用域。
+    ///
+    /// [basic.scope.class]: 类成员声明里由 elaborated-type-specifier 引入的新
+    /// tag 属于包围它的命名空间, 不是类作用域 (否则会变成包围类的一个成员名
+    /// 槽位, 且后续 `class X` 完整定义从作用域链里找不到同一个符号 → ClassId
+    /// 分裂)。
+    fn nearest_enclosing_namespace_scope(&self) -> ScopeId {
+        let mut cur = self.current_scope;
+        for _ in 0..64 {
+            let Some(sc) = self.scopes.get(cur.0) else { break };
+            match sc.kind {
+                ScopeKind::Class | ScopeKind::Function | ScopeKind::Block => match sc.parent {
+                    Some(p) => cur = p,
+                    None => break,
+                },
+                _ => break,
+            }
+        }
+        cur
+    }
+
+    /// 按需把一个**从未声明过**的 tag 名登记成不完整 (前向) 类符号，返回其
+    /// [`ClassId`]。这是 [dcl.type.elab] 「elaborated-type-specifier 首次引入
+    /// tag」的 native 建模 (GCC/glibc 头里大量 `struct X *p;` / `struct X
+    /// arr[N];` 形态走这条路)。与 `register_classes_deep` 的前向登记同构:
+    /// 只建 Class 符号 + pad class_infos, **不 push 类作用域** (is_complete 保持
+    /// false)。后续真正的完整定义经 `build_decl::Class` 的 existing 分支复用同
+    /// 一个 ClassId。
+    fn register_forward_class(&mut self, name: &str) -> Result<ClassId, String> {
+        // 切到最近的命名空间/全局作用域登记 (见 nearest_enclosing_namespace_scope)。
+        let target = self.nearest_enclosing_namespace_scope();
+        let saved = self.current_scope;
+        self.current_scope = target;
+        // 去重: 已有同名限定且未完整定义的 Class 占位符 → 复用。
+        let existing = self.find_forward_class_symbol(name);
+        let class_sym = match existing {
+            Some(sym) => sym,
+            None => {
+                // add_symbol 无条件写入 self.current_scope (= target)。
+                let sym =
+                    self.add_symbol(name.to_string(), CxxSymbolKind::Class, CxxType::Void, Access::Public);
+                if let Some(s) = self.symbols.get_mut(sym.0) {
+                    s.ty = CxxType::Class(ClassId(sym.0));
+                }
+                sym
+            },
+        };
+        let class_id = ClassId(class_sym.0);
+        while self.class_infos.len() <= class_id.0 {
+            self.class_infos.push(ClassInfo::default());
+        }
+        // is_complete 保持 false (ClassInfo::default)。
+        self.current_scope = saved;
+        Ok(class_id)
+    }
+
     // --- HIR 构建 ---
 
     /// 获取构建好的 HIR
@@ -2071,18 +2254,19 @@ impl Sema {
         std::mem::take(&mut self.symbols)
     }
 
-    /// M54: 把浮点字面量文本剥成 `f64::from_str` 能接受的数值部分.
+    /// M54: 把浮点字面量文本剥成数值部分 (去精度后缀)。
     ///
-    /// 词法器将 `0.5f` / `2.5l` 的后缀留在同一个数字 token 里, 而 HIR 的
-    /// `FloatLiteral(String)` 在下游是按 `text.parse::<f64>().unwrap_or(0.0)`
-    /// 取值: 带后缀的文本**解析失败 → 静默变 0.0** (实测
-    /// `float x = 0.5f; if (x < 1.0f)` 恒为假, 而同一份代码的 C 路径正确)。
-    /// 后缀只表达精度 (`f`->float / `l`->long double), 而本前端的 HIR 浮点
-    /// 常量统一按 double 建模 (对象的存储类型仍由声明类型决定, 静态初值在
-    /// `native.rs::parse_float_initializer` 里按对象宽度发 F32/F64),
-    /// 因而在语义入口剥掉后缀即可, 不新增第二套宽度真源。
+    /// 词法器将 `0.5f` / `2.5l` 的后缀留在同一个数字 token 里, 而下游按
+    /// `text.parse::<f64>()` / `float80::from_decimal(text)` 取值: 带后缀的文本
+    /// **解析失败 → 静默变 0.0** (实测 `float x = 0.5f; if (x < 1.0f)` 恒为假,
+    /// 而同一份代码的 C 路径正确)。
+    ///
+    /// 后缀**不能丢**的是它携带的类型: [lex.fcon] 的 `f`/`l` 分别表示
+    /// `float` / `long double`, 由 [`crate::cpp::const_text::float_literal_bits`]
+    /// 在类型标注处用掉 (与 [`crate::cpp::const_text::int_literal_type`] 同一手法:
+    /// 文本→类型单一真源在 const_text, 不在调用点各自解析)。
     fn float_literal_value_text(text: &str) -> String {
-        text.trim_end_matches(['f', 'F', 'l', 'L']).to_string()
+        crate::cpp::const_text::float_literal_digits(text)
     }
 
     // --- HIR 构建辅助 ---
@@ -2346,7 +2530,27 @@ impl Sema {
                 // 这里在名字解析入口剩掉 tag 关键字 (C++ 标识符不可能含空格,
                 // 不会误伤普通类名).
                 if let Some(tag) = elaborated_tag_name(name) {
-                    return self.convert_type(&MangleType::Class(tag.to_string()));
+                    // [dcl.type.elab] / [basic.types]: 指向不完整类型的指针/
+                    // 引用/数组元素合法。若这个 tag **从未声明** (GCC/glibc 头
+                    // 里大量 `struct X *p;` 形态, 例如 `struct __locale_data
+                    // *__locales[13];`), 则按 elaborated-type-specifier 「首次
+                    // 引入 tag」的语义按需登记一个不完整类符号, 而不是报
+                    // unknown class type。enum key 不能引入新枚举 ([dcl.type.elab]/3)
+                    // → 裸名解析失败时仍按原错误返回。后续真正的完整定义会经
+                    // `build_decl::Class` 复用同一个 ClassId。
+                    match self.convert_type(&MangleType::Class(tag.to_string())) {
+                        Ok(ty) => return Ok(ty),
+                        Err(e) => {
+                            if matches!(
+                                elaborated_tag_kind(name),
+                                Some("struct") | Some("union") | Some("class")
+                            ) {
+                                let cid = self.register_forward_class(tag)?;
+                                return Ok(CxxType::Class(cid));
+                            }
+                            return Err(e);
+                        },
+                    }
                 }
                 // 嵌套类型名: parser 可能把 `A::B` 整体保留为一个 Class 名
                 // (模板实例化后的 `__dcc_template_iterator_traits_p_int::value_type`),
@@ -2394,6 +2598,13 @@ impl Sema {
                             return Ok(ty);
                         }
                     }
+                }
+                // 扩展浮点内建类型名 (`_Float32`/`_Float64`/`_Float32x`/...):
+                // glibc 头里以 typedef 使用点出现, 真 GCC 把它们当内建关键字
+                // 类型, dcc 需自己认识, 否则报 unknown class type (缺陷链上
+                // libcpp 卡在 `unknown class type: _Float32`)。
+                if let Some(bits) = extended_float_bits(name.as_str()) {
+                    return Ok(CxxType::Float { bits });
                 }
                 // 内置类型别名 (size_t, uintptr_t 等)
                 match name.as_str() {
@@ -2555,6 +2766,12 @@ impl Sema {
             "float" => return Ok(CxxType::Float { bits: 32 }),
             "double" => return Ok(CxxType::Float { bits: 64 }),
             "long double" => return Ok(CxxType::Float { bits: 80 }),
+            // 扩展浮点内建类型名: 与 convert_type 同一真源 (`extended_float_bits`)。
+            n if extended_float_bits(n).is_some() => {
+                return Ok(CxxType::Float {
+                    bits: extended_float_bits(n).unwrap(),
+                })
+            },
             _ => {},
         }
         // 指针形式: `int*`, `Foo*` 等
@@ -2579,6 +2796,14 @@ impl Sema {
         let mut base_classes = Vec::new();
         for base_spec in base_specs {
             let bc = self.resolve_base_class(&base_spec.name)?;
+            // 基类必须是完整类型 ([class.derived]/1): 指向基类的偏移、子对象
+            // 布局都依赖基类定义。前向声明 (只有符号没有类体) 不能当基类。
+            if !self.is_class_complete(bc) {
+                return Err(format!(
+                    "base class '{}' is incomplete",
+                    self.incomplete_type_name(bc)
+                ));
+            }
             base_classes.push(BaseClass {
                 class: bc,
                 access: Self::access_from_parser(base_spec.access),
@@ -3044,7 +3269,12 @@ impl Sema {
             )),
             CppExpr::FloatLit(s) => Ok(self.add_expr(
                 HirExprKind::FloatLiteral(Self::float_literal_value_text(s)),
-                CxxType::Float { bits: 64 },
+                // [lex.fcon]: 后缀决定字面量类型 (`1.0f` 是 float, `1.0L` 是
+                // long double)。硬写 bits: 64 会把整条运算链降格成 double
+                // (实测 `long double a = 1.0L/3.0L` 只有 53 位精度)。
+                CxxType::Float {
+                    bits: crate::cpp::const_text::float_literal_bits(s),
+                },
             )),
             CppExpr::StrLit(s) => {
                 // 字符串字面量: 类型是 `char[N]`, 在值上下文里立即退化为
@@ -3232,6 +3462,9 @@ impl Sema {
                 },
                 crate::cpp::parser::SizeofArg::Type(t) => {
                     let cxx_ty = self.convert_type(t)?;
+                    // sizeof 要求完整类型 ([expr.sizeof]/1): 指向不完整类
+                    // 的指针 sizeof 合法 (是 `Pointer`), 不完整类本身则硬错。
+                    self.require_complete_type(&cxx_ty)?;
                     Ok(self.add_expr(
                         HirExprKind::SizeOf(cxx_ty),
                         CxxType::Integer {
@@ -3243,6 +3476,7 @@ impl Sema {
                 crate::cpp::parser::SizeofArg::Expr(e) => {
                     let expr_id = self.build_expr(e)?;
                     let ty = self.hir.exprs[expr_id.0].ty.clone();
+                    self.require_complete_type(&ty)?;
                     Ok(self.add_expr(
                         HirExprKind::SizeOf(ty),
                         CxxType::Integer {
@@ -3438,6 +3672,10 @@ impl Sema {
                     },
                     _ => return Err("member access on non-class type".into()),
                 };
+                // 成员访问要求对象类型完整 ([class.member.access]/2):
+                // `Incomplete *p; p->x;` 不能默默退化成「无成员」的
+                // `member 'x' not found`, 必须报不完整类型错误。
+                self.require_complete_type(&CxxType::Class(class_id))?;
                 let (syms, ambiguous) = self.lookup_in_class(class_id, name);
                 if ambiguous {
                     return Err(format!("ambiguous member '{}'", name));
@@ -3504,6 +3742,37 @@ impl Sema {
                 if let CppExpr::Ident(name) = callee.as_ref() {
                     if let Some(class_sym) = self.resolve_class_symbol(name) {
                         return self.build_class_temporary(class_sym, args);
+                    }
+                    // [expr.type.conv]/2: 函数式 cast 到 typedef / alias 的非类别型
+                    // (`uint64_t` / `int` / ...), 与 `(T)x` 等价。之前 callee 走
+                    // `build_expr(Ident(T))` 报 `identifier 'T' is not a value`,
+                    // libcpp 的 `location_t LINE_MAP_MAX_LOCATION_WITH_PACKED_RANGES
+                    // = location_t(1342177280)<<31;` 卡在这。仅对已知类型名生效
+                    // (未知裸名 convert_type 仍 Err, 不干扰下方重载解析)。
+                    if let Ok(ty) = self.convert_type(&MangleType::Class(name.clone())) {
+                        if !matches!(ty, CxxType::Class(_)) {
+                            return match args.as_slice() {
+                                [] => {
+                                    // value-init 标量 → 0
+                                    Ok(self.add_expr(HirExprKind::IntLiteral(0), ty))
+                                },
+                                [a] => {
+                                    let e = self.build_expr(a)?;
+                                    Ok(self.add_expr(
+                                        HirExprKind::Cast {
+                                            expr: e,
+                                            target: ty.clone(),
+                                            kind: crate::cpp::hir::CastKind::Static,
+                                        },
+                                        ty,
+                                    ))
+                                },
+                                _ => Err(format!(
+                                    "functional cast '{}' expects 0 or 1 argument",
+                                    name
+                                )),
+                            };
+                        }
                     }
                 }
                 // `ns::T(args...)` / `Outer::Inner(args...)`: 限定形式的临时量构造
@@ -3765,6 +4034,7 @@ impl Sema {
                 let lhs_id = self.build_expr(lhs)?;
                 let rhs_id = self.build_expr(rhs)?;
                 let lhs_ty = self.hir.exprs[lhs_id.0].ty.clone();
+                let rhs_ty = self.hir.exprs[rhs_id.0].ty.clone();
                 // 运算符重载优先于内建运算: 只要有一侧是类/枚举类型, 先找
                 // `operator<op>` 候选; 没找到则回退到内建语义.
                 if matches!(
@@ -3872,14 +4142,36 @@ impl Sema {
                             LOr => BinaryOp::LogicalOr,
                             _ => return Err("unsupported binary operator".into()),
                         };
-                        // 简化：结果类型 = 左操作数类型
+                        // 结果类型按标准算, 不能拿「左操作数类型」凑: 见
+                        // [`CxxType::usual_arith_type`] 的记录 (旧写法把
+                        // `d < 0.4` 标成 double, 赋值处多插一条 double→int 转换,
+                        // 把已算好的 0/1 盖掉)。
+                        let result_ty = match bin_op {
+                            // [expr.rel] / [expr.eq] / [expr.log.and]: 结果是 `int`
+                            BinaryOp::Eq
+                            | BinaryOp::Ne
+                            | BinaryOp::Lt
+                            | BinaryOp::Le
+                            | BinaryOp::Gt
+                            | BinaryOp::Ge
+                            | BinaryOp::LogicalAnd
+                            | BinaryOp::LogicalOr => CxxType::relational_result_type(),
+                            // [expr.shift]: 结果 = 左操作数提升后的类型
+                            BinaryOp::Shl | BinaryOp::Shr => lhs_ty.clone(),
+                            // [expr.arith.conv]: 通常算术转换的复合类型。
+                            // `None` = 至少一侧不是内建标量 (指针算术、枚举等),
+                            // 保持原有口径以左操作数记账。
+                            _ => lhs_ty
+                                .usual_arith_type(&rhs_ty)
+                                .unwrap_or_else(|| lhs_ty.clone()),
+                        };
                         Ok(self.add_expr(
                             HirExprKind::BinaryOp {
                                 op: bin_op,
                                 lhs: lhs_id,
                                 rhs: rhs_id,
                             },
-                            lhs_ty,
+                            result_ty,
                         ))
                     },
                 }
@@ -4000,6 +4292,8 @@ impl Sema {
             CppExpr::TypeidType(ty) => {
                 // typeid(T): 静态类型的 type_info 引用
                 let cxx_ty = self.convert_type(ty)?;
+                // typeid(T) 要求 T 完整 ([typeinfo]/4)。
+                self.require_complete_type(&cxx_ty)?;
                 match cxx_ty {
                     CxxType::Class(class_id) => {
                         let ti_ty = self.typeid_result_type();
@@ -4048,6 +4342,16 @@ impl Sema {
             CppExpr::DynamicCast { ty, expr } => {
                 // dynamic_cast<T>(expr)
                 let dst_ty = self.convert_type(ty)?;
+                // dynamic_cast 目标类型 (无论指针还是引用形态) 必须完整
+                // ([expr.dynamic.cast]): 需要目标类的 typeinfo 参与运行期比对。
+                match &dst_ty {
+                    CxxType::Pointer(inner)
+                    | CxxType::LValueRef(inner)
+                    | CxxType::RValueRef(inner) => {
+                        self.require_complete_type(inner)?;
+                    },
+                    other => self.require_complete_type(other)?,
+                }
                 let expr_id = self.build_expr(expr)?;
                 let src_ty = self.hir.exprs[expr_id.0].ty.clone();
                 Ok(self.add_expr(
@@ -4100,6 +4404,8 @@ impl Sema {
             },
             CppExpr::New(ty_str, args) => {
                 let ty = self.type_name_to_cxx_type(ty_str)?;
+                // new 需要完整类型才能求尺寸与调构 ([expr.new]/4)。
+                self.require_complete_type(&ty)?;
                 let mut hir_args = Vec::new();
                 for a in args {
                     hir_args.push(self.build_expr(a)?);
@@ -4119,6 +4425,7 @@ impl Sema {
             },
             CppExpr::NewArr { ty, count } => {
                 let elem_ty = self.type_name_to_cxx_type(ty)?;
+                self.require_complete_type(&elem_ty)?;
                 let count_id = self.build_expr(count)?;
                 let ret_ty = CxxType::Pointer(Box::new(elem_ty.clone()));
                 Ok(self.add_expr(
@@ -4134,6 +4441,7 @@ impl Sema {
             },
             CppExpr::PlacementNew { ptr, ty, args } => {
                 let elem_ty = self.type_name_to_cxx_type(ty)?;
+                self.require_complete_type(&elem_ty)?;
                 let ptr_id = self.build_expr(ptr)?;
                 let mut hir_args = Vec::new();
                 for a in args {
@@ -4154,6 +4462,13 @@ impl Sema {
             },
             CppExpr::Delete(ptr) => {
                 let ptr_id = self.build_expr(ptr)?;
+                // delete 指向不完整类型的指针是 UB/非法规 ([expr.delete]/4
+                // 要求对象类型完整以正确调构)。指针的所指类必须完整。
+                if let CxxType::Pointer(inner) = &self.hir.exprs[ptr_id.0].ty {
+                    if let CxxType::Class(c) = inner.as_ref() {
+                        self.require_complete_type(&CxxType::Class(*c))?;
+                    }
+                }
                 let dtor = self.delete_dtor_for(ptr_id);
                 Ok(self.add_expr(
                     HirExprKind::Delete {
@@ -4166,6 +4481,12 @@ impl Sema {
             },
             CppExpr::DeleteArr(ptr) => {
                 let ptr_id = self.build_expr(ptr)?;
+                // delete[] 同样要求所指元素类型完整。
+                if let CxxType::Pointer(inner) = &self.hir.exprs[ptr_id.0].ty {
+                    if let CxxType::Class(c) = inner.as_ref() {
+                        self.require_complete_type(&CxxType::Class(*c))?;
+                    }
+                }
                 // `delete[]` 要先按逆序逐元素析构 (并读数组 cookie), 未实现;
                 // 这里传 `None` 保持旧的「只释放内存」行为。
                 Ok(self.add_expr(
@@ -4561,6 +4882,9 @@ impl Sema {
                     },
                     _ => (self.convert_type(ty)?, None),
                 };
+                // 定义一个该类型的对象要求完整类型 ([basic.types]/4);
+                // 数组元素类型同样要求完整 (`Incomplete arr[4];`)。
+                self.require_complete_type(&var_ty)?;
                 let sym = self.add_symbol(
                     name.clone(),
                     CxxSymbolKind::Variable,
@@ -4696,6 +5020,8 @@ impl Sema {
             } => {
                 // 静态局部变量: 符号注册到全局作用域, 生成带 guard 的线程安全初始化
                 let var_ty = self.convert_type(ty)?;
+                // 静态局部也是对象定义, 要求完整类型。
+                self.require_complete_type(&var_ty)?;
                 let init_id = match init {
                     Some(e) => Some(self.build_expr(e)?),
                     None => None,
@@ -5936,6 +6262,13 @@ impl Sema {
             self.set_owner(fn_sym, own);
         }
 
+        // 按值形参要求完整类型 ([dcl.fct]/9): 声明与定义都要查 (指针/引用天然放行),
+        // 且必须在下面 is_decl 早退之前 —— 否则 `void f(struct Incomplete v);` 这类
+        // 纯声明的按值不完整形参会被漏过 (g++ 对声明也报 “parameter has incomplete type”)。
+        for (_, pty) in params {
+            self.require_complete_type(pty)?;
+        }
+
         // 纯声明 (只有原型, 没有函数体): 只登记符号, 不进入 HIR 函数表.
         // 若仍登记, 后端会为它发射一个空定义 -> 与真正提供实体的那个 TU
         // (跨 TU / 跨模块 import, 或 libc 等外部实现) 发生 multiple definition.
@@ -5983,6 +6316,10 @@ impl Sema {
                 Access::Private,
             );
             param_syms.push(pid);
+        }
+        // 按值返回类型: 纯声明允许不完整返回类型, 只有函数有定义时才要求完整。
+        if !body.is_decl {
+            self.require_complete_type(&ret_ty)?;
         }
 
         // 构建函数体
@@ -7026,9 +7363,26 @@ impl Sema {
                     },
                 };
 
+                // [class.union]: 把 `union` 标记带到类信息里, 供布局层选择
+                // 重叠字段。`register_class` 可能复用第一遍的占位 class_infos,
+                // 所以两条分支都要写。
+                while self.class_infos.len() <= class_id.0 {
+                    self.class_infos.push(ClassInfo::default());
+                }
+                self.class_infos[class_id.0].is_union = class_decl.is_union;
+
                 // 进入类作用域处理成员
                 let old_class = self.current_class;
                 self.current_class = Some(class_id);
+                // complete-class context: `build_decl::Class` 只由**定义**
+                // (`struct X { ... }`) 触发 (前向声明是 `CppDecl::Typedef`),
+                // 所以进入成员处理时即可把该类标为完整。这让类内联成员函
+                // 数体 (`int f(){ return this->x; }`) 能合法访问自身成员 / 对自身
+                // 取 sizeof。真正的字段布局仍由 abi_layout 按字段独立计算。
+                while self.class_infos.len() <= class_id.0 {
+                    self.class_infos.push(ClassInfo::default());
+                }
+                self.class_infos[class_id.0].is_complete = true;
 
                 // 处理成员
                 let members: Vec<CppDecl> = class_decl.members.clone();
@@ -7109,6 +7463,8 @@ impl Sema {
                 ..
             } => {
                 let var_ty = self.convert_type(ty)?;
+                // 全局对象定义要求完整类型 (含数组元素)。
+                self.require_complete_type(&var_ty)?;
                 // M54: 重声明 (extern 声明 + 定义) 复用同一符号, 不完整数组
                 // 由定义处的真实边界补齐; 详见 `global_var_redeclaration`。
                 let redecl = self.global_var_redeclaration(name, &var_ty);
@@ -7268,6 +7624,38 @@ impl Sema {
                 // "top-level member declaration not supported").
                 Ok(())
             },
+            CppDecl::AnonAggr {
+                is_union,
+                members,
+                name,
+            } => {
+                // [dcl.type.anon]/1: 匿名聚合体 (`union { int i; char b[4]; } punned;`)
+                // 没有 tag, 包围它的声明引入一个**唯一类类型**并以 `name` 命名该
+                // 对象。早前这里与模块/概念归为同一个 no-op 分支, 后果是类型与变量
+                // 两部分全部丢失: 引用 `punned.i` 报 `undeclared identifier: punned`,
+                // 整个 TU 退回 legacy 文本降级。这里按标准语义拆成「合成一个具名
+                // 类 + 声明该类变量」两条普通声明, 复用全部现有布局/发射机制。
+                let class_name = format!("__dcc_anon_aggr_{}", name);
+                let class = crate::cpp::parser::ClassDecl {
+                    name: class_name.clone(),
+                    // parser 对 struct/union 都置 is_struct, 由 is_union 区分
+                    // 联合语义 (与 `parse_aggr_decl_impl` 同一约定)。
+                    is_struct: true,
+                    is_union: *is_union,
+                    bases: Vec::new(),
+                    members: members.clone(),
+                    member_access: Vec::new(),
+                };
+                self.build_decl(&CppDecl::Class(class))?;
+                self.build_decl(&CppDecl::GlobalVar {
+                    ty: crate::cpp::mangle::MangleType::Class(class_name),
+                    name: name.clone(),
+                    init: None,
+                    is_static: false,
+                    is_volatile: false,
+                    is_const: false,
+                })
+            },
             CppDecl::Concept { .. }
             | CppDecl::Module { .. }
             | CppDecl::Import { .. }
@@ -7275,9 +7663,8 @@ impl Sema {
             | CppDecl::Using { .. }
             | CppDecl::UsingEnum { .. }
             | CppDecl::InheritingCtor { .. }
-            | CppDecl::AnonAggr { .. }
             | CppDecl::Empty => {
-                // no-op: 模块/概念/继承构造/匿名聚合等占位
+                // no-op: 模块/概念/继承构造/using 声明等在 native 路径不产生实体
                 Ok(())
             },
             CppDecl::Opaque(text) => {
@@ -7437,6 +7824,11 @@ impl Sema {
                 ..
             } => {
                 let field_ty = self.convert_type(ty)?;
+                // 非静态数据成员占据对象存储, 要求完整类型 (指针/引用字段
+                // 天然放行); 静态成员是另一 TU 的定义, 允许不完整。
+                if !*is_static {
+                    self.require_complete_type(&field_ty)?;
+                }
                 let field_sym =
                     self.add_symbol(name.clone(), CxxSymbolKind::Field, field_ty, access);
                 let owner = self.current_class.unwrap().as_symbol();
@@ -7770,6 +8162,11 @@ impl Sema {
                 self.set_owner(inner_id.as_symbol(), owner);
 
                 self.current_class = Some(inner_id);
+                // 嵌套类定义同样在成员处理前标记为完整 (complete-class context)。
+                while self.class_infos.len() <= inner_id.0 {
+                    self.class_infos.push(ClassInfo::default());
+                }
+                self.class_infos[inner_id.0].is_complete = true;
                 for m in &inner.members {
                     let acc = self.member_access_of(inner, m);
                     self.build_class_member(m, inner_id, acc)?;
@@ -9914,6 +10311,112 @@ mod tests {
         assert!(hir_of_src(src).is_err(), "不存在的限定类型不得被兜底误接受");
     }
 
+    /// 缺陷 B4: 从未声明的 tag 只经指针 / 引用 / 指针数组 / typedef 到不完整
+    /// 指针出现 (GCC/glibc 头里 `struct __locale_data *__locales[13];` 形态),
+    /// native 后端必须按需登记为不完整类并接受, 而不是报 `unknown class type`。
+    #[test]
+    fn incomplete_tag_pointer_is_accepted() {
+        let src = "struct locale_like {\n\
+                    struct never_declared *locales[13];\n\
+                    int n;\n};\n\
+                   typedef struct opaque_tag *opaque_handle;\n\
+                   int consume(struct never_declared2 *l);\n\
+                   opaque_handle h;\n\
+                   int f() { struct locale_like loc; loc.n = 1; return loc.n; }";
+        if let Err(e) = hir_of_src(src) {
+            panic!("指向不完整 tag 的指针/数组/typedef 应被接受: {e}");
+        }
+    }
+
+    /// 先以指针出现、随后给出完整定义时, 使用点必须落在同一个 ClassId 上;
+    /// 否则成员访问会报 `member not found` (符号分裂)。这是对「按需登记与
+    /// 真正定义复用」这条路径的直接回归护栏。
+    #[test]
+    fn incomplete_tag_later_definition_reuses_class_id() {
+        let src = "struct late *lp;\n\
+                   struct late { int v; };\n\
+                   int f() { return lp->v; }";
+        if let Err(e) = hir_of_src(src) {
+            panic!("先用后定义必须复用同一类符号 (lp->v 应可解析): {e}");
+        }
+    }
+
+    /// 反向护栏: 「按需登记为不完整」绝不等于「一切未知都放行」。对只有
+    /// 前向声明 (未完整定义) 的类型取 `sizeof` 必须硬错 ([expr.sizeof]),
+    /// 而不是像修复前那样静默算出 size=1。
+    #[test]
+    fn sizeof_incomplete_type_is_rejected() {
+        let src = "struct Fwd;\nunsigned long f() { return sizeof(struct Fwd); }";
+        let err = hir_of_src(src).expect_err("对不完整类型取 sizeof 必须报错");
+        assert!(err.contains("incomplete"), "诊断应是不完整类型错误, 实得: {err}");
+    }
+
+    /// 成员访问同理: `Incomplete *p; p->x;` 不能默默退化成 `member 'x' not
+    /// found`, 必须报不完整类型错误。
+    #[test]
+    fn member_access_on_incomplete_type_is_rejected() {
+        let src = "struct Fwd;\nint f(struct Fwd *p) { return p->x; }";
+        let err = hir_of_src(src).expect_err("对不完整类型成员访问必须报错");
+        assert!(err.contains("incomplete"), "诊断应是不完整类型错误, 实得: {err}");
+    }
+
+    /// 定义一个不完整类型的对象 (全局/局部) 必须硬错 ([basic.types]/4)。
+    #[test]
+    fn object_definition_of_incomplete_type_is_rejected() {
+        let g = hir_of_src("struct Fwd;\nstruct Fwd g;")
+            .expect_err("不完整类型全局对象定义必须报错");
+        assert!(g.contains("incomplete"), "诊断应是不完整类型错误, 实得: {g}");
+        let l = hir_of_src("struct Fwd;\nvoid f() { struct Fwd v; }")
+            .expect_err("不完整类型局部对象定义必须报错");
+        assert!(l.contains("incomplete"), "诊断应是不完整类型错误, 实得: {l}");
+    }
+
+    /// `enum` key 不能按需引入新枚举 ([dcl.type.elab]/3): 未知 `enum X` 指针
+    /// 仍必须报错, 不能像 struct/union/class 那样兜底登记。
+    #[test]
+    fn enum_key_does_not_introduce_new_tag() {
+        let src = "struct S { enum never_seen *p; };";
+        assert!(
+            hir_of_src(src).is_err(),
+            "enum key 不得按需引入新枚举, 未知应报错"
+        );
+    }
+
+    /// 按值形参 / 按值返回 (函数有定义时) 都要求完整类型。
+    #[test]
+    fn by_value_param_and_return_of_incomplete_type_rejected() {
+        let param = hir_of_src("struct Fwd;\nvoid f(struct Fwd v);")
+            .expect_err("不完整类型按值形参必须报错");
+        assert!(param.contains("incomplete"), "实得: {param}");
+        // 指针形参天然放行 (下面不得报错)。
+        hir_of_src("struct Fwd;\nvoid f(struct Fwd *v);")
+            .expect("不完整类型指针形参应放行");
+        // 按值返回: 仅当函数有定义时要求完整 (纯声明允许)。
+        let ret = hir_of_src("struct Fwd;\nstruct Fwd g() { return g(); }")
+            .expect_err("不完整类型按值返回定义必须报错");
+        assert!(ret.contains("incomplete"), "实得: {ret}");
+    }
+
+    /// 不完整类型的**数组对象** (元素需完整) 必须报错。
+    #[test]
+    fn array_of_incomplete_type_rejected() {
+        let src = "struct Fwd;\nvoid f() { struct Fwd arr[4]; }";
+        let err = hir_of_src(src).expect_err("不完整类型数组定义必须报错");
+        assert!(err.contains("incomplete"), "实得: {err}");
+        // 指针数组天然放行 (即 __locales[13] 的合法形态)。
+        hir_of_src("struct Fwd;\nvoid f() { struct Fwd *arr[13]; }")
+            .expect("不完整类型指针数组应放行");
+    }
+
+    /// 继承一个**不完整基类**必须报错 ([class.derived]/1)。
+    #[test]
+    fn derive_from_incomplete_base_rejected() {
+        let src = "struct Base;\nstruct Derived : Base { int x; };";
+        let err = hir_of_src(src).expect_err("不完整基类必须报错");
+        assert!(err.contains("incomplete") || err.contains("base"), "实得: {err}");
+    }
+
+
     /// 类内成员函数体里的裸字段名 (定义在方法之后的 `private` 字段) 必须
     /// 能解析 —— 这是 iterator_traits 夹具的真实形态 (CountIt::p_).
     #[test]
@@ -10960,6 +11463,29 @@ impl InstantiationContext {
     }
 }
 
+/// 后缀带精度形式的扩展浮点内建类型名 (ISO/IEC TS 18661 / GCC
+/// `-mavx` 下的 `__float128` 族)。这些名字在 glibc 头里以
+/// `typedef _Float32 float_t;` / `typedef _Float32x double_t;` 等形态出现: 当
+/// 宿主编译器报 `__GNUC__ >= 13` 时, `typedef float _Float32;` 那类兵定义
+/// 被 `__GNUC_PREREQ` 守卫跳过 (因为真 GCC 把它们当内建关键字类型), 只留下
+/// **使用点** —— 于是 dcc 必须自己认识这些类型名, 否则报 unknown class type。
+///
+/// 宽度取自 x86_64 glibc `<bits/floatn-common.h>` 的格式等价关系: `_Float32`=float,
+/// `_Float64`/`_Float32x`=double, `_Float64x`=long double。`_Float128`/`_Float128x`
+/// 在 x86_64 是软件 128 位类型, 而后端无 128 位浮点运算支持, 按 long double 建模
+/// (与 GCC 在缺少 `__float128` 时一致, 只能保证尺寸/布局不报错)。
+pub fn extended_float_bits(name: &str) -> Option<u16> {
+    Some(match name {
+        "_Float16" => 16,
+        "_Float32" => 32,
+        "_Float64" | "_Float32x" => 64,
+        "_Float64x" => 80,
+        "_Float128" | "_Float128x" => 80,
+        "_Decimal32" | "_Decimal64" | "_Decimal128" => return None, // 十进制浮点不支持
+        _ => return None,
+    })
+}
+
 /// M52: 若一个 `MangleType::Class` 名字带 **elaborated type specifier** 前缀
 /// (`struct X` / `union U` / `enum E` / `class C`), 返回它真正 denotate 的
 /// tag 名; 否则返回 `None`.
@@ -10973,6 +11499,24 @@ pub fn elaborated_tag_name(name: &str) -> Option<&str> {
             let rest = rest.trim();
             if !rest.is_empty() && rest != name {
                 return Some(rest);
+            }
+        }
+    }
+    None
+}
+
+/// elaborated-type-specifier 的 tag 关键字种类。与 [`elaborated_tag_name`]
+/// 配对: 后者只给出裸 tag 名, 丢掉了是哪个关键字; 而「能否按需引入一个新
+/// tag」恰恰取决于关键字: [dcl.type.elab]/3 不允许 `enum X` 形式引入
+/// 新枚举 (opaque-enum-declaration 必须显式带底层类型), 而
+/// `struct`/`union`/`class` 允许。无 key 的纯名字 (`Foo`) 不是 elaborated
+/// specifier, 未知时应继续报 unknown class type。
+pub fn elaborated_tag_kind(name: &str) -> Option<&'static str> {
+    for kw in ["struct", "union", "enum", "class"] {
+        if let Some(rest) = name.strip_prefix(kw) {
+            let rest = rest.trim_start();
+            if !rest.is_empty() && rest != name {
+                return Some(kw);
             }
         }
     }

@@ -2123,6 +2123,20 @@ fn filter_template_decls(decls: &[CppDecl]) -> Vec<CppDecl> {
 /// 5. 为每个 class 生成 `Decl::StructDef`, 名字/字段顺序与 `lower_type` 一致
 /// 6. 把 vtable 数据降级为 `Decl::Var` (extern 数组) 占位 (Stage 5 完整发射)
 pub fn lower_decls_native(decls: &[CppDecl]) -> Result<NativeLowered, NativeError> {
+    // 语言级内置类型 (`__builtin_va_list` 等) 以普通声明的形式拼在最前面:
+    // GCC 把这些编译成内建 AST 节点, dcc 则复用同一条 C++ 声明文法, 使类登记 /
+    // ABI 布局 / 类型降级都走既有机制, 不需要在 sema 里为内置名字开查找特例。
+    let mut prelude_decls;
+    let decls: &[CppDecl] = match crate::cpp::builtin_decls_prelude::decls() {
+        Some(p) => {
+            prelude_decls = p;
+            prelude_decls.extend_from_slice(decls);
+            &prelude_decls
+        },
+        // 前导是本模块的常量文本, 解析不了属于内部错误; 此时保持原有行为
+        // (内置类型退化为未知类名), 而不是让整份编译崩在这里。
+        None => decls,
+    };
     // M52: C++20 协程 —— 在通用管线之前把协程重写为普通函数 + 状态机.
     // 只有 TU 里确实出现 co_await / co_yield / co_return 时才介入, 否则零影响.
     let coro_decls;
@@ -2294,7 +2308,17 @@ fn build_class_abis(
             .unwrap_or(false);
         // 真实类名是 RTTI/vtable 符号 mangle 的唯一来源, 必须注册;
         // 否则退回 `Class{id}` (TU 局部下标), 跨 TU 不稳定, weak 符号无法合并。
-        calc.register_class_with_name(cid, &sym.name, bases, virtual_bases, fields, has_virtual);
+        calc.register_class_with_name(
+            cid,
+            &sym.name,
+            bases,
+            virtual_bases,
+            fields,
+            has_virtual,
+            // `union` 与 `struct` 的字段布局完全不同 ([class.union]), 这个标记
+            // 只能从声明带来, 不能由布局结果反推。
+            sema.get_class_info(cid).map(|i| i.is_union).unwrap_or(false),
+        );
         // ABI 符号 (_ZTV/_ZTI/_ZTS) 必须用**限定**名: `ns::Widget` 的 typeinfo
         // 是 `_ZTIN2ns6WidgetE`, 不是 `_ZTI6Widget` (后者会和全局 `Widget` 撞
         // 符号, 也无法与 g++ 产物互操作)。简单名继续供布局层合成 `__vb_Base`
@@ -2376,6 +2400,96 @@ fn build_class_abis(
 }
 
 // === Program 组装 ===
+
+/// 从 `CxxType` 里收集全部类 id (跟过指针/引用/数组/成员指针)。
+///
+/// `throw D;` / `catch (B&)` / `dynamic_cast<D*>` 给出的类型经常是类类型的
+/// 指针或引用, 而需要的 typeinfo 是**那个类**的。
+fn class_ids_in_type(ty: &CxxType, out: &mut Vec<ClassId>) {
+    match ty {
+        CxxType::Class(cid) => out.push(*cid),
+        CxxType::Pointer(inner)
+        | CxxType::LValueRef(inner)
+        | CxxType::RValueRef(inner)
+        | CxxType::Array(inner, _) => class_ids_in_type(inner, out),
+        CxxType::MemberPointer { member, .. } => class_ids_in_type(member, out),
+        CxxType::Function { ret, params, .. } => {
+            class_ids_in_type(ret, out);
+            for p in params {
+                class_ids_in_type(p, out);
+            }
+        },
+        _ => {},
+    }
+}
+
+/// 本 TU 真正需要发射 `_ZTI`/`_ZTS` 的类集合 (Itanium ABI 的按需发射)。
+///
+/// 旧行为是「布局表里每个类都发一份 weak typeinfo」, 后果是**每个** native TU
+/// 都随身携带所有声明过的类的 RTTI, 包括从没 `typeid`/`throw`/`catch`/虚调用
+/// 用到过的类 (实测 `int main(){}` 也会导出 typeinfo 符号)。按 ABI 重新定义
+/// 需求集合:
+///
+/// 种子:
+///  1. **多态类** (自身或继承链上有虚函数, 即 `has_virtual_functions` /
+///     `needs_vptr`): 它的 vtable 首槽就是 `_ZTI<C>`, `typeid(*p)` 与
+///     `dynamic_cast` 都从那里读;
+///  2. 被 `typeid(T)` 静态路径、`dynamic_cast` 的源/目标类型、`throw` 表达式
+///     类型、`catch` 参数类型引用的类: 异常匹配与类型比较以 `_ZTI<C>` 地址为
+///     关键字 (在哪个 TU 用就在哪个 TU 发 weak 定义, 与 g++ 一致 —— 否则跨 TU
+///     `catch` 会找不到任何定义方)。
+///
+/// 传递闭包: 上面每个类的**基类链**也必须发 —— `Derived` 的 typeinfo 形态是
+/// `__si_class_type_info`, 第二槽就是 `_ZTIBase`; 基类自身可以完全没有虚函数
+/// (`class B{}; class D : B { virtual void f(); };`) 因而不是种子, 但引用真实
+/// 存在。递归展开到不动点。
+fn collect_rtti_needed(
+    hir: &HirTranslationUnit,
+    abi_map: &HashMap<ClassId, ClassAbi>,
+) -> HashSet<ClassId> {
+    let mut needed: HashSet<ClassId> = HashSet::new();
+    // 种子 1: 布局层判定为多态 / 需要 vptr 的类
+    for (cid, abi) in abi_map {
+        if abi.has_virtual_functions || abi.needs_vptr || !abi.virtual_bases.is_empty() {
+            needed.insert(*cid);
+        }
+    }
+    // 种子 2: 表达式 / 语句里显式用到类型信息的类
+    let mut seeds: Vec<ClassId> = Vec::new();
+    for e in &hir.exprs {
+        match &e.kind {
+            crate::cpp::hir::HirExprKind::TypeInfoRef(cid) => seeds.push(*cid),
+            crate::cpp::hir::HirExprKind::DynamicCast { src, dst, .. } => {
+                class_ids_in_type(src, &mut seeds);
+                class_ids_in_type(dst, &mut seeds);
+            },
+            crate::cpp::hir::HirExprKind::Throw { ty, .. } => class_ids_in_type(ty, &mut seeds),
+            _ => {},
+        }
+    }
+    for s in &hir.stmts {
+        if let crate::cpp::hir::HirStmtKind::Try { handlers, .. } = &s.kind {
+            for h in handlers {
+                if !h.is_catch_all {
+                    class_ids_in_type(&h.param_ty, &mut seeds);
+                }
+            }
+        }
+    }
+    needed.extend(seeds.into_iter());
+    // 基类闭包: 每条 typeinfo 都会引用它的基类 typeinfo
+    let mut frontier: Vec<ClassId> = needed.iter().copied().collect();
+    while let Some(cid) = frontier.pop() {
+        let Some(abi) = abi_map.get(&cid) else { continue };
+        for b in abi.bases.iter().map(|b| b.base).chain(abi.virtual_bases.iter().map(|v| v.base))
+        {
+            if needed.insert(b) {
+                frontier.push(b);
+            }
+        }
+    }
+    needed
+}
 
 fn build_program(
     output: &LowerIrOutput,
@@ -2643,6 +2757,8 @@ fn build_program(
     let mut emitted_rtti: HashSet<String> = HashSet::new();
     let mut abi_cids: Vec<ClassId> = abi_map.keys().copied().collect();
     abi_cids.sort_by_key(|c| c.0);
+    // 只发射本 TU 确实需要的 typeinfo (见 [`collect_rtti_needed`])。
+    let rtti_needed = collect_rtti_needed(hir, abi_map);
     // 本 TU 发射的 RTTI 相关符号定义 (供区分「外部引用」与「本地定义」)。
     let mut rtti_defs: HashSet<String> = HashSet::new();
     // 被 typeinfo 对象/虚表引用、但本 TU 不定义的外部符号 (基类 `_ZTI`、
@@ -2682,6 +2798,11 @@ fn build_program(
         let Some(abi) = abi_map.get(&cid) else {
             continue;
         };
+        // 按需发射: 非多态且本 TU 从未 `typeid`/`throw`/`catch`/`dynamic_cast`
+        // 用到它 (也不在任何被用到类的基类链上) 时, 不发 `_ZTI`/`_ZTS`。
+        if !rtti_needed.contains(&cid) {
+            continue;
+        }
         let ti_sym = abi.rtti.typeinfo_symbol.clone();
         let nm_sym = abi.rtti.typeinfo_name_symbol.clone();
         if emitted_rtti.contains(&ti_sym) {
@@ -3227,6 +3348,25 @@ fn cpp_static_initializer(e: &CppExpr, ty: &ast::Type, symbols: &[CxxSymbol]) ->
         CppExpr::Cast(_, inner) | CppExpr::StaticCast { expr: inner, .. } => {
             cpp_static_initializer(inner, ty, symbols)
         },
+        // [expr.type.conv]/2 函数式 cast 的静态初值形态: 剥掉 cast 后
+        // 折 inner。callee 必须是一个**到非-class 型**的 TypeAlias
+        // (`typedef uint64_t location_t;` 等), 且只有一个实参。
+        // libcpp 里 `location_t LINE_MAP_MAX_LOCATION_WITH_PACKED_RANGES
+        // = location_t(1342177280)<<31;` 卡在此形态。
+        // class 名不折 (临时量构造需运行期), 函数名不折 (真动态初始化)。
+        CppExpr::Call(callee, args) if args.len() == 1 => {
+            if let CppExpr::Ident(name) = callee.as_ref() {
+                let scalar_alias = symbols.iter().any(|s| {
+                    s.name == *name
+                        && matches!(s.kind, CxxSymbolKind::TypeAlias)
+                        && !matches!(s.ty, CxxType::Class(_))
+                });
+                if scalar_alias {
+                    return cpp_static_initializer(&args[0], ty, symbols);
+                }
+            }
+            None
+        },
         // M54: 数组名衰减成指针 (`int *q = garr;`) —— 词法上初值只是一个 `Ident`,
         // 能不能当地址用取决于被引用对象是不是**数组**：标量对象的“值”不是链接期
         // 常量, 必须落到调用方的不支持路径 (绝不静默零初始化)。
@@ -3396,6 +3536,17 @@ fn parse_float_initializer(text: &str, ty: &ast::Type) -> Option<ast::FloatConst
     }
     match ty {
         ast::Type::Float => trimmed.parse::<f32>().ok().map(ast::FloatConst::F32),
+        // 80 位 `long double` 的全局初值: 必须发 `FloatConst::LongDouble`, 否则
+        // 一个 16 字节的存储栌里只写了 8 字节的 double 位模式, 读回来是 0/nan
+        // (实测 `long double g_ld = 1.5L;` 打印 0.000000 / g++ 1.500000)。
+        ast::Type::LongDouble => crate::float80::from_decimal(trimmed)
+            .map(ast::FloatConst::LongDouble)
+            .or_else(|| {
+                trimmed
+                    .parse::<f64>()
+                    .ok()
+                    .map(|v| ast::FloatConst::LongDouble(crate::float80::from_f64(v)))
+            }),
         _ => trimmed.parse::<f64>().ok().map(ast::FloatConst::F64),
     }
 }
@@ -4038,6 +4189,25 @@ mod tests {
     use super::*;
     use crate::cpp::parser::CppParser;
 
+    /// 统计降级产物里的**用户** struct/union 定义数。
+    ///
+    /// native 管线会给每个 TU 拼上语言级内置类型前导 (目前是
+    /// `__dcc_sysv_va_list`, 见 [`crate::cpp::builtin_decls_prelude`]), 它不是用户
+    /// 代码的产物。类数量断言必须只算用户声明, 否则内置类型一进前导就会
+    /// 把「1 个类」变成「2 个类」这种与语义无关的漂移。
+    fn user_struct_count(out: &NativeLowered) -> usize {
+        out.prog
+            .decls
+            .iter()
+            .filter(|d| match d {
+                ast::Decl::StructDef(sd) => {
+                    sd.name.name != crate::cpp::builtin_decls_prelude::VA_LIST_STRUCT_NAME
+                },
+                _ => false,
+            })
+            .count()
+    }
+
     #[test]
     fn lower_free_function_native() {
         let src = b"int add(int a, int b) { return a + b; }\n\
@@ -4074,12 +4244,7 @@ int global = 0;\n\
         let decls = p.parse_top_level().expect("parse");
         let out = lower_decls_native(&decls).expect("native lower");
         // 应该有 1 个 struct (Point)
-        let struct_count = out
-            .prog
-            .decls
-            .iter()
-            .filter(|d| matches!(d, ast::Decl::StructDef(_)))
-            .count();
+        let struct_count = user_struct_count(&out);
         assert_eq!(struct_count, 1);
         // 至少 2 个函数 (ctor + dummy = 2)
         let fn_count = out
@@ -4110,12 +4275,7 @@ public:\n\
         let out = lower_decls_native(&decls).expect("native lower");
 
         // 应该有 2 个 struct (Base + Derived)
-        let struct_count = out
-            .prog
-            .decls
-            .iter()
-            .filter(|d| matches!(d, ast::Decl::StructDef(_)))
-            .count();
+        let struct_count = user_struct_count(&out);
         assert_eq!(struct_count, 2);
 
         // 找到 Derived 的 struct 定义，验证包含基类字段 b
@@ -4252,12 +4412,7 @@ public:\n\
         let out = lower_decls_native(&decls).expect("native lower");
 
         // 应该有 2 个 struct (Base + Derived)
-        let struct_count = out
-            .prog
-            .decls
-            .iter()
-            .filter(|d| matches!(d, ast::Decl::StructDef(_)))
-            .count();
+        let struct_count = user_struct_count(&out);
         assert_eq!(struct_count, 2);
 
         // 找到 Derived 的 struct 定义
@@ -4312,12 +4467,7 @@ public:\n\
         let out = lower_decls_native(&decls).expect("native lower");
 
         // 应该有 4 个 struct (A, B, C, D)
-        let struct_count = out
-            .prog
-            .decls
-            .iter()
-            .filter(|d| matches!(d, ast::Decl::StructDef(_)))
-            .count();
+        let struct_count = user_struct_count(&out);
         assert_eq!(struct_count, 4);
 
         // 找到 D 的 struct 定义

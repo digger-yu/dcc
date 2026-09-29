@@ -150,6 +150,9 @@ pub struct ClassAbi {
     /// `_ZTV1V`, 最终覆写者被静默丢失 (实测 gcc 107 / dcc 7)。偏移已考虑
     /// 子对象内的 vbptr (vbptr 在 0, vptr 紧随其后)。
     pub vbase_own_vptr_slots: Vec<(ClassId, u64)>,
+    /// 本类是不是 `union` ([class.union])。发射层据此选 `Type::Union` 而不是
+    /// 从「字段偏移全为 0」反推 (那个判据对单字段 struct 也会误中)。
+    pub is_union: bool,
 }
 
 /// 展平后的字段描述（偏移相对对象首地址）。
@@ -808,6 +811,8 @@ struct ClassDef {
     symbol_decl: HashMap<String, ClassId>,
     /// 是否有虚函数（影响 primary base 判定和 vptr）
     has_virtual: bool,
+    /// 是否是 `union` ([class.union]): 全部字段重叠在偏移 0, 对象尺寸取最大字段。
+    is_union: bool,
 }
 
 /// x86_64 指针大小
@@ -946,6 +951,13 @@ impl ItaniumAbiCalculator {
     }
 
     /// 注册一个类的定义信息（带真实类名）。
+    ///
+    /// `is_union`: 源码写的是 `union` 还是 `struct`/`class`。它必须是**声明上来信息**
+    /// 而不是布局结果: 早前 lower_ir 用「所有字段偏移都是 0」反推 union, 于是
+    /// 只有一个字段的 `struct S { int x; }` 也被当成 union (偏移 0 恰好重合),
+    /// 而真正多字段的 union 因为字段被顺序排列反而推不出来 —— 实测 GCC 15.3.0
+    /// 探测与 `cpp_abi_c_style_decls` 夹具里 `union {int i; long l;}` 的
+    /// `sizeof` 是 16 (gcc=8), 字段不重叠还会让成员写入越界踩到相邻对象。
     pub fn register_class_with_name(
         &mut self,
         class: ClassId,
@@ -954,9 +966,13 @@ impl ItaniumAbiCalculator {
         virtual_bases: Vec<ClassId>,
         fields: Vec<(String, CxxType)>,
         has_virtual: bool,
+        is_union: bool,
     ) {
         self.register_class_name(class, name);
         self.register_class(class, bases, virtual_bases, fields, has_virtual);
+        if let Some(def) = self.classes.get_mut(&class) {
+            def.is_union = is_union;
+        }
     }
 
     /// 注册一个类的定义信息。
@@ -982,6 +998,7 @@ impl ItaniumAbiCalculator {
                 methods: Vec::new(),
                 symbol_decl: HashMap::new(),
                 has_virtual,
+                is_union: false,
             },
         );
     }
@@ -1750,6 +1767,7 @@ impl AbiCalculator for ItaniumAbiCalculator {
 
         let mut abi = ClassAbi {
             class_id: class,
+            is_union: def.is_union,
             ..ClassAbi::default()
         };
 
@@ -1858,28 +1876,52 @@ impl AbiCalculator for ItaniumAbiCalculator {
         }
 
         // --- Step 2: 布局字段 ---
-        for (name, ty) in &def.fields {
-            let (field_size, field_align) = type_size_align(ty, self);
-
-            // 对齐当前 offset
-            let field_offset = align_up(current_offset, field_align);
-
-            // 记录字段布局
-            abi.fields.push(FieldLayout {
-                name: name.clone(),
-                offset: field_offset,
-                size: field_size,
-                align: field_align,
-            });
-
-            // 更新最大对齐
-            if field_align > max_align {
-                max_align = field_align;
+        // [class.union]/1: union 的所有成员表示重叠在同一起始地址, 对象尺寸取
+        // 最大成员, 对齐取最严成员 —— 不存在字段间的顺序累加与填充。
+        if def.is_union {
+            let mut union_size: u64 = 0;
+            for (name, ty) in &def.fields {
+                let (field_size, field_align) = type_size_align(ty, self);
+                abi.fields.push(FieldLayout {
+                    name: name.clone(),
+                    offset: 0,
+                    size: field_size,
+                    align: field_align,
+                });
+                if field_align > max_align {
+                    max_align = field_align;
+                }
+                if field_size > union_size {
+                    union_size = field_size;
+                }
             }
+            if union_size > current_offset {
+                current_offset = union_size;
+            }
+        } else {
+            for (name, ty) in &def.fields {
+                let (field_size, field_align) = type_size_align(ty, self);
 
-            // 推进 offset
-            if field_size > 0 {
-                current_offset = field_offset + field_size;
+                // 对齐当前 offset
+                let field_offset = align_up(current_offset, field_align);
+
+                // 记录字段布局
+                abi.fields.push(FieldLayout {
+                    name: name.clone(),
+                    offset: field_offset,
+                    size: field_size,
+                    align: field_align,
+                });
+
+                // 更新最大对齐
+                if field_align > max_align {
+                    max_align = field_align;
+                }
+
+                // 推进 offset
+                if field_size > 0 {
+                    current_offset = field_offset + field_size;
+                }
             }
         }
 
@@ -4077,6 +4119,7 @@ mod tests {
                 },
             )],
             true,
+            false,
         );
         calc.register_method(id, "speak".into(), true, id);
 
@@ -4195,6 +4238,7 @@ mod tests {
             vec![],
             vec![("v".into(), i32.clone())],
             true,
+            false,
         );
         calc.register_method_with_decl(
             v_id,
@@ -4212,6 +4256,7 @@ mod tests {
             vec![v_id],
             vec![("m".into(), i32.clone())],
             true,
+            false,
         );
         calc.register_method_with_decl(
             m_id,
@@ -4285,6 +4330,7 @@ mod tests {
             vec![],
             vec![("v".into(), i32.clone())],
             true,
+            false,
         );
         calc.register_method_with_decl(
             v_id,
@@ -4294,7 +4340,15 @@ mod tests {
             v_id,
             Some(v_id),
         );
-        calc.register_class_with_name(m_id, "M", vec![], vec![v_id], vec![("m".into(), i32)], true);
+        calc.register_class_with_name(
+            m_id,
+            "M",
+            vec![],
+            vec![v_id],
+            vec![("m".into(), i32)],
+            true,
+            false,
+        );
         // M 覆写 fv: 实现符号属于 M, 登记的虚槽条目指向被覆写的 V::fv
         calc.register_method_with_decl(
             m_id,

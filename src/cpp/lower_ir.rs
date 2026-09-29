@@ -1032,6 +1032,13 @@ impl<'a> IrLowerer<'a> {
             CxxType::Float { bits } => match bits {
                 32 => Ok(Type::Float),
                 64 => Ok(Type::Double),
+                // x87 80-bit `long double` ([basic.fundamental]/3.3: 它的精度至少
+                // 与 double 相同, 是实现定义的独立类型)。sema 用 `Float{bits: 80}`
+                // 表示它, C 侧则用 `Type::LongDouble` —— 两侧必须接得上, 否则
+                // 任何用到 `long double` 的 TU (printf 的 `%Lf`、`<cmath>` 的
+                // `strtold`, 以及 GCC 源码自身的 `LONG_DOUBLE_TYPE_SIZE`) 都会在
+                // 这里报 unsupported 并退回 legacy 文本降级。
+                80 => Ok(Type::LongDouble),
                 _ => Err(LowerIrError::Unsupported(format!("float with {} bits", bits))),
             },
             CxxType::Pointer(inner) => {
@@ -1317,11 +1324,14 @@ fn class_of_object_type(ty: &CxxType) -> Option<ClassId> {
     }
 }
 
+/// 这个类的 C 侧表示是不是 `union`。
+///
+/// 真值是布局层的 `ClassAbi::is_union` (从声明的 `union` 关键字带来)。
+/// 旧写法用「所有字段偏移都是 0」反推, 两个方向都会错: 单个字段的
+/// `struct S { int x; }` 被误判成 union, 而真正多字段的 union 因为字段被
+/// 顺序排列反而判不出来。
 fn is_union_layout(abi: &ClassAbi) -> bool {
-    if abi.fields.is_empty() {
-        return false;
-    }
-    abi.fields.iter().all(|f| f.offset == 0)
+    abi.is_union
 }
 
 /// 计算 ast::Type 的大小（字节），用于异常分配等场景。
@@ -2009,10 +2019,37 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             },
 
             HirExprKind::FloatLiteral(s) => {
-                // C++ HIR 浮点字面量按 double 建模（显式 f 后缀在 HIR
-                // 侧已处理类型；此处不存在 80-bit long double 通道）。
-                let val: f64 = s.parse().unwrap_or(0.0);
-                Ok(Operand::Float(FloatConst::F64(val), Type::Double))
+                // 常量表示必须跟**表达式类型**走 ([lex.fcon] + [basic.fundamental]):
+                // 早前无条件按 double 建模 (旧注释就写着「此处不存在 80-bit
+                // long double 通道」), 于是 `1.0L / 3.0L` 两侧都是 double, 商只有
+                // 53 位精度 (实测 dcc=0.333333333333333315 / gcc=0.333333333333333333),
+                // `float` 字面量也一样丢类型。宽度单一真源是 sema 己标好的
+                // `expr.ty` (由 const_text::float_literal_bits 从后缀得出)。
+                match expr_ty {
+                    Type::LongDouble => crate::float80::from_decimal(s)
+                        .map(|b| Operand::Float(FloatConst::LongDouble(b), Type::LongDouble))
+                        .or_else(|| {
+                            // 十进制扫描失败 (如十六进制浮点 / 特殊格式):
+                            // 经 f64 中转仍是一个可编译的常量, 不阻断整份编译。
+                            s
+                                .parse::<f64>()
+                                .ok()
+                                .map(|v| {
+                                    Operand::Float(
+                                        FloatConst::LongDouble(crate::float80::from_f64(v)),
+                                        Type::LongDouble,
+                                    )
+                                })
+                        })
+                        .ok_or_else(|| {
+                            LowerIrError::Internal(format!("cannot lower float literal {s:?}"))
+                        }),
+                    Type::Float => Ok(Operand::Float(
+                        FloatConst::F32(s.parse().unwrap_or(0.0)),
+                        Type::Float,
+                    )),
+                    other => Ok(Operand::Float(FloatConst::F64(s.parse().unwrap_or(0.0)), other)),
+                }
             },
 
             HirExprKind::BoolLiteral(b) => Ok(Operand::Int(if *b { 1 } else { 0 })),
@@ -2283,23 +2320,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                 cond,
                 then_expr,
                 else_expr,
-            } => {
-                // 条件表达式: dest = cond ? then : else
-                let cond = self.lower_expr(*cond)?;
-                let then_val = self.lower_expr(*then_expr)?;
-                let else_val = self.lower_expr(*else_expr)?;
-                let result = self.fresh_syn("__cond", expr_ty.clone());
-                self.push_inst(Inst {
-                    dest: Some(result.clone()),
-                    kind: InstKind::Select {
-                        cond,
-                        then_: then_val,
-                        else_: else_val,
-                    },
-                    span: dummy_span(),
-                });
-                Ok(Operand::Var(result))
-            },
+            } => self.lower_conditional(*cond, *then_expr, *else_expr, &expr_ty),
 
             HirExprKind::Comma { lhs, rhs } => {
                 // 逗号表达式: 先求 lhs (丢弃结果), 再求 rhs (作为结果)
@@ -2664,13 +2685,73 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
 
     /// 把短路结果写进基名为 `base` 的结果变量 (两条路径各调用一次).
     fn push_logical_result(&mut self, base: &str, e: Operand) -> SsaVar {
-        let dest = self.fresh_var(base, Type::Bool);
+        self.push_branch_result(base, &Type::Bool, e)
+    }
+
+    /// 把一个分支结果写进基名为 `base` 的结果变量 (两条路径各调用一次)。
+    ///
+    /// 两条路径的写入在 SSA→AST 重建时合并到同一个 C 局部, 因而不需要 phi。
+    fn push_branch_result(&mut self, base: &str, ty: &Type, e: Operand) -> SsaVar {
+        let dest = self.fresh_var(base, ty.clone());
         self.push_inst(Inst {
             dest: Some(dest.clone()),
-            kind: InstKind::Cast { ty: Type::Bool, e },
+            kind: InstKind::Cast { ty: ty.clone(), e },
             span: dummy_span(),
         });
         dest
+    }
+
+    /// [expr.cond]/1: `cond ? then : else` **只求值被选中的那一个分支**。
+    ///
+    /// 不能用 `InstKind::Select`: 它要求先把两个分支都降级到同一个线性块里再
+    /// 选择, 于是 (1) 未选中的分支的副作用也被执行 —— `w = c ? (w1 = 11) :
+    /// (w2 = 22)` 把 `w2` 也写了; (2) `Select` 只能承载可寄存器化的标量, 16
+    /// 字节的 `long double` 分支直接得到 `nan`。
+    ///
+    /// 正确形状是控制流: 真/假各一个基本块, 结果写进同一个基名的变量, merge
+    /// 块读它 —— 与 `&&` / `||` 的短路降级同一套机制。它能嵌套的前提是重建层
+    /// 能认出「某条路径本身又是分支」时的汇聚点, 那是
+    /// [`crate::ssa::compute_ipdoms`] (后支配者) 解决的问题。
+    fn lower_conditional(
+        &mut self,
+        cond: HirExprId,
+        then_expr: HirExprId,
+        else_expr: HirExprId,
+        result_ty: &Type,
+    ) -> Result<Operand, LowerIrError> {
+        let then_bb = self.unique_bb("cond_then");
+        let else_bb = self.unique_bb("cond_else");
+        let merge_bb = self.unique_bb("cond_merge");
+
+        let cond_val = self.lower_expr(cond)?;
+        self.set_term(Terminator::Branch {
+            cond: cond_val,
+            t: then_bb.clone(),
+            f: else_bb.clone(),
+        });
+
+        let result_base = self.fresh_logical_base("cond");
+
+        // 真分支: 只在这里降级 then_expr
+        self.current_bb = then_bb;
+        let then_val = self.lower_expr(then_expr)?;
+        self.push_branch_result(&result_base, result_ty, then_val);
+        self.set_term(Terminator::Jump(merge_bb.clone()));
+
+        // 假分支: 只在这里降级 else_expr
+        self.current_bb = else_bb;
+        let else_val = self.lower_expr(else_expr)?;
+        self.push_branch_result(&result_base, result_ty, else_val);
+        self.set_term(Terminator::Jump(merge_bb.clone()));
+
+        // merge: 读回结果变量 (与短路逻辑同一口径: version 0 只当名字载体)
+        self.current_bb = merge_bb;
+        Ok(Operand::Var(SsaVar {
+            base: result_base,
+            version: 0,
+            ty: result_ty.clone(),
+            span: dummy_span(),
+        }))
     }
 
     fn lower_logical_and(
@@ -8057,6 +8138,7 @@ mod tests {
         // Base: { x: int @ 0 }, size=4, align=4
         let base_abi = ClassAbi {
             class_id: base_id,
+            is_union: false,
             size: 4,
             align: 4,
             non_virtual_size: 4,
@@ -8089,6 +8171,7 @@ mod tests {
         // Base@0 (primary), y@4, size=8, align=4
         let derived_abi = ClassAbi {
             class_id: derived_id,
+            is_union: false,
             size: 8,
             align: 4,
             non_virtual_size: 8,
@@ -8337,6 +8420,7 @@ mod tests {
         // A: { a: int @ 0 }, size=4, align=4
         let a_abi = ClassAbi {
             class_id: a_id,
+            is_union: false,
             size: 4,
             align: 4,
             non_virtual_size: 4,
@@ -8368,6 +8452,7 @@ mod tests {
         // B: { b: double @ 0 }, size=8, align=8
         let b_abi = ClassAbi {
             class_id: b_id,
+            is_union: false,
             size: 8,
             align: 8,
             non_virtual_size: 8,
@@ -8403,6 +8488,7 @@ mod tests {
         // total=24, align=8
         let c_abi = ClassAbi {
             class_id: c_id,
+            is_union: false,
             size: 24,
             align: 8,
             non_virtual_size: 24,
@@ -8562,6 +8648,7 @@ mod tests {
 
         let a_abi = ClassAbi {
             class_id: a_id,
+            is_union: false,
             size: 4,
             align: 4,
             non_virtual_size: 4,
@@ -8592,6 +8679,7 @@ mod tests {
 
         let b_abi = ClassAbi {
             class_id: b_id,
+            is_union: false,
             size: 8,
             align: 8,
             non_virtual_size: 8,
@@ -8622,6 +8710,7 @@ mod tests {
 
         let c_abi = ClassAbi {
             class_id: c_id,
+            is_union: false,
             size: 24,
             align: 8,
             non_virtual_size: 24,
