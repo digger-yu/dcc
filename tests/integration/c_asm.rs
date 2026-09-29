@@ -2400,3 +2400,339 @@ fn asm_empty_template_minimal_stays_transparent_across_tu() {
     let rc = run_gcc_two_tu_cross_check("asm-empty-minimal", provider, consumer);
     assert_eq!(rc, 7, "空 asm 模板不得改变可观测行为: main 应返回 7");
 }
+
+// ============================================================================
+// --asm-fallback=gas|error — TU 级 GAS 透传降级 (双模式架构方案的落地验证)
+// ============================================================================
+//
+// 判据链: 后端只**记录**"这行编不出来"这个事实 (CommonImage.asm_passthrough),
+// 报错还是降级由 codegen::emit() 按 --asm-fallback 单点决定, 产物形态由 Emitted
+// 类型带到 driver。下面 7 条用例分别钉住这条链的每一个环节。
+
+/// 把降级夹具编译一次, 返回 (stderr, 是否成功, .o 路径, .s 路径)。
+fn asm_fallback_compile(
+    tag: &str,
+    extra: &[&str],
+    out_ext: &str,
+) -> (String, bool, std::path::PathBuf, std::path::PathBuf) {
+    let dir = std::env::temp_dir();
+    let stem = format!("dcc-asm-fallback-{tag}-{}", std::process::id());
+    let obj_path = dir.join(format!("{stem}{out_ext}"));
+    let text_path = dir.join(format!("{stem}.s"));
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/asm/asm_fallback_gas.c");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+    cmd.arg("-c").arg("-o").arg(&obj_path).args(extra).arg(&fixture);
+    let output = cmd.output().expect("run dcc");
+    (
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.success(),
+        obj_path,
+        text_path,
+    )
+}
+
+/// 默认策略必须是硬错误 —— 向后兼容, 老脚本不会因为新选项而静默改行为。
+#[test]
+#[cfg(unix)]
+fn asm_fallback_default_is_hard_error() {
+    let (stderr, ok, obj, text) = asm_fallback_compile("default", &[], ".o");
+    assert!(!ok, "默认策略下含不可编码 asm 的 TU 必须失败");
+    assert!(stderr.contains("E0311"), "必须报 E0311, 实际: {stderr}");
+    assert!(
+        stderr.contains("--asm-fallback=gas"),
+        "错误必须指出可用的降级开关, 实际: {stderr}"
+    );
+    assert!(!obj.exists() && !text.exists(), "失败时不得留下任何产物");
+    let _ = fs::remove_file(&obj);
+    let _ = fs::remove_file(&text);
+}
+
+/// 一条 asm 语句里的两行未知指令必须聚合成**一条**诊断 (不得刷屏)。
+#[test]
+#[cfg(unix)]
+fn asm_fallback_groups_diagnostics_per_asm_statement() {
+    let (stderr, _ok, obj, text) = asm_fallback_compile("grouped", &[], ".o");
+    let n = stderr.matches("error[E0311]").count();
+    assert_eq!(n, 1, "两条未知指令同属一条 asm 语句, 应只报一条聚合错误: {stderr}");
+    assert!(stderr.contains("serialize"), "诊断必须列出具体行: {stderr}");
+    assert!(stderr.contains("wbnoinvd"), "诊断必须列出具体行: {stderr}");
+    let _ = fs::remove_file(&obj);
+    let _ = fs::remove_file(&text);
+}
+
+/// --asm-fallback=gas: 整个 TU 降级为 GAS 文本, 且未知指令**逐字**透传。
+#[test]
+#[cfg(unix)]
+fn asm_fallback_gas_degrades_whole_tu_to_text() {
+    let (stderr, ok, obj, text) = asm_fallback_compile("degrade", &["--asm-fallback=gas"], ".o");
+    assert!(ok, "降级模式必须成功: {stderr}");
+    // 关键回归: 文本绝不许写进 .o (否则 host ld 会报 bad ELF magic)
+    assert!(!obj.exists(), "产物是文本时不得存在 .o: {}", obj.display());
+    assert!(text.exists(), "降级产物必须落在同名 .s: {}", text.display());
+    let body = fs::read_to_string(&text).expect("read degraded .s");
+    assert!(body.contains("serialize\n") || body.contains("\tserialize"), "透传丢失 serialize: {body}");
+    assert!(body.contains("wbnoinvd"), "透传丢失 wbnoinvd: {body}");
+    assert!(!body.contains('\u{fffd}'), "文本不得被 lossy 替换字符污染");
+    let _ = fs::remove_file(&obj);
+    let _ = fs::remove_file(&text);
+}
+
+/// 降级的终点是被真 `as` 接受并反汇编出同样的指令 —— 这是整条透传链的**唯一**
+/// 客观验收, 光看 dcc 不报错没有意义。`as` 不可用时显式打降级标记。
+#[test]
+#[cfg(unix)]
+fn asm_fallback_gas_text_assembles_through_real_as() {
+    if Command::new("as").arg("--version").output().is_err() {
+        eprintln!("ASM-FALLBACK-SKIP: no host `as` available");
+        return;
+    }
+    let (stderr, ok, obj, text) =
+        asm_fallback_compile("assemble", &["--asm-fallback=gas"], ".o");
+    assert!(ok, "降级模式必须成功: {stderr}");
+    let o = Command::new("as")
+        .arg("-o")
+        .arg(format!("{}.o", text.display()))
+        .arg(&text)
+        .output()
+        .expect("run as");
+    assert!(
+        o.status.success(),
+        "降级产出的 .s 必须能被真 GAS 汇编: {}\n{}",
+        String::from_utf8_lossy(&o.stderr),
+        fs::read_to_string(&text).unwrap_or_default()
+    );
+    if Command::new("objdump").arg("--version").output().is_ok() {
+        let d = Command::new("objdump")
+            .arg("-d")
+            .arg(format!("{}.o", text.display()))
+            .output()
+            .expect("run objdump");
+        let dis = String::from_utf8_lossy(&d.stdout).to_ascii_lowercase();
+        assert!(dis.contains("serialize"), "反汇编未见 serialize:\n{dis}");
+        assert!(dis.contains("wbnoinvd"), "反汇编未见 wbnoinvd:\n{dis}");
+    }
+    let _ = fs::remove_file(&obj);
+    let _ = fs::remove_file(&text);
+    let _ = fs::remove_file(format!("{}.o", text.display()));
+}
+
+/// `--asm-fallback` 的未知取值必须报错, 不许静默退回默认值。
+#[test]
+#[cfg(unix)]
+fn asm_fallback_rejects_unknown_value() {
+    let (stderr, ok, _obj, _text) =
+        asm_fallback_compile("badval", &["--asm-fallback=llvm"], ".err");
+    assert!(!ok, "未知取值必须失败");
+    assert!(
+        stderr.contains("gas") && stderr.contains("error"),
+        "必须列出合法取值, 实际: {stderr}"
+    );
+}
+
+/// 显式 `-o foo.o` + 降级: 名字按**实际产物形态**改成 foo.s, 且不得给文本加执行位。
+#[test]
+#[cfg(unix)]
+fn asm_fallback_does_not_label_text_as_object() {
+    let dir = std::env::temp_dir();
+    let stem = format!("dcc-asm-fallback-name-{}", std::process::id());
+    let req = dir.join(format!("{stem}.o"));
+    let got = dir.join(format!("{stem}.s"));
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/asm/asm_fallback_gas.c");
+    let o = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "--asm-fallback=gas", "-o"])
+        .arg(&req)
+        .arg(&fixture)
+        .output()
+        .expect("run dcc");
+    assert!(o.status.success(), "降级应成功: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(!req.exists(), "文本产物不得占用 .o 名字");
+    assert!(got.exists(), "应写出同名 .s");
+    let md = fs::metadata(&got).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            md.permissions().mode() & 0o111,
+            0,
+            "文本产物绝不应拿到执行位 (旧判据只看 CLI 标志会误加)"
+        );
+    }
+    let _ = fs::remove_file(&req);
+    let _ = fs::remove_file(&got);
+}
+
+/// 降级必须是确定性的: 同一个 TU 渲染两次逐字节相同。这条同时是"只跑一次
+/// codegen、两个渲染器共享"的结构保证 —— 若降级走了第二次 codegen 重跑,
+/// 并行/串行策略差异会在这里暴露。
+#[test]
+#[cfg(unix)]
+fn asm_fallback_output_is_deterministic() {
+    let mut texts = Vec::new();
+    for _ in 0..2 {
+        let (_stderr, ok, obj, text) =
+            asm_fallback_compile("determinism", &["--asm-fallback=gas"], ".o");
+        assert!(ok);
+        texts.push(fs::read_to_string(&text).expect("read degraded .s"));
+        let _ = fs::remove_file(&obj);
+        let _ = fs::remove_file(&text);
+    }
+    assert_eq!(texts[0], texts[1], "降级文本必须逐字节可复现");
+}
+
+/// 目标后端若还不具备"把整个 TU 渲染成真 GAS 文本"的能力, 降级必须给出**准确的
+/// 能力缺失错误 (E0312)**, 而不是写一个汇编不过的 .s 冒充成功。
+/// 本用例是能力闸门的护栏: 交叉后端补上指令解码器后, 应把它改为断言降级成功。
+#[test]
+#[cfg(unix)]
+fn asm_fallback_requires_gas_text_capability() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-asm-fallback-cross-{}.c", std::process::id()));
+    let obj = dir.join(format!("dcc-asm-fallback-cross-{}.o", std::process::id()));
+    // `msr daif, x0` 曾被静默编码成 NOP; 现在如实记为透传
+    fs::write(
+        &src,
+        "long f(void);\nvoid g(void) { __asm__ volatile(\"msr daif, x0\"); }\n",
+    )
+    .expect("write fixture");
+    let o = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["--target", "aarch64-linux-gnu", "-c", "--asm-fallback=gas", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+    // 不得静默编码: 要么报能力缺失 (E0312), 要么报透传清单 (E0311)。
+    assert!(
+        stderr.contains("E0312") || stderr.contains("E0311"),
+        "交叉后端上 msr 必须被如实上报 (E0312/E0311), 实际 ok={} stderr={}",
+        o.status.success(),
+        stderr
+    );
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&obj);
+}
+
+/// 回归 (本方案最核心的 silent bug): `msr`/`mrs` 过去被 mini_asm 静默编码成 NOP,
+/// 内核 barrier / 系统寄存器代码会**默默丢指令**。现在必须报 E0311。
+#[test]
+#[cfg(unix)]
+fn cross_msr_mrs_is_hard_error_not_silent_nop() {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("dcc-asm-msr-{}.c", std::process::id()));
+    let obj = dir.join(format!("dcc-asm-msr-{}.o", std::process::id()));
+    fs::write(&src, "void g(void) { __asm__ volatile(\"msr daif, x0\"); }\n").expect("write");
+    for target in ["aarch64-linux-gnu", "arm-linux-gnueabi", "riscv64-linux-gnu"] {
+        let o = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["--target", target, "-c", "-o"])
+            .arg(&obj)
+            .arg(&src)
+            .output()
+            .expect("run dcc");
+        let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+        assert!(
+            !o.status.success() && stderr.contains("E0311"),
+            "target {target}: msr/mrs 必须硬错误而非静默 NOP, 实际 ok={} stderr={}",
+            o.status.success(),
+            stderr
+        );
+    }
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&obj);
+}
+
+// ============================================================================
+// 语句位置内联汇编必须真的落进目标文件 (交叉后端曾整条丢弃)
+// ============================================================================
+
+/// 回归 (P0): aarch64 / riscv64 的 `Stmt::Expr` 分支原先只看 `ir.expressions`,
+/// 而 `__asm__` 在 IR 里没有对应形态 —— 于是**语句位置的内联汇编被整条静默丢掉**
+/// (naked 函数因为不走 IR 才侥幸正确)。现在四个交叉后端都必须真的发出指令。
+/// 判据用真 objdump 读回字节, 不看 dcc 自己的输出 —— 避免"自证正确"。
+#[test]
+#[cfg(unix)]
+fn cross_statement_position_inline_asm_lands_in_object() {
+    let dir = std::env::temp_dir();
+    let stem = format!("dcc-asm-lands-{}", std::process::id());
+    let src = dir.join(format!("{stem}.c"));
+    let obj = dir.join(format!("{stem}.o"));
+    fs::write(&src, "void g(void) { __asm__ volatile(\"nop\"); }\n").expect("write");
+    // (target, objdump, 该 ISA 的 nop 助记符)
+    let cases = [
+        ("aarch64-linux-gnu", "aarch64-linux-gnu-objdump", "nop"),
+        ("riscv64-linux-gnu", "riscv64-linux-gnu-objdump", "nop"),
+        ("arm-linux-gnueabi", "arm-linux-gnueabi-objdump", "nop"),
+        ("mips-linux-gnu", "mips-linux-gnu-objdump", "nop"),
+    ];
+    let mut ran = 0usize;
+    for (target, objdump, mnemonic) in cases {
+        let o = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["--target", target, "-c", "-o"])
+            .arg(&obj)
+            .arg(&src)
+            .output()
+            .expect("run dcc");
+        assert!(
+            o.status.success(),
+            "target {target}: 编译应成功, stderr={}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        let Ok(d) = Command::new(objdump).arg("-d").arg(&obj).output() else {
+            eprintln!("ASM-LANDS-SKIP: {objdump} unavailable");
+            continue;
+        };
+        ran += 1;
+        let dis = String::from_utf8_lossy(&d.stdout).to_ascii_lowercase();
+        let body = dis.split_once("<g>:").unwrap_or(("", &dis)).1;
+        assert!(
+            body.contains(mnemonic),
+            "target {target}: 语句位置的 `asm volatile(\"nop\")` 必须出现在 .text 里;\n\
+             objdump 输出:\n{body}"
+        );
+        let _ = fs::remove_file(&obj);
+    }
+    assert!(ran > 0, "ASM-LANDS-VACUOUS: 没有任何交叉 objdump 可用, 该门禁不能空跑");
+    let _ = fs::remove_file(&src);
+}
+
+/// 带输出操作数的内联汇编不得被丢弃: 丢一个字节都会让 C 变量停在陈旧值上。
+/// 用的是 aarch64 指令表确实支持的形态 (寄存器-寄存器 mov), 以便把
+/// “asm 真的进了 .text” 与 “编不出时的诚实报错” 两个判据分开验证。
+#[test]
+#[cfg(unix)]
+fn cross_register_output_asm_lands_in_object() {
+    let dir = std::env::temp_dir();
+    let stem = format!("dcc-asm-out-{}", std::process::id());
+    let src = dir.join(format!("{stem}.c"));
+    let obj = dir.join(format!("{stem}.o"));
+    fs::write(
+        &src,
+        "int g(int y) { int x; __asm__ volatile(\"mov %0, x1\" : \"=r\"(x)); return x; }\n",
+    )
+    .expect("write");
+    let mut ran = 0usize;
+    for (target, objdump) in [("aarch64-linux-gnu", "aarch64-linux-gnu-objdump")] {
+        let o = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["--target", target, "-c", "-o"])
+            .arg(&obj)
+            .arg(&src)
+            .output()
+            .expect("run dcc");
+        assert!(o.status.success(), "{target}: {}", String::from_utf8_lossy(&o.stderr));
+        let Ok(d) = Command::new(objdump).arg("-d").arg(&obj).output() else {
+            eprintln!("ASM-OUT-SKIP: {objdump} unavailable");
+            continue;
+        };
+        ran += 1;
+        let dis = String::from_utf8_lossy(&d.stdout).to_ascii_lowercase();
+        let body = dis.split_once("<g>:").unwrap_or(("", &dis)).1;
+        assert!(
+            body.contains("mov"),
+            "{target}: `mov %0, x1` 必须真的编码进 .text, 否则 x 是陈旧值:\n{body}"
+        );
+    }
+    assert!(ran > 0, "ASM-OUT-VACUOUS: 无可用 objdump, 门禁不得空跑");
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&obj);
+}
