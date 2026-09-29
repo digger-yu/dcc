@@ -74,18 +74,8 @@ impl Aarch64Codegen {
             input_names,
             &[],
         );
-        if self.asm_text_mode {
-            let lines: Vec<String> = resolved
-                .split('\n')
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect();
-            self.raw_func_asm_lines
-                .push((format!("__inline_{}", self.label_serial), lines));
-            self.label_serial += 1;
-        } else {
-            self.encode_and_emit_asm(&resolved, span_file, span_line);
-        }
+        // 文本与机器码出自同一次解析: 不再按目标模式二选一。
+        self.encode_and_emit_asm(&resolved, span_file, span_line);
 
         // --- 写回输出寄存器到 C 变量 ---
         let mut first_output_reg: Option<u8> = None;

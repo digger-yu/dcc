@@ -43,6 +43,12 @@ pub enum Feature {
 
     // Output format
     ObjectFormat(ObjectFmt), // Elf / Coff (Coff only on x86+Windows)
+    /// 本后端的 `-S` 能产出可被真 GAS 汇编的**完整**文本 (函数体不是占位桩)。
+    ///
+    /// 这是 `--asm-fallback=gas` (整 TU 降级给 GAS) 的前置能力: 降级意味着
+    /// 放弃直发 ELF、改由 `as` 接手, 如果 `-S` 本身产不出真指令文本, 降级
+    /// 只会得到一个无法汇编的文件。因此该能力必须显式声明, 不得默认成立。
+    GasTextOutput,
 
     // Debugging info
     Dwarf(u8), // DWARF version (0 if not supported)
@@ -134,6 +140,7 @@ impl FeatureSet {
                 Feature::Trapv,
                 Feature::ObjectFormat(ObjectFmt::Elf),
                 Feature::ObjectFormat(ObjectFmt::Coff),
+                Feature::GasTextOutput,
                 Feature::Dwarf(4),
                 // RiscVBorrowedRegs 不在 full() 里: 它是 RISC-V 专属特性，
                 // 由 riscv64_cross() 单独声明; 放在 full() 会让 x86_64 谎报。

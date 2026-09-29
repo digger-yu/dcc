@@ -1,63 +1,10 @@
-// src/codegen/mini_asm.rs - Non-x86 mini-assembler for -c path
+// src/codegen/mini_asm.rs - Non-x86 mini-assembler encoding tables
 //
-// Provides instruction parsing and machine code encoding for
-// AArch64, RISC-V, ARM, MIPS and MIPS64 inline assembly.
-// Used by non-x86 backends in -c mode to produce actual machine
-// code bytes instead of just storing asm text.
-
-/// Parse resolved asm text into individual instruction lines.
-/// Strips comments, empty lines, and leading/trailing whitespace.
-pub fn parse_asm_lines(text: &str) -> Vec<String> {
-    text.split('\n')
-        .map(|l| {
-            // Strip AT&T style comment (# ...)
-            let l = if let Some(pos) = l.find('#') { &l[..pos] } else { l };
-            // Strip // style comment
-            let l = if let Some(pos) = l.find("//") { &l[..pos] } else { l };
-            l.trim().to_string()
-        })
-        .filter(|l| !l.is_empty())
-        .collect()
-}
-
-/// Parse a single instruction line into (mnemonic, operands).
-/// Returns None if the line looks like a directive (starts with '.')
-/// or a label (ends with ':').
-pub fn parse_instruction(line: &str) -> Option<(String, Vec<String>)> {
-    let line = line.trim();
-    if line.is_empty() || line.starts_with('.') || line.ends_with(':') {
-        return None;
-    }
-    // Skip label prefix: "label: insn ..."
-    let line = if let Some(pos) = line.find(':') {
-        line[pos + 1..].trim()
-    } else {
-        line
-    };
-    if line.is_empty() {
-        return None;
-    }
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    let mnemonic = parts[0].to_lowercase();
-    let operands_str = if parts.len() > 1 {
-        parts[1..].join(" ")
-    } else {
-        String::new()
-    };
-    // Split operands by comma, handling spaces
-    let operands: Vec<String> = if operands_str.is_empty() {
-        Vec::new()
-    } else {
-        operands_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    };
-    Some((mnemonic, operands))
-}
-
-// ===== AArch64 register parsing and encoding =====
+// Provides instruction machine-code encoding for AArch64, RISC-V, ARM,
+// MIPS and MIPS64 inline assembly. This module is now purely the ISA
+// encoding tables: line lexing/classification, the pass-through decision
+// and diagnostics all live in `asm_source` (single source of truth for
+// every backend, including x86_64 via its injected encoder).
 
 /// Parse AArch64 register name to register number.
 /// Supports: x0-x30, w0-w30, sp/xzr/wzr, x30=lr
@@ -162,6 +109,109 @@ fn parse_sve_pred_reg(s: &str) -> Option<u8> {
     }
 }
 
+// ===== 操作数取用的严格语义 (单一真源) =====================================
+//
+// 历史缺陷: 各 encode_* 里大量写 `operands.first().and_then(parse).unwrap_or(0)`,
+// 把两种完全不同的情况抹平成同一个 0:
+//   (a) 操作数省略了   (b) 操作数存在但解析不出来
+// 于是 `blr xN` 静默编成 `blr x0`、`ld1w z0.s, [x3]` 静默丢掉基址寄存器 ——
+// 这是最难排查的一类 silent miscompile, 也正是「同一源码两模式产出不同机器码」
+// 的根因之一。此处把两者分开:
+//   req_* : 必需操作数。缺失或解析不出 -> None, 整条编码失败 (交 asm_source 判透传)
+//   opt_* : 可省略操作数。缺失 -> 默认值; 存在但解析不出 -> None
+
+/// AArch64 寄存器操作数 (返回 (编号, 是否 64 位))。
+fn a64_reg_at(ops: &[String], i: usize) -> Option<(u8, bool)> {
+    parse_aarch64_reg(ops.get(i)?.trim())
+}
+fn req_a64_reg(ops: &[String], i: usize) -> Option<u8> {
+    a64_reg_at(ops, i).map(|(n, _)| n)
+}
+fn opt_a64_reg(ops: &[String], i: usize, dflt: u8) -> Option<u8> {
+    if ops.get(i).is_some() {
+        req_a64_reg(ops, i)
+    } else {
+        Some(dflt)
+    }
+}
+
+/// 立即数词法的单一真源: `#` 可选, 支持 0x/0X 十六进制与负号。
+/// 统一为一个 i64 核心, 再由位宽视图去约束 —— 避免同一份词法被写两遍。
+fn parse_imm_core(s: &str) -> Option<i64> {
+    let s = s.trim().trim_start_matches('#').trim();
+    let (neg, digits) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s),
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let v = match digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+        Some(h) => {
+            if h.is_empty() {
+                return None;
+            }
+            i64::from_str_radix(h, 16).ok()?
+        },
+        None => digits.parse::<i64>().ok()?,
+    };
+    Some(if neg { -v } else { v })
+}
+
+/// i32 视图 (RISC-V / MIPS 的立即数域可负)。
+fn parse_imm_i32(s: &str) -> Option<i32> {
+    Some(parse_imm_core(s)?.try_into().ok()?)
+}
+
+/// u32 视图 (AArch64 / ARM 的无符号立即数域)。非数字或负数一律 None。
+fn parse_imm_scalar(s: &str) -> Option<u32> {
+    Some(parse_imm_core(s)?.try_into().ok()?)
+}
+fn req_imm(ops: &[String], i: usize) -> Option<u32> {
+    parse_imm_scalar(ops.get(i)?)
+}
+fn opt_imm(ops: &[String], i: usize, dflt: u32) -> Option<u32> {
+    if ops.get(i).is_some() {
+        req_imm(ops, i)
+    } else {
+        Some(dflt)
+    }
+}
+
+/// SVE / SVE 谓词寄存器取用: 同样区分缺位与非法。
+fn req_sve_reg(ops: &[String], i: usize) -> Option<u8> {
+    parse_sve_reg(ops.get(i)?)
+}
+fn req_sve_pred_reg(ops: &[String], i: usize) -> Option<u8> {
+    parse_sve_pred_reg(ops.get(i)?)
+}
+/// NEON 寄存器取用: (编号, 元素宽度位)。解析不出绝不默认 v0/128。
+fn req_neon_reg(ops: &[String], i: usize) -> Option<(u8, u16)> {
+    parse_neon_reg(ops.get(i)?)
+}
+
+/// RISC-V / ARM / MIPS 的同构包装。
+fn req_riscv_reg(ops: &[String], i: usize) -> Option<u8> {
+    parse_riscv_reg(ops.get(i)?.trim())
+}
+fn opt_riscv_reg(ops: &[String], i: usize, dflt: u8) -> Option<u8> {
+    if ops.get(i).is_some() {
+        req_riscv_reg(ops, i)
+    } else {
+        Some(dflt)
+    }
+}
+fn req_mips_imm(ops: &[String], i: usize) -> Option<i32> {
+    parse_mips_imm(ops.get(i)?)
+}
+fn opt_mips_imm(ops: &[String], i: usize, dflt: i32) -> Option<i32> {
+    if ops.get(i).is_some() {
+        req_mips_imm(ops, i)
+    } else {
+        Some(dflt)
+    }
+}
+
 /// Encode AArch64 instruction from mnemonic + operands.
 /// Returns encoded bytes (little-endian, 4 bytes per instruction).
 pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
@@ -243,30 +293,21 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
 
         // SVC #imm
         "svc" => {
-            let imm = operands
-                .first()
-                .and_then(|s| s.trim_start_matches('#').parse::<u32>().ok())
-                .unwrap_or(0);
+            let imm = req_imm(operands, 0)?;
             let insn: u32 = 0xd4000001 | ((imm & 0xffff) << 5);
             Some(insn.to_le_bytes().to_vec())
         },
 
         // BR Xn
         "br" => {
-            let rn = operands
-                .first()
-                .and_then(|r| parse_aarch64_reg(r).map(|(n, _)| n))
-                .unwrap_or(0);
+            let rn = req_a64_reg(operands, 0)?;
             let insn: u32 = 0xd61f0000 | ((rn as u32 & 0x1f) << 5);
             Some(insn.to_le_bytes().to_vec())
         },
 
         // BLR Xn
         "blr" => {
-            let rn = operands
-                .first()
-                .and_then(|r| parse_aarch64_reg(r).map(|(n, _)| n))
-                .unwrap_or(0);
+            let rn = req_a64_reg(operands, 0)?;
             let insn: u32 = 0xd63f0000 | ((rn as u32 & 0x1f) << 5);
             Some(insn.to_le_bytes().to_vec())
         },
@@ -292,8 +333,8 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
 
         // MOVZ Wd, #imm / MOVZ Xd, #imm
         "movz" if operands.len() == 2 => {
-            if let Some((rd, is64)) = parse_aarch64_reg(&operands[0]) {
-                let imm = operands[1].trim_start_matches('#').parse::<u32>().ok()?;
+            if let Some((rd, is64)) = a64_reg_at(operands, 0) {
+                let imm = req_imm(operands, 1)?;
                 let sf = if is64 { 1u32 << 31 } else { 0 };
                 let insn: u32 = sf | 0x52800000 | ((imm & 0xffff) << 5) | (rd as u32 & 0x1f);
                 Some(insn.to_le_bytes().to_vec())
@@ -339,8 +380,10 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
             }
         },
 
-        // MSR/MRS system register access - encode as NOP (complex encoding)
-        "msr" | "mrs" => Some(encode_aarch64_nop().to_vec()),
+        // MSR/MRS 系统寄存器访问: 不做静默 NOP 兜底。
+        // 系统寄存器编码依赖完整 SysReg 名表 (op0/op1/CRn/CRm/op2), 属于 GAS 的
+        // 既有能力范围; 这里返回 None 让 asm_source 把它标记为"透传给 GAS",
+        // 由 TU 级降级机制保证语义正确而非默默丢指令 (P0-5)。
 
         // CLREX
         "clrex" => {
@@ -357,10 +400,7 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
 
         // DBG #imm
         "dbg" => {
-            let imm = operands
-                .first()
-                .and_then(|s| s.trim_start_matches('#').parse::<u32>().ok())
-                .unwrap_or(0);
+            let imm = req_imm(operands, 0)?;
             let insn: u32 = 0xd503201f | ((imm & 0xf) << 5);
             Some(insn.to_le_bytes().to_vec())
         },
@@ -374,9 +414,9 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
         // FADD (vector) Vd.T, Vn.T, Vm.T
         // Q=1 for 128-bit, size=00 for .2s, 01 for .4h, 10 for .2d
         "fadd" if operands.len() == 3 && is_neon_reg(&operands[0]) => {
-            let (rd, rsz) = parse_neon_reg(&operands[0]).unwrap_or((0, 128));
-            let (rn, _) = parse_neon_reg(&operands[1]).unwrap_or((0, 128));
-            let (rm, _) = parse_neon_reg(&operands[2]).unwrap_or((0, 128));
+            let (rd, rsz) = req_neon_reg(operands, 0)?;
+            let (rn, _) = req_neon_reg(operands, 1)?;
+            let (rm, _) = req_neon_reg(operands, 2)?;
             let q = if rsz == 128 { 1u32 << 30 } else { 0 };
             // FADD vector: 0x0E20D400 | Q | size<<22 | Rm | Rn | Rd
             let size = match rsz {
@@ -396,9 +436,9 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
 
         // FSUB (vector) Vd.T, Vn.T, Vm.T
         "fsub" if operands.len() == 3 && is_neon_reg(&operands[0]) => {
-            let (rd, rsz) = parse_neon_reg(&operands[0]).unwrap_or((0, 128));
-            let (rn, _) = parse_neon_reg(&operands[1]).unwrap_or((0, 128));
-            let (rm, _) = parse_neon_reg(&operands[2]).unwrap_or((0, 128));
+            let (rd, rsz) = req_neon_reg(operands, 0)?;
+            let (rn, _) = req_neon_reg(operands, 1)?;
+            let (rm, _) = req_neon_reg(operands, 2)?;
             let q = if rsz == 128 { 1u32 << 30 } else { 0 };
             let size = match rsz {
                 128 => 0b10u32,
@@ -418,9 +458,9 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
 
         // FMUL (vector) Vd.T, Vn.T, Vm.T
         "fmul" if operands.len() == 3 && is_neon_reg(&operands[0]) => {
-            let (rd, rsz) = parse_neon_reg(&operands[0]).unwrap_or((0, 128));
-            let (rn, _) = parse_neon_reg(&operands[1]).unwrap_or((0, 128));
-            let (rm, _) = parse_neon_reg(&operands[2]).unwrap_or((0, 128));
+            let (rd, rsz) = req_neon_reg(operands, 0)?;
+            let (rn, _) = req_neon_reg(operands, 1)?;
+            let (rm, _) = req_neon_reg(operands, 2)?;
             let q = if rsz == 128 { 1u32 << 30 } else { 0 };
             let size = match rsz {
                 128 => 0b10u32,
@@ -440,9 +480,9 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
 
         // ADD (vector) Vd.T, Vn.T, Vm.T
         "add" if operands.len() == 3 && is_neon_reg(&operands[0]) => {
-            let (rd, rsz) = parse_neon_reg(&operands[0]).unwrap_or((0, 128));
-            let (rn, _) = parse_neon_reg(&operands[1]).unwrap_or((0, 128));
-            let (rm, _) = parse_neon_reg(&operands[2]).unwrap_or((0, 128));
+            let (rd, rsz) = req_neon_reg(operands, 0)?;
+            let (rn, _) = req_neon_reg(operands, 1)?;
+            let (rm, _) = req_neon_reg(operands, 2)?;
             let q = if rsz == 128 { 1u32 << 30 } else { 0 };
             // ADD vector: 0x0E208400 | Q | Rm | Rn | Rd (size=00 for .16b/.8b)
             let insn: u32 = 0x0e208400
@@ -455,9 +495,9 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
 
         // SUB (vector) Vd.T, Vn.T, Vm.T
         "sub" if operands.len() == 3 && is_neon_reg(&operands[0]) => {
-            let (rd, rsz) = parse_neon_reg(&operands[0]).unwrap_or((0, 128));
-            let (rn, _) = parse_neon_reg(&operands[1]).unwrap_or((0, 128));
-            let (rm, _) = parse_neon_reg(&operands[2]).unwrap_or((0, 128));
+            let (rd, rsz) = req_neon_reg(operands, 0)?;
+            let (rn, _) = req_neon_reg(operands, 1)?;
+            let (rm, _) = req_neon_reg(operands, 2)?;
             let q = if rsz == 128 { 1u32 << 30 } else { 0 };
             // SUB vector: 0x2E208400 | Q | Rm | Rn | Rd (size=00 for .16b/.8b)
             let insn: u32 = 0x2e208400
@@ -470,9 +510,9 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
 
         // MUL (vector) Vd.T, Vn.T, Vm.T
         "mul" if operands.len() == 3 && is_neon_reg(&operands[0]) => {
-            let (rd, rsz) = parse_neon_reg(&operands[0]).unwrap_or((0, 128));
-            let (rn, _) = parse_neon_reg(&operands[1]).unwrap_or((0, 128));
-            let (rm, _) = parse_neon_reg(&operands[2]).unwrap_or((0, 128));
+            let (rd, rsz) = req_neon_reg(operands, 0)?;
+            let (rn, _) = req_neon_reg(operands, 1)?;
+            let (rm, _) = req_neon_reg(operands, 2)?;
             let q = if rsz == 128 { 1u32 << 30 } else { 0 };
             // MUL vector: 0x0E209C00 | Q | Rm | Rn | Rd (size=00 for .16b/.8b)
             let insn: u32 = 0x0e209c00
@@ -485,8 +525,8 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
 
         // LD1 {Vt.T}, [Xn] - load 128-bit vector
         "ld1" if operands.len() == 2 && is_neon_reg(&operands[0]) => {
-            let (vt, _) = parse_neon_reg(&operands[0]).unwrap_or((0, 128));
-            let (xn, _) = parse_aarch64_reg(&operands[1]).unwrap_or((0, true));
+            let (vt, _) = req_neon_reg(operands, 0)?;
+            let (xn, _) = a64_reg_at(operands, 1)?;
             // LD1 (single structure, 128-bit): 0x4C007400 | Rn | Vt
             let insn: u32 = 0x4c407400 | ((xn as u32 & 0x1f) << 5) | (vt as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
@@ -494,8 +534,8 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
 
         // ST1 {Vt.T}, [Xn] - store 128-bit vector
         "st1" if operands.len() == 2 && is_neon_reg(&operands[0]) => {
-            let (vt, _) = parse_neon_reg(&operands[0]).unwrap_or((0, 128));
-            let (xn, _) = parse_aarch64_reg(&operands[1]).unwrap_or((0, true));
+            let (vt, _) = req_neon_reg(operands, 0)?;
+            let (xn, _) = a64_reg_at(operands, 1)?;
             // ST1 (single structure, 128-bit): 0x4C006400 | Rn | Vt
             let insn: u32 = 0x4c006400 | ((xn as u32 & 0x1f) << 5) | (vt as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
@@ -505,7 +545,7 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
 
         // PTRUE Pd.T - set all predicate elements to true
         "ptrue" if operands.len() == 1 && is_sve_pred_reg(&operands[0]) => {
-            let pd = parse_sve_pred_reg(&operands[0]).unwrap_or(0);
+            let pd = req_sve_pred_reg(operands, 0)?;
             // PTRUE: 0x25B86000 | Pd
             let insn: u32 = 0x25b86000 | (pd as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
@@ -513,9 +553,9 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
 
         // WHILELT Pd, Rn, Rm
         "whilelt" if operands.len() == 3 && is_sve_pred_reg(&operands[0]) => {
-            let pd = parse_sve_pred_reg(&operands[0]).unwrap_or(0);
-            let (rn, _) = parse_aarch64_reg(&operands[1]).unwrap_or((0, true));
-            let (rm, _) = parse_aarch64_reg(&operands[2]).unwrap_or((0, true));
+            let pd = req_sve_pred_reg(operands, 0)?;
+            let rn = req_a64_reg(operands, 1)?;
+            let rm = req_a64_reg(operands, 2)?;
             // WHILELT: 0x2528A400 | Rn | Rm | Pd
             let insn: u32 = 0x2528a400
                 | ((rn as u32 & 0x1f) << 16)
@@ -526,9 +566,9 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
 
         // SVE FADD Zzd.Pg/M, Zzn, Zzm
         "fadd" if operands.len() == 3 && is_sve_reg(&operands[0]) => {
-            let zd = parse_sve_reg(&operands[0]).unwrap_or(0);
-            let zn = parse_sve_reg(&operands[1]).unwrap_or(0);
-            let zm = parse_sve_reg(&operands[2]).unwrap_or(0);
+            let zd = req_sve_reg(operands, 0)?;
+            let zn = req_sve_reg(operands, 1)?;
+            let zm = req_sve_reg(operands, 2)?;
             // SVE FADD: 0x65000400 | Zm | Zn | Zd (simplified)
             let insn: u32 = 0x65000400
                 | ((zm as u32 & 0x1f) << 16)
@@ -539,9 +579,9 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
 
         // SVE ADD Zzd.Pg/M, Zzn, Zzm
         "add" if operands.len() == 3 && is_sve_reg(&operands[0]) => {
-            let zd = parse_sve_reg(&operands[0]).unwrap_or(0);
-            let zn = parse_sve_reg(&operands[1]).unwrap_or(0);
-            let zm = parse_sve_reg(&operands[2]).unwrap_or(0);
+            let zd = req_sve_reg(operands, 0)?;
+            let zn = req_sve_reg(operands, 1)?;
+            let zm = req_sve_reg(operands, 2)?;
             // SVE ADD: 0x45000400 | Zm | Zn | Zd (simplified)
             let insn: u32 = 0x45000400
                 | ((zm as u32 & 0x1f) << 16)
@@ -552,8 +592,8 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
 
         // LD1W {Zt.Pg}, [Xn] - SVE load vector of words
         "ld1w" if operands.len() == 2 && is_sve_reg(&operands[0]) => {
-            let zt = parse_sve_reg(&operands[0]).unwrap_or(0);
-            let (xn, _) = parse_aarch64_reg(&operands[1]).unwrap_or((0, true));
+            let zt = req_sve_reg(operands, 0)?;
+            let xn = req_a64_reg(operands, 1)?;
             // LD1W (vector): 0x85800000 | Rn | Zt (simplified)
             let insn: u32 = 0x85800000 | ((xn as u32 & 0x1f) << 5) | (zt as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
@@ -561,8 +601,8 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
 
         // ST1W {Zt.Pg}, [Xn] - SVE store vector of words
         "st1w" if operands.len() == 2 && is_sve_reg(&operands[0]) => {
-            let zt = parse_sve_reg(&operands[0]).unwrap_or(0);
-            let (xn, _) = parse_aarch64_reg(&operands[1]).unwrap_or((0, true));
+            let zt = req_sve_reg(operands, 0)?;
+            let xn = req_a64_reg(operands, 1)?;
             // ST1W (vector): 0xE5800000 | Rn | Zt (simplified)
             let insn: u32 = 0xe5800000 | ((xn as u32 & 0x1f) << 5) | (zt as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
@@ -701,16 +741,10 @@ pub fn encode_riscv64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
             Some(insn.to_le_bytes().to_vec())
         },
 
-        // SFENCE.VMA rs1, rs2
+        // SFENCE.VMA rs1, rs2  (两个操作数均可省略 = 刷全部)
         "sfence.vma" => {
-            let rs1 = operands
-                .first()
-                .and_then(|r| parse_riscv_reg(r))
-                .unwrap_or(0);
-            let rs2 = operands
-                .get(1)
-                .and_then(|r| parse_riscv_reg(r))
-                .unwrap_or(0);
+            let rs1 = opt_riscv_reg(operands, 0, 0)?;
+            let rs2 = opt_riscv_reg(operands, 1, 0)?;
             let insn: u32 = 0x12000073 | ((rs1 as u32) << 15) | ((rs2 as u32) << 20);
             Some(insn.to_le_bytes().to_vec())
         },
@@ -747,13 +781,7 @@ fn parse_riscv_fence_arg(s: &str) -> u32 {
 }
 
 fn parse_riscv_imm(s: &str) -> Option<i32> {
-    let s = s.trim();
-    let s = s.trim_start_matches('#');
-    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        i32::from_str_radix(hex, 16).ok()
-    } else {
-        s.parse::<i32>().ok()
-    }
+    parse_imm_i32(s)
 }
 
 // ===== ARM (AArch32) register parsing and encoding =====
@@ -894,10 +922,7 @@ pub fn encode_arm(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
 
         // SVC / SWI
         "svc" | "swi" => {
-            let imm = operands
-                .first()
-                .and_then(|s| s.trim_start_matches('#').parse::<u32>().ok())
-                .unwrap_or(0);
+            let imm = opt_imm(operands, 0, 0)?;
             let insn: u32 = 0xef000000 | (imm & 0x00ffffff);
             Some(insn.to_le_bytes().to_vec())
         },
@@ -966,13 +991,7 @@ pub fn parse_mips_reg(name: &str) -> Option<u8> {
 }
 
 fn parse_mips_imm(s: &str) -> Option<i32> {
-    let s = s.trim();
-    let s = s.trim_start_matches('#');
-    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        i32::from_str_radix(hex, 16).ok()
-    } else {
-        s.parse::<i32>().ok()
-    }
+    parse_imm_i32(s)
 }
 
 /// Encode MIPS instruction (works for both MIPS32 and MIPS64).
@@ -991,11 +1010,8 @@ pub fn encode_mips(mnemonic: &str, operands: &[String], is_64bit: bool) -> Optio
 
         // SYNC
         "sync" => {
-            // SYNC stype (default 0)
-            let stype = operands
-                .first()
-                .and_then(|s| parse_mips_imm(s))
-                .unwrap_or(0) as u32;
+            // SYNC stype (缺省 0)
+            let stype = opt_mips_imm(operands, 0, 0)? as u32;
             let insn: u32 = (stype & 0x1f) << 6 | 0x0f;
             Some(insn.to_be_bytes().to_vec())
         },
@@ -1080,84 +1096,222 @@ pub fn encode_mips(mnemonic: &str, operands: &[String], is_64bit: bool) -> Optio
 
         // BREAK
         "break" => {
-            let code = operands
-                .first()
-                .and_then(|s| parse_mips_imm(s))
-                .unwrap_or(0) as u32;
+            let code = opt_mips_imm(operands, 0, 0)? as u32;
             let insn: u32 = (code << 6) | 0x0d;
             Some(insn.to_be_bytes().to_vec())
         },
 
         // SYSCALL
         "syscall" => {
-            let code = operands
-                .first()
-                .and_then(|s| parse_mips_imm(s))
-                .unwrap_or(0) as u32;
+            let code = opt_mips_imm(operands, 0, 0)? as u32;
             let insn: u32 = (code << 6) | 0x0c;
             Some(insn.to_be_bytes().to_vec())
         },
 
-        // CACHE / PREF (hint instructions, encode with operands)
-        "cache" | "pref" => {
-            // These need immediate + base register, complex encoding
-            // Fall through to NOP for now
-            Some([0u8; 4].to_vec())
-        },
+        // CACHE / PREF: 不做静默 NOP 兜底 (需要 op 立即数 + base 寄存器 +
+        // 可选索引的复合格式)。返回 None -> asm_source 标记为透传给 GAS。
 
         _ => None,
-    }
-}
-
-/// Encode a list of resolved asm lines into machine code bytes
-/// for the given architecture. Returns Ok(encoded_bytes) on success,
-/// or Err(unrecognized_mnemonics) if any instruction is not supported.
-/// P0-5: unrecognized instructions are hard errors, not NOP fallbacks.
-pub fn encode_asm_lines_for_arch(
-    lines: &[String],
-    arch: &str,
-    is_64bit: bool,
-) -> Result<Vec<u8>, Vec<String>> {
-    let mut bytes = Vec::new();
-    let mut unrecognized = Vec::new();
-
-    for line in lines {
-        if let Some((mnemonic, operands)) = parse_instruction(line) {
-            let encoded = match arch {
-                "aarch64" => encode_aarch64(&mnemonic, &operands),
-                "riscv64" => encode_riscv64(&mnemonic, &operands),
-                "arm" => encode_arm(&mnemonic, &operands),
-                "mips" | "mips64" => encode_mips(&mnemonic, &operands, is_64bit),
-                _ => None,
-            };
-            match encoded {
-                Some(mut b) => bytes.append(&mut b),
-                None => {
-                    unrecognized.push(format!(
-                        "{}:{}",
-                        mnemonic,
-                        if operands.is_empty() {
-                            String::new()
-                        } else {
-                            operands.join(", ")
-                        }
-                    ));
-                },
-            }
-        }
-        // Directives and labels are silently skipped
-    }
-
-    if unrecognized.is_empty() {
-        Ok(bytes)
-    } else {
-        Err(unrecognized)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ===== 编码行为差分冻结基线 =====================================
+    //
+    // mini_asm 的 4 条 match 链即将被改造成「双向编码表」(供 -c 出字节与
+    // -S 出文本共用同一份 ISA 知识)。为了让这次改造可证而不是可信,
+    // 先用改造前的实现把「哪些输入能编码出什么字节」穷举枚举并冻结成
+    // tests/fixtures/asm/mini_asm_encode_freeze.txt; 改造后逐字节比对,
+    // 要求 diff = 0 (backend_refactor_plan.md §3.1「行为 diff = 失败」)。
+    //
+    // 重新生成: cargo test --lib encode_freeze -- --ignored
+
+    /// 各 ISA 的候选助记符 (含已移除的静默 NOP 项, 以钉住它们确实不再产字节)。
+    fn freeze_candidates(isa: &str) -> (&'static [&'static str], &'static [&'static str]) {
+        match isa {
+            "aarch64" => (
+                &[
+                    "add", "blr", "br", "cache", "clrex", "dbg", "dmb", "dsb", "fadd", "fmul",
+                    "fsub", "isb", "ld", "ld1", "ld1w", "mov", "movz", "mrs", "msr", "mul", "nop",
+                    "pref", "ptrue", "ret", "sev", "sevl", "st", "st1", "st1w", "sub", "svc",
+                    "wfe", "wfi", "whilelt", "yield",
+                ],
+                &[
+                    "x0", "x1", "x2", "x3", "x30", "sp", "xzr", "lr", "w0", "w1", "w15", "wzr",
+                    "s0", "s1", "d0", "d1", "v0", "v1", "v0.2d", "v1.2d", "v0.16b", "v0.4s",
+                    "z0", "z1", "p0", "p1", "p0.d", "#0", "#1", "#8", "#0xff", "#0x1ff", "#-1",
+                    "0", "8", "0xff", "ish", "ishld", "ishst", "osh", "oshld", "oshst", "sy",
+                    "[x0]", "[x0, #8]", "[sp, #16]", "[x1, x2]",
+                ],
+            ),
+            "riscv64" => (
+                &[
+                    "add", "addi", "cache", "ebreak", "ecall", "fence", "fence.i", "msr", "nop",
+                    "pause", "ret", "sfence.vma", "sub", "wfi",
+                ],
+                &[
+                    "x0", "x1", "x2", "x10", "x15", "zero", "ra", "sp", "gp", "tp", "t0", "t6",
+                    "a0", "a7", "s0", "0", "1", "8", "-1", "0x7ff", "-2048", "1111", "rw",
+                    "rw,w", "iorw", "ow",
+                ],
+            ),
+            "arm" => (
+                &[
+                    "add", "bx", "clrex", "dmb", "dsb", "isb", "ld", "mov", "msr", "nop", "sev",
+                    "sevl", "st", "sub", "svc", "swi", "wfe", "wfi", "yield",
+                ],
+                &[
+                    "r0", "r1", "r2", "r3", "r12", "r14", "r15", "sp", "fp", "ip", "lr", "pc",
+                    "a0", "a1", "t0", "t3", "s0", "s1", "#0", "#1", "#8", "#0xff", "0", "8",
+                    "0xff", "ish", "ishld", "ishst", "osh", "sy", "cc", "eq", "ne",
+                ],
+            ),
+            "mips" => (
+                &[
+                    "add", "addu", "break", "cache", "daddu", "jalr", "jr", "move", "nop", "pref",
+                    "ssnop", "sub", "subu", "sync", "syscall",
+                ],
+                &[
+                    "$0", "$1", "$2", "$4", "$8", "$29", "$31", "zero", "at", "v0", "a0", "t0",
+                    "t9", "sp", "ra", "0", "1", "8", "64", "0x40", "$0x7",
+                ],
+            ),
+            _ => (&[], &[]),
+        }
+    }
+
+    /// 穷举枚举操作数组合, 只保留能成功编码的输入 (即真正的行为面)。
+    /// 确定性: 无 HashMap 迭代, 结果排序后输出。
+    fn freeze_rows(isa: &str, is_64bit: bool) -> Vec<String> {
+        let (mnemonics, pool) = freeze_candidates(isa);
+        let encode = |m: &str, ops: &[String]| -> Option<Vec<u8>> {
+            match isa {
+                "aarch64" => encode_aarch64(m, ops),
+                "riscv64" => encode_riscv64(m, ops),
+                "arm" => encode_arm(m, ops),
+                "mips" => encode_mips(m, ops, is_64bit),
+                _ => None,
+            }
+        };
+        let mut rows: Vec<String> = Vec::new();
+        for m in mnemonics {
+            for arity in 0..=4usize {
+                // arity 越高池子越小, 避免组合爆炸同时覆盖主要形态
+                let n = match arity {
+                    0 | 1 | 2 => pool.len(),
+                    3 => pool.len().min(20),
+                    _ => pool.len().min(6),
+                };
+                // odometer 枚举 arity 个操作数的全部组合
+                let mut idx: Vec<Vec<usize>> = Vec::new();
+                if arity == 0 {
+                    idx.push(Vec::new());
+                } else {
+                    let mut combo = vec![0usize; arity];
+                    loop {
+                        idx.push(combo.clone());
+                        let mut car = true;
+                        for slot in combo.iter_mut().rev() {
+                            let v = *slot + 1;
+                            if v >= n {
+                                *slot = 0;
+                            } else {
+                                *slot = v;
+                                car = false;
+                                break;
+                            }
+                        }
+                        if car {
+                            break;
+                        }
+                    }
+                }
+                for pick in idx {
+                    let ops: Vec<String> = pick.iter().map(|&i| pool[i].to_string()).collect();
+                    if let Some(bytes) = encode(m, &ops) {
+                        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                        rows.push(format!("{isa}|{m}|{} => {hex}", ops.join("|")));
+                    }
+                }
+            }
+        }
+        rows.sort();
+        rows.dedup();
+        rows
+    }
+
+    /// FNV-1a 64bit: 无依赖的确定摘要, 用于把完整语料压缩成可入库的基线。
+    fn fnv1a64(s: &str) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in s.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x1000_0000_01b3);
+        }
+        h
+    }
+
+    /// 冻结报告 = 逐 ISA 的行数+摘要 (精确钉住行为) + 等距抽样行 (可诊断)。
+    /// 全量语料达百 MB 且高度冗余, 不入库; 摘要失配时跑 regen 看 diff。
+    fn freeze_report() -> String {
+        let mut out = String::new();
+        out.push_str("# mini_asm 编码行为冻结基线 (双向表改造的差分对照)\n");
+        out.push_str("# 重新生成: cargo test --lib encode_freeze -- --ignored\n");
+        out.push_str("# DIGEST 行钉住「全部可编码输入 -> 字节」的完整行为; SAMPLE 行为等距抽样, 供人工定位。\n");
+        // 每个 ISA 只算一次: (标签, mini_asm 架构键, is_64bit)
+        let sets = [
+            ("aarch64", "aarch64", false),
+            ("riscv64", "riscv64", false),
+            ("arm", "arm", false),
+            ("mips32", "mips", false),
+            ("mips64", "mips", true),
+        ];
+        let mut all: Vec<String> = Vec::new();
+        for (label, key, is64) in sets {
+            let rows = freeze_rows(key, is64);
+            let joined = rows.join("\n");
+            out.push_str(&format!(
+                "DIGEST {label} rows={} bytes={} fnv1a64={:016x}\n",
+                rows.len(),
+                joined.len(),
+                fnv1a64(&joined)
+            ));
+            all.extend(rows);
+        }
+        let stride = (all.len() / 240).max(1);
+        out.push_str("# SAMPLE\n");
+        for (i, r) in all.iter().enumerate() {
+            if i % stride == 0 {
+                out.push_str(r);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// 钉住改造前后的编码行为完全一致 (行数 + 逐字节摘要)。
+    #[test]
+    fn encode_freeze_is_byte_identical() {
+        let golden = include_str!("../../../tests/fixtures/asm/mini_asm_encode_freeze.txt");
+        let got = freeze_report();
+        assert_eq!(
+            got,
+            golden,
+            "mini_asm 编码行为与冻结基线不一致; 若为有意变更, 跑 --ignored regen 并审阅 diff",
+        );
+    }
+
+    /// 维护入口: 显式重新生成冻结基线。只有在**有意**改变编码行为时才运行,
+    /// 随后必须人工审阅 diff。
+    #[test]
+    #[ignore = "regenerates the golden freeze baseline; run deliberately"]
+    fn regenerate_encode_freeze() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/asm/mini_asm_encode_freeze.txt");
+        std::fs::write(path, freeze_report()).unwrap();
+    }
 
     #[test]
     fn test_parse_aarch64_regs() {
@@ -1166,6 +1320,67 @@ mod tests {
         assert_eq!(parse_aarch64_reg("sp"), Some((31, true)));
         assert_eq!(parse_aarch64_reg("lr"), Some((30, true)));
         assert_eq!(parse_aarch64_reg("xzr"), Some((31, true)));
+    }
+
+    // ===== 操作数严格语义: 解析不出不得默认成寄存器 0 ==============
+
+    fn ops(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `blr xN` 曾被静默编成 `blr x0` —— 最难查的一类 silent miscompile。
+    #[test]
+    fn aarch64_unparseable_mandatory_operand_is_rejected_not_zeroed() {
+        // 正面: 真实寄存器必须被编码到对应位域
+        let x9 = encode_aarch64("blr", &ops(&["x9"])).unwrap();
+        let x0 = encode_aarch64("blr", &ops(&["x0"])).unwrap();
+        assert_ne!(x9, x0, "blr 的目标寄存器必须影响编码");
+        // 反面: 非法/缺失操作数一律 None, 绝不等于 x0 的编码
+        assert_eq!(encode_aarch64("blr", &ops(&["garbage"])), None);
+        assert_eq!(encode_aarch64("blr", &ops(&[])), None);
+        assert_eq!(encode_aarch64("br", &ops(&["[x1]"])), None);
+        assert_eq!(encode_aarch64("svc", &ops(&["#notanum"])), None);
+    }
+
+    /// 带括号基址的 SVE/NEON 形式曾被默默当成 x0 + v0。
+    #[test]
+    fn aarch64_vector_forms_do_not_silently_default_bases_and_lanes() {
+        // operands[1] 不是裸寄存器 -> 不能默默用 x0
+        assert_eq!(encode_aarch64("ld1w", &ops(&["z0.s", "[x3]"])), None);
+        assert_eq!(encode_aarch64("st1w", &ops(&["z0.s", "[x3]"])), None);
+        // 逐元素宽度不一致的混合操作数不能当作 v0
+        assert_eq!(encode_aarch64("fadd", &ops(&["v0.2s", "x1", "x2"])), None);
+        assert_eq!(encode_aarch64("add", &ops(&["v0.16b", "garbage", "v2.16b"])), None);
+        assert_eq!(encode_aarch64("whilelt", &ops(&["p0.d", "[x1]", "x2"])), None);
+        // 合法形式仍必须成功
+        assert!(encode_aarch64("ld1w", &ops(&["z0.s", "x3"])).is_some());
+        assert!(encode_aarch64("fadd", &ops(&["v0.2s", "v1.2s", "v2.2s"])).is_some());
+    }
+
+    /// 可省略操作数: 缺省合法, 但给了就必须合法。
+    #[test]
+    fn optional_operands_default_only_when_absent() {
+        // sfence.vma 不带操作数 = 刷全部, 合法
+        assert!(encode_riscv64("sfence.vma", &ops(&[])).is_some());
+        // 带了非法操作数不得默默当成 zero
+        assert_eq!(encode_riscv64("sfence.vma", &ops(&["garbage"])), None);
+        let a = encode_riscv64("sfence.vma", &ops(&[])).unwrap();
+        let b = encode_riscv64("sfence.vma", &ops(&["a0"])).unwrap();
+        assert_ne!(a, b, "给出 rs1 必须反映到编码里");
+        // mips sync stype
+        assert!(encode_mips("sync", &ops(&[]), false).is_some());
+        assert_eq!(encode_mips("sync", &ops(&["garbage"]), false), None);
+    }
+
+    /// GAS 两种立即数写法 (`#0x..` 与十进制) 都得支持, 之前只支持十进制。
+    #[test]
+    fn hex_and_decimal_immediates_both_encode() {
+        assert_eq!(
+            encode_aarch64("movz", &ops(&["x0", "#0x1ff"])),
+            encode_aarch64("movz", &ops(&["x0", "#511"]))
+        );
+        assert!(encode_aarch64("svc", &ops(&["#0x10"])).is_some());
+        assert!(encode_arm("svc", &ops(&["#0x123456"])).is_some());
     }
 
     #[test]
@@ -1240,67 +1455,6 @@ mod tests {
     fn test_encode_mips_sync() {
         let bytes = encode_mips("sync", &[], false).unwrap();
         assert_eq!(bytes, vec![0x00, 0x00, 0x00, 0x0f]);
-    }
-
-    #[test]
-    fn test_parse_instruction() {
-        assert_eq!(parse_instruction("nop"), Some(("nop".to_string(), vec![])));
-        assert_eq!(
-            parse_instruction("dmb ish"),
-            Some(("dmb".to_string(), vec!["ish".to_string()]))
-        );
-        assert_eq!(
-            parse_instruction("mov w0, w1"),
-            Some(("mov".to_string(), vec!["w0".to_string(), "w1".to_string()]))
-        );
-        assert_eq!(parse_instruction(".globl foo"), None);
-        assert_eq!(parse_instruction("label:"), None);
-    }
-
-    #[test]
-    fn test_encode_asm_lines_ok() {
-        let lines = vec!["nop".to_string(), "nop".to_string()];
-        let result = encode_asm_lines_for_arch(&lines, "aarch64", false);
-        assert!(result.is_ok());
-        let bytes = result.unwrap();
-        // Two AArch64 NOPs = 8 bytes
-        assert_eq!(bytes.len(), 8);
-    }
-
-    #[test]
-    fn test_encode_asm_lines_unrecognized_is_error() {
-        // P0-5: unrecognized instructions must produce Err, not NOP
-        let lines = vec![
-            "nop".to_string(),
-            "xyzzy_invalid".to_string(),
-            "nop".to_string(),
-        ];
-        let result = encode_asm_lines_for_arch(&lines, "aarch64", false);
-        assert!(result.is_err());
-        let unrecognized = result.unwrap_err();
-        assert_eq!(unrecognized.len(), 1);
-        assert!(unrecognized[0].starts_with("xyzzy_invalid"));
-    }
-
-    #[test]
-    fn test_encode_asm_lines_riscv_unrecognized() {
-        let lines = vec!["unknown_riscv_insn".to_string()];
-        let result = encode_asm_lines_for_arch(&lines, "riscv64", true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_encode_asm_lines_arm_unrecognized() {
-        let lines = vec!["bad_arm_insn".to_string()];
-        let result = encode_asm_lines_for_arch(&lines, "arm", false);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_encode_asm_lines_mips_unrecognized() {
-        let lines = vec!["bad_mips_insn".to_string()];
-        let result = encode_asm_lines_for_arch(&lines, "mips", false);
-        assert!(result.is_err());
     }
 
     // ===== NEON SIMD tests =====

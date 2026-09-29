@@ -7,6 +7,7 @@ use crate::codegen::shared::backend::{
 };
 use crate::codegen::shared::features::FeatureSet;
 use crate::diagnostics::Diagnostic;
+use crate::ir::Module;
 
 use super::codegen::ArmCodegen;
 
@@ -21,7 +22,6 @@ impl Backend for ArmCodegen {
 
     fn compile(&mut self, input: &CompileInput<'_>) -> Result<CommonImage, Vec<Diagnostic>> {
         self.set_source_name(&input.opts.source_name);
-        self.set_asm_text_mode(input.opts.emit_asm);
         self.compile(input.module);
         build_aux_sections(self, input);
         Ok(CommonImage {
@@ -60,17 +60,23 @@ impl Backend for ArmCodegen {
                 .iter()
                 .map(|(k, v)| (k.clone(), *v))
                 .collect(),
+            asm_passthrough: self.asm_passthrough.clone(),
+            asm_passthrough_regions: self.asm_passthrough_regions.clone(),
         })
     }
 
     fn render_asm(&mut self, input: &CompileInput<'_>) -> Result<Vec<u8>, Vec<Diagnostic>> {
+        // -S 与 -c 共用同一次 codegen 运行, 仅渲染器不同。
         self.set_source_name(&input.opts.source_name);
-        self.set_asm_text_mode(true);
         self.compile(input.module);
+        self.render_asm_from_state(input.module)
+    }
+
+    fn render_asm_from_state(&mut self, module: &Module) -> Result<Vec<u8>, Vec<Diagnostic>> {
         if crate::codegen::has_fatal_diagnostics(&self.diagnostics) {
             return Err(self.diagnostics.clone());
         }
-        Ok(self.build_asm_output(input.module).into_bytes())
+        Ok(self.build_asm_output(module).into_bytes())
     }
 
     fn build_object(&mut self) -> Result<Vec<u8>, Vec<Diagnostic>> {

@@ -39,8 +39,12 @@ pub struct ArmCodegen {
     pub(crate) raw_global_asm_lines: Vec<String>,
     /// 函数级内联 asm 原始文本行: (函数名, 行列表)
     pub(crate) raw_func_asm_lines: Vec<(String, Vec<String>)>,
-    /// -S 模式标志: true 时保留 asm 文本输出, false 时编码机器码
-    pub(crate) asm_text_mode: bool,
+    /// dcc 编不出、必须透传给 GAS 的行记录 (TU 级降级判据, 由 asm_source 产出)。
+    /// 注意: 这里只记事实, 不在本后端报错也不降级。
+    pub(crate) asm_passthrough:
+        Vec<crate::codegen::shared::asm_source::AsmPassthroughRecord>,
+    /// 透传语句在 .text 内的起点与其 GAS 行 (降级时按位插入文本)。
+    pub(crate) asm_passthrough_regions: Vec<(u64, Vec<String>)>,
     /// exec 模式入口地址
     pub(crate) entry: u64,
     /// exec 模式 _start 中 BL main 的指令位置
@@ -59,7 +63,7 @@ pub struct ArmCodegen {
     pub(crate) canary_slot_off: i32,
     /// -mrecord-mcount: ftrace call site positions for __mcount_loc section
     pub(crate) mcount_loc_entries: Vec<(u64, String)>,
-    /// 编译诊断 (未识别内联汇编指令等)
+    /// 编译诊断
     pub(crate) diagnostics: Vec<crate::diagnostics::Diagnostic>,
     pub(crate) _target: Target,
 }

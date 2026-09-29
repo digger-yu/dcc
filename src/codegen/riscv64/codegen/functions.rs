@@ -202,13 +202,8 @@ impl Riscv64Codegen {
 
     /// naked 函数中发射单条 asm 文本行 (asm goto 用)
     pub(crate) fn emit_asm_line_naked(&mut self, line: &str, span: &crate::diagnostics::Span) {
-        if self.asm_text_mode {
-            self.raw_func_asm_lines
-                .push((format!("__naked_{}", self.label_serial), vec![line.to_string()]));
-            self.label_serial += 1;
-        } else {
-            self.encode_and_emit_asm(line, &span.file, span.line);
-        }
+        // 与内联 asm 走同一个单一真源入口: 文本与字节同次产出。
+        self.encode_and_emit_asm(line, &span.file, span.line);
     }
 
     pub(crate) fn plan_locals(&mut self, ast: Option<&FuncDecl>) {

@@ -6,6 +6,7 @@
 pub mod abi; // Architecture-independent ABI handling
 pub mod asm; // Assembly emission utilities
 pub mod asm_constraints; // Cross-ISA inline asm constraint parsing
+pub mod asm_source; // 内联汇编源行的单一真源 (解析/分类/编码/透传判据)
 pub mod backend; // Backend trait definition
 pub mod control_flow; // Control flow: jumps, labels, basic blocks
 pub mod elf; // ELF object file generation

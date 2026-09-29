@@ -197,18 +197,8 @@ impl ArmCodegen {
                     input_names,
                     &label_pairs,
                 );
-                if self.asm_text_mode {
-                    eprintln!("{}:{}: warning: asm goto on non-x86_64 target: inline asm text preserved in -S output only", span.file, span.line);
-                    let lines: Vec<String> = resolved
-                        .split('\n')
-                        .map(|l| l.trim().to_string())
-                        .filter(|l| !l.is_empty())
-                        .collect();
-                    self.raw_func_asm_lines
-                        .push((self.source_name.clone(), lines));
-                } else {
-                    self.encode_and_emit_asm(&resolved, &span.file, span.line);
-                }
+                // 文本与机器码出自同一次解析 (详见 asm_source::record_asm_stmt)。
+                self.encode_and_emit_asm(&resolved, &span.file, span.line);
             },
             _ => {},
         }

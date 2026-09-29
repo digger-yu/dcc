@@ -259,6 +259,12 @@ pub struct Codegen {
     pub asm_insn_debug_entries: Vec<(u64, u32, u16)>,
     // --- AsmEvent structured logging for -S output ---
     pub asm_events: Vec<crate::codegen::asm_event::AsmEvent>,
+    /// dcc 编不出、必须透传给 GAS 的内联汇编行 (TU 级降级判据的唯一真源)。
+    pub asm_passthrough: Vec<crate::codegen::shared::asm_source::AsmPassthroughRecord>,
+    /// 透传语句在 .text 内的起点与其原始行 (降级文本按位置插入)。
+    pub asm_passthrough_regions: Vec<(u64, Vec<String>)>,
+    /// 当前 asm 行被本后端编码器拒收的标记 (由 `emit_asm_line` 消费)。
+    pub asm_line_rejected: bool,
     pub rodata_string_init_globals: Vec<String>,
     pub rodata_string_slots: Vec<u64>,
     pub pending_data_rodata_rels: Vec<(u64, u64, Option<usize>)>,
@@ -626,6 +632,9 @@ impl Codegen {
             asm_insn_debug_entries: Vec::new(),
             // --- AsmEvent structured logging ---
             asm_events: Vec::new(),
+            asm_passthrough: Vec::new(),
+            asm_passthrough_regions: Vec::new(),
+            asm_line_rejected: false,
             current_asm_line: 0,
             current_asm_src_line: 0,
             diagnostics: Vec::new(),

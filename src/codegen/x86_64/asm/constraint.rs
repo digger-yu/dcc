@@ -3,6 +3,7 @@
 #![allow(clippy::all)]
 #![allow(unused_imports)]
 use crate::ast::*;
+use crate::codegen::shared::asm_source::AsmPassthroughRecord;
 use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
@@ -261,7 +262,7 @@ impl Codegen {
             is_push_imm: false,
         });
     }
-    fn asm_src_pos(&self) -> (String, u32) {
+    pub(crate) fn asm_src_pos(&self) -> (String, u32) {
         let line = self.current_asm_src_line;
         if line == 0 || self.line_map.is_empty() {
             return (self.source_name.clone(), line);
@@ -296,12 +297,23 @@ impl Codegen {
             .trim_matches('"')
             .to_string()
     }
-    pub(crate) fn asm_warn(&mut self, msg: &str) {
+    /// 内联汇编某一行的编码被本后端拒收。
+    ///
+    /// 旧实现叫 `asm_warn` 但实际 push 的是 `E0311` Error, 把“这个缺陷意味着
+    /// 什么”的判定留在最底层。现在只记事实: 诊断由
+    /// `asm_source::passthrough_diagnostics` 统一生成, 是否降级由
+    /// `codegen::emit()` 根据 `--asm-fallback` 统一决定。
+    pub(crate) fn asm_reject(&mut self, msg: &str) {
         let (file, line) = self.asm_src_pos();
-        let span = Span::point(&file, line, 1);
-        let mut diag = Diagnostic::err("E0311", msg, span);
-        diag.hint = Some("fix the mini-asm mnemonic or operand pattern".to_string());
-        self.diagnostics.push(diag);
+        let ordinal = self.current_asm_line;
+        crate::codegen::shared::asm_source::note_backend_reject(
+            self,
+            crate::codegen::shared::asm_source::AsmIsa::X86_64,
+            msg,
+            ordinal,
+            &file,
+            line,
+        );
     }
     pub(crate) fn asm_xmm_name(idx: usize) -> &'static str {
         const NAMES: [&str; 16] = [
@@ -1013,5 +1025,25 @@ impl Codegen {
             }
         }
         expr.to_string()
+    }
+}
+
+// asm_source 的数据容器接入 (x86_64 只实现基础面)。
+//
+// x86_64 的 -S 文本由反汇编自己刚编码的字节得到, 不保存用户 asm 原文容器,
+// 因此只实现 AsmOutcomeSink 而不实现 AsmStmtSink —— 能力差异留在类型上,
+// 不用空实现掩盖。
+impl crate::codegen::shared::asm_source::AsmOutcomeSink for Codegen {
+    fn pc(&self) -> u64 {
+        self.code.len() as u64
+    }
+    fn push_code(&mut self, bytes: &[u8]) {
+        self.code.extend_from_slice(bytes);
+    }
+    fn save_passthrough_region(&mut self, pc: u64, lines: Vec<String>) {
+        self.asm_passthrough_regions.push((pc, lines));
+    }
+    fn add_passthrough_records(&mut self, recs: Vec<AsmPassthroughRecord>) {
+        self.asm_passthrough.extend(recs);
     }
 }

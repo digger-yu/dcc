@@ -86,7 +86,13 @@ impl Aarch64Codegen {
                 self.emitted_return = true;
             },
             Stmt::Expr { e, .. } => {
-                if let Some(expr) = ir.expressions.first() {
+                // 内联汇编在 IR 里没有对应形态 (它不是求值节点)。若只看
+                // `ir.expressions`, 语句位置的 asm 会被整条丢掉 —— naked 路径
+                // 不走 IR 所以侥幸正确。这里按 AST 形态显式分流,
+                // 保证 `__asm__` 在任何函数形态下都真的落地。
+                if matches!(e, Expr::AsmExpr { .. }) {
+                    self.gen_expr_from_ast(e);
+                } else if let Some(expr) = ir.expressions.first() {
                     let _ = self.gen_expr(expr);
                 } else {
                     self.gen_expr_from_ast(e);
@@ -236,30 +242,8 @@ impl Aarch64Codegen {
                     input_names,
                     &label_pairs,
                 );
-                if self.asm_text_mode {
-                    let func_name = self.source_name.clone();
-                    let entry = self
-                        .raw_func_asm_lines
-                        .last_mut()
-                        .filter(|(n, _)| n == &func_name);
-                    if let Some((_, lines)) = entry {
-                        for line in resolved.split('\n') {
-                            let t = line.trim();
-                            if !t.is_empty() {
-                                lines.push(t.to_string());
-                            }
-                        }
-                    } else {
-                        let lines = resolved
-                            .split('\n')
-                            .map(|l| l.trim().to_string())
-                            .filter(|l| !l.is_empty())
-                            .collect();
-                        self.raw_func_asm_lines.push((func_name, lines));
-                    }
-                } else {
-                    self.encode_and_emit_asm(&resolved, &span.file, span.line);
-                }
+                // 文本与机器码出自同一次解析 (详见 asm_source::record_asm_stmt)。
+                self.encode_and_emit_asm(&resolved, &span.file, span.line);
                 // Writeback output registers to C variables
                 for (i, op) in resolved_operands.iter().enumerate() {
                     if op.is_output && i < outputs.len() {

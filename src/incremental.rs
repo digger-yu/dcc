@@ -317,6 +317,7 @@ mod tests {
             relocatable: true,
             link_mode: false,
             emit_asm: false,
+            asm_fallback: crate::cli::AsmFallback::default(),
             preprocess_only: false,
             dump_macros: false,
             force_includes: vec![],

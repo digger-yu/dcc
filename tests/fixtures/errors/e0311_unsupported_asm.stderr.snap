@@ -1,3 +1,3 @@
-error[E0311]: unsupported inline asm instruction 'xyzzy_invalid_insn' (asm line 1)
+error[E0311]: unsupported inline asm instruction on x86_64 target: 'xyzzy_invalid_insn %rax' (not encodable by dcc)
   --> <file>:5:1
-  hint: fix the mini-asm mnemonic or operand pattern
+  hint: enable --asm-fallback=gas to emit this TU as GAS text and let the assembler encode these instructions, or add the mnemonics to dcc's instruction table

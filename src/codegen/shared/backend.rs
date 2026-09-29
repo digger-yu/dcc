@@ -1,7 +1,8 @@
 // src/codegen/backend.rs - 统一 Backend trait 契约
 // First Principle: all architecture backends must implement the same interface
 
-use crate::cli::Arch;
+use crate::cli::{Arch, AsmFallback};
+use crate::codegen::shared::asm_source::AsmPassthroughRecord;
 use crate::codegen::shared::features::FeatureSet;
 use crate::diagnostics::Diagnostic;
 use crate::ir::Module;
@@ -16,6 +17,8 @@ pub struct EmitOptions<'a> {
     pub relocatable: bool,
     pub emit_asm: bool,
     pub source_name: String,
+    /// 内联汇编不可编码时的策略 (默认 Error; Gas = 整 TU 降级为 GAS 文本)
+    pub asm_fallback: AsmFallback,
 
     // Debug and diagnostics
     pub debug_level: u8,
@@ -59,6 +62,12 @@ pub struct CommonImage {
     pub extra_sections: Vec<ExtraSection>,
     pub diagnostics: Vec<Diagnostic>,
     pub func_sizes: BTreeMap<String, u64>,
+    /// dcc 编不出来、必须透传给 GAS 的内联汇编行。这是 TU 级降级判据的
+    /// **唯一**数据源 —— 不得再用扫 diagnostic 字符串的方式推断。
+    pub asm_passthrough: Vec<AsmPassthroughRecord>,
+    /// 透传语句在 .text 内的起点与其原始行: 降级成 GAS 文本时,
+    /// 这些行按位置插入到解码出的指令流中 (保证文本与字节的位置对应)。
+    pub asm_passthrough_regions: Vec<(u64, Vec<String>)>,
     // Additional fields as needed for debug/parallel results
 }
 
@@ -121,6 +130,18 @@ pub trait Backend {
     ///
     /// 返回汇编文本的 UTF-8 字节 (调用方直接 write_all)。
     fn render_asm(&mut self, input: &CompileInput<'_>) -> Result<Vec<u8>, Vec<Diagnostic>>;
+
+    /// 从**已经 `compile()` 完成的当前状态**渲染 GAS 文本, 不得重跑 codegen。
+    ///
+    /// 为什么需要这个方法: TU 级降级 (“这批字节里有编不出来的行, 整个 TU 改出
+    /// 文本”) 发生在 `compile()` 之后。若回头再调 `render_asm(input)`, 就是在已填满
+    /// 的缓冲上再跑一遍 codegen: 字节翻倍、符号重复、诊断累积, 且并行/串行策略
+    // 两轮回不一样 —— 恰好制造了本方案要消灭的“同一源码两次结果不同”。
+    ///
+    /// 一次分配、两处复用: 本方法与 `build_object()` 共同消费同一次 `compile()`
+    /// 的结果, 因此 `-c` 与降级 `-S` 的差异只可能出现在最终编码层, 不可能出现在
+    /// 操作数分配层。实现时必须与 `render_asm()` 共用同一个文本渲染器。
+    fn render_asm_from_state(&mut self, module: &Module) -> Result<Vec<u8>, Vec<Diagnostic>>;
 
     /// 将 `compile()` 生成的内部状态序列化为最终目标文件字节 (ELF .o / ET_EXEC)。
     ///

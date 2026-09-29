@@ -17,6 +17,7 @@ use crate::codegen::{build_dwarf_cu, debug_abs_reloc_type};
 use crate::codegen::{coff, shared::elf};
 use crate::debug;
 use crate::diagnostics::Diagnostic;
+use crate::ir::Module;
 
 impl Backend for Codegen {
     fn arch(&self) -> Arch {
@@ -76,6 +77,8 @@ impl Backend for Codegen {
                 .iter()
                 .map(|(k, v)| (k.clone(), *v))
                 .collect(),
+            asm_passthrough: self.asm_passthrough.clone(),
+            asm_passthrough_regions: self.asm_passthrough_regions.clone(),
         })
     }
 
@@ -84,7 +87,13 @@ impl Backend for Codegen {
         // 再输出汇编文本; 不构建 DWARF / ELF。
         apply_emit_options(self, input);
         self.compile_module(input.module);
-        Ok(self.build_asm_output(input.module.source()).into_bytes())
+        self.render_asm_from_state(input.module)
+    }
+
+    fn render_asm_from_state(&mut self, module: &Module) -> Result<Vec<u8>, Vec<Diagnostic>> {
+        // x86_64 的 -S 本就是“对自己刚编码的字节做反汇编渲染”, 天然与 -c 同源;
+        // 本方法只是把这个既有事实暴露给 TU 级降级路径, 避免重跑 codegen。
+        Ok(self.build_asm_output(module.source()).into_bytes())
     }
 
     fn build_object(&mut self) -> Result<Vec<u8>, Vec<Diagnostic>> {

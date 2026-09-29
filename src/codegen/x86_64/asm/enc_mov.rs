@@ -87,7 +87,7 @@ impl Codegen {
             let pos = self.pos() - 4;
             self.pending_data_rels.push((pos, sym.clone()));
         } else {
-            self.asm_warn("unsupported lea operand pattern");
+            self.asm_reject("unsupported lea operand pattern");
         }
     }
     fn emit_asm_load(
@@ -405,7 +405,7 @@ impl Codegen {
                 self.pending_data_rels.push((pos, sym.clone()));
             },
             _ => {
-                self.asm_warn("unsupported movbe operand pattern");
+                self.asm_reject("unsupported movbe operand pattern");
             },
         }
     }
@@ -777,7 +777,7 @@ impl Codegen {
                 }
             },
             _ => {
-                self.asm_warn("unsupported mov operand pattern");
+                self.asm_reject("unsupported mov operand pattern");
             },
         }
     }
@@ -834,7 +834,7 @@ impl Codegen {
             self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, opcode]);
             self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
         } else {
-            self.asm_warn("unsupported movnt operand pattern");
+            self.asm_reject("unsupported movnt operand pattern");
         }
     }
     pub(crate) fn emit_asm_movsx(
@@ -880,7 +880,7 @@ impl Codegen {
                     16 => self.emit(&[0x0F, 0xBF, Self::modrm_reg_reg(*d, *s)]),
                     32 => self.emit(&[0x63, Self::modrm_reg_reg(*d, *s)]),
                     _ => {
-                        self.asm_warn("unsupported movsx source size");
+                        self.asm_reject("unsupported movsx source size");
                     },
                 };
             },
@@ -946,7 +946,7 @@ impl Codegen {
                     }
                     self.emit(&(*v as i32).to_le_bytes());
                 } else {
-                    self.asm_warn("movsx $imm with unsupported size");
+                    self.asm_reject("movsx $imm with unsupported size");
                 }
             },
             (AsmOperand::SymDisp(sym, _), AsmOperand::Reg(d, _)) => {
@@ -969,7 +969,7 @@ impl Codegen {
                 self.pending_data_rels.push((pos, sym.clone()));
             },
             _ => {
-                self.asm_warn("unsupported movsx operand pattern");
+                self.asm_reject("unsupported movsx operand pattern");
             },
         }
     }
@@ -1010,7 +1010,7 @@ impl Codegen {
                     8 => self.emit(&[0x0F, 0xB6, Self::modrm_reg_reg(*d, *s)]),
                     16 => self.emit(&[0x0F, 0xB7, Self::modrm_reg_reg(*d, *s)]),
                     _ => {
-                        self.asm_warn("unsupported movzx source size");
+                        self.asm_reject("unsupported movzx source size");
                     },
                 };
             },
@@ -1037,7 +1037,7 @@ impl Codegen {
                         self.emit(&[0x41, 0xB0 + (d & 7), *v as u8]);
                     }
                 } else {
-                    self.asm_warn("movzx $imm only supports 8-bit source");
+                    self.asm_reject("movzx $imm only supports 8-bit source");
                 }
             },
             (AsmOperand::SymDisp(sym, _), AsmOperand::Reg(d, _)) => {
@@ -1050,7 +1050,7 @@ impl Codegen {
                 self.pending_data_rels.push((pos, sym.clone()));
             },
             _ => {
-                self.asm_warn("unsupported movzx operand pattern");
+                self.asm_reject("unsupported movzx operand pattern");
             },
         }
     }
@@ -1071,7 +1071,7 @@ impl Codegen {
                     4 => self.emit(&[0x0F, 0xA1]), // pop %fs
                     5 => self.emit(&[0x0F, 0xA9]), // pop %gs
                     _ => {
-                        self.asm_warn(&format!("pop: unknown segment {}", seg));
+                        self.asm_reject(&format!("pop: unknown segment {}", seg));
                     },
                 }
             },
@@ -1096,7 +1096,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(0, *disp, *base, *index, *scale);
             },
             _ => {
-                self.asm_warn("unsupported pop operand pattern");
+                self.asm_reject("unsupported pop operand pattern");
             },
         }
     }
@@ -1119,7 +1119,7 @@ impl Codegen {
                     4 => self.emit(&[0x0F, 0xA0]), // push %fs
                     5 => self.emit(&[0x0F, 0xA8]), // push %gs
                     _ => {
-                        self.asm_warn(&format!("push: unknown segment {}", seg));
+                        self.asm_reject(&format!("push: unknown segment {}", seg));
                     },
                 }
             },
@@ -1178,7 +1178,7 @@ impl Codegen {
                 self.pending_data_rels.push((pos, sym.clone()));
             },
             _ => {
-                self.asm_warn("unsupported push operand pattern");
+                self.asm_reject("unsupported push operand pattern");
             },
         }
     }
@@ -1294,7 +1294,7 @@ impl Codegen {
             let pos = self.pos() - 4;
             self.pending_data_rels.push((pos, sym.clone()));
         } else {
-            self.asm_warn("unsupported sys mem operand pattern");
+            self.asm_reject("unsupported sys mem operand pattern");
         }
         let _ = grp;
     }

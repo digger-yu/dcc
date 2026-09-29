@@ -272,7 +272,7 @@ impl Codegen {
             // XMM 寄存器约束
             if let Some(xmm_bits) = Self::asm_constraint_wants_xmm(raw) {
                 if !Self::asm_type_allows_xmm(&op.ty()) {
-                    self.asm_warn(
+                    self.asm_reject(
                         "inconsistent operand constraints in an 'asm': long double needs an x87 constraint (t/u/f)",
                     );
                     map.insert(format!("%{idx}"), String::new());
@@ -483,7 +483,7 @@ impl Codegen {
             // XMM
             if let Some(xmm_bits) = Self::asm_constraint_wants_xmm(raw) {
                 if !Self::asm_type_allows_xmm(&op.ty()) {
-                    self.asm_warn(
+                    self.asm_reject(
                         "inconsistent operand constraints in an 'asm': long double needs an x87 constraint (t/u/f)",
                     );
                     map.insert(format!("%{idx}"), String::new());
@@ -873,7 +873,7 @@ impl Codegen {
         }
     }
     pub(crate) fn warn_unresolved_asm_operand(&mut self, line: &str, asm_line: usize) {
-        self.asm_warn(&format!(
+        self.asm_reject(&format!(
             "unsupported inline asm operand pattern '{}' (asm line {})",
             line, asm_line
         ));

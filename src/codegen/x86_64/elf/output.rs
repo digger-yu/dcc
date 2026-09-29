@@ -199,16 +199,43 @@ impl Codegen {
                 if self.emit_cfi {
                     out.push_str("\t.cfi_startproc\n");
                 }
-                out.push_str(&disasm::disassemble_range(
-                    &layout.bytes,
-                    0,
-                    layout.bytes.len(),
-                    layout.text_start,
-                    &labels,
-                    &directives,
-                    &self.disasm_calls,
-                    &self.disasm_data,
-                ));
+                // 透传区域: 这些行 dcc 编不出来, 因此**没有字节**、只有文本。
+                // 它们必须按记录时的 pc 插回渲染流 —— 否则 `-c` 降级成 `-S` 后
+                // 会静默丢掉整条内联汇编 (正是本方案要消灭的缺陷)。
+                let mut regions: Vec<(usize, &Vec<String>)> = self
+                    .asm_passthrough_regions
+                    .iter()
+                    .filter_map(|(pc, lines)| {
+                        let off = (*pc).checked_sub(layout.text_start)? as usize;
+                        (off <= layout.bytes.len()).then_some((off, lines))
+                    })
+                    .collect();
+                regions.sort_by_key(|(off, _)| *off);
+                let dis = |from: usize, to: usize| {
+                    disasm::disassemble_range(
+                        &layout.bytes,
+                        from,
+                        to,
+                        layout.text_start,
+                        &labels,
+                        &directives,
+                        &self.disasm_calls,
+                        &self.disasm_data,
+                    )
+                };
+                let mut cursor = 0usize;
+                for (off, lines) in &regions {
+                    if *off > cursor {
+                        out.push_str(&dis(cursor, *off));
+                        cursor = *off;
+                    }
+                    for l in lines.iter() {
+                        out.push_str(&format!("\t{l}\n"));
+                    }
+                }
+                if cursor < layout.bytes.len() {
+                    out.push_str(&dis(cursor, layout.bytes.len()));
+                }
                 if self.emit_cfi {
                     out.push_str("\t.cfi_endproc\n");
                 }

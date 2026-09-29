@@ -1071,6 +1071,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     let opts = codegen::EmitOptions {
         relocatable: cfg.relocatable,
         emit_asm: cfg.emit_asm,
+        asm_fallback: cfg.asm_fallback,
         source_name: file_name.to_string(),
         debug_level: cfg.debug_level,
         dwarf_version: cfg.dwarf_version,
@@ -1085,47 +1086,14 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         verbose: cfg.verbose,
     };
 
-    let bytes = codegen::emit(&module, &target, opts)?;
-    if cfg.verbose {
-        eprintln!("dcc: size   = {} bytes", bytes.len());
-    }
-
-    let out = &cfg.output;
-    // -o -: 写 stdout (管道输出), 与 GCC 行为一致
-    if out.to_str() == Some("-") {
-        io::stdout().write_all(&bytes).map_err(|e| {
-            vec![Diagnostic::err(
-                "E0101",
-                format!("write error (stdout): {}", e),
-                crate::diagnostics::Span::point("", 0, 0),
-            )]
-        })?;
-    } else {
-        let mut f = fs::File::create(out).map_err(|e| {
-            vec![Diagnostic::err(
-                "E0101",
-                format!("cannot write {}: {}", out.display(), e),
-                crate::diagnostics::Span::point(&out.display().to_string(), 0, 0),
-            )]
-        })?;
-        f.write_all(&bytes).unwrap();
-        if !cfg.relocatable && !cfg.emit_asm {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut p = f.metadata().unwrap().permissions();
-                p.set_mode(0o755);
-                f.set_permissions(p).unwrap();
-            }
-        }
-        eprintln!("dcc: wrote {}", out.display());
-    }
+    let emitted = codegen::emit(&module, &target, opts)?;
+    let out = write_emit_output(&cfg.output, &emitted, cfg.emit_asm)?;
 
     // 自举回归对比: -c/--bootstrap-compare=<ref.o> 模式.
     // 编译结束后, 把当前 .o 与 ref.o 做三层对比 (byte / struct /
     // semantic). 仅做诊断打印, 不阻塞编译, 与 GCC -fcompare-debug 行为一致.
     if let Some(ref_path) = cfg.bootstrap_compare.as_ref() {
-        match crate::bootstrap::compare_files(ref_path, out) {
+        match crate::bootstrap::compare_files(ref_path, &out) {
             Ok(report) => {
                 eprintln!("dcc: bootstrap compare vs {}:", ref_path.display());
                 eprint!("{}", report.format());
@@ -2229,6 +2197,62 @@ fn write_module_interface(
     Ok(())
 }
 
+/// 把 codegen 产物落盘 —— 二进制与文本两种形态在此一处处理。
+///
+/// 必须在类型层区分而不能像旧代码那样只看 CLI 标志, 因为两个真实缺陷:
+///   1. 降级产出的 GAS 文本若写进 `.o`, 后续 host `ld`/`cc` 会把它当 ELF 读并
+///      报 bad ELF magic —— 所以输出名按**实际产物形态**改为同名 `.s`;
+///   2. 0755 只适用于真正产出可执行文件 —— 旧判据用 CLI 标志, 一降级就会给
+///      文本文件加执行位。
+/// 返回最终写入路径 (调用方的 bootstrap 对比需要它)。
+fn write_emit_output(
+    requested: &std::path::Path,
+    emitted: &crate::codegen::shared::asm_source::Emitted,
+    emit_asm: bool,
+) -> Result<std::path::PathBuf, Vec<Diagnostic>> {
+    use std::io::Write;
+    // 名字修正只针对“请求的是目标文件、实际发的是文本”这一组合;
+    // -S 本身就要文本, 不改名。
+    let out = if emitted.is_text() && !emit_asm {
+        requested.with_extension("s")
+    } else {
+        requested.to_path_buf()
+    };
+    let bytes = emitted.as_bytes();
+    if out.to_str() == Some("-") {
+        std::io::stdout()
+            .write_all(&bytes)
+            .map_err(|e| io_diag("write error (stdout)", &e.to_string()))?;
+        return Ok(out);
+    }
+    let mut f = fs::File::create(&out).map_err(|e| {
+        io_diag(&format!("cannot write {}", out.display()), &e.to_string())
+    })?;
+    f.write_all(&bytes).map_err(|e| {
+        io_diag(&format!("cannot write {}", out.display()), &e.to_string())
+    })?;
+    // 权限位按实际形态定: 文本永远不拿执行位。
+    if !emitted.is_text() && !emit_asm {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = f.metadata().unwrap().permissions();
+            p.set_mode(0o755);
+            f.set_permissions(p).unwrap();
+        }
+    }
+    eprintln!("dcc: wrote {}", out.display());
+    Ok(out)
+}
+
+fn io_diag(what: &str, detail: &str) -> Vec<Diagnostic> {
+    vec![Diagnostic::err(
+        "E0101",
+        format!("{what}: {detail}"),
+        crate::diagnostics::Span::point("", 0, 0),
+    )]
+}
+
 /// C++ 原生后端: 把 ast::Program 直接走 C 主流水线 (ir::lower → 优化 →
 /// codegen::emit → 写输出). 完整复用 run() 中的 target 构造、优化、
 /// codegen、输出写入、bootstrap compare、增量编译更新等逻辑, 确保 native
@@ -2240,7 +2264,6 @@ fn emit_native_program(
     line_map: Vec<LineSpan>,
 ) -> Result<(), Vec<Diagnostic>> {
     use crate::diagnostics::Severity;
-    use std::io::Write;
 
     let dcfg = diag_cfg(cfg);
 
@@ -2405,6 +2428,7 @@ fn emit_native_program(
     let opts = codegen::EmitOptions {
         relocatable: cfg.relocatable,
         emit_asm: cfg.emit_asm,
+        asm_fallback: cfg.asm_fallback,
         source_name: file_name.to_string(),
         debug_level: cfg.debug_level,
         dwarf_version: cfg.dwarf_version,
@@ -2419,46 +2443,12 @@ fn emit_native_program(
         verbose: cfg.verbose,
     };
 
-    let bytes = codegen::emit(&module, &target, opts)?;
-
-    if cfg.verbose {
-        eprintln!("dcc: size   = {} bytes", bytes.len());
-    }
-
-    // 写输出 (与 run() 完全一致: stdout / 文件 + 0755 权限)
-    let out = &cfg.output;
-    if out.to_str() == Some("-") {
-        std::io::stdout().write_all(&bytes).map_err(|e| {
-            vec![Diagnostic::err(
-                "E0101",
-                format!("write error (stdout): {}", e),
-                crate::diagnostics::Span::point("", 0, 0),
-            )]
-        })?;
-    } else {
-        let mut f = fs::File::create(out).map_err(|e| {
-            vec![Diagnostic::err(
-                "E0101",
-                format!("cannot write {}: {}", out.display(), e),
-                crate::diagnostics::Span::point(&out.display().to_string(), 0, 0),
-            )]
-        })?;
-        f.write_all(&bytes).unwrap();
-        if !cfg.relocatable && !cfg.emit_asm {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut p = f.metadata().unwrap().permissions();
-                p.set_mode(0o755);
-                f.set_permissions(p).unwrap();
-            }
-        }
-        eprintln!("dcc: wrote {}", out.display());
-    }
+    let emitted = codegen::emit(&module, &target, opts)?;
+    let out = write_emit_output(&cfg.output, &emitted, cfg.emit_asm)?;
 
     // 自举回归对比 (与 run() 一致)
     if let Some(ref_path) = cfg.bootstrap_compare.as_ref() {
-        match crate::bootstrap::compare_files(ref_path, out) {
+        match crate::bootstrap::compare_files(ref_path, &out) {
             Ok(report) => {
                 eprintln!("dcc: bootstrap compare vs {}:", ref_path.display());
                 eprint!("{}", report.format());

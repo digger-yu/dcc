@@ -28,10 +28,6 @@ impl Mips64Codegen {
         self.inner.set_source_name(name);
     }
 
-    pub fn set_asm_text_mode(&mut self, v: bool) {
-        self.inner.set_asm_text_mode(v);
-    }
-
     pub fn push_extra_section(&mut self, sec: crate::codegen::shared::elf::ElfSection) {
         self.inner.push_extra_section(sec);
     }
@@ -128,7 +124,6 @@ mod backend {
         }
         fn compile(&mut self, input: &CompileInput<'_>) -> Result<CommonImage, Vec<Diagnostic>> {
             self.set_source_name(&input.opts.source_name);
-            self.set_asm_text_mode(input.opts.emit_asm);
             self.compile(input.module);
             build_aux_sections(self, input);
             let inner = &self.inner;
@@ -168,16 +163,24 @@ mod backend {
                     .iter()
                     .map(|(k, v)| (k.clone(), *v))
                     .collect(),
+                asm_passthrough: inner.asm_passthrough.clone(),
+                asm_passthrough_regions: inner.asm_passthrough_regions.clone(),
             })
         }
         fn render_asm(&mut self, input: &CompileInput<'_>) -> Result<Vec<u8>, Vec<Diagnostic>> {
+            // -S 与 -c 共用同一次 codegen 运行, 仅渲染器不同。
             self.set_source_name(&input.opts.source_name);
-            self.set_asm_text_mode(true);
             self.compile(input.module);
+            self.render_asm_from_state(input.module)
+        }
+        fn render_asm_from_state(
+            &mut self,
+            module: &crate::ir::Module,
+        ) -> Result<Vec<u8>, Vec<Diagnostic>> {
             if crate::codegen::has_fatal_diagnostics(&self.inner.diagnostics) {
                 return Err(self.inner.diagnostics.clone());
             }
-            Ok(self.build_asm_output(input.module).into_bytes())
+            Ok(self.build_asm_output(module).into_bytes())
         }
         fn build_object(&mut self) -> Result<Vec<u8>, Vec<Diagnostic>> {
             Ok(self.build_output())

@@ -2,6 +2,7 @@
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
 use crate::ast::{Decl, Program};
+use crate::codegen::shared::asm_source::AsmPassthroughRecord;
 use crate::codegen::shared::elf::{
     self, ComdatGroup, ElfSection, ElfSym, SHF_ALLOC, SHF_GNU_RETAIN, SHT_PROGBITS, STB_GLOBAL,
     STB_LOCAL, STB_WEAK, STT_FUNC, STT_GNU_IFUNC, STT_OBJECT, STT_TLS,
@@ -62,7 +63,8 @@ impl Aarch64Codegen {
             tls_globals: HashMap::new(),
             raw_global_asm_lines: Vec::new(),
             raw_func_asm_lines: Vec::new(),
-            asm_text_mode: false,
+            asm_passthrough: Vec::new(),
+            asm_passthrough_regions: Vec::new(),
             diagnostics: Vec::new(),
             mcount_loc_entries: Vec::new(),
             _target: target,
@@ -74,10 +76,6 @@ impl Aarch64Codegen {
 
     pub(crate) fn set_source_name(&mut self, name: impl Into<String>) {
         self.source_name = name.into();
-    }
-
-    pub(crate) fn set_asm_text_mode(&mut self, v: bool) {
-        self.asm_text_mode = v;
     }
 
     /// 解析 GNU asm label: 如果 C 名有对应的 asm 标签则返回 asm 标签名，
@@ -110,31 +108,42 @@ impl Aarch64Codegen {
         }
     }
 
-    /// Encode resolved asm text into machine code and emit to code buffer.
-    /// Used in -c mode to produce actual machine code for inline asm.
-    /// P0-5: unrecognized instructions produce hard errors, not NOPs.
-    pub(crate) fn encode_and_emit_asm(&mut self, resolved: &str, span_file: &str, span_line: u32) {
-        let lines = crate::codegen::shared::mini_asm::parse_asm_lines(resolved);
-        match crate::codegen::shared::mini_asm::encode_asm_lines_for_arch(&lines, "aarch64", false)
-        {
-            Ok(bytes) => {
-                self.code.extend_from_slice(&bytes);
-            },
-            Err(unrecognized) => {
-                for mnem in &unrecognized {
-                    let span = crate::diagnostics::Span::point(span_file, span_line, 1);
-                    let mut diag = crate::diagnostics::Diagnostic::err(
-                        "E0311",
-                        format!("unsupported inline asm instruction '{}' on aarch64 target", mnem),
-                        span,
-                    );
-                    diag.hint = Some("add encoding support or use asm text mode (-S)".to_string());
-                    self.diagnostics.push(diag);
-                }
-            },
-        }
+    /// 处理一条已解析的 asm 语句 —— 薄壳。
+    ///
+    /// 策略、编码、透传判定全部在 `asm_source::record_asm_stmt` (全仓唯一实现);
+    /// 本后端只提供数据容器 (见下方 `AsmStmtSink` 实现)。旧版本在这里各自
+    /// 写了一份“能不能编、编不出怎么报告”的逻辑, 5 个后端 5 微妙不一致。
+    pub(crate) fn emit_asm_stmt(
+        &mut self,
+        key: &str,
+        resolved: &str,
+        span_file: &str,
+        span_line: u32,
+    ) {
+        crate::codegen::shared::asm_source::record_asm_stmt(
+            self,
+            crate::codegen::shared::asm_source::AsmIsa::AArch64,
+            key,
+            resolved,
+            span_file,
+            span_line,
+        );
     }
 
+    /// 兼容旧名: 无显式 key 的调用点 (naked / 单行)。
+    pub(crate) fn encode_and_emit_asm(
+        &mut self,
+        resolved: &str,
+        span_file: &str,
+        span_line: u32,
+    ) {
+        let key = format!("__inline_{}", self.label_serial);
+        self.label_serial += 1;
+        self.emit_asm_stmt(&key, resolved, span_file, span_line);
+    }
+}
+
+impl Aarch64Codegen {
     /// 启用/禁用 AArch64 MTE 硬件 tag (HWASAN 栈帧 tag 模式)。
     /// 由 `-fsanitize=hwaddress` 在 AArch64 目标上触发。
     pub(crate) fn set_mte_enabled(&mut self, on: bool) {
@@ -590,5 +599,29 @@ impl Aarch64Codegen {
                 self.patch_bcond(at, target, cond);
             }
         }
+    }
+}
+
+// asm_source 的数据容器接入: 本后端只负责存储, 不负责任何“能不能编、
+// 编不出怎么办”的判断 —— 那份策略全仓只有一份 (record_asm_stmt)。
+impl crate::codegen::shared::asm_source::AsmOutcomeSink for Aarch64Codegen {
+    fn pc(&self) -> u64 {
+        self.pos()
+    }
+    fn push_code(&mut self, bytes: &[u8]) {
+        self.code.extend_from_slice(bytes);
+    }
+    fn save_passthrough_region(&mut self, pc: u64, lines: Vec<String>) {
+        self.asm_passthrough_regions.push((pc, lines));
+    }
+    fn add_passthrough_records(&mut self, recs: Vec<AsmPassthroughRecord>) {
+        self.asm_passthrough.extend(recs);
+    }
+}
+
+// AsmStmtSink 的文本面: 本后端保存内联 asm 原文, 使 -S 与降级都有可信文本来源。
+impl crate::codegen::shared::asm_source::AsmStmtSink for Aarch64Codegen {
+    fn save_asm_text(&mut self, key: &str, lines: Vec<String>) {
+        self.raw_func_asm_lines.push((key.to_string(), lines));
     }
 }

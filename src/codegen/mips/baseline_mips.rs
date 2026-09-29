@@ -4,6 +4,7 @@ use crate::ast::{BinOp, BlockItem, Decl, Expr, FuncDecl, Program, Stmt, UnOp};
 use crate::codegen::shared::asm_constraints::{
     self, resolve_asm_operands, resolve_asm_template_enhanced, AsmArch,
 };
+use crate::codegen::shared::asm_source::AsmPassthroughRecord;
 use crate::codegen::shared::elf::{
     self, ElfRela, ElfSection, ElfSym, SHF_ALLOC, SHF_GNU_RETAIN, SHT_PROGBITS, STB_GLOBAL,
     STB_LOCAL, STB_WEAK, STT_FUNC, STT_GNU_IFUNC,
@@ -51,8 +52,12 @@ pub struct MipsCodegen {
     raw_global_asm_lines: Vec<String>,
     /// 函数级内联 asm 原始文本行: (函数名, 行列表)
     raw_func_asm_lines: Vec<(String, Vec<String>)>,
-    /// -S 模式标志: true 时保留 asm 文本输出, false 时编码机器码
-    asm_text_mode: bool,
+    /// dcc 编不出、必须透传给 GAS 的行记录 (TU 级降级判据, 由 asm_source 产出)。
+    /// 注意: 这里只记事实, 不在本后端报错也不降级。
+    /// 这两个字段必须是 `pub`: `mips64.rs` 是平级模块, 组装 CommonImage 时要直接读它们。
+    pub asm_passthrough: Vec<crate::codegen::shared::asm_source::AsmPassthroughRecord>,
+    /// 透传语句在 .text 内的起点与其 GAS 行 (降级时按位插入文本)。
+    pub asm_passthrough_regions: Vec<(u64, Vec<String>)>,
     /// exec 模式入口地址
     entry: u64,
     /// exec 模式 _start 中 JAL main 的指令位置
@@ -71,7 +76,7 @@ pub struct MipsCodegen {
     canary_slot_off: i32,
     /// -mrecord-mcount: ftrace call site positions for __mcount_loc section
     mcount_loc_entries: Vec<(u64, String)>,
-    /// 编译诊断 (未识别内联汇编指令等)
+    /// 编译诊断
     pub diagnostics: Vec<crate::diagnostics::Diagnostic>,
     _target: Target,
 }
@@ -106,7 +111,8 @@ impl MipsCodegen {
             continue_labels: Vec::new(),
             raw_global_asm_lines: Vec::new(),
             raw_func_asm_lines: Vec::new(),
-            asm_text_mode: false,
+            asm_passthrough: Vec::new(),
+            asm_passthrough_regions: Vec::new(),
             entry: if relocatable { 0 } else { 0x400000 + 52 + 32 },
             start_call_pos: None,
             is_current_func_variadic: false,
@@ -125,36 +131,30 @@ impl MipsCodegen {
         self.source_name = name.into();
     }
 
-    pub fn set_asm_text_mode(&mut self, v: bool) {
-        self.asm_text_mode = v;
+    /// 处理一条已解析的 asm 语句 —— 薄壳。
+    ///
+    /// 策略、编码、透传判定全部在 `asm_source::record_asm_stmt` (全仓唯一实现);
+    /// 本后端只提供数据容器 (见下方 `AsmStmtSink` 实现)。旧版本在这里各自
+    /// 写了一份“能不能编、编不出怎么报告”的逻辑, 5 个后端 5 微妙不一致。
+    ///
+    /// ISA 由本实例自己的 `is_64bit` 决定 (由 `Mips64Codegen::new()` 调
+    /// `set_64bit()` 置位), 32/64 位共用这一份代码, 因此绝不硬编码成某一个。
+    fn emit_asm_stmt(&mut self, key: &str, resolved: &str, span_file: &str, span_line: u32) {
+        let isa = if self.is_64bit {
+            crate::codegen::shared::asm_source::AsmIsa::Mips64
+        } else {
+            crate::codegen::shared::asm_source::AsmIsa::Mips32
+        };
+        crate::codegen::shared::asm_source::record_asm_stmt(
+            self, isa, key, resolved, span_file, span_line,
+        );
     }
 
-    /// Encode resolved asm text into machine code and emit to code buffer.
-    /// P0-5: unrecognized instructions produce hard errors, not NOPs.
+    /// 兼容旧名: 无显式 key 的调用点 (naked / 单行)。
     fn encode_and_emit_asm(&mut self, resolved: &str, span_file: &str, span_line: u32) {
-        let arch = if self.is_64bit { "mips64" } else { "mips" };
-        let lines = crate::codegen::shared::mini_asm::parse_asm_lines(resolved);
-        match crate::codegen::shared::mini_asm::encode_asm_lines_for_arch(
-            &lines,
-            arch,
-            self.is_64bit,
-        ) {
-            Ok(bytes) => {
-                self.code.extend_from_slice(&bytes);
-            },
-            Err(unrecognized) => {
-                for mnem in &unrecognized {
-                    let span = crate::diagnostics::Span::point(span_file, span_line, 1);
-                    let mut diag = crate::diagnostics::Diagnostic::err(
-                        "E0311",
-                        format!("unsupported inline asm instruction '{}' on {} target", mnem, arch),
-                        span,
-                    );
-                    diag.hint = Some("add encoding support or use asm text mode (-S)".to_string());
-                    self.diagnostics.push(diag);
-                }
-            },
-        }
+        let key = format!("__inline_{}", self.label_serial);
+        self.label_serial += 1;
+        self.emit_asm_stmt(&key, resolved, span_file, span_line);
     }
 
     pub fn set_64bit(&mut self) {
@@ -715,13 +715,8 @@ impl MipsCodegen {
 
     /// naked 函数中发射单条 asm 文本行 (asm goto 用)
     fn emit_asm_line_naked(&mut self, line: &str, span: &crate::diagnostics::Span) {
-        if self.asm_text_mode {
-            self.raw_func_asm_lines
-                .push((format!("__naked_{}", self.label_serial), vec![line.to_string()]));
-            self.label_serial += 1;
-        } else {
-            self.encode_and_emit_asm(line, &span.file, span.line);
-        }
+        // 与内联 asm 走同一个单一真源入口: 文本与字节同次产出。
+        self.encode_and_emit_asm(line, &span.file, span.line);
     }
 
     fn emit_epilogue(&mut self) {
@@ -981,18 +976,8 @@ impl MipsCodegen {
                     input_names,
                     &label_pairs,
                 );
-                if self.asm_text_mode {
-                    eprintln!("{}:{}: warning: asm goto on non-x86_64 target: inline asm text preserved in -S output only", span.file, span.line);
-                    let lines: Vec<String> = resolved
-                        .split('\n')
-                        .map(|l| l.trim().to_string())
-                        .filter(|l| !l.is_empty())
-                        .collect();
-                    self.raw_func_asm_lines
-                        .push((self.source_name.clone(), lines));
-                } else {
-                    self.encode_and_emit_asm(&resolved, &span.file, span.line);
-                }
+                // 文本与机器码出自同一次解析 (详见 asm_source::record_asm_stmt)。
+                self.encode_and_emit_asm(&resolved, &span.file, span.line);
             },
             _ => {},
         }
@@ -1819,18 +1804,8 @@ impl MipsCodegen {
             input_names,
             &[],
         );
-        if self.asm_text_mode {
-            let lines: Vec<String> = resolved
-                .split('\n')
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect();
-            self.raw_func_asm_lines
-                .push((format!("__inline_{}", self.label_serial), lines));
-            self.label_serial += 1;
-        } else {
-            self.encode_and_emit_asm(&resolved, span_file, span_line);
-        }
+        // 文本与机器码出自同一次解析: 不再按目标模式二选一。
+        self.encode_and_emit_asm(&resolved, span_file, span_line);
 
         // --- 写回输出寄存器到 C 变量 ---
         let mut first_output_reg: Option<u8> = None;
@@ -2237,6 +2212,25 @@ impl MipsCodegen {
     }
 }
 
+// asm_source 的数据容器接入: 本后端只负责存储, 不负责任何“能不能编、
+// 编不出怎么办”的判断 —— 那份策略全仓只有一份 (record_asm_stmt)。
+// 本后端没有 aarch64/riscv64 那样的 `pos()` 辅助方法, 取当前位置沿用
+// 既有写法 `self.code.len() as u64`。
+impl crate::codegen::shared::asm_source::AsmOutcomeSink for MipsCodegen {
+    fn pc(&self) -> u64 {
+        self.code.len() as u64
+    }
+    fn push_code(&mut self, bytes: &[u8]) {
+        self.code.extend_from_slice(bytes);
+    }
+    fn save_passthrough_region(&mut self, pc: u64, lines: Vec<String>) {
+        self.asm_passthrough_regions.push((pc, lines));
+    }
+    fn add_passthrough_records(&mut self, recs: Vec<AsmPassthroughRecord>) {
+        self.asm_passthrough.extend(recs);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2375,7 +2369,6 @@ mod backend {
         }
         fn compile(&mut self, input: &CompileInput<'_>) -> Result<CommonImage, Vec<Diagnostic>> {
             self.set_source_name(&input.opts.source_name);
-            self.set_asm_text_mode(input.opts.emit_asm);
             self.compile(input.module);
             build_aux_sections(self, input);
             Ok(CommonImage {
@@ -2414,16 +2407,24 @@ mod backend {
                     .iter()
                     .map(|(k, v)| (k.clone(), *v))
                     .collect(),
+                asm_passthrough: self.asm_passthrough.clone(),
+                asm_passthrough_regions: self.asm_passthrough_regions.clone(),
             })
         }
         fn render_asm(&mut self, input: &CompileInput<'_>) -> Result<Vec<u8>, Vec<Diagnostic>> {
+            // -S 与 -c 共用同一次 codegen 运行, 仅渲染器不同。
             self.set_source_name(&input.opts.source_name);
-            self.set_asm_text_mode(true);
             self.compile(input.module);
+            self.render_asm_from_state(input.module)
+        }
+        fn render_asm_from_state(
+            &mut self,
+            module: &crate::ir::Module,
+        ) -> Result<Vec<u8>, Vec<Diagnostic>> {
             if crate::codegen::has_fatal_diagnostics(&self.diagnostics) {
                 return Err(self.diagnostics.clone());
             }
-            Ok(self.build_asm_output(input.module).into_bytes())
+            Ok(self.build_asm_output(module).into_bytes())
         }
         fn build_object(&mut self) -> Result<Vec<u8>, Vec<Diagnostic>> {
             Ok(self.build_output())
@@ -2504,5 +2505,12 @@ mod backend {
                 });
             }
         }
+    }
+}
+
+// AsmStmtSink 的文本面: 本后端保存内联 asm 原文, 使 -S 与降级都有可信文本来源。
+impl crate::codegen::shared::asm_source::AsmStmtSink for MipsCodegen {
+    fn save_asm_text(&mut self, key: &str, lines: Vec<String>) {
+        self.raw_func_asm_lines.push((key.to_string(), lines));
     }
 }

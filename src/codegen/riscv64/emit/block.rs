@@ -67,7 +67,11 @@ impl Riscv64Codegen {
                 self.emitted_return = true;
             },
             Stmt::Expr { e, .. } => {
-                if let Some(expr) = ir.expressions.first() {
+                // 同 aarch64: 语句位置的 `__asm__` 在 IR 里没有对应形态,
+                // 只看 `ir.expressions` 会把整条 asm 静默丢掉。
+                if matches!(e, Expr::AsmExpr { .. }) {
+                    self.gen_expr_from_ast(e);
+                } else if let Some(expr) = ir.expressions.first() {
                     let _ = self.gen_expr(expr);
                 } else {
                     self.gen_expr_from_ast(e);
@@ -205,17 +209,8 @@ impl Riscv64Codegen {
                     input_names,
                     &label_pairs,
                 );
-                if self.asm_text_mode {
-                    let lines: Vec<String> = resolved
-                        .split('\n')
-                        .map(|l| l.trim().to_string())
-                        .filter(|l| !l.is_empty())
-                        .collect();
-                    self.raw_func_asm_lines
-                        .push((self.source_name.clone(), lines));
-                } else {
-                    self.encode_and_emit_asm(&resolved, &span.file, span.line);
-                }
+                // 文本与机器码出自同一次解析 (详见 asm_source::record_asm_stmt)。
+                self.encode_and_emit_asm(&resolved, &span.file, span.line);
                 // Writeback output registers
                 for (i, op) in resolved_operands.iter().enumerate() {
                     if op.is_output && i < outputs.len() {

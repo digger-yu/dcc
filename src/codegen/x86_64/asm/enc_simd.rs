@@ -45,7 +45,7 @@ impl Codegen {
                 (*d, *s, *t)
             },
             _ => {
-                self.asm_warn("AMX tdp* needs tmm regs");
+                self.asm_reject("AMX tdp* needs tmm regs");
                 return;
             },
         };
@@ -101,7 +101,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             _ => {
-                self.asm_warn("unsupported evex 2-op operand pattern");
+                self.asm_reject("unsupported evex 2-op operand pattern");
             },
         }
     }
@@ -141,14 +141,14 @@ impl Codegen {
         let d = match dst {
             AsmOperand::Reg(d, ds) if *ds >= 128 => *d,
             _ => {
-                self.asm_warn("unsupported FMA dst pattern");
+                self.asm_reject("unsupported FMA dst pattern");
                 return;
             },
         };
         let s1 = match src2 {
             AsmOperand::Reg(s, ss) if *ss >= 128 => *s,
             _ => {
-                self.asm_warn("unsupported FMA src1 pattern");
+                self.asm_reject("unsupported FMA src1 pattern");
                 return;
             },
         };
@@ -192,7 +192,7 @@ impl Codegen {
                 self.pending_data_rels.push((pos, sym.clone()));
             },
             _ => {
-                self.asm_warn("unsupported FMA src2 pattern");
+                self.asm_reject("unsupported FMA src2 pattern");
             },
         }
     }
@@ -242,7 +242,7 @@ impl Codegen {
             let pos = self.pos() - 4;
             self.pending_data_rels.push((pos, sym.clone()));
         } else {
-            self.asm_warn("fpu_load only supports mem operand");
+            self.asm_reject("fpu_load only supports mem operand");
         }
     }
     pub(crate) fn emit_asm_mmx_2op(&mut self, src: &AsmOperand, dst: &AsmOperand, opcode: u8) {
@@ -265,7 +265,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             _ => {
-                self.asm_warn("unsupported MMX operand pattern");
+                self.asm_reject("unsupported MMX operand pattern");
             },
         }
     }
@@ -301,7 +301,7 @@ impl Codegen {
                 self.pending_data_rels.push((pos, sym.clone()));
             },
             _ => {
-                self.asm_warn("pextr dst must be gpr or mem");
+                self.asm_reject("pextr dst must be gpr or mem");
             },
         }
     }
@@ -337,7 +337,7 @@ impl Codegen {
                 self.pending_data_rels.push((pos, sym.clone()));
             },
             _ => {
-                self.asm_warn("pinsr src must be gpr or mem");
+                self.asm_reject("pinsr src must be gpr or mem");
             },
         }
     }
@@ -396,7 +396,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             _ => {
-                self.asm_warn("unsupported scan operand pattern");
+                self.asm_reject("unsupported scan operand pattern");
             },
         }
     }
@@ -440,7 +440,7 @@ impl Codegen {
                 self.pending_data_rels.push((pos, sym.clone()));
             },
             _ => {
-                self.asm_warn("src must be xmm or mem");
+                self.asm_reject("src must be xmm or mem");
             },
         }
     }
@@ -573,7 +573,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             _ => {
-                self.asm_warn("unsupported sse arith operand pattern");
+                self.asm_reject("unsupported sse arith operand pattern");
             },
         }
     }
@@ -629,7 +629,7 @@ impl Codegen {
                 self.emit(&[imm8]);
             },
             _ => {
-                self.asm_warn("unsupported sse cmp/shuffle operand pattern");
+                self.asm_reject("unsupported sse cmp/shuffle operand pattern");
             },
         }
     }
@@ -712,7 +712,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             _ => {
-                self.asm_warn("unsupported sse mov operand pattern");
+                self.asm_reject("unsupported sse mov operand pattern");
             },
         }
     }
@@ -789,7 +789,7 @@ impl Codegen {
                 self.emit(&[load_op, Self::modrm_reg_reg(*d, *s)]);
             },
             _ => {
-                self.asm_warn("unsupported sse packed mov operand pattern");
+                self.asm_reject("unsupported sse packed mov operand pattern");
             },
         }
     }
@@ -814,7 +814,7 @@ impl Codegen {
                 },
             ) if *sz == ASM_REG_TMM => (*d, *disp, *base, *index, *scale),
             _ => {
-                self.asm_warn("tileloadd needs tmm and mem");
+                self.asm_reject("tileloadd needs tmm and mem");
                 return;
             },
         };
@@ -842,7 +842,7 @@ impl Codegen {
                 AsmOperand::Reg(s, sz),
             ) if *sz == ASM_REG_TMM => (*s, *disp, *base, *index, *scale),
             _ => {
-                self.asm_warn("tilestored needs tmm and mem");
+                self.asm_reject("tilestored needs tmm and mem");
                 return;
             },
         };
@@ -1028,7 +1028,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             _ => {
-                self.asm_warn(&format!(
+                self.asm_reject(&format!(
                     "unsupported vex 2-op operand pattern (l:{}, pp:{}, map:{}, opcode:0x{:02x}, w:{}), src:{:?}, dst:{:?}",
                     l, pp, map, opcode, w, src, dst
                 ));
@@ -1050,14 +1050,14 @@ impl Codegen {
         let d = match dst {
             AsmOperand::Reg(d, ds) if *ds >= 128 => *d,
             _ => {
-                self.asm_warn("unsupported VEX 3-op dst pattern");
+                self.asm_reject("unsupported VEX 3-op dst pattern");
                 return;
             },
         };
         let s1 = match src2 {
             AsmOperand::Reg(s, ss) if *ss >= 128 => *s,
             _ => {
-                self.asm_warn("unsupported VEX 3-op src1 pattern");
+                self.asm_reject("unsupported VEX 3-op src1 pattern");
                 return;
             },
         };
@@ -1100,7 +1100,7 @@ impl Codegen {
                 self.pending_data_rels.push((pos, sym.clone()));
             },
             _ => {
-                self.asm_warn("unsupported VEX 3-op src2 pattern");
+                self.asm_reject("unsupported VEX 3-op src2 pattern");
             },
         }
     }
@@ -1153,7 +1153,7 @@ impl Codegen {
                 Self::modrm_reg_reg(*d, *s),
             ]);
         } else {
-            self.asm_warn("vmread only supports reg,reg operands");
+            self.asm_reject("vmread only supports reg,reg operands");
         }
     }
     pub(crate) fn emit_asm_vmwrite(&mut self, src: &AsmOperand, dst: &AsmOperand) {
@@ -1165,7 +1165,7 @@ impl Codegen {
                 Self::modrm_reg_reg(*s, *d),
             ]);
         } else {
-            self.asm_warn("vmwrite only supports reg,reg operands");
+            self.asm_reject("vmwrite only supports reg,reg operands");
         }
     }
     pub(crate) fn emit_asm_vpextr_imm8(
@@ -1200,7 +1200,7 @@ impl Codegen {
                 self.pending_data_rels.push((pos, sym.clone()));
             },
             _ => {
-                self.asm_warn("vpextr dst must be gpr or mem");
+                self.asm_reject("vpextr dst must be gpr or mem");
             },
         }
     }
@@ -1237,7 +1237,7 @@ impl Codegen {
                 self.pending_data_rels.push((pos, sym.clone()));
             },
             _ => {
-                self.asm_warn("vpinsr src must be gpr or mem");
+                self.asm_reject("vpinsr src must be gpr or mem");
             },
         }
     }
@@ -1264,7 +1264,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
             },
             _ => {
-                self.asm_warn("unsupported x87 operand pattern");
+                self.asm_reject("unsupported x87 operand pattern");
             },
         }
     }
@@ -1290,7 +1290,7 @@ impl Codegen {
                 }
             },
             _ => {
-                self.asm_warn("unsupported x87 st operand pattern");
+                self.asm_reject("unsupported x87 st operand pattern");
             },
         }
     }

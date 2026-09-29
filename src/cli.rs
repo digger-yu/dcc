@@ -37,6 +37,39 @@ pub enum StackGuardReg {
     Gs, // per-CPU: %gs:0x28
 }
 
+/// 内联汇编不可编码时的处理策略 (`--asm-fallback=`)。
+///
+/// 定义在 cli 而非 codegen: 它是一个用户选项的语义, 且 `EmitOptions` 已经
+/// 依赖 `cli::Arch` —— 把策略类型放在下层会反向依赖上层。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AsmFallback {
+    /// 每个不可编码行报 E0311 硬错误 (默认, 保持历史行为向后兼容)
+    #[default]
+    Error,
+    /// 整个 TU 降级为 GAS 文本, 交 `as` 汇编
+    Gas,
+}
+
+impl AsmFallback {
+    /// 只接受 `gas` / `error`: 未知值必须报错, 绝不能静默当成默认值。
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "error" => Ok(AsmFallback::Error),
+            "gas" => Ok(AsmFallback::Gas),
+            other => Err(format!(
+                "unknown --asm-fallback value '{other}' (expected 'gas' or 'error')"
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AsmFallback::Error => "error",
+            AsmFallback::Gas => "gas",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub inputs: Vec<PathBuf>,
@@ -59,6 +92,8 @@ pub struct Config {
     pub relocatable: bool,                    // -c / -r
     pub link_mode: bool,                      // -r 合并 .o（依赖 host ld/objcopy，非内置链接器）
     pub emit_asm: bool,                       // -S: 输出汇编文本 .s
+    /// --asm-fallback=gas|error: 内联汇编编不出时是报错还是整 TU 降级为 GAS 文本
+    pub asm_fallback: AsmFallback,
     pub preprocess_only: bool,                // -E: 只做预处理
     pub dump_macros: bool,                    // -dM: 预处理后输出所有宏定义
     pub force_includes: Vec<String>,          // -include file: 强制包含文件
@@ -1310,6 +1345,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut verbose = false;
     let mut relocatable = false;
     let mut emit_asm = false;
+    let mut asm_fallback = AsmFallback::default();
     let mut preprocess_only = false;
     let mut dump_macros = false;
     let mut force_includes: Vec<String> = vec![];
@@ -1444,6 +1480,12 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             }
             "-S" => {
                 emit_asm = true;
+            }
+            // --asm-fallback=gas|error: 内联汇编编不出时的策略。
+            // 未知取值直接报错, 不静默回退到默认值 —— 否则用户以为自己在用透传。
+            opt if opt.starts_with("--asm-fallback=") => {
+                asm_fallback =
+                    AsmFallback::parse(&opt["--asm-fallback=".len()..]).map_err(|m| CliError::new(&m))?;
             }
             "-E" => {
                 preprocess_only = true;
@@ -3042,6 +3084,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             relocatable,
             link_mode,
             emit_asm,
+            asm_fallback,
             preprocess_only,
             dump_macros,
             force_includes,
@@ -3171,6 +3214,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             relocatable,
             link_mode: false,
             emit_asm,
+            asm_fallback,
             preprocess_only,
             dump_macros,
             force_includes,
@@ -3342,6 +3386,13 @@ fn print_help() {
     println!();
     println!("OPTIONS:");
     println!("    -c                  emit relocatable object (.o), do not link");
+    println!("    -S                  emit assembly text (.s)");
+    println!("    --asm-fallback=gas|error");
+    println!("                        inline asm beyond dcc's instruction table:");
+    println!("                          error (default) -> hard E0311 per statement");
+    println!("                          gas             -> emit whole TU as GAS text");
+    println!("                                            (needs backend GasTextOutput,");
+    println!("                                             otherwise E0312)");
     println!("    -r                  merge .o files (requires host ld, objcopy)");
     println!("    -flto               per-function sections + .llvm.lto summary");
     println!("    -O0|-O1|-O2|-O3     optimization level (default O0)");

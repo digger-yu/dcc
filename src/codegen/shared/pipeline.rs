@@ -321,6 +321,8 @@ mod tests {
         let options = EmitOptions {
             relocatable: false,
             emit_asm: false,
+            asm_fallback: crate::cli::AsmFallback::default(),
+
             source_name: "test.c".to_string(),
             debug_level: 0,
             dwarf_version: 4,

@@ -68,7 +68,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
             },
             _ => {
-                self.asm_warn("unsupported descriptor operand pattern");
+                self.asm_reject("unsupported descriptor operand pattern");
             },
         }
     }

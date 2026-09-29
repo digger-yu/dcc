@@ -244,7 +244,7 @@ impl Codegen {
                 if let Some(cc) = cc {
                     self.emit_asm_cmov(&ops[0], &ops[1], cc, bits);
                 } else {
-                    self.asm_warn(&format!("unsupported cmov condition '{}'", cond));
+                    self.asm_reject(&format!("unsupported cmov condition '{}'", cond));
                 }
             },
 
@@ -361,7 +361,7 @@ impl Codegen {
                     self.emit(&[Self::rex(false, *d, index.unwrap_or(0), *base), 0x0F, 0x02]);
                     self.emit_asm_modrm_mem_only(*d & 7, *disp, *base, *index, *scale);
                 } else {
-                    self.asm_warn("lar needs reg, reg/mem operands");
+                    self.asm_reject("lar needs reg, reg/mem operands");
                 }
             },
             // 描述符表: str (0F 00 /1) 与 sgdt/sidt/lgdt/lidt (0F 01 /0-/3)
@@ -446,7 +446,7 @@ impl Codegen {
                     self.pending_data_rels.push((pos, sym.clone()));
                 },
                 _ => {
-                    self.asm_warn("rdrand needs register or memory operand");
+                    self.asm_reject("rdrand needs register or memory operand");
                 },
             },
             "rdseed" if ops.len() == 1 => match &ops[0] {
@@ -489,7 +489,7 @@ impl Codegen {
                     self.pending_data_rels.push((pos, sym.clone()));
                 },
                 _ => {
-                    self.asm_warn("rdseed needs register or memory operand");
+                    self.asm_reject("rdseed needs register or memory operand");
                 },
             },
             "invlpg" if ops.len() == 1 => self.emit_asm_sys_mem(&ops[0], 0x01, 0x01),
@@ -534,7 +534,7 @@ impl Codegen {
                     ]);
                     self.emit_asm_modrm_mem_only(6, *disp, *base, *index, *scale);
                 } else {
-                    self.asm_warn("vmxon needs memory operand");
+                    self.asm_reject("vmxon needs memory operand");
                 }
             },
             // wrussq: 0F 38 F5 /r (reg, mem) — CET user shadow stack write
@@ -557,7 +557,7 @@ impl Codegen {
                     ]);
                     self.emit_asm_modrm_mem_only(*s & 7, *disp, *base, *index, *scale);
                 } else {
-                    self.asm_warn("wrussq needs reg, mem operands");
+                    self.asm_reject("wrussq needs reg, mem operands");
                 }
             },
             "ud2" => self.emit(&[0x0F, 0x0B]),
@@ -786,7 +786,7 @@ impl Codegen {
                         self.pending_data_rels.push((pos, sym.clone()));
                     },
                     _ => {
-                        self.asm_warn("retf needs imm16");
+                        self.asm_reject("retf needs imm16");
                     },
                 }
             },
@@ -804,7 +804,7 @@ impl Codegen {
                         self.pending_data_rels.push((pos, sym.clone()));
                     },
                     _ => {
-                        self.asm_warn("lret needs imm16");
+                        self.asm_reject("lret needs imm16");
                     },
                 }
             },
@@ -823,7 +823,7 @@ impl Codegen {
                     self.pending_data_rels.push((pos, off_sym.clone()));
                 },
                 _ => {
-                    self.asm_warn("ljmpw needs $seg, $off");
+                    self.asm_reject("ljmpw needs $seg, $off");
                 },
             },
             "ljmpl" | "ljmp" if ops.len() == 2 => match (&ops[0], &ops[1]) {
@@ -841,7 +841,7 @@ impl Codegen {
                     self.pending_data_rels.push((pos, off_sym.clone()));
                 },
                 _ => {
-                    self.asm_warn("ljmpl needs $seg, $off");
+                    self.asm_reject("ljmpl needs $seg, $off");
                 },
             },
             // ljmpw/ljmpl/ljmp 间接形式: FF /5 (mem)
@@ -866,7 +866,7 @@ impl Codegen {
                     self.pending_data_rels.push((pos, off_sym.clone()));
                 },
                 _ => {
-                    self.asm_warn("lcallw needs $seg, $off");
+                    self.asm_reject("lcallw needs $seg, $off");
                 },
             },
             "lcalll" | "lcall" if ops.len() == 2 => match (&ops[0], &ops[1]) {
@@ -884,7 +884,7 @@ impl Codegen {
                     self.pending_data_rels.push((pos, off_sym.clone()));
                 },
                 _ => {
-                    self.asm_warn("lcalll needs $seg, $off");
+                    self.asm_reject("lcalll needs $seg, $off");
                 },
             },
             // lcallw/lcalll/lcall 间接形式: FF /3 (mem)
@@ -973,7 +973,7 @@ impl Codegen {
                         is_push_imm: false,
                     });
                 } else {
-                    self.asm_warn("xbegin needs label or imm");
+                    self.asm_reject("xbegin needs label or imm");
                 }
             },
             "xend" => self.emit(&[0x0F, 0x01, 0xD5]),
@@ -985,7 +985,7 @@ impl Codegen {
                     let _ = s;
                     self.emit(&[0xC6, 0xF8, 0x00]);
                 } else {
-                    self.asm_warn("xabort needs imm8");
+                    self.asm_reject("xabort needs imm8");
                 }
             },
             "xtest" => self.emit(&[0x0F, 0x01, 0xD6]),
@@ -1019,10 +1019,10 @@ impl Codegen {
                     if *ds == 128 {
                         self.emit_asm_sse_2op_imm_mem(*d, src, 3, 0, 0, 0, 1, 0xDF, *imm);
                     } else {
-                        self.asm_warn("aeskeygenassist dst must be xmm");
+                        self.asm_reject("aeskeygenassist dst must be xmm");
                     }
                 } else {
-                    self.asm_warn("aeskeygenassist needs imm, reg/mem, reg");
+                    self.asm_reject("aeskeygenassist needs imm, reg/mem, reg");
                 }
             },
 
@@ -1035,10 +1035,10 @@ impl Codegen {
                     if *ds == 128 {
                         self.emit_asm_sse_2op_imm_mem(*d, src, 3, 0, 0, 0, 0, 0xCC, *imm);
                     } else {
-                        self.asm_warn("sha1rnds4 dst must be xmm");
+                        self.asm_reject("sha1rnds4 dst must be xmm");
                     }
                 } else {
-                    self.asm_warn("sha1rnds4 needs imm, reg/mem, reg");
+                    self.asm_reject("sha1rnds4 needs imm, reg/mem, reg");
                 }
             },
             // sha1nexte xmm1, xmm2/m128 : 0F 38 C8 /r
@@ -1280,7 +1280,7 @@ impl Codegen {
                         self.pending_data_rels.push((pos, sym.clone()));
                     }
                 } else {
-                    self.asm_warn("vcvtps2ph needs imm, reg, reg/mem");
+                    self.asm_reject("vcvtps2ph needs imm, reg, reg/mem");
                 }
             },
 
@@ -1318,14 +1318,14 @@ impl Codegen {
                                 self.pending_data_rels.push((pos, sym.clone()));
                             },
                             _ => {
-                                self.asm_warn("pshufd src must be xmm or mem");
+                                self.asm_reject("pshufd src must be xmm or mem");
                             },
                         }
                     } else {
-                        self.asm_warn("pshufd dst must be xmm");
+                        self.asm_reject("pshufd dst must be xmm");
                     }
                 } else {
-                    self.asm_warn("pshufd needs imm, xmm/mem, xmm");
+                    self.asm_reject("pshufd needs imm, xmm/mem, xmm");
                 }
             },
             "pshufhw" if ops.len() == 3 => {
@@ -1356,14 +1356,14 @@ impl Codegen {
                                 self.pending_data_rels.push((pos, sym.clone()));
                             },
                             _ => {
-                                self.asm_warn("pshufhw src must be xmm or mem");
+                                self.asm_reject("pshufhw src must be xmm or mem");
                             },
                         }
                     } else {
-                        self.asm_warn("pshufhw dst must be xmm");
+                        self.asm_reject("pshufhw dst must be xmm");
                     }
                 } else {
-                    self.asm_warn("pshufhw needs imm, xmm/mem, xmm");
+                    self.asm_reject("pshufhw needs imm, xmm/mem, xmm");
                 }
             },
             "pshuflw" if ops.len() == 3 => {
@@ -1394,14 +1394,14 @@ impl Codegen {
                                 self.pending_data_rels.push((pos, sym.clone()));
                             },
                             _ => {
-                                self.asm_warn("pshuflw src must be xmm or mem");
+                                self.asm_reject("pshuflw src must be xmm or mem");
                             },
                         }
                     } else {
-                        self.asm_warn("pshuflw dst must be xmm");
+                        self.asm_reject("pshuflw dst must be xmm");
                     }
                 } else {
-                    self.asm_warn("pshuflw needs imm, xmm/mem, xmm");
+                    self.asm_reject("pshuflw needs imm, xmm/mem, xmm");
                 }
             },
             // pmulhrsw xmm1, xmm2/m128 : 66 0F 38 0B /r
@@ -1430,10 +1430,10 @@ impl Codegen {
                     if *ds == 128 {
                         self.emit_asm_sse_2op_imm_mem(*d, src, 3, 0, 0, 0, 1, 0x0F, *imm);
                     } else {
-                        self.asm_warn("palignr dst must be xmm");
+                        self.asm_reject("palignr dst must be xmm");
                     }
                 } else {
-                    self.asm_warn("palignr needs imm, reg/mem, reg");
+                    self.asm_reject("palignr needs imm, reg/mem, reg");
                 }
             },
             // pblendw xmm1, xmm2/m128, imm8 : 66 0F 3A 0E /r ib
@@ -1444,10 +1444,10 @@ impl Codegen {
                     if *ds == 128 {
                         self.emit_asm_sse_2op_imm_mem(*d, src, 3, 0, 0, 0, 1, 0x0E, *imm);
                     } else {
-                        self.asm_warn("pblendw dst must be xmm");
+                        self.asm_reject("pblendw dst must be xmm");
                     }
                 } else {
-                    self.asm_warn("pblendw needs imm, reg/mem, reg");
+                    self.asm_reject("pblendw needs imm, reg/mem, reg");
                 }
             },
             // phminposuw xmm1, xmm2/m128, imm8 : 66 0F 38 41 /r ib
@@ -1513,10 +1513,10 @@ impl Codegen {
                     if *ds == 128 {
                         self.emit_asm_pinsr_imm8(*imm, src, *d, 0x20, 0);
                     } else {
-                        self.asm_warn("pinsrb dst must be xmm");
+                        self.asm_reject("pinsrb dst must be xmm");
                     }
                 } else {
-                    self.asm_warn("pinsrb needs imm, src, xmm");
+                    self.asm_reject("pinsrb needs imm, src, xmm");
                 }
             },
             "pinsrd" if ops.len() == 3 => {
@@ -1526,10 +1526,10 @@ impl Codegen {
                     if *ds == 128 {
                         self.emit_asm_pinsr_imm8(*imm, src, *d, 0x22, 0);
                     } else {
-                        self.asm_warn("pinsrd dst must be xmm");
+                        self.asm_reject("pinsrd dst must be xmm");
                     }
                 } else {
-                    self.asm_warn("pinsrd needs imm, src, xmm");
+                    self.asm_reject("pinsrd needs imm, src, xmm");
                 }
             },
             "pinsrq" if ops.len() == 3 => {
@@ -1539,10 +1539,10 @@ impl Codegen {
                     if *ds == 128 {
                         self.emit_asm_pinsr_imm8(*imm, src, *d, 0x22, 1);
                     } else {
-                        self.asm_warn("pinsrq dst must be xmm");
+                        self.asm_reject("pinsrq dst must be xmm");
                     }
                 } else {
-                    self.asm_warn("pinsrq needs imm, src, xmm");
+                    self.asm_reject("pinsrq needs imm, src, xmm");
                 }
             },
             // pextrb/pextrd/pextrq : 66 0F 3A 14/16/15 /r ib
@@ -1553,10 +1553,10 @@ impl Codegen {
                     if *ss == 128 {
                         self.emit_asm_pextr_imm8(*imm, *s, dst, 0x14, 0);
                     } else {
-                        self.asm_warn("pextrb src must be xmm");
+                        self.asm_reject("pextrb src must be xmm");
                     }
                 } else {
-                    self.asm_warn("pextrb needs imm, xmm, dst");
+                    self.asm_reject("pextrb needs imm, xmm, dst");
                 }
             },
             "pextrd" if ops.len() == 3 => {
@@ -1566,10 +1566,10 @@ impl Codegen {
                     if *ss == 128 {
                         self.emit_asm_pextr_imm8(*imm, *s, dst, 0x16, 0);
                     } else {
-                        self.asm_warn("pextrd src must be xmm");
+                        self.asm_reject("pextrd src must be xmm");
                     }
                 } else {
-                    self.asm_warn("pextrd needs imm, xmm, dst");
+                    self.asm_reject("pextrd needs imm, xmm, dst");
                 }
             },
             "pextrq" if ops.len() == 3 => {
@@ -1579,10 +1579,10 @@ impl Codegen {
                     if *ss == 128 {
                         self.emit_asm_pextr_imm8(*imm, *s, dst, 0x16, 1);
                     } else {
-                        self.asm_warn("pextrq src must be xmm");
+                        self.asm_reject("pextrq src must be xmm");
                     }
                 } else {
-                    self.asm_warn("pextrq needs imm, xmm, dst");
+                    self.asm_reject("pextrq needs imm, xmm, dst");
                 }
             },
             // extractps : 66 0F 3A 17 /r ib
@@ -1593,10 +1593,10 @@ impl Codegen {
                     if *ss == 128 {
                         self.emit_asm_pextr_imm8(*imm, *s, dst, 0x17, 0);
                     } else {
-                        self.asm_warn("extractps src must be xmm");
+                        self.asm_reject("extractps src must be xmm");
                     }
                 } else {
-                    self.asm_warn("extractps needs imm, xmm, dst");
+                    self.asm_reject("extractps needs imm, xmm, dst");
                 }
             },
             // insertps xmm1, xmm2/m128, imm8 : 66 0F 3A 21 /r ib
@@ -1628,14 +1628,14 @@ impl Codegen {
                                 self.pending_data_rels.push((pos, sym.clone()));
                             },
                             _ => {
-                                self.asm_warn("insertps src must be xmm or mem");
+                                self.asm_reject("insertps src must be xmm or mem");
                             },
                         }
                     } else {
-                        self.asm_warn("insertps dst must be xmm");
+                        self.asm_reject("insertps dst must be xmm");
                     }
                 } else {
-                    self.asm_warn("insertps needs imm, xmm/mem, xmm");
+                    self.asm_reject("insertps needs imm, xmm/mem, xmm");
                 }
             },
             // AVX vpinsrb/vpinsrd/vpinsrq : VEX.128.66.0F3A.W0 20/22/22 /r ib
@@ -1646,10 +1646,10 @@ impl Codegen {
                     if *ds == 128 {
                         self.emit_asm_vpinsr_imm8(*imm, src, *d, *d, 0x20, 0);
                     } else {
-                        self.asm_warn("vpinsrb dst must be xmm");
+                        self.asm_reject("vpinsrb dst must be xmm");
                     }
                 } else {
-                    self.asm_warn("vpinsrb needs imm, src, xmm");
+                    self.asm_reject("vpinsrb needs imm, src, xmm");
                 }
             },
             "vpinsrb" if ops.len() == 4 => {
@@ -1659,10 +1659,10 @@ impl Codegen {
                     if *vs == 128 && *ds == 128 {
                         self.emit_asm_vpinsr_imm8(*imm, src, *v, *d, 0x20, 0);
                     } else {
-                        self.asm_warn("vpinsrb needs xmm vvvv/dst");
+                        self.asm_reject("vpinsrb needs xmm vvvv/dst");
                     }
                 } else {
-                    self.asm_warn("vpinsrb needs imm, src, xmm, xmm");
+                    self.asm_reject("vpinsrb needs imm, src, xmm, xmm");
                 }
             },
             "vpinsrd" if ops.len() == 3 => {
@@ -1672,10 +1672,10 @@ impl Codegen {
                     if *ds == 128 {
                         self.emit_asm_vpinsr_imm8(*imm, src, *d, *d, 0x22, 0);
                     } else {
-                        self.asm_warn("vpinsrd dst must be xmm");
+                        self.asm_reject("vpinsrd dst must be xmm");
                     }
                 } else {
-                    self.asm_warn("vpinsrd needs imm, src, xmm");
+                    self.asm_reject("vpinsrd needs imm, src, xmm");
                 }
             },
             "vpinsrd" if ops.len() == 4 => {
@@ -1685,10 +1685,10 @@ impl Codegen {
                     if *vs == 128 && *ds == 128 {
                         self.emit_asm_vpinsr_imm8(*imm, src, *v, *d, 0x22, 0);
                     } else {
-                        self.asm_warn("vpinsrd needs xmm vvvv/dst");
+                        self.asm_reject("vpinsrd needs xmm vvvv/dst");
                     }
                 } else {
-                    self.asm_warn("vpinsrd needs imm, src, xmm, xmm");
+                    self.asm_reject("vpinsrd needs imm, src, xmm, xmm");
                 }
             },
             "vpinsrq" if ops.len() == 3 => {
@@ -1698,10 +1698,10 @@ impl Codegen {
                     if *ds == 128 {
                         self.emit_asm_vpinsr_imm8(*imm, src, *d, *d, 0x22, 1);
                     } else {
-                        self.asm_warn("vpinsrq dst must be xmm");
+                        self.asm_reject("vpinsrq dst must be xmm");
                     }
                 } else {
-                    self.asm_warn("vpinsrq needs imm, src, xmm");
+                    self.asm_reject("vpinsrq needs imm, src, xmm");
                 }
             },
             "vpinsrq" if ops.len() == 4 => {
@@ -1711,10 +1711,10 @@ impl Codegen {
                     if *vs == 128 && *ds == 128 {
                         self.emit_asm_vpinsr_imm8(*imm, src, *v, *d, 0x22, 1);
                     } else {
-                        self.asm_warn("vpinsrq needs xmm vvvv/dst");
+                        self.asm_reject("vpinsrq needs xmm vvvv/dst");
                     }
                 } else {
-                    self.asm_warn("vpinsrq needs imm, src, xmm, xmm");
+                    self.asm_reject("vpinsrq needs imm, src, xmm, xmm");
                 }
             },
             // AVX vpextrb/vpextrd/vpextrq、vextractps/vextractpd
@@ -1725,10 +1725,10 @@ impl Codegen {
                     if *ss == 128 {
                         self.emit_asm_vpextr_imm8(*imm, *s, dst, 0x14, 0);
                     } else {
-                        self.asm_warn("vpextrb src must be xmm");
+                        self.asm_reject("vpextrb src must be xmm");
                     }
                 } else {
-                    self.asm_warn("vpextrb needs imm, xmm, dst");
+                    self.asm_reject("vpextrb needs imm, xmm, dst");
                 }
             },
             "vpextrd" if ops.len() == 3 => {
@@ -1738,10 +1738,10 @@ impl Codegen {
                     if *ss == 128 {
                         self.emit_asm_vpextr_imm8(*imm, *s, dst, 0x16, 0);
                     } else {
-                        self.asm_warn("vpextrd src must be xmm");
+                        self.asm_reject("vpextrd src must be xmm");
                     }
                 } else {
-                    self.asm_warn("vpextrd needs imm, xmm, dst");
+                    self.asm_reject("vpextrd needs imm, xmm, dst");
                 }
             },
             "vpextrq" if ops.len() == 3 => {
@@ -1751,10 +1751,10 @@ impl Codegen {
                     if *ss == 128 {
                         self.emit_asm_vpextr_imm8(*imm, *s, dst, 0x16, 1);
                     } else {
-                        self.asm_warn("vpextrq src must be xmm");
+                        self.asm_reject("vpextrq src must be xmm");
                     }
                 } else {
-                    self.asm_warn("vpextrq needs imm, xmm, dst");
+                    self.asm_reject("vpextrq needs imm, xmm, dst");
                 }
             },
             "vextractps" if ops.len() == 3 => {
@@ -1764,10 +1764,10 @@ impl Codegen {
                     if *ss == 128 {
                         self.emit_asm_vpextr_imm8(*imm, *s, dst, 0x17, 0);
                     } else {
-                        self.asm_warn("vextractps src must be xmm");
+                        self.asm_reject("vextractps src must be xmm");
                     }
                 } else {
-                    self.asm_warn("vextractps needs imm, xmm, dst_reg/mem");
+                    self.asm_reject("vextractps needs imm, xmm, dst_reg/mem");
                 }
             },
             "vextractpd" if ops.len() == 3 => {
@@ -1787,10 +1787,10 @@ impl Codegen {
                             },
                         }
                     } else {
-                        self.asm_warn("vextractpd src must be xmm");
+                        self.asm_reject("vextractpd src must be xmm");
                     }
                 } else {
-                    self.asm_warn("vextractpd needs imm, xmm, dst_reg/mem");
+                    self.asm_reject("vextractpd needs imm, xmm, dst_reg/mem");
                 }
             },
             // pmovsxbw / pmovsxbd / pmovsxbq / pmovsxwd / pmovsxwq / pmovsxdq
@@ -2528,10 +2528,10 @@ impl Codegen {
                     if *sz == ASM_REG_TMM {
                         self.emit(&[0xC4, 0xE2, 0x7B, 0x49, 0xC0 | (d & 7)]);
                     } else {
-                        self.asm_warn("tilezero needs tmm register");
+                        self.asm_reject("tilezero needs tmm register");
                     }
                 } else {
-                    self.asm_warn("tilezero needs tmm register");
+                    self.asm_reject("tilezero needs tmm register");
                 }
             },
             // tileloadd tmm1, sibmem : VEX.128.F2.0F38.W0 4B /r
@@ -2670,14 +2670,14 @@ impl Codegen {
                                 self.pending_data_rels.push((pos, sym.clone()));
                             },
                             _ => {
-                                self.asm_warn("pshufw src must be mmx or mem");
+                                self.asm_reject("pshufw src must be mmx or mem");
                             },
                         }
                     } else {
-                        self.asm_warn("pshufw dst must be mmx");
+                        self.asm_reject("pshufw dst must be mmx");
                     }
                 } else {
-                    self.asm_warn("pshufw needs imm, mmx/mem, mmx");
+                    self.asm_reject("pshufw needs imm, mmx/mem, mmx");
                 }
             },
             "pmaddwd" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0xF5),
@@ -2737,37 +2737,37 @@ impl Codegen {
                 if let AsmOperand::Imm(v) = &ops[0] {
                     self.emit(&[0xE2, *v as u8]);
                 } else {
-                    self.asm_warn("loop needs imm8 offset");
+                    self.asm_reject("loop needs imm8 offset");
                 }
             },
             "loope" | "loopz" if ops.len() == 1 => {
                 if let AsmOperand::Imm(v) = &ops[0] {
                     self.emit(&[0xE1, *v as u8]);
                 } else {
-                    self.asm_warn("loope needs imm8 offset");
+                    self.asm_reject("loope needs imm8 offset");
                 }
             },
             "loopne" | "loopnz" if ops.len() == 1 => {
                 if let AsmOperand::Imm(v) = &ops[0] {
                     self.emit(&[0xE0, *v as u8]);
                 } else {
-                    self.asm_warn("loopne needs imm8 offset");
+                    self.asm_reject("loopne needs imm8 offset");
                 }
             },
 
             // === 杂项 ===
             "bound" if ops.len() == 2 => {
-                self.asm_warn("bound is 80286 legacy");
+                self.asm_reject("bound is 80286 legacy");
             },
             "enter" if ops.len() == 2 => {
                 if let (AsmOperand::Imm(imm16), AsmOperand::Imm(imm8)) = (&ops[0], &ops[1]) {
                     self.emit(&[0xC8, *imm16 as u8, (*imm16 >> 8) as u8, *imm8 as u8]);
                 } else {
-                    self.asm_warn("enter needs imm16, imm8");
+                    self.asm_reject("enter needs imm16, imm8");
                 }
             },
             "into" => {
-                self.asm_warn("into is 80286 legacy");
+                self.asm_reject("into is 80286 legacy");
             },
 
             // === BMI1/BMI2 扩展 ===
@@ -2780,10 +2780,10 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 0);
                         self.emit(&[0xF2, Self::modrm_reg_reg(*d, *s)]);
                     } else {
-                        self.asm_warn("andn needs GPR operands");
+                        self.asm_reject("andn needs GPR operands");
                     }
                 } else {
-                    self.asm_warn("andn needs reg, reg, reg");
+                    self.asm_reject("andn needs reg, reg, reg");
                 }
             },
             // bextr: VEX.NDS.128.0F38.W0 F7 /r (dst, src1, src2)
@@ -2795,10 +2795,10 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 0);
                         self.emit(&[0xF7, Self::modrm_reg_reg(*d, *s)]);
                     } else {
-                        self.asm_warn("bextr needs GPR operands");
+                        self.asm_reject("bextr needs GPR operands");
                     }
                 } else {
-                    self.asm_warn("bextr needs reg, reg, reg");
+                    self.asm_reject("bextr needs reg, reg, reg");
                 }
             },
             // blsi: VEX.NDS.128.0F38.W0 F3/3 (dst, src)
@@ -2808,10 +2808,10 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *d, 0, 0);
                         self.emit(&[0xF3, Self::modrm_reg_reg(3, *s)]);
                     } else {
-                        self.asm_warn("blsi needs GPR operands");
+                        self.asm_reject("blsi needs GPR operands");
                     }
                 } else {
-                    self.asm_warn("blsi needs reg, reg");
+                    self.asm_reject("blsi needs reg, reg");
                 }
             },
             // blsmsk: VEX.NDS.128.0F38.W0 F3/2 (dst, src)
@@ -2821,10 +2821,10 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *d, 0, 0);
                         self.emit(&[0xF3, Self::modrm_reg_reg(2, *s)]);
                     } else {
-                        self.asm_warn("blsmsk needs GPR operands");
+                        self.asm_reject("blsmsk needs GPR operands");
                     }
                 } else {
-                    self.asm_warn("blsmsk needs reg, reg");
+                    self.asm_reject("blsmsk needs reg, reg");
                 }
             },
             // blsr: VEX.NDS.128.0F38.W0 F3/1 (dst, src)
@@ -2834,10 +2834,10 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *d, 0, 0);
                         self.emit(&[0xF3, Self::modrm_reg_reg(1, *s)]);
                     } else {
-                        self.asm_warn("blsr needs GPR operands");
+                        self.asm_reject("blsr needs GPR operands");
                     }
                 } else {
-                    self.asm_warn("blsr needs reg, reg");
+                    self.asm_reject("blsr needs reg, reg");
                 }
             },
             // bzhi: VEX.NDS.128.0F38.W0 F5 /r (dst, src1, src2)
@@ -2849,10 +2849,10 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 0);
                         self.emit(&[0xF5, Self::modrm_reg_reg(*d, *s)]);
                     } else {
-                        self.asm_warn("bzhi needs GPR operands");
+                        self.asm_reject("bzhi needs GPR operands");
                     }
                 } else {
-                    self.asm_warn("bzhi needs reg, reg, reg");
+                    self.asm_reject("bzhi needs reg, reg, reg");
                 }
             },
             // mulx: VEX.NDS.128.F2.0F38.W0 F6 /r (dst, src1, src2)
@@ -2864,10 +2864,10 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 3);
                         self.emit(&[0xF6, Self::modrm_reg_reg(*d, *s)]);
                     } else {
-                        self.asm_warn("mulx needs GPR operands");
+                        self.asm_reject("mulx needs GPR operands");
                     }
                 } else {
-                    self.asm_warn("mulx needs reg, reg, reg");
+                    self.asm_reject("mulx needs reg, reg, reg");
                 }
             },
             // pdep: VEX.NDS.128.F2.0F38.W0 F2 /r (dst, src1, src2)
@@ -2879,10 +2879,10 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 3);
                         self.emit(&[0xF2, Self::modrm_reg_reg(*d, *s)]);
                     } else {
-                        self.asm_warn("pdep needs GPR operands");
+                        self.asm_reject("pdep needs GPR operands");
                     }
                 } else {
-                    self.asm_warn("pdep needs reg, reg, reg");
+                    self.asm_reject("pdep needs reg, reg, reg");
                 }
             },
             // pext: VEX.NDS.128.F3.0F38.W0 F5 /r (dst, src1, src2)
@@ -2894,10 +2894,10 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 2);
                         self.emit(&[0xF5, Self::modrm_reg_reg(*d, *s)]);
                     } else {
-                        self.asm_warn("pext needs GPR operands");
+                        self.asm_reject("pext needs GPR operands");
                     }
                 } else {
-                    self.asm_warn("pext needs reg, reg, reg");
+                    self.asm_reject("pext needs reg, reg, reg");
                 }
             },
             // rorx: VEX.128.F2.0F3A.W0 F0 /r ib (dst, src, imm8)
@@ -2909,10 +2909,10 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 3, 1, 0, 0, 3);
                         self.emit(&[0xF0, Self::modrm_reg_reg(*d, *s), *imm as u8]);
                     } else {
-                        self.asm_warn("rorx needs GPR operands");
+                        self.asm_reject("rorx needs GPR operands");
                     }
                 } else {
-                    self.asm_warn("rorx needs imm, reg, reg");
+                    self.asm_reject("rorx needs imm, reg, reg");
                 }
             },
             // sarx/shlx/shrx: VEX.NDS.128.0F38.W0 F7/F7/F7 /r (dst, src1, src2)
@@ -2924,10 +2924,10 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 0);
                         self.emit(&[0xF7, Self::modrm_reg_reg(7, *s)]);
                     } else {
-                        self.asm_warn("sarx needs GPR operands");
+                        self.asm_reject("sarx needs GPR operands");
                     }
                 } else {
-                    self.asm_warn("sarx needs reg, reg, reg");
+                    self.asm_reject("sarx needs reg, reg, reg");
                 }
             },
             "shlx" if ops.len() == 3 => {
@@ -2938,10 +2938,10 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 0);
                         self.emit(&[0xF7, Self::modrm_reg_reg(6, *s)]);
                     } else {
-                        self.asm_warn("shlx needs GPR operands");
+                        self.asm_reject("shlx needs GPR operands");
                     }
                 } else {
-                    self.asm_warn("shlx needs reg, reg, reg");
+                    self.asm_reject("shlx needs reg, reg, reg");
                 }
             },
             "shrx" if ops.len() == 3 => {
@@ -2952,10 +2952,10 @@ impl Codegen {
                         self.emit_vex4_prefix(*d, *s, 2, 1, *v, 0, 0);
                         self.emit(&[0xF7, Self::modrm_reg_reg(5, *s)]);
                     } else {
-                        self.asm_warn("shrx needs GPR operands");
+                        self.asm_reject("shrx needs GPR operands");
                     }
                 } else {
-                    self.asm_warn("shrx needs reg, reg, reg");
+                    self.asm_reject("shrx needs reg, reg, reg");
                 }
             },
             // adcx: 66 0F 38 F6 /r (dst, src)
@@ -2971,10 +2971,10 @@ impl Codegen {
                             Self::modrm_reg_reg(*d, *s),
                         ]);
                     } else {
-                        self.asm_warn("adcx needs GPR operands");
+                        self.asm_reject("adcx needs GPR operands");
                     }
                 } else {
-                    self.asm_warn("adcx needs reg, reg");
+                    self.asm_reject("adcx needs reg, reg");
                 }
             },
             // adox: F3 0F 38 F6 /r (dst, src)
@@ -2990,19 +2990,18 @@ impl Codegen {
                             Self::modrm_reg_reg(*d, *s),
                         ]);
                     } else {
-                        self.asm_warn("adox needs GPR operands");
+                        self.asm_reject("adox needs GPR operands");
                     }
                 } else {
-                    self.asm_warn("adox needs reg, reg");
+                    self.asm_reject("adox needs reg, reg");
                 }
             },
 
-            // 未识别指令: 硬错误 (P0-5: 不再静默替换为 NOP)
+            // 未识别指令: 不在这里报错也不在这里降级。
+            // 标记拒收, 由调用方 `emit_asm_line` 拿原始行文本记为透传 (P0-5:
+            // 仍然绝不静默替换为 NOP)。
             _ => {
-                self.asm_warn(&format!(
-                    "unsupported inline asm instruction '{}' (asm line {})",
-                    mnemonic, self.current_asm_line,
-                ));
+                self.asm_line_rejected = true;
             },
         }
     }
@@ -3144,6 +3143,10 @@ impl Codegen {
             self.emit(&[seg_pfx]);
         }
         self.emit_asm_instr(mnemonic, &ops);
+        // 本后端编不出这一行: 把**原始行文本**记为透传, 交 GAS 接手。
+        if std::mem::take(&mut self.asm_line_rejected) {
+            self.asm_reject(&line);
+        }
         // 记录逐指令调试信息 (用于 DWARF .debug_line per-instruction 条目)
         if self.debug_level > 0 && debug_src_line > 0 {
             let pc_end = self.code.len() as u64;
@@ -3571,7 +3574,7 @@ impl Codegen {
         }
     }
     pub(crate) fn emit_unsupported_asm_operands(&mut self, context: &str) {
-        self.asm_warn(&format!("unsupported {context} operand pattern"));
+        self.asm_reject(&format!("unsupported {context} operand pattern"));
     }
     pub(crate) fn finish_empty_asm_function(&mut self, name: &str, start: u64) {
         if self.pos() != start || !self.asm_symbol_is_function(name) {

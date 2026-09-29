@@ -777,7 +777,7 @@ impl Codegen {
                 // 传给 asm goto, 跨函数边界使用会导致未定义行为。
                 for inp in inputs.iter() {
                     if matches!(inp, Expr::LabelAddr { .. }) {
-                        self.asm_warn(
+                        self.asm_reject(
                             "label address used in asm goto may be invalid \
                              if the label is in a different function",
                         );

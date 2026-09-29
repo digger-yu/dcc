@@ -63,7 +63,7 @@ impl Codegen {
                 self.emit(&[0xFF, 0xD0]);
             },
             _ => {
-                self.asm_warn("unsupported call operand pattern");
+                self.asm_reject("unsupported call operand pattern");
             },
         }
     }
@@ -82,9 +82,9 @@ impl Codegen {
             },
             _ => {
                 if is_call {
-                    self.asm_warn("lcall needs memory operand");
+                    self.asm_reject("lcall needs memory operand");
                 } else {
-                    self.asm_warn("ljmp needs memory operand");
+                    self.asm_reject("ljmp needs memory operand");
                 }
                 self.emit(&[0x90]);
             },
@@ -142,7 +142,7 @@ impl Codegen {
                 }
             },
             _ => {
-                self.asm_warn("unsupported in port operand");
+                self.asm_reject("unsupported in port operand");
             },
         }
         let _ = val;
@@ -154,7 +154,7 @@ impl Codegen {
         if let AsmOperand::Imm(v) = op {
             self.emit(&[0xCD, *v as u8]);
         } else {
-            self.asm_warn("unsupported int operand pattern");
+            self.asm_reject("unsupported int operand pattern");
         }
     }
     pub(crate) fn emit_asm_jcc(&mut self, op: &AsmOperand, cc: u8) {
@@ -190,7 +190,7 @@ impl Codegen {
                 let _ = at;
             },
             _ => {
-                self.asm_warn("unsupported jcc operand pattern");
+                self.asm_reject("unsupported jcc operand pattern");
             },
         }
     }
@@ -248,7 +248,7 @@ impl Codegen {
                 }
             },
             _ => {
-                self.asm_warn("unsupported jmp operand pattern");
+                self.asm_reject("unsupported jmp operand pattern");
             },
         }
     }
@@ -304,7 +304,7 @@ impl Codegen {
                 }
             },
             _ => {
-                self.asm_warn("unsupported out port operand");
+                self.asm_reject("unsupported out port operand");
             },
         }
         let _ = val;

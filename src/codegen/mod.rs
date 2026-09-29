@@ -1252,11 +1252,18 @@ fn debug_abs_reloc_type(arch: crate::cli::Arch) -> u32 {
 /// Unified code generation entry point
 /// First Principle: use registry to find backend, then delegate
 /// This replaces the giant match statement with a clean abstraction
+///
+/// 返回 `Emitted` 而不是 `Vec<u8>`: “这次发的是 ELF 还是 GAS 文本”必须
+/// 在类型上不可省略, 否则降级后的文本会被写进 `.o` 并按可执行文件算权限位。
 pub fn emit(
     module: &Module,
     target: &Target,
     opts: EmitOptions,
-) -> Result<Vec<u8>, Vec<Diagnostic>> {
+) -> Result<shared::asm_source::Emitted, Vec<Diagnostic>> {
+    use crate::cli::AsmFallback;
+    use shared::asm_source::{passthrough_diagnostics, Emitted};
+    use shared::features::Feature;
+
     // -S 与 -c 都需后端以可重定位模式构建 (旧行为: relocatable || emit_asm)
     let relocatable = opts.relocatable || opts.emit_asm;
     // Check if backend exists for this architecture (no panic!)
@@ -1275,9 +1282,10 @@ pub fn emit(
         opts: &opts,
     };
 
-    // -S 路径: 直接返回汇编文本字节, 不做 ELF 打包
+    // -S 路径: 直接返回汇编文本, 不做 ELF 打包
     if opts.emit_asm {
-        return backend.render_asm(&input);
+        let bytes = backend.render_asm(&input)?;
+        return Ok(Emitted::Text(utf8_text(bytes, &opts.source_name)?));
     }
 
     // Perform compilation through unified trait
@@ -1288,6 +1296,46 @@ pub fn emit(
         return Err(image.diagnostics);
     }
 
+    // ===== TU 级降级判定 (全仓唯一一处) =====
+    //
+    // 判据是结构化的 `image.asm_passthrough`, 不是扫 diagnostic 字符串。
+    // 降级动作调 `render_asm_from_state`: 消费刚跑完的那一次 codegen,
+    // 绝不重跑 —— 重跑就是本方案要消灭的“同一源码两次结果不同”。
+    if !image.asm_passthrough.is_empty() {
+        match opts.asm_fallback {
+            AsmFallback::Error => return Err(passthrough_diagnostics(&image.asm_passthrough)),
+            AsmFallback::Gas => {
+                // 降级的前提: 本后端的 -S 是真文本。不具备时给出准确的
+                // 能力缺失错误, 而不是写一个汇编不过的 .s 冒充成功。
+                if !backend.features().has(Feature::GasTextOutput) {
+                    return Err(vec![Diagnostic::err(
+                        "E0312",
+                        format!(
+                            "--asm-fallback=gas is unavailable for {:?} target: this backend's \
+                             -S output is not yet a complete, assemblable translation of the TU",
+                            target.arch
+                        ),
+                        Span::point(&opts.source_name, 0, 0),
+                    )]);
+                }
+                let bytes = backend.render_asm_from_state(module)?;
+                return Ok(Emitted::Text(utf8_text(bytes, &opts.source_name)?));
+            },
+        }
+    }
+
     // Packaging (ELF ET_REL / ET_EXEC / COFF) is the backend's own responsibility
-    backend.build_object()
+    Ok(Emitted::Object(backend.build_object()?))
+}
+
+/// 后端文本均以 ASCII/GAS 语法输出; 非 UTF-8 字节意味着后端渲染出错,
+/// 必须作为硬错误报出而非用 lossy 转换静默替换成 U+FFFD。
+fn utf8_text(bytes: Vec<u8>, source: &str) -> Result<String, Vec<Diagnostic>> {
+    String::from_utf8(bytes).map_err(|_| {
+        vec![Diagnostic::err(
+            "E0301",
+            format!("assembly text output for '{source}' is not valid UTF-8"),
+            Span::point(source, 0, 0),
+        )]
+    })
 }

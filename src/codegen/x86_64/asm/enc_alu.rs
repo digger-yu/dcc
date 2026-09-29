@@ -100,7 +100,7 @@ impl Codegen {
                     }
                 } else if bits == 8 {
                     // 8 位但 imm 越界: 报错
-                    self.asm_warn(&format!("8-bit ALU immediate out of range ({})", v));
+                    self.asm_reject(&format!("8-bit ALU immediate out of range ({})", v));
                     self.emit(&[0x90]);
                 } else if *v >= i32::MIN as i64 && *v <= i32::MAX as i64 {
                     self.emit(&[0x81, Self::modrm_reg_reg(op, *d)]);
@@ -228,7 +228,7 @@ impl Codegen {
                     let pos = self.pos() - 4 - if *v >= -128 && *v <= 127 { 1 } else { 4 };
                     self.pending_data_rels.push((pos, sym.clone()));
                 } else {
-                    self.asm_warn("unsupported ALU operand pattern");
+                    self.asm_reject("unsupported ALU operand pattern");
                 }
             },
         }
@@ -344,7 +344,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             _ => {
-                self.asm_warn("unsupported bit-test operand pattern");
+                self.asm_reject("unsupported bit-test operand pattern");
             },
         }
     }
@@ -363,7 +363,7 @@ impl Codegen {
                 }
                 self.emit(&[0x0F, 0xC8 + (r & 7)]);
             } else if bits == 16 {
-                self.asm_warn("bswap on 16-bit register not supported");
+                self.asm_reject("bswap on 16-bit register not supported");
             } else {
                 if *r >= 8 {
                     self.emit(&[0x41]);
@@ -371,7 +371,7 @@ impl Codegen {
                 self.emit(&[0x0F, 0xC8 + (r & 7)]);
             }
         } else {
-            self.asm_warn("unsupported bswap operand pattern");
+            self.asm_reject("unsupported bswap operand pattern");
         }
     }
     pub(crate) fn emit_asm_cmov(&mut self, src: &AsmOperand, dst: &AsmOperand, cc: u8, bits: u8) {
@@ -413,7 +413,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             _ => {
-                self.asm_warn("unsupported cmov operand pattern");
+                self.asm_reject("unsupported cmov operand pattern");
             },
         }
     }
@@ -493,7 +493,7 @@ impl Codegen {
                 });
             },
             _ => {
-                self.asm_warn("unsupported cmpxchg operand pattern");
+                self.asm_reject("unsupported cmpxchg operand pattern");
             },
         }
     }
@@ -525,7 +525,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(1, *disp, *base, *index, *scale);
             },
             _ => {
-                self.asm_warn("cmpxchg16b requires a memory operand");
+                self.asm_reject("cmpxchg16b requires a memory operand");
             },
         }
     }
@@ -567,7 +567,7 @@ impl Codegen {
                 self.pending_data_rels.push((pos, sym.clone()));
             },
             _ => {
-                self.asm_warn("cmpxchg8b requires a memory operand");
+                self.asm_reject("cmpxchg8b requires a memory operand");
             },
         }
     }
@@ -622,7 +622,7 @@ impl Codegen {
                 self.pending_data_rels.push((pos, sym.clone()));
             },
             _ => {
-                self.asm_warn("unsupported imul2 operand pattern");
+                self.asm_reject("unsupported imul2 operand pattern");
             },
         }
     }
@@ -684,11 +684,11 @@ impl Codegen {
                     }
                 },
                 _ => {
-                    self.asm_warn("unsupported imul3 src operand pattern");
+                    self.asm_reject("unsupported imul3 src operand pattern");
                 },
             }
         } else {
-            self.asm_warn("unsupported imul3 operand pattern");
+            self.asm_reject("unsupported imul3 operand pattern");
         }
     }
     pub(crate) fn emit_asm_popcnt(&mut self, src: &AsmOperand, dst: &AsmOperand, bits: u8) {
@@ -743,7 +743,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             _ => {
-                self.asm_warn("unsupported popcnt operand pattern");
+                self.asm_reject("unsupported popcnt operand pattern");
             },
         }
     }
@@ -788,7 +788,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(0, *disp, *base, *index, *scale);
             },
             _ => {
-                self.asm_warn("unsupported setcc operand pattern");
+                self.asm_reject("unsupported setcc operand pattern");
             },
         }
     }
@@ -828,7 +828,7 @@ impl Codegen {
                     self.emit_asm_modrm_mem_only(op, *disp, *base, *index, *scale);
                 },
                 _ => {
-                    self.asm_warn("shift SegMem: only $imm or %cl supported");
+                    self.asm_reject("shift SegMem: only $imm or %cl supported");
                 },
             }
             return;
@@ -922,7 +922,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(op, *disp, *base, *index, *scale);
             },
             _ => {
-                self.asm_warn("unsupported shift operand pattern");
+                self.asm_reject("unsupported shift operand pattern");
             },
         }
     }
@@ -990,7 +990,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             _ => {
-                self.asm_warn("unsupported shld/shrd operand pattern");
+                self.asm_reject("unsupported shld/shrd operand pattern");
             },
         }
     }
@@ -1054,7 +1054,7 @@ impl Codegen {
                         // 负值: 0xF6 /0 ib 接受 unsigned 8-bit, 负值截断为 u8
                         self.emit(&[0xF6, Self::modrm_reg_reg(0, *d), *v as u8]);
                     } else {
-                        self.asm_warn(&format!("8-bit test immediate out of range ({})", v));
+                        self.asm_reject(&format!("8-bit test immediate out of range ({})", v));
                         self.emit(&[0x90]);
                     }
                 } else if *v >= -128 && *v <= 127 && (*d & 7) == 0 {
@@ -1143,12 +1143,12 @@ impl Codegen {
                 } else if *v >= i32::MIN as i64 && *v <= i32::MAX as i64 {
                     self.emit(&(*v as i32).to_le_bytes());
                 } else {
-                    self.asm_warn(&format!("32/64-bit test mem immediate out of range ({})", v));
+                    self.asm_reject(&format!("32/64-bit test mem immediate out of range ({})", v));
                     self.emit(&[0x90]);
                 }
             },
             _ => {
-                self.asm_warn("unsupported test operand pattern");
+                self.asm_reject("unsupported test operand pattern");
             },
         }
     }
@@ -1196,7 +1196,7 @@ impl Codegen {
                 self.pending_data_rels.push((pos, sym.clone()));
             },
             _ => {
-                self.asm_warn("unsupported unary operand pattern");
+                self.asm_reject("unsupported unary operand pattern");
             },
         }
     }
@@ -1248,7 +1248,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             _ => {
-                self.asm_warn("unsupported xadd operand pattern");
+                self.asm_reject("unsupported xadd operand pattern");
             },
         }
     }
@@ -1318,7 +1318,7 @@ impl Codegen {
             self.emit(&[Self::rex(w, *s, index.unwrap_or(0), *base), opcode]);
             self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
         } else {
-            self.asm_warn("unsupported xchg operand pattern");
+            self.asm_reject("unsupported xchg operand pattern");
         }
     }
     pub(crate) fn parse_cmov_cond(cond: &str) -> (Option<u8>, u8) {

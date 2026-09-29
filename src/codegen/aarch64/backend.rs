@@ -12,6 +12,7 @@ use crate::codegen::shared::backend::{
 use crate::codegen::shared::elf;
 use crate::codegen::shared::features::FeatureSet;
 use crate::diagnostics::Diagnostic;
+use crate::ir::Module;
 
 impl Backend for Aarch64Codegen {
     fn arch(&self) -> Arch {
@@ -25,20 +26,28 @@ impl Backend for Aarch64Codegen {
     fn compile(&mut self, input: &CompileInput<'_>) -> Result<CommonImage, Vec<Diagnostic>> {
         apply_emit_options(self, input);
         self.compile(input.module);
-        if !self.diagnostics.is_empty() {
+        // 统一失败策略: 只有 Severity::Error 才构成失败。旧写法
+        // `!diagnostics.is_empty()` 把 warning 也当错误上抛,
+        // 会使任何新增警告直接弄挂编译。
+        if crate::codegen::has_fatal_diagnostics(&self.diagnostics) {
             return Err(self.diagnostics.clone());
         }
         Ok(build_image(self))
     }
 
     fn render_asm(&mut self, input: &CompileInput<'_>) -> Result<Vec<u8>, Vec<Diagnostic>> {
+        // -S 不再是独立的第二套 codegen: 与 -c 跑同一次 compile,
+        // 只是换一个渲染器。这是“一次分配、多处复用”在本后端的落点。
         apply_emit_options(self, input);
-        self.set_asm_text_mode(true);
         self.compile(input.module);
-        if !self.diagnostics.is_empty() {
+        self.render_asm_from_state(input.module)
+    }
+
+    fn render_asm_from_state(&mut self, module: &Module) -> Result<Vec<u8>, Vec<Diagnostic>> {
+        if crate::codegen::has_fatal_diagnostics(&self.diagnostics) {
             return Err(self.diagnostics.clone());
         }
-        Ok(self.build_asm_output(input.module).into_bytes())
+        Ok(self.build_asm_output(module).into_bytes())
     }
 
     fn build_object(&mut self) -> Result<Vec<u8>, Vec<Diagnostic>> {
@@ -102,5 +111,7 @@ fn build_image(cg: &Aarch64Codegen) -> CommonImage {
             .collect(),
         diagnostics: cg.diagnostics.clone(),
         func_sizes: cg.func_sizes.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+        asm_passthrough: cg.asm_passthrough.clone(),
+        asm_passthrough_regions: cg.asm_passthrough_regions.clone(),
     }
 }

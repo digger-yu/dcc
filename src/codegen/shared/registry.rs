@@ -6,6 +6,7 @@ use crate::codegen::shared::backend::{Backend, CommonImage, CompileInput};
 use crate::codegen::shared::features::FeatureSet;
 use crate::codegen::x86_64;
 use crate::diagnostics::Diagnostic;
+use crate::ir::Module;
 use crate::target::Target;
 
 use crate::codegen::mips;
@@ -74,6 +75,31 @@ impl Backend for AnyBackend {
             AnyBackend::Mips(cg) => <mips::MipsCodegen as Backend>::render_asm(cg, input),
             AnyBackend::Mips64(cg) => <mips64::Mips64Codegen as Backend>::render_asm(cg, input),
             AnyBackend::RiscV64(cg) => <riscv64::Riscv64Codegen as Backend>::render_asm(cg, input),
+        }
+    }
+
+    /// 从已 `compile()` 的状态渲染 GAS 文本 (TU 级降级路径)。
+    ///
+    /// 与 `render_asm()` 同为 UFCS 显式走 trait: 包装层不得自己重跑 codegen,
+    /// 否则就是在已填满的缓冲上再编译一轮 (字节翻倍 / 符号重复 / 诊断累积)。
+    fn render_asm_from_state(&mut self, module: &Module) -> Result<Vec<u8>, Vec<Diagnostic>> {
+        match self {
+            AnyBackend::X86_64(cg) => {
+                <x86_64::Codegen as Backend>::render_asm_from_state(cg, module)
+            },
+            AnyBackend::AArch64(cg) => {
+                <aarch64::Aarch64Codegen as Backend>::render_asm_from_state(cg, module)
+            },
+            AnyBackend::Arm(cg) => <arm::ArmCodegen as Backend>::render_asm_from_state(cg, module),
+            AnyBackend::Mips(cg) => {
+                <mips::MipsCodegen as Backend>::render_asm_from_state(cg, module)
+            },
+            AnyBackend::Mips64(cg) => {
+                <mips64::Mips64Codegen as Backend>::render_asm_from_state(cg, module)
+            },
+            AnyBackend::RiscV64(cg) => {
+                <riscv64::Riscv64Codegen as Backend>::render_asm_from_state(cg, module)
+            },
         }
     }
 

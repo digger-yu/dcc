@@ -53,7 +53,7 @@ impl Codegen {
                 self.pending_data_rels.push((pos, sym.clone()));
             },
             _ => {
-                self.asm_warn("unsupported clflush operand pattern");
+                self.asm_reject("unsupported clflush operand pattern");
             },
         }
     }
@@ -63,7 +63,7 @@ impl Codegen {
             self.emit(&[Self::rex(true, 0, 0, *r)]);
             self.emit(&[0x0F, 0xAE, ((ext & 7) << 3) | (r & 7)]);
         } else {
-            self.asm_warn("fsgsbase requires a register operand");
+            self.asm_reject("fsgsbase requires a register operand");
         }
     }
     pub(crate) fn emit_asm_gdt(&mut self, op: &AsmOperand, ext: u8) {
@@ -94,7 +94,7 @@ impl Codegen {
                 self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
             },
             _ => {
-                self.asm_warn("unsupported gdt operand pattern");
+                self.asm_reject("unsupported gdt operand pattern");
             },
         }
     }
@@ -130,11 +130,11 @@ impl Codegen {
                     self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
                 },
                 _ => {
-                    self.asm_warn("invpcid needs memory operand");
+                    self.asm_reject("invpcid needs memory operand");
                 },
             }
         } else {
-            self.asm_warn("invpcid needs register operand");
+            self.asm_reject("invpcid needs register operand");
         }
     }
     pub(crate) fn emit_asm_prefetch(&mut self, op: &AsmOperand, hint: u8) {
@@ -169,7 +169,7 @@ impl Codegen {
             let pos = self.pos() - 4;
             self.pending_data_rels.push((pos, sym.clone()));
         } else {
-            self.asm_warn("unsupported prefetch operand pattern");
+            self.asm_reject("unsupported prefetch operand pattern");
         }
     }
     pub(crate) fn emit_asm_rdpid(&mut self, op: &AsmOperand) {
@@ -180,7 +180,7 @@ impl Codegen {
             }
             self.emit(&[0x0F, 0xC7, 0xF8 | (r & 7)]);
         } else {
-            self.asm_warn("rdpid requires a register operand");
+            self.asm_reject("rdpid requires a register operand");
         }
     }
 }
