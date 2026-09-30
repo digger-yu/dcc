@@ -1218,6 +1218,28 @@ impl Codegen {
         self.vec_temp_off + (slot as i64 * slot_bytes)
     }
 
+    /// 绑定表是本函数物理寄存器所有权的真源之一。一个名字绑到 callee-saved 池里
+    /// 的寄存器之后, 那个寄存器必须同时登记两件事, 否则就是「同一个寄存器被两个人
+    /// 拥有」, 而两边都会毫无提示地覆盖对方:
+    ///   * `callee_saved_used` 对应位 —— 序言的四条保存指令先无条件发射, 函数体生成
+    ///     完之后由 `patch_callee_saves` 把「本函数没用到」的那些改成 nop。不置位就
+    ///     等于本函数可以毁掉调用者存放在该寄存器里的值: 实测调用方把二元式左操作数
+    ///     溅在 %rbx 上并跨一次调用保活, 被调方绑了 %rbx 却没保存, 结果 1500 而 gcc
+    ///     是 500。
+    ///   * `reg_allocated` 对应位 —— 临时值池 (`alloc_callee_saved`) 不能再把这个
+    ///     寄存器发出去, 否则表达式溅出直接盖掉变量的家: 实测 `register long v
+    ///     asm("rbx") = 7` 在一次 `(q + r) * g(s)` 之后读出 25。
+    /// 绑到 caller-saved 或固定用途寄存器 (rax/rcx/rdx/rsi/rdi/r8/r9/rsp/rbp/r13)
+    /// 不在本函数的保护能力之内: 表达式求值每时每刻都在用它们, GCC 为此建的是完整的
+    /// 干涉模型而不是一个位图。这条边界如实记在 docs/ssa-pass-upgrade-plan.md。
+    pub fn claim_bound_register(&mut self, reg: u8) {
+        let idx = (0..self.callee_saved_pool.len()).find(|&i| self.callee_saved_pool[i] == reg);
+        if let Some(i) = idx {
+            self.reg_allocated |= 1 << i;
+            self.callee_saved_used |= 1 << i;
+        }
+    }
+
     pub fn alloc_callee_saved(&mut self) -> Option<u8> {
         for i in 0..4 {
             if self.reg_allocated & (1 << i) == 0 {
@@ -1230,6 +1252,12 @@ impl Codegen {
     }
 
     pub fn free_callee_saved(&mut self, reg: u8) {
+        // 变量的家不是临时值: claim 之后 `alloc_callee_saved` 就不会再发这个寄存器,
+        // 所以正常路径到不了这里。留这道门是让「把绑定中的寄存器标回空闲」在未来
+        // 任何新增的释放点上都直接失效, 而不是又退回本文件刚修掉的缺陷。
+        if self.reg_bindings.values().any(|&r| r == reg) {
+            return;
+        }
         for i in 0..4 {
             if self.callee_saved_pool[i] == reg {
                 self.reg_allocated &= !(1 << i);

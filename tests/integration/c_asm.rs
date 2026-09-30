@@ -436,6 +436,41 @@ fn asm_register_binding_yields_to_address_escape() {
     }
 }
 
+/// `register asm` 绑定的寄存器是向调用者借的：借之前必须保存，借期间不得再当临时值
+/// 发出去（绑定表就是寄存器所有权的真源）。
+///
+/// 三条形态的实测错值全部只在 -O0/-O1 出现（-O2/-O3 换了表达式形状，恰好没走溅出
+/// 路径），所以逐档与 gcc 对照 —— 只跑默认档或只跑 -O2 都会漏掉一整类错值。
+/// 静态反向对照钉住「绑定仍然生效」：判据不能退化成把 `register asm` 关掉。
+#[test]
+fn asm_register_binding_owns_its_register() {
+    let source = include_str!("../fixtures/asm/asm_register_binding_clobber.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("asm-reg-bind-owns", source, &[flag]),
+            0,
+            "{flag}: 绑定寄存器的保存/占用判定丢了值"
+        );
+    }
+    let (build, asm_text) = run_asm_output_test("asm-reg-bind-owns-asm", source);
+    assert!(build.status.success(), "stderr: {}", String::from_utf8_lossy(&build.stderr));
+    let body = extract_function_body(&asm_text, "pinned");
+    assert!(body.contains("mov %rax, %rbx"), "绑定的变量必须真的住在 %rbx 里:\n{body}");
+    assert!(
+        body.contains("mov %rbx, -16(%r13)"),
+        "绑定过 %rbx 的函数必须保存它, 否则毁掉调用者存放在里面的值:\n{body}"
+    );
+    // file-scope 的绑定是第三条路：`compile_func` 开头就把绑定写进表，而位图在其后
+    // 被 `reset_reg_tracker()` 清零，所以必须在那里重新登记。这一条造不出稳定的运行时
+    // 错值（临时值池归还得很即时，%r14 极少跨调用保活），于是直接钉产物字节：
+    // 只要存在 `register long gv asm("r14")`，每个函数都必须真的保存 %r14。
+    // 修前实测整份目标文件里 `mov %r14,-0x20(%r13)`（4d 89 75 e0）出现 **0 次** ——
+    // 保存被 patch_callee_saves 改成了 nop，而函数体确实在往 %r14 里写。
+    let (text, _disasm) = compile_legacy_asm_object("asm-reg-bind-owns-obj", source);
+    assert_bytes_present(&text, &[0x4d, 0x89, 0x75, 0xe0], "序言保存 %r14");
+    assert_bytes_present(&text, &[0x49, 0x89, 0x5d, 0xf0], "序言保存 %rbx");
+}
+
 /// GNU 局部数字标签 6: / 6f / 6b
 #[test]
 fn asm_local_label_compiles() {

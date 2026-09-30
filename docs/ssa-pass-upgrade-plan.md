@@ -1084,6 +1084,67 @@ COMPILE-FAIL 仍 60、ADDR-NORM 仍 2（本轮零新增）；最小复现修后�
 `direct=222 local=222 global=222` 且与 gcc 一致，`DCC_SSA_BAIL=1` 打印
 `[SSA] f5 不进管线：聚合对象的整体赋值无法在 IR 里表达`。
 
+### 7.15 第 23 轮（下半）：P12 增量路线第一步——绑定表成为寄存器所有权的真源
+
+下一轮方向按选定意见走「P12 增量路线：先补 `ssa_gvn::walk_addr_of` 的遗漏变体，再接
+绑定表，并新增活性夹具」。**第一条已在第 19 轮做完**（`walk_expr_addr_of` /
+`walk_stmt_addr_of` 去掉了 `_ => {}` 并穷举所有变体，`addr_escaped_names` 是唯一入口，
+见 §7.8），本轮因此从「接绑定表」起步 —— 一上手就撞出两条比 GVN 严重得多的存量错值，
+而且它们**都不在优化档**：-O0/-O1 错，-O2/-O3 因为 SSA 往返换了表达式形状恰好躲过。
+
+**撞出来的三条（全部实测，修前 vs gcc）**：
+
+| 形态 | 修前 -O0 | gcc | 病灶 |
+|---|---|---|---|
+| 被调方把变量绑在 %rbx 且自己不做二元式；调用方把左操作数溅在 %rbx 上跨调用保活 | `r=1500` | `r=500` | 绑定从不登记 `callee_saved_used` ⇒ 序言那条保存被 `patch_callee_saves` 改成 nop，本函数毁掉调用者的寄存器 |
+| `register long v asm("rbx") = 7;` 之后同函数来一次 `(q + r) * g(s)` | `x=50 v=25` | `x=32 v=7` | 绑定从不登记 `reg_allocated` ⇒ 表达式溅出池把**同一个 %rbx** 当临时值发了出去，直接盖掉变量的家 |
+| file-scope `register long gv asm("r14")` | 整份目标文件里 `mov %r14,-0x20(%r13)` 出现 **0 次**，而函数体确实在往 %r14 写 | — | 第三条路：`compile_func` 开头就填好绑定表，位图随后被 `reset_reg_tracker()` 清零 |
+
+**根因只有一个**：`reg_bindings` 记录「某个名字住在某个物理寄存器」，却没有任何人把那个
+寄存器登记为**已占用**。x86_64 后端有两个互不相干的寄存器消费者 —— 表达式溅出池
+（`alloc_callee_saved`，按 `reg_allocated` 位图分配）与序言的 callee-saved 保存表（按
+`callee_saved_used` 位图回填）—— 两个都不看绑定表，于是同一个寄存器被三个人同时拥有，
+且没有任何一处会报错。这与 §7.8 的逸出判据是同一个模式：**所有权判据一旦有两套，弱的
+那一套决定产物**。
+
+修法（仍是「单一入口」，不做「读侧到处查表」）：
+
+| 改动 | 作用 |
+|---|---|
+| `Codegen::claim_bound_register` | 绑到 callee-saved 池里的寄存器时同时置 `reg_allocated` 与 `callee_saved_used` 两个位。文档里划出边界：绑到 caller-saved / 固定用途寄存器（rax/rcx/rdx/rsi/rdi/r8/r9/rsp/rbp/r13）不在这道门的能力之内 —— 表达式求值每时每刻都在用它们，GCC 为此建的是完整干涉图而不是一个位图 |
+| `reset_reg_tracker` | 清零位图后按 `reg_bindings` 重新登记，覆盖 file-scope 绑定那条「先填表、后清零」的顺序 |
+| `free_callee_saved` | 绑定中的寄存器不允许被标回空闲，防止未来新增的释放点再犯同一个错 |
+| `tests/fixtures/asm/asm_register_binding_clobber.c` | 新增活性夹具：两条运行时形态 + `pinned()` 反向对照（绑定必须仍然生效，判据不能退化成「把 register asm 关掉」）+ file-scope 形态 |
+| `asm_register_binding_owns_its_register` | 四档逐档 gcc 对照；静态反向对照 `mov %rax, %rbx` 钉住绑定；产物字节断言钉住序言保存（修前该字节序列出现 0 次） |
+
+**代价**：绑定生效期间临时值池少一个寄存器（4 → 3），更深的表达式退回帧槽。这是所有权
+模型的必然结果而不是回归 —— GCC 同样是在干涉图里减掉已被占用的寄存器。
+
+**本轮新测到、仍未闭合的两条（同一族，都已缩到一句话可复现）**：
+
+| 形态 | 实测 | 病灶 |
+|---|---|---|
+| `register unsigned int v asm("rbx"); v = 0x100000001UL; unsigned long back = v;` | -O0 `back=4294967297`，gcc 与 -O2 都是 `1` | 绑定路径是两次裸 64 位 `mov`：`mov_to_stack` 不按声明宽度截断，`mov_from_stack` 不做符号/零扩展 —— 而栈槽路径的宽度口径（`movsxd` / `movzx` / 32 位 store）是专门修过的（`access.rs` 里那段注释写着「按变量声明类型宽度存储」）。P12-B 想把 `int`/`char` 变量也灌进绑定表，必须先闭合这条 |
+| 四个 `"=q"` 输出 + `register long v asm("rbx")` | -O0 `after=22`，gcc `after=100` | `GP_LEGACY_POOL = [rax,rbx,rcx,rdx]` 服务 `q`/`Q` 约束，而 asm 规划器（`AsmRegisterPlanner::new` 只吃 clobber 列表）不知道绑定表 |
+
+第二条**不能**只把绑定寄存器加进规划器的排除集合：`q` 的可用池只有 4 个，一旦
+耗尽，现有回退 `pool[seed % 4]` 会返回一个**已经占用**的寄存器，那只是把错值换了
+一个方向。要先定的是「`q` 池耗尽时怎么办」—— gcc 在这种情况下报 impossible
+constraint，而 dcc 已经有 W0005「impossible constraint」这条诊断可复用。因此它与
+P12-B 的占用模型一起设计，本轮不半途改。
+
+**为什么这仍算 P12 的增量落地**：§7.3 已说明 P12 的字面形态（`ast::Ident` 携带寄存器号 +
+codegen 不再分配 + 真 SPILL/RELOAD）要重写发射模型，而实质价值是「让分配结果进入产物且
+正确」。本轮先把「谁拥有哪个寄存器」这一条判据闭合：自动分配灌进 `reg_bindings` 之前，
+这张表必须已经是所有消费者公认的真源，否则自动分配只是把同一个冲突从用户手里接过来。
+下一步（P12-B）才是 SSA 层活性区间 → 挑变量 → 灌进这张表，并且按 §7.5 的教训用**产物
+差异**证明它真的生效。
+
+**度量**：`cargo test --release -j2 -- --test-threads=2` 3088 通过 / 0 失败 / 零
+warning；OPT-DIFF 仍 **4（2 个文件）**（本轮改的是后端发射层，没有新增等价性债）；
+可复现门禁 5040 组合字节一致；`make golden-cross` 校验 6 项全 OK（arm/mips 产物未变，
+本项只影响 x86_64）；`check_fixtures` / `check_fixtures_selftest` 5/5 全过。
+
 ### 8. 第 6 轮：P10 已接入 + P16 分析层完成
 
 > 【校正】本小节写的是当时状态。其中 P16 表格的「准入」与「可观测」两行、以及表后
