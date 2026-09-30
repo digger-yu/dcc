@@ -1188,5 +1188,9 @@ impl Codegen {
                 self.upvar_intermediate_offsets = saved_upvar_intermediate;
             }
         }
+        // 缺陷 B: 本函数 (含上面刚发的嵌套函数) 收尾时, 指向内部 `.L` 标号的
+        // 跳转必须已全部可解析。并行 worker 里这一条把「标号在别的 chunk 被
+        // 同名覆盖」从静默误编译变成发射期错误 (而不是等到合并/回填之后)。
+        self.check_pending_labels_closed(&f.name.name);
     }
 }

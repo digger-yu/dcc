@@ -50,6 +50,10 @@ struct Dec<'a> {
     base: u64,
     calls: &'a HashMap<u64, String>,
     data: &'a HashMap<u64, String>,
+    /// 「地址 → 标号名」命名表, 与 `disassemble_range` 打印标号**定义**用的是
+    /// 同一份数据。缺陷 C 的根因就是定义侧查这张表、引用侧伪造名字, 两侧
+    /// 永远对不上, 导致 `-S` 产物交给 GAS 后生成针对未定义 `.L*` 的重定位。
+    labels: &'a BTreeMap<u64, Vec<&'a str>>,
 }
 
 impl<'a> Dec<'a> {
@@ -250,8 +254,38 @@ impl<'a> Dec<'a> {
         Some(format!("{inner}({base})"))
     }
 
-    fn rel_target(&self, rel: i32, insn_end: u64) -> String {
-        format!(".L{}", (insn_end as i64 + rel as i64) as u64)
+    /// 跳转 / 调用目标的唯一解析路径 (`jmp`、`jcc`、`call` 共用)。
+    ///
+    /// `site` 是 rel32/rel8 字段自身的地址 (即 `calls` 表的键), `insn_end` 是下一条
+    /// 指令地址。优先级不可颠倒:
+    ///
+    /// 1. `calls`: 发射期就记下来的**符号名**。经重定位解析的 `call`/`jmp` 在字节里
+    ///    只写了 addend 占位 (常为 0), 按地址算出来的「目标」是本指令的下一条,
+    ///    那一处恰好有自己的标号 —— 先查地址会把 `call foo` 渲染成 `call .Lnext`。
+    /// 2. `labels`: 与标号定义同一张表, 所以引用名与定义名不可能漂移。
+    /// 3. 两者都查不到 -> [`Self::unresolved_target`], 不得伪造 GAS 合法名。
+    fn jump_target(&self, site: u64, rel: i32, insn_end: u64) -> String {
+        if let Some(sym) = self.calls.get(&site) {
+            return sym.clone();
+        }
+        match insn_end.checked_add_signed(rel as i64) {
+            Some(target) => match self.labels.get(&target).and_then(|names| names.first()) {
+                Some(name) => (*name).to_string(),
+                None => Self::unresolved_target(target),
+            },
+            // 回绕的目标地址不可能是本 TU 内的合法标号, 同样不得臆造名字。
+            None => Self::unresolved_target(insn_end),
+        }
+    }
+
+    /// 未解析目标的渲染。
+    ///
+    /// 旧实现是 `format!(".L{}", addr)`: 造出一个**语法合法但从未定义**的标号,
+    /// GAS 把它当成未定义全局符号, 安静地发一条 `R_X86_64_PLT32/.L126` 重定位
+    /// —— 产出的 `.o` 能链、能装、跑必挂。`<>` 不是 GAS 表达式合法 token,
+    /// 因此汇编器会直接报错终止: 后端只能保证「不静默」, 不能保证猜对名字。
+    fn unresolved_target(target: u64) -> String {
+        format!("<dcc-unresolved-target-0x{:x}>", target)
     }
 
     fn prefix_str(pfx: &Prefixes) -> String {
@@ -377,21 +411,23 @@ impl<'a> Dec<'a> {
                 let rel = self.take_i8()? as i32;
                 Some((
                     self.pos - start,
-                    format!("{}jmp {}", Self::prefix_str(&pfx), self.rel_target(rel, off + 2)),
+                    format!(
+                        "{}jmp {}",
+                        Self::prefix_str(&pfx),
+                        self.jump_target(off + 1, rel, off + 2)
+                    ),
                 ))
             },
             0xE8 => {
                 self.take();
                 let rel = self.take_i32()?;
-                let sym = self.calls.get(&(off + 1)).cloned();
-                let target = sym.unwrap_or_else(|| self.rel_target(rel, off + 5));
+                let target = self.jump_target(off + 1, rel, off + 5);
                 Some((self.pos - start, format!("{}call {target}", Self::prefix_str(&pfx))))
             },
             0xE9 => {
                 self.take();
                 let rel = self.take_i32()?;
-                let sym = self.calls.get(&(off + 1)).cloned();
-                let target = sym.unwrap_or_else(|| self.rel_target(rel, off + 5));
+                let target = self.jump_target(off + 1, rel, off + 5);
                 Some((self.pos - start, format!("{}jmp {target}", Self::prefix_str(&pfx))))
             },
             0x31 if self.code.get(self.pos) == Some(&0xC0) => {
@@ -454,7 +490,10 @@ impl<'a> Dec<'a> {
                 };
                 let rel = self.take_i32()?;
                 let end = off + (self.pos - start) as u64;
-                Some((self.pos - start, format!("{cc} {}", self.rel_target(rel, end))))
+                Some((
+                    self.pos - start,
+                    format!("{cc} {}", self.jump_target(off + 2, rel, end)),
+                ))
             },
             0xAE if self.peek() == Some(0xF0) => {
                 self.take();
@@ -1819,6 +1858,7 @@ pub fn disassemble_range(
             base: base_offset,
             calls,
             data,
+            labels,
         };
         match dec.decode_one() {
             Some((len, text)) if len > 0 => {

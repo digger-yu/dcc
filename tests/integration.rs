@@ -46,6 +46,10 @@ include!("integration/cpp_runtime.rs");
 
 include!("integration/opt.rs");
 
+include!("integration/opt_licm.rs");
+
+include!("integration/opt_ssa_gate.rs");
+
 include!("integration/xfail.rs");
 
 include!("integration/glue_misc.rs");

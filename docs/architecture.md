@@ -179,6 +179,56 @@ src/codegen/shared/
 
 ---
 
+## 🧠 SSA 优化管线 (src/ssa.rs + src/ssa_passes.rs)
+
+入口 `opt.rs::run_ssa_passes`: 把结构化函数 `AST → SSA → pass → AST` 转一圈再回写
+`f.body`。**准入闸门**（三条，缺一不可）：
+
+| 闸门 | 作用 |
+|---|---|
+| `is_structured(body)` | 拒 goto / label / switch / asm goto 等非结构化控制流 |
+| `func_has_loop(f)` | 含 while/for/do 的函数不进 SSA —— `rebuild_cycle` 尚未正确（且该判据必须**穷举**所有可含语句的形态，包括 `Stmt::Switch` 的 case 体、`Stmt::Label`、语句表达式 `({...})`、嵌套函数体；`lower_switches_in_func` 在闸门**之后**才展开 switch，漏一个形态就等于让循环带着走进 SSA） |
+| `func_has_unsafe_ssa_pattern` / volatile 全局 | static 局部、带初值的数组、引用 volatile 全局的函数 |
+
+### 当前 pass 调度 (`run_with_opts`, 仅 -O2+ 进入)
+
+| # | pass | 对产物的影响 | 备注 |
+|---|---|---|---|
+| P2 | `strength_reduction` | 有 | 乘/除 2 幂 → 移位（按 dest 宽度与符号定宽） |
+| P3 | `ivop` | 有 | 归纳变量重写 |
+| P10 | `tail_call_optimization` | 有 | 自递归尾调用 → Jump(entry) |
+| P14 | `speculative_execution` | 有 | 分支条件的**依赖闭包**上提（不得按字典序重排） |
+| P17 | `gvn` | 有 | 全局值编号：整型同形计算跳块归一（`in[BB] = ⋂ out[pred]`）；内存读与浮点运算只块内复用；phi 退化与同块合并 |
+| P18 | `dead_store_elim` | 有 | 死存储消除：局部覆盖 + 单入链全局；volatile / 全局 / 被取址且逃逸的写一律保留 |
+| P19 | `jump_threading` | 有 | 常量分支折叠 + 空跳板链合并 + 不可达块剔除 + **CFG 缓存与 phi 行修补** |
+| P1 | `dead_inst_elim` / `dead_bb_elim` | 有 | GVN/穿线后的清理；**不得删具名变量的赋值**（重建后那个栈槽就永不写） |
+| P5 | `instruction_scheduling` | 有 (-O3) | 块内 list scheduling，依赖图驱动 |
+| P12b | `ubsan_ir_instrument` | 部分 | guard 已插；“重建时转 `__ubsan_handle_*`” 的说法开之前并不存在 |
+| P4/P13 | `alias_analysis_*` / `alias_set` | 无 | 结果被丢弃，仍待接入 P18/P20 |
+| P6/P7 | `pgo` / `auto_parallelization` | 无 | 以 `__dcc_*` hint 形式实现，重建时被丢弃（hint 本身在 AST 层由 `parallelize_block` 打标） |
+| P16 | 软件流水 | 仅有地基 | [src/ssa_pipelining.rs](file:///root/dcc/src/ssa_pipelining.rs)：依赖图（带距离/延迟，含内存定序与基名塌缩序边）、RecMII/ResMII、epi-cyclic 模调度 + 7 个单测。**不参与编译产物**：循环识别、prologue/kernel/epilogue 切分、IR 落地均未完成（分工与剩余项见该模块头部与 `docs/ssa-pass-upgrade-plan.md` §7） |
+
+**已删除的伪实现**（它们当时都报告 `changed = true` 却对机器码零影响，其中两条还会造成运行时错）：
+`function_attribute_propagation`（假 hint 造成 SEGV）、`register_allocation`（全局栈槽模型下不属本层）、
+`software_pipelining`（空函数体）、`loop_tiling` / `loop_interchange`（把一条指令原样复制一遍，破坏单赋值）。
+AST 层的同名伪流水 `loop_opt::software_pipeline_block` 也已删除：它只往循环前插一条
+`#pragma GCC pipelined` 的空 asm（后端当注释，实测 -O3 汇编 0 次出现），不产生任何流水变换。
+理由逐条写在 `src/ssa_passes.rs` 对应小节。
+
+### 本层三条硬约束
+
+1. **CFG 只能从终结符读**：`bb.preds` / `bb.succs` 是构造期缓存，改过 terminator 即脏；
+   只允许 `term_succs` / `collect_all_preds`，并在 pass 末尾 `refresh_cfg_caches`。
+2. **遍历序必须确定**：所有块级循环走 `ordered_block_names` / RPO，不得用 `blocks.values()`
+   （HashMap 随机序会直接泄入产物字节，破坏可复现性）。
+3. **返回值必须是真事**：`-> bool` 意味着“IR 真的改了”，驱动定点迭代；只插元数据就返回
+   true 会把调度器骗成无限循环。
+
+### Pass 级开关（风险兜底）
+
+`DCC_SSA_OFF=dse,gvn,jt,die,dbe` 可逐个关掉本轮新增的 pass，用于定位回归而不必重新编译。
+默认全部开启；该开关只用于诊断，**不得作为错漏的长期规避手段**。
+
 ## 📋 Implementation Phases with Design-First Approach
 
 ### Phase 1: Foundation (Weeks 1-2) - ✅ Done

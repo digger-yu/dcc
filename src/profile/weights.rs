@@ -3,8 +3,10 @@
 // 第一性原理: PGO / AutoFDO / LBR / MemProf 是四个独立数据源, 但都
 // 回答 "这个函数 / 边 / 分配点有多热?" 的同一问题. 编译器需要把四个
 // 源合并成一个统一的 hot/cold 标记, 喂给 codegen 决定段布局 (.text
-// vs .text.hot vs .text.unlikely) 与 hint Store (__dcc_section_hot /
-// __dcc_section_cold). 这一层是"权重下发"的桥梁.
+// vs .text.hot vs .text.unlikely). 真源是 `FuncDecl::is_hot` / `is_cold`
+// 这两个 AST 属性位 —— codegen 直接读它们; 不存在「hint Store」这一层
+// (旧的 `__dcc_section_hot/cold` Store 是对不存在符号的内存写, 已删).
+// 这一层是"权重下发"的桥梁.
 //
 // 当前实现: 每个数据源提供一个分类器 (Hot/Warm/Cold/Unknown), 合并
 // 策略是 **多源投票**: 任意一个源标 Hot 就 Hot, 全部标 Cold 才 Cold,

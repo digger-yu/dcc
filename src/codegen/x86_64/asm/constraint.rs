@@ -439,13 +439,11 @@ impl Codegen {
                 }
             }
         }
-        // 纯数字
-        if let Some(hex) = expr.strip_prefix("0x").or_else(|| expr.strip_prefix("0X")) {
-            if let Ok(v) = i64::from_str_radix(hex, 16) {
-                return (v, false);
-            }
-        }
-        if let Ok(v) = expr.parse::<i64>() {
+        // 纯数字。十六进制必须按 **u64** 宽度接受: `0xdeadbeefcafebabe` 这类 64 位全宽
+        // 常量超过 `i64::MAX`, 旧实现 `i64::from_str_radix` 直接失败 ⇒ 落到「其他符号名」
+        // 分支, 于是 `.quad 0xdeadbeefcafebabe` 变成一条**针对数字文本的符号引用**。
+        // GAS 把它当绝对量编码, 不产生任何重定位 —— 这里必须与 GAS 一致。
+        if let Some(v) = Self::parse_asm_number(expr) {
             return (v, false);
         }
         // 其他符号名
@@ -454,13 +452,32 @@ impl Codegen {
         }
         (0, false)
     }
-    pub(crate) fn parse_asm_imm_token(s: &str) -> Option<i64> {
-        let s = s.trim().trim_end_matches(',');
-        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-            i64::from_str_radix(hex, 16).ok()
-        } else {
-            s.parse().ok()
+
+    /// asm 数据伪指令里的数值字面量: 十进制(可带符号) 与 0x/0X 十六进制。
+    /// 十六进制按 u64 接受后再按位当作 i64 (GAS 对 `.quad` 的处理口径),
+    /// 因此「看起来像数字」的串一律**不会**被误判成符号名。
+    pub(crate) fn parse_asm_number(expr: &str) -> Option<i64> {
+        let expr = expr.trim();
+        if expr.is_empty() {
+            return None;
         }
+        if let Some(hex) = expr.strip_prefix("0x").or_else(|| expr.strip_prefix("0X")) {
+            if let Ok(v) = u64::from_str_radix(hex, 16) {
+                return Some(v as i64);
+            }
+            return None;
+        }
+        if let Ok(v) = expr.parse::<i64>() {
+            return Some(v);
+        }
+        // 无符号十进制 (0..u64::MAX) 也是合法常量, 例如 `.quad 18446744073709551615`。
+        expr.parse::<u64>().ok().map(|v| v as i64)
+    }
+    pub(crate) fn parse_asm_imm_token(s: &str) -> Option<i64> {
+        // 与数据伪指令共用同一份数值判据 (旧写法只按 i64 解 16 进制,
+        // 与 `parse_asm_expr_atom` 不一致 ⇒ 同一个字面量在不同路径一边是立即数、
+        // 一边是符号)。
+        Self::parse_asm_number(s.trim().trim_end_matches(','))
     }
     fn parse_asm_mem(s: &str) -> AsmOperand {
         // 格式: [disp](%base[,%idx[,scale]])

@@ -84,8 +84,62 @@ impl Codegen {
         format!(".L{}", n)
     }
 
+    /// `.L` 内部标号命名空间的唯一谓词。
+    ///
+    /// 与 [`Self::fresh_label`] 同处 L1 发射层, 因为两者描述同一个事实:
+    /// 哪些标号名是**后端自己造的**。GAS/ELF 约定 `.L` 开头符号不进 symtab,
+    /// 所以链接期根本不可能解析它们: 一条指向 `.L*` 的跳转如果没进 `labels`
+    /// 表, 只能是发射器自己发漏了, 绝不能像合法外部符号那样降级成重定位。
+    /// 区分这两类的判断只允许存在这一处。
+    pub fn is_internal_label(name: &str) -> bool {
+        name.starts_with(".L")
+    }
+
     pub fn label(&mut self, name: &str) {
         self.labels.insert(name.to_string(), self.pos());
+    }
+
+    /// 一个函数 (含其嵌套函数) 发射结束时的 pending 闭合性断言。
+    ///
+    /// `jmp_rel32` / `jcc_rel32` 写出的 `disp32` 占位是 `0,0,0,0` —— 不回填就是
+    /// 「跳到下一条」(原地自环)。那会产出一个能编过、能链上、跑必挂的目标文件,
+    /// 比编译失败恶劣得多。因此本函数自己造的内部标号必须在函数发射结束时全部
+    /// 可解析; 只有合法外部符号 (跳 TU / 内联汇编里声明的全局标签) 才能留给重定位。
+    pub(in crate::codegen::x86_64) fn check_pending_labels_closed(&mut self, func_name: &str) {
+        // 先取不变异地拷出名单, 再调 `&mut self` 的上报通道。
+        let unresolved: Vec<String> = {
+            let labels = &self.labels;
+            self.pending
+                .iter()
+                .filter(|p| Self::is_internal_label(&p.target) && !labels.contains_key(&p.target))
+                .map(|p| p.target.clone())
+                .collect()
+        };
+        if unresolved.is_empty() {
+            return;
+        }
+        // 去重但保持发射顺序, 使诊断本身可复现。
+        let mut seen = std::collections::HashSet::new();
+        let uniq: Vec<&str> = unresolved
+            .iter()
+            .filter(|n| seen.insert((*n).clone()))
+            .map(|n| n.as_str())
+            .collect();
+        self.report_internal_bug(
+            "E1102",
+            format!(
+                "internal label(s) {} referenced by a jump in function '{}' are never defined; \
+                 their rel32 displacement would stay 0 (jump-to-next-instruction)",
+                uniq
+                    .iter()
+                    .map(|n| format!("'{}'", n))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                func_name
+            ),
+            "a compiler-generated .L label must be emitted with `Codegen::label` before the \
+             function finishes; do not downgrade it to an external relocation",
+        );
     }
 
     // ========================================================================
@@ -1569,5 +1623,97 @@ impl Codegen {
             4 => self.emit(&[0x31, 0xF2]),       // xor edx, esi
             _ => self.emit(&[0x48, 0x31, 0xF2]), // xor rdx, rsi
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::{Abi, Arch, Os, TargetTriple};
+    use crate::diagnostics::Severity;
+    use crate::target::Target;
+
+    fn x86() -> Codegen {
+        Codegen::new(Target::resolve(&TargetTriple {
+            arch: Arch::X86_64,
+            vendor: "unknown".into(),
+            os: Os::Linux,
+            abi: Abi::Gnu,
+        }))
+    }
+
+    fn jump_to(target: &str) -> PendingJump {
+        PendingJump {
+            at: 0,
+            target: target.to_string(),
+            kind: JumpKind::Jmp,
+            disp_offset: 1,
+            next_ip: 6,
+            is_push_imm: false,
+        }
+    }
+
+    fn error_codes(cg: &Codegen) -> Vec<&'static str> {
+        cg.diagnostics
+            .iter()
+            .filter(|d| d.sev == Severity::Error)
+            .map(|d| d.code)
+            .collect()
+    }
+
+    /// `.L` 谓词只能盖住后端自造的名字。把 `printf` / `.text` 误判成内部
+    /// 标号会让 `-c` 下每一条外部跳转都变成假报的后端 bug, 比静默误编译
+    /// 更糟糕 (直接卡住所有用户)。
+    #[test]
+    fn internal_label_predicate_covers_only_the_dot_l_namespace() {
+        assert!(Codegen::is_internal_label(".L0"));
+        assert!(Codegen::is_internal_label(".L42"));
+        assert!(Codegen::is_internal_label(".Ll_main_retry"));
+        assert!(Codegen::is_internal_label(".Lasm_local_3_1_0"));
+        assert!(!Codegen::is_internal_label("printf"));
+        assert!(!Codegen::is_internal_label(".text"));
+        assert!(!Codegen::is_internal_label(".rodata"));
+        assert!(!Codegen::is_internal_label("L0"));
+    }
+
+    /// `fresh_label` 仍是 `.L<n>` 的唯一号源: 并行分区只改 `next_label` 的起点,
+    /// 不改命名格式 (否则 `.L` 谓词与 symtab 规则会两边漂移)。
+    #[test]
+    fn fresh_label_is_the_single_number_source() {
+        let mut cg = x86();
+        assert_eq!(cg.next_label, 0);
+        assert_eq!(cg.fresh_label(), ".L0");
+        assert_eq!(cg.fresh_label(), ".L1");
+        assert_eq!(cg.next_label, 2);
+    }
+
+    /// 缺陷 B 要求 3: 指向未定义内部标号的 pending 必须当场报错。
+    /// `jmp_rel32` 留下的 `0,0,0,0` 占位不回填就是「跳到下一条」。
+    #[test]
+    fn undefined_internal_label_in_pending_is_a_hard_error() {
+        let mut cg = x86();
+        cg.pending.push(jump_to(".L7"));
+        cg.pending.push(jump_to(".L7")); // 同一标号两处引用
+        cg.check_pending_labels_closed("f");
+        assert_eq!(error_codes(&cg), vec!["E1102"], "诊断必须只出一条且不得去重失败");
+        let d = &cg.diagnostics[0];
+        assert!(d.msg.contains(".L7") && d.msg.contains("'f'"), "msg = {}", d.msg);
+    }
+
+    /// 已定义的内部标号与合法外部符号都是正常局面, 不得报任何错。
+    /// 这一条是「不得用误报把 fail-fast 变成 fail-everything」的反向守卫。
+    #[test]
+    fn defined_and_external_targets_stay_silent() {
+        let mut cg = x86();
+        cg.label(".L7");
+        cg.pending.push(jump_to(".L7"));
+        cg.pending.push(jump_to("other_func"));
+        cg.pending.push(jump_to("asm_defined_tag"));
+        cg.check_pending_labels_closed("f");
+        assert!(
+            cg.diagnostics.is_empty(),
+            "unexpected: {:?}",
+            error_codes(&cg)
+        );
     }
 }

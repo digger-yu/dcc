@@ -453,6 +453,14 @@ pub struct ParallelEmitCtx {
     pub rodata: Vec<u8>,
     pub string_pool: HashMap<Vec<u8>, u64>,
     pub text_align: u64,
+    /// 本 worker 的 `.L` 内部标号命名空间基址。
+    ///
+    /// `Codegen::next_label` 是 `.L<n>` 唯一的号源 (见 `instructions::fresh_label`),
+    /// 而 worker 用 `Codegen::new` 重建 ⇒ 默认全从 0 起号 ⇒ 合并时同名覆盖。
+    /// 由 `emit_functions_parallel` 按 **slot 下标** 静态分配互不重叠的区间。
+    pub label_base: u32,
+    /// 本 worker 可消耗的标号数; 高水位 = `label_base + label_span`。
+    pub label_span: u32,
 }
 
 #[derive(Clone)]
@@ -490,6 +498,13 @@ pub struct FuncEmitChunk {
     pub new_rodata: Vec<u8>,
     /// chunk 开始时的 rodata 大小 (用于计算增量)
     pub rodata_base: u64,
+    /// 本 chunk 的 `.L` 标号区间基址 / 容量 / 实际用量。
+    ///
+    /// `label_used > label_span` 意味着本函数越进了下一个 slot 的命名空间,
+    /// 合并后两个函数的同名 `.L<n>` 会互相覆盖 —— 必须报错, 不能静默降级。
+    pub label_base: u32,
+    pub label_span: u32,
+    pub label_used: u32,
 }
 
 impl Codegen {
@@ -1889,10 +1904,46 @@ impl Codegen {
             .unwrap_or((1u16, pos))
     }
 
+    /// 后端内部不变量破坏的统一上报通道。
+    ///
+    /// 这类诊断与用户代码无关 (不是前端错误), 但绝不能再往下降级成静默产物。
+    /// 走既有的 `Diagnostic` / `Severity::Error` 通道 (与 E1100 同一条路径),
+    /// 由 driver 统一以非零退出码终止编译。
+    pub(in crate::codegen::x86_64) fn report_internal_bug(
+        &mut self,
+        code: &'static str,
+        msg: String,
+        hint: &str,
+    ) {
+        self.diagnostics.push(Diagnostic {
+            sev: crate::diagnostics::Severity::Error,
+            code,
+            msg,
+            span: crate::diagnostics::Span::point("<codegen>", 0, 0),
+            hint: Some(hint.to_string()),
+            source_line: None,
+        });
+    }
+
     fn patch_local_jumps(&mut self, move_ranges: &[(u64, u64, usize, u64)]) {
         let pending = std::mem::take(&mut self.pending);
         for p in pending {
             let Some(&dst) = self.labels.get(&p.target) else {
+                // 缺陷 D: 只能降级「合法外部符号」。编译器自己造的 `.L` 标号不进
+                // symtab, 把它的跳转当成一条 PC32 重定位发出去, 链接期只能解析成
+                // 空符号 / 未定义全局 —— 静默误编译。
+                if Self::is_internal_label(&p.target) {
+                    self.report_internal_bug(
+                        "E1102",
+                        format!(
+                            "jump at .text+{:#x} targets internal label '{}' which is never defined \
+                             in this TU",
+                            p.at, p.target
+                        ),
+                        "do not fall back to an external relocation for a compiler-generated .L label",
+                    );
+                    continue;
+                }
                 if self.relocatable && !p.is_push_imm {
                     let rel_off = p.disp_offset;
                     self.pending_code_rels.push(PendingCodeRel {
@@ -1931,5 +1982,87 @@ impl Codegen {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::{Abi, Arch, Os, TargetTriple};
+    use crate::diagnostics::Severity;
+
+    fn x86() -> Codegen {
+        Codegen::new(Target::resolve(&TargetTriple {
+            arch: Arch::X86_64,
+            vendor: "unknown".into(),
+            os: Os::Linux,
+            abi: Abi::Gnu,
+        }))
+    }
+
+    fn jump(target: &str) -> PendingJump {
+        PendingJump {
+            at: 0,
+            target: target.to_string(),
+            kind: JumpKind::Jmp,
+            disp_offset: 1,
+            next_ip: 5,
+            is_push_imm: false,
+        }
+    }
+
+    fn err_codes(cg: &Codegen) -> Vec<&'static str> {
+        cg.diagnostics
+            .iter()
+            .filter(|d| d.sev == Severity::Error)
+            .map(|d| d.code)
+            .collect()
+    }
+
+    /// 缺陷 D: `patch_local_jumps` 只能把「合法外部符号」降级成一条 PC32 重定位。
+    /// 编译器自己造的 `.L` 标号不进 symtab, 降级后链接期只能解析成空符号,
+    /// 而 `jmp_rel32` 留下的 `0,0,0,0` 占位若不回填语义等于「跳下一条」。
+    #[test]
+    fn undefined_internal_label_jump_is_not_downgraded_to_a_relocation() {
+        let mut cg = x86();
+        cg.relocatable = true;
+        cg.code = vec![0xE9, 0, 0, 0, 0];
+        cg.pending.push(jump(".Lnope"));
+        cg.patch_local_jumps(&[]);
+        assert!(
+            cg.pending_code_rels.is_empty(),
+            "内部标号不得变成外部重定位"
+        );
+        assert_eq!(err_codes(&cg), vec!["E1102"]);
+        assert!(cg.diagnostics[0].msg.contains(".Lnope"));
+    }
+
+    /// 反向守卫: 外部符号在 `-c` 下仍必须降级成重定位, 不得误报。
+    /// 把这一条误报成后端 bug 等于封死所有 `-c` 外部跳转。
+    #[test]
+    fn external_jump_still_downgrades_to_pc32_relocation() {
+        let mut cg = x86();
+        cg.relocatable = true;
+        cg.code = vec![0xE9, 0, 0, 0, 0];
+        cg.pending.push(jump("printf"));
+        cg.patch_local_jumps(&[]);
+        assert_eq!(cg.pending_code_rels.len(), 1);
+        assert_eq!(cg.pending_code_rels[0].symbol, "printf");
+        assert!(cg.diagnostics.is_empty(), "unexpected: {:?}", err_codes(&cg));
+    }
+
+    /// 已定义的内部标号仍须就地回填 (本改动不得改变正常路径的任何字节)。
+    #[test]
+    fn defined_internal_label_is_patched_in_place() {
+        let mut cg = x86();
+        cg.relocatable = true;
+        cg.code = vec![0xE9, 0, 0, 0, 0, 0x90, 0x90];
+        cg.labels.insert(".L0".to_string(), 6);
+        cg.pending.push(jump(".L0"));
+        cg.patch_local_jumps(&[]);
+        assert!(cg.pending_code_rels.is_empty());
+        assert!(cg.diagnostics.is_empty(), "unexpected: {:?}", err_codes(&cg));
+        let disp = i32::from_le_bytes(cg.code[1..5].try_into().unwrap());
+        assert_eq!(disp, 6 - 5, "disp32 必须等于 dst - next_ip");
     }
 }

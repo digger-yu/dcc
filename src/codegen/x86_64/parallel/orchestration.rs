@@ -61,7 +61,36 @@ impl Codegen {
             rodata: self.rodata.clone(),
             string_pool: self.string_pool.clone(),
             text_align: self.text_align,
+            // 默认直接继承主 Codegen 的游标; `emit_functions_parallel` 会按 slot
+            // 下标把它换成互不重叠的分区基址。
+            label_base: self.next_label,
+            label_span: u32::MAX - self.next_label,
         }
+    }
+
+    /// `.L` 内部标号命名空间在并行发射下的分区容量。
+    ///
+    /// `next_label` 是 `u32`, 号源只有一个 (`Codegen::fresh_label`), 而发射被切成
+    /// `n` 个互不通信的 worker ⇒ 唯一既不串号、又与调度无关的分法是按 slot 下标
+    /// 等分剩余标号池: `slot i` 拥有 `[base_i, base_i + span)`,
+    /// `span = (u32::MAX - origin) / n`。
+    ///
+    /// 越界条件因此是「单个函数需要 > 4.29e9/n 个内部标号」; n 是本 TU 的函数数,
+    /// 该量级对任何真实输入都有多个数量级的余量。万一越界, `merge_func_chunk`
+    /// 会报 E1101 而不是静默覆盖。
+    pub(in crate::codegen::x86_64) fn parallel_label_span(n_funcs: usize, origin: u32) -> u32 {
+        let avail = (u32::MAX - origin) as u64;
+        if n_funcs <= 1 {
+            avail as u32
+        } else {
+            (avail / n_funcs as u64) as u32
+        }
+    }
+
+    /// slot `i` 的 `.L` 区间基址。必须只依赖 `origin` + `i` (源码序), 绝不依赖
+    /// worker 编号 / 完成顺序, 否则产物随调度抖动。
+    pub(in crate::codegen::x86_64) fn parallel_label_base(origin: u32, slot: usize, span: u32) -> u32 {
+        ((origin as u64) + (slot as u64) * (span as u64)).min(u32::MAX as u64) as u32
     }
 
     pub(in crate::codegen::x86_64) fn codegen_from_parallel(ctx: ParallelEmitCtx) -> Self {
@@ -102,6 +131,9 @@ impl Codegen {
         cg.rodata = ctx.rodata;
         cg.string_pool = ctx.string_pool;
         cg.text_align = ctx.text_align;
+        // worker 的标号游标从分区基址起号。这是消除「每个 worker 都从 .L0 开始」
+        // 那一路径同名覆盖的唯一插入点: `fresh_label` 本身不动, 保持单一真源。
+        cg.next_label = ctx.label_base;
         cg
     }
 
@@ -111,8 +143,13 @@ impl Codegen {
         prog: &Program,
     ) -> FuncEmitChunk {
         let rodata_base = ctx.rodata.len() as u64;
+        let label_base = ctx.label_base;
+        let label_span = ctx.label_span;
         let mut cg = Self::codegen_from_parallel(ctx);
         cg.compile_func(&f, prog);
+        // 本函数实际用掉的标号数。worker 内部就闭合 (不跳函数取号), 因此该值与
+        // 调度 / 核数无关。
+        let label_used = cg.next_label.saturating_sub(label_base);
         let new_rodata = cg.rodata[rodata_base as usize..].to_vec();
         let size = cg
             .func_sizes
@@ -148,6 +185,9 @@ impl Codegen {
             disasm_calls: cg.disasm_calls,
             new_rodata,
             rodata_base,
+            label_base,
+            label_span,
+            label_used,
         }
     }
 
@@ -163,7 +203,21 @@ impl Codegen {
         self.labels
             .insert(chunk.name.clone(), base + chunk.entry_offset);
         for (name, off) in &chunk.labels {
-            self.labels.insert(name.clone(), base + *off);
+            // 函数入口标签已由上面按 `entry_offset` 落表 (worker 表里的同名项与它
+            // 同值, 因为 `entry_offset` 就是从同一张表读的)。
+            if *name == chunk.name {
+                continue;
+            }
+            // 缺陷 B: 绝不静默覆盖。`labels` 是「标号名 → .text 偏移」的唯一真源;
+            // 两个 chunk 交出同名标号 = 它们的 `je/jmp` 会在合并后被回填到同一
+            // 地址 —— 实测表现为 p1 的循环跳进 p2。这不是可降级的情形, 只能当后端
+            // 内部不变量破坏上报, 并且 **保留先落表的那份** (覆盖会让后一个函数的
+            // 跳转指向先一个函数的代码, 正是本缺陷的失效形态)。
+            if let Some(&prev) = self.labels.get(name.as_str()) {
+                self.report_label_collision(&chunk, name.as_str(), prev, base + *off);
+            } else {
+                self.labels.insert(name.clone(), base + *off);
+            }
         }
         self.func_sizes.insert(chunk.name.clone(), chunk.size);
         // C++ 零成本异常: 归档本 chunk 的 CFI 事实与受保护调用点。
@@ -300,20 +354,69 @@ impl Codegen {
         }
     }
 
+    /// chunk 标号与本 Codegen 已有标号同名。
+    fn report_label_collision(&mut self, chunk: &FuncEmitChunk, name: &str, prev: u64, new: u64) {
+        self.report_internal_bug(
+            "E1101",
+            format!(
+                "internal label '{}' collides while merging function '{}': \
+                 already defined at .text+{:#x}, now redefined at .text+{:#x} \
+                 (label namespace partition [{:#x}, {:#x}))",
+                name, chunk.name, prev, new, chunk.label_base, chunk.label_span
+            ),
+            "并行发射的 .L 标号命名空间不唯一; 不要用 -j1 / DCC_NO_PARALLEL 绕过, 请修分区分配",
+        );
+    }
+
+    /// 标号分区闭合性: slot `i` 实际用掉的标号不得越进 slot `i+1` 的区间。
+    /// 按 **slot 序** (而非完成序) 检查, 使诊断本身也与调度无关。
+    fn check_label_partition(&mut self, chunks: &[FuncEmitChunk]) {
+        for c in chunks {
+            if c.label_used > c.label_span {
+                self.report_internal_bug(
+                    "E1101",
+                    format!(
+                        "function '{}' consumed {} internal labels, exceeding its \
+                         .L namespace partition of {} (base {:#x})",
+                        c.name, c.label_used, c.label_span, c.label_base
+                    ),
+                    "increase the .L label pool or partition it unevenly; silent \
+                     label overwrite would miscompile a neighbour function",
+                );
+            }
+        }
+    }
+
     /// 函数级并行 emit：`-O2+` 多函数 TU 在 worker 线程中分块生成后按序合并。
     pub(in crate::codegen::x86_64) fn emit_functions_parallel(
         &mut self,
         top_funcs: &[FuncDecl],
         prog: &Program,
     ) {
-        let ctx = Arc::new(self.parallel_emit_ctx());
         let n = top_funcs.len();
+        // ---- `.L` 标号命名空间分区 (缺陷 B 根因) ----
+        // 必须在抓 ctx 之前算: `parallel_emit_ctx()` 把主游标当作区间原点,
+        // 发射前已被全局初始化代码用掉的 `.L<n>` / `.L.compound.<n>` 不能被重号。
+        let label_origin = self.next_label;
+        let label_span = Self::parallel_label_span(n, label_origin);
+        let ctx = Arc::new(self.parallel_emit_ctx());
         let degree = Self::parallel_worker_count(n);
+
+        // 每个 slot 一份互不重叠的标号区间。注意用的是 **slot 下标** 而不是
+        // worker 编号 / 完成顺序: worker 靠 `next_job.fetch_add` 抢活, 任何建立在
+        // 抢活结果上的号段都会让产物随调度抖动。slot 序 == 合并序 == 源码序。
+        let worker_ctx = |slot: usize| {
+            let mut c = ctx.as_ref().clone();
+            c.label_base = Self::parallel_label_base(label_origin, slot, label_span);
+            c.label_span = label_span;
+            c
+        };
 
         let chunks: Vec<FuncEmitChunk> = if degree <= 1 {
             top_funcs
                 .iter()
-                .map(|f| Self::emit_func_chunk(ctx.as_ref().clone(), f.clone(), prog))
+                .enumerate()
+                .map(|(i, f)| Self::emit_func_chunk(worker_ctx(i), f.clone(), prog))
                 .collect()
         } else {
             let next_job = AtomicUsize::new(0);
@@ -326,7 +429,7 @@ impl Codegen {
                             break;
                         }
                         let chunk =
-                            Self::emit_func_chunk(ctx.as_ref().clone(), top_funcs[i].clone(), prog);
+                            Self::emit_func_chunk(worker_ctx(i), top_funcs[i].clone(), prog);
                         slots.lock().unwrap()[i] = Some(chunk);
                     });
                 }
@@ -338,6 +441,19 @@ impl Codegen {
                 .map(|c| c.expect("parallel codegen dropped a function chunk"))
                 .collect()
         };
+
+        // 分区闭合性与重名守卫先于合并: 两者都是「本轮产物不可信」的硬错误,
+        // 必须在回填 `labels` 前就报错, 否则诊断会依赖 chunk 合并顺序。
+        self.check_label_partition(&chunks);
+
+        // 合并后主游标必须 >= 所有 chunk 用过的最大标号, 否则之后任何走串行
+        // 发射的标号会再撞一次名。
+        let high_water = chunks
+            .iter()
+            .map(|c| c.label_base.saturating_add(c.label_used))
+            .max()
+            .unwrap_or(label_origin);
+        self.next_label = self.next_label.max(high_water);
 
         for (f, chunk) in top_funcs.iter().zip(chunks.iter()) {
             debug_assert_eq!(f.name.name, chunk.name);
@@ -355,5 +471,230 @@ impl Codegen {
             .map(|p| p.get().min(n_funcs))
             .unwrap_or(4)
             .max(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::{Abi, Arch, Os, TargetTriple};
+    use crate::codegen::x86_64::JumpKind;
+    use crate::codegen::x86_64::PendingJump;
+    use crate::diagnostics::Severity;
+    use crate::target::Target;
+
+    fn x86() -> Codegen {
+        Codegen::new(Target::resolve(&TargetTriple {
+            arch: Arch::X86_64,
+            vendor: "unknown".into(),
+            os: Os::Linux,
+            abi: Abi::Gnu,
+        }))
+    }
+
+    /// 最小可用 chunk: 只填标号命名空间相关字段, 其余为空。
+    fn chunk(name: &str) -> FuncEmitChunk {
+        FuncEmitChunk {
+            name: name.to_string(),
+            code: vec![],
+            entry_offset: 0,
+            size: 0,
+            labels: HashMap::new(),
+            pending: vec![],
+            string_refs: vec![],
+            float_refs: vec![],
+            x87_float_refs: vec![],
+            pending_func_rels: vec![],
+            pending_code_rels: vec![],
+            pending_func_addr_rels: vec![],
+            pending_data_rels: vec![],
+            pending_sib_data_rels: vec![],
+            label_addr_refs: vec![],
+            pending_custom_sec_rels: vec![],
+            pushsection_code_ranges: vec![],
+            extra_sections: vec![],
+            custom_sec_indices: HashMap::new(),
+            func_cfi: None,
+            eh_funcs: vec![],
+            disasm_calls: HashMap::new(),
+            new_rodata: vec![],
+            rodata_base: 0,
+            label_base: 0,
+            label_span: u32::MAX,
+            label_used: 0,
+        }
+    }
+
+    fn error_codes(cg: &Codegen) -> Vec<&'static str> {
+        cg.diagnostics
+            .iter()
+            .filter(|d| d.sev == Severity::Error)
+            .map(|d| d.code)
+            .collect()
+    }
+
+    /// 缺陷 B 的可复现性论证核心: 号段只能由 (原点, slot 下标) 决定。
+    /// slot 序 == 合并序 == 源码序, 与 worker 数 / 抢活顺序 / 完成顺序无关。
+    #[test]
+    fn label_partitions_are_contiguous_disjoint_and_never_wrap() {
+        for origin in [0u32, 1, 7, 1000, 65536] {
+            for n in 1..=257usize {
+                let span = Codegen::parallel_label_span(n, origin);
+                assert!(span > 0, "n={n} origin={origin}: span 不得为 0");
+                let mut expect = origin;
+                for slot in 0..n {
+                    let base = Codegen::parallel_label_base(origin, slot, span);
+                    assert_eq!(base, expect, "slot {slot} 必须紧接上一个 slot");
+                    expect = base + span;
+                    assert!(expect <= u32::MAX, "分区不得越过 u32 号池上界");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn label_base_is_independent_of_worker_count() {
+        // 同一个 slot 在不同并行度下必须拿到同一个基址, 否则产物随调度抖动。
+        let origin = 3u32;
+        for n in [2usize, 3, 5, 8, 16] {
+            let span = Codegen::parallel_label_span(n, origin);
+            let _ = span;
+        }
+        // degree 不进入公式: 基址只由 (origin, slot, span) 决定。
+        let span = Codegen::parallel_label_span(8, origin);
+        for slot in 0..8 {
+            assert_eq!(
+                Codegen::parallel_label_base(origin, slot, span),
+                origin + (slot as u32) * span
+            );
+        }
+    }
+
+    /// 合并时重名不得静默覆盖: 先落表的那一份必须保持不动, 并给出 E1101。
+    /// 覆盖正是原缺陷的失效形态 —— p1 的 `.L1` 被 p2 的同名定义顶掉后,
+    /// p1 的循环跳进了 p2 的代码。
+    #[test]
+    fn merging_colliding_labels_reports_e1101_and_keeps_the_first_definition() {
+        let mut cg = x86();
+        let mut a = chunk("p1");
+        a.labels.insert(".L1".to_string(), 0x40);
+        cg.merge_func_chunk(a, 1);
+        let first = cg.labels[".L1"];
+
+        let mut b = chunk("p2");
+        b.labels.insert(".L1".to_string(), 0x90);
+        cg.merge_func_chunk(b, 1);
+
+        assert_eq!(error_codes(&cg), vec!["E1101"], "重名必须报错");
+        let d = &cg.diagnostics[0];
+        assert!(
+            d.msg.contains(".L1") && d.msg.contains("p2"),
+            "诊断要点出冲突标号与归属函数: {}",
+            d.msg
+        );
+        assert_eq!(
+            cg.labels[".L1"], first,
+            "绝不得用后一个 chunk 的定义覆盖先一个"
+        );
+    }
+
+    /// 分区后的正常局面: 不同函数交出不同名标号, 不得产生任何诊断。
+    #[test]
+    fn merging_disjoint_label_namespaces_is_silent() {
+        let mut cg = x86();
+        let origin = 0u32;
+        let span = Codegen::parallel_label_span(2, origin);
+        let mut a = chunk("p1");
+        a.label_base = Codegen::parallel_label_base(origin, 0, span);
+        a.label_used = 2;
+        a.labels
+            .insert(format!(".L{}", a.label_base), 0x10);
+        let mut b = chunk("p2");
+        b.label_base = Codegen::parallel_label_base(origin, 1, span);
+        b.label_used = 2;
+        b.labels
+            .insert(format!(".L{}", b.label_base), 0x20);
+        cg.merge_func_chunk(a.clone(), 1);
+        cg.merge_func_chunk(b.clone(), 1);
+        assert!(cg.diagnostics.is_empty(), "unexpected: {:?}", error_codes(&cg));
+        // 两个函数的同名偏移不得互相顶掉: 此处名字本身就不同。
+        assert_ne!(
+            format!(".L{}", a.label_base),
+            format!(".L{}", b.label_base)
+        );
+        cg.check_label_partition(&[a, b]);
+        assert!(cg.diagnostics.is_empty(), "unexpected: {:?}", error_codes(&cg));
+    }
+
+    /// 扇区越界 (单函数用超了自己的号段) 必须在合并前就被拦住。
+    #[test]
+    fn label_partition_overrun_is_reported() {
+        let mut cg = x86();
+        let mut c = chunk("huge");
+        c.label_span = 4;
+        c.label_used = 5;
+        cg.check_label_partition(&[c]);
+        assert_eq!(error_codes(&cg), vec!["E1101"]);
+        assert!(cg.diagnostics[0].msg.contains("huge"));
+    }
+
+    /// worker 的起始游标必须等于分区基址 —— 这是「每个 worker 从 .L0 起号」
+    /// 那个根因唯一的修复点。
+    #[test]
+    fn worker_codegen_starts_at_its_partition_base() {
+        let mut cg = x86();
+        cg.next_label = 11;
+        let mut ctx = cg.parallel_emit_ctx();
+        assert_eq!(ctx.label_base, 11, "默认继承主游标, 不得从 0 起号");
+        ctx.label_base = 5000;
+        ctx.label_span = 100;
+        let mut worker = Codegen::codegen_from_parallel(ctx);
+        assert_eq!(worker.next_label, 5000);
+        assert_eq!(worker.fresh_label(), ".L5000");
+    }
+
+    /// chunk 合并后主游标必须高于所有 worker 用过的最大标号, 否则之后任何
+    /// 走串行发射的函数会再撞一次名。
+    #[test]
+    fn merged_chunks_advance_the_main_label_cursor() {
+        let mut cg = x86();
+        let top = 64u32;
+        cg.next_label = top;
+        let span = Codegen::parallel_label_span(2, top);
+        let mut a = chunk("p1");
+        a.label_base = Codegen::parallel_label_base(top, 0, span);
+        a.label_used = 3;
+        let mut b = chunk("p2");
+        b.label_base = Codegen::parallel_label_base(top, 1, span);
+        b.label_used = 7;
+        let high_water = a
+            .label_base
+            .max(b.label_base.saturating_add(b.label_used));
+        cg.next_label = cg.next_label.max(high_water);
+        assert!(cg.next_label > b.label_base + b.label_used - 1);
+        // 主游标后续取号不得与任何 chunk 重名。
+        assert!(cg.fresh_label() != format!(".L{}", b.label_base));
+    }
+
+    /// pending 合并后仍指向同一个标号名: 并行不得把 chunk 的跳转目标
+    /// 名字改动 (那会改变回填结果)。
+    #[test]
+    fn merging_preserves_pending_jump_targets_shifted_by_base() {
+        let mut cg = x86();
+        let mut a = chunk("p1");
+        a.code = vec![0xE9, 0, 0, 0, 0];
+        a.pending.push(PendingJump {
+            at: 0,
+            target: ".L5".to_string(),
+            kind: JumpKind::Jmp,
+            disp_offset: 1,
+            next_ip: 5,
+            is_push_imm: false,
+        });
+        a.labels.insert(".L5".to_string(), 9);
+        cg.merge_func_chunk(a, 1);
+        assert_eq!(cg.pending.len(), 1);
+        assert_eq!(cg.pending[0].target, ".L5");
+        assert_eq!(cg.labels[".L5"], 9);
     }
 }

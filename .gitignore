@@ -92,6 +92,14 @@ dn_g.o
 # 误提交的调试二进制 (曾经 git add 进去，防止再次提交)
 test_globals
 
+# 根目录裸机/差分验证的一次性产物。
+# 锚定前导 `/` 只约束仓库根，不会误伤 examples/、tests/fixtures/ 下的同名文件；
+# 无扩展名的 ELF 可执行文件不被上面任何通配模式命中，必须逐个点名。
+/test_return_42
+/test.c
+/dummy.c
+/return42.c
+
 # Test fixtures (.c files under tests/fixtures/ are tracked, but inline
 # `.s` asm fixtures for snapshot tests should also be tracked).
 # 仅排除编译产物 .s；tests/fixtures 下的 .s 用 `!tests/fixtures/**/*.s` 重新纳入
@@ -137,8 +145,10 @@ golden_hashes/
 commit_message_*.txt
 
 # Build artifacts and test outputs
+# 注意：`*.o` 与 `!tests/fixtures/corpus/**/*.o` 例外已在上方 DCC artifacts 段声明。
+# gitignore 是后规则覆盖前规则，此处再写一次 `*.o` 会把 corpus fixture 的例外抵消掉，
+# 导致新增的 tests/fixtures/corpus/*.o 被静默忽略，故此处只补充其它目标码后缀。
 target/
-*.o
 *.obj
 *.elf
 *.bin

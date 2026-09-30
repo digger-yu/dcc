@@ -1,4 +1,4 @@
-.PHONY: all build test test-all bootstrap kernel-full-build kernel-full-check clean-cache torture-setup torture
+.PHONY: all build test test-all opt-eq bootstrap kernel-full-build kernel-full-check clean-cache torture-setup torture
 
 DCC_REPO ?= $(CURDIR)
 KERNEL_DIR ?= /root/linux-7.1
@@ -25,8 +25,14 @@ test:
 
 # test-all = Tier 0 全量 + examples 端到端冒烟（scripts/test_all.sh 只做薄编排，
 # 不复制任何断言逻辑；以前它没有任何调用点，此处接入）。门禁不在这里重复跑。
+# 末尾再接入优化档位执行等价门禁：Tier 0 不跑 -O 档位，而优化器的正确性定义恰好
+# 是「不改行为」—— 本轮修完的一批静默误编译（死循环/SEGV/截断）全部由它暴露。
+opt-eq: build
+	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" JOBS="$(JOBS)" bash scripts/check_opt_equivalence.sh
+
 test-all: test
 	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" bash scripts/test_all.sh
+	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" JOBS="$(JOBS)" bash scripts/check_opt_equivalence.sh
 
 torture-setup:
 	bash scripts/setup_torture.sh

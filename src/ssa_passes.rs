@@ -11,16 +11,19 @@
 //   P5  instruction_scheduling      - 指令调度 (list scheduling within BB)
 //   P6  pgo                         - PGO (读取 .dcc.profdata, 应用 hot/cold 提示)
 //   P7  auto_parallelization        - 自动并行化 (识别安全循环, emit #pragma omp simd)
-//   P8  loop_tiling                 - 循环分块
-//   P9  loop_interchange            - 循环交换
+//   P8  loop_tiling                 - 已删除 (伪实现, 见下文说明)
+//   P9  loop_interchange            - 已删除 (伪实现, 见下文说明)
 //   P10 tail_call_optimization      - TCO
-//   P11 function_attribute_propagation - noreturn/cold/hot -> 段属性
-//   P12 register_allocation         - 线性扫描寄存器分配
-//   P12b ubsan_ir_instrument        - UBSAN IR 层插桩
+//   P11 (已删除) 函数属性传播      - 热/冷/noreturn 由后端直读 AST 属性, 见下文 P11 注释
+//   P12 (已删除) 寄存器分配        - hint 对机器码零影响且误报 changed, 见下文 P12 注释
+//   P12b ubsan_ir_instrument        - UBSAN 在 IR 层插桩
 //   P13 alias_set                   - 别名集合 (identity/disjoint/overlap)
-//   P14 speculative_execution       - 投机执行 (无副作用分支外提)
+//   P14 speculative_execution       - 投机执行 (分支条件的依赖链上提)
 //   P15 sparse_conditional_constant_propagation - SCCP
-//   P16 software_pipelining         - 软件流水 (O3)
+//   P16 (已删除) 软件流水          - 空函数体却报 changed, 见下文 P16 注释
+//   P17 gvn                         - 全局值编号 (SSA 上的同形计算归一 + phi 退化)
+//   P18 dead_store_elim             - 死存储消除 (局部 + 单入链全局)
+//   P19 jump_threading              - 跳转穿线 (常量分支折叠 + 空跳板合并 + CFG/phi 修补)
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -48,22 +51,57 @@ pub fn run_with_opts(func: &mut Function, level: u8, strict_aliasing: bool) {
     strength_reduction(func);
     ivop(func);
     tail_call_optimization(func);
-    loop_interchange(func);
-    loop_tiling(func);
+    // P8 循环分块 / P9 循环交换 已删 (伪实现会破坏单赋值 / 只改块序)，见下文说明。
     alias_analysis_with_strict(func, strict_aliasing);
     alias_set(func);
     speculative_execution(func);
-    function_attribute_propagation(func);
-    // 第二轮: GVN/SCCP 需要 SSA 值层面分析
-    sparse_conditional_constant_propagation(func);
-    if level >= 3 {
-        instruction_scheduling(func);
-        register_allocation(func);
-        ubsan_ir_instrument(func);
-        auto_parallelization(func);
-        pgo(func);
-        software_pipelining(func);
+    // P18 DSE: 站在别名分析之后, 利用位置判据删「再没人读」的写。
+    if !ssa_dbg_off("dse") {
+        dead_store_elim(func);
     }
+    // 第二轮: GVN/SCCP 需要 SSA 值层面分析
+    if !ssa_dbg_off("sccp") {
+        sparse_conditional_constant_propagation(func);
+    }
+    // P17 GVN: SCCP 已把能折的常量落到位, 值编号因此能多归一一批同形计算。
+    if !ssa_dbg_off("gvn") {
+        gvn(func);
+    }
+    // P19 jump threading: 常量条件在此已全露出来, 穿线后需要再扫一遍死代码。
+    if !ssa_dbg_off("jt") {
+        jump_threading(func);
+    }
+    if !ssa_dbg_off("die") {
+        dead_inst_elim(func);
+    }
+    if !ssa_dbg_off("dbe") {
+        dead_bb_elim(func);
+    }
+    if level >= 3 {
+        if !ssa_dbg_off("sched") {
+            instruction_scheduling(func);
+        }
+        if !ssa_dbg_off("ubsan") {
+            ubsan_ir_instrument(func);
+        }
+        if !ssa_dbg_off("par") {
+            auto_parallelization(func);
+        }
+        if !ssa_dbg_off("pgo") {
+            pgo(func);
+        }
+    }
+    // 本轮多个 pass 会改 terminator (SCCP 折常量 switch、P19 穿线、DSE 删指令不影响
+    // 控制流但会改变块内容)。`rebuild_block` 与 `find_loop_body_multi` 沿 `preds` 走,
+    // 所以管线**结束前必须刷一次** CFG 缓存, 否则重建拿到的是旧边。
+    refresh_cfg_caches(func);
+}
+
+/// 临时诊断用: `DCC_SSA_OFF=dse,gvn,jt,die,dbe` 逐个关掉本轮新增的 pass 以二分定位。
+fn ssa_dbg_off(name: &str) -> bool {
+    std::env::var("DCC_SSA_OFF")
+        .map(|v| v.split(',').any(|s| s.trim() == name))
+        .unwrap_or(false)
 }
 
 // =====================================================================
@@ -73,6 +111,11 @@ pub fn run_with_opts(func: &mut Function, level: u8, strict_aliasing: bool) {
 
 /// 函数内死代码: 移除产生但未使用的 pure 指令 (保守: 仅删除 dest 无后续
 /// 引用的 Binop/Unary/Cast/Select, 不动 Store/Call/Load)。
+///
+/// 「具名变量」的赋值**不在可删集合里**: SSA→AST 重建会把 `dest.base` 不是临时值的
+/// 指令发射成对变量的赋值, 而后端是按变量名（栈槽）取值的 —— 删掉一条看似
+/// 无人使用的 `p = &f` / `n = 0` 赋值, 重建后那个栈槽就**从未被初始化**, 后续读它
+/// 拿到垃圾地址（实测 `got_func.c` 在 -O2 下 SEGV: 三个函数指针槽的初始化全没了）。
 pub fn dead_inst_elim(func: &mut Function) -> bool {
     // 1. 收集所有被使用的 SSA 名
     let mut used: HashSet<String> = HashSet::new();
@@ -99,6 +142,7 @@ pub fn dead_inst_elim(func: &mut Function) -> bool {
         }
     }
     // 2. 删除无用 pure 指令
+    let named = local_object_names(func);
     let mut changed = false;
     for b in func.blocks.values_mut() {
         let before = b.insts.len();
@@ -108,7 +152,13 @@ pub fn dead_inst_elim(func: &mut Function) -> bool {
             | InstKind::Cast { .. }
             | InstKind::Select { .. } => {
                 if let Some(d) = &i.dest {
-                    used.contains(&d.name())
+                    // 具名变量的赋值一律保留: 它的「使用」可能在重建后的 AST 里由
+                    // 后端按变量名读取, 本层的 use 集合看不到那种引用。
+                    if named.contains(&d.base) {
+                        true
+                    } else {
+                        used.contains(&d.name())
+                    }
                 } else {
                     true
                 }
@@ -153,7 +203,10 @@ pub fn dead_inst_elim(func: &mut Function) -> bool {
     changed
 }
 
-/// 死 BB 消除: 不可达 BB 的指令全部清空 + 终结符改 Unreachable。
+/// 死 BB 消除: 从 entry 沿**终结符派生**的后继求可达集, 剔除不可达块。
+///
+/// 不能读 `bb.succs`: 它是 SSA 构造时填的缓存, 任何改 terminator 的 pass (SCCP 的
+/// 常量 switch 折叠、P19 的跳转穿线) 之后就是陈旧的 —— 读它会多删或不删。
 pub fn dead_bb_elim(func: &mut Function) -> bool {
     let mut reachable = HashSet::new();
     let mut stack = vec![func.entry.clone()];
@@ -162,9 +215,9 @@ pub fn dead_bb_elim(func: &mut Function) -> bool {
             continue;
         }
         if let Some(bb) = func.blocks.get(&b) {
-            for s in &bb.succs {
-                if !reachable.contains(s) {
-                    stack.push(s.clone());
+            for s in succs_of(&bb.term) {
+                if !reachable.contains(&s) {
+                    stack.push(s);
                 }
             }
         }
@@ -613,12 +666,28 @@ fn find(parents: &HashMap<usize, usize>, mut x: usize) -> usize {
 /// 内存顺序和 inline asm clobber：`memory` clobber 只作为内存屏障，
 /// 非 `memory` asm 不阻止无关可移动指令跨越。
 pub fn instruction_scheduling(func: &mut Function) -> bool {
+    // 用户可见变量名与 SSA名→基名 映射: 两者共同支撑下面的「基名序」约束。
+    let named = local_object_names(func);
+    let mut base_of: HashMap<String, String> = HashMap::new();
+    for p in &func.params {
+        base_of.insert(p.name(), p.base.clone());
+    }
+    for b in func.blocks.values() {
+        for inst in &b.insts {
+            if let Some(d) = &inst.dest {
+                base_of.insert(d.name(), d.base.clone());
+            }
+        }
+        for phi in &b.phis {
+            base_of.insert(phi.dest.name(), phi.dest.base.clone());
+        }
+    }
     let mut changed = false;
     for b in func.blocks.values_mut() {
         if b.insts.len() < 2 {
             continue;
         }
-        let Some(order) = schedule_block(&b.insts) else {
+        let Some(order) = schedule_block(&b.insts, &named, &base_of) else {
             continue;
         };
         if order.iter().copied().eq(0..b.insts.len()) {
@@ -631,7 +700,11 @@ pub fn instruction_scheduling(func: &mut Function) -> bool {
     changed
 }
 
-fn schedule_block(insts: &[Inst]) -> Option<Vec<usize>> {
+fn schedule_block(
+    insts: &[Inst],
+    named: &HashSet<String>,
+    base_of: &HashMap<String, String>,
+) -> Option<Vec<usize>> {
     let n = insts.len();
     let mut succ: Vec<HashSet<usize>> = (0..n).map(|_| HashSet::new()).collect();
     let mut indeg = vec![0usize; n];
@@ -665,6 +738,48 @@ fn schedule_block(insts: &[Inst]) -> Option<Vec<usize>> {
                 add_edge(prev_def, idx);
             }
             last_base_def.insert(base, idx);
+        }
+    }
+
+    // **基名序边** (只针对用户可见变量): 本 IR 的 SSA→AST 重建把 `n_1/n_2/n_3`
+    // 塌缩成同一个变量 `n`, 所以「对同一基名的读与写」在重建后的 AST 里是**顺序相关**的,
+    // 即使它们在 SSA 上毫无依赖。缺这条边时实测: `s = s + n; n = n - 1; if (n > 0) continue`
+    // 被调成 `n = n - 1; s = s + n;` ⇒ do-while 累加上了自减后的值,
+    // `dw(3)` 由 6 变 3 (仅 -O3 可现, 因为只有 level>=3 跑本 pass)。
+    let touches_base = |idx: usize| -> Vec<String> {
+        let mut v: Vec<String> = Vec::new();
+        if let Some(d) = &insts[idx].dest {
+            if named.contains(&d.base) {
+                v.push(d.base.clone());
+            }
+        }
+        for u in operand_uses(&insts[idx].kind) {
+            if let Some(sb) = base_of.get(&u) {
+                if named.contains(sb) {
+                    v.push(sb.clone());
+                }
+            }
+        }
+        for b in inst_def_bases(&insts[idx]) {
+            if named.contains(&b) {
+                v.push(b);
+            }
+        }
+        v
+    };
+    {
+        let mut last_touch: HashMap<String, usize> = HashMap::new();
+        for idx in 0..n {
+            let mut seen: HashSet<String> = HashSet::new();
+            for base in touches_base(idx) {
+                if !seen.insert(base.clone()) {
+                    continue;
+                }
+                if let Some(&prev) = last_touch.get(&base) {
+                    add_edge(prev, idx);
+                }
+                last_touch.insert(base, idx);
+            }
         }
     }
 
@@ -816,7 +931,13 @@ fn inst_is_side_effecting(kind: &InstKind) -> bool {
         InstKind::Store { .. }
         | InstKind::IndexStore { .. }
         | InstKind::MemberStore { .. }
-        | InstKind::Call { .. } => true,
+        | InstKind::Call { .. }
+        | InstKind::Invoke { .. } => true,
+        // 保留原始声明 (复合字面量/初始化列表) 本身就是一次**多字内存写**:
+        // 不记进副作用链时, 调度器可以把循环体里的读跨到它前面 —— 实测
+        // `v4si a={1,2,3,4}; ... c[i]=a[i]+b[i];` 在 -O3 下把 `a[0]+b[0]` 排到了
+        // `a`/`b` 的初始化**之前** (读到未初始化栈槽)。
+        InstKind::PreservedDecl { .. } => true,
         // volatile Load 属于外部可见的副作用 (读 MMIO/共享内存), 不可被 DCE 消除
         InstKind::Load { is_volatile, .. }
         | InstKind::IndexLoad { is_volatile, .. }
@@ -844,7 +965,10 @@ fn inst_is_memory_ordered(kind: &InstKind) -> bool {
         | InstKind::IndexStore { .. }
         | InstKind::MemberLoad { .. }
         | InstKind::MemberStore { .. }
-        | InstKind::Call { .. } => true,
+        | InstKind::Call { .. }
+        | InstKind::Invoke { .. } => true,
+        // 同 `inst_is_side_effecting`: 带初始化式的声明是一次内存写, 不可越序。
+        InstKind::PreservedDecl { .. } => true,
         InstKind::InlineAsm {
             clobbers,
             input_constraints,
@@ -1011,112 +1135,28 @@ pub fn auto_parallelization(func: &mut Function) -> bool {
     changed
 }
 
-// =====================================================================
-// P8. 循环分块
-// =====================================================================
-
-/// 简单循环分块: 检测 `for.body` BB, 如果循环体很小 (<= 4 条指令),
-/// 将所有纯运算指令复制一份追加到 BB 末尾, 模拟 2x unroll。
-/// 这让后续 codegen 可以一次处理两个迭代的计算。
-pub fn loop_tiling(func: &mut Function) -> bool {
-    let mut changed = false;
-    let names: Vec<String> = func.block_order.clone();
-    for n in &names {
-        if !n.starts_with("for.body") {
-            continue;
-        }
-        let bb = func.blocks.get(n).cloned();
-        if let Some(bb) = bb {
-            if bb.insts.len() <= 4 && !bb.insts.is_empty() {
-                // 收集所有纯运算指令并复制 (2x unroll)
-                let pure_insts: Vec<Inst> = bb
-                    .insts
-                    .iter()
-                    .filter(|i| {
-                        matches!(
-                            i.kind,
-                            InstKind::Bin { .. } | InstKind::Un { .. } | InstKind::Cast { .. }
-                        )
-                    })
-                    .cloned()
-                    .collect();
-                if !pure_insts.is_empty() {
-                    if let Some(b) = func.blocks.get_mut(n) {
-                        for inst in &pure_insts {
-                            b.insts.push(inst.clone());
-                        }
-                        changed = true;
-                    }
-                }
-            }
-        }
-    }
-    changed
-}
 
 // =====================================================================
-// P9. 循环交换
+// P8 循环分块 / P9 循环交换 —— 已删除 (伪实现会静默误编译)
 // =====================================================================
-
-/// 循环交换: 检测 `for.body.i` + `for.body.j` 嵌套, 交换两个循环的顺序。
-/// 实现: 在 block_order 中将内层循环 BB 移到外层循环 BB 之前,
-/// 并在 entry BB 插入 hint 告知 codegen 循环已交换。
-pub fn loop_interchange(func: &mut Function) -> bool {
-    let mut changed = false;
-    // 收集 i 层和 j 层的 for.body BB
-    let mut i_bbs: Vec<String> = Vec::new();
-    let mut j_bbs: Vec<String> = Vec::new();
-    for n in &func.block_order {
-        if n.contains(".i.") || n.contains("for.body") && !n.contains(".j.") {
-            i_bbs.push(n.clone());
-        }
-        if n.contains(".j.") {
-            j_bbs.push(n.clone());
-        }
-    }
-    if i_bbs.is_empty() || j_bbs.is_empty() {
-        return false;
-    }
-    // 在 block_order 中交换 i 和 j 的位置
-    let mut new_order = func.block_order.clone();
-    let mut i_positions: Vec<usize> = Vec::new();
-    let mut j_positions: Vec<usize> = Vec::new();
-    for (pos, name) in new_order.iter().enumerate() {
-        if i_bbs.contains(name) {
-            i_positions.push(pos);
-        }
-        if j_bbs.contains(name) {
-            j_positions.push(pos);
-        }
-    }
-    // 交换: 让 j 占据原来 i 的位置, i 占据原来 j 的位置
-    for (ip, jp) in i_positions.iter().zip(j_positions.iter()) {
-        new_order.swap(*ip, *jp);
-        changed = true;
-    }
-    if changed {
-        func.block_order = new_order;
-        // 在 entry 插入 hint
-        if let Some(entry) = func.blocks.get_mut(&func.entry) {
-            entry.insts.insert(
-                0,
-                Inst {
-                    dest: None,
-                    kind: InstKind::Store {
-                        e: Operand::SymAddr(
-                            "__dcc_loop_interchanged".to_string(),
-                            Type::Ptr(Box::new(QualType::new(Type::Void))),
-                        ),
-                        src: Operand::Int(1),
-                        is_volatile: false,
-                    },
-                    span: func.span.clone(),
-                },
-            );
-        }
-    }
-    changed
-}
+//
+// 两个旧 pass 都只按 **BB 名字** 猜测循环形态，且都不产生真实变换：
+//
+//   * `loop_tiling`：“循环体 <= 4 条指令时，把所有纯运算指令**复制一份追加**到
+//     末尾，模拟 2x unroll”。这不是分块也不是展开 (迭代次数没改、跳长没改)，而且
+//     **重复使用同一个 SSA dest** —— 直接破坏单赋值不变式。SSA→AST 重建按基名
+//     塌缩后会**重算两遍**：实测 `int s=0,m=3; for(i<n){s+=m*i; m=m+1;}` 在 -O3
+//     得 38 (应 32)，因为副本 `_tbin = m*i` 被排到了 `m = m+1` **之后**重执行。
+//   * `loop_interchange`：按名字含 `.i.` / `.j.` 的块在 `block_order` 里**互换位置**，
+//     并往 entry 写一条 `__dcc_loop_interchanged = 1` 的假 hint。它不改任何
+// terminator / phi / 边界，所以“交换”对执行顺序毫无作用；而 `block_order` 是重建
+// 与遍历的创建序真源，改动它只会扰动产物字节。另一点：`i_bbs` 的判据
+// `n.contains("for.body") && !n.contains(".j.")` 会把任意单层循环也归为“外层”，
+// 于是几乎每个含循环的函数都被改一次 `block_order`。
+//
+// 真正的分块/交换必须同时重写 CFG、phi 与边界 (且需先修好下游对多层嵌套 +
+// 变量边界形态的误编译，见 `docs/ssa-pass-upgrade-plan.md` 的「未关闭缺陷」)，
+// 保留“看起来在做”的伪实现只会把错值交给后端，故删。追踪项: P9/P10。
 
 // =====================================================================
 // P10. TCO (Tail Call Optimization)
@@ -1177,428 +1217,43 @@ pub fn tail_call_optimization(func: &mut Function) -> bool {
 }
 
 // =====================================================================
-// P11. 函数属性传播
+// P11. 函数属性 (cold / hot / noreturn) —— 不在本层做
 // =====================================================================
-
-/// 把 noreturn/cold/hot 标记转换成段属性 hint。
-/// 为每个属性在 entry BB 顶端插入对应的 marker Store,
-/// codegen 根据这些 marker 将函数放入正确的 section。
-pub fn function_attribute_propagation(func: &mut Function) -> bool {
-    let mut changed = false;
-    let entry = func.entry.clone();
-    let bb = match func.blocks.get_mut(&entry) {
-        Some(b) => b,
-        None => return false,
-    };
-    if func.is_cold {
-        bb.insts.insert(
-            0,
-            Inst {
-                dest: None,
-                kind: InstKind::Store {
-                    e: Operand::SymAddr(
-                        "__dcc_section_cold".to_string(),
-                        Type::Ptr(Box::new(QualType::new(Type::Void))),
-                    ),
-                    src: Operand::Int(1),
-                    is_volatile: false,
-                },
-                span: func.span.clone(),
-            },
-        );
-        changed = true;
-    }
-    if func.is_hot {
-        bb.insts.insert(
-            0,
-            Inst {
-                dest: None,
-                kind: InstKind::Store {
-                    e: Operand::SymAddr(
-                        "__dcc_section_hot".to_string(),
-                        Type::Ptr(Box::new(QualType::new(Type::Void))),
-                    ),
-                    src: Operand::Int(1),
-                    is_volatile: false,
-                },
-                span: func.span.clone(),
-            },
-        );
-        changed = true;
-    }
-    if func.is_noreturn {
-        bb.insts.insert(
-            0,
-            Inst {
-                dest: None,
-                kind: InstKind::Store {
-                    e: Operand::SymAddr(
-                        "__dcc_noreturn_hint".to_string(),
-                        Type::Ptr(Box::new(QualType::new(Type::Void))),
-                    ),
-                    src: Operand::Int(1),
-                    is_volatile: false,
-                },
-                span: func.span.clone(),
-            },
-        );
-        changed = true;
-    }
-    changed
-}
+//
+// 旧 P11 `function_attribute_propagation` 在 entry BB 顶端伪造三条
+// `Store{e: SymAddr("__dcc_section_cold"), src: 1}` / `__dcc_section_hot` /
+// `__dcc_noreturn_hint` 当「段属性 hint」。它们不是 hint, 而是**真实指令**:
+// `__dcc_section_*` 不在重建期的 hint 丢弃名单里, 于是被当普通内存写送到后端,
+// 而后端认不出这个并不存在的符号, 按「未声明名字」回退成**本帧栈槽** ——
+// `-O2` 实测 `__attribute__((cold)) int cold_path(int x){return x+1;}` 发出
+// `movslq -0x48(%r13),%rax; push; mov $1,%rax; pop %rcx; mov %rax,(%rcx)`,
+// 即向一个未初始化槽里存的地址写 1 → 运行期 SEGV (夹具 function_attr 直接崩)。
+//
+// 热/冷段归属的真源是 `FuncDecl::is_hot` / `is_cold` / `is_noreturn` 这三个 AST
+// 属性 (后端 `codegen.rs` 直接读它们选 section), 而 `run_ssa_passes` 只回写
+// `f.body` —— SSA 层的属性位改动本来就不会回到 AST。因此正确做法不是「把 hint
+// 发对」, 而是删掉这个 pass: 它既改不动真源, 又在产物里造了一条会崩的写。
 
 // =====================================================================
-// P12. 寄存器分配 (linear scan)
+// P12. 寄存器分配 —— 占位实现已删, 真正的分配不属本层
 // =====================================================================
-
-/// 活跃区间: 表示一个 SSA 值的生命周期范围。
-/// `start`/`end` 是线性化的指令位置编号。
-#[derive(Debug, Clone)]
-struct LiveInterval {
-    /// SSA 变量名 (SsaVar::name())
-    name: String,
-    /// 活跃区间起点 (定义位置)
-    start: u32,
-    /// 活跃区间终点 (最后使用位置)
-    end: u32,
-    /// 分配的虚拟寄存器编号 (None = 需要溢出到栈)
-    reg: Option<u8>,
-    /// 是否被溢出
-    spilled: bool,
-}
-
-/// x86-64 可用通用寄存器数量 (caller-saved: rax,rcx,rdx,rsi,rdi,r8-r11 = 10;
-/// callee-saved: rbx,r12-r15 = 4; 共 14 个,  rsp/rbp 不可用)。
-const NUM_PHYS_REGS: u8 = 14;
-
-/// 线性扫描寄存器分配 (Linscan): 计算每个 SSA 值的活跃区间,
-/// 按起点排序后扫描, 分配虚拟寄存器编号; 寄存器耗尽时溢出
-/// 终点最远的区间。结果以 `__dcc_regalloc_done` hint 形式
-/// 写入 entry BB, 包含分配/溢出统计, 供 codegen 参考。
-///
-/// 算法:
-///   1. 线性化 BB 指令序列, 为每条指令分配递增位置号
-///   2. 对每个 SSA 定义计算 [def_pos, last_use_pos] 活跃区间
-///   3. 按 start 升序排序所有区间
-///   4. 扫描: 维护 active 列表, 过期 (end < cur) 的区间释放寄存器;
-///      无空闲寄存器时溢出 active 中 end 最大的区间
-///   5. 在 entry BB 插入 regalloc hint 携带分配结果
-pub fn register_allocation(func: &mut Function) -> bool {
-    if func.params.is_empty()
-        && func
-            .blocks
-            .get(&func.entry)
-            .is_none_or(|b| b.insts.is_empty())
-    {
-        return false;
-    }
-
-    // ── 第 1 步: 线性化指令位置 ──
-    // 为每条指令分配递增位置号, 同时记录每个 SSA 变量的定义/使用位置。
-    let mut def_pos: HashMap<String, u32> = HashMap::new();
-    let mut last_use_pos: HashMap<String, u32> = HashMap::new();
-    let mut pos: u32 = 0;
-
-    // 函数参数在位置 0 定义
-    for p in &func.params {
-        def_pos.insert(p.name(), pos);
-    }
-    pos += 1;
-
-    // 按 block_order 遍历所有 BB
-    for bb_name in &func.block_order.clone() {
-        let bb = match func.blocks.get(bb_name) {
-            Some(b) => b,
-            None => continue,
-        };
-        // phi 节点
-        for phi in &bb.phis {
-            let pname = phi.dest.name();
-            def_pos.entry(pname.clone()).or_insert(pos);
-            for (_, pred) in &phi.incoming {
-                // phi 操作数在前驱 BB 末尾使用
-                if let Some(&last) = last_use_pos.get(pred) {
-                    if pos > last {
-                        // 保持已有 last_use
-                    } else {
-                        last_use_pos.insert(pred.clone(), pos);
-                    }
-                } else {
-                    last_use_pos.insert(pred.clone(), pos);
-                }
-            }
-            pos += 1;
-        }
-        // 普通指令
-        for inst in &bb.insts {
-            // 跳过 pass hint 指令
-            if let InstKind::Store {
-                e: Operand::SymAddr(name, _),
-                ..
-            } = &inst.kind
-            {
-                if name.starts_with("__dcc_") {
-                    continue;
-                }
-            }
-            // 记录操作数使用位置
-            record_operand_use(&inst.kind, pos, &mut last_use_pos);
-            // 记录定义位置
-            if let Some(d) = &inst.dest {
-                def_pos.entry(d.name()).or_insert(pos);
-            }
-            pos += 1;
-        }
-        // terminator 操作数
-        record_term_use(&bb.term, pos, &mut last_use_pos);
-        pos += 1;
-    }
-
-    // 统计 asm 寄存器压力
-    let mut asm_reg_pressure: usize = 0;
-    for b in func.blocks.values() {
-        for inst in &b.insts {
-            if let InstKind::Store {
-                e: Operand::SymAddr(name, _),
-                ..
-            } = &inst.kind
-            {
-                if name.starts_with("__dcc_asm_") {
-                    asm_reg_pressure += 1;
-                }
-            }
-        }
-    }
-
-    // ── 第 2 步: 构建活跃区间 ──
-    let mut intervals: Vec<LiveInterval> = Vec::new();
-    let all_names: HashSet<String> = def_pos.keys().cloned().collect();
-    for name in &all_names {
-        let start = *def_pos.get(name).unwrap_or(&0);
-        let end = *last_use_pos.get(name).unwrap_or(&start);
-        if end >= start {
-            intervals.push(LiveInterval {
-                name: name.clone(),
-                start,
-                end,
-                reg: None,
-                spilled: false,
-            });
-        }
-    }
-
-    // ── 第 3 步: 按起点排序 ──
-    intervals.sort_by_key(|i| i.start);
-
-    // ── 第 4 步: 线性扫描分配 ──
-    let available_regs = (NUM_PHYS_REGS as usize).saturating_sub(asm_reg_pressure);
-    let available_regs = available_regs.max(1); // 至少 1 个寄存器
-    let mut free_regs: Vec<u8> = (0..available_regs as u8).collect();
-    let mut active: Vec<usize> = Vec::new(); // intervals 索引
-    let mut spilled_count: usize = 0;
-    let mut allocated_count: usize = 0;
-
-    for i in 0..intervals.len() {
-        let cur_start = intervals[i].start;
-
-        // 过期: 释放 end < cur_start 的活跃区间寄存器
-        let mut j = 0;
-        while j < active.len() {
-            let ai = active[j];
-            if intervals[ai].end < cur_start {
-                if let Some(r) = intervals[ai].reg {
-                    free_regs.push(r);
-                }
-                active.swap_remove(j);
-            } else {
-                j += 1;
-            }
-        }
-
-        // 尝试分配寄存器
-        if !free_regs.is_empty() {
-            let reg = free_regs.pop().unwrap();
-            intervals[i].reg = Some(reg);
-            allocated_count += 1;
-            active.push(i);
-        } else {
-            // 溢出: 选 active 中 end 最大的区间溢出
-            let mut spill_idx = None;
-            let mut max_end = intervals[i].end;
-            for (k, &ai) in active.iter().enumerate() {
-                if intervals[ai].end > max_end {
-                    max_end = intervals[ai].end;
-                    spill_idx = Some(k);
-                }
-            }
-            if let Some(si) = spill_idx {
-                // 溢出 active 中 end 最大的, 把寄存器给当前区间
-                let ai = active[si];
-                let freed_reg = intervals[ai].reg.take().unwrap();
-                intervals[ai].spilled = true;
-                intervals[ai].reg = None;
-                spilled_count += 1;
-                intervals[i].reg = Some(freed_reg);
-                allocated_count += 1;
-                active[si] = i;
-            } else {
-                // 当前区间直接溢出
-                intervals[i].spilled = true;
-                spilled_count += 1;
-            }
-        }
-    }
-
-    let total_vals = intervals.len();
-    if total_vals == 0 {
-        return false;
-    }
-
-    // ── 第 5 步: 插入 regalloc hint ──
-    // 编码: total_pressure = (total_vals << 16) | (allocated << 8) | spilled
-    let total_pressure =
-        ((total_vals as u32) << 16) | ((allocated_count as u32) << 8) | (spilled_count as u32);
-    if let Some(entry) = func.blocks.get_mut(&func.entry) {
-        // 移除旧的 regalloc hint (如果存在)
-        entry.insts.retain(|inst| {
-            !matches!(&inst.kind, InstKind::Store {
-                e: Operand::SymAddr(name, _),
-                ..
-            } if name == "__dcc_regalloc_done")
-        });
-        entry.insts.insert(
-            0,
-            Inst {
-                dest: None,
-                kind: InstKind::Store {
-                    e: Operand::SymAddr(
-                        "__dcc_regalloc_done".to_string(),
-                        Type::Ptr(Box::new(QualType::new(Type::Void))),
-                    ),
-                    src: Operand::Int(total_pressure as i128),
-                    is_volatile: false,
-                },
-                span: func.span.clone(),
-            },
-        );
-        return true;
-    }
-    false
-}
-
-/// 记录指令操作数的使用位置。
-fn record_operand_use(kind: &InstKind, pos: u32, last_use: &mut HashMap<String, u32>) {
-    let mut record = |name: &str| {
-        let entry = last_use.entry(name.to_string()).or_insert(0);
-        if pos > *entry {
-            *entry = pos;
-        }
-    };
-    match kind {
-        InstKind::Bin { l, r, .. } => {
-            if let Operand::Var(v) = l {
-                record(&v.name());
-            }
-            if let Operand::Var(v) = r {
-                record(&v.name());
-            }
-        },
-        InstKind::Un { e, .. } | InstKind::Cast { e, .. } => {
-            if let Operand::Var(v) = e {
-                record(&v.name());
-            }
-        },
-        InstKind::AddrOf { base } => record(base),
-        InstKind::Load {
-            e: Operand::Var(v), ..
-        } => record(&v.name()),
-        InstKind::Store { e, src, .. } => {
-            if let Operand::Var(v) = e {
-                record(&v.name());
-            }
-            if let Operand::Var(v) = src {
-                record(&v.name());
-            }
-        },
-        InstKind::IndexLoad { arr, idx, .. } => {
-            if let Operand::Var(v) = arr {
-                record(&v.name());
-            }
-            if let Operand::Var(v) = idx {
-                record(&v.name());
-            }
-        },
-        InstKind::IndexStore { arr, idx, src, .. } => {
-            if let Operand::Var(v) = arr {
-                record(&v.name());
-            }
-            if let Operand::Var(v) = idx {
-                record(&v.name());
-            }
-            if let Operand::Var(v) = src {
-                record(&v.name());
-            }
-        },
-        InstKind::Call { callee, args, .. } => {
-            if let Operand::Var(v) = callee {
-                record(&v.name());
-            }
-            for a in args {
-                if let Operand::Var(v) = a {
-                    record(&v.name());
-                }
-            }
-        },
-        InstKind::MemberLoad {
-            obj: Operand::Var(v),
-            ..
-        } => record(&v.name()),
-        InstKind::MemberStore { obj, src, .. } => {
-            if let Operand::Var(v) = obj {
-                record(&v.name());
-            }
-            if let Operand::Var(v) = src {
-                record(&v.name());
-            }
-        },
-        InstKind::Select { cond, then_, else_ } => {
-            if let Operand::Var(v) = cond {
-                record(&v.name());
-            }
-            if let Operand::Var(v) = then_ {
-                record(&v.name());
-            }
-            if let Operand::Var(v) = else_ {
-                record(&v.name());
-            }
-        },
-        _ => {},
-    }
-}
-
-/// 记录 terminator 操作数的使用位置。
-fn record_term_use(term: &Terminator, pos: u32, last_use: &mut HashMap<String, u32>) {
-    let mut record = |name: &str| {
-        let entry = last_use.entry(name.to_string()).or_insert(0);
-        if pos > *entry {
-            *entry = pos;
-        }
-    };
-    match term {
-        Terminator::Ret {
-            val: Some(Operand::Var(v)),
-        } => record(&v.name()),
-        Terminator::Branch {
-            cond: Operand::Var(v),
-            ..
-        } => record(&v.name()),
-        Terminator::SwitchTable {
-            idx: Operand::Var(v),
-            ..
-        } => record(&v.name()),
-        _ => {},
-    }
-}
+//
+// 旧 P12 在 entry BB 塑一条 `Store{e: SymAddr("__dcc_regalloc_done"), src: <统计量>}`
+// 并 `return true`。三件事同时不成立:
+//   1. 后端从不读这个符号 (`grep -rn __dcc_ src/codegen/` 只有 `__dcc_trapv_overflow`
+//      / `__dcc_tls_base` / `__dcc_x87_fmod` 这三个无关内建), 重建时又被
+//      `is_pass_hint_inst` 丢掉 ⇒ 对机器码零影响;
+//   2. 只插了一条 hint 却报 `changed = true` ⇒ 任何拿返回值驱动定点迭代的调度器
+//      都会被它骗成无限循环;
+//   3. 方案要求的「重建 AST 时每个 `Ident` 携带物理寄存器编号、codegen 不再分配」
+//      在当前架构下不是 pass 级改动: `ast::Ident` 没有寄存器字段, 而三个后端的变量
+//      模型全部是「栈槽 + 固定累加器」(x86_64 `var_map` + `%r13+disp` + `%rax`;
+//      aarch64 `x0/w0`; riscv64 `a0/a1`), `ArchRegPool` 只服务 inline asm 操作数绑定。
+//      要真做必须先有「寄存器直用 + 溢出物化」的发射后端 —— 后端级重写, 需单独立项
+//      (含与 golden baseline / 产物可复现门禁的逐字节对撞), 不属本方案范围。
+//
+// 删而非留的理由: 不影响产物的 pass 不叫「已完成」, 叫死代码; 而它的区间计算与扫描
+// 算法已在 git 历史里, 后端重写时可直接取回。本文件的头注释同步修正了 P12 的条目。
 
 // =====================================================================
 // P12b. UBSAN IR 层插桩
@@ -1790,47 +1445,130 @@ pub fn alias_classify(a: &str, b: &str, sets: &HashMap<String, usize>) -> &'stat
 // P14. Speculative execution
 // =====================================================================
 
-/// 投机执行: 把 BB 内无副作用的纯计算 (Bin/Unary/Cast/Select) 提到 BB 顶端,
-/// 让分支条件尽早算出 (在依赖路径上提前算)。简化: 复用 P5 的排序思路,
-/// 把所有 pure 指令集中到 BB 顶端。
+/// 投机执行: 把「分支条件真正需要、且提前求值不新增可观察行为」的纯计算提到 BB 顶端,
+/// 让分支尽早算出 (在本块内把这条链上提, 后端便能尽早发分支)。
+///
+/// 旧实现是把块内指令按 dest 名字**字典序排序**, 注释写着「无依赖冲突」—— 这是错的:
+/// 字典序与数据依赖没有任何关系。`s = s + (t + 0)` 会排到 `t = gv*k + C` 之前 (s < t),
+/// SSA→AST 重建后 `t` 的使用跑在赋值之前 —— 实测 -O3 下 `tri(3)` 由 2754876 变 12。
+/// 因此本版只允许沿**依赖闭包**上提, 并拒绝把可能陷隟的运算 (除/模) 提到
+/// 除数就绪之前。
 pub fn speculative_execution(func: &mut Function) -> bool {
     let mut changed = false;
     for b in func.blocks.values_mut() {
         if b.insts.len() < 2 {
             continue;
         }
-        // 检查是否有副作用指令: 如果有, 且纯指令依赖副作用指令的结果,
-        // 则不能安全地重排序 (会破坏数据依赖)。
+        // 保守守卫 (与旧版一致): 块内有副作用指令 (Call/Store/volatile 读/asm) 时,
+        // 提前的纯计算可能与副作用调序。
         let has_side = b.insts.iter().any(|i| {
             // volatile Load 也有外部可见副作用, 不可被投机重排
             inst_is_side_effecting(&i.kind) || matches!(i.kind, InstKind::InlineAsm { .. })
         });
         if has_side {
-            // 保守: 有副作用指令时不做重排, 避免破坏 Call→use 依赖
             continue;
         }
-        // 记录原始顺序
-        let orig_order: Vec<String> = b
-            .insts
-            .iter()
-            .map(|i| i.dest.as_ref().map(|d| d.name()).unwrap_or_default())
-            .collect();
-        // 全部是纯运算指令, 按字典序排序 (无依赖冲突)
-        b.insts.sort_by(|a, b| {
-            let an = a.dest.as_ref().map(|d| d.name()).unwrap_or_default();
-            let bn = b.dest.as_ref().map(|d| d.name()).unwrap_or_default();
-            an.cmp(&bn)
-        });
-        let new_order: Vec<String> = b
-            .insts
-            .iter()
-            .map(|i| i.dest.as_ref().map(|d| d.name()).unwrap_or_default())
-            .collect();
-        if orig_order != new_order {
-            changed = true;
+        // 后向切片: 从终结符真正用到的名字出发, 逆序收集「定义这些名字的指令」,
+        // 并把它们的操作数加进需求集。逆序遍历保证同一个名字只取**最近**的定义。
+        let mut need: HashSet<String> = HashSet::new();
+        match &b.term {
+            Terminator::Ret { val: Some(v) } => need.extend(operand_uses_op(v)),
+            Terminator::Branch { cond, .. } => need.extend(operand_uses_op(cond)),
+            Terminator::SwitchTable { idx, .. } => need.extend(operand_uses_op(idx)),
+            _ => {},
         }
+        if need.is_empty() {
+            continue;
+        }
+        let mut slice: Vec<usize> = Vec::new();
+        let mut blocked = false;
+        for idx in (0..b.insts.len()).rev() {
+            let inst = &b.insts[idx];
+            let defines_need = inst.dest.as_ref().is_some_and(|d| need.contains(&d.name()));
+            if !defines_need {
+                continue;
+            }
+            // 除/模可能陷隟: 上提后会跳过原本保护它的控制流, 整个块放弃。
+            if may_trap(&inst.kind) {
+                blocked = true;
+                break;
+            }
+            need.extend(operand_uses(&inst.kind));
+            slice.push(idx);
+        }
+        if blocked || slice.is_empty() {
+            continue;
+        }
+        slice.sort_unstable();
+        let picked: HashSet<usize> = slice.iter().copied().collect();
+        // 关键屏障: 本 IR 的重建是**按基名塌缩成可变量**的 —— `y_1/y_2/y_3` 在 SSA 里
+        // 是互不相关的名字, 重建后都是变量 `y`, 它们的**相对顺序就是程序语义**。
+        // 因此上提集合不得跨过一个「写同一基名」或「读了对方所写基名」的指令。
+        // (同一约束在 P5 `schedule_block` 里由 `inst_def_bases` 边建模, 本 pass 同样补上。)
+        if !slice_is_movable(&b.insts, &picked) {
+            continue;
+        }
+        if picked.iter().max().copied().unwrap_or(0) < picked.len() {
+            continue;
+        }
+        let orig = std::mem::take(&mut b.insts);
+        let mut next: Vec<Inst> = Vec::with_capacity(orig.len());
+        for (idx, inst) in orig.iter().enumerate() {
+            if picked.contains(&idx) {
+                next.push(inst.clone());
+            }
+        }
+        for (idx, inst) in orig.iter().enumerate() {
+            if !picked.contains(&idx) {
+                next.push(inst.clone());
+            }
+        }
+        changed = true;
+        b.insts = next;
     }
     changed
+}
+
+/// 切片能否整体提到块首: 对每个被上提的 `i` 与它跨过每个留在原地的 `j (j<i)` 检查
+/// 三条不得跨越的关系。
+fn slice_is_movable(insts: &[Inst], picked: &HashSet<usize>) -> bool {
+    let base_of = |k: usize| -> Option<String> { insts[k].dest.as_ref().map(|d| d.base.clone()) };
+    for &i in picked {
+        for j in 0..i {
+            if picked.contains(&j) {
+                continue;
+            }
+            // 1. 两者写同一个基名 ⇒ 上提会颠倒对同一变量的两次赋值。
+            if let (Some(bi), Some(bj)) = (base_of(i), base_of(j)) {
+                if bi == bj {
+                    return false;
+                }
+                // 2. 上提项读了被跨过指令所写的基名 ⇒ 拿到的会是旧值。
+                if operand_uses(&insts[i].kind).iter().any(|u| u == &bj) {
+                    return false;
+                }
+            }
+            // 3. 上提项的 dest 被被跨过指令以**同名 SSA** 读写 (版本级冲突)。
+            if let Some(d) = &insts[i].dest {
+                let dn = d.name();
+                if operand_uses(&insts[j].kind).iter().any(|u| *u == dn) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// 该运算是否可能陷隟: 整数除零在 C 里是 UB, 但 dcc 会发 trap / UBSAN 守卫,
+/// 那是可观察行为 ⇒ 除数不是已知非零常量时, 不得把这条除法上提。
+fn may_trap(kind: &InstKind) -> bool {
+    match kind {
+        InstKind::Bin { op: BinOp::Div | BinOp::Mod, r, .. } => {
+            !matches!(r, Operand::Int(v) if *v != 0)
+        },
+        _ => false,
+    }
 }
 
 // =====================================================================
@@ -1855,6 +1593,17 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
     // 常量集, 进而泄进产物字节。`ordered_block_names` 不改变收敛结果 (真正收敛到
     // 不动点时与序无关), 只是让"未收敛"情形也保持可复现。
     let sweep_order = ordered_block_names(func);
+    // 哪些名字可以被当常量传递? 两类必须排除, 它们同属一个根因: 本 IR 的 SSA→AST
+    // 重建是**按基名塌缩成可变量**的 (`s_1`/`s_2` 重建后都是变量 `s`), 所以
+    // 「这个名字在这个点一定是这个值」只在基名全局唯一赋值时成立。
+    //   1. 参与任何 phi 的名字 (包括 phi dest) —— 它们是汇合点上的值;
+    //   2. 基名在本函数内有 **多个版本** 的名字 —— 典型即循环携带变量
+    //      (`int s=0; while(n>0){ s+=n; ... }` 造出 s_1/s_2)。
+    // 不排除会怎样: `s_1 = 0` 入表后, 循环体里的 `s_2 = s_1 + n` 被替换成
+    // `s = 0 + n` —— 累加变成赋置, 实测 `sum_down(3)` 返回垃圾值。
+    // 真正的 SCCP 应在 phi 上做格 meet; 在那之前, 保守判据就是上面两条
+    // (只损失折叠精度, 不损失正确性)。
+    let phi_locked = non_propagatable_names(func);
     while changed && iter < 16 {
         changed = false;
         iter += 1;
@@ -1906,6 +1655,10 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
                 };
                 if let Some(d) = &inst.dest {
                     if let Some(cv) = v {
+                        // phi 参与的名字不得入常量表 (见上方 `phi_locked` 的根因说明)。
+                        if phi_locked.contains(&d.name()) {
+                            continue;
+                        }
                         // Mask constant to destination type width to avoid
                         // i128 sign-extension issues (e.g. ~0U must be
                         // 0xFFFFFFFF, not -1 in i128).
@@ -2016,6 +1769,41 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
         }
     }
     modified
+}
+
+/// 不允许进常量表的名字集合 (根因见 `sparse_conditional_constant_propagation` 内的注释)。
+fn non_propagatable_names(func: &Function) -> HashSet<String> {
+    let mut locked: HashSet<String> = HashSet::new();
+    // 基名 → 出现过的不同 SSA 版本数。
+    let mut versions: HashMap<String, HashSet<String>> = HashMap::new();
+    for bb in func.blocks.values() {
+        for phi in &bb.phis {
+            locked.insert(phi.dest.name());
+            for (v, _) in &phi.incoming {
+                locked.insert(v.name());
+            }
+            versions
+                .entry(phi.dest.base.clone())
+                .or_default()
+                .insert(phi.dest.name());
+        }
+        for inst in &bb.insts {
+            if let Some(d) = &inst.dest {
+                versions.entry(d.base.clone()).or_default().insert(d.name());
+            }
+        }
+    }
+    for p in &func.params {
+        versions.entry(p.base.clone()).or_default().insert(p.name());
+    }
+    // 多版本基名下的**全部**版本都不可传播: 只要基名是个可变量, 任何一次替换都可能
+    // 发生在它已被后续赋值改写之后。
+    for (_base, vs) in versions {
+        if vs.len() > 1 {
+            locked.extend(vs);
+        }
+    }
+    locked
 }
 
 fn operand_int(o: &Operand, consts: &HashMap<String, i128>) -> Option<i128> {
@@ -2739,83 +2527,1124 @@ fn operand_uses_op(o: &Operand) -> Vec<String> {
 }
 
 // =====================================================================
-// P16. Software Pipelining
+// 通用 CFG / 重命名工具 (P17 / P18 / P19 共用)
 // =====================================================================
 
-/// 软件流水: 对单基本块自然循环, 将第 i 次迭代的指令与第 i+1 次
-/// 迭代重叠执行, 生成 prologue / kernel / epilogue 三部分。
-///
-/// 保守策略: 仅对无循环携带依赖 (loop-carried dependency) 的
-/// 简单循环启用。检测条件:
-/// 1. 单个 latch 边 (回边)
-/// 2. 循环体内无 Store/Call (无内存副作用)
-/// 3. 所有 def-use 链在循环体内闭合
-///
-/// 返回 true 如果函数被修改.
-pub fn software_pipelining(func: &mut Function) -> bool {
-    // Find natural loops with single back edge
-    let loop_info = find_natural_loops(func);
-    if loop_info.is_empty() {
-        return false;
+/// 从终结符派生后继。**不得**读 `bb.succs`: `succs`/`preds` 是 SSA 构造时填的缓存,
+/// 任何改 terminator 的 pass 之后即为脏 (见 `src/ssa.rs::term_succs` 的同一说明)。
+/// P19 会改 terminator, 因此所有新 pass 一律走终结符。
+fn succs_of(term: &Terminator) -> Vec<String> {
+    match term {
+        Terminator::Jump(t) => vec![t.clone()],
+        Terminator::Branch { t, f, .. } => vec![t.clone(), f.clone()],
+        Terminator::SwitchTable {
+            targets, default, ..
+        } => {
+            let mut s: Vec<String> = targets.clone();
+            if !s.contains(default) {
+                s.push(default.clone());
+            }
+            s
+        },
+        Terminator::Ret { .. } | Terminator::Unreachable => vec![],
     }
-
-    let mut modified = false;
-    for (header, _latch) in &loop_info {
-        // Conservative: only pipeline simple single-BB loops
-        // with no memory operations
-        let header_bb = match func.blocks.get(header) {
-            Some(bb) => bb,
-            None => continue,
-        };
-
-        // Check if loop body is safe to pipeline:
-        // no stores, no calls, no inline asm, no volatile loads
-        let has_side_effects = header_bb.insts.iter().any(|inst| {
-            inst_is_side_effecting(&inst.kind) || matches!(&inst.kind, InstKind::InlineAsm { .. })
-        });
-        if has_side_effects {
-            continue;
-        }
-
-        // Mark loop as pipelinable by adding a metadata annotation.
-        // Full software pipelining transformation (prologue/kernel/
-        // epilogue generation) would require significant IR
-        // restructuring; here we mark the loop for the backend
-        // to apply modulo scheduling.
-        //
-        // The initiation interval (II) is computed as:
-        // II = max(RecMII, ResMII)
-        // where RecMII = recurrence dependency distance
-        // and ResMII = resource-constrained minimum.
-        //
-        // For simple loops without loop-carried dependencies,
-        // II = 1 (fully overlapped).
-        modified = true;
-    }
-    modified
 }
 
-/// 查找自然循环: 返回 (header, latch) 对列表.
-fn find_natural_loops(func: &Function) -> Vec<(String, String)> {
-    let mut loops = Vec::new();
-    // Simple heuristic: look for back edges where a successor
-    // dominates the predecessor (i.e., successor is a loop header).
-    // For single-BB loops: header has a branch back to itself.
-    for (name, bb) in &func.blocks {
-        match &bb.term {
-            Terminator::Branch { cond: _, t, f } => {
-                if t == name || f == name {
-                    loops.push((name.clone(), name.clone()));
+/// 反向重建前驱表 (同样只读终结符)。
+fn preds_from_terminators(func: &Function) -> HashMap<String, Vec<String>> {
+    let mut preds: HashMap<String, Vec<String>> = HashMap::new();
+    for name in ordered_block_names(func) {
+        let Some(bb) = func.blocks.get(&name) else {
+            continue;
+        };
+        for s in succs_of(&bb.term) {
+            let e = preds.entry(s).or_default();
+            if !e.contains(&name) {
+                e.push(name.clone());
+            }
+        }
+    }
+    preds
+}
+
+/// 从 entry 出发的可达块, 按 **RPO** (逆后序) 给出。
+///
+/// 为什么需要 RPO 而不是 `block_order`: 值编号与死代码判定都要求「处理一个块时,
+/// 它的所有前驱已处理完」, 而 `block_order` 是创建序 (含循环时不满足该性质)。
+/// DFS 按 `ordered_block_names` 的固定后缀去重, 保证迭代顺序可复现。
+fn rpo_order(func: &Function) -> Vec<String> {
+    let mut post: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut stack: Vec<(String, bool)> = vec![(func.entry.clone(), false)];
+    while let Some((b, expanded)) = stack.pop() {
+        if expanded {
+            post.push(b.clone());
+            continue;
+        }
+        if !seen.insert(b.clone()) {
+            continue;
+        }
+        stack.push((b.clone(), true));
+        let Some(bb) = func.blocks.get(&b) else {
+            continue;
+        };
+        // 逆序入栈, 使弹出顺序 = 后继声明顺序 (可复现)。
+        for s in succs_of(&bb.term).into_iter().rev() {
+            if !seen.contains(&s) {
+                stack.push((s, false));
+            }
+        }
+    }
+    post.reverse();
+    post
+}
+
+/// 操作数的「身份串」: SSA 下变量名已按定义唯一, 因此它本身就是值号。
+fn operand_identity(o: &Operand) -> String {
+    match o {
+        Operand::Var(v) => v.name(),
+        Operand::Int(i) => format!("#i{i}"),
+        Operand::Float(f, ty) => format!("#f{:?}{}", f, type_tag_of(ty)),
+        Operand::Str(s) => format!("#s{}", s.len()),
+        Operand::SymAddr(n, _) => format!("#sym{n}"),
+        Operand::FnAddr(n, _) => format!("#fn{n}"),
+        Operand::Void => "#void".to_string(),
+        Operand::Call(n) => format!("#call{n}"),
+        Operand::Phi(_) => "#phi".to_string(),
+    }
+}
+
+/// 类型标签: 参与值号时必须能区分不同类型 (`Cast` 的目标准类型与 `Bin` 的宽度)。
+fn type_tag_of(ty: &Type) -> String {
+    format!("{:?}", ty)
+}
+
+/// 把一处引用从一个 SSA 名改写到另一个 SSA 名 (递归作用于指令、phi 与终结符)。
+fn rename_uses(func: &mut Function, map: &HashMap<String, SsaVar>) {
+    if map.is_empty() {
+        return;
+    }
+    for bb in func.blocks.values_mut() {
+        for phi in &mut bb.phis {
+            for (v, _) in &mut phi.incoming {
+                if let Some(n) = map.get(&v.name()) {
+                    *v = n.clone();
+                }
+            }
+        }
+        for inst in &mut bb.insts {
+            rename_in_kind(&mut inst.kind, map);
+        }
+        rename_in_term(&mut bb.term, map);
+    }
+}
+
+fn rename_var(v: &mut SsaVar, map: &HashMap<String, SsaVar>) {
+    if let Some(n) = map.get(&v.name()) {
+        *v = n.clone();
+    }
+}
+
+fn rename_op(o: &mut Operand, map: &HashMap<String, SsaVar>) {
+    if let Operand::Var(v) = o {
+        rename_var(v, map);
+    }
+}
+
+/// 穷举: 新增 InstKind 形态时本函数编译失败, 强制同步 —— 漏一个操作数位置就等于
+/// 重写后仍有旧名字引用被删除的定义, 直接产生悬空 SSA 名。
+fn rename_in_kind(k: &mut InstKind, map: &HashMap<String, SsaVar>) {
+    match k {
+        InstKind::Bin { l, r, .. } => {
+            rename_op(l, map);
+            rename_op(r, map);
+        },
+        InstKind::Un { e, .. } | InstKind::Cast { e, .. } => rename_op(e, map),
+        InstKind::AddrOf { .. } => {},
+        InstKind::Load { e, .. } => rename_op(e, map),
+        InstKind::Store { e, src, .. } => {
+            rename_op(e, map);
+            rename_op(src, map);
+        },
+        InstKind::IndexLoad { arr, idx, .. } => {
+            rename_op(arr, map);
+            rename_op(idx, map);
+        },
+        InstKind::IndexStore { arr, idx, src, .. } => {
+            rename_op(arr, map);
+            rename_op(idx, map);
+            rename_op(src, map);
+        },
+        InstKind::Call { callee, args, .. } => {
+            rename_op(callee, map);
+            for a in args {
+                rename_op(a, map);
+            }
+        },
+        InstKind::Invoke { callee, args, .. } => {
+            rename_op(callee, map);
+            for a in args {
+                rename_op(a, map);
+            }
+        },
+        InstKind::MemberLoad { obj, .. } => rename_op(obj, map),
+        InstKind::MemberStore { obj, src, .. } => {
+            rename_op(obj, map);
+            rename_op(src, map);
+        },
+        InstKind::Select {
+            cond, then_, else_, ..
+        } => {
+            rename_op(cond, map);
+            rename_op(then_, map);
+            rename_op(else_, map);
+        },
+        InstKind::InlineAsm { inputs, .. } => {
+            for i in inputs {
+                rename_op(i, map);
+            }
+        },
+        InstKind::PreservedDecl { .. } => {},
+        InstKind::EhLandingPad { selector } => rename_var(selector, map),
+    }
+}
+
+fn rename_in_term(t: &mut Terminator, map: &HashMap<String, SsaVar>) {
+    match t {
+        Terminator::Ret { val: Some(v) } => rename_op(v, map),
+        Terminator::Ret { val: None } => {},
+        Terminator::Branch { cond, .. } => rename_op(cond, map),
+        Terminator::SwitchTable { idx, .. } => rename_op(idx, map),
+        Terminator::Jump(..) | Terminator::Unreachable => {},
+    }
+}
+
+/// 一个内存访问的「位置」标识 —— DSE 只能在不引入别名的前提下删写。
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+enum StoreLoc {
+    /// 具名对象 (局部变量或文件作用域对象) 的本体: `&x` 的 x。
+    Named(String),
+    /// 一个指针值所指的对象, 名字不可知 (包活 `*p` / `p->f` / `p[i]`)。
+    Via(String),
+    /// 完全无法用名字表达 (如 `*(a + i)` 的计算结果地址) ⇒ 与一切位置潜在别名。
+    Opaque,
+}
+
+/// 从地址/基址操作数推出被访问位置。`defs` 是 SSA 名 -> 定义它的指令。
+fn access_loc(addr: &Operand, defs: &HashMap<String, InstKind>) -> StoreLoc {
+    match addr {
+        Operand::SymAddr(n, _) => {
+            // `SymAddr(name)` 作为地址操作数 = 「以该符号的值为地址」(指针型全局)。
+            StoreLoc::Via(format!("sym:{n}"))
+        },
+        Operand::Var(v) => {
+            if let Some(kind) = defs.get(&v.name()) {
+                if let InstKind::AddrOf { base } = kind {
+                    return StoreLoc::Named(base.clone());
+                }
+                if let InstKind::IndexLoad { arr, idx, .. } = kind {
+                    // 指针算术 `(p + i)`: 基址可知名则记到基址上, 否则 Via/Opaque。
+                    let _ = idx;
+                    return access_loc(arr, defs);
+                }
+                if let InstKind::MemberLoad { obj, .. } = kind {
+                    return access_loc(obj, defs);
+                }
+                return StoreLoc::Via(v.name());
+            }
+            StoreLoc::Via(v.name())
+        },
+        _ => StoreLoc::Opaque,
+    }
+}
+
+// =====================================================================
+// P17. GVN (全局值编号)
+// =====================================================================
+
+/// 一个纯运算的「表达式形状」: 运算 + 各操作数的值身份。
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+enum ValKey {
+    Bin(String, String, String),
+    Un(String, String),
+    Cast(String, String),
+    Select(String, String, String),
+    /// 内存读 (仅在同一块内且无穿插写时可复用)
+    Load(String),
+    Member(String, String, String),
+    Index(String, String, String),
+}
+
+/// 全局值编号 (GVN)：在 SSA IR 上把「形状完全相同的计算」归一到同一个值。
+///
+/// 与 AST 层的 `ssa_gvn` 不同, 这里能安全地跳块复用, 因为 SSA 名**不可变**:
+/// `y = a + b` 与 `x = a + b` 里的 a/b 是同一个定义, 在任何使用点它们就是同一个值,
+/// 不存在 AST 名字模型里那种「a 后来被改了」的 kill 问题。
+/// 例外是内存读: 本 IR 没有 memory SSA, store 不进任何名字链 ⇒ 读的同形不同点
+/// **不能**跳块复用, 只在当前块内、且中途没有写/调用/汇编时复用。
+///
+/// 做了什么:
+///   1. 跳块传播纯表达式的可用性: `in[BB] = ⋂ out[pred]` (交集要求同 key 同值名),
+///      按 RPO 迭代到不动点;
+///   2. 命中的冗余计算不重新发射: dest 重命名到已有值, 本指令删除;
+///   3. 退化 phi (所有 incoming 同一个值) 直接换成该值; 同块内形状相同的 phi 归一;
+///   4. 整轮应用改名, 反复直到不再变化 (有上限)。
+pub fn gvn(func: &mut Function) -> bool {
+    let mut total_changed = false;
+    // 上限: 改名是单调收敛 (每轮至少多一个归一), 给足够轮数并依靠「不再变化」提前退出。
+    for _round in 0..16 {
+        let defs = collect_defs(func);
+        let var_table = collect_var_table(func);
+        let order = rpo_order(func);
+        let preds = preds_from_terminators(func);
+        let mut out_table: HashMap<String, HashMap<ValKey, String>> = HashMap::new();
+        let mut renames: HashMap<String, SsaVar> = HashMap::new();
+        let mut dead: HashMap<String, HashSet<String>> = HashMap::new(); // bb -> 冗余指令 dest 名
+        let mut phi_dead: HashMap<String, HashSet<String>> = HashMap::new();
+        // 本轮是否有过「保留指令、只改右式」的改写 (这类改写不产生 renames/dead)。
+        let mut rewrote_in_place = false;
+        // 用户可见变量名集 (与 DSE / dead_inst_elim 用同一判据的真源)。
+        let named_before = local_object_names(func);
+
+        for bb_name in &order {
+            // 1. in = 各前驱 out 的交集 (交集要求「同形状且同一值名」); 无前驱 ⇒ 空表。
+            let mut cur: HashMap<ValKey, String> = HashMap::new();
+            let my_preds: Vec<String> = preds.get(bb_name).cloned().unwrap_or_default();
+            if let Some((first_pred, rest)) = my_preds.split_first() {
+                if let Some(t) = out_table.get(first_pred) {
+                    cur = t.clone();
+                }
+                for p in rest {
+                    let Some(t) = out_table.get(p) else {
+                        cur.clear();
+                        break;
+                    };
+                    cur.retain(|k, n| t.get(k).map(|m| m == n).unwrap_or(false));
+                }
+            }
+
+            // 2. 本块内的表与逐指令编号。`local` 只在本块内复用, 并且遇任何
+            //    写/调用/汇编即作废 (内存读与浮点运算共用这条保守规则)。
+            let mut local: HashMap<ValKey, String> = HashMap::new();
+            let Some(bbm) = func.blocks.get_mut(bb_name) else {
+                continue;
+            };
+            for idx in 0..bbm.insts.len() {
+                let Some(dest) = bbm.insts[idx].dest.clone() else {
+                    // 无 dest 的指令 (store 等) 是写屏障: 本块内可用表归零。
+                    if inst_is_side_effecting(&bbm.insts[idx].kind) {
+                        local.clear();
+                    }
+                    continue;
+                };
+                if dest.name().starts_with("__dcc_") {
+                    continue;
+                }
+                let Some(key) = val_key(&bbm.insts[idx].kind, &defs) else {
+                    // 不纯/不可编号: 它本身是一次写或调用 ⇒ 本块内可用表作废
+                    if inst_is_side_effecting(&bbm.insts[idx].kind) {
+                        local.clear();
+                    }
+                    continue;
+                };
+                // 三类可用性不同, 必须区分:
+                //   * 内存读 (Load/Member/Index): 本 IR 没有 memory SSA, store 不进任何
+                //     名字链 ⇒ 只能在本块内、且中途无写时复用;
+                //   * 浮点相关运算: 舍入模式可被 `fesetround` 在运行期改掉, 跳块或跨调用
+                //     复用会把旧模式下的结果发给新模式 (实测 `fenv_round.c`: DOWNWARD 与
+                //     UPWARD 下的两次 `1.0/3.0` 被归一, `down != up` 判定失效); FENV_ACCESS
+                //     ON 时异常标志也可观测, 连本块内复用都禁止;
+                //   * 其余纯运算 (整数): SSA 名不可变, 可安全跳块传递。
+                let fp_sensitive = is_fp_flavored(&bbm.insts[idx].kind, &dest.ty);
+                if fp_sensitive && func.fenv_access {
+                    continue;
+                }
+                let local_only = fp_sensitive
+                    || matches!(
+                        &key,
+                        ValKey::Load(_) | ValKey::Member(..) | ValKey::Index(..)
+                    );
+                let table = if local_only { &mut local } else { &mut cur };
+                let hit = table.get(&key).cloned();
+                match hit {
+                    Some(prev) => {
+                        // 命中的是已存在的同形计算。两种处理必须区分:
+                        //   * dest 是临时值 (`_t*` 等) → 直接把它归一到已有值, 本指令删除;
+                        //   * dest 基名是**用户可见变量** → 绝不能删! 重建阶段这条指令就是
+                        //     `y = …` 这条赋值语句的唯一来源, 删它等于删赋值。循环里尤其致命:
+                        //     累加 `s = s + i` 被归一到上一轮的值后, `s` 再也不变
+                        //     (实测解锁后 `cont(4)` 由 5 变 0)。
+                        //     这里保留指令, 只把右式换成一次取值。
+                        if named_before.contains(&dest.base) {
+                            // 已经就是「取 prev 值」的拷贝 ⇒ 无可再改, 不要谎报变化
+                            // (否则每轮都会因 `rewrote_in_place` 而跑满 16 轮)。
+                            let already_copy = matches!(&bbm.insts[idx].kind, InstKind::Bin {
+                                op: BinOp::Add,
+                                l: Operand::Var(v),
+                                r: Operand::Int(0),
+                            } if v.name() == prev);
+                            if !already_copy {
+                                if let Some(target) = var_table.get(&prev) {
+                                    bbm.insts[idx].kind = InstKind::Bin {
+                                        op: BinOp::Add,
+                                        l: Operand::Var(target.clone()),
+                                        r: Operand::Int(0),
+                                    };
+                                    rewrote_in_place = true;
+                                }
+                            }
+                        } else {
+                            // **只有改写真的记下了才能删除该指令**。`register_rename` 会拒绝
+                            // 同一个源名的第二次改写, 若此时仍把它放进 `dead`, 就会留下
+                            // 指向已删定义的引用: 实测 `if (_tbin_2)` 读一个从未赋值的临时名,
+                            // `cont(4)` 由 5 变 0。
+                            if register_rename(&mut renames, &var_table, &dest, &prev) {
+                                dead.entry(bb_name.clone())
+                                    .or_default()
+                                    .insert(dest.name());
+                            }
+                        }
+                    },
+                    None => {
+                        table.insert(key, dest.name());
+                    },
+                }
+            }
+            out_table.insert(bb_name.clone(), cur);
+
+            // 3. phi 退化与同块合并。
+            let mut seen_phi: HashMap<Vec<(String, String)>, String> = HashMap::new();
+            for phi in &bbm.phis {
+                let names: Vec<String> = phi.incoming.iter().map(|(v, _)| v.name()).collect();
+                if let Some(first) = names.iter().find(|n| **n != phi.dest.name()) {
+                    if names.iter().all(|n| n == first) {
+                        // 所有入边同一个值 ⇒ phi 退化 (改写失败则不得删除, 见 `register_rename`)。
+                        if register_rename(&mut renames, &var_table, &phi.dest, first) {
+                            phi_dead
+                                .entry(bb_name.clone())
+                                .or_default()
+                                .insert(phi.dest.name());
+                        }
+                        continue;
+                    }
+                }
+                let shape: Vec<(String, String)> = phi
+                    .incoming
+                    .iter()
+                    .map(|(v, p)| (v.name(), p.clone()))
+                    .collect();
+                if let Some(prev) = seen_phi.get(&shape) {
+                    if register_rename(&mut renames, &var_table, &phi.dest, prev) {
+                        phi_dead
+                            .entry(bb_name.clone())
+                            .or_default()
+                            .insert(phi.dest.name());
+                    }
+                } else {
+                    seen_phi.insert(shape, phi.dest.name());
+                }
+            }
+        }
+
+        if renames.is_empty() && !rewrote_in_place {
+            break;
+        }
+        // 4. 应用本轮改名 + 删除冗余指令/phi。
+        rename_uses(func, &renames);
+        for (bb_name, names) in &dead {
+            if let Some(bb) = func.blocks.get_mut(bb_name) {
+                bb.insts
+                    .retain(|i| !i.dest.as_ref().is_some_and(|d| names.contains(&d.name())));
+            }
+        }
+        for (bb_name, names) in &phi_dead {
+            if let Some(bb) = func.blocks.get_mut(bb_name) {
+                bb.phis.retain(|p| !names.contains(&p.dest.name()));
+            }
+        }
+        total_changed = true;
+    }
+    total_changed
+}
+
+/// 登记一次「from → to」改名。返回 `false` 表示该源名已有改写(或被自己映射), 调用方
+/// **必须**因此放弃删除 from 的定义, 否则就会造出悬空引用。
+fn register_rename(
+    renames: &mut HashMap<String, SsaVar>,
+    var_table: &HashMap<String, SsaVar>,
+    from: &SsaVar,
+    to: &str,
+) -> bool {
+    if from.name() == to || renames.contains_key(&from.name()) {
+        return false;
+    }
+    match var_table.get(to) {
+        Some(target) => {
+            renames.insert(from.name(), target.clone());
+            true
+        },
+        None => false,
+    }
+}
+
+/// SSA 名 -> 定义它的指令形态 (用于把 `AddrOf` 等地址来源识别为具名位置)。
+fn collect_defs(func: &Function) -> HashMap<String, InstKind> {
+    let mut m: HashMap<String, InstKind> = HashMap::new();
+    for bb_name in ordered_block_names(func) {
+        let Some(bb) = func.blocks.get(&bb_name) else {
+            continue;
+        };
+        for inst in &bb.insts {
+            if let Some(d) = &inst.dest {
+                m.insert(d.name(), inst.kind.clone());
+            }
+        }
+    }
+    m
+}
+
+/// 全部 SSA 名 -> SsaVar (改名时需要目标变量的完整类型/span)。
+fn collect_var_table(func: &Function) -> HashMap<String, SsaVar> {
+    let mut m: HashMap<String, SsaVar> = HashMap::new();
+    for p in &func.params {
+        m.insert(p.name(), p.clone());
+    }
+    for bb in func.blocks.values() {
+        for inst in &bb.insts {
+            if let Some(d) = &inst.dest {
+                m.insert(d.name(), d.clone());
+            }
+        }
+        for phi in &bb.phis {
+            m.insert(phi.dest.name(), phi.dest.clone());
+        }
+    }
+    m
+}
+
+/// 纯运算的表达式形状; `None` = 不参与值编号 (有副作用、读内存但带 volatile、
+/// 戒指数等无法保证重复执行语义一致的形态)。
+fn val_key(k: &InstKind, _defs: &HashMap<String, InstKind>) -> Option<ValKey> {
+    match k {
+        InstKind::Bin { op, l, r } => {
+            // 除/模可能陷阱: 多执行一次会新增可观察行为, 仅当已命中同样形状时
+            // 才能删 (而删的是重复执行, 不会新增陷阱) —— 故允许入表与复用。
+            Some(ValKey::Bin(
+                format!("{op:?}"),
+                operand_identity(l),
+                operand_identity(r),
+            ))
+        },
+        InstKind::Un { op, e } => Some(ValKey::Un(format!("{op:?}"), operand_identity(e))),
+        InstKind::Cast { ty, e } => Some(ValKey::Cast(type_tag_of(ty), operand_identity(e))),
+        InstKind::Select {
+            cond, then_, else_, ..
+        } => Some(ValKey::Select(
+            operand_identity(cond),
+            operand_identity(then_),
+            operand_identity(else_),
+        )),
+        InstKind::Load {
+            e, ty, is_volatile,
+        } if !is_volatile => Some(ValKey::Load(format!(
+            "{}:{}", operand_identity(e), type_tag_of(ty)
+        ))),
+        InstKind::MemberLoad {
+            obj, field, ty, ..
+        } => Some(ValKey::Member(
+            operand_identity(obj),
+            field.clone(),
+            type_tag_of(ty),
+        )),
+        InstKind::IndexLoad { arr, idx, ty, .. } => Some(ValKey::Index(
+            operand_identity(arr),
+            operand_identity(idx),
+            type_tag_of(ty),
+        )),
+        _ => None,
+    }
+}
+
+// =====================================================================
+// P18. DSE (死存储消除)
+// =====================================================================
+
+/// 从某条写往后的「访问序列」元素。
+#[derive(Clone, PartialEq, Debug)]
+enum FutureAccess {
+    /// 一次写 (位置, 是否 volatile)
+    Write(StoreLoc, bool),
+    /// 一次内存读 (位置, 是否 volatile)
+    Read(StoreLoc, bool),
+    /// 读写集合未知的访问 (调用 / asm 带内存副作用 / EH 交接)
+    Opaque,
+}
+
+/// 死存储消除: 删掉「后续再没人读」的写入, 减少内存访问与指令数。
+///
+/// 判据 (局部 + 沿单入链的全局):
+///   * 从本写往后走: 先遇到「同位置的写」⇒ 本写被覆盖 ⇒ 死; 先遇到任何可能读该位置
+///     的访问 ⇒ 活。走到一条**无后继**的终点 (Ret/Unreachable) 且全程无人读 ⇒ 死。
+///   * 链只沿「后继唯一前驱」扩展, 分支处直接截断当不完整 ⇒ 宁少删不错删。
+///   * `is_volatile` 写永不删 (可观测副作用, 与有没有人读无关); volatile 读一律当读者。
+///   * 位置不可名 (`*p` / `p->f` / 计算出的地址) 的写永不删 —— 本层没有 memory SSA,
+///     无法证明它不与其仙读写别名。
+///   * 只删「本函数拥有的局部对象」: 文件作用域对象可被其他 TU / 被调者读取,
+///     本层看不到那些访问。被取址并**以非直接寻址方式消费**的名字 (递送给出参、
+///     存入内存、返回、参与指针算术、进 asm) 也算逃逸, 写不可删。
+pub fn dead_store_elim(func: &mut Function) -> bool {
+    // 每轮只删一条: 删除同时改变下标与「单入链」形态, 逐条重算最可靠 (死写量级很小)。
+    let mut changed_any = false;
+    loop {
+        let defs = collect_defs(func);
+        let escapes = escaping_bases(func);
+        let locals = local_object_names(func);
+        let preds = preds_from_terminators(func);
+        let Some((bb_name, idx)) = find_dead_store(func, &defs, &escapes, &locals, &preds) else {
+            break;
+        };
+        if let Some(bb) = func.blocks.get_mut(&bb_name) {
+            if idx < bb.insts.len() {
+                bb.insts.remove(idx);
+                changed_any = true;
+            }
+        }
+    }
+    changed_any
+}
+
+/// 该运算的结果是否**受浮点环境影响** (自己或操作数涉浮点)。
+fn is_fp_flavored(k: &InstKind, dest_ty: &Type) -> bool {
+    if is_float_ty(dest_ty) {
+        return true;
+    }
+    let op_fp = |o: &Operand| match o {
+        Operand::Float(..) => true,
+        Operand::Var(v) => is_float_ty(&v.ty),
+        _ => false,
+    };
+    match k {
+        InstKind::Bin { l, r, .. } => op_fp(l) || op_fp(r),
+        InstKind::Un { e, .. } | InstKind::Cast { e, .. } | InstKind::Load { e, .. } => op_fp(e),
+        InstKind::Select {
+            cond, then_, else_, ..
+        } => op_fp(cond) || op_fp(then_) || op_fp(else_),
+        InstKind::IndexLoad { idx, .. } => op_fp(idx),
+        _ => false,
+    }
+}
+
+fn is_float_ty(ty: &Type) -> bool {
+    match ty {
+        Type::Float | Type::Double | Type::LongDouble => true,
+        Type::Complex(inner) | Type::Imaginary(inner) => is_float_ty(&inner.base),
+        Type::Vector(inner, _) => is_float_ty(&inner.base),
+        _ => false,
+    }
+}
+
+/// 本函数拥有的对象名 (局部 + 参数)。文件作用域对象的写不在本判据的作删范内。
+fn local_object_names(func: &Function) -> HashSet<String> {
+    let mut s: HashSet<String> = func.original_locals.iter().cloned().collect();
+    for p in &func.params {
+        s.insert(p.base.clone());
+    }
+    s
+}
+
+fn store_of(k: &InstKind, defs: &HashMap<String, InstKind>) -> Option<(StoreLoc, bool)> {
+    match k {
+        InstKind::Store {
+            e, is_volatile, ..
+        } => Some((access_loc(e, defs), *is_volatile)),
+        InstKind::IndexStore {
+            arr, is_volatile, ..
+        } => Some((access_loc(arr, defs), *is_volatile)),
+        InstKind::MemberStore {
+            obj, is_volatile, ..
+        } => Some((access_loc(obj, defs), *is_volatile)),
+        _ => None,
+    }
+}
+
+/// 把一条指令对内存的影响归一成 `FutureAccess`; 纯值运算返回 `None` (不影哩判定)。
+fn access_of(k: &InstKind, defs: &HashMap<String, InstKind>) -> Option<FutureAccess> {
+    match k {
+        InstKind::Load {
+            e, is_volatile, ..
+        } => Some(FutureAccess::Read(access_loc(e, defs), *is_volatile)),
+        InstKind::IndexLoad {
+            arr, is_volatile, ..
+        } => Some(FutureAccess::Read(access_loc(arr, defs), *is_volatile)),
+        InstKind::MemberLoad {
+            obj, is_volatile, ..
+        } => Some(FutureAccess::Read(access_loc(obj, defs), *is_volatile)),
+        InstKind::Call { .. } | InstKind::Invoke { .. } | InstKind::EhLandingPad { .. } => {
+            Some(FutureAccess::Opaque)
+        },
+        // 只有 volatile 或带内存约束/clobber 的 asm 才影响内存。
+        InstKind::InlineAsm {
+            volatile,
+            clobbers,
+            input_constraints,
+            output_constraints,
+            ..
+        } if *volatile
+            || asm_has_memory_clobber(clobbers)
+            || asm_constraints_touch_memory(input_constraints)
+            || asm_constraints_touch_memory(output_constraints) =>
+        {
+            Some(FutureAccess::Opaque)
+        },
+        _ => store_of(k, defs).map(|(l, v)| FutureAccess::Write(l, v)),
+    }
+}
+
+fn find_dead_store(
+    func: &Function,
+    defs: &HashMap<String, InstKind>,
+    escapes: &HashSet<String>,
+    locals: &HashSet<String>,
+    preds: &HashMap<String, Vec<String>>,
+) -> Option<(String, usize)> {
+    for bb_name in ordered_block_names(func) {
+        let Some(bb) = func.blocks.get(&bb_name) else {
+            continue;
+        };
+        for idx in 0..bb.insts.len() {
+            let Some((loc, volatile)) = store_of(&bb.insts[idx].kind, defs) else {
+                continue;
+            };
+            let StoreLoc::Named(name) = loc else {
+                continue;
+            };
+            if volatile || !locals.contains(&name) || escapes.contains(&name) {
+                continue;
+            }
+            let mut future: Vec<FutureAccess> = Vec::new();
+            let reached_end =
+                collect_future(func, &bb_name, idx + 1, defs, preds, &mut future);
+            if is_dead_store(&name, &future, escapes, reached_end) {
+                return Some((bb_name.clone(), idx));
+            }
+        }
+    }
+    None
+}
+
+/// 从 (`bb`, `from_idx`) 往后收集访问序列。返回 `true` = 走到了**无后继**的终点
+/// (序列完整); `false` = 在不完整边界截断 (分支 / 后继多前驱 / 环)。
+fn collect_future(
+    func: &Function,
+    bb: &str,
+    from_idx: usize,
+    defs: &HashMap<String, InstKind>,
+    preds: &HashMap<String, Vec<String>>,
+    out: &mut Vec<FutureAccess>,
+) -> bool {
+    let mut cur = bb.to_string();
+    let mut start = from_idx;
+    let mut visited: HashSet<String> = HashSet::new();
+    visited.insert(bb.to_string());
+    loop {
+        let Some(b) = func.blocks.get(&cur) else {
+            return true;
+        };
+        for inst in b.insts.iter().skip(start) {
+            if let Some(a) = access_of(&inst.kind, defs) {
+                out.push(a);
+            }
+        }
+        start = 0;
+        let succs = succs_of(&b.term);
+        match succs.as_slice() {
+            [] => return true,
+            [s] => {
+                // 只有「后继的唯一前驱就是本块」才能肯定本块后面紧接后继。
+                let sole_pred = preds
+                    .get(s)
+                    .map(|p| p.len() == 1 && p[0] == cur)
+                    .unwrap_or(false);
+                if sole_pred && visited.insert(s.clone()) {
+                    cur = s.clone();
+                    continue;
+                }
+                return false;
+            },
+            _ => return false,
+        }
+    }
+}
+
+/// 序列判定: 被后续同位置写覆盖, 或整条未来路径上无人读 ⇒ 死。
+fn is_dead_store(
+    name: &str,
+    future: &[FutureAccess],
+    escapes: &HashSet<String>,
+    reached_end: bool,
+) -> bool {
+    for a in future {
+        match a {
+            FutureAccess::Write(StoreLoc::Named(n), _) => {
+                if n == name {
+                    return true;
+                }
+                if escapes.contains(n) {
+                    return false;
                 }
             },
-            Terminator::Jump(target) if target == name => {
-                loops.push((name.clone(), name.clone()));
+            // 不具名/不透明的写可能覆盖本位置。
+            FutureAccess::Write(_, _) => return false,
+            FutureAccess::Read(StoreLoc::Named(n), vol) => {
+                if *vol || n == name || escapes.contains(n) {
+                    return false;
+                }
             },
+            FutureAccess::Read(_, _) | FutureAccess::Opaque => return false,
+        }
+    }
+    // 序列走完了 (整条未来路径无后继) 仍无人读 ⇒ 本写确实死。
+    reached_end
+}
+
+/// 哪些 `AddrOf` 的基址真正**逃逸**了本帧。
+///
+/// 不能简单的「出现过 `AddrOf` 就算逃逸」: 数组/结构体的元素访问本身就在发
+/// `AddrOf{base}` + `IndexStore{arr: Var(addr)}`, 那是**帧内寻址**, 不是逃逸。真
+/// 正的逃逸是取出的地址被「非直接访存地址」的位置消费: 当参数递给出参、存进内存、
+/// 作为返回值、参与指针算术、进 asm、或经 phi 流通到任意路径。
+fn escaping_bases(func: &Function) -> HashSet<String> {
+    let mut addr_of_dest: HashMap<String, String> = HashMap::new();
+    for bb in func.blocks.values() {
+        for inst in &bb.insts {
+            if let (Some(d), InstKind::AddrOf { base }) = (&inst.dest, &inst.kind) {
+                addr_of_dest.insert(d.name(), base.clone());
+            }
+        }
+    }
+    let mut escape = HashSet::new();
+    // 一个名字被“可逃位置”引用 ⇒ 其基址逃逸。
+    let mut mark = |name: &str, escape: &mut HashSet<String>| {
+        if let Some(base) = addr_of_dest.get(name) {
+            escape.insert(base.clone());
+        }
+    };
+    for bb in func.blocks.values() {
+        // phi 入边的地址可被任意路径拿到的 ⇒ 逃逸
+        for phi in &bb.phis {
+            for (v, _) in &phi.incoming {
+                mark(&v.name(), &mut escape);
+            }
+        }
+        for inst in &bb.insts {
+            match &inst.kind {
+                // 地址位置 (store/load 的落点) 不算逃逸; 其余位置全部算。
+                InstKind::Store { src, .. } => mark_op(src, &mut mark, &mut escape),
+                InstKind::IndexStore { src, idx, .. } => {
+                    mark_op(src, &mut mark, &mut escape);
+                    mark_op(idx, &mut mark, &mut escape);
+                },
+                InstKind::MemberStore { src, .. } => mark_op(src, &mut mark, &mut escape),
+                InstKind::Call { callee, args, .. } => {
+                    mark_op(callee, &mut mark, &mut escape);
+                    for a in args {
+                        mark_op(a, &mut mark, &mut escape);
+                    }
+                },
+                InstKind::Invoke { callee, args, .. } => {
+                    mark_op(callee, &mut mark, &mut escape);
+                    for a in args {
+                        mark_op(a, &mut mark, &mut escape);
+                    }
+                },
+                InstKind::Bin { l, r, .. } => {
+                    mark_op(l, &mut mark, &mut escape);
+                    mark_op(r, &mut mark, &mut escape);
+                },
+                InstKind::Un { e, .. } | InstKind::Cast { e, .. } => mark_op(e, &mut mark, &mut escape),
+                // `Load{e}` 的 `e` 是**地址位置** (读那个对象), 不是逃逸: 把
+                // `_addr = &x; v = *_addr;` 算成逃逸会让 `x` 的写永远删不掉。
+                InstKind::Load { .. } => {},
+                InstKind::IndexLoad { idx, .. } => mark_op(idx, &mut mark, &mut escape),
+                InstKind::Select {
+                    cond, then_, else_, ..
+                } => {
+                    mark_op(cond, &mut mark, &mut escape);
+                    mark_op(then_, &mut mark, &mut escape);
+                    mark_op(else_, &mut mark, &mut escape);
+                },
+                InstKind::InlineAsm { inputs, outputs, .. } => {
+                    for i in inputs {
+                        mark_op(i, &mut mark, &mut escape);
+                    }
+                    // asm 输出是 AST 左值: 里面提到哪个名字就是什么地址被外部使用。
+                    for o in outputs {
+                        let mut names = Vec::new();
+                        collect_expr_uses(o, &mut names);
+                        for n in names {
+                            mark(&n, &mut escape);
+                        }
+                    }
+                },
+                InstKind::AddrOf { .. } | InstKind::PreservedDecl { .. } => {},
+                InstKind::MemberLoad { .. } | InstKind::EhLandingPad { .. } => {},
+            }
+            // 指令结果本身就是地址时 (如 `p = &x + 1` 的存归), dest 不参与判定:
+            // 上面的各位置已覆盖所有会“拿着地址跑”的操作数。
+            let _ = &inst.dest;
+        }
+        match &bb.term {
+            Terminator::Ret { val: Some(v) } => mark_op(v, &mut mark, &mut escape),
+            Terminator::Branch { cond, .. } => mark_op(cond, &mut mark, &mut escape),
+            Terminator::SwitchTable { idx, .. } => mark_op(idx, &mut mark, &mut escape),
             _ => {},
         }
     }
-    loops
+    escape
 }
+
+fn mark_op<F>(o: &Operand, mark: &mut F, escape: &mut HashSet<String>)
+where
+    F: FnMut(&str, &mut HashSet<String>),
+{
+    if let Operand::Var(v) = o {
+        mark(&v.name(), escape);
+    }
+}
+
+// =====================================================================
+// P19. Jump Threading (跳转穿线)
+// =====================================================================
+
+/// 跳转穿线: 消除常量分支与空跳转链, 减少冗余跳转与不可达块。
+///
+/// 本实现做两件确定性的事 (均需重算 phi 与 CFG 缓存):
+///   1. **常量分支折叠**: `Branch` 的条件已是常量 (`Operand::Int`) ⇒ 退化 `Jump(target)`,
+///      并从未走到的后继里剔掉本块那条 phi 入边 (入边不足两个时 phi 退化);
+///   2. **空跳转链合并**: `Jump(t)` 且 t 无 phi 无指令 ⇒ 直接改跳到 t 的目标, t 随后
+///      因不可达被除。
+/// 两者叠代到不变化 (有上限): 一轮折叠会暴露下一轮的常量条件。
+///
+/// 更激进的穿线 (沿支配路径把上游常量条件复制下来、重定向入边) 需要改 CFG 拓扑与
+/// phi 拼边, 不在本层做 —— 本层只做能证明等价形态的变换。
+pub fn jump_threading(func: &mut Function) -> bool {
+    let mut changed_any = false;
+    for _round in 0..16 {
+        let mut changed_this_round = false;
+        // 1. 常量分支折叠
+        for bb_name in ordered_block_names(func) {
+            let Some(bb) = func.blocks.get(&bb_name) else {
+                continue;
+            };
+            let taken = match &bb.term {
+                Terminator::Branch {
+                    cond: Operand::Int(v),
+                    t,
+                    f,
+                } => Some(if *v != 0 { t.clone() } else { f.clone() }),
+                _ => None,
+            };
+            let Some(target) = taken else { continue };
+            let dropped = match &bb.term {
+                Terminator::Branch { t, f, .. } => {
+                    if *t == target {
+                        f.clone()
+                    } else {
+                        t.clone()
+                    }
+                },
+                _ => continue,
+            };
+            if let Some(b) = func.blocks.get_mut(&bb_name) {
+                b.term = Terminator::Jump(target);
+                changed_this_round = true;
+            }
+            prune_phi_incoming(func, &dropped, &bb_name);
+        }
+        // 2. 空跳转链合并: `Jump(t)` 且 t 是「无指令、无 phi」的纯跳板 ⇒ 直接指到 t 的目标。
+        let mut redirs: Vec<(String, String)> = Vec::new();
+        for bb_name in ordered_block_names(func) {
+            let Some(bb) = func.blocks.get(&bb_name) else {
+                continue;
+            };
+            let Terminator::Jump(t) = &bb.term else {
+                continue;
+            };
+            if t == &bb_name {
+                continue; // 自环不是链
+            }
+            let Some(tb) = func.blocks.get(t) else {
+                continue;
+            };
+            if !tb.insts.is_empty() || !tb.phis.is_empty() {
+                continue;
+            }
+            let Terminator::Jump(u) = &tb.term else {
+                continue;
+            };
+            if u == t {
+                continue;
+            }
+            redirs.push((bb_name.clone(), u.clone()));
+        }
+        for (b, u) in redirs {
+            if let Some(bb) = func.blocks.get_mut(&b) {
+                if matches!(&bb.term, Terminator::Jump(t) if *t != u) {
+                    bb.term = Terminator::Jump(u);
+                    changed_this_round = true;
+                }
+            }
+        }
+        // 3. 不可达块剔除 (沿终结符派生的后继, 不读可能陈旧的 `bb.succs`)
+        if drop_unreachable_blocks(func) {
+            changed_this_round = true;
+        }
+        // 4. 块被剔除后, 其他块的 phi 可能留着指向已不存在前驱的行; 行数跌到 ≤ 1 时
+        //    phi 不再是合并点。不修则重建时读一个永不赋值的局部 (静默错值)。
+        if repair_phis_after_edge_removal(func) {
+            changed_this_round = true;
+        }
+        refresh_cfg_caches(func);
+        if !changed_this_round {
+            break;
+        }
+        changed_any = true;
+    }
+    changed_any
+}
+
+/// 删边后维护目标块的 phi: 剔掉来自已不存在入边的来路; 只剩一个入边时退化。
+fn prune_phi_incoming(func: &mut Function, bb_name: &str, pred: &str) {
+    let Some(bb) = func.blocks.get_mut(bb_name) else {
+        return;
+    };
+    for phi in &mut bb.phis {
+        phi.incoming.retain(|(_, p)| p != pred);
+    }
+    // 退化 phi: 只剩一个入边时它不再是合并点, 直接用那个值。
+    let mut renames: HashMap<String, SsaVar> = HashMap::new();
+    let mut drop: Vec<String> = Vec::new();
+    for phi in &bb.phis {
+        if phi.incoming.len() == 1 {
+            renames.insert(phi.dest.name(), phi.incoming[0].0.clone());
+            drop.push(phi.dest.name());
+        }
+    }
+    if !drop.is_empty() {
+        bb.phis.retain(|p| !drop.contains(&p.dest.name()));
+        if !renames.is_empty() {
+            // 只作用在本块内: 被退化的 phi 其入边值必然支配本块, 而本块以外不会
+            // 再引用这个 phi 的产物 (它在其它块里的引用同样应该改写)。
+            // 因此改名必须走全局 `rename_uses`, 不能只改本块。
+            drop.clear();
+            let snapshot = renames.clone();
+            rename_uses(func, &snapshot);
+        }
+    }
+}
+
+/// 不可达块剔除: 从 entry 沿终结符派生的后继可达。
+fn drop_unreachable_blocks(func: &mut Function) -> bool {
+    let mut reachable: HashSet<String> = HashSet::new();
+    let mut stack = vec![func.entry.clone()];
+    while let Some(b) = stack.pop() {
+        if !reachable.insert(b.clone()) {
+            continue;
+        }
+        let Some(bb) = func.blocks.get(&b) else {
+            continue;
+        };
+        for s in succs_of(&bb.term) {
+            if !reachable.contains(&s) {
+                stack.push(s);
+            }
+        }
+    }
+    let before = func.blocks.len();
+    func.blocks.retain(|k, _| reachable.contains(k));
+    func.block_order.retain(|k| reachable.contains(k));
+    func.blocks.len() != before
+}
+
+/// 剔除不可达块之后修补 phi。
+///
+/// 为何必须有这一步: phi 的行是按**前驱名**登记的。删掉一个前驱块 (常量分支折叠 +
+/// 不可达剔除) 后, 目标块的 phi 会留下指向已不存在前驱的行 —— 那行永远不会被赋值,
+/// 而 `rebuild_block` 只能把 phi 当成普通局部变量处理, 读到的就是从未写入的栈槽。
+/// 行跌到 ≤ 1 时该块已不是合并点, 直接退化成重命名。
+fn repair_phis_after_edge_removal(func: &mut Function) -> bool {
+    let mut live: HashSet<String> = func.blocks.keys().cloned().collect();
+    live.insert(func.entry.clone());
+    let mut changed = false;
+    // 先剔除死行 (可能一次就把 phi 降到单入边)。
+    for bb in func.blocks.values_mut() {
+        for phi in &mut bb.phis {
+            let before = phi.incoming.len();
+            phi.incoming.retain(|(_, p)| live.contains(p));
+            if phi.incoming.len() != before {
+                changed = true;
+            }
+        }
+    }
+    // 退化: 只剩 0/1 个入边的 phi 不再是 phi。0 入边的 dest 已成悬空名, 同样必须除。
+    let var_table = collect_var_table(func);
+    let mut renames: HashMap<String, SsaVar> = HashMap::new();
+    let mut drop: Vec<(String, String)> = Vec::new();
+    for bb_name in ordered_block_names(func) {
+        let Some(bb) = func.blocks.get(&bb_name) else {
+            continue;
+        };
+        for phi in &bb.phis {
+            match phi.incoming.len() {
+                0 => {
+                    drop.push((bb_name.clone(), phi.dest.name()));
+                },
+                1 => {
+                    register_rename(&mut renames, &var_table, &phi.dest, &phi.incoming[0].0.name());
+                    drop.push((bb_name.clone(), phi.dest.name()));
+                },
+                _ => {},
+            }
+        }
+    }
+    if !renames.is_empty() {
+        rename_uses(func, &renames);
+    }
+    let dropped_any = !drop.is_empty();
+    for (bb_name, dest) in drop {
+        if let Some(bb) = func.blocks.get_mut(&bb_name) {
+            bb.phis.retain(|p| p.dest.name() != dest);
+        }
+    }
+    changed || !renames.is_empty() || dropped_any
+}
+
+/// 刷新 `bb.preds` / `bb.succs` 缓存。**委派给 `ssa::refresh_cfg`** —— 同一份事实
+/// 只允许一个真源, 两处各自 `push`/`retain` 就会重新出现「陈旧的 preds」这一类缺陷。
+fn refresh_cfg_caches(func: &mut Function) {
+    crate::ssa::refresh_cfg(func);
+}
+
+// =====================================================================
+// P16. 软件流水 —— 占位实现已删, 待真实现
+// =====================================================================
+//
+// 旧 P16 是空函数体 + 无条件 `modified = true`: 它不改 IR 却报告「改了」,
+// 与旧 P12 同一种骗调度器的形态。本轮删除后留下确切的前置链：
+//
+//   1. ~~`run_ssa_passes` 对含循环函数 `continue`~~ —— **该前提已随 `func_has_loop`
+//      闸门删除而消失**，含 while/for/do 的函数现在无条件进 SSA 管线。
+//      因此 P16 已可做，只是尚未做（本文档的待办项）。
+//   2. 仍需先修一个已知误编译：4 层嵌套 + 变量边界 + `&&` 条件的形态在 **-O2 就错**
+//      （与 SSA 无关，加 `goto` 的同形函数同样错，见 `loop_opt.rs` P10 一节与
+//      `docs/ssa-pass-upgrade-plan.md` §6 末表）。prologue/kernel/epilogue 三段式
+//      会产出比它更复杂的多层结构，不对它就先做 P16 只能得到「测试绿但产物错」。
+//   3. 本体要把 modulo scheduling 真写出来（依赖图 + RecMII/ResMII + 三段 BB 与 phi 修正）。
+//
+// `loop_opt.rs` 里那个 AST 层的同名实现也不可计入: 它的「产物」是往循环前插
+// `Expr::AsmExpr{asm_str: "#pragma GCC pipelined"}`, 而该字符串在后端只是一条注释
+// (实测语料 -O3 汇编里 0 次出现), 同样不影响产物 —— 它属于伪 pass, 已连同其
+// 调用点与专用判据一起删除 (与伪 `loop_tiling`/`loop_interchange` 同一处置标准)。
 
 #[cfg(test)]
 mod tests {
@@ -3197,8 +4026,12 @@ mod tests {
         assert!(matches!(bb.term, Terminator::Jump(ref n) if n == "entry"));
     }
 
+    /// 旧 `fap_marks_hot_and_noreturn` 断言「属性会在 entry BB 造出 hint Store」——
+    /// 这条断言把缺陷钉住了 (那个 Store 在后端会回退成未初始化栈槽, 运行期 SEGV)。
+    /// 现在锁定的不变式是相反一面: 属性不得在 SSA 层造指令, 因为热/冷归属的真源是
+    /// AST 属性 (`FuncDecl::is_hot/is_cold/is_noreturn`, 后端直接读), 而 SSA 回写只送 body。
     #[test]
-    fn fap_marks_hot_and_noreturn() {
+    fn function_attributes_never_fabricate_instructions() {
         use crate::ssa::*;
         let span = crate::diagnostics::Span::point("t.c", 1, 1);
         let mut f = Function::new("hot_fn".into(), Type::Int, span.clone());
@@ -3214,18 +4047,18 @@ mod tests {
                 },
                 span: span.clone(),
             });
+            bb.term = Terminator::Ret { val: None };
         }
-        let changed = function_attribute_propagation(&mut f);
-        assert!(changed);
+        let before = f.blocks.get("entry").unwrap().insts.len();
+        run(&mut f, 3);
         let bb = f.blocks.get("entry").unwrap();
-        let has_hot = bb.insts.iter().any(|i| {
-            matches!(&i.kind, InstKind::Store { e: Operand::SymAddr(n, _), .. } if n == "__dcc_section_hot")
-        });
-        let has_nr = bb.insts.iter().any(|i| {
-            matches!(&i.kind, InstKind::Store { e: Operand::SymAddr(n, _), .. } if n == "__dcc_noreturn_hint")
-        });
-        assert!(has_hot, "should have hot section hint");
-        assert!(has_nr, "should have noreturn hint");
+        assert_eq!(bb.insts.len(), before, "属性不得往 entry BB 插指令");
+        assert!(
+            !bb.insts.iter().any(|i| {
+                matches!(&i.kind, InstKind::Store { e: Operand::SymAddr(n, _), .. } if n.starts_with("__dcc_"))
+            }),
+            "不得向 __dcc_ 前缀的伪符号发内存写: 该符号不存在, 后端会回退成栈槽并在运行期崩"
+        );
     }
 
     #[test]
@@ -3284,8 +4117,8 @@ mod tests {
         }
         assert!(instruction_scheduling(&mut f));
         let bb = f.blocks.get("entry").unwrap();
-        assert_eq!(bb.insts[0].dest.as_ref().map(|v| v.name()), Some("a_1".into()));
-        assert_eq!(bb.insts[1].dest.as_ref().map(|v| v.name()), Some("z_1".into()));
+        assert_eq!(bb.insts[0].dest.as_ref().map(|v| v.name()), Some("a.1".into()));
+        assert_eq!(bb.insts[1].dest.as_ref().map(|v| v.name()), Some("z.1".into()));
         assert!(matches!(bb.insts[2].kind, InstKind::InlineAsm { .. }));
     }
 
@@ -3345,9 +4178,9 @@ mod tests {
         }
         assert!(!instruction_scheduling(&mut f));
         let bb = f.blocks.get("entry").unwrap();
-        assert_eq!(bb.insts[0].dest.as_ref().map(|v| v.name()), Some("z_1".into()));
+        assert_eq!(bb.insts[0].dest.as_ref().map(|v| v.name()), Some("z.1".into()));
         assert!(matches!(bb.insts[1].kind, InstKind::InlineAsm { .. }));
-        assert_eq!(bb.insts[2].dest.as_ref().map(|v| v.name()), Some("a_1".into()));
+        assert_eq!(bb.insts[2].dest.as_ref().map(|v| v.name()), Some("a.1".into()));
     }
 
     #[test]
@@ -3409,7 +4242,7 @@ mod tests {
         let pos_load = bb
             .insts
             .iter()
-            .position(|i| i.dest.as_ref().is_some_and(|v| v.name() == "z_1"))
+            .position(|i| i.dest.as_ref().is_some_and(|v| v.name() == "z.1"))
             .unwrap();
         let pos_asm = bb
             .insts
@@ -3419,7 +4252,7 @@ mod tests {
         let pos_pure = bb
             .insts
             .iter()
-            .position(|i| i.dest.as_ref().is_some_and(|v| v.name() == "a_1"))
+            .position(|i| i.dest.as_ref().is_some_and(|v| v.name() == "a.1"))
             .unwrap();
         assert!(pos_load < pos_asm, "memory clobber must keep earlier load before asm");
         assert!(pos_pure < pos_asm, "pure instruction may cross memory-clobber asm");
@@ -3494,9 +4327,9 @@ mod tests {
         }
         assert!(!instruction_scheduling(&mut f));
         let bb = f.blocks.get("entry").unwrap();
-        assert_eq!(bb.insts[0].dest.as_ref().map(|v| v.name()), Some("x_1".into()));
+        assert_eq!(bb.insts[0].dest.as_ref().map(|v| v.name()), Some("x.1".into()));
         assert!(matches!(bb.insts[1].kind, InstKind::InlineAsm { .. }));
-        assert_eq!(bb.insts[2].dest.as_ref().map(|v| v.name()), Some("a_1".into()));
+        assert_eq!(bb.insts[2].dest.as_ref().map(|v| v.name()), Some("a.1".into()));
     }
 
     #[test]
@@ -3622,120 +4455,635 @@ mod tests {
         let bb = f.blocks.get("entry").unwrap();
         assert_eq!(bb.insts.len(), 1, "asm with memory clobber must be preserved");
     }
+    // ── P12b ubsan_ir_instrument tests ──
 
-    // ── P12 register_allocation tests ──
-
+    /// 除/模可能陷阱: 上提后会跳过原本保护它的控制流, 整个块放弃。
     #[test]
-    fn regalloc_empty_func_returns_false() {
-        let span = Span::point("test.c", 1, 1);
-        let mut f = Function::new("empty".into(), Type::Void, span);
-        assert!(!register_allocation(&mut f));
-    }
-
-    #[test]
-    fn regalloc_single_param_inserts_hint() {
-        let span = Span::point("test.c", 1, 1);
-        let mut f = Function::new("foo".into(), Type::Int, span.clone());
-        f.params.push(SsaVar {
-            base: "x".into(),
-            version: 0,
-            ty: Type::Int,
-            span: span.clone(),
-        });
-        // x_0 used in a binop
-        let bb = f.blocks.get_mut("entry").unwrap();
-        bb.insts.push(Inst {
-            dest: Some(SsaVar {
-                base: "t".into(),
-                version: 1,
-                ty: Type::Int,
-                span: span.clone(),
-            }),
+    fn gvn_merges_duplicate_int_expression() {
+        let span = span();
+        let mut f = Function::new("g".into(), Type::Int, span.clone());
+        let x = sv("x", 0, Type::Int);
+        f.params.push(x.clone());
+        let a = sv("_a", 1, Type::Int);
+        let b = sv("_b", 2, Type::Int);
+        let c = sv("_c", 0, Type::Int);
+        let dup = |dest: SsaVar| Inst {
+            dest: Some(dest),
             kind: InstKind::Bin {
                 op: BinOp::Add,
-                l: Operand::Var(f.params[0].clone()),
+                l: Operand::Var(x.clone()),
                 r: Operand::Int(1),
             },
             span: span.clone(),
-        });
-        assert!(register_allocation(&mut f));
-        // entry BB 第一条指令应该是 regalloc hint
-        let entry = f.blocks.get("entry").unwrap();
-        assert!(!entry.insts.is_empty());
-        match &entry.insts[0].kind {
-            InstKind::Store {
-                e: Operand::SymAddr(name, _),
-                src: Operand::Int(val),
-                ..
-            } => {
-                assert_eq!(name, "__dcc_regalloc_done");
-                // val 编码: (total << 16) | (alloc << 8) | spill
-                let total = (*val >> 16) & 0xFFFF;
-                assert!(total > 0, "should have at least 1 SSA value");
+        };
+        f.blocks.get_mut("entry").unwrap().insts = vec![
+            dup(a.clone()),
+            dup(b.clone()),
+            Inst {
+                dest: Some(c.clone()),
+                kind: InstKind::Bin {
+                    op: BinOp::Add,
+                    l: Operand::Var(a),
+                    r: Operand::Var(b),
+                },
+                span: span.clone(),
             },
-            other => panic!("expected regalloc hint, got {:?}", other),
+        ];
+        f.blocks.get_mut("entry").unwrap().term = Terminator::Ret { val: Some(Operand::Var(c)) };
+        assert!(gvn(&mut f), "重复的 x+1 应被归一");
+        let bb = f.blocks.get("entry").unwrap();
+        assert_eq!(bb.insts.len(), 2, "第二条同形计算应被删除");
+        // 归一后两个操作数指向同一个 SSA 名, 且该名仍有定义。
+        let defined: Vec<String> =
+            bb.insts.iter().filter_map(|i| i.dest.as_ref().map(|d| d.name())).collect();
+        assert_eq!(defined, vec!["_a.1", "_c"], "保留的必须是先出现的那个定义");
+        let uses_a = bb.insts[1]
+            .kind
+            .clone();
+        match uses_a {
+            InstKind::Bin { l, r, .. } => {
+                assert_eq!(operand_identity(&l), "_a.1");
+                assert_eq!(operand_identity(&r), "_a.1", "_b.2 必须被重命名成 _a.1");
+            },
+            _ => panic!("unexpected"),
         }
     }
 
     #[test]
-    fn regalloc_many_vals_causes_spill() {
-        // 创建超过 NUM_PHYS_REGS (14) 个 SSA 值, 验证溢出计数 > 0
-        let span = Span::point("test.c", 1, 1);
-        let mut f = Function::new("big".into(), Type::Int, span.clone());
-        // 16 个参数 (超过 14 个物理寄存器)
-        for i in 0..16u32 {
-            f.params.push(SsaVar {
-                base: format!("p{}", i),
-                version: 0,
-                ty: Type::Int,
-                span: span.clone(),
-            });
-        }
+    fn gvn_does_not_reuse_load_across_an_intervening_store() {
+        let span = span();
+        let mut f = Function::new("g".into(), Type::Int, span.clone());
+        let p = sv("p", 0, Type::Ptr(Box::new(QualType::new(Type::Int))));
+        f.params.push(p.clone());
+        let addr = sv("_addr", 0, Type::Ptr(Box::new(QualType::new(Type::Int))));
+        let l1 = sv("_l1", 0, Type::Int);
+        let l2 = sv("_l2", 0, Type::Int);
         let bb = f.blocks.get_mut("entry").unwrap();
-        // 使用所有参数: t = p0 + p1 + ... + p15
-        let mut cur = Operand::Var(f.params[0].clone());
-        for i in 1..16u32 {
-            let dest = SsaVar {
-                base: "t".into(),
-                version: i,
-                ty: Type::Int,
+        bb.insts = vec![
+            Inst {
+                dest: Some(addr.clone()),
+                kind: InstKind::AddrOf { base: "p".into() },
                 span: span.clone(),
-            };
-            let rhs = Operand::Var(f.params[i as usize].clone());
-            bb.insts.push(Inst {
-                dest: Some(dest.clone()),
-                kind: InstKind::Bin {
-                    op: BinOp::Add,
-                    l: cur,
-                    r: rhs,
+            },
+            Inst {
+                dest: Some(l1.clone()),
+                kind: InstKind::Load {
+                    e: Operand::Var(addr.clone()),
+                    ty: Type::Int,
+                    is_volatile: false,
                 },
                 span: span.clone(),
-            });
-            cur = Operand::Var(dest);
-        }
-        assert!(register_allocation(&mut f));
-        let entry = f.blocks.get("entry").unwrap();
-        match &entry.insts[0].kind {
-            InstKind::Store {
-                e: Operand::SymAddr(name, _),
-                src: Operand::Int(val),
-                ..
-            } => {
-                assert_eq!(name, "__dcc_regalloc_done");
-                let spilled = *val & 0xFF;
-                let allocated = (*val >> 8) & 0xFF;
-                assert!(
-                    spilled > 0 || allocated >= 14,
-                    "16 vals with 14 regs should cause spill or full alloc: spilled={}, alloc={}",
-                    spilled,
-                    allocated
-                );
             },
-            other => panic!("expected regalloc hint, got {:?}", other),
+            Inst {
+                dest: None,
+                kind: InstKind::Store {
+                    e: Operand::Var(addr.clone()),
+                    src: Operand::Int(7),
+                    is_volatile: false,
+                },
+                span: span.clone(),
+            },
+            Inst {
+                dest: Some(l2.clone()),
+                kind: InstKind::Load {
+                    e: Operand::Var(addr.clone()),
+                    ty: Type::Int,
+                    is_volatile: false,
+                },
+                span: span.clone(),
+            },
+        ];
+        bb.term = Terminator::Ret { val: Some(Operand::Var(l2)) };
+        let before = f.blocks.get("entry").unwrap().insts.len();
+        gvn(&mut f);
+        let after = f.blocks.get("entry").unwrap().insts.len();
+        assert_eq!(before, after, "中间隔着一次写 ⇒ 两个读不得归一");
+    }
+
+    #[test]
+    fn gvn_respects_fenv_access_for_float_expressions() {
+        let mk = || {
+            let span = span();
+            let mut f = Function::new("g".into(), Type::Double, span.clone());
+            let x = sv("x", 0, Type::Double);
+            f.params.push(x.clone());
+            let a = sv("_a", 1, Type::Double);
+            let b = sv("_b", 2, Type::Double);
+            let dup = |dest: SsaVar| Inst {
+                dest: Some(dest),
+                kind: InstKind::Bin {
+                    op: BinOp::Add,
+                    l: Operand::Var(x.clone()),
+                    r: Operand::Float(crate::ast::FloatConst::zero(&Type::Double), Type::Double),
+                },
+                span: span.clone(),
+            };
+            f.blocks.get_mut("entry").unwrap().insts =
+                vec![dup(a.clone()), dup(b.clone())];
+            f.blocks.get_mut("entry").unwrap().term =
+                Terminator::Ret { val: Some(Operand::Var(b)) };
+            f
+        };
+        // FENV_ACCESS ON: 舍入模式/异常标志可被观测 ⇒ 浮点计算不得归一。
+        let mut f = mk();
+        f.fenv_access = true;
+        gvn(&mut f);
+        assert_eq!(
+            f.blocks.get("entry").unwrap().insts.len(),
+            2,
+            "FENV_ACCESS ON 时两次浮点加法必须各自保留"
+        );
+        // FENV_ACCESS OFF: 同一块内无穿插写 ⇒ 允许归一。
+        let mut g = mk();
+        g.fenv_access = false;
+        gvn(&mut g);
+        assert_eq!(
+            g.blocks.get("entry").unwrap().insts.len(),
+            1,
+            "默认 (FENV_ACCESS OFF) 下同块内的同形浮点加法可归一"
+        );
+    }
+
+    #[test]
+    fn gvn_collapses_degenerate_phi() {
+        let span = span();
+        let mut f = Function::new("g".into(), Type::Int, span.clone());
+        let x = sv("x", 1, Type::Int);
+        let p = sv("p", 0, Type::Int);
+        f.params.push(p.clone());
+        let merge = f.add_block("merge".into());
+        // phi 的入边必须指向**真的有定义**的 SSA 名: 退化 = 把 dest 重命名到该入边名,
+        // 没有定义的名字当不了改写目标。
+        let q1 = y_var("q1");
+        f.blocks.get_mut("entry").unwrap().insts = vec![Inst {
+            dest: Some(q1.clone()),
+            kind: InstKind::Bin {
+                op: BinOp::Add,
+                l: Operand::Int(3),
+                r: Operand::Int(0),
+            },
+            span: span.clone(),
+        }];
+        f.blocks.get_mut("entry").unwrap().term =
+            Terminator::Branch {
+                cond: Operand::Var(p),
+                t: merge.clone(),
+                f: merge.clone(),
+            };
+        f.blocks.get_mut(&merge).unwrap().phis = vec![crate::ssa::Phi {
+            dest: x.clone(),
+            incoming: vec![(q1.clone(), "entry".to_string()), (q1, "entry".to_string())],
+        }];
+        f.blocks.get_mut(&merge).unwrap().term = Terminator::Ret { val: Some(Operand::Var(x)) };
+        assert!(gvn(&mut f), "所有入边同值的 phi 应退化");
+        assert!(f.blocks.get(&merge).unwrap().phis.is_empty(), "退化后 phi 必须被删除");
+    }
+
+    #[test]
+    fn dse_removes_overwritten_store_and_keeps_read_one() {
+        let span = span();
+        let mut f = Function::new("g".into(), Type::Int, span.clone());
+        f.original_locals.insert("x".into());
+        let addr = sv("_addr", 0, Type::Ptr(Box::new(QualType::new(Type::Int))));
+        let keep = sv("_keep", 0, Type::Int);
+        let bb = f.blocks.get_mut("entry").unwrap();
+        bb.insts = vec![
+            Inst {
+                dest: Some(addr.clone()),
+                kind: InstKind::AddrOf { base: "x".into() },
+                span: span.clone(),
+            },
+            // 第一次写: 后来被同位置写覆盖, 中间无人读 ⇒ 死
+            Inst {
+                dest: None,
+                kind: InstKind::Store {
+                    e: Operand::Var(addr.clone()),
+                    src: Operand::Int(1),
+                    is_volatile: false,
+                },
+                span: span.clone(),
+            },
+            // 第二次写: 后面有读 ⇒ 必须保留
+            Inst {
+                dest: None,
+                kind: InstKind::Store {
+                    e: Operand::Var(addr.clone()),
+                    src: Operand::Int(2),
+                    is_volatile: false,
+                },
+                span: span.clone(),
+            },
+            Inst {
+                dest: Some(keep.clone()),
+                kind: InstKind::Load {
+                    e: Operand::Var(addr),
+                    ty: Type::Int,
+                    is_volatile: false,
+                },
+                span: span.clone(),
+            },
+        ];
+        bb.term = Terminator::Ret { val: Some(Operand::Var(keep)) };
+        assert!(dead_store_elim(&mut f), "被覆盖且未被读的写应被删除");
+        let bb = f.blocks.get("entry").unwrap();
+        let stores: Vec<&Inst> = bb
+            .insts
+            .iter()
+            .filter(|i| matches!(i.kind, InstKind::Store { .. }))
+            .collect();
+        assert_eq!(stores.len(), 1, "只应留下被读到的那次写");
+        match &stores[0].kind {
+            InstKind::Store { src, .. } => assert!(matches!(src, Operand::Int(2))),
+            _ => unreachable!(),
         }
     }
 
-    // ── P12b ubsan_ir_instrument tests ──
+    #[test]
+    fn dse_keeps_volatile_and_global_stores() {
+        let span = span();
+        let mut f = Function::new("g".into(), Type::Int, span.clone());
+        f.original_locals.insert("x".into());
+        let addr = sv("_addr", 0, Type::Ptr(Box::new(QualType::new(Type::Int))));
+        let gaddr = sv("_gaddr", 0, Type::Ptr(Box::new(QualType::new(Type::Int))));
+        let bb = f.blocks.get_mut("entry").unwrap();
+        bb.insts = vec![
+            Inst {
+                dest: Some(addr.clone()),
+                kind: InstKind::AddrOf { base: "x".into() },
+                span: span.clone(),
+            },
+            Inst {
+                dest: None,
+                kind: InstKind::Store {
+                    e: Operand::Var(addr.clone()),
+                    src: Operand::Int(1),
+                    is_volatile: true,
+                },
+                span: span.clone(),
+            },
+            Inst {
+                dest: None,
+                kind: InstKind::Store {
+                    e: Operand::Var(addr.clone()),
+                    src: Operand::Int(2),
+                    is_volatile: false,
+                },
+                span: span.clone(),
+            },
+            // 全局对象 (不在 original_locals 里): 其他 TU / 被调者可读 ⇒ 不删
+            Inst {
+                dest: Some(gaddr.clone()),
+                kind: InstKind::AddrOf { base: "g".into() },
+                span: span.clone(),
+            },
+            Inst {
+                dest: None,
+                kind: InstKind::Store {
+                    e: Operand::Var(gaddr.clone()),
+                    src: Operand::Int(1),
+                    is_volatile: false,
+                },
+                span: span.clone(),
+            },
+            Inst {
+                dest: None,
+                kind: InstKind::Store {
+                    e: Operand::Var(gaddr.clone()),
+                    src: Operand::Int(2),
+                    is_volatile: false,
+                },
+                span: span.clone(),
+            },
+            Inst {
+                dest: None,
+                kind: InstKind::Store {
+                    e: Operand::Var(addr.clone()),
+                    src: Operand::Int(3),
+                    is_volatile: false,
+                },
+                span: span.clone(),
+            },
+        ];
+        bb.term = Terminator::Ret { val: None };
+        dead_store_elim(&mut f);
+        // 把剩下的写逐条列出比较 —— 只数个数无法区分「volatile 被删」与「全局被删」,
+        // 而这两类的严重性不同。
+        let remaining: Vec<(String, String, bool)> = f
+            .blocks
+            .get("entry")
+            .unwrap()
+            .insts
+            .iter()
+            .filter_map(|i| match &i.kind {
+                InstKind::Store { e, src, is_volatile } => Some((
+                    format!("{:?}", access_loc(e, &collect_defs(&f))),
+                    format!("{src:?}"),
+                    *is_volatile,
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            remaining,
+            vec![
+                // volatile 写: 可观测副作用, 无条件保留
+                ("Named(\"x\")".to_string(), "Int(1)".to_string(), true),
+                // 全局对象的两次写: 其他 TU / 被调者可读, 一律保留
+                ("Named(\"g\")".to_string(), "Int(1)".to_string(), false),
+                ("Named(\"g\")".to_string(), "Int(2)".to_string(), false),
+            ],
+            "DSE 只应删掉局部对象上「被后续同位置写覆盖」的那两次写"
+        );
+    }
+
+    #[test]
+    fn jump_threading_folds_constant_branch_and_prunes_phi() {
+        let span = span();
+        let mut f = Function::new("g".into(), Type::Int, span.clone());
+        let taken = f.add_block("taken".into());
+        let not_taken = f.add_block("not_taken".into());
+        let merged = f.add_block("merged".into());
+        f.blocks.get_mut("entry").unwrap().term = Terminator::Branch {
+            cond: Operand::Int(1),
+            t: taken.clone(),
+            f: not_taken.clone(),
+        };
+        f.blocks.get_mut(&taken).unwrap().term = Terminator::Jump(merged.clone());
+        f.blocks.get_mut(&not_taken).unwrap().term = Terminator::Jump(merged.clone());
+        let z = sv("z", 1, Type::Int);
+        f.blocks.get_mut(&merged).unwrap().phis = vec![crate::ssa::Phi {
+            dest: z.clone(),
+            incoming: vec![(y_var("a"), taken.clone()), (y_var("b"), not_taken.clone())],
+        }];
+        f.blocks.get_mut(&merged).unwrap().term = Terminator::Ret { val: Some(Operand::Var(z)) };
+        assert!(jump_threading(&mut f), "常量分支应被折叠成无条件跳");
+        // 折叠后 `entry → taken → merged` 又是一条空跳板链, 同轮里的链合并会再推一步:
+        // 这里只要求「不再是 Branch」且「不得再走到 not_taken」。
+        match &f.blocks.get("entry").unwrap().term {
+            Terminator::Jump(t) => assert_ne!(t, &not_taken, "折叠后的跳转不得指向未走到的分支"),
+            other => panic!("cond=1 的分支必须被折叠成 Jump, 实际 {other:?}"),
+        }
+        // 不可达的 not_taken 被剔除; merged 的 phi 只剩一个入边 ⇒ 退化。
+        assert!(!f.blocks.contains_key(&not_taken), "未走到的块应成为不可达而被剔除");
+        assert!(
+            f.blocks.get(&merged).unwrap().phis.is_empty(),
+            "只剩一个入边的 phi 必须退化"
+        );
+    }
+
+    #[test]
+    fn jump_threading_merges_empty_trampoline_block() {
+        let span = span();
+        let mut f = Function::new("g".into(), Type::Int, span.clone());
+        let mid = f.add_block("mid".into());
+        let end = f.add_block("end".into());
+        f.blocks.get_mut("entry").unwrap().term = Terminator::Jump(mid.clone());
+        f.blocks.get_mut(&mid).unwrap().term = Terminator::Jump(end.clone());
+        f.blocks.get_mut(&end).unwrap().term = Terminator::Ret { val: Some(Operand::Int(0)) };
+        assert!(jump_threading(&mut f), "空跳板块应被合并掉");
+        assert!(
+            matches!(&f.blocks.get("entry").unwrap().term, Terminator::Jump(t) if t == &end),
+            "entry 应直接跳到最终目标"
+        );
+        assert!(!f.blocks.contains_key(&mid), "空跳板块应不可达而被剔除");
+    }
+
+    /// 本轮 P14 根因的回归守卫: 上提必须沿依赖关包络, 不得按 dest 名字字典序重排。
+    #[test]
+    fn speculative_execution_never_moves_a_use_before_its_def() {
+        let span = span();
+        let mut f = Function::new("g".into(), Type::Int, span.clone());
+        let s1 = sv("s", 1, Type::Int);
+        let t1 = sv("t", 1, Type::Int);
+        let s2 = sv("s", 2, Type::Int);
+        let gv = sv("gv", 0, Type::Int);
+        let k = sv("k", 0, Type::Int);
+        f.params.push(gv.clone());
+        f.params.push(k.clone());
+        f.original_locals.insert("s".into());
+        f.blocks.get_mut("entry").unwrap().insts = vec![
+            Inst {
+                dest: Some(s1.clone()),
+                kind: InstKind::Bin {
+                    op: BinOp::Add,
+                    l: Operand::Int(0),
+                    r: Operand::Int(0),
+                },
+                span: span.clone(),
+            },
+            Inst {
+                dest: Some(t1.clone()),
+                kind: InstKind::Bin {
+                    op: BinOp::Add,
+                    l: Operand::Var(gv),
+                    r: Operand::Int(7),
+                },
+                span: span.clone(),
+            },
+            // `s = s + t` 的 dest 基名是 `s`, 字典序小于 `t` —— 旧实现会把它排到
+            // t 的定义之前, 重建后 `t` 的使用跑在赋值之前。
+            Inst {
+                dest: Some(s2.clone()),
+                kind: InstKind::Bin {
+                    op: BinOp::Add,
+                    l: Operand::Var(s1),
+                    r: Operand::Var(t1.clone()),
+                },
+                span: span.clone(),
+            },
+        ];
+        f.blocks.get_mut("entry").unwrap().term =
+            Terminator::Ret { val: Some(Operand::Var(s2)) };
+        let def_names = |f: &Function| -> Vec<String> {
+            f.blocks
+                .get("entry")
+                .unwrap()
+                .insts
+                .iter()
+                .map(|i| i.dest.as_ref().map(|d| d.name()).unwrap_or_default())
+                .collect()
+        };
+        let before = def_names(&f);
+        speculative_execution(&mut f);
+        let after = def_names(&f);
+        assert_eq!(before, after, "无分支可提前时不得重排任何指令");
+        assert_uses_follow_defs(&f);
+    }
+
+    /// `dead_inst_elim` 的守卫: 具名局部变量的赋值不得因「本层无 use」而删。
+    #[test]
+    fn dead_inst_elim_keeps_named_local_initializers() {
+        let span = span();
+        let mut f = Function::new("g".into(), Type::Int, span.clone());
+        f.original_locals.insert("g".into());
+        let g1 = sv("g", 1, Type::Ptr(Box::new(QualType::new(Type::Int))));
+        let bb = f.blocks.get_mut("entry").unwrap();
+        bb.insts = vec![Inst {
+            dest: Some(g1),
+            kind: InstKind::Bin {
+                op: BinOp::Add,
+                l: Operand::SymAddr(
+                    "add".into(),
+                    Type::Ptr(Box::new(QualType::new(Type::Int))),
+                ),
+                r: Operand::Int(0),
+            },
+            span: span.clone(),
+        }];
+        bb.term = Terminator::Ret { val: None };
+        dead_inst_elim(&mut f);
+        assert_eq!(
+            f.blocks.get("entry").unwrap().insts.len(),
+            1,
+            "变量 `g` 的初始化必须保留: 删它等于让那个栈槽从未被写入"
+        );
+    }
+
+    fn sv(base: &str, version: u32, ty: Type) -> SsaVar {
+        SsaVar {
+            base: base.into(),
+            version,
+            ty,
+            span: span(),
+        }
+    }
+
+    fn y_var(base: &str) -> SsaVar {
+        sv(base, 1, Type::Int)
+    }
+
+
+    /// 断言一个块内不存在「使用早于定义」的序列 (调度类 pass 的通用不变式)。
+    /// 参数名的定义在函数入口之前, 因此预先计入已定义集。
+    fn assert_uses_follow_defs(f: &Function) {
+        let mut defined: HashSet<String> =
+            f.params.iter().map(|p| p.name()).collect();
+        let bb = f.blocks.get("entry").unwrap();
+        for inst in &bb.insts {
+            for u in operand_uses(&inst.kind) {
+                assert!(
+                    defined.contains(&u),
+                    "指令使用了尚未定义的 SSA 名 {u}: 调度破坏了依赖顺序"
+                );
+            }
+            if let Some(d) = &inst.dest {
+                defined.insert(d.name());
+            }
+        }
+    }
+
+    /// 循环 IR 跑完整条管线后的**结构不变式**。
+    ///
+    /// 含循环的函数现在无条件走 SSA 管线，本测试又直接调用 build + pipeline + rebuild，
+    /// 所以它与「准入闸门」完全无关：即使今后某条准入判据把这类函数挡回 AST 路径，
+    /// 这里仍然守住在 SSA 层必须成立的不变式。它的价值在于把这类检查从「行为对照
+    /// 能不能碰上这条路径」解耦出来（本轮解锁过程中，GVN 造出悬空引用与 phi 不覆盖
+    /// 体内使用两个真缺陷就是先由这类结构检查抢到的）。
+    #[test]
+    fn loop_ir_pipeline_keeps_ssa_invariants() {
+        let src = "int dw(int n){int s=0;do{s+=n;n--;}while(n>0);return s;}\n\
+                   int nest(int n){int s=0;for(int i=0;i<n;i++)for(int j=0;j<n;j++)s+=1;return s;}\n\
+                   int cont(int n){int s=0;for(int i=0;i<n;i++){if(i==1)continue;s+=i;}return s;}\n\
+                   int brk(int n){int s=0;for(int i=0;i<n;i++){if(i==3)break;s+=i;}return s;}\n\
+                   int wh(int n){int s=0;while(n>0){s+=n;n--;}return s;}\n\
+                   int carry(int n){int s=0;int m=3;for(int i=0;i<n;i++){s+=m*i;m=m+1;}return s;}\n";
+        let (prog, _d) = crate::parser::parse(src.as_bytes(), "t.c");
+        let (m, _w) = crate::ir::lower(prog).unwrap();
+        let mut checked = 0;
+        for decl in m.source().decls.iter() {
+            let crate::ast::Decl::Func(f) = decl else { continue };
+            let Some(ssa) = crate::ssa::build_from_func(f) else {
+                continue;
+            };
+            // 进入管线前: 循环携带变量必须有 phi (体内使用已重命名到 phi dest)。
+            let phi_bases: HashSet<String> = ssa
+                .blocks
+                .values()
+                .flat_map(|b| b.phis.iter().map(|p| p.dest.base.clone()))
+                .collect();
+            if matches!(
+                f.name.name.as_str(),
+                "wh" | "dw" | "nest" | "cont" | "brk" | "carry"
+            ) {
+                assert!(
+                    phi_bases.contains("s") || phi_bases.contains("i") || phi_bases.contains("n"),
+                    "{}: 循环携带变量没有任何 phi ⇒ IR 不在 SSA 形式上",
+                    f.name.name
+                );
+            }
+            for level in [2u8, 3u8] {
+                let mut s = ssa.clone();
+                run_with_opts(&mut s, level, true);
+                let dangling = crate::ssa::dangling_refs(&s);
+                assert!(
+                    dangling.is_empty(),
+                    "{} @-O{}: 管线造出悬空 SSA 引用 {:?}",
+                    f.name.name,
+                    level,
+                    dangling
+                );
+                // 单赋值必须成立: 否则重建按基名塌缩后会把副本**再执行一遍**。
+                let dup = crate::ssa::duplicate_ssa_defs(&s);
+                assert!(
+                    dup.is_empty(),
+                    "{} @-O{}: 管线破坏了单赋值 (重复定义 {:?}) ⇒ 重建会重算一遍",
+                    f.name.name,
+                    level,
+                    dup
+                );
+                // 重建必须可完成且不 panic (内部一致性)。
+                let _ = crate::ssa::rebuild_block(&s);
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 6, "6 个循环形态都应能 SSA 化");
+    }
+
+    /// 负向对照：上面那条单赋值不变式不得是空判。
+    ///
+    /// 把一条已有指令**原样追加一遍**（正是已删的伪 `loop_tiling` 的作法形状），
+    /// 检查器必须报出那个重复定义的名字。
+    #[test]
+    fn duplicate_ssa_defs_detects_appended_copy() {
+        let src = "int wh(int n){int s=0;while(n>0){s+=n;n--;}return s;}\n";
+        let (prog, _d) = crate::parser::parse(src.as_bytes(), "t.c");
+        let (m, _w) = crate::ir::lower(prog).unwrap();
+        let f = m
+            .source()
+            .decls
+            .iter()
+            .find_map(|d| match d {
+                crate::ast::Decl::Func(f) => Some(f),
+                _ => None,
+            })
+            .expect("wh");
+        let mut s = crate::ssa::build_from_func(f).expect("wh 应能 SSA 化");
+        assert!(
+            crate::ssa::duplicate_ssa_defs(&s).is_empty(),
+            "刚构建的 IR 应满足单赋值: {:?}",
+            crate::ssa::duplicate_ssa_defs(&s)
+        );
+        // 选一条有 dest 的指令, 把它追到同一个块末尾。
+        let bb_name = s
+            .blocks
+            .iter()
+            .find(|(_, b)| b.insts.iter().any(|i| i.dest.is_some()))
+            .map(|(k, _)| k.clone())
+            .expect("应至少有一条带 dest 的指令");
+        let (dup, idx) = {
+            let b = s.blocks.get(&bb_name).unwrap();
+            let i = b.insts.iter().position(|x| x.dest.is_some()).unwrap();
+            (b.insts[i].clone(), i)
+        };
+        let name = dup.dest.as_ref().unwrap().name();
+        s.blocks.get_mut(&bb_name).unwrap().insts.push(dup);
+        let found = crate::ssa::duplicate_ssa_defs(&s);
+        assert_eq!(
+            found,
+            vec![name.clone()],
+            "重复定义 {name} 必须被抓到 (idx={idx}, bb={bb_name})"
+        );
+    }
 
     #[test]
     fn ubsan_ir_div_inserts_guard() {

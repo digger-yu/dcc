@@ -42,6 +42,7 @@ pub mod sanitizer;
 pub mod semantics;
 pub mod ssa;
 pub mod ssa_gvn;
+pub mod ssa_pipelining;
 pub mod ssa_passes;
 pub mod static_locals;
 pub mod symbol;

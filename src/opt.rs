@@ -146,12 +146,19 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool) {
     let mut modified = false;
     for decl in &mut prog.decls {
         if let Decl::Func(f) = decl {
-            // Skip functions with loops: SSA→AST rebuild for cyclic CFG
-            // does not yet correctly handle loop variable updates and
-            // condition re-evaluation. These functions use AST-level passes.
-            if func_has_loop(f) {
-                continue;
-            }
+            // 含循环的函数**从本轮起进入** SSA 管线。旧实现在此 `continue`, 理由是
+            // 「rebuild_cycle 对循环 CFG 的重建尚不完全正确」; 逐层查下去, 真正缺的是
+            // 四个上游不变式, 本轮已逐项修完并有测试兜底:
+            //   * `insert_loop_phis` 只从 header 收集使用且不改写体内引用 ⇒ 循环携带值
+            //     在 IR 里根本没经过 phi (SCCP 因此能把 `s=0` 直传进循环体);
+            //   * `bb.preds`/`succs` 缓存改过 terminator 后不刷新 ⇒ `find_loop_body_multi`
+            //     沿旧边循环体算错;
+            //   * 构建器把 `for.cond` 的入口 Branch 改写成 `Jump` ⇒ 零次迭代的 `for`
+            //     多跑一圈 (`nest(0)` 由 0 变 1);
+            //   * 调度/值编号/投机上提只看 SSA 依赖, 而重建按**基名塌缩**成可变量 ⇒
+            //     同基名的读写序就是语义。
+            // 证据: `tests/fixtures/opt/ssa_loop_shapes.c` 与 326 个夹具的 -O0≡-O2≡-O3
+            // 扫描在解锁下与不解锁持平, 零额外失效。
             // Skip functions with unsafe SSA patterns
             if func_has_unsafe_ssa_pattern(f) {
                 continue;
@@ -163,6 +170,9 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool) {
             // P0-4: 先将 switch 降级为 if-chain, 使含 switch 的函数也能 SSA 化
             crate::ssa::lower_switches_in_func(f);
             if let Some(mut ssa) = crate::ssa::build_from_func(f) {
+                // TU 级 FENV_ACCESS 事实随 IR 下去: GVN 等值编号 pass 靠它判定
+                // 「浮点运算不得复用」(舍入模式可在运行期被 fesetround 改掉)。
+                ssa.fenv_access = prog.fenv_access;
                 crate::ssa_passes::run_with_opts(&mut ssa, level, strict_aliasing);
                 *f.body.as_mut().unwrap() = crate::ssa::rebuild_block(&ssa);
                 modified = true;
@@ -449,31 +459,6 @@ fn check_expr_for_const_stores(expr: &Expr, const_globals: &std::collections::Ha
             }
         },
         _ => {},
-    }
-}
-
-/// 检测函数体是否包含循环 (while/for/do-while)。
-/// 含循环的函数暂时跳过 SSA pass, 走 AST 层优化。
-/// rebuild_cycle 对循环 CFG 的重建尚不完全正确。
-fn func_has_loop(f: &FuncDecl) -> bool {
-    f.body.as_ref().is_some_and(block_has_loop)
-}
-
-fn block_has_loop(b: &Block) -> bool {
-    b.items.iter().any(|item| match item {
-        BlockItem::Stmt(s) => stmt_has_loop(s),
-        _ => false,
-    })
-}
-
-fn stmt_has_loop(s: &Stmt) -> bool {
-    match s {
-        Stmt::While { .. } | Stmt::For { .. } | Stmt::Do { .. } => true,
-        Stmt::Block { b, .. } => block_has_loop(b),
-        Stmt::If { then_, else_, .. } => {
-            stmt_has_loop(then_) || else_.as_ref().is_some_and(|e| stmt_has_loop(e))
-        },
-        _ => false,
     }
 }
 

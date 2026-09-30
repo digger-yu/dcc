@@ -118,13 +118,74 @@ pub(crate) fn run_compile_and_run_flags(
 }
 
 
+/// 运行上限时间 (秒), 由 `DCC_TEST_EXE_TIMEOUT_SECS` 覆盖, 默认 20。
+const EXE_TIMEOUT_DEFAULT: u64 = 20;
+
+fn exe_timeout_secs() -> u64 {
+    std::env::var("DCC_TEST_EXE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(EXE_TIMEOUT_DEFAULT)
+}
+
+/// **有界**地运行一个可执行文件, 返回 (退出码, stdout, stderr)。
+///
+/// 为什么必须由这一个函数管: 优化器最危险的失效形态是静默误编译出来的**死循环**
+/// (`-O2` 的 LICM 曾把整个 while 体外提成空转)。而 `Command::output()` 会无限阻塞,
+/// 于是这种缺陷不是把测试跑红, 而是把整个 `cargo test` 吊死 —— 门禁看起来“还在跑”,
+/// 实际永远不给出结论。超时一律当失败 (panic), 让缺陷以红色测试的形式可定位。
+///
+/// 读两个管道在单独线程里 `read_to_end`: 不在主线程排空的话, 子进程写满 pipe 缓冲区
+/// 会阻塞在 write 上, `try_wait` 永远拿不到退出状态 → 正常程序被误判为挂死。
+pub(crate) fn run_exe_bounded(path: &std::path::Path) -> (i32, Vec<u8>, Vec<u8>) {
+    let mut child = Command::new(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("run {}: {e}", path.display()));
+    let mut out = child.stdout.take().expect("stdout piped");
+    let mut err = child.stderr.take().expect("stderr piped");
+    let out_join = std::thread::spawn(move || {
+        let mut v: Vec<u8> = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut out, &mut v);
+        v
+    });
+    let err_join = std::thread::spawn(move || {
+        let mut v: Vec<u8> = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut err, &mut v);
+        v
+    });
+    let limit = exe_timeout_secs();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(limit);
+    let status = loop {
+        match child.try_wait().expect("try_wait") {
+            Some(st) => break st,
+            None => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // 等排空线程收尾, 否则它们会拿着已关闭的 fd 继续重试。
+                    let _ = out_join.join();
+                    let _ = err_join.join();
+                    panic!(
+                        "HANG: {} 未在 {limit}s 内退出 (很可能是优化器造成的死循环误编译)",
+                        path.display()
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            },
+        }
+    };
+    let stdout = out_join.join().expect("stdout reader thread");
+    let stderr = err_join.join().expect("stderr reader thread");
+    (status.code().unwrap_or(-1), stdout, stderr)
+}
+
+
 pub(crate) fn run_exe(path: &std::path::Path) -> i32 {
-    Command::new(path)
-        .output()
-        .expect("run executable")
-        .status
-        .code()
-        .unwrap_or(-1)
+    run_exe_bounded(path).0
 }
 
 
@@ -161,18 +222,72 @@ pub(crate) fn run_gcc_cross_check(name: &str, source: &str) -> i32 {
         "dcc 应能编译 {name}: {}",
         String::from_utf8_lossy(&dcompile.stderr)
     );
-    let grun = Command::new(&gexe).output().expect("run gcc-built exe");
-    let drun = Command::new(&dexe).output().expect("run dcc-built exe");
+    let (gcode, gstdout, _gerr) = run_exe_bounded(&gexe);
+    let (dcode, dstdout, _derr) = run_exe_bounded(&dexe);
     let _ = fs::remove_file(&gexe);
     let _ = fs::remove_file(&dexe);
-    let gcode = grun.status.code().unwrap_or(-1);
-    let dcode = drun.status.code().unwrap_or(-1);
     assert_eq!(
-        String::from_utf8_lossy(&grun.stdout),
-        String::from_utf8_lossy(&drun.stdout),
+        String::from_utf8_lossy(&gstdout),
+        String::from_utf8_lossy(&dstdout),
         "{name}: gcc 与 dcc 的 stdout 不一致 (gcc_rc={gcode} dcc_rc={dcode})"
     );
     assert_eq!(gcode, dcode, "{name}: gcc 与 dcc 的退出码不一致");
+    dcode
+}
+
+
+/// 带优化档位的 gcc 交叉对照: 同一 C 源由 `gcc -O0` 与 `dcc <dcc_flags>` 各自编译,
+/// 要求 stdout 逐字节一致且退出码相同, 返回该退出码供调用方再断言具体值。
+///
+/// 为什么必须新添一个而不是复用 [`run_gcc_cross_check`]: 后者内部走
+/// `run_compile_and_run`, 零参数 = **-O0**。本项目全部“优化夹具”（
+/// `tests/integration/opt.rs` 里的 m16_*）就是这样“用 -O0 的结果当 -O2 的结论”:
+/// 同一批夹具手动加 `-O2` 后有 5 个 SEGV/HANG/错值, 而门禁全绿。
+/// 优化类测试的参照系必须是 gcc, 否则两个编译器“一致地错”依旧通过。
+///
+/// 运行两侧均走 [`run_exe_bounded`]: -O2 的误编译典型形态是死循环, 无上限时会把
+/// 整个测试目标吊死而不是跑红。
+pub(crate) fn run_gcc_cross_check_opt(name: &str, source: &str, dcc_flags: &[&str]) -> i32 {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let gsrc = dir.join(format!("dcc-xopt-{name}-{pid}.c"));
+    let gexe = dir.join(format!("dcc-xopt-{name}-{pid}.gcc"));
+    fs::write(&gsrc, source).expect("write C fixture for gcc");
+    let gbuild = Command::new("gcc")
+        .args(["-O0", "-std=gnu2x", "-w", "-o"])
+        .arg(&gexe)
+        .arg(&gsrc)
+        .output()
+        .expect("run gcc");
+    let (dbuild, dexe) = run_compile_and_run_flags(name, source, dcc_flags);
+    let _ = fs::remove_file(&gsrc);
+    assert!(
+        gbuild.status.success(),
+        "{name} [{}]: gcc 应能编译: {}",
+        dcc_flags.join(" "),
+        String::from_utf8_lossy(&gbuild.stderr)
+    );
+    assert!(
+        dbuild.status.success(),
+        "{name} [{}]: dcc 应能编译: {}",
+        dcc_flags.join(" "),
+        String::from_utf8_lossy(&dbuild.stderr)
+    );
+    let (gcode, gstdout, _) = run_exe_bounded(&gexe);
+    let (dcode, dstdout, _) = run_exe_bounded(&dexe);
+    let _ = fs::remove_file(&gexe);
+    let _ = fs::remove_file(&dexe);
+    assert_eq!(
+        String::from_utf8_lossy(&gstdout),
+        String::from_utf8_lossy(&dstdout),
+        "{name} [{}]: gcc 与 dcc 的 stdout 不一致 (gcc_rc={gcode} dcc_rc={dcode})",
+        dcc_flags.join(" ")
+    );
+    assert_eq!(
+        gcode, dcode,
+        "{name} [{}]: gcc 与 dcc 的退出码不一致",
+        dcc_flags.join(" ")
+    );
     dcode
 }
 

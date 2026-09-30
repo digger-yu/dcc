@@ -18,6 +18,58 @@ use crate::codegen::x86_64::{Codegen, GlobalVar, PendingCodeRel};
 use std::collections::HashMap;
 
 impl Codegen {
+    /// 本 TU 里全部「日后会以符号名发一条重定位」的待处理名字 —— symtab 建表与重定位
+    /// 回填共用的**唯一**枚举点。
+    ///
+    /// 为什么必须只有一份: Phase 2 要给每个被引用名补上 symtab 条目 (本文件), Phase 3
+    /// (`elf/resolve.rs::reloc_sym_index`) 只能按名字查索引。两处各自枚举一遍必然漂移 ——
+    /// 旧版 UND 登记只盖住了 3 条列表, 而发射重定位的列表有 11 条, 剩下的名字在 symtab
+    /// 里根本不存在。迁就它们的旧行为是 `sym_index.get(..).unwrap_or(0)`: 把「无此符号」
+    /// 降级成 `STN_UNDEF` (索引 0), 链接期按 ELF 规格取 `S = 0`, 重定位静默落到镜像起点。
+    ///
+    /// `.L` 前缀的内部标号必须排除: 按 GAS/ELF 约定它们不进 symtab, 给它们建 UND 条目
+    /// 等于把「发射器漏回填」的缺陷掩盖成合法未定义符号 (那条路径归 E1102/E1103 管)。
+    /// 以 `.` 开头的名字一律不进这个名单: `.rodata` / `.text` 这类 **section 符号**已在
+    /// local_syms 里定过义, 再补一条同名 UND 会得到两个同名符号并把重定位指到错的节。
+    ///
+    /// 输出**保序去重**: symtab 条目序直接进入产物字节, 建立在 HashMap 迭代序上会
+    /// 让同一份源码编出不一致的 .o。
+    pub(crate) fn referenced_reloc_symbols(&self) -> Vec<String> {
+        // 只收集引用, 不对 pending 列表做任何写入 —— 保证不动发射与回填语义。
+        let mut raw: Vec<&String> = Vec::new();
+        raw.extend(self.pending_func_rels.iter().map(|(_, n)| n));
+        raw.extend(self.pending_func_addr_rels.iter().map(|(_, n, _)| n));
+        raw.extend(self.pending_code_rels.iter().map(|r| &r.symbol));
+        raw.extend(self.pending_data_rels.iter().map(|(_, n)| n));
+        raw.extend(self.pending_sib_data_rels.iter().map(|(_, n)| n));
+        raw.extend(self.pending_tls_rels.iter().map(|(_, n)| n));
+        raw.extend(self.pending_data64_rels.iter().map(|(_, n, _, _, _)| n));
+        raw.extend(self.pending_rodata_rels.iter().map(|(_, n, _, _)| n));
+        raw.extend(self.pending_debug_info_relocs.iter().map(|(_, n)| n));
+        raw.extend(self.pending_custom_sec_rels.iter().map(|r| &r.symbol));
+        raw.extend(self.pending_label_diff_rels.iter().flat_map(|(_, a, b, _)| [a, b]));
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut out: Vec<String> = Vec::new();
+        for name in raw {
+            // 归一化 asm label: 与 `reloc_sym_index` 用的是同一份 asm_label_map。
+            let resolved = self
+                .asm_label_map
+                .get(name.as_str())
+                .cloned()
+                .unwrap_or_else(|| name.clone());
+            if resolved.is_empty() || Self::is_internal_label(&resolved) {
+                continue;
+            }
+            if resolved.starts_with('.') || resolved.starts_with(".L") {
+                continue;
+            }
+            if seen.insert(resolved.clone()) {
+                out.push(resolved);
+            }
+        }
+        out
+    }
+
     /// Phase 2: 收集所有符号 (正确顺序: STN_UNDEF → LOCAL → GLOBAL)
     /// 先收集到临时 vec, 然后排序构建最终 symtab
     pub(crate) fn collect_rel_symbols(
@@ -630,6 +682,26 @@ impl Codegen {
             if !known_syms.contains(&rel.symbol) && implicit_und.insert(rel.symbol.clone()) {
                 global_syms.push(ElfSym {
                     name: rel.symbol.clone(),
+                    section: SHN_UNDEF,
+                    value: 0,
+                    size: 0,
+                    bind: STB_GLOBAL,
+                    ty: STT_NOTYPE,
+                    visibility: STV_DEFAULT,
+                });
+            }
+        }
+
+        // 其余「日后会以符号名发一条重定位」的条目: 同一口径补 UND 登记。
+        // 旧版只枚举了函数调用表 + pending_code_rels, `pending_data_rels` /
+        // `pending_sib_data_rels` / `pending_tls_rels` / `pending_data64_rels` /
+        // `pending_rodata_rels` / `pending_debug_info_relocs` / `pending_custom_sec_rels` /
+        // `pending_label_diff_rels` 里的名字全靠碰巧命中已注册符号 —— inline asm 引用的
+        // 外部符号 (`retf $stack_cleanup` / `ljmp $0x08, far_target`) 因此查无索引。
+        for name in self.referenced_reloc_symbols() {
+            if !known_syms.contains(&name) && implicit_und.insert(name.clone()) {
+                global_syms.push(ElfSym {
+                    name,
                     section: SHN_UNDEF,
                     value: 0,
                     size: 0,
