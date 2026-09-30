@@ -443,7 +443,7 @@ SSA 管线。为把这件事做到而不是「拔掉闸门留着错值」，本�
 | P10 分块产物进 SSA 后在 -O3 忙等 | `for(i<5)for(j<5)s=s+i*j;` 分块后 | **已修并已接入**（第 5 轮）：根因不是 `rebuild_cycle`，而是「`_` 前缀猜合成临时值」+「SSA 版本名与临时值 base 撞名」两个判据缺陷，详见 §7。转换本体由 `tile_nest_preserves_iteration_space`（小解释器逐点对比迭代序列）/ `tile_keeps_body_verbatim` / `tile_refuses_unsafe_nests` 三个单测锁住。 |
 | **度量修正**：OPT-DIFF 真实是 **102 条 / 51 个文件**（COMPILE-FAIL 63，语料 335）| `make opt-eq` 的 `summary.txt` | 本文此前记的「102」与上一轮记的「40」都不是名单总量：门禁脚本在**显示**处带 `| head -40`，而统计用的是 `grep -c '^OPT-DIFF'` 对 **stdout**，于是把显示截断当成了总量（上一轮真正的值是 40 条显示 = 前 40 行）。已去掉截断，现在打印 `TOTAL OPT-DIFF=<n> 条 / <m> 个文件` 并列出全部条目，`grep -c` 与 `TOTAL` 从此自洽（本轮实测 102/51；并行审计会话测得 103/52，差的 1 条是两次运行间的名单漂移）。存量债逐项消除中。 |
 | ~~新：P16 落地的 store kernel 缺陷（因此默认不接入产物）~~ **已关闭（第 17 轮）** | 最小复现：`static int arr[12]; int main(void){ for(int i=0;i<12;i++) arr[i]=i; printf("done=%d\n",arr[5]); }` | 实测三档与 gcc 一致（`done=5`），且该循环现在被准入拒收（`depth=0`）。真正的根因不是 `IndexStore` 专属，而是「基名塌缩后的反依赖未被判定覆盖」——同一条边同时解释越界写与本节的错值。修复与度量见 §7.6。 |
-| **新：同一翻译单元内的跨函数污染** | `tests/fixtures/opt/ssa_pipe_nested.c` 原 `nest_three` 形态：函数内 `static int buf[6]` + 三层循环 `buf[j] += i + k` | -O2/-O3 得 **210**（应 36）。**关键实测**：同一个函数单独成分翻译单元编译时得到 36（正确），多个函数共存于同一 TU 时变 210 ⇒ 没有「循环嵌套错」而是跨函数/整个 TU 的优化污染（候选面：`prune_dead_stores`、跨函数 DCE、`ssa_gvn` 的函数级缓存）。已从守门夹具移出、但在此显式登记。 |
+| ~~新：同一翻译单元内的跨函数污染~~ **已关（第 20 轮复测）** | `tests/fixtures/opt/ssa_pipe_nested.c` 的 `nest_three` 形态：函数内 `static int buf[6]` + 三层循环 `buf[j] += i + k` | 当年实测 -O2/-O3 得 210（应 36），且单函数独立成 TU 是对的 ⇒ 跨函数/TU 级污染。本轮按原形态重建（函数内 static 数组 + 两个无关旁函数）复测：`-O0/-O1/-O2/-O3` 全部 36 且与 gcc 一致 ⇒ 随本轮 SCCP/往返类修复一并消失。夹具里的这条形态留着继续钉（它回归过一次）。 |
 
 ### 7. 本轮（第 7～8 轮）：P16 的一次重大挫折与当前真实边界
 
@@ -657,7 +657,7 @@ MISSING，实为空跑。
 | 3 | ~~`reg_bindings` 闭合：取址与 `"m"` 约束查绑定表~~ **已做（第 19 轮，见 §7.8）**：改成「逸出即不绑定」而非「读侧查表」，逸出判据复用 `ssa_gvn::addr_escaped_names`；「规划期尊重绑定」**故意保留不变**（栈槽是逸出的退回路径，必须始终存在） | `src/ssa_gvn.rs`、`emit/functions.rs`、`emit/stmt.rs` | 实测从错值 `42 0` 变正确的 `42 42`；并补上了逸出收集对语句表达式/复合字面量/asm 操作数的漏报 |
 | 4 | ~~修 `IndexStore` 的 kernel 实例~~ **已做（第 17 轮）**：根因是基名塌缩反依赖，由 `refine_kernel_row` + `emitted_reads_match` 闭掉，流水已默认接入 | `src/ssa_pipelining.rs` | 见 §7.6 |
 | 5 | ~~clrsb 位宽取形参类型 + 改夹具错值期望~~ **已做（第 18 轮）**：位宽改取 `Type::Long`/`LongLong`，夹具期望按 gcc 实测改为 31 | `special/builtins.rs`、`tests/fixtures/c/rotate.c` | 与 gcc 真值对齐（三档与 -O0 均一致） |
-| 6 | `DCC_OPT_SKIP=<pass>` **已做（第 18 轮）**：覆盖 AST 层全部 10 个调用点，与 `DCC_SSA_OFF` 合起来能二分管线任意一段；跨函数污染（`nest_three`）**仍未修**，但已用新开关定位到具体 pass | `src/opt.rs::opt_skipped` | 本轮就是靠它把剩下 18 条 OPT-DIFF 全部归因到具体 pass（见 §7.7 表） |
+| 6 | `DCC_OPT_SKIP=<pass>` **已做（第 18 轮）**：覆盖 AST 层全部 10 个调用点，与 `DCC_SSA_OFF` 合起来能二分管线任意一段；跨函数污染（`nest_three`）**也已关**（第 20 轮按原形态复测四档均为 36 且与 gcc 一致） | `src/opt.rs::opt_skipped` | 本轮就是靠它把剩下 18 条 OPT-DIFF 全部归因到具体 pass（见 §7.7 表） |
 
 目标数值路径：102 → (1) 32 → (2)(5)+门禁归一化 18（/9 个文件）。(4) 已于第 17 轮
 完成且 P16 已默认接入；剩下的 18 条已逐条归因，见 §7.7。
@@ -930,6 +930,14 @@ codegen 对数组类型的局部按「对象住在自己的槽里」给地址（
 | 重建时把数组类型的合成临时值衰减成 `Ptr(elem)`（声明与使用处同一规则） | **修好 vla.c 全部四档**，但 `may_alias.c` 在 -O2/-O3 段错误 ⇒ 同一个「数组类型」在本 IR 里有两种存储语义，类型本身分不出来 |
 | GVN 不给数组类型的结果编号（`val_key` 路线） | 数组临时值确实不再被合并（探针确认 `_tmem_7/10/13/16/19/23` 各自 uses=1），**但 vla.c 仍 rc=12** |
 | 在生产端衰减（`lower_expr` 的 Member 分支把数组成员的类型直接做成 `Ptr(elem)`） | **更糟**：vla.c 与 may_alias.c 都段错误 ⇒ codegen 把 `MemberLoad{ty: Ptr}` 当成「从该地址再取一个指针」，类型不是标签而是加载宽度 |
+
+may_alias 为什么会翻车（新证据，不是猜测）：把该类临时值声明成 `Ptr` 后，-O2 对
+帧内结构体的成员访问会多出一次**整体拷贝**：`may_alias.c` 的 `aligned_alias_test` 在
+-O0 是 `lea -80(%r13), %rax`（直接给成员地址），而 decay 版本变成
+`lea -80(%r13),%rsi; lea -88(%r13),%rdi; mov $2,%rcx; rep movsq` —— codegen 把
+「取子对象地址」当成了「按值产生一个聚合」并复制了整个结构体。也就是说：帧内对象需要
+数组类型（地址=自己的槽），堆块里的柔性数组需要指针类型（槽里存的是地址），二者在
+IR 里目前是同一个东西。
 
 三条一起指向同一个结论：**「子对象的地址」在本 IR 里没有自己的表示**。它今天被塞进
 一个「数组类型的值」里，于是同一个类型背着两种存储语义（别名 vs 住在自己槽里的聚合），
