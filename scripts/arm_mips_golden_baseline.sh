@@ -1,132 +1,100 @@
 #!/bin/bash
-# scripts/arm_mips_golden_baseline.sh - ARM/MIPS Golden Baseline Capture and Validation Script
-
-set -e
-
-echo "========================================="
-echo "=== ARM/MIPS Golden Baseline ==="
-echo "========================================="
-
-# Configuration
-BASELINE_DIR="/root/dcc/golden_baseline/arm_mips_modular"
+# scripts/arm_mips_golden_baseline.sh - ARM/MIPS 交叉产物基线捕获与漂移校验
+#
+# 这个脚本曾经是「空跑还报告成功」的形态，四处缺陷叠在一起：
+#   1. 三个夹具路径 (`basic/test_add.c` / `control/if_else.c` / `functions/function_call.c`)
+#      在仓库里不存在，循环里 `continue` 跳过 ⇒ 实际什么都没编译；
+#   2. 目标开关写成 `-m=arm`，dcc 的交叉目标开关是 `--target <triple>` ⇒ 就算夹具存在也编不出
+#      对应架构的产物；
+#   3. `normalize_asm` 在**定义之前**就被调用 ⇒ 一旦真编译成功就在此中断；
+#   4. 基线只是每次运行重新生成一遍，没有任何「与上次比」的判据 ⇒ 漂移看不出来。
+# 现在：夹具缺失/编译失败/产物与基线不一致一律置红；基线不存在时捕获并明示 CAPTURED。
+#
+# 判据用**目标文件字节哈希**而不是 objdump 文本：交叉 objdump 不一定装在本机，而基线要盯的
+# 恰恰是「同一份输入有没有产出不同字节」。
+#
+# 用法: DCC=... bash scripts/arm_mips_golden_baseline.sh [capture|verify]
+#   capture（默认）: 基线缺失则写入，存在则校验。
+#   verify: 基线缺失即失败（CI 用，禁止悄悄重写基线）。
+#
+# 基线存在 `tests/golden/` 而不是 `golden_baseline/`：后者整目录被 .gitignore 排除且
+# **一个文件也未入库**，所以任何存进去的基线都只是本机临时件，别人 clone 后拿不到。
+# 基线要成为门禁就必须是仓库内容。
+set -o pipefail
+DCC=${DCC:-/root/dcc/target/release/dcc}
+REPO=${DCC_REPO:-/root/dcc}
+BASELINE_DIR=${BASELINE_DIR:-/root/dcc/tests/golden/arm_mips}
+MODE=${1:-capture}
 mkdir -p "$BASELINE_DIR"
 
-TESTS_DIR="/root/dcc/tests/fixtures"
-TEMP_DIR="/tmp/arm_mips_test_output"
-rm -rf "$TEMP_DIR"
-mkdir -p "$TEMP_DIR"
-
-# Test programs to compile
-declare -a TEST_PROGRAMS=(
-    "basic/test_add.c"
-    "control/if_else.c"
-    "functions/function_call.c"
+# 目标三元组（dcc 的 --target 取值）与夹具都必须真实存在，缺失即红。
+TARGETS=(arm-linux-gnueabi mips-linux-gnu)
+FIXTURES=(
+    "tests/fixtures/c/address_const.c"
+    "tests/fixtures/c/apply_ret.c"
+    "tests/fixtures/c/array_dim_const_fold.c"
 )
 
-# Architecture modes
-ARCH_MODES=("arm" "mips")
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+fails=0
+captured=0
+checked=0
 
-echo ""
-echo "📋 Testing with architectures: ${ARCH_MODES[*]}"
-echo ""
-
-# Track results
-declare -A RESULTS
-TOTAL_TESTS=0
-PASSED_TESTS=0
-
-for arch in "${ARCH_MODES[@]}"; do
-    echo "========================================="
-    echo "🔧 Processing: $arch"
-    echo "========================================="
-    
-    mkdir -p "$BASELINE_DIR/$arch"
-    
-    for test_file in "${TEST_PROGRAMS[@]}"; do
-        TOTAL_TESTS=$((TOTAL_TESTS + 1))
-        
-        full_path="$TESTS_DIR/${test_file}"
-        
-        if [ ! -f "$full_path" ]; then
-            echo "⚠️  Skipping missing test: $test_file"
+for t in "${TARGETS[@]}"; do
+    for rel in "${FIXTURES[@]}"; do
+        src="$REPO/$rel"
+        name=$(basename "$src" .c)
+        base="$BASELINE_DIR/${t}_${name}.sha256"
+        if [ ! -f "$src" ]; then
+            # 以前这里是 `continue` + 一句警告：夹具被移动/改名会让门禁永远「全绿」，
+            # 而它实际什么都没测。缺文件就是缺测，必须算失败。
+            echo "MISSING  $t $rel (夹具不存在)"
+            fails=$((fails + 1))
             continue
         fi
-        
-        basename=$(basename "$test_file" .c)
-        output_obj="$TEMP_DIR/${arch}_${basename}.o"
-        output_asm="$BASELINE_DIR/${arch}/${basename}.asm"
-        
-        echo "Testing: $test_file ($arch)"
-        
-        # Compile with dcc
-        if dcc "$full_path" -m="$arch" -o "$output_obj" 2>/dev/null; then
-            echo "   ✅ Compilation successful"
-            
-            # Extract assembly listing
-            if objdump -d "$output_obj" > "$output_asm" 2>/dev/null; then
-                echo "   ✅ Assembly extracted"
-                
-                # Create normalized version
-                normalize_asm "$output_asm" > "${output_asm%.asm}_normalized.asm"
-                
-                RESULTS["${arch}_${basename}"]="PASS"
-                PASSED_TESTS=$((PASSED_TESTS + 1))
-            else
-                echo "   ❌ Failed to extract assembly"
-                RESULTS["${arch}_${basename}"]="ASM_EXTRACTION_FAILED"
-            fi
-        else
-            echo "   ❌ Compilation failed"
-            RESULTS["${arch}_${basename}"]="COMPILATION_FAILED"
+        obj="$TMP/${t}_${name}.o"
+        if ! "$DCC" --target "$t" -c -O0 -o "$obj" "$src" >"$obj.log" 2>&1; then
+            echo "COMPILE-FAIL $t $rel"
+            sed 's/^/    /' "$obj.log" | head -5
+            fails=$((fails + 1))
+            continue
         fi
-        
-        echo ""
+        got=$(sha256sum "$obj" | awk '{print $1}')
+        if [ ! -f "$base" ]; then
+            if [ "$MODE" = "verify" ]; then
+                echo "NO-BASELINE $t $rel (verify 模式不得新建基线)"
+                fails=$((fails + 1))
+                continue
+            fi
+            echo "$got  $t $rel" > "$base"
+            echo "CAPTURED $t $rel <- $got"
+            captured=$((captured + 1))
+            continue
+        fi
+        want=$(awk '{print $1}' "$base")
+        if [ "$want" = "$got" ]; then
+            echo "OK       $t $rel"
+        else
+            echo "DRIFT    $t $rel"
+            echo "           基线 $want"
+            echo "           当前 $got"
+            fails=$((fails + 1))
+        fi
+        checked=$((checked + 1))
     done
 done
 
-echo "========================================="
-echo "📊 Test Summary:"
-echo "========================================="
-echo "Total tests: $TOTAL_TESTS"
-echo "Passed: $PASSED_TESTS"
-echo "Failed: $((TOTAL_TESTS - PASSED_TESTS))"
 echo ""
-
-if [ $TOTAL_TESTS -gt 0 ]; then
-    success_rate=$((PASSED_TESTS * 100 / TOTAL_TESTS))
-    echo "Success rate: ${success_rate}%"
-fi
-
-echo ""
-echo "========================================="
-echo "💾 Baseline Storage:"
-echo "========================================="
-echo "Baseline location: $BASELINE_DIR"
-ls -la "$BASELINE_DIR" | head -5
-
-echo ""
-echo "✅ Golden baseline capture complete!"
-echo ""
-
-# Function to normalize assembly output
-normalize_asm() {
-    local input_file="$1"
-    
-    # Convert register names, remove addresses, standardize formatting
-    sed -E '
-        s/\[.*\]/\[RELOC\]/g          # Remove relocation info
-        s/0x[0-9a-f]+/ADDR/g          # Replace hex addresses
-        /^$/d                          # Remove empty lines
-        s/^[[:space:]]+//             # Trim leading whitespace
-    ' "$input_file" | \
-    tr '[:upper:]' '[:lower:]' | \
-    uniq
-}
-
-# Exit with error if any tests failed
-if [ $PASSED_TESTS -ne $TOTAL_TESTS ]; then
-    echo "⚠️  Some tests failed. Check output for details."
+echo "=== arm/mips 基线: 校验 $checked, 新捕获 $captured, 失败 $fails (mode=$MODE)"
+if [ "$fails" -ne 0 ]; then
+    echo "arm_mips_golden_baseline: FAIL"
     exit 1
 fi
-
+if [ "$checked" -eq 0 ] && [ "$captured" -eq 0 ]; then
+    # 一个都没跑成就不算「通过」：那正是本脚本原来的失效形态。
+    echo "arm_mips_golden_baseline: FAIL (没有校验到任何产物)"
+    exit 1
+fi
+echo "arm_mips_golden_baseline: OK"
 exit 0

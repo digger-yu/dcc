@@ -20,7 +20,7 @@
 //   P13 alias_set                   - 别名集合 (identity/disjoint/overlap)
 //   P14 speculative_execution       - 投机执行 (分支条件的依赖链上提)
 //   P15 sparse_conditional_constant_propagation - SCCP
-//   P16 (已删除) 软件流水          - 空函数体却报 changed, 见下文 P16 注释
+//   P16 software_pipelining         - 软件流水 (模调度 + peel/kernel/排空三段落地)
 //   P17 gvn                         - 全局值编号 (SSA 上的同形计算归一 + phi 退化)
 //   P18 dead_store_elim             - 死存储消除 (局部 + 单入链全局)
 //   P19 jump_threading              - 跳转穿线 (常量分支折叠 + 空跳板合并 + CFG/phi 修补)
@@ -52,10 +52,11 @@ pub fn run_with_opts(func: &mut Function, level: u8, strict_aliasing: bool) {
     // 早就把归纳变量链与 latch 改成了分类器不认识的形状。流水本身要重建循环结构
     // （拆块、改名、插轮转 phi），所以它先跑，后面的 pass 再在 kernel 上继续优化。
     //
-    // 仍默认关闭：当前资源模型下只有依赖链形态能拿到一级重叠（语料 200 个文件实测
-    // 5 个候选循环、唯一有重叠的 depth=2），且接入点提前后尚需一次端到端确认；
-    // 详见 docs/ssa-pass-upgrade-plan.md §7.3/§7.5。
-    if std::env::var("DCC_PIPE_ON").is_ok() && !ssa_dbg_off("pipe") {
+    // 默认已接入：之前的两条实测缺陷（IndexStore kernel 实例越界写、链尾多累加一
+    // 轮）同源于「基名塌缩后的反依赖」，已由 `ssa_pipelining` 的发射序重排与
+    // `emitted_reads_match` 判定闭掉（详见 docs/ssa-pass-upgrade-plan.md §7.5）。
+    // 二分定位仍可用：`DCC_SSA_OFF=pipe` 关掉本 pass。
+    if !ssa_dbg_off("pipe") {
         run_pipelining(func);
     }
     // 第一轮: 不依赖 GVN/SCCP 的 pass
@@ -122,14 +123,38 @@ pub fn run_pipelining(func: &mut Function) -> bool {
         headers.push(name);
     }
     let mut changed = false;
+    // 诊断窗口：流水的错值只在真实管线里出现，单测看的是未经其它 pass 的 SSA，
+    // 所以必须有一条路径能看到「计划 + 落地后 IR」（只写 stderr，不参与产物字节）。
+    let dump = std::env::var("DCC_PIPE_DUMP").is_ok();
     for h in headers {
         // 每个循环都重新过一遍闸门：前一个循环的落地可能已改变了本循环的区域。
         // 计划里的 `lp` 就是分类结果，直接交给落地，避免两次分类不一致。
-        let Ok(p) = crate::ssa_pipelining::plan_for_header_with(func, &h, &res) else {
-            continue;
-        };
-        if crate::ssa_pipelining::apply_plan(func, &p.lp, &p.inst).is_ok() {
-            changed = true;
+        match crate::ssa_pipelining::plan_for_header_with(func, &h, &res) {
+            Err(e) => {
+                // 「它没跑」与「它为什么没跑」在产物上完全一样，所以拒因也必须可查
+                // （否则只能靠猜形状，本模块的多轮修复就反复卡在这点上）。
+                if dump {
+                    eprintln!("[P16] {}#{h} 未流水：{e}", func.name);
+                }
+            },
+            Ok(p) => {
+                if dump {
+                    eprint!("\n==== [P16] 计划 =====\n{}", crate::ssa_pipelining::dump_plan(func, &p));
+                }
+                match crate::ssa_pipelining::apply_plan(func, &p.lp, &p.inst) {
+                    Ok(()) => {
+                        if dump {
+                            eprint!("==== [P16] 落地后 ====\n{}", crate::ssa::dump_function(func));
+                        }
+                        changed = true;
+                    },
+                    Err(e) => {
+                        if dump {
+                            eprintln!("[P16] {}#{h} 落地被拒：{e}", func.name);
+                        }
+                    },
+                }
+            },
         }
     }
     changed
@@ -3664,20 +3689,21 @@ fn refresh_cfg_caches(func: &mut Function) {
 }
 
 // =====================================================================
-// P16. 软件流水 —— 占位实现已删, 待真实现
+// P16. 软件流水 —— 真实现已接入（上面 `run_pipelining`），旧占位已删
 // =====================================================================
 //
 // 旧 P16 是空函数体 + 无条件 `modified = true`: 它不改 IR 却报告「改了」,
-// 与旧 P12 同一种骗调度器的形态。本轮删除后留下确切的前置链：
+// 与旧 P12 同一种骗调度器的形态。当年留下三条前置，现在的状态：
 //
-//   1. ~~`run_ssa_passes` 对含循环函数 `continue`~~ —— **该前提已随 `func_has_loop`
-//      闸门删除而消失**，含 while/for/do 的函数现在无条件进 SSA 管线。
-//      因此 P16 已可做，只是尚未做（本文档的待办项）。
-//   2. 仍需先修一个已知误编译：4 层嵌套 + 变量边界 + `&&` 条件的形态在 **-O2 就错**
-//      （与 SSA 无关，加 `goto` 的同形函数同样错，见 `loop_opt.rs` P10 一节与
-//      `docs/ssa-pass-upgrade-plan.md` §6 末表）。prologue/kernel/epilogue 三段式
-//      会产出比它更复杂的多层结构，不对它就先做 P16 只能得到「测试绿但产物错」。
-//   3. 本体要把 modulo scheduling 真写出来（依赖图 + RecMII/ResMII + 三段 BB 与 phi 修正）。
+//   1. ~~`run_ssa_passes` 对含循环函数 `continue`~~ —— 已随 `func_has_loop`
+//      闸门删除而消失，含 while/for/do 的函数无条件进 SSA 管线。
+//   2. ~~4 层嵌套 + 变量边界 + `&&` 条件的 -O2 误编译~~ —— 已修（见
+//      `docs/ssa-pass-upgrade-plan.md` §6/§8-A）；而流水自己的准入也**不依赖**它：
+//      嵌在任何循环里的循环一律不流水（`is_nested_in_other_loop`）。
+//   3. 本体已真写出来：依赖图 + RecMII/ResMII + epi-cyclic 模调度 + 三段切分 +
+//      peel/kernel/排空落地，在 `crate::ssa_pipelining`。两道可判定自检
+//      （`InstancePlan::verify` 证 T 序与实例覆盖，`emitted_reads_match` 证基名
+//      塌缩下的发射序）不通过就不接入，拒因由 `DCC_PIPE_DUMP` 可查。
 //
 // `loop_opt.rs` 里那个 AST 层的同名实现也不可计入: 它的「产物」是往循环前插
 // `Expr::AsmExpr{asm_str: "#pragma GCC pipelined"}`, 而该字符串在后端只是一条注释

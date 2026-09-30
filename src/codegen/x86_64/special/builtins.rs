@@ -2673,10 +2673,15 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                // GCC 语义: 无后缀 → int 宽度(32), l → long 宽度, ll → long long 宽度.
+                // GCC 语义: 无后缀 → int 宽度, l → long 宽度, ll → long long 宽度。
+                // 宽度必须取**形参类型**而不是实参表达式的类型：`__builtin_clrsbl(0x80000000)`
+                // 的字面量在 C 里是 `unsigned int`（32 位），拿它的宽度算就会得到 0，
+                // 而 gcc 给 31（long 是 64 位，符号位在 bit 63）。实参进入形参时已完成
+                // 宽度转换，所以形参类型就是本次 clrsb 的真实位宽。
                 let bits = match name {
-                    "__builtin_clrsb" => 32,
-                    _ => args[0].ty().size() as i32 * 8,
+                    "__builtin_clrsb" => Type::Int.size() as i32 * 8,
+                    "__builtin_clrsbl" => Type::Long.size() as i32 * 8,
+                    _ => Type::LongLong.size() as i32 * 8,
                 };
                 self.gen_expr(&args[0], 0); // rax = x
                 if bits == 64 {

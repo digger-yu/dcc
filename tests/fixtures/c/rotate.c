@@ -24,13 +24,17 @@ int test_clrsb(void) {
     int c3 = __builtin_clrsb(0xFFFFFFFF);   /* 31 (全符号位) */
     int c4 = __builtin_clrsb(0x00000000);   /* 31 (0 视作正数) */
     long long cll1 = __builtin_clrsbll(0x100000000LL);  /* 30 */
-    int cl1 = __builtin_clrsbl(0x80000000);             /* 0  (32 位) */
+    /* `l` 后缀的形参是 long，x86-64 (LP64) 上是 64 位：字面量 0x80000000 无后缀时
+     * 在 C 里是 unsigned int，进入形参后零扩展成 0x0000000080000000，符号位是 bit 63，
+     * 所以冗余符号位个数是 31。这里必须按**形参类型**定宽（gcc -O0/-O2 实测均为 31）；
+     * 旧版本写 0 是因为宽按实参表达式取，误当成了 32 位。*/
+    int cl1 = __builtin_clrsbl(0x80000000);             /* 31 (long = 64 位) */
     if (c1 != 30) return 11;
     if (c2 != 0) return 12;
     if (c3 != 31) return 13;
     if (c4 != 31) return 14;
     if (cll1 != 30) return 15;
-    if (cl1 != 0) return 16;
+    if (cl1 != 31) return 16;
     return 0;
 }
 

@@ -609,6 +609,9 @@ struct Builder {
     label_var_snapshots: HashMap<String, HashMap<String, SsaVar>>,
     /// 本函数内**被取址**的对象根名 (由 `build_from_func` 的第一遍构建收集)。
     addr_taken: std::collections::HashSet<String>,
+    /// 记下「该表达式无法在 SSA 里忠实表达」。非空 ⇒ `build_ssa` 放弃整个函数的
+    /// SSA 化，该函数留在 AST 通道上。原因文本只在放弃这条冷路上构造。
+    bail: Option<String>,
 }
 
 impl Builder {
@@ -626,6 +629,7 @@ impl Builder {
             pending_gotos: Vec::new(),
             label_var_snapshots: HashMap::new(),
             addr_taken,
+            bail: None,
         };
         b.func.blocks.get_mut(&b.cur).unwrap().term = Terminator::Unreachable;
         b
@@ -653,6 +657,52 @@ impl Builder {
 
     fn define(&mut self, var: SsaVar) {
         self.current.insert(var.base.clone(), var);
+    }
+
+    /// 本表达式无法降级 ⇒ 记下原因，并返回一个**从不进产物**的占位值。
+    ///
+    /// 旧行为是静默 `Operand::Int(0)`：那个表达式在产物里真的变成 0，于是一批
+    /// `_Complex` / `VaArg` / 复合字面量 / `&下标` `&成员` 形态在 -O2 静默误编译
+    /// （见 `docs/ssa-pass-upgrade-plan.md` §7.4 第 1 项）。宁可整个函数不走 SSA，
+    /// 也不保留「看着像优化、其实是错值」的形态。穷举的 catch-all 保证以后新增的
+    /// `Expr` 变体也默认走这条路，而不是静默变 0。
+    fn unsupported(&mut self, why: &str) {
+        if self.bail.is_none() {
+            self.bail = Some(why.to_string());
+        }
+    }
+
+    /// 当前块已有的指令数（用来框出「刚降级出来的那段指令」）。
+    fn cur_inst_count(&self) -> usize {
+        self.func.blocks.get(&self.cur).map(|b| b.insts.len()).unwrap_or(usize::MAX)
+    }
+
+    /// 下标 `from` 之后新发射的指令是否全部**纯且不陷获** —— 把它无条件执行是否等价。
+    ///
+    /// 判据建在**实际发射出的指令**上而不是 AST 白名单上：这样它不会与降级代码漂移，
+    /// 新增一种降级形态时默认落到「担心的一侧」。三类算不纯：
+    ///   * 读内存（Load/IndexLoad/MemberLoad）：分支被提出后可能访问未映射地址（`c ? *p : 0`）；
+    ///   * 除法/求余：提前执行会凭空产生 SIGFPE；
+    ///   * 给**用户对象**赋值（dest 不是合成临时值）：`x++` 在本 IR 里就是一条
+    ///     dest 为 `x.N` 的纯加法，但重建后它是一条用户可见的赋值，两侧都跑就是错。
+    fn emitted_is_pure(&self, from: usize) -> bool {
+        let Some(bb) = self.func.blocks.get(&self.cur) else {
+            return false;
+        };
+        bb.insts.iter().skip(from).all(|i| {
+            if i.dest
+                .as_ref()
+                .is_some_and(|d| !is_synthetic_temp_base(&self.func, &d.base))
+            {
+                return false;
+            }
+            match &i.kind {
+                InstKind::Bin { op, .. } => !matches!(op, BinOp::Div | BinOp::Mod),
+                InstKind::Un { .. } | InstKind::Cast { .. } | InstKind::Select { .. }
+                | InstKind::AddrOf { .. } => true,
+                _ => false,
+            }
+        })
     }
 
     /// `name` 是否是**本函数的存储** (局部变量或参数)。这是该事实的唯一判据。
@@ -1107,8 +1157,20 @@ impl Builder {
                 ty,
             } => {
                 let co = self.lower_expr(cond);
+                // `InstKind::Select` 是「两个分支都算完再选」，所以它只在两个分支
+                // 都**纯且不陷获**时才等价。旧实现无条件用它，于是
+                // `x < y ? x++ : y++` 两边自增都执行（实测 -O2 直接 abort）。
+                let before = self.cur_inst_count();
                 let t = self.lower_expr(then_);
+                let then_ok = self.emitted_is_pure(before);
+                let before = self.cur_inst_count();
                 let f = self.lower_expr(else_);
+                let else_ok = self.emitted_is_pure(before);
+                if !(then_ok && else_ok) {
+                    // 不静默错下去：整个函数放弃 SSA 化，留在 AST 通道（那里是真分支）。
+                    self.unsupported("三元分支带副作用或可陷获（Select 会两侧都执行）");
+                    return Operand::Int(0);
+                }
                 let dest = self.fresh("sel", ty.clone(), span);
                 self.emit(Inst {
                     dest: Some(dest.clone()),
@@ -1121,12 +1183,13 @@ impl Builder {
                 });
                 Operand::Var(dest)
             },
-            Expr::Comma { l: _, r, span, ty } => {
-                // 丢弃 lhs (在 SSA 化中已通过指令序列完成)
+            Expr::Comma { l, r, span, ty } => {
                 let _ = span;
-                let o = self.lower_expr(r);
                 let _ = ty;
-                o
+                // 逗号表达式的左操作数只为副作用存在，但**必须照常降级**：旧实现直接
+                // 把它丢掉，于是 `x = (f(), 1)` 里的调用在产物里消失（静默误编译）。
+                self.lower_expr(l);
+                self.lower_expr(r)
             },
             Expr::Call {
                 callee,
@@ -1281,6 +1344,8 @@ impl Builder {
                     self.define(dest.clone());
                     return Operand::Var(dest);
                 }
+                // `&a[i]` / `&s.f` 需要地址算术，而 `InstKind::AddrOf` 只能取具名对象的基址。
+                self.unsupported("取址的对象不是简单变量（&下标 / &成员）");
                 Operand::Int(0)
             },
             Expr::PostInc {
@@ -1536,7 +1601,14 @@ impl Builder {
                     Operand::Int(0)
                 }
             },
-            _ => Operand::Int(0), // 简化: 复杂 expr (CompoundLit, StmtExpr, LabelAddr, VaArg) 降级
+            // 其余形态（`_Complex` 家族、VaArg、复合字面量、InitList、语句表达式、
+            // label 地址）在 SSA 里没有忠实表达：放弃整个函数的 SSA 化，而不是静默
+            // 返 0（原因与实测见 `Builder::unsupported`）。这里必须是 catch-all：
+            // 以后新增的 `Expr` 变体要落在「不优化」而不是「错值」这一边。
+            other => {
+                self.unsupported(&format!("表达式无法在 SSA 里忠实表达（{:?}）", expr_shape(other)));
+                Operand::Int(0)
+            },
         }
     }
 
@@ -3395,6 +3467,21 @@ pub fn build_from_func(f: &FuncDecl) -> Option<Function> {
     build_ssa(f, addr_taken)
 }
 
+/// 给「没能降级的表达式」一个可读的形态名（只用于诊断文本，不参与判据）。
+/// 列出的就是 catch-all 实际会碰到的变体；其余一律报「未列举形态」。
+fn expr_shape(e: &Expr) -> &'static str {
+    match e {
+        Expr::ComplexLit { .. } | Expr::ComplexIntLit { .. } => "_Complex 字面量",
+        Expr::Real { .. } | Expr::Imag { .. } => "__real__/__imag__",
+        Expr::VaArg { .. } => "va_arg",
+        Expr::CompoundLit { .. } => "复合字面量",
+        Expr::InitList { .. } => "初始化列表",
+        Expr::StmtExpr { .. } => "语句表达式 ({...})",
+        Expr::LabelAddr { .. } => "label 地址",
+        _ => "未列举形态",
+    }
+}
+
 fn build_ssa(f: &FuncDecl, addr_taken: HashSet<String>) -> Option<Function> {
     let body = f.body.as_ref()?;
     if !is_structured(body) {
@@ -3427,6 +3514,15 @@ fn build_ssa(f: &FuncDecl, addr_taken: HashSet<String>) -> Option<Function> {
         }
     }
     builder.lower_block(body);
+    // 有任何表达式没能忠实降级 ⇒ 放弃整个函数的 SSA 化，该函数留在 AST 通道上。
+    // 诊断窗口：`DCC_SSA_BAIL=1` 打印函数名与原因（丢优化与拿到错值在产物上很像，
+    // 没有原因就只能猜，同 `DCC_PIPE_DUMP` 的理由）。
+    if let Some(why) = builder.bail.take() {
+        if std::env::var("DCC_SSA_BAIL").is_ok() {
+            eprintln!("[SSA] {} 不进管线：{why}", f.name.name);
+        }
+        return None;
+    }
     // 若最终 BB 没有 terminator, 加 Ret void
     let cur = builder.cur.clone();
     if let Some(b) = builder.func.blocks.get_mut(&cur) {
@@ -5675,10 +5771,32 @@ fn addr_of_ty(dest_ty: Option<&Type>) -> Type {
     }
 }
 
+/// 一元指令重建时的**结果类型**。
+///
+/// 第一真源是指令 `dest` 的类型：构建器在 `lower_expr` 里就是用原始
+/// `Expr::Unary.ty` 给 dest 定型的，所以它已经带好了「`-d` 是 double、`!x` 是 int」
+/// 这类 C 语义。旧实现只认向量，其余一律写 `Type::Int` ⇒ `n = -b`（b 是 double）
+/// 重建后成了 `Unary{ty: Int}`，codegen 的一元负号分支（`emit/expr/unary.rs` 靠
+/// `e.ty()` 判走不走 xorpd）于是落回整数 `neg r64`，浮点取负直接丢失（实测 -O2
+/// 打印 `0.000000` 而不是 `-2.300000`）。dest 缺失时才按 op 与操作数类型推。
+fn unary_result_ty(dest_ty: Option<&Type>, op: &UnOp, inner_ty: &Type) -> Type {
+    if let Some(t) = dest_ty {
+        if !matches!(t, Type::Void) {
+            return t.clone();
+        }
+    }
+    match op {
+        // `!x` 的结果在 C 里永远是 int。
+        UnOp::Not => Type::Int,
+        // 其余一元运算保持操作数类型（Neg/BitNot/Plus 在向量上逐元素，类型不变）。
+        UnOp::Neg | UnOp::BitNot | UnOp::Plus => inner_ty.clone(),
+    }
+}
+
 /// 将 SSA 指令转换为 AST 表达式, 同时应用内联替换。
 /// `inst_span` 是原始 SSA 指令的 span, 用于保留源码位置信息。
-/// `dest_ty` 是该指令 `dest` 变器的 SSA 类型 —— `AddrOf` 重建 `&base` 时
-/// 它是指针指向类型的**唯一真源** (下面 `AddrOf` 分支有详细理由)。
+/// `dest_ty` 是该指令 `dest` 变器的 SSA 类型 —— 它是 `AddrOf` 重建 `&base` 与
+/// `Un` 重建一元结果（`-d` 必须仍是 double）这两个分支的类型**唯一真源**。
 fn inst_to_expr_resolved(
     kind: &InstKind,
     subst: &HashMap<String, Option<Expr>>,
@@ -5703,12 +5821,7 @@ fn inst_to_expr_resolved(
         },
         InstKind::Un { op, e } => {
             let inner = resolve_operand(e, &fake_env, subst, func);
-            // 向量 UnOp: 结果类型同内部表达式 (Neg/BitNot 在向量上逐元素)
-            let ty = if matches!(inner.ty(), Type::Vector(_, _)) {
-                inner.ty()
-            } else {
-                Type::Int
-            };
+            let ty = unary_result_ty(dest_ty, op, &inner.ty());
             Expr::Unary {
                 op: *op,
                 e: Box::new(inner),
@@ -6166,14 +6279,16 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
             op: *op,
             e: Box::new(operand_to_expr(e, env, func)),
             span: sp.clone(),
-            ty: match e {
+            // 与 `inst_to_expr_resolved` 共用同一推型规则（本函数目前无调用点，
+            // 但两套规则一旦分叉，将来启用它就会拿到错类型）。
+            ty: unary_result_ty(None, op, &match e {
                 Operand::Var(v) => v.ty.clone(),
                 Operand::Float(_, t) => t.clone(),
                 Operand::SymAddr(_, t) => t.clone(),
                 Operand::FnAddr(_, t) => t.clone(),
                 Operand::Int(_) => Type::Int,
                 _ => Type::Int,
-            },
+            }),
         },
         InstKind::Cast { ty, e } => Expr::Cast {
             ty: ty.clone(),
@@ -6776,5 +6891,125 @@ mod tests {
         assert!(!is_lower_ir_temp_base(""));
         assert!(!is_lower_ir_temp_base("i"));
         assert!(!is_lower_ir_temp_base("__dcc_static_0"));
+    }
+
+    /// 取第一个函数并试 SSA 化；`None` = 该函数不进管线（留在 AST 通道上）。
+    fn try_build(src: &str, name: &str) -> Option<Function> {
+        let (prog, _d) = crate::parser::parse(src.as_bytes(), "t.c");
+        for decl in prog.decls.iter() {
+            if let crate::ast::Decl::Func(f) = decl {
+                if f.name.name == name {
+                    return build_from_func(f);
+                }
+            }
+        }
+        panic!("找不到函数 {name}");
+    }
+
+    /// 无法在 SSA 里忠实表达的表达式必须让**整个函数**放弃 SSA 化，而不是静默
+    /// 返 `Operand::Int(0)`（那条路径曾在 -O2 产生一批错值，见 `Builder::unsupported`）。
+    ///
+    /// 反向对照同样重要：不带该形态的同一函数必须能进管线，否则「所有函数全部
+    /// 放弃 SSA」也能把测试做绿（那其实就是「SSA 整层空转」那种假绿）。
+    #[test]
+    fn unlowerable_expr_bails_out_of_ssa_instead_of_becoming_zero() {
+        assert!(try_build("int a(void){ return (int[]){1,2,3}[1]; }\n", "a").is_none(), "复合字面量不可降级");
+        assert!(try_build("int b(void){ int x[4]; int *p = &x[2]; return (int)(long)p; }\n", "b").is_none(), "&下标 需地址算术");
+        assert!(try_build("int c(void){ int x[4]; x[2] = 9; return x[2]; }\n", "c").is_some(), "对照组必须仍进 SSA 管线");
+    }
+
+    /// 逗号表达式的左操作数只为副作用存在，但必须照常降级：旧实现直接丢掉 `l`,
+    /// 于是 `x = (g(), 1)` 里的调用在产物里消失。这条测试钉住两个面：
+    /// 函数仍能进 SSA（逗号不是放弃理由）且 IR 里真有那一次调用。
+    #[test]
+    fn comma_keeps_the_left_operand_side_effect() {
+        let f = try_build("int g(void); int f(void){ int x = (g(), 1); return x; }\n", "f")
+            .expect("逗号表达式不应成为放弃 SSA 的理由");
+        let calls = f
+            .blocks
+            .values()
+            .flat_map(|bb| bb.insts.iter())
+            .filter(|i| matches!(&i.kind, InstKind::Call { callee, .. } if matches!(callee, Operand::SymAddr(n, _) if n == "g")))
+            .count();
+        assert_eq!(calls, 1, "必须保留逗号左侧的那一次调用");
+    }
+
+    /// 三元分支带副作用/可陷获时不得降级成 `Select`（它两侧都执行），而要让整个
+    /// 函数放弃 SSA 化。反向对照：纯分支必须仍走 Select，否则「一律放弃」也能绿。
+    #[test]
+    fn ternary_with_side_effect_branches_bails_out() {
+        assert!(
+            try_build("int t1(void){ int x = 3, y = 2; return (x < y ? x++ : y++); }\n", "t1")
+                .is_none(),
+            "两侧自增不得被无条件执行"
+        );
+        assert!(
+            try_build("int t3(int c, int *p){ return c ? *p : 0; }\n", "t3").is_none(),
+            "分支里的读内存不得被提前执行"
+        );
+        let f = try_build("int t2(int c,int a,int b){ return c ? a + 1 : b + 2; }\n", "t2")
+            .expect("纯三元表达式仍应进 SSA 管线");
+        assert!(
+            f.blocks
+                .values()
+                .any(|bb| bb.insts.iter().any(|i| matches!(i.kind, InstKind::Select { .. }))),
+            "纯分支仍降级成 Select（否则本判据只是在关掉整层优化）"
+        );
+    }
+}
+
+/// 一元指令重建必须把结果类型定成指令 `dest` 的类型。
+///
+/// 旧实现只认向量类型，其余一律写 `Type::Int`，于是 `double n = -b;` 重建后成了
+/// `Unary{ty: Int}`，codegen 靠 `e.ty()` 判走不走 xorpd 的分支落回整数 `neg r64`
+/// ⇒ 浮点取负直接丢失（实测 -O2 打印 `0.000000`，真值 `-2.300000`）。
+#[cfg(test)]
+mod unary_rebuild_ty_tests {
+    use super::*;
+
+    fn un(op: crate::ast::UnOp, inner_ty: Type) -> InstKind {
+        let sp = Span::point("t.c", 1, 1);
+        InstKind::Un {
+            op,
+            e: Operand::Var(SsaVar {
+                base: "b".into(),
+                version: 1,
+                ty: inner_ty,
+                span: sp,
+            }),
+        }
+    }
+
+    fn rebuilt(kind: &InstKind, dest_ty: Option<&Type>) -> Expr {
+        let sp = Span::point("t.c", 1, 1);
+        let f = Function::new("f".into(), Type::Int, sp.clone());
+        inst_to_expr_resolved(kind, &HashMap::new(), &sp, &f, dest_ty)
+    }
+
+    #[test]
+    fn float_negation_keeps_double_and_int_keeps_int() {
+        let k = un(crate::ast::UnOp::Neg, Type::Double);
+        assert!(
+            matches!(&rebuilt(&k, Some(&Type::Double)), Expr::Unary { ty, .. } if matches!(ty, Type::Double)),
+            "double 取负的结果类型不得退化成 Int：{:?}",
+            rebuilt(&k, Some(&Type::Double))
+        );
+        let ki = un(crate::ast::UnOp::Neg, Type::Int);
+        assert!(
+            matches!(&rebuilt(&ki, Some(&Type::Int)), Expr::Unary { ty, .. } if matches!(ty, Type::Int)),
+            "整数取负仍得 Int"
+        );
+        // `!x` 在 C 里结果永远是 int，不得因为操作数是 double 就把结果定成 double。
+        let kn = un(crate::ast::UnOp::Not, Type::Double);
+        assert!(
+            matches!(&rebuilt(&kn, Some(&Type::Int)), Expr::Unary { ty, .. } if matches!(ty, Type::Int)),
+            "逻辑非必须回到 int：{:?}",
+            rebuilt(&kn, Some(&Type::Int))
+        );
+        // dest 缺失时按操作数类型推（不能默认成 Int，否则浮点又丢一次）。
+        assert!(
+            matches!(&rebuilt(&k, None), Expr::Unary { ty, .. } if matches!(ty, Type::Double)),
+            "无 dest 时按操作数类型推"
+        );
     }
 }

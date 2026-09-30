@@ -123,16 +123,19 @@ fn underscore_locals_match_gcc_at_all_levels() {
     );
 }
 
-/// P16 软件流水的两条执行级守门夹具。
+/// P16 软件流水的执行级守门夹具（流水已默认接入 -O2/-O3）。
 ///
-/// 落地（peel + kernel 重排 + 一级轮转 phi + 出口侧最后实例）已实现，但**默认不接入
-/// 产物**：进入产物后有一条已定位、尚未修好的缺陷 —— `main` 里的纯写循环被流水时
-/// -O2 输出整块丢失（越界写踩坏 stdio，见 `ssa_passes.rs` 里 `DCC_PIPE_ON` 的注释）。
+/// 曾经默认关闭的两条实测缺陷（kernel 内 store 实例越界写、链尾多累加一轮）同源于
+/// 一个根因：SSA→AST 重建把同基名塌缩成一个槽，而模调度的 T 序模型不表达这种
+/// 反依赖。现在由 `ssa_pipelining::emitted_reads_match` 在发射序上过一道判定，排不出
+/// 合法序的循环直接拒收（丢收益，不出错值）。
 ///
-/// 这两条夹具在**默认路径**上盯住「各档位与 gcc 逐字节一致」，因此：
-///   * 现在它们是绿的，证明默认路径没被落地污染；
-///   * 把流水默认打开的那一刻，它们会立刻变红，直到 kernel 的 store 实例被修对。
-/// `ssa_pipe_nested.c` 另外锁住「嵌套场景不得破坏外层结构」这条准入判据。
+/// 这三条夹具的分工：
+///   * `ssa_pipe_chain.c`：该流水的（依赖链）与不该流水的（归约/短 trip）共存，
+///     逐档与 gcc 对照 ⇒ 错值与错拒都藏不住；
+///   * `ssa_pipe_reduction.c`：被真流水的 load 归约（`red8_scaled`，trip=8、depth=1）
+///     仍须与 gcc 一致；
+///   * `ssa_pipe_nested.c`：锁住「嵌套场景不得破坏外层结构」这条准入判据。
 #[test]
 fn ssa_pipe_reduction_matches_gcc_at_all_levels() {
     assert_all_levels_match_gcc(
@@ -151,13 +154,46 @@ fn ssa_pipe_nested_matches_gcc_at_all_levels() {
     );
 }
 
-/// 三种流水判定并存的样本：该流水的（依赖链）与不该流水的（load 归约 depth=0）
-/// 放在同一个翻译单元里，默认路径逐档与 gcc 对照。
+/// 三种流水判定并存的样本：该流水的（两条 6 级依赖链）与不该流水的（load 归约
+/// depth=0、5 级链 depth=0、trip 太短）放在同一个翻译单元里，默认路径逐档与 gcc 对照。
 #[test]
 fn ssa_pipe_chain_matches_gcc_at_all_levels() {
     assert_all_levels_match_gcc(
         "ssa-pipe-chain",
         include_str!("../fixtures/opt/ssa_pipe_chain.c"),
         "流水落地或准入判定改变了行为",
+    );
+}
+
+/// 同一份源码、同一档位，只让 P16 开/关（`DCC_SSA_OFF=pipe`），返回 -O2 汇编。
+fn dcc_asm_with_pipe(name: &str, src: &str, ssa_off: Option<&str>) -> String {
+    let dir = env::temp_dir();
+    let sp = dir.join(format!("dcc-{name}-pipe-{}.c", std::process::id()));
+    let ap = dir.join(format!("dcc-{name}-pipe-{}.s", std::process::id()));
+    fs::write(&sp, src).expect("写夹具");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+    cmd.arg("-O2").args(["-S", "-o"]).arg(&ap).arg(&sp);
+    if let Some(v) = ssa_off {
+        cmd.env("DCC_SSA_OFF", v);
+    }
+    let out = cmd.output().expect("跑 dcc");
+    assert!(out.status.success(), "编译失败：{}", String::from_utf8_lossy(&out.stderr));
+    let text = fs::read_to_string(&ap).unwrap_or_default();
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&ap);
+    text
+}
+
+/// 「pass 已接入」必须由**产物差异**证明，不能由代码已调用证明 —— 否则它可以是一个
+/// 永远不生效的默认参数，而上面所有夹具与全部门禁依旧全绿（§7.5 就是这么发现的：
+/// 接入点在管线末尾时，开/关的 -O2 汇编 sha256 完全相同）。
+#[test]
+fn ssa_pipe_default_on_changes_the_product() {
+    let src = include_str!("../fixtures/opt/ssa_pipe_chain.c");
+    let on = dcc_asm_with_pipe("pipe-chain", src, None);
+    let off = dcc_asm_with_pipe("pipe-chain", src, Some("pipe"));
+    assert_ne!(
+        on, off,
+        "默认路径的 -O2 产物必须因流水而不同；与 DCC_SSA_OFF=pipe 逐字节相同 ⇒ 本 pass 空转"
     );
 }

@@ -9,7 +9,7 @@
 //! 1. **正确性优先于收益**。依赖模型漏一条边的后果是静默错值，不是编译失败，所以
 //!    内存操作、以及本 IR 特有的「基名塌缩序」（SSA→AST 重建把 `n_1/n_2` 还原成同一
 //!    个变量，故同基名的读/写顺序就是语义）一律保守建边。
-//! 2. **不靠推导，靠判定**。两道判定缺一不可：
+//! 2. **不靠推导，靠判定**。三道判定缺一不可：
 //!    * `modulo_schedule` 返回的 stage 必须过 `edges_satisfied` 全量校验才算「该间隔
 //!      可行」；下界被压低是安全问题，被抬高是丢收益，因此 `rec_mii` 只对**闭合环**
 //!      求最大 Σlatency/Σdistance（把不闭合的长链当环会跳过本来可行的间隔，见
@@ -18,9 +18,15 @@
 //!      `T(p,k) = stage[p] + k·II` **逐元素相等**，且每个 `(节点, 迭代)` 恰好出现一次。
 //!      上一版实现里它当场抓出两个方向性错误（kernel 迭代号没随轮次推进、跳轮引用
 //!      偏移符号写反导致所有真实循环被误拒），若无它则会以错值形式进入产物。
+//!    * `emitted_reads_match` 沿**实际发射序**模拟「同基名共享一个槽」的语义：重建
+//!      会把 `e.4`/`e.5`/`e.14` 塌缩成同一个变量，于是「上一轮的值能不能拿到」取决于
+//!      行内先后 —— 那是 T 序模型里不存在的**反依赖**，见「发射序」一节。
 //!
-//! 未做（诚实记录，本模块因此不参与编译产物）：把计划**应用到 IR** —— 节点重命名、
-//! 三段块、一级轮转 phi，接入 `run_ssa_passes` 并用执行夹具与 objdump 验收。
+//! 接入状态：已在 `-O2`/`-O3` **默认接入**（`ssa_passes::run_with_opts` 开头，必须在其它
+//! 改写循环的 pass 之前跑）；`DCC_SSA_OFF=pipe` 可关，`DCC_PIPE_DUMP=1` 看计划与落地后 IR。
+//!
+//! 未做：真轮转寄存器（槽位复制）。行内反依赖排不出合法序的循环会被**拒收**而不是
+//! 错跑，代价是丢掉那部分收益。
 //!
 //! 识别层只认真实 IR 的形状，不猜：`for` 的头是带 phi 的 `for.body`、latch 是条件回边
 //! 所在的 `for.step`、`i++` 被拆成 `_tpost=i+0; _tupd=_tpost+1; i_2=_tupd+0` 的拷贝链；
@@ -1410,9 +1416,82 @@ impl InstancePlan {
         out
     }
 
-    /// 绝对时间序（平局尺子：先 T，再行内位置，再节点号）。
-    fn key(&self, stage: &[usize], x: &(usize, usize)) -> (usize, usize, usize) {
-        (stage[x.0] + x.1 * self.ii, stage[x.0] % self.ii, x.0)
+    /// 行内位置表（节点 → 行内下标），由 kernel 第一行给出。
+    ///
+    /// 行内序**是**语义的一部分：SSA→AST 重建把同基名的 `e.5` / `e.14` 还原成同一个
+    /// 变量（同一个槽），所以「谁先发射」直接决定读者拿到哪一份值。行与行必须一致，
+    /// 否则轮与轮之间就没有确定的语义可言 —— 这里宁可直接判 None 也不猜。
+    fn row_pos(&self) -> Option<Vec<usize>> {
+        let n = self.shift.len();
+        let row0 = self.kernel.first()?;
+        if row0.len() != n || self.kernel.iter().any(|r| r != row0) {
+            return None;
+        }
+        let mut pos = vec![usize::MAX; n];
+        for (i, &p) in row0.iter().enumerate() {
+            if p >= n || pos[p] != usize::MAX {
+                return None;
+            }
+            pos[p] = i;
+        }
+        Some(pos)
+    }
+
+    /// kernel 行（所有行相同，见 `row_pos`）。
+    pub fn row(&self) -> Option<&Vec<usize>> {
+        if self.row_pos().is_some() {
+            self.kernel.first()
+        } else {
+            None
+        }
+    }
+
+    /// 绝对时间序（平局尺子：先 T，再**行内位置**，再节点号）。
+    ///
+    /// 平局用行内位置而不是 `stage%ii`：平局意味着两者 T 相同、图上无约束，
+    /// 于是发射序就是唯一真源（见 `row_pos`）。拿不到合法行序时给一个不可能
+    /// 出现的下标，让后面的逐元素相等比较自然失败，而不是另起一套规则。
+    fn key(&self, stage: &[usize], pos: &[usize], x: &(usize, usize)) -> (usize, usize, usize) {
+        (stage[x.0] + x.1 * self.ii, pos.get(x.0).copied().unwrap_or(usize::MAX), x.0)
+    }
+
+    /// 换一份行内序：所有 kernel 行同步替换，prologue/epilogue 按新平局尺子归位。
+    ///
+    /// 只接受「同一节点集合的重排」，并且换完必须还能 `verify`，所以调用方拿到的
+    /// 计划要么与新行序自洽、要么被拒 —— 不存在「行序换了但切分还是旧的」的中间态。
+    pub fn with_row(&self, stage: &[usize], row: &[usize]) -> Result<InstancePlan, &'static str> {
+        let n = self.shift.len();
+        let mut sorted = row.to_vec();
+        sorted.sort_unstable();
+        if sorted.len() != n || sorted.iter().enumerate().any(|(i, &p)| i != p) {
+            return Err("新行序不是节点集的一个排列");
+        }
+        let mut pos = vec![0usize; n];
+        for (i, &p) in row.iter().enumerate() {
+            pos[p] = i;
+        }
+        let mut out = self.clone();
+        out.kernel = vec![row.to_vec(); self.kernel.len()];
+        let tkey = |x: &(usize, usize)| self.key(stage, &pos, x);
+        out.prologue = self.prologue.clone();
+        out.epilogue = self.epilogue.clone();
+        out.prologue.sort_by_key(tkey);
+        out.epilogue.sort_by_key(tkey);
+        if !out.verify(stage) {
+            return Err("重排后的行序与实例覆盖/T 序不再自洽");
+        }
+        Ok(out)
+    }
+
+    /// 每个节点被实际执行的次数（发射序视角）。合法切分里必须恰为 trip 次。
+    pub fn exec_counts(&self) -> Vec<usize> {
+        let mut c = vec![0usize; self.shift.len()];
+        for &(p, _) in &self.flatten() {
+            if p < c.len() {
+                c[p] += 1;
+            }
+        }
+        c
     }
 
     /// 证明这份切分是合法的：**每个 (节点, 迭代) 恰好执行一次**，且展开序与 T 序
@@ -1423,7 +1502,11 @@ impl InstancePlan {
     /// 两者都不会让编译失败，只会让产物错值。
     pub fn verify(&self, stage: &[usize]) -> bool {
         let n = self.shift.len();
-        if stage.len() != n || self.kernel.iter().any(|r| r.len() != n) {
+        let pos = match self.row_pos() {
+            Some(p) => p,
+            None => return false,
+        };
+        if stage.len() != n {
             return false;
         }
         let trip = self.kernel.len() + self.depth;
@@ -1449,7 +1532,7 @@ impl InstancePlan {
         // 2. 序恒等：与 T 序逐元素相等（不只是「非降」，而是同一个序列）。
         let mut want: Vec<(usize, usize)> =
             (0..n).flat_map(|p| (0..trip).map(move |k| (p, k))).collect();
-        want.sort_by_key(|x| self.key(stage, x));
+        want.sort_by_key(|x| self.key(stage, &pos, x));
         want.iter().eq(got.iter())
     }
 }
@@ -1471,7 +1554,7 @@ pub fn instance_plan(stage: &[usize], ii: usize, trip: usize) -> Option<Instance
     let rounds = trip - depth;
     let mut row: Vec<usize> = (0..n).collect();
     row.sort_by_key(|&p| (stage[p] % ii, p));
-    let kernel = vec![row; rounds];
+    let kernel = vec![row.clone(); rounds];
     let mut prologue: Vec<(usize, usize)> = Vec::new();
     let mut epilogue: Vec<(usize, usize)> = Vec::new();
     for p in 0..n {
@@ -1483,9 +1566,13 @@ pub fn instance_plan(stage: &[usize], ii: usize, trip: usize) -> Option<Instance
             }
         }
     }
-    // 两段各自按绝对时间归位（kernel 行内序已由 row 的排序给出）。不排就凑不出
-    // T 序，下面的逐元素相等会直接拒收 —— 这正是自检该做的事。
-    let tkey = |x: &(usize, usize)| (stage[x.0] + x.1 * ii, stage[x.0] % ii, x.0);
+    // 两段各自按绝对时间归位（平局尺子就是行内位置，与 `verify` 用的是同一把）。
+    // 不排就凑不出 T 序，下面的逐元素相等会直接拒收 —— 这正是自检该做的事。
+    let mut pos = vec![0usize; n];
+    for (i, &q) in row.iter().enumerate() {
+        pos[q] = i;
+    }
+    let tkey = |x: &(usize, usize)| (stage[x.0] + x.1 * ii, pos[x.0], x.0);
     prologue.sort_by_key(tkey);
     epilogue.sort_by_key(tkey);
     let plan = InstancePlan { ii, depth, shift, kernel, prologue, epilogue };
@@ -1610,6 +1697,286 @@ fn benefit_verdict(depth: usize, ii: usize, trip: usize) -> Result<(), &'static 
     Ok(())
 }
 
+// ========================================= 发射序：基名塌缩的反依赖与判定
+//
+// SSA→AST 重建把 `e.4` / `e.5` / `e.14` 全都还原成同一个变量 `e`（同一个栈槽），
+// head 块上那对轮转 phi 因此折叠成 `e = e` 被丢掉。于是「读上一轮的 e」在机器码里
+// 并不是读一个轮转寄存器，而是**读那个槽的当前内容** —— 它等于哪一份实例完全由
+// 发射顺序决定：消费者必须排在生产者本轮写之前，才拿得到上一轮的值。
+//
+// 模调度的 T 序模型表达不了这件事：它只给真数据依赖定序，而这里是**反依赖**（WAR）。
+// 实测 chain6_10（6 级依赖链、trip=10）就是这么错的：kernel 行把 `f += e` 排在
+// `e += d` 之后 ⇒ f 每轮读到本轮的 e，少加第一轮、多算最后一轮，-O2 得 7006（真值 5005）。
+//
+// 两道判据：
+//   * `refine_kernel_row`：按行内约束（本轮前向 = 生产者先，轮转读 = 消费者先）稳定
+//     重排平局，不改变任何实例的绝对时间；
+//   * `emitted_reads_match`：沿**实际发射序**（prologue → 每轮「head 判定 + kernel 行」
+//     → epilogue）模拟槽位内容，要求每个读都命中模型指定的那个实例。
+// 后者是发射层的最终闸门：漏掉任何一条边，它以「读到的不是预期实例」的形式炸出来，
+// 而不是以错值进产物。前者只是让后者能通过的重排，不参与正确性论证。
+
+/// 消费者（轮偏移 `shift_p`）读生产者 q 的输出要往回几轮。唯一真源：行内约束与
+/// 落地共用它，两处各写一套正是上一版「测试绿而实际错」的根源。判定指令不占节点号，
+/// 它的 `shift_p` 就是 `COND_SHIFT`。
+fn back_rounds(shift_p: usize, shift_q: usize, carried: bool) -> i64 {
+    shift_q as i64 - shift_p as i64 + if carried { 1 } else { 0 }
+}
+
+/// 判定指令在发射序里的轮偏移：它在 head 块、body 之前，等价于一个 shift=0 的节点。
+const COND_SHIFT: usize = 0;
+
+/// 行内约束 `(u, v)`：u 必须排在 v 之前。
+fn row_constraints(lp: &PipelinedLoop, plan: &InstancePlan, row: &[usize]) -> Vec<(usize, usize)> {
+    let mut def_of: HashMap<String, usize> = HashMap::new();
+    for (i, inst) in lp.nodes.iter().enumerate() {
+        if let Some(d) = &inst.dest {
+            def_of.insert(d.name(), i);
+        }
+    }
+    let shift = &plan.shift;
+    let mut out = Vec::new();
+    for &p in row {
+        for v in kind_uses(&lp.nodes[p].kind) {
+            let key = v.name();
+            let (q, carried) = if let Some(&q) = lp.phi_sources.get(&key) {
+                (q, true)
+            } else if let Some(&q) = def_of.get(&key) {
+                (q, false)
+            } else {
+                continue;
+            };
+            match back_rounds(shift[p], shift[q], carried) {
+                // 本轮前向：生产者必须先发射。
+                0 => out.push((q, p)),
+                // 轮转（要上一轮的值）：消费者必须在生产者本轮写之前读。累加器
+                // 自读自己（p==q）由「上一轮已写入槽」天然满足，不构成行内约束。
+                1 if p != q => out.push((p, q)),
+                _ => {},
+            }
+        }
+    }
+    out
+}
+
+/// 按行内约束重排 kernel 行。稳定排序（无约束的保持原相对序），所以能不动就不动；
+/// 约束成环说明基名塌缩下拿不到两全的序（要真轮转寄存器才行）⇒ 拒，并给出原因。
+pub fn refine_kernel_row(
+    lp: &PipelinedLoop,
+    plan: &InstancePlan,
+    stage: &[usize],
+) -> Result<InstancePlan, &'static str> {
+    let row0 = match plan.row() {
+        Some(r) => r.clone(),
+        None => return Err("kernel 行不合法（行间不一致或有重/漏节点）"),
+    };
+    let n = row0.len();
+    let mut rank = vec![0usize; n];
+    for (i, &p) in row0.iter().enumerate() {
+        rank[p] = i;
+    }
+    let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut indeg = vec![0usize; n];
+    let mut seen: HashSet<(usize, usize)> = HashSet::new();
+    for (u, v) in row_constraints(lp, plan, &row0) {
+        if u >= n || v >= n || u == v || !seen.insert((u, v)) {
+            continue;
+        }
+        succ[u].push(v);
+        indeg[v] += 1;
+    }
+    // Kahn：每步在所有入度 0 的节点里选原行序最靠前的 ⇒ 结果确定，且与旧实现的
+    // 「按 stage%ii 排」在无约束时逐字相同（产物字节不因此抖动）。
+    let mut out: Vec<usize> = Vec::with_capacity(n);
+    let mut done = vec![false; n];
+    while out.len() < n {
+        let pick = (0..n)
+            .filter(|&x| !done[x] && indeg[x] == 0)
+            .min_by_key(|&x| rank[x])
+            .ok_or("行内反依赖约束成环：基名塌缩下无法两全（需真轮转寄存器）")?;
+        done[pick] = true;
+        out.push(pick);
+        for &s in &succ[pick] {
+            if !done[s] {
+                indeg[s] -= 1;
+            }
+        }
+    }
+    if out == row0 {
+        return Ok(plan.clone());
+    }
+    plan.with_row(stage, &out)
+}
+
+/// 模拟一次读：`v` 在迭代 `k` 处被读，检查槽里此刻的内容正是模型指定的那份实例。
+fn sim_check_read(
+    lp: &PipelinedLoop,
+    def_of: &HashMap<String, usize>,
+    v: &SsaVar,
+    k: usize,
+    slot: &HashMap<String, Option<(usize, usize)>>,
+) -> Result<(), &'static str> {
+    let key = v.name();
+    // 模型要的是哪个实例：携带值 = 上一迭代，区域内定义 = 同迭代，
+    // 区域外（参数/循环前的定义）= 进循环前的值（槽还没被区域内的写盖住）。
+    let want: Option<(usize, usize)> = if let Some(&q) = lp.phi_sources.get(&key) {
+        if k == 0 {
+            None
+        } else {
+            Some((q, k - 1))
+        }
+    } else if let Some(&q) = def_of.get(&key) {
+        Some((q, k))
+    } else {
+        None
+    };
+    let got = slot.get(&v.base).copied().unwrap_or(None);
+    if got == want {
+        Ok(())
+    } else {
+        Err("发射序下该读拿到的不是模型指定的实例（基名塌缩反依赖）")
+    }
+}
+
+/// 沿实际发射序模拟「每个基名一个槽」的语义。任何一处读错实例都直接拒收。
+pub fn emitted_reads_match(lp: &PipelinedLoop, plan: &InstancePlan) -> Result<(), &'static str> {
+    let n = lp.nodes.len();
+    let row = match plan.row() {
+        Some(r) => r.clone(),
+        None => return Err("kernel 行不合法（无法模拟发射序）"),
+    };
+    let mut def_of: HashMap<String, usize> = HashMap::new();
+    let mut base_of: Vec<Option<String>> = vec![None; n];
+    for (i, inst) in lp.nodes.iter().enumerate() {
+        if let Some(d) = &inst.dest {
+            def_of.insert(d.name(), i);
+            base_of[i] = Some(d.base.clone());
+        }
+    }
+    let rounds = plan.kernel.len();
+    let trip = rounds + plan.depth;
+    let mut slot: HashMap<String, Option<(usize, usize)>> = HashMap::new();
+    // 发射一条实例：先按当前槽校验它的每个读，再把它自己的值压进槽。
+    macro_rules! fire {
+        ($p:expr, $k:expr) => {{
+            let (p, k) = ($p, $k);
+            if p >= n {
+                return Err("实例引用了不存在的节点");
+            }
+            if k >= trip {
+                // 与 `apply_into` 里的命名阶段用同一句话：这条越界在两侧都会被拦，
+                // 原因文案不得分叉，否则测试钉的是文案而不是行为。
+                return Err("实例迭代号超出 trip 范围");
+            }
+            for v in kind_uses(&lp.nodes[p].kind) {
+                sim_check_read(lp, &def_of, &v, k, &slot)?;
+            }
+            if let Some(b) = &base_of[p] {
+                slot.insert(b.clone(), Some((p, k)));
+            }
+        }};
+    }
+    for &(p, k) in &plan.prologue {
+        fire!(p, k);
+    }
+    for r in 0..rounds {
+        // head 块：判定在 body 之前跑，读的是上一轮的产出 ⇒ 按 shift=0 的消费者算。
+        for v in kind_uses(&lp.cond.kind) {
+            sim_check_read(lp, &def_of, &v, r + COND_SHIFT, &slot)?;
+        }
+        for &p in &row {
+            fire!(p, r + plan.shift[p]);
+        }
+    }
+    // 跳出循环的那一次判定同样在 head 里发射，它读的也必须是真实存在的实例。
+    for v in kind_uses(&lp.cond.kind) {
+        sim_check_read(lp, &def_of, &v, rounds + COND_SHIFT, &slot)?;
+    }
+    for &(p, k) in &plan.epilogue {
+        fire!(p, k);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod emit_order_tests {
+    use super::*;
+    use crate::ssa::Function;
+
+    /// 最小错值形态（`tests/fixtures/opt/ssa_pipe_chain.c` 的 chain6_10）：6 级
+    /// 依赖链、trip=10 —— 「区域节点数 ≥ 6 才触发」的那个形状。
+    const CHAIN6: &str = "int c6(void){int a=0,b=0,c=0,d=0,e=0,f=0;for(int i=0;i<10;i++){a+=1;b+=a;c+=b;d+=c;e+=d;f+=e;}return f;}\n";
+
+    fn fn_ssa(src: &str, name: &str) -> Function {
+        let (prog, _d) = crate::parser::parse(src.as_bytes(), "t.c");
+        let (m, _w) = crate::ir::lower(prog).unwrap();
+        for decl in m.source().decls.iter() {
+            if let crate::ast::Decl::Func(f) = decl {
+                if f.name.name == name {
+                    return crate::ssa::build_from_func(f).expect("应能 SSA 化");
+                }
+            }
+        }
+        panic!("找不到函数 {name}");
+    }
+
+    /// 旧规则的行序：只看 `stage%ii`，不看基名塌缩后的反依赖。
+    fn naive_row(stage: &[usize], ii: usize, n: usize) -> Vec<usize> {
+        let mut row: Vec<usize> = (0..n).collect();
+        row.sort_by_key(|&p| (stage[p] % ii, p));
+        row
+    }
+
+    fn node_of(lp: &PipelinedLoop, base: &str) -> usize {
+        lp.nodes
+            .iter()
+            .position(|n| n.dest.as_ref().map(|d| d.base.as_str()) == Some(base))
+            .unwrap_or_else(|| panic!("调度区里没有以 {base} 为基名的节点"))
+    }
+
+    /// 该形状必须被接受，而且行序必须把链尾 `f += e` 排在 `e += d` 之前：
+    /// f 要的是上一轮的 e，而机器码里那就是一个槽，晚一拍就被本轮的写盖掉。
+    #[test]
+    fn minimal_wrong_shape_gets_a_row_order_that_reads_the_right_slot() {
+        let f = fn_ssa(CHAIN6, "c6");
+        let p = plan_for_header(&f, "for.body").unwrap_or_else(|e| panic!("chain6 应过闸门：{e}"));
+        emitted_reads_match(&p.lp, &p.inst).expect("接受的计划必须过发射序自检");
+        let row = p.inst.row().expect("行序必须合法").clone();
+        let pos = |q: usize| row.iter().position(|&x| x == q).unwrap();
+        let (e_n, f_n) = (node_of(&p.lp, "e"), node_of(&p.lp, "f"));
+        assert!(pos(f_n) < pos(e_n), "链尾必须先于它读的那个生产者：行序={row:?}");
+    }
+
+    /// 反向对照：把行序退回旧规则，发射序自检必须拒它，落地层也必须拒它。
+    /// 没有这条，上一条可能只是因为自检空转才绿。
+    #[test]
+    fn unrefined_row_order_is_rejected() {
+        let f = fn_ssa(CHAIN6, "c6");
+        let p = plan_for_header(&f, "for.body").expect("chain6 应过闸门");
+        let naive = naive_row(&p.stage, p.ii, p.lp.nodes.len());
+        let bad = p.inst.with_row(&p.stage, &naive).expect("旧行序仍是合法切分");
+        let e = emitted_reads_match(&p.lp, &bad).expect_err("旧行序必须被发射序自检拒掉");
+        assert!(e.contains("不是模型指定的实例"), "实得：{e}");
+        let mut g = f.clone();
+        let before = crate::ssa::dump_function(&g);
+        assert!(apply_plan(&mut g, &p.lp, &bad).is_err(), "apply 不得接受被拒的行序");
+        assert_eq!(crate::ssa::dump_function(&g), before, "被拒时原 IR 必须逐字不变");
+    }
+
+    /// 每个节点的实际执行次数必须恰为 trip（§7.5 要求的那条 IR 层断言）。
+    #[test]
+    fn every_node_executes_exactly_trip_times() {
+        let f = fn_ssa(CHAIN6, "c6");
+        let p = plan_for_header(&f, "for.body").expect("chain6 应过闸门");
+        let want = vec![p.lp.trip; p.lp.nodes.len()];
+        assert_eq!(p.inst.exec_counts(), want, "每节点恰执行 trip 次");
+        // 反向对照：少一个排空实例就立即不等 —— 证明这条断言真的在数东西。
+        let mut bad = p.inst.clone();
+        bad.epilogue.pop();
+        assert_ne!(bad.exec_counts(), want);
+    }
+}
+
 /// 唯一闸门：识别 → 建图 → MII → 模调度 → 三段切分 → 收益与代价判据。
 ///
 /// 必须只有一条路径。分成两条（比如诊断走一套、实跑走另一套）的后果就是
@@ -1628,6 +1995,9 @@ pub fn plan_for_header_with(
     let mii = rec_mii(&g).max(res_mii(&g, res));
     // 从 MII 起逐步增大；再大到节点数就没有重叠可言了。
     let ceiling = mii.max(lp.nodes.len());
+    // 发射层拒绝原因比「没有可行调度」有用得多（行序成环 / 读到错实例），
+    // 搜索耗尽时把它报出去，不让它被一个泛化原因掩盖。
+    let mut last_emit: Option<&'static str> = None;
     for ii in mii..=ceiling {
         let Some(stage) = modulo_schedule(&g, ii, res) else {
             continue;
@@ -1642,9 +2012,23 @@ pub fn plan_for_header_with(
             // depth=0 这种情形换更大的 II 只会更没意义，直接结束搜索并报原因。
             return Err(e);
         }
+        // 发射序两道判据：先按行内反依赖重排平局，再沿实际发射序模拟槽位内容。
+        // 它们抓的是 T 序模型表达不了的错（见上面「发射序」一节），拿不到合法行序
+        // 就换下一个间隔 —— 更大的 II 会给出不同的平局，可能反而能排开。
+        let inst = match refine_kernel_row(&lp, &inst, &stage) {
+            Ok(p) => p,
+            Err(e) => {
+                last_emit = Some(e);
+                continue;
+            },
+        };
+        if let Err(e) = emitted_reads_match(&lp, &inst) {
+            last_emit = Some(e);
+            continue;
+        }
         return Ok(PipelinePlan { lp, ii, stage, inst });
     }
-    Err("MII 到节点数之间找不到可行调度")
+    Err(last_emit.unwrap_or("MII 到节点数之间找不到可行调度"))
 }
 
 /// 用默认资源模型跑闸门。
@@ -2171,6 +2555,10 @@ fn apply_into(
     if header == preheader || header == exit || latch == exit {
         return Err("循环角色重合");
     }
+    // 发射序自检。闸门已过一次，这里再过一次不是重复：`apply_plan` 可以被直接调用
+    // （单测、后续新接入点），而它发出的就是「基名同一个槽」的 IR —— 那个语义只有
+    // 沿实际发射序模拟才判得出来，拿旧计划或手改过的行序进来都会在此被拦下。
+    emitted_reads_match(lp, plan)?;
 
     let row = &plan.kernel[0];
     if row.len() != n {
@@ -2242,29 +2630,29 @@ fn apply_into(
     //    这条公式两次出错都是被检查逼出来的：先只把 phi dest 当跳轮引用（漏了
     //    `节点 6 读 i_2` 其实是跳上一轮），后一次是把 shift 写反（back 算成 -1）。
     //    两者都会产生前向引用，而前向引用在产物里是错值，不是编译错误。
-    let back_rounds = |p: usize, q: usize, carried: bool| -> i64 {
-        shift[q] as i64 - shift[p] as i64 + if carried { 1 } else { 0 }
-    };
-    // 初值所在的实例：第 0 轮消费者需要的是 (q, shift[q] - back_rounds(p, q, carried))
-    // 当 back_rounds=1 时，生产者 q 需要在消费者 p 之前一轮执行
-    let init_iter = |q: usize, p: usize, carried: bool| -> i64 { 
-        (shift[q] as i64) - back_rounds(p, q, carried) 
+    //
+    //    公式本体在 `back_rounds`（与本函数同一个），行序约束与这里共用它。
+    // 初值所在的实例：第 0 轮读者要的是 (q, shift[q] - back)；`None` 表示读者是
+    // head 块里那条判定指令（它自己的轮偏移是 `COND_SHIFT`，不占节点号）。
+    let init_iter = |q: usize, cons: Option<usize>, carried: bool| -> i64 {
+        let back = back_rounds(cons.map_or(COND_SHIFT, |p| shift[p]), shift[q], carried);
+        (shift[q] as i64) - back
     };
     // 生产者节点 → (一个读者, 被读的名字, 是否携带值)
-    let mut rot: HashMap<usize, (usize, String, bool)> = HashMap::new();
+    let mut rot: HashMap<usize, (Option<usize>, String, bool)> = HashMap::new();
     for &p in row {
         for v in kind_uses(&lp.nodes[p].kind) {
             let key = v.name();
             let carried = lp.phi_sources.contains_key(&key);
             let src = if carried { lp.phi_sources.get(&key) } else { def_of.get(&key) };
             let Some(&q) = src else { continue };
-            match back_rounds(p, q, carried) {
+            match back_rounds(shift[p], shift[q], carried) {
                 0 => {},
                 1 => {
                     // 同一生产者的多个读者必须落在同一个初值实例上，否则一个 phi
                     // 服不了两个读者。
-                    if let Some((p2, _, co2)) = rot.insert(q, (p, key.clone(), carried)) {
-                        if init_iter(q, p2, co2) != init_iter(q, p, carried) {
+                    if let Some((p2, _, co2)) = rot.insert(q, (Some(p), key.clone(), carried)) {
+                        if init_iter(q, p2, co2) != init_iter(q, Some(p), carried) {
                             return Err("同一轮转生产者的初值实例不一致");
                         }
                     }
@@ -2274,16 +2662,17 @@ fn apply_into(
         }
     }
     // 判定指令也占一个位置：它在 body 之前执行（见下的 `khead` 块），所以它的「轮偏移」
-    // 是 0；而它读的是 body 节点上一轮的输出 ⇒ 那些节点同样需要轮转 phi。
+    // 是 `COND_SHIFT`；而它读的是 body 节点上一轮的输出 ⇒ 那些节点同样需要轮转 phi。
     // 不把它们收进来，head 就会引用一个尚未产出的名字。
     for v in kind_uses(&lp.cond.kind) {
         let key = v.name();
         let Some(&q) = lp.phi_sources.get(&key).or_else(|| def_of.get(&key)) else { continue };
-        if shift[q] != 1 {
+        let carried = lp.phi_sources.contains_key(&key);
+        if back_rounds(COND_SHIFT, shift[q], carried) != 1 {
             return Err("判定所需的跳轮偏移不是一级轮转");
         }
-        if let Some((p2, _, co2)) = rot.insert(q, (0, key.clone(), false)) {
-            if init_iter(q, p2, co2) != 0 && p2 != 0 {
+        if let Some((p2, _, co2)) = rot.insert(q, (None, key.clone(), carried)) {
+            if init_iter(q, p2, co2) != init_iter(q, None, carried) {
                 return Err("同一轮转生产者的初值实例不一致");
             }
         }
@@ -2359,7 +2748,7 @@ fn apply_into(
             },
             // kernel：back == 1 ⇒ 轮转 phi；back == 0 ⇒ 本轮前向（要求行内早于消费者）。
             None => {
-                if back_rounds(p, q, carried) == 1 {
+                if back_rounds(shift[p], shift[q], carried) == 1 {
                     let d = rot_dest.get(&q).cloned().ok_or("需要轮转 phi 但生产者不在轮转集合里")?;
                     return Ok(Operand::Var(d));
                 }
@@ -2578,6 +2967,47 @@ fn apply_into(
         func.block_order.retain(|b| *b != latch);
     }
     Ok(())
+}
+
+// ================================================== 诊断窗口（DCC_PIPE_DUMP）
+
+/// 把一个候选循环的**识别 / 调度 / 三段切分**打成文本。
+///
+/// 为什么必须有它：流水的错值只在「管线中途的 IR」上出现（接入点教训见
+/// `docs/ssa-pass-upgrade-plan.md` §7.5），而单测看的是未经其它 pass 的 SSA ——
+/// 两边都对不上时，没有这个窗口就只能靠猜形状。
+/// 由 `ssa_passes::run_pipelining` 在 `DCC_PIPE_DUMP` 存在时调用，只写 stderr，
+/// 不参与产物字节。
+pub fn dump_plan(func: &Function, p: &PipelinePlan) -> String {
+    let lp = &p.lp;
+    let mut s = String::new();
+    s.push_str(&format!(
+        "fn {} header={} latch={} preheader={} exit={} region={:?} iv={} trip={}\n",
+        func.name, lp.header, lp.latch, lp.preheader, lp.exit, lp.region_bbs, lp.iv_base, lp.trip
+    ));
+    for (i, nd) in lp.nodes.iter().enumerate() {
+        let d = nd.dest.as_ref().map(|x| x.name()).unwrap_or_else(|| "-".to_string());
+        s.push_str(&format!("  node[{i}] {d} = {:?}\n", nd.kind));
+    }
+    let cd = lp.cond.dest.as_ref().map(|x| x.name()).unwrap_or_else(|| "-".to_string());
+    s.push_str(&format!("  cond    {cd} = {:?}\n", lp.cond.kind));
+    let mut ps: Vec<(String, usize)> = lp.phi_sources.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    ps.sort();
+    s.push_str(&format!("  phi_sources={ps:?}\n"));
+    s.push_str(&format!("  ii={} stage={:?}\n", p.ii, p.stage));
+    let inst = &p.inst;
+    s.push_str(&format!(
+        "  depth={} shift={:?} rounds={} row={:?}\n",
+        inst.depth, inst.shift, inst.kernel.len(), inst.kernel.first()
+    ));
+    let names: Vec<String> = lp.nodes.iter().map(|n| n.dest.as_ref().map(|x| x.name()).unwrap_or_else(|| "-".to_string())).collect();
+    let show = |v: &[(usize, usize)]| -> Vec<String> {
+        v.iter().map(|&(q, k)| format!("{}#{k}[{}]", names.get(q).map(String::as_str).unwrap_or("?"), q)).collect()
+    };
+    s.push_str(&format!("  prologue ={:?}\n", show(&inst.prologue)));
+    s.push_str(&format!("  epilogue ={:?}\n", show(&inst.epilogue)));
+    s.push_str(&format!("  verify={} flatten_len={}\n", inst.verify(&p.stage), inst.flatten().len()));
+    s
 }
 
 #[cfg(test)]

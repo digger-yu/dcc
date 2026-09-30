@@ -1,4 +1,4 @@
-.PHONY: all build test test-all opt-eq bootstrap kernel-full-build kernel-full-check clean-cache torture-setup torture
+.PHONY: all build test test-all opt-eq golden-cross bootstrap kernel-full-build kernel-full-check clean-cache torture-setup torture
 
 DCC_REPO ?= $(CURDIR)
 KERNEL_DIR ?= /root/linux-7.1
@@ -30,9 +30,16 @@ test:
 opt-eq: build
 	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" JOBS="$(JOBS)" bash scripts/check_opt_equivalence.sh
 
+# 交叉后端的字节基线（arm/mips）。`verify` 模式：基线缺失或产物漂移都置红，
+# 不允许在 CI 里悄悄重写基线。这个门禁曾经没有任何调用点且实为空跑（夹具路径全部
+# 不存在、目标开关写错），现在既修了脚本也接进了这里。
+golden-cross: build
+	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" bash scripts/arm_mips_golden_baseline.sh verify
+
 test-all: test
 	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" bash scripts/test_all.sh
 	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" JOBS="$(JOBS)" bash scripts/check_opt_equivalence.sh
+	$(MAKE) golden-cross
 
 torture-setup:
 	bash scripts/setup_torture.sh

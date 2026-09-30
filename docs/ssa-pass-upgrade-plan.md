@@ -21,7 +21,7 @@
 | P13 | alias_set | ✅ 完整 | 返回值被丢弃 → 空转 | ⚠ |
 | P14 | speculative_execution | ✅ 完整 | **按 dest 字典序重排 → -O3 静默误编译** | ✅ 已重写为依赖闭包上提 |
 | P15 | SCCP | ✅ 完整 | 真 | ✅ |
-| P16 | software_pipelining | ⚠ stub | 空函数体却 `modified=true`；被循环闸门结构性锁死 | ❌ **未做**（已删 stub，前置链已记录） |
+| P16 | software_pipelining | ⚠ stub | 空函数体却 `modified=true`；被循环闸门结构性锁死 | ✅ **已真实现并默认接入 -O2/-O3**（第 17 轮，见 §7.6） |
 | P17 | GVN | 缺失（仅 AST 层同名物） | — | ✅ **本轮新增（SSA 层）** |
 | P18 | DSE | 缺失（`prune_dead_stores` 不是 DSE） | — | ✅ **本轮新增（SSA 层）** |
 | P19 | jump threading | 缺失 | — | ✅ **本轮新增（SSA 层）** |
@@ -442,7 +442,7 @@ SSA 管线。为把这件事做到而不是「拔掉闸门留着错值」，本�
 | ~~4 层嵌套 + 变量边界 + `&&` 条件在 -O2 即错~~ | 同上 | **已修**（本轮）：根因不在形态也不在 LICM，而是 AST 层 GVN 的 `coalesce_block` 用**块内**写入集合判「一次性拷贝」——`for (int i = ti; i < 5; i++)` 的声明在 for-init 子块里，而写 `i` 的 `i++` 属于外层节点，于是声明被删、循环读从未赋值的 `i`。现在 `FnScope::assigned` 改成全函数视角；夹具 `gvn_loop_copied_iv.c`。v1–v6 探针与手写的 4 层分块形态现在 -O0/-O1/-O2/-O3 全一致。 |
 | P10 分块产物进 SSA 后在 -O3 忙等 | `for(i<5)for(j<5)s=s+i*j;` 分块后 | **已修并已接入**（第 5 轮）：根因不是 `rebuild_cycle`，而是「`_` 前缀猜合成临时值」+「SSA 版本名与临时值 base 撞名」两个判据缺陷，详见 §7。转换本体由 `tile_nest_preserves_iteration_space`（小解释器逐点对比迭代序列）/ `tile_keeps_body_verbatim` / `tile_refuses_unsafe_nests` 三个单测锁住。 |
 | **度量修正**：OPT-DIFF 真实是 **102 条 / 51 个文件**（COMPILE-FAIL 63，语料 335）| `make opt-eq` 的 `summary.txt` | 本文此前记的「102」与上一轮记的「40」都不是名单总量：门禁脚本在**显示**处带 `| head -40`，而统计用的是 `grep -c '^OPT-DIFF'` 对 **stdout**，于是把显示截断当成了总量（上一轮真正的值是 40 条显示 = 前 40 行）。已去掉截断，现在打印 `TOTAL OPT-DIFF=<n> 条 / <m> 个文件` 并列出全部条目，`grep -c` 与 `TOTAL` 从此自洽（本轮实测 102/51；并行审计会话测得 103/52，差的 1 条是两次运行间的名单漂移）。存量债逐项消除中。 |
-| **新：P16 落地的 store kernel 缺陷（因此默认不接入产物）** | 最小复现：`static int arr[12]; int main(void){ for(int i=0;i<12;i++) arr[i]=i; printf("done=%d\n",arr[5]); }` | -O0/-O1 正常，**-O2 输出整块丢失而退出码仍为 0**（越界写踩坏 stdio 而不崩溃）。同一形状里「归约在被调函数内」与「归约不读内存」都正常 ⇒ 病灶在 **kernel 内的 `IndexStore` 实例 / 它的跳轮 phi**（写地址的迭代号错位）。落地代码与单测保留，接入由 `DCC_PIPE_ON=1` 显式控制，修好后默认打开并由 `tests/fixtures/opt/ssa_pipe_reduction.c` 验收。 |
+| ~~新：P16 落地的 store kernel 缺陷（因此默认不接入产物）~~ **已关闭（第 17 轮）** | 最小复现：`static int arr[12]; int main(void){ for(int i=0;i<12;i++) arr[i]=i; printf("done=%d\n",arr[5]); }` | 实测三档与 gcc 一致（`done=5`），且该循环现在被准入拒收（`depth=0`）。真正的根因不是 `IndexStore` 专属，而是「基名塌缩后的反依赖未被判定覆盖」——同一条边同时解释越界写与本节的错值。修复与度量见 §7.6。 |
 | **新：同一翻译单元内的跨函数污染** | `tests/fixtures/opt/ssa_pipe_nested.c` 原 `nest_three` 形态：函数内 `static int buf[6]` + 三层循环 `buf[j] += i + k` | -O2/-O3 得 **210**（应 36）。**关键实测**：同一个函数单独成分翻译单元编译时得到 36（正确），多个函数共存于同一 TU 时变 210 ⇒ 没有「循环嵌套错」而是跨函数/整个 TU 的优化污染（候选面：`prune_dead_stores`、跨函数 DCE、`ssa_gvn` 的函数级缓存）。已从守门夹具移出、但在此显式登记。 |
 
 ### 7. 本轮（第 7～8 轮）：P16 的一次重大挫折与当前真实边界
@@ -652,14 +652,15 @@ MISSING，实为空跑。
 
 | 序 | 动作 | 位置 | 预期效果 |
 |---|---|---|---|
-| 1 | 不可降级表达式改为「整函数放弃 SSA 化」而不是静默变 `Operand::Void`→常量 0 | `src/ssa.rs:1269-1285`、`1539`、`6131-6135` | 单一改动能消掉大批 OPT-DIFF（`_Complex`、`VaArg`、复合字面量、`&下标/成员` 全走同一根） |
-| 2 | 一元运算重建取真实类型（硬编码 `Type::Int`） | `src/ssa.rs:6165-6170` | 数学 builtin 系列 OPT-DIFF |
-| 3 | `reg_bindings` 闭合：取址与 `"m"` 约束查绑定表；规划期尊重绑定 | `mem/addr.rs`、`asm/constraint.rs`、`emit/func_setup.rs` | P12 增量路线的步 2/3，且是现存 bug 修复 |
-| 4 | 修 `IndexStore` 的 kernel 实例（本轮已定位到写地址迭代号） | `src/ssa_pipelining.rs::apply_into` | 修好后才能把流水默认打开 |
-| 5 | clrsb 位宽取形参类型 + 改夹具错值期望 | `special/builtins.rs`、`tests/fixtures/c/rotate.c` | 该条与 gcc 真值对齐 |
-| 6 | 跨函数污染（`nest_three` 形态）与 `DCC_OPT_SKIP=<pass>` 诊断开关 | `src/opt.rs` | 先能二分 AST 层 pass，再谈修 |
+| 1 | ~~不可降级表达式改为「整函数放弃 SSA 化」~~ **已做（第 18 轮）**：`Builder::unsupported` + catch-all，整个函数退回 AST 通道；顺手修了同一层的两个静默误编译（逗号丢左侧、三元 `Select` 无条件执行两侧） | `src/ssa.rs::Builder::{unsupported,cur_inst_count,emitted_is_pure}` | **OPT-DIFF 102 → 32**（实测） |
+| 2 | ~~一元运算重建取真实类型~~ **已做（第 18 轮）**：真正的错点不在 `inst_to_expr`（那已是旧状态）而在**唯一有人调用的** `inst_to_expr_resolved`，它只认向量类型其余写 `Type::Int` ⇒ 浮点取负在 -O2 丢失。现由 `unary_result_ty` 以 `dest` 类型为真源 | `src/ssa.rs` | 修掉「`double n = -b` 得 0」这类错值；math builtin 系列 OPT-DIFF 消失 |
+| 3 | `reg_bindings` 闭合：取址与 `"m"` 约束查绑定表；规划期尊重绑定 —— **仍未做**（第 18 轮查清了为何不能仓促做，见 §7.7） | `mem/addr.rs`、`asm/constraint.rs`、`emit/func_setup.rs` | P12 增量路线的步 2/3；影响面窄（只碰 `register asm` 且地址外溢的变量）但需要新的活性夹具与跨函数逸出判据 |
+| 4 | ~~修 `IndexStore` 的 kernel 实例~~ **已做（第 17 轮）**：根因是基名塌缩反依赖，由 `refine_kernel_row` + `emitted_reads_match` 闭掉，流水已默认接入 | `src/ssa_pipelining.rs` | 见 §7.6 |
+| 5 | ~~clrsb 位宽取形参类型 + 改夹具错值期望~~ **已做（第 18 轮）**：位宽改取 `Type::Long`/`LongLong`，夹具期望按 gcc 实测改为 31 | `special/builtins.rs`、`tests/fixtures/c/rotate.c` | 与 gcc 真值对齐（三档与 -O0 均一致） |
+| 6 | `DCC_OPT_SKIP=<pass>` **已做（第 18 轮）**：覆盖 AST 层全部 10 个调用点，与 `DCC_SSA_OFF` 合起来能二分管线任意一段；跨函数污染（`nest_three`）**仍未修**，但已用新开关定位到具体 pass | `src/opt.rs::opt_skipped` | 本轮就是靠它把剩下 18 条 OPT-DIFF 全部归因到具体 pass（见 §7.7 表） |
 
-目标数值路径：102 → (1) 预估大幅下降 → (2)(3)(5) 继续 → 待 (4) 修完打开 P16 默认接入。
+目标数值路径：102 → (1) 32 → (2)(5)+门禁归一化 18（/9 个文件）。(4) 已于第 17 轮
+完成且 P16 已默认接入；剩下的 18 条已逐条归因，见 §7.7。
 
 ### 7.5 第 12 轮：两个推翻性的实测——条件节点不能进调度区，接入点必须在管线最前
 
@@ -731,6 +732,129 @@ IR 层断言（算一遍 `prologue ++ kernel×R ++ epilogue` 对每个节点的*
 
 默认路径（不开 `DCC_PIPE_ON`）下 1962 lib + 996 integration 全绿，`ssa_pipe_chain` / `ssa_pipe_reduction` /
 `ssa_pipe_nested` 三条执行夹具逐档与 gcc 一致。
+
+### 7.6 第 17 轮：P16 的错值根因是基名塌缩反依赖，已修并默认接入
+
+上一轮把临界点定在「区域节点数 ≥ 6」与「最后一个节点多累加了一整轮」。本轮按
+§7.5 留下的两个工具入口查，结论是：**那不是 prologue/epilogue 边界错，也不是
+节点数阈值，而是发射序缺了一道判定**。
+
+**根因（实测到指令粒度）**：SSA→AST 重建把同基名的 `e.4`/`e.5`/`e.14` 全部还原成
+同一个变量（同一个栈槽），head 块上那对轮转 phi 因此折叠成 `e = e` 被丢弃。于是
+「读上一轮的 e」在机器码里**不是**读一个轮转寄存器，而是读那个槽的当前内容 ——
+它等于哪份实例完全取决于发射顺序。chain6 的 kernel 行按 `stage%ii` 把 `e += d`
+排在 `f += e` 之前，所以 `f` 每轮读到本轮的 e：少加第一轮 e（=1）、多算最后一轮 ⇒
+`f = 5004 + 2002 = 7006`（真值 5005）。模调度的 T 序模型只给真数据依赖定序，而这
+是一条**反依赖**（WAR），模型里根本没有这条边 —— 所以 34 条 IR 单测与 `verify` 全绿
+依旧错值。m≤5 之所以「全对」，实测是因为它们 `depth=0` 被闸门拒了、根本没流水（见下）。
+
+**修的方式（按「不靠推导，靠判定」）**：
+
+| 改动 | 作用 |
+|---|---|
+| `InstancePlan::row_pos` / `key` / `with_row` | 行内序提升为一等公民：`verify` 的平局尺子改为行内位置（而不是 `stage%ii`），并要求各行一致、是节点集的排列。平局意味着图上无约束 ⇒ 发射序就是唯一真源。 |
+| `refine_kernel_row` | 按行内约束稳定重排平局：本轮前向 ⇒ 生产者先，轮转读 ⇒ 消费者先（累加器自读自己天然满足）。Kahn + 原行序优先 ⇒ 确定性且能不动就不动；约束成环就拒（基名塌缩下确实无解，需真轮转寄存器）。 |
+| `emitted_reads_match` | **发射层的最终闸门**：沿 `prologue → 每轮「head 判定 + kernel 行」 → epilogue` 模拟槽位内容，要求每个读操作数都命中模型指定的那个实例（携带值 = 上一迭代，区域内定义 = 同迭代，区域外 = 仍为循环前的值）。漏任何一条边都以拒收结束，不会以错值进产物。 |
+| `back_rounds(shift_p, shift_q, carried)` | 跳轮公式收敛为单一真源，落地与行序约束共用；判定指令不再伪造成「节点 0」，而是显式 `COND_SHIFT`，顺手消掉一个潜伏错（旧代码里 `init_iter(q, 0, …)` 取的是 `shift[0]`，恰好不致错才没暴露）。 |
+| `exec_counts` | 每节点实际执行次数必须恰为 trip（§7.5 要求的那条断言），带反向对照。 |
+| `DCC_PIPE_DUMP=1` | 诊断窗口：打印识别结果/依赖信息/stage/三段切分/落地后 IR，**并打印每个候选头的拒因**。没这个窗口就只能猜形状，本模块多轮修复反复卡在这点上。 |
+
+**接入与度量（均为本机实测）**：
+
+- 默认接入：`run_with_opts` 里去掉 `DCC_PIPE_ON` 门槛，`DCC_SSA_OFF=pipe` 仍可关掉二分。
+- 「真的改了产物」由新集成测试 `ssa_pipe_default_on_changes_the_product` 钉住：同一份
+  夹具同一档位，只切 `DCC_SSA_OFF=pipe`，-O2 汇编必须不同（§7.5 的教训：接入与否
+  不能看代码是否被调用）。
+- 全量：`cargo test --release -j2 -- --test-threads=2` **exit 0**，1965 lib + 997 integration
+  全绿，零 warning（新增 3 条 IR 层单测 + 1 条集成单测）。
+- OPT 等价门禁：`scripts/check_opt_equivalence.sh` 仍为 **102 OPT-DIFF / 63 COMPILE-FAIL**
+  与本轮前完全一致 ⇒ 默认接入在整个夹具语料上零新增回归。
+- 覆盖面：前 400 个夹具文件里共 3 个循环被流水（`ch`、`chain6_10`、`red8_scaled`）。
+  其中 `red8_scaled` 是 load 乘 2 归约（trip=8、depth=1），它的结果被 printf 打印并与
+  gcc 逐字节对照 ⇒ 首次拿到「真流水的循环跳档与 gcc 一致」的执行级证据。
+
+**同时推翻/修正三条旧结论**：
+
+1. §7.3 把默认关闭的理由之一定为「`IndexStore` 被流水后越界写」，具体到「kernel 内
+   store 实例的写地址迭代号错位」。本轮实测：当前 `ch_store` 在准入处就被拒
+   （「归纳变量初值不是区域外的唯一常量定义」），store 形态根本不进流水；而越界写
+   与本轮这条错值同源于基名塌缩反依赖（当时多跑一轮 ⇒ 写了 `a[trip]`）。所以旧归因
+   方向对（写地址迭代号）但定位不准（不是 store 专属 bug）。
+2. 「m≤5 全对」不是「流水对了」，而是 `depth=0` 被拒。实测：5 级链最后一个节点
+   stage=4 而 II=5 ⇒ depth=0；6 级链才出现 stage=9 的跳行。所以本仓语料里唯一
+   能流水的形状就是 6 级依赖链（以及带乘法的 load 归约）。
+3. §7.4 表里的「唯一有重叠的 depth=2」已不存在：`benefit_verdict` 一直拒 `depth>1`，
+   所以所有被接受的计划 depth 恒为 1（由 `dependency_chain_yields_real_overlap_and_is_accepted`
+   钉住）。
+
+仍未做（诚实记录）：真轮转寄存器（同基名难同时保留两份）——拿不到合法行序的循环现在
+被**拒收**而不是错跑，代价是丢收益；`DCC_PIPE_DUMP` 会把它们的拒因列出来。
+
+### 7.7 第 18 轮：OPT-DIFF 102 → 18，剩下的逐条已归因到具体 pass
+
+本轮先把 §7.4 里成本/收益比最好的几项做完，再把剩下的存量债**逐条定位**（上一轮只会
+写「102 条待消除」，连哪条属于哪个 pass 都不知道）。
+
+**做完的**（每项都有实测数字，不是「应该修好了」）：
+
+1. **不可降级表达式不再静默变 0**（§7.4 项 1）。`lower_expr_inner` 的 catch-all 与
+   `&下标`/`&成员` 两个口子现在都会设 `Builder::unsupported(原因)`，`build_ssa` 见到它
+   就**放弃整个函数的 SSA 化**（该函数留在 AST 通道，`opt.rs` 本来就是 `if let Some(ssa)`）。
+   新窗口 `DCC_SSA_BAIL=1` 打印是哪个函数因为什么不进管线。
+   ⇒ **OPT-DIFF 从 102 降到 32**（51 → 16 个文件），全量测试绿。
+2. **额外发现两个同类静默误编译**（都不在 §7.4 清单里，是同一根「降级层默默丢语义」）：
+   * `Expr::Comma { l: _, .. }` 直接**丢弃左侧** ⇒ `x = (f(), 1)` 里的调用在产物里消失。
+     现在两侧都照常降级。
+   * `Expr::Cond` 无条件降级成 `InstKind::Select`，而 Select 是「两侧都算完再选」⇒
+     `x < y ? x++ : y++` 两边自增都执行（实测夹具直接 abort）。现在发射序里出现任何
+     存/载/调用/可陷获运算/给用户变量赋值都整个函数退回 AST 层。判据建在**实际发射出的
+     指令**上而不是 AST 白名单上，所以不会与降级代码漂移（`emitted_is_pure`）。
+   ⇒ 32 → 26。
+3. **一元运算重建取真实类型**（§7.4 项 2）。方案里的行号指向 `inst_to_expr`，但那个函数
+   **没有任何调用点**（当时已改成读操作数类型了），真正跑的是 `inst_to_expr_resolved`，
+   它仍是「只认向量类型，其余一律 `Type::Int`」。后果不是数学 builtin 而是**任意浮点取负**：
+   `double b = 2.3; double n = -b;` 在 -O2 得到 `0.000000`（重建后 `Unary{ty:Int}` ⇒
+   codegen 的 xorpd 分支落回整数 `neg r64`）。现在类型以指令 `dest` 为真源（`unary_result_ty`），
+   并对无 dest 的情形按 op 推（`!x` 永远是 int）。⇒ 26 → 22。
+4. **clrsb 位宽取形参类型**（§7.4 项 5）。旧码用 `args[0].ty().size()`，而
+   `__builtin_clrsbl(0x80000000)` 的字面量是 `unsigned int` ⇒ 错算成 32 位宽。现在按
+   `Type::Int`/`Long`/`LongLong` 定型 ⇒ 与 gcc 一致（31）。同时发现**夹具自身期望是错的**
+   （写的是 0），已按 gcc 实测改正——这条属于「错值期望把错实现钉住了」的典型形态。
+5. **`DCC_OPT_SKIP=<pass>`**（§7.4 项 6 的前半）：覆盖 AST 层 10 个调用点。本轮剩余
+   存量债的归因全部出自它 + 原有 `DCC_SSA_OFF`（两者合起来才能二分整条管线）。
+6. **`__NO_INLINE__` 与 `__OPTIMIZE__` 不再同时成立**（新发现，不是优化器 bug）：
+   dcc 在所有档位都定义 `__NO_INLINE__`，gcc 只在 -O0 定义。修时发现它是**影子副本**致：
+   `preprocess()` 里两处各定一次，后者无条件盖掉前者的档位判据。现在只留一处。
+   另外 `tests/fixtures/c/predefined_macros.c` 本身要求「`__OPTIMIZE__` 与 `__NO_INLINE__`
+   都已定义」，而这两个宏按定义不可能同时成立 ⇒ 夹具自相矛盾，已改成只断言「恰好一个」。
+7. **OPT 门禁不再把 ASLR 报成 bug**：`check_opt_equivalence.sh` 直接比 stdout，而夹具
+   `attr_returns_nonnull.c` 打印堆地址 ⇒ 每次运行都不同，永远 DIFF。现在比较前先抹长
+   十六进制串，并且**被抹掉时记一行 `ADDR-NORM`**，不让归一化变成静默放过。
+8. **`arm_mips_golden_baseline.sh` 从空跑变成真门禁**（§7.3 登记的第二个门禁缺陷）。实测
+   四个叠加问题：三个夹具路径不存在且 `continue` 跳过；目标开关写成 `-m=arm`（实际是
+   `--target <triple>`）；`normalize_asm` 在定义之前就被调用；基线每次重新生成而不比较。
+   现在：夹具缺失/编译失败/产物漂移一律置红，一个都没跑成也算失败；基线改存
+   `tests/golden/arm_mips/`（原 `golden_baseline/` **整目录被 .gitignore 排除且零文件入库**，
+   存在那里的基线永远不可能成为别人仓库里的门禁），并以 `make golden-cross`（`verify` 模式）
+   接入 `make test-all`。已实测捕获幂等与 DRIFT 能真被拒出。
+
+**剩下的 18 条 / 9 个文件，已逐条归因**（每行都是新开关实测，不是猜测）：
+
+| 文件 | -O2 现象 | 关掉谁就正常 | 下一步 |
+|---|---|---|---|
+| `va_arg/global_valist_sse_agg.c`、`va_arg/vacopy_sse_agg.c`、`va_arg/mixed_sse_pipeline_named.c`、`va_arg/mixed_sse_via_valist_param.c` | 退出码 = 首个读错位置的序号（15/10/20/13） | **只有 SCCP**（`DCC_SSA_OFF=sccp` 就全对） | SCCP 不得对「经另一函数写入的全局 va_list 字段」做常量传播；先从 `non_propagatable_names` 入手查 |
+| `vla.c` | rc=12 | **只有 SSA 层 GVN**（`DCC_SSA_OFF=gvn` 就全对） | GVN 对 VLA 基址/长度推导的重用条件 |
+| `complex_abi.c`、`ld80_arith.c`、`chained_assign_truncation.c`、`agg_param_reg_stack_split.c` | rc=1 / rc=1 / abort / rc=6 | 关掉**整个 SSA 往返**才正常，单个 pass 都不是触发者 | 属于 build/rebuild 的形状丢失（例如 `chained_assign_truncation` 的赋值结果必须按左值类型截断，而 SSA 里它是一条加法），需逐个建模 |
+
+**§7.4 项 3（`reg_bindings` 闭合）本轮没做，理由不是时间不够**：查下去发现它不是一个
+「补一句查表」的改动。当前只有 `mov_from_stack`/`mov_to_stack` 两处看绑定表；要闭合就必须
+先回答「这个变量的地址逸出了吗」，而这需要（a）一个覆盖全函数表达式的逸出收集（包括
+asm `"m"`/`"=&m"` 约束的操数，它与 `&x` 是同一个事实但 AST 里没有 `AddrOf`），
+（b）跳函数可见性（文件作 `register asm` 变量的地址可在任何一个函数里被取），
+（c）新的活性夹具（现在 `register asm` 的夹具全在 `tests/fixtures/_archive/dev/`，
+即活性套件对这一特例 **零覆盖**）。(a) 已有可复用的完备实现（`ssa_gvn::walk_addr_of`），
+但它得先补齐 `AsmExpr`/`StmtExpr`/`CompoundLit` 等遗漏变体（补了会同时收紧 GVN 的逸出集，
+方向安全但需重跑全量）。这每一项都比「改两行」重，所以本轮没有拿它换表面上的绿。
 
 ### 8. 第 6 轮：P10 已接入 + P16 分析层完成
 

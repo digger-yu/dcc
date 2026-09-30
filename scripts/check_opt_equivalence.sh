@@ -24,6 +24,11 @@ jobs=${JOBS:-2}
 timeout_s=${TIMEOUT_S:-20}
 mkdir -p "$OUT"
 
+# 抹掉 ASLR 决定的地址：夹具里打印指针值的输出每次运行都不同，直接比 stdout 会把
+# 「本来就不可比」报成 OPT-DIFF（同一手法已用在 gcc 差分 harness 上）。只抹带 0x 前缀
+# 的长十六进制串与裸的 8+ 位 hex，不抹普通数值，以免掩盖真的算错的值。
+# 归一化后相等而原文不等时仍会记一行 ADDR-NORM，让「被抹掉的部分」在报告里可见。
+norm() { sed -E 's/0x[0-9a-fA-F]{4,}/0xADDR/g; s/\b[0-9a-fA-F]{8,}\b/HEX/g' "$1"; }
 probe() {
   local f=$1
   local tag
@@ -41,14 +46,16 @@ probe() {
       base_rc=$rc
       mv "$OUT/${tag}_d0.out" "$OUT/${tag}_base.out" 2>/dev/null
     else
-      if [ "$rc" -ne "$base_rc" ] || ! cmp -s "$OUT/${tag}_base.out" "$OUT/${tag}_d$L.out"; then
+      if [ "$rc" -ne "$base_rc" ] || ! cmp -s <(norm "$OUT/${tag}_base.out") <(norm "$OUT/${tag}_d$L.out"); then
         echo "OPT-DIFF $tag -O$L base_rc=$base_rc opt_rc=$rc" >> "$OUT/summary.txt"
+      elif ! cmp -s "$OUT/${tag}_base.out" "$OUT/${tag}_d$L.out"; then
+        echo "ADDR-NORM $tag -O$L (仅地址不同，已归一化)" >> "$OUT/summary.txt"
       fi
     fi
   done
   return 0
 }
-export -f probe; export DCC REPO OUT timeout_s
+export -f probe norm; export DCC REPO OUT timeout_s
 
 : > "$OUT/summary.txt"
 find "$REPO/tests/fixtures/c" "$REPO/tests/fixtures/opt" -name '*.c' | sort \
@@ -56,8 +63,9 @@ find "$REPO/tests/fixtures/c" "$REPO/tests/fixtures/opt" -name '*.c' | sort \
 total=$(find "$REPO/tests/fixtures/c" "$REPO/tests/fixtures/opt" -name '*.c' | wc -l)
 diffs=$(grep -c '^OPT-DIFF' "$OUT/summary.txt" || true)
 fails=$(grep -c '^COMPILE-FAIL' "$OUT/summary.txt" || true)
+norms=$(grep -c '^ADDR-NORM' "$OUT/summary.txt" || true)
 echo "=== 语料总数: $total"
-echo "=== OPT-DIFF: $diffs   COMPILE-FAIL: $fails"
+echo "=== OPT-DIFF: $diffs   COMPILE-FAIL: $fails   ADDR-NORM(已归一化): $norms"
 if [ "$diffs" -gt 0 ]; then
   files=$(grep '^OPT-DIFF' "$OUT/summary.txt" | awk '{print $2}' | sort -u | wc -l)
   # 必须全量打印：以前这里带 `| head -40`，而调用方（以及文档里的度量）习惯用

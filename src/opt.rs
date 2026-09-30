@@ -99,30 +99,62 @@ pub fn optimize_with_full_target(
     strict_aliasing: bool,
 ) {
     // 内联: O0-O2 仅 always_inline/flatten; O3 额外启发式
-    function_inline(module, level);
+    if !opt_skipped("function_inline") {
+        function_inline(module, level);
+    }
     if level == 0 {
         return;
     }
-    fold_constants(module);
+    if !opt_skipped("fold_constants") {
+        fold_constants(module);
+    }
     if level >= 2 {
-        prune_dead_stores(module);
+        if !opt_skipped("prune_dead_stores") {
+            prune_dead_stores(module);
+        }
         // Dead asm elimination: the SSA DCE pass removes pure
         // (non-volatile, no outputs, no memory clobber) asm when
         // its results are unused, matching GCC behavior. Volatile
         // asm and asm with side effects are always preserved.
-        fold_constant_branches(module);
-        eliminate_unreachable(module);
-        crate::ssa_gvn::run(module, level);
-        crate::loop_opt::run_with_target(module, level, has_vnni, vec_bits);
+        if !opt_skipped("fold_constant_branches") {
+            fold_constant_branches(module);
+        }
+        if !opt_skipped("eliminate_unreachable") {
+            eliminate_unreachable(module);
+        }
+        if !opt_skipped("ssa_gvn") {
+            crate::ssa_gvn::run(module, level);
+        }
+        if !opt_skipped("loop_opt") {
+            crate::loop_opt::run_with_target(module, level, has_vnni, vec_bits);
+        }
         // M16: 跨函数 DCE (call graph reachability)
-        cross_function_dce(module);
+        if !opt_skipped("cross_function_dce") {
+            cross_function_dce(module);
+        }
         // Qualifier-aware optimization: const/volatile/restrict
-        qualifier_aware_optimization(module);
+        if !opt_skipped("qualifier_aware") {
+            qualifier_aware_optimization(module);
+        }
     }
     if level >= 2 {
         // M16: SSA pass pipeline (strength reduction, IVOP, TCO, etc.)
-        run_ssa_passes(module, level, strict_aliasing);
+        if !opt_skipped("run_ssa_passes") {
+            run_ssa_passes(module, level, strict_aliasing);
+        }
     }
+}
+
+/// 诊断用：`DCC_OPT_SKIP=prune_dead_stores,ssa_gvn,loop_opt,...` 逐个关掉 AST 层 pass。
+///
+/// 为什么必须有它：优化器改动行为时的定位手段只有「关掉某个 pass 再看产物」，
+/// 而没有开关就只能读代码猜。本轮就是这么错过一次的：`-O2` 下浮点一元负号被
+/// 降级成 `addsd +0.0`（错值），先前的二分只能覆盖 SSA 层（`DCC_SSA_OFF`），
+/// 而那个缺陷恰好在 AST 层。两个开关合起来才是整条管线（名字与本函数里的调用一一对应）。
+fn opt_skipped(name: &str) -> bool {
+    std::env::var("DCC_OPT_SKIP")
+        .map(|v| v.split(',').any(|s| s.trim() == name))
+        .unwrap_or(false)
 }
 
 /// M16: 把 AST -> SSA, 跑 ssa_passes::run, 再 SSA -> AST 重建。

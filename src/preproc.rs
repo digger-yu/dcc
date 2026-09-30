@@ -752,7 +752,12 @@ pub fn preprocess(
     if opt_level > 0 {
         pp.define_builtin("__OPTIMIZE__", "1");
     }
-    pp.define_builtin("__NO_INLINE__", "1");
+    // __NO_INLINE__ 与它**互斥**：gcc 只在不做内联的 -O0 下定义它。
+    // 旧实现无条件定义，于是 `-O2` 下两个宏同时成立（与 gcc 不符，且让任何
+    // 按档位分流的头部看到错结论）。
+    if opt_level == 0 {
+        pp.define_builtin("__NO_INLINE__", "1");
+    }
     // x86 段寄存器宏
     if matches!(target.arch, Arch::X86_64) {
         pp.define_builtin("__SEG_GS", "1");
@@ -1316,13 +1321,11 @@ pub fn preprocess(
     pp.define_builtin("__VERSION__", "dcc 0.1 (M19)");
     // __TIMESTAMP__ / __BASE_FILE__ 推迟到宏展开阶段按需生成
     // (避免编译日期/时间/源路径被冻结进缓存)
-    // dcc does not perform optimisation passes yet, so do NOT define
-    // __OPTIMIZE__.  Linux kernel headers use #ifdef __OPTIMIZE__ to
-    // gate __compiletime_assert (which requires dead-code elimination);
-    // defining it without actual optimisation produces unresolvable
-    // references to __compiletime_assert_N at link time.
+    // __OPTIMIZE__ / __NO_INLINE__ 的定义在上方「GCC 兼容宏」那一段（按 opt_level
+    // 互斥），此处不得再定一份：这里曾是影子副本，会把上面的档位判据无条件盖掉。
+    // (保留这段注释是因为历史理由: Linux 内核头用 #ifdef __OPTIMIZE__ 门控
+    //  __compiletime_assert，需要死代码消除才能成立。)
     pp.define_builtin("__OPTIMIZE_SIZE__", "0");
-    pp.define_builtin("__NO_INLINE__", "1");
     pp.define_builtin("__FINITE_MATH_ONLY__", "1");
     pp.define_builtin("__PIC__", "2");
     pp.define_builtin("__PIE__", "2");
