@@ -444,7 +444,10 @@ fn term_succs(term: &Terminator) -> Vec<&str> {
 
 /// Derive predecessor block names from all BB terminators.
 /// Same rationale as `term_succs`: `bb.preds` can become stale.
-fn collect_all_preds(func: &Function) -> HashMap<String, Vec<String>> {
+///
+/// 已 pub：P16 的循环识别同样只能从终结符派生前驱 —— `bb.preds` 是构造期缓存，改过
+/// terminator 即脏，另写一份派生逻辑必然与这里漂移。
+pub fn collect_all_preds(func: &Function) -> HashMap<String, Vec<String>> {
     let mut preds: HashMap<String, Vec<String>> = HashMap::new();
     for (from_name, bb) in &func.blocks {
         for t in term_succs(&bb.term) {
@@ -2886,9 +2889,14 @@ fn insert_label_phis(
 /// Find the body blocks of a natural loop (header, latch).
 /// Loop body = {header} ∪ {blocks that can reach latch without going through header}
 ///
+/// 已 pub：「在环内」与「受头支配」不是同一个关系 —— 循环出口也受头支配
+/// （实测 `while.end` 的支配集含 `while.cond`），拿支配关系当环内判据会把出口
+/// 误当成环内后继，然后把整个 `while` 形态错拒。P16 的循环识别必须用这里的结果；
+/// 另写一份自然循环收集只会与这里漂移。
+///
 /// 返回值按名字排序: 调用方会用它决定 phi 插入序, 直接 `HashSet::into_iter()`
 /// 会把进程随机哈希序泄到下游。
-fn find_loop_body(func: &Function, header: &str, latch: &str) -> Vec<String> {
+pub fn find_loop_body(func: &Function, header: &str, latch: &str) -> Vec<String> {
     find_loop_body_multi(func, header, std::slice::from_ref(&latch.to_string()))
 }
 

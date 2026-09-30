@@ -452,7 +452,7 @@ SSA 管线。为把这件事做到而不是「拔掉闸门留着错值」，本�
 已被压缩掉）。因此当前树里的 [src/ssa_pipelining.rs](file:///root/dcc/src/ssa_pipelining.rs)
 **只有地基**：资源/延迟模型、依赖图、`res_mii`、`rec_mii`、`earliest_times`、
 `edges_satisfied`、`modulo_schedule`，外加 7 个重建并全绿的单测。产物不受影响
-（无人调用它）。
+（无人调用它）。（现状见下面 §7.1：识别/切分/闸门已重建，只剩落地。）
 
 已按「测试即规格」重建的部分（`mod tests`，7 全绿）：
 
@@ -498,7 +498,7 @@ P16 剩余工作（下一轮，按此顺序做，每步都带判定式自检）�
 
 | 门禁 | 结果 |
 |---|---|
-| `cargo test --release -j2 -- --test-threads=2` | **全绿**（1935 lib + 993 integration + 其它套件），零 warning |
+| `cargo test --release -j2 -- --test-threads=2` | **全绿**（1935 lib + 993 integration + 其它套件），零 warning（本轮已推进到 1955，见 §7.1）|
 | `scripts/check_fixtures.sh` | 597 个夹具全部被引用 |
 | `scripts/check_fixtures_selftest.sh` | 5/5 PASS（门禁本身会被证明能红） |
 | `scripts/check_reproducible_output.sh` | 5040 组合 × 3 次连跑字节一致 |
@@ -508,6 +508,57 @@ P16 剩余工作（下一轮，按此顺序做，每步都带判定式自检）�
 改动（上轮那个数也没留下名单文件，无法逐项比对）。本表记录的是**当前权威值 40**；
 剩下的 20 个文件就是 §4 那批存量债（`_Complex`、long double、数学 builtin、percpu、
 预定义宏、rotate 内联等），仍为红，不得从宽判定。
+
+### 7.1 第 9 轮：识别 / 切分 / 闸门已重建，只剩 IR 落地
+
+上面那个表是提交时的状态（1935 lib）。本轮把§7 里「只剩地基」推进到
+「只剩落地」：现在 `src/ssa_pipelining.rs` 共 22 条单测（地基 7 + 识别 10 + 切分/闸门 5），
+并且识别与闸门均跑**真实 IR**（`parser → ir::lower → build_from_func`），不再只测合成图。
+全量：1955 lib + 993 integration 全绿，零 warning。
+
+**先用 dump 拿真实形状，再写分类器**（上一轮连错三次全是因为凭记忆假设形状）：
+
+```
+entry     : s_1 = 0, i_1 = 0
+for.cond  : _tbin_1 = (i_1 < 8)   Branch t=for.body f=for.end   ← preheader，无 phi
+for.body  : phis=[i_3, s_3]  idx=IndexLoad(a,i_3); s_2=_tidx+s_3   Jump for.step  ← 头
+for.step  : _tpost=i_3+0; _tupd=_tpost+1; i_2=_tupd+0; _tpost=…; _tbin_6=(i_2<8)
+                                                Branch t=for.body f=for.end  ← latch
+```
+
+由 dump 仍抓出两个真缺陷（都是先写错、被真实 IR 测试当场拦下）：
+
+1. **拿「受头支配」当环内判据是错的** —— 循环出口同样受头支配（实测 `while.end` 的支配集
+   含 `while.cond`）。两个后继都被当成环内后继 ⇒ 整个 `while` 形态被错拒。改用自然循环体
+   集合（复用 `ssa::find_loop_body`，已 pub：另写一份只会与它漂移）。
+2. **比较可能在头块、也可能在 preheader**：`for` 的 `i<8` 在 `for.cond`，`while` 的 `n>0` 在头
+   自身。两边都有时不猜哪个控制回边，直接拒。
+
+还有两个容易「测试绿但能力错」的点按事实处理了：
+
+- 步长要穿透构建器的 `x = v + 0` 拷贝惯用法（`i++` 在 IR 里是 `_tpost=i_3+0;
+  _tupd=_tpost+1; i_2=_tupd+0` 三行），只允许沿拷贝链遇到**恰好一次**真实步进；否则
+  `i=i*2` 这类会被误收。
+- 变量写在右边（`8 > i`）必须翻转运算符再判方向。测试同时钉住两面：`0 < i` 要当下降拒掉，
+  `8 > i` 要当上升接受（只测前者等于「变量在右就拒」也能绿，那会默默丢掉一批可流水循环）。
+
+**切分层的正确性不靠推导**：`InstancePlan::verify` 要求 `prologue ++ kernel×R ++ epilogue`
+与绝对时间 `T(p,k)=stage[p]+k·II` 的序**逐元素相等**，且每个 `(节点,迭代)` 恰好出现一次。
+三条负向对照（删一个实例 / 颠倒行内序 / 改坏 shift）全部必须被拒，否则「覆盖完整」是空判。
+
+**收益判据拆成独立函数 `benefit_verdict`**：本来我拿「体内只写内存的循环」当 depth=0 的
+反例，实测发现它照样通过闸门——因为 II 被**资源约束**抬到 3，stage 分布自然跨行。拿真实
+IR 反推这条判据会得到错结论，所以改成用合成 (depth, ii, trip) 精确覆盖三条规则；真实 IR
+那条只钉它该钉的事（分类器必须认得出这类循环，且一旦接受则计划自洽）。
+
+**丢失的结论现在重新实测了**：`red`（`for(i<8) s+=a[i]`）的 RecMII=3、ResMII=3，在 ii=3 处
+`stage=[0,2,0,1,2,1,3]` ⇒ **depth=1，真跳迭代重叠**；写死为
+`shape_tests::recognized_loop_has_real_cross_iteration_overlap`。`plan_from_recognized_loop_is_sliceable`
+进一步断言它的三段展开覆盖 7×8=56 个实例。P16 落地不再需要「先假定有重叠」。
+
+仍差的只有一步：**把计划应用到 IR**（节点重命名 + prologue/kernel/epilogue 三段块 +
+一级轮转 phi）、接入 `run_ssa_passes`、并用执行夹具与 objdump 验收。未接入前 `ssa_pipelining`
+不参与编译产物，所以上表的 OPT-DIFF 与可复现结果与接入前同源。
 
 ### 8. 第 6 轮：P10 已接入 + P16 分析层完成
 

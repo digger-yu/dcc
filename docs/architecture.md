@@ -206,7 +206,7 @@ src/codegen/shared/
 | P12b | `ubsan_ir_instrument` | 部分 | guard 已插；“重建时转 `__ubsan_handle_*`” 的说法开之前并不存在 |
 | P4/P13 | `alias_analysis_*` / `alias_set` | 无 | 结果被丢弃，仍待接入 P18/P20 |
 | P6/P7 | `pgo` / `auto_parallelization` | 无 | 以 `__dcc_*` hint 形式实现，重建时被丢弃（hint 本身在 AST 层由 `parallelize_block` 打标） |
-| P16 | 软件流水 | 仅有地基 | [src/ssa_pipelining.rs](file:///root/dcc/src/ssa_pipelining.rs)：依赖图（带距离/延迟，含内存定序与基名塌缩序边）、RecMII/ResMII、epi-cyclic 模调度 + 7 个单测。**不参与编译产物**：循环识别、prologue/kernel/epilogue 切分、IR 落地均未完成（分工与剩余项见该模块头部与 `docs/ssa-pass-upgrade-plan.md` §7） |
+| P16 | 软件流水 | 分析层已完成 | [src/ssa_pipelining.rs](file:///root/dcc/src/ssa_pipelining.rs)：循环识别（单 latch + 直线链区域 + 常量 trip）、依赖图（带距离/延迟，含内存定序与基名塌缩序边）、RecMII/ResMII、epi-cyclic 模调度、`prologue/kernel/epilogue` 三段切分（`InstancePlan::verify` 逐元素比对绝对时间序）、单一闸门 + `rejections` 诊断。**仍不参与编译产物**：把计划应用到 IR（节点重命名 + 三段块 + 一级轮转 phi）未做，见 `docs/ssa-pass-upgrade-plan.md` §7.1 |
 
 **已删除的伪实现**（它们当时都报告 `changed = true` 却对机器码零影响，其中两条还会造成运行时错）：
 `function_attribute_propagation`（假 hint 造成 SEGV）、`register_allocation`（全局栈槽模型下不属本层）、
