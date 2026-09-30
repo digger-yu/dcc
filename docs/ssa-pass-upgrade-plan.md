@@ -844,7 +844,7 @@ IR 层断言（算一遍 `prologue ++ kernel×R ++ epilogue` 对每个节点的*
 |---|---|---|---|
 | `va_arg/global_valist_sse_agg.c`、`va_arg/vacopy_sse_agg.c`、`va_arg/mixed_sse_pipeline_named.c`、`va_arg/mixed_sse_via_valist_param.c` | 退出码 = 首个读错位置的序号（15/10/20/13） | **只有 SCCP**（`DCC_SSA_OFF=sccp` 就全对） | SCCP 不得对「经另一函数写入的全局 va_list 字段」做常量传播；先从 `non_propagatable_names` 入手查 |
 | `vla.c` | rc=12 | **只有 SSA 层 GVN**（`DCC_SSA_OFF=gvn` 就全对） | 未修；两种候选方案已被实测否定，证据与下一步见 §7.10 |
-| `complex_abi.c`、`ld80_arith.c`、`agg_param_reg_stack_split.c` | rc=1 / rc=1 / rc=6 | 关掉**整个 SSA 往返**才正常，单个 pass 都不是触发者 | 属于 build/rebuild 的形状丢失，需逐个建模（同 §7.11 的做法：先用最小可复现把范围收到一条构造，再定位是哪个 pass） |
+| ~~`complex_abi.c`~~ **已修（第 22 轮，见 §7.13）**；`ld80_arith.c`、`agg_param_reg_stack_split.c` | 复数：rc=1；其余 rc=1 / rc=6 | 复数那两条都不在优化 pass 里，而在**降级/重建的形状丢失**上 | 剩余两个仍需逐个建模（做法同 §7.11/§7.13：先最小可复现，再问「IR 里有没有这条指令」） |
 | ~~`chained_assign_truncation.c`~~ **已修（第 21 轮，见 §7.11）** | abort | `DCC_SSA_OFF=sccp` 就正常，但根因不在 SCCP：是构建器丢了中间类型 + 全局赋值返回了原始 RHS | 见 §7.11 |
 
 **§7.4 项 3（`reg_bindings` 闭合）本轮没做，理由不是时间不够**（下一轮已做完，见 §7.8）：
@@ -1014,6 +1014,35 @@ docs/longdouble_80bit_migration.md 的未完部分，不是 opt pass 的局部�
 三条一起指向同一个结构性缺口（跟 §7.10 的「子对象地址没有表示」是同一件事的不同侧面）：
 **值种类（地址 / 聚合 / 80 位浮点 / 复数）在 SSA IR 里都靠 Type 猜，而不是各自有形态**。
 按这个方向做的下一步能一次收掉多个夹具；继续按类型打补丁则每个文件都要重来一遍。
+
+### 7.13 第 22 轮：`_Complex` 的两条静默丢失（OPT-DIFF 8 → 6）
+
+`complex_abi.c` 现在四档全绿。它是两条互相独立的缺陷，都靠同一套最小可复现定位
+（先缩到一句话，再问「IR 里有没有这条指令」，而不是猜 ABI）：
+
+1. **不被认识的赋值左值 = 只做不写**。`lower_lvalue` 只认识 Ident/Deref/Index/Member
+   四种左值，`__real__ z = r` 不在其内；调用点在拿到 `None` 时**什么也不发射**，只把
+   RHS 当表达式值返回。于是 `double _Complex z; __real__ z=r; __imag__ z=i; return z;`
+   过 SSA 后整个函数只剩 `return z`（探针确认两条 Store 根本不在 IR 里），-O2 返回
+   未初始化数据。现在与「不可降级表达式」同一条路：记下原因、整个函数放弃 SSA 化，
+   留在本来就能正确处理它的 AST 通道 —— 「只做不写」比不优化危险得多。
+2. **复数算术在重建时丢了结果类型**。`infer_binop_type` 有指针/向量/浮点/整数各分支，
+   唯独没有复数，于是 `x + y`（两侧 `double _Complex`）落到最后的 Int 回退；codegen
+   正是靠操作数与结果类型挑选 `gen_complex_binop`，类型一变复数加法就退化成标量运算
+   （实测 -O2 得 (1.0e9, 0)，gcc 与 -O0 都是 (6, 8)）。补上复数分支：结果取复数，内部
+   类型按两侧实部的通常算术类型（C11 6.2.5p13 / 6.3.1.8），且**排在比较分支之后**，
+   所以 `z1 == z2` 之类仍是 int。
+
+两条都配了单测：`unrecognised_assign_lvalue_bails_instead_of_dropping_the_store`（含
+`p->a = 1` 必须仍发 MemberStore 的反向对照）与 `infer_binop_type_keeps_complex_results`
+（四种算术 + 复数×实数 + 相等运算仍为 int）。`double_complex_abi_run_returns_zero`
+从「只跑默认档」改成 -O0/-O1/-O2/-O3 四档全跑 —— 这类只在优化档暴露的缺陷，靠默认档
+测试等于没测。
+
+度量：OPT-DIFF **8 → 6（3 个文件）**；`cargo test --release` 3086 通过 / 0 失败 / 零
+warning；可复现门禁 5040 组合一致；新代码 clippy 零命中。剩余：`vla.c`（子对象地址无
+表示，§7.10）、`ld80_arith.c`（80 位 long double 过 SSA 往返，§7.12）、
+`agg_param_reg_stack_split.c`（聚合参数拆分，§7.12）。
 
 ### 8. 第 6 轮：P10 已接入 + P16 分析层完成
 

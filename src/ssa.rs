@@ -1160,6 +1160,13 @@ impl Builder {
                 if let Some(dest_var) = lower_lvalue(l, &BinOp::Add, ro.clone(), span, ty, self) {
                     return Operand::Var(dest_var);
                 }
+                // 左值形态不被 `lower_lvalue` 认识（`__real__ z = r` 这种复数字段就在这里）。
+                // 旧行为是什么也不发、只把 RHS 当表达式值返回 ⇒ **这次写静默消失**：
+                // `double _Complex z; __real__ z = r; __imag__ z = i; return z;` 过 SSA 后
+                // 整个函数只剩 `return z`（实测：两条 Store 根本不在 IR 里），-O2 因此
+                // 返回未初始化数据。不能只做不写：跟「不可降级表达式」同一处理，
+                // 整个函数放弃 SSA 化，留在能正确处理的 AST 通道上。
+                self.unsupported("赋值左值形态无法降级（写会被丢弃）");
                 ro
             },
             Expr::Cast { ty, e: inner, span } => {
@@ -5744,6 +5751,34 @@ fn infer_binop_type(op: &BinOp, l: &Expr, r: &Expr) -> Type {
         // 向量比较是 GNU 扩展的例外: 结果逐元素为全 1/全 0, 类型同操作数。
         return Type::Int;
     }
+    // 复数运算：结果类型是复数，其内部类型取两侧实部的通常算术类型 (C11 6.2.5p13
+    // 与 6.3.1.8：`_Complex double` 与 `double` 运算得 `_Complex double`)。必须排在
+    // 浮点分支之前、比较分支之后：复数的关系/相等运算结果仍是 int（上面已返回），
+    // 而复数算术若不在此定型，就会掉到最后的 Int 回退 —— codegen 靠操作数与结果
+    // 类型选择 `gen_complex_binop`，类型一变复数加减就退化成标量浮点/整数运算。
+    // 实测：`double _Complex add_dc(x,y){ return x + y; }` 在 -O2 得到 (1.0e9, 0)，
+    // 而 gcc 与 -O0 都是 (6, 8)。
+    if matches!(&lt, Type::Complex(_) | Type::Imaginary(_))
+        || matches!(&rt, Type::Complex(_) | Type::Imaginary(_))
+    {
+        let real_part = |t: &Type| -> Type {
+            match t {
+                Type::Complex(q) | Type::Imaginary(q) => q.base.clone(),
+                other => other.clone(),
+            }
+        };
+        let (li, ri) = (real_part(&lt), real_part(&rt));
+        let rank = |t: &Type| -> u8 {
+            match t {
+                Type::LongDouble => 3,
+                Type::Double => 2,
+                Type::Float => 1,
+                _ => 0,
+            }
+        };
+        let base = if rank(&li) >= rank(&ri) { li } else { ri };
+        return Type::Complex(Box::new(QualType::new(base)));
+    }
     if matches!(&lt, Type::Float | Type::Double | Type::LongDouble)
         || matches!(&rt, Type::Float | Type::Double | Type::LongDouble)
     {
@@ -6996,6 +7031,73 @@ mod tests {
                 .values()
                 .any(|bb| bb.insts.iter().any(|i| matches!(i.kind, InstKind::Select { .. }))),
             "纯分支仍降级成 Select（否则本判据只是在关掉整层优化）"
+        );
+    }
+
+    /// 不被认识的赋值左值必须让整函数放弃 SSA 化，而不是“只做不写”。
+    ///
+    /// `__real__ z = r` 这类左值不在 `lower_lvalue` 的形态表里，旧实现于是
+    /// 什么都不发、只把 RHS 当表达式值返回 —— 两条写指令在 IR 里根本不存在，
+    /// `double _Complex z; __real__ z=r; __imag__ z=i; return z;` 在 -O2 返回未初始化数据。
+    /// 反向对照：普通局部赋值与 `p->a = v` 这类受支持的左值仍须进管线。
+    #[test]
+    fn unrecognised_assign_lvalue_bails_instead_of_dropping_the_store() {
+        assert!(
+            try_build(
+                "double _Complex f(void){ double _Complex z; __real__ z = 1; __imag__ z = 2; return z; }\n",
+                "f"
+            )
+            .is_none(),
+            "复数字段赋值不能被静默丢弃"
+        );
+        let ok = try_build("struct S{double a;}; double g(struct S *p){ p->a = 1; return p->a; }\n", "g")
+            .expect("受支持的左值仍应进 SSA 管线");
+        assert!(
+            ok.blocks.values().any(|bb| bb
+                .insts
+                .iter()
+                .any(|i| matches!(i.kind, InstKind::MemberStore { .. }))),
+            "成员赋值必须真的发射成一条 MemberStore"
+        );
+    }
+
+    /// 复数算术的重建类型必须是复数（关系运算仍是 int）。
+    ///
+    /// codegen 靠类型选 `gen_complex_binop`；`infer_binop_type` 少了复数分支时，
+    /// `x + y`（两侧都是 `double _Complex`）会掉到 Int 回退，复数加法退化成
+    /// 标量运算（实测 -O2 得 (1.0e9, 0)，gcc 与 -O0 都是 (6, 8)）。
+    #[test]
+    fn infer_binop_type_keeps_complex_results() {
+        let sp = Span::point("t.c", 1, 1);
+        let cx = || Expr::Ident {
+            name: crate::ast::Ident { name: "x".into(), span: sp.clone() },
+            span: sp.clone(),
+            ty: Type::Complex(Box::new(QualType::new(Type::Double))),
+        };
+        let dbl = || Expr::Ident {
+            name: crate::ast::Ident { name: "y".into(), span: sp.clone() },
+            span: sp.clone(),
+            ty: Type::Double,
+        };
+        for op in [BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div] {
+            let t = infer_binop_type(&op, &cx(), &cx());
+            assert!(
+                matches!(&t, Type::Complex(q) if matches!(q.base, Type::Double)),
+                "{:?} 的复数运算结果必须是 _Complex double，实得 {:?}",
+                op,
+                t
+            );
+            // 复数与实数混合运算得同宽度的复数 (C11 6.3.1.8)。
+            assert!(
+                matches!(infer_binop_type(&op, &cx(), &dbl()), Type::Complex(_)),
+                "{:?} 复数+实数应仍为复数",
+                op
+            );
+        }
+        // 关系/相等运算的结果仍是 int（上面必须早于复数分支）。
+        assert!(
+            matches!(infer_binop_type(&BinOp::EqEq, &cx(), &cx()), Type::Int),
+            "复数相等运算结果必须是 int"
         );
     }
 }

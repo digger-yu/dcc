@@ -580,14 +580,19 @@ double _Complex f(double _Complex a, double _Complex b) { return a * b; }
 #[test]
 fn double_complex_abi_run_returns_zero() {
     let source = include_str!("../fixtures/c/complex_abi.c");
-    let (output, exe) = run_compile_and_run("double-complex-abi", source);
-    assert!(
-        output.status.success(),
-        "compile stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let rc = run_exe(&exe);
-    assert_eq!(rc, 0, "double_complex_abi should return 0, got {rc}");
+    // 逐档跑：本夹具的两条历史缺陷都只在 -O2 起才暴露——字段式写入复数局部后
+    // 读回（写被静默丢弃）与 `x + y` 的复数加法（重建时结果类型退化成 int）。
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        let (output, exe) = run_compile_and_run_flags("double-complex-abi", source, &[flag]);
+        assert!(
+            output.status.success(),
+            "{flag} 编译失败: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rc = run_exe(&exe);
+        assert_eq!(rc, 0, "{flag}: double_complex_abi 应返回 0，实际 {rc}");
+        let _ = fs::remove_file(exe);
+    }
 }
 
 #[test]
