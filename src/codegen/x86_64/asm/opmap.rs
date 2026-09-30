@@ -1146,6 +1146,34 @@ impl Codegen {
         let Expr::Ident { name, ty, .. } = expr else {
             return;
         };
+        // 变量绑在寄存器里（用户的 `register asm`，或 P12 的自动分配）时，它的家
+        // 不是栈槽。旧代码无条件按 `[r13+off]` 写回，于是 asm 的结果落进一个再没
+        // 人读的槽里：实测 `register long v asm("rbx")` +
+        // `__asm__ volatile("movq $5, %0" : "=r"(v))` 之后 `v` 仍是 0，gcc 是 5。
+        // 走 `mov_to_stack` 顺带把宽度口径也统一掉（见 `var_access_shape`）。
+        if self.reg_bindings.contains_key(&name.name) {
+            if xmm_width == 0 {
+                self.mov_to_stack(reg, &name.name);
+                return;
+            }
+            // SSE 的输出值在 xmm 里，而变量的家是 GP 寄存器：先按宽度存进栈槽，
+            // 再从槽读进一个临时 callee-saved 号，最后仍由 `mov_to_stack` 进绑定
+            // 寄存器。这个组合（`register double v asm("rbx")` + `"=x"(v)`）偏到
+            // 角落，但没有任何理由让它变成静默错值。
+            let off = self.var_offset(&name.name);
+            let sz = ty.size();
+            if matches!(ty, Type::Float) {
+                self.store_xmm32_stack(reg, off);
+            } else {
+                self.store_xmm64_stack(reg, off);
+            }
+            if let Some(tmp) = self.alloc_callee_saved() {
+                self.load_stack_sized(tmp, off, sz);
+                self.mov_to_stack(tmp, &name.name);
+                self.free_callee_saved(tmp);
+            }
+            return;
+        }
         if matches!(ty, Type::Float | Type::Double | Type::LongDouble)
             || matches!(ty, Type::Imaginary(_))
         {

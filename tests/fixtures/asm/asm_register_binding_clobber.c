@@ -89,6 +89,16 @@ __attribute__((noinline)) static long six_q_outputs(long *o0) {
     return a + b + c + d + e + f;            /* 11+22+33+44+55+66 = 231 */
 }
 
+/* 缺陷 5：变量绑在寄存器里时，内联汇编的输出写回必须落到那个寄存器 —— 旧代码无条件
+ * 写栈槽，于是结果落进一个再没人读的内存里。修前实测
+ *   register long v asm("rbx"); __asm__("movq $5, %0" : "=r"(v)); → v = 0（gcc 是 5）*/
+__attribute__((noinline)) static long asm_output_into_bound(void) {
+    register long v asm("rbx") = 0;
+    __asm__ volatile("movq $5, %0" : "=r"(v));
+    v += 1;
+    return v;                              /* 6 */
+}
+
 /* 反向对照：绑定必须仍然生效（值在 %rbx 里，而不是被悄悄退回内存）。 */
 __attribute__((noinline)) static long pinned(long q) {
     register long v asm("rbx") = q;
@@ -104,8 +114,9 @@ int main(void) {
     long x4 = pinned(41);                     /* 42 */
     long xv = q_pool_vs_binding(&qsum);       /* v=100, qsum=110 */
     long x6 = six_q_outputs(&o0);             /* 231, o0=11 */
-    printf("x1=%ld x2=%ld x3=%ld x4=%ld v=%ld qsum=%ld six=%ld o0=%ld sink0=%ld\n",
-           x1, x2, x3, x4, xv, qsum, x6, o0, sink[0]);
-    return (x1 == 32 && x2 == 500 && x3 == 87 && x4 == 42 && xv == 100 && qsum == 110 &&
+    long x5 = asm_output_into_bound();          /* 5 + 1 = 6 */
+    printf("x1=%ld x2=%ld x3=%ld x4=%ld x5=%ld v=%ld qsum=%ld six=%ld o0=%ld sink0=%ld\n",
+           x1, x2, x3, x4, x5, xv, qsum, x6, o0, sink[0]);
+    return (x1 == 32 && x2 == 500 && x3 == 87 && x4 == 42 && x5 == 6 && xv == 100 && qsum == 110 &&
             x6 == 231 && o0 == 11 && sink[0] == 7) ? 0 : 1;
 }
