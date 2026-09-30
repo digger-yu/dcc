@@ -191,6 +191,10 @@ pub struct Codegen {
     pub reg_bindings: HashMap<String, u8>,
     // file-scope register asm 变量绑定：每个函数入口恢复
     pub global_reg_bindings: HashMap<String, u8>,
+    /// 全程序里「地址被取走」的对象根名；只有 `addr_escaped_done` 为真时才参与判定
+    /// （区分「扫过且为空」与「还没扫」）。判据本身在 `ssa_gvn::addr_escaped_names`。
+    pub addr_escaped: std::collections::HashSet<String>,
+    pub addr_escaped_done: bool,
     // data 节 64 位符号引用重定位：(data_section_offset, symbol_name)
     /// (data_off, symbol, custom_sec, rel_type, addend) — addend 用于 &arr[i] 等
     pub pending_data64_rels: Vec<(u64, String, Option<usize>, u32, i64)>,
@@ -610,6 +614,8 @@ impl Codegen {
             upvar_intermediate_offsets: HashMap::new(),
             label_addr_refs: vec![],
             reg_bindings: HashMap::new(),
+            addr_escaped: std::collections::HashSet::new(),
+            addr_escaped_done: false,
             global_reg_bindings: HashMap::new(),
             pending_data64_rels: vec![],
             pending_rodata_rels: vec![],

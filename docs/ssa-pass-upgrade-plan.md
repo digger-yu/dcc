@@ -654,7 +654,7 @@ MISSING，实为空跑。
 |---|---|---|---|
 | 1 | ~~不可降级表达式改为「整函数放弃 SSA 化」~~ **已做（第 18 轮）**：`Builder::unsupported` + catch-all，整个函数退回 AST 通道；顺手修了同一层的两个静默误编译（逗号丢左侧、三元 `Select` 无条件执行两侧） | `src/ssa.rs::Builder::{unsupported,cur_inst_count,emitted_is_pure}` | **OPT-DIFF 102 → 32**（实测） |
 | 2 | ~~一元运算重建取真实类型~~ **已做（第 18 轮）**：真正的错点不在 `inst_to_expr`（那已是旧状态）而在**唯一有人调用的** `inst_to_expr_resolved`，它只认向量类型其余写 `Type::Int` ⇒ 浮点取负在 -O2 丢失。现由 `unary_result_ty` 以 `dest` 类型为真源 | `src/ssa.rs` | 修掉「`double n = -b` 得 0」这类错值；math builtin 系列 OPT-DIFF 消失 |
-| 3 | `reg_bindings` 闭合：取址与 `"m"` 约束查绑定表；规划期尊重绑定 —— **仍未做**（第 18 轮查清了为何不能仓促做，见 §7.7） | `mem/addr.rs`、`asm/constraint.rs`、`emit/func_setup.rs` | P12 增量路线的步 2/3；影响面窄（只碰 `register asm` 且地址外溢的变量）但需要新的活性夹具与跨函数逸出判据 |
+| 3 | ~~`reg_bindings` 闭合：取址与 `"m"` 约束查绑定表~~ **已做（第 19 轮，见 §7.8）**：改成「逸出即不绑定」而非「读侧查表」，逸出判据复用 `ssa_gvn::addr_escaped_names`；「规划期尊重绑定」**故意保留不变**（栈槽是逸出的退回路径，必须始终存在） | `src/ssa_gvn.rs`、`emit/functions.rs`、`emit/stmt.rs` | 实测从错值 `42 0` 变正确的 `42 42`；并补上了逸出收集对语句表达式/复合字面量/asm 操作数的漏报 |
 | 4 | ~~修 `IndexStore` 的 kernel 实例~~ **已做（第 17 轮）**：根因是基名塌缩反依赖，由 `refine_kernel_row` + `emitted_reads_match` 闭掉，流水已默认接入 | `src/ssa_pipelining.rs` | 见 §7.6 |
 | 5 | ~~clrsb 位宽取形参类型 + 改夹具错值期望~~ **已做（第 18 轮）**：位宽改取 `Type::Long`/`LongLong`，夹具期望按 gcc 实测改为 31 | `special/builtins.rs`、`tests/fixtures/c/rotate.c` | 与 gcc 真值对齐（三档与 -O0 均一致） |
 | 6 | `DCC_OPT_SKIP=<pass>` **已做（第 18 轮）**：覆盖 AST 层全部 10 个调用点，与 `DCC_SSA_OFF` 合起来能二分管线任意一段；跨函数污染（`nest_three`）**仍未修**，但已用新开关定位到具体 pass | `src/opt.rs::opt_skipped` | 本轮就是靠它把剩下 18 条 OPT-DIFF 全部归因到具体 pass（见 §7.7 表） |
@@ -846,7 +846,8 @@ IR 层断言（算一遍 `prologue ++ kernel×R ++ epilogue` 对每个节点的*
 | `vla.c` | rc=12 | **只有 SSA 层 GVN**（`DCC_SSA_OFF=gvn` 就全对） | GVN 对 VLA 基址/长度推导的重用条件 |
 | `complex_abi.c`、`ld80_arith.c`、`chained_assign_truncation.c`、`agg_param_reg_stack_split.c` | rc=1 / rc=1 / abort / rc=6 | 关掉**整个 SSA 往返**才正常，单个 pass 都不是触发者 | 属于 build/rebuild 的形状丢失（例如 `chained_assign_truncation` 的赋值结果必须按左值类型截断，而 SSA 里它是一条加法），需逐个建模 |
 
-**§7.4 项 3（`reg_bindings` 闭合）本轮没做，理由不是时间不够**：查下去发现它不是一个
+**§7.4 项 3（`reg_bindings` 闭合）本轮没做，理由不是时间不够**（下一轮已做完，见 §7.8）：
+查下去发现它不是一个
 「补一句查表」的改动。当前只有 `mov_from_stack`/`mov_to_stack` 两处看绑定表；要闭合就必须
 先回答「这个变量的地址逸出了吗」，而这需要（a）一个覆盖全函数表达式的逸出收集（包括
 asm `"m"`/`"=&m"` 约束的操数，它与 `&x` 是同一个事实但 AST 里没有 `AddrOf`），
@@ -855,6 +856,44 @@ asm `"m"`/`"=&m"` 约束的操数，它与 `&x` 是同一个事实但 AST 里没
 即活性套件对这一特例 **零覆盖**）。(a) 已有可复用的完备实现（`ssa_gvn::walk_addr_of`），
 但它得先补齐 `AsmExpr`/`StmtExpr`/`CompoundLit` 等遗漏变体（补了会同时收紧 GVN 的逸出集，
 方向安全但需重跑全量）。这每一项都比「改两行」重，所以本轮没有拿它换表面上的绿。
+
+### 7.8 第 19 轮：`register asm` 与地址逸出的矛盾（§7.4 项 3）
+
+上一轮说这项不是「补一句查表」，本轮把理由逐条做完并验证。
+
+**实测到的错值**（不是推演）：
+
+```c
+register long v asm("r15") = 0;
+long *p = &v;
+v = 42;
+```
+
+修复前（`191fa23` 的编译器）：打印 `42 0`、退出 1 —— 绑定生效后 `v = 42` 只写 `%r15`，
+那个栈槽**从来没人写过**，`*p` 读到的是栈残留。修复后四档均 `42 42`、退出 0。
+（gcc 对这种写法直接拒绝编译：`error: address of register variable 'v' requested`，
+所以这份夹具只能断言 dcc 自己的语义，不能做 gcc 对照。）
+
+**判据的位置：不新增一套，而是复用已有的那一套**。方案原本写的是「读侧查绑定表」
+（`mem/addr.rs`、`asm/constraint.rs`），但那样每新增一个读侧就要记得查；而且它与
+GVN 已有的逸出分析形成两套判据。现在统一到一处：
+
+| 环节 | 改动 |
+|---|---|
+| `ssa_gvn::walk_expr_addr_of` / `walk_stmt_addr_of` | 去掉 `_ => {}`，**穷举**所有 `Expr`/`Stmt` 变体。旧版把语句表达式 `({...})`、复合字面量/初始化列表、`AsmExpr` 操作数、`va_arg` 全部静默不递归 ⇒ 那里的 `&x` 根本不会被报为逸出（GVN 同一个判据也跟着漏报） |
+| `ssa_gvn::addr_escaped_names` | 新增的唯一入口：返回一个块内所有地址被取走的根名。asm 的 `"m"`/`"Q"`/`"g"` 等内存约束操作数不靠 `AddrOf` 语法，而是单独识别为逸出（它就是「把对象地址交出去」） |
+| `Codegen::{collect_addr_escaped, register_binding_allowed}` | 程序级扫一次（含嵌套函数体），局部与 file-scope 两条绑定路径共用同一道门；地址逸出的名字不再写入 `reg_bindings` |
+| `tests/fixtures/asm/asm_register_binding_escape.c` | 活性夹具（此前 `register asm` 只在 `_archive/dev/` 里，活性套件零覆盖）：三个方向各一条 —— 取址退回内存、asm `"m"` 约束退回内存、不逸出时绑定仍正确工作（防止退化成「把特性关掉」） |
+| `ssa_gvn::tests::addr_escaped_names_covers_every_escape_shape` | 6 种逸出形态 + 一条「不取址必须为空」的反向对照 |
+
+**故意没改的那一半**：「规划期 `pre_register_vars_max` 无脑分槽」保留。因为槽现在
+就是逸出对象的退回路径，必须在绑定生效时也存在；把它改成「绑定了就不分槽」会直接
+删掉这个退路。剩下的只是浪费帧空间（丢收益，不丢正确性）；要省它得先解决「绑定
+生效与否要到整程序扫完才知道，而帧大小在函数体发射前就定死了」这个先后顺序。
+
+**度量**：`cargo test --release` 3083 通过 / 0 失败；OPT-DIFF 仍 18（无回归）；可复现
+门禁 5040 组合字节一致；`check_fixtures` 601 个夹具全被引用；`make golden-cross` 6 项
+全 OK（arm/mips 产物未变，本项只影响 x86_64 的绑定判定）。
 
 ### 8. 第 6 轮：P10 已接入 + P16 分析层完成
 

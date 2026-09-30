@@ -63,6 +63,43 @@ impl Codegen {
             self.compile_func(f, prog);
         }
     }
+    /// 汇总全程序里「地址被取走」的对象根名，一个 Codegen 实例只算一次。
+    ///
+    /// 为什么是程序级而不是当前函数级：file-scope 的 `register asm` 变量可以在
+    /// **任何**一个函数里被取址，只看本函数体会漏。判据本身复用
+    /// `ssa_gvn::addr_escaped_names`，后端不再自己爬一遍 AST —— 两套逸出判据里弱的
+    /// 那一套会决定产物正确性。集合按名字索引，所以同名变量在别处被取址会一并
+    /// 取消绑定（偏保守：只丢绑定，不丢正确性）。
+    fn collect_addr_escaped(&mut self, prog: &Program) {
+        if self.addr_escaped_done {
+            return;
+        }
+        self.addr_escaped_done = true;
+        // 嵌套函数体也要扫：它的 `&外局名` 同样是对外层对象的逸出。
+        fn walk_decl(set: &mut std::collections::HashSet<String>, d: &crate::ast::Decl) {
+            let crate::ast::Decl::Func(f) = d else {
+                return;
+            };
+            let Some(b) = &f.body else {
+                return;
+            };
+            set.extend(crate::ssa_gvn::addr_escaped_names(b));
+            for item in &b.items {
+                if let crate::ast::BlockItem::Decl(nd) = item {
+                    walk_decl(set, nd);
+                }
+            }
+        }
+        for d in &prog.decls {
+            walk_decl(&mut self.addr_escaped, d);
+        }
+    }
+
+    /// 该名字是否允许绑定到物理寄存器（地址逸出者不允许）。声明处的两条路径共用。
+    pub(crate) fn register_binding_allowed(&self, name: &str) -> bool {
+        !self.addr_escaped.contains(name)
+    }
+
     pub fn compile_func(&mut self, f: &FuncDecl, prog: &Program) {
         let arg_regs: [u8; 6] = [7, 6, 2, 1, 8, 9];
         self.var_map.clear();
@@ -73,7 +110,14 @@ impl Codegen {
         // (20040423-1: 匿名 struct 的空 tag 在 main/sub1 同 key)
         self.vm_struct_size_slots.clear();
         self.reg_bindings.clear();
-        self.reg_bindings.extend(self.global_reg_bindings.clone());
+        // file-scope 绑定也要过同一道逸出判据：地址被取走的对象必须留在内存里。
+        self.collect_addr_escaped(prog);
+        for (n, r) in self.global_reg_bindings.clone() {
+            if !self.register_binding_allowed(&n) {
+                continue;
+            }
+            self.reg_bindings.insert(n, r);
+        }
         self.cleanup_vars.clear();
         self.sret_watermark = 0;
         self.sret_region_base = 0;
@@ -933,8 +977,13 @@ impl Codegen {
                             continue; // static 局部变量已在全局数据段分配
                         }
                         if let Some(ref reg_name) = v.register_name {
-                            if let Some(reg_idx) = Self::parse_reg_name(reg_name) {
-                                self.reg_bindings.insert(v.name.name.clone(), reg_idx);
+                            // 地址被取走的对象不得绑到物理寄存器：绑定后那个栈槽再也
+                            // 没人写过，`&v` 的读者拿到旧值/垃圾（GCC 遇到逸出同样是
+                            // 忽略绑定，而规划期总是先分好了槽，退回内存路径无风险）。
+                            if self.register_binding_allowed(&v.name.name) {
+                                if let Some(reg_idx) = Self::parse_reg_name(reg_name) {
+                                    self.reg_bindings.insert(v.name.name.clone(), reg_idx);
+                                }
                             }
                         }
                         if let Some(ref fn_name) = v.cleanup_fn {

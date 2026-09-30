@@ -420,6 +420,22 @@ fn asm_inline_qualifier_compiles() {
     assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
+/// `register asm` 变量被取址（或被内联汇编的 `"m"` 约束引用）时必须退回内存。
+///
+/// 旧实现无条件绑定，`&v` 读到从未被写的栈槽（实测 `42 0`）。这类构造 gcc 直接
+/// 拒绝编译，所以本夹具只断言 dcc 自身语义，不跟 gcc 对照。
+#[test]
+fn asm_register_binding_yields_to_address_escape() {
+    let source = include_str!("../fixtures/asm/asm_register_binding_escape.c");
+    for flag in ["-O0", "-O2", "-O3"] {
+        let (output, exe) = run_compile_and_run_flags("asm-reg-bind-escape", source, &[flag]);
+        assert!(output.status.success(), "{flag}: stderr: {}",
+            String::from_utf8_lossy(&output.stderr));
+        assert_eq!(run_exe(&exe), 0, "{flag}: 地址逸出的 register asm 变量丢了值");
+        let _ = fs::remove_file(exe);
+    }
+}
+
 /// GNU 局部数字标签 6: / 6f / 6b
 #[test]
 fn asm_local_label_compiles() {

@@ -319,6 +319,22 @@ fn is_addr_taken(name: &str, b: &Block) -> bool {
     found
 }
 
+/// 一个块（典型就是一份函数体）内**地址被取走**的对象根名集合。
+///
+/// 这是「该对象必须留在内存里」这一事实的唯一判据，目前有两个消费者：
+///   * GVN 用它决定变量是否参与合并（`is_addr_taken` 的批量版）；
+///   * 后端用它决定 `register asm` 绑定能不能生效 —— GCC 对地址外溢的寄存器
+///     变量本来就是「放弃绑定、留在内存」，绑定生效才会造成静默旧值。
+///
+/// 必须走本入口而不是自己爬 AST：逸出判据一旦有两套，其中一套漏报就是错值。
+pub fn addr_escaped_names(b: &Block) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    walk_addr_of(b, &mut |root: &str| {
+        out.insert(root.to_string());
+    });
+    out
+}
+
 /// 遍历块内所有 `Expr::AddrOf` 的根对象名。
 fn walk_addr_of(b: &Block, on_root: &mut dyn FnMut(&str)) {
     for item in &b.items {
@@ -337,7 +353,12 @@ fn walk_addr_of(b: &Block, on_root: &mut dyn FnMut(&str)) {
 fn walk_stmt_addr_of(st: &Stmt, on_root: &mut dyn FnMut(&str)) {
     match st {
         Stmt::Block { b, .. } => walk_addr_of(b, on_root),
-        Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => walk_expr_addr_of(e, on_root),
+        Stmt::Expr { e, .. } => walk_expr_addr_of(e, on_root),
+        Stmt::Return { val, .. } => {
+            if let Some(v) = val {
+                walk_expr_addr_of(v, on_root);
+            }
+        },
         Stmt::If { cond, then_, else_, .. } => {
             walk_expr_addr_of(cond, on_root);
             walk_stmt_addr_of(then_, on_root);
@@ -371,8 +392,44 @@ fn walk_stmt_addr_of(st: &Stmt, on_root: &mut dyn FnMut(&str)) {
                 walk_addr_of(&c.body, on_root);
             }
         },
-        _ => {},
+        Stmt::Label { stmt, .. } => walk_stmt_addr_of(stmt, on_root),
+        // `&&label` 跳板只涉及标号，不涉及对象地址。
+        Stmt::Goto { .. } | Stmt::Break { .. } | Stmt::Continue { .. }
+        | Stmt::Fallthrough { .. } => {},
+        Stmt::GotoIndirect { expr, .. } => walk_expr_addr_of(expr, on_root),
+        // asm goto 的操作数与普通 asm 同一处理（内存约束 = 把对象地址交出去）。
+        Stmt::AsmGoto { outputs, output_constraints, inputs, input_constraints, .. } => {
+            walk_asm_operands_addr_of(outputs, output_constraints, on_root);
+            walk_asm_operands_addr_of(inputs, input_constraints, on_root);
+        },
+        Stmt::Invoke { call, .. } => walk_stmt_addr_of(call, on_root),
+        Stmt::EhLandingPad { object, selector, .. } => {
+            walk_expr_addr_of(object, on_root);
+            walk_expr_addr_of(selector, on_root);
+        },
     }
+}
+
+/// 把一组 asm 操作数与其约束串配对遍历：内存约束的操作数根对象算「地址已被取走」。
+fn walk_asm_operands_addr_of(
+    ops: &[Expr],
+    constraints: &[String],
+    on_root: &mut dyn FnMut(&str),
+) {
+    for (i, o) in ops.iter().enumerate() {
+        if constraints.get(i).map(|c| constraint_is_memory(c)).unwrap_or(false) {
+            if let Some(root) = ident_root_name(o) {
+                on_root(&root);
+            }
+        }
+        // 操作数本身仍要递归：`"r"(&x)` 里已经有真正的 AddrOf。
+        walk_expr_addr_of(o, on_root);
+    }
+}
+
+/// 该约束是否要求内存操作数（而不是寄存器）。保守判定：只要出现内存类约束字母。
+fn constraint_is_memory(c: &str) -> bool {
+    c.chars().any(|ch| matches!(ch, 'm' | 'Q' | 'g' | 's' | 'O' | 'v'))
 }
 
 fn walk_expr_addr_of(e: &Expr, on_root: &mut dyn FnMut(&str)) {
@@ -415,7 +472,44 @@ fn walk_expr_addr_of(e: &Expr, on_root: &mut dyn FnMut(&str)) {
                 walk_expr_addr_of(a, on_root);
             }
         },
-        _ => {},
+        // 以下四个变体以前全部落在 `_ => {}` 里，也就是**静默不递归**。它们不是
+        // 罕见形态：`({ int *p = &x; })` 里的 `&x` 被漏报，GVN 就会把 `x` 当成
+        // 「没被取过址」而参与合并；同一个判据将来也要管住寄存器绑定。
+        // 这里不留 `_`：以后新增 `Expr` 变体会直接编不过，而不是静默漏报。
+        Expr::StmtExpr { block, .. } => walk_addr_of(block, on_root),
+        Expr::CompoundLit { inits, .. } | Expr::InitList { inits, .. } => {
+            for it in inits {
+                match it {
+                    crate::ast::InitItem::Expr(e) => walk_expr_addr_of(e, on_root),
+                    crate::ast::InitItem::Designated { value, .. } => {
+                        walk_expr_addr_of(value, on_root)
+                    },
+                }
+            }
+        },
+        Expr::AsmExpr { outputs, output_constraints, inputs, input_constraints, .. } => {
+            walk_asm_operands_addr_of(outputs, output_constraints, on_root);
+            walk_asm_operands_addr_of(inputs, input_constraints, on_root);
+        },
+        // `va_arg(ap, T)` 会原地修改 va_list 对象，它的地址必然对外可见。
+        Expr::VaArg { ap, .. } => {
+            if let Some(root) = ident_root_name(ap) {
+                on_root(&root);
+            }
+            walk_expr_addr_of(ap, on_root);
+        },
+        // 叶子：没有子表达式（`LabelAddr` 是 `&&label`，只涉及标号）。
+        Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::ComplexLit { .. }
+        | Expr::ComplexIntLit { .. }
+        | Expr::String { .. }
+        | Expr::Char { .. }
+        | Expr::Ident { .. }
+        | Expr::SizeofTy { .. }
+        | Expr::AlignofTy { .. }
+        | Expr::Offsetof { .. }
+        | Expr::LabelAddr { .. } => {},
     }
 }
 
@@ -1231,5 +1325,64 @@ mod tests {
         if let BlockItem::Decl(Decl::Var(v)) = &body.items[0] {
             assert_eq!(v.name.name, "a");
         }
+    }
+
+    /// 取一段源码里某个函数的「地址逸出」集。
+    fn escapes(src: &str, fname: &str) -> Vec<String> {
+        let (prog, _d) = crate::parser::parse(src.as_bytes(), "t.c");
+        for decl in prog.decls.iter() {
+            if let Decl::Func(f) = decl {
+                if f.name.name == fname {
+                    let b = f.body.as_ref().expect("body");
+                    let mut v: Vec<String> = addr_escaped_names(b).into_iter().collect();
+                    v.sort();
+                    return v;
+                }
+            }
+        }
+        panic!("找不到函数 {fname}");
+    }
+
+    /// 逸出收集必须覆盖每一种可以携带 `&x` 的表达式形态。
+    ///
+    /// 语句表达式、复合字面量/初始化列表、内联汇编操作数、va_arg 这几个变体以前
+    /// 全部落在 walker 的 `_ => {}` 里**静默不递归**：GVN 因此把被取址的变量当成
+    /// 可合并，后端也因此给它留下 `register asm` 绑定（两者都是静默错值）。
+    /// 反向对照（不取址时必须为空）同样必要：否则「一律认为逸出」也能让上面全绿。
+    #[test]
+    fn addr_escaped_names_covers_every_escape_shape() {
+        assert_eq!(escapes("int f(void){ int x; return (int)(long)&x; }\n", "f"), ["x"]);
+        assert_eq!(
+            escapes("int f(void){ int a[4]; return (int)(long)&a[1]; }\n", "f"),
+            ["a"],
+            "下标的根对象才是逸出的那个"
+        );
+        assert_eq!(
+            escapes(
+                "struct S{int g;};\nint f(void){ struct S s; return (int)(long)&s.g; }\n",
+                "f"
+            ),
+            ["s"]
+        );
+        assert_eq!(
+            escapes("int f(void){ int x; ({ int *p = &x; *p; }); return 0; }\n", "f"),
+            ["x"],
+            "语句表达式里的 &x 不得漏报"
+        );
+        assert_eq!(
+            escapes("int f(int v){ int x; __asm__ volatile(\"\" : : \"m\"(x)); return v; }\n", "f"),
+            ["x"],
+            "asm 内存约束操作数 = 把对象地址交出去"
+        );
+        assert_eq!(
+            escapes("int f(void){ int x; int *q = (int *[]){ &x }[0]; return (int)(long)q; }\n", "f"),
+            ["x"],
+            "复合字面量的初始化式里也得递归"
+        );
+        // 反向对照：没有任何逸出时集合必须为空。
+        assert!(
+            escapes("int f(void){ int x = 1; return x + 1; }\n", "f").is_empty(),
+            "不取址时不得报逸出"
+        );
     }
 }
