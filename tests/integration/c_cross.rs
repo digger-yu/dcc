@@ -1867,6 +1867,15 @@ fn c_agg_param_reg_stack_split_gcc_cross_check() {
     let src = include_str!("../fixtures/c/agg_param_reg_stack_split.c");
     let rc = run_gcc_cross_check("c-agg-param-reg-stack-split", src);
     assert_eq!(rc, 0, "agg_param_reg_stack_split: 每条断言对应一个 return 值");
+    // 逐档与 gcc 对照：这条缺陷（聚合对象整体赋值被降级成一次标量 Store，第二个
+    // 八字节静默丢失）只在 -O2 起出现，因为要走 SSA 往返才落到那条形态。
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("c-agg-param-reg-stack-split", src, &[flag]),
+            0,
+            "{flag}: agg_param_reg_stack_split 与 gcc 不一致（聚合整体赋值丢字节）"
+        );
+    }
 }
 
 /// 缺陷 6: 全局二维数组索引塌缩 (`static long long e[10][2]` 的每一行都读出

@@ -842,9 +842,9 @@ IR 层断言（算一遍 `prologue ++ kernel×R ++ epilogue` 对每个节点的*
 
 | 文件 | -O2 现象 | 关掉谁就正常 | 下一步 |
 |---|---|---|---|
-| `va_arg/global_valist_sse_agg.c`、`va_arg/vacopy_sse_agg.c`、`va_arg/mixed_sse_pipeline_named.c`、`va_arg/mixed_sse_via_valist_param.c` | 退出码 = 首个读错位置的序号（15/10/20/13） | **只有 SCCP**（`DCC_SSA_OFF=sccp` 就全对） | SCCP 不得对「经另一函数写入的全局 va_list 字段」做常量传播；先从 `non_propagatable_names` 入手查 |
+| ~~`va_arg/global_valist_sse_agg.c`、`va_arg/vacopy_sse_agg.c`、`va_arg/mixed_sse_pipeline_named.c`、`va_arg/mixed_sse_via_valist_param.c`~~ **已修（第 20 轮，见 §7.9）** | 退出码 = 首个读错位置的序号（15/10/20/13） | **只有 SCCP**（`DCC_SSA_OFF=sccp` 就全对） | 归因对了但病灶更早：SCCP 的常量表**不带类型**，于是把 `Type::Struct`（va_list 聚合）的槽位当 int 常量替换。已按操作数类型类守卫，四个夹具四档与 gcc 一致 |
 | `vla.c` | rc=12 | **只有 SSA 层 GVN**（`DCC_SSA_OFF=gvn` 就全对） | 未修；两种候选方案已被实测否定，证据与下一步见 §7.10 |
-| ~~`complex_abi.c`~~ **已修（第 22 轮，见 §7.13）**；`ld80_arith.c`、`agg_param_reg_stack_split.c` | 复数：rc=1；其余 rc=1 / rc=6 | 复数那两条都不在优化 pass 里，而在**降级/重建的形状丢失**上 | 剩余两个仍需逐个建模（做法同 §7.11/§7.13：先最小可复现，再问「IR 里有没有这条指令」） |
+| ~~`complex_abi.c`~~ **已修（第 22 轮，见 §7.13）**；~~`agg_param_reg_stack_split.c`~~ **已修（第 23 轮，见 §7.14）**；`ld80_arith.c` | 复数：rc=1；聚合：rc=6 | 这两条都不在优化 pass 里，而在**降级/重建的形状丢失**上 | 只剩 `ld80_arith.c`：80 位 long double 过 SSA 往返丢精度，属 `docs/longdouble_80bit_migration.md` 的未完部分。它与仍未修的 `vla.c` 一起指向同一个结构性缺口：**值种类在 IR 里靠 `Type` 猜，而不是各自有形态**（§7.14） |
 | ~~`chained_assign_truncation.c`~~ **已修（第 21 轮，见 §7.11）** | abort | `DCC_SSA_OFF=sccp` 就正常，但根因不在 SCCP：是构建器丢了中间类型 + 全局赋值返回了原始 RHS | 见 §7.11 |
 
 **§7.4 项 3（`reg_bindings` 闭合）本轮没做，理由不是时间不够**（下一轮已做完，见 §7.8）：
@@ -1043,6 +1043,46 @@ docs/longdouble_80bit_migration.md 的未完部分，不是 opt pass 的局部�
 warning；可复现门禁 5040 组合一致；新代码 clippy 零命中。剩余：`vla.c`（子对象地址无
 表示，§7.10）、`ld80_arith.c`（80 位 long double 过 SSA 往返，§7.12）、
 `agg_param_reg_stack_split.c`（聚合参数拆分，§7.12）。
+
+### 7.14 第 23 轮：聚合对象的整体赋值在 IR 里没有表示（OPT-DIFF 6 → 4）
+
+`agg_param_reg_stack_split.c` 现在四档与 gcc 一致。但它当场证明的**不是** SysV 的聚合
+参数「寄存器/栈槽拆分」，而是 §7.10/§7.12 那条结构性结论的第三个实例：**聚合值在本 IR
+里没有被当成对象**。
+
+**最小可复现**（三条写法只差「拷到哪里」，实测只有第三条坏；`-O2`，gcc 全对）：
+
+| 形态 | 修前 -O2 | gcc |
+|---|---|---|
+| `rb = p.b;` 直接读成员 | ✓ 222 | ✓ 222 |
+| `struct P2 t = p; rb2 = t.b;` 局部拷贝 | ✓ 222 | ✓ 222 |
+| `g = p; rb3 = g.b;` **给具名对象整体赋值** | **0** | ✓ 222 |
+
+差别只在降级路径：局部拷贝走 `lower_expr_into`，它**定义一个聚合类型的 SSA 变量**，
+重建后仍是一条聚合声明，后端按 `size` 搬 ⇒ 对；而 `g = p;` 走 `store_to_named_object`，
+发射的是「一条 `Store`，src 是一个 `Operand`」，重建后落成 `*(&g) = p`，后端按**标量**
+搬 8 字节 ⇒ 第二个八字节从来没被写过，`g.b` 读出的是栈/数据段残留。
+
+**为什么这条 bail 而不是给 `Store` 补聚合形态**：真修法需要同时改所有发射点与重建点
+（成员赋值、初始化列表、按字节拷贝的循环、`Operand` 侧要能表达「一个聚合值的地址」），
+而 `Operand` 现在表达不出来 —— 这与 §7.10 里 vla.c 被三种类型规则修法全部否定的缺口
+是同一个：**值种类（子对象地址 / 聚合 / 80 位浮点 / 复数）在 SSA IR 里都靠 `Type` 猜，
+而不是各自有形态**。形态级改动是下一项独立工作（验收对：`vla.c` + `may_alias.c`）；
+本轮按 §7.13 已验证的那条规则处理：**让可能「只做不写 / 只搬一半」的函数整体退出 SSA**，
+留在本来就能正确处理它的 AST 通道，把缺口留在诊断（`DCC_SSA_BAIL=1` 打印
+`聚合对象的整体赋值无法在 IR 里表达`）里，而不是留在产物里。
+
+**反向对照**（防止退化成「把结构体全关掉」）：`g.b = v;` 走 MemberStore，是受支持的
+形态，必须仍进管线 —— 新单测 `aggregate_assignment_to_named_object_bails` 两个断言各钉
+一边。`c_agg_param_reg_stack_split_gcc_cross_check` 从「只跑默认档」扩成
+-O0/-O1/-O2/-O3 四档 gcc 对照；顺带记一句：`check_opt_equivalence.sh` 只扫 0/2/3 三档，
+这条夹具的 -O1 是第一次被覆盖。
+
+**度量**：OPT-DIFF **6 → 4（2 个文件：`c_ld80_arith.c`、`c_vla.c`，各 -O2/-O3）**；
+`cargo test --release -j2 -- --test-threads=2` 3087 通过 / 0 失败 / 零 warning；
+COMPILE-FAIL 仍 60、ADDR-NORM 仍 2（本轮零新增）；最小复现修后四档均为
+`direct=222 local=222 global=222` 且与 gcc 一致，`DCC_SSA_BAIL=1` 打印
+`[SSA] f5 不进管线：聚合对象的整体赋值无法在 IR 里表达`。
 
 ### 8. 第 6 轮：P10 已接入 + P16 分析层完成
 

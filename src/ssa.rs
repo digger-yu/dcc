@@ -803,6 +803,21 @@ impl Builder {
             },
             span: span.clone(),
         });
+        // 聚合对象（结构体/联合体/数组）的**整体赋值**在本 IR 里没有表示：一条
+        // `Store` 的 src 是一个值，重建后写成 `*(&g) = p`，后端按标量搬 8 字节，
+        // 于是第二个八字节静默丢失。实测（-O2）：
+        //     struct P2 { long a, b; } g;  g = p;   →  g.b == 0
+        // 而同一份代码的局部拷贝 (`struct P2 t = p;`) 是对的，因为它走
+        // `lower_expr_into`（定义一个聚合类型的 SSA 变量），不走 Store。
+        // 与其「只写一半」，不如让整个函数放弃 SSA 化，留在 AST 通道上由
+        // gen_struct_assign 正确处理 —— 与不可降级表达式、不认识左值同一条规则。
+        if matches!(
+            obj_ty,
+            Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)
+        ) {
+            self.unsupported("聚合对象的整体赋值无法在 IR 里表达");
+            return value;
+        }
         // 赋值表达式的值是**存入之后**的对象值（C11 6.5.16p3）：必须先按左值类型截断
         // 并恢复符号/零扩展，才能往外传。直接把原始 RHS 返回去的话，链式赋值会丢掉
         // 中间那一层宽度：`gl = gu = gs = -1`（三个都是全局量）里 `gu = -1` 的值应是
@@ -7058,6 +7073,29 @@ mod tests {
                 .iter()
                 .any(|i| matches!(i.kind, InstKind::MemberStore { .. }))),
             "成员赋值必须真的发射成一条 MemberStore"
+        );
+    }
+
+    /// 聚合对象的整体赋值在 IR 里没有表示，必须让整个函数退出 SSA，而不是只搬
+    /// 一半字节。实测 -O2 旧行为：`struct P2 { long a, b; } g; g = p;` 之后
+    /// `g.b` 读到 0 —— 那条 `Store` 重建后是 `*(&g) = p`，后端按标量搬 8 字节。
+    /// 同一份代码里 `struct P2 t = p;` 是对的（它走 `lower_expr_into`，不走 Store），
+    /// 所以坏的不是「结构体」而是**给具名对象整体赋值**这条形态。
+    /// 反向对照：成员赋值 `g.b = v` 必须仍进管线（不能一刀切退出）。
+    #[test]
+    fn aggregate_assignment_to_named_object_bails() {
+        assert!(
+            try_build(
+                "struct P { long a; long b; }; struct P g; void f(struct P p){ g = p; }\n",
+                "f"
+            )
+            .is_none(),
+            "聚合整体赋值不得降级成一次标量 Store"
+        );
+        assert!(
+            try_build("struct P { long a; long b; }; struct P g; void f(long v){ g.b = v; }\n", "f")
+                .is_some(),
+            "成员赋值是受支持的形态，不得一起退出 SSA 管线"
         );
     }
 
