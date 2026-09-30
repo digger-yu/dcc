@@ -187,10 +187,12 @@ pub struct Codegen {
     pub upvar_intermediate_offsets: HashMap<String, Vec<i64>>,
     // &&label 地址引用：(disp32_pos, label_name)
     pub label_addr_refs: Vec<(u64, String)>,
-    // register asm 变量绑定：变量名 → 寄存器编号
-    pub reg_bindings: HashMap<String, u8>,
+    // register asm 变量绑定：变量名 → (寄存器编号, 声明类型)。类型与寄存器必须同表携带：
+    // 绑定路径的读写要按声明宽度截断/扩展，与栈槽路径同一口径，否则同一个变量在两条
+    // 通路下会给出不同的值。
+    pub reg_bindings: HashMap<String, (u8, Type)>,
     // file-scope register asm 变量绑定：每个函数入口恢复
-    pub global_reg_bindings: HashMap<String, u8>,
+    pub global_reg_bindings: HashMap<String, (u8, Type)>,
     /// 全程序里「地址被取走」的对象根名；只有 `addr_escaped_done` 为真时才参与判定
     /// （区分「扫过且为空」与「还没扫」）。判据本身在 `ssa_gvn::addr_escaped_names`。
     pub addr_escaped: std::collections::HashSet<String>,
@@ -453,7 +455,7 @@ pub struct ParallelEmitCtx {
     pub func_param_types: HashMap<String, Vec<Type>>,
     pub defined_funcs: HashSet<String>,
     pub error_attr_fns: HashSet<String>,
-    pub global_reg_bindings: HashMap<String, u8>,
+    pub global_reg_bindings: HashMap<String, (u8, Type)>,
     pub rodata: Vec<u8>,
     pub string_pool: HashMap<Vec<u8>, u64>,
     pub text_align: u64,
@@ -1075,7 +1077,7 @@ impl Codegen {
                 if let Some(ref reg_name) = v.register_name {
                     if let Some(reg_idx) = Self::parse_reg_name(reg_name) {
                         self.global_reg_bindings
-                            .insert(v.name.name.clone(), reg_idx);
+                            .insert(v.name.name.clone(), (reg_idx, v.ty.clone()));
                     }
                     continue;
                 }

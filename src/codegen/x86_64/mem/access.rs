@@ -1045,12 +1045,59 @@ impl Codegen {
 
         true
     }
-    pub(crate) fn mov_from_stack(&mut self, reg: u8, name: &str) {
-        // P1-5: register asm 变量直接从绑定寄存器加载
-        if let Some(&bound_reg) = self.reg_bindings.get(name) {
-            if reg != bound_reg {
-                self.mov(reg, bound_reg);
+    /// 变量存取宽度口径的**唯一真源**：返回 `(字节数, 4 字节有符号?, 窄有符号枚举?, 是聚合?)`。
+    ///
+    /// 为什么要把这段计算抽出来而不是各写一遍：栈槽路径的宽度规则是专门修过的（窄写
+    /// 只写那么多字节、读时按符号性 `movsxd`/`movzx`），而 `register asm` 绑定路径原来是
+    /// 两次裸 64 位 `mov` —— 同一个变量在两条通路下给出两个值。实测
+    /// `register unsigned int v asm("rbx"); v = 0x100000001UL; unsigned long back = v;`
+    /// 在 -O0 读出 `back=4294967297`，而栈槽路径与 gcc 都是 `1`。
+    ///
+    /// 类型来源:`var_map`（局部变量，`pre_register_vars` 必然登记过）→ 绑定表里携带的
+    /// 声明类型（file-scope 的 `register asm` 变量在收集全局时被 `continue` 掉，既不在
+    /// `var_map` 也不在 `globals_raw`）→ 8 字节有符号回退。
+    fn var_access_shape(&self, name: &str) -> (usize, bool, bool, bool) {
+        let Some(t) = self
+            .var_map
+            .get(name)
+            .map(|(_, t)| t)
+            .or_else(|| self.reg_bindings.get(name).map(|(_, t)| t))
+        else {
+            return (8, true, false, false);
+        };
+        let s = t.size();
+        // 符号性: int / 默认枚举 / _Atomic(int) 视为 signed;
+        // C23 固定底层类型枚举按底层类型判定 (如 enum E : int),
+        // 否则负枚举值会被零扩展成巨大正数.
+        let signed = |ty: &Type| -> bool {
+            match ty {
+                Type::Int => true,
+                Type::Enum(_, _, None) => true,
+                Type::Enum(_, _, Some(u)) => Self::is_signed_int(&u.base),
+                Type::Atomic(b) => match &b.base {
+                    Type::Int => true,
+                    Type::Enum(_, _, Some(u)) => Self::is_signed_int(&u.base),
+                    _ => false,
+                },
+                _ => false,
             }
+        };
+        // signed_narrow: 窄类型 (1/2 字节) 且 signed, 但调用方的
+        // gen_int_promote 不处理枚举 (ty.is_int() 不含 Enum),
+        // 需在此处补 movsx 符号扩展.
+        let sn = s < 4 && matches!(t, Type::Enum(_, _, Some(u)) if Self::is_signed_int(&u.base));
+        // For struct/union types, treat as unsigned to avoid
+        // sign-extension loads that truncate the value.
+        let is_struct = matches!(t, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _));
+        (s, signed(t) && !is_struct, sn, is_struct)
+    }
+    pub(crate) fn mov_from_stack(&mut self, reg: u8, name: &str) {
+        let (sz, signed4, signed_narrow, is_struct) = self.var_access_shape(name);
+        // P1-5: register asm 变量直接从绑定寄存器加载, 但宽度口径与栈槽路径同源。
+        // 写入侧 (`mov_to_stack`) 立的是规范形态 (低位有效、高位为 0), 所以无符号与
+        // 8 字节就是普通 64 位搬运, 有符号窄类型补 movsx/movsxd。
+        if let Some(&(bound_reg, _)) = self.reg_bindings.get(name) {
+            self.mov_reg_extend(reg, bound_reg, sz, signed4 || signed_narrow);
             return;
         }
         let off = self.var_offset(name);
@@ -1061,45 +1108,10 @@ impl Codegen {
         // (写 32 位寄存器自动清零高位); 1/2 字节用 movzx, 普通窄类型的
         // 符号语义由调用方的 gen_int_promote 处理, 窄有符号枚举在此处
         // 补 movsx (promote 不覆盖枚举); 8 字节维持 64 位 load.
-        let (sz, signed4, signed_narrow) = match self.var_map.get(name) {
-            Some((_, t)) => {
-                let s = t.size();
-                // 符号性: int / 默认枚举 / _Atomic(int) 视为 signed;
-                // C23 固定底层类型枚举按底层类型判定 (如 enum E : int),
-                // 否则负枚举值会被零扩展成巨大正数.
-                let signed = |ty: &Type| -> bool {
-                    match ty {
-                        Type::Int => true,
-                        Type::Enum(_, _, None) => true,
-                        Type::Enum(_, _, Some(u)) => Self::is_signed_int(&u.base),
-                        Type::Atomic(b) => match &b.base {
-                            Type::Int => true,
-                            Type::Enum(_, _, Some(u)) => Self::is_signed_int(&u.base),
-                            _ => false,
-                        },
-                        _ => false,
-                    }
-                };
-                // signed_narrow: 窄类型 (1/2 字节) 且 signed, 但调用方的
-                // gen_int_promote 不处理枚举 (ty.is_int() 不含 Enum),
-                // 需在此处补 movsx 符号扩展.
-                let sn =
-                    s < 4 && matches!(t, Type::Enum(_, _, Some(u)) if Self::is_signed_int(&u.base));
-                // For struct/union types, treat as unsigned to avoid
-                // sign-extension loads that truncate the value.
-                let is_struct = matches!(t, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _));
-                (s, signed(t) && !is_struct, sn)
-            },
-            None => (8, true, false),
-        };
         // For struct/union types, always load 8 bytes to avoid truncation.
         // Structs may have sizes like 6 bytes, but we need to load the full
         // 8-byte register to preserve all fields.
-        let is_struct_type = match self.var_map.get(name) {
-            Some((_, t)) => matches!(t, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)),
-            None => false,
-        };
-        if is_struct_type {
+        if is_struct {
             self.load_stack(reg, off);
             return;
         }
@@ -1134,11 +1146,11 @@ impl Codegen {
         }
     }
     pub(crate) fn mov_to_stack(&mut self, reg: u8, name: &str) {
-        // P1-5: register asm 变量直接存入绑定寄存器
-        if let Some(&bound_reg) = self.reg_bindings.get(name) {
-            if reg != bound_reg {
-                self.mov(bound_reg, reg);
-            }
+        let (sz, _, _, _) = self.var_access_shape(name);
+        // P1-5: register asm 变量直接存入绑定寄存器, 并按声明宽度截断成规范形态 ——
+        // 与下面栈槽路径的「按宽度 store」同口径 (缺陷与实测见 `var_access_shape`)。
+        if let Some(&(bound_reg, _)) = self.reg_bindings.get(name) {
+            self.mov_reg_truncate(bound_reg, reg, sz);
             return;
         }
         let off = self.var_offset(name);
@@ -1146,7 +1158,6 @@ impl Codegen {
         // 写入小类型变量的栈槽 (后续 idiv 等指令加载时会读
         // 到错误的高位). 例如 `signed int xx = ulong_x` 必须只
         // 写 4 字节, 使 movsxd 加载时能正确符号扩展.
-        let sz = self.var_map.get(name).map(|(_, t)| t.size()).unwrap_or(8);
         match sz {
             1 | 2 | 4 => self.emit_store(reg, off, sz),
             _ => self.store_stack(reg, off),

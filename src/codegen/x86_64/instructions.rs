@@ -193,6 +193,86 @@ impl Codegen {
         }
         self.emit(&[rex, 0x8B, 0xC0 | ((dst & 7) << 3) | (src & 7)]);
     }
+    /// 寄存器 → 寄存器**按声明宽度截断**的搬运，用于写进某个 `register asm` 变量的家。
+    /// 规范形态：低 `sz` 位是值，高位为 0（读出时再按符号性扩展，见
+    /// `mov_reg_extend`）。为什么必须截断：绑定路径原来是裸 64 位 `mov`，于是
+    /// `register unsigned int v asm("rbx"); v = 0x100000001UL;` 之后 `v` 读回
+    /// 4294967297，而栈槽路径（32 位 store）与 gcc 都是 1 —— 同一个变量在两条通路
+    /// 下给出两个值，就是「宽度口径有两套」的直接后果。
+    pub fn mov_reg_truncate(&mut self, dst: u8, src: u8, sz: usize) {
+        let modrm = 0xC0u8 | ((dst & 7) << 3) | (src & 7);
+        match sz {
+            1 | 2 => {
+                // movzx dst, src8 / src16: 只取低位并清零高位。
+                // 低 8 位里 r4-r7 是 spl/bpl/sil/dil, 必须有 REX 前缀才能编出来;
+                // r8-r15 的字节/字寄存器同样靠 REX.R/B 区分。
+                let need_rex = dst >= 8 || src >= 8 || (sz == 1 && src >= 4);
+                let op = if sz == 1 { 0xB6 } else { 0xB7 };
+                if need_rex {
+                    let mut rex = 0x40u8;
+                    if dst >= 8 {
+                        rex |= 0x04;
+                    }
+                    if src >= 8 || (sz == 1 && src >= 4) {
+                        rex |= 0x01;
+                    }
+                    self.emit(&[rex, 0x0F, op, modrm]);
+                } else {
+                    self.emit(&[0x0F, op, modrm]);
+                }
+            },
+            4 => {
+                // mov dst32, src32: 32 位写自动清零高 32 位。dst == src 时也不能跳,
+                // 那一次「自己搬自己」正是把高 32 位清掉的动作。
+                let mut rex = 0x40u8;
+                if dst >= 8 {
+                    rex |= 0x04;
+                }
+                if src >= 8 {
+                    rex |= 0x01;
+                }
+                // 方向必须是 8B (mov r, r/m: ModRM.reg 是目的, rm 是源) —— 与 `mov()`
+                // 同一个形态, 只是不带 REX.W。89 /r 的方向正好相反 (reg 是源), 用它
+                // 会把变量的旧值当输入搬进来 (实测读出的是栈/参数垃圾)。
+                if rex == 0x40 {
+                    self.emit(&[0x8B, modrm]);
+                } else {
+                    self.emit(&[rex, 0x8B, modrm]);
+                }
+            },
+            _ => {
+                if dst != src {
+                    self.mov(dst, src);
+                }
+            },
+        }
+    }
+
+    /// 从 `mov_reg_truncate` 立下的规范形态**按声明宽度扩展**读出。
+    /// 无符号与 8 字节就是普通 64 位搬运（高位本来就是 0 或有效位）；有符号窄类型
+    /// 补 movsx/movsxd，与栈槽路径的 `movsxd`/`load_stack_sized` 同口径。
+    pub fn mov_reg_extend(&mut self, dst: u8, src: u8, sz: usize, signed: bool) {
+        if sz >= 8 || !signed {
+            if dst != src {
+                self.mov(dst, src);
+            }
+            return;
+        }
+        let modrm = 0xC0u8 | ((dst & 7) << 3) | (src & 7);
+        let mut rex = 0x48u8;
+        if dst >= 8 {
+            rex |= 0x04;
+        }
+        if src >= 8 {
+            rex |= 0x01;
+        }
+        match sz {
+            1 => self.emit(&[rex, 0x0F, 0xBE, modrm]),
+            2 => self.emit(&[rex, 0x0F, 0xBF, modrm]),
+            _ => self.emit(&[rex, 0x63, modrm]), // movsxd r64, r/m32
+        }
+    }
+
 
     pub fn mov_imm(&mut self, reg: u8, v: i128) {
         if v >= i32::MIN as i128 && v <= i32::MAX as i128 {
@@ -1255,7 +1335,7 @@ impl Codegen {
         // 变量的家不是临时值: claim 之后 `alloc_callee_saved` 就不会再发这个寄存器,
         // 所以正常路径到不了这里。留这道门是让「把绑定中的寄存器标回空闲」在未来
         // 任何新增的释放点上都直接失效, 而不是又退回本文件刚修掉的缺陷。
-        if self.reg_bindings.values().any(|&r| r == reg) {
+        if self.reg_bindings.values().any(|(r, _)| *r == reg) {
             return;
         }
         for i in 0..4 {

@@ -1120,11 +1120,12 @@ COMPILE-FAIL 仍 60、ADDR-NORM 仍 2（本轮零新增）；最小复现修后�
 **代价**：绑定生效期间临时值池少一个寄存器（4 → 3），更深的表达式退回帧槽。这是所有权
 模型的必然结果而不是回归 —— GCC 同样是在干涉图里减掉已被占用的寄存器。
 
-**本轮新测到、仍未闭合的两条（同一族，都已缩到一句话可复现）**：
+**本轮新测到的两条同类缺口（同一族，都已缩到一句话可复现；宽度那条当轮就闭合了，见
+§7.16）**：
 
 | 形态 | 实测 | 病灶 |
 |---|---|---|
-| `register unsigned int v asm("rbx"); v = 0x100000001UL; unsigned long back = v;` | -O0 `back=4294967297`，gcc 与 -O2 都是 `1` | 绑定路径是两次裸 64 位 `mov`：`mov_to_stack` 不按声明宽度截断，`mov_from_stack` 不做符号/零扩展 —— 而栈槽路径的宽度口径（`movsxd` / `movzx` / 32 位 store）是专门修过的（`access.rs` 里那段注释写着「按变量声明类型宽度存储」）。P12-B 想把 `int`/`char` 变量也灌进绑定表，必须先闭合这条 |
+| ~~`register unsigned int v asm("rbx"); v = 0x100000001UL; unsigned long back = v;`~~ **已修（§7.16）** | -O0 `back=4294967297`，gcc 与 -O2 都是 `1` | 绑定路径是两次裸 64 位 `mov`：`mov_to_stack` 不按声明宽度截断，`mov_from_stack` 不做符号/零扩展 —— 而栈槽路径的宽度口径（`movsxd` / `movzx` / 32 位 store）是专门修过的（`access.rs` 里那段注释写着「按变量声明类型宽度存储」）。P12-B 要把 `int`/`char` 变量也灌进绑定表，必须先闭合这条 ⇒ 已闭合 |
 | 四个 `"=q"` 输出 + `register long v asm("rbx")` | -O0 `after=22`，gcc `after=100` | `GP_LEGACY_POOL = [rax,rbx,rcx,rdx]` 服务 `q`/`Q` 约束，而 asm 规划器（`AsmRegisterPlanner::new` 只吃 clobber 列表）不知道绑定表 |
 
 第二条**不能**只把绑定寄存器加进规划器的排除集合：`q` 的可用池只有 4 个，一旦
@@ -1144,6 +1145,45 @@ codegen 不再分配 + 真 SPILL/RELOAD）要重写发射模型，而实质价�
 warning；OPT-DIFF 仍 **4（2 个文件）**（本轮改的是后端发射层，没有新增等价性债）；
 可复现门禁 5040 组合字节一致；`make golden-cross` 校验 6 项全 OK（arm/mips 产物未变，
 本项只影响 x86_64）；`check_fixtures` / `check_fixtures_selftest` 5/5 全过。
+
+### 7.16 第 23 轮（下半之二）：绑定路径的宽度口径与栈槽路径对齐
+
+§7.15 留下的两条未闭合项里先做了「绑定路径按声明宽度存取」—— 它同时是 P12-B 的前置：
+自动分配要能把 `int`/`char` 变量灌进绑定表。
+
+**病灶**：`mov_to_stack` / `mov_from_stack` 的绑定分支各是一次裸 64 位 `mov`，而栈槽分支
+的宽度规则是专门修过的（窄写只写那么多字节、读时按符号性 `movsxd`/`movzx`）。同一个变量
+因此在两种形态下给出两个值。最小复现（新夹具 `tests/fixtures/c/register_binding_width.c`，
+修前 = `75fc854` 的编译器，-O0 实测）：
+
+| 语句 | 修前 -O0 | gcc |
+|---|---|---|
+| `register unsigned int v asm("rbx"); v = w; bv = v;`（`w = 0x1000000ABUL`） | `bv=0` | 171 |
+| `register unsigned int gvu asm("r15"); gvu = w; gv = gvu;`（file-scope） | `gv=4294967467` | 171 |
+| 控制：`s = -1`（signed int）、`c = 200`（signed char）、循环里 `c += 1` | ✓ | ✓ |
+
+`bv=0` 里混着 §7.15 的缺陷 2（%rbx 还被临时值池借走了一次），`gv=4294967467` 才是纯宽度
+口径问题 —— 而它也只有「宽源赋给窄绑定变量」才会暴露：`c = 200` 这种写法在赋值处就已经
+把值转成了目标类型，寄存器里本来就是 -56，所以窄绑定的日常用法看上去一直是对的。
+
+| 改动 | 作用 |
+|---|---|
+| `Codegen::var_access_shape` | 宽度口径的唯一真源，返回 `(字节数, 4 字节有符号, 窄有符号枚举, 是聚合)`。原来这段判断只是 `mov_from_stack` 里的一个局部闭包，现在提出来给两条通路共用；类型来源是 `var_map`（局部）→ 绑定表携带的声明类型 → 8 字节回退 |
+| `Codegen::mov_reg_truncate` | 写入绑定寄存器时按声明宽度截断成**规范形态**（低位有效、高位为 0），于是读出侧无符号只需普通 64 位搬运 |
+| `Codegen::mov_reg_extend` | 读出时按符号性补 `movsx`/`movsxd`，与栈槽路径同口径 |
+| `reg_bindings: HashMap<String, (u8, Type)>`（连 `global_reg_bindings` 一起） | 寄存器与声明类型**同表携带**。file-scope 的 `register asm` 变量在收集全局时被 `continue` 掉，既不在 `var_map` 也不在 `globals_raw`，宽度只能由绑定表自己带 —— 分两张表就一定会漂移 |
+| `tests/fixtures/c/register_binding_width.c` + `asm_register_binding_honors_declared_width` | 四档逐档 gcc 对照；夹具放在 `tests/fixtures/c/` 里，因此 OPT 等价门禁从此也覆盖这条 |
+
+**本轮又实测抓到的一条自身缺陷（写下来，因为它正是这类改动的典型陷阱）**：第一版
+`mov_reg_truncate` 的 4 字节分支用了 `89 /r`，而 `89` 的方向是「reg 是源、r/m 是目的」，
+`mov()` 用的 `8B` 才相反 —— 结果是把变量的**旧值**当输入搬进去，所有测试值变成栈垃圾。
+是靠「先量再判」当场发现的，不是靠读代码。
+
+**度量**：`cargo test --release -j2 -- --test-threads=2` 3089 通过 / 0 失败 / 零
+warning；OPT-DIFF 仍 **4（2 个文件）** —— 新夹具本身进了语料，修前它会以
+`-O0 vs -O2` 的形式多出一条 OPT-DIFF，现在四档一致；可复现门禁从 5040 涨到
+**5058 组合**（新夹具带来的语料）且全部字节一致；`make golden-cross` 6 项全 OK；
+`check_fixtures` 全过（新夹具被测试引用）。
 
 ### 8. 第 6 轮：P10 已接入 + P16 分析层完成
 

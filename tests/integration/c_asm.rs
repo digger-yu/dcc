@@ -471,6 +471,23 @@ fn asm_register_binding_owns_its_register() {
     assert_bytes_present(&text, &[0x49, 0x89, 0x5d, 0xf0], "序言保存 %rbx");
 }
 
+/// `register asm` 变量的读写必须与栈槽路径同一个宽度口径（写入截断、读出扩展）。
+///
+/// 修前 -O0 实测 `bv=0`、file-scope 的 `gv=4294967467`（gcc 与 -O2 都是 171）：绑定
+/// 路径是两次裸 64 位 `mov`，只有「宽源赋给窄绑定变量」才暴露。这份夹具放在
+/// `tests/fixtures/c/` 里，因此 `check_opt_equivalence.sh` 也会逐档盯住它。
+#[test]
+fn asm_register_binding_honors_declared_width() {
+    let source = include_str!("../fixtures/c/register_binding_width.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("asm-reg-bind-width", source, &[flag]),
+            0,
+            "{flag}: 绑定变量的宽度口径与 gcc 不一致"
+        );
+    }
+}
+
 /// GNU 局部数字标签 6: / 6f / 6b
 #[test]
 fn asm_local_label_compiles() {

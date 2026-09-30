@@ -112,11 +112,11 @@ impl Codegen {
         self.reg_bindings.clear();
         // file-scope 绑定也要过同一道逸出判据：地址被取走的对象必须留在内存里。
         self.collect_addr_escaped(prog);
-        for (n, r) in self.global_reg_bindings.clone() {
+        for (n, b) in self.global_reg_bindings.clone() {
             if !self.register_binding_allowed(&n) {
                 continue;
             }
-            self.reg_bindings.insert(n, r);
+            self.reg_bindings.insert(n, b);
         }
         self.cleanup_vars.clear();
         self.sret_watermark = 0;
@@ -982,7 +982,7 @@ impl Codegen {
                             // 忽略绑定，而规划期总是先分好了槽，退回内存路径无风险）。
                             if self.register_binding_allowed(&v.name.name) {
                                 if let Some(reg_idx) = Self::parse_reg_name(reg_name) {
-                                    self.reg_bindings.insert(v.name.name.clone(), reg_idx);
+                                    self.reg_bindings.insert(v.name.name.clone(), (reg_idx, v.ty.clone()));
                                     // 绑定即占用该寄存器：必须保存 + 不得再当临时值发出（见 claim_bound_register）
                                     self.claim_bound_register(reg_idx);
                                 }

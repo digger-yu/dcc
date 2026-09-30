@@ -959,7 +959,7 @@ impl Codegen {
                     // 与 `compile_func` 里的声明同一判据：地址已逸出的对象不得绑到寄存器。
                     if self.register_binding_allowed(&v.name.name) {
                         if let Some(reg_idx) = Self::parse_reg_name(reg_name) {
-                            self.reg_bindings.insert(v.name.name.clone(), reg_idx);
+                            self.reg_bindings.insert(v.name.name.clone(), (reg_idx, v.ty.clone()));
                             // 绑定即占用该寄存器：必须保存 + 不得再当临时值发出（见 claim_bound_register）
                             self.claim_bound_register(reg_idx);
                         }

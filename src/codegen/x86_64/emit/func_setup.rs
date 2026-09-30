@@ -18,7 +18,7 @@ impl Codegen {
         // 「本函数不使用这些寄存器」, 序言里对应的保存会被 patch_callee_saves
         // 改成 nop —— 调用者存放在里面的值就此消失 (本地声明那条路径在绑定处
         // 当场 claim, 因为它的时机晚于本函数)。
-        let bound: Vec<u8> = self.reg_bindings.values().copied().collect();
+        let bound: Vec<u8> = self.reg_bindings.values().map(|(r, _)| *r).collect();
         for reg in bound {
             self.claim_bound_register(reg);
         }
