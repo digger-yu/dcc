@@ -2945,7 +2945,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     span: dummy_span(),
                 };
                 self.push_inst(inst);
-                Ok(Operand::Void)
+                Ok(Operand::Int(0))
             },
             HirExprKind::FieldAccess { object, field } => {
                 self.lower_field_store(*object, *field, rhs)
@@ -5238,7 +5238,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
             // 链就是 [end_catch 清理, 外层 handler]。
             self.eh_call_runtime(CxxRuntimeSymbol::Rethrow, vec![]);
             self.set_term(Terminator::Unreachable);
-            return Ok(Operand::Void);
+            return Ok(Operand::Int(0));
         };
 
         // 1. 异常缓冲区 (堆上, 由 `__cxa_end_catch`/`__cxa_free_exception` 释放)

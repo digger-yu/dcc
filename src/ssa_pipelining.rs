@@ -2660,7 +2660,7 @@ mod apply_tests {
         // latch 块已被摘除，且不在块序里。
         assert!(!f.blocks.contains_key("for.step"), "latch 块应被摘除");
         assert!(!f.block_order.iter().any(|b| b == "for.step"));
-        // preheader 保留条件分支（不是一跳到底）：否则首次进 kernel 无人判定，
+        // preheader 无条件跳转：否则首次进 kernel 无人判定，
         // 整个循环变成 do-while 语义、至少多跑一轮（就是那次越界写）。
         // 出口块前置 epilogue。
         assert!(

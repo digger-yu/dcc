@@ -1156,7 +1156,7 @@ impl Builder {
                 }
                 match dest {
                     Some(v) => Operand::Var(v),
-                    None => Operand::Void,
+                    None => Operand::Int(0),
                 }
             },
             Expr::Index { arr, idx, span, ty } => {
@@ -1533,10 +1533,10 @@ impl Builder {
                     self.define(d.clone());
                     Operand::Var(d)
                 } else {
-                    Operand::Void
+                    Operand::Int(0)
                 }
             },
-            _ => Operand::Void, // 简化: 复杂 expr (CompoundLit, StmtExpr, LabelAddr, VaArg) 降级
+            _ => Operand::Int(0), // 简化: 复杂 expr (CompoundLit, StmtExpr, LabelAddr, VaArg) 降级
         }
     }
 
@@ -6166,7 +6166,14 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
             op: *op,
             e: Box::new(operand_to_expr(e, env, func)),
             span: sp.clone(),
-            ty: Type::Int,
+            ty: match e {
+                Operand::Var(v) => v.ty.clone(),
+                Operand::Float(_, t) => t.clone(),
+                Operand::SymAddr(_, t) => t.clone(),
+                Operand::FnAddr(_, t) => t.clone(),
+                Operand::Int(_) => Type::Int,
+                _ => Type::Int,
+            },
         },
         InstKind::Cast { ty, e } => Expr::Cast {
             ty: ty.clone(),
