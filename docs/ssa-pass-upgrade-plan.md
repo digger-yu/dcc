@@ -843,8 +843,8 @@ IR 层断言（算一遍 `prologue ++ kernel×R ++ epilogue` 对每个节点的*
 | 文件 | -O2 现象 | 关掉谁就正常 | 下一步 |
 |---|---|---|---|
 | `va_arg/global_valist_sse_agg.c`、`va_arg/vacopy_sse_agg.c`、`va_arg/mixed_sse_pipeline_named.c`、`va_arg/mixed_sse_via_valist_param.c` | 退出码 = 首个读错位置的序号（15/10/20/13） | **只有 SCCP**（`DCC_SSA_OFF=sccp` 就全对） | SCCP 不得对「经另一函数写入的全局 va_list 字段」做常量传播；先从 `non_propagatable_names` 入手查 |
-| `vla.c` | rc=12 | **只有 SSA 层 GVN**（`DCC_SSA_OFF=gvn` 就全对） | GVN 对 VLA 基址/长度推导的重用条件 |
-| `complex_abi.c`、`ld80_arith.c`、`chained_assign_truncation.c`、`agg_param_reg_stack_split.c` | rc=1 / rc=1 / abort / rc=6 | 关掉**整个 SSA 往返**才正常，单个 pass 都不是触发者 | 属于 build/rebuild 的形状丢失（例如 `chained_assign_truncation` 的赋值结果必须按左值类型截断，而 SSA 里它是一条加法），需逐个建模 |
+| `vla.c` | rc=12 | **只有 SSA 层 GVN**（`DCC_SSA_OFF=gvn` 就全对） | 未修；两种候选方案已被实测否定，证据与下一步见 §7.10 |
+| `complex_abi.c`、`ld80_arith.c`、`chained_assign_truncation.c`、`agg_param_reg_stack_split.c` | rc=1 / rc=1 / abort / rc=6 | 关掉**整个 SSA 往返**才正常，单个 pass 都不是触发者（第 20 轮逐个 `DCC_SSA_OFF=*` 复测：gvn/sccp/dse/sched/die 全部仍错） | 属于 build/rebuild 的形状丢失，需逐个建模。新证据：`chained_assign_truncation` 的 `unsigned f(void){...ul = us = l2 = s2 = -1; return ul;}` 抽成单函数**不复现**（-O0/-O2 都给 65535），所以触发条件在同一 TU 的别处；下一步从「往返前后整函数 AST 对比」入手而不是猜赋值截断 |
 
 **§7.4 项 3（`reg_bindings` 闭合）本轮没做，理由不是时间不够**（下一轮已做完，见 §7.8）：
 查下去发现它不是一个
@@ -894,6 +894,49 @@ GVN 已有的逸出分析形成两套判据。现在统一到一处：
 **度量**：`cargo test --release` 3083 通过 / 0 失败；OPT-DIFF 仍 18（无回归）；可复现
 门禁 5040 组合字节一致；`check_fixtures` 601 个夹具全被引用；`make golden-cross` 6 项
 全 OK（arm/mips 产物未变，本项只影响 x86_64 的绑定判定）。
+
+### 7.9 第 20 轮：SCCP 的无类型常量表与调度器的声明盲区（OPT-DIFF 18 → 10）
+
+靠第 18 轮加的 `DCC_OPT_SKIP` / 原有 `DCC_SSA_OFF` 对剩下 18 条逐文件二分，
+先修掉两个「单 pass 触发」的根因：
+
+1. **SCCP 的常量表是无类型 i128**（4 个 va_arg 夹具 / 8 条）。`Cast{e,..} =>
+   operand_int(e,..)` 把 `(long double)50` 登成整数 50，替常量后变参实参从
+   `Var(_tcast_1: LongDouble)` 变成 `Operand::Int(50)`：数值一样但 SysV 参数类从
+   MEMORY 变成 INTEGER，caller 不再预留 16 字节溢出区 ⇒ callee 里每个
+   `va_arg(long double)` 都读错位置（夹具退出码就是首个读错的序号）。现在
+   入表与替入两端都要求「该名字的 SSA 类型是整数类」。新单测同时钉住反向
+   对照（整数传播仍要工作），否则这条判据只是「关掉 SCCP」。
+2. **调度器看不见用户声明**（vec_cast.c / 2 条）。`PreservedDecl` 把整条 `Decl::Var`
+   保留成一条指令，它**没有 dest**，所以 `inst_defs`/`inst_def_bases` 都不报它，
+   名字→基名表里也没有它供出的 `v.1` ⇒ 基名序链上有洞，P5 能把声明挖到读它的
+   值之后（实测 -O3 下 `v2si v = {..}; (unsigned long long)v` 拿到全 0）。同时
+   `base_of` 现在也覆盖「只被读过、从没当过 dest」的名字。
+   这条长期藏在 1. 后面：被折成常量后根本没有可错序的依赖边。两个都修，而不是
+   把折叠改回去。`vector_size_cast_in_expression_run_returns_zero` 改成四档全跑
+   ——只跑 -O0 时这类 -O3 缺陷对测试套件完全不可见，只能靠 OPT 门禁兜到。
+
+### 7.10 未修：vla.c（GVN 触发），以两种被实测否定的候选方案为证据
+
+现象：`z->data[i]` 的三次地址计算被合并成一个 `_tmem_16`；它不再「单次使用」，
+重建时就不能再内联，于是变成一个具名局部——而**局部的存储语义与它装的值不一回事**：
+codegen 对数组类型的局部按「对象住在自己的槽里」给地址（`lea slot`），而槽里存的
+其实是那块对象的地址 ⇒ 读写全落到本地帧（`zero_len_test`/`flex_arr_test` 返回 -2）。
+
+两个看上去合理的修法都被实测否定（已回退，证据留在 `ssa_ident_expr` 的注释里）：
+
+| 候选 | 结果 |
+|---|---|
+| 重建时把数组类型的合成临时值衰减成 `Ptr(elem)`（声明与使用处同一规则） | 修好 vla.c，但 `may_alias.c` 在 -O2 **段错误** ⇒ 同一个「数组类型」在本 IR 里有两种存储语义，类型本身分不出来 |
+| GVN 不给数组类型的结果编号（`val_key` 路线） | **没有修好 vla.c** ⇒ 这次合并不来自值编号 CSE |
+
+下一轮的起点（而不是重新猜）：GVN 里剩下的两条重命名通道——phi 形状
+（`seen_phi` / `register_rename`，`ssa_passes.rs` 约 3010-3045）与退化 phi
+（约 3627 行）。先用临时探针确认合并到底由哪条通道产生，再决定存储语义如何建模
+（真正的修法可能需要把「子数组的地址」在 IR 里就表成 `Ptr`，而不是靠类型猜）。
+
+本轮度量：`cargo test --release` 3084 通过 / 0 失败；OPT-DIFF **18 → 10（5 个文件）**；
+可复现门禁 5040 组合字节一致；`check_fixtures` 全引用、selftest 5/5。
 
 ### 8. 第 6 轮：P10 已接入 + P16 分析层完成
 

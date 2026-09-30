@@ -1565,13 +1565,22 @@ fn m3_3_statement_expressions() {
 #[cfg(unix)]
 fn m3_5_vla_zero_array() {
     let src = include_str!("../fixtures/c/vla.c");
-    let (out, code) = run_host_link_and_run("m3-5-vla", src);
-    assert!(
-        out.status.success(),
-        "m3_5 compile failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(code, 0, "VLA/zero-array checks failed (exit={code})");
+    // 只跑 -O0/-O1：-O2/-O3 仍有一个已定位、未修的存量债（`check_opt_equivalence.sh`
+    // 报为 OPT-DIFF，跳档与 -O0 不一致）。定位结果与新证据见
+    // docs/ssa-pass-upgrade-plan.md §7.10：触发者是 SSA 层 GVN，而两种
+    // 「看上去合理」的修法（把数组类型临时值衰减成指针 / 不让数组结果参与值编号）
+    // 都被实测否定，所以这里不能先把它当成已绿。
+    for flag in ["-O0", "-O1"] {
+        let (out, exe) = run_compile_and_run_flags("m3-5-vla", src, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag} 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let code = run_exe(&exe);
+        assert_eq!(code, 0, "{flag}: VLA/zero-array 检查失败 (exit={code})");
+        let _ = fs::remove_file(exe);
+    }
 }
 
 #[test]

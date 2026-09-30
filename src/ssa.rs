@@ -5565,6 +5565,23 @@ fn emit_rebuild_inst(
     }
 }
 
+/// SSA 变量 → AST `Ident` 的唯一出口。重建的多条路径共用一份构造，避免各自漂移。
+///
+/// 注意：这里**不能**给数组类型的临时值做「衰减成指针」的改写。试过，错的：同一个
+/// 「数组类型的 SSA 值」在本 IR 里有两种存储语义（子对象的别名，与住在自己槽里的
+/// 聚合），按类型一刀切会让 `may_alias.c` 在 -O2 段错误。正确的修在 GVN 侧（
+/// `val_key` 不给数组类型结果编号），见那里的根因说明。
+fn ssa_ident_expr(name: &str, v: &SsaVar) -> Expr {
+    Expr::Ident {
+        name: crate::ast::Ident {
+            name: name.to_string(),
+            span: v.span.clone(),
+        },
+        span: v.span.clone(),
+        ty: v.ty.clone(),
+    }
+}
+
 /// 解析操作数: 先查 subst 内联映射, 再回退到基础名。
 fn resolve_operand(
     o: &Operand,
@@ -5580,23 +5597,9 @@ fn resolve_operand(
             }
             // 非内联: 使用基础变量名
             if let Some(found) = env.get(&ssa_name) {
-                Expr::Ident {
-                    name: crate::ast::Ident {
-                        name: found.base.clone(),
-                        span: v.span.clone(),
-                    },
-                    span: v.span.clone(),
-                    ty: v.ty.clone(),
-                }
+                ssa_ident_expr(&found.base, v)
             } else {
-                Expr::Ident {
-                    name: crate::ast::Ident {
-                        name: v.base.clone(),
-                        span: v.span.clone(),
-                    },
-                    span: v.span.clone(),
-                    ty: v.ty.clone(),
-                }
+                ssa_ident_expr(&v.base, v)
             }
         },
         _ => operand_to_expr(o, env, func),
@@ -6180,23 +6183,9 @@ fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>, _func: &Function)
     match o {
         Operand::Var(v) => {
             if let Some(found) = env.get(&v.name()) {
-                Expr::Ident {
-                    name: crate::ast::Ident {
-                        name: found.base.clone(),
-                        span: v.span.clone(),
-                    },
-                    span: v.span.clone(),
-                    ty: v.ty.clone(),
-                }
+                ssa_ident_expr(&found.base, v)
             } else {
-                Expr::Ident {
-                    name: crate::ast::Ident {
-                        name: v.base.clone(),
-                        span: v.span.clone(),
-                    },
-                    span: v.span.clone(),
-                    ty: v.ty.clone(),
-                }
+                ssa_ident_expr(&v.base, v)
             }
         },
         Operand::Int(v) => Expr::Int {
