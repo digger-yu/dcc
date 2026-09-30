@@ -940,6 +940,9 @@ pub fn classify_loop(func: &Function, header: &str) -> Result<PipelinedLoop, &'s
     if nodes.is_empty() {
         return Err("调度区为空");
     }
+    if nodes.iter().any(|i| !inst_is_materializable(&i.kind)) {
+        return Err("调度区内有不可按迭代复制的指令（异常边/用户声明/asm 输出）");
+    }
     if nodes.len() > 64 {
         return Err("调度区超过 64 条指令（方案的准入上限）");
     }
@@ -1026,6 +1029,24 @@ pub fn classify_loop(func: &Function, header: &str) -> Result<PipelinedLoop, &'s
 
 fn bb_phis_empty(func: &Function, name: &str) -> bool {
     func.blocks.get(name).map(|b| b.phis.is_empty()).unwrap_or(false)
+}
+
+/// 该指令能否被**按迭代复制**成多份实例。
+///
+/// 不是所有指令复制多份都还等价：
+///   * `Invoke` 复制会把一个受保护调用点撑成 N 个 call-site 区间，落地垫的
+///     `%rax/%rdx` 交接也会错位；`EhLandingPad` 必须是其块的第一条指令。
+///   * `PreservedDecl` 是**用户声明**，复制多份就是重复定义；
+///   * `InlineAsm` 的 `output_vars` 是写侧名字，多实例共用同一个名字会互相覆盖。
+/// 物化层只重写读操作数与 dest，处理不了这些形态，所以在准入处就拒掉。
+fn inst_is_materializable(k: &InstKind) -> bool {
+    !matches!(
+        k,
+        InstKind::Invoke { .. }
+            | InstKind::EhLandingPad { .. }
+            | InstKind::PreservedDecl { .. }
+            | InstKind::InlineAsm { .. }
+    )
 }
 
 /// 从头出发、只沿「属于自然循环体」的后继推进，走到 latch 为止；同时收集
@@ -1668,5 +1689,298 @@ mod gate_tests {
                 );
             }
         }
+    }
+}
+
+// ======================================================= 实例物化（落地地基）
+
+/// 物化出来的线性序列。
+#[derive(Clone, Debug)]
+pub struct Materialized {
+    pub insts: Vec<Inst>,
+    /// `(节点, 迭代)` → 该实例在序列里的输出名。
+    pub names: HashMap<(usize, usize), String>,
+}
+
+struct ResolveCtx<'a> {
+    lp: &'a PipelinedLoop,
+    def_of: &'a HashMap<String, usize>,
+    phi_from_pre: &'a HashMap<String, Operand>,
+    external: &'a HashSet<String>,
+}
+
+/// 把「节点 p 在迭代 k」这条指令里的一个源操作数解析成生产它的那个实例的输出名。
+///
+/// 三种情形必须分开：
+///   * 读的是**循环携带值**（头的 phi dest）⇒ 要的是上一轮的生产者，即
+///     `(phi_sources[v], k-1)`；第 0 轮读的是进循环前的值（phi 的 preheader 侧）。
+///   * 读的是**区域内**其它定义 ⇒ 同一迭代的那个实例。
+///   * 读的是**区域外**（参数、全局、循环前的定义）⇒ 原样保留。
+/// 任何「生产者还没物化」的情形都是错误返回，绝不留下一个前向引用。
+fn resolve_operand(
+    o: &Operand,
+    k: usize,
+    ctx: &ResolveCtx,
+    names: &HashMap<(usize, usize), String>,
+) -> Result<Operand, &'static str> {
+    let Operand::Var(v) = o else {
+        return Ok(o.clone());
+    };
+    let key = v.name();
+    if let Some(&q) = ctx.lp.phi_sources.get(&key) {
+        if k == 0 {
+            let src = ctx.phi_from_pre.get(&key).ok_or("phi 没有 preheader 侧输入")?;
+            return Ok(src.clone());
+        }
+        let name = names
+            .get(&(q, k - 1))
+            .cloned()
+            .ok_or("携带值的上一轮生产者尚未物化（调度序与依赖矛盾）")?;
+        return Ok(Operand::Var(SsaVar {
+            base: name,
+            version: 0,
+            ty: v.ty.clone(),
+            span: v.span.clone(),
+        }));
+    }
+    if let Some(&q) = ctx.def_of.get(&key) {
+        let name = names
+            .get(&(q, k))
+            .cloned()
+            .ok_or("同迭代依赖的生产者尚未物化（实例序颠倒了）")?;
+        return Ok(Operand::Var(SsaVar {
+            base: name,
+            version: 0,
+            ty: v.ty.clone(),
+            span: v.span.clone(),
+        }));
+    }
+    if ctx.external.contains(&key) {
+        return Ok(o.clone());
+    }
+    Err("引用了既不在调度区内、也不在区域外的名字")
+}
+
+/// 穷举重写一条指令里的所有读操作数。match 覆盖 `InstKind` 的全部变体是编译
+/// 器强制的 —— 新增变体时漏处理会直接编不过，而不是静默漏掉一条依赖。
+fn rewrite_kind<F>(k: &InstKind, f: &F) -> Result<InstKind, &'static str>
+where
+    F: Fn(&Operand) -> Result<Operand, &'static str>,
+{
+    Ok(match k {
+        InstKind::Bin { op, l, r } => InstKind::Bin { op: *op, l: f(l)?, r: f(r)? },
+        InstKind::Un { op, e } => InstKind::Un { op: *op, e: f(e)? },
+        InstKind::Cast { ty, e } => InstKind::Cast { ty: ty.clone(), e: f(e)? },
+        InstKind::AddrOf { base } => InstKind::AddrOf { base: base.clone() },
+        InstKind::Load { e, ty, is_volatile } => {
+            InstKind::Load { e: f(e)?, ty: ty.clone(), is_volatile: *is_volatile }
+        },
+        InstKind::Store { e, src, is_volatile } => {
+            InstKind::Store { e: f(e)?, src: f(src)?, is_volatile: *is_volatile }
+        },
+        InstKind::IndexLoad { arr, idx, ty, is_volatile } => InstKind::IndexLoad {
+            arr: f(arr)?,
+            idx: f(idx)?,
+            ty: ty.clone(),
+            is_volatile: *is_volatile,
+        },
+        InstKind::IndexStore { arr, idx, src, ty, is_volatile } => InstKind::IndexStore {
+            arr: f(arr)?,
+            idx: f(idx)?,
+            src: f(src)?,
+            ty: ty.clone(),
+            is_volatile: *is_volatile,
+        },
+        InstKind::Call { callee, args, ret_ty } => InstKind::Call {
+            callee: f(callee)?,
+            args: args.iter().map(f).collect::<Result<Vec<_>, _>>()?,
+            ret_ty: ret_ty.clone(),
+        },
+        InstKind::MemberLoad { obj, obj_ty, field, ty, is_volatile, is_arrow } => {
+            InstKind::MemberLoad {
+                obj: f(obj)?,
+                obj_ty: obj_ty.clone(),
+                field: field.clone(),
+                ty: ty.clone(),
+                is_volatile: *is_volatile,
+                is_arrow: *is_arrow,
+            }
+        },
+        InstKind::MemberStore { obj, obj_ty, field, src, ty, is_volatile, is_arrow } => {
+            InstKind::MemberStore {
+                obj: f(obj)?,
+                obj_ty: obj_ty.clone(),
+                field: field.clone(),
+                src: f(src)?,
+                ty: ty.clone(),
+                is_volatile: *is_volatile,
+                is_arrow: *is_arrow,
+            }
+        },
+        InstKind::Select { cond, then_, else_ } => InstKind::Select {
+            cond: f(cond)?,
+            then_: f(then_)?,
+            else_: f(else_)?,
+        },
+        InstKind::InlineAsm { .. } => return Err("asm 指令不可物化（准入应已拒）"),
+        InstKind::PreservedDecl { .. } => return Err("用户声明不可按迭代复制（准入应已拒）"),
+        InstKind::Invoke { .. } => return Err("受保护调用不可物化（准入应已拒）"),
+        InstKind::EhLandingPad { .. } => return Err("落地垫不可物化（准入应已拒）"),
+    })
+}
+
+/// 把一个流水计划物化成**一条线性指令序列**：每个 `(节点, 迭代)` 实例复制一份，
+/// 源操作数改写成生产它的实例的输出名，输名字统一成唯一的 `_pipe{seq}`。
+///
+/// 这是「应用到 IR」的地基：kernel 的轮转 phi 只是把这条序列压缩回循环的紧凑
+/// 形式。序列本身的合法性是**可判定**的 —— 每个引用都必须指向更早的实例或区域外
+/// 定义。模调度只要漏一条边（含基名塌缩序边、内存定序边、跳迭代边），这里就会以
+/// 「生产者尚未物化」的形式炸出来，而不是以错值形式进入产物。
+pub fn materialize(
+    func: &Function,
+    lp: &PipelinedLoop,
+    plan: &InstancePlan,
+) -> Result<Materialized, &'static str> {
+    let n = lp.nodes.len();
+    let mut def_of: HashMap<String, usize> = HashMap::new();
+    for (i, inst) in lp.nodes.iter().enumerate() {
+        if let Some(d) = &inst.dest {
+            def_of.insert(d.name(), i);
+        }
+    }
+    let mut external: HashSet<String> = func.params.iter().map(|p| p.name()).collect();
+    for name in crate::ssa::ordered_block_names(func) {
+        if lp.region_bbs.contains(&name) {
+            continue;
+        }
+        let Some(bb) = func.blocks.get(&name) else { continue };
+        for inst in &bb.insts {
+            if let Some(d) = &inst.dest {
+                external.insert(d.name());
+            }
+        }
+    }
+    let mut phi_from_pre: HashMap<String, Operand> = HashMap::new();
+    if let Some(h) = func.blocks.get(&lp.header) {
+        for p in &h.phis {
+            if let Some((src, _)) = p.incoming.iter().find(|(_, from)| *from == lp.preheader) {
+                phi_from_pre.insert(p.dest.name(), Operand::Var(src.clone()));
+            }
+        }
+    }
+    let ctx = ResolveCtx { lp, def_of: &def_of, phi_from_pre: &phi_from_pre, external: &external };
+
+    let mut names: HashMap<(usize, usize), String> = HashMap::new();
+    let mut insts: Vec<Inst> = Vec::new();
+    for (idx, &(p, k)) in plan.flatten().iter().enumerate() {
+        if p >= n {
+            return Err("实例引用了不存在的节点");
+        }
+        let src = &lp.nodes[p];
+        if !inst_is_materializable(&src.kind) {
+            return Err("调度区内有不可按迭代复制的指令（异常边/用户声明/asm 输出）");
+        }
+        let out = format!("_pipe{idx}");
+        let kind: InstKind;
+        {
+            let f = |o: &Operand| resolve_operand(o, k, &ctx, &names);
+            kind = rewrite_kind(&src.kind, &f)?;
+        }
+        let dest = src.dest.as_ref().map(|d| SsaVar {
+            base: out.clone(),
+            version: 0,
+            ty: d.ty.clone(),
+            span: d.span.clone(),
+        });
+        insts.push(Inst { dest, kind, span: src.span.clone() });
+        names.insert((p, k), out);
+    }
+    // 覆盖性：每个 (节点,迭代) 都要有名字，且序列长度与实例数一致。
+    if names.len() != n * (plan.kernel.len() + plan.depth) || insts.len() != plan.flatten().len() {
+        return Err("物化序列的实例覆盖不完整");
+    }
+    Ok(Materialized { insts, names })
+}
+
+#[cfg(test)]
+mod materialize_tests {
+    use super::*;
+    use crate::ssa::Function;
+
+    fn fn_ssa(src: &str, name: &str) -> Function {
+        let (prog, _d) = crate::parser::parse(src.as_bytes(), "t.c");
+        let (m, _w) = crate::ir::lower(prog).unwrap();
+        for decl in m.source().decls.iter() {
+            if let crate::ast::Decl::Func(f) = decl {
+                if f.name.name == name {
+                    return crate::ssa::build_from_func(f).expect("应能 SSA 化");
+                }
+            }
+        }
+        panic!("找不到函数 {name}");
+    }
+
+    const RED: &str = "int red(int n,int*a){int s=0;for(int i=0;i<8;i++)s+=a[i];return s;}\n";
+
+    fn red_plan() -> (Function, PipelinedLoop, PipelinePlan) {
+        let f = fn_ssa(RED, "red");
+        let p = plan_for_header(&f, "for.body").unwrap_or_else(|e| panic!("red 应过闸门：{e}"));
+        let lp = p.lp.clone();
+        (f, lp, p)
+    }
+
+    /// 真实循环的物化序列必须是**合法线性序**：每个 `_pipe*` 引用都指向更早的
+    /// 实例。这就是「模调度没有漏边」的直接证据 —— 漏一条边这里就炸。
+    #[test]
+    fn materialized_sequence_has_no_forward_reference() {
+        let (f, lp, p) = red_plan();
+        let m = materialize(&f, &lp, &p.inst).unwrap_or_else(|e| panic!("物化失败：{e}"));
+        assert_eq!(m.insts.len(), lp.nodes.len() * lp.trip, "实例数 = 节点数 × 迭代数");
+        assert_eq!(m.names.len(), m.insts.len());
+        let mut defined: HashSet<String> = HashSet::new();
+        for (idx, inst) in m.insts.iter().enumerate() {
+            for u in kind_uses(&inst.kind) {
+                if u.base.starts_with("_pipe") {
+                    assert!(defined.contains(&u.name()), "实例 {idx} 前向引用 {}", u.name());
+                }
+            }
+            if let Some(d) = &inst.dest {
+                assert!(d.base.starts_with("_pipe"), "输名字必须是唯一的合成名：{}", d.name());
+                assert!(!defined.contains(&d.name()), "输名字不得重复");
+                defined.insert(d.name());
+            }
+        }
+        // 携带值确实跨轮引用（否则说明物化把递归拍平了，那是错的）。
+        let crossed = m
+            .names
+            .iter()
+            .filter(|((_, k), _)| *k > 0)
+            .count();
+        assert!(crossed > 0, "应有跨轮实例");
+    }
+
+    /// 负向对照：把 kernel 行内序颠倒，物化必须报错而不是产出一个前向引用序列。
+    /// 没有这条，上一条测试可能因为「永远不会出现错序」而成为空判。
+    #[test]
+    fn materialize_rejects_reversed_row() {
+        let (f, lp, p) = red_plan();
+        let mut bad = p.inst.clone();
+        for row in bad.kernel.iter_mut() {
+            row.reverse();
+        }
+        let e = materialize(&f, &lp, &bad).expect_err("颠倒行内序必须被拒");
+        assert!(e.contains("尚未物化"), "应报生产者缺失，实得：{e}");
+    }
+
+    /// 区域内有不可按迭代复制的指令（inline asm 的输出/易失标记）时，准入就该拒。
+    #[test]
+    fn admission_refuses_unmaterializable_insts() {
+        let src = "int a(int n,int*v){int s=0;for(int i=0;i<8;i++){{__asm__ volatile(\"nop\");s+=v[i];}}return s;}\n";
+        let f = fn_ssa(src, "a");
+        let errs = rejections(&f, &Resources::default());
+        assert!(
+            errs.iter().any(|(_, e)| e.contains("不可按迭代复制")),
+            "含 asm 的区域必须被准入拒掉：{errs:?}"
+        );
     }
 }

@@ -560,6 +560,40 @@ IR 反推这条判据会得到错结论，所以改成用合成 (depth, ii, trip
 一级轮转 phi）、接入 `run_ssa_passes`、并用执行夹具与 objdump 验收。未接入前 `ssa_pipelining`
 不参与编译产物，所以上表的 OPT-DIFF 与可复现结果与接入前同源。
 
+### 7.2 第 10 轮：物化层——把「应用到 IR」从推导变成可判定的检查
+
+新增 `materialize()`：把一个计划展成**一条线性指令序列**，每个 `(节点, 迭代)` 实例
+复制一份，源操作数改写成「生产它的那个实例的输出名」（输名字统一成唯一的
+`_pipe{seq}`），区域外操作数原样保留。它就是落地所需的全部名字解析规则。
+
+**一个重要设计决策（走弯路后得到的）**：不要手工推 kernel 的轮转 phi 该携带哪个
+版本的哪个变量。我尝试过按 `shift` 手推索引（节点 0 读 `i_3` 需要哪一轮的 `i_2`？），
+这正是上一版实现反复出错的地方。现在的路径是：`resolve_operand` 已经把「该读
+哪一个实例」算对了（56 个实例无一前向引用），kernel 的 phi 集合应当从这条规则**自动
+生成**：对每条跨轮引用（`r' = r - 1`）生成一个 phi，latch 侧接生产者节点本轮的输出，
+preheader 侧接 prologue 对应的实例输出；同轮前向引用直接接名字，不生成 phi。
+`depth ≤ 1` 保证跳轮只能是 `r-1`，所以一级 phi 够用 —— 这不是凑巧，而是闸门判据的
+直接推论。
+
+准入加了一条 `inst_is_materializable`：区域内有 `Invoke` / `EhLandingPad` /
+`PreservedDecl` / `InlineAsm` 时直接拒。理由逐条写在函数注释里（受保护调用复制多份
+会把一个 call-site 区间撑成 N 个；用户声明复制就是重复定义；asm 的 `output_vars` 是
+写侧名字，多实例共用会互相覆盖）。这些形态物化后不会产生编译错误，只会产生**错值**。
+
+三条单测（`materialize_tests`）：
+
+| 测试 | 内容 |
+|---|---|
+| `materialized_sequence_has_no_forward_reference` | `red` 的 56 个实例逐个检查：每个 `_pipe*` 引用都必须指向**更早**的实例，输名字全局唯一。这就是「模调度没有漏边」的直接证据 —— 漏一条边（基名塌缩序、内存定序、跳迭代）这里就炸。 |
+| `materialize_rejects_reversed_row` | 负向对照：把 kernel 行内序颠倒，物化必须报错而不是产出前向引用序列。没这条，上一条可能是空判。 |
+| `admission_refuses_unmaterializable_insts` | 体内含 `__asm__ volatile("nop")` 的循环必须在准入就被拒。 |
+
+`rewrite_kind` 是**穷举 match**（`InstKind` 全部 16 个变体），新增变体时漏处理会直接编
+不过，而不是静默漏掉一条依赖。不可物化的四个变体在 arm 里返回 `Err`（准入应已拦下，
+万一漏过这里是第二道闸门）。
+
+全量：1958 lib + 993 integration 全绿，零 warning。
+
 ### 8. 第 6 轮：P10 已接入 + P16 分析层完成
 
 > 【校正】本小节写的是当时状态。其中 P16 表格的「准入」与「可观测」两行、以及表后
