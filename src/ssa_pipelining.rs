@@ -2245,8 +2245,11 @@ fn apply_into(
     let back_rounds = |p: usize, q: usize, carried: bool| -> i64 {
         shift[q] as i64 - shift[p] as i64 + if carried { 1 } else { 0 }
     };
-    // 初值所在的实例：第 0 轮消费者需要的是 (q, shift[p] - (携带?1:0))。
-    let init_iter = |p: usize, carried: bool| -> i64 { shift[p] as i64 - if carried { 1 } else { 0 } };
+    // 初值所在的实例：第 0 轮消费者需要的是 (q, shift[q] - back_rounds(p, q, carried))
+    // 当 back_rounds=1 时，生产者 q 需要在消费者 p 之前一轮执行
+    let init_iter = |q: usize, p: usize, carried: bool| -> i64 { 
+        (shift[q] as i64) - back_rounds(p, q, carried) 
+    };
     // 生产者节点 → (一个读者, 被读的名字, 是否携带值)
     let mut rot: HashMap<usize, (usize, String, bool)> = HashMap::new();
     for &p in row {
@@ -2261,12 +2264,27 @@ fn apply_into(
                     // 同一生产者的多个读者必须落在同一个初值实例上，否则一个 phi
                     // 服不了两个读者。
                     if let Some((p2, _, co2)) = rot.insert(q, (p, key.clone(), carried)) {
-                        if init_iter(p2, co2) != init_iter(p, carried) {
+                        if init_iter(q, p2, co2) != init_iter(q, p, carried) {
                             return Err("同一轮转生产者的初值实例不一致");
                         }
                     }
                 },
                 _ => return Err("跳轮引用需要超过一级轮转寄存器"),
+            }
+        }
+    }
+    // 判定指令也占一个位置：它在 body 之前执行（见下的 `khead` 块），所以它的「轮偏移」
+    // 是 0；而它读的是 body 节点上一轮的输出 ⇒ 那些节点同样需要轮转 phi。
+    // 不把它们收进来，head 就会引用一个尚未产出的名字。
+    for v in kind_uses(&lp.cond.kind) {
+        let key = v.name();
+        let Some(&q) = def_of.get(&key) else { continue };
+        if shift[q] != 1 {
+            return Err("判定所需的跳轮偏移不是一级轮转");
+        }
+        if let Some((p2, _, co2)) = rot.insert(q, (0, key.clone(), false)) {
+            if init_iter(q, p2, co2) != 0 && p2 != 0 {
+                return Err("同一轮转生产者的初值实例不一致");
             }
         }
     }
@@ -2286,7 +2304,7 @@ fn apply_into(
             span: src_var.span.clone(),
         };
         // 第 0 轮需要的实例；负数表示「进循环前的值」，用原 phi 的 preheader 侧输入。
-        let want = init_iter(p, carried);
+        let want = init_iter(q, p, carried);
         let pre_val: Operand = if want < 0 {
             phi_pre.get(&key).cloned().ok_or("phi 没有 preheader 侧输入")?
         } else {
@@ -2390,11 +2408,8 @@ fn apply_into(
     //    kernel 每轮末尾一份（决定是否再来一轮）。两者读的都是「该生产节点当前可用的
     //    最新值」，即下一轮的归纳变量 —— 把它当普通调度节点按轮转 phi 解析，判定的对象
     //    就退回本轮，多跑一轮（实测的 `a[trip]` 越界写即此）。
-    let mut cond_dest_pre: Option<SsaVar> = None;
     let mut cond_dest_kern: Option<SsaVar> = None;
     if let Some(d) = &lp.cond.dest {
-        let v = alloc.fresh(&d.base);
-        cond_dest_pre = Some(SsaVar { base: d.base.clone(), version: v, ty: d.ty.clone(), span: d.span.clone() });
         let v2 = alloc.fresh(&d.base);
         cond_dest_kern = Some(SsaVar { base: d.base.clone(), version: v2, ty: d.ty.clone(), span: d.span.clone() });
     }
@@ -2420,37 +2435,51 @@ fn apply_into(
         };
         Ok(Inst { dest: dest.clone(), kind: rewrite_kind(&lp.cond.kind, &f)?, span: lp.cond.span.clone() })
     };
-    let pick_pre = |q: usize| -> Option<SsaVar> { prologue_last.get(&q).cloned() };
-    let pick_kern = |q: usize| -> Option<SsaVar> { kernel_name[q].clone() };
-    let cond_pre = mk_cond(&cond_dest_pre, &pick_pre)?;
-    let cond_kern = mk_cond(&cond_dest_kern, &pick_kern)?;
-    let cond_var_pre = cond_dest_pre.clone().ok_or("判定指令没有输出")?;
+    let pick_head = |q: usize| -> Option<SsaVar> {
+        // head 在 body 之前执行：能用轮转 phi 就用 phi（上一轮的值）。
+        rot_dest.get(&q).cloned().or_else(|| prologue_last.get(&q).cloned())
+    };
+    let cond_kern = mk_cond(&cond_dest_kern, &pick_head)?;
     let cond_var_kern = cond_dest_kern.clone().ok_or("判定指令没有输出")?;
+    // kernel 的 head 块名：由 body 名派生，多循环场景下也不会相撞。
+    let khead = format!("{header}.khead");
 
     // 5. 一次性写回。
+    // kernel 落成**两块**：head（轮转 phi + 判定 + 分支）与 body（按 T 序的全部调度
+    // 节点 + 跳回 head）。单块自环的 kernel 实测会被结构化重建弄丢回边（-O2 下 `ch`
+    // 只跑一轮：`cmp` 后的两条分支都跳向出口），而两块形式正是 SSA 构建器为 `while`
+    // 产出的形状，重建认识它。
     {
         let pre = func.blocks.get_mut(&preheader).ok_or("preheader 不存在")?;
         pre.insts.extend(prologue_insts);
-        pre.insts.push(cond_pre);
-        // 保留条件分支而不是改成无条件 Jump：否则首次进入 kernel 没有判定，
-        // 整个循环变成 do-while 语义，至少会多跑一轮。
-        pre.term = crate::ssa::Terminator::Branch {
-            cond: Operand::Var(cond_var_pre),
-            t: header.clone(),
-            f: exit.clone(),
-        };
+        pre.term = crate::ssa::Terminator::Jump(khead.clone());
     }
     {
+        // body：轮转 phi 不在这里（它们在 head，每轮只赋一次上一轮的值）。
         let h = func.blocks.get_mut(&header).ok_or("头块不存在")?;
-        h.phis = kernel_phis;
-        let mut body = kernel_insts;
-        body.push(cond_kern);
-        h.insts = body;
-        h.term = crate::ssa::Terminator::Branch {
-            cond: Operand::Var(cond_var_kern),
-            t: header.clone(),
-            f: exit.clone(),
-        };
+        h.phis = Vec::new();
+        h.insts = kernel_insts;
+        h.term = crate::ssa::Terminator::Jump(khead.clone());
+    }
+    func.blocks.insert(
+        khead.clone(),
+        BasicBlock {
+            name: khead.clone(),
+            phis: kernel_phis,
+            insts: vec![cond_kern],
+            term: crate::ssa::Terminator::Branch {
+                cond: Operand::Var(cond_var_kern),
+                t: header.clone(),
+                f: exit.clone(),
+            },
+            preds: Vec::new(),
+            succs: Vec::new(),
+        },
+    );
+    // 块序里把 head 插在 body 之前：重建与诊断都按这个序遍历，必须确定性。
+    match func.block_order.iter().position(|b| *b == header) {
+        Some(pos) => func.block_order.insert(pos, khead.clone()),
+        None => func.block_order.push(khead.clone()),
     }
     {
         let x = func.blocks.get_mut(&exit).ok_or("出口块不存在")?;
@@ -2610,17 +2639,28 @@ mod apply_tests {
         let h = &f.blocks["for.body"];
         assert_eq!(
             h.insts.len(),
-            lp.nodes.len() + 1,
-            "kernel = 全部调度节点 + 末尾那份判定指令（不能复用本轮进入值的 phi，否则会多跑一轮）"
+            lp.nodes.len(),
+            "body = 全部调度节点；判定已移到 head（单块自环会被重建丢回边）"
         );
-        assert!(!h.phis.is_empty(), "跨轮引用必须生成轮转 phi");
-        match &h.term {
+        assert!(h.phis.is_empty(), "轮转 phi 属于 head，不该留在 body");
+        assert!(
+            matches!(&h.term, crate::ssa::Terminator::Jump(t) if t == "for.body.khead"),
+            "body 必须跳回 head"
+        );
+        let head = &f.blocks["for.body.khead"];
+        assert_eq!(head.insts.len(), 1, "head 只含那一份判定指令");
+        assert!(!head.phis.is_empty(), "跳轮引用必须在 head 上生成轮转 phi");
+        match &head.term {
             crate::ssa::Terminator::Branch { t, f: fx, .. } => {
                 assert_eq!(t, "for.body");
                 assert_eq!(fx, "for.end");
             },
-            _ => panic!("kernel 必须是条件回边"),
+            _ => panic!("head 必须是条件分支：环内进 body，环外出到 for.end"),
         }
+        // head 必须排在 body 之前：重建与诊断都按块序遍历，这个序必须确定。
+        let ord = f.block_order.clone();
+        let pos = |k: &str| ord.iter().position(|b| b == k).unwrap_or(usize::MAX);
+        assert!(pos("for.body.khead") < pos("for.body"), "head 必须排在 body 之前");
         // latch 块已被摘除，且不在块序里。
         assert!(!f.blocks.contains_key("for.step"), "latch 块应被摘除");
         assert!(!f.block_order.iter().any(|b| b == "for.step"));
@@ -2628,13 +2668,12 @@ mod apply_tests {
         // 整个循环变成 do-while 语义、至少多跑一轮（就是那次越界写）。
         // 出口块前置 epilogue。
         assert!(
-            matches!(&f.blocks["for.cond"].term, crate::ssa::Terminator::Branch { t, f: fx, .. }
-                if t == "for.body" && fx == "for.end"),
-            "preheader 必须仍然是条件分支"
+            matches!(&f.blocks["for.cond"].term, crate::ssa::Terminator::Jump(t) if t == "for.body.khead"),
+            "preheader 只能无条件进 head（判定统一由 head 负责）"
         );
         assert!(
-            f.blocks["for.cond"].insts.len() >= 2 + p.inst.prologue.len(),
-            "preheader = 原有指令 + prologue + 那份入口判定"
+            f.blocks["for.cond"].insts.len() >= 1 + p.inst.prologue.len(),
+            "preheader = 原有指令 + prologue"
         );
         assert!(f.blocks["for.end"].insts.len() >= p.inst.epilogue.len());
 
@@ -2680,4 +2719,5 @@ mod apply_tests {
         assert_eq!(snapshot(&f), before, "落地失败时原 IR 必须逐字不变");
     }
 }
+
 
