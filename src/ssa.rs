@@ -1281,7 +1281,7 @@ impl Builder {
                     self.define(dest.clone());
                     return Operand::Var(dest);
                 }
-                Operand::Void
+                Operand::Int(0)
             },
             Expr::PostInc {
                 e: operand,

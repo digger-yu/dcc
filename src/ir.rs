@@ -112,6 +112,16 @@ pub struct Function {
     pub span: Span,
 }
 
+impl Function {
+    /// Get the function type for this Function.
+    pub fn unknown_ty(&self) -> ValueType {
+        ValueType::Function {
+            ret: Box::new(self.return_type.clone()),
+            params: self.params.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Global {
     pub name: String,

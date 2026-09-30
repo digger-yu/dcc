@@ -2715,16 +2715,20 @@ impl Codegen {
                     } else if bits == 16 {
                         self.emit(&[0xC1, 0xE0, 16]); // shl eax, 16
                         self.emit(&[0xC1, 0xF8, 31]); // sar eax, 31 → 0 或 -1
-                        self.emit(&[0x25, 0xFF, 0xFF, 0x00, 0x00]); // and eax, 0xFFFF
+                        self.emit(&[0x25, 0xFF, 0xFF, 0x00, 0x00]); // and eax, 0xFFFF → 保留符号扩展
                         self.emit(&[0x89, 0xC2]); // mov edx, eax
+                        // 恢复原始16位值到eax的低16位，高位清零
+                        self.emit(&[0x25, 0xFF, 0xFF, 0x00, 0x00]); // and eax, 0xFFFF
                     } else {
                         // bits == 8
                         self.emit(&[0xC1, 0xE0, 24]); // shl eax, 24
                         self.emit(&[0xC1, 0xF8, 31]); // sar eax, 31 → 0 或 -1
-                        self.emit(&[0x25, 0xFF, 0x00, 0x00, 0x00]); // and eax, 0xFF
+                        self.emit(&[0x25, 0xFF, 0x00, 0x00, 0x00]); // and eax, 0xFF → 保留符号扩展
                         self.emit(&[0x89, 0xC2]); // mov edx, eax
+                        // 恢复原始8位值到eax的低8位，高位清零
+                        self.emit(&[0x25, 0xFF, 0x00, 0x00, 0x00]); // and eax, 0xFF
                     }
-                    // xor eax, edx: eax = x ^ s_bits (32-bit)
+                    // xor eax, edx: eax = x ^ s_bits (按类型宽度处理)
                     self.emit(&[0x31, 0xD0]);
                     // mov ecx, eax: 保存 x^s_bits 到 ecx, 用于 test
                     self.emit(&[0x89, 0xC1]);

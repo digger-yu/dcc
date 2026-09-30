@@ -245,6 +245,7 @@ impl Codegen {
                         val.clone()
                     } else if val.starts_with('-')
                         || val.chars().next().is_some_and(|c| c.is_ascii_digit())
+                        || Self::asm_symbolic_operand(&val)
                     {
                         format!("${val}")
                     } else {
@@ -260,6 +261,8 @@ impl Codegen {
 
             // 内存操作数 (m 优先)
             if Self::asm_constraint_prefers_memory(raw, is_inout) {
+                // 处理地址操作数绑定，确保reg_bindings闭合
+                self.prepare_asm_binding(op, 0, is_output);
                 if let Some(mem) = self.asm_memory_operand_str(op) {
                     map.insert(format!("%{idx}"), mem.clone());
                     slots.push(Slot::Mem(mem));
@@ -335,7 +338,7 @@ impl Codegen {
                 .get(op_idx)
                 .map(String::as_str)
                 .unwrap_or("r");
-            let (_is_output, is_inout, _early, match_digit) = Self::parse_asm_constraint_flags(raw);
+            let (is_output, is_inout, _early, match_digit) = Self::parse_asm_constraint_flags(raw);
             let _letter = Self::asm_pick_sub_constraint(raw, is_inout);
 
             // match-digit: 复用先前操作数的寄存器, 但仍需 prepare_asm_binding
@@ -471,6 +474,8 @@ impl Codegen {
 
             // 内存操作数
             if Self::asm_constraint_prefers_memory(raw, is_inout) {
+                // 处理地址操作数绑定，确保reg_bindings闭合
+                self.prepare_asm_binding(op, 0, is_output);
                 if let Some(mem) = self.asm_memory_operand_str(op) {
                     map.insert(format!("%{idx}"), mem.clone());
                     slots.push(Slot::Mem(mem));

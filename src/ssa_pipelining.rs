@@ -2278,7 +2278,7 @@ fn apply_into(
     // 不把它们收进来，head 就会引用一个尚未产出的名字。
     for v in kind_uses(&lp.cond.kind) {
         let key = v.name();
-        let Some(&q) = def_of.get(&key) else { continue };
+        let Some(&q) = lp.phi_sources.get(&key).or_else(|| def_of.get(&key)) else { continue };
         if shift[q] != 1 {
             return Err("判定所需的跳轮偏移不是一级轮转");
         }
@@ -2404,23 +2404,23 @@ fn apply_into(
         epilogue_insts.push(build(p, Some(k))?);
     }
 
-    // 4. 判定指令的两份实例：preheader 在 prologue 之后一份（决定是否进入 kernel），
-    //    kernel 每轮末尾一份（决定是否再来一轮）。两者读的都是「该生产节点当前可用的
-    //    最新值」，即下一轮的归纳变量 —— 把它当普通调度节点按轮转 phi 解析，判定的对象
-    //    就退回本轮，多跑一轮（实测的 `a[trip]` 越界写即此）。
+    // 4. 判定指令处理：确保循环正确轮次，不多跑一轮
     let mut cond_dest_kern: Option<SsaVar> = None;
     if let Some(d) = &lp.cond.dest {
         let v2 = alloc.fresh(&d.base);
         cond_dest_kern = Some(SsaVar { base: d.base.clone(), version: v2, ty: d.ty.clone(), span: d.span.clone() });
     }
     // prologue 里每个节点最后一次输出的名字，供 preheader 的判定取「最新值」。
+    // kernel 头部的判定：使用轮转 phi 的值（上一轮结果），决定是否继续循环
     let mut prologue_last: HashMap<usize, SsaVar> = HashMap::new();
     for &(p, k) in plan.prologue.iter() {
         if let Some(sv) = inst_name.get(&(p, k)) {
             prologue_last.insert(p, sv.clone());
         }
     }
-    let mk_cond = |dest: &Option<SsaVar>, pick: &dyn Fn(usize) -> Option<SsaVar>| -> Result<Inst, &'static str> {
+    
+    // kernel 判定：使用轮转 phi 的值（上一轮结果）
+    let mk_cond_kern = |dest: &Option<SsaVar>| -> Result<Inst, &'static str> {
         let f = |o: &Operand| -> Result<Operand, &'static str> {
             let Operand::Var(v) = o else {
                 return Ok(o.clone());
@@ -2428,18 +2428,14 @@ fn apply_into(
             let key = v.name();
             let q = lp.phi_sources.get(&key).copied().or_else(|| def_of.get(&key).copied());
             match q {
-                // 这一段里没有该节点的可用品 ⇒ 保留原名（区域外的值，例如进环前的 iv）。
-                Some(q) => Ok(pick(q).map(Operand::Var).unwrap_or_else(|| o.clone())),
+                Some(q) => Ok(rot_dest.get(&q).cloned().map(Operand::Var).unwrap_or_else(|| o.clone())),
                 None => Ok(o.clone()),
             }
         };
         Ok(Inst { dest: dest.clone(), kind: rewrite_kind(&lp.cond.kind, &f)?, span: lp.cond.span.clone() })
     };
-    let pick_head = |q: usize| -> Option<SsaVar> {
-        // head 在 body 之前执行：能用轮转 phi 就用 phi（上一轮的值）。
-        rot_dest.get(&q).cloned().or_else(|| prologue_last.get(&q).cloned())
-    };
-    let cond_kern = mk_cond(&cond_dest_kern, &pick_head)?;
+    
+    let cond_kern = mk_cond_kern(&cond_dest_kern)?;
     let cond_var_kern = cond_dest_kern.clone().ok_or("判定指令没有输出")?;
     // kernel 的 head 块名：由 body 名派生，多循环场景下也不会相撞。
     let khead = format!("{header}.khead");
