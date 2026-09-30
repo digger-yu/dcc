@@ -1309,6 +1309,7 @@ impl Codegen {
     ///   * `reg_allocated` 对应位 —— 临时值池 (`alloc_callee_saved`) 不能再把这个
     ///     寄存器发出去, 否则表达式溅出直接盖掉变量的家: 实测 `register long v
     ///     asm("rbx") = 7` 在一次 `(q + r) * g(s)` 之后读出 25。
+    ///
     /// 绑到 caller-saved 或固定用途寄存器 (rax/rcx/rdx/rsi/rdi/r8/r9/rsp/rbp/r13)
     /// 不在本函数的保护能力之内: 表达式求值每时每刻都在用它们, GCC 为此建的是完整的
     /// 干涉模型而不是一个位图。这条边界如实记在 docs/ssa-pass-upgrade-plan.md。
