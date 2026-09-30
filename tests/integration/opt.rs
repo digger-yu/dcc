@@ -243,14 +243,20 @@ double f(double a, double b, double c) { return a * b + c; }
 #[test]
 fn vector_size_cast_in_expression_run_returns_zero() {
     let source = include_str!("../fixtures/c/vec_cast.c");
-    let (output, exe) = run_compile_and_run("vector-size-cast-in-expr", source);
-    assert!(
-        output.status.success(),
-        "compile stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let rc = run_exe(&exe);
-    assert_eq!(rc, 0, "vector_size_cast_in_expression should return 0, got {rc}");
+    // 必须逐档跑：-O3 的 P5 调度器曾把 `v2si v = {..}` 这条 PreservedDecl 排到读它的
+    // Cast 之后（声明没有 dest，因此名字→基名表与基名序链都看不见它），实测拿到
+    // 全 0 位模式。只跑 -O0 时这类缺陷对测试套件完全不可见。
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        let (output, exe) = run_compile_and_run_flags("vector-size-cast-in-expr", source, &[flag]);
+        assert!(
+            output.status.success(),
+            "{flag} 编译失败: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rc = run_exe(&exe);
+        assert_eq!(rc, 0, "{flag}: vector_size_cast_in_expression 应返回 0，实际 {rc}");
+        let _ = fs::remove_file(exe);
+    }
 }
 
 /// SIMD 浮点向量：标量 SSE 逐元素 +/-/×

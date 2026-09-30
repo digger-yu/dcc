@@ -3594,7 +3594,7 @@ fn kind_operands(kind: &InstKind) -> Vec<&Operand> {
     }
 }
 
-fn kind_operand_ssa_vars(kind: &InstKind) -> Vec<SsaVar> {
+pub(crate) fn kind_operand_ssa_vars(kind: &InstKind) -> Vec<SsaVar> {
     kind_operands(kind)
         .into_iter()
         .filter_map(|o| match o {

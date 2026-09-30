@@ -740,6 +740,13 @@ pub fn instruction_scheduling(func: &mut Function) -> bool {
             if let Some(d) = &inst.dest {
                 base_of.insert(d.name(), d.base.clone());
             }
+            // 名字→基名的映射必须也覆盖「只被读过、从没当过 dest」的名字：
+            // `PreservedDecl` 声明的具名对象就是这种（它没有 dest，却供出了 `v.1`）。
+            // 不补这里，`touches_base` 看不见该读者属于哪个基名链，调度器就能把声明
+            // 挖到读者之后（实测 -O3 把 `v2si v = {..}` 排到读它的 Cast 之后，拿到全 0）。
+            for u in crate::ssa::kind_operand_ssa_vars(&inst.kind) {
+                base_of.entry(u.name()).or_insert_with(|| u.base.clone());
+            }
         }
         for phi in &b.phis {
             base_of.insert(phi.dest.name(), phi.dest.base.clone());
@@ -935,6 +942,13 @@ fn inst_defs(inst: &Inst) -> Vec<String> {
     if let InstKind::InlineAsm { output_vars, .. } = &inst.kind {
         defs.extend(output_vars.iter().map(|v| v.name()));
     }
+    // 用户声明 (`Decl::Var` 整体保留下来的那条指令) 也是定义：它把带初值的对象建起来。
+    // 不报出来，调度器就看不见「值消费者依赖它」这条边，能把声明挖到读者之后（实测
+    // `v2si v = {..}; unsigned long long b = (unsigned long long)v;` 在 -O3 把声明排到
+    // Cast 之后，拿到全 0 的位模式）。
+    if let InstKind::PreservedDecl { var, .. } = &inst.kind {
+        defs.push(var.name.name.clone());
+    }
     defs
 }
 
@@ -945,6 +959,10 @@ fn inst_def_bases(inst: &Inst) -> Vec<String> {
     }
     if let InstKind::InlineAsm { output_vars, .. } = &inst.kind {
         defs.extend(output_vars.iter().map(|v| v.base.clone()));
+    }
+    // 同 `inst_defs`：基名序就是本 IR 的语义序，声明必须是这个链上的一环。
+    if let InstKind::PreservedDecl { var, .. } = &inst.kind {
+        defs.push(var.name.name.clone());
     }
     defs
 }
@@ -1722,6 +1740,12 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
                         if phi_locked.contains(&d.name()) {
                             continue;
                         }
+                        // 本表的值是无类型的 i128，只有**整数类**变量能代表它；浮点/
+                        // long double 名字一旦入表，后面的替换就把 ABI 类型类换掉了
+                        // (见 `replace_op` 的根因说明)。
+                        if type_bits(&d.ty).is_none() {
+                            continue;
+                        }
                         // Mask constant to destination type width to avoid
                         // i128 sign-extension issues (e.g. ~0U must be
                         // 0xFFFFFFFF, not -1 in i128).
@@ -1933,8 +1957,19 @@ fn replace_op_in_term(t: &mut Terminator, consts: &HashMap<String, i128>) {
     }
 }
 
+/// 把一个已被判为常量的名字替成 `Operand::Int`。
+///
+/// 为什么必须看变量自己的 SSA 类型：`consts` 是无类型的 i128，而 IR 的类型类是有语义的。
+/// `InstKind::Cast{e, ..} => operand_int(e, ..)` 会把 `(long double)50` 登成整数 50，
+/// 于是变参调用的实参从 `Var(_tcast_1: LongDouble)` 变成 `Int(50)`——数值看着一样，
+/// ABI 类却从 MEMORY 换成了 INTEGER：caller 不再预留 16 字节的溢出区，callee 侧的
+/// `va_arg(long double)` 全部读错位置（实测四个 va_arg 夹具同时红，退出码就是首个
+/// 读错位置的序号）。只在整数类之间做替换，类型类因此保持不变。
 fn replace_op(o: &mut Operand, consts: &HashMap<String, i128>) {
     if let Operand::Var(v) = o {
+        if type_bits(&v.ty).is_none() {
+            return;
+        }
         if let Some(c) = consts.get(&v.name()) {
             *o = Operand::Int(*c);
         }
@@ -5264,5 +5299,55 @@ mod tests {
             },
             other => panic!("expected ubsan guard, got {:?}", other),
         }
+    }
+
+    /// SCCP 的常量表是无类型的 i128，因此替常量**不得改变操作数的类型类**。
+    ///
+    /// 旧行为把 `(long double)50` 登成整数 50，变参调用的实参从 `Var( _: LongDouble)`
+    /// 变成 `Int(50)`：数值看着一样，ABI 类却从 MEMORY 换成 INTEGER，caller 不再预留
+    /// 16 字节溢出区 ⇒ callee 侧 `va_arg(long double)` 全部读错位置（实测四个 va_arg
+    /// 夹具同时红）。反向对照：整数实参仍必须被折叠，否则这条判据只是「关掉 SCCP」。
+    #[test]
+    fn sccp_const_fold_keeps_the_operand_type_class() {
+        let src = "int g(long double); int h(int);\
+                    int f(void){ long double d = (long double)50; int n = 7 + 3;\
+                          return g(d) + h(n); }\n";
+        let (prog, _d) = crate::parser::parse(src.as_bytes(), "t.c");
+        let (m, _w) = crate::ir::lower(prog).unwrap();
+        for decl in m.source().decls.iter() {
+            if let Decl::Func(fh) = decl {
+                if fh.name.name != "f" {
+                    continue;
+                }
+                let mut ssa = crate::ssa::build_from_func(fh).expect("应能 SSA 化");
+                sparse_conditional_constant_propagation(&mut ssa);
+                let mut ld_arg: Option<Operand> = None;
+                let mut int_arg: Option<Operand> = None;
+                for b in ssa.blocks.values() {
+                    for i in &b.insts {
+                        if let InstKind::Call { callee, args, .. } = &i.kind {
+                            match callee {
+                                Operand::SymAddr(n, _) if n == "g" => ld_arg = args.first().cloned(),
+                                Operand::SymAddr(n, _) if n == "h" => int_arg = args.first().cloned(),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                let ld = ld_arg.expect("应有对 g 的调用");
+                assert!(
+                    matches!(&ld, Operand::Var(v) if matches!(v.ty, Type::LongDouble))
+                        || matches!(&ld, Operand::Float(..)),
+                    "long double 实参不得被换成整数常量：{ld:?}"
+                );
+                let it = int_arg.expect("应有对 h 的调用");
+                assert!(
+                    matches!(&it, Operand::Int(10)),
+                    "整数常量传播必须仍然工作（否则本判据只是在关掉 SCCP）：{it:?}"
+                );
+                return;
+            }
+        }
+        panic!("找不到函数 f");
     }
 }
