@@ -91,10 +91,55 @@ pub fn run_with_opts(func: &mut Function, level: u8, strict_aliasing: bool) {
             pgo(func);
         }
     }
+    // P16 软件流水：计划、切分、轮转 phi 生成与落地都已实现并受单测锁定，但**默认
+    // 不接入产物**，因为它进入产物后有一条已定位、尚未修好的正确性缺陷：
+    //
+    //   最小复现（已实测：-O0/-O1 正常，-O2 输出整块丢失而退出码仍为 0）：
+    //     static int arr[12];
+    //     int main(void){ for(int i=0;i<12;i++) arr[i]=i; printf("done=%d\n",arr[5]); }
+    //
+    //   同一夹具里「归约在被调函数内」与「归约不读内存」两种形态都正常，所以
+    //   病灶在 **kernel 内的 IndexStore 实例/它的跳轮 phi**：写地址的迭代号一旦错
+    //   位就会越界写，踩坏 stdio 缓冲而不崩溃。
+    //
+    // 拿错值与死循环换「pass 看起来已接入」是反向的，所以默认关。需要验证落地
+    // 形态时用 `DCC_PIPE_ON=1` 显式开启；修好上条缺陷后把默认打开，并同时依赖
+    // `tests/fixtures/opt/ssa_pipe_reduction.c` 与 `ssa_pipe_nested.c` 两条执行级
+    // 夹具验收（它们已在默认路径上盯住「各档位与 gcc 一致」）。
+    if std::env::var("DCC_PIPE_ON").is_ok() && !ssa_dbg_off("pipe") {
+        run_pipelining(func);
+    }
     // 本轮多个 pass 会改 terminator (SCCP 折常量 switch、P19 穿线、DSE 删指令不影响
     // 控制流但会改变块内容)。`rebuild_block` 与 `find_loop_body_multi` 沿 `preds` 走,
-    // 所以管线**结束前必须刷一次** CFG 缓存, 否则重建拿到的是旧边。
+    // 所以管线**结束前必须刷一次 CFG 缓存**, 否则重建拿到的是旧边。
     refresh_cfg_caches(func);
+}
+
+/// P16 软件流水的执行入口：对每个候选头跑闸门，通过就落地。
+///
+/// 先把候选头按块名序收集完再逐个处理：落地会改 CFG（摘除 latch、往 preheader/exit
+/// 追指令），边遍历边改会读到失效的块序，而块序直接决定产物字节。
+pub fn run_pipelining(func: &mut Function) -> bool {
+    let res = crate::ssa_pipelining::Resources::default();
+    let mut headers: Vec<String> = Vec::new();
+    for name in crate::ssa::ordered_block_names(func) {
+        if func.blocks[&name].phis.is_empty() {
+            continue;
+        }
+        headers.push(name);
+    }
+    let mut changed = false;
+    for h in headers {
+        // 每个循环都重新过一遍闸门：前一个循环的落地可能已改变了本循环的区域。
+        // 计划里的 `lp` 就是分类结果，直接交给落地，避免两次分类不一致。
+        let Ok(p) = crate::ssa_pipelining::plan_for_header_with(func, &h, &res) else {
+            continue;
+        };
+        if crate::ssa_pipelining::apply_plan(func, &p.lp, &p.inst).is_ok() {
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// 临时诊断用: `DCC_SSA_OFF=dse,gvn,jt,die,dbe` 逐个关掉本轮新增的 pass 以二分定位。

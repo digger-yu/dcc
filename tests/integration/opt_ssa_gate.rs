@@ -122,3 +122,31 @@ fn underscore_locals_match_gcc_at_all_levels() {
         "下划线命名的用户变量被当成合成临时值, 或 SSA 版本名与临时值 base 撞名",
     );
 }
+
+/// P16 软件流水的两条执行级守门夹具。
+///
+/// 落地（peel + kernel 重排 + 一级轮转 phi + 出口侧最后实例）已实现，但**默认不接入
+/// 产物**：进入产物后有一条已定位、尚未修好的缺陷 —— `main` 里的纯写循环被流水时
+/// -O2 输出整块丢失（越界写踩坏 stdio，见 `ssa_passes.rs` 里 `DCC_PIPE_ON` 的注释）。
+///
+/// 这两条夹具在**默认路径**上盯住「各档位与 gcc 逐字节一致」，因此：
+///   * 现在它们是绿的，证明默认路径没被落地污染；
+///   * 把流水默认打开的那一刻，它们会立刻变红，直到 kernel 的 store 实例被修对。
+/// `ssa_pipe_nested.c` 另外锁住「嵌套场景不得破坏外层结构」这条准入判据。
+#[test]
+fn ssa_pipe_reduction_matches_gcc_at_all_levels() {
+    assert_all_levels_match_gcc(
+        "ssa-pipe-reduction",
+        include_str!("../fixtures/opt/ssa_pipe_reduction.c"),
+        "P16 落地的 peel/kernel/轮转 phi 改变了归约语义",
+    );
+}
+
+#[test]
+fn ssa_pipe_nested_matches_gcc_at_all_levels() {
+    assert_all_levels_match_gcc(
+        "ssa-pipe-nested",
+        include_str!("../fixtures/opt/ssa_pipe_nested.c"),
+        "内层循环被流水时外层携带值丢失或外层推进链被破坏（曾表现为死循环）",
+    );
+}

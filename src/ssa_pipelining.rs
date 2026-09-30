@@ -30,7 +30,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::BinOp;
-use crate::ssa::{BasicBlock, Function, Inst, InstKind, Operand, SsaVar};
+use crate::ssa::{BasicBlock, Function, Inst, InstKind, Operand, Phi, SsaVar};
 
 // ---------------------------------------------------------------- 资源与延迟模型
 
@@ -871,6 +871,44 @@ fn loop_bound(func: &Function, blk: &str) -> Option<(SsaVar, BinOp, i64, bool)> 
     last
 }
 
+/// 本循环是否嵌在其它自然循环之内。
+///
+/// 为什么现在必须拒嵌套（两条实测错值/挂死，不是理论担心）：
+///
+/// 1. **外层携带值会被当成循环不变量**。`for(i) for(j) s+=1;` 里 `s` 的 phi 在**外层**
+///    头，内层区域读到的 `s.3` 不是内层 phi dest、也不在内层区域内定义 ⇒ 被归为
+///    「区域外、原样保留」，于是内层 kernel 每轮都算 `s = 1 + s.3`，累加丢失（实测）。
+/// 2. **落地会动到外层赖以前进的块**。往 preheader 追 prologue、往 exit 追 epilogue、
+///    摘除 latch、以及「区域外引用改指向最后实例」这一步重写所有非区域块的指令与
+///    terminator —— 当这些块位于外层循环体内时，改写的就是外层自己的推进与判定链
+///    （实测后果是外层永不退出，产物死循环）。
+///
+/// 判据只看事实：只要本循环头落在另一个自然循环的体内，就拒。内层流水的收益要等
+/// 落地形式做到「不破坏外层结构」时再拿，不能靠先假定安全把死循环送进产物。
+fn is_nested_in_other_loop(func: &Function, header: &str) -> bool {
+    for name in crate::ssa::ordered_block_names(func) {
+        if name == header {
+            continue;
+        }
+        let Some(bb) = func.blocks.get(&name) else { continue };
+        if bb.phis.is_empty() {
+            continue;
+        }
+        let doms = crate::ssa::compute_dominators(func);
+        let mut latches: Vec<String> = pred_names(func, &name)
+            .into_iter()
+            .filter(|p| dominates(&doms, &name, p))
+            .collect();
+        latches.dedup();
+        for lt in latches {
+            if crate::ssa::find_loop_body(func, &name, &lt).iter().any(|b| b == header) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// 判定一个候选头是否是可流水的循环。
 ///
 /// 方案的三条前置全部在这里把关：单 latch 自然循环、区域是直线链（⇒不嵌套）、
@@ -880,6 +918,9 @@ pub fn classify_loop(func: &Function, header: &str) -> Result<PipelinedLoop, &'s
     let bb = func.blocks.get(header).ok_or("块不存在")?;
     if bb.phis.is_empty() {
         return Err("头块没有 phi：不是循环携带形式的环");
+    }
+    if is_nested_in_other_loop(func, header) {
+        return Err("本循环嵌在其它循环之内（落地会破坏外层结构，见 is_nested_in_other_loop）");
     }
     if !dominates(&doms, header, header) {
         return Err("头块不可达");
@@ -1226,28 +1267,18 @@ mod shape_tests {
         assert!(errs.iter().any(|(_, e)| e.contains("trip 未知")), "{errs:?}");
     }
 
+    /// 嵌套循环的**两层都必须被拒**：外层因为区域不是直线链（内层块带 phi），
+    /// 内层因为「本循环嵌在其它循环之内」。第二条判据不是过度保守：拿掉它之后
+    /// 实测产物出现两类错（外层携带值被当不变量、外层推进链被重写至死循环），
+    /// 详见 `is_nested_in_other_loop` 与 `tests/fixtures/opt/ssa_pipe_nested.c`。
     #[test]
-    fn nested_inner_loop_is_a_chain_but_outer_is_not() {
+    fn nested_loops_are_refused_on_both_levels() {
         let f = fn_ssa(NEST, "nest");
-        // 内层 for.body 仍是直线链；外层区域的链上会出现带 phi 的块 ⇒ 必须被拒。
-        let mut ok_inner = 0;
-        let mut refused: Vec<(String, &'static str)> = Vec::new();
-        for name in crate::ssa::ordered_block_names(&f) {
-            if f.blocks[&name].phis.is_empty() {
-                continue;
-            }
-            match classify_loop(&f, &name) {
-                Ok(l) => {
-                    assert_eq!(l.nodes.len(), 6, "内层区域 = for.body(1)+for.step(5)：{l:?}");
-                    assert_eq!(l.trip, 4);
-                    ok_inner += 1;
-                },
-                Err(e) => refused.push((name, e)),
-            }
-        }
-        assert_eq!(ok_inner, 1, "只应识别出最内层：{refused:?}");
-        assert_eq!(refused.len(), 1, "外层必须被拒且给出原因：{refused:?}");
-        assert!(refused[0].1.contains("直线链") || refused[0].1.contains("带 phi"), "{refused:?}");
+        let r = rejections(&f, &Resources::default());
+        assert_eq!(r.len(), 2, "两个头都必须被拒：{r:?}");
+        assert!(r.iter().any(|(_, e)| e.contains("嵌在其它循环之内")), "内层需给出嵌套原因：{r:?}");
+        assert!(r.iter().any(|(_, e)| e.contains("直线链") || e.contains("带 phi")), "外层需给出形状原因：{r:?}");
+        assert!(plans_for(&f, &Resources::default()).is_empty(), "嵌套场景不得产出任何计划");
     }
 
     /// 识别结果直接喂调度层：真实归约循环必须给出**跳迭代重叠**（depth ≥ 1）。
@@ -1982,5 +2013,568 @@ mod materialize_tests {
             errs.iter().any(|(_, e)| e.contains("不可按迭代复制")),
             "含 asm 的区域必须被准入拒掉：{errs:?}"
         );
+    }
+}
+
+// ===================================================== 计划应用到 IR（落地）
+
+/// 版本分配器：以「全函数现有最大版本」为起点递增，保证与构建器产出的名字不撞。
+struct VersionAllocator {
+    max: HashMap<String, u32>,
+}
+
+impl VersionAllocator {
+    fn new(func: &Function) -> Self {
+        let mut max: HashMap<String, u32> = HashMap::new();
+        let note = |v: &SsaVar, max: &mut HashMap<String, u32>| {
+            let e = max.entry(v.base.clone()).or_insert(0);
+            if v.version > *e {
+                *e = v.version;
+            }
+        };
+        for p in &func.params {
+            note(p, &mut max);
+        }
+        for bb in func.blocks.values() {
+            for phi in &bb.phis {
+                note(&phi.dest, &mut max);
+            }
+            for inst in &bb.insts {
+                if let Some(d) = &inst.dest {
+                    note(d, &mut max);
+                }
+            }
+        }
+        VersionAllocator { max }
+    }
+    fn fresh(&mut self, base: &str) -> u32 {
+        let v = self.max.entry(base.to_string()).or_insert(0);
+        *v += 1;
+        *v
+    }
+}
+
+/// 把一个流水计划**应用到 IR**：peel 出 prologue、把 kernel 重排成单块自然循环、
+/// 把 epilogue 放到出口块头部。
+///
+/// kernel 为什么必须是单块：真实 kernel 行的节点在原 IR 里分属 `for.body` 与
+/// `for.step`，而且**跨块交错**（`red` 的行序是 `[0,2,6,3,5,1,4]`，`for.body` 的节点
+/// 1 排在 `for.step` 的节点之后）。两块的形状表达不出这个序，而序就是正确性
+/// （`edges_satisfied` 保证的正是按 T 序串行执行）。所以落成 rebuild 已经支持的
+/// 最简形状：一个带 phi、带条件分支的单块循环（与 `while.cond` 同形）。
+///
+/// 失败安全：全部工作在 `Function` 的副本上做，只有 `dangling_refs`（不得有悬空
+/// 引用）与 `duplicate_ssa_defs`（全函数单赋值）都通过时才替换原函数。任何一条
+/// 判据不满足就返回 `Err`，原 IR 一个字节都不动。
+pub fn apply_plan(
+    func: &mut Function,
+    lp: &PipelinedLoop,
+    plan: &InstancePlan,
+) -> Result<(), &'static str> {
+    let mut work = func.clone();
+    apply_into(&mut work, lp, plan)?;
+    let dangling = crate::ssa::dangling_refs(&work);
+    if !dangling.is_empty() {
+        return Err("落地后存在悬空引用");
+    }
+    let dup = crate::ssa::duplicate_ssa_defs(&work);
+    if !dup.is_empty() {
+        return Err("落地后违反单赋值");
+    }
+    *func = work;
+    Ok(())
+}
+
+fn apply_into(
+    func: &mut Function,
+    lp: &PipelinedLoop,
+    plan: &InstancePlan,
+) -> Result<(), &'static str> {
+    let n = lp.nodes.len();
+    // 0. 计划与函数必须匹配：区域拼接序、块集合、phi 集合都逐条核对。
+    //    拿旧计划改新 IR 会产出自洽但错误的代码，这比编译失败更糟。
+    let mut expect: Vec<Inst> = Vec::new();
+    for name in &lp.region_bbs {
+        let bb = func.blocks.get(name).ok_or("计划引用的块已不存在")?;
+        expect.extend(bb.insts.iter().cloned());
+    }
+    // 只比 kind（不比 span）：同一条指令换了位置仍是同样的语义。
+    let same_kind = |a: &Inst, b: &Inst| -> bool { format!("{:?}", a.kind) == format!("{:?}", b.kind) };
+    if expect.len() != n || !expect.iter().zip(lp.nodes.iter()).all(|(a, b)| same_kind(a, b)) {
+        return Err("计划与当前 IR 不匹配（区域已变）");
+    }
+    let header = lp.header.clone();
+    let latch = lp.latch.clone();
+    let preheader = lp.preheader.clone();
+    let exit = lp.exit.clone();
+    if header == preheader || header == exit || latch == exit {
+        return Err("循环角色重合");
+    }
+
+    let row = &plan.kernel[0];
+    if row.len() != n {
+        return Err("kernel 行不含全部节点");
+    }
+    let mut row_pos: HashMap<usize, usize> = HashMap::new();
+    for (i, &p) in row.iter().enumerate() {
+        if !row_pos.insert(p, i).is_none() {
+            return Err("kernel 行内有重复节点");
+        }
+    }
+    let shift = &plan.shift;
+    let rounds = plan.kernel.len();
+    let trip = rounds + plan.depth;
+
+    // 1. 名字：kernel 每个节点一个 dest（每轮同一个名字），prologue/epilogue 每个
+    //    实例一个 dest。版本序按物化序递增，保证「基名塌缩后」的赋值序与 T 序一致。
+    let mut alloc = VersionAllocator::new(func);
+    let mut kernel_name: Vec<Option<SsaVar>> = vec![None; n];
+    let mut inst_name: HashMap<(usize, usize), SsaVar> = HashMap::new();
+    for &(p, k) in plan.flatten().iter() {
+        if k >= trip {
+            // 实例的迭代号越界意味着切分与 trip 不自洽，绝不能继续命名。
+            return Err("实例迭代号超出 trip 范围");
+        }
+        let src = &lp.nodes[p];
+        let Some(d) = &src.dest else { continue };
+        let v = alloc.fresh(&d.base);
+        let nv = SsaVar { base: d.base.clone(), version: v, ty: d.ty.clone(), span: d.span.clone() };
+        if k >= shift[p] && k < shift[p] + rounds {
+            // kernel 内的实例：每轮复用同一个名字，所以只能分配一次。
+            if kernel_name[p].is_none() {
+                kernel_name[p] = Some(nv.clone());
+            }
+            inst_name.insert((p, k), kernel_name[p].clone().unwrap());
+        } else {
+            inst_name.insert((p, k), nv);
+        }
+    }
+    for p in 0..n {
+        if kernel_name[p].is_none() != lp.nodes[p].dest.is_none() {
+            return Err("kernel 实例命名与节点结构不一致");
+        }
+    }
+
+    let mut def_of: HashMap<String, usize> = HashMap::new();
+    for (i, inst) in lp.nodes.iter().enumerate() {
+        if let Some(d) = &inst.dest {
+            def_of.insert(d.name(), i);
+        }
+    }
+    // 原 phi 的 preheader 侧输入（第 0 轮读携带值时用）。
+    let mut phi_pre: HashMap<String, Operand> = HashMap::new();
+    for p in &func.blocks[&header].phis {
+        if let Some((src, _)) = p.incoming.iter().find(|(_, from)| *from == preheader) {
+            phi_pre.insert(p.dest.name(), Operand::Var(src.clone()));
+        }
+    }
+
+    // 2. kernel 需要的轮转 phi。跳轮数只由下面这一个公式给出，phi 生成与操作数解析
+    //    都走它 —— 两处各写一套正是上一版「测试绿而实际错」的根源。
+    //
+    //    消费者 p 在轮 r 执行迭代 k_p = r + shift[p]。它读节点 q 在迭代 k_needed 的
+    //    定义：携带值（头的 phi）要 k_p - 1，区域内其它定义要 k_p。而 q 在轮 r_q 产出
+    //    迭代 r_q + shift[q] ⇒ r_q = k_needed - shift[q]，所以
+    //        back = r - r_q = shift[q] - shift[p] + (携带?1:0)
+    //    back = 0 ⇒ 本轮前向引用；back = 1 ⇒ 需要一级轮转 phi；其它 ⇒ 超过一级 ⇒ 拒。
+    //
+    //    这条公式两次出错都是被检查逼出来的：先只把 phi dest 当跳轮引用（漏了
+    //    `节点 6 读 i_2` 其实是跳上一轮），后一次是把 shift 写反（back 算成 -1）。
+    //    两者都会产生前向引用，而前向引用在产物里是错值，不是编译错误。
+    let back_rounds = |p: usize, q: usize, carried: bool| -> i64 {
+        shift[q] as i64 - shift[p] as i64 + if carried { 1 } else { 0 }
+    };
+    // 初值所在的实例：第 0 轮消费者需要的是 (q, shift[p] - (携带?1:0))。
+    let init_iter = |p: usize, carried: bool| -> i64 { shift[p] as i64 - if carried { 1 } else { 0 } };
+    // 生产者节点 → (一个读者, 被读的名字, 是否携带值)
+    let mut rot: HashMap<usize, (usize, String, bool)> = HashMap::new();
+    for &p in row {
+        for v in kind_uses(&lp.nodes[p].kind) {
+            let key = v.name();
+            let carried = lp.phi_sources.contains_key(&key);
+            let src = if carried { lp.phi_sources.get(&key) } else { def_of.get(&key) };
+            let Some(&q) = src else { continue };
+            match back_rounds(p, q, carried) {
+                0 => {},
+                1 => {
+                    // 同一生产者的多个读者必须落在同一个初值实例上，否则一个 phi
+                    // 服不了两个读者。
+                    if let Some((p2, _, co2)) = rot.insert(q, (p, key.clone(), carried)) {
+                        if init_iter(p2, co2) != init_iter(p, carried) {
+                            return Err("同一轮转生产者的初值实例不一致");
+                        }
+                    }
+                },
+                _ => return Err("跳轮引用需要超过一级轮转寄存器"),
+            }
+        }
+    }
+    let mut rot_dest: HashMap<usize, SsaVar> = HashMap::new();
+    let mut kernel_phis: Vec<Phi> = Vec::new();
+    // 按节点号生成 phi：HashMap 的迭代序会把随机哈希序泄进 phi 排列，进而泄进产物字节。
+    let mut rot_nodes: Vec<usize> = rot.keys().copied().collect();
+    rot_nodes.sort_unstable();
+    for &q in &rot_nodes {
+        let (p, key, carried) = rot[&q].clone();
+        let src_var = lp.nodes[q].dest.as_ref().ok_or("轮转生产者没有输出")?;
+        let v = alloc.fresh(&src_var.base);
+        let dest = SsaVar {
+            base: src_var.base.clone(),
+            version: v,
+            ty: src_var.ty.clone(),
+            span: src_var.span.clone(),
+        };
+        // 第 0 轮需要的实例；负数表示「进循环前的值」，用原 phi 的 preheader 侧输入。
+        let want = init_iter(p, carried);
+        let pre_val: Operand = if want < 0 {
+            phi_pre.get(&key).cloned().ok_or("phi 没有 preheader 侧输入")?
+        } else {
+            inst_name
+                .get(&(q, want as usize))
+                .cloned()
+                .map(Operand::Var)
+                .ok_or("轮转 phi 的初值实例没有被物化")?
+        };
+        let lat_val = kernel_name[q].clone().ok_or("轮转生产者不在 kernel 内")?;
+        rot_dest.insert(q, dest.clone());
+        kernel_phis.push(Phi {
+            dest,
+            incoming: vec![
+                (match pre_val {
+                    Operand::Var(x) => x,
+                    _ => return Err("轮转 phi 的初值必须是变量"),
+                }, preheader.clone()),
+                (lat_val, header.clone()),
+            ],
+        });
+    }
+
+    // 3. 逐实例生成指令。
+    let resolve = |o: &Operand, p: usize, k: Option<usize>| -> Result<Operand, &'static str> {
+        let Operand::Var(x) = o else {
+            return Ok(o.clone());
+        };
+        let key = x.name();
+        let (q, carried) = if let Some(&q) = lp.phi_sources.get(&key) {
+            (q, true)
+        } else if let Some(&q) = def_of.get(&key) {
+            (q, false)
+        } else {
+            // 区域外（参数、全局、循环前的定义）：原样保留。
+            return Ok(o.clone());
+        };
+        match k {
+            // prologue / epilogue：解析到具体实例。
+            Some(k) => {
+                let want = k as i64 - if carried { 1 } else { 0 };
+                if want < 0 {
+                    return Ok(phi_pre.get(&key).cloned().ok_or("phi 没有 preheader 侧输入")?);
+                }
+                let sv = inst_name.get(&(q, want as usize)).cloned().ok_or("依赖的生产者实例尚未物化")?;
+                // prologue 在 kernel 之前执行，不得引用 kernel 内的名字；epilogue 在
+                // kernel 之后，引用它正好合法。
+                if k < shift[p] && want >= shift[q] as i64 && want < (shift[q] + rounds) as i64 {
+                    return Err("prologue 引用了 kernel 内的实例（值在尚未执行时就被读）");
+                }
+                Ok(Operand::Var(sv))
+            },
+            // kernel：back == 1 ⇒ 轮转 phi；back == 0 ⇒ 本轮前向（要求行内早于消费者）。
+            None => {
+                if back_rounds(p, q, carried) == 1 {
+                    let d = rot_dest.get(&q).cloned().ok_or("需要轮转 phi 但生产者不在轮转集合里")?;
+                    return Ok(Operand::Var(d));
+                }
+                if row_pos.get(&q).copied().unwrap_or(usize::MAX) >= row_pos[&p] {
+                    return Err("kernel 内本轮生产者排在消费者之后");
+                }
+                Ok(Operand::Var(kernel_name[q].clone().ok_or("本轮生产者没有输出")?))
+            },
+        }
+    };
+
+    let build = |p: usize, k: Option<usize>| -> Result<Inst, &'static str> {
+        let src = &lp.nodes[p];
+        if !inst_is_materializable(&src.kind) {
+            return Err("调度区内有不可按迭代复制的指令");
+        }
+        let f = |o: &Operand| resolve(o, p, k);
+        let kind = rewrite_kind(&src.kind, &f)?;
+        let dest = match (&src.dest, k) {
+            (Some(_), Some(kk)) => Some(
+                inst_name
+                    .get(&(p, kk))
+                    .cloned()
+                    .ok_or("该实例没有被命名（切分与节点集不自洽）")?,
+            ),
+            (Some(_), None) => Some(kernel_name[p].clone().ok_or("kernel 实例没有被命名")?),
+            (None, _) => None,
+        };
+        Ok(Inst { dest, kind, span: src.span.clone() })
+    };
+
+    let mut prologue_insts: Vec<Inst> = Vec::new();
+    for &(p, k) in &plan.prologue {
+        prologue_insts.push(build(p, Some(k))?);
+    }
+    let mut kernel_insts: Vec<Inst> = Vec::new();
+    for &p in row {
+        kernel_insts.push(build(p, None)?);
+    }
+    let mut epilogue_insts: Vec<Inst> = Vec::new();
+    for &(p, k) in &plan.epilogue {
+        epilogue_insts.push(build(p, Some(k))?);
+    }
+
+    // 4. kernel 的终结符：条件必须是区域内某个节点算出的值（准入保证唯一出口）。
+    let latch_term = func.blocks[&latch].term.clone();
+    let cond_name = match &latch_term {
+        crate::ssa::Terminator::Branch { cond, .. } => match cond {
+            Operand::Var(v) => v.name(),
+            _ => return Err("latch 的条件不是变量"),
+        },
+        _ => return Err("latch 不是条件分支"),
+    };
+    let cond_node = match def_of.get(&cond_name) {
+        Some(q) => *q,
+        None => return Err("latch 条件由区域外计算，kernel 无法自洽判定"),
+    };
+    let cond_var = kernel_name[cond_node].clone().ok_or("条件节点没有输出")?;
+    // 条件节点必须在本轮所有副作用之后？不必：T 序已排好，条件值一旦算出就不再变。
+
+    // 5. 一次性写回。
+    {
+        let pre = func.blocks.get_mut(&preheader).ok_or("preheader 不存在")?;
+        pre.insts.extend(prologue_insts);
+        pre.term = crate::ssa::Terminator::Jump(header.clone());
+    }
+    {
+        let h = func.blocks.get_mut(&header).ok_or("头块不存在")?;
+        h.phis = kernel_phis;
+        h.insts = kernel_insts;
+        h.term = crate::ssa::Terminator::Branch {
+            cond: Operand::Var(cond_var),
+            t: header.clone(),
+            f: exit.clone(),
+        };
+    }
+    {
+        let x = func.blocks.get_mut(&exit).ok_or("出口块不存在")?;
+        let mut merged = epilogue_insts;
+        merged.extend(x.insts.iter().cloned());
+        x.insts = merged;
+    }
+    // 6. 区域外的引用修复。区域内节点的值被改名成各实例的新名字，而**区域外的指令
+    //    也会读它们** —— 典型形态是出口块的 `return s` 读累加器，也包括任何
+    //    terminator 里的操作数。第一次实现只改了指令侧、漏了 term 侧，于是留下
+    //    `for.end: s.2` 这种悬空引用。规则：一律改指向该节点在 T 序上**最后执行的
+    //    那个实例**（出循环时能看到的正是它最后一次赋值）。
+    let mut last_of: HashMap<usize, SsaVar> = HashMap::new();
+    for &(p, k) in plan.flatten().iter() {
+        if lp.nodes[p].dest.is_some() {
+            if let Some(sv) = inst_name.get(&(p, k)) {
+                last_of.insert(p, sv.clone());
+            }
+        }
+    }
+    let reroute = |o: &Operand| -> Result<Operand, &'static str> {
+        if let Operand::Var(v) = o {
+            if let Some(&q) = def_of.get(&v.name()) {
+                let sv = last_of.get(&q).cloned().ok_or("区域外引用找不到对应的最后实例")?;
+                return Ok(Operand::Var(sv));
+            }
+        }
+        Ok(o.clone())
+    };
+    for name in crate::ssa::ordered_block_names(func) {
+        if lp.region_bbs.contains(&name) {
+            continue;
+        }
+        let (new_insts, new_phis, new_term) = {
+            let bb = func.blocks.get(&name).ok_or("块不存在")?;
+            let mut items: Vec<Inst> = Vec::with_capacity(bb.insts.len());
+            for inst in &bb.insts {
+                items.push(Inst {
+                    dest: inst.dest.clone(),
+                    kind: rewrite_kind(&inst.kind, &reroute)?,
+                    span: inst.span.clone(),
+                });
+            }
+            let phis: Vec<Phi> = bb
+                .phis
+                .iter()
+                .map(|p| {
+                    let mut inc = Vec::with_capacity(p.incoming.len());
+                    for (s, f) in &p.incoming {
+                        match reroute(&Operand::Var(s.clone()))? {
+                            Operand::Var(x) => inc.push((x, f.clone())),
+                            _ => return Err("phi 输入必须是变量"),
+                        }
+                    }
+                    Ok(Phi { dest: p.dest.clone(), incoming: inc })
+                })
+                .collect::<Result<Vec<Phi>, &'static str>>()?;
+            let term = match &bb.term {
+                crate::ssa::Terminator::Ret { val } => crate::ssa::Terminator::Ret {
+                    val: match val {
+                        Some(v) => Some(reroute(v)?),
+                        None => None,
+                    },
+                },
+                crate::ssa::Terminator::Jump(t) => crate::ssa::Terminator::Jump(t.clone()),
+                crate::ssa::Terminator::Branch { cond, t, f } => crate::ssa::Terminator::Branch {
+                    cond: reroute(cond)?,
+                    t: t.clone(),
+                    f: f.clone(),
+                },
+                crate::ssa::Terminator::SwitchTable { idx, values, targets, default } => {
+                    crate::ssa::Terminator::SwitchTable {
+                        idx: reroute(idx)?,
+                        values: values.clone(),
+                        targets: targets.clone(),
+                        default: default.clone(),
+                    }
+                },
+                crate::ssa::Terminator::Unreachable => crate::ssa::Terminator::Unreachable,
+            };
+            (items, phis, term)
+        };
+        let bb = func.blocks.get_mut(&name).ok_or("块不存在")?;
+        bb.insts = new_insts;
+        bb.phis = new_phis;
+        bb.term = new_term;
+    }
+    // latch 块已成死块：确认没人指向它，然后从 CFG 摘除。
+    for name in crate::ssa::ordered_block_names(func) {
+        if name == latch || name == header {
+            continue;
+        }
+        if succ_names(func, &name).iter().any(|s| *s == latch) {
+            return Err("latch 仍被其它块引用，无法摘除");
+        }
+    }
+    {
+        // 头块自己的回边指向自己，是 kernel 的正常形状；其余块已核实无人指向 latch。
+        func.blocks.remove(&latch);
+        func.block_order.retain(|b| *b != latch);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod apply_tests {
+    use super::*;
+    use crate::ssa::Function;
+
+    const RED: &str = "int red(int n,int*a){int s=0;for(int i=0;i<8;i++)s+=a[i];return s;}\n";
+
+    fn red_fn() -> Function {
+        let (prog, _d) = crate::parser::parse(RED.as_bytes(), "t.c");
+        let (m, _w) = crate::ir::lower(prog).unwrap();
+        for decl in m.source().decls.iter() {
+            if let crate::ast::Decl::Func(f) = decl {
+                if f.name.name == "red" {
+                    return crate::ssa::build_from_func(f).expect("应能 SSA 化");
+                }
+            }
+        }
+        panic!("找不到 red");
+    }
+
+    fn snapshot(f: &Function) -> String {
+        let mut parts = Vec::new();
+        for name in crate::ssa::ordered_block_names(f) {
+            let bb = &f.blocks[&name];
+            parts.push(format!(
+                "{}|phis={}|insts={}{}",
+                name,
+                bb.phis.len(),
+                bb.insts.len(),
+                bb.insts
+                    .iter()
+                    .map(|i| format!("#{}", i.dest.as_ref().map(|d| d.name()).unwrap_or_default()))
+                    .collect::<String>()
+            ));
+        }
+        parts.join(";")
+    }
+
+    /// 落地后的 IR 必须仍是合法 SSA：无悬空引用、单赋值、kernel 是单块自然循环，
+    /// 而且必须能被结构化重建回 AST（rebuild 支持这个形状才算真能落地）。
+    #[test]
+    fn apply_produces_valid_rebuildable_ir() {
+        let mut f = red_fn();
+        let lp = classify_loop(&f, "for.body").expect("red 应被识别");
+        let p = plan_for_header_with(&f, "for.body", &Resources::default()).expect("red 应过闸门");
+        apply_plan(&mut f, &lp, &p.inst).expect("落地应成功");
+
+        assert!(crate::ssa::dangling_refs(&f).is_empty(), "落地后不得有悬空引用");
+        assert!(crate::ssa::duplicate_ssa_defs(&f).is_empty(), "落地后必须保持单赋值");
+
+        // kernel：单块、有轮转 phi、含全部节点、回边指向自己、出口唯一。
+        let h = &f.blocks["for.body"];
+        assert_eq!(h.insts.len(), lp.nodes.len(), "kernel 必须含全部节点");
+        assert!(!h.phis.is_empty(), "跨轮引用必须生成轮转 phi");
+        match &h.term {
+            crate::ssa::Terminator::Branch { t, f: fx, .. } => {
+                assert_eq!(t, "for.body");
+                assert_eq!(fx, "for.end");
+            },
+            _ => panic!("kernel 必须是条件回边"),
+        }
+        // latch 块已被摘除，且不在块序里。
+        assert!(!f.blocks.contains_key("for.step"), "latch 块应被摘除");
+        assert!(!f.block_order.iter().any(|b| b == "for.step"));
+        // prologue 落在 preheader 尾部，出口块前置 epilogue。
+        assert!(
+            matches!(&f.blocks["for.cond"].term, crate::ssa::Terminator::Jump(t) if t == "for.body"),
+            "preheader 现在只能无条件进 kernel"
+        );
+        assert_eq!(
+            f.blocks["for.cond"].insts.len(),
+            1 + p.inst.prologue.len(),
+            "preheader = 原有那一条条件 + 全部 prologue 指令"
+        );
+        assert!(f.blocks["for.end"].insts.len() >= p.inst.epilogue.len());
+
+        // 结构化重建必须跑通（这才是「能进产物」的前提）。
+        let ast = crate::ssa::rebuild_block(&f);
+        assert!(!ast.items.is_empty(), "重建结果不能是空块");
+    }
+
+    /// 拿旧计划改新 IR 必须被拒 —— 否则会得到自洽但错误的代码。
+    #[test]
+    fn apply_refuses_stale_plan() {
+        let mut f = red_fn();
+        let lp = classify_loop(&f, "for.body").expect("red 应被识别");
+        let p = plan_for_header(&f, "for.body").expect("red 应过闸门");
+        // 把区域里一条指令换成别的形态，模拟「IR 已被其它 pass 改动」。
+        let mut stale = lp.clone();
+        if let Some(d) = stale.nodes.get(1).and_then(|i| i.dest.clone()) {
+            stale.nodes[1] = Inst {
+                dest: Some(d),
+                kind: InstKind::Bin { op: BinOp::Mul, l: Operand::Int(3), r: Operand::Int(3) },
+                span: stale.nodes[1].span.clone(),
+            };
+        }
+        let before = snapshot(&f);
+        let e = apply_plan(&mut f, &stale, &p.inst).expect_err("过期计划必须被拒");
+        assert!(e.contains("不匹配"), "应报计划与 IR 不匹配，实得：{e}");
+        assert_eq!(snapshot(&f), before, "拒绝时不得改动原 IR");
+    }
+
+    /// 失败安全：落地中途失败必须原样返回，不留半改的 IR。
+    /// 这是「先在副本上改、全过才替换」这条设计的直接验证。
+    #[test]
+    fn apply_failure_leaves_ir_untouched() {
+        let mut f = red_fn();
+        let lp = classify_loop(&f, "for.body").expect("red 应被识别");
+        let p = plan_for_header(&f, "for.body").expect("red 应过闸门");
+        let mut bad = p.inst.clone();
+        // 造一个迭代号越界的实例：切分与 trip 不自洽。
+        bad.epilogue.push((0, 999));
+        let before = snapshot(&f);
+        let e = apply_plan(&mut f, &lp, &bad).expect_err("越界实例必须被拒");
+        assert!(e.contains("超出 trip 范围") || e.contains("覆盖不完整"), "实得：{e}");
+        assert_eq!(snapshot(&f), before, "落地失败时原 IR 必须逐字不变");
     }
 }

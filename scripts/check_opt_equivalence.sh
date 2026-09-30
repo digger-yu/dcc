@@ -59,7 +59,12 @@ fails=$(grep -c '^COMPILE-FAIL' "$OUT/summary.txt" || true)
 echo "=== 语料总数: $total"
 echo "=== OPT-DIFF: $diffs   COMPILE-FAIL: $fails"
 if [ "$diffs" -gt 0 ]; then
-  grep '^OPT-DIFF' "$OUT/summary.txt" | sort | head -40
+  files=$(grep '^OPT-DIFF' "$OUT/summary.txt" | awk '{print $2}' | sort -u | wc -l)
+  # 必须全量打印：以前这里带 `| head -40`，而调用方（以及文档里的度量）习惯用
+  # `grep -c '^OPT-DIFF'` 统计 **stdout**，于是「显示截断」被误当成「名单总量」，
+  # 实际 103 条被记成 40 条。门禁的数自己说谎比它红更糟。
+  echo "=== TOTAL OPT-DIFF=$diffs 条 / $files 个文件（以下为全部条目，未截断；原始汇总: $OUT/summary.txt）"
+  grep '^OPT-DIFF' "$OUT/summary.txt" | sort
   echo "OPT-DIFF 非空 → FAIL (优化器改变了程序行为)"
   exit 1
 fi
