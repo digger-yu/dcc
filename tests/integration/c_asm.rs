@@ -488,6 +488,48 @@ fn asm_register_binding_honors_declared_width() {
     }
 }
 
+/// 寄存器类的 asm 输出绑到**非 Ident 左值**（`a[i]` / `*p` / `s.f`）时必须仍然写回。
+///
+/// 修前 `writeback_asm_operand` 的每个分支都以 `Expr::Ident` 为前提，非 Ident 直接
+/// `return`，实测四个档位全部静默丢值（`a[1]/a[2]/gs[0]/*p/s.b/s.c` 都是 0，gcc 是
+/// 5/7/9/11/13/14）。夹具放在 `tests/fixtures/c/`，因此 OPT 等价门禁也覆盖它。
+#[test]
+fn asm_output_on_indexed_lvalue_is_written_back() {
+    let source = include_str!("../fixtures/c/asm_output_general_lvalue.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("asm-out-indexed-lvalue", source, &[flag]),
+            0,
+            "{flag}: 寄存器类输出绑到 a[i]/*p/s.f 时值丢了"
+        );
+    }
+}
+
+/// `q` 类的 legacy 寄存器不够用时，必须**报出来**，不能退化成静默错值。
+///
+/// 修前七个 `"=q"` 输出实测全是 0（gcc 是 11..77），也就是「分配器把已占用的寄存器
+/// 再发一次」的直接后果。现在的策略是返回 None 并报 impossible constraint；
+/// 以后有人重写操作数暂存约定时，这条会先变红，提醒他把诊断一起撤掉。
+#[test]
+fn asm_q_class_exhaustion_is_reported_not_silent() {
+    let source = "int main(void) {\n\
+                  long o[7] = {0,0,0,0,0,0,0};\n\
+                  __asm__ volatile(\n\
+                      \"movq $11, %0\\n\\tmovq $22, %1\\n\\tmovq $33, %2\\n\\t\"\n\
+                      \"movq $44, %3\\n\\tmovq $55, %4\\n\\tmovq $66, %5\\n\\tmovq $77, %6\"\n\
+                      : \"=q\"(o[0]), \"=q\"(o[1]), \"=q\"(o[2]), \"=q\"(o[3]),\n\
+                        \"=q\"(o[4]), \"=q\"(o[5]), \"=q\"(o[6]));\n\
+                  return o[0] == 11;\n\
+                  }\n";
+    let (output, obj) = run_object_test("asm-q-exhausted", source);
+    let _ = fs::remove_file(obj);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("impossible constraint"),
+        "q 类耗尽应报 impossible constraint，实际 stderr:\n{stderr}"
+    );
+}
+
 /// GNU 局部数字标签 6: / 6f / 6b
 #[test]
 fn asm_local_label_compiles() {

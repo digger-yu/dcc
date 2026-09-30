@@ -1185,6 +1185,66 @@ warning；OPT-DIFF 仍 **4（2 个文件）** —— 新夹具本身进了语料
 **5058 组合**（新夹具带来的语料）且全部字节一致；`make golden-cross` 6 项全 OK；
 `check_fixtures` 全过（新夹具被测试引用）。
 
+### 7.17 第 23 轮（下半之三）：内联汇编侧的寄存器占用与写回
+
+§7.15 把「变量绑定」这一侧的寄存器所有权闭上了。同一套判据在内联汇编侧还有三处漏洞，
+都是当轮实测出来的（修前 = `13226ab`）。
+
+| 形态 | 修前实测 | gcc / 修后 |
+|---|---|---|
+| `register long v asm("rbx")` + 四个 `"=q"` 输出 | `after=22`（v 被输出盖掉） | 100 |
+| 六个 `"=q"` 输出（无绑定） | `six=297 o0=66`，**四个档位都错** | `six=231 o0=11` |
+| 寄存器类输出绑到非 Ident 左值：`a[i]` / `*p` / `s.b` / `gs[0]` | `a1=0 a2=0 gs0=0 a3=0 sb=0 sc=0` | `5 7 9 11 13 14` |
+
+三条的病灶分别是：
+
+1. **asm 规划器不认识寄存器所有权**。`AsmRegisterPlanner` 只吃 clobber 列表；变量绑定的
+   寄存器、以及外层表达式正握着的 callee-saved 溅出槽，对它都是隐形的。
+2. **`pick` 的第二遍「兜底」忽略 `used` 集合**。第一遍本来就是环形扫完整池，所以第二遍
+   唯一的实际作用就是把**已经发出去的号**再发一次 —— 同一句 asm 的两个操作数共享寄存器。
+   这条与表达式形状无关，四个档位都错，因此不是「-O0 特例」。
+3. **`writeback_asm_operand` 的每个分支都以 `Expr::Ident` 为前提**，非 Ident 直接 `return`。
+   于是 `"=r"(a[i])` 这类写法（内核与库代码的常见形态）值整个丢掉，而且是静默的。
+
+修法（沿用「判据只有一处真源」）：
+
+| 改动 | 作用 |
+|---|---|
+| `AsmRegisterPlanner::mark_unavailable_gp` | 把「本条 asm 之外已被占有的号」转达进 `used_gp`；**不**进 `clobber_gp`（那些号不是被本句 asm 毁掉的，asm 之后占用者还要用） |
+| `Codegen::build_asm_operand_map` 开头 | 一次性交出 `reg_bindings` 的号 + `reg_allocated` 对应的溅出槽号，所有权判据仍然只有一处 |
+| `GP_LEGACY_POOL` 4 → 6 | gcc 的 `q` 类是「不需要 REX 的前 8 个号」；dcc 去掉 rbp/rsp（帧指针 / 栈指针）后是 6 个。旧的 4 个号让「%rbx 被某个变量占着」这件正常的事立刻把 `q` 类挤爆，掉进第 2 条的复用兜底 |
+| `pick` 只留一遍 | 池子真耗尽时返回 `None`，不再复用 |
+| `q` 类耗尽 → `impossible constraint` | E0311 + 既有的 `--asm-fallback=gas` 提示。gcc 在这种情况下也是报错；把静默错值换成可见诊断，并由 `asm_q_class_exhaustion_is_reported_not_silent` 钉住「不许退回静默」 |
+| `writeback_asm_general_lvalue` | 非 Ident 左值的输出写回：scratch 取 callee-saved 池（GP 分配池只含 caller-saved ⇒ 这个号一定不是本句任何操作数的寄存器），`gen_lvalue_addr` 求地址，`store_reg_to_ptr` 按宽度存。地址算不出、或宽度不是一条 store 能表达（聚合 / 向量 / long double / 128 位 / float）时返回 `false` 保持旧行为 —— 宁可不做，也不写到一个算错的位置 |
+
+**一条被实测否决的做法（写下来因为它看起来最顺手）**：把 GP 分配池扩到 callee-saved
+（13 个号），用来解决「一句 asm 的 GP 操作数多于 9 个」。
+
+* 只扩池：10 个 `"=r"` 输出仍然错（`s=64`，gcc 是 `s=55`）；
+* 再把「asm 期间独占这些号 + 序言保存它们」的登记补上（`reg_allocated` +
+  `callee_saved_used`）：结果更糟（`s=10`，七个 `"=q"` 输出变成 `77 0 0 0 0 0 0`）。
+
+⇒ 病灶在「操作数求值 / 写回 / 表达式求值」三者对哪些寄存器可用的重叠假设上，本轮
+没有定位到，所以扩池不是两行改动。已按实测退回原状。
+
+**本轮之后仍然开着的三条（都有实测）**：
+
+1. 一句 asm 的 GP 类操作数多于 9 个 ⇒ 仍会复用同一个号（`s=64` vs gcc `s=55`）；
+2. `"=x"`（xmm 输出）绑到**任何**左值都会编出崩溃的程序（`x1.c`/`x2.c` 段错误，
+   修前修后一样）。因此通用写回本轮只做 GP 形态，配套的 `store_xmm_to_ptr` 也删掉了
+   —— 不留没有实测通过的代码；
+3. §7.16 那条「`q` 池耗尽时报错而 gcc 能编」（七个 `"=q"` 输出）。
+
+**度量**：`cargo test --release -j2 -- --test-threads=2` 3091 通过 / 0 失败 / 零
+warning；OPT-DIFF 仍 **4（2 个文件）**；可复现门禁 5076 组合（新增两份夹具带来的语料）
+字节一致；`make golden-cross` 6 项全 OK；`check_fixtures` 全过。新夹具：
+`tests/fixtures/asm/asm_register_binding_clobber.c` 扩到四个形态、
+`tests/fixtures/c/asm_output_general_lvalue.c`（进 OPT 语料）；新测试
+`asm_register_binding_owns_its_register`（逐档 gcc 对照 + 静态反向对照 + 产物字节断言）、
+`asm_output_on_indexed_lvalue_is_written_back`、
+`asm_q_class_exhaustion_is_reported_not_silent`。
+
+
 ### 8. 第 6 轮：P10 已接入 + P16 分析层完成
 
 > 【校正】本小节写的是当时状态。其中 P16 表格的「准入」与「可观测」两行、以及表后

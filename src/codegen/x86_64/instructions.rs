@@ -520,6 +520,49 @@ impl Codegen {
         }
     }
 
+    /// 把 `src` 的值按 `sz` 字节存到 `base` 指向的地址（`[base]` 无位移形式）。
+    ///
+    /// `store_stack` 只会写帧内 `[r13+disp]`；而内联汇编的输出操作数绑到
+    /// `a[i]` / `*p` / `s.f` 这类**非 Ident 左值**时，目标地址是运行时算出来的指针，
+    /// 必须走这条。ModRM/SIB 交给 `emit_reg_indirect_modrm`，因此 base 可以是任意
+    /// GP（含需要 SIB 的 rsp/r12 与需要 disp8 的 rbp/r13）。
+    pub fn store_reg_to_ptr(&mut self, src: u8, base: u8, sz: usize) {
+        // 低 8 位里 r4-r7 是 spl/bpl/sil/dil：只要带 REX 就能编出来，与 src>=8 同理。
+        let mut rex = 0x40u8;
+        if src >= 8 {
+            rex |= 0x04;
+        }
+        if base >= 8 || (sz == 1 && src >= 4) {
+            rex |= 0x01;
+        }
+        match sz {
+            1 => {
+                if rex != 0x40 {
+                    self.emit(&[rex]);
+                }
+                self.emit(&[0x88]);
+            },
+            2 => {
+                self.emit(&[0x66]);
+                if rex != 0x40 {
+                    self.emit(&[rex]);
+                }
+                self.emit(&[0x89]);
+            },
+            4 => {
+                if rex != 0x40 {
+                    self.emit(&[rex]);
+                }
+                self.emit(&[0x89]);
+            },
+            _ => {
+                self.emit(&[rex | 0x08]);
+                self.emit(&[0x89]);
+            },
+        }
+        self.emit_reg_indirect_modrm(src, base);
+    }
+
     pub fn load_stack_sized(&mut self, reg: u8, off: i64, size: usize) {
         if Self::fits_disp32(off) {
             let rex_r = if reg >= 8 { 0x04 } else { 0 };
@@ -1314,11 +1357,15 @@ impl Codegen {
     /// 不在本函数的保护能力之内: 表达式求值每时每刻都在用它们, GCC 为此建的是完整的
     /// 干涉模型而不是一个位图。这条边界如实记在 docs/ssa-pass-upgrade-plan.md。
     pub fn claim_bound_register(&mut self, reg: u8) {
-        let idx = (0..self.callee_saved_pool.len()).find(|&i| self.callee_saved_pool[i] == reg);
-        if let Some(i) = idx {
+        if let Some(i) = self.callee_saved_pool_index(reg) {
             self.reg_allocated |= 1 << i;
             self.callee_saved_used |= 1 << i;
         }
+    }
+
+    /// 该物理寄存器在 callee-saved 池里的下标（决定两个位图的哪一位）。
+    fn callee_saved_pool_index(&self, reg: u8) -> Option<usize> {
+        (0..self.callee_saved_pool.len()).find(|&i| self.callee_saved_pool[i] == reg)
     }
 
     pub fn alloc_callee_saved(&mut self) -> Option<u8> {

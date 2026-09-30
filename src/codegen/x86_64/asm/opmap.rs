@@ -58,6 +58,18 @@ impl Codegen {
         // 对于指针变量, 加载其值; 对于其他表达式, 按值求值
         self.gen_expr(expr, reg);
     }
+
+    /// 该约束是否要求 x86-64 的 legacy 寄存器类（`q` / `Q`）。
+    /// 只服务于「规划器返回 None 之后要不要报 impossible constraint」这一个判定，
+    /// 不参与分配本身，所以不必与规划器的字母表严格同步。
+    fn constraint_demands_legacy_gp(raw: &str) -> bool {
+        let digits = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+        let core = raw
+            .trim_start_matches(['=', '+', '&', '%'])
+            .trim_start_matches(digits);
+        !core.contains('{') && core.chars().any(|c| c == 'q' || c == 'Q')
+    }
+
     pub(crate) fn build_asm_operand_map(
         &mut self,
         outputs: &[Expr],
@@ -92,6 +104,17 @@ impl Codegen {
         // 解析 clobber 列表, 把被 clobber 的寄存器加入统一规划器的排除集合。
         let (clobber_gp, clobber_xmm, _x87_count) = Self::parse_clobber_registers(clobbers);
         let mut planner = AsmRegisterPlanner::new(&clobber_gp, &clobber_xmm);
+        // 寄存器所有权只有一个真源：变量绑定的寄存器（`reg_bindings`）与外层表达式
+        // 正握着的溅出槽（`reg_allocated` 对应的 callee-saved 池）都不是本条 asm 可以
+        // 动的东西。旧实现里规划器两边都不看，于是 `q` 类实测把值写进了绑在 %rbx 的
+        // 变量里（`after=22`，gcc 是 100）。
+        let mut owned_gp: Vec<u8> = self.reg_bindings.values().map(|(r, _)| *r).collect();
+        for i in 0..4 {
+            if self.reg_allocated & (1 << i) != 0 {
+                owned_gp.push(self.callee_saved_pool[i]);
+            }
+        }
+        planner.mark_unavailable_gp(owned_gp);
 
         // 预扫描输出约束: 预留固定寄存器 (a/b/c/d/S/D),
         // 避免 =r 等通用分配抢占后续 =a 等固定约束所需的寄存器。
@@ -304,6 +327,10 @@ impl Codegen {
                 meta.push((chosen, 0, true, false, if early { 1 } else { 0 }));
                 idx += 1;
                 continue;
+            } else if Self::constraint_demands_legacy_gp(raw) {
+                // 与输入侧同一条判据：legacy 类耗尽时报 impossible constraint，
+                // 不静默换成别的寄存器（那会丢写回，实测第 7 个输出全是 0）。
+                self.asm_reject("impossible constraint: 'q' has no free legacy register");
             }
 
             // 内存地址 (p): lea 到一个 GP 寄存器, 模板里就是 %reg
@@ -612,6 +639,12 @@ impl Codegen {
                 meta.push((chosen, 0, false, false, 0));
                 idx += 1;
                 continue;
+            } else if Self::constraint_demands_legacy_gp(raw) {
+                // legacy 类（rax/rbx/rcx/rdx/rsi/rdi）里已经没有空闲号 —— 这就是约束
+                // 满足不了。绝不退成「换一个别的寄存器」：实测那样会丢最后一个操作数
+                // 的写回，只是换一种错值。报 impossible constraint，出路是既有的
+                // --asm-fallback=gas（整 TU 交给 GAS 编码）。
+                self.asm_reject("impossible constraint: 'q' has no free legacy register");
             }
 
             // 内存地址 (p)
@@ -715,7 +748,6 @@ impl Codegen {
                 xmm_width: *xmm_w,
             });
         }
-
         // name aliases
         for (i, name) in output_names.iter().enumerate() {
             if let Some(n) = name {
@@ -878,7 +910,73 @@ impl Codegen {
             line, asm_line
         ));
     }
+    /// 把 asm 输出寄存器写回一个**非 Ident** 左值（`a[i]` / `*p` / `s.f` / `a[i].f`）。
+    ///
+    /// 为什么需要它：`writeback_asm_operand` 的每个分支都以
+    /// `let Expr::Ident { .. } = expr else { return }` 开头，于是这类输出被**静默丢掉**。
+    /// 实测 `__asm__ volatile("movq $5, %0" : "=q"(a[1]))` 之后 `a[1]` 仍是 0（gcc 是 5），
+    /// `"=r"(a[2])`、`"=q"(gs[0])`（全局数组）同样丢 —— 而「把结果取到数组元素」是
+    /// 内核与库代码里的常见写法。
+    ///
+    /// 返回 `false` 表示这条路走不了（地址算不出，或宽度不是一条 store 能表达的：
+    /// 聚合 / 向量 / long double / 128 位整数）。调用方保留原有行为：宁可维持旧状态，
+    /// 也不把值写到一个算错的位置。
+    ///
+    /// scratch 必须来自 callee-saved 池：GP 分配池 (`AsmRegisterPlanner::GP_POOL`) 只含
+    /// caller-saved 号，所以这个 scratch 一定不是本句 asm 的任何操作数寄存器；
+    /// `alloc_callee_saved` 同时置 `reg_allocated` 与 `callee_saved_used`，因此它也不会
+    /// 与外层表达式的溅出槽相撞，并且序言会真的保存它。写回结束立刻归还。
+    fn writeback_asm_general_lvalue(&mut self, expr: &Expr, src: u8) -> bool {
+        let ty = expr.ty();
+        let effective_ty = match &ty {
+            Type::Imaginary(inner) => inner.base.clone(),
+            other => other.clone(),
+        };
+        let excluded = matches!(
+            &effective_ty,
+            Type::Void
+                | Type::LongDouble
+                | Type::Complex(_)
+                | Type::Imaginary(_)
+                | Type::Array(..)
+                | Type::Vector(..)
+                | Type::Struct(..)
+                | Type::Union(..)
+                | Type::Func(..)
+                | Type::Named(_)
+                | Type::Int128
+                | Type::UInt128
+                | Type::Float
+                | Type::Double
+        );
+        let sz = effective_ty.size();
+        if excluded || sz == 0 || sz > 8 {
+            return false;
+        }
+        let scratch = match self.alloc_callee_saved() {
+            Some(r) => r,
+            None => return false,
+        };
+        if !self.gen_lvalue_addr(expr, scratch) {
+            self.free_callee_saved(scratch);
+            return false;
+        }
+        self.store_reg_to_ptr(src, scratch, sz);
+        self.free_callee_saved(scratch);
+        true
+    }
+
     pub(crate) fn writeback_asm_operand(&mut self, expr: &Expr, reg: u8, xmm_width: u8) {
+        // 非 Ident 左值先走通用写回（原因与实测见 `writeback_asm_general_lvalue`）。
+        // 只管 GP 形态（`"=r"` / `"=q"`）：xmm / x87 的写回另有编码，而 `"=x"` 绑到
+        // 非 Ident 左值时更早就崩（实测本版本与修改前都段错误），那是另一条独立
+        // 缺陷，不在这里半修。
+        if !matches!(expr, Expr::Ident { .. })
+            && xmm_width == 0
+            && self.writeback_asm_general_lvalue(expr, reg)
+        {
+            return;
+        }
         // x87 FPU 栈寄存器写回 (f/t/u 约束): fstp 存储 st(0) 到内存
         if xmm_width == 200 || xmm_width == 201 {
             let Expr::Ident { name, ty, .. } = expr else {

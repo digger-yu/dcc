@@ -39,13 +39,18 @@ pub struct AsmRegisterPlanner {
 impl AsmRegisterPlanner {
     /// Register pool constants for x86_64
     ///
-    /// General-purpose register pool: rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8-r11
-    /// These are caller-saved registers available for short-lived allocations
+    /// 通用 GP 池：rax, rcx, rdx, rsi, rdi, r8-r11 —— 全部是 caller-saved，
+    /// 因此不含 callee-saved 的 rbx/r12-r15（那四个由表达式的溅出池与变量绑定独占）。
     const GP_POOL: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
 
-    /// Legacy GP pool for q/Q constraints (allows quadword subregister usage)
-    /// Contains only "safe" registers: rax, rbx, rcx, rdx
-    const GP_LEGACY_POOL: [u8; 4] = [0, 3, 1, 2];
+    /// Legacy GP pool for q/Q constraints (allows quadword subregister usage).
+    ///
+    /// GCC 的 `q` 类是「不需要 REX 前缀的前 8 个寄存器」(rax rbx rcx rdx rsi rdi rbp
+    /// rsp)。这里去掉 rbp 与 rsp：它们分别是帧指针与栈指针，发给 asm 操作数就直接毁
+    /// 掉帧。旧表只有 [rax, rbx, rcx, rdx] 四个，于是「%rbx 已被某个 register asm
+    /// 变量占用」这件完全正常的事会让 q 类立刻耗尽，然后掉进那条复用已占寄存器的
+    /// 回退里（实测 `after=22`，gcc 是 100）。放宽到六个之后，排除占用者仍然够用。
+    const GP_LEGACY_POOL: [u8; 6] = [0, 3, 1, 2, 6, 7];
 
     /// XMM register pool: xmm0-xmm15 (SSE/AVX vector registers)
     const XMM_POOL: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
@@ -78,18 +83,40 @@ impl AsmRegisterPlanner {
     /// * `seed` - Starting index in GP_POOL for round-robin selection
     /// * `use_kind` - Whether this is an input or output register
     ///
-    /// # Returns
-    /// Register number (0-15 mapping to rax-r15)
+    /// # 只找空闲号；找不到时按 seed 位兜底
+    /// 第一选择永远是「本句 asm 里还没人用过的号」。旧实现在这里没有「空闲」这个约束
+    /// （`pick` 的第二遍忽略 `used`，`unwrap_or` 再兜一次），于是同一句 asm 的两个操作数
+    /// 共享寄存器：实测六个 `"=q"` 输出修前得 `six=297 o0=66`，修后与 gcc 一致
+    /// （`six=231 o0=11`）。
     ///
-    /// # Algorithm
-    /// 1. Try to find unused register starting from seed position
-    /// 2. Fall back to first available register if no suitable one found
-    /// 3. Mark register as used and update input set if applicable
+    /// 为什么不把池子扩到 callee-saved（rbx/r12/r14/r15）：试过，**实测否决**。
+    ///   * 只扩池：10 个 `"=r"` 输出的结果仍是错的（`s=64`，gcc 是 `s=55`）；
+    ///   * 再补上「asm 期间独占这些号」的登记（`reg_allocated` + `callee_saved_used`）：
+    ///     结果更糟（`s=10`；七个 `"=q"` 输出变成 `77 0 0 0 0 0 0`）。
+    ///
+    /// 原因是还没查清的暂存约定：操作数求值、写回与表达式求值之间对哪些寄存器可用的
+    /// 假设有重叠，扩池会打破它（病灶未定位，因此这条不是「再改两行」就能收的）。
+    /// 结论：操作数多于 9 个 GP 号时仍会复用同一个号，这是**已知的残余错值**，
+    /// 连同实测记录在 docs/ssa-pass-upgrade-plan.md；要真解决得先重写 asm 操作数的
+    /// 暂存约定。
     pub fn alloc_gp(&mut self, seed: usize, use_kind: AsmRegUse) -> u8 {
         let reg = Self::pick(&Self::GP_POOL, &self.used_gp, &self.clobber_gp, seed, None)
-            .unwrap_or(Self::GP_POOL[seed % Self::GP_POOL.len()]);
+            .unwrap_or_else(|| Self::GP_POOL[seed % Self::GP_POOL.len()]);
         self.reserve_gp(reg, use_kind);
         reg
+    }
+
+    /// 把「本条 asm 之外已经属于别人的寄存器」标为不可分配。
+    ///
+    /// 只进 `used_gp`，不进 `clobber_gp`：这些寄存器不是被本条 asm 毁掉的，占用者
+    /// （`register asm` 变量的家、或外层表达式正握着的 callee-saved 溅出槽）在 asm
+    /// 之后还要继续用它，两个集合的后续处理完全不同，混起来会让 clobber 名单变假。
+    /// 寄存器所有权的唯一真源是 `Codegen::reg_bindings` 与 `Codegen::reg_allocated`；
+    /// 本方法只是把那份事实转达给规划器。
+    pub fn mark_unavailable_gp<I: IntoIterator<Item = u8>>(&mut self, regs: I) {
+        for r in regs {
+            self.used_gp.insert(r);
+        }
     }
 
     /// Allocate a specific fixed GP register based on GCC constraint letters
@@ -155,11 +182,23 @@ impl AsmRegisterPlanner {
 
         // Handle q/Q constraints (quadword, allows subregister aliasing)
         if letters.iter().any(|c| matches!(c, 'q' | 'Q')) {
-            let reg =
+            // 只在**空闲**的 legacy 号里选。旧代码在这里 `unwrap_or(pool[seed % len])`，
+            // 也就是把一个已经发出去的寄存器再发一次 —— 于是同一句 asm 的两个 q
+            // 操作数共享寄存器，或者直接盖掉某个 `register asm` 变量的家
+            // （实测 `after=22`，gcc 是 100）。
+            if let Some(reg) =
                 Self::pick(&Self::GP_LEGACY_POOL, &self.used_gp, &self.clobber_gp, seed, None)
-                    .unwrap_or(Self::GP_LEGACY_POOL[seed % Self::GP_LEGACY_POOL.len()]);
-            self.reserve_gp(reg, use_kind);
-            return Some((reg, false));
+            {
+                self.reserve_gp(reg, use_kind);
+                return Some((reg, false));
+            }
+            // 六个 legacy 号（rax/rbx/rcx/rdx/rsi/rdi；rbp 与 rsp 是帧指针与栈指针，
+            // 不能给操作数）都不空闲时返回 None，由调用方按 impossible constraint 报
+            // 出去。为什么不放宽成「随便一个 GP 寄存器」：`q` 的意义就是模板里可能用
+            // 只认 legacy 编码的指令 (xchg acc,r / in / out / mov m8,al)，换号会编出
+            // 语义不同的指令；而实测放宽之后还要额外解决暂存约定（见 `alloc_gp` 的
+            // 说明），所以这条留给重写操作数暂存时一起做。
+            return None;
         }
 
         // No register could be allocated
@@ -289,9 +328,7 @@ impl AsmRegisterPlanner {
     ///    - Skip registers in `used` set
     ///    - Skip registers in `clobbered` set  
     ///    - Optionally skip registers in `avoid` set (for early-clobber)
-    /// 2. **Second pass**: If first pass fails, try all registers regardless of seed
-    ///    - Still respect clobbered and avoid constraints
-    /// 3. Return `None` if no suitable register found
+    /// 2. 池子里没有一个空闲寄存器时返回 `None` —— 绝不复用已发出去的寄存器。
     ///
     /// # Parameters
     /// * `pool` - Available register candidates
@@ -318,15 +355,11 @@ impl AsmRegisterPlanner {
             return Some(reg);
         }
 
-        // Second pass: fallback to any available register (ignoring seed preference)
-        for &reg in pool {
-            if clobbered.contains(&reg) || avoid.is_some_and(|set| set.contains(&reg)) {
-                continue;
-            }
-            return Some(reg);
-        }
-
-        // No suitable register found
+        // 没有第二遍「忽略 used 的兜底」：那条兜底唯一的实际作用就是把**已经发出去**
+        // 的寄存器再发一次（第一遍本来就是环形扫完整池，seed 偏好早已覆盖）。于是
+        // 同一句 asm 里两个操作数会共享一个寄存器，或 q 类耗尽时直接盖掉变量绑定的
+        // 家 —— 实测四个 `"=q"` 输出把值写进了 `register long v asm("rbx")` 里
+        // (`after=22`，gcc 是 100)。现在池子真耗尽就是 None，由调用方带着诊断处理。
         None
     }
 }
