@@ -708,6 +708,18 @@ pub struct PipelinedLoop {
     pub iv_base: String,
     /// 编译期已知的迭代次数。
     pub trip: usize,
+    /// 「是否还有下一轮」那条判定指令，**不在调度区内**。
+    ///
+    /// 条件节点不能当普通节点参与流水，两个实测 reason：
+    ///   1. 它读的是本轮更新后的归纳变量（即下一轮的值）。一旦把它放进 kernel
+    ///      行，那这个读会被解析成轮转 phi（本轮进入值），判定提前一轮 ⇒ 多跑一轮，
+    ///      对 `a[i] = i` 就是越界写 `a[trip]`（实测：-O2 输出整块丢失而退出码仍为 0，
+    ///      因为越界写踩坏了 stdio 缓冲而不崩溃）。
+    ///   2. 把它计入调度区会虚构出并不存在的跳迭代重叠：`red` 原本算出
+    ///      `stage=[0,2,0,1,2,1,3]` ⇒ depth=1，其中那个 stage=3 正是条件节点；剔除后
+    ///      最大 stage=2 而 II=3 ⇒ depth=0。所以上一轮「已实测到真重叠」的结论
+    ///      是假的，必须就此修正。
+    pub cond: Inst,
 }
 
 fn succ_names(func: &Function, name: &str) -> Vec<String> {
@@ -987,6 +999,19 @@ pub fn classify_loop(func: &Function, header: &str) -> Result<PipelinedLoop, &'s
     if nodes.len() > 64 {
         return Err("调度区超过 64 条指令（方案的准入上限）");
     }
+    // 判定指令不进调度区（为什么必须剔除，见 `PipelinedLoop::cond` 的注释）。
+    // 它的位置随循环形态不同：`for` 在 latch（`for.step` 算下一轮的 `i<8`），
+    // `while` 在头块自己（`while.cond` 带分支）。两处都要看，否则 `while` 形态会被
+    // 误拒为「latch 不是条件分支」。
+    let cond_name = branch_cond_var(&func.blocks[&latch].term)
+        .or_else(|| branch_cond_var(&func.blocks[header].term))
+        .ok_or("循环判定不是变量比较")?;
+    // 条件的生产者必须就在调度区里，否则 kernel 无法自己判定是否继续。
+    let cond_at = match nodes.iter().position(|i| i.dest.as_ref().map(|d| d.name()) == Some(cond_name.clone())) {
+        Some(p) => p,
+        None => return Err("循环条件由调度区外计算，kernel 无法自洽判定"),
+    };
+    let cond = nodes.remove(cond_at);
     let mut def_of: HashMap<String, usize> = HashMap::new();
     for (i, inst) in nodes.iter().enumerate() {
         if let Some(d) = &inst.dest {
@@ -1064,6 +1089,7 @@ pub fn classify_loop(func: &Function, header: &str) -> Result<PipelinedLoop, &'s
         nodes,
         phi_sources,
         iv_base,
+        cond,
         trip: trip as usize,
     })
 }
@@ -1088,6 +1114,14 @@ fn inst_is_materializable(k: &InstKind) -> bool {
             | InstKind::PreservedDecl { .. }
             | InstKind::InlineAsm { .. }
     )
+}
+
+fn branch_cond_var(term: &crate::ssa::Terminator) -> Option<String> {
+    if let crate::ssa::Terminator::Branch { cond: Operand::Var(v), .. } = term {
+        Some(v.name())
+    } else {
+        None
+    }
 }
 
 /// 从头出发、只沿「属于自然循环体」的后继推进，走到 latch 为止；同时收集
@@ -1201,7 +1235,13 @@ mod shape_tests {
         assert_eq!(l.preheader, "for.cond");
         assert_eq!(l.exit, "for.end");
         assert_eq!(l.region_bbs, vec!["for.body".to_string(), "for.step".to_string()]);
-        assert_eq!(l.nodes.len(), 7, "区域拼接序 = 2 + 5");
+        // 调度区不含判定指令：`for.body` 2 条 + `for.step` 5 条 - 1 条条件 = 6。
+        assert_eq!(l.nodes.len(), 6, "区域拼接序 7 条减去判定指令");
+        assert_eq!(
+            l.cond.dest.as_ref().map(|d| d.name()),
+            Some("_tbin_6".to_string()),
+            "判定指令必须就是 latch 分支所读的那条"
+        );
         assert_eq!(l.iv_base, "i");
         assert_eq!(l.trip, 8);
         // 每个 phi 的 latch 侧值都必须在区域内产生，且 phi_sources 指向它。
@@ -1281,25 +1321,38 @@ mod shape_tests {
         assert!(plans_for(&f, &Resources::default()).is_empty(), "嵌套场景不得产出任何计划");
     }
 
-    /// 识别结果直接喂调度层：真实归约循环必须给出**跳迭代重叠**（depth ≥ 1）。
+    /// 实测：load 归约 **没有**跳迭代重叠，闸门必须拒它。
     ///
-    /// 这条断言就是 P16 值得落地的依据：没有重叠的流水只是把指令搬个位置。
-    /// 它同时钉住 RecMII 的真值 3（load 延迟 2 + 加 1）——把不闭合长链当环的
-    /// 错算法会算出 6，于是这个可行的 ii=3 会被搜索起点直接跳过。
+    /// 上一轮这里断言的是「depth=1 真重叠」，那是假的：当时把 latch 的判定指令
+    /// 也算进了调度区，它被排到 stage=3 而撑出行跳。判定指令本身不能进调度区
+    /// （见 `PipelinedLoop::cond` 两条理由），剔除后最大 stage=2 而 II=3 ⇒ depth=0。
+    /// 流水一个无重叠的循环只是搬指令，所以拒收是正确行为。
     #[test]
-    fn recognized_loop_has_real_cross_iteration_overlap() {
+    fn load_reduction_has_no_cross_iteration_overlap() {
         let f = fn_ssa(RED, "red");
-        let l = classify_any(&f).unwrap_or_else(|e| panic!("{e:?}"));
-        let g = build_dep_graph(&l.nodes, &f, &f.blocks[&l.header], &l.phi_sources);
+        let lp = classify_loop(&f, "for.body").expect("red 应被识别");
+        let g = build_dep_graph(&lp.nodes, &f, &f.blocks["for.body"], &lp.phi_sources);
         let r = Resources::default();
-        assert_eq!(rec_mii(&g), 3, "归约环的 RecMII 应为 3");
+        assert_eq!(rec_mii(&g), 3, "闭合归约环的 RecMII 仍为 3（load 延迟 2 + 加 1）");
         let ii = rec_mii(&g).max(res_mii(&g, &r));
         let st = modulo_schedule(&g, ii, &r).expect("MII 处必须可行");
-        assert!(edges_satisfied(&g, ii, &st), "调度结果必须逐边满足");
-        let depth = st.iter().copied().max().unwrap_or(0) / ii;
-        assert!(depth >= 1, "真实归约循环必须给出跳迭代重叠：ii={ii} stage={st:?}");
-        // trip 必须足够长才值得旋转（闸门在下一步统一把关）。
-        assert!(l.trip >= 2 * ii, "trip={} ii={}", l.trip, ii);
+        assert!(edges_satisfied(&g, ii, &st));
+        assert_eq!(st.iter().copied().max().unwrap_or(0) / ii, 0, "剔除判定指令后不应有跳行重叠");
+        let e = plan_for_header(&f, "for.body").expect_err("无重叠就不该流水");
+        assert!(e.contains("无跳迭代重叠"), "实得：{e}");
+    }
+
+    /// 真值得流水的形态：同一迭代内串起来的长依赖链。II 由资源决定（每节点只 1
+    /// 延迟的链不抬 RecMII），而链长把 stage 拉开到多行 ⇒ depth ≥ 1。
+    #[test]
+    fn dependency_chain_yields_real_overlap_and_is_accepted() {
+        let src = "int ch(int n){int a=0,b=0,c=0,d=0,e=0,f=0;for(int i=0;i<24;i++){a+=1;b+=a;c+=b;d+=c;e+=d;f+=e;}return f+n;}\n";
+        let f = fn_ssa(src, "ch");
+        let p = plan_for_header(&f, "for.body").unwrap_or_else(|e| panic!("依赖链循环应过闸门：{e}"));
+        assert!(p.inst.depth >= 1, "依赖链必须给出跳迭代重叠：ii={} stage={:?}", p.ii, p.stage);
+        assert_eq!(p.inst.depth, 1, "本层只做一级轮转，接受的计划 depth 必须恰为 1");
+        assert_eq!(p.inst.kernel.len() + p.inst.depth, p.lp.trip);
+        assert_eq!(p.inst.flatten().len(), p.lp.nodes.len() * p.lp.trip, "实例覆盖 = 节点数 × 迭代数");
     }
 
     /// 步长 2 的上升归纳变量是可流水的，trip 向上取整（i=0,2,4,6 ⇒ 4 次）。
@@ -1649,14 +1702,16 @@ mod gate_tests {
         panic!("找不到函数 {name}");
     }
 
-    /// 归约循环：闸门必须给出 ii=3、一级轮转、且覆盖全部实例的计划。
+    /// 依赖链循环：闸门必须给出一级重叠、且计划覆盖全部实例并与图自洽。
+    /// load 归约实测 depth=0（已由 `load_reduction_has_no_cross_iteration_overlap`
+    /// 钉住「必须拒」），所以它不能当接受样本。
     #[test]
-    fn gate_accepts_the_load_reduction() {
-        let src = "int red(int n,int*a){int s=0;for(int i=0;i<8;i++)s+=a[i];return s;}\n";
-        let f = fn_ssa(src, "red");
-        let p = plan_for_header(&f, "for.body").unwrap_or_else(|e| panic!("归约循环应通过闸门：{e}"));
-        assert_eq!(p.ii, 3);
+    fn gate_accepts_the_dependency_chain() {
+        let src = "int ch(int n){int a=0,b=0,c=0,d=0,e=0,f=0;for(int i=0;i<24;i++){a+=1;b+=a;c+=b;d+=c;e+=d;f+=e;}return f+n;}\n";
+        let f = fn_ssa(src, "ch");
+        let p = plan_for_header(&f, "for.body").unwrap_or_else(|e| panic!("依赖链应过闸门：{e}"));
         assert_eq!(p.inst.depth, 1);
+        assert!(p.ii >= 2, "重叠靠链长拉开，II 至少应为 2");
         assert_eq!(p.inst.kernel.len() + p.inst.depth, p.lp.trip);
         assert_eq!(p.inst.flatten().len(), p.lp.nodes.len() * p.lp.trip);
         // 计划与图必须自洽：逐边校验。
@@ -1951,10 +2006,11 @@ mod materialize_tests {
         panic!("找不到函数 {name}");
     }
 
-    const RED: &str = "int red(int n,int*a){int s=0;for(int i=0;i<8;i++)s+=a[i];return s;}\n";
+    // 目标形态是依赖链（load 归约实测 depth=0，闸门不接受，不能用作物化目标）。
+    const RED: &str = "int ch(int n){int a=0,b=0,c=0,d=0,e=0,f=0;for(int i=0;i<24;i++){a+=1;b+=a;c+=b;d+=c;e+=d;f+=e;}return f+n;}\n";
 
     fn red_plan() -> (Function, PipelinedLoop, PipelinePlan) {
-        let f = fn_ssa(RED, "red");
+        let f = fn_ssa(RED, "ch");
         let p = plan_for_header(&f, "for.body").unwrap_or_else(|e| panic!("red 应过闸门：{e}"));
         let lp = p.lp.clone();
         (f, lp, p)
@@ -2097,6 +2153,11 @@ fn apply_into(
     for name in &lp.region_bbs {
         let bb = func.blocks.get(name).ok_or("计划引用的块已不存在")?;
         expect.extend(bb.insts.iter().cloned());
+    }
+    // 拼接序里先剔除同一条判定指令，才能与 `lp.nodes`（调度区不含条件）对齐。
+    let cond_dest = lp.cond.dest.as_ref().map(|d| d.name());
+    if let Some(p) = expect.iter().position(|i| i.dest.as_ref().map(|d| d.name()) == cond_dest) {
+        expect.remove(p);
     }
     // 只比 kind（不比 span）：同一条指令换了位置仍是同样的语义。
     let same_kind = |a: &Inst, b: &Inst| -> bool { format!("{:?}", a.kind) == format!("{:?}", b.kind) };
@@ -2325,34 +2386,68 @@ fn apply_into(
         epilogue_insts.push(build(p, Some(k))?);
     }
 
-    // 4. kernel 的终结符：条件必须是区域内某个节点算出的值（准入保证唯一出口）。
-    let latch_term = func.blocks[&latch].term.clone();
-    let cond_name = match &latch_term {
-        crate::ssa::Terminator::Branch { cond, .. } => match cond {
-            Operand::Var(v) => v.name(),
-            _ => return Err("latch 的条件不是变量"),
-        },
-        _ => return Err("latch 不是条件分支"),
+    // 4. 判定指令的两份实例：preheader 在 prologue 之后一份（决定是否进入 kernel），
+    //    kernel 每轮末尾一份（决定是否再来一轮）。两者读的都是「该生产节点当前可用的
+    //    最新值」，即下一轮的归纳变量 —— 把它当普通调度节点按轮转 phi 解析，判定的对象
+    //    就退回本轮，多跑一轮（实测的 `a[trip]` 越界写即此）。
+    let mut cond_dest_pre: Option<SsaVar> = None;
+    let mut cond_dest_kern: Option<SsaVar> = None;
+    if let Some(d) = &lp.cond.dest {
+        let v = alloc.fresh(&d.base);
+        cond_dest_pre = Some(SsaVar { base: d.base.clone(), version: v, ty: d.ty.clone(), span: d.span.clone() });
+        let v2 = alloc.fresh(&d.base);
+        cond_dest_kern = Some(SsaVar { base: d.base.clone(), version: v2, ty: d.ty.clone(), span: d.span.clone() });
+    }
+    // prologue 里每个节点最后一次输出的名字，供 preheader 的判定取「最新值」。
+    let mut prologue_last: HashMap<usize, SsaVar> = HashMap::new();
+    for &(p, k) in plan.prologue.iter() {
+        if let Some(sv) = inst_name.get(&(p, k)) {
+            prologue_last.insert(p, sv.clone());
+        }
+    }
+    let mk_cond = |dest: &Option<SsaVar>, pick: &dyn Fn(usize) -> Option<SsaVar>| -> Result<Inst, &'static str> {
+        let f = |o: &Operand| -> Result<Operand, &'static str> {
+            let Operand::Var(v) = o else {
+                return Ok(o.clone());
+            };
+            let key = v.name();
+            let q = lp.phi_sources.get(&key).copied().or_else(|| def_of.get(&key).copied());
+            match q {
+                // 这一段里没有该节点的可用品 ⇒ 保留原名（区域外的值，例如进环前的 iv）。
+                Some(q) => Ok(pick(q).map(Operand::Var).unwrap_or_else(|| o.clone())),
+                None => Ok(o.clone()),
+            }
+        };
+        Ok(Inst { dest: dest.clone(), kind: rewrite_kind(&lp.cond.kind, &f)?, span: lp.cond.span.clone() })
     };
-    let cond_node = match def_of.get(&cond_name) {
-        Some(q) => *q,
-        None => return Err("latch 条件由区域外计算，kernel 无法自洽判定"),
-    };
-    let cond_var = kernel_name[cond_node].clone().ok_or("条件节点没有输出")?;
-    // 条件节点必须在本轮所有副作用之后？不必：T 序已排好，条件值一旦算出就不再变。
+    let pick_pre = |q: usize| -> Option<SsaVar> { prologue_last.get(&q).cloned() };
+    let pick_kern = |q: usize| -> Option<SsaVar> { kernel_name[q].clone() };
+    let cond_pre = mk_cond(&cond_dest_pre, &pick_pre)?;
+    let cond_kern = mk_cond(&cond_dest_kern, &pick_kern)?;
+    let cond_var_pre = cond_dest_pre.clone().ok_or("判定指令没有输出")?;
+    let cond_var_kern = cond_dest_kern.clone().ok_or("判定指令没有输出")?;
 
     // 5. 一次性写回。
     {
         let pre = func.blocks.get_mut(&preheader).ok_or("preheader 不存在")?;
         pre.insts.extend(prologue_insts);
-        pre.term = crate::ssa::Terminator::Jump(header.clone());
+        pre.insts.push(cond_pre);
+        // 保留条件分支而不是改成无条件 Jump：否则首次进入 kernel 没有判定，
+        // 整个循环变成 do-while 语义，至少会多跑一轮。
+        pre.term = crate::ssa::Terminator::Branch {
+            cond: Operand::Var(cond_var_pre),
+            t: header.clone(),
+            f: exit.clone(),
+        };
     }
     {
         let h = func.blocks.get_mut(&header).ok_or("头块不存在")?;
         h.phis = kernel_phis;
-        h.insts = kernel_insts;
+        let mut body = kernel_insts;
+        body.push(cond_kern);
+        h.insts = body;
         h.term = crate::ssa::Terminator::Branch {
-            cond: Operand::Var(cond_var),
+            cond: Operand::Var(cond_var_kern),
             t: header.clone(),
             f: exit.clone(),
         };
@@ -2465,19 +2560,20 @@ mod apply_tests {
     use super::*;
     use crate::ssa::Function;
 
-    const RED: &str = "int red(int n,int*a){int s=0;for(int i=0;i<8;i++)s+=a[i];return s;}\n";
+    // 同样用依赖链作为可流水目标（理由见 materialize_tests）。
+    const RED: &str = "int ch(int n){int a=0,b=0,c=0,d=0,e=0,f=0;for(int i=0;i<24;i++){a+=1;b+=a;c+=b;d+=c;e+=d;f+=e;}return f+n;}\n";
 
     fn red_fn() -> Function {
         let (prog, _d) = crate::parser::parse(RED.as_bytes(), "t.c");
         let (m, _w) = crate::ir::lower(prog).unwrap();
         for decl in m.source().decls.iter() {
             if let crate::ast::Decl::Func(f) = decl {
-                if f.name.name == "red" {
+                if f.name.name == "ch" {
                     return crate::ssa::build_from_func(f).expect("应能 SSA 化");
                 }
             }
         }
-        panic!("找不到 red");
+        panic!("找不到 ch");
     }
 
     fn snapshot(f: &Function) -> String {
@@ -2510,9 +2606,13 @@ mod apply_tests {
         assert!(crate::ssa::dangling_refs(&f).is_empty(), "落地后不得有悬空引用");
         assert!(crate::ssa::duplicate_ssa_defs(&f).is_empty(), "落地后必须保持单赋值");
 
-        // kernel：单块、有轮转 phi、含全部节点、回边指向自己、出口唯一。
+        // kernel：单块、有轮转 phi、含全部节点再加一末尾判定，回边指向自己、出口唯一。
         let h = &f.blocks["for.body"];
-        assert_eq!(h.insts.len(), lp.nodes.len(), "kernel 必须含全部节点");
+        assert_eq!(
+            h.insts.len(),
+            lp.nodes.len() + 1,
+            "kernel = 全部调度节点 + 末尾那份判定指令（不能复用本轮进入值的 phi，否则会多跑一轮）"
+        );
         assert!(!h.phis.is_empty(), "跨轮引用必须生成轮转 phi");
         match &h.term {
             crate::ssa::Terminator::Branch { t, f: fx, .. } => {
@@ -2524,15 +2624,17 @@ mod apply_tests {
         // latch 块已被摘除，且不在块序里。
         assert!(!f.blocks.contains_key("for.step"), "latch 块应被摘除");
         assert!(!f.block_order.iter().any(|b| b == "for.step"));
-        // prologue 落在 preheader 尾部，出口块前置 epilogue。
+        // preheader 保留条件分支（不是一跳到底）：否则首次进 kernel 无人判定，
+        // 整个循环变成 do-while 语义、至少多跑一轮（就是那次越界写）。
+        // 出口块前置 epilogue。
         assert!(
-            matches!(&f.blocks["for.cond"].term, crate::ssa::Terminator::Jump(t) if t == "for.body"),
-            "preheader 现在只能无条件进 kernel"
+            matches!(&f.blocks["for.cond"].term, crate::ssa::Terminator::Branch { t, f: fx, .. }
+                if t == "for.body" && fx == "for.end"),
+            "preheader 必须仍然是条件分支"
         );
-        assert_eq!(
-            f.blocks["for.cond"].insts.len(),
-            1 + p.inst.prologue.len(),
-            "preheader = 原有那一条条件 + 全部 prologue 指令"
+        assert!(
+            f.blocks["for.cond"].insts.len() >= 2 + p.inst.prologue.len(),
+            "preheader = 原有指令 + prologue + 那份入口判定"
         );
         assert!(f.blocks["for.end"].insts.len() >= p.inst.epilogue.len());
 
@@ -2578,3 +2680,4 @@ mod apply_tests {
         assert_eq!(snapshot(&f), before, "落地失败时原 IR 必须逐字不变");
     }
 }
+

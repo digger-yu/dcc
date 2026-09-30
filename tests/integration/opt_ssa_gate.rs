@@ -150,3 +150,14 @@ fn ssa_pipe_nested_matches_gcc_at_all_levels() {
         "内层循环被流水时外层携带值丢失或外层推进链被破坏（曾表现为死循环）",
     );
 }
+
+/// 三种流水判定并存的样本：该流水的（依赖链）与不该流水的（load 归约 depth=0）
+/// 放在同一个翻译单元里，默认路径逐档与 gcc 对照。
+#[test]
+fn ssa_pipe_chain_matches_gcc_at_all_levels() {
+    assert_all_levels_match_gcc(
+        "ssa-pipe-chain",
+        include_str!("../fixtures/opt/ssa_pipe_chain.c"),
+        "流水落地或准入判定改变了行为",
+    );
+}

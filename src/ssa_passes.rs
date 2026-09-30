@@ -47,6 +47,17 @@ pub fn run_with_opts(func: &mut Function, level: u8, strict_aliasing: bool) {
     if level < 2 {
         return;
     }
+    // P16 软件流水：**必须在其它改写循环的 pass 之前跑**。放到管线末尾时实测产物
+    // 与关闭时逐字节相同（-O2 下一个循环也没流水）：ivop / GVN / SCCP / 展开 / 分块
+    // 早就把归纳变量链与 latch 改成了分类器不认识的形状。流水本身要重建循环结构
+    // （拆块、改名、插轮转 phi），所以它先跑，后面的 pass 再在 kernel 上继续优化。
+    //
+    // 仍默认关闭：当前资源模型下只有依赖链形态能拿到一级重叠（语料 200 个文件实测
+    // 5 个候选循环、唯一有重叠的 depth=2），且接入点提前后尚需一次端到端确认；
+    // 详见 docs/ssa-pass-upgrade-plan.md §7.3/§7.5。
+    if std::env::var("DCC_PIPE_ON").is_ok() && !ssa_dbg_off("pipe") {
+        run_pipelining(func);
+    }
     // 第一轮: 不依赖 GVN/SCCP 的 pass
     strength_reduction(func);
     ivop(func);
@@ -90,24 +101,6 @@ pub fn run_with_opts(func: &mut Function, level: u8, strict_aliasing: bool) {
         if !ssa_dbg_off("pgo") {
             pgo(func);
         }
-    }
-    // P16 软件流水：计划、切分、轮转 phi 生成与落地都已实现并受单测锁定，但**默认
-    // 不接入产物**，因为它进入产物后有一条已定位、尚未修好的正确性缺陷：
-    //
-    //   最小复现（已实测：-O0/-O1 正常，-O2 输出整块丢失而退出码仍为 0）：
-    //     static int arr[12];
-    //     int main(void){ for(int i=0;i<12;i++) arr[i]=i; printf("done=%d\n",arr[5]); }
-    //
-    //   同一夹具里「归约在被调函数内」与「归约不读内存」两种形态都正常，所以
-    //   病灶在 **kernel 内的 IndexStore 实例/它的跳轮 phi**：写地址的迭代号一旦错
-    //   位就会越界写，踩坏 stdio 缓冲而不崩溃。
-    //
-    // 拿错值与死循环换「pass 看起来已接入」是反向的，所以默认关。需要验证落地
-    // 形态时用 `DCC_PIPE_ON=1` 显式开启；修好上条缺陷后把默认打开，并同时依赖
-    // `tests/fixtures/opt/ssa_pipe_reduction.c` 与 `ssa_pipe_nested.c` 两条执行级
-    // 夹具验收（它们已在默认路径上盯住「各档位与 gcc 一致」）。
-    if std::env::var("DCC_PIPE_ON").is_ok() && !ssa_dbg_off("pipe") {
-        run_pipelining(func);
     }
     // 本轮多个 pass 会改 terminator (SCCP 折常量 switch、P19 穿线、DSE 删指令不影响
     // 控制流但会改变块内容)。`rebuild_block` 与 `find_loop_body_multi` 沿 `preds` 走,
