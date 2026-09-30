@@ -12,6 +12,10 @@
  * signedness (movsx for signed incl. char, movzx for unsigned).
  *
  * GCC torture tests: 960801-1.c, 921218-2.c
+ *
+ * 不变式不止「寄存器里看着对」：赋值表达式的值必须是**存入之后**的对象值
+ * (C11 6.5.16p3)，而每一层显式转换的宽度必须留在 IR 里。下面两组全局/局部
+ * 链式赋值都只为这两条服务。
  */
 void abort(void);
 void exit(int);
@@ -70,6 +74,29 @@ int main(void) {
     if (gs != -1) abort();
     if (gu != (unsigned short) -1) abort();
     if (gl != (unsigned short) -1) abort();
+
+    /* 中间一层的宽度不得被外层左值类型吃掉。两个独立缺陷都在这里：
+     *   1. 构建器把预派发的 `target` 直接当 Cast 的 dest，于是
+     *      `long w1 = (unsigned short)-1` 的 IR 里 `unsigned short` 那层消失，
+     *      -O2 的 SCCP 将常量折成 -1（gcc 与 -O0 都是 65535）。
+     *   2. 给全局量赋值后返回原始 RHS，违反 C11 6.5.16p3（赋值表达式的值是
+     *      存入之后的对象值），链式赋值就漏掉了截断。*/
+    {
+        long w1;
+        unsigned short uw;
+        w1 = (unsigned short) -1;
+        if (w1 != 65535) abort();
+        long w2 = (unsigned char) 300;
+        if (w2 != 44) abort();
+        uw = 70000;
+        if (uw != 4464) abort();
+        long w3 = (short) uw;
+        if (w3 != 4464) abort();
+        int iv;
+        long jv;
+        jv = (iv = (unsigned short) -1);
+        if (iv != 65535 || jv != 65535) abort();
+    }
 
     exit(0);
 }

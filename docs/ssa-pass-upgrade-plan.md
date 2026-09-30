@@ -844,7 +844,8 @@ IR 层断言（算一遍 `prologue ++ kernel×R ++ epilogue` 对每个节点的*
 |---|---|---|---|
 | `va_arg/global_valist_sse_agg.c`、`va_arg/vacopy_sse_agg.c`、`va_arg/mixed_sse_pipeline_named.c`、`va_arg/mixed_sse_via_valist_param.c` | 退出码 = 首个读错位置的序号（15/10/20/13） | **只有 SCCP**（`DCC_SSA_OFF=sccp` 就全对） | SCCP 不得对「经另一函数写入的全局 va_list 字段」做常量传播；先从 `non_propagatable_names` 入手查 |
 | `vla.c` | rc=12 | **只有 SSA 层 GVN**（`DCC_SSA_OFF=gvn` 就全对） | 未修；两种候选方案已被实测否定，证据与下一步见 §7.10 |
-| `complex_abi.c`、`ld80_arith.c`、`chained_assign_truncation.c`、`agg_param_reg_stack_split.c` | rc=1 / rc=1 / abort / rc=6 | 关掉**整个 SSA 往返**才正常，单个 pass 都不是触发者（第 20 轮逐个 `DCC_SSA_OFF=*` 复测：gvn/sccp/dse/sched/die 全部仍错） | 属于 build/rebuild 的形状丢失，需逐个建模。新证据：`chained_assign_truncation` 的 `unsigned f(void){...ul = us = l2 = s2 = -1; return ul;}` 抽成单函数**不复现**（-O0/-O2 都给 65535），所以触发条件在同一 TU 的别处；下一步从「往返前后整函数 AST 对比」入手而不是猜赋值截断 |
+| `complex_abi.c`、`ld80_arith.c`、`agg_param_reg_stack_split.c` | rc=1 / rc=1 / rc=6 | 关掉**整个 SSA 往返**才正常，单个 pass 都不是触发者 | 属于 build/rebuild 的形状丢失，需逐个建模（同 §7.11 的做法：先用最小可复现把范围收到一条构造，再定位是哪个 pass） |
+| ~~`chained_assign_truncation.c`~~ **已修（第 21 轮，见 §7.11）** | abort | `DCC_SSA_OFF=sccp` 就正常，但根因不在 SCCP：是构建器丢了中间类型 + 全局赋值返回了原始 RHS | 见 §7.11 |
 
 **§7.4 项 3（`reg_bindings` 闭合）本轮没做，理由不是时间不够**（下一轮已做完，见 §7.8）：
 查下去发现它不是一个
@@ -952,6 +953,33 @@ IR 里目前是同一个东西。
 
 本轮度量：`cargo test --release` 3084 通过 / 0 失败；OPT-DIFF **18 → 10（5 个文件）**；
 可复现门禁 5040 组合字节一致；`check_fixtures` 全引用、selftest 5/5。
+
+### 7.11 第 21 轮：赋值表达式的值与「中间那一层宽度」（OPT-DIFF 10 → 8）
+
+`chained_assign_truncation.c` 在 -O2/-O3 走 `abort()`。上一轮把范围收到最小可复现：
+`unsigned f(void){ ... ul = us = l2 = s2 = -1; return ul; }` 单独编译**是对的**，
+真正错的是全局量那组 —— `short gs; long gl; unsigned short gu; gl = gu = gs = -1;`
+在 -O2 得到 `gl = -1`，而 -O0 与 gcc 都是 `65535`。顺着这条线挖出**两个独立缺陷**：
+
+1. **构建器把预派发的 `target` 直接当 `Cast` 的 dest**（`lower_expr` 的 Cast 分支）。
+   `long w1 = (unsigned short)-1;` 走 `lower_expr_into(rhs, w1.1)`，而 `w1.1` 的类型是
+   `long`，于是那条 Cast 的 dest 类型成了 `long`，`(unsigned short)` 这一层的宽度与符号
+   在 IR 里**根本不存在了**。SCCP 之后按 `dest.ty` 掩码就掩成 64 位，常量停在 -1。
+   现在只有当 `target.ty == 表达式自己的类型` 时才复用 target，否则先按表达式自己的类型
+   算出结果、再显式转成目标类型（两层 Cast 都在 IR 里）。
+2. **给具名对象赋值后返回原始 RHS**（`store_to_named_object`），违反 C11 6.5.16p3：
+   赋值表达式的值是**存入之后**的对象值。局部量那条路径靠 `lower_expr_into` 把 RHS 直接
+   落进左值的新版本，天然带类型，所以一直是对的；全局量这条路径漏了，于是链式赋值把
+   中间宽度吃掉。现在在标量且类型不一致时补一条 `Cast`（不是回读内存，因此不给 volatile
+   全局增加可观察访问）。
+
+两个缺陷都不是优化器的错，SCCP 只是把丢了类型的 IR 忠实地折叠出来而已。夹具
+`chained_assign_truncation.c` 补了一组新断言，把两类都钉住：`w1 = (unsigned short)-1`
+（局部，缺陷 1）、`long w2 = (unsigned char)300`、`uw = 70000` 后再 `w3 = (short)uw`，
+以及 `jv = (iv = (unsigned short)-1)`（表达式值，缺陷 2）—— 期望值全部按 gcc 实测核对。
+
+度量：OPT-DIFF **10 → 8（4 个文件）**；`cargo test --release` 3084 通过 / 0 失败 / 零
+warning；可复现门禁 5040 组合字节一致；`check_fixtures` 全引用；新代码 clippy 零命中。
 
 ### 8. 第 6 轮：P10 已接入 + P16 分析层完成
 

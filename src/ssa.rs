@@ -803,6 +803,33 @@ impl Builder {
             },
             span: span.clone(),
         });
+        // 赋值表达式的值是**存入之后**的对象值（C11 6.5.16p3）：必须先按左值类型截断
+        // 并恢复符号/零扩展，才能往外传。直接把原始 RHS 返回去的话，链式赋值会丢掉
+        // 中间那一层宽度：`gl = gu = gs = -1`（三个都是全局量）里 `gu = -1` 的值应是
+        // 65535，而实测 -O2 把 -1 传进了 `gl`（-O0 与 gcc 都是 65535）。
+        // 这里用 Cast 而不是回读内存：不增加可观察访问（volatile 全局也安全）。
+        let is_scalar = !matches!(
+            obj_ty,
+            Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)
+        );
+        let value_ty = match &value {
+            Operand::Var(v) => Some(v.ty.clone()),
+            Operand::Int(_) => Some(Type::Int),
+            _ => None,
+        };
+        if is_scalar && value_ty.as_ref() != Some(obj_ty) {
+            let cast = self.fresh("astyp", obj_ty.clone(), span);
+            self.emit(Inst {
+                dest: Some(cast.clone()),
+                kind: InstKind::Cast {
+                    ty: obj_ty.clone(),
+                    e: value,
+                },
+                span: span.clone(),
+            });
+            self.define(cast.clone());
+            return Operand::Var(cast);
+        }
         value
     }
 
@@ -1137,7 +1164,18 @@ impl Builder {
             },
             Expr::Cast { ty, e: inner, span } => {
                 let o = self.lower_expr(inner);
-                let dest = target.unwrap_or_else(|| self.fresh("cast", ty.clone(), span));
+                // 预派发的 `target` 只有在类型跟这条 Cast 的结果类型相同时才能直接当
+                // dest。否则中间那一层类型会被丢掉：`long a = (unsigned short)-1;` 走的是
+                // `lower_expr_into(rhs, a.1)`（`a.1` 的类型是 long），于是 dest 成了 long，
+                // `(unsigned short)` 的宽度与符号在 IR 里消失 —— 实测 -O2 下 SCCP 把常量
+                // 折成 -1，而 gcc 是 65535。改成两步：先按表达式自己的类型算出结果，
+                // 再显式转成目标类型，两层转换都留在 IR 里。
+                let outer: Option<SsaVar> =
+                    target.as_ref().filter(|t| &t.ty != ty).cloned();
+                let dest: SsaVar = match (&target, &outer) {
+                    (Some(t), None) => t.clone(),
+                    _ => self.fresh("cast", ty.clone(), span),
+                };
                 self.emit(Inst {
                     dest: Some(dest.clone()),
                     kind: InstKind::Cast {
@@ -1147,7 +1185,22 @@ impl Builder {
                     span: span.clone(),
                 });
                 self.define(dest.clone());
-                Operand::Var(dest)
+                let value = Operand::Var(dest);
+                match outer {
+                    Some(t) => {
+                        self.emit(Inst {
+                            dest: Some(t.clone()),
+                            kind: InstKind::Cast {
+                                ty: t.ty.clone(),
+                                e: value,
+                            },
+                            span: span.clone(),
+                        });
+                        self.define(t.clone());
+                        Operand::Var(t)
+                    },
+                    None => value,
+                }
             },
             Expr::Cond {
                 cond,
