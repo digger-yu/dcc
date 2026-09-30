@@ -563,6 +563,33 @@ impl Codegen {
         self.emit_reg_indirect_modrm(src, base);
     }
 
+    /// `[base] <- xmm`：`bits` = 32 (movss) / 64 (movsd) / 128 (movups)。
+    /// 编码与 `store_xmm32_stack`/`store_xmm64_stack` 同族，只是寻址换成 `[base]`，
+    /// 用于「SSE 输出绑到 `a[i]` / `*p` 这类非 Ident 左值」的写回
+    /// （见 `writeback_asm_general_lvalue`）。
+    pub fn store_xmm_to_ptr(&mut self, xmm: u8, base: u8, bits: u8) {
+        let prefix: u8 = match bits {
+            32 => 0xF3,
+            64 => 0xF2,
+            _ => 0,
+        };
+        let mut rex = 0x40u8;
+        if xmm >= 8 {
+            rex |= 0x04;
+        }
+        if base >= 8 {
+            rex |= 0x01;
+        }
+        if prefix != 0 {
+            self.emit(&[prefix]);
+        }
+        if rex != 0x40 {
+            self.emit(&[rex]);
+        }
+        self.emit(&[0x0F, 0x11]);
+        self.emit_reg_indirect_modrm(xmm, base);
+    }
+
     pub fn load_stack_sized(&mut self, reg: u8, off: i64, size: usize) {
         if Self::fits_disp32(off) {
             let rex_r = if reg >= 8 { 0x04 } else { 0 };

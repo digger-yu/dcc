@@ -177,7 +177,13 @@ impl Codegen {
             // 字符串操作
             "movsb" => self.emit(&[0xA4]),
             "movsw" => self.emit(&[0x66, 0xA5]),
-            "movsl" | "movsd" => self.emit(&[0xA5]),
+            // `movsd` 有两个互不相干的意思：没有操作数时是字符串搬移 ([rsi] -> [rdi])，
+            // 带两个操作数时是 SSE 标量双精度搬移。这里必须按操作数个数分开：以前这一支
+            // 没有守卫，先于下面 `"movsd" if ops.len() == 2` 的 SSE 分支命中，于是
+            // `movsd %xmm1, %xmm0` 被编成 0xA5（`rep movsd`）—— 实测带 `"=x"` 输出的
+            // 程序一跑就段错误。`movsl` 没有这层歧义（SSE 侧叫 movss/movsd），保持原样。
+            "movsl" => self.emit(&[0xA5]),
+            "movsd" if ops.is_empty() => self.emit(&[0xA5]),
             "movsq" => self.emit(&[0x48, 0xA5]),
             "stosb" => self.emit(&[0xAA]),
             "stosw" => self.emit(&[0x66, 0xAB]),

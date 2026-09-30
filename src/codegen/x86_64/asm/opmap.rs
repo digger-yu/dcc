@@ -926,7 +926,12 @@ impl Codegen {
     /// caller-saved 号，所以这个 scratch 一定不是本句 asm 的任何操作数寄存器；
     /// `alloc_callee_saved` 同时置 `reg_allocated` 与 `callee_saved_used`，因此它也不会
     /// 与外层表达式的溅出槽相撞，并且序言会真的保存它。写回结束立刻归还。
-    fn writeback_asm_general_lvalue(&mut self, expr: &Expr, src: u8) -> bool {
+    fn writeback_asm_general_lvalue(
+        &mut self,
+        expr: &Expr,
+        src: u8,
+        xmm_width: u8,
+    ) -> bool {
         let ty = expr.ty();
         let effective_ty = match &ty {
             Type::Imaginary(inner) => inner.base.clone(),
@@ -946,11 +951,23 @@ impl Codegen {
                 | Type::Named(_)
                 | Type::Int128
                 | Type::UInt128
-                | Type::Float
-                | Type::Double
         );
         let sz = effective_ty.size();
         if excluded || sz == 0 || sz > 8 {
+            return false;
+        }
+        // float / double 的输出寄存器是 xmm，存法不同（movss / movsd）。注意
+        // `"=x"` 的 `xmm_width` 一律是 128（见 `asm_constraint_wants_xmm`），所以
+        // 宽度必须按**类型**判，而不是照抄 xmm_width。这一条现在才敢做：
+        // `movsd %xmm1, %xmm0` 以前被编成字符串搬移 0xA5（见 emit_lines.rs 里
+        // `movsd` 的守卫），写回还没走到程序就已经崩了。
+        let float_bits = match &effective_ty {
+            Type::Float => Some(32u8),
+            Type::Double => Some(64u8),
+            _ => None,
+        };
+        if xmm_width != 0 && float_bits.is_none() {
+            // 操作数在 xmm 里但类型不是 float/double：不知道该怎么存，保持旧行为。
             return false;
         }
         let scratch = match self.alloc_callee_saved() {
@@ -961,19 +978,22 @@ impl Codegen {
             self.free_callee_saved(scratch);
             return false;
         }
-        self.store_reg_to_ptr(src, scratch, sz);
+        match float_bits {
+            Some(bits) => self.store_xmm_to_ptr(src, scratch, bits),
+            None => self.store_reg_to_ptr(src, scratch, sz),
+        }
         self.free_callee_saved(scratch);
         true
     }
 
     pub(crate) fn writeback_asm_operand(&mut self, expr: &Expr, reg: u8, xmm_width: u8) {
         // 非 Ident 左值先走通用写回（原因与实测见 `writeback_asm_general_lvalue`）。
-        // 只管 GP 形态（`"=r"` / `"=q"`）：xmm / x87 的写回另有编码，而 `"=x"` 绑到
-        // 非 Ident 左值时更早就崩（实测本版本与修改前都段错误），那是另一条独立
-        // 缺陷，不在这里半修。
+        // 必须放在最前面：下面每个分支都以 `Expr::Ident` 为前提，非 Ident 落进去就是
+        // 静默丢值。x87 / MMX / 段寄存器 / 条件码（`xmm_width` 的 2xx 编码）仍走各自
+        // 的分支 —— 它们的宽度语义与 GP/SSE 两条不同，混进来只会让诊断变模糊。
         if !matches!(expr, Expr::Ident { .. })
-            && xmm_width == 0
-            && self.writeback_asm_general_lvalue(expr, reg)
+            && matches!(xmm_width, 0 | 32 | 64 | 128)
+            && self.writeback_asm_general_lvalue(expr, reg, xmm_width)
         {
             return;
         }
