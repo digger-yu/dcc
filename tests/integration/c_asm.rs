@@ -505,6 +505,71 @@ fn asm_output_on_indexed_lvalue_is_written_back() {
     }
 }
 
+/// x86_64 REX **位序**与「低 8 位字节寄存器只要有 REX 就合法」的实测形态。
+///
+/// 修前同一份代码在 objdump 里的错编（全部静默，长度一样、不崩溃）：
+///   `movb $65,"=S"` → `b6 41` = `mov $0x41,%dh`；`addb $16,"+D"` → `80 c7 10` =
+///   `add $0x10,%bh`；`sete "=S"` → `0f 94 c6` = `sete %dh`；`orb $1` 因
+///   `0x80 + op*8` 撞成 `88 /r`（mov）；`shlb $2` 报 E0311；`"=m"` 的 char 存回
+///   走 `89 /r` 越界写 4 字节。
+///
+/// 只在 -O0/-O1 与 gcc 对照：-O2/-O3 另有一个**与本夹具无关的既有缺陷**（跨 noinline
+/// 调用的全局写被丢），由下面的 xfail 用例单独钉住。判据用运行值而不是产物字节，
+/// 因为这些编码唯一的行为后果就是「写到了别人的位段上」。
+#[test]
+fn rex_operand_bit_order_matches_gcc() {
+    let source = include_str!("../fixtures/asm/rex_operand_bit_order.c");
+    for flag in ["-O0", "-O1"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("rex-bit-order", source, &[flag]),
+            0,
+            "{flag}: REX 位序/宽度口径与 gcc 不一致（值落到了别的寄存器的位段）"
+        );
+    }
+}
+
+/// 既有缺陷（非本轮引入）：-O2/-O3 下，跨 `noinline` 调用的全局变量写被丢，于是
+/// 后续读拿到第一次写的值。HEAD 实测本夹具 `a=-125 b=-125 c=-125`（gcc 是 11/1/77…），
+/// 最小复现：`f1(){asm("movb $65,%%sil"…); cb=a+d;} f2(){asm(…); cb=v;}` 两个写入者
+/// 交替读 `cb`。
+#[test]
+fn rex_bit_order_fixture_xfail_o2_drops_cross_call_global_writes() {
+    let source = include_str!("../fixtures/asm/rex_operand_bit_order.c");
+    for flag in ["-O2", "-O3"] {
+        let (gsrc, gexe) = {
+            let dir = std::env::temp_dir();
+            let pid = std::process::id();
+            let gsrc = dir.join(format!("dcc-rexx-{pid}.c"));
+            let gexe = dir.join(format!("dcc-rexx-{pid}.gcc"));
+            std::fs::write(&gsrc, source).expect("write fixture");
+            let gb = std::process::Command::new("gcc")
+                .args(["-O0", "-std=gnu2x", "-w", "-o"])
+                .arg(&gexe)
+                .arg(&gsrc)
+                .output()
+                .expect("run gcc");
+            assert!(gb.status.success(), "oracle 侧 gcc 必须能编译本夹具");
+            let _ = std::fs::remove_file(&gsrc);
+            (gsrc, gexe)
+        };
+        let gcc_out = std::process::Command::new(&gexe).output().expect("run gcc exe");
+        let _ = std::fs::remove_file(&gexe);
+        let _ = gsrc;
+        let (dcompile, dexe) = run_compile_and_run_flags("rex-xfail-o2", source, &[flag]);
+        assert!(
+            dcompile.status.success(),
+            "{flag}: dcc 应能编译（缺陷在优化器，不在前端）"
+        );
+        let dcc_out = std::process::Command::new(&dexe).output().expect("run dcc exe");
+        let _ = std::fs::remove_file(dexe);
+        assert_ne!(
+            dcc_out.stdout, gcc_out.stdout,
+            "跨调用的全局写若已修好，请把本用例并进上面那条绿灯对照；\
+             当前 -O2/-O3 应读到第一次写的值（a=-125 被复制给 b/c/e）"
+        );
+    }
+}
+
 /// `q` 类的 legacy 寄存器不够用时，必须**报出来**，不能退化成静默错值。
 ///
 /// 修前七个 `"=q"` 输出实测全是 0（gcc 是 11..77），也就是「分配器把已占用的寄存器
