@@ -134,10 +134,10 @@ fn first_line(cg: &Codegen, case: &str) -> String {
     );
     let out = decode(&cg.code);
     let line = out.lines().next().unwrap_or("").trim().to_string();
-    // 解码器读不出来会兜底成 `.byte ...`，那等于这条用例没跑：必须当场判红，
-    // 否则门禁会在「新编码形态解码器不认识」时悄悄变成空跑。
+    // 解码器读不出来有两种兜底：`.byte ...` 与 `# UNKNOWN ...`。两者都等于这条用例
+    // **没跑**，必须当场判红，否则门禁会在「新编码形态解码器不认识」时悄悄变成空跑。
     assert!(
-        !line.contains(".byte"),
+        !line.contains(".byte") && !line.contains("UNKNOWN"),
         "{case}: 解码器看不懂这段字节，门禁未覆盖。字节 = {:?}, 解码 = {out}",
         cg.code
     );
@@ -351,6 +351,126 @@ fn increment_matrix() {
             let mut c = cg();
             c.increment(r, sz);
             check(&c, &format!("inc r{r} sz={sz}"), &[name(r, bits)]);
+        }
+    }
+}
+
+/// 帧访问助手：整个后端流量最大的发射点，此前零覆盖。
+///
+/// 它们把寄存器放在 ModRM.reg（目的/源），把基址固定为 %r13 或 %r11，所以位序应该是
+/// 「REX.R 给 reg + REX.B 给 base」。这一族的 modrm 不在紧跟的 emit 里（在
+/// `emit_r13_modrm_disp` / `emit_reg_indirect_modrm` 里），所以批量批改的脚本只能把它们
+/// 列为「判不出」——那不等于没病，而是判据没伸到这里。接进门禁就不再靠人读。
+#[test]
+fn frame_access_helpers_matrix() {
+    for reg in 0..16u8 {
+        // disp32 内与超出 disp32（后者走 lea %r11 + 间接寻址两条路）
+        for off in [-40i64, -4096, 8i64, 4096i64] {
+            let small = off.abs() < 2048;
+            let mut c = cg();
+            c.load_stack(reg, off);
+            check(&c, &format!("load_stack r{reg} off={off}"), &[name(reg, 64)]);
+
+            let mut c = cg();
+            c.store_stack(reg, off);
+            check(&c, &format!("store_stack r{reg} off={off}"), &[name(reg, 64)]);
+
+            for size in [1usize, 2, 4, 8] {
+                let mut c = cg();
+                c.load_stack_sized(reg, off, size);
+                // 窄尺寸走 movzx，目的寄存器读回来是 32 位。
+                let w = if size < 4 { 32 } else { size * 8 };
+                check(&c, &format!("load_stack_sized r{reg} size={size} off={off}"), &[name(reg, w)]);
+
+                let mut c = cg();
+                c.emit_store(reg, off, size);
+                check(&c, &format!("emit_store r{reg} size={size} off={off}"), &[name(reg, size * 8)]);
+            }
+
+            if small {
+                // %rsp 相对的两个助手：reg 字段是数据寄存器，base=rsp 需要 SIB。
+                for off2 in [8usize, 4096] {
+                    let mut c = cg();
+                    c.store_rsp_qword(reg, off2);
+                    check(&c, &format!("store_rsp_qword r{reg} off={off2}"), &[name(reg, 64)]);
+                    let mut c = cg();
+                    c.load_rsp_qword(reg, off2);
+                    check(&c, &format!("load_rsp_qword r{reg} off={off2}"), &[name(reg, 64)]);
+                }
+                let mut c = cg();
+                c.emit_lea_r13(reg, off);
+                check(&c, &format!("emit_lea_r13 r{reg} off={off}"), &[name(reg, 64), "%r13"]);
+            }
+        }
+    }
+}
+
+/// SSE 与 GP 之间的 `movd`，以及 `%r13` 相对的两条 `movdqu`。前缀次序必须是
+/// `F3/F2 → REX → opcode`，而 xmm 寄存器号在 ModRM.reg 上（扩展位是 REX.R）。
+#[test]
+fn xmm_transfer_matrix() {
+    for x in 0..16u8 {
+        for off in [-40i64, 4096i64] {
+            let mut c = cg();
+            c.emit_movdqu_r13_to_xmm(x, off);
+            check(&c, &format!("movdqu (%r13{off}) -> xmm{x}"), &[format!("%xmm{x}").as_str()]);
+
+            let mut c = cg();
+            c.emit_movdqu_xmm_to_r13(x, off);
+            check(&c, &format!("movdqu xmm{x} -> (%r13{off})"), &[format!("%xmm{x}").as_str()]);
+        }
+    }
+    for x in 0..16u8 {
+        for gp in 0..16u8 {
+            let mut c = cg();
+            c.emit_movd_gp_to_xmm(x, gp);
+            check(&c, &format!("movd r{gp} -> xmm{x}"), &[name(gp, 32)]);
+        }
+    }
+}
+
+/// SSE 与帧/栈之间的存与取。xmm 号一律在 ModRM.reg 上 ⇒ >=8 需要 REX.R；而
+/// `movss/movsd` 的宽度由 F3/F2 定，**不能**带 REX.W（带了就会被 objdump 标成
+/// `rex.WB movsd …` —— 那是多余位的唯一读数）。`emit_xmm_store_rsp` 旧代码一个前缀都不发，
+/// 实测 `movsd %xmm9, (%rsp)` 实际写的是 %xmm0，两个浮点变量掉进同一个槽。
+#[test]
+fn xmm_frame_transfer_matrix() {
+    for x in 0..16u8 {
+        let xmm_name = format!("%xmm{x}");
+        let xmm_name = xmm_name.as_str();
+        for off in [-40i64, 4096i64] {
+            let mut c = cg();
+            c.store_xmm32_stack(x, off);
+            check(&c, &format!("movss xmm{x} -> (%r13{off})"), &[xmm_name]);
+            let mut c = cg();
+            c.store_xmm64_stack(x, off);
+            check(&c, &format!("movsd xmm{x} -> (%r13{off})"), &[xmm_name]);
+            for elem in [4usize, 8] {
+                let mut c = cg();
+                c.load_stack_xmm(x, off, elem, elem == 4);
+                check(&c, &format!("load_stack_xmm xmm{x} elem={elem} off={off}"), &[xmm_name]);
+            }
+            for off2 in [8usize, 4096] {
+                for (p, mn) in [(0xF3u8, "movss"), (0xF2u8, "movsd")] {
+                    let mut c = cg();
+                    c.emit_xmm_store_rsp(p, x, off2);
+                    check(&c, &format!("{mn} xmm{x} -> (%rsp+{off2})"), &[xmm_name]);
+                    let mut c = cg();
+                    c.emit_xmm_load_rsp(p, x, off2);
+                    check(&c, &format!("{mn} (%rsp+{off2}) -> xmm{x}"), &[xmm_name]);
+                }
+            }
+        }
+        for base in [3u8, 4, 5, 12, 13] {
+            for bits in [32u8, 64, 128] {
+                let mut c = cg();
+                c.store_xmm_to_ptr(x, base, bits);
+                check(
+                    &c,
+                    &format!("store_xmm_to_ptr xmm{x} -> ({}) bits={bits}", name(base, 64)),
+                    &[xmm_name, name(base, 64)],
+                );
+            }
         }
     }
 }
