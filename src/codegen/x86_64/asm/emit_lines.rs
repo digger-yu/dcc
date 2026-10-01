@@ -18,6 +18,22 @@ use crate::target::Target;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 impl Codegen {
+    /// 无后缀整数助记符（mov / add / and / cmp / test …）的运算宽度。**由操作数定**，
+    /// 写死 64 是错的：`mov $1, %eax` 是 32 位写（不碰高 32 位），而按 64 位编会清掉
+    /// %rax 的高 32 位；`add %eax, %ebx` 按 64 位编则连标志位口径都换了。
+    /// 先看**目的**（它决定写入宽度），再看源；两边都没寄存器（只能
+    /// `mov $imm, mem` 这种本身就不完整的写法）时保持原来的 64，不改变既有行为。
+    fn asm_int_bits(src: &AsmOperand, dst: &AsmOperand) -> u8 {
+        for op in [dst, src] {
+            if let AsmOperand::Reg(_, bits) = op {
+                if *bits != 0 {
+                    return *bits;
+                }
+            }
+        }
+        64
+    }
+
     fn emit_asm_instr(&mut self, mnemonic: &str, ops: &[AsmOperand]) {
         match mnemonic {
             // 无操作数指令
@@ -215,7 +231,12 @@ impl Codegen {
             },
 
             // 数据移动
-            "mov" | "movq" if ops.len() == 2 => self.emit_asm_mov(&ops[0], &ops[1], 64),
+            // 无后缀的整数助记符宽度由**操作数**决定（GAS 规则）；见 asm_int_bits。
+            "mov" if ops.len() == 2 => {
+                let bits = Self::asm_int_bits(&ops[0], &ops[1]);
+                self.emit_asm_mov(&ops[0], &ops[1], bits)
+            },
+            "movq" if ops.len() == 2 => self.emit_asm_mov(&ops[0], &ops[1], 64),
             "movl" if ops.len() == 2 => self.emit_asm_mov(&ops[0], &ops[1], 32),
             "movw" if ops.len() == 2 => self.emit_asm_mov(&ops[0], &ops[1], 16),
             // movd: 32-bit 整数与 xmm 之间的传送 (66 0F 6E / 66 0F 7E)
@@ -255,36 +276,75 @@ impl Codegen {
             },
 
             // 算术
-            "add" | "addq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 0, 64),
+            // 无后缀的一支（add/or/adc/sbb/and/sub/xor/cmp/test）同样按操作数定宽：
+            // 旧代码把它们与 `*q` 归成同一条、写死 64，于是 `add %eax,%ebx` 被编成
+            // REX.W 的 64 位加（高 32 位参与运算、标志位口径也不同）。
+            "add" if ops.len() == 2 => {
+                let bits = Self::asm_int_bits(&ops[0], &ops[1]);
+                self.emit_asm_alu(&ops[0], &ops[1], 0, bits)
+            },
+            "addq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 0, 64),
             "addl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 0, 32),
             "addw" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 0, 16),
             "addb" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 0, 8),
-            "adc" | "adcq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 2, 64),
+            "adc" if ops.len() == 2 => {
+                let bits = Self::asm_int_bits(&ops[0], &ops[1]);
+                self.emit_asm_alu(&ops[0], &ops[1], 2, bits)
+            },
+            "adcq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 2, 64),
             "adcl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 2, 32),
             "adcb" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 2, 8),
-            "sbb" | "sbbq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 3, 64),
+            "sbb" if ops.len() == 2 => {
+                let bits = Self::asm_int_bits(&ops[0], &ops[1]);
+                self.emit_asm_alu(&ops[0], &ops[1], 3, bits)
+            },
+            "sbbq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 3, 64),
             "sbbl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 3, 32),
             "sbbb" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 3, 8),
-            "sub" | "subq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 5, 64),
+            "sub" if ops.len() == 2 => {
+                let bits = Self::asm_int_bits(&ops[0], &ops[1]);
+                self.emit_asm_alu(&ops[0], &ops[1], 5, bits)
+            },
+            "subq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 5, 64),
             "subl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 5, 32),
             "subw" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 5, 16),
             "subb" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 5, 8),
-            "and" | "andq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 4, 64),
+            "and" if ops.len() == 2 => {
+                let bits = Self::asm_int_bits(&ops[0], &ops[1]);
+                self.emit_asm_alu(&ops[0], &ops[1], 4, bits)
+            },
+            "andq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 4, 64),
             "andl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 4, 32),
             "andw" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 4, 16),
             "andb" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 4, 8),
-            "or" | "orq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 1, 64),
+            "or" if ops.len() == 2 => {
+                let bits = Self::asm_int_bits(&ops[0], &ops[1]);
+                self.emit_asm_alu(&ops[0], &ops[1], 1, bits)
+            },
+            "orq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 1, 64),
             "orl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 1, 32),
             "orw" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 1, 16),
             "orb" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 1, 8),
-            "xor" | "xorq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 6, 64),
+            "xor" if ops.len() == 2 => {
+                let bits = Self::asm_int_bits(&ops[0], &ops[1]);
+                self.emit_asm_alu(&ops[0], &ops[1], 6, bits)
+            },
+            "xorq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 6, 64),
             "xorl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 6, 32),
             "xorb" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 6, 8),
-            "cmp" | "cmpq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 7, 64),
+            "cmp" if ops.len() == 2 => {
+                let bits = Self::asm_int_bits(&ops[0], &ops[1]);
+                self.emit_asm_alu(&ops[0], &ops[1], 7, bits)
+            },
+            "cmpq" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 7, 64),
             "cmpl" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 7, 32),
             "cmpw" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 7, 16),
             "cmpb" if ops.len() == 2 => self.emit_asm_alu(&ops[0], &ops[1], 7, 8),
-            "test" | "testq" if ops.len() == 2 => self.emit_asm_test(&ops[0], &ops[1], 64),
+            "test" if ops.len() == 2 => {
+                let bits = Self::asm_int_bits(&ops[0], &ops[1]);
+                self.emit_asm_test(&ops[0], &ops[1], bits)
+            },
+            "testq" if ops.len() == 2 => self.emit_asm_test(&ops[0], &ops[1], 64),
             "testl" if ops.len() == 2 => self.emit_asm_test(&ops[0], &ops[1], 32),
             "testb" if ops.len() == 2 => self.emit_asm_test(&ops[0], &ops[1], 8),
             "imul" if ops.len() == 2 => self.emit_asm_imul2(&ops[0], &ops[1]),
@@ -695,14 +755,32 @@ impl Codegen {
             "cvttpd2dq" if ops.len() == 2 => self.emit_asm_sse_arith(&ops[0], &ops[1], 0x66, 0xE6),
 
             // 移位
-            "shl" | "sal" | "shlq" if ops.len() == 2 => {
-                self.emit_asm_shift(&ops[0], &ops[1], 4, 64)
+            // 无后缀的一支按操作数定宽（见 asm_int_bits）；另补上 b/w 两个窄宽度，
+            // 否则 `shlb` 只能报 E0311（编码层已支持 8 位的 C0/D0）。
+            "shl" | "sal" if ops.len() == 2 => {
+                let bits = Self::asm_int_bits(&ops[0], &ops[1]);
+                self.emit_asm_shift(&ops[0], &ops[1], 4, bits)
             },
+            "shlq" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 4, 64),
             "shll" | "sall" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 4, 32),
-            "shr" | "shrq" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 5, 64),
+            "shlw" | "salw" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 4, 16),
+            "shlb" | "salb" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 4, 8),
+            "shr" if ops.len() == 2 => {
+                let bits = Self::asm_int_bits(&ops[0], &ops[1]);
+                self.emit_asm_shift(&ops[0], &ops[1], 5, bits)
+            },
+            "shrq" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 5, 64),
             "shrl" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 5, 32),
-            "sar" | "sarq" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 7, 64),
+            "shrw" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 5, 16),
+            "shrb" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 5, 8),
+            "sar" if ops.len() == 2 => {
+                let bits = Self::asm_int_bits(&ops[0], &ops[1]);
+                self.emit_asm_shift(&ops[0], &ops[1], 7, bits)
+            },
+            "sarq" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 7, 64),
             "sarl" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 7, 32),
+            "sarw" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 7, 16),
+            "sarb" if ops.len() == 2 => self.emit_asm_shift(&ops[0], &ops[1], 7, 8),
 
             // 双精度移位 / 位测试
             "shld" | "shldq" if ops.len() == 3 => {
