@@ -82,7 +82,7 @@ impl Codegen {
                 }
                 self.mov_imm(1, assign_l_ty.size() as i128);
                 self.emit(&[0xFC]); // cld
-                self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                self.emit(&[0xF3, 0xA4]); // rep movsb
                 return;
             }
             if rax_is_agg_addr {
@@ -516,7 +516,7 @@ impl Codegen {
                 } else {
                     self.mov_imm(1, agg_sz as i128); // rcx = size
                 }
-                self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                self.emit(&[0xF3, 0xA4]); // rep movsb
             } else {
                 self.gen_expr(ptr_e, 0); // rax = address
                 self.push(0); // save addr
@@ -817,7 +817,7 @@ impl Codegen {
                     self.emit(&[0x48, 0x89, 0xCF]); // mov rdi, rcx (dst)
                     self.emit(&[0xFC]); // cld
                     self.mov_imm(1, agg_sz as i128); // rcx = size (rep movsb counter)
-                    self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                    self.emit(&[0xF3, 0xA4]); // rep movsb
                 } else {
                     self.push(0); // 保存目标地址
                     let size = field_info.as_ref().map_or(4, |f| f.ty.size());
@@ -998,7 +998,7 @@ impl Codegen {
                     self.pop(7); // rdi = dst
                     self.emit(&[0xFC]); // cld
                     self.mov_imm(2, assign_sz as i128); // rcx = size
-                    self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                    self.emit(&[0xF3, 0xA4]); // rep movsb
                 } else {
                     self.gen_expr(r, 0);
                 }

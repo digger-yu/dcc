@@ -664,7 +664,8 @@ impl Codegen {
                     if bits == 16 {
                         self.emit(&[0x66]);
                     }
-                    self.emit(&[Self::rex(w, *s, 0, *d), 0x89, Self::modrm_reg_reg(*s, *d)]);
+                    self.emit_rex_if_used(w, *s, 0, *d, false);
+                    self.emit(&[0x89, Self::modrm_reg_reg(*s, *d)]);
                 }
             },
             // imm → reg

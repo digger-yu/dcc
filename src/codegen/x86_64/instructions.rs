@@ -1142,8 +1142,20 @@ impl Codegen {
         }
     }
 
+    /// SSE 标量存回 `%rsp` 相对槽。xmm 号在 ModRM.reg 上，所以 xmm>=8 **必须**发
+    /// REX.R(0x04)；旧代码一个前缀都不发，于是 `movsd %xmm9, (%rsp)` 实际写的是
+    /// `%xmm0` —— 两个不同的浮点变量会掉到同一个槽里。base=rsp 靠 SIB 表达，不需要 REX.B。
     pub fn emit_xmm_store_rsp(&mut self, pfx: u8, xmm: u8, off: usize) {
-        self.emit(&[pfx, 0x0F, 0x11]);
+        let rex = if xmm >= 8 { 0x44 } else { 0 };
+        if pfx != 0 {
+            if rex != 0 {
+                self.emit(&[pfx, rex, 0x0F, 0x11]);
+            } else {
+                self.emit(&[pfx, 0x0F, 0x11]);
+            }
+        } else {
+            self.emit(&[rex, 0x0F, 0x11]);
+        }
         if off < 128 {
             self.emit(&[0x44 | ((xmm & 7) << 3), 0x24, off as u8]);
         } else {
@@ -1153,7 +1165,17 @@ impl Codegen {
     }
 
     pub fn emit_xmm_load_rsp(&mut self, pfx: u8, xmm: u8, off: usize) {
-        self.emit(&[pfx, 0x0F, 0x10]);
+        // 与存回侧同一条位序规则（0F 10 /r，xmm 在 reg 字段）。
+        let rex = if xmm >= 8 { 0x44 } else { 0 };
+        if pfx != 0 {
+            if rex != 0 {
+                self.emit(&[pfx, rex, 0x0F, 0x10]);
+            } else {
+                self.emit(&[pfx, 0x0F, 0x10]);
+            }
+        } else {
+            self.emit(&[rex, 0x0F, 0x10]);
+        }
         if off < 128 {
             self.emit(&[0x44 | ((xmm & 7) << 3), 0x24, off as u8]);
         } else {
@@ -1265,9 +1287,11 @@ impl Codegen {
             matches!(expr_ty, Type::Bool | Type::UChar | Type::UShort | Type::UInt);
         if is_unsigned_small {
             // 零扩展: mov dst32, dst32 (32 位写自动清零高 32 位)
-            let dst = 0; // 整数结果约定在 rax
-            let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-            self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+            let dst = 0u8; // 整数结果约定在 rax
+            // 自反 `mov %eax,%eax`：dst 恒为 0 ⇒ 没有任何字段需要扩展，裸 0x40 只会
+            // 多占一字节并被 objdump 标成 `rex mov %eax,%eax`。
+            debug_assert!(dst < 8);
+            self.emit(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
         }
         // 无符号 64 位类型: cvtsi2ssq/cvtsi2sdq 将有符号 64 位
         // 解释转换, 对 >INT63 的值产生错误结果.

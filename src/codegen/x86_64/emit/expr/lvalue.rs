@@ -483,7 +483,7 @@ impl Codegen {
                         } else {
                             0xF2u8
                         };
-                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
+                        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], result_off);
                     }
                     self.emit_lea_r13(0, result_off);
                 } else {
@@ -654,7 +654,7 @@ impl Codegen {
                         let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                         // 加载实部: global → xmm0 → [r13+result_off]
                         self.emit_global_float_load_to_xmm(0, &name.name, &inner);
-                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off);
+                        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
                         // 加载虚部: global+inner_sz → xmm0 → [r13+result_off+inner_sz]
                         self.emit_global_float_load_to_xmm_offset(
                             0,
@@ -663,7 +663,7 @@ impl Codegen {
                             &inner,
                         );
                         self.emit_xmm0_r13_disp(
-                            &[pfx, 0x49, 0x0F, 0x11],
+                            &[pfx, 0x41, 0x0F, 0x11],
                             result_off + inner_sz as i64,
                         );
                     }
@@ -703,7 +703,7 @@ impl Codegen {
             } else {
                 0xF2u8
             };
-            self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
+            self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], result_off);
             self.emit_lea_r13(0, result_off);
         } else if matches!(ty, Type::Float | Type::Double | Type::LongDouble)
             || matches!(ty, Type::Imaginary(_))

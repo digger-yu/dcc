@@ -133,7 +133,7 @@ impl Codegen {
                 } else {
                     0xF2u8
                 };
-                self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
+                self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], result_off);
             }
             self.emit_lea_r13(0, result_off);
         }
@@ -358,7 +358,7 @@ impl Codegen {
         if is_float_inner {
             // 实部载入 xmm0，供浮点转换
             let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
-            self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
+            self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], result_off);
             // rax 指向结果区, 供 spill_complex_operand 的 rep movsb 使用
             self.emit_lea_r13(0, result_off);
         } else {
@@ -594,7 +594,7 @@ impl Codegen {
             let rpfx = if matches!(ri, Type::Float) { 0xF3u8 } else { 0xF2u8 };
             let r_isz = ri.size() as i64;
             let result_off = -self.frame_size + 8;
-            self.emit_xmm0_r13_disp(&[rpfx, 0x49, 0x0F, 0x10], result_off + r_isz);
+            self.emit_xmm0_r13_disp(&[rpfx, 0x41, 0x0F, 0x10], result_off + r_isz);
             self.emit_float_convert(&ri, inner);
         } else {
             self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0, xmm0 (标量: 虚部 0)
@@ -680,7 +680,7 @@ impl Codegen {
                 } else {
                     0xF2u8
                 };
-                self.emit_xmm0_r13_disp(&[rpfx, 0x49, 0x0F, 0x10], result_off);
+                self.emit_xmm0_r13_disp(&[rpfx, 0x41, 0x0F, 0x10], result_off);
                 self.emit_float_convert(&src_inner, inner);
             } else {
                 // 标量 init: 浮点值在 xmm0 (按源宽度), 整数在 rax —
@@ -1024,7 +1024,7 @@ impl Codegen {
                     self.emit_load_mem_typed_disp(isz as usize, t, isz);
                     self.gen_float_store_at(result_off + isz, t);
                     // xmm0 = 实部
-                    self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
+                    self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], result_off);
                 },
                 _ => {
                     // 整数内型: 分量按类型宽度读取.
@@ -1135,7 +1135,7 @@ impl Codegen {
             } else {
                 let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                 let read_off = if is_real { result_off } else { result_off + inner_sz };
-                self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], read_off);
+                self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], read_off);
             }
         } else {
             // 整数内型非 lvalue (如 3i + 5i): 实部/虚部在帧临时区
@@ -1201,7 +1201,7 @@ impl Codegen {
                 // complex 调用方 movsd 只读 xmm0, 虚部丢失
                 // complex-6 test_float)。
                 let result_off = -self.frame_size + 8;
-                self.emit_xmm0_r13_disp(&[0x66, 0x49, 0x0F, 0x10], result_off);
+                self.emit_xmm0_r13_disp(&[0x66, 0x41, 0x0F, 0x10], result_off);
             }
             return;
         }
@@ -1275,7 +1275,7 @@ impl Codegen {
             Type::Float => {
                 // `_Complex float` 是**单个** SSE eightbyte: 槽内
                 // [real@0..4][imag@4..8] 就是打包好的对象表示, movsd 整体装载。
-                self.emit_xmm0_r13_disp(&[0xF2, 0x49, 0x0F, 0x10], off);
+                self.emit_xmm0_r13_disp(&[0xF2, 0x41, 0x0F, 0x10], off);
             },
             Type::LongDouble => {
                 // 先压虚部再压实部 → st0=real、st1=imag。
@@ -1320,7 +1320,7 @@ impl Codegen {
                     } else {
                         0xF2u8
                     };
-                    self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
+                    self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], result_off);
                 }
                 self.emit_lea_r13(0, result_off);
                 return;
@@ -1363,7 +1363,7 @@ impl Codegen {
             self.emit_lea_r13(6, result_off); // rsi = 源
             self.mov_imm(1, (isz * 2) as i128); // rcx = 字节数
             self.emit(&[0xFC]); // cld
-            self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+            self.emit(&[0xF3, 0xA4]); // rep movsb
                                             // 统一 rvalue 约定: result_off 已含结果, rax=地址
             self.emit_lea_r13(0, result_off);
         }
@@ -1610,7 +1610,7 @@ impl Codegen {
                         self.emit(&[v_pfx, 0x0F, 0x10, 0x00]);
                     } else {
                         let off = self.var_offset(&name.name);
-                        self.emit_xmm0_r13_disp(&[v_pfx, 0x49, 0x0F, 0x10], off);
+                        self.emit_xmm0_r13_disp(&[v_pfx, 0x41, 0x0F, 0x10], off);
                     }
                     self.emit_float_convert(&v_inner, op_inner);
                     self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
@@ -1716,10 +1716,10 @@ impl Codegen {
                 } else {
                     // 局部 complex 变量: 从 [r13+off] 加载
                     let off = self.var_offset(&name.name);
-                    self.emit_xmm0_r13_disp(&[v_pfx, 0x49, 0x0F, 0x10], off);
+                    self.emit_xmm0_r13_disp(&[v_pfx, 0x41, 0x0F, 0x10], off);
                     self.emit_float_convert(&v_inner, op_inner);
                     self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
-                    self.emit_xmm0_r13_disp(&[v_pfx, 0x49, 0x0F, 0x10], off + v_isz);
+                    self.emit_xmm0_r13_disp(&[v_pfx, 0x41, 0x0F, 0x10], off + v_isz);
                     self.emit_float_convert(&v_inner, op_inner);
                     self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]);
                 }
@@ -1755,11 +1755,11 @@ impl Codegen {
                     if e_is_float && is_float_inner {
                         // 实部: [result_off] (e 自身宽度) → cvt → [rsp+slot]
                         let e_pfx = if matches!(e_inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-                        self.emit_xmm0_r13_disp(&[e_pfx, 0x49, 0x0F, 0x10], result_off);
+                        self.emit_xmm0_r13_disp(&[e_pfx, 0x41, 0x0F, 0x10], result_off);
                         self.emit_float_convert(&e_inner, op_inner);
                         self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
                         // 虚部: [result_off+e_isz]
-                        self.emit_xmm0_r13_disp(&[e_pfx, 0x49, 0x0F, 0x10], result_off + e_isz);
+                        self.emit_xmm0_r13_disp(&[e_pfx, 0x41, 0x0F, 0x10], result_off + e_isz);
                         self.emit_float_convert(&e_inner, op_inner);
                         self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]);
                     } else if is_float_inner {

@@ -120,22 +120,22 @@ impl Codegen {
             // 而非调用时读取调用者 r13 — 否则外部函数调用函数指针时
             // 静态链会指向调用者帧, 嵌套函数访问父帧 upvar 时读到垃圾。
             // 写入字节 0-1: movabs r10 = 49 ba
-            self.emit(&[0x48, 0xC6, 0x07, 0x49]); // mov BYTE [rdi+0], 0x49
-            self.emit(&[0x48, 0xC6, 0x47, 0x01, 0xBA]); // mov BYTE [rdi+1], 0xBA
+            self.emit(&[0xC6, 0x07, 0x49]); // mov BYTE [rdi+0], 0x49
+            self.emit(&[0xC6, 0x47, 0x01, 0xBA]); // mov BYTE [rdi+1], 0xBA
                                                         // 写入字节 2-9: 定义父帧指针 (当前 r13 值)
                                                         // mov [rdi+2], r13 = 4C 89 6F 02 (REX.WB, r13 为源寄存器)
             self.emit(&[0x4C, 0x89, 0x6F, 0x02]);
             // 写入字节 10-11: movabs r11 = 49 bb
-            self.emit(&[0x48, 0xC6, 0x47, 0x0A, 0x49]); // mov BYTE [rdi+10], 0x49
-            self.emit(&[0x48, 0xC6, 0x47, 0x0B, 0xBB]); // mov BYTE [rdi+11], 0xBB
+            self.emit(&[0xC6, 0x47, 0x0A, 0x49]); // mov BYTE [rdi+10], 0x49
+            self.emit(&[0xC6, 0x47, 0x0B, 0xBB]); // mov BYTE [rdi+11], 0xBB
                                                         // 写入字节 12-19: 函数地址 (rax 中的 8 字节)
             self.emit(&[0x48, 0x89, 0x47, 0x0C]); // mov [rdi+12], rax
                                                   // 写入字节 20-22: jmp r11 = 41 ff e3
-            self.emit(&[0x48, 0xC6, 0x47, 0x14, 0x41]); // mov BYTE [rdi+20], 0x41
-            self.emit(&[0x48, 0xC6, 0x47, 0x15, 0xFF]); // mov BYTE [rdi+21], 0xFF
-            self.emit(&[0x48, 0xC6, 0x47, 0x16, 0xE3]); // mov BYTE [rdi+22], 0xE3
+            self.emit(&[0xC6, 0x47, 0x14, 0x41]); // mov BYTE [rdi+20], 0x41
+            self.emit(&[0xC6, 0x47, 0x15, 0xFF]); // mov BYTE [rdi+21], 0xFF
+            self.emit(&[0xC6, 0x47, 0x16, 0xE3]); // mov BYTE [rdi+22], 0xE3
                                                         // 写入字节 23-31: nop 填充 (不执行)
-            self.emit(&[0x48, 0xC6, 0x47, 0x17, 0x90]); // mov BYTE [rdi+23], 0x90
+            self.emit(&[0xC6, 0x47, 0x17, 0x90]); // mov BYTE [rdi+23], 0x90
             self.emit(&[0x48, 0xC7, 0x47, 0x18]); // mov QWORD [rdi+24]
             self.emit(&0x9090909090909090u64.to_le_bytes());
         }
@@ -175,8 +175,9 @@ impl Codegen {
     }
     pub(crate) fn load_static_chain_for_call(&mut self, hops: i32, offs: &[i64]) {
         if hops <= 0 {
-            // mov r10, r13 (REX.WRB + 89 /r)
-            self.emit(&[0x4F, 0x89, 0xEA]);
+            // mov r10, r13: reg 字段是 r13（REX.R），r/m 字段是 r10（REX.B）。
+            // mod=11 没有 SIB，旧代码发的 0x4F 多了一个 REX.X（产物被 objdump 标成 rex.WRXB）。
+            self.emit(&[0x4D, 0x89, 0xEA]);
             return;
         }
         self.load_frame_via_chain(10, hops, offs);

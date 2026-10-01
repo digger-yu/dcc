@@ -769,7 +769,7 @@ impl Codegen {
                                             // 保存 rdi 作为返回值 (memcpy/memmove 返回 dst)
                 self.emit(&[0x57]); // push rdi
                 self.emit(&[0xfc]); // cld (清除方向标志)
-                self.emit(&[0xf3, 0x48, 0xa4]); // rep movsb
+                self.emit(&[0xF3, 0xA4]); // rep movsb
                 self.emit(&[0x58]); // pop rax (返回值 = dst)
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -806,7 +806,7 @@ impl Codegen {
                 self.gen_expr(&args[0], 7); // rdi = dst
                 self.gen_expr(&args[2], 1); // rcx = n
                 self.emit(&[0xfc]); // cld
-                self.emit(&[0xf3, 0x48, 0xa4]); // rep movsb
+                self.emit(&[0xF3, 0xA4]); // rep movsb
                                                 // rep movsb 后 rdi = dst+n, 移到 rax 作为返回值
                 self.mov(0, 7); // rax = rdi
                 if dst != 0 {
@@ -1086,12 +1086,12 @@ impl Codegen {
                         let imag_off = inner_sz;
                         // 实部: [rcx] → xmm0 → [result_off] (不变)
                         self.emit(&[pfx, 0x0F, 0x10, 0x01]);
-                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off);
+                        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
                         // 虚部: [rcx+off] → xmm0 → flip → [result_off+inner_sz]
                         self.emit(&[pfx, 0x0F, 0x10, 0x81]);
                         self.emit(&(imag_off as i32).to_le_bytes());
                         self.flip_sign_xmm(0, &inner);
-                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off + inner_sz);
+                        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
                     } else {
                         self.gen_expr(arg, 0);
                         if matches!(arg, Expr::Call { .. }) {
@@ -1105,14 +1105,14 @@ impl Codegen {
                             }
                         }
                         // 实部: xmm0 → [result_off] (不变)
-                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off);
+                        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
                         // 虚部: 加载并翻转
-                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off + inner_sz);
+                        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], result_off + inner_sz);
                         self.flip_sign_xmm(0, &inner);
-                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off + inner_sz);
+                        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
                     }
                     // 重载实部到 xmm0 (complex rvalue 约定: xmm0=实部)
-                    self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
+                    self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], result_off);
                     if dst != 0 {
                         self.mov(dst, 0);
                     }
@@ -2088,7 +2088,7 @@ impl Codegen {
                 self.emit(&176u32.to_le_bytes()); // add rsi, 176
                 self.emit(&[0x48, 0xC7, 0xC1]);
                 self.emit(&size.to_le_bytes()); // mov rcx, size
-                self.emit(&[0xFC, 0xF3, 0x48, 0xA4]); // cld; rep movsb
+                self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
                                                       // 从缓冲区恢复 GP 寄存器实参 (rdi..r9)
                 self.emit(&[0x4C, 0x8B, 0x9C, 0x24]);
                 self.emit(&buf_off.to_le_bytes()); // mov r11, [rsp+buf_off]
@@ -3080,7 +3080,7 @@ impl Codegen {
                 self.gen_expr(&args[0], 7); // rdi = dst
                 self.gen_expr(&args[2], 1); // rcx = n
                 self.emit(&[0xfc]); // cld
-                self.emit(&[0xf3, 0x48, 0xa4]); // rep movsb
+                self.emit(&[0xF3, 0xA4]); // rep movsb
                 if dst != 0 {
                     self.mov(dst, 7);
                 }

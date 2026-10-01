@@ -779,7 +779,8 @@ impl Codegen {
             if self.target.indirect_branch_thunk_extern {
                 self.call_label("__x86_indirect_call_thunk_r11");
             } else {
-                self.emit(&[0x49, 0xFF, 0xD3]);
+                // `call *%r11`：FF /2 的 r/m 是 r11（REX.B 足够），REX.W 对 call 无意义
+                self.emit(&[0x41, 0xFF, 0xD3]);
             }
         }
         self.emit_add_rsp(frame_bytes as i64);

@@ -56,7 +56,12 @@ impl Codegen {
             if dst >= 8 {
                 rex |= 0x01;
             }
-            self.emit(&[rex]);
+            // 32 位且 src/dst 都在低 8 个 ⇒ 这个 rex 就是裸 0x40，不扩任何字段。
+            // 它不改变语义，但会被 objdump 标成 `rex and %edx,%ecx` —— 那是多余位唯一
+            // 的读数，也是下一个人照抄的源头。64 位一支的 0x48 是 W 位，必须留。
+            if rex != 0x40 {
+                self.emit(&[rex]);
+            }
         }
         let r = (src & 7) << 3;
         let m = dst & 7;

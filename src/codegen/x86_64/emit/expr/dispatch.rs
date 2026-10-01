@@ -532,7 +532,7 @@ impl Codegen {
                         }
                         self.mov_imm(1, assign_l_ty.size() as i128);
                         self.emit(&[0xFC]); // cld
-                        self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                        self.emit(&[0xF3, 0xA4]); // rep movsb
                         return;
                     }
                     if rax_is_agg_addr {
@@ -998,7 +998,7 @@ impl Codegen {
                         } else {
                             self.mov_imm(1, agg_sz as i128); // rcx = size
                         }
-                        self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                        self.emit(&[0xF3, 0xA4]); // rep movsb
                     } else {
                         self.gen_expr(ptr_e, 0); // rax = address
                         self.push(0); // save addr
@@ -1303,7 +1303,7 @@ impl Codegen {
                             self.emit(&[0x48, 0x89, 0xCF]); // mov rdi, rcx (dst)
                             self.emit(&[0xFC]); // cld
                             self.mov_imm(1, agg_sz as i128); // rcx = size (rep movsb counter)
-                            self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                            self.emit(&[0xF3, 0xA4]); // rep movsb
                         } else {
                             self.push(0); // 保存目标地址
                             let size = field_info.as_ref().map_or(4, |f| f.ty.size());
@@ -1491,7 +1491,7 @@ impl Codegen {
                             self.pop(7); // rdi = dst
                             self.emit(&[0xFC]); // cld
                             self.mov_imm(2, assign_sz as i128); // rcx = size
-                            self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                            self.emit(&[0xF3, 0xA4]); // rep movsb
                         } else {
                             self.gen_expr(r, 0);
                         }
@@ -1636,12 +1636,12 @@ impl Codegen {
                                                  // 实部: [rcx] → xmm0 → flip → [result_off]
                         self.emit(&[pfx, 0x0F, 0x10, 0x01]); // movss/movsd xmm0, [rcx]
                         self.flip_sign_xmm(0, &inner);
-                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off);
+                        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
                         // 虚部: [rcx+off] → xmm0 → flip → [result_off+inner_sz]
                         self.emit(&[pfx, 0x0F, 0x10, 0x81]);
                         self.emit(&(imag_off as i32).to_le_bytes());
                         self.flip_sign_xmm(0, &inner);
-                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off + inner_sz);
+                        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
                     } else {
                         // rvalue: gen_expr 后 xmm0=实部
                         self.gen_expr(e, 0);
@@ -1657,14 +1657,14 @@ impl Codegen {
                         }
                         // 实部翻转符号位并写回临时区
                         self.flip_sign_xmm(0, &inner);
-                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off);
+                        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
                         // 虚部翻转符号位并写回临时区
-                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off + inner_sz);
+                        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], result_off + inner_sz);
                         self.flip_sign_xmm(0, &inner);
-                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off + inner_sz);
+                        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
                     }
                     // 重载实部到 xmm0 (complex rvalue 约定: xmm0=实部)
-                    self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
+                    self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], result_off);
                     if dst != 0 {
                         self.mov(dst, 0);
                     }
@@ -1703,32 +1703,32 @@ impl Codegen {
                             let imag_off = inner_sz;
                             // 实部: [rcx] → xmm0 → [result_off] (不变)
                             self.emit(&[pfx, 0x0F, 0x10, 0x01]); // movss/movsd xmm0, [rcx]
-                            self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off);
+                            self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
                             // 虚部: [rcx+off] → xmm0 → flip → [result_off+inner_sz]
                             self.emit(&[pfx, 0x0F, 0x10, 0x81]);
                             self.emit(&(imag_off as i32).to_le_bytes());
                             self.flip_sign_xmm(0, &inner);
                             self.emit_xmm0_r13_disp(
-                                &[pfx, 0x49, 0x0F, 0x11],
+                                &[pfx, 0x41, 0x0F, 0x11],
                                 result_off + inner_sz,
                             );
                         } else {
                             self.gen_expr(e, 0);
                             // 实部已经在 xmm0, 直接写回
-                            self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off);
+                            self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
                             // 虚部: 加载并翻转
                             self.emit_xmm0_r13_disp(
-                                &[pfx, 0x49, 0x0F, 0x10],
+                                &[pfx, 0x41, 0x0F, 0x10],
                                 result_off + inner_sz,
                             );
                             self.flip_sign_xmm(0, &inner);
                             self.emit_xmm0_r13_disp(
-                                &[pfx, 0x49, 0x0F, 0x11],
+                                &[pfx, 0x41, 0x0F, 0x11],
                                 result_off + inner_sz,
                             );
                         }
                         // 重载实部到 xmm0
-                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
+                        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], result_off);
                         // rax = result_off (dcc complex rvalue 约定, 供
                         // spill_complex_operand 的 rep movsb / gen_return 读取)
                         self.emit_lea_r13(0, result_off);
@@ -1871,8 +1871,12 @@ impl Codegen {
                                 self.emit(&[rex, 0x63, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                             } else {
                                 // mov dst32, dst32 (zero-extend 32→64)
-                                let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                                self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                                // 自反 ModRM: dst 同时在 ModRM.reg 与 r/m ⇒ >=8 要同时置 REX.R 与 REX.B(0x05)；
+                                // <8 时一个前缀都不发（裸 0x40 不扩任何字段，只会被 objdump 标成 `rex mov`）。
+                                if dst >= 8 {
+                                    self.emit(&[0x45]);
+                                }
+                                self.emit(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                             }
                         } else if result_sz < 8 {
                             // 8-byte types: no fixup needed (not already

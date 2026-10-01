@@ -147,8 +147,13 @@ impl Codegen {
             _ => return,
         };
         if is_32bit {
-            let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-            self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+            // 自反 ModRM: dst 同时在 ModRM.reg 与 r/m ⇒ >=8 必须同时置 REX.R 与 REX.B(0x05)，
+            // 只置一边就把另一个字段留在低 8 个寄存器上（读/写的都是别人的 %eax）。
+            // <8 时一个前缀都不发：裸 0x40 什么都不扩，只多占一字节并被 objdump 标成 `rex mov`。
+            if dst >= 8 {
+                self.emit(&[0x45]);
+            }
+            self.emit(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
         } else {
             let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
             self.emit(&[rex, 0x81, 0xE0 | (dst & 7)]);
@@ -279,8 +284,13 @@ impl Codegen {
         };
         if is_32bit {
             // mov dst32, dst32: 89 /r (32 位操作数自动零扩展高 32 位)
-            let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-            self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+            // 自反 ModRM: dst 同时在 ModRM.reg 与 r/m ⇒ >=8 必须同时置 REX.R 与 REX.B(0x05)，
+            // 只置一边就把另一个字段留在低 8 个寄存器上（读/写的都是别人的 %eax）。
+            // <8 时一个前缀都不发：裸 0x40 什么都不扩，只多占一字节并被 objdump 标成 `rex mov`。
+            if dst >= 8 {
+                self.emit(&[0x45]);
+            }
+            self.emit(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
         } else {
             // and dst, imm32: REX.W 81 /4 id
             let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
@@ -589,7 +599,7 @@ impl Codegen {
         let is_float = matches!(effective_ty, Type::Float);
         if is_float {
             // float: movss [r13+off], xmm0 → F3 49 0F 11 45 off
-            self.emit(&[0xF3, 0x49, 0x0F, 0x11]);
+            self.emit(&[0xF3, 0x41, 0x0F, 0x11]);
             if off.abs() < 128 {
                 self.emit(&[0x45, off as i8 as u8]);
             } else {
@@ -598,7 +608,7 @@ impl Codegen {
             }
         } else {
             // double: movsd [r13+off], xmm0 → F2 49 0F 11 45 off
-            self.emit(&[0xF2, 0x49, 0x0F, 0x11]);
+            self.emit(&[0xF2, 0x41, 0x0F, 0x11]);
             if off.abs() < 128 {
                 self.emit(&[0x45, off as i8 as u8]);
             } else {

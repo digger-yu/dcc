@@ -53,7 +53,7 @@ impl Codegen {
                 if let Some(inner) = cplx_inner {
                     if matches!(inner, Type::Float | Type::Double) {
                         let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-                        self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], slot);
+                        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], slot);
                     }
                 }
                 self.emit_lea_r13(0, slot); // rax = 槽地址

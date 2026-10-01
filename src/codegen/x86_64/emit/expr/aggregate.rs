@@ -94,7 +94,7 @@ impl Codegen {
             self.mov_imm(1, es.max(1) as i128);
         }
         self.emit(&[0xFC]); // cld
-        self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+        self.emit(&[0xF3, 0xA4]); // rep movsb
     }
     /// 聚合**形态**判据: 结构体/联合体/数组/原子/向量。与「值模型」判据
     /// [`Self::value_is_whole_copy`] 分开, 两者一起构成聚合赋值分发的全部知识,
@@ -567,7 +567,7 @@ impl Codegen {
                                         let rpfx =
                                             if matches!(si, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                                         self.emit_xmm0_r13_disp(
-                                            &[rpfx, 0x49, 0x0F, 0x10],
+                                            &[rpfx, 0x41, 0x0F, 0x10],
                                             result_off,
                                         );
                                     }
@@ -636,7 +636,7 @@ impl Codegen {
                                     let si = src_inner.clone().unwrap();
                                     let rpfx =
                                         if matches!(si, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-                                    self.emit_xmm0_r13_disp(&[rpfx, 0x49, 0x0F, 0x10], result_off);
+                                    self.emit_xmm0_r13_disp(&[rpfx, 0x41, 0x0F, 0x10], result_off);
                                 }
                                 // cvttsd2si rax, xmm0
                                 self.emit(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]);
@@ -789,7 +789,7 @@ impl Codegen {
                 self.mov(1, 11);
             }
             self.emit(&[0xFC]); // cld
-            self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+            self.emit(&[0xF3, 0xA4]); // rep movsb
             return;
         }
         let qwords = sz / 8;
@@ -1371,7 +1371,7 @@ impl Codegen {
                                     self.emit_lea_r13(6, src_off); // rsi = src
                                     self.mov_imm(1, sz as i128); // rcx = count
                                     self.emit(&[0xFC]); // cld
-                                    self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                                    self.emit(&[0xF3, 0xA4]); // rep movsb
                                     src_addr_ok = true;
                                 }
                             } else if matches!(value, Expr::CompoundLit { .. }) {
@@ -1383,7 +1383,7 @@ impl Codegen {
                                 self.mov(6, 0); // rsi = rax
                                 self.mov_imm(1, sz as i128); // rcx = count
                                 self.emit(&[0xFC]); // cld
-                                self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                                self.emit(&[0xF3, 0xA4]); // rep movsb
                                 src_addr_ok = true;
                             } else if matches!(
                                 value,
@@ -1395,7 +1395,7 @@ impl Codegen {
                                     self.mov(6, 0); // rsi = rax
                                     self.mov_imm(1, sz as i128); // rcx = count
                                     self.emit(&[0xFC]); // cld
-                                    self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                                    self.emit(&[0xF3, 0xA4]); // rep movsb
                                     src_addr_ok = true;
                                 }
                             }

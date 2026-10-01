@@ -641,7 +641,7 @@ impl Codegen {
                     self.emit_lea_r13(7, temp_off); // rdi = 临时槽
                     self.mov_imm(1, vec_size as i128);
                     self.emit(&[0xFC]); // cld
-                    self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                    self.emit(&[0xF3, 0xA4]); // rep movsb
                 }
             },
             Expr::Call { .. } => {
@@ -663,7 +663,7 @@ impl Codegen {
                 self.emit_lea_r13(7, temp_off); // rdi = 临时区
                 self.mov_imm(1, total_bytes as i128);
                 self.emit(&[0xFC]); // cld
-                self.emit(&[0xF3, 0x48, 0xA4]); // rep movsb
+                self.emit(&[0xF3, 0xA4]); // rep movsb
             },
         }
     }

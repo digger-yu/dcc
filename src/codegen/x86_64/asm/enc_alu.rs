@@ -74,11 +74,10 @@ impl Codegen {
                     if bits == 16 {
                         self.emit(&[0x66]);
                     }
-                    self.emit(&[
-                        Self::rex(w, *s, 0, *d),
-                        0x01 + op * 8,
-                        Self::modrm_reg_reg(*s, *d),
-                    ]);
+                    // 16/32/64 位支：src 在 reg、dst 在 r/m，谁 >=8 才扩谁。
+                    // 两个都在低 8 个时旧代码仍发一枚裸 0x40（objdump 标成 `rex add %ebx,%eax`）。
+                    self.emit_rex_if_used(w, *s, 0, *d, false);
+                    self.emit(&[0x01 + op * 8, Self::modrm_reg_reg(*s, *d)]);
                 }
             },
             (AsmOperand::Imm(v), AsmOperand::Reg(d, _)) => {
@@ -95,7 +94,7 @@ impl Codegen {
                         self.emit(&[0x40 | if *d >= 8 { 0x01 } else { 0 }]);
                     }
                 } else {
-                    self.emit(&[Self::rex(w, 0, 0, *d)]);
+                    self.emit_rex_if_used(w, 0, 0, *d, false);
                 }
                 if bits == 8 && *v >= 0 && *v <= 255 {
                     // 8 位 ALU: `80 /digit ib`。操作码**只有 0x80**，八个运算全部靠
@@ -131,8 +130,8 @@ impl Codegen {
                             ]);
                         }
                         // 现在 rax 是 imm; dst 是 d: op d, rax
+                        self.emit_rex_if_used(w, *d, 0, 0, false);
                         self.emit(&[
-                            Self::rex(w, *d, 0, 0),
                             0x01 + op * 8,
                             Self::modrm_reg_reg(*d, 0),
                         ]);
@@ -212,7 +211,8 @@ impl Codegen {
                     if bits == 16 {
                         self.emit(&[0x66]);
                     }
-                    self.emit(&[Self::rex(w, *d, 0, 0), 0x03 + op * 8]);
+                    self.emit_rex_if_used(w, *d, 0, 0, false);
+                    self.emit(&[0x03 + op * 8]);
                     self.emit_asm_modrm_mem_only(*d, 0, ASM_BASE_RIP, None, 1);
                     let pos = self.pos() - 4;
                     self.pending_data_rels.push((pos, sym.clone()));
@@ -274,8 +274,8 @@ impl Codegen {
                     0xBB => 7,
                     _ => 4,
                 };
+                self.emit_rex_if_used(w, 0, 0, *d, false);
                 self.emit(&[
-                    Self::rex(w, 0, 0, *d),
                     0x0F,
                     0xBA,
                     Self::modrm_reg_reg(ext, *d),
@@ -1057,13 +1057,14 @@ impl Codegen {
                 if bits == 16 {
                     self.emit(&[0x66]);
                 }
-                self.emit(&[Self::rex(w, *s, 0, *d), 0x85, Self::modrm_reg_reg(*s, *d)]);
+                self.emit_rex_if_used(w, *s, 0, *d, false);
+                self.emit(&[0x85, Self::modrm_reg_reg(*s, *d)]);
             },
             (AsmOperand::Imm(v), AsmOperand::Reg(d, _)) => {
                 if bits == 16 {
                     self.emit(&[0x66]);
                 }
-                self.emit(&[Self::rex(w, 0, 0, *d)]);
+                self.emit_rex_if_used(w, 0, 0, *d, bits == 8);
                 if bits == 8 {
                     if *v >= 0 && *v <= 255 {
                         self.emit(&[0xF6, Self::modrm_reg_reg(0, *d), *v as u8]);
@@ -1188,7 +1189,8 @@ impl Codegen {
         };
         match op {
             AsmOperand::Reg(r, _) => {
-                self.emit(&[Self::rex(w, 0, 0, *r), opcode, Self::modrm_reg_reg(ext, *r)]);
+                self.emit_rex_if_used(w, 0, 0, *r, bits == 8);
+                self.emit(&[opcode, Self::modrm_reg_reg(ext, *r)]);
             },
             AsmOperand::Mem {
                 disp,
@@ -1199,7 +1201,8 @@ impl Codegen {
                 if bits == 16 {
                     self.emit(&[0x66]);
                 }
-                self.emit(&[Self::rex(w, 0, index.unwrap_or(0), *base), opcode]);
+                self.emit_rex_if_used(w, 0, index.unwrap_or(0), *base, bits == 8);
+                self.emit(&[opcode]);
                 self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
             },
             AsmOperand::SymDisp(sym, _) => {
@@ -1207,7 +1210,11 @@ impl Codegen {
                 if bits == 16 {
                     self.emit(&[0x66]);
                 }
-                self.emit(&[Self::rex(w, 0, 0, 0), opcode]);
+                // RIP 相对的 modrm 是 `mod=00 rm=101`，它由 opcode 的 ext 与 rm=5 构成，
+                // 没有任何字段需要扩展 ⇒ 64 位以下不该发前缀（旧代码发的是裸 0x40，
+                // 产物被 objdump 标成 `rex incl %gs:0x0(%rip)`）。
+                self.emit_rex_if_used(w, 0, 0, 0, bits == 8);
+                self.emit(&[opcode]);
                 self.emit_asm_modrm_mem_only(ext, 0, ASM_BASE_RIP, None, 1);
                 let pos = self.pos() - 4;
                 self.pending_data_rels.push((pos, sym.clone()));

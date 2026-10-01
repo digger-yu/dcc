@@ -559,6 +559,20 @@ impl Codegen {
             None
         }
     }
+    /// `Self::rex()` 恒返回 ≥0x40，因此「一个字段都不用扩」时它给出的是一枚**不扩任何字段
+    /// 的裸前缀**。它不改变语义，但会被 objdump 标成 `rex add %ebx,%eax` —— 那是多余位的
+    /// 唯一读数，也是下一个人照抄的源头。这个助手把「按需才发」集中到一处。
+    ///
+    /// 8 位上下文**不走这里**：%spl/%bpl/%sil/%dil（字段值 4..7）需要的是「存在 REX」，
+    /// 那些调用点自己显式发 `0x40 | …`（见 enc_alu / enc_mov 的 bits == 8 分支）。
+    /// `byte_ctx` 为真表示本条指令可能是 8 位形式，此时一律发前缀（保守，不弱化正确性）。
+    pub(crate) fn emit_rex_if_used(&mut self, w: bool, r: u8, x: u8, b: u8, byte_ctx: bool) {
+        if byte_ctx || w || r >= 8 || x >= 8 || b >= 8 {
+            let v = Self::rex(w, r, x, b);
+            self.emit(&[v]);
+        }
+    }
+
     pub(crate) fn rex(w: bool, r: u8, x: u8, b: u8) -> u8 {
         let mut v = 0x40u8;
         if w {

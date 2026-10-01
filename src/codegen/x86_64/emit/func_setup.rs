@@ -955,9 +955,11 @@ impl Codegen {
         // mov r14, [r13 - 32]  (REX.WRB: r14 needs REX.R, r13 needs REX.B)
         self.callee_save_patch_sites.push((self.pos(), 0x04));
         self.emit(&[0x4d, 0x8b, 0x75, 0xe0]);
-        // mov r15, [r13 - 40]  (REX.WRB: r15 needs REX.R+REX.B)
+        // mov r15, [r13 - 40]  (REX.WRB: r15 在 reg 字段需要 REX.R, r13 在 r/m 需要 REX.B)
+        // 这里没有 SIB，REX.X 是多余的：旧代码发 0x4F = W|R|X|B，产物里被 objdump 标成
+        // `rex.WRXB mov -0x28(%r13),%r15`（与序言侧同一个复制源）。
         self.callee_save_patch_sites.push((self.pos(), 0x08));
-        self.emit(&[0x4f, 0x8b, 0x7d, 0xd8]);
+        self.emit(&[0x4d, 0x8b, 0x7d, 0xd8]);
         // mov rsp, r13: 恢复栈指针
         self.emit(&[0x49, 0x8b, 0xe5]);
         self.emit(&[0x41, 0x5d]); // pop r13

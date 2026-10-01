@@ -136,13 +136,25 @@ impl Codegen {
         match float_ty {
             Type::Float => {
                 // cvttss2si dst, xmm0 (F3 REX 0F 2C /r)
-                let rex = 0x40 | (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x04 } else { 0 });
-                self.emit(&[0xF3, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+                // cvt 的 REX 只在真的扩了字段时才发：`0x40 | 0 | 0` 是什么也不扩的裸前缀，
+                // 多占一字节并被 objdump 标成 `rex cvttsd2si`（多余位的唯一读数）。
+                let rex = (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x04 } else { 0 });
+                if rex != 0 {
+                    self.emit(&[0xF3, 0x40 | rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+                } else {
+                    self.emit(&[0xF3, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+                }
             },
             Type::Double => {
                 // cvttsd2si dst, xmm0 (F2 REX 0F 2C /r)
-                let rex = 0x40 | (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x04 } else { 0 });
-                self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+                // cvt 的 REX 只在真的扩了字段时才发：`0x40 | 0 | 0` 是什么也不扩的裸前缀，
+                // 多占一字节并被 objdump 标成 `rex cvttsd2si`（多余位的唯一读数）。
+                let rex = (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x04 } else { 0 });
+                if rex != 0 {
+                    self.emit(&[0xF2, 0x40 | rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+                } else {
+                    self.emit(&[0xF2, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+                }
             },
             Type::LongDouble => {
                 // long double 的值通道是 **x87 st(0)** (80-bit 值模型, 见
@@ -155,8 +167,14 @@ impl Codegen {
                 // 落成 f64 到 xmm0, 再走按 xmm0 取值的 cvttsd2si。
                 self.emit_x87_to_xmm0();
                 // cvttsd2si dst, xmm0 (F2 REX 0F 2C /r)
-                let rex = 0x40 | (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x04 } else { 0 });
-                self.emit(&[0xF2, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+                // cvt 的 REX 只在真的扩了字段时才发：`0x40 | 0 | 0` 是什么也不扩的裸前缀，
+                // 多占一字节并被 objdump 标成 `rex cvttsd2si`（多余位的唯一读数）。
+                let rex = (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x04 } else { 0 });
+                if rex != 0 {
+                    self.emit(&[0xF2, 0x40 | rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+                } else {
+                    self.emit(&[0xF2, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]);
+                }
             },
             _ => {},
         }
@@ -304,8 +322,13 @@ impl Codegen {
                     self.emit(&[rex, 0x0F, 0xBF, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                 } else {
                     // movzwl: 32 位 mov 零扩展高 32 位, 再 and 0xFFFF
-                    let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                    // 自反 ModRM: dst 同时在 ModRM.reg 与 r/m ⇒ >=8 必须同时置 REX.R 与 REX.B(0x05)，
+                    // 只置一边就把另一个字段留在低 8 个寄存器上（读/写的都是别人的 %eax）。
+                    // <8 时一个前缀都不发：裸 0x40 什么都不扩，只多占一字节并被 objdump 标成 `rex mov`。
+                    if dst >= 8 {
+                        self.emit(&[0x45]);
+                    }
+                    self.emit(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                     let rex2 = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     self.emit(&[rex2, 0x81, 0xE0 | (dst & 7)]);
                     self.emit(&0xFFFFu32.to_le_bytes());
@@ -314,8 +337,13 @@ impl Codegen {
             Type::Int | Type::UInt => {
                 if !is_signed {
                     // 无符号 int: mov dst32, dst32 零扩展到 64 位
-                    let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+                    // 自反 ModRM: dst 同时在 ModRM.reg 与 r/m ⇒ >=8 必须同时置 REX.R 与 REX.B(0x05)，
+                    // 只置一边就把另一个字段留在低 8 个寄存器上（读/写的都是别人的 %eax）。
+                    // <8 时一个前缀都不发：裸 0x40 什么都不扩，只多占一字节并被 objdump 标成 `rex mov`。
+                    if dst >= 8 {
+                        self.emit(&[0x45]);
+                    }
+                    self.emit(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                 }
                 // 有符号 int: 64 位寄存器低 32 位已正确, 无需操作
             },
@@ -365,8 +393,13 @@ impl Codegen {
         }
         if is_32bit {
             // mov dst32, dst32: 32 位写自动零扩展高 32 位
-            let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-            self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
+            // 自反 ModRM: dst 同时在 ModRM.reg 与 r/m ⇒ >=8 必须同时置 REX.R 与 REX.B(0x05)，
+            // 只置一边就把另一个字段留在低 8 个寄存器上（读/写的都是别人的 %eax）。
+            // <8 时一个前缀都不发：裸 0x40 什么都不扩，只多占一字节并被 objdump 标成 `rex mov`。
+            if dst >= 8 {
+                self.emit(&[0x45]);
+            }
+            self.emit(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
         } else {
             // and dst, mask: 清除高位
             let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21

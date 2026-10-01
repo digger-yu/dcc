@@ -180,19 +180,19 @@ impl Codegen {
                 // [real@0..4][imag@4..8])。旧实现按 xmm0/xmm1 两
                 // 寄存器约定拆分 (那是 _Complex double 的分类),
                 // float complex 虚部丢失 (complex-6 test_float)。
-                self.emit_xmm0_r13_disp(&[0x66, 0x49, 0x0F, 0xD6], result_off);
+                self.emit_xmm0_r13_disp(&[0x66, 0x41, 0x0F, 0xD6], result_off);
                 // 实部重载 xmm0 (dcc complex rvalue 约定, movss 4B)
-                self.emit_xmm0_r13_disp(&[0xF3, 0x49, 0x0F, 0x10], result_off);
+                self.emit_xmm0_r13_disp(&[0xF3, 0x41, 0x0F, 0x10], result_off);
             } else if matches!(inner.base, Type::Double) {
                 let pfx = 0xF2u8;
                 let isz = inner.base.size() as i64;
                 // xmm0=实部 → [result_off]
-                self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off);
+                self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
                 // xmm1=虚部 → xmm0 → [result_off+isz]
                 self.emit(&[pfx, 0x0F, 0x10, 0xC1]); // movsd xmm0, xmm1
-                self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], result_off + isz);
+                self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + isz);
                 // 实部重载 xmm0 (dcc complex rvalue 约定)
-                self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x10], result_off);
+                self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], result_off);
             } else if matches!(inner.base, Type::LongDouble) {
                 // SysV: _Complex long double 经 x87 返回 st0=real、st1=imag,
                 // 非 sret。先 fstp tbyte real@result_off（弹出后 imag 升到

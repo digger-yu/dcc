@@ -969,7 +969,7 @@ impl Codegen {
                     }
                     // 保存实部 → [r13 + base_off]
                     self.emit_lea_r13(7, base_off);
-                    self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], base_off);
+                    self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], base_off);
                     // 加载虚部: [rax + inner_sz] → xmm0
                     let inner_sz_i64 = inner_sz as i64;
                     self.emit(&[0x48, 0x81, 0xc0, 0x00]); // add rax, inner_sz
@@ -982,10 +982,10 @@ impl Codegen {
                     }
                     // 保存虚部 → [r13 + base_off + inner_sz]
                     self.emit_lea_r13(7, base_off + inner_sz_i64);
-                    self.emit_xmm0_r13_disp(&[pfx, 0x49, 0x0F, 0x11], base_off + inner_sz_i64);
+                    self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], base_off + inner_sz_i64);
                     // 恢复 xmm0 到实部
                     self.emit_lea_r13(6, base_off);
-                    self.emit(&[pfx, 0x49, 0x0F, 0x10, 0xf0]); // movss xmm0, [r13 + off]
+                    self.emit(&[pfx, 0x41, 0x0F, 0x10, 0xf0]); // movss xmm0, [r13 + off]
                                                                // 返回地址在 rax/dst
                     self.emit_lea_r13(0, base_off);
                     if dst != 0 {
