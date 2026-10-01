@@ -288,82 +288,85 @@ fn subobject_member_addr_matches_gcc_at_all_levels() {
     }
 }
 
-/// **已知未修，且不是本轮引入**：基址是**指针指数组**（`int (*pa)[N]`）的多重下标。
+/// 指针指数组形参（`int (*pa)[N]`）的类型模型与下标形态：四个档位都必须与 gcc 一致。
 ///
-/// 本轮是在给 `(*pa)[i]` 做衰减时撞上它的。下面四行定性证据把它与 SSA 层撇清了：
-///   * `git stash` 回到 HEAD 重建后同一形状仍错（不是本轮改出来的）；
-///   * `DCC_OPT_SKIP=run_ssa_passes` 跳过整层 SSA 后仍错 ⇒ 不在 SSA 往返；
-///   * 逐个跳过 `prune_dead_stores` / `ssa_gvn` / `loop_opt` 仍错 ⇒ 也不是这三个 AST pass；
-///   * `pa[i][j]` 连 **-O0** 都错 ⇒ 基线前端/codegen 的缺陷。
+/// 本条曾是 xfail，名字是 `pointer_to_array_index_is_a_known_baseline_defect`，按**实测
+/// 矩阵**逐格钉「仍与 gcc 不一致」，并在断言文本里写明「哪一格变一致了就说明那一格被
+/// 修好，请把它移到绿灯对照」。现在它按自己指的方向变成了绿灯。保留这段历史是因为
+/// 根因被误归因过一次：
 ///
-/// 实测矩阵（不猜，逐档跑出来的）：
+/// 真因不在 codegen 也不在 SSA，而在**形参声明符的结合顺序**：`int (*pa)[3]` 被建成
+/// `Array(Ptr(Int),3)`（3 个 int* 的数组）而不是 `Ptr(Array(Int,3))`（指向「3 个 int
+/// 的数组」的指针）。实测 `sizeof(pa)` 返 24（= 3*8）而 gcc 返 8。基址类型错，`pa[i][j]`
+/// 的步长与 `(*pa)[i]` 的衰减必然全错 —— 所以它连 -O0 都是静默错值。当时我用「跳过
+/// run_ssa_passes / 跳过各 AST pass / 回 HEAD」三步把它定成「基线 codegen 缺陷」，方向
+/// 对了却没指向解析器；真正的捷径是最早该做的那一步：**用 sizeof 直接问类型**。
 ///
-/// | 形状 | -O0 | -O1 | -O2 | -O3 |
-/// |---|---|---|---|---|
-/// | `pa[0][0]=1; return pa[0][1];`（gcc 返 3） | 254 | 253 | 255 | 254 |
-/// | `(*pa)[2]=7; pa[0][0]=1; return (*pa)[2]+(*pa)[0];`（gcc 返 8） | 8 | 8 | **段错误** | **段错误** |
-///
-/// 错法看起来是内层 `pa[0]`（元素类型是数组）被当**值**读进临时帧：写落到临时帧、
-/// 读又拿未初始化地址（所以退出码逐次漂动）；第二行在 -O2 把目标算成 `0x7` 这样
-/// 的野地址 ⇒ rc=139。真修需要一般的「左值地址」形态（基址 + 下标*步长而不载入），
-/// 与 `InstKind::MemberAddr` 同一条路线。
-///
-/// 为什么按矩阵逐档断言而不是笼统写「优化档位都错」：第一版里我就把范围写宽成了
-/// 「-O1..-O3」，实际 `(*pa)[i]` 与 `pa[i][j]` 同现时 -O1 是对的。钉矩阵的话，任何人
-/// 修好任一格，本测试会指着那一格说「这里现在一致了」。
+/// 下面的期望值都写在源程里并以返回 0 表示全部成立：这样「与 gcc 一致」与「算对了」
+/// 同时被钉住（若只比 stdout 而不要求 0，我的期望写错时 gcc 也会配合地返回同一个
+/// 非零值，那是一种假绿）。每个调用都走**语句序列**，不把多个修改同一数组的调用写进
+/// 同一个表达式参数列表 —— 参数求值顺序在 C 里未规定，会产生与编译器无关的假
+/// MISMATCH（本项目为此踩过一次）。
 #[test]
-fn pointer_to_array_index_is_a_known_baseline_defect() {
-    let decay_write = "int f(int (*pa)[3]) { pa[0][0] = 1; return pa[0][1]; }\n\
-                       int main(void){ int a[3]={2,3,4}; return f(&a); }\n";
-    let wild = "int f(int (*pa)[3]) { (*pa)[2] = 7; pa[0][0] = 1; return (*pa)[2] + (*pa)[0]; }\n\
-                int main(void){ int a[3]={2,3,4}; return f(&a); }\n";
-    let diverge_at = |src: &str, flag: &str| -> bool {
-        let dir = std::env::temp_dir();
-        let tag = std::process::id();
-        let gsrc = dir.join(format!("dcc-p2a-{tag}.c"));
-        let gexe = dir.join(format!("dcc-p2a-{tag}.gcc"));
-        let dexe = dir.join(format!("dcc-p2a-{tag}.dcc"));
-        std::fs::write(&gsrc, src).expect("写临时源文件");
-        let gb = std::process::Command::new("gcc")
-            .args(["-O0", "-w", "-o"])
-            .arg(&gexe)
-            .arg(&gsrc)
-            .output()
-            .expect("跑 gcc");
-        assert!(gb.status.success(), "oracle 侧 gcc 必须能编译");
-        let gout = std::process::Command::new(&gexe).output().expect("跑 gcc 产物");
-        let db = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
-            .args([flag, "-o"])
-            .arg(&dexe)
-            .arg(&gsrc)
-            .output()
-            .expect("跑 dcc");
-        assert!(db.status.success(), "dcc 应能编译（{flag}）：问题在 codegen 不在前端");
-        let dout = std::process::Command::new(&dexe).output().expect("跑 dcc 产物");
-        for p in [&gsrc, &gexe, &dexe] {
-            let _ = std::fs::remove_file(p);
-        }
-        !(dout.status == gout.status && dout.stdout == gout.stdout)
-    };
-
-    // 按实测矩阵逐格钉。
+fn pointer_to_array_param_matches_gcc_at_all_levels() {
+    let src = "static int sizes(int (*pa)[3]) { return (int)sizeof(pa) * 10000 \
+               + (int)sizeof(*pa) * 100 + (int)sizeof(pa[0]); }\n\
+               static int sub(int (*pa)[3]) { pa[0][0] = 11; pa[1][2] = 22; \
+               return pa[0][0] + pa[1][2]; }\n\
+               static int dec(int (*pa)[3]) { (*pa)[2] = 7; \
+               return (*pa)[2] + (*pa)[0]; }\n\
+               int main(void) {\n\
+                   int r1[6] = {0,1,2,3,4,5}; int r2[6] = {0,1,2,3,4,5};\n\
+                   int r3[6] = {0,1,2,3,4,5}; int ok = 1;\n\
+                   if (sizes((int (*)[3]) r1) != 81212) ok = 0;\n\
+                   if (sub((int (*)[3]) r2) != 33) ok = 0;\n\
+                   if (r2[0] != 11 || r2[5] != 22) ok = 0;\n\
+                   if (dec((int (*)[3]) r3) != 7) ok = 0;\n\
+                   if (r3[2] != 7) ok = 0;\n\
+                   return ok ? 0 : 1;\n\
+               }\n";
     for flag in ["-O0", "-O1", "-O2", "-O3"] {
-        assert!(
-            diverge_at(decay_write, flag),
-            "pa[i][j] 在 {flag} 下已与 gcc 一致：那一格已被修好，请把它从本用例移到绿灯对照，\
-             并补上一般的「左值地址」形态"
+        assert_eq!(
+            run_gcc_cross_check_opt("ptr-to-array-param", src, &[flag]),
+            0,
+            "{flag}: 指针指数组形参的类型模型 / pa[i][j] / (*pa)[i] 与 gcc 不一致"
         );
     }
-    for flag in ["-O2", "-O3"] {
-        assert!(
-            diverge_at(wild, flag),
-            "(*pa)[i] 与 pa[i][j] 同现时在 {flag} 下已与 gcc 一致：同上"
-        );
-    }
-    for flag in ["-O0", "-O1"] {
-        assert!(
-            !diverge_at(wild, flag),
-            "(*pa)[i] 与 pa[i][j] 同现时在 {flag} 下反而新错了：本格历史上是对的，请查回归"
+}
+
+/// 指针指数组的 **typedef** 形式：`typedef int (*arrp)[3];` 必须能编译，且
+/// 尺寸、步长、读写都与 gcc 一致。四个档位逐档对照。
+///
+/// 与上面那条同一个声明符形状，但在不同的代码路径上：typedef 的 `(*name)` 分支
+/// 只认函数指针（`)` 后必须是 `(`），所以 `typedef int (*arrp)[3];` 会在 gcc 能过的
+/// 写法上连报 E0004/E0001/E0003 三条错。这一族是扫出来的：形参路径修好后，同类的
+/// 结构体成员与局部变量路径实测已对（它们本来就是「先加后缀再包指针」），只有
+/// typedef 这条路缺入分支。
+///
+/// `c[1][3] = 7` 必须落到 `buf[19]`（行步长 16），这才能证明类型是
+/// Ptr(Array(char,16)) 而不是 Array(Ptr(char),16) —— 只看 sizeof 的话两者都是
+/// 16*8/8 这类巧合相等的值，需要一次带步长的写才能分开。
+#[test]
+fn pointer_to_array_typedef_matches_gcc_at_all_levels() {
+    let src = "typedef int (*arrp)[3];\ntypedef char (*rowp)[16];\n\
+         int main(void) {\n\
+         \x20   int r[6] = {0,1,2,3,4,5}; char buf[32]; int bad = 0;\n\
+         \x20   arrp t = (arrp) r; rowp c = (rowp) buf;\n\
+         \x20   if ((int)sizeof(arrp) != 8) bad |= 1;\n\
+         \x20   if ((int)sizeof(t) != 8) bad |= 2;\n\
+         \x20   if ((int)sizeof(*t) != 12) bad |= 4;\n\
+         \x20   if (t[1][2] != 5) bad |= 8;\n\
+         \x20   t[0][0] = 42; if (r[0] != 42) bad |= 16;\n\
+         \x20   if ((int)sizeof(rowp) != 8) bad |= 32;\n\
+         \x20   if ((int)sizeof(*c) != 16) bad |= 64;\n\
+         \x20   c[1][3] = 7; if (buf[19] != 7) bad |= 128;\n\
+         \x20   return bad;\n\
+         }\n";
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("ptr-to-array-typedef", src, &[flag]),
+            0,
+            "{flag}: 指针指数组的 typedef（尺寸 / 步长 / 写入位置）与 gcc 不一致"
         );
     }
 }

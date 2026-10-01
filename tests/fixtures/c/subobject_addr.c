@@ -63,10 +63,40 @@ via_flexible(struct F *f)
 	return f->data[2] - f->data[0] + f->count;
 }
 
+/* 指针指数组形参的多重下标 `pa[i][j]`。曾经因为形参声明符 `int (*pa)[3]`
+ * 被建为 Array(Ptr(Int),3)（而不是 Ptr(Array(Int,3))）而连 -O0 都静默错值。 */
+static int
+via_ptr_to_array(int (*pa)[3])
+{
+	pa[0][0] = 11;
+	pa[1][2] = 22;
+	return pa[0][0] + pa[1][2];
+}
+
+/* 解引用基址的衰减 `(*pa)[i]`：同一个根因的另一侧，且它走 SSA 往返。
+ * 曾以为「IR 表达不了」而整函数退 SSA，那是误归因。 */
+static int
+via_deref_decay(int (*pa)[3])
+{
+	(*pa)[2] = 7;
+	return (*pa)[2] + (*pa)[0];
+}
+
+/* 把**类型模型**直接钉在产物上：`int (*pa)[3]` 是一个指针（8），它指向的
+ * 是一个 3 int 的数组（12）。只测下标值的话，声明符结合顺序反了也可能
+ * 被其它路径抵消，而 sizeof 没有余地。 */
+static int
+ptr_to_array_sizes(int (*pa)[3])
+{
+	return (int)sizeof(pa) * 10000 + (int)sizeof(*pa) * 100 + (int)sizeof(pa[0]);
+}
+
 int
 main(void)
 {
 	int buf[64];
+	int r1[6];
+	int r2[6];
 	struct P p;
 	struct Z *z;
 	struct F *f;
@@ -74,6 +104,10 @@ main(void)
 
 	for (i = 0; i < 64; i++) {
 		buf[i] = 0;
+	}
+	for (i = 0; i < 6; i++) {
+		r1[i] = i;
+		r2[i] = 100 + i;
 	}
 	p.a = 5;
 	p.b = 9;
@@ -87,5 +121,10 @@ main(void)
 	printf("zerolen=%d\n", via_zero_len(z));
 	printf("flexible=%d\n", via_flexible(f));
 	printf("zerolen_again=%d\n", z->data[3]);
+	printf("p2a=%d\n", via_ptr_to_array((int (*)[3]) r1));
+	printf("p2a_back=%d\n", r1[2]);
+	printf("decay=%d\n", via_deref_decay((int (*)[3]) r2));
+	printf("decay_back=%d\n", r2[2]);
+	printf("sizes=%d\n", ptr_to_array_sizes((int (*)[3]) r1));
 	return 0;
 }

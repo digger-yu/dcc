@@ -3284,6 +3284,28 @@ impl<'a> Parser<'a> {
                         ty: ptr_ty,
                         span: sp,
                     }]);
+                } else if self.cur.kind == TokKind::LBracket {
+                    // typedef int (*arrp)[3]; —— 「指向数组的指针」的 typedef。
+                    // 这条分支此前只认函数指针（`)` 后必须是 `(`），所以
+                    // `typedef int (*arrp)[3];` 在 gcc 能过的写法上连报 E0004/E0001/E0003
+                    // 三条错。与形参路径 `int (*pa)[3]` 是同一个声明符形状，那边
+                    // 刚因为「先包指针再加数组后缀」的结合顺序错过一次，这里直接把
+                    // 顺序写对：数组后缀**先**作用于基类型，再包一层指针。
+                    let arr_ty = self.parse_array_suffix(ty);
+                    let ptr_ty = Type::Ptr(Box::new(arr_ty.into()));
+                    let sp = name.span.clone();
+                    self.skip_post_decl_modifiers();
+                    if !self.expect(TokKind::Semi, "';'") {
+                        return None;
+                    }
+                    if !self.register_typedef(&name, ptr_ty.clone()) {
+                        return None;
+                    }
+                    return Some(vec![Decl::Typedef {
+                        name,
+                        ty: ptr_ty,
+                        span: sp,
+                    }]);
                 }
             }
             // GCC 扩展: 允许无名的 typedef 声明 (如 `typedef union { ... };`)
@@ -8079,13 +8101,24 @@ impl<'a> Parser<'a> {
                     }
                     ty = wrapped;
                 } else if self.cur.kind == TokKind::LBracket {
-                    // 指向数组的指针: int (*a)[2]
-                    // 解析数组后缀并包裹指针
-                    let mut wrapped: Type = ty;
+                    // 指向数组的指针: `int (*pa)[3]` 是 Ptr(Array(Int,3)) ——
+                    // 「指向 3 个 int 的数组的指针」，不是「3 个 int* 的数组」。
+                    // 结合顺序必须与函数指针分支相反：数组后缀**先**作用于基类型，
+                    // 再由内向外包 ptr_depth 层指针。
+                    //
+                    // 旧写法先包指针、再对指针类型加数组后缀，得到
+                    // Array(Ptr(Int),3)：实测 sizeof(int (*pa)[3]) 返 24（= 3*8）
+                    // 而 gcc 返 8；sizeof(*pa) 返 4 而 gcc 返 12；`pa[1][0] = 77`
+                    // 写到了错误的偏移（调用方的 a[3] 保持 3）。于是
+                    // `pa[i][j]` / `(*pa)[i]` 在 **-O0 就静默错值**，因为错的是类型
+                    // 而不是某个优化 pass。局部变量路径是对的（对比 4146 行附近：
+                    // 那里就是先加后缀再包指针），只有形参这条分支反了。
+                    let arr_ty = self.parse_array_suffix(ty);
+                    let mut wrapped: Type = arr_ty;
                     for _ in 0..ptr_depth {
                         wrapped = Type::Ptr(Box::new(wrapped.into()));
                     }
-                    ty = self.parse_array_suffix(wrapped);
+                    ty = wrapped;
                 } else {
                     // 无后续 (params): 只是多级指针, 不是函数指针
                     let mut wrapped: Type = ty;

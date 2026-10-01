@@ -1476,6 +1476,33 @@ fn m2_1_type_system() {
     assert_eq!(code, 0, "type size/align checks failed (exit={code})");
 }
 
+/// 声明符与类型模型的矩阵：形参衰减、指针指数组（形参与 typedef）、函数指针数组。
+///
+/// 这个夹具的存在理由：`int (*pa)[3]` 作为**形参**曾被建成 `Array(Ptr(Int),3)`
+/// 而不是 `Ptr(Array(Int,3))`，于是 `pa[i][j]` 的步长与 `(*pa)[i]` 的衰减全错，
+/// **连 -O0 都是静默错值**（真因、取证与误归因的教训见 docs §7.34）。
+///
+/// 四个档位都跑：类型模型错不该只在某个 -O 档被暴露——实测它在 -O0 就错，而
+/// 只在 -O2/-O3 跑的等价门禁（OPT-DIFF）当时因语料里没有这个形状而一路绿灯。
+/// 每族同时钉 `sizeof` 与**一次带步长的写**：只看 sizeof 时正反两种结合可能
+/// 巧合相等（8/16），只有按正确步长写出去才能分开。
+#[test]
+#[cfg(unix)]
+fn decl_param_decay_matrix_holds_at_all_levels() {
+    let src = include_str!("../fixtures/c/decl_param_decay.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        let (out, exe) = run_compile_and_run_flags("decl-param-decay", src, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag}: 声明符矩阵夹具应能编译: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rc = run_exe(&exe);
+        assert_eq!(rc, 0, "{flag}: 声明符/类型模型矩阵不成立（bad-bitmask={rc}）");
+        let _ = fs::remove_file(&exe);
+    }
+}
+
 /// M2.2: struct layout - bitfields, alignment, padding, packed,
 /// aligned attribute, unions, flexible array members.
 #[test]

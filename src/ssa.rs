@@ -683,21 +683,6 @@ impl Builder {
         self.current.insert(var.base.clone(), var);
     }
 
-    /// `(*pa)[i]` 一类：下标的基址是**解引用得到的数组**，它需要「数组 → 首元素指针」
-    /// 衰减，而衰减后的基址就是指针的**值** —— IR 现在发不出那个值（见调用处实测）。
-    ///
-    /// 读写两侧都要调：降级有两条独立的 `Expr::Index` 路径，HEAD 只在读侧挡，于是
-    /// `(*pa)[2] = 7`（写）绕过退路进了 SSA。历史上「只挡一边」已错过两次，不再第三次。
-    ///
-    /// 故意**不**管固定大小二维数组 `a[i][j]`（a 是栈上数组对象）与 `pa[i][j]`：
-    /// 前者今天是对的（一起挡就是拿覆盖面换一个不存在的洞）；后者的错值不在 SSA 层
-    /// （实测跳过 `run_ssa_passes` 后依旧错），属于基线 codegen 的独立缺陷。
-    fn bail_if_deref_array_base(&mut self, arr: &Expr) {
-        if matches!(&arr.ty(), Type::Array(_, _)) && matches!(arr, Expr::Deref { .. }) {
-            self.unsupported("下标的数组操作数是需要衰减的解引用基址（发不出指针值）");
-        }
-    }
-
     /// 本表达式无法降级 ⇒ 记下原因，并返回一个**从不进产物**的占位值。
     ///
     /// 旧行为是静默 `Operand::Int(0)`：那个表达式在产物里真的变成 0，于是一批
@@ -1341,14 +1326,15 @@ impl Builder {
                 // 子对象地址（`z->data` 的基址 = 对象地址 + 字段偏移）。这件事过去在 IR
                 // 里无表示，只能整函数退 SSA（§7.29）；现在由 `InstKind::MemberAddr`
                 // 与 `Expr::Member`/`Expr::Deref` 的数组分支直接给出基址，下面
-                // `lower_expr(arr)` 拿到的就是那个地址，不再需要特殊判据：成员基址那一半
-                // 已由 `InstKind::MemberAddr` 真正表达（`z->data[i]`）。
+                // `lower_expr(arr)` 拿到的就是那个地址，不再需要特殊判据：成员基址
+                // （`z->data[i]`）由 `InstKind::MemberAddr` 表达，解引用基址
+                // （`(*pa)[i]`）由 `Expr::Deref` 的数组分支表达。
                 //
-                // **解引用基址**那一半（`(*pa)[i]`，pa 是 `int (*)[3]`）仍表达不了：试过把它
-                // 直接返 `lower_expr(pa)` 作为衰减后的基址，重建时它被当成**左值基址**而发成
-                // `lea -88(%r13), %rax` —— 那是「存放指针的栈槽的地址」而不是指针的值，于是
-                // `(*pa)[2] = 7` 算出 `0x7` 这样的野目标 → 运行期段错误（rc=139）。继续退 SSA。
-                self.bail_if_deref_array_base(arr);
+                // 曾以为「解引用基址表达不了」并加了退路，那是误归因：当时发成
+                // `lea -88(%r13)`（拿「存放指针的栈槽地址」当指针值）的真因是形参
+                // `int (*pa)[3]` 被解析成 Array(Ptr(Int),3) 而非 Ptr(Array(Int,3))，
+                // 基址类型错则地址计算必然错。声明符修正后实测逐档与 gcc 一致，
+                // 退路已撤（否则就是拿 SSA 覆盖面换一个已经不存在的洞）。
                 let a = self.lower_expr(arr);
                 let i = self.lower_expr(idx);
                 let dest = target.unwrap_or_else(|| self.fresh("idx", ty.clone(), span));
@@ -1462,6 +1448,19 @@ impl Builder {
                 Operand::Var(dest)
             },
             Expr::Deref { e, span, ty } => {
+                // 与 `Expr::Member` 的数组分支同一条 C 衰减规则：`(*pa)[i]` 里 `*pa`
+                // 是数组类型，它的值就是基址 = `pa` 所含的**指针值**，不该再发一次
+                // `Load` 把整个数组当值读进临时帧。
+                //
+                // 本轮第一次试这条时它发成了 `lea 存放指针的栈槽`（把指针变量当左值
+                // 基址），我当时的结论是「IR 表达不了」并加了退路。那个结论错了：
+                // 真因是形参声明符 `int (*pa)[3]` 被建成了 Array(Ptr(Int),3) 而不是
+                // Ptr(Array(Int,3))（sizeof 返 24 而非 8），基址类型错则地址计算必然错。
+                // 解析器修好后此处实测与 gcc 逐档一致，所
+                // 以这里不需要退路。（判据本身见 git 历史里那次误归因，教训记在文档。）
+                if matches!(ty, Type::Array(_, _)) {
+                    return self.lower_expr(e);
+                }
                 let o = self.lower_expr(e);
                 let dest = target.unwrap_or_else(|| self.fresh("deref", ty.clone(), span));
                 // volatile 检测: `e` 的类型若是 Ptr(QT) 且 QT.quals 含 volatile.
@@ -2396,8 +2395,6 @@ fn lower_lvalue(
         return Some(dest);
     }
     if let Expr::Index { arr, idx, ty, .. } = l {
-        // 写侧与读侧同一判据（HEAD 只在读侧挡，`(*pa)[2] = 7` 会绕过退路）。
-        b.bail_if_deref_array_base(arr);
         let a = b.lower_expr(arr);
         let i = b.lower_expr(idx);
         let store_volatile = match arr.ty() {

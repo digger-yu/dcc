@@ -43,10 +43,19 @@ rex-hygiene: build
 golden-cross: build
 	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" bash scripts/arm_mips_golden_baseline.sh verify
 
+# P16 软件流水的产物级核对。流水有一类失败是 gcc 差分**查不出来**的：准入闸门被重构
+# 弄得永不触发时，产物只是「少优化」，依旧与 gcc 逐字节一致。所以这里用两个独立读数
+# 交叉确认：`DCC_PIPE_DUMP` 的接受/拒因记录，与 objdump 比较「默认」和
+# `DCC_SSA_OFF=pipe` 同一函数的反汇编。反向对照已验：给 dcc 包一层永久
+# `DCC_SSA_OFF=pipe` 后本门禁报 6 项并 exit 1。
+pipe-structure: build
+	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" bash scripts/check_pipe_structure.sh
+
 test-all: test
 	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" bash scripts/test_all.sh
 	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" JOBS="$(JOBS)" bash scripts/check_opt_equivalence.sh
 	$(MAKE) rex-hygiene
+	$(MAKE) pipe-structure
 	$(MAKE) golden-cross
 
 torture-setup:
