@@ -1519,7 +1519,7 @@ P12-A3（asm 规划器尊重绑定表/临时池占用 + `q` 池耗尽政策）�
 正确的处置不是回头手工猜，而是**先给 `rex_matrix.rs` 加一条覆盖这些发射点的矩阵，让它点名**；
 在能点名之前把它们留在文档里，比写进代码里的「我觉得这里没问题」诚实。
 
-夹具 `tests/fixtures/asm/rex_operand_bit_order.c` 与两条用例：
+夹具 `tests/fixtures/asm/asm_rex_operand_bit_order.c` 与两条用例：
 `rex_operand_bit_order_matches_gcc`（-O0/-O1 与 gcc 逐档对照）、
 `rex_bit_order_fixture_xfail_o2_drops_cross_call_global_writes`（-O2/-O3 的偏差**不是本轮引入**：
 已用 `git stash` + 重建 HEAD 对照，HEAD 在同一夹具上是 `a=-120 b=0` / `-O2 a=4200 b=4200`，

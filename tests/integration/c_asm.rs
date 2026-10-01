@@ -518,7 +518,7 @@ fn asm_output_on_indexed_lvalue_is_written_back() {
 /// 因为这些编码唯一的行为后果就是「写到了别人的位段上」。
 #[test]
 fn rex_operand_bit_order_matches_gcc() {
-    let source = include_str!("../fixtures/asm/rex_operand_bit_order.c");
+    let source = include_str!("../fixtures/asm/asm_rex_operand_bit_order.c");
     for flag in ["-O0", "-O1"] {
         assert_eq!(
             run_gcc_cross_check_opt("rex-bit-order", source, &[flag]),
@@ -534,7 +534,7 @@ fn rex_operand_bit_order_matches_gcc() {
 /// 交替读 `cb`。
 #[test]
 fn rex_bit_order_fixture_xfail_o2_drops_cross_call_global_writes() {
-    let source = include_str!("../fixtures/asm/rex_operand_bit_order.c");
+    let source = include_str!("../fixtures/asm/asm_rex_operand_bit_order.c");
     for flag in ["-O2", "-O3"] {
         let (gsrc, gexe) = {
             let dir = std::env::temp_dir();
