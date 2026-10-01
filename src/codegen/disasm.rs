@@ -6,6 +6,11 @@ const REG8: [&str; 16] = [
     "%al", "%cl", "%dl", "%bl", "%spl", "%bpl", "%sil", "%dil", "%r8b", "%r9b", "%r10b", "%r11b",
     "%r12b", "%r13b", "%r14b", "%r15b",
 ];
+/// **没有 REX 前缀时**字段 4..7 的名字。%spl/%bpl/%sil/%dil 只在「存在 REX」时才可达，
+/// 无 REX 的 4..7 是遗留的 %ah/%ch/%dh/%bh。这张表是「该发 REX 却没发」这类缺陷的唯一
+/// 探测器：少了它，`80 c7 10`（真机 = `add $0x10,%bh`）会被读成 `add $0x10,%dil`，
+/// 往返校验正好假绿 —— 而 objdump 会老实报出 %bh。
+const REG8_LEGACY: [&str; 8] = ["%al", "%cl", "%dl", "%bl", "%ah", "%ch", "%dh", "%bh"];
 const REG16: [&str; 16] = [
     "%ax", "%cx", "%dx", "%bx", "%sp", "%bp", "%si", "%di", "%r8w", "%r9w", "%r10w", "%r11w",
     "%r12w", "%r13w", "%r14w", "%r15w",
@@ -29,6 +34,11 @@ struct Rex {
     r: bool,
     x: bool,
     b: bool,
+    /// 是否真的存在 REX 字节。与上面四个位**正交**：全 0 的 `0x40` 也是合法 REX，它
+    /// 不搬任何字段编号，只把 8 位上下文里字段 4..7 的释义从 %ah..%bh 切到 %spl..%dil。
+    /// 因此「为 %sil 置 REX.B」是错的（那会把字段搬到 %r14b），「不发 REX 而写 %sil」
+    /// 同样是错的（那是 %dh）；这两类缺陷都只能靠这一位区分。
+    present: bool,
 }
 
 #[derive(Default)]
@@ -83,16 +93,29 @@ impl<'a> Dec<'a> {
         Some(self.take()? as i8)
     }
 
+    /// `66 B8 iw` / `66 C7 /0 iw` 这类 16 位立即数。不读它就不知道指令有多长，
+    /// 后面的字节会被当成新指令的首字节 —— 整份反汇编从此错位。
+    fn take_i16(&mut self) -> Option<i16> {
+        if self.pos + 2 > self.code.len() {
+            return None;
+        }
+        let v = i16::from_le_bytes(self.code[self.pos..self.pos + 2].try_into().ok()?);
+        self.pos += 2;
+        Some(v)
+    }
+
     fn abs_off(&self) -> u64 {
         self.base + self.pos as u64
     }
 
-    fn reg(&self, _rex: &Rex, idx: u8, width: u8) -> &'static str {
+    fn reg(&self, rex: &Rex, idx: u8, width: u8) -> &'static str {
         // idx 已由调用方按 REX.R / REX.B / REX.X 扩展为完整 0..15 索引.
         // 此处不能再叠加 REX.B, 否则会把 reg 字段 (用 REX.R 扩展) 错当成 r/m 字段
         // (用 REX.B 扩展), 导致反汇编里 rax 误显示为 r8, r8 误显示为 rax 等.
         let i = (idx & 15) as usize;
         match width {
+            // 8 位命名取决于「有没有 REX」，而不只是 REX 的位值（见 REG8_LEGACY）.
+            1 if !rex.present && i < 8 => REG8_LEGACY[i],
             1 => REG8[i],
             2 => REG16[i],
             4 => REG32[i],
@@ -124,6 +147,7 @@ impl<'a> Dec<'a> {
                 r: (b & 0x04) != 0,
                 x: (b & 0x02) != 0,
                 b: (b & 0x01) != 0,
+                present: true,
             }
         } else {
             Rex::default()
@@ -443,17 +467,31 @@ impl<'a> Dec<'a> {
             0xB8..=0xBF => {
                 let reg = b - 0xB8;
                 self.take();
-                let imm = self.take_i32()?;
-                Some((self.pos - start, format!("mov ${imm}, {}", REG32[reg as usize])))
+                // 0x66 下立即数是 imm16 且目标是 16 位寄存器（`66 B8 iw` = mov $imm,%ax）。
+                // 按 imm32 读会把长度算错，后缀的两个字节被当成新指令首字节。
+                if pfx.o16 {
+                    let imm = self.take_i16()?;
+                    Some((
+                        self.pos - start,
+                        format!("mov ${imm}, {}", REG16[reg as usize]),
+                    ))
+                } else {
+                    let imm = self.take_i32()?;
+                    Some((
+                        self.pos - start,
+                        format!("mov ${imm}, {}", REG32[reg as usize]),
+                    ))
+                }
             },
             0xB0..=0xB7 => {
+                // 走到这里说明没有 REX（有则整体交给 decode_rex），故 4..7 是 %ah..%bh.
                 let reg = b - 0xB0;
                 self.take();
                 let imm = self.take()? as i32;
-                Some((self.pos - start, format!("mov ${imm}, {}", REG8[reg as usize])))
+                Some((self.pos - start, format!("mov ${imm}, {}", REG8_LEGACY[reg as usize])))
             },
             0x0F => self.decode_two_byte(start, &pfx),
-            0x41 | 0x49 | 0x4C | 0x48 => self.decode_rex(start, &pfx),
+            0x40..=0x4F => self.decode_rex(start, &pfx),
             // x87 FPU instructions (0xD8-0xDF)
             0xD8..=0xDF => {
                 let opcode = self.take()?; // 先取 opcode
@@ -825,12 +863,17 @@ impl<'a> Dec<'a> {
             },
             // --- MOV r, imm ---
             0xB8..=0xBF => {
+                // `B8+rd` 的寄存器编号在 **opcode 低 3 位**，扩展它的是 REX.B 而不是 REX.R.
                 let reg = op - 0xB8;
-                let r = self.reg(&rex, reg | if rex.r { 8 } else { 0 }, width);
+                let r = self.reg(&rex, reg | if rex.b { 8 } else { 0 }, width);
                 let imm = if rex.w {
                     let v = i64::from_le_bytes(self.code[self.pos..self.pos + 8].try_into().ok()?);
                     self.pos += 8;
                     v
+                } else if pfx.o16 {
+                    // `66 41 B8 iw` = mov $imm,%r8w：16 位立即数只有 2 字节，
+                    // 按 imm32 读会超出指令边界，整份反汇编错位。
+                    i64::from(self.take_i16()?)
                 } else {
                     self.take_i32()? as i64
                 };
@@ -1097,11 +1140,14 @@ impl<'a> Dec<'a> {
 
     fn decode_legacy(&mut self, start: usize, pfx: &Prefixes) -> Option<(usize, String)> {
         let rex = Rex::default();
+        // 无 REX 的 legacy 形式同样要认 0x66：`66 89 /r` 是 16 位 mov，操作数得叫 %ax
+        // 而不是 %eax。宽度看不到 0x66 的话，编码器漏发 0x66 的缺陷就会被读成合法编码。
+        let w = if pfx.o16 { 2 } else { 4 };
         let op = self.take()?;
         match op {
             // ALU r/m32, r32
             0x01 | 0x09 | 0x21 | 0x29 | 0x31 => {
-                let (src, dst) = self.modrm_gp(&rex, 4)?;
+                let (src, dst) = self.modrm_gp(&rex, w)?;
                 let mn = match op {
                     0x01 => "add",
                     0x09 => "or",
@@ -1114,7 +1160,7 @@ impl<'a> Dec<'a> {
             },
             // ALU r32, r/m32
             0x03 | 0x0B | 0x23 | 0x2B | 0x33 | 0x3B => {
-                let (dst, src) = self.modrm_gp(&rex, 4)?;
+                let (dst, src) = self.modrm_gp(&rex, w)?;
                 let mn = match op {
                     0x03 => "add",
                     0x0B => "or",
@@ -1155,12 +1201,12 @@ impl<'a> Dec<'a> {
             },
             // MOV r/m32, r32
             0x89 => {
-                let (src, dst) = self.modrm_gp(&rex, 4)?;
+                let (src, dst) = self.modrm_gp(&rex, w)?;
                 Some(self.finish(start, pfx, &format!("mov {src}, {dst}")))
             },
             // MOV r32, r/m32
             0x8B => {
-                let (dst, src) = self.modrm_gp(&rex, 4)?;
+                let (dst, src) = self.modrm_gp(&rex, w)?;
                 Some(self.finish(start, pfx, &format!("mov {src}, {dst}")))
             },
             // MOV r8, r/m8
@@ -1175,7 +1221,7 @@ impl<'a> Dec<'a> {
             },
             // MOV r/m32, imm32
             0xC7 => {
-                let (_, mem) = self.modrm_gp(&rex, 4)?;
+                let (_, mem) = self.modrm_gp(&rex, w)?;
                 let imm = self.take_i32()?;
                 Some(self.finish(start, pfx, &format!("mov ${imm}, {mem}")))
             },
@@ -1187,12 +1233,12 @@ impl<'a> Dec<'a> {
             },
             // LEA r32, mem
             0x8D => {
-                let (dst, src) = self.modrm_gp(&rex, 4)?;
+                let (dst, src) = self.modrm_gp(&rex, w)?;
                 Some(self.finish(start, pfx, &format!("lea {src}, {dst}")))
             },
             // CMP/TEST r/m32, r32
             0x39 | 0x85 => {
-                let (a, b) = self.modrm_gp(&rex, 4)?;
+                let (a, b) = self.modrm_gp(&rex, w)?;
                 let mn = if op == 0x39 { "cmp" } else { "test" };
                 Some(self.finish(start, pfx, &format!("{mn} {b}, {a}")))
             },
@@ -1216,7 +1262,7 @@ impl<'a> Dec<'a> {
                     7 => "cmp",
                     _ => "alu",
                 };
-                let (_, mem) = self.modrm_gp(&rex, 4)?;
+                let (_, mem) = self.modrm_gp(&rex, w)?;
                 let imm = self.take_i32()?;
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
             },
@@ -1235,7 +1281,7 @@ impl<'a> Dec<'a> {
                     7 => "cmp",
                     _ => "alu",
                 };
-                let (_, mem) = self.modrm_gp(&rex, 4)?;
+                let (_, mem) = self.modrm_gp(&rex, w)?;
                 let imm = self.take_i8()? as i32;
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
             },
@@ -1271,7 +1317,7 @@ impl<'a> Dec<'a> {
                     7 => "sar",
                     _ => "shift",
                 };
-                let (_, mem) = self.modrm_gp(&rex, 4)?;
+                let (_, mem) = self.modrm_gp(&rex, w)?;
                 let imm = self.take()? as i32;
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, {mem}")))
             },
@@ -1305,7 +1351,7 @@ impl<'a> Dec<'a> {
                     7 => "sar",
                     _ => "shift",
                 };
-                let (_, mem) = self.modrm_gp(&rex, 4)?;
+                let (_, mem) = self.modrm_gp(&rex, w)?;
                 Some(self.finish(start, pfx, &format!("{mn} $1, {mem}")))
             },
             // Shift/Rotate r/m8, 1
@@ -1337,7 +1383,7 @@ impl<'a> Dec<'a> {
                     7 => "sar",
                     _ => "shift",
                 };
-                let (_, mem) = self.modrm_gp(&rex, 4)?;
+                let (_, mem) = self.modrm_gp(&rex, w)?;
                 Some(self.finish(start, pfx, &format!("{mn} %cl, {mem}")))
             },
             // Shift/Rotate r/m8, cl
@@ -1360,7 +1406,7 @@ impl<'a> Dec<'a> {
             0xF7 => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
-                let (_, mem) = self.modrm_gp(&rex, 4)?;
+                let (_, mem) = self.modrm_gp(&rex, w)?;
                 if reg == 0 {
                     let imm = self.take_i32()?;
                     Some(self.finish(start, pfx, &format!("test ${imm}, {mem}")))
@@ -1398,7 +1444,7 @@ impl<'a> Dec<'a> {
             0xFF => {
                 let modrm = self.code.get(self.pos)?;
                 let reg = (modrm >> 3) & 7;
-                let (_, mem) = self.modrm_gp(&rex, 4)?;
+                let (_, mem) = self.modrm_gp(&rex, w)?;
                 let mn = match reg {
                     0 => "inc",
                     1 => "dec",
@@ -1419,7 +1465,7 @@ impl<'a> Dec<'a> {
             },
             // XCHG r/m32, r32
             0x87 => {
-                let (src, dst) = self.modrm_gp(&rex, 4)?;
+                let (src, dst) = self.modrm_gp(&rex, w)?;
                 Some(self.finish(start, pfx, &format!("xchg {src}, {dst}")))
             },
             // MOVSXD r32, r/m32 (without REX, same as MOV r32, r/m32 on 64-bit)
@@ -1429,18 +1475,18 @@ impl<'a> Dec<'a> {
                 let reg = (modrm >> 3) & 7;
                 let rm = modrm & 7;
                 let dst = self.reg(&rex, reg, 4).to_string();
-                let src = self.decode_mem(&rex, mod_, rm, 4)?;
+                let src = self.decode_mem(&rex, mod_, rm, w)?;
                 Some(self.finish(start, pfx, &format!("movsxd {src}, {dst}")))
             },
             // IMUL r32, r/m32, imm32
             0x69 => {
-                let (src, dst) = self.modrm_gp(&rex, 4)?;
+                let (src, dst) = self.modrm_gp(&rex, w)?;
                 let imm = self.take_i32()?;
                 Some(self.finish(start, pfx, &format!("imul ${imm}, {src}, {dst}")))
             },
             // IMUL r32, r/m32, imm8
             0x6B => {
-                let (src, dst) = self.modrm_gp(&rex, 4)?;
+                let (src, dst) = self.modrm_gp(&rex, w)?;
                 let imm = self.take_i8()? as i32;
                 Some(self.finish(start, pfx, &format!("imul ${imm}, {src}, {dst}")))
             },
