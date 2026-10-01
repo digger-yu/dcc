@@ -131,7 +131,8 @@ fn kind_uses(k: &InstKind) -> Vec<SsaVar> {
         InstKind::Un { e, .. }
         | InstKind::Cast { e, .. }
         | InstKind::Load { e, .. }
-        | InstKind::MemberLoad { obj: e, .. } => push(e, &mut v),
+        | InstKind::MemberLoad { obj: e, .. }
+        | InstKind::MemberAddr { obj: e, .. } => push(e, &mut v),
         InstKind::Store { e, src, .. } | InstKind::MemberStore { obj: e, src, .. } => {
             push(e, &mut v);
             push(src, &mut v);
@@ -2265,6 +2266,13 @@ where
             callee: f(callee)?,
             args: args.iter().map(f).collect::<Result<Vec<_>, _>>()?,
             ret_ty: ret_ty.clone(),
+        },
+        InstKind::MemberAddr { obj, obj_ty, field, ty, is_arrow } => InstKind::MemberAddr {
+            obj: f(obj)?,
+            obj_ty: obj_ty.clone(),
+            field: field.clone(),
+            ty: ty.clone(),
+            is_arrow: *is_arrow,
         },
         InstKind::MemberLoad { obj, obj_ty, field, ty, is_volatile, is_arrow } => {
             InstKind::MemberLoad {

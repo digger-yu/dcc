@@ -255,12 +255,10 @@ fn plain_loops_still_go_through_ssa() {
 
 /// 零长/柔性数组成员（`z->data[i]`）四个档位都必须与 gcc 一致。
 ///
-/// 这类下标需要「子对象地址」（对象地址 + 字段偏移），而 IR 只表达得了具名对象的取址，
-/// 所以整函数退出 SSA 往返（判据与实测见 `ssa::Builder` 的 Index 分支注释：修前 -O2
-/// 把 `data` 的**内容**当地址解引用，读出栈垃圾且每次不同）。
-///
-/// 反面：固定大小二维数组不得被这条判据误挡（`plain_loops_still_go_through_ssa` 同族的
-/// 覆盖面守卫在 `subobject_array_decay_bails_while_2d_arrays_stay_in_ssa`）。
+/// 这类下标需要「子对象地址」（对象地址 + 字段偏移）。IR 过去只表达得了具名对象的
+/// 取址，于是把 `data` 的**内容**当地址解引用 —— 实测 -O2 读出栈垃圾而 -O0 正确；
+/// 当时只能整函数退 SSA（§7.29）。现在由 `InstKind::MemberAddr` 真正表达，本测试从
+/// 「不优化但正确」变成「优化后且正确」—— 这就是那条退路当初欠的账。
 #[test]
 fn vla_and_flexible_array_match_gcc_at_all_levels() {
     let source = include_str!("../fixtures/c/vla.c");
@@ -269,6 +267,103 @@ fn vla_and_flexible_array_match_gcc_at_all_levels() {
             run_gcc_cross_check_opt("vla-flexible", source, &[flag]),
             0,
             "{flag}: VLA / 零长数组 / 柔性数组成员与 gcc 不一致"
+        );
+    }
+}
+
+/// 子对象地址形态的全家福：`&p->b`（标量成员取址）、`z->data[i]`（零长数组）、
+/// `f->data[i]`（柔性数组）、`&v[1]` 再下标。四个档位逐档与 gcc 对照。
+///
+/// 与上面那条分开是因为它们钉的是不同代码路径：`vla.c` 走完整 VLA 运行时链，
+/// 本夹具只钉 `MemberAddr` 的降级/重建两侧（读写都要，只修一侧是历史上的重复错误）。
+#[test]
+fn subobject_member_addr_matches_gcc_at_all_levels() {
+    let source = include_str!("../fixtures/c/subobject_addr.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("subobject-addr", source, &[flag]),
+            0,
+            "{flag}: 子对象地址（&成员 / 零长 / 柔性数组）与 gcc 不一致"
+        );
+    }
+}
+
+/// **已知未修，且不是本轮引入**：基址是**指针指数组**（`int (*pa)[N]`）的多重下标。
+///
+/// 本轮是在给 `(*pa)[i]` 做衰减时撞上它的。下面四行定性证据把它与 SSA 层撇清了：
+///   * `git stash` 回到 HEAD 重建后同一形状仍错（不是本轮改出来的）；
+///   * `DCC_OPT_SKIP=run_ssa_passes` 跳过整层 SSA 后仍错 ⇒ 不在 SSA 往返；
+///   * 逐个跳过 `prune_dead_stores` / `ssa_gvn` / `loop_opt` 仍错 ⇒ 也不是这三个 AST pass；
+///   * `pa[i][j]` 连 **-O0** 都错 ⇒ 基线前端/codegen 的缺陷。
+///
+/// 实测矩阵（不猜，逐档跑出来的）：
+///
+/// | 形状 | -O0 | -O1 | -O2 | -O3 |
+/// |---|---|---|---|---|
+/// | `pa[0][0]=1; return pa[0][1];`（gcc 返 3） | 254 | 253 | 255 | 254 |
+/// | `(*pa)[2]=7; pa[0][0]=1; return (*pa)[2]+(*pa)[0];`（gcc 返 8） | 8 | 8 | **段错误** | **段错误** |
+///
+/// 错法看起来是内层 `pa[0]`（元素类型是数组）被当**值**读进临时帧：写落到临时帧、
+/// 读又拿未初始化地址（所以退出码逐次漂动）；第二行在 -O2 把目标算成 `0x7` 这样
+/// 的野地址 ⇒ rc=139。真修需要一般的「左值地址」形态（基址 + 下标*步长而不载入），
+/// 与 `InstKind::MemberAddr` 同一条路线。
+///
+/// 为什么按矩阵逐档断言而不是笼统写「优化档位都错」：第一版里我就把范围写宽成了
+/// 「-O1..-O3」，实际 `(*pa)[i]` 与 `pa[i][j]` 同现时 -O1 是对的。钉矩阵的话，任何人
+/// 修好任一格，本测试会指着那一格说「这里现在一致了」。
+#[test]
+fn pointer_to_array_index_is_a_known_baseline_defect() {
+    let decay_write = "int f(int (*pa)[3]) { pa[0][0] = 1; return pa[0][1]; }\n\
+                       int main(void){ int a[3]={2,3,4}; return f(&a); }\n";
+    let wild = "int f(int (*pa)[3]) { (*pa)[2] = 7; pa[0][0] = 1; return (*pa)[2] + (*pa)[0]; }\n\
+                int main(void){ int a[3]={2,3,4}; return f(&a); }\n";
+    let diverge_at = |src: &str, flag: &str| -> bool {
+        let dir = std::env::temp_dir();
+        let tag = std::process::id();
+        let gsrc = dir.join(format!("dcc-p2a-{tag}.c"));
+        let gexe = dir.join(format!("dcc-p2a-{tag}.gcc"));
+        let dexe = dir.join(format!("dcc-p2a-{tag}.dcc"));
+        std::fs::write(&gsrc, src).expect("写临时源文件");
+        let gb = std::process::Command::new("gcc")
+            .args(["-O0", "-w", "-o"])
+            .arg(&gexe)
+            .arg(&gsrc)
+            .output()
+            .expect("跑 gcc");
+        assert!(gb.status.success(), "oracle 侧 gcc 必须能编译");
+        let gout = std::process::Command::new(&gexe).output().expect("跑 gcc 产物");
+        let db = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args([flag, "-o"])
+            .arg(&dexe)
+            .arg(&gsrc)
+            .output()
+            .expect("跑 dcc");
+        assert!(db.status.success(), "dcc 应能编译（{flag}）：问题在 codegen 不在前端");
+        let dout = std::process::Command::new(&dexe).output().expect("跑 dcc 产物");
+        for p in [&gsrc, &gexe, &dexe] {
+            let _ = std::fs::remove_file(p);
+        }
+        !(dout.status == gout.status && dout.stdout == gout.stdout)
+    };
+
+    // 按实测矩阵逐格钉。
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert!(
+            diverge_at(decay_write, flag),
+            "pa[i][j] 在 {flag} 下已与 gcc 一致：那一格已被修好，请把它从本用例移到绿灯对照，\
+             并补上一般的「左值地址」形态"
+        );
+    }
+    for flag in ["-O2", "-O3"] {
+        assert!(
+            diverge_at(wild, flag),
+            "(*pa)[i] 与 pa[i][j] 同现时在 {flag} 下已与 gcc 一致：同上"
+        );
+    }
+    for flag in ["-O0", "-O1"] {
+        assert!(
+            !diverge_at(wild, flag),
+            "(*pa)[i] 与 pa[i][j] 同现时在 {flag} 下反而新错了：本格历史上是对的，请查回归"
         );
     }
 }

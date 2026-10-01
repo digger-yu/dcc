@@ -114,6 +114,30 @@ pub enum InstKind {
         args: Vec<Operand>,
         ret_ty: Type,
     },
+    /// `dest = &obj.field` —— 子对象**地址**。
+    ///
+    /// 为什么需要单独一条：`InstKind::AddrOf { base }` 只能取**具名对象**的基址，
+    /// 而 `&p->fld` / `&(q.fld)` 要的是「对象地址 + 字段偏移」。缺这条指令时 IR 只能
+    /// 把子对象当**值**读（`MemberLoad`），于是数组类型的字段（`struct { int data[]; }`
+    /// 的柔性数组、`int data[0]` 的零长数组、VLA 成员）拿不到基址而是拿到字段的
+    /// **内容** —— 实测 -O2 读出栈垃圾而 -O0 对（静默误编译）。按本项目既有政策，
+    /// 表达不了的形状会让整函数退 SSA（§7.29）；这条指令就是那个真修。
+    ///
+    /// 字段偏移**不在 SSA 层算**：与 `MemberLoad` 同一约定，只记 `obj`/`obj_ty`/`field`/
+    /// `is_arrow`，重建时原样装回 `Expr::AddrOf { e: Expr::Member { .. } }`，由 codegen
+    /// 现有的 `&var / &struct.field / &ptr->field` 地址形态发成 `lea`（单一真源，不在
+    /// 这里复制一份布局计算）。
+    ///
+    /// `ty` 是**字段类型**（不是地址类型）；`dest` 的类型由调用处取 `Ptr(ty)`。
+    MemberAddr {
+        obj: Operand,
+        /// 基址表达式的类型（重建时用它恢复结构体类型，与 `MemberLoad::obj_ty` 同义）
+        obj_ty: Type,
+        field: String,
+        ty: Type,
+        /// `obj` 已是指向结构体的指针：重建为 `&obj->field`，不再额外解引用。
+        is_arrow: bool,
+    },
     /// `dest = obj.field`
     MemberLoad {
         obj: Operand,
@@ -657,6 +681,21 @@ impl Builder {
 
     fn define(&mut self, var: SsaVar) {
         self.current.insert(var.base.clone(), var);
+    }
+
+    /// `(*pa)[i]` 一类：下标的基址是**解引用得到的数组**，它需要「数组 → 首元素指针」
+    /// 衰减，而衰减后的基址就是指针的**值** —— IR 现在发不出那个值（见调用处实测）。
+    ///
+    /// 读写两侧都要调：降级有两条独立的 `Expr::Index` 路径，HEAD 只在读侧挡，于是
+    /// `(*pa)[2] = 7`（写）绕过退路进了 SSA。历史上「只挡一边」已错过两次，不再第三次。
+    ///
+    /// 故意**不**管固定大小二维数组 `a[i][j]`（a 是栈上数组对象）与 `pa[i][j]`：
+    /// 前者今天是对的（一起挡就是拿覆盖面换一个不存在的洞）；后者的错值不在 SSA 层
+    /// （实测跳过 `run_ssa_passes` 后依旧错），属于基线 codegen 的独立缺陷。
+    fn bail_if_deref_array_base(&mut self, arr: &Expr) {
+        if matches!(&arr.ty(), Type::Array(_, _)) && matches!(arr, Expr::Deref { .. }) {
+            self.unsupported("下标的数组操作数是需要衰减的解引用基址（发不出指针值）");
+        }
     }
 
     /// 本表达式无法降级 ⇒ 记下原因，并返回一个**从不进产物**的占位值。
@@ -1298,26 +1337,18 @@ impl Builder {
                 }
             },
             Expr::Index { arr, idx, span, ty } => {
-                // `arr` 是**数组类型**时，元素访问先要「数组 → 首元素指针」的衰减，
-                // 而基址是**子对象地址**（`p->fld` 的基址 = 对象地址 + 字段偏移）。
-                // IR 里取地址只有 `AddrOf { base: 名字 }` 一种形态，表达不了这个偏移，
-                // 于是发下去的 `IndexLoad` 拿到的是「字段的值」而非「字段的地址」。
-                // 实测：`struct ZeroLen { int count; int data[0]; }` 的 `z->data[0]` 在
-                // -O2 读出栈垃圾（而 -O0 对），且垃圾每次都不同 —— 典型静默误编译。
-                // 按既有政策（见 `Builder::unsupported`、§7.14 聚合整体赋值）让**整函数**
-                // 退出 SSA 往返，而不是留一个看起来能跑的错形状。
+                // `arr` 是**数组类型**时需要「数组 → 首元素指针」的衰减，而基址可以是
+                // 子对象地址（`z->data` 的基址 = 对象地址 + 字段偏移）。这件事过去在 IR
+                // 里无表示，只能整函数退 SSA（§7.29）；现在由 `InstKind::MemberAddr`
+                // 与 `Expr::Member`/`Expr::Deref` 的数组分支直接给出基址，下面
+                // `lower_expr(arr)` 拿到的就是那个地址，不再需要特殊判据：成员基址那一半
+                // 已由 `InstKind::MemberAddr` 真正表达（`z->data[i]`）。
                 //
-                // 判据刻意只认「基址是成员/解引用」：固定大小二维数组 `a[2][1]` 的外层
-                // 下标同样拿到数组类型，但它今天是对的（基址是可表达的对象 + 算术），
-                // 把它一起挡掉就是拿覆盖面换一个不存在的洞。
-                if matches!(&arr.ty(), Type::Array(_, _))
-                    && matches!(
-                        arr.as_ref(),
-                        Expr::Member { .. } | Expr::Deref { .. }
-                    )
-                {
-                    self.unsupported("下标的数组操作数是需要衰减的子对象（成员/解引用基址）");
-                }
+                // **解引用基址**那一半（`(*pa)[i]`，pa 是 `int (*)[3]`）仍表达不了：试过把它
+                // 直接返 `lower_expr(pa)` 作为衰减后的基址，重建时它被当成**左值基址**而发成
+                // `lea -88(%r13), %rax` —— 那是「存放指针的栈槽的地址」而不是指针的值，于是
+                // `(*pa)[2] = 7` 算出 `0x7` 这样的野目标 → 运行期段错误（rc=139）。继续退 SSA。
+                self.bail_if_deref_array_base(arr);
                 let a = self.lower_expr(arr);
                 let i = self.lower_expr(idx);
                 let dest = target.unwrap_or_else(|| self.fresh("idx", ty.clone(), span));
@@ -1345,6 +1376,32 @@ impl Builder {
                 is_arrow,
             } => {
                 let obj_ty = expr.ty();
+                // 数组类型表达式的**值就是它的地址**（C 的衰减规则）。`z->data[i]`、
+                // `f->data[1] = 7`、`&z->data`、把 `z->data` 当指针传参 —— 四处要的都是
+                // 「对象地址 + 字段偏移」，因此这里必须发 `MemberAddr`，而不是走下面
+                // 那条把字段当**值**读的路径：后者对柔性数组/零长数组/VLA 成员拿到的是
+                // 字段内容而非基址，实测 -O2 读出栈垃圾而 -O0 对（静默误编译，§7.29）。
+                //
+                // 只改数组类型成员：标量/结构体成员的既有路径不动，否则就是拿覆盖面
+                // 换一个不存在的洞。
+                if let Type::Array(elem_qt, _) = ty {
+                    let obj = self.lower_expr(expr);
+                    let ptr_ty = Type::Ptr(elem_qt.clone());
+                    let dest = target.unwrap_or_else(|| self.fresh("subaddr", ptr_ty, span));
+                    self.emit(Inst {
+                        dest: Some(dest.clone()),
+                        kind: InstKind::MemberAddr {
+                            obj,
+                            obj_ty: obj_ty.clone(),
+                            field: field.name.clone(),
+                            ty: ty.clone(),
+                            is_arrow: *is_arrow,
+                        },
+                        span: span.clone(),
+                    });
+                    self.define(dest.clone());
+                    return Operand::Var(dest);
+                }
                 let obj = self.lower_expr(expr);
                 let dest = target.unwrap_or_else(|| self.fresh("mem", ty.clone(), span));
                 // 结构体字段访问: 若对象本身带 volatile, 则访问沿用.
@@ -1439,8 +1496,36 @@ impl Builder {
                     self.define(dest.clone());
                     return Operand::Var(dest);
                 }
-                // `&a[i]` / `&s.f` 需要地址算术，而 `InstKind::AddrOf` 只能取具名对象的基址。
-                self.unsupported("取址的对象不是简单变量（&下标 / &成员）");
+                // `&s.f` / `&p->fld`：子对象地址。以前这里直接 `unsupported`，
+                // 而 `MemberAddr` 就是为它加的（偏移由 codegen 的地址形态给）。
+                if let Expr::Member {
+                    expr,
+                    field,
+                    span: m_sp,
+                    ty: f_ty,
+                    is_arrow,
+                } = e.as_ref()
+                {
+                    let obj_ty = expr.ty();
+                    let obj = self.lower_expr(expr);
+                    let ptr_ty = Type::Ptr(Box::new(QualType::new(f_ty.clone())));
+                    let dest = target.unwrap_or_else(|| self.fresh("subaddr", ptr_ty, m_sp));
+                    self.emit(Inst {
+                        dest: Some(dest.clone()),
+                        kind: InstKind::MemberAddr {
+                            obj,
+                            obj_ty,
+                            field: field.name.clone(),
+                            ty: f_ty.clone(),
+                            is_arrow: *is_arrow,
+                        },
+                        span: m_sp.clone(),
+                    });
+                    self.define(dest.clone());
+                    return Operand::Var(dest);
+                }
+                // `&a[i]` 需要地址算术，而 `InstKind::AddrOf` 只能取具名对象的基址。
+                self.unsupported("取址的对象不是简单变量（&下标）");
                 Operand::Int(0)
             },
             Expr::PostInc {
@@ -2311,6 +2396,8 @@ fn lower_lvalue(
         return Some(dest);
     }
     if let Expr::Index { arr, idx, ty, .. } = l {
+        // 写侧与读侧同一判据（HEAD 只在读侧挡，`(*pa)[2] = 7` 会绕过退路）。
+        b.bail_if_deref_array_base(arr);
         let a = b.lower_expr(arr);
         let i = b.lower_expr(idx);
         let store_volatile = match arr.ty() {
@@ -2526,7 +2613,9 @@ pub(crate) fn rename_kind_uses(k: &mut InstKind, map: &HashMap<String, SsaVar>) 
                 rename_operand(a, map);
             }
         },
-        InstKind::MemberLoad { obj, .. } => rename_operand(obj, map),
+        InstKind::MemberLoad { obj, .. } | InstKind::MemberAddr { obj, .. } => {
+            rename_operand(obj, map)
+        }
         InstKind::MemberStore { obj, src, .. } => {
             rename_operand(obj, map);
             rename_operand(src, map);
@@ -2710,7 +2799,7 @@ fn collect_uses_kind(k: &InstKind) -> Vec<String> {
                 push(a, &mut v);
             }
         },
-        InstKind::MemberLoad { obj, .. } => push(obj, &mut v),
+        InstKind::MemberLoad { obj, .. } | InstKind::MemberAddr { obj, .. } => push(obj, &mut v),
         InstKind::MemberStore { obj, src, .. } => {
             push(obj, &mut v);
             push(src, &mut v);
@@ -3131,7 +3220,9 @@ fn collect_var_uses_inst(kind: &InstKind, out: &mut HashMap<String, SsaVar>) {
                 collect_var_uses_op(a, out);
             }
         },
-        InstKind::MemberLoad { obj, .. } | InstKind::MemberStore { obj, .. } => {
+        InstKind::MemberLoad { obj, .. }
+        | InstKind::MemberAddr { obj, .. }
+        | InstKind::MemberStore { obj, .. } => {
             collect_var_uses_op(obj, out);
         },
         InstKind::Select { cond, then_, else_ } => {
@@ -3680,7 +3771,7 @@ fn kind_operands(kind: &InstKind) -> Vec<&Operand> {
             v.extend(args.iter());
             v
         },
-        InstKind::MemberLoad { obj, .. } => vec![obj],
+        InstKind::MemberLoad { obj, .. } | InstKind::MemberAddr { obj, .. } => vec![obj],
         InstKind::Select { cond, then_, else_ } => vec![cond, then_, else_],
         InstKind::InlineAsm { inputs, .. } => inputs.iter().collect(),
         InstKind::AddrOf { .. }
@@ -6110,6 +6201,35 @@ fn inst_to_expr_resolved(
             span: sp.clone(),
             ty: Type::Int,
         },
+        InstKind::MemberAddr {
+            obj,
+            obj_ty,
+            field,
+            ty,
+            is_arrow,
+            ..
+        } => {
+            // 子对象地址: 装回 `&obj->field` / `&(obj.field)`，偏移由 codegen 的
+            // 地址形态给出（与 `MemberLoad` 同一个单一真源约定）。
+            let mut base = resolve_operand(obj, &fake_env, subst, func);
+            if !*is_arrow {
+                set_expr_ty_if_compatible(&mut base, obj_ty);
+            }
+            Expr::AddrOf {
+                e: Box::new(Expr::Member {
+                    expr: Box::new(base),
+                    field: crate::ast::Ident {
+                        name: field.clone(),
+                        span: sp.clone(),
+                    },
+                    span: sp.clone(),
+                    ty: ty.clone(),
+                    is_arrow: *is_arrow,
+                }),
+                span: sp.clone(),
+                ty: Type::Ptr(Box::new(crate::ast::QualType::new(ty.clone()))),
+            }
+        },
         InstKind::MemberLoad {
             obj,
             obj_ty,
@@ -6547,6 +6667,35 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
             v: 0,
             span: sp.clone(),
             ty: Type::Int,
+        },
+        InstKind::MemberAddr {
+            obj,
+            obj_ty,
+            field,
+            ty,
+            is_arrow,
+            ..
+        } => {
+            // 子对象地址: 装回 `&obj->field` / `&(obj.field)`, 偏移交给 codegen
+            // 现有的地址形态（与 `MemberLoad` 单一真源同一约定）。
+            let mut base = operand_to_expr(obj, env, func);
+            if !*is_arrow {
+                set_expr_ty_if_compatible(&mut base, obj_ty);
+            }
+            Expr::AddrOf {
+                e: Box::new(Expr::Member {
+                    expr: Box::new(base),
+                    field: crate::ast::Ident {
+                        name: field.clone(),
+                        span: sp.clone(),
+                    },
+                    span: sp.clone(),
+                    ty: ty.clone(),
+                    is_arrow: *is_arrow,
+                }),
+                span: sp.clone(),
+                ty: Type::Ptr(Box::new(crate::ast::QualType::new(ty.clone()))),
+            }
         },
         InstKind::MemberLoad {
             obj,
@@ -7079,35 +7228,61 @@ mod tests {
         panic!("找不到函数 {name}");
     }
 
-    /// 下标的数组操作数是「需要衰减的子对象」（`p->fld[i]`，fld 是零长/柔性数组）
-    /// 时整函数退出 SSA；而固定大小二维数组 `a[i][j]` 必须仍进 SSA。
+    /// 子对象地址现在**有 IR 表示**（`InstKind::MemberAddr`）：`p->fld[i]`（fld 是零长/
+    /// 柔性数组）的基址 = 对象地址 + 字段偏移。以前 IR 表达不了，只能整函数退 SSA
+    /// （§7.29），本节把「退路」的断言换成「表示存在」的断言。
     ///
-    /// 两面都钉：只钉前者会把所有数组访问一起挡掉（那等同于 SSA 层空转），
-    /// 只钉后者则守不住实测的静默误编译（`z->data[0]` 在 -O2 读出栈垃圾）。
+    /// 为什么不只断言「能进 SSA」：退路删掉后，发一个看起来能跑的错形状也能做绿。
+    /// 所以这里钉「IR 里确实出现了 `MemberAddr`」，而**值对不对**交给
+    /// `vla_and_flexible_array_match_gcc_at_all_levels` 拿 gcc 实测地面真值逐档对照。
+    /// 读与写两侧都钉（历史上「只挡一边」重复错过两次）。
     #[test]
-    fn subobject_array_decay_bails_while_2d_arrays_stay_in_ssa() {
+    fn subobject_array_decay_is_represented_as_member_addr() {
+        fn n_member_addr(src: &str, fname: &str) -> usize {
+            let f = try_build(src, fname).expect("子对象下标应能进 SSA");
+            f.blocks
+                .values()
+                .flat_map(|b| b.insts.iter())
+                .filter(|i| matches!(i.kind, InstKind::MemberAddr { .. }))
+                .count()
+        }
+
         let zero_len = "struct Z { int count; int data[0]; };\n\
                         int t(struct Z* z){ return z->data[0] + z->data[2]; }\n";
         assert!(
-            try_build(zero_len, "t").is_none(),
-            "零长数组成员的下标需要子对象地址，IR 表达不了 ⇒ 整函数退 SSA"
+            n_member_addr(zero_len, "t") >= 1,
+            "零长数组成员的下标基址必须走 MemberAddr"
         );
+        // 条数不钉死：构建期不做 CSE，`data[0] + data[2]` 现在发两次衰减（实测 2 条），
+        // 以后的 pass 把它合成一条不是错。只钉「有没有」与「不该有的地方没有」。
         let flex = "struct F { int count; int data[]; };\n\
                     int t(struct F* f){ f->data[1] = 7; return f->data[1]; }\n";
         assert!(
-            try_build(flex, "t").is_none(),
-            "柔性数组成员的**写**同样要退 SSA（与读同一判据，不能只挡一边）"
+            n_member_addr(flex, "t") >= 1,
+            "柔性数组成员的**写**同样要拿到子对象地址（与读同一机制，不能只做一边）"
+        );
+        // `&成员` 取址（不是数组字段）也必须能表达：这是 §7.29 同一缺口的另一侧。
+        let addr_of_scalar_member = "struct P { int a; int b; };\n\
+                                     int* t(struct P* p){ return &p->b; }\n";
+        assert!(
+            n_member_addr(addr_of_scalar_member, "t") >= 1,
+            "&p->b 要发 MemberAddr，而不是把字段当值读"
         );
 
         let fixed_2d = "int t(void){ int a[3][4]; a[2][1] = 5; return a[2][1]; }\n";
         assert!(
             try_build(fixed_2d, "t").is_some(),
-            "固定大小二维数组仍应走 SSA 往返（外层下标也拿到数组类型，但基址可表达）"
+            "固定大小二维数组仍应走 SSA 往返"
         );
         let ptr_elem = "int t(int* p){ p[2] = 9; return p[2]; }\n";
         assert!(
             try_build(ptr_elem, "t").is_some(),
             "指针下标（无需衰减）不得被误挡"
+        );
+        assert_eq!(
+            n_member_addr(ptr_elem, "t"),
+            0,
+            "指针下标不应凭空多造一条 MemberAddr（反向对照）"
         );
     }
 

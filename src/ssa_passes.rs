@@ -980,6 +980,7 @@ fn inst_is_movable_value(kind: &InstKind) -> bool {
                 | InstKind::Un { .. }
                 | InstKind::Cast { .. }
                 | InstKind::AddrOf { .. }
+                | InstKind::MemberAddr { .. }
                 | InstKind::Load { .. }
                 | InstKind::IndexLoad { .. }
                 | InstKind::MemberLoad { .. }
@@ -2785,7 +2786,7 @@ fn rename_in_kind(k: &mut InstKind, map: &HashMap<String, SsaVar>) {
                 rename_op(a, map);
             }
         },
-        InstKind::MemberLoad { obj, .. } => rename_op(obj, map),
+        InstKind::MemberLoad { obj, .. } | InstKind::MemberAddr { obj, .. } => rename_op(obj, map),
         InstKind::MemberStore { obj, src, .. } => {
             rename_op(obj, map);
             rename_op(src, map);
@@ -3443,6 +3444,9 @@ fn escaping_bases(func: &Function) -> HashSet<String> {
                     mark_op(idx, &mut mark, &mut escape);
                 },
                 InstKind::MemberStore { src, .. } => mark_op(src, &mut mark, &mut escape),
+                // `&obj.field`：obj 在这里被当**值**（基址指针）读，跟 `MemberLoad` 一样
+                // 计为一次使用；地址本身不是逃逸出去的新对象。
+                InstKind::MemberAddr { obj, .. } => mark_op(obj, &mut mark, &mut escape),
                 InstKind::Call { callee, args, .. } => {
                     mark_op(callee, &mut mark, &mut escape);
                     for a in args {
