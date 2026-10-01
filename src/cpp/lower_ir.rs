@@ -1877,7 +1877,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
     /// 静态存储对象上的自增/自减: `AddrOf → Load → Bin → Store`。
     ///
     /// 与 `lower_incdec_local` 的 volatile 分支同构, 但必须走全局符号:
-    /// 静态存储的旧值不在本函数的 SSA 里 (也不应在 —— 它要能跳调用/跳函数
+    /// 静态存储的旧值不在本函数的 SSA 里 (也不应在 —— 它要能跨调用/跨函数
     /// 保持), 旧实现只查 `self.locals` 于是直接 `local variable not found`.
     fn lower_incdec_static_storage(
         &mut self,

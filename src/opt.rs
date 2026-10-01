@@ -566,6 +566,12 @@ fn block_has_unsafe_ssa_pattern(b: &Block) -> bool {
             // static 局部变量跨调用持久, SSA 无法正确建模
             || v.is_static
         },
+        // 嵌套函数：重建后的体里**没有** `Decl::Func`（被前面的降低步骤按帧偏移另存），
+        // 于是 -O2 产物里它的定义直接消失。实测最小复现
+        // `int main(void){ int id(void){ return 3; } return id()==3?0:1; }`：
+        // -O0 链得过、-O2 `undefined reference to 'id'`。§7.20 为寄存器分配记过同一事实
+        // （那边是「不能把被嵌套函数访达的变量绑进寄存器」），这边把整函数退出 SSA。
+        BlockItem::Decl(Decl::Func(_)) => true,
         BlockItem::Stmt(s) => stmt_has_unsafe_ssa_pattern(s),
         _ => false,
     })
@@ -601,7 +607,18 @@ fn cross_function_dce(module: &mut Module) {
     let mut extra_roots = Vec::new();
     for d in prog.decls.drain(..) {
         match d {
-            Decl::Func(f) => funcs.push(f),
+            Decl::Func(f) => {
+                // `__attribute__((copy(fn)))` 在产物里是 `.set 别名, 目标`；目标必须当根，
+                // 否则它因「没人直接调用」被 DCE 吃掉，剩下一条指向上定义已消失的
+                // `.set` —— 链接期只报 `undefined reference to 别名`，完全看不出真正被
+                // 删的是谁。实测（-O0 对、-O2/-O3 链接失败）：
+                //     static int _internal_impl(int a,int b){return a+b;}
+                //     int public_api(int,int) __attribute__((copy("_internal_impl")));
+                if let Some(target) = f.alias_name.clone() {
+                    extra_roots.push(target);
+                }
+                funcs.push(f);
+            },
             Decl::Var(v) => {
                 if let Some(init) = &v.init {
                     collect_global_func_roots(init, &mut extra_roots);

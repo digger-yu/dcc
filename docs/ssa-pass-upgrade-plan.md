@@ -1665,6 +1665,60 @@ complex_abi / agg_param / chained_assign / nested_pollution 若干。
 COMPILE-FAIL 仍 60（下一个待处理项）；可复现 5094 组合字节一致；REX 卫生 611 组合零条。
 
 
+### 7.30 第 24 轮之十：COMPILE-FAIL 60 条逐个定性 —— 其实只有 2 条真缺陷（都已修）
+
+平铺的「COMPILE-FAIL: 60」不是 60 个缺陷。拿门禁自己留下的构建日志逐条读后：
+
+| 分类 | 数量 | 是什么 |
+|---|---|---|
+| CF-NOMAIN | 35 | 夹具根本没有 `main`（只做编译期检查），而门禁跑的是**链接** |
+| CF-CROSS-TU | 16 | 符号由配对的另一 TU 提供（`my_log`/`ifunc_func`/`inner`…），单文件链接必失败 |
+| CF-SRC-REJECT | 6 | **同样的 flags 下 gcc 也拒绝**（`??=` 三角符需要 `-trigraphs`；`#error`/`constexpr` 那几条夹具自己就断言诊断；CUDA `__global__`、故意的未知 `__builtin_`） |
+| CF-LIBC-SYM | 1 | `attr_target_clones.c` 缺 `vsnprintf`/`__isoc23_vfscanf`/`feof_unlocked` 等 libc 符号（运行库覆盖缺口，归入另一类） |
+| CF-UNKNOWN | **0** | 剩下的才按新增缺陷处理 |
+| （已修） | 2 | 见下 |
+
+定性过程中挖出两条**只在链接期暴露**的真缺陷（`-c` 全绿，所以 Tier 0 永远拓不到）：
+
+1. **嵌套函数的定义在 -O2/-O3 消失**
+   `int main(void){ int id(void){ return 3; } return id()==3?0:1; }` → `-O2` 报
+   `undefined reference to 'id'`。就是 §7.20 为寄存器分配记过的同一事实（重建后的体里没有
+   `Decl::Func`），当时只修了分配器那一侧。现在把嵌套函数参加
+   `func_has_unsafe_ssa_pattern`（它原本遇到 `Decl::Func` 直接返 false）。
+2. **`__attribute__((copy(fn)))` 的目标被跨函数 DCE 吃掉**
+   产物里 `-O2` 仍有 `.set public_api, _internal_impl`，但 `_internal_impl` 的定义没了（没人
+   直接调它）→ 链接报的是「undefined reference to public_api」，完全看不出被删的是另一个名字。
+   修在 `cross_function_dce`：别名目标必须进 `extra_roots`。
+
+`c23_nullptr.c`（块内 `nullptr_t id(void){…}`）与 `attr_copy_full.c` 就是这两条在语料里的现形；
+修后 58 不再是 60。两条各留一份最小形状进 `link_only_defects_survive_all_levels`（四档跑**链接**，
+因为 Tier 0 只 `-c`拓不到这类问题）。
+
+**门禁本身改了**：`check_opt_equivalence.sh` 现在按上表分类打印，且 **CF-UNKNOWN 非空直接 FAIL**。
+分类里最关键的一条不是靠人列文件清单，而是拿同样的 flags **去问 gcc**：gcc 也拒的一律算
+语料/flags 不匹配而不是编译器债（三角符就是靠这条自动归位的）。这样「60」不再会藏新的真缺陷，
+也不会逼人去改测试计数。
+
+### 7.31 本轮总账
+
+- OPT-DIFF：**8 → 0**（本轮首次归零）。
+- COMPILE-FAIL：**60 → 58**，且 58 已全部定性完毕（CF-UNKNOWN = 0）。
+- REX 位序/卫生：矩阵 9→15 个（实测 5652 组合）+ 新增**产物级**门禁
+  `scripts/check_rex_hygiene.sh`（609→611 组合，多余位与 `%ah..%bh` 均为 0），已进 `make test-all`。
+- P12：A/A2/A3/B 均落地；方案字面形态（`Ident` 携带寄存器号 + 真 SPILL/RELOAD）仍未做。
+- 测试：`cargo test --lib` 2005、`--test integration` 1010（本轮开始时分别是 1997 / 1004）；
+  可复现 5094 组合字节一致；
+  arm/mips 基线 6 项 OK。
+
+**明确留下的未修项**（都写了“为什么不现在就修”，不是为了凑绿）：
+
+1. 多出口循环与子对象地址下标现在是**不优化且正确**；真修分别是「重建侧出口所有权设计」
+   与「IR 加子对象地址形态」（§7.28/§7.29）。
+2. `attr_target_clones.c` 的 libc 符号缺口（E0302）属运行库覆盖，不是优化器。
+3. 自家反解码器仍有 ≈3% 行读不出来（`.byte`/`# UNKNOWN` 兜底）——所以产物级门禁以 objdump
+   为权威；把解码器补到「逐字命中」仍是独立的一项。
+
+
 ### 8. 第 6 轮：P10 已接入 + P16 分析层完成
 > 【校正】本小节写的是当时状态。其中 P16 表格的「准入」与「可观测」两行、以及表后
 > 四个真缺陷对应的分类器代码，已随 §7 记录的误删丢失，目前**不在树里**；下表的

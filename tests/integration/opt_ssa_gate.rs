@@ -273,6 +273,35 @@ fn vla_and_flexible_array_match_gcc_at_all_levels() {
     }
 }
 
+/// 只在**链接期**才暴露的两个 -O2 缺陷（COMPILE-FAIL 逐条定性的产出）：
+///
+///   1. 嵌套函数的定义在 SSA 往返后消失（`-O2` 报 `undefined reference to 'id'`）；
+///   2. `__attribute__((copy(fn)))` 的**目标**被跨函数 DCE 吃掉，留下一条悬空 `.set`
+///      （报的是「undefined reference to public_api」，完全看不出被删的是 `_internal_impl`）。
+///
+/// 为什么必须在这里显式跑**链接**：Tier 0 全部只 `-c`，上面两个形状在 `-c` 下全绿；
+/// 而 OPT 等价门禁会跑链接，所以下一次改动弄坏它们时，只有这条测试能在 CI 里
+/// 指到具体形状（而不是一个变红的门禁计数）。
+#[test]
+fn link_only_defects_survive_all_levels() {
+    let nested = "int main(void){ int id(void){ return 3; } return id() == 3 ? 0 : 1; }\n";
+    let copy_alias = "static int _internal_impl(int a, int b){ return a + b; }\n\
+                      int public_api(int a, int b) __attribute__((copy(\"_internal_impl\")));\n\
+                      int main(void){ return public_api(3, 4) == 7 ? 0 : 1; }\n";
+    for (tag, src) in [("nested-func-link", nested), ("copy-alias-link", copy_alias)] {
+        for flag in ["-O0", "-O1", "-O2", "-O3"] {
+            let (build, exe) = run_compile_and_run_flags(tag, src, &[flag, "-std=gnu2x"]);
+            assert!(
+                build.status.success(),
+                "{tag} [{flag}] 链接失败: {}",
+                String::from_utf8_lossy(&build.stderr)
+            );
+            assert_eq!(run_exe(&exe), 0, "{tag} [{flag}] 运行结果不对");
+            let _ = std::fs::remove_file(exe);
+        }
+    }
+}
+
 /// 「关掉 pass，产物必须不一样」——接入证明本身。
 ///
 /// 为什么不能只比产物：`-O2` 下表达式的溅出池本来就会用 %rbx，所以「序言保存 %rbx」

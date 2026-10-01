@@ -147,7 +147,7 @@ impl Codegen {
         let label_span = ctx.label_span;
         let mut cg = Self::codegen_from_parallel(ctx);
         cg.compile_func(&f, prog);
-        // 本函数实际用掉的标号数。worker 内部就闭合 (不跳函数取号), 因此该值与
+        // 本函数实际用掉的标号数。worker 内部就闭合 (不跨函数取号), 因此该值与
         // 调度 / 核数无关。
         let label_used = cg.next_label.saturating_sub(label_base);
         let new_rodata = cg.rodata[rodata_base as usize..].to_vec();

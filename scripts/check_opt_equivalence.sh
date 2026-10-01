@@ -63,9 +63,59 @@ find "$REPO/tests/fixtures/c" "$REPO/tests/fixtures/opt" -name '*.c' | sort \
 total=$(find "$REPO/tests/fixtures/c" "$REPO/tests/fixtures/opt" -name '*.c' | wc -l)
 diffs=$(grep -c '^OPT-DIFF' "$OUT/summary.txt" || true)
 fails=$(grep -c '^COMPILE-FAIL' "$OUT/summary.txt" || true)
+# COMPILE-FAIL 不是一条债，而是几种不同的东西混在一起（本轮逐个定性出来的）：平铺成
+# 一个数字会让人以为「还有 60 个缺陷」，也会让**新的**真缺陷藏在里面。所以按日志归类，
+# 只有 CF-UNKNOWN 才置红。
+#
+# 关键一条：判「前端错误算不算 dcc 的债」不靠人列文件清单，而是**用同样的 flags 问 gcc**。
+# 例：`c89_trigraphs.c` 的 `??=` 在 -std=gnu2x 下 gcc 也拒绝（夹具自己的注释就写着需要
+# -trigraphs），它属于"语料与 flags 不匹配"，不是缺陷；靠人记就会把它错登记成债。
+classify_cf() {
+  local f=$1 tag=$2 L=$3 log="$OUT/${tag}_d${L}.build"
+  [ -f "$log" ] || { echo "CF-UNKNOWN"; return; }
+  if grep -qE "undefined reference to .main|crt1\\.o.*_start" "$log"; then echo "CF-NOMAIN"; return; fi
+  if grep -qE "^error\\[E0302\\]" "$log"; then echo "CF-LIBC-SYM"; return; fi
+  if grep -qE "undefined reference to" "$log"; then echo "CF-CROSS-TU"; return; fi
+  # 到这里都是前端/汇编侧错误：gcc 也拒绝 ⇒ 语料本身的问题，不是编译器的债
+  if gcc -fsyntax-only -std=gnu2x -w "$f" >/dev/null 2>&1; then
+    echo "CF-UNKNOWN"
+  else
+    echo "CF-SRC-REJECT"
+  fi
+}
+: > "$OUT/cf_classified.txt"
+grep '^COMPILE-FAIL' "$OUT/summary.txt" | while read -r _ tag lvl _rest; do
+  L=${lvl#-O}
+  # 从 tag 还原源文件路径：tag 是「相对 tests/fixtures 的路径，/ 换成 _」
+  src=$(find "$REPO/tests/fixtures/c" "$REPO/tests/fixtures/opt" -name "*.c" \
+          | sed "s|$REPO/tests/fixtures/||; s|/|_|g" | grep -x "$tag" \
+          | head -1 | sed "s|^|$REPO/tests/fixtures/|; s|_|/|2" )
+  [ -f "$src" ] || src=""
+  printf '%s %s\n' "$(classify_cf "$src" "$tag" "$L")" "$tag" >> "$OUT/cf_classified.txt"
+done
+unknown=$(grep -c '^CF-UNKNOWN' "$OUT/cf_classified.txt" || true)
 norms=$(grep -c '^ADDR-NORM' "$OUT/summary.txt" || true)
 echo "=== 语料总数: $total"
 echo "=== OPT-DIFF: $diffs   COMPILE-FAIL: $fails   ADDR-NORM(已归一化): $norms"
+if [ -s "$OUT/cf_classified.txt" ]; then
+  echo "=== COMPILE-FAIL 定性（只有 CF-UNKNOWN 计为新增缺陷）:"
+  awk '{print $1}' "$OUT/cf_classified.txt" | sort | uniq -c | sort -rn | while read -r n k; do
+    case "$k" in
+      CF-NOMAIN)     d="夹具无 main，只做编译期检查（门禁不该链接它）";;
+      CF-CROSS-TU)   d="符号由另一 TU 提供，单文件链接必失败";;
+      CF-SRC-REJECT) d="同样 flags 下 gcc 也拒绝（语料/flags 不匹配，非编译器债）";;
+      CF-LIBC-SYM)   d="缺 libc 符号支持（运行库覆盖缺口）";;
+      *)             d="未定性，按新增缺陷处理";;
+    esac
+    printf '    %-14s %3d  %s\n' "$k" "$n" "$d"
+  done
+fi
+
+if [ "${unknown:-0}" -gt 0 ]; then
+  echo "CF-UNKNOWN 非空 → FAIL（有未定性的编译失败，先归类再决定是否算债）:"
+  grep '^CF-UNKNOWN' "$OUT/cf_classified.txt" | sed 's/^/  /'
+  exit 1
+fi
 if [ "$diffs" -gt 0 ]; then
   files=$(grep '^OPT-DIFF' "$OUT/summary.txt" | awk '{print $2}' | sort -u | wc -l)
   # 必须全量打印：以前这里带 `| head -40`，而调用方（以及文档里的度量）习惯用
