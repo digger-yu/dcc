@@ -16,7 +16,7 @@
 | P9 | loop_interchange | ✅ 完整 | 同上（空转） | ⚠ |
 | P10 | tail_call_optimization | ✅ 完整 | 真 | ✅ |
 | P11 | function_attribute_propagation | ✅ 完整 | **假 hint 导致 -O2 SEGV** | ✅ 已删除（段归属回到 AST 真源） |
-| P12 | register_allocation | ⚠ stub | 只统计、后端不读、还误报 `changed=true` | ◐ **增量已落地**（§7.20：SSA 层活性分配灌进绑定表，产物差异已验证）；方案的字面形态（`Ident` 携带寄存器号 + codegen 不再分配 + 真 SPILL/RELOAD）**仍未做**，需重写单遍发射模型。◐ §7.21~§7.26：把「谁拥有哪个寄存器」这条链上的**编码位序**从人撞改为门禁点名（3928 组合 / 53 个点位修正），因为自动分配一开始把 `dst>=8` 的死分支点亮 |
+| P12 | register_allocation | ⚠ stub | 只统计、后端不读、还误报 `changed=true` | ◐ **增量已落地**（§7.20：SSA 层活性分配灌进绑定表，产物差异已验证）；方案的字面形态（`Ident` 携带寄存器号 + codegen 不再分配 + 真 SPILL/RELOAD）**仍未做**，需重写单遍发射模型。◐ §7.21~§7.27：把「谁拥有哪个寄存器」这条链上的**编码位序**从人撞改为门禁点名（15 矩阵 5652 组合 + 产物级卫生门禁，42 条存量点名到 0），因为自动分配一开始把 `dst>=8` 的死分支点亮 |
 | P12b | ubsan_ir_instrument | ✅ 完整 | guard 已插；文档声称的符号转换代码不存在 | ⚠ 注释已修正 |
 | P13 | alias_set | ✅ 完整 | 返回值被丢弃 → 空转 | ⚠ |
 | P14 | speculative_execution | ✅ 完整 | **按 dest 字典序重排 → -O3 静默误编译** | ✅ 已重写为依赖闭包上提 |
@@ -1432,7 +1432,8 @@ P12-A3（asm 规划器尊重绑定表/临时池占用 + `q` 池耗尽政策）�
 
 ### 7.23 第 24 轮之三：REX 位序穷举门禁 `src/codegen/x86_64/rex_matrix.rs`
 
-12 个矩阵、**3928 个操作数组合**，每条位序敏感的编码函数把 16 个 GP（× 宽度 × 基址）
+12 个矩阵、**3908 个操作数组合**（这数是实测的：在 `first_line()` 里加计数器跑
+`--test-threads=1`，不是手算 —— 初稿写的 3928 就是手算的，错了 20），每条位序敏感的编码函数把 16 个 GP（× 宽度 × 基址）
 全组合编出来，交给自家解码器读回，断言「读回的寄存器名恰好是意图的那几个」。
 
 判据的两条设计约束（都不是先想到的，是写的时候被自己绊出来的）：
@@ -1526,9 +1527,58 @@ P12-A3（asm 规划器尊重绑定表/临时池占用 + `q` 池耗尽政策）�
 第二个实例）。
 
 **度量**（本轮全部改动之上复测）：`cargo test --lib` 1999 通过 / 0 失败（含 12 条新矩阵，
-3928 个组合，0.02s）；`cargo test --test integration` **1006** 通过 / 0 失败；
+3908 个组合，0.02s）；`cargo test --test integration` **1006** 通过 / 0 失败；
 OPT-DIFF **8 → 4**（`ld80_arith`、`vla` 两条旧账，本轮未动）；COMPILE-FAIL 60 条存量债不变；
 探针 `-O0/-O2` 产物里 `%ah..%bh` 与异常 `rex` 标注归零。
+
+
+### 7.27 第 24 轮之七：把判据伸到发射点——门禁从 9 个矩阵长到 15 个，另加一条扫产物的
+
+§7.26 留下的是“剩下的 AMBIG 需要门禁点名”。本轮把这句话落实，结果是：**上一轮的
+“判不出就不改”里，确有一类是真缺陷**，而且不靠人读能看不出来。
+
+**矩阵覆盖面扩充**（`rex_matrix.rs` 12→15 个矩阵，实测组合数 3908 → 5652）：
+
+| 新矩阵 | 为什么必须接 | 接上后说出什么 |
+|---|---|---|
+| `frame_access_helpers_matrix` | `load_stack`/`store_stack`/`load_stack_sized`/`emit_store`/`emit_lea_r13`/`*_rsp_qword` 是全后端流量最大的发射点，它们的 modrm 在 `emit_r13_modrm_disp`/`emit_reg_indirect_modrm` 里，批量脚本看不到⇒全被归为 AMBIG | 全部正确（机器确认，不再靠人读） |
+| `xmm_transfer_matrix` / `xmm_frame_transfer_matrix` | SSE 存/取帧与 `movd/movdqu` | `emit_xmm_store_rsp` 在 xmm>=8 时**不发 REX.R** ⇒ `movsd %xmm9,(%rsp)` 实际写 %xmm0，两个浮点变量掉进同一个槽 |
+| `emit_asm_mov_imm_to_mem_matrix` | 上轮留下的 `C6/C7` 待说项 | base>=8 的 REX.B 已可验证 |
+
+接矩阵之前必须先修眼睛：解码器不认 `0F 6F/7F`（movdqu/movdqa），整个 vector 帧通路在
+`-S` 里是一片 UNKNOWN；同时门禁的“读不出来就算没跑”判据补上了第二种兜底
+`# UNKNOWN`（原本只拦 `.byte`）—— 否则新增矩阵会“通过”于根本没人读数。
+
+**产物级门禁 `scripts/check_rex_hygiene.sh`**（已接进 `make test-all`）。矩阵只能覆盖
+能被独立调用的发射点，表达式发射器（位域/原子/蹦床）藏在 IR 上下文里，所以这条扫**产物**：
+对 609 个「夹具 × 档位」组合跑 objdump，要求
+
+- **A** 无 `rex` 标注（不扩任何字段的 REX 位）；
+- **B** 无 `%ah/%ch/%dh/%bh`（8 位操作数缺存在性 REX）。
+
+两条都以 objdump 为权威，原因上面刚说：自家解码器补上 `Rex.present` 之前读不出 B 类。
+标定也做了：拿 GAS 汇编同一批助记符（`movsd/movzbl/rep movsb/call *%r11/movq %xmm0`）反汇编，
+**GAS 自己从不触发 `rex` 标注** ⇒ 这不是读数口径差异而是多发。语料排除
+`tests/fixtures/asm/`：那里内核汇编把字面量池落在 .text，反汇编必然读出无意义助记符
+（最初的扫描就因此假报过一批 `%ch/%bh`，实际是 `c1 c4 e3` 这种数据）。
+
+**点名到零：42 → 0**。其中两条是真错而不止是噪声：
+
+1. **自反 ModRM 只置单边（12 处）**：`let rex = 0x40 | if dst >= 8 { 0x01 }` 配的 modrm 是
+   `0xC0 | ((dst&7)<<3) | (dst&7)`（同一个寄存器既在 reg 又在 r/m），dst>=8 时只置 B 不置 R
+   ⇒ `movsbq %r8b,%rax` 一类把结果写进了 %rax 而不是 %r8。这一族**不是本轮改坏的**
+   （`git show` 对比确认它们本来就是这个值，上轮脚本只给它们加了注释）—— 它们是上轮
+   “判不出就不改”留下的真债。
+2. **`movsd/movss` 多发 REX.W**（344 次）：宽度由 F2/F3 定，W 位无意义；`rep movsb` 的 A4
+   是字节固定宽度（movsq 是 REX.W + **A5**，不是 A4+W）；`call *%r11` 同理。多余位是
+   「rex() 助手无法表达不需要」的化身，所以修法是根因而非逐点：新增
+   `Codegen::emit_rex_if_used(w, r, x, b, byte_ctx)`，把「按需才发」收到一处（`byte_ctx` 为真
+   时一律发，因为 8 位上下文可能需要的是存在性），已转化的发射点覆盖 reg-reg ALU /
+   test / unary inc-dec-neg / mov imm-to-mem。
+
+**度量**：`cargo test --lib` 2003 / `--test integration` 1006 全过；
+`rex-hygiene` 在 609 个组合上零条；OPT-DIFF 仍 4（未新增）；可复现 5076 组合字节一致；
+arm/mips 基线 6 项 OK。反向对照：把 reg-reg ALU 的按需发前缀退回无条件发，门禁立刻报 2 条。
 
 
 ### 8. 第 6 轮：P10 已接入 + P16 分析层完成

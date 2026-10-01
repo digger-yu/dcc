@@ -30,6 +30,13 @@ test:
 opt-eq: build
 	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" JOBS="$(JOBS)" bash scripts/check_opt_equivalence.sh
 
+# x86_64 产物的 REX 卫生不变式（以 objdump 为权威）：多余位 = 0，`%ah..%bh` = 0。
+# 为什么不只靠 `rex_matrix` 那套穷举矩阵：矩阵只能覆盖能被独立调用的发射点，而表达式
+# 发射器（位域/原子/蹦床…）藏在 IR 上下文里。这条门禁扫**产物**，所以任何发射点写坏
+# 都会被点名（§7.26：本轮就是靠它把 42 条存量一次性点名到 0）。
+rex-hygiene: build
+	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" bash scripts/check_rex_hygiene.sh
+
 # 交叉后端的字节基线（arm/mips）。`verify` 模式：基线缺失或产物漂移都置红，
 # 不允许在 CI 里悄悄重写基线。这个门禁曾经没有任何调用点且实为空跑（夹具路径全部
 # 不存在、目标开关写错），现在既修了脚本也接进了这里。
@@ -39,6 +46,7 @@ golden-cross: build
 test-all: test
 	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" bash scripts/test_all.sh
 	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" JOBS="$(JOBS)" bash scripts/check_opt_equivalence.sh
+	$(MAKE) rex-hygiene
 	$(MAKE) golden-cross
 
 torture-setup:
