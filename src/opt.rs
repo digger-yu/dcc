@@ -84,8 +84,10 @@ pub fn optimize(module: &mut Module, level: u8) {
 /// `has_vnni`: 目标是否支持 VNNI 指令
 /// `vec_bits`: 向量寄存器位宽 (256/512)
 pub fn optimize_with_target(module: &mut Module, level: u8, has_vnni: bool, vec_bits: u32) {
-    // Default: strict_aliasing=true (C standard semantics)
-    optimize_with_full_target(module, level, has_vnni, vec_bits, true);
+    // Default: strict_aliasing=true (C standard semantics), debug_info=false
+    // (`optimize_with_target` 的既有调用方都不带 -g 信息; 需要时走
+    // `optimize_with_full_target`)。
+    optimize_with_full_target(module, level, has_vnni, vec_bits, true, false);
 }
 
 /// 带完整目标信息的优化入口。
@@ -97,6 +99,7 @@ pub fn optimize_with_full_target(
     has_vnni: bool,
     vec_bits: u32,
     strict_aliasing: bool,
+    debug_info: bool,
 ) {
     // 内联: O0-O2 仅 always_inline/flatten; O3 额外启发式
     if !opt_skipped("function_inline") {
@@ -140,7 +143,7 @@ pub fn optimize_with_full_target(
     if level >= 2 {
         // M16: SSA pass pipeline (strength reduction, IVOP, TCO, etc.)
         if !opt_skipped("run_ssa_passes") {
-            run_ssa_passes(module, level, strict_aliasing);
+            run_ssa_passes(module, level, strict_aliasing, debug_info);
         }
     }
 }
@@ -163,7 +166,12 @@ fn opt_skipped(name: &str) -> bool {
 /// rebuild_cycle 将循环 CFG 重建为 while 循环 AST。
 /// 注意: rebuild_cycle 对含循环函数的重建尚不完全正确,
 /// 因此含循环的函数仍走 AST pass 路径。
-fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool) {
+fn run_ssa_passes(
+    module: &mut Module,
+    level: u8,
+    strict_aliasing: bool,
+    debug_info: bool,
+) {
     let prog = module.source_mut();
     // Collect volatile global variable names - SSA passes must not
     // propagate constants through volatile accesses.
@@ -175,6 +183,8 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool) {
             _ => None,
         })
         .collect();
+    // file-scope 的 `register asm` 变量占住的号要让开（循环里不能再借 `prog`，所以先算）。
+    let taken_regs = file_scope_bound_regs(&prog.decls);
     let mut modified = false;
     for decl in &mut prog.decls {
         if let Decl::Func(f) = decl {
@@ -206,12 +216,47 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool) {
                 // 「浮点运算不得复用」(舍入模式可在运行期被 fesetround 改掉)。
                 ssa.fenv_access = prog.fenv_access;
                 crate::ssa_passes::run_with_opts(&mut ssa, level, strict_aliasing);
-                *f.body.as_mut().unwrap() = crate::ssa::rebuild_block(&ssa);
+                let rebuilt = crate::ssa::rebuild_block(&ssa);
+                // P12：SSA 层的寄存器分配，结果写进重建后的 AST（`register_name`）。
+                // 判据要看**重建前**的函数体（嵌套函数在重建后的体里已经没有了，
+                // 见 `ssa_regalloc::assign` 的说明），落地只写重建后的体。
+                // 只有 x86_64 后端读这张表，所以其他后端的产物不受影响；
+                // `debug_info` 时整条 pass 不动（DWARF 还只会发栈槽位置）。
+                let orig_body = f.body.replace(rebuilt);
+                if !opt_skipped("ssa_regalloc") {
+                    let ctx = crate::ssa_regalloc::Ctx {
+                        debug_info,
+                        taken_regs: taken_regs.clone(),
+                    };
+                    if let Some(orig) = &orig_body {
+                        crate::ssa_regalloc::assign(&ssa, orig, f.body.as_mut().unwrap(), &ctx);
+                    }
+                }
                 modified = true;
             }
         }
     }
     let _ = modified;
+}
+
+/// file-scope 的 `register asm` 变量占住了哪些 callee-saved 号（自动分配要让开）。
+///
+/// 为什么必须让开而不是复用：后端对每个函数都会把 file-scope 绑定重新灌进绑定表，
+/// 两个变量共享一个寄存器就是静默错值（§7.15 修的是同一类问题）。
+fn file_scope_bound_regs(
+    decls: &[crate::ast::Decl],
+) -> std::collections::HashSet<u8> {
+    let mut out = std::collections::HashSet::new();
+    for d in decls {
+        if let crate::ast::Decl::Var(v) = d {
+            if let Some(rn) = &v.register_name {
+                if let Some(r) = crate::ssa_regalloc::pooled_reg_of(rn) {
+                    out.insert(r);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Returns true if the function references any volatile global variable.

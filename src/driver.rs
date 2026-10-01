@@ -941,6 +941,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         opt_has_vnni,
         opt_vec_bits,
         cfg.strict_aliasing,
+        cfg.debug_level > 0,
     );
     if cfg.opt > 0 {
         ir::resync(&mut module)
@@ -2313,6 +2314,7 @@ fn emit_native_program(
         opt_has_vnni,
         opt_vec_bits,
         cfg.strict_aliasing,
+        cfg.debug_level > 0,
     );
     if cfg.opt > 0 {
         ir::resync(&mut module).map_err(|d| {

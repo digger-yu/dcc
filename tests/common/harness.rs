@@ -292,6 +292,49 @@ pub(crate) fn run_gcc_cross_check_opt(name: &str, source: &str, dcc_flags: &[&st
 }
 
 
+
+/// 带环境变量与档位的汇编输出：给「某条 pass 是否真的改变了产物」这类断言用。
+///
+/// 为什么必须有它：一次 pass 接进管线后，单测全绿并不能证明它到达了产物
+/// （docs/ssa-pass-upgrade-plan.md §7.5 就是这条教训 —— 旧 P16 的接入点放在管线
+/// 末尾时，开与关的汇编逐字节相同）。唯一可信的证据是「关掉它，产物不一样」，
+/// 而这需要一个能传 `DCC_OPT_SKIP` 的编译入口。
+///
+/// 返回 `(汇编文本, stderr)`：stderr 一并给出，是因为「诊断里说绑了谁」与「产物是否
+/// 因此改变」是两个必须同时成立的证据，只看其中一个都会假绿。
+pub(crate) fn compile_asm_text_with_env(
+    name: &str,
+    source: &str,
+    flags: &[&str],
+    envs: &[(&str, &str)],
+) -> (String, String) {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let src = dir.join(format!("dcc-asmenv-{name}-{pid}.c"));
+    let out = dir.join(format!("dcc-asmenv-{name}-{pid}.s"));
+    fs::write(&src, source).expect("write C source");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+    cmd.arg("-S").arg("-o").arg(&out);
+    for f in flags {
+        cmd.arg(f);
+    }
+    cmd.arg(&src);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let status = cmd.output().expect("run dcc");
+    assert!(
+        status.status.success(),
+        "dcc 编译失败: {src:?}: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let text = fs::read_to_string(&out).unwrap_or_default();
+    let err = String::from_utf8_lossy(&status.stderr).into_owned();
+    let _ = fs::remove_file(src);
+    let _ = fs::remove_file(out);
+    (text, err)
+}
+
 /// 跨 TU ABI 互操作对照: 同一对 C 源 (provider 无 main, consumer 有 main)
 /// 用 gcc / dcc **各自单独编译**后由主机 gcc 链接, 要求四种组合的 stdout
 /// 逐字节一致且退出码相同:

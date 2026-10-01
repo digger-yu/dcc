@@ -1,0 +1,973 @@
+// src/ssa_regalloc.rs
+//
+// P12：SSA 层的寄存器分配。
+//
+// # 为什么分配算在 IR 上、结果落在 AST 上
+//
+// 只有 IR 有真正的 CFG、phi 与单赋值形式，「某个变量在哪些点上活着」只有在 IR 上算得
+// 准。而 x86_64 后端唯一被**所有**消费者承认的寄存器所有权通道是绑定表
+// （`Codegen::reg_bindings`，由 `VarDecl::register_name` 驱动）：序言保存、表达式溅出
+// 池、内联汇编的寄存器规划、宽度口径、asm 输出写回，现在全都读同一张表 ——
+// docs/ssa-pass-upgrade-plan.md 的 §7.15 ~ §7.19 一条条闭合的就是这件事。
+//
+// 方案原文要求的字面形态（`ast::Ident` 携带寄存器号 + codegen 不再分配 + 真
+// SPILL/RELOAD）需要重写单遍发射模型（§7.3 记了三条硬约束），不属本方案范围；这里做
+// 的是它的**实质价值**：分配结果真的进入产物，并且可以用产物差异验证（§7.5 的教训）。
+//
+// # 为什么只做「整个生命期待在一个寄存器里」
+//
+// SSA→AST 重建会把同基名的多个版本塌缩回同一个可变量，读写的**先后**就是语义，所以分配
+// 粒度只能是变量（基名）。这也决定判定必须偏保守：活性区间取「该基名在 IR 里最早出现的
+// 位置 ~ 最晚出现的位置」，跨分支、跨回边一律按最坏情况算重叠。少绑一个变量只是少一点
+// 收益，多绑一个就是静默错值。
+//
+// # 准入条件（每一条都对应一个实测过的失败形态）
+//
+// 1. 只处理局部 `Decl::Var`，且类型是 1/2/4/8 字节的标量整数或指针。
+//    浮点要换 xmm 通道（后端没有为它准备的宽度口径），聚合/数组/向量本质是内存对象，
+//    `long double` 是 10 字节对象，`_Atomic` 与位域另有语义。
+// 2. 地址被取走过 ⇒ 不绑。判据复用 `ssa_gvn::addr_escaped_names`（§7.8），绝不自己
+//    再爬一遍 AST —— 两套逸出判据里弱的那一套会决定产物。
+// 3. 出现在任何内联汇编的操作数里 ⇒ 不绑。asm 输出写回虽然已经认识绑定表（§7.19），
+//    但 `"+r"`、`"=m"` 与「栈槽从此没人写」的组合还缺一整批实测，不把未验证的形态
+//    交给自动分配。
+// 4. 函数体里有嵌套函数 ⇒ 整个函数不绑：嵌套函数按帧偏移访问外层变量，而绑定变量的
+//    那个偏移没人写。
+// 5. `static` / `_Thread_local` / 纯 `extern` / `volatile` / `cleanup(...)` /
+//    `__asm__("label")` 过的变量不动；用户已经手写 `register asm` 的名字更不动
+//    （它占的那个号也从池子里扣掉）。
+// 6. 开着调试信息（`-g`）⇒ 整条 pass 不动：DWARF 的变量位置目前只会发栈槽，绑上去
+//    调试器会读一个从未写入的槽。这是显式记下的边界，不是遗漏 —— 要支持得发
+//    DWARF 寄存器位置。
+// 7. 名字在函数里被**重复声明且类型不同**（遮蔽）⇒ 不绑：后端按名字共用一个家。
+// 8. 基名的**第一次出现必须是 entry 块里的定义**。两个条件缺一不可：
+//    - 只看「先定义」会放过 `int x; if (c) x = 1; return x;` 这种「某条路径才初始化」
+//      的变量，未初始化的那条路径就会读到**调用者留在寄存器里的值**（-O0 读到的是栈
+//      垃圾）—— 同一个未定义行为在两个档位给出两个确定值，等价性门禁就变成抛硬币；
+//    - 形参也不行：它的值由 ABI 送进来，在 IR 里的第一次出现是使用而不是定义。
+//
+//    注意 `has_init` 不能当判据用：SSA→AST 重建会把 `for (long i = 0; ...)` 发成
+//    「先声明、后赋值」，实测重建后的 AST 里几乎所有局部都没有初始化式。
+//
+// # 可诊断
+//
+// `DCC_REGALLOC_DUMP=1` 打印每个函数绑了谁、绑到哪个号、以及每个被拒的名字和原因。
+// 理由与 §7.6 给流水线的 `DCC_PIPE_DUMP` 一样：准入是一串保守条件，「它没跑」和「它为
+// 什么没跑」在产物上长得一模一样，没有这个窗口就只能猜。
+
+use crate::ast::{Block, BlockItem, Decl, Expr, InitItem, Stmt, Type};
+use crate::ssa::{Function, Operand, Terminator};
+use std::collections::{HashMap, HashSet};
+
+/// 可分配的物理寄存器：x86_64 后端表达式溅出池里那四个 callee-saved 号。
+///
+/// 数组顺序就是分配优先级。为什么只有这四个：跨调用仍然活着的通用寄存器只有
+/// callee-saved，而 `r13` 是本后端的帧基址、`rbp`/`rsp` 是帧指针与栈指针。
+const POOL: [(&str, u8); 4] = [("rbx", 3), ("r12", 12), ("r14", 14), ("r15", 15)];
+
+/// `DCC_REGALLOC_DUMP=1` 时打印诊断（缓存一次，避免每条 pass 都读环境）。
+fn dump_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("DCC_REGALLOC_DUMP").as_deref() == Ok("1"))
+}
+
+/// 一个函数的分配结果。
+#[derive(Debug, Default, Clone)]
+pub struct Plan {
+    /// 变量基名 → 寄存器名（`register asm` 的写法，如 `"rbx"`）
+    pub bindings: Vec<(String, &'static str)>,
+    /// 被拒的名字与原因（只为 dump 与测试服务；顺序确定）
+    pub rejected: Vec<(String, &'static str)>,
+}
+
+impl Plan {
+    pub fn is_empty(&self) -> bool {
+        self.bindings.is_empty()
+    }
+}
+
+/// 用户手写的 `register asm` 用的是不是池子里的号（是则该号已被占用）。
+pub fn pooled_reg_of(asm_name: &str) -> Option<u8> {
+    let n = asm_name.trim_start_matches('%').to_ascii_lowercase();
+    POOL.iter()
+        .find(|(nm, _)| *nm == n)
+        .map(|(_, r)| *r)
+}
+
+/// 调用方需要的上下文。
+#[derive(Debug, Clone)]
+pub struct Ctx {
+    /// 本次编译要不要发调试信息（`-g*`）
+    pub debug_info: bool,
+    /// file-scope `register asm` 变量占住的号
+    pub taken_regs: HashSet<u8>,
+}
+
+/// 算出该绑哪些变量，并把结果写进**重建后的** AST（`VarDecl::register_name`）。
+///
+/// `judge_on` 是**重建前**的函数体，`body` 是重建后的：判据必须看前者。实测
+/// （`tests::nested_function_is_detected_from_the_original_body`）重建后的函数体里
+/// 已经没有嵌套函数的 `Decl::Func`（它被前面的降低步骤搬走了），只在重建后的体上找
+/// 就会漏掉「外层变量被嵌套函数按帧偏移访问」这一整类，而那一类绑上去是静默错值。
+/// 两边都扫，判据取并集（保守），落地只写进 `body`。
+pub fn assign(func: &Function, judge_on: &Block, body: &mut Block, ctx: &Ctx) -> Plan {
+    let plan = plan_for(func, judge_on, body, ctx);
+    if !plan.bindings.is_empty() {
+        apply_bindings(body, &plan);
+    }
+    if dump_on() {
+        eprint!("[regalloc] {}\n", func.name);
+        for (n, r) in &plan.bindings {
+            eprint!("  bind {n} -> %{r}\n");
+        }
+        for (n, why) in &plan.rejected {
+            eprint!("  skip {n}: {why}\n");
+        }
+    }
+    plan
+}
+
+// ---------------------------------------------------------------------------
+// 规划
+// ---------------------------------------------------------------------------
+
+/// 变量的静态信息（一次 AST 遍历收齐）。
+struct VarInfo {
+    ty: Type,
+    bindable_ty: bool,
+    plain_local: bool,
+    user_bound: bool,
+}
+
+struct Cand {
+    name: String,
+    first: i32,
+    last: i32,
+    accesses: usize,
+}
+
+fn plan_for(func: &Function, judge_on: &Block, body: &Block, ctx: &Ctx) -> Plan {
+    let mut plan = Plan::default();
+    if ctx.debug_info {
+        return plan;
+    }
+    let mut sc = Scan::default();
+    scan_block(judge_on, &mut sc);
+    scan_block(body, &mut sc);
+    let mut escaped = crate::ssa_gvn::addr_escaped_names(judge_on);
+    escaped.extend(crate::ssa_gvn::addr_escaped_names(body));
+    // 用户手写的 `register asm`（局部或 file-scope）占住的号一律让开。光把那个名字
+    // 记进 rejected 是不够的：后端照样会把同一个号给变量，两个变量共享一个寄存器
+    // 就是静默错值 —— 这条是 `tests::user_bound_local_reserves_its_register` 逼出来的。
+    let mut taken = ctx.taken_regs.clone();
+    taken.extend(sc.user_bound_regs.iter().copied());
+    let infos = &sc.infos;
+    let spans = base_spans(func);
+
+    // 候选者必须按**完全确定**的顺序处理：候选集来自 HashMap，排序键取
+    // 「访问次数降序 → 区间起点升序 → 名字升序」，寄存器按 POOL 顺序取第一个不冲突的。
+    let mut cands: Vec<Cand> = Vec::new();
+    let mut names: Vec<&String> = infos.keys().collect();
+    names.sort();
+    for name in names {
+        let info = &infos[name];
+        // 判据先算，**再**看 IR 里有没有这个基名：顺序反了会让「IR 里根本没出现过」
+        // 的名字（典型是被取址的变量、以及 volatile 读写被降级成 `_tnload_*` 临时值的
+        // 变量）既不进 bindings 也不进 rejected，等于凭空消失 —— dump 与测试都看不见它
+        // 为什么没被绑，而这正是本 pass 唯一可诊断的入口。
+        // 候选者必须是**用户声明的局部**（`original_locals`）。不加这条的话，重建
+        // 出来的编译器临时值（`_tbin_*`、`_tcall_*` 之类）也会被当成变量去绑 ——
+        // 实测 `seg_qualifier.c` 的 main 一度把四个临时值全绑走了：既挤掉了真正的热
+        // 变量，又把「合成临时值」这条后端专门有约定（`is_synthetic_temp_base`，见
+        // §7 的第 5 轮补记）的名字推进了绑定表。
+        let why: Option<&'static str> = if !func.original_locals.contains(name) {
+            Some("not-a-user-local")
+        } else if sc.has_nested_fn {
+            Some("nested-function-in-scope")
+        } else if !info.bindable_ty {
+            Some("type-not-bindable")
+        } else if !info.plain_local {
+            Some("static/tls/extern/volatile/atomic/cleanup/asm-label")
+        } else if info.user_bound {
+            Some("already-register-asm")
+        } else if sc.shadowed.contains(name) {
+            Some("shadowed-with-different-type")
+        } else if escaped.contains(name) {
+            Some("address-escaped")
+        } else if sc.asm_names.contains(name) {
+            Some("inline-asm-operand")
+        } else {
+            match spans.get(name) {
+                // IR 里没有这个基名的任何读写：没有生命期可言，也就无从判断
+                // 「定义是否在 entry 块」，一律不绑。
+                None => Some("no-ir-presence"),
+                Some(sp) if !sp.entry_def => Some("not-defined-in-entry-block"),
+                Some(_) => None,
+            }
+        };
+        match why {
+            Some(w) => plan.rejected.push((name.clone(), w)),
+            None => {
+                let sp = &spans[name];
+                cands.push(Cand {
+                    name: name.clone(),
+                    first: sp.first,
+                    last: sp.last,
+                    accesses: sp.defs + sp.uses,
+                });
+            },
+        }
+    }
+    cands.sort_by(|a, b| {
+        b.accesses
+            .cmp(&a.accesses)
+            .then(a.first.cmp(&b.first))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    // 一个号只发给一个变量，绝不复用。
+    //
+    // 为什么不能按「区间不相交就共用号」（我第一版就是这么写的，实测两处错值）：
+    // 后端的绑定表是**函数级**的 `名字 -> 号`（`Codegen::reg_bindings`），读写路径
+    // 每次都查同一张表，中间没有任何「重新绑到别的号」的时机。两个名字指向同一个号
+    // 就是同一个家被两人写，跟它们的 IR 区间是否重叠无关。实测形态：
+    //   char16_t c16 = 'A'; char32_t c32 = U'B'; if (c16 != 65) ...
+    //   SCCP 把比较折掉之后 `c16` 在 IR 里只剩定义那一个位置，区间退化成点，
+    //   于是被判成「与 c32 不相交」而共用 %rbx —— -O2 下 rc=3（gcc 是 0）。
+    // 结论：这个后端的架构决定了分配粒度是「整个函数」，区间只用来排序与选择，
+    // 不用来共用寄存器。
+    let mut used_slots: Vec<usize> = Vec::new();
+    for c in &cands {
+        match POOL
+            .iter()
+            .enumerate()
+            .find(|(i, (_, rv))| !taken.contains(rv) && !used_slots.contains(i))
+        {
+            Some((i, _)) => {
+                used_slots.push(i);
+                plan.bindings.push((c.name.clone(), POOL[i].0));
+            },
+            None => plan
+                .rejected
+                .push((c.name.clone(), "no-free-callee-saved-register")),
+        }
+    }
+    plan
+}
+
+// ---------------------------------------------------------------------------
+// AST 遍历：变量声明、asm 操作数、嵌套函数
+// ---------------------------------------------------------------------------
+
+/// 该类型能不能绑进 GP 寄存器（见文件头准入条件 1）。
+///
+/// 只放**平台标准整型与指针**：`char/short/int/long/long long` 及其无符号形态，加上
+/// 指针。以下都不交给自动分配，理由不是「怕麻烦」而是**后端对它们另有通路**，而
+/// 绑定路径只保证与栈槽路径共用 `var_access_shape` 那一条口径：
+///   * `char8_t/char16_t/char32_t`、`_Bool`：字符/布尔宽度另有约定，实测夹具
+///     `char16_char32.c` 就是这条 pass 的第一版在这里做出错值的（另一个原因是同号
+///     复用，见 `plan_for`）；
+///   * 浮点（含 `long double`）、复数、向量：值在 xmm/x87 上；
+///   * 数组、结构体、联合体：它们本身就是内存对象；
+///   * `_Atomic`：原子访问必须留在内存对象上。
+/// 收窄的代价是少绑几个变量，放宽的代价是静默错值 —— 这个方向上不能含糊。
+fn bindable_ty(t: &Type) -> bool {
+    match t {
+        // 指针可以绑（就是一个 8 字节槽）；`Func` 类型与 `_Atomic` 不绑：前者是函数
+        // 设计算器语义的载体，后者的读写必须留在内存对象上。
+        Type::Func(..) | Type::Atomic(_) => false,
+        other => {
+            let ok = matches!(
+                other,
+                Type::Char
+                    | Type::SChar
+                    | Type::UChar
+                    | Type::Short
+                    | Type::UShort
+                    | Type::Int
+                    | Type::UInt
+                    | Type::Long
+                    | Type::ULong
+                    | Type::LongLong
+                    | Type::ULongLong
+            );
+            ok && other.size() <= 8
+        },
+    }
+}
+
+/// 一次 AST 遍历收集的四样东西（都是「能不能绑」的判据）。
+#[derive(Default)]
+struct Scan {
+    /// 变量基名 → 静态信息
+    infos: HashMap<String, VarInfo>,
+    /// 同名但类型不同的名字（遮蔽）
+    shadowed: HashSet<String>,
+    /// 出现在内联汇编操作数里的根对象名
+    asm_names: HashSet<String>,
+    /// 函数体里有没有嵌套函数
+    has_nested_fn: bool,
+    /// 用户手写 `register asm` 占住的、属于本 pass 池子的号
+    user_bound_regs: HashSet<u8>,
+}
+
+fn scan_block(b: &Block, sc: &mut Scan) {
+    for item in &b.items {
+        match item {
+            BlockItem::Decl(Decl::Var(v)) => {
+                let plain_local = !v.is_static
+                    && !v.is_thread_local
+                    && !(v.is_extern && v.init.is_none())
+                    && !v.quals.is_volatile()
+                    && v.cleanup_fn.is_none()
+                    && v.asm_label.is_none()
+                    && v.alias_name.is_none()
+                    // 段前缀变量（`__seg_gs` / `__seg_fs`，Linux per-cpu 与 TLS）的
+                    // 读写走的是「段基址 + 帧偏移」这条完全独立的路径；一旦绑到寄存器，
+                    // 读写两边就会一个走寄存器、一个走段内存。实测 `seg_qualifier.c`
+                    // 在 -O2 下 rc 从 37 变 67。
+                    && v.addr_space == crate::ast::AddrSpace::None
+                    && v.tls_model.is_none()
+                    && !matches!(v.ty, Type::Atomic(_));
+                let fresh = VarInfo {
+                    ty: v.ty.clone(),
+                    bindable_ty: bindable_ty(&v.ty),
+                    plain_local,
+                    user_bound: v.register_name.is_some(),
+                };
+                let name = v.name.name.clone();
+                match sc.infos.get_mut(&name) {
+                    // 同名重复声明：类型不同就是遮蔽，后端只会给它一个家。
+                    Some(prev) => {
+                        if prev.ty != fresh.ty {
+                            sc.shadowed.insert(name);
+                        }
+                        prev.plain_local &= fresh.plain_local;
+                        prev.user_bound |= fresh.user_bound;
+                        prev.bindable_ty &= fresh.bindable_ty;
+                    },
+                    None => {
+                        sc.infos.insert(name, fresh);
+                    },
+                }
+                if let Some(rn) = &v.register_name {
+                    if let Some(r) = pooled_reg_of(rn) {
+                        sc.user_bound_regs.insert(r);
+                    }
+                }
+                if let Some(e) = &v.init {
+                    scan_expr(e, sc);
+                }
+            },
+            BlockItem::Decl(Decl::Func(f)) => {
+                if f.body.is_some() {
+                    sc.has_nested_fn = true;
+                }
+            },
+            BlockItem::Stmt(s) => scan_stmt(s, sc),
+            _ => {},
+        }
+    }
+}
+
+fn scan_stmt(s: &Stmt, sc: &mut Scan) {
+    match s {
+        Stmt::Block { b, .. } => scan_block(b, sc),
+        Stmt::Expr { e, .. } => scan_expr(e, sc),
+        Stmt::Return { val, .. } => {
+            if let Some(e) = val {
+                scan_expr(e, sc);
+            }
+        },
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
+            scan_expr(cond, sc);
+            scan_stmt(then_, sc);
+            if let Some(x) = else_ {
+                scan_stmt(x, sc);
+            }
+        },
+        Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
+            scan_expr(cond, sc);
+            scan_stmt(body, sc);
+        },
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
+            if let Some(i) = init {
+                scan_stmt(i, sc);
+            }
+            if let Some(c) = cond {
+                scan_expr(c, sc);
+            }
+            if let Some(st) = step {
+                scan_expr(st, sc);
+            }
+            scan_stmt(body, sc);
+        },
+        Stmt::Switch { expr, cases, .. } => {
+            scan_expr(expr, sc);
+            for c in cases {
+                scan_block(&c.body, sc);
+            }
+        },
+        Stmt::Label { stmt: inner, .. } => scan_stmt(inner, sc),
+        Stmt::GotoIndirect { expr, .. } => scan_expr(expr, sc),
+        Stmt::AsmGoto {
+            outputs, inputs, ..
+        } => {
+            for o in outputs.iter().chain(inputs.iter()) {
+                collect_asm_operand(o, &mut sc.asm_names);
+            }
+        },
+        Stmt::Invoke { call, .. } => scan_stmt(call, sc),
+        Stmt::EhLandingPad { object, selector, .. } => {
+            scan_expr(object, sc);
+            scan_expr(selector, sc);
+        },
+        Stmt::Goto { .. } | Stmt::Break { .. } | Stmt::Continue { .. }
+        | Stmt::Fallthrough { .. } => {},
+    }
+}
+
+/// 递归走完表达式。刻意不留宽松的 `_ => {}`：新增 `Expr` 变体会直接编不过，而不是
+/// 静默漏收一个名字 —— 漏收的代价是「本该被否决的变量被绑进寄存器」，那是静默错值。
+fn scan_expr(e: &Expr, sc: &mut Scan) {
+    match e {
+        Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::ComplexLit { .. }
+        | Expr::ComplexIntLit { .. }
+        | Expr::String { .. }
+        | Expr::Char { .. }
+        | Expr::SizeofTy { .. }
+        | Expr::AlignofTy { .. }
+        | Expr::Offsetof { .. }
+        | Expr::LabelAddr { .. }
+        | Expr::Ident { .. } => {},
+        Expr::Unary { e: x, .. }
+        | Expr::Cast { e: x, .. }
+        | Expr::AddrOf { e: x, .. }
+        | Expr::Deref { e: x, .. }
+        | Expr::Real { e: x, .. }
+        | Expr::Imag { e: x, .. }
+        | Expr::SizeofExpr { e: x, .. }
+        | Expr::AlignofExpr { e: x, .. }
+        | Expr::PostInc { e: x, .. }
+        | Expr::PostDec { e: x, .. }
+        | Expr::PreInc { e: x, .. }
+        | Expr::PreDec { e: x, .. } => scan_expr(x, sc),
+        Expr::Member { expr: x, .. } => scan_expr(x, sc),
+        Expr::Binop { l, r, .. }
+        | Expr::Assign { l, r, .. }
+        | Expr::Comma { l, r, .. }
+        | Expr::Index { arr: l, idx: r, .. } => {
+            scan_expr(l, sc);
+            scan_expr(r, sc);
+        },
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
+            scan_expr(cond, sc);
+            scan_expr(then_, sc);
+            scan_expr(else_, sc);
+        },
+        Expr::Call { callee, args, .. } => {
+            scan_expr(callee, sc);
+            for a in args {
+                scan_expr(a, sc);
+            }
+        },
+        // 语句表达式里的声明属于内层作用域：它与外层同名而类型不同就是遮蔽。
+        Expr::StmtExpr { block, .. } => scan_block(block, sc),
+        Expr::CompoundLit { inits, .. } | Expr::InitList { inits, .. } => {
+            for it in inits {
+                match it {
+                    InitItem::Expr(x) => scan_expr(x, sc),
+                    InitItem::Designated { value, .. } => scan_expr(value, sc),
+                }
+            }
+        },
+        Expr::VaArg { ap, .. } => scan_expr(ap, sc),
+        Expr::AsmExpr {
+            outputs, inputs, ..
+        } => {
+            for o in outputs.iter().chain(inputs.iter()) {
+                collect_asm_operand(o, &mut sc.asm_names);
+            }
+        },
+    }
+}
+
+/// 一个 asm 操作数表达式的根对象名（`x`、`x[i]`、`p->f`、`(*p).f` 都算 `x`/`p`）。
+fn collect_asm_operand(e: &Expr, out: &mut HashSet<String>) {
+    if let Some(root) = ident_root_name(e) {
+        out.insert(root);
+    }
+}
+
+fn ident_root_name(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Ident { name, .. } => Some(name.name.clone()),
+        Expr::Member { expr, .. } | Expr::Cast { e: expr, .. } => ident_root_name(expr),
+        Expr::Index { arr, .. } => ident_root_name(arr),
+        Expr::Deref { e, .. } => ident_root_name(e),
+        _ => None,
+    }
+}
+
+/// 把分配结果写进 AST。只碰 `register_name` 仍为空的声明（用户写死的优先）。
+fn apply_bindings(b: &mut Block, plan: &Plan) {
+    let map: HashMap<&str, &str> = plan
+        .bindings
+        .iter()
+        .map(|(n, r)| (n.as_str(), *r))
+        .collect();
+    fn stmt(s: &mut Stmt, map: &HashMap<&str, &str>) {
+        match s {
+            Stmt::Block { b, .. } => walk(b, map),
+            Stmt::If { then_, else_, .. } => {
+                stmt(then_, map);
+                if let Some(e) = else_ {
+                    stmt(e, map);
+                }
+            },
+            Stmt::While { body, .. } | Stmt::Do { body, .. } => stmt(body, map),
+            Stmt::For {
+                init, body, ..
+            } => {
+                if let Some(i) = init {
+                    stmt(i, map);
+                }
+                stmt(body, map);
+            },
+            Stmt::Switch { cases, .. } => {
+                for c in cases {
+                    walk(&mut c.body, map);
+                }
+            },
+            Stmt::Label { stmt: inner, .. } => stmt(inner, map),
+            Stmt::Invoke { call, .. } => stmt(call, map),
+            _ => {},
+        }
+    }
+    fn walk(b: &mut Block, map: &HashMap<&str, &str>) {
+        for item in &mut b.items {
+            match item {
+                BlockItem::Decl(Decl::Var(v)) => {
+                    if let Some(r) = map.get(v.name.name.as_str()) {
+                        if v.register_name.is_none() {
+                            v.register_name = Some((*r).to_string());
+                        }
+                    }
+                },
+                BlockItem::Stmt(s) => stmt(s, map),
+                _ => {},
+            }
+        }
+    }
+    walk(b, &map);
+}
+
+// ---------------------------------------------------------------------------
+// IR 侧的基名活性区间
+// ---------------------------------------------------------------------------
+
+struct Span {
+    first: i32,
+    last: i32,
+    /// 最早那次出现是定义，**且**这个定义落在 entry 块里。
+    ///
+    /// 判据是「最早那次出现是定义，**且该定义属于 entry 块**」。
+    ///
+    /// 为什么要带上块身份（实测踩过）：`long s(int c){long x;if(c)x=1;else x=2;return x;}`
+    /// 里 `x` 的区间是 `[1,5]`，而 entry 块的指令数也刚好让「位置 ≤ entry 末尾」成立 ——
+    /// 用位置数值当界会差一个边界就把分支里的定义算进 entry，把「只在某条路径初始化」
+    /// 的变量绑走；那条未初始化路径读到的就是**调用者留在寄存器里的值**（-O0 读到栈
+    /// 垃圾），同一个未定义行为在两个档位各给一个确定值。块身份没有这个歧义。
+    entry_def: bool,
+    defs: usize,
+    uses: usize,
+}
+
+/// 每个基名在 IR 里的 `[最早, 最晚]` 出现位置与定义/使用计数。
+///
+/// 位置按 `block_order` 顺序对 phi 槽、指令、terminator 递增编号。用途有两个：判
+/// 「第一次出现是不是 entry 块里的定义」，以及给候选者排序（访问次数、区间起点）。
+/// **不**用来判断两个变量能否共用一个号 —— 那件事在这个后端没有意义，见 `plan_for`。
+fn base_spans(func: &Function) -> HashMap<String, Span> {
+    let mut out: HashMap<String, Span> = HashMap::new();
+    let mut pos: i32 = 0;
+    for bname in &func.block_order {
+        let Some(bb) = func.blocks.get(bname) else {
+            continue;
+        };
+        let in_entry = bname == &func.entry;
+        for phi in &bb.phis {
+            // phi 的 dest 是本块的定义，incoming 是前驱末尾的使用：位置若相同，
+            // 必须记成「最早出现是使用」，否则会把「读旧值」当成已初始化。
+            note(&mut out, &phi.dest.base, pos, true, in_entry);
+            for (src, _) in &phi.incoming {
+                note(&mut out, &src.base, pos, false, false);
+            }
+            pos += 1;
+        }
+        for inst in &bb.insts {
+            for op in crate::ssa::kind_operand_ssa_vars(&inst.kind) {
+                note(&mut out, &op.base, pos, false, in_entry);
+            }
+            if let Some(d) = &inst.dest {
+                note(&mut out, &d.base, pos, true, in_entry);
+            }
+            pos += 1;
+        }
+        note_term(&bb.term, pos, &mut out);
+        pos += 1;
+    }
+    out
+}
+
+fn note(m: &mut HashMap<String, Span>, name: &str, at: i32, is_def: bool, in_entry: bool) {
+    if let Some(e) = m.get_mut(name) {
+        if at < e.first {
+            e.first = at;
+            e.entry_def = is_def && in_entry;
+        } else if at == e.first {
+            // 同一位置上既有定义又有使用 ⇒ 不能算「先定义」
+            e.entry_def &= is_def && in_entry;
+        }
+        if at > e.last {
+            e.last = at;
+        }
+        if is_def {
+            e.defs += 1;
+        } else {
+            e.uses += 1;
+        }
+        return;
+    }
+    m.insert(
+        name.to_string(),
+        Span {
+            first: at,
+            last: at,
+            defs: if is_def { 1 } else { 0 },
+            uses: if is_def { 0 } else { 1 },
+            entry_def: is_def && in_entry,
+        },
+    );
+}
+
+fn note_term(t: &Terminator, at: i32, out: &mut HashMap<String, Span>) {
+    let mut use_op = |o: &Operand| match o {
+        Operand::Var(v) => note(out, &v.base, at, false, false),
+        Operand::Phi(pairs) => {
+            for (v, _) in pairs {
+                note(out, &v.base, at, false, false);
+            }
+        },
+        _ => {},
+    };
+    match t {
+        Terminator::Ret { val: Some(o) } => use_op(o),
+        Terminator::Ret { val: None } | Terminator::Jump(_) | Terminator::Unreachable => {},
+        Terminator::Branch { cond, .. } => use_op(cond),
+        Terminator::SwitchTable { idx, .. } => use_op(idx),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 走完「AST → SSA → 优化 → 重建 → 分配」，与 `opt::run_ssa_passes` 的接线一致。
+    ///
+    /// 四个返回值都要：`Function` 用来独立复核活性区间（不能只信分配器的话），
+    /// 重建前的体是判据输入、重建后的体用来验证结果真的写进了 AST，`Plan` 是被测对象。
+    fn run_pipeline(
+        src: &str,
+        fname: &str,
+        level: u8,
+        ctx: &Ctx,
+    ) -> (Function, Block, Block, Plan) {
+        let (prog, _d) = crate::parser::parse(src.as_bytes(), "t.c");
+        let (m, _w) = crate::ir::lower(prog).unwrap();
+        let f = m
+            .source()
+            .decls
+            .iter()
+            .find_map(|d| match d {
+                crate::ast::Decl::Func(f) if f.name.name == fname => Some(f.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("源里没有函数 {fname}"));
+        let mut ssa = crate::ssa::build_from_func(&f).unwrap_or_else(|| {
+            panic!("{fname} 应能 SSA 化（否则这条测试测不到分配）")
+        });
+        crate::ssa_passes::run_with_opts(&mut ssa, level, true);
+        let orig = f.body.clone().expect("被测函数必须有体");
+        let mut body = crate::ssa::rebuild_block(&ssa);
+        let plan = assign(&ssa, &orig, &mut body, ctx);
+        (ssa, orig, body, plan)
+    }
+
+    fn ctx_default() -> Ctx {
+        Ctx { debug_info: false, taken_regs: HashSet::new() }
+    }
+
+    fn bound_names(plan: &Plan) -> Vec<String> {
+        plan.bindings.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    fn reg_of<'a>(plan: &'a Plan, name: &str) -> Option<&'a str> {
+        plan.bindings
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, r)| *r)
+    }
+
+    fn reason_of<'a>(plan: &'a Plan, name: &str) -> Option<&'a str> {
+        plan.rejected
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, w)| *w)
+    }
+
+    /// 热循环里的累加器与归纳变量都该住进寄存器，而且**必须真的落到 AST 上**
+    /// （重建后的 `Decl::Var` 带上了 `register_name`），否则后端根本看不到分配结果。
+    #[test]
+    fn hot_loop_locals_move_into_registers_and_into_the_ast() {
+        let src = "long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i;return acc;}\n";
+        let (_, _, body, plan) = run_pipeline(src, "s", 2, &ctx_default());
+        assert!(
+            bound_names(&plan).contains(&"acc".to_string())
+                && bound_names(&plan).contains(&"i".to_string()),
+            "累加器与归纳变量都应被绑，实际绑定 {:?}、拒绝 {:?}",
+            plan.bindings,
+            plan.rejected
+        );
+        assert_ne!(
+            reg_of(&plan, "acc"),
+            reg_of(&plan, "i"),
+            "同时活着的两个变量不得共用一个寄存器"
+        );
+        // AST 侧必须看得到
+        let mut seen = 0;
+        for item in &body.items {
+            if let BlockItem::Decl(crate::ast::Decl::Var(v)) = item {
+                if v.register_name.is_some() {
+                    seen += 1;
+                }
+            }
+        }
+        assert!(
+            seen >= 2,
+            "分配结果必须写进重建后的 AST（带 register_name 的声明数 = {seen}）"
+        );
+    }
+
+    /// 同一个名字连续跑两次必须给出**逐字相同**的结果：候选集来自 HashMap，
+    /// 只要排序里漏一个键，产物就会随哈希种子漂移（可复现性门禁会红）。
+    #[test]
+    fn plan_is_deterministic() {
+        let src = "long s(long n){long a=1;long b=2;long c=n+3;return a*2+b*4+c*8;}\n";
+        let (_, _, _, p1) = run_pipeline(src, "s", 2, &ctx_default());
+        for _ in 0..8 {
+            let (_, _, _, p2) = run_pipeline(src, "s", 2, &ctx_default());
+            assert_eq!(p1.bindings, p2.bindings, "绑定结果不稳定");
+            assert_eq!(p1.rejected, p2.rejected, "拒绝名单不稳定");
+        }
+    }
+
+    /// 地址被取走过的变量一律不绑（后端会把它退回内存，绑了就是旧值）。
+    #[test]
+    fn address_escaped_variable_is_not_bound() {
+        let src = "long s(long n){long a=0;long*p=&a;for(long i=0;i<n;i++)a+=i;return *p;}\n";
+        let (_, _, _, plan) = run_pipeline(src, "s", 2, &ctx_default());
+        assert_eq!(
+            reg_of(&plan, "a"),
+            None,
+            "被取址的变量绝不能绑：它必须留在内存里，实际 {:?}",
+            plan.bindings
+        );
+        assert_eq!(reason_of(&plan, "a"), Some("address-escaped"));
+    }
+
+    /// 出现在内联汇编操作数里的变量一律不绑：`"+r"`/`"=m"` 与「栈槽不再被写」
+    /// 的组合还缺一整批实测，不交给自动分配。
+    #[test]
+    fn inline_asm_operand_is_not_bound() {
+        let src = "long s(long n){long out=0;__asm__ volatile(\"addq $1, %0\" : \"+r\"(out));out+=n;return out;}\n";
+        let (_, _, _, plan) = run_pipeline(src, "s", 2, &ctx_default());
+        assert_eq!(reason_of(&plan, "out"), Some("inline-asm-operand"));
+    }
+
+    /// 类型/存储期/限定符各挡一条：volatile、static、浮点、数组、结构体、_Atomic。
+    #[test]
+    fn wrong_kind_variables_are_not_bound() {
+        let src = "long s(long n){volatile long v=1;static long st=2;double d=3.0;long arr[2]={4,5};struct P{long x;} p={6};_Atomic long at=7;return v+st+(long)d+arr[0]+p.x+at+n;}\n";
+        let (_, _, _, plan) = run_pipeline(src, "s", 2, &ctx_default());
+        // 每个都断言两条：既没被绑，又有一个**具体**的拒绝原因（原因可能是
+        // 「类型不行 / 不是普通局部 / IR 里没它」，都成立即安全）。
+        for name in ["v", "st", "d", "arr", "p", "at"] {
+            assert_eq!(
+                reg_of(&plan, name),
+                None,
+                "{name} 不该被绑，实际 {:?}",
+                plan.bindings
+            );
+            assert!(
+                reason_of(&plan, name).is_some(),
+                "{name} 应有一个可诊断的拒绝原因（dump 里看得见才叫可诊断）"
+            );
+        }
+    }
+
+    /// 一个号只发给一个变量 —— 后端没有「中途换家」的能力。
+    ///
+    /// 这条是被实测打脸后收紧的。第一版按「IR 区间不相交就可以共用号」实现，
+    /// `tests/fixtures/c/char16_char32.c` 立刻错值（-O2 rc=3，gcc 与 -O0 是 0）：
+    /// 两个变量的比较被 SCCP 折掉之后，它们在 IR 里的区间退化成定义那一个点，
+    /// 于是被判成互不相交而共用 %rbx —— 可绑定表是**函数级**的 `名字 -> 号`，
+    /// 两个名字同号就是同一个家被两个人写，跟区间重叠与否无关。
+    ///
+    /// 形状换成「循环里三个各自被折掉一部分使用的累加器」：这条会真的绑到 >= 2 个
+    /// 变量（`tests::only_folded_locals_have_no_ir_presence` 记录的是另一半事实 ——
+    /// 全被折掉的名字连候选者都不是，所以那条不能拿来测复用）。
+    #[test]
+    fn each_register_goes_to_exactly_one_variable() {
+        let src = "long s(long n){long a=0;long b=1;long c=2;for(long i=0;i<n;i++){a+=i;b+=a;c+=b;}return a+b+c;}\n";
+        let (_, _, _, plan) = run_pipeline(src, "s", 2, &ctx_default());
+        assert!(
+            plan.bindings.len() >= 2,
+            "这条样例本就该同时绑到两个变量（否则本测试是空判）：绑定 {:?}，拒绝 {:?}",
+            plan.bindings,
+            plan.rejected
+        );
+        let regs: Vec<&str> = plan.bindings.iter().map(|(_, r)| *r).collect();
+        let uniq: std::collections::HashSet<&str> = regs.iter().copied().collect();
+        assert_eq!(
+            regs.len(),
+            uniq.len(),
+            "同一个号被发给了两个变量（后端没有中途换家的能力）：{:?}",
+            plan.bindings
+        );
+        assert!(
+            regs.len() <= POOL.len(),
+            "绑定的变量数不可能超过池子大小：{:?}",
+            plan.bindings
+        );
+    }
+
+    /// 被常量折叠彻底拿掉使用的局部，在 IR 里连一次出现都没有 ⇒ 一律不绑。
+    ///
+    /// 这条不是「保守得没意义」，而是把上一条测试说不到的那一半说清楚：
+    /// `long a=65; if(a!=65) return 3;` 经过 SCCP 之后在 IR 里**没有任何**痕迹，
+    /// 于是它连候选者都不是（`no-ir-presence`）。第一版正是在这种名字上判成
+    /// 「区间退化成点 ⇒ 与别人不相交」而共用了 %rbx。
+    #[test]
+    fn fully_folded_locals_have_no_ir_presence() {
+        let src = "long s(void){long a=65;long b=66;if(a!=65)return 3;if(b!=66)return 4;return 0;}\n";
+        let (_, _, _, plan) = run_pipeline(src, "s", 2, &ctx_default());
+        assert!(plan.bindings.is_empty(), "全被折掉的名字不该被绑：{:?}", plan.bindings);
+        assert_eq!(reason_of(&plan, "a"), Some("no-ir-presence"));
+        assert_eq!(reason_of(&plan, "b"), Some("no-ir-presence"));
+    }
+
+    /// 形参不绑：它在 IR 里的第一次出现是使用（值由 ABI 送进来），绑上就等于把
+    /// 调用者留在寄存器里的值当成初始值。
+    #[test]
+    fn parameter_is_not_bound() {
+        let src = "long s(long n){long m=n*2;return m+1;}\n";
+        let (_, _, _, plan) = run_pipeline(src, "s", 2, &ctx_default());
+        // 形参不在 `Decl::Var` 里，所以它连候选者都不是：断言「没被绑」这条性质。
+        assert_eq!(reg_of(&plan, "n"), None, "形参绝不能绑：它的值由 ABI 送进来");
+        assert_eq!(reason_of(&plan, "m"), None, "函数里定义的 m 应当可以被绑");
+    }
+
+    /// 「只在某条路径上赋值」的变量一律不绑。这一条守的是等价性门禁：不这么限
+    /// 的话，未初始化那条路径在 -O0 读到栈垃圾、在 -O2 读到**调用者留下的寄存器值**，
+    /// 同一个未定义行为给出两个确定值。
+    #[test]
+    fn conditionally_initialized_variable_is_not_bound() {
+        let src = "long s(int c){long x;if(c)x=1;else x=2;return x;}\n";
+        let (_, _, _, plan) = run_pipeline(src, "s", 2, &ctx_default());
+        assert_eq!(
+            reason_of(&plan, "x"),
+            Some("not-defined-in-entry-block"),
+            "绑定表 {:?}",
+            plan.bindings
+        );
+    }
+
+    /// 有嵌套函数的函数整体不绑：嵌套函数按帧偏移访问外层变量，而绑定变量的那个
+    /// 偏移没人写。
+    #[test]
+    fn function_with_nested_function_is_untouched() {
+        let src = "long s(long n){long acc=n;long inner(void){return acc;}return inner()+acc;}\n";
+        let (_, _, _, plan) = run_pipeline(src, "s", 2, &ctx_default());
+        assert!(
+            plan.bindings.is_empty(),
+            "含嵌套函数的整条 pass 都不该绑，实际 {:?}",
+            plan.bindings
+        );
+    }
+
+    /// 用户手写的 `register asm` 优先，且它占的号不能被自动分配再发一次。
+    #[test]
+    fn user_binding_wins_and_its_register_is_reserved() {
+        let src = "long s(long n){register long v asm(\"rbx\");v=n+1;long w=v*2;long z=w+n;return z+v;}\n";
+        let (_, _, _, plan) = run_pipeline(src, "s", 2, &ctx_default());
+        assert_eq!(reason_of(&plan, "v"), Some("already-register-asm"));
+        assert_ne!(
+            reg_of(&plan, "w"),
+            Some("rbx"),
+            "%rbx 已被用户手写的绑定占住，自动分配不能再发给 w：{:?}",
+            plan.bindings
+        );
+        assert_ne!(
+            reg_of(&plan, "z"),
+            Some("rbx"),
+            "%rbx 已被用户占住，任何自动分配都不能用它：{:?}",
+            plan.bindings
+        );
+    }
+
+    /// file-scope 的 `register asm` 占住的号同样要让开（后端每个函数都会重新灌进表）。
+    #[test]
+    fn file_scope_taken_register_is_not_reused() {
+        let src = "long s(long n){long a=n+1;long b=a*2;long c=b+3;long d=c*4;long e=d+5;long f2=e*6;return f2+d;}\n";
+        let mut ctx = ctx_default();
+        ctx.taken_regs.insert(3u8); // %rbx
+        let (_, _, _, plan) = run_pipeline(src, "s", 2, &ctx);
+        for (n, r) in &plan.bindings {
+            assert_ne!(*r, "rbx", "{n} 不得使用被 file-scope 占住的 %rbx");
+        }
+    }
+
+    /// `-g` 时整条 pass 不动：DWARF 目前只会发栈槽位置，绑上去调试器读的是没人写
+    /// 的槽。这是显式边界，不是遗漏。
+    #[test]
+    fn debug_info_disables_the_pass() {
+        let src = "long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i;return acc;}\n";
+        let mut ctx = ctx_default();
+        ctx.debug_info = true;
+        let (_, _, _, plan) = run_pipeline(src, "s", 2, &ctx);
+        assert!(plan.bindings.is_empty(), "-g 时不得有任何绑定：{:?}", plan.bindings);
+    }
+
+    /// `DCC_OPT_SKIP=ssa_regalloc` 关掉的是调用点，这里验证 pass 自己也能整体退回：
+    /// 不含可绑变量的函数必须一条都不报（防止把「没得绑」实现成「绑了但后端忽略」）。
+    #[test]
+    fn nothing_bindable_yields_empty_plan() {
+        let src = "long s(long n){return n*2+1;}\n";
+        let (_, _, _, plan) = run_pipeline(src, "s", 2, &ctx_default());
+        assert!(plan.bindings.is_empty(), "{:?}", plan.bindings);
+    }
+
+}

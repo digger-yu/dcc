@@ -197,3 +197,64 @@ fn ssa_pipe_default_on_changes_the_product() {
         "默认路径的 -O2 产物必须因流水而不同；与 DCC_SSA_OFF=pipe 逐字节相同 ⇒ 本 pass 空转"
     );
 }
+
+// ===== P12：SSA 层寄存器分配 =====
+//
+// `ssa_regalloc` 把热变量灌进后端既有的绑定表（`VarDecl::register_name`）。分配器
+// 自己的判据由 src/ssa_regalloc.rs 的 13 条单测钉住；这里钉的是另外两件事：
+// 判据在真实管线里成立（执行级夹具），以及**结果真的到达了产物**（§7.5 的教训：
+// pass 接在管线里但产物逐字节相同，说明它根本没生效，而单测全绿看不出来）。
+
+/// 分配判据的执行级对照：绑定与不绑定的变量放在同一份程序里，任何一条判据错了
+/// 都会变成错值（期望值取 gcc 实测）。
+#[test]
+fn ssa_regalloc_locals_match_gcc_at_all_levels() {
+    assert_all_levels_match_gcc(
+        "ssa-regalloc-locals",
+        include_str!("../fixtures/opt/ssa_regalloc_locals.c"),
+        "自动寄存器分配的某条准入判据失效（绑定变量读写错、或该拒的没拒）",
+    );
+}
+
+/// 「关掉 pass，产物必须不一样」——接入证明本身。
+///
+/// 为什么不能只比产物：`-O2` 下表达式的溅出池本来就会用 %rbx，所以「序言保存 %rbx」
+/// 并不是绑定独有的特征（第一版断言就是这么写的，负向对照立刻假了）。真正的证据是
+/// 两条一起成立：
+///   1. 诊断里点名把累加器放进了寄存器（说明分配器算了并交给了后端）；
+///   2. 关掉这条 pass 之后产物逐字节不同（说明它真的到达了产物，而不是算了没人用）。
+#[test]
+fn ssa_regalloc_reaches_the_product() {
+    let src = "long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i*3;return acc+n;}\n";
+    let (on, on_err) =
+        compile_asm_text_with_env("regalloc-on", src, &["-O2"], &[("DCC_REGALLOC_DUMP", "1")]);
+    let (off, off_err) = compile_asm_text_with_env(
+        "regalloc-off",
+        src,
+        &["-O2"],
+        &[("DCC_REGALLOC_DUMP", "1"), ("DCC_OPT_SKIP", "ssa_regalloc")],
+    );
+    // 具体发到哪个号由热度决定（`i` 比 `acc` 访问得多），所以这里只断言「两个热变量
+    // 都进了寄存器，而且拿的是不同的号」—— 号的名字不是这条测试要保护的东西。
+    assert!(
+        on_err.contains("bind acc -> ") && on_err.contains("bind i -> "),
+        "分配器没把循环里的两个热变量放进寄存器：\n{on_err}"
+    );
+    let regs: Vec<&str> = on_err
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("bind ").and_then(|r| r.split(" -> ").nth(1)))
+        .collect();
+    assert_eq!(
+        regs.len(),
+        regs.iter().collect::<std::collections::HashSet<_>>().len(),
+        "同一个号被发了两次（诊断 {regs:?}）：\n{on_err}"
+    );
+    assert!(
+        !off_err.contains("bind "),
+        "关掉 pass 后诊断里仍然 bind ⇒ 开关没起作用，下面的产物比较就没意义了：\n{off_err}"
+    );
+    assert_ne!(
+        on, off,
+        "关掉 ssa_regalloc 后产物逐字节相同 ⇒ 这条 pass 没接到管线上（§7.5 的老坑）"
+    );
+}
