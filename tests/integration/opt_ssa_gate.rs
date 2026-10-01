@@ -253,6 +253,26 @@ fn plain_loops_still_go_through_ssa() {
     assert_ne!(on, off, "普通 for 循环仍应走 SSA 往返（否则判据过宽，覆盖面丢光）");
 }
 
+/// 零长/柔性数组成员（`z->data[i]`）四个档位都必须与 gcc 一致。
+///
+/// 这类下标需要「子对象地址」（对象地址 + 字段偏移），而 IR 只表达得了具名对象的取址，
+/// 所以整函数退出 SSA 往返（判据与实测见 `ssa::Builder` 的 Index 分支注释：修前 -O2
+/// 把 `data` 的**内容**当地址解引用，读出栈垃圾且每次不同）。
+///
+/// 反面：固定大小二维数组不得被这条判据误挡（`plain_loops_still_go_through_ssa` 同族的
+/// 覆盖面守卫在 `subobject_array_decay_bails_while_2d_arrays_stay_in_ssa`）。
+#[test]
+fn vla_and_flexible_array_match_gcc_at_all_levels() {
+    let source = include_str!("../fixtures/c/vla.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("vla-flexible", source, &[flag]),
+            0,
+            "{flag}: VLA / 零长数组 / 柔性数组成员与 gcc 不一致"
+        );
+    }
+}
+
 /// 「关掉 pass，产物必须不一样」——接入证明本身。
 ///
 /// 为什么不能只比产物：`-O2` 下表达式的溅出池本来就会用 %rbx，所以「序言保存 %rbx」
