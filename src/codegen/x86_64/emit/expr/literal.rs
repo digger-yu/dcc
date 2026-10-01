@@ -158,7 +158,7 @@ impl Codegen {
                             }
                             // dst += rcx
                             // add r/m64=dst(B), reg=rcx(R): dst>=8 需 REX.B(0x01)
-                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                             self.emit(&[rex, 0x01, 0xC0 | ((1 & 7) << 3) | (dst & 7)]);
                             // 下降到元素类型
                             cur_ty = elem.base.clone();

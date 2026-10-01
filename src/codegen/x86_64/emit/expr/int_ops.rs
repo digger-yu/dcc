@@ -192,7 +192,7 @@ impl Codegen {
         // 最后 cmovs 选 0。
         let zero_reg = if dst == 0 { 2 } else { 0 };
         self.emit(&[0x48, 0x31, 0xC0 | ((zero_reg & 7) << 3) | (zero_reg & 7)]);
-        let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
+        let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
         self.emit(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
         let rex_cmov = 0x48 | if dst >= 8 { 0x04 } else { 0 };
         self.emit(&[
@@ -289,24 +289,24 @@ impl Codegen {
             Type::Bool | Type::Char | Type::SChar | Type::UChar => {
                 if is_signed {
                     // movsbq dst_low8, dst: 截断到 8 位并符号扩展
-                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     self.emit(&[rex, 0x0F, 0xBE, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                 } else {
                     // movzbl dst_low8, dst: 截断到 8 位并零扩展
-                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     self.emit(&[rex, 0x0F, 0xB6, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                 }
             },
             Type::Short | Type::UShort => {
                 if is_signed {
                     // movswq dst_low16, dst: 截断到 16 位并符号扩展
-                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     self.emit(&[rex, 0x0F, 0xBF, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                 } else {
                     // movzwl: 32 位 mov 零扩展高 32 位, 再 and 0xFFFF
-                    let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };
+                    let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
-                    let rex2 = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+                    let rex2 = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     self.emit(&[rex2, 0x81, 0xE0 | (dst & 7)]);
                     self.emit(&0xFFFFu32.to_le_bytes());
                 }
@@ -314,7 +314,7 @@ impl Codegen {
             Type::Int | Type::UInt => {
                 if !is_signed {
                     // 无符号 int: mov dst32, dst32 零扩展到 64 位
-                    let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };
+                    let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                 }
                 // 有符号 int: 64 位寄存器低 32 位已正确, 无需操作
@@ -328,7 +328,7 @@ impl Codegen {
         }
     }
     pub(crate) fn gen_int_promote(&mut self, dst: u8, ty: &Type) {
-        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+        let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
         match ty {
             Type::Char | Type::SChar | Type::Bool => {
                 // movsx dst, dst_low8: 48 0F BE C0+dst,dst
@@ -365,11 +365,11 @@ impl Codegen {
         }
         if is_32bit {
             // mov dst32, dst32: 32 位写自动零扩展高 32 位
-            let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };
+            let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
             self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
         } else {
             // and dst, mask: 清除高位
-            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
             self.emit(&[rex, 0x81, 0xE0 | (dst & 7)]);
             self.emit(&mask.to_le_bytes());
         }

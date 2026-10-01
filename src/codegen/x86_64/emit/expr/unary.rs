@@ -294,15 +294,15 @@ impl Codegen {
                     // 64-bit neg: 对有符号 32+ 位类型 (非 trapv),
                     // 寄存器值已符号扩展到 64 位, 必须用
                     // REX.W neg 保持上 32 位一致
-                    let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     self.emit(&[rex, 0xf7, 0xd8 | (dst & 7)]);
                 } else if use_32bit_neg {
                     // 32-bit neg for trapv: 检测 32 位溢出
-                    let rex = 0x40 | if dst >= 8 { 0x44 } else { 0 };
+                    let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     self.emit(&[rex, 0xf7, 0xd8 | (dst & 7)]);
                 } else {
                     // 32 位无符号: REX 前缀无 .W
-                    let rex = 0x40 | if dst >= 8 { 0x44 } else { 0 };
+                    let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     self.emit(&[rex, 0xf7, 0xd8 | (dst & 7)]);
                 }
                 // -ftrapv: 有符号取负溢出检查 (e.g. -INT_MIN)
@@ -328,7 +328,7 @@ impl Codegen {
             UnOp::Not => {
                 // 逻辑非: !x = (x == 0) ? 1 : 0
                 // test dst, dst
-                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                 self.emit(&[rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                 // sete al: 零 → 1, 非零 → 0 (0F 94 C0)
                 self.emit(&[0x0F, 0x94, 0xC0]);
@@ -339,7 +339,7 @@ impl Codegen {
                 self.emit(&[rex2, 0x0F, 0xB6, 0xC0 | ((dst & 7) << 3)]);
             },
             UnOp::BitNot => {
-                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                 self.emit(&[rex, 0xf7, 0xd0 | (dst & 7)]);
                 // not flips all 64 bits. The result must be
                 // truncated to the expression type width, then
@@ -356,11 +356,11 @@ impl Codegen {
                         Self::is_signed_int(&result_ty) || matches!(result_ty, Type::Char);
                     if is_signed {
                         // movsxd dst, dst (sign-extend 32→64)
-                        let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                        let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: 自反 ModRM, reg 与 r/m 都要扩, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                         self.emit(&[rex, 0x63, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                     } else {
                         // mov dst32, dst32 (zero-extend 32→64)
-                        let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };
+                        let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                         self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                     }
                 } else if result_sz < 8 {

@@ -41,7 +41,7 @@ impl Codegen {
                         self.emit(&(parent_off as i32).to_le_bytes());
                     } else {
                         if parent_off != 0 {
-                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                             self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
                             self.emit(&(parent_off as i32).to_le_bytes());
                         }
@@ -284,7 +284,7 @@ impl Codegen {
                 if let Some(ref f) = field_info {
                     let field_off = f.offset as i32;
                     if field_off != 0 {
-                        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                        let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                         self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
                         self.emit(&field_off.to_le_bytes());
                     }
@@ -380,7 +380,7 @@ impl Codegen {
                 }
                 // 加上虚部偏移
                 if inner_sz != 0 {
-                    let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
                     self.emit(&(inner_sz as i32).to_le_bytes());
                 }

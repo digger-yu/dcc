@@ -683,9 +683,12 @@ impl Codegen {
             // mov [r13 - 32], r14  (REX.WRB: r14 needs REX.R, r13 needs REX.B)
             self.callee_save_patch_sites.push((self.pos(), 0x04));
             self.emit(&[0x4d, 0x89, 0x75, 0xe0]);
-            // mov [r13 - 40], r15  (REX.WRB: r15 needs REX.R+REX.B, r13 needs REX.B)
+            // mov [r13 - 40], r15  (REX.WRB: r15 需要 REX.R, r13 需要 REX.B)
+            // 这里的 modrm 是 `mod=01 rm=101`（r13+disp8），**没有 SIB**，所以 REX.X
+            // 是多余的：旧代码发 0x4F = W|R|X|B，产物里被 objdump 老实标成
+            // `rex.WRXB mov %r15,-0x28(%r13)`。X 只在有 SIB 时表达 index 扩展。
             self.callee_save_patch_sites.push((self.pos(), 0x08));
-            self.emit(&[0x4f, 0x89, 0x7d, 0xd8]);
+            self.emit(&[0x4d, 0x89, 0x7d, 0xd8]);
             // 变参 reg save area 放在 frame 底部 (紧贴 rsp 之后).
             // 帧布局 (自下而上):
             //   r13+0 saved r13 / r13+8 ret addr

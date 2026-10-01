@@ -1527,7 +1527,7 @@ impl Codegen {
                         // add dst, tmp: opcode 01 /r → r/m=dst(B), reg=src(R)
                         let rex = 0x48
                             | if tmp >= 8 { 0x04 } else { 0 }
-                            | if dst >= 8 { 0x01 } else { 0 };
+                            | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                         self.emit(&[rex, 0x01, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
                         acc_open = true;
                     } else {
@@ -1535,7 +1535,7 @@ impl Codegen {
                         // add/and r/m64=dst, imm32: dst>=8 需 REX.B(0x01)
                         if fa > 1 {
                             let m = (fa - 1) as i128;
-                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                             self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
                             // imm32: 只能发 4 字节 (i128 to_le_bytes 是 16 字节)
                             self.emit(&(m as u32).to_le_bytes());
@@ -1546,10 +1546,10 @@ impl Codegen {
                             self.gen_sizeof_runtime(&f.ty, tmp);
                             let rex = 0x48
                                 | if tmp >= 8 { 0x04 } else { 0 }
-                                | if dst >= 8 { 0x01 } else { 0 };
+                                | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                             self.emit(&[rex, 0x01, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
                         } else {
-                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                             self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
                             self.emit(&(f.ty.size() as u32).to_le_bytes());
                         }
@@ -1561,7 +1561,7 @@ impl Codegen {
                 } else if *salign > 1 {
                     let m = (*salign - 1) as i128;
                     // add/and r/m64=dst, imm32: dst>=8 需 REX.B(0x01)
-                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
                     // imm32: 只能发 4 字节 (i128 to_le_bytes 是 16 字节)
                     self.emit(&(m as u32).to_le_bytes());
@@ -1584,7 +1584,7 @@ impl Codegen {
                             // cmp r/m64(dst,B), r64(tmp,R); cmovcc r/m←reg 同式
                             let rex = 0x48
                                 | if tmp >= 8 { 0x04 } else { 0 }
-                                | if dst >= 8 { 0x01 } else { 0 };
+                                | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                             self.emit(&[rex, 0x39, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
                             self.emit(&[rex, 0x0F, 0x47, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
                         } else {
@@ -1599,7 +1599,7 @@ impl Codegen {
                     // dst = max(dst, static_max)
                     self.mov_imm(tmp, static_max as i128);
                     let rex =
-                        0x48 | if tmp >= 8 { 0x04 } else { 0 } | if dst >= 8 { 0x01 } else { 0 };
+                        0x48 | if tmp >= 8 { 0x04 } else { 0 } | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     self.emit(&[rex, 0x39, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
                     self.emit(&[rex, 0x0F, 0x47, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
                 } else if !acc_open {

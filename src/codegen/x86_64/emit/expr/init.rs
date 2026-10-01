@@ -186,7 +186,7 @@ impl Codegen {
                         _ => true,
                     };
                     // reg 与 r/m 同为 dst: dst >= r8 时 REX 需同时置 R|B
-                    let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
+                    let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     let modrm = 0xC0 | ((dst & 7) << 3) | (dst & 7);
                     match (l_sz, l_signed) {
                         (1, true) => self.emit(&[rex, 0x0F, 0xBE, modrm]),

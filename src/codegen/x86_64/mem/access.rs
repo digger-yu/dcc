@@ -96,7 +96,7 @@ impl Codegen {
         if let ByteOffset::Constant(off) = &desc.offset {
             if *off != 0 {
                 if dst != 0 {
-                    let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: 该寄存器只在 r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
                     self.emit(&(*off as i32).to_le_bytes());
                 } else {
@@ -591,7 +591,7 @@ impl Codegen {
                 // 原 bug 用 0x03 (mod=00, rm=rbx) 导致 mov (%rbx), dst +
                 // 垃圾字节被后续指令流误解析 → SIGILL.
                 if Self::fits_disp32(parent_off) {
-                    let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
+                    let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: 自反 ModRM, reg 与 r/m 都要扩, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     let modrm = 0x80 | ((dst & 7) << 3) | (dst & 7);
                     self.emit(&[rex, 0x8B, modrm]);
                     self.emit(&(parent_off as i32).to_le_bytes());
@@ -606,7 +606,7 @@ impl Codegen {
             } else {
                 // 普通数组/向量: 起源帧 + parent_off 即数据地址
                 if parent_off != 0 {
-                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
                     self.emit(&(parent_off as i32).to_le_bytes());
                 }
@@ -710,7 +710,7 @@ impl Codegen {
             };
             let (scale2, sib2) = if elem_size == 16 {
                 // imul idx, idx, 16
-                let rex_i = 0x48u8 | if idx_reg >= 8 { 0x01 } else { 0 };
+                let rex_i = 0x48u8 | if idx_reg >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                 self.emit(&[rex_i, 0x69, 0xC0 | ((idx_reg & 7) << 3) | (idx_reg & 7)]);
                 self.emit(&16i32.to_le_bytes());
                 (0u8, (0u8 << 6) | ((idx_reg & 7) << 3) | 3)
@@ -1137,7 +1137,7 @@ impl Codegen {
                 if signed_narrow {
                     // movsx reg, reg_lowN: 窄有符号枚举 (C23 enum E : signed char/short)
                     // 零扩展读后符号扩展到 64 位 (调用方 promote 不覆盖枚举)
-                    let rex = 0x48 | if reg >= 8 { 0x44 } else { 0 };
+                    let rex = 0x48 | if reg >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     let op = if sz == 1 { 0xBE } else { 0xBF };
                     self.emit(&[rex, 0x0F, op, 0xC0 | ((reg & 7) << 3) | (reg & 7)]);
                 }

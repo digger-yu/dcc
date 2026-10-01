@@ -161,14 +161,14 @@ impl Codegen {
             if i == 0 {
                 self.load_stack(dst, off);
             } else if Self::fits_disp32(off) {
-                let rex = 0x48u8 | 0x01 | if dst >= 8 { 0x05 } else { 0 };
+                let rex = 0x48u8 | 0x01 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                 self.emit(&[rex, 0x8B, 0x80 | ((dst & 7) << 3) | (dst & 7)]);
                 self.emit(&(off as i32).to_le_bytes());
             } else {
                 // 罕见: 链槽偏移超出 disp32, 用 r10 作缩放槽
                 self.mov_imm(10, off as i128);
                 // mov dst, [dst + r10]: REX.X (r10 索引) + REX.R/B (dst 扩展)
-                let rex = 0x48u8 | 0x02 | if dst >= 8 { 0x05 } else { 0 };
+                let rex = 0x48u8 | 0x02 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                 self.emit(&[rex, 0x8B, 0x80 | ((dst & 7) << 3) | 0x04, 0x10 | (dst & 7)]);
             }
         }

@@ -335,7 +335,10 @@ impl Codegen {
             if let Some(ref f) = field_info {
                 let field_off = f.offset as i32;
                 if field_off != 0 {
-                    let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                    // dst 在 ModRM.r/m 上（`81 /0 id`），扩展位是 REX.B；写 0x44(REX.R)
+                    // 会把 /0 抬成 /8 = 未定义操作码。实测 `4c 81 c4` 被 objdump 读成
+                    // `rex.WR add $0x1,%rsp`。
+                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     self.emit(&[rex, 0x81, 0xC0 | (dst & 7)]);
                     self.emit(&field_off.to_le_bytes());
                 }
@@ -354,17 +357,27 @@ impl Codegen {
                 if let Some(bw) = f.bit_width {
                     // 位域读取: 加载容器 → 右移 → 掩码
                     let container_size = f.ty.size();
-                    // 加载容器值
+                    // 加载容器值。这里的 ModRM 是**自反**的（同一个寄存器既在 reg 又在
+                    // r/m），所以 dst>=8 必须**同时**置 REX.R 与 REX.B（0x05）：只置一边
+                    // 会把另一个字段留在低 8 个寄存器上，读回来的就是别人的值。
+                    let rb = if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
+                    let modrm_self = ((dst & 7) << 3) | (dst & 7);
                     match container_size {
-                        1 => self.emit(&[0x48, 0x0F, 0xB6, ((dst & 7) << 3) | (dst & 7)]),
-                        2 => self.emit(&[0x48, 0x0F, 0xB7, ((dst & 7) << 3) | (dst & 7)]),
-                        4 => self.emit(&[0x8B, ((dst & 7) << 3) | (dst & 7)]),
-                        8 => self.emit(&[0x48, 0x8B, ((dst & 7) << 3) | (dst & 7)]),
+                        1 => self.emit(&[0x48 | rb, 0x0F, 0xB6, modrm_self]),
+                        2 => self.emit(&[0x48 | rb, 0x0F, 0xB7, modrm_self]),
+                        4 => {
+                            if rb != 0 {
+                                self.emit(&[0x40 | rb]);
+                            }
+                            self.emit(&[0x8B, modrm_self]);
+                        },
+                        8 => self.emit(&[0x48 | rb, 0x8B, modrm_self]),
                         _ => {},
                     }
                     // 右移 bit_offset 位
                     if f.bit_offset > 0 {
-                        let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                        // `C1 /5 ib`：dst 在 r/m，需要 REX.B
+                        let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                         self.emit(&[rex, 0xC1, 0xE8 | (dst & 7), f.bit_offset as u8]);
                     }
                     // 掩码: and dst, (1 << bw) - 1
@@ -375,8 +388,8 @@ impl Codegen {
                         // (例如 bw=32 时 mask=0xFFFFFFFF 会被
                         // 符号扩展为 0xFFFFFFFFFFFFFFFF, 变成 no-op).
                         if mask <= 0x7FFFFFFF {
-                            // 32 位有符号 imm32 可安全编码
-                            let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                            // 32 位有符号 imm32 可安全编码（`81 /4 id`：dst 在 r/m → REX.B）
+                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                             self.emit(&[rex, 0x81, 0xE0 | (dst & 7)]);
                             self.emit(&(mask as u32).to_le_bytes());
                         } else {
@@ -384,12 +397,13 @@ impl Codegen {
                             // 使用 rcx 作为临时寄存器 (如 dst==rcx 则用 rdx)
                             let tmp = if dst != 1 { 1 } else { 2 }; // rcx or rdx
                                                                     // movabs tmp, mask
-                            let rex_tmp = 0x48 | if tmp >= 8 { 0x44 } else { 0 };
+                            // `48 B8+rd` 的寄存器号在 **opcode 低 3 位**，扩展它的也是 REX.B
+                            let rex_tmp = 0x48 | if tmp >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                             self.emit(&[rex_tmp, 0xB8 | (tmp & 7)]);
                             self.emit(&mask.to_le_bytes());
-                            // and dst, tmp
+                            // and dst, tmp：tmp 在 reg 字段(REX.R)，dst 在 r/m(REX.B)
                             let rex = 0x48
-                                | if dst >= 8 { 0x44 } else { 0 }
+                                | if dst >= 8 { 0x01 } else { 0 }   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                                 | if tmp >= 8 { 0x04 } else { 0 };
                             self.emit(&[rex, 0x21, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
                         }
@@ -415,27 +429,27 @@ impl Codegen {
                         let sign_bit: u64 = 1u64 << (bw - 1);
                         let inv_mask: u64 = !((1u64 << bw) - 1);
                         if sign_bit <= 0xFFFFFFFF {
-                            // 32 位符号位: 可用 imm32 编码
-                            let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                            // 32 位符号位: 可用 imm32 编码（`F7 /0 id`：dst 在 r/m → REX.B）
+                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                             // test dst, (1 << (bw-1))
                             self.emit(&[rex, 0xF7, 0xC0 | (dst & 7)]);
                             self.emit(&((sign_bit as u32).to_le_bytes()));
                             // jz +7 (跳过符号扩展)
                             self.emit(&[0x74, 0x07]);
-                            // or dst, inv_mask  (填充高位)
-                            let rex2 = 0x48 | if dst >= 8 { 0x44 } else { 0 };
+                            // or dst, inv_mask  (填充高位)（`81 /1 id`：dst 在 r/m → REX.B）
+                            let rex2 = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                             self.emit(&[rex2, 0x81, 0xC8 | (dst & 7)]);
                             self.emit(&(inv_mask as u32).to_le_bytes());
                         } else {
                             // >32 位: 用临时寄存器 (rcx/rdx)
                             let tmp = if dst != 1 { 1 } else { 2 };
-                            // movabs tmp, sign_bit
-                            let rex_tmp = 0x48 | if tmp >= 8 { 0x44 } else { 0 };
+                            // movabs tmp, sign_bit（opcode 低 3 位 → REX.B）
+                            let rex_tmp = 0x48 | if tmp >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                             self.emit(&[rex_tmp, 0xB8 | (tmp & 7)]);
                             self.emit(&sign_bit.to_le_bytes());
-                            // test dst, tmp
+                            // test dst, tmp：tmp 在 reg(REX.R)，dst 在 r/m(REX.B)
                             let rex_t = 0x48
-                                | if dst >= 8 { 0x44 } else { 0 }
+                                | if dst >= 8 { 0x01 } else { 0 }   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                                 | if tmp >= 8 { 0x04 } else { 0 };
                             self.emit(&[rex_t, 0x85, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
                             // jz +N (跳过 movabs + or)
@@ -444,9 +458,9 @@ impl Codegen {
                             // movabs tmp, inv_mask
                             self.emit(&[rex_tmp, 0xB8 | (tmp & 7)]);
                             self.emit(&inv_mask.to_le_bytes());
-                            // or dst, tmp
+                            // or dst, tmp：tmp 在 reg(REX.R)，dst 在 r/m(REX.B)
                             let rex_o = 0x48
-                                | if dst >= 8 { 0x44 } else { 0 }
+                                | if dst >= 8 { 0x01 } else { 0 }   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                                 | if tmp >= 8 { 0x04 } else { 0 };
                             self.emit(&[rex_o, 0x09, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]);
                         }
