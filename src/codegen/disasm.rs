@@ -644,6 +644,24 @@ impl<'a> Dec<'a> {
                 let mn = if scalar == "ss" { "cvtss2sd" } else { "cvtsd2ss" };
                 Some((self.pos - start, format!("{mn} {src}, {dst}")))
             },
+            0x6F | 0x7F => {
+                // `F3 0F 6F /r` = movdqu xmm ← r/m，`F3 0F 7F /r` = movdqu r/m ← xmm；
+                // 0x66 同形但是 movdqa。后端存/取 SSE 临时值就走这两条，解码器不认它们
+                // 的话，整个 vector 帧通路在 `-S` 里是一片 UNKNOWN。
+                let (reg_name, mem) = self.modrm_xmm(&rex)?;
+                let mn = if pfx.rep {
+                    "movdqu"
+                } else if pfx.o16 {
+                    "movdqa"
+                } else {
+                    "movq"
+                };
+                if op == 0x6F {
+                    Some((self.pos - start, format!("{mn} {mem}, {reg_name}")))
+                } else {
+                    Some((self.pos - start, format!("{mn} {reg_name}, {mem}")))
+                }
+            },
             0x6E | 0x7E => {
                 // 66 0F 6E /r: movd r/m32, xmm (REX.W 时为 movq)
                 // 66 0F 7E /r: movd xmm, r/m32 (REX.W 时为 movq)
@@ -1059,7 +1077,7 @@ impl<'a> Dec<'a> {
         match op {
             // REX 前缀的 SSE 标量/vector 指令（0x66/0xF2/0xF3 为 opcode 选择符）
             // 统一交回 decode_sse 处理，避免把 F2/F3/66 误当成独立前缀助记符。
-            0x10 | 0x11 | 0x2A | 0x2C | 0x5A => {
+            0x10 | 0x11 | 0x2A | 0x2C | 0x5A | 0x6F | 0x7F => {
                 self.pos = start;
                 self.decode_sse(start, pfx)
             },
