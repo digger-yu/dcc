@@ -85,16 +85,28 @@ impl Codegen {
                 if bits == 16 {
                     self.emit(&[0x66]);
                 }
-                if bits != 8 {
+                if bits == 8 {
+                    // `80 /digit ib`: ModRM.reg 装的是 **opcode 扩展**(/0..7)，绝不可被
+                    // REX.R 扩成 /8..15（未定义操作码，真机 #UD）；目的寄存器在 r/m 上，
+                    // d>=8 需要 REX.B，而 d∈4..7(%spl..%dil) 只需要「存在 REX」。
+                    // 旧代码 8 位一支一个前缀都不发，实测 `addb $16, "+D"` 被编成
+                    // `80 c7 10` = `add $0x10,%bh`（改的是 %rdi 的 8..15 位）。
+                    if *d >= 4 {
+                        self.emit(&[0x40 | if *d >= 8 { 0x01 } else { 0 }]);
+                    }
+                } else {
                     self.emit(&[Self::rex(w, 0, 0, *d)]);
                 }
                 if bits == 8 && *v >= 0 && *v <= 255 {
-                    // 8 位 ALU: 80 /0 ib, 接受 0..255 的字节值
-                    self.emit(&[0x80 + op * 8, Self::modrm_reg_reg(op, *d), *v as u8]);
+                    // 8 位 ALU: `80 /digit ib`。操作码**只有 0x80**，八个运算全部靠
+                    // ModRM.reg(/digit) 区分；写 `0x80 + op*8` 会把 opcode 撞到其他指令上：
+                    // orb→0x88(mov r/m8,r8)、adcb→0x90(nop)、andb→0xA0(mov al,moffs16)、
+                    // cmpb→0xB8(mov eax,imm32) —— 整条指令流从此错位。
+                    self.emit(&[0x80, Self::modrm_reg_reg(op, *d), *v as u8]);
                 } else if *v >= -128 && *v <= 127 {
-                    // 8/16 位: 80 /0 ib
+                    // 8 位: `80 /digit ib`; 16/32/64: `83 /digit ib`（imm8 符号扩展）
                     if bits == 8 {
-                        self.emit(&[0x80 + op * 8, Self::modrm_reg_reg(op, *d), *v as u8]);
+                        self.emit(&[0x80, Self::modrm_reg_reg(op, *d), *v as u8]);
                     } else {
                         self.emit(&[0x83, Self::modrm_reg_reg(op, *d), *v as u8]);
                     }
@@ -184,7 +196,8 @@ impl Codegen {
                     self.emit_asm_modrm_mem_only(7, *disp, *base, *index, *scale);
                     self.emit(&[*v as u8]);
                 } else if bits == 8 {
-                    self.emit(&[0x80 + op * 8]);
+                    // 同上：内存目的也是 `80 /digit ib`，opcode 不随 op 变。
+                    self.emit(&[0x80]);
                     self.emit_asm_modrm_mem_only(op, *disp, *base, *index, *scale);
                     self.emit(&[*v as u8]);
                 } else {
@@ -752,19 +765,17 @@ impl Codegen {
     }
     pub(crate) fn emit_asm_setcc(&mut self, op: &AsmOperand, cc: u8) {
         match op {
-            AsmOperand::Reg(r, sz) => {
-                // 8 位寄存器编码: ah/bh/ch/dh 是 4..7 物理槽, 但 r/m 字段也用 4..7
-                // REX 无效编码 0x40 用于 ah/bh/ch/dh 旧语法; 用 REX 后 ah 不可达
-                // 这里统一按 r/m 字段 0..7 处理
-                if *r >= 4 && *r < 8 && *sz == 8 {
-                    // 高 8 位寄存器: 不发 REX, 直接编码
-                    self.emit(&[0x0F, cc, 0xC0 | (r & 7)]);
-                } else {
-                    if *r >= 8 {
-                        self.emit(&[0x41]);
-                    }
-                    self.emit(&[0x0F, cc, 0xC0 | (r & 7)]);
+            AsmOperand::Reg(r, _) => {
+                // `0F 90+cc /0`：目的在 ModRM.r/m。本仓库的寄存器名表把 %ah/%ch/%dh/%bh
+                // 折叠到 0..3（见 asm/expansion.rs 与 emit/expr/utils.rs），所以 8 位上下文
+                // 里出现 4..7 **只可能**是 %spl/%bpl/%sil/%dil —— 与「旧式高 8 位寄存器」
+                // 无关。旧代码正是把这个方向理解反了，对 4..7 不发 REX，实测
+                // `sete %sil` 被编成 `0f 94 c6` = `sete %dh`（写的是 %rsi 的 8..15 位）。
+                // >=8 需要的是 REX.B（r/m 字段）。
+                if *r >= 4 {
+                    self.emit(&[0x40 | if *r >= 8 { 0x01 } else { 0 }]);
                 }
+                self.emit(&[0x0F, cc, 0xC0 | (r & 7)]);
             },
             AsmOperand::Mem {
                 disp,
@@ -839,10 +850,15 @@ impl Codegen {
                     self.emit(&[0x66]);
                 }
                 self.emit(&[Self::rex(w, 0, 0, *d)]);
+                // 8 位移位用的是**不带 imm 后缀的那一族**：D0 /digit（移位 1）与
+                // C0 /digit ib。D1/C1 是 16/32/64 位的，拿来做 8 位会把整个
+                // 32 位移过去（实测解码回来的是 %eax 而不是 %al）。
                 if *v == 1 {
-                    self.emit(&[0xD1, Self::modrm_reg_reg(op, *d)]);
+                    self.emit(if bits == 8 { &[0xD0] } else { &[0xD1] });
+                    self.emit(&[Self::modrm_reg_reg(op, *d)]);
                 } else {
-                    self.emit(&[0xC1, Self::modrm_reg_reg(op, *d), *v as u8]);
+                    self.emit(if bits == 8 { &[0xC0] } else { &[0xC1] });
+                    self.emit(&[Self::modrm_reg_reg(op, *d), *v as u8]);
                 }
             },
             // 兼容: shift $cl 实际语义是 shl/sar/shr/r 任意 reg 作为 count 来源
@@ -852,15 +868,16 @@ impl Codegen {
                     self.emit(&[0x66]);
                 }
                 if *c != 1 {
-                    // 任意 reg: 先 mov cl, c 再 D3 /4
-                    if *c >= 8 {
-                        self.emit(&[0x49]);
-                    } else {
-                        self.emit(&[0x48]);
-                    }
+                    // 任意 reg: 先 mov c, cl 再 D3 /4（AT&T 的 `mov %src, %dst`：src 在
+                    // ModRM.reg、rcx 在 r/m）。所以扩展 c 的是 **REX.R**，不是 REX.B：
+                    // 旧代码发 0x49(W|B) 会把两个字段读成 `mov %rcx,%r9` —— 方向颠倒，
+                    // 既砸了 %r9，cl 也仍然没设置。
+                    self.emit(&[0x48 | if *c >= 8 { 0x04 } else { 0 }]);
                     self.emit(&[0x89, Self::modrm_reg_reg(*c, 1)]);
                 }
-                self.emit(&[Self::rex(w, 0, 0, *d), 0xD3, Self::modrm_reg_reg(op, *d)]);
+                self.emit(&[Self::rex(w, 0, 0, *d)]);
+                // 同上：寄存器计数（%cl）的 8 位形式是 `D2 /digit`，不是 `D3`。
+                self.emit(&[if bits == 8 { 0xD2 } else { 0xD3 }, Self::modrm_reg_reg(op, *d)]);
             },
             (
                 AsmOperand::Imm(v),

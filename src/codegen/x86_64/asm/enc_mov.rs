@@ -100,11 +100,14 @@ impl Codegen {
         bits: u8,
     ) {
         let w = bits == 64;
+        // 8 位装载必须走 `8A /r`（mov r8, r/m8）。写成 8B 会把 1 字节读做成 4 字节读，
+        // 把高 3 字节的相邻数据当成操作数（与存回侧同一个越界类缺陷，见 emit_asm_store）。
+        let load_op = if bits == 8 { 0x8A } else { 0x8B };
         if base == ASM_BASE_RIP {
             if bits == 16 {
                 self.emit(&[0x66]);
             }
-            self.emit(&[Self::rex(w, dst, 0, 0), 0x8B]);
+            self.emit(&[Self::rex(w, dst, 0, 0), load_op]);
             self.emit_asm_modrm_mem_only(dst, disp, ASM_BASE_RIP, None, 1);
             return;
         }
@@ -114,7 +117,7 @@ impl Codegen {
             self.emit(&[0x66]);
         }
         self.emit(&[Self::rex(w, dst, index.unwrap_or(0), base)]);
-        self.emit(&[0x8B]);
+        self.emit(&[load_op]);
         let mut modrm = (dst & 7) << 3;
         if !need_disp && disp == 0 {
             modrm |= 0x00;
@@ -667,20 +670,39 @@ impl Codegen {
             // imm → reg
             (AsmOperand::Imm(v), AsmOperand::Reg(d, _)) => {
                 if bits == 8 {
+                    // `B0+rd ib`: 寄存器号在 **opcode 低 3 位**，扩展它的是 REX.B；而
+                    // %spl/%bpl/%sil/%dil (4..7) 只需要「存在 REX」。旧代码一个前缀都不发，
+                    // 于是 `movb $65, %sil` 被编成 `mov $65,%dh`（写进 %rsi 的 8..15 位，
+                    // 内存目标从未被写）。两者也不能合并：为 4..7 置 B 会搬到 %r12b..%r15b。
+                    if *d >= 4 {
+                        self.emit(&[0x40 | if *d >= 8 { 0x01 } else { 0 }]);
+                    }
                     self.emit(&[0xB0 + (d & 7), *v as u8]);
                 } else if *v >= i32::MIN as i64 && *v <= i32::MAX as i64 {
-                    // 16 位: 0x66 前缀须在 REX 之前
-                    if bits == 16 {
-                        self.emit(&[0x66]);
-                    }
-                    if *d >= 8 {
-                        self.emit(&[0x41]);
-                    }
-                    self.emit(&[0xB8 + (d & 7)]);
-                    if bits == 16 {
-                        self.emit(&(*v as i16).to_le_bytes());
-                    } else {
+                    if bits == 64 {
+                        // 64 位目标 + 32 位立即数只能走 `REX.W + C7 /0 id`（符号扩展）。
+                        // `B8+rd imm32` 不带 REX.W，那是 32 位写：高 32 位被清零，
+                        // 于是 `movq $-1, %rax` 得到 0xFFFFFFFF 而不是 -1。
+                        self.emit(&[
+                            0x48 | if *d >= 8 { 0x01 } else { 0 },
+                            0xC7,
+                            Self::modrm_reg_reg(0, *d),
+                        ]);
                         self.emit(&(*v as i32).to_le_bytes());
+                    } else {
+                        // 16 位: 0x66 前缀须在 REX 之前
+                        if bits == 16 {
+                            self.emit(&[0x66]);
+                        }
+                        if *d >= 8 {
+                            self.emit(&[0x41]);
+                        }
+                        self.emit(&[0xB8 + (d & 7)]);
+                        if bits == 16 {
+                            self.emit(&(*v as i16).to_le_bytes());
+                        } else {
+                            self.emit(&(*v as i32).to_le_bytes());
+                        }
                     }
                 } else {
                     // movabs reg, imm64
@@ -727,13 +749,26 @@ impl Codegen {
                     scale,
                 },
             ) => {
-                // mov [mem], imm: C7 /0 id (32-bit) or C6 /0 ib (8-bit)
+                // mov [mem], imm: C7 /0 id (16/32/64 位) 或 C6 /0 ib (8 位)。
+                // 目的在 **ModRM.r/m**：base/index 只要有一个 >=8 就必须发 REX。
+                // 旧代码把 need_rex 硬编码成 false（所以下面永远传 false），实测
+                // `movb $77, -0x40(%r13)` 被编成 `-0x40(%rbp)` —— 写进了别人的栈槽，
+                // 长度完全一样，因此既不崩溃也没有任何诊断。16 位那一支还同时
+                // 漏了 0x66（于是按 32 位存）。
+                let need_rex = *base >= 8 || index.map_or(false, |i| i >= 8);
                 if bits == 8 {
+                    if need_rex {
+                        self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base)]);
+                    }
                     self.emit_asm_modrm_mem(0xC6, 0, *disp, *base, *index, *scale, false);
                     self.emit(&[*v as u8]);
                 } else {
-                    if bits != 16 && bits != 8 {
-                        self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base)]);
+                    if bits == 16 {
+                        // legacy 前缀必须在 REX 之前
+                        self.emit(&[0x66]);
+                    }
+                    if bits == 64 || need_rex {
+                        self.emit(&[Self::rex(bits == 64, 0, index.unwrap_or(0), *base)]);
                     }
                     self.emit_asm_modrm_mem(0xC7, 0, *disp, *base, *index, *scale, false);
                     self.emit(&(*v as i32).to_le_bytes());
@@ -1192,11 +1227,14 @@ impl Codegen {
         bits: u8,
     ) {
         let w = bits == 64;
+        // 8 位存回必须走 `88 /r`（mov r/m8, r8）。旧代码写死 0x89，实测 `"=m"(*p)`
+        // （char *p）只该写 1 字节却写了 4 字节，越界盖掉相邻变量 —— 比错寄存器更坏。
+        let store_op = if bits == 8 { 0x88 } else { 0x89 };
         if base == ASM_BASE_RIP {
             if bits == 16 {
                 self.emit(&[0x66]);
             }
-            self.emit(&[Self::rex(w, src, 0, 0), 0x89]);
+            self.emit(&[Self::rex(w, src, 0, 0), store_op]);
             self.emit_asm_modrm_mem_only(src, disp, ASM_BASE_RIP, None, 1);
             return;
         }
@@ -1206,7 +1244,7 @@ impl Codegen {
             self.emit(&[0x66]);
         }
         self.emit(&[Self::rex(w, src, index.unwrap_or(0), base)]);
-        self.emit(&[0x89]);
+        self.emit(&[store_op]);
         let mut modrm = (src & 7) << 3;
         if !need_disp && disp == 0 {
             modrm |= 0x00;

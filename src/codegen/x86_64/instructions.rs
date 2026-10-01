@@ -204,8 +204,10 @@ impl Codegen {
         match sz {
             1 | 2 => {
                 // movzx dst, src8 / src16: 只取低位并清零高位。
-                // 低 8 位里 r4-r7 是 spl/bpl/sil/dil, 必须有 REX 前缀才能编出来;
-                // r8-r15 的字节/字寄存器同样靠 REX.R/B 区分。
+                // 位序必须分开判：REX.R 看 ModRM.reg（这里是 dst），REX.B 看 r/m
+                // （这里是 src）。而 spl/bpl/sil/dil 只要「有 REX 前缀」就合法，
+                // **不能**为此去置 REX.B —— 那会把字段索引搬到 +8 的高 8 个寄存器上。
+                // 实测踩过：置了 B 之后 `movzbl %sil,%ebx` 被编成 `movzbl %r14b,%ebx`。
                 let need_rex = dst >= 8 || src >= 8 || (sz == 1 && src >= 4);
                 let op = if sz == 1 { 0xB6 } else { 0xB7 };
                 if need_rex {
@@ -213,7 +215,7 @@ impl Codegen {
                     if dst >= 8 {
                         rex |= 0x04;
                     }
-                    if src >= 8 || (sz == 1 && src >= 4) {
+                    if src >= 8 {
                         rex |= 0x01;
                     }
                     self.emit(&[rex, 0x0F, op, modrm]);
@@ -278,11 +280,11 @@ impl Codegen {
         if v >= i32::MIN as i128 && v <= i32::MAX as i128 {
             // 使用 MOV r/m64, imm32 (REX.W + 0xC7 /0) 符号扩展 32 位立即数到 64 位
             // 避免 MOV r32, imm32 的零扩展导致负数比较错误
-            let rex = 0x48 + if reg >= 8 { 0x01 } else { 0 };
+            let rex = 0x48 + if reg >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
             self.emit(&[rex, 0xC7, 0xC0 + (reg & 7)]);
             self.emit(&(v as i32).to_le_bytes());
         } else {
-            self.emit(&[0x48 + if reg >= 8 { 0x01 } else { 0 }]);
+            self.emit(&[0x48 + if reg >= 8 { 0x01 } else { 0 }]);   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
             self.emit(&[0xb8 + (reg & 7)]);
             self.emit(&(v as i64).to_le_bytes());
         }
@@ -527,17 +529,22 @@ impl Codegen {
     /// 必须走这条。ModRM/SIB 交给 `emit_reg_indirect_modrm`，因此 base 可以是任意
     /// GP（含需要 SIB 的 rsp/r12 与需要 disp8 的 rbp/r13）。
     pub fn store_reg_to_ptr(&mut self, src: u8, base: u8, sz: usize) {
-        // 低 8 位里 r4-r7 是 spl/bpl/sil/dil：只要带 REX 就能编出来，与 src>=8 同理。
+        // `88 /r`（mov r/m8, r8）的位序：ModRM.reg 是**值**寄存器 src，r/m 是基址
+        // base。所以 REX.R 只看 src>=8，REX.B 只看 base>=8。
+        // src 落在 r4-r7（spl/bpl/sil/dil）时只需要「存在 REX 前缀」，绝不能去置
+        // REX.B —— 那会把 base 搬到高 8 个寄存器（实测 `mov %sil,(%rbx)` 被编成
+        // `mov %sil,(%r11)`，直接段错误）。need_rex 因此单独算。
         let mut rex = 0x40u8;
         if src >= 8 {
             rex |= 0x04;
         }
-        if base >= 8 || (sz == 1 && src >= 4) {
+        if base >= 8 {
             rex |= 0x01;
         }
+        let need_rex = rex != 0x40 || (sz == 1 && (4..8).contains(&(src & 7)));
         match sz {
             1 => {
-                if rex != 0x40 {
+                if need_rex {
                     self.emit(&[rex]);
                 }
                 self.emit(&[0x88]);
@@ -751,11 +758,13 @@ impl Codegen {
     /// Increment register by 1.
     pub fn increment(&mut self, reg: u8, sz: usize) {
         if sz == 1 {
-            let rex = if reg >= 8 { 0x41 } else { 0x00 };
+            // `FE /0`：目的在 ModRM.r/m，所以 >=8 需要的是 REX.B；而 %spl/%bpl/%sil/%dil
+            // (4..7) 只要「有 REX 前缀」。旧代码 reg<8 时发的是 0x00 —— 那是 `add` 的
+            // opcode，整条指令流从此错位（实测被读成 `add %bh,%dh`）。
+            let rex = 0x40u8 | if reg >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
             self.emit(&[rex, 0xFE, 0xC0 | (reg & 7)]);
         } else if sz == 2 {
-            let _rex = if reg >= 8 { 0x66 | 0x41 << 8 } else { 0x66 };
-            // 66 prefix for 16-bit
+            // 66 prefix for 16-bit（必须在 REX 之前）
             if reg >= 8 {
                 self.emit(&[0x66, 0x41, 0xFF, 0xC0 | (reg & 7)]);
             } else {
@@ -833,7 +842,11 @@ impl Codegen {
             .map(|g| (g.size, g.is_tls, g.offset, Self::is_signed_int(&g.ty)))
             .unwrap_or((8, false, 0, false));
         let tls_exec = is_tls && !self.relocatable;
-        let pref = if reg >= 8 { 0x41 } else { 0x00 }; // REX.R for high reg
+        // 目标寄存器在 ModRM.reg 上，扩展它的是 REX.R(0x04) 而不是 REX.B(0x01)。
+        // 写成 0x41 会同时干两件事：reg 字段留在低 8 个（值被写进 %eax），而 r/m 的
+        // `mod=00 rm=101`（RIP 相对）被搬成 `(%r13+disp32)` —— 后者止于错寄存器，
+        // 前者是静默错值。
+        let pref = if reg >= 8 { 0x44 } else { 0x00 }; // REX.R for high reg
                                                        // 注: ET_EXEC TLS 走 pending_tls_rels (由 resolve() 修补).
                                                        // ET_REL TLS 走 pending_data_rels + R_X86_64_PC32 (host linker 处理).
                                                        // FS 段前缀与 RIP-relative 寻址不兼容, 故不使用.
@@ -928,11 +941,17 @@ impl Codegen {
             .unwrap_or((8, false, 0));
         let tls_exec = is_tls && !self.relocatable;
         let modrm = 0x05 | ((reg & 7) << 3);
+        // 存回方向的**值**寄存器在 ModRM.reg 上，扩展它的是 REX.R(0x04)：
+        // 旧代码 sz==1 对 reg>=8 只发全 0 的 0x40（存了 %al 而不是 %r8b），
+        // sz==2/4 干脆不发前缀。8 位那支还要兼顾 %spl..%dil（4..7）只需「存在 REX」。
+        // 前缀长度参与 disp 偏移计算（pending 重定位要指到 disp 字段），所以逐分支显式算。
+        let rex_8 = if reg >= 8 { 0x44 } else if reg >= 4 { 0x40 } else { 0x00 };
+        let rex_hi = if reg >= 8 { 0x44 } else { 0x00 };
         match sz {
             1 => {
-                let pos = self.pos() + 2 + if reg >= 4 { 1 } else { 0 };
-                if reg >= 4 {
-                    self.emit(&[0x40, 0x88, modrm, 0, 0, 0, 0]);
+                let pos = self.pos() + 2 + if rex_8 != 0 { 1 } else { 0 };
+                if rex_8 != 0 {
+                    self.emit(&[rex_8, 0x88, modrm, 0, 0, 0, 0]);
                 } else {
                     self.emit(&[0x88, modrm, 0, 0, 0, 0]);
                 }
@@ -943,8 +962,13 @@ impl Codegen {
                 }
             },
             2 => {
-                let pos = self.pos() + 3;
-                self.emit(&[0x66, 0x89, modrm, 0, 0, 0, 0]);
+                let pos = self.pos() + 3 + if rex_hi != 0 { 1 } else { 0 };
+                if rex_hi != 0 {
+                    // 0x66 在 REX 之前（legacy prefix → REX → opcode 是硬性次序）
+                    self.emit(&[0x66, rex_hi, 0x89, modrm, 0, 0, 0, 0]);
+                } else {
+                    self.emit(&[0x66, 0x89, modrm, 0, 0, 0, 0]);
+                }
                 if tls_exec {
                     self.pending_tls_rels.push((pos, resolved.clone()));
                 } else {
@@ -952,8 +976,12 @@ impl Codegen {
                 }
             },
             4 => {
-                let pos = self.pos() + 2;
-                self.emit(&[0x89, modrm, 0, 0, 0, 0]);
+                let pos = self.pos() + 2 + if rex_hi != 0 { 1 } else { 0 };
+                if rex_hi != 0 {
+                    self.emit(&[rex_hi, 0x89, modrm, 0, 0, 0, 0]);
+                } else {
+                    self.emit(&[0x89, modrm, 0, 0, 0, 0]);
+                }
                 if tls_exec {
                     self.pending_tls_rels.push((pos, resolved.clone()));
                 } else {
@@ -1238,7 +1266,7 @@ impl Codegen {
         if is_unsigned_small {
             // 零扩展: mov dst32, dst32 (32 位写自动清零高 32 位)
             let dst = 0; // 整数结果约定在 rax
-            let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };
+            let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
             self.emit(&[rex, 0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
         }
         // 无符号 64 位类型: cvtsi2ssq/cvtsi2sdq 将有符号 64 位

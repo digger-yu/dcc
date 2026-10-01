@@ -31,6 +31,9 @@ mod emit;
 mod instructions;
 mod mem;
 mod parallel;
+/// REX 位序穷举门禁（编字节 → 自家解码器读回 → 比对意图寄存器名）
+#[cfg(test)]
+mod rex_matrix;
 mod special;
 
 // ============================================================================
