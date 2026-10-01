@@ -4110,15 +4110,18 @@ pub fn has_multi_exit_cycle(func: &Function) -> bool {
             .chain(std::iter::once(header))
         {
             let Some(b) = func.blocks.get(name) else { continue };
-            for s in &b.succs {
+            // 后继从 terminator 现取, 不读 `b.succs`: 本项目的 `term_succs` 文档写明
+            // SSA pass 改过 terminator 后 `succs` 可能过期。这里读旧边集会**漏掉真存在的
+            // 出口边** ⇒ 少计一个出口 ⇒ 把表达不了的循环放进来 (静默误编译的危险方向)。
+            for s in term_succs(&b.term) {
                 if s == header || body.contains(s) {
                     continue;
                 }
                 if is_back_edge(name, s, &doms) {
                     continue;
                 }
-                if !outside.iter().any(|e| e == s) {
-                    outside.push(s.clone());
+                if !outside.iter().any(|e| e.as_str() == s) {
+                    outside.push(s.to_string());
                 }
             }
         }
