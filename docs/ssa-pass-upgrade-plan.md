@@ -1581,6 +1581,54 @@ OPT-DIFF **8 → 4**（`ld80_arith`、`vla` 两条旧账，本轮未动）；COM
 arm/mips 基线 6 项 OK。反向对照：把 reg-reg ALU 的按需发前缀退回无条件发，门禁立刻报 2 条。
 
 
+### 7.28 第 24 轮之八：`ld80_arith` 根本不是精度问题 —— 是多出口循环接错线
+
+OPT-DIFF 从 4 降到 **2**（只剩 `c_vla.c`）。`ld80_arith` 的 TODO 标签写的是「80 位
+long double 过 SSA 往返丢精度」，那个结论是**错的**，而它把后续定位带偏了一整轮：
+
+1. 夹具在 -O2 下报 `FAIL: q object is not 80-bit 1/3`，但把 `(unsigned char*)&q` 直接打出来，
+   -O0/-O2 都是 `abaaaaaaaaaaaaaafd3f`（正确的 80-bit 位型）。**对象表示没丢精度，
+   那个比较函数自己被误编译了**。
+2. 去掉 long double 后形状依旧：`for (i=0;i<n;i++) if (i==2) return 7; return 1;` 的
+   `a(2)` 在 -O2 返 7（gcc 返 1）。`int`、全局数组、`const void*` 参数全一样中。
+3. 计数探针对比：`cnt` 显示循环体**只正确跑了 2 轮** —— 错不在循环次数，在**出口接线**。
+4. 归因：`DCC_OPT_SKIP` 逐个排 AST 层 pass 全部仍错，`run_ssa_passes` 排掉后对 → 在 SSA 往返。
+   （中途用 `DCC_SSA_OFF=1` 得出过“不是 SSA”的结论，那是错的开关 —— 记下以免下一个人
+   拿错工具读数当作判据。）
+5. 临时 dump 节点头与 CFG 直接给出答案：`header=for.body`、`exit_succ=Some("if.then")` ——
+   这个循环有**两个**循环外后继（侧出口 `if.then`=ret 7 与正常落出 `for.end`=ret 1），
+   而一个 `while` 只有一个落出口。
+
+**政策**：这种形状**整函数退出 SSA 往返**（与 §7.14 聚合整体赋值同一条），判据是
+`ssa::has_multi_exit_cycle`：存在某个自然循环的循环外后继 > 1。理由不是“修不了”，而是
+两条看上去都能修的路径实测都错：
+
+| 改法 | 结果 |
+|---|---|
+| 提升节点头分支为 `while` 条件，续体取侧出口 | `a(2)` 返 7（原判据错误） |
+| 续体改取「latch 的正常落出」 | `a(0)`/`a(1)` 返 0：外层落出路径后面空无一物，函数直接落到序言 |
+| 续体「前驱不全在循环内则不在此发」 | 同上，`a(1)` 仍返 0（外层也不发，因为外层已把重建全权交给 cycle） |
+
+中途还踩过一个**判据过宽**：第二版用「续体被外层共享」作判据，而普通 for 循环的
+`for.end` 本来就同时是 preheader `for.cond` 假边的目标（实测前驱 = `[for.step, for.cond]`）
+⇒ 所有 for 循环被挡。当场由 `ssa_regalloc_reaches_the_product`（P12-B 的验收测试）变红
+发现 —— 这就是为什么「接入证明」必须与拒判据同时存在：只看前者会把覆盖面丢光当成功。
+
+留下一个明确的未修项：多出口循环现在是**不优化**而不是**正确优化**。真正的修法是
+结构化重建侧的出口所有权设计（续体归外层、侧出口就地展开、二者不得双发），
+不是再推一条更精细的拒判据。
+
+夹具 `tests/fixtures/c/loop_multi_exit.c`：30 个期望值全部取自 `gcc -O0` 实测（初稿手算
+错了 3 处，其中包括一个 break 先触发、`return 999` 永不可达的自相矛盾设计）。
+两条测试 + 两个方向：`loop_multi_exit_matches_gcc_at_all_levels`（四档与 gcc 对照）、
+`plain_loops_still_go_through_ssa`（反面：普通循环不得掉出 SSA）、
+`multi_exit_cycle_predicate_is_narrow_and_sound`（判据本身的两面）。反向对照：把判据短期
+关掉后夹具在 -O2 立刻报 4 条 FAIL。
+
+**度量**：OPT-DIFF **4 → 2**（`ld80_arith` 两条消失，只剩 `c_vla.c`）；`cargo test --lib`
+2004、`--test integration` 1008 全过；可复现 5094 组合字节一致；REX 卫生门禁 611 组合零条。
+
+
 ### 8. 第 6 轮：P10 已接入 + P16 分析层完成
 > 【校正】本小节写的是当时状态。其中 P16 表格的「准入」与「可观测」两行、以及表后
 > 四个真缺陷对应的分类器代码，已随 §7 记录的误删丢失，目前**不在树里**；下表的

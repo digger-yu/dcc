@@ -216,6 +216,14 @@ fn run_ssa_passes(
                 // 「浮点运算不得复用」(舍入模式可在运行期被 fesetround 改掉)。
                 ssa.fenv_access = prog.fenv_access;
                 crate::ssa_passes::run_with_opts(&mut ssa, level, strict_aliasing);
+                // 循环的续体与外层构造共享时，结构化重建表达不了（判据与实测两端失败见
+                // `has_multi_exit_cycle`）⇒ 整函数退出 SSA 往返，f 保持 AST 原形。
+                if crate::ssa::has_multi_exit_cycle(&ssa) {
+                    if std::env::var("DCC_SSA_BAIL").is_ok() {
+                        eprintln!("dcc: SSA bail: 共享续体的循环 ({})", f.name.name);
+                    }
+                    continue;
+                }
                 let rebuilt = crate::ssa::rebuild_block(&ssa);
                 // P12：SSA 层的寄存器分配，结果写进重建后的 AST（`register_name`）。
                 // 判据要看**重建前**的函数体（嵌套函数在重建后的体里已经没有了，

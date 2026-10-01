@@ -4053,6 +4053,64 @@ fn plan_inlined_temps(func: &Function) -> InlinePlan {
     }
 }
 
+/// 结构化重建**表达不了**的循环形状：某个自然循环有**两个以上**的「循环外后继」。
+///
+/// 为什么这是硬歧义而不是可以就地展开的细节：`while` 只有一个落出口，共享续体既要从
+/// 循环的 break 路径到这里，又要由**外层**那条边发射一次；在一处发就把另一处吃掉了。
+/// 实测两端都错过：
+///   * 把侧出口当续体在循环后发 ⇒ `a(2)` 返 7（gcc 返 1，循环体其实只正确跑了 2 轮）；
+///   * 提升节点头分支为 `while` 条件、续体取正常落出块 ⇒ `a(0)`/`a(1)` 返 0（落出路径
+///     后面空无一物，函数直接落到序言）。
+/// 为什么不是「续体被外层共享」：普通 `for` 的 `for.end` 本来就同时是 preheader
+/// `for.cond` 的假边目标（实测前驱 = [for.step, for.cond]），那条判据会把**所有** for
+/// 循环都挡掉。用「出边个数」才对准本歧义：`for (i=0;i<n;i++) if (i==2) return 7;`
+/// 有 `if.then`(ret 7) 与 `for.end`(ret 1) 两个出口，而普通循环只有 `for.end` 一个。
+///
+/// 与聚合整体赋值同一政策：IR 表达不了的形状**整函数退出 SSA 往返**，而不是发一个
+/// 看起来对、实际接错线的结构。
+pub fn has_multi_exit_cycle(func: &Function) -> bool {
+    let doms = compute_dominators(func);
+    for (header, hb) in func.blocks.iter() {
+        // 自然循环的 header：存在一条从某前驱回来的回边。
+        let latches: Vec<String> = hb
+            .preds
+            .iter()
+            .filter(|p| is_back_edge(p, header, &doms))
+            .cloned()
+            .collect();
+        if latches.is_empty() {
+            continue;
+        }
+        let body: HashSet<String> = find_loop_body_multi(func, header, &latches)
+            .into_iter()
+            .collect();
+        // 收集循环外后继
+        let mut outside: Vec<String> = Vec::new();
+        for name in body.iter()
+            .chain(std::iter::once(header))
+        {
+            let Some(b) = func.blocks.get(name) else { continue };
+            for s in &b.succs {
+                if s == header || body.contains(s) {
+                    continue;
+                }
+                if is_back_edge(name, s, &doms) {
+                    continue;
+                }
+                if !outside.iter().any(|e| e == s) {
+                    outside.push(s.clone());
+                }
+            }
+        }
+        // 多于一个循环外后继 ⇒ 单个 `while` 表达不了（它只有一个落出口）：
+        // 侧出口（体内 return/break 走到的块）与正常落出块是两个不同的块。
+        if outside.len() > 1 {
+            return true;
+        }
+    }
+    false
+}
+
 /// 把 SSA Function 重建为 AST Block (codegen 仍走 AST 路径)。
 ///
 /// 策略:
@@ -6996,6 +7054,39 @@ mod tests {
             }
         }
         panic!("找不到函数 {name}");
+    }
+
+    /// 「一个 `while` 只有一个落出口」这条限制到底挡住了多少函数：判据过宽会把
+    /// 普通循环一起挡掉（SSA 覆盖面大幅丢失），过窄则挡不住真歧义。两边都钉，
+    /// 因为它们各对应一类历史错误（先例：「续体被外层共享」那条判据实测会挡掉
+    /// **所有** for 循环 —— 普通 for 的 `for.end` 本来就同时是 preheader 的假边目标）。
+    #[test]
+    fn multi_exit_cycle_predicate_is_narrow_and_sound() {
+        // 不挡：普通 for、只有 continue 的循环（出口只有 for.end）
+        let plain_for = "long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i*3;return acc+n;}\n";
+        assert!(
+            !has_multi_exit_cycle(&try_build(plain_for, "s").expect("普通 for 应能进 SSA")),
+            "普通 for 循环不该被判为多出口（P12-B 的验收夹具就是这个形状）"
+        );
+        let cont_only =
+            "long s(long n){long acc=0;for(long i=0;i<n;i++){if(i%2==0)continue;acc+=i;}return acc;}\n";
+        assert!(
+            !has_multi_exit_cycle(&try_build(cont_only, "s").expect("continue 循环应能进 SSA")),
+            "只有 continue 的循环不该被判为多出口"
+        );
+
+        // 要挡：体内提前 return / break 与正常落出是两个不同的循环外后继
+        let early_return = "int a(int n){for(int i=0;i<n;i++){if(i==2)return 7;}return 1;}\n";
+        assert!(
+            has_multi_exit_cycle(&try_build(early_return, "a").expect("早退循环应能建 IR")),
+            "体内 return + 循环落出 = 两个出口，必须判为多出口"
+        );
+        let ret_and_break =
+            "int a(int n){int s=0;for(int i=0;i<n;i++){if(i==1)return 9;if(i==3)break;s+=i;}return s;}\n";
+        assert!(
+            has_multi_exit_cycle(&try_build(ret_and_break, "a").expect("应能建 IR")),
+            "return 与 break 同现时更要判为多出口"
+        );
     }
 
     /// 无法在 SSA 里忠实表达的表达式必须让**整个函数**放弃 SSA 化，而不是静默

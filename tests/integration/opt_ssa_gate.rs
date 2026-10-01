@@ -216,6 +216,43 @@ fn ssa_regalloc_locals_match_gcc_at_all_levels() {
     );
 }
 
+/// 多出口循环（体内 return/break + 循环正常落出）四个档位都必须与 gcc 一致。
+///
+/// 这类形状上结构化重建只能表达一个落出口，政策是整函数退出 SSA 往返（判据与两端
+/// 实测失败见 `ssa::has_multi_exit_cycle`）。夹具里每个期望值都取自 gcc 实测；初稿手算的
+/// 3 处不符已被纠正（包括一个 break 先触发、return 永不可达的自相矛盾设计）。
+///
+/// 反向对照做过：把判据短期关掉后同一夹具在 -O2 报 4 条 FAIL（`n=1`/`n=2` 本该 1 却得 7，
+/// 未命中时侧出口的语句仍执行），所以这条不是空跑。
+#[test]
+fn loop_multi_exit_matches_gcc_at_all_levels() {
+    let source = include_str!("../fixtures/c/loop_multi_exit.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("loop-multi-exit", source, &[flag]),
+            0,
+            "{flag}: 多出口循环的重建与 gcc 不一致（循环出口接错线）"
+        );
+    }
+}
+
+/// 覆盖面反面：普通循环不得因为这条判据掉出 SSA。上一版判据用「续体被外层共享」
+/// 作错锺，会把所有 for 循环挡掉（`for.end` 本来就同时是 preheader 假边的目标），
+/// 当时就是靠 P12-B 这条验收测试变红才发现的。
+#[test]
+fn plain_loops_still_go_through_ssa() {
+    let src = "long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i*3;return acc+n;}\n";
+    let (on, _) = compile_asm_text_with_env("multiexit-plain", src, &["-O2"], &[("DCC_SSA_BAIL", "1")]);
+    let (off, _) = compile_asm_text_with_env(
+        "multiexit-plain-off",
+        src,
+        &["-O2"],
+        &[("DCC_OPT_SKIP", "run_ssa_passes")],
+    );
+    assert!(!on.is_empty(), "编译应产出汇编");
+    assert_ne!(on, off, "普通 for 循环仍应走 SSA 往返（否则判据过宽，覆盖面丢光）");
+}
+
 /// 「关掉 pass，产物必须不一样」——接入证明本身。
 ///
 /// 为什么不能只比产物：`-O2` 下表达式的溅出池本来就会用 %rbx，所以「序言保存 %rbx」
