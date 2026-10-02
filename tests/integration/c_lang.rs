@@ -433,34 +433,119 @@ fn may_alias_struct_compiles() {
     assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
-/// __seg_fs / __seg_gs (and __seg_{cs,ds,es,ss}) 地址空间限定符解析
+/// `__seg_fs` / `__seg_gs` (以及 `__seg_{cs,ds,es,ss}`) 地址空间限定符
 ///
-/// 这些是 x86 段寄存器限定符 (per-cpu 访问依赖 %gs:/%fs:).
-/// dcc 仅解析不处理: 解析器在所有合法位置 (decl-specifier,
-/// 类型与 * 之间, * 与标识符之间, 函数指针声明符, 函数指针
-/// 字段声明符, sizeof/_Alignof 等) 跳过这些关键字, 但不存入
-/// 类型系统, 也不影响代码生成. 因此编译成功, 运行结果等价
-/// 于不带限定符的程序. 真正的段寄存器前缀生成尚未实现,
-/// 详见 docs/missing_features.md.
+/// 契约在第 26 轮翻了一次。旧断言是「asm 里不得出现 %fs:/%gs:」（当时只解析不
+/// 处理）。那条契约与已经落地的实现互相矛盾：`emit/expr/lvalue.rs`、`dispatch.rs`、
+/// `increment.rs` 早就按 pointee 的 `addr_space` 发前缀，但**只有 decl-specifier
+/// 那一个位置**能把段带进类型系统 —— 于是同一个语义的几种拼写里只有一种生效
+/// （实测 `int __seg_gs *p` 的解引用不生前缀，而 `__seg_gs int *f(void)` 会），
+/// 那是比「全不发」更危险的 silently-wrong。
 ///
-/// 覆盖: 全局变量 / 函数返回类型 / 函数参数 / 局部变量 /
-/// cast / struct 字段 / typedef / typeof / static 组合 /
-/// 多限定符链 / const 组合 / 全部 6 个 x86 段名 /
-/// 函数指针声明符 / 函数指针字段声明符 / sizeof / Alignof.
+/// 现在两面都钉，并且**逐函数**钉（全局计数会被别人的前缀凑数）：
+///   * 正向: 段限定 pointee 的每种访问形态都要发前缀（解引用 / 下标 / 成员 /
+///     自增自减 / 局部变量 / 形参 / typedef / cast / typeof / 函数返回类型）;
+///   * 反向: 不带段的 `test_plain` 与记为 Generic 的 cs/ds/es/ss 必须一个前缀也不发
+///     （不写这一面，「逢访存就发前缀」也能把正向做绿）;
+///   * 两个档位都跑：段信息必须在 SSA 往返里活下来（-O2 只发 `*p` 不发 `p[i]`
+///     就是本轮抓到的）;
+///   * 执行: 退出码 0 —— 用户态 GS base == 0，所以 gs 前缀不改变可观察行为；
+///     fs 的那几个函数只定义不调用（理由见夹具头注释）。
+///
+/// 覆盖: 全局变量 / 函数返回类型 / 函数参数 / 局部变量 / cast / struct 字段 /
+/// typedef / typeof / static 组合 / 多限定符链 / const 组合 / 全部 6 个 x86 段名 /
+/// 函数指针声明符 / 函数指针字段声明符 / sizeof / Alignof。
 #[test]
-fn seg_qualifier_compiles_and_runs() {
+fn seg_qualifier_parses_all_positions_and_emits_segment_prefixes() {
     let source = include_str!("../fixtures/c/seg_qualifier.c");
-    // 先验证编出的汇编里没有 %fs:/%gs: 段前缀, 落实 “仅解析不处理” 的契约.
-    let (asm_out, asm_text) = run_asm_output_test("seg-qualifier-asm", source);
-    assert!(
-        asm_out.status.success(),
-        "seg_qualifier asm compile failed: {}",
-        String::from_utf8_lossy(&asm_out.stderr)
-    );
-    assert!(!asm_text.contains("%fs:"), "asm output should not contain %fs: segment prefix");
-    assert!(!asm_text.contains("%gs:"), "asm output should not contain %gs: segment prefix");
 
-    // 然后编译运行, 验证可执行.
+    /// 取某个函数的 asm 函数体（从 `<name>:` 到下一个行首标签）。
+    fn body_of(asm_text: &str, name: &str) -> String {
+        let mut out = String::new();
+        let mut hit = false;
+        for line in asm_text.lines() {
+            if line.trim_end() == format!("{}:", name) {
+                hit = true;
+                continue;
+            }
+            if !hit {
+                continue;
+            }
+            // 下一个行首标签（助记符行都以空白开头）就是本函数结束。
+            let is_label = !line.starts_with(' ')
+                && !line.starts_with('\t')
+                && !line.starts_with('.')
+                && line.trim_end().ends_with(':');
+            let is_section = !line.starts_with(' ') && !line.starts_with('\t') && line.starts_with('.');
+            if is_label || is_section {
+                break;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
+    }
+
+    fn has_seg(body: &str) -> bool {
+        body.contains("%gs:") || body.contains("%fs:")
+    }
+
+    // (函数名, 期望前缀)：`Some("%gs:")` = 必须发 gs；`None` = 一个前缀也不许发。
+    const GS_ACCESS: [&str; 11] = [
+        "use_param_gs",   // 形参：基类型与 * 之间
+        "local_test",     // 局部变量
+        "cast_test",      // cast 出来的段指针
+        "typedef_test",   // typedef 名 + cast
+        "typeof_test",    // typeof 基类型
+        "idx_gs",         // p[i] 读
+        "store_gs",       // *p = v 写
+        "idx_store_gs",   // p[i] = v 写
+        "preinc_gs",      // ++*p 读—改—写
+        "arrow_gs",       // *s->vp（字段是段指针）
+        "use_ret_gs_ptr"  // 经函数返回类型带段的指针解引用
+    ];
+    const FS_ACCESS: [&str; 1] = ["use_param_fs"];
+    const NO_SEGMENT: [&str; 5] = ["test_plain", "test_cs", "test_ds", "test_es", "test_ss"];
+
+    for flag in ["", "-O2"] {
+        let (asm_out, asm_text) = run_asm_output_test_flags("seg-qualifier-asm", source, flag);
+        assert!(
+            asm_out.status.success(),
+            "seg_qualifier [{flag}] 应能编译: {}",
+            String::from_utf8_lossy(&asm_out.stderr)
+        );
+        for name in GS_ACCESS {
+            let body = body_of(&asm_text, name);
+            assert!(
+                !body.is_empty(),
+                "[{flag}] 夹具里找不到函数 {name}（改名会让这些断言空判）"
+            );
+            assert!(
+                body.contains("%gs:"),
+                "[{flag}] {name}: 段限定 pointee 的访问必须发 %gs:，实得\n{body}"
+            );
+        }
+        for name in FS_ACCESS {
+            let body = body_of(&asm_text, name);
+            assert!(
+                body.contains("%fs:"),
+                "[{flag}] {name}: __seg_fs pointee 必须发 %fs:，实得\n{body}"
+            );
+        }
+        for name in NO_SEGMENT {
+            let body = body_of(&asm_text, name);
+            assert!(
+                !body.is_empty(),
+                "[{flag}] 夹具里找不到反向对照函数 {name}"
+            );
+            assert!(
+                !has_seg(&body),
+                "[{flag}] {name}: 无限定 / Generic 段不得发前缀，实得\n{body}"
+            );
+        }
+    }
+
+    // 然后编译运行: gs 前缀在用户态不改可观察行为, 程序必须正常结束。
     let (output, exe) = run_compile_and_run("seg-qualifier", source);
     assert!(
         output.status.success(),
@@ -469,9 +554,7 @@ fn seg_qualifier_compiles_and_runs() {
     );
     let rc = run_exe(&exe);
     let _ = fs::remove_file(exe);
-    // 运行成功即视为与无限定符版本行为一致 (exit code 由 OS 截断到 8 位).
-    // 重点是程序可执行、可结束, 没有崩溃或段错误.
-    assert!(rc >= 0, "seg_qualifier executable failed: rc={rc}");
+    assert_eq!(rc, 0, "seg_qualifier 夹具自检未通过（rc={rc}）");
 }
 
 /// GCC 兼容：相同类型的重复 typedef 不报错
@@ -826,6 +909,60 @@ fn gnu89_implicit_function_decl_warns_and_continues() {
     assert!(stderr.contains("W1000"), "expected W1000: {stderr}");
 }
 
+/// `-fstrict-aliasing` 必须**告知无效**，不得默默假装做了。
+///
+/// 背景：P4/P13 那份别名分析因「结果从入口到管线都被丢弃」已删（见
+/// docs/ssa-pass-upgrade-plan.md §7.37），删完之后 `-fstrict-aliasing` 就是一个
+/// 「能接受但悄悄无效」的开关。§7.37 的要求是二选一（接真 TBAA 消费者，或给一
+/// 条诊断），本用例钉住后者：
+///   * `-fstrict-aliasing`：警告 + 仍成功编译（不改变行为，不能把它做成错误）；
+///   * `-fno-strict-aliasing`：**不警告** —— 它要求的保守 aliasing 本来就是现状；
+///   * 不传任何一侧：也不警告。
+/// 反向对照那两条是必需的：若实现成「只要看到 strict_aliasing 字样就叫」，
+/// 内核构建传 `-fno-strict-aliasing` 会被噪音淹没，而那侧其实没有债。
+#[test]
+fn fstrict_aliasing_is_reported_as_inert_but_fno_is_silent() {
+    let src = "int main(void) { return 0; }\n";
+    let path = std::env::temp_dir().join(format!("dcc-strict-alias-{}.c", std::process::id()));
+    fs::write(&path, src).unwrap();
+    let run = |flag: &str| {
+        // 用 `-S -o /dev/null` 而不是 `-fsyntax-only`：后者不走 `cli_warnings` 的输出通道
+        //（实测同一条警告在 `-c`/`-S` 下会打印、`-fsyntax-only` 不打印），拿它测警告会是假绿。
+        let mut args = vec!["-S", "-o", "/dev/null"];
+        if !flag.is_empty() {
+            args.push(flag);
+        }
+        let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(&args)
+            .arg(&path)
+            .output()
+            .expect("run dcc");
+        (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+
+    let (ok, err) = run("-fstrict-aliasing");
+    assert!(ok, "-fstrict-aliasing 仍应编译成功: {err}");
+    assert!(
+        err.contains("-fstrict-aliasing"),
+        "-fstrict-aliasing 应有一条告知它无效的警告: {err}"
+    );
+
+    let (ok, err) = run("-fno-strict-aliasing");
+    assert!(ok, "-fno-strict-aliasing 应编译成功: {err}");
+    assert!(
+        !err.contains("strict-aliasing"),
+        "-fno-strict-aliasing 要求的保守行为就是现状，不得警告（内核构建全部传这个）: {err}"
+    );
+
+    let (ok, err) = run("");
+    let _ = fs::remove_file(&path);
+    assert!(ok, "默认应编译成功: {err}");
+    assert!(
+        !err.contains("strict-aliasing"),
+        "不传标志时不得警告: {err}"
+    );
+}
+
 // ===== M15: const_eval / 严格类型检查 / 运行时检查 =====
 
 /// 浮点常量求值 (M15.1)
@@ -953,7 +1090,12 @@ fn ld80_asm_x_rejects_long_double() {
     let tag = format!("dcc-ld80-asm-x-reject-{}", std::process::id());
     let src_path = dir.join(format!("{tag}.c"));
     let obj_path = dir.join(format!("{tag}.o"));
-    fs::write(&src_path, include_str!("../fixtures/c/ld80_asm_x_rejects_long_double.c"))
+    // 负向夹具（本夹具就是期望 E0311 拒绝）属于 tests/fixtures/errors/：
+    // 放在 fixtures/c/ 会被链接型语级测试当成待修债。
+    fs::write(
+        &src_path,
+        include_str!("../fixtures/errors/ld80_asm_x_rejects_long_double.c"),
+    )
         .expect("write C fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .args(["-c", "-o"])

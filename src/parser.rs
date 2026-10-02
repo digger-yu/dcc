@@ -5709,7 +5709,7 @@ impl<'a> Parser<'a> {
         self.skip_ptr_qualifiers();
         let has_ptr = self.cur.kind == TokKind::Star;
         if !has_ptr {
-            // 没冇 *, 限定符属于变量而非 pointed-to 类型, 恢复
+            // 没有 *, 限定符属于变量而非 pointed-to 类型, 恢复
             self.decl_quals = saved_decl_quals;
         } else {
             // 有 *: 限定符属于 pointed-to 类型
@@ -5779,7 +5779,18 @@ impl<'a> Parser<'a> {
         self.advance(); // )
                         // 现在期望 `(params)` 形式的函数参数列表
         if self.cur.kind != TokKind::LParen {
-            // 不是函数指针, 可能只是指针抽象 `(*)`
+            // 不是函数指针。但如果 `(*)` 后面跟的是数组后缀（`int (*)[4]`），必须
+            // **先**把后缀作用于基类型、**再**包指针 —— 与 parse_params / typedef 那两处
+            // 同一个结合顺序：`int (*)[4]` 是「指向 4 个 int 的数组的指针」（8 字节），
+            // 不是「4 个 int* 的数组」（32 字节）。旧代码在这里只包一层 `Ptr` 就返回，
+            // 剩下的 `[4]` 由调用方的 `parse_array_suffix` 套在指针上，实测
+            // `sizeof((int(*)[4])0)` 返 32 而 gcc 返 8。在这里消掉后缀之后，调用方
+            // 的 `parse_array_suffix` 就看不到 `[` 了，不会重复包裹。
+            if self.cur.kind == TokKind::LBracket {
+                let arr_ty = self.parse_array_suffix(ty);
+                return Type::Ptr(Box::new(arr_ty.into()));
+            }
+            // 可能只是指针抽象 `(*)`
             ty = Type::Ptr(Box::new(ty.into()));
             return ty;
         }
@@ -5864,6 +5875,10 @@ impl<'a> Parser<'a> {
             // C23 [[attributes]]: 在类型限定符之间出现，在 match 之前检查
             if self.cur.kind == TokKind::LBracket && self.peek.kind == TokKind::LBracket {
                 self.parse_std_attributes();
+                continue;
+            }
+            // 段寄存器地址空间限定符可出现在声明说明符序列的任意位置
+            if self.try_consume_seg_qualifier() {
                 continue;
             }
             match self.cur.kind {
@@ -6089,20 +6104,9 @@ impl<'a> Parser<'a> {
                     self.advance();
                 },
                 // __seg_fs / __seg_gs / __seg_cs / __seg_ds / __seg_es / __seg_ss:
-                // x86 段寄存器地址空间限定符 (per-cpu 变量访问需要).
-                // 捕获地址空间并存入 spec_addr_space, 最终写入 VarDecl.
-                // 与 skip_ptr_qualifiers 中的同名关键字配合,
-                // 确保在 decl-specifier / 类型与 * 之间 / * 与标识符之间
-                // 等位置都被正确处理.
-                TokKind::Ident
-                    if matches!(
-                        self.cur.text.as_str(),
-                        "__seg_fs" | "__seg_gs" | "__seg_cs" | "__seg_ds" | "__seg_es" | "__seg_ss"
-                    ) =>
-                {
-                    self.spec_addr_space = AddrSpace::from_ident(&self.cur.text);
-                    self.advance();
-                },
+                // x86 段寄存器地址空间限定符 (per-cpu 变量访问需要)。
+                // 已由循环顶部的 `try_consume_seg_qualifier` 统一处理（两个分词循环共用
+                // 同一个入口），此处不再单独一条 arm。
                 // CUDA/HIP 函数限定符: __global__ / __device__ / __host__
                 // 仅 -fcuda / -fhip 时解析为限定符 (否则是普通标识符,
                 // 由后续语义阶段报 undeclared, 位置精确到标识符)
@@ -6830,6 +6834,12 @@ impl<'a> Parser<'a> {
             // 继续消费后续修饰符. 整数类 (int / char / short / long / int128)
             // 与 _Bool / void / _Atomic 不与 _Complex 组合, 加 `break` 防止吞掉
             // 后续 declarator ident (例 `typedef _Bool _Bool;`).
+            //
+            // 段地址空间限定符：基类型**之后**的那个位置（`int __seg_gs *p`）只有这个
+            // 循环能看到，所以它也必须走同一个入口。
+            if self.try_consume_seg_qualifier() {
+                continue;
+            }
             match self.cur.kind {
                 TokKind::KwComplex => {
                     is_complex = true;
@@ -7052,12 +7062,16 @@ impl<'a> Parser<'a> {
             }
         }
         // 消耗类型后的内核属性宏 (仅在后面是标识符或指针时, 避免误吞函数名)
+        //
+        // `__seg_*` 必须排除：它们不是「可以丢掉的属性宏」，而是改变内存访问位置的类型
+        // 限定符 —— 被这个循环吞掉就是静默按普通地址访问（与 gcc 产物不一致）。
         while self.cur.kind == TokKind::Ident
             && self.cur.text.starts_with("__")
             && !self.typedefs.contains_key(&self.cur.text)
             && self.cur.text != "__attribute__"
             && self.cur.text != "__asm__"
             && self.cur.text != "__asm"
+            && !Self::seg_qualifier_text(&self.cur.text)
             && self.peek_declarator_start()
         {
             self.advance();
@@ -7162,6 +7176,34 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// `__seg_*` 段寄存器地址空间限定符的字面量集合。
+    /// gcc 只接受 `fs`/`gs` 两个，dcc 另外四个（cs/ds/es/ss）也解析但不生段前缀，
+    /// 因为现存语料里出现过它们。
+    fn seg_qualifier_text(text: &str) -> bool {
+        matches!(
+            text,
+            "__seg_fs" | "__seg_gs" | "__seg_cs" | "__seg_ds" | "__seg_es" | "__seg_ss"
+        )
+    }
+
+    /// 当前 token 是 `__seg_*` 时：记录到 `spec_addr_space` 并消费它，返回是否消费。
+    ///
+    /// 这是段限定符的**唯一**入口：声明说明符循环（基类型之前与之后两个）、
+    /// `skip_ptr_qualifiers`（基类型与 `*` 之间、`*` 与名字之间）全部走它。以前只有
+    /// 第一个循环有这条 arm，于是 `int __seg_gs *p`（限定符在基类型之后）被下面那个
+    /// 「吞掉 `__` 开头的内核属性宏」的循环静默吃掉 —— 实测只有 `__seg_gs int *p` 能
+    /// 活到 codegen，两者语义相同但只有一个发 `%gs:`，那是比不发更危险的 silently-wrong。
+    fn try_consume_seg_qualifier(&mut self) -> bool {
+        if self.cur.kind != TokKind::Ident || !Self::seg_qualifier_text(&self.cur.text) {
+            return false;
+        }
+        if matches!(self.spec_addr_space, AddrSpace::None) {
+            self.spec_addr_space = AddrSpace::from_ident(&self.cur.text);
+        }
+        self.advance();
+        true
+    }
+
     fn skip_ptr_qualifiers(&mut self) {
         while matches!(
             self.cur.kind,
@@ -7178,14 +7220,15 @@ impl<'a> Parser<'a> {
                     | "__attribute__"
                     | "_ms_restrict"
                     | "_restrict"
-                    | "__seg_gs"
-                    | "__seg_fs"
-                    | "__seg_ds"
-                    | "__seg_es"
-                    | "__seg_cs"
-                    | "__seg_ss"
-            ))
+            ) || Self::seg_qualifier_text(&self.cur.text))
         {
+            // 段地址空间限定符走唯一入口（记录到 spec_addr_space 并消费），不在
+            // const/volatile/restrict 那一族里重复处理。
+            let seg_text = self.cur.text.clone();
+            if Self::seg_qualifier_text(&seg_text) {
+                self.try_consume_seg_qualifier();
+                continue;
+            }
             if self.cur.text == "__attribute__" {
                 self.skip_attributes();
             } else {
@@ -7215,20 +7258,11 @@ impl<'a> Parser<'a> {
                         self.decl_quals |= QualifierFlags::RESTRICT
                     },
                     _ => {
-                        // Address space qualifiers (__seg_gs etc.) are
-                        // handled by spec_addr_space elsewhere; only warn
-                        // for truly unknown identifier tokens.
-                        if self.cur.kind == TokKind::Ident
-                            && !matches!(
-                                self.cur.text.as_str(),
-                                "__seg_gs"
-                                    | "__seg_fs"
-                                    | "__seg_ds"
-                                    | "__seg_es"
-                                    | "__seg_cs"
-                                    | "__seg_ss"
-                            )
-                        {
+                        // Address space qualifiers are consumed above via the single
+                        // `try_consume_seg_qualifier` entry point, so anything landing
+                        // here that is still an identifier is a genuinely unknown
+                        // qualifier token.
+                        if self.cur.kind == TokKind::Ident {
                             self.warn_here(
                                 "W1014",
                                 format!(
@@ -7273,16 +7307,28 @@ impl<'a> Parser<'a> {
     /// 类似 parse_ptr_suffix, 但在创建指针时将限定符应用到内部类型.
     /// 用于处理 `T const *p` 中 const 属于 pointed-to 类型的情况.
     fn parse_ptr_suffix_with_quals(&mut self, mut ty: Type, inner_quals: QualifierFlags) -> Type {
+        let mut first = true;
         loop {
             if self.cur.kind != TokKind::Star {
                 break;
             }
             self.advance();
             // 将内部限定符应用到第一次指针创建时的内部类型
+            //
+            // 地址空间限定符 (`__seg_gs` / `__seg_fs`) 与 const 同侧：它属于 **pointee**，
+            // 所以必须在这第一条 `*` 上落进 QualType（`T __seg_gs *p` 的段前缀由解引用
+            // 那一侧读出来）。旧代码把它硬写成 `AddrSpace::None`，于是「基类型后、`*` 前」
+            // 这个 gcc 认可的位置上的段限定符全部被静默丢掉 —— 实测只有 decl-specifier
+            // 位置（`__seg_gs T *f(void)`）能活到 codegen。
+            let addr_space = if first { self.spec_addr_space } else { AddrSpace::None };
+            if first {
+                self.spec_addr_space = AddrSpace::None;
+                first = false;
+            }
             let inner = QualType {
                 base: ty.clone(),
                 quals: inner_quals,
-                addr_space: AddrSpace::None,
+                addr_space,
             };
             ty = Type::Ptr(Box::new(inner));
             // 后续的限定符 (如 `T const * const *p`) 属于外层指针

@@ -241,6 +241,14 @@ struct FnScope {
     /// 块内视角完全看不到。当时实测：声明被删后循环读一个从未赋值的 `i`，
     /// `for(int ti=0;ti<5;ti=ti+4){for(int i=ti;i<5;i++)s=s+i;}` 在 -O2 得 9 而应 14。
     assigned: HashSet<String>,
+    /// 本函数拥有的每个名字（**参数 + 所有嵌套块的局部声明**）的声明类型。
+    ///
+    /// 为什么需要它：coalesce 只能在「两边类型完全相同」时把一个名字换成另一个。
+    /// 旧实现只从**当前块的声明**里查类型，而参数根本不在其中 —— 查不到就干脆不比，
+    /// 于是 `int __seg_gs *lp = p;`（p 是 `int *`）被合并成 `lp`→`p`，pointee 的
+    /// `__seg_gs` 连同 `%gs:` 前缀一起消失（实测 -O2 发成普通地址读写）。
+    /// 差别的不是“少一次优化”：那是发往错误内存的一次读写。
+    types: HashMap<String, Type>,
 }
 
 impl FnScope {
@@ -249,10 +257,12 @@ impl FnScope {
             locals: HashSet::new(),
             escaped: HashSet::new(),
             assigned: HashSet::new(),
+            types: HashMap::new(),
         };
         for p in &f.params {
             if let Some(n) = &p.name {
                 s.locals.insert(n.name.clone());
+                s.types.insert(n.name.clone(), p.ty.clone());
             }
         }
         if let Some(body) = &f.body {
@@ -270,6 +280,7 @@ fn collect_scope(b: &Block, s: &mut FnScope) {
         match item {
             BlockItem::Decl(Decl::Var(v)) => {
                 s.locals.insert(v.name.name.clone());
+                s.types.insert(v.name.name.clone(), v.ty.clone());
                 // 数组名在表达式里等价于 `&a[0]`, 元素可经该指针被写。
                 if matches!(v.ty, Type::Array(_, _)) || is_addr_taken(&v.name.name, b) {
                     s.escaped.insert(v.name.name.clone());
@@ -706,13 +717,9 @@ fn coalesce_block(block: &mut Block, scope: &FnScope) {
     for item in &block.items {
         collect_assignments(item, &mut assigned, &mut decl_counts);
     }
-    // Collect variable types for compatibility check
-    let mut var_types: HashMap<String, Type> = HashMap::new();
-    for item in &block.items {
-        if let BlockItem::Decl(Decl::Var(v)) = item {
-            var_types.insert(v.name.name.clone(), v.ty.clone());
-        }
-    }
+    // 类型比对用的表在 `scope.types`（参数 + 全函数嵌套声明）。旧实现只收本块的
+    // Decl，参数查不到就整段跳过比对 —— 那是下面「类型未知 ⇒ 不合并」这条规则
+    // 要堵的洞（见 `FnScope::types` 的注释）。
     // 间接写 (`*p = x` / `p->f = x`) 改的是哪个名字 AST 层判不了, 只能把所有被取址
     // 与数组类型的局部一律视为已写。
     let opaque_write = assigned.contains("") || scope.assigned.contains("");
@@ -747,12 +754,22 @@ fn coalesce_block(block: &mut Block, scope: &FnScope) {
                     // decay computes address at each use site, but aliasing would
                     // make codegen treat the array name as a pre-computed pointer,
                     // skipping the LEA instruction.
-                    let src_ty = var_types.get(src);
-                    let dst_ty = var_types.get(dst);
-                    if let (Some(s), Some(d)) = (src_ty, dst_ty) {
-                        if std::mem::discriminant(s) != std::mem::discriminant(d) {
-                            continue;
-                        }
+                    // 别名只在**类型完全相同**时成立。旧判据用的是 `mem::discriminant`,
+                    // 那只比枚举变体：`int __seg_gs *` 与 `int *` 都是 `Type::Ptr(..)`，
+                    // 于是把带段的拷贝目标换成不带段的源名字 —— **pointee 的 QualType
+                    // （`__seg_gs` / `const` / `volatile`）跟着消失**。实测后果不是“少一次
+                    // 优化”而是错值：-O2 下 `int __seg_gs *lp = p; return *lp;` 发成普通
+                    // 地址读写（-O0/-O1 正常），在用户态是 GS base 为 0 所以看不出来，
+                    // 在内核 per-cpu 场景就是往错误的内存读写。
+                    let src_ty = scope.types.get(src);
+                    let dst_ty = scope.types.get(dst);
+                    let (Some(s), Some(d)) = (src_ty, dst_ty) else {
+                        // 类型未知 ⇒ 不合并。宁可少一次优化，也不能拿“看不到类型”
+                        // 当“类型相同”。
+                        continue;
+                    };
+                    if s != d {
+                        continue;
                     }
                     alias.insert(dst.to_string(), src.to_string());
                 }
