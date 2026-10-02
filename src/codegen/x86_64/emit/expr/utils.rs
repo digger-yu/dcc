@@ -802,38 +802,13 @@ impl Codegen {
         let byte_off = offset.min(data.len());
         self.emit_string_ptr_slot(rel, &data[byte_off..], rodata_slots)
     }
+    /// 副作用判据：**实体已移到后端无关的语义层**（`crate::semantics::expr_has_side_effects`）。
+    ///
+    /// 为什么：同一件判据 codegen（复合赋值单求值）与 SSA 构建器（自增自减/复合赋值的
+    /// 读—改—写）两边都要用，只写在后端里会让 SSA 侧没法区分「重复降级无害」与
+    /// 「把 `i++` 跑两遍」。这里保留 `Self::` 入口是为了不拆改动 20 多个调用点。
     pub(crate) fn expr_has_side_effects(e: &Expr) -> bool {
-        match e {
-            Expr::Unary { op, e: inner, .. } => {
-                matches!(op, UnOp::Neg) // PreDecr/PostDecr/PreIncr/PostIncr are separate variants
-                    || Self::expr_has_side_effects(inner)
-            },
-            Expr::Binop { l, r, .. } | Expr::Comma { l, r, .. } => {
-                Self::expr_has_side_effects(l) || Self::expr_has_side_effects(r)
-            },
-            Expr::Assign { .. } => true,
-            Expr::Call { .. } => true,
-            Expr::PreInc { .. }
-            | Expr::PreDec { .. }
-            | Expr::PostInc { .. }
-            | Expr::PostDec { .. } => true,
-            Expr::Deref { e, .. }
-            | Expr::Cast { e, .. }
-            | Expr::Real { e, .. }
-            | Expr::Imag { e, .. } => Self::expr_has_side_effects(e),
-            Expr::Index { arr, idx, .. } => {
-                Self::expr_has_side_effects(arr) || Self::expr_has_side_effects(idx)
-            },
-            Expr::Member { expr, .. } => Self::expr_has_side_effects(expr),
-            Expr::Cond {
-                cond, then_, else_, ..
-            } => {
-                Self::expr_has_side_effects(cond)
-                    || Self::expr_has_side_effects(then_)
-                    || Self::expr_has_side_effects(else_)
-            },
-            _ => false,
-        }
+        crate::semantics::expr_has_side_effects(e)
     }
     pub(crate) fn expr_span(e: &Expr) -> &crate::diagnostics::Span {
         match e {
@@ -896,73 +871,10 @@ impl Codegen {
         }
         (fallback_file, line, span.col)
     }
+    /// 结构相等判据：**实体已移到后端无关的语义层**，与上面的副作用判据同一理由
+    /// （复合赋值的「r 里哪一半是 lvalue 拷贝」在 codegen 与 SSA 两侧都要判）。
     pub(crate) fn exprs_structurally_equal(a: &Expr, b: &Expr) -> bool {
-        match (a, b) {
-            (Expr::Ident { name: na, .. }, Expr::Ident { name: nb, .. }) => na.name == nb.name,
-            (Expr::Int { v: va, .. }, Expr::Int { v: vb, .. }) => va == vb,
-            (Expr::Deref { e: ea, .. }, Expr::Deref { e: eb, .. }) => {
-                Self::exprs_structurally_equal(ea, eb)
-            },
-            (
-                Expr::Index {
-                    arr: aa, idx: ia, ..
-                },
-                Expr::Index {
-                    arr: ab, idx: ib, ..
-                },
-            ) => Self::exprs_structurally_equal(aa, ab) && Self::exprs_structurally_equal(ia, ib),
-            (
-                Expr::Member {
-                    expr: ea,
-                    field: fa,
-                    is_arrow: aa,
-                    ..
-                },
-                Expr::Member {
-                    expr: eb,
-                    field: fb,
-                    is_arrow: ab,
-                    ..
-                },
-            ) => aa == ab && fa.name == fb.name && Self::exprs_structurally_equal(ea, eb),
-            (Expr::Unary { op: oa, e: ea, .. }, Expr::Unary { op: ob, e: eb, .. }) => {
-                oa == ob && Self::exprs_structurally_equal(ea, eb)
-            },
-            (Expr::PreInc { e: ea, .. }, Expr::PreInc { e: eb, .. })
-            | (Expr::PreDec { e: ea, .. }, Expr::PreDec { e: eb, .. })
-            | (Expr::PostInc { e: ea, .. }, Expr::PostInc { e: eb, .. })
-            | (Expr::PostDec { e: ea, .. }, Expr::PostDec { e: eb, .. }) => {
-                Self::exprs_structurally_equal(ea, eb)
-            },
-            (
-                Expr::Binop {
-                    op: oa,
-                    l: la,
-                    r: ra,
-                    ..
-                },
-                Expr::Binop {
-                    op: ob,
-                    l: lb,
-                    r: rb,
-                    ..
-                },
-            ) => {
-                oa == ob
-                    && Self::exprs_structurally_equal(la, lb)
-                    && Self::exprs_structurally_equal(ra, rb)
-            },
-            (Expr::Cast { e: ea, .. }, Expr::Cast { e: eb, .. }) => {
-                Self::exprs_structurally_equal(ea, eb)
-            },
-            (Expr::Comma { l: la, r: ra, .. }, Expr::Comma { l: lb, r: rb, .. }) => {
-                Self::exprs_structurally_equal(la, lb) && Self::exprs_structurally_equal(ra, rb)
-            },
-            (Expr::AddrOf { e: ea, .. }, Expr::AddrOf { e: eb, .. }) => {
-                Self::exprs_structurally_equal(ea, eb)
-            },
-            _ => false,
-        }
+        crate::semantics::exprs_structurally_equal(a, b)
     }
     pub(crate) fn expr_warn(&self, e: &Expr, msg: &str) {
         eprintln!("{}", self.expr_warning(e, msg));

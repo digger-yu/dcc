@@ -625,3 +625,121 @@ pub fn storage_type_from_ast(ty: &Type) -> StorageType {
         _ => StorageType::Scalar { size: ty.size() },
     }
 }
+
+// ============================================================================
+// 共享的表达式判据（codegen 与 SSA 降级共用）
+// ============================================================================
+
+/// 这条表达式求值是否带副作用（自增自减/赋值/调用/它们嵌套在任何子表达式里）。
+///
+/// 为什么放在后端无关的语义层而不是某个后端里：「先算地址、读—改—写只用那一个地址」
+/// 这一类降级在 **codegen**（`x86_64` 的复合赋值单求值路径）与 **SSA 构建器**（自增
+/// 自减、复合赋值）两侧都需要同一个判据。以前它只在 x86_64 里有，于是 SSA 侧根本
+/// 没法区分「重复降级子表达式无害」与「会把 `i++` 跑两遍」—— 实测 -O2 下
+/// `a[i] += 7` 的返回值是未初始化垃圾、`a[i++] += 5` 写错位置（见 `docs/` 本轮记录）。
+/// 判据只写一份，两侧都从这里取。
+pub fn expr_has_side_effects(e: &Expr) -> bool {
+    match e {
+        Expr::Unary { op, e: inner, .. } => {
+            matches!(op, ast::UnOp::Neg) // PreDecr/PostDecr/PreIncr/PostIncr 是独立变体
+                || expr_has_side_effects(inner)
+        },
+        Expr::Binop { l, r, .. } | Expr::Comma { l, r, .. } => {
+            expr_has_side_effects(l) || expr_has_side_effects(r)
+        },
+        Expr::Assign { .. } => true,
+        Expr::Call { .. } => true,
+        Expr::PreInc { .. } | Expr::PreDec { .. } | Expr::PostInc { .. } | Expr::PostDec { .. } => {
+            true
+        },
+        Expr::Deref { e, .. }
+        | Expr::Cast { e, .. }
+        | Expr::Real { e, .. }
+        | Expr::Imag { e, .. } => expr_has_side_effects(e),
+        Expr::Index { arr, idx, .. } => {
+            expr_has_side_effects(arr) || expr_has_side_effects(idx)
+        },
+        Expr::Member { expr, .. } => expr_has_side_effects(expr),
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
+            expr_has_side_effects(cond)
+                || expr_has_side_effects(then_)
+                || expr_has_side_effects(else_)
+        },
+        _ => false,
+    }
+}
+
+/// 两棵表达式子树是否**结构相同**（同一对象 + 同样的下标/字段链）。
+///
+/// 用途：parser 把复合赋值 `LV op= R` 展开成 `Assign{l: LV, r: Binop{op, LV_拷贝, R}}`，
+/// 于是「r 里那一半边是不是 LV 的拷贝」必须靠结构相等判断，两侧（codegen 的单求值
+/// 路径、SSA 的读—改—写降级）用的是同一份实现。
+///
+/// 注意：这里**不**比较类型与 span，只比形态与名字 —— 这是刻意的：拷贝子树在
+/// 整数提升等处可能带不同 span，比 span 会让判定失效而退回双求值的错路。
+pub fn exprs_structurally_equal(a: &Expr, b: &Expr) -> bool {
+    match (a, b) {
+        (Expr::Ident { name: na, .. }, Expr::Ident { name: nb, .. }) => na.name == nb.name,
+        (Expr::Int { v: va, .. }, Expr::Int { v: vb, .. }) => va == vb,
+        (Expr::Deref { e: ea, .. }, Expr::Deref { e: eb, .. }) => {
+            exprs_structurally_equal(ea, eb)
+        },
+        (
+            Expr::Index {
+                arr: aa, idx: ia, ..
+            },
+            Expr::Index {
+                arr: ab, idx: ib, ..
+            },
+        ) => exprs_structurally_equal(aa, ab) && exprs_structurally_equal(ia, ib),
+        (
+            Expr::Member {
+                expr: ea,
+                field: fa,
+                is_arrow: aa,
+                ..
+            },
+            Expr::Member {
+                expr: eb,
+                field: fb,
+                is_arrow: ab,
+                ..
+            },
+        ) => aa == ab && fa.name == fb.name && exprs_structurally_equal(ea, eb),
+        (Expr::Unary { op: oa, e: ea, .. }, Expr::Unary { op: ob, e: eb, .. }) => {
+            oa == ob && exprs_structurally_equal(ea, eb)
+        },
+        (Expr::PreInc { e: ea, .. }, Expr::PreInc { e: eb, .. })
+        | (Expr::PreDec { e: ea, .. }, Expr::PreDec { e: eb, .. })
+        | (Expr::PostInc { e: ea, .. }, Expr::PostInc { e: eb, .. })
+        | (Expr::PostDec { e: ea, .. }, Expr::PostDec { e: eb, .. }) => {
+            exprs_structurally_equal(ea, eb)
+        },
+        (
+            Expr::Binop {
+                op: oa,
+                l: la,
+                r: ra,
+                ..
+            },
+            Expr::Binop {
+                op: ob,
+                l: lb,
+                r: rb,
+                ..
+            },
+        ) => {
+            oa == ob && exprs_structurally_equal(la, lb) && exprs_structurally_equal(ra, rb)
+        },
+        (Expr::Cast { e: ea, .. }, Expr::Cast { e: eb, .. }) => exprs_structurally_equal(ea, eb),
+        (Expr::Comma { l: la, r: ra, .. }, Expr::Comma { l: lb, r: rb, .. }) => {
+            exprs_structurally_equal(la, lb) && exprs_structurally_equal(ra, rb)
+        },
+        (Expr::AddrOf { e: ea, .. }, Expr::AddrOf { e: eb, .. }) => {
+            exprs_structurally_equal(ea, eb)
+        },
+        _ => false,
+    }
+}

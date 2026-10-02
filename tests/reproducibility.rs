@@ -264,7 +264,10 @@ int many(void) {
 }
 "#;
 
-    let expected: Vec<&str> = vec!["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
+    // 跨轮基准序：只在第一轮定下来，后面每一轮都拿它比。
+    let mut reference: Option<Vec<String>> = None;
+
+    let expected_locals: Vec<&str> = vec!["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
 
     for round in 0..30 {
         let (prog, diags) = dcc::parser::parse(MULTI_LOCAL_SOURCE.as_bytes(), "many.c");
@@ -295,10 +298,36 @@ int many(void) {
             })
             .collect();
 
+        // 本测试守的是两件事，都不是「一个临时值也不能多」：
+        //   1. **用户声明的局部**必须按源码声明序出现在最前面（少了、换了都是
+        //      `HashSet` 迭代序泄漏，会直接改写栏位偏移 ⇒ -O2 产物不可复现）；
+        //   2. 30 轮跑出的序必须逐字相同（序一旦取决于哈希序就会在这里暴露）。
+        //
+        // 后面允许有合成临时值：取址类临时值**不得**被内联进取址操作数（否则重建出
+        // `&(&m[i])[j]` 这种嵌套取址，从错值恶化成段错误；判据见 `is_addr_producer`）。
+        // 所以旧版那句「emitted 恰好等于 6 个用户局部」已经不再是要守的性质 ——
+        // 把它换成下面三条：前缀 = 源码序、余下全是 `_` 前缀的合成值、30 轮恒等。
+        let head: Vec<&str> = emitted.iter().take(expected_locals.len()).map(String::as_str).collect();
         assert_eq!(
-            emitted, expected,
-            "round {round}: rebuild_block 的局部声明序不再是源码声明序 \
-             (HashSet 迭代序泄漏会直接改写栈槽偏移, 使 -O2 产物不可复现)"
+            head, expected_locals,
+            "round {round}: rebuild_block 的前 {n} 条局部声明必须是源码声明序（实际 {emitted:?}）",
+            n = expected_locals.len()
         );
+        for extra in &emitted[expected_locals.len()..] {
+            assert!(
+                extra.starts_with('_'),
+                "round {round}: 用户局部之后只能出现编译器合成临时值，实际多了一个 {extra:?}（全部：{emitted:?}）"
+            );
+        }
+        if round == 0 {
+            // 基准序：后面每一轮都拿它比，才抓得住「同一输入两次编译序不同」。
+            reference = Some(emitted.clone());
+        } else {
+            assert_eq!(
+                reference.as_ref().unwrap(),
+                &emitted,
+                "round {round}: 局部声明序在两次重建之间变了（不可复现的直接证据）"
+            );
+        }
     }
 }

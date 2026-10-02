@@ -35,6 +35,13 @@
 //      `_s` 是合法用户标识符，而 `int _tbin` 的第 2 个版本 `_tbin_2` 会与
 //      `fresh("bin")` 的临时值 base 完全同名 ⇒ 两个不相关的 SSA 名互相覆盖。
 //
+//   8. 内存左值的「读—改—写」必须在 IR 里真的读出又写回，且左值只求值一次。
+//      `Expr::PostInc/PreInc` 的降级曾只认 `Expr::Ident` 操作数，其余形态直接返回常量
+//      1（既不读也不写，也不标 `unsupported`）⇒ 实测 -O2 下 `int r = ++*p;` 返回 1 且
+//      对象没被写；复合赋值那一半把 parser 展开出来的左值拷贝求值两遍 ⇒
+//      `int r = a[i] += 7;` 返回未初始化垃圾、`a[i++] += 5` 写错格子。
+//      判据与 codegen 共用 `crate::semantics`，修法是地址只求一次的读—改—写。
+//
 // 全部通过 `run_gcc_cross_check_opt` 运行：带 `-O` 档位、带超时、与 gcc 逐字节对照。
 
 /// 逐档与 gcc 对照同一份夹具; 失效形态含 HANG, 故必须走有界运行。
@@ -120,6 +127,39 @@ fn underscore_locals_match_gcc_at_all_levels() {
         "underscore-locals",
         include_str!("../fixtures/opt/underscore_locals.c"),
         "下划线命名的用户变量被当成合成临时值, 或 SSA 版本名与临时值 base 撞名",
+    );
+}
+
+/// 内存左值读—改—写（`++*p` / `a[i]++` / `++s.f` / `a[i] += 7` / `*--p += 1` / volatile
+/// / 循环体内）逐档与 gcc 对照。见文件头第 8 条与夹具注释里的实测数字。
+#[test]
+fn ssa_mem_rmw_matches_gcc_at_all_levels() {
+    assert_all_levels_match_gcc(
+        "ssa-mem-rmw",
+        include_str!("../fixtures/opt/ssa_mem_rmw.c"),
+        "SSA 降级丢掉了内存左值的读—改—写（返回常量且不写内存）",
+    );
+}
+
+/// 多维下标的**写入**逐档与 gcc 对照。
+///
+/// 守的是两个已观测的失效，它们共用同一句夹具（`tests/fixtures/c/array2d_global_stride.c`）：
+///   1. 行 stride 被按元素宽度算（§6 的「缺陷 6」）—— 行读回全相同；
+///   2. `m[i][j] = v` 的内层基址 `m[i]` 是**数组类型**的左值，SSA 降级把它当右值取
+///      （`IndexLoad{ty: Array}` ⇒ 重建后是个帧临时里的行副本）⇒ 写进了副本，数组本体
+///      没被动。只在 -O3（展开后下标全成常量）可现，实测 `small7x3[3][0]`/`[6][0]`
+///      读回 0 而同一行 `[i][1]`/`[i][2]` 正常。
+///
+/// 为什么不只靠语料级门：同一个夹具在 `c_cross.rs` 里只跑 `run_gcc_cross_check`
+/// （相等于 -O0），能接住它的只有 `check_opt_equivalence.sh` 那条全档位语料级测试；
+/// 而那是 611 夹具 × 3 档的十余分钟门，红一条时定位慢。这里按档逐个比，失败信息
+/// 直接给出函数名与档位。完整历史与修法见 `docs/ssa-pass-upgrade-plan.md` §7.40。
+#[test]
+fn c_array2d_global_stride_matches_gcc_at_all_levels() {
+    assert_all_levels_match_gcc(
+        "c-array2d-global-stride-opt",
+        include_str!("../fixtures/c/array2d_global_stride.c"),
+        "多维下标写入在高档位下行副本化/行 stride 算错",
     );
 }
 
@@ -367,6 +407,27 @@ fn pointer_to_array_typedef_matches_gcc_at_all_levels() {
             run_gcc_cross_check_opt("ptr-to-array-typedef", src, &[flag]),
             0,
             "{flag}: 指针指数组的 typedef（尺寸 / 步长 / 写入位置）与 gcc 不一致"
+        );
+    }
+}
+
+/// 一般的「左值地址」形态：`&a[i][j]`（下标基址本身是计算出来的数组行）。
+///
+/// 过去 `Expr::AddrOf` 降级遇到内层基址仍是数组时 `unsupported`，整函数退回 AST 通道
+/// （正确但丢掉全部 SSA 优化）。现在由逐层 `InstKind::IndexAddr` 表达，且地址类临时值
+/// 不被内联进取址操作数（否则重建出 `&(&m[i])[j]` 嵌套取址 —— 历史上从错值恶化成段错误）。
+///
+/// 夹具覆盖一维/二维/三维、非 2 次幂行步长、常量与变量下标混用、8 字节元素、经
+/// `(*p)[j]` 的衰减基址、行指针再下标、全局二维数组。期望值取 gcc -O0 实测并按布局
+/// 手算复核；四个档位逐档与 gcc 对照（错值与段错误都藏不住）。
+#[test]
+fn lvalue_addr_rows_match_gcc_at_all_levels() {
+    let source = include_str!("../fixtures/c/lvalue_addr_rows.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("lvalue-addr-rows", source, &[flag]),
+            0,
+            "{flag}: 一般左值地址（&a[i][j] 逐层 IndexAddr）与 gcc 不一致"
         );
     }
 }

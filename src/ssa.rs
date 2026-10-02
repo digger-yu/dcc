@@ -138,6 +138,32 @@ pub enum InstKind {
         /// `obj` 已是指向结构体的指针：重建为 `&obj->field`，不再额外解引用。
         is_arrow: bool,
     },
+    /// `dest = &arr[idx]` —— 下标表达式的**左值地址**（基址 + 下标*步长，不载入）。
+    ///
+    /// 与 `MemberAddr` 同一条缺口、同一个解法：`InstKind::AddrOf { base }` 只能取具名
+    /// 对象的基址，而 `&a[i]` 要「基址 + 下标*步长」。缺它时降级只能 `unsupported`，
+    /// 后果不是错值而是**整个函数不进 SSA**（产物正确但丢了全部优化）—— 实测
+    /// `int *p = &x[2];` 就在 `build_from_func` 阶段被拒。
+    ///
+    /// 偏移与步长都不在 SSA 层算：重建时装回 `Expr::AddrOf{Expr::Index{..}}`，交给
+    /// codegen 的 `AddrOf` 分支（它本来就有 `Expr::Index` 与 `Expr::Deref` 两个子形态，
+    /// 所以下标取址在 AST 路径上一直是对的）。单一真源，不在这复制一份布局算术。
+    ///
+    /// 一般的「左值地址」形态：`&m[i][j]`（乃至任意维 `&m[i][j][k]…`）逐层发
+    /// `IndexAddr`，每一层的 `arr` 是内一层的地址。内层基址本身是「计算出来的数组行」
+    /// （内层下标的结果类型仍是数组）时，降级用 `lower_lvalue_base_addr` 递归再发一条
+    /// `IndexAddr`：那一层的 `ty` 取内层下标的**结果类型**（即行数组类型），行步长由
+    /// codegen 用 `sizeof(row)` 算。地址类临时值不得被内联进取址操作数（见
+    /// `plan_inlined_temps` 的 addr-slot 守卫），重建 AST 始终是 `&<rowvar>[j]` 而非嵌套
+    /// 取址。
+    ///
+    /// `ty` 是**元素类型**（决定步长，与 `IndexLoad`/`IndexStore` 同一约定；中间层可以
+    /// 是数组类型 = 行）；`arr` 是基址操作数（数组对象的地址、指针值，或内层 `IndexAddr`）。
+    IndexAddr {
+        arr: Operand,
+        idx: Operand,
+        ty: Type,
+    },
     /// `dest = obj.field`
     MemberLoad {
         obj: Operand,
@@ -914,6 +940,175 @@ impl Builder {
         self.lower_expr_inner(e, None)
     }
 
+    /// 求一个**左值表达式**的地址操作数，专供 `IndexAddr` 的基址（`arr`）槽使用。
+    ///
+    /// 与 `lower_expr` 的唯一区别：当基址本身是「计算出来的数组行」（内层下标，
+    /// 其类型仍是数组，如 `&m[i][j]` 里的 `m[i]`）时，`lower_expr` 会发 `IndexLoad`
+    /// 把该行**当值载入** —— 那是错的，我们要的是行的**地址**。这里对这种形状递归
+    /// 发一条 `IndexAddr`：元素类型取内层下标的结果类型（即那一行的数组类型），行步长
+    /// 交给 codegen 的 `AddrOf(Index)` 用 `sizeof(row)` 算，SSA 层不复制任何布局算术
+    /// （单一真源）。其余基址形态（具名数组/指针、数组成员、解引用基址）本就由各自的
+    /// 衰减分支给出地址，直接委托 `lower_expr`。
+    fn lower_lvalue_base_addr(&mut self, e: &Expr) -> Operand {
+        if let Expr::Index {
+            arr,
+            idx,
+            span,
+            ty: row_ty,
+        } = e
+        {
+            let base = self.lower_lvalue_base_addr(arr);
+            let i = self.lower_expr(idx);
+            let ptr_ty = Type::Ptr(Box::new(QualType::new(row_ty.clone())));
+            let dest = self.fresh("idxaddr", ptr_ty, span);
+            self.emit(Inst {
+                dest: Some(dest.clone()),
+                kind: InstKind::IndexAddr {
+                    arr: base,
+                    idx: i,
+                    ty: row_ty.clone(),
+                },
+                span: span.clone(),
+            });
+            self.define(dest.clone());
+            return Operand::Var(dest);
+        }
+        self.lower_expr(e)
+    }
+
+    /// 该类型是不是「标量整数或指针」—— 即 `Builder::lower_mem_rmw` 能造出正确 Bin 的那个域。
+    ///
+    /// 浮点/聚合/复数不在内：它们的 compound assign 旧路径已经在产出正确的类型组合，
+    /// 而这里发的 `InstKind::Bin` 拿不到那些类型信息（实测把 C++ 的 `clog << ws` 编成
+    /// 一条 float 上的 `Shl` ⇒ `E1003 unsupported floating-point operation`）。
+    fn is_scalar_int_or_ptr(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::Bool
+                | Type::Char
+                | Type::UChar
+                | Type::Short
+                | Type::UShort
+                | Type::Int
+                | Type::UInt
+                | Type::Long
+                | Type::ULong
+                | Type::LongLong
+                | Type::ULongLong
+                | Type::Int128
+                | Type::UInt128
+                | Type::Ptr(_)
+                | Type::Enum(..)
+        )
+    }
+    
+    /// 内存左值访问的 volatile 判据 —— 与 `Expr::Deref` / `Expr::Index` / `Expr::Member`
+    /// 三条**右值**降级各自的判据一致（集中到这里，避免读侧与写侧用两套口径）。
+    fn lvalue_is_volatile(&self, lv: &Expr) -> bool {
+        match lv {
+            Expr::Deref { e, .. } => matches!(&e.ty(), Type::Ptr(qt) if qt.is_volatile()),
+            Expr::Index { arr, .. } => matches!(arr.ty(), Type::Array(qt, _) if qt.is_volatile()),
+            Expr::Member {
+                expr, is_arrow, ..
+            } => {
+                if *is_arrow {
+                    matches!(&expr.ty(), Type::Ptr(qt) if qt.is_volatile())
+                } else if let Expr::Ident { name, .. } = expr.as_ref() {
+                    self.func
+                        .local_quals
+                        .get(name.name.as_str())
+                        .map(|q| q.is_volatile())
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+            },
+            _ => false,
+        }
+    }
+
+    /// 内存左值（`*p` / `a[i]` / `s.f` / `q->g`）的**读—改—写**降级：自增自减与复合
+    /// 赋值共用这一条。地址只求一次，旧值与新值各是一个 SSA 临时值，写回同一个地址。
+    ///
+    /// 为什么必须有它（实测，不是推的）：`Expr::PostInc/PreInc` 那条 arm 过去只认
+    /// `Expr::Ident` 操作数，其余形态直接 `return Operand::Int(one)` —— 既不读也不写，
+    /// 也不标 `unsupported`，函数照样进 SSA。于是 -O2 下逐条与 gcc 对照：
+    ///   `int r = ++*p;` → r 恒为 1、`a[0]` 根本没被写（gcc：r=1、a[0]=1）；
+    ///   `int r = a[3]++;` → r=1（应为旧值 0）且 a[3] 不写；`++s.f` / `++q->g` 同构。
+    /// 复合赋值那半边（`a[i] += 7` 的返回值是未初始化垃圾）见 `lower_expr_inner` 的
+    /// `Expr::Assign` 分支。
+    ///
+    /// 地址从 `Expr::AddrOf` 那条已验证的降级拿（Ident / `&s.f` / `&a[i]` 分别由
+    /// `AddrOf` / `MemberAddr` / `IndexAddr` 表达），不在这里重抄一份形状判据；
+    /// `*p` 则直接取指针值（`&*p == p`，走 AddrOf 会换来一次不必要的退 SSA）。
+    ///
+    /// store 宽度真源：`InstKind::Store` 不带被写对象类型，重建时由
+    /// [`store_pointee_ty`] 从地址操作数的类型还原 ⇒ 地址临时值的类型必须是
+    /// `Ptr(对象类型)`，给错就是越界写。
+    fn lower_mem_rmw(
+        &mut self,
+        lv: &Expr,
+        op: BinOp,
+        rhs: Operand,
+        res_ty: Option<&Type>,
+        span: &Span,
+    ) -> Option<(Operand, Operand)> {
+        let ty = lv.ty();
+        if matches!(ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) | Type::Array(_, _)) {
+            // 聚合左值没有标量 RMW 语义（`(*ps)++` 不合法），落到这里说明形态意外，
+            // 保守退 SSA而不是猜一个宽度。
+            return None;
+        }
+        // `new` 的类型由调用方给（复合赋值时是原 `Binop` 自己的 `ty`）：这里造的是一
+        // 条 IR 里的 Bin，AST 上那一层的类型信息不会自己流过来，写错了下游的宽度/
+        // 符号性就跟着错。
+        let new_ty = res_ty.cloned().unwrap_or_else(|| ty.clone());
+        let is_volatile = self.lvalue_is_volatile(lv);
+        let addr: Operand = match lv {
+            Expr::Deref { e, .. } => self.lower_expr(e),
+            other => {
+                let addr_node = Expr::AddrOf {
+                    e: Box::new(other.clone()),
+                    span: span.clone(),
+                    ty: Type::Ptr(Box::new(QualType::new(ty.clone()))),
+                };
+                self.lower_expr(&addr_node)
+            },
+        };
+        let old = self.fresh("rmwld", ty.clone(), span);
+        self.emit(Inst {
+            dest: Some(old.clone()),
+            kind: InstKind::Load {
+                e: addr.clone(),
+                ty: ty.clone(),
+                is_volatile,
+            },
+            span: span.clone(),
+        });
+        self.define(old.clone());
+        let new = self.fresh("rmwop", new_ty, span);
+        self.emit(Inst {
+            dest: Some(new.clone()),
+            kind: InstKind::Bin {
+                op,
+                l: Operand::Var(old.clone()),
+                r: rhs,
+            },
+            span: span.clone(),
+        });
+        self.define(new.clone());
+        self.emit(Inst {
+            dest: None,
+            kind: InstKind::Store {
+                e: addr,
+                src: Operand::Var(new.clone()),
+                is_volatile,
+            },
+            span: span.clone(),
+        });
+        Some((Operand::Var(old), Operand::Var(new)))
+    }
+
     /// 把 `e` 的值算出来并**确定地写进 `target`**, 返回 `target`。
     ///
     /// 为什么需要这层保证而不是直接调 `lower_expr_inner(e, Some(target))`:
@@ -1194,6 +1389,50 @@ impl Builder {
                     self.lower_expr_into(r, new_v.clone());
                     self.define(new_v.clone());
                     return Operand::Var(new_v);
+                }
+                // 复合赋值 `LV op= R`：parser 把它展开成 `Assign{l: LV, r: Binop{op, LV 拷贝, R}}`
+                // ——`BinOp` 里没有 `Set` 变体，所以「是不是复合赋值」只能靠「r 的某一半边
+                // 与 l 结构相同」判（判据与 codegen 共用 `crate::semantics` 那一份实现）。
+                // 旧路径把整棵 `r` 降下来再写 `l`，等于把 LV 求值**两遍**：无副作用时两个
+                // 地址碰巧相同，有副作用时（`a[i++] += 5`、`*--p += 1`）它们不同 ⇒ 写错位置；
+                // 而赋值结果那个临时值在新版本里连定义都没有 —— 实测 -O2 下
+                // `int r = a[i] += 7;` 的 `r` 是未初始化垃圾（gcc 给 7）。
+                // 正确做法与自增自减共用一条机器：地址只求一次的读—改—写。
+                if let Expr::Binop {
+                    op: bop,
+                    l: bl,
+                    r: br,
+                    ty: bty,
+                    ..
+                } = r.as_ref()
+                {
+                    let rhs_e: Option<&Expr> =
+                        if crate::semantics::exprs_structurally_equal(l, bl) {
+                            Some(br.as_ref())
+                        } else if crate::semantics::exprs_structurally_equal(l, br) {
+                            // parser 对可交换运算符会把操作数交换位置（read 在右）
+                            Some(bl.as_ref())
+                        } else {
+                            None
+                        };
+                    if let Some(rhs_e) = rhs_e {
+                        // 只对**标量整数/指针**左值走读—改—写。其余形态（聚合、浮点、
+                        // C++ 流对象当左值用等）留在旧路径上：那些形状下旧路径本来就
+                        // 产生正确的类型组合，而本函数造的 Bin 拿不出它们的类型
+                        //（实测把 `std::clog << ws` 编成“floating-point Shl”直接报错）。
+                        if Self::is_scalar_int_or_ptr(&l.ty()) {
+                            let rhs_op = self.lower_expr(rhs_e);
+                            return match self.lower_mem_rmw(l, *bop, rhs_op, Some(bty), span) {
+                                Some((_old, new)) => new,
+                                None => {
+                                    // 地址给不出来（位域、聚合元素等）：整函数退 SSA。
+                                    // 不能退回旧路径 —— 那条路径就是这次的错值本身。
+                                    self.unsupported("复合赋值的左值形态给不出地址（读—改—写）");
+                                    Operand::Int(0)
+                                },
+                            };
+                        }
+                    }
                 }
                 let ro = self.lower_expr(r);
                 if let Some(dest_var) = lower_lvalue(l, &BinOp::Add, ro.clone(), span, ty, self) {
@@ -1523,8 +1762,45 @@ impl Builder {
                     self.define(dest.clone());
                     return Operand::Var(dest);
                 }
-                // `&a[i]` 需要地址算术，而 `InstKind::AddrOf` 只能取具名对象的基址。
-                self.unsupported("取址的对象不是简单变量（&下标）");
+                // `&a[i]` / `(*p)[i]` / `s.f[i]` / `&m[i][j]` / `&m[i][j][k]`：下标的
+                // **左值地址**，由 `InstKind::IndexAddr` 表达。基址走 `lower_lvalue_base_addr`：
+                //   * 具名数组 / 指针 / 数组成员 / 解引用基址 —— 既有衰减分支本就给出地址，
+                //     与 `lower_expr` 同义；
+                //   * **计算出来的数组行**（内层下标 `m[i]`，其类型仍是数组）—— 递归再发一条
+                //     `IndexAddr`，那一层的元素类型取内层下标的**结果类型**（这里是行数组类型），
+                //     于是行步长由 codegen 的 `AddrOf(Index)` 用 `sizeof(row)` 算，SSA 层不碰
+                //     任何布局算术（单一真源）。
+                //
+                // 每层 `IndexAddr` 都重建为 `&<base>[idx]`。作为下一层基址的地址类临时值
+                // **不会被内联**（见 `plan_inlined_temps` 的 addr-slot 守卫），所以重建出的
+                // AST 始终是 `&<rowvar>[j]`（codegen 走「载入指针值再偏移」分支），而不是历史
+                // 上那条把内层行地址内联成 `&(&m[i])[j]` 嵌套取址、从错值恶化成段错误的失败路径。
+                if let Expr::Index {
+                    arr,
+                    idx,
+                    span: isp,
+                    ty: elem_ty,
+                } = e.as_ref()
+                {
+                    let a = self.lower_lvalue_base_addr(arr);
+                    let i = self.lower_expr(idx);
+                    let ptr_ty = Type::Ptr(Box::new(QualType::new(elem_ty.clone())));
+                    let dest = target.unwrap_or_else(|| self.fresh("idxaddr", ptr_ty, isp));
+                    self.emit(Inst {
+                        dest: Some(dest.clone()),
+                        kind: InstKind::IndexAddr {
+                            arr: a,
+                            idx: i,
+                            ty: elem_ty.clone(),
+                        },
+                        span: isp.clone(),
+                    });
+                    self.define(dest.clone());
+                    return Operand::Var(dest);
+                }
+                // 其余形态（`&f()`、`&&label`、复合字面量取址等）仍需更一般的左值地址，
+                // IR 表达不了就整函数退 SSA（正确但不优化）。
+                self.unsupported("取址的对象不是简单变量/成员/下标");
                 Operand::Int(0)
             },
             Expr::PostInc {
@@ -1707,7 +1983,42 @@ impl Builder {
                     self.define(v.clone());
                     return Operand::Var(v);
                 }
-                Operand::Int(one)
+                // 非 Ident 的内存左值（`++*p` / `(*p)++` / `a[i]++` / `++s.f` / `++q->g` /
+                // `++p[i]`）：读—改—写，地址只求一次。旧实现在这里 `return
+                // Operand::Int(one)` —— 既不读也不写、连 `unsupported` 都不标 ⇒ -O2 静默
+                // 误编译（逐条与 gcc 对照的实测数字见 `lower_mem_rmw`）。
+                let (old_val, new_val) = match self.lower_mem_rmw(
+                    operand.as_ref(),
+                    BinOp::Add,
+                    Operand::Int(one),
+                    None,
+                    span,
+                ) {
+                    Some(pair) => pair,
+                    None => {
+                        // 地址形态给不出来（位域 `++s.bf`、`++f()` 的返回左值等）：
+                        // 与「不可降级表达式」同一处置，整函数退 SSA，绝不允许「只做不写」。
+                        self.unsupported("自增/自减的左值形态给不出地址");
+                        return Operand::Int(0);
+                    },
+                };
+                let result = if is_pre { new_val } else { old_val };
+                // `int v = x++;` 这种预派发 target：结果必须落进去，否则那个变量只有
+                // define 没有赋值（与 Ident 分支同一条理由）。
+                if let Some(t) = target {
+                    self.emit(Inst {
+                        dest: Some(t.clone()),
+                        kind: InstKind::Bin {
+                            op: BinOp::Add,
+                            l: result,
+                            r: Operand::Int(0),
+                        },
+                        span: span.clone(),
+                    });
+                    self.define(t.clone());
+                    return Operand::Var(t);
+                }
+                result
             },
             Expr::SizeofTy { ty, .. } => Operand::Int(ty.size() as i128),
             Expr::SizeofExpr { e, .. } => match e.as_ref() {
@@ -2395,7 +2706,15 @@ fn lower_lvalue(
         return Some(dest);
     }
     if let Expr::Index { arr, idx, ty, .. } = l {
-        let a = b.lower_expr(arr);
+        // 基址必须取**地址形式**，不能取右值形式：`m[i][j] = v` 的 `m[i]` 是**数组类型**
+        // 的左值，`lower_expr` 会把它当值降级（`IndexLoad{ty: Array}` ⇒ 重建时是个住在
+        // 自己帧临时里的行副本），写进去的是副本而不是数组本体。-O3 展开后两个下标都
+        // 成常量时实测就是这个形状：`small7x3[3][0]`/`[6][0]` 根本没被写（读到 0），
+        // 同一行的 `[i][1]`/`[i][2]` 却正常写进数组 —— 因为那两条的内层基址刚好被内联
+        // 成了「行地址」而这一条没有。基名是 `lower_lvalue_base_addr`：数组行→`IndexAddr`，
+        // 指针/具名数组/解引用基址→原衰减分支本就给出地址。写入仍按本条指令自己的
+        // 元素类型 `ty` 定标（`IndexStore{ty: Int}` ⇒ 行首地址 + j*4），不会按行步长算错。
+        let a = b.lower_lvalue_base_addr(arr);
         let i = b.lower_expr(idx);
         let store_volatile = match arr.ty() {
             Type::Array(elem_qt, _) => elem_qt.is_volatile(),
@@ -2593,6 +2912,10 @@ pub(crate) fn rename_kind_uses(k: &mut InstKind, map: &HashMap<String, SsaVar>) 
             rename_operand(arr, map);
             rename_operand(idx, map);
         },
+        InstKind::IndexAddr { arr, idx, .. } => {
+            rename_operand(arr, map);
+            rename_operand(idx, map);
+        },
         InstKind::IndexStore { arr, idx, src, .. } => {
             rename_operand(arr, map);
             rename_operand(idx, map);
@@ -2782,6 +3105,10 @@ fn collect_uses_kind(k: &InstKind) -> Vec<String> {
             push(src, &mut v);
         },
         InstKind::IndexLoad { arr, idx, .. } => {
+            push(arr, &mut v);
+            push(idx, &mut v);
+        },
+        InstKind::IndexAddr { arr, idx, .. } => {
             push(arr, &mut v);
             push(idx, &mut v);
         },
@@ -3762,6 +4089,7 @@ fn kind_operands(kind: &InstKind) -> Vec<&Operand> {
         InstKind::Un { e, .. } | InstKind::Cast { e, .. } | InstKind::Load { e, .. } => vec![e],
         InstKind::Store { e, src, .. } | InstKind::MemberStore { obj: e, src, .. } => vec![e, src],
         InstKind::IndexLoad { arr, idx, .. } => vec![arr, idx],
+        InstKind::IndexAddr { arr, idx, .. } => vec![arr, idx],
         InstKind::IndexStore { arr, idx, src, .. } => vec![arr, idx, src],
         InstKind::Call { callee, args, .. } | InstKind::Invoke { callee, args, .. } => {
             let mut v = vec![callee];
@@ -4008,6 +4336,20 @@ struct InlinePlan {
     kept_temp_bases: OrderedNameSet,
 }
 
+/// 该指令的**结果**重建后是否是一个 `Expr::AddrOf{ .. }`（即一个左值地址，而非载入值）。
+/// 只有这三类会：`AddrOf`（具名对象基址）、`MemberAddr`（`&obj.field`）、`IndexAddr`
+/// （`&arr[idx]`）。它们的值是「地址」，一旦被就地内联进父表达式，父级若按指针**值**再
+/// 参与算术（减法求元素差、作为另一条取址/下标的基址），重建 AST 会把这层
+/// `AddrOf{ Index }` 连同步长语义一起搬过去 —— 实测把单用例地址临时值内联进指针减法会
+/// 把结果算成 0 / 负数 / 巨大垃圾，内联进 `IndexAddr.arr` 更会退化成段错误的嵌套取址。
+/// 故地址类临时值一律**不内联**，保留成真实变量（值不变，代价只是多一个栈槽）。
+fn is_addr_producer(kind: &InstKind) -> bool {
+    matches!(
+        kind,
+        InstKind::AddrOf { .. } | InstKind::MemberAddr { .. } | InstKind::IndexAddr { .. }
+    )
+}
+
 /// 把 SSA→AST 重建「单次使用临时值就地内联」的决策算一遍, 产出 `subst` 表。
 ///
 /// 必须独立成函数并在**生成局部声明之前**调用: 被拒绝内联的临时值会退化成一条
@@ -4100,11 +4442,17 @@ fn plan_inlined_temps(func: &Function) -> InlinePlan {
                 inst.kind,
                 InstKind::Invoke { .. } | InstKind::EhLandingPad { .. }
             );
+            // 地址类临时值一律不内联：`AddrOf`/`MemberAddr`/`IndexAddr` 的结果重建后是
+            // `Expr::AddrOf{ .. }`，把它就地塞进任一父表达式都会让地址语义漂移（父级按
+            // 指针值重算步长 / 再包一层取址）。保留成真实临时变量后，消费方走 codegen 的
+            // 「载入指针值再按其类型偏移」分支，语义无歧义。代价只是多一个栈槽，不改变值。
+            let addr_operand_pinned = is_addr_producer(&inst.kind);
             let mut chain: Option<ExpandedTemp> = None;
             let inlineable = is_temp
                 && use_count <= 1
                 && !side_effect_unused
                 && !is_eh_pinned
+                && !addr_operand_pinned
                 && {
                     // SSA→AST 重建把 `n_1`/`n_2` 塌缩回同一个变量 `n`, 于是内联
                     // 「在使用点重算表达式」会把对 `n` 的读**搬到中途赋值之后**。
@@ -4139,6 +4487,10 @@ fn plan_inlined_temps(func: &Function) -> InlinePlan {
                     func,
                     inst.dest.as_ref().map(|v| &v.ty),
                 );
+                // （这里曾加过一道「展开表达式的类型必须等于 dest 类型才内联」的守卫；
+                // 实测它不是必需的：-O2 丢 `__seg_gs` 的真因在 `ssa_gvn::coalesce_block`
+                // 的类型判据（见那里的说明），修完之后它只会把 C++ 降级里大量合法的
+                // 类型转换拷贝阻挡在链式内联之外，实测表现为 `g + 6 - g` 算错。)
                 subst.insert(ssa_name.clone(), Some(resolved));
                 if let Some(info) = chain {
                     expanded.insert(ssa_name, info);
@@ -4239,6 +4591,7 @@ pub fn rebuild_block(func: &Function) -> Block {
         subst,
         kept_temp_bases,
     } = plan_inlined_temps(func);
+    let _ = &kept_temp_bases;
 
     // 1. 只声明原始局部变量 (不声明 SSA 临时变量)
     let param_names: HashSet<String> = func.params.iter().map(|p| p.base.clone()).collect();
@@ -6147,6 +6500,17 @@ fn inst_to_expr_resolved(
             span: sp.clone(),
             ty: ty.clone(),
         },
+        InstKind::IndexAddr { arr, idx, ty } => Expr::AddrOf {
+            // 下标取址: 装回 `&arr[idx]`，由 codegen 的 AddrOf(Index) 分支算步长。
+            e: Box::new(Expr::Index {
+                arr: Box::new(resolve_operand(arr, &fake_env, subst, func)),
+                idx: Box::new(resolve_operand(idx, &fake_env, subst, func)),
+                span: sp.clone(),
+                ty: ty.clone(),
+            }),
+            span: sp.clone(),
+            ty: Type::Ptr(Box::new(crate::ast::QualType::new(ty.clone()))),
+        },
         InstKind::IndexStore {
             arr, idx, src, ty, ..
         } => Expr::Assign {
@@ -6371,6 +6735,13 @@ fn collect_op_uses(kind: &InstKind, out: &mut HashSet<String>) {
             collect_op_uses_op(arr, out);
             collect_op_uses_op(idx, out);
         },
+        // `IndexAddr` 与 `IndexLoad` 同一操作数形状（`arr` 基址 + `idx` 下标），内联计划
+        // 的使用计数必须一视同仁：漏了它，作为下一层基址的行地址临时值会被当成
+        // 「无消费者」而内联进取址操作数 → 嵌套 AddrOf（历史段错误的根因）。
+        InstKind::IndexAddr { arr, idx, .. } => {
+            collect_op_uses_op(arr, out);
+            collect_op_uses_op(idx, out);
+        },
         InstKind::IndexStore { arr, idx, src, .. } => {
             collect_op_uses_op(arr, out);
             collect_op_uses_op(idx, out);
@@ -6430,6 +6801,11 @@ fn op_count_in_kind(kind: &InstKind, name: &str) -> usize {
             count += op_count_in_op(src, name);
         },
         InstKind::IndexLoad { arr, idx, .. } => {
+            count += op_count_in_op(arr, name);
+            count += op_count_in_op(idx, name);
+        },
+        // 同 `collect_op_uses`：`IndexAddr` 的 `arr`/`idx` 都是真实使用，必须计入使用次数。
+        InstKind::IndexAddr { arr, idx, .. } => {
             count += op_count_in_op(arr, name);
             count += op_count_in_op(idx, name);
         },
@@ -6622,6 +6998,17 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
             idx: Box::new(operand_to_expr(idx, env, func)),
             span: sp.clone(),
             ty: ty.clone(),
+        },
+        InstKind::IndexAddr { arr, idx, ty } => Expr::AddrOf {
+            // 与上面同一形态（本函数是内联临时值用的另一份表达式构造器）。
+            e: Box::new(Expr::Index {
+                arr: Box::new(operand_to_expr(arr, env, func)),
+                idx: Box::new(operand_to_expr(idx, env, func)),
+                span: sp.clone(),
+                ty: ty.clone(),
+            }),
+            span: sp.clone(),
+            ty: Type::Ptr(Box::new(crate::ast::QualType::new(ty.clone()))),
         },
         InstKind::IndexStore {
             arr, idx, src, ty, ..
@@ -7324,8 +7711,130 @@ mod tests {
     #[test]
     fn unlowerable_expr_bails_out_of_ssa_instead_of_becoming_zero() {
         assert!(try_build("int a(void){ return (int[]){1,2,3}[1]; }\n", "a").is_none(), "复合字面量不可降级");
-        assert!(try_build("int b(void){ int x[4]; int *p = &x[2]; return (int)(long)p; }\n", "b").is_none(), "&下标 需地址算术");
+        // `&x[2]` 曾经也只能退 SSA（IR 里没有「下标的左值地址」形态），现已由
+        // `InstKind::IndexAddr` 表达。这里不只断言「能进管线」，而是钉住 IR 里
+        // 确实出现了那条指令：只查 is_some 的话，将来删了它又换回退路也能做绿。
+        {
+            let f = try_build("int b(void){ int x[4]; int *p = &x[2]; return (int)(long)p; }\n", "b")
+                .expect("&下标 现在应能进 SSA（IndexAddr）");
+            let n = f
+                .blocks
+                .values()
+                .flat_map(|b| b.insts.iter())
+                .filter(|i| matches!(i.kind, InstKind::IndexAddr { .. }))
+                .count();
+            assert!(n >= 1, "`&x[2]` 必须发 IndexAddr，实得 {n} 条");
+        }
         assert!(try_build("int c(void){ int x[4]; x[2] = 9; return x[2]; }\n", "c").is_some(), "对照组必须仍进 SSA 管线");
+    }
+
+    /// 一般的「左值地址」形态：`&m[i][j]`（下标基址本身是计算出来的数组行）过去只能
+    /// 整函数退 SSA，现在逐层发 `IndexAddr`。只钉「进管线 + 发了多条 IndexAddr」这两件
+    /// SSA 结构层能直接断言的事：行步长是否算对、地址临时值是否被误内联成嵌套取址（历史
+    /// 段错误），由集成夹具 `lvalue_addr_rows_match_gcc_at_all_levels` 逐档与 gcc 对照钉住
+    /// —— 若守卫失效，-O2/-O3 会段错误或算错指针差而当场变红。
+    #[test]
+    fn nested_lvalue_addr_goes_through_ssa_as_index_addr_chain() {
+        let count_idx_addr = |src: &str, name: &str| -> usize {
+            try_build(src, name)
+                .expect("&m[i][j] 现在应能进 SSA")
+                .blocks
+                .values()
+                .flat_map(|b| b.insts.iter())
+                .filter(|i| matches!(i.kind, InstKind::IndexAddr { .. }))
+                .count()
+        };
+        // 二维：一行地址 + 一个元素地址 = 至少 2 条 IndexAddr。
+        let d2 = "int t(int i,int j){ int m[3][5]; int *p = &m[i][j]; return (int)(long)p; }\n";
+        assert!(
+            count_idx_addr(d2, "t") >= 2,
+            "`&m[i][j]` 应逐层发 >=2 条 IndexAddr（行 + 元素）"
+        );
+        // 三维：至少 3 条（两层行 + 元素）。
+        let d3 = "int t(int i,int j,int k){ int m[2][3][4]; int *p = &m[i][j][k]; return (int)(long)p; }\n";
+        assert!(
+            count_idx_addr(d3, "t") >= 3,
+            "`&m[i][j][k]` 应逐层发 >=3 条 IndexAddr"
+        );
+        // 反向对照：不经计算行的 `&m[0][j]`（基址是具名数组，不需内层行地址）仍只需 1 层？
+        // 不——`m[0]` 仍是 Index，会递归发一条行地址；故也 >=2。真正只需 1 条的是一维。
+        let d1 = "int t(int i){ int a[4]; int *p = &a[i]; return (int)(long)p; }\n";
+        assert_eq!(
+            count_idx_addr(d1, "t"),
+            1,
+            "一维 `&a[i]` 只应发 1 条 IndexAddr（基址是具名数组，无计算行）"
+        );
+    }
+
+    /// 内存左值的**读—改—写**必须在 IR 里同时出现一次读与一次写回。
+    ///
+    /// 这条钉的是一个 P0 静默误编译：`Expr::PostInc/PreInc` 那条 arm 只认 `Expr::Ident`
+    /// 操作数，其余形态直接 `return Operand::Int(one)` —— 既不读也不写、连 `unsupported`
+    /// 都不标，函数照样进 SSA。实测 -O2 下 `int r = ++*p;` 得到常量 1 且 `*p` 没被写。
+    ///
+    /// 为什么不只靠执行级夹具 `ssa_mem_rmw_matches_gcc_at_all_levels`：那条在形态
+    /// 退化成「整函数退 SSA」时**仍然会绿**（产物正确，只是不优化）。这里钉的是
+    /// 「IR 里确实做了这件事」，与 `MemberAddr`/`IndexAddr` 同一口径。
+    #[test]
+    fn mem_lvalue_rmw_emits_load_and_store_in_ir() {
+        let cases = [
+            ("int f(int *p){ return ++*p; }\n", "f", "`++*p`"),
+            ("int f(int *p){ return (*p)++; }\n", "f", "`(*p)++`"),
+            ("int f(int a[4], int i){ return a[i]++; }\n", "f", "`a[i]++`"),
+            (
+                "struct S{int f;}; int f(struct S *q){ return ++q->f; }\n",
+                "f",
+                "`++q->f`",
+            ),
+        ];
+        for (src, name, what) in cases {
+            let func = try_build(src, name).unwrap_or_else(|| panic!("{what} 现在应能进 SSA"));
+            let (mut reads, mut writes) = (0usize, 0usize);
+            for b in func.blocks.values() {
+                for i in &b.insts {
+                    match i.kind {
+                        InstKind::Load { .. }
+                        | InstKind::IndexLoad { .. }
+                        | InstKind::MemberLoad { .. } => reads += 1,
+                        InstKind::Store { .. }
+                        | InstKind::IndexStore { .. }
+                        | InstKind::MemberStore { .. } => writes += 1,
+                        _ => {},
+                    }
+                }
+            }
+            assert!(reads >= 1, "{what}: IR 里必须有一次读，实得 {reads}");
+            assert!(writes >= 1, "{what}: IR 里必须有一次写回，实得 {writes}");
+        }
+
+        // 复合赋值：读与写必须共用**同一个**地址临时值 —— 这就是「左值只求值一次」
+        // 在 IR 里的形状。旧降级把 parser 展开出来的左值拷贝再降一遍，两个地址是
+        // 两个临时值；下标带副作用时（`a[i++] += 5`）它们不是同一个格子。
+        let func = try_build("int f(int a[4], int i){ return a[i] += 7; }\n", "f")
+            .expect("`a[i] += 7` 现在应能进 SSA");
+        let mut load_addrs: Vec<String> = Vec::new();
+        let mut store_addrs: Vec<String> = Vec::new();
+        for b in func.blocks.values() {
+            for i in &b.insts {
+                match &i.kind {
+                    InstKind::Load { e, .. } | InstKind::Store { e, .. } => {
+                        if let Operand::Var(v) = e {
+                            let n = v.name();
+                            if matches!(i.kind, InstKind::Load { .. }) {
+                                load_addrs.push(n);
+                            } else {
+                                store_addrs.push(n);
+                            }
+                        }
+                    },
+                    _ => {},
+                }
+            }
+        }
+        assert!(
+            load_addrs.iter().any(|a| store_addrs.contains(a)),
+            "读与写必须共用同一个地址临时值（左值只求值一次），实得 load={load_addrs:?} store={store_addrs:?}"
+        );
     }
 
     /// 逗号表达式的左操作数只为副作用存在，但必须照常降级：旧实现直接丢掉 `l`,

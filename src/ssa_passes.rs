@@ -7,17 +7,17 @@
 //   P1  cross_function_dce         - 跨函数 DCE (call graph reachability)
 //   P2  strength_reduction          - 强度削减 (mul by power-of-2 -> shl)
 //   P3  ivop                        - 归纳变量优化 (i*C+K -> 重写)
-//   P4  alias_analysis              - 别名分析 (Steensgaard union-find)
+//   P4  (已删除) 别名分析          - Steensgaard 结果无任何消费者，对机器码零影响，见下文
 //   P5  instruction_scheduling      - 指令调度 (list scheduling within BB)
-//   P6  pgo                         - PGO (读取 .dcc.profdata, 应用 hot/cold 提示)
-//   P7  auto_parallelization        - 自动并行化 (识别安全循环, emit #pragma omp simd)
+//   P6  (已删除) pgo               - 只往不存在的符号插 hot hint Store，写被重建丢弃
+//   P7  (已删除) auto_parallelization - 同上，emit 的是 `__dcc_parallel_hint` 假符号
 //   P8  loop_tiling                 - 已删除 (伪实现, 见下文说明)
 //   P9  loop_interchange            - 已删除 (伪实现, 见下文说明)
 //   P10 tail_call_optimization      - TCO
 //   P11 (已删除) 函数属性传播      - 热/冷/noreturn 由后端直读 AST 属性, 见下文 P11 注释
 //   P12 (已删除) 寄存器分配        - hint 对机器码零影响且误报 changed, 见下文 P12 注释
 //   P12b ubsan_ir_instrument        - UBSAN 在 IR 层插桩
-//   P13 alias_set                   - 别名集合 (identity/disjoint/overlap)
+//   P13 (已删除) alias_set          - 三档判别只被自己的单测调用，无产物消费者
 //   P14 speculative_execution       - 投机执行 (分支条件的依赖链上提)
 //   P15 sparse_conditional_constant_propagation - SCCP
 //   P16 software_pipelining         - 软件流水 (模调度 + peel/kernel/排空三段落地)
@@ -25,7 +25,7 @@
 //   P18 dead_store_elim             - 死存储消除 (局部 + 单入链全局)
 //   P19 jump_threading              - 跳转穿线 (常量分支折叠 + 空跳板合并 + CFG/phi 修补)
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     BinOp, BlockItem, Decl, Designator, Expr, FuncDecl, InitItem, QualType, Stmt, Type, UnOp,
@@ -35,15 +35,22 @@ use crate::ssa::{ordered_block_names, Function, Inst, InstKind, Operand, SsaVar,
 
 /// 调度 pipeline 入口: 在 -O2 / -O3 时由 `opt::optimize` 调用。
 ///
-/// `strict_aliasing`: 当 true 时, 别名分析可按类型区分不同指针类型的
-/// 别名关系 (C 标准: 不同类型指针不别名, 除 char*)。当 false 时
-/// (-fno-strict-aliasing), 所有指针合并到同一 alias set (保守)。
+/// 走「不假设严格别名」那一侧的默认值；`run_with_opts` 的参数说明为什么它暂时无消费者。
 pub fn run(func: &mut Function, level: u8) {
     run_with_opts(func, level, true);
 }
 
 /// 带完整选项的 pipeline 入口。
-pub fn run_with_opts(func: &mut Function, level: u8, strict_aliasing: bool) {
+/// 参数 `_strict_aliasing` 目前**无人消费**：它的唯一消费者是已删的 P4 别名分析
+/// （strict=false 时把所有指针归同一 alias set）。CLI 依旧接受
+/// `-fno-strict-aliasing`/`-fstrict-aliasing`（脚本与内核构建在传这两个标志），
+/// 删掉它们会是用户可见的 API 变更，不在本项范围。将来接 TBAA 消费者时直接
+/// 用回这个名字即可。
+///
+/// 「不默默无效」现在由 CLI 层守：`-fstrict-aliasing` 会发一条警告（用户要的优化
+/// 不存在），而 `-fno-strict-aliasing` 仍静默接受（它要求的保守行为就是现状）。
+/// 判据见 integration 用例 `fstrict_aliasing_is_reported_as_inert_but_fno_is_silent`。
+pub fn run_with_opts(func: &mut Function, level: u8, _strict_aliasing: bool) {
     if level < 2 {
         return;
     }
@@ -63,11 +70,12 @@ pub fn run_with_opts(func: &mut Function, level: u8, strict_aliasing: bool) {
     strength_reduction(func);
     ivop(func);
     tail_call_optimization(func);
-    // P8 循环分块 / P9 循环交换 已删 (伪实现会破坏单赋值 / 只改块序)，见下文说明。
-    alias_analysis_with_strict(func, strict_aliasing);
-    alias_set(func);
+    // P4 别名分析 / P13 别名集合 已删（Steensgaard 结果从入口到管线都被丢弃，
+    // 对机器码零影响），P6 PGO / P7 自动并行化 已删（它们只往不存在的符号
+    // `__dcc_hot_hint` / `__dcc_parallel_hint` 插 Store，而重建名单显式丢弃这些写）。
+    // 与已删的 P11 同一类，理由与实测证据见下文「已删除的伪实现」说明。
     speculative_execution(func);
-    // P18 DSE: 站在别名分析之后, 利用位置判据删「再没人读」的写。
+    // P18 DSE: 用自有位置模型（Named/Via/Opaque）判「再没人读」的写。
     if !ssa_dbg_off("dse") {
         dead_store_elim(func);
     }
@@ -96,12 +104,9 @@ pub fn run_with_opts(func: &mut Function, level: u8, strict_aliasing: bool) {
         if !ssa_dbg_off("ubsan") {
             ubsan_ir_instrument(func);
         }
-        if !ssa_dbg_off("par") {
-            auto_parallelization(func);
-        }
-        if !ssa_dbg_off("pgo") {
-            pgo(func);
-        }
+        // P7 自动并行化 / P6 PGO 曾在此调用（`DCC_SSA_OFF=par|pgo` 可关），已删：
+        // 它们只插入对不存在符号的 Store，且这些写在 SSA→AST 重建时被丢弃名单
+        // 抹掉。实测 139 个夹具在 -O3 下开/关这两个 pass 产物字节全同。
     }
     // 本轮多个 pass 会改 terminator (SCCP 折常量 switch、P19 穿线、DSE 删指令不影响
     // 控制流但会改变块内容)。`rebuild_block` 与 `find_loop_body_multi` 沿 `preds` 走,
@@ -448,278 +453,6 @@ fn find_induction_vars(func: &Function) -> HashSet<String> {
     ivs
 }
 
-// =====================================================================
-// P4. 别名分析 (Steensgaard union-find, 字段不敏感)
-// =====================================================================
-
-/// 别名分析入口: 默认 strict_aliasing=true (C 标准语义)。
-pub fn alias_analysis(func: &Function) -> HashMap<String, usize> {
-    alias_analysis_with_strict(func, true)
-}
-
-/// 带 strict-aliasing 选项的别名分析。
-///
-/// 当 `strict_aliasing=false` (-fno-strict-aliasing) 时, 所有指针变量
-/// 合并到同一 alias set (最保守的别名假设), 因为 C 标准允许通过类型
-/// 强转访问不同类型的数据。
-///
-/// 当 `strict_aliasing=true` 时, 使用 Steensgaard union-find 分析,
-/// 按类型标签区分 alias set: 不同类型 (非 char*/void*) 的指针不合并。
-pub fn alias_analysis_with_strict(
-    func: &Function,
-    strict_aliasing: bool,
-) -> HashMap<String, usize> {
-    let mut sets = alias_analysis_inner(func);
-    if !strict_aliasing {
-        // -fno-strict-aliasing: 所有指针合并到同一 alias set
-        let unified_id = 0;
-        for v in sets.values_mut() {
-            *v = unified_id;
-        }
-    } else {
-        // strict-aliasing: 按类型标签分离不兼容的指针
-        // 收集每个 SSA 变量的类型
-        let mut type_map: HashMap<String, crate::ast::Type> = HashMap::new();
-        for bb_name in ordered_block_names(func) {
-            let Some(bb) = func.blocks.get(&bb_name) else {
-                continue;
-            };
-            for inst in &bb.insts {
-                if let Some(d) = &inst.dest {
-                    type_map.insert(d.name(), d.ty.clone());
-                }
-            }
-        }
-        // 检测类型不兼容的 alias set 并分裂
-        // 如果两个变量在同一 alias set 但类型不兼容, 分配不同 set
-        //
-        // **BTreeMap + 按名排序的成员列表**: 分裂时"第一组保留原 set_id、其余组
-        // 拿 `next_set++`"，所以 `type_class.values()` 的随机序与 `sets` 的随机序
-        // 会直接决定新 set 的编号 → 下游按 set id 遍历的 pass 跑在不同顺序上。
-        let mut type_class: std::collections::BTreeMap<usize, Vec<(String, crate::ast::Type)>> =
-            std::collections::BTreeMap::new();
-        let mut set_entries: Vec<(&String, &usize)> = sets.iter().collect();
-        set_entries.sort_by(|a, b| a.0.cmp(b.0));
-        for (name, &set_id) in set_entries {
-            if let Some(ty) = type_map.get(name) {
-                type_class
-                    .entry(set_id)
-                    .or_default()
-                    .push((name.clone(), ty.clone()));
-            }
-        }
-        let mut next_set = sets.values().copied().max().unwrap_or(0) + 1;
-        for members in type_class.values() {
-            if members.len() <= 1 {
-                continue;
-            }
-            // 按类型分组
-            let mut groups: Vec<(crate::ast::Type, Vec<String>)> = Vec::new();
-            for (name, ty) in members {
-                let mut found = false;
-                for (gty, gnames) in &mut groups {
-                    if types_alias_compatible(gty, ty) {
-                        gnames.push(name.clone());
-                        found = true;
-                        break;
-                    }
-                }
-                if !found {
-                    groups.push((ty.clone(), vec![name.clone()]));
-                }
-            }
-            // 第一组保持原 set_id, 其余分配新 set
-            for (_, gnames) in groups.iter().skip(1) {
-                let new_id = next_set;
-                next_set += 1;
-                for name in gnames {
-                    sets.insert(name.clone(), new_id);
-                }
-            }
-        }
-    }
-    sets
-}
-
-/// 判断两个类型是否可能别名 (C strict-aliasing 规则).
-/// 不同类型不别名, 除:
-/// - char* 可以别名任何类型
-/// - void* 可以别名任何类型
-/// - 相同类型当然别名
-fn types_alias_compatible(a: &crate::ast::Type, b: &crate::ast::Type) -> bool {
-    use crate::ast::Type;
-    if a == b {
-        return true;
-    }
-    // char* / void* 可以别名任何类型
-    match (a, b) {
-        (Type::Ptr(aq), Type::Ptr(bq)) => match (&aq.base, &bq.base) {
-            (Type::Void, _) | (_, Type::Void) => true,
-            (Type::Char, _) | (_, Type::Char) => true,
-            _ => aq.base == bq.base,
-        },
-        _ => true, // 非指针类型不区分
-    }
-}
-
-/// Steensgaard union-find 别名分析核心实现。
-///
-/// 给每个 SSA 指针变量分配一个 alias set 编号 (Steensgaard 风格):
-///   p = &x  => set(p) = set(x)
-///   p = q   => union(set(p), set(q))
-///   p = alloc => 新 set
-///  函数返回 map: SSA 名 -> set id.
-///
-/// C99 restrict 语义: 标记为 restrict 的函数参数保证不与其他指针别名。
-/// 分析时将 restrict 参数放入独立的 alias set, 不与其它指针合并。
-fn alias_analysis_inner(func: &Function) -> HashMap<String, usize> {
-    let mut sets: HashMap<String, usize> = HashMap::new();
-    let mut parents: HashMap<usize, usize> = HashMap::new();
-    let mut next_id = 0usize;
-    // Collect restrict-qualified parameter names (base names, version 0)
-    //
-    // **需要一份有序名单**: 下方按迭代顺序给 restrict 参数分配 alias set id
-    // (`next_id += 1`)。直接用 HashSet 迭代会让同一函数每次编译拿到不同的
-    // id 编号，进而使下游按 id 遍历的 pass 跑在不同顺序上 → 产物不可复现。
-    let mut restrict_names: Vec<String> = func
-        .param_quals
-        .iter()
-        .filter(|(_, quals)| quals.is_restrict())
-        .map(|(name, _)| name.clone())
-        .collect();
-    restrict_names.sort();
-    restrict_names.dedup();
-    let restrict_params: std::collections::HashSet<String> =
-        restrict_names.iter().cloned().collect();
-    // Assign unique alias sets to restrict parameters upfront
-    for name in &restrict_names {
-        let id = next_id;
-        next_id += 1;
-        sets.insert(format!("{}_0", name), id);
-    }
-    //
-    // **必须按 block_order 而不是 `blocks.values()` 遍历**: `blocks` 是 HashMap，
-    // 其随机序会经由循环体内的 `next_id += 1` 泄落到 alias set 编号上，
-    // 并同时决定各 BB 内 union 的先后。`block_order` 是 lowering 期的创建序，也是本仓库
-    // 已有的定序约定 (参见 ssa.rs 里 `for bb_name in &func.block_order`)。
-    for bb_name in ordered_block_names(func) {
-        let Some(b) = func.blocks.get(&bb_name) else {
-            continue;
-        };
-        for inst in &b.insts {
-            match &inst.kind {
-                InstKind::AddrOf { base } => {
-                    let id = *sets.entry(base.clone()).or_insert_with(|| {
-                        let i = next_id;
-                        next_id += 1;
-                        i
-                    });
-                    if let Some(d) = &inst.dest {
-                        // Don't union if dest is a restrict parameter
-                        if !restrict_params.contains(&d.base) {
-                            sets.insert(d.name(), id);
-                        }
-                    }
-                },
-                InstKind::Load { e, .. } => {
-                    if let Some(d) = &inst.dest {
-                        if let Some(s) = set_of(e, &sets) {
-                            // Don't union if dest is a restrict parameter
-                            if !restrict_params.contains(&d.base) {
-                                sets.insert(d.name(), s);
-                            }
-                        }
-                    }
-                },
-                InstKind::Store {
-                    e: Operand::Var(v),
-                    src,
-                    ..
-                } => {
-                    // Don't union if target is a restrict parameter
-                    if !restrict_params.contains(&v.base) {
-                        let src_set = set_of(src, &sets).unwrap_or(0);
-                        union_into(&mut sets, &mut parents, &v.name(), src_set);
-                    }
-                },
-                InstKind::Call { args, .. } => {
-                    if let Some(d) = &inst.dest {
-                        for a in args {
-                            if let Some(s) = set_of(a, &sets) {
-                                let _ = s;
-                            }
-                        }
-                        // Don't union if dest is a restrict parameter
-                        if !restrict_params.contains(&d.base) {
-                            let id = next_id;
-                            next_id += 1;
-                            sets.insert(d.name(), id);
-                        }
-                    }
-                },
-                _ => {},
-            }
-        }
-    }
-    sets
-}
-
-// 确定性的 BB 遍历序已上调到 `crate::ssa::ordered_block_names`:
-// 先按创建序 `block_order`，再补上未列入者 (按名字排序)。补集是为了保证覆盖
-// 完整: 若某 BB 未进 `block_order` 而被漏掉，会少做一次 union，那就是语义变化
-// 而不只是定序变化了。放在 ssa 侧是因为 rebuild 路径同样需要它。
-
-fn set_of(o: &Operand, sets: &HashMap<String, usize>) -> Option<usize> {
-    match o {
-        Operand::Var(v) => sets.get(&v.name()).copied(),
-        Operand::SymAddr(n, _) => sets.get(n).copied(),
-        _ => None,
-    }
-}
-
-fn union_into(
-    sets: &mut HashMap<String, usize>,
-    parents: &mut HashMap<usize, usize>,
-    key: &str,
-    other: usize,
-) {
-    let cur = sets.get(key).copied();
-    if let Some(c) = cur {
-        // 用 union-find 合并: 将两个集合的 root 统一
-        let root_c = find(parents, c);
-        let root_o = find(parents, other);
-        if root_c != root_o {
-            // 将较大 id 指向较小 id (保持确定性)
-            let (from, to) = if root_c < root_o {
-                (root_o, root_c)
-            } else {
-                (root_c, root_o)
-            };
-            parents.insert(from, to);
-        }
-        sets.insert(key.to_string(), find(parents, c));
-    } else {
-        sets.insert(key.to_string(), find(parents, other));
-    }
-}
-
-/// union-find: 带路径压缩的查找。
-fn find(parents: &HashMap<usize, usize>, mut x: usize) -> usize {
-    let mut path = Vec::new();
-    while let Some(&p) = parents.get(&x) {
-        if p == x {
-            break;
-        }
-        path.push(x);
-        x = p;
-    }
-    // 路径压缩
-    for n in path {
-        // 不能在这里修改 parents (借用规则), 但 find 仍然正确
-        let _ = n;
-    }
-    x
-}
 
 // =====================================================================
 // P5. 指令调度 (list scheduling within basic block)
@@ -981,6 +714,10 @@ fn inst_is_movable_value(kind: &InstKind) -> bool {
                 | InstKind::Cast { .. }
                 | InstKind::AddrOf { .. }
                 | InstKind::MemberAddr { .. }
+                // `IndexAddr` 与 `AddrOf`/`MemberAddr` 同类：纯地址算术，不读不写，
+                // 所以可以像普通 Bin 运算一样重排/内联。这里没被编译器点到（本 match
+                // 有 `_` 兜底），兜底结果会是「不可移动」——安全但白丢优化。
+                | InstKind::IndexAddr { .. }
                 | InstKind::Load { .. }
                 | InstKind::IndexLoad { .. }
                 | InstKind::MemberLoad { .. }
@@ -1071,150 +808,6 @@ fn asm_has_memory_clobber(clobbers: &[String]) -> bool {
 
 fn asm_constraints_touch_memory(constraints: &[String]) -> bool {
     constraints.iter().any(|c| c.contains('m'))
-}
-
-// =====================================================================
-// P6. PGO 框架
-// =====================================================================
-
-/// 解析 .dcc.profdata 文件 (text format: `bb <bb_name> <count>`)。返回每个 BB 的
-/// 执行次数,供后续 hot/cold 提示使用。
-pub fn load_profile(path: &str) -> HashMap<String, u64> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return HashMap::new();
-    };
-    let mut out = HashMap::new();
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("bb ") {
-            let mut it = rest.split_whitespace();
-            if let (Some(bb), Some(c)) = (it.next(), it.next()) {
-                if let Ok(n) = c.parse::<u64>() {
-                    out.insert(bb.to_string(), n);
-                }
-            }
-        }
-    }
-    out
-}
-
-/// 应用 PGO 数据: hot BB 在 codegen 阶段加 .text.hot 提示; cold BB 加
-/// .text.unlikely 提示。函数 is_hot / is_cold 字段反映 top-level 热度。
-pub fn pgo(func: &mut Function) -> bool {
-    let path = format!("{}.dcc.profdata", func.name);
-    let profile = load_profile(&path);
-    if profile.is_empty() {
-        return false;
-    }
-    let total: u64 = profile.values().sum();
-    if total == 0 {
-        return false;
-    }
-    let mut hot_bbs = 0;
-    let mut cold_bbs = 0;
-    for (name, count) in &profile {
-        let ratio = *count as f64 / total as f64;
-        if ratio > 0.10 {
-            if let Some(bb) = func.blocks.get_mut(name) {
-                bb.insts.insert(
-                    0,
-                    Inst {
-                        dest: None,
-                        kind: InstKind::Store {
-                            e: Operand::SymAddr(
-                                "__dcc_hot_hint".to_string(),
-                                Type::Ptr(Box::new(QualType::new(Type::Void))),
-                            ),
-                            src: Operand::Int(*count as i128),
-                            is_volatile: false,
-                        },
-                        span: func.span.clone(),
-                    },
-                );
-                hot_bbs += 1;
-            }
-        } else if *count < 2 {
-            if let Some(bb) = func.blocks.get_mut(name) {
-                bb.insts.insert(
-                    0,
-                    Inst {
-                        dest: None,
-                        kind: InstKind::Store {
-                            e: Operand::SymAddr(
-                                "__dcc_cold_hint".to_string(),
-                                Type::Ptr(Box::new(QualType::new(Type::Void))),
-                            ),
-                            src: Operand::Int(*count as i128),
-                            is_volatile: false,
-                        },
-                        span: func.span.clone(),
-                    },
-                );
-                cold_bbs += 1;
-            }
-        }
-    }
-    func.is_hot = hot_bbs > cold_bbs;
-    func.is_cold = cold_bbs > hot_bbs && hot_bbs == 0;
-    hot_bbs + cold_bbs > 0
-}
-
-// =====================================================================
-// P7. Auto-parallelization
-// =====================================================================
-
-/// 检测 for (i = 0; i < N; i++) 形式的简单循环 (BB 名模式 `for.*`), 标注
-/// `is_parallelizable` 提示给 codegen。Codegen 见到该 BB 时可发 SIMD。
-pub fn auto_parallelization(func: &mut Function) -> bool {
-    let mut changed = false;
-    for name in &func.block_order.clone() {
-        if !name.starts_with("for.body") {
-            continue;
-        }
-        let bb = match func.blocks.get(name) {
-            Some(b) => b,
-            None => continue,
-        };
-        // 简单安全检查: 循环体无 Call 指令 + 无 Store 到非 induction 变量
-        let mut safe = true;
-        for inst in &bb.insts {
-            if matches!(inst.kind, InstKind::Call { .. }) {
-                safe = false;
-                break;
-            }
-            if let InstKind::Store {
-                e: Operand::SymAddr(n, _),
-                ..
-            } = &inst.kind
-            {
-                if !n.starts_with("_t") {
-                    safe = false;
-                    break;
-                }
-            }
-        }
-        if safe {
-            changed = true;
-            // 通过插入一条 marker Store 提示 codegen (注释式; 不影响正确性)
-            if let Some(b) = func.blocks.get_mut(name) {
-                b.insts.insert(
-                    0,
-                    Inst {
-                        dest: None,
-                        kind: InstKind::Store {
-                            e: Operand::SymAddr(
-                                "__dcc_parallel_hint".to_string(),
-                                Type::Ptr(Box::new(QualType::new(Type::Void))),
-                            ),
-                            src: Operand::Int(1),
-                            is_volatile: false,
-                        },
-                        span: func.span.clone(),
-                    },
-                );
-            }
-        }
-    }
-    changed
 }
 
 
@@ -1484,43 +1077,6 @@ fn ubsan_kind_hash(kind: &str) -> i128 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash as i128
-}
-
-// =====================================================================
-// P13. 别名集合 (Alias Set): identity / disjoint / overlap
-// =====================================================================
-
-/// 别名集合分类: 基于 P4 的 alias analysis 结果,
-/// 为每对指针 SSA 值提供三档判别:
-///   - Identity: 同一 alias set (必定别名)
-///   - Disjoint: 不同 alias set 且无 union 路径 (必定不别名)
-///   - Overlap: 其他情况 (可能别名)
-///
-/// 返回: (set 划分, 判别结果 map)
-pub fn alias_set(func: &Function) -> BTreeMap<usize, Vec<String>> {
-    let sets = alias_analysis(func);
-    let mut grouped: BTreeMap<usize, Vec<String>> = BTreeMap::new();
-    for (k, v) in &sets {
-        grouped.entry(*v).or_default().push(k.clone());
-    }
-    grouped
-}
-
-/// 判别两个 SSA 变量的别名关系。
-/// 返回: "identity" | "disjoint" | "overlap"
-pub fn alias_classify(a: &str, b: &str, sets: &HashMap<String, usize>) -> &'static str {
-    let sa = sets.get(a);
-    let sb = sets.get(b);
-    match (sa, sb) {
-        (Some(a_id), Some(b_id)) => {
-            if a_id == b_id {
-                "identity"
-            } else {
-                "disjoint"
-            }
-        },
-        _ => "overlap", // 未知指针保守视为可能别名
-    }
 }
 
 // =====================================================================
@@ -2377,6 +1933,13 @@ fn operand_refs_asm(op: &Operand) -> bool {
     }
 }
 
+/// 收集一条指令读到的**全部** SSA 名 —— 调度/投机/LICM/DCE 的依赖判据都走这一份。
+///
+/// 这里**故意不写 `_ => {}` 兜底**：兜底臂会让新增的 `InstKind` 变体静默变成「无操
+/// 数、无依赖」，于是调度器把一个读地址结果的消费者上提到块首、把生产者留在后面 ⇒
+/// 块内 use-before-def；重建按块内指令序发射变量 ⇒ 读到未初始化栈槽（-O2/-O3 静默错值，
+/// 链式 `&m[i][j]` 尤其致命）。判据只有一份，就不再需要事后把生产者往前搬的补丁。
+/// 穷举臂同时保证：将来加变体时编译器会点名到这里。
 fn collect_uses(k: &InstKind, out: &mut Vec<String>) {
     match k {
         InstKind::Bin { l, r, .. } => {
@@ -2394,6 +1957,12 @@ fn collect_uses(k: &InstKind, out: &mut Vec<String>) {
             add_op(arr, out);
             add_op(idx, out);
         },
+        // `IndexAddr` 与 `IndexLoad` 是同一操作数形状（`arr` 基址 + `idx` 下标）：两者都
+        // 真的**读**这两个值，区别只在是否访问内存。漏掉这条臂就是上面那段历史错值的真因。
+        InstKind::IndexAddr { arr, idx, .. } => {
+            add_op(arr, out);
+            add_op(idx, out);
+        },
         InstKind::IndexStore { arr, idx, src, .. } => {
             add_op(arr, out);
             add_op(idx, out);
@@ -2405,7 +1974,16 @@ fn collect_uses(k: &InstKind, out: &mut Vec<String>) {
                 add_op(a, out);
             }
         },
+        // C++ 零成本 EH：受保护调用的操作数与普通 Call 同义，此前落在兜底臂里。
+        InstKind::Invoke { callee, args, .. } => {
+            add_op(callee, out);
+            for a in args {
+                add_op(a, out);
+            }
+        },
         InstKind::MemberLoad { obj, .. } => add_op(obj, out),
+        // `&obj.field`：`obj` 在这里被当**值**（基址指针）读，与 `MemberLoad` 同理。
+        InstKind::MemberAddr { obj, .. } => add_op(obj, out),
         InstKind::MemberStore { obj, src, .. } => {
             add_op(obj, out);
             add_op(src, out);
@@ -2425,7 +2003,11 @@ fn collect_uses(k: &InstKind, out: &mut Vec<String>) {
                 collect_expr_uses(output, out);
             }
         },
-        _ => {},
+        // `AddrOf { base }` 的 `base` 是**对象名**（重建时直接装回 `Expr::Ident`），不是一
+        // 个会流动的值：它读的是那个对象，而对象序由内存定序规则管，不由 def-use 边管。
+        InstKind::AddrOf { .. } => {},
+        // 原地保留的声明与 landingpad 的 selector 都不读已有 SSA 值（后者自带 dest）。
+        InstKind::PreservedDecl { .. } | InstKind::EhLandingPad { .. } => {},
     }
 }
 
@@ -2766,6 +2348,10 @@ fn rename_in_kind(k: &mut InstKind, map: &HashMap<String, SsaVar>) {
             rename_op(src, map);
         },
         InstKind::IndexLoad { arr, idx, .. } => {
+            rename_op(arr, map);
+            rename_op(idx, map);
+        },
+        InstKind::IndexAddr { arr, idx, .. } => {
             rename_op(arr, map);
             rename_op(idx, map);
         },
@@ -3468,6 +3054,8 @@ fn escaping_bases(func: &Function) -> HashSet<String> {
                 // `_addr = &x; v = *_addr;` 算成逃逸会让 `x` 的写永远删不掉。
                 InstKind::Load { .. } => {},
                 InstKind::IndexLoad { idx, .. } => mark_op(idx, &mut mark, &mut escape),
+                // `IndexAddr` 与 `IndexLoad` 同理：`arr` 是地址位置，只有下标算使用。
+                InstKind::IndexAddr { idx, .. } => mark_op(idx, &mut mark, &mut escape),
                 InstKind::Select {
                     cond, then_, else_, ..
                 } => {
@@ -4435,16 +4023,6 @@ mod tests {
         assert_eq!(bb.insts[2].dest.as_ref().map(|v| v.name()), Some("a.1".into()));
     }
 
-    #[test]
-    fn alias_classify_identity_and_disjoint() {
-        let mut sets = HashMap::new();
-        sets.insert("p".into(), 0);
-        sets.insert("q".into(), 0);
-        sets.insert("r".into(), 1);
-        assert_eq!(alias_classify("p", "q", &sets), "identity");
-        assert_eq!(alias_classify("p", "r", &sets), "disjoint");
-        assert_eq!(alias_classify("p", "unknown", &sets), "overlap");
-    }
 
     /// DCE eliminates pure (non-volatile, no outputs, no memory
     /// clobber) asm when its results are unused.

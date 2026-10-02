@@ -216,6 +216,21 @@ fn run_ssa_passes(
                 // 「浮点运算不得复用」(舍入模式可在运行期被 fesetround 改掉)。
                 ssa.fenv_access = prog.fenv_access;
                 crate::ssa_passes::run_with_opts(&mut ssa, level, strict_aliasing);
+                // 诊断窗口：`DCC_SSA_IR_DUMP=1` 打印过完 SSA 管线的 IR 与重建后的 AST。
+                // 为什么必须有：这两样之间发生的事（内联、类型还原、基名塌缩）在产物上
+                // 常常只剩一个错值或一个丢掉的限定符，没窗口就只能猜。只在报障时打开，
+                // 不进任何判据。
+                if std::env::var("DCC_SSA_IR_DUMP").is_ok() {
+                    eprintln!(
+                        "==== [SSA IR] {} ====\n{}",
+                        f.name.name,
+                        crate::ssa::dump_function(&ssa)
+                    );
+                }
+                // 注：这里曾有一个 `stabilize_addr_def_use` 事后把被落到后面的地址生产者
+                // 往前搬的补丁。它的根因（`ssa_passes::collect_uses` 对 `IndexAddr`/`MemberAddr`/`Invoke`
+                // 盲视，导致调度/投机在块内造出 use-before-def）已在那一份依赖判据里穷举修掉，
+                // 所以上面那个搬动不再需要（实测：去掉它之后 lvalue_addr_rows 夹具仍逐档与 gcc 一致）。
                 // 循环的续体与外层构造共享时，结构化重建表达不了（判据与实测两端失败见
                 // `has_multi_exit_cycle`）⇒ 整函数退出 SSA 往返，f 保持 AST 原形。
                 if crate::ssa::has_multi_exit_cycle(&ssa) {
