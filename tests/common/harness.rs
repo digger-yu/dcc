@@ -68,11 +68,28 @@ pub(crate) fn run_object_test_flags(
 
 
 pub(crate) fn run_asm_output_test(name: &str, source: &str) -> (std::process::Output, String) {
+    run_asm_output_test_flags(name, source, "")
+}
+
+/// 同一件事，但可以额外传一组 flags（按空白分开）。
+///
+/// 为什么需要：有些性质只在特定档位上成立/失效。实例：`__seg_gs` 的 pointee 段前缀
+/// 在 -O0 下发得对，-O2 的 SSA 往返会把段信息弄丢（只在部分访问形态上发）—— 只看
+/// 默认档位就抓不到。空串时行为与 `run_asm_output_test` 一字不差。
+pub(crate) fn run_asm_output_test_flags(
+    name: &str,
+    source: &str,
+    extra_flags: &str,
+) -> (std::process::Output, String) {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
     let asm_path = dir.join(format!("dcc-{name}-{}.s", std::process::id()));
     fs::write(&source_path, source).expect("write C fixture");
-    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+    if !extra_flags.is_empty() {
+        cmd.args(extra_flags.split_whitespace());
+    }
+    let output = cmd
         .args(["-S", "-o"])
         .arg(&asm_path)
         .arg(&source_path)

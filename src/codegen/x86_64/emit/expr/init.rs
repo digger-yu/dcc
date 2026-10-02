@@ -334,6 +334,7 @@ impl Codegen {
                         self.push(0); // save addr
                         self.gen_expr(r, 0); // rax = val
                         self.pop(1); // rcx = addr
+                        self.emit_seg(Self::lvalue_seg_prefix(lv));
                         self.emit_store_scalar_float_at(&r.ty(), elem_ty, 1); // 单一真源：收浮影子副本
                         return;
                     }
@@ -350,6 +351,7 @@ impl Codegen {
                         self.push(0); // save addr
                         self.gen_expr(r, 0); // rax = val
                         self.pop(1); // rcx = addr
+                        self.emit_seg(Self::lvalue_seg_prefix(lv));
                         match es {
                             1 => self.emit(&[0x88, 0x01]),
                             2 => self.emit(&[0x66, 0x89, 0x01]),
@@ -393,8 +395,10 @@ impl Codegen {
                         return;
                     }
                     if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
+                        self.emit_seg(Self::lvalue_seg_prefix(lv));
                         self.emit_store_scalar_float_at(&r.ty(), elem_ty, 1);
                     } else {
+                        self.emit_seg(Self::lvalue_seg_prefix(lv));
                         match es {
                             1 => self.emit(&[0x88, 0x01]),
                             2 => self.emit(&[0x66, 0x89, 0x01]),
@@ -434,8 +438,10 @@ impl Codegen {
                         return;
                     }
                     if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
+                        self.emit_seg(Self::lvalue_seg_prefix(lv));
                         self.emit_store_scalar_float_at(&r.ty(), elem_ty, 1);
                     } else {
+                        self.emit_seg(Self::lvalue_seg_prefix(lv));
                         match es {
                             1 => self.emit(&[0x88, 0x01]),
                             2 => self.emit(&[0x66, 0x89, 0x01]),
@@ -447,7 +453,9 @@ impl Codegen {
             }
         } else if let Expr::Deref { e: ptr_e, .. } = lv {
             // *ptr = val
-            let seg_prefix = Self::ptr_seg_prefix(&ptr_e.ty());
+            // 前缀沿基址链下潜取（单一入口 `lvalue_seg_prefix`）：只看本层会把
+            // `*pp` 这类形状漏掉。
+            let seg_prefix = Self::lvalue_seg_prefix(lv);
             let is_deref_aggregate = matches!(
                 assign_l_ty,
                 Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) | Type::Array(_, _)
@@ -499,10 +507,8 @@ impl Codegen {
                 // 2. Get destination address (pointer value) into rdi
                 self.gen_expr(ptr_e, 0); // rax = ptr value
                 self.mov(7, 0); // rdi = rax
-                                // 3. rep movsb
-                if let Some(seg) = seg_prefix {
-                    self.emit(&[seg]);
-                }
+                                // 3. 拷贝到段限定目标（带段时不能用 rep movsb，
+                                // 理由与站点说明见 `Codegen::copy_agg_to_seg`）
                 self.emit(&[0xFC]); // cld
                                     // 拷贝大小: VM struct/union 为运行时值 (声明点绑定
                                     // 槽优先), 其余为编译期 size
@@ -516,7 +522,11 @@ impl Codegen {
                 } else {
                     self.mov_imm(1, agg_sz as i128); // rcx = size
                 }
-                self.emit(&[0xF3, 0xA4]); // rep movsb
+                match seg_prefix {
+                    None => self.emit(&[0xF3, 0xA4]), // rep movsb
+                    Some(seg) if assign_l_ty.has_vla() => self.copy_bytes_to_seg_runtime(seg),
+                    Some(seg) => self.copy_agg_to_seg(agg_sz, seg),
+                }
             } else {
                 self.gen_expr(ptr_e, 0); // rax = address
                 self.push(0); // save addr

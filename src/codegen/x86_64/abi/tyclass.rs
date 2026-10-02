@@ -559,6 +559,53 @@ impl Codegen {
             None
         }
     }
+    /// 一条**左值表达式**的最终访问需要哪个段前缀：沿 `Deref`/`Index`/`Member`/`Cast`
+    /// 的基址链下潜，取第一个 pointee 带 `__seg_gs`/`__seg_fs` 的指针。
+    ///
+    /// 单一入口。所有「先算地址、再访问内存」的站点（语义层 `materialize_address`、
+    /// 解引用、下标/成员的旧路径、inc/dec、聚合写入）都必须走它，而不是各自只瞥
+    /// 最外面那一层 —— 只看一层的实测后果是 `p[i]` / `q->a` / `a[i].f` 这类「基址是
+    /// 段指针、外面还包一层下标或成员」的访问静默按普通地址读写（与 gcc 产物不一致，
+    /// 在内核 per-cpu 场景下是写错内存）。
+    pub(crate) fn lvalue_seg_prefix(e: &Expr) -> Option<u8> {
+        let base = match e {
+            Expr::Deref { e, .. } => Some(&**e),
+            Expr::Index { arr, .. } => Some(&**arr),
+            Expr::Member { expr, .. } => Some(&**expr),
+            Expr::Cast { e, .. } => Some(&**e),
+            // 地址算术（`*(p + 1)` / `*(p + i)`）：结果类型已带段，但万一上游只
+            // 给了一侧的操作数带段，这里一并下潜。
+            Expr::Binop { l, r, .. } => {
+                return Self::lvalue_seg_prefix(l).or_else(|| Self::lvalue_seg_prefix(r))
+            },
+            _ => None,
+        };
+        match base {
+            Some(b) => Self::seg_prefix_of_base(b),
+            None => None,
+        }
+    }
+    /// 同上，但入参已经是「被解引用 / 被取成员 / 被下标的**基址表达式**」（`*p` 的 `p`、
+    /// `p->a` 的 `p`、`*(pp+1)` 的 `pp`）：先看这一层指针的 pointee 带不带段，
+    /// 不带再往下潜。
+    pub(crate) fn seg_prefix_of_base(base: &Expr) -> Option<u8> {
+        Self::ptr_seg_prefix(&base.ty()).or_else(|| Self::lvalue_seg_prefix(base))
+    }
+    /// 发一枚已算好的段前缀（`None` 时不发任何东西 —— 误发会污染下一条指令）。
+    pub(crate) fn emit_seg(&mut self, seg: Option<u8>) {
+        if let Some(seg) = seg {
+            self.emit(&[seg]);
+        }
+    }
+    /// 紧接其后的那一笔内存访问要不要带段前缀：就地判、就地发。
+    ///
+    /// 调用约定：必须**紧贴** load/store 的字节序列，中间不能插别的指令字节 ——
+    /// 段前缀只作用于它后面的那一条指令。
+    pub(crate) fn emit_seg_for(&mut self, lv: &Expr) {
+        if let Some(seg) = Self::lvalue_seg_prefix(lv) {
+            self.emit(&[seg]);
+        }
+    }
     /// `Self::rex()` 恒返回 ≥0x40，因此「一个字段都不用扩」时它给出的是一枚**不扩任何字段
     /// 的裸前缀**。它不改变语义，但会被 objdump 标成 `rex add %ebx,%eax` —— 那是多余位的
     /// 唯一读数，也是下一个人照抄的源头。这个助手把「按需才发」集中到一处。

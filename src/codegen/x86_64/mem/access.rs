@@ -844,6 +844,105 @@ impl Codegen {
         self.emit(&[seg_prefix]);
         self.emit_load_mem_typed(size, ty);
     }
+    /// 段限定（`__seg_gs`/`__seg_fs`）目标上的聚合拷贝：`rsi` = 源，`rdi` = 目标。
+    ///
+    /// 为什么不能沿用 `rep movsb`：64 位模式下字符串指令的段前缀被 CPU 忽略，
+    /// 所以上面挂一枚 `65` 的 `rep movsb` **等于写到非段内存** —— 不报错、不改字节，
+    /// 只是写错地方（旧实现把前缀发在 `cld` 前面，连“给 movsb 用”都说不上）。
+    /// gcc 同一形状发的是带前缀的普通存取（`movaps %xmm0,%gs:(%rdi)` 等）。
+    ///
+    /// 这里按 8/4/2/1 字节展开搬运，**每一笔落点单独带前缀**（前缀只作用下一条指令）。
+    /// 尺寸是编译期常量（VLA + 段限定的聚合不在本路径：上面 `size()` 对 VLA 不可信）。
+    pub(crate) fn copy_agg_to_seg(&mut self, size: usize, seg: u8) {
+        // rax 在本路径上是存活值（聚合赋值的地址/值约定），当暂存器用前先压后复。
+        self.emit(&[0x50]); // push rax
+        // `mod_ << 6 | rm`：rsi=110 / rdi=111 都不需要 SIB；reg 域固定 000（rax/al）。
+        let disp_bytes = |me: &mut Self, mod_: u8, off: usize| {
+            if mod_ == 1 {
+                me.emit(&[off as u8]);
+            } else if mod_ == 2 {
+                me.emit(&(off as i32).to_le_bytes());
+            }
+        };
+        // 一笔「读 [rsi+off] 的 w 字节」：rax 作暂存（源侧是通用地址空间，不需前缀）
+        macro_rules! load_at {
+            ($w:expr, $off:expr) => {{
+                let (mod_, need_disp) = if $off == 0 {
+                    (0u8, false)
+                } else if $off < 128 {
+                    (1u8, true)
+                } else {
+                    (2u8, true)
+                };
+                match $w {
+                    8 => self.emit(&[0x48, 0x8B, (mod_ << 6) | 0x06]),
+                    4 => self.emit(&[0x8B, (mod_ << 6) | 0x06]),
+                    2 => self.emit(&[0x66, 0x8B, (mod_ << 6) | 0x06]),
+                    _ => self.emit(&[0x8A, (mod_ << 6) | 0x06]),
+                }
+                if need_disp {
+                    disp_bytes(self, mod_, $off);
+                }
+            }};
+        }
+        // 一笔「写 al/rax 到 seg:[rdi+off]」—— 前缀逐笔发，不共享
+        macro_rules! store_at {
+            ($w:expr, $off:expr) => {{
+                let (mod_, need_disp) = if $off == 0 {
+                    (0u8, false)
+                } else if $off < 128 {
+                    (1u8, true)
+                } else {
+                    (2u8, true)
+                };
+                self.emit(&[seg]);
+                match $w {
+                    8 => self.emit(&[0x48, 0x89, (mod_ << 6) | 0x07]),
+                    4 => self.emit(&[0x89, (mod_ << 6) | 0x07]),
+                    2 => self.emit(&[0x66, 0x89, (mod_ << 6) | 0x07]),
+                    _ => self.emit(&[0x88, (mod_ << 6) | 0x07]),
+                }
+                if need_disp {
+                    disp_bytes(self, mod_, $off);
+                }
+            }};
+        }
+        let mut off = 0usize;
+        while size - off >= 8 {
+            load_at!(8, off);
+            store_at!(8, off);
+            off += 8;
+        }
+        for w in [4usize, 2, 1] {
+            if size - off >= w {
+                load_at!(w, off);
+                store_at!(w, off);
+                off += w;
+            }
+        }
+        self.emit(&[0x58]); // pop rax
+    }
+    /// 尺寸只有运行期才能定（VLA 聚合）且目标带段时的逐字节搬运：
+    /// `rsi` = 源、`rdi` = 目标、`rcx` = 己计好的字节数（与 `rep movsb` 同一约定）。
+    /// 循环体定长，所以 `jnz` 的反向位移是编译期常量：不能拿运行期长度算。
+    pub(crate) fn copy_bytes_to_seg_runtime(&mut self, seg: u8) {
+        // 位移算术（循环体定长 16 字节）：
+        //   0: 48 85 C9  test rcx,rcx
+        //   3: 74 10     jz   +16  （跳到 jnz 之后，即 21）
+        //   5: 8A 06     mov  al,[rsi]
+        //   7: <seg> 88 07  mov  seg:[rdi],al
+        //  10: 48 FF C6  inc  rsi
+        //  13: 48 FF C7  inc  rdi
+        //  16: 48 FF C9  dec  rcx
+        //  19: 75 F0     jnz  -16  （回到 5）
+        self.emit(&[0x48, 0x85, 0xC9, 0x74, 0x10]);
+        self.emit(&[0x8A, 0x06]); // mov al, [rsi]
+        self.emit(&[seg, 0x88, 0x07]); // mov seg:[rdi], al
+        self.emit(&[0x48, 0xFF, 0xC6]); // inc rsi
+        self.emit(&[0x48, 0xFF, 0xC7]); // inc rdi
+        self.emit(&[0x48, 0xFF, 0xC9]); // dec rcx
+        self.emit(&[0x75, 0xF0]); // jnz -> 回到 mov al,[rsi]
+    }
     pub(crate) fn emit_rsp_modrm_disp(&mut self, reg_field: u8, off: i64) {
         if off == 0 {
             self.emit(&[0x04 | ((reg_field & 7) << 3), 0x24]);
@@ -911,6 +1010,11 @@ impl Codegen {
                     self.pop(0); // rax = addr
                 }
                 let elem_ty = original_expr.ty();
+                // 基址是 `__seg_gs`/`__seg_fs` 指针时（`p[i]`、`q->a`、`a[i].f`）必须
+                // 带段前缀；判据单一入口见 [`Codegen::lvalue_seg_prefix`]。
+                if let Some(seg) = Self::lvalue_seg_prefix(original_expr) {
+                    self.emit(&[seg]);
+                }
                 self.emit_load_mem_typed(elem_size, &elem_ty);
                 if dst != 0 && !self.is_scalar_float_channel_ty(&elem_ty) {
                     self.mov(dst, 0);
@@ -929,12 +1033,20 @@ impl Codegen {
                     }
                 }
                 let elem_ty = original_expr.ty();
+                // 同 LoadScalar：地址已经算在 rcx，段限定基址必须让这一笔写入落在段里。
+                let seg = Self::lvalue_seg_prefix(original_expr);
                 if self.is_scalar_float_channel_ty(&elem_ty) {
                     // 单一真源：值可能在 xmm0（f32/f64）或 st(0)（long double），
                     // 旧写法无条件 `movsd [rcx], xmm0` 会把陈旧 xmm0 写进
                     // long double 对象，并把真正的 80-bit 值漏在 x87 栈上。
+                    if let Some(seg) = seg {
+                        self.emit(&[seg]);
+                    }
                     self.emit_store_scalar_float_at(&elem_ty, &elem_ty, 1);
                 } else {
+                    if let Some(seg) = seg {
+                        self.emit(&[seg]);
+                    }
                     match elem_size {
                         1 => self.emit(&[0x88, 0x01]),
                         2 => self.emit(&[0x66, 0x89, 0x01]),

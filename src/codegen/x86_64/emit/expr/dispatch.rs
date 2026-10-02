@@ -816,6 +816,7 @@ impl Codegen {
                                 self.push(0); // save addr
                                 self.gen_expr(r, 0); // rax = val
                                 self.pop(1); // rcx = addr
+                                self.emit_seg_for(lv);
                                 self.emit_store_scalar_float_at(&r.ty(), elem_ty, 1); // 单一真源：收浮影子副本
                                 return;
                             }
@@ -832,6 +833,7 @@ impl Codegen {
                                 self.push(0); // save addr
                                 self.gen_expr(r, 0); // rax = val
                                 self.pop(1); // rcx = addr
+                                self.emit_seg_for(lv);
                                 match es {
                                     1 => self.emit(&[0x88, 0x01]),
                                     2 => self.emit(&[0x66, 0x89, 0x01]),
@@ -872,6 +874,7 @@ impl Codegen {
                                 self.gen_agg_elem_store(r, elem_ty, es, dst);
                                 return;
                             }
+                            self.emit_seg_for(lv);
                             if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
                                 self.emit_store_scalar_float_at(&r.ty(), elem_ty, 1);
                             } else {
@@ -913,6 +916,7 @@ impl Codegen {
                                 self.gen_agg_elem_store(r, elem_ty, es, dst);
                                 return;
                             }
+                            self.emit_seg_for(lv);
                             if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
                                 self.emit_store_scalar_float_at(&r.ty(), elem_ty, 1);
                             } else {
@@ -927,7 +931,9 @@ impl Codegen {
                     }
                 } else if let Expr::Deref { e: ptr_e, .. } = lv {
                     // *ptr = val
-                    let seg_prefix = Self::ptr_seg_prefix(&ptr_e.ty());
+                    // 段前缀沿基址链下潜取（`*pp` 这类「指针的指针」外层是普通指针、
+                    // 里层才带段时，只看一层会漏发前缀）。
+                    let seg_prefix = Self::lvalue_seg_prefix(lv);
                     let is_deref_aggregate = matches!(
                         assign_l_ty,
                         Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) | Type::Array(_, _)
@@ -981,10 +987,12 @@ impl Codegen {
                         // 2. Get destination address (pointer value) into rdi
                         self.gen_expr(ptr_e, 0); // rax = ptr value
                         self.mov(7, 0); // rdi = rax
-                                        // 3. rep movsb
-                        if let Some(seg) = seg_prefix {
-                            self.emit(&[seg]);
-                        }
+                                        // 3. 拷贝到段限定目标
+                        //
+                        // 带段时**不能**用 `rep movsb`：64 位模式下字符串指令的段前缀被 CPU
+                        // 忽略，挂一枚 `65` 的 rep movsb 会写到非段内存（旧实现把前缀发在
+                        // `cld` 前面，那是给 cld 加的，等于什么都没做）。带段路径改走
+                        // `copy_agg_to_seg`（常量尺寸）/ `copy_bytes_to_seg_runtime`（VLA）。
                         self.emit(&[0xFC]); // cld
                                             // 拷贝大小: VM struct/union 为运行时值 (声明点绑定
                                             // 槽优先), 其余为编译期 size
@@ -998,7 +1006,13 @@ impl Codegen {
                         } else {
                             self.mov_imm(1, agg_sz as i128); // rcx = size
                         }
-                        self.emit(&[0xF3, 0xA4]); // rep movsb
+                        match seg_prefix {
+                            None => self.emit(&[0xF3, 0xA4]), // rep movsb
+                            Some(seg) if assign_l_ty.has_vla() => {
+                                self.copy_bytes_to_seg_runtime(seg)
+                            },
+                            Some(seg) => self.copy_agg_to_seg(agg_sz, seg),
+                        }
                     } else {
                         self.gen_expr(ptr_e, 0); // rax = address
                         self.push(0); // save addr
@@ -1335,9 +1349,11 @@ impl Codegen {
                                         fty,
                                         Type::Float | Type::Double | Type::LongDouble
                                     ) {
+                                        self.emit_seg(Self::lvalue_seg_prefix(lv));
                                         self.emit_store_scalar_float_at(&r.ty(), fty, 1);
                                     // 单一真源：收浮影子副本
                                     } else {
+                                        self.emit_seg(Self::lvalue_seg_prefix(lv));
                                         match size {
                                             1 => self.emit(&[0x88, 0x01]),
                                             2 => self.emit(&[0x66, 0x89, 0x01]),
@@ -1345,7 +1361,9 @@ impl Codegen {
                                             8 => self.emit(&[0x48, 0x89, 0x01]),
                                             16 => {
                                                 // __int128: rax:rdx → [rcx]:[rcx+8]
+                                                // 两笔写入都要前缀（段前缀只作用下一条指令）
                                                 self.emit(&[0x48, 0x89, 0x01]); // mov [rcx], rax
+                                                self.emit_seg(Self::lvalue_seg_prefix(lv));
                                                 self.emit(&[0x48, 0x89, 0x51, 0x08]);
                                                 // mov [rcx+8], rdx
                                             },
@@ -1353,6 +1371,7 @@ impl Codegen {
                                         }
                                     }
                                 } else {
+                                    self.emit_seg(Self::lvalue_seg_prefix(lv));
                                     match size {
                                         1 => self.emit(&[0x88, 0x01]),
                                         2 => self.emit(&[0x66, 0x89, 0x01]),
@@ -1360,6 +1379,7 @@ impl Codegen {
                                         8 => self.emit(&[0x48, 0x89, 0x01]),
                                         16 => {
                                             self.emit(&[0x48, 0x89, 0x01]); // mov [rcx], rax
+                                            self.emit_seg(Self::lvalue_seg_prefix(lv));
                                             self.emit(&[0x48, 0x89, 0x51, 0x08]);
                                             // mov [rcx+8], rdx
                                         },

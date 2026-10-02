@@ -23,8 +23,10 @@ impl Codegen {
             return;
         }
         self.gen_expr(e, 0);
-        // __seg_gs/__seg_fs 指针解引用: 发射段前缀 (%gs:/%fs:)
-        if let Some(seg) = Self::ptr_seg_prefix(&e.ty()) {
+        // __seg_gs/__seg_fs 指针解引用: 发射段前缀 (%gs:/%fs:)。`e` 就是**基址表达式**，
+        // 所以走 `seg_prefix_of_base`（先看本层 pointee，再沿链下潜 —— `*pp` /
+        // `*(p + 1)` 这些形状外层不一定就是带段指针）。
+        if let Some(seg) = Self::seg_prefix_of_base(e) {
             self.emit_load_mem_typed_seg(load_size, &load_ty, seg);
         } else {
             self.emit_load_mem_typed(load_size, &load_ty);
@@ -210,6 +212,9 @@ impl Codegen {
                     }
                 }
                 self.emit(&[0x48, 0x01, 0xc8]); // add rax, rcx
+                // 语义层描述符接不住时的兼容路径：段限定基址同样要带前缀，
+                // 否则 `p[i]` 会退化成普通访问（单一入口见 `lvalue_seg_prefix`）。
+                self.emit_seg(Self::lvalue_seg_prefix(e));
                 self.emit_load_mem_typed(es as usize, elem_ty); // 按元素类型加载
                 if dst != 0 && !matches!(elem_ty, Type::Float | Type::Double) {
                     self.mov(dst, 0);
@@ -231,6 +236,7 @@ impl Codegen {
             self.pop(0);
             self.emit_index_scale(es, arr, elem_ty);
             self.emit(&[0x48, 0x01, 0xc8]); // add rax, rcx
+            self.emit_seg(Self::lvalue_seg_prefix(e));
             self.emit_load_mem_typed(es as usize, elem_ty);
             if dst != 0 && !matches!(elem_ty, Type::Float | Type::Double) {
                 self.mov(dst, 0);
@@ -345,6 +351,10 @@ impl Codegen {
             }
         }
         // 3. 加载成员值 (位域 vs 普通)
+        //
+        // 段前缀：`p->a` / `q[i].a` / `p->a.b` 的基址可能是 `__seg_gs` 指针，而地址只是
+        // 在普通算术后加上去的偏移 —— 前缀必须贴在**每一笔**访存前，故先算一次、各站点复用。
+        let seg = Self::seg_prefix_of_base(expr);
         // 数组字段 (如 decNumber 的 Unit lsu[1]): 值上下文中衰减为
         // 首元素地址 — dst 已持有该地址, 不得再按元素大小加载值,
         // 否则 `p = s->arr` 会把 arr[0] 的值当作地址.
@@ -362,6 +372,7 @@ impl Codegen {
                     // 会把另一个字段留在低 8 个寄存器上，读回来的就是别人的值。
                     let rb = if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     let modrm_self = ((dst & 7) << 3) | (dst & 7);
+                    self.emit_seg(seg);
                     match container_size {
                         1 => self.emit(&[0x48 | rb, 0x0F, 0xB6, modrm_self]),
                         2 => self.emit(&[0x48 | rb, 0x0F, 0xB7, modrm_self]),
@@ -497,6 +508,7 @@ impl Codegen {
                         // 单一真源：long double 必须 `fld tbyte [dst]`（旧写法
                         // movsd 只读 16 字节槽的低 8 字节，依赖“高 8 字节为 0
                         // 且就是 f64 位型”的旧不变量）。
+                        self.emit_seg(seg);
                         self.emit_load_scalar_float_at(&f.ty, dst);
                     } else {
                         let is_signed = !matches!(
@@ -509,6 +521,7 @@ impl Codegen {
                                 | Type::ULongLong
                                 | Type::UInt128
                         );
+                        self.emit_seg(seg);
                         match size {
                             1 => {
                                 let opcode = if is_signed { 0xBEu8 } else { 0xB6u8 };
@@ -540,6 +553,7 @@ impl Codegen {
                 // 位模式当作整数值用 cvtsi2ss 转换成浮点数。
                 if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
                     // 同上：单一真源，long double 走 `fld tbyte`。
+                    self.emit_seg(seg);
                     self.emit_load_scalar_float_at(ty, dst);
                 } else {
                     let is_signed = !matches!(
@@ -552,6 +566,7 @@ impl Codegen {
                             | Type::ULongLong
                             | Type::UInt128
                     );
+                    self.emit_seg(seg);
                     match size {
                         1 => {
                             let opcode = if is_signed { 0xBEu8 } else { 0xB6u8 };

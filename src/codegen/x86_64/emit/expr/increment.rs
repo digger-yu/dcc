@@ -237,12 +237,9 @@ impl super::super::super::Codegen {
             }
             // 内存 lvalue: (*p)++ / a[i]-- / s->f++
             let mem_sz = inner_ty.size().max(1);
-            // __seg_gs/__seg_fs 指针解引用的 inc/dec: 需要段前缀
-            let seg_prefix = if let Expr::Deref { e: ptr_e, .. } = lv {
-                Self::ptr_seg_prefix(&ptr_e.ty())
-            } else {
-                None
-            };
+            // 段前缀：不只看 `*p`，`p[i]++` / `q->a++` / `a[i].f++` 同样要带 ——
+            // 基址链下潜取，单一入口见 `lvalue_seg_prefix`。
+            let seg_prefix = Self::lvalue_seg_prefix(lv);
             if !self.gen_lvalue_addr(lv, 0) {
                 return;
             }
