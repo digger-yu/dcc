@@ -185,11 +185,14 @@ fn builtin_choose_full_run_returns_zero() {
     assert_eq!(rc, 0, "choose should return 0, got {rc}");
 }
 
-/// 未知 __builtin_*：warning + 零值；void 变体发射 ud2
+/// 未知 __builtin_*：**硬错误 E0018**（早期版本是 warning + 零值，现已收紧；
+/// 下方注释与断言以当前行为为准）；void 变体发射 ud2。
 #[test]
 #[cfg(unix)]
 fn unknown_builtin_is_hard_error_e0018() {
-    let source = include_str!("../fixtures/c/unk_builtin.c");
+    // 负向夹具（期望编译报错）属于 tests/fixtures/errors/；放在 fixtures/c/ 会被
+    // 链接型的语料级测试误当成待修债（它们永远链接不过，因为本来就不该编译过）。
+    let source = include_str!("../fixtures/errors/unk_builtin.c");
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-unknown-builtin-{}.c", std::process::id()));
     let object_path = dir.join(format!("dcc-unknown-builtin-{}.o", std::process::id()));
@@ -236,6 +239,81 @@ fn attr_target_clones_compile_and_run() {
     let rc = run_exe(&exe);
     assert_eq!(rc, 0, "attr_target_clones should return 0, got {rc}");
     let _ = fs::remove_file(exe);
+}
+
+/// **已知未修（双向钉住）**：`target_clones` 会把链接静默从动态降级为静态。
+///
+/// 实测链：`.o` 里有 IFUNC 符号时，`driver.rs` 不再走宿主 cc（注释说宿链处理不了
+/// dcc 的 IFUNC resolver —— 因为 resolver 的机器码是**内置链接器**现场拼的，
+/// `link/target_clones.rs` 那 662 行），而是改走 `run_builtin_linker`。后果：
+///
+/// | 输入 | 链接路径 | 产物 |
+/// |---|---|---|
+/// | 只用 `printf` | 宿主 cc | 动态，NEEDED libc.so.6 |
+/// | 只用 `target_clones` | 内置链接器 | **静态**，无 PT_INTERP、无 .dynamic |
+/// | 两者同用 | 内置链接器 | 链接失败：几十个 E0302 |
+///
+/// 那几十个未定义符号里绝大多数是夹具**从未调用**的（`tmpfile`/`asprintf`/`rename`…），
+/// 所以它不是「缺 libc 符号表」（补不完的），而是「静态链下 crt 与 libc 内部引用
+/// 全部变成真未定义」。因此本测试两面都钉：
+///   1. 不带 IFUNC 的同主程序必须是动态的（基准线）；
+///   2. 带 IFUNC 的必须仍是动态的 —— 这一条**今天故意红着**，所以当前只断言
+///      「它现在确实是静态的」，并在注释与 docs §7.38 写明修好后该翻方向。
+/// 为什么不能只留「链接失败」一条：那只钉住了用户可见现象，没钉住「静默变静态」
+/// 这个本质——而后者就算 libc 问题被旁路躲过也仍然是错的。
+#[test]
+#[cfg(unix)]
+fn target_clones_diverts_to_static_link_is_known_defect() {
+    let plain = "#include <stdio.h>\nint compute(int x){ return x*2+1; }\n\
+                 int main(void){ printf(\"%d\\n\", compute(10)); return 0; }\n";
+    let clones = "#include <stdio.h>\n\
+                  __attribute__((target_clones(\"sse4.2,default\")))\n\
+                  int compute(int x){ return x*2+1; }\n\
+                  int main(void){ printf(\"%d\\n\", compute(10)); return 0; }\n";
+    let dir = std::env::temp_dir();
+    let tag = std::process::id();
+    let needed_of = |src: &str, stem: &str| -> Option<bool> {
+        let sf = dir.join(format!("dcc-tc-{stem}-{tag}.c"));
+        let exe = dir.join(format!("dcc-tc-{stem}-{tag}.bin"));
+        std::fs::write(&sf, src).expect("写临时源文件");
+        let ok = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["-O0", "-o"]).arg(&exe).arg(&sf)
+            .output().map(|o| o.status.success()).unwrap_or(false);
+        let _ = std::fs::remove_file(&sf);
+        if !ok {
+            let _ = std::fs::remove_file(&exe);
+            return None;
+        }
+        let dyn_info = std::process::Command::new("readelf")
+            .args(["-d"]).arg(&exe).output().map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        let _ = std::fs::remove_file(&exe);
+        Some(dyn_info.contains("(NEEDED)"))
+    };
+
+    // 1) 基准线：不带 IFUNC 的同主程序走宿主 cc，必须是动态链接。
+    assert_eq!(
+        needed_of(plain, "plain"),
+        Some(true),
+        "基准线就变了：不带 IFUNC 的程序也不再是动态链接，需先查链接路径是否整体跑偏"
+    );
+
+    // 2) 当前缺陷：引入 IFUNC 后链接直接失败（E0302）。三种读数各自对应不同的状态，
+    // 所以**每个转移都必须逼出一处的显式修改**，不允许默默进绿：
+    //   None       = 现状（链不上）
+    //   Some(false) = 链上了但仍静态 —— 本质缺陷未修
+    //   Some(true)  = 修好了（保留动态链）
+    match needed_of(clones, "clones") {
+        None => {} // 已知缺陷现状
+        Some(false) => panic!(
+            "target_clones + libc 已能链上，但产物仍是静态的：降级缺陷未修。请改成本分支 \
+             断言 Some(false) 并保留 docs §7.38 的开放项"
+        ),
+        Some(true) => panic!(
+            "target_clones 程序现在已是动态链接：降级缺陷已修好。请把这个用例改成断言 \
+             Some(true)（与 plain 并列），并更新 docs §7.38"
+        ),
+    }
 }
 
 /// __attribute__((no_sanitize(...))) / no_sanitize_address

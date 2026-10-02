@@ -40,7 +40,11 @@ probe() {
       echo "COMPILE-FAIL $tag -O$L" >> "$OUT/summary.txt"
       return 0
     fi
-    ( cd "$OUT" && timeout "$timeout_s" "./${tag}_d$L" > "${tag}_d$L.out" 2>/dev/null )
+    # 外层子 shell 也要 `2>/dev/null`：夹具**有意**触发信号时（`builtin_trap.c`
+    # 一类），「段错误/非法指令/已中止/追踪或断点陷阱」是 **bash 作业控制自己打的**
+    # 消息，不是产物的 stderr——只重定向内层那一条滤不掉它。这些刷屏会让人以为
+    # 脚本在报错（它并没有：下面比的正是退出码，gcc 侧同信号同崩才算一致）。
+    ( cd "$OUT" && timeout "$timeout_s" "./${tag}_d$L" > "${tag}_d$L.out" 2>/dev/null ) 2>/dev/null
     rc=$?
     if [ "$L" = 0 ]; then
       base_rc=$rc
@@ -53,14 +57,33 @@ probe() {
       fi
     fi
   done
+  # 进度：全量要十几分钟，不报进度就无法区分「在跑」与「卡死」。并行下每行是短
+  # 写入，`>>` 追加一行是原子的；计数偶差一两个无妨，它只用于显示。
+  n=$(( $(wc -l < "$OUT/progress.txt" 2>/dev/null || echo 0) + 1 ))
+  printf '%s\n' "$f" >> "$OUT/progress.txt"
+  if [ $((n % 25)) -eq 0 ]; then
+    echo "… 已完成 $n 个夹具" >&2
+  fi
   return 0
 }
 export -f probe norm; export DCC REPO OUT timeout_s
 
 : > "$OUT/summary.txt"
-find "$REPO/tests/fixtures/c" "$REPO/tests/fixtures/opt" -name '*.c' | sort \
-  | xargs -P "$jobs" -I{} bash -c 'probe "$@"' _ {}
-total=$(find "$REPO/tests/fixtures/c" "$REPO/tests/fixtures/opt" -name '*.c' | wc -l)
+: > "$OUT/progress.txt"
+
+# `ONLY=<子串>` 只跑匹配的夹具：全量要 611 个 × 3 档的「编译+链接+跑」，实测单夹具
+# 就要十几秒，整体十几分钟；日常改一处时不需要等全量，全量是 `make test-all` 的活。
+# 不开 ONLY 时行为与以前完全一致。
+only=${ONLY:-}
+list_file="$OUT/corpus.txt"
+find "$REPO/tests/fixtures/c" "$REPO/tests/fixtures/opt" -name '*.c' | sort > "$list_file"
+if [ -n "$only" ]; then
+  grep -F -- "$only" "$list_file" > "$list_file.f" && mv "$list_file.f" "$list_file"
+  echo "ONLY=$only → 命中 $(wc -l < "$list_file") 个夹具（不设 ONLY 则跑全量）"
+fi
+total=$(wc -l < "$list_file")
+export total
+xargs -a "$list_file" -P "$jobs" -I{} bash -c 'probe "$@"' _ {}
 diffs=$(grep -c '^OPT-DIFF' "$OUT/summary.txt" || true)
 fails=$(grep -c '^COMPILE-FAIL' "$OUT/summary.txt" || true)
 # COMPILE-FAIL 不是一条债，而是几种不同的东西混在一起（本轮逐个定性出来的）：平铺成
@@ -74,7 +97,17 @@ classify_cf() {
   local f=$1 tag=$2 L=$3 log="$OUT/${tag}_d${L}.build"
   [ -f "$log" ] || { echo "CF-UNKNOWN"; return; }
   if grep -qE "undefined reference to .main|crt1\\.o.*_start" "$log"; then echo "CF-NOMAIN"; return; fi
-  if grep -qE "^error\\[E0302\\]" "$log"; then echo "CF-LIBC-SYM"; return; fi
+  if grep -qE "^error\\[E0302\\]" "$log"; then
+    # E0302 不都是一种债。实测证明：源里有 IFUNC（target_clones / ifunc 属性）时，
+    # dcc 会从「宿主 cc 链接」改道到内置链接器，而内置链接器产出的是**静态**
+    # 可执行文件（无 PT_INTERP、无 .dynamic），所以任何 libc 引用都变成未定义符号。
+    # 把它记成「运行库覆盖缺口」会指错地方（补符号表永远补不完）；它的真问题是
+    # 「IFUNC 使链接静默从动态降级为静态」，见 docs/ssa-pass-upgrade-plan.md §7.38。
+    if grep -qE "target_clones|__attribute__\\(\\(ifunc|\bifunc\(" "$f"; then
+      echo "CF-IFUNC-DYNLINK"; return
+    fi
+    echo "CF-LIBC-SYM"; return
+  fi
   if grep -qE "undefined reference to" "$log"; then echo "CF-CROSS-TU"; return; fi
   # 到这里都是前端/汇编侧错误：gcc 也拒绝 ⇒ 语料本身的问题，不是编译器的债
   if gcc -fsyntax-only -std=gnu2x -w "$f" >/dev/null 2>&1; then
@@ -86,10 +119,13 @@ classify_cf() {
 : > "$OUT/cf_classified.txt"
 grep '^COMPILE-FAIL' "$OUT/summary.txt" | while read -r _ tag lvl _rest; do
   L=${lvl#-O}
-  # 从 tag 还原源文件路径：tag 是「相对 tests/fixtures 的路径，/ 换成 _」
+  # 从 tag 还原源文件路径：tag 是「相对 tests/fixtures 的路径，/ 换成 _」。
+  # 只能换**第一个** `_`（它才是目录分隔）；之前写的 `s|_|/|2` 对任何文件名里带
+  # 下划线的夹具（本次实测影 9 条 CF）都还原成不存在的路径，于是 `$src` 为空、
+  # 下面的 gcc 探针拿到空文件名而失败 —— 把「源文件查不到」误归成「gcc 也拒」。
   src=$(find "$REPO/tests/fixtures/c" "$REPO/tests/fixtures/opt" -name "*.c" \
           | sed "s|$REPO/tests/fixtures/||; s|/|_|g" | grep -x "$tag" \
-          | head -1 | sed "s|^|$REPO/tests/fixtures/|; s|_|/|2" )
+          | head -1 | sed "s|^|$REPO/tests/fixtures/|; s|_|/|" )
   [ -f "$src" ] || src=""
   printf '%s %s\n' "$(classify_cf "$src" "$tag" "$L")" "$tag" >> "$OUT/cf_classified.txt"
 done
@@ -105,9 +141,10 @@ if [ -s "$OUT/cf_classified.txt" ]; then
       CF-CROSS-TU)   d="符号由另一 TU 提供，单文件链接必失败";;
       CF-SRC-REJECT) d="同样 flags 下 gcc 也拒绝（语料/flags 不匹配，非编译器债）";;
       CF-LIBC-SYM)   d="缺 libc 符号支持（运行库覆盖缺口）";;
+      CF-IFUNC-DYNLINK) d="IFUNC 使链接改道内置链接器，产物静默变静态 ⇒ 无法引 libc";;
       *)             d="未定性，按新增缺陷处理";;
     esac
-    printf '    %-14s %3d  %s\n' "$k" "$n" "$d"
+    printf '    %-17s %3d  %s\n' "$k" "$n" "$d"
   done
 fi
 
