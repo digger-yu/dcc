@@ -47,12 +47,142 @@ struct Prefixes {
     rep: bool,
     repne: bool,
     o16: bool,
+    /// 段前缀字节（0x26/0x2E/0x36/0x3E/0x64/0x65）。它**必须被当成前缀收掉**：留在
+    /// 流里会被当成一条指令的首字节（`0x26` 还带 ModRM），于是一条 `65 48 8b 05 …`
+    /// 被读成两段残渣，percpu 那一族整页错位。
+    ///
+    /// 渲染位置不是我们定的，是 `as` + `objdump -d` 反读出来的（见 seg_operand/seg_word
+    /// 的注释）：FS/GS 贴在内存操作数上，ES/CS/SS/DS 贴在助记符前。
+    seg: Option<u8>,
+}
+
+/// 段前缀 → 贴在**内存操作数**前的字面量。objdump 只对 FS/GS 用这种拼法：
+/// `65 48 8b 05 …` → `mov %gs:0x0(%rip),%rax`；`64 48 8b 04 25 10` → `mov %fs:0x10,%rax`。
+/// ES/CS/SS/DS 返回空串，因为它们走 [`seg_word`]。
+fn seg_operand(pfx: u8) -> &'static str {
+    match pfx {
+        0x64 => "%fs:",
+        0x65 => "%gs:",
+        _ => "",
+    }
+}
+
+/// 段前缀 → 贴在**助记符**前的字面量。objdump 的两种情形用这一路：
+/// ES/CS/SS/DS 覆盖（`26 48 8b 58 08` → `es mov 0x8(%rax),%rbx`、
+/// `3e 48 8b 58 08` → `ds mov …`、`36 ff 20` → `ss jmp *(%rax)`），
+/// 以及 FS/GS 但这条指令压根没有内存操作数（`65 90` → `gs nop`、
+/// `65 0f ae f0` → `gs mfence`）。
+fn seg_word(pfx: u8) -> &'static str {
+    match pfx {
+        0x26 => "es ",
+        0x2e => "cs ",
+        0x36 => "ss ",
+        0x3e => "ds ",
+        0x64 => "fs ",
+        0x65 => "gs ",
+        _ => "",
+    }
 }
 
 /// 条件码后缀, 索引 = 0x0F 后操作码低 4 位 (setcc/jcc 共用).
 const CC_NAMES: [&str; 16] = [
     "o", "no", "b", "ae", "e", "ne", "be", "a", "s", "ns", "p", "np", "l", "ge", "le", "g",
 ];
+
+/// `66 0F xx /r` 打包整数算术族（SSE2）的助记词表。
+///
+/// **每一项都是本机 `as` + `objdump -d` 反读出来的**（不是记忆）：对每个 op 码组
+/// `.byte 0x66,0x0f,0xXX,0xc1` 交给 objdump 读名字，再用 `as` 组装 `mn %xmm1,%xmm0`
+/// 确认能回到同一串字节（双向定死）。AT&T 打印序是 `{src}, {dst}`：dst=ModRM.reg，
+/// src=ModRM.r/m（mod=3 时也叫 %xmmN）。
+pub(crate) fn packed_int_mnemonic(op: u8) -> Option<&'static str> {
+    Some(match op {
+        0x60 => "punpcklbw",
+        0x61 => "punpcklwd",
+        0x62 => "punpckldq",
+        0x63 => "packsswb",
+        0x64 => "pcmpgtb",
+        0x65 => "pcmpgtw",
+        0x66 => "pcmpgtd",
+        0x67 => "packuswb",
+        0x68 => "punpckhbw",
+        0x69 => "punpckhwd",
+        0x6a => "punpckhdq",
+        0x6b => "packssdw",
+        0x6c => "punpcklqdq",
+        0x6d => "punpckhqdq",
+        0x74 => "pcmpeqb",
+        0x75 => "pcmpeqw",
+        0x76 => "pcmpeqd",
+        0xd1 => "psrlw",
+        0xd2 => "psrld",
+        0xd3 => "psrlq",
+        0xd4 => "paddq",
+        0xd5 => "pmullw",
+        0xd8 => "psubusb",
+        0xd9 => "psubusw",
+        0xda => "pminub",
+        0xdb => "pand",
+        0xdc => "paddusb",
+        0xdd => "paddusw",
+        0xdf => "pandn",
+        0xe0 => "pavgb",
+        0xe1 => "psraw",
+        0xe2 => "psrad",
+        0xe3 => "pavgw",
+        0xe4 => "pmulhuw",
+        0xe5 => "pmulhw",
+        0xe8 => "psubsb",
+        0xe9 => "psubsw",
+        0xea => "pminsw",
+        0xeb => "por",
+        0xec => "paddsb",
+        0xed => "paddsw",
+        0xee => "pmaxsw",
+        0xef => "pxor",
+        0xf1 => "psllw",
+        0xf2 => "pslld",
+        0xf3 => "psllq",
+        0xf4 => "pmuludq",
+        0xf5 => "pmaddwd",
+        0xf6 => "psadbw",
+        0xf8 => "psubb",
+        0xf9 => "psubw",
+        0xfa => "psubd",
+        0xfb => "psubq",
+        0xfc => "paddb",
+        0xfd => "paddw",
+        0xfe => "paddd",
+        // 有意不入表的（objdump 读不回可被 `as` 重现的名字）：
+        //   0xd6 movq / 0x6e,0x7e movd（已有专列）、0xd7 pmovmskb（dst 是 GP，
+        //   `pmovmskb %xmm1,%xmm0` 被 GAS 拒）、0xf7 maskmovdqu、0xe6/0xe7（objdump
+        //   对 0xe6 打 AVX 名 `vttpd2dq`，与 legacy 名不同）、0xf0/0xff（本机
+        //   binutils 直报 `(bad)`/ud0）。
+        _ => return None,
+    })
+}
+
+/// 两条 0F 入口（非-REX 的 [`Dec::decode_two_byte`] 与 REX 的
+/// [`Dec::decode_two_byte_rex`]）**共用**这一张 SSE 白名单。写成谓词而不是两份
+/// 字面量列表，是因为这个项目已经踩过「只改了 `decode_sse`、入口白名单没加 →
+/// 复测数字一动没动」的坑：两份列表迟早会漂。
+pub(crate) fn sse_op(op: u8) -> bool {
+    matches!(
+        op,
+        // load / store / 标量算术 / 转换（原有覆盖面）
+        0x10 | 0x11 | 0x28 | 0x29 | 0x2A | 0x2C | 0x2E | 0x2F | 0x51 | 0x57 | 0x58
+            | 0x59 | 0x5A | 0x5C | 0x5D | 0x5E | 0x5F | 0x6E | 0x6F | 0x7E | 0x7F | 0xD6
+            // 打包整数算术族（只在 66 格有名字，见 packed_int_mnemonic）
+            | 0x60..=0x6D | 0x74..=0x76
+            | 0xD1..=0xD5 | 0xD8..=0xDD | 0xDF
+            | 0xE0..=0xE5 | 0xE8..=0xEB | 0xEC..=0xEF
+            | 0xF1..=0xF6 | 0xF8..=0xFE
+            // UNPCKL/UNPCKH（无 66 = ps，66 = pd）
+            | 0x14 | 0x15
+            // 0F 3A 三字节转义（只有 66 格的 round* 有名字）
+            | 0x3A
+    )
+}
 
 struct Dec<'a> {
     code: &'a [u8],
@@ -64,6 +194,12 @@ struct Dec<'a> {
     /// 同一份数据。缺陷 C 的根因就是定义侧查这张表、引用侧伪造名字, 两侧
     /// 永远对不上, 导致 `-S` 产物交给 GAS 后生成针对未定义 `.L*` 的重定位。
     labels: &'a BTreeMap<u64, Vec<&'a str>>,
+    /// 本条指令的段前缀字节（由 [`Dec::take_prefixes`] 记下, `decode_mem` 据此把
+    /// `%gs:` 贴到内存操作数上）。Dec 每条指令新建一次, 所以不会串到下一条。
+    seg: Option<u8>,
+    /// 段前缀是否已经贴在某个内存操作数上了。贴过就不再在助记符前重复贴
+    /// （objdump 也是二选一：`mov %gs:0x8(%rax),%rbx` vs `gs nop`）。
+    seg_shown: bool,
 }
 
 impl<'a> Dec<'a> {
@@ -127,6 +263,12 @@ impl<'a> Dec<'a> {
         XMM[(idx & 7) as usize + if rex.r { 8 } else { 0 }]
     }
 
+    /// 按**完整** 0..15 索引取 %xmm 名。REX 的哪一位扩展该字段由调用方决定
+    /// （ModRM.reg 走 REX.R，ModRM.r/m 走 REX.B），所以这里刻意不碰 rex。
+    fn xmm_at(&self, idx: u8) -> &'static str {
+        XMM[(idx & 15) as usize]
+    }
+
     /// Compute effective operand width considering 0x66 prefix and REX.W
     fn eff_width(&self, rex: &Rex, pfx: &Prefixes) -> u8 {
         if rex.w {
@@ -166,14 +308,42 @@ impl<'a> Dec<'a> {
         Some((reg_name, mem))
     }
 
+    /// SSE 形 ModRM：reg 字段是 XMM 目的，r/m 字段是源（XMM 或内存）。
+    ///
+    /// mod=3 时 r/m 字段**也是** XMM 号，不是 GP 寄存器：`0f 58 c1` 的 objdump 读数是
+    /// `addps %xmm1,%xmm0`（`as` 组装 `addps %xmm1,%xmm0` 正好得到这 3 个字节）。旧代码
+    /// 这里调 `decode_mem(width=8)`，把 %xmm1 打成 `%rcx` —— 名字和号都错。
     fn modrm_xmm(&mut self, rex: &Rex) -> Option<(String, String)> {
         let modrm = self.take()?;
         let mod_ = modrm >> 6;
         let reg = (modrm >> 3) & 7;
         let rm = modrm & 7;
         let reg_name = self.xmm(rex, reg).to_string();
-        let mem = self.decode_mem(rex, mod_, rm, 8)?;
+        let mem = if mod_ == 3 {
+            self.xmm_at(rm | if rex.b { 8 } else { 0 }).to_string()
+        } else {
+            self.decode_mem(rex, mod_, rm, 8)?
+        };
         Some((reg_name, mem))
+    }
+
+    /// `0F 2C` 的 F3/F2 格（cvttss2si / cvttsd2si）：reg 字段是**通用寄存器**目的，
+    /// r/m 是 XMM 或内存源。`f3 0f 2c c1` → objdump `cvttss2si %xmm1,%eax`（as 组装
+    /// 同一行得到同样字节），返回 `(src, dst)` 以便按 AT&T 序打印。
+    fn modrm_cvttrunc(&mut self, rex: &Rex, gp_width: u8) -> Option<(String, String)> {
+        let modrm = self.take()?;
+        let mod_ = modrm >> 6;
+        let reg = (modrm >> 3) & 7;
+        let rm = modrm & 7;
+        let dst = self
+            .reg(rex, reg | if rex.r { 8 } else { 0 }, gp_width)
+            .to_string();
+        let src = if mod_ == 3 {
+            self.xmm_at(rm | if rex.b { 8 } else { 0 }).to_string()
+        } else {
+            self.decode_mem(rex, mod_, rm, gp_width)?
+        };
+        Some((src, dst))
     }
 
     /// modrm，reg 字段为 XMM，r/m 字段为 GP 寄存器或内存（按 gp_width 命名）。
@@ -262,7 +432,17 @@ impl<'a> Dec<'a> {
         // RIP-relative 时, data 符号在 disp32 起始位置; 其他情况在指令末尾
         let lookup_off = rip_disp_off.unwrap_or_else(|| self.abs_off());
         let sym = self.data.get(&lookup_off).cloned();
-        let mut inner = String::new();
+        // 段前缀贴在内存操作数上（objdump 反读确认：`65 48 0f b6 00` =
+        // `movzbq %gs:(%rax),%rax`）。只有 FS/GS 走这一路，ES/CS/SS/DS 由
+        // prefix_str 贴在助记符前；mod=3 的寄存器形式在上面已早退，不会到这里。
+        let seg = match self.seg {
+            Some(b) => seg_operand(b),
+            None => "",
+        };
+        if !seg.is_empty() {
+            self.seg_shown = true;
+        }
+        let mut inner = String::from(seg);
         if let Some(s) = sym {
             inner.push_str(&s);
         } else if disp != 0 {
@@ -312,8 +492,18 @@ impl<'a> Dec<'a> {
         format!("<dcc-unresolved-target-0x{:x}>", target)
     }
 
-    fn prefix_str(pfx: &Prefixes) -> String {
+    fn prefix_str(&self, pfx: &Prefixes) -> String {
         let mut parts = Vec::new();
+        // 段前缀。ES/CS/SS/DS 只能走这一路（objdump: `es mov 0x8(%rax),%rbx`）；
+        // FS/GS 已经在内存操作数上贴过 `%gs:` 就不再重复（`gs mov %gs:(%rax)` 是错的）。
+        if let Some(s) = pfx.seg {
+            if !self.seg_shown {
+                let w = seg_word(s);
+                if !w.is_empty() {
+                    parts.push(w);
+                }
+            }
+        }
         if pfx.lock {
             parts.push("lock");
         }
@@ -332,8 +522,8 @@ impl<'a> Dec<'a> {
     }
 
     fn finish(&self, start: usize, pfx: &Prefixes, body: &str) -> (usize, String) {
-        let text = if pfx.lock || pfx.rep || pfx.repne {
-            format!("{}{body}", Self::prefix_str(pfx))
+        let text = if pfx.lock || pfx.rep || pfx.repne || pfx.seg.is_some() {
+            format!("{}{body}", self.prefix_str(pfx))
         } else {
             body.to_string()
         };
@@ -360,6 +550,14 @@ impl<'a> Dec<'a> {
                     pfx.o16 = true;
                     self.take();
                 },
+                // 段前缀。之前这一族**不被收集**，于是 `65 48 8b 05 …`（percpu 读）被
+                // 从 0x65 开始当指令读：0x65 不在任何臂上 → 只吞它自己 → 后面的
+                // `48 8b …` 又被重读一遍，读数里同时出现 `# UNKNOWN 0x65, 0x48` 与一条
+                // “真” mov（两条加起来还是一行 UNKNOWN），整族 percpu 访问全部错位。
+                Some(b @ (0x26 | 0x2e | 0x36 | 0x3e | 0x64 | 0x65)) => {
+                    pfx.seg = Some(b);
+                    self.take();
+                },
                 _ => break,
             }
         }
@@ -370,20 +568,24 @@ impl<'a> Dec<'a> {
         let start = self.pos;
         let off = self.base + start as u64;
         let pfx = self.take_prefixes();
+        // 段前缀交给 decode_mem 贴到内存操作数上（objdump 的拼法），所以既记字节
+        // 也记「还没贴过」。
+        self.seg = pfx.seg;
+        self.seg_shown = false;
         let b = self.peek()?;
 
         if (0x50..=0x57).contains(&b) {
             self.take();
             return Some((
                 self.pos - start,
-                format!("{}push {}", Self::prefix_str(&pfx), REG64[(b - 0x50) as usize]),
+                format!("{}push {}", self.prefix_str(&pfx), REG64[(b - 0x50) as usize]),
             ));
         }
         if (0x58..=0x5F).contains(&b) {
             self.take();
             return Some((
                 self.pos - start,
-                format!("{}pop {}", Self::prefix_str(&pfx), REG64[(b - 0x58) as usize]),
+                format!("{}pop {}", self.prefix_str(&pfx), REG64[(b - 0x58) as usize]),
             ));
         }
 
@@ -398,7 +600,7 @@ impl<'a> Dec<'a> {
             },
             0xC3 => {
                 self.take();
-                Some((self.pos - start, format!("{}ret", Self::prefix_str(&pfx))))
+                Some((self.pos - start, format!("{}ret", self.prefix_str(&pfx))))
             },
             0xC9 => {
                 self.take();
@@ -416,19 +618,28 @@ impl<'a> Dec<'a> {
                 self.take();
                 Some((self.pos - start, "cltd".into()))
             },
+            // CBW/CWDE/CWT：宽度轴与 REX 路径同一份事实（as + objdump 实测：
+            // `98`→cwtl、`66 98`→cbtw）。本函数的 arm 自己 take opcode。
+            0x98 => {
+                self.take();
+                let mn = if pfx.o16 { "cbtw" } else { "cwtl" };
+                Some((self.pos - start, mn.into()))
+            },
+            0xCC => {
+                self.take();
+                Some((self.pos - start, "int3".into()))
+            },
             0x9B => {
                 self.take();
                 Some((self.pos - start, "fwait".into()))
             },
-            0xA4 if pfx.rep => {
+            // 字符串族（MOVS/STOS/CMPS/SCAS）：本路径无 REX，宽度由 66 定。
+            // 拼写与 REX 路径共用 [`Self::string_op_text`]，不在两处各写一份 ——
+            // 以前这里只有 `rep movs*` 两条且只念助记符，同一族指令在两条路径里
+            // 有两种拼法，那就是下一份漂移的起点。
+            op @ (0xA4 | 0xA5 | 0xA6 | 0xA7 | 0xAA | 0xAB | 0xAE | 0xAF) => {
                 self.take();
-                Some((self.pos - start, "rep movsb".into()))
-            },
-            0xA5 if pfx.rep => {
-                self.take();
-                let rex = self.parse_rex();
-                let mn = if rex.w { "rep movsq" } else { "rep movsl" };
-                Some((self.pos - start, mn.into()))
+                Some((self.pos - start, Self::string_op_text(op, &pfx, false)?))
             },
             0xEB => {
                 self.take();
@@ -437,7 +648,7 @@ impl<'a> Dec<'a> {
                     self.pos - start,
                     format!(
                         "{}jmp {}",
-                        Self::prefix_str(&pfx),
+                        self.prefix_str(&pfx),
                         self.jump_target(off + 1, rel, off + 2)
                     ),
                 ))
@@ -446,13 +657,13 @@ impl<'a> Dec<'a> {
                 self.take();
                 let rel = self.take_i32()?;
                 let target = self.jump_target(off + 1, rel, off + 5);
-                Some((self.pos - start, format!("{}call {target}", Self::prefix_str(&pfx))))
+                Some((self.pos - start, format!("{}call {target}", self.prefix_str(&pfx))))
             },
             0xE9 => {
                 self.take();
                 let rel = self.take_i32()?;
                 let target = self.jump_target(off + 1, rel, off + 5);
-                Some((self.pos - start, format!("{}jmp {target}", Self::prefix_str(&pfx))))
+                Some((self.pos - start, format!("{}jmp {target}", self.prefix_str(&pfx))))
             },
             0x31 if self.code.get(self.pos) == Some(&0xC0) => {
                 self.take();
@@ -507,25 +718,19 @@ impl<'a> Dec<'a> {
         let op = self.take()?;
         match op {
             0x05 => Some((self.pos - start, "syscall".into())),
+            // RDTSC（不带 ModRM、不带立即数）。dcc 的 inline asm `rdtsc` 发射
+            // `0f 31`（emit_lines.rs），没这条臂时它会落 fallback 并把后面切碎。
+            0x31 => Some((self.pos - start, "rdtsc".into())),
             0x0B => Some((self.pos - start, "ud2".into())),
             0x1F => {
                 let _ = self.take();
                 Some((self.pos - start, "nop".into()))
             },
-            0x84..=0x8F => {
-                let cc = match op - 0x80 {
-                    0x04 => "je",
-                    0x05 => "jne",
-                    0x0C => "jl",
-                    0x0D => "jge",
-                    0x0E => "jle",
-                    0x0F => "jg",
-                    0x02 => "jb",
-                    0x03 => "jae",
-                    0x08 => "js",
-                    0x09 => "jns",
-                    _ => "jcc",
-                };
+            0x80..=0x8F => {
+                // 全 16 个条件码都有名字（`0f 80/81/8a/8b` → objdump `jo/jno/jp/jnp`，
+                // `as` 组装同一行得回同串字节）。旧表只写了 10 个，其余归到
+                // 「jcc」这个不存在的助记词上 —— 而 `0f 82`（jb）连进都不进这一臂。
+                let cc = format!("j{}", CC_NAMES[(op - 0x80) as usize]);
                 let rel = self.take_i32()?;
                 let end = off + (self.pos - start) as u64;
                 Some((
@@ -533,9 +738,9 @@ impl<'a> Dec<'a> {
                     format!("{cc} {}", self.jump_target(off + 2, rel, end)),
                 ))
             },
-            0xAE if self.peek() == Some(0xF0) => {
-                self.take();
-                Some((self.pos - start, "mfence".into()))
+            0xAE => {
+                let rex = self.parse_rex();
+                self.decode_group_ae(start, &rex)
             },
             0xB0 | 0xB1 => {
                 let rex = self.parse_rex();
@@ -566,9 +771,22 @@ impl<'a> Dec<'a> {
                 let r = self.reg(&rex, rm | if rex.b { 8 } else { 0 }, 1);
                 Some(self.finish(start, pfx, &format!("set{} {r}", CC_NAMES[(op - 0x90) as usize])))
             },
-            0x10 | 0x11 | 0x2A | 0x2C | 0x5A | 0x6E | 0x7E => {
+            // SSE 族的入口白名单。**与 REX 入口共用 [`sse_op`]**：上一版这里是一张
+            // 字面量列表，改了 `decode_sse` 而忘在这里加 op 码的话完全不起作用
+            // （实测全语料未读数 2046 → 2046，一动没动）。
+            op if sse_op(op) => {
                 self.pos = start;
                 self.decode_sse(start, pfx)
+            },
+            // 0F 18 / 0F 0D：hint-nop 与 prefetch 族（非-REX 入口）。
+            0x18 | 0x0D => {
+                let rex = Rex::default();
+                self.decode_group_hint(start, pfx, &rex, op)
+            },
+            // BSWAP（非-REX 入口）。寄存器号在 opcode 低 3 位，**没有 ModRM**。
+            0xC8..=0xCF => {
+                let rex = Rex::default();
+                self.decode_bswap(start, pfx, &rex, op)
             },
             0xB6 | 0xB7 | 0xBE | 0xBF => {
                 // movzx/movsx (无 REX): reg 字段是宽目标 (32 位), r/m 是窄源
@@ -592,16 +810,25 @@ impl<'a> Dec<'a> {
                 let (src, dst) = self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
                 Some(self.finish(start, pfx, &format!("imul {src}, {dst}")))
             },
-            _ => {
-                let len = decode_unknown_len(self.code, start);
-                self.pos = start + len;
-                // Output the full unknown instruction as .byte sequence
-                let bytes: Vec<String> = self.code[start..self.pos]
-                    .iter()
-                    .map(|b| format!("0x{:02x}", b))
-                    .collect();
-                Some((len, format!("# UNKNOWN {}", bytes.join(", "))))
+            // BSF / BSR（`0F BC` / `0F BD`）：扫位起点/终点，dcc 在 __builtin_ctz/clz
+            // 路径上会发。宽度由 REX.W 定，其他与 imul 同构。
+            0xBC | 0xBD => {
+                let rex = self.parse_rex();
+                let (rm, r) = self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
+                let mn = if op == 0xBC { "bsf" } else { "bsr" };
+                Some(self.finish(start, pfx, &format!("{mn} {rm}, {r}")))
             },
+            // SHLD / SHRD（双入口之一）。本路径的开头 `peek() == 0x0F` 已经保证了
+            // 没有 REX（带 REX 的整体走 decode_rex → decode_two_byte_rex），所以这里
+            // 用 Rex::default() 而不是再 parse_rex()：0F 后面的字节是 ModRM，它落在
+            // 0x40..=0x4F（`shld %cl,%eax,0x8(%rax)` = `0f a5 40 08`）时会被误当成 REX 吞掉。
+            0xA4 | 0xA5 | 0xAC | 0xAD => {
+                let rex = Rex::default();
+                self.decode_shld_shrd(start, pfx, &rex, op)
+            },
+            // 唯一兜底出口：整条长度由 [`Dec::unknown_len`] 算完再报 UNKNOWN（方法论
+            // ③：不消费完 ModRM+disp+imm 就会把一条指令切成两段残渣）。
+            _ => Some(self.unknown_from(start)),
         }
     }
 
@@ -611,38 +838,190 @@ impl<'a> Dec<'a> {
         let _ = self.take(); // 0x0F
         let op = self.take()?;
         // 0x66/0xF2/0xF3 在此是 SSE 指令编码的一部分，不是独立前缀助记符。
-        let scalar = if pfx.repne {
+        //
+        // 前缀决定「打包/标量 × 单/双精度」四格：无=ps、66=pd、F3=ss、F2=sd。
+        // 大多数算术助记词就是「词根 + 该后缀」（addps/addpd/addss/addsd、
+        // xorps/xorpd/xorss/xorsd …）；只有 load/store 一类例外（movups/movupd/
+        // movss/movsd、movaps/movapd）需要逐条列表。名字必须与**发射端同一拼写**：
+        // 本解码器只用于自家 `-S` 读数与矩阵断言，名字猜错比报 UNKNOWN 更糟（后者
+        // 会被「读不出来就判红」接住，前者会默地让断言跟错误的读数对齐）。
+        let sfx = if pfx.repne {
             "sd"
         } else if pfx.rep {
             "ss"
+        } else if pfx.o16 {
+            "pd"
         } else {
-            "sd"
+            "ps"
         };
+        // 比较类用的是 legacy SSE2 的 66 前缀而不是 F2：`0F 2E` = UCOMISS、
+        // `66 0F 2E` = UCOMISD（同样 `0F 2F` = COMISS、`66 0F 2F` = COMISD）。
+        let wide = pfx.o16 || pfx.repne;
         match op {
             0x10 => {
                 let (dst, src) = self.modrm_xmm(&rex)?;
-                let mn = if scalar == "ss" { "movss" } else { "movsd" };
+                let mn = match (pfx.repne, pfx.rep, pfx.o16) {
+                    (true, _, _) => "movsd",
+                    (_, true, _) => "movss",
+                    (_, _, true) => "movupd",
+                    _ => "movups",
+                };
                 Some((self.pos - start, format!("{mn} {src}, {dst}")))
             },
             0x11 => {
                 let (src, dst) = self.modrm_xmm(&rex)?;
-                let mn = if scalar == "ss" { "movss" } else { "movsd" };
+                let mn = match (pfx.repne, pfx.rep, pfx.o16) {
+                    (true, _, _) => "movsd",
+                    (_, true, _) => "movss",
+                    (_, _, true) => "movupd",
+                    _ => "movups",
+                };
+                Some((self.pos - start, format!("{mn} {src}, {dst}")))
+            },
+            0x28 => {
+                // MOVAPS/MOVAPD（打包对齐 load）、MOVSS（F3）。
+                let (dst, src) = self.modrm_xmm(&rex)?;
+                let mn = if pfx.rep {
+                    "movss"
+                } else if pfx.repne {
+                    "movsd"
+                } else if pfx.o16 {
+                    "movapd"
+                } else {
+                    "movaps"
+                };
+                Some((self.pos - start, format!("{mn} {src}, {dst}")))
+            },
+            0x29 => {
+                let (src, dst) = self.modrm_xmm(&rex)?;
+                let mn = if pfx.rep {
+                    "movss"
+                } else if pfx.repne {
+                    "movsd"
+                } else if pfx.o16 {
+                    "movapd"
+                } else {
+                    "movaps"
+                };
+                Some((self.pos - start, format!("{mn} {src}, {dst}")))
+            },
+            0x2E | 0x2F => {
+                let (dst, src) = self.modrm_xmm(&rex)?;
+                let root = if op == 0x2E { "ucomi" } else { "comi" };
+                let mn = format!("{root}{}", if wide { "sd" } else { "ss" });
+                Some((self.pos - start, format!("{mn} {src}, {dst}")))
+            },
+            // UNPCKL/UNPCKH：无 66 格 = ps，66 格 = pd（F2/F3 格 objdump 直报
+            // `(bad)`，所以不猜）。`0f 14 c1` → `unpcklps %xmm1,%xmm0`、
+            // `66 0f 14 c1` → `unpcklpd %xmm1,%xmm0`、内存形 `0f 14 48 10` →
+            // `unpcklps 0x10(%rax),%xmm1`（都是 as+objdump 反读）。
+            0x14 | 0x15 => {
+                if pfx.rep || pfx.repne {
+                    return Some(self.unknown_from(start));
+                }
+                let (dst, src) = self.modrm_xmm(&rex)?;
+                let root = if op == 0x14 { "unpckl" } else { "unpckh" };
+                let mn = format!("{root}{}", if pfx.o16 { "pd" } else { "ps" });
+                Some((self.pos - start, format!("{mn} {src}, {dst}")))
+            },
+            // 0F 3A 三字节转义。只补 `as` 能明确反读的那四格：66 + op3 ∈ {08,09,0A,0B}
+            // = roundps/roundpd/roundss/roundsd（imm8 在 ModRM(+disp) **之后**）。
+            // 其余 op3（palignr/pshufb/pcmpeqq/extractps/pdep/pext/packusdw…）需要
+            // 逐格验证，且很多在不带 66 的格子上；本语料零命中，不猜。
+            0x3A => {
+                if !pfx.o16 || pfx.rep || pfx.repne {
+                    return Some(self.unknown_from(start));
+                }
+                let op3 = self.take()?;
+                let mn = match op3 {
+                    0x08 => "roundps",
+                    0x09 => "roundpd",
+                    0x0A => "roundss",
+                    0x0B => "roundsd",
+                    _ => return Some(self.unknown_from(start)),
+                };
+                let (dst, src) = self.modrm_xmm(&rex)?;
+                let imm = self.take()? as i32;
+                Some((self.pos - start, format!("{mn} ${imm}, {src}, {dst}")))
+            },
+            // `66 0F xx` 打包整数算术族（表见 [`packed_int_mnemonic`]）。
+            op if packed_int_mnemonic(op).is_some() => {
+                let mn = match packed_int_mnemonic(op) {
+                    Some(m) => m,
+                    None => return Some(self.unknown_from(start)),
+                };
+                if !pfx.o16 || pfx.rep || pfx.repne {
+                    // 不带 66 的是 MMX 格子（`0f fe c1` → `paddd %mm1,%mm0`），那是
+                    // 另一张表（需 %mm 命名且多个 op 码在 MMX 里语义不同），本语料
+                    // 零命中 ⇒ 整条消费后照实报 UNKNOWN，不当“读对了”。
+                    return Some(self.unknown_from(start));
+                }
+                let (dst, src) = self.modrm_xmm(&rex)?;
                 Some((self.pos - start, format!("{mn} {src}, {dst}")))
             },
             0x2A => {
-                let (xmm, src) = self.modrm_xmm(&rex)?;
-                let mn = if scalar == "ss" { "cvtsi2ss" } else { "cvtsi2sd" };
+                // CVTSI2SS/CVTSI2SD：源是**通用寄存器**（或内存），所以不能用
+                // modrm_xmm（它把 r/m 也命名成 %xmm）。而且只有 F3/F2 两格是
+                // cvtsi2*：无 66 与 66 格的 `0F 2A` 是 MMX 的 CVTPI2PS/CVTPI2PD
+                // （`0f 2a c1` → objdump `cvtpi2ps %mm1,%xmm0`）。旧代码给这四个格子
+                // 统一拼成 `cvtsi2{sfx}`，其中的 `cvtsi2ps`/`cvtsi2pd` 在本机
+                // binutils 的读数里根本不存在 —— 那是“猜名字”的典型。
+                if !(pfx.rep || pfx.repne) {
+                    return Some(self.unknown_from(start));
+                }
+                let gp_w = if rex.w { 8 } else { 4 };
+                let (xmm, src) = self.modrm_xmm_gp(&rex, gp_w)?;
+                let mn = if pfx.rep { "cvtsi2ss" } else { "cvtsi2sd" };
                 Some((self.pos - start, format!("{mn} {src}, {xmm}")))
             },
             0x2C => {
-                let (dst, xmm) = self.modrm_xmm(&rex)?;
-                let mn = if scalar == "ss" { "cvttss2si" } else { "cvttsd2si" };
-                Some((self.pos - start, format!("{mn} {xmm}, {dst}")))
+                // 同 0x2A：只有 F3/F2 格是 cvttss2si/cvttsd2si，**目的是 GP 寄存器**
+                // （`f3 0f 2c c1` → `cvttss2si %xmm1,%eax`）。旧代码把两个操作数都
+                // 用 modrm_xmm 命名，读出来是 `cvttss2si %rcx,%xmm0` —— 两边都错。
+                // 无 66 / 66 格是 MMX 的 cvttps2pi/cvttpd2pi（目的叫 %mm0），不补。
+                if !(pfx.rep || pfx.repne) {
+                    return Some(self.unknown_from(start));
+                }
+                let mn = if pfx.rep { "cvttss2si" } else { "cvttsd2si" };
+                let (src, dst) = self.modrm_cvttrunc(&rex, if rex.w { 8 } else { 4 })?;
+                Some((self.pos - start, format!("{mn} {src}, {dst}")))
             },
             0x5A => {
                 let (dst, src) = self.modrm_xmm(&rex)?;
-                let mn = if scalar == "ss" { "cvtss2sd" } else { "cvtsd2ss" };
+                let mn = match (pfx.rep, pfx.repne, pfx.o16) {
+                    (true, _, _) => "cvtss2sd",
+                    (_, true, _) => "cvtsd2ss",
+                    (_, _, true) => "cvtpd2ps",
+                    _ => "cvtps2pd",
+                };
                 Some((self.pos - start, format!("{mn} {src}, {dst}")))
+            },
+            0x51 | 0x57 | 0x58 | 0x59 | 0x5C | 0x5D | 0x5E | 0x5F => {
+                // 算术族：sqrtps/xorps/addps/mulps/subps/minps/divps/maxps 及其 pd/ss/sd
+                // 变体，全部等于「词根 + 前缀后缀」。
+                // 旧解码表完全没这些条目，所以 `f2 0f 58`（addsd）、`66 0f 57`（xorpd）、
+                // `0f 57`（xorps）在 `-S` 里整批报 UNKNOWN（实测全语料 3.3% 行读不出来，
+                // 这就是最大的几块）。`0x5E`（div）一度被漏：只补了 51/57/58/59/5C/5D/5F，
+                // 复测时 `f2 0f 5e`/`f3 0f 5e` 仍在残留里 —— 同一个族里漏一项就会留在清单上。
+                let (dst, src) = self.modrm_xmm(&rex)?;
+                let root = match op {
+                    0x51 => "sqrt",
+                    0x57 => "xor",
+                    0x58 => "add",
+                    0x59 => "mul",
+                    0x5C => "sub",
+                    0x5D => "min",
+                    0x5E => "div",
+                    _ => "max",
+                };
+                let mn = format!("{root}{sfx}");
+                Some((self.pos - start, format!("{mn} {src}, {dst}")))
+            },
+            0xD6 => {
+                // `66 0F D6 /r` = MOVQ m64 ← xmm（存回），与 `0F D6` 的 legacy MMX
+                // 形式同拼写；方向与 0x11（store）一致：先寄存器后内存。
+                let (src, dst) = self.modrm_xmm(&rex)?;
+                Some((self.pos - start, format!("movq {src}, {dst}")))
             },
             0x6F | 0x7F => {
                 // `F3 0F 6F /r` = movdqu xmm ← r/m，`F3 0F 7F /r` = movdqu r/m ← xmm；
@@ -674,16 +1053,9 @@ impl<'a> Dec<'a> {
                     Some((self.pos - start, format!("{mn} {xmm}, {gp}")))
                 }
             },
-            _ => {
-                let len = decode_unknown_len(self.code, start);
-                self.pos = start + len;
-                // Output the full unknown instruction as .byte sequence
-                let bytes: Vec<String> = self.code[start..self.pos]
-                    .iter()
-                    .map(|b| format!("0x{:02x}", b))
-                    .collect();
-                Some((len, format!("# UNKNOWN {}", bytes.join(", "))))
-            },
+            // 唯一兜底出口：整条长度由 [`Dec::unknown_len`] 算完再报 UNKNOWN（方法论
+            // ③：不消费完 ModRM+disp+imm 就会把一条指令切成两段残渣）。
+            _ => Some(self.unknown_from(start)),
         }
     }
 
@@ -1036,34 +1408,87 @@ impl<'a> Dec<'a> {
                 Some(self.finish(start, pfx, &format!("{mn} {mem}")))
             },
             // --- Sign extension ---
+            // 本路径的 `op` 已在函数开头 take 过：下面四条以前各带一句 `self.take()`，
+            // 那等于**多吞下一条指令的首字节**并把长度报大 1 —— 从这一条起整页错位
+            // （残留清单里那批 `4d 11 d8`、`4d c8 49 63 4d`、`4d 19 df`、`4d a0/a8` 零碎
+            // 字节都是 REX 开头的前缀被前面多吃一字节后重读的产物）。名字与宽度都取自
+            // `as` + `objdump -d` 实测：`98`→cwtl、`66 98`→cbtw、`48 98`→cltq。
             0x98 => {
-                self.take();
-                Some((self.pos - start, "cltq".into()))
+                let mn = if rex.w {
+                    "cltq"
+                } else if pfx.o16 {
+                    "cbtw"
+                } else {
+                    "cwtl"
+                };
+                Some((self.pos - start, mn.into()))
             },
-            0x99 => {
-                self.take();
-                Some((self.pos - start, "cqo".into()))
-            },
+            0x99 => Some((self.pos - start, "cqo".into())),
+            // --- INT3 ---
+            // inline asm 的 `int3`（`emit_asm_*` 里有发射点）与陷阱填充都走这条。
+            0xCC => Some((self.pos - start, "int3".into())),
             // --- PUSHF/POPF ---
-            0x9C => {
-                self.take();
-                Some((self.pos - start, "pushfq".into()))
+            0x9C => Some((self.pos - start, "pushfq".into())),
+            0x9D => Some((self.pos - start, "popfq".into())),
+            // 字符串族：`f3 48 ab`（dcc 自己发射的 rep stos %rax 清零循环）以前没臂，
+            // 落 fallback 只吞 2 字节 ⇒ 从这里起整页错位。拼写与 legacy 路径共用一条
+            // （包括 `rep movsb/movsl/movsq` —— 它们以前在本文件里是另一套只念助记符的
+            // 写法，同一族指令两种拼法就是下一次漂移的起点）。
+            // 注意 `op` 已在函数开头 take 过，这里不能再 take。
+            op @ (0xA4 | 0xA5 | 0xA6 | 0xA7 | 0xAA | 0xAB | 0xAE | 0xAF) => {
+                Some((self.pos - start, Self::string_op_text(op, &pfx, rex.w)?))
             },
-            0x9D => {
-                self.take();
-                Some((self.pos - start, "popfq".into()))
-            },
+            0xD8..=0xDF => self.decode_x87(start, op),
+            0xF8 => Some((self.pos - start, "clc".into())),
+            0xF9 => Some((self.pos - start, "stc".into())),
+            0xFA => Some((self.pos - start, "cli".into())),
+            0xFB => Some((self.pos - start, "sti".into())),
+            0xFC => Some((self.pos - start, "cld".into())),
+            0xFD => Some((self.pos - start, "std".into())),
             // --- Fallback ---
-            _ => {
-                let len = decode_unknown_len(self.code, start);
-                self.pos = start + len;
-                // Output the full unknown instruction as .byte sequence
-                let bytes: Vec<String> = self.code[start..self.pos]
-                    .iter()
-                    .map(|b| format!("0x{:02x}", b))
-                    .collect();
-                Some((len, format!("# UNKNOWN {}", bytes.join(", "))))
-            },
+            // 唯一兜底出口：整条长度由 [`Dec::unknown_len`] 算完再报 UNKNOWN（方法论
+            // ③：不消费完 ModRM+disp+imm 就会把一条指令切成两段残渣）。
+            _ => Some(self.unknown_from(start)),
+        }
+    }
+
+    /// 字符串指令（MOVS / STOS / CMPS / SCAS）的 objdump 拼写。
+    ///
+    /// 这些编码**不带 ModRM 也带不了立即数**，长度就是「前缀 + 1 字节 opcode」，所以
+    /// 两条解码路径（legacy 与 REX）只共用这份**文本**知识，不在两处各写一遍。
+    ///
+    /// 拼写全部取自 `as` + `objdump -d` 实测（本文件的规矩：名字拿不准就继续报
+    /// UNKNOWN，猜错的名字会让自家断言与错误读数对齐）：
+    ///   `aa`→`stos %al,%es:(%rdi)`   `f3 aa`→`rep stos %al,%es:(%rdi)`
+    ///   `48 ab`→`stos %rax,...`  `66 ab`→`stos %ax,...`
+    ///   `ae`→`scas %es:(%rdi),%al`  `f3 ae`→`repz scas ...`（注意是 repz 不是 rep）
+    ///   `a6`→`cmpsb %es:(%rdi),%ds:(%rsi)`  `f3 a6`→`repz cmpsb ...`
+    ///   `a4`→`movsb %ds:(%rsi),%es:(%rdi)`  `f3 a4`→`rep movsb ...`
+    ///
+    /// 为什么必须有：旧解码器只有 `rep movs*` 两条，于是 **dcc 自己发射的** `f3 48 ab`
+    /// （栈帧里那个 `rep stos %rax` 清零循环，见 `emit/func_setup.rs`）落进 fallback，
+    /// 只吞 2 字节不消费后续 ⇒ 从这一条起整份反汇编错位；`check_disasm_coverage.sh` 的
+    /// 残留清单里那些 `ae`、`a0`、`cb`、`45 90` 零碎字节就是同一条指令被切碎的重读产物。
+    fn string_op_text(op: u8, pfx: &Prefixes, w: bool) -> Option<String> {
+        // 尺寸后缀（movs/cmps 用）与寄存器写法（stos/scas 用），按 REX.W / 66 / 默认三档
+        let (sfx, reg) = if w {
+            ("q", "%rax")
+        } else if pfx.o16 {
+            ("w", "%ax")
+        } else {
+            ("l", "%eax")
+        };
+        let (repz, rep) = if pfx.rep { ("repz ", "rep ") } else { ("", "") };
+        match op {
+            0xA4 => Some(format!("{rep}movsb  %ds:(%rsi),%es:(%rdi)")),
+            0xA5 => Some(format!("{rep}movs{sfx}  %ds:(%rsi),%es:(%rdi)")),
+            0xA6 => Some(format!("{repz}cmpsb  %es:(%rdi),%ds:(%rsi)")),
+            0xA7 => Some(format!("{repz}cmps{sfx}  %es:(%rdi),%ds:(%rsi)")),
+            0xAA => Some(format!("{rep}stos   %al,%es:(%rdi)")),
+            0xAB => Some(format!("{rep}stos   {reg},%es:(%rdi)")),
+            0xAE => Some(format!("{repz}scas   %es:(%rdi),%al")),
+            0xAF => Some(format!("{repz}scas   %es:(%rdi),{reg}")),
+            _ => None,
         }
     }
 
@@ -1075,12 +1500,37 @@ impl<'a> Dec<'a> {
     ) -> Option<(usize, String)> {
         let op = self.take()?;
         match op {
+            // RDTSC 的 REX 入口（与非-REX 入口同一拼写；`rdtsc` 不受 REX 影响）。
+            0x31 => Some((self.pos - start, "rdtsc".into())),
             // REX 前缀的 SSE 标量/vector 指令（0x66/0xF2/0xF3 为 opcode 选择符）
             // 统一交回 decode_sse 处理，避免把 F2/F3/66 误当成独立前缀助记符。
-            0x10 | 0x11 | 0x2A | 0x2C | 0x5A | 0x6F | 0x7F => {
+            // **与非-REX 入口共用 [`sse_op`]**：只补一张表而漏另一入口的话，带 REX 的
+            // 那一批（如 `66 41 0f 28`、`66 0f fe` 的 r13 形）仍会落进 fallback。
+            op if sse_op(op) => {
                 self.pos = start;
                 self.decode_sse(start, pfx)
             },
+            // 0F 18 / 0F 0D：hint-nop 与 prefetch 族（REX 入口：dcc 对 %r8- 基址
+            // 会带 REX.B）。rex 已由 decode_rex 解好传入，不能再 parse_rex 一次。
+            0x18 | 0x0D => self.decode_group_hint(start, pfx, rex, op),
+            // BSWAP r32/r64（REX 入口）。`48 0f c8` → `bswap %rax`、
+            // `41 0f c8` → `bswap %r8d`（as+objdump 反读，都不带注记）。
+            0xC8..=0xCF => self.decode_bswap(start, pfx, rex, op),
+            // 串行化 / mxcsr 族与非-REX 路径共用同一实现（旧代码只在非-REX 路径上
+            // 有 mfence 字节序列特判，带 REX 的同类一律落进只吞 2 字节的 fallback）。
+            0xAE => self.decode_group_ae(start, rex),
+            // BSF / BSR 与非-REX 路径同构：旧表只在非-REX 路径上有臂，所以
+            // `48 0f bd c0`（bsrq %eax,%eax）仍报 UNKNOWN。两路径同表同一实现，
+            // 不再按字节序列特判。
+            0xBC | 0xBD => {
+                let (rm, r) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
+                let mn = if op == 0xBC { "bsf" } else { "bsr" };
+                Some(self.finish(start, pfx, &format!("{mn} {rm}, {r}")))
+            },
+            // SHLD / SHRD（双入口的另一条：带 REX 的那一批）。实测未读数里最大两堆
+            // 就是 `48 0f a5`/`48 0f ad`（int128 移位路径发射 shld/shrd），只补非-REX
+            // 入口它们一条也不会少。rex 由调用方（decode_rex）已解好传入。
+            0xA4 | 0xA5 | 0xAC | 0xAD => self.decode_shld_shrd(start, pfx, rex, op),
             0x6E | 0x7E => {
                 // REX 前缀版本的 movd/movq：66 48 0F 6E/7E /r
                 let gp_width = if rex.w { 8 } else { 4 };
@@ -1143,16 +1593,9 @@ impl<'a> Dec<'a> {
                 let (src, dst) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
                 Some(self.finish(start, pfx, &format!("cmov{cc} {src}, {dst}")))
             },
-            _ => {
-                let len = decode_unknown_len(self.code, start);
-                self.pos = start + len;
-                // Output the full unknown instruction as .byte sequence
-                let bytes: Vec<String> = self.code[start..self.pos]
-                    .iter()
-                    .map(|b| format!("0x{:02x}", b))
-                    .collect();
-                Some((len, format!("# UNKNOWN {}", bytes.join(", "))))
-            },
+            // 唯一兜底出口：整条长度由 [`Dec::unknown_len`] 算完再报 UNKNOWN（方法论
+            // ③：不消费完 ModRM+disp+imm 就会把一条指令切成两段残渣）。
+            _ => Some(self.unknown_from(start)),
         }
     }
 
@@ -1509,30 +1952,257 @@ impl<'a> Dec<'a> {
                 Some(self.finish(start, pfx, &format!("imul ${imm}, {src}, {dst}")))
             },
             // ALU eax, imm32
-            0x05 | 0x0D | 0x25 | 0x2D | 0x35 | 0x3D => {
+            0x05 | 0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D => {
                 let mn = match op {
                     0x05 => "add",
                     0x0D => "or",
+                    0x15 => "adc",
+                    0x1D => "sbb",
                     0x25 => "and",
                     0x2D => "sub",
                     0x35 => "xor",
-                    0x3D => "cmp",
-                    _ => "?",
+                    _ => "cmp",
                 };
                 let imm = self.take_i32()?;
                 Some(self.finish(start, pfx, &format!("{mn} ${imm}, %eax")))
             },
+            // ALU accumulator, imm8：`04/0C/14/1C/24/2C/34/3C ib`。legacy 路径只有上面
+            // 那个 `%eax` 的 imm32 族，没有 imm8 兄弟 ⇒ `34 01`（adc $0x1,%al）、
+            // `14 24`（adc $0x24,%al）这类全报 UNKNOWN（实测两类共 30+ 处，且只吞
+            // 1 字节不会错位，但仍算「读不出来」）。操作数寄存器是 %al（0x66 时 %ax），
+            // 与 imm32 臂同一张 op 表。
+            0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
+                let mn = match op {
+                    0x04 => "add",
+                    0x0C => "or",
+                    0x14 => "adc",
+                    0x1C => "sbb",
+                    0x24 => "and",
+                    0x2C => "sub",
+                    0x34 => "xor",
+                    _ => "cmp",
+                };
+                let acc = if pfx.o16 { "%ax" } else { "%al" };
+                let imm = self.take_i8()?;
+                Some(self.finish(start, pfx, &format!("{mn} ${imm}, {acc}")))
+            },
+            // ret imm16（`C2 iw`）与 retf imm16（`CA iw`）：props 表认识这一族而解码臂
+            // 没有 ⇒ `c2` 开头的 14 处报 UNKNOWN。
+            0xC2 | 0xCA => {
+                let mn = if op == 0xC2 { "ret" } else { "retf" };
+                let imm = self.take_i16()?;
+                Some(self.finish(start, pfx, &format!("{mn} ${imm}")))
+            },
+            // jcc rel8：短条件跳转在 legacy 路径上**根本没有臂**（长形式 `0F 80..=8F`
+            // 只存在于 two-byte 路径），所以 `74 07`（je）先被读成一条 UNKNOWN，
+            // 紧跟的 `07, 0x48` 又是下一句被切碎的重读 —— 一条缺失会连带造成整段
+            // 错位，这就是为什么未读数不能只看条数要看锤点。长度与 rel8 的
+            // site/end 算法照 `0xEB` 同一惯例。
+            0x70..=0x7F => {
+                let cc = match op - 0x70 {
+                    0x04 => "je",
+                    0x05 => "jne",
+                    0x0C => "jl",
+                    0x0D => "jge",
+                    0x0E => "jle",
+                    0x0F => "jg",
+                    0x02 => "jb",
+                    0x03 => "jae",
+                    0x08 => "js",
+                    0x09 => "jns",
+                    _ => "jcc",
+                };
+                let rel = self.take_i8()? as i32;
+                let off = self.base + start as u64;
+                let target = self.jump_target(off + 1, rel, off + 2);
+                Some(self.finish(start, pfx, &format!("{cc} {target}")))
+            },
+            // 字符串 / 标志位族：之前只补了 REX 路径，legacy 路径仍缺 ⇒ `fc`、`a4`、
+            // `a5` 落进下面这个只吞 2 字节的 fallback，后面字节序列全线错位（实测剩余
+            // 未读数里 `fc, 0x48`、`fc, 0xf3`、`a4, 0x49` 就是这批残渣）。`op` 已在
+            // 函数开头 take 过，这里不能再 take。
+            0xA4 => {
+                let mn = if pfx.rep { "rep movsb" } else { "movsb" };
+                Some(self.finish(start, pfx, mn))
+            },
+            0xA5 => {
+                let mn = match (pfx.rep, pfx.o16) {
+                    (true, true) => "rep movsd",
+                    (true, false) => "rep movsl",
+                    (false, true) => "movsd",
+                    (false, false) => "movsl",
+                };
+                Some(self.finish(start, pfx, mn))
+            },
+            0xF8 => Some(self.finish(start, pfx, "clc")),
+            0xF9 => Some(self.finish(start, pfx, "stc")),
+            0xFA => Some(self.finish(start, pfx, "cli")),
+            0xFB => Some(self.finish(start, pfx, "sti")),
+            0xFC => Some(self.finish(start, pfx, "cld")),
+            0xFD => Some(self.finish(start, pfx, "std")),
+            // 唯一兜底出口：整条长度由 [`Dec::unknown_len`] 算完再报 UNKNOWN（方法论
+            // ③：不消费完 ModRM+disp+imm 就会把一条指令切成两段残渣）。
+            _ => Some(self.unknown_from(start)),
+        }
+    }
+
+    /// `0F 18 /digit` 与 `0F 0D /digit`： prefetch 族与多字节 hint-nop。两族形状一样
+    /// （ModRM 的 reg 字段是 /digit，r/m 是内存；mod=3 在 64 位下只有 0F 18 还有意义）。
+    ///
+    /// 名字全部来自本机 `as` + `objdump -d` 反读（不是记的）：
+    ///   `0f 18 00/08/10/18` → `prefetchnta/prefetcht0/prefetcht1/prefetcht2 (%rax)`，
+    ///   `0f 18 20/28/30/38` → `nopl (%rax)`（/4../7 是 hint-nop，不是 prefetch），
+    ///   `0f 18 c0/c1/c8` → `nop %eax`/`nop %ecx`（mod=3 时操作数名**取 rm 字段**），
+    ///   `66 0f 18 c1` → `nop %cx`；`0f 0d 00/08/10/18/20` → `prefetch/prefetchw/
+    ///   prefetchwt1/prefetch/prefetch (%rax)`（/3../7 也被读成 `prefetch`）。
+    /// 不补的形状及原因：
+    ///   * `48 0f 18 00` / `44 0f 18 00` —— objdump 对多余位打的是字面注记
+    ///     `rex.W prefetchnta (%rax)` / `rex.R …`，那不是 GAS 合法文本（-S 输出要能回炸）；
+    ///   * `0f 0d c1` —— objdump 报 `(bad)`；
+    ///   * `f3 0f 18 c1` —— objdump 打 `repz nop %ecx`（前缀被当独立助记词），
+    ///     与我们的 `rep` 拼法不一致，不赌。
+    /// 以上都走 [`Self::unknown_from`]：整条消费完再报 UNKNOWN。
+    fn decode_group_hint(
+        &mut self,
+        start: usize,
+        pfx: &Prefixes,
+        rex: &Rex,
+        op: u8,
+    ) -> Option<(usize, String)> {
+        if rex.w || rex.r {
+            return Some(self.unknown_from(start));
+        }
+        let modrm = *self.code.get(self.pos)?;
+        let mod_ = modrm >> 6;
+        let digit = (modrm >> 3) & 7;
+        if mod_ == 3 {
+            // 只有 0F 18 的寄存器形有名字（`nop {rm}`）；0F 0D 的 mod=3 是 (bad)。
+            if op != 0x18 || pfx.rep || pfx.repne || pfx.lock || rex.w {
+                return Some(self.unknown_from(start));
+            }
+            self.take()?;
+            let w = if pfx.o16 { 2 } else { 4 };
+            let r = self.reg(rex, (modrm & 7) | if rex.b { 8 } else { 0 }, w);
+            return Some(self.finish(start, pfx, &format!("nop {r}")));
+        }
+        // 内存形：上面反读的那些都发生在「除 REX.B 外无前缀」的格子上。
+        if pfx.o16 || pfx.rep || pfx.repne || pfx.lock {
+            return Some(self.unknown_from(start));
+        }
+        self.take()?;
+        let mem = self.decode_mem(rex, mod_, modrm & 7, 4)?;
+        let mn = match (op, digit) {
+            (0x18, 0) => "prefetchnta",
+            (0x18, 1) => "prefetcht0",
+            (0x18, 2) => "prefetcht1",
+            (0x18, 3) => "prefetcht2",
+            (0x18, 4..=7) => "nopl",
+            (0x0D, 1) => "prefetchw",
+            (0x0D, 2) => "prefetchwt1",
+            // 0F 0D 的 /0 与 /3../7 都读回 `prefetch`（binutils 对未分配的 digit
+            // 仍按 AMD 的 3DNow! prefetch 打），这一条是实测不是推论。
+            (0x0D, 0) | (0x0D, 3..=7) => "prefetch",
+            _ => return Some(self.unknown_from(start)),
+        };
+        Some((self.pos - start, format!("{mn} {mem}")))
+    }
+
+    /// `0F C8+r` = BSWAP r。寄存器号在 opcode 低 3 位（+REX.B），**没有 ModRM**。
+    /// `0f c8` → `bswap %eax`、`0f cf` → `bswap %edi`、`48 0f cf` → `bswap %rdi`、
+    /// `41 0f c8` → `bswap %r8d`、`66 0f c8` → `bswap %ax`（均为 as+objdump 反读）。
+    fn decode_bswap(
+        &mut self,
+        start: usize,
+        pfx: &Prefixes,
+        rex: &Rex,
+        op: u8,
+    ) -> Option<(usize, String)> {
+        self.take()?;
+        let w = self.eff_width(rex, pfx);
+        let r = self.reg(rex, (op & 7) | if rex.b { 8 } else { 0 }, w);
+        Some(self.finish(start, pfx, &format!("bswap {r}")))
+    }
+
+    /// `0F A4`/`0F A5`/`0F AC`/`0F AD` = SHLD/SHRD。`0F A4`/`0F AC` 的计数是紧随其后的
+    /// imm8，`0F A5`/`0F AD` 的计数是 `%cl`；ModRM 的 **reg 字段就是第二个操作数**
+    /// （源寄存器），不是 `/digit`。
+    ///
+    /// 助记词与操作数次序都是 `as` 组装 + `objdump -d` 反读定的（本机 binutils）：
+    ///   `0f a4 c3 03` → `shld $0x3,%eax,%ebx`、`48 0f a5 c3` → `shld %cl,%rax,%rbx`、
+    ///   `48 0f ac c3 03` → `shrd $0x3,%rax,%rbx`、`48 0f ad c3` → `shrd %cl,%rax,%rbx`、
+    ///   `66 0f a4 c3 03` → `shld $0x3,%ax,%bx`（16 位形式不带后缀）。
+    /// 还把 reg 字段 0..7 逐个扫了一遍（`48 0f a5 c0/c1/…/ff`）：binutils 对每个 reg
+    /// 值都读回 `shld`，源操作数就是 reg 字段那个寄存器。所以过去那条「reg=/4 时是
+    /// 另一条 SHL/SHR」的说法在本机读不出来，按 /digit 分发就会念错名字。
+    fn decode_shld_shrd(
+        &mut self,
+        start: usize,
+        pfx: &Prefixes,
+        rex: &Rex,
+        op: u8,
+    ) -> Option<(usize, String)> {
+        let width = self.eff_width(rex, pfx);
+        let (src, dst) = self.modrm_gp(rex, width)?;
+        let mn = if op == 0xA4 || op == 0xA5 { "shld" } else { "shrd" };
+        if op == 0xA4 || op == 0xAC {
+            // imm8 在 ModRM 之后（`0f a4 c3 03`），漏读它会把计数吐给下一条指令。
+            let imm = self.take()? as i32;
+            return Some(self.finish(start, pfx, &format!("{mn} ${imm}, {src}, {dst}")));
+        }
+        Some(self.finish(start, pfx, &format!("{mn} %cl, {src}, {dst}")))
+    }
+
+    /// `0F AE /digit`，按 ModRM 的 reg 字段选形。**映射不是靠记，是用 GAS assemble
+    /// + objdump 反读定的**（`0f ae 07/0f/17/1f/e8/f0/f8` 分别 = fxsave/fxrstor/
+    /// ldmxcsr/stmxcsr/lfence/mfence/sfence）：
+    ///   /0 fxsave、/1 fxrstor、/2 ldmxcsr、/3 stmxcsr、/5 lfence、/6 mfence、/7 sfence。
+    /// 第一版按记忆写成 3=ldmxcsr、4=stmxcsr，那会把 stmxcsr 念成 ldmxcsr —— 比报
+    /// UNKNOWN 危险得多（猜错的名字会让自家断言与错误读数对齐）。/4 是 AMD 重叠编码
+    /// (lzcnt/sse)，无法单从字节定形，照实报 UNKNOWN。
+    ///
+    /// 旧代码只写了 `0xAE if peek == 0xF0` 一条按字节组合的特判（实际只认 mfence），
+    /// 其余 /digit 全落进「吞 2 字节、不消费 ModRM」的 fallback，从这一条起整份错位。
+    fn decode_group_ae(&mut self, start: usize, rex: &Rex) -> Option<(usize, String)> {
+        let modrm = self.take()?;
+        let mn = match (modrm >> 3) & 7 {
+            0 => "fxsave",
+            1 => "fxrstor",
+            2 => "ldmxcsr",
+            3 => "stmxcsr",
+            5 => "lfence",
+            6 => "mfence",
+            7 => "sfence",
+            // 认不得时也必须把整条指令（ModRM + 可能的 disp/imm）消费完再报 UNKNOWN：
+            // 从 start 重算长度会把 ModRM 吐回去，于是一条指令被读成两段残渣
+            // （实测残留清单里 `0f ae` 与 `e0` 成对出现就是这个错位）。
             _ => {
-                let len = decode_unknown_len(self.code, start);
-                self.pos = start + len;
-                // Output the full unknown instruction as .byte sequence
+                let at = self.pos - 1;
+                self.pos = at + consume_modrm_and_optional_parts(self.code, at);
                 let bytes: Vec<String> = self.code[start..self.pos]
                     .iter()
-                    .map(|b| format!("0x{:02x}", b))
+                    .map(|b| format!("0x{b:02x}"))
                     .collect();
-                Some((len, format!("# UNKNOWN {}", bytes.join(", "))))
+                return Some((self.pos - start, format!("# UNKNOWN {}", bytes.join(", "))));
             },
+        };
+        if modrm >> 6 == 3 {
+            // 串行化指令的 ModRM 是 mod=11、rm=000，无操作数
+            return Some((self.pos - start, mn.into()));
         }
+        let mem = self.decode_mem(rex, modrm >> 6, modrm & 7, 4)?;
+        Some((self.pos - start, format!("{mn} {mem}")))
+    }
+
+    /// 把 `start` 处按「读不出来」发射，并把游标推到该序列之后。
+    /// 抽出来是因为三条路径（非-REX / REX / SSE）都需要在「认不得但不猜」时复用它。
+    fn unknown_from(&mut self, start: usize) -> (usize, String) {
+        let len = self.unknown_len(start);
+        self.pos = start + len;
+        let bytes: Vec<String> = self.code[start..self.pos]
+            .iter()
+            .map(|b| format!("0x{b:02x}"))
+            .collect();
+        (len, format!("# UNKNOWN {}", bytes.join(", ")))
     }
 
     /// 解码 x87 FPU 指令 (0xD8-0xDF)
@@ -1862,27 +2532,55 @@ impl<'a> Dec<'a> {
     }
 
     /// 单字节 opcode 的 (是否含 ModRM, 默认立即数长度) 属性表。
+    ///
+    /// 每一条都用 `as` 组 `.byte …` + `objdump -d` 看过它**实际吃掉几字节**（本机
+    /// binutils，不是凭记忆抄表）。这张表错一格的后果不是「少读一条」而是「从这一条
+    /// 起整份错位」：实测残留里 `cc 48 c7`、`cb 48 8b`、`c8 48 63 c0 41 89 45` 都是
+    /// 0xCC/0xCB/0xC8 被当成「有 ModRM」切出来的残渣。
+    /// 几条形与直觉相反（逐条验过）：
+    ///   * `cc` = int3、1 字节；`c3` ret 1 字节，但 `c2` 是 `ret $imm16`（3 字节），
+    ///     `ca` = `lret $imm16`（3 字节），`cb` = `lret`（objdump 只吃 1 字节）；
+    ///   * `c8` = `enter $imm16,$imm8`，共 4 字节；
+    ///   * `a0..=a3` 是 moffs：无 ModRM，后面跟 **8 字节绝对地址**（`a1 …` 共 9 字节，
+    ///     objdump 打 `movabs 0x…,%eax`）；
+    ///   * 字符串族 `a4..=af` 一律**无 ModRM**（`a6` → `cmpsb %es:(%rdi),%ds:(%rsi)`，
+    ///     `ae` → `scas %es:(%rdi),%al`），只有 `a8`(imm8) / `a9`(imm32) 带立即数；
+    ///   * `90..=97` 是 `xchg eax, r`（无 ModRM）；`e0..=e3` 是 loopne/loope/loop/jecxz
+    ///     的 rel8（2 字节）。
     fn legacy_opcode_props(op1: u8) -> (bool, usize) {
         match op1 {
-            // 无 ModRM，无立即数
-            0x90 | 0xC3 | 0xC9 | 0x99 | 0x9C | 0x9D | 0x98 | 0x37 | 0x3F | 0x27 | 0x2F | 0xF5
-            | 0xF8 | 0xF9 | 0xFA | 0xFB | 0xFC | 0xFD | 0x06 | 0x07 | 0x0E | 0x16 | 0x17 | 0x1E
-            | 0x1F | 0x60 | 0x61 | 0x9E | 0x9F => (false, 0),
-            // 无 ModRM，imm8
-            0x6A | 0xEB | 0xCD | 0xD4 | 0xD5 | 0xE4 | 0xE5 | 0xE6 | 0xE7 | 0x70..=0x7F => {
+            // 无 ModRM、无立即数
+            0x06 | 0x07 | 0x0E | 0x16 | 0x17 | 0x1E | 0x1F | 0x27 | 0x2F | 0x37 | 0x3F => {
+                (false, 0)
+            },
+            0x60 | 0x61 | 0x6C | 0x6D | 0x6E | 0x6F => (false, 0),
+            // xchg eax,r（90..=97）与标志/跳变族（98..=9F，9A 在 64 位下 invalid）
+            0x90..=0x97 | 0x98..=0x99 | 0x9B..=0x9F => (false, 0),
+            // 字符串族（除 a8/a9）、ret/retf 裸形、leave、int3、xlat、in/out 隐式形、
+            // hlt/cmc/clc..std
+            0xA4..=0xA7 | 0xAA..=0xAF => (false, 0),
+            0xC3 | 0xC9 | 0xCB | 0xCC | 0xD7 | 0xEC..=0xEF | 0xF4 | 0xF5 | 0xF8..=0xFD => {
+                (false, 0)
+            },
+            // 无 ModRM、imm8（含 ALU acc、短跳、loop 一族、enter 之外的一族）
+            0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C | 0x6A | 0xA8 => (false, 1),
+            0xB0..=0xB7 | 0xCD | 0xCE | 0xD4 | 0xD5 | 0xE0..=0xE7 | 0x70..=0x7F | 0xEB => {
                 (false, 1)
             },
-            // 无 ModRM，imm32/rel32
-            0x68 | 0xE8 | 0xE9 => (false, 4),
-            // mov r, imm
-            0xB0..=0xB7 => (false, 1),
+            // 无 ModRM、imm16（ret/retf 带计数形）
+            0xC2 | 0xCA => (false, 2),
+            // 无 ModRM、enter 的 imm16 + imm8
+            0xC8 => (false, 3),
+            // 无 ModRM、imm32 / rel32
+            0x05 | 0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D | 0x68 | 0xA9 | 0xE8 | 0xE9 => {
+                (false, 4)
+            },
+            // mov r, imm64：`48 B8+r` 的 imm 是 8 字节，但那一形由 `decode_rex` 直接
+            // 认（本表只在兜底路径上用，那里取 4 不会错到越过 REX.W 形）。
             0xB8..=0xBF => (false, 4),
-            // ALU rax, imm8
-            0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => (false, 1),
-            // ALU rax, imm32
-            0x05 | 0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D => (false, 4),
-            // ret imm16 / int imm8 / in/out imm8 等已在上面覆盖
-            // 默认：含 ModRM，立即数长度待定
+            // moffs：无 ModRM，跟 8 字节绝对地址
+            0xA0..=0xA3 => (false, 8),
+            // 默认：含 ModRM，立即数长度由 [`Self::unknown_len`] 里的分组修正项定
             _ => (true, 0),
         }
     }
@@ -1923,6 +2621,8 @@ pub fn disassemble_range(
             calls,
             data,
             labels,
+            seg: None,
+            seg_shown: false,
         };
         match dec.decode_one() {
             Some((len, text)) if len > 0 => {
@@ -2190,6 +2890,94 @@ mod tests {
         );
         assert!(out.contains("mov $5, %eax"));
         assert!(out.contains("ret"));
+    }
+
+    /// 字符串指令族（MOVS/STOS/CMPS/SCAS）。字节与期望文本都是 `as` + `objdump -d`
+    /// 反读出来的，不是凭记忆写的。
+    ///
+    /// 背后两件事都要钉住：
+    ///   1. **名字** —— `repz scas` 不是 `rep scas`，`stos`/`scas` 不带尺寸字母；
+    ///   2. **长度** —— 这些 opcode 不带 ModRM，所以下一条必须紧接开头。后半段的
+    ///      `c3` 就是专门用来抓错位的：`f3 48 ab` 一旦落进只吞 2 字节的 fallback，
+    ///      后面的 `mov $0,%eax; ret` 会被重读成残渣（那正是残留清单里那些
+    ///      `ae`/`a0`/`cb` 零碎字节的来源）。
+    #[test]
+    fn decodes_string_instructions_and_keeps_following_stream_aligned() {
+        let one = |bytes: &[u8]| -> String {
+            let mut code = bytes.to_vec();
+            code.push(0xC3); // ret：错位时它不会以 `ret` 出现
+            disassemble_range(
+                &code,
+                0,
+                code.len(),
+                0,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+        };
+
+        let cases: &[(&[u8], &str)] = &[
+            (&[0xA4], "movsb  %ds:(%rsi),%es:(%rdi)"),
+            (&[0xF3, 0xA4], "rep movsb  %ds:(%rsi),%es:(%rdi)"),
+            (&[0x48, 0xA5], "movsq  %ds:(%rsi),%es:(%rdi)"),
+            (&[0xF3, 0x48, 0xA5], "rep movsq  %ds:(%rsi),%es:(%rdi)"),
+            (&[0xA6], "cmpsb  %es:(%rdi),%ds:(%rsi)"),
+            (&[0xF3, 0x48, 0xA7], "repz cmpsq  %es:(%rdi),%ds:(%rsi)"),
+            (&[0xAA], "stos   %al,%es:(%rdi)"),
+            (&[0x66, 0xAB], "stos   %ax,%es:(%rdi)"),
+            (&[0xF3, 0x48, 0xAB], "rep stos   %rax,%es:(%rdi)"),
+            (&[0xAE], "scas   %es:(%rdi),%al"),
+            (&[0xF3, 0x48, 0xAF], "repz scas   %es:(%rdi),%rax"),
+        ];
+        for (bytes, want) in cases {
+            let out = one(bytes);
+            assert!(out.contains(want), "{bytes:02x?} 应念成 {want:?}，实得:\n{out}");
+            // 反向对照：不能因为长度算错而多出一条 UNKNOWN。
+            assert!(!out.contains("UNKNOWN"), "{bytes:02x?} 后续流被错位切碎:\n{out}");
+            assert!(out.contains("ret"), "{bytes:02x?} 后面那条 ret 没读回来:\n{out}");
+        }
+    }
+
+    /// `0F AE /digit` 族。这些字节序列不是凭记忆写的，而是用 `as` 组装
+    /// `fxsave/fxrstor/ldmxcsr/stmxcsr/lfence/mfence/sfence (%rdi)` 后从 `objdump -d`
+    /// 反读得到的。把它们固定下来是因为第一版按记忆把 /2、/3 错记成 /3、/4，
+    /// 那会把 stmxcsr 念成 ldmxcsr —— 比一条 UNKNOWN 危险得多，因为猜错的名字会让
+    /// 依赖本解码器的矩阵判据与错误读数对齐。/4 是 AMD 重叠编码（lzcnt/sse），
+    /// 单从字节无法定形，所以它必须是 UNKNOWN，不能赌一个名字。
+    #[test]
+    fn decodes_group_ae_by_modrm_reg_field() {
+        let code = [
+            0x0F, 0xAE, 0x07, // fxsave  (%rdi)
+            0x0F, 0xAE, 0x0F, // fxrstor (%rdi)
+            0x0F, 0xAE, 0x17, // ldmxcsr (%rdi)
+            0x0F, 0xAE, 0x1F, // stmxcsr (%rdi)
+            0x0F, 0xAE, 0xE8, // lfence
+            0x0F, 0xAE, 0xF0, // mfence
+            0x0F, 0xAE, 0xF8, // sfence
+            0x0F, 0xAE, 0xE0, // /4: AMD 重叠编码，不得赌名字
+        ];
+        let out = disassemble_range(
+            &code,
+            0,
+            code.len(),
+            0,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        for want in ["fxsave", "fxrstor", "ldmxcsr", "stmxcsr", "lfence", "mfence", "sfence"] {
+            assert!(out.contains(want), "缺少 {want}：\n{out}");
+        }
+        // 前七条各占 3 字节，第八条必须整条报 UNKNOWN而不是被当某一条误读
+        assert!(out.contains("UNKNOWN"), "AMD 重叠编码 /4 必须报 UNKNOWN：\n{out}");
+        assert_eq!(
+            out.matches("0xae, 0xe0").count(),
+            1,
+            "残余字节只能出现一次（多份 = 不消费 ModRM 后重读造成错位）：\n{out}"
+        );
     }
 
     #[test]
