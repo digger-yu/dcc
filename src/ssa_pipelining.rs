@@ -141,6 +141,12 @@ fn kind_uses(k: &InstKind) -> Vec<SsaVar> {
             push(arr, &mut v);
             push(idx, &mut v);
         },
+        // `IndexAddr` 与 `IndexLoad` 同样读 arr/idx，只是它不访问内存（见
+        // `res_of`/`latency_of`/`is_memory_ordered` 的兜底：地址算术计为 Alu/1/不定序）。
+        InstKind::IndexAddr { arr, idx, .. } => {
+            push(arr, &mut v);
+            push(idx, &mut v);
+        },
         InstKind::IndexStore { arr, idx, src, .. } => {
             push(arr, &mut v);
             push(idx, &mut v);
@@ -904,7 +910,16 @@ fn loop_bound(func: &Function, blk: &str) -> Option<(SsaVar, BinOp, i64, bool)> 
 ///
 /// 判据只看事实：只要本循环头落在另一个自然循环的体内，就拒。内层流水的收益要等
 /// 落地形式做到「不破坏外层结构」时再拿，不能靠先假定安全把死循环送进产物。
-fn is_nested_in_other_loop(func: &Function, header: &str) -> bool {
+/// 本循环是否嵌在**其它**循环体内。
+///
+/// `doms` 由调用方递下来（`classify_loop` 已经算过一次）：在这里面逐候选头重算
+/// 支配集是 O(头数²) 次全函数 COQH 定点，块数上百时编译会从毫秒退到分钟级
+/// （实测 255 块的语料上逾 2 分钟）。
+fn is_nested_in_other_loop(
+    func: &Function,
+    header: &str,
+    doms: &HashMap<String, HashSet<String>>,
+) -> bool {
     for name in crate::ssa::ordered_block_names(func) {
         if name == header {
             continue;
@@ -913,10 +928,9 @@ fn is_nested_in_other_loop(func: &Function, header: &str) -> bool {
         if bb.phis.is_empty() {
             continue;
         }
-        let doms = crate::ssa::compute_dominators(func);
         let mut latches: Vec<String> = pred_names(func, &name)
             .into_iter()
-            .filter(|p| dominates(&doms, &name, p))
+            .filter(|p| dominates(doms, &name, p))
             .collect();
         latches.dedup();
         for lt in latches {
@@ -938,7 +952,7 @@ pub fn classify_loop(func: &Function, header: &str) -> Result<PipelinedLoop, &'s
     if bb.phis.is_empty() {
         return Err("头块没有 phi：不是循环携带形式的环");
     }
-    if is_nested_in_other_loop(func, header) {
+    if is_nested_in_other_loop(func, header, &doms) {
         return Err("本循环嵌在其它循环之内（落地会破坏外层结构，见 is_nested_in_other_loop）");
     }
     if !dominates(&doms, header, header) {
@@ -2248,6 +2262,11 @@ where
         },
         InstKind::Store { e, src, is_volatile } => {
             InstKind::Store { e: f(e)?, src: f(src)?, is_volatile: *is_volatile }
+        },
+        InstKind::IndexAddr { arr, idx, ty } => InstKind::IndexAddr {
+            arr: f(arr)?,
+            idx: f(idx)?,
+            ty: ty.clone(),
         },
         InstKind::IndexLoad { arr, idx, ty, is_volatile } => InstKind::IndexLoad {
             arr: f(arr)?,
