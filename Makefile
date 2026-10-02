@@ -51,11 +51,25 @@ golden-cross: build
 pipe-structure: build
 	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" bash scripts/check_pipe_structure.sh
 
+# 自家反汇编（`-S` 读数）的逐字命中率。`# UNKNOWN` 不影响产物，所以没有任何用例会
+# 因它变多而红；而 rex_matrix 那 15 个矩阵的判据止于「读回来的名字必须是意图那个」，
+# 读不出就没读数。CEILING 必须给**显式数字**：不设时上限等于本次实测值，这条判据
+# 就永远不会红。当前值 = 实测 13（-O0 9 + -O2 4）。历史：上一轮记的是 235，反解码器
+# 补齐后降到 26，本轮再补「字符串指令族（STOS/SCAS/CMPS）+ rdtsc/int3/cwt」与
+# 三处 REX 路径重复 take（多吞下一字节 ⇒ 整页错位）后降到 13；剩下的 13 条全部
+# 是 moffs/test/enter 一族被切碎的重读产物（`4d a0`、`4d a8`、`4d c8`、`4d 11 d8`），
+# 名字拿不准的继续报 UNKNOWN，不猜。
+# 本仓的纪律：CEILING 只按当场实测写死，脚本自己会提醒「少了 N 条就砍」。
+# 残留清单由脚本自己按字节序列聚合打印，就是待补清单。
+disasm-cov: build
+	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" LEVELS="0 2" CEILING=13 bash scripts/check_disasm_coverage.sh
+
 test-all: test
 	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" bash scripts/test_all.sh
 	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" JOBS="$(JOBS)" bash scripts/check_opt_equivalence.sh
 	$(MAKE) rex-hygiene
 	$(MAKE) pipe-structure
+	$(MAKE) disasm-cov
 	$(MAKE) golden-cross
 
 torture-setup:
