@@ -1,6 +1,6 @@
 # DCC 缺失特性与已知限制
 
-> 最后更新：2026-09-02 — 基于当前源码、测试与脚本审计
+> 最后更新：2026-10-02 — 基于当前源码、测试与脚本审计
 >
 > 已支持特性详见 `docs/support_features.md`。本文件只记录仍不支持、
 > 明确降级、仍为 stub/no-op，或缺少测试契约的项目。
@@ -15,7 +15,10 @@
 | `-mpreferred-stack-boundary=N` (N≠2) | DCC 不调整栈对齐；`=2` 为内核默认，静默接受；其他值发出警告 |
 | `-fno-plt` | 接受但无操作；内核不使用 PLT，DCC codegen 不生成 PLT 入口 |
 | `-ftrampolines` / `-fno-trampolines` | 接受但无操作；嵌套函数直接调用通过 `__builtin_call_with_static_chain` 支持；嵌套函数取地址时生成栈上 trampoline (设置 r10=父帧指针后跳转)，用户需确保栈可执行 (mprotect PROT_EXEC) 或通过 `-z execstack` 链接 |
-| 优化器 `-fno-strict-aliasing` | 已实现：`-fno-strict-aliasing` 时别名分析合并所有指针到同一 alias set (保守)；默认 `-fstrict-aliasing` 按类型标签区分 alias set (C 标准语义) |
+| 优化器 `-fstrict-aliasing` | **无效果，但会明说**。优化器不做基于类型标签的别名假设（TBAA）：原先那份别名分析因「结果从入口到管线全部被丢弃」已删（`docs/ssa-pass-upgrade-plan.md` §7.37），至今没有接上真消费者。因为产物永远等于「保守 aliasing」那一侧：`-fno-strict-aliasing` 静默接受（它要求的本来就是现状，内核构建全部传这个），而 `-fstrict-aliasing` 会发一条 `dcc: warning: ignoring '-fstrict-aliasing' …`，不默假做了。判据：`fstrict_aliasing_is_reported_as_inert_but_fno_is_silent`（三个方向：警告 / 不警告 / 不传也不警告）。真正的 TBAA 仍是开放项。|
+| x86 段寄存器限定符 `__seg_gs` / `__seg_fs`（**指针 pointee** 位置） | 已实现且逐形核对：解引用、下标、成员、复合赋值/自增自减、cast、typedef、typeof、局部/形参/函数返回类型均发 `%gs:`/`%fs:`，与 gcc 一致。| 
+| x86 段寄存器限定符加在**对象本体**上 | **未实现，且不报错**：`__seg_gs int gv;` 后读 `gv`，gcc 发 `mov %gs:0x0(%rip),%eax`，dcc 仍按默认段访问。需要一条「符号→段」的表（`GlobalVar` 加字段，`emit_global_load/store/addr` 三个入口就能覆盖 66 个调用点）。未做的理由：改的是所有全局存取的发射路径，需要与内核构建单独对拍（`docs/ssa-pass-upgrade-plan.md` §7.40 七、第 1 项）。|
+| 地址空间的**诊断** | gcc 对 `int * __seg_gs p`（限定符在 `*` 之后）、自动变量带段、`__seg_gs` 指针与普通指针互相赋值均报错；dcc 全盘接受（比 gcc 宽松）。不会错值，但也不是契约对齐。|
 
 
 ## 链接器 / 对象文件限制

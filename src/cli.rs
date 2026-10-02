@@ -211,7 +211,14 @@ pub struct Config {
     pub stack_protector_guard_reg: StackGuardReg,
     /// -fstack-clash-protection: 大块栈分配逐页探测
     pub stack_clash_protection: bool,
-    /// -fno-strict-aliasing: 关闭类型双关优化假设 (默认 true)
+    /// 严格别名假设（默认 true，与 gcc 一致）。
+    ///
+    /// 注意：**这个值当前没有消费者**。上一轮删掉了 P4/P13 别名分析（它们的
+    /// 结果从入口到管线都被丢弃，对机器码零影响，见 docs/ssa-pass-upgrade-plan.md
+    /// §7.37），而 dcc 的优化器至今**不做**类型标签假设（TBAA）—— 也就是说产物
+    /// 永远按「保守 aliasing」那一侧行为。因此：
+    ///   * `-fno-strict-aliasing` 静默接受：它要求的保守行为本来就是现状；
+    ///   * `-fstrict-aliasing` 发一条警告：用户要的优化不存在，不能默默假装做了。
     pub strict_aliasing: bool,
     /// -fno-strict-overflow: 关闭有符号溢出优化假设 (默认 true)
     pub strict_overflow: bool,
@@ -2516,6 +2523,19 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-fstack-clash-protection" => stack_clash_protection = true,
             // Optimizer semantics flags
             "-fno-strict-aliasing" => strict_aliasing = false,
+            // `-fstrict-aliasing` 在 dcc 里是个**没有实现**的请求：优化器不做基于类型
+            // 标签的别名假设（TBAA 消费者从未存在过，原先那份别名分析因结果被丢弃
+            // 而在 §7.37 删除）。静默接受就是「假装做了」；这里明确告知，开关仍然有效
+            // 接受（不改变行为、不报错）。
+            "-fstrict-aliasing" => {
+                strict_aliasing = true;
+                cli_warnings.push(
+                    "ignoring '-fstrict-aliasing': DCC's optimizer makes no type-based \
+                     aliasing assumptions (no TBAA consumer exists), so the product is \
+                     already what this flag asks for"
+                        .to_string(),
+                );
+            }
             "-fno-strict-overflow" => strict_overflow = false,
             // Fast math
             "-ffast-math" => {
