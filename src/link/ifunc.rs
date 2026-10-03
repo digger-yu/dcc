@@ -12,7 +12,19 @@
 //   3. 共享库加载时, 动态链接器执行 resolver 把最终函数地址写入 GOT 项
 //   4. 引用方按普通函数调用处理 (PLT/GOT), 在静态可执行下会直接走 resolver
 //
-// 静态可执行模式下, dcc 不执行 resolver, 只记录解析关系。
+// 静态可执行模式 (ET_EXEC, `emit_dynamic == false`) 下, dcc 没有、也不可能「记录解析
+// 关系然后交给别人执行」: 那条路上没有 ld.so, 而引用方是**提前固化**的直接 `call rel32`
+// (没有 GOT 槽可改写), `apply_relocations` 里 R_X86_64_IRELATIVE 又是一个空操作分支
+// (`relocate.rs` 的 `R_X86_64_GLOB_DAT | JUMP_SLOT | RELATIVE | IRELATIVE => {}`)。
+// 所以静态路径必须自己把每个 IFUNC 定到一个具体实现体: 见 `bind_static_exec_ifuncs`。
+// 要在静态产物里保留「运行时 CPUID 派发」, 缺的不是这几行, 而是三件成套的东西:
+//   1. 引用方改成经 GOT 间接 (`call *(%rip)`), 而不是 `call` 直接绑 vaddr;
+//   2. 启动期有一个重定位应用者 (glibc 静态链接靠 `.rela.iplt` + crt 的 `apply_irel`,
+//      dcc 的内置 `_start` 桩在 `mod.rs::ensure_start_stub`, 目前只是调 `main`);
+//   3. `.rela.dyn`/`.rela.iplt` 那套节在 ET_EXEC 里真的被写出来 (现在只有 PIE/Shared
+//      走 `plt_got::fill_plt_got_with_opts`)。
+// 这三件都在 `src/link/layout.rs` / `src/link/plt_got.rs` / `elf_exec.rs`, 不属于本模块,
+// 因此静态路径选择「绑定 default 变体 + 无条件播报」, 而不是假装还能派发。
 
 #![allow(dead_code)]
 
@@ -130,6 +142,75 @@ pub fn collect_from_bundle(
     (table, relas)
 }
 
+/// 静态 ET_EXEC 里把每个 IFUNC 定到它的具体实现体。
+///
+/// 判据与动作：对 `layout.symbols` 里每一个 `STT_GNU_IFUNC` 符号 `f`，找同名变体
+/// `f.default`（`target_clones("...,default")` 必然发它，codegen 侧的发形由
+/// `src/codegen/x86_64/ifunc.rs` 保证）：
+///   * 找到 → 把 `f` 的 `value`/`section`/`size` 改写成该变体的，并把类型降级成
+///     `STT_FUNC`。静态产物里没有任何人会调用 resolver，留着 IFUNC 类型会让
+///     `readelf -sW` 读出「有 IFUNC、却没有 IRELATIVE 来解析它」的假象；`STT_FUNC`
+///     才是这条调用真正落到的地方。改写发生在 `apply_relocations` 之前，所以固化进
+///     `.text` 的 `call rel32` 绑的就是这个变体地址。
+///   * 找不到（用户手写 `__attribute__((ifunc("r")))`，resolver 是任意 C 函数，链接期
+///     无法静态求值）→ 返回 `Err`，由调用方报错。**不**退化成「把调用绑到 resolver
+///     体」：那样 `call f` 会返回一个函数指针而不是 `f` 的返回值，是静默的错程序
+///     （实测纯 target_clones 程序被这样绑进 resolver 后 SIGSEGV）。
+///
+/// 成功时返回 `(ifunc 名, 被绑到的变体名)` 列表，调用方**无条件**打印 —— 这是
+/// 「静态路径放弃了 CPUID 派发」这件事的唯一对外说明口。
+pub fn bind_static_exec_ifuncs(
+    layout: &mut Layout,
+) -> Result<Vec<(String, String)>, Vec<String>> {
+    use crate::codegen::shared::elf::{STT_FUNC, STT_GNU_IFUNC};
+
+    // 变体表：`<base>.default` -> (section, value, size, vaddr)。一次扫描，避免每个 IFUNC 都 O(n) 查。
+    // `vaddr` 直接搬目标的，不重算：它已经由 `build_symbols` 按 `section.vaddr + value`
+    // 定好，而 symtab 的 `st_value` 写的就是它（`elf_exec.rs`），`apply_relocations` 则用
+    // `sections[sym.section].vaddr + sym.value` —— 两者必须同时搬，否则符号表与指令不一致。
+    let mut defaults: HashMap<String, (u16, u64, u64, u64)> = HashMap::new();
+    for s in &layout.symbols {
+        if let Some(base) = s.name.strip_suffix(".default") {
+            if s.ty == STT_FUNC || s.kind == STT_FUNC {
+                defaults.insert(base.to_string(), (s.section, s.value, s.size, s.vaddr));
+            }
+        }
+    }
+
+    let mut bound = Vec::new();
+    let mut unresolvable = Vec::new();
+    for i in 0..layout.symbols.len() {
+        let is_ifunc = layout.symbols[i].kind == STT_GNU_IFUNC
+            || layout.symbols[i].ty == STT_GNU_IFUNC;
+        if !is_ifunc {
+            continue;
+        }
+        let name = layout.symbols[i].name.clone();
+        if name.is_empty() {
+            continue;
+        }
+        match defaults.get(name.as_str()) {
+            Some(&(section, value, size, vaddr)) => {
+                let sym = &mut layout.symbols[i];
+                sym.section = section;
+                sym.value = value;
+                sym.size = size;
+                sym.vaddr = vaddr;
+                sym.ty = STT_FUNC;
+                sym.kind = STT_FUNC;
+                bound.push((name.clone(), format!("{name}.default")));
+            },
+            None => unresolvable.push(name),
+        }
+    }
+    if unresolvable.is_empty() {
+        Ok(bound)
+    } else {
+        unresolvable.sort();
+        Err(unresolvable)
+    }
+}
+
 /// 为 IFUNC 生成 .rela.dyn 记录 (R_X86_64_IRELATIVE)
 /// 动态链接器会在加载时调用 resolver 并把返回值写入对应 GOT 项
 pub fn gen_irelative_relas(table: &IfuncTable) -> Vec<OutputRela> {
@@ -146,6 +227,8 @@ pub fn gen_irelative_relas(table: &IfuncTable) -> Vec<OutputRela> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codegen::shared::elf::STT_NOTYPE;
+    use crate::link::layout::OutputSymbol;
 
     #[test]
     fn test_register_and_lookup() {
@@ -204,6 +287,141 @@ mod tests {
         let data = [100u8, 0, b'a', b'b'];
         let parsed = parse_dcc_ifunc_section(&data);
         assert!(parsed.is_empty());
+    }
+
+    /// 构造一个最小 Layout: 一个 .text 输出节 + 调用方给的符号。
+    /// 只够 `bind_static_exec_ifuncs` 用 (它只看 symbols 的 name/ty/kind/value/size/vaddr
+    /// 以及 sections[i].vaddr), 不参与地址分配。
+    fn layout_with_symbols(symbols: Vec<OutputSymbol>) -> Layout {
+        use crate::codegen::shared::elf::{SHT_PROGBITS, SHF_ALLOC, SHF_EXECINSTR};
+        use crate::link::layout::{OutputSection, OutputSectionKind};
+        let text = OutputSection {
+            kind: OutputSectionKind::Text,
+            name: ".text".to_string(),
+            sh_name_off: 0,
+            ty: SHT_PROGBITS,
+            flags: SHF_ALLOC | SHF_EXECINSTR,
+            align: 16,
+            data: Vec::new(),
+            size: 0x1000,
+            entsize: 0,
+            output_index: 0,
+            load_segment: 0,
+            vaddr: 0x400160,
+            file_off: 0x160,
+            input_offsets: Vec::new(),
+            input_sections: Vec::new(),
+        };
+        Layout {
+            is_pie: false,
+            is_shared: false,
+            arch: crate::debug::ArchKind::X86_64,
+            base_addr: 0x400000,
+            file_base: 0x160,
+            sections: vec![text],
+            segments: vec![],
+            symbols,
+            entry: 0,
+            has_symtab: true,
+            has_dynamic: false,
+            n_locals: 0,
+            output_relas: vec![],
+            needed: vec![],
+            dynamic_linker: None,
+            comdat_groups: vec![],
+        }
+    }
+
+    fn sym(name: &str, ty: u8, value: u64, size: u64) -> OutputSymbol {
+        use crate::codegen::shared::elf::{STB_GLOBAL, STB_LOCAL, STV_DEFAULT};
+        OutputSymbol {
+            name: name.to_string(),
+            value,
+            vaddr: 0x400160 + value,
+            size,
+            bind: if name.starts_with("__") || name.contains('.') {
+                STB_LOCAL
+            } else {
+                STB_GLOBAL
+            },
+            ty,
+            kind: ty,
+            visibility: STV_DEFAULT,
+            section: 0,
+            shndx_if_section: 0,
+        }
+    }
+
+    /// 静态 ET_EXEC: IFUNC 被绑到 `<base>.default` 变体, 类型降为 STT_FUNC,
+    /// 并返回可播报的 (ifunc, 变体) 对 —— 不留在 resolver 体上 (那是 SIGSEGV 那个形状)。
+    #[test]
+    fn bind_static_exec_ifuncs_binds_to_default_variant() {
+        use crate::codegen::shared::elf::{STT_FUNC, STT_GNU_IFUNC};
+        let mut layout = layout_with_symbols(vec![
+            sym("", STT_NOTYPE, 0, 0),
+            sym("compute", STT_GNU_IFUNC, 0x2e0, 41), // resolver 体地址 (新形状)
+            sym("compute.resolver", STT_FUNC, 0x2e0, 41),
+            sym("compute.sse4_2", STT_FUNC, 0x0, 100),
+            sym("compute.default", STT_FUNC, 0x68, 100),
+        ]);
+        let bound = bind_static_exec_ifuncs(&mut layout).expect("default 变体存在, 应可绑");
+        assert_eq!(bound, vec![("compute".to_string(), "compute.default".to_string())]);
+        let compute = layout
+            .symbols
+            .iter()
+            .find(|s| s.name == "compute")
+            .unwrap();
+        let default = layout
+            .symbols
+            .iter()
+            .find(|s| s.name == "compute.default")
+            .unwrap();
+        assert_eq!(compute.value, default.value);
+        assert_eq!(compute.vaddr, default.vaddr);
+        assert_eq!(compute.size, default.size);
+        assert_eq!(compute.section, default.section);
+        assert_eq!(compute.ty, STT_FUNC, "静态产物里不该再剩 IFUNC 类型");
+        assert_eq!(compute.kind, STT_FUNC);
+        // resolver 体本身不动 (它仍在 .text 里, 只是没人调用)
+        let resolver = layout
+            .symbols
+            .iter()
+            .find(|s| s.name == "compute.resolver")
+            .unwrap();
+        assert_eq!(resolver.value, 0x2e0);
+    }
+
+    /// 静态 ET_EXEC: 用户手写 `__attribute__((ifunc("r")))` 没有 `default` 变体时
+    /// 必须报错, 不能静默把调用绑到 resolver 体 (那会返回函数指针当返回值)。
+    #[test]
+    fn bind_static_exec_ifuncs_errors_without_default_variant() {
+        use crate::codegen::shared::elf::{STT_FUNC, STT_GNU_IFUNC};
+        let mut layout = layout_with_symbols(vec![
+            sym("", STT_NOTYPE, 0, 0),
+            sym("ifunc_func", STT_GNU_IFUNC, 0, 54),
+            sym("resolve_ifunc", STT_FUNC, 0, 54),
+            sym("default_impl", STT_FUNC, 0x38, 60),
+        ]);
+        let err = bind_static_exec_ifuncs(&mut layout)
+            .err()
+            .expect("无 default 变体时应 Err, 不得静默绑 resolver");
+        assert_eq!(err, vec!["ifunc_func".to_string()]);
+        // 符号未被就地改写
+        assert_eq!(layout.symbols[1].kind, STT_GNU_IFUNC);
+    }
+
+    /// 没有 IFUNC 符号时 (大多数程序) 本步为空操作, 不能误伤同名前缀的符号。
+    #[test]
+    fn bind_static_exec_ifuncs_noop_without_ifunc() {
+        use crate::codegen::shared::elf::STT_FUNC;
+        let mut layout = layout_with_symbols(vec![
+            sym("", STT_NOTYPE, 0, 0),
+            sym("main", STT_FUNC, 0, 42),
+            sym("foo.default", STT_FUNC, 100, 8),
+        ]);
+        assert_eq!(bind_static_exec_ifuncs(&mut layout).unwrap(), vec![]);
+        assert_eq!(layout.symbols[1].value, 0);
+        assert_eq!(layout.symbols[2].value, 100);
     }
 
     #[test]

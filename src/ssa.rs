@@ -4513,61 +4513,492 @@ fn plan_inlined_temps(func: &Function) -> InlinePlan {
     }
 }
 
-/// 结构化重建**表达不了**的循环形状：某个自然循环有**两个以上**的「循环外后继」。
+/// 循环出口边的**所有权分类** —— 判据 (`has_multi_exit_cycle`) 与重建发射器
+/// (`rebuild_bb` 的 3 个点 + `rebuild_cycle` 头块分支的 2 个点) 的**唯一真源**。
 ///
-/// 为什么这是硬歧义而不是可以就地展开的细节：`while` 只有一个落出口，共享续体既要从
-/// 循环的 break 路径到这里，又要由**外层**那条边发射一次；在一处发就把另一处吃掉了。
-/// 实测两端都错过：
-///   * 把侧出口当续体在循环后发 ⇒ `a(2)` 返 7（gcc 返 1，循环体其实只正确跑了 2 轮）；
-///   * 提升节点头分支为 `while` 条件、续体取正常落出块 ⇒ `a(0)`/`a(1)` 返 0（落出路径
-///     后面空无一物，函数直接落到序言）。
-/// 为什么不是「续体被外层共享」：普通 `for` 的 `for.end` 本来就同时是 preheader
-/// `for.cond` 的假边目标（实测前驱 = [for.step, for.cond]），那条判据会把**所有** for
-/// 循环都挡掉。用「出边个数」才对准本歧义：`for (i=0;i<n;i++) if (i==2) return 7;`
-/// 有 `if.then`(ret 7) 与 `for.end`(ret 1) 两个出口，而普通循环只有 `for.end` 一个。
+/// 为什么必须是单一真源: 历史上这一族两次被 gcc 差分当场证伪 (§7.28 / §7.32), 两次都
+/// 是「判据说可以 / 发射器某一侧另外安排」的错位 —— 只改一侧会拆掉现有的互相掩盖
+/// (见 §7.32 与本文件 `has_multi_exit_cycle` 的说明)。设计全文见
+/// `docs/wp_multi_exit_loop.md`。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LoopExitOwner {
+    /// 循环的**自然落点 (续体)**: 由 `rebuild_cycle` 在 `while` 之后发射**一次**;
+    /// 到达它的边只发 `break` (落到同一位置), 绝不得就地展开 (否则双份执行)。
+    Continuation,
+    /// 体内 `return` 的落点: 在**到达边**就地发 `Stmt::Return`。它不占用续体名额。
+    PureReturn,
+    /// 只被循环内路径到达、且自带语句的侧出口: 在**到达边**就地展开本块语句,
+    /// 再由其 terminator 递归成 `break`。
+    InlineOnEdge,
+    /// 发射器无路可发 ⇒ 判据必须把整个函数退出 SSA 往返 (不优化且正确)。
+    Unsupported,
+}
+
+/// 一个自然循环的出口所有权计划。
+#[derive(Clone, Debug)]
+pub struct LoopExitPlan {
+    /// 唯一确定的自然落点 (桩块折叠后的块名)。`None` = 本循环没有结构落点
+    /// (所有出口都是体内 `return`, 循环体是 `while(1)` 永不落出)。
+    pub cont: Option<String>,
+    /// 每条出口边是否都能被发射器安排。`false` ⇒ 判据必须挡住本函数。
+    pub expressible: bool,
+    /// 节点头的 `Branch` 是否允许被**提升**成 `while (cond)`。
+    ///
+    /// 这是本轮查出的根因级约束: 提升头块分支 = 把头块那条出口边**改判**成循环的
+    /// 落出口 (因为提升后头块不再发 `if`, 体内那条边根本没有发射点)。于是
+    /// 「续体取法」与「提升许可」互为前提: 只有当头块的出口边**就是**续体时才能提升,
+    /// 否则必须退回 `while(1) { if (c) return …; … }` 的形态。§7.32 那次放松把续体改对
+    /// 却没管提升, 实测就是 `该走到 return 7: got 1 want 7` 那一类错值。
+    pub allow_header_lift: bool,
+    /// 拒判原因 (仅诊断窗口读, 不参与任何语义)。
+    pub reason: &'static str,
+}
+
+/// 循环的**唯一结构事实**: latch 集合与 body 集合。
 ///
-/// 与聚合整体赋值同一政策：IR 表达不了的形状**整函数退出 SSA 往返**，而不是发一个
-/// 看起来对、实际接错线的结构。
-pub fn has_multi_exit_cycle(func: &Function) -> bool {
-    let doms = compute_dominators(func);
-    for (header, hb) in func.blocks.iter() {
-        // 自然循环的 header：存在一条从某前驱回来的回边。
-        let latches: Vec<String> = hb
-            .preds
-            .iter()
-            .filter(|p| is_back_edge(p, header, &doms))
-            .cloned()
-            .collect();
-        if latches.is_empty() {
+/// 判据与重建共用这一份 —— 两边各算一次就会因 `preds`/`succs` 缓存过期而给出不同的
+/// 循环体 (§7.32 未修项 2 的同类问题), 而「判据放行 ⇔ 发射器有路可发」的同源性
+/// 正好建立在两边看到的是同一个循环之上。返回的 body **含**头块; 无回边时返回 `None`。
+pub fn loop_shape(
+    func: &Function,
+    header: &str,
+    doms: &HashMap<String, HashSet<String>>,
+) -> Option<(Vec<String>, HashSet<String>)> {
+    let mut latches: Vec<String> = Vec::new();
+    let mut names: Vec<&String> = func.blocks.keys().collect();
+    names.sort();
+    for name in names {
+        if name == header {
             continue;
         }
-        let body: HashSet<String> = find_loop_body_multi(func, header, &latches)
-            .into_iter()
-            .collect();
-        // 收集循环外后继
-        let mut outside: Vec<String> = Vec::new();
-        for name in body.iter()
-            .chain(std::iter::once(header))
-        {
-            let Some(b) = func.blocks.get(name) else { continue };
-            // 后继从 terminator 现取, 不读 `b.succs`: 本项目的 `term_succs` 文档写明
-            // SSA pass 改过 terminator 后 `succs` 可能过期。这里读旧边集会**漏掉真存在的
-            // 出口边** ⇒ 少计一个出口 ⇒ 把表达不了的循环放进来 (静默误编译的危险方向)。
-            for s in term_succs(&b.term) {
-                if s == header || body.contains(s) {
-                    continue;
-                }
-                if is_back_edge(name, s, &doms) {
-                    continue;
-                }
-                if !outside.iter().any(|e| e.as_str() == s) {
-                    outside.push(s.to_string());
-                }
+        // C++ 零成本异常：落地垫块**不是循环体的一部分**。垫块会 `goto` 回入正常规块
+        // （包括循环头），那条边在 CFG 上就是一条「回边」，于是垫块被算成 latch、垫块
+        // 自己与它的链被圈进 body，垫块的去向（如 `eh_resume.8`）进而被数成循环的
+        // 「共享出口」当上续体 —— 循环正常走完后就落进 `_Unwind_Resume`（实测
+        // `eh_loop_and_scope_exit.cpp`：`PLAN cont=Some("eh_resume.8")`，g++ 退出码 0 /
+        // dcc -3）。垫块只由 unwinder 按地址区间与其他块的 `goto` 进入，它既不能当
+        // latch、也不能当体块或续体；它的发射归 `rebuild_eh_blocks` 平铺那一段。
+        if is_eh_pad(name, func) {
+            continue;
+        }
+        if !is_back_edge(name, header, doms) {
+            continue;
+        }
+        let Some(bb) = func.blocks.get(name) else { continue };
+        // 后继从 terminator 现取: `term_succs` 的文档写明 SSA pass 改过 terminator 后
+        // `b.succs` 可能过期, 读旧边集会**漏掉真存在的出口边** (静默误编译的方向)。
+        if term_succs(&bb.term).iter().any(|s| *s == header) {
+            latches.push(name.clone());
+        }
+    }
+    if latches.is_empty() {
+        return None;
+    }
+    let mut body: HashSet<String> = find_loop_body_multi(func, header, &latches)
+        .into_iter()
+        .collect();
+    // 同上：body 里也要去掉垫块，否则从体块跳向垫块的那条边会被当普通体内边。
+    body.retain(|b| !is_eh_pad(b, func));
+    Some((latches, body))
+}
+
+/// 该块是否属于**平坦发射的 EH 落地垫区**（只由 unwinder 按 `.text` 地址区间、以及其他
+/// 块的 `goto` 进入）。它不是正常控制流的一部分：既不能当循环体 / latch，也不能当
+/// 循环续体；它的发射归 `rebuild_eh_blocks`，而结构化重建碰到它只能发一个 `goto`。
+fn is_eh_pad(name: &str, func: &Function) -> bool {
+    func.eh_unwind_blocks.iter().any(|p| p == name)
+}
+
+/// 把出口块的**空壳落点**折叠到它真正干活的后继块。
+///
+/// 源码里一句 `break;` 落到的块常常**自己没有语句** (全部语义在它的后继里, 实测
+/// `if.then.0` = 零条语句 + 无 phi + `Jump(for.end)`); 不折叠就会把桩块与它身后的
+/// 合并块数成两个出口 —— 于是今天连「`for` 里一个普通 `break`」都被退路挡住 (实测
+/// 见 §7.32 表格与本文件 `has_multi_exit_cycle` 的说明)。
+///
+/// 折叠条件严格: 只沿「无自己的语句 + 无 phi + terminator 是无条件 `Jump` + 目标仍在
+/// 循环外」的链走; 一旦折回循环内、或碰到有语句/有 phi/非 `Jump` 的块就停 (停下时的
+/// 块就是代表块, 即使用它自己仍是桩块 —— 那是一条回入边, 所有权归续体以外的保守分类)。
+fn resolve_loop_exit_stub(
+    target: &str,
+    func: &Function,
+    header: &str,
+    body: &HashSet<String>,
+) -> String {
+    let mut cur = target.to_string();
+    let mut seen: HashSet<String> = HashSet::new();
+    loop {
+        if !seen.insert(cur.clone()) {
+            return cur;
+        }
+        let Some(bb) = func.blocks.get(&cur) else {
+            return cur;
+        };
+        if !bb.phis.is_empty() || !bb.insts.iter().all(|i| is_pass_hint_inst(&i.kind)) {
+            return cur;
+        }
+        let Terminator::Jump(n) = &bb.term else {
+            return cur;
+        };
+        if n.as_str() == header || body.contains(n.as_str()) {
+            return cur;
+        }
+        cur = n.clone();
+    }
+}
+
+/// 出口块在**还不知道续体**时的粗分类 (续体确定后再定最终所有权)。
+///
+/// `Shared` = 既不是体内纯 `return`、也不能在到达边展开 ⇒ 必须由循环后的续体发一次。
+/// 这一档就是「自然落点的候选」, 也就是今天 `has_multi_exit_cycle` 真正该数的东西。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ExitClass {
+    /// `Ret` 终结符、无 phi、单一前驱: 到达边直接发 `Stmt::Return` 就够。
+    /// 前驱集合的约束保留 (§7.32): 多前驱的 `Ret` 块汇聚的是**不同路径的值**, 按路径
+    /// 展开要依赖 env 里的版本恰好一致, 那是另一件事, 不在本轮放行范围。
+    Ret,
+    /// 自带语句且**全部前驱都在循环内**: 只能被循环路径到达 ⇒ 到达边展开不会双份执行。
+    ///
+    /// (旧发射器额外还禁止「头块直接出口」与「latch 的后继」展开 —— 那两条约束说的
+    /// 就是「本块是否那个只发一次的续体」, 现在由计划的 `cont` 唯一确定并**优先**判为
+    /// `LoopExitOwner::Continuation`, 不必再单独表达。旧发射器只给 5 个发射点中的 3 个
+    /// 用 (§7.32 未修项 1), 如今 5 个点走同一个 [`loop_exit_owner`]。)
+    Inline,
+    /// 其余: 循环外也有前驱进入它 ⇒ 它必须是那个「发一次」的落点。
+    Shared,
+    /// 这条边的落点是 EH 落地垫块。垫块不参与结构化续体（它由 `rebuild_eh_blocks` 平铺
+    /// 发射，带自己的标签），所以它**既不消耗也不提供**续体名额；发射器在到达边递归到
+    /// 它时，由 `rebuild_bb` 开头的发垫守卫写成 `goto pad`。
+    ///
+    /// 为什么单独建一个类而不是归到 `Inline`：`Inline` 的含义是「本块语句属于循环路径的
+    /// 一部分，在到达边展开」，把垫块的语句搬到边上是错的（垫块入口地址要进
+    /// `.eh_frame`/落地垫表，语句必须只有一份）。
+    IntoPad,
+}
+
+fn exit_class_of(
+    folded: &str,
+    func: &Function,
+    header: &str,
+    body: &HashSet<String>,
+) -> ExitClass {
+    let Some(bb) = func.blocks.get(folded) else {
+        return ExitClass::Shared;
+    };
+    // 落点就是 EH 落地垫：它不属于结构化续体（见 `ExitClass::IntoPad`）。这一条必须在
+    // 所有其他分类之前，否则垫块会被归成 `Shared` 而成为续体候选（实测就是这么错的）。
+    if is_eh_pad(folded, func) {
+        return ExitClass::IntoPad;
+    }
+    // 这里**不**对落地垫块做特判。落地垫不得被结构化重建消费这件事只有一个拦截点：
+    // `rebuild_bb` 开头（它同时管住了标签发射与 visited 记账，是「已发射」的唯一真源）。
+    // 在此处再把垫块归成 `Shared` 会改变续体选取，而续体选取正是发射器依赖的事实；
+    // 本轮实测：加上这道守卫后 `eh_loop_and_scope_exit` 的落地垫分派错位（g++ 0 /
+    // dcc -3），去掉它只保留 `rebuild_bb` 那一处则标签与行为同时正确 —— 同一件事写两处
+    // 必然互相拧。
+    // 体内纯 `return`: 与 `is_loop_exit_pure_return` 同一判据 (Ret + 无 phi + 单一前驱)。
+    if is_loop_exit_pure_return(folded, func) {
+        return ExitClass::Ret;
+    }
+    if bb.phis.is_empty()
+        && !bb.insts.iter().all(|i| is_pass_hint_inst(&i.kind))
+        && bb.preds
+            .iter()
+            .all(|p| p.as_str() == header || body.contains(p.as_str()))
+    {
+        return ExitClass::Inline;
+    }
+    ExitClass::Shared
+}
+
+/// 计算一个自然循环的出口所有权计划。
+pub fn loop_exit_plan(
+    func: &Function,
+    header: &str,
+    body: &HashSet<String>,
+    latches: &[String],
+    doms: &HashMap<String, HashSet<String>>,
+) -> LoopExitPlan {
+    let in_loop = |x: &str| x == header || body.contains(x);
+    let fold = |x: &str| resolve_loop_exit_stub(x, func, header, body);
+
+    // 1. 出口边 (src -> raw target), 按 src 字典序保证确定性。
+    let mut srcs: Vec<String> = body.iter().cloned().collect();
+    if !srcs.iter().any(|s| s == header) {
+        srcs.push(header.to_string());
+    }
+    srcs.sort();
+    let mut edges: Vec<(String, String)> = Vec::new();
+    for name in srcs.iter() {
+        let Some(b) = func.blocks.get(name) else { continue };
+        for s in term_succs(&b.term) {
+            if s == header || body.contains(s) || is_back_edge(name, s, doms) {
+                continue;
+            }
+            if !edges.iter().any(|(a, t)| a == name && t == s) {
+                edges.push((name.clone(), s.to_string()));
             }
         }
-        // 多于一个循环外后继 ⇒ 单个 `while` 表达不了（它只有一个落出口）：
-        // 侧出口（体内 return/break 走到的块）与正常落出块是两个不同的块。
-        if outside.len() > 1 {
+    }
+
+    // 2. 粗分类 (折叠后), 得到「必须由循环后续体发一次」的共享出口集合。
+    let mut shared: Vec<String> = Vec::new();
+    let mut edge_class: Vec<(String, String, ExitClass)> = Vec::new();
+    for (src, tgt) in edges.iter() {
+        let f = fold(tgt);
+        let c = exit_class_of(&f, func, header, body);
+        if c == ExitClass::Shared && !shared.iter().any(|e| *e == f) {
+            shared.push(f.clone());
+        }
+        edge_class.push((src.clone(), tgt.clone(), c));
+    }
+
+    // 3. 两个**结构**候选: 节点头条件边的落出口 (提升后它就是落出口) 与 latch 的尾条件落出。
+    let header_exit: Option<String> = match func.blocks.get(header).map(|b| b.term.clone()) {
+        Some(Terminator::Branch { ref t, ref f, .. }) => {
+            let tc = in_loop(t) || is_back_edge(header, t, doms);
+            let fc = in_loop(f) || is_back_edge(header, f, doms);
+            if tc && !fc {
+                Some(f.clone())
+            } else if fc && !tc {
+                Some(t.clone())
+            } else {
+                None
+            }
+        },
+        _ => None,
+    };
+    // 头块那条体外出边如果落在 EH 落地垫上，它就不是结构续体（垫块只由 unwinder/`goto`
+    // 进入）。不滤掉的话 `allow_header_lift` 与 `cont` 都会把「提升后的落出口」算成垫块，
+    // 循环正常结束就走进 `_Unwind_Resume`。
+    let header_exit = header_exit.filter(|h| !is_eh_pad(&fold(h), func));
+    // 节点头是**无条件 `Jump` 且直接跳出循环** = 循环体无法从头块到达的退化形状。
+    // 发射器对它只有两种发法 (`rebuild_cycle` 的 `body_entries` 只收**体内**后继):
+    // 发 `while (1) { <头块语句> }` 后直接落到续体 (真实循环体一条都不执行),
+    // 或因头块自身不可达而死循环 —— 两者都是静默错值, 没有第三种发法可安排那条边。
+    // 今天旧判据在这里并不挡 (体外后继只有 1 个), 属于「判据比发射器宽」的反方向
+    // (过宽), 因此这一条同时收紧判据。
+    let header_jump_escape: Option<String> = match func.blocks.get(header).map(|b| &b.term) {
+        Some(Terminator::Jump(t)) if !in_loop(t) && !is_back_edge(header, t, doms) => {
+            Some(t.clone())
+        },
+        _ => None,
+    };
+    let mut tail_exits: Vec<String> = Vec::new();
+    for l in latches.iter() {
+        let Some(b) = func.blocks.get(l) else { continue };
+        for s in term_succs(&b.term) {
+            if s == header || body.contains(s) || is_back_edge(l, s, doms) {
+                continue;
+            }
+            let fs = fold(s);
+            // 落在 EH 落地垫上的边不是续体候选（垫块由平铺那一段发），否则循环后会
+            // 把 `_Unwind_Resume` 当正常落点发出去。
+            if is_eh_pad(&fs, func) {
+                continue;
+            }
+            if !tail_exits.iter().any(|e| *e == fs) {
+                tail_exits.push(fs);
+            }
+        }
+    }
+
+    // 4. 续体唯一化。**共享出口优先**: 它们是「循环外也有前驱进入」的块, 除当作落点
+    //    外没有别的发法; 只有当一条共享出口都没有时, 才在两个结构候选里取唯一值。
+    let cont: Option<String>;
+    let mut reason = "";
+    if shared.len() == 1 {
+        cont = Some(shared[0].clone());
+    } else if shared.len() > 1 {
+        cont = None;
+        reason = "两个以上必须共享的出口块";
+    } else if tail_exits.len() == 1 {
+        cont = Some(tail_exits[0].clone());
+    } else if tail_exits.len() > 1 {
+        cont = None;
+        reason = "两个latch各自落出到不同的块";
+    } else if let Some(h) = header_exit.as_ref() {
+        cont = Some(fold(h));
+    } else {
+        // 无限循环且所有出口都是体内 return: 根本没有落出口, 循环之后不得发任何块。
+        cont = None;
+        reason = "无落出口(全 return)";
+    }
+
+    // 5. 逐边定所有权; 任何一条边走不到发射器的三种发法之一就是无路可发。
+    //
+    //    本轮实测新增的硬约束 (`docs/wp_multi_exit_loop.md` §2.4 的 A9):
+    //    **节点头自己就是循环体块**（旋转后的 do-while / 无限循环），它带对**具名存储**的
+    //    写，而它那条出口边折到**由 latch 提供的**续体（即头块上真有一句 `break`）——
+    //    两种发法实测都错：
+    //      * 提升 `Branch` 为 `while (cond)` ⇒ 头块指令被整体丢弃，具名变量的写被追到
+    //        使用点重算，相对顺序变了（`do{s+=i;i++;if(i==3)break;}while(i<n);return s+i;`
+    //        实测 -O2 `do_break(3)` 得 9 而 gcc 得 6）；
+    //      * 退回 `while(1){ if(c){…} else {…} }` 形态 ⇒ 本轮实测同样错（同一读数）。
+    //    缺的机制是把头块的具名写固定成“循环体内按原序发射的语句”并与提升互斥（需重做
+    //    `header_insts_droppable` 与头块指令的发射路径），不在本轮放行集内 ⇒ 整函数退回
+    //    AST（不优化但正确，实测：`DCC_OPT_SKIP=run_ssa_passes` 下该形状逐档与 gcc 一致）。
+    //
+    //    `!tail_exits.is_empty()` 是本条约束的**必要限定**，不是修饰: 只有当续体是**别的
+    //    latch 块**落出来的、头块那条边是额外的 `break` 时，才存在「头块既是体块又是分支点」
+    //    的冲突。`while (k-- > 0) { … }` 形态里头块就是唯一落出的条件块（没有独立 latch
+    //    落出），那条边是循环条件本身而不是体内 `break` ⇒ 不该被挡。少了这个限定会把
+    //    `while(n--)` 这一整族 C 里最常见的循环踢出 SSA（相对 HEAD 的**覆盖面倒退**，实测
+    //    `DCC_SSA_BAIL=1` 会报 `共享续体的循环 (f_while_kdec)`），而倒退不会让任何测试变红。
+    let header_writes_user_storage = func.blocks.get(header).map_or(false, |b| {
+        b.insts.iter().any(|i| {
+            !is_pass_hint_inst(&i.kind)
+                && i.dest
+                    .as_ref()
+                    .is_some_and(|d| !is_synthetic_temp_base(func, &d.base))
+        })
+    });
+    let header_break_with_named_write = header_exit.as_ref().is_some_and(|h| {
+        !tail_exits.is_empty()
+            && header_writes_user_storage
+            && cont.as_deref() == Some(fold(h).as_str())
+    });
+    let mut expressible = shared.len() <= 1
+        && tail_exits.len() <= 1
+        && header_jump_escape.is_none()
+        && !header_break_with_named_write;
+    if header_jump_escape.is_some() && reason.is_empty() {
+        reason = "节点头直跳循环外(循环体不可达)";
+    }
+    if header_break_with_named_write && reason.is_empty() {
+        reason = "节点头带具名写 + 头块 break 到续体(两种发法实测都错)";
+    }
+    for (_, tgt, c) in edge_class.iter() {
+        let owner = owner_of(tgt, *c, cont.as_deref(), func, header, body, doms);
+        if owner == LoopExitOwner::Unsupported {
+            expressible = false;
+            if reason.is_empty() {
+                reason = "出口边无路可发";
+            }
+        }
+    }
+
+    // 6. 提升许可: 只有当节点头那条出口边**就是**续体时才允许把 `Branch` 提成
+    //    `while (cond)`; 否则体内那条边的语句/返回值随提升整个丢掉 (§7.32 那 14 条错值的
+    //    根因)。
+    //
+    //    第二个条件同样是实测出来的 (本轮 adv 夹具 A9
+    //    `do { s+=i; i++; if (i==3) break; } while (i<n); return s+i;`): 提升 = **整体丢弃**
+    //    头块的指令, 而头块里对**具名存储**的写一旦被丢, 重建只能在读到它的地方重算,
+    //    写相对其它语句的时机就被挪动 (实测 -O2 `do_break(3)` 得 9 而 gcc 得 6 —— `s+=i`
+    //    用了自增之后的 i)。发射器原有的 `header_insts_droppable` 本想拦这类形状, 但它只
+    //    问「dest 是否被登记为可内联」, 而具名变量的版本 (`i.2 = _tupd_2 + 0`) 恰恰是
+    //    可内联的拷贝 ⇒ 它对「写具名变量」判成可丢弃。
+    //
+    //    写在计划里而不是只写在发射器里, 是为了保持本工作包的第一原则: 判据、续体取法、
+    //    提升许可、出口边守卫**同源** (§7.32 的教训是单侧改动会拆掉现有的互相掩盖)。
+    //    (上面第 5 步已把“头块具名写 + 头块 break”整族挡成 `expressible = false`, 这里的
+    //    否定提升仍然保留: 它拦的是头块出口边**不是**续体、但仍带具名写的那些形状。)
+    let allow_header_lift = match header_exit.as_ref() {
+        None => true,
+        Some(h) => cont.as_deref() == Some(fold(h).as_str()) && !header_writes_user_storage,
+    };
+
+    if std::env::var("DCC_LOOPDBG").is_ok() {
+        eprintln!("[loopdbg] PLAN header={header} cont={cont:?} pads={:?}", func.eh_unwind_blocks);
+        eprintln!(
+            "[loopdbg]   shared={shared:?} tail_exits={tail_exits:?} header_exit={header_exit:?} expressible={expressible} reason={reason}"
+        );
+        for (s, t, c) in edge_class.iter() {
+            eprintln!("[loopdbg]   edge {s} -> {t} folded={} class={:?}", fold(t), c);
+        }
+    }
+
+    LoopExitPlan {
+        cont,
+        expressible,
+        allow_header_lift,
+        reason,
+    }
+}
+
+/// 单条出口边的所有权 —— 计划内部与 `rebuild_bb` 守卫共用的分类函数。
+fn owner_of(
+    target: &str,
+    cls: ExitClass,
+    cont: Option<&str>,
+    func: &Function,
+    header: &str,
+    body: &HashSet<String>,
+    _doms: &HashMap<String, HashSet<String>>,
+) -> LoopExitOwner {
+    let folded = resolve_loop_exit_stub(target, func, header, body);
+    if cont == Some(folded.as_str()) {
+        return LoopExitOwner::Continuation;
+    }
+    match cls {
+        ExitClass::Ret => LoopExitOwner::PureReturn,
+        ExitClass::Inline => LoopExitOwner::InlineOnEdge,
+        // 落点在垫块区：发射器在到达边递归到它时由 `rebuild_bb` 的发垫守卫写成 `goto pad`，
+        // 而垫块正文与标签由平铺那一段唯一发出。它不占续体名额，也不参与展开。
+        ExitClass::IntoPad => LoopExitOwner::InlineOnEdge,
+        // 桩块自身无语句: 折叠后的块如果是上述两类, 同样能在到达边安排
+        ExitClass::Shared => {
+            if folded != target {
+                match exit_class_of(&folded, func, header, body) {
+                    ExitClass::Ret => return LoopExitOwner::PureReturn,
+                    ExitClass::Inline => return LoopExitOwner::InlineOnEdge,
+                    ExitClass::IntoPad => return LoopExitOwner::InlineOnEdge,
+                    ExitClass::Shared => {},
+                }
+            }
+            LoopExitOwner::Unsupported
+        },
+    }
+}
+
+/// 重建侧查询单条出口边的所有权 (判据与发射器的同一真源)。
+pub fn loop_exit_owner(
+    target: &str,
+    func: &Function,
+    header: &str,
+    body: &HashSet<String>,
+    doms: &HashMap<String, HashSet<String>>,
+) -> LoopExitOwner {
+    let (latches, _) = match loop_shape(func, header, doms) {
+        Some(v) => v,
+        None => return LoopExitOwner::Unsupported,
+    };
+    let plan = loop_exit_plan(func, header, body, &latches, doms);
+    let cls = exit_class_of(
+        &resolve_loop_exit_stub(target, func, header, body),
+        func,
+        header,
+        body,
+    );
+    owner_of(target, cls, plan.cont.as_deref(), func, header, body, doms)
+}
+
+/// 结构化重建**表达不了**的循环形状：本循环的出口边里有发射器安排不了的归属。
+///
+/// 与旧版的区分（旧版数「循环外后继个数 > 1」）：
+///   * 旧判据把**桩块** (`break` 的空壳落点, 零条语句、无 phi、`Jump` 到合并块) 与它
+///     身后的合并块数成两个出口 ⇒ 今天连「`for` 里一个普通 `break`」都整函数退 SSA
+///     (实测形状清单见 `docs/wp_multi_exit_loop.md` §2, 其中 S5/S7/S13 本无需挡);
+///   * 同时旧判据又**没数**真正的硬约束：同一个循环有两个结构落点候选 (节点头条件边与
+///     latch 尾条件边落到不同的块) 时 `while` 只能表达一个。
+///
+/// 现在判据与发射器**同源**：`has_multi_exit_cycle` 与 `rebuild_bb`/`rebuild_cycle` 的 5 + 1 个
+/// 出口边发射点 (`SwitchTable` 的出边是本轮实测查出的第 6 个) 都调同一个 [`loop_exit_plan`]
+/// ⇒ 「判据放行」等价于「每条出口边都有发法」。
+/// 任一侧单独改都会拆掉现有的互相掩盖而产出错值 (§7.28 三条改法、§7.32 的放松均如此),
+/// 所以这一轮是「发射点守卫 + 续体取法 + 提升许可 + 判据」同一笔改完。
+///
+/// 与聚合整体赋值同一政策：IR/重建表达不了的形状**整函数退出 SSA 往返**（不优化且正确）。
+pub fn has_multi_exit_cycle(func: &Function) -> bool {
+    let doms = compute_dominators(func);
+    let mut headers: Vec<&String> = func.blocks.keys().collect();
+    headers.sort();
+    for header in headers {
+        let Some((latches, body)) = loop_shape(func, header, &doms) else {
+            continue;
+        };
+        if !loop_exit_plan(func, header, &body, &latches, &doms).expressible {
             return true;
         }
     }
@@ -5048,56 +5479,6 @@ fn is_loop_exit_pure_return(target: &str, func: &Function) -> bool {
     uniq.len() == 1
 }
 
-/// 循环体外目标块能不能就地展开成「本块语句 + 逐出循环」。
-///
-/// 背景: `rebuild_cycle` 按**路径**重建循环体, 目标是「不在循环体内」的分支目标
-/// 会直接射成 `break`。当该目标块自己带语句时 (实测
-/// `for (...) { if (i == 1) { printf("X"); break; } printf("L"); }`), 那些语句随
-/// 目标块一起被丢弃 —— dcc 只打 `L`, g++ 打 `LX`。判据:
-///   * 本块没有自己的语句 → 与 `break` 完全等价, 不展开 (避免无意义的重复)。
-///   * header 的直接出口不展开: 那是循环的**正常后继**, 由循环之后的续体发射一次;
-///     展开会让它的语句在 break 路径与落出路径上各跑一遍 (双份执行)。
-///   * 任何 latch (含非回边后继的循环体块) 的后继也不展开: do-while / 带尾判的
-///     循环里「正常落出」不经过 header, 落出块同样由循环之后的续体发射一次。
-///   * 前驱必须全在循环内 (含 header): 否则循环外的路径也会进入本块, 同样双份执行。
-///
-/// 展开后本块的 terminator (跳出循环的 Jump) 会自然递归成 `break`, 因此不会把循环
-/// 出口块的内容带进来。
-fn should_inline_loop_exit_target(
-    target: &str,
-    func: &Function,
-    header: &str,
-    body: &HashSet<String>,
-) -> bool {
-    let Some(bb) = func.blocks.get(target) else {
-        return false;
-    };
-    if bb.insts.iter().all(|i| is_pass_hint_inst(&i.kind)) {
-        return false;
-    }
-    if let Some(h) = func.blocks.get(header) {
-        if h.succs.iter().any(|s| s == target && !body.contains(s)) {
-            return false;
-        }
-    }
-    // do-while 这类「条件在尾部」的循环: 正常落出由 latch 的非回边后继完成,
-    // 那个落出块同样属于循环之后的续体, 内联会双份执行。
-    for (name, b) in func.blocks.iter() {
-        if name == header || !body.contains(name) {
-            continue;
-        }
-        if !b.succs.iter().any(|s| s == header) {
-            continue;
-        }
-        if b.succs.iter().any(|s| s == target) {
-            return false;
-        }
-    }
-    bb.preds
-        .iter()
-        .all(|p| p.as_str() == header || body.contains(p.as_str()))
-}
-
 /// SSA→AST 结构化重建 (`rebuild_bb` / `rebuild_cycle`) 的共享上下文。
 ///
 /// 把一路沿递归透传的 5 个参数 (`func` / `doms` / `subst` / `visited` /
@@ -5135,6 +5516,26 @@ fn rebuild_bb(
     let func = cx.func;
     let doms = cx.doms;
     let subst = cx.subst;
+    // C++ 零成本异常：落地垫块**不得被结构化重建消费**。它只由 unwinder 按 `.text`
+    // 地址区间、以及其他块的 `goto` 进入，正文与标签由 `rebuild_eh_blocks` 在主体之后
+    // 统一发一次。这里沿正常控制流递归进来就会把本块记进 `visited`，于是尾巴跳过发射
+    // —— 「语句已发射」被当成「标签已发射」，其他回入点的 `goto` 全部悬空（实测
+    // `eh_loop_and_scope_exit.cpp`：`.Ll_main_eh_resume.8` 被 3 条 `goto` 引用却零个定义，
+    // 链接前 E1102）。正确发法：此处只发 `goto`，正文留给尾巴。
+    //
+    // 位置必须在下面那个 `visited.insert` **之前** —— 那个 insert 就是「已发射」的唯一
+    // 真源，在它后面拦等于先记账再拦，尾巴照样不发（本轮实测过：插在 `blocks.get` 之后
+    // 仍然 E1102）。
+    if func.eh_unwind_blocks.iter().any(|p| p == bb_name) {
+        out.push(BlockItem::Stmt(Stmt::Goto {
+            target: crate::ast::Ident {
+                name: bb_name.to_string(),
+                span: func.span.clone(),
+            },
+            span: func.span.clone(),
+        }));
+        return;
+    }
     // In loop-internal mode, we rebuild blocks per-path so that join points
     // (e.g. for_inc reached from both branches of an if) are not skipped.
     // Each *straight-line* path in a structured loop ends with continue or
@@ -5232,6 +5633,12 @@ fn rebuild_bb(
         }
     }
     if is_cycle_entry(bb_name, func, doms) {
+        if std::env::var("DCC_LOOPDBG").is_ok() {
+            eprintln!(
+                "[loopdbg] enter-cycle {bb_name} stop_at={stop_at:?} outer_loop={:?}",
+                loop_ctx.map(|(h, _)| h)
+            );
+        }
         rebuild_cycle(bb_name, cx, out, stop_at, loop_ctx);
         return;
     }
@@ -5279,13 +5686,14 @@ fn rebuild_bb(
                     }));
                 } else if body_set.contains(t) {
                     rebuild_bb(t, cx, out, loop_ctx, stop_at);
-                } else if is_loop_exit_pure_return(t, func)
-                    || should_inline_loop_exit_target(t, func, lh, body_set)
-                {
-                    // 循环体内的 `return` 块 (见 `is_loop_exit_pure_return` 注释),
-                    // 或「先做事再跳出循环」的 break 路径块 (见
-                    // `should_inline_loop_exit_target` 注释): 展开成对应语句, 不能只发
-                    // `break` / `return` 把本块的代码丢掉。
+                } else if matches!(
+                    loop_exit_owner(t, func, lh, body_set, doms),
+                    LoopExitOwner::PureReturn | LoopExitOwner::InlineOnEdge
+                ) {
+                    // 出口边守卫 (5 个发射点的唯一真源, 见 [`loop_exit_owner`]):
+                    // 体内 `return` 块与「先做事再跳出循环」的 break 路径块都在**到达边**
+                    // 展开成对应语句; 续体 (`Continuation`) 与无路可发的保守回退
+                    // (`Unsupported`) 只发 `break`, 由 `rebuild_cycle` 在循环之后发一次。
                     rebuild_bb(t, cx, out, loop_ctx, stop_at);
                 } else {
                     out.push(BlockItem::Stmt(Stmt::Break {
@@ -5304,11 +5712,40 @@ fn rebuild_bb(
             //
             // 只在直线条带区做: 循环体内由 rebuild_cycle 自己处理收敛。
             let join = if loop_ctx.is_none() {
-                branch_join(bb_name, t, f, func)
+                let bj = branch_join(bb_name, t, f, func);
+                let raw = if bj
+                    .as_deref()
+                    .is_some_and(|j| func.blocks.contains_key(j))
+                {
+                    bj
+                } else {
+                    // 虚拟后支配者占位名 (`compute_ipdoms` 的 `\u{1}[postdom-exit]`) 不是块:
+                    // 拿它当汇聚点会让两条路径都**不发**汇聚块, 而 If 之后的发射又因
+                    // 块不存在而空转 —— 体内有 `return` 时 (一条路径不经过任何后续块就出
+                    // 函数) `from` 根本没有后支配者, 正是这种形态。此时先试「循环入口边」
+                    // 那种汇聚点 (见 [`loop_entry_join`]), 再把原来的值留作兼容回退。
+                    loop_entry_join(t, f, func, doms).or(bj)
+                };
+                // **口径对齐** (本工作包实测新查出的根因): 汇聚点必须与循环续体走同一条
+                // 折叠链。`branch_join` 给的是**未折叠**的汇聚块 (如 `for.end`: 零语句桩,
+                // `Jump if.end`), 而续体由 `loop_exit_plan` 给的是**折叠后**的块 (`if.end`)。
+                // 两者不等时 `path_stop` 就管不住循环尾部那次续体发射: 续体被内联进**第一
+                // 个**到达它的臂, 兄弟臂因共享 `visited` 拿到空 (实测 -O2 下
+                // `if(k==1){for(...)}else{while(k-->0)...}` 的 else 臂丢掉整个累加并落到
+                // 函数尾部返回 0)。折叠条件与 [`resolve_loop_exit_stub`] 完全同一套。
+                raw
+                    .filter(|j| func.blocks.contains_key(j.as_str()) && j.as_str() != bb_name)
+                    .map(|j| fold_join(&j, func, stop_at))
             } else {
                 None
             };
             let path_stop = join.as_deref().or(stop_at);
+            if std::env::var("DCC_LOOPDBG").is_ok() {
+                eprintln!(
+                    "[loopdbg] branch bb={bb_name} t={t} f={f} join={join:?} stop_at={stop_at:?} outer_loop={:?}",
+                    loop_ctx.map(|(h, _)| h)
+                );
+            }
             let cond_e = resolve_operand(cond, cx.env, subst, func);
             let mut then_items: Vec<BlockItem> = Vec::new();
             let mut then_env = cx.env.clone();
@@ -5320,9 +5757,10 @@ fn rebuild_bb(
                     }));
                 },
                 Some((lh, body_set)) if !body_set.contains(t) => {
-                    if is_loop_exit_pure_return(t, func)
-                        || should_inline_loop_exit_target(t, func, lh, body_set)
-                    {
+                    if matches!(
+                        loop_exit_owner(t, func, lh, body_set, doms),
+                        LoopExitOwner::PureReturn | LoopExitOwner::InlineOnEdge
+                    ) {
                         rebuild_bb(
                             t,
                             &mut RebuildCtx {
@@ -5368,9 +5806,10 @@ fn rebuild_bb(
                     }));
                 },
                 Some((lh, body_set)) if !body_set.contains(f) => {
-                    if is_loop_exit_pure_return(f, func)
-                        || should_inline_loop_exit_target(f, func, lh, body_set)
-                    {
+                    if matches!(
+                        loop_exit_owner(f, func, lh, body_set, doms),
+                        LoopExitOwner::PureReturn | LoopExitOwner::InlineOnEdge
+                    ) {
                         rebuild_bb(
                             f,
                             &mut RebuildCtx {
@@ -5444,6 +5883,24 @@ fn rebuild_bb(
             default,
         } => {
             let idx_e = resolve_operand(idx, cx.env, subst, func);
+            // 出口边发射点 (第 6 个, 本轮实测新发现): 旧代码对每个 case 目标与 default
+            // **无条件**递归展开, 于是在「循环内 switch + case 落到循环外的合并块」上
+            // 会把同一个续体**发两份** (一份在 case 体内, 一份在 `rebuild_cycle` 的循环
+            // 之后), 而体内 `return` 块被当成续体时返回值又整个丢掉。现在与其余 5 个
+            // 点走同一个 [`loop_exit_owner`] (判据与发射器的唯一真源)。
+            let switch_edge_blocked = |target: &str| -> bool {
+                match loop_ctx {
+                    Some((lh, body_set)) => {
+                        target != lh
+                            && !body_set.contains(target)
+                            && !matches!(
+                                loop_exit_owner(target, func, lh, body_set, doms),
+                                LoopExitOwner::PureReturn | LoopExitOwner::InlineOnEdge
+                            )
+                    },
+                    None => false,
+                }
+            };
             let mut cases = Vec::new();
             // Each case branch rebuilds its path independently with its own
             // visited set, so that shared downstream blocks (e.g. switch_end)
@@ -5456,19 +5913,25 @@ fn rebuild_bb(
                 let mut case_visited = cx.visited.clone();
                 // `None`: 每条 case 自带 visited 副本, 链上的多入边块在各条
                 // case 路径里各自展开 (与旧行为一致), 因此不走 `stop_at` 机制。
-                rebuild_bb(
-                    target,
-                    &mut RebuildCtx {
-                        func,
-                        doms,
-                        subst: &target_subst,
-                        visited: &mut case_visited,
-                        env: &mut target_env,
-                    },
-                    &mut target_items,
-                    loop_ctx,
-                    None,
-                );
+                if switch_edge_blocked(target) {
+                    target_items.push(BlockItem::Stmt(Stmt::Break {
+                        span: func.span.clone(),
+                    }));
+                } else {
+                    rebuild_bb(
+                        target,
+                        &mut RebuildCtx {
+                            func,
+                            doms,
+                            subst: &target_subst,
+                            visited: &mut case_visited,
+                            env: &mut target_env,
+                        },
+                        &mut target_items,
+                        loop_ctx,
+                        None,
+                    );
+                }
                 cases.push(Case {
                     val: Some(Expr::Int {
                         v: *v,
@@ -5488,19 +5951,25 @@ fn rebuild_bb(
             let mut def_env = cx.env.clone();
             let def_subst = subst.clone();
             let mut def_visited = cx.visited.clone();
-            rebuild_bb(
-                default,
-                &mut RebuildCtx {
-                    func,
-                    doms,
-                    subst: &def_subst,
-                    visited: &mut def_visited,
-                    env: &mut def_env,
-                },
-                &mut def_items,
-                loop_ctx,
-                None,
-            );
+            if switch_edge_blocked(default) {
+                def_items.push(BlockItem::Stmt(Stmt::Break {
+                    span: func.span.clone(),
+                }));
+            } else {
+                rebuild_bb(
+                    default,
+                    &mut RebuildCtx {
+                        func,
+                        doms,
+                        subst: &def_subst,
+                        visited: &mut def_visited,
+                        env: &mut def_env,
+                    },
+                    &mut def_items,
+                    loop_ctx,
+                    None,
+                );
+            }
             cases.push(Case {
                 val: None,
                 range_end: None,
@@ -5578,44 +6047,23 @@ fn rebuild_cycle(
     cx.visited.insert(header.to_string());
 
     // Find all back edges that target the header (latch -> header).
-    let mut latches: Vec<String> = Vec::new();
-    for (name, bb) in &func.blocks {
-        if name == header {
-            continue;
-        }
-        if !is_back_edge(name, header, doms) {
-            continue;
-        }
-        let succs: Vec<&str> = match &bb.term {
-            Terminator::Jump(t) => vec![t.as_str()],
-            Terminator::Branch { t, f, .. } => vec![t.as_str(), f.as_str()],
-            Terminator::SwitchTable {
-                targets, default, ..
-            } => {
-                let mut s: Vec<&str> = targets.iter().map(|t| t.as_str()).collect();
-                if !s.contains(&default.as_str()) {
-                    s.push(default.as_str());
-                }
-                s
-            },
-            _ => vec![],
-        };
-        if succs.contains(&header) {
-            latches.push(name.clone());
-        }
-    }
-    if latches.is_empty() {
-        // No back edge found — should not happen for a cycle entry.
-        // Fall back to rebuilding the header as a normal block.
-        return;
-    }
-    // Collect loop body blocks via reverse DFS from **all** latches (excluding
-    // header). 单 latch 会漏掉 continue 类 latch 所在的分支区域 (见
-    // `find_loop_body_multi` 注释)。
-    let body_bbs_set: HashSet<String> = find_loop_body_multi(func, header, &latches)
-        .into_iter()
-        .filter(|b| b != header)
+    //
+    // latch 与循环体由 [`loop_shape`] 给出 —— 与判据 `has_multi_exit_cycle` 共用**同一份**
+    // 结构事实。两边各算一次就会因 `preds`/`succs` 缓存过期而看到不同的循环,
+    // 那正是「判据放行但发射器无路可发」的另一半根源 (单 latch 会漏掉 continue 类
+    // latch 所在的分支区域, 见 `find_loop_body_multi` 注释)。
+    let (latches, body_incl_header) = match loop_shape(func, header, doms) {
+        Some(v) => v,
+        // 找不到回边 —— 对 cycle entry 不该发生; 退化为按普通块重建 (与旧行为一致)。
+        None => return,
+    };
+    let body_bbs_set: HashSet<String> = body_incl_header
+        .iter()
+        .filter(|b| b.as_str() != header)
+        .cloned()
         .collect();
+    // 出口所有权计划：续体唯一化 + 提升许可 + 5 个发射点共用的同一真源。
+    let plan = loop_exit_plan(func, header, &body_bbs_set, &latches, doms);
 
     // Handle header phi nodes: map phi dest to the entry (first incoming) version.
     // In the AST representation, there is only one variable per base name,
@@ -5670,15 +6118,22 @@ fn rebuild_cycle(
         },
         _ => None, // infinite loop or non-branch header (e.g. do-while)
     };
-    let cond_expr: Option<Expr> = if header_insts_droppable { cond_expr_raw } else { None };
+    let cond_expr: Option<Expr> = if header_insts_droppable && plan.allow_header_lift {
+        cond_expr_raw
+    } else {
+        None
+    };
 
-    // Determine loop body entry block(s) and exit blocks from header terminator.
+    // Determine loop body entry block(s) from header terminator.
     // For while-loop: header is cond block, body entry = the successor that's
-    // inside the loop, exit = the successor outside the loop.
-    // For do-while/infinite: header is a body block, we start recursing from it.
+    // inside the loop. For do-while/infinite: header is a body block, we start
+    // recursing from it.
+    //
+    // 出口块集合**不再在这里手工收集**: 续体由 [`loop_exit_plan`] 唯一确定。
+    // 旧做法 `exit_blocks.into_iter().next()` 把头块出边排最前, 而头块那条体外出边
+    // 常常正好就是体内 `return` 块 ⇒ 循环之后发的是那条 `return`, 于是「出口边发射点
+    // 缺守卫」与「续体取法随意」互相掩盖 (§7.32 的核心认识)。
     let mut body_entries: Vec<String> = Vec::new();
-    let mut exit_blocks: Vec<String> = Vec::new();
-    let mut seen_exit: HashSet<String> = HashSet::new();
     match &header_bb.term {
         Terminator::Branch { t, f, .. } => {
             let t_in_body = body_bbs_set.contains(t);
@@ -5691,18 +6146,10 @@ fn rebuild_cycle(
             if f_in_body && !f_back {
                 body_entries.push(f.clone());
             }
-            if !t_in_body && !t_back && seen_exit.insert(t.clone()) {
-                exit_blocks.push(t.clone());
-            }
-            if !f_in_body && !f_back && seen_exit.insert(f.clone()) {
-                exit_blocks.push(f.clone());
-            }
         },
         Terminator::Jump(t) => {
             if body_bbs_set.contains(t) && !is_back_edge(header, t, doms) {
                 body_entries.push(t.clone());
-            } else if !is_back_edge(header, t, doms) {
-                exit_blocks.push(t.clone());
             }
         },
         Terminator::SwitchTable {
@@ -5711,54 +6158,15 @@ fn rebuild_cycle(
             for t in targets {
                 if body_bbs_set.contains(t) && !is_back_edge(header, t, doms) {
                     body_entries.push(t.clone());
-                } else if !is_back_edge(header, t, doms) && seen_exit.insert(t.clone()) {
-                    exit_blocks.push(t.clone());
                 }
             }
             if body_bbs_set.contains(default) && !is_back_edge(header, default, doms) {
                 body_entries.push(default.clone());
-            } else if !is_back_edge(header, default, doms) && seen_exit.insert(default.clone()) {
-                exit_blocks.push(default.clone());
             }
         },
         _ => {},
     }
-    // Also scan all body blocks for exit successors (for break, etc.)
-    for bb_name in body_bbs_set.iter() {
-        let bb = match func.blocks.get(bb_name) {
-            Some(b) => b,
-            None => continue,
-        };
-        let succs: Vec<&str> = match &bb.term {
-            Terminator::Jump(t) => vec![t.as_str()],
-            Terminator::Branch { t, f, .. } => vec![t.as_str(), f.as_str()],
-            Terminator::SwitchTable {
-                targets, default, ..
-            } => {
-                let mut s: Vec<&str> = targets.iter().map(|t| t.as_str()).collect();
-                if !s.contains(&default.as_str()) {
-                    s.push(default.as_str());
-                }
-                s
-            },
-            _ => vec![],
-        };
-        for s in succs {
-            if s == header {
-                continue;
-            }
-            if body_bbs_set.contains(s) {
-                continue;
-            }
-            if is_back_edge(bb_name, s, doms) {
-                continue;
-            }
-            if seen_exit.insert(s.to_string()) {
-                exit_blocks.push(s.to_string());
-            }
-        }
-    }
-    let exit_succ = exit_blocks.into_iter().next();
+    let exit_succ: Option<String> = plan.cont.clone();
 
     // Emit loop body using rebuild_bb in loop-internal mode.
     // Start with the header instructions if the header is a body block
@@ -5772,6 +6180,19 @@ fn rebuild_cycle(
     // 「选哪条边」的条件仍丢掉: `for (...) { if (i==1) continue; s+=i; }` 被重建为
     // 「先 i++ 再测 i<n」的两段直线代码, 循环第一圈就 return (实测 `cont(4)` 返回 0)。
     let mut branched_from_header = false;
+    // 边是否还在循环内 (含头块自身 —— 回到头块就是 `continue`)。
+    let side_in_loop = |target: &str| -> bool { target == header || body_bbs_set.contains(target) };
+    // 出口边发射点 (5 个中的第 4/5 个): 旧做法在头块分支那里**直接发裸 `Stmt::Break`**,
+    // 不过出口边守卫 —— 在「节点头本身就是分支点」的循环 (旋转后的 do-while /
+    // 无限循环) 上体内 `return` 的返回值会被整个丢掉 (§7.32 未修项 1)。现在与
+    // `rebuild_bb` 那三处走同一个 [`loop_exit_owner`] (判据与发射器的唯一真源)。
+    let expand_on_edge = |target: &str| -> bool {
+        !side_in_loop(target)
+            && matches!(
+                loop_exit_owner(target, func, header, &body_bbs_set, doms),
+                LoopExitOwner::PureReturn | LoopExitOwner::InlineOnEdge
+            )
+    };
     if cond_expr.is_none() {
         for inst in &header_bb.insts {
             if is_pass_hint_inst(&inst.kind) {
@@ -5785,7 +6206,14 @@ fn rebuild_cycle(
             // 头块指令不可丢弃时 (`while (k-- > 0)` 这种「条件里带自增」的形态)
             // 必须连 header 的 Branch 一起发成 `if (c) {…} else {…}`: 那种情况下
             // 退出判据无法被提到 `while (...)` 里 (提上去就要丢掉头块的写)。
-            if (both_in_body && neither_is_header) || !header_insts_droppable {
+            // 第三个触发条件 `!plan.allow_header_lift`: 提升被计划否掉时 (头块那条出口边
+            // **不是**续体), 必须把 `Branch` 当语句发出去, 那条出口边才有发射点 —— 否则
+            // 体内 `return` 随提升整个丢掉 (§7.32 那 14 条错值的根因)。
+            let has_exit_side = !(side_in_loop(t) && side_in_loop(f));
+            if (both_in_body && neither_is_header)
+                || !header_insts_droppable
+                || (!plan.allow_header_lift && has_exit_side)
+            {
                 branched_from_header = true;
                 let cond_e = resolve_operand(cond, cx.env, subst, func);
                 let mut then_items: Vec<BlockItem> = Vec::new();
@@ -5795,12 +6223,21 @@ fn rebuild_cycle(
                 let then_subst = subst.clone();
                 let else_subst = subst.clone();
                 let lctx = Some((header, &body_bbs_set));
-                // 某一侧跳出循环 (典型: `while (k-- > 0)` 的 exit 边) 时发 `break`;
-                // 落在循环内 (含回到 header ⇒ `rebuild_bb` 自己发 `continue`) 才递归重建。
-                let side_in_loop = |target: &str| -> bool {
-                    target == header || body_bbs_set.contains(target)
-                };
                 if side_in_loop(t) {
+                    rebuild_bb(
+                        t,
+                        &mut RebuildCtx {
+                            func,
+                            doms,
+                            subst: &then_subst,
+                            visited: &mut *cx.visited,
+                            env: &mut then_env,
+                        },
+                        &mut then_items,
+                        lctx,
+                        stop_at,
+                    );
+                } else if expand_on_edge(t) {
                     rebuild_bb(
                         t,
                         &mut RebuildCtx {
@@ -5820,6 +6257,20 @@ fn rebuild_cycle(
                     }));
                 }
                 if side_in_loop(f) {
+                    rebuild_bb(
+                        f,
+                        &mut RebuildCtx {
+                            func,
+                            doms,
+                            subst: &else_subst,
+                            visited: &mut *cx.visited,
+                            env: &mut else_env,
+                        },
+                        &mut else_items,
+                        lctx,
+                        stop_at,
+                    );
+                } else if expand_on_edge(f) {
                     rebuild_bb(
                         f,
                         &mut RebuildCtx {
@@ -5900,6 +6351,12 @@ fn rebuild_cycle(
         span: func.span.clone(),
     }));
     // Continue from exit block (回到外层循环上下文, 顶层调用时 outer_ctx 为 None)
+    if std::env::var("DCC_LOOPDBG").is_ok() {
+        eprintln!(
+            "[loopdbg] cycle header={header} cont={exit_succ:?} stop_at={stop_at:?} outer_loop={:?}",
+            outer_ctx.map(|(h, _)| h)
+        );
+    }
     if let Some(exit) = exit_succ {
         rebuild_bb(&exit, cx, out, outer_ctx, stop_at);
     }
@@ -5959,6 +6416,73 @@ fn walk_to_join(
             _ => return None,
         }
     }
+}
+
+/// 汇聚点的折叠: 沿「无 phi + 零真实语句 + 无条件 `Jump`」链向前走, 遇到**外层停止点**
+/// `stop_at`、块不存在、有 phi/有真实语句、或多目标终结符即停。
+///
+/// 与 [`resolve_loop_exit_stub`] 同一套条件 (那里额外要求不折回循环体内, 因为它的对象
+/// 是出口边; 汇聚链在循环外, 没有 header/body 可比), 目的是让「这条边到底谁发」与
+/// 「落点发几次」用**同一个块名**说话 —— 只要两边口径不一致, `stop_at` 就管不住
+/// 循环尾部那次续体发射 (见 `rebuild_bb` 的 `join` 计算)。
+fn fold_join(target: &str, func: &Function, stop_at: Option<&str>) -> String {
+    let mut cur = target.to_string();
+    let mut seen: HashSet<String> = HashSet::new();
+    loop {
+        if !seen.insert(cur.clone()) {
+            return cur;
+        }
+        if Some(cur.as_str()) == stop_at {
+            return cur;
+        }
+        let Some(bb) = func.blocks.get(&cur) else {
+            return cur;
+        };
+        if !bb.phis.is_empty() || !bb.insts.iter().all(|i| is_pass_hint_inst(&i.kind)) {
+            return cur;
+        }
+        let Terminator::Jump(n) = &bb.term else {
+            return cur;
+        };
+        cur = n.clone();
+    }
+}
+
+/// 二路分支的**循环入口形态**的汇聚点: 一侧是循环头, 另一侧正是那个循环的续体。
+///
+/// 为什么 [`branch_join`] 判不出它: 两条路径的 `walk_to_join` 各自立刻返回不同的块
+/// (循环头本身入边数就 >1: preheader + latch), 于是回落到 `from` 的后支配者; 而体内有
+/// `return` 时 `from` 根本没有真正的后支配者 (一条路径直接从 `return` 出函数), 拿到的是
+/// 虚拟 EXIT 占位名。不补这一条, 循环的续体就会被**内联进进入循环的那条路径** (发在 `if`
+/// 里面), 另一条路径什么也没有: 实测 `for(int i=0;i<n;i++){if(i==2)return 7;} return 1;`
+/// 在 `n=0` 时返回 0 而不是 1 (落出路径后面空无一物, 函数直接落到序言)。
+///
+/// 续体由 [`loop_exit_plan`] 唯一给出 —— 与本工作包的所有权模型同一个真源: 「续体只能发
+/// 一次」在入口边上就等价于「续体就是汇聚点」。
+fn loop_entry_join(
+    t: &str,
+    f: &str,
+    func: &Function,
+    doms: &HashMap<String, HashSet<String>>,
+) -> Option<String> {
+    for (entry, other) in [(t, f), (f, t)] {
+        if !is_cycle_entry(entry, func, doms) {
+            continue;
+        }
+        let Some((latches, body)) = loop_shape(func, entry, doms) else {
+            continue;
+        };
+        let body_excl: HashSet<String> = body
+            .iter()
+            .filter(|b| b.as_str() != entry)
+            .cloned()
+            .collect();
+        let plan = loop_exit_plan(func, entry, &body_excl, &latches, doms);
+        if plan.cont.as_deref() == Some(other) {
+            return Some(other.to_string());
+        }
+    }
+    None
 }
 
 /// 二路分支的公共汇聚块: 先走「唯一前驱 + 无条件跳转」快路径, 不行再取
@@ -7612,6 +8136,62 @@ mod tests {
         panic!("找不到函数 {name}");
     }
 
+    /// EH 落地垫块永远不属于循环结构：既不能当 latch / 体块，也不能当续体。
+    ///
+    /// 实测形状（C++ `for` + 循环作用域内需要析构的对象）里，垫块会 `goto` 回入循环头，
+    /// 那条边在 CFG 上就是一条**回边**：于是垫块被算成 latch、被圈进 body，它的去向
+    /// `eh_resume.8` 又被数成「共享出口」选成续体 —— 循环正常走完就落进
+    /// `_Unwind_Resume`（`eh_loop_and_scope_exit.cpp`：g++ 退出码 0 / dcc -3，而只跑 C
+    /// 语料的 gcc 差分完全看不到这一条）。本例用真 IR 手工把体块标成垫块，钉两面：
+    ///   * 标为垫块后它不能再是 latch，也不能再在 body 里；
+    ///   * 反向对照：不标垫块时它**仍然**是 latch（否则「把谁都挡在循环外」也能做绿）。
+    #[test]
+    fn eh_pads_are_never_loop_members_or_continuations() {
+        let src = "int s(int n){int acc=0;for(int i=0;i<n;i++){acc+=i;}return acc+n;}\n";
+        let func = try_build(src, "s").expect("普通 for 应能建 IR");
+        let doms = compute_dominators(&func);
+
+        // 先定到那个循环的头与 latch。
+        let mut headers: Vec<&String> = func.blocks.keys().collect();
+        headers.sort();
+        let (header, latches, body) = headers
+            .iter()
+            .filter_map(|h| {
+                loop_shape(&func, h, &doms).map(|(l, b)| (h.to_string(), l, b))
+            })
+            .next()
+            .expect("应找到一个循环");
+        assert!(!latches.is_empty(), "反向对照：该循环应有 latch");
+        let latch = latches[0].clone();
+        assert!(body.contains(&latch), "latch {latch} 本应在 body 里");
+
+        // 把 latch 标成落地垫块：它不得再被算进循环结构。
+        let mut marked = func.clone();
+        marked.eh_unwind_blocks = vec![latch.clone()];
+        if let Some((l2, b2)) = loop_shape(&marked, &header, &doms) {
+            assert!(
+                !l2.contains(&latch),
+                "被标成 EH 落地垫的块不能再当 latch（它那条回入边不是循环回边）"
+            );
+            assert!(
+                !b2.contains(&latch),
+                "被标成 EH 落地垫的块不能再在 body 里（否则它的去向会被数成出口）"
+            );
+        }
+        // 垫块也不能当续体：就算还能找到循环，`loop_exit_plan.cont` 必须不是垫块。
+        for h in headers.iter() {
+            if let Some((ls, bs)) = loop_shape(&marked, h, &doms) {
+                let plan = loop_exit_plan(&marked, h, &bs, &ls, &doms);
+                if let Some(c) = plan.cont.as_deref() {
+                    assert!(
+                        !is_eh_pad(c, &marked),
+                        "循环续体落在了 EH 落地垫 {c} 上：循环正常结束会走进 _Unwind_Resume"
+                    );
+                }
+            }
+        }
+    }
+
     /// 子对象地址现在**有 IR 表示**（`InstKind::MemberAddr`）：`p->fld[i]`（fld 是零长/
     /// 柔性数组）的基址 = 对象地址 + 字段偏移。以前 IR 表达不了，只能整函数退 SSA
     /// （§7.29），本节把「退路」的断言换成「表示存在」的断言。
@@ -7670,37 +8250,522 @@ mod tests {
         );
     }
 
-    /// 「一个 `while` 只有一个落出口」这条限制到底挡住了多少函数：判据过宽会把
-    /// 普通循环一起挡掉（SSA 覆盖面大幅丢失），过窄则挡不住真歧义。两边都钉，
-    /// 因为它们各对应一类历史错误（先例：「续体被外层共享」那条判据实测会挡掉
-    /// **所有** for 循环 —— 普通 for 的 `for.end` 本来就同时是 preheader 的假边目标）。
+    /// 多出口循环退路钉的是**出口所有权契约**，而不是「两个循环外后继就得挡」。
+    ///
+    /// 旧版本这里钉的是旧计数口径（「体内 return + 循环落出 = 两个出口 ⇒ 必须判为多
+    /// 出口」），那个口径已被逐形实测推翻：同一个读数下 `for(...){if(i==2)return 7;}` 的
+    /// 侧出口是 `Ret` 块（不占续体名额），在到达边就地发 `return` 就对了（四档与 gcc 一致，
+    /// 见 `tests/fixtures/opt/loop_exit_ownership.c`）。现在钉的是：哪个出口是自然落点
+    /// (`plan.cont`)、其余出口走哪种落地方式 (`LoopExitOwner`)，以及仍不可表达的那一族确实被挡。
+    ///
+    /// 两面仍然都要钉（历史先例：「续体被外层共享」那条判据实测会挡掉**所有** for 循环）：
+    /// 上半是「不该挡的别挡」（捕手，与 `plain_loops_still_go_through_ssa` / `adv` 夹具同一
+    /// 方向），下半是「该挡的必须挡」。
     #[test]
     fn multi_exit_cycle_predicate_is_narrow_and_sound() {
-        // 不挡：普通 for、只有 continue 的循环（出口只有 for.end）
-        let plain_for = "long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i*3;return acc+n;}\n";
-        assert!(
-            !has_multi_exit_cycle(&try_build(plain_for, "s").expect("普通 for 应能进 SSA")),
-            "普通 for 循环不该被判为多出口（P12-B 的验收夹具就是这个形状）"
+        // ---- 一面：这些形状都必须**不挡**（逐个都有四档 gcc 实测支撑）----
+        let unblocked: &[(&str, &str, &str)] = &[
+            (
+                "普通 for（P12-B 验收夹具就是这个形状）",
+                "s",
+                "long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i*3;return acc+n;}\n",
+            ),
+            (
+                "只有 continue",
+                "s",
+                "long s(long n){long acc=0;for(long i=0;i<n;i++){if(i%2==0)continue;acc+=i;}return acc;}\n",
+            ),
+            (
+                "一句普通 break（桩块与合并块不得数成两个出口）",
+                "s",
+                "int s(int n){int acc=0;for(int i=0;i<n;i++){if(i==3)break;acc+=i;}return acc;}\n",
+            ),
+            (
+                "两个 break 合并到同一个落点",
+                "s",
+                "int s(int n){int acc=0;for(int i=0;i<n;i++){if(i==1)break;if(i==2)break;acc+=i;}return acc;}\n",
+            ),
+            (
+                "体内 return + 循环落出（旧口径错挡的那一条）",
+                "a",
+                "int a(int n){for(int i=0;i<n;i++){if(i==2)return 7;}return 1;}\n",
+            ),
+            (
+                "return 与 break 同现",
+                "a",
+                "int a(int n){int s=0;for(int i=0;i<n;i++){if(i==1)return 9;if(i==3)break;s+=i;}return s;}\n",
+            ),
+            (
+                "两个不同的纯 return 块",
+                "a",
+                "int a(int n){int s=0;for(int i=0;i<n;i++){if(i==1)return 9;if(i==2)return 8;s+=i;}return s;}\n",
+            ),
+            (
+                "侧出口自带语句再跳出（InlineOnEdge）",
+                "a",
+                "int g;int a(int n){int s=0;for(int i=0;i<n;i++){if(i==1){g=101;break;}s+=i;}return s+g;}\n",
+            ),
+            (
+                "旋转 do-while + 体内 return（节点头即分支点）",
+                "a",
+                "int a(int n){int i=0;do{i++;if(i==3)return 42;}while(i<n);return -1;}\n",
+            ),
+            (
+                "无限循环 + 节点头 return/break 并存",
+                "a",
+                "int a(int n){int i=0;for(;;){if(i>=n)return 5;if(i==2)break;i++;}return 6;}\n",
+            ),
+            (
+                "break 落到桩块且循环后还有代码",
+                "a",
+                "int a(int n){int s=0;for(int i=0;i<n;i++){if(i==2)break;s+=i;}if(s>3)return 1;return 2;}\n",
+            ),
+            // 收窄的**代价上限**也要钉住：`header_break_with_named_write` 只能挡「头块上真
+            // 有一句 break、而续体由另一个 latch 提供」那一族。少了 `!tail_exits.is_empty()`
+            // 限定就会把 `while (n--)` 这一整族（头块自己就是唯一落出的条件块）一并踢出 SSA
+            // ——那是相对 HEAD 的覆盖面倒退，不优化但也不报错，**任何 gcc 差分测试都拦不住它**。
+            (
+                "while(k-- > 0) 无侧出口（C 里最常见，不得被收窄误挡）",
+                "a",
+                "int a(int n){int k=n,acc=0;while(k-- > 0){acc+=k;}return acc;}\n",
+            ),
+            (
+                "while(k-- > 0) + 体内 break（头块那条边是循环条件本身）",
+                "a",
+                "int a(int n){int k=n,s=0;while(k-- > 0){if(k==2)break;s+=k;}return s;}\n",
+            ),
+            (
+                "while(k-- > 0) + return 与 break 同现",
+                "a",
+                "int a(int n){int k=n,s=0;while(k-- > 0){if(k==3)return 91;if(k==1)break;s+=k;}return s+1;}\n",
+            ),
+        ];
+        for (why, fname, src) in unblocked {
+            let func = try_build(src, fname)
+                .unwrap_or_else(|| panic!("{why}: 应能进 SSA 建 IR"));
+            assert!(!has_multi_exit_cycle(&func), "{why}: 不该被判为不可表达");
+        }
+
+        // ---- 二面：钉住「谁当自然落点、其余边走哪种落地方式」----
+        // `for(int i=0;i<n;i++){if(i==2)return 7;} return 1;`
+        //   自然落点 = for.end（循环外也有前驱进入，只能发一次）
+        //   侧出口 if.then = 体内纯 return ⇒ 在到达边就地发 `return`
+        let early = "int a(int n){for(int i=0;i<n;i++){if(i==2)return 7;}return 1;}\n";
+        let (header, plan, owners) = shape_owners(early, "a");
+        assert_eq!(header, "for.body", "早退循环的循环头应是体内块");
+        assert_eq!(plan.cont.as_deref(), Some("for.end"), "自然落点应是 for.end");
+        assert!(plan.expressible, "该形状应可表达: {}", plan.reason);
+        assert_eq!(
+            owner_of_edge(&owners, "if.then"),
+            LoopExitOwner::PureReturn,
+            "体内 return 的落点必须在到达边发 `return`（不占续体名额）"
         );
-        let cont_only =
-            "long s(long n){long acc=0;for(long i=0;i<n;i++){if(i%2==0)continue;acc+=i;}return acc;}\n";
+        assert_eq!(
+            owner_of_edge(&owners, "for.end"),
+            LoopExitOwner::Continuation,
+            "循环落出的那条边只能发 `break`，续体在循环之后发一次"
+        );
+        // 提升许可：本形状的循环头是**体内块** for.body，它的出口边 `if.then` 不是续体，
+        // 提升就会把那条 `return` 随丢弃的头块分支一起丢掉（§7.32 那 14 条错值的根因），
+        // 所以计划必须说「不许提升」，发射器退回 `while(1){ if(i==2) return 7; … }`。
         assert!(
-            !has_multi_exit_cycle(&try_build(cont_only, "s").expect("continue 循环应能进 SSA")),
-            "只有 continue 的循环不该被判为多出口"
+            !plan.allow_header_lift,
+            "节点头的出口边不是续体 ⇒ 不得把它的 Branch 提成 while 条件"
         );
 
-        // 要挡：体内提前 return / break 与正常落出是两个不同的循环外后继
-        let early_return = "int a(int n){for(int i=0;i<n;i++){if(i==2)return 7;}return 1;}\n";
+        // `for(...){if(i==1){g=101;break;}s+=i;}` 的侧出口块自带语句且前驱全在循环内
+        // ⇒ 只能在到达边就地展开，绝不能当续体（否则续体双份执行）。
+        let inline_src =
+            "int g;int a(int n){int s=0;for(int i=0;i<n;i++){if(i==1){g=101;break;}s+=i;}return s;}\n";
+        let (header2, plan2, owners2) = shape_owners(inline_src, "a");
+        assert_eq!(header2, "for.body");
+        assert_eq!(plan2.cont.as_deref(), Some("for.end"), "续体仍是循环落出块");
         assert!(
-            has_multi_exit_cycle(&try_build(early_return, "a").expect("早退循环应能建 IR")),
-            "体内 return + 循环落出 = 两个出口，必须判为多出口"
+            owners2
+                .iter()
+                .any(|(_, _, o)| *o == LoopExitOwner::InlineOnEdge),
+            "带语句且前驱全在循环内的侧出口必须在到达边展开"
         );
-        let ret_and_break =
-            "int a(int n){int s=0;for(int i=0;i<n;i++){if(i==1)return 9;if(i==3)break;s+=i;}return s;}\n";
+        // 头块的出口边（`if.then`，带语句、前驱全在循环内）不是续体 ⇒ 提升同样被否掉，
+        // 那条边回到 `if` 语句上由出口边守卫安排。
         assert!(
-            has_multi_exit_cycle(&try_build(ret_and_break, "a").expect("应能建 IR")),
-            "return 与 break 同现时更要判为多出口"
+            !plan2.allow_header_lift && plan2.expressible,
+            "侧出口展开与提升互斥：应可表达且不许提升 ({})",
+            plan2.reason
         );
+
+        // ---- 三面：仍不可表达的那一族必须挡（退回 AST，不优化但正确）----
+        // 节点头自己就是循环体块（旋转 do-while）、带对具名存储的写、而它那条出口边是
+        // `break`（折到续体）。实测：提升会丢头块的写（`do_break(3)` 得 9 而 gcc 得 6），
+        // 退回 `while(1){if(c)…}` 同样错 ⇒ 只能整函数退出 SSA 往返。
+        let blocked_srcs: &[(&str, &str)] = &[
+            (
+                "旋转 do-while：头块带具名写 + break 到续体",
+                "int a(int n){int i=0,s=0;do{s+=i;i++;if(i==3)break;}while(i<n);return s+i;}\n",
+            ),
+            (
+                "无限循环：头块带累加写 + break 到续体",
+                "int a(int n){int i=0,s=0;for(;;){s+=i;i++;if(i>n)break;}return s+i;}\n",
+            ),
+        ];
+        for (why, src) in blocked_srcs {
+            let func = try_build(src, "a").unwrap_or_else(|| panic!("{why}: 应能建 IR"));
+            assert!(has_multi_exit_cycle(&func), "{why}: 必须挡（两种发法实测都错）");
+        }
+        // 同形状但侧出口是 `return`（而不是 break）⇒ 必须仍然放行：这一对是上面那两条
+        // 反向对照，证明挡的是「头块 break 到续体」而不是「所有带写的节点头」。
+        let near_miss = "int a(int n){int i=0,s=0;do{s+=i;i++;if(i==3)return 42;}while(i<n);return s+i;}\n";
+        let nm = try_build(near_miss, "a").expect("near miss 应能建 IR");
+        assert!(
+            !has_multi_exit_cycle(&nm),
+            "同形状但侧出口是 return：已实测四档与 gcc 一致，不得误挡"
+        );
+    }
+
+    /// 取证辅助：取函数里**第一个**自然循环的节点头、所有权计划，以及每条出口边的
+    /// `(原始目标, 折叠后代表块, 所有权)`。判据与发射器走同一套 API，这里也只是读它们。
+    fn shape_owners(
+        src: &str,
+        fname: &str,
+    ) -> (String, LoopExitPlan, Vec<(String, String, LoopExitOwner)>) {
+        let func = try_build(src, fname).expect("应能建 IR");
+        let doms = compute_dominators(&func);
+        let mut headers: Vec<&String> = func.blocks.keys().collect();
+        headers.sort();
+        for header in headers {
+            let Some((latches, body_incl)) = loop_shape(&func, header, &doms) else {
+                continue;
+            };
+            let body: HashSet<String> = body_incl
+                .iter()
+                .filter(|b| b.as_str() != header.as_str())
+                .cloned()
+                .collect();
+            let plan = loop_exit_plan(&func, header, &body, &latches, &doms);
+            let mut names: Vec<&String> = body_incl.iter().collect();
+            names.sort();
+            let mut owners = Vec::new();
+            for name in names {
+                let Some(b) = func.blocks.get(name) else { continue };
+                for s in term_succs(&b.term) {
+                    if s == header || body.contains(s) || is_back_edge(name, s, &doms) {
+                        continue;
+                    }
+                    let o = loop_exit_owner(s, &func, header, &body, &doms);
+                    let rep = resolve_loop_exit_stub(s, &func, header, &body);
+                    if !owners.iter().any(|(a, _, _)| a == s) {
+                        owners.push((s.to_string(), rep, o));
+                    }
+                }
+            }
+            return (header.clone(), plan, owners);
+        }
+        panic!("没找到自然循环");
+    }
+
+    fn owner_of_edge(owners: &[(String, String, LoopExitOwner)], target: &str) -> LoopExitOwner {
+        for (_, rep, o) in owners {
+            if rep == target {
+                return *o;
+            }
+        }
+        panic!("出口边里没有 {target}");
+    }
+
+    /// **取证窗口**（`#[ignore]`，不进任何判据）：把多出口循环各形状的**真实 CFG** 打出来。
+    ///
+    /// 运行：`cargo test --lib --release -- --ignored --nocapture multi_exit_shape_probe`
+    ///
+    /// 为什么需要它：`has_multi_exit_cycle` 挡的是「循环外后继 > 1」，而历史两次被 gcc 差分
+    /// 证伪都源于**拿猜测的形状当边界**（§7.28 的三条改法、§7.32 的放松）。这张表逐条打印
+    /// 每个出口边的客观读数（terminator / phi / 语句数 / 前驱集合 / 是否头块直出 / 是否
+    /// latch 落出 / 桩块折叠后的目标），出口所有权模型的每一层放行都必须对着它说话。
+    #[test]
+    #[ignore]
+    fn multi_exit_shape_probe() {
+        let shapes: &[(&str, &str)] = &[
+            (
+                "S1_plain_for",
+                "long a(long n){long acc=0;for(long i=0;i<n;i++)acc+=i*3;return acc+n;}\n",
+            ),
+            (
+                "S2_continue_only",
+                "long a(long n){long acc=0;for(long i=0;i<n;i++){if(i%2==0)continue;acc+=i;}return acc;}\n",
+            ),
+            (
+                "S3_early_return",
+                "int a(int n){for(int i=0;i<n;i++){if(i==2)return 7;}return 1;}\n",
+            ),
+            (
+                "S4_ret_and_break",
+                "int a(int n){int s=0;for(int i=0;i<n;i++){if(i==1)return 9;if(i==3)break;s+=i;}return s;}\n",
+            ),
+            (
+                "S5_break_only",
+                "int a(int n){int s=0;for(int i=0;i<n;i++){if(i==3)break;s+=i;}return s;}\n",
+            ),
+            (
+                "S6_side_stmt_break",
+                "int g;int a(int n){int s=0;for(int i=0;i<n;i++){if(i==1){g=101;break;}s+=i;}return s;}\n",
+            ),
+            (
+                "S7_two_breaks_merge",
+                "int a(int n){int s=0;for(int i=0;i<n;i++){if(i==1)break;if(i==2)break;s+=i;}return s;}\n",
+            ),
+            (
+                "S8_do_while_rotated",
+                "int a(int n){int i=0;do{i++;if(i==3)return 42;}while(i<n);return -1;}\n",
+            ),
+            (
+                "S9_infinite_loop_head_branch",
+                "int a(int n){int i=0;for(;;){if(i>=n)return 5;if(i==2)break;i++;}return 6;}\n",
+            ),
+            (
+                "S10_ret_twopaths_same_block",
+                "int a(int n){int s=0;for(int i=0;i<n;i++){if(i==1)return 9;if(i==2)return 9;s+=i;}return s;}\n",
+            ),
+            (
+                "S11_ret_depends_on_loop_var",
+                "int a(int n){int s=0;for(int i=0;i<n;i++){if(i==2)return s;s+=i;}return s;}\n",
+            ),
+            (
+                "S12_nested_inner_early_return",
+                "int a(int n){int acc=0;for(int i=0;i<n;i++){for(int j=0;j<i;j++){if(j==1)return 77;}}return acc;}\n",
+            ),
+            (
+                "S13_break_then_outer_code",
+                "int a(int n){int s=0;for(int i=0;i<n;i++){if(i==2)break;s+=i;}if(s>3)return 1;return 2;}\n",
+            ),
+            (
+                "S14_while_carried_header_inst",
+                "int a(int n){int k=n,s=0;while(k-- > 0){if(k==2)return 7;s+=k;}return s;}\n",
+            ),
+            (
+                "S15_pure_infinite_no_fallthrough",
+                "int a(int n){for(;;){if(n<=0)return 3;n--;}}\n",
+            ),
+            // ---- 对抗样本 (本轮新加的「应当仍被挡」形状; 拿不到它们就证明不了退路变窄而不是没了) ----
+            (
+                "T1_multi_pred_ret_plus_merge",
+                "int a(int n){int s=0;for(int i=0;i<n;i++){if(i==1||i==2)return 5;s+=i;}return s;}\n",
+            ),
+            (
+                "T2_multi_pred_ret_only",
+                "int a(int n){for(int i=0;i<n;i++){if(i==1||i==2)return 5;}}\n",
+            ),
+            (
+                "T3_break_and_return_and_continue",
+                "int a(int n){int s=0;for(int i=0;i<n;i++){if(i==1)continue;if(i==3)return 4;if(i==5)break;s+=i;}return s;}\n",
+            ),
+            (
+                "T4_nested_two_breaks",
+                "int a(int n){int s=0;for(int i=0;i<n;i++){for(int j=0;j<n;j++){if(j==1)break;}if(i==2)break;s+=i;}return s;}\n",
+            ),
+            (
+                "T5_do_while_break_tail",
+                "int a(int n){int i=0;do{if(i==2)break;i++;}while(i<n);return i;}\n",
+            ),
+            (
+                "T6_two_shared_exits",
+                "int a(int n){int s=0;for(int i=0;i<n;i++){if(i==1){s=9;return s;}if(i==3)return 4;s+=i;}return s;}\n",
+            ),
+        ];
+        for (tag, src) in shapes {
+            let Some(func) = try_build(src, "a") else {
+                println!("==== {tag}: BUILD-FAIL (函数根本没进 SSA) ====");
+                continue;
+            };
+            println!("\n==== SHAPE {tag} ====");
+            println!(
+                "blocked_before(unbounded outsides) = {} / blocked_after(plan inexpressible) = {}",
+                has_multi_exit_cycle_before_shape_gate(&func),
+                has_multi_exit_cycle(&func)
+            );
+            print!("{}", shape_probe_report(&func));
+        }
+    }
+
+    /// **旧退路的计数规则**（仅供取证对比，不参与任何语义）：「循环外后继个数 > 1」。
+    ///
+    /// 把它留在测试模块而不是删掉，是因为本轮的「拆了多少退路」必须能被直接读到:
+    /// 同一个形状用旧规则与新计划各判一次, 差集就是本轮真正释放的覆盖面。
+    fn has_multi_exit_cycle_before_shape_gate(func: &Function) -> bool {
+        let doms = compute_dominators(func);
+        let mut headers: Vec<&String> = func.blocks.keys().collect();
+        headers.sort();
+        for header in headers {
+            let Some(hb) = func.blocks.get(header) else { continue };
+            let latches: Vec<String> = hb
+                .preds
+                .iter()
+                .filter(|p| is_back_edge(p, header, &doms))
+                .cloned()
+                .collect();
+            if latches.is_empty() {
+                continue;
+            }
+            let body: HashSet<String> = find_loop_body_multi(func, header, &latches)
+                .into_iter()
+                .collect();
+            let mut outside: Vec<String> = Vec::new();
+            let mut names: Vec<&String> = body.iter().chain(std::iter::once(header)).collect();
+            names.sort();
+            for name in names {
+                let Some(b) = func.blocks.get(name) else { continue };
+                for s in term_succs(&b.term) {
+                    if s == header || body.contains(s) || is_back_edge(name, s, &doms) {
+                        continue;
+                    }
+                    if !outside.iter().any(|e| e == s) {
+                        outside.push(s.to_string());
+                    }
+                }
+            }
+            if outside.len() > 1 {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// [`multi_exit_shape_probe`] 的读数器：块清单 + 每个自然循环的出口边分类表。
+    fn shape_probe_report(func: &Function) -> String {
+        let doms = compute_dominators(func);
+        let mut out = String::new();
+        out.push_str("  -- blocks --\n");
+        for name in &func.block_order {
+            let Some(bb) = func.blocks.get(name) else { continue };
+            let stmts = bb.insts.iter().filter(|i| !is_pass_hint_inst(&i.kind)).count();
+            out.push_str(&format!(
+                "    {:<16} stmts={} phis={} preds={:?} term={:?}\n",
+                bb.name,
+                stmts,
+                bb.phis.len(),
+                bb.preds,
+                bb.term
+            ));
+        }
+        let mut headers: Vec<&String> = func.blocks.keys().collect();
+        headers.sort();
+        for header in headers {
+            let hb = &func.blocks[header];
+            let latches: Vec<String> = hb
+                .preds
+                .iter()
+                .filter(|p| is_back_edge(p, header, &doms))
+                .cloned()
+                .collect();
+            if latches.is_empty() {
+                continue;
+            }
+            let body: HashSet<String> = find_loop_body_multi(func, header, &latches)
+                .into_iter()
+                .collect();
+            out.push_str(&format!(
+                "  -- loop header={} body={:?} latches={:?} --\n",
+                header,
+                {
+                    let mut v: Vec<&str> = body.iter().map(|s| s.as_str()).collect();
+                    v.sort();
+                    v
+                },
+                latches
+            ));
+            // 头块条件边的两侧与 latch 的非回边后继 —— 续体唯一化的两个候选真源
+            if let Some(hb) = func.blocks.get(header) {
+                out.push_str(&format!(
+                    "    header_succs={:?} (cond-exit 候选: 其中不在 body 的边)\n",
+                    term_succs(&hb.term)
+                ));
+            }
+            let mut names: Vec<&String> = body.iter().chain(std::iter::once(header)).collect();
+            names.sort();
+            let mut distinct: Vec<String> = Vec::new();
+            for name in names {
+                let Some(b) = func.blocks.get(name) else { continue };
+                for s in term_succs(&b.term) {
+                    if s == header || body.contains(s) || is_back_edge(name, s, &doms) {
+                        continue;
+                    }
+                    let Some(tb) = func.blocks.get(s) else { continue };
+                    let pure_ret = is_loop_exit_pure_return(s, func);
+                    let stmts = tb.insts.iter().filter(|i| !is_pass_hint_inst(&i.kind)).count();
+                    let stub = stmts == 0 && tb.phis.is_empty() && matches!(tb.term, Terminator::Jump(_));
+                    let all_in = tb.preds.iter().all(|p| p.as_str() == header || body.contains(p.as_str()));
+                    let head_direct = term_succs(&hb.term).iter().any(|x| *x == s);
+                    let latch_exit = body
+                        .iter()
+                        .any(|m| m != header && func.blocks.get(m).map(|b| term_succs(&b.term).iter().any(|x| *x == s)).unwrap_or(false));
+                    let folded = probe_fold_stub(s, func, &body);
+                    out.push_str(&format!(
+                        "    EXIT {name}->{s}: term={:?} phis={} stmts={stmts} preds={:?} pure_return={pure_ret} \
+                         zero_stmt_stub={stub} all_preds_in_loop={all_in} header_direct={head_direct} \
+                         latch_exit={latch_exit} fold=>{folded}\n",
+                        tb.term,
+                        tb.phis.len(),
+                        tb.preds,
+                    ));
+                    if !distinct.iter().any(|e| e == s) {
+                        distinct.push(s.to_string());
+                    }
+                }
+            }
+            let folded_distinct: Vec<String> = distinct
+                .iter()
+                .map(|d| probe_fold_stub(d, func, &body))
+                .filter(|d| !d.is_empty())
+                .collect::<Vec<_>>();
+            let mut fd = folded_distinct.clone();
+            fd.sort();
+            fd.dedup();
+            out.push_str(&format!(
+                "    outsides(raw)={:?} outsides(folded)={:?} blocked={}\n",
+                distinct,
+                fd,
+                distinct.len() > 1
+            ));
+            // ---- 本轮的所有权计划读数 (设计段每一条放行都必须对着这里说话) ----
+            if let Some((pl_latches, pl_body)) = loop_shape(func, header, &doms) {
+                let plan = loop_exit_plan(func, header, &pl_body, &pl_latches, &doms);
+                out.push_str(&format!(
+                    "    PLAN cont={:?} expressible={} allow_header_lift={} reason={}\n",
+                    plan.cont, plan.expressible, plan.allow_header_lift, plan.reason
+                ));
+                let mut enames: Vec<&String> = pl_body.iter().collect();
+                enames.sort();
+                for name in enames {
+                    let Some(b) = func.blocks.get(name) else { continue };
+                    for s in term_succs(&b.term) {
+                        if s == header || pl_body.contains(s) || is_back_edge(name, s, &doms) {
+                            continue;
+                        }
+                        let owner = loop_exit_owner(s, func, header, &pl_body, &doms);
+                        out.push_str(&format!("      EDGE {name}->{s}: owner={owner:?}\n"));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// 沿「无语句、无 phi、仍在循环外」的 `Jump` 链折叠桩块（break 的空壳落点）。
+    fn probe_fold_stub(target: &str, func: &Function, body: &HashSet<String>) -> String {
+        let mut cur = target.to_string();
+        let mut seen: HashSet<String> = HashSet::new();
+        loop {
+            if !seen.insert(cur.clone()) {
+                return cur;
+            }
+            let Some(bb) = func.blocks.get(&cur) else {
+                return cur;
+            };
+            let stmts = bb.insts.iter().filter(|i| !is_pass_hint_inst(&i.kind)).count();
+            let is_stub = stmts == 0 && bb.phis.is_empty();
+            match &bb.term {
+                Terminator::Jump(n) if is_stub && !body.contains(n) => cur = n.clone(),
+                _ => return cur,
+            }
+        }
     }
 
     /// 无法在 SSA 里忠实表达的表达式必须让**整个函数**放弃 SSA 化，而不是静默

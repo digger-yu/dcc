@@ -103,6 +103,9 @@ impl Codegen {
     pub fn compile_func(&mut self, f: &FuncDecl, prog: &Program) {
         let arg_regs: [u8; 6] = [7, 6, 2, 1, 8, 9];
         self.var_map.clear();
+        // 段地址槽登记表是逐函数状态：不清就会把上一个函数的 `t = &gv` 广播到
+        // 下一个函数的同名槽位（误发前缀 = 访存到错误的段）。
+        self.local_addr_seg.clear();
         self.var_map_total_slots = 0;
         self.vla_offsets.clear();
         // VM 类型尺寸绑定槽是每函数帧内状态 (槽偏移在各函数独立

@@ -136,6 +136,42 @@ int arrow_gs(struct gs_fields *s) { return *s->vp; }
  * 位置，留着它做错配对照（其他位置修之前不发前缀，这一条却发）。 */
 int use_ret_gs_ptr(void) { return *make_gs_ptr(); }
 
+/* 20: 段限定符加在**对象本体**上。它与前 19 条不同类：段是**符号**的属性，不挂在任何
+ * 表达式的类型上，所以发射点只能查「符号→段」表（`emit_global_load/store` 两个口 + 
+ * 先取址后访问那一族的前缀真源）。gcc 形如 `movl %gs:gv(%rip), %eax`。
+ *
+ * fs 侧同样只定义不调用：用户态 FS base 是 TLS 地址（非 0），真去访问 `%fs:sym(%rip)`
+ * 必然 SIGSEGV —— 实测 gcc 靠把 `(void)fs_global;` 优化成空来躲开这笔访问，而 dcc 在
+ * -O0 会老实发那条装载，所以「执行 fs 对象访问」在这份夹具里永远不合法。 */
+__seg_gs int obj_gs = 0;
+__seg_fs int obj_fs = 0;
+__seg_gs int obj_gs_arr[4];
+struct obj_seg_s { int a; int b; };
+__seg_gs struct obj_seg_s obj_gs_agg;
+__seg_gs struct obj_seg_s obj_gs_agg2;
+
+int obj_read_gs(void) { return obj_gs; }
+void obj_write_gs(int v) { obj_gs = v; }
+int obj_incdec_gs(void) { obj_gs++; return obj_gs; }
+int obj_idx_gs(int i) { return obj_gs_arr[i]; }
+void obj_idx_wr_gs(int i, int v) { obj_gs_arr[i] = v; }
+int obj_member_gs(void) { return obj_gs_agg.b; }
+void obj_member_wr_gs(void) { obj_gs_agg.a = 7; }
+int obj_agg_copy_gs(void) { obj_gs_agg2 = obj_gs_agg; return obj_gs_agg2.a; }
+/* 取址（LEA）**不得**发前缀：GAS 明说 "segment override on `lea' is ineffectual"，
+ * 前缀字节占位而地址仍不含段基址 —— 那是「看着修了其实没修」。反向对照。 */
+int *obj_addr_gs(void) { return &obj_gs; }
+int *obj_addr_arr_gs(void) { return &obj_gs_arr[2]; }
+/* fs 侧同形，只定义不调用 */
+int obj_read_fs(void) { return obj_fs; }
+void obj_write_fs(int v) { obj_fs = v; }
+/* 函数体内的 `static __seg_fs int`：以 mangled 名登记，源名查表必然查不到 —— 
+ * 这一条钉住「表按 resolve 后的键存」那件事。同样不调用。 */
+int obj_static_fs(void) { static __seg_fs int sl = 0; sl = sl + 1; return sl; }
+/* 不带段的普通全局：反向对照，一个前缀也不许发。 */
+int obj_plain = 0;
+int obj_read_plain(void) { return obj_plain; }
+
 /* 只有 gs 那几条能真跑 (用户态 GS base == 0)。fs 的那几个函数留到上面的"定义但
  * 不调用"部分, 断言在 asm 上完成。 */
 int main(void) {
@@ -166,7 +202,30 @@ int main(void) {
     if (test_sizeof_seg() != 4 || test_alignof_seg() != 4 ||
         test_sizeof_seg_ptr() != (int)sizeof(void *))
         return 8;
-    (void)fs_global;
+
+    /* 对象本体带 gs 段：GS base == 0 ⇒ 与默认段完全一致，必须可执行且值正确。 */
+    obj_write_gs(21);
+    if (obj_read_gs() != 21)
+        return 9;
+    if (obj_incdec_gs() != 22) /* 自增后读回 */
+        return 10;
+    if (obj_addr_gs() != &obj_gs || obj_addr_arr_gs() != &obj_gs_arr[2])
+        return 11;
+    obj_idx_wr_gs(2, 5);
+    if (obj_idx_gs(2) != 5 || obj_gs_arr[2] != 5)
+        return 12;
+    obj_member_wr_gs();
+    if (obj_gs_agg.a != 7 || obj_member_gs() != 0)
+        return 13;
+    if (obj_agg_copy_gs() != 7) /* 段限定目标上的聚合拷贝 */
+        return 14;
+    obj_plain = 33;
+    if (obj_read_plain() != 33)
+        return 15;
+    /* fs 与 static gs 那几个只引用符号、不访问内存（LEA 无语义），保证不被链接期丢弃。 */
+    (void)&fs_global;
+    (void)&obj_fs;
+    (void)&obj_static_fs;
     (void)static_gs_var;
     (void)multi_seg;
     (void)make_fnptr;

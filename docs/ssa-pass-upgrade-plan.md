@@ -16,7 +16,7 @@
 | P9 | loop_interchange | ✅ 完整 | 同上（空转） | ✅ **已删除**（只改块序不做交换；早于本轮，表行之前未同步） |
 | P10 | tail_call_optimization | ✅ 完整 | 真 | ✅ |
 | P11 | function_attribute_propagation | ✅ 完整 | **假 hint 导致 -O2 SEGV** | ✅ 已删除（段归属回到 AST 真源） |
-| P12 | register_allocation | ⚠ stub | 只统计、后端不读、还误报 `changed=true` | ◐ **增量已落地**（§7.20：SSA 层活性分配灌进绑定表，产物差异已验证）；方案的字面形态（`Ident` 携带寄存器号 + codegen 不再分配 + 真 SPILL/RELOAD）**仍未做**，需重写单遍发射模型。◐ §7.21~§7.27：把「谁拥有哪个寄存器」这条链上的**编码位序**从人撞改为门禁点名（15 矩阵 5652 组合 + 产物级卫生门禁，42 条存量点名到 0），因为自动分配一开始把 `dst>=8` 的死分支点亮 |
+| P12 | register_allocation | ⚠ stub | 只统计、后端不读、还误报 `changed=true` | ◐ **增量已落地**（§7.20：SSA 层活性分配灌进绑定表，产物差异已验证）；方案的字面形态（`Ident` 携带寄存器号 + codegen 不再分配 + 真 SPILL/RELOAD）**仍未做**，需重写单遍发射模型。◐ §7.21~§7.27：把「谁拥有哪个寄存器」这条链上的**编码位序**从人撞改为门禁点名（15 矩阵 5652 组合 + 产物级卫生门禁，42 条存量点名到 0），因为自动分配一开始把 `dst>=8` 的死分支点亮。字面形态的设计文档见 `docs/p12-physreg-spill-design.md`（已写、未开工；开工触发条件在其 §9） |
 | P12b | ubsan_ir_instrument | ✅ 完整 | guard 已插；文档声称的符号转换代码不存在 | ⚠ 注释已修正 |
 | P13 | alias_set | ✅ 完整 | 返回值被丢弃 → 空转 | ✅ **已删除**（§7.37：三档判别 `alias_classify` 只被自己的单测调用） |
 | P14 | speculative_execution | ✅ 完整 | **按 dest 字典序重排 → -O3 静默误编译** | ✅ 已重写为依赖闭包上提 |
@@ -328,6 +328,8 @@
   （x86_64 `var_map` + `%r13+disp` + `%rax`；aarch64 `x0/w0`；riscv64 `a0/a1`），
   `ArchRegPool` 只服务 inline asm 绑定、连 x86_64 pool 都没有。
   ⇒ 这不是 pass 级补全而是**后端级重写**（需单独立项，含与 golden baseline / 可复现门禁逐字节对撞）。
+  该立项的设计文档已写：**`docs/p12-physreg-spill-design.md`**（设计完成、未开工；
+  四条硬约束、被否的三种形态、Phase 0~6 与每阶段的零行为-diff 判据、以及开工触发条件都在那里）。
   原 stub （只发 `__dcc_regalloc_done` 统计、后端从不读、还误报 `changed=true`）已删除，
   理由写在下文 P12 小节。
 - **P16**：当时结构性不可行 —— `run_ssa_passes` 对所有含循环函数 `continue`，P16（以及 P7/P8/P9）
@@ -2437,6 +2439,249 @@ VLA 尺寸走定长循环体的 `copy_bytes_to_seg_runtime`（`jnz` 的位移是
 `test_all.sh`（11/11）、`check_opt_equivalence.sh`（OPT-DIFF **0**，COMPILE-FAIL 56 且
 CF-UNKNOWN 0）、REX 卫生 618 组合、`check_pipe_structure.sh`、`check_disasm_coverage.sh`
 （13/13）、`golden-cross`（arm/mips 6 项 verify 0 失败）。
+
+### 7.41 第 27 轮：四项遗留一次做，其中**两项的记账是错的**
+
+开局是 §7.40「七、仍未修」的四项（段限定对象本体、IFUNC、多出口循环、反解码器 13 条），
+并行推进。结论：两项彻底修完、一项交付底线 + 可证伪边界、一项落地但留了第四类推不动；
+过程中**两条记账被实测推翻**，还顺手挖出一条与本轮无关的静默误编译。分项报告在
+`docs/wp_disasm.md`、`docs/wp_ifunc.md`、`docs/wp_multi_exit_loop.md`、
+`docs/wp_goto_pending.md`；段限定那包开工时被中断、由主控接手收口，没有分项报告，
+结论以下面「二」为准。
+
+#### 一、反解码器：那 13 条不是「三族缺臂」，是两个长度/清单缺陷的**错位产物**
+
+记录写的是「集中在 moffs（`a0..a3` 带 8 字节绝对地址）、`test al,imm8`（`a8`）、`enter`
+（`c8`）三族」。逐条拿 `objdump` 对真值之后：这三族在本仓语料里**一条都不存在** ——
+那些字节是指令流**错位之后**被当成 opcode 重读的残渣，而兜底长度表早就认识它们
+（`a0..=a3` 吞 8 字节、`c8` 吞 imm16+imm8、`cb` 吞 0）。真正的两个根因：
+
+1. **ALU `/r` 的四份清单同时漏了 adc / sbb**。REX 与 legacy 两条路径原本各有四条臂、
+   每条自己手写一份 `add/or/and/sub/xor(/cmp)` 名单，于是八个运算里的两个在**四处**
+   一起缺席（实测 `4d 11 d8` = objdump `adc %r11,%r8`、`4d 19 df` = `sbb %r11,%r15`）。
+   现在收敛成一张按位算的表 `Dec::alu_rm_r`（`op>>3` 定运算、`op&7<4` 定形状、bit1 定
+   方向、bit0 定宽度），两条路径共用一份事实。`0F`（转义）、`04/05`（accumulator+imm）、
+   `37/3F`（AAA/AAS）都落在被排除的 +4..+7 上，不需要额外特判。
+2. **MOVSXD 把 REX.B 双重施加到 rm 上**。`decode_mem` 内部自己做 `rm | rex.b<<3` 并按
+   **原始** rm 判 `rm==4`(SIB) / `rm==5`(RIP)；那一处先扩展一次，SIB 就变成了 12 ——
+   既不读 SIB 也不读位移 ⇒ **长度少算** ⇒ 后面整页错位。残渣正是记录里那三族字节。
+
+顺带查出并修掉四个「有名字但读错」的文本缺陷（都不影响产物，但 `rex_matrix` 的判据就
+建立在这份读数上）：SIB 带变址时 `,%rcx,4(%r11)` 把变址写在括号**外**（GAS 直接报
+`expecting operand before ','`，实测全语料 75 处 → 0）；`FE/FF` 间接转移少打 `*` 且目标
+用 32 位名（24 处 / 22 处 → 0）；x87 的 `f???` 占位符（改成按 objdump 逐格对账的 576 格
+全表）；shift/rotate 兜底臂打成假助记词 `shift`（REX 那三份漏了 rcl/rcr）。
+
+**这一族最值钱的认识：那条指标有两个盲区，本轮差点又被它骗过去。**`# UNKNOWN` 只数
+「读不出来」，而 (a) 错位之后读出来的是**有名字**的假指令（`fmuls 99(%rcx)`、
+`mov -117(%rax)`、`movsxd (%r12)`），一条都不报；(b) `f???`、`shift` 这类有名无实的
+占位符同样不报。所以 `check_disasm_coverage.sh` 里补了一条每函数指令条数探测器
+（`dcc -S` vs `objdump -d`，两侧同跳 `nop`、分母为 0 判红）。实测 2470 次比较 / 16 条
+不一致，逐条定性后**没有一条是解码器错位**（14 条是 `-S` 与 `-c` 两条产出路径本就不同，
+2 条是产物级 `lock mov $0,(%r12)`），所以探测器先「只报告不断言」（`SKEW_ASSERT=0`），
+原因写在脚本注释里 —— 不是留着余量，是它还没被证明能区分缺陷与非缺陷。
+
+另：`C6/C7` 的 /digit=7 是 XABORT/XBEGIN 而不是 `mov`（后端为 inline asm 的 `xbegin`
+确实会发 `c7 f8`），本机 GAS 两种拼法都拒 ⇒ 拿不到真值就照实报 UNKNOWN，不打一条
+看起来合法的 `mov`。`CEILING` 13 → **0**（分母 278270），此后任何一条 UNKNOWN 都红。
+`-S` 输出的 GAS 回炸 557/626 → 612/626，剩下 14 条首因是 `<dcc-unresolved-target-0x…>`
+占位符（有意为之：旧的 `.L{addr}` 会做出「能链能装、跑必挂」的产物）。
+
+#### 二、`__seg_*` 加在对象本体上：符号→段表，以及两条「不能顺手做」的事
+
+段限定符加在**符号**上与前 19 条不同类：它不挂在任何表达式的类型上，所以发射点只能查
+表。三处真源，缺一处就是静默访错段：
+
+* `Codegen::global_seg: HashMap<String, AddrSpace>`，键是**过 `resolve_global_key` 之后**
+  的符号键 —— 函数体内 `static __seg_fs int x;` 在发射侧是 `.Lsl4.f.x`，用源名进表永远
+  查不到（那是「看起来接了其实没接」）；
+* `emit_global_load` / `emit_global_store` 在任何 `self.pos()` 参与 disp32 计算**之前**
+  贴 `0x64`/`0x65` —— 前缀把整条指令右移一字节，先取 pos 会让 pending 重定位全部错位；
+* 「先取址、后访问」那一族（`gv++`、`arr[i]`、`gs.b`、聚合拷贝）前缀落在**访问**那一笔，
+  真源仍是 `abi::tyclass::lvalue_seg_prefix`（现在既认 pointee 的段，也认符号本体的段）。
+
+两条刻意**不做**的事，都是实测支持的判断，不是保守：
+
+1. `emit_global_addr`（LEA）不发前缀。LEA 不做内存访问，段重叠前缀对它是空操作（GAS 直接
+   警告 `segment override on 'lea' is ineffectual`），贴字节只会给出「修好了」的假象 ——
+   地址仍不含段基址，后续以它为基的访问全部越段。这一条做成了**反向断言**，与 gcc 同形
+   （gcc：`leaq arr(%rip),%rax` + `movl %gs:(%rax,%rdi,4),%eax`）。
+2. 段限定与 TLS 是两条轴，不合并：前者改**指令字节**，后者改**重定位种类**
+   （`pending_tls_rels` vs `pending_data_rels`）。一个符号可能只带段不是 TLS（非 TLS 的
+   per-cpu 对象），反之亦然。
+
+实现接通后**既有夹具自检崩了**（`seg_qualifier.c` rc=139）。查下来不是 dcc 的错：夹具里
+那句 `(void)fs_global;` 在 gcc 下被优化成空，而 dcc -O0 会老实发那条装载 —— 用户态 FS
+base 是 TLS 地址（非 0），真去访问 `%fs:sym(%rip)` 必然 SIGSEGV。所以修的是**夹具**（把 fs
+那一族挪进「只定义不调用」，断言留在 asm 上），不是削弱发射。这条实测同时说明：
+「fs 侧执行级对拍」在这个环境里永远不合法，只能钉 gs 侧。
+
+判据：两条 seg 用例，`seg_qualifier.c`（语法位置）扩到对象本体后逐函数断言；新增
+`seg_object_body.c`（只放 gcc 完全接受的形状）配套用例
+`seg_qualifier_on_object_body_emits_segment_prefixes` —— 正向 24 项按**前缀笔数下限**断言
+（只钉「有没有」的话，「只给写贴前缀、读裸走」这种半修状态能直接做绿），fs 5 项，
+反向对照 13 项（取址 / 不带段 / 指针本体写 / 局部遮蔽段全局），两档都跑，最后与 gcc
+四档执行级对拍。
+
+#### 三、IFUNC：真修落地（resolver 从内置链接器搬回 codegen）
+
+先定实两处矛盾记录（主控与子包各自重跑过）：`compute` **确实是** `STT_GNU_IFUNC`，但旧产物
+的 `st_value` 与实现体同址、无 CPUID、无 resolver 体、无 IRELATIVE ⇒ 「STT_GNU_IFUNC」为真、
+「codegen 已生成 resolver」为假（那句注释已订正）。
+
+§7.38 给的二选一，本轮走第一个：**resolver 搬回 codegen**。终态实测（不由报告转述）：
+
+* `.o`：`compute` type=10 @`0x1160`/41 与 `compute.resolver`（`FUNC WEAK`）**同址同尺寸**，
+  实现体在 `0x0`/`0x68`；resolver 体 = `call __dcc_cpu_indicator_init` +
+  `testl $0x100000,__dcc_cpu_model(%rip)`（SSE4.2 = leaf1/ECX#20）+ 两个 `lea <变体>` + `ret`；
+  检测体里 `objdump -d` 数到 8 条 `cpuid` + 1 条 `xgetbv`。
+* 可执行：stderr `via host cc`，`file` 报 `dynamically linked, interpreter …`，`readelf -d`
+  有 `NEEDED libc.so.6`，`readelf -rW` 有两条 `R_X86_64_IRELATIVE`，与 gcc 同源产物
+  stdout 逐字一致、退出码相同。`driver.rs` 里「含 IFUNC 就改道内置链接器」那条分支与
+  `elf_has_ifunc_symbols` 已删 —— 静默降级这个形状现在**不存在**了，而不是被报了。
+* `__builtin_cpu_supports` / `__builtin_cpu_is` 不再是恒假桩：逐名与 gcc 对照（dcc 给 0/1、
+  gcc 给 libgcc 位值，对「支持与否」一致；gcc 文档只保证 non-zero，所以判据一律 `!= 0`）；
+  检测体自包含 —— `nm -u` 对 `__cpu_model`/`__cpu_indicator_init` 的未定义引用数 dcc = 0
+  （gcc = 2）。
+* 位表单一真源：特性位/优先级/分类表共一份在 `semantics::cpu_isa`，`link/target_clones.rs`
+  改成薄转发（它仍服务 `.dcc.ifunc` 与外部 `.o` 那条路径；为何不能合并不写在注释里而是
+  写在那份模块头注释里）。`table_agrees_with_host_detector` 就是「两边不得各写一份事实」
+  的可证伪证明。
+* 三态哨兵已翻：`target_clones_diverts_to_static_link_is_known_defect` →
+  `target_clones_links_dynamically_with_codegen_resolver`（断动态 + host cc + IRELATIVE +
+  resolver 同址同尺寸 + stdout 与 gcc 逐字），旧名在 `src/`/`tests/` 里 0 命中。上一轮不翻是
+  对的（当时没做出动态产物），本轮翻也是对的（依据是实跑 `file`/`readelf -d`）。
+* 底线不退：仍走内置链接器的路径（`-fbuiltin-linker`）继续三行齐报 —— 绑了哪个变体、
+  无运行时 resolver、静态（无 PT_INTERP / DT_NEEDED）。不带 IFUNC 的程序仍必须动态（基准线）。
+
+顺手修掉定实过程中抵到的宿主侧检测器真缺陷（`src/cpuid.rs`）：`avx_vnni` 读的是 leaf 7
+**子叶 0 的 ECX#4**，而那一位是 **OSPKE**（真值在子叶 1 的 EAX#4），而且门控错用 `avx` 而非
+XCR0 0x6 ⇒ 带 CET 而无 AVX-VNNI 的机器会被报成真、反之报成假。现已按 `cpu_isa` 同口径修正，
+并把 `serialize`/`clwb` 两个「本表有、检测器根本不报」的名字补进检测器与交叉核对集。
+
+**仍未闭合**的一点（不属于「链接方式静默降级」这条缺陷）：变体之间的**机器码逐字节相同**
+（按 `st_size` 全量比过四组），因为 dcc 没有 per-variant 的 ISA codegen（`FuncDecl` 只带
+`target_clones`/`ifunc_resolver` 元信息，ISA 上下文没传到指令选择层）。所以「选中了非 default
+变体」目前只能由地址差与手写 `ifunc` 观察，不能由变体代码本身不同观察。缺的是 per-function
+ISA 上下文 + 全语料回归，已列为独立项（`docs/wp_ifunc_real_fix.md` §7.1）。
+
+#### 四、多出口循环：出口所有权模型落地，代价是先接住一个 C++ 零成本 EH 的真错值
+
+`has_multi_exit_cycle` 不再数「循环外后继个数」，改成问 `loop_exit_plan(...).expressible`
+—— 判据与发射器同源（判据放行 ⇔ 发射器有路可发），这是 §7.32 那句「必须一次性做完」的
+那一半。每条出口边归四种所有权之一（`Continuation` / `PureReturn` / `InlineOnEdge` /
+`Unsupported`），5 个发射点走同一个 `owner_of`。
+
+**落地过程中被 C++ 侧挡了一次，而且不是「不优化」而是「错值」**（这是本轮最值钱的发现）：
+`eh_loop_and_scope_exit.cpp` 退出码 g++ 0 / dcc -3。逐文件二分定到 `src/ssa.rs` 一处，
+再用 `DCC_LOOPDBG=1` 直接拿到错的那一步：
+
+```
+PLAN header=for_cond.0 cont=Some("eh_resume.8")  shared=["eh_resume.8"]  tail_exits=[]
+edge eh_lp.6 -> eh_lp_next.7 folded=eh_resume.8 class=Shared
+```
+
+根因：**EH 落地垫块被当成了循环结构的一部分**。垫块会 `goto` 回入正常规块（包括循环
+头），那条边在 CFG 上就是一条回边 ⇒ 垫块被算成 latch、被圈进 body，它的去向
+`eh_resume.8` 又被数成「共享出口」当上续体 ⇒ 循环正常走完落进 `_Unwind_Resume`。
+修法在唯一真源 `loop_shape`：垫块既不是 latch 也不在 body；再加三层同类约束（出口边
+落点为垫块时归新的 `ExitClass::IntoPad`，既不消耗也不提供续体名额；`tail_exits` 与
+`header_exit` 都滤掉垫块；结构化重建碰到垫块只发 `goto`，正文与标签归
+`rebuild_eh_blocks`）。不拦它时它是 latch（反向对照写进判据）。
+
+一个当时踩了的坑：先在 `exit_class_of` 里把垫块归成 `Shared`，看上去同类修法，却把续体
+选取改动了（而续体选取止是发射器依赖的事实）⇒ 行为仍然错。同一件事只能有一个拦截点（
+`rebuild_bb` 开头，它同时管住标签发射与 `visited` 记账），代码里把这个理由写成了注释。
+
+两条实测边界（方向相反，都不是凭推的）：
+
+1. **挡过头**：第一版挡条件漏了 `!tail_exits.is_empty()`，`DCC_SSA_BAIL=1` 当场报出
+   `while (k-- > 0)` 整族被踢出 SSA —— 那是相对 HEAD 的**覆盖面倒退**，而倒退**不会让
+   任何 gcc 差分变红**（产物仍然正确，只是不优化），只能靠 bail 计数与反向对照看到。
+2. **推不动**：旋转 do-while / 无限循环里「节点头既带具名写又是分支点，且它的出口边
+   折到由另一个 latch 提供的续体」—— 提升与回退**两种发法实测都错**（`do_break` 读数
+   `2 2 5 9 9 9 9` vs gcc `1 1 3 6 6 6 6`，只否掉提升后一字未变）⇒ 判不可表达、退回 AST。
+   这是继 §7.28 / §7.32 之后**第三次**被同一族挡回来。
+
+判据侧一个方法论坑的修正（与实现无关的真收益）：`compile_asm_text_with_env` 把 tag 写进
+`.file` 行，于是「两档 asm 必须不同」的 `assert_ne!` 是**空判**、`assert_eq!` 无条件红。改为
+`asm_body()` 剔掉 `.file` 行再比才有信息量（实测：进 SSA 的形状差 800+ 行，确实掉出 SSA
+的形状差 **0** 行）。
+
+收口后的状态：`for`、`continue`、单个与多个 `break` 合并、体内 `return`、`return`+`break`
+同现、`InlineOnEdge` 侧出口、旋转 do-while + `return`、无限循环、循环内 `switch`、
+`while (k-- > 0)` 一族 **全部进 SSA 且逐形四档与 gcc 一致**；仍走 AST 不优化的只剩
+「两个共享出口块」「两个 latch 落不同块」「节点头直跳循环外」与上面第 2 条。
+常驻判据：两份逐形夹具（`loop_exit_ownership.c` 19 形、`loop_exit_ownership_adv.c` 13 形）+
+lib 用例 `eh_pads_are_never_loop_members_or_continuations`（钉「垫块不进循环结构」与反向对照）+
+`multi_exit_cycle_predicate_is_narrow_and_sound` + `plain_loops_still_go_through_ssa`（两面都钉）。
+新增诊断窗口：`DCC_LOOPDBG=1` 下的 `[loopdbg] PLAN/edge/class/cont` 行（本轮就是靠它一步定到
+错位的续体选取）。
+
+
+#### 五、顺手挖出来的一条静默误编译（G2）并已真修
+
+推进第四项时撞见的，与循环无关：`goto` 跳到「循环之后的第二个标签」在 -O2/-O3 出错值，
+且 `DCC_OPT_SKIP=run_ssa_passes` 下**同样错** ⇒ 不在 SSA，在 AST 层。根因：
+`Stmt::Label { stmt }` 只包**一条**紧随语句，而 `dce_block` 在顶层 `Return` 之后把其余
+item 一律当不可达清掉 ⇒ `out:` 标签后面的 `return s;` 被丢，控制流从 `out:` 顺落进
+`late:` 再从函数尾 fall-off，`%eax` 只剩 `s -= 3 - 5`。修法是「遇到 `Label` 复位
+`stopped`」，语义最小；反向锚是 `return` 后**无**标签的真 dead 仍须被清（两条 lib 判据
+`g2_dce_block_retains_items_after_label` / `g2_dce_block_still_prunes_pure_dead_after_return`
+一面正着钉住）。这条不在本轮开局清单里，是「先测再改」的产出。
+
+#### 六、仍未修（逐项写了为什么不现在就动）
+
+1. 地址空间的**诊断**（gcc 对 `int * __seg_gs p`、自动变量带段、段指针与普通指针互相
+   赋值均报错）dcc 仍全盘接受 —— 不发错值，但不是契约对齐。
+2. IFUNC 已真修（见「三」）。**剩下的是另一件事**：变体之间没真差别 —— dcc 缺 per-function
+   的 ISA codegen（`FuncDecl` 带 `target_clones` 但 ISA 上下文不进指令选择），所以各变体机器码
+   逐字节相同。要补的是「每个变体真按自己的 `-m` 面发码」+ 全语料回归；它不属于「链接
+   方式静默降级」这条缺陷。另外内置链接器那条静态路径不做运行时派发（绑 default + 无条件
+   播报），缺 GOT 间接/启动期重定位应用者，逐项缺口列在 `src/link/ifunc.rs` 模块头。
+3. 多出口第四类（节点头带具名写 + 头块 `break` 到 latch 提供的续体）：提升/回退两侧
+   实测皆错，缺的是把头块的具名写固定成「循环体内按原序发射」并与提升互斥（需重做
+   `header_insts_droppable` 与头块指令的发射路径）。出口所有权实现本身**已落地**（见「四」）。
+   另记一条流程教训：这一族重落时必须同时跑 `cpp_abi_gcc_cross_check`（尤其
+   `cpp_abi_eh_group`）—— 只跑 C 语料的 gcc 差分对 C++ EH 这条路径完全看不到。
+4. 错位探测器的 16 条 skew 未进断言（定性见上），等它能区分缺陷与非缺陷再收。
+5. `-S` 回炸剩 14 条（`<dcc-unresolved-target>` 占位符策略）与 94 行「内存目的 + 立即数
+   源」无尺寸字母（GAS 只给 warning，宽度由汇编器反推）—— 都是读数格式决策，牵动全语料
+   246839 条纯指令行，不在本轮动。
+6. 严格别名：真正的 TBAA 消费者仍未接上，接上之后 `-fstrict-aliasing` 那条警告必须跟着
+   改（§7.37）。
+
+#### 七、段限定对象本体那包的内核产物对拍（改的是所有全局存取发射路径，必须单独拍）
+
+三层证据，缺一不可：
+
+1. **按构造**：内核对 per-cpu 对象用的是 `__percpu`（`address_space(__percpu)` 标签）与
+   inline asm 里的 `"%%"__stringify(__percpu_seg)":"` 字面前缀，**不是** C 层的
+   `__seg_gs int x;`。全树只有 3 个文件提到 `__seg_*`：`arch/x86/include/asm/percpu.h` 与
+   `include/asm-generic/percpu.h` 是「编译器不原生支持时的 fallback `#define`」，
+   `scripts/genksyms/keywords.c` 是关键字表 —— 都不是带段限定的对象定义，所以本改
+   动对内核不可能生效（这也是为什么它必须被验证而不是被假设）。
+2. **逐字节 A/B**：拿 HEAD 构建的二进制与本轮构建的二进制，对同一批内核 TU 编译并
+   `cmp` 产物。先筛出「**真的由 dcc 编**」的那些（`dcc-kernel-cc.sh` 在 dcc 失配时会静默
+   退回 gcc，不筛就会出现 7 个「两侧都是 gcc」的假 SAME——我第一次就踩了这个坑）：
+   `arch/x86/kernel/irq.o`、`init/version.o`、`kernel/irq/spurious.o` 3 个 TU 全部 **SAME**，
+   DIFF 0。其余候选（`mm/page_isolation.c`、`kernel/panic.c`、`crypto/hash.c`、
+   `mm/percpu.c`、`kernel/sched/core.c` 等）两侧都由 gcc 编（dcc 仍编不了）⇒ 不参与结论。
+3. **门级**：`make kernel-full-check` 在 **HEAD 上同样红**（`prepare0_full.sh` 的
+   `E0206: include file not found: list.h / xalloc.h / list_types.h`，两边读数一致），
+   所以它是**既有环境/工具链缺口**，不是本批引入的回归。这条既有红本身是个真问题
+   （内核全树验收门现在是红的），但修它不属于本轮四项遗留的范围，记在此处以免后人
+   误读成「本轮改坏」。
+
+另外 `make test-all` 全链跑完且 exit 0（`check_opt_equivalence.sh` OPT-DIFF **0**、
+`check_disasm_coverage.sh` 指令行 279813 / 读不出 **0** / 上限 0、`check_pipe_structure.sh`
+OK、REX 卫生 OK、`golden-cross` arm/mips OK）。
+
+测试（本轮收尾全量跑过，`--no-fail-fast`，均 0 失败）：lib **2016**、integration **1026**
+（本轮开局是 2008 / 1019），`cpp_abi_*` 交叉验证 target 9 条全绿（就是它接住了多出口
+实现退 EH 垫那件事），其余 target（errors / perf_regression / reproducibility / profile /
+fixdep 等）全绿。开局那 1 条红（`seg_qualifier_*` 自检 rc=-1）现在绿，且多了一条同族
+新判据。
 
 ### 8. 第 6 轮：P10 已接入 + P16 分析层完成
 

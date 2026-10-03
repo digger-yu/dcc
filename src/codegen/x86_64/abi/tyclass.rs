@@ -567,29 +567,158 @@ impl Codegen {
     /// 最外面那一层 —— 只看一层的实测后果是 `p[i]` / `q->a` / `a[i].f` 这类「基址是
     /// 段指针、外面还包一层下标或成员」的访问静默按普通地址读写（与 gcc 产物不一致，
     /// 在内核 per-cpu 场景下是写错内存）。
-    pub(crate) fn lvalue_seg_prefix(e: &Expr) -> Option<u8> {
-        let base = match e {
+    ///
+    /// 本函数现在同时认**两条轴**：
+    /// - pointee 带段（`int __seg_gs *p`）—— 凭表达式的类型，`ptr_seg_prefix`；
+    /// - 符号本体带段（`__seg_gs int gv;` / `__seg_gs int arr[]`）—— 类型里没有这个信息
+    ///   （它是符号的属性），只能查 `Codegen::global_seg`。
+    /// 第二条轴必须挂在这里而不是 `emit_global_addr`：LEA 不做内存访问，段前缀对它是
+    /// **空操作**（gas：“segment override on `lea' is ineffectual”），前缀只能逐笔贴在
+    /// 真实的 load/store 上 —— 而那正是本函数的全部消费者所在的位置。
+    pub(crate) fn lvalue_seg_prefix(&self, e: &Expr) -> Option<u8> {
+        if let Expr::Ident { name, .. } = e {
+            // 整个左值就是那个对象（`gv++` / `gs = …` / `struct S l = gs`）：
+            // 访问的就是对象自身的存储 ⇒ 符号本体的段适用。
+            return self.object_seg_prefix(&name.name);
+        }
+        let base: Option<&Expr> = match e {
             Expr::Deref { e, .. } => Some(&**e),
             Expr::Index { arr, .. } => Some(&**arr),
             Expr::Member { expr, .. } => Some(&**expr),
             Expr::Cast { e, .. } => Some(&**e),
+            // 取址后再被解引用 / 下标 / 取成员（`*&x`、`*(&a[i])`）：按 C 语义 `*&x ≡ x`，
+            // 访问的就是 `x` 自身的存储，所以 `x` 的段决定这一笔访存的段。
+            // 这条臂不是摆设：`-O2` 的 SSA 降把全局标量的读/写统一降到
+            // `InstKind::AddrOf` + `Load`/`Store`，重建回来的 AST 正是
+            // `Deref{AddrOf{Ident}}`（见 src/ssa.rs 的 `InstKind::Store` 重建），
+            // 且 `AddrOf` 的指针类型是**就地重建**的、不带地址空间标注，
+            // 所以只看 `ptr_seg_prefix` 会漏。少了这条臂，`-O2` 下所有
+            // 「对象本体带段限定」的全局访问都会退化成默认段。
+            Expr::AddrOf { e, .. } => Some(&**e),
             // 地址算术（`*(p + 1)` / `*(p + i)`）：结果类型已带段，但万一上游只
             // 给了一侧的操作数带段，这里一并下潜。
             Expr::Binop { l, r, .. } => {
-                return Self::lvalue_seg_prefix(l).or_else(|| Self::lvalue_seg_prefix(r))
+                return self.lvalue_seg_prefix(l).or_else(|| self.lvalue_seg_prefix(r))
             },
             _ => None,
         };
         match base {
-            Some(b) => Self::seg_prefix_of_base(b),
+            Some(b) => self.seg_prefix_of_base(b),
             None => None,
         }
     }
     /// 同上，但入参已经是「被解引用 / 被取成员 / 被下标的**基址表达式**」（`*p` 的 `p`、
     /// `p->a` 的 `p`、`*(pp+1)` 的 `pp`）：先看这一层指针的 pointee 带不带段，
     /// 不带再往下潜。
-    pub(crate) fn seg_prefix_of_base(base: &Expr) -> Option<u8> {
-        Self::ptr_seg_prefix(&base.ty()).or_else(|| Self::lvalue_seg_prefix(base))
+    pub(crate) fn seg_prefix_of_base(&self, base: &Expr) -> Option<u8> {
+        if let Some(seg) = Self::ptr_seg_prefix(&base.ty()) {
+            return Some(seg);
+        }
+        if let Expr::Ident { name, .. } = base {
+            // 基址是一个变量名。只有当被访问的是**这个变量自身的存储**时，符号本体的
+            // 段才适用：数组名 / 结构体对象名正是这种情形（`arr[i]` / `gs.b` —— 基址就是
+            // 那个对象的前字节）；而**指针**变量被解引用时，访问的是它所指对象的存储，
+            // 与这个指针对象自己住在哪个段无关（`__seg_gs int *p; *p = 1;` 按默认段写，
+            // 只有读/写 `p` 本体那一笔贴前缀，那笔走 `emit_global_load/store`）。
+            // 判据用**声明类型**（`globals_raw`）而不是 `base.ty()`：数组表达式在语义层可能
+            // 已经 decay 成指针，用表达式类型会把 `arr[i]` 误判成指针基址而漏前缀。
+            if self.is_global_not_local(&name.name) {
+                return self.object_seg_prefix_of_base(&name.name);
+            }
+            // 局部（包括 `-O2` SSA 重建出来的临时量）：局部本身在栈上、不属任何段，
+            // 但若这个槽里的**指针值**指向一个带段限定的对象（`t = &gv` 后 `*t`），
+            // 这一笔访问就要贴那个段。存在理由与只在何处登记见 `Codegen::local_addr_seg`。
+            return self.local_addr_seg_prefix(&name.name);
+        }
+        self.lvalue_seg_prefix(base)
+    }
+    /// 某个局部槽里的指针值所指向对象的段（`None` = 不携带段地址）。
+    /// 存理由（为何只能在 codegen 侧按赋值流推）见 `Codegen::local_addr_seg`。
+    pub(crate) fn local_addr_seg_prefix(&self, name: &str) -> Option<u8> {
+        self.local_addr_seg.get(name).copied()
+    }
+    /// 「左值是单个标识符」的赋值完成后更新该槽的段地址登记（理由见
+    /// `Codegen::local_addr_seg`）。只有这一个登记点，查询点也只有
+    /// `seg_prefix_of_base` 一处 —— 不在 66 个发射点各自贴补丁。
+    pub(crate) fn track_addr_seg_assign(&mut self, name: &str, rhs: &Expr) {
+        let seg = Self::addr_seg_carried_by_value(rhs, self);
+        if let Some(seg) = seg {
+            self.local_addr_seg.insert(name.to_string(), seg);
+        } else {
+            // 清除而不是保留：槽里现在装的是一个**不带段**的位模式（或另一个
+            // 对象的地址），继续按旧段贴前缀就是误发。
+            self.local_addr_seg.remove(name);
+        }
+    }
+    /// 一个**指针值表达式**是否携带段地址（`&x` —— x 的存储带段；或从另一个已
+    /// 登记的槽/带段 pointee 的指针拷贝）。写成自由函数是为了不拿 `&mut self`，
+    /// 以便在 `track_addr_seg_assign` 里先算完再改表。
+    fn addr_seg_carried_by_value(e: &Expr, cg: &Codegen) -> Option<u8> {
+        match e {
+            // `t = &x`：`*(&x) ≡ x`，段属于被取址对象的存储。
+            Expr::AddrOf { e: inner, .. } => {
+                if let Expr::Ident { name, .. } = &**inner {
+                    if cg.is_global_not_local(&name.name) {
+                        return cg.object_seg_prefix(&name.name);
+                    }
+                    return cg.local_addr_seg_prefix(&name.name);
+                }
+                cg.lvalue_seg_prefix(inner)
+            },
+            // 括号 / 指针到指针的隐式转换等薄壳：继续看里层值
+            Expr::Cast { e: inner, .. } => Self::addr_seg_carried_by_value(inner, cg)
+                .or_else(|| Self::ptr_seg_prefix(&e.ty())),
+            // `(a, &gv)` （sanitizer 包裹也是这形）：逗号表达式的值是右操作数
+            Expr::Comma { r, .. } => Self::addr_seg_carried_by_value(r, cg),
+            // 三目 `cond ? t1 : t2`：两侧同段才登记（宁漏不误）。
+            Expr::Cond { then_, else_, .. } => {
+                let a = Self::addr_seg_carried_by_value(then_, cg);
+                let b = Self::addr_seg_carried_by_value(else_, cg);
+                match (a, b) {
+                    (Some(s), Some(t)) if s == t => Some(s),
+                    _ => None,
+                }
+            },
+            other => {
+                // 声明就带段的指针（`int __seg_gs *q; p = q;`）本来就走类型系统那条轴，
+                // 这里一并传下去，使 `p` 的后续访问与 `q` 同段（与 gcc 的
+                // “段跟着指针类型走”一致）。
+                if let Expr::Ident { name, .. } = other {
+                    cg.local_addr_seg_prefix(&name.name)
+                        .or_else(|| Self::ptr_seg_prefix(&other.ty()))
+                } else {
+                    Self::ptr_seg_prefix(&other.ty())
+                }
+            },
+        }
+    }
+    /// 符号**本体**所在的段（`__seg_gs int gv;`）。入参是源码里的变量名，
+    /// 函数体里的 `static` 会先经 `resolve_global_key` 换成 mangled 名再查表。
+    pub(crate) fn object_seg_prefix(&self, name: &str) -> Option<u8> {
+        // 局部遮蔽全局（`int __seg_gs gv; int f(){ int gv; gv++; }`）必须走默认段：
+        // 表是按符号登记的，若不先排局部就会把全局的段贴到栈槽访问上。
+        if !self.is_global_not_local(name) {
+            return None;
+        }
+        let resolved = self.resolve_global_key(name);
+        self.global_seg_prefix(resolved)
+    }
+    /// 同上，但用在「基址」位置上：指针类型的对象本体不适用（解释见 `seg_prefix_of_base`）。
+    fn object_seg_prefix_of_base(&self, name: &str) -> Option<u8> {
+        if !self.is_global_not_local(name) {
+            return None;
+        }
+        let resolved = self.resolve_global_key(name).to_string();
+        let decl_is_ptr = self
+            .globals_raw
+            .get(&resolved)
+            .map(|g| g.ty.is_ptr())
+            .unwrap_or(false);
+        if decl_is_ptr {
+            None
+        } else {
+            self.global_seg_prefix(&resolved)
+        }
     }
     /// 发一枚已算好的段前缀（`None` 时不发任何东西 —— 误发会污染下一条指令）。
     pub(crate) fn emit_seg(&mut self, seg: Option<u8>) {
@@ -602,7 +731,7 @@ impl Codegen {
     /// 调用约定：必须**紧贴** load/store 的字节序列，中间不能插别的指令字节 ——
     /// 段前缀只作用于它后面的那一条指令。
     pub(crate) fn emit_seg_for(&mut self, lv: &Expr) {
-        if let Some(seg) = Self::lvalue_seg_prefix(lv) {
+        if let Some(seg) = self.lvalue_seg_prefix(lv) {
             self.emit(&[seg]);
         }
     }

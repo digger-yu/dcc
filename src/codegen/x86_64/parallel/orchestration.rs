@@ -46,6 +46,8 @@ impl Codegen {
                     )
                 })
                 .collect(),
+            // 段表跟着快照走（见 `ParallelEmitCtx::global_seg` 的存在理由）
+            global_seg: self.global_seg.clone(),
             variadic_funcs: self.variadic_funcs.clone(),
             old_style_funcs: self.old_style_funcs.clone(),
             nested_funcs: self.nested_funcs.clone(),
@@ -116,6 +118,8 @@ impl Codegen {
                 },
             );
         }
+        // worker 重建 Codegen 时段表必须同时回位，否则段前缀只在主线程路径上出现
+        cg.global_seg = ctx.global_seg;
         cg.variadic_funcs = ctx.variadic_funcs;
         cg.old_style_funcs = ctx.old_style_funcs;
         cg.nested_funcs = ctx.nested_funcs;

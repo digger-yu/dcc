@@ -1,10 +1,11 @@
 // src/codegen/x86_64/codegen.rs - x86_64 Codegen 结构体定义
 // Phase 1b Migration: Extract struct from monolithic mod.rs
 
-use crate::ast::{Decl, Designator, Expr, Field, Program, Type};
+use crate::ast::{AddrSpace, Decl, Designator, Expr, Field, Program, Type};
 use crate::codegen::shared::elf;
 use crate::codegen::shared::elf::{ComdatGroup, ElfRela, ElfSection, ElfSym, ExtraRelaSection};
 use crate::codegen::x86_64::elf::attr_diag::AttrDiagFn;
+use crate::codegen::x86_64::ifunc;
 use crate::codegen::x86_64::mem::global;
 use crate::codegen::x86_64::FuncDecl;
 use crate::const_eval;
@@ -58,6 +59,34 @@ pub struct Codegen {
     pub ubsan_ptr_refs: Vec<(u64, u64, u64)>,
     // 全局变量 (通过 lookup_global_info / lookup_global_by_key 受控访问)
     pub globals_raw: HashMap<String, GlobalVar>,
+    /// 符号 → 段地址空间（`__seg_fs` / `__seg_gs` 加在**对象本体**上）。
+    ///
+    /// 存在理由：对象本体的段不属于任何一个表达式的类型（它是**符号**的属性），
+    /// 而访存发射点是 `emit_global_addr/load/store` 这一族中央入口（66 个调用点）。
+    /// 把「哪个符号属于哪个段」记成一张表，前缀就只需要在那三个入口贴一次 ——
+    /// 若在调用点各贴各的，就是项目规范禁止的分阶段缺口。
+    ///
+    /// 与 pointee 一侧的段限定（`int __seg_gs *p`）是两条独立的轴：那条走类型系统
+    /// `QualType::addr_space`（见 `abi::tyclass::ptr_seg_prefix`），这张表只管符号本体。
+    pub global_seg: HashMap<String, AddrSpace>,
+    /// 局部**槽** → 该槽里的指针值所指向对象所在的段（`%gs`=0x65 / `%fs`=0x64）。
+    ///
+    /// 为什么必须有它（`-O2` 才出现的形，判据
+    /// `seg_qualifier_on_object_body_emits_segment_prefixes` 两档都跑）：`-O2` 的 SSA
+    /// 降把「对象本体带段限定的全局」的访问拆成两条语句 `t = &gv; *t = v;`（真源见
+    /// `src/ssa.rs` 的 `named_addr_operand`），而 `AddrOf` 造出的指针类型是就地新建的
+    /// `Ptr(QualType::new(obj_ty))`，**不带地址空间** —— `ptr_seg_prefix` 那条轴到这里
+    /// 必然为空。段信息只能在 codegen 侧按赋值流补回来：登记只发生在
+    /// 「左值是单个标识符」的赋值点（一处），查询只发生在
+    /// `abi::tyclass::seg_prefix_of_base`（一处）。
+    ///
+    /// 保守方向：任何其它赋值都会清除该槽的登记（宁可漏发也不误发）。
+    ///
+    /// **不进并行快照**：它是「一个函数体内推导出来的」逐函数状态，在
+    /// `compile_func` 入口清空、只由本函数体的赋值语句重新登记；并行 worker 里
+    /// 新造的 `Codegen` 从空表开始，与串行路径得到同一结果（快照反而会引入
+    /// 「跳函数残留」这条不一致）。
+    pub local_addr_seg: HashMap<String, u8>,
     // CompoundLit 去重缓存：同类型同内容的 CompoundLit 只物化一次
     // key = format!("{:?}", Expr) (类型 +inits 序列化),
     // value = (anon_name, rodata_offset)
@@ -287,6 +316,19 @@ pub struct Codegen {
     pub trampoline_slots: HashMap<String, i64>,
     pub trampoline_total_size: i32,
     pub complete_struct_types: HashMap<String, Type>,
+    // ── IFUNC / CPUID 合成（见 `ifunc.rs`）──
+    /// 本 TU 合成出来的函数清单（`__dcc_cpu_indicator_init` + 每个 `<f>.resolver`）。
+    /// 它们不在 `prog.decls` 里，所 `elf/rel_symbols.rs` 需要这份显式清单才能给它们
+    /// 发「已定义」符号。
+    pub ifunc_synth: Vec<ifunc::SynthFunc>,
+    /// IFUNC 基符号清单（`st_value`/`st_size` 取自 `resolver` 的合成体）。
+    pub ifunc_defs: Vec<ifunc::IfuncDef>,
+    /// 本 TU 是否用过 `__builtin_cpu_*`（决定要不要合成 CPUID 部分）。
+    /// 由 `special/builtins.rs` 的分支置位，合成 pass 在函数发射全部结束后跑。
+    pub cpu_builtin_used: bool,
+    /// `__dcc_cpu_model` 是否已登记进 `.data` 布局（只登记一次；为何用 `.data` 而非
+    /// `.bss` 见 `ifunc.rs::ensure_cpu_model`）。
+    pub cpu_model_registered: bool,
 }
 #[derive(Clone)]
 pub struct GlobalVar {
@@ -444,6 +486,10 @@ pub struct ParallelEmitCtx {
     pub source_name: String,
     pub line_map: Vec<LineSpan>,
     pub globals: HashMap<String, ParallelGlobalSnap>,
+    /// 符号 → 段地址空间。并行发射下**必须**跟着快照走：否则 worker 里的
+    /// `emit_global_load/store/addr` 查不到段，同一个源文件在“并行/不并行”两条路上
+    /// 产出不同的字节 —— 那是比不发前缀更难查的错。
+    pub global_seg: HashMap<String, AddrSpace>,
     pub variadic_funcs: HashMap<String, bool>,
     pub old_style_funcs: std::collections::HashSet<String>,
     pub nested_funcs: HashMap<String, Vec<(String, i64)>>,
@@ -537,6 +583,8 @@ impl Codegen {
             ubsan_lea_refs: vec![],
             ubsan_ptr_refs: vec![],
             globals_raw: HashMap::new(),
+            global_seg: HashMap::new(),
+            local_addr_seg: HashMap::new(),
             compound_lit_cache: HashMap::new(),
             frame_size: 0,
             expr_depth: 0,
@@ -682,6 +730,11 @@ impl Codegen {
             func_alignments: HashMap::new(),
             // 完整 struct/union 定义映射 (前向引用解析)
             complete_struct_types: HashMap::new(),
+            // IFUNC / CPUID 合成：展开产物在 `compile_rel` 尾部消费
+            ifunc_synth: Vec::new(),
+            ifunc_defs: Vec::new(),
+            cpu_builtin_used: false,
+            cpu_model_registered: false,
         }
     }
 
@@ -819,6 +872,13 @@ impl Codegen {
                                 .insert(v.name.name.clone(), model.clone());
                         }
                     }
+                    // 段寄存器限定符加在**对象本体**上（`__seg_gs int gv;`）：那是符号的
+                    // 属性，不挂在任何表达式的类型上，所以只能在此处进表。与 TLS 是两条
+                    // 独立的轴（上面 `is_thread_local` 那支不干涉本支）。
+                    if v.addr_space.is_segment() {
+                        self.global_seg
+                            .insert(v.name.name.clone(), v.addr_space);
+                    }
                 },
                 _ => {},
             }
@@ -830,8 +890,92 @@ impl Codegen {
         }
     }
 
+    /// 收集函数体内 `static` 局部变量的段限定，以 **mangled 名**进 `global_seg`。
+    ///
+    /// 为什么不能走上面那个 file-scope 循环：函数体里的 `static __seg_fs int x;` 在
+    /// `globals_raw` / 发射侧都以 `.Lsl<N>.<func>.<x>` 登记（`resolve_global_key` 把源名
+    /// 映到 mangled 名），用源名进表永远查不到 —— 那是“看起来接了、其实没接”。
+    /// 本 pass 必须跑在 `analyze_static_locals` 之后（要靠它提供 mangled 名）。
+    fn collect_static_local_segments(&mut self, prog: &Program) {
+        for decl in &prog.decls {
+            if let Decl::Func(f) = decl {
+                if let Some(body) = &f.body {
+                    let found = Self::collect_seg_statics(body);
+                    for (src, addr) in found {
+                        if let Some(m) = self.static_local_map.resolve(&f.name.name, &src) {
+                            let m = m.to_string();
+                            self.global_seg.insert(m, addr);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 递归收集一个块（含 switch 分支与嵌套函数体）里带段限定的 `static` 声明。
+    /// 只读 AST，返回 (源名, 地址空间)；避开 `&mut self` 重入借用的同时少一处可变状态。
+    fn collect_seg_statics(b: &crate::ast::Block) -> Vec<(String, AddrSpace)> {
+        let mut out = Vec::new();
+        for item in &b.items {
+            match item {
+                crate::ast::BlockItem::Decl(Decl::Var(v)) => {
+                    if v.is_static && v.addr_space.is_segment() {
+                        out.push((v.name.name.clone(), v.addr_space));
+                    }
+                },
+                crate::ast::BlockItem::Decl(Decl::Func(nf)) => {
+                    // 嵌套函数体里的 static 同样要 cover（发射时归属那个嵌套函数）
+                    if let Some(body) = &nf.body {
+                        out.extend(Self::collect_seg_statics(body));
+                    }
+                },
+                crate::ast::BlockItem::Stmt(s) => out.extend(Self::collect_seg_statics_of_stmt(s)),
+                // StructDef/UnionDef/EnumDef/Typedef 等声明不含对象本体
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// 语句里的子块/子语句递归（非块状语句包一层不会找到声明，直接返回空）。
+    fn collect_seg_statics_of_stmt(s: &crate::ast::Stmt) -> Vec<(String, AddrSpace)> {
+        use crate::ast::Stmt;
+        match s {
+            Stmt::Block { b, .. } => Self::collect_seg_statics(b),
+            Stmt::Switch { cases, .. } => {
+                let mut out = Vec::new();
+                for c in cases {
+                    out.extend(Self::collect_seg_statics(&c.body));
+                }
+                out
+            },
+            Stmt::If {
+                then_, else_, ..
+            } => {
+                let mut out = Self::collect_seg_statics_of_stmt(then_);
+                if let Some(e) = else_ {
+                    out.extend(Self::collect_seg_statics_of_stmt(e));
+                }
+                out
+            },
+            Stmt::While { body, .. } | Stmt::Do { body, .. } | Stmt::For { body, .. } => {
+                Self::collect_seg_statics_of_stmt(body)
+            },
+            Stmt::Label { stmt, .. } => Self::collect_seg_statics_of_stmt(stmt),
+            _ => Vec::new(),
+        }
+    }
+
     /// ET_EXEC 模式: 生成可直接执行的 ELF
     fn compile_exec(&mut self, prog: &Program) {
+        // IFUNC / CPUID 合成只在 ET_REL 路径实现（resolver 需要重定位与动态链接器
+        // 的 R_X86_64_IRELATIVE 机制）。这里绝不能“继续但发一个指向实现体的 IFUNC”
+        // —— 那正是本轮要修的静默降级缺陷的源头：符号表看上去有 IFUNC，实际没有
+        // resolver，链接期只能挑一条路径，而且很可能是一条错的路径。
+        if ifunc::needs_ifunc_synthesis(prog) {
+            self.report_no_exec_ifunc_support();
+            return;
+        }
         self.entry = 0x400000 + 64 + 56;
         // 收集本 TU 中有函数体的函数名
         self.defined_funcs.clear();
@@ -1030,6 +1174,7 @@ impl Codegen {
                                   // 静态局部变量分析 pass + 预注册到 data/bss
         self.static_local_map = crate::static_locals::analyze_static_locals(prog);
         self.pre_register_static_locals();
+        self.collect_static_local_segments(prog);
         self.emit_functions(prog);
         // 修补 data_section 里的 label 地址差值
         // (`&&A - &&B` 在静态初始化式中出现, 编译期 label 未知,
@@ -1676,6 +1821,7 @@ impl Codegen {
         // 静态局部变量分析 pass + 预注册到 data/bss
         self.static_local_map = crate::static_locals::analyze_static_locals(prog);
         self.pre_register_static_locals();
+        self.collect_static_local_segments(prog);
         // 生成函数代码 (无 _start)
         self.emit_functions(prog);
         // 修补 data_section 里的 label 地址差值 (同 compile_exec 路径)
@@ -1840,6 +1986,12 @@ impl Codegen {
             .map(|(fs, s, e, i, _)| (*fs, *s, *e, *i))
             .chain(self.pushsection_code_ranges.iter().copied())
             .collect();
+
+        // IFUNC / CPUID 合成体：必须晚于上面那个 `move_ranges` 快照（自定义节搬迁只
+        // 覆盖用户函数区间，合成代码不能被搬走），又必须早于 `patch_local_jumps`
+        // （resolver 里的 `.L` 前向跳转要和其他函数一起回填，未定义即 E1102）与
+        // `collect_rel_symbols`（resolver / IFUNC / `__dcc_cpu_model` 要进 symtab）。
+        self.emit_ifunc_synthesis(prog);
 
         // 所有标签已发射完成后, 先修补本地跳转, 并把最终仍未解析
         // 的 asm 符号跳转转换为 pending code relocation。符号表收集

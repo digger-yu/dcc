@@ -4,7 +4,7 @@
 use crate::ast::{Decl, Program};
 use crate::codegen::shared::elf::{
     ElfRela, ExtraRelaSection, R_X86_64_32S, R_X86_64_64, R_X86_64_GOTPCREL, R_X86_64_PC32,
-    R_X86_64_PLT32, R_X86_64_TPOFF32, STB_LOCAL,
+    R_X86_64_PLT32, R_X86_64_TPOFF32, STB_LOCAL, STT_GNU_IFUNC,
 };
 use crate::codegen::x86_64::{Codegen, PendingCodeRel};
 
@@ -399,12 +399,23 @@ impl Codegen {
             };
             // 检查符号绑定: LOCAL 表示本 TU 定义 (含 static), 用 PC32
             // 产生位置无关重定位, 避免 PLT 跳转
-            let is_local = self
+            let (is_local, is_ifunc) = self
                 .symbols
                 .get(sym_idx as usize)
-                .map(|s| s.bind == STB_LOCAL)
-                .unwrap_or(false);
-            let rel_type = if is_local { R_X86_64_PC32 } else { R_X86_64_PLT32 };
+                .map(|s| (s.bind == STB_LOCAL, s.ty == STT_GNU_IFUNC))
+                .unwrap_or((false, false));
+            // IFUNC 必须走 PLT32，**即使是 STB_LOCAL 基名**：PC32 是对符号地址的
+            // 静态绑定，而 IFUNC 符号的 `st_value` 是 **resolver 体**，把它直接当
+            // 调用目标 = 每次都跳到 resolver 并拿返回地址当代码跳——真正会跑的只有
+            // PLT（由 ld 为 IFUNC 生成 PLT 条目 + 一条 `R_X86_64_IRELATIVE`）。
+            // 实测 gcc 13.3 对 `static` + target_clones 也发 `R_X86_64_PLT32 fstatic - 4`
+            // （符号表里 `fstatic` 是 IFUNC LOCAL），所以「LOCAL 就用 PC32」这条启发
+            // 式对 IFUNC 不成立。（取数过程见 docs/wp_ifunc_real_fix.md）
+            let rel_type = if is_local && !is_ifunc {
+                R_X86_64_PC32
+            } else {
+                R_X86_64_PLT32
+            };
             self.relocations.push(ElfRela {
                 offset: code_off,
                 sym_index: sym_idx,

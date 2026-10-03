@@ -11468,6 +11468,14 @@ impl<'a> Parser<'a> {
                                     | "__builtin_nan"
                                     | "__builtin_nanf"
                                     | "__builtin_nanl"
+                                    // x86 CPU 检测三件套：真实现在
+                                    // `codegen::x86_64::ifunc`（resolver 体复用同一条
+                                    // `__dcc_cpu_indicator_init`），返回值都是 int 语义，
+                                    // 列在这里只为止掉 W1015「返回类型未知」的噪声——
+                                    // 它们本来就是编译器内建，没有声明可写。
+                                    | "__builtin_cpu_supports"
+                                    | "__builtin_cpu_is"
+                                    | "__builtin_cpu_init"
                             )
                         {
                             self.warn_here(

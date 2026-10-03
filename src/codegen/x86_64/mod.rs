@@ -28,6 +28,10 @@ mod codegen;
 pub mod eh_tables;
 mod elf;
 mod emit;
+/// `target_clones` / IFUNC / `__builtin_cpu_*` 的 codegen 侧真实现
+/// （AST 展开 + resolver/CPUID 合成体发射）；driver 与 `elf/rel_symbols.rs`
+/// 都消费本模块，展开只在 `ir::lower` 之前跑一次。
+pub mod ifunc;
 mod instructions;
 mod mem;
 mod parallel;

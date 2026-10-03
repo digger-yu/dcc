@@ -1342,12 +1342,31 @@ fn eh_frame_hdr_content_has_fde() {
 
 // ====== IFUNC / symver / RELRO / build-id tests ======
 
-/// IFUNC resolver runtime: 编译 IFUNC 程序并用 host gcc 链接运行,
-/// 验证 resolver 被正确调用并返回预期实现
+/// IFUNC resolver runtime: dcc 出的 `.o` 必须能被**宿主 gcc/ld 原生**链接并运行，
+/// 动态链接器真调用 resolver、选中的是真实现。
+///
+/// 旧版三处不成立（本轮翻转的理由）：
+///   * 夹具 `attr_ifunc.c` 不是合法 C（`resolver` 返回 `void*` 而被 `ifunc()` 引用的
+///     基名声明与实现体类型不匹配），dcc 对它零诊断 —— 测的是编译器接受非法输入；
+///   * `if !link.status.success() { eprintln!("skip …"); return; }` 把「根本链不上」
+///     吃成假绿 —— 而这恰好是 IFUNC 静态降级缺陷当时的现场形状；
+///   * 只断 `rc == 0`，不区别「跑对了」与「跑丢了但默认退 0」。
+/// 现在换合法夹具 `attr_target_clones_ifunc_behavior.c`（两个返回值不同的实现体 +
+/// `__builtin_cpu_supports` 交叉核对），取消 skip 出口，并钉「产物仍是动态」与
+/// 「IFUNC + IRELATIVE 活到最终产物」。实测（-O0）：
+/// ```text
+/// gcc /tmp/be.o -o exe → 成功（只有 .note.GNU-stack 缺失与 tempnam 两类警告）
+/// file → PIE … dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2
+/// readelf -sW → by_sse2 IFUNC GLOBAL @0x2260 == resolve_sse2 FUNC LOCAL @0x2260
+/// readelf -rW → 0x4fc8 R_X86_64_IRELATIVE 2260 / 0x4fd0 R_X86_64_IRELATIVE 22e0
+/// 运行 → by_sse2=2 want_a=2 / by_avx2=11 want_b=11（rc=0，与 gcc 逐字相同）
+/// ```
 #[test]
 #[cfg(unix)]
 fn ifunc_resolver_runtime() {
-    let src = include_str!("../fixtures/c/attr_ifunc.c");
+    const STT_GNU_IFUNC: u8 = 10;
+    const R_X86_64_IRELATIVE: u32 = 37;
+    let src = include_str!("../fixtures/c/attr_target_clones_ifunc_behavior.c");
     let (out, obj) = run_object_test("ifunc-resolver-runtime", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
     let dir = std::env::temp_dir();
@@ -1359,23 +1378,62 @@ fn ifunc_resolver_runtime() {
         .output()
         .expect("host gcc link");
     let _ = fs::remove_file(&obj);
-    if !link.status.success() {
-        let _ = fs::remove_file(&exe);
-        // IFUNC 链接可能需要 glibc 支持, 跳过而非失败
-        eprintln!(
-            "skip ifunc runtime: host link failed: {}",
-            String::from_utf8_lossy(&link.stderr)
-        );
-        return;
-    }
+    // 不再「链不上就 skip」：宿主 ld 原生处理带真 resolver 的 IFUNC `.o` 就是本工作包
+    // 的交付物，链不上即缺陷回来了。
+    assert!(
+        link.status.success(),
+        "宿主 gcc/ld 必须能原生链接含 IFUNC 的 .o（旧缺陷形状里这里会失败或被 skip）：{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
     #[cfg(unix)]
     {
         let _ = fs::set_permissions(&exe, fs::Permissions::from_mode(0o755));
     }
+    // 产物必须是动态的：静态产物里没有会跑 resolver 的动态链接器。
+    assert_dynamically_linked(&exe, "ifunc_resolver_runtime（宿主 gcc 链 dcc .o）", "");
+    // IFUNC 语义活到最终产物：基名仍 STT_GNU_IFUNC、指向用户写的 resolver，且
+    // 重定位表里有指向那个 resolver 的 R_X86_64_IRELATIVE（PIE 下在 `.rela.dyn`，
+    // 非 PIE 下在 `.rela.plt`，故扫全部 `.rela*`）。
+    let bytes = fs::read(&exe).unwrap_or_default();
+    let syms = elf64_syms(&bytes);
+    let find = |n: &str| syms.iter().find(|s| s.name == n);
+    let mut irel_addends: Vec<u64> = Vec::new();
+    for (base, resolver) in [("by_sse2", "resolve_sse2"), ("by_avx2", "resolve_avx2")] {
+        let b = find(base).unwrap_or_else(|| panic!("exe 里没有 IFUNC 基名 {base}"));
+        let r = find(resolver).unwrap_or_else(|| panic!("exe 里没有用户 resolver {resolver}"));
+        assert_eq!(b.stype, STT_GNU_IFUNC, "{base} 在最终产物里仍必须是 STT_GNU_IFUNC");
+        assert_eq!(r.stype, 2, "{resolver} 是普通 STT_FUNC（gcc 的形状）");
+        assert_eq!((b.value, b.size), (r.value, r.size), "{base} 必须指向 {resolver}");
+        assert_ne!(
+            b.value,
+            find("slow_impl").expect("slow_impl").value,
+            "{base} 又指回实现体了 = resolver 丢失（旧缺陷形状）"
+        );
+        irel_addends.push(r.value);
+    }
+    let irel: Vec<u64> = elf64_all_rela(&bytes)
+        .into_iter()
+        .filter(|r| r.2 == R_X86_64_IRELATIVE)
+        .map(|r| r.3 as u64)
+        .collect();
+    for want in irel_addends {
+        assert!(
+            irel.contains(&want),
+            ".rela.dyn 里没有指向 resolver {want:#x} 的 R_X86_64_IRELATIVE（实际 {irel:?}）：\
+             动态链接器不会调用 resolver"
+        );
+    }
     let run = Command::new(&exe).output().expect("run ifunc exe");
     let _ = fs::remove_file(&exe);
     let rc = run.status.code().unwrap_or(-1);
-    assert_eq!(rc, 0, "ifunc resolver should return 0, got {rc}");
+    let stdout = String::from_utf8_lossy(&run.stdout).to_string();
+    // 夹具自己只在「选中的是 fast_impl(=2) 且与 builtin 读数一致」时退 0。
+    assert_eq!(rc, 0, "ifunc resolver 应选中非 default 实现, got {rc}; stdout: {stdout}");
+    assert_eq!(
+        stdout,
+        "by_sse2=2 want_a=2\nby_avx2=11 want_b=11\n",
+        "选型输出与预期不符（恒假 resolver/恒返 default 只能得到 by_sse2=1）"
+    );
 }
 
 /// RELRO: -z relro PIE 应生成 GNU_RELRO 段
@@ -3402,3 +3460,183 @@ fn wcs_libc_call_passes_through() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// 工作包 IFUNC（本轮：真修）：「IFUNC 使链接静默从动态降级为静态」已闭合。
+//
+// 旧背景（docs §7.38 桶 CF-IFUNC-DYNLINK、docs/wp_ifunc.md）与旧形状：
+//   * target_clones 的 .o 把 compute/multiply 发成 STT_GNU_IFUNC(type=10)，st_value
+//     直接指向实现体（= compute.sse4.2 = compute.default），**没有 resolver 体**；
+//   * driver 见 IFUNC 即改道内置链接器；纯 clones → 静态 ET_EXEC（无 dynamic 段），
+//     clones+libc(printf) → E0302 链失败。
+// 上一轮只钉「不能静默」（改道原因 + 后果必须说出来）；本轮把 resolver 搬回 codegen
+// （`src/codegen/x86_64/ifunc.rs`）后：改道分支已删，宿主 cc/ld 原生处理该 `.o` 并产
+// **动态**可执行文件。下面两条因此从「断静态/断失败」翻成「断动态/断链得上」，同时
+// 保留底线：仍走内置链接器（用户显式 `-fbuiltin-linker`）的路径必须继续自报链接方式。
+// 实测证据（含逐字 `file`/`readelf` 读数）见 docs/wp_ifunc_real_fix.md。
+// ---------------------------------------------------------------------------
+
+/// 把源码经指定 flags 链成可执行文件，返回 (是否成功, stderr 文本, 产物路径)。
+/// 用 PID+stem 造唯一临时名，避免与并行用例互相踩。
+#[cfg(unix)]
+fn dcc_link_capture_flags(
+    c_src: &str,
+    stem: &str,
+    flags: &[&str],
+) -> (bool, String, std::path::PathBuf) {
+    let dir = std::env::temp_dir();
+    let tag = std::process::id();
+    let sf = dir.join(format!("dcc-ifunc-snd-{stem}-{tag}.c"));
+    let exe = dir.join(format!("dcc-ifunc-snd-{stem}-{tag}.bin"));
+    std::fs::write(&sf, c_src).expect("写临时源文件");
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"));
+    cmd.arg("-std=gnu23");
+    for f in flags {
+        cmd.arg(f);
+    }
+    cmd.args(["-o"]).arg(&exe).arg(&sf);
+    let out = cmd.output().expect("运行 dcc");
+    let _ = std::fs::remove_file(&sf);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    (out.status.success(), stderr, exe)
+}
+
+/// 契约 1 翻版：两条链路的**链接方式**都必须真实且自报。
+///
+/// 前身 `target_clones_static_downgrade_is_announced_not_silent` 钉的是「产物是静态的 +
+/// 诊断说了静态」；本轮把 resolver 搬回 codegen、删掉改道分支后，默认路径的产物应当
+/// 是**动态**的，所以那一翻变成：
+///   * 默认路径（无 `-fbuiltin-linker`）：必须经宿主 cc 产出动态可执行文件，且 stderr
+///     不得再说「改道内置链接器 / 降级为静态」——假诊断与假产物一样是不静默的违反。
+///   * 显式 `-fbuiltin-linker`：产物确实是静态的，且必须自报 static + 明说这条路径里
+///     运行时 CPUID 派发已失效（IFUNC 被冻结到 `<base>.default`）。
+#[test]
+#[cfg(unix)]
+fn target_clones_link_mode_is_announced_on_both_paths() {
+    let src = "__attribute__((target_clones(\"sse4.2,default\")))\n\
+                int compute(int x){ return x*2+1; }\n\
+                int main(void){ return compute(10) == 21 ? 0 : 1; }\n";
+
+    // ---- 1) 默认路径：动态，且不谎报改道 ----
+    let (ok, stderr, exe) = dcc_link_capture_flags(src, "only", &["-O0"]);
+    assert!(ok, "纯 target_clones 必须能链上；stderr:\n{stderr}");
+    assert_dynamically_linked(&exe, "默认路径（含 IFUNC）", &stderr);
+    let dyn_out = std::process::Command::new("readelf")
+        .args(["-d"])
+        .arg(&exe)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    assert!(
+        dyn_out.contains("(NEEDED)"),
+        "动态产物必须真的有 DT_NEEDED（不然就是假动态）:\n{dyn_out}"
+    );
+    let lower = stderr.to_lowercase();
+    assert!(
+        stderr.contains("via host cc"),
+        "链接方式必须被说出来（这里是宿主 cc），不允许静默:\n{stderr}"
+    );
+    assert!(
+        !lower.contains("built-in linker") && !lower.contains("downgrade"),
+        "默认路径不再改道内置链接器，因此也不得再说「已降级为静态」——\n\
+         假诊断与假产物一样不允许:\n{stderr}"
+    );
+    let (rc, _stdout, run_stderr) = run_exe_bounded(&exe);
+    let _ = std::fs::remove_file(&exe);
+    let run_stderr = String::from_utf8_lossy(&run_stderr).to_string();
+    assert_eq!(rc, 0, "动态产物里 compute(10) 必须返回 21；stderr:\n{run_stderr}");
+
+    // ---- 2) 显式 `-fbuiltin-linker`：仍静态，但仍必须自报 ----
+    let (ok, stderr, exe) = dcc_link_capture_flags(src, "builtin", &["-O0", "-fbuiltin-linker"]);
+    assert!(ok, "纯 target_clones 应能用内置链接器链上；stderr:\n{stderr}");
+    assert!(
+        stderr.contains("static (no PT_INTERP / DT_NEEDED)"),
+        "内置链接产物必须自报链接方式（不得静默）:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("bound to variant 'compute.default'")
+            && stderr.contains("CPUID dispatch is DISABLED"),
+        "静态 ET_EXEC 里 IFUNC 被冻结到 default 变体、运行时 CPUID 派发失效——这一件\
+         语义退化必须无条件说出来:\n{stderr}"
+    );
+    let file_out = std::process::Command::new("file")
+        .arg(&exe)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    assert!(
+        file_out.contains("statically linked"),
+        "诊断声称 static，产物就必须真是 statically linked（契约 4：不得默默无效/说谎）:\n{file_out}"
+    );
+    let (rc, _stdout, run_stderr) = run_exe_bounded(&exe);
+    let _ = std::fs::remove_file(&exe);
+    let run_stderr = String::from_utf8_lossy(&run_stderr).to_string();
+    assert_eq!(
+        rc, 0,
+        "静态产物绑到 default 变体后必须跑得对（绑进 resolver 的旧形状这里 SIGSEGV rc=139）；\n\
+         stderr:\n{run_stderr}"
+    );
+}
+
+/// 契约 1 翻版（失败侧→成功侧）：target_clones + libc(printf) 必须能经宿主 cc **链上**。
+///
+/// 前身 `target_clones_libc_link_failure_is_attributed_to_diversion` 钉的是「必链不上，
+/// 但失败要归因到 IFUNC 改道」；它自己就写了「若已能链上说明链接方式变了，请把本用例
+/// 翻成断言动态产物」—— 那一翻就是本条。旧形状里这里堆几十个 E0302，原因不是缺 libc
+/// 符号表，而是「含 IFUNC 就改道内置链接器」；改道分支已删，于是这里必须链得上、
+/// 产物必须动态、运行必须输出 21。
+///
+/// 底线仍钉住：用户**显式** `-fbuiltin-linker` 时依旧链不上 libc 入口（内置链接器的
+/// libc 能力是独立缺陷，不属本工作包），但失败必须被归因到「这是内置链接器的静态
+/// ET_EXEC、没有动态加载器」并告知去掉该选项可得动态产物，不得让用户面对一堆孤立
+/// E0302；也不得再把失败归因到已不存在的「IFUNC 改道」。
+#[test]
+#[cfg(unix)]
+fn target_clones_libc_links_via_host_cc_and_builtin_failure_is_attributed() {
+    let src = "#include <stdio.h>\n\
+                __attribute__((target_clones(\"sse4.2,default\")))\n\
+                int compute(int x){ return x*2+1; }\n\
+                int main(void){ printf(\"%d\\n\", compute(10)); return 0; }\n";
+
+    // ---- 1) 已修：默认路径链得上 + 动态 + 输出对 ----
+    let (ok, stderr, exe) = dcc_link_capture_flags(src, "libc", &["-O0"]);
+    assert!(
+        ok,
+        "target_clones + printf 现在必须能经宿主 cc 链上（resolver 已在 .o 里、改道分支已删）；\n\
+         链不上说明退回旧缺陷形状（那个形状下这里堆几十个 E0302）。stderr:\n{stderr}"
+    );
+    assert_dynamically_linked(&exe, "clones + libc（宿主 cc）", &stderr);
+    let (rc, stdout, run_stderr) = run_exe_bounded(&exe);
+    let _ = std::fs::remove_file(&exe);
+    assert_eq!(rc, 0, "运行失败；stderr:\n{}", String::from_utf8_lossy(&run_stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&stdout),
+        "21\n",
+        "compute(10) 必须经动态链接器跑 resolver 后返回 21"
+    );
+
+    // ---- 2) 底线：显式走内置链接器时，失败仍必须被归因、不得静默 ----
+    let (ok, stderr, exe) = dcc_link_capture_flags(src, "libc-builtin", &["-O0", "-fbuiltin-linker"]);
+    let _ = std::fs::remove_file(&exe);
+    let lower = stderr.to_lowercase();
+    assert!(
+        !ok,
+        "内置链接器仍不能供 libc 入口（docs/missing_features.md 的 libc 行，不属本包）；\n\
+         若已能链上说明那个缺陷被修了，请同步翻本判据并更新 docs"
+    );
+    assert!(
+        stderr.contains("E0302") || stderr.contains("undefined reference"),
+        "失败必须有链接失败信号；stderr:\n{stderr}"
+    );
+    assert!(
+        lower.contains("built-in linker") && stderr.contains("no PT_INTERP"),
+        "这堆 E0302 必须被归因到「内置链接器的静态 ET_EXEC、没有动态加载器」，\n\
+         并告知去掉 -fbuiltin-linker 可得动态产物，不得误读成缺 libc 符号表；\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("STT_GNU_IFUNC"),
+        "旧诊断把失败归因到「IFUNC 改道内置链接器」；改道分支已删，再说 IFUNC 就是\n\
+         假归因（把用户引向一个已经不存在的机制）；stderr:\n{stderr}"
+    );
+}
+

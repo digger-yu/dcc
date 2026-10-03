@@ -45,8 +45,8 @@ pub struct CpuFeatures {
     pub avx512_vpopcntdq: bool,
 
     // --- AVX-VNNI (VEX form, non-512) ---
-    // CPUID leaf 7 sub-leaf 0, ECX[bit 4]
-    pub avx_vnni: bool,
+    // CPUID leaf 7 **sub-leaf 1**, EAX[bit 4]（旧代码错读子叶 0 的 ECX#4 = OSPKE，已修）
+    pub avx_vnni: bool,   // CPUID leaf 7 **sub-leaf 1**, EAX[bit 4]（不是子叶 0 的 ECX#4）
 
     // --- CPUID leaf 7 sub-leaf 0, EDX ---
     pub avx512_4vnniw: bool,
@@ -54,6 +54,10 @@ pub struct CpuFeatures {
 
     // --- CET (Control-flow Enforcement Technology) ---
     pub cet_ss: bool,  // CPUID leaf 7, ECX[bit 7]: CET_SS
+    /// CPUID leaf 7, EDX[bit 14]: SERIALIZE（序列化合约指令）
+    pub serialize: bool,
+    /// CPUID leaf 7, EBX[bit 24]: CLWB（需要 OS 已开 xsave：与 `semantics::cpu_isa` 同口径）
+    pub clwb: bool,
     pub cet_ibt: bool, // CPUID leaf 7, EDX[bit 20]: CET_IBT
 
     // --- AVX10 (CPUID leaf 7 sub-leaf 1) ---
@@ -350,13 +354,22 @@ fn detect_x86() -> CpuFeatures {
         // CET
         feats.cet_ss = bit(ecx7, 7);
         feats.cet_ibt = bit(edx7, 20);
+        // SERIALIZE / CLWB —— 两个以前根本不报的名字（`semantics::cpu_isa` 有它们，
+        // 因为 target_clones 与 `__builtin_cpu_supports` 要按名字回答）。位号按
+        // 权威源：serialize = (7,0):EDX#14，clwb = (7,0):EBX#24。
+        feats.serialize = bit(edx7, 14);
+        feats.clwb = bit(ebx7, 24) && feats.osxsave;
 
         // AVX-512 扩展 (ECX)
         feats.avx512_vbmi = bit(ecx7, 1) && feats.avx512f;
         feats.avx512_vbmi2 = bit(ecx7, 6) && feats.avx512f;
         feats.avx512_vnni = bit(ecx7, 11) && feats.avx512f;
-        // AVX-VNNI (VEX form): ECX[bit 4], requires AVX (not AVX-512)
-        feats.avx_vnni = bit(ecx7, 4) && feats.avx;
+        // AVX-VNNI (VEX form) 的真位在 **CPUID leaf 7 子叶 1 的 EAX#4**（`cpufeatures.h`
+        // word 12 bit 4），不是子叶 0 的 ECX#4 —— 那一位是 **OSPKE**（CET  supervisor
+        // mode 存在位），与 AVX-VNNI 无关；旧代码读在那里，任何带 CET 而无 AVX-VNNI
+        // 的机器都会被报成真，而带 AVX-VNNI 的旧机器会被报成假。门控也不是 `avx` 而是
+        // XCR0 的 SSE+YMM 两位（0x6），与 `semantics::cpu_isa` 那张表同一口径。
+        // 本字段因此在子叶 1 的块里赋值（见下）。
         feats.avx512_bitalg = bit(ecx7, 12) && feats.avx512f;
         feats.avx512_vpopcntdq = bit(ecx7, 14) && feats.avx512f;
 
@@ -369,8 +382,12 @@ fn detect_x86() -> CpuFeatures {
         let max_subleaf = leaf7.eax; // EAX of leaf 7 = max sub-leaf
         if max_subleaf >= 1 {
             let leaf7_1 = std::arch::x86_64::__cpuid_count(7, 1);
+            let eax7_1 = leaf7_1.eax;
             let ebx7_1 = leaf7_1.ebx;
             let edx7_1 = leaf7_1.edx;
+
+            // AVX-VNNI（VEX 形）：子叶 1 的 EAX[bit 4]，门控是 XCR0 的 SSE+YMM（0x6）。
+            feats.avx_vnni = bit(eax7_1, 4) && os_avx_ready;
 
             // AVX10.1 support: EDX[bit 19]
             let cpu_has_avx10 = bit(edx7_1, 19);

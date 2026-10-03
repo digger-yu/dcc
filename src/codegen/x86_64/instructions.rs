@@ -2,7 +2,7 @@
 // Low-level x86_64 machine code emission methods for Codegen
 // Core instruction encoding: mov, arithmetic, logic, stack, jumps, labels
 
-use crate::ast::{Expr, Type};
+use crate::ast::{AddrSpace, Expr, Type};
 use crate::codegen::x86_64::codegen::JumpKind;
 use crate::codegen::x86_64::codegen::PendingJump;
 use crate::codegen::x86_64::Codegen;
@@ -826,8 +826,46 @@ impl Codegen {
         self.is_global_object(name)
     }
 
+    /// 查「这个全局符号属于哪个段」→ x86 legacy 段前缀字节（`%fs`=0x64 / `%gs`=0x65）。
+    ///
+    /// 前置：`resolved` 必须是已过 `resolve_global_key` 的符号键 —— 函数体里的
+    /// `static __seg_fs int x;` 在那里被换成 mangled 名，表也是按 mangled 名登记的。
+    ///
+    /// 返回 None ⇒ 默认段，**一个字节都不多发**：`global_seg` 只在
+    /// `AddrSpace::is_segment()` 时才插条目，所以不带段限定的全局永远走无前缀分支；
+    /// 段限定的符号本体与 `AddrSpace::Generic`（cs/ds/es/ss）也一律不发，与 pointee
+    /// 那一侧（`abi::tyclass::ptr_seg_prefix`）口径一致。
+    pub fn global_seg_prefix(&self, resolved: &str) -> Option<u8> {
+        self.global_seg
+            .get(resolved)
+            .and_then(|a| AddrSpace::prefix_byte(*a))
+    }
+
+    /// 符号本体带段限定时，在指令最前贴段前缀字节。
+    ///
+    /// 前缀必须落在 legacy-prefix 区（LOCK/段/操作数尺寸/地址尺寸/REX/opcode 的硬次序）：
+    /// 所以它先于 `0x66`（sz=2 的存）与 `0xF3/0xF2`（SSE mandatory prefix）发出去。
+    /// 本函数**必须在任何 `self.pos()` 参与 disp32 计算之前**调用：pending 重定位要指
+    /// 到 disp 字段，前缀把整条指令右移一字节，先取 pos 就全错位。
+    #[inline]
+    pub(crate) fn emit_global_seg(&mut self, resolved: &str) {
+        if let Some(seg) = self.global_seg_prefix(resolved) {
+            self.emit(&[seg]);
+        }
+    }
+
     pub fn emit_global_addr(&mut self, reg: u8, name: &str) {
         let resolved = self.resolve_global_key(name).to_string();
+        // 取址（LEA）**不发**段前缀，即使符号本体带 `__seg_gs`/`__seg_fs` —— 这不是保守，
+        // 是硬件事实：LEA 不做内存访问，段重叠前缀对它的结果是空操作（gas 直接警告
+        // “segment override on `lea' is ineffectual”；实测 `lea %fs:g(%rip)` 与不带前缀的
+        // `lea g(%rip)` 得到同一个值）。所以在这里贴前缀只会给出“看起来修了”的假象：
+        // 前缀字节占位、地址仍是不含段基址的裸地址，后续所有以它为基的访问仍然越段。
+        //
+        // 因此“先取址、后访问”那一族（`gv++` / `arr[i]` / `gs.b` / 聚合拷贝）的前缀必须
+        // 落在**访问**那一笔上，单一真源是 `abi::tyclass::lvalue_seg_prefix`（它现在既认
+        // pointee 的段，也认符号本体的段）；本函数只负责把裸地址算出来，与 gcc 同形
+        // （gcc: `leaq arr(%rip),%rax` + `movl %gs:(%rax,%rdi,4),%eax`）。
         let disp32_pos = self.pos() + 3;
         let rex = if reg >= 8 { 0x4C } else { 0x48 };
         self.emit(&[rex, 0x8D, 0x05 | ((reg & 7) << 3), 0, 0, 0, 0]);
@@ -836,6 +874,10 @@ impl Codegen {
 
     pub fn emit_global_load(&mut self, reg: u8, name: &str) {
         let resolved = self.resolve_global_key(name).to_string();
+        // 段限定与 TLS 是两条独立的轴：下面 `is_tls` 决定的是**重定位种类**
+        // (pending_tls_rels vs pending_data_rels)，本行决定的是**指令字节**；
+        // 一个符号可以同时带其中之一，也可能只有段（非 TLS 的 per-cpu 对象）。
+        self.emit_global_seg(&resolved);
         let (sz, is_tls, _off, is_signed) = self
             .globals_raw
             .get(&resolved)
@@ -934,6 +976,8 @@ impl Codegen {
 
     pub fn emit_global_store(&mut self, reg: u8, name: &str) {
         let resolved = self.resolve_global_key(name).to_string();
+        // 同 load：段前缀只改指令字节，`is_tls` 只改重定位种类，两条轴不合并。
+        self.emit_global_seg(&resolved);
         let (sz, is_tls, _off) = self
             .globals_raw
             .get(&resolved)

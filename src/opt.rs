@@ -1230,8 +1230,16 @@ fn dce_block(items: &mut Vec<BlockItem>) {
     let mut stopped = false;
     items.retain(|item| {
         if stopped {
-            // goto 仍可跳入 return 之后的标签，不能当不可达代码删除
+            // G2: `Stmt::Label { stmt }` 只把紧随标签的**一条语句**纳入自己，
+            // 标签之后到下一个 Label/terminator 之间的顶层 item（典型形态是
+            // `out: <body>; return s;` 里的 `return s;`）仍然是「跳到 out 之后
+            // 可达」的路径。旧实现只保 Label 本身、把中间的 Return 全清掉 ⇒
+            // `goto out` 从 `out:` 直落进下一个标签、再从函数尾 fall-off，
+            // `%eax` 只剩最后一条对 `s` 的写，实测 `out:` 少 3 变成少 3+5。
+            // 正确的语义是：Label 是跳入入口，遇到它就把 stopped 复位；此后
+            // 的 item 保留到本 block 末尾或下一个顶层 Return（再触发 stopped）。
             if matches!(item, BlockItem::Stmt(Stmt::Label { .. })) {
+                stopped = false;
                 return true;
             }
             return false;
@@ -2728,6 +2736,130 @@ mod tests {
                 BlockItem::Stmt(Stmt::Label { .. })
             ));
         }
+    }
+
+    /// G2：`dce_block` 不得把 Label 后面到本 block 末尾（或下一个顶层 Return）
+    /// 之间的顶层 item 当不可达清掉。旧实现只保 Label 本身、把 `out: <body>; return s;`
+    /// 里的 `return s;` 清掉 ⇒ `goto out` 从 out 直落进 late 再从函数尾 fall-off。
+    ///
+    /// 直接对 `dce_block` 单元测（不走完整 `optimize`），避免其他 pass 混进信号。
+    /// 修复前：items.len()==5（两个顶层 Return 被清）；修复后：items.len()==7。
+    #[test]
+    fn g2_dce_block_retains_items_after_label() {
+        let src = b"int f(int n) {\n\
+                      int s = n;\n\
+                      goto out;\n\
+                      return 999;\n\
+                    out:\n\
+                      s -= 3;\n\
+                      return s;\n\
+                    late:\n\
+                      s -= 5;\n\
+                      return s;\n\
+                  }\n";
+        let (prog, diags) = crate::parser::parse(src, "g2-dce.c");
+        assert!(
+            diags
+                .iter()
+                .all(|d| !matches!(d.sev, crate::diagnostics::Severity::Error)),
+            "parse errors: {:?}",
+            diags
+        );
+        let f = prog
+            .decls
+            .iter()
+            .find_map(|d| {
+                if let Decl::Func(f) = d {
+                    if f.name.name == "f" {
+                        Some(f)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .expect("func f");
+        let mut items = f.body.as_ref().unwrap().items.clone();
+        // 预处理：确认入参形状已如预期（Goto + Return + Label + Return + Label + Return）。
+        let pre_returns = items
+            .iter()
+            .filter(|it| matches!(it, BlockItem::Stmt(Stmt::Return { .. })))
+            .count();
+        let pre_labels = items
+            .iter()
+            .filter(|it| matches!(it, BlockItem::Stmt(Stmt::Label { .. })))
+            .count();
+        assert_eq!(pre_labels, 2, "夹具应含 out: / late: 两个 Label");
+        assert!(pre_returns >= 3, "夹具应有 ≥ 3 个顶层 Return (999/s/s)，实得 {pre_returns}");
+
+        dce_block(&mut items);
+
+        let post_returns = items
+            .iter()
+            .filter(|it| matches!(it, BlockItem::Stmt(Stmt::Return { .. })))
+            .count();
+        let post_labels = items
+            .iter()
+            .filter(|it| matches!(it, BlockItem::Stmt(Stmt::Label { .. })))
+            .count();
+        assert_eq!(post_labels, 2, "两个 Label 必须保留");
+        assert!(
+            post_returns >= 3,
+            "G2: Label 后面的顶层 Return 不能当不可达清掉 — 实得 {post_returns} 个 Return, 得 ≥ 3 (999 + out后的 s + late后的 s)"
+        );
+    }
+
+    /// 修 G2 后仍须确保：**没有 Label** 时，Return 后的真不可达仍被清掉（dce 不能完全不删）。
+    #[test]
+    fn g2_dce_block_still_prunes_pure_dead_after_return() {
+        let src = b"int f(int n) {\n\
+                      if (n == 0) {\n\
+                          return 1;\n\
+                          n = 42;\n\
+                          n = 43;\n\
+                      }\n\
+                      return 2;\n\
+                  }\n";
+        let (prog, _diags) = crate::parser::parse(src, "g2-dce-still.c");
+        let f = prog
+            .decls
+            .iter()
+            .find_map(|d| {
+                if let Decl::Func(f) = d {
+                    if f.name.name == "f" {
+                        Some(f)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .expect("func f");
+        // 直接将 内层 If-then block 拉出来 dce。
+        // 入参 then_ block: [Return 1, n=42, n=43] → dce 后: [Return 1] (1 个)。
+        let mut found_then_items: Option<Vec<BlockItem>> = None;
+        for it in &f.body.as_ref().unwrap().items {
+            if let BlockItem::Stmt(Stmt::If { then_, .. }) = it {
+                if let Stmt::Block { b, .. } = &**then_ {
+                    found_then_items = Some(b.items.clone());
+                    break;
+                }
+            }
+        }
+        let mut then_items = found_then_items.expect("if-then block");
+        assert!(
+            then_items.len() >= 3,
+            "夹具内部预期 [Return 1, n=42, n=43], 实得 len={}",
+            then_items.len()
+        );
+        dce_block(&mut then_items);
+        assert_eq!(
+            then_items.len(),
+            1,
+            "G2 修后仍需将 Return 后的**非 Label** 不可达清掉 (len 应为 1)"
+        );
     }
 
     #[test]

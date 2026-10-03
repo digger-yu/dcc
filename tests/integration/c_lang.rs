@@ -433,6 +433,41 @@ fn may_alias_struct_compiles() {
     assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
+/// 取某个函数的 asm 函数体（从 `<name>:` 到下一个行首标签或伪指令行）。
+///
+/// 两条 `seg_qualifier_*` 用例共用这一份：段前缀的断言必须**逐函数**做，全局计数会被
+/// 别人的前缀凑数（把无关函数的前缀数进去就看不出某个形状真的没发）。名字带 `seg_`
+/// 前缀是因为本文件被 `tests/integration.rs` 以 `include!` 文本级注入到 crate 根。
+fn seg_asm_body(asm_text: &str, name: &str) -> String {
+    let mut out = String::new();
+    let mut hit = false;
+    for line in asm_text.lines() {
+        if line.trim_end() == format!("{}:", name) {
+            hit = true;
+            continue;
+        }
+        if !hit {
+            continue;
+        }
+        // 下一个行首标签（助记符行都以空白开头）就是本函数结束。
+        let is_label = !line.starts_with(' ')
+            && !line.starts_with('\t')
+            && !line.starts_with('.')
+            && line.trim_end().ends_with(':');
+        let is_section = !line.starts_with(' ') && !line.starts_with('\t') && line.starts_with('.');
+        if is_label || is_section {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+fn seg_has_prefix(body: &str) -> bool {
+    body.contains("%gs:") || body.contains("%fs:")
+}
+
 /// `__seg_fs` / `__seg_gs` (以及 `__seg_{cs,ds,es,ss}`) 地址空间限定符
 ///
 /// 契约在第 26 轮翻了一次。旧断言是「asm 里不得出现 %fs:/%gs:」（当时只解析不
@@ -459,37 +494,6 @@ fn may_alias_struct_compiles() {
 fn seg_qualifier_parses_all_positions_and_emits_segment_prefixes() {
     let source = include_str!("../fixtures/c/seg_qualifier.c");
 
-    /// 取某个函数的 asm 函数体（从 `<name>:` 到下一个行首标签）。
-    fn body_of(asm_text: &str, name: &str) -> String {
-        let mut out = String::new();
-        let mut hit = false;
-        for line in asm_text.lines() {
-            if line.trim_end() == format!("{}:", name) {
-                hit = true;
-                continue;
-            }
-            if !hit {
-                continue;
-            }
-            // 下一个行首标签（助记符行都以空白开头）就是本函数结束。
-            let is_label = !line.starts_with(' ')
-                && !line.starts_with('\t')
-                && !line.starts_with('.')
-                && line.trim_end().ends_with(':');
-            let is_section = !line.starts_with(' ') && !line.starts_with('\t') && line.starts_with('.');
-            if is_label || is_section {
-                break;
-            }
-            out.push_str(line);
-            out.push('\n');
-        }
-        out
-    }
-
-    fn has_seg(body: &str) -> bool {
-        body.contains("%gs:") || body.contains("%fs:")
-    }
-
     // (函数名, 期望前缀)：`Some("%gs:")` = 必须发 gs；`None` = 一个前缀也不许发。
     const GS_ACCESS: [&str; 11] = [
         "use_param_gs",   // 形参：基类型与 * 之间
@@ -505,7 +509,33 @@ fn seg_qualifier_parses_all_positions_and_emits_segment_prefixes() {
         "use_ret_gs_ptr"  // 经函数返回类型带段的指针解引用
     ];
     const FS_ACCESS: [&str; 1] = ["use_param_fs"];
-    const NO_SEGMENT: [&str; 5] = ["test_plain", "test_cs", "test_ds", "test_es", "test_ss"];
+    // 段限定符加在**对象本体**上（夹具 §20）：段属于符号而不属于任何表达式的类型，
+    // 所以这一族的真源是「符号→段」表（`emit_global_load/store` 两个下发口）与
+    // 「先取址后访问」那一族的前缀真源。旧状态是**不发前缀且不报错**（silently-wrong）。
+    const OBJ_GS_ACCESS: [&str; 8] = [
+        "obj_read_gs",     // 标量读
+        "obj_write_gs",    // 标量写
+        "obj_incdec_gs",   // 自增后读回（读—改—写）
+        "obj_idx_gs",      // 先取址、后访问：下标读
+        "obj_idx_wr_gs",   // 下标写
+        "obj_member_gs",   // 成员读（基址 + 字段偏移）
+        "obj_member_wr_gs", // 成员写
+        "obj_agg_copy_gs", // 聚合拷贝（64 位下 `rep movsb` 的段前缀被 CPU 忽略）
+    ];
+    // fs 只定义不调用（用户态 FS base 是 TLS 地址，实测执行就是 SIGSEGV），断言在 asm 上。
+    const OBJ_FS_ACCESS: [&str; 3] = ["obj_read_fs", "obj_write_fs", "obj_static_fs"];
+    // 反向对照：不带段的全局、以及**取址（LEA）**——GAS 明说段重叠对 LEA 无效，
+    // 在那里贴前缀只会做出「看着修了」的假象。
+    const NO_SEGMENT: [&str; 8] = [
+        "test_plain",
+        "test_cs",
+        "test_ds",
+        "test_es",
+        "test_ss",
+        "obj_read_plain",
+        "obj_addr_gs",
+        "obj_addr_arr_gs",
+    ];
 
     for flag in ["", "-O2"] {
         let (asm_out, asm_text) = run_asm_output_test_flags("seg-qualifier-asm", source, flag);
@@ -515,7 +545,7 @@ fn seg_qualifier_parses_all_positions_and_emits_segment_prefixes() {
             String::from_utf8_lossy(&asm_out.stderr)
         );
         for name in GS_ACCESS {
-            let body = body_of(&asm_text, name);
+            let body = seg_asm_body(&asm_text, name);
             assert!(
                 !body.is_empty(),
                 "[{flag}] 夹具里找不到函数 {name}（改名会让这些断言空判）"
@@ -526,20 +556,46 @@ fn seg_qualifier_parses_all_positions_and_emits_segment_prefixes() {
             );
         }
         for name in FS_ACCESS {
-            let body = body_of(&asm_text, name);
+            let body = seg_asm_body(&asm_text, name);
+            assert!(
+                !body.is_empty(),
+                "[{flag}] 夹具里找不到函数 {name}（改名会让这些断言空判）"
+            );
             assert!(
                 body.contains("%fs:"),
                 "[{flag}] {name}: __seg_fs pointee 必须发 %fs:，实得\n{body}"
             );
         }
+        for name in OBJ_GS_ACCESS {
+            let body = seg_asm_body(&asm_text, name);
+            assert!(
+                !body.is_empty(),
+                "[{flag}] 夹具里找不到对象本体带段的函数 {name}"
+            );
+            assert!(
+                body.contains("%gs:"),
+                "[{flag}] {name}: `__seg_gs` 加在对象本体上，每一笔访问必须发 %gs:，实得\n{body}"
+            );
+        }
+        for name in OBJ_FS_ACCESS {
+            let body = seg_asm_body(&asm_text, name);
+            assert!(
+                !body.is_empty(),
+                "[{flag}] 夹具里找不到对象本体带段的函数 {name}"
+            );
+            assert!(
+                body.contains("%fs:"),
+                "[{flag}] {name}: `__seg_fs` 加在对象本体上必须发 %fs:，实得\n{body}"
+            );
+        }
         for name in NO_SEGMENT {
-            let body = body_of(&asm_text, name);
+            let body = seg_asm_body(&asm_text, name);
             assert!(
                 !body.is_empty(),
                 "[{flag}] 夹具里找不到反向对照函数 {name}"
             );
             assert!(
-                !has_seg(&body),
+                !seg_has_prefix(&body),
                 "[{flag}] {name}: 无限定 / Generic 段不得发前缀，实得\n{body}"
             );
         }
@@ -555,6 +611,127 @@ fn seg_qualifier_parses_all_positions_and_emits_segment_prefixes() {
     let rc = run_exe(&exe);
     let _ = fs::remove_file(exe);
     assert_eq!(rc, 0, "seg_qualifier 夹具自检未通过（rc={rc}）");
+}
+
+/// 段寄存器限定符加在**对象本体**上（`__seg_gs int gv;` 这一形）。
+///
+/// 与上一条用例的分工：`seg_qualifier.c` 钉「限定符能出现在哪些语法位置」，而其中有
+/// 几个位置 gcc 直接拒绝（`int * __seg_gs p`、形参带段等），所以那份夹具**不能**与 gcc
+/// 对拍。本用例的夹具只放 gcc 完全接受的形状，钉的是另一件事：**段属于符号本体**，
+/// 不挂在任何表达式的类型上 —— 所以发射点只能查「符号→段」表（`emit_global_load` /
+/// `emit_global_store` 两个下发口，加「先取址后访问」那一族的前缀真源）。
+///
+/// 修前的状态是「不发前缀且不报错」（gcc 发 `mov %gs:0x0(%rip),%eax`），即静默访错段。
+/// 三面都钉：
+///   * 正向：标量/复合赋值/自增自减/下标（含 long、u8 窄形）/浮点与 long double/成员/
+///     聚合拷贝/函数内 `static`/表达式里两个段全局 —— 逐函数要求前缀，且读—改—写那一族
+///     要求**至少两笔**（只给写加前缀、读裸走是最容易被漏掉的错法）；
+///   * 取址反向对照：`&gv` 必须**不发**前缀。GAS 明说 "segment override on `lea' is
+///     ineffectual"，在那儿贴字节只会做出「看着修了」的假象；
+///   * 轴分离：`__seg_gs int *pseg` 的**本体**写不发前缀（指针本身在默认段）而
+///     `*pseg` 发（pointee 带段）；不带段的普通全局与局部遮蔽全局的同名变量一个前缀也
+///     不发（不写这一面，「逢全局访存就发前缀」也能把正向做绿）。
+///
+/// 两个档位都跑：段信息必须在 SSA 往返里活下来。fs 侧只定义不调用（用户态 FS base 是
+/// TLS 地址，实测执行就是 SIGSEGV），断言全部在 asm 上；最后与 gcc 四档做执行级对拍。
+#[test]
+fn seg_qualifier_on_object_body_emits_segment_prefixes() {
+    let source = include_str!("../fixtures/c/seg_object_body.c");
+
+    // (函数名, 最少前缀笔数)。计数而非只判存在：读—改—写形状只钉「有没有」的话，
+    // 「只给写贴前缀、读裸走」这种半修状态能直接做绿。
+    const GS: [(&str, usize); 24] = [
+        ("obj_rd", 1),
+        ("obj_wr", 1),
+        ("obj_cad", 2),
+        ("obj_csub", 2),
+        ("obj_cmul", 2),
+        ("obj_cand", 2),
+        ("obj_cor", 2),
+        ("obj_cxor", 2),
+        ("obj_cmod", 2),
+        ("obj_cshl", 2),
+        ("obj_inc_post_stmt", 2),
+        ("obj_inc_pre_val", 2),
+        ("obj_dec_post_val", 2),
+        ("arr_rd", 1),
+        ("arr_wr", 1),
+        ("arr_inc", 2),
+        ("arr_rd_long", 1),
+        ("arr_rd_u8", 1),
+        ("dbl_rd", 1),
+        ("ld_wr", 1),
+        ("fld_cad", 2),
+        ("agg_assign", 1),
+        ("static_gs_inc", 2),
+        ("two", 2),
+    ];
+    const FS: [&str; 5] =
+        ["fs_rd", "fs_wr", "fs_static_rd", "fs_static_wr", "fs_arr_rd"];
+    const NO_PREFIX: [&str; 13] = [
+        "obj_take",     // &gv —— LEA 发前缀无效，必须不发
+        "fld_take",     // &gs —— 同上，目标是结构体
+        "plain_take",
+        "plain_rd",
+        "plain_wr",
+        "plain_cad",
+        "plain_arr_rd",
+        "plain_fld_wr",
+        "plain_agg_copy",
+        "static_plain_wr",
+        "pseg_wr_obj",      // 带段指针的**本体**：默认段
+        "p_plain_rd_pointee", // 普通指针的解引用
+        "shadow_gs",        // 局部遮蔽同名段全局：走的是栈，不是段
+    ];
+
+    for flag in ["", "-O2"] {
+        let (asm_out, asm_text) = run_asm_output_test_flags("seg-object-body-asm", source, flag);
+        assert!(
+            asm_out.status.success(),
+            "seg_object_body [{flag}] 应能编译: {}",
+            String::from_utf8_lossy(&asm_out.stderr)
+        );
+        for (name, min) in GS {
+            let body = seg_asm_body(&asm_text, name);
+            assert!(!body.is_empty(), "[{flag}] 夹具里找不到函数 {name}（改名会让断言空判）");
+            let got = body.matches("%gs:").count();
+            assert!(
+                got >= min,
+                "[{flag}] {name}: 对象本体带 __seg_gs，至少 {min} 笔访问要发 %gs:，实发 {got} 笔，实得\n{body}"
+            );
+        }
+        for name in FS {
+            let body = seg_asm_body(&asm_text, name);
+            assert!(!body.is_empty(), "[{flag}] 夹具里找不到函数 {name}");
+            assert!(
+                body.contains("%fs:"),
+                "[{flag}] {name}: 对象本体带 __seg_fs 必须发 %fs:，实得\n{body}"
+            );
+            assert!(
+                !body.contains("%gs:"),
+                "[{flag}] {name}: fs 侧的形状不得串到 gs 段，实得\n{body}"
+            );
+        }
+        // 轴分离的另一面：pointee 带段的解引用仍要发前缀（不能因为改的是「符号表」
+        // 那一轴就把 pointee 那一轴顶掉）。
+        let pdp = seg_asm_body(&asm_text, "pseg_rd_pointee");
+        assert!(pdp.contains("%gs:"), "[{flag}] pseg_rd_pointee: {pdp}");
+        for name in NO_PREFIX {
+            let body = seg_asm_body(&asm_text, name);
+            assert!(!body.is_empty(), "[{flag}] 夹具里找不到反向对照函数 {name}");
+            assert!(
+                !seg_has_prefix(&body),
+                "[{flag}] {name}: 取址 / 不带段 / 指针本体都不得发前缀，实得\n{body}"
+            );
+        }
+    }
+
+    // 与 gcc 四档逐字对拍（本夹具全是 gcc 完全接受的形状）。
+    assert_all_levels_match_gcc(
+        "c-seg-object-body",
+        source,
+        "段限定对象本体的访问在高档位下丢前缀或改错值",
+    );
 }
 
 /// GCC 兼容：相同类型的重复 typedef 不报错

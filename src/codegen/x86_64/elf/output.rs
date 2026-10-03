@@ -107,6 +107,11 @@ impl Codegen {
                     }
                 }
             }
+            // 合成体（`__dcc_cpu_indicator_init` / `<f>.resolver`）不在 `prog.decls` 里，
+            // 上面的 `collect_all_funcs` 看不到它们，而它们确实有字节：`-S` 必须能
+            // 把 resolver 体渲出来（否则「`-c` 与 `-S` 同形」这条回归无法目测）。
+            // 渲染只是可读性，**不得**用它的读数判断机器码语义（自家反汇编器不可信）。
+            out.push_str(&self.render_ifunc_synth_asm());
             return out;
         }
 
@@ -262,19 +267,51 @@ impl Codegen {
             }
         }
 
-        // __attribute__((target_clones(...))): emit .set for variant aliases
+        // __attribute__((target_clones(...))): IFUNC 基名 = 它自己的 resolver
+        //
+        // 旧行为：给每个变体发一条 `.set <variant>, <base>`（因为它们本来就是基名的
+        // 别名）。新行为下变体各自有真实函数体（由上面的 `funcs` 循环渲染），基名反而
+        // **没有体** —— 它的值是 `ifunc::emit_resolver_body` 合成的 `<base>.resolver`。
+        // 与 `.o` 侧 `elf/rel_symbols.rs` 的 `ifunc_defs` 那一段同一个口径。
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
-                if !f.target_clones.is_empty() {
-                    for variant in &f.target_clones {
-                        let variant_name = format!("{}.{}", f.name.name, variant);
-                        out.push_str(&format!(
-                            "\t.globl {}\n\t.set {}, {}\n",
-                            variant_name, variant_name, f.name.name
-                        ));
-                    }
+                if f.target_clones.is_empty() || f.body.is_some() {
+                    continue;
                 }
+                let base = self.resolve_asm_label(&f.name.name).to_string();
+                let resolver = ifunc::resolver_sym(&base);
+                if !self.labels.contains_key(&resolver) {
+                    continue; // 合成没跑（报错提前终止），不发指向不存在符号的 .set
+                }
+                if !f.is_static {
+                    out.push_str(&format!("\t.globl {base}\n"));
+                } else if f.is_weak {
+                    out.push_str(&format!("\t.weak {base}\n"));
+                }
+                out.push_str(&format!("\t.set {base}, {resolver}\n"));
+                out.push_str(&format!("\t.type {base}, @gnu_indirect_function\n"));
             }
+        }
+
+        // `__attribute__((ifunc("r")))`：同形，值指向声明里那个 resolver。
+        for decl in &prog.decls {
+            let Decl::Func(f) = decl else { continue };
+            let Some(resolver) = f.ifunc_resolver.clone() else {
+                continue;
+            };
+            if f.body.is_some() || !f.target_clones.is_empty() {
+                continue; // 有体形状由上面的函数体循环负责；target_clones 已有自家用法
+            }
+            let base = self.resolve_asm_label(&f.name.name).to_string();
+            let r = self.resolve_asm_label(&resolver).to_string();
+            if !self.labels.contains_key(&r) {
+                continue; // 不指不存在符号（rel_symbols 那边已逐条报诊）
+            }
+            if !f.is_static {
+                out.push_str(&format!("\t.globl {base}\n"));
+            }
+            out.push_str(&format!("\t.set {base}, {r}\n"));
+            out.push_str(&format!("\t.type {base}, @gnu_indirect_function\n"));
         }
 
         // .rodata section: floating-point literals and string constants
@@ -286,6 +323,12 @@ impl Codegen {
                 out.push_str(&format!("\t.byte {}\n", bytes.join(", ")));
             }
         }
+
+        // 合成体（`__dcc_cpu_indicator_init` / `<f>.resolver`）：与上面事件路径同一个
+        // 口径。它们不在 `prog.decls` 里，`collect_all_funcs` 看不到；不渲染的话
+        // `-S` 出来的 `.set compute, compute.resolver` 会指向一个汇编器里不存在
+        // 的符号（实测：`as /tmp/tc.s` rc=0 但 `compute.resolver` 变成 UND）。
+        out.push_str(&self.render_ifunc_synth_asm());
 
         out
     }
@@ -884,6 +927,13 @@ impl Codegen {
         }
         let mut names = Vec::new();
         Self::collect_all_funcs(prog, &mut names);
+        // 合成体也要进 `func_asm_layout`：它们不在 `prog.decls` 里，但 `-S` 需要它们
+        // 的字节（命名口径与 `elf/rel_symbols.rs` 完全同一：两边都读 `ifunc_synth`）。
+        for sf in &self.ifunc_synth {
+            if !names.iter().any(|n| n == &sf.name) {
+                names.push(sf.name.clone());
+            }
+        }
         for name in names {
             let start = match self.labels.get(&name) {
                 Some(s) => *s,

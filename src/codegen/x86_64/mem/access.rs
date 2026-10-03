@@ -315,6 +315,9 @@ impl Codegen {
                 _ => (0xDDu8, 0x05u8),
             };
             // fld m32/m64/m80 [rip+disp32]：disp32 位于字节 2（指令长 6）。
+            // 段限定全局走同一个口：前缀在 opcode 之前，pos 在其后取。
+            let resolved = self.resolve_global_key(name).to_string();
+            self.emit_global_seg(&resolved);
             let disp_pos = self.pos() + 2;
             self.emit(&[opcode, modrm, 0, 0, 0, 0]);
             self.push_global_float_rel(disp_pos, name);
@@ -347,6 +350,8 @@ impl Codegen {
             ins.push(0x40 | rex);
         }
         ins.extend_from_slice(&[0x0F, 0x10, modrm, 0, 0, 0, 0]);
+        let resolved = self.resolve_global_key(name).to_string();
+        self.emit_global_seg(&resolved);
         let disp_pos = self.pos() + ins.len() as u64 - 4;
         self.emit(&ins);
         self.push_global_float_rel(disp_pos, name);
@@ -432,6 +437,8 @@ impl Codegen {
                 Type::LongDouble => (0xDBu8, 0x3Du8),
                 _ => (0xDDu8, 0x1Du8),
             };
+            let resolved = self.resolve_global_key(name).to_string();
+            self.emit_global_seg(&resolved);
             let disp_pos = self.pos() + 2;
             self.emit(&[opcode, modrm, 0, 0, 0, 0]);
             self.push_global_float_rel(disp_pos, name);
@@ -446,6 +453,7 @@ impl Codegen {
         let tls_exec = is_tls && !self.relocatable;
         let is_float = matches!(effective_ty, Type::Float);
         let pfx = if is_float { 0xF3 } else { 0xF2 };
+        self.emit_global_seg(&resolved);
         let pos = self.pos() + 4;
         self.emit(&[pfx, 0x0F, 0x11, 0x05, 0, 0, 0, 0]);
         if tls_exec {
@@ -473,6 +481,7 @@ impl Codegen {
             ins.push(0x40 | rex);
         }
         ins.extend_from_slice(&[0x0F, 0x11, modrm, 0, 0, 0, 0]);
+        self.emit_global_seg(&resolved);
         let disp_pos = self.pos() + ins.len() as u64 - 4;
         self.emit(&ins);
         self.pending_data_rels.push((disp_pos, resolved));
@@ -496,6 +505,8 @@ impl Codegen {
                 Type::LongDouble => (0xDBu8, 0x2Du8),
                 _ => (0xDDu8, 0x05u8),
             };
+            let resolved = self.resolve_global_key(name).to_string();
+            self.emit_global_seg(&resolved);
             let dp1 = self.pos() + 2;
             self.emit(&[opcode, modrm, 0, 0, 0, 0]);
             self.push_global_float_rel(dp1, name);
@@ -553,6 +564,8 @@ impl Codegen {
             Type::LongDouble => (0xDBu8, 0x3Du8),
             _ => (0xDDu8, 0x1Du8),
         };
+        let resolved = self.resolve_global_key(name).to_string();
+        self.emit_global_seg(&resolved);
         let dp = self.pos() + 2;
         self.emit(&[opcode, modrm, 0, 0, 0, 0]); // fstp [rip+x]
         self.push_global_float_rel(dp, name);
@@ -682,6 +695,10 @@ impl Codegen {
         elem_size: u8,
         elem_ty: &Type,
     ) {
+        // 符号本体带段限定（`__seg_gs int arr[4];` 的 `arr[i]`）：前缀只能贴在**真正做
+        // 内存访问**的那一笔上（上面的 LEA 不算访问，贴了是空操作）。本函数是「全局数组
+        // 下标」这一族的单一入口，所以在此处统一处理，而不是回到各个调用点分支。
+        let seg = self.global_seg_prefix(global);
         let scale = match elem_size {
             2 => 1u8,
             4 => 2,
@@ -722,6 +739,7 @@ impl Codegen {
             if idx_reg >= 8 {
                 rex |= 0x02; // REX.X
             }
+            self.emit_seg(seg);
             self.emit(&[rex, opcode, 0x04 | ((rf & 7) << 3), sib2]);
         } else if is_float {
             let xmm = 0u8; // 浮点表达式结果约定在 xmm0
@@ -739,6 +757,7 @@ impl Codegen {
                 ins.push(rex);
             }
             ins.extend_from_slice(&[0x0F, 0x10, modrm | ((xmm & 7) << 3), sib]);
+            self.emit_seg(seg);
             self.emit(&ins);
         } else if is_double {
             let xmm = 0u8;
@@ -756,6 +775,7 @@ impl Codegen {
                 ins.push(rex);
             }
             ins.extend_from_slice(&[0x0F, 0x10, modrm | ((xmm & 7) << 3), sib]);
+            self.emit_seg(seg);
             self.emit(&ins);
         } else {
             // 按 elem_size 和符号性选加载指令:
@@ -771,6 +791,7 @@ impl Codegen {
             }
             if is_signed {
                 // 符号扩展加载: 保留 REX.W
+                self.emit_seg(seg);
                 match elem_size {
                     1 => self.emit(&[rex, 0x0F, 0xBE, modrm | ((dst_gp & 7) << 3), sib]), // movsbq
                     2 => self.emit(&[rex, 0x0F, 0xBF, modrm | ((dst_gp & 7) << 3), sib]), // movswq
@@ -782,6 +803,7 @@ impl Codegen {
                 if elem_size != 8 {
                     rex &= !0x08;
                 }
+                self.emit_seg(seg);
                 match elem_size {
                     1 => self.emit(&[rex, 0x0F, 0xB6, modrm | ((dst_gp & 7) << 3), sib]), // movzbq
                     2 => self.emit(&[rex, 0x0F, 0xB7, modrm | ((dst_gp & 7) << 3), sib]), // movzwq
@@ -1012,7 +1034,7 @@ impl Codegen {
                 let elem_ty = original_expr.ty();
                 // 基址是 `__seg_gs`/`__seg_fs` 指针时（`p[i]`、`q->a`、`a[i].f`）必须
                 // 带段前缀；判据单一入口见 [`Codegen::lvalue_seg_prefix`]。
-                if let Some(seg) = Self::lvalue_seg_prefix(original_expr) {
+                if let Some(seg) = self.lvalue_seg_prefix(original_expr) {
                     self.emit(&[seg]);
                 }
                 self.emit_load_mem_typed(elem_size, &elem_ty);
@@ -1034,7 +1056,7 @@ impl Codegen {
                 }
                 let elem_ty = original_expr.ty();
                 // 同 LoadScalar：地址已经算在 rcx，段限定基址必须让这一笔写入落在段里。
-                let seg = Self::lvalue_seg_prefix(original_expr);
+                let seg = self.lvalue_seg_prefix(original_expr);
                 if self.is_scalar_float_channel_ty(&elem_ty) {
                     // 单一真源：值可能在 xmm0（f32/f64）或 st(0)（long double），
                     // 旧写法无条件 `movsd [rcx], xmm0` 会把陈旧 xmm0 写进

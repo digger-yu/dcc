@@ -575,6 +575,13 @@ impl Codegen {
                     return;
                 }
                 if let Expr::Ident { name, ty: l_ty, .. } = lv {
+                    // 段地址槽登记（唯一登记点，理由见 `Codegen::local_addr_seg`）：
+                    // `-O2` 的 SSA 降把「对象本体带段限定的全局」的访问拆成
+                    // `t = &gv; *t = v;` 两条语句，`t` 的指针类型不带地址空间，
+                    // 到下面解引用那一笔时表达式里已查不到段 —— 只能在这条
+                    // 「左值是单个标识符」的赋值上把段跟着值记下来。
+                    // 本行不改任何字节输出，只更新一张表。
+                    self.track_addr_seg_assign(&name.name, r);
                     let sz = l_ty.size();
                     // VM struct/union (含 VLA 字段的局部类型) 即使编译期
                     // size() 回退值 <= 8 也必须走整体拷贝: 其语义大小是
@@ -933,7 +940,7 @@ impl Codegen {
                     // *ptr = val
                     // 段前缀沿基址链下潜取（`*pp` 这类「指针的指针」外层是普通指针、
                     // 里层才带段时，只看一层会漏发前缀）。
-                    let seg_prefix = Self::lvalue_seg_prefix(lv);
+                    let seg_prefix = self.lvalue_seg_prefix(lv);
                     let is_deref_aggregate = matches!(
                         assign_l_ty,
                         Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) | Type::Array(_, _)
@@ -1349,11 +1356,11 @@ impl Codegen {
                                         fty,
                                         Type::Float | Type::Double | Type::LongDouble
                                     ) {
-                                        self.emit_seg(Self::lvalue_seg_prefix(lv));
+                                        self.emit_seg(self.lvalue_seg_prefix(lv));
                                         self.emit_store_scalar_float_at(&r.ty(), fty, 1);
                                     // 单一真源：收浮影子副本
                                     } else {
-                                        self.emit_seg(Self::lvalue_seg_prefix(lv));
+                                        self.emit_seg(self.lvalue_seg_prefix(lv));
                                         match size {
                                             1 => self.emit(&[0x88, 0x01]),
                                             2 => self.emit(&[0x66, 0x89, 0x01]),
@@ -1363,7 +1370,7 @@ impl Codegen {
                                                 // __int128: rax:rdx → [rcx]:[rcx+8]
                                                 // 两笔写入都要前缀（段前缀只作用下一条指令）
                                                 self.emit(&[0x48, 0x89, 0x01]); // mov [rcx], rax
-                                                self.emit_seg(Self::lvalue_seg_prefix(lv));
+                                                self.emit_seg(self.lvalue_seg_prefix(lv));
                                                 self.emit(&[0x48, 0x89, 0x51, 0x08]);
                                                 // mov [rcx+8], rdx
                                             },
@@ -1371,7 +1378,7 @@ impl Codegen {
                                         }
                                     }
                                 } else {
-                                    self.emit_seg(Self::lvalue_seg_prefix(lv));
+                                    self.emit_seg(self.lvalue_seg_prefix(lv));
                                     match size {
                                         1 => self.emit(&[0x88, 0x01]),
                                         2 => self.emit(&[0x66, 0x89, 0x01]),
@@ -1379,7 +1386,7 @@ impl Codegen {
                                         8 => self.emit(&[0x48, 0x89, 0x01]),
                                         16 => {
                                             self.emit(&[0x48, 0x89, 0x01]); // mov [rcx], rax
-                                            self.emit_seg(Self::lvalue_seg_prefix(lv));
+                                            self.emit_seg(self.lvalue_seg_prefix(lv));
                                             self.emit(&[0x48, 0x89, 0x51, 0x08]);
                                             // mov [rcx+8], rdx
                                         },

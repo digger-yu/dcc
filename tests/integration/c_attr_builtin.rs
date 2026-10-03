@@ -241,79 +241,330 @@ fn attr_target_clones_compile_and_run() {
     let _ = fs::remove_file(exe);
 }
 
-/// **已知未修（双向钉住）**：`target_clones` 会把链接静默从动态降级为静态。
+// ---------------------------------------------------------------------------
+// IFUNC / target_clones：动态链接与 resolver 选型的判据
+//
+// 助手放在本文件而不是 tests/common/harness/elf.rs：后者不在本工作包的所有权范围
+// 内，而这些取数只有下面这组用例会用到。
+// ---------------------------------------------------------------------------
+
+/// 解析 ELF64 的 `SHT_RELA` 节（24 字节条目），返回 `(r_offset, 符号索引, 类型, 加数)`。
 ///
-/// 实测链：`.o` 里有 IFUNC 符号时，`driver.rs` 不再走宿主 cc（注释说宿链处理不了
-/// dcc 的 IFUNC resolver —— 因为 resolver 的机器码是**内置链接器**现场拼的，
-/// `link/target_clones.rs` 那 662 行），而是改走 `run_builtin_linker`。后果：
+/// 为什么不走 `readelf -s`/`-r` 的文本：本机 zh_CN.UTF-8 下 readelf 把 `STT_GNU_IFUNC`
+/// 打成 `<操作系统专用>：10`（同一个词在 exe 里又打成 `IFUNC`），任何 `grep IFUNC` 的
+/// 判据都会随 locale 假红/假绿。`ELF64_R_SYM` 是 r_info 的**高 32 位**、`ELF64_R_TYPE`
+/// 是低 32 位（写反了会得到「每个 PC32 都指向 sym 2」这种看起来能自洽的错读数）。
+fn elf64_rela(data: &[u8], section: &str) -> Vec<(u64, u32, u32, i64)> {
+    let Some(raw) = elf64_section_data(data, section) else {
+        return Vec::new();
+    };
+    raw.chunks_exact(24)
+        .map(|e| {
+            let info = u64::from_le_bytes(e[8..16].try_into().unwrap());
+            (
+                u64::from_le_bytes(e[0..8].try_into().unwrap()),
+                (info >> 32) as u32,
+                (info & 0xffff_ffff) as u32,
+                i64::from_le_bytes(e[16..24].try_into().unwrap()),
+            )
+        })
+        .collect()
+}
+
+/// 解析 ELF64 节头表，返回下标 = `st_shndx` 的节名向量（下标 0 是 SHT_NULL）。
 ///
-/// | 输入 | 链接路径 | 产物 |
-/// |---|---|---|
-/// | 只用 `printf` | 宿主 cc | 动态，NEEDED libc.so.6 |
-/// | 只用 `target_clones` | 内置链接器 | **静态**，无 PT_INTERP、无 .dynamic |
-/// | 两者同用 | 内置链接器 | 链接失败：几十个 E0302 |
+/// 为何需要它：`__dcc_cpu_model` 必须坐在 `.data`（PROGBITS）而不是 `.bss`（NOBITS）——
+/// 内置链接器的静态路径把 NOBITS 输出节铺错（`.bss` size=0、RW `PT_LOAD` 全 0，见
+/// `codegen/x86_64/ifunc.rs::ensure_cpu_model` 的注释），坐 `.bss` 就写不进内存。
+/// 只用 `elf64_sections`（名字→属性）拿不到「符号属于哪个节」，所以这里按节头序取名字。
+fn elf64_section_names(data: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    if data.len() < 64 {
+        return out;
+    }
+    let e_shoff = u64::from_le_bytes(data[40..48].try_into().unwrap()) as usize;
+    let e_shentsize = u16::from_le_bytes(data[58..60].try_into().unwrap()) as usize;
+    let e_shnum = u16::from_le_bytes(data[60..62].try_into().unwrap()) as usize;
+    let e_shstrndx = u16::from_le_bytes(data[62..64].try_into().unwrap()) as usize;
+    if e_shentsize < 64 || e_shoff + e_shentsize * e_shnum > data.len() {
+        return out;
+    }
+    let shstr = e_shoff + e_shstrndx * e_shentsize;
+    let shstr_off = u64::from_le_bytes(data[shstr + 24..shstr + 32].try_into().unwrap()) as usize;
+    for i in 0..e_shnum {
+        let off = e_shoff + i * e_shentsize;
+        let name_off = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
+        out.push(elf64_read_cstr(&data[shstr_off.saturating_add(name_off)..]));
+    }
+    out
+}
+
+/// 按 `sh_type == SHT_SYMTAB(2)` 找符号表，返回 `(名字, bind, stype, shndx, value, size)`。
 ///
-/// 那几十个未定义符号里绝大多数是夹具**从未调用**的（`tmpfile`/`asprintf`/`rename`…），
-/// 所以它不是「缺 libc 符号表」（补不完的），而是「静态链下 crt 与 libc 内部引用
-/// 全部变成真未定义」。因此本测试两面都钉：
-///   1. 不带 IFUNC 的同主程序必须是动态的（基准线）；
-///   2. 带 IFUNC 的必须仍是动态的 —— 这一条**今天故意红着**，所以当前只断言
-///      「它现在确实是静态的」，并在注释与 docs §7.38 写明修好后该翻方向。
-/// 为什么不能只留「链接失败」一条：那只钉住了用户可见现象，没钉住「静默变静态」
-/// 这个本质——而后者就算 libc 问题被旁路躲过也仍然是错的。
+/// 为何需要它（而不是 `harness::elf64_syms`）：内置链接器的静态产物把 `.symtab`/`.strtab`/
+/// `.shstrtab` 的节头 `sh_name` 都写成了 0（`src/link/elf_exec.rs` 里那五个 `write_shdr`
+/// 调用第一个参数传 0，而 `lookup_sh_name` 只在用户节上用），所以 `readelf -SW` 里这些节
+/// **没有名字**，按名字找的 `elf64_syms` 会返回空表。宿主 cc 产的 exe 不受影响。
+/// 本助手只按节类型与 `sh_link` 取数，不依赖节名；它同时也是那个缺陷的现场证据。
+/// （`harness/elf.rs` 不在本工作包所有权里，所以修在本文件。）
+///
+/// `SHT_SYMTAB` 是 **2**，不是 3 —— `3` 是 `SHT_STRTAB`。取错会把字符串表当符号表读，
+/// 得到满屏 ASCII 碎片（`val=0x2e00617461646f72` = `"rodata\0."`）这种看着像「解析器坏了」
+/// 实则常量写错的红。符号条目大小优先信 `sh_entsize`，只在其为 0 时回落到 24。
+fn elf64_syms_by_type(data: &[u8]) -> Vec<Elf64Sym> {
+    const SHT_SYMTAB: u32 = 2;
+    let mut out = Vec::new();
+    if data.len() < 64 {
+        return out;
+    }
+    let e_shoff = u64::from_le_bytes(data[40..48].try_into().unwrap()) as usize;
+    let e_shentsize = u16::from_le_bytes(data[58..60].try_into().unwrap()) as usize;
+    let e_shnum = u16::from_le_bytes(data[60..62].try_into().unwrap()) as usize;
+    if e_shentsize < 64 || e_shoff + e_shentsize * e_shnum > data.len() {
+        return out;
+    }
+    // (sh_type, sh_offset, sh_size, sh_link, sh_entsize)
+    let shdr = |i: usize| -> (u32, u64, u64, u32, u64) {
+        let o = e_shoff + i * e_shentsize;
+        (
+            u32::from_le_bytes(data[o + 4..o + 8].try_into().unwrap()),
+            u64::from_le_bytes(data[o + 24..o + 32].try_into().unwrap()),
+            u64::from_le_bytes(data[o + 32..o + 40].try_into().unwrap()),
+            u32::from_le_bytes(data[o + 40..o + 44].try_into().unwrap()),
+            u64::from_le_bytes(data[o + 56..o + 64].try_into().unwrap()),
+        )
+    };
+    let Some(sym_idx) = (0..e_shnum).find(|&i| shdr(i).0 == SHT_SYMTAB) else {
+        return out;
+    };
+    let (_, sym_off, sym_size, strtab_idx, sym_ent) = shdr(sym_idx);
+    let sym_ent = if sym_ent >= 24 { sym_ent as usize } else { 24 };
+    if strtab_idx as usize >= e_shnum || (sym_off as usize) + (sym_size as usize) > data.len() {
+        return out;
+    }
+    let (_, str_off, str_size, _, _) = shdr(strtab_idx as usize);
+    if (str_off as usize) + (str_size as usize) > data.len() {
+        return out;
+    }
+    let strtab = &data[str_off as usize..(str_off + str_size) as usize];
+    for e in data[sym_off as usize..(sym_off + sym_size) as usize].chunks_exact(sym_ent) {
+        let st_name = u32::from_le_bytes(e[0..4].try_into().unwrap()) as usize;
+        out.push(Elf64Sym {
+            name: if st_name > 0 && st_name < strtab.len() {
+                elf64_read_cstr(&strtab[st_name..])
+            } else {
+                String::new()
+            },
+            bind: e[4] >> 4,
+            stype: e[4] & 0xf,
+            shndx: u16::from_le_bytes(e[6..8].try_into().unwrap()),
+            value: u64::from_le_bytes(e[8..16].try_into().unwrap()),
+            size: u64::from_le_bytes(e[16..24].try_into().unwrap()),
+        });
+    }
+    out
+}
+
+/// 汇总一个产物里所有 `.rela*` 节的 RELA 条目。
+///
+/// 为什么不只看 `.rela.dyn`：irelative 放哪由 `ld` 根据输出类型决定——PIE/DYNAMIC 下
+/// 在 `.rela.dyn`，非 PIE 的 ET_EXEC 下在 **`.rela.plt`**（实测：`dcc` 的 clones+printf
+/// 产物 `readelf -rW` 里 `R_X86_64_IRELATIVE` 在 `.rela.plt`，gcc 的 PIE 产物在
+/// `.rela.dyn`）。只扫 `.rela.dyn` 会在非 PIE 上假红，只扫 `.rela.plt` 则在 PIE 上假红。
+fn elf64_all_rela(data: &[u8]) -> Vec<(u64, u32, u32, i64)> {
+    let mut v = Vec::new();
+    for sec in [".rela.dyn", ".rela.plt", ".rela.iplt"] {
+        v.extend(elf64_rela(data, sec));
+    }
+    v
+}
+
+/// 走默认路径（dcc 出 `.o` → 宿主 `cc` 链接）编译源码，返回 `(成功?, stderr, exe 路径)`。
+///
+/// 不清理临时 exe：调用方要 `file`/`readelf`/运行它。PID 进文件名避免并行用例互踩，
+/// 由调用方末尾删。
+fn dcc_link_exe(tag: &str, src: &str, flags: &[&str]) -> (bool, String, std::path::PathBuf) {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sf = dir.join(format!("dcc-ifuncdyn-{tag}-{pid}.c"));
+    let exe = dir.join(format!("dcc-ifuncdyn-{tag}-{pid}.bin"));
+    fs::write(&sf, src).expect("写临时源文件");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+    cmd.arg("-std=gnu23");
+    for f in flags {
+        cmd.arg(f);
+    }
+    cmd.args(["-o"]).arg(&exe).arg(&sf);
+    let out = cmd.output().expect("运行 dcc");
+    let _ = fs::remove_file(&sf);
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+        exe,
+    )
+}
+
+/// 只编成 `.o` 并把它读回来（`.o` 侧的静态判据用）。
+fn dcc_obj_bytes(tag: &str, src: &str, flags: &[&str]) -> Vec<u8> {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sf = dir.join(format!("dcc-ifuncobj-{tag}-{pid}.c"));
+    let obj = dir.join(format!("dcc-ifuncobj-{tag}-{pid}.o"));
+    fs::write(&sf, src).expect("写临时源文件");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+    cmd.arg("-std=gnu23").arg("-c");
+    for f in flags {
+        cmd.arg(f);
+    }
+    cmd.args(["-o"]).arg(&obj).arg(&sf);
+    let out = cmd.output().expect("运行 dcc -c");
+    assert!(out.status.success(), "compile [{}]: {}", flags.join(" "), String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(&sf);
+    let bytes = fs::read(&obj).expect("读回 .o");
+    let _ = fs::remove_file(&obj);
+    bytes
+}
+
+/// 「这个产物是**动态**链接的」：`.interp`（PT_INTERP）+ `DT_NEEDED libc.so.6` +
+/// `file` 报 dynamically linked，三项都得成立。
+///
+/// 三项而不是一项：`.interp` 只证明有解释器，`DT_NEEDED` 只证明有动态段，`file` 只是
+/// 外部工具的读数 —— 「静默降级为静态」的缺陷形状是三者同时缺，判据也必须同时收。
+fn assert_dynamically_linked(exe: &std::path::Path, who: &str, stderr: &str) {
+    let bytes = fs::read(exe).unwrap_or_default();
+    let secs = elf64_sections(&bytes);
+    assert!(
+        secs.contains_key(".interp"),
+        "{who}: 产物没有 .interp（= 没有 PT_INTERP）= 静态可执行文件；IFUNC 降级缺陷回来了。stderr:\n{stderr}"
+    );
+    let need = elf64_dynamic_needed(&bytes);
+    assert!(
+        need.iter().any(|n| n == "libc.so.6"),
+        "{who}: DT_NEEDED 里没有 libc.so.6（读到 {need:?}）；stderr:\n{stderr}"
+    );
+    let file_out = Command::new("file")
+        .arg(exe)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    assert!(
+        file_out.contains("dynamically linked"),
+        "{who}: `file` 没报 dynamically linked:\n{file_out}"
+    );
+}
+
+/// **已修**（前身是三态哨兵 `target_clones_diverts_to_static_link_is_known_defect`，
+/// §7.38 / §7.41 三 / `docs/missing_features.md` 的 IFUNC 行）：IFUNC 不再把链接从
+/// 动态降级为静态。
+///
+/// 旧形状：`.o` 里 IFUNC 符号的 `st_value` 直指实现体、全 `.o` 无 CPUID 也无 resolver
+/// 体，于是 `driver.rs` 「含 IFUNC 就改道内置链接器」，而那条路径产**静态**可执行文件
+/// （与 `printf` 同用时更是几十个 E0302）。哨兵当时停在「链不上」这一格，并写明
+/// 「真做出动态产物后必须翻成断言动态」—— resolver 搬回 codegen（
+/// `codegen::x86_64::ifunc`）后改道分支已删，本用例就是那一翻。
+///
+/// 实测依据（写进 `docs/wp_ifunc_real_fix.md`，-O0 起）：
+/// ```text
+/// file        → dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2
+/// readelf -d  → 0x…0001 (NEEDED) [libc.so.6]
+/// readelf -rW → 0000000000405318  0000000000000025 R_X86_64_IRELATIVE  4030c0
+/// readelf -sW → 122: 00000000004030c0 41 IFUNC  GLOBAL  compute
+///               106: 00000000004030c0 41 FUNC   WEAK    compute.resolver
+/// ```
+/// （以上为本机 2026-10-03 重采：地址会随 `.text` 长度漂 —— `__dcc_cpu_indicator_init`
+/// 占 3590B，但「IRELATIVE 存在 + IFUNC 与自己的 resolver 同址同尺寸」不变。）
+/// 两面都钉：不带 IFUNC 的程序必须**仍然**动态（基准线，翻转三态判据最容易造成的假绿
+/// 是「所有产物都变静态而判据跟着改」）；带 IFUNC 的必须动态、链得上、跑得出与 gcc
+/// 逐字相同的结果，且 IFUNC 语义（`STT_GNU_IFUNC` + `R_X86_64_IRELATIVE`）必须活到
+/// 最终产物里而不是只在 `.o` 里。
 #[test]
 #[cfg(unix)]
-fn target_clones_diverts_to_static_link_is_known_defect() {
+fn target_clones_links_dynamically_with_codegen_resolver() {
+    // STT_GNU_IFUNC / R_X86_64_IRELATIVE 的数值（本地定义，避免依赖 libc 常量的导入权）。
+    const STT_GNU_IFUNC: u8 = 10;
+    const R_X86_64_IRELATIVE: u32 = 37;
+
     let plain = "#include <stdio.h>\nint compute(int x){ return x*2+1; }\n\
                  int main(void){ printf(\"%d\\n\", compute(10)); return 0; }\n";
     let clones = "#include <stdio.h>\n\
                   __attribute__((target_clones(\"sse4.2,default\")))\n\
                   int compute(int x){ return x*2+1; }\n\
                   int main(void){ printf(\"%d\\n\", compute(10)); return 0; }\n";
-    let dir = std::env::temp_dir();
-    let tag = std::process::id();
-    let needed_of = |src: &str, stem: &str| -> Option<bool> {
-        let sf = dir.join(format!("dcc-tc-{stem}-{tag}.c"));
-        let exe = dir.join(format!("dcc-tc-{stem}-{tag}.bin"));
-        std::fs::write(&sf, src).expect("写临时源文件");
-        let ok = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
-            .args(["-O0", "-o"]).arg(&exe).arg(&sf)
-            .output().map(|o| o.status.success()).unwrap_or(false);
-        let _ = std::fs::remove_file(&sf);
-        if !ok {
-            let _ = std::fs::remove_file(&exe);
-            return None;
-        }
-        let dyn_info = std::process::Command::new("readelf")
-            .args(["-d"]).arg(&exe).output().map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-            .unwrap_or_default();
-        let _ = std::fs::remove_file(&exe);
-        Some(dyn_info.contains("(NEEDED)"))
-    };
 
-    // 1) 基准线：不带 IFUNC 的同主程序走宿主 cc，必须是动态链接。
-    assert_eq!(
-        needed_of(plain, "plain"),
-        Some(true),
-        "基准线就变了：不带 IFUNC 的程序也不再是动态链接，需先查链接路径是否整体跑偏"
+    // 1) 基准线：不带 IFUNC 的同主程序必须是动态链接。
+    let (ok, stderr, exe) = dcc_link_exe("plain", plain, &["-O0"]);
+    assert!(ok, "基准线编译失败：{stderr}");
+    assert_dynamically_linked(&exe, "plain（无 IFUNC）基准线", &stderr);
+    let _ = fs::remove_file(&exe);
+
+    // 2) 已修：带 IFUNC 必须链得上（旧形状在这里是几十个 E0302）。
+    let (ok, stderr, exe) = dcc_link_exe("clones", clones, &["-O0"]);
+    assert!(
+        ok,
+        "target_clones + printf 现在必须能经宿主 cc 链上（resolver 已由 codegen 发进 .text，\
+         `driver.rs` 里那条「含 IFUNC 就改道内置链接器」的分支已删）。失败说明又回到静态/\
+         改道那一侧：\n{stderr}"
+    );
+    // 3) 且产物必须是动态的 —— 这正是当年「静默降级」缺的那一条。
+    assert_dynamically_linked(&exe, "clones（含 IFUNC）", &stderr);
+    // 4) 走的是宿主 cc，不是内置链接器：路径必须自己说出来（底线：不得静默）。
+    assert!(
+        stderr.contains("via host cc"),
+        "含 IFUNC 的程序必须由 stderr 明说是经宿主 cc 链接（内置链接器那条改道分支不该再出现）:\n{stderr}"
     );
 
-    // 2) 当前缺陷：引入 IFUNC 后链接直接失败（E0302）。三种读数各自对应不同的状态，
-    // 所以**每个转移都必须逼出一处的显式修改**，不允许默默进绿：
-    //   None       = 现状（链不上）
-    //   Some(false) = 链上了但仍静态 —— 本质缺陷未修
-    //   Some(true)  = 修好了（保留动态链）
-    match needed_of(clones, "clones") {
-        None => {} // 已知缺陷现状
-        Some(false) => panic!(
-            "target_clones + libc 已能链上，但产物仍是静态的：降级缺陷未修。请改成本分支 \
-             断言 Some(false) 并保留 docs §7.38 的开放项"
-        ),
-        Some(true) => panic!(
-            "target_clones 程序现在已是动态链接：降级缺陷已修好。请把这个用例改成断言 \
-             Some(true)（与 plain 并列），并更新 docs §7.38"
-        ),
-    }
+    // 5) IFUNC 语义必须活到最终产物：`compute` 仍是 STT_GNU_IFUNC，且 `st_value`
+    //    指向**自己的 resolver**（同 value/size），不是实现体。
+    let syms = elf64_syms(&fs::read(&exe).unwrap_or_default());
+    let find = |n: &str| syms.iter().find(|s| s.name == n);
+    let ifunc = find("compute").unwrap_or_else(|| panic!("exe symtab 里没有 compute"));
+    let resolver = find("compute.resolver").unwrap_or_else(|| panic!("exe 里没有 compute.resolver"));
+    assert_eq!(ifunc.stype, STT_GNU_IFUNC, "exe 里 compute 的 st_type 必须是 STT_GNU_IFUNC(10)");
+    assert_eq!(ifunc.bind, 1, "非 static 基名的 IFUNC 必须是 GLOBAL（与 gcc 同形）");
+    assert_eq!(resolver.stype, 2, "resolver 必须是普通 STT_FUNC —— gcc 的形状");
+    assert_eq!(resolver.bind, 2, "非 static 的 `<base>.resolver` 必须是 WEAK（与 gcc 同形）");
+    assert_eq!(
+        (ifunc.value, ifunc.size),
+        (resolver.value, resolver.size),
+        "IFUNC 的 st_value/st_size 必须等于它自己 resolver 的：\
+         旧缺陷形状是 IFUNC 与**实现体**同址（全 .o 无 resolver 体）"
+    );
+
+    // 6) 动态链接器真的会被叫去跑 resolver：重定位表里必须有 IRELATIVE，且其
+    //    addend 就是那个 resolver 的地址。（非 PIE 的 ET_EXEC 里 `ld` 把它放 `.rela.plt`，
+    //    PIE 里放 `.rela.dyn`，所以扫全部 `.rela*`。）
+    let exe_bytes = fs::read(&exe).unwrap_or_default();
+    let irel: Vec<(u64, u32, u32, i64)> = elf64_all_rela(&exe_bytes)
+        .into_iter()
+        .filter(|r| r.2 == R_X86_64_IRELATIVE)
+        .collect();
+    assert!(
+        !irel.is_empty(),
+        "exe 的重定位表里没有 R_X86_64_IRELATIVE：动态链接器不会调用 resolver，\
+         IFUNC 只是符号表上的装饰"
+    );
+    assert!(
+        irel.iter().any(|(_, _, _, addend)| *addend as u64 == resolver.value),
+        "IRELATIVE 的 addend 必须是 resolver 地址（读得 {:?}，resolver @ {:#x}）",
+        irel.iter().map(|r| format!("{:#x}", r.3)).collect::<Vec<_>>(),
+        resolver.value
+    );
+
+    // 7) 行为：结果必须对（resolver 选中的实现真被调用），并与 gcc 逐字一致。
+    let (rc, stdout, run_stderr) = run_exe_bounded(&exe);
+    let _ = fs::remove_file(&exe);
+    let run_stderr = String::from_utf8_lossy(&run_stderr).to_string();
+    assert_eq!(rc, 0, "运行 rc: stderr:\n{run_stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&stdout),
+        "21\n",
+        "target_clones 的 compute(10) 必须经 IFUNC 解析后返回 21"
+    );
+    assert_eq!(
+        run_gcc_cross_check_opt("tc-dyn-parity", clones, &["-O0"]),
+        0,
+        "与 gcc 的 stdout/退出码对照（同一份源）"
+    );
 }
 
 /// __attribute__((no_sanitize(...))) / no_sanitize_address
@@ -559,47 +810,921 @@ fn attr_flatten_asm_no_call_to_inlined() {
     assert!(!asm.contains("call inner"), "flatten should inline inner(): {asm}");
 }
 
-// __attribute__((target_clones(...)))): 验证 IFUNC 符号和变体符号生成
+/// `target_clones` 的 `.o` 形状：基名必须是 `STT_GNU_IFUNC`，且 `st_value` 指向
+/// **自己的 resolver 体**（同 value、同 size）；变体实现体各自独立成 `STT_FUNC`。
+///
+/// 三条断言各钉一个曾经真错过的点：
+///   * 旧版只写 `syms.contains("10") && syms.contains("compute")`：既没验 st_type 真是
+///     10（`"10"` 在任何 symtab 文本里都能撞到别处），也没验「指向哪里」—— 而
+///     「指向哪里」才是本缺陷的本体。现在走 ELF 解析读 `st_info & 0xf`。
+///   * 名字里的 `.` 会被 mangle 成 `_`（gcc 13 实测同形）：`compute.sse4_2`，而旧版
+///     断的是 `compute.sse4.2` —— 那条断言从来不可能绿。
+///   * 「IFUNC 与 `<base>.resolver` 同址同尺寸」是「`.o` 里有可跑 resolver」的证据；
+///     上一轮的缺陷形状正是 IFUNC 与**实现体**同址。所以额外断 IFUNC 地址与每个
+///     变体地址都**不相等** —— 直接钉住那个旧形状不可能重新发生。
 #[test]
 #[cfg(unix)]
 fn attr_target_clones_ifunc_symbols() {
+    const STT_GNU_IFUNC: u8 = 10;
+    const STT_FUNC: u8 = 2;
+    const STT_OBJECT: u8 = 1;
     let src = include_str!("../fixtures/c/attr_target_clones.c");
-    let src_path = std::env::temp_dir().join(format!("dcc-target-clones-{}.c", std::process::id()));
-    let obj = std::env::temp_dir().join(format!("dcc-target-clones-{}.o", std::process::id()));
-    fs::write(&src_path, src).expect("write source");
-    let output = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .arg("-c")
-        .arg("-o")
-        .arg(&obj)
-        .arg(&src_path)
-        .output()
-        .expect("run dcc -c for target_clones");
-    assert!(output.status.success(), "compile: {}", String::from_utf8_lossy(&output.stderr));
-    // 验证 ELF 符号: compute/multiply 应为 IFUNC (type 10),
-    // 变体符号 (compute.sse4.2, compute.default 等) 应为 FUNC
-    let readelf = Command::new("readelf")
-        .arg("-s")
-        .arg(&obj)
-        .output()
-        .expect("readelf");
-    let syms = String::from_utf8_lossy(&readelf.stdout);
-    // IFUNC 符号类型为 10 (STT_GNU_IFUNC)
+    let obj = dcc_obj_bytes("tc-syms", src, &["-O0"]);
+    let syms = elf64_syms(&obj);
+    let find = |n: &str| syms.iter().find(|s| s.name == n);
+
+    // 基名：GLOBAL IFUNC；resolver：WEAK FUNC，同址同尺寸。
+    for base in ["compute", "multiply"] {
+        let b = find(base).unwrap_or_else(|| panic!(".o 里没有基名符号 {base}: 共 {} 个符号", syms.len()));
+        let r = find(&format!("{base}.resolver")).expect("codegen 必须发 <base>.resolver 体");
+        assert_eq!(b.stype, STT_GNU_IFUNC, "{base} 必须是 STT_GNU_IFUNC(10)");
+        assert_eq!(b.bind, 1, "非 static 基名的 IFUNC 必须是 GLOBAL");
+        assert!(b.size > 0, "IFUNC 的 st_size 必须是 resolver 的实际长度，不是 0");
+        assert_eq!(r.stype, STT_FUNC, "resolver 本体是普通 STT_FUNC —— gcc 的形状");
+        assert_eq!(r.bind, 2, "非 static 的 <base>.resolver 必须是 WEAK");
+        assert_eq!(
+            (b.value, b.size),
+            (r.value, r.size),
+            "{base} 的 st_value/st_size 必须与自己 resolver 一致"
+        );
+    }
+
+    // 变体名：点号被 mangle 成下划线，且都是各自独立的 FUNC 体。
+    let variants = [
+        "compute.sse4_2",
+        "compute.default",
+        "multiply.avx",
+        "multiply.sse4_2",
+        "multiply.default",
+    ];
+    for v in variants {
+        let s = find(v).unwrap_or_else(|| panic!("缺变体符号 {v}（旧判据写的 {v} 拼错了点号形式）"));
+        assert_eq!(s.stype, STT_FUNC, "{v} 应是 STT_FUNC");
+        assert!(s.size > 0, "{v} 应有非零函数体");
+    }
+    // 基名不得再与任何一个实现体同址（旧缺陷形状）。
+    for base in ["compute", "multiply"] {
+        let b = find(base).expect("base");
+        for v in variants.iter().filter(|v| v.starts_with(&format!("{base}."))) {
+            let s = find(v).expect("variant");
+            assert_ne!(
+                b.value, s.value,
+                "IFUNC {base} 与实现体 {v} 同址 = resolver 又丢了（旧缺陷形状）"
+            );
+        }
+    }
+
+    // CPUID 缓存必须真的存在于 `.o`（LOCAL OBJECT，尺寸 = cpu_isa::MODEL_BYTES）：
+    // resolver 与 `__builtin_cpu_*` 共用它，没有它两者都是空谈。
+    let model = find("__dcc_cpu_model").expect(".o 里应有 __dcc_cpu_model");
+    assert_eq!(model.stype, STT_OBJECT, "__dcc_cpu_model 应是 OBJECT");
+    assert_eq!(model.bind, 0, "CPUID 缓存必须是 STB_LOCAL（不进动态符号表）");
+    assert_eq!(
+        model.size,
+        dcc::semantics::cpu_isa::MODEL_BYTES as u64,
+        "__dcc_cpu_model 尺寸必须等于 cpu_isa::MODEL_BYTES（= SLOT_WORDS * 4）：槽表加了而对象没跟着长，\
+         发射器就会读写到对象之外"
+    );
+    // 必须坐 `.data`（PROGBITS）而不是 `.bss`（NOBITS）：内置链接器的静态路径把
+    // NOBITS 节铺成 size=0 / RW PT_LOAD 全 0，缓存落不进去 → `__dcc_cpu_indicator_init`
+    // 第一个写就 SIGSEGV。这一条把「换节」这个设计决定钉住，改回 `.bss` 立刻红。
+    let sec_names = elf64_section_names(&obj);
+    let model_sec = sec_names
+        .get(model.shndx as usize)
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        model_sec, ".data",
+        "__dcc_cpu_model 必须在 .data（NOBITS 的 .bss 在内置静态链接路径下不会被映射）"
+    );
+    let init = find("__dcc_cpu_indicator_init").expect(".o 里应有 __dcc_cpu_indicator_init");
+    assert_eq!(init.stype, STT_FUNC, "CPUID 检测函数应是 STT_FUNC");
+    assert_eq!(init.bind, 0, "CPUID 检测函数必须 LOCAL，不依赖 libgcc 的同名符号");
+    assert!(init.size > 0, "检测函数体必须真被发出来（旧形状里全 .o 无 CPUID）");
+}
+
+/// resolver 的变体判定链必须按 **ISA 优先级表**（真源 `semantics::cpu_isa`）排，
+/// 而不是按 `target_clones(...)` 的书写顺序；并且真的发 CPUID 检测。
+///
+/// 夹具故意把书写顺序打乱（`"sse4.2,avx512f,avx,default"` / `"default,avx,sse4.2"`），
+/// 所以“按声明顺序”与“按优先级”两种实现会给出不同的链 —— 写死的期望序列
+/// `avx512f → avx → sse4_2 → default` / `avx → sse4_2 → default` 只要任一处回到
+/// 「声明序」或「只认 default」就立刻红。可证伪且机器无关。
+///
+/// 为什么只能在 `.o` 侧静态断这条「判定链顺序」：dcc 目前没有 per-variant 的 ISA
+/// codegen（`ast.rs` 里没有 `target_attrs`），`foo.avx` 与 `foo.default` 的机器码
+/// 完全相同，选中谁在 stdout 里看不出来。但「选中谁」本身仍可在动态产物里观察：
+/// `(void *)foo` 经 GOT + `R_X86_64_IRELATIVE` 拿到的是**解析后的实现体地址**（实测
+/// dcc 本机得 `compute.sse4_2`），见 `target_clones_runtime_resolves_to_non_default_variant`；
+/// 而「选型真发生」的行为级等价证明（两个返回值不同的实现体）由
+/// `attr_target_clones_ifunc_behavior_*` 用 `__attribute__((ifunc))` 钉。
+#[test]
+#[cfg(unix)]
+fn attr_target_clones_select_resolver_dispatch_order() {
+    const R_X86_64_PC32: u32 = 2;
+    let src = include_str!("../fixtures/c/attr_target_clones_select.c");
+    let obj = dcc_obj_bytes("tc-select", src, &["-O0"]);
+    let syms = elf64_syms(&obj);
+    let find = |n: &str| syms.iter().find(|s| s.name == n);
+    let relas = elf64_rela(&obj, ".rela.text");
+
+    // 一个 resolver 体内命中的变体符号，按指令地址（r_offset）排序 = 判定链顺序。
+    let chain = |base: &str| -> Vec<String> {
+        let r = find(&format!("{base}.resolver")).unwrap_or_else(|| panic!("没有 {base}.resolver"));
+        let prefix = format!("{base}.");
+        let mut hits: Vec<(u64, String)> = relas
+            .iter()
+            .filter(|(off, _sym, typ, _)| *typ == R_X86_64_PC32 && *off >= r.value && *off < r.value + r.size)
+            .filter_map(|(off, sym, _, _)| syms.get(*sym as usize).map(|s| (*off, s.name.clone())))
+            .filter(|(_, name)| name.starts_with(&prefix))
+            .collect();
+        hits.sort();
+        hits.into_iter().map(|(_, name)| name).collect()
+    };
+
+    assert_eq!(
+        chain("pick"),
+        vec!["pick.avx512f", "pick.avx", "pick.sse4_2", "pick.default"],
+        "pick 的判定链必须是 ISA 优先级顺序（书写序是 sse4.2,avx512f,avx,default）"
+    );
+    assert_eq!(
+        chain("pick_static"),
+        vec!["pick_static.avx", "pick_static.sse4_2", "pick_static.default"],
+        "pick_static 的判定链必须是 avx → sse4_2 → default（书写序是 default,avx,sse4.2）"
+    );
+
+    // CPUID 证据：resolver 入门先调检测函数，判定体读特性缓存。
+    for base in ["pick", "pick_static"] {
+        let r = find(&format!("{base}.resolver")).expect("resolver");
+        let in_body = |sym: &str| -> bool {
+            relas.iter().any(|(off, idx, typ, _)| {
+                *typ == R_X86_64_PC32 && *off >= r.value && *off < r.value + r.size
+                    && syms.get(*idx as usize).map(|s| s.name == sym).unwrap_or(false)
+            })
+        };
+        assert!(
+            in_body("__dcc_cpu_indicator_init"),
+            "{base}.resolver 必须调用 __dcc_cpu_indicator_init：resolver 由动态链接器在 \
+             .init 之前调用，那一刻没有任何已初始化状态可靠（不依赖 .init_array 的设计决定）"
+        );
+        assert!(
+            in_body("__dcc_cpu_model"),
+            "{base}.resolver 必须读 __dcc_cpu_model 的特性位缓存（否则就是无条件返回 default 的假 resolver）"
+        );
+    }
+
+    // static 基名那一支的形状：IFUNC 与 resolver 都必须是 LOCAL（与 gcc 13 实测同形）。
+    let sb = find("pick_static").expect("pick_static");
+    let sr = find("pick_static.resolver").expect("pick_static.resolver");
+    assert_eq!((sb.stype, sb.bind), (10, 0), "static 基名：STT_GNU_IFUNC + STB_LOCAL");
+    assert_eq!((sr.stype, sr.bind), (2, 0), "static 的 resolver：STT_FUNC + STB_LOCAL");
+    assert_eq!((sb.value, sb.size), (sr.value, sr.size), "static 分支也要 IFUNC 指向自己 resolver");
+    // 同一个基名的变体实现体地址必须两两不同（否则「选中谁」无意义）。
+    let mut addrs: Vec<u64> = ["pick.avx512f", "pick.avx", "pick.sse4_2", "pick.default"]
+        .iter()
+        .map(|n| find(n).unwrap_or_else(|| panic!("缺变体 {n}")).value)
+        .collect();
+    addrs.sort_unstable();
+    addrs.dedup();
+    assert_eq!(addrs.len(), 4, "四个变体实现体必须有四个不同地址");
+}
+
+/// resolver 的**机器码本身**必须逐位来自 `cpu_isa` 表 —— 单一真源在字节层的证据。
+///
+/// 为什么需要这一条（而 §1.5 那条不够）：那只看「判定链里出现了哪些变体名」，它不能
+/// 发现「名字对、但测的位错了」（把 leaf7 的位读到 leaf1 的槽上、或掩码与槽不配对）。
+/// 本用例把 `.o` 里 `__dcc_cpu_model` 的每一条重定位**反回机器码**：从指令字节辨出
+/// 发射形式（`F7 05` = `test m32,imm32`、`8B 05` = `mov disp32(%rip),%eax`），算出
+/// 真实字段偏移 = `r_addend + (L - f)`，再与 `cpu_isa` 的 `(cache_slot(leaf,reg), bit)`
+/// 逐条比对。这一步同时钉住那个很容易踩的加数陷阱：`readelf` 显示的加数已经含了
+/// `-(L - f)`，`test` 是 -8、`mov` 是 -4；把两者都当 -4 算会得到「槽号差一个 dword」
+/// 的自洽错读（CPUID 真测了、位号也对，但读错了寄存器）。XCR0 门控同理：表里
+/// `xcr0_mask != 0` 的 ISA 必须能在机器码里看到读 `SLOT_XCR0_LOW`，SSE 系必须看不到。
+///
+/// 与机器无关：只读 `.o` 的字节与重定位，不运行任何东西；期望值全部从 `cpu_isa`
+/// 推出，不在此处重写一份位表（否则本用例会变成「第二份表」而失去钉作用）。
+#[test]
+#[cfg(unix)]
+fn attr_target_clones_resolver_bits_come_from_cpu_isa_table() {
+    use dcc::semantics::cpu_isa;
+    const R_X86_64_PC32: u32 = 2;
+
+    /// 一条从 `__dcc_cpu_model` 读出的检测：特性位（槽, 位）或 XCR0 读（槽）。
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Read {
+        Feature(usize, u32),
+        Xcr0(usize),
+    }
+
+    let src = include_str!("../fixtures/c/attr_target_clones.c");
+    let obj = dcc_obj_bytes("tc-bits", src, &["-O0"]);
+    let syms = elf64_syms(&obj);
+    let text = elf64_section_data(&obj, ".text").expect(".o 里应有 .text").to_vec();
+    let relas = elf64_rela(&obj, ".rela.text");
+
+    // 已知发射形式的 `(L - f)`：与 `codegen/x86_64/ifunc.rs` 的 `RipForm::delta` 同值。
+    // 这里列的是「指令长 - disp32 字段相对指令起始的偏移」，不是特性位。
+    let decode = |off: u64, addend: i64| -> Option<Read> {
+        let p = off as usize;
+        if p < 2 || p + 8 > text.len() {
+            return None;
+        }
+        let (delta, imm_after) = match &text[p - 2..p] {
+            [0xF7, 0x05] => (8i64, true),
+            [0x8B, 0x05] => (4i64, false),
+            _ => return None,
+        };
+        let field = addend + delta;
+        if field < 0 || field % 4 != 0 {
+            return None;
+        }
+        let slot = (field / 4) as usize;
+        if imm_after {
+            let mask = u32::from_le_bytes(text[p + 4..p + 8].try_into().unwrap());
+            if mask.count_ones() != 1 {
+                return None;
+            }
+            Some(Read::Feature(slot, mask.trailing_zeros()))
+        } else {
+            Some(Read::Xcr0(slot))
+        }
+    };
+
+    for base in ["compute", "multiply"] {
+        let find = |n: &str| syms.iter().find(|s| s.name == n);
+        let r = find(&format!("{base}.resolver"))
+            .unwrap_or_else(|| panic!(".o 里没有 {base}.resolver"));
+        let prefix = format!("{base}.");
+        // 按地址序重走一遍 resolver：特性读累积，碰到变体 `lea` 则闭合一段。
+        let mut hits: Vec<(u64, String, i64)> = relas
+            .iter()
+            .filter(|(off, _, typ, _)| *typ == R_X86_64_PC32 && *off >= r.value && *off < r.value + r.size)
+            .filter_map(|(off, idx, _, add)| {
+                syms.get(*idx as usize).map(|s| (*off, s.name.clone(), *add))
+            })
+            .collect();
+        hits.sort();
+
+        let mut pending: Vec<Read> = Vec::new();
+        let mut segments: Vec<(String, Vec<Read>)> = Vec::new();
+        for (off, name, add) in hits {
+            if name.starts_with(&prefix) {
+                segments.push((name, std::mem::take(&mut pending)));
+            } else if name == "__dcc_cpu_model" {
+                pending.push(decode(off, add).unwrap_or_else(|| panic!(
+                    "{base}.resolver 里 {off:#x} 处指向 __dcc_cpu_model 的重定位不是已知的检测形式\
+                     （addend={add}，前缀字节 {:?}）",
+                    &text[off as usize - 2..off as usize]
+                )));
+            }
+            // `__dcc_cpu_indicator_init` 等其他目标不参与本轮比较。
+        }
+        assert!(
+            pending.is_empty() && segments.len() >= 2,
+            "{base}.resolver 的结构应是「若干段，每段以变体 lea 结尾」；实际段数 {}",
+            segments.len()
+        );
+        // 防「空对空也算过」：本基名必须真读到过至少一条特性位（否则上面那个
+        // `got == want` 在两边都空时也会成立，就是假绿）。
+        assert!(
+            segments
+                .iter()
+                .any(|(_, rs)| rs.iter().any(|rd| matches!(rd, Read::Feature(..)))),
+            "{base}.resolver 里一条特性检测都没读到（假 resolver 的形状）：{segments:?}"
+        );
+        assert!(
+            segments.iter().any(|(_, rs)| rs
+                .iter()
+                .any(|rd| matches!(rd, Read::Xcr0(s) if *s == cpu_isa::SLOT_XCR0_LOW)))
+                == (base == "multiply"),
+            "只有带 AVX 家族的 {base} 才应读到 XCR0 门控：{segments:?}"
+        );
+
+        for (variant, reads) in &segments {
+            let suffix = &variant[prefix.len()..];
+            if suffix == "default" {
+                assert!(
+                    reads.is_empty(),
+                    "{variant} 不应带任何特性检测（default 是无条件兜底）；实际读到 {reads:?}"
+                );
+                continue;
+            }
+            let arch = cpu_isa::lookup(suffix)
+                .unwrap_or_else(|| panic!("变体名 {variant} 的 ISA 部分不在 cpu_isa 表里"));
+            let want: Vec<Read> = arch
+                .bits
+                .iter()
+                .map(|b| {
+                    let slot = cpu_isa::cache_slot(b.leaf, b.subleaf, b.reg).unwrap_or_else(|| {
+                        panic!("cpu_isa 自己不一致：{suffix} 的位 {b:?} 没有缓存槽")
+                    });
+                    Read::Feature(slot, b.bit as u32)
+                })
+                .collect();
+            let got: Vec<Read> = reads
+                .iter()
+                .filter(|rd| matches!(rd, Read::Feature(..)))
+                .cloned()
+                .collect();
+            assert_eq!(
+                got, want,
+                "{variant} 的检测位必须逐条等于 cpu_isa 的表（槽/位不配对 = 加数换算错了或\
+                 发射器读了另一份表）"
+            );
+            let wants_xcr0 = arch.xcr0_mask != 0;
+            let has_xcr0 = reads
+                .iter()
+                .any(|rd| matches!(rd, Read::Xcr0(s) if *s == cpu_isa::SLOT_XCR0_LOW));
+            assert_eq!(
+                has_xcr0, wants_xcr0,
+                "{variant}: XCR0 门控必须按表出现（表要 {:#x}，机器码里有 {has_xcr0}）",
+                arch.xcr0_mask
+            );
+        }
+    }
+}
+
+/// 「真选中了非 default 变体」在 **target_clones** 上也必须可观察（不只是 `.o` 侧静态读）。
+///
+/// 通道：宿主 `ld` 给 `(void *)compute` 发 GOT 槽 + `R_X86_64_IRELATIVE`，动态链接器
+/// 调 resolver 并把**返回的变体地址**写回那个槽 —— 程序打印出来的就是选型结果。实测
+/// 本机（sse4.2/avx 都支持，`-O0`）：`delta=-448` = `compute.sse4_2`(0x402150) -
+/// `marker`(0x402310)，而 `compute.default`(0x4021b8) 那一支是 -344。判据把「builtin
+/// 说支持」与「地址落在该变体」钉成同一件事，因此恒假桩 / 恒返 default / 恒返第一个
+/// 变体三种偷工做法都会红（机器无关）。打印差值而非绝对地址：同样吃 PIE/ASLR。
+///
+/// 任务书要求的是「真的选中了 **avx/sse4.2** 变体」都能被观察到，所以夹具带**两支**：
+/// `compute`（二档 `sse4.2,default`）与 `dispatch3`（三档 `avx,sse4.2,default`，实测
+/// `delta3=-240` = `dispatch3.avx`(0x402220) - `marker`；sse4_2 是 -160、default 是 -80）。
+/// 第二支额外钉两件事：avx 与 sse4.2 同时为真时必须走 avx（优先级），以及 avx 那一支的
+/// XCR0/OSXSAVE 门控。期望仍只由 `__builtin_cpu_supports("avx")` 的运行时读数决定，
+/// 所以在任何机器上都成立；「三档链只认第一/最后一档」这类错在本机会给 sse4_2 或
+/// default，立刻红。
+///
+/// 不做 gcc 逐字对照（两处有意差异，理由写在夹具头）：
+///   1) gcc 13 把 `&ifunc` 绑到 PLT 桩 —— 实测 `gcc -O0 -no-pie` 打 `delta=-4606`，
+///      即 `p = marker(0x40227e) - 4606 = 0x401080`，落在 `.plt.sec` [0x401060,0x401090)，
+///      而 dcc 打解析后的实现体；调用语义相同，但只有 dcc 这一侧能直接读出选了谁；
+///   2) `__builtin_cpu_supports` 的返回值 gcc 是 libgcc 内部特性字的位值（本机实测
+///      sse4.2=256、avx=512），dcc 归一成 0/1 —— 本判据用 `has != 0` 取定，对两者免疫。
+#[test]
+#[cfg(unix)]
+fn target_clones_runtime_resolves_to_non_default_variant() {
+    let src = include_str!("../fixtures/c/attr_target_clones_selected.c");
+    let (ok, stderr, exe) = dcc_link_exe("tc-selected", src, &["-O0"]);
+    assert!(ok, "夹具应能经宿主 cc 链上；stderr:\n{stderr}");
+    // 观察选型之前先确认产物是动态的：静态产物里根本没有动态链接器去跑 resolver。
+    assert_dynamically_linked(&exe, "tc-selected", &stderr);
+
+    let syms = elf64_syms(&fs::read(&exe).unwrap_or_default());
+    let value_of = |n: &str| -> i64 {
+        syms.iter()
+            .find(|s| s.name == n)
+            .unwrap_or_else(|| panic!("exe 符号表里没有 {n}"))
+            .value as i64
+    };
+    let marker = value_of("marker");
+    let sse4_2 = value_of("compute.sse4_2") - marker;
+    let default = value_of("compute.default") - marker;
+    assert_ne!(sse4_2, default, "两个变体必须真的在两个不同地址上，否则本判据无从分辨");
+
+    let (rc, stdout, run_stderr) = run_exe_bounded(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "运行失败；stderr:\n{}", String::from_utf8_lossy(&run_stderr));
+    let text = String::from_utf8_lossy(&stdout).to_string();
+    let field = |key: &str| -> Option<i64> {
+        text.split_whitespace()
+            .find_map(|w| w.strip_prefix(&format!("{key}=")))
+            .and_then(|v| v.parse::<i64>().ok())
+    };
+    let (delta, has, call) = (
+        field("delta"),
+        field("has_sse42"),
+        field("call"),
+    );
+    let (delta, has, call) = (
+        delta.unwrap_or_else(|| panic!("输出里没有 delta=：{text}")),
+        has.unwrap_or_else(|| panic!("输出里没有 has_sse42=：{text}")),
+        call.unwrap_or_else(|| panic!("输出里没有 call=：{text}")),
+    );
+    assert_eq!(call, 21, "compute(10) 必须经 IFUNC 解析后返回 21（选中的实现真被调用）");
+    let (expect, other, which) = if has != 0 {
+        (sse4_2, default, "compute.sse4_2")
+    } else {
+        (default, sse4_2, "compute.default")
+    };
+    assert_eq!(
+        delta, expect,
+        "本机 `__builtin_cpu_supports(\"sse4.2\")` 报 {has}，解析后的地址就应该落在 \
+         {which}（差值 {expect}），实际 {delta}；输出：{text}"
+    );
+    assert_ne!(
+        delta, other,
+        "解析结果同时等于**另一个**变体 = resolver 的选型与 CPUID 读数无关（假 resolver）"
+    );
+
+    // 第二支：三变体链 `avx,sse4.2,default` —— 「真选中了 avx 变体」也必须可观察。
+    let avx = value_of("dispatch3.avx") - marker;
+    let d3_sse42 = value_of("dispatch3.sse4_2") - marker;
+    let d3_default = value_of("dispatch3.default") - marker;
+    // 三个变体必须落在三个不同地址上，否则本判据无从分辨选型结果。
     assert!(
-        syms.contains("10") && syms.contains("compute"),
-        "compute should be IFUNC: {syms}"
+        avx != d3_sse42 && avx != d3_default && d3_sse42 != d3_default,
+        "dispatch3 的三个变体地址必须两两不同，实得 avx={avx} sse4_2={d3_sse42} default={d3_default}"
+    );
+    let delta3 = field("delta3").unwrap_or_else(|| panic!("输出里没有 delta3=：{text}"));
+    let has_avx = field("has_avx").unwrap_or_else(|| panic!("输出里没有 has_avx=：{text}"));
+    let call3 = field("call3").unwrap_or_else(|| panic!("输出里没有 call3=：{text}"));
+    assert_eq!(call3, 17, "dispatch3(10) 必须经 IFUNC 解析后返回 17（选中的实现真被调用）");
+    let (which3, expect3) = if has_avx != 0 {
+        ("dispatch3.avx", avx)
+    } else if has != 0 {
+        ("dispatch3.sse4_2", d3_sse42)
+    } else {
+        ("dispatch3.default", d3_default)
+    };
+    assert_eq!(
+        delta3, expect3,
+        "本机 avx={has_avx} sse4.2={has}，解析后的地址就应该落在 {which3}（差值 {expect3}），\
+         实际 {delta3}；三档链的优先级或 XCR0 门控有一处不对；输出：{text}"
+    );
+    for (name, value) in [
+        ("dispatch3.avx", avx),
+        ("dispatch3.sse4_2", d3_sse42),
+        ("dispatch3.default", d3_default),
+    ] {
+        if name != which3 {
+            assert_ne!(
+                delta3, value,
+                "解析结果等于 {name}，但 builtin 读数要求 {which3}（选型与 CPUID 读数脱钩）"
+            );
+        }
+    }
+}
+
+/// 「CPUID 真被跑过、真选中的不是 default」的**行为级**可证伪判据。
+///
+/// 夹具用 `__attribute__((ifunc))` + 返回值不同的实现体：`resolve_sse2` 在
+/// leaf1/EDX#26（x86-64 恒真）时返回 `fast_impl = 2`，否则 `slow_impl = 1`；
+/// `main` 把「选中结果」与「运行时再问一次 `__builtin_cpu_supports`」比较，并只在
+/// `a == 2` 时返回 0。于是恒假 resolver / 无条件返回 default / builtin 永远 0 三种
+/// 偷工做法都得 rc != 0。第二个 ifunc 用 `avx2`（本机真、老机器假），只与 gcc
+/// 逐字比输出而不写死结果。
+#[test]
+#[cfg(unix)]
+fn attr_target_clones_ifunc_behavior_selects_non_default() {
+    const STT_GNU_IFUNC: u8 = 10;
+    const STT_FUNC: u8 = 2;
+    let src = include_str!("../fixtures/c/attr_target_clones_ifunc_behavior.c");
+    for opt in ["-O0", "-O1", "-O2", "-O3"] {
+        let rc = run_gcc_cross_check_opt(&format!("tc-behavior-{opt}"), src, &[opt]);
+        assert_eq!(rc, 0, "{opt}: 夹具自己判定「选中的必须是 fast_impl(=2) 且与 builtin 同源」失败");
+    }
+    // `.o` 侧：`__attribute__((ifunc("r")))` 的基名必须与用户写的 resolver 同址。
+    let obj = dcc_obj_bytes("tc-behavior-o", src, &["-O0"]);
+    let syms = elf64_syms(&obj);
+    let find = |n: &str| syms.iter().find(|s| s.name == n);
+    for (base, resolver) in [("by_sse2", "resolve_sse2"), ("by_avx2", "resolve_avx2")] {
+        let b = find(base).unwrap_or_else(|| panic!(".o 里没有 IFUNC 基名 {base}"));
+        let r = find(resolver).unwrap_or_else(|| panic!("用户写的 resolver {resolver} 没发到 .o（被 DCE 杀过）"));
+        assert_eq!(b.stype, STT_GNU_IFUNC, "{base} 必须是 STT_GNU_IFUNC");
+        assert_eq!(r.stype, STT_FUNC, "{resolver} 必须是普通 FUNC 体");
+        assert_eq!((b.value, b.size), (r.value, r.size), "{base} 必须指向 {resolver}");
+        assert_ne!(b.value, find("slow_impl").expect("slow_impl").value, "IFUNC 不得直指实现体");
+    }
+}
+
+/// `__builtin_cpu_supports` / `__builtin_cpu_is` 必须是**真实现**（运行时 CPUID +
+/// 缓存），而不是挂在 `preproc.rs` 名字表上的恒假桩。
+///
+/// 夹具的四条不变量（sse/sse2 恒真锚点、avx2⇒avx⇒sse4.2⇒sse3⇒sse2 单调、intel/amd
+/// 互斥、init 后幂等）全是机器无关的：恒 0 桩钉不住第一条，硬编码 1 钉不住第二条
+/// 的错位的位（把 leaf7 当 leaf1 读会以「高特性真、低特性假」破坏偏序），厂商 dword
+/// 拼接顺序写错（ECX 当 EDX）钉不住第三条。四档都与 gcc 逐字对照 stdout。
+#[test]
+#[cfg(unix)]
+fn attr_target_clones_cpu_builtin_is_real_implementation() {
+    let src = include_str!("../fixtures/c/attr_target_clones_cpu_builtin.c");
+    for opt in ["-O0", "-O1", "-O2", "-O3"] {
+        let rc = run_gcc_cross_check_opt(&format!("tc-builtin-{opt}"), src, &[opt]);
+        assert_eq!(rc, 0, "{opt}: builtin 的不变量不成立（恒假桩/位表错位/厂商顺序错）");
+    }
+    // 只用 builtin（没有 target_clones）也必须自带 CPUID 检测：不能靠宿主 libgcc。
+    let obj = dcc_obj_bytes("tc-builtin-o", src, &["-O0"]);
+    let syms = elf64_syms(&obj);
+    let find = |n: &str| syms.iter().find(|s| s.name == n);
+    assert!(find("__dcc_cpu_indicator_init").is_some(), "只用 builtin 时也必须发检测函数");
+    assert!(find("__dcc_cpu_model").is_some(), "只用 builtin 时也必须发缓存对象");
+    for undefined in elf64_undefined_symbols(&obj) {
+        assert!(
+            !undefined.contains("__cpu_model") && !undefined.contains("__builtin_cpu"),
+            "builtin 实现不得依赖 libgcc 符号，得自包含在 .o 里：{undefined}"
+        );
+    }
+    // 读表序列真的在 `.text` 里（不只是“有个定义”）：有 PC32 指向缓存与检测函数。
+    let relas = elf64_rela(&obj, ".rela.text");
+    let references = |n: &str| {
+        relas
+            .iter()
+            .any(|(_, idx, _, _)| syms.get(*idx as usize).map(|s| s.name == n).unwrap_or(false))
+    };
+    assert!(references("__dcc_cpu_model"), "builtin 的读表序列没发出来（.text 里没有对 __dcc_cpu_model 的重定位）");
+    assert!(references("__dcc_cpu_indicator_init"), "builtin 没调用 CPUID 检测");
+}
+
+/// `__builtin_cpu_supports` 位表的**逐名字与 gcc 差分**判据。
+///
+/// 为什么 `attr_target_clones_cpu_builtin_is_real_implementation` 的四条不变量不够：
+/// 它们钉的是「非空 + 偏序 + 互斥 + 幂等」，抓得住恒假桩和「把 leaf7 当 leaf1 读」这类
+/// **结构性**错误，但抓不住「名字落在同一 leaf 的另一个位上」，也完全不看扩展叶。
+/// 本轮就是靠这条差分当场抓到两个真错（不是理论风险，是已修掉的既有缺陷）：
+///   1. `rdseed` 在 `src/semantics.rs` 里写成 CPUID.(7,0):EBX**#22** —— 那是 ENCLV，
+///      RDSEED 是 #18；本机 #22=0、#18=1，而偏序链里没有 rdseed，所以四条不变量全绿、
+///      答案恒 0，gcc 报 1。
+///   2. 扩展叶根探测（leaf `0x8000_0000`）被一个**永假**门控挡住：门控读的是基本叶最大值
+///      `SLOT_LEAF0_EAX`（本机 0x20）并要求它 `>= 0x8000_0000`。于是 `SLOT_EXT_MAX_EAX`
+///      永不填、leaf `0x8000_0001` 整条跳过，`lzcnt`/`abm`/`lm`/`nx`/`syscall`/`rdtscp`/
+///      `sse4a`/`3dnow`/`3dnowext` **全体静默读 0** —— 正是任务书禁止的「看起来修了」形状。
+///      恒真锚点那条不变量只列了 sse/sse2，碰不到扩展叶，所以也没抓到。
+///
+/// 判据的两层：
+///   * **与 gcc 逐字对照**（四档）：同一份夹具、同一台真机，任何一位写错都会显形。
+///   * **自洽核对**（不看 gcc，把 dcc 自己的 stdout 当数据）：49 个名字一个都不能少
+///     （少一个 = 夹具与名字表脱钩，gcc 对照会跟着一起瞎，因为两侧都少问同一个名字）；
+///     `sum=` 必须等于逐行 1 的个数；x86-64 恒真位必须为 1 —— 其中 `lm` 只来自扩展叶，
+///     所以它是「扩展叶探测真的执行过」的直接证据，不依赖 gcc 在场。
+///
+/// 名字集合取的是 **gcc 13 与 dcc 都接受**的交集（gcc 侧表在
+/// `gcc/common/config/i386/i386-isas.h`），**一个都不排除**。曾经把 `movdiri`
+/// 排除在外并写成「本机 EDX bit27=1 而 gcc 报 0，那是 libgcc 对 >31 号特性字的
+/// 存储/版本条件」—— 那个归因是**错的**，它把一个实现缺陷掩盖成外部不可比：
+/// 权威位号是 CPUID.(7,0):**ECX**#27（Linux `cpufeatures.h` word 16、gcc `cpuid.h`
+/// 的 `bit_MOVDIRI` 配 `cpuinfo.h` 的 `ecx & bit_MOVDIRI`），本表曾写成 EDX#27
+/// （那一位是 INTEL_STIBP），所以在不支持 MOVDIRI 的本机上报 1 而 gcc 报 0。
+/// 现在位号改正、名字放回，两侧都在场才藏不住。
+#[test]
+#[cfg(unix)]
+fn attr_target_clones_cpu_supports_matrix_matches_gcc() {
+    /// gcc 13 (`i386-isas.h`) 与 dcc (`src/semantics.rs::FEATURES`) 都接受的特性名。
+    const NAMES: &[&str] = &[
+        "3dnow", "abm", "adx", "aes", "avx", "avx2", "avx512bf16", "avx512bitalg",
+        "avx512bw", "avx512cd", "avx512dq", "avx512er", "avx512f", "avx512ifma",
+        "avx512pf", "avx512vbmi", "avx512vbmi2", "avx512vl", "avx512vnni",
+        "avx512vp2intersect", "avx512vpopcntdq", "bmi", "bmi2", "clwb", "clzero",
+        "cmov", "f16c", "fma", "gfni", "ibt", "lm", "lzcnt", "mmx", "movbe",
+        "movdiri", "osxsave", "pclmul", "pku", "popcnt", "rdrnd", "rdseed",
+        "serialize", "sha", "shstk", "sse", "sse2", "sse3", "sse4.1", "sse4.2",
+        "sse4a", "ssse3", "vaes", "vpclmulqdq", "waitpkg", "wbnoinvd", "xop",
+        "xsave", "xsavec", "xsaveopt", "xsaves",
+    ];
+    let src = include_str!("../fixtures/c/attr_target_clones_cpu_matrix.c");
+    assert_eq!(NAMES.len(), 60, "交集名字表本身要按数量钉住（夹具头写着 60 个）");
+    for opt in ["-O0", "-O1", "-O2", "-O3"] {
+        let rc = run_gcc_cross_check_opt(&format!("tc-matrix-{opt}"), src, &[opt]);
+        assert_eq!(rc, 0, "{opt}: 夹具的机器无关锚点不成立（扩展叶没跑 / 偏序破 / abm!=lzcnt / 子叶门控错）");
+    }
+
+    // 第二层：dcc 自己的读数当数据核对，不借 gcc 的权威。
+    let (build, exe) = run_compile_and_run_flags("tc-matrix-self", src, &["-O2"]);
+    assert!(
+        build.status.success(),
+        "dcc 应能编译 cpu_matrix（任一名字不被接受就是 E0018）: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let (code, stdout, stderr) = run_exe_bounded(&exe);
+    let _ = std::fs::remove_file(&exe);
+    let text = String::from_utf8_lossy(&stdout).to_string();
+    assert_eq!(code, 0, "dcc 侧锚点自检失败（rc={code}），输出:\n{text}\nstderr:\n{}", String::from_utf8_lossy(&stderr));
+
+    let mut ones = 0usize;
+    for name in NAMES {
+        // 名字里带 `.`（sse4.1/sse4.2）与以数字开头（3dnow）都不影响：夹具打印的行标签就是原名。
+        let mut hits = text
+            .lines()
+            .filter(|l| l.split_once('=').map(|(k, _)| k == *name).unwrap_or(false));
+        let value = hits
+            .next()
+            .unwrap_or_else(|| panic!("输出里缺 {name}= 这一行 —— 夹具与名字表脱钩了:\n{text}"));
+        assert!(hits.next().is_none(), "{name} 在输出里出现多次，对照就没有意义了");
+        let v: i32 = value
+            .split_once('=')
+            .unwrap()
+            .1
+            .parse()
+            .unwrap_or_else(|_| panic!("{name} 的读数不是整数: {value}"));
+        assert!((v == 0 || v == 1), "{name} 必须是归一后的 0/1，实得 {v}");
+        ones += v as usize;
+    }
+    assert_eq!(
+        text.lines().filter(|l| l.contains('=')).count(),
+        NAMES.len() + 1,
+        "输出行数应正好是 60 个名字 + 1 行 sum=（多出来的行说明夹具加了没登记的名字）:\n{text}"
+    );
+    let sum: i32 = text
+        .lines()
+        .find_map(|l| l.strip_prefix("sum=").and_then(|v| v.trim().parse().ok()))
+        .expect("没有 sum= 聚合行");
+    assert_eq!(sum as usize, ones, "sum= 与逐行 1 的个数不一致（夹具自己不自洽，对照读数不可信）");
+
+    // 扩展叶的直接证据：`lm` 只有 0x8000_0001 的探测真的跑了才会是 1。
+    let read = |n: &str| {
+        text.lines()
+            .find(|l| l.split_once('=').map(|(k, _)| k == n).unwrap_or(false))
+            .unwrap_or_else(|| panic!("输出里缺 {n}=:\n{text}"))
+            .split_once('=')
+            .unwrap()
+            .1
+            .trim()
+            .parse::<i32>()
+            .unwrap()
+    };
+    for anchor in ["lm", "mmx", "cmov", "sse", "sse2"] {
+        assert_eq!(read(anchor), 1, "{anchor} 在 x86-64 上恒真；读 0 说明对应探测没跑（lm=扩展叶整条被跳过）");
+    }
+    assert_eq!(read("abm"), read("lzcnt"), "abm 与 lzcnt 是同一个 CPUID 位（0x8000_0001/ECX#5）的两种写法");
+    // 子叶门控的一致性（不靠 gcc 在场）：(0xD,1)/(7,1) 的内容在子叶不存在时**等于子叶 0**，
+    // 所以「把 (7,0):EAX 当 (7,1):EAX 用」只会体现为子叶名字的答案错；这里用两条
+    // 必要约束钉住方向（子叶位为真 ⇒ 它依赖的父位为真）。
+    if read("xsaveopt") == 1 || read("xsavec") == 1 || read("xsaves") == 1 {
+        assert_eq!(read("xsave"), 1, "(0xD,1) 的位子叶为真但 xsave 为假 ⇒ 子叶采集没被 xsave 门控");
+    }
+    if read("avx512bf16") == 1 {
+        assert_eq!(read("osxsave"), 1, "(7,1) 的位需要 XCR0 的 AVX-512 状态位，osxsave 为假时不得为真");
+    }
+}
+
+/// `__builtin_cpu_is("<型号名>")` 必须是**真的分类结果**（终态 3 的另一半）。
+///
+/// `attr_target_clones_cpu_builtin_is_real_implementation` 只问 `intel`/`amd` 两个厂商名，
+/// 它证明的是「leaf0 的三个 dword 被认出来」。型号名要求得多：leaf1/EAX 的
+/// family+model 解码（含 `family==0xf`/`==6`/Zhaoxin `==7` 三支厂商相关调整）+ 整张按
+/// `(厂商, family)` 分组、按 model 逐条、必要时用特性位当守卫的分类表。那一层在上一轮
+/// 根本不存在（型号名一律报 E1125 桩），所以判据必须逐个名字问。
+///
+/// 两层，避免「把本机答案抄进断言」：
+///   * **与 gcc 逐字对照**（四档）：本机 gcc 报 `intel=1 corei7=1 rocketlake=1`、其余 48 个
+///     为 0。恒假桩在这条上必红（它给不出那三个 1）。
+///   * **参考求值器对账**（不写死本机答案）：期望值由 `cpu_isa::host_processor_class()`
+///     现场算出（同一张 `CLASSIFY` + 同一份 `decode_family_model`），逐名字与 dcc 的
+///     stdout 比。换一台 AMD/Zhaoxin 机器，期望跟着变而判据仍成立 —— 与硬编码
+///     `rocketlake=1` 的写法有本质区别（后者在别的机器上假红）。
+#[test]
+#[cfg(unix)]
+fn attr_target_clones_cpu_is_model_names_match_gcc() {
+    use dcc::semantics::cpu_isa;
+    let src = include_str!("../fixtures/c/attr_target_clones_cpu_is_matrix.c");
+    let names = cpu_isa::cpu_is_names();
+    assert_eq!(names.len(), 51, "`__builtin_cpu_is` 名字集（gcc 13.3 实测集）的数量变了");
+    for opt in ["-O0", "-O1", "-O2", "-O3"] {
+        let rc = run_gcc_cross_check_opt(&format!("tc-cpuis-{opt}"), src, &[opt]);
+        assert_eq!(
+            rc, 0,
+            "{opt}: 型号名夹具的机器无关锚点不成立（厂商互斥 / atom!=bonnell / 子型不蕴含父型 / 多个子型同时为真）"
+        );
+    }
+
+    let (build, exe) = run_compile_and_run_flags("tc-cpuis-self", src, &["-O2"]);
+    assert!(
+        build.status.success(),
+        "dcc 应能编译 cpu_is 矩阵（任一型号名不被接受就是 E1125）: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let (code, stdout, stderr) = run_exe_bounded(&exe);
+    let _ = std::fs::remove_file(&exe);
+    let text = String::from_utf8_lossy(&stdout).to_string();
+    assert_eq!(code, 0, "dcc 侧锚点自检失败（rc={code}）:\n{text}\nstderr:\n{}", String::from_utf8_lossy(&stderr));
+
+    let read = |n: &str| -> i32 {
+        text.lines()
+            .find(|l| l.split_once('=').map(|(k, _)| k == n).unwrap_or(false))
+            .unwrap_or_else(|| panic!("输出里缺 {n}= 这一行 —— 夹具与 `CPU_IS_NAMES` 脱钩了:\n{text}"))
+            .split_once('=')
+            .unwrap()
+            .1
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("{n} 的读数不是 0/1:\n{text}"))
+    };
+    assert_eq!(
+        text.lines().filter(|l| l.contains('=')).count(),
+        names.len() + 1,
+        "输出行数应正好是 51 个名字 + 1 行 sum=（多出来的行说明夹具加了没登记的名字）:\n{text}"
+    );
+    for n in &names {
+        let v = read(n);
+        assert!(v == 0 || v == 1, "{n} 必须被夹具归一成 0/1，实得 {v}");
+    }
+    let ones = names.iter().filter(|n| read(n) == 1).count();
+    let sum: i32 = text
+        .lines()
+        .find_map(|l| l.strip_prefix("sum=").and_then(|v| v.trim().parse().ok()))
+        .expect("没有 sum= 聚合行");
+    assert_eq!(sum as usize, ones, "sum= 与逐行 1 的个数不一致（夹具不自洽，对照读数不可信）");
+
+    // 第二层：与参考求值器逐名字对账（只在能真跑 CPUID 的宿主上做）。
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
+    {
+        let (kind, class) = cpu_isa::host_processor_class();
+        for n in &names {
+            assert_eq!(
+                read(n),
+                cpu_isa::cpu_is_holds(n, kind, &class) as i32,
+                "'{n}' 的答案与 cpu_isa 参考求值器不一致：发射侧的解码/分类链/比较槽三处任一处飘了\n\
+                 宿主 kind={kind} type={} subtype={}",
+                class.cpu_type,
+                class.cpu_subtype,
+            );
+        }
+        // 反「恒假桩」：本机上确实有型号名为真（厂商名至少一个 + 若分类命中则型号名）。
+        assert!(
+            read("intel") == 1 || read("amd") == 1,
+            "本机厂商名全为 0：leaf0 厂商 dword 比较坏了（型号名也不会对）:\n{text}"
+        );
+    }
+}
+
+/// `__dcc_cpu_indicator_init` 写进型号槽的 id 必须**恰好等于** `CLASSIFY` 里那些 id。
+///
+/// 为什么只靠上一条还不够：那是对**本机这一条路径**的读数 —— 本机是 Intel family 6
+/// model 0xa7，分类链只走到那一条规则就 `jmp` 结束，其余几十条写入点根本没被执行过。
+/// 如果发射器漏了某条规则（或比较端与写入端的 id 算歪），本机答案依旧全绿，而在一台
+/// 真的 Cascade Lake / znver3 上 `__builtin_cpu_is("cascadelake")` 会永远为 0 —— 那正是
+/// 「看起来修了」的形状，而且在这一台机器上任何跑数据的判据都抓不到。
+///
+/// 所以本条不运行任何东西，只读 `.o` 的字节与重定位：把 init 体里每一条
+/// `movl $imm32, disp32(%rip)`（`C7 05`，`delta = 8`）按加数还原成「槽 + 立即数」，
+/// 然后要求型号槽的立即数集合与从 `CLASSIFY` 推出来的 id 集合**相等**（不是包含）。
+/// 期望全部由表算出，本文件不重写一份 id 表（否则用例自己就成了第二份真源）。
+#[test]
+#[cfg(unix)]
+fn attr_target_clones_cpu_indicator_classify_ids_come_from_classify_table() {
+    use std::collections::BTreeSet;
+    use dcc::semantics::cpu_isa;
+    const R_X86_64_PC32: u32 = 2;
+
+    let src = include_str!("../fixtures/c/attr_target_clones_cpu_is_matrix.c");
+    let obj = dcc_obj_bytes("tc-classify-ids", src, &["-O0"]);
+    let syms = elf64_syms(&obj);
+    let text = elf64_section_data(&obj, ".text").expect(".o 里应有 .text").to_vec();
+    let relas = elf64_rela(&obj, ".rela.text");
+    let init = syms
+        .iter()
+        .find(|s| s.name == "__dcc_cpu_indicator_init")
+        .expect("只用 __builtin_cpu_is 也必须发 CPUID 检测函数");
+    assert!(init.size > 0, "__dcc_cpu_indicator_init 必须是带长度的函数体");
+
+    // 槽 -> 被写入过的立即数集合（只收 `C7 05` 这一种形式）。
+    let mut writes: std::collections::BTreeMap<usize, BTreeSet<u32>> = std::collections::BTreeMap::new();
+    for (off, idx, typ, addend) in relas.iter() {
+        if *typ != R_X86_64_PC32 || *off < init.value || *off >= init.value + init.size {
+            continue;
+        }
+        if syms.get(*idx as usize).map(|s| s.name.as_str()) != Some("__dcc_cpu_model") {
+            continue;
+        }
+        let p = *off as usize;
+        if p < 2 || p + 8 > text.len() || text[p - 2..p] != [0xC7, 0x05] {
+            continue;
+        }
+        // `addend = slot_offset - delta`（`delta = 8`：disp32 字段到下一条指令起始）。
+        let field = *addend + 8;
+        assert!(field >= 0 && field % 4 == 0, "init 体里 {p:#x} 处的 `C7 05` 加数不指向 dword 槽：addend={addend}");
+        let slot = (field / 4) as usize;
+        let imm = u32::from_le_bytes(text[p + 4..p + 8].try_into().unwrap());
+        writes.entry(slot).or_default().insert(imm);
+    }
+
+    // 期望集：从 `CLASSIFY` 推（与写入端、比较端同一个 `type_id`/`subtype_id`）。
+    let mut want_type: BTreeSet<u32> = BTreeSet::new();
+    let mut want_subtype: BTreeSet<u32> = BTreeSet::new();
+    for g in cpu_isa::CLASSIFY {
+        if !g.group_type.is_empty() {
+            want_type.insert(cpu_isa::type_id(g.group_type).unwrap_or_else(|| panic!("组级类型 '{}' 没有 id", g.group_type)));
+        }
+        for r in g.rules {
+            if !r.cpu_type.is_empty() {
+                want_type.insert(cpu_isa::type_id(r.cpu_type).unwrap_or_else(|| panic!("规则类型 '{}' 没有 id", r.cpu_type)));
+            }
+            if !r.cpu_subtype.is_empty() {
+                want_subtype.insert(cpu_isa::subtype_id(r.cpu_subtype).unwrap_or_else(|| panic!("规则子型 '{}' 没有 id", r.cpu_subtype)));
+            }
+        }
+    }
+    assert!(!want_type.is_empty() && !want_subtype.is_empty(), "分类表本身不能是空的");
+    let got_type = writes.get(&cpu_isa::SLOT_CPU_TYPE).cloned().unwrap_or_default();
+    let got_subtype = writes.get(&cpu_isa::SLOT_CPU_SUBTYPE).cloned().unwrap_or_default();
+    assert_eq!(
+        got_type, want_type,
+        "init 体写进 `SLOT_CPU_TYPE` 的 id 集与 `CLASSIFY` 不等：漏一条 = 那个型号名在任何机器上永为 0，\
+         多一条 = 表里存在「发得出但问不到」的 id（本例不运行任何东西，所以与宿主 CPU 无关）"
+    );
+    assert_eq!(
+        got_subtype, want_subtype,
+        "init 体写进 `SLOT_CPU_SUBTYPE` 的 id 集与 `CLASSIFY` 不等（同上）"
+    );
+    // id 从 1 起编（`= 0` 是「未分类」），所以发射器写出的 id 不得包含 0。
+    assert!(
+        !got_type.contains(&0) && !got_subtype.contains(&0),
+        "型号槽被写了 0（分类链把「不写」误成「写 0」会让后面的规则无法覆盖它）"
+    );
+
+    // 厂商 kind：四条已知签名都必须发得出（0 = 未匹配时的兵底写 0，它不在签名表里）。
+    let want_vendor: BTreeSet<u32> = cpu_isa::VENDOR_SIGS.iter().map(|v| v.kind).collect();
+    let got_vendor = writes.get(&cpu_isa::SLOT_VENDOR_KIND).cloned().unwrap_or_default();
+    assert!(
+        want_vendor.iter().all(|k| got_vendor.contains(k)),
+        "init 体没把 `{want_vendor:?}` 全体写进 SLOT_VENDOR_KIND（实得 {got_vendor:?}）：\
+         某个厂商的机器上厂商名与全部型号名都会永为 0"
+    );
+    for k in &got_vendor {
+        assert!(
+            *k == cpu_isa::VENDOR_UNKNOWN || want_vendor.contains(k),
+            "SLOT_VENDOR_KIND 被写了表外的 kind {k}"
+        );
+    }
+}
+
+/// 底线 5 的另一面：仍走内置链接器（用户显式 `-fbuiltin-linker`）的路径不得静默。
+///
+/// 钉三件事：
+///   1. 静态 ET_EXEC 里 IFUNC 被绑到 `<base>.default`（`link::ifunc::bind_static_exec_ifuncs`）。
+///      没有这一步时，引用方会直接 `call <base>.resolver`，而 resolver `ret` 回的是
+///      **函数指针**不是返回值 —— 实测纯 target_clones 程序因此 SIGSEGV（rc=139）。
+///   2. 这条语义退化必须**无条件**写在 stderr（不许退回到静默降级），产物也确实是静态的。
+///   3. 最终 exe 里不该再剩 `STT_GNU_IFUNC`：静态产物没人应用 IRELATIVE，留着那个类型
+///      就是「有 IFUNC、却永远不会被解析」的装饰。
+#[test]
+#[cfg(unix)]
+fn target_clones_builtin_linker_static_binds_default_and_announces() {
+    const STT_GNU_IFUNC: u8 = 10;
+    let src = "__attribute__((target_clones(\"sse4.2,default\")))\n\
+                int compute(int x){ return x*2+1; }\n\
+                int main(void){ return compute(10) == 21 ? 0 : 1; }\n";
+    let (ok, stderr, exe) = dcc_link_exe("tc-static-bind", src, &["-O0", "-fbuiltin-linker"]);
+    assert!(ok, "纯 target_clones（无 libc）应能用内置链接器链上；stderr:\n{stderr}");
+    assert!(
+        stderr.contains("bound to variant 'compute.default'"),
+        "静态路径把 IFUNC 冻结到 default 变体这件事必须明说（不得静默）；stderr:\n{stderr}"
     );
     assert!(
-        syms.contains("10") && syms.contains("multiply"),
-        "multiply should be IFUNC: {syms}"
+        stderr.contains("CPUID dispatch is DISABLED"),
+        "必须说清静态产物里运行时 CPUID 派发已失效；stderr:\n{stderr}"
     );
-    // 变体符号
-    assert!(syms.contains("compute.sse4.2"), "missing compute.sse4.2: {syms}");
-    assert!(syms.contains("compute.default"), "missing compute.default: {syms}");
-    assert!(syms.contains("multiply.avx"), "missing multiply.avx: {syms}");
-    assert!(syms.contains("multiply.sse4.2"), "missing multiply.sse4.2: {syms}");
-    assert!(syms.contains("multiply.default"), "missing multiply.default: {syms}");
-    let _ = fs::remove_file(&src_path);
-    let _ = fs::remove_file(&obj);
+    assert!(
+        stderr.contains("static (no PT_INTERP / DT_NEEDED)"),
+        "内置链接产物必须自报链接方式；stderr:\n{stderr}"
+    );
+    // 真跑得出正确结果（这一条就是 SIGSEGV 回归的反面：绑进 resolver 后 rc=139）。
+    let (rc, _stdout, run_stderr) = run_exe_bounded(&exe);
+    let run_stderr = String::from_utf8_lossy(&run_stderr).to_string();
+    assert_eq!(
+        rc, 0,
+        "静态产物的 compute(10) 必须返回 21（绑错东西时要么 SIGSEGV 要么 rc=1）；stderr:\n{run_stderr}"
+    );
+    // exe 侧：`compute` 与 `compute.default` 同址，且全表不再有任何 IFUNC。
+    // 取数走 `elf64_syms_by_type`：内置链接器把自己的 `.symtab/.strtab` 节头 `sh_name`
+    // 写成 0（见该助手注释），按名字找符号表的 `elf64_syms` 在这里只会拿到空表。
+    let bytes = fs::read(&exe).unwrap_or_default();
+    let syms = elf64_syms_by_type(&bytes);
+    assert!(!syms.is_empty(), "静态 exe 里找不到 SHT_SYMTAB 节（连符号表都没有）");
+    let find = |n: &str| syms.iter().find(|s| s.name == n);
+    let dump: Vec<String> = syms
+        .iter()
+        .map(|s| format!("{}(ty={},val={:#x})", s.name, s.stype, s.value))
+        .collect();
+    let compute = find("compute").unwrap_or_else(|| panic!("exe 里应有 compute；实际符号：{}", dump.join(" ")));
+    let default = find("compute.default").expect("exe 里应有 compute.default");
+    assert_eq!(compute.value, default.value, "静态产物里 compute 必须就是 default 变体");
+    assert_ne!(compute.stype, STT_GNU_IFUNC, "静态产物不该留永不会被解析的 IFUNC 类型");
+    assert!(
+        !syms.iter().any(|s| s.stype == STT_GNU_IFUNC && !s.name.is_empty()),
+        "静态 exe 里还有 IFUNC 符号 = 又回到「有 IFUNC 没人应用重定位」那个假形状"
+    );
+    let _ = fs::remove_file(&exe);
+}
+
+/// `__builtin_cpu_supports` 在内置链接器的**静态**产物里也必须真能跑（不是只能走宿主链）。
+///
+/// 这一条钉的是本轮把 `__dcc_cpu_model` 从 `.bss` 换到 `.data` 的决定：内置链接器的
+/// 静态路径把 NOBITS 输出节铺成 size=0 / RW `PT_LOAD` 全 0（那一页根本没映射），
+/// 缓存坐 `.bss` 时 `__dcc_cpu_indicator_init` 第一个写就 SIGSEGV（实测 rc=139）。
+/// 恒 0 桩则会让本夹具返回 3。两者都不是 0，只有「真 CPUID + 真可写的缓存」才得 0。
+#[test]
+#[cfg(unix)]
+fn cpu_builtin_supports_runs_under_builtin_linker_static() {
+    let src = "int main(void){\n\
+                int sse = __builtin_cpu_supports(\"sse\");\n\
+                int sse2 = __builtin_cpu_supports(\"sse2\");\n\
+                return (sse && sse2) ? 0 : 3;\n}\n";
+    let (ok, stderr, exe) = dcc_link_exe("cpu-static", src, &["-O0", "-fbuiltin-linker"]);
+    assert!(ok, "只用 builtin 的程序应能静态链上；stderr:\n{stderr}");
+    let (rc, _stdout, run_stderr) = run_exe_bounded(&exe);
+    let run_stderr = String::from_utf8_lossy(&run_stderr).to_string();
+    assert_eq!(
+        rc, 0,
+        "x86-64 上 sse/sse2 恒支持：rc=3 说明 builtin 是恒假桩，rc=139 说明 CPUID 缓存没被映射；stderr:\n{run_stderr}"
+    );
+    let _ = fs::remove_file(&exe);
 }
 
 // __attribute__((deprecated("msg"))): 仅声明, 解析/编译不应报错
@@ -848,20 +1973,30 @@ fn m27_attr_ifunc_with_builtin_linker() {
 #[test]
 #[cfg(unix)]
 fn m27_attr_ifunc_symbol_type_is_ifunc() {
+    const STT_GNU_IFUNC: u8 = 10;
+    const STT_FUNC: u8 = 2;
     let src = include_str!("../fixtures/c/attr_ifunc.c");
     let (out, obj) = run_object_test("m27-attr-ifunc-obj", src);
     assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
-    // 用 readelf 验证符号表
-    let output = std::process::Command::new("readelf")
-        .args(["-s", obj.to_str().unwrap()])
-        .output()
-        .expect("run readelf");
-    let sym_text = String::from_utf8_lossy(&output.stdout);
-    // IFUNC 符号应存在且类型正确
-    assert!(
-        sym_text.contains("ifunc_func") && sym_text.contains("resolve_ifunc"),
-        "ifunc symbols should exist: {}",
-        sym_text
+    // 直接解析 ELF 而不是 `readelf -s` 文本：本机 zh_CN.UTF-8 下 readelf 把
+    // `STT_GNU_IFUNC` 打成 `<操作系统专用>：10`，所以下面这三条断言只能读字节。
+    let data = fs::read(&obj).expect("read obj");
+    let _ = fs::remove_file(&obj);
+    let syms = elf64_syms(&data);
+    let find = |n: &str| syms.iter().find(|s| s.name == n);
+    let f = find("ifunc_func").expect("ifunc_func 必须在 symtab 里");
+    let r = find("resolve_ifunc").expect("resolve_ifunc 必须在 symtab 里");
+    // 旧版只断两个名字都在 —— 连 st_type 是不是 10 都没验。现在三条都钉：
+    assert_eq!(f.stype, STT_GNU_IFUNC, "ifunc_func 的 st_type 必须是 STT_GNU_IFUNC(10)");
+    assert_eq!(f.bind, 1, "非 static 声明的 IFUNC 必须是 GLOBAL");
+    assert_eq!(r.stype, STT_FUNC, "用户写的 resolver 是普通 STT_FUNC");
+    assert_eq!(
+        (f.value, f.size),
+        (r.value, r.size),
+        "`__attribute__((ifunc(\"r\")))` 的 IFUNC 必须与 r 同址同尺寸（指向真 resolver 体，\
+         不是实现体）。注意：本夹具是**非法 C**（`default_impl` 先用后声明）—— \
+         符号形状仍对，但 resolver 体本身是错的，所以上报的未修项里记了它；\
+         行为级判据看 attr_target_clones_ifunc_behavior.c"
     );
 }
 

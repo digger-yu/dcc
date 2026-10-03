@@ -2492,13 +2492,39 @@ impl Codegen {
                 }
                 true
             },
-            // __builtin_cpu_init(): 初始化 CPU 检测 (x86_64 上为 no-op)
-            "__builtin_cpu_init" => true,
-            // __builtin_cpu_supports(feature): 运行时 CPU 特性检测
-            // 简化实现: 返回 0 (不支持), 允许代码编译通过
-            // 完整实现需要 CPUID 指令和特性字符串解析
+            // ===== x86 CPU 内置函数：真实现（CPUID + `.data` 里的缓存）=====
+            // 发射器、特性位表、缓存对象全部在 `codegen::x86_64::ifunc`，与
+            // `target_clones` 的 resolver **共用同一条 `emit_feature_check`**：
+            // 「运行时 builtin 的答案」与「resolver 在装载期的选型」同真同假。
+            // 缓存必须坐 `.data` 而不是 `.bss`：内置链接器的静态路径不映射 NOBITS
+            // 输出节（`src/link/layout.rs` 的 `fill_section_data`），坐 `.bss` 会让
+            // `__dcc_cpu_indicator_init` 的第一个写 SIGSEGV（判据
+            // `attr_target_clones_ifunc_symbols` 断 `__dcc_cpu_model` 的节是 PROGBITS）。
+            // 之前的 `mov_imm(dst, 0)` 恒假桩已删除：resolver 体要复用同一条
+            // 真实检测（本轮改造前，CPUID 机器码只能由内置链接器现场拼字节流补，
+            // `.o` 里根本没有 resolver，链接因此静默从动态降级为静态）。
+            "__builtin_cpu_init" => {
+                self.emit_cpu_init_builtin();
+                true
+            },
             "__builtin_cpu_supports" => {
-                self.mov_imm(dst, 0);
+                let span = Span::point(&self.source_name, 0, 1);
+                match args.first() {
+                    Some(a) => self.emit_cpu_supports(a, span, dst),
+                    None => {
+                        self.emit_cpu_supports_missing_arg(span, dst);
+                    },
+                }
+                true
+            },
+            "__builtin_cpu_is" => {
+                let span = Span::point(&self.source_name, 0, 1);
+                match args.first() {
+                    Some(a) => self.emit_cpu_is(a, span, dst),
+                    None => {
+                        self.emit_cpu_is_missing_arg(span, dst);
+                    },
+                }
                 true
             },
             // ===== M12+ 补洞 builtins =====

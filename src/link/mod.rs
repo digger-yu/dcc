@@ -546,6 +546,48 @@ pub fn link_from_bundle(
             layout.output_relas.push(r);
         }
     }
+    // 2.9c 静态 ET_EXEC：IFUNC 必须在链接期定到一个具体实现体（无 ld.so 可调用 resolver）。
+    //
+    // codegen 现在把真 resolver 体发在 `.o` 里（IFUNC 的 `st_value` 指向它，与 gcc 同形）。
+    // 宿主 `ld` 的动态路径会把它变成一条 `R_X86_64_IRELATIVE`，ld.so 在加载期调用 resolver
+    // 并把**选中变体的地址**写进 GOT。内置链接器的静态 ET_EXEC 没有这套：`emit_dynamic ==
+    // false` → 不生成 .got/.rela.dyn，`apply_relocations` 里 IRELATIVE 是空操作分支，而引用方
+    // 是**提前固化**的直接 `call rel32`（没有 GOT 间接层可改写）。放任 IFUNC 指向 resolver 的
+    // 后果实测是 SIGSEGV：`call compute` 跳进 resolver、`ret` 回一个函数指针当返回值。
+    // 所以这里把 IFUNC 绑到 `<base>.default`（对任何 CPU 都合法的那个变体），并**无条件**
+    // 播报这条语义退化 —— 静态路径放弃了 CPUID 运行时派发，不能靠用户自己发现。
+    // 为什么不能做成「静态也运行时派发」：需要 GOT 间接 + 启动期重定位应用者（glibc 靠
+    // `.rela.iplt` + crt）+ ET_EXEC 里真写出重定位节，三件都在本文件不拥有的
+    // `layout.rs`/`plt_got.rs`/`elf_exec.rs` 里；逐项缺口的说明写在 `src/link/ifunc.rs` 模块头。
+    if !builder.emit_dynamic && matches!(cfg.output_kind, OutputKind::Executable) {
+        match ifunc::bind_static_exec_ifuncs(&mut layout) {
+            Ok(bound) => {
+                for (ifunc_name, variant_name) in &bound {
+                    eprintln!(
+                        "dcc-link: static ET_EXEC: IFUNC '{}' bound to variant '{}' (no runtime \
+                         resolver applier in this path -> CPUID dispatch is DISABLED; drop \
+                         -fbuiltin-linker to get a dynamically linked binary that dispatches at \
+                         load time)",
+                        ifunc_name, variant_name
+                    );
+                }
+            },
+            Err(names) => {
+                return Err(diag(
+                    "E0302",
+                    format!(
+                        "built-in linker (static ET_EXEC) cannot resolve IFUNC(s): {} — their \
+                         resolver is a user C function that cannot be evaluated at link time, and \
+                         this path has no runtime relocation applier to call it. Bind target: \
+                         `target_clones(...,\"default\")` provides a statically bindable variant; \
+                         for `__attribute__((ifunc(\"...\")))` drop -fbuiltin-linker so the host \
+                         ld/ld.so can run the resolver",
+                        names.join(", ")
+                    ),
+                ));
+            },
+        }
+    }
     // 2.10 为静态链接可执行文件合成 _start 桩 (如果没有 _start)
     ensure_start_stub(&mut layout);
     // 2.10.1 vDSO 集成: 嵌入 .text.vdso + .note.GNU-vdso + 符号
@@ -658,6 +700,35 @@ pub fn link_from_bundle(
     Ok(bytes)
 }
 
+/// 判断一个 IFUNC 符号是否**自带 resolver 体**（新形状）。
+///
+/// 判据两条，缺一不可：
+///   1. 存在名为 `<name>.resolver` 的 `STT_FUNC` 符号（名字由
+///      `codegen::x86_64::ifunc::resolver_sym` 给出 —— 命名规则全项目**只定义在那
+///      一处**，链接器调它，不再自己拼一份后缀表）；
+///   2. 它的 `st_value` 与 IFUNC 符号的 `st_value` 相同且非零 —— 即 IFUNC 真的指向
+///      resolver 体，而不是旧形状里「与实现体同址」那个假 IFUNC。
+///
+/// 旧形状的 `.o`（无 resolver 体）仍走 `target_clones::generate_resolver_blob` 那条
+/// 既有路径：它服务的是**外部提供的、或者只写了变体别名而没有 resolver** 的对象，
+/// 以及 `-fbuiltin-linker` 下不得不在链接期拼判定的场景。理由与位表同源说明写在
+/// `src/link/target_clones.rs` 模块头。
+fn ifunc_carries_own_resolver_body(
+    syms: &[crate::link::object::InputSymbol],
+    ifunc_name: &str,
+    ifunc_value: u64,
+) -> bool {
+    if ifunc_value == 0 {
+        return false;
+    }
+    let resolver_name = crate::codegen::x86_64::ifunc::resolver_sym(ifunc_name);
+    syms.iter().any(|s| {
+        s.name == resolver_name
+            && s.ty == crate::codegen::shared::elf::STT_FUNC
+            && s.value == ifunc_value
+    })
+}
+
 /// 收集 input bundle 中的 .symver / target_clones / destructor 信息
 fn collect_link_directives(bundle: &InputBundle, cfg: &mut LinkConfig) {
     for obj in &bundle.objects {
@@ -689,11 +760,35 @@ fn collect_link_directives(bundle: &InputBundle, cfg: &mut LinkConfig) {
             if sym.ty == 10 {
                 // STT_GNU_IFUNC = 10
                 let func_name = &sym.name;
+                // ---- 新形状（codegen 侧已有真 resolver 体）：不进这张表 ----
+                //
+                // `codegen::x86_64::ifunc` 产出的 `.o` 里，IFUNC 符号的 `st_value` 就是
+                // `<name>.resolver` 函数的地址（与 gcc 同形）。那种对象**自带**判定机器码：
+                // 普通重定位流程会把它变成一条 `R_X86_64_IRELATIVE`（addend = resolver）。
+                // 如果再进一次 target_clones 表，`generate_resolver_blob` 会在 `.text.ifunc`
+                // 里现拼**第二份** CPUID 判定，并把基名再登记一份同名 IFUNC 符号 —— 两份
+                // resolver 同时存活，被选中的取决于符号序，那正是本轮要消除的「看起来修了」。
+                if ifunc_carries_own_resolver_body(&obj.symbols, func_name, sym.value) {
+                    if cfg.verbose {
+                        eprintln!(
+                            "dcc-link: ifunc '{}' has its own resolver body at 0x{:x} (from \
+                             codegen); skipping built-in resolver generation",
+                            func_name, sym.value
+                        );
+                    }
+                    continue;
+                }
                 // 查找变体符号 (func_name.variant_arch)
                 let mut variants = Vec::new();
                 for vsym in &obj.symbols {
                     if vsym.name.starts_with(&format!("{}.", func_name)) {
                         let arch = vsym.name[func_name.len() + 1..].to_string();
+                        // `.resolver` 不是变体（旧形状里它不存在；新形状已在上面 return）。
+                        // 万一命中的是「只有 resolver 体、没有变体」的奇怪输入，把它当变体
+                        // 会拼出一个名为 `resolver` 的 ISA 检测（永远选不中）。
+                        if arch == "resolver" || arch.is_empty() {
+                            continue;
+                        }
                         variants.push((vsym.name.clone(), arch, vsym.value));
                     }
                 }

@@ -209,6 +209,15 @@ impl Codegen {
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
                 if f.body.is_none() && f.alias_name.is_none() {
+                    // IFUNC 基名不能发 UND：它们的有效定义是下面 `ifunc_defs` / 本 TU
+                    // 合成循环里那条 `STT_GNU_IFUNC` 已定义符号（`st_value` 指向真
+                    // resolver 体）。发 UND 会让 `.o` 里「IFUNC 名字未定义」，链接期只能
+                    // 报 undefined reference（旧行为：`attr_ifunc.c` 全链接 E0202）。
+                    // 判据与 `ifunc::collect_clone_bases` 一致：无体 + 保留 target_clones
+                    // 标记 = 已被 `expand_target_clones` 展开的基名。
+                    if !f.target_clones.is_empty() || f.ifunc_resolver.is_some() {
+                        continue;
+                    }
                     // 检查 C 名和 asm label 解析后的名字
                     let resolved = self.resolve_asm_label(&f.name.name).to_string();
                     // Skip functions with empty names
@@ -370,6 +379,22 @@ impl Codegen {
                     continue;
                 }
                 if f.body.is_some() {
+                    // `target_clones` 的函数体不应再走到这里：`ifunc::expand_target_clones`
+                    // 会把基名换成**无体**声明 + 每个变体一份体。基名带体到这里 = 展开
+                    // 没跑过，再往下只能产出「IFUNC 与实现体同址」那份旧坏形状。
+                    if !f.target_clones.is_empty() {
+                        self.report_internal_bug(
+                            "E1126",
+                            format!(
+                                "function '{}' with a body still carries target_clones {:?} at \
+                                 symtab time",
+                                f.name.name, f.target_clones
+                            ),
+                            "driver must call ifunc::expand_target_clones before ir::lower; a \
+                                 bodiless base name plus one real body per variant is the only \
+                                 shape that can carry a resolver",
+                        );
+                    }
                     // 收集此函数的嵌套函数 (递归, 不含自身)
                     let mut nested = vec![];
                     if let Some(body) = &f.body {
@@ -401,8 +426,11 @@ impl Codegen {
                             } else {
                                 STB_GLOBAL
                             },
-                            // ifunc / target_clones 属性: 函数符号类型为 STT_GNU_IFUNC
-                            ty: if f.ifunc_resolver.is_some() || !f.target_clones.is_empty() {
+                            // `__attribute__((ifunc(...)))` 挂在**有体**函数上时，只能把
+                            // 它自己的体当 IFUNC 值（gcc 拒绝那种写法）。`target_clones`
+                            // **不再**在这里参与判定：它的 IFUNC 符号由下面 `ifunc_defs`
+                            // 那一段以真 resolver 体产出，基名到这里必然无体。
+                            ty: if f.ifunc_resolver.is_some() {
                                 STT_GNU_IFUNC
                             } else {
                                 STT_FUNC
@@ -518,36 +546,147 @@ impl Codegen {
             }
         }
 
-        // __attribute__((target_clones(...))): 创建变体符号别名
-        // 对每个 target_clones 函数 foo("sse4.2,default")，
-        // 创建 foo.sse4.2 和 foo.default 作为 foo 的别名符号。
+        // ====================================================================
+        // IFUNC / CPUID 合成体与 IFUNC 基符号
+        // ====================================================================
+        //
+        // 旧形状（本轮之前）：`target_clones` 的基名**有体**，于是基名与每个变体
+        // 都以「基名的地址」发成 `STT_GNU_IFUNC` + 一堆同址别名 —— `.o` 里没有
+        // CPUID、没有 resolver，整份判定被搬到内置链接器里现拼字节流，链接因此
+        // 只能静默从动态降级为静态（docs/missing_features.md 的 IFUNC 行）。
+        //
+        // 新形状：`ifunc::expand_target_clones` 把每个变体展开成**独立函数体**
+        // （上面的函数定义循环按真实地址给它们发 `STB_LOCAL` + `STT_FUNC`），基名
+        // 只留无体声明；`ifunc::emit_ifunc_synthesis` 在 `.text` 尾部合成真 resolver。
+        // 所以下面两段只登记「不在 `prog.decls` 里的合成体」与「基名的 IFUNC 符号」，
+        // 变体别名循环在这里**整块删除**：变体不再需要别名，它有自己的体。
+        //
+        // 1) 合成函数：`__dcc_cpu_indicator_init` 与每个 `<f>.resolver`。必须在
+        //    `known_syms` 建立之前登记，否则下面「按 labels 补符号」那一轮会把它们
+        //    发成 `size = 0` 的 `STT_NOTYPE`（`call`/`jmp` 的目标语义全靠 type+size）。
+        for sf in &self.ifunc_synth.clone() {
+            let Some(func_start) = self.labels.get(&sf.name).copied() else {
+                self.report_internal_bug(
+                    "E1126",
+                    format!(
+                        "synthesized function '{}' is on the ifunc synth list but has no label",
+                        sf.name
+                    ),
+                    "emit_ifunc_synthesis must label every body it emits into .text",
+                );
+                continue;
+            };
+            let size = self
+                .func_sizes
+                .get(&sf.name)
+                .copied()
+                .unwrap_or_else(|| self.compute_func_size_fallback(&sf.name, func_start));
+            let sym = ElfSym {
+                name: sf.name.clone(),
+                // 合成体总是走 `self.emit`，即 `.text`（section 1）；它不可能属于
+                // 自定义节，因为 `move_ranges` 快照在合成之前就已经取定了。
+                section: 1u16,
+                value: func_start,
+                size,
+                bind: sf.bind,
+                ty: STT_FUNC,
+                visibility: STV_DEFAULT,
+            };
+            if sf.bind == STB_LOCAL {
+                local_syms.push(sym);
+            } else {
+                global_syms.push(sym);
+            }
+        }
+
+        // 2) IFUNC 基符号：`st_value`/`st_size` 取自它自己的 resolver（与 gcc 实测同形：
+        //    `IFUNC f` 与 `FUNC f.resolver` 的 value/size 完全一致，见
+        //    docs/wp_ifunc_real_fix.md 的 `readelf -sW` 对照表）。
+        for d in &self.ifunc_defs.clone() {
+            let Some(func_start) = self.labels.get(&d.resolver).copied() else {
+                self.report_internal_bug(
+                    "E1126",
+                    format!(
+                        "IFUNC '{}' references resolver '{}' which has no label",
+                        d.name, d.resolver
+                    ),
+                    "the IFUNC symbol's value must be the resolver body; emitting the same \
+                     address as the implementation body is the silent-static-downgrade defect \
+                     this path exists to remove",
+                );
+                continue;
+            };
+            let size = self
+                .func_sizes
+                .get(&d.resolver)
+                .copied()
+                .unwrap_or_else(|| self.compute_func_size_fallback(&d.resolver, func_start));
+            let sym = ElfSym {
+                name: d.name.clone(),
+                section: 1u16,
+                value: func_start,
+                size,
+                bind: d.bind,
+                ty: STT_GNU_IFUNC,
+                visibility: Self::parse_visibility(&d.visibility),
+            };
+            if d.bind == STB_LOCAL {
+                local_syms.push(sym);
+            } else {
+                global_syms.push(sym);
+            }
+        }
+
+        // 3) `__attribute__((ifunc("r")))`：基名是 IFUNC，值/大小取自 `r` 的函数体
+        //    （gcc 实测：`IFUNC GLOBAL ifunc_func` 与 `FUNC LOCAL resolver` 同 value/size）。
         for decl in &prog.decls {
-            if let Decl::Func(f) = decl {
-                if !f.target_clones.is_empty() {
-                    if let Some(func_sym) = global_syms
-                        .iter()
-                        .find(|s| s.name == f.name.name)
-                        .or_else(|| local_syms.iter().find(|s| s.name == f.name.name))
-                    {
-                        // 克隆字段以避免借用冲突
-                        let sec = func_sym.section;
-                        let val = func_sym.value;
-                        let sz = func_sym.size;
-                        for variant in &f.target_clones {
-                            let variant_name = format!("{}.{}", f.name.name, variant);
-                            let variant_sym = ElfSym {
-                                name: variant_name,
-                                section: sec,
-                                value: val,
-                                size: sz,
-                                bind: STB_GLOBAL,
-                                ty: STT_FUNC,
-                                visibility: STV_DEFAULT,
-                            };
-                            global_syms.push(variant_sym);
-                        }
-                    }
-                }
+            let Decl::Func(f) = decl else { continue };
+            let Some(resolver) = f.ifunc_resolver.clone() else {
+                continue;
+            };
+            if !f.target_clones.is_empty() {
+                continue; // 两个属性同时挂：target_clones 已在上面产出 IFUNC
+            }
+            if f.body.is_some() {
+                continue; // 有体形状由上面的函数定义循环处理（避免同名发两份）
+            }
+            let name = self.resolve_asm_label(&f.name.name).to_string();
+            let resolver_label = self.resolve_asm_label(&resolver).to_string();
+            let Some(func_start) = self.labels.get(&resolver_label).copied() else {
+                self.report_internal_bug(
+                    "E1125",
+                    format!(
+                        "__attribute__((ifunc(\"{resolver}\"))) on '{name}': resolver is not \
+                         defined in this TU (no label '{resolver_label}')",
+                    ),
+                    "an IFUNC resolver must have a body in the same translation unit; do not \
+                     emit an IFUNC symbol whose value cannot point at a resolver",
+                );
+                continue;
+            };
+            let size = self.func_sizes.get(&resolver_label).copied().unwrap_or_else(|| {
+                self.compute_func_size_fallback(&resolver_label, func_start)
+            });
+            let bind = if f.is_weak {
+                STB_WEAK
+            } else if f.is_static {
+                STB_LOCAL
+            } else {
+                STB_GLOBAL
+            };
+            let sym = ElfSym {
+                name,
+                section: 1u16,
+                value: func_start,
+                size,
+                bind,
+                ty: STT_GNU_IFUNC,
+                visibility: Self::parse_visibility(&f.visibility),
+            };
+            if bind == STB_LOCAL {
+                local_syms.push(sym);
+            } else {
+                global_syms.push(sym);
             }
         }
 

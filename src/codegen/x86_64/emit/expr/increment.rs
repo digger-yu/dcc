@@ -44,7 +44,14 @@ impl super::super::super::Codegen {
         if let Expr::Ident { name, .. } = lv {
             // 全局变量：使用 RIP-relative 寻址读 - 改 - 写
             // 必须排除同名局部变量 (C 作用域：局部遮蔽全局)
+            //
+            // 带段限定的全局（`__seg_gs int gv; gv++`）也必须走本快路径：下面自己写死了
+            // `lea` + `mov (%rax)` 字节序列，所以按单一入口 `lvalue_seg_prefix` 取到段后
+            // **逐笔贴在真实访存前**（取址那一笔贴不上：LEA 不做内存访问，段前缀对它是
+            // 空操作）。`[rsp]` 那两笔读的是栈上的地址副本，不属段内存，不发前缀。
+            // 不带段的全局 seg = None ⇒ 一个字节都不多发，产物与改前逐字节相同。
             if self.is_global_not_local(&name.name) {
+                let seg = self.lvalue_seg_prefix(lv);
                 // 全局变量 inc/dec: 读 - 改 - 写 via RIP-relative
                 // 注意：mov eax, [rax] 会零扩展到 rax，销毁 rax 中的地址.
                 // 策略：先 push 地址，再 load 值，从栈恢复地址后递增写回.
@@ -53,6 +60,7 @@ impl super::super::super::Codegen {
                 self.push(0); // push 地址 → [rsp]
                               // 2. 加载当前值到 rax
                 self.emit_global_addr(0, &name.name); // rax = &c
+                self.emit_seg(seg);
                 match inner_ty.size() {
                     1 => self.emit(&[0x48, 0x0F, 0xB6, 0x00]),
                     2 => self.emit(&[0x48, 0x0F, 0xB7, 0x00]),
@@ -67,6 +75,7 @@ impl super::super::super::Codegen {
                 // 3. 从栈恢复地址到 rax
                 self.emit(&[0x48, 0x8B, 0x04, 0x24]); // mov rax, [rsp]
                                                       // rax = 地址，加载值并递增
+                self.emit_seg(seg);
                 match inner_ty.size() {
                     1 => self.emit(&[0x48, 0x0F, 0xB6, 0x00]),
                     2 => self.emit(&[0x48, 0x0F, 0xB7, 0x00]),
@@ -77,6 +86,7 @@ impl super::super::super::Codegen {
                 self.emit_inc_dec_reg(0, is_inc, step as i32); // rax = 新值
                                                                // 写回：地址仍在 [rsp], 用 rdx 暂存地址
                 self.emit(&[0x48, 0x8B, 0x14, 0x24]); // mov rdx, [rsp]
+                self.emit_seg(seg);
                 match inner_ty.size() {
                     1 => self.emit(&[0x88, 0x02]),       // mov [rdx], al
                     2 => self.emit(&[0x66, 0x89, 0x02]), // mov [rdx], ax
@@ -239,7 +249,7 @@ impl super::super::super::Codegen {
             let mem_sz = inner_ty.size().max(1);
             // 段前缀：不只看 `*p`，`p[i]++` / `q->a++` / `a[i].f++` 同样要带 ——
             // 基址链下潜取，单一入口见 `lvalue_seg_prefix`。
-            let seg_prefix = Self::lvalue_seg_prefix(lv);
+            let seg_prefix = self.lvalue_seg_prefix(lv);
             if !self.gen_lvalue_addr(lv, 0) {
                 return;
             }

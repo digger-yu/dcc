@@ -205,6 +205,19 @@ fn ssa_pipe_chain_matches_gcc_at_all_levels() {
     );
 }
 
+/// 逐字节对照汇编前摘掉 `.file` 行。
+///
+/// 为什么必须摘：`compile_asm_text_with_env` 把调用方给的 tag 写进源文件名，于是两次
+/// 调用的产物**永远**在 `.file` 这一行上差一串字节。不摘的话 `assert_ne!` 会因为文件
+/// 名而空跑（看起来绿，其实证明不了任何事），`assert_eq!` 会因为同一个原因无条件失败。
+/// 实测这条不是理论问题：本轮新加的反向断言首跑就是被 `.file` 挡红的。
+fn asm_body(asm: &str) -> String {
+    asm.lines()
+        .filter(|l| !l.starts_with("\t.file"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// 同一份源码、同一档位，只让 P16 开/关（`DCC_SSA_OFF=pipe`），返回 -O2 汇编。
 fn dcc_asm_with_pipe(name: &str, src: &str, ssa_off: Option<&str>) -> String {
     let dir = env::temp_dir();
@@ -290,7 +303,99 @@ fn plain_loops_still_go_through_ssa() {
         &[("DCC_OPT_SKIP", "run_ssa_passes")],
     );
     assert!(!on.is_empty(), "编译应产出汇编");
-    assert_ne!(on, off, "普通 for 循环仍应走 SSA 往返（否则判据过宽，覆盖面丢光）");
+    assert_ne!(
+        asm_body(&on),
+        asm_body(&off),
+        "普通 for 循环仍应走 SSA 往返（否则判据过宽，覆盖面丢光）"
+    );
+
+    // 「体内 return + 循环落出」那一族（旧口径里的「多出口」）必须**真的在 SSA 里**：
+    // 上面的普通循环只证明「没把好的挡光」，这一句证明「收窄判据不会偷偷退化成全挡回去
+    // 也能绿」（挡回去产物照样与 gcc 一致，只有逐字节对照能区分）。
+    //
+    // 这一族曾因「EH 落地垫块被算进循环结构、被选成续体」而把 C++ 侧改坏（垫块 `goto`
+    // 回入循环头 = CFG 上的一条回边）；现在由 lib 判据
+    // `eh_pads_are_never_loop_members_or_continuations` 与 `cpp_abi_eh_group` 两面钉住。
+    let early = "int a(int n){for(int i=0;i<n;i++){if(i==2)return 7;}return 1;}\n";
+    let (e_ast, _) = compile_asm_text_with_env(
+        "multiexit-early-ast",
+        early,
+        &["-O2"],
+        &[("DCC_OPT_SKIP", "run_ssa_passes")],
+    );
+    let (e_ssa, _) = compile_asm_text_with_env("multiexit-early-ssa", early, &["-O2"], &[]);
+    assert!(!e_ast.is_empty() && !e_ssa.is_empty(), "两侧都应产出汇编");
+    assert_ne!(
+        asm_body(&e_ast),
+        asm_body(&e_ssa),
+        "体内 return 的多出口循环应走 SSA 往返（本轮释放的覆盖面）"
+    );
+
+    // 反向的另一半：实测不可表达的那一族必须**确实掉出 SSA**（退回 AST 才谈得上
+    // 「不优化但正确」）——旋转 do-while + 头块带具名写 + break 到续体。
+    let bail = "int a(int n){int i=0,s=0;do{s+=i;i++;if(i==3)break;}while(i<n);return s+i;}\n";
+    let (b_ast, _) = compile_asm_text_with_env(
+        "multiexit-bail-ast",
+        bail,
+        &["-O2"],
+        &[("DCC_OPT_SKIP", "run_ssa_passes")],
+    );
+    let (b_ssa, _) = compile_asm_text_with_env("multiexit-bail-ssa", bail, &["-O2"], &[]);
+    // 实测读数：摘掉 `.file` 后两侧逐字节相同（-O2），即这个函数确实整函数掉出了 SSA；
+    // 而上面 `early` 那一族摘掉 `.file` 后仍差 800 多行，确实在 SSA 里。
+    assert_eq!(
+        asm_body(&b_ast),
+        asm_body(&b_ssa),
+        "不可表达的旋转 do-while 必须整函数退回 SSA（否则又把错值放了出来）"
+    );
+
+    // 第三面（收窄的代价上限）：`while (k-- > 0)` 头块也带具名写，但它**没有**独立的 latch
+    // 落出（头块自己就是循环条件的唯一落出点），不属于实测出错的那一族，不得被挡。
+    // 这类倒退不会让任何 gcc 差分变红（AST 路径照样算对），只有产物逐字节对照看得见。
+    let kdec = "int a(int n){int k=n,acc=0;while(k-- > 0){acc+=k;}return acc;}\n";
+    let (k_ast, _) = compile_asm_text_with_env(
+        "multiexit-kdec-ast",
+        kdec,
+        &["-O2"],
+        &[("DCC_OPT_SKIP", "run_ssa_passes")],
+    );
+    let (k_ssa, _) = compile_asm_text_with_env("multiexit-kdec-ssa", kdec, &["-O2"], &[]);
+    assert_ne!(
+        asm_body(&k_ast),
+        asm_body(&k_ssa),
+        "`while (k-- > 0)` 被误挡出 SSA ⇒ 本轮收窄把最常见的循环一并丢了"
+    );
+}
+
+/// 「循环出口所有权」模型的**放行集**逐形实测：体内 return / return+break / 多个 break
+/// 合并 / continue-only / 旋转 do-while + 体内 return / 无限循环 / break 落到零语句桩块 /
+/// 循环内 switch 的 case 出边 / 多前驱 return 块，四档都必须与 gcc 一致。
+///
+/// 为什么与下面那条对抗夹具分开：它们钉的是模型的两个相反方向 —— 这一条证明
+/// 「放行的确实对」，下面那一条证明「测不透的已经挡回来」。历史两次（§7.28 / §7.32）
+/// 都是只钉了一个方向就出事。
+#[test]
+fn loop_exit_ownership_shapes_match_gcc_at_all_levels() {
+    assert_all_levels_match_gcc(
+        "loop-exit-ownership",
+        include_str!("../fixtures/opt/loop_exit_ownership.c"),
+        "出口所有权模型的放行形状在某一档与 gcc 不一致",
+    );
+}
+
+/// 「循环出口所有权」模型的**边界集**：`goto` 出循环、break 落到带 phi 的汇聚块、
+/// 双 latch、嵌套循环内外同时出边、旋转 do-while + 头块 break（本轮实测两种发法都错、
+/// 现已整族挡回 AST）。
+///
+/// 这一条同时是挡下的**捕手**：把 `header_break_with_named_write` 去掉后
+/// `do_break` 在 -O2/-O3 立即得 `2 2 5 9 …`（gcc `1 1 3 6 …`），所以它不是空跑。
+#[test]
+fn loop_exit_ownership_boundary_matches_gcc_at_all_levels() {
+    assert_all_levels_match_gcc(
+        "loop-exit-ownership-adv",
+        include_str!("../fixtures/opt/loop_exit_ownership_adv.c"),
+        "出口所有权模型的边界形状没挡住或误挡了",
+    );
 }
 
 /// 零长/柔性数组成员（`z->data[i]`）四个档位都必须与 gcc 一致。
@@ -502,4 +607,52 @@ fn ssa_regalloc_reaches_the_product() {
         on, off,
         "关掉 ssa_regalloc 后产物逐字节相同 ⇒ 这条 pass 没接到管线上（§7.5 的老坑）"
     );
+}
+
+// ===== G2：AST 层 `eliminate_unreachable` (`dce_block`) 与 Label/Return 混排 =====
+//
+// 缺陷代号 G2（docs/wp_multi_exit_loop.md §4 移交）。旧 `dce_block` 在顶层 `Return`
+// 之后 stopped=true，只保留后续 Label —— 但 `Stmt::Label { stmt }` 只把紧随标签的
+// **一条语句**纳入自己，标签之后到下一个 Label/terminator 之间的顶层 item（典型
+// 形态是 `out: <body>; return s;` 里的 `return s;`）仍是「跳到 out 之后可达」的路径，
+// 被误清 ⇒ `goto out` 从 `out:` 顺落到 `late:` 再从函数尾 fall-off，`%eax` 只剩
+// 最后一条对 `s` 的写，gcc `-3` 变 dcc `-8`。修法：遇到 Label 就把 stopped 复位。
+
+/// G2 最小形状（双标签 + 顶层 Return + goto）与循环+双标签两条同族形状，
+/// 四档逐个与 gcc 对照。失败信息直接给出档位，方便下次定位是 `-O2` 还是 `-O3`
+/// 一侧回归。夹具内 F3（`return` 后无标签的真不可达）用来钉「修 G2 不得把 dce
+/// 修成完全不删」。
+#[test]
+fn dce_label_after_return_minimal_matches_gcc_at_all_levels() {
+    if !tool_exists("gcc") {
+        return;
+    }
+    let src = include_str!("../fixtures/opt/dce_label_after_return_minimal.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("dce-label-after-return-min", src, &[flag]),
+            0,
+            "{flag}: dce_block 把 Label 后顶层 Return 当不可达清掉 ⇒ \
+             goto out 直落进 late 再从函数尾 fall-off（F1/F2 形状）",
+        );
+    }
+}
+
+/// G2 在「循环出口所有权」侧的原始夹具：`goto` 跳到循环之后的第二个标签。
+/// 从前因值错故意没进门禁，见 docs/wp_multi_exit_loop.md §4；G2 修好后同一
+/// 夹具直接作为回归门禁。四档逐个比，失败时给出档位与 `goto_out2` 函数名。
+#[test]
+fn loop_exit_ownership_goto_matches_gcc_at_all_levels() {
+    if !tool_exists("gcc") {
+        return;
+    }
+    let src = include_str!("../fixtures/opt/loop_exit_ownership_goto_pending.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("loop-exit-ownership-goto", src, &[flag]),
+            0,
+            "{flag}: a_goto_out2 在 `out:` 与 `late:` 双标签处被 dce_block 误清 \
+             → gcc `7 7 -3 -3 -3 -3 -3` 应变为 `7 7 -8 -8 -8 -8 -8`",
+        );
+    }
 }

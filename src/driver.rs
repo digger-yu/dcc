@@ -671,6 +671,36 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         }
     }
 
+    // x86_64 `target_clones` 展开（`codegen::x86_64::ifunc`）。
+    //
+    // **必须在 `ir::lower` 之前**：展开产出的是新的 AST 函数声明（每个变体一份独立
+    // 函数体），基名只留**无体**声明作为「我是 IFUNC 基名」的标记；codegen 随后在
+    // `.text` 尾部合成真 resolver（`<base>.resolver`）并把基名登成 `STT_GNU_IFUNC`。
+    //
+    // 不做这一步就只能回到旧形状：`.o` 里 IFUNC 与实现体**同址**、全 `.o` 无 CPUID，
+    // 于是链接期只能由内置链接器现场拼 CPUID 字节流，产物静默从动态降级为静态
+    // （docs/missing_features.md 的 IFUNC 行、docs/ssa-pass-upgrade-plan.md §7.38）。
+    // 展开后宿主 `cc`/`ld` 能原生处理该 `.o`，`driver.rs` 里那条改道分支因此不再需要。
+    if matches!(cfg.target.arch, crate::cli::Arch::X86_64) {
+        let mut expand_diags: Vec<Diagnostic> = Vec::new();
+        codegen::x86_64::ifunc::expand_target_clones(&mut prog, &mut expand_diags);
+        remap_diags(&mut expand_diags, &line_map);
+        enrich_diags(&mut expand_diags, src, &file_name, input.parent());
+        let expand_has_err = expand_diags
+            .iter()
+            .any(|d| matches!(d.sev, Severity::Error));
+        // 错误不在此处打印（由 main.rs 统一输出，避免重复）；警告必须可见。
+        for d in &expand_diags {
+            if matches!(d.sev, Severity::Warning) {
+                d.print_with(&dcfg);
+            }
+        }
+        diags.extend(expand_diags);
+        if expand_has_err {
+            return Err(diags);
+        }
+    }
+
     // sanitizer 插桩（AST 层，在 IR lower 之前）
     sanitizer::instrument_program(&mut prog, cfg.sanitizers, cfg.target.arch);
 
@@ -2714,8 +2744,15 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         no_semantic_interposition: cfg.no_semantic_interposition,
         fuse_ld: cfg.fuse_ld.clone(),
         version_table: link::symver::VersionTable::new(),
-        // target_clones: 内置链接器从目标文件的 IFUNC 符号自动检测,
-        // 无需从 AST 显式注册 (codegen 已生成 resolver 和 STT_GNU_IFUNC 符号)
+        // target_clones: 内置链接器从目标文件的 IFUNC 符号自动检测，无需从 AST 显式注册。
+        //
+        // 本项先前还要「`.o` 含 IFUNC 就改道内置链接器」（因为那时 codegen 只发一个
+        // `st_value` 指向实现体的假 IFUNC，宿主 ld 拿不到可跑的 resolver）。现在
+        // `src/codegen/x86_64/ifunc.rs` 在 `.o` 里发真 resolver 体（IFUNC 的 `st_value`
+        // 指向它，与 gcc 同形），宿主 `cc`/`ld` 能原生处理该 `.o` 并产出动态可执行文件，
+        // 那条改道分支已经删掉（见下面 `via host cc` 处的注释）。下面这张表只服务
+        // `-fbuiltin-linker` 那条既有路径（链接期现拼 resolver）；它的保留理由与
+        // 特性位表同源说明写在 `src/link/target_clones.rs` 模块头。
         target_clones: link::target_clones::TargetClonesTable::new(),
         fini_builder: link::fini_dispatch::FiniArrayBuilder::new(),
         arch: arch_from_target(&cfg.target),
@@ -2781,7 +2818,7 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
             link_cfg.allowed_undef.extend(extra);
         }
     }
-    let bytes = if cfg.linker_lto {
+    let link_result = if cfg.linker_lto {
         // LTO path: read .dcc.lto sections from input .o files,
         // deserialize bitcode, run cross-TU optimization, then link
         if cfg.verbose {
@@ -2825,10 +2862,25 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
 
         // Link with optimized bitcode (currently just calls link_multi_tu)
         // Future: re-codegen inlined functions before linking
-        link::link_multi_tu(&inputs, &cfg.output, &link_cfg)?
+        link::link_multi_tu(&inputs, &cfg.output, &link_cfg)
     } else {
-        link::link_multi_tu(&inputs, &cfg.output, &link_cfg)?
+        link::link_multi_tu(&inputs, &cfg.output, &link_cfg)
     };
+    // 失败时也要把「这条路径怎么链」说明白：内置链接器写的是静态 ET_EXEC（无
+    // PT_INTERP/DT_NEEDED），那一串 E0302 里大部分名字本来由动态链接器/libc 提供，
+    // 不说清就会被误读成「宿主 cc 也链不上」。不退回到静默失败。
+    let bytes = link_result.map_err(|errs| {
+        if errs.iter().any(|d| d.code == "E0302") {
+            eprintln!(
+                "dcc: the above unresolved symbol(s) came from the BUILT-IN linker path \
+                 (-fbuiltin-linker), which writes a static ET_EXEC with no PT_INTERP and no \
+                 DT_NEEDED; those symbols are normally satisfied by libc.so.6 through the \
+                 dynamic loader. Drop -fbuiltin-linker to link via the host cc (dynamically \
+                 linked)"
+            );
+        }
+        errs
+    })?;
     // tmp_guard drop 时统一清理临时 .o (链接/写输出失败路径也不例外)
     std::fs::write(&cfg.output, &bytes).map_err(|e| {
         vec![Diagnostic::err(
@@ -2848,9 +2900,17 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
             }
         }
     }
+    // 无论走哪条内置链接路径，都显式报告最终链接方式（静态/动态），让
+    // “产物怎么链的”从输出里直接可读，不允许用户要动态、拿到静态却一声不响。
+    let link_mode = if link_cfg.dynamic_linker.is_some() {
+        "dynamic (PT_INTERP + DT_NEEDED)"
+    } else {
+        "static (no PT_INTERP / DT_NEEDED)"
+    };
     eprintln!(
-        "dcc: built-in linker wrote {} ({} bytes, {:?})",
+        "dcc: built-in linker wrote {} ({}, {} bytes, {:?})",
         cfg.output.display(),
+        link_mode,
         bytes.len(),
         output_kind
     );
@@ -3001,35 +3061,19 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
     cfg.output = tmp_o.clone();
     cfg.relocatable = true;
     let sanitizer_flags = host_sanitizer_flags(&cfg);
-    // 保存 cfg 副本, 以便后续 IFUNC 检测后可能走内置链接器
-    let cfg_saved = cfg.clone();
     // 强制走内置链接器 ≠ 1 路径是上面"递归后"需走的；现在 cfg.built_link
     // 仍是 false，所以 .o 由 run() 末端 codegen 直接输出。
     // 临时 .o / 目录由 _tmp_cleanup 在离开作用域时回收, 因此错误直接上抛即可.
     run(cfg)?;
-    // 2) 检测 .o 中是否包含 IFUNC 符号 (target_clones / __attribute__((ifunc)))
-    //    宿主 cc/ld 无法处理 dcc 生成的 IFUNC resolver (resolver 代码在
-    //    内置链接器中生成), 此时必须走内置链接器路径.
-    let has_ifunc = fs::read(&tmp_o)
-        .ok()
-        .map(|bytes| elf_has_ifunc_symbols(&bytes))
-        .unwrap_or(false);
-    if has_ifunc {
-        if verbose {
-            eprintln!("dcc: IFUNC symbols detected in {}, using builtin linker", tmp_o.display());
-        }
-        let mut link_cfg = cfg_saved.clone();
-        link_cfg.inputs = vec![tmp_o.clone()];
-        link_cfg.output = final_output.clone();
-        link_cfg.built_link = true;
-        link_cfg.relocatable = false;
-        let link_result = run_builtin_linker(&link_cfg);
-        if link_result.is_ok() {
-            eprintln!("dcc: {} (via builtin linker, IFUNC)", final_output.display());
-        }
-        return link_result;
-    }
-    // 3) 无 IFUNC: 调 host cc 链接
+    // 2) 直接调宿主 cc 链接。
+    //
+    // 旧版在这里读 `.o` 的 symtab，一旦发现 `STT_GNU_IFUNC` 就改道内置链接器 ——
+    // 因为当时 `.o` 里的 IFUNC 符号与实现体**同址**、根本没有 resolver 体，
+    // 宿主 `ld` 只能把调用绑到实现体地址上（或者报 unresolvable relocation）。
+    // 现在 resolver 由 codegen 发在 `.text` 里（`codegen::x86_64::ifunc`），
+    // `st_value` 指向真 resolver 体，`ld` 原生就能为它生成 PLT 条目 +
+    // `R_X86_64_IRELATIVE`（实测与 gcc 产物逐形一致），那条改道分支因此不再需要。
+    // 内置链接器仍只在 `-fbuiltin-linker` / 无宿主 cc 时启用，且继续明说链接方式。
     let link_result = link_with_host_cc(
         &tmp_o,
         &final_output,
@@ -3045,62 +3089,10 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
     link_result
 }
 
-/// 检测 ELF 对象文件是否包含 STT_GNU_IFUNC 类型符号.
-fn elf_has_ifunc_symbols(elf: &[u8]) -> bool {
-    use crate::codegen::shared::elf::{ELFCLASS64, ELFMAG, SHT_SYMTAB};
-    if elf.len() < 64 || elf.get(0..4) != Some(&ELFMAG) || elf[4] != ELFCLASS64 {
-        return false;
-    }
-    let shoff = u64::from_le_bytes(
-        elf.get(40..48)
-            .and_then(|s| s.try_into().ok())
-            .unwrap_or([0; 8]),
-    ) as usize;
-    let shentsize = u16::from_le_bytes(
-        elf.get(58..60)
-            .and_then(|s| s.try_into().ok())
-            .unwrap_or([0; 2]),
-    ) as usize;
-    let shnum = u16::from_le_bytes(
-        elf.get(60..62)
-            .and_then(|s| s.try_into().ok())
-            .unwrap_or([0; 2]),
-    ) as usize;
-    if shnum == 0 || shentsize < 64 || shoff + shnum * shentsize > elf.len() {
-        return false;
-    }
-    // 找 .symtab
-    for i in 0..shnum {
-        let base = shoff + i * shentsize;
-        if base + 64 > elf.len() {
-            break;
-        }
-        let sh_type = u32::from_le_bytes(elf[base + 4..base + 8].try_into().unwrap());
-        if sh_type != SHT_SYMTAB {
-            continue;
-        }
-        let data_off = u64::from_le_bytes(elf[base + 24..base + 32].try_into().unwrap()) as usize;
-        let data_size = u64::from_le_bytes(elf[base + 32..base + 40].try_into().unwrap()) as usize;
-        let entsize = u64::from_le_bytes(elf[base + 56..base + 64].try_into().unwrap()) as usize;
-        if entsize < 24 || data_off + data_size > elf.len() {
-            return false;
-        }
-        let sym_count = data_size / entsize;
-        for j in 0..sym_count {
-            let sym_base = data_off + j * entsize;
-            if sym_base + 24 > elf.len() {
-                break;
-            }
-            let st_info = elf[sym_base + 4];
-            let st_type = st_info & 0xf;
-            if st_type == 10 {
-                // STT_GNU_IFUNC = 10
-                return true;
-            }
-        }
-    }
-    false
-}
+/// `elf_has_ifunc_symbols` 已随「含 IFUNC 就改道内置链接器」那条分支一起删除：
+/// 现在 `.o` 里的 IFUNC 符号带真 resolver 体（`codegen::x86_64::ifunc`），宿主 `ld`
+/// 能原生处理，不需要再靠扫 symtab 来决定链接路径。扫 symtab 那个机制本身也是个
+/// 坑：它对「有 IFUNC 符号」和「有真 resolver」不加区分，前者恰好是旧缺陷的形状。
 
 fn add_unique_string(v: &mut Vec<String>, value: impl Into<String>) {
     let value = value.into();
