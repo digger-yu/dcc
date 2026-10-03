@@ -70,6 +70,85 @@ fn ipdom_and_branch_join_find_nested_joins() {
     assert_eq!(branch_join("B", "B1", "B2", &f).as_deref(), Some("M2"));
 }
 
+/// `collect_all_preds` 给出的前驱表必须是**确定序**（本仓不变式：HashMap
+/// 迭代序一律不得外泄）。它是 `bb.preds` 缓存与 `DCC_SSA_IR_DUMP` 读数的唯一
+/// 来源：曾经这里直接 `for (name, bb) in &func.blocks` 迭代 HashMap，同一
+/// 二进制连跑 8 次会给出两种 preds 序 —— 集合内容不变，但拿诊断文本做
+/// 差分对拍时会把「同一个二进制」误读成「两个行为」。
+///
+/// 判据强度：造一扇入 7 个前驱到同一个 `join` 的 CFG。若退化回 HashMap 迭代，
+/// 随机序恰好用不上等于规范序的概率是 1/7! = 1/5040 ⇒ **单次运行就有足够
+/// 判定力**，不需要多次采样碰运气（同 `check_fixtures_selftest.sh` 的思路）。
+#[test]
+fn collect_all_preds_yields_canonical_deterministic_order() {
+    let span = Span::point("t.c", 1, 1);
+    let mut f = Function::new("f".into(), Type::Int, span);
+    // canonical 块序 = block_order 的插入序: entry, in0..in5, join
+    for i in 0..6 {
+        let b = format!("in{i}");
+        f.add_block(b.clone());
+        f.blocks.get_mut(&b).unwrap().term = Terminator::Jump("join".into());
+    }
+    f.add_block("join".into());
+    f.blocks.get_mut("join").unwrap().term = Terminator::Ret {
+        val: Some(Operand::Int(0)),
+    };
+    f.blocks.get_mut("entry").unwrap().term = Terminator::Jump("join".into());
+
+    let order = ordered_block_names(&f);
+    let idx = |n: &str| {
+        order
+            .iter()
+            .position(|b| b == n)
+            .unwrap_or_else(|| panic!("`{n}` 不在规范块序里: {order:?}"))
+    };
+    let preds = collect_all_preds(&f);
+
+    // 1) 结构性质：每个目标块的前驱表沿规范块序单调递增。
+    for (target, ps) in &preds {
+        for w in ps.windows(2) {
+            assert!(
+                idx(&w[0]) < idx(&w[1]),
+                "`{target}` 的 preds 未走规范块序: {ps:?} (canonical {order:?})"
+            );
+        }
+    }
+    // 2) 具体读数钉死：1/5040 的偶合概率在这条断言上。
+    assert_eq!(
+        preds["join"],
+        vec!["entry", "in0", "in1", "in2", "in3", "in4", "in5"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>(),
+        "7 路扇入的 preds 必须按规范块序给出 (canonical {order:?})"
+    );
+
+    // 3) 这个序会随 `refresh_cfg` 落进缓存并进 dump 读数，一起钉住。
+    refresh_cfg(&mut f);
+    assert_eq!(
+        f.blocks["join"].preds,
+        preds["join"],
+        "bb.preds 缓存必须与派生结果同序"
+    );
+    let d1 = dump_function(&f);
+    let d2 = dump_function(&f);
+    assert_eq!(d1, d2, "同一 IR 两次读数必须逐字一致");
+    assert!(
+        d1.contains("join: preds=[\"entry\", \"in0\", \"in1\", \"in2\", \"in3\", \"in4\", \"in5\"]"),
+        "dump 里的 preds 行未按规范序输出:\n{d1}"
+    );
+
+    // 4) 菱形图上的集合内容（只排序不能掩盖多划/漏划前驱边）。
+    let g = nested_branch_cfg();
+    let gp = collect_all_preds(&g);
+    let mut m = gp["M"].clone();
+    let mut m2 = gp["M2"].clone();
+    m.sort();
+    m2.sort();
+    assert_eq!(m, vec!["A".to_string(), "M2".to_string()]);
+    assert_eq!(m2, vec!["B1".to_string(), "B2".to_string()]);
+}
+
 #[test]
 fn simple_function_builds_ssa() {
     let span = Span::point("t.c", 1, 1);

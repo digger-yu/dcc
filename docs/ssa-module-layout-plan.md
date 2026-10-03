@@ -416,7 +416,7 @@ src/ast_gvn.rs 1410（原 ssa_gvn.rs 1405，头注释净增 5）
 | `wc -l src/ssa/mod.rs` < 500 | **103**（目标 <120 也满足）；除 `pub mod`/`pub use`/注释外无实现 |
 | `crate::ssa_passes\|...\|ssa_gvn` 为空 | ✓ 0 处 |
 | `cargo check --release --all-targets -j2` 0 error / 0 warning（§6 第 4 条已改为此口径） | ✓ 0 / 0；`cargo build --release -j2` 亦 0 warning |
-| `cargo test --release -j2` 全绿且 **lib 条数不变** | lib **2058 passed / 2 ignored**、integration 1036/1、errors 26、其余各 target 全等；用例名集合 3212 条，归一后与基线**完全相同**（差异只有模块前缀） |
+| `cargo test --release -j2` 全绿且 **lib 条数不变** | 【搬迁验收】lib **2058 passed / 2 ignored**、integration 1036/1、errors 26、其余各 target 全等；用例名集合 3212 条，归一后与基线**完全相同**（差异只有模块前缀）。后续 §10.6.1 的缺陷修复另加 1 条不变式用例 ⇒ 现 2059，与搬迁无关 |
 | `make test` 全绿（含三架构交叉汇编、pipeline-parity 等测试用例脚本） | ✓ `check_fixtures.sh` + `check_fixtures_selftest.sh` + `golden-cross` + `pipe-structure` + `opt-eq` |
 | 产物三档哈希逐字节一致 | ✓ grand aggregate `f5e00728fa61e7db…dc059` 全程未变；`check_reproducible_output.sh` 全绿（5238 组合 × 3 连跑）；`check_disasm_coverage.sh` 读不出 162 = 基线值 |
 | `git diff --stat backup/… HEAD` 以 rename 为主 | ✓ `git diff --cached --stat -M backup/pre-ssa-layout-rewrite -- src/`：22 files changed, 9361(+)/9113(-)，净额 +248 全在新增的子文件头注释、`use` 与 `mod.rs` 地图；三个收编模块均识别为 rename（内容差 `passes.rs` 16 行 / `pipelining.rs` 4 行 / `regalloc.rs` 10 行，全部是模块路径与文件头注释）；`ssa.rs → ssa/mod.rs` 因内容差超阈值不记为 rename，它的一分为十二靠上面「每块逐字节 diff」与 §10.3 第 3 条的推导链保证 |
@@ -430,6 +430,38 @@ src/ast_gvn.rs 1410（原 ssa_gvn.rs 1405，头注释净增 5）
 集合内容敏感（任何元素增删都会改变哈希）。实测 9 个通道配置 × `-O2/-O3` × 291 夹具全部 OK。
 待单独修（不属于本方案范围，已登记）：给 `preds`/`succs` 缓存的打印走 `ordered_*` 系列，
 否则这个窗口在二分定位时会把「同一个二进制」当成「两个行为」。
+**→ 已在 §10.6.1 修掉。**
+
+### 10.6.1 后续修复：`preds` 缓存的确定序（上面登记的存量缺陷）
+
+**根因（比 §10.6 当初的描述更精确）**：`src/ssa/cfg.rs::collect_all_preds` 直接
+`for (name, bb) in &func.blocks` 迭代 **HashMap**，所以每个目标块的 preds 向量
+的序 = 进程随机哈希序；`refresh_cfg` 又把它写进 `bb.preds` 缓存，于是
+`dump_function` 的 `preds={:?}` 逐次不稳定。`succs` 由终结符字段序派生，本来就是确定的
+（实测也证实只有 `preds` 会翻）。
+
+项目里其实**已有正确写法**：`src/ssa/passes.rs::preds_from_terminators` 走
+`ordered_block_names(func)`；而消费侧 `src/ssa/pipelining.rs::pred_names` 不得不自己
+`v.sort(); v.dedup();` 兜底。这说明缺的是共享派生函数的确定序，而不是某个打印点。
+
+**修法（改在源头，不改打印点）**：`collect_all_preds` 改为遍历 `ordered_block_names(func)`。
+只改序不改集合内容（仍不去重，保持 `Branch{t,f}` 同目标时计两次的既有语义），
+因此缓存、`DCC_SSA_IR_DUMP`/`DCC_DUMP_CPP_AST`/`DCC_PIPE_DUMP` 三条读数、以及任何
+依赖前驱序的消费者一次性变得可复现（打印点各修一处会漏掉未来的新读者）。
+
+**证据**：
+- 行为中性：三档产物哈希与搬迁前基线**逐字节一致**（全语料 873 行比对）；
+- 读数稳定：同一二进制连跑 8 次，`if.end.0: preds` 从修正前的 4/4 分裂变为 8/8 一致；
+  另在3 份带菱形/多前驱的夹具上连跑 5 次，整份诊断文本各只产生 1 种哈希；
+- 测试钩钉：新增 `ssa::tests::collect_all_preds_yields_canonical_deterministic_order`。
+  它造一个 **7 路扇入**同一个 `join` 的 CFG，退化回 HashMap 时随机序恰好等于规范序的
+  概率只有 1/7! = 1/5040 ⇒ 单次运行即有判定力。判定力已实测：**把实现临时退回
+  HashMap 写法后该用例直接变红**（失败信息里就是乱序读数
+  `["entry", "in4", "in1", "in0", "in5", "in2", "in3"]`），恢复后又变绿。
+  这条“自测要证明会红”的做法与 `check_fixtures_selftest.sh` 一致。
+- 全套门禁重跑：`cargo check --release --all-targets -j2` 0/0、`cargo build --release -j2`
+  0 warning、lib 2059 passed / 2 ignored、fixtures / selftest(5/5) / reproducible(5238) /
+  disasm(162) / pipe-structure / golden-cross / opt-eq(0 OPT-DIFF) 全绿。
 
 ### 10.7 重现本轮验收的命令
 

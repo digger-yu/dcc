@@ -40,12 +40,19 @@ pub(super) fn term_succs(term: &Terminator) -> Vec<&str> {
 /// terminator 即脏，另写一份派生逻辑必然与这里漂移。
 pub(super) fn collect_all_preds(func: &Function) -> HashMap<String, Vec<String>> {
     let mut preds: HashMap<String, Vec<String>> = HashMap::new();
-    for (from_name, bb) in &func.blocks {
+    // 遍历序必须确定。直接 `for (name, bb) in &func.blocks` 迭代的是 HashMap,
+    // 进程随机哈希种子会让同一个目标块的前驱列表每次给出不同顺序 —— 集合
+    // 内容不变, 但这个序会随 `refresh_cfg` 写进 `bb.preds` 缓存, 于是
+    // `DCC_SSA_IR_DUMP` 的读数逐次不稳定 (实测同一二进制连跑 8 次出两种序),
+    // 拿它做差分对拍时会把「同一个二进制」误当成「两个行为」。
+    // 走本模块的 `ordered_block_names`: 与 `passes::preds_from_terminators`
+    // 用同一套确定序, 也让任何依赖前驱序的消费者天然可复现。
+    for name in ordered_block_names(func) {
+        let Some(bb) = func.blocks.get(&name) else {
+            continue;
+        };
         for t in term_succs(&bb.term) {
-            preds
-                .entry(t.to_string())
-                .or_default()
-                .push(from_name.clone());
+            preds.entry(t.to_string()).or_default().push(name.clone());
         }
     }
     preds
