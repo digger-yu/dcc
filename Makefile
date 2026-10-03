@@ -13,13 +13,18 @@ build:
 
 # Tier 0 权威清单见 docs/tests_quality_system_plan.md §9，四条缺一即 Tier 0 不成立：
 #   1) cargo build --tests   —— 全部 test target 必须能构建
-#   2) cargo test --release  —— 6 个 target 全部测试通过
+#   2) cargo test --release  —— 全部 target 通过；由 cargo_test_summary.sh 跑，
+#      它额外给出**跨 target 总计**（测试项总数 / 失败 / 忽略）与失败、忽略列表 ——
+#      cargo 自己只按 target 各打一行，原先要自己数。退出码仍透传 cargo 的，
+#      汇总器不判绿（否则就是新的假绿源）。它自带 -j2 / --test-threads=2 限流，
+#      所以这里**不传 JOBS**（本文件默认的 JOBS=$(nproc) 会把机器顶满）；
+#      要改并发用 `JOBS=... TEST_THREADS=... make test` 显式覆盖。
 #   3) check_fixtures.sh     —— fixture 门禁本体
 #   4) check_fixtures_selftest.sh —— 元门禁（证明 3 真的会红）
 # 失败即红 —— 不设 `|| true`，不做任何降级。
 test:
-	cargo build --tests
-	cargo test --release
+	cargo build --tests -j2
+	DCC_REPO="$(DCC_REPO)" bash scripts/cargo_test_summary.sh
 	DCC_REPO="$(DCC_REPO)" bash scripts/check_fixtures.sh
 	DCC_REPO="$(DCC_REPO)" bash scripts/check_fixtures_selftest.sh
 

@@ -505,7 +505,8 @@ git status --porcelain tests/ | grep -c zz        # 必须为 0（无残留）
 ```text
 Tier 0  PR 必绿（本地等价：make test）
         ├─ cargo build --tests
-        ├─ cargo test --release                 # 全部 6 个 target
+        ├─ bash scripts/cargo_test_summary.sh   # 跑 cargo test --release；除逐 target 行外
+        │                                       #   还给测试项总数 / 失败 / 忽略与两份名单
         ├─ bash scripts/check_fixtures.sh        ← 硬失败，无开关
         └─ bash scripts/check_fixtures_selftest.sh   ← 门禁本身有门禁
 
@@ -527,6 +528,7 @@ Tier 3  可选深测：libiberty / gcc 源树（`--features gcc_src`）、STRICT
 | `Makefile:14 test:` | 仅 `cargo test --release` | 追加 `bash scripts/check_fixtures.sh`（失败即红）。**实测落点**：`make test` 逐字跑完 Tier 0 全部四条（`cargo build --tests` → `cargo test --release` → `check_fixtures.sh` → `check_fixtures_selftest.sh`），因为本 §9 开头就写着“Tier 0 PR 必绿（本地等价：make test）” |
 | `Makefile:16-18 test-all:` | `test` + `check_fixtures.sh` | 保留，另加 selftest。**实测落点**：`test-all: test` + `bash scripts/test_all.sh`（门禁不在这里重复跑），同时把 `scripts/test_all.sh` 从没有任何调用点的孤儿入口接入 |
 | `scripts/test_all.sh` | examples 冒烟，与 cargo 无关 | 顶部注释指向本 §9；只做薄编排，不复制断言逻辑；调用点 = `make test-all` |
+| `scripts/cargo_test_summary.sh` | 不存在（原先只能逐 target 数 `test result:` 行） | Tier 0 第 2 条的执行入口：跑 `cargo test --release -j2 -- --test-threads=2`，输出逐 target 表 + 跨 target 总计（测试项总数 / 通过 / 失败 / 忽略）+ 失败列表 + 忽略列表。**它只报告不判绿**：退出码一律透传 cargo；另有「逐行之和 == 总计」自核对，归属异常会点名而不是静默给一张对不上的表 |
 | `e2e.yml:54-55` | `cargo test --release` 单条 | 同 job 增加 `check_fixtures.sh` step（**不带** `continue-on-error`）。**实测落点**：该 job 先加 `cargo build --tests` step，再加一个独立 step 依次跑 `check_fixtures.sh` 与 `check_fixtures_selftest.sh`；e2e job 的 5 个 example step 已去掉 `continue-on-error`（实测四个退出码 42/23/100/20 与诊断面均真通过，假绿不再成立） |
 | `.github/PULL_REQUEST_TEMPLATE.md` | 不存在 | 新建，4 项勾选：新 fixture 已挂载测试 / 已进主题子文件 / 已跑 `check_fixtures` / 覆盖索引已加行 |
 
