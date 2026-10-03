@@ -221,7 +221,7 @@ pub(crate) fn decode_escape_at(bytes: &[u8], at: usize) -> Option<(u8, usize)> {
 /// 里首个能表示者), 抽成单一真源是因为同一件事有两处需要它:
 ///
 /// * `src/cpp/sema.rs` 给整数字面量推 HIR 类型 (以前硬写 `Integer{bits:32}`);
-/// * `src/ssa.rs` 的 SSA→AST 重建 —— `Operand::Int(i128)` 本身无类型, 常量节点
+/// * `src/ssa/expr_rebuild.rs` 的 SSA→AST 重建 —— `Operand::Int(i128)` 本身无类型, 常量节点
 ///   的 `ty` 决定立即数物化宽度与 `usual_arith_type` 的推导结果。
 ///
 /// 局限 (已记录): 本函数只看量级。字面量的**后缀** (`1L << 40` 这类小量级 +

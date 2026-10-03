@@ -1,7 +1,7 @@
 /* 嵌套循环必须逐档与 -O0 同结果 —— 这条是 P16 落地「不得破坏外层结构」的护栏。
  *
  * 为什么单独立一条：内层循环被流水时曾出现两类实测缺陷（都被 `run_pipelining`
- * 的嵌套准入拦下，见 ssa_pipelining::is_nested_in_other_loop）：
+ * 的嵌套准入拦下，见 ssa::pipelining::is_nested_in_other_loop）：
  *   1. 外层携带值（这里两个循环共享 `sum`）在内层区域里读到的名字既不是内层 phi
  *      dest 也不在内层区域内定义 ⇒ 被当成循环不变量原样保留 ⇒ 累加丢失；
  *   2. 落地往内层的 preheader/exit 追加指令、摘除内层 latch，而这些块位于外层循环

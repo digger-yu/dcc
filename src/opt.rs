@@ -125,8 +125,8 @@ pub fn optimize_with_full_target(
         if !opt_skipped("eliminate_unreachable") {
             eliminate_unreachable(module);
         }
-        if !opt_skipped("ssa_gvn") {
-            crate::ssa_gvn::run(module, level);
+        if !opt_skipped("ast_gvn") {
+            crate::ast_gvn::run(module, level);
         }
         if !opt_skipped("loop_opt") {
             crate::loop_opt::run_with_target(module, level, has_vnni, vec_bits);
@@ -148,7 +148,7 @@ pub fn optimize_with_full_target(
     }
 }
 
-/// 诊断用：`DCC_OPT_SKIP=prune_dead_stores,ssa_gvn,loop_opt,...` 逐个关掉 AST 层 pass。
+/// 诊断用：`DCC_OPT_SKIP=prune_dead_stores,ast_gvn,loop_opt,...` 逐个关掉 AST 层 pass。
 ///
 /// 为什么必须有它：优化器改动行为时的定位手段只有「关掉某个 pass 再看产物」，
 /// 而没有开关就只能读代码猜。本轮就是这么错过一次的：`-O2` 下浮点一元负号被
@@ -160,7 +160,7 @@ fn opt_skipped(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// M16: 把 AST -> SSA, 跑 ssa_passes::run, 再 SSA -> AST 重建。
+/// M16: 把 AST -> SSA, 跑 ssa::passes::run, 再 SSA -> AST 重建。
 /// 含 goto / label / switch 的函数自动跳过 (走 is_structured 检测)。
 /// SSA builder 通过 insert_loop_phis 为循环回边插入 phi 节点,
 /// rebuild_cycle 将循环 CFG 重建为 while 循环 AST。
@@ -215,7 +215,7 @@ fn run_ssa_passes(
                 // TU 级 FENV_ACCESS 事实随 IR 下去: GVN 等值编号 pass 靠它判定
                 // 「浮点运算不得复用」(舍入模式可在运行期被 fesetround 改掉)。
                 ssa.fenv_access = prog.fenv_access;
-                crate::ssa_passes::run_with_opts(&mut ssa, level, strict_aliasing);
+                crate::ssa::passes::run_with_opts(&mut ssa, level, strict_aliasing);
                 // 诊断窗口：`DCC_SSA_IR_DUMP=1` 打印过完 SSA 管线的 IR 与重建后的 AST。
                 // 为什么必须有：这两样之间发生的事（内联、类型还原、基名塌缩）在产物上
                 // 常常只剩一个错值或一个丢掉的限定符，没窗口就只能猜。只在报障时打开，
@@ -228,7 +228,7 @@ fn run_ssa_passes(
                     );
                 }
                 // 注：这里曾有一个 `stabilize_addr_def_use` 事后把被落到后面的地址生产者
-                // 往前搬的补丁。它的根因（`ssa_passes::collect_uses` 对 `IndexAddr`/`MemberAddr`/`Invoke`
+                // 往前搬的补丁。它的根因（`ssa::passes::collect_uses` 对 `IndexAddr`/`MemberAddr`/`Invoke`
                 // 盲视，导致调度/投机在块内造出 use-before-def）已在那一份依赖判据里穷举修掉，
                 // 所以上面那个搬动不再需要（实测：去掉它之后 lvalue_addr_rows 夹具仍逐档与 gcc 一致）。
                 // 循环的续体与外层构造共享时，结构化重建表达不了（判据与实测两端失败见
@@ -242,17 +242,17 @@ fn run_ssa_passes(
                 let rebuilt = crate::ssa::rebuild_block(&ssa);
                 // P12：SSA 层的寄存器分配，结果写进重建后的 AST（`register_name`）。
                 // 判据要看**重建前**的函数体（嵌套函数在重建后的体里已经没有了，
-                // 见 `ssa_regalloc::assign` 的说明），落地只写重建后的体。
+                // 见 `ssa::regalloc::assign` 的说明），落地只写重建后的体。
                 // 只有 x86_64 后端读这张表，所以其他后端的产物不受影响；
                 // `debug_info` 时整条 pass 不动（DWARF 还只会发栈槽位置）。
                 let orig_body = f.body.replace(rebuilt);
                 if !opt_skipped("ssa_regalloc") {
-                    let ctx = crate::ssa_regalloc::Ctx {
+                    let ctx = crate::ssa::regalloc::Ctx {
                         debug_info,
                         taken_regs: taken_regs.clone(),
                     };
                     if let Some(orig) = &orig_body {
-                        crate::ssa_regalloc::assign(&ssa, orig, f.body.as_mut().unwrap(), &ctx);
+                        crate::ssa::regalloc::assign(&ssa, orig, f.body.as_mut().unwrap(), &ctx);
                     }
                 }
                 modified = true;
@@ -273,7 +273,7 @@ fn file_scope_bound_regs(
     for d in decls {
         if let crate::ast::Decl::Var(v) = d {
             if let Some(rn) = &v.register_name {
-                if let Some(r) = crate::ssa_regalloc::pooled_reg_of(rn) {
+                if let Some(r) = crate::ssa::regalloc::pooled_reg_of(rn) {
                     out.insert(r);
                 }
             }
@@ -406,7 +406,7 @@ fn expr_refs_volatile(e: &Expr, vol: &std::collections::HashSet<String>) -> bool
 ///   skip SSA optimization to preserve load/store ordering.
 /// - **restrict**: Function parameters with restrict qualifier indicate
 ///   non-aliasing pointers. This information is available for future alias
-///   analysis improvements (currently alias_analysis in ssa_passes.rs does
+///   analysis improvements (currently alias_analysis in src/ssa/passes.rs does
 ///   not use restrict hints).
 fn qualifier_aware_optimization(module: &mut Module) {
     let prog = module.source();
@@ -653,7 +653,7 @@ fn cross_function_dce(module: &mut Module) {
             other => others.push(other),
         }
     }
-    crate::ssa_passes::cross_function_dce_with_roots(&mut funcs, true, &extra_roots);
+    crate::ssa::passes::cross_function_dce_with_roots(&mut funcs, true, &extra_roots);
     let mut all: Vec<Decl> = others;
     for f in funcs {
         all.push(Decl::Func(f));

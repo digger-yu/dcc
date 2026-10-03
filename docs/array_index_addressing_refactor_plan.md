@@ -1,5 +1,10 @@
 # 数组下标寻址重构方案
 
+> **路径勘误（2026-10，SSA 目录化）**：本文里的 `src/ssa.rs` 等旧路径**不改写**（当时的事实）。
+> 拆涉到的位置：IR 形态在 `src/ssa/ir.rs`，降级在 `src/ssa/build.rs`/`lower.rs`，
+> 重建在 `src/ssa/rebuild.rs`/`expr_rebuild.rs`。对照表见
+> [`docs/ssa-module-layout-plan.md` §10](./ssa-module-layout-plan.md)。
+
 ## 1. 问题定义
 
 当前问题为：**静态数组的下标访问使用了错误的基址**。
@@ -458,8 +463,8 @@ x86-64 完成后，按相同语义契约审查并收敛：
 当前优化层已经针对静态局部禁用部分 SSA/GVN，并对数组/指针别名做了局部保护：
 
 - [opt.rs](../src/opt.rs#L469)
-- [ssa_gvn.rs](../src/ssa_gvn.rs#L22)
-- [ssa_gvn.rs](../src/ssa_gvn.rs#L128)
+- 旧位 `src/ssa_gvn.rs:22`（现为 `src/ast_gvn.rs`）
+- 旧位 `src/ssa_gvn.rs:128`（现为 `src/ast_gvn.rs`）
 
 这些保护可以作为过渡措施，但不能替代对象身份建模。
 

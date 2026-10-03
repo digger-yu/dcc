@@ -1,4 +1,4 @@
-// src/ssa_regalloc.rs
+// src/ssa/regalloc.rs
 //
 // P12：SSA 层的寄存器分配。
 //
@@ -26,7 +26,7 @@
 // 1. 只处理局部 `Decl::Var`，且类型是 1/2/4/8 字节的标量整数或指针。
 //    浮点要换 xmm 通道（后端没有为它准备的宽度口径），聚合/数组/向量本质是内存对象，
 //    `long double` 是 10 字节对象，`_Atomic` 与位域另有语义。
-// 2. 地址被取走过 ⇒ 不绑。判据复用 `ssa_gvn::addr_escaped_names`（§7.8），绝不自己
+// 2. 地址被取走过 ⇒ 不绑。判据复用 `ast_gvn::addr_escaped_names`（§7.8），绝不自己
 //    再爬一遍 AST —— 两套逸出判据里弱的那一套会决定产物。
 // 3. 出现在任何内联汇编的操作数里 ⇒ 不绑。asm 输出写回虽然已经认识绑定表（§7.19），
 //    但 `"+r"`、`"=m"` 与「栈槽从此没人写」的组合还缺一整批实测，不把未验证的形态
@@ -154,8 +154,8 @@ fn plan_for(func: &Function, judge_on: &Block, body: &Block, ctx: &Ctx) -> Plan 
     let mut sc = Scan::default();
     scan_block(judge_on, &mut sc);
     scan_block(body, &mut sc);
-    let mut escaped = crate::ssa_gvn::addr_escaped_names(judge_on);
-    escaped.extend(crate::ssa_gvn::addr_escaped_names(body));
+    let mut escaped = crate::ast_gvn::addr_escaped_names(judge_on);
+    escaped.extend(crate::ast_gvn::addr_escaped_names(body));
     // 用户手写的 `register asm`（局部或 file-scope）占住的号一律让开。光把那个名字
     // 记进 rejected 是不够的：后端照样会把同一个号给变量，两个变量共享一个寄存器
     // 就是静默错值 —— 这条是 `tests::user_bound_local_reserves_its_register` 逼出来的。
@@ -709,7 +709,7 @@ mod tests {
         let mut ssa = crate::ssa::build_from_func(&f).unwrap_or_else(|| {
             panic!("{fname} 应能 SSA 化（否则这条测试测不到分配）")
         });
-        crate::ssa_passes::run_with_opts(&mut ssa, level, true);
+        crate::ssa::passes::run_with_opts(&mut ssa, level, true);
         let orig = f.body.clone().expect("被测函数必须有体");
         let mut body = crate::ssa::rebuild_block(&ssa);
         let plan = assign(&ssa, &orig, &mut body, ctx);

@@ -67,7 +67,7 @@ impl Codegen {
     ///
     /// 为什么是程序级而不是当前函数级：file-scope 的 `register asm` 变量可以在
     /// **任何**一个函数里被取址，只看本函数体会漏。判据本身复用
-    /// `ssa_gvn::addr_escaped_names`，后端不再自己爬一遍 AST —— 两套逸出判据里弱的
+    /// `ast_gvn::addr_escaped_names`，后端不再自己爬一遍 AST —— 两套逸出判据里弱的
     /// 那一套会决定产物正确性。集合按名字索引，所以同名变量在别处被取址会一并
     /// 取消绑定（偏保守：只丢绑定，不丢正确性）。
     fn collect_addr_escaped(&mut self, prog: &Program) {
@@ -83,7 +83,7 @@ impl Codegen {
             let Some(b) = &f.body else {
                 return;
             };
-            set.extend(crate::ssa_gvn::addr_escaped_names(b));
+            set.extend(crate::ast_gvn::addr_escaped_names(b));
             for item in &b.items {
                 if let crate::ast::BlockItem::Decl(nd) = item {
                     walk_decl(set, nd);

@@ -42,7 +42,7 @@ pub fn run_with_target(module: &mut Module, level: u8, has_vnni: bool, vec_bits:
                     tile_block(body, 4, &mut tile_names);
                     // P7: 自动并行化标注
                     parallelize_block(body);
-                    // P16 软件流水不在此实现：见 `ssa_passes.rs` 末尾与
+                    // P16 软件流水不在此实现：见 `src/ssa/passes.rs` 末尾与
                     // `docs/ssa-pass-upgrade-plan.md` §7（原 AST 层实现只插一条后端
                     // 当注释的空 asm，属伪 pass，已删除）。
                 }

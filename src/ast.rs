@@ -1469,7 +1469,7 @@ impl Type {
     /// C11 6.3.1.8「通常算术转换」的整数部分: 两个操作数的公共类型。
     ///
     /// 全项目**单一真源** —— C 前端 (`parser.rs`)、SSA→AST 重建
-    /// (`ssa.rs::infer_binop_type`) 与 codegen 共用本函数, 避免任一
+    /// (`ssa::expr_rebuild::infer_binop_type`) 与 codegen 共用本函数, 避免任一
     /// 路径自己拍一个「结果都是 int」的近似口径 —— 那会把 `long * int`
     /// 降格成 32 位运算, 后续 `long` 赋值变成 sext(i32), 高 32 位静默丢失。
     ///

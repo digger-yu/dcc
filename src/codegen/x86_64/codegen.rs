@@ -74,7 +74,7 @@ pub struct Codegen {
     /// 为什么必须有它（`-O2` 才出现的形，判据
     /// `seg_qualifier_on_object_body_emits_segment_prefixes` 两档都跑）：`-O2` 的 SSA
     /// 降把「对象本体带段限定的全局」的访问拆成两条语句 `t = &gv; *t = v;`（真源见
-    /// `src/ssa.rs` 的 `named_addr_operand`），而 `AddrOf` 造出的指针类型是就地新建的
+    /// `src/ssa/build.rs` 的 `named_addr_operand`），而 `AddrOf` 造出的指针类型是就地新建的
     /// `Ptr(QualType::new(obj_ty))`，**不带地址空间** —— `ptr_seg_prefix` 那条轴到这里
     /// 必然为空。段信息只能在 codegen 侧按赋值流补回来：登记只发生在
     /// 「左值是单个标识符」的赋值点（一处），查询只发生在
@@ -223,7 +223,7 @@ pub struct Codegen {
     // file-scope register asm 变量绑定：每个函数入口恢复
     pub global_reg_bindings: HashMap<String, (u8, Type)>,
     /// 全程序里「地址被取走」的对象根名；只有 `addr_escaped_done` 为真时才参与判定
-    /// （区分「扫过且为空」与「还没扫」）。判据本身在 `ssa_gvn::addr_escaped_names`。
+    /// （区分「扫过且为空」与「还没扫」）。判据本身在 `ast_gvn::addr_escaped_names`。
     pub addr_escaped: std::collections::HashSet<String>,
     pub addr_escaped_done: bool,
     // data 节 64 位符号引用重定位：(data_section_offset, symbol_name)

@@ -590,7 +590,7 @@ impl Codegen {
             // 访问的就是 `x` 自身的存储，所以 `x` 的段决定这一笔访存的段。
             // 这条臂不是摆设：`-O2` 的 SSA 降把全局标量的读/写统一降到
             // `InstKind::AddrOf` + `Load`/`Store`，重建回来的 AST 正是
-            // `Deref{AddrOf{Ident}}`（见 src/ssa.rs 的 `InstKind::Store` 重建），
+            // `Deref{AddrOf{Ident}}`（见 src/ssa/expr_rebuild.rs 的 `InstKind::Store` 重建），
             // 且 `AddrOf` 的指针类型是**就地重建**的、不带地址空间标注，
             // 所以只看 `ptr_seg_prefix` 会漏。少了这条臂，`-O2` 下所有
             // 「对象本体带段限定」的全局访问都会退化成默认段。

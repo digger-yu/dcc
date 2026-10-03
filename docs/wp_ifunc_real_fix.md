@@ -1,5 +1,9 @@
 # WP：把 IFUNC resolver 从内置链接器搬回 codegen —— 真修报告
 
+> **路径勘误（2026-10，SSA 目录化）**：本文里的 `src/ssa.rs` / `ssa_passes::cross_function_dce`
+> 等旧路径**不改写**（当时的事实）；现分别为 `src/ssa/`（已拆为多文件）与
+> `crate::ssa::passes::cross_function_dce`。对照表见 [`docs/ssa-module-layout-plan.md` §10](./ssa-module-layout-plan.md)。
+
 任务：`docs/ssa-pass-upgrade-plan.md` §7.38 / §7.41 三、`docs/missing_features.md` 的 IFUNC 行
 所记的「IFUNC 使链接静默从动态降级为静态」。本报告只写**实测**与**代码位置**；
 上一轮（底线那轮）的边界说明在 `docs/wp_ifunc.md`，本轮不再重复论证已实定的事实。

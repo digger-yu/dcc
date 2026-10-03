@@ -25,7 +25,7 @@
 |------|----------|
 | 实现语言 | Rust（suckless 零 crate 依赖，ADR-005） |
 | 输入 | C89/99/11/17/23 + GNU 扩展；C++ 子集（M7–M18，详见 §3.2） |
-| 中间层 | typed IR（`src/ir.rs`）+ 轻量 SSA（M16，`src/ssa.rs`） |
+| 中间层 | typed IR（`src/ir.rs`）+ 轻量 SSA（M16，`src/ssa/`） |
 | 输出 | ELF64（ET_EXEC / ET_REL / ET_DYN），自写 `src/codegen/elf.rs` |
 | 后端 | x86_64 / aarch64 / riscv64 / mips / mips64 / arm 全部完整（`has_backend() == true`） |
 | 链接器 | 自有 `src/link/` 内置链接器；旧路径走 host `ld -r`（`link/legacy.rs`） |

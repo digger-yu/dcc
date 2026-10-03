@@ -267,7 +267,7 @@ pub fn expand_target_clones(prog: &mut Program, diags: &mut Vec<Diagnostic>) {
     // ---- 0) `__attribute__((ifunc("r")))` 的 resolver 必须存活到 codegen ----
     //
     // resolver 只被属性引用、不被任何 C 调用点引用，所以 `static` resolver 会被
-    // 「按引用可达性删」的 DCE（`ssa_passes::cross_function_dce`）当死代码删掉：实测
+    // 「按引用可达性删」的 DCE（`ssa::passes::cross_function_dce`）当死代码删掉：实测
     // gcc 13 在 -O2/-O3 仍发 `FUNC LOCAL resolve_a` + `IFUNC GLOBAL ifunc_a` 同址，而
     // dcc 在 -O2/-O3 上 resolver 已消失 → IFUNC 符号失去落点（只能报 E1125，产物没有
     // IFUNC）。GCC 的语义相当于把这种 resolver 隐式当 `__attribute__((used))`。这里给

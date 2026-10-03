@@ -22,7 +22,7 @@
 //!      会把 `e.4`/`e.5`/`e.14` 塌缩成同一个变量，于是「上一轮的值能不能拿到」取决于
 //!      行内先后 —— 那是 T 序模型里不存在的**反依赖**，见「发射序」一节。
 //!
-//! 接入状态：已在 `-O2`/`-O3` **默认接入**（`ssa_passes::run_with_opts` 开头，必须在其它
+//! 接入状态：已在 `-O2`/`-O3` **默认接入**（`crate::ssa::passes::run_with_opts` 开头，必须在其它
 //! 改写循环的 pass 之前跑）；`DCC_SSA_OFF=pipe` 可关，`DCC_PIPE_DUMP=1` 看计划与落地后 IR。
 //!
 //! 未做：真轮转寄存器（槽位复制）。行内反依赖排不出合法序的循环会被**拒收**而不是
@@ -3003,7 +3003,7 @@ fn apply_into(
 /// 为什么必须有它：流水的错值只在「管线中途的 IR」上出现（接入点教训见
 /// `docs/ssa-pass-upgrade-plan.md` §7.5），而单测看的是未经其它 pass 的 SSA ——
 /// 两边都对不上时，没有这个窗口就只能靠猜形状。
-/// 由 `ssa_passes::run_pipelining` 在 `DCC_PIPE_DUMP` 存在时调用，只写 stderr，
+/// 由 `crate::ssa::passes::run_pipelining` 在 `DCC_PIPE_DUMP` 存在时调用，只写 stderr，
 /// 不参与产物字节。
 pub fn dump_plan(func: &Function, p: &PipelinePlan) -> String {
     let lp = &p.lp;

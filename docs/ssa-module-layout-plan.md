@@ -1,8 +1,9 @@
 # SSA 子系统目录化方案（src/ssa* 五文件的布局重构）
 
-> **状态：设计完成，未开工。**本文不是待办清单，而是一份"要不要做、
-> 真要做就一次做对"的实施设计。开工时机由 §8 的触发条件决定，
-> 不由日历决定；§1 的判据是**产物零字节变化**。
+> **状态：已完工（2026-10，Phase 0-5 全部做完，§6 验收清单全绿）。**
+> 本文保留原设计形态作为依据；§10 是执行记录，含**复测数据**、**与设计的偏差清单**
+> 与**验收实测值**。开工触发条件（§8 条件 1）在本轮成立：`src/ssa.rs` 已从取数时点的
+> 7753 行涨到 **9089 行**。
 >
 > 取数时点：HEAD `439bbf0` + 工作区未提交改动，2026-10。§2 的每个数字
 > 都附了复取命令，隔段时间再读必须先复核（文件行数会变）。
@@ -223,7 +224,10 @@ bash scripts/check_reproducible_output.sh > .work_tmp/layout_base/repro.txt 2>&1
 - [ ] `ls -d src/ssa/`；`ls src/ssa.rs src/ssa_passes.rs src/ssa_pipelining.rs src/ssa_regalloc.rs src/ssa_gvn.rs` 全部不存在（无 E0761、无残留）。
 - [ ] `wc -l src/ssa/mod.rs` < 500（目标 <120），且其中除 `pub mod` / `pub use` / 注释外无实现代码。
 - [ ] `grep -rn "crate::ssa_passes\|crate::ssa_pipelining\|crate::ssa_regalloc\|ssa_gvn" src/` 为空。
-- [ ] `cargo build --release -j2` **0 warning**（搬漏 `mut`、重复 `use`、越权可见性都会在这里暴露）。
+- [ ] `cargo check --release --all-targets -j2` **0 error / 0 warning**（搬漏 `mut`、重复 `use`、
+      越权可见性都会在这里暴露）。**不得只跑 `cargo build --release`**：它不编译
+      `#[cfg(test)]` 目标，本轮就因此漏过一次 test-target 编译失败（见 §10.8.1）。
+      `cargo build --release -j2` 仅用于产出做产物对拍的二进制，同样要求 0 warning。
 - [ ] `cargo test --release -j2 -- --test-threads=2` 全绿，且 **lib 用例条数与基线相同** —— 条数变了就是有测试块被漏搬，这是目录化最阴的失败模式。
 - [ ] `make test` 全绿（含三架构交叉汇编、pipeline-parity 等测试用例脚本）。
 - [ ] 产物三档哈希与 Phase 0 基线逐字节一致；`scripts/check_reproducible_output.sh` 全绿；`scripts/check_disasm_coverage.sh` 残留数 = 基线值。
@@ -285,3 +289,208 @@ git ls-files src/opt | wc -l; ls -d src/opt 2>/dev/null   # 空目录残骸是�
 ```
 
 若复核后的数字与本文不符，**以复测为准**并回来修订本文（写明修订日期与差异）。
+
+---
+
+## 10. 执行记录（2026-10，Phase 0-5）
+
+备份分支：`backup/pre-ssa-layout-rewrite`（= HEAD `46c9e5c`，开工前工作区干净）。
+硬判据（产物零字节变化）**全程成立**：每个 Phase 结束时三档产物哈希与 Phase 0 基线
+逐字节一致，Phase 4 又用备份分支**重新构建**的二进制做了一次对拍，两边哈希相同。
+
+### 10.1 复测数据（与 §2.1 的差异）
+
+| 取数时点的 §2.1 | 开工实测 |
+|---|---|
+| `ssa.rs` 7753 | **9089**（+1336，§8 条件 1 成立） |
+| `ssa_passes.rs` 4907 | 4935 |
+| `ssa_pipelining.rs` 3168 | 3176 |
+| `ssa_regalloc.rs` 973 | 973 |
+| `ssa_gvn.rs` 1388 | 1405 |
+| `opt.rs` 3373 | 3516 |
+
+外部耦合面也比 §2.2 预估更小：`crate::ssa::` 形态的引用实测 16 处，分布在 `opt.rs`(11)、
+`cpp/lower_ir.rs`(2)、`cpp/native.rs`(1)、`codegen/x86_64/emit/functions.rs`(1)、`ast_gvn.rs`(1)
+（后两者是 `crate::ast_gvn`）；§2.2 列的 `codegen/x86_64/codegen.rs` 与 `ifunc.rs` 已仅剩注释。
+`file!()` / `module_path!()` / `#[path]` 复测仍为 0 处（路径不进产物、不进用例名）。
+
+### 10.2 落地形态（替代 §3 的目标布局）
+
+```
+src/ssa/
+  mod.rs        103 行：13 条 pub mod + 14 条 pub use（只列目录外真有消费者的名字）
+                + 9 条仅 `ssa` 内部共享的再导出 + 地图注释（无实现）
+  ir.rs         846   cfg.rs        494   structure.rs  431
+  build.rs     2098   lower.rs      571   loop_exit.rs  508
+  inline_temps.rs 333  rebuild.rs   1518   expr_rebuild.rs 1040
+  dump.rs        34   passes.rs    4935   pipelining.rs 3176   regalloc.rs 973
+  tests.rs     1305   unary_rebuild_ty_tests.rs  52
+src/ast_gvn.rs 1410（原 ssa_gvn.rs 1405，头注释净增 5）
+```
+
+行号→文件的映射按 127 个顶层条目（含各自紧邻上方的注释块）无缝拼出，每块搬完都用
+只读 `diff` 与源区间做**逐字节对照**（10 个实现文件均 0 输出），因此「没改一行代码」是
+可证明的而非声称的。两个测试块是例外：判据为「剥掉一层 4 空格缩进后逐行一致」，
+另外各自新增了一小段 `use`（共 16 行，原因见 §10.3 第 3 条）。
+
+### 10.3 与设计的偏差清单（均以实测为准，理由逐条）
+
+1. **拆成 10 个实现文件而不是 §3 的 8 个**。两个原因：（a）「多出口循环出口归属」一组
+   （`LoopExitOwner`/`LoopExitPlan`/`loop_shape`/`loop_exit_plan`/`owner_of`/`exit_class_of`/
+   `resolve_loop_exit_stub`/`is_eh_pad`/`has_multi_exit_cycle`）写方案时还不存在，新增
+   `loop_exit.rs`；（b）为了守住 §1 目标 2「职责文件 < 2000 行」，把 §3 的 `rebuild.rs ~2600`
+   控流/表达式两个轴拆开（`rebuild.rs` 1518 + `expr_rebuild.rs` 1040），从 `build.rs` 拆出
+   被 `Builder` 调用的降级辅助与 phi 插入（`lower.rs` 571）。`build.rs` 2098 行是**本次拆分的
+   10 个实现文件里**最大的（`passes/pipelining/regalloc` 是整文件收编，不在该口径内），
+   来头是 `impl Builder` 本身 1951 行且不宜拆。
+2. **`has_multi_exit_cycle` 从 §3 的 `cfg.rs` 改放 `loop_exit.rs`**。它与 `loop_exit_plan` 是
+   「判据与发射器同源」的一对（见 `loop_exit.rs` 头注释）；分家止好把要防止漂移的东西摆在一起。
+3. **两个测试块分放两个文件**，不是 §3/§5 2.4 说的集中到 `ssa/tests.rs`。集中会把第二块的
+   用例名变成 `ssa::tests::unary_rebuild_ty_tests::*`，而分放两个同名文件使两个模块路径完全不变
+   —— §6 第 5 条要的是「用例不静默丢失」，名字不变比「只有一个测试文件」更值钱。
+   两个文件的内容 = 源区间逐行剥掉一层 4 空格缩进（只剥外层 `#[cfg(test)] mod X {`/`}` 外壳），
+   另在顶部补 16 行 `use`——必须补的原因是：原来 `use super::*;` 的 `super` 是那个带
+   `use std::collections::…` / `use crate::ast::{…}` 的 9089 行文件， glob 能带进这些名字；
+   拆完后 `super` 是只含声明与再导出的 `mod.rs`，那些名字全部失效。
+   已先实测确认该区间**没有裸跳行字符串字面量**
+   （所有多行串均用 `\`+换行续行，会吞掉下一行前导空白），所以剥缩进是一次纯空白变更。
+4. **Phase 1 的改动面是 12 处而不是 7 处**。除代码与注释外，还包含 `opt.rs` 里
+   `opt_skipped("ssa_gvn")` 这个 **`DCC_OPT_SKIP` 关键字字符串** —— 它与模块同名，不改就会在
+   `src/` 里留下旧名。这是全程**唯一一处诊断文案变化**，已登记到 §4.1（见下面第 6 条的对拍处理）。
+   实测全仓没有任何测试用例或脚本使用旧关键字 `DCC_OPT_SKIP=ssa_gvn`。
+5. **§5 3.3 预估的 6 处外部路径实测只剩 5 处**（`cpp/*` 与 `codegen/*` 的引用已降为注释）；
+   目录内部引用统一取 `crate::ssa::passes::` / `crate::ssa::pipelining::` 全路径形，不用 `super::`，
+   与三个文件里既有的 `crate::ssa::ordered_block_names` 写法一致。实际字面点 10 个：
+   `opt.rs` 5、`ssa/passes.rs` 4、`ssa/regalloc.rs` 1。
+6. **`DCC_OPT_SKIP` 的 `run_ssa_passes` / `ssa_regalloc` 两个关键字不改**，因此 §6 第 3 条
+   判据按 `crate::ssa_passes|crate::ssa_pipelining|crate::ssa_regalloc|ssa_gvn` 这四种形式为限
+   （实测全空）。理由：它们是用户可见旋钮，`tests/integration/opt_ssa_gate.rs` 与
+   `scripts/check_reproducible_output.sh` 都按名字驱动；而 Phase 1 那条关键字已因模块改名
+   必须跟着改，所以 §4.1 的逐通道对拍里，OLD/NEW 两侧**各自使用自己的关键字列表**。
+7. **6 处 `// ==== 区块横幅 ====` 注释归位**：它们原属单文件里的节分隔，拆分后与主体分家。
+   1 处改写为 `Switch -> If-chain 降级 pass` 留在 `structure.rs`（它仍有两个主体，分隔仍有导航价值），
+   其余 5 处（Dominator tree / 入口检测 / AST->SSA 转换器 / SSA->AST 重建器 / Pass 工具打印）
+   与子文件头注释语义重复，删除。删改的全是注释，产物哈希在此步未变。
+8. **§2.2 说的 docs 旧路径引用 51 处，实测 101 行命中**（旧名在 docs 里有 `.rs` 后缀、
+   `crate::` 前缀、散文提及三种形）。按 §5.1 执行：**执行记录里的旧名是当时的事实，不改写**；
+   只更新现行状态类文档与代码里的活性指针，具体落成三类：
+   - 现行文档（本节就是其中一份，另：`architecture.md` 补优化器侧模块图 + §10.2 布局，
+     `support_features.md` 的两处活性指针，`README.md` 的 `src/ssa.rs` → `src/ssa/`）；
+   - 代码与夹具里的活性指针注释（`opt.rs`/`loop_opt.rs`/`codegen/x86_64/ifunc.rs`/
+     `tests/integration/opt_ssa_gate.rs` 及 4 份 `.c` 夹具注释里的模块路径）；
+   - **12 份历史执行记录在标题下方加一条「路径不改写、新位置见本文 §10.4」的勘误指引**
+     （正文一字未动）：`ssa-pass-upgrade-plan`(53 处)、`p12-physreg-spill-design`(10)、
+     `wp_multi_exit_loop`(8)、`wp_ifunc_real_fix`(4)、`cpp_native_gcc_convergence_plan`(4)、
+     `cxx-native-foundation-fix-plan`(3)、`wp_goto_pending`(2)、`dcc-fix-symref-consteval-solution`(2)、
+     `c23-fallthrough-volatile-ssa-fix-plan`(2)、`array_index_addressing_refactor_plan`(2)、
+     `wp_disasm`(1)、`longdouble_80bit_migration`(1)。这两类做法共同满足 §5.1
+     「历史条目仍可查」：旧名原地保留，但任何一份记录的读者在开头就能拿到新路径。
+     未加指引的两份：本文（对照表本体）与 `architecture_v1_backup_20260923.md`（文件名已自说明
+     是归档快照，不应再写）。
+   - 夹具**文件名**（`ssa_regalloc_locals.c` 等）与集成测试**函数名**（`ssa_regalloc_*`）未改：
+     前者进《三档产物哈希》的比对表键，后者是用例名集合判据的比对对象，改它们等于动判据。
+9. **§2.2 说的 51 处 docs 引用与 19 处代码引用的取数均已是旧快照**；开工时实测
+   `crate::ssa::` 形态外部引用 16 处（分布在 5 个文件），全部通过 `mod.rs` 再导出保持不变。
+
+### 10.4 旧名 → 新名 对照（历史条目反查用）
+
+| 旧 | 新 |
+|---|---|
+| `src/ssa.rs` | `src/ssa/mod.rs`（声明+再导出）+ `ir/cfg/structure/build/lower/loop_exit/inline_temps/rebuild/expr_rebuild/dump/tests/unary_rebuild_ty_tests.rs` |
+| `src/ssa_passes.rs` | `src/ssa/passes.rs`（模块 `crate::ssa::passes`） |
+| `src/ssa_pipelining.rs` | `src/ssa/pipelining.rs`（模块 `crate::ssa::pipelining`） |
+| `src/ssa_regalloc.rs` | `src/ssa/regalloc.rs`（模块 `crate::ssa::regalloc`） |
+| `src/ssa_gvn.rs` / `crate::ssa_gvn` | `src/ast_gvn.rs` / `crate::ast_gvn`（它在 AST 上工作，与 SSA IR 无关） |
+| `DCC_OPT_SKIP=ssa_gvn` | `DCC_OPT_SKIP=ast_gvn`（唯一随改名变化的诊断关键字） |
+| `src/opt/`（空目录残骸） | 已删除（`git ls-files src/opt` = 0） |
+| `DCC_OPT_SKIP=run_ssa_passes` / `=ssa_regalloc` | 未变（用户可见旋钮，不是模块路径） |
+
+历史条目里提到的 `ssa.rs:NNNN` 行号已全部失效（目录化后行号重排）；反查符号请用名字而非行号，
+`git log --follow` 与 `backup/pre-ssa-layout-rewrite` 保留了完整旧形状。
+
+### 10.5 验收实测值（§6 逐条）
+
+| §6 判据 | 实测 |
+|---|---|
+| `ls -d src/ssa/`；旧 5 文件不存在 | ✓（无 E0761、无残骸） |
+| `wc -l src/ssa/mod.rs` < 500 | **103**（目标 <120 也满足）；除 `pub mod`/`pub use`/注释外无实现 |
+| `crate::ssa_passes\|...\|ssa_gvn` 为空 | ✓ 0 处 |
+| `cargo check --release --all-targets -j2` 0 error / 0 warning（§6 第 4 条已改为此口径） | ✓ 0 / 0；`cargo build --release -j2` 亦 0 warning |
+| `cargo test --release -j2` 全绿且 **lib 条数不变** | lib **2058 passed / 2 ignored**、integration 1036/1、errors 26、其余各 target 全等；用例名集合 3212 条，归一后与基线**完全相同**（差异只有模块前缀） |
+| `make test` 全绿（含三架构交叉汇编、pipeline-parity 等测试用例脚本） | ✓ `check_fixtures.sh` + `check_fixtures_selftest.sh` + `golden-cross` + `pipe-structure` + `opt-eq` |
+| 产物三档哈希逐字节一致 | ✓ grand aggregate `f5e00728fa61e7db…dc059` 全程未变；`check_reproducible_output.sh` 全绿（5238 组合 × 3 连跑）；`check_disasm_coverage.sh` 读不出 162 = 基线值 |
+| `git diff --stat backup/… HEAD` 以 rename 为主 | ✓ `git diff --cached --stat -M backup/pre-ssa-layout-rewrite -- src/`：22 files changed, 9361(+)/9113(-)，净额 +248 全在新增的子文件头注释、`use` 与 `mod.rs` 地图；三个收编模块均识别为 rename（内容差 `passes.rs` 16 行 / `pipelining.rs` 4 行 / `regalloc.rs` 10 行，全部是模块路径与文件头注释）；`ssa.rs → ssa/mod.rs` 因内容差超阈值不记为 rename，它的一分为十二靠上面「每块逐字节 diff」与 §10.3 第 3 条的推导链保证 |
+
+### 10.6 Phase 4 反证的一个意外发现（与搬迁无关，但必须记录）
+
+`DCC_SSA_IR_DUMP` 打印的 `preds=[..]` / `succs=[..]` **元素序本身就逐次运行不稳定**：
+对**搬迁前**的二进制同一夹具连跑 8 次，得到两种序（3/5 分布）；搬迁后连跑 8 次为 4/4。
+即这是存量的 HashMap 迭代序泄漏，只影响诊断文本，不影响产物（两侧 `.s` 均逐字节确定）。
+因此逐通道对拍的判据是「退出码 + `.s` 产物 + **序归一后**的诊断文本」逐字节一致；归一仍对
+集合内容敏感（任何元素增删都会改变哈希）。实测 9 个通道配置 × `-O2/-O3` × 291 夹具全部 OK。
+待单独修（不属于本方案范围，已登记）：给 `preds`/`succs` 缓存的打印走 `ordered_*` 系列，
+否则这个窗口在二分定位时会把「同一个二进制」当成「两个行为」。
+
+### 10.7 重现本轮验收的命令
+
+```bash
+cd /root/dcc
+cargo build --release -j2                                    # 期望 0 warning
+cargo test --release -j2 -- --test-threads=2                  # 期望 lib 2058/2 ignored
+JOBS=2 bash .work_tmp/layout_base/gen_hash.sh /tmp/h.txt       # 基线 grand aggregate
+LEVELS="0 2" bash scripts/check_disasm_coverage.sh | tail -2    # OK（0.0531%，上限 162）
+bash scripts/check_reproducible_output.sh                      # 5238 组合全可复现
+DCC=$PWD/target/release/dcc DCC_REPO=$PWD JOBS=2 bash scripts/check_opt_equivalence.sh
+```
+（`.work_tmp/layout_base/gen_hash.sh` 与 `channels.sh`/`norm.awk` 是本轮的只读采集器，
+在 `.gitignore` 内不入库；需要时可从 §10.5 的描述重现。）
+
+### 10.8 独立复核（CodeReview）后的修订
+
+本轮收尾做了一次不预先告知结论的独立复核。复核**独立复现了硬判据**（产物 873 行哈希
+`cmp` 逐字节相同、强制重编 0 warning、用例名多重集反向归一后只差 2 条前缀、
+用 `split_map` 反向验证“原文件每一非空行均出现在新文件中”），**无阻断级问题**；
+但拓出了 5 条应当修的缺陷，已全部修正：
+
+| # | 复核拓出的问题 | 修正 |
+|---|---|---|
+| 1 | `src/` 内仍残留 **6 处指向已删除的 `src/ssa.rs` 的活性注释**（`ir.rs:473`、`passes.rs:2215`、`ast.rs:1472`、`cpp/const_text.rs:224`、`codegen/x86_64/codegen.rs:77`、`abi/tyclass.rs:593`）。§6 第 3 条的 grep 判据按构造 **不覆盖 `ssa.rs`**，所以“判据全绿”不等于这一类已收干 | 6 处逐条改指新位置；并把 `grep -rn "ssa\.rs" src/` 列为本方案的附加残留判据（实测现为零命中） |
+| 2 | 本轮新写的注释引用了**不存在的诊断通道 `DCC_SSA_DUMP`**（根源：方案 §5 4.1 自己列的 `DCC_SSA_DUMP` / `DCC_SSA_ERR_DUMP` / `DCC_REGALLOC=0` 三个名字在代码里都不存在，实测真名是 `DCC_SSA_IR_DUMP` / `DCC_SSA_BAIL` / `DCC_REGALLOC_DUMP`） | 按实测调用点改写：`dump_function` 由 `DCC_SSA_IR_DUMP`(opt.rs)、`DCC_DUMP_CPP_AST`(cpp/native.rs)、`DCC_PIPE_DUMP`(ssa/passes.rs) 三条通道共用；同步修 `mod.rs` 地图与 `architecture.md` |
+| 3 | `architecture.md` 新模块图声称子文件“**单向依赖**”，但实际有两条反向边（`ir → rebuild::inst_has_side_effect`、`loop_exit → rebuild::{is_pass_hint_inst, is_loop_exit_pure_return}`） | 改为“大致分层 + 显式登记两条反向边”，并写明它们是“判据只有一份”的共享，拆模块时不得当作可断开的边 |
+| 4 | **公共面未按 §5 2.3 收紧**：13 个 `pub use` 名字在本目录外连注释都未出现（它们的消费者已在 Phase 3 变成了兄弟模块）；另有 4 个 `pub(super)` 放宽无任何消费者（`store_pointee_ty`/`operand_to_expr`/`collect_var_uses_op`，其前三个本来就在 `#![allow(dead_code)]` 下） | 按“目录外真有代码消费者”为准重算：保留 **14** 个 `pub use`，其余 17 个降为 `pub(super)` + 仅 `ssa` 内部可见的普通 `use`；那 4 个退回本模块私有。`kind_operand_ssa_vars` 从 `pub(crate) use` 降为普通 `use`。例外：`OrderedNameSet` 必须留 `pub`（它是 `pub struct Function` 的 `pub` 字段类型）。`inst_to_expr` 全仓零调用（搬迁前就是死码，本轮不顺手删，只登记） |
+| 5 | 本节（§10）有多处“证据强于事实”：称两个测试块是“逐字副本”（实际各补了一段 `use`）、`ast_gvn.rs` 写 1412（实 1410）、`impl Builder` 写 1952（实 1951）、`build.rs` 写“全表最大值”（同表 `passes.rs` 更大） | 已全部按实测修正（上方 §10.2/§10.3 已改）；这本账是本轮唯一的搬运凭证，数字错比没有更坏 |
+
+**有意不改的两项**（写了理由，免得下一轮又被当成漏洞）：
+- `pub mod passes/pipelining/regalloc/…` 不降为私有 `mod`：§3 目标布局明确写的是“`pub mod` 声明”，
+  且收编后的三个模块本来就是库内各处的调用入口；“同一事实的第二条路径”由 §3 自己选定，
+  不在本轮翻案。
+- 历史文档正文里的旧链接文字保留（按 §5.1 “不改写”），但**指向已删文件的可点击链接**
+  已改掉 target（文字不变），否则它们永远 404。
+
+**修正后的复验**（同样全部实测）：`cargo build --release -j2` **0 warning**；
+三档产物哈希与 Phase 0 基线**逐字节一致**（可见性收紧属纯编译期改动，已被该判据证明）；
+`cargo test --release -j2 -- --test-threads=2` 全绿且 lib 仍为 **2058 passed / 2 ignored**；
+`check_fixtures` / `check_fixtures_selftest`(5/5) / `check_reproducible_output`(5238 组合) 全绿。
+
+#### 10.8.1 上述第 4 条修正过程中我自己引入过一次回归（必须记下来）
+
+按“目录外真有消费者”收紧可见性时，我根据 **lib 构建**报的 `unused_imports` 警告删掉了
+`mod.rs` 里 5 条再导出；但 `#[cfg(test)] mod tests` 正是靠其中几条解析
+`loop_shape` / `loop_exit_plan` / `loop_exit_owner` / `LoopExitOwner` / `LoopExitPlan`。
+结果是 **`cargo build --release` 全绿、`cargo build --tests` 编译失败 17 错**。
+根因不在这一次编辑，而在**判据本身**：§6 第 4/5 条只写了 `cargo build --release -j2`
+与 `cargo test --release`，如果只跑前者就看不到 test target。
+
+两个永久修正：
+1. 改判据：编译门禁一律用 **`cargo check --release --all-targets -j2`**（覆盖 lib / bins /
+   tests / examples），`cargo build` 只用于产出可执行文件做产物对拍；
+2. 真正的修法不是把再导出塞回 `mod.rs`（那样会重新引入 lib 的 unused 警告），而是让
+   `tests.rs` 自己显式 `use crate::ssa::loop_exit::{…}` —— 跟它对待其他内部符号的方式一致。
+
+本轮最终状态（含此修正）的实测：`cargo check --release --all-targets -j2` **0 error / 0 warning**；
+`cargo build --tests -j2` 通过；`cargo test --release -j2 -- --test-threads=2` 全绿且条数与基线相同；
+三档产物哈希仍与基线**逐字节一致**；`check_fixtures` / selftest(5/5) / `check_reproducible_output` /
+`check_disasm_coverage`(162) / `check_pipe_structure` / `arm_mips_golden_baseline verify` /
+`check_opt_equivalence`(0 OPT-DIFF) 全绿。
+
+

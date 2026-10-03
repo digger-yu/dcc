@@ -1,5 +1,9 @@
 # `-S` 反汇编读数收尾：四处文本形状缺陷、常驻判据、上限归零与错位探测
 
+> **路径勘误（2026-10，SSA 目录化）**：本文第 550 行附近的「禁改文件清单」里写的 `src/ssa.rs`
+> 是当时的事实，**不改写**；该文件现已拆为 `src/ssa/` 多个职责文件。对照表见
+> [`docs/ssa-module-layout-plan.md` §10](./ssa-module-layout-plan.md)。
+
 范围：`src/codegen/disasm.rs`（只用于自家 `-S` 读数与 `rex_matrix` 判据，不进产物）、
 `scripts/check_disasm_coverage.sh`、`Makefile` 的 `disasm-cov` 目标（只动 `CEILING` 与
 该目标自己的注释）。本文里所有 objdump/GAS 读数都是命令输出**原文**（含 objdump 的

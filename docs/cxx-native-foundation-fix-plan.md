@@ -1,5 +1,9 @@
 # C++ Native 路径基础能力补齐方案
 
+> **路径勘误（2026-10，SSA 目录化）**：本文里的 `src/ssa*.rs` / `ssa_passes` 等旧路径**不改写**；
+> 现 `src/ssa.rs` → `src/ssa/`（已拆为多文件）、`src/ssa_passes.rs` → `src/ssa/passes.rs`。
+> 对照表见 [`docs/ssa-module-layout-plan.md` §10](./ssa-module-layout-plan.md)。
+
 - 状态: 提案
 - 前置: legacy lower-to-C 路径已淘汰（driver.rs 改造完成），native lower_ir 为唯一后端
 - 目标: 补齐 C++ native 路径的基础诊断与语义能力，对齐 C 端已实现的 fallthrough/volatile 水准，逐步消除 legacy 淘汰后的测试失败

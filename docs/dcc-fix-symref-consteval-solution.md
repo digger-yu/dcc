@@ -1,5 +1,8 @@
 # 修复方案：SSA 重建全局符号引用错误 & const_eval 赋值表达式处理错误
 
+> **路径勘误（2026-10，SSA 目录化）**：本文里的 `src/ssa.rs`（`fn operand_to_expr`）旧路径**不改写**；
+> 该表达式重建现在 `src/ssa/expr_rebuild.rs`。对照表见 [`docs/ssa-module-layout-plan.md` §10](./ssa-module-layout-plan.md)。
+
 ## 问题概述
 
 两个问题都存在，需要修复：

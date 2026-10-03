@@ -1,5 +1,9 @@
 # a6：long double 的 80-bit 值模型三侧迁移
 
+> **路径勘误（2026-10，SSA 目录化）**：本文清点消费点时列的 `ssa.rs`（以及它旁边的 `ir.rs`
+> 指 `src/ir.rs`，不是新文件 `src/ssa/ir.rs`）是当时的事实，**不改写**；`src/ssa.rs` 现已拆为
+> `src/ssa/` 多个职责文件。对照表见 [`docs/ssa-module-layout-plan.md` §10](./ssa-module-layout-plan.md)。
+
 ## 当前状态（本文件开头以下的历史分析已部分过时，以此处为准）
 
 | 面 | 状态 |

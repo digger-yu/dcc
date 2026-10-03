@@ -179,10 +179,60 @@ src/codegen/shared/
 
 ---
 
-## 🧠 SSA 优化管线 (src/ssa.rs + src/ssa_passes.rs)
+## 🧠 SSA 优化管线 (src/ssa/ —— 目录 + mod.rs 双层结构)
 
 入口 `opt.rs::run_ssa_passes`: 把结构化函数 `AST → SSA → pass → AST` 转一圈再回写
-`f.body`。**准入闸门**（三条，缺一不可）：
+`f.body`。
+
+### 模块布局（与 codegen 侧同一套双层结构规范）
+
+`src/ssa/mod.rs` 只有声明、再导出与「地图注释」，实现一律在子文件里；外部调用方继续走
+`crate::ssa::*`（由 `mod.rs` 的 `pub use` 维持），**不需要知道内容在哪个文件**。
+分层大致是 `ir → cfg → structure → build/lower → loop_exit/inline_temps → rebuild/expr_rebuild`，
+但**不是严格单向**，已知两条反向边：`ir::inst_unremovable`/`inst_written_bases` 调
+`rebuild::inst_has_side_effect`，`loop_exit` 调 `rebuild::{is_pass_hint_inst, is_loop_exit_pure_return}`。
+它们是为了「判据只有一份」而存在的共享，**不是层次倒置**，拆模块时不得当作可断开的边。
+
+```
+src/ssa/
+├── mod.rs              103 行：13 条 pub mod + 14 条 pub use 再导出 + 地图注释
+│                       （不放实现；`pub use` 只列**目录外真有消费者**的名字，
+│                       其余项降为 `pub(super)` + 仅 `ssa` 内部可见的再导出）
+├── ir.rs               IR 数据形态与属性判据：SsaVar / Operand / InstKind / Inst /
+│                       Terminator / BasicBlock / Phi / OrderedNameSet / Function /
+│                       collect_uses_* / rename_*
+├── cfg.rs              CFG 与支配：term_succs / collect_all_preds / compute_dominators /
+│                       compute_ipdoms / is_back_edge / reverse_postorder / refresh_cfg /
+│                       find_loop_body{,_multi} / ordered_block_names / dangling_refs
+├── structure.rs        进 SSA **之前**的 AST 侧政策：is_structured* 准入判据 +
+│                       lower_switches*（switch → if-chain）
+├── build.rs            AST → SSA 唯一入口：Builder + build_from_func / build_ssa
+├── lower.rs            Builder 调用的降级辅助：lower_lvalue / collect_local_decls* /
+│                       insert_loop_phis / insert_label_phis
+├── loop_exit.rs        多出口循环的出口归属 —— 判据(has_multi_exit_cycle) 与发射器同源
+├── inline_temps.rs     合成临时值的内联窗口：plan_inlined_temps / inline_window_safe
+├── rebuild.rs          SSA → AST 的**控制流**重建：rebuild_block / RebuildCtx / rebuild_bb /
+│                       rebuild_cycle / emit_rebuild_inst / walk_to_join / branch_join
+├── expr_rebuild.rs     SSA → AST 的**表达式**重建与类型推导：inst_to_expr{,_resolved} /
+│                       operand_to_expr / infer_binop_type / store_pointee_ty / addr_of_ty
+├── dump.rs             dump_function —— `DCC_SSA_IR_DUMP` / `DCC_DUMP_CPP_AST` / `DCC_PIPE_DUMP`
+│                       三条通道共用的 IR 读数（只读不写，不进产物字节）
+├── passes.rs           M16 优化 pass 集合（原 src/ssa_passes.rs）
+├── pipelining.rs       P16 软件流水（原 src/ssa_pipelining.rs）
+├── regalloc.rs         P12 SSA 层寄存器分配（原 src/ssa_regalloc.rs）
+├── tests.rs            跨切用例（构造 → 跑 pass → 重建查产物形态），不拆散
+└── unary_rebuild_ty_tests.rs  一元指令重建的类型回归
+```
+
+**单一真源的落点**（改判据前先确认只有一处）：SSA 化准入与降级政策只在 `structure.rs` /
+`build.rs`；出口边归属只在 `loop_exit.rs`（实测 `rebuild.rs` 共 7 个调用点：5 处 `loop_exit_owner` + 2 处 `loop_exit_plan`，均必须指向
+`loop_exit.rs` 的唯一实现）；表达式类型推导只在 `expr_rebuild.rs`；诊断文案在 `dump.rs` /
+`pipelining.rs::dump_plan`。
+
+与 SSA 无关、但名字曾带 `ssa_` 前缀的一个模块已正名为 **`src/ast_gvn.rs`**（它在 AST 上
+做 GVN/CSE/拷贝传播，从不碰 SSA IR；SSA 上的值编号在 `src/ssa/passes.rs::gvn`）。
+
+**准入闸门**（三条，缺一不可）：
 
 | 闸门 | 作用 |
 |---|---|
@@ -206,14 +256,14 @@ src/codegen/shared/
 | P12b | `ubsan_ir_instrument` | 部分 | guard 已插；“重建时转 `__ubsan_handle_*`” 的说法开之前并不存在 |
 | P4/P13 | `alias_analysis_*` / `alias_set` | 无 | 结果被丢弃，仍待接入 P18/P20 |
 | P6/P7 | `pgo` / `auto_parallelization` | 无 | 以 `__dcc_*` hint 形式实现，重建时被丢弃（hint 本身在 AST 层由 `parallelize_block` 打标） |
-| P16 | 软件流水 | 分析层已完成 | [src/ssa_pipelining.rs](file:///root/dcc/src/ssa_pipelining.rs)：循环识别（单 latch + 直线链区域 + 常量 trip）、依赖图（带距离/延迟，含内存定序与基名塌缩序边）、RecMII/ResMII、epi-cyclic 模调度、`prologue/kernel/epilogue` 三段切分（`InstancePlan::verify` 逐元素比对绝对时间序）、单一闸门 + `rejections` 诊断。**仍不参与编译产物**：把计划应用到 IR（节点重命名 + 三段块 + 一级轮转 phi）未做，见 `docs/ssa-pass-upgrade-plan.md` §7.1 |
+| P16 | 软件流水 | 分析层已完成 | [src/ssa/pipelining.rs](file:///root/dcc/src/ssa/pipelining.rs)：循环识别（单 latch + 直线链区域 + 常量 trip）、依赖图（带距离/延迟，含内存定序与基名塌缩序边）、RecMII/ResMII、epi-cyclic 模调度、`prologue/kernel/epilogue` 三段切分（`InstancePlan::verify` 逐元素比对绝对时间序）、单一闸门 + `rejections` 诊断。**仍不参与编译产物**：把计划应用到 IR（节点重命名 + 三段块 + 一级轮转 phi）未做，见 `docs/ssa-pass-upgrade-plan.md` §7.1 |
 
 **已删除的伪实现**（它们当时都报告 `changed = true` 却对机器码零影响，其中两条还会造成运行时错）：
 `function_attribute_propagation`（假 hint 造成 SEGV）、`register_allocation`（全局栈槽模型下不属本层）、
 `software_pipelining`（空函数体）、`loop_tiling` / `loop_interchange`（把一条指令原样复制一遍，破坏单赋值）。
 AST 层的同名伪流水 `loop_opt::software_pipeline_block` 也已删除：它只往循环前插一条
 `#pragma GCC pipelined` 的空 asm（后端当注释，实测 -O3 汇编 0 次出现），不产生任何流水变换。
-理由逐条写在 `src/ssa_passes.rs` 对应小节。
+理由逐条写在 `src/ssa/passes.rs` 对应小节。
 
 ### 本层三条硬约束
 

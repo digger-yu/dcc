@@ -1,5 +1,9 @@
 # C++ Native 后端对齐 GCC 源码树实施方案
 
+> **路径勘误（2026-10，SSA 目录化）**：本文里的 `src/ssa*.rs` / `ssa_passes` 等旧路径**不改写**；
+> 现 `src/ssa_passes.rs` → `src/ssa/passes.rs`，`src/ssa.rs` → `src/ssa/`（已拆为多文件）。
+> 对照表见 [`docs/ssa-module-layout-plan.md` §10](./ssa-module-layout-plan.md)。
+
 - 状态: 提案
 - 前置: `docs/gcc_build_guide.md`（GCC 子集构建门禁）、`docs/cpp_native_backend_implementation_plan.md`（Stage 0–10）、`docs/dcc-compile-gxx-source-plan.md`（libstdc++/gcc/cp 特性缺口盘点）
 - 目标: 以 GCC 15.3.0 源码树作为**缺陷发现仪器**，把 C++ native 后端推进到"自身产物可链接、可与 g++ 产物互操作"，并给出到达"用 dcc 编译 gcc-15.3.0"所需的完整缺口清单

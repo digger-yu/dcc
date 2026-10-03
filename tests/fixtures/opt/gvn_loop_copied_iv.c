@@ -9,7 +9,7 @@
  * 同一根因的另一形态（P10 分块的产物形态，4 层嵌套 + `&&` 边界）在 -O2 得 0 而应 50。
  *
  * 判据：coalesce 的写入集合必须是**全函数**视角（含外层循环 step/cond、兄弟块、
- * switch 体），见 `ssa_gvn::FnScope::assigned`。
+ * switch 体），见 `ast_gvn::FnScope::assigned`。
  *
  * 通过: exit 0（期望值取自 gcc -O0 参照）
  */

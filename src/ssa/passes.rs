@@ -1,4 +1,4 @@
-// src/ssa_passes.rs - M16 优化 pass 集合
+// src/ssa/passes.rs - M16 优化 pass 集合
 //
 // 全部 pass 在新 SSA IR 上工作 (`crate::ssa`)。返回 `true` 表示该 pass 改了 IR,
 // 调度器 (`Pipeline::run`) 用来决定是否需要再跑一次上游 pass。
@@ -60,7 +60,7 @@ pub fn run_with_opts(func: &mut Function, level: u8, _strict_aliasing: bool) {
     // （拆块、改名、插轮转 phi），所以它先跑，后面的 pass 再在 kernel 上继续优化。
     //
     // 默认已接入：之前的两条实测缺陷（IndexStore kernel 实例越界写、链尾多累加一
-    // 轮）同源于「基名塌缩后的反依赖」，已由 `ssa_pipelining` 的发射序重排与
+    // 轮）同源于「基名塌缩后的反依赖」，已由 `ssa::pipelining` 的发射序重排与
     // `emitted_reads_match` 判定闭掉（详见 docs/ssa-pass-upgrade-plan.md §7.5）。
     // 二分定位仍可用：`DCC_SSA_OFF=pipe` 关掉本 pass。
     if !ssa_dbg_off("pipe") {
@@ -119,7 +119,7 @@ pub fn run_with_opts(func: &mut Function, level: u8, _strict_aliasing: bool) {
 /// 先把候选头按块名序收集完再逐个处理：落地会改 CFG（摘除 latch、往 preheader/exit
 /// 追指令），边遍历边改会读到失效的块序，而块序直接决定产物字节。
 pub fn run_pipelining(func: &mut Function) -> bool {
-    let res = crate::ssa_pipelining::Resources::default();
+    let res = crate::ssa::pipelining::Resources::default();
     let mut headers: Vec<String> = Vec::new();
     for name in crate::ssa::ordered_block_names(func) {
         if func.blocks[&name].phis.is_empty() {
@@ -134,7 +134,7 @@ pub fn run_pipelining(func: &mut Function) -> bool {
     for h in headers {
         // 每个循环都重新过一遍闸门：前一个循环的落地可能已改变了本循环的区域。
         // 计划里的 `lp` 就是分类结果，直接交给落地，避免两次分类不一致。
-        match crate::ssa_pipelining::plan_for_header_with(func, &h, &res) {
+        match crate::ssa::pipelining::plan_for_header_with(func, &h, &res) {
             Err(e) => {
                 // 「它没跑」与「它为什么没跑」在产物上完全一样，所以拒因也必须可查
                 // （否则只能靠猜形状，本模块的多轮修复就反复卡在这点上）。
@@ -144,9 +144,9 @@ pub fn run_pipelining(func: &mut Function) -> bool {
             },
             Ok(p) => {
                 if dump {
-                    eprint!("\n==== [P16] 计划 =====\n{}", crate::ssa_pipelining::dump_plan(func, &p));
+                    eprint!("\n==== [P16] 计划 =====\n{}", crate::ssa::pipelining::dump_plan(func, &p));
                 }
-                match crate::ssa_pipelining::apply_plan(func, &p.lp, &p.inst) {
+                match crate::ssa::pipelining::apply_plan(func, &p.lp, &p.inst) {
                     Ok(()) => {
                         if dump {
                             eprint!("==== [P16] 落地后 ====\n{}", crate::ssa::dump_function(func));
@@ -2212,7 +2212,7 @@ fn operand_uses_op(o: &Operand) -> Vec<String> {
 // =====================================================================
 
 /// 从终结符派生后继。**不得**读 `bb.succs`: `succs`/`preds` 是 SSA 构造时填的缓存,
-/// 任何改 terminator 的 pass 之后即为脏 (见 `src/ssa.rs::term_succs` 的同一说明)。
+/// 任何改 terminator 的 pass 之后即为脏 (见 `crate::ssa::cfg::term_succs` 的同一说明)。
 /// P19 会改 terminator, 因此所有新 pass 一律走终结符。
 fn succs_of(term: &Terminator) -> Vec<String> {
     match term {
@@ -2462,7 +2462,7 @@ enum ValKey {
 
 /// 全局值编号 (GVN)：在 SSA IR 上把「形状完全相同的计算」归一到同一个值。
 ///
-/// 与 AST 层的 `ssa_gvn` 不同, 这里能安全地跳块复用, 因为 SSA 名**不可变**:
+/// 与 AST 层的 `ast_gvn` 不同, 这里能安全地跳块复用, 因为 SSA 名**不可变**:
 /// `y = a + b` 与 `x = a + b` 里的 a/b 是同一个定义, 在任何使用点它们就是同一个值,
 /// 不存在 AST 名字模型里那种「a 后来被改了」的 kill 问题。
 /// 例外是内存读: 本 IR 没有 memory SSA, store 不进任何名字链 ⇒ 读的同形不同点
@@ -3328,7 +3328,7 @@ fn refresh_cfg_caches(func: &mut Function) {
 //      `docs/ssa-pass-upgrade-plan.md` §6/§8-A）；而流水自己的准入也**不依赖**它：
 //      嵌在任何循环里的循环一律不流水（`is_nested_in_other_loop`）。
 //   3. 本体已真写出来：依赖图 + RecMII/ResMII + epi-cyclic 模调度 + 三段切分 +
-//      peel/kernel/排空落地，在 `crate::ssa_pipelining`。两道可判定自检
+//      peel/kernel/排空落地，在 `crate::ssa::pipelining`。两道可判定自检
 //      （`InstancePlan::verify` 证 T 序与实例覆盖，`emitted_reads_match` 证基名
 //      塌缩下的发射序）不通过就不接入，拒因由 `DCC_PIPE_DUMP` 可查。
 //

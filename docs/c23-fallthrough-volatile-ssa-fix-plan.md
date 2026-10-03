@@ -1,5 +1,10 @@
 # DCC C23 [[fallthrough]] 诊断 和 SSA volatile 感知问题修复方案
 
+> **路径勘误（2026-10，SSA 目录化）**：本文里的 `ssa.rs:NNNN` / `ssa_passes.rs:NNNN` 旧路径与行号
+> **不改写**（当时的事实）。目录化后行号已全部失效，按名字反查：`collect_local_decls` 现在
+> `src/ssa/lower.rs`，`inst_is_side_effecting` 现在 `src/ssa/passes.rs`；`bb.local_quals` 等数据形态
+> 在 `src/ssa/ir.rs`。对照表见 [`docs/ssa-module-layout-plan.md` §10](./ssa-module-layout-plan.md)。
+
 ## 问题总览
 
 | 问题 | 当前状态 | 严重度 |
@@ -57,7 +62,7 @@
 
 ### 当前问题
 - 现状：
-  1. `collect_local_decls` ([ssa.rs:1516-1565](file:///root/dcc/src/ssa.rs#L1516-L1565)) 在 AST→SSA 时收集了局部变量的 `qualifiers` (`func.local_quals`)，重建时恢复。
+  1. `collect_local_decls` （旧位 `src/ssa.rs:1516-1565`，现为 `src/ssa/lower.rs`）在 AST→SSA 时收集了局部变量的 `qualifiers` (`func.local_quals`)，重建时恢复。
   2. 但是 SSA IR 层的 `Load`/`Store`/`IndexLoad`/`IndexStore`/`MemberLoad`/`MemberStore` 指令没有 volatile 标记，优化 pass 无法知道访问是否是 volatile 的。
   3. 当前优化还没有 DSE (dead store elimination) 或 load forwarding，所以暂时安全，但是“正确但脆弱”，未来启用这些优化后会错误消除 volatile 访问。
 
@@ -107,7 +112,7 @@
    - 在 load 转发/常量传播：不转发 volatile load，不合并多次访问。
    - 在 alias 分析：保持 volatile 访问的副作用，不消除。
 
-   参考 `inst_is_side_effecting` ([ssa_passes.rs:762-778](file:///root/dcc/src/ssa_passes.rs#L762-L778))：
+   参考 `inst_is_side_effecting` （旧位 `src/ssa_passes.rs:762-778`，现为 `src/ssa/passes.rs`）：
    ```rust
    InstKind::Load { is_volatile, .. } => is_volatile,
    InstKind::IndexLoad { is_volatile, .. } => is_volatile,

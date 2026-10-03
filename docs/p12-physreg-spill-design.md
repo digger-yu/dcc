@@ -1,5 +1,10 @@
 # P12 字面形态设计：位置进 IR、codegen 不再分配、真 SPILL/RELOAD
 
+> **路径勘误（2026-10，SSA 目录化）**：本文正文里的旧路径**不改写**（它们记的是当时的事实）。
+> 新位置：`src/ssa.rs` → `src/ssa/`（一分为十二）、`src/ssa_regalloc.rs` → `src/ssa/regalloc.rs`、
+> `src/ssa_passes.rs` → `src/ssa/passes.rs`、`ssa_gvn` → `src/ast_gvn.rs`。
+> 完整对照表与验收实测见 [`docs/ssa-module-layout-plan.md` §10](./ssa-module-layout-plan.md)。
+
 > **状态：设计完成，未开工。** 本文不是待办清单，而是"要不要做、真要做就一次做对"的
 > 实施设计。开工时机由 §9 的触发条件决定，不由日历决定。
 >

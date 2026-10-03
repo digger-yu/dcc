@@ -86,7 +86,7 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 | `_Generic` 指针精确匹配 | `tests/fixtures/c/generic_ptr.c`；按 pointee 匹配 |
 | C89 Digraphs | `<:`→`[` `:>`→`]` `<%`→`{` `%>`→`}` `%:`→`#` `%:%:`→`##`；词法分析器 (`tokens.rs`) 与预处理器 (`preproc.rs`) 双层识别；指令行 `%:define` 等价 `#define`；宏体 `%:%:` 等价 `##` token paste；字符串/字符字面量内不转换。测试: `tests/fixtures/c/c89_digraphs.c` + `c89_digraphs_compile_and_run` + `c89_digraphs_preprocess` |
 | C89 Trigraphs | `??=`→`#` `??(`→`[` `??/`→`\` `??)`→`]` `??'`→`^` `??<`→`{` `??!`→`|` `??>`→`}` `??-`→`~`；需 `-trigraphs` 启用；翻译阶段 1 (行续接前) 转换；字符串/字符字面量内不转换。测试: `tests/fixtures/c/c89_trigraphs.c` + `c89_trigraphs_compile_and_run` + `c89_trigraphs_preprocess` + `c89_trigraphs_not_in_strings` + `c89_trigraphs_disabled_by_default` |
-| C99 restrict 语义 | 解析 `restrict`/`__restrict__`/`__restrict` 限定符；`Param` 结构存储参数限定符；SSA `Function::param_quals` 记录参数限定符；别名分析 (`ssa_passes.rs::alias_analysis`) 将 restrict 参数放入独立 alias set，不与其他指针合并，保证不别名语义。测试: `tests/fixtures/c/c99_restrict.c` + `c99_restrict_compile_and_run` |
+| C99 restrict 语义 | 解析 `restrict`/`__restrict__`/`__restrict` 限定符；`Param` 结构存储参数限定符；SSA `Function::param_quals` 记录参数限定符；别名分析 (`src/ssa/passes.rs::alias_analysis`) 将 restrict 参数放入独立 alias set，不与其他指针合并，保证不别名语义。测试: `tests/fixtures/c/c99_restrict.c` + `c99_restrict_compile_and_run` |
 | C11 _Atomic 非基本类型 | `_Atomic struct S` / `_Atomic union U` 等非基本类型的 _Atomic 限定符支持；解析器正确解析并标记限定符，codegen 生成正确代码。测试: `tests/fixtures/c/c11_atomic_struct.c` + `c11_atomic_struct_compile_and_run` |
 | C11 _Noreturn 语义 | `_Noreturn` 函数限定符解析并标记函数为不返回；`FuncDecl::is_noreturn` 标志影响控制流分析；优化器利用该信息进行死代码消除。测试: `tests/fixtures/c/c11_noreturn.c` + `c11_noreturn_compile_and_run` |
 | 宏 `#` / `##` 字符串化 | `preproc` 单测 `stringify_collapses_*`；条件 token 拼接；`#` 操作符只转义 `"` 不转义 `\` (与 GCC 一致，内核 `__stringify(\reg)` 正确展开) |
@@ -526,7 +526,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 |------|------|
 | `-O0` always_inline | `tests/fixtures/c/always_inline.c` |
 | `-O1` 常量折叠 + 内联 | — |
-| `-O2` GVN/CSE/LICM/分支折叠 | `ssa_gvn.rs` + `loop_opt.rs` |
+| `-O2` GVN/CSE/LICM/分支折叠 | `ast_gvn.rs` + `loop_opt.rs` |
 | `-O3` 循环展开 + 向量元素循环向量化 | 小 trip≤4；VNNI dot-product 模式检测 (int16 `sum += a[i]*b[i]`), AVX2=16 lanes / AVX-512=32 lanes |
 | `-march=<name>` / `-mtune=<name>` / `-mcpu=<name>` | 微架构精确调优: x86-64-v2/v3/v4、native、sandybridge/haswell/skylake/icelake-server/sapphirerapids/granite-rapids；ARM cortex-a53/a72/a76/neoverse-n1/v1；`-march=native` 使用 CPUID 检测结果；`-mcpu=` ARM 等价 -march + -mtune |
 | `-Ofast` / `-ffast-math` / `-ffp-contract=` | `-Ofast` 等价 `-O3 -ffast-math`；`-ffast-math` 允许浮点重结合/倒数/非IEEE快速路径, 隐含 `-fno-strict-aliasing -fno-strict-overflow`；`-ffp-contract=fast\|on\|off\|default` 控制 FP 收缩 (FMA) 策略 |

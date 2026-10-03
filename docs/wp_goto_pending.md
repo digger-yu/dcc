@@ -1,5 +1,8 @@
 # G2：`goto` 跳到循环之后第二个标签 ⇒ `-O2/-O3` 静默错值 —— 定位与修复报告
 
+> **路径勘误（2026-10，SSA 目录化）**：本文里的 `src/ssa.rs` 旧路径与行号**不改写**（当时的事实）；
+> 该文件已拆为 `src/ssa/` 多个职责文件。对照表见 [`docs/ssa-module-layout-plan.md` §10](./ssa-module-layout-plan.md)。
+
 ## 0. 一句话根因
 
 `src/opt.rs::dce_block`（`-O2` 的 `eliminate_unreachable` pass 的内部实现）把「顶层

@@ -1,5 +1,10 @@
 # 工作包 LOOP —— 多出口循环的重建侧出口所有权设计
 
+> **路径勘误（2026-10，SSA 目录化）**：本文正文里的旧路径**不改写**（它们记的是当时的事实）。
+> 本包涉及的判据与发射器现在 `src/ssa/loop_exit.rs`（与 `src/ssa/rebuild.rs` 同源）；
+> `src/ssa.rs` → `src/ssa/`、`src/ssa_passes.rs` → `src/ssa/passes.rs`。
+> 完整对照表与验收实测见 [`docs/ssa-module-layout-plan.md` §10](./ssa-module-layout-plan.md)。
+
 负责人：LOOP 工作包。范围：`src/ssa.rs` 的 SSA→AST 结构化重建（`rebuild_bb` /
 `rebuild_cycle`）与它的准入判据 `has_multi_exit_cycle`。
 

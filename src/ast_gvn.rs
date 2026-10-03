@@ -1,6 +1,11 @@
-//! SSA 风格局部优化：拷贝传播、GVN/CSE、虚拟寄存器合并。
+//! src/ast_gvn.rs - AST 风格的局部优化：拷贝传播、GVN/CSE、虚拟寄存器合并。
 //!
-//! 在 AST 层工作，与 x86_64 栈槽后端配合：消除冗余纯表达式，
+//! 本模块在 **AST** 上工作（GVN on the AST），与 `crate::ssa::passes::gvn`（在 SSA IR 上做
+//! 值编号的那一套）是两套互不相干的实现：这里必须处理「名字后来被改写」的 kill 问题，
+//! 那里因为 SSA 名不可变才能安全地跳块复用。
+//! 名字里曾有 `ssa_` 前缀，属误导 —— 本模块从不碰 SSA IR —— 已于目录化 Phase 1 去掉。
+//!
+//! 与 x86_64 栈槽后端配合：消除冗余纯表达式，
 //! 合并等价的局部临时变量（类比 register coalescing）。
 
 use std::collections::{HashMap, HashSet};

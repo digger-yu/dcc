@@ -6,6 +6,7 @@
 #![allow(dead_code, unreachable_patterns, dropping_references)]
 
 pub mod ast;
+pub mod ast_gvn;
 #[cfg(test)]
 mod ast_tests;
 pub mod bootstrap;
@@ -41,10 +42,6 @@ pub mod riscv32;
 pub mod sanitizer;
 pub mod semantics;
 pub mod ssa;
-pub mod ssa_gvn;
-pub mod ssa_pipelining;
-pub mod ssa_passes;
-pub mod ssa_regalloc;
 pub mod static_locals;
 pub mod symbol;
 pub mod target;

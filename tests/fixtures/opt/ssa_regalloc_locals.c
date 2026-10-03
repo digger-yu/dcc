@@ -1,7 +1,7 @@
 /* P12 自动寄存器分配的执行级夹具：把「热变量住进 callee-saved 寄存器」这件事的
  * 每一条判据都放在同一份程序里，任何一条判据错都会立刻变成错值。
  *
- * 为什么必须有这份夹具（而不是只靠 ssa_regalloc 的单测）：单测看的是分配器的计划，
+ * 为什么必须有这份夹具（而不是只靠 ssa::regalloc 的单测）：单测看的是分配器的计划，
  * 而计划对了、后端把变量放到寄存器后**读写路径**对不对是另一件事 —— §7.15~§7.19 修
  * 的就是这类「分配结果进了绑定表，但某个消费者没读表」的静默错值。这里刻意同时包含：
  *
@@ -103,7 +103,7 @@ __attribute__((noinline)) static long kinds(long n) {
 
 int main(void) {
     /* 期望值全部取 gcc 实测（各档位输出相同）。嵌套函数按帧偏移访问外层变量那条
-     * 判据由 `ssa_regalloc::tests::function_with_nested_function_is_untouched` 钉住：
+     * 判据由 `ssa::regalloc::tests::function_with_nested_function_is_untouched` 钉住：
      * 这里不放嵌套函数，因为嵌套函数在 -O2 起另有既存缺陷（链接期
      * `undefined reference to inner`），会把两份债混成一条。 */
     gs[0] = escaped(6);

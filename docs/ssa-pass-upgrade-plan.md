@@ -1,5 +1,10 @@
 # P2-1 SSA Pass 基础设施完整升级方案
 
+> **路径勘误（2026-10，SSA 目录化）**：本文正文里的旧路径**不改写**（它们记的是当时的事实）。
+> 新位置：`src/ssa.rs` → `src/ssa/`（一分为十二）、`src/ssa_passes.rs` → `src/ssa/passes.rs`、
+> `src/ssa_pipelining.rs` → `src/ssa/pipelining.rs`、`src/ssa_regalloc.rs` → `src/ssa/regalloc.rs`、
+> `ssa_gvn` → `src/ast_gvn.rs`。完整对照表与验收实测见 [`docs/ssa-module-layout-plan.md` §10](./ssa-module-layout-plan.md)。
+
 > **本方案的完成度表已按实测修正。**下表是写方案时的声称值与实测值的差异；
 > 执行结果见末尾「执行记录」一节。
 
@@ -456,7 +461,8 @@ SSA 管线。为把这件事做到而不是「拔掉闸门留着错值」，本�
 `sed -i "1,${L}d"` 想删掉未完成的「落地」段，`1,${L}d` 删的却是落地**之前**的全部
 代码，即 P16 的循环识别、三段切分、实例计划、统一闸门与它们的单测全被删掉
 （约 1596 行）。缓存与会话转录都救不回来（工具输出缓存只存 stdout，转录里的代码
-已被压缩掉）。因此当前树里的 [src/ssa_pipelining.rs](file:///root/dcc/src/ssa_pipelining.rs)
+已被压缩掉）。因此当前树里的 [src/ssa/pipelining.rs](file:///root/dcc/src/ssa/pipelining.rs)
+（旧路径 `src/ssa_pipelining.rs`）
 **只有地基**：资源/延迟模型、依赖图、`res_mii`、`rec_mii`、`earliest_times`、
 `edges_satisfied`、`modulo_schedule`，外加 7 个重建并全绿的单测。产物不受影响
 （无人调用它）。（现状见下面 §7.1：识别/切分/闸门已重建，只剩落地。）
@@ -2702,7 +2708,7 @@ fixdep 等）全绿。开局那 1 条红（`seg_qualifier_*` 自检 rc=-1）现�
 接入过程中又被两个独立缺陷卡住，均已修（见 §8）。
 
 **P16 软件流水：分析与调度层已完成并被单测锁住；IR 落地待做。**新文件
-[src/ssa_pipelining.rs](file:///root/dcc/src/ssa_pipelining.rs)：
+[src/ssa_pipelining.rs](file:///root/dcc/src/ssa/pipelining.rs)：
 
 | 组成 | 内容 |
 |---|---|

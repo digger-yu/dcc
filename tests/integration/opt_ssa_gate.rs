@@ -167,7 +167,7 @@ fn c_array2d_global_stride_matches_gcc_at_all_levels() {
 ///
 /// 曾经默认关闭的两条实测缺陷（kernel 内 store 实例越界写、链尾多累加一轮）同源于
 /// 一个根因：SSA→AST 重建把同基名塌缩成一个槽，而模调度的 T 序模型不表达这种
-/// 反依赖。现在由 `ssa_pipelining::emitted_reads_match` 在发射序上过一道判定，排不出
+/// 反依赖。现在由 `ssa::pipelining::emitted_reads_match` 在发射序上过一道判定，排不出
 /// 合法序的循环直接拒收（丢收益，不出错值）。
 ///
 /// 这三条夹具的分工：
@@ -253,8 +253,8 @@ fn ssa_pipe_default_on_changes_the_product() {
 
 // ===== P12：SSA 层寄存器分配 =====
 //
-// `ssa_regalloc` 把热变量灌进后端既有的绑定表（`VarDecl::register_name`）。分配器
-// 自己的判据由 src/ssa_regalloc.rs 的 13 条单测钉住；这里钉的是另外两件事：
+// `ssa::regalloc` 把热变量灌进后端既有的绑定表（`VarDecl::register_name`）。分配器
+// 自己的判据由 src/ssa/regalloc.rs 的 13 条单测钉住；这里钉的是另外两件事：
 // 判据在真实管线里成立（执行级夹具），以及**结果真的到达了产物**（§7.5 的教训：
 // pass 接在管线里但产物逐字节相同，说明它根本没生效，而单测全绿看不出来）。
 
