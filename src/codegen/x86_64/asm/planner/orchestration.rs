@@ -34,14 +34,31 @@ pub struct AsmRegisterPlanner {
     input_xmm: HashSet<u8>,   // XMM registers used by inputs (for early-clobber check)
     clobber_gp: HashSet<u8>,  // GP registers marked as clobbered (excluded from alloc)
     clobber_xmm: HashSet<u8>, // XMM registers marked as clobbered (excluded from alloc)
+    /// 本条 asm **实际发出去过**的 GP 号（不含构造时进表的 clobber 与已有主人）。
+    /// 有了它，调用方才能把 callee-saved 那几个登记回占用真源（`RegBank::claim`）；
+    /// 只看 `used_gp` 不行，它里面混着传进来的排除集，区分不了「谁发的」。
+    chosen_gp: HashSet<u8>,
+    /// 兜底是否真的发生过：发生过就说明有操作数**复用**了同一个号（值会互相盖）。
+    /// 调用方拿它把这种情形报成 `impossible constraint`（与 legacy `q` 池耗空那条同口径），
+    /// 而不是静默交出一个错值。
+    exhausted_gp: bool,
 }
 
 impl AsmRegisterPlanner {
     /// Register pool constants for x86_64
     ///
-    /// 通用 GP 池：rax, rcx, rdx, rsi, rdi, r8-r11 —— 全部是 caller-saved，
-    /// 因此不含 callee-saved 的 rbx/r12-r15（那四个由表达式的溅出池与变量绑定独占）。
-    const GP_POOL: [u8; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
+    /// 通用 GP 池：前九个是 caller-saved（rax, rcx, rdx, rsi, rdi, r8-r11），后面四个是
+    /// callee-saved（rbx, r12, r14, r15）。为什么把 callee-saved 也纳进来：**过去只有九个
+    /// 可选，操作数多于九个时 `alloc_gp` 会回退到「复用已发出去的号」**（实测十个 `"=r"`
+    /// 输出得 `s=64`，gcc 是 55：第十个输出落在了第一个的家上），那是静默错值。
+    /// 取用顺序仍是「先 caller-saved」，所以只有真的不够时才动 callee-saved；而一旦动了，
+    /// 调用方必须把那个号登记回 `RegBank`（见 `Codegen::own_asm_operand_gp`：序言保存不得被
+    /// 改成 nop，溅出池也不得再发同一个号）。`r13`/`rbp` 永远不进池：它们是帧基址与帧指针。
+    ///
+    /// 这一条以前记的是「扩池已被实测否决」（只扩池仍错、再补登记更错）：那两组数字是在
+    /// `pick` 还会忽略 `used` 集合、且 `owned_gp()` 还不是构造参数时测的；那两个前提修好后
+    /// （同一句 asm 内不复用 + 已有主人不从池里发）扩池在本轮实测里是有效的。
+    const GP_POOL: [u8; 13] = [0, 1, 2, 6, 7, 8, 9, 10, 11, 3, 12, 14, 15];
 
     /// Legacy GP pool for q/Q constraints (allows quadword subregister usage).
     ///
@@ -84,7 +101,21 @@ impl AsmRegisterPlanner {
             input_xmm: HashSet::new(),
             clobber_gp: clobber_gp.clone(),
             clobber_xmm: clobber_xmm.clone(),
+            chosen_gp: HashSet::new(),
+            exhausted_gp: false,
         }
+    }
+
+    /// 本条 asm 里是否出现过「GP 池已空，只能复用已发出去的号」。
+    pub fn gp_exhausted(&self) -> bool {
+        self.exhausted_gp
+    }
+
+    /// 本条 asm 发出去过的 GP 号（升序，确定序）。
+    pub fn chosen_gp(&self) -> Vec<u8> {
+        let mut v: Vec<u8> = self.chosen_gp.iter().copied().collect();
+        v.sort_unstable();
+        v
     }
 
     /// Allocate a general-purpose register using round-robin strategy
@@ -99,19 +130,19 @@ impl AsmRegisterPlanner {
     /// 共享寄存器：实测六个 `"=q"` 输出修前得 `six=297 o0=66`，修后与 gcc 一致
     /// （`six=231 o0=11`）。
     ///
-    /// 为什么不把池子扩到 callee-saved（rbx/r12/r14/r15）：试过，**实测否决**。
-    ///   * 只扩池：10 个 `"=r"` 输出的结果仍是错的（`s=64`，gcc 是 `s=55`）；
-    ///   * 再补上「asm 期间独占这些号」的登记（`reg_allocated` + `callee_saved_used`）：
-    ///     结果更糟（`s=10`；七个 `"=q"` 输出变成 `77 0 0 0 0 0 0`）。
-    ///
-    /// 原因是还没查清的暂存约定：操作数求值、写回与表达式求值之间对哪些寄存器可用的
-    /// 假设有重叠，扩池会打破它（病灶未定位，因此这条不是「再改两行」就能收的）。
-    /// 结论：操作数多于 9 个 GP 号时仍会复用同一个号，这是**已知的残余错值**，
-    /// 连同实测记录在 docs/ssa-pass-upgrade-plan.md；要真解决得先重写 asm 操作数的
-    /// 暂存约定。
+    /// 下面那条 `unwrap_or_else` 仍是**兜底**：池子（含 callee-saved 四个）全被占或全被
+    /// clobber 时它还会复用同一个号。那个情形下 GCC 会直接报
+    /// `asm operand has impossible constraints`，所以这条兜底是「宁可编下去也不报错」的
+    /// 旧选择，它的残留风险由池扩大到 13 个号后已大幅降低；彻底解决要重写操作数暂存约定
+    /// （设计 §11.17 里记的 Phase 6.1 另一半），不能拿兜底当常态。
     pub fn alloc_gp(&mut self, seed: usize, use_kind: AsmRegUse) -> u8 {
-        let reg = Self::pick(&Self::GP_POOL, &self.used_gp, &self.clobber_gp, seed, None)
-            .unwrap_or_else(|| Self::GP_POOL[seed % Self::GP_POOL.len()]);
+        let picked = Self::pick(&Self::GP_POOL, &self.used_gp, &self.clobber_gp, seed, None);
+        if picked.is_none() {
+            // 池（13 个号）全被占或全被 clobber：这一步仍会复用同号，但这件事**不得静默**：
+            // 登记下来交给调用方点名（见 `gp_exhausted`）。
+            self.exhausted_gp = true;
+        }
+        let reg = picked.unwrap_or_else(|| Self::GP_POOL[seed % Self::GP_POOL.len()]);
         self.reserve_gp(reg, use_kind);
         reg
     }
@@ -127,7 +158,7 @@ impl AsmRegisterPlanner {
     /// Some((reg_number, is_fixed)) if a register was allocated, None otherwise
     ///
     /// # Constraint Mapping
-    /// - `a/b/c/d/S/D` → Fixed registers rax/rbx/rcx/rbx/rsi/rdi
+    /// - `a/b/c/d/S/D` → Fixed registers rax/rbx/rcx/rdx/rsi/rdi
     /// - `q/Q` → Any register from legacy pool (allows 32/64-bit aliasing)
     /// - `=r/+r/&r` → Dynamic allocation via `alloc_gp()` (returns None here)
     /// - `{cc}`, `@cc*` → Condition codes (returns None)
@@ -240,6 +271,7 @@ impl AsmRegisterPlanner {
     /// This prevents future allocations from reusing the same register.
     pub fn reserve_gp(&mut self, reg: u8, use_kind: AsmRegUse) {
         self.used_gp.insert(reg);
+        self.chosen_gp.insert(reg);
         if matches!(use_kind, AsmRegUse::Input) {
             self.input_gp.insert(reg);
         }

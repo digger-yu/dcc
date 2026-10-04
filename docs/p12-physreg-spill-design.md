@@ -1287,9 +1287,45 @@ F1/F2（它们只在 -O0/-O1 失控）。
 1. **号→名也有三份**：`abi/tyclass.rs:375 gp_reg_name`（0..15，越界静默返 "rax"）、
    `codegen/asm_event.rs:660-690` 的四张宽度名表（8/16/32/64 位各一张）。它们的服务对象
    不同（AT&T 文本生成 vs 诊断文案），合之前得先确认“越界返 rax”这个兼容行为有没有人在依赖。
-2. **asm 操作数暂存约定重写**（§7.15 记录的残余错值：GP 号超过 9 个时
-   `asm/planner/orchestration.rs:112-116` 会 `unwrap_or_else` 复用已发出去的号）。
-   这是真正的待做项，且与 caller-saved 池相干（同一个规划器）。
+2. ~~**asm 操作数暂存约定重写**~~ —— **本轮已做完关键的一半**（见 §11.18）：GP 池从 9 个
+   caller-saved 号扩到含 callee-saved 的 13 个，动到 callee-saved 就登记回 `RegBank`，
+   池真空了则点名。剩下的半件是更根本的那条：操作数用 caller-saved 号时，与表达式求值
+   对 rax/rcx/rdx 的硬编码假设仍有重叠（那是「结果恒在 %rax」的同一条债，与 caller-saved
+   池那个独立立项相干）。
+
+### 11.18 asm 操作数落进 callee-saved：扩池 + 登记回占用真源（已完工，产物变 3 行）
+
+`asm/planner/orchestration.rs` 过去只给 9 个 caller-saved 号，`alloc_gp` 找不到空闲号时
+**静默复用已发出去的号**。两组实测数字：
+
+| 形状 | 修前（dcc） | gcc | 修后（dcc） |
+|------|-------------|-----|-------------|
+| 10 个 `"=r"` 输出 | `s=64`（第十个落在第一个的家上） | `s=55` | `s=55`（-O0/-O2 都是） |
+| 16 个 `"=r"` 输出 | 静默复用同号、编下去 | 报 `asm operand has impossible constraints` | 报 `impossible constraint: inline asm has more GP operands than free registers`，退出码 1 |
+| `"a"/"b"` 固定约束（操作数直接住进 %rbx）+ 调用者拿 %rbx 存值 | `r1=-1`（调用者的 %rbx 被毁） | `r1=300` | `r1=300`（四档都是） |
+
+第三条是那组「扩池被实测否决」旧记录的真原因：**扩池本身不是问题，缺的是登记**。
+callee-saved 做操作数时必须同时成立两件事 —— 序言那条保存不得被 `patch_callee_saves`
+改成 nop，以及 `alloc_temp` 不得再把同一个号当溅出槽发出去 —— 两件都是 `RegBank::claim`
+一次做完的。旧记录里「再补登记反而更糟（`s=10`、七个 `"=q"` 变 `77 0 0 0 0 0 0`）」是在
+`pick` 还会忽略 `used` 集合、且 `owned_gp()` 还不是构造参数时测的；那两个前提修好后（同一
+句 asm 内不复用 + 已有主人不从池里发）本轮实测扩池是有效的，所以旧结论就地订正。
+
+做法：规划器记下自己实际发出过哪些号（`chosen_gp`）与是否出现过池空（`exhausted_gp`），
+`Codegen::own_asm_operand_gp` 把其中属于池的号 claim 掉；调用时机是输出/输入两个循环的
+**每轮开头**与整表建完之后（只在末尾登记的话，输入求值期间 `alloc_temp` 还看不到这些号
+已被占）。caller-saved 的号不进 claim：它们本来就不在溅出池里，钉住它们只会让后续每条 asm
+可选的号逐步耗空。取用顺序仍是先 caller-saved，所以只有真的不够时才动 callee-saved。
+
+**产物变化**：三档 873 行里变 **3 行** —— `tests/fixtures/c/bootstrap_selftest.c` 的 -O0/-O2/-O3
+（就是那个 `"b"` 固定约束的夹具：现在序言保留 `mov %rbx,-0x10(%r13)`，以前它被改成 nop）。
+逐行核过：该夹具四档与 gcc 同为“ALL 14 TEST GROUPS PASSED”。其余 870 行逐字节不变。
+新基线 `hash_p61b.txt`。
+
+**常驻用例**：`asm_operand_in_callee_saved_keeps_the_prologue_save`（夹具
+`tests/fixtures/asm/asm_operand_callee_saved.c`：固定约束 + 十个输出 + 六个 `"=q"` 的反向对照），
+四档逐档与 gcc 对照 + 产物级「用过 %rbx 做操作数就必须真的保存它」。**退回就红**实测：把
+`own_asm_operand_gp` 短路后重建，该用例在 `-O0` 就失败（`r1=-1`，gcc 是 300）。
 
 
 

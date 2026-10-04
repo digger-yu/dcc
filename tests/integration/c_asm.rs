@@ -730,6 +730,34 @@ fn reserved_frame_registers_are_rejected_not_silently_dropped() {
     );
 }
 
+/// 内联 asm 的操作数落进 callee-saved 号时，那个号必须登记回占用真源（Phase 6.1）：
+/// 否则序言那条保存会被 `patch_callee_saves` 改成 nop，本函数毁掉**调用者**存在 %rbx 里的
+/// 值（固定约束 `"b"` 这条通路）；而操作数多于九个 caller-saved 号时，旧实现会「复用已发出
+/// 的号」（十个 `"=r"` 输出实测得 64，第十个落在第一个的家上）。
+///
+/// 四档逐档与 gcc 对照（只跑一档会漏：固定约束那条在 -O0 就错）。产物级判据钉住
+/// 「asm 用过 callee-saved ⇒ 序言必须保留那条保存」而不是去看保存了多少字节。
+#[test]
+fn asm_operand_in_callee_saved_keeps_the_prologue_save() {
+    let source = include_str!("../fixtures/asm/asm_operand_callee_saved.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("asm-op-callee-saved", source, &[flag]),
+            0,
+            "{flag}: asm 操作数踩了 callee-saved 却没保存（或多了输出就复用同号）"
+        );
+    }
+    let (build, asm_text) = run_asm_output_test_flags("asm-op-callee-saved-asm", source, "-O0");
+    assert!(build.status.success(), "stderr: {}", String::from_utf8_lossy(&build.stderr));
+    let f = extract_function_body(&asm_text, "asm_add_b");
+    assert!(!f.is_empty(), "asm_add_b 应在产物里（否则下面的判据是空跑）");
+    assert!(
+        f.contains("mov %rbx, -16(%r13)"),
+        "操作数住进 %rbx 的函数必须真的保存它；这句被 patch_callee_saves 改成 nop 就等于\n\
+         本函数毁掉调用者的 %rbx（实测：调用方跨过这个调用后 v 不再是 1000）：\n{f}"
+    );
+}
+
 /// 声明「住在寄存器里」与 `__attribute__((cleanup))` 必须在**每一条**声明通路上都生效：
 /// `for` 的 init、语句表达式 `({...})`、带标签的块。本轮实测的四条静默失效：
 ///   * `for (register long i asm("rbx") = 0; i < n; i++)` ⇒ 条件读 %rbx 而 `i++` 写栈槽，

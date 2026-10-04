@@ -70,6 +70,33 @@ impl Codegen {
         !core.contains('{') && core.chars().any(|c| c == 'q' || c == 'Q')
     }
 
+    /// 本条 asm 实际用过的 callee-saved 号必须登记回占用真源（P12 Phase 6.1）。
+    ///
+    /// GP 池现在含 rbx/r12/r14/r15：操作数多于 9 个 GP 号时，过去会**静默复用同一个号**
+    /// （实测十个 `"=r"` 输出得 `s=64`，gcc 是 55：第十个输出落在了第一个的家上）。
+    /// 而 callee-saved 拿来做操作数，有两件事必须同时成立：
+    ///   (a) 序言那条保存不得被 `patch_callee_saves` 改成 nop，否则本函数毁掉调用者存在
+    ///       %rbx 里的值（§7.15 实测过同一族：修前 `caller_holds_rbx` 得 1500，gcc 是 500）；
+    ///   (b) 表达式溅出池（`alloc_temp`）不得再把同一个号发出去，否则会盖掉已就位的操作数。
+    /// `RegBank::claim` 一次做完这两件（它置的就是那两个位）。
+    ///
+    /// caller-saved 的号不进 claim：它们本来就不在溅出池里，钉住它们只会让后续每条 asm
+    /// 可选的号逐步耗空。
+    ///
+    /// 调用时机是**输出操作数分配完之后**与**整张表建完之后**各一次（幂等）：只在末尾登记
+    /// 的话，输入操作数求值期间 `alloc_temp` 还看不到这些号已被占——那就是 (b) 的窗口。
+    pub(crate) fn own_asm_operand_gp(&mut self, planner: &AsmRegisterPlanner) {
+        for reg in planner.chosen_gp() {
+            if crate::codegen::x86_64::abi::regbank::RegBank::pool_for_bank(
+                crate::location::RegBank::Gp,
+            )
+            .contains(&reg)
+            {
+                self.reg_bank.claim(reg);
+            }
+        }
+    }
+
     pub(crate) fn build_asm_operand_map(
         &mut self,
         outputs: &[Expr],
@@ -142,6 +169,9 @@ impl Codegen {
 
         // ===== 处理 outputs =====
         for (op_idx, op) in outputs.iter().enumerate() {
+            // 上一轮挑中的 callee-saved 号必须先登记，再求值本操作数：否则这次求值里
+            // `alloc_temp` 可能把同一个号再发出去（见 `own_asm_operand_gp` 的 (b)）。
+            self.own_asm_operand_gp(&planner);
             let raw = output_constraints
                 .get(op_idx)
                 .map(String::as_str)
@@ -351,6 +381,8 @@ impl Codegen {
 
         // ===== 处理 inputs =====
         for (op_idx, op) in inputs.iter().enumerate() {
+            // 同上：输入求值之前先把已挑中的 callee-saved 操作数号登记掉。
+            self.own_asm_operand_gp(&planner);
             let raw = input_constraints
                 .get(op_idx)
                 .map(String::as_str)
@@ -731,6 +763,15 @@ impl Codegen {
 
         // 把 meta 转成 AsmOpBinding
         bindings.clear();
+        self.own_asm_operand_gp(&planner);
+        // GP 池（含 callee-saved 四个）全被占时 `alloc_gp` 只能复用已发出去的号，那是静默
+        // 错值；点名它（与 legacy `q` 池耗空那条同一口径），而不是把一个确定会盖值的
+        // 分配交出去。
+        if planner.gp_exhausted() {
+            self.asm_reject(
+                "impossible constraint: inline asm has more GP operands than free registers",
+            );
+        }
         for (i, (reg, xmm_w, is_out, is_mem, flags)) in meta.iter().enumerate() {
             let _ = i;
             bindings.push(AsmOpBinding {
