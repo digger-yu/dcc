@@ -16,6 +16,13 @@ pub mod layout;
 // regbank.rs 是「哪个物理寄存器被占着」的唯一真源（Phase 1，见
 // docs/p12-physreg-spill-design.md §3 H4 / §7 Phase 1）。
 pub mod regbank;
+// regnames.rs 是「寄存器名字 → 号/位宽」的唯一名表（Phase 6.1 的第一半）。以前有三份：
+// `emit/func_setup.rs::parse_reg_name`（register asm / clobber 用）与 `emit/expr/utils.rs`、
+// `asm/expansion.rs` 两份逐字相同的 `parse_reg_name_bits`。三份表各自演化就会漂移，
+// 而漂移的具体形状已经实测到过：`%r13` 一类的写法在一处认得、另一处不认得
+// （`register asm("r13")` 在 -O0 照做、在 -O2 静默降级）。接受哪种写法（`%` 前缀、
+// 大写、APX）现在是表数据的一个维度，不是散在调用点的 if。
+pub(crate) mod regnames;
 
 // Note: Internal helper functions remain private in their modules
 // They are accessed via qualified paths like abi::tyclass::abi_classes

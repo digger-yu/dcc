@@ -41,9 +41,12 @@ impl Codegen {
     /// 经过那个 `pop`。所以必须在函数入口就知道这件事（H1），不然第一个表达式已经把值
     /// 放进了那个号。
     ///
-    /// 判据本身只有一份（`crate::ast_asm::escaping_asm_clobbers`）：分配器用同一个事实决
-    /// 定「变量的家不得放这些号」（`ssa::regalloc::plan_for`）。两处各自写一遍遍历就会
-    /// 漂移，而漂移的方向就是静默错值。
+    /// 判据本身只有一份（`crate::ast_asm::escaping_asm_clobbers`）。分配器这一侧今天**不需要**
+    /// 再读它：带 `Label`/`AsmGoto` 的函数根本进不了 SSA（`ssa::structure::is_structured`），
+    /// 所以一个号也不会被自动绑到这些号上 —— 那条前提由用例
+    /// `ssa::regalloc::tests::escaping_asm_functions_do_not_reach_the_allocator` 钉住；
+    /// 它一变红，补判据的位置就只可能在本函数与 `plan_for` 这两处。两处各自写一遍
+    /// 遍历就会漂移，而漂移的方向就是静默错值。
     pub fn ban_escaping_asm_regs(&mut self, body: Option<&crate::ast::Block>) {
         let Some(b) = body else { return };
         for name in crate::ast_asm::escaping_asm_clobbers(b) {
@@ -67,43 +70,17 @@ impl Codegen {
         }
     }
 
+    /// 用户写的寄存器文本名 → 号。名字表只有一份（`abi/regnames.rs`）：本函数以前是
+    /// 三张同事实表里的那一张（它额外认识 APX r16-r31，并接受 `%` 前缀与大写），
+    /// 现在保留同样的接受口径，只把「哪个名字是哪个号」的事实交给唯一名表。
+    /// 接受集的分寸（哪些写法有 `%` 形态）由表里的 `percent_ok` 逐条描述，
+    /// 所以合并不扩大也不缩小语言。
     pub fn parse_reg_name(name: &str) -> Option<u8> {
-        match name.to_lowercase().as_str() {
-            "al" | "ah" | "ax" | "eax" | "rax" | "%rax" | "%eax" | "%ax" => Some(0),
-            "bl" | "bh" | "bx" | "ebx" | "rbx" | "%rbx" | "%ebx" | "%bx" => Some(3),
-            "cl" | "ch" | "cx" | "ecx" | "rcx" | "%rcx" | "%ecx" | "%cx" => Some(1),
-            "dl" | "dh" | "dx" | "edx" | "rdx" | "%rdx" | "%edx" | "%dx" => Some(2),
-            "sil" | "si" | "esi" | "rsi" | "%rsi" | "%esi" | "%si" => Some(6),
-            "dil" | "di" | "edi" | "rdi" | "%rdi" | "%edi" | "%di" => Some(7),
-            "spl" | "sp" | "esp" | "rsp" | "%rsp" | "%esp" | "%sp" => Some(4),
-            "bpl" | "bp" | "ebp" | "rbp" | "%rbp" | "%ebp" | "%bp" => Some(5),
-            "r8" | "r8d" | "r8w" | "r8b" | "%r8" => Some(8),
-            "r9" | "r9d" | "r9w" | "r9b" | "%r9" => Some(9),
-            "r10" | "r10d" | "r10w" | "r10b" | "%r10" => Some(10),
-            "r11" | "r11d" | "r11w" | "r11b" | "%r11" => Some(11),
-            "r12" | "r12d" | "r12w" | "r12b" | "%r12" => Some(12),
-            "r13" | "r13d" | "r13w" | "r13b" | "%r13" => Some(13),
-            "r14" | "r14d" | "r14w" | "r14b" | "%r14" => Some(14),
-            "r15" | "r15d" | "r15w" | "r15b" | "%r15" => Some(15),
-            // APX EGPR (Extended General Purpose Registers) r16-r31
-            "r16" | "r16d" | "r16w" | "r16b" | "%r16" => Some(16),
-            "r17" | "r17d" | "r17w" | "r17b" | "%r17" => Some(17),
-            "r18" | "r18d" | "r18w" | "r18b" | "%r18" => Some(18),
-            "r19" | "r19d" | "r19w" | "r19b" | "%r19" => Some(19),
-            "r20" | "r20d" | "r20w" | "r20b" | "%r20" => Some(20),
-            "r21" | "r21d" | "r21w" | "r21b" | "%r21" => Some(21),
-            "r22" | "r22d" | "r22w" | "r22b" | "%r22" => Some(22),
-            "r23" | "r23d" | "r23w" | "r23b" | "%r23" => Some(23),
-            "r24" | "r24d" | "r24w" | "r24b" | "%r24" => Some(24),
-            "r25" | "r25d" | "r25w" | "r25b" | "%r25" => Some(25),
-            "r26" | "r26d" | "r26w" | "r26b" | "%r26" => Some(26),
-            "r27" | "r27d" | "r27w" | "r27b" | "%r27" => Some(27),
-            "r28" | "r28d" | "r28w" | "r28b" | "%r28" => Some(28),
-            "r29" | "r29d" | "r29w" | "r29b" | "%r29" => Some(29),
-            "r30" | "r30d" | "r30w" | "r30b" | "%r30" => Some(30),
-            "r31" | "r31d" | "r31w" | "r31b" | "%r31" => Some(31),
-            _ => None,
-        }
+        crate::codegen::x86_64::abi::regnames::lookup_reg_name(
+            name,
+            &crate::codegen::x86_64::abi::regnames::NAME_FORMS_USER,
+        )
+        .map(|e| e.num)
     }
 
     /// 回填本函数序言/尾声的 callee-saved 保存/恢复指令.
