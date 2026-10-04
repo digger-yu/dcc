@@ -181,6 +181,7 @@ fn simple_function_builds_ssa() {
                     visibility: None,
                     is_unused: false,
                     register_name: None,
+                    home: None,
                     cleanup_fn: None,
                     is_thread_local: false,
                     no_sanitize: vec![],
@@ -517,8 +518,8 @@ fn eh_pads_are_never_loop_members_or_continuations() {
     let latch = latches[0].clone();
     assert!(body.contains(&latch), "latch {latch} 本应在 body 里");
 
-    // 把 latch 标成落地垫块：它不得再被算进循环结构。
-    let mut marked = func.clone();
+    // 把 latch 标成落地垫块：它不得再被算进循环结构（副本上做，走显式 `fork()`）。
+    let mut marked = func.fork();
     marked.eh_unwind_blocks = vec![latch.clone()];
     if let Some((l2, b2)) = loop_shape(&marked, &header, &doms) {
         assert!(

@@ -118,6 +118,15 @@ pub fn rebuild_block(func: &Function) -> Block {
         decl_names.push(name.clone());
     }
 
+    // D3 / Phase 3.4：分裂出的真局部也必须声明（它们不在 `original_locals` 里）。
+    // 表由 `regalloc` 算一次存进 `func.local_splits`，重建与交付读同一个答案；
+    // 今天这张表恒空（同基名的版本同一个家），所以产物逐字节不变。
+    for (ast_name, _base, _) in func.local_splits.new_locals() {
+        if !decl_names.contains(ast_name) {
+            decl_names.push(ast_name.clone());
+        }
+    }
+
     for name in &decl_names {
         if param_names.contains(name) {
             continue;
@@ -127,18 +136,22 @@ pub fn rebuild_block(func: &Function) -> Block {
             continue;
         }
         // Use the stored type from local_types if available, otherwise try to infer from instructions
-        let ty = func.local_types.get(name).cloned().unwrap_or_else(|| {
-            all_def_types.get(name).cloned().unwrap_or_else(|| {
-                func.blocks
-                    .values()
-                    .flat_map(|bb| bb.insts.iter())
-                    .find_map(|inst| {
-                        inst.dest
-                            .as_ref()
-                            .filter(|d| &d.base == name)
-                            .map(|d| d.ty.clone())
-                    })
-                    .unwrap_or(Type::Int)
+        // 分裂出的局部优先从 `local_splits` 拿自己的类型：下面的两条退路都只认基名，
+        // 拿不到就会退成 `Type::Int`（按 4 字节分配栈槽）—— 静默宽度错。
+        let ty = func.local_splits.type_of_local(name).unwrap_or_else(|| {
+            func.local_types.get(name).cloned().unwrap_or_else(|| {
+                all_def_types.get(name).cloned().unwrap_or_else(|| {
+                    func.blocks
+                        .values()
+                        .flat_map(|bb| bb.insts.iter())
+                        .find_map(|inst| {
+                            inst.dest
+                                .as_ref()
+                                .filter(|d| &d.base == name)
+                                .map(|d| d.ty.clone())
+                        })
+                        .unwrap_or(Type::Int)
+                })
             })
         });
         // 保留原始类型限定符 (volatile/const/restrict),
@@ -164,6 +177,9 @@ pub fn rebuild_block(func: &Function) -> Block {
             visibility: None,
             is_unused: false,
             register_name: None,
+            // 家不由重建写：位置表在 `rebuild_block` **之后**才由 regalloc 建好
+            // （它的准入判据要扫重建后的体），所以唯一写入点是 `apply_bindings`。
+            home: None,
             cleanup_fn: None,
             is_thread_local: false,
             no_sanitize: vec![],
@@ -217,7 +233,7 @@ fn push_inst_stmt(inst: &Inst, bb_name: &str, cx: &mut RebuildCtx<'_>, out: &mut
         cx.env.insert(sel.name(), sel.clone());
         let mk_ident = |v: &SsaVar| Expr::Ident {
             name: crate::ast::Ident {
-                name: v.base.clone(),
+                name: func.local_splits.ast_name(v),
                 span: v.span.clone(),
             },
             span: v.span.clone(),
@@ -253,7 +269,8 @@ fn push_inst_stmt(inst: &Inst, bb_name: &str, cx: &mut RebuildCtx<'_>, out: &mut
             op: crate::ast::BinOp::Add,
             l: Box::new(Expr::Ident {
                 name: crate::ast::Ident {
-                    name: d.base.clone(),
+                    // 赋值左端用版本自己的局部名（否则读写会落到不同变量上）
+                    name: func.local_splits.ast_name(d),
                     span: d.span.clone(),
                 },
                 span: d.span.clone(),
@@ -1493,7 +1510,8 @@ fn emit_rebuild_inst(
             op: crate::ast::BinOp::Add,
             l: Box::new(Expr::Ident {
                 name: crate::ast::Ident {
-                    name: d.base.clone(),
+                    // 赋值左端用版本自己的局部名（否则读写会落到不同变量上）
+                    name: func.local_splits.ast_name(d),
                     span: d.span.clone(),
                 },
                 span: d.span.clone(),

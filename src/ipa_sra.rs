@@ -697,6 +697,7 @@ fn inject_scalar_locals(
         visibility: None,
         is_unused: false,
         register_name: None,
+        home: None,
         cleanup_fn: None,
         is_thread_local: false,
         no_sanitize: vec![],

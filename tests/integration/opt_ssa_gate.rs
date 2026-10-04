@@ -609,6 +609,98 @@ fn ssa_regalloc_reaches_the_product() {
     );
 }
 
+/// Phase 5.2c 的**前提核对**：带异常落地垫的函数今天拿不到自动分配的寄存器家，而挡住它的
+/// 不是任何一条 EH 判据，是两道结构性闸：
+///   1. C++ 前端把函数体降到 AST 时不调用分配器（`cpp/native.rs` 直接 `ssa::rebuild_block`）；
+///   2. 落地垫形态在 AST 里必然带着地垫标签与回入标签，而带 `Stmt::Label` 的函数被
+///      `ssa::structure::is_structured` 判为非结构化 ⇒ `build_from_func` 返 `None` ⇒ 整个
+///      函数不进 SSA，也就不会被规划（所以闸 1 被绕过时闸 2 仍在）。
+///
+/// 于是设计 §7 5.2 要的「落地垫的寄存器约定」今天**没有消费者**：没有任何带 EH 的函数会被
+/// 绑号。我没有为此在分配器里加一条 EH 判据（那是到不了的入口，与 5.2a 同一个决定），而是
+/// 把前提钉住：同一个 TU 里非 EH 的热函数必须真的被规划（反向对照，保证不是空跑），三个带
+/// EH 的函数一行 dump 都不许出现。前提一变就红，那时必须先补上落地垫的判据：垫入口只毁
+/// `%rax`/`%rdx`（其他 callee-saved 跟异常边保持），而对象/selector 槽必须是**具名局部**
+/// （`cpp/lower_ir.rs` 已经要求这一点，因为 SSA 临时会被内联掉）。
+/// EH 的**行为**正确性由 `cpp_abi_eh_group` 那套与 g++ 的交叉对照负责，本用例不重复。
+#[test]
+#[cfg(unix)]
+fn eh_landing_pad_functions_are_never_auto_bound() {
+    let src = "extern \"C\" int printf(const char *, ...);\n\
+               int hot(long n){ long a=0,b=0,c=0,d=0,e=0,f=0;\n\
+               for(long i=0;i<n;i++){a+=1;b+=a;c+=b;d+=c;e+=d;f+=e;}\n\
+               return (int)(a+b+c+d+e+f); }\n\
+               int with_eh(long n){ long a=0,b=0,c=0,d=0,e=0,f=0;\n\
+               try { for(long i=0;i<n;i++){a+=1;b+=a;c+=b;d+=c;e+=d;f+=e; if(a==3) throw 1;} }\n\
+               catch(int x){ f+=x; } return (int)(a+b+c+d+e+f); }\n\
+               int eh_no_loop(long n){ long a=n+1,b=a*2,c=b+a,d=c*3,e=d+c,f=e*2;\n\
+               try { if(a>3) throw 2; } catch(int x){ f+=x; } return (int)(a+b+c+d+e+f); }\n\
+               int cleanup_only(long n){ long a=n+1,b=a*2,c=b+a,d=c*3,e=d+c,f=e*2;\n\
+               try { if(a>3) throw 3; } catch(...){ f+=7; } return (int)(a+b+c+d+e+f); }\n\
+               int main(){ printf(\"%d %d %d %d\\n\", hot(5), with_eh(5), eh_no_loop(5), cleanup_only(5));\n\
+               return 0; }\n";
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let cpath = dir.join(format!("dcc-eh-nohome-{pid}.cpp"));
+    let opath = dir.join(format!("dcc-eh-nohome-{pid}.o"));
+    fs::write(&cpath, src).expect("write cpp source");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .env("DCC_REGALLOC_DUMP", "1")
+        .args(["-O2", "-c", "-o"])
+        .arg(&opath)
+        .arg(&cpath)
+        .output()
+        .expect("run dcc -O2 -c");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let _ = fs::remove_file(&cpath);
+    let _ = fs::remove_file(&opath);
+    assert!(out.status.success(), "-O2 应能编过这份 C++ 源：\n{stderr}");
+    assert!(
+        stderr.contains("[regalloc] hot"),
+        "反向对照：同一个 TU 里不带 EH 的热函数必须真的被规划，否则下面那条断言没有判定力：\n{stderr}"
+    );
+    for name in ["with_eh", "eh_no_loop", "cleanup_only"] {
+        assert!(
+            !stderr.contains(&format!("[regalloc] {name}")),
+            "{name} 带落地垫却被规划了：落地垫的寄存器约定还没进干涉模型，先补判据再放开 \n（见设计 §7 5.2 与 §11.14 的 N2/N5）"
+        );
+    }
+}
+
+/// Phase 5.2b 的同类前提核对：**带嵌套函数的函数拿不到自动分配的寄存器家**。
+///
+/// §7 5.2 列的第二条干涉对象是「嵌套函数按帧偏移访问外层变量」那条路（P12-A 的准入条件 4，
+/// 即今天 `plan_for` 里的 `nested-function-in-scope`）。本轮实测发现两件事，所以这一步**没有**
+/// 去收窄那条规则：
+///   1. 那条规则在真实管线上命中 **0** —— 含 `BlockItem::Decl(Decl::Func)` 的函数在进 SSA 前
+///      就被 `opt.rs::block_has_unsafe_ssa_pattern` 整函数踢出管线，所以把它收成「只拒被
+///      捕获者」在语料上多不出一个绑定（本用例就是这条事实的常驻版本）；
+///   2. 真要拿到收益，得先修好另一族缺陷（并行 codegen 不回收嵌套函数符号、`collect_upvars`
+///      漏 VLA 声明维度与 EH 子树、逸出判据两套不分叉），设计 §11.14 的 N1/N5/N8。
+/// 于是这里只钉前提：同 TU 里不带嵌套的热函数必须真的被规划（反向对照），带嵌套函数的那个
+/// 函数一行 dump 都不许出现。前提一变就红，那时再按 §11.14 清完障碍、并把拒绑集换成
+/// 「直接子 `FuncDecl.upvars` 的名字并集」（而不是继续用整函数开关）。
+#[test]
+#[cfg(unix)]
+fn nested_function_bodies_are_never_auto_bound() {
+    let src = "long hot(long n){ long a=0,b=0,c=0,d=0,e=0,f=0;\n\
+               for(long i=0;i<n;i++){a+=1;b+=a;c+=b;d+=c;e+=d;f+=e;}\n\
+               return a+b+c+d+e+f; }\n\
+               long with_nested(long n){ long id(void){ return 3; } return id() + n; }\n\
+               int main(void){ return (int)((hot(4) + with_nested(7)) % 3); }\n";
+    let (asm_text, stderr) =
+        compile_asm_text_with_env("nested-nohome", src, &["-O2"], &[("DCC_REGALLOC_DUMP", "1")]);
+    assert!(!asm_text.is_empty(), "应产出汇编：\n{stderr}");
+    assert!(
+        stderr.contains("[regalloc] hot"),
+        "反向对照：同一个 TU 里不带嵌套函数的热函数必须真的被规划：\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("[regalloc] with_nested"),
+        "带嵌套函数的函数却被规划了：而它的外层变量可由嵌套体按帧偏移读，窄判据还没建起来 \n（先按设计 §11.14 清完 N1/N5/N8）：\n{stderr}"
+    );
+}
+
 // ===== G2：AST 层 `eliminate_unreachable` (`dce_block`) 与 Label/Return 混排 =====
 //
 // 缺陷代号 G2（docs/wp_multi_exit_loop.md §4 移交）。旧 `dce_block` 在顶层 `Return`

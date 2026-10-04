@@ -38,6 +38,12 @@
 //                    unary_result_ty / int_const_ty。类型推导判据只在这里, 不要在 rebuild.rs
 //                    再写一份。
 //   dump.rs          dump_function —— `DCC_SSA_DUMP` 的读数通道; 诊断文案只在这里。
+//   location.rs      SSA 值的**家** (`Location`/`LocMap`/`RegBank`) —— P12 字面形态的载体。
+//                    只定义数据形态与显式改写入口 (fork/rename/retain)；**不放**任何
+//                    分配策略（活性、干涉、溢出决策全在 regalloc.rs），也不放后端编号到
+//                    物理寄存器的解释（那是 abi/regbank.rs 的事）。
+//   liveness.rs      逐点活性与**干涉表**（Phase 5.1 的数据地基）。只回答「这两个值会
+//                    同时活着吗」，不放「该给哪个号」的决策（那在 regalloc.rs）。
 //   tests.rs / unary_rebuild_ty_tests.rs
 //                    跨切用例 (构造 → 跑 pass → 重建检查产物形态) 集中放这里, 不为了
 //                    「文件对齐」把一条回归场景切成两半 —— 那会同时毁掉它的可读性与判据价值。
@@ -47,6 +53,8 @@ pub mod dump;
 pub mod expr_rebuild;
 pub mod inline_temps;
 pub mod ir;
+pub mod location;
+pub mod liveness;
 pub mod lower;
 pub mod loop_exit;
 // passes.rs        M16 优化 pass 集合 (P1..Pn: 跨函数 DCE / 强度削减 / IVOP / GVN / 调度…),
@@ -83,6 +91,9 @@ mod unary_rebuild_ty_tests;
 pub use ir::{
     BasicBlock, Function, Inst, InstKind, Operand, OrderedNameSet, Phi, SsaVar, Terminator,
 };
+// `LocMap` 是 `pub struct Function` 的 `pub` 字段类型，与 `OrderedNameSet` 同理必须保 `pub`；
+// 其余三个是 `Location` 的组成件，后端消费时要按名字读，所以也对外。
+pub use location::{LocMap, Location, RegBank, RegId, Splits};
 pub use structure::lower_switches_in_func;
 pub use build::build_from_func;
 pub use loop_exit::has_multi_exit_cycle;

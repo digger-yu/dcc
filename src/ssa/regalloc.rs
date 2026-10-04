@@ -56,7 +56,7 @@
 // 什么没跑」在产物上长得一模一样，没有这个窗口就只能猜。
 
 use crate::ast::{Block, BlockItem, Decl, Expr, InitItem, Stmt, Type};
-use crate::ssa::{Function, Operand, Terminator};
+use crate::ssa::{Function, LocMap, Location, RegBank, RegId, SsaVar, Splits};
 use std::collections::{HashMap, HashSet};
 
 /// 可分配的物理寄存器：x86_64 后端表达式溅出池里那四个 callee-saved 号。
@@ -72,12 +72,57 @@ fn dump_on() -> bool {
 }
 
 /// 一个函数的分配结果。
-#[derive(Debug, Default, Clone)]
+#[derive(Debug)]
 pub struct Plan {
     /// 变量基名 → 寄存器名（`register asm` 的写法，如 `"rbx"`）
     pub bindings: Vec<(String, &'static str)>,
     /// 被拒的名字与原因（只为 dump 与测试服务；顺序确定）
     pub rejected: Vec<(String, &'static str)>,
+    /// 量化读数（`docs/p12-physreg-spill-design.md` §7 的 Phase 0.2）：只服务诊断与
+    /// 「值不值得做字面形态」的判定，**不参与任何分配决定**，因此产物零影响；
+    /// 仅在 `DCC_REGALLOC_DUMP=1` 时才计算（`max_overlap` 是 O(n²)）。
+    pub stats: PlanStats,
+    /// 版本粒度的位置表（P12 Phase 3）。**从 Phase 3.2 起它是写进 AST 的唯一输入**；
+    /// `bindings` 退为诊断/测试读数，两者不一致时单测
+    /// `the_ast_landing_comes_from_the_table` 会红。
+    ///
+    /// 本类型因此不再 `derive(Clone, Default)`：`LocMap` 故意不可复制也不默认构造
+    /// （见 `ssa/location.rs`），「忘了建表」与「建了但空」不得长得一样。
+    pub loc: LocMap,
+}
+
+impl Plan {
+    /// 显式空表（取代旧的 `Plan::default()`：`LocMap` 不实现 `Default` 是有意的）。
+    fn empty() -> Self {
+        Self {
+            bindings: Vec::new(),
+            rejected: Vec::new(),
+            stats: PlanStats::default(),
+            loc: LocMap::empty(),
+        }
+    }
+}
+
+/// Phase 0 要求量化的两个数：池满造成的拒绑占比，与 IR 上同时活标量的上界。
+/// 前者是 Phase 5（真 SPILL/RELOAD）的收益上界；如果它接近 0，溢出收益就只是
+/// 纸面收益（设计 §7 Phase 0 的判据原文）。后者是「池有多大才够」的实测口径。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PlanStats {
+    /// 走完全部准入判据、进入「挑号」环节的候选数
+    pub pool_candidates: usize,
+    /// 因为池里没有空闲号而被拒的候选数
+    pub pool_full_rejects: usize,
+    /// IR 里所有可见基名的 `[first, last]` 区间最大重叠数
+    pub max_live_bases: usize,
+    /// 同上，只算进入挑号环节的候选
+    pub max_live_candidates: usize,
+    /// **池满拒绑里有多少是「版本分裂能救」的**（其余只能靠溢出救）。
+    ///
+    /// 分法根据是干涉表：被池满拒的候选如果与某个已绑基名存在一对**不同时活着**的
+    /// 版本，那今天挡住它的就不是物理干涉，而是「一个号只给一个变量」这条 blanket
+    /// 规则（§7.20 判据 3）。这个数直接决定 Phase 5 的工力该投在 spill 还是在分裂上
+    /// —— 设计 §7 Phase 0 的原话：没有下降数据的收益不算收益。
+    pub pool_full_shareable: usize,
 }
 
 impl Plan {
@@ -94,6 +139,12 @@ pub fn pooled_reg_of(asm_name: &str) -> Option<u8> {
         .map(|(_, r)| *r)
 }
 
+/// 号 → `register asm` 的写法。`POOL` 是唯一的号表，所以上下两个方向（名→号、号→名）
+/// 都只能从它派生；两边各自返一份名单就是「同一个事实两处定义」。
+fn pool_reg_name(n: u8) -> Option<&'static str> {
+    POOL.iter().find(|(_, v)| *v == n).map(|(nm, _)| *nm)
+}
+
 /// 调用方需要的上下文。
 #[derive(Debug, Clone)]
 pub struct Ctx {
@@ -103,17 +154,45 @@ pub struct Ctx {
     pub taken_regs: HashSet<u8>,
 }
 
-/// 算出该绑哪些变量，并把结果写进**重建后的** AST（`VarDecl::register_name`）。
+/// 算出该绑哪些变量，并把结果写进**重建后的** AST。
 ///
 /// `judge_on` 是**重建前**的函数体，`body` 是重建后的：判据必须看前者。实测
 /// （`tests::nested_function_is_detected_from_the_original_body`）重建后的函数体里
 /// 已经没有嵌套函数的 `Decl::Func`（它被前面的降低步骤搬走了），只在重建后的体上找
 /// 就会漏掉「外层变量被嵌套函数按帧偏移访问」这一整类，而那一类绑上去是静默错值。
 /// 两边都扫，判据取并集（保守），落地只写进 `body`。
-pub fn assign(func: &Function, judge_on: &Block, body: &mut Block, ctx: &Ctx) -> Plan {
-    let plan = plan_for(func, judge_on, body, ctx);
-    if !plan.bindings.is_empty() {
-        apply_bindings(body, &plan);
+///
+/// **Phase 3.2**：分配结果同时写进 `func.value_loc`，且 AST 落地**只经由这张表**；
+/// 函数签名从 `&Function` 改成 `&mut Function` 就是这件事的形状证据 —— 位置表是 IR 的
+/// 一部分，不是调用方事后自己拼的副产品。
+/// 决策阶段（Phase 5.0）：只看 IR 与**重建前**的体，并把结果写进 `func`。
+///
+/// 为什么要拆成两步：版本分裂表必须在 `rebuild_block` **之前**就存在于 IR 上，重建才能
+/// 给不同版本生成各自的局部（见设计 §11.8.1 记录的那个循环）。而旧形状把决策放在重建
+/// 之后，还多扫一份重建后的体 —— 那等于把决策建立在“重建会产生什么”上，永远无法前置。
+///
+/// 旧的那份后置扫描不能直接丢：丢了就是未可证明的行为变更。所以它拆到 `validate_against_rebuilt`
+/// 里作为**校验**跑（不改决策），并由用例钉住“后置事实不改变计划”（§11.9 的探针实测：
+/// 在 291 份夹具上去掉后置扫描，绑定结果逐字节不变）。
+pub fn plan_and_split(func: &mut Function, original: &Block, ctx: &Ctx) -> Plan {
+    let plan = plan_for(func, original, ctx);
+    // D3 / Phase 3.4：同基名的版本拿到不同家时，它们必须成为各自的 AST 局部；
+    // 表算一次存进 IR，重建与交付读同一个答案。今天总是空表 ⇒ 产物不变。
+    let splits = plan.loc.compute_splits(func);
+    func.local_splits = splits.clone();
+    let loc = plan.loc.fork();
+    func.value_loc = loc;
+    plan
+}
+
+/// 交付阶段（重建之后）：校验后置事实，然后**只经由位置表**把结果写进重建后的 AST。
+///
+/// 不回滚决策：一旦“后置发现→取消已算出的家”，分裂表与实际发射就会不一致（多一个
+/// 声明却没家的局部会改变帧内布局）。校验只负责把这类事说出来，让判据能往前修。
+pub fn deliver(func: &Function, plan: &mut Plan, body: &mut Block) {
+    validate_against_rebuilt(func, plan, body);
+    if !plan.loc.is_empty() {
+        apply_bindings(body, plan, &func.local_splits);
     }
     if dump_on() {
         eprint!("[regalloc] {}\n", func.name);
@@ -123,7 +202,63 @@ pub fn assign(func: &Function, judge_on: &Block, body: &mut Block, ctx: &Ctx) ->
         for (n, why) in &plan.rejected {
             eprint!("  skip {n}: {why}\n");
         }
+        // 量化行：Phase 0 的「值不值得干」与 Phase 5 的归属数据都从这里取（全语料聚合）。
+        eprint!(
+            "  stats cands={} poolfull={} live={} live_cands={} shareable={}\n",
+            plan.stats.pool_candidates,
+            plan.stats.pool_full_rejects,
+            plan.stats.max_live_bases,
+            plan.stats.max_live_candidates,
+            plan.stats.pool_full_shareable
+        );
     }
+}
+
+/// 后置事实在已绑名字上的冲突列表（`(基名, 原因)`）。抽成返回值而不是直接打印，
+/// 是为了它能被用例直接断言（而不是靠 grep 诊断文本）。
+fn post_rebuild_conflicts(plan: &Plan, rebuilt: &Block) -> Vec<(String, &'static str)> {
+    let mut post = Scan::default();
+    scan_block(rebuilt, &mut post);
+    let escaped_post = crate::ast_gvn::addr_escaped_names(rebuilt);
+    let mut out = Vec::new();
+    for (base, _) in &plan.bindings {
+        // 不查 `has_nested_fn`：嵌套函数在重建后的体里已经消失（§7.20 判据 1），
+        // 所以它只能来自治理前的体，当后置信号会永远不成立。
+        let why: Option<&'static str> = if escaped_post.contains(base) {
+            Some("address-escaped")
+        } else if post.asm_names.contains(base) {
+            Some("inline-asm-operand")
+        } else if post.infos.get(base.as_str()).map_or(false, |i| i.user_bound) {
+            Some("already-register-asm")
+        } else {
+            None
+        };
+        if let Some(w) = why {
+            out.push((base.clone(), w));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// 校验：重建后的体里如果出现了「会让已绑名字不该绑」的新事实，就是决策前置的假设
+/// 破了。这种事必须是**可看见的**，而不是默默改变绑定（后者会把帧布局也拖动）。
+///
+/// 为什么不用 `report_internal_bug`：那会把一条“当前未证实但不改变行为”的不变式违反
+/// 直接变成编译失败；先走诊断窗口，等语料上零命中后再升级成硬错误（升级只改本函数）。
+fn validate_against_rebuilt(func: &Function, plan: &Plan, rebuilt: &Block) {
+    for (base, w) in post_rebuild_conflicts(plan, rebuilt) {
+        eprintln!(
+            "dcc: regalloc 后置校验命中：{} 里的 '{}' 只在重建后的体里露出 '{}'（决策已前置，不回滚）",
+            func.name, base, w
+        );
+    }
+}
+
+/// 旧的单一入口（保留给测试：决策 + 交付一次做完，`body` 就是重建后的体）。
+pub fn assign(func: &mut Function, original: &Block, body: &mut Block, ctx: &Ctx) -> Plan {
+    let mut plan = plan_and_split(func, original, ctx);
+    deliver(func, &mut plan, body);
     plan
 }
 
@@ -146,16 +281,30 @@ struct Cand {
     accesses: usize,
 }
 
-fn plan_for(func: &Function, judge_on: &Block, body: &Block, ctx: &Ctx) -> Plan {
-    let mut plan = Plan::default();
-    if ctx.debug_info {
-        return plan;
-    }
+/// D5：**能不能把家定在物理寄存器**的唯一判据（P12 Phase 4.3 把守卫从 pass 入口
+/// 搬到这里）。
+///
+/// 旧写法是 `plan_for` 开头 `if ctx.debug_info { return plan; }`，语义是「pass 不跑」；
+/// 而真正的规则是「本函数不允许产出 `Reg` 家，因为 DWARF 只会发栈槽位置，绑上去就是
+/// 让调试器读一个从未被写入的槽」。两者今天产物相同，但下阶段不同：Phase 6.2 给
+/// DWARF 补上寄存器位置表达式后，取消限制只需改本函数一处，而不必重新找一个
+/// 「pass 入口的跳过点」并保证它的判据与 Location 一致。
+///
+/// 守卫搬到这里后，准入判据与活性仍然照跑，-g 下被拒的名字带原因进 `rejected`，
+/// 所以 `DCC_REGALLOC_DUMP` 在 -g 下从「什么都看不到」变成「看得到为什么没绑」。
+fn register_homes_allowed(ctx: &Ctx) -> bool {
+    !ctx.debug_info
+}
+
+fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
+    let mut plan = Plan::empty();
+    // D5 的守卫不再在这里早返（见 `register_homes_allowed`）：判据照跑，只是不产出 Reg 家。
+    let homes_allowed = register_homes_allowed(ctx);
     let mut sc = Scan::default();
-    scan_block(judge_on, &mut sc);
-    scan_block(body, &mut sc);
-    let mut escaped = crate::ast_gvn::addr_escaped_names(judge_on);
-    escaped.extend(crate::ast_gvn::addr_escaped_names(body));
+    // 决策阶段只看**重建前**的体（Phase 5.0）。重建后那份事实由 `validate_against_rebuilt`
+    // 负责，它不再参与决定谁绑、绑到哪个号。
+    scan_block(original, &mut sc);
+    let escaped = crate::ast_gvn::addr_escaped_names(original);
     // 用户手写的 `register asm`（局部或 file-scope）占住的号一律让开。光把那个名字
     // 记进 rejected 是不够的：后端照样会把同一个号给变量，两个变量共享一个寄存器
     // 就是静默错值 —— 这条是 `tests::user_bound_local_reserves_its_register` 逼出来的。
@@ -238,6 +387,12 @@ fn plan_for(func: &Function, judge_on: &Block, body: &Block, ctx: &Ctx) -> Plan 
     // 不用来共用寄存器。
     let mut used_slots: Vec<usize> = Vec::new();
     for c in &cands {
+        if !homes_allowed {
+            // 走完准入判据、但被 Location 层的规则拦住：原因必须落进拒因，
+            // 不然后人只能看到「没绑」而看不到「为什么没绑」。
+            plan.rejected.push((c.name.clone(), "debug-info-forbids-register-home"));
+            continue;
+        }
         match POOL
             .iter()
             .enumerate()
@@ -252,7 +407,82 @@ fn plan_for(func: &Function, judge_on: &Block, body: &Block, ctx: &Ctx) -> Plan 
                 .push((c.name.clone(), "no-free-callee-saved-register")),
         }
     }
+    // 位置表（版本粒度）：从已定稿的 bindings + IR 建，供 `assign` 落地并由 IR 携带。
+    let loc = to_loc_map(&plan, func);
+    plan.loc = loc;
+    // Phase 0 的量化读数（`docs/p12-physreg-spill-design.md` §7 0.2）。只服务于
+    // `DCC_REGALLOC_DUMP` 的统计，**不参与任何分配决定**，因此产物零影响；
+    // 并且 `max_overlap` 是 O(n²)，所以只在诊断开着时算 —— 不能把一次性探针
+    // 变成每次 -O2 每个函数都要付的固定成本。
+    if dump_on() {
+        plan.stats.pool_candidates = cands.len();
+        plan.stats.pool_full_rejects = plan
+            .rejected
+            .iter()
+            .filter(|(_, w)| *w == "no-free-callee-saved-register")
+            .count();
+        plan.stats.max_live_bases =
+            max_overlap(spans.values().map(|s| (s.first, s.last)).collect::<Vec<_>>());
+        plan.stats.max_live_candidates =
+            max_overlap(cands.iter().map(|c| (c.first, c.last)).collect());
+        // 干涉分桶：池满被拒的候选里，有多少本可以复用某个已绑号（只是版本不重叠）。
+        // 这张表只在诊断开着时算：它是 Phase 5 的决策数据，不是今天的分配输入。
+        plan.stats.pool_full_shareable = shareable_rejects(func, &plan);
+    }
     plan
+}
+
+/// 「池满被拒的候选里，有多少本可以复用某个已绑号」的计数（设计 §7 Phase 0 的归属数据）。
+///
+/// 抽成函数而不是内联在诊断分支里，是为了它能被用例直接验证 —— 一个「0」既可能是
+/// 真结论（没机会），也可能是度量本身算错；不验证就分不清，而这两个结论会把 Phase 5
+/// 的工力引到相反的方向上（分表 vs 溢出）。
+pub(crate) fn shareable_rejects(func: &Function, plan: &Plan) -> usize {
+    let iv = crate::ssa::liveness::compute(func);
+    let bound: Vec<String> = plan.bindings.iter().map(|(b, _)| b.clone()).collect();
+    if bound.is_empty() {
+        return 0;
+    }
+    let mut shareable = 0usize;
+    for (cand, why) in &plan.rejected {
+        if *why != "no-free-callee-saved-register" {
+            continue;
+        }
+        let cv = crate::ssa::liveness::versions_of_base(func, cand);
+        if cv.is_empty() {
+            continue;
+        }
+        let ok = bound.iter().any(|b| {
+            let bv = crate::ssa::liveness::versions_of_base(func, b);
+            // 用 ∀ 的 `ranges_disjoint` 而不是 ∃ 的 `bases_have_disjoint_pair`：
+            // 基名在重建后只有一个格子，只要有一对版本同时活着就不能共用一个号。
+            // 上一轮用 ∃ 算出的 58 因此高估了收益（设计 §11.9 已订正）。
+            !bv.is_empty() && iv.ranges_disjoint(&cv, &bv)
+        });
+        if ok {
+            shareable += 1;
+        }
+    }
+    shareable
+}
+
+/// 闭区间 `[first, last]` 的最大重叠数（含区间自身，所以非空集合的上界至少为 1）。
+///
+/// 这是**上界口径**而非逐点活性：真正的逐点活性要跑 CFG liveness（那是 Phase 5
+/// 干涉表的事），而 Phase 0 要回答的是「池子尺寸与同时活标量数的量级差距」，
+/// 基名区间就够。O(n²) 在语料规模上无所谓。
+fn max_overlap(spans: Vec<(i32, i32)>) -> usize {
+    let mut best = 0usize;
+    for (a, b) in &spans {
+        let mut n = 0usize;
+        for (c, d) in &spans {
+            if c <= b && a <= d {
+                n += 1;
+            }
+        }
+        best = best.max(n);
+    }
+    best
 }
 
 // ---------------------------------------------------------------------------
@@ -522,13 +752,38 @@ fn ident_root_name(e: &Expr) -> Option<String> {
 }
 
 /// 把分配结果写进 AST。只碰 `register_name` 仍为空的声明（用户写死的优先）。
-fn apply_bindings(b: &mut Block, plan: &Plan) {
-    let map: HashMap<&str, &str> = plan
-        .bindings
+///
+/// **Phase 3.2 的形状**：输入是 `plan.loc`（位置表）而不是 `plan.bindings`。今天两者必然
+/// 一致（表就是 `to_loc_map(bindings)` 建的），所以产物逐字节不变是这一步的判据；而
+/// 从这一步起，「让 AST 看到分配结果」这条路只剩一个入口。
+///
+/// **Phase 4.1b**：同一次写入也填 `VarDecl::home`（已按通道解释好的号）。两条同时存在不是
+/// 双真源：`register_name` 是用户文本名的载体（本函数不写用户声明，只填自动分配的缺口），
+/// `home` 是分配结果；两者在 `the_ast_landing_comes_from_the_table` 里被要成一致。
+/// Phase 4.1c/d 会让后端改读 `home` 并拆掉 `register_name` 这条中间通道。
+fn apply_bindings(b: &mut Block, plan: &mut Plan, splits: &Splits) {
+    // 表 → 「AST 局部名 → 号」。不可表示的家（非 GP 通道、池外号，以及分裂也没能
+    // 消除的同基名冲突）走下面的拒因点名，不默默绑。
+    let mut homes: HashMap<String, RegId> = HashMap::new();
+    let mut unrepresentable: Vec<String> = Vec::new();
+    for (local, loc) in plan.loc.fold_for_codegen(splits) {
+        match loc {
+            Some(Location::Reg(r)) if r.bank == RegBank::Gp => {
+                homes.insert(local, r);
+            }
+            Some(_) => unrepresentable.push(local),
+            None => unrepresentable.push(local),
+        }
+    }
+    unrepresentable.sort();
+    for local in unrepresentable {
+        plan.rejected.push((local, "home-not-representable"));
+    }
+    let map: HashMap<&str, (&str, RegId)> = homes
         .iter()
-        .map(|(n, r)| (n.as_str(), *r))
+        .filter_map(|(k, r)| pool_reg_name(r.n).map(|nm| (k.as_str(), (nm, *r))))
         .collect();
-    fn stmt(s: &mut Stmt, map: &HashMap<&str, &str>) {
+    fn stmt(s: &mut Stmt, map: &HashMap<&str, (&str, RegId)>) {
         match s {
             Stmt::Block { b, .. } => walk(b, map),
             Stmt::If { then_, else_, .. } => {
@@ -556,14 +811,16 @@ fn apply_bindings(b: &mut Block, plan: &Plan) {
             _ => {},
         }
     }
-    fn walk(b: &mut Block, map: &HashMap<&str, &str>) {
+    fn walk(b: &mut Block, map: &HashMap<&str, (&str, RegId)>) {
         for item in &mut b.items {
             match item {
                 BlockItem::Decl(Decl::Var(v)) => {
-                    if let Some(r) = map.get(v.name.name.as_str()) {
+                    if let Some((r, reg)) = map.get(v.name.name.as_str()) {
                         if v.register_name.is_none() {
                             v.register_name = Some((*r).to_string());
                         }
+                        // Phase 4.1b：家同时交出去（位与名字同源，不会出现一边有一边没）。
+                        v.home = Some(Location::Reg(*reg));
                     }
                 },
                 BlockItem::Stmt(s) => stmt(s, map),
@@ -595,13 +852,14 @@ struct Span {
     uses: usize,
 }
 
-/// 每个基名在 IR 里的 `[最早, 最晚]` 出现位置与定义/使用计数。
+/// IR 里「一个 SSA 名出现了一次」的**唯一**遍历。
 ///
-/// 位置按 `block_order` 顺序对 phi 槽、指令、terminator 递增编号。用途有两个：判
-/// 「第一次出现是不是 entry 块里的定义」，以及给候选者排序（访问次数、区间起点）。
-/// **不**用来判断两个变量能否共用一个号 —— 那件事在这个后端没有意义，见 `plan_for`。
-fn base_spans(func: &Function) -> HashMap<String, Span> {
-    let mut out: HashMap<String, Span> = HashMap::new();
+/// `base_spans`（活性区间）与 `to_loc_map`（版本粒度的家）必须走同一次遍历：
+/// 「哪些出现算数」不允许有两份答案 —— 一边看到了、另一边漏了，就是「家挂在
+/// 一个没人读的名字上」或「区间比实际短」那一族静默错值。参数与旧 `base_spans`
+/// 里的计数口径逐字一致（`pos` 按 `block_order` 对 phi 槽/指令/terminator 递增，
+/// `is_def`、`in_entry` 同旧义）。
+fn each_occurrence(func: &Function, mut visit: impl FnMut(&SsaVar, i32, bool, bool)) {
     let mut pos: i32 = 0;
     for bname in &func.block_order {
         let Some(bb) = func.blocks.get(bname) else {
@@ -611,24 +869,39 @@ fn base_spans(func: &Function) -> HashMap<String, Span> {
         for phi in &bb.phis {
             // phi 的 dest 是本块的定义，incoming 是前驱末尾的使用：位置若相同，
             // 必须记成「最早出现是使用」，否则会把「读旧值」当成已初始化。
-            note(&mut out, &phi.dest.base, pos, true, in_entry);
+            visit(&phi.dest, pos, true, in_entry);
             for (src, _) in &phi.incoming {
-                note(&mut out, &src.base, pos, false, false);
+                visit(src, pos, false, false);
             }
             pos += 1;
         }
         for inst in &bb.insts {
             for op in crate::ssa::kind_operand_ssa_vars(&inst.kind) {
-                note(&mut out, &op.base, pos, false, in_entry);
+                visit(&op, pos, false, in_entry);
             }
             if let Some(d) = &inst.dest {
-                note(&mut out, &d.base, pos, true, in_entry);
+                visit(d, pos, true, in_entry);
             }
             pos += 1;
         }
-        note_term(&bb.term, pos, &mut out);
+        for v in crate::ssa::ir::term_operand_ssa_vars(&bb.term) {
+            visit(&v, pos, false, false);
+        }
         pos += 1;
     }
+}
+
+/// 每个基名在 IR 里的 `[最早, 最晚]` 出现位置与定义/使用计数。
+///
+/// 位置按 `block_order` 顺序对 phi 槽、指令、terminator 递增编号（遍历本身在
+/// `each_occurrence`，与位置表共用）。用途有两个：判「第一次出现是不是 entry 块里的
+/// 定义」，以及给候选者排序（访问次数、区间起点）。
+/// **不**用来判断两个变量能否共用一个号 —— 那件事在这个后端没有意义，见 `plan_for`。
+fn base_spans(func: &Function) -> HashMap<String, Span> {
+    let mut out: HashMap<String, Span> = HashMap::new();
+    each_occurrence(func, |var, pos, is_def, in_entry| {
+        note(&mut out, &var.base, pos, is_def, in_entry)
+    });
     out
 }
 
@@ -663,22 +936,33 @@ fn note(m: &mut HashMap<String, Span>, name: &str, at: i32, is_def: bool, in_ent
     );
 }
 
-fn note_term(t: &Terminator, at: i32, out: &mut HashMap<String, Span>) {
-    let mut use_op = |o: &Operand| match o {
-        Operand::Var(v) => note(out, &v.base, at, false, false),
-        Operand::Phi(pairs) => {
-            for (v, _) in pairs {
-                note(out, &v.base, at, false, false);
-            }
-        },
-        _ => {},
-    };
-    match t {
-        Terminator::Ret { val: Some(o) } => use_op(o),
-        Terminator::Ret { val: None } | Terminator::Jump(_) | Terminator::Unreachable => {},
-        Terminator::Branch { cond, .. } => use_op(cond),
-        Terminator::SwitchTable { idx, .. } => use_op(idx),
+/// 把 P12-A 的分配结果（基名粒度）落成 IR 侧的**版本粒度**位置表。
+///
+/// 规则只有一条：某基名被绑到 `%rN` ⇒ 它在 IR 里的**每一个** SSA 版本的家都是那个号。
+/// 这不是偷懒，而是今天后端的表示能力（绑定表是函数级 `名字 → 号`，读写每次查同一张表，
+/// 中途没有换家的时机 —— 见 §7.20 那条「一个号只给一个变量」的实测判据）。所以本函数
+/// 产出表与 `LocMap::fold_by_base` 折叠回去必然一致；Phase 5 的分配器若开始给不同版本
+/// 分不同号，折叠会点名（`None`）而不是默默取一个。
+///
+/// 与 `base_spans` 共用 `each_occurrence`：「哪些出现算数」不允许有两份答案。
+pub fn to_loc_map(plan: &Plan, func: &Function) -> LocMap {
+    let mut out = LocMap::empty();
+    // 基名 → 池内号。绑到池外的号（自动分配今天不会发生）不进表：`pooled_reg_of`
+    // 就是那条判据的唯一出处。
+    let wanted: HashMap<&str, u8> = plan
+        .bindings
+        .iter()
+        .filter_map(|(base, rn)| pooled_reg_of(rn).map(|n| (base.as_str(), n)))
+        .collect();
+    if wanted.is_empty() {
+        return out;
     }
+    each_occurrence(func, |var, _, _, _| {
+        if let Some(&n) = wanted.get(var.base.as_str()) {
+            out.bind(var, Location::Reg(RegId { bank: RegBank::Gp, n }));
+        }
+    });
+    out
 }
 
 #[cfg(test)]
@@ -712,7 +996,7 @@ mod tests {
         crate::ssa::passes::run_with_opts(&mut ssa, level, true);
         let orig = f.body.clone().expect("被测函数必须有体");
         let mut body = crate::ssa::rebuild_block(&ssa);
-        let plan = assign(&ssa, &orig, &mut body, ctx);
+        let plan = assign(&mut ssa, &orig, &mut body, ctx);
         (ssa, orig, body, plan)
     }
 
@@ -736,6 +1020,257 @@ mod tests {
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, w)| *w)
+    }
+
+    /// D5 的守卫形状：-g 拦住的是**家**，不是整条 pass。
+    ///
+    /// 与旧行为的产品差异为零（两边都不绑），但语义不再藏在入口的早返里：-g 下
+    /// 候选者仍然被评到，拒因从「什么都没发生」变成可诊断的一条。Phase 6.2 给 DWARF
+    /// 补上寄存器位置后，只删 `register_homes_allowed` 这一条即可。
+    #[test]
+    fn debug_info_gates_the_home_not_the_pass() {
+        let src = "long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i;return acc;}\n";
+        let gctx = Ctx { debug_info: true, taken_regs: HashSet::new() };
+        let (_ssa, _orig, _body, plan) = run_pipeline(src, "s", 2, &gctx);
+        assert!(plan.bindings.is_empty(), "-g 下不得产出寄存器家，实际 {:?}", plan.bindings);
+        assert!(
+            plan.rejected.iter().any(|(_, w)| *w == "debug-info-forbids-register-home"),
+            "-g 下被拦住的原因必须可诊断，实际 {:?}",
+            plan.rejected
+        );
+        // 反向对照：关掉 -g 同一个源仍然绑得上（否则本用例会退化成「把 pass 关掉」）
+        let (_s2, _o2, _b2, p2) = run_pipeline(src, "s", 2, &ctx_default());
+        assert!(!p2.bindings.is_empty(), "非 -g 下仍然应绑（否则守卫在判据之前）");
+    }
+
+    /// 非空验证：上面那个全语料∀ 口径量出的「池满拒绑 140 个，可共用 0 个」既可能是
+    /// 真结论，也可能是度量算错。拿一个结构上明确“第 5 个变量与前面都不重叠”的源跑：
+    /// 如果连它都报 0，那度量是坏了，而不是没机会。
+    #[test]
+    fn shareable_metric_is_not_vacuously_zero() {
+        // a..e 依次短命：每个只在自己那条语句里活。必须依赖形参：常量会被 SCCP 折叠，
+        // 连 IR _presence 都没有（那就是 `fully_folded_locals_have_no_ir_presence` 记的现象），
+        // 本用例就会退化成空跑 —— 第一版就是这么错的。
+        let src = "long sink;\nlong f(long k){long a=k+1;sink=sink+a;long b=k+2;sink=sink+b;\
+                   long c=k+3;sink=sink+c;long d=k+4;sink=sink+d;long e=k+5;sink=sink+e;return sink;}\n";
+        let (ssa, _orig, _body, plan) = run_pipeline(src, "f", 2, &ctx_default());
+        assert!(
+            !plan.bindings.is_empty(),
+            "被测源应先绑上若干变量（否则本用例是空跑）"
+        );
+        let pool_full = plan
+            .rejected
+            .iter()
+            .filter(|(_, w)| *w == "no-free-callee-saved-register")
+            .count();
+        assert!(
+            pool_full >= 1,
+            "池只有 4 个号，5 个候选应至少拒一个，实际 rejected={:?}",
+            plan.rejected
+        );
+        assert!(
+            shareable_rejects(&ssa, &plan) >= 1,
+            "依次短命的第 5 个变量本可复用已绑号；报 0 说明度量坏了（而不是没机会）"
+        );
+    }
+
+    /// Phase 5.0 的核心不变式：决策前置不能漏掉后置事实。
+    ///
+    /// 旧形状把重建后的体也当决策输入；现在它只是校验。如果某个已绑基名只在重建后的
+    /// 体里露出「不该绑」的事实，那前置就是错的假设，而且它会拖动帧布局 —— 所以这条
+    /// 必须能在用例里直接断言（不靠 grep 诊断文本）。跑真实夹具（含内联汇编与地址逸出
+    /// 两份专门夹具），不靠手写小段代码。
+    #[test]
+    fn post_rebuild_facts_do_not_change_the_plan() {
+        const PATHS: [&str; 3] = [
+            "tests/fixtures/asm/asm_register_binding_clobber.c",
+            "tests/fixtures/asm/asm_register_binding_escape.c",
+            "tests/fixtures/opt/ssa_regalloc_locals.c",
+        ];
+        let mut checked = 0usize;
+        let mut functions_with_bindings = 0usize;
+        for path in PATHS {
+            let src = std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path),
+            )
+            .unwrap_or_else(|e| panic!("读不到 {path}：{e}（用例不得因为文件缺失而空跑）"));
+            let (prog, _d) = crate::parser::parse(src.as_bytes(), path);
+            let (m, _w) = crate::ir::lower(prog).expect("夹具应能 lower");
+            for d in &m.source().decls {
+                let f = match d {
+                    crate::ast::Decl::Func(f) if f.body.is_some() => f,
+                    _ => continue,
+                };
+                let Some(mut ssa) = crate::ssa::build_from_func(f) else { continue };
+                crate::ssa::passes::run_with_opts(&mut ssa, 2, true);
+                if crate::ssa::has_multi_exit_cycle(&ssa) {
+                    continue;
+                }
+                let ctx = Ctx { debug_info: false, taken_regs: HashSet::new() };
+                let mut plan = plan_for(&ssa, f.body.as_ref().unwrap(), &ctx);
+                plan.loc = to_loc_map(&plan, &ssa);
+                let rebuilt = crate::ssa::rebuild_block(&ssa);
+                let conflicts = post_rebuild_conflicts(&plan, &rebuilt);
+                assert!(
+                    conflicts.is_empty(),
+                    "{path} 的 {}：决策前置漏掉了后置事实 {:?}",
+                    f.name.name, conflicts
+                );
+                checked += 1;
+                if !plan.bindings.is_empty() {
+                    functions_with_bindings += 1;
+                }
+            }
+        }
+        // 假绿防护：真的扫到了函数，而且至少有一个函数绑上了号（否则上面断言是空跑）
+        assert!(checked >= 3, "只校验了 {checked} 个函数，用例覆盖面不足");
+        assert!(
+            functions_with_bindings >= 1,
+            "所有被校函数都没绑任何号 ⇒ 后置校验断言根本没有判定力"
+        );
+    }
+
+    /// Phase 3.2 的判据本体：AST 上的绑定**只能来自位置表**，且与诊断读数一致。
+    ///
+    /// 三个读数必须同构：表的基名折叠、写进 AST 的 `register_name`、`plan.bindings`。
+    /// 今天它们来同一次分配，所以逐字相等是应有的；谁改了其中一个而没改其他，这条就红。
+    /// （Phase 4 会去掉 AST 这条中间通道，那时本用例改成「表 ↔ 后端实际存取」。）
+    #[test]
+    fn the_ast_landing_comes_from_the_table() {
+        let src = "long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i;return acc;}\n";
+        let (ssa, _orig, body, plan) = run_pipeline(src, "s", 2, &ctx_default());
+
+        // 表→基名→号
+        let from_table: HashMap<String, u8> = plan
+            .loc
+            .fold_by_base()
+            .into_iter()
+            .filter_map(|(b, l)| match l {
+                Some(Location::Reg(r)) => Some((b, r.n)),
+                _ => None,
+            })
+            .collect();
+        assert!(!from_table.is_empty(), "被测源应至少绑出一个变量");
+        // 诊断读数必须与表一致（名字→号走 POOL，两者同一个号表）
+        for (base, rn) in &plan.bindings {
+            let n = pooled_reg_of(rn).expect("绑定名必须是池里的号");
+            assert_eq!(from_table.get(base), Some(&n), "表与 bindings 对不上：{base}");
+        }
+        assert_eq!(from_table.len(), plan.bindings.len(), "表与 bindings 集合大小不等");
+        // IR 里携带的必须是同一张表（assign 已把它写进 func.value_loc）
+        assert_eq!(
+            ssa.value_loc.sorted_entries(),
+            plan.loc.sorted_entries(),
+            "IR 上的位置表与分配结果不同步"
+        );
+        // AST 侧：每个带 register_name 的声明都对应表里的一个号，名字用 POOL 校
+        let mut landed = 0;
+        fn walk(b: &Block, table: &HashMap<String, u8>, n: &mut usize) {
+            for item in &b.items {
+                match item {
+                    BlockItem::Decl(Decl::Var(v)) => {
+                        if let Some(rn) = &v.register_name {
+                            let got = pooled_reg_of(rn).expect("落地名必须是池里的号");
+                            assert_eq!(
+                                table.get(&v.name.name).copied(),
+                                Some(got),
+                                "AST 把 {} 绑到了 %{}，但表里没有这个家",
+                                v.name.name,
+                                rn
+                            );
+                            // Phase 4.1b：家与文本名必须同时存在且同号（后端即将只读前者）。
+                            assert_eq!(
+                                v.home,
+                                Some(Location::Reg(RegId { bank: RegBank::Gp, n: got })),
+                                "{} 的 home 与 register_name 不同源",
+                                v.name.name
+                            );
+                            *n += 1;
+                        } else {
+                            assert_eq!(
+                                v.home, None,
+                                "{} 没有 register_name 却带了家（两条通道开始漂了）",
+                                v.name.name
+                            );
+                        }
+                    }
+                    BlockItem::Stmt(s) => stmt_walk(s, table, n),
+                    _ => {}
+                }
+            }
+        }
+        fn stmt_walk(s: &Stmt, table: &HashMap<String, u8>, n: &mut usize) {
+            match s {
+                Stmt::Block { b, .. } => walk(b, table, n),
+                Stmt::If { then_, else_, .. } => {
+                    walk_then(then_, table, n);
+                    if let Some(e) = else_ {
+                        walk_then(e, table, n);
+                    }
+                }
+                Stmt::While { body, .. } | Stmt::Do { body, .. } => stmt_walk(body, table, n),
+                Stmt::For { body, .. } => stmt_walk(body, table, n),
+                Stmt::Switch { cases, .. } => {
+                    for c in cases {
+                        walk(&c.body, table, n);
+                    }
+                }
+                _ => {}
+            }
+        }
+        fn walk_then(s: &Stmt, table: &HashMap<String, u8>, n: &mut usize) {
+            stmt_walk(s, table, n);
+        }
+        walk(&body, &from_table, &mut landed);
+        assert_eq!(landed, from_table.len(), "表里每个家都应在 AST 上有一个落地声明");
+    }
+
+    /// Phase 3.1 的等价性判据：位置表与绑定结果**必须一致**（本阶段仍无人读它）。
+    ///
+    /// 为什么现在就钉：Phase 4 把消费方从 `register_name` 切到 `value_loc` 时，如果表与
+    /// 绑定结果不一致，错会体现为产物变化（难归因）；而在 3.1 只需一条单测就能红。
+    #[test]
+    fn to_loc_map_agrees_with_the_plan_at_base_granularity() {
+        let src = "long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i;return acc;}\n";
+        let (ssa, _orig, _body, plan) = run_pipeline(src, "s", 2, &ctx_default());
+        assert!(
+            plan.bindings.len() >= 2,
+            "被测源应至少绑两个变量，实际 {:?}",
+            plan.bindings
+        );
+
+        let loc = to_loc_map(&plan, &ssa);
+
+        // (a) 折叠回基名 == plan.bindings（同集合、同号）
+        let mut got = loc.fold_by_base();
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut want: Vec<(String, Option<Location>)> = plan
+            .bindings
+            .iter()
+            .map(|(b, rn)| {
+                let n = pooled_reg_of(rn).expect("绑定名必须是池里的号");
+                (b.clone(), Some(Location::Reg(RegId { bank: RegBank::Gp, n })))
+            })
+            .collect();
+        want.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(got, want, "位置表折叠回基名必须与绑定结果一一对应");
+
+        // (b) 覆盖性：表恰好覆盖被绑基名的每一个 SSA 版本，不多不少、无悬空键
+        let bound: HashSet<String> = plan.bindings.iter().map(|(b, _)| b.clone()).collect();
+        let mut all_names: HashSet<String> = HashSet::new();
+        let mut want_keys: HashSet<String> = HashSet::new();
+        each_occurrence(&ssa, |v, _, _, _| {
+            all_names.insert(v.name());
+            if bound.contains(&v.base) {
+                want_keys.insert(v.name());
+            }
+        });
+        let have: HashSet<String> = loc.sorted_entries().into_iter().map(|(k, ..)| k).collect();
+        assert_eq!(have, want_keys, "表的键集合必须等于被绑基名的全部 SSA 版本");
+        assert!(
+            loc.dangling_keys(|k| all_names.contains(k)).is_empty(),
+            "表里不得有在 IR 找不到出现的键"
+        );
     }
 
     /// 热循环里的累加器与归纳变量都该住进寄存器，而且**必须真的落到 AST 上**
@@ -861,6 +1396,75 @@ mod tests {
             regs.len() <= POOL.len(),
             "绑定的变量数不可能超过池子大小：{:?}",
             plan.bindings
+        );
+    }
+
+    /// Phase 5.2a 的分工：**守得住的 clobber 不在这里让号**。
+    ///
+    /// clobber 说的是「本条 asm 之后这个号的内容不保证」。普通 `asm volatile` 没有跳出
+    /// 目标，后端在发射点前后各插一条保存/恢复就守得住（`asm/emit.rs::asm_guard_regs`；
+    /// 产物形态见夹具 `tests/fixtures/asm/asm_clobber_home_and_temp.c`），所以分配器不得
+    /// 因为这种 clobber 少绑一个变量 —— 那等于把 P12 的收益在最常见形状上缴掉。
+    /// 这条是反向对照：守得住时，同一个号必须仍然被绑出去。
+    #[test]
+    fn guardable_asm_clobber_does_not_shrink_the_pool() {
+        let plain =
+            "long s(long n){long a=0;long b=1;long c=2;for(long i=0;i<n;i++){a+=i;b+=a;c+=b;}return a+b+c;}\n";
+        let with_asm = "long s(long n){long a=0;long b=1;long c=2;for(long i=0;i<n;i++){\
+                        a+=i;__asm__ volatile(\"movq $1, %%rbx\" ::: \"rbx\");b+=a;c+=b;}\
+                        return a+b+c;}\n";
+        let (_f0, _o0, _b0, p0) = run_pipeline(plain, "s", 2, &ctx_default());
+        let (_f1, _o1, _b1, p1) = run_pipeline(with_asm, "s", 2, &ctx_default());
+        assert!(
+            p0.bindings.iter().any(|(_, r)| *r == "rbx"),
+            "基线源里应有人拿到 %rbx（否则本用例是空跑）：{:?}",
+            p0.bindings
+        );
+        assert!(
+            p1.bindings.iter().any(|(_, r)| *r == "rbx"),
+            "%rbx 被一条守得住的 asm clobber 了，分配器不得因此让号：{:?}",
+            p1.bindings
+        );
+    }
+
+    /// 为什么分配器**不需要**为 `asm goto` 的 clobber 另外建一份让号判据：这类函数今天
+    /// 根本进不了 SSA 管线 —— `is_structured` 看见 `Label`/`AsmGoto` 就整函数降级回 AST
+    /// 路径（`ssa::build::build_from_func` 在那一处返 `None`），于是一个号也不会被自动绑走。
+    ///
+    /// 本用例钉住的是这条**前提**，不是「已经处理了」。前提一变（比如将来允许 label 进
+    /// SSA），这里就会红，提醒把判据补回 `plan_for`：事实已经由
+    /// `crate::ast_asm::escaping_asm_clobbers` 收好，后端那一侧（`ban_escaping_asm_regs`）
+    /// 也已经在读同一个判据，所以补回来的位置只有一个。
+    #[test]
+    fn escaping_asm_functions_do_not_reach_the_allocator() {
+        let func_of = |src: &str| {
+            let (prog, _d) = crate::parser::parse(src.as_bytes(), "t.c");
+            let (m, _w) = crate::ir::lower(prog).unwrap();
+            m.source()
+                .decls
+                .iter()
+                .find_map(|d| match d {
+                    crate::ast::Decl::Func(f) if f.name.name == "s" => Some(f.clone()),
+                    _ => None,
+                })
+                .expect("源里有函数 s")
+        };
+        // 逃逸形态：asm goto 带着跳出目标，而目标标签就在同一个函数里
+        let escape = "long s(long n){long a=0;for(long i=0;i<n;i++){a+=i;\
+                      __asm__ goto(\"jmp %l0\" ::: \"rbx\" : skip);}\
+                      a+=1;skip:return a;}\n";
+        let fd = func_of(escape);
+        assert!(
+            crate::ssa::build_from_func(&fd).is_none(),
+            "带逃逸 asm goto 的函数必须不进 SSA（否则变量的家可能被绑到一个毁得住的号上）"
+        );
+        // 反向对照：同一个号被**普通** asm clobber 时函数照进 SSA（上面那条用例要求它绑得上）
+        let guardable = "long s(long n){long a=0;for(long i=0;i<n;i++){\
+                         __asm__ volatile(\"\" ::: \"rbx\");a+=i;}return a;}\n";
+        let fd2 = func_of(guardable);
+        assert!(
+            crate::ssa::build_from_func(&fd2).is_some(),
+            "普通 asm 不该把函数挡在 SSA 外面（那会让上面那条反向对照变成空跑）"
         );
     }
 

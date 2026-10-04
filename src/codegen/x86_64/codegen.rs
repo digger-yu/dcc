@@ -91,14 +91,26 @@ pub struct Codegen {
     // key = format!("{:?}", Expr) (类型 +inits 序列化),
     // value = (anon_name, rodata_offset)
     pub compound_lit_cache: HashMap<String, (String, u64)>,
-    pub frame_size: i64,
+    /// 本函数帧布局的**解算结果**（P12 Phase 2）。
+    ///
+    /// 搬迁前这里同时有 `frame_size` / `vec_temp_off` 两个裸字段，与各消费者现场
+    /// 推算的算式构成「同一个帧坐标有多个理解」（实测 42 处 `-self.frame_size + 8`、
+    /// 10 处 `48 + temp_slots*8`）。现在帧里**解算后不再变**的坐标只有本表这一个出处；
+    /// 而 `sret_region_base` / `var_map_total_slots` / `sret_watermark` 仍是 Codegen 字段，
+    /// 因为它们是**生成期会往下压的游标**，不是布局读数。
+    ///
+    /// 初值取 `unresolved()`：它等于「旧公式喂旧零镜像」的结果，所以下游即使在
+    /// 解算之前读帧底坐标（串行/并行首函数、`naked` 早返）也与搬迁前逐字相同。
+    pub frame_layout: crate::codegen::x86_64::abi::layout::LayoutMap,
     pub expr_depth: u32,     // 当前表达式嵌套深度 (用于帧临时槽分配)
+    /// 晚分配站点的**发射序**计数（P12 Phase 5.1.a 配套，见 `Codegen::next_late_site`）。
+    /// 逐函数复位（与 `expr_depth` 同处）。
+    pub late_site_seq: u32,
     pub max_expr_depth: u32, // 最大表达式嵌套深度
     pub temp_slots: i32,     // 帧临时槽数量 (用于变量偏移计算)
     /// 已注册固定栈对象占用的 8 字节槽数。
     /// 只记录真实布局用量，不再为大数组创建 __pad_ 占位项。
     pub var_map_total_slots: i64,
-    pub vec_temp_off: i64, // 向量临时槽区基址 (r13 相对)
     pub vla_offsets: HashMap<String, i64>,
     pub vla_total_size: i64,
     /// 局部 variable-sized struct (含 VLA 字段) 的声明时绑定总大小槽:
@@ -110,6 +122,13 @@ pub struct Codegen {
     // 当前函数体含 VLA 声明：goto/break/continue 跳转前需恢复动态栈基，
     // 否则循环内重复进入 VLA 作用域会累积泄漏直至栈耗尽 (vla-dealloc-1)
     pub cur_func_has_vla: bool,
+    /// 当前函数是 `__attribute__((naked))`：没有序言/尾声，也没有帧，函数体就是用户的汇编。
+    ///
+    /// 两个读取方靠它区分形态（P12 Phase 5.2a）：
+    ///   * 内联 asm 的「保存/恢复守护」不得在 naked 函数里插 `push`/`pop` —— 栈是用户在管；
+    ///   * 而且这条路径上 `reset_reg_tracker()` 根本没跑，`RegBank` 的两个位图还是上一个
+    ///     函数的残值（那是旧代码就有的行为，本阶段不顺手改），据它算出的守护集合不可信。
+    pub cur_func_is_naked: bool,
     pub bf_rmw_depth: u32, // 位域 read-modify-write 嵌套深度 (动态帧槽分配)
     /// 向量 binop 操作数物化槽号。嵌套向量 binop 时每层结果槽 R 的
     /// 操作数物化到 R+1 (XMM 快速路径 R+1/R+2), 避免内层子表达式
@@ -216,12 +235,15 @@ pub struct Codegen {
     pub upvar_intermediate_offsets: HashMap<String, Vec<i64>>,
     // &&label 地址引用：(disp32_pos, label_name)
     pub label_addr_refs: Vec<(u64, String)>,
-    // register asm 变量绑定：变量名 → (寄存器编号, 声明类型)。类型与寄存器必须同表携带：
-    // 绑定路径的读写要按声明宽度截断/扩展，与栈槽路径同一口径，否则同一个变量在两条
-    // 通路下会给出不同的值。
-    pub reg_bindings: HashMap<String, (u8, Type)>,
-    // file-scope register asm 变量绑定：每个函数入口恢复
-    pub global_reg_bindings: HashMap<String, (u8, Type)>,
+    /// 变量名 → **家** + 声明类型。这张表就是「哪些变量住物理寄存器」的唯一答案
+    /// （P12 Phase 4.1c 之前叫 `reg_bindings: HashMap<String,(u8,Type)>`；改成携带
+    /// `Location` 是为了 Phase 5 能表达 `Spill` 而不必再造第二张表）。
+    ///
+    /// 类型必须与家**同表携带**：绑定路径的读写要按声明宽度截断/扩展，与栈槽路径同一
+    /// 口径，否则同一个变量在两条通路下会给出不同的值（§7.16 实测）。
+    pub homes: HashMap<String, (crate::location::Location, Type)>,
+    // file-scope 绑定的家：每个函数入口恢复
+    pub global_homes: HashMap<String, (crate::location::Location, Type)>,
     /// 全程序里「地址被取走」的对象根名；只有 `addr_escaped_done` 为真时才参与判定
     /// （区分「扫过且为空」与「还没扫」）。判据本身在 `ast_gvn::addr_escaped_names`。
     pub addr_escaped: std::collections::HashSet<String>,
@@ -307,10 +329,12 @@ pub struct Codegen {
     pub asm_label_map: HashMap<String, String>,
     pub tls_var_models: HashMap<String, String>,
     pub func_alignments: HashMap<String, usize>,
-    // ── 寄存器分配器：caller/callee-saved 显式建模 ──
-    pub callee_saved_pool: [u8; 4],
-    pub reg_allocated: u8,
-    pub callee_saved_used: u8,
+    // ── 寄存器占用真源：池定义 + 两个位图 + 钉住集合，全在 `RegBank` 里 ──
+    // 见 `abi/regbank.rs` 头注释与 docs/p12-physreg-spill-design.md §3 H4。
+    // 旧的 `callee_saved_pool` / `reg_allocated` / `callee_saved_used` 三个裸字段
+    // 已收进本类型：位图仍是内部表示，但外部只能经查询方法读，写路径只剩
+    // `claim`/`alloc_temp`/`release`/`reset` 四条。
+    pub reg_bank: crate::codegen::x86_64::abi::regbank::RegBank,
     pub callee_save_patch_sites: Vec<(u64, u8)>,
     // ── 嵌套函数 trampoline ──
     pub trampoline_slots: HashMap<String, i64>,
@@ -501,7 +525,7 @@ pub struct ParallelEmitCtx {
     pub func_param_types: HashMap<String, Vec<Type>>,
     pub defined_funcs: HashSet<String>,
     pub error_attr_fns: HashSet<String>,
-    pub global_reg_bindings: HashMap<String, (u8, Type)>,
+    pub global_homes: HashMap<String, (crate::location::Location, Type)>,
     pub rodata: Vec<u8>,
     pub string_pool: HashMap<Vec<u8>, u64>,
     pub text_align: u64,
@@ -586,16 +610,17 @@ impl Codegen {
             global_seg: HashMap::new(),
             local_addr_seg: HashMap::new(),
             compound_lit_cache: HashMap::new(),
-            frame_size: 0,
+            frame_layout: crate::codegen::x86_64::abi::layout::LayoutMap::unresolved(),
             expr_depth: 0,
+            late_site_seq: 0,
             max_expr_depth: 0,
             temp_slots: 0,
             var_map_total_slots: 0,
-            vec_temp_off: 0,
             vla_offsets: HashMap::new(),
             vla_total_size: 0,
             vm_struct_size_slots: HashMap::new(),
             cur_func_has_vla: false,
+            cur_func_is_naked: false,
             bf_rmw_depth: 0,
             vector_op_slot: 1,
             relocatable: false,
@@ -663,10 +688,10 @@ impl Codegen {
             upvar_chain_depth: HashMap::new(),
             upvar_intermediate_offsets: HashMap::new(),
             label_addr_refs: vec![],
-            reg_bindings: HashMap::new(),
+            homes: HashMap::new(),
             addr_escaped: std::collections::HashSet::new(),
             addr_escaped_done: false,
-            global_reg_bindings: HashMap::new(),
+            global_homes: HashMap::new(),
             pending_data64_rels: vec![],
             pending_rodata_rels: vec![],
             pending_label_diff_rels: vec![],
@@ -718,10 +743,8 @@ impl Codegen {
             mcount_loc_entries: vec![],
             asm_label_map: HashMap::new(),
             tls_var_models: HashMap::new(),
-            // 寄存器分配器初始化
-            callee_saved_pool: [3, 12, 14, 15], // rbx, r12, r14, r15
-            reg_allocated: 0,
-            callee_saved_used: 0,
+            // 寄存器占用真源（逐函数复位见 `reset_reg_tracker`）
+            reg_bank: crate::codegen::x86_64::abi::regbank::RegBank::new(),
             callee_save_patch_sites: vec![],
             // 嵌套函数 trampoline
             trampoline_slots: HashMap::new(),
@@ -1219,12 +1242,16 @@ impl Codegen {
         // 收集全局变量 → .data / .bss (或自定义 section)
         for decl in &prog.decls {
             if let Decl::Var(v) = decl {
-                if let Some(ref reg_name) = v.register_name {
-                    if let Some(reg_idx) = Self::parse_reg_name(reg_name) {
-                        self.global_reg_bindings
-                            .insert(v.name.name.clone(), (reg_idx, v.ty.clone()));
+                if v.register_name.is_some() {
+                    // 与声明处同一个解析器：非法名在这里就报错（E0316）。
+                    // **只有真的拿到了家才跳过存储分配**：旧写法是无条件 `continue`，于是
+                    // 一个没认出来的名字会让这个全局对象既不进 .data/.bss 也不发符号
+                    // （实测产物里名字出现 0 次）。
+                    let home = self.resolve_asm_reg(v);
+                    if let Some(home) = home {
+                        self.global_homes.insert(v.name.name.clone(), (home, v.ty.clone()));
+                        continue;
                     }
-                    continue;
                 }
                 let sz_raw = v.ty.size().max(1);
                 // 超大数组 (>1GB) 可能导致内存分配失败，视为外部声明不分配存储
@@ -2224,5 +2251,72 @@ mod tests {
         assert!(cg.diagnostics.is_empty(), "unexpected: {:?}", err_codes(&cg));
         let disp = i32::from_le_bytes(cg.code[1..5].try_into().unwrap());
         assert_eq!(disp, 6 - 5, "disp32 必须等于 dst - next_ip");
+    }
+
+    /// Phase 5.1.c：**`Spill(槽号)` 与「同一个偏移的 `Stack` 家」必须发出逐字节相同的指令**。
+    ///
+    /// 这条对拍就是「翻译只发生在一处」的证据：三个消费臂（取地址 / 读 / 写）如果此哪个
+    /// 自己拿槽号当偏移用（少翻译一次）或翻译两次（多减一层），字节流当场分叉。比直接匹配
+    /// 位移字节好：它不依赖宽度/寻址形式，将来改 `load_stack` 的编码不会把用例弄假。
+    ///
+    /// 最后一句钉住「不是靠回退到 var_map 旧槽凑上的」：同一个名字没有家时算出来的
+    /// 坐标必须与带里那个不同（否则本用例三个臂可以全部走回退而照样绿）。
+    #[test]
+    fn spill_home_goes_through_the_single_translation_point() {
+        use crate::codegen::x86_64::abi::layout::{
+            FramePlan, LayoutMap, TRAMP_RESERVE, VEC_RESERVE,
+        };
+        use crate::location::Location;
+        let mut cg = x86();
+        cg.frame_layout = LayoutMap::resolve(&FramePlan {
+            temp_slots: 2,
+            var_bytes: 512,
+            sret_need: 64,
+            va_slots: 0,
+            static_chain_slot: 0,
+            bf_rmw_reserve: 0,
+            vec_reserve: VEC_RESERVE,
+            tramp_reserve: TRAMP_RESERVE,
+            stack_reserve: 48,
+            spill_slots: 3,
+        });
+        assert_eq!(cg.frame_layout.spill_band_bytes, 24, "本用例需要一个非零 band");
+        let want = cg.frame_layout.spill_off(1);
+        cg.homes.insert("v".to_string(), (Location::Spill(1), Type::Long));
+        assert_eq!(cg.stack_home_off("v"), want, "取地址必须走 spill_off");
+
+        cg.code.clear();
+        cg.mov_from_stack(0, "v");
+        let read_spill = cg.code.clone();
+        cg.code.clear();
+        cg.mov_to_stack(0, "v");
+        let write_spill = cg.code.clone();
+
+        // 换成显式 `Stack(want)`（同一个坐标）：两条发射序列必须逐字节相同
+        cg.homes.insert("v".to_string(), (Location::Stack(want), Type::Long));
+        cg.code.clear();
+        cg.mov_from_stack(0, "v");
+        let read_stack = cg.code.clone();
+        cg.code.clear();
+        cg.mov_to_stack(0, "v");
+        let write_stack = cg.code.clone();
+        assert_eq!(read_spill, read_stack, "读路的 spill_off 与 Stack 家发的字节不一样");
+        assert_eq!(write_spill, write_stack, "写路的 spill_off 与 Stack 家发的字节不一样");
+        assert!(
+            !read_spill.is_empty() && !write_spill.is_empty(),
+            "两侧都是空字节流 ⇒ 上面两条等式是空跑的相等"
+        );
+
+        // 没家时走 var_map（懒注册）⇒ 坐标与带里那个不同：排除「靠回退凑绿」
+        cg.homes.remove("v");
+        assert_ne!(cg.stack_home_off("v"), want, "本用例必须真的在比较两个不同的坐标");
+        // 而带外的家（Imm）仍得走点名报错，不得静默当成帧内坐标
+        cg.homes.insert("w".to_string(), (Location::Imm(7), Type::Long));
+        cg.stack_home_off("w");
+        assert!(
+            err_codes(&cg).contains(&"E1129"),
+            "Imm 家必须仍报 E1129（没接线的家要可见地失败），实得 {:?}",
+            err_codes(&cg)
+        );
     }
 }

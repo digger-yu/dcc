@@ -6,6 +6,7 @@
 #![allow(dead_code, unreachable_patterns, dropping_references)]
 
 pub mod ast;
+pub mod ast_asm;
 pub mod ast_gvn;
 #[cfg(test)]
 mod ast_tests;
@@ -26,6 +27,7 @@ pub mod ipa_sra;
 pub mod ir;
 pub mod link;
 pub mod linker_script;
+pub mod location;
 pub mod loop_opt;
 pub mod lto;
 pub mod memory_report;

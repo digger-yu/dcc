@@ -106,7 +106,7 @@ impl Codegen {
                 _ => Type::Double,
             };
             let inner_sz = inner.size() as i64;
-            let result_off = -self.frame_size + 8;
+            let result_off = self.complex_result_off();
             // complex LD: 两分量各 fchs (值通道是 x87), 物化到帧槽,
             // rax=result_off (LD rvalue 约定; 旧路径 movsd 只读 8 字节)。
             if matches!(inner, Type::LongDouble) {
@@ -178,7 +178,7 @@ impl Codegen {
                 _ => Type::Double,
             };
             let inner_sz = inner.size() as i64;
-            let result_off = -self.frame_size + 8;
+            let result_off = self.complex_result_off();
             // complex LD 共轭: 源只求值一次物化成 tbyte 对, real 直写,
             // imag fchs 后写。
             if matches!(inner, Type::LongDouble) {

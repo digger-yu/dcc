@@ -59,7 +59,7 @@ impl Codegen {
             func_param_types: self.func_param_types.clone(),
             defined_funcs: self.defined_funcs.clone(),
             error_attr_fns: self.error_attr_fns.clone(),
-            global_reg_bindings: self.global_reg_bindings.clone(),
+            global_homes: self.global_homes.clone(),
             rodata: self.rodata.clone(),
             string_pool: self.string_pool.clone(),
             text_align: self.text_align,
@@ -131,7 +131,7 @@ impl Codegen {
         cg.func_param_types = ctx.func_param_types;
         cg.defined_funcs = ctx.defined_funcs;
         cg.error_attr_fns = ctx.error_attr_fns;
-        cg.global_reg_bindings = ctx.global_reg_bindings;
+        cg.global_homes = ctx.global_homes;
         cg.rodata = ctx.rodata;
         cg.string_pool = ctx.string_pool;
         cg.text_align = ctx.text_align;

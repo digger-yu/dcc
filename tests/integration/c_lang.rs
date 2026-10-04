@@ -3405,3 +3405,61 @@ fn user_warning_does_not_break_compile() {
     let output = run_syntax_test("user-warning", source);
     assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
+
+/// 深嵌套二元式必须落在**帧溅出槽**的 disp32 编码上，且解码必须干净。
+///
+/// 为什么钉这一条：表达式第 `depth` 层的溅出槽偏移是 `-(48 + depth*8)`，发射点按
+/// `|off| < 128` 在 disp8 / disp32 两条编码之间分岔（`expr/binary.rs`、`expr/dispatch.rs`）。
+/// 而 disp32 分支直接发 `slot_off.to_le_bytes()` —— **发射宽度由变量类型决定，不由数值决定**。
+/// P12 Phase 2 把该算式收进 `abi/layout.rs::temp_slot_off()` 时把它从 `i32` 变成了 `i64`：
+/// 数值一字不差，但 `to_le_bytes()` 从 4 字节变成 8 字节，disp32 后面多了 4 个 `0xff`，
+/// 紧随其后的整条指令流被推偏（objdump 报 `(bad)`，执行到那里 SIGILL）。
+///
+/// 当时的两层判据都没抓到：三档产物哈希的语料里没有 `expr_depth >= 10` 的帧槽回退，
+/// 而 `git diff` 逐行核对看到的是“恒等替换”。所以这里把两个方向都钉住：
+/// 静态（解码必须无 `(bad)`）+ 动态（执行结果必须对）。表达式的深度下界取 12：
+/// `depth>=10` 就会越过 disp8 边界，留两层余量。
+#[test]
+fn deep_right_nested_binops_stay_decodable_and_correct() {
+    // 12 层右嵌套：g(1) + (g(2) + (... + (g(12) + 0)))，求值应为 78。
+    let mut src = String::from("int g(int x) { return x; }\nint f(void) { return ");
+    for i in 1..=12 {
+        src.push_str(&format!("g({}) + (", i));
+    }
+    src.push('0');
+    for _ in 1..=12 {
+        src.push(')');
+    }
+    src.push_str(";\n}\nint main(void) { return f() - 78; }\n");
+
+    // 静态：编成目标文件后反汇编不得出现不可解码字节。
+    let (output, obj) = run_object_test_flags("deep-nested-binop", &src, &["-O0"]);
+    assert!(
+        output.status.success(),
+        "编译失败：{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let dump = Command::new("objdump")
+        .args(["-d", "--no-show-raw-insn"])
+        .arg(&obj)
+        .output()
+        .expect("objdump");
+    assert!(dump.status.success(), "objdump -d 失败");
+    let text = String::from_utf8_lossy(&dump.stdout);
+    assert!(
+        !text.contains("(bad)"),
+        "深嵌套表达式落在 disp32 编码上时字节流被写坏了（发射宽度应该永远是 4 字节）：\n{}",
+        text.lines().filter(|l| l.contains("bad")).collect::<Vec<_>>().join("\n")
+    );
+
+    // 动态：写坏编码必然 SIGILL（退出码 132），能跑对才是真的对。
+    let (cout, exe) = run_compile_and_run("deep-nested-binop-run", &src);
+    assert!(
+        cout.status.success(),
+        "编译失败：{}",
+        String::from_utf8_lossy(&cout.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(exe);
+    assert_eq!(code, 0, "深嵌套右结合加法链的求值结果错（期望 78）");
+}

@@ -94,7 +94,10 @@ impl Codegen {
         let var_has_definition = |name: &str| -> bool { var_defined.contains(name) };
         for decl in &prog.decls {
             if let Decl::Var(v) = decl {
-                if v.register_name.is_some() {
+                // 住在寄存器里的对象不进符号表：判据读**家表**（收集阶段已解析完的那一份），
+                // 不再独立判 `register_name.is_some()` —— 否则一个没认出的寄存器名会让对象
+                // 既无存储又无符号（§11.6.3 记的静默消失缺陷）。同一事实只有一处判据。
+                if self.global_homes.contains_key(v.name.name.as_str()) {
                     continue;
                 }
                 // __attribute__((alias)): 变量别名由 alias 路径处理

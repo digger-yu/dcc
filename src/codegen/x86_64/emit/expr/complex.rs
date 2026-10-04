@@ -180,7 +180,7 @@ impl Codegen {
         let is_float_inner = matches!(inner_ty, Type::Float | Type::Double | Type::LongDouble);
         let total_sz = inner_sz * 2;
         let save_sz = total_sz * 2;
-        let result_off = -self.frame_size + 8;
+        let result_off = self.complex_result_off();
         if matches!(inner_ty, Type::LongDouble) {
             // `_Complex long double` 走独立 x87 链路（f/d 仍走下方 SSE 路径）。
             // 详见 gen_complex_ld_binop。
@@ -443,7 +443,7 @@ impl Codegen {
         let (base_reg, real_base) = if is_lvalue {
             (0u8, 0i64)
         } else {
-            (13u8, -self.frame_size + 8)
+            (13u8, self.complex_result_off())
         };
         self.emit_x87_fld_at(base_reg, real_base as i32, &src_inner);
         self.emit_x87_fstp_at(13, dst as i32, &Type::LongDouble);
@@ -593,7 +593,7 @@ impl Codegen {
             let ri = r_inner.unwrap_or_else(|| inner.clone());
             let rpfx = if matches!(ri, Type::Float) { 0xF3u8 } else { 0xF2u8 };
             let r_isz = ri.size() as i64;
-            let result_off = -self.frame_size + 8;
+            let result_off = self.complex_result_off();
             self.emit_xmm0_r13_disp(&[rpfx, 0x41, 0x0F, 0x10], result_off + r_isz);
             self.emit_float_convert(&ri, inner);
         } else {
@@ -665,7 +665,7 @@ impl Codegen {
         // (尾部重载), 对 sret Call 返回 (Memory 类, xmm0 未定义)
         // 不成立: rr = cl2(x) 实部被垃圾污染 (B 打印 0.0)。
         if matches!(inner, Type::Float | Type::Double | Type::LongDouble) {
-            let result_off = -self.frame_size + 8;
+            let result_off = self.complex_result_off();
             if init_is_complex {
                 // 读取宽度按源内型: 产出端 (binop 等) 按运算 inner 写
                 // result_off 位模式, 目标更窄 (Float) 时按 movss 读低
@@ -695,7 +695,7 @@ impl Codegen {
             // 实部/虚部均从内存对读取, 不信任 rax/rdx 寄存器内容。
             // 源 4 字节时 result_off 低 8 字节为实部+虚部打包,
             // movsxd 取实部符号扩展 (_Complex int → _Complex long)。
-            let result_off = -self.frame_size + 8;
+            let result_off = self.complex_result_off();
             if !init_is_complex {
                 // 标量 init: gen_expr 后 rax = 值 (非 result_off 地址
                 // 约定), 旧路径直接 load_stack(result_off) 丢弃 rax,
@@ -736,7 +736,7 @@ impl Codegen {
             let _ = imag_bytes;
         } else {
             if init_is_complex {
-                let result_off = -self.frame_size + 8;
+                let result_off = self.complex_result_off();
                 // 虚部按源内型偏移读取 (源 4 字节时在 result_off+4,
                 // 而非目标的 inner_sz)
                 self.load_stack(0, result_off + src_inner_sz);
@@ -1004,7 +1004,7 @@ impl Codegen {
             return false;
         }
         let isz = inner.size() as i64;
-        let result_off = -self.frame_size + 8;
+        let result_off = self.complex_result_off();
         if let Type::LongDouble = &inner {
             // LD: 源在 [rax+0]/[rax+16]（每分量 16 字节 tbyte 槽），逐分量
             // fld tbyte 起、fstp tbyte 物化到 result_off/result_off+16。
@@ -1126,7 +1126,7 @@ impl Codegen {
             // 统一物化在 result_off 内存对。不能信任寄存器残留:
             // Call sret 返回 (Memory 类) 后 xmm0 未定义。
             self.gen_expr(e, 0);
-            let result_off = -self.frame_size + 8;
+            let result_off = self.complex_result_off();
             if matches!(inner, Type::LongDouble) {
                 // LD: 实部/虚部各在 16 字节 tbyte 槽 (result_off / +16),
                 // fld tbyte 把该分量留在 st(0)（x87 标量通道）。
@@ -1140,7 +1140,7 @@ impl Codegen {
         } else {
             // 整数内型非 lvalue (如 3i + 5i): 实部/虚部在帧临时区
             self.gen_expr(e, 0);
-            let result_off = -self.frame_size + 8;
+            let result_off = self.complex_result_off();
             let off = if is_real { result_off } else { result_off + inner_sz };
             self.load_stack(0, off);
         }
@@ -1200,7 +1200,7 @@ impl Codegen {
                 // xmm1 — 那是 _Complex double 的两寄存器分类, float
                 // complex 调用方 movsd 只读 xmm0, 虚部丢失
                 // complex-6 test_float)。
-                let result_off = -self.frame_size + 8;
+                let result_off = self.complex_result_off();
                 self.emit_xmm0_r13_disp(&[0x66, 0x41, 0x0F, 0x10], result_off);
             }
             return;
@@ -1222,7 +1222,7 @@ impl Codegen {
             return;
         }
         self.gen_expr(e, 0);
-        let result_off = -self.frame_size + 8;
+        let result_off = self.complex_result_off();
         self.emit_xmm_r13_disp(pfx, 0x10, 0, result_off);
         self.emit_xmm_r13_disp(pfx, 0x10, 1, result_off + inner_sz);
         if is_float {
@@ -1300,7 +1300,7 @@ impl Codegen {
     }
     pub(crate) fn gen_complex_store_rcx(&mut self, r: &Expr, l_ty: &Type) {
         if let Type::Complex(ref inner) = *l_ty {
-            let result_off = -self.frame_size + 8;
+            let result_off = self.complex_result_off();
             if matches!(&inner.base, Type::Float | Type::Double | Type::LongDouble) {
                 // 目标地址由调用方 push 入栈，store_complex_at_rcx 内部会
                 // 自行 pop 到 rcx 并对 r 只求值一次（LD 单次物化；f/d 经
@@ -1326,7 +1326,7 @@ impl Codegen {
                 return;
             }
             let isz = inner.base.size() as i64;
-            let result_off = -self.frame_size + 8;
+            let result_off = self.complex_result_off();
             self.gen_expr(r, 0);
             self.pop(1); // rcx = 目标地址
             let src_isz = match r.ty() {
@@ -1480,7 +1480,7 @@ impl Codegen {
             match op {
                 BinOp::Add | BinOp::Sub => {
                     // real ± imag → complex: 结果需要存 (real, imag) 对
-                    let result_off = -self.frame_size + 8;
+                    let result_off = self.complex_result_off();
                     let inner_sz = inner_ty.size() as i64;
                     let total_sz = inner_sz * 2;
                     let save_sz = total_sz * 2;
@@ -1584,7 +1584,7 @@ impl Codegen {
         op_inner: &Type,
     ) {
         let total_sz = inner_sz * 2;
-        let result_off = -self.frame_size + 8;
+        let result_off = self.complex_result_off();
         match e {
             Expr::Ident { name, ty, .. } => {
                 // 分量偏移/读取宽度按变量自身 inner (C99 提升后运算 inner

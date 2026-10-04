@@ -155,7 +155,7 @@ impl Codegen {
                                             Expr::CompoundLit { .. } | Expr::InitList { .. }
                                         ) {
                                             // 使用帧底部临时区 (-frame_size+8)
-                                            let temp_off = -self.frame_size + 8;
+                                            let temp_off = self.complex_result_off();
                                             let inits = match e {
                                                 Expr::CompoundLit { inits, .. } => Some(inits),
                                                 Expr::InitList { inits, .. } => Some(inits),
@@ -472,17 +472,10 @@ impl Codegen {
                 self.break_targets.pop();
             },
             Stmt::Block { b, .. } => {
-                let cleanup_base = self.cleanup_vars.len();
+                let cleanup_base = self.begin_cleanup_scope();
                 self.gen_block_items(&b.items);
-                // P2-9: 块结束时逆序调用 cleanup 函数
-                while self.cleanup_vars.len() > cleanup_base {
-                    if let Some((var_name, fn_name)) = self.cleanup_vars.pop() {
-                        // 发射: lea rdi, [r13 + offset]; call fn_name
-                        let off = self.var_offset(&var_name);
-                        self.emit_lea_r13(7, off); // rdi = &var
-                        self.call_label(&fn_name);
-                    }
-                }
+                // P2-9: 块结束时逆序调用 cleanup 函数（与语句表达式共用同一份实现）
+                self.end_cleanup_scope(cleanup_base);
                 // 含 VLA 的块 fall-through 退出: 恢复动态栈基,
                 // 丢弃本块及更深层已退出的动态分配 (见 emit_vla_restore)
                 if Self::block_contains_vla(&b.items) {
@@ -935,6 +928,29 @@ impl Codegen {
         }
     }
 
+    /// 块作用域的 cleanup 登记边界：进来时记水位。
+    ///
+    /// 为什么要成对地抽出来：`__attribute__((cleanup))` 的**登记**在 `gen_block_item` 里，
+    /// 而**发出**在 `Stmt::Block` 臂里；语句表达式 `({...})` 走的是 `gen_block_item` 的一份
+    /// 副本（`emit/expr/dispatch.rs`），它既有自己的登记点又没有这个收尾点 —— 于是写在
+    /// 语句表达式里的 cleanup 从来不会执行（实测 `hits=0`，gcc 是 4）。把两端收成一个
+    /// 成对入口，副本忘了哪一端都会当场可见。
+    pub fn begin_cleanup_scope(&mut self) -> usize {
+        self.cleanup_vars.len()
+    }
+
+    /// 出块：按 LIFO 发出本作用域内登记的 cleanup 调用。
+    pub fn end_cleanup_scope(&mut self, base: usize) {
+        while self.cleanup_vars.len() > base {
+            if let Some((var_name, fn_name)) = self.cleanup_vars.pop() {
+                // 发射: lea rdi, [r13 + offset]; call fn_name
+                let off = self.var_offset(&var_name);
+                self.emit_lea_r13(7, off); // rdi = &var
+                self.call_label(&fn_name);
+            }
+        }
+    }
+
     fn gen_block_item(&mut self, it: &BlockItem) {
         match it {
             BlockItem::Stmt(s) => self.gen_stmt(s),
@@ -955,16 +971,9 @@ impl Codegen {
                 {
                     return;
                 }
-                if let Some(ref reg_name) = v.register_name {
-                    // 与 `compile_func` 里的声明同一判据：地址已逸出的对象不得绑到寄存器。
-                    if self.register_binding_allowed(&v.name.name) {
-                        if let Some(reg_idx) = Self::parse_reg_name(reg_name) {
-                            self.reg_bindings.insert(v.name.name.clone(), (reg_idx, v.ty.clone()));
-                            // 绑定即占用该寄存器：必须保存 + 不得再当临时值发出（见 claim_bound_register）
-                            self.claim_bound_register(reg_idx);
-                        }
-                    }
-                }
+                // 声明处的绑定走唯一入口（与 `compile_func` 那侧同一份判据，
+                // 以前是两个拷贝，改一处漏一处）。
+                self.bind_decl_home(v);
                 // P2-9: cleanup 属性变量注册
                 if let Some(ref fn_name) = v.cleanup_fn {
                     self.cleanup_vars
@@ -1034,7 +1043,7 @@ impl Codegen {
                             // 避开 float→__int128 转换只备 rax 的情形。
                             let store_hi = matches!(&v.ty, Type::Int128 | Type::UInt128)
                                 && matches!(&init_ty, Type::Int128 | Type::UInt128)
-                                && !self.reg_bindings.contains_key(&v.name.name);
+                                && !self.homes.contains_key(&v.name.name);
                             self.mov_to_stack(0, &v.name.name);
                             if store_hi {
                                 let off = self.var_offset(&v.name.name);

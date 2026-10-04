@@ -307,7 +307,7 @@ impl Codegen {
                             // dst (rax) 已指向返回值, 保持不变
                         } else {
                             // <=8B 全值在 rax; >8B 且 <=16B 在 rax:rdx
-                            let result_off = -self.frame_size + 8;
+                            let result_off = self.complex_result_off();
                             self.emit_store(0, result_off, 8);
                             if struct_size > 8 {
                                 self.emit_store(2, result_off + 8, 8);
@@ -482,7 +482,7 @@ impl Codegen {
                     // spill/比较端把 rax 当源地址 rep movsb, 标量加载
                     // 会让它以位模式值为指针 (foo().x 段错误)。
                     let isz = inner.base.size();
-                    let result_off = -self.frame_size + 8;
+                    let result_off = self.complex_result_off();
                     self.mov(6, dst); // rsi = 字段地址
                     self.emit_lea_r13(7, result_off); // rdi = 物化槽
                     self.mov_imm(1, (isz * 2) as i128);
@@ -646,7 +646,7 @@ impl Codegen {
                 // 消费端 (gen_complex_part 非 lvalue 分支等) 按
                 // result_off 读取; 旧目标 vector_temp_base 与
                 // 消费端约定错位。
-                let result_off = -self.frame_size + 8;
+                let result_off = self.complex_result_off();
                 let is_float_inner = matches!(
                     ty,
                     Type::Complex(ref inner)
@@ -706,7 +706,7 @@ impl Codegen {
                 _ => 8,
             };
             let total_sz = inner_sz * 2;
-            let result_off = -self.frame_size + 8;
+            let result_off = self.complex_result_off();
             let src_off = self.var_offset(&name.name);
             self.emit_lea_r13(6, src_off); // rsi = &var
             self.emit_lea_r13(7, result_off); // rdi = result_off

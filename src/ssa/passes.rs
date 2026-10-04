@@ -1730,6 +1730,12 @@ fn walk_block_refs(
                 if let Some(init) = &v.init {
                     walk_expr_refs(init, func_names, calls, address_taken);
                 }
+                // `__attribute__((cleanup(f)))` 是一个**调用**，只是不写成 `Expr::Call`。
+                // 不记进调用图，DCE 就会把只被 cleanup 用的 static 函数删掉：实测
+                // `-O2` 链接报 `undefined reference to 'hit_cleanup'`，而 `-O0/-O1` 正常。
+                if let Some(cf) = &v.cleanup_fn {
+                    calls.push(cf.clone());
+                }
             },
             _ => {},
         }
@@ -4693,7 +4699,8 @@ mod tests {
                 );
             }
             for level in [2u8, 3u8] {
-                let mut s = ssa.clone();
+                // 整函数复制走显式 `fork()`：pass 要在副本上跑，位置表也必须一起带走。
+                let mut s = ssa.fork();
                 run_with_opts(&mut s, level, true);
                 let dangling = crate::ssa::dangling_refs(&s);
                 assert!(

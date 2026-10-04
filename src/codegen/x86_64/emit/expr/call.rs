@@ -161,7 +161,7 @@ impl Codegen {
         // (赋值/spill/传参) 统一按内存对读取, 避免整数 _Complex
         // 返回被按 xmm 读取得垃圾 (complex-6: ctest_int)。
         if let Type::Complex(inner) = ty {
-            let result_off = -self.frame_size + 8;
+            let result_off = self.complex_result_off();
             if complex_builtin_done {
                 // conj 系列已在 gen_builtin 内自物化 (实部
                 // result_off, 虚部 result_off+isz, xmm0=实部),

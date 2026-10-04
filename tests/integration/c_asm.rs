@@ -471,6 +471,310 @@ fn asm_register_binding_owns_its_register() {
     assert_bytes_present(&text, &[0x49, 0x89, 0x5d, 0xf0], "序言保存 %rbx");
 }
 
+/// 内联汇编的 clobber 名单是「本条 asm 之后这些号的内容不保证」的宣告：谁此刻正把值
+/// 放在那儿，谁就必须被保住（P12 Phase 5.2a）。
+///
+/// 两类主人各自只在某些档位坏：变量的家只在 -O2/-O3 存在（自动分配发生在 SSA 管线里），
+/// 而表达式栈机的溅出槽与档位无关 —— 修前实测 `-O0` 就坏。所以逐档与 gcc 对照。
+///
+/// 修前的两个读数（本轮实测）：`home_across_clobber(10)` 得 632360（gcc 3050），
+/// `temp_across_clobber(2,3,4)` 得 38885（gcc 25，四个档位都错）。静态判据钉住两件事：
+/// 守护确实成对出现且把那条 asm 包在中间；而且它没有退化成「看见 clobber 就不绑」
+/// —— 那个号仍然必须是变量的家。
+#[test]
+fn asm_clobber_guards_the_register_that_holds_a_value() {
+    let source = include_str!("../fixtures/asm/asm_clobber_home_and_temp.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("asm-clobber-guard", source, &[flag]),
+            0,
+            "{flag}: 内联 asm 的 clobber 毁掉了正持有值的寄存器"
+        );
+    }
+    let (build, asm_text) = run_asm_output_test_flags("asm-clobber-guard-asm", source, "-O2");
+    assert!(build.status.success(), "stderr: {}", String::from_utf8_lossy(&build.stderr));
+
+    // 成对守护必须把被测的那条 asm 包在中间：顺序反了（先毁后存）等于没守。
+    let assert_wraps = |who: &str, body: &str, inner: &str| {
+        let p = body
+            .find("push %rbx")
+            .unwrap_or_else(|| panic!("{who}: 没找到守护的 push %rbx:\n{body}"));
+        let m = body
+            .find(inner)
+            .unwrap_or_else(|| panic!("{who}: 没找到被测的 asm 指令 {inner}:\n{body}"));
+        let o = body
+            .find("pop %rbx")
+            .unwrap_or_else(|| panic!("{who}: 没找到守护的 pop %rbx:\n{body}"));
+        assert!(
+            p < m && m < o,
+            "{who}: push/pop 必须把 {inner} 包在中间（push={p} asm={m} pop={o}）"
+        );
+    };
+    let home = extract_function_body(&asm_text, "home_across_clobber");
+    assert_wraps("home_across_clobber", &home, "mov $12345, %rbx");
+    assert!(
+        home.contains("mov %rax, %rbx"),
+        "被守护的号仍然必须是变量的家（判据不得退化成「看见 clobber 就不绑」）:\n{home}"
+    );
+    let temp = extract_function_body(&asm_text, "temp_across_clobber");
+    assert_wraps("temp_across_clobber", &temp, "mov $7777, %rbx");
+    assert!(
+        temp.contains("imul %rbx, %rcx"),
+        "溅出槽跨 asm 后必须还能从同一个号读回值（否则守护只是把错值挪了个地方）:\n{temp}"
+    );
+}
+
+/// 守护把 `%rsp` 在 asm 体内下推 8×N 字节，而本后端要求「体内每个 call 点 rsp ≡ 0 (mod 16)」：
+/// `emit/stmt.rs` 里 pr44575 的教训就是跳调用多压 8 字节让 libc 的 `movaps` 当场崩。所以
+/// 奇数个守护 push 必须配一次 `sub/add rsp, 8`，偶数个不得配（P12 Phase 5.2a）。
+///
+/// 这条不与 gcc 对照 stdout：在 inline asm 里 `call` 一个函数是 GCC 文档明确不支持的写法
+/// （实测 gcc 连活变量都保不住，返回一个栈地址），参照系只能是本后端自己的 ABI 不变式。
+/// 产物级判据是**逐 call 点累加 %rsp 位移**而不是匹配字符串：将来任何人往守护里加/减 push
+/// 都跑不掉，而只会写字符串比对的那条一改守护形式就变成假绿。
+#[test]
+fn asm_clobber_guard_keeps_call_sites_aligned() {
+    let source = include_str!("../fixtures/asm/asm_clobber_guard_alignment.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        let (build, exe) = run_compile_and_run_flags("asm-clobber-align", source, &[flag]);
+        assert!(
+            build.status.success(),
+            "{flag}: 应能编译: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let (rc, out, _) = run_exe_bounded(&exe);
+        // 139 = SIGSEGV，正是对齐没补上时的形态（探针实测：手动在 call 前 subq $8, %rsp 就崩）
+        assert_eq!(rc, 0, "{flag}: 读数不对或崩了（139=SIGSEGV 即对齐未补）");
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            "r1=10 r2=140\n",
+            "{flag}: 守护把值保错了"
+        );
+        let _ = std::fs::remove_file(&exe);
+    }
+
+    let (build, asm_text) = run_asm_output_test_flags("asm-clobber-align-asm", source, "-O2");
+    assert!(build.status.success(), "stderr: {}", String::from_utf8_lossy(&build.stderr));
+    for name in ["one_guarded", "two_guarded"] {
+        let body = extract_function_body(&asm_text, name);
+        assert!(!body.is_empty(), "{name} 应在产物里（否则本用例是空跑）");
+        // 函数入口时 rsp ≡ 8 (mod 16)（调用方的 call 推了返回地址），SysV 要求 call 指令
+        // 处 rsp ≡ 0 ⇒ 「从入口算起共下推了多少」必须 ≡ 8 (mod 16)。
+        let mut off: i64 = 0;
+        let mut calls = 0usize;
+        for raw in body.lines() {
+            let l = raw.trim();
+            if l == "mov %r13, %rsp" || l == "leave" {
+                // 尾声开始：rsp 由帧基址重置，体内 call 点已全部核过，累加到此为止。
+                break;
+            }
+            if let Some(rest) = l.strip_prefix("push ") {
+                if rest.trim() != "%rsp" {
+                    off += 8;
+                }
+            } else if let Some(rest) = l.strip_prefix("pop ") {
+                if rest.trim() != "%rsp" {
+                    off -= 8;
+                }
+            } else if let Some(rest) = l.strip_prefix("sub $") {
+                if let Some(n) = rest.split(",").next().and_then(|x| x.trim().parse::<i64>().ok()) {
+                    if rest.contains("%rsp") {
+                        off += n;
+                    }
+                }
+            } else if let Some(rest) = l.strip_prefix("add $") {
+                if let Some(n) = rest.split(",").next().and_then(|x| x.trim().parse::<i64>().ok()) {
+                    if rest.contains("%rsp") {
+                        off -= n;
+                    }
+                }
+            } else if l.starts_with("call ") {
+                calls += 1;
+                assert_eq!(
+                    (8 - off).rem_euclid(16),
+                    0,
+                    "{name}: 第 {calls} 个 call 点 %rsp 已下推 {off} 字节，不满足 16 字节对齐:\n{body}"
+                );
+            } else if (l.starts_with("and ") && l.contains("%rsp"))
+                || (l.starts_with("mov ") && l.ends_with("%rsp"))
+            {
+                // `and ..., %rsp` 是动态帧、`mov X, %rsp`（X 不是帧基址）直接写 rsp：这两种
+                // 形态会让上面的累加不再可信，本夹具不该出现；出现了就必须红，而不是默默
+                // 给一个「看起来对」的读数。
+                panic!("{name}: 出现了位移判据算不了的 rsp 写法：{l}");
+            }
+        }
+        assert!(calls >= 1, "{name}: 一个 call 都没看到 ⇒ 对齐判据是空跑");
+    }
+    // 守护个数驱动补对齐：奇数配、偶数不配（后者若也配就把对齐又弄坏了）。
+    let one = extract_function_body(&asm_text, "one_guarded");
+    assert!(
+        one.contains("sub $8, %rsp") && one.contains("add $8, %rsp"),
+        "一个守护 push 必须配一次对齐补偿（本夹具实测：少它就是 SIGSEGV）:\n{one}"
+    );
+    let two = extract_function_body(&asm_text, "two_guarded");
+    assert!(
+        !two.contains("sub $8, %rsp"),
+        "两个守护 push 已经对齐，不得再额外下推 8 字节:\n{two}"
+    );
+}
+
+/// 跳得出的 `asm goto` 守不住一个正被它毁掉的号 ⇒ 必须点名（E0317）：既不能静默给错值，
+/// 也不能插一对「跳走那条路永远不执行」的 push/pop（那会把 `%rsp` 永久下推，后续每个
+/// call 点都错位）。P12 Phase 5.2a 的边界。
+///
+/// 今天能走到这条判据上的只有用户自己写的 `register asm("rbx")` + 同一函数里
+/// `::: "rbx"` 的 `asm goto`：溅出槽已由函数入口的 `ban_escaping_asm_regs` 移出池，
+/// 自动绑定的家已由「这类函数不进 SSA」挡在外面（两个前提各有用例钉着）。
+#[test]
+fn escaping_asm_goto_clobbering_a_held_register_is_an_error() {
+    let bad = "register long v asm(\"rbx\");\n\
+               long f(long n){ long a=0;\n\
+               for(long i=0;i<n;i++){ a+=i;\n\
+               __asm__ goto(\"jmp %l0\" : : : \"rbx\" : sk); }\n\
+               sk: return a; }\n\
+               int main(void){ return (int)f(3) == 3 ? 0 : 1; }\n";
+    let (output, _obj) = run_object_test("esc-goto-clobber", bad);
+    assert!(!output.status.success(), "守不住的 clobber 不得静默通过");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0317"), "期望诊断码 E0317，实得：{stderr}");
+    assert!(
+        stderr.contains("rbx") && stderr.contains("goto"),
+        "诊断必须点名那个号与那条 asm 的形态，实得：{stderr}"
+    );
+
+    // 反向对照：同一个号被**跳不出去**的 asm clobber 时必须照旧编译，并由守护保住值
+    // —— 判据不得退化成「看见绑定号被 clobber 就报错」。
+    let ok = "register long v asm(\"rbx\");\n\
+              long f(long n){ v = n + 1;\n\
+              __asm__ volatile(\"movq $99, %%rbx\" ::: \"rbx\");\n\
+              return (long)v; }\n\
+              int main(void){ return (int)f(41) == 42 ? 0 : 1; }\n";
+    let (build, exe) = run_compile_and_run_flags("esc-goto-clobber-ok", ok, &["-O2"]);
+    assert!(
+        build.status.success(),
+        "跳不出去的 clobber 应当由守护管住而不是报错: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let (rc, out, _) = run_exe_bounded(&exe);
+    let _ = std::fs::remove_file(&exe);
+    assert_eq!(rc, 0, "被守护的绑定变量必须仍是 42（139=SIGSEGV 则是守护弄坏了对齐）: {}", String::from_utf8_lossy(&out));
+}
+
+/// 保留号的判据（E0318）：`%r13` 是本后端的帧基址（`-fno-omit-frame-pointer` 下还有 `%rbp`），
+/// 不能当变量的家；`%rsp` 不能被 clobber（它守无可守），但**可以**当只读别名。
+///
+/// 修前的实测行为是「同一份源两个档位两个答案」：`register long v asm("r13")` 在 -O0
+/// 真发出 `mov %rax,%r13`（之后所有 `-N(%r13)` 寻址全错），而在 -O2 被静默降级成栈槽
+/// —— 两边都不报错。现在两边都是 E0318（退出码 1），与 E0316 同一条纪律。
+///
+/// 反向对照特意含两个内核/stdlib 真在用的写法：`register ... asm("rsp")` 只读别名
+/// （把它一起拒了就弄坏内核构建），以及能被守护的 `%rbx`/`%r13` clobber（拒了就等于
+/// 把 5.2a 的守护改成「不让写 asm」）。
+#[test]
+fn reserved_frame_registers_are_rejected_not_silently_dropped() {
+    // 绑定侧：两个档位都必须报错，且点名变量与那个名字
+    let bind = "register long v asm(\"r13\");\nint main(void){ v = 3; return (int)v - 3; }\n";
+    for flag in ["-O0", "-O2"] {
+        let (output, _obj) = run_object_test(&format!("reserved-bind-{}", flag), bind);
+        assert!(!output.status.success(), "{flag}: 把变量绑在帧基址上不得静默通过");
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert!(
+            stderr.contains("E0318") && stderr.contains("v") && stderr.contains("r13"),
+            "期望 E0318 并点名变量与寄存器，实得：{stderr}"
+        );
+    }
+    // clobber 侧：%rsp 守不了（它就是守护自己的基座），GCC 同样不允许
+    let clobber = "long f(long n){ __asm__ volatile(\"nop\" : : : \"rsp\"); return n; }\n\
+                   int main(void){ return (int)f(2) - 2; }\n";
+    let (output, _obj) = run_object_test("reserved-clobber-rsp", clobber);
+    assert!(!output.status.success(), "clobber %rsp 不得静默通过");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(stderr.contains("E0318"), "期望 E0318，实得：{stderr}");
+
+    // 反向对照：能被守护的 callee-saved 号**不得**跟着报错——帧基址能守（push/pop 原样
+    // 还回来），池号也能守；把它们一起拒了就是把 5.2a 的守护改成了「不让写 asm」。
+    let ok = "long f(long n){ register long v asm(\"rbx\"); v = n + 1;\n\
+              __asm__ volatile(\"movq $7, %%rbx\" : : : \"rbx\");\n\
+              __asm__ volatile(\"movq $8, %%r13\" : : : \"r13\", \"memory\");\n\
+              return (long)v - (n + 1); }\nint main(void){ return (int)f(4) != 0; }\n";
+    let (build, exe) = run_compile_and_run_flags("reserved-reverse", ok, &["-O2"]);
+    assert!(
+        build.status.success(),
+        "被守护得住的号（%rbx 绑定、clobber %rbx/%r13）必须照旧编译：{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let (rc, out, _) = run_exe_bounded(&exe);
+    let _ = std::fs::remove_file(&exe);
+    assert_eq!(rc, 0, "守护后 %rbx 与 %r13 上的值都得原样：{}", String::from_utf8_lossy(&out));
+
+    // 反向对照的另一半：`register ... asm("rsp")` 是内核用的只读别名，不得跟着报错，
+    // 而且读回来的必须真是栈指针（不是某个从未写过的栈槽）。
+    let csp = "long printf(const char *, ...);\n\
+               register unsigned long current_stack_pointer asm(\"rsp\");\n\
+               unsigned long foo(void) { return current_stack_pointer; }\n\
+               int main(void){ unsigned long here; long d = (long)(foo() - (unsigned long)&here);\n\
+               printf(\"d=%ld\\n\", d); return (d > -4096 && d < 4096) ? 0 : 1; }\n";
+    let (build, exe) = run_compile_and_run_flags("reserved-rsp-alias", csp, &["-O2"]);
+    assert!(
+        build.status.success(),
+        "`register ... asm(\"rsp\")` 只读别名必须照旧编译（内核依赖它）：{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let (rc, out, _) = run_exe_bounded(&exe);
+    let _ = std::fs::remove_file(&exe);
+    assert_eq!(
+        rc, 0,
+        "读回来的值必须在栈地址附近（否则那个别名是静默错的）：{}",
+        String::from_utf8_lossy(&out)
+    );
+}
+
+/// 声明「住在寄存器里」与 `__attribute__((cleanup))` 必须在**每一条**声明通路上都生效：
+/// `for` 的 init、语句表达式 `({...})`、带标签的块。本轮实测的四条静默失效：
+///   * `for (register long i asm("rbx") = 0; i < n; i++)` ⇒ 条件读 %rbx 而 `i++` 写栈槽，
+///     **-O0/-O1 无限循环**（`register_var` 对家变量返过偏移 0，读-改-写那侧又绕开 `home_for`）；
+///   * 语句表达式里那份 `gen_block_item` 副本漏了 `bind_decl_home` ⇒ 整个 `register asm`
+///     被忽略（同一个声明写在普通块里则真用寄存器）；同一个副本还漏了 cleanup 的登记与收尾；
+///   * `rebuild_block` 重建声明时写 `cleanup_fn: None` ⇒ **-O2/-O3 把清理整个丢掉**
+///     （实测普通块里 `hits` 从 gcc 的 5 变成 0），所以这条**必须逐档**与 gcc 对照：
+///     只跑 -O0 恰好是它原本就对的那一档，等于没测。
+#[test]
+fn register_home_and_cleanup_survive_every_declaration_path() {
+    let source = include_str!("../fixtures/asm/asm_register_home_all_scopes.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("reg-home-all-scopes", source, &[flag]),
+            0,
+            "{flag}: 绑定家或 cleanup 在某某条声明通路上静默失效（挂死/无限循环也算这一类）"
+        );
+    }
+    let (build, asm_text) = run_asm_output_test_flags("reg-home-all-scopes-asm", source, "-O0");
+    assert!(build.status.success(), "stderr: {}", String::from_utf8_lossy(&build.stderr));
+
+    // `i++` 的增量必须落回 %rbx（修前它是 `add $1,%rax` + `mov %rax,栈槽`，家永远不会前进）。
+    // 对**增量之后**的子串做包含检查，本身就是「先把新值写回 home」的判据。
+    let for_body = extract_function_body(&asm_text, "for_init_bound");
+    let inc = for_body
+        .find("add $1, %rax")
+        .unwrap_or_else(|| panic!("for_init_bound 里找不到增量指令：\n{for_body}"));
+    assert!(
+        for_body[inc..].contains("mov %rax, %rbx"),
+        "增量之后必须把新值写回 %rbx（家的所在地）；修前它写的是栈槽，循环因此永不前进：\n{for_body}"
+    );
+
+    // 语句表达式里的声明：绑定真的生效，而且 cleanup 真的发出去了
+    let se_body = extract_function_body(&asm_text, "stmt_expr_bound");
+    assert!(
+        se_body.contains("mov %rax, %r12") && se_body.contains("mov %r12, %rax"),
+        "语句表达式里的 `register long j asm(\"r12\")` 必须真的走 %r12：\n{se_body}"
+    );
+    assert!(
+        se_body.contains("call hit_cleanup"),
+        "`__attribute__((cleanup))` 写在语句表达式里也必须执行：\n{se_body}"
+    );
+}
+
 /// `register asm` 变量的读写必须与栈槽路径同一个宽度口径（写入截断、读出扩展）。
 ///
 /// 修前 -O0 实测 `bv=0`、file-scope 的 `gv=4294967467`（gcc 与 -O2 都是 171）：绑定
@@ -2910,4 +3214,55 @@ fn cross_register_output_asm_lands_in_object() {
     assert!(ran > 0, "ASM-OUT-VACUOUS: 无可用 objdump, 门禁不得空跑");
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&obj);
+}
+
+/// 非法寄存器名必须是**错误**，不能静默把对象丢掉（P12 Phase 4.1d）。
+///
+/// 改前的实测行为：`register long gv asm("nosuchreg");` 退出码 0，而产物里 `gv` 出现
+/// **0 次** —— 收集全局时 `continue` 让它不进 .data/.bss，符号表又判 `register_name.is_some()`
+/// 不发符号，于是这个对象整个消失。gcc 在这里是
+/// `error: invalid register name for ‘gv’`。「名字没认出来」不可能比「声明不存在」更接近
+/// 用户意图，所以这里断言两件事：编译失败 + 诊断点名了变量和非法名。
+#[test]
+fn invalid_register_asm_name_is_an_error_not_a_silent_drop() {
+    // file-scope 与局部两种形态都走同一个解析器（`Codegen::resolve_asm_reg`）。
+    let src = "register long gv asm(\"nosuchreg\");\n\
+               int main(void) { register long lv asm(\"alsofake\"); lv = 3; return (int)gv + (int)lv; }\n";
+    let (output, _obj) = run_object_test("bad-reg-name", src);
+    assert!(!output.status.success(), "非法寄存器名不得静默通过");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0316"),
+        "期望诊断码 E0316，实得：{stderr}"
+    );
+    assert!(
+        stderr.contains("gv") && stderr.contains("nosuchreg"),
+        "诊断必须点名变量与非法名，实得：{stderr}"
+    );
+    assert!(
+        stderr.contains("lv") && stderr.contains("alsofake"),
+        "局部声明的非法名也要报（同一个解析器），实得：{stderr}"
+    );
+}
+
+/// 合法名的两种写法（`"rbx"` 与 gcc 文档里出现的 `"%rbx"`）都仍要能用，且绑定真的生效。
+///
+/// 反向对照的意义：新加的报错判据不能顺手把合法输入一起否掉 —— 那会伪装成「修好了」。
+#[test]
+fn register_asm_name_accepts_the_percent_form() {
+    let src = "register long v asm(\"%rbx\");\nint main(void) { v = 7; return (int)v - 7; }\n";
+    let (output, asm_text) = run_asm_output_test("reg-pct-form", src);
+    assert!(
+        output.status.success(),
+        "% 形式应当合法（gcc 也接受）：{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !asm_text.contains("E0316"),
+        "合法名不得触发新诊断：{asm_text}"
+    );
+    let (bout, exe) = run_compile_and_run("reg-pct-form-run", src);
+    assert!(bout.status.success(), "编译失败：{}", String::from_utf8_lossy(&bout.stderr));
+    assert_eq!(run_exe(&exe), 0, "%rbx 绑定没生效");
+    let _ = fs::remove_file(exe);
 }

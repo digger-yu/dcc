@@ -10,6 +10,12 @@ pub mod tyclass;
 // call.rs 已由 batch 3 从 mod.rs 逐字搬迁 `emit_sysv_call` 生产实现, 影子存根作废。
 pub mod call;
 pub mod frame;
+// layout.rs 是帧布局的**解算阶段**（P12 字面形态 Phase 2）：发射之前一次算完
+// 各带边界，`emit_sub_rsp` 与所有 `%r13+disp` 消费者读同一份 `LayoutMap`。
+pub mod layout;
+// regbank.rs 是「哪个物理寄存器被占着」的唯一真源（Phase 1，见
+// docs/p12-physreg-spill-design.md §3 H4 / §7 Phase 1）。
+pub mod regbank;
 
 // Note: Internal helper functions remain private in their modules
 // They are accessed via qualified paths like abi::tyclass::abi_classes

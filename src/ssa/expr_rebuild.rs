@@ -44,11 +44,12 @@ pub(super) fn resolve_operand(
             if let Some(Some(expr)) = subst.get(&ssa_name) {
                 return expr.clone();
             }
-            // 非内联: 使用基础变量名
+            // 非内联: 用该版本在 AST 里的局部名（D3/Phase 3.4：同基名的版本被分了
+            // 不同的家时，它们不再塌缩成同一个变量）。没分裂时就是基名。
             if let Some(found) = env.get(&ssa_name) {
-                ssa_ident_expr(&found.base, v)
+                ssa_ident_expr(&func.local_splits.ast_name(found), v)
             } else {
-                ssa_ident_expr(&v.base, v)
+                ssa_ident_expr(&func.local_splits.ast_name(v), v)
             }
         },
         _ => operand_to_expr(o, env, func),
@@ -708,13 +709,13 @@ pub(super) fn op_count_in_op(o: &Operand, name: &str) -> usize {
     0
 }
 
-fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>, _func: &Function) -> Expr {
+fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>, func: &Function) -> Expr {
     match o {
         Operand::Var(v) => {
             if let Some(found) = env.get(&v.name()) {
-                ssa_ident_expr(&found.base, v)
+                ssa_ident_expr(&func.local_splits.ast_name(found), v)
             } else {
-                ssa_ident_expr(&v.base, v)
+                ssa_ident_expr(&func.local_splits.ast_name(v), v)
             }
         },
         Operand::Int(v) => Expr::Int {

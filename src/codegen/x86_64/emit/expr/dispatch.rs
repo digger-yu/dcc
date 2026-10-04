@@ -272,11 +272,14 @@ impl Codegen {
                 //       / r13-(48+temp*8).. 变量 (基址 hdr 含 temp_slots)
                 // 注意: binop 槽公式只用 48 (callee-saved 区大小),
                 // temp_slots 只体现在变量基址 hdr 中, 不可重复计入.
-                let slot_off = -(48 + self.expr_depth as i32 * 8);
+                let slot_off =
+                    crate::codegen::x86_64::abi::layout::LayoutMap::temp_slot_off(
+                        self.expr_depth as i64,
+                    );
                 // 尝试使用被调用者保存寄存器代替帧槽 (减少内存访问).
                 // callee-saved 跨 call 保活 (ABI 保证 + 本编译器序言保存
                 // callee_saved_used 集合), 因此含 call 的表达式同样安全;
-                // 递归 binop 通过 reg_allocated 位图分配, 不冲突.
+                // 递归 binop 通过 `RegBank::alloc_temp` 分配，不冲突.
                 // dst==1 (rcx) 时左值可能是 shift 计数, 保守退回帧槽.
                 let use_callee_saved = dst != 1;
                 let callee_reg = if use_callee_saved {
@@ -1347,7 +1350,7 @@ impl Codegen {
                                         // gen_expr 物化在 result_off (rax=地址
                                         // 约定), 整体拷贝 isz*2 字节到 [rcx]
                                         let isz = cinner.base.size();
-                                        let result_off = -self.frame_size + 8;
+                                        let result_off = self.complex_result_off();
                                         self.emit_lea_r13(6, result_off); // rsi
                                         self.emit(&[0x48, 0x89, 0xCF]); // mov rdi, rcx
                                         self.mov_imm(1, (isz * 2) as i128);
@@ -1513,7 +1516,7 @@ impl Codegen {
                             self.push(0); // 保存目标地址
                             self.gen_expr(r, 0);
                             // 源地址: gen_expr 对聚合类型结果在帧临时区
-                            let src_off = -self.frame_size + 8;
+                            let src_off = self.complex_result_off();
                             self.emit_lea_r13(6, src_off); // rsi = src
                             self.pop(7); // rdi = dst
                             self.emit(&[0xFC]); // cld
@@ -1634,7 +1637,7 @@ impl Codegen {
                         _ => Type::Double,
                     };
                     let inner_sz = inner.size() as i64;
-                    let result_off = -self.frame_size + 8;
+                    let result_off = self.complex_result_off();
                     // complex LD: 两分量各 fchs (值通道是 x87), 物化到帧槽,
                     // rax=result_off (LD rvalue 约定)。绝不能落到下方 SSE
                     // movsd/flip_sign 路径 — 那只读/写 8 字节, 会破坏 10 字节
@@ -1707,7 +1710,7 @@ impl Codegen {
                         _ => Type::Double,
                     };
                     let inner_sz = inner.size() as i64;
-                    let result_off = -self.frame_size + 8;
+                    let result_off = self.complex_result_off();
                     // complex LD 共轭: 源只求值一次物化成 tbyte 对, real 直写,
                     // imag fchs 后写 (值通道是 x87, 不能走下方 SSE 副本)。
                     if matches!(inner, Type::LongDouble) {
@@ -2076,6 +2079,7 @@ impl Codegen {
             Expr::StmtExpr { block, .. } => {
                 // 语句表达式 ({...}): 执行块内语句, 最后表达式值留在 dst
                 let items = &block.items;
+                let cleanup_base = self.begin_cleanup_scope();
                 let last_idx = items.len().saturating_sub(1);
                 for (i, item) in items.iter().enumerate() {
                     match item {
@@ -2150,6 +2154,16 @@ impl Codegen {
                                 }
                                 continue;
                             }
+                            // 声明处的家必须走与 `gen_block_item` 同一个入口。这里是那条逻辑的
+                            // 一份副本，而副本漏了 `bind_decl_home` 与 `cleanup_fn` 登记：实测
+                            // `({ register long j asm("r12"); j = 5; j; })` 里那个绑定完全失效
+                            // （读写都走内存，而同一个声明在普通块里则真的走 %r12），而
+                            // `__attribute__((cleanup))` 在语句表达式里从不调用。读不了家的后端
+                            // 不会报错，只会把变量留在两处都不认的状态里。
+                            self.bind_decl_home(v);
+                            if let Some(ref fn_name) = v.cleanup_fn {
+                                self.cleanup_vars.push((v.name.name.clone(), fn_name.clone()));
+                            }
                             self.register_var(&v.name.name, &v.ty);
                             // 定义+声明一体的 struct/union 类型绑定 +
                             // VLA/VM struct 变量动态分配 (语句表达式内)
@@ -2194,6 +2208,18 @@ impl Codegen {
                         },
                         _ => {},
                     }
+                }
+                // 块作用域的 cleanup 必须在这里发出（以前这一臂只有登记、没有收尾，
+                // 于是 `({...})` 里的 `__attribute__((cleanup))` 静默失效）。登记了 cleanup 时
+                // 先把值在帧里放稳：cleanup 是真 call，会毁掉 caller-saved 的 dst，而跨 call
+                // 不得用 push/pop 护住（pr44575：那会把 16 字节对齐弄坏）。
+                if self.cleanup_vars.len() > cleanup_base {
+                    let slot = self.alloc_sret_slot(8);
+                    self.store_stack(dst, slot);
+                    self.end_cleanup_scope(cleanup_base);
+                    self.load_stack(dst, slot);
+                } else {
+                    self.end_cleanup_scope(cleanup_base);
                 }
             },
             Expr::Cast { ty, e, .. } => {
@@ -2294,7 +2320,8 @@ impl Codegen {
                         // 返回对象首地址, 非元数据槽)
                         self.load_stack(dst, off);
                     } else {
-                        let off = self.var_offset(&name.name);
+                        // `&var` 是取地址：走家的单一读入口（寄存器家会是内部错误）
+                        let off = self.stack_home_off(&name.name);
                         // REX.W + REX.B (r13) + REX.R (当 dst >= 8, 编码 r10/r11/r12/...)
                         let rex = 0x48u8 | 0x01 | (if dst >= 8 { 0x04 } else { 0 });
                         self.emit(&[rex, 0x8D]);
@@ -2466,22 +2493,11 @@ impl Codegen {
                 // 都会静默失效。现只委派。
                 self.gen_expr_member_rvalue(expr, field, is_arrow, ty, dst);
             },
-            Expr::CompoundLit { ty, inits, .. } => {
-                if let Type::Vector(elem_ty, n) = ty {
-                    self.gen_vector_init_rvalue(inits, &elem_ty.base, *n, 0);
-                    let vec_size = elem_ty.base.size() * n;
-                    let temp_off = self.vector_temp_base(0, vec_size);
-                    self.emit_lea_r13(dst, temp_off);
-                    return;
-                }
-                // 复合字面量: (type){...} - 在栈上分配可变内存, 初始化后返回地址
-                // 用唯一名称注册到 var_map, 复用 register_var 的栈分配逻辑
-                let compound_name = format!("__compound_lit_{}", self.pos());
-                let base_offset = self.register_var(&compound_name, ty);
-                // 生成初始化代码
-                self.gen_init_list_at(base_offset, ty, inits);
-                // dst = r13 + base_offset (compound lit address)
-                self.emit_lea_r13(dst, base_offset);
+            Expr::CompoundLit { .. } => {
+                // 单一入口：本 arm 曾是 `gen_expr_compound_lit`（`expr/compound.rs`）的逐字
+                // 副本。两份同源只会发生「只改了不在跑的那一份」的静默失效（上面
+                // Member / Cast 两个 arm 就是同一族缺陷修完留下的先例），所以这里只委派。
+                self.gen_expr_compound_lit(e, dst);
             },
             Expr::VaArg { .. } => {
                 // 单一入口：本 arm 曾是 `gen_expr_va_arg` 的逐字副本（两份同源

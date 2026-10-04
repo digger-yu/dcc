@@ -1972,7 +1972,8 @@ mod emit_order_tests {
         let bad = p.inst.with_row(&p.stage, &naive).expect("旧行序仍是合法切分");
         let e = emitted_reads_match(&p.lp, &bad).expect_err("旧行序必须被发射序自检拒掉");
         assert!(e.contains("不是模型指定的实例"), "实得：{e}");
-        let mut g = f.clone();
+        // 「被拒时原 IR 必须逐字不变」这条断言靠的就是副本独立 —— 显式 `fork()`。
+        let mut g = f.fork();
         let before = crate::ssa::dump_function(&g);
         assert!(apply_plan(&mut g, &p.lp, &bad).is_err(), "apply 不得接受被拒的行序");
         assert_eq!(crate::ssa::dump_function(&g), before, "被拒时原 IR 必须逐字不变");
@@ -2538,7 +2539,8 @@ pub fn apply_plan(
     lp: &PipelinedLoop,
     plan: &InstancePlan,
 ) -> Result<(), &'static str> {
-    let mut work = func.clone();
+    // 在副本上落地、验证失败则原件不动 —— 整函数复制必须走显式 `fork()`（含 `value_loc`）。
+    let mut work = func.fork();
     apply_into(&mut work, lp, plan)?;
     let dangling = crate::ssa::dangling_refs(&work);
     if !dangling.is_empty() {

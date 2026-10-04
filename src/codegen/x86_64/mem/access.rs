@@ -17,6 +17,10 @@ use crate::semantics::{self, *};
 use crate::target::Target;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+
+/// 消费点读到了后端**还没接线**的家（`Spill`/`Imm`/非 GP 通道）。
+/// 与 `report_internal_bug` 同族：它不是用户代码错误，而是「新增了一种家却没改消费点」。
+const DIAG_UNPLUMBED_HOME: &str = "E1129";
 impl Codegen {
     pub(crate) fn copy_r13_bytes(&mut self, src_off: i64, dst_off: i64, size: usize) {
         self.emit_lea_r13(6, src_off);
@@ -1085,7 +1089,7 @@ impl Codegen {
                     self.pop(0); // rax = addr
                 }
                 let elem_ty = original_expr.ty();
-                let result_off = -self.frame_size + 8;
+                let result_off = self.complex_result_off();
                 if let Type::Complex(ref inner) = elem_ty {
                     let inner_sz = inner.base.size();
                     let pfx = if matches!(inner.base, Type::Float) {
@@ -1143,7 +1147,7 @@ impl Codegen {
                 if let Type::Complex(ref inner) = elem_ty {
                     // rvalue 已经在 result_off 生成，直接拷贝
                     let inner_sz = inner.base.size();
-                    let result_off = -self.frame_size + 8;
+                    let result_off = self.complex_result_off();
                     self.emit_lea_r13(6, result_off); // rsi = source
                                                       // 存储实部: xmm0 → [rcx]
                     self.emit(&[0x48, 0x89, 0xf2]); // mov rdx, rsi
@@ -1195,7 +1199,7 @@ impl Codegen {
             .var_map
             .get(name)
             .map(|(_, t)| t)
-            .or_else(|| self.reg_bindings.get(name).map(|(_, t)| t))
+            .or_else(|| self.homes.get(name).map(|(_, t)| t))
         else {
             return (8, true, false, false);
         };
@@ -1225,16 +1229,77 @@ impl Codegen {
         let is_struct = matches!(t, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _));
         (s, signed(t) && !is_struct, sn, is_struct)
     }
+    /// 名字 → 家：**唯一的读入口**（P12 Phase 4.3，取代「先查 `var_map` 再查 `homes`」
+    /// 这种在每个消费点各自定优先级的写法）。
+    ///
+    /// 双轨的害不在「有两条路」，而在**每个点自己决定谁优先**——§7.15/§7.19 的实测结论
+    /// 是「所有权判据一旦有两套，弱的那一套决定产物」。现在优先级只在本函数里定一次，
+    /// 消费点只能 `match` 到底（不留 `_ => {}`，新增变体会在这里编不过/立刻报内部错误）。
+    ///
+    /// 没有家的名字返回 `Stack(off)`，偏移由 `var_offset` 按今天的懒注册口径给出（同一
+    /// 个名字永远得到同一个偏移），所以这一步对产物没有任何改变；把偏移在发射前全部
+    /// 定完是 Phase 2.2 登记的「会长的那一段」（晚分配搬进解算阶段）的事。
+    pub(crate) fn home_for(&mut self, name: &str) -> crate::location::Location {
+        if let Some((loc, _)) = self.homes.get(name) {
+            return *loc;
+        }
+        crate::location::Location::Stack(self.var_offset(name))
+    }
+
+    /// 后端还没接线的家（`Imm`、非 GP 通道）。今天没有任何生产者会给出它们，所以这里
+    /// 既不 `unreachable!` 也不静默回退：**报内部错误并退回该名字的栈槽**，让「新增了
+    /// 没接线的家」在测试与产物上立刻可见（同 §7.15 那族错的处理方式：宁可可见地失败）。
+    ///
+    /// `Spill` 不在这条路上：它从 Phase 5.1.c 起是**已接线**的家，翻译只发生在
+    /// [`crate::codegen::x86_64::abi::layout::LayoutMap::spill_off`]（见 `Location::Spill` 上的
+    /// 单位约定：携带的是槽序号）。
+    fn unplumbed_home(&mut self, site: &str, loc: &crate::location::Location, name: &str) -> i64 {
+        self.report_internal_bug(
+            DIAG_UNPLUMBED_HOME,
+            format!("{} 读到尚未接线的家 {:?}（变量 '{}'）", site, loc, name),
+            "接多通道（XMM/x87）或常量家时必须同时更新本文件的消费点，不得让新家静默走回退",
+        );
+        self.var_offset(name)
+    }
+
+    /// 取地址类消费点（`AddrOf` / `MemberAddr` / `IndexAddr` 与地址计算）用的帧内偏移。
+    ///
+    /// 它走同一个 `home_for` 读入口，所以「先查 `var_map` 再查绑定表」的优先级在全后端
+    /// 只有 `home_for` 一处。名字如果带着**非栈**的家（住在寄存器里），就是「地址逸出的
+    /// 对象不得绑寄存器」那条判据漏了 —— 今天由 `register_binding_allowed` 与
+    /// `bindable_ty` 挡着，但「现在挡着」不等于「不可能」；而静默把 `&v` 指向一个
+    /// 从未写过的栈槽，正是 §7.15/§7.19 已经实测过的那族错值。所以这里报内部错误，
+    /// 不拿 `debug_assert` 充数（release 构建里 debug_assert 不成立就仍是静默错值）。
+    pub(crate) fn stack_home_off(&mut self, name: &str) -> i64 {
+        match self.home_for(name) {
+            crate::location::Location::Stack(o) => o,
+            // spill 槽就是内存：取地址与变量槽同形（地址只在帧内有效，跳帧逸出由
+            // `register_binding_allowed`/`collect_addr_escaped` 挡在外面）。
+            crate::location::Location::Spill(slot) => self.frame_layout.spill_off(slot),
+            other => self.unplumbed_home("取地址", &other, name),
+        }
+    }
+
     pub(crate) fn mov_from_stack(&mut self, reg: u8, name: &str) {
         let (sz, signed4, signed_narrow, is_struct) = self.var_access_shape(name);
-        // P1-5: register asm 变量直接从绑定寄存器加载, 但宽度口径与栈槽路径同源。
-        // 写入侧 (`mov_to_stack`) 立的是规范形态 (低位有效、高位为 0), 所以无符号与
-        // 8 字节就是普通 64 位搬运, 有符号窄类型补 movsx/movsxd。
-        if let Some(&(bound_reg, _)) = self.reg_bindings.get(name) {
-            self.mov_reg_extend(reg, bound_reg, sz, signed4 || signed_narrow);
-            return;
-        }
-        let off = self.var_offset(name);
+        // 家只有一个读入口（`home_for`）；下面每个分支只回答「这个家怎么读」。
+        // 寄存器路的宽度口径与栈槽路同源：写入侧立的是规范形态（低位有效、高位为 0），
+        // 所以无符号与 8 字节就是普通 64 位搬运，有符号窄类型补 movsx/movsxd。
+        // 先取到一个局部再匹配：诊断臂需要把同一个家按引用递出去，而在 match 的 scrutinee
+        // 上再调一次 `home_for` 就是多一个读入口（旧代码正是这么写的）。
+        let home = self.home_for(name);
+        let off = match home {
+            crate::location::Location::Reg(r) => {
+                if r.bank == crate::location::RegBank::Gp {
+                    self.mov_reg_extend(reg, r.n, sz, signed4 || signed_narrow);
+                    return;
+                }
+                self.unplumbed_home("mov_from_stack", &home, name)
+            }
+            crate::location::Location::Stack(o) => o,
+            crate::location::Location::Spill(slot) => self.frame_layout.spill_off(slot),
+            crate::location::Location::Imm(_) => self.unplumbed_home("mov_from_stack", &home, name),
+        };
         // 按声明类型宽度加载. 槽可能被窄写污染 (如 *ip = v 只写 4 字节,
         // 高 4 字节是启动代码残留的栈垃圾), 恒用 64 位 load 会把未定义
         // 高位一起读入 (64 位比较/传参即出错).
@@ -1281,13 +1346,21 @@ impl Codegen {
     }
     pub(crate) fn mov_to_stack(&mut self, reg: u8, name: &str) {
         let (sz, _, _, _) = self.var_access_shape(name);
-        // P1-5: register asm 变量直接存入绑定寄存器, 并按声明宽度截断成规范形态 ——
-        // 与下面栈槽路径的「按宽度 store」同口径 (缺陷与实测见 `var_access_shape`)。
-        if let Some(&(bound_reg, _)) = self.reg_bindings.get(name) {
-            self.mov_reg_truncate(bound_reg, reg, sz);
-            return;
-        }
-        let off = self.var_offset(name);
+        // 与读出侧共用同一个读入口；按声明宽度截断成规范形态与下面栈槽路径的
+        // 「按宽度 store」同口径（缺陷与实测见 `var_access_shape`）。
+        let home = self.home_for(name);
+        let off = match home {
+            crate::location::Location::Reg(r) => {
+                if r.bank == crate::location::RegBank::Gp {
+                    self.mov_reg_truncate(r.n, reg, sz);
+                    return;
+                }
+                self.unplumbed_home("mov_to_stack", &home, name)
+            }
+            crate::location::Location::Stack(o) => o,
+            crate::location::Location::Spill(slot) => self.frame_layout.spill_off(slot),
+            crate::location::Location::Imm(_) => self.unplumbed_home("mov_to_stack", &home, name),
+        };
         // 按变量声明类型宽度存储, 避免 64 位 store 把高位垃圾
         // 写入小类型变量的栈槽 (后续 idiv 等指令加载时会读
         // 到错误的高位). 例如 `signed int xx = ulong_x` 必须只

@@ -8,6 +8,10 @@ use crate::codegen::x86_64::codegen::PendingJump;
 use crate::codegen::x86_64::Codegen;
 use crate::semantics::ObjectResolver;
 
+/// 生成期新增家超出帧额度的诊断码（与 `report_internal_bug` 同一条上报通道）。
+/// 它是后端不变量破坏，不是用户代码错误；详见 `check_frame_budget`。
+const DIAG_FRAME_BUDGET: &str = "E1128";
+
 // REX prefix encoding helpers
 #[inline]
 fn rex_w() -> u8 {
@@ -1052,7 +1056,7 @@ impl Codegen {
     /// 帧头字节数: 16 (保存的 r13 + 返回地址) + 32 (callee-saved) + temp_slots*8。
     /// 变量区与 sret/物化槽区都从帧头之下向下生长, 两条边界必须同口径。
     pub fn frame_hdr(&self) -> i64 {
-        48i64 + self.temp_slots as i64 * 8
+        crate::codegen::x86_64::abi::layout::LayoutMap::hdr_of(self.temp_slots as i64)
     }
 
     /// **变量区**当前已占用的最低字节地址: 其它帧区只允许排在它之下。
@@ -1061,6 +1065,21 @@ impl Codegen {
     /// 共同向下生长, 长度就是 `var_map_total_slots * 8`。
     pub fn var_arena_floor(&self) -> i64 {
         -(self.var_map_total_slots * 8) - self.frame_hdr() + 8
+    }
+
+    /// 下一个晚分配站点的序号（给 `__compound_lit_*` / `__vmsize_*` 这类**只在发射期才出现**
+    /// 的对象做名字后缀）。
+    ///
+    /// 为什么不用 `self.pos()`（已发射字节数）：那个值把「名字」与「与本分配无关的机器码
+    /// 长度」绑在一起 —— 任何改变前缀长度的东西（nop 填充、分支松弛、sanitizer 插桩、
+    /// `-ftrivial-auto-var-init`）都会改名字；而名字只要求「同函数内每个到达点唯一」，
+    /// 发射序就是那个唯一性本身的序。实测槽位**偏移**并不随 pos 变（偏移由水位算），
+    /// 所以这不是一个已观测到的错值，而是一条无收益的耦合；真正决定偏移的是**到达顺序**
+    /// （设计 §11.16 与本轮只读审计的那份「顺序差异风险表」），那一条仍在 §11.15 的
+    /// 「late band 要搬进解算阶段」里，它必然改产物，不能靠改名完成。
+    pub fn next_late_site(&mut self) -> u32 {
+        self.late_site_seq = self.late_site_seq.saturating_add(1);
+        self.late_site_seq
     }
 
     pub fn register_var(&mut self, name: &str, ty: &Type) -> i64 {
@@ -1076,10 +1095,17 @@ impl Codegen {
             }
             return off;
         }
-        // P1-5: register asm 变量不分配栈槽, 直接绑定到指定寄存器
-        if self.reg_bindings.contains_key(name) {
-            return 0;
-        }
+        // 家**不**改变「要不要预留一个栈槽」这件事，所以这里**不得**因为有家就返 0。
+        // 原来那句 `if self.homes.contains_key(name) { return 0; }`（P1-5）在
+        // `pre_register_vars` 覆盖不到的三类子树里是真能走到的：`for` 的 init、语句表达式
+        // `({...})` 里的声明、带标签的块（它们的声明只靠发射期懒注册）。返 0 就是把这个
+        // 变量放到 `%r13+0` —— 而那里是保存的 r13 自身。实测（本轮只读审计带回）：
+        //   `for (register int i asm("rbx") = 0; i < 3; i++) g(i);` ⇒ 内存侧读写变成
+        //   `mov (%r13),%eax` / `mov %rax,(%r13)`，而读侧走 %ebx ⇒ 槽与家分裂，
+        //   可执行版本直接死循环（timeout 后 rc=124）。另外 `asm/opmap.rs` 的
+        //   xmm→GP 中转 scratch 拿 `var_offset(name)` 当内存用，同样要求「有家的变量也有槽」。
+        // 为什么不是「省下这 8 字节」：槽本来就算在变量区里（`pre_register_vars` 不看 homes），
+        // 返 0 省不下帧，只造成账目与实际不一致。
         // 分配口径与 pre_register_vars 共用单一真源 var_alloc_slots
         let slots = Self::var_alloc_slots(ty);
         let hdr = self.frame_hdr();
@@ -1106,6 +1132,12 @@ impl Codegen {
         let off = -(used + hdr) - (slots.saturating_sub(1) * 8);
         self.var_map.insert(name.to_string(), (off, ty.clone()));
         self.var_map_total_slots = (used + slots * 8) / 8;
+        // **Phase 2.2（H1 的硬边界）**：生成期的晚增长不得越过帧底。
+        // `sub rsp, frame_size` 早在函数体之前发出去了，帧不可能再变大 —— 那才是
+        // H1 说的「静默把帧往下长」。只读**一个**标量（变量区最低字节），不把 sret 区
+        // 字节再加一遍：`used` 上面已被 `min_used` 夹逼，sret 深度已经在里面了。
+        // （判据口径只住在 `LayoutMap::fits_above_bottom`，本函数不另算上限。）
+        self.check_frame_budget(self.var_arena_floor(), name);
         // 反方向不变量: sret 区此后也只能排在变量区之下。锚点单调下移保证后续
         // sret 槽之间同样互不重叠 (第 k 个槽的顶 = anchor_k - cur_{k-1} ≤
         // anchor_{k-1} - cur_{k-1} = 第 k-1 个槽的底)。
@@ -1119,7 +1151,48 @@ impl Codegen {
         let padded = (size as i64 + 15) & !15;
         let cur = self.sret_watermark;
         self.sret_watermark = cur + padded;
-        self.sret_region_base - cur - padded
+        let off = self.sret_region_base - cur - padded;
+        // 同一条判据的反方向：sret/物化带的最低字节也不得越过帧底。这里的 `off`
+        // 本身就是本槽的底（槽向下生长），所以不需要再加变量区的用量。
+        self.check_frame_budget(off, "<sret>");
+        off
+    }
+
+    /// 生成期新增家之前问一次**解算表**：新家的最低字节是否还在帧里。越过帧底就是
+    /// 后端不变量破坏，必须报错而不是继续长帧（`docs/p12-physreg-spill-design.md` §3 的 H1）。
+    ///
+    /// 口径是**单一标量** `low_off` 与 `LayoutMap::frame_base()` 的比较，不是「变量区字节 +
+    /// sret 区字节」：前者在 `register_var` 里已被 `min_used` 夹逼含了 sret 深度，再相加
+    /// 就是双重计费，会把合法代码报成溢出（独立复核拓出）。
+    ///
+    /// 也不拿更紧的 `arena_room` 当上限：它把 `reserve_late_var_slots()` 已预扣的那份
+    /// 再计一次费。晚分配吃掉帧底各带富余是**既有行为**，本函数不顺手收紧它；真正新增的
+    /// 那条约束在 `LayoutMap::allows_late_allocation` 里：**只有本函数真给了非零 spill
+    /// band** 时，晚分配才不得压穿它（band=0 时该判据退化成今天这条帧底比较，所以现有
+    /// 语料一个字节也不会变 —— Phase 5.1.d 欠的那条账到此结掉）。
+    ///
+    /// 只在帧已解算（`frame_size > 0`）时检查：`unresolved()` 占位表的帧大小是 0，
+    /// 拿它当上限会把任何分配都误判成越界。
+    fn check_frame_budget(&mut self, low_off: i64, who: &str) {
+        let room = self.frame_layout;
+        if room.frame_size <= 0 {
+            return;
+        }
+        if room.allows_late_allocation(low_off) {
+            return;
+        }
+        self.report_internal_bug(
+            DIAG_FRAME_BUDGET,
+            format!(
+                "frame budget exhausted in `{}` while allocating '{who}': lowest byte offset \
+                 {low_off} passes the frame bottom {} (frame_size {}B)",
+                self.current_func_name,
+                room.frame_base(),
+                room.frame_size
+            ),
+            "帧大小在函数体之前就已发射（sub rsp），生成期只能从已预留区里取家；需要更多 \
+             空间就应在 abi/layout.rs 的解算阶段加大预留，而不是让变量区压穿帧底",
+        );
     }
 
     /// Allocate a local variable slot (generic name).
@@ -1127,27 +1200,18 @@ impl Codegen {
         self.alloc_sret_slot(sz)
     }
 
-    /// 帧底「复数 / 16 字节聚合 rvalue 物化带」的字节宽度。
-    ///
-    /// 后端有 90 余处按 `complex rvalue 的内存对固定在 -frame_size + 8` 这一契约
-    /// 直接寻址（实部 @ off、虚部 @ off + inner_size；`_Complex long double` 是
-    /// 两个 16 字节 tbyte 槽 → 用到 off+32）。帧规划必须为这条带**预留**空间并让
-    /// 变参 reg save area / 向量临时区从带之上开始，否则：
-    /// - 变参函数的 GP 保存槽 `+8..+16`（保存的 `rsi`）会被复数物化写坏，随后
-    ///   `va_arg(ap, int)` 从 `gp_offset=8` 读回复数位模式；
-    /// - `_Complex float/double` 变参自身也无处可存 —— `va_arg` 的装载结果按同一
-    ///   契约必须落在该带内（消费端 `gen_complex_part` / `gen_complex_init` /
-    ///   `spill_complex_operand` 一律按该地址回读，不信任寄存器残值）。
-    ///
-    /// 宽度取 48（16 对齐，覆盖 off+8..off+40 并留下 guard）。
-    pub(crate) const CX_FRAME_BAND: i64 = 48;
-
-    /// 复数 rvalue 内存对的槽偏移（帧底带内，见 [`Self::CX_FRAME_BAND`]）。
+    /// 复数 rvalue 内存对的槽偏移（帧底带内，带宽与「为什么需要这条带」见
+    /// `abi::layout::CX_FRAME_BAND`）。
     ///
     /// 该地址对**所有**函数成立：帧规划把带从寄存器保存区/向量临时区里划了
     /// 出来，所以既不会被 `va_start` 的游标踩到，也不会被嵌套调用的临时槽覆盖。
+    ///
+    /// Phase 2 起它是解算表的读数而不是现场推算：以前有 42 处直接写
+    /// `-self.frame_size + 8`，带的位置于是有 42 个理解；现在只有一个出处。
+    /// （旧的同名常量 `Codegen::CX_FRAME_BAND` 与镜像字段 `Codegen::frame_size` 已删，
+    /// 帧的坐标只剩 `LayoutMap` 一个出处。）
     pub fn complex_result_off(&self) -> i64 {
-        -self.frame_size + 8
+        self.frame_layout.rvalue_off
     }
 
     /// 保存当前 sret 槽水位 (用于嵌套求值作用域)。配合
@@ -1460,61 +1524,41 @@ impl Codegen {
     }
 
     pub fn vector_temp_base(&self, slot: usize, vec_size: usize) -> i64 {
-        let slot_bytes = vec_size.div_ceil(8) as i64 * 8;
-        self.vec_temp_off + (slot as i64 * slot_bytes)
+        self.frame_layout.vec_temp(slot as i64, vec_size)
     }
 
     /// 绑定表是本函数物理寄存器所有权的真源之一。一个名字绑到 callee-saved 池里
     /// 的寄存器之后, 那个寄存器必须同时登记两件事, 否则就是「同一个寄存器被两个人
     /// 拥有」, 而两边都会毫无提示地覆盖对方:
-    ///   * `callee_saved_used` 对应位 —— 序言的四条保存指令先无条件发射, 函数体生成
+    ///   * `used_mask` 对应位 —— 序言的四条保存指令先无条件发射, 函数体生成
     ///     完之后由 `patch_callee_saves` 把「本函数没用到」的那些改成 nop。不置位就
     ///     等于本函数可以毁掉调用者存放在该寄存器里的值: 实测调用方把二元式左操作数
     ///     溅在 %rbx 上并跨一次调用保活, 被调方绑了 %rbx 却没保存, 结果 1500 而 gcc
     ///     是 500。
-    ///   * `reg_allocated` 对应位 —— 临时值池 (`alloc_callee_saved`) 不能再把这个
+    ///   * `allocated_mask` 对应位 —— 临时值池 (`alloc_callee_saved`) 不能再把这个
     ///     寄存器发出去, 否则表达式溅出直接盖掉变量的家: 实测 `register long v
     ///     asm("rbx") = 7` 在一次 `(q + r) * g(s)` 之后读出 25。
     ///
     /// 绑到 caller-saved 或固定用途寄存器 (rax/rcx/rdx/rsi/rdi/r8/r9/rsp/rbp/r13)
     /// 不在本函数的保护能力之内: 表达式求值每时每刻都在用它们, GCC 为此建的是完整的
     /// 干涉模型而不是一个位图。这条边界如实记在 docs/ssa-pass-upgrade-plan.md。
+    ///
+    /// Phase 1 起本方法只是 `RegBank::claim` 的薄封装：占用真相只有一份，
+    /// 写路径也都只从 RegBank 走（见 `abi/regbank.rs` 头注释的 H4）。
     pub fn claim_bound_register(&mut self, reg: u8) {
-        if let Some(i) = self.callee_saved_pool_index(reg) {
-            self.reg_allocated |= 1 << i;
-            self.callee_saved_used |= 1 << i;
-        }
-    }
-
-    /// 该物理寄存器在 callee-saved 池里的下标（决定两个位图的哪一位）。
-    fn callee_saved_pool_index(&self, reg: u8) -> Option<usize> {
-        (0..self.callee_saved_pool.len()).find(|&i| self.callee_saved_pool[i] == reg)
+        self.reg_bank.claim(reg);
     }
 
     pub fn alloc_callee_saved(&mut self) -> Option<u8> {
-        for i in 0..4 {
-            if self.reg_allocated & (1 << i) == 0 {
-                self.reg_allocated |= 1 << i;
-                self.callee_saved_used |= 1 << i;
-                return Some(self.callee_saved_pool[i]);
-            }
-        }
-        None // 池已耗尽
+        self.reg_bank.alloc_temp()
     }
 
     pub fn free_callee_saved(&mut self, reg: u8) {
         // 变量的家不是临时值: claim 之后 `alloc_callee_saved` 就不会再发这个寄存器,
         // 所以正常路径到不了这里。留这道门是让「把绑定中的寄存器标回空闲」在未来
-        // 任何新增的释放点上都直接失效, 而不是又退回本文件刚修掉的缺陷。
-        if self.reg_bindings.values().any(|(r, _)| *r == reg) {
-            return;
-        }
-        for i in 0..4 {
-            if self.callee_saved_pool[i] == reg {
-                self.reg_allocated &= !(1 << i);
-                return;
-            }
-        }
+        // 任何新增的释放点上都直接失效, 而不是又退回本文件刚修掉的缺陷。判据现在
+        // 住在 `RegBank::release` 里（被钉住的号不还），因此新增释放点绕不过去。
+        self.reg_bank.release(reg);
     }
 
     // ---- 以下为自 monolith（28a9063）恢复的底层指令编码原语 ----

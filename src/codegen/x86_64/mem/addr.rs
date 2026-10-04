@@ -52,10 +52,10 @@ impl Codegen {
                     self.emit_global_addr(dst, &name.name);
                 } else if self.vla_offsets.contains_key(&name.name) {
                     // VLA: 基址存储在变量栈槽中
-                    let off = self.var_offset(&name.name);
+                    let off = self.stack_home_off(&name.name);
                     self.load_stack(dst, off);
                 } else {
-                    let off = self.var_offset(&name.name);
+                    let off = self.stack_home_off(&name.name);
                     self.emit_lea_r13(dst, off);
                 }
                 true
@@ -173,7 +173,7 @@ impl Codegen {
                     // 全局数组: RIP-relative LEA 取地址
                     self.emit_global_addr(dst, &name.name);
                 } else {
-                    let off = self.var_offset(&name.name);
+                    let off = self.stack_home_off(&name.name);
                     // REX.W + REX.B (r13) + REX.R (dst >= 8 → r10/r11/...)
                     let rex = 0x48u8 | 0x01 | (if dst >= 8 { 0x04 } else { 0 });
                     self.emit(&[rex, 0x8D]);
@@ -226,7 +226,7 @@ impl Codegen {
                     // 返回对象首地址, 非元数据槽)
                     self.load_stack(dst, off);
                 } else {
-                    let off = self.var_offset(&name.name);
+                    let off = self.stack_home_off(&name.name);
                     // REX.W + REX.B (r13) + REX.R (当 dst >= 8, 编码 r10/r11/r12/...)
                     let rex = 0x48u8 | 0x01 | (if dst >= 8 { 0x04 } else { 0 });
                     self.emit(&[rex, 0x8D]);
@@ -251,7 +251,7 @@ impl Codegen {
                     if self.is_global_not_local(&name.name) {
                         self.emit_global_addr(dst, &name.name);
                     } else {
-                        let off = self.var_offset(&name.name);
+                        let off = self.stack_home_off(&name.name);
                         let rex = 0x49u8;
                         self.emit(&[rex, 0x8D]);
                         if off.abs() < 128 {
@@ -315,15 +315,15 @@ impl Codegen {
                             self.emit_global_load(0, &arr_name.name);
                         }
                     } else if self.vla_offsets.contains_key(&arr_name.name) {
-                        let off = self.var_offset(&arr_name.name);
+                        let off = self.stack_home_off(&arr_name.name);
                         self.load_stack(0, off);
                     } else if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
                         // 局部数组: LEA 取地址
-                        let off = self.var_offset(&arr_name.name);
+                        let off = self.stack_home_off(&arr_name.name);
                         self.emit_lea_r13(0, off);
                     } else {
                         // 局部指针: 加载指针值
-                        let off = self.var_offset(&arr_name.name);
+                        let off = self.stack_home_off(&arr_name.name);
                         self.load_stack(0, off);
                     }
                 } else {
@@ -354,7 +354,7 @@ impl Codegen {
                     if self.is_global_not_local(&name.name) {
                         self.emit_global_addr(dst, &name.name);
                     } else {
-                        let off = self.var_offset(&name.name);
+                        let off = self.stack_home_off(&name.name);
                         self.emit_lea_r13(dst, off);
                     }
                 } else if !self.gen_lvalue_addr(inner, dst) {
@@ -372,7 +372,7 @@ impl Codegen {
                     if self.is_global_not_local(&name.name) {
                         self.emit_global_addr(dst, &name.name);
                     } else {
-                        let off = self.var_offset(&name.name);
+                        let off = self.stack_home_off(&name.name);
                         self.emit_lea_r13(dst, off);
                     }
                 } else if !self.gen_lvalue_addr(inner, dst) {

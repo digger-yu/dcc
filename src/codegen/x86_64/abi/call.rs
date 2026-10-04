@@ -427,7 +427,7 @@ impl Codegen {
                         } else {
                             // 复杂表达式: 先物化到 result_off, 再逐分量加载
                             self.gen_expr(arg, 0);
-                            let result_off = -self.frame_size + 8;
+                            let result_off = self.complex_result_off();
                             self.emit_xmm0_r13_disp(
                                 &[pfx, 0x41, 0x0F, 0x10],
                                 result_off + chunk_off,

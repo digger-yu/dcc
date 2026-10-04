@@ -103,18 +103,11 @@ impl Codegen {
 
         // 解析 clobber 列表, 把被 clobber 的寄存器加入统一规划器的排除集合。
         let (clobber_gp, clobber_xmm, _x87_count) = Self::parse_clobber_registers(clobbers);
-        let mut planner = AsmRegisterPlanner::new(&clobber_gp, &clobber_xmm);
-        // 寄存器所有权只有一个真源：变量绑定的寄存器（`reg_bindings`）与外层表达式
-        // 正握着的溅出槽（`reg_allocated` 对应的 callee-saved 池）都不是本条 asm 可以
-        // 动的东西。旧实现里规划器两边都不看，于是 `q` 类实测把值写进了绑在 %rbx 的
-        // 变量里（`after=22`，gcc 是 100）。
-        let mut owned_gp: Vec<u8> = self.reg_bindings.values().map(|(r, _)| *r).collect();
-        for i in 0..4 {
-            if self.reg_allocated & (1 << i) != 0 {
-                owned_gp.push(self.callee_saved_pool[i]);
-            }
-        }
-        planner.mark_unavailable_gp(owned_gp);
+        // 寄存器所有权只有一个真源：`RegBank`。绑定的号（含池外的用户绑定）与外层
+        // 表达式正握着的溅出槽都不是本条 asm 可以动的东西。旧实现里规划器两边都不
+        // 看，于是 `q` 类实测把值写进了绑在 %rbx 的变量里（`after=22`，gcc 是 100）。
+        // Phase 1：事实作为构造参数一次性交出，不再存在「构造后手工转达」这条路。
+        let mut planner = AsmRegisterPlanner::new(&clobber_gp, &clobber_xmm, &self.reg_bank.owned_gp());
 
         // 预扫描输出约束: 预留固定寄存器 (a/b/c/d/S/D),
         // 避免 =r 等通用分配抢占后续 =a 等固定约束所需的寄存器。
@@ -1151,7 +1144,7 @@ impl Codegen {
         // 人读的槽里：实测 `register long v asm("rbx")` +
         // `__asm__ volatile("movq $5, %0" : "=r"(v))` 之后 `v` 仍是 0，gcc 是 5。
         // 走 `mov_to_stack` 顺带把宽度口径也统一掉（见 `var_access_shape`）。
-        if self.reg_bindings.contains_key(&name.name) {
+        if self.homes.contains_key(&name.name) {
             if xmm_width == 0 {
                 self.mov_to_stack(reg, &name.name);
                 return;

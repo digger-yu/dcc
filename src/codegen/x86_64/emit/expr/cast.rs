@@ -323,7 +323,7 @@ impl Codegen {
                         self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], off);
                     },
                     _ => {
-                        let result_off = -self.frame_size + 8;
+                        let result_off = self.complex_result_off();
                         let pfx = if is_f32 { 0xF3u8 } else { 0xF2u8 };
                         self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], result_off);
                     },

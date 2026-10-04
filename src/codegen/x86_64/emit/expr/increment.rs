@@ -122,8 +122,34 @@ impl super::super::super::Codegen {
                 if !is_pre {
                     self.pop(dst); // 后缀：恢复旧值到 dst
                 }
+            } else if matches!(
+                self.home_for(&name.name),
+                crate::location::Location::Reg(r) if r.bank == crate::location::RegBank::Gp
+            ) {
+                // 家在 GP 寄存器上：读-改-写必须在同一个号上做。
+                // 下面那个「通用」臂自己拿 `var_offset` + 手写宽度的 load/store，所以绑了
+                // 寄存器的变量在这里会只改内存：实测 `for (register long i asm("rbx") = 0;
+                // i < n; i++)` 无限循环（-O0/-O1）—— 循环条件读 %rbx 而 `i++` 写 -96(%r13)，
+                // 同一个变量两个家（违反设计 §3 的 H4）。走 `mov_from_stack`/`mov_to_stack`
+                // 是为了不再长出第三条读家的路，也顺带复用同一个宽度口径（§7.16）。
+                self.mov_from_stack(dst, &name.name);
+                if !is_pre {
+                    self.push(dst); // 后缀：保存旧值
+                }
+                self.emit_inc_dec_reg(dst, is_inc, step as i32);
+                self.mov_to_stack(dst, &name.name);
+                if is_pre && inner_ty.size().max(1) < 4 {
+                    // 前缀 + 窄有符号：与内存路径同口径，把写回后的值按声明宽度读回来
+                    self.mov_from_stack(dst, &name.name);
+                }
+                if !is_pre {
+                    self.pop(dst); // 后缀：恢复旧值到 dst
+                }
             } else {
-                let off = self.var_offset(&name.name);
+                // 栈槽（或 spill 槽）：坐标走单一读入口 `stack_home_off`，而不是 `var_offset`。
+                // 两者对「没有家的名字」完全同值（`home_for` 回退就是 `var_offset`），所以
+                // 本行不是行为变更；区别只在于 `Spill` 家现在能被正确翻译（Phase 5.1.c）。
+                let off = self.stack_home_off(&name.name);
                 let ty_sz = inner_ty.size().max(1);
                 // 按类型大小加载 (零扩展小类型到 64 位)
                 self.load_stack_sized(dst, off, ty_sz);

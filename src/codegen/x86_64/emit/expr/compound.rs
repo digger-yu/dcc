@@ -51,8 +51,9 @@ impl Codegen {
                 return;
             }
             // 复合字面量: (type){...} - 在栈上分配可变内存, 初始化后返回地址
-            // 用唯一名称注册到 var_map, 复用 register_var 的栈分配逻辑
-            let compound_name = format!("__compound_lit_{}", self.pos());
+            // 用唯一名称注册到 var_map, 复用 register_var 的栈分配逻辑。名字后缀用发射序
+            // 而不是 `pos()`（已发射字节数），见 `Codegen::next_late_site` 的注释。
+            let compound_name = format!("__compound_lit_{}", self.next_late_site());
             let base_offset = self.register_var(&compound_name, ty);
             // 生成初始化代码
             self.gen_init_list_at(base_offset, ty, inits);
@@ -109,7 +110,7 @@ impl Codegen {
                     _ => Type::Double,
                 };
                 let inner_sz = inner.size() as i64;
-                let result_off = -self.frame_size + 8;
+                let result_off = self.complex_result_off();
                 if matches!(inner, Type::Float | Type::Double | Type::LongDouble) {
                     self.gen_float_imm_load(*real, &inner); // xmm0 = 实部
                     self.gen_float_store_at(result_off, &inner);
@@ -139,7 +140,7 @@ impl Codegen {
                     other => other.clone(),
                 };
                 let inner_sz = inner.size() as i64;
-                let result_off = -self.frame_size + 8;
+                let result_off = self.complex_result_off();
                 self.mov_imm(0, *real);
                 self.emit_store(0, result_off, inner_sz as usize);
                 self.mov_imm(0, *imag);

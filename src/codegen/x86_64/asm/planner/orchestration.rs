@@ -63,11 +63,21 @@ impl AsmRegisterPlanner {
     /// # Arguments
     /// * `clobber_gp` - Set of general-purpose registers that will be clobbered
     /// * `clobber_xmm` - Set of XMM registers that will be clobbered
+    /// * `owned_gp` - 本条 asm **之外**已有主人的 GP 号（由 `RegBank::owned_gp()` 一次性
+    ///   给出：`register asm` 变量钉住的号 + 外层表达式正握着的溅出槽）
     ///
-    /// These registers are pre-marked as used so they won't be allocated.
-    pub fn new(clobber_gp: &HashSet<u8>, clobber_xmm: &HashSet<u8>) -> Self {
+    /// 这些寄存器都不会被分配。两个集合的含义不同，不得混用：
+    ///   * `owned_gp` 只进 `used_gp`，**不进** `clobber_gp` —— 它们不是被本条 asm
+    ///     毁掉的，asm 之后原占用者还要继续用它；写进 clobber 名单会让它变假
+    ///     （§7.17 立的那条规矩）。
+    ///   * Phase 1 之前这一步是 `mark_unavailable_gp()` 在构造后手工转达的；那种
+    ///     「先建好再补一句」的形式就是 H4 说的第四套判据，新增调用点很容易漏掉。
+    ///     现在事实是构造参数，漏传直接编译不过。
+    pub fn new(clobber_gp: &HashSet<u8>, clobber_xmm: &HashSet<u8>, owned_gp: &[u8]) -> Self {
+        let mut used_gp = clobber_gp.clone();
+        used_gp.extend(owned_gp.iter().copied());
         Self {
-            used_gp: clobber_gp.clone(),
+            used_gp,
             used_xmm: clobber_xmm.clone(),
             used_mmx: HashSet::new(),
             input_gp: HashSet::new(),
@@ -104,19 +114,6 @@ impl AsmRegisterPlanner {
             .unwrap_or_else(|| Self::GP_POOL[seed % Self::GP_POOL.len()]);
         self.reserve_gp(reg, use_kind);
         reg
-    }
-
-    /// 把「本条 asm 之外已经属于别人的寄存器」标为不可分配。
-    ///
-    /// 只进 `used_gp`，不进 `clobber_gp`：这些寄存器不是被本条 asm 毁掉的，占用者
-    /// （`register asm` 变量的家、或外层表达式正握着的 callee-saved 溅出槽）在 asm
-    /// 之后还要继续用它，两个集合的后续处理完全不同，混起来会让 clobber 名单变假。
-    /// 寄存器所有权的唯一真源是 `Codegen::reg_bindings` 与 `Codegen::reg_allocated`；
-    /// 本方法只是把那份事实转达给规划器。
-    pub fn mark_unavailable_gp<I: IntoIterator<Item = u8>>(&mut self, regs: I) {
-        for r in regs {
-            self.used_gp.insert(r);
-        }
     }
 
     /// Allocate a specific fixed GP register based on GCC constraint letters

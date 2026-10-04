@@ -851,7 +851,7 @@ impl Codegen {
                                 // gen_expr 物化在 result_off (rax=地址
                                 // 约定), 整体拷贝 isz*2 字节到 [rcx]
                                 let isz = cinner.base.size();
-                                let result_off = -self.frame_size + 8;
+                                let result_off = self.complex_result_off();
                                 self.emit_lea_r13(6, result_off); // rsi
                                 self.emit(&[0x48, 0x89, 0xCF]); // mov rdi, rcx
                                 self.mov_imm(1, (isz * 2) as i128);
@@ -1003,7 +1003,7 @@ impl Codegen {
                     self.push(0); // 保存目标地址
                     self.gen_expr(r, 0);
                     // 源地址: gen_expr 对聚合类型结果在帧临时区
-                    let src_off = -self.frame_size + 8;
+                    let src_off = self.complex_result_off();
                     self.emit_lea_r13(6, src_off); // rsi = src
                     self.pop(7); // rdi = dst
                     self.emit(&[0xFC]); // cld

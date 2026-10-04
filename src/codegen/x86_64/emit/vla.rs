@@ -65,9 +65,9 @@ impl Codegen {
         }
     }
     pub(crate) fn emit_vla_restore(&mut self) {
-        if self.cur_func_has_vla && self.frame_size > 0 {
+        if self.cur_func_has_vla && self.frame_layout.frame_size > 0 {
             // lea rsp, [r13 + (-frame_size)]
-            self.emit_lea_r13(4, -self.frame_size);
+            self.emit_lea_r13(4, self.frame_layout.frame_base());
         }
     }
     pub(crate) fn find_vla_stride_slot_from_desc(

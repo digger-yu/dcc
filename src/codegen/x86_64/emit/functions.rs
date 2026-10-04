@@ -6,6 +6,7 @@
 
 use crate::ast::*;
 use crate::codegen::shared::elf as shared_elf;
+use crate::codegen::x86_64::abi::layout::LayoutMap;
 use crate::codegen::x86_64::{AbiClass, Codegen};
 use std::collections::HashMap;
 
@@ -112,15 +113,22 @@ impl Codegen {
         // 分配), 跨函数残留会导致 sizeof 读到别的函数帧的槽
         // (20040423-1: 匿名 struct 的空 tag 在 main/sub1 同 key)
         self.vm_struct_size_slots.clear();
-        self.reg_bindings.clear();
+        self.homes.clear();
         // file-scope 绑定也要过同一道逸出判据：地址被取走的对象必须留在内存里。
         self.collect_addr_escaped(prog);
-        for (n, b) in self.global_reg_bindings.clone() {
+        for (n, b) in self.global_homes.clone() {
             if !self.register_binding_allowed(&n) {
                 continue;
             }
-            self.reg_bindings.insert(n, b);
+            self.homes.insert(n, b);
         }
+        // 绑定表定稿了，把钉住集合重投影一遍。**为什么现在就要做**：`naked` 分支在
+        // 下面的 `reset_reg_tracker()` 之前就 `return`，而旧代码的 `owned_gp` 是当时现查
+        // `reg_bindings` 算的；如果 `pinned` 等到 reset 才清，naked 函数里的内联 asm
+        // 就会拿上一个函数的绑定当本函数家的名单（多排除会换发号，少排除会盖掉变量）。
+        // 只同步名单，不动位图 —— 位图在 naked 路径上旧代码就是保留残值的。
+        self.reg_bank
+            .resync_pins(self.homes.values().filter_map(|(l, _)| l.reg()).map(|r| r.n));
         self.cleanup_vars.clear();
         self.sret_watermark = 0;
         self.sret_region_base = 0;
@@ -130,6 +138,9 @@ impl Codegen {
             .body
             .as_ref()
             .is_some_and(|b| Self::block_contains_vla(&b.items));
+        // naked 形态必须在下面那个早返**之前**就定下来：内联 asm 的保存/恢复守护
+        // （P12 Phase 5.2a）不得往用户的裸汇编里插 push/pop。
+        self.cur_func_is_naked = f.is_naked;
         self.current_sret_offset = None;
         // 记录当前函数名 (用于嵌套函数重命名作用域)
         self.current_func_name = f.name.name.clone();
@@ -234,6 +245,9 @@ impl Codegen {
         self.temp_slots = 0;
         self.bf_rmw_depth = 0;
         self.reset_reg_tracker();
+        // 逃逸用的 `asm goto` clobber 掉的池号不得再当临时值发出（必须在任何发射**之前**
+        // 定完，H1：第一个表达式就可能把值放进那个号）。与分配器读同一个判据。
+        self.ban_escaping_asm_regs(f.body.as_ref());
         // 本函数序言/尾声补丁点在 sites 中的起始下标 (与嵌套函数隔离)
         let callee_sites_base = self.callee_save_patch_sites.len();
         if let Some(body) = &f.body {
@@ -264,6 +278,11 @@ impl Codegen {
         // 一维 VLA 形参被丢弃的最外层维度表达式 (Param::vla_dim):
         // 仅需在入口求值副作用, 不影响类型语义 (C11 6.9.1p10)
         let mut param_dim_effects: Vec<Expr> = Vec::new();
+        // spill band 的尺寸（P12 Phase 5.1.b）：由 `pre_register_vars` 在同一个逐声明循环里
+        // 从**已交付的家**（`VarDecl::home == Spill(slot)`）数出来，而不是另开一份分配或扫描。
+        // 今天分配器还不产出 Spill 家 ⇒ 两个分支都是 0 ⇒ 帧与今天逐字节相同（设计 §11.4 的
+        // 「band 是解算输入，不是事后发明」在这里兑现）。
+        let mut spill_slots: i64 = 0;
         if f.name.name != "main" || self.relocatable {
             // 先预注册函数体中的局部变量 (使参数偏移自然在局部变量下方).
             // 使用 var_map_total_slots 累加器替代 O(n) 遍历.
@@ -276,6 +295,7 @@ impl Codegen {
                     &self.static_local_map,
                     &f.name.name,
                     &mut self.var_map_total_slots,
+                    &mut spill_slots,
                 );
             }
             // 预计算已注册局部变量的总大小, 用于参数偏移计算.
@@ -377,7 +397,7 @@ impl Codegen {
                     let aligned = (stack_arg_off + 15) & !15;
                     stack_arg_off = aligned + 32;
                     if let Some(nm) = nm_opt {
-                        let hdr = 48i64 + temp_slots as i64 * 8;
+                        let hdr = LayoutMap::hdr_of(temp_slots as i64);
                         // 32 字节 (real@off, imag@off+16) 在帧槽中占 4 个
                         // 8 字节槽。局部槽公式与标量 LD (16B→-(SIZE-8)=-8)
                         // 及通用聚合 base=-(u+hdr)-(chunks-1)*8 一致:
@@ -401,7 +421,7 @@ impl Codegen {
                     // SysV ABI: 聚合参数可以部分通过寄存器、部分通过栈传递。
                     // 例如 _Complex double 在只有 1 个 XMM 可用时，实部用寄存器，
                     // 虚部通过栈传递。必须逐个 chunk 处理，不能整体判断。
-                    let hdr = 48i64 + temp_slots as i64 * 8;
+                    let hdr = LayoutMap::hdr_of(temp_slots as i64);
                     let base_off = -(used_before + hdr) - (chunks as i64 - 1) * 8;
                     if let Some(nm) = nm_opt {
                         self.var_map
@@ -526,7 +546,7 @@ impl Codegen {
                     let aligned = (stack_arg_off + 15) & !15;
                     stack_arg_off = aligned + 16;
                     if let Some(nm) = nm_opt {
-                        let hdr = 48i64 + temp_slots as i64 * 8;
+                        let hdr = LayoutMap::hdr_of(temp_slots as i64);
                         let off = -(used_before + hdr) - 8;
                         self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                         // 不走逐字 8+8 搬运：改由 ld_param_stores 在入口降级。
@@ -539,7 +559,7 @@ impl Codegen {
                         let saved_fp = fp_idx;
                         fp_idx += 1;
                         if let Some(nm) = nm_opt {
-                            let hdr = 48i64 + temp_slots as i64 * 8;
+                            let hdr = LayoutMap::hdr_of(temp_slots as i64);
                             let off = -(used_before + hdr);
                             self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                             xmm_param_stores.push((saved_fp as u8, off, p.ty.clone(), false));
@@ -549,7 +569,7 @@ impl Codegen {
                         let my_stack_off = stack_arg_off;
                         stack_arg_off += 8;
                         if let Some(nm) = nm_opt {
-                            let hdr = 48i64 + temp_slots as i64 * 8;
+                            let hdr = LayoutMap::hdr_of(temp_slots as i64);
                             let off = -(used_before + hdr);
                             self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                             stack_param_stores.push((my_stack_off, off));
@@ -562,7 +582,7 @@ impl Codegen {
                     param_used_total += 8;
                     gp_idx += 1;
                     if let Some(nm) = nm_opt {
-                        let hdr = 48i64 + temp_slots as i64 * 8;
+                        let hdr = LayoutMap::hdr_of(temp_slots as i64);
                         let off = -(used_before + hdr);
                         self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                         param_stores.push((reg, off));
@@ -574,7 +594,7 @@ impl Codegen {
                     let my_stack_off = stack_arg_off;
                     stack_arg_off += 8;
                     if let Some(nm) = nm_opt {
-                        let hdr = 48i64 + temp_slots as i64 * 8;
+                        let hdr = LayoutMap::hdr_of(temp_slots as i64);
                         let off = -(used_before + hdr);
                         self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
                         stack_param_stores.push((my_stack_off, off));
@@ -595,8 +615,11 @@ impl Codegen {
             // 与上面同一根因、同一条轴: 复合字面量 / VM 尺寸元信息等只在代码生成
             // 时才 `register_var` 的对象也走变量区, 需在定 `sret_region_base` 前预扣。
             self.reserve_late_var_slots(f.body.as_ref());
-            // frame_size = 变量实际字节 + 16(保存寄存器) + temp_slots*8
-            // 包含 padding 条目, 每个占 8 字节. 使用累加器替代 O(n) 遍历.
+            // 帧布局**解算**（P12 Phase 2）：以前这里是一段现场求和，现在只保留
+            // 输入；所有带边界由 `abi::layout::LayoutMap::resolve` 一次算完。
+            // 求和项与求和顺序与搬迁前字面一致（`var_bytes + hdr + sret_need +
+            // sc_slot + cx_band + va_slots + vec_reserve + bf_rmw_reserve +
+            // tramp_reserve + stack_reserve`，再 16 对齐）。
             let var_bytes: i64 = self.var_map_total_slots.saturating_mul(8);
             let sc_slot: i64 = if f.is_nested { 8 } else { 0 }; // 嵌套函数需要静态链槽位
             let va_slots: i64 = if f.is_variadic {
@@ -608,54 +631,45 @@ impl Codegen {
             } else {
                 0
             };
-            // 向量临时槽区: 预留 512 字节 (32 个 16B 槽), 位于 va save/静态链上方,
-            // 避免 vector_temp_base 与变量区重叠。嵌套向量 binop 每层
-            // 需要更深的操作数槽 (XMM 路径每层 2 槽), 128 字节只够
-            // 3 层嵌套, 深链式表达式会溢出到变量区 (pr23135)
-            let vec_reserve: i64 = 512;
-            // 帧底复数/16B 聚合 rvalue 物化带 (见 `CX_FRAME_BAND`)。本函数其余
-            // 帧底偏移一律从带**之上**起算, 使 `-frame_size+8` 的复数内存对既不
-            // 落在变参 GP 保存槽里, 也不与向量临时槽 0 重叠。
-            let cx_band = Self::CX_FRAME_BAND;
-            // 位域 RMW 临时槽: 预留 32 字节 (2 级嵌套, 每级 16 字节)
-            let bf_rmw_reserve: i64 = 32;
-            // 嵌套函数 trampoline 空间: 预留 256 字节 (最多 8 个 trampoline, 每个 32 字节)
-            // 实际 trampoline 代码在代码生成阶段按需写入栈帧
-            let tramp_reserve: i64 = 256;
-            // 帧头: 16 (saved r13 + ret addr) + 32 (callee-saved) + temp_slots*8
-            let hdr: i64 = 48 + temp_slots as i64 * 8;
-            let raw: i64 = var_bytes
-                .saturating_add(hdr)
-                .saturating_add(sret_need)
-                .saturating_add(sc_slot)
-                .saturating_add(cx_band)
-                .saturating_add(va_slots)
-                .saturating_add(vec_reserve)
-                .saturating_add(bf_rmw_reserve)
-                .saturating_add(tramp_reserve)
-                .saturating_add(self.stack_reserve_bytes());
-            self.frame_size = (raw + 15) & !15; // 16 字节对齐
-                                                // sret/物化槽区顶界: 紧邻变量区底 (变量区占 -(hdr+var_bytes))。
-            self.sret_region_base = -(hdr + var_bytes);
-            // vec 区下移 sret 槽深度, 使槽区夹在变量区与 vec 区之间。
-            // 帧底先留出复数物化带 (cx_band), 变参 save area 紧随其后。
-            self.vec_temp_off = -self.frame_size + cx_band + va_slots + sc_slot + 8;
-            if self.frame_size > 0 {
-                if self.target.stack_clash_protection && self.frame_size > 4096 {
-                    self.emit_stack_clash_probes(self.frame_size);
+            // spill band：尺寸来自上面那个逐声明循环（`spill_slots`）。Phase 5.1 今天
+            // 分配器不产出 Spill 家 ⇒ 它仍是 0，但band 已经是布局解算的**输入**，所以
+            // 打开溢出时不会再长出第七个推算者。
+            let layout = crate::codegen::x86_64::abi::layout::LayoutMap::resolve(
+                &crate::codegen::x86_64::abi::layout::FramePlan {
+                    temp_slots: temp_slots as i64,
+                    var_bytes,
+                    sret_need,
+                    va_slots,
+                    static_chain_slot: sc_slot,
+                    bf_rmw_reserve: crate::codegen::x86_64::abi::layout::BF_RMW_RESERVE,
+                    vec_reserve: crate::codegen::x86_64::abi::layout::VEC_RESERVE,
+                    tramp_reserve: crate::codegen::x86_64::abi::layout::TRAMP_RESERVE,
+                    stack_reserve: self.stack_reserve_bytes(),
+                    spill_slots,
+                },
+            );
+            self.frame_layout = layout;
+            // sret/物化槽区顶界：紧邻变量区底（变量区占 -(hdr+var_bytes)）。
+            // 这一条**生成期会变**（`register_var` 会把它跟变量区一起往下压），
+            // 所以它留在 Codegen 当游标；而 `frame_size` / `vec_temp_off` 解算后不再变，
+            // 镜像字段已删，花费者一律直读 `LayoutMap`（帧的坐标从此只有一份）。
+            self.sret_region_base = layout.sret_region_base;
+            if self.frame_layout.frame_size > 0 {
+                if self.target.stack_clash_protection && self.frame_layout.frame_size > 4096 {
+                    self.emit_stack_clash_probes(self.frame_layout.frame_size);
                 } else {
-                    self.emit_sub_rsp(self.frame_size);
+                    self.emit_sub_rsp(self.frame_layout.frame_size);
                 }
             }
             // -ftrivial-auto-var-init=zero: 零初始化整个栈帧. 对超大帧跳过.
             if self.target.auto_var_init_zero
-                && self.frame_size > 0
-                && self.frame_size <= 16 * 1024 * 1024
+                && self.frame_layout.frame_size > 0
+                && self.frame_layout.frame_size <= 16 * 1024 * 1024
             {
-                self.emit_zero_init_frame(self.frame_size);
+                self.emit_zero_init_frame(self.frame_layout.frame_size);
             }
             // Stack canary: 在帧顶部 (r13-8) 存储金丝雀值
-            if self.target.stack_protector && self.frame_size >= 8 {
+            if self.target.stack_protector && self.frame_layout.canary_fits() {
                 // mov rax, seg:[0x28]  → 加载 canary
                 // seg = fs (0x64) or gs (0x65) based on guard register
                 let seg_prefix = match self.target.stack_protector_guard_reg {
@@ -667,7 +681,7 @@ impl Codegen {
                 self.emit(&[0x49, 0x89, 0x85, 0xf8, 0xff, 0xff, 0xff]);
             }
             // KASAN 栈红区: 毒化整个帧, 然后解除变量区域的毒化
-            if self.kasan && self.frame_size > 0 {
+            if self.kasan && self.frame_layout.frame_size > 0 {
                 self.emit_kasan_stack_poison_all();
                 self.emit_kasan_stack_unpoison_vars();
             }
@@ -705,7 +719,7 @@ impl Codegen {
             //       错误返回循环变量值. 而 save area 下方还要留出复数物化带,
             //       否则复数内存对会写坏 GP 槽 1 (保存的 rsi), 使后续
             //       `va_arg` 从 gp_offset=8 读回复数位模式。
-            self.variadic_reg_save_offset = -self.frame_size + cx_band;
+            self.variadic_reg_save_offset = self.frame_layout.variadic_reg_save_off;
             if f.is_variadic {
                 for (i, reg) in arg_regs.iter().enumerate() {
                     self.store_stack(*reg, self.variadic_reg_save_offset + i as i64 * 8);
@@ -724,7 +738,7 @@ impl Codegen {
             // 保存同一寄存器. 注意不能用 rdx: rdx 是第 3 个整型参数寄存器,
             // 嵌套函数有 ≥3 个整型参数时静态链会覆盖第 3 个参数.
             if f.is_nested {
-                self.static_chain_offset = self.variadic_reg_save_offset + va_slots;
+                self.static_chain_offset = self.frame_layout.static_chain_off;
                 // mov [r13 + static_chain_offset], r10
                 self.store_stack(10, self.static_chain_offset);
                 // 登记本帧链槽偏移: 后代嵌套函数多层上溯静态链时逐帧使用
@@ -819,7 +833,7 @@ impl Codegen {
             // A1: 保存 sret 指针 (rdi) 到帧底部专用槽, 供返回时写回聚合结果
             if has_sret {
                 // 位于变参保存区之上、向量临时区之下 (静态链同位置, 二者互斥)
-                let sret_off = -self.frame_size + cx_band + va_slots + sc_slot;
+                let sret_off = self.frame_layout.sret_ptr_off;
                 self.store_stack(7, sret_off);
                 self.current_sret_offset = Some(sret_off);
             }
@@ -833,42 +847,49 @@ impl Codegen {
                     &self.static_local_map,
                     &f.name.name,
                     &mut self.var_map_total_slots,
+                    &mut spill_slots,
                 );
             }
             // 包含 padding 条目, 每个占 8 字节. 使用累加器替代 O(n) 遍历.
             self.reserve_late_var_slots(f.body.as_ref());
             let var_bytes: i64 = self.var_map_total_slots.saturating_mul(8);
-            // 帧头: 16 (saved r13 + ret addr) + 32 (callee-saved) + temp_slots*8
-            let hdr: i64 = 48 + temp_slots as i64 * 8;
-            let tramp_reserve: i64 = 256; // 嵌套函数 trampoline 空间
-            let raw = var_bytes
-                .saturating_add(hdr)
-                .saturating_add(sret_need)
-                .saturating_add(Self::CX_FRAME_BAND) // 帧底复数 rvalue 物化带
-                .saturating_add(512) // 向量临时槽区 (嵌套 binop 操作数槽)
-                .saturating_add(tramp_reserve)
-                .saturating_add(self.stack_reserve_bytes());
-            self.frame_size = (raw + 15) & !15;
+            // 同一份布局解算（无参/`main` 分支）。该分支今天不**参与**变参 save area /
+            // 静态链 / 位域 RMW 三个预留（见 `abi/layout.rs` 文件头记的「不对称 1」），
+            // 于是这三个带在这里传 0：不对称从「两份公式」变成「可见的输入」，
+            // Phase 2 不改它（改了就是改产物）。
+            let layout = crate::codegen::x86_64::abi::layout::LayoutMap::resolve(
+                &crate::codegen::x86_64::abi::layout::FramePlan {
+                    temp_slots: temp_slots as i64,
+                    var_bytes,
+                    sret_need,
+                    va_slots: 0,
+                    static_chain_slot: 0,
+                    bf_rmw_reserve: 0,
+                    vec_reserve: crate::codegen::x86_64::abi::layout::VEC_RESERVE,
+                    tramp_reserve: crate::codegen::x86_64::abi::layout::TRAMP_RESERVE,
+                    stack_reserve: self.stack_reserve_bytes(),
+                    spill_slots,
+                },
+            );
+            self.frame_layout = layout;
             // sret/物化槽区顶界: 紧邻变量区底 (变量区占 -(hdr+var_bytes))。
-            self.sret_region_base = -(hdr + var_bytes);
-            // 向量临时区从复数物化带之上开始 (`-frame_size+8` 属于复数内存对)。
-            self.vec_temp_off = -self.frame_size + Self::CX_FRAME_BAND + 8;
-            if self.frame_size > 0 {
-                if self.target.stack_clash_protection && self.frame_size > 4096 {
-                    self.emit_stack_clash_probes(self.frame_size);
+            self.sret_region_base = layout.sret_region_base;
+            if self.frame_layout.frame_size > 0 {
+                if self.target.stack_clash_protection && self.frame_layout.frame_size > 4096 {
+                    self.emit_stack_clash_probes(self.frame_layout.frame_size);
                 } else {
-                    self.emit_sub_rsp(self.frame_size);
+                    self.emit_sub_rsp(self.frame_layout.frame_size);
                 }
             }
             // -ftrivial-auto-var-init=zero: 零初始化整个栈帧. 对超大帧跳过.
             if self.target.auto_var_init_zero
-                && self.frame_size > 0
-                && self.frame_size <= 16 * 1024 * 1024
+                && self.frame_layout.frame_size > 0
+                && self.frame_layout.frame_size <= 16 * 1024 * 1024
             {
-                self.emit_zero_init_frame(self.frame_size);
+                self.emit_zero_init_frame(self.frame_layout.frame_size);
             }
             // Stack canary: 在帧顶部 (r13-8) 存储金丝雀值
-            if self.target.stack_protector && self.frame_size >= 8 {
+            if self.target.stack_protector && self.frame_layout.canary_fits() {
                 // mov rax, seg:[0x28]  → 加载 canary
                 // seg = fs (0x64) or gs (0x65) based on guard register
                 let seg_prefix = match self.target.stack_protector_guard_reg {
@@ -880,7 +901,7 @@ impl Codegen {
                 self.emit(&[0x49, 0x89, 0x85, 0xf8, 0xff, 0xff, 0xff]);
             }
             // KASAN 栈红区: 毒化整个帧, 然后解除变量区域的毒化
-            if self.kasan && self.frame_size > 0 {
+            if self.kasan && self.frame_layout.frame_size > 0 {
                 self.emit_kasan_stack_poison_all();
                 self.emit_kasan_stack_unpoison_vars();
             }
@@ -982,18 +1003,9 @@ impl Codegen {
                             }
                             continue; // static 局部变量已在全局数据段分配
                         }
-                        if let Some(ref reg_name) = v.register_name {
-                            // 地址被取走的对象不得绑到物理寄存器：绑定后那个栈槽再也
-                            // 没人写过，`&v` 的读者拿到旧值/垃圾（GCC 遇到逸出同样是
-                            // 忽略绑定，而规划期总是先分好了槽，退回内存路径无风险）。
-                            if self.register_binding_allowed(&v.name.name) {
-                                if let Some(reg_idx) = Self::parse_reg_name(reg_name) {
-                                    self.reg_bindings.insert(v.name.name.clone(), (reg_idx, v.ty.clone()));
-                                    // 绑定即占用该寄存器：必须保存 + 不得再当临时值发出（见 claim_bound_register）
-                                    self.claim_bound_register(reg_idx);
-                                }
-                            }
-                        }
+                        // 声明处的绑定走唯一入口 `bind_decl_home`（以前这里是 `compile_func`
+                        // 自己抄的一份 `gen_block_items` 逻辑，两处必须同步改）。
+                        self.bind_decl_home(v);
                         if let Some(ref fn_name) = v.cleanup_fn {
                             self.cleanup_vars
                                 .push((v.name.name.clone(), fn_name.clone()));
@@ -1151,7 +1163,7 @@ impl Codegen {
             f.name.name.clone(),
             crate::codegen::x86_64::eh_tables::FuncCfi {
                 prologue_end: self.cur_prologue_end,
-                callee_saved_used: self.callee_saved_used,
+                callee_saved_used: self.reg_bank.used_mask(),
                 frame_pointer: self.target.frame_pointer,
             },
         );

@@ -642,7 +642,7 @@ impl Codegen {
             Type::Complex(inner) if matches!(&inner.base, Type::Float | Type::Double) => {
                 let pfx = if matches!(&inner.base, Type::Float) { 0xF3 } else { 0xF2 };
                 let inner_sz = inner.size() as i64;
-                let result_off = -self.frame_size + 8;
+                let result_off = self.complex_result_off();
                 self.emit_xmm_r13_disp(pfx, 0x10, 0, src_off);
                 self.emit_xmm_r13_disp(pfx, 0x11, 0, result_off);
                 self.emit_xmm_r13_disp(pfx, 0x10, 1, src_off + inner_sz);

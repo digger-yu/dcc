@@ -65,6 +65,15 @@ pub struct VarDecl {
     pub visibility: Option<String>,
     pub is_unused: bool,
     pub register_name: Option<String>, // register asm("rN")
+    /// P12 Phase 4：这个声明的**家**，由 IR 侧的位置表折叠而来（`ssa::regalloc::apply_bindings`
+    /// 是唯一写入点）。后端读到它就**照办**，不再自己分配。
+    ///
+    /// 与上面 `register_name` 的分工不是「两套真源」：`register_name` 是用户写的
+    /// **文本名**（与 `section`/`alignment` 同类的声明属性，目标中立），而 `home` 是
+    /// **分配结果**（已按通道解释好的号）。两者在 `Codegen` 的入口由同一个解析器
+    /// 汇成一张家表（优先级：用户指定 > 自动分配，与今天的 `apply_bindings` 一致）。
+    /// 因为 `Location` 是 `Copy`，本字段不打破 `VarDecl: Clone`。
+    pub home: Option<crate::location::Location>,
     pub cleanup_fn: Option<String>,    // __attribute__((cleanup(fn)))
     pub is_thread_local: bool,         // _Thread_local / __thread
     /// __attribute__((no_sanitize("address"|"undefined"|"thread"|"kernel-address")))

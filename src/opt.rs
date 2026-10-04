@@ -239,21 +239,26 @@ fn run_ssa_passes(
                     }
                     continue;
                 }
-                let rebuilt = crate::ssa::rebuild_block(&ssa);
-                // P12：SSA 层的寄存器分配，结果写进重建后的 AST（`register_name`）。
-                // 判据要看**重建前**的函数体（嵌套函数在重建后的体里已经没有了，
-                // 见 `ssa::regalloc::assign` 的说明），落地只写重建后的体。
-                // 只有 x86_64 后端读这张表，所以其他后端的产物不受影响；
-                // `debug_info` 时整条 pass 不动（DWARF 还只会发栈槽位置）。
-                let orig_body = f.body.replace(rebuilt);
-                if !opt_skipped("ssa_regalloc") {
+                // P12 Phase 5.0：**决策在重建之前**。`plan_and_split` 只看 IR 与重建前的体，
+                // 并把版本分裂表写进 `ssa.local_splits` —— 重建必须看得见它，才能给不同
+                // 版本生成各自的局部。只有 x86_64 后端读这张表，其他后端产物不受影响。
+                let regalloc_plan = if opt_skipped("ssa_regalloc") {
+                    None
+                } else {
                     let ctx = crate::ssa::regalloc::Ctx {
                         debug_info,
                         taken_regs: taken_regs.clone(),
                     };
-                    if let Some(orig) = &orig_body {
-                        crate::ssa::regalloc::assign(&ssa, orig, f.body.as_mut().unwrap(), &ctx);
-                    }
+                    f.body.as_ref().map(|orig| {
+                        crate::ssa::regalloc::plan_and_split(&mut ssa, orig, &ctx)
+                    })
+                };
+                let rebuilt = crate::ssa::rebuild_block(&ssa);
+                f.body = Some(rebuilt);
+                if let (Some(mut plan), Some(body)) = (regalloc_plan, f.body.as_mut()) {
+                    // 交付（重建之后）：先校验后置事实（拿的就是重建后的体），再把位置表写进 AST。
+                    // 决策阶段已经用完重建前的体，这里不再需要它（Phase 5.0 的顺序证据）。
+                    crate::ssa::regalloc::deliver(&ssa, &mut plan, body);
                 }
                 modified = true;
             }
@@ -580,6 +585,13 @@ fn block_has_unsafe_ssa_pattern(b: &Block) -> bool {
                 && v.init.as_ref().is_some())
             // static 局部变量跨调用持久, SSA 无法正确建模
             || v.is_static
+            // `__attribute__((cleanup(f)))` 是块作用域上的一个**隐式调用**，而 IR 里没有它
+            // 的表示：实测 `rebuild_block` 重建声明时写的是 `cleanup_fn: None`
+            // （`ssa/rebuild.rs:183`），于是 -O2/-O3 把清理**整个丢掉**（普通块与语句
+            // 表达式两类作用域都受影响），同一个源在 -O0/-O1 与 -O2 给出两个答案。
+            // 这里让整函数退回 AST 路径（与同列的 static/extern/VLA 同一处理口径），
+            // 而不是在 IR 里新增一个副作用调用 —— 后者是另一个数量级的改动。
+            || v.cleanup_fn.is_some()
         },
         // 嵌套函数：重建后的体里**没有** `Decl::Func`（被前面的降低步骤按帧偏移另存），
         // 于是 -O2 产物里它的定义直接消失。实测最小复现
@@ -610,7 +622,70 @@ fn stmt_has_unsafe_ssa_pattern(s: &Stmt) -> bool {
                 || stmt_has_unsafe_ssa_pattern(body)
         },
         Stmt::Switch { cases, .. } => cases.iter().any(|c| block_has_unsafe_ssa_pattern(&c.body)),
+        // 语句表达式 `({...})` 里的声明也是声明：只看顶层 item 会漏掉它（实测：
+        // `({ __attribute__((cleanup(cb))) long c = 4; ... })` 的清理在 -O2 静默消失）。
+        Stmt::Expr { e, .. } => expr_has_unsafe_ssa_pattern(e),
         _ => false,
+    }
+}
+
+/// 表达式树里有没有「只能待在 AST 上」的形态（目前就是语句表达式块里的声明）。
+///
+/// 与 `ast_asm::walk_expr` 同构地穷举写：新增 `Expr` 变体会直接编不过，而不是静默
+/// 漏掉一个子树（漏一个就是上面那条注释里那个静默错值的又一个版本）。
+fn expr_has_unsafe_ssa_pattern(e: &Expr) -> bool {
+    use crate::ast::Expr as E;
+    match e {
+        E::Int { .. }
+        | E::Float { .. }
+        | E::ComplexLit { .. }
+        | E::ComplexIntLit { .. }
+        | E::String { .. }
+        | E::Char { .. }
+        | E::SizeofTy { .. }
+        | E::AlignofTy { .. }
+        | E::Offsetof { .. }
+        | E::LabelAddr { .. }
+        | E::Ident { .. } => false,
+        E::Unary { e: x, .. }
+        | E::Cast { e: x, .. }
+        | E::AddrOf { e: x, .. }
+        | E::Deref { e: x, .. }
+        | E::Real { e: x, .. }
+        | E::Imag { e: x, .. }
+        | E::SizeofExpr { e: x, .. }
+        | E::AlignofExpr { e: x, .. }
+        | E::PostInc { e: x, .. }
+        | E::PostDec { e: x, .. }
+        | E::PreInc { e: x, .. }
+        | E::PreDec { e: x, .. } => expr_has_unsafe_ssa_pattern(x),
+        E::Member { expr: x, .. } => expr_has_unsafe_ssa_pattern(x),
+        E::Binop { l, r, .. }
+        | E::Assign { l, r, .. }
+        | E::Comma { l, r, .. }
+        | E::Index { arr: l, idx: r, .. } => {
+            expr_has_unsafe_ssa_pattern(l) || expr_has_unsafe_ssa_pattern(r)
+        },
+        E::Cond { cond, then_, else_, .. } => {
+            expr_has_unsafe_ssa_pattern(cond)
+                || expr_has_unsafe_ssa_pattern(then_)
+                || expr_has_unsafe_ssa_pattern(else_)
+        },
+        E::Call { callee, args, .. } => {
+            expr_has_unsafe_ssa_pattern(callee)
+                || args.iter().any(expr_has_unsafe_ssa_pattern)
+        },
+        E::StmtExpr { block, .. } => block_has_unsafe_ssa_pattern(block),
+        E::CompoundLit { inits, .. } | E::InitList { inits, .. } => inits.iter().any(|it| match it
+        {
+            crate::ast::InitItem::Expr(x) => expr_has_unsafe_ssa_pattern(x),
+            crate::ast::InitItem::Designated { value, .. } => expr_has_unsafe_ssa_pattern(value),
+        }),
+        E::VaArg { ap, .. } => expr_has_unsafe_ssa_pattern(ap),
+        E::AsmExpr { outputs, inputs, .. } => {
+            outputs.iter().any(expr_has_unsafe_ssa_pattern)
+                || inputs.iter().any(expr_has_unsafe_ssa_pattern)
+        },
     }
 }
 
@@ -1860,6 +1935,7 @@ fn plain_var_decl(ty: crate::ast::Type, name: String, init: Option<Expr>, span: 
         visibility: None,
         is_unused: false,
         register_name: None,
+        home: None,
         cleanup_fn: None,
         is_thread_local: false,
         no_sanitize: vec![],

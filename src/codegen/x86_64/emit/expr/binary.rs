@@ -236,11 +236,12 @@ impl Codegen {
         //       / r13-(48+temp*8).. 变量 (基址 hdr 含 temp_slots)
         // 注意: binop 槽公式只用 48 (callee-saved 区大小),
         // temp_slots 只体现在变量基址 hdr 中, 不可重复计入.
-        let slot_off = -(48 + self.expr_depth as i32 * 8);
+        let slot_off =
+            crate::codegen::x86_64::abi::layout::LayoutMap::temp_slot_off(self.expr_depth as i64);
         // 尝试使用被调用者保存寄存器代替帧槽 (减少内存访问).
         // callee-saved 跨 call 保活 (ABI 保证 + 本编译器序言保存
         // callee_saved_used 集合), 因此含 call 的表达式同样安全;
-        // 递归 binop 通过 reg_allocated 位图分配, 不冲突.
+        // 递归 binop 通过 `RegBank::alloc_temp` 分配，不冲突.
         // dst==1 (rcx) 时左值可能是 shift 计数, 保守退回帧槽.
         let use_callee_saved = dst != 1;
         let callee_reg = if use_callee_saved {

@@ -6,21 +6,53 @@
 
 use crate::ast::*;
 use crate::codegen::shared::elf as shared_elf;
+use crate::codegen::x86_64::abi::layout::LayoutMap;
 use crate::codegen::x86_64::Codegen;
 use std::collections::HashMap;
 
+/// 用户写了不是寄存器的寄存器名（与 `report_internal_bug` 不同：这是**用户代码错误**，
+/// 不是后端不变量破坏）。
+const DIAG_BAD_REG_NAME: &str = "E0316";
+
 impl Codegen {
     pub fn reset_reg_tracker(&mut self) {
-        self.reg_allocated = 0;
-        self.callee_saved_used = 0;
+        // 占用真相只有一份：清的是 `RegBank` 里的两个位图与钉住集合。
+        self.reg_bank.reset();
         // file-scope 的 `register asm` 绑定在 compile_func 开头就已经写进
-        // reg_bindings, 而上面两行把两个位图清零。不重新 claim 就等于宣告
+        // reg_bindings, 而上面一行把占用清空。不重新 claim 就等于宣告
         // 「本函数不使用这些寄存器」, 序言里对应的保存会被 patch_callee_saves
         // 改成 nop —— 调用者存放在里面的值就此消失 (本地声明那条路径在绑定处
         // 当场 claim, 因为它的时机晚于本函数)。
-        let bound: Vec<u8> = self.reg_bindings.values().map(|(r, _)| *r).collect();
+        let bound: Vec<u8> = self
+            .homes
+            .values()
+            .filter_map(|(l, _)| l.reg())
+            .map(|r| r.n)
+            .collect();
         for reg in bound {
-            self.claim_bound_register(reg);
+            self.reg_bank.claim(reg);
+        }
+    }
+
+    /// P12 Phase 5.2a：把「本函数里能把控制流带出保存/恢复区间的 asm goto」clobber 掉的
+    /// 池号从临时值发号器里拿掉。
+    ///
+    /// 为什么不能只在发射点处理：守护是一对 `push`/`pop`，而 `asm goto` 的跳出路径上不
+    /// 经过那个 `pop`。所以必须在函数入口就知道这件事（H1），不然第一个表达式已经把值
+    /// 放进了那个号。
+    ///
+    /// 判据本身只有一份（`crate::ast_asm::escaping_asm_clobbers`）：分配器用同一个事实决
+    /// 定「变量的家不得放这些号」（`ssa::regalloc::plan_for`）。两处各自写一遍遍历就会
+    /// 漂移，而漂移的方向就是静默错值。
+    pub fn ban_escaping_asm_regs(&mut self, body: Option<&crate::ast::Block>) {
+        let Some(b) = body else { return };
+        for name in crate::ast_asm::escaping_asm_clobbers(b) {
+            // 名字→号走本后端已有的那一份解析（`register asm` 与 clobber 同一口径）；
+            // `ban` 对池外的号（caller-saved）直接返 false，所以 `"rcx"` 这种最常见的
+            // clobber 不会改变本函数能用的溅出号。
+            if let Some(reg) = Self::parse_reg_name(&name) {
+                self.reg_bank.ban(reg);
+            }
         }
     }
 
@@ -76,12 +108,12 @@ impl Codegen {
 
     /// 回填本函数序言/尾声的 callee-saved 保存/恢复指令.
     /// 单遍编译下序言先于函数体发射, 无法预知函数体是否使用这些寄存器;
-    /// 函数体生成完毕后 callee_saved_used 已完整, 将未使用寄存器的
+    /// 函数体生成完毕后 `RegBank::used_mask` 已完整, 将未使用寄存器的
     /// 4 字节 mov 改写为 4×0x90 (nop), 消除叶子函数的冗余保存/恢复.
     /// 尾声可能在每个 return 处内联发射, 统一在此处回填, 不依赖生成顺序.
     /// sites_base: compile_func 开头记录的 sites 起始下标 (嵌套函数隔离).
     pub fn patch_callee_saves(&mut self, sites_base: usize) {
-        let used = self.callee_saved_used;
+        let used = self.reg_bank.used_mask();
         for (pos, bit) in self.callee_save_patch_sites.drain(sites_base..) {
             if used & bit == 0 {
                 let p = pos as usize;
@@ -92,6 +124,132 @@ impl Codegen {
 
     pub fn emit_store_rax_r13(&mut self, off: i64) {
         self.store_stack(0, off);
+    }
+
+    /// 用户文本名 → 家（后端事实：名字表只有 `parse_reg_name` 这一份）。
+    /// 名字不是本目标已知的寄存器 ⇒ **报错**，而不是静默不绑。
+    ///
+    /// 实测过的静默后果（P12 Phase 4.1d 要消除的缺陷）：
+    /// `register long gv asm("nosuchreg");` 在改前退出码 0，而产物里 `gv` 出现 **0 次** ——
+    /// 全局变量因收集阶段 `continue` 不进 .data/.bss，又因 `rel_symbols` 判
+    /// `register_name.is_some()` 不发符号，于是这个对象**整个消失**；而 gcc 在这里是
+    /// `error: invalid register name for ‘gv’`。「一个名字没认出来」不可能比「声明不存在」
+    /// 更接近用户意图，所以只能报错。
+    pub(crate) fn resolve_asm_reg(&mut self, v: &VarDecl) -> Option<crate::location::Location> {
+        let text = v.register_name.as_deref()?;
+        if let Some(loc) = Self::parse_reg_home(text) {
+            // 名字认得，但这个号是本端自己的帧基座：拿它当家会让所有 `%r13+disp` 寻址
+            // 一起失效。而今天它不报错：实测同一个 `register long v asm("r13")` 在 -O0
+            // 真发出 `mov %rax,%r13`，在 -O2 则被静默降级成栈槽（`mov %rax,-0x48(%r13)`）
+            // —— 同一份源两个档位两个答案，那比报错坏得多。
+            if let Some(why) = self.reserved_reg_reason(&loc) {
+                self.diag_reserved_reg(&v.name.name, text, why, &v.span);
+                return None;
+            }
+            return Some(loc);
+        }
+        self.diagnostics.push(crate::diagnostics::Diagnostic {
+            sev: crate::diagnostics::Severity::Error,
+            code: DIAG_BAD_REG_NAME,
+            msg: format!("invalid register name for '{}': '{}'", v.name.name, text),
+            span: v.span.clone(),
+            hint: Some("register asm(\"rN\") 里的 N 必须是本目标已知的寄存器名".to_string()),
+            source_line: None,
+        });
+        None
+    }
+
+    /// 保留号（栈指针 / 帧基址 / 帧指针）不得当变量之家：诊断码也只定在这里一处
+    /// （`asm/emit.rs` 的 clobber 侧引用同一个常量）。
+    pub(crate) const DIAG_RESERVED_REG: &'static str = "E0318";
+
+    /// 这个家落在的号是不是本端保留号（帧基址 / 帧指针）。
+    ///
+    /// **只拒这两个，不拒 `%rsp`**：内核与 libm 依赖的
+    /// `register unsigned long current_stack_pointer asm("rsp")` 是一个合法且常见的
+    /// 「只读别名」（本轮实测：把它拒了直接弄坏 `parallel_codegen_keeps_file_scope_register_asm_binding`）。
+    /// 家为 `Reg(4)` 时读侧发的就是 `mov %rsp,%rax`，正是用户要的东西；写侧也是用户自己要求的。
+    /// 而 `%r13`/`%rbp` 不一样：它们是本端自己用来定位帧的，被当家用会让所有
+    /// `%r13+disp` 寻址一起失效（或在另一个档位被静默降级）。
+    /// clobber 侧的 `%rsp` 仍被拒（它守无可守），见 `asm/emit.rs::asm_reject_reserved_clobber`。
+    fn reserved_reg_reason(&self, loc: &crate::location::Location) -> Option<&'static str> {
+        let n = loc.reg()?.n;
+        match n {
+            13 => Some("%r13 是本后端的帧基址：所有局部量都按 `%r13+disp` 寻址"),
+            5 if self.target.frame_pointer => {
+                Some("%rbp 在 -fno-omit-frame-pointer 下是帧指针（序言 push、尾声 pop）")
+            },
+            _ => None,
+        }
+    }
+
+    fn diag_reserved_reg(&mut self, name: &str, text: &str, why: &str, span: &crate::diagnostics::Span) {
+        use crate::diagnostics::{Diagnostic, Severity};
+        self.diagnostics.push(Diagnostic {
+            sev: Severity::Error,
+            code: Self::DIAG_RESERVED_REG,
+            msg: format!("register '{}': '{}' 是保留寄存器 —— {}", name, text, why),
+            span: span.clone(),
+            hint: Some(
+                "本后端可当变量之家的 callee-saved 号只有 rbx/r12/r14/r15（%r13 是帧基址、\n\
+                 %rbp 在 -fno-omit-frame-pointer 下是帧指针，都不行；%rsp 当只读别名是可以的）".to_string(),
+            ),
+            source_line: None,
+        });
+    }
+
+    /// 变量声明处的**家**写入的唯一入口（P12 Phase 4.1c）。
+    ///
+    /// 为什么要有它：同一件事（「这个声明要住哪个寄存器」）之前在 `compile_func` 与
+    /// `gen_block_items` 各有一份拷贝（两处字面同形、改一处漏一处的形状）；而 §7.15/§7.19
+    /// 反复实测到的结论是「消费者没读同一张表」就是静默错值的来源。家在这里只有一个
+    /// 算式，插入后必然同步 `RegBank` 与钉住集合。
+    ///
+    /// 两个来源的优先级与今天一致：**用户写的文本名 > IR 位置表给出的分配结果**
+    /// （`apply_bindings` 本来就不会覆盖已有的 `register_name`，而自动分配把
+    /// `already-register-asm` 当拒因，所以两者不会同时出现在同一个变量上）。
+    /// 返回是否真的绑上了。
+    pub fn bind_decl_home(&mut self, v: &VarDecl) -> bool {
+        // 地址被取走的对象不得绑到物理寄存器：绑定后那个栈槽再没人写过，`&v` 的读者
+        // 拿到旧值/垃圾（GCC 遇到逸出同样是忽略绑定，而规划期总是先分好了槽，
+        // 退回内存路径无风险）。
+        if !self.register_binding_allowed(&v.name.name) {
+            return false;
+        }
+        let home = match &v.register_name {
+            // 用户文本名：非法就报错（见 `resolve_asm_reg`），不静默降级成内存变量。
+            Some(_) => self.resolve_asm_reg(v),
+            // 自动分配的结果：已是 `Location`，不再走名字这一圈。
+            None => v.home,
+        };
+        match home {
+            Some(loc) => {
+                self.insert_home(&v.name.name, loc, v.ty.clone());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 登记一个家，并同步占用事实。**只给声明处用**：file-scope 表 (`global_homes`) 的
+    /// 重填走直接 `insert`，因为那条路径上旧代码不在这里 claim（它在 `reset_reg_tracker`
+    /// 里做），而 `naked` 函数根本不会走到 reset —— 改在这里 claim 就是新增行为。
+    pub(super) fn insert_home(&mut self, name: &str, loc: crate::location::Location, ty: Type) {
+        self.homes.insert(name.to_string(), (loc, ty));
+        if let Some(r) = loc.reg() {
+            // 绑定即占用该寄存器：必须保存 + 不得再当临时值发出（见 `RegBank::claim`）
+            self.reg_bank.claim(r.n);
+        }
+    }
+
+    /// 用户文本名 → 家（后端事实：名字表只有 `parse_reg_name` 这一份）。
+    pub fn parse_reg_home(name: &str) -> Option<crate::location::Location> {
+        Self::parse_reg_name(name).map(|n| {
+            crate::location::Location::Reg(crate::location::RegId {
+                bank: crate::location::RegBank::Gp,
+                n,
+            })
+        })
     }
 
     pub fn ends_with_return(items: &[BlockItem]) -> bool {
@@ -672,6 +830,7 @@ impl Codegen {
         static_local_map: &crate::static_locals::StaticLocalMap,
         func_name: &str,
         total_slots: &mut i64,
+        spill_slots: &mut i64,
     ) {
         // 先收集每个名字的全函数最大分配需求, 再按首次出现顺序分配偏移。
         // maxima 必须从整棵函数体树算得并随递归全程携带: 若在嵌套
@@ -688,7 +847,26 @@ impl Codegen {
             func_name,
             total_slots,
             &maxima,
+            spill_slots,
         );
+    }
+
+    /// 本函数需要多少个 spill 槽：从**已经交付到声明上的家**里数（P12 Phase 5.1.b）。
+    ///
+    /// 为什么不在这里重新算一遍分配：分配器的决定已经写进 `VarDecl::home`，帧只需要回答
+    /// 「这些家里出现过的最大槽号是多少」。拿 `max(槽号)+1` 当带尺寸，尺寸与坐标就天生
+    /// 来自同一份事实；若另加一个 `FuncDecl::spill_slots` 字段由分配器写，就会出现
+    /// 「带尺寸与槽号不一致」这种只能靠自觉维护的双轨（§3 的 H4）。
+    ///
+    /// 只算**真正占帧内槽**的声明：extern 引用全局符号、已由分析 pass 预注册的 static local
+    /// 不占帧内空间（上面两处 `continue` 早于本行），所以它们就算带着 Spill 家也不得拉大带。
+    /// 序号负值按非法忽略（宁可少给一个槽也不能算出一个越界的偏移）。
+    fn count_spill_slot(v: &crate::ast::VarDecl, spill_slots: &mut i64) {
+        if let Some(crate::location::Location::Spill(slot)) = v.home {
+            if slot >= 0 && slot.saturating_add(1) > *spill_slots {
+                *spill_slots = slot.saturating_add(1);
+            }
+        }
     }
 
     fn pre_register_vars_max(
@@ -700,6 +878,7 @@ impl Codegen {
         func_name: &str,
         total_slots: &mut i64,
         maxima: &HashMap<String, (i64, Type)>,
+        spill_slots: &mut i64,
     ) {
         for item in items {
             match item {
@@ -714,6 +893,8 @@ impl Codegen {
                             continue;
                         }
                     }
+                    // 同一个逐声明循环顺带定 spill band 尺寸（不另开一份遍历）。
+                    Self::count_spill_slot(v, spill_slots);
                     let (slots, alloc_ty) = match maxima.get(&v.name.name) {
                         Some((s, t)) => (*s, t.clone()),
                         None => (Self::var_alloc_slots(&v.ty), v.ty.clone()),
@@ -722,7 +903,7 @@ impl Codegen {
                     // total_slots 仍递增会导致偏移计算错误。
                     if !var_map.contains_key(&v.name.name) {
                         let used = total_slots.saturating_mul(8);
-                        let hdr = 48i64 + temp_slots as i64 * 8;
+                        let hdr = LayoutMap::hdr_of(temp_slots as i64);
                         let off = -(used + hdr) - (slots.saturating_sub(1) * 8);
                         var_map.insert(v.name.name.clone(), (off, alloc_ty));
                         *total_slots = total_slots.saturating_add(slots);
@@ -745,6 +926,7 @@ impl Codegen {
                         func_name,
                         total_slots,
                         maxima,
+                        spill_slots,
                     );
                 },
                 _ => {},
@@ -761,6 +943,7 @@ impl Codegen {
         func_name: &str,
         total_slots: &mut i64,
         maxima: &HashMap<String, (i64, Type)>,
+        spill_slots: &mut i64,
     ) {
         match s {
             Stmt::Block { b, .. } => {
@@ -773,6 +956,7 @@ impl Codegen {
                     func_name,
                     total_slots,
                     maxima,
+                    spill_slots,
                 );
             },
             Stmt::If { then_, else_, .. } => {
@@ -785,6 +969,7 @@ impl Codegen {
                     func_name,
                     total_slots,
                     maxima,
+                    spill_slots,
                 );
                 if let Some(e) = else_ {
                     Self::pre_register_stmt_max(
@@ -796,6 +981,7 @@ impl Codegen {
                         func_name,
                         total_slots,
                         maxima,
+                        spill_slots,
                     );
                 }
             },
@@ -809,6 +995,7 @@ impl Codegen {
                     func_name,
                     total_slots,
                     maxima,
+                    spill_slots,
                 );
             },
             Stmt::Switch { cases, .. } => {
@@ -822,6 +1009,7 @@ impl Codegen {
                         func_name,
                         total_slots,
                         maxima,
+                        spill_slots,
                     );
                 }
             },
@@ -927,8 +1115,8 @@ impl Codegen {
 
     pub fn emit_func_epilogue(&mut self) {
         // Stack canary 检查: 在恢复 rsp 前验证金丝雀值
-        if self.target.stack_protector && self.frame_size >= 8 {
-            // mov r11, [r13 - 8]  → 加载存储的 canary 到临时寄存器
+        if self.target.stack_protector && self.frame_layout.canary_fits() {
+            // mov r11, [r13 - 8]  → 加载存储的 canary 到临时寄存器（槽位 = `abi::layout::CANARY_OFF`）
             self.emit(&[0x4d, 0x8b, 0x9d, 0xf8, 0xff, 0xff, 0xff]);
             // xor r11, seg:[0x28]  → 与原始 canary 比较
             // seg = fs (0x64) or gs (0x65) based on guard register
@@ -981,5 +1169,121 @@ impl Codegen {
         } else {
             self.emit(&[0xC3]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{BlockItem, Decl, Stmt};
+    use crate::location::Location;
+    use crate::static_locals::StaticLocalMap;
+
+    /// 把指定名字的声明的 `home` 改成 `Spill(slot)`。今天分配器还不产出 Spill 家，所以
+    /// 本用例只能这样注入 —— 验的是「带的尺寸从已交付的家导出」这条机制本身，
+    /// 而不是某个分配结果。
+    fn body_with_spill_home(src: &str, fname: &str, name: &str, slot: i64) -> Vec<BlockItem> {
+        let mut items = body_of(src, fname);
+        let mut hit = false;
+        set_home(&mut items, name, slot, &mut hit);
+        assert!(hit, "源里没有名为 '{name}' 的声明（用例不得因为找不到名字而空跑）");
+        items
+    }
+
+    fn body_of(src: &str, fname: &str) -> Vec<BlockItem> {
+        let (prog, _d) = crate::parser::parse(src.as_bytes(), "t.c");
+        let (m, _w) = crate::ir::lower(prog).unwrap();
+        m.source()
+            .decls
+            .iter()
+            .find_map(|d| match d {
+                Decl::Func(f) if f.name.name == fname => Some(f.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("源里没有函数 {fname}"))
+            .body
+            .expect("被测函数必须有体")
+            .items
+    }
+
+    /// 遍历形状与 `pre_register_vars` 那一份一致（只服务于测试，不进产物路径）。
+    fn set_home(items: &mut [BlockItem], name: &str, slot: i64, hit: &mut bool) {
+        for item in items {
+            match item {
+                BlockItem::Decl(Decl::Var(v)) => {
+                    if v.name.name == name {
+                        v.home = Some(Location::Spill(slot));
+                        *hit = true;
+                    }
+                },
+                // 其余声明（函数/类型/typedef/global asm）里没有要改的局部家。
+                BlockItem::Decl(_) => {},
+                BlockItem::Stmt(s) => set_home_stmt(s, name, slot, hit),
+            }
+        }
+    }
+
+    fn set_home_stmt(s: &mut Stmt, name: &str, slot: i64, hit: &mut bool) {
+        match s {
+            Stmt::Block { b, .. } => set_home(&mut b.items, name, slot, hit),
+            Stmt::If { then_, else_, .. } => {
+                set_home_stmt(then_, name, slot, hit);
+                if let Some(e) = else_ {
+                    set_home_stmt(e, name, slot, hit);
+                }
+            },
+            Stmt::While { body, .. } | Stmt::Do { body, .. } | Stmt::For { body, .. } => {
+                set_home_stmt(body, name, slot, hit)
+            },
+            Stmt::Switch { cases, .. } => {
+                for c in cases {
+                    set_home(&mut c.body.items, name, slot, hit);
+                }
+            },
+            _ => {},
+        }
+    }
+
+    fn plan_spill_slots(items: &[BlockItem], fname: &str) -> (i64, usize, i64) {
+        let mut var_map: HashMap<String, (i64, crate::ast::Type)> = HashMap::new();
+        let mut total = 0i64;
+        let mut spill = 0i64;
+        Codegen::pre_register_vars(
+            &mut var_map,
+            items,
+            2,
+            0,
+            &StaticLocalMap::default(),
+            fname,
+            &mut total,
+            &mut spill,
+        );
+        // 第三个读数就是「遍历真的跑了」的证据：没有它，spill == 0 可能只是根本没进入循环。
+        (spill, var_map.len(), total)
+    }
+
+    const SRC: &str = "long f(long n){ long a = n; { long deep = n + 1; a += deep; } \
+                        extern long g_env; long b = a + n; return b + g_env; }\n";
+
+    /// Phase 5.1.b 的三条：**最大槽号 + 1 就是带的尺寸**；嵌套块里的声明不会漏算；
+    /// 而 extern 声明不占帧内空间，就算带着 Spill 家也不得拉大带（拉大了是白吃帧，
+    /// 算小了就是越界写）。最后一句钉「没有 Spill 家⇒带为 0」：那才是今天全语料的形状，
+    /// 也是「本步产物逐字节不变」的根据。
+    #[test]
+    fn spill_band_is_sized_from_the_delivered_homes() {
+        assert_eq!(plan_spill_slots(&body_with_spill_home(SRC, "f", "a", 0), "f").0, 1);
+        assert_eq!(plan_spill_slots(&body_with_spill_home(SRC, "f", "a", 2), "f").0, 3);
+        assert_eq!(plan_spill_slots(&body_with_spill_home(SRC, "f", "deep", 5), "f").0, 6);
+        // extern 声明不占帧内槽：就算它被塞了 Spill 家也不得拉大带（拉大了就是白吃帧），
+        // 而同一个调用里普通局部仍然真的被预注册（否则这条 0 只是空跑）。
+        let (for_extern, registered, watermark) =
+            plan_spill_slots(&body_with_spill_home(SRC, "f", "g_env", 7), "f");
+        assert_eq!(for_extern, 0, "extern 声明不得拉大 spill band");
+        assert!(
+            registered >= 3 && watermark > 0,
+            "同一个调用必须真的预注册了局部（变量区没算起来就是遍历没跑到，上面那个 0 就是假绿）"
+        );
+        let (none, _, _) = plan_spill_slots(&body_of(SRC, "f"), "f");
+        assert_eq!(none, 0, "没有任何 Spill 家时带必须是 0");
     }
 }

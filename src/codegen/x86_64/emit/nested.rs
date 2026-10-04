@@ -148,8 +148,9 @@ impl Codegen {
         // 每个 trampoline 32 字节 (16 字节对齐)
         let tramp_size: i64 = 32;
         // Trampoline 槽位位于帧底部 trampoline reserve (256 字节) 内
-        // 从 reserve 顶部向下分配: 第一个槽在 -frame_size + 256 - 32
-        let offset = -self.frame_size + (256i64 - self.trampoline_total_size as i64 - tramp_size);
+        // 从 reserve 顶部向下分配: 第一个槽在 tramp_top(-frame_size+256) 之下
+        let offset =
+            self.frame_layout.tramp_top - self.trampoline_total_size as i64 - tramp_size;
         self.trampoline_total_size += tramp_size as i32;
         self.trampoline_slots
             .insert(nested_name.to_string(), offset);

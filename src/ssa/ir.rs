@@ -359,7 +359,7 @@ impl OrderedNameSet {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Function {
     pub name: String,
     pub params: Vec<SsaVar>,
@@ -406,6 +406,19 @@ pub struct Function {
     /// 这些块在结构体重建时必须额外包一层 `Stmt::Label`, 否则异常路径
     /// 「继续执行 try 语句之后的代码」无法表达。
     pub eh_reentry_labels: Vec<String>,
+    /// P12 字面形态 (Phase 3): SSA 值的**家**。数据形态与改写入口在 `ssa/location.rs`。
+    ///
+    /// 为什么放在 `Function` 而不是 `ast::Ident`：编号是后端事实、`Ident` 只能表达
+    /// 「叫什么」表达不了「在哪住」，而挂在 IR 上才能谈活性/干涉，并让「复制函数的 pass」
+    /// 被编译器点名（`LocMap` 故意不实现 `Clone`/`Default`）。
+    ///
+    /// 本字段由 `regalloc` 填写、重建时翻译成后端的绑定表；Phase 3.0 阶段它只存
+    /// 与不读（产物逐字节不变就是这一步的判据）。
+    pub value_loc: crate::ssa::location::LocMap,
+    /// D3 / Phase 3.4：版本分裂表（同基名的版本拿到不同家时，它们必须成为
+    /// 各自的 AST 局部）。由 `regalloc::assign` 算一次；重建与交付都读它，
+    /// 所以「哪个版本叫什么」只有一份答案。今天总是空（⇒ 产物不变）。
+    pub local_splits: crate::ssa::location::Splits,
 }
 
 impl Function {
@@ -429,9 +442,48 @@ impl Function {
             param_quals: HashMap::new(),
             eh_unwind_blocks: Vec::new(),
             eh_reentry_labels: Vec::new(),
+            value_loc: crate::ssa::location::LocMap::empty(),
+            local_splits: crate::ssa::location::Splits::default(),
         };
         s.add_block("entry".to_string());
         s
+    }
+
+    /// 显式整函数复制 —— Phase 3.3「让编译器点名」的落点（设计 §7 Phase 3.3）。
+    ///
+    /// `Function` 不再 `derive(Clone)`（因 `value_loc: LocMap` 故意不可复制），于是
+    /// **新增一个字段会同时打破本函数与每一个整函数克隆点**，逼写代码的人回答
+    /// 「这个字段在克隆→验证→提交的模式里该怎么走」。若靠 derive，新字段会被静默
+    /// 带走 —— 而位置表恰恰不能静默：SSA 改名/删块/重编号之后，挂在死名字上的家
+    /// 会让新名字默默落到默认值上（实测风险见设计 §11.5 第 8 条）。
+    ///
+    /// 字段逐条深拷贝，副本与原件完全独立：`pipelining::apply_plan` 靠的正是
+    /// 「在副本上落地、验证失败则原件一字不动」这一语义。
+    pub fn fork(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            params: self.params.clone(),
+            ret_ty: self.ret_ty.clone(),
+            entry: self.entry.clone(),
+            blocks: self.blocks.clone(),
+            block_order: self.block_order.clone(),
+            globals: self.globals.clone(),
+            is_cold: self.is_cold,
+            is_hot: self.is_hot,
+            is_noreturn: self.is_noreturn,
+            fenv_access: self.fenv_access,
+            span: self.span.clone(),
+            original_locals: self.original_locals.clone(),
+            local_types: self.local_types.clone(),
+            local_quals: self.local_quals.clone(),
+            param_quals: self.param_quals.clone(),
+            eh_unwind_blocks: self.eh_unwind_blocks.clone(),
+            eh_reentry_labels: self.eh_reentry_labels.clone(),
+            // 位置表也必须跟着带走，但只能走显式 `fork()`：名字就是「我知道我在
+            // 把位置表一起带走」的声明，而不是 derive 的默认行为。
+            value_loc: self.value_loc.fork(),
+            local_splits: self.local_splits.clone(),
+        }
     }
 
     pub fn add_block(&mut self, name: String) -> String {
@@ -755,6 +807,32 @@ pub(crate) fn kind_operand_ssa_vars(kind: &InstKind) -> Vec<SsaVar> {
             _ => None,
         })
         .collect()
+}
+
+/// 终结符里被**读**的 SSA 变量（与 `kind_operand_ssa_vars` 同一事实的终结符侧）。
+///
+/// 为什么提到这里而不是留在消费点：终结符的操作数形状本文件已经知道一遍
+/// （`rename_term_uses`），而活性/位置表又各自需要「哪些名字在终结符里出现」。
+/// 多一份知道 = 多一处会漏变体的地方（`Ret{val}`/`Branch{cond}`/`SwitchTable{idx}`
+/// 漏一个就是静默丢活，而不是编不过）。
+pub(crate) fn term_operand_ssa_vars(t: &Terminator) -> Vec<SsaVar> {
+    let mut out = Vec::new();
+    let mut take = |o: &Operand| match o {
+        Operand::Var(v) => out.push(v.clone()),
+        Operand::Phi(pairs) => {
+            for (v, _) in pairs {
+                out.push(v.clone());
+            }
+        }
+        _ => {}
+    };
+    match t {
+        Terminator::Ret { val: Some(o) } => take(o),
+        Terminator::Ret { val: None } | Terminator::Jump(_) | Terminator::Unreachable => {}
+        Terminator::Branch { cond, .. } => take(cond),
+        Terminator::SwitchTable { idx, .. } => take(idx),
+    }
+    out
 }
 
 /// 该指令是否**读内存** (解引用读 / 读全局对象内容)。内联它等于把这次读**推迟**

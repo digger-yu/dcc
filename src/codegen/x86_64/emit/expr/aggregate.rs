@@ -39,7 +39,7 @@ impl Codegen {
             Type::Complex(inner) if matches!(&inner.base, Type::Float | Type::Double) => {
                 self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0, xmm0
                 self.emit(&[0x0F, 0x57, 0xC9]); // xorps xmm1, xmm1
-                let result_off = -self.frame_size + 8;
+                let result_off = self.complex_result_off();
                 let pfx = if matches!(&inner.base, Type::Float) {
                     0xF3u8
                 } else {
@@ -560,7 +560,7 @@ impl Codegen {
                                     // 整数目标 + 浮点源 (C99 6.3.1.7 分量
                                     // 截断): cvttsd2si 后写 [rcx]/[rcx+isz]
                                     let isz = inner.base.size() as i64;
-                                    let result_off = -self.frame_size + 8;
+                                    let result_off = self.complex_result_off();
                                     self.pop(1); // rcx = dst addr
                                     if src_complex {
                                         let si = src_inner.clone().unwrap();
@@ -631,7 +631,7 @@ impl Codegen {
                                 // → 实部取了 1.0d 低 32 位 0 (complex-6
                                 // test_int)。
                                 let isz = inner.base.size() as i64;
-                                let result_off = -self.frame_size + 8;
+                                let result_off = self.complex_result_off();
                                 if src_complex {
                                     let si = src_inner.clone().unwrap();
                                     let rpfx =
@@ -663,7 +663,7 @@ impl Codegen {
                 // 先物化 (值, 0) 复用同一路径。
                 if let Type::Complex(inner) = dst_ty {
                     if !matches!(&inner.base, Type::Float | Type::Double | Type::LongDouble) {
-                        let result_off = -self.frame_size + 8;
+                        let result_off = self.complex_result_off();
                         self.gen_expr(r, 0);
                         if !matches!(r.ty(), Type::Complex(_) | Type::Imaginary(_)) {
                             // 标量 RHS: 实部 = rax 值, 虚部清零 (物化为同宽
