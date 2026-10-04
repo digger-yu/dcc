@@ -1,6 +1,6 @@
 // src/codegen/x86_64/abi/regnames.rs —— x86_64 寄存器名 → (号, 位宽) 的**唯一**名表。
 //
-// 为什么要有它（`docs/p12-physreg-spill-design.md` §11.17 登记、§7 Phase 6.1 要求的
+// 为什么要有它（`docs/p12-physreg-spill-design.md` §11.15 登记、§7 Phase 6.1 要求的
 // 「三份名字表合一」）：同一件事（「`rbx` 是 3 号、64 位」）此前有三份实现：
 //   1. `emit/func_setup.rs::parse_reg_name`        —— `register asm` 与 clobber 用；
 //   2. `emit/expr/utils.rs::parse_reg_name_bits`   —— 表达式里的显式寄存器引用；

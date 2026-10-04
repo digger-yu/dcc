@@ -787,9 +787,12 @@ impl Codegen {
         ops.push(DW_CFA_DEF_CFA);
         enc_uleb(&mut ops, 13);
         enc_uleb(&mut ops, cfa_off);
-        // r13 自身存在 [r13+0] = CFA-16 -> 因子 16/8 = 2 (data_align = -8)
+        // r13 自身存在 [r13+0]：默认档 CFA = r13+16，所以下界是 CFA-16 → 因子 2；
+        // frame-pointer 档序言多推了一层 rbp，CFA = r13+24，同一个槽就是 CFA-24
+        // → 因子 3。写死 2 会让 r13 与 rbp 两条 DW_CFA_offset 指向同一个地址，
+        // 展开穿过 FP 帧时 r13 被恢复成 rbp 的值（实测产物里两条都是 at cfa-16）。
         ops.push(DW_CFA_OFFSET | 13);
-        enc_uleb(&mut ops, 2);
+        enc_uleb(&mut ops, if cfi.frame_pointer { 3 } else { 2 });
         if cfi.frame_pointer {
             // rbp 存在 [r13+8] = CFA-16 -> 因子 2
             ops.push(DW_CFA_OFFSET | 6);

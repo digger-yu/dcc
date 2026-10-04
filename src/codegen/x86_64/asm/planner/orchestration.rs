@@ -134,7 +134,7 @@ impl AsmRegisterPlanner {
     /// clobber 时它还会复用同一个号。那个情形下 GCC 会直接报
     /// `asm operand has impossible constraints`，所以这条兜底是「宁可编下去也不报错」的
     /// 旧选择，它的残留风险由池扩大到 13 个号后已大幅降低；彻底解决要重写操作数暂存约定
-    /// （设计 §11.17 里记的 Phase 6.1 另一半），不能拿兜底当常态。
+    /// （设计 §11.15 与 §11.16 记的 Phase 6.1 那两条），不能拿兜底当常态。
     pub fn alloc_gp(&mut self, seed: usize, use_kind: AsmRegUse) -> u8 {
         let picked = Self::pick(&Self::GP_POOL, &self.used_gp, &self.clobber_gp, seed, None);
         if picked.is_none() {

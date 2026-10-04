@@ -236,6 +236,15 @@ impl Codegen {
         self.emit(&[0x41, 0x55, 0x49, 0x89, 0xe5]);
         if self.target.frame_pointer {
             self.emit(&[0x48, 0x89, 0xE5]); // mov rbp, rsp
+            // frame-pointer 模式下序言推了**两个**寄存器（rbp 与 r13），而入口时
+            // rsp ≡ 8 (mod 16)，两次 8 字节之后仍就是 8 —— 本端的不变式是「体内每个 call
+            // 点 rsp ≡ 0 (mod 16)」（`emit/stmt.rs` 里 pr44575 就是它的代价）。实测
+            // `-fno-omit-frame-pointer` 下调用 printf("%.1f") 直接 SIGSEGV(139)，
+            // 而 gcc 同一源正常。这里多下推 8 字节把它对齐；尾声用 `mov %rsp, %r13`
+            // 复位栈指针，所以这 8 字节不需要（也不应该）手写回去。
+            // 它必须在 `cur_prologue_end` 之前发出：FDE 的 CFA 规则从那个偏移之后才生效，
+            // 落在规则之外的 prologue 差异展开器就看不到了。
+            self.emit(&[0x48, 0x83, 0xEC, 0x08]); // sub $8, rsp
         }
         // C++ 零成本异常: 序言到此结束 —— FDE 的 CFA 规则必须从这一偏移之后
         // 才生效 (之前 rsp 还在变动, CFA 沿用 CIE 的 `rsp + 8`)。

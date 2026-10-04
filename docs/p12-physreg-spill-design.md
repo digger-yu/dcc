@@ -1105,7 +1105,7 @@ label 进 SSA）它就红，而事实已经由 `ast_asm` 收好、补判据的�
 **记下的边界（不藏）**：
 - 「谁正持有值」这一读今天包括三类：变量的家、表达式溅出槽、以及**帧基址本身**
   （`%r13`；`-fno-omit-frame-pointer` 下还有 `%rbp`）。前者两项是 Phase 5.2a 的正题，第三项是
-  同一机制顺手接住的（§11.16 的 F5：clobber %r13 从 SIGSEGV 变成与 gcc 同值）。
+  同一机制顺手接住的（§11.14 的 F5：clobber %r13 从 SIGSEGV 变成与 gcc 同值）。
 - 用户在同一函数里既 `register long v asm("rbx")` 又 `::: "rbx"`：普通 asm 能守（push/pop
   把 %rbx 原样还回，实测 42 仍对），而跳得出的 `asm goto` 守不了 ⇒ E0317 点名，不静默给错值。
 - 普通（非 goto）asm 的模板里硬写 `jmp`/改 `%rsp`：任何编译器都看不见，属于 GCC 文档里
@@ -1118,7 +1118,7 @@ label 进 SSA）它就红，而事实已经由 `ast_asm` 收好、补判据的�
 （`({…})` 里不含 asm 也一样）。登记在这里是因为它会挡住 5.2 的一种测试形状（逃逸 asm 与活
 溅出槽同时存在于一个语句表达式内），不是本方案的组成部分。
 
-### 11.13 Phase 5.1.a/b/c/d —— spill band 接进布局解算（已完工，零 diff）
+### 11.12 Phase 5.1.a/b/c/d —— spill band 接进布局解算（已完工，零 diff）
 
 §7 5.1 的正题是「预算不足时把可溢出值落到 spill band，产生 `Location::Spill`，reload 点由
 后端在读取该值时插入」。本轮先把**管子接完**（a→d 四步，全部零 diff），因为并行审计
@@ -1177,7 +1177,7 @@ label 进 SSA）它就红，而事实已经由 `ast_asm` 收好、补判据的�
 SSA（§11.11 的两道闸）⇒ 不会有 Spill 家，所以今天无害；一旦将来放开，5.1.d 的新判据会把
 压穿带直接报成 E1128（而不是静默覆写），所以不会降级成错值。
 
-### 11.14 Phase 5.2a 同期审计带回的相邻缺陷（都有实测，均未修）
+### 11.13 相邻缺陷清单的最新状态
 
 这些不是本方案的组成部件，但它们就压在 5.2 剩下的两条路上，所以逐条记在这里（谁将来动
 嵌套函数 / EH / frame-pointer 路线，先从这里取现成的复现）：
@@ -1187,55 +1187,17 @@ SSA（§11.11 的两道闸）⇒ 不会有 Spill 家，所以今天无害；一�
 | N1 | `-O2` 并行 codegen 不回收 worker 的 `nested_funcs`/`defined_funcs` ⇒ 嵌套函数 ELF 符号丢失 | 170 个含嵌套函数的 TU 里 **74 个**发出悬空 `U <nested>_<parent>.N`；`DCC_NO_PARALLEL=1` 立即恢复 | `parallel/orchestration.rs`（`FuncEmitChunk` 字段表里没有这两张表）+ `elf/symbols.rs` | 它是 5.2b（嵌套函数那条干涉路）唯一能跑起来的环境前提 |
 | N2 | `-fno-omit-frame-pointer` 下 FDE 把 r13 的 `DW_CFA_offset` 因子硬编码成 2（该是 3），与 rbp **同址** | 产物里两条 `at cfa-16` ⇒ 展开穿过 FP 帧时 r13 被恢复成 rbp 的值 | `elf/output.rs:790-792` | EH/unwind 与寄存器所有权共用的那张表错了；5.2c 需要它同时对 |
 | N3 | 同一 FP 模式的序言两次 push ⇒ 体内 `rsp ≡ 8 (mod 16)` | 实测 `./p8c_fp` SIGSEGV(139)，默认档正常 | `emit/functions.rs:230-236` | 与本轮守护撞上的是同一条不变式（所以 N3 未修时守护只能靠自己的对齐补偿） |
-| N4 | ~~clobber/绑定命中 `%r13`/`%rsp`（CFA、帧基址、栈指针）无任何判据无诊断，且 `-O0` 照做、`-O2` 静默降级成栈槽~~ **已修（§11.16 的 F5）**：帧基址进守护名单；绑定侧只拒 `%r13`/`%rbp`（`%rsp` 作为内核在用的只读别名仍允许），clobber 侧拒 `%rsp` | 旧实测：`register asm("r13")` -O0 真发 `mov %rax,%r13`，-O2 变 `mov %rax,-0x48(%r13)`；`::: "r13"` 无守护无报错（-O0/-O2 都 SIGSEGV） | `RegBank::ban`（池外号返 false）、`asm_clobber_held_regs` | 5.2 的「干涉对象」需要的那条「不可守不可绑，碰到就报错」判据已落 |
+| N4 | ~~clobber/绑定命中 `%r13`/`%rsp`（CFA、帧基址、栈指针）无任何判据无诊断，且 `-O0` 照做、`-O2` 静默降级成栈槽~~ **已修（§11.14 的 F5）**：帧基址进守护名单；绑定侧只拒 `%r13`/`%rbp`（`%rsp` 作为内核在用的只读别名仍允许），clobber 侧拒 `%rsp` | 旧实测：`register asm("r13")` -O0 真发 `mov %rax,%r13`，-O2 变 `mov %rax,-0x48(%r13)`；`::: "r13"` 无守护无报错（-O0/-O2 都 SIGSEGV） | `RegBank::ban`（池外号返 false）、`asm_clobber_held_regs` | 5.2 的「干涉对象」需要的那条「不可守不可绑，碰到就报错」判据已落 |
 | N5 | `parser.rs::collect_upvars` 漏两类引用：嵌套体里 VLA **声明维度**引的外层变量、以及 `Stmt::Invoke`/`EhLandingPad` 子树 | 嵌套体内 `long a[n]; sizeof a` 的 TU rc 不定（三次跑出 0/0/128），gcc 是 48 | `src/parser.rs`（`collect_upvars_expr`/`collect_upvars_stmt`） | 收窄「捕获名集」之前必须补完，否则漏收的名字会被绑走 |
 | N6 | 语句表达式里**未被使用的标号**使外层二元式的右操作数丢值 | `(q+r) + ({ skip: g(s); })` 得 6（gcc 10）；`t * ({ skip: g(s); })` 得 5（gcc 25）；四档都坏，与寄存器分配无关 | `gen_expr_stmt_expr` 一族（本轮未定位到行） | 它会挡住 5.2 的一种测试形状（逃逸 asm + 活溅出槽同时在一条语句表达式里） |
 | N7 | 用户 asm 模板里 `call` 一个 **static** 函数时，`-O2` 下符号被改名 ⇒ 链接失败 | `/usr/bin/ld: undefined reference to 'leaf'`（改为外部链接就正常） | 静态名 mangling 与 asm 文本不交汇的地方 | 本轮写守护夹具时实碰到的；也是那条 ABI 不变式相关的最早信号 |
 | N8 | 逸出判据有两套：`ast_gvn::walk_addr_of` 不递归 `Decl::Func`，而后端有一份**显式递归**的同名判据 | 嵌套体里的 `&acc` 只有后端知道，分配器的 `escaped` 看不到 | `ast_gvn.rs:355-366` vs `emit/functions.rs:79-96` | H4 的同一条病灶（所有权/逸出判据多套）；5.2b 收窄前必须合流 |
 
-除 N6/N7 是本轮写夹具时亲手碰到的，N1–N5、N8 由并行审计带回并各自附了复现路径；本轮一条
-也没有动它们（包括自己引入并已修的那条对齐回归），因为每一修都会改产物，必须单独一个
-阶段、单独一批 gcc 对照去做。
+除 N6/N7 是本轮写夹具时亲手碰到的，N1–N5、N8 由并行审计带回并各自附了复现路径。本轮已修
+其中三条：N4（保留号，见 §11.14 F5）、N2/N3（frame-pointer 档，见 §11.17）；其余仍未动，
+因为每一修都会改产物，必须单独一个阶段、单独一批 gcc 对照去做。
 
-### 11.15 还剩什么（没做完的，不能当成已交付）
-
-- **目标 2 的栈侧半边未成立**：`Location::Stack(off)` 里的偏移仍然是发射期懒注册的产物。
-  原计划的第一步是「把晚分配的名字从代码位置改成 AST 站点 id，并证明偏移序列与今天一致」。
-  本轮实测：**这两条要求数学上不可同时满足**，所以下一步不是改名，而是把晚分配整搬进
-  解算表（必然改产物）：
-  - 发射序与 AST 先序**不同**的形状（实测 4 条）：`switch` 的 default 体排在全部 case 体之后
-    （`emit/stmt.rs:721-729`）；case 标签比较链先于所有 case 体，且这一条只在 `-O0` 不同 ——
-    `-O1+` 把 switch 降级成 if-else 链（`ssa/structure.rs::lower_switches_in_func`）后反而同序
-    （发射序不是源码结构的函数，而是优化管线的函数）；`for` 的 step 在 body 之后发射
-    （`stmt.rs:445` vs `447-448`，而 `ast.rs:300-305` 的字段序把 step 排在 body 前）；
-    向量赋值先算右操作数（`dispatch.rs:524` 在 `528` 之前）。
-  - 「一个站点 = 一次注册」也不成立：内联展开不产生 AST 节点（1 个字面量节点实测注册 3 次），
-    复合赋值与 GNU `?:` 会**克隆**子树（两个不同节点共用同一个 span ⇒ 按 span 去重会把今天的
-    2 槽变成 1 槽），向量字面量走 `vector_temp_base` 根本不 `register_var`，同 tag 的 VM 尺寸
-    槽多个声明只对应 1 个槽。
-  - 已经做完的一步（零 diff）：`__compound_lit_*` 的名字后缀从 `self.pos()`（已发射字节数）改成
-    发射序计数器 `Codegen::next_late_site()`，并把 `dispatch.rs` 里那份复合字面量 arm 的
-    逐字副本改成委派 `gen_expr_compound_lit`。**这不是修一个已观测的错值**：实测槽位
-    *偏移* 本来就不随 `pos()` 变（它由水位算），`-falign-loops=32/64` 下偏移逐字节相同；
-    收益是拆掉「名字 ↔ 无关机器码长度」这条无意义耦合与一份影子副本。三档 873 行逐字节不变。
-  - 剩下那步真正难的地方不是改名，而是**第 k 个晚分配对象的偏移还被中间的
-    `alloc_sret_slot` 历史夹着**（`register_var` 的 `min_used` 夹逼，实测中间插一次聚合返回
-    调用就会把后续槽推低 64 字节）：要把它定在解算阶段，sret/物化带也得一起静态化。
-- Phase 5.2 三条已查到底（§11.11）：**a** 的 clobber 守护 + 逃逸让号 + E0317 已完工；**b**
-  与 **c** 今天没有消费者（两道结构性闸把带嵌套函数/带落地垫的函数整体挡在分配器之外），
-  所以只落了前提用例与障碍清单（§11.14 的 N1/N5/N8），没有新加到不了的判据。
-  要拿到那两条的收益，必须先清 §11.14 那一族缺陷（并行 codegen 丢嵌套符号、`collect_upvars`
-  漏 VLA 维度与 EH 子树、逸出判据两套）——那是独立立项的事，不是本阶段能顺带定掉的。
-- Phase 5.1 的正题（per-value 真 SPILL/RELOAD + caller-saved + spill band 接进布局解算）：
-  **band 那一半已完工且零 diff（§11.13 的 a/b/c/d）**；剩下的两件也已在同一节写清为什么不能
-  先做：分配器产出 `Spill` 家在本语料上换不来收益（要收益必须先有额外的号），而 caller-saved
-  撞三条架构级障碍（发射约定恒 %rax、声明级家 vs 程序点存活、没有 caller-saved 保存通道）。
-- Phase 6 四项：6.1 的**名字表合一已完工**（§11.17，零 diff），它的另一半（asm 操作数
-  暂存约定与号→名表）与 6.2/6.3/6.4 未开工；§8 的内核全树构建与 QEMU 启动矩阵：
-  **从未跑过**（本轮按用户要求暂停，不拿未跑过的东西当证据；三档哈希与
-  9 个测试用例脚本不代替它）。
-
-### 11.16 同族修复 —— 声明通路补全与 cleanup 保住（已完工，产物变 2 行）
+### 11.14 同族修复 —— 声明通路补全与 cleanup 保住（已完工，产物变 2 行）
 
 本轮两路专家审计与夹具编写过程中实测到四条同族缺陷（都是「同一个变量两个家」或
 「家/属性在某条通路上静默消失」，即 §3 的 H4），已全部修完：
@@ -1246,7 +1208,7 @@ SSA（§11.11 的两道闸）⇒ 不会有 Spill 家，所以今天无害；一�
 | F2 | 自增/自减臂自己拿 `var_offset` 读改写，绕开了 `home_for` | 循环条件读 %rbx 而 `i++` 写 -96(%r13) ⇒ **-O0/-O1 无限循环**（同一个变量两个家） | `emit/expr/increment.rs`：家在 GP 寄存器上时走 `mov_from_stack`/`mov_to_stack`（同一个读入口 + 同一个宽度口径）；栈槽臂的坐标改走 `stack_home_off`（对无家名字同值，区别只在 `Spill` 家现在能正确翻译） |
 | F3 | `emit/expr/dispatch.rs` 里 `gen_block_item` 的那份副本漏了 `bind_decl_home` 与 `cleanup_fn` 登记，也没有块尾的 cleanup 收尾 | `({ register long j asm("r12"); ... })` 里绑定完全失效；`({ __attribute__((cleanup(f))) ... })` 里的清理从不执行（`hits=0` 对 gcc 的 4） | 副本补上同一个写入入口；cleanup 的「记水位 + LIFO 发出」抽成成对的 `begin/end_cleanup_scope`（普通块与语句表达式共用），并在发出前用帧槽而不是 `push` 护住结果（pr44575 同一条对齐约束） |
 | F4 | `ssa::rebuild_block` 重建声明时写 `cleanup_fn: None`，而 IR 里没有 cleanup 这个副作用的表示 | **-O2/-O3 把 `__attribute__((cleanup))` 整个丢掉**（普通块里也中：`hits` 从 5 变 0），而 `cross_function_dce` 不认这条隐式调用，进一步报 `undefined reference to 'hit_cleanup'` | 两道各修一半：`opt.rs::block_has_unsafe_ssa_pattern` 把「体内有 cleanup 声明」（含语句表达式里的，新增穷举的 `expr_has_unsafe_ssa_pattern`）当成整函数退回 AST 路径（与同列的 static/extern/VLA 同一口径）；`ssa::passes.rs::walk_block_refs` 把 `cleanup_fn` 记进调用图。没有在 IR 里新造一个副作用调用 —— 那是另一个数量级的改动，也不是本阶段能顺带定掉的 |
-| F5 | 保留号无判据：clobber `%r13`（帧基址）不守护不报错；`register asm("r13")` 在 -O0 真发 `mov %rax,%r13`、在 -O2 静默降级成栈槽（§11.14 的 N4） | clobber `%r13`：-O0/-O2 **都是 SIGSEGV(139)**，gcc 同一源得 10；绑定 `%r13`：同一份源两个档位两个答案 | 「谁正持有值」除了池号还算上帧基址（`-fno-omit-frame-pointer` 下还算 `%rbp`），于是同一个 push/pop 守护就能把帧基址原样还回来（F5 的运行时症状直接消失）。**绑定侧只拒 `%r13`/`%rbp`，不拒 `%rsp`**：`register unsigned long current_stack_pointer asm("rsp")` 是内核在用的只读别名（家为 `Reg(4)` 时读侧发的就是 `mov %rsp,%rax`，实测读回的值就落在栈附近），把它一起拒了当场弄坏 `parallel_codegen_keeps_file_scope_register_asm_binding` —— 这条反向对照现在也在用例里。clobber 侧的 `%rsp` 仍拒（它正是守护自己的基座，GCC 同样不允许）⇒ **E0318**；判据只住 `func_setup.rs::reserved_reg_reason` 与 `asm/emit.rs::asm_reject_reserved_clobber` 两处，诊断码 `Codegen::DIAG_RESERVED_REG` 共用一份 |
+| F5 | 保留号无判据：clobber `%r13`（帧基址）不守护不报错；`register asm("r13")` 在 -O0 真发 `mov %rax,%r13`、在 -O2 静默降级成栈槽（§11.13 的 N4） | clobber `%r13`：-O0/-O2 **都是 SIGSEGV(139)**，gcc 同一源得 10；绑定 `%r13`：同一份源两个档位两个答案 | 「谁正持有值」除了池号还算上帧基址（`-fno-omit-frame-pointer` 下还算 `%rbp`），于是同一个 push/pop 守护就能把帧基址原样还回来（F5 的运行时症状直接消失）。**绑定侧只拒 `%r13`/`%rbp`，不拒 `%rsp`**：`register unsigned long current_stack_pointer asm("rsp")` 是内核在用的只读别名（家为 `Reg(4)` 时读侧发的就是 `mov %rsp,%rax`，实测读回的值就落在栈附近），把它一起拒了当场弄坏 `parallel_codegen_keeps_file_scope_register_asm_binding` —— 这条反向对照现在也在用例里。clobber 侧的 `%rsp` 仍拒（它正是守护自己的基座，GCC 同样不允许）⇒ **E0318**；判据只住 `func_setup.rs::reserved_reg_reason` 与 `asm/emit.rs::asm_reject_reserved_clobber` 两处，诊断码 `Codegen::DIAG_RESERVED_REG` 共用一份 |
 
 **产物变化（本轮唯一一次）**：三档 873 行里变了 **2 行** —— `tests/fixtures/c/attr_cleanup.c` 的
 `-O2` 与 `-O3`（`-O0` 那行不变），正是 F4 把带 cleanup 的函数留在 AST 路径的必然结果。逐行核对：
@@ -1261,7 +1223,7 @@ SSA（§11.11 的两道闸）⇒ 不会有 Spill 家，所以今天无害；一�
 F1/F2（它们只在 -O0/-O1 失控）。
 
 
-### 11.17 寄存器名字表的合一（Phase 6.1 的第一半，已完工零 diff）
+### 11.15 寄存器名字表的合一（Phase 6.1 的第一半，已完工零 diff）
 
 「x86_64 寄存器名→(号,位宽,规范名)」这张表曾有**三份**实现：
 `emit/func_setup.rs:39 parse_reg_name`、`emit/expr/utils.rs:1357 parse_reg_name_bits`、
@@ -1287,13 +1249,13 @@ F1/F2（它们只在 -O0/-O1 失控）。
 1. **号→名也有三份**：`abi/tyclass.rs:375 gp_reg_name`（0..15，越界静默返 "rax"）、
    `codegen/asm_event.rs:660-690` 的四张宽度名表（8/16/32/64 位各一张）。它们的服务对象
    不同（AT&T 文本生成 vs 诊断文案），合之前得先确认“越界返 rax”这个兼容行为有没有人在依赖。
-2. ~~**asm 操作数暂存约定重写**~~ —— **本轮已做完关键的一半**（见 §11.18）：GP 池从 9 个
+2. ~~**asm 操作数暂存约定重写**~~ —— **本轮已做完关键的一半**（见 §11.16）：GP 池从 9 个
    caller-saved 号扩到含 callee-saved 的 13 个，动到 callee-saved 就登记回 `RegBank`，
    池真空了则点名。剩下的半件是更根本的那条：操作数用 caller-saved 号时，与表达式求值
    对 rax/rcx/rdx 的硬编码假设仍有重叠（那是「结果恒在 %rax」的同一条债，与 caller-saved
    池那个独立立项相干）。
 
-### 11.18 asm 操作数落进 callee-saved：扩池 + 登记回占用真源（已完工，产物变 3 行）
+### 11.16 asm 操作数落进 callee-saved：扩池 + 登记回占用真源（已完工，产物变 3 行）
 
 `asm/planner/orchestration.rs` 过去只给 9 个 caller-saved 号，`alloc_gp` 找不到空闲号时
 **静默复用已发出去的号**。两组实测数字：
@@ -1328,4 +1290,66 @@ callee-saved 做操作数时必须同时成立两件事 —— 序言那条保�
 `own_asm_operand_gp` 短路后重建，该用例在 `-O0` 就失败（`r1=-1`，gcc 是 300）。
 
 
+
+### 11.17 frame-pointer 档的两条修复（N2/N3，已完工，默认档零 diff）
+
+仓里从来没有 `-fno-omit-frame-pointer` 的测试（全量用例与 9 个测试用例脚本都是默认档），
+所以这两个缺陷在全绿下存活：
+
+- **N3 体内对齐**：FP 档序言推两个寄存器（rbp然r13），入口 rsp ≡ 8 (mod 16)，两次 8 字节后
+  仍是 8 ⇒ 每个调用点都差 8 字节。实测同一份源（循环里 `printf("%.2f")` + 一个 `char buf[24]`
+  局部）在 FP 档 **SIGSEGV(139)**，不带该 flag 与 gcc 都正常。修法：在 `mov %rsp, %rbp` 之后、
+  `cur_prologue_end` 之前补一次 `sub $8, %rsp`（尾声用 `mov %rsp, %r13` 复位栈指针，所以这
+  8 字节不需要手写回去；它必须在 prologue 范围内，否则 FDE 的 CFA 规则盖不到它）。
+- **N2 FDE 把 r13 与 rbp 写成同一个槽**：FP 档 CFA = r13+24（多压了一层 rbp），r13 存在
+  [r13+0] = CFA-24 ⇒ 因子该是 3，代码写死了 2 ⇒ `readelf --debug-dump=frames` 里 r13 与 rbp
+  两条都是 `at cfa-16`，展开穿过 FP 帧时 r13 被恢复成 rbp 的值。修法：因子按
+  `cfi.frame_pointer` 取 3/2。
+
+**判据**：`frame_pointer_mode_keeps_calls_aligned_and_fde_distinct`（夹具
+`tests/fixtures/opt/frame_pointer_aligned_calls.c`）——四档逐档与 gcc 对照（139 就是 N3 的形态）、
+产物级「FP 序言必须紧跟 `sub $8, %rsp`」、`readelf` 级「r13 在 cfa-24、rbp 在 cfa-16 且两者
+不得同址」、再加默认档的反向对照（不得出现 FP 序言）。新夹具放在 `opt/` 而不是 `c/`：
+后者会被三档哈希与 `check_opt_equivalence.sh` 按默认 flags 扫，拿不到 FP 这条轴。
+
+**产物影响**：三档哈希 873 行逐字节不变（默认档不进入这两个分支）；影响面只在带
+`-fno-omit-frame-pointer` 的构建上 —— 那恰好是内核的默认配置（CONFIG_FRAME_POINTER）。
+
+### 11.18 还剩什么（没做完的，不能当成已交付）
+
+- **目标 2 的栈侧半边未成立**：`Location::Stack(off)` 里的偏移仍然是发射期懒注册的产物。
+  原计划的第一步是「把晚分配的名字从代码位置改成 AST 站点 id，并证明偏移序列与今天一致」。
+  本轮实测：**这两条要求数学上不可同时满足**，所以下一步不是改名，而是把晚分配整搬进
+  解算表（必然改产物）：
+  - 发射序与 AST 先序**不同**的形状（实测 4 条）：`switch` 的 default 体排在全部 case 体之后
+    （`emit/stmt.rs:721-729`）；case 标签比较链先于所有 case 体，且这一条只在 `-O0` 不同 ——
+    `-O1+` 把 switch 降级成 if-else 链（`ssa/structure.rs::lower_switches_in_func`）后反而同序
+    （发射序不是源码结构的函数，而是优化管线的函数）；`for` 的 step 在 body 之后发射
+    （`stmt.rs:445` vs `447-448`，而 `ast.rs:300-305` 的字段序把 step 排在 body 前）；
+    向量赋值先算右操作数（`dispatch.rs:524` 在 `528` 之前）。
+  - 「一个站点 = 一次注册」也不成立：内联展开不产生 AST 节点（1 个字面量节点实测注册 3 次），
+    复合赋值与 GNU `?:` 会**克隆**子树（两个不同节点共用同一个 span ⇒ 按 span 去重会把今天的
+    2 槽变成 1 槽），向量字面量走 `vector_temp_base` 根本不 `register_var`，同 tag 的 VM 尺寸
+    槽多个声明只对应 1 个槽。
+  - 已经做完的一步（零 diff）：`__compound_lit_*` 的名字后缀从 `self.pos()`（已发射字节数）改成
+    发射序计数器 `Codegen::next_late_site()`，并把 `dispatch.rs` 里那份复合字面量 arm 的
+    逐字副本改成委派 `gen_expr_compound_lit`。**这不是修一个已观测的错值**：实测槽位
+    *偏移* 本来就不随 `pos()` 变（它由水位算），`-falign-loops=32/64` 下偏移逐字节相同；
+    收益是拆掉「名字 ↔ 无关机器码长度」这条无意义耦合与一份影子副本。三档 873 行逐字节不变。
+  - 剩下那步真正难的地方不是改名，而是**第 k 个晚分配对象的偏移还被中间的
+    `alloc_sret_slot` 历史夹着**（`register_var` 的 `min_used` 夹逼，实测中间插一次聚合返回
+    调用就会把后续槽推低 64 字节）：要把它定在解算阶段，sret/物化带也得一起静态化。
+- Phase 5.2 三条已查到底（§11.11）：**a** 的 clobber 守护 + 逃逸让号 + E0317 已完工；**b**
+  与 **c** 今天没有消费者（两道结构性闸把带嵌套函数/带落地垫的函数整体挡在分配器之外），
+  所以只落了前提用例与障碍清单（§11.13 的 N1/N5/N8），没有新加到不了的判据。
+  要拿到那两条的收益，必须先清 §11.13 那一族缺陷（并行 codegen 丢嵌套符号、`collect_upvars`
+  漏 VLA 维度与 EH 子树、逸出判据两套）——那是独立立项的事，不是本阶段能顺带定掉的。
+- Phase 5.1 的正题（per-value 真 SPILL/RELOAD + caller-saved + spill band 接进布局解算）：
+  **band 那一半已完工且零 diff（§11.12 的 a/b/c/d）**；剩下的两件也已在同一节写清为什么不能
+  先做：分配器产出 `Spill` 家在本语料上换不来收益（要收益必须先有额外的号），而 caller-saved
+  撞三条架构级障碍（发射约定恒 %rax、声明级家 vs 程序点存活、没有 caller-saved 保存通道）。
+- Phase 6 四项：6.1 的**名字表合一已完工**（§11.15，零 diff），它的另一半（asm 操作数
+  暂存约定与号→名表）与 6.2/6.3/6.4 未开工；§8 的内核全树构建与 QEMU 启动矩阵：
+  **从未跑过**（本轮按用户要求暂停，不拿未跑过的东西当证据；三档哈希与
+  9 个测试用例脚本不代替它）。
 

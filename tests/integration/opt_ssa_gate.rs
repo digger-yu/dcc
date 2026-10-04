@@ -662,7 +662,7 @@ fn eh_landing_pad_functions_are_never_auto_bound() {
     for name in ["with_eh", "eh_no_loop", "cleanup_only"] {
         assert!(
             !stderr.contains(&format!("[regalloc] {name}")),
-            "{name} 带落地垫却被规划了：落地垫的寄存器约定还没进干涉模型，先补判据再放开 \n（见设计 §7 5.2 与 §11.14 的 N2/N5）"
+            "{name} 带落地垫却被规划了：落地垫的寄存器约定还没进干涉模型，先补判据再放开 \n（见设计 §7 5.2 与 §11.13 的 N2/N5）"
         );
     }
 }
@@ -676,9 +676,9 @@ fn eh_landing_pad_functions_are_never_auto_bound() {
 ///      就被 `opt.rs::block_has_unsafe_ssa_pattern` 整函数踢出管线，所以把它收成「只拒被
 ///      捕获者」在语料上多不出一个绑定（本用例就是这条事实的常驻版本）；
 ///   2. 真要拿到收益，得先修好另一族缺陷（并行 codegen 不回收嵌套函数符号、`collect_upvars`
-///      漏 VLA 声明维度与 EH 子树、逸出判据两套不分叉），设计 §11.14 的 N1/N5/N8。
+///      漏 VLA 声明维度与 EH 子树、逸出判据两套不分叉），设计 §11.13 的 N1/N5/N8。
 /// 于是这里只钉前提：同 TU 里不带嵌套的热函数必须真的被规划（反向对照），带嵌套函数的那个
-/// 函数一行 dump 都不许出现。前提一变就红，那时再按 §11.14 清完障碍、并把拒绑集换成
+/// 函数一行 dump 都不许出现。前提一变就红，那时再按 §11.13 清完障碍、并把拒绑集换成
 /// 「直接子 `FuncDecl.upvars` 的名字并集」（而不是继续用整函数开关）。
 #[test]
 #[cfg(unix)]
@@ -697,7 +697,77 @@ fn nested_function_bodies_are_never_auto_bound() {
     );
     assert!(
         !stderr.contains("[regalloc] with_nested"),
-        "带嵌套函数的函数却被规划了：而它的外层变量可由嵌套体按帧偏移读，窄判据还没建起来 \n（先按设计 §11.14 清完 N1/N5/N8）：\n{stderr}"
+        "带嵌套函数的函数却被规划了：而它的外层变量可由嵌套体按帧偏移读，窄判据还没建起来 \n（先按设计 §11.13 清完 N1/N5/N8）：\n{stderr}"
+    );
+}
+
+/// `-fno-omit-frame-pointer` 的两条实测判据（设计 §11.13 的 N2/N3，本轮修）。
+///
+/// 为什么这条用例必须存在：仓里**从来没有** FP 档的测试（全量用例与9 个测试用例脚本
+/// 都是默认档），所以这两个缺陷能存活：一是一个调用点差 8 字节导致 libc 浮点路径
+/// `movaps` 当场崩（实测 SIGSEGV/139，不带该 flag 与 gcc 都正常），二是 FDE 把 r13 与 rbp
+/// 写成同一个槽（两条都是 `at cfa-16`），展开穿过 FP 帧时把帧基址恢复成 rbp 的值。
+#[test]
+#[cfg(unix)]
+fn frame_pointer_mode_keeps_calls_aligned_and_fde_distinct() {
+    let source = include_str!("../fixtures/opt/frame_pointer_aligned_calls.c");
+    // 1) 运行：四档逐档与 gcc 对照（139=SIGSEGV 就是对齐未修的形态）
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("fp-aligned", source, &[flag, "-fno-omit-frame-pointer"]),
+            0,
+            "{flag} -fno-omit-frame-pointer: 调用点或读数不对"
+        );
+    }
+    // 2) 产物：FP 序言在 `mov %rsp, %rbp` 之后紧跟一次 `sub $8, %rsp`（对齐补偿）
+    let (asm_text, stderr) = compile_asm_text_with_env(
+        "fp-prologue",
+        source,
+        &["-O0", "-fno-omit-frame-pointer"],
+        &[],
+    );
+    assert!(!asm_text.is_empty(), "应产出汇编：\n{stderr}");
+    let anchor = "mov %rsp, %rbp";
+    let at = asm_text
+        .find(anchor)
+        .unwrap_or_else(|| panic!("FP 档序言里没有 `{anchor}`：\n{asm_text}"));
+    assert!(
+        asm_text[at + anchor.len()..].trim_start().starts_with("sub $8, %rsp"),
+        "FP 档序言必须紧接一次 `sub $8, %rsp` 把体内对齐补回来：\n{}",
+        asm_text[at..].chars().take(120).collect::<String>()
+    );
+    // 3) FDE：r13 在 cfa-24、rbp 在 cfa-16（两者不得同址）
+    let (obj_out, obj) =
+        run_object_test_flags("fp-fde", source, &["-O0", "-fno-omit-frame-pointer"]);
+    assert!(
+        obj_out.status.success(),
+        "FP 档应能编过：{}",
+        String::from_utf8_lossy(&obj_out.stderr)
+    );
+    let dump = Command::new("readelf")
+        .args(["--debug-dump=frames"])
+        .arg(&obj)
+        .output()
+        .expect("readelf");
+    let _ = std::fs::remove_file(&obj);
+    let text = String::from_utf8_lossy(&dump.stdout).to_string();
+    assert!(
+        text.contains("DW_CFA_offset: r13 (r13) at cfa-24"),
+        "FP 档的 r13 保存槽应是 CFA-24（因子 3），否则与 rbp 同址：\n{text}"
+    );
+    assert!(
+        text.contains("DW_CFA_offset: r6 (rbp) at cfa-16"),
+        "rbp 保存槽应在 CFA-16：\n{text}"
+    );
+    assert!(
+        !text.contains("DW_CFA_offset: r13 (r13) at cfa-16"),
+        "两条 DW_CFA_offset 不得指向同一个地址：\n{text}"
+    );
+    // 4) 反向对照：默认档不受这条影响（既不出现 FP 序言，也不多推 8 字节）
+    let (def_text, _) = compile_asm_text_with_env("fp-default", source, &["-O0"], &[]);
+    assert!(
+        !def_text.contains("mov %rsp, %rbp"),
+        "默认档不应出现 FP 序言：\n{def_text}"
     );
 }
 
