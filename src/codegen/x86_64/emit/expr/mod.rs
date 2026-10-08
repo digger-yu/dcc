@@ -6,7 +6,6 @@
 // batch 4 逐 arm 搬迁过程中已彻底无引用，一并作废删除。
 
 pub mod aggregate;
-pub mod binary;
 pub mod complex;
 pub mod dispatch;
 pub mod float;
@@ -20,7 +19,6 @@ pub mod call;
 pub mod cast;
 pub mod compound;
 pub mod increment;
-pub mod init;
 pub mod literal;
 pub mod unary;
 pub mod va_arg;
