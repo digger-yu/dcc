@@ -166,7 +166,7 @@ pub fn run_pipelining(func: &mut Function) -> bool {
 }
 
 /// 临时诊断用: `DCC_SSA_OFF=dse,gvn,jt,die,dbe` 逐个关掉本轮新增的 pass 以二分定位。
-fn ssa_dbg_off(name: &str) -> bool {
+pub fn ssa_dbg_off(name: &str) -> bool {
     std::env::var("DCC_SSA_OFF")
         .map(|v| v.split(',').any(|s| s.trim() == name))
         .unwrap_or(false)

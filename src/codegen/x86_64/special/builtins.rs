@@ -178,7 +178,7 @@ impl Codegen {
                     self.emit(&[0x0F, 0xAE, 0xF0]);
                 }
                 self.gen_expr(&args[0], 7); // rdi = ptr
-                self.gen_expr(&args[1], 0); // rax = expected (cmpxchg 用 rax)
+                self.gen_expr(&args[1], Self::EVAL_BASE); // rax = expected (cmpxchg 用 rax)
                                             // 保存 expected 到帧临时槽, 因为还需要写入
                 let slot = -8 - (self.expr_depth as i32 * 8);
                 {
@@ -242,13 +242,13 @@ impl Codegen {
                 self.gen_expr(&args[0], 7); // rdi = ptr
                                             // First: compute desired value into rsi
                                             // (must be done BEFORE expected, since cmpxchg needs rax = expected)
-                if !self.gen_lvalue_addr(&args[2], 0) {
-                    self.gen_expr(&args[2], 0);
+                if !self.gen_lvalue_addr(&args[2], Self::EVAL_BASE) {
+                    self.gen_expr(&args[2], Self::EVAL_BASE);
                 }
                 // rax = address of desired variable
                 self.emit(&[0x48, 0x8B, 0x30]); // mov rsi, [rax] (rsi = desired value)
                                                 // Then: compute expected value into rax (last, for cmpxchg)
-                self.gen_expr(&args[1], 0); // rax = expected_ptr
+                self.gen_expr(&args[1], Self::EVAL_BASE); // rax = expected_ptr
                 let slot = -8 - (self.expr_depth as i32 * 8);
                 // Save expected_ptr to stack slot
                 {
@@ -462,7 +462,7 @@ impl Codegen {
                 self.emit_atomic_xadd(sz); // lock xadd [rdi], rsi
                                            // rsi = old value, [rdi] = new value
                                            // add rsi, val to get new value
-                self.gen_expr(&args[1], 0); // rax = val
+                self.gen_expr(&args[1], Self::EVAL_BASE); // rax = val
                 match sz {
                     1 => self.emit(&[0x40, 0x00, 0xC6]), // add sil, al
                     2 => self.emit(&[0x66, 0x01, 0xC6]), // add si, ax
@@ -485,7 +485,7 @@ impl Codegen {
                 self.emit_atomic_xadd(sz); // lock xadd [rdi], rsi
                                            // rsi = old value (negated val was added)
                                            // add rsi, val (original) to get new value
-                self.gen_expr(&args[1], 0); // rax = val
+                self.gen_expr(&args[1], Self::EVAL_BASE); // rax = val
                 match sz {
                     1 => self.emit(&[0x40, 0x00, 0xC6]), // add sil, al
                     2 => self.emit(&[0x66, 0x01, 0xC6]), // add si, ax
@@ -570,7 +570,7 @@ impl Codegen {
                 }
                 let sz = self.atomic_elem_size(args, 0);
                 self.gen_expr(&args[0], 7); // rdi = ptr
-                self.gen_expr(&args[1], 0); // rax = old
+                self.gen_expr(&args[1], Self::EVAL_BASE); // rax = old
                 self.gen_expr(&args[2], 6); // rsi = new
                 self.emit_lock_cmpxchg_rdi_rsi(sz); // lock cmpxchg [rdi], rsi
                                                     // ZF=1 if success (rax was old value)
@@ -587,7 +587,7 @@ impl Codegen {
                 }
                 let sz = self.atomic_elem_size(args, 0);
                 self.gen_expr(&args[0], 7); // rdi = ptr
-                self.gen_expr(&args[1], 0); // rax = old
+                self.gen_expr(&args[1], Self::EVAL_BASE); // rax = old
                 self.gen_expr(&args[2], 6); // rsi = new
                 self.emit_lock_cmpxchg_rdi_rsi(sz); // lock cmpxchg [rdi], rsi
                                                     // rax = actual old value (whether success or fail)
@@ -784,7 +784,7 @@ impl Codegen {
                 }
                 // 参数: dst(rdi), val(rax), n(rcx)
                 self.gen_expr(&args[0], 7); // rdi = dst
-                self.gen_expr(&args[1], 0); // rax = val
+                self.gen_expr(&args[1], Self::EVAL_BASE); // rax = val
                 self.gen_expr(&args[2], 1); // rcx = n
                 self.emit(&[0x57]); // push rdi
                 self.emit(&[0xfc]); // cld
@@ -936,7 +936,7 @@ impl Codegen {
             // (va-arg-21: va_end(**ap_ptr++) 的 ap_ptr++ 推进不可丢失)
             "__builtin_va_end" => {
                 if !args.is_empty() {
-                    self.gen_expr(&args[0], 0);
+                    self.gen_expr(&args[0], Self::EVAL_BASE);
                 }
                 true
             },
@@ -1020,11 +1020,11 @@ impl Codegen {
                 let libc_name = name.strip_prefix("__builtin_").unwrap();
                 // SysV ABI: float/double 参数在 xmm0, xmm1
                 if !args.is_empty() {
-                    self.gen_expr(&args[0], 0); // xmm0 = arg0
+                    self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = arg0
                 }
                 if args.len() >= 2 {
                     self.emit(&[0xF2, 0x0F, 0x11, 0xC2]); // movsd xmm2, xmm0
-                    self.gen_expr(&args[1], 0); // xmm0 = arg1
+                    self.gen_expr(&args[1], Self::EVAL_BASE); // xmm0 = arg1
                     self.emit(&[0xF2, 0x0F, 0x11, 0xC1]); // movsd xmm1, xmm0
                     self.emit(&[0xF2, 0x0F, 0x11, 0xD0]); // movsd xmm0, xmm2
                 }
@@ -1081,7 +1081,7 @@ impl Codegen {
                         return true;
                     }
                     let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-                    if self.gen_lvalue_addr(arg, 0) {
+                    if self.gen_lvalue_addr(arg, Self::EVAL_BASE) {
                         self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
                         let imag_off = inner_sz;
                         // 实部: [rcx] → xmm0 → [result_off] (不变)
@@ -1093,7 +1093,7 @@ impl Codegen {
                         self.flip_sign_xmm(0, &inner);
                         self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
                     } else {
-                        self.gen_expr(arg, 0);
+                        self.gen_expr(arg, Self::EVAL_BASE);
                         if matches!(arg, Expr::Call { .. }) {
                             // SSE 返回: 虚部在 xmm1, 物化到临时区
                             self.emit(&[pfx, 0x41, 0x0F, 0x11]);
@@ -1277,7 +1277,7 @@ impl Codegen {
                 }
                 self.push(0); // save addr
                               // 求值 val 到 rax
-                self.gen_expr(&args[1], 0);
+                self.gen_expr(&args[1], Self::EVAL_BASE);
                 self.pop(1); // rcx = addr
                              // mov %gs:[rcx], rax (段前缀 + 存储)
                 self.emit(&[0x65]); // GS segment prefix
@@ -1321,7 +1321,7 @@ impl Codegen {
                 }
                 self.push(0); // save addr
                               // 求值 val 到 rax
-                self.gen_expr(&args[1], 0);
+                self.gen_expr(&args[1], Self::EVAL_BASE);
                 self.pop(1); // rcx = addr
                              // add %gs:[rcx], rax (段前缀 + 加法)
                 self.emit(&[0x65]); // GS segment prefix
@@ -1375,10 +1375,10 @@ impl Codegen {
                 if args.len() >= 2 {
                     let dest_ptr = matches!(args[0].ty(), Type::Ptr(_));
                     let dest_ok = if dest_ptr {
-                        self.gen_expr(&args[0], 0);
+                        self.gen_expr(&args[0], Self::EVAL_BASE);
                         true
                     } else {
-                        self.gen_lvalue_addr(&args[0], 0)
+                        self.gen_lvalue_addr(&args[0], Self::EVAL_BASE)
                     };
                     if dest_ok {
                         self.mov(7, 0); // rdi = dest va_list 地址
@@ -1519,7 +1519,7 @@ impl Codegen {
                 }
                 let arg_ty = args[0].ty();
                 let is_f = matches!(arg_ty, Type::Float);
-                self.gen_expr(&args[0], 0); // xmm0 = x
+                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
                                             // ucomis{s,d} xmm0, xmm0
                 if is_f {
                     self.emit(&[0x0F, 0x2E, 0xC0]); // ucomiss xmm0, xmm0
@@ -1551,7 +1551,7 @@ impl Codegen {
                 let arg_ty = args[0].ty();
                 let is_f = matches!(arg_ty, Type::Float);
                 // 1. isinf: |x| == +Inf 且非 NaN
-                self.gen_expr(&args[0], 0); // xmm0 = x
+                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
                 self.emit(&[0x48, 0xB8]);
                 self.emit(&0x7FFFFFFFFFFFFFFFu64.to_le_bytes());
                 self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]); // movq xmm1, rax
@@ -1577,7 +1577,7 @@ impl Codegen {
                 self.emit(&[0x0F, 0xB6, 0xC0]);
                 self.emit(&[0x89, 0xC7]); // mov edi, eax (edi = isinf)
                                           // 2. sign: 重新加载 x, 取符号位
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 self.emit(&[0x0F, 0x50, 0xC0]); // movmskps eax, xmm0
                 self.emit(&[0x83, 0xE0, 0x01]); // and eax, 1 (eax = sign)
                 self.emit(&[0x89, 0xC6]); // mov esi, eax (esi = sign)
@@ -1605,7 +1605,7 @@ impl Codegen {
                 }
                 let arg_ty = args[0].ty();
                 let is_f = matches!(arg_ty, Type::Float);
-                self.gen_expr(&args[0], 0); // xmm0 = x
+                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
                                             // 加载 abs_mask 到 xmm1
                 self.emit(&[0x48, 0xB8]);
                 self.emit(&0x7FFFFFFFFFFFFFFFu64.to_le_bytes());
@@ -1645,7 +1645,7 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 // 如果 a 是 float, 升为 double
                 if matches!(args[0].ty(), Type::Float) {
                     self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]); // cvtss2sd xmm0, xmm0
@@ -1684,18 +1684,18 @@ impl Codegen {
                 let cmp_prefix: u8 = if is_f { 0 } else { 0x66 };
                 let cmp_opcode: u8 = 0x2E;
                 // 1. NaN 测试
-                self.gen_expr(&args[5], 0);
+                self.gen_expr(&args[5], Self::EVAL_BASE);
                 self.emit(&[cmp_prefix, 0x0F, cmp_opcode, 0xC0]); // ucomis{s,d} xmm0, xmm0
                 self.emit(&[0x0F, 0x9A, 0xC3]); // setp bl
                 self.emit(&[0x0F, 0xB6, 0xDB]); // movzx ebx, bl
                                                 // 2. Zero 测试
-                self.gen_expr(&args[5], 0);
+                self.gen_expr(&args[5], Self::EVAL_BASE);
                 self.emit(&[0x0F, 0x57, 0xC9]); // xorps xmm1, xmm1
                 self.emit(&[cmp_prefix, 0x0F, cmp_opcode, 0xC8]); // ucomis{s,d} xmm1, xmm0
                 self.emit(&[0x0F, 0x94, 0xC1]); // sete cl
                 self.emit(&[0x0F, 0xB6, 0xC9]); // movzx ecx, cl
                                                 // 3. Inf 测试
-                self.gen_expr(&args[5], 0);
+                self.gen_expr(&args[5], Self::EVAL_BASE);
                 self.emit(&[0x48, 0xB8]);
                 let inf_bits: u64 = if is_f { 0x7F800000 } else { 0x7FF0000000000000 };
                 self.emit(&inf_bits.to_le_bytes());
@@ -1705,7 +1705,7 @@ impl Codegen {
                 self.emit(&[0x0F, 0xB6, 0xD2]); // movzx edx, dl
                                                 // 4. 合成: 优先级 NaN > Inf > Zero > Normal
                                                 // 默认: args[4] (Normal)
-                self.gen_expr(&args[4], 0);
+                self.gen_expr(&args[4], Self::EVAL_BASE);
                 // 若 Zero: eax = args[2]
                 // 若 Inf:  eax = args[1]
                 // 若 NaN:  eax = args[0]
@@ -1757,7 +1757,7 @@ impl Codegen {
                 }
                 let arg_ty = args[0].ty();
                 let is_f = matches!(arg_ty, Type::Float);
-                self.gen_expr(&args[0], 0); // xmm0 = x
+                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
                                             // movmskps eax, xmm0
                 self.emit(&[0x0F, 0x50, 0xC0]);
                 if is_f {
@@ -1797,7 +1797,7 @@ impl Codegen {
                     if i < 6 {
                         // 前 6 个参数: 整数到 gp_regs[i], 浮点到 xmm{i}
                         if matches!(arg_ty, Type::Float | Type::Double | Type::LongDouble) {
-                            self.gen_expr(a, 0); // xmm0
+                            self.gen_expr(a, Self::EVAL_BASE); // xmm0
                             if i != 0 {
                                 // movaps xmm{i}, xmm0
                                 self.emit(&[0xF3, 0x0F, 0x11, 0xC0 | ((i as u8) << 3)]);
@@ -1807,7 +1807,7 @@ impl Codegen {
                         }
                     } else {
                         // 第 7+ 个参数: 压栈
-                        self.gen_expr(a, 0);
+                        self.gen_expr(a, Self::EVAL_BASE);
                         if matches!(arg_ty, Type::Float | Type::Double | Type::LongDouble) {
                             self.emit(&[0xF2, 0x0F, 0x11, 0x44, 0x24, 0]); // movsd [rsp+0], xmm0
                         } else {
@@ -1908,7 +1908,7 @@ impl Codegen {
                     return true;
                 }
                 // XOR fold，避免依赖可选的 POPCNT CPU 特性。
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 for shift in [32u8, 16, 8, 4, 2, 1] {
                     self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
                     self.emit(&[0x48, 0xC1, 0xE9, shift]); // shr rcx, shift
@@ -1935,7 +1935,7 @@ impl Codegen {
                     "__builtin_bitreverse32" => 32,
                     _ => 64,
                 };
-                self.gen_expr(&args[0], 0); // rax = input
+                self.gen_expr(&args[0], Self::EVAL_BASE); // rax = input
                 self.emit(&[0x48, 0x31, 0xC9]); // xor rcx, rcx
                 self.emit(&[0xBA]);
                 self.emit(&bits.to_le_bytes()); // mov edx, bits
@@ -1992,9 +1992,9 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 self.push(0);
-                self.gen_expr(&args[1], 0);
+                self.gen_expr(&args[1], Self::EVAL_BASE);
                 self.pop(1); // rcx = lhs, rax = rhs
                 let result_ty = args.get(2).map(|e| e.ty()).unwrap_or_else(|| args[0].ty());
                 let size = result_ty.size();
@@ -2128,7 +2128,7 @@ impl Codegen {
                     return true;
                 }
                 // Evaluate address argument to rax
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 // Determine rw (0=read, 1=write) and locality (0-3)
                 let rw = args
                     .get(1)
@@ -2170,13 +2170,13 @@ impl Codegen {
                 let result_size = result_ty.size().max(4);
                 let is_unsigned = !Self::is_signed_int(&result_ty);
                 // 1. 求值 ptr → r10
-                self.gen_expr(&args[2], 0);
+                self.gen_expr(&args[2], Self::EVAL_BASE);
                 self.emit(&[0x49, 0x89, 0xc2]); // mov r10, rax
                                                 // 2. 求值 a → push
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 self.push(0);
                 // 3. 求值 b → rax
-                self.gen_expr(&args[1], 0);
+                self.gen_expr(&args[1], Self::EVAL_BASE);
                 // 4. pop a → rcx
                 self.pop(1);
                 // rax = b, rcx = a, r10 = ptr
@@ -2434,13 +2434,13 @@ impl Codegen {
                 let op_size = args[0].ty().size().max(4); // 至少 32 位
                 let type_bits = op_size * 8;
                 // 1. 求值 ptr → r10
-                self.gen_expr(&args[2], 0);
+                self.gen_expr(&args[2], Self::EVAL_BASE);
                 self.emit(&[0x49, 0x89, 0xc2]); // mov r10, rax
                                                 // 2. 求值 b (移位量) → push
-                self.gen_expr(&args[1], 0);
+                self.gen_expr(&args[1], Self::EVAL_BASE);
                 self.push(0);
                 // 3. 求值 a (被移值) → rax
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 // 4. pop b → rcx (移位量)
                 self.pop(1);
                 // rax = a (被移值), rcx = b (移位量), r10 = ptr
@@ -2590,11 +2590,11 @@ impl Codegen {
                 //   xmm2 <- xmm0: reg=0, rm=2 ⇒ 0xC2
                 // ModR/M (F2/F3 0F 10 指令: MOVSD/MOVSS xmm, xmm/m; reg=dst, rm=src):
                 //   xmm0 <- xmm3: reg=0, rm=3 ⇒ 0xC3
-                self.gen_expr(&args[0], 0); // xmm0 = arg0
+                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = arg0
                 self.emit(&[prefix, 0x0F, 0x11, 0xC3]); // mov[sd|ss] xmm3, xmm0 (备份 arg0)
-                self.gen_expr(&args[1], 0); // xmm0 = arg1
+                self.gen_expr(&args[1], Self::EVAL_BASE); // xmm0 = arg1
                 self.emit(&[prefix, 0x0F, 0x11, 0xC1]); // mov[sd|ss] xmm1, xmm0
-                self.gen_expr(&args[2], 0); // xmm0 = arg2
+                self.gen_expr(&args[2], Self::EVAL_BASE); // xmm0 = arg2
                 self.emit(&[prefix, 0x0F, 0x11, 0xC2]); // mov[sd|ss] xmm2, xmm0
                 self.emit(&[prefix, 0x0F, opcode, 0xC3]); // mov[sd|ss] xmm0, xmm3 (恢复 arg0)
                 self.emit(&[0x54]); // push rsp
@@ -2709,7 +2709,7 @@ impl Codegen {
                     "__builtin_clrsbl" => Type::Long.size() as i32 * 8,
                     _ => Type::LongLong.size() as i32 * 8,
                 };
-                self.gen_expr(&args[0], 0); // rax = x
+                self.gen_expr(&args[0], Self::EVAL_BASE); // rax = x
                 if bits == 64 {
                     // 64-bit clrsb: 用 cqo 复制符号到 rdx, 然后 xor rax, rdx.
                     self.emit(&[0x48, 0x99]); // cqo (REX.W)
@@ -2894,7 +2894,7 @@ impl Codegen {
                     return true;
                 }
                 // gen_expr always returns result in rax (reg 0).
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 // xor dst,dst: dst in both reg and r/m → REX.R+REX.B
                 let rex_xor = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                 // add dst,rcx: dst in r/m only → REX.B
@@ -3069,7 +3069,7 @@ impl Codegen {
                 if args.len() < 4 {
                     return false;
                 }
-                self.gen_expr(&args[0], 0); // rax = a
+                self.gen_expr(&args[0], Self::EVAL_BASE); // rax = a
                 self.gen_expr(&args[1], 6); // rsi = b
                 self.emit(&[0x48, 0x01, 0xF0]); // add rax, rsi
                                                 // 进位标志在 CF, 但 __builtin_addc 返回结果 (不进位)
@@ -3083,7 +3083,7 @@ impl Codegen {
                 if args.len() < 4 {
                     return false;
                 }
-                self.gen_expr(&args[0], 0); // rax = a
+                self.gen_expr(&args[0], Self::EVAL_BASE); // rax = a
                 self.gen_expr(&args[1], 6); // rsi = b
                 self.emit(&[0x48, 0x29, 0xF0]); // sub rax, rsi
                 if dst != 0 {
@@ -3118,7 +3118,7 @@ impl Codegen {
                     return false;
                 }
                 self.gen_expr(&args[0], 7); // rdi = dst
-                self.gen_expr(&args[1], 0); // rax = val
+                self.gen_expr(&args[1], Self::EVAL_BASE); // rax = val
                 self.gen_expr(&args[2], 1); // rcx = n
                 self.emit(&[0xfc]); // cld
                 self.emit(&[0xf3, 0xaa]); // rep stosb
@@ -3196,11 +3196,11 @@ impl Codegen {
                     return true;
                 }
                 // 加载 magnitude 到 xmm0
-                self.gen_expr(&args[0], 0); // xmm0 = magnitude
+                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = magnitude
                                             // 备份 magnitude 到 xmm2
                 self.emit(&[0xF2, 0x0F, 0x11, 0xC2]); // movsd xmm2, xmm0
                                                       // 加载 sign 到 xmm0
-                self.gen_expr(&args[1], 0); // xmm0 = sign
+                self.gen_expr(&args[1], Self::EVAL_BASE); // xmm0 = sign
                                             // 移动到 xmm1
                 self.emit(&[0xF2, 0x0F, 0x11, 0xC1]); // movsd xmm1, xmm0
                                                       // 恢复 magnitude 到 xmm0
@@ -3246,7 +3246,7 @@ impl Codegen {
                 }
                 let arg_ty = args[0].ty();
                 let is_f = matches!(arg_ty, Type::Float);
-                self.gen_expr(&args[0], 0); // xmm0 = x
+                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
                                             // 加载 abs_mask 到 xmm1
                 self.emit(&[0x48, 0xB8]);
                 self.emit(&0x7FFFFFFFFFFFFFFFu64.to_le_bytes());
@@ -3267,9 +3267,9 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0); // xmm0 = magnitude (float)
+                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = magnitude (float)
                 self.emit(&[0xF2, 0x0F, 0x11, 0xC2]); // movsd xmm2, xmm0 (backup)
-                self.gen_expr(&args[1], 0); // xmm0 = sign (float)
+                self.gen_expr(&args[1], Self::EVAL_BASE); // xmm0 = sign (float)
                 self.emit(&[0xF2, 0x0F, 0x11, 0xC1]); // movsd xmm1, xmm0
                 self.emit(&[0xF2, 0x0F, 0x11, 0xD0]); // movsd xmm0, xmm2
                 self.call_label("copysignf");
@@ -3286,9 +3286,9 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0); // xmm0 = magnitude (long double)
+                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = magnitude (long double)
                 self.emit(&[0xF2, 0x0F, 0x11, 0xC2]); // movsd xmm2, xmm0 (backup)
-                self.gen_expr(&args[1], 0); // xmm0 = sign (long double)
+                self.gen_expr(&args[1], Self::EVAL_BASE); // xmm0 = sign (long double)
                 self.emit(&[0xF2, 0x0F, 0x11, 0xC1]); // movsd xmm1, xmm0
                 self.emit(&[0xF2, 0x0F, 0x11, 0xD0]); // movsd xmm0, xmm2
                 self.call_label("copysignl");
@@ -3308,7 +3308,7 @@ impl Codegen {
                     return true;
                 }
                 // 第一个参数: x, 放到 xmm0
-                self.gen_expr(&args[0], 0); // xmm0 = x
+                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
                                             // 第二个参数: iptr (指针), 放到 rdi
                 self.gen_expr(&args[1], 7); // rdi = iptr
                                             // 调用 libc modf/modff/modfl
@@ -3387,7 +3387,7 @@ impl Codegen {
                 }
                 let arg_ty = args[0].ty();
                 let is_f = matches!(arg_ty, Type::Float);
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 self.emit(&[0x48, 0xB8]);
                 self.emit(&0x7FFFFFFFFFFFFFFFu64.to_le_bytes());
                 self.emit(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]);
@@ -3422,10 +3422,10 @@ impl Codegen {
                     return true;
                 }
                 // 转发到 libc 比较
-                self.gen_expr(&args[0], 0); // xmm0 = a
+                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = a
                                             // 备份 a 到 xmm2
                 self.emit(&[0xF2, 0x0F, 0x11, 0xC2]); // movsd xmm2, xmm0
-                self.gen_expr(&args[1], 0); // xmm0 = b
+                self.gen_expr(&args[1], Self::EVAL_BASE); // xmm0 = b
                 self.emit(&[0xF2, 0x0F, 0x11, 0xC1]); // movsd xmm1, xmm0
                 self.emit(&[0xF2, 0x0F, 0x11, 0xD0]); // movsd xmm0, xmm2
                                                       // ucomisd xmm0, xmm1: 比较 a vs b
@@ -3527,9 +3527,9 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0); // xmm0 = a
+                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = a
                 self.emit(&[0xF2, 0x0F, 0x11, 0xC2]); // movsd xmm2, xmm0
-                self.gen_expr(&args[1], 0); // xmm0 = b
+                self.gen_expr(&args[1], Self::EVAL_BASE); // xmm0 = b
                 self.emit(&[0xF2, 0x0F, 0x5D, 0xC2]); // minsd xmm0, xmm2
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -3542,9 +3542,9 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 self.emit(&[0xF3, 0x0F, 0x11, 0xC2]); // movss xmm2, xmm0
-                self.gen_expr(&args[1], 0);
+                self.gen_expr(&args[1], Self::EVAL_BASE);
                 self.emit(&[0xF3, 0x0F, 0x5D, 0xC2]); // minss xmm0, xmm2
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -3557,9 +3557,9 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 self.emit(&[0xF2, 0x0F, 0x11, 0xC2]); // movsd xmm2, xmm0
-                self.gen_expr(&args[1], 0);
+                self.gen_expr(&args[1], Self::EVAL_BASE);
                 self.emit(&[0xF2, 0x0F, 0x5F, 0xC2]); // maxsd xmm0, xmm2
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -3572,9 +3572,9 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 self.emit(&[0xF3, 0x0F, 0x11, 0xC2]); // movss xmm2, xmm0
-                self.gen_expr(&args[1], 0);
+                self.gen_expr(&args[1], Self::EVAL_BASE);
                 self.emit(&[0xF3, 0x0F, 0x5F, 0xC2]); // maxss xmm0, xmm2
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -3584,9 +3584,9 @@ impl Codegen {
             // __builtin_fminl/fmaxl: long double -> libm (80-bit)
             "__builtin_fmaxl" | "__builtin_fminl" => {
                 if args.len() >= 2 {
-                    self.gen_expr(&args[0], 0);
+                    self.gen_expr(&args[0], Self::EVAL_BASE);
                     self.emit(&[0xF2, 0x0F, 0x11, 0xC2]);
-                    self.gen_expr(&args[1], 0);
+                    self.gen_expr(&args[1], Self::EVAL_BASE);
                     self.emit(&[0xF2, 0x0F, 0x11, 0xC1]);
                     self.emit(&[0xF2, 0x0F, 0x11, 0xD0]);
                 }
@@ -3798,7 +3798,7 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0); // xmm0 = x
+                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
                 self.emit(&[0xF2, 0x0F, 0x51, 0xC0]); // sqrtsd xmm0, xmm0
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -3812,7 +3812,7 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 self.emit(&[0xF3, 0x0F, 0x51, 0xC0]); // sqrtss xmm0, xmm0
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -3822,7 +3822,7 @@ impl Codegen {
             // __builtin_sqrtl: long double -> libm sqrtl (80-bit, no SSE)
             "__builtin_sqrtl" => {
                 if !args.is_empty() {
-                    self.gen_expr(&args[0], 0);
+                    self.gen_expr(&args[0], Self::EVAL_BASE);
                 }
                 self.call_label("sqrtl");
                 if dst != 0 {
@@ -3837,7 +3837,7 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 self.emit(&[0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x01]);
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -3849,7 +3849,7 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 self.emit(&[0x66, 0x0F, 0x3A, 0x0A, 0xC0, 0x01]);
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -3859,7 +3859,7 @@ impl Codegen {
             // __builtin_floorl: long double -> libm (80-bit)
             "__builtin_floorl" => {
                 if !args.is_empty() {
-                    self.gen_expr(&args[0], 0);
+                    self.gen_expr(&args[0], Self::EVAL_BASE);
                 }
                 self.emit(&[0x54]);
                 self.call_label("floorl");
@@ -3875,7 +3875,7 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 self.emit(&[0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x02]);
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -3887,7 +3887,7 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 self.emit(&[0x66, 0x0F, 0x3A, 0x0A, 0xC0, 0x02]);
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -3897,7 +3897,7 @@ impl Codegen {
             // __builtin_ceill: long double -> libm (80-bit)
             "__builtin_ceill" => {
                 if !args.is_empty() {
-                    self.gen_expr(&args[0], 0);
+                    self.gen_expr(&args[0], Self::EVAL_BASE);
                 }
                 self.emit(&[0x54]);
                 self.call_label("ceill");
@@ -3913,7 +3913,7 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 self.emit(&[0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x00]);
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -3925,7 +3925,7 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 self.emit(&[0x66, 0x0F, 0x3A, 0x0A, 0xC0, 0x00]);
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -3935,7 +3935,7 @@ impl Codegen {
             // __builtin_roundl: long double -> libm (80-bit)
             "__builtin_roundl" => {
                 if !args.is_empty() {
-                    self.gen_expr(&args[0], 0);
+                    self.gen_expr(&args[0], Self::EVAL_BASE);
                 }
                 self.emit(&[0x54]);
                 self.call_label("roundl");
@@ -3951,7 +3951,7 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 self.emit(&[0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x03]);
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -3963,7 +3963,7 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0);
+                self.gen_expr(&args[0], Self::EVAL_BASE);
                 self.emit(&[0x66, 0x0F, 0x3A, 0x0A, 0xC0, 0x03]);
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -3973,7 +3973,7 @@ impl Codegen {
             // __builtin_truncl: long double -> libm (80-bit)
             "__builtin_truncl" => {
                 if !args.is_empty() {
-                    self.gen_expr(&args[0], 0);
+                    self.gen_expr(&args[0], Self::EVAL_BASE);
                 }
                 self.emit(&[0x54]);
                 self.call_label("truncl");
@@ -3989,7 +3989,7 @@ impl Codegen {
             | "__builtin_expf" | "__builtin_expl" | "__builtin_sin" | "__builtin_sinf"
             | "__builtin_sinl" => {
                 if !args.is_empty() {
-                    self.gen_expr(&args[0], 0);
+                    self.gen_expr(&args[0], Self::EVAL_BASE);
                 }
                 let libc_name = name.strip_prefix("__builtin_").unwrap();
                 self.call_label(libc_name);
@@ -4043,7 +4043,7 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0); // rax = mode
+                self.gen_expr(&args[0], Self::EVAL_BASE); // rax = mode
                 self.emit(&[0x25, 0x00, 0x0C, 0x00, 0x00]); // and eax, 0xC00
                 self.emit(&[0xC1, 0xE0, 0x03]); // shl eax, 3 → MXCSR 位 13-14
                 self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
@@ -4064,7 +4064,7 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0); // rax = excepts
+                self.gen_expr(&args[0], Self::EVAL_BASE); // rax = excepts
                 self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
                 self.emit(&[0xF7, 0xD0]); // not eax
                                           // 清除 MXCSR 异常标志
@@ -4089,7 +4089,7 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0); // rax = excepts
+                self.gen_expr(&args[0], Self::EVAL_BASE); // rax = excepts
                 self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
                 self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
                 self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
@@ -4111,7 +4111,7 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0); // rax = excepts
+                self.gen_expr(&args[0], Self::EVAL_BASE); // rax = excepts
                 self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
                                                             // 测试 MXCSR 异常标志
                 self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
@@ -4142,7 +4142,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], 7); // rdi = flagp
-                self.gen_expr(&args[1], 0); // rax = excepts
+                self.gen_expr(&args[1], Self::EVAL_BASE); // rax = excepts
                 self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
                 self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
                 self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
@@ -4161,7 +4161,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], 7); // rdi = flagp
-                self.gen_expr(&args[1], 0); // rax = excepts
+                self.gen_expr(&args[1], Self::EVAL_BASE); // rax = excepts
                 self.emit(&[0x0F, 0xB7, 0x0F]); // movzx ecx, word [rdi]
                 self.emit(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00]); // and ecx, 0x3F
                 self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
@@ -4185,7 +4185,7 @@ impl Codegen {
                 self.gen_expr(&args[0], 7); // rdi = flagp
                 self.emit(&[0x0F, 0xB7, 0x0F]); // movzx ecx, word [rdi]
                 self.emit(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00]); // and ecx, 0x3F
-                self.gen_expr(&args[1], 0); // rax = excepts
+                self.gen_expr(&args[1], Self::EVAL_BASE); // rax = excepts
                 self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
                 self.emit(&[0x21, 0xC1]); // and ecx, eax
                 self.mov(0, 1); // rax = rcx
@@ -4303,7 +4303,7 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0); // rax = excepts
+                self.gen_expr(&args[0], Self::EVAL_BASE); // rax = excepts
                 self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
                 self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
                 self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
@@ -4323,7 +4323,7 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0); // rax = excepts
+                self.gen_expr(&args[0], Self::EVAL_BASE); // rax = excepts
                 self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
                 self.emit(&[0x48, 0x83, 0xEC, 8]); // sub rsp, 8
                 self.emit(&[0x0F, 0xAE, 0x1C, 0x24]); // stmxcsr [rsp]
@@ -4355,7 +4355,7 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], 0); // rax = excepts
+                self.gen_expr(&args[0], Self::EVAL_BASE); // rax = excepts
                 self.emit(&[0x25, 0x3F, 0x00, 0x00, 0x00]); // and eax, 0x3F
                 self.emit(&[0x89, 0xC2]); // mov edx, eax (save excepts in edx)
                 self.emit(&[0x48, 0x83, 0xEC, 0x10]); // sub rsp, 16

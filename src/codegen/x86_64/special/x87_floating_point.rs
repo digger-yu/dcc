@@ -303,7 +303,7 @@ impl Codegen {
         let save_bytes: u8 = 16;
         let _ = is_ld;
         // 加载左操作数到 st(0)
-        self.gen_expr(l, 0); // st(0) = l
+        self.gen_expr(l, Self::EVAL_BASE); // st(0) = l
         self.emit_operand_to_st0(&l.ty(), 0);
         self.emit(&[0x48, 0x83, 0xEC, save_bytes]); // sub rsp, 16
         if is_ld {
@@ -313,7 +313,7 @@ impl Codegen {
         }
         self.expr_depth += 1;
         // 加载右操作数到 st(0)
-        self.gen_expr(r, 0); // st(0) = r
+        self.gen_expr(r, Self::EVAL_BASE); // st(0) = r
         self.emit_operand_to_st0(&r.ty(), 0);
         self.expr_depth -= 1;
         // 重新加载左操作数: st(0) = l, st(1) = r

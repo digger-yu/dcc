@@ -360,8 +360,31 @@ fn walk_addr_of(b: &Block, on_root: &mut dyn FnMut(&str)) {
                     walk_expr_addr_of(init, on_root);
                 }
             },
+            // 嵌套函数体必须递归进来：`{ int acc; auto void f(void){ g(&acc); } }`
+            // 里的 `&acc` 是对**外层函数那个对象**的逸出。以前这条递归缺失，
+            // 于是只有后端那份手写递归的版本看得到它，GVN 看不见 —— 同一个
+            // 逸出判据两套实现，弱的那一套决定产物（§11.13 的 N8）。
+            BlockItem::Decl(Decl::Func(f)) => {
+                if let Some(body) = &f.body {
+                    walk_addr_of(body, on_root);
+                }
+            },
+            // 块级 asm 也可以是内存约束操作数（把对象地址交出去）。
+            BlockItem::Decl(Decl::GlobalAsm {
+                outputs,
+                output_constraints,
+                inputs,
+                input_constraints,
+                ..
+            }) => {
+                walk_asm_operands_addr_of(outputs, output_constraints, on_root);
+                walk_asm_operands_addr_of(inputs, input_constraints, on_root);
+            },
+            // 类型定义不携带地址逸出
+            BlockItem::Decl(
+                Decl::StructDef(_) | Decl::UnionDef(_) | Decl::EnumDef(_) | Decl::Typedef { .. },
+            ) => {},
             BlockItem::Stmt(st) => walk_stmt_addr_of(st, on_root),
-            _ => {},
         }
     }
 }
@@ -1402,6 +1425,19 @@ mod tests {
             escapes("int f(void){ int x; int *q = (int *[]){ &x }[0]; return (int)(long)q; }\n", "f"),
             ["x"],
             "复合字面量的初始化式里也得递归"
+        );
+        // N8：嵌套函数体里的 `&acc` 也是对外层对象的逸出。后端以前为了这件事自己手写
+        // 一份递归，于是同一个事实有两套判据，而弱的那一套决定产物（GVN 看不见就把 `acc`
+        // 当可合并的临时值）。现在递归住在判据本身里，后端只递一次入口 —— 这一行就是
+        // 那次「删副本不留缺口」的替换证明。（用 `*(&acc) = 1` 而不是 `use(&acc)`：
+        // 前者不需要额外声明，不会被「隐式声明」的语义错误抢在断言之前。）
+        assert_eq!(
+            escapes(
+                "int outer(void){ int acc = 0; auto void f(void){ *(&acc) = 1; } f(); return acc; }\n",
+                "outer"
+            ),
+            ["acc"],
+            "嵌套函数体里的 &acc 不得漏报"
         );
         // 反向对照：没有任何逸出时集合必须为空。
         assert!(

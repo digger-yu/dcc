@@ -827,7 +827,7 @@ pub fn qual_type_to_dwarf(
 }
 
 /// Convert AST Type to DWARF type for BTF generation
-fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
+pub(crate) fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
     use crate::ast::Type;
     match ty {
         Type::Void => debug::DwarfType {
@@ -1255,11 +1255,16 @@ fn debug_abs_reloc_type(arch: crate::cli::Arch) -> u32 {
 ///
 /// 返回 `Emitted` 而不是 `Vec<u8>`: “这次发的是 ELF 还是 GAS 文本”必须
 /// 在类型上不可省略, 否则降级后的文本会被写进 `.o` 并按可执行文件算权限位。
+///
+/// Ok 的第二项是**非致命诊断**（警告）。为什么要在类型上带出来：以前后端的
+/// `self.diagnostics` 里的警告在 `image.diagnostics` 里只参与「是否致命」的判定就
+/// 被丢掉，于是 codegen 阶段根本没有警告通道 —— 而 Phase 6.4 要求的「不得静默」
+/// 与「不得把 gcc 能编的源码弄红」两件事只能靠这个通道同时成立（否则只能选一边）。
 pub fn emit(
     module: &Module,
     target: &Target,
     opts: EmitOptions,
-) -> Result<shared::asm_source::Emitted, Vec<Diagnostic>> {
+) -> Result<(shared::asm_source::Emitted, Vec<Diagnostic>), Vec<Diagnostic>> {
     use crate::cli::AsmFallback;
     use shared::asm_source::{passthrough_diagnostics, Emitted};
     use shared::features::Feature;
@@ -1282,10 +1287,24 @@ pub fn emit(
         opts: &opts,
     };
 
+    // 「这个后端的家能力面」必须在后端被调用**之前**查（Phase 6.4）：-S 与 -c 走
+    // 的是两条不同的发射入口，只在其中一条上查就会给出「同一个源 -c 报错、
+    // -S 静默产出」的分裂答案。今天只有 x86_64 能认寄存器家，其他六个后端收到
+    // 非栈家或非法寄存器名都是硬错误；合法名但本后端实现不了是警告（不改变更
+    // 能编的事实），所以这里把非致命的几条一路带到最后再交给调用方。
+    let home_diags = shared::homes::check_program_homes(target.arch, module.source());
+    if has_fatal_diagnostics(&home_diags) {
+        return Err(home_diags);
+    }
+    let home_warnings: Vec<Diagnostic> = home_diags
+        .into_iter()
+        .filter(|d| !matches!(d.sev, Severity::Error))
+        .collect();
+
     // -S 路径: 直接返回汇编文本, 不做 ELF 打包
     if opts.emit_asm {
         let bytes = backend.render_asm(&input)?;
-        return Ok(Emitted::Text(utf8_text(bytes, &opts.source_name)?));
+        return Ok((Emitted::Text(utf8_text(bytes, &opts.source_name)?), home_warnings));
     }
 
     // Perform compilation through unified trait
@@ -1295,6 +1314,15 @@ pub fn emit(
     if has_fatal_diagnostics(&image.diagnostics) {
         return Err(image.diagnostics);
     }
+    // 后端自己采集的非致命诊断（以前在这一步被丢掉）现在与家能力面的警告一起上行。
+    let mut notes = home_warnings;
+    notes.extend(
+        image
+            .diagnostics
+            .iter()
+            .filter(|d| !matches!(d.sev, Severity::Error))
+            .cloned(),
+    );
 
     // ===== TU 级降级判定 (全仓唯一一处) =====
     //
@@ -1319,13 +1347,13 @@ pub fn emit(
                     )]);
                 }
                 let bytes = backend.render_asm_from_state(module)?;
-                return Ok(Emitted::Text(utf8_text(bytes, &opts.source_name)?));
+                return Ok((Emitted::Text(utf8_text(bytes, &opts.source_name)?), notes));
             },
         }
     }
 
     // Packaging (ELF ET_REL / ET_EXEC / COFF) is the backend's own responsibility
-    Ok(Emitted::Object(backend.build_object()?))
+    Ok((Emitted::Object(backend.build_object()?), notes))
 }
 
 /// 后端文本均以 ASCII/GAS 语法输出; 非 UTF-8 字节意味着后端渲染出错,

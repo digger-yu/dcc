@@ -51,8 +51,8 @@ impl Codegen {
         if let Type::Vector(_, _) = src_ty {
             if src_ty.size() == ty.size() && ty.size() <= 8 && ty.is_int() {
                 // 取 vector 地址到 rax (rvalue 先物化到临时槽)
-                if !self.gen_lvalue_addr(e, 0) {
-                    self.gen_expr(e, 0);
+                if !self.gen_lvalue_addr(e, Self::EVAL_BASE) {
+                    self.gen_expr(e, Self::EVAL_BASE);
                     let toff = self.vector_temp_base(0, src_ty.size());
                     self.emit_lea_r13(0, toff);
                 }
@@ -508,12 +508,14 @@ impl Codegen {
                     match dst_bits {
                         8 => {
                             // movsbq %al, %rax (截断到 8 位, 符号扩展)
-                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
+                            // 自反 ModRM: dst 同时在 reg 与 r/m ⇒ >=8 两个扩展位都要置。
+                            let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                             self.emit(&[rex, 0x0F, 0xBE, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                         },
                         16 => {
                             // movswq %ax, %rax (截断到 16 位, 符号扩展)
-                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
+                            // 同上。
+                            let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                             self.emit(&[rex, 0x0F, 0xBF, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                         },
                         _ => {},

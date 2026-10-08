@@ -1134,4 +1134,564 @@ pub(crate) fn path_decision_in(stderr: &[u8]) -> &'static str {
     "unknown"
 }
 
+// ---------------------------------------------------------------------------
+// 以下助手由 `tests/integration/*.rs` 上移（§14：主题子文件里 `^fn` 数必须 ==
+// `#[test]` 数 —— 被多条用例共用的助手不属于主题文件）。函数体逐字保持原语义，
+// 只把可见性收敛成 `pub(crate)`、并把原先依赖壳 `use std::env` 的写法改成全路径。
+// 每个助手的判据类别登记在 `scripts/gen_coverage_index.sh` 头部的推断表里。
+// ---------------------------------------------------------------------------
 
+/// 取某个函数的 asm 函数体（从 `<name>:` 到下一个行首标签或伪指令行）。
+///
+/// 两条 `seg_qualifier_*` 用例共用这一份：段前缀的断言必须**逐函数**做，全局计数会被
+/// 别人的前缀凑数（把无关函数的前缀数进去就看不出某个形状真的没发）。保留 `seg_`
+/// 前缀是因为主题子文件被壳以 `include!` 文本级注入同一个 crate，泛用名会互相撞车。
+pub(crate) fn seg_asm_body(asm_text: &str, name: &str) -> String {
+    let mut out = String::new();
+    let mut hit = false;
+    for line in asm_text.lines() {
+        if line.trim_end() == format!("{}:", name) {
+            hit = true;
+            continue;
+        }
+        if !hit {
+            continue;
+        }
+        // 下一个行首标签（助记符行都以空白开头）就是本函数结束。
+        let is_label = !line.starts_with(' ')
+            && !line.starts_with('\t')
+            && !line.starts_with('.')
+            && line.trim_end().ends_with(':');
+        let is_section = !line.starts_with(' ') && !line.starts_with('\t') && line.starts_with('.');
+        if is_label || is_section {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+pub(crate) fn seg_has_prefix(body: &str) -> bool {
+    body.contains("%gs:") || body.contains("%fs:")
+}
+
+/// 把降级夹具编译一次, 返回 (stderr, 是否成功, .o 路径, .s 路径)。
+///
+/// 自 `tests/integration/c_asm.rs` 上移：7 条 `asm_fallback_*` 用例共用这一份编链动作，
+/// 本身不跑产物 —— 判据面在调用方（看 stderr / 产物形态）。
+pub(crate) fn asm_fallback_compile(
+    tag: &str,
+    extra: &[&str],
+    out_ext: &str,
+) -> (String, bool, std::path::PathBuf, std::path::PathBuf) {
+    let dir = std::env::temp_dir();
+    let stem = format!("dcc-asm-fallback-{tag}-{}", std::process::id());
+    let obj_path = dir.join(format!("{stem}{out_ext}"));
+    let text_path = dir.join(format!("{stem}.s"));
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/asm/asm_fallback_gas.c");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+    cmd.arg("-c").arg("-o").arg(&obj_path).args(extra).arg(&fixture);
+    let output = cmd.output().expect("run dcc");
+    (
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.success(),
+        obj_path,
+        text_path,
+    )
+}
+
+/// 解析 ELF64 的 `SHT_RELA` 节（24 字节条目），返回 `(r_offset, 符号索引, 类型, 加数)`。
+///
+/// 为何不走 `readelf -s`/`-r` 的文本：本机 zh_CN.UTF-8 下 readelf 把 `STT_GNU_IFUNC`
+/// 打成 `<操作系统专用>：10`（同一个词在 exe 里又打成 `IFUNC`），任何 `grep IFUNC` 的
+/// 判据都会随 locale 假红/假绿。`ELF64_R_SYM` 是 r_info 的**高 32 位**、`ELF64_R_TYPE`
+/// 是低 32 位（写反了会得到「每个 PC32 都指向 sym 2」这种看起来能自洽的错读数）。
+/// （自 `tests/integration/c_attr_builtin.rs` 上移：`c_link_debug.rs` 也在用。）
+pub(crate) fn elf64_rela(data: &[u8], section: &str) -> Vec<(u64, u32, u32, i64)> {
+    let Some(raw) = elf64_section_data(data, section) else {
+        return Vec::new();
+    };
+    raw.chunks_exact(24)
+        .map(|e| {
+            let info = u64::from_le_bytes(e[8..16].try_into().unwrap());
+            (
+                u64::from_le_bytes(e[0..8].try_into().unwrap()),
+                (info >> 32) as u32,
+                (info & 0xffff_ffff) as u32,
+                i64::from_le_bytes(e[16..24].try_into().unwrap()),
+            )
+        })
+        .collect()
+}
+
+/// 解析 ELF64 节头表，返回下标 = `st_shndx` 的节名向量（下标 0 是 SHT_NULL）。
+///
+/// 为何需要它：`__dcc_cpu_model` 必须坐在 `.data`（PROGBITS）而不是 `.bss`（NOBITS）——
+/// 内置链接器的静态路径把 NOBITS 输出节钺错（`.bss` size=0、RW `PT_LOAD` 全 0，见
+/// `codegen/x86_64/ifunc.rs::ensure_cpu_model` 的注释），坐 `.bss` 就写不进内存。
+/// 只用 `elf64_sections`（名字→属性）拿不到「符号属于哪个节」，所以这里按节头序取名字。
+pub(crate) fn elf64_section_names(data: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    if data.len() < 64 {
+        return out;
+    }
+    let e_shoff = u64::from_le_bytes(data[40..48].try_into().unwrap()) as usize;
+    let e_shentsize = u16::from_le_bytes(data[58..60].try_into().unwrap()) as usize;
+    let e_shnum = u16::from_le_bytes(data[60..62].try_into().unwrap()) as usize;
+    let e_shstrndx = u16::from_le_bytes(data[62..64].try_into().unwrap()) as usize;
+    if e_shentsize < 64 || e_shoff + e_shentsize * e_shnum > data.len() {
+        return out;
+    }
+    let shstr = e_shoff + e_shstrndx * e_shentsize;
+    let shstr_off = u64::from_le_bytes(data[shstr + 24..shstr + 32].try_into().unwrap()) as usize;
+    for i in 0..e_shnum {
+        let off = e_shoff + i * e_shentsize;
+        let name_off = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
+        out.push(elf64_read_cstr(&data[shstr_off.saturating_add(name_off)..]));
+    }
+    out
+}
+
+/// 按 `sh_type == SHT_SYMTAB(2)` 找符号表，返回 `(名字, bind, stype, shndx, value, size)`。
+///
+/// 为何需要它（而不是 `harness::elf64_syms`）：内置链接器的静态产物把 `.symtab`/`.strtab`/
+/// `.shstrtab` 的节头 `sh_name` 都写成了 0（`src/link/elf_exec.rs` 里那五个 `write_shdr`
+/// 调用第一个参数传 0，而 `lookup_sh_name` 只在用户节上用），所以 `readelf -SW` 里这些节
+/// **没有名字**，按名字找的 `elf64_syms` 会返回空表。宿主 cc 产的 exe 不受影响。
+/// 本助手只按节类型与 `sh_link` 取数，不依赖节名；它同时也是那个缺陷的现场证据。
+///
+/// `SHT_SYMTAB` 是 **2**，不是 3 —— `3` 是 `SHT_STRTAB`。取错会把字符串表当符号表读，
+/// 得到满屏 ASCII 碎片（`val=0x2e00617461646f72` = `"rodata\0."`）这种看着像「解析器坏了」
+/// 实则常量写错的红。符号条目大小优先信 `sh_entsize`，只在其为 0 时回落到 24。
+pub(crate) fn elf64_syms_by_type(data: &[u8]) -> Vec<Elf64Sym> {
+    const SHT_SYMTAB: u32 = 2;
+    let mut out = Vec::new();
+    if data.len() < 64 {
+        return out;
+    }
+    let e_shoff = u64::from_le_bytes(data[40..48].try_into().unwrap()) as usize;
+    let e_shentsize = u16::from_le_bytes(data[58..60].try_into().unwrap()) as usize;
+    let e_shnum = u16::from_le_bytes(data[60..62].try_into().unwrap()) as usize;
+    if e_shentsize < 64 || e_shoff + e_shentsize * e_shnum > data.len() {
+        return out;
+    }
+    // (sh_type, sh_offset, sh_size, sh_link, sh_entsize)
+    let shdr = |i: usize| -> (u32, u64, u64, u32, u64) {
+        let o = e_shoff + i * e_shentsize;
+        (
+            u32::from_le_bytes(data[o + 4..o + 8].try_into().unwrap()),
+            u64::from_le_bytes(data[o + 24..o + 32].try_into().unwrap()),
+            u64::from_le_bytes(data[o + 32..o + 40].try_into().unwrap()),
+            u32::from_le_bytes(data[o + 40..o + 44].try_into().unwrap()),
+            u64::from_le_bytes(data[o + 56..o + 64].try_into().unwrap()),
+        )
+    };
+    let Some(sym_idx) = (0..e_shnum).find(|&i| shdr(i).0 == SHT_SYMTAB) else {
+        return out;
+    };
+    let (_, sym_off, sym_size, strtab_idx, sym_ent) = shdr(sym_idx);
+    let sym_ent = if sym_ent >= 24 { sym_ent as usize } else { 24 };
+    if strtab_idx as usize >= e_shnum || (sym_off as usize) + (sym_size as usize) > data.len() {
+        return out;
+    }
+    let (_, str_off, str_size, _, _) = shdr(strtab_idx as usize);
+    if (str_off as usize) + (str_size as usize) > data.len() {
+        return out;
+    }
+    let strtab = &data[str_off as usize..(str_off + str_size) as usize];
+    for e in data[sym_off as usize..(sym_off + sym_size) as usize].chunks_exact(sym_ent) {
+        let st_name = u32::from_le_bytes(e[0..4].try_into().unwrap()) as usize;
+        out.push(Elf64Sym {
+            name: if st_name > 0 && st_name < strtab.len() {
+                elf64_read_cstr(&strtab[st_name..])
+            } else {
+                String::new()
+            },
+            bind: e[4] >> 4,
+            stype: e[4] & 0xf,
+            shndx: u16::from_le_bytes(e[6..8].try_into().unwrap()),
+            value: u64::from_le_bytes(e[8..16].try_into().unwrap()),
+            size: u64::from_le_bytes(e[16..24].try_into().unwrap()),
+        });
+    }
+    out
+}
+
+/// 汇总一个产物里所有 `.rela*` 节的 RELA 条目。
+///
+/// 为什么不只看 `.rela.dyn`：irelative 放哪由 `ld` 根据输出类型決定——PIE/DYNAMIC 下
+/// 在 `.rela.dyn`，非 PIE 的 ET_EXEC 下在 **`.rela.plt`**（实测：`dcc` 的 clones+printf
+/// 产物 `readelf -rW` 里 `R_X86_64_IRELATIVE` 在 `.rela.plt`，gcc 的 PIE 产物在
+/// `.rela.dyn`）。只扫 `.rela.dyn` 会在非 PIE 上假红，只扫 `.rela.plt` 则在 PIE 上假红。
+pub(crate) fn elf64_all_rela(data: &[u8]) -> Vec<(u64, u32, u32, i64)> {
+    let mut v = Vec::new();
+    for sec in [".rela.dyn", ".rela.plt", ".rela.iplt"] {
+        v.extend(elf64_rela(data, sec));
+    }
+    v
+}
+
+/// 走默认路径（dcc 出 `.o` → 宿主 `cc` 链接）编译源码，返回 `(成功?, stderr, exe 路径)`。
+///
+/// 不清理临时 exe：调用方要 `file`/`readelf`/运行它。PID 进文件名避免并行用例互踩，
+/// 由调用方末尾删。（自 `tests/integration/c_attr_builtin.rs` 上移。）
+pub(crate) fn dcc_link_exe(tag: &str, src: &str, flags: &[&str]) -> (bool, String, std::path::PathBuf) {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sf = dir.join(format!("dcc-ifuncdyn-{tag}-{pid}.c"));
+    let exe = dir.join(format!("dcc-ifuncdyn-{tag}-{pid}.bin"));
+    fs::write(&sf, src).expect("写临时源文件");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+    cmd.arg("-std=gnu23");
+    for f in flags {
+        cmd.arg(f);
+    }
+    cmd.args(["-o"]).arg(&exe).arg(&sf);
+    let out = cmd.output().expect("运行 dcc");
+    let _ = fs::remove_file(&sf);
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+        exe,
+    )
+}
+
+/// 只编成 `.o` 并把它读回来（`.o` 侧的静态判据用）。
+pub(crate) fn dcc_obj_bytes(tag: &str, src: &str, flags: &[&str]) -> Vec<u8> {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sf = dir.join(format!("dcc-ifuncobj-{tag}-{pid}.c"));
+    let obj = dir.join(format!("dcc-ifuncobj-{tag}-{pid}.o"));
+    fs::write(&sf, src).expect("写临时源文件");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+    cmd.arg("-std=gnu23").arg("-c");
+    for f in flags {
+        cmd.arg(f);
+    }
+    cmd.args(["-o"]).arg(&obj).arg(&sf);
+    let out = cmd.output().expect("运行 dcc -c");
+    assert!(out.status.success(), "compile [{}]: {}", flags.join(" "), String::from_utf8_lossy(&out.stderr));
+    let _ = fs::remove_file(&sf);
+    let bytes = fs::read(&obj).expect("读回 .o");
+    let _ = fs::remove_file(&obj);
+    bytes
+}
+
+/// 「这个产物是**动态**链接的」：`.interp`（PT_INTERP）+ `DT_NEEDED libc.so.6` +
+/// `file` 报 dynamically linked，三项都得成立。
+///
+/// 三项而不是一项：`.interp` 只证明有解释器，`DT_NEEDED` 只证明有动态段，`file` 只是
+/// 外部工具的读数 —— 「静默降级为静态」的缺陷形状是三者同时缺，判据也必须同时收。
+pub(crate) fn assert_dynamically_linked(exe: &std::path::Path, who: &str, stderr: &str) {
+    let bytes = fs::read(exe).unwrap_or_default();
+    let secs = elf64_sections(&bytes);
+    assert!(
+        secs.contains_key(".interp"),
+        "{who}: 产物没有 .interp（= 没有 PT_INTERP）= 静态可执行文件；IFUNC 降级缺陷回来了。stderr:\n{stderr}"
+    );
+    let need = elf64_dynamic_needed(&bytes);
+    assert!(
+        need.iter().any(|n| n == "libc.so.6"),
+        "{who}: DT_NEEDED 里没有 libc.so.6（读到 {need:?}）；stderr:\n{stderr}"
+    );
+    let file_out = Command::new("file")
+        .arg(exe)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    assert!(
+        file_out.contains("dynamically linked"),
+        "{who}: `file` 没报 dynamically linked:\n{file_out}"
+    );
+}
+
+/// 把源码经指定 flags 链成可执行文件，返回 (是否成功, stderr 文本, 产物路径)。
+/// 用 PID+stem 造唯一临时名，避免与并行用例互踩。（自 `tests/integration/c_link_debug.rs` 上移。）
+#[cfg(unix)]
+pub(crate) fn dcc_link_capture_flags(
+    c_src: &str,
+    stem: &str,
+    flags: &[&str],
+) -> (bool, String, std::path::PathBuf) {
+    let dir = std::env::temp_dir();
+    let tag = std::process::id();
+    let sf = dir.join(format!("dcc-ifunc-snd-{stem}-{tag}.c"));
+    let exe = dir.join(format!("dcc-ifunc-snd-{stem}-{tag}.bin"));
+    std::fs::write(&sf, c_src).expect("写临时源文件");
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"));
+    cmd.arg("-std=gnu23");
+    for f in flags {
+        cmd.arg(f);
+    }
+    cmd.args(["-o"]).arg(&exe).arg(&sf);
+    let out = cmd.output().expect("运行 dcc");
+    let _ = std::fs::remove_file(&sf);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    (out.status.success(), stderr, exe)
+}
+
+/// 逐档与 gcc 对照同一份夹具; 失效形态含 HANG, 故必须走有界运行。
+/// （自 `tests/integration/opt_ssa_gate.rs` 上移：`c_lang.rs` 也在用。）
+pub(crate) fn assert_all_levels_match_gcc(tag: &str, src: &str, why: &str) {
+    if !tool_exists("gcc") {
+        return;
+    }
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt(tag, src, &[flag]),
+            0,
+            "{flag}: {why}"
+        );
+    }
+}
+
+/// 逐字节对照汇编前摘掉 `.file` 行。
+///
+/// 为什么必须摘：`compile_asm_text_with_env` 把调用方给的 tag 写进源文件名，于是两次
+/// 调用的产物**永远**在 `.file` 这一行上差一串字节。不摘的话 `assert_ne!` 会因为文件
+/// 名而空跑（看起来绿，其实证明不了任何事），`assert_eq!` 会因为同一个原因无条件失败。
+/// 实测这条不是理论问题：本轮新加的反向断言首跑就是被 `.file` 挡红的。
+/// （自 `tests/integration/opt_ssa_gate.rs` 上移；只做文本归一，不贡献判据。）
+pub(crate) fn asm_body(asm: &str) -> String {
+    asm.lines()
+        .filter(|l| !l.starts_with("\t.file"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 同一份源码、同一档位，只让 P16 开/关（`DCC_SSA_OFF=pipe`），返回 -O2 汇编。
+/// （自 `tests/integration/opt_ssa_gate.rs` 上移；原先依赖壳的 `use std::env`，这里写全路径。）
+pub(crate) fn dcc_asm_with_pipe(name: &str, src: &str, ssa_off: Option<&str>) -> String {
+    let dir = std::env::temp_dir();
+    let sp = dir.join(format!("dcc-{name}-pipe-{}.c", std::process::id()));
+    let ap = dir.join(format!("dcc-{name}-pipe-{}.s", std::process::id()));
+    fs::write(&sp, src).expect("写夹具");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+    cmd.arg("-O2").args(["-S", "-o"]).arg(&ap).arg(&sp);
+    if let Some(v) = ssa_off {
+        cmd.env("DCC_SSA_OFF", v);
+    }
+    let out = cmd.output().expect("跑 dcc");
+    assert!(out.status.success(), "编译失败：{}", String::from_utf8_lossy(&out.stderr));
+    let text = fs::read_to_string(&ap).unwrap_or_default();
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&ap);
+    text
+}
+
+
+
+// ============================================================================
+// Phase 6.2 收尾：gdb 实读 dcc `-g` 产物的共享助手（自 tests/integration/dwarf_gdb.rs 搬入）
+//
+// 搬进来的理由不是「凑过 STRUCT-HELPER」，而是 §14 的意图：主题子文件应当是一条
+// `#[test]` 序列，共享的「怎么编、怎么跑 gdb、怎么读 readelf」属于这里。
+// ============================================================================
+
+/// 故意让「源码序」与「地址序」不同序：`sink` 在**第 1 行**就有原型，而它在 `.text` 里排在
+/// `f` 之后。这正是 CU 区间取 `functions.first()/last()` 时会算错、取 min/max 时才对的形状
+/// （见 `src/debug.rs::normalize_cu`）。`v`/`t` 两个局部各自走寄存器家与栈槽家。
+pub(crate) const DWARF_GDB_SRC: &str = r#"int sink(int);
+int f(void) {
+    register int v asm("rbx") = 42;
+    int t = sink(0);
+    return v + t;
+}
+int sink(int x) { return x + 1; }
+int main(void) { return f() - 43; }
+"#;
+
+/// 一个 DIE 的若干事实。为什么不自己写 DWARF 解析器：`.debug_abbrev` 是流式的，在本仓库里
+/// 再放一份「谁知道属性怎么排」的实现就是第二知道；readelf 已是 DWARF 文本层的既有工具。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DwarfDieRow {
+    pub(crate) tag: String,
+    pub(crate) name: String,
+    pub(crate) low: Option<u64>,
+    pub(crate) high: Option<u64>,
+    pub(crate) decl_line: Option<u64>,
+    pub(crate) frame_base: bool,
+    /// `DW_AT_location` 那行的原文（readelf 已把字节块反汇编成 `DW_OP_reg12 (r12)` 这种形）。
+    /// 不自己解字节块：仓库里再放一份「谁知道位置表达式怎么排」就是第二知道。
+    pub(crate) location: String,
+}
+
+/// gdb / readelf 是否可用。不可用时调用方跳过而不是失败（与 `host_cc_available` 同策略）。
+pub(crate) fn dwarf_gdb_unavailable() -> Option<&'static str> {
+    if !tool_exists("gdb") {
+        return Some("gdb not found");
+    }
+    if !host_cc_available() {
+        return Some("no host cc");
+    }
+    None
+}
+
+/// 把 `DWARF_GDB_SRC` 落成临时 `.c` 并按给定档位编译/链接。**故意不删源文件**：gdb 打印
+/// 源码行、以及行断点按文件名解析都要用它。返回 (源路径, 产物路径)。
+pub(crate) fn dwarf_gdb_build(
+    tag: &str,
+    flags: &[&str],
+    link: bool,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    dwarf_gdb_build_env(tag, DWARF_GDB_SRC, flags, link, &[])
+}
+
+/// `dwarf_gdb_build` 的带环境变量版本：`-O2` 那条用例需要同时拿到**并行**与**串行**
+/// 两份产物（`DCC_NO_PARALLEL=1` 是 `cli.rs` 里 `opt >= 2` 那条开关的唯一逃生门），
+/// 而两者只能由环境区别。
+pub(crate) fn dwarf_gdb_build_env(
+    tag: &str,
+    src: &str,
+    flags: &[&str],
+    link: bool,
+    envs: &[(&str, &str)],
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sf = dir.join(format!("dcc-{tag}-{pid}.c"));
+    let out = dir.join(format!("dcc-{tag}-{pid}.{}", if link { "bin" } else { "o" }));
+    std::fs::write(&sf, src).expect("写临时 C 源");
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"));
+    cmd.arg("-std=gnu23").args(flags);
+    if !link {
+        cmd.arg("-c");
+    }
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.arg("-o").arg(&out).arg(&sf);
+    let res = cmd.output().expect("运行 dcc");
+    assert!(
+        res.status.success(),
+        "dcc 编译 [{}] 失败：{}",
+        flags.join(" "),
+        String::from_utf8_lossy(&res.stderr)
+    );
+    (sf, out)
+}
+
+/// 跑一次 `gdb -batch` 会话，返回 stdout+stderr 合流（gdb 的诊断走 stderr，警告走 stdout）。
+pub(crate) fn gdb_batch(exe: &std::path::Path, cmds: &[&str]) -> String {
+    let mut cmd = std::process::Command::new("gdb");
+    cmd.arg("-batch")
+        .arg("-nx")
+        .arg("-iex")
+        .arg("set debuginfod enabled off")
+        .arg("-ex")
+        .arg("set pagination off");
+    for c in cmds {
+        cmd.arg("-ex").arg(c);
+    }
+    // readelf/gdb 在本机 zh_CN.UTF-8 下会翻译固定文案，判据靠英文字面串，必须锁 C locale。
+    cmd.env("LC_ALL", "C").arg(exe);
+    let out = cmd.output().expect("运行 gdb");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// 从 gdb 会话输出里取 `Breakpoint 1 at 0x....` 的地址（用于「三行绑到不同地址」这条判据）。
+/// 取不到就点名是哪一行取的 —— 空串互不相等的假象会让判据假绿，所以这里直接 pan。
+pub(crate) fn gdb_bp_addr(out: &str, which: &str) -> String {
+    let p = out.find("Breakpoint 1 at 0x").unwrap_or_else(|| {
+        panic!("{which} 那次会话里 gdb 没有报出 `Breakpoint 1 at 0x...`：\n{out}")
+    });
+    let rest = &out[p + "Breakpoint 1 at 0x".len()..];
+    rest.split(|c: char| !matches!(c, '0'..='9' | 'a'..='f' | 'A'..='F'))
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// 取 `DW_AT_<attr> : <value>` 一行的两段。
+pub(crate) fn readelf_attr(line: &str) -> Option<(&str, &str)> {
+    let idx = line.find("DW_AT_")?;
+    let rest = &line[idx + 6..];
+    let colon = rest.find(": ")?;
+    Some((rest[..colon].trim(), rest[colon + 2..].trim()))
+}
+
+/// readelf 打的整数值：`0x401110`、`0x12d`，以及未重定位的 `.o` 里的裸 `0`。
+pub(crate) fn readelf_int(v: &str) -> Option<u64> {
+    let t = v.trim();
+    let body = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+    u64::from_str_radix(body, if body == t { 10 } else { 16 }).ok()
+}
+
+/// `readelf --debug-dump=info` 的文本。
+pub(crate) fn readelf_debug_info_dump(path: &std::path::Path) -> String {
+    let out = std::process::Command::new("readelf")
+        .env("LC_ALL", "C")
+        .arg("--debug-dump=info")
+        .arg(path)
+        .output()
+        .expect("运行 readelf");
+    assert!(
+        out.status.success(),
+        "readelf 失败：{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// 把 `readelf --debug-dump=info` 的文本切成 DIE 行（以 `Abbrev Number: N (DW_TAG_...)` 分段）。
+pub(crate) fn parse_debug_info(dump: &str) -> Vec<DwarfDieRow> {
+    let mut rows: Vec<DwarfDieRow> = Vec::new();
+    let mut cur: Option<DwarfDieRow> = None;
+    for line in dump.lines() {
+        if let Some(p) = line.find("(DW_TAG_") {
+            if let Some(prev) = cur.take() {
+                rows.push(prev);
+            }
+            let tail = &line[p + 1..];
+            let tag = tail.split(')').next().unwrap_or("").to_string();
+            cur = Some(DwarfDieRow { tag, ..Default::default() });
+            continue;
+        }
+        let Some(row) = cur.as_mut() else { continue };
+        let Some((attr, value)) = readelf_attr(line) else { continue };
+        match attr {
+            "name" => {
+                row.name = value.rsplit(": ").next().unwrap_or(value).to_string();
+            }
+            "low_pc" => row.low = readelf_int(value),
+            "high_pc" => row.high = readelf_int(value),
+            "decl_line" => row.decl_line = readelf_int(value),
+            "frame_base" => row.frame_base = true,
+            "location" => row.location = value.to_string(),
+            _ => {}
+        }
+    }
+    if let Some(prev) = cur.take() {
+        rows.push(prev);
+    }
+    rows
+}
+
+/// 取某个 `DW_TAG_variable` 的 `DW_AT_location` 原文。名字而不是地址是键：`-O2` 下
+/// 谁绑上寄存器是分配器的事，用例只问「这个变量的位置表达式长什么样」。
+pub(crate) fn var_location(rows: &[DwarfDieRow], name: &str) -> Option<String> {
+    rows.iter()
+        .find(|r| r.tag == "DW_TAG_variable" && r.name == name)
+        .map(|r| r.location.clone())
+        .filter(|s| !s.is_empty())
+}
+
+/// 从 `1 byte block: 5c \t(DW_OP_reg12 (r12))` 里取寄存器名（gdb 那边要拿它写
+/// `set $r12 = ...`）。取不到就返 `None`，由调用方点名是哪个变量。
+pub(crate) fn dwarf_reg_name(loc: &str) -> Option<String> {
+    let open = loc.rfind('(')?;
+    let close = loc[open..].find(')').map(|i| open + i)?;
+    let inner = loc[open + 1..close].trim();
+    let last = inner.rsplit([' ', '\t']).next()?;
+    if last.starts_with('r') {
+        Some(last.to_string())
+    } else {
+        None
+    }
+}

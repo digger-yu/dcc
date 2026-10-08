@@ -65,6 +65,106 @@ use std::collections::{HashMap, HashSet};
 /// callee-saved，而 `r13` 是本后端的帧基址、`rbp`/`rsp` 是帧指针与栈指针。
 const POOL: [(&str, u8); 4] = [("rbx", 3), ("r12", 12), ("r14", 14), ("r15", 15)];
 
+/// **自动分配器可用**的号：`POOL` 再加上一族 caller-saved 号（Phase 5.1 前置三）。
+///
+/// 为什么这一族以前不敢用：本后端当时**没有任何机制能在 call 前把寄存器里的值放到
+/// 安全地方、call 后再搬回来**，所以发一个会被调用毁掉的号就是静默错值。通道现在建在
+/// `abi/call.rs::emit_sysv_call` 的两端（存走 `store_stack`、取走 `load_stack`，程序点级
+/// 家切换见 `Codegen::home_overrides`），所以本表里只能放**那个窗口能护住**的号。
+///
+/// 逐个排掉的理由（这些不是泛泛的谨慎，而是每一个号都有具体的写入点责任）：
+///   * `rax(0)` 是求值基址（`EVAL_BASE_REG`），一个号不能同时是落点与某个变量的家；
+///   * `rdx(2)` 是 128 位整数返回的高半（以及部分长 double 表示），存/取窗口在
+///     `emit_sysv_call` 末尾，而调用方要到 `gen_call_result_move` 才把结果搬走 —— 在
+///     窗口末尾就恢复 rdx 会盖掉还没被消费的高半；
+///   * `r10(10)` 是嵌套函数的静态链与非局部跳转的父帧基址（`emit/stmt.rs`），它的写入
+///     点不在 call 序列里；
+///   * `r11(11)` 是帧内寻址的 scratch（`store_stack`/`load_stack` 的 disp32 越界分支拿它
+///     算地址）—— 存/取动作自己就会毁掉它；
+///   * `rsp(4)`/`rbp(5)`/`r13(13)` 固定用途（帧底/帧基）。
+///
+/// 剩下的 `rcx/rsi/rdi/r8/r9` 在本后端的写入点就是 SysV 参数装载与 varargs 计数，两者都
+/// 在 `emit_sysv_call` 内部，所以这个窗口的覆盖面是完整的。这个假设不靠口头保证：
+/// 错了会直接体现在 `check_opt_equivalence.sh`、夹具执行对拍与 gcc 交叉对拍上（本轮已跑）。
+/// 剩下的号里，**`rcx` 也不能当家**：x86 的变长移位/循环移位把计数**强制放在 `%cl`**
+/// （`shl/shr/sal/sar/ror/rol` 的 `r/m, %cl` 形式，以及 `__builtin_rotateright8` 这类
+/// 内置）。它不是一个可以「用前存、用后取」的普通暂存位：任何一条变长移位都会写 `%cl`。
+/// 实测证据：开池后 `tests/fixtures/c/rotate.c` 在 -O2 下第 4 项失败
+/// （`__builtin_rotateright8(0xC1, 2) != 0x70`），而同一夹具不开池返回 0。
+/// 所以本表只放 `{rsi, rdi, r8, r9}`；`rcx` 归发射侧当暂存候选（它永远不会是家，
+/// 于是两个角色不再挤同一批号 —— 这一条比 `stage_free_after` 更根本）。
+/// 实测逐号定案（`DCC_EXT_POOL` 按号开，判据是四档执行对拍）：
+///   * `rcx` ✕ —— x86 变长移位/循环移位的计数强制在 `%cl`（`rotate.c` 开池后第 4 项
+///     `__builtin_rotateright8(0xC1,2)` 错），不是可「用前存、用后取」的普通位；
+///   * `rsi`/`rdi` ✕ —— 它们同时是 `rep movsb/rep movsq` 的源与目的（聚合拷贝/内存内置
+///     在**非调用路径**上就会重写这两个号），`strcasecmp.c` 开池后第 5 项错、只开
+///     `{r8,r9}` 时三夹具全部与关池同值；
+///   * `r8`/`r9` —— 以前记的两组读数（`DCC_EXT_POOL=r8,r9` 报 **OPT-DIFF 177**，只开
+///     `{rsi,rdi,r8,r9}` 时是 5）**已作废**：修完比较臂那条 REX.B 漏发之后重测，默认
+///     关池在同一个 364 语料上是 **0** 条，开 `r8,r9` 是 **2** 条（`c_strcasecmp.c` 的
+///     -O2/-O3）+ 3 条新增 COMPILE-FAIL（`attr_target_clones_cpu_*`）。⇒ 那 177/5 量的
+///     是同一条编码缺陷，不是池的代价；证据与开池前置判据见设计 §11.53/§11.54。
+///
+/// 因此延伸池默认仍不开（`ext_pool_selection()` 默认空），且不得因为本表非空就认为安全。
+const AUTO_EXT_POOL: [(&str, u8); 2] = [("r8", 8), ("r9", 9)];
+
+/// 自动分配器的完整候选表。
+///
+/// **默认只等于 `POOL`：延伸池发号已被实测否决**（原因与设计结论见本文 §11.39）。形状：
+/// `int e = sink(5)` 的家给成 `%rcx` 后，紧跟其后的求值把 `%rcx` 当二元运算右操作数的
+/// 固定暂存号（`emit/expr/binary.rs` 的 `gen_expr_decay(r, 1)` 与那批 rcx 专属字节），家
+/// 就被普通计算覆盖：-O2 下 gcc 给 50、dcc 给 47。
+///
+/// 但「哪一个号真的危」不应该靠读代码的直觉回答。本函数按 `DCC_EXT_POOL` 的逗号列表
+/// 把对应的号加进候选表（默认空 ⇒ 行为与今天逐字相同），于是可以**逐号**在真产物上跑
+/// 执行对拍定案（审计入口：`.work_tmp/p12_base/audit_ext_pool.sh`）。这不是第二行为开关，
+/// 而是量具：产物路径上它永远关着，因为发布构建不会设这个环境变量（`ext_pool_enabled`
+/// 的默认值就是空，而且有用例钉住「不开池时不得发出延伸池家」）。
+pub fn ext_pool_selection() -> Vec<u8> {
+    let spec = match std::env::var("DCC_EXT_POOL") {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    spec.split(',')
+        .map(|t| t.trim().trim_start_matches('%').to_ascii_lowercase())
+        .filter(|t| !t.is_empty())
+        .filter_map(|t| AUTO_EXT_POOL.iter().find(|(nm, _)| *nm == t).map(|(_, r)| *r))
+        .collect()
+}
+
+fn auto_pool() -> Vec<(&'static str, u8)> {
+    let mut out: Vec<(&'static str, u8)> = POOL.iter().map(|&(n, r)| (n, r)).collect();
+    for n in ext_pool_selection() {
+        if let Some(&(nm, r)) = AUTO_EXT_POOL.iter().find(|(_, v)| *v == n) {
+            if !out.iter().any(|(_, v)| *v == r) {
+                out.push((nm, r));
+            }
+        }
+    }
+    out
+}
+
+/// 延伸池在不在自动候选表里，只由这一个开关回答（诊断与用例都读它，不各自复制形状）。
+pub fn ext_pool_enabled() -> bool {
+    !ext_pool_selection().is_empty()
+}
+
+/// 发射侧的暂存候选表（`codegen::x86_64::abi::regbank::RHS_STAGE_CANDIDATES`）就是本表：
+/// 两个模块各自需要知道同一件事，但只有这里能持有名单。给用例用。
+pub fn auto_ext_pool_regs() -> Vec<u8> {
+    AUTO_EXT_POOL.iter().map(|&(_, r)| r).collect()
+}
+
+/// 这个号是不是需要存/取通道的延伸池号（给发射侧用：只有这类家才预留保存槽）。
+pub fn is_auto_ext_reg(n: u8) -> bool {
+    AUTO_EXT_POOL.iter().any(|&(_, r)| r == n)
+}
+
+/// 「自动池满了」这个拒因的**唯一字串**。以前它以内联文本抄在 5 个地方（1 个推 + 4 个
+/// 读），而度量（`pool_full_rejects`/`shareable`/`nocall`）与分配器共用这个键：抄本一旦
+/// 不一致，账面上的收益面就会静默变成 0，而那看上去像「没机会」而不是「算错了」。
+pub const REASON_NO_FREE_REG: &str = "no-free-auto-assignable-register";
+
 /// `DCC_REGALLOC_DUMP=1` 时打印诊断（缓存一次，避免每条 pass 都读环境）。
 fn dump_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -123,6 +223,12 @@ pub struct PlanStats {
     /// 规则（§7.20 判据 3）。这个数直接决定 Phase 5 的工力该投在 spill 还是在分裂上
     /// —— 设计 §7 Phase 0 的原话：没有下降数据的收益不算收益。
     pub pool_full_shareable: usize,
+    /// **池满被拒的候选里，有多少个活区间不跨 call**（Phase 5.1 前置三的收益面）。
+    ///
+    /// 这一族是「给它们发 caller-saved 号就立刻能用、不需要任何保存通道」的部分；
+    /// 剩下的那部分才需要前置三的 store/load 通道。它和 `pool_full_shareable` 回答不
+    /// 同一个问题：后者问「callee-saved 池里能不能挤出一个号」，前者问「能不能用池外的号」。
+    pub poolfull_no_call: usize,
 }
 
 impl Plan {
@@ -139,10 +245,20 @@ pub fn pooled_reg_of(asm_name: &str) -> Option<u8> {
         .map(|(_, r)| *r)
 }
 
-/// 号 → `register asm` 的写法。`POOL` 是唯一的号表，所以上下两个方向（名→号、号→名）
-/// 都只能从它派生；两边各自返一份名单就是「同一个事实两处定义」。
+/// 号 → `register asm` 的写法。**自动池整张表都是候选**（callee-saved + 延伸池）：以前
+/// 只查 `POOL`，于是分配器给的延伸池家在这里变成 `None`，被归到
+/// 「不可表示」而静默退回内存 —— 那看上去只在绑定读数里有，到不了产物。
 fn pool_reg_name(n: u8) -> Option<&'static str> {
-    POOL.iter().find(|(_, v)| *v == n).map(|(nm, _)| *nm)
+    auto_pool().into_iter().find(|(_, v)| *v == n).map(|(nm, _)| nm)
+}
+
+/// 名 → **整个自动池**里的号（callee-saved 加延伸池）。与 `pooled_reg_of` 不是一回事：
+/// 后者只回答「这个名是不是需要序言保存的那族号」，而本函数回答「分配器能不能拿它当家」。
+/// 两者分开写而不是共用 `pooled_reg_of`，是因为前置三以后自动绑定可以落在 callee-saved
+/// 池外：用错了就会把延伸池的绑定静默丢掉（实测就是这个形状：绑定读数里有、产物里没有）。
+pub fn auto_reg_of(asm_name: &str) -> Option<u8> {
+    let n = asm_name.trim_start_matches('%').to_ascii_lowercase();
+    auto_pool().into_iter().find(|(nm, _)| *nm == n).map(|(_, r)| r)
 }
 
 /// 调用方需要的上下文。
@@ -204,12 +320,14 @@ pub fn deliver(func: &Function, plan: &mut Plan, body: &mut Block) {
         }
         // 量化行：Phase 0 的「值不值得干」与 Phase 5 的归属数据都从这里取（全语料聚合）。
         eprint!(
-            "  stats cands={} poolfull={} live={} live_cands={} shareable={}\n",
+            "  stats cands={} poolfull={} live={} live_cands={} shareable={} nocall={} needssave={}\n",
             plan.stats.pool_candidates,
             plan.stats.pool_full_rejects,
             plan.stats.max_live_bases,
             plan.stats.max_live_candidates,
-            plan.stats.pool_full_shareable
+            plan.stats.pool_full_shareable,
+            plan.stats.poolfull_no_call,
+            plan.stats.pool_full_rejects.saturating_sub(plan.stats.poolfull_no_call)
         );
     }
 }
@@ -286,14 +404,22 @@ struct Cand {
 ///
 /// 旧写法是 `plan_for` 开头 `if ctx.debug_info { return plan; }`，语义是「pass 不跑」；
 /// 而真正的规则是「本函数不允许产出 `Reg` 家，因为 DWARF 只会发栈槽位置，绑上去就是
-/// 让调试器读一个从未被写入的槽」。两者今天产物相同，但下阶段不同：Phase 6.2 给
+/// 让调试器读一个从未被写入的槽」。两者当时产物相同，但下阶段不同：Phase 6.2 给
 /// DWARF 补上寄存器位置表达式后，取消限制只需改本函数一处，而不必重新找一个
 /// 「pass 入口的跳过点」并保证它的判据与 Location 一致。
 ///
-/// 守卫搬到这里后，准入判据与活性仍然照跑，-g 下被拒的名字带原因进 `rejected`，
-/// 所以 `DCC_REGALLOC_DUMP` 在 -g 下从「什么都看不到」变成「看得到为什么没绑」。
-fn register_homes_allowed(ctx: &Ctx) -> bool {
-    !ctx.debug_info
+/// **Phase 6.2 已接线，所以这里不再拦**：`src/debug.rs` 会从 `Codegen::debug_var_facts`
+/// 给每个有物理寄存器家的局部发 `DW_OP_regN`（N 由号表换算，实测 gdb `print` 读到的是
+/// 活寄存器本身：改掉 %rbx，`print v` 立刻跟着变）。`POOL` 里只有 callee-saved
+///（rbx/r12/r14/r15），后端是**函数级**的名字→号绑定（一个号一个变量，见下面那段
+/// 为什么不按区间共用），所以上面那个「只发栈槽位置」的前提不在了。
+///
+/// 保留本函数而不是删掉：它是那条规则的**唯一**落点，以后谁要重新拦（比如发现某个
+/// 形状的位置表达式仍发不出）只需改这里，不必再回到 pass 入口去找早返点。返回恒为
+/// `true` 是刻意的：`ctx` 参数不读 `debug_info` 了，而那个字段仍然留着（`src/opt.rs` 构
+/// 造 `Ctx` 时需要它，且它是 `-g` 在本模块里唯一的可观测身份）。
+fn register_homes_allowed(_ctx: &Ctx) -> bool {
+    true
 }
 
 fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
@@ -388,23 +514,50 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
     let mut used_slots: Vec<usize> = Vec::new();
     for c in &cands {
         if !homes_allowed {
-            // 走完准入判据、但被 Location 层的规则拦住：原因必须落进拒因，
-            // 不然后人只能看到「没绑」而看不到「为什么没绑」。
-            plan.rejected.push((c.name.clone(), "debug-info-forbids-register-home"));
+            // 本阶段不拦（`register_homes_allowed` 恒为 true）。保留这条分支形状是为了
+            // 让「拦」与「拒因可诊断」同时成立：谁重新拦上，名字仍然会带原因进
+            // `rejected`，而不是退回到「看不到为什么没绑」。
+            plan.rejected.push((c.name.clone(), "register-home-disallowed-by-location-policy"));
             continue;
         }
-        match POOL
+        // 发号前先算出「哪些号已经归属某个家」：本次检查需要它，而不能到发射期才发现全满。
+        //
+        // 「必须给右操作数暂存留至少一个空闲候选」是**发号判据的一部分**，不是发射期的兑底：
+        // 延伸池与暂存候选是同一批号（§11.47 实测：候选表全被家占满时 `emit` 会
+        // 报 `E1135`），而只有分配器能看见所有候选的最终归属 —— 到了发射期已经无从选择。
+        let pool = auto_pool();
+        let held_by_pool: Vec<u8> = pool
             .iter()
             .enumerate()
-            .find(|(i, (_, rv))| !taken.contains(rv) && !used_slots.contains(i))
-        {
-            Some((i, _)) => {
+            .filter(|(i, _)| used_slots.contains(i))
+            .map(|(_, (_, r))| *r)
+            .collect();
+        let stage_free_after = |rv: u8| -> bool {
+            // 「延伸池号」与「右操作数暂存候选」就是同一批 5 个号（两边的定义各自
+            // 排掉了 rax/rdx/r10/r11，由 `auto_ext_pool_is_the_staging_candidate_set` 钉住这个
+            // 相等关系）。所以这里用本地的 `AUTO_EXT_POOL` 表达即可，不需要跨层去读后端的
+            // 候选表 —— 而且跨层也读不到（`codegen::x86_64::abi` 是私有模块）。
+            !is_auto_ext_reg(rv)
+                || AUTO_EXT_POOL
+                    .iter()
+                    .any(|&(_, c)| c != rv && !taken.contains(&c) && !held_by_pool.contains(&c))
+        };
+        let pick = pool
+            .iter()
+            .enumerate()
+            .find(|(i, (_, rv))| {
+                !taken.contains(rv) && !used_slots.contains(i) && stage_free_after(*rv)
+            })
+            .map(|(i, (nm, _))| (i, *nm));
+        match pick {
+            Some((i, nm)) => {
                 used_slots.push(i);
-                plan.bindings.push((c.name.clone(), POOL[i].0));
+                plan.bindings.push((c.name.clone(), nm));
             },
+            // 自动池满了：callee-saved 与延伸池一个都不剩（或剩下的会让暂存耗空）。
             None => plan
                 .rejected
-                .push((c.name.clone(), "no-free-callee-saved-register")),
+                .push((c.name.clone(), REASON_NO_FREE_REG)),
         }
     }
     // 位置表（版本粒度）：从已定稿的 bindings + IR 建，供 `assign` 落地并由 IR 携带。
@@ -419,7 +572,7 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
         plan.stats.pool_full_rejects = plan
             .rejected
             .iter()
-            .filter(|(_, w)| *w == "no-free-callee-saved-register")
+            .filter(|(_, w)| *w == REASON_NO_FREE_REG)
             .count();
         plan.stats.max_live_bases =
             max_overlap(spans.values().map(|s| (s.first, s.last)).collect::<Vec<_>>());
@@ -428,8 +581,20 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
         // 干涉分桶：池满被拒的候选里，有多少本可以复用某个已绑号（只是版本不重叠）。
         // 这张表只在诊断开着时算：它是 Phase 5 的决策数据，不是今天的分配输入。
         plan.stats.pool_full_shareable = shareable_rejects(func, &plan);
+        // 前置三收益面：池满被拒的候选里，有多少根本不过 call（这些用 caller-saved
+        // 号不需要保存通道）。同样只在诊断开着时算，不是今天的分配输入。
+        plan.stats.poolfull_no_call = poolfull_no_call(func, &plan);
     }
     plan
+}
+
+/// 池满被拒的候选里，活区间**不跨 call** 的个数（前置三的收益面，只读诊断）。
+fn poolfull_no_call(func: &Function, plan: &Plan) -> usize {
+    plan.rejected
+        .iter()
+        .filter(|(_, why)| *why == REASON_NO_FREE_REG)
+        .filter(|(name, _)| !crate::ssa::liveness::spans_call(func, name))
+        .count()
 }
 
 /// 「池满被拒的候选里，有多少本可以复用某个已绑号」的计数（设计 §7 Phase 0 的归属数据）。
@@ -445,7 +610,7 @@ pub(crate) fn shareable_rejects(func: &Function, plan: &Plan) -> usize {
     }
     let mut shareable = 0usize;
     for (cand, why) in &plan.rejected {
-        if *why != "no-free-callee-saved-register" {
+        if *why != REASON_NO_FREE_REG {
             continue;
         }
         let cv = crate::ssa::liveness::versions_of_base(func, cand);
@@ -762,14 +927,24 @@ fn ident_root_name(e: &Expr) -> Option<String> {
 /// `home` 是分配结果；两者在 `the_ast_landing_comes_from_the_table` 里被要成一致。
 /// Phase 4.1c/d 会让后端改读 `home` 并拆掉 `register_name` 这条中间通道。
 fn apply_bindings(b: &mut Block, plan: &mut Plan, splits: &Splits) {
-    // 表 → 「AST 局部名 → 号」。不可表示的家（非 GP 通道、池外号，以及分裂也没能
+    // 表 → 「AST 局部名 → 家」。不可表示的家（非 GP 通道、池外号，以及分裂也没能
     // 消除的同基名冲突）走下面的拒因点名，不默默绑。
-    let mut homes: HashMap<String, RegId> = HashMap::new();
+    //
+    // 以前这里只放行 `Reg`，其余一律当「不可表示」丢弃 —— 那就是 §11.13 给 5.1.e 点名的
+    // 表达缺口：`Spill` 从 Phase 5.1.c 起已是后端**已接线**的家（读/写/取地址三个消费臂
+    // 全部走 `LayoutMap::spill_off`，带的尺寸也从交付的家导出），唯一断的就是这里不交付。
+    // 今天没有任何生产者给出 `Spill`（下面的 `bind` 只发 `Reg`），所以放行它是零产物影响的；
+    // 不放行，则分配器永远拿不到「把这个值存到溢出槽」这一项能力。
+    let mut homes: HashMap<String, Location> = HashMap::new();
     let mut unrepresentable: Vec<String> = Vec::new();
     for (local, loc) in plan.loc.fold_for_codegen(splits) {
         match loc {
-            Some(Location::Reg(r)) if r.bank == RegBank::Gp => {
-                homes.insert(local, r);
+            Some(Location::Reg(r)) if r.bank == RegBank::Gp && pool_reg_name(r.n).is_some() => {
+                homes.insert(local, Location::Reg(r));
+            }
+            Some(Location::Spill(slot)) => {
+                // 溢出槽就是内存：它不需要名字表里的文本名，也不占用任何寄存器
+                homes.insert(local, Location::Spill(slot));
             }
             Some(_) => unrepresentable.push(local),
             None => unrepresentable.push(local),
@@ -779,11 +954,19 @@ fn apply_bindings(b: &mut Block, plan: &mut Plan, splits: &Splits) {
     for local in unrepresentable {
         plan.rejected.push((local, "home-not-representable"));
     }
-    let map: HashMap<&str, (&str, RegId)> = homes
+    // `Option<&'static str>` 就是「这个家要不要同时写 `register_name`」：寄存器家要
+    // （旧代码靠它作为同源的名单），spill 家不要（它不是寄存器，写了就是骗后端去保存）。
+    let map: HashMap<&str, (Option<&'static str>, Location)> = homes
         .iter()
-        .filter_map(|(k, r)| pool_reg_name(r.n).map(|nm| (k.as_str(), (nm, *r))))
+        .map(|(k, loc)| {
+            let nm = match loc {
+                Location::Reg(r) => pool_reg_name(r.n),
+                _ => None,
+            };
+            (k.as_str(), (nm, *loc))
+        })
         .collect();
-    fn stmt(s: &mut Stmt, map: &HashMap<&str, (&str, RegId)>) {
+    fn stmt(s: &mut Stmt, map: &HashMap<&str, (Option<&'static str>, Location)>) {
         match s {
             Stmt::Block { b, .. } => walk(b, map),
             Stmt::If { then_, else_, .. } => {
@@ -811,16 +994,18 @@ fn apply_bindings(b: &mut Block, plan: &mut Plan, splits: &Splits) {
             _ => {},
         }
     }
-    fn walk(b: &mut Block, map: &HashMap<&str, (&str, RegId)>) {
+    fn walk(b: &mut Block, map: &HashMap<&str, (Option<&'static str>, Location)>) {
         for item in &mut b.items {
             match item {
                 BlockItem::Decl(Decl::Var(v)) => {
-                    if let Some((r, reg)) = map.get(v.name.name.as_str()) {
+                    if let Some((rn, loc)) = map.get(v.name.name.as_str()) {
                         if v.register_name.is_none() {
-                            v.register_name = Some((*r).to_string());
+                            if let Some(name) = rn {
+                                v.register_name = Some((*name).to_string());
+                            }
                         }
                         // Phase 4.1b：家同时交出去（位与名字同源，不会出现一边有一边没）。
-                        v.home = Some(Location::Reg(*reg));
+                        v.home = Some(*loc);
                     }
                 },
                 BlockItem::Stmt(s) => stmt(s, map),
@@ -947,12 +1132,11 @@ fn note(m: &mut HashMap<String, Span>, name: &str, at: i32, is_def: bool, in_ent
 /// 与 `base_spans` 共用 `each_occurrence`：「哪些出现算数」不允许有两份答案。
 pub fn to_loc_map(plan: &Plan, func: &Function) -> LocMap {
     let mut out = LocMap::empty();
-    // 基名 → 池内号。绑到池外的号（自动分配今天不会发生）不进表：`pooled_reg_of`
-    // 就是那条判据的唯一出处。
+    // 基名 → 自动池里的号。绑到自动池外的号才不进表：`auto_reg_of` 就是那条判据的唯一出处。
     let wanted: HashMap<&str, u8> = plan
         .bindings
         .iter()
-        .filter_map(|(base, rn)| pooled_reg_of(rn).map(|n| (base.as_str(), n)))
+        .filter_map(|(base, rn)| auto_reg_of(rn).map(|n| (base.as_str(), n)))
         .collect();
     if wanted.is_empty() {
         return out;
@@ -1022,50 +1206,66 @@ mod tests {
             .map(|(_, w)| *w)
     }
 
-    /// D5 的守卫形状：-g 拦住的是**家**，不是整条 pass。
+    /// D5 的守卫现在只到「拦」为止：Phase 6.2 给 DWARF 接上 `DW_OP_regN` 后，`-g`
+    /// 不再拦寄存器家。本用例钉的是**翻过来的那一面**：`-g` 下照样绑，但准入判据照跑。
     ///
-    /// 与旧行为的产品差异为零（两边都不绑），但语义不再藏在入口的早返里：-g 下
-    /// 候选者仍然被评到，拒因从「什么都没发生」变成可诊断的一条。Phase 6.2 给 DWARF
-    /// 补上寄存器位置后，只删 `register_homes_allowed` 这一条即可。
+    /// 为什么不删掉这个用例：它是「`-g` 与产物形状」这条关系上唯一直接可读到的一条。
+    /// 删了就只能从三档哈希间接推，而哈希本身分不清「没绑」与「绑了但读不到」。
     #[test]
-    fn debug_info_gates_the_home_not_the_pass() {
+    fn debug_info_no_longer_gates_the_register_home() {
         let src = "long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i;return acc;}\n";
         let gctx = Ctx { debug_info: true, taken_regs: HashSet::new() };
         let (_ssa, _orig, _body, plan) = run_pipeline(src, "s", 2, &gctx);
-        assert!(plan.bindings.is_empty(), "-g 下不得产出寄存器家，实际 {:?}", plan.bindings);
         assert!(
-            plan.rejected.iter().any(|(_, w)| *w == "debug-info-forbids-register-home"),
-            "-g 下被拦住的原因必须可诊断，实际 {:?}",
-            plan.rejected
+            !plan.bindings.is_empty(),
+            "-g 下应照样绑得上（Phase 6.2 已接线 DW_OP_regN，实际 {:?}）",
+            plan.bindings
         );
-        // 反向对照：关掉 -g 同一个源仍然绑得上（否则本用例会退化成「把 pass 关掉」）
-        let (_s2, _o2, _b2, p2) = run_pipeline(src, "s", 2, &ctx_default());
-        assert!(!p2.bindings.is_empty(), "非 -g 下仍然应绑（否则守卫在判据之前）");
+        for w in ["debug-info-forbids-register-home", "register-home-disallowed-by-location-policy"] {
+            assert!(
+                !plan.rejected.iter().any(|(_, r)| *r == w),
+                "旧拒因 {w} 不得再出现在 -g 的拒因里，实际 {:?}",
+                plan.rejected
+            );
+        }
+        // 反向对照：取消拦的是「能不能拿寄存器家」，不是准入判据。被取址的局部仍然
+        // 必须不绑（否则本用例会退化成「-g 下逢人就绑」）。
+        let esc = "long s(long n){long k=n;long*p=&k;*p+=n;return *p;}\n";
+        let (_s2, _o2, _b2, p2) = run_pipeline(esc, "s", 2, &gctx);
+        assert!(
+            p2.rejected.iter().any(|(_, w)| *w == "address-escaped"),
+            "-g 下取过址的局部仍必须被准入判据拒掉，实际 {:?}",
+            p2.rejected
+        );
     }
 
-    /// 非空验证：上面那个全语料∀ 口径量出的「池满拒绑 140 个，可共用 0 个」既可能是
-    /// 真结论，也可能是度量算错。拿一个结构上明确“第 5 个变量与前面都不重叠”的源跑：
+    /// 非空验证：上面那个全语料∀ 口径量出的「池满拒绑 148 个，可共用 0 个」既可能是
+    /// 真结论，也可能是度量算错。拿一个结构上明确「最后一个变量与前面都不重叠」的源跑：
     /// 如果连它都报 0，那度量是坏了，而不是没机会。
     #[test]
     fn shareable_metric_is_not_vacuously_zero() {
         // a..e 依次短命：每个只在自己那条语句里活。必须依赖形参：常量会被 SCCP 折叠，
         // 连 IR _presence 都没有（那就是 `fully_folded_locals_have_no_ir_presence` 记的现象），
         // 本用例就会退化成空跑 —— 第一版就是这么错的。
+        // 候选数要**多于自动池**。延伸池目前不开（见 `auto_pool`），所以自动池就是
+        // `POOL` 那 4 个 callee-saved；开池的那天本用例要跟着长到 10 个候选，而那
+        // 一天必须先解决暂存约定（设计 §11.39）。
         let src = "long sink;\nlong f(long k){long a=k+1;sink=sink+a;long b=k+2;sink=sink+b;\
                    long c=k+3;sink=sink+c;long d=k+4;sink=sink+d;long e=k+5;sink=sink+e;return sink;}\n";
         let (ssa, _orig, _body, plan) = run_pipeline(src, "f", 2, &ctx_default());
         assert!(
-            !plan.bindings.is_empty(),
-            "被测源应先绑上若干变量（否则本用例是空跑）"
+            plan.bindings.len() >= 4,
+            "被测源应先把自动池绑满（实得 {}），否则本用例是空跑",
+            plan.bindings.len()
         );
         let pool_full = plan
             .rejected
             .iter()
-            .filter(|(_, w)| *w == "no-free-callee-saved-register")
+            .filter(|(_, w)| *w == REASON_NO_FREE_REG)
             .count();
         assert!(
             pool_full >= 1,
-            "池只有 4 个号，5 个候选应至少拒一个，实际 rejected={:?}",
+            "自动池只有 4 个号（延伸池未开），5 个候选应至少拒一个，实际 rejected={:?}",
             plan.rejected
         );
         assert!(
@@ -1187,9 +1387,11 @@ mod tests {
                             );
                             *n += 1;
                         } else {
-                            assert_eq!(
-                                v.home, None,
-                                "{} 没有 register_name 却带了家（两条通道开始漂了）",
+                            // 两条通道不得漂：没有寄存器名就不能有**寄存器**家。而 `Spill`
+                            // 是内存家，它本来就不该有 `register_name`（Phase 5.1.e 的交付形状）。
+                            assert!(
+                                v.home.is_none() || matches!(v.home, Some(Location::Spill(_))),
+                                "{} 没有 register_name 却带了非内存的家（两条通道开始漂了）",
                                 v.name.name
                             );
                         }
@@ -1554,15 +1756,30 @@ mod tests {
         }
     }
 
-    /// `-g` 时整条 pass 不动：DWARF 目前只会发栈槽位置，绑上去调试器读的是没人写
-    /// 的槽。这是显式边界，不是遗漏。
+    /// `-g` 不再参与决定谁绑：同一个源在两档下的**计划必须逐项相等**。
+    ///
+    /// 这比「两档都绑得上」强：它同时钉住了「`-g` 不会少绑」与「`-g` 不会多绑」。
+    /// 旧形状下这个断言会是 `[] == [(acc, rbx), (i, r12)]` 而红 —— 那条限制已经随
+    /// Phase 6.2 接线 DW_OP_regN 删掉了（见 `register_homes_allowed`）。
     #[test]
-    fn debug_info_disables_the_pass() {
+    fn debug_info_does_not_change_the_plan() {
         let src = "long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i;return acc;}\n";
-        let mut ctx = ctx_default();
-        ctx.debug_info = true;
-        let (_, _, _, plan) = run_pipeline(src, "s", 2, &ctx);
-        assert!(plan.bindings.is_empty(), "-g 时不得有任何绑定：{:?}", plan.bindings);
+        let mut gctx = ctx_default();
+        gctx.debug_info = true;
+        let (_, _, _, gplan) = run_pipeline(src, "s", 2, &gctx);
+        let (_, _, _, nplan) = run_pipeline(src, "s", 2, &ctx_default());
+        assert!(
+            !gplan.bindings.is_empty(),
+            "空对空也能让下面的相等成立，所以先要求非空"
+        );
+        assert_eq!(
+            gplan.bindings, nplan.bindings,
+            "-g 与非 -g 的绑定表必须逐项相等（号也一样，否则 DWARF 与机器码会错位）"
+        );
+        assert_eq!(
+            gplan.rejected, nplan.rejected,
+            "-g 与非 -g 的拒因表也必须逐项相等"
+        );
     }
 
     /// `DCC_OPT_SKIP=ssa_regalloc` 关掉的是调用点，这里验证 pass 自己也能整体退回：
@@ -1574,4 +1791,96 @@ mod tests {
         assert!(plan.bindings.is_empty(), "{:?}", plan.bindings);
     }
 
+    /// Phase 5.1.e 的**交付半边**：分配器一旦给出 `Spill` 家，它必须能一路走到 AST 声明上。
+    ///
+    /// 以前 `apply_bindings` 只放行 `Reg`，其余一律报 `home-not-representable` 丢弃 ——
+    /// 而 `Spill` 从 Phase 5.1.c 起已是后端**已接线**的家（读/写/取地址三个消费臂全走
+    /// `LayoutMap::spill_off`，带的尺寸也从交付的家导出）。那不交付，生产侧就无从表达；
+    /// 今天没有任何分配结果给出 Spill，所以只能像带尺寸那条用例一样注入验机制本身。
+    #[test]
+    fn spill_homes_are_delivered_to_the_ast() {
+        let src = "long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i;return acc;}\n";
+        // 在**重建前**的那份体上交付：拿 `run_pipeline` 已经交付过的体再做一次会被
+        // 「已有 register_name 不覆盖」那条旧规则遮住，测不到新臂的形状。
+        let (_ssa, orig, _rebuilt, mut plan) = run_pipeline(src, "s", 2, &ctx_default());
+        let mut body = orig.clone();
+        // 注入：只有一个局部拿 `Spill(2)`，其余名字不在表上（它们必须既没家也没寄存器名）
+        let mut m = LocMap::empty();
+        m.bind(
+            &crate::ssa::ir::SsaVar {
+                base: "acc".to_string(),
+                version: 1,
+                ty: Type::Long,
+                span: crate::diagnostics::Span::point("t.c", 1, 1),
+            },
+            Location::Spill(2),
+        );
+        plan.loc = m;
+        apply_bindings(&mut body, &mut plan, &Splits::default());
+
+        let mut found = 0;
+        fn walk(b: &Block, found: &mut usize) {
+            for item in &b.items {
+                match item {
+                    BlockItem::Decl(Decl::Var(v)) => {
+                        if v.name.name == "acc" {
+                            assert_eq!(
+                                v.home,
+                                Some(Location::Spill(2)),
+                                "Spill 家必须原样交付到声明上"
+                            );
+                            assert!(
+                                v.register_name.is_none(),
+                                "内存家不得写 register_name（那会骗后端去保存一个不存在的寄存器）"
+                            );
+                            *found += 1;
+                        } else {
+                            assert_eq!(
+                                v.home, None,
+                                "不在表上的名字不得被顺手给家：{}",
+                                v.name.name
+                            );
+                        }
+                    },
+                    // 递归下潜：`for` 的 init 里也有声明，只看顶层会把它们全遮住
+                    BlockItem::Stmt(s) => walk_stmt(s, found),
+                    _ => {},
+                }
+            }
+        }
+        fn walk_stmt(s: &Stmt, found: &mut usize) {
+            match s {
+                Stmt::Block { b, .. } => walk(b, found),
+                Stmt::If { then_, else_, .. } => {
+                    walk_stmt(then_, found);
+                    if let Some(e) = else_ {
+                        walk_stmt(e, found);
+                    }
+                },
+                Stmt::While { body, .. } | Stmt::Do { body, .. } => walk_stmt(body, found),
+                Stmt::For { init, body, .. } => {
+                    if let Some(i) = init {
+                        walk_stmt(i, found);
+                    }
+                    walk_stmt(body, found);
+                },
+                Stmt::Switch { cases, .. } => {
+                    for c in cases {
+                        walk(&c.body, found);
+                    }
+                },
+                Stmt::Label { stmt, .. } => walk_stmt(stmt, found),
+                Stmt::Invoke { call, .. } => walk_stmt(call, found),
+                _ => {},
+            }
+        }
+        walk(&body, &mut found);
+        assert_eq!(found, 1, "本用例必须真的改到了一个叫 acc 的声明（否则只是空跑）");
+        // 也不能顺手多一个拒因：`acc` 现在是可表示的家
+        assert!(
+            !plan.rejected.iter().any(|(n, _)| n == "acc"),
+            "Spill 家不得被报成 home-not-representable：{:?}",
+            plan.rejected
+        );
+    }
 }

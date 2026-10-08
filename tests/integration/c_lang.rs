@@ -433,41 +433,6 @@ fn may_alias_struct_compiles() {
     assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
-/// 取某个函数的 asm 函数体（从 `<name>:` 到下一个行首标签或伪指令行）。
-///
-/// 两条 `seg_qualifier_*` 用例共用这一份：段前缀的断言必须**逐函数**做，全局计数会被
-/// 别人的前缀凑数（把无关函数的前缀数进去就看不出某个形状真的没发）。名字带 `seg_`
-/// 前缀是因为本文件被 `tests/integration.rs` 以 `include!` 文本级注入到 crate 根。
-fn seg_asm_body(asm_text: &str, name: &str) -> String {
-    let mut out = String::new();
-    let mut hit = false;
-    for line in asm_text.lines() {
-        if line.trim_end() == format!("{}:", name) {
-            hit = true;
-            continue;
-        }
-        if !hit {
-            continue;
-        }
-        // 下一个行首标签（助记符行都以空白开头）就是本函数结束。
-        let is_label = !line.starts_with(' ')
-            && !line.starts_with('\t')
-            && !line.starts_with('.')
-            && line.trim_end().ends_with(':');
-        let is_section = !line.starts_with(' ') && !line.starts_with('\t') && line.starts_with('.');
-        if is_label || is_section {
-            break;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
-}
-
-fn seg_has_prefix(body: &str) -> bool {
-    body.contains("%gs:") || body.contains("%fs:")
-}
-
 /// `__seg_fs` / `__seg_gs` (以及 `__seg_{cs,ds,es,ss}`) 地址空间限定符
 ///
 /// 契约在第 26 轮翻了一次。旧断言是「asm 里不得出现 %fs:/%gs:」（当时只解析不
@@ -545,7 +510,7 @@ fn seg_qualifier_parses_all_positions_and_emits_segment_prefixes() {
             String::from_utf8_lossy(&asm_out.stderr)
         );
         for name in GS_ACCESS {
-            let body = seg_asm_body(&asm_text, name);
+            let body = harness::seg_asm_body(&asm_text, name);
             assert!(
                 !body.is_empty(),
                 "[{flag}] 夹具里找不到函数 {name}（改名会让这些断言空判）"
@@ -556,7 +521,7 @@ fn seg_qualifier_parses_all_positions_and_emits_segment_prefixes() {
             );
         }
         for name in FS_ACCESS {
-            let body = seg_asm_body(&asm_text, name);
+            let body = harness::seg_asm_body(&asm_text, name);
             assert!(
                 !body.is_empty(),
                 "[{flag}] 夹具里找不到函数 {name}（改名会让这些断言空判）"
@@ -567,7 +532,7 @@ fn seg_qualifier_parses_all_positions_and_emits_segment_prefixes() {
             );
         }
         for name in OBJ_GS_ACCESS {
-            let body = seg_asm_body(&asm_text, name);
+            let body = harness::seg_asm_body(&asm_text, name);
             assert!(
                 !body.is_empty(),
                 "[{flag}] 夹具里找不到对象本体带段的函数 {name}"
@@ -578,7 +543,7 @@ fn seg_qualifier_parses_all_positions_and_emits_segment_prefixes() {
             );
         }
         for name in OBJ_FS_ACCESS {
-            let body = seg_asm_body(&asm_text, name);
+            let body = harness::seg_asm_body(&asm_text, name);
             assert!(
                 !body.is_empty(),
                 "[{flag}] 夹具里找不到对象本体带段的函数 {name}"
@@ -589,13 +554,13 @@ fn seg_qualifier_parses_all_positions_and_emits_segment_prefixes() {
             );
         }
         for name in NO_SEGMENT {
-            let body = seg_asm_body(&asm_text, name);
+            let body = harness::seg_asm_body(&asm_text, name);
             assert!(
                 !body.is_empty(),
                 "[{flag}] 夹具里找不到反向对照函数 {name}"
             );
             assert!(
-                !seg_has_prefix(&body),
+                !harness::seg_has_prefix(&body),
                 "[{flag}] {name}: 无限定 / Generic 段不得发前缀，实得\n{body}"
             );
         }
@@ -692,7 +657,7 @@ fn seg_qualifier_on_object_body_emits_segment_prefixes() {
             String::from_utf8_lossy(&asm_out.stderr)
         );
         for (name, min) in GS {
-            let body = seg_asm_body(&asm_text, name);
+            let body = harness::seg_asm_body(&asm_text, name);
             assert!(!body.is_empty(), "[{flag}] 夹具里找不到函数 {name}（改名会让断言空判）");
             let got = body.matches("%gs:").count();
             assert!(
@@ -701,7 +666,7 @@ fn seg_qualifier_on_object_body_emits_segment_prefixes() {
             );
         }
         for name in FS {
-            let body = seg_asm_body(&asm_text, name);
+            let body = harness::seg_asm_body(&asm_text, name);
             assert!(!body.is_empty(), "[{flag}] 夹具里找不到函数 {name}");
             assert!(
                 body.contains("%fs:"),
@@ -714,20 +679,20 @@ fn seg_qualifier_on_object_body_emits_segment_prefixes() {
         }
         // 轴分离的另一面：pointee 带段的解引用仍要发前缀（不能因为改的是「符号表」
         // 那一轴就把 pointee 那一轴顶掉）。
-        let pdp = seg_asm_body(&asm_text, "pseg_rd_pointee");
+        let pdp = harness::seg_asm_body(&asm_text, "pseg_rd_pointee");
         assert!(pdp.contains("%gs:"), "[{flag}] pseg_rd_pointee: {pdp}");
         for name in NO_PREFIX {
-            let body = seg_asm_body(&asm_text, name);
+            let body = harness::seg_asm_body(&asm_text, name);
             assert!(!body.is_empty(), "[{flag}] 夹具里找不到反向对照函数 {name}");
             assert!(
-                !seg_has_prefix(&body),
+                !harness::seg_has_prefix(&body),
                 "[{flag}] {name}: 取址 / 不带段 / 指针本体都不得发前缀，实得\n{body}"
             );
         }
     }
 
     // 与 gcc 四档逐字对拍（本夹具全是 gcc 完全接受的形状）。
-    assert_all_levels_match_gcc(
+    harness::assert_all_levels_match_gcc(
         "c-seg-object-body",
         source,
         "段限定对象本体的访问在高档位下丢前缀或改错值",
@@ -3462,4 +3427,173 @@ fn deep_right_nested_binops_stay_decodable_and_correct() {
     let code = run_exe(&exe);
     let _ = fs::remove_file(exe);
     assert_eq!(code, 0, "深嵌套右结合加法链的求值结果错（期望 78）");
+}
+
+/// N5 + N9：嵌套函数捕获外层变量的两条通路，与 VLA 运行时尺寸的基址。
+///
+/// 四档逐个与 gcc 对照（`-O0` 是唯一能看见静态链那条轴的档位，`-O2/-O3` 则验证
+/// 「含嵌套函数的函数不进 SSA」那道闸仍然生效）。修前实测同一份源在
+/// `-O0/-O2` 都返回 1：`sizeof a` 是 0（`n` 没进 upvars）⇒ `d=14` 而不是 72，
+/// `plain` 的 `sizeof c` 返回被 `c[2]=7` 踩掉的那个槽 ⇒ `p=14` 而不是 47。
+#[test]
+fn nested_vla_upvar_capture_matches_gcc_at_all_levels() {
+    if !tool_exists("gcc") {
+        return;
+    }
+    let src = include_str!("../fixtures/opt/nested_vla_upvar_capture.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("nested-vla-upvar", src, &[flag]),
+            0,
+            "{flag}: 嵌套函数里 VLA 声明维度/形参维度的外层引用没进 upvars，\
+             或 VLA 元素访问的基址取的是元数据槽本身而非其内容"
+        );
+    }
+}
+
+/// N6：语句表达式「最后一个 item」带标签外壳时值不能丢，四档逐个与 gcc 对照。
+///
+/// 为什么必须四档都跑：`-O0/-O1` 走 AST 直发（残值是上一个操作数 ⇒ `a=5`），
+/// `-O2/-O3` 走 SSA 往返（同一条分类守卫的另一份消费路径 ⇒ 残值成了垃圾数），
+/// 只跑任一半都会让另一半回归。夹具里同时含「标号未被使用」与「`goto` 用到标号」
+/// 两条反向对照：取值路径不能把标号漏发，也不能把它发两遍。
+#[test]
+fn stmt_expr_labeled_tail_matches_gcc_at_all_levels() {
+    if !tool_exists("gcc") {
+        return;
+    }
+    let src = include_str!("../fixtures/opt/stmt_expr_labeled_tail.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("stmt-expr-labeled-tail", src, &[flag]),
+            0,
+            "{flag}: 语句表达式尾部带标签外壳时值丢了（或标号漏发/重发）"
+        );
+    }
+}
+
+/// `T *(*f(P1))(P2)` 声明符：P1 是 f 自己的形参、P2 属于被指向的函数。
+///
+/// 四档逐个与 gcc 对照（同一份源在 -O0 走 AST 直发、-O2/-O3 走 SSA 往返；
+/// 参数槽与家两条路都要对）。三种形状一起钉：双层参数表、双层多参数、
+/// 以及只有一层参数表的旧形状（反向对照，改动不许弄坏它）。
+#[test]
+fn fnptr_returning_function_params_match_gcc_at_all_levels() {
+    if !tool_exists("gcc") {
+        return;
+    }
+    let src = include_str!("../fixtures/opt/fnptr_returning_fn_params.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("fnptr-returning-fn", src, &[flag]),
+            0,
+            "{flag}: 返回函数指针的函数把自己的形参丢了（参数没人接 / 发射期懒注册猜宽度）"
+        );
+    }
+}
+
+/// 帧内槽必须在**规划期**登记完（`var_offset` 的发射期兜底从此是异常，不是常规）。
+///
+/// 兜底路径只会按 `Type::Int` 猜一个槽，而且「发射期还会新增多少对象」无法预知，
+/// 晚分配带的容量也就无从计算（§11.23）。现在 `reserve_late_var_slots` 把体内被引用的
+/// 名字按表达式自带的类型全部登过，兜底改成 E1134 硬错误。
+///
+/// 注意分寸：夹具里那些形状在**旧**二进制上跑出来也是对的（Int 猜的槽恰好没被按错
+/// 宽度读），所以它不是错值的回归钉，而是形状守卫：它钉的是「这些形状不得再走兜底」
+/// （下面逐档断 stderr 里没有 E1134），以及四档与 gcc 同结果。
+#[test]
+fn frame_slots_are_planned_not_lazily_guessed() {
+    if !tool_exists("gcc") {
+        return;
+    }
+    let src = include_str!("../fixtures/opt/planned_frame_slots.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("planned-frame-slots", src, &[flag]),
+            0,
+            "{flag}: 帧内槽没在规划期登记，或发射期兜底把宽类型按 Int 存取"
+        );
+    }
+    // 可执行的那条不变式：本夹具的每一种形状都不许再触到发射期兜底。
+    // E1134 是 Error 级 ⇒ 触到就是编不过，所以退出码与 stderr 两样一起看。
+    let (out, exe) = run_compile_and_run_flags("planned-frame-slots-obj", src, &["-O2"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let _ = std::fs::remove_file(exe);
+    assert!(out.status.success(), "-O2 应能编过: {stderr}");
+    assert!(
+        !stderr.contains("E1134"),
+        "帧内槽兜底被触到（该名字没在规划期登记）: {stderr}"
+    );
+}
+
+
+
+
+// ============================================================================
+// N13（本轮已修）：-O2/-O3 的整体结构体赋值曾把源对象的第二个成员写成垃圾
+//
+// 形状：SSA 重建把「把聚合值拷进目标」写成 `x + 0` 的 copy 形态，聚合拷贝的分支因此
+// 把它当成「一个表达式」走通用路 —— 假定 `gen_expr` 后前 16 字节在 `rax:rdx`，而内存聚合
+// 的求值给出的是地址、`%rdx` 是从未装载过的垃圾；临时区按 `dst_off - padded` 算，对
+// `y = x` 恰好落在源对象自己身上 ⇒ 先把 `x.b` 覆盖成垃圾再拷贝。
+// 修在 `emit/expr/aggregate.rs`：先剥掉那个 `+ 0`，右值是内存对象时直接取其地址当源。
+//
+// 这一节留在测试里而不是删掉，理由是本缺陷**在修前没有任何测试覆盖**（`OPT-DIFF 0`、
+// 全语料绿同时存在一个错值），所以它同时是「这个形状现在有对拍」的凭据。
+// ============================================================================
+
+/// 整块聚合赋值后逐成员读；低档与高档都必须与 gcc 同值。
+const AGG_COPY_PARITY_SRC: &str = r#"
+struct S { long a, b; };
+struct Big { long a,b,c,d,e,f,g,h; };
+int main(void){
+    struct S p = {1,2}; struct S q = p;
+    struct Big x = {1,2,3,4,5,6,7,8}; struct Big y = x;
+    return (int)((q.a + q.b) * 100 + (y.a+y.b+y.c+y.d+y.e+y.f+y.g+y.h));
+}
+"#;
+
+#[test]
+fn agg_copy_matches_gcc_at_all_levels() {
+    // `run_gcc_cross_check_opt` 已经在内部断言了「两侧退出码相等 + 两侧 stdout 相等」，
+    // 返回的是那个退出码；所以这里再钉住它等于算得出的期望值，就等于同时证了
+    // 「gcc≡dcc」与「值真的是 336」。（不用 `assert_all_levels_match_gcc`：它要求程序
+    // 返回 0，而本夹具把结果当退出码交出去。）
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            harness::run_gcc_cross_check_opt("agg-copy-parity", AGG_COPY_PARITY_SRC, &[flag]),
+            80,
+            "{flag}: 期望 (1+2)*100 + (1+…+8) = 336，而退出码按 256 取模 ⇒ 336 % 256 = 80"
+        );
+    }
+}
+
+/// 聚合拷贝与 varargs、6 参数调用混在一起时也不能错（N13 当初就是从这类混合形状里
+/// 剥出来的；单独的结构体拷贝绿了不代表与参数装载共处时仍绿）。
+#[test]
+fn agg_copy_with_varargs_and_six_arg_calls_matches_gcc() {
+    let src = r#"
+#include <stdarg.h>
+struct Big { long a,b,c,d,e,f,g,h; };
+static long acc;
+long va_sum(int n, ...) { va_list ap; va_start(ap, n); long s = 0; for (int i = 0; i < n; i++) s += va_arg(ap, long); va_end(ap); acc += s; return s; }
+long six(long a, long b, long c, long d, long e, long f) { acc += a+b+c+d+e+f; return a*1+b*2+c*3+d*4+e*5+f*6; }
+int main(void) {
+    struct Big x = {1,2,3,4,5,6,7,8};
+    long p = six(1,2,3,4,5,6);
+    long q = va_sum(4, 10L, 20L, 30L, 40L);
+    struct Big y = x;
+    long r = y.a+y.b+y.c+y.d+y.e+y.f+y.g+y.h;
+    long t = six(p, q, r, x.e, x.f, x.g);
+    acc = p + q + r + t;
+    return (int)(acc % 251);
+}
+"#;
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            harness::run_gcc_cross_check_opt("agg-copy-mixed", src, &[flag]),
+            216,
+            "{flag}: 聚合拷贝与 varargs/多参调用共存时必须与 gcc 同值（期望 216，实取自 gcc 实测）"
+        );
+    }
 }

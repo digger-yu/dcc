@@ -231,15 +231,15 @@ impl Codegen {
         let lv_ty = target.ty();
         let lv_sz = lv_ty.size();
         // 1. 计算 lvalue 地址 → rax
-        let got_addr = self.gen_lvalue_addr(target, 0);
+        let got_addr = self.gen_lvalue_addr(target, Self::EVAL_BASE);
         if !got_addr {
             // 无法取地址, 退回普通路径 (直接走原有 Assign codegen)
             // 注意: 这里不克隆表达式, 而是让调用方走原始路径.
             // 由于我们已经匹配了 compound pattern, 但无法取地址,
             // 直接按普通赋值处理 (读取 target 值, 计算 binop, 存回).
-            self.gen_expr(target, 0); // 读取 target 当前值 → rax
+            self.gen_expr(target, Self::EVAL_BASE); // 读取 target 当前值 → rax
             self.push(0); // 保存旧值
-            self.gen_expr_decay(rhs, 0); // RHS → rax
+            self.gen_expr_decay(rhs, Self::EVAL_BASE); // RHS → rax
             self.pop(1); // rcx = 旧值 (pop to rcx, not rdx!)
                          // rax = rhs, rcx = old → binop(rax=old, rcx=rhs)
                          // 交换: rax=rcx(old), rcx=rax(rhs)
@@ -307,18 +307,21 @@ impl Codegen {
             Type::Bool | Type::Char | Type::SChar | Type::UChar => {
                 if is_signed {
                     // movsbq dst_low8, dst: 截断到 8 位并符号扩展
-                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
+                    // 自反 ModRM: dst 同时在 ModRM.reg 与 r/m ⇒ >=8 必须同时置 REX.R 与 REX.B。
+                    let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     self.emit(&[rex, 0x0F, 0xBE, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                 } else {
                     // movzbl dst_low8, dst: 截断到 8 位并零扩展
-                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
+                    // 同上：两个字段同一个号，只置 REX.B 会把 reg 留在低 8 号上。
+                    let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     self.emit(&[rex, 0x0F, 0xB6, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                 }
             },
             Type::Short | Type::UShort => {
                 if is_signed {
                     // movswq dst_low16, dst: 截断到 16 位并符号扩展
-                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
+                    // 同上：自反 ModRM 两个字段都要扩。
+                    let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     self.emit(&[rex, 0x0F, 0xBF, 0xC0 | ((dst & 7) << 3) | (dst & 7)]);
                 } else {
                     // movzwl: 32 位 mov 零扩展高 32 位, 再 and 0xFFFF

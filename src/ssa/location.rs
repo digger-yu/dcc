@@ -167,6 +167,51 @@ impl LocMap {
         acc.into_iter().collect()
     }
 
+    /// 已经**被占用的名字**的唯一口径：用户原始局部 + 形参 + IR 里出现过的全部定义基名
+    /// （含 `_tbin_7` 这类合成临时值，也含软件流水造出来的轮转格）。
+    ///
+    /// 为什么这张名单要单独成为函数，而不是各调用方自己拼：分裂名与轮转格名都是
+    /// 「凭空出来的名字换一个存储位置」，而名字一旦被两个对象共用，后端的
+    /// 名字→家 / 名字→栈槽两张表就把它们当成同一个对象 —— 那正是 §7.20 那条判据
+    /// （一个号不得发给两个变量）的反面形状。所以「什么算被占用」必须只有一份答案，
+    /// 否则流水造的名字与分裂造的名字可以互相撞上而两边都自查通过。
+    pub fn reserved_names(func: &crate::ssa::ir::Function) -> std::collections::HashSet<String> {
+        let mut used: std::collections::HashSet<String> = func.original_locals.iter().cloned().collect();
+        used.extend(func.params.iter().map(|p| p.base.clone()));
+        for bb in func.blocks.values() {
+            for phi in &bb.phis {
+                used.insert(phi.dest.base.clone());
+            }
+            for inst in &bb.insts {
+                if let Some(d) = &inst.dest {
+                    used.insert(d.base.clone());
+                }
+            }
+        }
+        used
+    }
+    
+    /// 分配一个分裂名：`{base}_s{k}`，`k` 从 `start` 起往上找第一个没被占用的；
+    /// `used.insert` 同时就是登记，所以同一基名内与跨基名都不会重名。
+    ///
+    /// 选「最小可用 k」而不是加一个固定前缀：那能把「`x` 与 `x_s1` 已存在时的后续版本」
+    /// 这样的链确定性地展开。这条口径**只有这一处实现**（`LocMap::compute_splits` 与
+    /// 软件流水的轮转格共用它），谁再拼一次 `format!("{}_s{}", ..)` 就是第二份命名判据。
+    pub fn reserve_split_name(
+        used: &mut std::collections::HashSet<String>,
+        base: &str,
+        start: usize,
+    ) -> String {
+        let mut k = start;
+        loop {
+            let cand = format!("{}_s{}", base, k);
+            if used.insert(cand.clone()) {
+                return cand;
+            }
+            k += 1;
+        }
+    }
+    
     /// 由本表算出版本分裂表：**只允许分裂用户局部变量**。
     /// 自动分配本来就把 `not-a-user-local` 当拒因，而合成临时值的基名还被
     /// `is_synthetic_temp_base` 按前缀判过（改名会让那条判据隔两层不一致）。
@@ -176,6 +221,15 @@ impl LocMap {
     /// 两者都已在手上，再写一份“哪些版本属于同一个基名”的判据就是第二份真源。
     pub fn compute_splits(&self, func: &crate::ssa::ir::Function) -> Splits {
         let mut out = Splits::default();
+        // 占名检查。分裂名以前是「拼出来就用」（`{base}_s{i}`），而用户完全可以已经有一个
+        // 叫 `x_s1` 的局部：那时分裂体与它**同名**，而后端的名字→家 / 名字→栈槽两张表
+        // 都是按名字索引的，同名就是两个对象共用一个家 —— 正是 §7.20 那条判据（一个号
+        // 不得发给两个变量）的反面形状，而它今天只在「用户起了这个名」时发生，所以
+        // 靠现有语料根本碰不到。名单口径见 `Self::reserved_names`（原始局部 + 形参 + IR 里
+        // 出现过的全部定义基名 + 本表基名），分配走 `Self::reserve_split_name`（与本文件
+        // 唯一实现）：软件流水的轮转格也走这两个入口，两边共用一份答案才不会互相撞上。
+        let mut used: std::collections::HashSet<String> = Self::reserved_names(func);
+        used.extend(self.map.values().map(|e| e.base.clone()));
         for (base, vs) in self.grouped_by_base() {
             if vs.len() < 2 || vs.iter().all(|(_, l, _)| *l == vs[0].1) {
                 continue; // 只有一个版本，或版本们同一个家 ⇒ 不需要分裂
@@ -186,7 +240,11 @@ impl LocMap {
             // 升序后首个版本沿用原名（它在 `original_locals` 里已有声明），
             // 其余版本拿到带后缀的新局部名 + 自己的类型。
             for (i, (ssa, _, ty)) in vs.iter().enumerate() {
-                let ast = if i == 0 { base.clone() } else { format!("{}_s{}", base, i) };
+                let ast = if i == 0 {
+                    base.clone()
+                } else {
+                    Self::reserve_split_name(&mut used, base.as_str(), i)
+                };
                 out.by_ssa.insert(ssa.clone(), ast.clone());
                 if i > 0 {
                     out.locals.push((ast, base.clone(), ty.clone()));
@@ -594,6 +652,64 @@ mod tests {
                 ("x_s1".to_string(), Some(gp(12))),
             ],
             "分裂必须消除基名层的冲突，而不是默默丢一个"
+        );
+    }
+
+    /// 分裂名的**占名检查**（§11.13 给 5.1.e 点名的两条表达缺口之一）。
+    ///
+    /// 用户自己可以有一个叫 `x_s1` 的局部。以前分裂体无条件拿这个名字，于是
+    /// 「两个不同的对象共用一个名字」—— 后端的名字→家、名字→栈槽两张表都按名字索引，
+    /// 同名就是共用一个家（§7.20 那条判据的反面形状）。本用例同时钉三件事：
+    ///   * 分裂名不得等于任何原始局部；
+    ///   * 分裂名之间也不得互相同名（多个基名同时分裂时）；
+    ///   * 首个版本仍用原名（那是它已有的声明），且新名字只往后扰。
+    #[test]
+    fn split_names_cannot_collide_with_user_locals() {
+        let mut func =
+            crate::ssa::ir::Function::new("f".to_string(), Type::Long, Span::point("t.c", 1, 1));
+        // 用户同时有 `x`/`y`（会被分裂）与 `x_s1`/`x_s2`/`y_s1`（不该被碰）
+        for name in ["x", "y", "x_s1", "x_s2", "y_s1"] {
+            func.original_locals.insert(name.to_string());
+        }
+        let mut m = LocMap::empty();
+        // 两个基名都拿到不同的家（同基名内不同一个家才会分裂）
+        m.bind(&v("x", 1), gp(3));
+        m.bind(&v("x", 2), gp(12));
+        m.bind(&v("x", 3), gp(14));
+        m.bind(&v("y", 1), gp(3));
+        m.bind(&v("y", 2), gp(15));
+        func.value_loc = m;
+
+        let s = func.value_loc.compute_splits(&func);
+        let made: Vec<String> = s.new_locals().into_iter().map(|t| t.0.clone()).collect();
+        // 1) 不得踩到用户的名字
+        for name in &made {
+            assert!(
+                !func.original_locals.contains(name.as_str()),
+                "分裂名 '{name}' 撞上了一个已有局部"
+            );
+        }
+        // 2) 不得自相同名
+        let uniq: std::collections::HashSet<&String> = made.iter().collect();
+        assert_eq!(uniq.len(), made.len(), "分裂名之间不得重名：{made:?}");
+        // 3) 具体形状：x 的第 2/3 版本因 `x_s1`/`x_s2` 已被占而拿到 `x_s3`/`x_s4`；
+        //    y 的第 2 版本拿 `y_s2`（`y_s1` 是用户的名字，从 i=1 起被占 ⇒ 扰到 2）
+        assert_eq!(s.ast_name(&v("x", 1)), "x", "首个版本必须沿用原名");
+        assert_eq!(s.ast_name(&v("x", 2)), "x_s3", "实得：{made:?}");
+        assert_eq!(s.ast_name(&v("x", 3)), "x_s4", "实得：{made:?}");
+        assert_eq!(s.ast_name(&v("y", 2)), "y_s2", "实得：{made:?}");
+        // 反向对照：没被占时就是 `x_s1`（上面的判据不能是「永远往后推一格」）
+        let mut plain =
+            crate::ssa::ir::Function::new("g".to_string(), Type::Long, Span::point("t.c", 1, 1));
+        plain.original_locals.insert("x".to_string());
+        let mut pm = LocMap::empty();
+        pm.bind(&v("x", 1), gp(3));
+        pm.bind(&v("x", 2), gp(12));
+        plain.value_loc = pm;
+        assert_eq!(
+            plain.value_loc.compute_splits(&plain).ast_name(&v("x", 2)),
+            "x_s1",
+            "没名字可占时不得多推一格后缀（那会让已有用例的名字与产物都漂）"
         );
     }
 

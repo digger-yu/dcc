@@ -592,6 +592,22 @@ fn block_has_unsafe_ssa_pattern(b: &Block) -> bool {
             // 这里让整函数退回 AST 路径（与同列的 static/extern/VLA 同一处理口径），
             // 而不是在 IR 里新增一个副作用调用 —— 后者是另一个数量级的改动。
             || v.cleanup_fn.is_some()
+            // **VLA / VM 聚合（带运行时尺寸的对象）整函数退回 AST 路径**。
+            // IR 里没有「运行时尺寸对象」这个表示：`collect_local_decls` 存的是名字
+            // 与类型快照，`rebuild_block` 重建后那个对象在两张表（`var_map` /
+            // `vla_offsets`）里的身份不再是发射期那条判据 —— 实测：
+            //   `int n=c+3; long a[n]; …; a[2]=7; sizeof a/8 + a[2] - 12`
+            //     gcc / dcc -O0 / -O1 = 255，dcc -O2 / -O3 = **252**（`sizeof a` 读回 0，
+            //     元素访问与写各自落进描述符区，自洽但错）；
+            //   `struct { char data[size]; } a; …; probe(1, a)`
+            //     -O2/-O3 **SIGSEGV(139)**（调用侧 `mov -104(%r13),%rcx; mov (%rcx),%rax`
+            //     解引用一个被数据踩掉的描述符槽）。
+            // 与 `vla.c` 那种「写完再读回」的夹具不同，上面两条把 `sizeof`/传参与
+            // 元素访问放在一起，才把「基址错但自洽」照出来。
+            // 真正的修法是让 IR 能表达运行时尺寸对象（尺寸槽、运行时 stride、
+            // 地址身份三件），那是另一个数量级的改动；在此之前正确的口径与
+            // `static`/`cleanup`/嵌套函数同一档：IR 表达不了的就留在 AST 上。
+            || v.ty.has_vla()
         },
         // 嵌套函数：重建后的体里**没有** `Decl::Func`（被前面的降低步骤按帧偏移另存），
         // 于是 -O2 产物里它的定义直接消失。实测最小复现
@@ -622,6 +638,9 @@ fn stmt_has_unsafe_ssa_pattern(s: &Stmt) -> bool {
                 || stmt_has_unsafe_ssa_pattern(body)
         },
         Stmt::Switch { cases, .. } => cases.iter().any(|c| block_has_unsafe_ssa_pattern(&c.body)),
+        // 标号语句的体里也能带声明（`out: struct {int d[n];} b;`）：不递归就与
+        // 上面那条注释里「只看顶层 item 会漏掉语句表达式里的声明」同一病灶。
+        Stmt::Label { stmt, .. } => stmt_has_unsafe_ssa_pattern(stmt),
         // 语句表达式 `({...})` 里的声明也是声明：只看顶层 item 会漏掉它（实测：
         // `({ __attribute__((cleanup(cb))) long c = 4; ... })` 的清理在 -O2 静默消失）。
         Stmt::Expr { e, .. } => expr_has_unsafe_ssa_pattern(e),

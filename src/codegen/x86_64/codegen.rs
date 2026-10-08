@@ -106,6 +106,41 @@ pub struct Codegen {
     /// 晚分配站点的**发射序**计数（P12 Phase 5.1.a 配套，见 `Codegen::next_late_site`）。
     /// 逐函数复位（与 `expr_depth` 同处）。
     pub late_site_seq: u32,
+    /// §11.23 步 2：规划期为「发射期才会冒出来的帧内对象」预扣的槽数上界。
+    /// 由 `reserve_late_var_slots()` 一次写下，逐函数复位。
+    pub late_slot_budget: i64,
+    /// 发射期**实际**新增的槽数（只统计 `frame_planned` 之后的新名字 `register_var`）。
+    /// 它与 `late_slot_budget` 的差就是静态扫描的余量；超出即 `E1133`。
+    pub late_slot_used: i64,
+    /// 晚分配带的**字节游标**（§11.23 步 3）：带顶往下已吃了多少。它取代了
+    /// 「晚分配挤在变量区水位里 + `min_used` 夹逼」那套现场让步，逐函数复位。
+    pub late_var_cursor: i64,
+    /// 本函数的帧规划是否已经走完（`reserve_late_var_slots()` 的最后一件事）。
+    /// 只有在此之后的 `register_var` 新名字才算「晚分配」，才进 `late_slot_used`。
+    pub frame_planned: bool,
+    /// 最近一次「求值到基址」留下的**持有记录**：`Some(号)` 意思是「那个号里现在就是刚
+    /// 求出来的值」（Phase 5.1 前置一·下）。
+    ///
+    /// 为什么它可以被信任：失效点只有一个 —— `Codegen::emit`，即「又发了一条指令出去」。
+    /// 本轮已把函数体内所有绕开 `emit` 的直接追写收进 `emit`（nop 填充、`mov r13,r10`、
+    /// 内联 asm 的 `push_code`），所以「发了新指令但记录仍声称有效」这个形状在结构上不成立。
+    /// 写入点在 `gen_expr_value` 里、发生在它内部所有发射**之后**，顺序不能反。
+    pub eval_holding: Option<crate::location::RegId>,
+    /// **程序点级家覆盖**（Phase 5.1 前置二）：名字 → 「在这一段里它其实住在哪里」。
+    ///
+    /// 声明级的家（`homes`）只能回答「这个变量的家是哪个号」，而前置三需要的恰好是它的
+    /// 反面：在一段代码里（一个 call 序列）那个号**会被毁掉**，值暂时只在内存里。没有
+    /// 这一层，参数装载就会在「已存下、尚未取回」的窗口里读到被自己盖掉的号（形状与
+    /// 成因见 `abi/call.rs` 与 `src/ssa/regalloc.rs::AUTO_EXT_POOL` 的注释）。
+    ///
+    /// 只有一个读入口能看到它：`home_for`。地址类消费点也走同一个入口，所以「先查覆盖
+    /// 再查家表」的优先级在全后端只有一份。
+    pub home_overrides: HashMap<String, crate::location::Location>,
+    /// 延伸池家的保存槽（前置三的存/取两头都要的那个内存位置）。
+    ///
+    /// 在**规划期**建好（满足 H1：家在发射前定完），内容不随发射变化；每个条目就是一个
+    /// 住在 caller-saved 号里的自动绑定变量：它的号、它的槽偏移与它的宽度。
+    pub ext_home_saves: Vec<ExtHomeSave>,
     pub max_expr_depth: u32, // 最大表达式嵌套深度
     pub temp_slots: i32,     // 帧临时槽数量 (用于变量偏移计算)
     /// 已注册固定栈对象占用的 8 字节槽数。
@@ -268,6 +303,10 @@ pub struct Codegen {
     pub comdat_groups: Vec<ComdatGroup>,
     // .debug_info relocations: (offset_in_section, symbol_name)
     pub pending_debug_info_relocs: Vec<(u64, String)>,
+    /// Phase 6.2：逐函数采集的「局部 → 帧内位置」表（函数名 → 条目），只在 `-g` 下填。
+    /// 它存在的理由与 `SymbolFacts` 同类：那是一张**函数级**事实表，而 DWARF 在
+    /// 整个 TU 编译完之后才拼，当时单函数的 `homes`/`var_map` 早已被下一个函数复位。
+    pub debug_var_facts: Vec<(String, Vec<DebugVarLoc>)>,
     // .pushsection 非文本节数据收集
     pub pushsection_stack: Vec<usize>,
     /// .section/.previous 节切换栈 (独立于 pushsection_stack)
@@ -314,6 +353,15 @@ pub struct Codegen {
     /// 用于在 -g 下生成 per-instruction.debug_line 条目，
     /// 使 GDB 能单步进入 asm 块内部每条指令 (类似 GCC.debug_insn 效果)
     pub asm_insn_debug_entries: Vec<(u64, u32, u16)>,
+    /// 普通 C 语句的 DWARF 行号记录：(语句起始 PC, 源码行)。
+    ///
+    /// 为什么单开一张表：上面两张只覆盖内联 asm 块，它们的 PC 区间是「整块」且带
+    /// discriminator 语义（`backend.rs` 拼表时按「同址时语句边界优先」的规则喂进去）。把
+    /// C 语句塞进同一条通道会让那套规则失真。本表填上之前，纯 C 单元的
+    /// `CompileUnit::line_entries` 恒空，`src/debug.rs` 只能退到「每函数一行（声明行）」的
+    /// 兜底表 —— 症状是 gdb 里 `break file.c:5` 报 `No line 5 in file`（语句级断点绑不上）。
+    /// aarch64 / riscv 后端早就在语句发射入口记这一条（`src/codegen/aarch64/emit/block.rs`）。
+    pub stmt_line_entries: Vec<(u64, u32)>,
     // --- AsmEvent structured logging for -S output ---
     pub asm_events: Vec<crate::codegen::asm_event::AsmEvent>,
     /// dcc 编不出、必须透传给 GAS 的内联汇编行 (TU 级降级判据的唯一真源)。
@@ -497,6 +545,15 @@ pub struct ParallelGlobalSnap {
     pub size: usize,
     pub section: u16,
     pub is_tls: bool,
+    /// 声明类型。**必须跟着快照走**：worker 里拿 `Type::Int` 占位就是把「全局变量的
+    /// 符号性/宽度」这个程序级事实丢在了并行路径外——实测 `_Bool g; … = g;` 在串行下发
+    /// `movzbl`、在并行下发 `movsbl`（§11.13 的 N12，与 N1 同一类）。
+    pub ty: Type,
+    /// 已机化好的初始化字节（与 `GlobalVar::init` 同形）。少了它，worker 就无法像串行
+    /// 那样从初值折叠。
+    pub init: Option<Vec<u8>>,
+    /// 该变量是否已经在数据段里有实体。发射点的分派读它，不能拿默认值凑。
+    pub in_data_section: bool,
 }
 
 #[derive(Clone)]
@@ -510,6 +567,12 @@ pub struct ParallelEmitCtx {
     pub source_name: String,
     pub line_map: Vec<LineSpan>,
     pub globals: HashMap<String, ParallelGlobalSnap>,
+    /// 静态局部变量的程序级地图（名字 mangle / 需运行时初始化集合）。
+    /// 不下行时 worker 里 `is_static` 的局部走不了「实体在 data/bss」那条路，同一个
+    /// 函数的字节比串行一大截（§11.13 的 N12：实测 `static_local_arrays.c` 串行 1458B /
+    /// 并行 1610B）。主 cg 在 `pre_register_static_locals()` 回填之后才取本快照，
+    /// 所以 worker 拿到的就是发射点实际读到的那一份。
+    pub static_local_map: crate::static_locals::StaticLocalMap,
     /// 符号 → 段地址空间。并行发射下**必须**跟着快照走：否则 worker 里的
     /// `emit_global_load/store/addr` 查不到段，同一个源文件在“并行/不并行”两条路上
     /// 产出不同的字节 —— 那是比不发前缀更难查的错。
@@ -523,7 +586,8 @@ pub struct ParallelEmitCtx {
     pub nested_chain_offsets: HashMap<String, i64>,
     pub nested_func_rename_counter: u32,
     pub func_param_types: HashMap<String, Vec<Type>>,
-    pub defined_funcs: HashSet<String>,
+    /// 程序级符号事实的下行快照（与 `FuncEmitChunk::facts` 同一张字段表）。
+    pub facts: SymbolFacts,
     pub error_attr_fns: HashSet<String>,
     pub global_homes: HashMap<String, (crate::location::Location, Type)>,
     pub rodata: Vec<u8>,
@@ -537,6 +601,40 @@ pub struct ParallelEmitCtx {
     pub label_base: u32,
     /// 本 worker 可消耗的标号数; 高水位 = `label_base + label_span`。
     pub label_span: u32,
+}
+
+/// 一个住在 caller-saved 号里的自动绑定变量，它在帧内的**保存槽**（前置三）。
+///
+/// 为什么存的是偏移而不是 `Spill(slot)`：发射侧存/取用的就是 `store_stack`/`load_stack`
+/// 这两个按帧内偏移工作的函数（它们也是 `Location::Stack` 走的那两个），拿偏移就不必
+/// 再造一个「谁会把槽序号翻译成偏移」的第二知道。翻译仍只有 `LayoutMap::spill_off` 一处。
+#[derive(Debug, Clone)]
+pub struct ExtHomeSave {
+    /// 变量名（覆盖表与存/取都用它作键）
+    pub name: String,
+    /// 它的家（一定在 `AUTO_EXT_POOL` 里，否则不会进本表）
+    pub reg: u8,
+    /// 帧内保存槽偏移
+    pub slot_off: i64,
+    /// 存取宽度（按该变量的类型，不是按 8 字节默认）
+    pub size: usize,
+}
+
+/// 一个局部变量在**本帧**里的位置（Phase 6.2 交给 DWARF 的唯一读数）。
+///
+/// 为什么需要它与它的采集点：以前 `-g` 下一个变量 DIE 都不发（`local_vars` 恒空），
+/// 而 `src/ssa/regalloc.rs` 因此必须在 `-g` 下禁止寄存器家（DWARF 只能发栈槽位置，
+/// 绑上去就是让调试器读一个从未写过的槽）。取消那条限制的前提就是本结构：
+/// 「每个局部住在哪」由发射器在函数体生成完之后交付（那时 `homes` 与 `var_map`
+/// 都是最终值），而不让 debug 侧自己再推一遍帧坐标 —— 那是第六个现场推算偏移的人。
+#[derive(Debug, Clone)]
+pub struct DebugVarLoc {
+    pub name: String,
+    /// 与 DWARF 的偏移基准无关：这里就是 `%r13 + off`（`Stack`）、物理寄存器（`Reg`）
+    /// 或溢出槽序号（`Spill`）；换算（CFA 关系、DWARF 寄存器号）只发生在 `debug.rs` 那一侧。
+    pub loc: crate::location::Location,
+    pub ty: crate::ast::Type,
+    pub decl_line: u32,
 }
 
 #[derive(Clone)]
@@ -570,10 +668,34 @@ pub struct FuncEmitChunk {
     /// worker 内归档, 偏移相对 chunk 代码起点, 合并时加上落位基址)。
     pub eh_funcs: Vec<crate::codegen::x86_64::eh_tables::EhFuncInfo>,
     pub disasm_calls: HashMap<u64, String>,
+    /// Phase 6.2：本 chunk 函数的「局部 → 位置」表（只在 `-g` 下非空）。不随 chunk
+    /// 带回，并行 `-g` 构建里由 worker 发的那些函数就一个变量 DIE 都没有 ——
+    /// 与 N1/N12 同一族（函数级事实只存在于主 Codegen），所以必须带。
+    pub debug_var_facts: Vec<(String, Vec<DebugVarLoc>)>,
+    /// Phase 6.2：本 chunk 采集的**行号条目**（只在 `-g` 下非空），PC 相对 chunk 代码起点。
+    ///
+    /// 三张表都必须带回：`-O2` 起默认走并行发射（`cli.rs` 的 `opt >= 2`），而
+    /// `.debug_line` 只由主 Codegen 的这三张表拼装（`backend.rs::build_debug_sections`）。
+    /// 不带回就是「`-g -O0` 有语句行、`-g -O2` 整张表退化成每函数一行」——`break file.c:N`
+    /// 在被 Phase 6.2 放开寄存器家的那一档（`-g -O2`）里全部绑不上，与 N1/N12/debug_var_facts
+    /// 同一族（函数级事实只存在于 worker，没有回程）。
+    pub stmt_line_entries: Vec<(u64, u32)>,
+    pub asm_line_entries: Vec<(u64, u64, u32)>,
+    pub asm_insn_debug_entries: Vec<(u64, u32, u16)>,
     /// rodata 增量：chunk 编译期间新增的 rodata 数据
     pub new_rodata: Vec<u8>,
     /// chunk 开始时的 rodata 大小 (用于计算增量)
     pub rodata_base: u64,
+    /// 本 chunk **新登记**的内部化条目 `(内容键, chunk 局部 rodata 偏移)`，按偏移升序。
+    ///
+    /// 这是 N10 的唯一修复抓手。串行发射下「谁第一次写到这个键，谁就定字节位置」，
+    /// 而 worker 只看见自己的 `string_pool` 快照 ⇒ 跨 worker 重复的字符串各自落一份
+    /// 字节、并且主 Codegen 的 `string_pool` 根本不知道有这回事（于是 `compile_rel`
+    /// 末尾那趟「把 `string_refs` 里的键补进 rodata」又加第三份）。回传这张表，
+    /// 合并阶段就能按 **源码序重放**「字节落位 + 按内容键去重」这件事本身，
+    /// 并把引用里那些按偏移的读数从 chunk 局部坐标映射到最终坐标（N10，§11.33）。
+    /// 必须按偏移升序：`HashMap` 的迭代序随运行变化，直接遍历它会让产物依赖哈希随机度。
+    pub pool_add: Vec<(Vec<u8>, u64)>,
     /// 本 chunk 的 `.L` 标号区间基址 / 容量 / 实际用量。
     ///
     /// `label_used > label_span` 意味着本函数越进了下一个 slot 的命名空间,
@@ -581,6 +703,48 @@ pub struct FuncEmitChunk {
     pub label_base: u32,
     pub label_span: u32,
     pub label_used: u32,
+    /// worker 侧新增的程序级符号事实（上行回传）。
+    ///
+    /// 不回传 ⇒ 主 Codegen 的 `defined_funcs` 里没有嵌套函数，ELF 侧把它当外部
+    /// 符号发成 UND，链接期 `undefined reference to 'inner_parent.0'`；`func_sizes`
+    /// 缺失则符号 size 退回 `compute_func_size_fallback`（§11.13 的 N1）。
+    pub facts: SymbolFacts,
+}
+
+/// 跨函数共享、且在 `compile_func` 期间还会**新增**的程序级符号事实。
+///
+/// 为什么收成一张表而不是散字段：并行发射的 N1 病根就是「worker 新增的事实没有
+/// 回程」，而散字段意味着下行快照、worker 重建、chunk 结构、合并四处各自记住一份
+/// 「哪几个字段算程序级」。下行与上行共用这一个类型，将来新增一条事实只有一处可漏。
+#[derive(Clone, Default)]
+pub struct SymbolFacts {
+    /// 本 TU 中有函数体的函数名（含嵌套函数的唯一名）
+    pub defined_funcs: HashSet<String>,
+    /// 函数名 → 代码大小（嵌套函数的 size 只有编译它的那个 worker 知道）
+    pub func_sizes: HashMap<String, u64>,
+}
+
+impl Codegen {
+    /// 取当前程序级符号事实的快照（并行发射下行的那一份）。
+    pub(in crate::codegen::x86_64) fn capture_symbol_facts(&self) -> SymbolFacts {
+        SymbolFacts {
+            defined_funcs: self.defined_funcs.clone(),
+            func_sizes: self.func_sizes.clone(),
+        }
+    }
+
+    /// 合并 worker 带回的程序级符号事实：**只插缺的**。
+    ///
+    /// 这个语义成立的前提是「所有 worker 都从同一份快照出发，且每个函数只会被
+    /// 一个 worker 编译」⇒ 两侧同名键的值必然相同，谁先落表都一样。
+    pub(in crate::codegen::x86_64) fn merge_symbol_facts(&mut self, facts: &SymbolFacts) {
+        for name in &facts.defined_funcs {
+            self.defined_funcs.insert(name.clone());
+        }
+        for (name, size) in &facts.func_sizes {
+            self.func_sizes.entry(name.clone()).or_insert(*size);
+        }
+    }
 }
 
 impl Codegen {
@@ -613,6 +777,13 @@ impl Codegen {
             frame_layout: crate::codegen::x86_64::abi::layout::LayoutMap::unresolved(),
             expr_depth: 0,
             late_site_seq: 0,
+            late_slot_budget: 0,
+            late_slot_used: 0,
+            late_var_cursor: 0,
+            frame_planned: false,
+            eval_holding: None,
+            home_overrides: HashMap::new(),
+            ext_home_saves: Vec::new(),
             max_expr_depth: 0,
             temp_slots: 0,
             var_map_total_slots: 0,
@@ -700,6 +871,7 @@ impl Codegen {
             extra_rela_sections: vec![],
             comdat_groups: vec![],
             pending_debug_info_relocs: vec![],
+            debug_var_facts: Vec::new(),
             pushsection_stack: vec![],
             section_stack: vec![],
             section_active: false,
@@ -726,6 +898,7 @@ impl Codegen {
             func_asm_layout: HashMap::new(),
             asm_line_entries: Vec::new(),
             asm_insn_debug_entries: Vec::new(),
+            stmt_line_entries: Vec::new(),
             // --- AsmEvent structured logging ---
             asm_events: Vec::new(),
             asm_passthrough: Vec::new(),
@@ -865,12 +1038,14 @@ impl Codegen {
                     Self::collect_nested_funcs(&body.items, &mut nested);
                     for nf in nested {
                         Self::register_func_sig(&nf, &mut self.func_param_types);
-                        self.nested_funcs
-                            .insert(nf.name.name.clone(), nf.upvars.clone());
                         if nf.is_old_style {
                             self.old_style_funcs.insert(nf.name.name.clone());
                         }
                     }
+                    // 嵌套函数的唯一符号名在此一次性预分配（以**唯一名**进
+                    // `nested_funcs`），发射期只查不分配：并行下 worker 改不了全局
+                    // 计数，也不把新登记的事实带回来（N1）。
+                    self.prescan_nested_names(&body.items, &f.name.name);
                 }
             }
         }
@@ -1002,6 +1177,9 @@ impl Codegen {
         self.entry = 0x400000 + 64 + 56;
         // 收集本 TU 中有函数体的函数名
         self.defined_funcs.clear();
+        // 逐 TU 采集的调试信息表也逐 TU 清空：不准则上一次的局部会被当成这一次的名字
+        // （同一进程里跑两次编译、或串行/串行对比时都会露）。
+        self.debug_var_facts.clear();
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
                 if f.body.is_some() {
@@ -1231,6 +1409,9 @@ impl Codegen {
     fn compile_rel(&mut self, prog: &Program) {
         // 收集本 TU 中有函数体的函数名 (用于 emit_func_addr 区分内部/外部)
         self.defined_funcs.clear();
+        // 逐 TU 采集的调试信息表也逐 TU 清空：不准则上一次的局部会被当成这一次的名字
+        // （同一进程里跑两次编译、或串行/串行对比时都会露）。
+        self.debug_var_facts.clear();
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
                 if f.body.is_some() {
@@ -1249,6 +1430,9 @@ impl Codegen {
                     // （实测产物里名字出现 0 次）。
                     let home = self.resolve_asm_reg(v);
                     if let Some(home) = home {
+                        // 文件作用域是唯一需要这句话的地方：与局部绑定不同，全局对象看起来
+                        // 「应该住在某处」，而绑到一个会被调用毁掉的号上时这个期望正是错的。
+                        self.diag_call_clobbered_global_binding(v, &home);
                         self.global_homes.insert(v.name.name.clone(), (home, v.ty.clone()));
                         continue;
                     }
@@ -1997,11 +2181,39 @@ impl Codegen {
             }
         }
 
-        // 处理字符串引用 → 确保所有字符串在 rodata 中
+        // 字符串引用 → rodata 定址的前置条件：每个被引用过的内容键都已在池里。
+        //
+        // N10: 这里原本是一趟「兜底补拷贝」—— 把 `string_refs` 里还没进池的键再
+        // `extend` 进 `rodata`。它把并行发射的「漏登记」掩盖成「产物看起来合法但
+        // `.rodata` 多存一份」：旧 `merge_func_chunk` 从不把 chunk 的新键写回主
+        // `string_pool`，于是每个被引用过的字符串都会在这里再落一份字节（实测
+        // `tests/fixtures/c/main.c` 的 `.rodata` 28B → 56B，符号地址随之改变）。
+        // 现在合并期按内容键重放已经保证「每个内部化条目在池里恰好一份字节、
+        // 引用必然命中」，命中不了就是后端内部不变量破坏：只能报 E1105，绝不
+        // 能再静默补一份（补一份就是把本缺陷写回产物）。
+        // 保留补拷贝本身只为诊断可继续（否则会走到 `string_pool[&data]` 直接
+        // panic），但报了 E1105 就是硬错，产物不会被当作合法输出交付。
         let string_data_list: Vec<Vec<u8>> =
             self.string_refs.iter().map(|(_, d)| d.clone()).collect();
         for data in &string_data_list {
             if !self.string_pool.contains_key(data) {
+                self.report_internal_bug(
+                    "E1105",
+                    format!(
+                        "string reference at .text+{:#x} has no interned rodata entry for {:?} \
+                         (pool has {} entries, .rodata is {} bytes)",
+                        self.string_refs
+                            .iter()
+                            .find(|(_, d)| *d == *data)
+                            .map(|(p, _)| *p)
+                            .unwrap_or(0),
+                        data,
+                        self.string_pool.len(),
+                        self.rodata.len()
+                    ),
+                    "rodata 内部化条目的登记与引用必须同时到达主 Codegen; \
+                     不要用 DCC_NO_PARALLEL / -j1 绕过, 请修 merge_chunk_rodata",
+                );
                 let off = self.rodata.len() as u64;
                 self.rodata.extend_from_slice(data);
                 self.string_pool.insert(data.clone(), off);
@@ -2271,6 +2483,8 @@ mod tests {
         cg.frame_layout = LayoutMap::resolve(&FramePlan {
             temp_slots: 2,
             var_bytes: 512,
+            // 晚分配带与本用例无关（测的是 spill 翻译点），传 0 保持原有坐标
+            late_slots: 0,
             sret_need: 64,
             va_slots: 0,
             static_chain_slot: 0,
@@ -2307,8 +2521,11 @@ mod tests {
             "两侧都是空字节流 ⇒ 上面两条等式是空跑的相等"
         );
 
-        // 没家时走 var_map（懒注册）⇒ 坐标与带里那个不同：排除「靠回退凑绿」
+        // 没家时走 var_map：坐标与带里那个不同（排除「靠回退凑绿」）。这里**显式**
+        // `register_var` 而不是拿 `var_offset` 的兜底：§11.23 步 1 之后那条兜底已是
+        // `E1134` 后端不变量破坏，本用例不得依赖一个错路才能成立。
         cg.homes.remove("v");
+        cg.register_var("v", &crate::ast::Type::Long);
         assert_ne!(cg.stack_home_off("v"), want, "本用例必须真的在比较两个不同的坐标");
         // 而带外的家（Imm）仍得走点名报错，不得静默当成帧内坐标
         cg.homes.insert("w".to_string(), (Location::Imm(7), Type::Long));
@@ -2318,5 +2535,113 @@ mod tests {
             "Imm 家必须仍报 E1129（没接线的家要可见地失败），实得 {:?}",
             err_codes(&cg)
         );
+    }
+
+    /// §11.23 步 3：**发射期晚分配只能住在自己的带里**。
+    ///
+    /// 本用例把布局解算、预算、账面、到位判据四件事拉在一起对拍，因为它们只要有一件
+    /// 与实际不一致，产物就会静默重叠（旧写法靠 `min_used` 夹逼避免那一幕，但夹逼本身
+    /// 就是在已发射出去的 `sub rsp` 之下现场推坐标）：
+    /// * 两个对象从带顶往下排，第三个就出带 ⇒ `E1133`；
+    /// * 带里用掉的字节不得再压变量区水位（`var_map_total_slots` 不动），也不得
+    ///   压低 `sret_region_base` 锚点（解算完它就不再动）；
+    /// * 预算不足但位置还在帧内 ⇒ 仍要报 `E1133`（账面判据与到位判据两条独立）。
+    #[test]
+    fn late_allocation_lands_in_the_band_and_rejects_overrun() {
+        use crate::codegen::x86_64::abi::layout::{
+            FramePlan, LayoutMap, TRAMP_RESERVE, VEC_RESERVE,
+        };
+        let mut cg = x86();
+        cg.frame_layout = LayoutMap::resolve(&FramePlan {
+            temp_slots: 2,
+            var_bytes: 128,
+            late_slots: 2,
+            sret_need: 64,
+            va_slots: 0,
+            static_chain_slot: 0,
+            bf_rmw_reserve: 0,
+            vec_reserve: VEC_RESERVE,
+            tramp_reserve: TRAMP_RESERVE,
+            stack_reserve: 48,
+            spill_slots: 0,
+        });
+        // 本用例需要非零带：带顶/带底不得重合，否则「在带内」是空条件
+        assert_eq!(cg.frame_layout.late_band_bytes, 16, "需要一个两槽的带");
+        // 预算与「规划已结束」由 `reserve_late_var_slots()` 写下，这里给同形的值
+        cg.late_slot_budget = 2;
+        cg.frame_planned = true;
+        let sret_anchor_before = cg.sret_region_base;
+        let var_slots_before = cg.var_map_total_slots;
+
+        let a = cg.register_var("__compound_lit_1", &crate::ast::Type::Long);
+        let b = cg.register_var("__compound_lit_2", &crate::ast::Type::Long);
+        assert_eq!(a, cg.frame_layout.late_band_top - 8, "第一槽从带顶开始");
+        assert_eq!(b, cg.frame_layout.late_band_top - 16, "第二槽接着往下");
+        assert_eq!(b, cg.frame_layout.late_band_bottom(), "第二槽的最低字节恰在带底");
+        assert_eq!(cg.late_slot_used, 2, "账面必须逐笔累加");
+        assert!(cg.diagnostics.is_empty(), "带内分配不得报错: {:?}", err_codes(&cg));
+        // 晚分配不得再动变量区水位与 sret 锚点（那两段现场推坐标的代码就是被删掉的）
+        assert_eq!(cg.var_map_total_slots, var_slots_before, "带里的对象不占变量区");
+        assert_eq!(cg.sret_region_base, sret_anchor_before, "锚点不再被晚分配压低");
+
+        // 第三个：带里没地方了 ⇒ 账面与到位两条判据都得响
+        let c = cg.register_var("__compound_lit_3", &crate::ast::Type::Long);
+        assert_eq!(c, cg.frame_layout.late_band_bottom() - 8);
+        assert!(
+            err_codes(&cg).contains(&"E1133"),
+            "超出预算的晚分配必须报 E1133，实得 {:?}",
+            err_codes(&cg)
+        );
+        assert_eq!(cg.late_slot_used, 3, "报错后仍分配一个槽，只为后续流程不崩");
+    }
+
+    /// 「刚求出来的值在哪」必须是一条**可作废的记录**，而不是一个永远声称成立的常量。
+    /// 本用例同时钉三件事：两种写法字节全等（不改产物）、记得到、任何新指令出去就作废。
+    #[test]
+    fn eval_holding_is_recorded_and_invalidated_by_the_single_sink() {
+        use crate::location::{RegBank as RBank, RegId};
+        let e = Expr::Int {
+            v: 7,
+            span: crate::diagnostics::Span::point("t.c", 1, 1),
+            ty: Type::Int,
+        };
+        let mut a = x86();
+        let mut b = x86();
+        let held = a.gen_expr_value(&e);
+        b.gen_expr(&e, Codegen::EVAL_BASE);
+        assert_eq!(a.code, b.code, "持有记录不是只读事实：它改了发射字节");
+        assert_eq!(
+            held,
+            RegId { bank: RBank::Gp, n: Codegen::EVAL_BASE },
+            "落点必须由求值基址给出，而不是用例里手写一个 0"
+        );
+        assert_eq!(a.eval_held(), Some(held), "刚求完就应该查得到");
+        // 核心语义：失效点就是唯一的追写出口。
+        a.emit(&[0x90]);
+        assert_eq!(a.eval_held(), None, "发了新指令后记录还声称有效 —— 那是陈旧值");
+    }
+
+    /// 持有记录不得活过一个函数：不准则新函数开头的 `eval_held()` 会拿到上一个函数留下的号。
+    #[test]
+    fn eval_holding_is_reset_per_function() {
+        use crate::location::{RegBank as RBank, RegId};
+        let (prog, _d) = crate::parser::parse(b"int q(void) { return 1; }", "t.c");
+        let (m, _w) = crate::ir::lower(prog).unwrap();
+        let src = m.source();
+        let f = src
+            .decls
+            .iter()
+            .find_map(|d| match d {
+                crate::ast::Decl::Func(f) if f.name.name == "q" => Some(f.clone()),
+                _ => None,
+            })
+            .expect("源里没有带体的 q");
+        let mut cg = x86();
+        cg.eval_holding = Some(RegId {
+            bank: RBank::Gp,
+            n: 3,
+        });
+        cg.compile_func(&f, src);
+        assert_eq!(cg.eval_holding, None, "compile_func 必须复位持有记录");
     }
 }

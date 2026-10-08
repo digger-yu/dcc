@@ -407,6 +407,19 @@ pub fn compute_index_offset(idx: &Expr, elem_ty: &Type) -> ByteOffset {
 /// 根据存储信息确定基址 (Layer 1 -> Layer 2 的桥梁)。
 fn address_from_storage(storage: StorageInfo, ty: &Type) -> AddressDescriptor {
     let base = match (&storage.class, ty) {
+        // VLA / VM 聚合: 帧里的那个槽是**元数据槽**，它的内容才是动态数据区
+        // 基址（`gen_vla_alloc` 发 `mov %rsp,[off]`）。它与下面「槽位即对象
+        // 地址」的普通栈上聚合形状相反：这里走 StackFrame 会 `lea` 出描述符本身，
+        // 于是 a[i] 的读写全部落回固定帧区，先踩掉自己的 stride/size 槽。
+        // 后端侧同类判断见 mem/access.rs::emit_ident_base_addr 与 lvalue.rs：
+        // 判据取两份的并 —— `obj_type` 是解析器给出的身份，`ty.has_vla()` 直接
+        // 描述类型（它能兼顾 `int a[2][n]` 这种外层常量、内层运行时的形状，
+        // `storage_type_from_ast` 对它们只报 Array）。
+        (StorageClass::Stack, _) if matches!(storage.obj_type, StorageType::Vla { .. }) || ty.has_vla() => {
+            AddressBase::StackSlotLoad {
+                offset: storage.stack_offset.unwrap_or(0),
+            }
+        },
         // 栈上数组/向量/结构体/联合体: 槽位即对象地址, 取地址 (LEA FP+offset)。
         // 聚合是 lvalue, 标识符的值约定为其栈槽地址 (见 x86_64 gen_lvalue_addr
         // 的 Ident 分支)。若误走 StackSlotLoad 会把槽内数据当指针解引用

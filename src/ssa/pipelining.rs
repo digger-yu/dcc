@@ -18,15 +18,23 @@
 //!      `T(p,k) = stage[p] + k·II` **逐元素相等**，且每个 `(节点, 迭代)` 恰好出现一次。
 //!      上一版实现里它当场抓出两个方向性错误（kernel 迭代号没随轮次推进、跳轮引用
 //!      偏移符号写反导致所有真实循环被误拒），若无它则会以错值形式进入产物。
-//!    * `emitted_reads_match` 沿**实际发射序**模拟「同基名共享一个槽」的语义：重建
-//!      会把 `e.4`/`e.5`/`e.14` 塌缩成同一个变量，于是「上一轮的值能不能拿到」取决于
-//!      行内先后 —— 那是 T 序模型里不存在的**反依赖**，见「发射序」一节。
+//!    * `emitted_reads_match` 沿**实际发射序**模拟存储语义：默认按「同基名共享一个槽」
+//!      读（重建会把 `e.4`/`e.5`/`e.14` 塌缩成同一个变量，于是「上一轮的值能不能拿到」
+//!      取决于行内先后 —— 那是 T 序模型里不存在的**反依赖**，见「发射序」一节）；
+//!      而当某个跳轮读有自己的**轮转格**（`InstancePlan::cells`）时，它读的是那个格子
+//!      而不是生产者的槽，行内反依赖约束随之消失。
 //!
 //! 接入状态：已在 `-O2`/`-O3` **默认接入**（`crate::ssa::passes::run_with_opts` 开头，必须在其它
-//! 改写循环的 pass 之前跑）；`DCC_SSA_OFF=pipe` 可关，`DCC_PIPE_DUMP=1` 看计划与落地后 IR。
+//! 改写循环的 pass 之前跑）；`DCC_SSA_OFF=pipe` 关整条流水，`DCC_SSA_OFF=rot` 只关真轮转
+//! （逐字退回「同基名只能有一个槽」的旧保守判据，反向对照靠它）；`DCC_PIPE_DUMP=1`
+//! 看计划、拒因与格子表（`rot_cells=`）。
 //!
-//! 未做：真轮转寄存器（槽位复制）。行内反依赖排不出合法序的循环会被**拒收**而不是
-//! 错跑，代价是丢掉那部分收益。
+//! 已完成（Phase 6.3）：**真轮转寄存器**。旧版在 `benefit_verdict` 里拿 `depth > 1` 整条
+//! 拒收「同一个基名要同时保留两份值」的循环；现在每个 (跳轮生产者, lag) 由
+//! `crate::ssa::location::LocMap::reserve_split_name`（与版本分裂同一个占名分配器）分一个
+//! 独立基名，它 own 一个 AST 局部、因而 own 一个自己的家，kernel 行尾有一条 lag 从大到小
+//! 的拷贝链。代价上限是 `MAX_ROT_DEPTH`/`MAX_ROT_CELLS`；超上限、类型不可拷贝、或发射序
+//! 自检仍对不上时继续**拒收**而不是错跑。
 //!
 //! 识别层只认真实 IR 的形状，不猜：`for` 的头是带 phi 的 `for.body`、latch 是条件回边
 //! 所在的 `for.step`、`i++` 被拆成 `_tpost=i+0; _tupd=_tpost+1; i_2=_tupd+0` 的拷贝链；
@@ -1416,6 +1424,27 @@ pub struct InstancePlan {
     pub prologue: Vec<(usize, usize)>,
     /// 轮结束后用来排空的实例（节点, 迭代）。
     pub epilogue: Vec<(usize, usize)>,
+    /// **真轮转格**（P12-B 的「版本粒度的家」在流水侧的消费）：空表就是旧的
+    /// 基名塌缩模型（一级轮转 + 行内反依赖约束）；非空时这些跳轮读不再读生产者
+    /// 自己的格子，而是读 `home` 那个**独立局部**（自己的家：一个寄存器或帧内带
+    /// 里的一个槽）。名字由 `crate::ssa::location::LocMap` 的共享占名分配器给出，
+    /// 所以与版本分裂不会撞上。
+    pub cells: Vec<RotCell>,
+}
+
+/// 一个轮转格：生产者节点 `q` 往回 `lag` 轮（`lag ≥ 1`）的那份值住在哪个基名里。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RotCell {
+    /// 生产者节点号。
+    pub q: usize,
+    /// 跳几轮（`back_rounds` 的结果）。
+    pub lag: i64,
+    /// 该格的基名（形如 `a_s1`）：它 own 一个 AST 局部，因此 own 一个家。
+    pub home: String,
+    /// 播种要读的那个**携带 phi 名**（仅当该格的初值是「进循环前的那份值」时需要）。
+    /// `Some` 意味着两个不同的携带 phi 共享同一格就是两个可能不同的初值 ⇒ 必须拒；
+    /// `None` 意味着初值就是某个已物化的实例，谁读都同一份 ⇒ 多个名字共格合法。
+    pub seed: Option<String>,
 }
 
 impl InstancePlan {
@@ -1590,7 +1619,7 @@ pub fn instance_plan(stage: &[usize], ii: usize, trip: usize) -> Option<Instance
     let tkey = |x: &(usize, usize)| (stage[x.0] + x.1 * ii, pos[x.0], x.0);
     prologue.sort_by_key(tkey);
     epilogue.sort_by_key(tkey);
-    let plan = InstancePlan { ii, depth, shift, kernel, prologue, epilogue };
+    let plan = InstancePlan { ii, depth, shift, kernel, prologue, epilogue, cells: Vec::new() };
     // 覆盖完整性与序恒等全交给 verify：它不通过就不返回计划，而不是返回一个
     // 「看起来对」的切分。
     plan.verify(stage).then_some(plan)
@@ -1712,6 +1741,43 @@ fn benefit_verdict(depth: usize, ii: usize, trip: usize) -> Result<(), &'static 
     Ok(())
 }
 
+/// 真轮转的上限：**轮转级数**（最多同时保留几份旧值）与**格子总数**（每轮行尾要
+/// 发多少条拷贝）。这两条不是「不敢做」，而是代价判据：级数 N 时 prologue/epilogue
+/// 各自多 N 轮、每轮多 O(格子数) 条拷贝，而收益仍是同一个 II。上限外的循环
+/// 宁可继续不收（与旧行为的「一律拒」相比，这里只拒代价不划算的那部分）。
+pub const MAX_ROT_DEPTH: usize = 8;
+/// 每轮行尾的拷贝链上限（跳迭代读的对数）。
+pub const MAX_ROT_CELLS: usize = 16;
+
+/// 轮转路径的收益判据：前两条与塌缩模型完全一致（这样「depth=0 / trip 太短」的拒因
+/// 文案在两模型下相同），只把 `depth > 1` 换成上限判据。
+pub fn benefit_verdict_rot(depth: usize, ii: usize, trip: usize, cells: usize) -> Result<(), &'static str> {
+    if depth == 0 {
+        return Err("无跳迭代重叠 (depth=0)：流水只是搬动指令");
+    }
+    if trip < 2 * ii {
+        return Err("trip 太短：prologue/epilogue 开销盖过收益");
+    }
+    if depth > MAX_ROT_DEPTH {
+        return Err("轮转级数超上限：prologue/epilogue 代价盖过收益");
+    }
+    if cells > MAX_ROT_CELLS {
+        return Err("轮转格数超上限：每轮行尾的拷贝链太长");
+    }
+    Ok(())
+}
+
+/// 轮转格的值类型是否能用一条 `Cast`（同型转换 = 原样拷贝）拿到自己的格子。
+/// 复数/聚合/数组/向量/_Atomic 不行：它们的重建形状不是「一个标量局部」，
+/// 给它们造格子就是拿未验证的形状去换收益（宁可不接受该循环）。
+fn rot_cell_ty_supported(ty: &crate::ast::Type) -> bool {
+    use crate::ast::Type as T;
+    !matches!(
+        ty,
+        T::Complex(_) | T::Imaginary(_) | T::Array(..) | T::Struct(..) | T::Union(..) | T::Vector(..) | T::Atomic(_) | T::Func(..) | T::Void
+    )
+}
+
 // ========================================= 发射序：基名塌缩的反依赖与判定
 //
 // SSA→AST 重建把 `e.4` / `e.5` / `e.14` 全都还原成同一个变量 `e`（同一个栈槽），
@@ -1731,17 +1797,38 @@ fn benefit_verdict(depth: usize, ii: usize, trip: usize) -> Result<(), &'static 
 // 后者是发射层的最终闸门：漏掉任何一条边，它以「读到的不是预期实例」的形式炸出来，
 // 而不是以错值进产物。前者只是让后者能通过的重排，不参与正确性论证。
 
-/// 消费者（轮偏移 `shift_p`）读生产者 q 的输出要往回几轮。唯一真源：行内约束与
-/// 落地共用它，两处各写一套正是上一版「测试绿而实际错」的根源。判定指令不占节点号，
-/// 它的 `shift_p` 就是 `COND_SHIFT`。
+/// 消费者（轮偏移 `shift_p`）读生产者 q 的输出要往回几轮。唯一真源：行内约束、
+/// 发射序模拟与落地三处共用它，两处各写一套正是上一版「测试绿而实际错」的根源。
+/// 判定指令不占节点号，它的 `shift_p` 就是 `cond_shift`。
 fn back_rounds(shift_p: usize, shift_q: usize, carried: bool) -> i64 {
     shift_q as i64 - shift_p as i64 + if carried { 1 } else { 0 }
 }
 
-/// 判定指令在发射序里的轮偏移：它在 head 块、body 之前，等价于一个 shift=0 的节点。
-const COND_SHIFT: usize = 0;
+/// 判定指令在发射序里的轮偏移：它在 khead 块、kernel 行**之前**执行。
+///
+/// 为什么是 `depth - 1` 而不是常量 0（旧代码写死 0，而 `depth ≤ 1` 时两者相同，
+/// 所以塌缩模型从来没暴露过）。设 kernel 第 r 行的判定读到的是原程序「第 k(r) 轮
+/// 循环尾的那次判定」。原判定在第 k 轮尾为真当且仅当还有一轮要跑，所以：
+///   * kernel 必须恰好跑 `rounds = trip - depth` 行（`prologue + rows + epilogue`
+///     的实例覆盖已由 `verify` 钉死：每节点恰 `trip` 次）；
+///   * 于是「判定为真」必须等价于 `r ≤ rounds - 1`；
+///   * 而原判定读的是第 k 轮产的归纳变量值（本形状里 `i_new = k + 1`，与 `trip` 比），
+///     它为真当且仅当 `k ≤ trip - 2`。
+/// 两式对齐 ⇒ `k(r) = r + depth - 1`，即把判定看成轮偏移为 `depth - 1` 的节点。
+/// 实测：写回 0 时 `rb`（depth=2、trip=32、rounds=30）会多跑一整行（第 30 行仍为真），
+/// 而那一行的累加器实例在 epilogue 里又跑一遗 ⇒ 375 变 391（恰好多一个 `d` 值 16）。
+fn cond_shift(depth: usize) -> usize {
+    depth.saturating_sub(1)
+}
 
 /// 行内约束 `(u, v)`：u 必须排在 v 之前。
+///
+/// 两类约束，第二类只在**没有轮转格**时存在：
+///   * 本轮前向（`back == 0`）：这是图上的真数据依赖（距离 0），生产者必须先发射；
+///   * 跳轮读（`back ≥ 1`）：基名塌缩模型下它读的是同一个槽，所以消费者必须排在
+///     生产者本轮写**之前**（WAR）；一旦该 (生产者, lag) 有自己的格子，这次读就不再
+///     碰生产者的槽 ⇒ 约束消失。这就是「同基名无法同时保留两份 ⇒ 保守拒收」被
+///     解除的那一处：行内约束不再成环，平局也就不会被强行重排。
 fn row_constraints(lp: &PipelinedLoop, plan: &InstancePlan, row: &[usize]) -> Vec<(usize, usize)> {
     let mut def_of: HashMap<String, usize> = HashMap::new();
     for (i, inst) in lp.nodes.iter().enumerate() {
@@ -1761,17 +1848,106 @@ fn row_constraints(lp: &PipelinedLoop, plan: &InstancePlan, row: &[usize]) -> Ve
             } else {
                 continue;
             };
-            match back_rounds(shift[p], shift[q], carried) {
+            let back = back_rounds(shift[p], shift[q], carried);
+            if back == 0 {
                 // 本轮前向：生产者必须先发射。
-                0 => out.push((q, p)),
-                // 轮转（要上一轮的值）：消费者必须在生产者本轮写之前读。累加器
-                // 自读自己（p==q）由「上一轮已写入槽」天然满足，不构成行内约束。
-                1 if p != q => out.push((p, q)),
-                _ => {},
+                out.push((q, p));
+            } else if back >= 1 && p != q && !has_cell(&plan.cells, q, back) {
+                // 轮转（要上一轮的值）而没有自己的格子：消费者必须在生产者本轮写
+                // 之前读。累加器自读自己（p==q）由「上一轮已写入槽」天然满足。
+                out.push((p, q));
             }
         }
     }
     out
+}
+
+/// 该 (生产者, lag) 是否已有轮转格（行内约束与发射序模拟共用的唯一查法）。
+fn has_cell(cells: &[RotCell], q: usize, lag: i64) -> bool {
+    cells.iter().any(|c| c.q == q && c.lag == lag)
+}
+
+/// 这份切分需要哪些轮转格：所有「跳 ≥ 1 轮」的读，按 (生产者节点, lag) 归并。
+///
+/// 为什么在闸门里算而不是在落地时算：行内约束与发射序模拟必须读**同一份**格子表，
+/// 否则一边按「有格子」放行、另一边按「同一个槽」校验，判据就成了两套真源。
+/// 名字也在这里定下来（`LocMap::reserve_split_name`，与版本分裂同一个分配器），
+/// 落地只照抄，不再分配一次 —— 于是「同一个基名的 K 份版本各自有位置」这件事在
+/// 计划里就是可观测的，而不是等到 AST 才发现名字撞了。
+pub fn needed_cells(func: &Function, lp: &PipelinedLoop, plan: &InstancePlan) -> Result<Vec<RotCell>, &'static str> {
+    let row = match plan.row() {
+        Some(r) => r.clone(),
+        None => return Err("kernel 行不合法（无法算轮转格）"),
+    };
+    let shift = &plan.shift;
+    let mut def_of: HashMap<String, usize> = HashMap::new();
+    for (i, inst) in lp.nodes.iter().enumerate() {
+        if let Some(d) = &inst.dest {
+            def_of.insert(d.name(), i);
+        }
+    }
+    let mut keys: std::collections::BTreeMap<(usize, i64), Option<String>> =
+        std::collections::BTreeMap::new();
+    let cs = cond_shift(plan.depth);
+    let mut note = |p_shift: usize, q: usize, carried: bool, key: String| -> Result<(), &'static str> {
+        let back = back_rounds(p_shift, shift[q], carried);
+        if back < 1 {
+            return Ok(()); // 本轮前向（靠行内序）或区域外引用：不需要格子
+        }
+        let d = lp.nodes[q].dest.as_ref().ok_or("轮转生产者没有输出")?;
+        if !rot_cell_ty_supported(&d.ty) {
+            return Err("轮转值的类型不是可拷贝标量（聚合/数组/向量/复数/_Atomic）");
+        }
+        // 格子的初值就是实例 `(q, shift[q] - back)`，而 `back_rounds` 展开后它恰等于
+        // `p_shift - (携带?1:0)`（只与读者有关，与生产者无关）。它为负意味着「要的
+        // 是进循环前的那份值」，于是这一格必须能从**一个确定的 phi** 拿到初值；
+        // 两个不同的携带 phi 共享同一格就是两个可能不同的初值 ⇒ 拒。初值不是
+        // 「进循环前」那一档时没有这个约束：同一个 (生产者, lag) 本来就是同一个实例，
+        // 被两个名字读完全等价（实测 `rb` 里判定读 `i.2`、体内读 `i.3` 就是同一份值的
+        // 两个名字，把它们拆成两格既错也白）。
+        let want = p_shift as i64 - if carried { 1 } else { 0 };
+        let seed = if want < 0 { Some(key) } else { None };
+        match keys.get(&(q, back)) {
+            None => {
+                keys.insert((q, back), seed);
+            },
+            Some(prev) => {
+                if *prev != seed {
+                    return Err("同一轮转格被两个不同的携带名字读（初值可能不同）");
+                }
+            },
+        }
+        Ok(())
+    };
+    for &p in &row {
+        for v in kind_uses(&lp.nodes[p].kind) {
+            let key = v.name();
+            if let Some(&q) = lp.phi_sources.get(&key) {
+                note(shift[p], q, true, key)?;
+            } else if let Some(&q) = def_of.get(&key) {
+                note(shift[p], q, false, key)?;
+            }
+        }
+    }
+    // 判定指令也读跳轮的值：它在 khead 里、body 之前执行，轮偏移是 `cond_shift`。
+    for v in kind_uses(&lp.cond.kind) {
+        let key = v.name();
+        if let Some(&q) = lp.phi_sources.get(&key) {
+            note(cs, q, true, key)?;
+        } else if let Some(&q) = def_of.get(&key) {
+            note(cs, q, false, key)?;
+        }
+    }
+    // 占名名单与分配器都只有一份：`LocMap::reserved_names` （原始局部 + 形参 + IR 里
+    // 出现过的全部基名）+ `reserve_split_name`。按 (节点, lag) 升序分配 ⇒ 确定序。
+    let mut used = crate::ssa::location::LocMap::reserved_names(func);
+    let mut out: Vec<RotCell> = Vec::new();
+    for (&(q, lag), seed) in &keys {
+        let base = lp.nodes[q].dest.as_ref().ok_or("轮转生产者没有输出")?.base.clone();
+        let home = crate::ssa::location::LocMap::reserve_split_name(&mut used, &base, 1);
+        out.push(RotCell { q, lag, home, seed: seed.clone() });
+    }
+    Ok(out)
 }
 
 /// 按行内约束重排 kernel 行。稳定排序（无约束的保持原相对序），所以能不动就不动；
@@ -1823,37 +1999,78 @@ pub fn refine_kernel_row(
     plan.with_row(stage, &out)
 }
 
-/// 模拟一次读：`v` 在迭代 `k` 处被读，检查槽里此刻的内容正是模型指定的那份实例。
-fn sim_check_read(
+/// 一次读落在**哪个格子**上，以及格子此刻应该装哪份实例。
+///
+/// 返回 `(存储键, 期望内容)`。存储键在两个模型下不同：
+///   * 基名塌缩模型（`cells` 为空，或该跳轮读没格子）：`v.base` —— 同基名只有一个槽；
+///   * 真轮转模型：跳 ≥ 1 轮的读落在该 (生产者, lag) 的格子 `home` 上。
+/// `cons_shift` 为 `Some(s)` 表示这次读发生在 kernel 的某一行里（消耗者的轮偏移 s，
+/// 判定指令是 `cond_shift(depth)`）；`None` 表示 prologue/epilogue 的实例——那里落地时
+/// 直接按实例名字引用，不经过轮转格，所以上面仍是基名级的槽。
+fn sim_read_target(
     lp: &PipelinedLoop,
     def_of: &HashMap<String, usize>,
+    shift: &[usize],
+    cells: &[RotCell],
     v: &SsaVar,
     k: usize,
-    slot: &HashMap<String, Option<(usize, usize)>>,
-) -> Result<(), &'static str> {
+    cons_shift: Option<usize>,
+) -> (String, Option<(usize, usize)>) {
     let key = v.name();
     // 模型要的是哪个实例：携带值 = 上一迭代，区域内定义 = 同迭代，
     // 区域外（参数/循环前的定义）= 进循环前的值（槽还没被区域内的写盖住）。
-    let want: Option<(usize, usize)> = if let Some(&q) = lp.phi_sources.get(&key) {
-        if k == 0 {
-            None
-        } else {
-            Some((q, k - 1))
-        }
+    let mut want: Option<(usize, usize)> = None;
+    let mut prod: Option<usize> = None;
+    if let Some(&q) = lp.phi_sources.get(&key) {
+        prod = Some(q);
+        want = if k == 0 { None } else { Some((q, k - 1)) };
     } else if let Some(&q) = def_of.get(&key) {
-        Some((q, k))
-    } else {
-        None
-    };
-    let got = slot.get(&v.base).copied().unwrap_or(None);
+        prod = Some(q);
+        want = Some((q, k));
+    }
+    let mut store = v.base.clone();
+    if let (Some(s), Some(q)) = (cons_shift, prod) {
+        // 轮数差 = 消费者所在轮 (k - s) 与生产者所在轮 (wk - shift[q]) 之差。
+        // 与 `back_rounds` 同一个公式：携带时 wk = k-1 会得 lag = shift[q]-s+1，
+        // 非携带时 wk = k 会得 lag = shift[q]-s —— 两处各自写一套就是上一版「测试绿
+        // 而实际错」的根源，所以这里只允许从 lag 反查格子。
+        if let Some((_, wk)) = want {
+            let lag = (k as i64 - s as i64) - wk as i64 + shift[q] as i64;
+            if lag >= 1 {
+                if let Some(c) = cells.iter().find(|c| c.q == q && c.lag == lag) {
+                    store = c.home.clone();
+                }
+            }
+        }
+    }
+    (store, want)
+}
+
+/// 模拟一次读：检查格子此刻的内容正是模型指定的那份实例。
+fn sim_check_read(
+    lp: &PipelinedLoop,
+    def_of: &HashMap<String, usize>,
+    shift: &[usize],
+    cells: &[RotCell],
+    v: &SsaVar,
+    k: usize,
+    cons_shift: Option<usize>,
+    slot: &HashMap<String, Option<(usize, usize)>>,
+) -> Result<(), &'static str> {
+    let (store, want) = sim_read_target(lp, def_of, shift, cells, v, k, cons_shift);
+    let got = slot.get(&store).copied().unwrap_or(None);
     if got == want {
         Ok(())
+    } else if store != v.base {
+        Err("轮转格里的值不是模型指定的实例（拷贝链与跳轮读不一致）")
     } else {
         Err("发射序下该读拿到的不是模型指定的实例（基名塌缩反依赖）")
     }
 }
 
-/// 沿实际发射序模拟「每个基名一个槽」的语义。任何一处读错实例都直接拒收。
+/// 沿实际发射序模拟格子语义：`cells` 为空时就是「每个基名一个槽」的塌缩模型；
+/// 非空时额外维护轮转格，并在每轮行尾做一次链式后移（`L` 从大到小）。
+/// 任何一处读错实例都直接拒收。
 pub fn emitted_reads_match(lp: &PipelinedLoop, plan: &InstancePlan) -> Result<(), &'static str> {
     let n = lp.nodes.len();
     let row = match plan.row() {
@@ -1870,10 +2087,70 @@ pub fn emitted_reads_match(lp: &PipelinedLoop, plan: &InstancePlan) -> Result<()
     }
     let rounds = plan.kernel.len();
     let trip = rounds + plan.depth;
+    let cells = &plan.cells;
+    // 判定指令的轮偏移与闸门、落地同一个公式（不是常量）：depth ≥ 2 时它少跳 depth-1 轮。
+    let cs = cond_shift(plan.depth);
     let mut slot: HashMap<String, Option<(usize, usize)>> = HashMap::new();
-    // 发射一条实例：先按当前槽校验它的每个读，再把它自己的值压进槽。
+    // 播种：与落地**同一个发射位置**（`want = shift[q] - lag < 0` ⇒ prologue 之前；
+    // 否则 ⇒ prologue 实例 `(q, want)` 之后）。这里必须真的**读基名槽**，而不是按
+    // 公式写死格子内容：按公式写就看不见「锚点此刻槽里其实是同基名的另一次写」这类
+    // 错值，而落地（`a_s1 = a`）恰恰会拿到那一份。负数下标对应「进循环前的值」，
+    // 与携带值在 `k == 0` 时的读法同一个口径（模型里就是 `None`）。
+    let want_of = |c: &RotCell| -> i64 { plan.shift[c.q] as i64 - c.lag };
+    let seed_one = |slot: &mut HashMap<String, Option<(usize, usize)>>,
+                   c: &RotCell| -> Result<(), &'static str> {
+        let want = plan.shift[c.q] as i64 - c.lag;
+        let Some(b) = base_of[c.q].clone() else {
+            return Err("轮转生产者没有输出");
+        };
+        let cur = slot.get(&b).copied().unwrap_or(None);
+        let expect: Option<(usize, usize)> = if want < 0 { None } else { Some((c.q, want as usize)) };
+        if cur != expect {
+            return Err("轮转格的播种点拿不到预期实例（基名槽在锚点已被同基名的另一次写盖住）");
+        }
+        slot.insert(c.home.clone(), cur);
+        Ok(())
+    };
+    // 行尾的拷贝链：与落地**同序**（同一基名内 lag 从大到小），否则模拟与机器码
+    // 两套语义：`a_s3 = a_s2; a_s2 = a_s1; a_s1 = a;` 是自下而上的链，先写小 lag 就会
+    // 把本轮的新值传下去（每一格都拿到同一个最新值），链就白轮了。
+    let shift_cells = |slot: &mut HashMap<String, Option<(usize, usize)>>,
+                       r: usize| -> Result<(), &'static str> {
+        let mut order: Vec<usize> = (0..cells.len()).collect();
+        order.sort_by(|&x, &y| {
+            let (a, b) = (&cells[x], &cells[y]);
+            a.q.cmp(&b.q).then(b.lag.cmp(&a.lag))
+        });
+        for &i in &order {
+            let c = &cells[i];
+            let src = if c.lag == 1 {
+                // 一级格直接拿生产者本轮的输出：它必须仍住在基名槽里（行尾没人
+                // 再写同一个基名），否则 `a_s1 = a` 拿到的是别的写。这条不是走过场：
+                // 一个迭代里同一基名被写两次时，旧模型靠行内序护住，而拷贝链只能
+                // 在行尾拿 ⇒ 必须点名拒收（而不是静默拿错）。
+                let Some(b) = base_of[c.q].clone() else {
+                    return Err("轮转生产者没有输出");
+                };
+                let cur = slot.get(&b).copied().unwrap_or(None);
+                if cur != Some((c.q, r + plan.shift[c.q])) {
+                    return Err("轮转生产者的值在行尾已被同基名的另一次写盖住");
+                }
+                cur
+            } else {
+                let prev_home = cells
+                    .iter()
+                    .find(|o| o.q == c.q && o.lag == c.lag - 1)
+                    .map(|o| o.home.clone())
+                    .ok_or("轮转拷贝链缺一级格子")?;
+                slot.get(&prev_home).copied().unwrap_or(None)
+            };
+            slot.insert(c.home.clone(), src);
+        }
+        Ok(())
+    };
+    // 发射一条实例：先按当前格子校验它的每个读，再把它自己的值压进基名槽。
     macro_rules! fire {
-        ($p:expr, $k:expr) => {{
+        ($p:expr, $k:expr, $s:expr) => {{
             let (p, k) = ($p, $k);
             if p >= n {
                 return Err("实例引用了不存在的节点");
@@ -1884,31 +2161,49 @@ pub fn emitted_reads_match(lp: &PipelinedLoop, plan: &InstancePlan) -> Result<()
                 return Err("实例迭代号超出 trip 范围");
             }
             for v in kind_uses(&lp.nodes[p].kind) {
-                sim_check_read(lp, &def_of, &v, k, &slot)?;
+                sim_check_read(lp, &def_of, &plan.shift, cells, &v, k, $s, &slot)?;
             }
             if let Some(b) = &base_of[p] {
                 slot.insert(b.clone(), Some((p, k)));
             }
         }};
     }
+    let mut seeded = vec![false; cells.len()];
+    for (i, c) in cells.iter().enumerate() {
+        if want_of(c) < 0 {
+            seed_one(&mut slot, c)?;
+            seeded[i] = true;
+        }
+    }
     for &(p, k) in &plan.prologue {
-        fire!(p, k);
+        fire!(p, k, None);
+        for (i, c) in cells.iter().enumerate() {
+            if !seeded[i] && c.q == p && want_of(c) == k as i64 {
+                seed_one(&mut slot, c)?;
+                seeded[i] = true;
+            }
+        }
+    }
+    if seeded.iter().any(|&s| !s) {
+        // 与 `apply_into` 同一句话：那里的播种指令找不到插入点，落地就是拿旧值发上去。
+        return Err("轮转格的播种实例不在 prologue 里");
     }
     for r in 0..rounds {
         // head 块：判定在 body 之前跑，读的是上一轮的产出 ⇒ 按 shift=0 的消费者算。
         for v in kind_uses(&lp.cond.kind) {
-            sim_check_read(lp, &def_of, &v, r + COND_SHIFT, &slot)?;
+            sim_check_read(lp, &def_of, &plan.shift, cells, &v, r + cs, Some(cs), &slot)?;
         }
         for &p in &row {
-            fire!(p, r + plan.shift[p]);
+            fire!(p, r + plan.shift[p], Some(plan.shift[p]));
         }
+        shift_cells(&mut slot, r)?;
     }
     // 跳出循环的那一次判定同样在 head 里发射，它读的也必须是真实存在的实例。
     for v in kind_uses(&lp.cond.kind) {
-        sim_check_read(lp, &def_of, &v, rounds + COND_SHIFT, &slot)?;
+        sim_check_read(lp, &def_of, &plan.shift, cells, &v, rounds + cs, Some(cs), &slot)?;
     }
     for &(p, k) in &plan.epilogue {
-        fire!(p, k);
+        fire!(p, k, None);
     }
     Ok(())
 }
@@ -1993,14 +2288,37 @@ mod emit_order_tests {
     }
 }
 
+/// 发射序两道判据（先按行内反依赖重排平局，再沿实际发射序模拟槽位内容）。
+///
+/// 两个发射模型共用它：拿不到合法行序就换下一个间隔 —— 更大的 II 会给出不同的
+/// 平局，可能反而能排开。
+fn emit_check(
+    lp: &PipelinedLoop,
+    inst: &InstancePlan,
+    stage: &[usize],
+) -> Result<InstancePlan, &'static str> {
+    let refined = refine_kernel_row(lp, inst, stage)?;
+    emitted_reads_match(lp, &refined)?;
+    Ok(refined)
+}
+
 /// 唯一闸门：识别 → 建图 → MII → 模调度 → 三段切分 → 收益与代价判据。
 ///
 /// 必须只有一条路径。分成两条（比如诊断走一套、实跑走另一套）的后果就是
 /// 「测试绿而实际跳过」，或反过来在实际里跑了一个测试没覆盖的宽松版本。
 ///
-/// 代价判据：本层只做**一级**轮转寄存器（`depth ≤ 1`），因为落地的形式是头块
-/// 上一对 phi（上一轮 / 本轮）。`depth` 更大时要 N 级轮转值，收益也撑不起改 IR
-/// 的风险，直接拒并给原因。
+/// **两个发射模型按固定顺序试，而不是合成一套判据**：
+///   1. 基名塌缩模型（一个基名一个槽，`cells` 为空）——今天的行为，一字不改地
+///      先试；它过的循环与新模型无关 ⇒ 已有语料不会因本轮抖动产物（判据：三档
+///      哈希只允许「新增被接受的循环」那一类行变）。
+///   2. 真轮转模型（每个 (生产者, lag) 一个自己的基名、一个自己的家）——只在模型 1
+///      拿不到合法行序/合法读数时才试，目的就是解除「同基名无法同时保留两份
+///      ⇒ 保守拒收」。
+///
+/// 代价判据：模型 1 只做**一级**轮转寄存器（`depth ≤ 1`），因为落地的形式是头块
+/// 上一对 phi（上一轮 / 本轮）；模型 2 把那条换成上限 `MAX_ROT_DEPTH`/`MAX_ROT_CELLS`
+/// （级数 N 时 prologue/epilogue 各多 N 轮、每轮多一条拷贝链，代价真的会盖过收益，
+/// 那部分继续拒）。`DCC_SSA_OFF=rot` 就是关掉模型 2 ⇒ 逐字退回旧行为。
 pub fn plan_for_header_with(
     func: &Function,
     header: &str,
@@ -2011,9 +2329,14 @@ pub fn plan_for_header_with(
     let mii = rec_mii(&g).max(res_mii(&g, res));
     // 从 MII 起逐步增大；再大到节点数就没有重叠可言了。
     let ceiling = mii.max(lp.nodes.len());
+    let rot_on = !crate::ssa::passes::ssa_dbg_off("rot");
     // 发射层拒绝原因比「没有可行调度」有用得多（行序成环 / 读到错实例），
     // 搜索耗尽时把它报出去，不让它被一个泛化原因掩盖。
     let mut last_emit: Option<&'static str> = None;
+    // 真轮转自己的拒因（类型不可拷 / 级数与格数上限 / 拷贝链与跳轮读不一致）。
+    // 只有模型 2 真的被试过才非 `None`，此时它才是诚实的那一条 —— 旧措辞
+    // 「需要超过一级轮转寄存器（本层不做）」在本层已经做了，不能继续报它。
+    let mut last_rot: Option<&'static str> = None;
     for ii in mii..=ceiling {
         let Some(stage) = modulo_schedule(&g, ii, res) else {
             continue;
@@ -2024,27 +2347,50 @@ pub fn plan_for_header_with(
             // 切不出来（轮数非正等）就换下一个间隔继续试：这不算拒绝理由。
             None => continue,
         };
-        if let Err(e) = benefit_verdict(depth, ii, lp.trip) {
-            // depth=0 这种情形换更大的 II 只会更没意义，直接结束搜索并报原因。
-            return Err(e);
-        }
-        // 发射序两道判据：先按行内反依赖重排平局，再沿实际发射序模拟槽位内容。
-        // 它们抓的是 T 序模型表达不了的错（见上面「发射序」一节），拿不到合法行序
-        // 就换下一个间隔 —— 更大的 II 会给出不同的平局，可能反而能排开。
-        let inst = match refine_kernel_row(&lp, &inst, &stage) {
-            Ok(p) => p,
+        // ============ 模型 1：基名塌缩 ============
+        match benefit_verdict(depth, ii, lp.trip) {
             Err(e) => {
-                last_emit = Some(e);
-                continue;
+                // `depth=0` / `trip 太短` 两条在两个模型下逐字相同（换更大的 II 只会
+                // 更没意义）⇒ 就地结束并报原因，与旧行为同一个出口；关掉真轮转时
+                // 连 `depth>1` 也照旧就地结束（那就是今天的行为，反向对照靠它）。
+                //
+                // 但报出去的那条必须是**更宽松那一档**的答案：`depth>1` 在模型 1 是
+                // 「需要超过一级轮转寄存器（本层不做）」，而模型 2 早就不看这条，于是
+                // 「depth=2 且 trip 不够」的循环若仍报前者，拒因就在指一条已经不存在的
+                // 拦路虎（实测：同一形状把 trip 从 32 改成 4 仍报「需要超过一级轮转寄存器」，
+                // 而真原因是 `trip 太短`）。`DCC_SSA_OFF=rot` 那一路逐字保持旧文案。
+                if !rot_on {
+                    return Err(e);
+                }
+                match benefit_verdict_rot(depth, ii, lp.trip, 0) {
+                    Err(e2) => return Err(e2),
+                    Ok(()) => last_emit = Some(e),
+                }
             },
-        };
-        if let Err(e) = emitted_reads_match(&lp, &inst) {
-            last_emit = Some(e);
+            Ok(()) => match emit_check(&lp, &inst, &stage) {
+                Ok(p) => return Ok(PipelinePlan { lp, ii, stage, inst: p }),
+                Err(e) => last_emit = Some(e),
+            },
+        }
+        if !rot_on {
             continue;
         }
-        return Ok(PipelinePlan { lp, ii, stage, inst });
+        // ============ 模型 2：真轮转 ============
+        // 格子表在这里算一次并塞进计划：行内约束、发射序模拟、落地三处读的是
+        // **同一份**答案（否则一边按「有格子」放行、另一边按「同一个槽」校验）。
+        let rot = (|| -> Result<InstancePlan, &'static str> {
+            let cells = needed_cells(func, &lp, &inst)?;
+            let mut with_cells = inst.clone();
+            with_cells.cells = cells;
+            benefit_verdict_rot(depth, ii, lp.trip, with_cells.cells.len())?;
+            emit_check(&lp, &with_cells, &stage)
+        })();
+        match rot {
+            Ok(p) => return Ok(PipelinePlan { lp, ii, stage, inst: p }),
+            Err(e) => last_rot = Some(e),
+        }
     }
-    Err(last_emit.unwrap_or("MII 到节点数之间找不到可行调度"))
+    Err(last_rot.or(last_emit).unwrap_or("MII 到节点数之间找不到可行调度"))
 }
 
 /// 用默认资源模型跑闸门。
@@ -2175,6 +2521,96 @@ mod gate_tests {
                 );
             }
         }
+    }
+
+    // ===== 真轮转（Phase 6.3）：解除「同基名无法同时保留两份 ⇒ 保守拒收」 =====
+
+    /// 依赖链每一级都是一次数组载入 ⇒ 载入延迟把 stage 拉到 depth≥2。旧判据
+    /// (`benefit_verdict` 的 `depth > 1`) 整条拒收它；现在每个跳轮读有自己的格子。
+    ///
+    /// 这条单测钉的是**计划层**：接受 + 格子表非空 + 名字互不相同且不与已有局部同名
+    /// + 实例覆盖仍完整。产物层与执行层由 `tests/integration/p16_rotation.rs` 与夹具钉。
+    #[test]
+    fn gate_accepts_depth_two_load_chain_with_real_cells() {
+        let src = "static int idx[8];\n\
+                   int rl(int n){int s=0;for(int i=0;i<32;i++){int a=idx[i&7]+1;int b=idx[a&7]+1;int c=idx[b&7]+1;int d=idx[c&7]+1;s+=d;}return s+n;}\n";
+        let f = fn_ssa(src, "rl");
+        let p = plan_for_header(&f, "for.body")
+            .unwrap_or_else(|e| panic!("depth>1 的依赖载入链应被真轮转接受，实际被拒：{e}"));
+        assert!(p.inst.depth >= 2, "样本必须真的跨过一级（否则测不到旧判据）：depth={}", p.inst.depth);
+        assert!(!p.inst.cells.is_empty(), "接受了 depth≥2 却没有格子表 ⇒ 走的是塌缩模型，判据形同虚设");
+
+        // 每格一个 (生产者, lag)，且 home 互不相同 —— 「同一个基名的 K 份值各有位置」
+        // 的全部含义。
+        let mut keys = std::collections::BTreeSet::new();
+        let mut homes = std::collections::BTreeSet::new();
+        for c in &p.inst.cells {
+            assert!(c.lag >= 1, "格子只服务跳 ≥ 1 轮的读：{:?}", c);
+            assert!(keys.insert((c.q, c.lag)), "同一 (生产者, lag) 被分配了两个格子：{:?}", p.inst.cells);
+            assert!(homes.insert(c.home.clone()), "两个格子拿到同一个家：{:?}", p.inst.cells);
+        }
+        // 名字必须是共享分配器的产物（`{base}_s{k}`），且不得与任何已有基名同名。
+        let reserved = crate::ssa::location::LocMap::reserved_names(&f);
+        for c in &p.inst.cells {
+            assert!(c.home.contains("_s"), "格子名应由 `reserve_split_name` 给出 `{{base}}_s{{k}}`，实际 {}", c.home);
+            assert!(!reserved.contains(&c.home), "格子名 {} 与已有局部/形参/phi dest 同名", c.home);
+        }
+        // 计划的实例覆盖与图自洽性不因格子而改变（格子只换存储位置，不换时序）。
+        assert!(p.inst.verify(&p.stage), "带格子的计划必须仍逐实例覆盖");
+        assert_eq!(p.inst.flatten().len(), p.lp.nodes.len() * p.lp.trip);
+        let g = build_dep_graph(&p.lp.nodes, &f, &f.blocks["for.body"], &p.lp.phi_sources);
+        assert!(edges_satisfied(&g, p.ii, &p.stage));
+        // 发射序模拟对格子模型同样必须放行（否则闸门与自检两套真源）。
+        emitted_reads_match(&p.lp, &p.inst).unwrap_or_else(|e| panic!("格子表与发射序不一致：{e}"));
+    }
+
+    /// 格子命名必须走全仓唯一的占名分配器：用户自己有一个叫 `i_s1` 的局部，而归纳
+    /// 变量 `i` 的格子恰好想要 `i_s1` ⇒ 必须避让到 `i_s2`。绕过它就是两个局部同名。
+    #[test]
+    fn rotation_cells_yield_to_existing_user_locals() {
+        let src = "static int idx[8];\n\
+                   int clash(int n){int s=0,i_s1=5;for(int i=0;i<24;i++){int a=idx[i&7]+1;int b=idx[a&7]+1;int c=idx[b&7]+1;int d=idx[c&7]+1;s+=d;s+=i_s1;}return s+n;}\n";
+        let f = fn_ssa(src, "clash");
+        let p = plan_for_header(&f, "for.body").expect("占名不应改变接受结论，只改变格子的名字");
+        let iv_cell = p.inst.cells.iter().find(|c| c.home.starts_with("i_s"));
+        let Some(c) = iv_cell else {
+            // 形状变了就可能不需要 `i` 的格子（判定读的是别的实例）；那种情况下
+            // 至少不能出现「格子名 = 用户局部名」这条越界。
+            for x in &p.inst.cells {
+                assert_ne!(x.home, "i_s1", "格子拿了用户已有名");
+            }
+            return;
+        };
+        assert_eq!(c.home, "i_s2", "`i_s1` 已被用户局部占用，格子必须避让：{:?}", p.inst.cells);
+    }
+
+    /// 判定指令的轮偏移是 `depth - 1`，不是常量 0。`depth ≤ 1` 时两者相同，所以
+    /// 塌缩模型从来暴露不了它；写回 0 会让 depth=2 的循环多跑一整行（实测 375 变 391）。
+    #[test]
+    fn cond_shift_tracks_the_rotation_depth() {
+        assert_eq!(cond_shift(0), 0);
+        assert_eq!(cond_shift(1), 0, "depth=1 必须与旧行为逐字相同（产物字节不因此抖动）");
+        assert_eq!(cond_shift(2), 1);
+        assert_eq!(cond_shift(5), 4);
+    }
+
+    /// 轮转路径的四条代价判据都要能单独挨到：`depth=0` 与 `trip 太短` 两条文案与
+    /// 塌缩模型一致（这样拒因在两模型下可对比），后两条才是轮转自己的上限。
+    #[test]
+    fn benefit_verdict_rot_covers_each_rule() {
+        assert_eq!(benefit_verdict_rot(0, 3, 8, 4), Err("无跳迭代重叠 (depth=0)：流水只是搬动指令"));
+        assert_eq!(benefit_verdict_rot(2, 3, 5, 4), Err("trip 太短：prologue/epilogue 开销盖过收益"));
+        assert_eq!(
+            benefit_verdict_rot(MAX_ROT_DEPTH + 1, 3, 64, 0),
+            Err("轮转级数超上限：prologue/epilogue 代价盖过收益")
+        );
+        assert_eq!(
+            benefit_verdict_rot(2, 3, 64, MAX_ROT_CELLS + 1),
+            Err("轮转格数超上限：每轮行尾的拷贝链太长")
+        );
+        assert!(benefit_verdict_rot(2, 3, 8, 4).is_ok());
+        // 旧判据在 depth>1 上仍然给那条文案：它就是反向对照要退回的地方。
+        assert_eq!(benefit_verdict(2, 3, 64), Err("需要超过一级轮转寄存器（本层不做）"));
     }
 }
 
@@ -2662,11 +3098,31 @@ fn apply_into(
     //
     //    公式本体在 `back_rounds`（与本函数同一个），行序约束与这里共用它。
     // 初值所在的实例：第 0 轮读者要的是 (q, shift[q] - back)；`None` 表示读者是
-    // head 块里那条判定指令（它自己的轮偏移是 `COND_SHIFT`，不占节点号）。
+    // khead 块里那条判定指令（它自己的轮偏移是 `cond_shift(depth)`，不占节点号）。
+    let cs = cond_shift(plan.depth);
     let init_iter = |q: usize, cons: Option<usize>, carried: bool| -> i64 {
-        let back = back_rounds(cons.map_or(COND_SHIFT, |p| shift[p]), shift[q], carried);
+        let back = back_rounds(cons.map_or(cs, |p| shift[p]), shift[q], carried);
         (shift[q] as i64) - back
     };
+    // 读者在 kernel 里应该读的「本轮起始值」名字。两个模型两套（但只一条跳轮公式）：
+    //   * 塌缩：`rot_dest[q]` —— 生产者自己的基名的另一版（同一个槽）；
+    //   * 真轮转：`cell_read[(q,lag)]` —— 格子的独立基名（自己的家）。
+    let mut rot_dest: HashMap<usize, SsaVar> = HashMap::new();
+    let mut cell_read: HashMap<(usize, i64), SsaVar> = HashMap::new();
+    let mut kernel_phis: Vec<Phi> = Vec::new();
+    // 轮转格的播种指令（`seed_first` = 读「进循环前的值」那些，必须排在 prologue
+    // 之前；`seed_after` = 按它读的那个实例位置插入）与行尾拷贝链。
+    let cells = plan.cells.clone();
+    let mut seed_first: Vec<Inst> = Vec::new();
+    let mut seed_after: HashMap<(usize, usize), Vec<Inst>> = HashMap::new();
+    let mut row_copies: Vec<Inst> = Vec::new();
+    if cells.is_empty() {
+    // 塔缩模型只能表达一级轮转（头块上一对 phi：上一轮 / 本轮）。depth > 1 而没有格子
+    // 意味着「行内序能护住但引用关系已经超出一级」的形状，走到这里就是上游判据改了
+    // 而这里没跟进 ⇒ 必须点名拒，不能默默拿本轮的值当上一轮。
+    if plan.depth > 1 {
+        return Err("多级流水需要轮转格但格子表为空（上游判据与本处不一致）");
+    }
     // 生产者节点 → (一个读者, 被读的名字, 是否携带值)
     let mut rot: HashMap<usize, (Option<usize>, String, bool)> = HashMap::new();
     for &p in row {
@@ -2691,13 +3147,13 @@ fn apply_into(
         }
     }
     // 判定指令也占一个位置：它在 body 之前执行（见下的 `khead` 块），所以它的「轮偏移」
-    // 是 `COND_SHIFT`；而它读的是 body 节点上一轮的输出 ⇒ 那些节点同样需要轮转 phi。
+    // 是 `cond_shift`；而它读的是 body 节点上一轮的输出 ⇒ 那些节点同样需要轮转 phi。
     // 不把它们收进来，head 就会引用一个尚未产出的名字。
     for v in kind_uses(&lp.cond.kind) {
         let key = v.name();
         let Some(&q) = lp.phi_sources.get(&key).or_else(|| def_of.get(&key)) else { continue };
         let carried = lp.phi_sources.contains_key(&key);
-        if back_rounds(COND_SHIFT, shift[q], carried) != 1 {
+        if back_rounds(cs, shift[q], carried) != 1 {
             return Err("判定所需的跳轮偏移不是一级轮转");
         }
         if let Some((p2, _, co2)) = rot.insert(q, (None, key.clone(), carried)) {
@@ -2706,9 +3162,6 @@ fn apply_into(
             }
         }
     }
-    let mut rot_dest: HashMap<usize, SsaVar> = HashMap::new();
-    let mut kernel_phis: Vec<Phi> = Vec::new();
-    // 按节点号生成 phi：HashMap 的迭代序会把随机哈希序泄进 phi 排列，进而泄进产物字节。
     let mut rot_nodes: Vec<usize> = rot.keys().copied().collect();
     rot_nodes.sort_unstable();
     for &q in &rot_nodes {
@@ -2745,6 +3198,122 @@ fn apply_into(
             ],
         });
     }
+    } else {
+        // ---------- 分支 B：真轮转（每个 (生产者, lag) 一个独立基名 = 一个自己的家） ----------
+        //
+        // 三件事必须同时成立，缺一件就是静默错值：
+        //   1. 每格一个 khead phi，dest 与两个 incoming **同基名**（`home`）。重建
+        //      (`rebuild_cycle`) 把头块 phi 的 dest 别名到第一个 incoming，只有同基名
+        //      才能保证「读写落到同一个家」在基名塌缩后仍成立；
+        //   2. 播种指令必须插在**它读的那个实例之后**（`want < 0` 时插在 prologue 之前），
+        //      因为 `a.v` 这类实例名在重建后就是槽 `a`：早一步拿到的是进循环前的值，
+        //      晚一步拿到的是后续轮的值；
+        //   3. 行尾拷贝链按 lag **从大到小**发（`a_s3 = a_s2; a_s2 = a_s1; a_s1 = a`），
+        //      从小到大会把本轮的新值一路灌进每一格。
+        // 名字来自 `needed_cells`（`LocMap::reserve_split_name` 的共享分配器），这里只
+        // 照抄不再分配一次；格子基名同时进 `original_locals`（声明 + 不被 DCE + 调度
+        // 的基名序边都认这个名字）。
+        let src_of = |q: usize| -> Result<&SsaVar, &'static str> {
+            lp.nodes[q].dest.as_ref().ok_or("轮转生产者没有输出")
+        };
+        let mk = |home: &str, src: &SsaVar, alloc: &mut VersionAllocator| -> SsaVar {
+            let v = alloc.fresh(home);
+            SsaVar { base: home.to_string(), version: v, ty: src.ty.clone(), span: src.span.clone() }
+        };
+        // 1. 每格一个 phi dest（行尾拷贝与读者都引用它）。`cells` 已是 (q asc, lag asc)
+        //    的确定序，HashMap 的随机序不得泄进名字版本（它直接决定产物字节）。
+        for c in cells.iter() {
+            let src = src_of(c.q)?;
+            let dest = mk(&c.home, src, &mut alloc);
+            if cell_read.insert((c.q, c.lag), dest.clone()).is_some() {
+                return Err("轮转格重复（同一 (生产者, lag) 被分配了两次）");
+            }
+            kernel_phis.push(Phi { dest, incoming: Vec::new() });
+        }
+        // 2. 播种：`want = shift[q] - lag`（与 `seed_cells` 、`init_iter` 同一个公式）。
+        let mut seed_name: HashMap<(usize, i64), SsaVar> = HashMap::new();
+        for c in cells.iter() {
+            let src = src_of(c.q)?;
+            let want = shift[c.q] as i64 - c.lag;
+            let val: Operand = if want < 0 {
+                // 「进循环前的那份值」只能从一个确定的携带 phi 拿（`needed_cells` 已保证
+                // 同一格的全部负下标读共享这个名字）；名字不确定的格子在闸门里就被拒了。
+                let sk = c
+                    .seed
+                    .as_ref()
+                    .ok_or("轮转格初值是进循环前的值，但没有确定的携带名")?;
+                phi_pre.get(sk).cloned().ok_or("phi 没有 preheader 侧输入")?
+            } else {
+                inst_name
+                    .get(&(c.q, want as usize))
+                    .cloned()
+                    .map(Operand::Var)
+                    .ok_or("轮转格的初值实例没有被物化")?
+            };
+            let Operand::Var(x) = val else { return Err("轮转格的初值必须是变量") };
+            let dest = mk(&c.home, src, &mut alloc);
+            seed_name.insert((c.q, c.lag), dest.clone());
+            let inst = Inst {
+                dest: Some(dest),
+                // 同型 `Cast` = 原样搬运（实测发 `mov`/`fldt`+`fstpt`，不是 `+0` 那条）。
+                kind: InstKind::Cast { ty: src.ty.clone(), e: Operand::Var(x) },
+                span: src.span.clone(),
+            };
+            if want < 0 {
+                seed_first.push(inst);
+            } else {
+                seed_after.entry((c.q, want as usize)).or_default().push(inst);
+            }
+        }
+        // 3. 行尾拷贝链：先按 (q asc, lag desc) 把名字分配完（后面的要引用前面的 dest，
+        //    而发射序就是这里的序），再拼指令。
+        let mut chain: Vec<&RotCell> = cells.iter().collect();
+        chain.sort_by(|a, b| a.q.cmp(&b.q).then(b.lag.cmp(&a.lag)));
+        let mut copy_name: HashMap<(usize, i64), SsaVar> = HashMap::new();
+        for c in chain.iter() {
+            let src = src_of(c.q)?;
+            copy_name.insert((c.q, c.lag), mk(&c.home, src, &mut alloc));
+        }
+        for c in chain.iter() {
+            let src = src_of(c.q)?;
+            let from: Operand = if c.lag == 1 {
+                Operand::Var(kernel_name[c.q].clone().ok_or("轮转生产者不在 kernel 内")?)
+            } else {
+                cell_read
+                    .get(&(c.q, c.lag - 1))
+                    .cloned()
+                    .map(Operand::Var)
+                    .ok_or("轮转拷贝链缺一级格子")?
+            };
+            let Operand::Var(x) = from else { return Err("轮转拷贝的源必须是变量") };
+            let dest = copy_name.get(&(c.q, c.lag)).cloned().ok_or("轮转拷贝没有名字")?;
+            row_copies.push(Inst {
+                dest: Some(dest),
+                kind: InstKind::Cast { ty: src.ty.clone(), e: Operand::Var(x) },
+                span: src.span.clone(),
+            });
+        }
+        // 4. 把 phi 的两个 incoming 回填（同基名：见上面第 1 条）。
+        for (i, c) in cells.iter().enumerate() {
+            let phi = &mut kernel_phis[i];
+            let dest = cell_read.get(&(c.q, c.lag)).cloned().ok_or("轮转格没有 phi")?;
+            if phi.dest != dest {
+                return Err("轮转格 phi 与回填不同名（格子表与 phi 表失同）");
+            }
+            phi.incoming = vec![
+                (seed_name.get(&(c.q, c.lag)).cloned().ok_or("轮转格没有播种指令")?, preheader.clone()),
+                (copy_name.get(&(c.q, c.lag)).cloned().ok_or("轮转格没有行尾拷贝")?, header.clone()),
+            ];
+        }
+        // 5. 格子基名当用户局部看：重建靠它声明局部，`dead_inst_elim` 靠它不删赋值，
+        //    `instruction_scheduling` 的基名序边也只对具名基名生数——少了最后这条，
+        //    -O3 会把行尾拷贝提前到生产者之前（静默错值）。
+        for c in cells.iter() {
+            // `OrderedNameSet::insert` 本身就是「没有才加、保持首次插入序」，所以这里
+            // 不能自己写一份 `contains` + `push`：那会绕过它的保序去重口径。
+            func.original_locals.insert(c.home.clone());
+        }
+    }
 
     // 3. 逐实例生成指令。
     let resolve = |o: &Operand, p: usize, k: Option<usize>| -> Result<Operand, &'static str> {
@@ -2775,11 +3344,21 @@ fn apply_into(
                 }
                 Ok(Operand::Var(sv))
             },
-            // kernel：back == 1 ⇒ 轮转 phi；back == 0 ⇒ 本轮前向（要求行内早于消费者）。
+            // kernel：back == 0 ⇒ 本轮前向（要求行内早于消费者）；back ≥ 1 ⇒ 要么有
+            // 自己的轮转格（读格子的 phi），要么塌缩模型里那对一级 phi。
             None => {
-                if back_rounds(shift[p], shift[q], carried) == 1 {
+                let back = back_rounds(shift[p], shift[q], carried);
+                if let Some(d) = cell_read.get(&(q, back)).cloned() {
+                    return Ok(Operand::Var(d));
+                }
+                if back == 1 {
                     let d = rot_dest.get(&q).cloned().ok_or("需要轮转 phi 但生产者不在轮转集合里")?;
                     return Ok(Operand::Var(d));
+                }
+                if back >= 2 {
+                    // 上面那个 `rot` 扫描已经拦过一轮；这里不是走过场，而是「谁都不能
+                    // 默默拿本轮的值当上一轮」这条必须落在引用点上。
+                    return Err("跳轮引用需要超过一级轮转寄存器");
                 }
                 if row_pos.get(&q).copied().unwrap_or(usize::MAX) >= row_pos[&p] {
                     return Err("kernel 内本轮生产者排在消费者之后");
@@ -2809,14 +3388,28 @@ fn apply_into(
         Ok(Inst { dest, kind, span: src.span.clone() })
     };
 
+    // 轮转格的播种：读「进循环前的值」那些排在 prologue **之前**，其余插在它读的
+    // 那个实例之后。位置不是风格：实例名重建后就是基名槽，早一步晚一步拿到的是
+    // 不同的份（与 `emitted_reads_match` 里的 `seed_cells` 同一条发射序）。
     let mut prologue_insts: Vec<Inst> = Vec::new();
+    prologue_insts.extend(seed_first.iter().cloned());
     for &(p, k) in &plan.prologue {
         prologue_insts.push(build(p, Some(k))?);
+        if let Some(seeds) = seed_after.remove(&(p, k)) {
+            prologue_insts.extend(seeds);
+        }
+    }
+    if !seed_after.is_empty() {
+        // 格子要的那个实例根本不在 prologue 里 ⇒ 播种无处可插，拿旧值发上去就是错值。
+        return Err("轮转格的播种实例不在 prologue 里");
     }
     let mut kernel_insts: Vec<Inst> = Vec::new();
     for &p in row {
         kernel_insts.push(build(p, None)?);
     }
+    // 行尾拷贝链（lag 从大到小）：它就是「真轮转」在机器码层面的形（上一轮的值
+    // 逐格后移），而 `emitted_reads_match` 的 `shift_cells` 按同一份序模拟。
+    kernel_insts.extend(row_copies.iter().cloned());
     let mut epilogue_insts: Vec<Inst> = Vec::new();
     for &(p, k) in &plan.epilogue {
         epilogue_insts.push(build(p, Some(k))?);
@@ -2837,7 +3430,7 @@ fn apply_into(
         }
     }
     
-    // kernel 判定：使用轮转 phi 的值（上一轮结果）
+    // kernel 判定：使用轮转 phi / 轮转格的值（上一轮结果），决定是否继续循环
     let mk_cond_kern = |dest: &Option<SsaVar>| -> Result<Inst, &'static str> {
         let f = |o: &Operand| -> Result<Operand, &'static str> {
             let Operand::Var(v) = o else {
@@ -2846,7 +3439,14 @@ fn apply_into(
             let key = v.name();
             let q = lp.phi_sources.get(&key).copied().or_else(|| def_of.get(&key).copied());
             match q {
-                Some(q) => Ok(rot_dest.get(&q).cloned().map(Operand::Var).unwrap_or_else(|| o.clone())),
+                Some(q) => {
+                    let back = back_rounds(cs, shift[q], lp.phi_sources.contains_key(&key));
+                    let d = cell_read
+                        .get(&(q, back))
+                        .cloned()
+                        .or_else(|| if back == 1 { rot_dest.get(&q).cloned() } else { None });
+                    Ok(d.map(Operand::Var).unwrap_or_else(|| o.clone()))
+                },
                 None => Ok(o.clone()),
             }
         };
@@ -3035,6 +3635,18 @@ pub fn dump_plan(func: &Function, p: &PipelinePlan) -> String {
     };
     s.push_str(&format!("  prologue ={:?}\n", show(&inst.prologue)));
     s.push_str(&format!("  epilogue ={:?}\n", show(&inst.epilogue)));
+    // 真轮转格（P16-6.3）：它就是把「同基名不能同时保留两份」的拒收换成 N 份独立位置，
+    // 所以「接受了几个格、每个格是谁的哪一轮」必须直接可读（`DCC_PIPE_DUMP=2`）。
+    if inst.cells.is_empty() {
+        s.push_str("  rot_cells=none(基名塌缩)\n");
+    } else {
+        let cells: Vec<String> = inst
+            .cells
+            .iter()
+            .map(|c| format!("{}#{}:lag{}->{}", names.get(c.q).map(String::as_str).unwrap_or("?"), c.q, c.lag, c.home))
+            .collect();
+        s.push_str(&format!("  rot_cells={cells:?}\n"));
+    }
     s.push_str(&format!("  verify={} flatten_len={}\n", inst.verify(&p.stage), inst.flatten().len()));
     s
 }

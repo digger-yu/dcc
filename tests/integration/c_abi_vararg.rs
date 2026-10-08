@@ -704,54 +704,27 @@ fn va_arg_mix_ld80_namedparam_cross_tu_gcc_interop() {
     assert_eq!(rc, 0, "ld80_namedparam: caller 逐判据返回 1..4，0 表示形参与 st(0) 返回均对");
 }
 
-/// D8（**已定位未修**）钉住：`va_arg` 取 VLA（运行时尺寸）聚合时，消费侧把
-/// VLA 元数据槽的**地址**当数组基址（应为 `mov` 取槽内存放的分配基址），且
-/// 溢出区装载长度用编译期回退值 8 而非运行时尺寸 —— 实测 dcc 产物 SIGSEGV，
-/// gcc 参照返回 0。
+/// D8（**已修并全档转正**）：`va_arg` 取 VLA（运行时尺寸）聚合后，`d.data[i]` 的
+/// 基址必须从 VLA **元数据槽里加载**（`mov -0x78(%r13),%rax`），不能 `lea` 那个槽本身；
+/// 而调用侧把整块 VLA 聚合作为变参实参传出去时，也必须拿到同一个数据区。
 ///
-/// 这里不用 `#[ignore]` 掩盖（方案 §7.4 禁止），而是把「两侧结果不一致」这一
-/// 事实本身作为断言钉住：一旦 dcc 修好该缺陷，本测试会失败，提醒把它改写成
-/// `run_gcc_cross_check` 绿灯断言并把夹具从 `c/va_arg_xfail/` 移入 `c/va_arg/`。
+/// 两处修点：`semantics::address_from_storage`（VLA/VM 聚合归 `StackSlotLoad`）与
+/// `mem/object_resolver.rs::resolve_identity`（`vla_offsets` 排在 `var_map` 前）。
+/// -O2/-O3 那一半原先仍坑：函数体里有运行时尺寸对象时 SSA 往返会丢它的身份（基址
+/// 落回描述符区、`sizeof` 读回 0），现由 `opt.rs::block_has_unsafe_ssa_pattern` 让
+/// 整函数退回 AST 路径 —— 与同列的 `static`/`cleanup`/嵌套函数同一口径。
+///
+/// 旧形状（修前）：四档全 SIGSEGV(139)，本件因此住在 `c/va_arg_xfail/`；现在它已
+/// 移入 `c/va_arg/`（该目录由 `scripts/dcc_gcc_diff.sh` 全量扫，必须全绿）。
 #[test]
 #[cfg(unix)]
-fn va_arg_xfail_vla_agg_via_va_arg_still_diverges_from_gcc() {
-    let src = include_str!("../fixtures/c/va_arg_xfail/vla_agg_via_va_arg.c");
-    let dir = std::env::temp_dir();
-    let pid = std::process::id();
-    let gsrc = dir.join(format!("dcc-vax-{pid}.c"));
-    let gexe = dir.join(format!("dcc-vax-{pid}.gcc"));
-    fs::write(&gsrc, src).expect("write fixture");
-    let gbuild = Command::new("gcc")
-        .args(["-O0", "-std=gnu2x", "-w", "-o"])
-        .arg(&gexe)
-        .arg(&gsrc)
-        .output()
-        .expect("run gcc");
-    assert!(
-        gbuild.status.success(),
-        "oracle 侧 gcc 必须能编译本夹具（否则它没有资格当 xfail 判据）: {}",
-        String::from_utf8_lossy(&gbuild.stderr)
-    );
-    let grun = Command::new(&gexe).output().expect("run gcc exe");
-    let _ = fs::remove_file(&gexe);
-    let _ = fs::remove_file(&gsrc);
-    assert_eq!(
-        grun.status.code().unwrap_or(-1),
-        0,
-        "gcc 参照必须返回 0（VLA 聚合内容逐项正确）"
-    );
-    let (dcompile, dexe) = run_compile_and_run("va-xfail-vla-agg", src);
-    assert!(
-        dcompile.status.success(),
-        "dcc 应能编译（缺陷在运行期，不在前端）: {}",
-        String::from_utf8_lossy(&dcompile.stderr)
-    );
-    let drun = Command::new(&dexe).output().expect("run dcc exe");
-    let _ = fs::remove_file(dexe);
-    assert_ne!(
-        drun.status.code(),
-        grun.status.code(),
-        "D8 若已修复，请把本用例改写成 run_gcc_cross_check 绿灯断言并迁移夹具；\
-         当前 dcc 侧应因基址/装载长度两处缺陷而崩溃或返回非 0"
-    );
+fn va_arg_vla_agg_via_va_arg_matches_gcc_at_all_levels() {
+    let src = include_str!("../fixtures/c/va_arg/vla_agg_via_va_arg.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("va-vla-agg", src, &[flag]),
+            0,
+            "{flag}: VLA 聚合经 va_arg 赋值后的成员基址/运行时尺寸与 gcc 不一致"
+        );
+    }
 }

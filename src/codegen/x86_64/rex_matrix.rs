@@ -144,6 +144,147 @@ fn first_line(cg: &Codegen, case: &str) -> String {
     line
 }
 
+/// 同 `check`，但用于「意图那条不在首行」的多指令臂（`idiv`/`div` 前面必有 cqto 或
+/// `xor rdx,rdx`）。判据仍是名字：除数寄存器被搬错字段时，`{mn} ... {reg}` 这一行根本
+/// 不会出现，而不是出现一条看起来正常的假指令。
+fn check_divisor_line(cg: &Codegen, case: &str, mn: &str, reg: &str) {
+    let out = decode(&cg.code);
+    assert!(
+        out.lines().any(|l| l.trim().starts_with(mn) && l.contains(reg)),
+        "{case}: 没读到 `{mn} ... {reg}` 这一行（除数字段的 REX 位丢了就会读成别的号）。\
+         字节 = {:?}, 解码 = {out}",
+        cg.code
+    );
+    for legacy in ["%ah", "%ch", "%dh", "%bh"] {
+        assert!(
+            !out.contains(legacy),
+            "{case}: 解码里出现 {legacy}，说明 8 位字段该发 REX 而漏发；字节 {:?}",
+            cg.code
+        );
+    }
+}
+
+/// 同 `check`，但只断言「意图名在首行里」—— 用于操作数次序由解码侧决定、
+/// 而本轮不想连带迁就的场合（见 `binop_matrix` 的 Mul 注释）。
+fn check_at(cg: &Codegen, case: &str, expected: &str) {
+    let line = first_line(cg, case);
+    assert!(
+        line.contains(expected),
+        "{case}: 期望读回 {expected}，实际 `{line}`（字节 {:?}）—— 字段被搬走了",
+        cg.code
+    );
+}
+
+/// 逐操作数核对：首行里出现的**每一个** `%名` 都必须在 `allowed` 里。
+///
+/// 为什么需要这一条：自反形（同一个号既在 ModRM.reg 又在 r/m）的两个意图名是
+/// 同一个，「名字在不在」拓不出其中一侧被搬回低 8 号 —— 实测
+/// `movsbq (%r8), %eax` 这种读数里 `%r8` 明明在行上，而 dest 字段已经错了。
+/// 只看首行：一个编码点发了多条时逐条跑本函数（或由调用方只传首条的意图）。
+fn check_only_regs(cg: &Codegen, case: &str, allowed: &[impl AsRef<str>]) {
+    let line = first_line(cg, case);
+    let body = line.splitn(2, char::is_whitespace).nth(1).unwrap_or("");
+    let chars: Vec<char> = body.chars().collect();
+    let mut i = 0usize;
+    let mut seen = 0usize;
+    while i < chars.len() {
+        if chars[i] != '%' {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < chars.len() && chars[j].is_ascii_alphanumeric() {
+            j += 1;
+        }
+        let got = &body[i..j];
+        seen += 1;
+        let want = allowed.iter().map(|a| a.as_ref()).collect::<Vec<_>>().join(" ");
+        assert!(
+            allowed.iter().any(|a| a.as_ref() == got),
+            "{case}: 读数是 `{line}`，其中的 {got} 不在意图寄存器集 [{want}] 里 —— \
+             某个 ModRM 字段没被正确的 REX 位扩到（字节 {:?}）",
+            cg.code
+        );
+        i = j;
+    }
+    assert!(seen > 0, "{case}: 首行 `{line}` 里一个寄存器都没读到，门禁未覆盖");
+}
+
+/// 某个号的全部宽度名（一个自反形的两个字段都只能出现这些名字）。
+fn own_names(dst: u8) -> Vec<String> {
+    [8usize, 16, 32, 64].iter().map(|&b| name(dst, b).to_string()).collect()
+}
+
+/// `emit_load_self_typed`：地址与目的地同一个号的按类型装载。
+/// 这一族以前抄在 10 个站点上（既不发 REX 也不发 SIB），现在收敛到一个入口，
+/// 而入口必须有自己的机器判据：16 号 × 4 宽度 × 2 符号性，按**逐操作数**核对。
+#[test]
+fn load_self_typed_matrix() {
+    for dst in 0..16u8 {
+        for size in [1usize, 2, 4, 8] {
+            for signed in [false, true] {
+                let mut c = cg();
+                c.emit_load_self_typed(size, signed, dst);
+                // 允许的名字：dst 自己的各宽度名（基址以 64 位名出现，目标按指令宽度出现）。
+                let allowed = own_names(dst);
+                check_only_regs(
+                    &c,
+                    &format!("load-self r{dst} size={size} signed={signed}"),
+                    &allowed,
+                );
+            }
+        }
+    }
+}
+
+/// `gen_int_narrow_cast` / `gen_int_promote`：寄存器内部的截断与提升，全部是自反形。
+/// 这两个入口以前各自手抄字节，同一个错在同一函数里修了一半还剩一半。
+#[test]
+fn narrow_cast_promote_matrix() {
+    // (类型, narrow_cast 该不该发字节)：逐条写死，为的是把「按设计不发」和
+    // 「漏发」分开。有符号 int/long 的截断与提升都不需要动作（值已在 64 位
+    // 寄存器里），而空字节若不当成断言，本组就等于没跑。
+    let cases = [
+        (Type::Bool, true),
+        (Type::Char, true),
+        (Type::SChar, true),
+        (Type::UChar, true),
+        (Type::Short, true),
+        (Type::UShort, true),
+        (Type::Int, false),
+        (Type::UInt, true),
+    ];
+    for dst in 0..16u8 {
+        for (ty, emits) in cases.iter() {
+            let mut c = cg();
+            c.gen_int_narrow_cast(dst, ty);
+            assert_eq!(
+                !c.code.is_empty(),
+                *emits,
+                "narrow_cast r{dst} {ty:?}: 预期发字节={emits}，实际字节={:?}",
+                c.code
+            );
+            if *emits {
+                check_only_regs(&c, &format!("narrow_cast r{dst} {ty:?}"), &own_names(dst));
+            }
+
+            // 提升：int/UInt 以上不需要动作，窄类型必须发一条扩展指令。
+            let mut p = cg();
+            p.gen_int_promote(dst, ty);
+            let want_promote = !matches!(ty, Type::Int | Type::UInt);
+            assert_eq!(
+                !p.code.is_empty(),
+                want_promote,
+                "promote r{dst} {ty:?}: 预期发字节={want_promote}，实际字节={:?}",
+                p.code
+            );
+            if want_promote {
+                check_only_regs(&p, &format!("promote r{dst} {ty:?}"), &own_names(dst));
+            }
+        }
+    }
+}
+
 fn assert_no_legacy8(line: &str, code: &[u8], case: &str, expected: &[&str]) {
     for legacy in ["%ah", "%ch", "%dh", "%bh"] {
         assert!(
@@ -192,6 +333,101 @@ fn store_reg_to_ptr_matrix() {
                     &format!("store sz={sz} src={src} base={base}"),
                     &[name(src, bits), name(base, 64)],
                 );
+            }
+        }
+    }
+}
+
+/// `binop`：表达式求值主干的 16 个臂，以前**不在矩阵里**。代价已经兑现：比较臂的一条
+/// REX.B 漏发（`cmp %r8d,%r12d` 编成 `cmp %r8d,%esp`，mod=3 rm=100 是非法编码）能在
+/// 92 个夹具上静默误编译而 cargo 用例全绿 —— 因为 P16 把右操作数的暂存号从写死的
+/// `%rcx` 换成候选表首号（`%r8`）之后，「两侧同属高 8 号」从死分支变成常走分支。
+/// 本矩阵就是把「点亮死分支」这类改动变成机器判据的那一步。
+#[test]
+fn binop_matrix() {
+    use crate::ast::BinOp;
+
+    // Add/Sub/And/Or/Xor：dst 在 r/m（REX.B），src 在 reg（REX.R）。32 位一支只有在
+    // 「无符号且两侧 ≤4 字节」时才成立，两支的前缀基数不同（0 vs 0x48），必须都跑。
+    for (ty, bits) in [(Type::UInt, 32usize), (Type::ULong, 64)] {
+        for op in [BinOp::Add, BinOp::Sub, BinOp::And, BinOp::Or, BinOp::Xor] {
+            for dst in 0..16u8 {
+                for src in 0..16u8 {
+                    let mut c = cg();
+                    c.binop(op, dst, src, false, &ty, &ty);
+                    check_ordered(
+                        &c,
+                        &format!("{op:?} r{dst},r{src} bits={bits}"),
+                        &[name(src, bits), name(dst, bits)],
+                    );
+                }
+            }
+        }
+        // 比较臂：首条就是 cmp（窄无符号的零扩展在 ULong 上提前返回，不会插到前面）。
+        for op in [BinOp::Lt, BinOp::Le, BinOp::Gt, BinOp::Ge, BinOp::EqEq, BinOp::Ne] {
+            for dst in 0..16u8 {
+                for src in 0..16u8 {
+                    for signed in [false, true] {
+                        let mut c = cg();
+                        c.binop(op, dst, src, signed, &ty, &ty);
+                        check_ordered(
+                            &c,
+                            &format!("{op:?} r{dst},r{src} bits={bits} signed={signed}"),
+                            &[name(src, bits), name(dst, bits)],
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Mul：`imul r/m, r` 里 dst 在 reg 字段、src 在 r/m —— 与加减分支反着来，
+    // 所以必须单独跑一遍（同一份 rex 变量在两支里贡献的是不同的位）。
+    // 这里不用 `check_ordered` 而用 `check`：自家反汇编把 `0F AF` 的操作数**次序**
+    // 念反了（`48 0f af c1` 自家读成 `imul %rax, %rcx`，objdump 是 `imul %rcx,%rax`），
+    // 那是解码侧的一条独立缺陷（见设计文档 §11.51），不应让编码侧的矩阵去迁就它；
+    // 而「两个意图名字必须都在」已经足以拓出字段被搬错/REX 位漏发。
+    for dst in 0..16u8 {
+        for src in 0..16u8 {
+            let mut c = cg();
+            c.binop(BinOp::Mul, dst, src, true, &Type::Long, &Type::Long);
+            let case = format!("imul r{dst},r{src}");
+            check(&c, &case, &[name(src, 64)]);
+            check_at(&c, &case, name(dst, 64));
+        }
+    }
+
+    // Shl/Shr 的 %cl 形：src 已经是 cl 时首条就是移位，r/m 是 dst（只可能贡献 REX.B）。
+    for op in [BinOp::Shl, BinOp::Shr] {
+        for dst in 0..16u8 {
+            for signed in [false, true] {
+                let mut c = cg();
+                c.binop(op, dst, 1, signed, &Type::Long, &Type::Long);
+                check_ordered(
+                    &c,
+                    &format!("{op:?} cl -> r{dst} signed={signed}"),
+                    &["%cl", name(dst, 64)],
+                );
+            }
+        }
+    }
+
+    // Div/Mod：`idiv/div r/m` 的除数在 r/m 字段，而它不在首条（前面有 cqto/xor rdx,rdx
+    // 与把被除数搬 rax 的 mov），所以按「行」定位而不是取首行。src==2 一支会把除数
+    // 经 push/pop 挪到 %rcx（刻意的），把它当 `%rdx` 期望会假红，故跳过。
+    for op in [BinOp::Div, BinOp::Mod] {
+        for dst in 0..16u8 {
+            for src in 0..16u8 {
+                if src == 2 {
+                    continue;
+                }
+                for signed in [false, true] {
+                    let mut c = cg();
+                    c.binop(op, dst, src, signed, &Type::Long, &Type::Long);
+                    let mn = if signed { "idiv" } else { "div" };
+                    check_divisor_line(&c, &format!("{op:?} r{dst}/r{src} signed={signed}"), mn,
+                                       name(src, 64));
+                }
             }
         }
     }

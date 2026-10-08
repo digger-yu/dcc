@@ -331,3 +331,69 @@ int many(void) {
         }
     }
 }
+
+/// 并行发射不得改产物：同一份源在默认（并行）与 `DCC_NO_PARALLEL=1`（串行）下
+/// 的 `.o` 必须**逐字节相同**。
+///
+/// 这条性质失守过两次，而且是同一类根因：**程序级事实没有随下行快照走**。
+/// * N1 —— worker 不回传 `defined_funcs`/`func_sizes`，嵌套函数的唯一名在 ELF 侧发成 UND；
+/// * N12 —— worker 重建 `Codegen` 时把全局的 `ty` 占位成 `Type::Int`、`init` 占位成
+///   `None`，并且根本不下发 `static_local_map`。实测同一个 `.o` 的 `.text` 在两种模式下
+///   差 691 字节：`movzbl`（串行，`unsigned char`/`_Bool` 正确）变成 `movsbl`（并行），
+///   而带静态局部的函数走了「懒初始化 + 帧内槽」的退化路，直接长了一截。
+///   反向对照已验：修复前的二进制在本用例上红（`.text` 691 字节不同）。
+///
+/// 判据要「整文件相同」而不是「只看 `.text`」，所以夹具刻意不含字符串/浮点字面量 ——
+/// N10（并行 `.rodata` 按 worker 内部化）会改 `.rodata` 与符号地址，那还挂着，
+/// 见 `docs/p12-physreg-spill-design.md` §11.13 的 N10 行与 §11.24。
+#[test]
+fn parallel_codegen_preserves_program_level_facts() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/c/parallel_global_facts.c");
+    let exists = fs::metadata(&src).is_ok();
+    assert!(exists, "夹具不存在：{}", src.display());
+
+    let emit = |serial: bool, tag: &str| -> Vec<u8> {
+        let out = std::env::temp_dir().join(format!(
+            "dcc-repro-par-{tag}-{}.o",
+            std::process::id()
+        ));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+        cmd.arg("--target")
+            .arg("x86_64-linux-gnu")
+            .arg("-O2")
+            .arg("-c")
+            .arg("-o")
+            .arg(&out)
+            .arg(&src);
+        if serial {
+            cmd.env("DCC_NO_PARALLEL", "1");
+        }
+        let status = cmd.output().expect("run dcc");
+        assert!(
+            status.status.success(),
+            "{tag} 编译失败: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        let bytes = fs::read(&out).expect("read .o");
+        let _ = fs::remove_file(&out);
+        bytes
+    };
+
+    // 并行路径要求「至少两个带体的顶层函数」才会真的分块，所以先确认本用例真的走并行；
+    // 否则下面这句只是把串行和串行比，本用例就成了假绿。
+    let par = emit(false, "par");
+    let ser = emit(true, "ser");
+    assert!(!par.is_empty(), "并行 .o 为空（假绿）");
+    assert!(
+        par.len() > 200,
+        "并行 .o 只有 {} 字节，太小，多半没走到分块发射",
+        par.len()
+    );
+    assert_eq!(
+        par, ser,
+        "并行与串行的 .o 不逐字节相同（并行改了产物）：并行 {}B / 串行 {}B",
+        par.len(),
+        ser.len()
+    );
+}

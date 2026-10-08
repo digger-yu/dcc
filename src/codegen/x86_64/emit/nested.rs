@@ -99,10 +99,20 @@ impl Codegen {
         if self.trampoline_slots.is_empty() {
             return;
         }
-        // 收集所有 trampoline 名称，避免借用冲突
-        let tramp_names: Vec<String> = self.trampoline_slots.keys().cloned().collect();
-        for name in &tramp_names {
-            let tramp_off = self.trampoline_slots[name];
+        // 收集所有 trampoline 名称，避免借用冲突。
+        // **按名字排序**：`trampoline_slots` 是 HashMap，直接 `keys()` 会让多个
+        // 嵌套函数时这些写入块的发射序随进程随机（实测同一份源 8 连编，
+        // `lea -768(%r13)` 与 `lea -800(%r13)` 两块会互换 ⇒ 产物不可复现）。
+        // 槽位**偏移**由 `gen_trampoline` 按 `nested_decls` 的源码序分配，本身
+        // 就确定；这里只固定发射序。
+        let mut tramp_names: Vec<&String> = self.trampoline_slots.keys().collect();
+        tramp_names.sort();
+        // 名字与槽位一起拿成 owned 列表：循环体里全是 `&mut self`，借着
+        // HashMap 的键就不能再发射。
+        let ordered: Vec<(String, i64)> =
+            tramp_names.iter().map(|n| ((*n).clone(), self.trampoline_slots[*n])).collect();
+        for (name, tramp_off) in &ordered {
+            let tramp_off = *tramp_off;
             // 加载嵌套函数地址到 rax
             self.emit_func_addr(0, name);
             // rdi = trampoline 目标地址 = r13 + tramp_off

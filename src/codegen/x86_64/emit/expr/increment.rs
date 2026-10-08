@@ -38,7 +38,7 @@ impl super::super::super::Codegen {
             l: check, r: inner, ..
         } = lv
         {
-            self.gen_expr(check, 0);
+            self.gen_expr(check, Self::EVAL_BASE);
             lv = inner.as_ref();
         }
         if let Expr::Ident { name, .. } = lv {
@@ -276,7 +276,7 @@ impl super::super::super::Codegen {
             // 段前缀：不只看 `*p`，`p[i]++` / `q->a++` / `a[i].f++` 同样要带 ——
             // 基址链下潜取，单一入口见 `lvalue_seg_prefix`。
             let seg_prefix = self.lvalue_seg_prefix(lv);
-            if !self.gen_lvalue_addr(lv, 0) {
+            if !self.gen_lvalue_addr(lv, Self::EVAL_BASE) {
                 return;
             }
             self.push(0); // 保存地址
@@ -337,9 +337,9 @@ impl super::super::super::Codegen {
         // 1. Get container address, save to frame slot
         if let Expr::Member { expr, is_arrow, .. } = lv {
             if *is_arrow {
-                self.gen_expr(expr, 0);
+                self.gen_expr(expr, Self::EVAL_BASE);
             } else {
-                self.gen_lvalue_addr(expr, 0);
+                self.gen_lvalue_addr(expr, Self::EVAL_BASE);
             }
         }
         if field_off != 0 {

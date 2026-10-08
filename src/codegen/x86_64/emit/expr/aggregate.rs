@@ -72,7 +72,7 @@ impl Codegen {
         self.push(1); // 保存目标地址 (rcx)
         if !self.gen_lvalue_addr(r, 6) {
             // 非 lvalue 源 (CompoundLit 等): gen_expr 约定返回聚合地址
-            self.gen_expr(r, 0);
+            self.gen_expr(r, Self::EVAL_BASE);
             self.mov(6, 0);
         }
         self.pop(7); // rdi = 目标地址
@@ -437,7 +437,7 @@ impl Codegen {
                 // *ptr: evaluate ptr to get address, use directly as source.
                 // This avoids the rax/rdx temp path which only handles 16 bytes.
                 Expr::Deref { e: inner, .. } => {
-                    self.gen_expr(inner, 0); // rax = ptr
+                    self.gen_expr(inner, Self::EVAL_BASE); // rax = ptr
                     self.mov(6, 0); // rsi = rax (source address)
                     true
                 },
@@ -448,7 +448,7 @@ impl Codegen {
                 // 链式聚合赋值 / 语句表达式块值: gen_expr 约定返回聚合
                 // 目标地址, 直接作源 (20070919-1: a = ({ ...; p[3] = b; }))
                 Expr::Assign { .. } | Expr::StmtExpr { .. } => {
-                    self.gen_expr(r, 0);
+                    self.gen_expr(r, Self::EVAL_BASE);
                     self.mov(6, 0); // rsi = rax (聚合源地址)
                     true
                 },
@@ -457,7 +457,7 @@ impl Codegen {
         };
         if !got_src {
             if matches!(dst_ty, Type::Vector(_, _)) {
-                self.gen_expr(r, 0);
+                self.gen_expr(r, Self::EVAL_BASE);
                 let temp_off = self.vector_temp_base(0, sz);
                 self.emit_lea_r13(6, temp_off);
             } else {
@@ -500,7 +500,7 @@ impl Codegen {
                         // 源的 (实部, 虚部) 对由 gen_expr 按 complex rvalue 统一
                         // 约定物化在复数结果带, stride = 源内型宽度。
                         let band_off = self.complex_result_off();
-                        self.gen_expr(r, 0);
+                        self.gen_expr(r, Self::EVAL_BASE);
                         let src_isz = si.size() as i64;
                         let d_isz = inner.base.size() as i64;
                         // 目标地址: staged (全局/运行时地址) 走寄存器间接, 局部
@@ -544,7 +544,7 @@ impl Codegen {
                                 self.store_complex_at_rcx(r, &inner.base);
                             } else {
                                 // f/d 与 int 截断臂: 先 gen_expr 再寻址。
-                                self.gen_expr(r, 0);
+                                self.gen_expr(r, Self::EVAL_BASE);
                                 self.emit_agg_dst_addr(dst, 1); // rcx = dst
                                                                 // [`store_complex_at_rcx`] 的交付约定是「调用方把
                                                                 // 目标地址 push 入栈, 内部自行 pop」(见其注释) ——
@@ -609,7 +609,7 @@ impl Codegen {
                             );
                         } else {
                             // 局部 f/d 与局部 int 目标
-                            self.gen_expr(r, 0);
+                            self.gen_expr(r, Self::EVAL_BASE);
                             if dst_float {
                                 // Convert integer RHS to float if needed
                                 // (e.g., c = 0 where c is _Complex double)
@@ -664,7 +664,7 @@ impl Codegen {
                 if let Type::Complex(inner) = dst_ty {
                     if !matches!(&inner.base, Type::Float | Type::Double | Type::LongDouble) {
                         let result_off = self.complex_result_off();
-                        self.gen_expr(r, 0);
+                        self.gen_expr(r, Self::EVAL_BASE);
                         if !matches!(r.ty(), Type::Complex(_) | Type::Imaginary(_)) {
                             // 标量 RHS: 实部 = rax 值, 虚部清零 (物化为同宽
                             // 布局后走下方同宽整体拷贝)。必须按 inner 宽度
@@ -748,18 +748,40 @@ impl Codegen {
                 }
                 // sret 调用返回: gen_expr 后 rax = 结果缓冲地址 (而非数据),
                 // 直接以 rax 为源整体拷贝, 不能把 rax/rdx 当作前 16 字节数据物化.
-                if matches!(r, Expr::Call { .. }) && Self::needs_memory_return(&r.ty()) {
-                    self.gen_expr(r, 0);
+                //
+                // 先剥掉 SSA 重建给聚合右值套上的 `+ 0`：那一条不是算术，而是「把聚合值
+                // 拷进目标」的 copy 形态（与 `expr_rebuild.rs:95` 注释里那族 `fn + 0` 同一个
+                // 写法）。不剥掉它，下面所有分支看到的都不是「一个内存对象」而是「一个
+                // 表达式」，于是走通用路：假定 `gen_expr` 后前 16 字节在 `rax:rdx`。而内存
+                // 聚合的求值给出的是**地址**，`%rdx` 是从未装载过的垃圾；临时区又按
+                // `dst_off - padded` 算，对 `y = x` 恰好落在**源对象自己身上**，于是先把
+                // `x.b` 写成垃圾才开始拷贝 —— N13 的实测形状（`struct S{long a,b;} x={1,2};
+                // y=x;` gcc 给 3、dcc 给 201/249 且垃圾值随环境变），见设计 §11.40/§11.42。
+                let rhs: &Expr = match r {
+                    Expr::Binop { op: BinOp::Add, l, r: zero, .. }
+                        if matches!(**zero, Expr::Int { v: 0, .. })
+                            && matches!(l.ty(), Type::Struct(..) | Type::Union(..) | Type::Array(..)) =>
+                    {
+                        l.as_ref()
+                    }
+                    _ => r,
+                };
+                if matches!(rhs, Expr::Call { .. }) && Self::needs_memory_return(&rhs.ty()) {
+                    self.gen_expr(rhs, Self::EVAL_BASE);
                     self.mov(6, 0); // rsi = rax (sret 缓冲地址)
-                } else if matches!(r, Expr::CompoundLit { .. }) {
+                } else if matches!(rhs, Expr::CompoundLit { .. }) {
                     // CompoundLit: gen_expr builds the struct on the stack
                     // and returns the address in rax. Use rax directly as
                     // the source address for the copy.
-                    self.gen_expr(r, 0);
+                    self.gen_expr(rhs, Self::EVAL_BASE);
                     self.mov(6, 0); // rsi = rax (compound lit temp address)
+                } else if self.gen_lvalue_addr(rhs, 6) {
+                    // 右值本身就是一个内存对象（`y = x` 剥掉 `+0` 后就是 `x`）：
+                    // `gen_lvalue_addr` 已经把它的地址发到 rsi（同文件第 73 行用的同一个助手），
+                    // 不需要任何物化，也就不会碰到上面那个临时区摞到源对象上的问题。
                 } else {
                     // 通用路径: 求值表达式, 存到帧临时区, 然后拷贝
-                    self.gen_expr(r, 0);
+                    self.gen_expr(rhs, Self::EVAL_BASE);
                     // 目标有帧槽时用其上方的安全临时区域; 不可直存的目标
                     // (全局 / 运行时地址) 没有可用帧槽, 现分配一个物化槽
                     // (旧写法统一用 `dst_off - padded`, 对全局即 `0 - padded`,
@@ -818,7 +840,7 @@ impl Codegen {
             self.gen_init_list_at(var_off, ty, inits);
         } else if let Some(InitItem::Expr(e)) = inits.first() {
             // 标量类型的单元素初始化 (C23 大括号初始化: double x = {1})
-            self.gen_expr(e, 0);
+            self.gen_expr(e, Self::EVAL_BASE);
             if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
                 self.emit_scalar_to_xmm0_if_needed(e, ty);
                 if matches!(ty, Type::Float) {
@@ -878,7 +900,7 @@ impl Codegen {
                         }
                         let mut k = f;
                         while k <= l {
-                            self.gen_expr(value, 0);
+                            self.gen_expr(value, Self::EVAL_BASE);
                             if matches!(
                                 &elem_ty.base,
                                 Type::Float | Type::Double | Type::LongDouble
@@ -974,7 +996,7 @@ impl Codegen {
                             continue;
                         }
                     }
-                    self.gen_expr(value, 0);
+                    self.gen_expr(value, Self::EVAL_BASE);
                     // 浮点数组元素: int 常量需要转换到 xmm0 (double a[] = {1, 2})
                     if matches!(&elem_ty.base, Type::Float | Type::Double | Type::LongDouble) {
                         self.emit_scalar_to_xmm0_if_needed(value, &elem_ty.base);
@@ -1005,7 +1027,7 @@ impl Codegen {
                         InitItem::Expr(e) => e,
                         _ => continue,
                     };
-                    self.gen_expr(value, 0);
+                    self.gen_expr(value, Self::EVAL_BASE);
                     self.emit_scalar_to_xmm0_if_needed(value, &elem_ty.base);
                     let off = base + (i * elem_size) as i64;
                     if matches!(elem_ty.base, Type::Float) {
@@ -1225,7 +1247,7 @@ impl Codegen {
                             self.emit_store(0, store_off, container_size);
                         }
                         // 生成初始化值 → rax
-                        self.gen_expr(value, 0);
+                        self.gen_expr(value, Self::EVAL_BASE);
                         // 保存值到栈临时槽: [r13-40]
                         self.emit(&[0x49, 0x89, 0x45, 0xd8]); // mov [r13-40], rax
                                                               // 用 mov rax, r13 + add rax, imm32 计算地址, 保存到 [r13-24]
@@ -1377,7 +1399,7 @@ impl Codegen {
                             } else if matches!(value, Expr::CompoundLit { .. }) {
                                 // CompoundLit: gen_expr builds on stack,
                                 // rax = address of temp
-                                self.gen_expr(value, 0);
+                                self.gen_expr(value, Self::EVAL_BASE);
                                 // rdi = dest, rsi = rax (src)
                                 self.emit_lea_r13(7, store_off); // rdi = dest
                                 self.mov(6, 0); // rsi = rax
@@ -1390,7 +1412,7 @@ impl Codegen {
                                 Expr::Member { .. } | Expr::Index { .. } | Expr::Deref { .. }
                             ) {
                                 // Lvalue: get address directly
-                                if self.gen_lvalue_addr(value, 0) {
+                                if self.gen_lvalue_addr(value, Self::EVAL_BASE) {
                                     self.emit_lea_r13(7, store_off); // rdi = dest
                                     self.mov(6, 0); // rsi = rax
                                     self.mov_imm(1, sz as i128); // rcx = count
@@ -1404,7 +1426,7 @@ impl Codegen {
                                 continue;
                             }
                         }
-                        self.gen_expr(value, 0);
+                        self.gen_expr(value, Self::EVAL_BASE);
                         if let Some(ft) = &field_ty_opt {
                             if matches!(ft, Type::Float | Type::Double | Type::LongDouble) {
                                 self.emit_scalar_to_xmm0_if_needed(value, ft);
@@ -1441,7 +1463,7 @@ impl Codegen {
                 // 递归路径下不可达 (elem_ty/field_ty 为标量时 value 不会是
                 // InitList); 保险: 按标量单元素取首值写内存
                 if let Some(InitItem::Expr(e)) = inits.first() {
-                    self.gen_expr(e, 0);
+                    self.gen_expr(e, Self::EVAL_BASE);
                     if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
                         self.emit_scalar_to_xmm0_if_needed(e, ty);
                         if matches!(ty, Type::Float) {

@@ -15,7 +15,7 @@ impl Codegen {
     pub fn gen_expr_comma(&mut self, e: &Expr, dst: u8) {
         if let Expr::Comma { l, r, .. } = e {
             // 逗号运算符: 求值 lhs 丢弃, 求值 rhs 结果放入 dst
-            self.gen_expr(l, 0);
+            self.gen_expr(l, Self::EVAL_BASE);
             self.gen_expr(r, dst);
         }
     }
@@ -26,7 +26,7 @@ impl Codegen {
             cond, then_, else_, ..
         } = e
         {
-            self.gen_expr(cond, 0);
+            self.gen_expr(cond, Self::EVAL_BASE);
             self.emit_truth_flags(&cond.ty());
             let le = self.fresh_label();
             let lend = self.fresh_label();

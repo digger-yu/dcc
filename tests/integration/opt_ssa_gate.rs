@@ -43,24 +43,12 @@
 //      判据与 codegen 共用 `crate::semantics`，修法是地址只求一次的读—改—写。
 //
 // 全部通过 `run_gcc_cross_check_opt` 运行：带 `-O` 档位、带超时、与 gcc 逐字节对照。
-
-/// 逐档与 gcc 对照同一份夹具; 失效形态含 HANG, 故必须走有界运行。
-fn assert_all_levels_match_gcc(tag: &str, src: &str, why: &str) {
-    if !tool_exists("gcc") {
-        return;
-    }
-    for flag in ["-O0", "-O1", "-O2", "-O3"] {
-        assert_eq!(
-            run_gcc_cross_check_opt(tag, src, &[flag]),
-            0,
-            "{flag}: {why}"
-        );
-    }
-}
+// 共用的逐档对照助手 `assert_all_levels_match_gcc`、汇编归一助手 `asm_body` 与
+// 开关对照助手 `dcc_asm_with_pipe` 都住在 `tests/common/harness.rs`。
 
 #[test]
 fn ssa_gate_switch_loop_matches_gcc_at_all_levels() {
-    assert_all_levels_match_gcc(
+    harness::assert_all_levels_match_gcc(
         "ssa-gate-switch-loop",
         include_str!("../fixtures/opt/ssa_gate_switch_loop.c"),
         "switch/label 里包的循环被 SSA 闸门漏判 ⇒ rebuild_cycle 出错",
@@ -69,7 +57,7 @@ fn ssa_gate_switch_loop_matches_gcc_at_all_levels() {
 
 #[test]
 fn ssa_order_multi_assign_matches_gcc_at_all_levels() {
-    assert_all_levels_match_gcc(
+    harness::assert_all_levels_match_gcc(
         "ssa-order-multi-assign",
         include_str!("../fixtures/opt/ssa_order_multi_assign.c"),
         "块内重排颠倒了同一变量的多次赋值顺序",
@@ -78,7 +66,7 @@ fn ssa_order_multi_assign_matches_gcc_at_all_levels() {
 
 #[test]
 fn ssa_loop_shapes_match_gcc_at_all_levels() {
-    assert_all_levels_match_gcc(
+    harness::assert_all_levels_match_gcc(
         "ssa-loop-shapes",
         include_str!("../fixtures/opt/ssa_loop_shapes.c"),
         "循环形态在优化档位下行为不一致",
@@ -87,7 +75,7 @@ fn ssa_loop_shapes_match_gcc_at_all_levels() {
 
 #[test]
 fn ssa_rebuild_inline_order_matches_gcc_at_all_levels() {
-    assert_all_levels_match_gcc(
+    harness::assert_all_levels_match_gcc(
         "ssa-rebuild-inline-order",
         include_str!("../fixtures/opt/ssa_rebuild_inline_order.c"),
         "重建期内联把临时值的读搬到了同基名写入之后 (或丢弃了节点头的写)",
@@ -96,7 +84,7 @@ fn ssa_rebuild_inline_order_matches_gcc_at_all_levels() {
 
 #[test]
 fn ssa_addr_taken_local_matches_gcc_at_all_levels() {
-    assert_all_levels_match_gcc(
+    harness::assert_all_levels_match_gcc(
         "ssa-addr-taken-local",
         include_str!("../fixtures/opt/ssa_addr_taken_local.c"),
         "被取址的标量局部被 SSA 版本化, 丢了指针的间接写",
@@ -105,7 +93,7 @@ fn ssa_addr_taken_local_matches_gcc_at_all_levels() {
 
 #[test]
 fn ssa_unroll_nested_iv_matches_gcc_at_all_levels() {
-    assert_all_levels_match_gcc(
+    harness::assert_all_levels_match_gcc(
         "ssa-unroll-nested-iv",
         include_str!("../fixtures/opt/ssa_unroll_nested_iv.c"),
         "-O3 展开没替换嵌套语句里的归纳变量, 或复制了悬空的 break/continue",
@@ -114,7 +102,7 @@ fn ssa_unroll_nested_iv_matches_gcc_at_all_levels() {
 
 #[test]
 fn gvn_loop_copied_iv_matches_gcc_at_all_levels() {
-    assert_all_levels_match_gcc(
+    harness::assert_all_levels_match_gcc(
         "gvn-loop-copied-iv",
         include_str!("../fixtures/opt/gvn_loop_copied_iv.c"),
         "AST 层 GVN 用块内写入集合判定, 删掉了循环变量的拷贝声明",
@@ -123,7 +111,7 @@ fn gvn_loop_copied_iv_matches_gcc_at_all_levels() {
 
 #[test]
 fn underscore_locals_match_gcc_at_all_levels() {
-    assert_all_levels_match_gcc(
+    harness::assert_all_levels_match_gcc(
         "underscore-locals",
         include_str!("../fixtures/opt/underscore_locals.c"),
         "下划线命名的用户变量被当成合成临时值, 或 SSA 版本名与临时值 base 撞名",
@@ -134,7 +122,7 @@ fn underscore_locals_match_gcc_at_all_levels() {
 /// / 循环体内）逐档与 gcc 对照。见文件头第 8 条与夹具注释里的实测数字。
 #[test]
 fn ssa_mem_rmw_matches_gcc_at_all_levels() {
-    assert_all_levels_match_gcc(
+    harness::assert_all_levels_match_gcc(
         "ssa-mem-rmw",
         include_str!("../fixtures/opt/ssa_mem_rmw.c"),
         "SSA 降级丢掉了内存左值的读—改—写（返回常量且不写内存）",
@@ -156,7 +144,7 @@ fn ssa_mem_rmw_matches_gcc_at_all_levels() {
 /// 直接给出函数名与档位。完整历史与修法见 `docs/ssa-pass-upgrade-plan.md` §7.40。
 #[test]
 fn c_array2d_global_stride_matches_gcc_at_all_levels() {
-    assert_all_levels_match_gcc(
+    harness::assert_all_levels_match_gcc(
         "c-array2d-global-stride-opt",
         include_str!("../fixtures/c/array2d_global_stride.c"),
         "多维下标写入在高档位下行副本化/行 stride 算错",
@@ -178,7 +166,7 @@ fn c_array2d_global_stride_matches_gcc_at_all_levels() {
 ///   * `ssa_pipe_nested.c`：锁住「嵌套场景不得破坏外层结构」这条准入判据。
 #[test]
 fn ssa_pipe_reduction_matches_gcc_at_all_levels() {
-    assert_all_levels_match_gcc(
+    harness::assert_all_levels_match_gcc(
         "ssa-pipe-reduction",
         include_str!("../fixtures/opt/ssa_pipe_reduction.c"),
         "P16 落地的 peel/kernel/轮转 phi 改变了归约语义",
@@ -187,7 +175,7 @@ fn ssa_pipe_reduction_matches_gcc_at_all_levels() {
 
 #[test]
 fn ssa_pipe_nested_matches_gcc_at_all_levels() {
-    assert_all_levels_match_gcc(
+    harness::assert_all_levels_match_gcc(
         "ssa-pipe-nested",
         include_str!("../fixtures/opt/ssa_pipe_nested.c"),
         "内层循环被流水时外层携带值丢失或外层推进链被破坏（曾表现为死循环）",
@@ -198,43 +186,11 @@ fn ssa_pipe_nested_matches_gcc_at_all_levels() {
 /// depth=0、5 级链 depth=0、trip 太短）放在同一个翻译单元里，默认路径逐档与 gcc 对照。
 #[test]
 fn ssa_pipe_chain_matches_gcc_at_all_levels() {
-    assert_all_levels_match_gcc(
+    harness::assert_all_levels_match_gcc(
         "ssa-pipe-chain",
         include_str!("../fixtures/opt/ssa_pipe_chain.c"),
         "流水落地或准入判定改变了行为",
     );
-}
-
-/// 逐字节对照汇编前摘掉 `.file` 行。
-///
-/// 为什么必须摘：`compile_asm_text_with_env` 把调用方给的 tag 写进源文件名，于是两次
-/// 调用的产物**永远**在 `.file` 这一行上差一串字节。不摘的话 `assert_ne!` 会因为文件
-/// 名而空跑（看起来绿，其实证明不了任何事），`assert_eq!` 会因为同一个原因无条件失败。
-/// 实测这条不是理论问题：本轮新加的反向断言首跑就是被 `.file` 挡红的。
-fn asm_body(asm: &str) -> String {
-    asm.lines()
-        .filter(|l| !l.starts_with("\t.file"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// 同一份源码、同一档位，只让 P16 开/关（`DCC_SSA_OFF=pipe`），返回 -O2 汇编。
-fn dcc_asm_with_pipe(name: &str, src: &str, ssa_off: Option<&str>) -> String {
-    let dir = env::temp_dir();
-    let sp = dir.join(format!("dcc-{name}-pipe-{}.c", std::process::id()));
-    let ap = dir.join(format!("dcc-{name}-pipe-{}.s", std::process::id()));
-    fs::write(&sp, src).expect("写夹具");
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
-    cmd.arg("-O2").args(["-S", "-o"]).arg(&ap).arg(&sp);
-    if let Some(v) = ssa_off {
-        cmd.env("DCC_SSA_OFF", v);
-    }
-    let out = cmd.output().expect("跑 dcc");
-    assert!(out.status.success(), "编译失败：{}", String::from_utf8_lossy(&out.stderr));
-    let text = fs::read_to_string(&ap).unwrap_or_default();
-    let _ = fs::remove_file(&sp);
-    let _ = fs::remove_file(&ap);
-    text
 }
 
 /// 「pass 已接入」必须由**产物差异**证明，不能由代码已调用证明 —— 否则它可以是一个
@@ -243,8 +199,8 @@ fn dcc_asm_with_pipe(name: &str, src: &str, ssa_off: Option<&str>) -> String {
 #[test]
 fn ssa_pipe_default_on_changes_the_product() {
     let src = include_str!("../fixtures/opt/ssa_pipe_chain.c");
-    let on = dcc_asm_with_pipe("pipe-chain", src, None);
-    let off = dcc_asm_with_pipe("pipe-chain", src, Some("pipe"));
+    let on = harness::dcc_asm_with_pipe("pipe-chain", src, None);
+    let off = harness::dcc_asm_with_pipe("pipe-chain", src, Some("pipe"));
     assert_ne!(
         on, off,
         "默认路径的 -O2 产物必须因流水而不同；与 DCC_SSA_OFF=pipe 逐字节相同 ⇒ 本 pass 空转"
@@ -262,7 +218,7 @@ fn ssa_pipe_default_on_changes_the_product() {
 /// 都会变成错值（期望值取 gcc 实测）。
 #[test]
 fn ssa_regalloc_locals_match_gcc_at_all_levels() {
-    assert_all_levels_match_gcc(
+    harness::assert_all_levels_match_gcc(
         "ssa-regalloc-locals",
         include_str!("../fixtures/opt/ssa_regalloc_locals.c"),
         "自动寄存器分配的某条准入判据失效（绑定变量读写错、或该拒的没拒）",
@@ -304,8 +260,8 @@ fn plain_loops_still_go_through_ssa() {
     );
     assert!(!on.is_empty(), "编译应产出汇编");
     assert_ne!(
-        asm_body(&on),
-        asm_body(&off),
+        harness::asm_body(&on),
+        harness::asm_body(&off),
         "普通 for 循环仍应走 SSA 往返（否则判据过宽，覆盖面丢光）"
     );
 
@@ -326,8 +282,8 @@ fn plain_loops_still_go_through_ssa() {
     let (e_ssa, _) = compile_asm_text_with_env("multiexit-early-ssa", early, &["-O2"], &[]);
     assert!(!e_ast.is_empty() && !e_ssa.is_empty(), "两侧都应产出汇编");
     assert_ne!(
-        asm_body(&e_ast),
-        asm_body(&e_ssa),
+        harness::asm_body(&e_ast),
+        harness::asm_body(&e_ssa),
         "体内 return 的多出口循环应走 SSA 往返（本轮释放的覆盖面）"
     );
 
@@ -344,8 +300,8 @@ fn plain_loops_still_go_through_ssa() {
     // 实测读数：摘掉 `.file` 后两侧逐字节相同（-O2），即这个函数确实整函数掉出了 SSA；
     // 而上面 `early` 那一族摘掉 `.file` 后仍差 800 多行，确实在 SSA 里。
     assert_eq!(
-        asm_body(&b_ast),
-        asm_body(&b_ssa),
+        harness::asm_body(&b_ast),
+        harness::asm_body(&b_ssa),
         "不可表达的旋转 do-while 必须整函数退回 SSA（否则又把错值放了出来）"
     );
 
@@ -361,8 +317,8 @@ fn plain_loops_still_go_through_ssa() {
     );
     let (k_ssa, _) = compile_asm_text_with_env("multiexit-kdec-ssa", kdec, &["-O2"], &[]);
     assert_ne!(
-        asm_body(&k_ast),
-        asm_body(&k_ssa),
+        harness::asm_body(&k_ast),
+        harness::asm_body(&k_ssa),
         "`while (k-- > 0)` 被误挡出 SSA ⇒ 本轮收窄把最常见的循环一并丢了"
     );
 }
@@ -376,7 +332,7 @@ fn plain_loops_still_go_through_ssa() {
 /// 都是只钉了一个方向就出事。
 #[test]
 fn loop_exit_ownership_shapes_match_gcc_at_all_levels() {
-    assert_all_levels_match_gcc(
+    harness::assert_all_levels_match_gcc(
         "loop-exit-ownership",
         include_str!("../fixtures/opt/loop_exit_ownership.c"),
         "出口所有权模型的放行形状在某一档与 gcc 不一致",
@@ -391,7 +347,7 @@ fn loop_exit_ownership_shapes_match_gcc_at_all_levels() {
 /// `do_break` 在 -O2/-O3 立即得 `2 2 5 9 …`（gcc `1 1 3 6 …`），所以它不是空跑。
 #[test]
 fn loop_exit_ownership_boundary_matches_gcc_at_all_levels() {
-    assert_all_levels_match_gcc(
+    harness::assert_all_levels_match_gcc(
         "loop-exit-ownership-adv",
         include_str!("../fixtures/opt/loop_exit_ownership_adv.c"),
         "出口所有权模型的边界形状没挡住或误挡了",
@@ -817,4 +773,232 @@ fn loop_exit_ownership_goto_matches_gcc_at_all_levels() {
              → gcc `7 7 -3 -3 -3 -3 -3` 应变为 `7 7 -8 -8 -8 -8 -8`",
         );
     }
+}
+
+/// N1：嵌套函数的**程序级符号事实**必须随并行 chunk 带回主 Codegen。
+///
+/// 三条断言各钉一半，缺一不可：
+///   1) 四档逐档与 gcc 对照 —— 符号丢了运行期就是链接失败，只编 `-S` 看不见；
+///   2) 并行与串行的 `.text` 反汇编逐字节相同，且六个唯一名**后缀编号相同** ——
+///      钉住「计数不能在 worker 里各起一路」（旧实测并行 `ib_add_b.0` / 串行
+///      `ib_add_b.1`，两份产物因此永远对不上）；
+///   3) `.symtab` 里每个嵌套函数恰好一条 LOCAL/FUNC 定义项、零条 UND ——
+///      旧实测 `-O2` 全是 `U ia_add_a.0`，而重复发射那一半让同一符号进了两遍。
+///
+/// 为什么不比整个 `.o` 字节：`-O2` 并行下每个 worker 都对自己的 `string_pool`
+/// 快照去重，跨 worker 重复的字符串会被各存一份（`.rodata` 膨胀，见 §11.13 的
+/// N10），那是另一条独立立项的债，不能拿它当本用例的判据。
+#[test]
+#[cfg(unix)]
+fn nested_func_symbol_facts_survive_parallel_codegen() {
+    let source = include_str!("../fixtures/opt/nested_func_symbol_facts.c");
+    // 1) 四档逐档与 gcc 对照
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("nested-sym-facts", source, &[flag]),
+            0,
+            "{flag}: 嵌套函数（含两层嵌套与 &nested 取址）的运行期结果与 gcc 不同"
+        );
+    }
+    // 2) 并行 vs 串行的 .o：符号与代码必须同源
+    let src = std::env::temp_dir().join(format!("dcc-nested-sym-{}.c", std::process::id()));
+    fs::write(&src, source).expect("write nested fixture");
+    let compile = |serial: bool| -> std::path::PathBuf {
+        let obj = std::env::temp_dir().join(format!(
+            "dcc-nested-sym-{}-{}.o",
+            std::process::id(),
+            if serial { "ser" } else { "par" }
+        ));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+        if serial {
+            cmd.env("DCC_NO_PARALLEL", "1");
+        } else {
+            cmd.env_remove("DCC_NO_PARALLEL");
+        }
+        let out = cmd
+            .args(["-O2", "-c", "-o"])
+            .arg(&obj)
+            .arg(&src)
+            .output()
+            .expect("run dcc");
+        assert!(
+            out.status.success(),
+            "{} 编译失败: {}",
+            if serial { "串行" } else { "并行" },
+            String::from_utf8_lossy(&out.stderr)
+        );
+        obj
+    };
+    let par = compile(false);
+    let ser = compile(true);
+    let disasm = |p: &std::path::Path| -> String {
+        let d = Command::new("objdump")
+            .args(["-d"])
+            .arg(p)
+            .output()
+            .expect("objdump");
+        assert!(d.status.success(), "objdump -d 失败: {p:?}");
+        // 去掉头行：它带的是对象文件名，两侧文件名本来就不同（不依赖 locale）
+        let stem = p.file_name().unwrap().to_string_lossy().to_string();
+        String::from_utf8_lossy(&d.stdout)
+            .lines()
+            .filter(|l| !l.contains(&stem))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let (par_asm, ser_asm) = (disasm(&par), disasm(&ser));
+    if par_asm != ser_asm {
+        // 失败信息直接给出第一条不同的反汇编行，免得下次再靠肉眼比两坨字节
+        let pd: Vec<&str> = par_asm.lines().collect();
+        let sd: Vec<&str> = ser_asm.lines().collect();
+        let first = (0..pd.len().max(sd.len()))
+            .find(|i| pd.get(*i) != sd.get(*i))
+            .unwrap_or(0);
+        panic!(
+            "并行与串行的 .text 不同 ⇒ worker 侧还在自己分配嵌套函数的唯一名\n\
+             第一条差异在第 {} 行:\n  par: {:?}\n  ser: {:?}",
+            first,
+            pd.get(first).unwrap_or(&"<无>"),
+            sd.get(first).unwrap_or(&"<无>")
+        );
+    }
+    let par_syms = elf64_syms(&fs::read(&par).expect("read parallel .o"));
+    let ser_syms = elf64_syms(&fs::read(&ser).expect("read serial .o"));
+    // N11：同一份源连编两次必须字节相同。旧实测 `emit_trampoline_to_stack` 按
+    // HashMap 随机序发射多个 trampoline 的写入块 ⇒ 两个 `lea -768/-800(%r13)`
+    // 会互换（8 连编里 4 次对 4 次），而语料里没有含嵌套函数的夹具，
+    // 所有一直跑绿的「可复现」检查从来推不到这条。
+    let par2 = compile(false);
+    let par2_asm = disasm(&par2);
+    let par_bytes = fs::read(&par).expect("read parallel .o");
+    let par2_bytes = fs::read(&par2).expect("read second parallel .o");
+    let _ = std::fs::remove_file(&par2);
+    assert_eq!(
+        par_asm, par2_asm,
+        "同一份源两次发射的 .text 不同 ⇒ 还有按 HashMap 随机序发射的站点"
+    );
+    assert_eq!(
+        par_bytes, par2_bytes,
+        "同一份源两次 .o 不同 ⇒ 除 .text 之外的产物事实也不确定"
+    );
+    let _ = std::fs::remove_file(&par);
+    let _ = std::fs::remove_file(&ser);
+    let _ = std::fs::remove_file(&src);
+    // 六个嵌套函数：唯一名与编号必须逐个对上
+    let want = [
+        "ia_add_a.0",
+        "ib_add_b.1",
+        "ic_add_b.2",
+        "mid_deep.3",
+        "leaf_mid_deep.3.4",
+        "nb_use_addr.5",
+    ];
+    for name in want {
+        let hits: Vec<_> = par_syms.iter().filter(|s| s.name == name).collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "并行 .symtab 里 `{name}` 应有且仅有一条定义项，实际 {} 条: {:?}",
+            hits.len(),
+            par_syms.iter().map(|s| s.name.clone()).collect::<Vec<_>>()
+        );
+        assert_eq!(hits[0].bind, 0, "`{name}` 必须是 LOCAL 绑定（嵌套函数）");
+        assert_eq!(hits[0].stype, 2, "`{name}` 必须是 STT_FUNC");
+        assert_eq!(hits[0].shndx, 1, "`{name}` 必须定义在 .text（0 = UND）");
+        assert!(hits[0].size > 0, "嵌套函数的 st_size 必须随 chunk 带回: {name}");
+        // 串行侧同一名字、同一编号
+        assert!(
+            ser_syms.iter().any(|s| s.name == name && s.shndx == 1),
+            "串行侧应定义同一个 `{name}`（编号不一致就是两套真源）"
+        );
+    }
+    // 没有一条 UND 的同名残留（旧形状就是发成 UND 后链接失败）
+    for name in want {
+        assert!(
+            !par_syms.iter().any(|s| s.name == name && s.shndx == 0),
+            "`{name}` 不得同时存在 UND 项"
+        );
+    }
+}
+
+/// VLA/VM 对象的**运行时尺寸身份**必须在四个档位指向同一个对象。
+///
+/// 这条是 `vla_and_flexible_array_match_gcc_at_all_levels` 照不出来的那一半：那份夹具
+/// 只「写完再读回」，而基址错的形状是**读写两侧同错**，因此自洽。本夹具把
+/// `sizeof a`（读元数据槽里的 size 字段）、元素写（落回同一区域）与
+/// `probe(1, a)`（调用侧要读槽内容当数据区基址）放在同一份源里，错值才现形。
+///
+/// 两个档位口径都要钉：`-O0/-O1` 走 AST 直发（消费侧基址由
+/// `semantics::address_from_storage` 决定），`-O2/-O3` 走 SSA 往返（对象身份由
+/// `mem/object_resolver.rs::resolve_identity` 的查表顺序 + `opt.rs` 的
+/// 「带运行时尺寸对象不进 IR」闸决定）。修前实测：开工基线四档全
+/// SIGSEGV(139)；只修消费侧基址时 -O2/-O3 的 `sizeof` 读回 0（同形状 252 vs 255）。
+#[test]
+fn vla_runtime_size_identity_matches_gcc_at_all_levels() {
+    if !tool_exists("gcc") {
+        return;
+    }
+    let src = include_str!("../fixtures/opt/vla_runtime_size_identity.c");
+    for flag in ["-O0", "-O1", "-O2", "-O3"] {
+        assert_eq!(
+            run_gcc_cross_check_opt("vla-runtime-identity", src, &[flag]),
+            0,
+            "{flag}: VLA/VM 对象的基址或运行时尺寸在档位之间不再是同一个对象"
+        );
+    }
+}
+
+// ============================================================================
+// Phase 5.1 前置三：延伸池（caller-saved 家）的发号已被实测否决，本用例钉住这个结论
+//
+// 形状：`e` 的家给成 %rcx 后，紧跟其后的求值把 %rcx 当通用 scratch 连用三次，家被普通
+// 计算覆盖 ⇒ -O2/-O3 少一个 3（gcc 50 / dcc 47）。完整证据与设计结论见
+// docs/p12-physreg-spill-design.md §11.39 与 `src/ssa/regalloc.rs::auto_pool` 的注释。
+//
+// 为什么这条用例值得留：否决之后最大的风险不是「忘了做」，而是**有人在没解决暂存约定的
+// 情况下把池打开**，而打开后只在少数源上错值。本用例让那种改动立刻红。
+// ============================================================================
+
+#[test]
+fn ext_pool_hands_out_no_homes_until_scratch_respects_occupancy() {
+    // 12 个依次短命、各跨一次调用的局部：如果延伸池开着，一定会被用到。
+    let src = r#"
+static long acc;
+long eat(long k) { acc += k; return k * 3 + 1; }
+long f(long k) {
+    long a = eat(k + 1); long b = eat(k + 2); long c = eat(k + 3);
+    long d = eat(k + 4); long e = eat(k + 5); long g = eat(k + 6);
+    long h = eat(k + 7); long i = eat(k + 8); long j = eat(k + 9);
+    long m = eat(k + 10); long q = eat(k + 11);
+    acc += a + b + c + d + e + g + h + i + j + m + q;
+    return acc;
+}
+int main(void) { long r = f(7); return (int)(r % 251); }
+"#;
+    let dir = std::env::temp_dir();
+    let sp = dir.join(format!("dcc-extoff-{}.c", std::process::id()));
+    fs::write(&sp, src).expect("写夹具");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .arg("-O2")
+        .arg("-S")
+        .arg("-o")
+        .arg("/dev/null")
+        .arg(&sp)
+        .env("DCC_REGALLOC_DUMP", "1")
+        .output()
+        .expect("跑 dcc");
+    let diag = String::from_utf8_lossy(&out.stderr).to_string();
+    // 候选确实很多（否则本用例是在测一条不会执行的路径）：必须看到拒绑。
+    assert!(
+        diag.contains("no-free-auto-assignable-register"),
+        "被测源必须把自动池占满并出现拒绑（否则下面的「没有延伸池家」是空跑）：\n{diag}"
+    );
+    for r in ["%rcx", "%rsi", "%rdi", "%r8", "%r9"] {
+        assert!(
+            !diag.contains(&format!("-> {r}")),
+            "延伸池号 {r} 被当成家发出去了，而暂存取号还没尊重占用事实 —— 这会产出静默错值 \
+             （实测形状见设计 §11.39）。要开池必须先让求值侧的 scratch 号查 `RegBank`。"
+        );
+    }
+    let _ = fs::remove_file(&sp);
 }

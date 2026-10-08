@@ -13,6 +13,8 @@ pub mod elf; // ELF object file generation
 pub mod expression_executor; // Expression evaluation engine
 pub mod expressions; // Expression lowering utilities
 pub mod features; // FeatureSet capability declarations
+/// 「这个后端的家能力面」与各 target 的寄存器名表（Phase 6.4）。
+pub mod homes;
 pub mod instruction_traits; // Instruction templates and traits
 pub mod mini_asm; // Non-x86 inline assembly parser
 pub mod operand_utils; // Operand manipulation helpers

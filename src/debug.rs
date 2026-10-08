@@ -66,6 +66,35 @@ impl ArchKind {
             ArchKind::Arm => 11,                     // R11 (fp)
         }
     }
+    /// 把本后端 GP 的**硬件编号**（x86_64：REX 三字段编出来的那个 0..31）翻成
+    /// DWARF 寄存器号。返回 None = 本 target 今天拿不出这个对应关系。
+    ///
+    /// 为什么需要一个专门的表而不是直接拿硬件号用：SysV/x86-64 psABI 的 DWARF 编号顺序与
+    /// 机器码编码**不一样**（rdx=1、rcx=2、rsi=4、rdi=5、rbp=6、rsp=7）。拿硬件号发
+    /// `DW_OP_reg` 就是让调试器去读另一个寄存器 —— 一个看不见的错（比不报位置更坏）。
+    ///
+    /// 只定义 x86_64：其他 target 的后端今天不消费 `Location::Reg`（见
+    /// `codegen::shared::homes::home_support` 只有 x86_64 是 StackAndRegister），所以下面
+    /// 一律 None而不是猜一张没对拍过的表。
+    pub fn dwarf_reg_of_gp_hw(self, hw: u8) -> Option<u8> {
+        match self {
+            ArchKind::X86_64 => match hw {
+                0 => Some(0),  // rax
+                1 => Some(2),  // rcx
+                2 => Some(1),  // rdx
+                3 => Some(3),  // rbx
+                4 => Some(7),  // rsp
+                5 => Some(6),  // rbp
+                6 => Some(4),  // rsi
+                7 => Some(5),  // rdi
+                // r8..r15 两侧同序；APX 的 r16..r31 也在 DWARF 的 reg16..reg31 上
+                n @ 8..=31 => Some(n),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// 字宽（字节）
     pub fn address_size(self) -> u8 {
         match self {
@@ -524,13 +553,14 @@ impl DwarfMember {
     }
 }
 
-/// 参数位置描述 (DWARF DW_AT_location 表达式)
-/// GDB 用此信息在调试时定位函数参数在栈帧中的位置
+/// 参数/变量的位置描述 (DWARF DW_AT_location 表达式)
+/// GDB 用此信息在调试时定位对象在栈帧 / 寄存器里的位置
 #[derive(Debug, Clone, Copy)]
 pub struct DwarfParamLocation {
-    /// DWARF 表达式操作码: DW_OP_fbreg (0x91) 或 DW_OP_call_frame_cfa (0x9c)
+    /// DWARF 表达式操作码: DW_OP_fbreg (0x91)、DW_OP_call_frame_cfa (0x9c)，
+    /// 或 `DW_OP_reg0 + n`（0x50..0x6f，寄存器家；此时 `offset` 参不参与编码）。
     pub op: u8,
-    /// 偏移量 (sleb128 编码): 相对帧基址或 CFA 的字节偏移
+    /// 偏移量 (sleb128 编码): 相对帧基址或 CFA 的字节偏移；寄存器家时为 0
     pub offset: i64,
 }
 
@@ -547,6 +577,55 @@ impl DwarfParamLocation {
         Self {
             op: DW_OP_call_frame_cfa,
             offset,
+        }
+    }
+    /// 构造一个**寄存器家**的位置：`dwarf_reg` 是 DWARF 寄存器号（不是硬件编码）。
+    ///
+    /// 这是 Phase 6.2 缺的那一块：以前 DWARF 只会发栈槽位置（`DW_OP_fbreg`），所以
+    /// `src/ssa/regalloc.rs` 在 `-g` 下必须禁止寄存器家（否则调试器读一个从未写过的槽）。
+    /// 号与硬件编码的换算不在这里（见 `hw_reg_to_dwarf`）。
+    pub fn reg(dwarf_reg: u8) -> Self {
+        Self {
+            op: DW_OP_reg0 + dwarf_reg,
+            offset: 0,
+        }
+    }
+
+    /// 本位置是不是寄存器家（调试器侧与用例都要能问这一句，而不是各自看 `op` 落在哪个区间）。
+    pub fn is_register(&self) -> bool {
+        self.op >= DW_OP_reg0 && self.op <= DW_OP_reg31
+    }
+
+    /// 本位置里的 DWARF 寄存器号（非寄存器家返回 None）
+    pub fn register(&self) -> Option<u8> {
+        if self.is_register() {
+            Some(self.op - DW_OP_reg0)
+        } else {
+            None
+        }
+    }
+
+    /// 把表达式字节编入 `out`（不含 `exprloc` 的长度前缀，那由 `write_location_expr` 写）。
+    ///
+    /// `DW_OP_reg0..reg31` 是**单字节、无操作数**的；而 fbreg / call_frame_cfa 后面跟一条
+    /// sleb128。两者形状不同，所以下面按 `op` 分岔而不是统一发一个偏移（那会多发 1 字节，
+    /// 长度与内容不一致就仍旧错位）。
+    pub fn encode_into(&self, out: &mut Vec<u8>) -> Result<(), ()> {
+        out.push(self.op);
+        if self.is_register() {
+            // reg0..reg31 无操作数；再高的号得走 DW_OP_regx（本 target 今天用不到）
+            return Ok(());
+        }
+        match self.op {
+            DW_OP_fbreg | DW_OP_call_frame_cfa => {
+                write_sleb128(out, self.offset);
+                Ok(())
+            },
+            DW_OP_plus_uconst => {
+                write_uleb128(out, self.offset.max(0) as u64);
+                Ok(())
+            },
+            _ => Err(()),
         }
     }
 }
@@ -794,6 +873,15 @@ const DW_AT_call_file: u16 = 0x57;
 const DW_AT_call_line: u16 = 0x58;
 const DW_AT_linkage_name: u16 = 0x6e;
 const DW_AT_location: u16 = 0x02;
+/// 变量的 `DW_OP_fbreg` 的基准。DWARF 里它是 **subprogram** 的属性（不是变量 DIE 的），
+/// 缺了它 gdb 会说「Could not find the frame base」并且拒读任何 fbreg 定位的局部。
+/// 数值 0x40。**不靠记忆也不靠猜测**：本仓从 gcc 自己发出的 `.debug_abbrev` 字节里解出来
+/// （subprogram 那条 abbrev 的属性顺序与 readelf 打印的名字逐位对齐：`3f` external、
+/// `03` name、`3a` decl_file、`3b` decl_line、`39` decl_column、`27` prototyped、`49` type、
+/// `11` low_pc、`12` high_pc，紧接的就是 `40` = frame_base）。猜错过一次：`0x0a` 是
+/// `DW_AT_subscr_data`、`0x1d` 是 `DW_AT_containing_type`，而 readelf **照它自己的表**
+/// 解成另一个属性名，不报任何错 —— 这种错只能靠对拍工具链的真实字节而不是 记性。
+const DW_AT_frame_base: u16 = 0x40;
 const DW_AT_const_value: u16 = 0x1c;
 const DW_AT_decl_file: u16 = 0x3a;
 const DW_AT_decl_line: u16 = 0x3b;
@@ -824,6 +912,9 @@ const DW_FORM_ref_udata: u16 = 0x0f;
 const DW_OP_fbreg: u8 = 0x91;
 const DW_OP_call_frame_cfa: u8 = 0x9c;
 const DW_OP_plus_uconst: u8 = 0x23;
+// 寄存器家：DW_OP_reg0..DW_OP_reg31 是 0x50..0x6f（单字节，无操作数）
+const DW_OP_reg0: u8 = 0x50;
+const DW_OP_reg31: u8 = 0x6f;
 
 const DW_LNS_extended_op: u8 = 0x00;
 const DW_LNS_copy: u8 = 0x01;
@@ -1174,18 +1265,104 @@ pub fn build_dwarf_arch(source: &str, functions: &[(&str, u64)], arch: ArchKind)
     build_dwarf_full(&cu, &opts)
 }
 
+/// `.debug_*` 各子节的**唯一口径**：把输入 CU 的函数表整理成「一条一函数、按地址升序、
+/// CU 范围覆盖全部函数」的形状，返回归一化后的副本（下游一律只读这份）。
+///
+/// 为什么必须在发射之前、在一处做，而不是让各节自己整理：`.debug_info` 的
+/// `DW_AT_low_pc`/`DW_AT_high_pc`、`.debug_line` 的地址序列、`.debug_aranges` 的表项、
+/// `.debug_frame` 的 FDE 读的是**同一批事实**（函数在 `.text` 里的位置）。此前四个消费者
+/// 各自直接扫 `cu.functions`，于是同一个缺陷在四个节里长成四种症状，而在 gdb 那边只
+/// 表现为一句 warning。逐条：
+///
+/// 1. **同一个函数不得有两条 DIE**。IR 里一个函数可以同时存在「原型声明」与「定义」
+///    两个条目，而上游 `func_pcs` 是按**名字**取 label 的，两条于是拿到同一个 PC ——
+///    发出去就是两个同名同址的 `DW_TAG_subprogram`、行表两行、两个完全重叠的 FDE。
+///    重叠 FDE 是 CFI 层的硬错误（`.debug_frame`/`.eh_frame` 不允许同一地址区间两条
+///    记录），重复 DIE 则让调试器在两个描述之间猜。合并规则：区间取并，非空的
+///    局部表 / 形参位置表 / 词法块表取「有内容的那一侧」，`decl_line` 取第一个非零值。
+/// 2. **地址必须单调递增**。`cu.functions` 是源码序，`.text` 里是链接序，两者不同序；
+///    而行号程序的状态机只能用「相对上一步的 advance」表达，倒退无法编码，DWARF
+///    §6.2.5.2 也要求序列内地址递增；gdb 对行表做二分查找，乱序的表它查不到。
+/// 3. **CU 自身的范围必须是 min/max，不是首尾**。原来取 `functions.first()/last()`
+///    （= 源码序首尾），实测产物里 CU 范围是 `[0x401190, +0xad)`，而真正最靠前的函数
+///    `f` 在 `0x401110` —— 整个落在 CU 范围之外，这正是 gdb 那句
+///    `Internal error: pc 0x401110 in read in CU, but not in symtab.` 的字面意思。
+///
+/// 没有函数时（只有 `func_ranges` 或只有行表的输入）一律**不改** `low_pc`/`high_pc`/
+/// `func_ranges`：这三个字段是输入的一部分，不能因为本函数「看起来该管它们」就被清空。
+pub fn normalize_cu(cu: &CompileUnit) -> CompileUnit {
+    let mut out = cu.clone();
+
+    // 1) 同名合并（保持首次出现的顺序，排序留给下一步）
+    let mut merged: Vec<DwarfFuncInfo> = Vec::with_capacity(cu.functions.len());
+    for f in cu.functions.iter() {
+        if let Some(prev) = merged.iter_mut().find(|p| p.name == f.name) {
+            prev.low_pc = prev.low_pc.min(f.low_pc);
+            prev.high_pc = prev.high_pc.max(f.high_pc);
+            if prev.decl_line == 0 {
+                prev.decl_line = f.decl_line;
+            }
+            if prev.linkage_name.is_none() {
+                prev.linkage_name = f.linkage_name.clone();
+            }
+            if prev.local_vars.is_empty() {
+                prev.local_vars = f.local_vars.clone();
+            }
+            if prev.param_locations.is_empty() {
+                prev.param_locations = f.param_locations.clone();
+            }
+            if prev.lexical_blocks.is_empty() {
+                prev.lexical_blocks = f.lexical_blocks.clone();
+            }
+            if prev.params.is_empty() {
+                prev.params = f.params.clone();
+            }
+            prev.is_external |= f.is_external;
+        } else {
+            merged.push(f.clone());
+        }
+    }
+
+    // 2) 按起始 PC 升序；同 PC（不该发生，但输入错了也不得让行表倒退）再按名字定序
+    merged.sort_by(|a, b| {
+        a.low_pc
+            .cmp(&b.low_pc)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    // 3) CU 范围 = 所有函数区间的 min/max
+    if let Some(lo) = merged.iter().map(|f| f.low_pc).min() {
+        out.low_pc = lo;
+        out.high_pc = merged.iter().map(|f| f.high_pc).max().unwrap_or(lo);
+        out.func_ranges = merged.iter().map(|f| (f.low_pc, f.high_pc)).collect();
+    }
+    out.functions = merged;
+    out
+}
+
 /// 完整 DWARF v4/v5 + 辅助节生成（主入口）
 pub fn build_dwarf_full(cu: &CompileUnit, opts: &DebugOptions) -> DebugSections {
+    // 四个消费者（info / line / aranges / frame）一律只读归一化后的这一份，见 `normalize_cu`。
+    let cu = &normalize_cu(cu);
     let mut sec = DebugSections::default();
 
     let mut strs = StringTable::new();
     let mut abb = AbbrevBuilder::default();
 
-    // 1) .debug_str
+    // 1) .debug_str —— 先按已知名字定下顺序（下面的第 2 步会复用同一张表，不会重排）
     sec.str = strl_section(&mut strs, cu, opts);
 
     // 2) .debug_abbrev + .debug_info
     let (abbrev, info, relocs) = build_abbrev_and_info(cu, opts, &mut strs, &mut abb);
+    // 节内容必须在这一步**之后**重新取。`StringTable::intern` 是「去重 + 往后追加」，
+    // 所以重取只会多出新串、不改动已有串的偏移（逐字节前缀相同）。
+    //
+    // 为什么这是结构性修法而不是「给上面那个枚举多一行」：`strl_section` 是「哪些串会
+    // 出现在 .debug_info 里」的**第二份知道**，它漏一个 DIE 种类，那个种类的 DW_FORM_strp
+    // 就指向节外（实测：新接上的 `DW_TAG_variable` 名字让 readelf 报「偏移量过大」，
+    // 而编译与链接完全无感）。以后新增任何带名字的 DIE 都不必再动 `strl_section`；
+    // 它剩下的作用只是固定已知串的顺序（不固定也不会错，只是字节会漂）。
+    sec.str = strs.clone().into_bytes();
     sec.abbrev = abbrev;
     sec.info = info;
     sec.debug_info_relocs = relocs;
@@ -1507,11 +1684,40 @@ fn build_abbrev_and_info(
             sub_attrs.push((DW_AT_decl_file, DW_FORM_data1));
             sub_attrs.push((DW_AT_decl_line, DW_FORM_data4));
         }
+        // DW_AT_frame_base：变量位置用 `DW_OP_fbreg` 时，它的基准就是本属性算出来的值。
+        // 缺它 gdb 直接报「Could not find the frame base for "f"」并拒读局部（实测），
+        // 所以这不是可选装饰而是 fbreg 能用的前提。选 `DW_OP_call_frame_cfa` 而不是
+        // `DW_OP_reg6`：本后端的 `DW_OP_fbreg` 偏移是按 **CFA** 算的（见
+        // `cfa_frame_offset`），与有没有 frame pointer 无关。
+        sub_attrs.push((DW_AT_frame_base, DW_FORM_exprloc));
         let code = abb.get_or_create(
             DW_TAG_subprogram,
             if has_children { DW_CHILDREN_yes } else { DW_CHILDREN_no },
             &sub_attrs,
         );
+        // 返回类型的 DIE 必须先发完（见 `write_type_die` 里同一理由的注释）；下面形参与
+        // 局部变量的类型同理，全部在写本 DIE 的字节之前算好偏移。
+        let ret_off = ensure_type_die(&mut info, abb, strs, &mut type_offsets, &f.return_type);
+        let param_type_offs: Vec<u32> = f
+            .params
+            .iter()
+            .map(|(_, pty)| ensure_type_die(&mut info, abb, strs, &mut type_offsets, pty))
+            .collect();
+        let local_var_type_offs: Vec<u32> = f
+            .local_vars
+            .iter()
+            .map(|v| ensure_type_die(&mut info, abb, strs, &mut type_offsets, &v.ty))
+            .collect();
+        let block_var_type_offs: Vec<Vec<u32>> = f
+            .lexical_blocks
+            .iter()
+            .map(|b| {
+                b.variables
+                    .iter()
+                    .map(|v| ensure_type_die(&mut info, abb, strs, &mut type_offsets, &v.ty))
+                    .collect()
+            })
+            .collect();
         write_uleb128(&mut info, code as u64);
 
         // name
@@ -1521,7 +1727,6 @@ fn build_abbrev_and_info(
             write_attr_strp(&mut info, strs.intern(ln));
         }
         // type (return type)
-        let ret_off = ensure_type_die(&mut info, abb, strs, &mut type_offsets, &f.return_type);
         info.extend_from_slice(&ret_off.to_le_bytes());
         // DW_FORM_flag_present: zero-length form, no bytes written
         // low_pc (relocated to function address) / high_pc (size, no reloc)
@@ -1534,9 +1739,12 @@ fn build_abbrev_and_info(
             info.push(f.decl_file_idx as u8 + 1); // 1-based file index
             info.extend_from_slice(&(f.decl_line).to_le_bytes());
         }
+        // frame_base 表达式：单个 `DW_OP_call_frame_cfa`（exprloc = ULEB 长度 + 字节）
+        write_uleb128(&mut info, 1);
+        info.push(DW_OP_call_frame_cfa);
 
         // formal parameters (with DW_AT_location for GDB variable inspection)
-        for (idx, (pname, pty)) in f.params.iter().enumerate() {
+        for (idx, (pname, _pty)) in f.params.iter().enumerate() {
             let has_location = f.param_locations.len() > idx;
             let mut param_attrs: Vec<(u16, u16)> =
                 vec![(DW_AT_name, DW_FORM_strp), (DW_AT_type, DW_FORM_ref4)];
@@ -1546,23 +1754,20 @@ fn build_abbrev_and_info(
             let pcode = abb.get_or_create(DW_TAG_formal_parameter, DW_CHILDREN_no, &param_attrs);
             write_uleb128(&mut info, pcode as u64);
             write_attr_strp(&mut info, strs.intern(pname));
-            let pty_off = ensure_type_die(&mut info, abb, strs, &mut type_offsets, pty);
+            let pty_off = param_type_offs[idx];
             info.extend_from_slice(&pty_off.to_le_bytes());
             if has_location {
-                let loc = &f.param_locations[idx];
-                // DW_OP_fbreg <fb_offset> or DW_OP_call_frame_cfa + offset
-                info.push(loc.op);
-                write_sleb128(&mut info, loc.offset);
+                write_location_expr(&mut info, &f.param_locations[idx]);
             }
         }
 
         // local variables in function scope (DW_TAG_variable)
-        for var in &f.local_vars {
-            emit_local_var_die(&mut info, abb, strs, cu, &mut type_offsets, var);
+        for (var, ty_off) in f.local_vars.iter().zip(&local_var_type_offs) {
+            emit_local_var_die(&mut info, abb, strs, cu, var, *ty_off);
         }
 
         // lexical blocks (DW_TAG_lexical_block) with nested variables
-        for block in &f.lexical_blocks {
+        for (bi, block) in f.lexical_blocks.iter().enumerate() {
             let block_has_vars = !block.variables.is_empty();
             let block_attrs: Vec<(u16, u16)> =
                 vec![(DW_AT_low_pc, DW_FORM_addr), (DW_AT_high_pc, DW_FORM_addr)];
@@ -1578,8 +1783,9 @@ fn build_abbrev_and_info(
             write_uleb128(&mut info, bcode as u64);
             info.extend_from_slice(&block.low_pc.to_le_bytes());
             info.extend_from_slice(&(block.high_pc - block.low_pc).to_le_bytes());
-            for var in &block.variables {
-                emit_local_var_die(&mut info, abb, strs, cu, &mut type_offsets, var);
+            // 类型 DIE 已在 subprogram 之前全部发完（否则它们会变成这个 block 的子 DIE）
+            for (var, ty_off) in block.variables.iter().zip(&block_var_type_offs[bi]) {
+                emit_local_var_die(&mut info, abb, strs, cu, var, *ty_off);
             }
             if block_has_vars {
                 info.push(0); // terminate lexical_block children
@@ -1601,12 +1807,14 @@ fn build_abbrev_and_info(
             (DW_AT_external, DW_FORM_flag_present),
         ];
         let code = abb.get_or_create(DW_TAG_variable, DW_CHILDREN_no, &var_attrs);
+        // 类型 DIE 先发完：本全局 DIE 自己已经在属性字节里插过内层类型了，同一个 CU 深度
+        // 上多一个兄弟 DIE 合法，插在属性字节中间则不合法。
+        let ty_off = ensure_type_die(&mut info, abb, strs, &mut type_offsets, &g.ty);
         write_uleb128(&mut info, code as u64);
         write_attr_strp(&mut info, strs.intern(&g.name));
         if let Some(ln) = &g.linkage_name {
             write_attr_strp(&mut info, strs.intern(ln));
         }
-        let ty_off = ensure_type_die(&mut info, abb, strs, &mut type_offsets, &g.ty);
         info.extend_from_slice(&ty_off.to_le_bytes());
         // DW_FORM_flag_present: zero-length form, no bytes written
     }
@@ -1631,8 +1839,8 @@ fn emit_local_var_die(
     abb: &mut AbbrevBuilder,
     strs: &mut StringTable,
     _cu: &CompileUnit,
-    type_offsets: &mut std::collections::HashMap<String, u32>,
     var: &DwarfLocalVar,
+    ty_off_prepared: u32,
 ) {
     let var_attrs: Vec<(u16, u16)> = vec![
         (DW_AT_name, DW_FORM_strp),
@@ -1642,11 +1850,27 @@ fn emit_local_var_die(
     let vcode = abb.get_or_create(DW_TAG_variable, DW_CHILDREN_no, &var_attrs);
     write_uleb128(info, vcode as u64);
     write_attr_strp(info, strs.intern(&var.name));
-    let ty_off = ensure_type_die(info, abb, strs, type_offsets, &var.ty);
-    info.extend_from_slice(&ty_off.to_le_bytes());
-    // location expression: DW_OP_fbreg <offset>
-    info.push(var.location.op);
-    write_sleb128(info, var.location.offset);
+    info.extend_from_slice(&ty_off_prepared.to_le_bytes());
+    write_location_expr(info, &var.location);
+}
+
+/// 把一条位置描述编成 `DW_FORM_exprloc` 形式的属性值。
+///
+/// `exprloc` 的布局是 **ULEB128 长度 + 表达式字节**。以前这里直接发 `op + sleb(offset)`
+/// 而没有长度前缀：解析器会把第一个操作码当长度读，后面全错。今天
+/// `param_locations`/`local_vars` 还是空列表所以这条路径从未被踩到，但 Phase 6.2 要往里
+/// 送寄存器家 —— 不先修好编码，升上去就是把一坑旧的错位变成新的。
+fn write_location_expr(info: &mut Vec<u8>, loc: &DwarfParamLocation) {
+    let mut expr: Vec<u8> = Vec::new();
+    if loc.encode_into(&mut expr).is_err() {
+        // 未识别的操作码：只发那个操作码本身，不自发明偏移。调用方今天只能从
+        // `fbreg`/`cfa`/`reg()` 三个构造器拿到值，所以这条路不可达；走到这里就是新增了
+        // 一种位置形状却没同时更新 `encode_into`，那由下面那条逐形状用例把住。
+        expr.clear();
+        expr.push(loc.op); // 只发操作码，不编偏移（编了就是拿一个假偏移骗调试器）
+    }
+    write_uleb128(info, expr.len() as u64);
+    info.extend_from_slice(&expr);
 }
 
 fn ensure_type_die(
@@ -1689,9 +1913,13 @@ fn write_type_die(
             let attrs: Vec<(u16, u16)> =
                 vec![(DW_AT_byte_size, DW_FORM_data1), (DW_AT_type, DW_FORM_ref4)];
             let code = abb.get_or_create(DW_TAG_pointer_type, DW_CHILDREN_no, &attrs);
+            // 嵌套类型的 DIE 必须在写本 DIE 的 abbreviation 号**之前**发完：DWARF 是流式
+            // 编码，一个 DIE 的属性字节必须连续，否则解析器会把内层 DIE 的字节当本 DIE 的
+            // 属性读，从这一点开始整个 unit 全错位（实测 readelf：`Bogus end-of-siblings
+            // marker` + `abbreviation number 94 which does not exist`，而编译器自己无感）。
+            let inner_off = ensure_type_die(info, abb, strs, type_offsets, inner);
             write_uleb128(info, code as u64);
             info.push(ty.byte_size as u8);
-            let inner_off = ensure_type_die(info, abb, strs, type_offsets, inner);
             info.extend_from_slice(&inner_off.to_le_bytes());
         },
         DwarfTypeKind::Struct { members } => {
@@ -1704,8 +1932,9 @@ fn write_type_die(
             let attrs: Vec<(u16, u16)> =
                 vec![(DW_AT_type, DW_FORM_ref4), (DW_AT_count, DW_FORM_data4)];
             let code = abb.get_or_create(DW_TAG_array_type, DW_CHILDREN_yes, &attrs);
-            write_uleb128(info, code as u64);
+            // 同上：元素类型的 DIE 先发完，再写本 array DIE 的属性字节
             let elem_off = ensure_type_die(info, abb, strs, type_offsets, element);
+            write_uleb128(info, code as u64);
             info.extend_from_slice(&elem_off.to_le_bytes());
             info.extend_from_slice(&(*count as u32).to_le_bytes());
             // subrange child
@@ -1734,10 +1963,11 @@ fn write_type_die(
                 (DW_AT_type, DW_FORM_ref4),
             ];
             let code = abb.get_or_create(DW_TAG_enumeration_type, DW_CHILDREN_yes, &attrs);
+            // 底层类型先发完（同一个「属性字节必须连续」的理由）
+            let u_off = ensure_type_die(info, abb, strs, type_offsets, underlying);
             write_uleb128(info, code as u64);
             write_attr_strp(info, strs.intern(&ty.name));
             info.push(ty.byte_size as u8);
-            let u_off = ensure_type_die(info, abb, strs, type_offsets, underlying);
             info.extend_from_slice(&u_off.to_le_bytes());
             for (name, val) in members {
                 let mem_attrs: Vec<(u16, u16)> = vec![
@@ -1754,11 +1984,16 @@ fn write_type_die(
         DwarfTypeKind::Func { ret, params } => {
             let attrs: Vec<(u16, u16)> = vec![(DW_AT_type, DW_FORM_ref4)];
             let code = abb.get_or_create(DW_TAG_subroutine_type, DW_CHILDREN_yes, &attrs);
-            write_uleb128(info, code as u64);
+            // 返回类型与全部形参类型都要先发完：本 DIE 与它那些 formal_parameter 子 DIE
+            // 的属性字节里不得插入其它 DIE（同一个「流式编码」理由）。
             let ret_off = ensure_type_die(info, abb, strs, type_offsets, ret);
+            let p_offs: Vec<u32> = params
+                .iter()
+                .map(|p| ensure_type_die(info, abb, strs, type_offsets, p))
+                .collect();
+            write_uleb128(info, code as u64);
             info.extend_from_slice(&ret_off.to_le_bytes());
-            for p in params {
-                let p_off = ensure_type_die(info, abb, strs, type_offsets, p);
+            for p_off in p_offs {
                 let param_attrs: Vec<(u16, u16)> = vec![(DW_AT_type, DW_FORM_ref4)];
                 let pcode =
                     abb.get_or_create(DW_TAG_formal_parameter, DW_CHILDREN_no, &param_attrs);
@@ -1771,9 +2006,9 @@ fn write_type_die(
             let attrs: Vec<(u16, u16)> =
                 vec![(DW_AT_name, DW_FORM_strp), (DW_AT_type, DW_FORM_ref4)];
             let code = abb.get_or_create(DW_TAG_typedef, DW_CHILDREN_no, &attrs);
+            let t_off = ensure_type_die(info, abb, strs, type_offsets, target);
             write_uleb128(info, code as u64);
             write_attr_strp(info, strs.intern(alias));
-            let t_off = ensure_type_die(info, abb, strs, type_offsets, target);
             info.extend_from_slice(&t_off.to_le_bytes());
         },
         DwarfTypeKind::Class {
@@ -1811,8 +2046,8 @@ fn write_qualifier_die(
     let _ = strs;
     let attrs: Vec<(u16, u16)> = vec![(DW_AT_type, DW_FORM_ref4)];
     let code = abb.get_or_create(tag, DW_CHILDREN_no, &attrs);
-    write_uleb128(info, code as u64);
     let inner_off = ensure_type_die(info, abb, strs, type_offsets, inner);
+    write_uleb128(info, code as u64);
     info.extend_from_slice(&inner_off.to_le_bytes());
 }
 
@@ -1851,10 +2086,17 @@ fn write_aggregate_die(
     let attrs: Vec<(u16, u16)> = vec![(DW_AT_name, DW_FORM_strp), (DW_AT_byte_size, DW_FORM_data1)];
     let code =
         abb.get_or_create(tag, if has_members { DW_CHILDREN_yes } else { DW_CHILDREN_no }, &attrs);
+    // 全部成员的类型 DIE 先发完（同一个「属性字节必须连续」的理由）。自指类型（`struct S { struct S *next; }`）
+    // 仍然能解析：本类型的偏移已由 `ensure_type_die` 在调用本函数**之前**登记，所以拿到的就
+    // 是这个尚未写完的 DIE 自己的偏移，与改动前同一形状。
+    let member_types: Vec<u32> = members
+        .iter()
+        .map(|m| ensure_type_die(info, abb, strs, type_offsets, &m.ty))
+        .collect();
     write_uleb128(info, code as u64);
     write_attr_strp(info, strs.intern(&ty.name));
     info.push(ty.byte_size as u8);
-    for m in members {
+    for (m, t_off) in members.iter().zip(member_types) {
         // 位域成员: 多 DW_AT_bit_size + DW_AT_bit_offset 两条属性.
         // 非位域成员: 单 DW_AT_data_member_location 属性.
         let mem_attrs: Vec<(u16, u16)> = if m.bit_size > 0 {
@@ -1880,12 +2122,11 @@ fn write_aggregate_die(
             // bit_size: 字段宽度 (bit)
             info.push(m.bit_size as u8);
             // bit_offset: big-endian 位序下, 从 byte 顶部到字段的 bit 距离
-            // (小端序下, 字段在 byte 内的位偏移需要转换). dcc 当前仅小端
-            // x86_64/aarch64/riscv64, 直接用 offset_bits % 8 作为位偏移.
+            // (小端序下, 字段在 byte 内的位偏移需要转换).
+            // dcc 当前仅小端 x86_64/aarch64/riscv64, 直接用 offset_bits % 8 作为位偏移。
             let bit_in_byte = (m.offset_bits % 8) as u8;
             info.push(bit_in_byte);
         }
-        let t_off = ensure_type_die(info, abb, strs, type_offsets, &m.ty);
         info.extend_from_slice(&t_off.to_le_bytes());
     }
     if has_members {
@@ -1923,6 +2164,15 @@ fn write_class_die(
         if has_children { DW_CHILDREN_yes } else { DW_CHILDREN_no },
         &attrs,
     );
+    // 同一个「属性字节必须连续」的理由：基类与成员的类型 DIE 全部先发完，再写本 class DIE。
+    let base_types: Vec<u32> = bases
+        .iter()
+        .map(|b| ensure_type_die(info, abb, strs, type_offsets, &b.base_type))
+        .collect();
+    let member_types: Vec<u32> = members
+        .iter()
+        .map(|m| ensure_type_die(info, abb, strs, type_offsets, &m.ty))
+        .collect();
     write_uleb128(info, code as u64);
     write_attr_strp(info, strs.intern(&ty.name));
     info.push(ty.byte_size as u8);
@@ -1930,7 +2180,7 @@ fn write_class_die(
         info.extend_from_slice(&(vtable_count as u16).to_le_bytes());
     }
     // 发射继承 DIE (DW_TAG_inheritance)
-    for base in bases {
+    for (base, base_off) in bases.iter().zip(&base_types) {
         let mut inh_attrs: Vec<(u16, u16)> = vec![
             (DW_AT_type, DW_FORM_ref4),
             (DW_AT_data_member_location, DW_FORM_data1),
@@ -1941,7 +2191,6 @@ fn write_class_die(
         inh_attrs.push((DW_AT_visibility, DW_FORM_data1));
         let inh_code = abb.get_or_create(DW_TAG_inheritance, DW_CHILDREN_no, &inh_attrs);
         write_uleb128(info, inh_code as u64);
-        let base_off = ensure_type_die(info, abb, strs, type_offsets, &base.base_type);
         info.extend_from_slice(&base_off.to_le_bytes());
         info.push(base.offset as u8);
         if base.is_virtual {
@@ -1950,7 +2199,7 @@ fn write_class_die(
         info.push(base.access); // 1=public, 2=protected, 3=private
     }
     // 发射成员 DIE (与 write_aggregate_die 相同)
-    for m in members {
+    for (m, t_off) in members.iter().zip(&member_types) {
         let mem_attrs: Vec<(u16, u16)> = if m.bit_size > 0 {
             vec![
                 (DW_AT_name, DW_FORM_strp),
@@ -1975,7 +2224,6 @@ fn write_class_die(
             let bit_in_byte = (m.offset_bits % 8) as u8;
             info.push(bit_in_byte);
         }
-        let t_off = ensure_type_die(info, abb, strs, type_offsets, &m.ty);
         info.extend_from_slice(&t_off.to_le_bytes());
     }
     if has_children {
@@ -1986,6 +2234,27 @@ fn write_class_die(
 // ============================================================================
 // .debug_line (DWARF v4/v5)
 // ============================================================================
+
+/// 函数入口的那一行（`DW_AT_low_pc` ↔ `DW_AT_decl_line`）。
+///
+/// 跳过两类不能当入口用的条目：只有原型没有体的声明 DIE（`is_declaration`，地址
+/// 不成立），以及区间倒挂/零长的函数（与 `build_aranges` 里那条 `hi <= lo` 同一个
+/// 口径）。入口行落在不存在的地址上，gdb 会把它当成 CU 区间里的空洞，症状就是
+/// `Internal error: pc ... in read in CU, but not in symtab.`。
+fn function_entry_line(f: &DwarfFuncInfo) -> Option<LineEntry> {
+    if f.is_declaration || f.high_pc <= f.low_pc {
+        return None;
+    }
+    Some(LineEntry {
+        pc: f.low_pc,
+        line: if f.decl_line > 0 { f.decl_line } else { 1 },
+        column: 1,
+        file_idx: 0,
+        discriminator: 0,
+        is_stmt: true,
+        basic_block: false,
+    })
+}
 
 fn build_line_program(cu: &CompileUnit, opts: &DebugOptions) -> (Vec<u8>, Vec<(u64, String)>) {
     let mut out = Vec::new();
@@ -2096,24 +2365,57 @@ fn build_line_program(cu: &CompileUnit, opts: &DebugOptions) -> (Vec<u8>, Vec<(u
         ..LineState::default()
     };
 
-    // Generate function-level line entries when no detailed line info available
-    let entries: Vec<LineEntry> = if cu.line_entries.is_empty() {
-        // Create one entry per function at its start address
-        cu.functions
-            .iter()
-            .map(|f| LineEntry {
-                pc: f.low_pc,
-                line: if f.decl_line > 0 { f.decl_line } else { 1 },
-                column: 1,
-                file_idx: 0,
-                discriminator: 0,
-                is_stmt: true,
-                basic_block: false,
-            })
-            .collect()
+    // 函数入口行与语句行**都要**铺。入口行保证「PC 落在函数序言（push %rbp /
+    // mov %rsp,%rbp / sub $N,%rsp 那几条）上」时 gdb 仍能报出正确行；以前这里是
+    // 「有详细条目就完全丢弃入口行」的二选一，而 x86_64 后端从来不会为普通 C 语句
+    // 发条目（只覆盖内联 asm），于是行表退到「每函数一行」的兜底形态，
+    // `break file.c:N` 全部绑不上。现在入口行给函数首地址（与 `DW_AT_low_pc` 一致），
+    // 语句行给断点与单步。
+    //
+    // 已经被详细条目占用的 PC 不再补入口行：同一 PC 上留两行不同行号时，gdb 取哪一条
+    // 取决于表的写入序，而入口行和该 PC 的语句行本来就只能留一个。
+    let mut entries: Vec<LineEntry> = Vec::new();
+    if cu.line_entries.is_empty() {
+        for f in &cu.functions {
+            if let Some(e) = function_entry_line(f) {
+                entries.push(e);
+            }
+        }
     } else {
-        cu.line_entries.clone()
-    };
+        let taken: std::collections::HashSet<u64> = cu.line_entries.iter().map(|e| e.pc).collect();
+        for f in &cu.functions {
+            if taken.contains(&f.low_pc) {
+                continue;
+            }
+            if let Some(e) = function_entry_line(f) {
+                entries.push(e);
+            }
+        }
+        entries.extend(cu.line_entries.iter().cloned());
+    }
+
+    // 行表的地址必须单调递增（理由见 `normalize_cu` 第 2 条）。这一步不能只靠上游排序：
+    // `cu.line_entries` 的出处不止一个（asm 块级条目与逐指令条目两张表拼起来），而
+    // fallback 那一份来自函数表。任何一次改动让顺序倒退，行号状态机就编不出「往回走」
+    // 的 advance，产出一张 gdb 二分查找命不中的表（症状与 CU 范围错同一种：
+    // `Internal error: pc ... in read in CU, but not in symtab.`）。
+    // 排序键与后端拼表时一致：PC 升序 → 同 PC 时语句边界优先 → discriminator 升序。
+    let mut entries: Vec<LineEntry> = entries;
+    entries.sort_by(|a, b| {
+        a.pc.cmp(&b.pc)
+            .then_with(|| b.is_stmt.cmp(&a.is_stmt))
+            .then_with(|| a.discriminator.cmp(&b.discriminator))
+    });
+    // 完全同址同行的重复行丢掉（同址不同行是合法的：内联、同一 PC 上多条语句），
+    // 重复行不是「多此一举」：同一 PC 上出现两行不同文件/行会让 gdb 取后者而丢掉函数入口
+    entries.dedup_by(|a, b| {
+        a.pc == b.pc
+            && a.line == b.line
+            && a.file_idx == b.file_idx
+            && a.column == b.column
+            && a.discriminator == b.discriminator
+            && a.is_stmt == b.is_stmt
+    });
 
     // M24: dedup adjacent same-source same-line entries
     let entries: Vec<LineEntry> = if opts.level <= 1 {
@@ -2136,12 +2438,23 @@ fn build_line_program(cu: &CompileUnit, opts: &DebugOptions) -> (Vec<u8>, Vec<(u
         entries
     };
 
-    // Emit line program with DW_LNE_set_address for absolute addresses
+    // Emit line program with DW_LNE_set_address at every function boundary.
+    //
+    // 「函数边界」要逐点重发 `DW_LNE_set_address` 并挂 reloc：行表里的地址字段写的是
+    // 函数在 `.text` 内的偏移，链接器只在这 8 字节上挂了指向该函数的 reloc 才会把它搬到
+    // 最终虚拟地址。以前只有 fallback（每函数一行）那条路挂 reloc，详细条目那条路整张表
+    // 只发一次 set_address 且不挂 reloc —— 产物里的行表于是落在一个「与任何代码地址都不
+    // 重合」的低地址段上，症状不是警告而是 `No line 5 in file`：gdb 读得到 CU，却按地址
+    // 找不到那一行的序列。
+    //
+    // 上面的入口行保证每个函数的 low_pc 处必有一条条目，所以这里可以用「pc == 某函数
+    // low_pc」当边界判据，而不必给表中间那些没有符号可挂的偏移造 reloc。
     let mut last_pc: u64 = 0;
     let mut first_entry = true;
     for (i, e) in entries.iter().enumerate() {
-        // Use DW_LNE_set_address at function boundaries or for first entry
-        let need_set_addr = first_entry || (cu.line_entries.is_empty() && i > 0);
+        let boundary_fn: Option<&DwarfFuncInfo> = cu.functions.iter().find(|f| f.low_pc == e.pc);
+        let need_set_addr =
+            first_entry || (cu.line_entries.is_empty() && i > 0) || boundary_fn.is_some();
         if need_set_addr {
             // DW_LNE_set_address: extended opcode 0x02 with 8-byte address
             out.push(DW_LNS_extended_op);
@@ -2150,14 +2463,8 @@ fn build_line_program(cu: &CompileUnit, opts: &DebugOptions) -> (Vec<u8>, Vec<(u
             let addr_offset = out.len() as u64;
             out.extend_from_slice(&e.pc.to_le_bytes());
             // Track relocation for this address
-            if cu.line_entries.is_empty() {
-                // Find which function this entry belongs to
-                for f in &cu.functions {
-                    if f.low_pc == e.pc {
-                        relocs.push((addr_offset, f.name.clone()));
-                        break;
-                    }
-                }
+            if let Some(f) = boundary_fn {
+                relocs.push((addr_offset, f.name.clone()));
             }
             state.address = e.pc;
             last_pc = e.pc;
@@ -2374,6 +2681,13 @@ fn build_aranges(cu: &CompileUnit, opts: &DebugOptions) -> (Vec<u8>, Vec<(u64, S
         out.extend_from_slice(&0u64.to_le_bytes());
     } else {
         for (idx, &(lo, hi)) in cu.func_ranges.iter().enumerate() {
+            // 零长/倒序的区间不发：`.debug_aranges` 是 gdb 用来「按地址找 CU」的索引，
+            // 一条长度为 0 的表项不是「无意义」而是「说谎」（它声称本 CU 覆盖一段不存在的
+            // 代码）。区间的递增与去重已由 `normalize_cu` 保证（`func_ranges` 与
+            // `functions` 同序同长，下面按 `idx` 取名字因此不会错位）。
+            if hi <= lo {
+                continue;
+            }
             let addr_offset = out.len() as u64;
             out.extend_from_slice(&lo.to_le_bytes());
             // Track relocation for this address
@@ -5070,5 +5384,536 @@ mod tests {
         // Verify header length = 32
         let hdr_len = u32::from_le_bytes([btf_ext[4], btf_ext[5], btf_ext[6], btf_ext[7]]);
         assert_eq!(hdr_len, 32, "BTF.ext header should be 32 bytes");
+    }
+
+    /// 位置表达式编码的逐形状用例（Phase 6.2）。
+    ///
+    /// 钉的是「长度与内容一致」：`exprloc` = ULEB 长度 + 表达式字节。旧写法直接发
+    /// `op + sleb(offset)` 而无长度，解析器把 `0x91` 当长度读 → 整个 unit 错位。而
+    /// `DW_OP_reg*` 是**单字节无操作数**的，所以下面同时钉住「寄存器家不多发一字节」：
+    /// 把 fbreg 的形状塞给 reg 家（多发一条 sleb）与把 reg 塞给 fbreg（少一字节）都得红。
+    #[test]
+    fn location_expr_carries_its_own_length() {
+        let enc = |loc: &DwarfParamLocation| {
+            let mut v = Vec::new();
+            write_location_expr(&mut v, loc);
+            v
+        };
+        // fbreg(-24)：长度 2（op + sleb），后面紧跟两个字节的表达式。
+        // sleb128(-24) = 0x68（低 7 位 0x68 的符号位已置，单字节结束）
+        let fb = enc(&DwarfParamLocation::fbreg(-24));
+        assert_eq!(fb, vec![0x02, DW_OP_fbreg, 0x68], "fbreg 的 exprloc 字节不对：{fb:x?}");
+        // call_frame_cfa + sleb：同样带长度
+        let cfa = enc(&DwarfParamLocation::cfa(8));
+        assert_eq!(cfa, vec![0x02, DW_OP_call_frame_cfa, 0x08]);
+        // 寄存器家：单字节，无操作数。号就是 DWARF 号（不是硬件号）
+        let r3 = enc(&DwarfParamLocation::reg(3));
+        assert_eq!(r3, vec![0x01, DW_OP_reg0 + 3], "DW_OP_reg 必须只占 1 字节：{r3:x?}");
+        // 往返：位置能问回「是不是寄存器家 / 哪一号」（消费方不得自己看 op 区间）
+        let reg = DwarfParamLocation::reg(0);
+        assert!(
+            reg.is_register()
+                && !DwarfParamLocation::fbreg(-24).is_register()
+                && !DwarfParamLocation::cfa(8).is_register(),
+            "只有 reg 家能被认成寄存器家"
+        );
+        assert_eq!(reg.register(), Some(0));
+        assert_eq!(DwarfParamLocation::fbreg(-8).register(), None);
+        // 溢出保护：reg0+31 仍在单字节区间内，而号 >31 不得构造（上面 `reg()` 会溢出到
+        // 下一个操作码，所以本 target 的换算表只到 31）
+        assert_eq!(DwarfParamLocation::reg(31).op, DW_OP_reg31);
+    }
+
+    /// 硬件号 → DWARF 号：SysV psABI 的编号顺序与机器码编码**不同序**。
+    /// 拿硬件号直接发 `DW_OP_reg` 会让调试器去读另一个寄存器（rdx/rcx 对换、rsi/rdi 对换、
+    /// rsp/rbp 对换），而那从产物上看不出来 —— 所以这张表只能逐号钉。
+    #[test]
+    fn dwarf_reg_number_table_matches_psabi_order() {
+        // (硬件号, DWARF 号, 名字) —— DWARF 号按 x86-64 psABI 的 DWARF 寄存器编号表
+        const WANT: &[(u8, u8, &str)] = &[
+            (0, 0, "rax"),
+            (1, 2, "rcx"),
+            (2, 1, "rdx"),
+            (3, 3, "rbx"),
+            (4, 7, "rsp"),
+            (5, 6, "rbp"),
+            (6, 4, "rsi"),
+            (7, 5, "rdi"),
+            (8, 8, "r8"),
+            (15, 15, "r15"),
+            (16, 16, "r16(APX)"),
+        ];
+        for (hw, dw, name) in WANT {
+            assert_eq!(
+                ArchKind::X86_64.dwarf_reg_of_gp_hw(*hw),
+                Some(*dw),
+                "{name} 的 DWARF 号不对"
+            );
+        }
+        assert_eq!(ArchKind::X86_64.dwarf_reg_of_gp_hw(32), None, "越界的号不得发位置");
+        // 其他 target：后端今天不消费 Location::Reg，因此这里必须是 None，不能猜表
+        assert_eq!(ArchKind::AArch64.dwarf_reg_of_gp_hw(0), None);
+        assert_eq!(ArchKind::RiscV64.dwarf_reg_of_gp_hw(0), None);
+    }
+
+    /// 一个 DIE 的属性字节必须连续（本轮修的坑本身）：带「指向 int 的指针」参数 +
+    /// 「int[4]」局部变量的单元编出来后，内层类型 DIE 不得落在外层 DIE 的属性字节中间。
+    ///
+    /// 判据不靠人眼看字节：`DW_AT_count` 的值就紧邻在 array DIE 的 ref4 之后，中间只能再
+    /// 容一个 data4；修之前的字节流会把元素类型的 DIE 插在它们之间。这里把两者之间的
+    /// 字节距离直接量出来（比「找得到 count」那种弱判据强），并自带一次判据自校验：
+    /// 拿一段「内层 DIE 尾部字节」去跑同一条判定，必须被拒。
+    #[test]
+    fn nested_type_die_does_not_split_a_dies_attributes() {
+        let int_ty = DwarfType {
+            name: "int".to_string(),
+            byte_size: 4,
+            kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+        };
+        let cu = CompileUnit {
+            source_name: "t.c".to_string(),
+            comp_dir: None,
+            producer: "dcc-test".to_string(),
+            language: 12,
+            functions: vec![DwarfFuncInfo {
+                name: "f".to_string(),
+                linkage_name: None,
+                low_pc: 0,
+                high_pc: 64,
+                decl_line: 1,
+                decl_file_idx: 0,
+                return_type: int_ty.clone(),
+                params: vec![(
+                    "p".to_string(),
+                    DwarfType {
+                        name: "int *".to_string(),
+                        byte_size: 8,
+                        kind: DwarfTypeKind::Pointer(Box::new(int_ty.clone())),
+                    },
+                )],
+                param_locations: vec![DwarfParamLocation::fbreg(-16)],
+                local_vars: vec![DwarfLocalVar {
+                    name: "a".to_string(),
+                    ty: DwarfType {
+                        name: "int[4]".to_string(),
+                        byte_size: 16,
+                        kind: DwarfTypeKind::Array {
+                            element: Box::new(int_ty.clone()),
+                            count: 4,
+                        },
+                    },
+                    location: DwarfParamLocation::fbreg(-32),
+                    decl_line: 2,
+                }],
+                lexical_blocks: vec![],
+                is_external: false,
+                is_inline: false,
+                is_declaration: false,
+            }],
+            globals: vec![],
+            types: vec![int_ty],
+            line_entries: vec![],
+            line_files: vec![],
+            line_dirs: vec![],
+            low_pc: 0,
+            high_pc: 64,
+            func_ranges: vec![],
+            cfi_rows: vec![],
+        };
+        let sec = build_dwarf_full(&cu, &DebugOptions::default());
+        let info = &sec.info;
+        // 在字节流里找 array DIE：它的属性是 [ref4(元素)][data4(count=4)]，两者紧邻。
+        let count_at = info.windows(4).position(|w| w == 4u32.to_le_bytes());
+        let count_at = count_at.expect("array 的 DW_AT_count 字节必须出现在流里");
+        // 它前 4 字节就是元素类型的 ref4（修之前中间会被塞进整个 int DIE 的字节）：
+        // 一个合法的 ref4 在当前 TU 里偏移不可能达到 2^16，所以高两字节必为 0；而内层
+        // DIE 的尾部字节（strp 偏移 / 属性值）拿不出这个形状。上面那条就是它的判据。
+        let before = &info[count_at.saturating_sub(4)..count_at];
+        assert!(
+            before[3] == 0 && before[2] == 0,
+            "DW_AT_count 前 4 字节应当是一个 ref4（高 2 字节为 0），实得 {before:x?} —— \
+             这就是内层类型 DIE 插在属性字节中间的形状"
+        );
+        // 判据自校验：内层 DIE 尾部被插进来时，上面那条必须报假（否则本用例只是空跑）。
+        let broken = [0x00u8, 0x91, 0xe8, 0xff]; // 一个典型的「fbreg 属性 + 高位非零」尾巴
+        assert!(
+            !(broken[3] == 0 && broken[2] == 0),
+            "判据自身分辨不出插进来的字节 ⇒ 上面那条断言是假绿"
+        );
+    }
+
+    /// `.debug_str` 必须包含 `.debug_info` 里每一个被 `DW_FORM_strp` 指的名字，而且
+    /// 多一个 DIE 不得移动已有串的偏移。
+    ///
+    /// 两边各测一件事：前者是本轮踩到的坑（`strl_section` 是「哪些串会出现」的第二份
+    /// 知道，它漏了变量名，readelf 就报「偏移量过大」，而编译与链接完全无感）；后者是
+    /// 修复能用的前提（表只能往后长），不然同一个源加一个局部就会让整节字节重排。
+    #[test]
+    fn debug_str_covers_every_die_name_without_moving_existing_offsets() {
+        let base_cu = |with_local: bool| {
+            let int_ty = DwarfType {
+                name: "int".to_string(),
+                byte_size: 4,
+                kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+            };
+            CompileUnit {
+                source_name: "t.c".to_string(),
+                comp_dir: None,
+                producer: "dcc-test".to_string(),
+                language: 12,
+                functions: vec![DwarfFuncInfo {
+                    name: "g".to_string(),
+                    linkage_name: None,
+                    low_pc: 0,
+                    high_pc: 16,
+                    decl_line: 1,
+                    decl_file_idx: 0,
+                    return_type: int_ty.clone(),
+                    params: vec![],
+                    param_locations: vec![],
+                    local_vars: if with_local {
+                        vec![DwarfLocalVar {
+                            name: "zz_local_name".to_string(),
+                            ty: int_ty.clone(),
+                            location: DwarfParamLocation::fbreg(-80),
+                            decl_line: 2,
+                        }]
+                    } else {
+                        vec![]
+                    },
+                    lexical_blocks: vec![],
+                    is_external: false,
+                    is_inline: false,
+                    is_declaration: false,
+                }],
+                globals: vec![],
+                types: vec![int_ty],
+                line_entries: vec![],
+                line_files: vec![],
+                line_dirs: vec![],
+                low_pc: 0,
+                high_pc: 16,
+                func_ranges: vec![],
+                cfi_rows: vec![],
+            }
+        };
+        let opts = DebugOptions::default();
+        let without = build_dwarf_full(&base_cu(false), &opts);
+        let with = build_dwarf_full(&base_cu(true), &opts);
+        // 1) 变量名必须在表里（不在此时，`.debug_info` 里那个 strp 就是节外指针）
+        let needle = b"zz_local_name\0";
+        assert!(
+            with.str
+                .windows(needle.len())
+                .any(|w| w == needle),
+            "DW_TAG_variable 的名字没进 .debug_str ⇒ strp 指向节外"
+        );
+        // 2) 已有串的偏移不得变动：新表必须以旧表为前缀
+        assert!(
+            with.str.starts_with(&without.str),
+            "多一个局部就让 .debug_str 重排了（旧表的长度 {}，新表 {}）",
+            without.str.len(),
+            with.str.len()
+        );
+        assert!(with.str.len() > without.str.len(), "新串根本没被追加上");
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 6.2 收尾：`.debug_info`/`.debug_line`/`.debug_aranges` 的地址口径
+    // （gdb 那句 `Internal error: pc ... in read in CU, but not in symtab.` 的根）
+    // ------------------------------------------------------------------
+
+    /// 只给名字与区间的 `DwarfFuncInfo`，重复 DIE / 区间口径两条判据用。
+    fn fn_info(name: &str, lo: u64, hi: u64, decl_line: u32) -> DwarfFuncInfo {
+        DwarfFuncInfo {
+            name: name.to_string(),
+            linkage_name: None,
+            low_pc: lo,
+            high_pc: hi,
+            decl_line,
+            decl_file_idx: 0,
+            return_type: DwarfType {
+                name: "int".to_string(),
+                byte_size: 4,
+                kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+            },
+            params: vec![],
+            param_locations: vec![],
+            local_vars: vec![],
+            lexical_blocks: vec![],
+            is_external: true,
+            is_inline: false,
+            is_declaration: false,
+        }
+    }
+
+    fn cu_with(functions: Vec<DwarfFuncInfo>, entries: Vec<LineEntry>) -> CompileUnit {
+        CompileUnit {
+            source_name: "x.c".to_string(),
+            comp_dir: None,
+            producer: "dcc".to_string(),
+            language: DW_LANG_C99,
+            func_ranges: functions.iter().map(|f| (f.low_pc, f.high_pc)).collect(),
+            functions,
+            globals: vec![],
+            types: vec![],
+            line_entries: entries,
+            line_files: vec!["x.c".to_string()],
+            line_dirs: vec![".".to_string()],
+            low_pc: 0,
+            high_pc: 0,
+            cfi_rows: vec![],
+        }
+    }
+
+    fn row(pc: u64, line: u32, is_stmt: bool) -> LineEntry {
+        LineEntry {
+            pc,
+            line,
+            column: 1,
+            file_idx: 0,
+            discriminator: 0,
+            is_stmt,
+            basic_block: false,
+        }
+    }
+
+    /// `.debug_info` 里**函数 DIE** 的 low_pc 重定位。必须先丢掉第 0 条：那是 CU 自己的
+    /// `DW_AT_low_pc`，而它的符号名就取自「排第一的那个函数」（`build_abbrev_and_info`），
+    /// 直接按名字数会多数出一条、把「几条函数 DIE」这个问题问错对象。
+    fn func_low_pc_relocs(relocs: &[(u64, String)]) -> Vec<(u64, String)> {
+        relocs.iter().skip(1).cloned().collect()
+    }
+
+    /// `.debug_aranges` 里实际有多少条区间表项：按头里的 address_size 走到对齐后的数据区，
+    /// 数到那对 0 终止符为止。不硬编码「头 = N 字节」，以免以后头长了就数错。
+    fn arange_count(ar: &[u8]) -> usize {
+        let addr = ar[10] as usize;
+        assert_eq!(addr, 8, "本用例只喂 x86_64（address_size = 8）");
+        assert!(ar.len() > 12, ".debug_aranges 只有头也没有终止项？");
+        let mut i = 12usize; // 4 长度 + 2 版本 + 4 CU 偏移 + 1 指针大小 + 1 段选择子
+        while i % (2 * addr) != 0 {
+            i += 1; // 对齐填充
+        }
+        let mut n = 0usize;
+        while i + 2 * addr <= ar.len() {
+            let lo = u64::from_le_bytes(ar[i..i + 8].try_into().unwrap());
+            let len = u64::from_le_bytes(ar[i + 8..i + 16].try_into().unwrap());
+            if lo == 0 && len == 0 {
+                return n;
+            }
+            n += 1;
+            i += 2 * addr;
+        }
+        n
+    }
+
+    /// 把 `.debug_line` 的 opcode 区解成 `(address, line)` 行序列。
+    ///
+    /// 为什么必须解码再验：判据要的是「发出去的表本身地址单调」（gdb 拿它做二分查找），
+    /// 而不是「输入向量排过序」。只看输入的话，发射器把行丢了、把 advance 算错了都看不出来。
+    fn decode_line_rows(line_bytes: &[u8]) -> Vec<(u64, u32)> {
+        assert!(line_bytes.len() > 20, "行表比一个只带头的长度还短");
+        assert_eq!(
+            u16::from_le_bytes([line_bytes[4], line_bytes[5]]),
+            4,
+            "这个解码器只按 DWARF 4 的头布局认（v5 多了 address_size/segment_selector_size 两字节）"
+        );
+        // DWARF 4 固定头：min_insn(10) max_ops(11) is_stmt(12) line_base(13) line_range(14) opcode_base(15)
+        let min_insn = line_bytes[10] as u64;
+        let line_base = line_bytes[13] as i8 as i64;
+        let line_range = line_bytes[14] as u64;
+        let opcode_base = line_bytes[15];
+        let ops = &line_bytes[skip_line_header(line_bytes)..];
+        let mut rows: Vec<(u64, u32)> = Vec::new();
+        let (mut addr, mut line) = (0u64, 1i64);
+        let mut i = 0usize;
+        while i < ops.len() {
+            let b = ops[i];
+            if b >= opcode_base {
+                let adj = (b - opcode_base) as u64;
+                addr += (adj / line_range) * min_insn;
+                line += line_base + (adj % line_range) as i64;
+                rows.push((addr, line as u32));
+                i += 1;
+                continue;
+            }
+            i += 1;
+            match b {
+                DW_LNS_extended_op => {
+                    let (len, used) = read_uleb128_from_slice(&ops[i..]);
+                    i += used;
+                    let sub = ops[i];
+                    i += 1;
+                    let payload = len as usize - 1;
+                    if sub == DW_LNE_set_address {
+                        addr = u64::from_le_bytes(ops[i..i + 8].try_into().unwrap());
+                    }
+                    i += payload;
+                },
+                DW_LNS_copy => rows.push((addr, line as u32)),
+                DW_LNS_advance_pc => {
+                    let (v, used) = read_uleb128_from_slice(&ops[i..]);
+                    addr += v * min_insn;
+                    i += used;
+                },
+                DW_LNS_advance_line => {
+                    let (v, used) = read_sleb128_from_slice(&ops[i..]);
+                    line += v;
+                    i += used;
+                },
+                DW_LNS_set_file | DW_LNS_set_column | DW_LNS_set_isa => {
+                    let (_, used) = read_uleb128_from_slice(&ops[i..]);
+                    i += used;
+                },
+                DW_LNS_fixed_advance_pc => {
+                    addr += u16::from_le_bytes([ops[i], ops[i + 1]]) as u64;
+                    i += 2;
+                },
+                _ => {},
+            }
+        }
+        rows
+    }
+
+    #[test]
+    fn cu_die_range_spans_every_function_not_the_source_order_ends() {
+        // 源码序（= 输入顺序）与地址序故意不同序：sink 在源码里写第一，但它在 .text 里排最后。
+        // 旧口径取 `functions.first()/last()` 会得到 low_pc=0x400（sink），而真正的最小地址是 0x10。
+        let sink = fn_info("sink", 0x400, 0x450, 1);
+        let f = fn_info("f", 0x10, 0x8b, 2);
+        let main = fn_info("main", 0x200, 0x25d, 8);
+        let cu = cu_with(vec![sink.clone(), f.clone(), main.clone()], vec![]);
+
+        let opts = DebugOptions {
+            level: 2,
+            ..Default::default()
+        };
+        let sec = build_dwarf_full(&cu, &opts);
+
+        // CU 的 low_pc 就在第一条 reloc 的位置上（`build_abbrev_and_info` 先推 CU 再推函数）
+        let (cu_lo_off, cu_lo_sym) = &sec.debug_info_relocs[0];
+        let lo = u64::from_le_bytes(
+            sec.info[*cu_lo_off as usize..*cu_lo_off as usize + 8]
+                .try_into()
+                .unwrap(),
+        );
+        let hi_const = u64::from_le_bytes(
+            sec.info[*cu_lo_off as usize + 8..*cu_lo_off as usize + 16]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(lo, 0x10, "DW_AT_low_pc 必须是所有函数的最小地址");
+        assert_eq!(hi_const, 0x450 - 0x10, "DW_FORM_data8 的 high_pc 是「距 low_pc 的常量偏移」");
+        assert_eq!(cu_lo_sym, "f", "CU low_pc 的重定位必须跟着最小地址那个函数");
+        // 反向对照：本用例必须能区分「min/max」与旧的「first/last」两种口径，
+        // 否则输入顺序恰好等于地址序时它永远绿（旧口径给出的会是 0x400）。
+        assert_ne!(lo, sink.low_pc, "判据空转：拿到的还是源码序首个函数的地址");
+        // 函数 DIE 自己的区间也得一条一个、按地址升序（第 2 条 reloc 起）
+        let func_los: Vec<u64> = sec.debug_info_relocs[1..]
+            .iter()
+            .map(|(off, _)| u64::from_le_bytes(sec.info[*off as usize..*off as usize + 8].try_into().unwrap()))
+            .collect();
+        assert_eq!(func_los, vec![0x10, 0x200, 0x400], "DW_TAG_subprogram 必须按地址升序");
+    }
+
+    #[test]
+    fn duplicate_function_entries_collapse_to_one_die_and_one_range() {
+        // IR 里同一函数可以同时有「原型声明」与「定义」两个条目，上游按名字取 label
+        // 让两者拿到同一个 PC（各自的 span 不同，所以行号不同——这正是行表里出现
+        // 「同址两行」的来源）。重复条目的另一个特征：一侧带局部变量、另一侧不带。
+        let declared = fn_info("sink", 0x400, 0x450, 1);
+        let mut defined = fn_info("sink", 0x400, 0x450, 5);
+        defined.local_vars.push(DwarfLocalVar {
+            name: "only_on_one_side".to_string(),
+            ty: declared.return_type.clone(),
+            location: DwarfParamLocation::fbreg(-16),
+            decl_line: 2,
+        });
+        let cu = cu_with(vec![declared, defined], vec![]);
+        assert_eq!(
+            cu.functions.iter().filter(|f| f.name == "sink").count(),
+            2,
+            "对照输入本身就得是两条同名条目，否则下面全是空转"
+        );
+
+        let norm = normalize_cu(&cu);
+        assert_eq!(norm.functions.len(), 1, "同名条目必须合成一条");
+        assert_eq!(norm.functions[0].local_vars.len(), 1, "合并不得丢掉另一侧的非空表");
+
+        let opts = DebugOptions {
+            level: 2,
+            ..Default::default()
+        };
+
+        // 反向对照：把**未归一化**的输入直接喂给三个发射器，各自都会发出两份。
+        // 这既是修复前产物的真实形状（两条同名同址 DIE、两行同址行、两条重叠 aranges 表项），
+        // 也同时证明下面那几个「1」不是仪器数不出「2」。
+        let mut strs = StringTable::new();
+        let mut abb = AbbrevBuilder::default();
+        let (_, _, raw_relocs) = build_abbrev_and_info(&cu, &opts, &mut strs, &mut abb);
+        let (raw_line, _) = build_line_program(&cu, &opts);
+        let (raw_aranges, _) = build_aranges(&cu, &opts);
+        assert_eq!(
+            func_low_pc_relocs(&raw_relocs)
+                .iter()
+                .filter(|(_, n)| *n == "sink")
+                .count(),
+            2,
+            "对照失效：未归一化的输入在 .debug_info 里只留下两条函数 low_pc 重定位"
+        );
+        assert_eq!(
+            decode_line_rows(&raw_line).len(),
+            2,
+            "对照失效：未归一化的输入在行表里只留下一行"
+        );
+        assert_eq!(
+            arange_count(&raw_aranges),
+            2,
+            "对照失效：未归一化的输入在 .debug_aranges 里只留下一条表项"
+        );
+
+        // 走主入口（= 四个消费者共用同一份归一化口径）：三处都必须只剩一份。
+        let sec = build_dwarf_full(&cu, &opts);
+        assert_eq!(
+            func_low_pc_relocs(&sec.debug_info_relocs)
+                .iter()
+                .filter(|(_, n)| *n == "sink")
+                .count(),
+            1,
+            "同名同址的 DW_TAG_subprogram 发了两条"
+        );
+        assert_eq!(arange_count(&sec.aranges), 1, ".debug_aranges 出现重叠重复表项");
+        let rows = decode_line_rows(&sec.line);
+        assert_eq!(rows.len(), 1, "重复函数在行表里留下了重复行：{:?}", rows);
+    }
+
+    #[test]
+    fn line_program_addresses_are_monotonic_even_when_the_input_is_not() {
+        // 输入故意降序 + 夹一条完全重复的行；发射后的表必须地址严格不降，而且一行都不能丢
+        let entries = vec![
+            row(0x300, 12, true),
+            row(0x100, 3, true),
+            row(0x200, 7, true),
+            row(0x200, 7, true),
+            row(0x180, 5, false),
+        ];
+        let cu = cu_with(vec![fn_info("f", 0x100, 0x400, 3)], entries.clone());
+        let sec = build_dwarf_full(
+            &cu,
+            &DebugOptions {
+                level: 3,
+                ..Default::default()
+            },
+        );
+        let rows = decode_line_rows(&sec.line);
+        let mut asc = rows.clone();
+        asc.sort();
+        assert_eq!(rows, asc, "行表地址倒退：gdb 的二分查找会命不中（{:?}）", rows);
+        // 反向对照：集合必须与输入（去掉那条完全重复的）相同 —— 防「把行全丢了也算单调」的假绿
+        let expect: std::collections::BTreeSet<(u64, u32)> =
+            entries.iter().map(|e| (e.pc, e.line)).collect();
+        let got: std::collections::BTreeSet<(u64, u32)> = rows.iter().cloned().collect();
+        assert_eq!(got, expect, "行表少行或多行（输入 {} 行，解码 {} 行）", expect.len(), rows.len());
     }
 }

@@ -640,12 +640,12 @@ fn format_operand(
 /// Format register operand with proper AT&T naming
 fn format_register(class: RegClass, index: u8, width: OperandWidth) -> String {
     let prefix = match class {
-        RegClass::Gp => match width {
-            OperandWidth::Bit8 => get_gp_name_8bit(index).to_string(),
-            OperandWidth::Bit16 => get_gp_name_16bit(index).to_string(),
-            OperandWidth::Bit32 => get_gp_name_32bit(index).to_string(),
-            OperandWidth::Bit64 => format!("%r{}", get_gp_name_64bit(index)),
-        },
+        // 号→名只有一份表（`codegen::x86_64::abi::regnames`，Phase 6.1 的后半）。
+        // 以前这里是第四份反向表（四张宽度表），而且 64 位那张给**裸名**、由调用方
+        // 再拼 `%r{}` —— 于是 `rax` 会变成 `%rrax`、`r13` 变成 `%rr13`。它一直没现形
+        // 是因为整条事件格式化路径从没被喂过数据（`Codegen::asm_events` 的 push 次数
+        // 实测为 0）—— 一份漂移的表躲在死路径里，就是§11.15 说的「各自演化」的下场。
+        RegClass::Gp => gp_att_name(index, width),
         RegClass::Xmm => format!("%xmm{}", index),
         RegClass::Ymm => format!("%ymm{}", index),
         RegClass::Zmm => format!("%zmm{}", index),
@@ -657,38 +657,20 @@ fn format_register(class: RegClass, index: u8, width: OperandWidth) -> String {
     prefix.to_string()
 }
 
-fn get_gp_name_8bit(idx: u8) -> &'static str {
-    const NAMES: [&str; 16] = [
-        "%al", "%cl", "%dl", "%bl", "%spl", "%bpl", "%sil", "%dil", "%r8b", "%r9b", "%r10b",
-        "%r11b", "%r12b", "%r13b", "%r14b", "%r15b",
-    ];
-    NAMES[idx as usize % 16]
+/// GP 号 + 宽度 → AT&T 名。查不到（不存在的号）就点名而不是猜一个：
+/// 日志里出现 `%rax` 形状的臉造名比一个看得见的 `<bad-reg>` 更坑。
+fn gp_att_name(index: u8, width: OperandWidth) -> String {
+    let bits = match width {
+        OperandWidth::Bit8 => 8u8,
+        OperandWidth::Bit16 => 16,
+        OperandWidth::Bit32 => 32,
+        OperandWidth::Bit64 => 64,
+    };
+    crate::codegen::x86_64::att_name_of_num(index, bits)
+        .unwrap_or_else(|| format!("<bad-reg-{index}/{bits}>"))
 }
 
-fn get_gp_name_16bit(idx: u8) -> &'static str {
-    const NAMES: [&str; 16] = [
-        "%ax", "%cx", "%dx", "%bx", "%sp", "%bp", "%si", "%di", "%r8w", "%r9w", "%r10w", "%r11w",
-        "%r12w", "%r13w", "%r14w", "%r15w",
-    ];
-    NAMES[idx as usize % 16]
-}
-
-fn get_gp_name_32bit(idx: u8) -> &'static str {
-    const NAMES: [&str; 16] = [
-        "%eax", "%ecx", "%edx", "%ebx", "%esp", "%ebp", "%esi", "%edi", "%r8d", "%r9d", "%r10d",
-        "%r11d", "%r12d", "%r13d", "%r14d", "%r15d",
-    ];
-    NAMES[idx as usize % 16]
-}
-
-fn get_gp_name_64bit(idx: u8) -> &'static str {
-    const NAMES: [&str; 16] = [
-        "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12",
-        "r13", "r14", "r15",
-    ];
-    NAMES[idx as usize % 16]
-}
-
+/// 段寄存器号 → 名（与 GP 不同域：段号不参与 `abi/regnames.rs` 那张 GP 表）。
 fn get_seg_name(idx: u8) -> String {
     match idx {
         0 => "%es".to_string(),
@@ -721,9 +703,15 @@ fn format_memory(mem: &AsmMem, _symbol_addrs: &std::collections::HashMap<String,
     }
 
     // Base register
+    //
+            // 注：本函数是 Phase 9 「事件格式化」那条路径的一部分，今天整条路还没接上
+            // （`Codegen::asm_events` 从未被 push），所以这里的 `Gp` 底数仍写死为帧基址
+            // r13 —— 那是那未完成的格式化器的缺口，不是名字表的缺口。本轮只把它里的
+            // 号→名换成共用的那一份（旧写法 `format!("%r{}", get_gp_name_64bit(13))`
+            // 会输出 `%rr13`）。
     if let Some(base) = &mem.base {
         let base_reg = match base {
-            RegClass::Gp => format!("%r{}", get_gp_name_64bit(13)), // Use r13 as r13 convention
+            RegClass::Gp => gp_att_name(13, OperandWidth::Bit64),
             _ => "%invalid".to_string(),
         };
         parts.push(base_reg);
@@ -734,9 +722,9 @@ fn format_memory(mem: &AsmMem, _symbol_addrs: &std::collections::HashMap<String,
     // Index*scale
     if let Some(_index) = mem.index {
         if mem.scale != 1 {
-            parts.push(format!("%r{},{}", get_gp_name_64bit(13), mem.scale));
+            parts.push(format!("{},{}", gp_att_name(13, OperandWidth::Bit64), mem.scale));
         } else {
-            parts.push(format!("%r{}", get_gp_name_64bit(13)));
+            parts.push(gp_att_name(13, OperandWidth::Bit64));
         }
     }
 
@@ -807,5 +795,25 @@ mod tests {
         assert_eq!(OperandWidth::Bit16.suffix_char(), 'w');
         assert_eq!(OperandWidth::Bit32.suffix_char(), 'l');
         assert_eq!(OperandWidth::Bit64.suffix_char(), 'q');
+    }
+
+    /// 号→名合一（Phase 6.1 后半）之后，四种宽度都必须给出能直接拼进 AT&T 文本的
+    /// 名字。这里同时钉住本模块旧四张表已经漂移的那一条：64 位那张给**裸名**、
+    /// 调用方再拼 `%r{}` ⇒ `rax` 变成 `%rrax`、`r13` 变成 `%rr13`。它一直没响是因为
+    /// 整条事件格式化路径从没被喂过数据（`Codegen::asm_events` 的 push 实测为 0）——
+    /// 躲在死路径里的副本不会自己变得正确。
+    #[test]
+    fn gp_register_names_come_from_the_single_reverse_table() {
+        assert_eq!(format_register(RegClass::Gp, 0, OperandWidth::Bit64), "%rax");
+        assert_eq!(format_register(RegClass::Gp, 13, OperandWidth::Bit64), "%r13");
+        assert_eq!(format_register(RegClass::Gp, 1, OperandWidth::Bit32), "%ecx");
+        assert_eq!(format_register(RegClass::Gp, 4, OperandWidth::Bit16), "%sp");
+        assert_eq!(format_register(RegClass::Gp, 0, OperandWidth::Bit8), "%al");
+        assert_eq!(format_register(RegClass::Gp, 6, OperandWidth::Bit8), "%sil");
+        // 不存在的号必须是看得见的，不能伪装成某个寄存器
+        assert_eq!(
+            format_register(RegClass::Gp, 99, OperandWidth::Bit64),
+            "<bad-reg-99/64>"
+        );
     }
 }

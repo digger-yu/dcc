@@ -2915,35 +2915,13 @@ fn asm_empty_template_minimal_stays_transparent_across_tu() {
 // 判据链: 后端只**记录**"这行编不出来"这个事实 (CommonImage.asm_passthrough),
 // 报错还是降级由 codegen::emit() 按 --asm-fallback 单点决定, 产物形态由 Emitted
 // 类型带到 driver。下面 7 条用例分别钉住这条链的每一个环节。
-
-/// 把降级夹具编译一次, 返回 (stderr, 是否成功, .o 路径, .s 路径)。
-fn asm_fallback_compile(
-    tag: &str,
-    extra: &[&str],
-    out_ext: &str,
-) -> (String, bool, std::path::PathBuf, std::path::PathBuf) {
-    let dir = std::env::temp_dir();
-    let stem = format!("dcc-asm-fallback-{tag}-{}", std::process::id());
-    let obj_path = dir.join(format!("{stem}{out_ext}"));
-    let text_path = dir.join(format!("{stem}.s"));
-    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/asm/asm_fallback_gas.c");
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
-    cmd.arg("-c").arg("-o").arg(&obj_path).args(extra).arg(&fixture);
-    let output = cmd.output().expect("run dcc");
-    (
-        String::from_utf8_lossy(&output.stderr).to_string(),
-        output.status.success(),
-        obj_path,
-        text_path,
-    )
-}
+// （共用的编链动作 `asm_fallback_compile` 住在 `tests/common/harness.rs`。）
 
 /// 默认策略必须是硬错误 —— 向后兼容, 老脚本不会因为新选项而静默改行为。
 #[test]
 #[cfg(unix)]
 fn asm_fallback_default_is_hard_error() {
-    let (stderr, ok, obj, text) = asm_fallback_compile("default", &[], ".o");
+    let (stderr, ok, obj, text) = harness::asm_fallback_compile("default", &[], ".o");
     assert!(!ok, "默认策略下含不可编码 asm 的 TU 必须失败");
     assert!(stderr.contains("E0311"), "必须报 E0311, 实际: {stderr}");
     assert!(
@@ -2959,7 +2937,7 @@ fn asm_fallback_default_is_hard_error() {
 #[test]
 #[cfg(unix)]
 fn asm_fallback_groups_diagnostics_per_asm_statement() {
-    let (stderr, _ok, obj, text) = asm_fallback_compile("grouped", &[], ".o");
+    let (stderr, _ok, obj, text) = harness::asm_fallback_compile("grouped", &[], ".o");
     let n = stderr.matches("error[E0311]").count();
     assert_eq!(n, 1, "两条未知指令同属一条 asm 语句, 应只报一条聚合错误: {stderr}");
     assert!(stderr.contains("serialize"), "诊断必须列出具体行: {stderr}");
@@ -2972,7 +2950,7 @@ fn asm_fallback_groups_diagnostics_per_asm_statement() {
 #[test]
 #[cfg(unix)]
 fn asm_fallback_gas_degrades_whole_tu_to_text() {
-    let (stderr, ok, obj, text) = asm_fallback_compile("degrade", &["--asm-fallback=gas"], ".o");
+    let (stderr, ok, obj, text) = harness::asm_fallback_compile("degrade", &["--asm-fallback=gas"], ".o");
     assert!(ok, "降级模式必须成功: {stderr}");
     // 关键回归: 文本绝不许写进 .o (否则 host ld 会报 bad ELF magic)
     assert!(!obj.exists(), "产物是文本时不得存在 .o: {}", obj.display());
@@ -2995,7 +2973,7 @@ fn asm_fallback_gas_text_assembles_through_real_as() {
         return;
     }
     let (stderr, ok, obj, text) =
-        asm_fallback_compile("assemble", &["--asm-fallback=gas"], ".o");
+        harness::asm_fallback_compile("assemble", &["--asm-fallback=gas"], ".o");
     assert!(ok, "降级模式必须成功: {stderr}");
     let o = Command::new("as")
         .arg("-o")
@@ -3029,7 +3007,7 @@ fn asm_fallback_gas_text_assembles_through_real_as() {
 #[cfg(unix)]
 fn asm_fallback_rejects_unknown_value() {
     let (stderr, ok, _obj, _text) =
-        asm_fallback_compile("badval", &["--asm-fallback=llvm"], ".err");
+        harness::asm_fallback_compile("badval", &["--asm-fallback=llvm"], ".err");
     assert!(!ok, "未知取值必须失败");
     assert!(
         stderr.contains("gas") && stderr.contains("error"),
@@ -3079,7 +3057,7 @@ fn asm_fallback_output_is_deterministic() {
     let mut texts = Vec::new();
     for _ in 0..2 {
         let (_stderr, ok, obj, text) =
-            asm_fallback_compile("determinism", &["--asm-fallback=gas"], ".o");
+            harness::asm_fallback_compile("determinism", &["--asm-fallback=gas"], ".o");
         assert!(ok);
         texts.push(fs::read_to_string(&text).expect("read degraded .s"));
         let _ = fs::remove_file(&obj);
@@ -3293,4 +3271,131 @@ fn register_asm_name_accepts_the_percent_form() {
     assert!(bout.status.success(), "编译失败：{}", String::from_utf8_lossy(&bout.stderr));
     assert_eq!(run_exe(&exe), 0, "%rbx 绑定没生效");
     let _ = fs::remove_file(exe);
+}
+
+/// N7 实测结论：用户 asm 文本里的 `call leaf` 引用的是**源名**，`-O2` 不会改名。
+///
+/// oracle 取 gcc -O0：同一份源在 gcc -O2 下**自己**就报
+/// `undefined reference to 'leaf'`（gcc 不把 asm 文本算进符号引用分析，于是把
+/// file-scope static 的定义整个丢掉），拿它当参照只会把一个既有的外部限制
+/// 记成 dcc 的缺陷。dcc 侧则要求 -O0 与 -O2 都能链接、都能跑出 5，并且
+/// `.symtab` 里 `leaf` 是一条 LOCAL FUNC 定义项（不是 UND、不是改名后的形态）。
+#[test]
+#[cfg(unix)]
+fn asm_text_call_keeps_static_func_source_name_at_all_levels() {
+    if !tool_exists("gcc") || !tool_exists("nm") {
+        return;
+    }
+    let source = include_str!("../fixtures/opt/asm_text_static_func_symbol.c");
+    // 1) gcc -O0 参照 = 5
+    assert_eq!(
+        run_gcc_cross_check_opt("asm-static-func-symbol", source, &["-O0"]),
+        5,
+        "-O0: 与 gcc 参照不一致（asm 文本引用的 static 函数被改名的形状）"
+    );
+    // 2) dcc -O2 必须自己也能链接并跑出同一个数（档位差一个 DCE，必须单独跑）
+    for flag in ["-O0", "-O2"] {
+        let (out, exe) = run_compile_and_run_flags("asm-static-func-symbol-o2", source, &[flag]);
+        assert!(
+            out.status.success(),
+            "{flag}: dcc 应能编译并链接（asm 文本里的 `call leaf` 必须解析到本 TU 的 \
+             static 定义）: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let (rc, _, _) = run_exe_bounded(&exe);
+        let _ = std::fs::remove_file(exe);
+        assert_eq!(rc, 5, "{flag}: `call leaf` + C 侧 leaf 两次 +1 应得 5");
+    }
+    // 3) 产物级：符号名保持源名，且是 LOCAL FUNC 定义
+    let (out, obj) = run_object_test_flags("asm-static-func-symbol-obj", source, &["-O2"]);
+    assert!(out.status.success(), "应能编出 .o");
+    let syms = elf64_syms(&fs::read(&obj).expect("read .o"));
+    let _ = std::fs::remove_file(obj);
+    let leaf: Vec<&_> = syms.iter().filter(|s| s.name == "leaf").collect();
+    assert_eq!(leaf.len(), 1, "`leaf` 应恰好一条符号项: {:?}", syms.iter().map(|s| s.name.clone()).collect::<Vec<_>>());
+    assert_eq!(leaf[0].shndx, 1, "`leaf` 必须定义在 .text（0 = UND，就是旧记录那条形状）");
+    assert_eq!(leaf[0].bind, 0, "file-scope static 函数必须是 LOCAL 绑定");
+    assert_eq!(leaf[0].stype, 2, "`leaf` 必须是 STT_FUNC");
+}
+
+/// 文件作用域 `register asm` 绑到**会被调用毁掉**的寄存器：dcc 必须像 gcc 一样说出来。
+///
+/// 判据按 gcc 逐字对拍（消息正文、条数、以及位置），而不但按 dcc 自己：
+///   * 夹具里 `lost` 绑 `%r11`（SysV caller-saved）⇒ 两侧各 **1** 条
+///     `call-clobbered register used for global register variable`；
+///   * `keep` 绑 `%r15`（callee-saved）**不得**再多一条 —— 这条是反向对照：
+///     只判「有没有报」的用例会连「把所有绑定都报一遍」一起放过；
+///   * 反向对照二：只绑 callee-saved 的既有夹具 `c/register_binding_width.c` 两侧都是 0 条；
+///   * 警告不得改变产物，也不得让编译失败（两侧同一份源都 rc=0，且都能跑对）。
+///
+/// 这条判据之前不存在：修之前 dcc 对同一个构造零诊断，也就是「寄存器跨不过调用」这件事
+/// 只有编译器知道（`docs/p12-physreg-spill-design.md` §11.29）。
+#[test]
+#[cfg(unix)]
+fn global_register_binding_on_call_clobbered_reg_warns_like_gcc() {
+    const MSG: &str = "call-clobbered register used for global register variable";
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/c/global_reg_call_clobbered.c");
+    let control = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/c/register_binding_width.c");
+    assert!(fixture.exists(), "夹具不存在：{}", fixture.display());
+
+    let count_on = |bin: &str, args: &[&str], src: &std::path::Path| -> (usize, bool) {
+        let out = Command::new(bin)
+            .args(args)
+            .arg("-c")
+            .arg("-o")
+            .arg("/dev/null")
+            .arg(src)
+            .output()
+            .unwrap_or_else(|_| panic!("run {bin}"));
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        (stderr.matches(MSG).count(), out.status.success())
+    };
+
+    // 1) 被测夹具：dcc 与 gcc 同为 1 条，且都不失败
+    let (dcc_n, dcc_ok) = count_on(env!("CARGO_BIN_EXE_dcc"), &["-O0"], &fixture);
+    assert!(dcc_ok, "警告不得让编译失败");
+    assert_eq!(
+        dcc_n, 1,
+        "call-clobbered 的绑定必须报恰好 1 条（实得 {dcc_n}）"
+    );
+    if harness::host_cc_available() {
+        let (gcc_n, _) = count_on("gcc", &["-O0"], &fixture);
+        assert_eq!(gcc_n, 1, "gcc 的这条诊断条数变了，判据需复核");
+        // 反向对照二：只有 callee-saved 绑定的夹具两侧都是 0 条
+        let (dcc_ctrl, _) = count_on(env!("CARGO_BIN_EXE_dcc"), &["-O0"], &control);
+        let (gcc_ctrl, _) = count_on("gcc", &["-O0"], &control);
+        assert_eq!(gcc_ctrl, 0, "对照夹具在 gcc 下不该有该诊断");
+        assert_eq!(
+            dcc_ctrl, 0,
+            "callee-saved 绑定不得被顺手报成 call-clobbered（实得 {dcc_ctrl}）"
+        );
+    }
+
+    // 2) 警告不改变产物：同一份源在 -O0..-O3 的 .s 里，除了这句话之外不得多出任何差异，
+    //    而它与诊断无关地存在 ⇒ 用「不带 stderr 的两次编译字节相同」表达同一件事。
+    let emit = |lvl: &str| -> String {
+        let asm_path = std::env::temp_dir().join(format!(
+            "dcc-call-clobber-{}-{}.s",
+            std::process::id(),
+            lvl
+        ));
+        let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .arg(lvl)
+            .args(["-S", "-o"])
+            .arg(&asm_path)
+            .arg(&fixture)
+            .output()
+            .expect("run dcc");
+        assert!(out.status.success(), "编译必须成功");
+        let text = std::fs::read_to_string(&asm_path).unwrap_or_default();
+        let _ = std::fs::remove_file(&asm_path);
+        text
+    };
+    let o0 = emit("-O0");
+    assert!(o0.contains("%r11"), "夹具必须真的用到 %r11，否则本用例是空跑");
+    assert!(o0.contains("%r15"), "夹具必须真的用到 %r15（反向对照臂）");
+    // 同一档连编两次字节相同（警告不引入任何不确定性）
+    assert_eq!(o0, emit("-O0"), "同一档两次编译的 .s 必须逐字节相同");
 }

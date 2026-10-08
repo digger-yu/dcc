@@ -398,11 +398,11 @@ impl Codegen {
                                  shape that can carry a resolver",
                         );
                     }
-                    // 收集此函数的嵌套函数 (递归, 不含自身)
-                    let mut nested = vec![];
-                    if let Some(body) = &f.body {
-                        Self::collect_nested_funcs(&body.items, &mut nested);
-                    }
+                    // 嵌套函数的符号不在这里发：本函数只能按**顶层父函数**查
+                    // `nested_func_renames`，孙层的原名存在中间那层的表里，查不到
+                    // 就退回原名 ⇒ 标签查不到 ⇒ 整个符号被静默跳过。全部嵌套函数
+                    // 已由 `compile_module` 预扫描以唯一名登进 `nested_funcs`，下面
+                    // 那一段是唯一发射入口。
                     // 先处理顶层函数自身
                     // Use resolved asm label name for label lookup
                     let label_key = self.resolve_asm_label(&f.name.name).to_string();
@@ -446,56 +446,18 @@ impl Codegen {
                             global_syms.push(sym);
                         }
                     }
-                    // 再处理嵌套函数
-                    for func in &nested {
-                        let orig_nested_name = &func.name.name;
-                        // 查找重命名后的名称 (如果有)
-                        let effective_name = self
-                            .nested_func_renames
-                            .get(&f.name.name)
-                            .and_then(|m| m.get(orig_nested_name))
-                            .cloned()
-                            .unwrap_or_else(|| orig_nested_name.clone());
-                        let nested_sym_name = self.resolve_asm_label(&effective_name).to_string();
-                        if nested_sym_name.is_empty() {
-                            continue;
-                        }
-                        if let Some(&func_start) = self.labels.get(&effective_name) {
-                            let func_size = self
-                                .func_sizes
-                                .get(&effective_name)
-                                .copied()
-                                .unwrap_or_else(|| {
-                                    self.compute_func_size_fallback(&effective_name, func_start)
-                                });
-                            let (sec_idx, sym_value) = if let Some(&(si, off)) =
-                                custom_func_offsets.get(&effective_name)
-                            {
-                                (si, off)
-                            } else {
-                                (1u16, func_start)
-                            };
-                            let sym = ElfSym {
-                                name: nested_sym_name,
-                                section: sec_idx,
-                                value: sym_value,
-                                size: func_size,
-                                bind: STB_LOCAL, // 嵌套函数使用局部绑定
-                                ty: STT_FUNC,
-                                visibility: STV_DEFAULT,
-                            };
-                            local_syms.push(sym);
-                        }
-                    }
                 }
             }
         }
-        // 发射所有嵌套函数的符号 (处理深层嵌套或未被上层循环处理的情况)
-        for nested_name in self.nested_funcs.keys() {
-            // 跳过已发射的符号
-            if self.sym_index.contains_key(nested_name) {
-                continue;
-            }
+        // 嵌套函数符号的**唯一**发射入口：事实只有一份（`nested_funcs`，预扫描
+        // 按源码序以唯一名登表），不再按 prog.decls 递归重走一遍 AST —— 两套枚举
+        // 必然漂移，今天就是漂成了「两个同名同址项」。
+        //
+        // 遍历序必须固定：`nested_funcs` 是 HashMap，直接 `keys()` 会让 .symtab 里的
+        // 符号次序随进程随机（实测同一份源五连编有一次不一致）。
+        let mut nested_names: Vec<&String> = self.nested_funcs.keys().collect();
+        nested_names.sort();
+        for nested_name in nested_names {
             if let Some(&func_start) = self.labels.get(nested_name) {
                 let func_size = self
                     .func_sizes

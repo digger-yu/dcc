@@ -20,6 +20,12 @@ use crate::target::Target;
 use std::collections::{HashMap, HashSet};
 
 mod abi;
+// 共享层 `codegen::shared::homes` 与 `codegen::asm_event` 需要「x86_64 上哪个 `register asm`
+// 名字合法」与「号→名」这两条判据（它自己有各 target 的名字表，x86_64 这张是 132 条的
+// 那一份）。`abi` 本身保持私有：只导出这几个函数，不放开整个模块。
+pub(crate) use self::abi::regnames::{
+    att_name_of_num, bare_name_of_num, is_user_register_name,
+};
 /// x86_64 代码生成器 - 所有子模块声明
 mod asm;
 mod backend;
@@ -45,9 +51,9 @@ mod special;
 // All production exports flow through this section.
 // ============================================================================
 pub use self::codegen::{
-    AbiClass, AggDst, ArgLoc, Codegen, CustomSecRel, DeferredPushsectionFixup, FuncAsmLayout,
-    FuncEmitChunk, GlobalVar, JumpKind, ParallelEmitCtx, ParallelGlobalSnap, PendingCodeRel,
-    PendingJump, VaListAddress,
+    AbiClass, AggDst, ArgLoc, Codegen, CustomSecRel, DebugVarLoc, DeferredPushsectionFixup,
+    FuncAsmLayout, FuncEmitChunk, GlobalVar, JumpKind, ParallelEmitCtx, ParallelGlobalSnap,
+    PendingCodeRel, PendingJump, SymbolFacts, VaListAddress,
 };
 
 // ============================================================================

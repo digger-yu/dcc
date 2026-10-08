@@ -38,6 +38,90 @@ pub type Bank = crate::location::RegBank;
 /// 的 `callee_save_patch_sites` 与 bit 0x01/0x02/0x04/0x08），换序就是换产物。
 const POOL: [u8; 4] = [3, 12, 14, 15]; // rbx, r12, r14, r15
 
+/// 表达式求值的**落点寄存器**（`docs/p12-physreg-spill-design.md` §7 Phase 5.1 前置一）。
+///
+/// 这是「结果恒在 %rax」那条发射约定的**唯一出处**。以前它以内联字面量 `0` 的形式
+/// 抄在了 252 个调用点上（实测 `grep -rE 'gen_expr\([^)]*, 0\)'`），而抄本不能回答
+/// 任何一个 P12 必须回答的问题：一个值现在到底在哪个寄存器里？基址要改就得同时改
+/// 完所有抄本（而这正是「谁也不知道自己改全了没有」的形状，与本仓 H4 同一类）。
+///
+/// 名字而不是一行注释：`Self::EVAL_BASE`（`Codegen` 上的别名）就是调用点要写的东西。
+/// 与 SysV 返回值寄存器、与本后端的名字表是否一致，由下面的用例钉住（不是口头约定）。
+pub const EVAL_BASE_REG: u8 = 0; // %rax
+
+/// 二元运算**右操作数的暂存号**候选表（Phase 5.1 前置三）。
+///
+/// 以前这个号在 `emit/expr/dispatch.rs` 里写死 `1`（连同三处 rcx 专属字节编码），意思就是
+/// 「`%rcx` 永远归暂存」—— 这条约定凌驾在占用事实上，所以把 caller-saved 号发给一个变量
+/// 当家以后，紧跟其后的求值会把那个家踩掉（实测：`a+b+c+d+e` 里 `c` 的家给 `%rcx` ⇒
+/// gcc 50 / dcc 47，设计 §11.40）。
+///
+/// **候选表不在这里定义**：它就是分配器的延伸池（`src/ssa/regalloc.rs::AUTO_EXT_POOL`）。
+/// 以前两边各自列了一份同样的 5 元表，而「哪些号能暂存」与「哪些号能当家」其实是同一个
+/// 事实的两面：家把候选占满后，发射期才发现无号可暂存（实测 `E1135`，§11.47）。现在单源
+/// 在分配器那一侧，它同时负责「发号时必须给暂存留一个空闲候选」这条判据。
+///
+/// 排除项（`rax` 求值基址、`rdx` 128 位返回高半、`r10` 静态链/非局部跳转、`r11` 帧寻址
+/// scratch、`rsp/rbp/r13` 固定用途）也同一源。
+pub fn rhs_stage_candidates() -> Vec<u8> {
+    crate::ssa::regalloc::auto_ext_pool_regs()
+}
+
+impl RegBank {
+    /// 给一次二元运算选右操作数的暂存号：跳过 `dst`（左右同开会直接把操作数吃掉）与
+    /// 任何已被握着的号（家：`allocated`；用户/自动钉住：`pinned`）。
+    ///
+    /// 返 `None` 意思是候选表全被握着 —— 调用方不得因此拿一个握着的号，而是去拿
+    /// 一个真正空闲的临时号（`alloc_temp`，它会同时把 `used_by_self` 置上，序言保存自动跟上）。
+    /// 分配器已保证这种情况不会发生（`stage_free_after`），所以调用方碰到它应当硬错误。
+    pub fn pick_rhs_stage(&self, dst: u8) -> Option<u8> {
+        let cands = rhs_stage_candidates();
+        let got = cands
+            .iter()
+            .copied()
+            .find(|&n| n != dst && !self.is_allocated(n) && !self.is_pinned(n));
+        if std::env::var_os("DCC_STAGE_PROBE").is_some() {
+            eprintln!(
+                "STAGE dst={} alloc={:08b} pinned={:?} -> {:?}",
+                dst,
+                self.allocated_mask(),
+                {
+                    let mut v: Vec<u8> = rhs_stage_candidates()
+                        .into_iter()
+                        .filter(|&n| self.is_pinned(n))
+                        .collect();
+                    v.sort();
+                    v
+                },
+                got
+            );
+        }
+        got
+    }
+}
+
+/// 这个 GP 号是不是**调用会被毁掉**的那一类（SysV AMD64）。
+///
+/// 为什么需要它作为一个可问的事实（Phase 5.1 前置三的第一块）：本后端到今天为止只把
+/// 「callee-saved 池」（`POOL`）当一份名单，而「跨 call 保活」需要的恰好是它的补集：
+/// 分配器选家、文件作用域 `register asm` 绑定、内联 asm 的 clobber 表，问的都是同一个问题
+/// （「这个号能不能存下一个值」），以前各自在心里背了一份。
+///
+/// 不叫 `is_callee_saved` 而叫 `is_call_clobbered`：两个集合并不是互补的。SysV 里
+/// `%rsp`/`%rbp` 是固定用途寄存器（前者本后端当只读别名允许绑定），它们既不「被调用毁」
+/// 也不是可供分配使用的 callee-saved 家；`%r13` 是本后端的帧基址。这三个号归「不毁」，
+/// 能不能拿当家是另一道门（`reserved_reg_reason`）负责的。
+///
+/// 实测对拍 gcc（`register unsigned long v asm("<r>");` 文件作用域）：`rax/rcx/rdx/rsi/rdi/
+/// r8-r11` 全部报 `call-clobbered register used for global register variable`，
+/// `rbx/r12/r13/r14/r15/rsp` 不报（`rbp` 是一条 error，不属本判据）。
+pub fn is_call_clobbered(n: u8) -> bool {
+    // SysV AMD64：callee-saved = rbx(3)、rbp(5)、r12-r15(12..15)；rsp(4) 固定；
+    // 剩下的（rax 0、rcx 1、rdx 2、rsi 6、rdi 7、r8-r11 = 8..11）都是 caller-saved。
+    // APX 的 r16-r31 不在本表的已知号里（绑定与 clobber 侧另有名字表门），这里一律当毁。
+    !matches!(n, 3 | 4 | 5 | 12 | 13 | 14 | 15)
+}
+
 /// 一个函数的寄存器占用状态。随 `compile_func` 逐函数复位（`reset_reg_tracker`）。
 #[derive(Debug, Clone)]
 pub struct RegBank {
@@ -566,5 +650,118 @@ mod tests {
         assert_eq!(bank.free_temps(), vec![3, 12, 14, 15]);
         assert!(!bank.is_banned(3));
         assert_eq!(bank.alloc_temp(), Some(3), "复位后 %rbx 必须重新可发");
+    }
+
+    /// 求值基址必须就是名字表里的那个 `%rax`（Phase 5.1 前置一）。
+    ///
+    /// 为什么要拿名字表对拍而不是写一句注释：`EVAL_BASE_REG` 说的是一件事（「结果落在
+    /// 几号」），`abi/regnames.rs` 的 132 条表说的是同一件事的另一种表述（「这个号叫什么」）。
+    /// 两边各拿一个字面量时，一侧重号（或 APX 扩表时改表）就会让「求值基址」静默变成
+    /// 另一个寄存器 —— 那比错值更糟，因为全后端的发射约定都跟着它走。
+    /// 本后端只支持 x86_64，号与名的对应关系就是 `att_name_of_num` 那一张表。
+    #[test]
+    fn eval_base_reg_is_the_name_tables_rax() {
+        use crate::codegen::x86_64::abi::regnames::att_name_of_num;
+        assert_eq!(
+            att_name_of_num(EVAL_BASE_REG, 64).as_deref(),
+            Some("%rax"),
+            "求值基址必须是名字表里的 %rax，实得 {:?}",
+            att_name_of_num(EVAL_BASE_REG, 64)
+        );
+        // 与「SysV 整型返回值在 rax」这条 ABI 事实也对得上：名字表的 0 号在
+        // callee-saved 池里不得存在（池是 rbx/r12/r14/r15），否则序言会保存求值基址。
+        assert!(
+            !RegBank::pool_for_bank(Bank::Gp).contains(&EVAL_BASE_REG),
+            "求值基址不得在 callee-saved 池里（序言会把它当变量家保存）"
+        );
+    }
+
+    /// `is_call_clobbered` 的表逐号对拍（SysV AMD64），并且钉住它与本文件里另外两份
+    /// 名单的关系：
+    /// * `POOL`（自动分配可用的 callee-saved 池）里的号**必须**不毁 —— 否则序言保存一个
+    ///   会被调用毁掉的号，而分配器以为它保得住值；
+    /// * `EVAL_BASE_REG`（%rax）**必须**毁 —— 它是求值落点，跨 call 不保活本来就是它的语义。
+    #[test]
+    fn call_clobbered_table_matches_sysv_and_the_local_pools() {
+        // 号 -> 该号是不是「不会被调用毁」的那一类（SysV AMD64 ABI 表，手写死作为独立真值）
+        const CALLEE_OR_FIXED: [u8; 7] = [3, 4, 5, 12, 13, 14, 15]; // rbx rsp rbp r12..r15
+        for n in 0u8..16 {
+            let want = !CALLEE_OR_FIXED.contains(&n);
+            assert_eq!(
+                is_call_clobbered(n),
+                want,
+                "号 {n} 的 call-clobber 属性与 SysV 表不一致（毁={} 应为={}）",
+                is_call_clobbered(n),
+                want
+            );
+        }
+        // APX 号（16+）不在已知集合里，一律当毁（宁可多报也不假装保活）
+        assert!(is_call_clobbered(16), "r16 不得被当成跨 call 保活的号");
+        for reg in RegBank::pool_for_bank(Bank::Gp) {
+            assert!(
+                !is_call_clobbered(*reg),
+                "自动分配池里的号 {reg} 被说成会被调用毁 ⇒ 池与 ABI 表已经不一致"
+            );
+        }
+        assert!(
+            is_call_clobbered(EVAL_BASE_REG),
+            "求值基址 %rax 必须是会被调用毁的那一类（否则表达式求值无需在 call 前存住它）"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rhs_stage_tests {
+    use super::*;
+
+    /// 取号器必须**看得见占用**：这是前置三开池的唯一前提（以前 `%rcx` 被写死成右操作数
+    /// 暂存号，家给 rcx 后就被普通求值踩掉，实测 gcc 50 / dcc 47）。
+    ///
+    /// 判据只说「候选表」而不点名某个号：表本身单源在分配器那侧
+    /// （`regalloc::AUTO_EXT_POOL`），它变过两次（五元 → 去掉 `rcx`/`rsi`/`rdi`），
+    /// 而上一版本这里把首位写死成 `rcx`，表一变就测试与实现各说各话（实测报
+    /// `left=8 right=9`：握着 `rcx` 根本不该换号）。
+    #[test]
+    fn rhs_stage_skips_regs_that_someone_holds() {
+        let cands = rhs_stage_candidates();
+        assert!(cands.len() >= 2, "候选表至少两个号，否则下面「换下一个」无判据");
+
+        let mut b = RegBank::new();
+        // 无人握着时取候选表首位。
+        assert_eq!(b.pick_rhs_stage(0), Some(cands[0]));
+
+        // 表**外**的号被握着不影响取号（`rcx` 是变长移位的计数，永远不进候选表）。
+        // 注意 `claim` 的返回值是「在 callee-saved 池里占了位」，池外号只进 `pinned`；
+        // 取号器读的是 `is_pinned`。
+        assert!(!b.claim(1), "rcx 不在 callee-saved 池里，claim 不该报「池里占位」");
+        assert!(b.is_pinned(1), "但池外号必须被记成握着");
+        assert_eq!(b.pick_rhs_stage(0), Some(cands[0]), "握着表外的号不得改变取号结果");
+
+        // 首位被握着时必须换到候选表里下一个空闲号。
+        let mut a = RegBank::new();
+        a.claim(cands[0]);
+        assert!(a.is_pinned(cands[0]), "握着必须落在 pinned/allocated 上，否则取号器看不见");
+        let s = a.pick_rhs_stage(0).expect("候选表还有空闲号");
+        assert_ne!(s, cands[0], "{} 已被握着，取号器不得再返回它", cands[0]);
+        assert_eq!(s, cands[1]);
+
+        // dst 自己绝不能被选中：左右同归一个号会直接把操作数吃掉。
+        let mut c = RegBank::new();
+        for n in rhs_stage_candidates().into_iter().skip(1) {
+            c.claim(n);
+        }
+        assert_eq!(c.pick_rhs_stage(rhs_stage_candidates()[0]), None, "只剩 dst 自己时必须报 None，由调用方去拿真正的临时号");
+    }
+
+    /// 候选表本身不得把「有主」的号收进来：这些号在别处各有硬用途（求值基址、128 位返回
+    /// 高半、静态链、帧寻址 scratch）。这张表是那条排除的唯一出处，所以它自己要被检查。
+    #[test]
+    fn rhs_stage_candidates_exclude_regs_with_hard_uses() {
+        for n in [EVAL_BASE_REG, 2u8, 4, 5, 10, 11, 13] {
+            assert!(
+                !rhs_stage_candidates().contains(&n),
+                "号 {n} 有硬用途（求值基址/128 位返回高半/栈与帧/静态链/帧寻址 scratch），不得进暂存候选表"
+            );
+        }
     }
 }

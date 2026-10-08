@@ -90,7 +90,7 @@ impl Codegen {
                 self.load_stack_sized(0, temp_off, elem_size);
             },
             _ => {
-                self.gen_expr(e, 0);
+                self.gen_expr(e, Self::EVAL_BASE);
                 let off = (elem_idx * elem_size) as i64;
                 if off != 0 {
                     if (-128..=127).contains(&off) {
@@ -150,7 +150,7 @@ impl Codegen {
                 self.load_stack_xmm(0, temp_off, elem_size, is_float);
             },
             _ => {
-                self.gen_expr(e, 0);
+                self.gen_expr(e, Self::EVAL_BASE);
             },
         }
     }
@@ -229,7 +229,7 @@ impl Codegen {
                     if l_is_vec {
                         self.gen_scalar_vector_load_sse(l, i, elem_size, is_float);
                     } else {
-                        self.gen_expr(l, 0);
+                        self.gen_expr(l, Self::EVAL_BASE);
                         self.emit_scalar_float_convert(&l.ty(), &elem_ty);
                     }
                     self.emit_sub_rsp(8);
@@ -239,7 +239,7 @@ impl Codegen {
                     if r_is_vec {
                         self.gen_scalar_vector_load_sse(r, i, elem_size, is_float);
                     } else {
-                        self.gen_expr(r, 0);
+                        self.gen_expr(r, Self::EVAL_BASE);
                         self.emit_scalar_float_convert(&r.ty(), &elem_ty);
                     }
                     self.emit(&[spfx, 0x0F, 0x10, 0xC8]); // movss xmm1, xmm0
@@ -268,7 +268,7 @@ impl Codegen {
                 if l_is_vec {
                     self.gen_scalar_vector_load_sse(l, i, elem_size, is_float);
                 } else {
-                    self.gen_expr(l, 0);
+                    self.gen_expr(l, Self::EVAL_BASE);
                     // 标量精度转换: 匹配向量元素类型
                     self.emit_scalar_float_convert(&l.ty(), &elem_ty);
                 }
@@ -282,7 +282,7 @@ impl Codegen {
                 if r_is_vec {
                     self.gen_scalar_vector_load_sse(r, i, elem_size, is_float);
                 } else {
-                    self.gen_expr(r, 0);
+                    self.gen_expr(r, Self::EVAL_BASE);
                     // 标量精度转换: 匹配向量元素类型
                     self.emit_scalar_float_convert(&r.ty(), &elem_ty);
                 }
@@ -338,14 +338,14 @@ impl Codegen {
             if l_is_vec {
                 self.gen_scalar_vector_load(l, i, elem_size);
             } else {
-                self.gen_expr(l, 0);
+                self.gen_expr(l, Self::EVAL_BASE);
             }
             self.emit(&[0x50]); // push rax (暂存 l 值)
                                 // 加载右操作数: 向量按元素取, 标量直接求值 (广播)
             if r_is_vec {
                 self.gen_scalar_vector_load(r, i, elem_size);
             } else {
-                self.gen_expr(r, 0);
+                self.gen_expr(r, Self::EVAL_BASE);
             }
             self.emit(&[0x59]); // pop rcx (恢复 l 值)
             match op {
@@ -536,7 +536,7 @@ impl Codegen {
             });
             let off = temp_off + (i * elem_size) as i64;
             if let Some(v) = value {
-                self.gen_expr(v, 0);
+                self.gen_expr(v, Self::EVAL_BASE);
                 self.emit_scalar_to_xmm0_if_needed(v, elem_ty);
             } else {
                 if matches!(elem_ty, Type::Float | Type::Double) {
@@ -636,7 +636,7 @@ impl Codegen {
             Expr::Member { .. } | Expr::Index { .. } | Expr::Deref { .. } => {
                 // vector lvalue: 取地址后整块拷贝到临时槽
                 // (不能回退 gen_expr: 会递归回本函数)
-                if self.gen_lvalue_addr(e, 0) {
+                if self.gen_lvalue_addr(e, Self::EVAL_BASE) {
                     self.emit(&[0x48, 0x89, 0xC6]); // mov rsi, rax
                     self.emit_lea_r13(7, temp_off); // rdi = 临时槽
                     self.mov_imm(1, vec_size as i128);
@@ -646,7 +646,7 @@ impl Codegen {
             },
             Expr::Call { .. } => {
                 // vector 返回值: gen_expr 已将 rax:rdx 存入槽 0
-                self.gen_expr(e, 0);
+                self.gen_expr(e, Self::EVAL_BASE);
                 if temp_slot != 0 {
                     let src_off = self.vector_temp_base(0, vec_size);
                     let n_qwords = vec_size.div_ceil(8);
@@ -657,7 +657,7 @@ impl Codegen {
                 }
             },
             _ => {
-                self.gen_expr(e, 0);
+                self.gen_expr(e, Self::EVAL_BASE);
                 let total_bytes = elem_size * count;
                 self.emit(&[0x48, 0x89, 0xC6]); // mov rsi, rax
                 self.emit_lea_r13(7, temp_off); // rdi = 临时区
@@ -744,7 +744,7 @@ impl Codegen {
         let elem_size = elem_ty.size();
         let vec_size = elem_size * count;
         let result_off = self.vector_temp_base(result_slot, vec_size);
-        if self.gen_lvalue_addr(e, 0) {
+        if self.gen_lvalue_addr(e, Self::EVAL_BASE) {
             // 保存源地址到 rcx (后续 load/store 会破坏 rax)
             self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
         } else {

@@ -45,6 +45,26 @@ fn find_use_site(func: &Function, name: &str) -> Option<(String, usize)> {
     None
 }
 
+/// `name` 是否被某个块的 **phi** 读（作为 incoming）。
+///
+/// phi 的入边**不在** `find_use_site`/`use_count` 的视野里（它们只扫 inst 与
+/// terminator），但 `rebuild_cycle` 会把头块 phi 的 dest **别名**到第一个 incoming
+/// （基名塌缩），于是「读那个 phi」在 AST 里就是「读那个名字的槽」。所以一个只被
+/// phi 读的合成临时值不是「无人读」，而是**那个槽的初始化**：把它的定义当内联丢掉，
+/// 槽就再也没人写过 —— 静默读未初始化，不是编译错误。
+///
+/// 实测形状（P16 轮转 phi 造的）：`tests/fixtures/opt/ssa_pipe_chain.c::chain_load4`
+/// 与 `tests/fixtures/opt/ssa_pipe_rotation.c::rot_load4` 这类依赖载入链 ——
+/// prologue 的最后一条 `_tbin_4 = a & 7` 只被 kernel 头的轮转 phi 读，丢掉后第一轮
+/// `_tidx_9 = idx[_tbin_4]` 读到 0，-O2 得 372 而 gcc 四档都是 375。
+fn read_by_phi(func: &Function, name: &str) -> bool {
+    func.blocks.values().any(|bb| {
+        bb.phis
+            .iter()
+            .any(|p| p.incoming.iter().any(|(src, _)| src.name() == name))
+    })
+}
+
 /// 把一个临时值内联到使用点后, 该表达式**实际**读取的基名与内存/副作用需求。
 struct ExpandedTemp {
     read_bases: HashSet<String>,
@@ -98,10 +118,18 @@ fn inline_window_safe(
         info.min_idx = info.min_idx.min(inner.min_idx).min(idx);
     }
     let (u_bb, u_pos) = match find_use_site(func, ssa_name) {
-        // 没有指令级消费者: 结果要么无人读 (丢弃安全), 要么只被 phi 经 `env`
-        // 间接消费 (phi 的展开点在各自前驱路径上, 由 phi 处理逻辑负责定序)。
         Some(p) => p,
-        None => return Some(info),
+        // 没有指令级消费者。这里必须**分两种**，不能一律放行：
+        //   * 真的无人读 ⇒ 丢掉定义是安全的（也确实是原来的收益来源）；
+        //   * 只被 phi 读 ⇒ **不能丢**（见 `read_by_phi`：重建把 phi 的 dest 别名到
+        //     第一个 incoming，那条定义就是槽的初始化）。
+        None => {
+            return if read_by_phi(func, ssa_name) {
+                None
+            } else {
+                Some(info)
+            }
+        },
     };
     if u_bb != def_bb || u_pos <= def_idx {
         return None;
@@ -331,3 +359,63 @@ pub(super) fn plan_inlined_temps(func: &Function) -> InlinePlan {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::Type;
+    use crate::diagnostics::Span;
+    use crate::ssa::{BasicBlock, Phi, SsaVar};
+
+    fn v(base: &str, version: u32) -> SsaVar {
+        SsaVar { base: base.to_string(), version, ty: Type::Int, span: Span::point("", 0, 0) }
+    }
+    fn blk(name: &str, phis: Vec<Phi>) -> BasicBlock {
+        BasicBlock {
+            name: name.to_string(),
+            phis,
+            insts: Vec::new(),
+            term: Terminator::Ret { val: None },
+            preds: Vec::new(),
+            succs: Vec::new(),
+        }
+    }
+    fn func(phis: Vec<Phi>) -> Function {
+        let mut f = Function::new("f".to_string(), Type::Int, Span::point("", 0, 0));
+        f.blocks.insert("head".to_string(), blk("head", phis));
+        f.block_order = vec!["head".to_string()];
+        f
+    }
+
+    /// phi 的入边**是**一次读。`find_use_site`/`use_count` 看不到它，而 `rebuild_cycle`
+    /// 把头块 phi 的 dest 别名到第一个 incoming，所以那条定义就是槽的初始化。
+    /// 把「只被 phi 读」当成「无人读」⇒ 定义被内联丢掉 ⇒ 槽从未被写 ⇒ 静默读未初始化
+    /// （实测 -O2 得 372 而 gcc 四档 375，见 `read_by_phi` 的注释与
+    /// `tests/integration/p16_rotation.rs` 的槽初始化判据）。
+    #[test]
+    fn a_phi_incoming_counts_as_a_read() {
+        let f = func(vec![Phi {
+            dest: v("_tbin", 2),
+            incoming: vec![(v("_tbin", 1), "pre".to_string()), (v("_tbin", 3), "head".to_string())],
+        }]);
+        assert!(read_by_phi(&f, "_tbin.1"), "phi 的 incoming 必须算一次读");
+        assert!(read_by_phi(&f, "_tbin.3"), "latch 侧那份同样是 phi 的入边");
+        assert!(!read_by_phi(&f, "_tbin.2"), "phi 的 dest 不是它自己的入边");
+        assert!(!read_by_phi(&f, "nobody.reads.me"), "无人读就是无人读（这条捷径是本 pass 的收益来源）");
+        assert!(find_use_site(&f, "_tbin.1").is_none(), "本例正是要暴露「指令侧无人读」这一面");
+    }
+
+    /// 反向：真的无人读时 `read_by_phi` 给出 `false`，上面那条「可以内联」的捷径仍然成立
+    /// （它是这条 pass 的收益来源，不能一并关掉）。
+    #[test]
+    fn an_unread_name_is_still_recognised_as_unread() {
+        let f = func(vec![Phi {
+            dest: v("a", 2),
+            incoming: vec![(v("a", 1), "pre".to_string()), (v("a", 3), "head".to_string())],
+        }]);
+        assert!(!read_by_phi(&f, "nobody.reads.me"));
+        assert!(find_use_site(&f, "nobody.reads.me").is_none());
+        assert!(!read_by_phi(&f, "a.9"), "不存在的版本当然没被读");
+        assert!(read_by_phi(&f, "a.1"), "preheader 侧那份是被读的");
+    }
+}

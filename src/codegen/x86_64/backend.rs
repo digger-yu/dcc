@@ -335,6 +335,50 @@ fn build_aux_sections(cg: &mut Codegen, input: &CompileInput<'_>) {
     }
 }
 
+/// 把发射器采集的「局部 → 位置」表填进 DWARF 的函数信息（Phase 6.2）。
+///
+/// 三条换算规则（其余一律**不发**，宁缺不错）：
+/// * `Stack(off)`（`%r13 + off`：变量区槽，或在采集时就已翻译回来的溢出槽）→
+///   `DW_OP_fbreg(off - cfa)`，`cfa` 就是 CFI 用来定 `CFA = rsp + cfa` 的那一个数
+///   （单源，见 `cfa_frame_offset`）；
+/// * `Reg(r)` → `DW_OP_regN`，N 是 **DWARF** 号而不是硬件号（psABI 两者不同序）；
+/// * 拿不出对应 DWARF 号的寄存器，或尚未接线的家形状（如 `Imm`）→ 不发这个变量的位置。
+///   少一个 DIE 只是调试信息缺，错一个 DIE 是把调试器指向另一个寄存器。
+fn fill_dwarf_local_vars(
+    cu: &mut crate::debug::CompileUnit,
+    facts: &[(String, Vec<crate::codegen::x86_64::DebugVarLoc>)],
+    target: &crate::target::Target,
+) {
+    use crate::codegen::x86_64::elf::output::cfa_frame_offset;
+    use crate::location::Location;
+    if facts.is_empty() {
+        return;
+    }
+    let cfa = cfa_frame_offset(target.frame_pointer) as i64;
+    let arch = crate::debug::ArchKind::X86_64;
+    for f in cu.functions.iter_mut() {
+        let Some((_, list)) = facts.iter().find(|(n, _)| *n == f.name) else {
+            continue;
+        };
+        for v in list {
+            let loc = match v.loc {
+                Location::Stack(off) => crate::debug::DwarfParamLocation::fbreg(off - cfa),
+                Location::Reg(r) => match arch.dwarf_reg_of_gp_hw(r.n) {
+                    Some(dr) => crate::debug::DwarfParamLocation::reg(dr),
+                    None => continue,
+                },
+                _ => continue,
+            };
+            f.local_vars.push(crate::debug::DwarfLocalVar {
+                name: v.name.clone(),
+                ty: crate::codegen::ast_type_to_dwarf(&v.ty),
+                location: loc,
+                decl_line: v.decl_line,
+            });
+        }
+    }
+}
+
 /// DWARF (.debug_* / .BTF / .rela.debug_*) 节组装
 fn build_debug_sections(
     cg: &mut Codegen,
@@ -361,6 +405,20 @@ fn build_debug_sections(
     // 块级条目: GDB 在 asm 块起始行设置语句边界
     // 逐指令条目: GDB 单步进入 asm 块内部每条指令 (类似 GCC .debug_insn)
     let mut combined_line_entries: Vec<debug::LineEntry> = Vec::new();
+    // 普通 C 语句 / 局部声明的条目（由 `Codegen::note_src_line` 在发射时攒下）。
+    // 这一份是行断点能绑上的唯一理由：没有它，纯 C 单元的 `line_entries` 恒空，
+    // `src/debug.rs` 只能退到「每函数一行」的兜底表，`break file.c:N` 全部绑不上。
+    for &(pc, src_line) in cg.stmt_line_entries.iter() {
+        combined_line_entries.push(debug::LineEntry {
+            pc,
+            line: src_line,
+            column: 1,
+            file_idx: 0,
+            discriminator: 0,
+            is_stmt: true,
+            basic_block: false,
+        });
+    }
     for &(pc_start, _pc_end, src_line) in cg.asm_line_entries.iter() {
         combined_line_entries.push(debug::LineEntry {
             pc: pc_start,
@@ -393,7 +451,13 @@ fn build_debug_sections(
             .then_with(|| a.discriminator.cmp(&b.discriminator))
     });
 
-    let cu = build_dwarf_cu(module, &opts.source_name, &func_pcs, combined_line_entries);
+    let mut cu = build_dwarf_cu(module, &opts.source_name, &func_pcs, combined_line_entries);
+    // Phase 6.2：把发射器采集的「局部 → 帧内位置」表填进 DWARF。以前这一步根本不存在
+    // （`local_vars` 恒空），于是 `-g` 下变量一个 DIE 都没有，而 `src/ssa/regalloc.rs` 也
+    // 因此必须禁止寄存器家。位置只有一个出处（`Codegen::debug_var_facts`），本函数只把它
+    // 翻译成 DWARF 的说法：`%r13+off` → `DW_OP_fbreg(off - cfa)`，寄存器 → `DW_OP_regN`，
+    // 溢出槽 → 它在帧里的实际偏移（与读/写路同一个 `spill_off`，不另算一份）。
+    fill_dwarf_local_vars(&mut cu, &cg.debug_var_facts, target);
     let debug_opts = debug::DebugOptions {
         level: opts.debug_level,
         dwarf_version: opts.dwarf_version,

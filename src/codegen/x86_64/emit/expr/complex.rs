@@ -414,7 +414,7 @@ impl Codegen {
         };
         // 标量源：real=值, imag=0
         if !is_cx {
-            self.gen_expr(e, 0);
+            self.gen_expr(e, Self::EVAL_BASE);
             self.emit_operand_to_st0(&e.ty(), 0);
             self.emit_x87_fstp_at(13, dst as i32, &Type::LongDouble);
             self.emit_x87_fldz();
@@ -426,7 +426,7 @@ impl Codegen {
         if imaginary {
             self.emit_x87_fldz();
             self.emit_x87_fstp_at(13, dst as i32, &Type::LongDouble);
-            self.gen_expr(e, 0);
+            self.gen_expr(e, Self::EVAL_BASE);
             self.emit_operand_to_st0(&src_inner, 0);
             self.emit_x87_fstp_at(13, dst as i32 + 16, &Type::LongDouble);
             return dst;
@@ -434,9 +434,9 @@ impl Codegen {
         // complex 源：lvalue 直读内存对；rvalue gen_expr 一次后读 result_off。
         // src_isz 是源分量宽度（f=4/d=8/LD=16），用于 rvalue 区的 imag 偏移。
         let src_isz = src_inner.size() as i64;
-        let is_lvalue = self.gen_lvalue_addr(e, 0);
+        let is_lvalue = self.gen_lvalue_addr(e, Self::EVAL_BASE);
         if !is_lvalue {
-            self.gen_expr(e, 0);
+            self.gen_expr(e, Self::EVAL_BASE);
         }
         // 基址：lvalue 在 rax；rvalue 在 r13+result_off。逐分量 fld（按源内型）
         // 后 fstp tbyte 到 dst。两次加载之间不能依赖 rax：fld 不破坏 rax。
@@ -648,7 +648,7 @@ impl Codegen {
             self.emit_x87_fstp_at(13, (off + inner_sz) as i32, &Type::LongDouble);
             return;
         }
-        self.gen_expr(init, 0);
+        self.gen_expr(init, Self::EVAL_BASE);
         let init_is_complex = matches!(init.ty(), Type::Complex(_));
         // 源内型宽度: init 可能窄于目标 (_Complex int 字面量表达式 →
         // _Complex long 变量, complex-6 test_long_int)。源/目标分量
@@ -1000,7 +1000,7 @@ impl Codegen {
             Type::Complex(inner) => inner.base.clone(),
             _ => return false,
         };
-        if !self.gen_lvalue_addr(e, 0) {
+        if !self.gen_lvalue_addr(e, Self::EVAL_BASE) {
             return false;
         }
         let isz = inner.size() as i64;
@@ -1085,7 +1085,7 @@ impl Codegen {
         // 分量在变量/字段内存中的偏移: 统一连续布局, 虚部槽 = off+inner_sz
         // (旧 LongDouble 向后 -8-inner_sz 与整体拷贝窗口 [off, off+size) 错位)
         let part_off = if is_real { 0 } else { inner_sz };
-        let lva_ok = self.gen_lvalue_addr(e, 0);
+        let lva_ok = self.gen_lvalue_addr(e, Self::EVAL_BASE);
         if lva_ok {
             // lvalue 形态 (变量/字段/下标/解引用): 直接对内存分量寻址
             if matches!(inner, Type::LongDouble) {
@@ -1125,7 +1125,7 @@ impl Codegen {
             // 非 lvalue complex 表达式 (binop/取负/字面量/Call): rvalue
             // 统一物化在 result_off 内存对。不能信任寄存器残留:
             // Call sret 返回 (Memory 类) 后 xmm0 未定义。
-            self.gen_expr(e, 0);
+            self.gen_expr(e, Self::EVAL_BASE);
             let result_off = self.complex_result_off();
             if matches!(inner, Type::LongDouble) {
                 // LD: 实部/虚部各在 16 字节 tbyte 槽 (result_off / +16),
@@ -1139,7 +1139,7 @@ impl Codegen {
             }
         } else {
             // 整数内型非 lvalue (如 3i + 5i): 实部/虚部在帧临时区
-            self.gen_expr(e, 0);
+            self.gen_expr(e, Self::EVAL_BASE);
             let result_off = self.complex_result_off();
             let off = if is_real { result_off } else { result_off + inner_sz };
             self.load_stack(0, off);
@@ -1192,7 +1192,7 @@ impl Codegen {
         let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
         let is_float = matches!(inner, Type::Float);
         if matches!(e, Expr::Call { .. }) {
-            self.gen_expr(e, 0);
+            self.gen_expr(e, Self::EVAL_BASE);
             if is_float {
                 // SysV ABI: _Complex float 是单个 8 字节 SSE 类, 实部/虚部
                 // 打包在 xmm0 低/高 32 位。Call 物化后 [result_off] 已是
@@ -1205,7 +1205,7 @@ impl Codegen {
             }
             return;
         }
-        if self.gen_lvalue_addr(e, 0) {
+        if self.gen_lvalue_addr(e, Self::EVAL_BASE) {
             if is_float {
                 // 打包: movss xmm0,[rax] / movss xmm1,[rax+4] /
                 // unpcklps xmm0,xmm1 → xmm0 = [real | imag]
@@ -1221,7 +1221,7 @@ impl Codegen {
             self.emit_xmm_rax_disp(pfx, 1, inner_sz); // xmm1 = 虚部
             return;
         }
-        self.gen_expr(e, 0);
+        self.gen_expr(e, Self::EVAL_BASE);
         let result_off = self.complex_result_off();
         self.emit_xmm_r13_disp(pfx, 0x10, 0, result_off);
         self.emit_xmm_r13_disp(pfx, 0x10, 1, result_off + inner_sz);
@@ -1260,7 +1260,7 @@ impl Codegen {
         } else {
             // 整数内型 `_Complex`: 8B 在 rax, 16B 在 rax:rdx (复数 rvalue 统一
             // 物化在复数结果带, rax=地址约定不可信)。
-            self.gen_expr(e, 0);
+            self.gen_expr(e, Self::EVAL_BASE);
             let result_off = self.complex_result_off();
             self.load_stack(0, result_off);
             if cx_ty.size() > 8 {
@@ -1327,7 +1327,7 @@ impl Codegen {
             }
             let isz = inner.base.size() as i64;
             let result_off = self.complex_result_off();
-            self.gen_expr(r, 0);
+            self.gen_expr(r, Self::EVAL_BASE);
             self.pop(1); // rcx = 目标地址
             let src_isz = match r.ty() {
                 // Complex 的 size() 是总宽 (inner*2), 分量步长取 inner 宽
@@ -1567,7 +1567,7 @@ impl Codegen {
             return;
         }
         // 非字面量: 求值后存储
-        self.gen_expr(init, 0);
+        self.gen_expr(init, Self::EVAL_BASE);
         if is_float {
             self.gen_float_store_at(off, inner);
         } else {
@@ -1751,7 +1751,7 @@ impl Codegen {
                     let e_is_float =
                         matches!(&e_inner, Type::Float | Type::Double | Type::LongDouble);
                     let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
-                    self.gen_expr(e, 0);
+                    self.gen_expr(e, Self::EVAL_BASE);
                     if e_is_float && is_float_inner {
                         // 实部: [result_off] (e 自身宽度) → cvt → [rsp+slot]
                         let e_pfx = if matches!(e_inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
@@ -1811,7 +1811,7 @@ impl Codegen {
                     // 标量整数提升必须先转浮点: 旧实现按 64 位整数存槽
                     // (store_rsp_qword), int 1 的低 32 位是 0.0f,
                     // `y->f != 1` 恒真误 abort (20020227-1)。
-                    self.gen_expr(e, 0);
+                    self.gen_expr(e, Self::EVAL_BASE);
                     if !matches!(e.ty(), Type::Float | Type::Double | Type::LongDouble) {
                         // cvtsi2ss/cvtsi2sd xmm0, rax (rax 已符号扩展)
                         let cvt_pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
@@ -1824,7 +1824,7 @@ impl Codegen {
                 } else {
                     // 标量整数提升为整数 _Complex: 实部=值, 虚部=0
                     // 注意: 操作数槽在 [rsp+slot], 用 store_rsp_qword (非 r13 相对)
-                    self.gen_expr(e, 0);
+                    self.gen_expr(e, Self::EVAL_BASE);
                     // 按 e 自身宽度符号/零扩展, 防高位脏值进分量
                     // (Call 返回窄整型时 rax 高位为垃圾)
                     if Self::is_integer_type(&e.ty()) {

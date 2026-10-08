@@ -299,11 +299,11 @@ impl Codegen {
             let expr_ty = e.ty();
             if Self::is_integer_type(&expr_ty) {
                 // 整数表达式 → rax → xmm0 (cvtsi2sd)
-                self.gen_expr(e, 0);
+                self.gen_expr(e, Self::EVAL_BASE);
                 self.emit_scalar_to_xmm0_if_needed(e, &declared_ret);
             } else {
                 // 浮点表达式 → xmm0; float 需提升到 double
-                self.gen_expr(e, 0);
+                self.gen_expr(e, Self::EVAL_BASE);
                 if matches!(expr_ty, Type::Float) && !matches!(declared_ret, Type::Float) {
                     self.emit(&[0xF3, 0x0F, 0x5A, 0xC0]); // cvtss2sd
                 }
@@ -338,7 +338,7 @@ impl Codegen {
             return;
         } else if matches!(e, Expr::Call { .. }) {
             // sret/寄存器返回调用: gen_expr 后 rax = &内部 sret 槽
-            self.gen_expr(e, 0);
+            self.gen_expr(e, Self::EVAL_BASE);
             self.mov(6, 0);
             got_src = true;
         } else if self.gen_lvalue_addr(e, 6) {
@@ -347,7 +347,7 @@ impl Codegen {
         }
         if !got_src {
             // 兜底: 求值后按 rax 指向物化结果 (与既有聚合赋值语义一致)
-            self.gen_expr(e, 0);
+            self.gen_expr(e, Self::EVAL_BASE);
             self.mov(6, 0);
         }
         // 2. 目标地址 → rdi (reg 7)
@@ -372,25 +372,31 @@ impl Codegen {
             self.emit(&[0xF3, 0xA4]); // rep movsb
         }
     }
-    pub(crate) fn gp_reg_name(idx: usize) -> &'static str {
-        match idx {
-            0 => "rax",
-            1 => "rcx",
-            2 => "rdx",
-            3 => "rbx",
-            4 => "rsp",
-            5 => "rbp",
-            6 => "rsi",
-            7 => "rdi",
-            8 => "r8",
-            9 => "r9",
-            10 => "r10",
-            11 => "r11",
-            12 => "r12",
-            13 => "r13",
-            14 => "r14",
-            15 => "r15",
-            _ => "rax",
+    /// 号 → 64 位裸规范名。名字表只有一份（`abi/regnames.rs::bare_name_of_num`，
+    /// Phase 6.1 的后半）。这里以前是它的又一份副本，而且 `0..15` 之外**静默折成
+    /// "rax"** —— 那是把「无此号」变成一个合法寄存器（与 §11.15 担心的同一个形状）。
+    /// 现在查不到就是 `None`，由调用方点名（见 `asm_reg_name_or_report`）。
+    pub(crate) fn gp_reg_name(idx: u8) -> Option<&'static str> {
+        crate::codegen::x86_64::abi::regnames::bare_name_of_num(idx, 64)
+    }
+
+    /// 发射/展开侧取寄存器名的唯一入口：号查不到就报后端内部不变量破坏
+    /// （`E1132`，Error 级 ⇒ 本次编译失败），返回值只用于让后续流程不崩。
+    /// 旧的「静默回退 rax」会把一个不存在的号编成 `%rax`，那是错值而不是错误。
+    pub(crate) fn asm_reg_name_or_report(&mut self, idx: u8) -> &'static str {
+        match Self::gp_reg_name(idx) {
+            Some(n) => n,
+            None => {
+                self.report_internal_bug(
+                    "E1132",
+                    format!(
+                        "inline-asm operand register number {idx} is out of range \
+                         (REX encodes 0..31)"
+                    ),
+                    "规划器发出了池外的寄存器号：检查 asm/planner 的号源与 abi/regbank 的池定义",
+                );
+                "rax"
+            }
         }
     }
     pub(crate) fn is_integer_type(ty: &Type) -> bool {

@@ -74,8 +74,19 @@ impl Codegen {
     // Core byte emission
     // ========================================================================
 
+    /// 指令字节的**唯一追写出口**。函数体内不得再出现 `self.code.push/extend`：
+    /// 求值落点的持有记录（`eval_holding`）以「又发了一条指令」为失效点，
+    /// 多一个出口就等于那条事实会静默变陈旧。判据：
+    /// `.work_tmp/p12_base/check_eval_base_single_source.sh`。
     pub fn emit(&mut self, b: &[u8]) {
         self.code.extend_from_slice(b);
+        self.eval_holding = None;
+    }
+
+    /// 「刚求出来的值在哪个号里」的读接口（前置一·下）。`None` 就是「没有这个事实」，
+    /// 而不是「猜一个」—— 调用方宁可自己再求值一次，也不得拿陈旧值往下算。
+    pub fn eval_held(&self) -> Option<crate::location::RegId> {
+        self.eval_holding
     }
 
     // ========================================================================
@@ -499,6 +510,26 @@ impl Codegen {
         if let Some(&(off, _)) = self.var_map.get(name) {
             return off;
         }
+        // 兜底路径必须是**异常**而不是常规：一个没在规划期登记的名字在这里只能按
+        // `Type::Int` 猜一个槽（非 int 的对象因此被按错宽度存取），而且晚分配带的容量
+        // 也因此无法预知（§11.23）。规划期现在已经把体内被引用的名字都登过
+        // （`reserve_late_var_slots`），所以走到这里就是后端不变量破坏：点名，本次
+        // 编译失败（Error 级诊断），仍分配一个槽只为让后续流程不崩。
+        self.report_internal_bug(
+            "E1134",
+            format!(
+                "frame slot for '{}' was never planned; the emission-time fallback guesses Type::Int and is a backend invariant violation",
+                name
+            ),
+            "把这个名字加进规划期登记（`func_setup::reserve_late_var_slots` / \
+                 `collect_frame_var_decls`），或在发射点显式 register_var 并给出真实类型",
+        );
+        if std::env::var_os("DCC_LATE_ALLOC").is_some() {
+            eprintln!(
+                "LATE func={} name={} slots=1 ty=Int",
+                self.current_func_name, name
+            );
+        }
         // 懒分配路径: 委托给 register_var 以保证偏移计算一致
         self.register_var(name, &Type::Int)
     }
@@ -683,6 +714,42 @@ impl Codegen {
         }
     }
 
+    /// 「地址与目的地是同一个号」的按类型装载（`mov (%dst) -> dst` 一族）。
+    ///
+    /// ModRM 的 reg 与 r/m 两个字段都是 dst ⇒ `dst>=8` 必须**同时**置 REX.R 与 REX.B
+    /// （0x05）；而 rm==4（%rsp/%r12）在 mod=00 下必须带 SIB、rm==5（%rbp/%r13）在
+    /// mod=00 下是 disp32 绝对寻址 —— 后两条由 [`Self::emit_reg_indirect_modrm`] 单源承担。
+    ///
+    /// 为什么要有这个入口：站点以前手写 `((dst&7)<<3)|(dst&7)`，既不发 REX 也不发 SIB，
+    /// 于是 dst<8 时逐字正确、dst 落在 4/5/12/13 时读的是**别人的地址**。P12/P16 把家与
+    /// 右操作数暂存号灌进高位寄存器之后，这条从死分支变成常走分支（实测
+    /// `tests/fixtures/c/seg_object_body.c` 的 `gs.b += 4` 在 -O0 直接 SIGSEGV：地址算进
+    /// %r8，装载却按 `(%rax)` 读，而 %rax 当时是右操作数 4）。dst<8 时发出的字节与旧
+    /// 写法逐字相同（三档哈希是裁判）。
+    pub fn emit_load_self_typed(&mut self, size: usize, is_signed: bool, dst: u8) {
+        // 位序: 自反 ModRM, 同一个号既在 reg 又在 r/m ⇒ 两个扩展位都要置, 判据见 §7.21
+        let rb = if dst >= 8 { 0x05 } else { 0u8 };
+        match size {
+            1 => self.emit(&[0x48 | rb, 0x0F, if is_signed { 0xBE } else { 0xB6 }]),
+            2 => self.emit(&[0x48 | rb, 0x0F, if is_signed { 0xBF } else { 0xB7 }]),
+            4 => {
+                if is_signed {
+                    // movsxd r64, r/m32：REX.W 必留（32 位源要符号扩展到 64 位）
+                    self.emit(&[0x48 | rb, 0x63]);
+                } else {
+                    // mov r32, r/m32：32 位写自动零扩展高 32 位，不带 REX.W；低 8 号时
+                    // 一个前缀都不发（裸 0x40 不扩任何字段，只多占一字节）。
+                    if rb != 0 {
+                        self.emit(&[0x40 | rb]);
+                    }
+                    self.emit(&[0x8B]);
+                }
+            },
+            _ => self.emit(&[0x48 | rb, 0x8B]),
+        }
+        self.emit_reg_indirect_modrm(dst, dst);
+    }
+
     pub fn emit_load_mem_typed(&mut self, size: usize, ty: &Type) {
         if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
             // 单一真源：long double 必须 `fld tbyte [rax]`，
@@ -792,6 +859,31 @@ impl Codegen {
     // ========================================================================
 
     pub fn call_label(&mut self, l: &str) {
+        // 前置三的覆盖缺口检查：call 序列的存/取窗口开在 `abi/call.rs::emit_sysv_call` 两端，
+        // 而 `call_label` 是本后端** primitive**，在 `abi/call.rs` 之外还有二十多个调用点
+        // （内置函数降级成 `memcmp`/`memchr`/`libc_name`、`__fentry__`/`mcount`、
+        // `__stack_chk_fail`、ifunc 的 CPU_INIT 那一族）。这些路径自己摆参数再直接 call，
+        // 不经窗口 ⇒ 住在 caller-saved 号里的家会被毁。
+        //
+        // 实测证据：开池后 `tests/fixtures/c/strcasecmp.c` -O2 第 5 项失败
+        // （`__builtin_strcasecmp` 降级成直接 call，而 `b2→%rsi`、`b3→%rdi` 正握着家），
+        // 同一夹具不开池返回 0。
+        //
+        // 本检查把那个**静默错值**变成可见、可归因的失败（同一函数里已有窗口开着时不会误报）。
+        // 延伸池默认关着 ⇒ `ext_home_saves` 为空 ⇒ 不进这条分支，今天的产物一字不变。
+        if !self.ext_home_saves.is_empty() && self.home_overrides.is_empty() {
+            self.report_internal_bug(
+                "E1136",
+                format!(
+                    "call 到 '{}' 不经过 caller-saved 家的保存窗口：本函数有 {} 个延伸池家，\
+                     它们会被这次调用毁掉",
+                    l,
+                    self.ext_home_saves.len()
+                ),
+                "把该调用点改用 `emit_sysv_call`，或在参数摆渡之前 `persist_ext_homes()`、\
+                 结果消费之后 `restore_ext_homes(n)`；不得让家静默被毁",
+            );
+        }
         let at = self.pos();
         self.emit(&[0xe8, 0, 0, 0, 0]);
         self.disasm_calls.insert(at + 1, l.to_string());
@@ -1108,40 +1200,72 @@ impl Codegen {
         // 返 0 省不下帧，只造成账目与实际不一致。
         // 分配口径与 pre_register_vars 共用单一真源 var_alloc_slots
         let slots = Self::var_alloc_slots(ty);
-        let hdr = self.frame_hdr();
-        // 变量区与 sret/物化槽区**都**自帧头向下生长, 而 `sret_region_base` 是按
-        // 规划期的 `var_bytes` 一次性定界的。`pre_register_vars` 看不见运行时才冒出来
-        // 的名字 (`__compound_lit_<pos>`、`__vmsize_<tag>`、懒注册的 `var_offset`),
-        // 它们在这里继续压低变量区。不夹逼就会让新变量直接压在**活着**的 sret 槽上:
-        // `a[i] = (struct S){...}` 里 `a[i]` 的目标地址槽正是被字面量内容覆盖,
-        // 随后 `rep movsq` 把一个分量值 (如 112) 当目的地址解引用 → SIGSEGV。
-        // 夹逼条件: 新区间 [off, off+slots*8) 整体落在已分配 sret 区之下。
-        let sret_low = self.sret_region_base - self.sret_watermark;
-        let mut used = self.var_map_total_slots.saturating_mul(8);
-        // sret 区尚未分配任何槽时, 它的顶 (锚点) 本来就是变量区, 只要求新变量
-        // 不越过锚点 (否则下面那条锚点下移会把已发出的槽坐标推高)。
-        let min_used = if self.sret_watermark == 0 {
-            -self.sret_region_base - hdr
-        } else {
-            8 - sret_low - hdr
-        };
-        let min_used = (min_used + 7) & !7;
-        if used < min_used {
-            used = min_used;
+        // §11.23 步 3：帧规划之后的新名字登记就是**发射期晚分配**，它只能住在本函数
+        // 自己的那条晚分配带里（带的尺寸是布局解算的输入，来自规划期那份可枚举预算）。
+        // 以前它挤在变量区水位底下，于是需要两段只在生成期推帧坐标的代码：`min_used`
+        // 夹逼（不让晚分配压穿 sret）与「`sret_region_base` 单调下移」——两者都在拿一个
+        // 已经发射出去的 `sub rsp` 的帧做现场让步，就是 H1 要消除的那条静默长帧路径。
+        // 带把它们代替了：上限就是带底，超出带就是预算少算（`E1133`），而不是静默重叠加。
+        if self.frame_planned {
+            let layout = self.frame_layout;
+            let off = layout.late_band_top
+                - self.late_var_cursor
+                - slots.saturating_mul(8);
+            self.late_var_cursor = self.late_var_cursor.saturating_add(slots.saturating_mul(8));
+            self.var_map.insert(name.to_string(), (off, ty.clone()));
+            self.late_slot_used = self.late_slot_used.saturating_add(slots);
+            if std::env::var_os("DCC_LATE_ALLOC").is_some() {
+                eprintln!(
+                    "LATE func={} name={} slots={} off={} used={}/budget={}",
+                    self.current_func_name,
+                    name,
+                    slots,
+                    off,
+                    self.late_slot_used,
+                    self.late_slot_budget
+                );
+            }
+            // 账面超出：静态扫描少算了这一族（只能由后端自己负责，不是用户代码错）。
+            if self.late_slot_used > self.late_slot_budget {
+                self.report_internal_bug(
+                    "E1133",
+                    format!(
+                        "late frame allocation in `{}` exceeded its planned budget: {} slots used, {} reserved (last '{}')",
+                        self.current_func_name, self.late_slot_used, self.late_slot_budget, name
+                    ),
+                    "把这一族发射期对象计进 `func_setup::late_need_*` 的静态扫描（而不是另开一条帧内分配），\
+                     扫描口径必须覆盖它的所有到达站点",
+                );
+            }
+            // 到位判据：对象的最低字节必须在带内。带为空时本判据不启用（见
+            // `LayoutMap::fits_in_late_band`），所以不会在「一个晚分配也没有」上报假错。
+            if !layout.fits_in_late_band(off) {
+                self.report_internal_bug(
+                    "E1133",
+                    format!(
+                        "late frame allocation in `{}` fell out of its band: '{}' at {off} is below the band bottom {} (band {}B)",
+                        self.current_func_name,
+                        name,
+                        layout.late_band_bottom(),
+                        layout.late_band_bytes
+                    ),
+                    "晚分配带是解算输入：带不够就是预算算少了（或是一个新的晚分配站点没被计入），\
+                     把它的尺寸补进 `late_need_*` 而不是把手伸向别人的带",
+                );
+            }
+            return off;
         }
+        // 规划期路径：变量区水位。此时 sret/物化区与晚分配带都还没定坐标（帧尚未解算），
+        // 新登记的变量就是普通局部，往下压变量区水位，后面由 `LayoutMap::resolve` 统一安排。
+        let hdr = self.frame_hdr();
+        let used = self.var_map_total_slots.saturating_mul(8);
         let off = -(used + hdr) - (slots.saturating_sub(1) * 8);
         self.var_map.insert(name.to_string(), (off, ty.clone()));
         self.var_map_total_slots = (used + slots * 8) / 8;
-        // **Phase 2.2（H1 的硬边界）**：生成期的晚增长不得越过帧底。
-        // `sub rsp, frame_size` 早在函数体之前发出去了，帧不可能再变大 —— 那才是
-        // H1 说的「静默把帧往下长」。只读**一个**标量（变量区最低字节），不把 sret 区
-        // 字节再加一遍：`used` 上面已被 `min_used` 夹逼，sret 深度已经在里面了。
-        // （判据口径只住在 `LayoutMap::fits_above_bottom`，本函数不另算上限。）
+        // **Phase 2.2（H1 的硬边界）**：生成期的晚增长不得越过帧底。规划期这条在帧未解算
+        // 时是空转（`frame_size == 0`），留着是为了「即使有人把登记推后到解算之后」也不会
+        // 静默长帧。（判据口径只住在 `LayoutMap::fits_above_bottom`，本函数不另算上限。）
         self.check_frame_budget(self.var_arena_floor(), name);
-        // 反方向不变量: sret 区此后也只能排在变量区之下。锚点单调下移保证后续
-        // sret 槽之间同样互不重叠 (第 k 个槽的顶 = anchor_k - cur_{k-1} ≤
-        // anchor_{k-1} - cur_{k-1} = 第 k-1 个槽的底)。
-        self.sret_region_base = self.sret_region_base.min(self.var_arena_floor());
         off
     }
 
@@ -1162,14 +1286,15 @@ impl Codegen {
     /// 后端不变量破坏，必须报错而不是继续长帧（`docs/p12-physreg-spill-design.md` §3 的 H1）。
     ///
     /// 口径是**单一标量** `low_off` 与 `LayoutMap::frame_base()` 的比较，不是「变量区字节 +
-    /// sret 区字节」：前者在 `register_var` 里已被 `min_used` 夹逼含了 sret 深度，再相加
-    /// 就是双重计费，会把合法代码报成溢出（独立复核拓出）。
+    /// sret 区字节」：两者各住自己的带，相加就是把同一段字节数两次，判据会比它声称
+    /// 保护的那条不变量更紧，会把合法代码报成溢出（独立复核拓出）。真正的不变量只有一条：
+    /// 帧已在 `sub rsp` 时发射出去，谁都越不过帧底。
     ///
-    /// 也不拿更紧的 `arena_room` 当上限：它把 `reserve_late_var_slots()` 已预扣的那份
-    /// 再计一次费。晚分配吃掉帧底各带富余是**既有行为**，本函数不顺手收紧它；真正新增的
-    /// 那条约束在 `LayoutMap::allows_late_allocation` 里：**只有本函数真给了非零 spill
-    /// band** 时，晚分配才不得压穿它（band=0 时该判据退化成今天这条帧底比较，所以现有
-    /// 语料一个字节也不会变 —— Phase 5.1.d 欠的那条账到此结掉）。
+    /// 也不拿更紧的 `arena_room` 当上限：它是诊断读数，不是可用额度（§11.4.5 那个双重
+    /// 计费坑踩过一次）。发射期晚分配的到位判据不在此，而在 `register_var` 晚路径里的
+    /// `LayoutMap::fits_in_late_band`（§11.23 步 3：晚分配已有自己的带，不再挤变量区）；
+    /// 本函数仍负责 sret/物化区那一侧，包括 `allows_late_allocation` 那条「非零 spill band
+    /// 不得被生成期增长压穿」（band=0 时它退化成今天这条帧底比较）。
     ///
     /// 只在帧已解算（`frame_size > 0`）时检查：`unresolved()` 占位表的帧大小是 0，
     /// 拿它当上限会把任何分配都误判成越界。

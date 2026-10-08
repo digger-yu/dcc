@@ -76,23 +76,18 @@ impl Codegen {
             return;
         }
         self.addr_escaped_done = true;
-        // 嵌套函数体也要扫：它的 `&外局名` 同样是对外层对象的逸出。
-        fn walk_decl(set: &mut std::collections::HashSet<String>, d: &crate::ast::Decl) {
+        // 只递一个入口：嵌套函数体由判据本身递归（`ast_gvn::walk_addr_of` 的
+        // `Decl::Func` 臂）。后端再手写一份递归就是第二套逸出判据，
+        // 而两套里弱的那一套会决定产物（§11.13 的 N8）。
+        for d in &prog.decls {
             let crate::ast::Decl::Func(f) = d else {
-                return;
+                continue;
             };
             let Some(b) = &f.body else {
-                return;
+                continue;
             };
-            set.extend(crate::ast_gvn::addr_escaped_names(b));
-            for item in &b.items {
-                if let crate::ast::BlockItem::Decl(nd) = item {
-                    walk_decl(set, nd);
-                }
-            }
-        }
-        for d in &prog.decls {
-            walk_decl(&mut self.addr_escaped, d);
+            self.addr_escaped
+                .extend(crate::ast_gvn::addr_escaped_names(b));
         }
     }
 
@@ -132,6 +127,24 @@ impl Codegen {
         self.cleanup_vars.clear();
         self.sret_watermark = 0;
         self.sret_region_base = 0;
+        // 帧解算表也是**逐函数**状态：`frame_size` 要等本函数的 `LayoutMap::resolve` 才算出来，
+        // 在那之前 `check_frame_budget` 必须处于「尚未知帧底」而不检查的状态（`unresolved()`
+        // 的 frame_size = 0，正是那个状态）。不复位就是拿**上一个函数**的帧底来量本函数
+        // 规划期的分配：实测 `long_double_abi.cpp` 的 `main`（帧 1000B 左右）在规划期登记
+        // `<agg_member_tmp>` 时，被上一个函数的 976B 帧判成 `E1128` 越界 —— 一条假硬错误。
+        self.frame_layout = crate::codegen::x86_64::abi::layout::LayoutMap::unresolved();
+        // 晚分配账面也是逐函数的（§11.23 步 2/3）。
+        self.late_slot_budget = 0;
+        self.late_slot_used = 0;
+        self.late_var_cursor = 0;
+        self.frame_planned = false;
+        // 持有记录不得活过一个函数：不准则本函数开头的任何一次 `eval_held()` 会拿到
+        // 上一个函数留下的号（那时代码里那个寄存器早已不是那个值）。
+        self.eval_holding = None;
+        // 前置二/三的两个函数级事实同样不得活过一个函数：覆盖表泄漏会把下一个函数的
+        // 变量钉在错误的内存位置上；保存槽表则是本帧坐标，跳帧用它们是直接错值。
+        self.home_overrides.clear();
+        self.ext_home_saves.clear();
         self.vla_total_size = 0;
         // 静态扫描函数体是否含 VLA 声明 (决定跳转前是否恢复动态栈基)
         self.cur_func_has_vla = f
@@ -187,21 +200,21 @@ impl Codegen {
         let func_align = f.alignment.unwrap_or(1).max(min_align).max(1);
         self.text_align = self.text_align.max(func_align as u64);
         while !self.code.len().is_multiple_of(func_align) {
-            self.code.push(0x90);
+            self.emit(&[0x90]);
         }
         let func_start = if let Some((n, m)) = self.patchable_function_entry {
             let prefix_len = m.min(n);
             let suffix_len = n.saturating_sub(prefix_len);
             self.text_align = self.text_align.max(n.max(1) as u64);
             for _ in 0..prefix_len {
-                self.code.push(0x90);
+                self.emit(&[0x90]);
             }
             let func_start = self.pos();
             // 使用 asm label 覆盖符号名 (如果有)
             let sym_name = self.resolve_asm_label(&f.name.name).to_string();
             self.label(&sym_name);
             for _ in 0..suffix_len {
-                self.code.push(0x90);
+                self.emit(&[0x90]);
             }
             func_start
         } else {
@@ -622,7 +635,8 @@ impl Codegen {
             let param_slots = param_used_total / 8;
             self.var_map_total_slots = self.var_map_total_slots.saturating_add(param_slots);
             // 与上面同一根因、同一条轴: 复合字面量 / VM 尺寸元信息等只在代码生成
-            // 时才 `register_var` 的对象也走变量区, 需在定 `sret_region_base` 前预扣。
+            // 时才 `register_var` 的对象现在有自己的一条带（§11.23 步 3），它的尺寸就是
+            // 本函数在这里定下的 `late_slot_budget`，没有再挤变量区。
             self.reserve_late_var_slots(f.body.as_ref());
             // 帧布局**解算**（P12 Phase 2）：以前这里是一段现场求和，现在只保留
             // 输入；所有带边界由 `abi::layout::LayoutMap::resolve` 一次算完。
@@ -647,6 +661,9 @@ impl Codegen {
                 &crate::codegen::x86_64::abi::layout::FramePlan {
                     temp_slots: temp_slots as i64,
                     var_bytes,
+                    // 晚分配带（§11.23 步 3）：尺寸就是规划期那份可枚举预算。
+                    // 带为 0 的函数（一个发射期对象也没有）仍与今天逐字节相同。
+                    late_slots: self.late_slot_budget,
                     sret_need,
                     va_slots,
                     static_chain_slot: sc_slot,
@@ -768,25 +785,15 @@ impl Codegen {
                     // callee 必须先将 xmm 中的 double 转为 float 再存储.
                     if f.is_old_style {
                         // cvtsd2ss xmmN, xmmN: double → float
-                        let lo = xmm & 7;
-                        let mut rex = 0u8;
-                        if lo >= 8 {
-                            rex |= 0x01;
-                        } // REX.B
-                        if lo >= 8 {
-                            rex |= 0x04;
-                        } // REX.R
-                        if rex != 0 {
-                            self.emit(&[
-                                0xF2,
-                                rex | 0x40,
-                                0x0F,
-                                0x5A,
-                                0xC0 | ((lo & 7) << 3) | (lo & 7),
-                            ]);
-                        } else {
-                            self.emit(&[0xF2, 0x0F, 0x5A, 0xC0 | (lo << 3) | lo]);
+                        // 两个 ModRM 字段都是同一个号 ⇒ xmm>=8 必须同时置 REX.R 与 REX.B。
+                        // 旧写法先算 `let lo = xmm & 7` 再拿 `lo >= 8` 判扩张，而掩蔽后的
+                        // 值永远 <8，于是 xmm 落在 8..15 时两个字段都编成了低 8 号
+                        // （写的不是 %xmm8-15而是 %xmm0-7）。
+                        self.emit(&[0xF2]);
+                        if xmm >= 8 {
+                            self.emit(&[0x45]); // REX.R+B，同一个号既在 reg 又在 r/m
                         }
+                        self.emit(&[0x0F, 0x5A, 0xC0 | ((xmm & 7) << 3) | (xmm & 7)]);
                     }
                     self.store_xmm32_stack(xmm, off);
                 } else if wide128 || (ty.size() == 16 && matches!(ty, Type::Vector(_, _))) {
@@ -870,6 +877,7 @@ impl Codegen {
                 &crate::codegen::x86_64::abi::layout::FramePlan {
                     temp_slots: temp_slots as i64,
                     var_bytes,
+                    late_slots: self.late_slot_budget,
                     sret_need,
                     va_slots: 0,
                     static_chain_slot: 0,
@@ -923,40 +931,24 @@ impl Codegen {
         // 一维 VLA 形参维度副作用求值 (声明顺序, 先于 stride 求值:
         // 多维参数的内层维度表达式可能依赖外层维度副作用后的值)
         for se in &param_dim_effects {
-            self.gen_expr(se, 0);
+            self.gen_expr(se, Self::EVAL_BASE);
         }
         for (pname, se, elem_sz) in &vla_param_dims {
             let off = self.var_offset(pname);
-            self.gen_expr(se, 0);
+            self.gen_expr(se, Self::EVAL_BASE);
             if *elem_sz != 1 {
                 self.imul_imm(0, *elem_sz as i128);
             }
             self.emit_store_rax_r13(off - 8);
         }
-        // 预收集嵌套函数并预注册重命名 (在编译函数体之前，这样调用点能使用正确的名称)
+        // 预收集嵌套函数（编译体之前需要它们的声明列表拿 trampoline 槽）。
+        // 唯一符号名已由 `compile_module` 的预扫描一次性定完（见
+        // `elf::prescan_nested_names`）：这里**只查不分配**。旧形状在本函数里递增
+        // 全局计数并改写三张表，并行下每个 worker 从同一份快照起号、回传又不存
+        // 这些表 ⇒ 并行与串行符号名不同且嵌套函数符号整个失踪（N1）。
         let mut nested_decls: Vec<FuncDecl> = Vec::new();
         if let Some(body) = &f.body {
             Self::collect_direct_nested_funcs(&body.items, &mut nested_decls);
-            let parent_name = f.name.name.clone();
-            for nf_decl in &nested_decls {
-                let orig_name = nf_decl.name.name.clone();
-                let unique_name =
-                    format!("{}_{}.{}", orig_name, parent_name, self.nested_func_rename_counter);
-                self.nested_func_rename_counter += 1;
-                // 使用作用域化的重命名: (父函数名, 原名) → 唯一名
-                self.nested_func_renames
-                    .entry(parent_name.clone())
-                    .or_default()
-                    .insert(orig_name.clone(), unique_name.clone());
-                // 记录定义父函数: 后代嵌套函数引用兄弟/祖先嵌套函数时,
-                // 沿此映射上溯静态链找到定义父帧
-                self.nested_func_parent
-                    .insert(unique_name.clone(), parent_name.clone());
-                // 更新 nested_funcs 映射
-                if let Some(upvars) = self.nested_funcs.remove(&orig_name) {
-                    self.nested_funcs.insert(unique_name, upvars);
-                }
-            }
         }
         // 嵌套函数 trampoline 预分配 + 运行时写入 (在重命名之后):
         // 为全部直接嵌套函数预分配 trampoline 槽 (不仅是被取地址者):
@@ -984,6 +976,13 @@ impl Codegen {
         }
         let ends_ret = if let Some(body) = &f.body {
             for item in &body.items {
+                // 顶层声明的行号必须在这里记：本循环把 `BlockItem::Decl(Decl::Var)` 就地
+                // 展开（不经过 `gen_block_item`），而 `Stmt` 分支走 `gen_stmt` 自带行号。
+                // 缺了这一条，`int t = sink(0);` 这样的声明行在 `.debug_line` 里根本没有
+                // entry，gdb 的 `break file.c:那一行` 依旧绑不上。
+                if let BlockItem::Decl(Decl::Var(v)) = item {
+                    self.note_src_line(v.span.line);
+                }
                 // Stmt 边界 save/restore 物化槽水位；Decl 变量槽已加入 var_map，全程保留
                 // (va_arg 分配的聚合临时槽属于 Stmt，需回收，变量定义槽无需回收)。
                 match item {
@@ -1005,7 +1004,7 @@ impl Codegen {
                             {
                                 // static local 需要运行时初始化: 发射初始化代码到全局地址
                                 if let Some(init) = &v.init {
-                                    self.gen_expr(init, 0);
+                                    self.gen_expr(init, Self::EVAL_BASE);
                                     self.emit_global_store(0, &v.name.name);
                                 }
                                 continue;
@@ -1049,7 +1048,7 @@ impl Codegen {
                                     }
                                 } else {
                                     // 指针初始化: 生成字符串地址
-                                    self.gen_expr(init, 0);
+                                    self.gen_expr(init, Self::EVAL_BASE);
                                     self.mov_to_stack(0, &v.name.name);
                                 }
                             } else {
@@ -1084,13 +1083,13 @@ impl Codegen {
                                     &v.ty,
                                     Type::Float | Type::Double | Type::LongDouble
                                 ) {
-                                    self.gen_expr(init, 0);
+                                    self.gen_expr(init, Self::EVAL_BASE);
                                     // int 常量初始化浮点变量: 先转换到 xmm0 (double x = 1;)
                                     self.emit_scalar_to_xmm0_if_needed(init, &v.ty);
                                     self.gen_float_store(&v.name.name, &v.ty);
                                 } else if matches!(&v.ty, Type::Int128 | Type::UInt128) {
                                     // P1-4 fix: __int128 变量初始化 (rax=low, rdx=high)
-                                    self.gen_expr(init, 0);
+                                    self.gen_expr(init, Self::EVAL_BASE);
                                     // 如果初始化器不是 int128 类型，需要符号扩展
                                     if !matches!(init.ty(), Type::Int128 | Type::UInt128) {
                                         if matches!(
@@ -1111,7 +1110,7 @@ impl Codegen {
                                     self.store_stack(0, off); // low → [r13+off]
                                     self.store_stack(2, off + 8); // high → [r13+off+8]
                                 } else {
-                                    self.gen_expr(init, 0);
+                                    self.gen_expr(init, Self::EVAL_BASE);
                                     // Implicit float→int conversion
                                     let init_ty = init.ty();
                                     if matches!(
@@ -1180,6 +1179,10 @@ impl Codegen {
         // 未使用寄存器的保存/恢复指令为 nop. 必须在嵌套函数生成前
         // (嵌套函数会 reset tracker 并追加自己的 sites).
         self.patch_callee_saves(callee_sites_base);
+        // Phase 6.2：本帧的位置表在此刻是完整的（`homes` 与 `var_map` 都是最终值），
+        // 而下一个函数一开始就把两者复位 —— 所以采集必须卡在这里，嵌套函数之前
+        // （见 `collect_debug_var_facts` 的注释）。
+        self.collect_debug_var_facts(f);
         // 父函数布局确定后再生成嵌套函数，把捕获变量的真实 r13 偏移传入。
         // 使用预收集的 nested_decls 和预注册的重命名
         if !nested_decls.is_empty() {

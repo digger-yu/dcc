@@ -50,6 +50,12 @@ include!("integration/opt_licm.rs");
 
 include!("integration/opt_ssa_gate.rs");
 
+include!("integration/p16_rotation.rs");
+
 include!("integration/xfail.rs");
 
 include!("integration/glue_misc.rs");
+
+include!("integration/parallel_rodata.rs");
+
+include!("integration/dwarf_gdb.rs");

@@ -24,7 +24,7 @@ impl Codegen {
             }
         }
         if matches!(e.ty(), Type::Int128 | Type::UInt128) {
-            self.gen_expr(e, 0);
+            self.gen_expr(e, Self::EVAL_BASE);
             match op {
                 UnOp::Neg => {
                     self.emit(&[0x48, 0xF7, 0xD8]); // neg rax
@@ -65,7 +65,7 @@ impl Codegen {
             // 80-bit 符号位 (旧路径 XOR xmm0 bit63 只动 8 字节, LD 根本
             // 不在 xmm0, 结果无效)。
             if matches!(neg_ty, Type::LongDouble) {
-                self.gen_expr(e, 0);
+                self.gen_expr(e, Self::EVAL_BASE);
                 self.emit_x87_chs();
                 if dst != 0 {
                     // 标量 LD rvalue: rax 取 gen_expr 已交付的地址
@@ -73,7 +73,7 @@ impl Codegen {
                 }
                 return;
             }
-            self.gen_expr(e, 0); // xmm0 = e
+            self.gen_expr(e, Self::EVAL_BASE); // xmm0 = e
             match neg_ty {
                 Type::Float => {
                     // 翻转 32 位符号位: movabs rax, 0x8000_0000
@@ -126,7 +126,7 @@ impl Codegen {
             }
             let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
             // 1. 实部 → xmm0, 虚部 → [r13+result_off+inner_sz]
-            if self.gen_lvalue_addr(e, 0) {
+            if self.gen_lvalue_addr(e, Self::EVAL_BASE) {
                 // lvalue (变量/字段/下标): 用 rcx 保存地址 (flip_sign_xmm
                 // 会破坏 rax 但不动 rcx), 逐分量加载/flip/store
                 self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
@@ -142,7 +142,7 @@ impl Codegen {
                 self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
             } else {
                 // rvalue: gen_expr 后 xmm0=实部
-                self.gen_expr(e, 0);
+                self.gen_expr(e, Self::EVAL_BASE);
                 if matches!(e, Expr::Call { .. }) {
                     // SSE 返回: 虚部在 xmm1, 物化到临时区
                     self.emit(&[pfx, 0x41, 0x0F, 0x11]);
@@ -196,7 +196,7 @@ impl Codegen {
             }
             if matches!(inner, Type::Float | Type::Double) {
                 let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-                if self.gen_lvalue_addr(e, 0) {
+                if self.gen_lvalue_addr(e, Self::EVAL_BASE) {
                     self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
                     let imag_off = inner_sz;
                     // 实部: [rcx] → xmm0 → [result_off] (不变)
@@ -208,7 +208,7 @@ impl Codegen {
                     self.flip_sign_xmm(0, &inner);
                     self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
                 } else {
-                    self.gen_expr(e, 0);
+                    self.gen_expr(e, Self::EVAL_BASE);
                     // 实部已经在 xmm0, 直接写回
                     self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
                     // 虚部: 加载并翻转
@@ -228,13 +228,13 @@ impl Codegen {
             }
             // 整数 inner: 共轭 = 虚部整数取负。
             // 1. 源物化到 result_off (保二进制布局)
-            if self.gen_lvalue_addr(e, 0) {
+            if self.gen_lvalue_addr(e, Self::EVAL_BASE) {
                 self.mov(6, 0); // rsi = &src
                 self.emit_lea_r13(7, result_off); // rdi = r13+result_off
                 self.mov_imm(1, (inner_sz * 2) as i128);
                 self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
             } else {
-                self.gen_expr(e, 0);
+                self.gen_expr(e, Self::EVAL_BASE);
                 // rvalue 已按统一约定物化到 result_off (rax=地址);
                 // 保险起见若 rax 不指向 result_off 则重拷
                 // (整数 complex rvalue 均遵守此约定)

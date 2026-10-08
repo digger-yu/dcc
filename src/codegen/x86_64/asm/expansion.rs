@@ -320,7 +320,8 @@ pub fn asm_reg_modifier_subst(val: &str, modifier: char) -> Option<String> {
         'a' => sz,
         _ => return None,
     };
-    gp_reg_name_bits(idx, bits).map(|s| s.to_string())
+    // 号→名只有一份表（`abi/regnames.rs`，Phase 6.1 的后半）。
+    crate::codegen::x86_64::abi::regnames::att_name_of_num(idx, bits)
 }
 
 /// Parse ASM register string → (index, size)
@@ -522,73 +523,7 @@ pub fn asm_reg_is_gpr(sz: u8) -> bool {
     sz <= 64
 }
 
-/// Helper function to get register name in AT&T format
-pub fn gp_reg_name_bits(idx: u8, bits: u8) -> Option<&'static str> {
-    Some(match (idx, bits) {
-        (0, 8) => "%al",
-        (0, 16) => "%ax",
-        (0, 32) => "%eax",
-        (0, 64) => "%rax",
-        (1, 8) => "%cl",
-        (1, 16) => "%cx",
-        (1, 32) => "%ecx",
-        (1, 64) => "%rcx",
-        (2, 8) => "%dl",
-        (2, 16) => "%dx",
-        (2, 32) => "%edx",
-        (2, 64) => "%rdx",
-        (3, 8) => "%bl",
-        (3, 16) => "%bx",
-        (3, 32) => "%ebx",
-        (3, 64) => "%rbx",
-        (4, 8) => "%spl",
-        (4, 16) => "%sp",
-        (4, 32) => "%esp",
-        (4, 64) => "%rsp",
-        (5, 8) => "%bpl",
-        (5, 16) => "%bp",
-        (5, 32) => "%ebp",
-        (5, 64) => "%rbp",
-        (6, 8) => "%sil",
-        (6, 16) => "%si",
-        (6, 32) => "%esi",
-        (6, 64) => "%rsi",
-        (7, 8) => "%dil",
-        (7, 16) => "%di",
-        (7, 32) => "%edi",
-        (7, 64) => "%rdi",
-        (8, 8) => "%r8b",
-        (8, 16) => "%r8w",
-        (8, 32) => "%r8d",
-        (8, 64) => "%r8",
-        (9, 8) => "%r9b",
-        (9, 16) => "%r9w",
-        (9, 32) => "%r9d",
-        (9, 64) => "%r9",
-        (10, 8) => "%r10b",
-        (10, 16) => "%r10w",
-        (10, 32) => "%r10d",
-        (10, 64) => "%r10",
-        (11, 8) => "%r11b",
-        (11, 16) => "%r11w",
-        (11, 32) => "%r11d",
-        (11, 64) => "%r11",
-        (12, 8) => "%r12b",
-        (12, 16) => "%r12w",
-        (12, 32) => "%r12d",
-        (12, 64) => "%r12",
-        (13, 8) => "%r13b",
-        (13, 16) => "%r13w",
-        (13, 32) => "%r13d",
-        (13, 64) => "%r13",
-        (14, 8) => "%r14b",
-        (14, 16) => "%r14w",
-        (14, 32) => "%r14d",
-        (14, 64) => "%r14",
-        (15, 8) => "%r15b",
-        (15, 16) => "%r15w",
-        (15, 32) => "%r15d",
-        (15, 64) => "%r15",
-        _ => return None,
-    })
-}
+// 号→名（AT&T 形态）住在 `abi/regnames.rs`（Phase 6.1 的后半）。这里以前是
+// 一份 68 条的本地副本，与 `emit/expr/utils.rs` 里那一份逐字相同（本轮对拍过），
+// 两份各自演化就会漂移 —— 第四份（`codegen/asm_event.rs` 的四张宽度表）正是
+// 已经漂移的那一份。

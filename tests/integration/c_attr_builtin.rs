@@ -244,214 +244,11 @@ fn attr_target_clones_compile_and_run() {
 // ---------------------------------------------------------------------------
 // IFUNC / target_clones：动态链接与 resolver 选型的判据
 //
-// 助手放在本文件而不是 tests/common/harness/elf.rs：后者不在本工作包的所有权范围
-// 内，而这些取数只有下面这组用例会用到。
+// 共用的 ELF 取数与编链助手（`elf64_rela` / `elf64_section_names` / `elf64_syms_by_type` /
+// `elf64_all_rela` / `dcc_link_exe` / `dcc_obj_bytes` / `assert_dynamically_linked`）住在
+// `tests/common/harness.rs`：§14 要求主题子文件里 `^fn` 数 == 测试属性数，而且
+// `c_link_debug.rs` 也在用同一批取数助手。
 // ---------------------------------------------------------------------------
-
-/// 解析 ELF64 的 `SHT_RELA` 节（24 字节条目），返回 `(r_offset, 符号索引, 类型, 加数)`。
-///
-/// 为什么不走 `readelf -s`/`-r` 的文本：本机 zh_CN.UTF-8 下 readelf 把 `STT_GNU_IFUNC`
-/// 打成 `<操作系统专用>：10`（同一个词在 exe 里又打成 `IFUNC`），任何 `grep IFUNC` 的
-/// 判据都会随 locale 假红/假绿。`ELF64_R_SYM` 是 r_info 的**高 32 位**、`ELF64_R_TYPE`
-/// 是低 32 位（写反了会得到「每个 PC32 都指向 sym 2」这种看起来能自洽的错读数）。
-fn elf64_rela(data: &[u8], section: &str) -> Vec<(u64, u32, u32, i64)> {
-    let Some(raw) = elf64_section_data(data, section) else {
-        return Vec::new();
-    };
-    raw.chunks_exact(24)
-        .map(|e| {
-            let info = u64::from_le_bytes(e[8..16].try_into().unwrap());
-            (
-                u64::from_le_bytes(e[0..8].try_into().unwrap()),
-                (info >> 32) as u32,
-                (info & 0xffff_ffff) as u32,
-                i64::from_le_bytes(e[16..24].try_into().unwrap()),
-            )
-        })
-        .collect()
-}
-
-/// 解析 ELF64 节头表，返回下标 = `st_shndx` 的节名向量（下标 0 是 SHT_NULL）。
-///
-/// 为何需要它：`__dcc_cpu_model` 必须坐在 `.data`（PROGBITS）而不是 `.bss`（NOBITS）——
-/// 内置链接器的静态路径把 NOBITS 输出节铺错（`.bss` size=0、RW `PT_LOAD` 全 0，见
-/// `codegen/x86_64/ifunc.rs::ensure_cpu_model` 的注释），坐 `.bss` 就写不进内存。
-/// 只用 `elf64_sections`（名字→属性）拿不到「符号属于哪个节」，所以这里按节头序取名字。
-fn elf64_section_names(data: &[u8]) -> Vec<String> {
-    let mut out = Vec::new();
-    if data.len() < 64 {
-        return out;
-    }
-    let e_shoff = u64::from_le_bytes(data[40..48].try_into().unwrap()) as usize;
-    let e_shentsize = u16::from_le_bytes(data[58..60].try_into().unwrap()) as usize;
-    let e_shnum = u16::from_le_bytes(data[60..62].try_into().unwrap()) as usize;
-    let e_shstrndx = u16::from_le_bytes(data[62..64].try_into().unwrap()) as usize;
-    if e_shentsize < 64 || e_shoff + e_shentsize * e_shnum > data.len() {
-        return out;
-    }
-    let shstr = e_shoff + e_shstrndx * e_shentsize;
-    let shstr_off = u64::from_le_bytes(data[shstr + 24..shstr + 32].try_into().unwrap()) as usize;
-    for i in 0..e_shnum {
-        let off = e_shoff + i * e_shentsize;
-        let name_off = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
-        out.push(elf64_read_cstr(&data[shstr_off.saturating_add(name_off)..]));
-    }
-    out
-}
-
-/// 按 `sh_type == SHT_SYMTAB(2)` 找符号表，返回 `(名字, bind, stype, shndx, value, size)`。
-///
-/// 为何需要它（而不是 `harness::elf64_syms`）：内置链接器的静态产物把 `.symtab`/`.strtab`/
-/// `.shstrtab` 的节头 `sh_name` 都写成了 0（`src/link/elf_exec.rs` 里那五个 `write_shdr`
-/// 调用第一个参数传 0，而 `lookup_sh_name` 只在用户节上用），所以 `readelf -SW` 里这些节
-/// **没有名字**，按名字找的 `elf64_syms` 会返回空表。宿主 cc 产的 exe 不受影响。
-/// 本助手只按节类型与 `sh_link` 取数，不依赖节名；它同时也是那个缺陷的现场证据。
-/// （`harness/elf.rs` 不在本工作包所有权里，所以修在本文件。）
-///
-/// `SHT_SYMTAB` 是 **2**，不是 3 —— `3` 是 `SHT_STRTAB`。取错会把字符串表当符号表读，
-/// 得到满屏 ASCII 碎片（`val=0x2e00617461646f72` = `"rodata\0."`）这种看着像「解析器坏了」
-/// 实则常量写错的红。符号条目大小优先信 `sh_entsize`，只在其为 0 时回落到 24。
-fn elf64_syms_by_type(data: &[u8]) -> Vec<Elf64Sym> {
-    const SHT_SYMTAB: u32 = 2;
-    let mut out = Vec::new();
-    if data.len() < 64 {
-        return out;
-    }
-    let e_shoff = u64::from_le_bytes(data[40..48].try_into().unwrap()) as usize;
-    let e_shentsize = u16::from_le_bytes(data[58..60].try_into().unwrap()) as usize;
-    let e_shnum = u16::from_le_bytes(data[60..62].try_into().unwrap()) as usize;
-    if e_shentsize < 64 || e_shoff + e_shentsize * e_shnum > data.len() {
-        return out;
-    }
-    // (sh_type, sh_offset, sh_size, sh_link, sh_entsize)
-    let shdr = |i: usize| -> (u32, u64, u64, u32, u64) {
-        let o = e_shoff + i * e_shentsize;
-        (
-            u32::from_le_bytes(data[o + 4..o + 8].try_into().unwrap()),
-            u64::from_le_bytes(data[o + 24..o + 32].try_into().unwrap()),
-            u64::from_le_bytes(data[o + 32..o + 40].try_into().unwrap()),
-            u32::from_le_bytes(data[o + 40..o + 44].try_into().unwrap()),
-            u64::from_le_bytes(data[o + 56..o + 64].try_into().unwrap()),
-        )
-    };
-    let Some(sym_idx) = (0..e_shnum).find(|&i| shdr(i).0 == SHT_SYMTAB) else {
-        return out;
-    };
-    let (_, sym_off, sym_size, strtab_idx, sym_ent) = shdr(sym_idx);
-    let sym_ent = if sym_ent >= 24 { sym_ent as usize } else { 24 };
-    if strtab_idx as usize >= e_shnum || (sym_off as usize) + (sym_size as usize) > data.len() {
-        return out;
-    }
-    let (_, str_off, str_size, _, _) = shdr(strtab_idx as usize);
-    if (str_off as usize) + (str_size as usize) > data.len() {
-        return out;
-    }
-    let strtab = &data[str_off as usize..(str_off + str_size) as usize];
-    for e in data[sym_off as usize..(sym_off + sym_size) as usize].chunks_exact(sym_ent) {
-        let st_name = u32::from_le_bytes(e[0..4].try_into().unwrap()) as usize;
-        out.push(Elf64Sym {
-            name: if st_name > 0 && st_name < strtab.len() {
-                elf64_read_cstr(&strtab[st_name..])
-            } else {
-                String::new()
-            },
-            bind: e[4] >> 4,
-            stype: e[4] & 0xf,
-            shndx: u16::from_le_bytes(e[6..8].try_into().unwrap()),
-            value: u64::from_le_bytes(e[8..16].try_into().unwrap()),
-            size: u64::from_le_bytes(e[16..24].try_into().unwrap()),
-        });
-    }
-    out
-}
-
-/// 汇总一个产物里所有 `.rela*` 节的 RELA 条目。
-///
-/// 为什么不只看 `.rela.dyn`：irelative 放哪由 `ld` 根据输出类型决定——PIE/DYNAMIC 下
-/// 在 `.rela.dyn`，非 PIE 的 ET_EXEC 下在 **`.rela.plt`**（实测：`dcc` 的 clones+printf
-/// 产物 `readelf -rW` 里 `R_X86_64_IRELATIVE` 在 `.rela.plt`，gcc 的 PIE 产物在
-/// `.rela.dyn`）。只扫 `.rela.dyn` 会在非 PIE 上假红，只扫 `.rela.plt` 则在 PIE 上假红。
-fn elf64_all_rela(data: &[u8]) -> Vec<(u64, u32, u32, i64)> {
-    let mut v = Vec::new();
-    for sec in [".rela.dyn", ".rela.plt", ".rela.iplt"] {
-        v.extend(elf64_rela(data, sec));
-    }
-    v
-}
-
-/// 走默认路径（dcc 出 `.o` → 宿主 `cc` 链接）编译源码，返回 `(成功?, stderr, exe 路径)`。
-///
-/// 不清理临时 exe：调用方要 `file`/`readelf`/运行它。PID 进文件名避免并行用例互踩，
-/// 由调用方末尾删。
-fn dcc_link_exe(tag: &str, src: &str, flags: &[&str]) -> (bool, String, std::path::PathBuf) {
-    let dir = std::env::temp_dir();
-    let pid = std::process::id();
-    let sf = dir.join(format!("dcc-ifuncdyn-{tag}-{pid}.c"));
-    let exe = dir.join(format!("dcc-ifuncdyn-{tag}-{pid}.bin"));
-    fs::write(&sf, src).expect("写临时源文件");
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
-    cmd.arg("-std=gnu23");
-    for f in flags {
-        cmd.arg(f);
-    }
-    cmd.args(["-o"]).arg(&exe).arg(&sf);
-    let out = cmd.output().expect("运行 dcc");
-    let _ = fs::remove_file(&sf);
-    (
-        out.status.success(),
-        String::from_utf8_lossy(&out.stderr).to_string(),
-        exe,
-    )
-}
-
-/// 只编成 `.o` 并把它读回来（`.o` 侧的静态判据用）。
-fn dcc_obj_bytes(tag: &str, src: &str, flags: &[&str]) -> Vec<u8> {
-    let dir = std::env::temp_dir();
-    let pid = std::process::id();
-    let sf = dir.join(format!("dcc-ifuncobj-{tag}-{pid}.c"));
-    let obj = dir.join(format!("dcc-ifuncobj-{tag}-{pid}.o"));
-    fs::write(&sf, src).expect("写临时源文件");
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
-    cmd.arg("-std=gnu23").arg("-c");
-    for f in flags {
-        cmd.arg(f);
-    }
-    cmd.args(["-o"]).arg(&obj).arg(&sf);
-    let out = cmd.output().expect("运行 dcc -c");
-    assert!(out.status.success(), "compile [{}]: {}", flags.join(" "), String::from_utf8_lossy(&out.stderr));
-    let _ = fs::remove_file(&sf);
-    let bytes = fs::read(&obj).expect("读回 .o");
-    let _ = fs::remove_file(&obj);
-    bytes
-}
-
-/// 「这个产物是**动态**链接的」：`.interp`（PT_INTERP）+ `DT_NEEDED libc.so.6` +
-/// `file` 报 dynamically linked，三项都得成立。
-///
-/// 三项而不是一项：`.interp` 只证明有解释器，`DT_NEEDED` 只证明有动态段，`file` 只是
-/// 外部工具的读数 —— 「静默降级为静态」的缺陷形状是三者同时缺，判据也必须同时收。
-fn assert_dynamically_linked(exe: &std::path::Path, who: &str, stderr: &str) {
-    let bytes = fs::read(exe).unwrap_or_default();
-    let secs = elf64_sections(&bytes);
-    assert!(
-        secs.contains_key(".interp"),
-        "{who}: 产物没有 .interp（= 没有 PT_INTERP）= 静态可执行文件；IFUNC 降级缺陷回来了。stderr:\n{stderr}"
-    );
-    let need = elf64_dynamic_needed(&bytes);
-    assert!(
-        need.iter().any(|n| n == "libc.so.6"),
-        "{who}: DT_NEEDED 里没有 libc.so.6（读到 {need:?}）；stderr:\n{stderr}"
-    );
-    let file_out = Command::new("file")
-        .arg(exe)
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
-    assert!(
-        file_out.contains("dynamically linked"),
-        "{who}: `file` 没报 dynamically linked:\n{file_out}"
-    );
-}
 
 /// **已修**（前身是三态哨兵 `target_clones_diverts_to_static_link_is_known_defect`，
 /// §7.38 / §7.41 三 / `docs/missing_features.md` 的 IFUNC 行）：IFUNC 不再把链接从
@@ -492,13 +289,13 @@ fn target_clones_links_dynamically_with_codegen_resolver() {
                   int main(void){ printf(\"%d\\n\", compute(10)); return 0; }\n";
 
     // 1) 基准线：不带 IFUNC 的同主程序必须是动态链接。
-    let (ok, stderr, exe) = dcc_link_exe("plain", plain, &["-O0"]);
+    let (ok, stderr, exe) = harness::dcc_link_exe("plain", plain, &["-O0"]);
     assert!(ok, "基准线编译失败：{stderr}");
-    assert_dynamically_linked(&exe, "plain（无 IFUNC）基准线", &stderr);
+    harness::assert_dynamically_linked(&exe, "plain（无 IFUNC）基准线", &stderr);
     let _ = fs::remove_file(&exe);
 
     // 2) 已修：带 IFUNC 必须链得上（旧形状在这里是几十个 E0302）。
-    let (ok, stderr, exe) = dcc_link_exe("clones", clones, &["-O0"]);
+    let (ok, stderr, exe) = harness::dcc_link_exe("clones", clones, &["-O0"]);
     assert!(
         ok,
         "target_clones + printf 现在必须能经宿主 cc 链上（resolver 已由 codegen 发进 .text，\
@@ -506,7 +303,7 @@ fn target_clones_links_dynamically_with_codegen_resolver() {
          改道那一侧：\n{stderr}"
     );
     // 3) 且产物必须是动态的 —— 这正是当年「静默降级」缺的那一条。
-    assert_dynamically_linked(&exe, "clones（含 IFUNC）", &stderr);
+    harness::assert_dynamically_linked(&exe, "clones（含 IFUNC）", &stderr);
     // 4) 走的是宿主 cc，不是内置链接器：路径必须自己说出来（底线：不得静默）。
     assert!(
         stderr.contains("via host cc"),
@@ -534,7 +331,7 @@ fn target_clones_links_dynamically_with_codegen_resolver() {
     //    addend 就是那个 resolver 的地址。（非 PIE 的 ET_EXEC 里 `ld` 把它放 `.rela.plt`，
     //    PIE 里放 `.rela.dyn`，所以扫全部 `.rela*`。）
     let exe_bytes = fs::read(&exe).unwrap_or_default();
-    let irel: Vec<(u64, u32, u32, i64)> = elf64_all_rela(&exe_bytes)
+    let irel: Vec<(u64, u32, u32, i64)> = harness::elf64_all_rela(&exe_bytes)
         .into_iter()
         .filter(|r| r.2 == R_X86_64_IRELATIVE)
         .collect();
@@ -829,7 +626,7 @@ fn attr_target_clones_ifunc_symbols() {
     const STT_FUNC: u8 = 2;
     const STT_OBJECT: u8 = 1;
     let src = include_str!("../fixtures/c/attr_target_clones.c");
-    let obj = dcc_obj_bytes("tc-syms", src, &["-O0"]);
+    let obj = harness::dcc_obj_bytes("tc-syms", src, &["-O0"]);
     let syms = elf64_syms(&obj);
     let find = |n: &str| syms.iter().find(|s| s.name == n);
 
@@ -888,7 +685,7 @@ fn attr_target_clones_ifunc_symbols() {
     // 必须坐 `.data`（PROGBITS）而不是 `.bss`（NOBITS）：内置链接器的静态路径把
     // NOBITS 节铺成 size=0 / RW PT_LOAD 全 0，缓存落不进去 → `__dcc_cpu_indicator_init`
     // 第一个写就 SIGSEGV。这一条把「换节」这个设计决定钉住，改回 `.bss` 立刻红。
-    let sec_names = elf64_section_names(&obj);
+    let sec_names = harness::elf64_section_names(&obj);
     let model_sec = sec_names
         .get(model.shndx as usize)
         .cloned()
@@ -923,10 +720,10 @@ fn attr_target_clones_ifunc_symbols() {
 fn attr_target_clones_select_resolver_dispatch_order() {
     const R_X86_64_PC32: u32 = 2;
     let src = include_str!("../fixtures/c/attr_target_clones_select.c");
-    let obj = dcc_obj_bytes("tc-select", src, &["-O0"]);
+    let obj = harness::dcc_obj_bytes("tc-select", src, &["-O0"]);
     let syms = elf64_syms(&obj);
     let find = |n: &str| syms.iter().find(|s| s.name == n);
-    let relas = elf64_rela(&obj, ".rela.text");
+    let relas = harness::elf64_rela(&obj, ".rela.text");
 
     // 一个 resolver 体内命中的变体符号，按指令地址（r_offset）排序 = 判定链顺序。
     let chain = |base: &str| -> Vec<String> {
@@ -1017,10 +814,10 @@ fn attr_target_clones_resolver_bits_come_from_cpu_isa_table() {
     }
 
     let src = include_str!("../fixtures/c/attr_target_clones.c");
-    let obj = dcc_obj_bytes("tc-bits", src, &["-O0"]);
+    let obj = harness::dcc_obj_bytes("tc-bits", src, &["-O0"]);
     let syms = elf64_syms(&obj);
     let text = elf64_section_data(&obj, ".text").expect(".o 里应有 .text").to_vec();
-    let relas = elf64_rela(&obj, ".rela.text");
+    let relas = harness::elf64_rela(&obj, ".rela.text");
 
     // 已知发射形式的 `(L - f)`：与 `codegen/x86_64/ifunc.rs` 的 `RipForm::delta` 同值。
     // 这里列的是「指令长 - disp32 字段相对指令起始的偏移」，不是特性位。
@@ -1171,10 +968,10 @@ fn attr_target_clones_resolver_bits_come_from_cpu_isa_table() {
 #[cfg(unix)]
 fn target_clones_runtime_resolves_to_non_default_variant() {
     let src = include_str!("../fixtures/c/attr_target_clones_selected.c");
-    let (ok, stderr, exe) = dcc_link_exe("tc-selected", src, &["-O0"]);
+    let (ok, stderr, exe) = harness::dcc_link_exe("tc-selected", src, &["-O0"]);
     assert!(ok, "夹具应能经宿主 cc 链上；stderr:\n{stderr}");
     // 观察选型之前先确认产物是动态的：静态产物里根本没有动态链接器去跑 resolver。
-    assert_dynamically_linked(&exe, "tc-selected", &stderr);
+    harness::assert_dynamically_linked(&exe, "tc-selected", &stderr);
 
     let syms = elf64_syms(&fs::read(&exe).unwrap_or_default());
     let value_of = |n: &str| -> i64 {
@@ -1281,7 +1078,7 @@ fn attr_target_clones_ifunc_behavior_selects_non_default() {
         assert_eq!(rc, 0, "{opt}: 夹具自己判定「选中的必须是 fast_impl(=2) 且与 builtin 同源」失败");
     }
     // `.o` 侧：`__attribute__((ifunc("r")))` 的基名必须与用户写的 resolver 同址。
-    let obj = dcc_obj_bytes("tc-behavior-o", src, &["-O0"]);
+    let obj = harness::dcc_obj_bytes("tc-behavior-o", src, &["-O0"]);
     let syms = elf64_syms(&obj);
     let find = |n: &str| syms.iter().find(|s| s.name == n);
     for (base, resolver) in [("by_sse2", "resolve_sse2"), ("by_avx2", "resolve_avx2")] {
@@ -1310,7 +1107,7 @@ fn attr_target_clones_cpu_builtin_is_real_implementation() {
         assert_eq!(rc, 0, "{opt}: builtin 的不变量不成立（恒假桩/位表错位/厂商顺序错）");
     }
     // 只用 builtin（没有 target_clones）也必须自带 CPUID 检测：不能靠宿主 libgcc。
-    let obj = dcc_obj_bytes("tc-builtin-o", src, &["-O0"]);
+    let obj = harness::dcc_obj_bytes("tc-builtin-o", src, &["-O0"]);
     let syms = elf64_syms(&obj);
     let find = |n: &str| syms.iter().find(|s| s.name == n);
     assert!(find("__dcc_cpu_indicator_init").is_some(), "只用 builtin 时也必须发检测函数");
@@ -1322,7 +1119,7 @@ fn attr_target_clones_cpu_builtin_is_real_implementation() {
         );
     }
     // 读表序列真的在 `.text` 里（不只是“有个定义”）：有 PC32 指向缓存与检测函数。
-    let relas = elf64_rela(&obj, ".rela.text");
+    let relas = harness::elf64_rela(&obj, ".rela.text");
     let references = |n: &str| {
         relas
             .iter()
@@ -1563,10 +1360,10 @@ fn attr_target_clones_cpu_indicator_classify_ids_come_from_classify_table() {
     const R_X86_64_PC32: u32 = 2;
 
     let src = include_str!("../fixtures/c/attr_target_clones_cpu_is_matrix.c");
-    let obj = dcc_obj_bytes("tc-classify-ids", src, &["-O0"]);
+    let obj = harness::dcc_obj_bytes("tc-classify-ids", src, &["-O0"]);
     let syms = elf64_syms(&obj);
     let text = elf64_section_data(&obj, ".text").expect(".o 里应有 .text").to_vec();
-    let relas = elf64_rela(&obj, ".rela.text");
+    let relas = harness::elf64_rela(&obj, ".rela.text");
     let init = syms
         .iter()
         .find(|s| s.name == "__dcc_cpu_indicator_init")
@@ -1660,7 +1457,7 @@ fn target_clones_builtin_linker_static_binds_default_and_announces() {
     let src = "__attribute__((target_clones(\"sse4.2,default\")))\n\
                 int compute(int x){ return x*2+1; }\n\
                 int main(void){ return compute(10) == 21 ? 0 : 1; }\n";
-    let (ok, stderr, exe) = dcc_link_exe("tc-static-bind", src, &["-O0", "-fbuiltin-linker"]);
+    let (ok, stderr, exe) = harness::dcc_link_exe("tc-static-bind", src, &["-O0", "-fbuiltin-linker"]);
     assert!(ok, "纯 target_clones（无 libc）应能用内置链接器链上；stderr:\n{stderr}");
     assert!(
         stderr.contains("bound to variant 'compute.default'"),
@@ -1685,7 +1482,7 @@ fn target_clones_builtin_linker_static_binds_default_and_announces() {
     // 取数走 `elf64_syms_by_type`：内置链接器把自己的 `.symtab/.strtab` 节头 `sh_name`
     // 写成 0（见该助手注释），按名字找符号表的 `elf64_syms` 在这里只会拿到空表。
     let bytes = fs::read(&exe).unwrap_or_default();
-    let syms = elf64_syms_by_type(&bytes);
+    let syms = harness::elf64_syms_by_type(&bytes);
     assert!(!syms.is_empty(), "静态 exe 里找不到 SHT_SYMTAB 节（连符号表都没有）");
     let find = |n: &str| syms.iter().find(|s| s.name == n);
     let dump: Vec<String> = syms
@@ -1716,7 +1513,7 @@ fn cpu_builtin_supports_runs_under_builtin_linker_static() {
                 int sse = __builtin_cpu_supports(\"sse\");\n\
                 int sse2 = __builtin_cpu_supports(\"sse2\");\n\
                 return (sse && sse2) ? 0 : 3;\n}\n";
-    let (ok, stderr, exe) = dcc_link_exe("cpu-static", src, &["-O0", "-fbuiltin-linker"]);
+    let (ok, stderr, exe) = harness::dcc_link_exe("cpu-static", src, &["-O0", "-fbuiltin-linker"]);
     assert!(ok, "只用 builtin 的程序应能静态链上；stderr:\n{stderr}");
     let (rc, _stdout, run_stderr) = run_exe_bounded(&exe);
     let run_stderr = String::from_utf8_lossy(&run_stderr).to_string();

@@ -343,7 +343,7 @@ impl Codegen {
             if let Some((chosen, _fixed)) =
                 planner.alloc_gp_for_constraint(raw, idx, AsmRegUse::Output)
             {
-                let name = Self::gp_reg_name(chosen as usize);
+                let name = self.asm_reg_name_or_report(chosen);
                 self.prepare_asm_binding(op, chosen, !is_inout);
                 map.insert(format!("%{idx}"), name.to_string());
                 slots.push(Slot::Reg(chosen, name));
@@ -360,7 +360,7 @@ impl Codegen {
             if Self::asm_constraint_is_address(raw) {
                 let chosen = planner.alloc_gp(idx, AsmRegUse::Output);
                 self.asm_load_address_to_reg(op, chosen);
-                let name = Self::gp_reg_name(chosen as usize);
+                let name = self.asm_reg_name_or_report(chosen);
                 map.insert(format!("%{idx}"), name.to_string());
                 slots.push(Slot::Reg(chosen, name));
                 meta.push((chosen, 0, true, false, if early { 1 } else { 0 }));
@@ -370,7 +370,7 @@ impl Codegen {
 
             // 默认: GP 寄存器
             let chosen = planner.alloc_gp(idx, AsmRegUse::Output);
-            let name = Self::gp_reg_name(chosen as usize);
+            let name = self.asm_reg_name_or_report(chosen);
             // +r (读写): 加载变量值; =r (只写): lea 地址 (将被 asm 覆写)
             self.prepare_asm_binding(op, chosen, !is_inout);
             map.insert(format!("%{idx}"), name.to_string());
@@ -580,7 +580,7 @@ impl Codegen {
                     // 将浮点位型加载到 GP 寄存器 (而非 XMM).
                     // 常量浮点值: 直接 mov 位型; 非变量: 从内存加载位型.
                     let chosen = planner.alloc_gp(idx, AsmRegUse::Input);
-                    let name = Self::gp_reg_name(chosen as usize);
+                    let name = self.asm_reg_name_or_report(chosen);
                     // 尝试直接求值浮点常量位型
                     if let Expr::Float { c, ty, .. } = op {
                         // 浮点常量的位型加载到 GP 寄存器。
@@ -611,7 +611,7 @@ impl Codegen {
                     } else {
                         // 其他表达式: 走 gen_expr (可能加载到 xmm0, 再 mov 到 gp)
                         // 对非常量表达式, 从临时区加载位型
-                        self.gen_expr(op, 0);
+                        self.gen_expr(op, Self::EVAL_BASE);
                         // xmm0 → GP (按类型大小复制位型)
                         if matches!(op.ty(), Type::Float) {
                             self.emit(&[
@@ -657,7 +657,7 @@ impl Codegen {
             if let Some((chosen, _fixed)) =
                 planner.alloc_gp_for_constraint(raw, idx, AsmRegUse::Input)
             {
-                let name = Self::gp_reg_name(chosen as usize);
+                let name = self.asm_reg_name_or_report(chosen);
                 self.prepare_asm_binding(op, chosen, false);
                 map.insert(format!("%{idx}"), name.to_string());
                 slots.push(Slot::Reg(chosen, name));
@@ -676,7 +676,7 @@ impl Codegen {
             if Self::asm_constraint_is_address(raw) {
                 let chosen = planner.alloc_gp(idx, AsmRegUse::Input);
                 self.asm_load_address_to_reg(op, chosen);
-                let name = Self::gp_reg_name(chosen as usize);
+                let name = self.asm_reg_name_or_report(chosen);
                 map.insert(format!("%{idx}"), name.to_string());
                 slots.push(Slot::Reg(chosen, name));
                 meta.push((chosen, 0, false, false, 0));
@@ -686,7 +686,7 @@ impl Codegen {
 
             // GP 寄存器
             let chosen = planner.alloc_gp(idx, AsmRegUse::Input);
-            let name = Self::gp_reg_name(chosen as usize);
+            let name = self.asm_reg_name_or_report(chosen);
             self.prepare_asm_binding(op, chosen, false);
             map.insert(format!("%{idx}"), name.to_string());
             slots.push(Slot::Reg(chosen, name));
@@ -735,7 +735,7 @@ impl Codegen {
             }
             // 找一个不冲突的 GP
             if let Some(cand) = planner.reassign_early_gp(reg, i) {
-                let new_name = Self::gp_reg_name(cand as usize);
+                let new_name = self.asm_reg_name_or_report(cand);
                 let key = format!("%{i}");
                 if let Some(op) = outputs.get(i) {
                     let raw = output_constraints
@@ -846,7 +846,7 @@ impl Codegen {
             return;
         }
         // 非变量: gen_expr 到 rax, 再 movd/mm
-        self.gen_expr(expr, 0);
+        self.gen_expr(expr, Self::EVAL_BASE);
         self.emit(&[0x0F, 0x6E, 0xC0 | ((mm & 7) << 3)]); // movd mm, eax
     }
     fn prepare_asm_seg_binding(&mut self, expr: &Expr, seg_code: u8) {
@@ -870,7 +870,7 @@ impl Codegen {
             }
             return;
         }
-        self.gen_expr(expr, 0);
+        self.gen_expr(expr, Self::EVAL_BASE);
         self.emit(&[0x8E, (seg_code & 7) << 3]);
     }
     fn prepare_asm_x87_binding(&mut self, expr: &Expr, st_idx: u8) {
@@ -902,7 +902,7 @@ impl Codegen {
         // 非变量表达式: gen_expr 按通道约定求值（ld 在 st0、f32/f64 在
         // xmm0、整数在 rax），再统一搬到 st0；旧代码无条件发 fld m64
         // [rax]，把整数/指针位型当 double 且漏掉 xmm0/st0 两种来源。
-        self.gen_expr(expr, 0);
+        self.gen_expr(expr, Self::EVAL_BASE);
         self.emit_operand_to_st0(&expr.ty(), 0);
     }
     fn prepare_asm_xmm_binding(&mut self, expr: &Expr, xmm: u8, _is_inout: bool) {
@@ -926,7 +926,7 @@ impl Codegen {
                 return;
             }
         }
-        self.gen_expr(expr, 0);
+        self.gen_expr(expr, Self::EVAL_BASE);
         let ty = expr.ty();
         if self.float_in_st0(&ty) {
             // long double 表达式结果在 st0：经栈 scratch 单步舍入到 f64

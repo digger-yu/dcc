@@ -100,7 +100,12 @@ impl Codegen {
             }
         }
         // 发射嵌套函数的符号 (它们不在 prog.decls 中)
-        for nested_name in self.nested_funcs.keys() {
+        //
+        // 按名字排序遍历：`nested_funcs` 是 HashMap，直接 `keys()` 会让 .symtab
+        // 里的符号次序随进程随机（同一份源两次编辑字节不同）。
+        let mut nested_names: Vec<&String> = self.nested_funcs.keys().collect();
+        nested_names.sort();
+        for nested_name in nested_names {
             if let Some(&off) = self.labels.get(nested_name) {
                 let sz = self.func_sizes.get(nested_name).copied().unwrap_or(0);
                 // 避免重复发射 (如果已经在上面的循环中处理过)

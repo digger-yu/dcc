@@ -318,7 +318,7 @@ impl Codegen {
             if matches!(op, BinOp::Mod) {
                 // 回退到通用调用路径, 通过外部函数实现
                 // 将左操作数存入临时槽, 计算右操作数, 调用 __dcc_x87_fmod
-                self.gen_expr(l, 0); // st(0) = l
+                self.gen_expr(l, Self::EVAL_BASE); // st(0) = l
                 self.emit_operand_to_st0(&l.ty(), 0);
                 // 保存 st(0) 到栈临时区 (固定 16 字节: ld 要装 tbyte 且保持对齐)
                 self.emit(&[0x48, 0x83, 0xEC, 16]); // sub rsp, 16
@@ -328,7 +328,7 @@ impl Codegen {
                     self.emit(&[0xDD, 0x1C, 0x24]); // fstp qword [rsp]
                 }
                 self.expr_depth += 1;
-                self.gen_expr(r, 0); // st(0) = r
+                self.gen_expr(r, Self::EVAL_BASE); // st(0) = r
                 self.emit_operand_to_st0(&r.ty(), 0);
                 self.expr_depth -= 1;
                 // 现在 st(0) = r, [rsp] = l
@@ -356,7 +356,7 @@ impl Codegen {
             }
             // 一般二元运算: 加载左到 st(0), 保存, 加载右到 st(0), 加载左到 st(0)
             // 最终: st(0) = 左, st(1) = 右
-            self.gen_expr(l, 0); // st(0) = l
+            self.gen_expr(l, Self::EVAL_BASE); // st(0) = l
                                  // 整数 / 宽浮点操作数经 Layer0 唯一入口搬到 st(0)
             self.emit_operand_to_st0(&l.ty(), 0);
             // 保存 l 到刚分配的 16 字节槽 (long double 用 tbyte, 否则 qword)
@@ -367,7 +367,7 @@ impl Codegen {
                 self.emit(&[0xDD, 0x1C, 0x24]); // fstp qword [rsp]
             }
             self.expr_depth += 1;
-            self.gen_expr(r, 0); // st(0) = r
+            self.gen_expr(r, Self::EVAL_BASE); // st(0) = r
             self.emit_operand_to_st0(&r.ty(), 0);
             self.expr_depth -= 1;
             // 重新加载 l
@@ -400,7 +400,7 @@ impl Codegen {
             // 复用上方 l→[rsp], 算 r, r→xmm1, l→xmm0 的代码段
             // 直接走通用路径, 这样节省重复 emit
             let save_bytes = (self.expr_depth as i32 + 1) * 8;
-            self.gen_expr(l, 0);
+            self.gen_expr(l, Self::EVAL_BASE);
             self.emit_scalar_to_xmm0_if_needed(l, &float_ty);
             self.emit(&[0x48, 0x83, 0xEC, save_bytes as u8]);
             if is_float {
@@ -409,7 +409,7 @@ impl Codegen {
                 self.emit(&[0xF2, 0x0F, 0x11, 0x04, 0x24]); // movsd [rsp], xmm0
             }
             self.expr_depth += 1;
-            self.gen_expr(r, 0);
+            self.gen_expr(r, Self::EVAL_BASE);
             self.expr_depth -= 1;
             self.emit_scalar_to_xmm0_if_needed(r, &float_ty);
             self.emit(&[0x66, 0x0F, 0x28, 0xC8]); // movapd xmm1, xmm0 (r→xmm1)
@@ -464,7 +464,7 @@ impl Codegen {
         // 嵌套时每个深度用不同的偏移: [rsp - 8*(depth+1)]
         let save_bytes = (self.expr_depth as i32 + 1) * 8;
         // 计算左操作数到 xmm0
-        self.gen_expr(l, 0);
+        self.gen_expr(l, Self::EVAL_BASE);
         // If LHS is integer, the result sits in eax; convert to
         // xmm0 before saving (e.g. `1.0 - x` where x is int).
         self.emit_scalar_to_xmm0_if_needed(l, &float_ty);
@@ -477,7 +477,7 @@ impl Codegen {
         }
         // 计算右操作数到 xmm0
         self.expr_depth += 1;
-        self.gen_expr(r, 0);
+        self.gen_expr(r, Self::EVAL_BASE);
         self.expr_depth -= 1;
         // 整数右操作数 (如 x * 2): 转换到 xmm0, 否则 xmm1 会残留左操作数
         self.emit_scalar_to_xmm0_if_needed(r, &float_ty);
@@ -669,25 +669,13 @@ impl Codegen {
             ty.clone()
         };
         let is_float = matches!(effective_ty, Type::Float);
-        if is_float {
-            self.emit(&[0xF3]);
-            if xmm >= 8 {
-                self.emit(&[0x44]);
-            }
-            self.emit(&[0x41, 0x0F, 0x10]);
-        } else {
-            self.emit(&[0xF2]);
-            if xmm >= 8 {
-                self.emit(&[0x44]);
-            }
-            self.emit(&[0x41, 0x0F, 0x10]);
-        }
-        if off.abs() < 128 {
-            self.emit(&[0x45 | ((xmm & 7) << 3), off as i8 as u8]);
-        } else {
-            self.emit(&[0x85 | ((xmm & 7) << 3)]);
-            self.emit(&(off as i32).to_le_bytes());
-        }
+        // `movss/movsd xmm, off(%r13)`：xmm 在 ModRM.reg ⇒ 扩它的是 REX.R，基址 %r13 要
+        // REX.B，两个位必须在**同一枚**前缀里。以前这里先 `if xmm>=8 {emit 0x44}` 再
+        // 固定发 `0x41`：x86 只认最后一条 REX，于是 0x44 被后面的 0x41 直接覆盖掉，
+        // xmm 落在 8..15 时读的是 `xmm(xmm&7)`。单源入口 `emit_xmm_r13_disp` 按位算；
+        // xmm<8 时两边字节逐字相同（前缀仍是 0x41）。
+        let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
+        self.emit_xmm_r13_disp(pfx, 0x10, xmm, off);
     }
     pub(crate) fn load_mem_xmm(&mut self, xmm: u8, elem_size: usize, is_float: bool) {
         if is_float {
@@ -706,14 +694,14 @@ impl Codegen {
             self.copy_r13_bytes(src_off, dst_off, src_ty.size());
             return;
         }
-        if self.gen_lvalue_addr(e, 0) {
+        if self.gen_lvalue_addr(e, Self::EVAL_BASE) {
             self.emit(&[0x48, 0x89, 0xC6]);
             self.emit_lea_r13(7, dst_off);
             self.mov_imm(1, src_ty.size() as i128);
             self.emit(&[0xFC, 0xF3, 0xA4]);
             return;
         }
-        self.gen_expr(e, 0);
+        self.gen_expr(e, Self::EVAL_BASE);
         match src_ty {
             Type::Complex(ref inner) if matches!(&inner.base, Type::Float | Type::Double) => {
                 // After gen_expr for complex returned via memory, rax (0) has the address

@@ -1117,7 +1117,18 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         verbose: cfg.verbose,
     };
 
-    let emitted = codegen::emit(&module, &target, opts)?;
+    let (emitted, codegen_notes) = codegen::emit(&module, &target, opts)?;
+    // codegen 阶段的非致命诊断（Phase 6.4 的家能力面警告是它的第一个使用者）：
+    // 与 parse 阶段同一策略 —— 无错误时立即输出，否则 warning-only 场景会整个
+    // 丢失（旧形状是后端的警告只参与「是否致命」的判定就被丢掉）。
+    if !codegen_notes.is_empty() {
+        let dcfg = diag_cfg(&cfg);
+        for d in &codegen_notes {
+            if matches!(d.sev, Severity::Warning) {
+                d.print_with(&dcfg);
+            }
+        }
+    }
     let out = write_emit_output(&cfg.output, &emitted, cfg.emit_asm)?;
 
     // 自举回归对比: -c/--bootstrap-compare=<ref.o> 模式.
@@ -2475,7 +2486,18 @@ fn emit_native_program(
         verbose: cfg.verbose,
     };
 
-    let emitted = codegen::emit(&module, &target, opts)?;
+    let (emitted, codegen_notes) = codegen::emit(&module, &target, opts)?;
+    // codegen 阶段的非致命诊断（Phase 6.4 的家能力面警告是它的第一个使用者）：
+    // 与 parse 阶段同一策略 —— 无错误时立即输出，否则 warning-only 场景会整个
+    // 丢失（旧形状是后端的警告只参与「是否致命」的判定就被丢掉）。
+    if !codegen_notes.is_empty() {
+        let dcfg = diag_cfg(&cfg);
+        for d in &codegen_notes {
+            if matches!(d.sev, Severity::Warning) {
+                d.print_with(&dcfg);
+            }
+        }
+    }
     let out = write_emit_output(&cfg.output, &emitted, cfg.emit_asm)?;
 
     // 自举回归对比 (与 run() 一致)

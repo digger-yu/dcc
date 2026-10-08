@@ -10,7 +10,51 @@ use crate::codegen::x86_64::{AbiClass, AggDst, Codegen, JumpKind};
 use crate::const_eval;
 
 impl Codegen {
+    /// 记录「本条语句的起始 PC ↔ 源码行」，供 `.debug_line` 用（Phase 6.2 收尾）。
+    ///
+    /// 为什么以前没有：x86_64 后端只在内联 asm 的发射路径里记过行号（`asm/emit.rs` 那两张
+    /// 表），于是纯 C 函数交给 `src/debug.rs` 的 `line_entries` 恒空，行表退到「每函数
+    /// 一行（声明行）」的兜底形态：函数断点能绑（靠 `.debug_info` 的 low_pc/high_pc），
+    /// 而 `break file.c:5` 这种语句级断点必然报 `No line 5 in file`。
+    ///
+    /// 只在 `-g` 下攒表：`debug_level == 0` 时这张表没有消费者，白白多一堆 push。
+    /// 行号为 0（合成语句、`Span::unknown()`）不记：0 不是合法源码行，绑上去只会让 gdb
+    /// 停在一个屏幕上看不到的位置。
+    pub(crate) fn note_stmt_line(&mut self, s: &Stmt) {
+        self.note_src_line(stmt_src_line(s));
+    }
+
+    /// `note_stmt_line` 的底层：行号已取好，只负责守卫与去重。
+    ///
+    /// 单独拆出来是因为局部声明（`int t = sink(0);`）不是 `Stmt`，而是
+    /// `BlockItem::Decl(Decl::Var(..))`：不给它记一条，声明行上仍然绑不上断点。
+    pub(crate) fn note_src_line(&mut self, line: u32) {
+        if self.debug_level == 0 {
+            return;
+        }
+        if line == 0 {
+            return;
+        }
+        let pc = self.code.len() as u64;
+        // 同一 PC 上同一行再记一次没有信息量（外层语句紧接着内层首条语句），而
+        // 同 PC 不同行是合法的语句重叠，必须保留。
+        //
+        // 去重键**必须含 PC**，只看行号会把「相邻两个不同地址上的同一行」也吞掉：
+        // 这张表在串行侧是跨函数累积的，而函数克隆（`__attribute__((target_clones))`
+        // / multiversioning）与相邻函数很容易落在同一行上 ⇒ 串行少行、并行（每个 worker
+        // 一张新表）不少行，`-O2 -g` 的 `.debug_line`/`.rela.debug_line`/`.BTF.ext`
+        // 三节对不上（实测 4 个 clone 夹具）。那处差异不在 PC 上，按行号去重无法区分，
+        // 也就守不住「并行不改产物」这条不变式。
+        if let Some(&(last_pc, last_line)) = self.stmt_line_entries.last() {
+            if last_line == line && last_pc == pc {
+                return;
+            }
+        }
+        self.stmt_line_entries.push((pc, line));
+    }
+
     pub fn gen_stmt(&mut self, s: &Stmt) {
+        self.note_stmt_line(s);
         match s {
             Stmt::Return { val, .. } => {
                 if let Some(e) = val {
@@ -37,7 +81,7 @@ impl Codegen {
                         // 那是在适配“ld 内部只有 f64 精度”的旧不变量，会把真 80-bit
                         // 返回值重新舍回 53 位尾数。
                         let e_ty = e.ty();
-                        self.gen_expr(e, 0);
+                        self.gen_expr(e, Self::EVAL_BASE);
                         self.emit_operand_to_st0(&e_ty, 0);
                     } else if matches!(self.current_func_ret_ty, Type::Complex(_))
                         && self.current_sret_offset.is_none()
@@ -184,7 +228,7 @@ impl Codegen {
                                                 },
                                                 _ => false,
                                             };
-                                            self.gen_expr(e, 0);
+                                            self.gen_expr(e, Self::EVAL_BASE);
                                             if rax_is_agg_addr {
                                                 // 先取高 8 再取低 8: 后一条会覆写 rax
                                                 self.emit(&[0x48, 0x8B, 0x50, 0x08]); // mov rdx, [rax+8]
@@ -205,7 +249,7 @@ impl Codegen {
                                 } // end else (non-Vector agg return)
                             }
                         } else {
-                            self.gen_expr(e, 0);
+                            self.gen_expr(e, Self::EVAL_BASE);
                             // Small vector (<=8B) return: gen_expr puts the
                             // vector data in temp slot 0 on the stack.  SysV
                             // ABI classifies <=16B vectors as SSE, so the
@@ -354,7 +398,7 @@ impl Codegen {
             },
             Stmt::Expr { e, .. } => {
                 if !self.gen_unknown_builtin_stmt(e) {
-                    self.gen_expr(e, 0);
+                    self.gen_expr(e, Self::EVAL_BASE);
                 }
             },
             Stmt::If {
@@ -381,7 +425,7 @@ impl Codegen {
                     }
                     // else: condition is false, no labels, no else → skip
                 } else {
-                    self.gen_expr(cond, 0);
+                    self.gen_expr(cond, Self::EVAL_BASE);
                     self.emit_truth_flags(&cond.ty());
                     let le = self.fresh_label();
                     let lend = self.fresh_label();
@@ -408,7 +452,7 @@ impl Codegen {
                 self.break_targets.push((le.clone(), false));
                 self.maybe_align_loop();
                 self.label(&ls);
-                self.gen_expr(cond, 0);
+                self.gen_expr(cond, Self::EVAL_BASE);
                 self.emit_truth_flags(&cond.ty());
                 self.jmp_rel32(&le, JumpKind::Je);
                 self.gen_stmt(body);
@@ -438,14 +482,14 @@ impl Codegen {
                 self.maybe_align_loop();
                 self.label(&ls);
                 if let Some(c) = cond {
-                    self.gen_expr(c, 0);
+                    self.gen_expr(c, Self::EVAL_BASE);
                     self.emit_truth_flags(&c.ty());
                     self.jmp_rel32(&le, JumpKind::Je);
                 }
                 self.gen_stmt(body);
                 self.label(&lst);
                 if let Some(s) = step {
-                    self.gen_expr(s, 0);
+                    self.gen_expr(s, Self::EVAL_BASE);
                 }
                 self.jmp_rel32(&ls, JumpKind::Jmp);
                 self.label(&le);
@@ -463,7 +507,7 @@ impl Codegen {
                 self.maybe_align_loop();
                 self.label(&ls);
                 self.gen_stmt(body);
-                self.gen_expr(cond, 0);
+                self.gen_expr(cond, Self::EVAL_BASE);
                 self.emit_truth_flags(&cond.ty());
                 self.jmp_rel32(&ls, JumpKind::Jne);
                 self.label(&le);
@@ -513,9 +557,7 @@ impl Codegen {
                     //   REX.WRB = 0x4D (W=1, R=1 for r10, B=1 for r13)
                     //   opcode  = 0x89 (mov r/m64, r64)
                     //   ModRM   = 0xD5 (mod=11, reg=r10&7=010, r/m=r13&7=101)
-                    self.code.push(0x4D);
-                    self.code.push(0x89);
-                    self.code.push(0xD5);
+                    self.emit(&[0x4D, 0x89, 0xD5]);
                 }
                 let lbl = self.c_label_to_asm(&target.name);
                 self.jmp_rel32(&lbl, JumpKind::Jmp);
@@ -596,7 +638,7 @@ impl Codegen {
                 // 保存在帧内槽, break 跳转无需额外清理。
                 self.break_targets.push((l_break.clone(), false));
                 // 计算switch表达式到rax
-                self.gen_expr(expr, 0);
+                self.gen_expr(expr, Self::EVAL_BASE);
                 let switch_is_int128 = matches!(expr.ty(), Type::Int128 | Type::UInt128);
                 // switch 值保存到 r13 帧内槽而非 push 栈槽: case 体中
                 // 可能含函数调用, push 跨越调用会使 rsp 错位 8, 违反
@@ -727,7 +769,7 @@ impl Codegen {
             },
             Stmt::GotoIndirect { expr, .. } => {
                 // goto *expr: 计算目标地址并跳转
-                self.gen_expr(expr, 0); // rax = 目标地址
+                self.gen_expr(expr, Self::EVAL_BASE); // rax = 目标地址
                 self.emit(&[0xFF, 0xE0]); // jmp rax
             },
             Stmt::Fallthrough { .. } => {},
@@ -792,131 +834,6 @@ impl Codegen {
             },
         }
     }
-    /// gen_expr 语句表达式分支 (batch F5 逐字搬迁: Expr::StmtExpr arm)。
-    /// 值约定: 块内最后一条表达式语句 (或 return) 结果放入 dst。
-    pub fn gen_expr_stmt_expr(&mut self, e: &Expr, dst: u8) {
-        if let Expr::StmtExpr { block, .. } = e {
-            // 语句表达式 ({...}): 执行块内语句, 最后表达式值留在 dst
-            let items = &block.items;
-            let last_idx = items.len().saturating_sub(1);
-            for (i, item) in items.iter().enumerate() {
-                match item {
-                    BlockItem::Stmt(Stmt::Expr { e, .. }) if i == last_idx => {
-                        // 最后一条表达式语句: 结果放入 dst
-                        let e_ty = e.ty();
-                        // 聚合类型 (struct/union) 的 StmtExpr 最后一条处理:
-                        // - lvalue (Ident/Member/Index/Deref): 取地址 + 整体拷贝到 sret 临时槽
-                        //   (不能 gen_expr 加载前 8 字节值, 调用方期望地址:
-                        //    pr c/5354: ({ struct S s; s.a=1; s; }).a)
-                        // - Call: SysV ABI >16B 返回已走 sret 约定 (rax=buffer 地址),
-                        //   否则物化寄存器返回值到临时槽
-                        // - 标量/其他: 正常 gen_expr
-                        if matches!(e_ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) {
-                            let sz = e_ty.size();
-                            if self.gen_lvalue_addr(e, 6) {
-                                // lvalue 路径: 整体拷贝到 sret 临时槽
-                                // rsi 已 = 源地址 (gen_lvalue_addr 放到 dst=6 即 rsi)
-                                let temp_off = self.alloc_sret_slot(sz);
-                                self.emit_lea_r13(7, temp_off); // rdi = sret 临时槽
-                                self.mov_imm(1, sz as i128); // rcx = size
-                                self.emit(&[0xFC]); // cld
-                                self.emit(&[0xF3, 0xA4]); // rep movsb
-                                self.emit_lea_r13(dst, temp_off);
-                            } else if Self::needs_memory_return(&e_ty) {
-                                // Call + >16B: SysV ABI sret, rax 已是返回地址
-                                self.gen_expr(e, dst);
-                            } else if matches!(e, Expr::Call { .. }) {
-                                // Call + <=16B: 寄存器返回, 物化到临时槽
-                                self.gen_expr(e, 0);
-                                let temp_off = self.alloc_sret_slot(sz);
-                                if sz <= 8 {
-                                    self.store_stack(0, temp_off);
-                                } else {
-                                    self.store_stack(0, temp_off);
-                                    self.store_stack(2, temp_off + 8);
-                                }
-                                self.emit_lea_r13(dst, temp_off);
-                            } else {
-                                // 其他非 lvalue 聚合 (CompoundLit 等): 让 gen_expr 自己处理
-                                self.gen_expr(e, dst);
-                            }
-                        } else {
-                            self.gen_expr(e, dst);
-                        }
-                    },
-                    BlockItem::Stmt(Stmt::Return { val: Some(e), .. }) if i == last_idx => {
-                        self.gen_expr(e, dst);
-                    },
-                    BlockItem::Stmt(s) => self.gen_stmt(s),
-                    BlockItem::Decl(Decl::Var(v)) => {
-                        // static 局部变量已在全局数据段分配
-                        if v.is_static
-                            && self
-                                .static_local_map
-                                .is_static_local(&self.current_func_name, &v.name.name)
-                            && !self
-                                .static_local_map
-                                .needs_runtime_init(&self.current_func_name, &v.name.name)
-                        {
-                            continue;
-                        }
-                        // static local 需要运行时初始化
-                        if v.is_static
-                            && self
-                                .static_local_map
-                                .needs_runtime_init(&self.current_func_name, &v.name.name)
-                        {
-                            if let Some(init) = &v.init {
-                                self.gen_expr(init, 0);
-                                self.emit_global_store(0, &v.name.name);
-                            }
-                            continue;
-                        }
-                        self.register_var(&v.name.name, &v.ty);
-                        // 定义+声明一体的 struct/union 类型绑定 +
-                        // VLA/VM struct 变量动态分配 (语句表达式内)
-                        if matches!(v.ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) {
-                            self.gen_vm_type_bind(&v.ty);
-                        }
-                        // VLA/VM struct 变量: 语句表达式内也需动态分配
-                        // 数据区并写元数据槽 (20070919-1: ({ struct S b; ... }))
-                        if Self::type_has_vla(&v.ty) {
-                            self.gen_vla_alloc(v);
-                        }
-                        if let Some(init) = &v.init {
-                            // 浮点: 结果在 xmm0, 必须用 movsd/movss 存回栈 (同 Stmt::Decl 路径)
-                            if matches!(&v.ty, Type::Float | Type::Double | Type::LongDouble) {
-                                self.gen_expr(init, 0);
-                                self.emit_scalar_to_xmm0_if_needed(init, &v.ty);
-                                self.gen_float_store(&v.name.name, &v.ty);
-                            } else {
-                                self.gen_expr(init, 0);
-                                // Implicit float→int conversion when
-                                // initializer is float but variable is
-                                // integer (e.g. `int a = 0.0;`).
-                                let init_ty = init.ty();
-                                if matches!(&init_ty, Type::Float | Type::Double | Type::LongDouble)
-                                    && Self::is_integer_type(&v.ty)
-                                {
-                                    self.emit_implicit_float_to_int(0, &init_ty, &v.ty);
-                                }
-                                self.mov_to_stack(0, &v.name.name);
-                            }
-                        }
-                    },
-                    BlockItem::Decl(Decl::StructDef(sd)) => {
-                        // 局部类型声明: 重新绑定 VM struct 大小槽
-                        // (与 gen_block_items 同一语义)
-                        self.gen_vm_struct_bind(sd, false);
-                    },
-                    BlockItem::Decl(Decl::UnionDef(sd)) => {
-                        self.gen_vm_struct_bind(sd, true);
-                    },
-                    _ => {},
-                }
-            }
-        }
-    }
 
     pub fn gen_block_items(&mut self, items: &[BlockItem]) {
         for it in items {
@@ -952,6 +869,9 @@ impl Codegen {
     }
 
     fn gen_block_item(&mut self, it: &BlockItem) {
+        if let BlockItem::Decl(Decl::Var(v)) = it {
+            self.note_src_line(v.span.line);
+        }
         match it {
             BlockItem::Stmt(s) => self.gen_stmt(s),
             BlockItem::Decl(Decl::Var(v)) => {
@@ -992,7 +912,7 @@ impl Codegen {
                         .needs_runtime_init(&self.current_func_name, &v.name.name)
                 {
                     if let Some(init) = &v.init {
-                        self.gen_expr(init, 0);
+                        self.gen_expr(init, Self::EVAL_BASE);
                         self.emit_global_store(0, &v.name.name);
                     }
                     return;
@@ -1021,12 +941,12 @@ impl Codegen {
                             self.gen_imaginary_init(&v.name.name, &inner.base, init);
                         } else if matches!(&v.ty, Type::Float | Type::Double | Type::LongDouble) {
                             // 浮点: xmm0 结果必须用 movsd/movss 存回栈, 不能用整数 mov rax
-                            self.gen_expr(init, 0);
+                            self.gen_expr(init, Self::EVAL_BASE);
                             // int 常量初始化浮点变量: 先转换到 xmm0 (double x = 1;)
                             self.emit_scalar_to_xmm0_if_needed(init, &v.ty);
                             self.gen_float_store(&v.name.name, &v.ty);
                         } else {
-                            self.gen_expr(init, 0);
+                            self.gen_expr(init, Self::EVAL_BASE);
                             // Implicit float→int conversion
                             let init_ty = init.ty();
                             if matches!(&init_ty, Type::Float | Type::Double | Type::LongDouble)
@@ -1066,4 +986,34 @@ impl Codegen {
             _ => {},
         }
     }
+}
+
+/// `Stmt` → 源码行（1-based，0 表示无位置信息）。
+///
+/// 为什么本模块自带一份：`src/opt.rs` 的 `StmtSpan`、`src/loop_opt.rs` 与
+/// `src/profile/gcov.rs` 的 `stmt_span` 都是各自模块的 private 辅助，跨不过；
+/// 把它们合并到 `src/ast.rs` 的 `impl Stmt { pub fn span(&self) -> &Span }` 是
+/// 下一步该做的事（那会改十几个调用点），不在本次行表接线范围内。这里先保证
+/// 行号只有一个入口：上面的 `note_stmt_line` 是本文件唯一的调用者。
+fn stmt_src_line(s: &Stmt) -> u32 {
+    let span = match s {
+        Stmt::If { span, .. }
+        | Stmt::While { span, .. }
+        | Stmt::Do { span, .. }
+        | Stmt::For { span, .. }
+        | Stmt::Return { span, .. }
+        | Stmt::Expr { span, .. }
+        | Stmt::Block { span, .. }
+        | Stmt::Break { span, .. }
+        | Stmt::Continue { span, .. }
+        | Stmt::Goto { span, .. }
+        | Stmt::GotoIndirect { span, .. }
+        | Stmt::Label { span, .. }
+        | Stmt::Switch { span, .. }
+        | Stmt::AsmGoto { span, .. }
+        | Stmt::Invoke { span, .. }
+        | Stmt::EhLandingPad { span, .. }
+        | Stmt::Fallthrough { span } => span,
+    };
+    span.line
 }

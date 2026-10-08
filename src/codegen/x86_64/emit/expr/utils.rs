@@ -194,12 +194,20 @@ impl Codegen {
                     self.zero_extend_for_cmp(dst, lt);
                     self.zero_extend_for_cmp(src, rt);
                 }
+                // `cmp r/m(dst), r(src)`：dst 在 r/m 字段 ⇒ 只可能贡献 REX.B，src 在 reg
+                // 字段 ⇒ 只可能贡献 REX.R。两个字段各自独立判，不可 else-if：P16 把右操作数
+                // 暂存号从写死的 %rcx 换成候选表首号（%r8）之后，「src 与 dst 同属高 8 号」
+                // 从死分支变成常走分支，漏掉的 REX.B 会让 `cmp %r8d,%r12d` 解码成
+                // `cmp %r8d,%esp`（mod=3 rm=100 是非法编码，objdump 直接点名 %esp）。
+                // 位序判据见 docs/ssa-pass-upgrade-plan.md §7.21，机器判据见 rex_matrix::binop_matrix。
                 let mut rex = if use_32bit { 0u8 } else { 0x48u8 };
                 if src >= 8 {
                     rex |= 0x44;
-                } else if dst >= 8 {
+                }
+                if dst >= 8 {
                     rex |= 0x41;
                 }
+                // 32 位比较且两侧都在低 8 号 ⇒ rex 为 0，不发前缀（64 位的 0x48 是 W 位）。
                 if rex != 0 {
                     self.emit(&[rex]);
                 }
@@ -936,75 +944,8 @@ impl Codegen {
         // 一份经 f64 中转的副本（见 global.rs 中的根因注释）。
         crate::codegen::x86_64::mem::global::global_init_bytes(init, sz, is_float, ty)
     }
-    pub(crate) fn gp_reg_name_bits(idx: u8, bits: u8) -> Option<&'static str> {
-        Some(match (idx, bits) {
-            (0, 8) => "%al",
-            (0, 16) => "%ax",
-            (0, 32) => "%eax",
-            (0, 64) => "%rax",
-            (1, 8) => "%cl",
-            (1, 16) => "%cx",
-            (1, 32) => "%ecx",
-            (1, 64) => "%rcx",
-            (2, 8) => "%dl",
-            (2, 16) => "%dx",
-            (2, 32) => "%edx",
-            (2, 64) => "%rdx",
-            (3, 8) => "%bl",
-            (3, 16) => "%bx",
-            (3, 32) => "%ebx",
-            (3, 64) => "%rbx",
-            (4, 8) => "%spl",
-            (4, 16) => "%sp",
-            (4, 32) => "%esp",
-            (4, 64) => "%rsp",
-            (5, 8) => "%bpl",
-            (5, 16) => "%bp",
-            (5, 32) => "%ebp",
-            (5, 64) => "%rbp",
-            (6, 8) => "%sil",
-            (6, 16) => "%si",
-            (6, 32) => "%esi",
-            (6, 64) => "%rsi",
-            (7, 8) => "%dil",
-            (7, 16) => "%di",
-            (7, 32) => "%edi",
-            (7, 64) => "%rdi",
-            (8, 8) => "%r8b",
-            (8, 16) => "%r8w",
-            (8, 32) => "%r8d",
-            (8, 64) => "%r8",
-            (9, 8) => "%r9b",
-            (9, 16) => "%r9w",
-            (9, 32) => "%r9d",
-            (9, 64) => "%r9",
-            (10, 8) => "%r10b",
-            (10, 16) => "%r10w",
-            (10, 32) => "%r10d",
-            (10, 64) => "%r10",
-            (11, 8) => "%r11b",
-            (11, 16) => "%r11w",
-            (11, 32) => "%r11d",
-            (11, 64) => "%r11",
-            (12, 8) => "%r12b",
-            (12, 16) => "%r12w",
-            (12, 32) => "%r12d",
-            (12, 64) => "%r12",
-            (13, 8) => "%r13b",
-            (13, 16) => "%r13w",
-            (13, 32) => "%r13d",
-            (13, 64) => "%r13",
-            (14, 8) => "%r14b",
-            (14, 16) => "%r14w",
-            (14, 32) => "%r14d",
-            (14, 64) => "%r14",
-            (15, 8) => "%r15b",
-            (15, 16) => "%r15w",
-            (15, 32) => "%r15d",
-            (15, 64) => "%r15",
-            _ => return None,
-        })
-    }
+    // 号→名（含 AT&T 形态）只有一份表：`abi/regnames.rs::att_name_of_num`
+    // （Phase 6.1 的后半）。这里以前是与 `asm/expansion.rs` 逐字相同的第二份副本。
     pub(crate) fn has_field_data_in_range(ty: &Type, lo: usize, hi: usize) -> bool {
         match ty {
             Type::Struct(_, fields, _, false) => {

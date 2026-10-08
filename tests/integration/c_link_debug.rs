@@ -1390,7 +1390,7 @@ fn ifunc_resolver_runtime() {
         let _ = fs::set_permissions(&exe, fs::Permissions::from_mode(0o755));
     }
     // 产物必须是动态的：静态产物里没有会跑 resolver 的动态链接器。
-    assert_dynamically_linked(&exe, "ifunc_resolver_runtime（宿主 gcc 链 dcc .o）", "");
+    harness::assert_dynamically_linked(&exe, "ifunc_resolver_runtime（宿主 gcc 链 dcc .o）", "");
     // IFUNC 语义活到最终产物：基名仍 STT_GNU_IFUNC、指向用户写的 resolver，且
     // 重定位表里有指向那个 resolver 的 R_X86_64_IRELATIVE（PIE 下在 `.rela.dyn`，
     // 非 PIE 下在 `.rela.plt`，故扫全部 `.rela*`）。
@@ -1411,7 +1411,7 @@ fn ifunc_resolver_runtime() {
         );
         irel_addends.push(r.value);
     }
-    let irel: Vec<u64> = elf64_all_rela(&bytes)
+    let irel: Vec<u64> = harness::elf64_all_rela(&bytes)
         .into_iter()
         .filter(|r| r.2 == R_X86_64_IRELATIVE)
         .map(|r| r.3 as u64)
@@ -3474,32 +3474,9 @@ fn wcs_libc_call_passes_through() {
 // **动态**可执行文件。下面两条因此从「断静态/断失败」翻成「断动态/断链得上」，同时
 // 保留底线：仍走内置链接器（用户显式 `-fbuiltin-linker`）的路径必须继续自报链接方式。
 // 实测证据（含逐字 `file`/`readelf` 读数）见 docs/wp_ifunc_real_fix.md。
+// 共用的编链助手 `dcc_link_capture_flags` 与取数助手 `elf64_all_rela` /
+// `assert_dynamically_linked` 住在 `tests/common/harness.rs`。
 // ---------------------------------------------------------------------------
-
-/// 把源码经指定 flags 链成可执行文件，返回 (是否成功, stderr 文本, 产物路径)。
-/// 用 PID+stem 造唯一临时名，避免与并行用例互相踩。
-#[cfg(unix)]
-fn dcc_link_capture_flags(
-    c_src: &str,
-    stem: &str,
-    flags: &[&str],
-) -> (bool, String, std::path::PathBuf) {
-    let dir = std::env::temp_dir();
-    let tag = std::process::id();
-    let sf = dir.join(format!("dcc-ifunc-snd-{stem}-{tag}.c"));
-    let exe = dir.join(format!("dcc-ifunc-snd-{stem}-{tag}.bin"));
-    std::fs::write(&sf, c_src).expect("写临时源文件");
-    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"));
-    cmd.arg("-std=gnu23");
-    for f in flags {
-        cmd.arg(f);
-    }
-    cmd.args(["-o"]).arg(&exe).arg(&sf);
-    let out = cmd.output().expect("运行 dcc");
-    let _ = std::fs::remove_file(&sf);
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    (out.status.success(), stderr, exe)
-}
 
 /// 契约 1 翻版：两条链路的**链接方式**都必须真实且自报。
 ///
@@ -3518,9 +3495,9 @@ fn target_clones_link_mode_is_announced_on_both_paths() {
                 int main(void){ return compute(10) == 21 ? 0 : 1; }\n";
 
     // ---- 1) 默认路径：动态，且不谎报改道 ----
-    let (ok, stderr, exe) = dcc_link_capture_flags(src, "only", &["-O0"]);
+    let (ok, stderr, exe) = harness::dcc_link_capture_flags(src, "only", &["-O0"]);
     assert!(ok, "纯 target_clones 必须能链上；stderr:\n{stderr}");
-    assert_dynamically_linked(&exe, "默认路径（含 IFUNC）", &stderr);
+    harness::assert_dynamically_linked(&exe, "默认路径（含 IFUNC）", &stderr);
     let dyn_out = std::process::Command::new("readelf")
         .args(["-d"])
         .arg(&exe)
@@ -3547,7 +3524,7 @@ fn target_clones_link_mode_is_announced_on_both_paths() {
     assert_eq!(rc, 0, "动态产物里 compute(10) 必须返回 21；stderr:\n{run_stderr}");
 
     // ---- 2) 显式 `-fbuiltin-linker`：仍静态，但仍必须自报 ----
-    let (ok, stderr, exe) = dcc_link_capture_flags(src, "builtin", &["-O0", "-fbuiltin-linker"]);
+    let (ok, stderr, exe) = harness::dcc_link_capture_flags(src, "builtin", &["-O0", "-fbuiltin-linker"]);
     assert!(ok, "纯 target_clones 应能用内置链接器链上；stderr:\n{stderr}");
     assert!(
         stderr.contains("static (no PT_INTERP / DT_NEEDED)"),
@@ -3599,13 +3576,13 @@ fn target_clones_libc_links_via_host_cc_and_builtin_failure_is_attributed() {
                 int main(void){ printf(\"%d\\n\", compute(10)); return 0; }\n";
 
     // ---- 1) 已修：默认路径链得上 + 动态 + 输出对 ----
-    let (ok, stderr, exe) = dcc_link_capture_flags(src, "libc", &["-O0"]);
+    let (ok, stderr, exe) = harness::dcc_link_capture_flags(src, "libc", &["-O0"]);
     assert!(
         ok,
         "target_clones + printf 现在必须能经宿主 cc 链上（resolver 已在 .o 里、改道分支已删）；\n\
          链不上说明退回旧缺陷形状（那个形状下这里堆几十个 E0302）。stderr:\n{stderr}"
     );
-    assert_dynamically_linked(&exe, "clones + libc（宿主 cc）", &stderr);
+    harness::assert_dynamically_linked(&exe, "clones + libc（宿主 cc）", &stderr);
     let (rc, stdout, run_stderr) = run_exe_bounded(&exe);
     let _ = std::fs::remove_file(&exe);
     assert_eq!(rc, 0, "运行失败；stderr:\n{}", String::from_utf8_lossy(&run_stderr));
@@ -3616,7 +3593,7 @@ fn target_clones_libc_links_via_host_cc_and_builtin_failure_is_attributed() {
     );
 
     // ---- 2) 底线：显式走内置链接器时，失败仍必须被归因、不得静默 ----
-    let (ok, stderr, exe) = dcc_link_capture_flags(src, "libc-builtin", &["-O0", "-fbuiltin-linker"]);
+    let (ok, stderr, exe) = harness::dcc_link_capture_flags(src, "libc-builtin", &["-O0", "-fbuiltin-linker"]);
     let _ = std::fs::remove_file(&exe);
     let lower = stderr.to_lowercase();
     assert!(

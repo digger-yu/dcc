@@ -142,7 +142,13 @@ impl Codegen {
         const DIAG_NO_GUARD: &str = "E0317";
         let names: Vec<String> = regs
             .iter()
-            .map(|&r| format!("%{}", Self::gp_reg_name(r as usize)))
+            .map(|&r| {
+                // 号→名只有一份表（`abi/regnames.rs`）。诊断文本里宁可显示一个看得见
+                // 的坏号：本函数已经在报 E0317，这里再报一次内部错误会把真正的
+                // 诊断顶掉（而旧 `gp_reg_name` 的静默折回会把它报成 `%rax`）。
+                crate::codegen::x86_64::abi::regnames::att_name_of_num(r, 64)
+                    .unwrap_or_else(|| format!("<bad-reg-{r}>"))
+            })
             .collect();
         let (file, line) = self.asm_src_pos();
         self.diagnostics.push(Diagnostic {

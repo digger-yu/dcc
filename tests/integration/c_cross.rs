@@ -2989,3 +2989,100 @@ fn arm32_member_offset_reads_use_exact_fp_immediates() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Phase 6.4（端到端）：`register asm("...")` 与「非栈家」在只支持栈的后端上
+/// **不允许静默**。旧形状是四个后端对 `Location`/`register_name` 的引用数为 0，
+/// 于是声明被整条忽略：变量住在栈槽里，读出来是未初始化的值，退出码 0。
+///
+/// 三条判据都要成立，缺任何一条就是「静默」或「误拒合法程序」：
+///   1) 该 target 不是寄存器名（`rbx` 在 aarch64/riscv64/mips/arm 上）⇒ 硬错误，
+///      与交叉 gcc 同判据（实测 `aarch64-linux-gnu-gcc` 与 `riscv64-linux-gnu-gcc`
+///      对 `asm("rbx")` 都报 `error: invalid register name for ‘p’`）；
+///   2) 是合法名但本后端实现不了（`sp`/`k0`/`a5`）⇒ **警告 + 仍可编**：§11.6.4 自己
+///      定的约束是「不得把原本能编的合法程序变成编不了」，而内核的
+///      `register unsigned long current_stack_pointer asm("sp")` 在 riscv64/arm 的 gcc
+///      上都接受；但诊断必须真的上到 stderr（codegen 阶段以前没有警告通道：
+///      后端的警告只参与「是否致命」的判定就被丢掉），且不写清「现在变量
+///      住在栈槽里」就还是静默；
+///   3) 反向对照：不带任何家请求的普通程序在**全部六个后端**上都必须照旧编过，
+///      且不产生任何家诊断。
+/// x86_64 侧的收紧一并在这里钉：小写名仍可绑（`rbx` 退出 0），大写与 APX 号被拒
+/// （gcc 同样拒，实测 `asm("RBX")`/`asm("r16")` 都是 invalid register name）。
+#[test]
+#[cfg(unix)]
+fn stack_only_targets_never_silently_ignore_register_homes() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let mk = |name: &str, text: &str| {
+        let p = dir.join(format!("dcc-homes-{}-{}.c", name, pid));
+        fs::write(&p, text).expect("write");
+        p
+    };
+    let compile = |triple: &str, src: &std::path::Path| -> (i32, String) {
+        let out = dir.join(format!("dcc-homes-{}-{}.o", triple, pid));
+        let o = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["--target", triple, "-O0", "-c", "-o"])
+            .arg(&out)
+            .arg(src)
+            .output()
+            .expect("run dcc");
+        let _ = fs::remove_file(&out);
+        let mut text = String::from_utf8_lossy(&o.stderr).to_string();
+        text.push_str(&String::from_utf8_lossy(&o.stdout));
+        (o.status.code().unwrap_or(-1), text)
+    };
+
+    let invalid = mk("invalid", "register unsigned long p asm(\"rbx\");\nunsigned long f(void){return p;}\n");
+    let valid = mk("valid", "register unsigned long p asm(\"sp\");\nunsigned long f(void){return p;}\n");
+    let plain = mk("plain", "struct S { int a; char b[4]; };\nint f(struct S s){ return s.a + s.b[1]; }\nint main(void){ struct S s; s.a = 3; s.b[0] = 1; return f(s) - 4; }\n");
+
+    for triple in [
+        "aarch64-linux-gnu",
+        "riscv64-linux-gnu",
+        "mips-linux-gnu",
+        "mips64-linux-gnu",
+        "arm-linux-gnueabi",
+    ] {
+        let (rc, msg) = compile(triple, &invalid);
+        assert_ne!(rc, 0, "{triple}: 非法寄存器名不得静默通过");
+        assert!(msg.contains("E1131"), "{triple}: 应报 E1131，实际: {msg}");
+        assert!(
+            msg.contains("invalid register name"),
+            "{triple}: 非法名的诊断要能认出是名字问题: {msg}"
+        );
+        let (rc2, msg2) = compile(triple, &valid);
+        assert_eq!(
+            rc2, 0,
+            "{triple}: 合法寄存器名不得改成硬错误（内核的 asm(\"sp\") 在 gcc 上能编）: {msg2}"
+        );
+        assert!(
+            msg2.contains("warning[E1131]") && msg2.contains("尚不支持")
+                && msg2.contains("栈槽"),
+            "{triple}: 合法名必须给出可见警告（说清缺什么、现在实际发生什么），实际: {msg2}"
+        );
+        let (rc3, msg3) = compile(triple, &plain);
+        assert_eq!(rc3, 0, "{triple}: 普通程序必须照旧编过，实际: {msg3}");
+        assert!(
+            msg3.is_empty() || !msg3.contains("E113"),
+            "{triple}: 没有家请求的普通程序不得产生任何家诊断: {msg3}"
+        );
+    }
+
+    // x86_64：小写合法名照旧可绑；大写与 APX 号被拒（与 gcc 同判据）
+    let (rc_ok, msg_ok) = compile("x86_64-linux-gnu", &invalid);
+    assert_eq!(rc_ok, 0, "x86_64 上 asm(\"rbx\") 是合法家请求，实际: {msg_ok}");
+    let upper = mk("upper", "register unsigned long p asm(\"RBX\");\nunsigned long f(void){return p;}\n");
+    let apx = mk("apx", "register unsigned long p asm(\"r16\");\nunsigned long f(void){return p;}\n");
+    for (name, src) in [("RBX", &upper), ("r16", &apx)] {
+        let (rc, msg) = compile("x86_64-linux-gnu", src);
+        assert_ne!(rc, 0, "x86_64 上 asm(\"{name}\") 必须被拒（gcc 同样报 invalid register name）: {msg}");
+        assert!(msg.contains("invalid register name"), "{name}: {msg}");
+    }
+    let (rc_plain, msg_plain) = compile("x86_64-linux-gnu", &plain);
+    assert_eq!(rc_plain, 0, "x86_64 普通程序不受影响: {msg_plain}");
+    let _ = fs::remove_file(&invalid);
+    let _ = fs::remove_file(&valid);
+    let _ = fs::remove_file(&plain);
+    let _ = fs::remove_file(&upper);
+    let _ = fs::remove_file(&apx);
+}

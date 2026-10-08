@@ -22,7 +22,7 @@ impl Codegen {
             self.gen_expr(e, dst);
             return;
         }
-        self.gen_expr(e, 0);
+        self.gen_expr(e, Self::EVAL_BASE);
         // __seg_gs/__seg_fs 指针解引用: 发射段前缀 (%gs:/%fs:)。`e` 就是**基址表达式**，
         // 所以走 `seg_prefix_of_base`（先看本层 pointee，再沿链下潜 —— `*pp` /
         // `*(p + 1)` 这些形状外层不一定就是带段指针）。
@@ -225,11 +225,11 @@ impl Codegen {
             let arr_ty = arr.ty();
             let arr_is_arr = matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _));
             if arr_is_arr {
-                if !self.gen_lvalue_addr(arr, 0) {
-                    self.gen_expr(arr, 0);
+                if !self.gen_lvalue_addr(arr, Self::EVAL_BASE) {
+                    self.gen_expr(arr, Self::EVAL_BASE);
                 }
             } else {
-                self.gen_expr(arr, 0);
+                self.gen_expr(arr, Self::EVAL_BASE);
             }
             self.push(0);
             self.gen_expr(idx, 1);
@@ -269,14 +269,12 @@ impl Codegen {
                     if self.vla_offsets.contains_key(&name.name) {
                         self.load_stack(dst, off);
                     } else {
-                        let rex = 0x49u8;
-                        self.emit(&[rex, 0x8D]);
-                        if off.abs() < 128 {
-                            self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
-                        } else {
-                            self.emit(&[0x85 | ((dst & 7) << 3)]);
-                            self.emit(&(off as i32).to_le_bytes());
-                        }
+                        // `lea off(%r13), dst`：目的寄存器在 ModRM.reg ⇒ dst>=8 需要的是
+                        // REX.R。这三行以前手写 `0x49`（W+B，给的是基址 %r13）加
+                        // `0x45|((dst&7)<<3)`，于是 dst>=8 时 reg 字段被截成 dst&7 而不扩：
+                        // `lea -72(%r13), %r8` 实际编成 `%rax`，地址落错了号。
+                        // 单源入口 `emit_lea_r13` 已经在算 REX.R，这里直接用它。
+                        self.emit_lea_r13(dst, off);
                     }
                 }
             } else {
@@ -367,23 +365,13 @@ impl Codegen {
                 if let Some(bw) = f.bit_width {
                     // 位域读取: 加载容器 → 右移 → 掩码
                     let container_size = f.ty.size();
-                    // 加载容器值。这里的 ModRM 是**自反**的（同一个寄存器既在 reg 又在
-                    // r/m），所以 dst>=8 必须**同时**置 REX.R 与 REX.B（0x05）：只置一边
-                    // 会把另一个字段留在低 8 个寄存器上，读回来的就是别人的值。
-                    let rb = if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    let modrm_self = ((dst & 7) << 3) | (dst & 7);
+                    // 加载容器值：自反 ModRM（同一个号既在 reg 又在 r/m）+ rm==4/5
+                    // 的 SIB/ disp8 规则，全部收收在 `emit_load_self_typed` 里（单一真源，
+                    // 理由见那个入口的注释）。
                     self.emit_seg(seg);
-                    match container_size {
-                        1 => self.emit(&[0x48 | rb, 0x0F, 0xB6, modrm_self]),
-                        2 => self.emit(&[0x48 | rb, 0x0F, 0xB7, modrm_self]),
-                        4 => {
-                            if rb != 0 {
-                                self.emit(&[0x40 | rb]);
-                            }
-                            self.emit(&[0x8B, modrm_self]);
-                        },
-                        8 => self.emit(&[0x48 | rb, 0x8B, modrm_self]),
-                        _ => {},
+                    if matches!(container_size, 1 | 2 | 4 | 8) {
+                        // 位域容器一律按无符号取回（符号扩展由下面的位宽自己管）。
+                        self.emit_load_self_typed(container_size, false, dst);
                     }
                     // 右移 bit_offset 位
                     if f.bit_offset > 0 {
@@ -522,26 +510,10 @@ impl Codegen {
                                 | Type::UInt128
                         );
                         self.emit_seg(seg);
-                        match size {
-                            1 => {
-                                let opcode = if is_signed { 0xBEu8 } else { 0xB6u8 };
-                                self.emit(&[0x48, 0x0F, opcode, ((dst & 7) << 3) | (dst & 7)]);
-                            },
-                            2 => {
-                                let opcode = if is_signed { 0xBFu8 } else { 0xB7u8 };
-                                self.emit(&[0x48, 0x0F, opcode, ((dst & 7) << 3) | (dst & 7)]);
-                            },
-                            4 => {
-                                if is_signed {
-                                    // movsxd r64, r/m32 — sign-extend dword to qword
-                                    self.emit(&[0x48, 0x63, ((dst & 7) << 3) | (dst & 7)]);
-                                } else {
-                                    // mov r32, r/m32 — zero-extend (implicit)
-                                    self.emit(&[0x8B, ((dst & 7) << 3) | (dst & 7)]);
-                                }
-                            },
-                            8 => self.emit(&[0x48, 0x8B, ((dst & 7) << 3) | (dst & 7)]),
-                            _ => {},
+                        // 按类型装载（自反 ModRM 的 REX/SIB 规则单源，见
+                        // `emit_load_self_typed`）；非 1/2/4/8 的形状以前也不发任何字节。
+                        if matches!(size, 1 | 2 | 4 | 8) {
+                            self.emit_load_self_typed(size, is_signed, dst);
                         }
                     }
                 }
@@ -567,26 +539,10 @@ impl Codegen {
                             | Type::UInt128
                     );
                     self.emit_seg(seg);
-                    match size {
-                        1 => {
-                            let opcode = if is_signed { 0xBEu8 } else { 0xB6u8 };
-                            self.emit(&[0x48, 0x0F, opcode, ((dst & 7) << 3) | (dst & 7)]);
-                        },
-                        2 => {
-                            let opcode = if is_signed { 0xBFu8 } else { 0xB7u8 };
-                            self.emit(&[0x48, 0x0F, opcode, ((dst & 7) << 3) | (dst & 7)]);
-                        },
-                        4 => {
-                            if is_signed {
-                                // movsxd r64, r/m32 — sign-extend dword to qword
-                                self.emit(&[0x48, 0x63, ((dst & 7) << 3) | (dst & 7)]);
-                            } else {
-                                // mov r32, r/m32 — zero-extend (implicit)
-                                self.emit(&[0x8B, ((dst & 7) << 3) | (dst & 7)]);
-                            }
-                        },
-                        8 => self.emit(&[0x48, 0x8B, ((dst & 7) << 3) | (dst & 7)]),
-                        _ => {},
+                    // 同上：字段信息查不到时的那份同形代码，也收敛到同一个入口
+                    // （以前两处各抄一遍字节，就是「同一个事实有两份副本」的现场）。
+                    if matches!(size, 1 | 2 | 4 | 8) {
+                        self.emit_load_self_typed(size, is_signed, dst);
                     }
                 }
             }

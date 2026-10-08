@@ -243,6 +243,76 @@ pub fn versions_of_base(func: &Function, base: &str) -> Vec<String> {
     out
 }
 
+/// 某个基名的活区间是否**跨过一次 call**（Phase 5.1 前置三的收益面度量）。
+///
+/// 只用于度量与用例，不进任何分配决策：它回答的是「如果允许把 caller-saved 号发当家，
+/// 需要保存通道的占多少、不需要的占多少」。口径与 `compute` 一致：同一个
+/// `ordered_block_names` 顺序、同一套 `collect_uses_kind`，因此不会出现「度量用的活性
+/// 与发号用的活性不是一套」这种第二真源。
+///
+/// 保守方向是**多报跨 call**（区间 [首次定义, 最后使用] 内出现任何一个 call 就算跨），
+/// 因为少报的后果是给真的跨 call 的值发一个会被毁掉的号。
+pub fn spans_call(func: &Function, base: &str) -> bool {
+    let versions = versions_of_base(func, base);
+    if versions.is_empty() {
+        return false;
+    }
+    let order = ordered_block_names(func);
+    let mut seq: usize = 0usize;
+    let mut first_def: Option<usize> = None;
+    let mut last_use: Option<usize> = None;
+    // call 点先收集、**末尾再判区间**：在扫到 call 那一刻，“最后使用”往往还没出现
+    // （`int a = sink(v); return v + a;` 里 v 在 call 之后才被读），当场判会漏报。
+    // 本用例集里 `spans_call_is_true_for_a_range_that_straddles_a_call` 钉的就是这个形状。
+    let mut call_points: Vec<usize> = Vec::new();
+    for bname in &order {
+        let Some(bb) = func.blocks.get(bname) else {
+            continue;
+        };
+        // phi：incoming 是读、dest 是写，都算在本点
+        for phi in &bb.phis {
+            seq += 1;
+            let reads = phi.incoming.iter().any(|(v, _)| v.base == base);
+            let writes = phi.dest.base == base;
+            if writes {
+                first_def.get_or_insert(seq);
+            }
+            if reads {
+                last_use = Some(seq);
+            }
+        }
+        for inst in &bb.insts {
+            seq += 1;
+            let is_call = matches!(inst.kind, crate::ssa::InstKind::Call { .. } | crate::ssa::InstKind::Invoke { .. });
+            let reads = collect_uses_kind(&inst.kind).iter().any(|v| versions.contains(v));
+            let writes = inst.dest.as_ref().map(|d| d.base == base).unwrap_or(false);
+            if writes {
+                first_def.get_or_insert(seq);
+            }
+            if reads {
+                last_use = Some(seq);
+            }
+            if is_call {
+                call_points.push(seq);
+            }
+        }
+        let tp_uses_base = match &bb.term {
+            Terminator::Ret { val: Some(o) } | Terminator::Branch { cond: o, .. } | Terminator::SwitchTable { idx: o, .. } => operand_vars(o).iter().any(|v| versions.contains(v)),
+            _ => false,
+        };
+        seq += 1;
+        if tp_uses_base {
+            last_use = Some(seq);
+        }
+    }
+    match (first_def, last_use) {
+        (Some(a), Some(b)) => call_points.iter().any(|c| *c >= a && *c <= b),
+        // 只有定义没有使用（或反之）的基名：保守报 true，因为下一轮可能就在区间内
+        // 毁掉它；少报的代价是给了一个会被毁的号。
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,19 +480,59 @@ mod tests {
         );
     }
 
-    /// 干涉关系必须**对称**：单向记账会让 `interferes(b,a)` 漏判，
-    /// 而漏判的后果就是两个同时活着的值共用一个号。
+    /// 干涉关系必须**对称**：单向记账会让 `interferes(b,a)` 漏判，而漏判的后果就是两个
+    /// 同时活着的值共用一个号。逐边反向检查，缺一条就把边名报出来。
     #[test]
     fn interference_is_symmetric() {
-        let func = ssa_of("long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i;return acc;}", "s");
+        let func = ssa_of("long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i*2;return acc;}", "s");
         let iv = compute(&func);
+        let mut broken = Vec::new();
         for (name, set) in &iv.conflicts {
             for other in set {
-                assert!(
-                    iv.conflicts_of(other).contains(name),
-                    "干涉不对称：{name} → {other} 缺反向边"
-                );
+                if !iv.conflicts_of(other).contains(name) {
+                    broken.push(format!("{name} -> {other}"));
+                }
             }
         }
+        assert!(broken.is_empty(), "干涉不对称的边: {broken:?}");
+    }
+
+    /// `spans_call` 的「跨」必须是真跨：变量定义在 call 前、最后使用在 call 后。
+    /// 这个度量直接决定前置三的收益面，算错就会把设计带倒。
+    ///
+    /// 注意形状：`v` 的定义**故意不取常量** —— `int v = 42` 会被 GVN 折掉，SSA 里根本
+    /// 没有 `v` 的版本（下一跳用例把这个行为钉住：无版本 ⇒ 报 false，因为没有任何地方
+    /// 会把值放在一个会被毁的号里）。
+    #[test]
+    fn spans_call_is_true_for_a_range_that_straddles_a_call() {
+        let func = ssa_of(
+            "int sink(int); int q(int n){int v = n + 1; int a = sink(v); return v + a;}",
+            "q",
+        );
+        assert!(
+            !versions_of_base(&func, "v").is_empty(),
+            "夹具本身得先成立：v 在 SSA 里真有版本，否则下面的断言是在测「不存在」"
+        );
+        assert!(
+            spans_call(&func, "v"),
+            "v 定义在 call 前、又在 call 后被读 ⇒ 活区间必跨过那个 call"
+        );
+        // 常量被折叠：没有版本 ⇒ 不报跨（也不崩）。
+        let folded = ssa_of("int sink(int); int q(void){int v = 42; return sink(v);}", "q");
+        assert!(!spans_call(&folded, "v"), "无版本时应报 false");
+    }
+
+    /// 不跨 call 的两个形状都必须报 false：「先算完再用」与「根本不参与 call」。
+    #[test]
+    fn spans_call_is_false_when_the_range_ends_before_the_call() {
+        let f1 = ssa_of("int sink(int); int q(void){int v = 42; int a = v + 1; return sink(a);}", "q");
+        assert!(
+            !spans_call(&f1, "v"),
+            "v 的最后使用在 call 之前 ⇒ 不需要保存通道"
+        );
+        let f2 = ssa_of("int q(void){int v = 42; return v + 1;}", "q");
+        assert!(!spans_call(&f2, "v"), "函数里一个 call 都没有");
+        // 反向对照：基名不存在时必须报 false而不是崩，也不能报成 true
+        assert!(!spans_call(&f2, "不存在"), "不存在的基名不得被判为跨 call");
     }
 }

@@ -16,7 +16,7 @@ impl Codegen {
     // 使用 rax:rdx = 右操作数, rcx:r8 = 左操作数, 结果 → rax:rdx
     pub fn gen_int128_binop(&mut self, op: BinOp, l: &Expr, r: &Expr, dst: u8) {
         // 1. 求值左操作数 → rax, push 两次 (低/高)
-        self.gen_expr_decay(l, 0);
+        self.gen_expr_decay(l, Self::EVAL_BASE);
         self.push(0); // push low
         if !matches!(l.ty(), Type::Int128 | Type::UInt128) {
             if matches!(
@@ -35,7 +35,7 @@ impl Codegen {
         }
         self.push(2); // push high
                       // 2. 求值右操作数 → rax:rdx
-        self.gen_expr_decay(r, 0);
+        self.gen_expr_decay(r, Self::EVAL_BASE);
         if !matches!(r.ty(), Type::Int128 | Type::UInt128) {
             if matches!(
                 r.ty(),
@@ -409,7 +409,7 @@ impl Codegen {
             self.gen_vector_load_into_slot(l, l_slot);
             self.vector_temp_base(l_slot, vec_size)
         } else {
-            self.gen_expr(l, 0);
+            self.gen_expr(l, Self::EVAL_BASE);
             let t_off = self.vector_temp_base(l_slot, 16);
             self.emit_store(0, t_off, 8); // [r13+t_off] = rax (low)
                                           // 标量可能只有 rax (如 int 常量), 需确保 rdx=0
@@ -422,7 +422,7 @@ impl Codegen {
             self.gen_vector_load_into_slot(r, r_slot);
             self.vector_temp_base(r_slot, vec_size)
         } else {
-            self.gen_expr(r, 0);
+            self.gen_expr(r, Self::EVAL_BASE);
             let t_off = self.vector_temp_base(r_slot, 16);
             self.emit_store(0, t_off, 8);
             self.emit(&[0x48, 0x31, 0xD2]); // xor rdx, rdx

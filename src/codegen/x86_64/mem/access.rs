@@ -1240,6 +1240,12 @@ impl Codegen {
     /// 个名字永远得到同一个偏移），所以这一步对产物没有任何改变；把偏移在发射前全部
     /// 定完是 Phase 2.2 登记的「会长的那一段」（晚分配搬进解算阶段）的事。
     pub(crate) fn home_for(&mut self, name: &str) -> crate::location::Location {
+        // 程序点级覆盖优先（前置二）：在一个 call 序列的存/取窗口里，某个寄存器家的值
+        // 暂时只在内存里。读入口只有这一个，所以地址类消费点与存取两侧看到的是同一个
+        // 答案；把这条判定再抄到各消费点就是第六个现场推算位置的人。
+        if let Some(&loc) = self.home_overrides.get(name) {
+            return loc;
+        }
         if let Some((loc, _)) = self.homes.get(name) {
             return *loc;
         }

@@ -136,16 +136,16 @@ impl Codegen {
                 if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
                     match &**arr {
                         Expr::Ident { .. } | Expr::Index { .. } => {
-                            if !self.gen_lvalue_addr(arr, 0) {
-                                self.gen_expr(arr, 0);
+                            if !self.gen_lvalue_addr(arr, Self::EVAL_BASE) {
+                                self.gen_expr(arr, Self::EVAL_BASE);
                             }
                         },
                         _ => {
-                            self.gen_expr(arr, 0);
+                            self.gen_expr(arr, Self::EVAL_BASE);
                         },
                     }
                 } else {
-                    self.gen_expr(arr, 0);
+                    self.gen_expr(arr, Self::EVAL_BASE);
                 }
                 self.push(0); // 保存基址 (gen_expr(idx) 可能破坏 rax)
                 self.gen_expr(idx, 1); // rcx = index
@@ -252,14 +252,9 @@ impl Codegen {
                         self.emit_global_addr(dst, &name.name);
                     } else {
                         let off = self.stack_home_off(&name.name);
-                        let rex = 0x49u8;
-                        self.emit(&[rex, 0x8D]);
-                        if off.abs() < 128 {
-                            self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
-                        } else {
-                            self.emit(&[0x85 | ((dst & 7) << 3)]);
-                            self.emit(&(off as i32).to_le_bytes());
-                        }
+                        // 同一件事的另一份手抄本：dst>=8 时缺 REX.R ⇒ lea 的目的被
+                        // 编成低 8 号。改走单源入口 `emit_lea_r13`（它已经在算 REX.R）。
+                        self.emit_lea_r13(dst, off);
                     }
                 } else {
                     // 通用路径: 基址来自任意 lvalue (如 &s.a.b, &s.i[k].f)
@@ -330,11 +325,11 @@ impl Codegen {
                     // 通用路径: 基址来自任意 lvalue/指针表达式 (如 &s.i[k])
                     let arr_ty = arr.ty();
                     if matches!(arr_ty, Type::Array(_, _) | Type::Vector(_, _)) {
-                        if !self.gen_lvalue_addr(arr, 0) {
-                            self.gen_expr(arr, 0);
+                        if !self.gen_lvalue_addr(arr, Self::EVAL_BASE) {
+                            self.gen_expr(arr, Self::EVAL_BASE);
                         }
                     } else {
-                        self.gen_expr(arr, 0);
+                        self.gen_expr(arr, Self::EVAL_BASE);
                     }
                 }
                 self.push(0);

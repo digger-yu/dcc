@@ -10,7 +10,83 @@ impl Codegen {
     /// Lower one SysV AMD64 call.  Outgoing stack arguments occupy the lowest
     /// addresses, temporary register staging follows them, and the complete
     /// area is rounded to 16 bytes so `%rsp` is aligned immediately before call.
+    ///
+    /// **前置三（caller-saved 保存通道）就包在本函数外面**：住在延伸池号里的自动绑定家
+    /// 在参数装载开始前就会被毁（装载本身就写 `rdi/rsi/rcx/r8/r9`，更不必说被调方），
+    /// 所以这里先把每个这类家存到它的帧内保存槽、并把它的**程序点级家**切到那个槽（见
+    /// `Codegen::home_overrides`），调用序列结束后再把值搬回号里。窗口必须盖住「参数求值 +
+    /// 装载 + call + 栈参回收」全部，而不只是 `call` 那一条指令 —— 因为毁掉它们的就包括
+    /// 装载自己。
     pub fn emit_sysv_call(
+        &mut self,
+        direct: Option<&str>,
+        callee: Option<&Expr>,
+        args: &[Expr],
+        sret_off: Option<i64>,
+    ) {
+        if self.ext_home_saves.is_empty() {
+            self.emit_sysv_call_inner(direct, callee, args, sret_off);
+            return;
+        }
+        let n = self.persist_ext_homes();
+        self.emit_sysv_call_inner(direct, callee, args, sret_off);
+        self.restore_ext_homes(n);
+    }
+
+    /// 把所有延伸池家存进各自的槽并开启覆盖；返回**本次新开启**的个数（嵌套 call 只该
+    /// 回滚自己那一层，不然内层会把外层正在用的覆盖一并抽掉）。
+    fn persist_ext_homes(&mut self) -> usize {
+        let mut opened = 0usize;
+        for i in 0..self.ext_home_saves.len() {
+            // 先把需要的值拿够再调 `&mut self` 的方法：存/取本身就是方法调用，与覆盖表
+            // 的写入同属一个 self。
+            let (reg, off) = (
+                self.ext_home_saves[i].reg,
+                self.ext_home_saves[i].slot_off,
+            );
+            let name = self.ext_home_saves[i].name.clone();
+            if self.home_overrides.contains_key(&name) {
+                continue; // 已被外层 call 序列存下，值在槽里、不需要再存
+            }
+            self.store_stack(reg, off);
+            self.home_overrides
+                .insert(name, crate::location::Location::Stack(off));
+            opened += 1;
+        }
+        opened
+    }
+
+    /// 取回本层开启的那些家。倒序回滚，与开启顺序对偶。
+    fn restore_ext_homes(&mut self, opened: usize) {
+        if opened == 0 {
+            return;
+        }
+        let mut done = 0usize;
+        for i in (0..self.ext_home_saves.len()).rev() {
+            if done == opened {
+                break;
+            }
+            let (reg, off) = (
+                self.ext_home_saves[i].reg,
+                self.ext_home_saves[i].slot_off,
+            );
+            let name = self.ext_home_saves[i].name.clone();
+            // 只认「现在覆盖着的」那些：本层没开启的条目不在覆盖表里（或属于外层）。
+            let mine = self
+                .home_overrides
+                .get(&name)
+                .is_some_and(|l| matches!(l, crate::location::Location::Stack(o) if *o == off));
+            if !mine {
+                continue;
+            }
+            self.load_stack(reg, off);
+            self.home_overrides.remove(&name);
+            done += 1;
+        }
+        debug_assert_eq!(done, opened, "回滚数量与开启数量不等：覆盖表泄漏了");
+    }
+
+    fn emit_sysv_call_inner(
         &mut self,
         direct: Option<&str>,
         callee: Option<&Expr>,
@@ -227,7 +303,7 @@ impl Codegen {
         // Callee scratch starts after all parameters.
         let callee_scratch = if direct.is_none() {
             let scratch_start = (stage_base + ((register_pieces + hidden_slots) * 8 + 7)) & !7;
-            self.gen_expr(callee.expect("indirect call expression"), 0);
+            self.gen_expr(callee.expect("indirect call expression"), Self::EVAL_BASE);
             self.store_rsp_qword(0, scratch_start);
             Some(scratch_start)
         } else {
@@ -277,7 +353,7 @@ impl Codegen {
             if matches!(effective_ty, Type::Vector(_, _)) {
                 // vector 实参: 按 GP 8 字节块传递 (dcc 内部标量化约定)
                 // 1. 取 vector 数据地址到 rax
-                if !self.gen_lvalue_addr(arg, 0) {
+                if !self.gen_lvalue_addr(arg, Self::EVAL_BASE) {
                     // rvalue: 先物化到向量临时槽 0 再取地址
                     // 注意: 必须用 gen_vector_load_into_slot (而非 gen_expr),
                     // 后者对 CompoundLit/Cast 等 Vector rvalue 只会留下一个
@@ -426,7 +502,7 @@ impl Codegen {
                             }
                         } else {
                             // 复杂表达式: 先物化到 result_off, 再逐分量加载
-                            self.gen_expr(arg, 0);
+                            self.gen_expr(arg, Self::EVAL_BASE);
                             let result_off = self.complex_result_off();
                             self.emit_xmm0_r13_disp(
                                 &[pfx, 0x41, 0x0F, 0x10],
@@ -505,7 +581,7 @@ impl Codegen {
                     // 语句表达式的目标地址), 必须按 8 字节块从 `[addr + chunk*8]`
                     // 装载。直接把 rax 当数据存槽, 被调方读到的就是指针字节
                     // (`f(g()).x` / `f(va_arg(...))` 即此)。
-                    self.gen_expr(arg, 0); // rax = address
+                    self.gen_expr(arg, Self::EVAL_BASE); // rax = address
                     self.mov(1, 0); // rcx = address (safe: no calls
                                     // between chunk loads)
                     self.stage_agg_chunks_from_mem(arg_locs, &mut staged, &mut stage);
@@ -523,7 +599,7 @@ impl Codegen {
                     // Other rvalue aggregate (e.g. function returning
                     // struct in rax:rdx): gen_expr leaves value in
                     // rax (and rdx for >8 bytes).
-                    self.gen_expr(arg, 0);
+                    self.gen_expr(arg, Self::EVAL_BASE);
                     // __int128 参数: 若 RHS 非 __int128, rdx 未设置, 需扩展
                     if matches!(effective_ty, Type::Int128 | Type::UInt128)
                         && !matches!(arg.ty(), Type::Int128 | Type::UInt128)
@@ -580,7 +656,7 @@ impl Codegen {
                 // `cvtsi2sd/cvtss2sd → movsd 到槽高半 → fld qword → fstp tbyte`
                 // 中转是“ld 内部为 f64”时代的产物，80-bit 值走 st(0) 后已删除
                 // —— 那条链会把实参先舍成 f64 再拓宽，正是本次要消除的序位错根因。
-                self.gen_expr(arg, 0);
+                self.gen_expr(arg, Self::EVAL_BASE);
                 self.emit_operand_to_st0(&arg.ty(), 0);
                 if let Some(ArgLoc::Stack(off)) = arg_locs.first() {
                     // fstp tbyte [rsp+off]：写 off..off+10，槽内其余字节是 SysV
@@ -593,7 +669,7 @@ impl Codegen {
                 }
                 continue;
             } else if matches!(effective_ty, Type::Float | Type::Double) {
-                self.gen_expr(arg, 0);
+                self.gen_expr(arg, Self::EVAL_BASE);
                 // 隐式整数→浮点转换: 实参是整数但形参是浮点类型
                 let arg_ty = arg.ty();
                 if Self::is_integer_type(&arg_ty) {
@@ -637,7 +713,7 @@ impl Codegen {
                 }
             } else if matches!(effective_ty, Type::Int128 | Type::UInt128) {
                 // SysV：16 字节整数占两个 GP 槽（低 rax / 高 rdx）
-                self.gen_expr(arg, 0);
+                self.gen_expr(arg, Self::EVAL_BASE);
                 if !matches!(arg.ty(), Type::Int128 | Type::UInt128) {
                     if matches!(effective_ty, Type::UInt128)
                         || matches!(
@@ -667,7 +743,7 @@ impl Codegen {
                     }
                 }
             } else {
-                self.gen_expr_decay(arg, 0);
+                self.gen_expr_decay(arg, Self::EVAL_BASE);
                 // 隐式浮点→整数转换: 实参是浮点表达式但形参是整数类型
                 // (bar(d + 4.0): 求值结果在 xmm0, 分类按形参 Integer 走
                 //  GP — 须 cvttsd2si 转回 GP, 否则传入 rax 中的陈旧残留
@@ -816,5 +892,72 @@ impl Codegen {
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codegen::x86_64::codegen::ExtHomeSave;
+    use crate::cli::{Abi, Arch, TargetTriple};
+    use crate::location::{Location, RegBank as RB, RegId};
+
+    fn cg() -> Codegen {
+        Codegen::new(crate::target::Target::resolve(&TargetTriple {
+            arch: Arch::X86_64,
+            vendor: "unknown".into(),
+            os: crate::cli::Os::Linux,
+            abi: Abi::Gnu,
+        }))
+    }
+
+    /// 延伸池条目：`v` 的家是 %rcx（1），保存槽在 -200(%r13)。
+    fn entry() -> ExtHomeSave {
+        ExtHomeSave { name: "v".into(), reg: 1, slot_off: -200, size: 8 }
+    }
+
+    /// 通道本身的机械性质：存 → 覆盖 → 取回 → 撤销，且嵌套只回滚自己那一层。
+    /// 这条用例不依赖分配器是否开池（开池被 §11.39 的暂存约定卡住），它测的是通道这件
+    /// 工具做对了没有 —— 否则「机制正确但没接线」与「机制就是错的」分不清。
+    #[test]
+    fn persist_and_restore_round_trip_the_home_and_the_override() {
+        let mut c = cg();
+        c.homes.insert("v".to_string(), (Location::Reg(RegId { bank: RB::Gp, n: 1 }), crate::ast::Type::Int));
+        c.ext_home_saves.push(entry());
+        // 未覆盖时读到的就是声明级的家（寄存器）。
+        assert_eq!(c.home_for("v"), Location::Reg(RegId { bank: RB::Gp, n: 1 }));
+
+        let before = c.code.len();
+        assert_eq!(c.persist_ext_homes(), 1, "第一次应当开启一层");
+        assert!(c.code.len() > before, "存的动作必须真的发出指令");
+        assert_eq!(c.home_for("v"), Location::Stack(-200), "窗口内读到的是槽，不是被毁的号");
+
+        // 再开一层（嵌套 call）不应重复存，也不应重复计数。
+        let at = c.code.len();
+        assert_eq!(c.persist_ext_homes(), 0, "外层已存下时不得再存一遍");
+        assert_eq!(c.code.len(), at, "重复 persist 不该发指令");
+
+        c.restore_ext_homes(1);
+        assert_eq!(c.home_for("v"), Location::Reg(RegId { bank: RB::Gp, n: 1 }), "取回后覆盖必须撤销");
+        assert!(c.code.len() > at, "取回的动作必须真的发出指令");
+
+        // opened=0 时一条指令都不该发（否则空函数会被平白加宽）。
+        let n = c.code.len();
+        c.restore_ext_homes(0);
+        assert_eq!(c.code.len(), n);
+    }
+
+    /// 没有延伸池家时（今天的全部产物路径），包装层必须**一字不改**地走原路。
+    /// 这条是本轮不回归的根据：开/关两条路径产生的字节完全相同。
+    #[test]
+    fn the_wrapper_is_inert_without_ext_homes() {
+        let mut a = cg();
+        let mut b = cg();
+        b.ext_home_saves.push(entry());
+        assert!(a.ext_home_saves.is_empty());
+        assert_eq!(a.persist_ext_homes(), 0);
+        assert!(a.home_overrides.is_empty());
+        // b 有条目才会动，a 有条目才会动 —— 判据是「条目表空 ⇒ 不发任何存/取」。
+        assert_eq!(a.code, b.code, "未开启通道时两侧都不该发任何东西");
     }
 }

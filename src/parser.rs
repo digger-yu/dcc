@@ -4347,12 +4347,7 @@ impl<'a> Parser<'a> {
                     // collect_upvars 看不到, 但序言求值 (++N 副作用) 需要
                     // 静态链访问 N (pr22061-3/4)
                     for p in &params {
-                        Self::collect_upvars_param_type(
-                            &p.ty,
-                            &child_flat,
-                            &parent_flat,
-                            &mut captured,
-                        );
+                        Self::collect_upvars_param(p, &child_flat, &parent_flat, &mut captured);
                     }
                     captured
                 };
@@ -5253,6 +5248,9 @@ impl<'a> Parser<'a> {
         if self.cur.kind == TokKind::LParen {
             self.advance();
             let inner_params = self.parse_params()?;
+            // `f` 自己的形参是否是变参：必须在解析**第二个**参数表之前抓住，
+            // 否则 `self.last_variadic` 此时已经是被指向函数（params2）的结论。
+            let inner_variadic = self.last_variadic;
             if !self.expect(TokKind::RParen, "')'") {
                 return None;
             }
@@ -5267,21 +5265,36 @@ impl<'a> Parser<'a> {
                 if !self.expect(TokKind::RParen, "')'") {
                     return None;
                 }
-                let inner_func = Type::Func(
+                // `int *(*f(params1)(params2)` 这个形状里：
+                //   params1 是 **f 自己的形参**；
+                //   params2 属于**被指向的那个函数**，它是返回类型的一部分。
+                // 旧代码把两个列表用反了（拿 params2 当 f 的形参、把 params1 塑进
+                // 被指向函数），于是 `f` 看起来不收参数：调用点传的参数没人接，
+                // 体里读 `init` 只能靠发射期懒注册拿到一个 Int 猜的栈槽。
+                // 实测（与 gcc 对拍）：`int *(*f(int init))(void) { val = init; … }`
+                // gcc rc=0、dcc rc=1（修前旧二进制也是 rc=1）。
+                let pointed_func = Type::Func(
                     Box::new(ty.clone().into()),
-                    inner_params.iter().map(|p| p.ty.clone().into()).collect(),
-                );
-                let ptr_ty = Type::Ptr(Box::new(inner_func.into()));
-                let outer_func = Type::Func(
-                    Box::new(ptr_ty.into()),
                     outer_params.iter().map(|p| p.ty.clone().into()).collect(),
                 );
+                let ret_ty = Type::Ptr(Box::new(pointed_func.into()));
+                // `f` 自己的类型也要登进 globals：只有一层参数表那条分支会做这件事
+                // （见下面 `(*name(params))` 那一支），两支不对称的话，函数名被当值用
+                // 时（`(void)make_fnptr;`）解析器认不出它是个函数，只能退到
+                // `var_offset` 的兜底路径——给一个函数分配**对象**栈槽。
+                let self_func_ty = Type::Func(
+                    Box::new(ret_ty.clone().into()),
+                    inner_params.iter().map(|p| p.ty.clone().into()).collect(),
+                );
+                if !self.in_function {
+                    self.globals.insert(name.name.clone(), self_func_ty);
+                }
                 attrs.merge(self.parse_attributes());
                 self.skip_asm_label();
                 self.locals.load_globals(&self.globals);
                 self.in_function = true;
                 let saved_func = self.current_function.replace(name.name.clone());
-                for p in &outer_params {
+                for p in &inner_params {
                     if let Some(nm) = &p.name {
                         self.locals.insert(nm.name.clone(), p.ty.clone());
                     }
@@ -5325,9 +5338,9 @@ impl<'a> Parser<'a> {
                 );
 
                 return Some(vec![Decl::Func(FuncDecl {
-                    ret_ty: outer_func,
+                    ret_ty,
                     name,
-                    params: outer_params,
+                    params: inner_params,
                     body,
                     span: sp,
                     is_extern: storage.is_extern,
@@ -5342,7 +5355,7 @@ impl<'a> Parser<'a> {
                     is_noinline: attrs.is_noinline,
                     is_always_inline: attrs.is_always_inline,
                     is_inline: attrs.is_inline,
-                    is_variadic: self.last_variadic,
+                    is_variadic: inner_variadic,
                     is_constructor: attrs.is_constructor,
                     is_destructor: attrs.is_destructor,
                     alias_name: attrs.alias_name.clone().or(attrs.copy_fn.clone()),
@@ -12108,28 +12121,81 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// 扫描形参类型中 VLA 维度表达式捕获的外层变量。
-    /// `void foo(int a[2][++N])` 退化后 p.ty = Ptr(Array(Int, Var(PreInc N))),
-    /// 维度表达式在类型里而不在函数体里, collect_upvars 看不到;
-    /// 但序言求值 (++N 副作用) 需要静态链访问 N (pr22061-3/4)。
-    fn collect_upvars_param_type(
+    /// 扫描类型里携带的表达式（目前唯一形态是 VLA 维度 `ArraySize::Var`）。
+    ///
+    /// 为什么这是独立的通路而不是「函数体遍历」的一个分支：类型树与表达式树是
+    /// 两棵结构，`int a[n]` 的 `n` 挂在 `v.ty` 上，只走 `v.init` 与语句永远看不到它
+    /// （§11.13 的 N5：看不到 ⇒ 不进 upvars ⇒ 没有静态链槽 ⇒ 序言按 0 分配 VLA 帧）。
+    fn collect_upvars_type(
         ty: &Type,
         local_vars: &HashMap<String, Type>,
         parent_locals: &HashMap<String, Type>,
         out: &mut Vec<(String, i64)>,
     ) {
         match ty {
-            Type::Ptr(q) => {
-                Self::collect_upvars_param_type(&q.base, local_vars, parent_locals, out);
+            Type::Ptr(q)
+            | Type::Complex(q)
+            | Type::Imaginary(q)
+            | Type::Vector(q, _)
+            | Type::Atomic(q) => {
+                Self::collect_upvars_type(&q.base, local_vars, parent_locals, out);
             },
             Type::Array(elem, ArraySize::Var(se)) => {
                 Self::collect_upvars_expr(se, local_vars, parent_locals, out);
-                Self::collect_upvars_param_type(&elem.base, local_vars, parent_locals, out);
+                Self::collect_upvars_type(&elem.base, local_vars, parent_locals, out);
             },
             Type::Array(elem, _) => {
-                Self::collect_upvars_param_type(&elem.base, local_vars, parent_locals, out);
+                Self::collect_upvars_type(&elem.base, local_vars, parent_locals, out);
             },
-            _ => {},
+            Type::Func(ret, params) => {
+                Self::collect_upvars_type(&ret.base, local_vars, parent_locals, out);
+                for p in params {
+                    Self::collect_upvars_type(&p.base, local_vars, parent_locals, out);
+                }
+            },
+            // 其余类型不携带运行时表达式（结构体字段是全局作用域的，不能吃静态链）
+            Type::Void
+            | Type::Bool
+            | Type::Char
+            | Type::SChar
+            | Type::UChar
+            | Type::Char8
+            | Type::Char16
+            | Type::Char32
+            | Type::Short
+            | Type::UShort
+            | Type::Int
+            | Type::UInt
+            | Type::Long
+            | Type::ULong
+            | Type::LongLong
+            | Type::ULongLong
+            | Type::Int128
+            | Type::UInt128
+            | Type::Float
+            | Type::Double
+            | Type::LongDouble
+            | Type::Fract
+            | Type::Accum
+            | Type::Struct(_, _, _, _)
+            | Type::Union(_, _, _, _)
+            | Type::Enum(_, _, _)
+            | Type::Named(_) => {},
+        }
+    }
+
+    /// 收集一个形参声明携带的外层变量：类型里的 VLA 维度（内层，保留在
+    /// `Ptr(Array(..))` 里）与 `vla_dim`（数组参数退化时被丢弃的最外层维度，
+    /// 但仍在调用入口求值 —— 副作用与静态链读都需要它）。
+    fn collect_upvars_param(
+        p: &Param,
+        local_vars: &HashMap<String, Type>,
+        parent_locals: &HashMap<String, Type>,
+        out: &mut Vec<(String, i64)>,
+    ) {
+        Self::collect_upvars_type(&p.ty, local_vars, parent_locals, out);
+        if let Some(d) = &p.vla_dim {
+            Self::collect_upvars_expr(d, local_vars, parent_locals, out);
         }
     }
 
@@ -12148,6 +12214,9 @@ impl<'a> Parser<'a> {
                     if let Some(init) = &v.init {
                         Self::collect_upvars_expr(init, local_vars, parent_locals, out);
                     }
+                    // 声明类型里的 VLA 维度（`long a[n];`）也是一次引用：它不在
+                    // init 也不在任何语句里（N5）
+                    Self::collect_upvars_type(&v.ty, local_vars, parent_locals, out);
                     // 新声明的局部变量加入 local_vars (不修改原始 map, 只在递归时传递)
                 },
                 BlockItem::Decl(Decl::Func(f)) => {
@@ -12155,8 +12224,27 @@ impl<'a> Parser<'a> {
                     if let Some(body) = &f.body {
                         Self::collect_upvars(&body.items, local_vars, parent_locals, out);
                     }
+                    // 嵌套函数的形参类型同样可以带 VLA 维度（兄弟函数的参数引用
+                    // 的是外层函数的局部，与顶层那份 params 循环同一条通路）
+                    for p in &f.params {
+                        Self::collect_upvars_param(p, local_vars, parent_locals, out);
+                    }
                 },
-                _ => {},
+                // 块级 typedef 可以是 VLA typedef（`typedef int arr[n];`），类型树里
+                // 同样携带一次外层引用；块级 asm 的操作数也是普通表达式。
+                BlockItem::Decl(Decl::Typedef { ty, .. }) => {
+                    Self::collect_upvars_type(ty, local_vars, parent_locals, out);
+                },
+                BlockItem::Decl(Decl::GlobalAsm {
+                    outputs, inputs, ..
+                }) => {
+                    for e in outputs.iter().chain(inputs.iter()) {
+                        Self::collect_upvars_expr(e, local_vars, parent_locals, out);
+                    }
+                },
+                // 结构/联合/枚举定义不携带运行时表达式（块级字段类型不能是 VLA，
+                // 枚举值是整型常量）
+                BlockItem::Decl(Decl::StructDef(_) | Decl::UnionDef(_) | Decl::EnumDef(_)) => {},
             }
         }
     }
@@ -12225,7 +12313,23 @@ impl<'a> Parser<'a> {
                     Self::collect_upvars_expr(i, local_vars, parent_locals, out);
                 }
             },
-            _ => {},
+            // C++ 零成本 EH：受保护调用本身是一整条语句（里面就是那次可能招
+            // 异常的实际 call），落地垫的两个接收者也是表达式——两者今天都不进
+            // 这条遍历（N5），而嵌套函数体里完全可以有它们。
+            Stmt::Invoke { call, .. } => {
+                Self::collect_upvars_stmt(call, local_vars, parent_locals, out);
+            },
+            Stmt::EhLandingPad {
+                object, selector, ..
+            } => {
+                Self::collect_upvars_expr(object, local_vars, parent_locals, out);
+                Self::collect_upvars_expr(selector, local_vars, parent_locals, out);
+            },
+            // 剩下的语句不携带表达式
+            Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::Goto { .. }
+            | Stmt::Fallthrough { .. } => {},
         }
     }
     fn collect_upvars_expr(
@@ -12234,6 +12338,10 @@ impl<'a> Parser<'a> {
         parent_locals: &HashMap<String, Type>,
         out: &mut Vec<(String, i64)>,
     ) {
+        // 类型侧统一走一遍：结果类型自己就能携带 VLA 维度（`int (*p)[n]` 的下标
+        // 结果、VLA 类型的转换与复合字面量），逐变体重复一遍必漏。
+        let e_ty = e.ty();
+        Self::collect_upvars_type(&e_ty, local_vars, parent_locals, out);
         match e {
             Expr::Ident { name, .. } => {
                 let n = &name.name;
@@ -12275,6 +12383,7 @@ impl<'a> Parser<'a> {
                 Self::collect_upvars_expr(then_, local_vars, parent_locals, out);
                 Self::collect_upvars_expr(else_, local_vars, parent_locals, out);
             },
+            // 这三条都只携带子表达式；结果类型由函数开头的一次统一走位处理。
             Expr::Cast { e, .. } | Expr::AddrOf { e, .. } | Expr::Deref { e, .. } => {
                 Self::collect_upvars_expr(e, local_vars, parent_locals, out);
             },
@@ -12307,7 +12416,13 @@ impl<'a> Parser<'a> {
                         InitItem::Expr(e) => {
                             Self::collect_upvars_expr(e, local_vars, parent_locals, out);
                         },
-                        InitItem::Designated { value, .. } => {
+                        InitItem::Designated { designator, value } => {
+                            Self::collect_upvars_designator(
+                                designator,
+                                local_vars,
+                                parent_locals,
+                                out,
+                            );
                             Self::collect_upvars_expr(value, local_vars, parent_locals, out);
                         },
                     }
@@ -12319,7 +12434,54 @@ impl<'a> Parser<'a> {
             | Expr::PreDec { e, .. } => {
                 Self::collect_upvars_expr(e, local_vars, parent_locals, out);
             },
-            _ => {},
+            // sizeof/alignof/offsetof 的四条：`e.ty()` 对它们返回 Int，所以
+            // 操作数类型必须单独走（`sizeof(vla_typedef)` 与 `offsetof(vla_t, ..)`
+            // 都要求运行时维度）。
+            Expr::SizeofExpr { e, .. } | Expr::AlignofExpr { e, .. } => {
+                Self::collect_upvars_expr(e, local_vars, parent_locals, out);
+            },
+            Expr::SizeofTy { ty, .. } | Expr::AlignofTy { ty, .. } => {
+                Self::collect_upvars_type(ty, local_vars, parent_locals, out);
+            },
+            Expr::Offsetof {
+                ty, indices, ..
+            } => {
+                Self::collect_upvars_type(ty, local_vars, parent_locals, out);
+                for idx in indices {
+                    Self::collect_upvars_expr(idx, local_vars, parent_locals, out);
+                }
+            },
+            // 剩下的变体不携带子表达式，类型侧已由开头统一处理
+            Expr::Int { .. }
+            | Expr::Float { .. }
+            | Expr::ComplexLit { .. }
+            | Expr::ComplexIntLit { .. }
+            | Expr::String { .. }
+            | Expr::Char { .. }
+            | Expr::LabelAddr { .. } => {},
+        }
+    }
+
+    /// 指定初始化器的下标表达式也是普通表达式：`int a[] = { [n] = 3 }` 里的 `n`
+    /// 可以指向外层变量，而旧遍历只看 `value`（下标落在 designator 里）。
+    fn collect_upvars_designator(
+        d: &Designator,
+        local_vars: &HashMap<String, Type>,
+        parent_locals: &HashMap<String, Type>,
+        out: &mut Vec<(String, i64)>,
+    ) {
+        match d {
+            Designator::Field(_) => {},
+            Designator::Index(e) => Self::collect_upvars_expr(e, local_vars, parent_locals, out),
+            Designator::Range(a, b) => {
+                Self::collect_upvars_expr(a, local_vars, parent_locals, out);
+                Self::collect_upvars_expr(b, local_vars, parent_locals, out);
+            },
+            Designator::Chain(items) => {
+                for sub in items {
+                    Self::collect_upvars_designator(sub, local_vars, parent_locals, out);
+                }
+            },
         }
     }
 

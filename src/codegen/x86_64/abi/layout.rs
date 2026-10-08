@@ -59,8 +59,15 @@ pub const SPILL_SLOT_BYTES: i64 = 8;
 pub struct FramePlan {
     /// 表达式栈深度决定的溅出槽数：`(max_expr_depth + 1).max(2)`
     pub temp_slots: i64,
-    /// 变量区字节数（`var_map_total_slots * 8`，已含参数与 `reserve_late_var_slots()` 预扣）
+    /// 变量区字节数（`var_map_total_slots * 8`，含参数与规划期登记的名字）
     pub var_bytes: i64,
+    /// 晚分配带的槽数（§11.23 步 3）。它就是 `reserve_late_var_slots()` 算出的那份
+    /// 预算（`Codegen::late_slot_budget`）：发射期才冒出来的对象（复合字面量 /
+    /// VM 尺寸槽 / `va_start` 的 ap / 聚合成员暂存）**不再挤在变量区水位底下**，
+    /// 而是排在本函数自己的一条带里。带是布局解算的**输入**，不是事后发明：
+    /// 帧大小因此把它算在内，晚分配再也不能从上面压穿 sret/物化区（那就是
+    /// `min_used` 夹逼与「锚点单调下移」那两段存在的全部理由）。
+    pub late_slots: i64,
     /// sret/物化槽的最大同时存活水位（`max_sret_bytes()` 静态扫描）
     pub sret_need: i64,
     /// 变参 reg save area（非变参函数传 0）
@@ -75,7 +82,8 @@ pub struct FramePlan {
     pub tramp_reserve: i64,
     /// 红区/向量 scratch（`stack_reserve_bytes()`）
     pub stack_reserve: i64,
-    /// KASAN 红区等额外槽（已经算进 `var_bytes`，此处仅备诊断，不参与求和）
+    /// spill band 的槽数（Phase 5.1.b）：尺寸从已交付的 `Location::Spill` 家导出，
+    /// 与其他带一样**参与**帧大小求和（输出在 `spill_band_bytes`）。
     pub spill_slots: i64,
 }
 
@@ -97,6 +105,8 @@ pub struct LayoutMap {
     pub stack_reserve: i64,
     /// spill band 字节数（Phase 2 恒 0：还没有任何值会被判成 spill）
     pub spill_band_bytes: i64,
+    /// 晚分配带字节数（`late_slots * 8`，§11.23 步 3）
+    pub late_band_bytes: i64,
     /// `sub rsp, frame_size` 的那个数
     pub frame_size: i64,
 
@@ -118,11 +128,14 @@ pub struct LayoutMap {
     pub tramp_top: i64,
     /// spill band 的顶（排在 sret/物化区之下、向量区之上；见 `spill_off`）
     pub spill_band_top: i64,
-    /// 变量区与 sret 区能占的总字节：帧大小减去帧头再减去帧底那摞带。
+    /// 晚分配带的顶（变量区正下方，`-(hdr + var_bytes)`；见 `late_band_bottom`）
+    pub late_band_top: i64,
+    /// 变量区与 sret 区能占的总字节：帧大小减去帧头、减去晚分配带、再减去帧底那摞带。
     ///
-    /// 注意：这是**诊断口径**，不是硬错误上限 —— `var_bytes` 里已经含了
-    /// `reserve_late_var_slots()` 的预扣，拿它当上限会把晚分配重复计一次费（详见
-    /// [`LayoutMap::fits_above_bottom`]）。硬错误走 `fits_above_bottom()`。
+    /// 注意：这是**诊断口径**，不是硬错误上限 —— 晚分配已经不在变量区里了，它自己
+    /// 有一条带（`late_band_bytes`）并从本读数里扣掉，所以本读数不再对晚分配重复计费
+    /// （详见 [`LayoutMap::fits_above_bottom`]）。硬错误走 `fits_above_bottom()`，
+    /// 晚分配的到位判定走 [`LayoutMap::fits_in_late_band`]。
     pub arena_room: i64,
 }
 
@@ -150,6 +163,7 @@ impl LayoutMap {
             tramp_reserve: TRAMP_RESERVE,
             stack_reserve: 0,
             spill_band_bytes: 0,
+            late_band_bytes: 0,
             frame_size: 0,
             sret_region_base: 0,
             vec_temp_off: 0,
@@ -159,6 +173,7 @@ impl LayoutMap {
             sret_ptr_off: 0,
             tramp_top: TRAMP_RESERVE,
             spill_band_top: 0,
+            late_band_top: 0,
             arena_room: 0,
         }
     }
@@ -177,9 +192,13 @@ impl LayoutMap {
     pub fn resolve(p: &FramePlan) -> Self {
         let hdr = Self::hdr_of(p.temp_slots);
         let spill_band_bytes = p.spill_slots.saturating_mul(SPILL_SLOT_BYTES);
+        // 晚分配带的尺寸就是规划期那份预算（`Codegen::late_slot_budget`），
+        // 一口 8 字节一个对象槽，与 `var_alloc_slots` 同口径。
+        let late_band_bytes = p.late_slots.saturating_mul(8);
         let raw = p
             .var_bytes
             .saturating_add(hdr)
+            .saturating_add(late_band_bytes)
             .saturating_add(p.sret_need)
             .saturating_add(spill_band_bytes)
             .saturating_add(p.static_chain_slot)
@@ -190,7 +209,11 @@ impl LayoutMap {
             .saturating_add(p.tramp_reserve)
             .saturating_add(p.stack_reserve);
         let frame_size = (raw.saturating_add(15)) & !15; // 16 字节对齐
-        let sret_region_base = -(hdr.saturating_add(p.var_bytes));
+        // 变量区底下就是晚分配带，sret/物化区再排到带底下。今天之前 sret 顶是
+        // 「变量区（已含晚分配预扣）的底」，数值与本式相同（预算全部吃满时），
+        // 区别在于晚分配现在只能在自己带里动，不得再压低本锚点。
+        let late_band_top = -(hdr.saturating_add(p.var_bytes));
+        let sret_region_base = late_band_top.saturating_sub(late_band_bytes);
         Self {
             temp_slots: p.temp_slots,
             hdr,
@@ -203,6 +226,7 @@ impl LayoutMap {
             tramp_reserve: p.tramp_reserve,
             stack_reserve: p.stack_reserve,
             spill_band_bytes,
+            late_band_bytes,
             frame_size,
             sret_region_base,
             vec_temp_off: -frame_size
@@ -216,14 +240,15 @@ impl LayoutMap {
             sret_ptr_off: -frame_size + CX_FRAME_BAND + p.va_slots + p.static_chain_slot,
             tramp_top: -frame_size + p.tramp_reserve,
             spill_band_top: sret_region_base - p.sret_need,
-            // 诊断读数：帧大小减去帧头再减去帧底那摞带。
+            late_band_top,
+            // 诊断读数：帧大小减去帧头、减去晚分配带、再减去帧底那摞带。
             //
-            // 这份算法**不是**生成期的可用额度：`var_bytes` 里已经含了
-            // `reserve_late_var_slots()` 预扣的晚分配槽，而 `register_var()` 的 `used`
-            // 起点也是同一份 `var_map_total_slots*8`。把它当上限就是重复计费，会把今天
-            // 完全合法的晚分配判成溢出（只读审计专家拓出，本仓已改为硬错误走
-            // `arena_limit()`）。留着它只为 Phase 5 加 spill band 时能回答：
-            // 「不算穿帧、但会吃掉帧底各带」的那条更早的告警线在哪。
+            // 这份算法仍**不是**生成期的可用额度：它只是回答「不算穿帧、但会吃掉帧底各带」
+            // 的那条更早的告警线在哪（硬错误走 `fits_above_bottom`，晚分配走
+            // `fits_in_late_band`）。以前它不能拿来当晚分配上限是因为要对已预扣的那份
+            // 重复计费；现在晚分配住在自己的带里，本读数已经把带扣干净了，但它依旧只是
+            // 诊断读数 —— 带内的到位判定不靠它（只读审计拓出的双重计费那个坑，
+            // §11.4.5 与 `instructions.rs` 各踩过一次）。
             arena_room: frame_size
                 .saturating_sub(hdr)
                 .saturating_sub(p.stack_reserve)
@@ -233,7 +258,8 @@ impl LayoutMap {
                 .saturating_sub(p.va_slots)
                 .saturating_sub(p.static_chain_slot)
                 .saturating_sub(CX_FRAME_BAND)
-                .saturating_sub(spill_band_bytes),
+                .saturating_sub(spill_band_bytes)
+                .saturating_sub(late_band_bytes),
         }
     }
 
@@ -251,20 +277,38 @@ impl LayoutMap {
         self.spill_band_top.saturating_sub(self.spill_band_bytes)
     }
 
-    /// 生成期新增分配能不能落在这个位置。**这就是 Phase 5.1.d 欠的那条账**：
-    /// `check_frame_budget` 以前只判帧底，于是晚分配（复合字面量/VM 尺寸槽）可以
-    /// 从上面压穿整个 spill band —— band 是解算期定下的静态坐标，而 `Codegen::sret_region_base`
-    /// 在生成期会被单调下压，两者之间过去没有任何判据（`arena_room` 那条更早的告警线
-    /// 也零读者）。
+    /// 晚分配带的底（再往下就是 sret/物化区的顶）。
+    pub fn late_band_bottom(&self) -> i64 {
+        self.late_band_top.saturating_sub(self.late_band_bytes)
+    }
+
+    /// 发射期晚分配的**到位判据**：一个新对象的最低字节必须在带内。
     ///
-    /// 关键：**band 为空时不得启用第二条判据**。今天合法的晚分配本来就可以吃掉帧底各带的
-    /// 富余（那它们就落在 `spill_band_top` 以下），把这条当成无条件约束会把合法代码报成
+    /// 带为空（本函数预算 0 槽，或帧还没解算）时不得启用：那会把「一个对象也没得
+    /// 分配」误报成越界。这就是 §11.23 步 3 拿掉 `min_used` 夹逼后补上的那条
+    /// 等价但不靠巧的不变式：以前「晚分配不得压穿 sret」靠的是现场夹逼 + 锚点
+    /// 单调下移（两个都在推 `sret_region_base`，而 `sub rsp` 早已发射），现在是「只能在
+    /// 自己带里动」——上限就是带，而带的尺寸是解算输入。
+    pub fn fits_in_late_band(&self, low_off: i64) -> bool {
+        if self.late_band_bytes <= 0 || self.frame_size <= 0 {
+            return true;
+        }
+        low_off >= self.late_band_bottom()
+    }
+
+    /// 生成期新增分配能不能落在这个位置（**sret/物化区**那一侧；发射期对象走
+    /// [`LayoutMap::fits_in_late_band`]，不再仍靠本判据）。这就是 Phase 5.1.d 欠的那条账：
+    /// `check_frame_budget` 以前只判帧底，于是 sret 游标可以从上面压穿整个 spill band
+    /// —— band 是解算期定下的静态坐标，而 `Codegen::sret_region_base` 在生成期会被单调
+    /// 下压，两者之间过去没有任何判据（`arena_room` 那条更早的告警线也零读者）。
+    ///
+    /// 关键：**band 为空时不得启用第二条判据**。拿它当无条件约束会把合法代码报成
     /// E1128（这个坑 §11.4.5 与 `instructions.rs` 里的双重计费各踩过一次）。只有真给了
     /// 一个非零 band，「不得越进去」才成为不变式。
     ///
-    /// 非零 band 时要求的不是「不落在带里」而是「停在带顶之上」：变量区水位与 sret 游标
-    /// 都只往下走，而帧底那摞带（向量/trampoline/静态链）不是晚分配区——所以任何一个
-    /// 落到带顶以下的晚分配，要么正在盖带，要么已经跨过带（一步跳过去的巨大槽也算）。
+    /// 非零 band 时要求的不是「不落在带里」而是「停在带顶之上」：sret 游标只往下走，
+    /// 而帧底那摞带（向量/trampoline/静态链）不是分配区——所以任何一个落到带顶以下的
+    /// 新家，要么正在盖带，要么已经跨过带（一步跳过去的巨大槽也算）。
     pub fn allows_late_allocation(&self, low_off: i64) -> bool {
         if !self.fits_above_bottom(low_off) {
             return false;
@@ -313,16 +357,15 @@ impl LayoutMap {
     /// 生成期越界硬判据：任何新增家的**最低字节地址**都不得越过帧底。
     ///
     /// 为什么只收一个标量而不是「变量区字节 + sret 区字节」（独立复核拓出的第二条）：
-    /// `register_var()` 的 `used` 在 `sret_watermark > 0` 时被 `min_used` 夹逼成
-    /// `var_bytes_plan + sret_watermark + 8` —— sret 区的深度**已经在里面**，再加一次
-    /// `sret_bytes` 就是双重计费，判据会比它声称保护的那条不变量更紧，会把合法代码
+    /// 两个区各自住在解算定下的带里（变量区、晚分配带、sret/物化区、spill 带、帧底那摞带），
+    /// 相加就是把同一段字节数两次：判据会比它声称保护的那条不变量更紧，会把合法代码
     /// 报成溢出。真正的不变量只有一条：帧已在 `sub rsp` 时发射出去，谁都越不过帧底。
-    /// 而两个区彼此不重叠由 `register_var`/`alloc_sret_slot` 现有的「锚点单调下移」
-    /// 夹逼保障（那是另一条不变量，不在这里重建）。
+    /// 而两个区彼此不重叠不再靠生成期现场夹逼保障（§11.23 步 3 删了「锚点单调下移」），
+    /// 而是靠每条带的边界都来自同一个 `resolve()`。
     ///
-    /// 也不拿更紧的 `arena_room`（刨掉帧底各带的那个读数）当上限：它把
-    /// `reserve_late_var_slots()` 已预扣的份额再计一次费，会把今天完全合法的晚分配
-    /// （复合字面量 / VM 尺寸槽 / va_arg ap 槽）误判成溢出。
+    /// 也不拿更紧的 `arena_room`（刨掉帧底各带的那个读数）当上限：它是诊断读数而不是
+    /// 可用额度，拿它当上限会把合法分配误判成溢出（§11.4.5 踩过一次）。发射期晚分配
+    /// 的到位判据在 [`LayoutMap::fits_in_late_band`]。
     pub fn fits_above_bottom(&self, low_off: i64) -> bool {
         low_off >= self.frame_base()
     }
@@ -340,6 +383,8 @@ mod tests {
         let p = FramePlan {
             temp_slots: 3,
             var_bytes: 80,
+            // 晚分配带传 0：本用例测的就是「带不存在时全部坐标逐字节等于搬迁前」
+            late_slots: 0,
             sret_need: 64,
             va_slots: 48 + 128,
             static_chain_slot: 8,
@@ -374,6 +419,7 @@ mod tests {
         let base = FramePlan {
             temp_slots: 2,
             var_bytes: 16,
+            late_slots: 0,
             sret_need: 0,
             va_slots: 0,
             static_chain_slot: 0,
@@ -399,6 +445,7 @@ mod tests {
         let mut p = FramePlan {
             temp_slots: 2,
             var_bytes: 16,
+            late_slots: 0,
             sret_need: 32,
             va_slots: 0,
             static_chain_slot: 0,
@@ -432,6 +479,7 @@ mod tests {
         let base = FramePlan {
             temp_slots: 2,
             var_bytes: 16,
+            late_slots: 0,
             sret_need: 32,
             va_slots: 0,
             static_chain_slot: 0,
@@ -457,7 +505,10 @@ mod tests {
         assert!(l.allows_late_allocation(l.spill_band_top - 8));
     }
 
-    /// Phase 5.1.d 的**新约束半边**：真给了非零 band，晚分配就不能压穿它。
+    /// Phase 5.1.d 的**新约束半边**：真给了非零 spill band，**sret/物化区那一侧的
+    /// 生成期增长**就不能压穿它。（从 §11.23 步 3 起，发射期对象已搬到自己的晚分配带里，
+    /// 它们的到位判据是 `fits_in_late_band`；本判据仍然负责 spill band 与 sret 游标之间
+    /// 那条线，所以名字里的 “late allocation” 今天指的是“生成期新分配”而不是晚分配带。）
     ///
     /// 判据是「新分配的最低字节仍得停在带底之上」：变量区水位与 sret 游标都是单调下压的，
     /// 所以这一步拒得早（碰到就报），而不是等到整体已经盖到带底下才发现；而带以下
@@ -468,6 +519,7 @@ mod tests {
         let base = FramePlan {
             temp_slots: 2,
             var_bytes: 16,
+            late_slots: 0,
             sret_need: 32,
             va_slots: 0,
             static_chain_slot: 0,
@@ -508,6 +560,7 @@ mod tests {
         let p = FramePlan {
             temp_slots: 2, // hdr = 48 + 16 = 64
             var_bytes: 32,
+            late_slots: 0,
             sret_need: 16,
             va_slots: 0,
             static_chain_slot: 0,
@@ -573,6 +626,7 @@ mod tests {
         let p = FramePlan {
             temp_slots: 7,
             var_bytes: 0,
+            late_slots: 0,
             sret_need: 0,
             va_slots: 0,
             static_chain_slot: 0,
@@ -583,5 +637,76 @@ mod tests {
             spill_slots: 0,
         };
         assert_eq!(LayoutMap::resolve(&p).hdr, LayoutMap::hdr_of(7));
+    }
+
+    /// 发射期对象不再挤在变量区里了，它自己的那条带就是它的额度：带的顶贴着
+    /// 变量区的底，带的底贴着 sret/物化区的顶，帧大小恰好多出一个 `late_band_bytes`。
+    ///
+    /// 本用例同时钉住三件只有拆开才看得清的事：
+    /// 1. **带是解算输入而不是事后发明**：`late_slots` 从 0 变 2，`frame_size` 多 16、
+    ///    `sret_region_base` 下移 16，而变量区里的坐标（`hdr`）一个不动 ——
+    ///    发射期对象不得再像旧写法那样把变量区水位压低从而盖到 sret 头上；
+    /// 2. **到位判据不靠巧**：带内最后一槽过，超出带底一槽就拒；
+    /// 3. **带为 0 时不得启用本判据**（一个发射期对象也没有的函数占全语料绝大多数，
+    ///    拿零高位的线当约束会把合法代码报成 E1133 —— 那个坑 §11.4.5 踩过一次）。
+    #[test]
+    fn late_band_is_a_layout_input_not_an_afterthought() {
+        let mk = |late_slots: i64| {
+            LayoutMap::resolve(&FramePlan {
+                temp_slots: 2,
+                var_bytes: 64,
+                late_slots,
+                sret_need: 32,
+                va_slots: 0,
+                static_chain_slot: 0,
+                bf_rmw_reserve: 0,
+                vec_reserve: VEC_RESERVE,
+                tramp_reserve: TRAMP_RESERVE,
+                stack_reserve: 48,
+                spill_slots: 0,
+            })
+        };
+        let no_band = mk(0);
+        let band = mk(2);
+        let hdr = LayoutMap::hdr_of(2);
+        // 1. 坐标关系：顶 = -(hdr + var_bytes)，底 = 顶 - 带字节 = sret 区的顶
+        assert_eq!(no_band.late_band_bytes, 0, "没给预算就没有带");
+        assert_eq!(band.late_band_top, -(hdr + 64));
+        assert_eq!(band.late_band_bytes, 16);
+        assert_eq!(band.late_band_bottom(), band.late_band_top - 16);
+        assert_eq!(band.sret_region_base, band.late_band_bottom(), "sret 区必须贴在带底");
+        // 帧尺寸只多了带本身那 16 字节（16 对齐 ⇒ 整数值可预期）
+        assert_eq!(band.frame_size, no_band.frame_size + 16, "带是求和里的一项");
+        assert_eq!(band.hdr, no_band.hdr, "帧头不动（它只由 temp_slots 决定）");
+        // 带吃的是**自己的**预留：变量区与 sret 区的额度不动（与 `spill_band_is_its_own_
+        // reservation` 同一个口径）。诊断读数 `arena_room` 因此必须相等 —— 它已经扣掉了带，
+        // 而帧大小恰好多出一个带：两边相互抵消。这条等式同时反证「把带当重复计费」那个坑
+        // 没回来（拿 arena_room 当晚分配上限就会当场报假溢出）。
+        assert_eq!(band.arena_room, no_band.arena_room, "晚分配不许动变量区/sret 区的额度");
+        // sret/物化区的顶被带顶推下去整一条带的宽度（这就是「不再压穿」的反面：
+        // 两者彼此让开是解算定下的，不是生成期现场夹出来的）
+        assert_eq!(band.sret_region_base, no_band.sret_region_base - 16);
+        // 2. 到位判据：两个 8 字节对象恰好填满带；第三个就出带
+        assert!(band.fits_in_late_band(band.late_band_top - 8), "带内第一槽");
+        assert!(
+            band.fits_in_late_band(band.late_band_bottom()),
+            "带内最后一槽的最低字节恰在带底，必须允许"
+        );
+        assert!(!band.fits_in_late_band(band.late_band_bottom() - 8), "超出带底一槽就拒");
+        // 上侧不需要判据，而是**构造性质**：发射点的游标从 `late_band_top - slots*8`
+        // 起、只单调往下走（见 `register_var` 的晚路径），所以任何对象的最低字节最多
+        // 也就是 `late_band_top - 8`，永远不会跑到带顶以上。把这条写成判据反而会把
+        // 「多槽对象从带顶往下排」的正确位置误拒（16 字节对象的顶就是 `top - 16`）。
+        assert!(band.fits_in_late_band(band.late_band_top - 8), "顶格的一个槽合法");
+        assert!(
+            band.fits_in_late_band(band.late_band_top - 16),
+            "带顶起的一个 16 字节对象（最低字节 = top-16）也必须合法"
+        );
+        // 3. 带为 0 时不得报错（哪怕位置在帧底以下）
+        assert!(no_band.fits_in_late_band(-100000), "空带时本判据不启用");
+        assert!(
+            LayoutMap::unresolved().fits_in_late_band(-100000),
+            "帧还没解算时也不得启用（规划期登记会走到这里）"
+        );
     }
 }

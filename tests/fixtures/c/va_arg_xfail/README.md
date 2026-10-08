@@ -6,9 +6,20 @@
 
 | 文件 | 症状 | 已定位的缺陷 |
 |---|---|---|
-| `vla_agg_via_va_arg.c` | gcc 退出 0，dcc SIGSEGV | D8：①`d.data[i]` 用 `lea -0x78(%r13)` 把 VLA **元数据槽地址**当数组基址（应为 `mov`，取槽里存的分配基址）；②溢出区装载长度用编译期回退值 `mov $0x8,%rcx`，而非 VLA 运行时尺寸 |
+| （空）| | |
 
-（`ld80_vararg_*`（D9）与 `ld80_namedparam_*`（D10）均已修复并移入
+（`vla_agg_via_va_arg.c`（D8）已修复并移入 `../va_arg/`。两处根因同一族
+—— VLA/VM 聚合的帧槽是**元数据槽**，槽内容才是动态数据区基址：
+① `d.data[i]` 的基址走 `lea -0x78(%r13)`（描述符自己）而非 `mov`；修在后端无关的
+`semantics::address_from_storage`（VLA 身份归 `StackSlotLoad`）与
+`mem/object_resolver.rs::resolve_identity`（`vla_offsets` 必须排在 `var_map` 前，
+否则同一个对象有两套身份判据）。
+② 「溢出区装载长度用回退 8」在复测时已经不成立：-O2 那侧的崩溃其实是①的
+SSA 往返版本 —— 函数体里有 VLA 时 IR 丢失运行时尺寸身份（`sizeof` 读回 0、
+基址落回描述符区），现由 `opt.rs::block_has_unsafe_ssa_pattern` 让整函数退回
+AST 路径（与同列的 `static`/`cleanup`/嵌套函数同一口径）。
+判据：`va_arg_vla_agg_via_va_arg_matches_gcc_at_all_levels` 四档逐个与 gcc 对照。
+`ld80_vararg_*`（D9）与 `ld80_namedparam_*`（D10）均已修复并移入
 `../va_arg_mix/` —— 两者四个方向全绿。D10 的第 3 点（`long double` 返回值
 按 SysV 应在 st(0)，旧代码却当 sret 发 `movq %xmm0,(%rdi)`）的根因是
 `needs_memory_return` 把 X87 与 Memory 归为一类；参数侧与返回侧对 X87 的

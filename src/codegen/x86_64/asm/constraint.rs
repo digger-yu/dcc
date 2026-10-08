@@ -248,7 +248,9 @@ impl Codegen {
             'a' => sz,
             _ => return None,
         };
-        Self::gp_reg_name_bits(idx, bits).map(|s| s.to_string())
+        // 号→名只有一份表（`abi/regnames.rs`，Phase 6.1 的后半）：本文件以前自己保了
+        // 一份 68 条的副本，与 `asm/expansion.rs` 里那一份逐字相同。
+        crate::codegen::x86_64::abi::regnames::att_name_of_num(idx, bits)
     }
     pub(crate) fn asm_rel32_symbol(&mut self, label: &str, opcode_len: u64) {
         let disp_off = self.pos() - 4;
@@ -1055,7 +1057,9 @@ impl crate::codegen::shared::asm_source::AsmOutcomeSink for Codegen {
         self.code.len() as u64
     }
     fn push_code(&mut self, bytes: &[u8]) {
-        self.code.extend_from_slice(bytes);
+        // 走 `emit` 而不是直接追写 `self.code`：「一条指令被发出去了」必须只有一个出口，
+        // 否则任何以「上一次发射」为依据的事实（如求值落点的持有记录）在这里会被静默绕过。
+        self.emit(bytes);
     }
     fn save_passthrough_region(&mut self, pc: u64, lines: Vec<String>) {
         self.asm_passthrough_regions.push((pc, lines));

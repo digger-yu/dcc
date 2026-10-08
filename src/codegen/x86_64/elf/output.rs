@@ -17,6 +17,21 @@ use crate::semantics::{self, *};
 use crate::target::Target;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+
+/// 序言后 `%r13` 与 DWARF **CFA** 的关系：CFI 定的是 `CFA = rsp + 本值`，而 `push r13`
+/// 后 `r13` 就是当时的 rsp，所以 **r13 = CFA - 本值**（无 frame_pointer 16，有则 24）。
+///
+/// 为什么抽成一个函数：CFI 与 DWARF 的 `DW_OP_fbreg` 算的是同一个数。两处各写一份
+/// `if frame_pointer {24} else {16}` 的话，改序言就只修一侧 —— 那调试器拿到的偏移会
+/// 整体上跳 8 字节，而从产物上看不出来（与 §7.15 那族「同一事实多套判据」同形状）。
+pub(crate) fn cfa_frame_offset(frame_pointer: bool) -> u64 {
+    if frame_pointer {
+        24
+    } else {
+        16
+    }
+}
+
 impl Codegen {
     pub fn build_asm_output(&self, prog: &Program) -> String {
         use crate::codegen::asm_event::{AsmEvent, AsmFormatter};
@@ -349,7 +364,7 @@ impl Codegen {
         }
         let mut ops = Vec::new();
         // CFA = rsp + 16 (无 frame_pointer) / rsp + 24 (有 frame_pointer)
-        let cfa_off: u32 = if self.target.frame_pointer { 24 } else { 16 };
+        let cfa_off: u32 = crate::codegen::x86_64::elf::output::cfa_frame_offset(self.target.frame_pointer) as u32;
         // DW_CFA_def_cfa (0x0c) uleb128(rsp=7) uleb128(offset)
         ops.push(0x0c);
         enc_uleb128(&mut ops, 7);

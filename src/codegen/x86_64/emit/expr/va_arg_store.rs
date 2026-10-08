@@ -996,7 +996,7 @@ impl Codegen {
         if let Expr::Ident { name, .. } = ap {
             if ap_is_ptr {
                 // va_list 作为函数参数时退化为指针，加载指针值到 rcx
-                self.gen_expr(ap, 0);
+                self.gen_expr(ap, Self::EVAL_BASE);
                 self.mov(1, 0); // rcx = rax
                 VaListAddress::InReg
             } else {
@@ -1004,12 +1004,12 @@ impl Codegen {
             }
         } else if let Expr::Deref { ref e, .. } = ap {
             // *ptr: 加载指针值到 rcx
-            self.gen_expr(e, 0);
+            self.gen_expr(e, Self::EVAL_BASE);
             self.mov(1, 0); // rcx = rax
             VaListAddress::InReg
         } else if ap_is_ptr {
             // 指针类型表达式 (如数组元素): 加载指针值到 rcx
-            self.gen_expr(ap, 0);
+            self.gen_expr(ap, Self::EVAL_BASE);
             self.mov(1, 0);
             VaListAddress::InReg
         } else if self.gen_lvalue_addr(ap, 1) {
@@ -1033,7 +1033,9 @@ impl Codegen {
                 | Type::UInt128
         )
     }
-    fn va_list_slot_ty() -> Type {
+    /// `va_list` 对象在本帧里的真实尺寸（24B = 3 槽）。规划期的晚分配预算读的就是它，
+    /// 所以不得在别处再写一份「3 槽」。
+    pub(crate) fn va_list_slot_ty() -> Type {
         Type::Array(Box::new(Type::ULong.into()), ArraySize::Const(3))
     }
 }

@@ -42,7 +42,7 @@ impl Codegen {
     fn emit_vla_elem_size(&mut self, ty: &Type) {
         match ty {
             Type::Array(inner, ArraySize::Var(n_expr)) => {
-                self.gen_expr(n_expr, 0); // rax = 本维元素个数
+                self.gen_expr(n_expr, Self::EVAL_BASE); // rax = 本维元素个数
                 let isz = inner.size() as i32;
                 if isz != 1 {
                     self.emit(&[0x48, 0x69, 0xC0]); // imul rax, rax, imm32
@@ -107,7 +107,7 @@ impl Codegen {
             if let Some(slot) = self.vm_size_slot(&v.ty) {
                 self.emit_mov_mem_r13(0, slot);
             } else {
-                self.gen_sizeof_runtime(&v.ty, 0);
+                self.gen_sizeof_runtime(&v.ty, Self::EVAL_BASE);
             }
             self.emit_store_rax_r13(off + 16);
             self.mov_imm(0, 0i128);
@@ -142,7 +142,7 @@ impl Codegen {
         self.emit_store_rax_r13(off + 8);
         // rax = 元素个数
         match var_e {
-            Some(se) => self.gen_expr(se, 0),
+            Some(se) => self.gen_expr(se, Self::EVAL_BASE),
             None => self.mov_imm(0, const_n as i128),
         }
         // rax *= stride: mov rcx, [r13+off+8]; imul rax, rcx
@@ -266,22 +266,18 @@ impl Codegen {
         self.gen_vm_type_bind(&vm_ty);
     }
     pub(crate) fn gen_vm_type_bind(&mut self, ty: &Type) {
-        let (key, has_vla_field) = match ty {
-            Type::Struct(tag, fields, _, false) => {
-                (format!("struct:{}", tag), fields.iter().any(|f| f.ty.has_vla()))
-            },
-            Type::Union(tag, fields, _, false) => {
-                (format!("union:{}", tag), fields.iter().any(|f| f.ty.has_vla()))
-            },
-            _ => return,
+        // 键拼法与「要不要占一槽」的判据都住在 `func_setup`（规划期那份静态扫描读的是
+        // 同一对函数）：两处各自 `format!` / 各自扫字段，扫描就会少计一槽（`E1133`）。
+        let Some(key) = Self::vm_size_key(ty) else {
+            return;
         };
-        if !has_vla_field {
+        if !Self::vm_record_needs_size_slot(ty) {
             self.vm_struct_size_slots.remove(&key);
             return;
         }
         let slot_name = format!("__vmsize_{}", key);
         let slot = self.register_var(&slot_name, &Type::Long);
-        self.gen_sizeof_runtime(ty, 0); // rax = 总大小 (运行时)
+        self.gen_sizeof_runtime(ty, Self::EVAL_BASE); // rax = 总大小 (运行时)
         self.emit_store_rax_r13(slot);
         self.vm_struct_size_slots.insert(key, slot);
     }
