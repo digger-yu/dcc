@@ -29,11 +29,13 @@
 #     本地 fn。新增助手没登记判据 → JAC-UNMAPPED（exit 1），不会悄悄降级。
 #
 #   run         编译产物真的跑起来（主机或 qemu），观察退出码/输出
-#               run_exe, run_compile_and_run, run_compile_and_run_flags,
-#               qemu_runtime_target
+#               run_exe, run_exe_bounded, run_compile_and_run,
+#               run_compile_and_run_flags, qemu_runtime_target
 #   compile     只看编译产物（.o / .s / stderr / IR），不承诺运行时
 #               run_syntax_test, run_object_test, run_object_test_flags,
-#               run_asm_output_test, run_compile_o, run_cpp_object_test,
+#               run_asm_output_test, run_asm_output_test_flags,
+#               compile_asm_text_with_env,
+#               run_compile_o, run_cpp_object_test,
 #               compile_legacy_asm_object, run_cpp_with_mode, path_decision_in,
 #               assert_bytes_present, assert_disasm_present, extract_function_body,
 #               object_symbol_size, readelf_relocations, elf64_sections,
@@ -43,15 +45,21 @@
 #               parse_offload_section, compile_to_object, compile_timed,
 #               compile_runs, assert_all_identical,
 #               assert_no_pid_shaped_hostlink_name, run_dcc, assert_snapshot,
-#               validate_diagnostic_snapshot
+#               validate_diagnostic_snapshot,
+#               seg_asm_body, seg_has_prefix, asm_fallback_compile,
+#               elf64_rela, elf64_section_names, elf64_syms_by_type, elf64_all_rela,
+#               dcc_link_exe, dcc_obj_bytes, assert_dynamically_linked,
+#               dcc_link_capture_flags, dcc_asm_with_pipe
 #   cross-check 与外部真值逐字节/逐槽对照（g++ / gcc / 宿主链接器），或与另一条
 #               lowering 路径对照（HIR vs legacy）
-#               run_gcc_cross_check, run_gcc_two_tu_cross_check,
+#               run_gcc_cross_check, run_gcc_cross_check_opt,
+#               run_gcc_two_tu_cross_check,
 #               cpp_gcc_cross_check, cpp_coroutine_cross_check,
 #               cpp_std20_exit_code_cross_check, gxx_native_cpp_exit_code,
 #               lower_both, run_host_link_and_run, run_host_link_and_run_with,
 #               host_link_objects_and_run, host_link_cpp_object_and_run,
-#               gxx_truth, dcc_result, check_one, check_group
+#               gxx_truth, dcc_result, check_one, check_group,
+#               assert_all_levels_match_gcc
 #   sanitize    带 -fsanitize=（UBSan/ASan）运行，或断言「运行时必须失败」
 #               run_sanitized_binary, assert_runtime_fails_with, assert_exit_code
 #   aux         只做路径/字符串/门控准备，不贡献判据
@@ -64,7 +72,25 @@
 #               empty_class, callable_key, class_key, is_backend_internal,
 #               owner_name, expected_entities, collect_expected, push_if_defined,
 #               native_entities, legacy_definition_lines, legacy_defines,
-#               line_mentions, legacy_plain_definition_names
+#               line_mentions, legacy_plain_definition_names, asm_body
+#
+# 本轮从主题子文件上移到 harness 的 13 个助手，类别按「助手自己做什么」定，
+# 不按「调用它的用例最终证明了什么」定（运行与 gcc 对拍由调用方自己的 run_* /
+# cross-check 助手贡献，不会被以下标签掩盖或抬高）：
+#   compile    seg_asm_body / seg_has_prefix：只从已发出的 .s 文本里取函数体、
+#              看段前缀（与 extract_function_body / path_decision_in 同类）；
+#              asm_fallback_compile / dcc_asm_with_pipe / dcc_obj_bytes：只跑 dcc
+#              拿 .s / .o / stderr；elf64_rela / elf64_section_names /
+#              elf64_syms_by_type / elf64_all_rela：只解析产物字节（与
+#              elf64_sections / elf64_syms 同一族）；assert_dynamically_linked：
+#              只断言产物的 .interp / DT_NEEDED / `file` 读数；
+#              dcc_link_exe / dcc_link_capture_flags：只回答「编链是否成功 +
+#              stderr + 产物在哪」——宿主 cc 在这两条里是流水线上的一环，不是被
+#              逐槽对照的真值，助手也不运行产物，所以记 compile 而不是 cross-check。
+#   cross-check assert_all_levels_match_gcc：把同一份夹具逐档（-O0/-O1/-O2/-O3）
+#              交给 gcc 与 dcc 各自编+跑，退出码逐条对照 ⇒ 真正的 gcc 对拍。
+#   aux        asm_body：只做汇编文本归一（摘掉 `.file` 行），不取产物、不断言，
+#              与 normalize_stderr / strip_ansi 同类，不贡献判据。
 #
 # Tier 推断（§9 权威表；本脚本只区分 0/3 两档 —— Tier 1/2 是 CI job 的划分，
 # 不是用例本身的属性）:
@@ -186,6 +212,7 @@ trap 'rm -rf "$WORK"' EXIT
 # ---------------------------------------------------------------------------
 CRIT_TABLE='
 run_exe run
+run_exe_bounded run
 run_compile_and_run run
 run_compile_and_run_flags run
 qemu_runtime_target run
@@ -193,6 +220,8 @@ run_syntax_test compile
 run_object_test compile
 run_object_test_flags compile
 run_asm_output_test compile
+run_asm_output_test_flags compile
+compile_asm_text_with_env compile
 run_compile_o compile
 run_cpp_object_test compile
 compile_legacy_asm_object compile
@@ -221,8 +250,22 @@ assert_no_pid_shaped_hostlink_name compile
 run_dcc compile
 assert_snapshot compile
 validate_diagnostic_snapshot compile
+seg_asm_body compile
+seg_has_prefix compile
+asm_fallback_compile compile
+elf64_rela compile
+elf64_section_names compile
+elf64_syms_by_type compile
+elf64_all_rela compile
+dcc_link_exe compile
+dcc_obj_bytes compile
+assert_dynamically_linked compile
+dcc_link_capture_flags compile
+dcc_asm_with_pipe compile
 run_gcc_cross_check cross-check
+run_gcc_cross_check_opt cross-check
 run_gcc_two_tu_cross_check cross-check
+assert_all_levels_match_gcc cross-check
 cpp_gcc_cross_check cross-check
 cpp_coroutine_cross_check cross-check
 cpp_std20_exit_code_cross_check cross-check
@@ -279,6 +322,18 @@ legacy_definition_lines aux
 legacy_defines aux
 line_mentions aux
 legacy_plain_definition_names aux
+asm_body aux
+dwarf_gdb_unavailable aux
+dwarf_gdb_build compile
+dwarf_gdb_build_env compile
+gdb_batch run
+gdb_bp_addr aux
+readelf_attr compile
+readelf_int compile
+readelf_debug_info_dump compile
+parse_debug_info compile
+var_location aux
+dwarf_reg_name aux
 '
 declare -A CRIT
 while IFS=' ' read -r h lab; do

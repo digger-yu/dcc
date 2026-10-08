@@ -100,8 +100,9 @@ g++ 原生构建运行得到的**退出码 + stdout** 与 dcc 产物（`dcc -c` 
 | virtual | `tests/fixtures/cpp_abi_virtual/` | `cpp_abi_virtual_group` (`:175`) → `check_group("cpp_abi_virtual")` (`:176`) | 4 | cross-check：多继承 secondary vtable 槽指向 this-adjust thunk、虚基子对象有自己的 vptr、类对象尺寸逐字节一致 |
 | overload | `tests/fixtures/cpp_abi_overload/` | `cpp_abi_overload_group` (`:187`) → `check_group("cpp_abi_overload")` (`:188`) | 4 | cross-check：链接名与候选选定（参数类型、const 限定、构造重载、成员函数重载） |
 | lifecycle | `tests/fixtures/cpp_abi_lifecycle/` | `cpp_abi_lifecycle_group` (`:181`) → `check_group("cpp_abi_lifecycle")` (`:182`) | 11 | cross-check：构造/析构次序、委托构造、copy/move 构造、隐式成员初始化次序与实参个数 |
+| c-style decls | `tests/fixtures/cpp_abi_c_style_decls/` | `cpp_abi_c_style_decls_group` (`:223`) → `check_group("cpp_abi_c_style_decls")` (`:224`) | 10 | cross-check：C/glibc 头里那批「C 风格声明」形态必须被 C++ 前端接住并落到同一 ABI 形状——`extern "C"` 单声明形态、匿名 struct/union 的 typedef、`typedef enum {…}` 的枚举量、多词基本类型说明符（`signed short int` 等）、`_Float32/_Float32x` 与 80 位 `long double`、只以指针出现的不完整 tag、带属性说明符的 `namespace`、三元对赋值/逗号的优先级、`<` 在比较与 template-id 之间的消歧 |
 
-夹具总数 29，逐条由 `check_group()` → `check_one()`（`:134`）驱动；
+夹具总数 39，逐条由 `check_group()` → `check_one()`（`:134`）驱动；
 `gxx_truth()`（`:75`）取 g++ 真值，`dcc_result()`（`:99`）取 dcc 产物结果。
 继承（单/多/虚基）不是独立目录，它落在 `cpp_abi_virtual/` 的
 `multi_inheritance_secondary_thunk.cpp`、`virtual_base_override_dispatch.cpp`、
@@ -109,10 +110,10 @@ g++ 原生构建运行得到的**退出码 + stdout** 与 dcc 产物（`dcc -c` 
 
 两个元测试：
 
-* `cpp_abi_groups_are_all_covered`（`:218`）——把 `all_groups()`（`:63`，
+* `cpp_abi_groups_are_all_covered`（`:229`）——把 `all_groups()`（`:63`，
   按前缀 `cpp_abi_` 枚举 `tests/fixtures/` 下的目录）得到的目录名与函数体内
-  **硬编码的 `COVERED` 常量**（`:219`-`:226`）比对，出现未登记的组就 assert 失败。
-* `cpp_abi_fixtures_are_standard_cxx`（`:239`）——遍历所有组的所有夹具，
+  **硬编码的 `COVERED` 常量**（`:230`-`:237`）比对，出现未登记的组就 assert 失败。
+* `cpp_abi_fixtures_are_standard_cxx`（`:251`）——遍历所有组的所有夹具，
   要求 g++ 本身接受（否则它只是 dcc 方言，交叉验证失去意义）。
 
 ### 新增一个 ABI 主题组的真实路径
@@ -193,33 +194,34 @@ fixture 列的记录约定：`(inline)` = 源码在函数体内联构造、没�
 
 | 指标 | 实测值 |
 |------|--------|
-| 主题子文件（`tests/integration/*.rs`） | 15 |
-| 主题子文件里的 `#[test]` | 970 |
+| 主题子文件（`tests/integration/*.rs`） | 20 |
+| 主题子文件里的 `#[test]` | 1085 |
 | 顶层 target（`tests/*.rs`，含壳） | 6 |
-| 顶层 target 里的 `#[test]`（不含主题） | 98 |
-| 索引数据行合计 | 1068 |
+| 顶层 target 里的 `#[test]`（不含主题） | 100 |
+| 索引数据行合计 | 1185 |
 
 ### 判据分布
 
 | 判据 | 用例数 |
 |------|--------|
-| compile | 687 |
-| cross-check | 114 |
+| compile | 730 |
+| cross-check | 170 |
 | report-only | 1 |
-| run | 257 |
+| run | 275 |
 | sanitize | 9 |
 
 ### Tier 分布（§9 权威表；T1/T2 是 CI job 划分，不是用例属性）
 
 | Tier | 用例数 |
 |------|--------|
-| T0 | 1063 |
+| T0 | 1180 |
 | T3 | 5 |
 
 ### C++ ABI 夹具族（磁盘真值 + 代码真值，与人工小节逐条对账）
 
 | 组 | 驱动 fn 行 | `check_group()` 行 | .cpp 夹具数 | 已登记 COVERED |
 |----|------------|----------------------|-------------|----------------|
+| `cpp_abi_c_style_decls` | `:223` | `:224` | 10 | yes |
 | `cpp_abi_eh` | `:203` | `:204` | 6 | yes |
 | `cpp_abi_lifecycle` | `:181` | `:182` | 11 | yes |
 | `cpp_abi_overload` | `:187` | `:188` | 4 | yes |
@@ -238,26 +240,31 @@ fixture 列的记录约定：`(inline)` = 源码在函数体内联构造、没�
 
 | 文件（相对 tests/） | 索引行数 | 一致 |
 |---------------------|----------|------|
-| integration/c_lang.rs | 136 | yes |
-| integration/c_asm.rs | 105 | yes |
+| integration/c_lang.rs | 146 | yes |
+| integration/c_asm.rs | 133 | yes |
 | integration/c_kernel.rs | 43 | yes |
-| integration/c_attr_builtin.rs | 103 | yes |
+| integration/c_attr_builtin.rs | 114 | yes |
 | integration/c_pp_c23.rs | 106 | yes |
 | integration/c_abi_vararg.rs | 38 | yes |
-| integration/c_link_debug.rs | 72 | yes |
-| integration/c_cross.rs | 82 | yes |
+| integration/c_link_debug.rs | 74 | yes |
+| integration/c_cross.rs | 83 | yes |
 | integration/c_sanitizer.rs | 54 | yes |
 | integration/cpp_lang.rs | 84 | yes |
 | integration/cpp_stdlib.rs | 8 | yes |
 | integration/cpp_runtime.rs | 47 | yes |
 | integration/opt.rs | 62 | yes |
+| integration/opt_licm.rs | 7 | yes |
+| integration/opt_ssa_gate.rs | 34 | yes |
+| integration/p16_rotation.rs | 9 | yes |
 | integration/xfail.rs | 6 | yes |
 | integration/glue_misc.rs | 24 | yes |
-| cpp_abi_gcc_cross_check.rs | 8 | yes |
+| integration/parallel_rodata.rs | 9 | yes |
+| integration/dwarf_gdb.rs | 4 | yes |
+| cpp_abi_gcc_cross_check.rs | 9 | yes |
 | errors.rs | 26 | yes |
 | perf_regression.rs | 4 | yes |
 | profile.rs | 53 | yes |
-| reproducibility.rs | 7 | yes |
+| reproducibility.rs | 8 | yes |
 
 ## 全量索引
 
@@ -299,7 +306,8 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_lang.rs` | `ternary_side_effects_local_shadows_global` | \`fixtures/c/ternary_side_effects.c\` | run | T0 · cfg(unix) |
 | `tests/integration/c_lang.rs` | `chained_assignment_value_truncated_to_lvalue_type` | \`fixtures/c/chained_assign_truncation.c\` | run | T0 · cfg(unix) |
 | `tests/integration/c_lang.rs` | `may_alias_struct_compiles` | \`fixtures/c/may_alias.c\` | compile | T0 |
-| `tests/integration/c_lang.rs` | `seg_qualifier_compiles_and_runs` | \`fixtures/c/seg_qualifier.c\` | run | T0 |
+| `tests/integration/c_lang.rs` | `seg_qualifier_parses_all_positions_and_emits_segment_prefixes` | \`fixtures/c/seg_qualifier.c\` | run | T0 |
+| `tests/integration/c_lang.rs` | `seg_qualifier_on_object_body_emits_segment_prefixes` | \`fixtures/c/seg_object_body.c\` | cross-check | T0 |
 | `tests/integration/c_lang.rs` | `compat_typedef_redefinition_compiles` | \`fixtures/c/typedef.c\` | compile | T0 |
 | `tests/integration/c_lang.rs` | `local_shadows_libc_function_name` | \`fixtures/c/shadow.c\` | run | T0 |
 | `tests/integration/c_lang.rs` | `complex_div_run_returns_zero` | \`fixtures/c/complex_div.c\` | run | T0 |
@@ -319,6 +327,7 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_lang.rs` | `implicit_function_decl_is_error_by_default` | (inline) | compile | T0 |
 | `tests/integration/c_lang.rs` | `implicit_function_decl_error_ignores_wno_in_modern_std` | (inline) | compile | T0 |
 | `tests/integration/c_lang.rs` | `gnu89_implicit_function_decl_warns_and_continues` | (inline) | compile | T0 |
+| `tests/integration/c_lang.rs` | `fstrict_aliasing_is_reported_as_inert_but_fno_is_silent` | (inline) | compile | T0 |
 | `tests/integration/c_lang.rs` | `m15_float_const_eval` | \`fixtures/c/float_const.c\` | run | T0 · cfg(unix) |
 | `tests/integration/c_lang.rs` | `m15_string_literal_and_concat` | \`fixtures/c/string_const.c\` | run | T0 · cfg(unix) |
 | `tests/integration/c_lang.rs` | `m15_address_const` | \`fixtures/c/address_const.c\` | run | T0 · cfg(unix) |
@@ -328,7 +337,7 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_lang.rs` | `ld80_arith_cmp` | \`fixtures/c/ld80_arith_cmp.c\` | run | T0 · cfg(unix) |
 | `tests/integration/c_lang.rs` | `ld80_asm_t_channel` | \`fixtures/c/ld80_asm_t_channel.c\` | run | T0 · cfg(unix) |
 | `tests/integration/c_lang.rs` | `ld80_asm_x_channel` | \`fixtures/c/ld80_asm_x_channel.c\` | run | T0 · cfg(unix) |
-| `tests/integration/c_lang.rs` | `ld80_asm_x_rejects_long_double` | \`fixtures/c/ld80_asm_x_rejects_long_double.c\` | compile | T0 |
+| `tests/integration/c_lang.rs` | `ld80_asm_x_rejects_long_double` | \`fixtures/errors/ld80_asm_x_rejects_long_double.c\` | compile | T0 |
 | `tests/integration/c_lang.rs` | `m15_float_store_paths` | \`fixtures/c/abi16_struct_extra.c\` | run | T0 · cfg(unix) |
 | `tests/integration/c_lang.rs` | `m15_constexpr_function` | \`fixtures/c/constexpr.c\` | run | T0 · cfg(unix) |
 | `tests/integration/c_lang.rs` | `m19_counter_monotonic` | \`fixtures/c/counter.c\` | run | T0 · cfg(unix) |
@@ -347,13 +356,14 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_lang.rs` | `m1_1_hello_stdout` | \`fixtures/c/hello.c\` | compile | T0 · cfg(unix) |
 | `tests/integration/c_lang.rs` | `m1_2_multi_file` | \`fixtures/c/helper.c\` \`fixtures/c/main.c\` | compile | T0 · cfg(unix) |
 | `tests/integration/c_lang.rs` | `m2_1_type_system` | \`fixtures/c/types.c\` | cross-check | T0 · cfg(unix) |
+| `tests/integration/c_lang.rs` | `decl_param_decay_matrix_holds_at_all_levels` | \`fixtures/c/decl_param_decay.c\` | run | T0 · cfg(unix) |
 | `tests/integration/c_lang.rs` | `m2_2_struct_layout` | \`fixtures/c/struct.c\` | cross-check | T0 · cfg(unix) |
 | `tests/integration/c_lang.rs` | `bitfield_runtime` | \`fixtures/c/bitfield_runtime.c\` | cross-check | T0 · cfg(unix) |
 | `tests/integration/c_lang.rs` | `m2_3_integer_promotion` | \`fixtures/c/promotion.c\` | cross-check | T0 · cfg(unix) |
 | `tests/integration/c_lang.rs` | `m2_4_pointers` | \`fixtures/c/pointer.c\` | cross-check | T0 · cfg(unix) |
 | `tests/integration/c_lang.rs` | `struct_field_aligned_codegen` | \`fixtures/c/struct_field_aligned.c\` | run | T0 · cfg(unix) |
 | `tests/integration/c_lang.rs` | `m3_3_statement_expressions` | \`fixtures/c/stmt_expr.c\` | cross-check | T0 · cfg(unix) |
-| `tests/integration/c_lang.rs` | `m3_5_vla_zero_array` | \`fixtures/c/vla.c\` | cross-check | T0 · cfg(unix) |
+| `tests/integration/c_lang.rs` | `m3_5_vla_zero_array` | \`fixtures/c/vla.c\` | run | T0 · cfg(unix) |
 | `tests/integration/c_lang.rs` | `c_arrow_member_store_offset_and_width` | (inline) | compile | T0 · cfg(unix) |
 | `tests/integration/c_lang.rs` | `func_type_param_compiles` | \`fixtures/c/func_type_param.c\` | compile | T0 |
 | `tests/integration/c_lang.rs` | `static_addr_const_init_compiles` | \`fixtures/c/static_addr_const.c\` | compile | T0 |
@@ -408,6 +418,13 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_lang.rs` | `permissive_unknown_typedef_warns` | (inline) | compile | T0 |
 | `tests/integration/c_lang.rs` | `unknown_variable_read_is_not_implicit_function_warning` | (inline) | compile | T0 |
 | `tests/integration/c_lang.rs` | `user_warning_does_not_break_compile` | \`fixtures/c/user_diag.c\` | compile | T0 |
+| `tests/integration/c_lang.rs` | `deep_right_nested_binops_stay_decodable_and_correct` | (inline) | run | T0 |
+| `tests/integration/c_lang.rs` | `nested_vla_upvar_capture_matches_gcc_at_all_levels` | \`fixtures/opt/nested_vla_upvar_capture.c\` | cross-check | T0 |
+| `tests/integration/c_lang.rs` | `stmt_expr_labeled_tail_matches_gcc_at_all_levels` | \`fixtures/opt/stmt_expr_labeled_tail.c\` | cross-check | T0 |
+| `tests/integration/c_lang.rs` | `fnptr_returning_function_params_match_gcc_at_all_levels` | \`fixtures/opt/fnptr_returning_fn_params.c\` | cross-check | T0 |
+| `tests/integration/c_lang.rs` | `frame_slots_are_planned_not_lazily_guessed` | \`fixtures/opt/planned_frame_slots.c\` | cross-check | T0 |
+| `tests/integration/c_lang.rs` | `agg_copy_matches_gcc_at_all_levels` | (inline) | cross-check | T0 |
+| `tests/integration/c_lang.rs` | `agg_copy_with_varargs_and_six_arg_calls_matches_gcc` | (inline) | cross-check | T0 |
 | `tests/integration/c_asm.rs` | `s_output_disassembles_function_body` | (inline) | compile | T0 |
 | `tests/integration/c_asm.rs` | `s_output_disassembles_return_thunk_symbol` | (inline) | compile | T0 |
 | `tests/integration/c_asm.rs` | `s_output_emits_custom_section_functions` | (inline) | compile | T0 |
@@ -431,6 +448,19 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_asm.rs` | `asm_constraints_compile` | \`examples/assembly/constraints.c\` | compile | T0 |
 | `tests/integration/c_asm.rs` | `o2_goto_label_after_return` | (inline) | compile | T0 |
 | `tests/integration/c_asm.rs` | `asm_inline_qualifier_compiles` | \`fixtures/asm/asm_inline.c\` | compile | T0 |
+| `tests/integration/c_asm.rs` | `asm_register_binding_yields_to_address_escape` | \`fixtures/asm/asm_register_binding_escape.c\` | run | T0 |
+| `tests/integration/c_asm.rs` | `asm_register_binding_owns_its_register` | \`fixtures/asm/asm_register_binding_clobber.c\` | cross-check | T0 |
+| `tests/integration/c_asm.rs` | `asm_clobber_guards_the_register_that_holds_a_value` | \`fixtures/asm/asm_clobber_home_and_temp.c\` | cross-check | T0 |
+| `tests/integration/c_asm.rs` | `asm_clobber_guard_keeps_call_sites_aligned` | \`fixtures/asm/asm_clobber_guard_alignment.c\` | run | T0 |
+| `tests/integration/c_asm.rs` | `escaping_asm_goto_clobbering_a_held_register_is_an_error` | (inline) | run | T0 |
+| `tests/integration/c_asm.rs` | `reserved_frame_registers_are_rejected_not_silently_dropped` | (inline) | run | T0 |
+| `tests/integration/c_asm.rs` | `asm_operand_in_callee_saved_keeps_the_prologue_save` | \`fixtures/asm/asm_operand_callee_saved.c\` | cross-check | T0 |
+| `tests/integration/c_asm.rs` | `register_home_and_cleanup_survive_every_declaration_path` | \`fixtures/asm/asm_register_home_all_scopes.c\` | cross-check | T0 |
+| `tests/integration/c_asm.rs` | `asm_register_binding_honors_declared_width` | \`fixtures/c/register_binding_width.c\` | cross-check | T0 |
+| `tests/integration/c_asm.rs` | `asm_output_on_indexed_lvalue_is_written_back` | \`fixtures/c/asm_output_general_lvalue.c\` | cross-check | T0 |
+| `tests/integration/c_asm.rs` | `rex_operand_bit_order_matches_gcc` | \`fixtures/asm/asm_rex_operand_bit_order.c\` | cross-check | T0 |
+| `tests/integration/c_asm.rs` | `rex_bit_order_fixture_xfail_o2_drops_cross_call_global_writes` | \`fixtures/asm/asm_rex_operand_bit_order.c\` | run | T0 |
+| `tests/integration/c_asm.rs` | `asm_q_class_exhaustion_is_reported_not_silent` | (inline) | compile | T0 |
 | `tests/integration/c_asm.rs` | `asm_local_label_compiles` | \`fixtures/asm/asm_local.c\` | compile | T0 |
 | `tests/integration/c_asm.rs` | `asm_label_insn_same_line_compiles` | \`fixtures/asm/asm_label.c\` | compile | T0 |
 | `tests/integration/c_asm.rs` | `asm_goto_hash_comment_compiles` | \`fixtures/asm/asm_goto.c\` | run | T0 |
@@ -513,6 +543,21 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_asm.rs` | `parallel_codegen_keeps_file_scope_register_asm_binding` | (inline) | compile | T0 · cfg(unix) |
 | `tests/integration/c_asm.rs` | `asm_label_test_renames_elf_symbols_exactly` | \`fixtures/asm/asm_label_test.c\` | compile | T0 · cfg(unix) |
 | `tests/integration/c_asm.rs` | `asm_empty_template_minimal_stays_transparent_across_tu` | \`fixtures/asm/asm_minimal.c\` | cross-check | T0 · cfg(unix) |
+| `tests/integration/c_asm.rs` | `asm_fallback_default_is_hard_error` | (inline) | compile | T0 · cfg(unix) |
+| `tests/integration/c_asm.rs` | `asm_fallback_groups_diagnostics_per_asm_statement` | (inline) | compile | T0 · cfg(unix) |
+| `tests/integration/c_asm.rs` | `asm_fallback_gas_degrades_whole_tu_to_text` | (inline) | compile | T0 · cfg(unix) |
+| `tests/integration/c_asm.rs` | `asm_fallback_gas_text_assembles_through_real_as` | (inline) | compile | T0 · cfg(unix) |
+| `tests/integration/c_asm.rs` | `asm_fallback_rejects_unknown_value` | (inline) | compile | T0 · cfg(unix) |
+| `tests/integration/c_asm.rs` | `asm_fallback_does_not_label_text_as_object` | \`fixtures/asm/asm_fallback_gas.c\` | compile | T0 · cfg(unix) |
+| `tests/integration/c_asm.rs` | `asm_fallback_output_is_deterministic` | (inline) | compile | T0 · cfg(unix) |
+| `tests/integration/c_asm.rs` | `asm_fallback_requires_gas_text_capability` | (inline) | compile | T0 · cfg(unix) |
+| `tests/integration/c_asm.rs` | `cross_msr_mrs_is_hard_error_not_silent_nop` | (inline) | compile | T0 · cfg(unix) |
+| `tests/integration/c_asm.rs` | `cross_statement_position_inline_asm_lands_in_object` | (inline) | compile | T0 · cfg(unix) |
+| `tests/integration/c_asm.rs` | `cross_register_output_asm_lands_in_object` | (inline) | compile | T0 · cfg(unix) |
+| `tests/integration/c_asm.rs` | `invalid_register_asm_name_is_an_error_not_a_silent_drop` | (inline) | compile | T0 |
+| `tests/integration/c_asm.rs` | `register_asm_name_accepts_the_percent_form` | (inline) | run | T0 |
+| `tests/integration/c_asm.rs` | `asm_text_call_keeps_static_func_source_name_at_all_levels` | \`fixtures/opt/asm_text_static_func_symbol.c\` | cross-check | T0 · cfg(unix) |
+| `tests/integration/c_asm.rs` | `global_register_binding_on_call_clobbered_reg_warns_like_gcc` | \`fixtures/c/global_reg_call_clobbered.c\` \`fixtures/c/register_binding_width.c\` | compile | T0 · cfg(unix) |
 | `tests/integration/c_kernel.rs` | `arch_x86_wrapper_preserves_supported_kernel_flags` | (inline) | compile | T0 · cfg(unix) |
 | `tests/integration/c_kernel.rs` | `libdecnumber_combined_tu_compiles` | \`fixtures/gcc_tools/libdecnumber_combined.c\` | compile | T3 · cfg(unix) |
 | `tests/integration/c_kernel.rs` | `gcc_cc1plus_bootstrap_gate` | (inline) | compile | T3 · cfg(unix) |
@@ -573,9 +618,10 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_attr_builtin.rs` | `builtin_file_line_func_run_returns_zero` | \`fixtures/c/file_line.c\` | run | T0 |
 | `tests/integration/c_attr_builtin.rs` | `builtin_classify_compat_run_returns_zero` | \`fixtures/c/classify.c\` | run | T0 |
 | `tests/integration/c_attr_builtin.rs` | `builtin_choose_full_run_returns_zero` | \`fixtures/c/choose.c\` | run | T0 |
-| `tests/integration/c_attr_builtin.rs` | `unknown_builtin_is_hard_error_e0018` | \`fixtures/c/unk_builtin.c\` | compile | T0 · cfg(unix) |
+| `tests/integration/c_attr_builtin.rs` | `unknown_builtin_is_hard_error_e0018` | \`fixtures/errors/unk_builtin.c\` | compile | T0 · cfg(unix) |
 | `tests/integration/c_attr_builtin.rs` | `attr_cleanup_compile_and_run` | \`fixtures/c/attr_cleanup.c\` | run | T0 · cfg(unix) |
 | `tests/integration/c_attr_builtin.rs` | `attr_target_clones_compile_and_run` | \`fixtures/c/attr_clones.c\` | run | T0 · cfg(unix) |
+| `tests/integration/c_attr_builtin.rs` | `target_clones_links_dynamically_with_codegen_resolver` | (inline) | cross-check | T0 · cfg(unix) |
 | `tests/integration/c_attr_builtin.rs` | `attr_no_sanitize_compile_and_run` | \`fixtures/c/attr_nosan.c\` | run | T0 · cfg(unix) |
 | `tests/integration/c_attr_builtin.rs` | `attr_no_trailing_underscore_alias` | (inline) | compile | T0 · cfg(unix) |
 | `tests/integration/c_attr_builtin.rs` | `attr_copy_returns_nonnull_compile_and_run` | \`fixtures/c/attr_copy.c\` | run | T0 · cfg(unix) |
@@ -596,6 +642,16 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_attr_builtin.rs` | `attr_flatten_comprehensive_at_all_opt_levels` | \`fixtures/c/attr_flatten_full.c\` | run | T0 · cfg(unix) |
 | `tests/integration/c_attr_builtin.rs` | `attr_flatten_asm_no_call_to_inlined` | (inline) | compile | T0 |
 | `tests/integration/c_attr_builtin.rs` | `attr_target_clones_ifunc_symbols` | \`fixtures/c/attr_target_clones.c\` | compile | T0 · cfg(unix) |
+| `tests/integration/c_attr_builtin.rs` | `attr_target_clones_select_resolver_dispatch_order` | \`fixtures/c/attr_target_clones_select.c\` | compile | T0 · cfg(unix) |
+| `tests/integration/c_attr_builtin.rs` | `attr_target_clones_resolver_bits_come_from_cpu_isa_table` | \`fixtures/c/attr_target_clones.c\` | compile | T0 · cfg(unix) |
+| `tests/integration/c_attr_builtin.rs` | `target_clones_runtime_resolves_to_non_default_variant` | \`fixtures/c/attr_target_clones_selected.c\` | run | T0 · cfg(unix) |
+| `tests/integration/c_attr_builtin.rs` | `attr_target_clones_ifunc_behavior_selects_non_default` | \`fixtures/c/attr_target_clones_ifunc_behavior.c\` | cross-check | T0 · cfg(unix) |
+| `tests/integration/c_attr_builtin.rs` | `attr_target_clones_cpu_builtin_is_real_implementation` | \`fixtures/c/attr_target_clones_cpu_builtin.c\` | cross-check | T0 · cfg(unix) |
+| `tests/integration/c_attr_builtin.rs` | `attr_target_clones_cpu_supports_matrix_matches_gcc` | \`fixtures/c/attr_target_clones_cpu_matrix.c\` | cross-check | T0 · cfg(unix) |
+| `tests/integration/c_attr_builtin.rs` | `attr_target_clones_cpu_is_model_names_match_gcc` | \`fixtures/c/attr_target_clones_cpu_is_matrix.c\` | cross-check | T0 · cfg(unix) |
+| `tests/integration/c_attr_builtin.rs` | `attr_target_clones_cpu_indicator_classify_ids_come_from_classify_table` | \`fixtures/c/attr_target_clones_cpu_is_matrix.c\` | compile | T0 · cfg(unix) |
+| `tests/integration/c_attr_builtin.rs` | `target_clones_builtin_linker_static_binds_default_and_announces` | (inline) | run | T0 · cfg(unix) |
+| `tests/integration/c_attr_builtin.rs` | `cpu_builtin_supports_runs_under_builtin_linker_static` | (inline) | run | T0 · cfg(unix) |
 | `tests/integration/c_attr_builtin.rs` | `m23_attr_deprecated_compiles_and_runs` | \`fixtures/c/attr_deprecated.c\` | run | T0 · cfg(unix) |
 | `tests/integration/c_attr_builtin.rs` | `m23_attr_ctor_priority_orders_correctly` | \`fixtures/c/attr_ctor_priority.c\` | run | T0 · cfg(unix) |
 | `tests/integration/c_attr_builtin.rs` | `m23_builtin_dbg_compiles_and_runs` | \`fixtures/c/builtin_dbg.c\` | run | T0 · cfg(unix) |
@@ -802,7 +858,7 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_abi_vararg.rs` | `va_arg_mix_int128_11named_cross_tu_gcc_interop` | \`fixtures/c/va_arg_mix/int128_11named_callee.c\` \`fixtures/c/va_arg_mix/int128_11named_caller.c\` | cross-check | T0 · cfg(unix) |
 | `tests/integration/c_abi_vararg.rs` | `va_arg_mix_ld80_vararg_cross_tu_gcc_interop` | \`fixtures/c/va_arg_mix/ld80_vararg_callee.c\` \`fixtures/c/va_arg_mix/ld80_vararg_caller.c\` | cross-check | T0 · cfg(unix) |
 | `tests/integration/c_abi_vararg.rs` | `va_arg_mix_ld80_namedparam_cross_tu_gcc_interop` | \`fixtures/c/va_arg_mix/ld80_namedparam_callee.c\` \`fixtures/c/va_arg_mix/ld80_namedparam_caller.c\` | cross-check | T0 · cfg(unix) |
-| `tests/integration/c_abi_vararg.rs` | `va_arg_xfail_vla_agg_via_va_arg_still_diverges_from_gcc` | \`fixtures/c/va_arg_xfail/vla_agg_via_va_arg.c\` | run | T0 · cfg(unix) |
+| `tests/integration/c_abi_vararg.rs` | `va_arg_vla_agg_via_va_arg_matches_gcc_at_all_levels` | \`fixtures/c/va_arg/vla_agg_via_va_arg.c\` | cross-check | T0 · cfg(unix) |
 | `tests/integration/c_link_debug.rs` | `debug_sections_emitted_with_g_flag` | (inline) | compile | T0 |
 | `tests/integration/c_link_debug.rs` | `sanitizer_metadata_section_emitted` | (inline) | compile | T0 |
 | `tests/integration/c_link_debug.rs` | `eh_frame_with_frame_pointer` | (inline) | compile | T0 |
@@ -838,7 +894,7 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_link_debug.rs` | `elf64_symtab_matches_gabi_layout` | (inline) | compile | T0 · cfg(unix) |
 | `tests/integration/c_link_debug.rs` | `gnu_hash_section_content_valid` | (inline) | run | T0 · cfg(unix) |
 | `tests/integration/c_link_debug.rs` | `eh_frame_hdr_content_has_fde` | (inline) | compile | T0 · cfg(unix) |
-| `tests/integration/c_link_debug.rs` | `ifunc_resolver_runtime` | \`fixtures/c/attr_ifunc.c\` | compile | T0 · cfg(unix) |
+| `tests/integration/c_link_debug.rs` | `ifunc_resolver_runtime` | \`fixtures/c/attr_target_clones_ifunc_behavior.c\` | compile | T0 · cfg(unix) |
 | `tests/integration/c_link_debug.rs` | `relro_pie_has_gnu_relro_segment` | (inline) | run | T0 · cfg(unix) |
 | `tests/integration/c_link_debug.rs` | `bind_now_dynamic_has_bind_now_flag` | (inline) | run | T0 · cfg(unix) |
 | `tests/integration/c_link_debug.rs` | `symver_directive_compiles` | (inline) | compile | T0 |
@@ -875,6 +931,8 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_link_debug.rs` | `shf_merge_strings_flags_and_payload_are_read_from_section_headers` | \`fixtures/c/shf_merge_strings.c\` | compile | T0 · cfg(unix) |
 | `tests/integration/c_link_debug.rs` | `tls_model_attr_fixture_lays_out_tbss_and_emits_tlsdesc_on_a64` | \`fixtures/c/tls_model_attr.c\` | compile | T0 · cfg(unix) |
 | `tests/integration/c_link_debug.rs` | `wcs_libc_call_passes_through` | (inline) | compile | T0 |
+| `tests/integration/c_link_debug.rs` | `target_clones_link_mode_is_announced_on_both_paths` | (inline) | run | T0 · cfg(unix) |
+| `tests/integration/c_link_debug.rs` | `target_clones_libc_links_via_host_cc_and_builtin_failure_is_attributed` | (inline) | run | T0 · cfg(unix) |
 | `tests/integration/c_cross.rs` | `int128_mul_div_mod_reach_machine_codegen` | (inline) | compile | T0 |
 | `tests/integration/c_cross.rs` | `aarch64_hello_cross_compile` | (inline) | compile | T0 |
 | `tests/integration/c_cross.rs` | `aarch64_ir_add_cross_compile` | (inline) | compile | T0 |
@@ -957,6 +1015,7 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_cross.rs` | `riscv_d_extension_emits_double_precision_ops_per_function` | \`fixtures/c/riscv_d_extension.c\` | compile | T0 · cfg(unix) |
 | `tests/integration/c_cross.rs` | `naked_nonx86_bodies_skip_prologue_and_auto_return` | \`fixtures/c/naked_nonx86.c\` | compile | T0 · cfg(unix) |
 | `tests/integration/c_cross.rs` | `arm32_member_offset_reads_use_exact_fp_immediates` | \`fixtures/c/arm_member_offset.c\` | compile | T0 · cfg(unix) |
+| `tests/integration/c_cross.rs` | `stack_only_targets_never_silently_ignore_register_homes` | (inline) | compile | T0 · cfg(unix) |
 | `tests/integration/c_sanitizer.rs` | `md_dependency_file_lists_includes` | (inline) | compile | T0 |
 | `tests/integration/c_sanitizer.rs` | `dep_file_uses_backslash_continuations` | (inline) | compile | T0 |
 | `tests/integration/c_sanitizer.rs` | `dep_file_mp_emits_phony_targets` | (inline) | compile | T0 |
@@ -1212,6 +1271,56 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/opt.rs` | `opt_loop_unroll_o3_run_returns_zero` | \`fixtures/opt/unroll.c\` | run | T0 · cfg(unix) |
 | `tests/integration/opt.rs` | `opt_loop_vectorize_o3_run_returns_zero` | \`fixtures/opt/vecopt.c\` | run | T0 · cfg(unix) |
 | `tests/integration/opt.rs` | `ffast_math_cli` | (inline) | compile | T0 |
+| `tests/integration/opt_licm.rs` | `licm_while_carried_matches_gcc_at_all_levels` | \`fixtures/opt/licm_while_carried.c\` | cross-check | T0 |
+| `tests/integration/opt_licm.rs` | `licm_do_while_carried_matches_gcc_at_all_levels` | \`fixtures/opt/licm_do_while_carried.c\` | cross-check | T0 |
+| `tests/integration/opt_licm.rs` | `licm_hoist_order_matches_gcc_at_all_levels` | \`fixtures/opt/licm_hoist_order.c\` | cross-check | T0 |
+| `tests/integration/opt_licm.rs` | `licm_invariant_for_matches_gcc_at_all_levels` | \`fixtures/opt/licm_invariant_for.c\` | cross-check | T0 |
+| `tests/integration/opt_licm.rs` | `licm_call_global_matches_gcc_at_all_levels` | \`fixtures/opt/licm_call_global.c\` | cross-check | T0 |
+| `tests/integration/opt_licm.rs` | `licm_volatile_read_matches_gcc_at_all_levels` | \`fixtures/opt/licm_volatile_read.c\` | cross-check | T0 |
+| `tests/integration/opt_licm.rs` | `licm_never_empties_a_while_body` | \`fixtures/opt/licm_while_carried.c\` | run | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `ssa_gate_switch_loop_matches_gcc_at_all_levels` | \`fixtures/opt/ssa_gate_switch_loop.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `ssa_order_multi_assign_matches_gcc_at_all_levels` | \`fixtures/opt/ssa_order_multi_assign.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `ssa_loop_shapes_match_gcc_at_all_levels` | \`fixtures/opt/ssa_loop_shapes.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `ssa_rebuild_inline_order_matches_gcc_at_all_levels` | \`fixtures/opt/ssa_rebuild_inline_order.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `ssa_addr_taken_local_matches_gcc_at_all_levels` | \`fixtures/opt/ssa_addr_taken_local.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `ssa_unroll_nested_iv_matches_gcc_at_all_levels` | \`fixtures/opt/ssa_unroll_nested_iv.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `gvn_loop_copied_iv_matches_gcc_at_all_levels` | \`fixtures/opt/gvn_loop_copied_iv.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `underscore_locals_match_gcc_at_all_levels` | \`fixtures/opt/underscore_locals.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `ssa_mem_rmw_matches_gcc_at_all_levels` | \`fixtures/opt/ssa_mem_rmw.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `c_array2d_global_stride_matches_gcc_at_all_levels` | \`fixtures/c/array2d_global_stride.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `ssa_pipe_reduction_matches_gcc_at_all_levels` | \`fixtures/opt/ssa_pipe_reduction.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `ssa_pipe_nested_matches_gcc_at_all_levels` | \`fixtures/opt/ssa_pipe_nested.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `ssa_pipe_chain_matches_gcc_at_all_levels` | \`fixtures/opt/ssa_pipe_chain.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `ssa_pipe_default_on_changes_the_product` | \`fixtures/opt/ssa_pipe_chain.c\` | compile | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `ssa_regalloc_locals_match_gcc_at_all_levels` | \`fixtures/opt/ssa_regalloc_locals.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `loop_multi_exit_matches_gcc_at_all_levels` | \`fixtures/c/loop_multi_exit.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `plain_loops_still_go_through_ssa` | (inline) | compile | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `loop_exit_ownership_shapes_match_gcc_at_all_levels` | \`fixtures/opt/loop_exit_ownership.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `loop_exit_ownership_boundary_matches_gcc_at_all_levels` | \`fixtures/opt/loop_exit_ownership_adv.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `vla_and_flexible_array_match_gcc_at_all_levels` | \`fixtures/c/vla.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `subobject_member_addr_matches_gcc_at_all_levels` | \`fixtures/c/subobject_addr.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `pointer_to_array_param_matches_gcc_at_all_levels` | (inline) | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `pointer_to_array_typedef_matches_gcc_at_all_levels` | (inline) | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `lvalue_addr_rows_match_gcc_at_all_levels` | \`fixtures/c/lvalue_addr_rows.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `link_only_defects_survive_all_levels` | (inline) | run | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `ssa_regalloc_reaches_the_product` | (inline) | compile | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `eh_landing_pad_functions_are_never_auto_bound` | (inline) | compile | T0 · cfg(unix) |
+| `tests/integration/opt_ssa_gate.rs` | `nested_function_bodies_are_never_auto_bound` | (inline) | compile | T0 · cfg(unix) |
+| `tests/integration/opt_ssa_gate.rs` | `frame_pointer_mode_keeps_calls_aligned_and_fde_distinct` | \`fixtures/opt/frame_pointer_aligned_calls.c\` | cross-check | T0 · cfg(unix) |
+| `tests/integration/opt_ssa_gate.rs` | `dce_label_after_return_minimal_matches_gcc_at_all_levels` | \`fixtures/opt/dce_label_after_return_minimal.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `loop_exit_ownership_goto_matches_gcc_at_all_levels` | \`fixtures/opt/loop_exit_ownership_goto_pending.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `nested_func_symbol_facts_survive_parallel_codegen` | \`fixtures/opt/nested_func_symbol_facts.c\` | cross-check | T0 · cfg(unix) |
+| `tests/integration/opt_ssa_gate.rs` | `vla_runtime_size_identity_matches_gcc_at_all_levels` | \`fixtures/opt/vla_runtime_size_identity.c\` | cross-check | T0 |
+| `tests/integration/opt_ssa_gate.rs` | `ext_pool_hands_out_no_homes_until_scratch_respects_occupancy` | (inline) | compile | T0 |
+| `tests/integration/p16_rotation.rs` | `p16_rotation_fixture_matches_gcc_at_all_levels` | \`fixtures/opt/ssa_pipe_rotation.c\` | cross-check | T0 |
+| `tests/integration/p16_rotation.rs` | `p16_rotation_accepts_depth_two_loops_with_own_cells` | \`fixtures/opt/ssa_pipe_rotation.c\` | compile | T0 |
+| `tests/integration/p16_rotation.rs` | `p16_rotation_emits_warmup_kernel_and_drain` | \`fixtures/opt/ssa_pipe_rotation.c\` | compile | T0 |
+| `tests/integration/p16_rotation.rs` | `p16_rotation_off_reverts_to_the_old_conservative_rejection` | \`fixtures/opt/ssa_pipe_rotation.c\` | compile | T0 |
+| `tests/integration/p16_rotation.rs` | `p16_pipe_off_gives_the_pre_pipelining_product` | \`fixtures/opt/ssa_pipe_rotation.c\` | compile | T0 |
+| `tests/integration/p16_rotation.rs` | `p16_rotation_cell_names_respect_existing_user_locals` | \`fixtures/opt/ssa_pipe_rotation.c\` | compile | T0 |
+| `tests/integration/p16_rotation.rs` | `p16_gate_fixture_acceptance_count_grows_by_the_rotated_loop` | \`fixtures/opt/ssa_pipe_chain.c\` | compile | T0 |
+| `tests/integration/p16_rotation.rs` | `p16_rotation_every_slot_is_written_before_its_first_read` | \`fixtures/opt/ssa_pipe_rotation.c\` | compile | T0 |
+| `tests/integration/p16_rotation.rs` | `p16_rotation_runtime_values_are_the_gcc_ones` | \`fixtures/opt/ssa_pipe_rotation.c\` | cross-check | T0 |
 | `tests/integration/xfail.rs` | `objtool_xfail_cant_decode_instruction` | (inline) | compile | T0 · cfg(unix) |
 | `tests/integration/xfail.rs` | `objtool_xfail_cant_find_starting_instruction` | (inline) | compile | T0 · cfg(unix) |
 | `tests/integration/xfail.rs` | `objtool_xfail_cant_find_jump_dest` | (inline) | compile | T0 · cfg(unix) |
@@ -1242,13 +1351,27 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/glue_misc.rs` | `multi_file_parallel_compile` | (inline) | compile | T0 |
 | `tests/integration/glue_misc.rs` | `multi_file_parallel_byte_identical` | (inline) | compile | T0 |
 | `tests/integration/glue_misc.rs` | `multi_file_rejects_output_flag` | (inline) | compile | T0 |
+| `tests/integration/parallel_rodata.rs` | `parallel_rodata_shared_string_literals_match_serial_object` | (inline) | compile | T0 |
+| `tests/integration/parallel_rodata.rs` | `parallel_rodata_shared_float_and_x87_constants_match_serial` | (inline) | compile | T0 |
+| `tests/integration/parallel_rodata.rs` | `parallel_rodata_snapshot_prefix_offset_is_not_shifted` | (inline) | compile | T0 |
+| `tests/integration/parallel_rodata.rs` | `parallel_rodata_compound_literal_and_shared_string_match_serial` | (inline) | compile | T0 |
+| `tests/integration/parallel_rodata.rs` | `parallel_rodata_fixture_main_c_is_byte_identical` | \`fixtures/c/main.c\` | compile | T0 |
+| `tests/integration/parallel_rodata.rs` | `parallel_rodata_object_independent_of_worker_degree` | (inline) | compile | T0 |
+| `tests/integration/parallel_rodata.rs` | `parallel_rodata_object_reproducible_across_repeated_parallel_runs` | (inline) | compile | T0 |
+| `tests/integration/parallel_rodata.rs` | `parallel_rodata_parallel_eligibility_check_has_teeth` | (inline) | compile | T0 |
+| `tests/integration/parallel_rodata.rs` | `parallel_rodata_g_build_non_debug_sections_match_serial` | (inline) | compile | T0 |
+| `tests/integration/dwarf_gdb.rs` | `gdb_reads_dcc_debug_info_locals_through_reg_and_fbreg` | (inline) | run | T0 · cfg(unix) |
+| `tests/integration/dwarf_gdb.rs` | `gdb_line_breakpoint_binds_on_line_that_has_a_dwarf_row` | (inline) | run | T0 · cfg(unix) |
+| `tests/integration/dwarf_gdb.rs` | `debug_info_cu_range_spans_all_functions_with_one_die_per_function` | (inline) | compile | T0 · cfg(unix) |
+| `tests/integration/dwarf_gdb.rs` | `gdb_parallel_o2_keeps_statement_rows_and_register_home` | (inline) | run | T0 · cfg(unix) |
 | `tests/cpp_abi_gcc_cross_check.rs` | `cpp_abi_virtual_group` | \`fixtures/cpp_abi_virtual\` | cross-check | T0 · file-cfg(unix) |
 | `tests/cpp_abi_gcc_cross_check.rs` | `cpp_abi_lifecycle_group` | \`fixtures/cpp_abi_lifecycle\` | cross-check | T0 · file-cfg(unix) |
 | `tests/cpp_abi_gcc_cross_check.rs` | `cpp_abi_overload_group` | \`fixtures/cpp_abi_overload\` | cross-check | T0 · file-cfg(unix) |
 | `tests/cpp_abi_gcc_cross_check.rs` | `cpp_abi_rtti_group` | \`fixtures/cpp_abi_rtti\` | cross-check | T0 · file-cfg(unix) |
 | `tests/cpp_abi_gcc_cross_check.rs` | `cpp_abi_eh_group` | \`fixtures/cpp_abi_eh\` | cross-check | T0 · file-cfg(unix) |
 | `tests/cpp_abi_gcc_cross_check.rs` | `cpp_abi_template_group` | \`fixtures/cpp_abi_template\` | cross-check | T0 · file-cfg(unix) |
-| `tests/cpp_abi_gcc_cross_check.rs` | `cpp_abi_groups_are_all_covered` | \`fixtures/cpp_abi_virtual\` \`fixtures/cpp_abi_lifecycle\` \`fixtures/cpp_abi_overload\` `+3 more` | compile | T0 · file-cfg(unix) |
+| `tests/cpp_abi_gcc_cross_check.rs` | `cpp_abi_c_style_decls_group` | \`fixtures/cpp_abi_c_style_decls\` | cross-check | T0 · file-cfg(unix) |
+| `tests/cpp_abi_gcc_cross_check.rs` | `cpp_abi_groups_are_all_covered` | \`fixtures/cpp_abi_virtual\` \`fixtures/cpp_abi_lifecycle\` \`fixtures/cpp_abi_overload\` `+4 more` | compile | T0 · file-cfg(unix) |
 | `tests/cpp_abi_gcc_cross_check.rs` | `cpp_abi_fixtures_are_standard_cxx` | (inline) | cross-check | T0 · file-cfg(unix) |
 | `tests/errors.rs` | `diagnostic_error_snapshots` | (inline) | compile | T0 |
 | `tests/errors.rs` | `e0100_no_input_file_cli` | (inline) | compile | T0 |
@@ -1340,4 +1463,5 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/reproducibility.rs` | `o0_and_o1_stay_byte_reproducible` | (inline) | compile | T0 |
 | `tests/reproducibility.rs` | `linked_executable_is_byte_reproducible` | (inline) | compile | T0 |
 | `tests/reproducibility.rs` | `rebuild_block_uses_source_declaration_order` | (inline) | compile | T0 |
+| `tests/reproducibility.rs` | `parallel_codegen_preserves_program_level_facts` | \`fixtures/c/parallel_global_facts.c\` | compile | T0 |
 <!-- END GENERATED -->

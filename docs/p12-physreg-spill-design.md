@@ -1188,14 +1188,19 @@ SSA（§11.11 的两道闸）⇒ 不会有 Spill 家，所以今天无害；一�
 | N2 | `-fno-omit-frame-pointer` 下 FDE 把 r13 的 `DW_CFA_offset` 因子硬编码成 2（该是 3），与 rbp **同址** | 产物里两条 `at cfa-16` ⇒ 展开穿过 FP 帧时 r13 被恢复成 rbp 的值 | `elf/output.rs:790-792` | EH/unwind 与寄存器所有权共用的那张表错了；5.2c 需要它同时对 |
 | N3 | 同一 FP 模式的序言两次 push ⇒ 体内 `rsp ≡ 8 (mod 16)` | 实测 `./p8c_fp` SIGSEGV(139)，默认档正常 | `emit/functions.rs:230-236` | 与本轮守护撞上的是同一条不变式（所以 N3 未修时守护只能靠自己的对齐补偿） |
 | N4 | ~~clobber/绑定命中 `%r13`/`%rsp`（CFA、帧基址、栈指针）无任何判据无诊断，且 `-O0` 照做、`-O2` 静默降级成栈槽~~ **已修（§11.14 的 F5）**：帧基址进守护名单；绑定侧只拒 `%r13`/`%rbp`（`%rsp` 作为内核在用的只读别名仍允许），clobber 侧拒 `%rsp` | 旧实测：`register asm("r13")` -O0 真发 `mov %rax,%r13`，-O2 变 `mov %rax,-0x48(%r13)`；`::: "r13"` 无守护无报错（-O0/-O2 都 SIGSEGV） | `RegBank::ban`（池外号返 false）、`asm_clobber_held_regs` | 5.2 的「干涉对象」需要的那条「不可守不可绑，碰到就报错」判据已落 |
-| N5 | `parser.rs::collect_upvars` 漏两类引用：嵌套体里 VLA **声明维度**引的外层变量、以及 `Stmt::Invoke`/`EhLandingPad` 子树 | 嵌套体内 `long a[n]; sizeof a` 的 TU rc 不定（三次跑出 0/0/128），gcc 是 48 | `src/parser.rs`（`collect_upvars_expr`/`collect_upvars_stmt`） | 收窄「捕获名集」之前必须补完，否则漏收的名字会被绑走 |
-| N6 | 语句表达式里**未被使用的标号**使外层二元式的右操作数丢值 | `(q+r) + ({ skip: g(s); })` 得 6（gcc 10）；`t * ({ skip: g(s); })` 得 5（gcc 25）；四档都坏，与寄存器分配无关 | `gen_expr_stmt_expr` 一族（本轮未定位到行） | 它会挡住 5.2 的一种测试形状（逃逸 asm + 活溅出槽同时在一条语句表达式里） |
-| N7 | 用户 asm 模板里 `call` 一个 **static** 函数时，`-O2` 下符号被改名 ⇒ 链接失败 | `/usr/bin/ld: undefined reference to 'leaf'`（改为外部链接就正常） | 静态名 mangling 与 asm 文本不交汇的地方 | 本轮写守护夹具时实碰到的；也是那条 ABI 不变式相关的最早信号 |
-| N8 | 逸出判据有两套：`ast_gvn::walk_addr_of` 不递归 `Decl::Func`，而后端有一份**显式递归**的同名判据 | 嵌套体里的 `&acc` 只有后端知道，分配器的 `escaped` 看不到 | `ast_gvn.rs:355-366` vs `emit/functions.rs:79-96` | H4 的同一条病灶（所有权/逸出判据多套）；5.2b 收窄前必须合流 |
+| N5 | ~~`parser.rs::collect_upvars` 漏两类引用：嵌套体里 VLA **声明维度**引的外层变量、以及 `Stmt::Invoke`/`EhLandingPad` 子树~~ **已修（§11.19）**：三条遍历全部改成穷举匹配（不留 `_ => {}`），新增类型树、形参 `vla_dim`、designator 下标、`sizeof/alignof/offsetof` 四条通路 | 旧实测：嵌套体内 `long a[n]; sizeof a` 的 TU 里 `sizeof` 恒为 0（三次跑出 0/0/128），gcc 是 48；同一形状在 `int k = n;` 之后写就对，因为那条走的是 init | `src/parser.rs`（`collect_upvars`/`_stmt`/`_expr`/`_type`/`_param`/`_designator`） | 捕获名集现在完整；「漏收的名字会被绑走」这条前提已排除 |
+| N6 | ~~语句表达式里**未被使用的标号**使外层二元式的右操作数丢值~~ **已修（§11.19）**：取值前先剥掉（并照常发射）`Stmt::Label` 外壳 | `(q+r) + ({ skip: g(s); })` 得 6（gcc 10）；`t * ({ skip: g(s); })` 得 5（gcc 25）；四档都坏，与寄存器分配无关 | `emit/expr/dispatch.rs::gen_expr` 的 `Expr::StmtExpr` arm（新增 `emit_tail_labels` + `gen_stmt_expr_value`）；顺手删掉零调用者的影子副本 `gen_expr_stmt_expr` | 它会挡住 5.2 的一种测试形状（逃逸 asm + 活溅出槽同时在一条语句表达式里）——现在该形状可以进了 |
+| N7 | ~~用户 asm 模板里 `call` 一个 **static** 函数时，`-O2` 下符号被改名 ⇒ 链接失败~~ **按 gcc 复测后推翻（§11.19）**：不是 dcc 改名。C 侧不引用时 gcc -O2 与 dcc -O2 **一摸一样**地把定义丢掉（两侧同一个 `undefined reference to 'leaf'`）；C 侧也引用时 dcc 保持源名并可链接，gcc -O2 自己链不上 | 实测：`nm` 两侧都是 `U leaf`（不是 `leaf.1` 那种改名形态）；`resolve_global_key` 只 mangle 函数内 static **局部**，不动 file-scope 函数符号 | `src/semantics`/`elf/symbols.rs` 无需改；新增用例钉住「符号名 = 源名」 | 旧记录把它当成 dcc 的缺陷，现在改写为「两侧共有的外部限制 + 一条保持源名的回归钉」 |
+| N8 | ~~逸出判据有两套：`ast_gvn::walk_addr_of` 不递归 `Decl::Func`，而后端有一份**显式递归**的同名判据~~ **已修（§11.19）**：递归内建到判据本身（连块级 `typedef`/asm 一起），后端那份手写递归删除 | 嵌套体里的 `&acc` 只有后端知道，分配器的 `escaped` 看不到 | `ast_gvn.rs::walk_addr_of` vs `emit/functions.rs::collect_addr_escaped` | H4 的同一条病灶（所有权/逸出判据多套）；5.2b 收窄前提已具备 |
+| N9 | **新（§11.19）**：VLA/VM 聚合的栈槽是**元数据槽**，语义层却把它归到「槽位即对象地址」⇒ 基址发成 `lea` 而非 `mov`；并且带运行时尺寸对象的函数走 SSA 往返后**身份会丢**（`var_map` 与 `vla_offsets` 两张表都命中时旧顺序报成 Local） | `long c[n]; c[2]=7; sizeof c` 返回 **7**（被写进了 size 槽）；`int n=c+3; long a[n]; …; sizeof a/8 + a[2]` 在 -O2/-O3 得 252 而 gcc/-O0/-O1 得 255；`struct{char data[size];}` 作为变参实参传出去时 -O2 **SIGSEGV(139)** | `semantics.rs::address_from_storage`（新增 VLA 臂）+ `mem/object_resolver.rs::resolve_identity`（`vla_offsets` 优先）+ `opt.rs::block_has_unsafe_ssa_pattern`（VLA/VM 聚合整函数退 AST） | 与 D8（va_arg 取 VLA 聚合）同源；修到位后 D8 **四档全部转正**，夹具已从 `c/va_arg_xfail/` 移入 `c/va_arg/` |
+| N10 | **已修（§11.33）**：并行发射下每个 worker 对自己的 `string_pool` 快照去重，跨 worker 重复的字符串（与浮点常量）各存一份 | 修复前：HEAD 二进制 `/tmp/dcc_head` 在**整 `.o` 逐字节**判据下 `RODATA-ONLY-MISMATCH 42` + `RODATA-DIFF(-g) 44`（`CODEGEN_DIFF_COUNT=107`；本轮工作区里 44 的差额是 §11.26 之后一并消掉的 N12 同族），`main.c` 的 `.rodata` 56B（并行）对 28B（串行）。修后实测（真树，二进制 md5 `6ef06181…`）：293 个夹具 **OK 285 / SKIP 8，硬失败类全为 0（含新的 `-g` 层 `RODATA-DIFF(-g)` / `OTHER-DIFF(-g)`）**；`-g` 下非 debug/BTF 节也逐字节全等（G-OK 127 + G-DEBUGONLY-DIFF 158 + SKIP 8） | `parallel/orchestration.rs`：`emit_func_chunk` 回传 `pool_add`（内容键 + chunk 局部偏移），`merge_func_chunk` 用 `merge_chunk_rodata` 按内容键**重放**取代整块追加，按偏移的引用改走 `map_chunk_rodata_off`（不再有 `rodata_delta`） | 「并行不改产物」现在对 `.o` 的**非 debug 面**是无条件不变式：`check_parallel_vs_serial.sh` 已升级为整个 `.o` 逐字节相同（剔 Value 那个口子删除，`-g` 层也从「只比 `.text` + `.debug_info`」升级成整 `.o`），反向对照拿 HEAD 二进制跑同一判据 → rc=1；三档哈希与基线逐字节相同（grand `a4e47418…`）、`cargo test` 3333 条全绿。残留（另计，不属 N10）：`-g` 下 `.debug_line` / `.rela.debug_line` / `.BTF.ext` 三节仍差 158 个夹具，根因是 `FuncEmitChunk` 没带回三张行号表，修它要动 `codegen.rs` 的 chunk 结构与 `src/debug.rs`（本轮禁改），已在 §11.33 末尾登记 |
+| N12 | **新、已修（§11.26）**：并行 worker 重建 `Codegen` 时把文件作用域变量的程序级事实**占位**掉了（`ty: Type::Int`、`init: None`、`in_data_section: false`），`static_local_map` 更是根本不在下行快照里 | 旧实测：`unsigned char`/`_Bool` 全局的 1 字节加载在串行是 `movzbl`、并行是 `movsbl`（2–4 字节）；带静态局部的函数走「懒初始化 + 帧内槽」退化路，`static_local_arrays.c` 的 `.text` 串行 1458B / 并行 1610B；`builtin_static_chain.c` 连符号项都不一样 | `parallel/orchestration.rs::codegen_from_parallel` + `ParallelGlobalSnap`（本轮补了 `ty`/`init`/`in_data_section` 三个字段与 `static_local_map` 下行） | 它是 N1 的同一条病灶（程序级事实不过 worker）换了个面：N1 丢的是符号定义，N12 丢的是**类型与初值** ⇒ 选出的指令不同。修后 `.text`/符号项在 283 个夹具上全等（仅余 N10 的 `.rodata`） |
+| N11 | **新（§11.19）**：`emit_trampoline_to_stack` 按 `HashMap::keys()` 随机序发射多个 trampoline 的写入块 | 同一份源 8 连编：`lea -768(%r13)` 与 `lea -800(%r13)` 两块 4:4 互换 ⇒ **产物不可复现** | `emit/nested.rs` | 语料里从来没有含嵌套函数的夹具，所以一直绿的 `check_reproducible_output.sh` 从未触及这条 |
 
-除 N6/N7 是本轮写夹具时亲手碰到的，N1–N5、N8 由并行审计带回并各自附了复现路径。本轮已修
-其中三条：N4（保留号，见 §11.14 F5）、N2/N3（frame-pointer 档，见 §11.17）；其余仍未动，
-因为每一修都会改产物，必须单独一个阶段、单独一批 gcc 对照去做。
+除 N6/N7 是本轮写夹具时亲手碰到的，N1–N5、N8 由并行审计带回并各自附了复现路径。§11.14 修了
+F5（= N4）、§11.17 修了 N2/N3；**§11.19 修了 N1/N5/N6/N8 并推翻了 N7**，同时带回 N9/N11（已修）
+与 N10（已定位未修）。N9/N10/N11 与上一轮那四条同族（都是 H4「同一个事实两套判据/两个家」
+在别的轴上的表现），所以记在同一张表里。
 
 ### 11.14 同族修复 —— 声明通路补全与 cleanup 保住（已完工，产物变 2 行）
 
@@ -1353,3 +1358,1704 @@ callee-saved 做操作数时必须同时成立两件事 —— 序言那条保�
   **从未跑过**（本轮按用户要求暂停，不拿未跑过的东西当证据；三档哈希与
   9 个测试用例脚本不代替它）。
 
+
+### 11.19 相邻缺陷整组完工（N1/N5/N6/N7/N8 清账，带回 N9/N10/N11）
+
+本轮的目标是 §11.18 列的两组东西。结论先说清楚：**相邻缺陷那一组（N1/N5/N6/N7/N8）整组
+做完**，过程中实测到三条新缺陷（N9/N11 已修，N10 已定位未修）；§11.18 前半那些「必然改产物」
+的大件（晚分配搬进 late band、6.1 号→名三份、6.2 DWARF、6.3 P16、6.4 多后端、5.1 生产者与
+caller-saved）**本轮没有动**，理由与实测见本节末尾，不写成「下次再做」。
+
+为什么先做 N 组：它们是那几件大件的**前提**——5.2b/5.2c 需要捕获名集与逸出判据完整（N5/N8），
+6.x 与 5.1 需要「程序级事实在发射前定完、发射期只查不改」这条形状先立起来（N1 就是它的一次
+完整演练），而 N6 挡住了 5.2 的一种测试形状。
+
+**N5 —— `collect_upvars` 补完，并把三条遍历改成穷举**。旧形状只看 `v.init` 与语句，于是挂在
+**类型树**上的引用（VLA 声明维度、形参维度、`Param::vla_dim`、designator 下标、
+`sizeof/alignof/offsetof` 的操作数类型）全部静默漏收。修法是三条：新增 `collect_upvars_type`
+（递归 `Ptr/Array(Var)/Complex/Imaginary/Vector/Atomic/Func`）、`collect_upvars_param`
+（类型 + 被丢弃的最外层 `vla_dim`）、`collect_upvars_designator`（`Index/Range/Chain`），
+并且**把三个函数的 `_ => {}` 全部删掉**，逐个变体显式列出（叶子写成一臂）——以后新增
+`Expr`/`Stmt`/`Type` 变体会直接编不过，而不是静默漏一条通路（`Stmt::Invoke`/
+`Stmt::EhLandingPad` 就是原来漏掉的那两条）。
+实测（`tests/fixtures/opt/nested_vla_upvar_capture.c`）：修前 `long a[n];` 的 `sizeof a` 恒为 0
+（`d=14` 而 gcc 是 `d=72`），修后 -O0/-O1/-O2/-O3 四档与 gcc 同 stdout 同退出码 0。
+
+**N9 —— 同一条实测里带出来的真错值（与嵌套函数无关），以及它的 SSA 那一半**。
+`long c[n]; c[2]=7; sizeof c` 返回 **7**。根因：VLA/VM 聚合的栈槽是**元数据槽**
+（`gen_vla_alloc` 发 `mov %rsp,[off]`，槽内容才是动态数据区基址），而
+`semantics::address_from_storage` 那份匹配把 `(Stack, Array)` 一律归成
+`AddressBase::StackFrame` ⇒ 基址发成 `lea -96(%r13),%rax`（描述符自己的地址），
+元素读写落回**固定帧区**，先踩掉自己的 stride 槽（off+8）与 size 槽（off+16）。
+读写两侧同错所以「自洽」，`vlacst.c` 那种「写完再求和」的夹具恰好看不出来，
+`sizeof` 一读就露。修法：`Vla` 身份或 `ty.has_vla()` 时归 `StackSlotLoad`。
+
+同一件事在 -O2/-O3 还有**另一半**，而且它才是更难发现的那一半：
+`mem/object_resolver.rs::resolve_identity` 先查 `var_map`、后查 `vla_offsets`，而一个
+VLA 对象**同时**在两张表里（`register_var` 登名字，`gen_vla_alloc` 登描述符），于是
+它被报成 `Local`，`obj_type` 由 var_map 里那份类型快照推导；SSA 往返重建后那份快照
+不再带运行时维度 ⇒ 基址又回到 `lea`。实测两条：
+`int n=c+3; long a[n]; …; a[2]=7; sizeof a/8 + a[2] - 12` —— gcc/-O0/-O1 = 255 而
+-O2/-O3 = **252**；`struct { char data[size]; } a; … probe(1, a)` —— -O2/-O3 **SIGSEGV**
+（调用侧 `mov -104(%r13),%rcx; mov (%rcx),%rax` 解引用一个被数据踩掉的槽）。
+修法两处：把 `vla_offsets` 排在 `var_map` 前面（「这个槽的内容才是对象地址」是更强的
+事实，且与 `emit/addr.rs`、`emit_ident_base_addr` 这些**已经**先看 `vla_offsets` 的站点
+对齐），以及让**带运行时尺寸对象的函数整体退回 AST 路径**
+（`opt.rs::block_has_unsafe_ssa_pattern` 新增 `v.ty.has_vla()` 一条；同批补上
+`Stmt::Label` 的递归，否则标号语句体里的声明又是一次「只看顶层 item」的漏收）。
+为什么这里是闸而不是「把 IR 教好」：IR 里没有「运行时尺寸对象」的表示（尺寸槽、
+运行时 stride、地址身份三件都得新建），那与 §11.14 F4 处理 `cleanup` 时是同一条判断
+—— 先按同一口径把函数留在 AST 上，把 IR 表达能力本身当独立立项。
+副作用（好的方向）：**D8 因此整条修完** —— `va_arg` 取 VLA 聚合那份夹具四档全绿
+（修前旧二进制四档全 139），按它自己写的处置说明从 `c/va_arg_xfail/` 移入
+`c/va_arg/`（该目录由 `scripts/dcc_gcc_diff.sh` 全量扫，必须全绿），xfail 用例删除。
+**产物变化**：三档 873 行里变 **3 行** —— `tests/fixtures/c/vla.c` 的 -O0/-O2/-O3（唯一
+那份 VLA 夹具），逐行核对是 `lea -96(%r13)` → `mov -96(%r13),%rax` 这一族差异，加上
+-O2/-O3 那两行因为整函数退回 AST 路径而与 -O0 同形。
+
+**N8 —— 逸出判据收成一套**。`ast_gvn::walk_addr_of` 不递归 `Decl::Func`，后端
+`collect_addr_escaped` 因此自己手写了一份递归 —— §3 的 H4 形状。修法：递归内建进判据本身
+（顺带补块级 `Decl::Typedef`（VLA typedef）与块级 `Decl::GlobalAsm` 的内存约束操作数，并把
+`walk_addr_of` 的 `_ => {}` 删掉），后端那份手写递归删除，只留「每个顶层函数递一次」这一个
+入口。GVN 侧的效果是**更保守**（嵌套体里的 `&acc` 现在会让 `acc` 不参与合并），只丢优化不丢
+正确性，且带嵌套函数的函数今天根本不进 SSA，所以实测零 diff。
+判据：`ast_gvn::tests::addr_escaped_names_covers_every_escape_shape` 新增一行
+`int outer(void){ int acc = 0; auto void f(void){ *(&acc) = 1; } … }` 要求逸出集 = `["acc"]`；
+**退回就红已实测**（把那条递归换成空臂后该用例报 `left: [] right: ["acc"]`，恢复后全绿）。
+
+**N1 —— 并行 codegen 回收程序级符号事实**，三条一起做才成立：
+1. **唯一名改为发射前预分配**（`elf::prescan_nested_names`）。旧形状在 `compile_func` 里递增
+   全局计数 `nested_func_rename_counter` 并改写 `nested_func_renames`/`nested_func_parent`/
+   `nested_funcs` 三张表：每个 worker 都从同一份快照起号 ⇒ 实测**并行 `ib_add_b.0`、串行
+   `ib_add_b.1`**，两份产物永远对不上。预分配用与发射期同一个遍历器
+   `collect_direct_nested_funcs`，递归形状逐字 mirroring（先给本层全部编号再下探，下探时父名
+   换成刚分配的唯一名），所以串行侧的名字与编号**一字不改**（实测 `nm` 两侧同序同名）。
+   `nested_funcs` 的键从原名换成唯一名（实测没有任何一处按名字查它，只有两处 `keys()` 遍历）。
+2. **上行回传**：新增 `SymbolFacts{defined_funcs, func_sizes}`，`ParallelEmitCtx`（下行快照）与
+   `FuncEmitChunk`（上行）共用这**同一张字段表**，合并语义是「只插缺的」。为什么做成一个类型
+   而不是往 chunk 里再散加两个字段：N1 的病根就是「worker 新增的事实没有回程」，而散字段意味着
+   下行、重建、chunk、合并四处各记一份「哪几个字段算程序级」，将来新增一条事实只有一处可漏。
+   修前实测 `-O2 -c` 里六个嵌套函数符号**全是 `U`**（`undefined reference to 'ia_add_a.0'`），
+   `DCC_NO_PARALLEL=1` 立即恢复；修后 `t ia_add_a.0 … t nb_use_addr.5` 六条齐、`st_size` 非 0。
+3. **符号发射去重 + 定序**：`rel_symbols.rs` 里那段 per-decl 递归只能按**顶层父函数**查重命名表，
+   孙层查不到就静默跳过，于是还留着一条「兜住所有嵌套函数」的 `nested_funcs.keys()` 循环，
+   而它的去重守卫查的是 `self.sym_index` —— 那张表到本函数最后才建，此刻恒为空 ⇒ 每个嵌套
+   函数被发**两遍**（`nm` 实测同一符号两条同址项）。修法：删掉 per-decl 那份嵌套枚举（事实只有
+   `nested_funcs` 一份），保留唯一发射入口并按名字排序遍历；`elf/symbols.rs`（exec 档）同样排序。
+   这是「产物字节」级的改动，但只影响 `.symtab` 里嵌套函数项的**个数与顺序**，实测重复项归零。
+
+**N11 —— 本轮实测到的新可复现性缺陷**。`emit_trampoline_to_stack` 按 `HashMap::keys()` 发射多个
+trampoline 的写入块 ⇒ 同一份源 8 连编，`lea -768(%r13)` 与 `lea -800(%r13)` 两块 **4:4 互换**，
+`.s` 与 `.o` 都不复现。修法：按名字排序（槽位偏移本来就是 `gen_trampoline` 按源码序分配的，
+确定的只有发射序）。为什么它一直没被抓到：**语料里从来没有含嵌套函数的夹具**，所以一直全绿的
+`check_reproducible_output.sh`（5094 组合）根本推不到这条 —— 这也是本轮把嵌套函数夹具放进
+`tests/fixtures/opt/` 并配一条「同一份源连编两次必须字节相同」断言的原因。
+
+**N6 —— 语句表达式尾部的标签外壳**。`({ skip: g(s); })` 里最后一个 block-item 是
+`Stmt::Label{ stmt: Stmt::Expr }`，而取值分支的守卫写的是裸 `Stmt::Expr … if i == last_idx`，
+于是它落到「当普通语句发」那条丢弃结果的路径，dst 里剩的是**上一个操作数的残值**：实测
+`-O0` 得 5（= `q+r`，右操作数整个丢）、`-O2/-O3` 得 4211509（残值来自更上游）。修法：新增
+`emit_tail_labels`（剥壳**并照常发射**标号，`goto`/`&&label` 要它存在）与 `gen_stmt_expr_value`
+（把原来那段聚合取值逻辑从 arm 里提出来，两条路径共用一份）。顺手删掉 `emit/stmt.rs` 里
+`gen_expr_stmt_expr` 那份 **125 行、零调用者**的影子副本 —— 它正是 §11.14 F3 那轮补 `bind_decl_home`
+时被绕过的另一份：不在调用图里，所以补不到、也测不到，留着就是下一次「改了没生效」的坑。
+修后四档与 gcc 同为 `a=9 b=20 c=4 d=8 e=11 f=7 calls=14`，退出码 0。
+
+**N7 —— 按 gcc 复测后推翻旧结论**（不是 dcc 的缺陷）。同一份源三种形状各测一遍：
+C 侧**不**引用那个 file-scope static 函数时，`gcc -O2` 与 `dcc -O2` **一模一样**地把定义整个丢掉
+（两侧 `nm` 都是 `U leaf`、两侧链接都是同一个 `undefined reference to 'leaf'`）—— gcc 不把 asm
+文本算进符号引用分析，这是它的既有限制；C 侧也引用一次时 dcc 保持源名 `t leaf`、可链接可运行，
+而 gcc -O2 在这一档自己就链不上。所以旧记录里「-O2 下符号被改名」的归因不成立
+（`resolve_global_key` 只 mangle 函数内 static **局部**，不动 file-scope 函数符号）。
+新增用例 `asm_text_call_keeps_static_func_source_name_at_all_levels` 钉住真正该钉的那条不变式：
+asm 文本引用的符号名 = 源名、且必须是 `.text` 里的 LOCAL FUNC 定义项。oracle 取 gcc -O0，
+理由写在用例的文档注释里（不能拿一个自己链不上的档位当参照）。
+
+**N10 —— 已定位、本轮不修**：并行发射下每个 worker 只对自己的 `string_pool` 快照去重，跨 worker
+重复的字符串各存一份 ⇒ 283 个能编过的夹具里 **48 个**并行 `.o` 与串行不同（`main.c` 的 `.rodata`
+28 → 56 字节；`.text` 与符号表逐字节相同，所以不是错值，是膨胀 + 破坏「并行不改产物」）。
+为什么不在本轮顺手修：字符串的引用是**按内容**在 resolve 期定址的（`string_refs` 带 data），
+而浮点/x87 的引用是**按偏移**的，两者混在 `rodata` 这一坨带对齐的字节流里；要真正做到按内容
+去重，得把 rodata 的 interning 拆成「条目表 + 末端定址」，而那会改**所有含字符串的 TU** 的
+`.rodata` 布局（字符串整体挪到尾部）—— 那是又一次「必然改产物」的全语料对撞，与 §11.18 前半
+那几件同量级，只能独立立项。本轮的处理是：把「并行 == 串行」的判据按 `.text`+`.symtab` 写
+（而不是整文件字节），并在 §11.13 的 N10 那一行留下实测数字与修法方向。
+
+> **§11.26 勘误**：上面括号里那句「`.text` 与符号表逐字节相同」**当时就不成立**，
+> 它是拿一个只看整文件字节、把全部差异归给 N10 的粗判据得出的。本轮按节名逐个比：
+> 48 个 MISMATCH 里有 **6 个夹具的 `.text` 本身不同**（最多的一类是静态局部函数长了 150 多字节），
+> 另一个夹具连符号项（不只是地址）都不同 —— 那就是 N12。修后重测：`.text` 零差异、
+> 符号项零差异（只剩 `SECTION` 项的 Size 因 `.rodata` 膨胀而不同），N10 的实测数字从 48 校正为 **44**。
+
+**判据（本轮新增 6 条用例 + 1 个语料级探针）**：
+`nested_vla_upvar_capture_matches_gcc_at_all_levels`（N5/N9，四档 vs gcc）、
+`va_arg_vla_agg_via_va_arg_matches_gcc_at_all_levels`（D8 整条转正，四档 vs gcc；
+原来那条 xfail 用例已删、夹具已从 `c/va_arg_xfail/` 移入 `c/va_arg/`）、
+`vla_runtime_size_identity_matches_gcc_at_all_levels`（N9 的两半：把 `sizeof`、元素写
+与「整个 VLA 聚合作为变参实参」放在一起，才照得出「基址错但两侧自洽」）、
+`stmt_expr_labeled_tail_matches_gcc_at_all_levels`（N6，含「`goto` 用到标号」的反向对照）、
+`asm_text_call_keeps_static_func_source_name_at_all_levels`（N7）、
+`nested_func_symbol_facts_survive_parallel_codegen`（N1+N11：四档 vs gcc、并行与串行 `.text`
+逐字节相同、六个唯一名与编号逐个对上、每条符号恰好一项且非 UND、同一份源连编两次字节相同）。
+语料级：`.work_tmp/p12_base/check_parallel_vs_serial.sh`（283 个夹具逐个比并行/串行 `.o`，
+本轮实测 MISMATCH 48，全部落在 N10 那一处；修 N1 之前这个数字里还混着嵌套函数那一族）。
+
+**本轮没动的几件（原本列了六件，6.4 与 6.1 已在 §11.21 / §11.22 完工），以及为什么不是「先放着」**：
+- ~~晚分配搬进 late band~~ —— **已在 §11.27 完工**（步 1→`E1134` 封死兜底、步 2→四族
+  预算可证、步 3→带与游标，`min_used` 夹逼与锚点下移已删）；§11.23 当年回退的那一步
+  现在能做了，原因就一句：带约束的对象集合从「任意名字」变成了「后端自己那四族」。
+- Phase 5.1 生产者与 caller-saved：三条架构级障碍原样存在（`gen_expr(x, 0)` 那 194 处「结果恒在
+  %rax」、家的粒度是声明级而 caller-saved 的存活是程序点级、序言只有 4 条 callee-saved 保存位）。
+  本轮实测新增一条支持证据：VLA 那一族「同一个对象两个家」（N9）说明**基址/槽位这类事实也必须
+  单源**，在补上 caller-saved 保存通道之前让分配器产出 `Spill`，只会把错值从「换个槽」升级成
+  「换个基址」。
+- ~~6.1 号→名那三份~~ —— **已在 §11.22 完工**（本轮实测确认现存不是三份而是**四份**反向表，
+  其中一份还躲在从没被喂过数据的死路径里、已经把 `rax` 输出成 `%rrax`）。
+- ~~6.2 DWARF 寄存器位置 / 6.3 P16 多形态流水 / 6.4 多后端硬错误：未开工~~
+  —— **6.4 已在 §11.21 完工**（同一轮里接着做的）；6.2/6.3 仍未开工，判据与障碍见 §7 Phase 6。
+- §8 的内核全树构建与 QEMU 启动矩阵：本轮**仍未跑**（N1 修的是并行 codegen 的嵌套函数符号，
+  真实规模验证路径只有这一条；三档哈希与 9 个测试用例脚本不代替它）。
+
+**新基线**：本轮产物变化 = N9 的 `tests/fixtures/c/vla.c` 三行（其余 870 行逐字节不变；
+三档 aggregate：`-O0 9a27b130b4620040…`、`-O2 c36b1e80742155c473a4…`、`-O3 593d8309a5ccb1e513d6…`，grand
+`04da5a61592950a6…`，873 行 / 24 条 FAIL-NOARTIFACT，与开工基线同数）；表与
+9 个测试用例脚本的结果在 `.work_tmp/p12_base/verify_n5n11.txt`（表 `hash_n5n11.txt`；
+上一轮中途的 `hash_n5n11_r1.txt` 留着对比：从「只修消费侧基址」到「再加 SSA 闸」
+只再动 vla.c 的 -O2/-O3 两行）。
+
+**测试用例脚本的最新状态（本轮实跑，全绿）**：`cargo test`（lib 2117 + integration 1054 +
+其余共 8 个 target）**全绿**；`check_fixtures` / `check_fixtures_selftest` /
+`check_reproducible_output` / `check_rex_hygiene` / `check_pipe_structure` /
+`check_disasm_coverage` / `check_opt_equivalence`（**OPT-DIFF = 0**）/ `golden-cross` 全绿
+（N11 那条 trampoline 定序就落在 `check_reproducible_output` 的能力面里）。
+中途 `check_opt_equivalence` 一度是红的（2 条 OPT-DIFF 全在
+`c/va_arg_xfail/vla_agg_via_va_arg.c`：-O0 rc=0、-O2/-O3 rc=139）。它不是本轮引入的
+错编译：gdb 定位到崩溃在 `main+386 mov (%rcx),%rax`，而**用开工前的旧二进制跑
+同一份源，崩溃地址与指令一字不差**——旧记录里四档**全坑**，所以「档位等价」这条
+不变量被同样坑的 -O0 满过了；N9 把消费侧基址修好之后坑与不坑的差异才第一次
+被这条扫描抓到。本轮按§11.19 那两处修点把它**真正修完**（而不是把夹具移出扫描集），
+现在四档全绿、OPT-DIFF 归零。
+
+**顺手登记、顺手发现的一条工具债**：`scripts/gen_coverage_index.sh` 的判据表里没登记
+`run_gcc_cross_check_opt`/`run_exe_bounded`/`compile_asm_text_with_env`/`run_asm_output_test_flags`
+这四个 harness 助手（前一轮加 FP 夹具时就已经漏登记），本轮新用例用到它们 ⇒ JAC-UNMAPPED
+exit 1。已把这四条补进表里（含文件头那段推断表）。补完后脚本仍然 FAIL，但剩下的
+14 条全是 **STRUCT-HELPER**：`c_attr_builtin.rs::assert_dynamically_linked`、
+`c_link_debug.rs::dcc_link_capture_flags`、`opt_ssa_gate.rs::{assert_all_levels_match_gcc,
+asm_body, dcc_asm_with_pipe}` 等助手 `fn` 落在主题子文件里（§14 要求 `^fn` 数 == `#[test]` 数，
+助手应住 `tests/common/harness.rs`）。那是上一轮就存量的迁移债，不是本轮引入的，
+代价是 `docs/test_coverage.md` 本轮**没能**重生成（脚本 FAIL 时不写盘），新5 条用例
+暂时不在索引里 —— 把那五个助手搬进 harness 之后重跑一次即可一并补上。
+
+
+### 11.21 Phase 6.4 完工 —— 家的能力面显式声明、各 target 名字表、外加一条本来不存在的警告通道
+
+§11.19 末尾列的六件里，**6.4 已在同一轮接着做完**（本节记它；那份清单以本节为准）。
+§7 Phase 6.4 的原文要求两件事：在只支持栈的后端上「明确只支持栈」，并「让 Location 的
+非栈取值触发显式硬错误而不是静默忽略」。
+
+**修前的实测事实**：`Location` 与 `register_name` 在
+`src/codegen/{aarch64,riscv64,arm,mips}/` 里的出现次数是 **0** —— 四个后端整条不认识
+这两个字段。后果分两种，都是静默：
+
+* 分配器/折叠给出的 `Location::Reg` 读不到 ⇒ 变量回到栈槽，「谁持有这个值」就成了
+  两套事实（§3 的 H4 在别的后端上的复现）；
+* 用户写 `register unsigned long p asm("rbx")` 编到 aarch64 上退出码 0，而 `p` 其实
+  住在栈槽里、读出来是未初始化的值。交叉 gcc 在这里是
+  `error: invalid register name for ‘p’`（实测 aarch64-linux-gnu-gcc-13、
+  riscv64-linux-gnu-gcc、mips-linux-gnu-gcc-12 三家同判据）。
+
+**新增的单一判据处 `codegen::shared::homes`**：
+
+1. `home_support(arch)` 按七个架构**穷举**声明能力面（不留 `_`：新增架构必须在这里
+   表态，否则就是「新后端默认静默忽略家」——本文件要消除的正是这个形状）。
+   今天只有 x86_64 是 `StackAndRegister`。
+2. `target_reg_names(arch)` 每 target 一张寄存器名表（aarch64 `x0-x30`/`sp`；riscv
+   `x0-x31` + `ra/sp/gp/…/a0-a7` ABI 别名；arm `r0-r15` + `a1-a8/v1-v8/ip/fp/sp/lr/pc`；
+   mips 数字号 + `zero/at/v0/a0/t0/s0/gp/sp/fp/ra`）。**实测口径**：aarch64/riscv64/mips
+   是拿本机装的交叉 gcc 逐个名量出来的；arm 与 mips64 本机没有交叉 gcc
+   （`ls /usr/bin` 实测只有那三个），按 AAPCS 与 o32/n64 文档给出并集。并集为何安全：
+   对只支持栈的后端，这张表**只决定诊断措辞**（非法名=错误、合法名=警告），两侧都
+   不是静默，所以取宽既不会误拒合法程序，也不会保留旧的静默。
+3. `check_program_homes` 扫全部 `VarDecl`：文件级、块内、嵌套函数体，以及
+   **表达式子树**里的声明（`for (register int i asm("rbx"); …)`、
+   `int t = ({ register int j asm("rbx"); j; })`、designator 下标）。
+   `check_stmt`/`check_expr`/`check_designator` 一律穷举、不留 `_` —— 少一条通路就是
+   §11.14 F3/F4 那个「家在某条通路上静默消失」的同族形状，而漏掉的那条通路平时
+   不会有任何症状（本仓已经为此改过三次：`gen_block_item` 的副本、`rebuild_block`
+   的 `cleanup_fn`、`collect_upvars` 的类型树）。
+
+**检查点放在 `codegen::emit()`、且放在后端被调用之前**：`-S` 与 `-c` 是两条不同的
+发射入口，只在其中一条上查就会出现「同一个源 `-c` 报错、`-S` 静默产出」的分裂答案；
+`emit()` 是全仓唯一同时覆盖两条路的入口。
+
+**顺带补上一条本来不存在的通道**（这是本节能同时满足两条互相冲突约束的前提）：
+`image.diagnostics` 里的非致命诊断以前只参与「是否致命」的判定就被丢掉，也就是
+**codegen 阶段没有警告通道**。而 §11.6.4 自己定的约束是「不得把原本能编的合法程序
+变成编不了」——内核的 `register unsigned long current_stack_pointer asm("sp")` 在
+riscv64/arm 的 gcc 上都接受，把它改成错误就是把能编的源码弄红；可只给警告又等于
+继续静默。解法是把通道补上：`emit()` 的 Ok 值改成 `(Emitted, Vec<Diagnostic>)`，
+driver 的两处调用点按 parse 阶段同一策略输出（无错误时立即打印，否则 warning-only
+场景丢失）。于是实测：
+
+* 非法名 ⇒ `error[E1131]` + 退出码 1（与交叉 gcc 同判据）；
+* 合法名但本后端实现不了 ⇒ `warning[E1131]`，退出码 0，**`-c` 与 `-S` 两条路都给**，
+  诊断里写清「该声明现在留在栈槽里（读出来是未初始化的值）」与要补什么；
+* 非栈 `Location` 抵达只支持栈的后端 ⇒ `error[E1130]`（今天没有这样的生产者，
+  所以这条由 lib 用例强制构造出那个状态来钉，形状与 §11.12 的「带恒为 0 ⇒ 臂不可达」
+  同一类：先有判据，生产者一出现就不会静默）。
+
+**x86_64 侧同一批收紧**（§11.7 当年记下、归到 Phase 6.4 的那条）：`NAME_FORMS_USER`
+不再接受大写与 APX 号，新增 `NAME_FORMS_CLOBBER`（认 `%`、认 APX、不认大写）。
+实测 gcc：`asm("rbx")` 接受；`asm("RBX")` 与 `asm("r16")` 都是
+`error: invalid register name for 'p'`；而 `::: "r16"` 在 `-mapxf` 下是合法 clobber。
+两个接受集不能共用一个口径，否则必有一侧与 gcc 相反，所以 `ban_escaping_asm_regs`
+改走新的 `parse_clobber_reg_name`，`register asm` 仍走 `parse_reg_name`；
+`regnames.rs` 的号→名互逆用例相应拆成两段分别验（legacy 两侧都认，APX 只有 clobber 认，
+且 `user("r16") == None` 被显式钉住）。语料实测：`tests/fixtures` 与 `examples` 里
+`asm("[A-Z]`、`asm("r16".."r31")` 均零命中，所以这条只改「gcc 本来就拒」的输入。
+
+**判据**：6 条 lib 用例（能力面穷举；名字按 target 分判；非栈家成错误 +
+栈家与 x86_64 的反向对照；合法名=警告、非法名=错误；子树里的声明扫到；
+普通程序在七个架构上零诊断）+ 1 条端到端 cross 用例
+`stack_only_targets_never_silently_ignore_register_homes`（五个交叉 triple ×
+非法名/合法名/普通程序三种形状，再加 x86_64 的 `rbx` 可编、`RBX`/`r16` 被拒）。
+
+**6.4 留下的一项能力缺口（已声明，不静默）**：真的把变量绑到寄存器（riscv/arm 的
+`asm("sp")` 只读别名、乃至全局寄存器变量）在这四个后端还没实现——现在它带
+`warning[E1131]` 与「要补什么」的 hint，hint 指向的正是本节：补 `Home` 抽象、
+序言保存通道与干涉表。它与 Phase 5.1 的 caller-saved 保存通道是同一条能力的两面，
+只是换了后端；因此本节也顺手把「非栈家必须有硬错误」这件事变成了四个后端共用的
+一条判据，而不是四份各写一遍的 if。
+
+
+### 11.22 Phase 6.1 的后半完工 —— 号→名四份反向表合一（顺带照出两份死路径里的漂移）
+
+§11.15 合并的是**名字→号**那三份；§11.18 与 §7 Phase 6.1 剩下来的另一半是**号→名**。
+本轮做完它，并且把「合并前先证明副本真的相同」这一步照 §11.15 的方法论做扎实。
+
+**合并前实测到的四份**（各自的越界行为都不一样，这正是必须合一的理由）：
+
+| 位置 | 定义域 | 越界行为 | 是否在活路径上 |
+|---|---|---|---|
+| `abi/tyclass.rs::gp_reg_name(idx)` | 只有 64 位、`0..15` | **静默折成 "rax"** | 活（`asm/opmap.rs` 8 处、`asm/emit.rs` 1 处） |
+| `emit/expr/utils.rs::gp_reg_name_bits(idx,bits)` | 68 条（`0..15` × 4 宽度） | 返 `None` | 活（`asm/constraint.rs:251` 消费） |
+| `asm/expansion.rs::gp_reg_name_bits(idx,bits)` | 同上 | 返 `None` | 活（`expansion.rs:323` 消费） |
+| `codegen/asm_event.rs` 四张宽度表 | 每张 16 条 | **`idx % 16` 取模** | 死（见下） |
+
+对拍证据（本轮实测，不是推断）：
+* 第二、三份是**逐字节相同**的副本 —— 把两份函数体去掉缩进与 `pub(crate)`/`pub` 差异后
+  `diff` 为空（各 69 行、68 个 `(号,位宽) => 名字` 条目）；
+* 第四份**已经漂移**：8/16/32 位的表给 `%al`/`%ax`/`%eax` 这种完整 AT&T 名，而 64 位那张
+  给**裸名** `rax`…，调用方却写 `format!("%r{}", get_gp_name_64bit(i))` ⇒ 实际输出
+  `%rrax`、`%rr13`（`format_memory` 里三处同样）。它之所以从没响过：整条事件格式化路径
+  没有生产者 —— 实测 `Codegen::asm_events` 的 `push` 次数为 **0**，`elf/output.rs` 那个
+  `if self.emit_asm_text && !self.asm_events.is_empty()` 分支恒不成立。
+  **一份躲在死路径里的副本不会自己变得正确**，这就是 §11.15 说「各自演化就会漂移」的实证。
+
+**合一之后**（唯一入口在 `abi/regnames.rs`，与名字→号同一张 132 条的表）：
+
+* `bare_name_of_num(num, bits) -> Option<&'static str>` 与
+  `att_name_of_num(num, bits) -> Option<String>`；拼 `%` 只在这一处发生，调用方不再各自
+  `format!`（那正是第四份漂移的形状）。
+* **高半字节不可由号反查**：`ah`/`ch`/`dh`/`bh` 与 `al`/`cl`/`dl`/`bl` 同为 0..3 号 8 位，
+  区分它们的是 ModRM 里另一套编码，不在「号」这个定义域里 —— 所以反向查固定回低半字节
+  （与被合并掉的那三份的实际行为一致），这件事写成表上的显式名单
+  `HIGH_HALF_LEGACY`，不是排序巧合。
+* 越界不再「猜一个」：`tyclass::gp_reg_name` 改成返回 `Option`，发射/展开侧统一走
+  `asm_reg_name_or_report`，查不到就 `report_internal_bug("E1132", …)`（Error 级 ⇒ 本次
+  编译失败）；诊断文本里（`asm/emit.rs` 报 E0317 的那处）用看得见的 `<bad-reg-N>`，
+  因为在那里再报一次内部错误会把真正的诊断顶掉。
+
+**判据**：`reverse_table_covers_every_merged_entry_and_prefers_low_half`（把被合并掉的
+副本 64 个条目按号×宽度**逐条字面量**钉住 —— 不用「同样的规则再推一遍」，否则两份都错时
+用例仍然绿）、`number_to_name_round_trips` 按两个接受集拆开验（legacy 两侧都认、APX 只有
+clobber 认，见 §11.21）、`gp_register_names_come_from_the_single_reverse_table`
+（本模块四种宽度 + 不存在的号必须看得见）。
+
+**产物影响**：零 —— 号→名的活路径输入域本来就是 `0..15`，四份表在那一段上取值相同；
+`-O0/-O2/-O3` 三档 873 行与 §11.19 的基线逐字节一致（见本节末的实测）。
+
+**6.1 之后仍然留着的两件（诚实记下）**：
+1. `asm_event::format_memory` 的 `Gp` 底数仍写死为帧基址 r13，`RegClass::Gp` 之外的
+   索引也不查表 —— 那是 Phase 9「事件格式化」整条路没接上的后果（生产者都没有），
+   不是名字表的问题。要接它得先决定 `asm_events` 由谁产生（现在的 `-S` 走 `disasm`
+   反解路径），不在 6.1 的范围内。
+2. x86_64 的 `NAME_FORMS_USER` 与 clobber 口径的分寸已按 gcc 实测收紧（§11.21），
+   但 mips 的 `$28`/`fp` 与 x86 AT&T 的 `%` 形态在**发射文本**里的一致性还没逐条对拍过
+   （那是 `asm/` 模板展开的另一件事）。
+
+### 11.23 晚分配搬进 late band：本轮做到「能被证伪」为止，随后回退（未落地）
+
+这一件本轮真的动了手，而且得到的不是进展而是**一条被证伪的前提**。写下来是为了下一次
+不必重新测绘同一条路。
+
+**实现过的部分**（现已全部回退，此处按原样记录）：`FramePlan::late_slots` 新增；
+`LayoutMap` 新增 `late_band_top`/`late_band_bytes` 与 `late_band_low()`/`fits_in_late_band()`，
+带排在 spill band 之下、帧底那摞带之上；`register_var` 的懒分配改成在带内走自己的游标，
+于是 `min_used` 夹逼与「晚分配压低 `sret_region_base` 锚点」那两段一并删掉；
+`reserve_late_var_slots()` 从「预扣进变量区水位」改成「只决定带的大小」；两条帧规划分支
+传入该值，并逐函数重置游标。
+
+**过程中先修掉的一层**：定容（`collect_var_alloc_maxima*`）与预注册（`pre_register_stmt_max`）
+是两份必须互相同意「哪些声明是规划期看得见的」遍历，而两者都漏了 `for` 的 init、
+标号语句的体与 `({...})` 块里的声明。把覆盖面补齐（并合并成一份
+`collect_frame_var_decls` 遍历）之后，`for (int i = 0; …)` 的 `i` 不再走发射期懒注册。
+
+**证伪点**：补完之后 `E1133`（带容量超出）立刻在四类名字上响。原因是**「发射期可能
+`register_var` 谁」从来没有一份权威清单**，`late_var_slots` 只数了其中两类。
+`grep register_var(` 实测到的全部调用点：
+
+| 站点 | 注册的名字 | 静态扫描是否数到 |
+|---|---|---|
+| `emit/expr/compound.rs:57` | `__compound_lit_<pos>` | 数到 |
+| `emit/vla.rs:283` | `__vmsize_<tag>` | 数到 |
+| `emit/expr/va_arg_store.rs:228` | `va_arg` 的 ap 槽 | **没数** |
+| `instructions.rs:503`（`var_offset` 的懒注册兜底） | **任意名字** | **没数**（原则上无法数） |
+| `emit/functions.rs:1010` / `emit/expr/dispatch.rs:2198` / `emit/stmt.rs:875` | 声明路径（规划期本该覆盖） | 实测仍漏：`_a`、`_b` |
+| 文件级 `register unsigned long gvu asm("r15")` | 每个引用它的函数各要一槽 | **没数** |
+
+于是结论很硬：**带容量的静态上界，前提是先有一份「谁会懒注册」的判据**；在那之前引入
+这条带，只能二选一 —— 要么 `E1133` 误伤现在能编的代码（实测四类名字，含
+`tests/fixtures/c/register_binding_width.c` 与 `m3_3_statement_expressions`），要么把扫描
+写成「宁可多给」从而偷偷回到「帧坐标不是一次解算出来的」那条老路。两者都不是交付。
+
+**为什么回退而不是留着**：拿一条新硬错误换掉一条老静默错值，如果它同时让 4 类合法输入
+编不过，那是回归而不是进步。回退后本轮的交付是 §11.19 / §11.21 / §11.22，三档哈希
+与 §11.19 记录的基线逐字节一致（实跑：`cargo test` 全部 9 个 target 绿，9 个测试用例脚本除
+下面那条存量工具债外全绿，`hash_n5n11.txt` 与回退前逐字节相同）。
+
+**下一步（顺序不能颠倒，每步都可验证）**：
+1. 先让「发射期懒注册」变成一个可枚举的集合：把 `var_offset` 的懒注册兜底改成显式错误
+   （点名哪些名字规划期没登记），给 `va_arg` 的 ap 槽与文件级 register 变量各加一条
+   规划期登记；`emit/functions.rs:1010` 那条声明路径为什么仍懒注册要单独查清（实测
+   `_a`/`_b` 就是它）。
+2. 第 1 步之后 `late_var_slots` 才谈得上与真实需求对齐，`E1133` 才只在「扫描真少算了」
+   时响，而不是替合法代码报错。
+3. 那时再引入带，并接受产物变化（晚分配与帧底各带的坐标会移动），按 §11.14 的方式
+   逐行核对 + 四档 gcc 差分。
+
+本轮顺手留下两件仍然有效的事实：定容与预注册**必须**共用一份遍历（这条约束以前只写在
+注释里，现在有了「不一致就 E1133」的代价）；以及文件级 `register asm` 变量在每个引用它
+的函数帧里都要一个槽——这件事在 §11.16 扩池那轮只被间接触及。
+
+### 11.24 §11.23 的第 1 步（上）：规划期遍历收成一份，顺带修掉一个声明符读反的真 bug
+
+§11.23 记下的结论是「带容量的前提是**可枚举的懒注册集合**」。本轮就是去把那个集合
+变成事实，过程中先修掉两处「规划期看不见的声明」，然后撞出一个**用户可见的错值**。
+
+**1. 定容与预注册合成一份遍历**。`collect_var_alloc_maxima*` 与 `pre_register_stmt_max`
+两份遍历合并成 `collect_frame_var_decls`（+ `_stmt`/`_expr`/`_designator`，全部穷举、
+不留 `_`），`pre_register_vars` 变成「先取列表 → 折叠同名最大值 → 按首次出现顺序分配」。
+覆盖面因此补齐了这几类以前会漏到发射期的声明：
+`for` 的 init、标号语句的体、`({...})` 块（含**夹在初始化式里**的那种，内核 `min()/max()`
+就是这个形状）、`if/while/do/for/switch` 的**条件与 step**、`asm goto` 的操作数、
+受保护调用的体。实测同一份语料里懒注册的名字从 34 种降到 6 种。
+
+**2. 声明符 `T *(*f(P1))(P2)` 的两个参数表被用反**（parser.rs:5250-5347，用户可见错值）。
+P1 是 `f` 自己的形参、P2 属于**被指向的那个函数**（是返回类型的一部分）；旧代码把
+P2 当成 `f` 的形参、把 P1 塑进被指向函数，于是 `f` 看起来收 `(void)`：调用点传进来的
+参数没人接，体里读 `init` 只能靠发射期懒注册、按 `Type::Int` 猜一个栈槽（非 int 形参
+因此会被按错误宽度存取）。
+实测：`int *(*f(int init))(void) { val = init; return impl; }` —— gcc rc=0，
+dcc rc=1，**开工前的旧二进制同样 rc=1**（不是本轮引入）。修后四档与 gcc 一致。
+判据：`fnptr_returning_function_params_match_gcc_at_all_levels` + 夹具
+`tests/fixtures/opt/fnptr_returning_fn_params.c`（三种形状：双层参数表、双层多参数、
+以及只有一层参数表的旧形状作反向对照）。
+
+**3. 测试用例（本轮实跑）**：`cargo test` 9 个 target 全绿；`check_fixtures`/`selftest`/
+`reproducible`/`rex_hygiene`/`pipe`/`disasm`/`opt_equivalence`(OPT-DIFF=0)/`golden-cross` 全绿。
+产物变化：三档 873 行里 **9 行 / 3 个夹具**（`stmt_expr.c`、`bootstrap_selftest.c` 是
+「初始化式里的 `({...})` 声明现在被规划」，`seg_qualifier.c` 是声明符读法修正），
+相对 §11.19 基线累计 55 行 / 27 个夹具 —— 全是「同一批名字的槽位从帧里另一些地址挪到
+变量区」导致的坐标重排，指令序列本身没变。新基线 grand `hash_n5n11.txt`。
+
+**还剩下的两类懒注册（第 1 步未完成的部分，已量化）**：
+- **函数名被当值用**（`make_fnptr`、`ret_fnptr`、`default_impl`）：现在走
+  `var_offset` 的兜底，给它分配了一个**对象**槽 —— 那是纯粹的错账（函数不是帧内对象），
+  应改走函数地址（reloc）那条路；
+- **未声明标识符**（`c23_bool.c` 在非 `-std=c23` 下的 `true`/`false`）：dcc 今天比 gcc 宽松
+  （gcc 报 undeclared），兜底同样给了一个 Int 槽。
+  这一类是「按定义无法由源码枚举」的那部分，所以带容量要么把「体内引用了、但既不是
+  规划声明也不是已知全局/函数/标号」的名字计入（可静态计算的保守上界），要么先把这条
+  兜底改成显式错误。两种做法都会动到 `var_offset` 的兜底语义，因此单独一步做。
+
+### 11.25 §11.23 的第 1 步（下）与第 2 步：发射期兜底封死，晚分配变成有账面的预算
+
+**第 1 步收尾**（§11.24 末列的两类残余都落到「规划期」这一侧）：
+- **函数名被当值用**（`default_impl`）：不再靠 `var_offset` 猜一个 Int 对象槽，而是在
+  `reserve_late_var_slots` 里按表达式**自带类型**登记；`Type::Func` 仍显式跳过（函数不是
+  帧内对象，发射点走 `emit_func_addr`）；
+- **带家的文件作用域变量**（`gvu`）：判据读既有的 `global_homes`/`homes` 两张表
+  （`global_needs_frame_slot`），不另开一份名单 —— 它本来就要一个帧内中转槽（§11.16）。
+
+于是「发射期可能 `register_var` 谁」第一次成为一份**可枚举**集合，`E1134` 成为真正的硬
+不变式：580 个夹具 × 四档（2320 次编译）实测 **`E1134` / `E1133` / `E1128` 零触发**。
+
+**过程中撞出的三条（都不是本轮引入的）**：
+1. **`frame_layout` 不是逐函数状态**。`compile_func` 复位了 `var_map` /
+   `var_map_total_slots` / `sret_watermark` / `sret_region_base`，唯独没复位帧解算表，
+   所以规划期的新名字登记会拿**上一个函数**的帧底去判 `check_frame_budget`：
+   `cpp_abi_c_style_decls/long_double_abi.cpp` 的 `main` 被前一个函数的 976B 帧判成
+   `E1128` —— 一条假硬错误（本轮加规划期登记才把它照出来）。复位成 `unresolved()`
+   （`frame_size = 0` 就是「帧还没定，不判」）；实测复位前 rc=1 + E1128、复位后 rc=0。
+2. **`<agg_member_tmp>` 是 16 字节暂存，旧写法按 8 字节拿槽**。发射点先
+   `store_stack(0, off)`，`agg_sz > 8` 时再 `store_stack(2, off + 8)`，而 `off + 8` 属于
+   **相邻对象的下半字节**；随后 `lea off,%rsi` + `rep movs` 就把邻居的字节当源读走。
+   现在在发射点显式 `register_var(_, &Type::Int128)`；实测偏移从 `-264/-256`（重叠）
+   变成各归各槽的 `-272/-264`。
+3. **又一份零调用者的影子副本**：`emit/expr/init.rs` 的 `gen_expr_assign`（**1035 行**）
+   是活的那条 `Expr::Assign` 路径（`emit/expr/dispatch.rs` 的 Assign 臂）的旧搬迁体，
+   全仓 grep（`src/`、`tests/`、`scripts/`、`tools/`、`docs/`）零调用；上面第 2 条的两个
+   站点之一就是它 —— 死副本不能当事实的出处，删。（`golden_hashes/literal.sha256` 里那行
+   `.rs` 源文件哈希不是判据，`docs/next_refactor_roadmap_zh.md` 第 8 条已记为无意义。）
+
+**第 2 步：预算**。`late_var_slots()` 那种「只返一个 `i64`、其余靠 `_ => 0`」的扫描换成
+`LateNeed` 四族清单（`emit/func_setup.rs`），每一条臂穷举（新增变体直接编不过）：
+
+| 族 | 发射点 | 计费 | 去重口径 |
+|---|---|---|---|
+| `__compound_lit_<pos>` | `emit/expr/compound.rs` | `var_alloc_slots(ty)` | 名字含发射序 ⇒ **站点之间不复用** |
+| 同上但类型是 `Vector` | 走 `vector_temp_base` | **0**（不在变量区） | 反向对照，旧扫描一律计费 |
+| `__vmsize_<key>` | `emit/vla.rs::gen_vm_type_bind` | 1 槽（`Type::Long`） | 按 `struct:<tag>` / `union:<tag>` 去重 |
+| `va_start` 的 ap 槽 | `emit_va_start` | 3 槽（`va_list_slot_ty`） | 按名字去重；全局与已登过的不计 |
+| `<agg_member_tmp>` | `emit/expr/dispatch.rs` | 2 槽（16B） | 固定名，全函数一份 |
+
+判据只住一处：`vm_size_key` / `vm_record_needs_size_slot` 同时被发射点 `gen_vm_type_bind`
+与规划期扫描读（原先两处各自 `format!`、各自扫字段）；`va_list_slot_ty` 从私有升给规划期。
+
+账面不变式：`reserve_late_var_slots` 写下 `late_slot_budget` 并置位 `frame_planned`；此后
+**任何新名字** `register_var` 都计入 `late_slot_used`，超出预算就是 `E1133`（后端自己的
+错，不是用户代码错）。`DCC_LATE_ALLOC` 逐笔打印 `used/budget`，语料级读数有两个脚本：
+`.work_tmp/p12_base/scan_e1134.sh`（账面聚合）与
+`.work_tmp/p12_base/late_family_census.sh`（**名字级**对账）。实测：38 个带晚分配的函数
+编译里 **34 个 `used == budget`**、4 个各余 2 槽（`tests/fixtures/c/agg_wide_value_load.c`：
+静态判据按「成员赋值 + 聚合 RHS」置位，发射点实际走了 sret 物化那条臂）、**0 个超出**；
+族名对账 70 笔 = `agg_member_tmp` 44 笔/88 槽 + `compound_lit` 10 笔/36 槽 + `vmsize`
+16 笔/16 槽，**OTHER 为空** ⇒ 没有第五族；`va_start` 的 ap 实测 **0 笔**（`va_list ap;` 本来
+就是普通局部声明，规划期已登记，发射点只命中 var_map）—— 这一项今天不花钱，但它是
+「直接把形参当 ap 用」那一类形状的上界，留着。
+
+新用例：`late_need_charges_the_four_late_families_exactly`（四族各带一条反向对照：向量
+字面量不得计费、非 VM 记录不得拉大预算、`Ident`/`CompoundLit` RHS 不得置位、
+同 tag / 同 ap 只一份）。
+
+**测试用例（本轮实跑，见 `.work_tmp/p12_base/verify_n5n11.txt`）**：`cargo test` 9 个
+ target 全绿（lib 2127 + integration 1056，9 个 target 合计 3298 条用例）；
+`check_fixtures`/`selftest`/`reproducible`/`rex_hygiene`/`pipe`/`disasm`/
+`opt_equivalence`（OPT-DIFF=0）/`golden-cross`/`check_parallel_vs_serial` 全绿；唯一红的
+是存量的 `gen_coverage_index.sh`（14 条 STRUCT-HELPER，§11.13 已登记）。产物变化：三档
+873 行里 **24 行 / 8 个夹具**（`agg_wide_value_load.c`、`struct_abi_extended.c` 是聚合成员
+暂存从 8 字节变 16 字节；`vec_init.c`、`vec_global.c`、`vec_fscalar.c`、
+`vec_small_return.c` 是向量复合字面量不再在变量区预扣；`attr_ifunc.c`、
+`flag_clobber_frame.c` 是预算构成的变化），本步基线 grand `f5b2aef2…`（相对 §11.24 的
+`93a3ece2…`；表分别存在 `hash_pre_s1e.txt` 与 `hash_s2_budget.txt`，因为 `hash_n5n11.txt`
+会被下一轮跑覆盖 —— 本轮之后的 `a4ce4fa6…` 在 `hash_s3_n12.txt`）。
+另加一条**产物侧**的帧不变式（不信后端自己的账面）：
+`.work_tmp/p12_base/check_frame_offsets_within_rsp.sh` 逐函数比「`sub $N, %rsp`」与
+「体内最深的 `-M(%r13)`」，578 个夹具 × 四档实测 **`FRAME_OVER_COUNT=0`**。
+
+**步 3 的前提到此齐了**：预算可证 ⇒ 带只是把「预扣进变量区水位 + `min_used` 夹逼」换成
+一条显式的 `late_slots` 带（`FramePlan` 多一个输入，`register_var` 的晚路径改走带内游标，
+`min_used` 那段与「晚分配压低 `sret_region_base` 锚点」一并删）。那必然改产物，而且改的
+正是「晚分配对象与帧底各带的坐标」，要按 §11.14 逐行核对 + 四档 gcc 差分。
+
+### 11.26 N12：并行 worker 丢的是「类型与初值」，没有下行的不止符号表
+
+上一轮把 N1 记成「并行 worker 不回传程序级**符号**事实」，并在 §11.24 里写下「并行/串行的
+`.text` 与符号表逐字节相同」。本轮给晚分配预算做产物侧复核时，那条结论被自己的数据推翻了：
+把 `.work_tmp/p12_base/check_parallel_vs_serial.sh` 从「比整文件字节」改成「按节比」以后，
+48 个 MISMATCH 里有 **6 个是 `.text` 本身不同**。粗判据把它们的差异全归给了 N10，
+而 N10 只解释 `.rodata` 与符号地址 —— 勘误已就地写在 §11.24 与 §11.13 的 N10 行。
+
+**根因只有一处，而且字面上就写着占位符**（`parallel/orchestration.rs::codegen_from_parallel`）：
+worker 重建 `Codegen` 时，全局变量表是从下行快照 `ParallelGlobalSnap` 重建的，而那张快照
+只带 `offset/size/section/is_tls` 四项，重建时把
+`ty: Type::Int, init: None, in_data_section: false` **写死**；`static_local_map` 更是
+完全不在快照里（它是主 cg 在 `compile_module` 里 `analyze_static_locals` +
+`pre_register_static_locals` 回填的，worker 拿到的是 `default()`）。
+
+于是同一个 IR 在两条路上选出不同指令：
+- 读 `unsigned char` / `_Bool` 全局：判据是「声明类型是否无符号」，worker 眼里它是 `int` ⇒
+  `movzbl` 变 `movsbl`（`c11_atomic_macros.c`、`c23_bool.c`、`chained_assign_truncation.c`，
+  每个差 1–4 字节）；
+- 函数里的静态局部：`is_static_local`/mangle 名查不到 ⇒ 走「懒初始化 + 帧内槽」退化路，
+  `static_local_arrays.c` 的 `.text` 串行 1458B / 并行 **1610B**；`seg_qualifier.c`、
+  `static_agg_by_value.c` 同族；`builtin_static_chain.c` 则是符号**项**（不只是地址）都不同。
+
+这一类比 N1 更危险：N1 至少让链接期报错，而这里两侧都能链接、都能跑，只是并行版把无符号
+字节当有符号读、把实体在 data/bss 的对象当帧内对象。而且**现有三档产物哈希根本看不到它**：
+`gen_hash.sh` 编的是 `-S`（文本产物），而并行发射的门是
+`parallel_codegen && relocatable && top_funcs.len() >= 2`（`emit/functions.rs:59`）
+⇒ `-S` 路径**从来就不走并行**，`.o`（ELF）字节完全不在哈希的覆盖面里。本轮哈希只多了
+新夹具自己的 3 行（873 → 876），其余 873 行逐字节不变 —— 这反向证明了上面那条：
+N12 的修正在文本产物上零信号。该盖住这个洞的不是哈希（它只能比字节、不能拆段），
+而是下面那两层新判据。
+
+**修法**：把事实本身放进快照，而不是在 worker 里猜。`ParallelGlobalSnap` 补
+`ty: Type` / `init: Option<Vec<u8>>` / `in_data_section: bool`，`ParallelEmitCtx` 补
+`static_local_map`；两处都在 `pre_register_static_locals()` 回填之后才取快照，所以 worker
+拿到的就是发射点实际读到的那一份。快照下行是**单向**的：worker 不改这些表（改的是自己帧内
+的游标），所以不需要像 `SymbolFacts` 那样做上行合并。
+
+**判据（三层，逐层都比以前严）**：
+1. 用例 `parallel_codegen_preserves_program_level_facts`（`tests/reproducibility.rs`）+
+   夹具 `tests/fixtures/c/parallel_global_facts.c`：同一份源 `-O2 -c` 在并行与串行下
+   **整个 `.o` 逐字节相同**（夹具刻意不含字符串/浮点 ⇒ 不受 N10 干扰，才有资格要整文件）。
+   反向对照已实测：修复前的二进制在这里差 **691 字节**，用例能红。
+2. 语料级探针 `check_parallel_vs_serial.sh` 升级为**硬失败**：`.text` 逐字节相同 + 符号项
+   （剔 Value/序号/`SECTION` 那一项）相同；N10 的 `.rodata` 差异单独报不失败。
+   实测：283 个夹具里 OK 240、RODATA-ONLY-MISMATCH 44（N10）、
+   **TEXT-DIFF 0、SYMTAB-DIFF 0**；拿修复前的二进制跑同一条判据 → rc=1，TEXT-DIFF 7。
+3. 产物侧帧不变式 `check_frame_offsets_within_rsp.sh`（本轮为步 2 引入）：
+   578 个夹具 × 四档 `FRAME_OVER_COUNT=0`。
+
+**还挂着的相关项**：N10（并行 `.rodata` 按 worker 内部化）仍未修，实测 44 个夹具；
+它现在被 2 号判据明确区隔为「膨胀/不可复现」而不是「改代码」，修法方向见 §11.24 那段。
+
+**测试用例（本轮实跑，紧接 §11.25 的那一轮）**：`cargo test` 9 个 target 全绿（lib 2127 +
+integration 1056 + 新增的 reproducibility 1 条，9 个 target 合计 3299 条）；9 个测试用例脚本
+除存量的 `gen_coverage_index.sh` 外全绿，其中 `check_parallel_vs_serial.sh` 已是**硬失败**
+口径（TEXT-DIFF 0 / SYMTAB-DIFF 0 / RODATA-ONLY-MISMATCH 44 / OK 240 / SKIP 8）。
+三档产物哈希：行数 873 → **876**（只多了新夹具的三档），其余行逐字节不变，grand
+`f5b2aef2…` → `a4ce4fa6…`（表 `hash_s3_n12.txt`）。这一轮没动产物正好就是 N12 的直接证据：
+哈希走的是 `-S` 文本路径，而错值在 `.o` 路径。
+
+### 11.27 §11.23 步 3 完工：晚分配搬进带，`min_used` 夹逼与锚点下移一并删掉
+
+**改了什么**（全部在帧布局这一条轴上）：
+- `abi/layout.rs`：`FramePlan::late_slots`（新输入）、`LayoutMap::late_band_bytes` /
+  `late_band_top` / `late_band_bottom()` / `fits_in_late_band()`；`resolve()` 的求和里
+  多项带，`sret_region_base = late_band_top - late_band_bytes`，`arena_room` 把带扣掉；
+- `emit/functions.rs`：两个帧规划分支都传 `late_slots: self.late_slot_budget`，
+  `compile_func` 入口多复位一个逐函数游标 `late_var_cursor`；
+- `instructions.rs::register_var` 拆成两条路径：**规划期**走变量区水位（此时帧未解算，
+  `check_frame_budget` 空转）；**发射期**从带顶往下走自己的游标，坐标 =
+  `late_band_top - cursor - slots*8`。旧的 `min_used` 夹逼与
+  `sret_region_base = min(sret_region_base, var_arena_floor())` 两行**删除** ——
+  它们存在的唯一理由就是「晚分配挤在变量区里，会压穿 sret/物化区」；
+- `emit/func_setup.rs::reserve_late_var_slots`：预算不再预扣进 `var_map_total_slots`，
+  只写下 `late_slot_budget`（带的尺寸就是它）。
+
+**为什么这一步现在能做而 §11.23 当年必须回退**：当年 E1133 在四类合法名字（`gvu`、`_a`、
+`va_arg` 的 ap、任意懒注册名）上误伤 —— 因为「谁会晚分配」没有清单。现在发射期兜底已被
+`E1134` 封死（步 1），四族预算可证（步 2），带约束的只剩后端自己的晚分配。
+
+**产物读数（本轮实测）**：相对 §11.26 基线只动了 **4 行 / 2 个夹具**
+（`agg_wide_value_load.c` 三档 + `designated.c` 一档）。这不是「带没生效」，而是两套坐标
+在数值上本来重合：旧写法把预算预扣进 `var_bytes`、晚分配从「`var_bytes` 底」往下走；
+带写法的 `sret_region_base = -(hdr + var_bytes_不带 + 带字节)` 与旧值相等，而带顶就是旧
+的变量区底。真正有差的只有旧 `min_used` 夹逼**真的介入过**的那几个函数（夹逼把对象推离
+已被占用的 sret 区，那一步依赖发射历史）—— 就是上面那 2 个夹具。带生效后这条线不再靠
+现场让步，而是解算时就定下的静态坐标。
+带在生效的直接证据：`DCC_LATE_ALLOC` 打印里多了 `off=` 读数，四个复合字面量在
+-192/-208/-224/-240（带顶往下），`used=8/budget=8`。
+
+**新判据（三层）**：
+1. `abi/layout.rs::late_band_is_a_layout_input_not_an_afterthought`：带是求和里的一项
+   （`frame_size` 恰好多一条带）、`arena_room` 不重复计费（两边相等）、
+   `sret_region_base` 被带顶推下整整 16 字节、到位判据在带底边界上一格放过、超出一格拒、
+   带为 0 与帧未解算时**不启用**（否则一个晚分配也没有的函数会被误报）；
+2. `codegen.rs::late_allocation_lands_in_the_band_and_rejects_overrun`（发射器级）：两
+   个对象从带顶往下排 ⇒ 零诊断；`var_map_total_slots` 与 `sret_region_base` 全程不动
+   （那两段现场推坐标的代码就是被删掉的）；第三个既超预算又出带 ⇒ `E1133`；
+3. 语料级：580 个夹具 × 四档 `VIOLATION_COUNT=0`（E1134/E1133/E1128）+
+   `FRAME_OVER_COUNT=0` + `check_fixtures` 全绿 + 四档 `OPT-DIFF=0`。
+
+**本轮踩到的工具债（已改）**：族名对账脚本的 `sed` 是按 `LATE` 行的字面格式匹配的，
+多了 `off=` 字段后它**静默匹配不上**，当场报出「晚分配 0 笔」—— 看上去像「带没人被使用」，
+其实是正则失配。已把 `off=` 写成可选字段。这一类「脚本按格式而不是按语义匹配」的代价记一笔。
+修好后按带生效的产物重跑：仍是 **70 笔 = `agg_member_tmp` 44/88 槽 + `compound_lit` 10/36 槽 +
+`vmsize` 16/16 槽，OTHER 为空** —— 带生效前后是同一批站点，只是它们的坐标不再靠夹逼。
+另外 `codegen.rs` 里 `spill_home_goes_through_the_single_translation_point` 那条旧用例本来
+靠 `var_offset` 的懒注册兜底凑坐标；步 1 之后那条兜底就是 `E1134`，用例不能再依赖一个错路
+才能成立，已改成显式 `register_var`。
+
+**测试用例（本轮实跑，`.work_tmp/p12_base/verify_n5n11.txt`）**：`cargo test` 9 个 target
+全绿，合计 **3301** 条（比 §11.26 那轮多 2 条：本步新增的两个带用例）；9 个测试用例脚本除
+存量的 `gen_coverage_index.sh`（仍是那 14 条 STRUCT-HELPER）外全绿，其中
+`check_parallel_vs_serial.sh`（硬失败口径）为 OK 240 / RODATA-ONLY-MISMATCH 44 /
+TEXT-DIFF 0 / SYMTAB-DIFF 0 / SKIP 8。三档哈希 grand `a4ce4fa6…` → **`c371f453…`**
+（表 `hash_s3_band.txt`，876 行 / 24 条 FAIL-NOARTIFACT 与开工同数）；变化 4 行 / 2 个夹具，
+上面那段已逐行核对过。`late_var_slots` 这条轴上的旧名字已全部消失：
+`grep -rn 'late_var_slots\|min_used' src/` 只剩 `reserve_late_var_slots()` 本身（它现在算的是
+带，不再预扣变量区）。
+
+### 11.28 Phase 5.1 前置一（上）：求值基址单源 —— 「结果恒在 %rax」从 295 个抄本变成一件事
+
+§11.13 与 §11.24 把这一条记成「`gen_expr(x, 0)` 194 处」。本轮先把口径重测一遍：
+字面量 `0` 作为求值落点参数的调用点，`gen_expr` 一家是 **252** 处，加上同一约定的其他
+求值族（`gen_lvalue_addr` 37、`gen_expr_decay` 4、`gen_sizeof_runtime` 2）共 **295** 处。
+旧文档那个 194 是当时那棵树的读数，不是今天的事实 —— 下文按实测数写。
+
+**为什么这是前置而不是改名**：这条约定回答的是「一个值现在到底在哪个寄存器里」，而
+P12 后面三件事全部依赖它能被**问出来**：程序点级家存活（前置二：要记录「这个值现在在
+%rax」以及它何时被毁）、caller-saved 保存通道（前置三：要知道哪些点在跨 call 保有值）、
+以及生产者（5.1.e：分配器得能把求值落点放到别的号上）。一个抄在 295 处里的字面量三件事
+都问不到，而「把基址改一下」必须同时改全 295 处 —— 正是本仓 H4（同一事实多套判据）的形状。
+
+**做了什么**：
+- 真源：`abi/regbank.rs` 的 `pub const EVAL_BASE_REG: u8 = 0;`（占用模型与号-名表住同一个
+  模块，基址也就住在这里），外加 `Codegen::EVAL_BASE` 别名，让调用点写 `Self::EVAL_BASE`
+  而不必处处 import；
+- 295 个调用点全部改用名字（`gen_expr` 252 + 三个同族 43）；
+- **不越界的那一类**：`emit_operand_to_st0(&ty, 0)`（0 是 st 槽下标）、
+  `gen_vector_init_rvalue(.., n, 0)` / `vector_temp_base(0, ..)`（0 是向量临时槽号）、
+  `emit(&[..])` 的字节数组 —— 这些 `0` 与求值基址无关，本轮一律没动。
+
+**与名字表对拍**（新用例 `eval_base_reg_is_the_name_tables_rax`）：`att_name_of_num(EVAL_BASE_REG, 64)`
+必须是 `"%rax"`，并且 0 号不得在 callee-saved 池里。两边各拿一个字面量时，一侧重号（或
+APX 扩表时改表）会让「求值基址」静默变成另一个寄存器 —— 那比错值更糟，因为全后端的
+发射约定都跟着它走。
+
+**机器判据**（`.work_tmp/p12_base/check_eval_base_single_source.sh`，已挂进常跑序列）：
+四条检查 ——定义恰好一处（`EVAL-SRC`）、求值族调用点零字面量 `0`（`EVAL-LITERAL`）、读者数
+≥ 250（`EVAL-READERS`，防「把名字全删」也能满足上一条的假绿）、以及**自校验**（对一个含
+字面量站点的临时样本跑同一条 grep，确认判据会红）。
+本轮实测：定义 1 处 / 字面量站点 0 / 读者 **298**。
+
+**产物必须一字不变**（本轮实跑）：三档哈希 876 行与 §11.27 的基线 `c371f453…` **逐字节相同**；
+这也是本轮唯一可用的「什么都没改错」证据 —— 改名把一个不变量从文本搬进了类型，如果哪个
+`0` 其实是别的意思（例如 st 槽下标被顺手换掉），字节当场会分叉。
+
+**测试用例（本轮实跑，`.work_tmp/p12_base/verify_n5n11.txt`）**：`cargo test` 9 个 target 全绿，
+合计 **3302** 条（比 §11.27 那轮多 1 条：名字表对拍用例）；常跑序列从 9 个脚本变成 **11 个**
+（新挂 `check_eval_base_single_source.sh`，以及原来只报数的晚分配不变量扇扫描
+`scan_e1134.sh` 改为超预算即失败），除存量的 `gen_coverage_index.sh` 外全绿：
+`EVAL-BASE-SINGLE-SOURCE: OK (定义 1 处 / 字面量站点 0 / 读者 298)`、
+`VIOLATION_COUNT=0`（580 夹具 × 四档）、账面 34 精确 / 4 余量 / 0 超出、
+`CODEGEN_DIFF_COUNT=0`、`OPT-DIFF=0`。三档哈希与 §11.27 基线逐字节相同（876 行，
+表 `hash_p1a_evalbase.txt`）。
+
+**本轮踩到的一条工具事实（记下来，它会反复出现）**：`SearchReplace` 类型的定向编辑是按
+**去空白后的整行**匹配的。用不带分号的片段（`self.gen_expr(e, 0)`）做 `replace_all` 时，
+它把整行换成了片段的新值，于是语句末尾的 `;` 被吃掉 —— 实测 73 处当场编不过
+（`expected ;`）。正确的用法是要么给完整行（含行尾注释），要么带分号；发现方法也很便宜：
+（`git diff` 里「-行以 `, 0);` 结尾而 +行以 `Self::EVAL_BASE)` 结尾」的配对。
+
+### 11.29 Phase 5.1 前置三（第一块）：「哪个号会被调用毁」第一次成为一个可问的事实
+
+前置三的完整目标（给分配器开一条 caller-saved 的保存/恢复通道）要等前置二的程序点级存活；
+但这一条债里有一块是**今天就能结清、而且结清它本身就是价值**的：这个事实本身在后端没有
+单一出处，而用户也看不到它。
+
+**先把 gcc 的规则量出来**（而不是照手册写）：`register unsigned long v asm("<r>");` 在
+文件作用域下，`rax/rcx/rdx/rsi/rdi/r8/r9/r10/r11` 全部报
+`warning: call-clobbered register used for global register variable`，`rbx/r12/r13/r14/r15/rsp`
+全部不报（`rbp` 是另一条 error：`frame pointer required, but reserved`）；同一个绑定写在
+**函数内**则零诊断（文档里明说局部寄存器变量不保证跨调用存活）。
+而 dcc 今天对**同一个构造完全无声**：实测 -O0 的产物与 gcc 逐条一致
+（`mov %rax,%r11` … `call sink` … `mov %r11,%rax`），两边都不会为它插保存/恢复 —— 也就是
+说差的不是代码，是那句话：「这个寄存器跨不过调用」以前只有编译器知道。
+
+**做了什么**：
+1. `abi/regbank.rs::is_call_clobbered(n) -> bool` —— SysV AMD64 的这张表第一次有了唯一出处
+   （以前只有 `POOL` 那份「可用的 callee-saved 池」名单，而跨 call 保活要的恰好不是它）。
+   名字叫 clobbered 而不是「非 callee-saved」：`rsp`/`rbp`/`r13` 是固定用途号，既不毁也不是
+   能拿来当家的 callee-saved，能不能当家是 `reserved_reg_reason` 另一道门。
+2. 新用例 `call_clobbered_table_matches_sysv_and_the_local_pools`：逐号（0..15）与手写的 SysV
+   真值表对拍，并钉住它与同文件里另外两份名单的关系 —— `POOL` 里的号**必须**不毁
+   （否则序言在保存一个保不住的号），`EVAL_BASE_REG`（%rax）**必须**毁（求值落点跨不过
+   call 本来就是它的语义）。两份名单不一致时当场红。
+3. 新诊断 `W0319`（与 `E0316`/`E0318` 同在 031x 寄存器名/绑定家族）：只在
+   `compile_rel` 那个**文件作用域**登记点发，消息正文与 gcc 逐字相同（所以两侧可以直接
+   `contains` 对比），位置也对齐到同一个 `line:col`；变量名与文本名进 hint。
+   **故意不保存也不升成错误**：那会偏离 gcc 的语义（本端与 gcc 产物一致是今天的事实）。
+
+**判据**：
+- 用例 `global_register_binding_on_call_clobbered_reg_warns_like_gcc` + 夹具
+  `tests/fixtures/c/global_reg_call_clobbered.c`：dcc 与 gcc 都是**恰好 1 条**；两条反向对照
+  ——只绑 callee-saved 的既有夹具两侧都是 0 条（否则「把所有绑定都报一遍」也能逃过本用例），
+  以及警告不得让编译失败、不得改变产物（同一档两次编译的 .s 逐字节相同）。
+  夹具本身必须真的同时用到 `%r11` 与 `%r15`（用不到就是空跑）。
+- 语料级：`check_call_clobber_warning_parity.sh` 对 499 个 `.c` 夹具逐文件比 dcc 与 gcc 的
+  条数，实测 **`WARN_MISMATCH_COUNT=0`**。
+
+**测试用例（本轮实跑）**：`cargo test` 9 个 target 全绿，合计 **3304** 条（新增 2 条：
+号表对拍 + gcc 诊断对拍）；常跑序列现在 **12 个**脚本，除存量的
+`gen_coverage_index.sh` 外全绿。三档哈希：行数 876 → **879**（只多了新夹具的三档），
+**其余行逐字节不变** —— 这就是「警告不改变产物」的直接读数（grand
+`c371f453…` → `a4e47418…`，表 `hash_p3a_clobber.txt`，变化只来自新增的 3 行）。
+
+**顺手记下一条与两侧共有的语义**（第一版夹具因此两侧都返回 1，与编译器无关）：全局寄存器
+变量**没有初值** —— 它就是函数入口时那个寄存器的内容（实测是链接器/运行时留下的指针位型），
+所以任何拿它当「从 0 开始的计数器」的断言都是错的；夹具改成只断言**相对量**。同时绑到
+caller-saved 的变量一旦**跨过一次调用**就不可预期，夹具里 `lost` 的写与读中间没有调用。
+
+**前置三还欠的部分**（不假装完工）：分配器真正用得上 caller-saved 家，需要「这个值在
+这个程序点还活不活」以及一处存它的位置（晚分配带今天只能给**发射期对象**，不能给一个
+要跨 call 的变量家）。那正是前置二，顺序不得颠倒。
+
+### 11.30 Phase 6.2（上）：先修好 DWARF 本身不可解析，再补寄存器位置
+
+动手做 6.2 之前先量了一下脚下的地，结果比预期糟：**`-g` 的 `.debug_info` 对任何带
+嵌套类型的 TU 都不可解析**。新门脚本 `.work_tmp/p12_base/check_dwarf_wellformed.sh` 实测
+51 个夹具 × 两档里 **46 行 `DW-UNPARSEABLE`**（readelf：`Bogus end-of-siblings marker` 与
+`DIE at offset 0x65 refers to abbreviation number 94 which does not exist`）。编译器自己完全
+无感，链接与执行也正常 —— 只有调试器拿到的是错的位置信息。
+
+**根因**：`src/debug.rs` 在写一个 DIE 的属性字节**中间**递归发射内层类型的 DIE。DWARF
+是流式编码：一个 DIE 的属性必须连续，children 排在属性之后。旧写法比如 pointer 是
+`[abbrev号][byte_size]→〔这里插入元素类型的整个 DIE〕[ref4]`，解析器从这一点开始全部错位。
+一共 14 处（pointer / array / typedef / enum 底层 / subroutine 返回与形参 / qualifier /
+struct-union 成员 / class 基类与成员 / 全局变量 / subprogram 返回类型 / 形参 /
+局部变量 / 词法块变量）。修法只有一个规则：**所有嵌套类型的 DIE 必须在写本 DIE 的
+abbreviation 号之前发完**（自指类型仍对：本类型的偏移在进 `write_type_die` 前就登记了）。
+
+**第二条：`DW_AT_location` 用的是 `DW_FORM_exprloc`，却没写 ULEB128 长度前缀**（直接发
+`op + sleb(offset)`）。今天 `param_locations`/`local_vars` 恒为空列表，所以这条路径从未被
+踩到 —— 但 6.2 就是要往里送寄存器家，不先修就是把旧的字节错位变成新的。现在由
+`write_location_expr` 统一编码，长度与内容一致。
+
+**6.2 要的三块地基（本轮上的）**：
+1. `DwarfParamLocation::reg(dwarf_reg)` → `DW_OP_reg0 + n`（0x50..0x6f，**单字节无操作数**），
+   配套读接口 `is_register()` / `register()`，消费方不得自己看 `op` 落在哪个区间；
+2. `ArchKind::dwarf_reg_of_gp_hw(hw)` → 硬件号到 DWARF 号的表。为什么不能直接拿硬件号用：
+   SysV psABI 的 DWARF 编号与机器码编码**不同序**（rdx=1、rcx=2、rsi=4、rdi=5、rbp=6、
+   rsp=7），搞错就是让调试器去读另一个寄存器，而从产物上看不出来；
+3. **非 x86_64 一律 `None`**：其他 target 的后端今天不消费 `Location::Reg`（§11.21 的
+   `home_support` 只有 x86_64 是 StackAndRegister），所以这里不猜一张没对拍过的表。
+
+**判据**：
+- 门脚本 `check_dwarf_wellformed.sh`（已挂进常跑序列）。两条子判据：不可解析=红，
+  **DIE 数为 0 也=红**（防「警告消失是因为整个 section 空了」的假绿）。实测 46 → 0。
+- `location_expr_carries_its_own_length`：三种位置的**逐字节**形状（fbreg 3 字节、
+  call_frame_cfa 3 字节、reg 2 字节），外加 `is_register()/register()` 往返；
+- `dwarf_reg_number_table_matches_psabi_order`：逐号对拍 psABI 表 + 越界号返 None；
+- `nested_type_die_does_not_split_a_dies_attributes`：array DIE 的 `DW_AT_count` 紧邻其
+  `ref4`（修之前会被整个元素类型 DIE 插开），**并自带一次判据自校验**：拿一段
+  「内层 DIE 尾部字节」跑同一条判定必须被拒，否则本用例就是假绿。
+
+**产物不受影响（这就是本轮的零信号证据）**：三档哈希与 §11.29 基线 **逐字节相同**
+（`a4e47418…`，879 行）—— 哈希不跑 `-g`，而本轮改的全在 DWARF 发射路径上；
+`cargo test` 9 个 target **3307 条全绿**，13 个测试用例脚本除存量的 covindex 外全绿。
+
+**6.2 还欠的一块**（不假装完工）：今天 dcc **一个变量 DIE 都不发**（`local_vars` /
+`param_locations` 恒空），所以上面的 `reg()` 还是没有生产者。要取消
+`src/ssa/regalloc.rs::register_homes_allowed` 那道 `-g` 限制，先得把后端已经知道的
+「每个局部住在哪个栈槽 / 哪个寄存器」递到 `debug.rs`（home 表与 `var_map` 都在
+`Codegen` 里，缺的只是采集那一步）。在那之前 `-g` 仍然禁寄存器家 —— 限制本身比
+一个读了错位置的调试器安全。
+
+### 11.31 5.1.e 点名的两条表达缺口：分裂占名、`Spill` 不能交付（都已接上）
+
+§11.13 与 §11.24 把生产者的前置写成两条「做生产者前必须先补」的表达缺口。本轮把两条
+都补了 —— 它们都是零产物影响的（生产者还不存在），但不补则分配器无法表达自己挖到的结果。
+
+**1. `compute_splits` 的分裂名没有占名检查**（`src/ssa/location.rs`）。分裂体叫
+`{base}_s{i}`，而用户完全可以已经有一个叫 `x_s1` 的局部：后端的名字→家与名字→栈槽
+两张表都按名字索引，**同名就是两个对象共用一个家** —— 正是 §7.20「一个号不得发给两个
+变量」的反面形状。修法：已用名字集合 = 所有原始局部 + 本表里出现过的全部基名（包含
+`_tbin_7` 这类合成临时值，它们不能被子分裂名占走）+ 已生成的分裂名；从 `i` 起往上取
+第一个没被占用的后缀。用例 `split_names_cannot_collide_with_user_locals` 钉三件事（不踩用户
+名字、分裂名之间不自相同名、首个版本仍用原名），**并带反向对照**：没名字可占时仍然就是
+`x_s1`（否则判据可以靠「永远往后推一格」蒙过去，而那会让已有用例的名字与产物都漂）。
+
+**2. `apply_bindings` 只放行 `Reg`**（`src/ssa/regalloc.rs`），其余一律报
+`home-not-representable` 丢弃。而 `Spill` 从 Phase 5.1.c 起已是后端**已接线**的家（读 /
+写 / 取地址三个消费臂全走 `LayoutMap::spill_off`，带的尺寸也从交付的家导出），唯一断的就是
+交付那一步。现在 `Spill(slot)` 能原样走到 `VarDecl::home` 上，而且**不写** `register_name`
+（内存家写了它就是骗后端去保存一个不存在的寄存器）。交付表从「名字→号」改成「名字→家」，
+`Option<&str>` 就是「这个家要不要同时有文本名」，所以寄存器家那条旧规则逐字保留。
+用例 `spill_homes_are_delivered_to_the_ast` 用注入验机制（今天无生产者，与
+`spill_band_is_sized_from_the_delivered_homes` 同一手法），并且**在重建前的那份体上**交付
+—— 拿已交付过的体再做一次会被「已有 `register_name` 不覆盖」那条旧规则遮住。同时把
+`the_ast_landing_comes_from_the_table` 里「没寄存器名就必须无家」那条过强的断言改成
+「没寄存器名就不能有**寄存器**家」（内存家是合法形状）。
+
+**零产物影响就是本轮的判据**：三档哈希与 §11.30 **逐字节相同**（`a4e47418…`，879 行）；
+`cargo test` 9 个 target **3309 条全绿**，13 个测试用例脚本除存量 covindex 外全绿
+（`VIOLATION_COUNT=0`、`CODEGEN_DIFF_COUNT=0`、`DW_BAD_COUNT=0`）。一旦将来真给出
+`Spill` 家，产物会改（那是带尺寸真的长大），而 5.1.d 的 `allows_late_allocation` 与
+`E1133` 账面会接住算错的那一侧。
+
+**生产者本体仍未做**（诚实记录）：上面的两条只是把「能交付」接上，分配器今天还不选择
+`Spill`。为什么不选：§11.9 的 ∀ 口径实测给出池满拒绑里可共用的空区间是 **0/140**，
+而在 caller-saved 保存通道（前置三的余下部分）与程序点级家存活（前置二）之前，
+多给分配器的也只是「同一个值换个槽」；那两条的前置本轮已各上一块（求值基址单源、
+`is_call_clobbered` 单源 + 可见警告）。
+
+### 11.32 Phase 6.2（下）：变量 DIE 真的存在了，以及一个结构性修法
+
+§11.30 末尾记的那块欠账（dcc 一个变量 DIE 都不发）本轮补完：`-g` 产物里现在真的有
+`DW_TAG_variable`，位置来自发射器而不是猜测。
+
+**数据通路**：`Codegen::debug_var_facts`（函数名 → 「局部 → 位置」表）由
+`collect_debug_var_facts` 在 `patch_callee_saves` 之后、嵌套函数之前采集（那时 `homes`
+与 `var_map` 刚好处在本帧的最终值，而下一个函数一开头就把它们复位）。名字集合**用规划期
+那一份遍历** `collect_frame_var_decls`，不另起一次 AST 扫描；合成名与静态局部因此天然不在
+表上。没命中时 `var_location` 返 `None` 而不走 `home_for` —— 那条路径的兜底从 §11.23 步 1
+起是 `E1134`，采集调试信息不得自己造出错误。`Spill` 家在**采集时就经 `spill_off` 翻译回
+`Stack`**，所以调试侧不需要知道帧布局，也不会出现第二份算溢出槽坐标的公式。
+
+**三条换算（拿不出就不发，宁缺不错）**：`Stack(off)` → `DW_OP_fbreg(off - cfa)`；
+`Reg(r)` → `DW_OP_regN`，N 过 `dwarf_reg_of_gp_hw`；拿不到 DWARF 号的寄存器（或尚未接线的
+家形状，如 `Imm`）→ 不发这个变量的位置。`cfa` 不是一处字面量而是抽出来的
+`cfa_frame_offset(frame_pointer)`，因为 CFI 与 `DW_OP_fbreg` 算的是同一个数——两处各写
+`if frame_pointer {24} else {16}` 就是「改序言只修一侧」，而偏移整体上跳 8 字节从产物上
+看不出来。实测对拍：`int x` 在 `%r13-64` → `DW_OP_fbreg: -80`（CFA = rsp+16、r13 = CFA-16）✓。
+
+**一个结构性修法（本节真正值钱的那一块）**：接上变量 DIE 后，readelf 当场报
+`DW_AT_name : (indirect string, offset: 0x1b): <偏移量过大>` —— 编译与链接完全无感。
+根因不是「`strl_section` 漏了一个字段」，而是 `.debug_str` 的内容由一份**独立的枚举**决定，
+且它在 `.debug_info` 之前就被定格：任何只在 info pass 里出现的串（变量名、以后新加的
+任何 DIE 种类）都指向节外。给那个枚举多加一行只能修到下一个 DIE 种类。现在的修法是
+**在 info pass 之后重取节内容**：`StringTable::intern` 是去重 + 往后追加，所以重取只会
+多出新串、**不改动已有串的偏移**（前缀性质，由用例钉住）。`strl_section` 就此退化成顺序
+提示，不再是正确性的承担者。
+
+**判据**：
+- 新用例 `debug_str_covers_every_die_name_without_moving_existing_offsets`：变量名必须在
+  `.debug_str` 里，而且「多一个局部」不得让旧表重排（新表以旧表为前缀）；
+- `check_parallel_vs_serial.sh` 新增第 2 层：`-O2 -g` 下并行与串行的 `.text` 与
+  `.debug_info` 都得逐字节相同（函数级事实不随 chunk 带回，并行 `-g` 构建里 worker 编译的
+  函数就一个变量 DIE 都没有 —— N1/N12 同族）。实测 **`DEBUGINFO-DIFF 0`、TEXT-DIFF(-g) 0**。
+  非空对照：同一夹具下修复前的二进制 `DW_TAG_variable` 是 **0 条**，现在是 **3 条**——
+  新判据盖的是有内容的路径。（拿旧二进制比 `.debug_info` 会「两侧都是空节」而相同，
+  所以这条判据的反向证据是 DIE 条数，不是旧产物。）
+- 并行路径：`debug_var_facts` 随 `FuncEmitChunk` 带回主 Codegen（与 `SymbolFacts` 同形状）。
+
+**全量验证（本轮实跑）**：`cargo test` 9 个 target **3310 条全绿**（新增 1 条 strp 覆盖用例）；
+13 个测试用例脚本除存量 covindex 外全绿；三档哈希与 §11.31 基线 **逐字节相同**
+（`a4e47418…`，879 行）—— 非 `-g` 产物一个字没动，`collect_debug_var_facts` 在
+`debug_level == 0` 时直接返回。
+
+**仍未做的**：`-g` 那道 `register_homes_allowed` 限制本轮**没取消**。现在 DWARF 已能描述
+寄存器家，但取消限制后 `-g` 的产物会变（局部开始进寄存器），那需要先在真产物上验一次
+「调试器确实读得到值」（目前只有 readelf 层面的位置对拍，没有 gdb 层面的实读验证）。
+那一步与前置二一起做。
+
+### 11.33 N10 完工 —— `.rodata` 的 interning 变成「内容键 + 合并期重放」，判据升级成整个 `.o` 逐字节相同
+
+**为什么必须修，而不是继续按 `.text`+符号项判**：§11.24/§11.26 把 N10 定性成「膨胀但不改
+代码」先挂着，代价是「并行不改产物」这条不变式只能按 `.text` 逐字节 + 符号项（剔掉 Value、
+序号、`SECTION` 那一项）来判。那是一个**有洞的口径**：符号项里被剔掉的 `SECTION` Size 恰好
+就是 N10 的指纹 —— 等于把缺陷从判据里剪掉再宣布通过。本轮把它补成无条件不变式。
+
+**结构难点（当初登记的理由，逐条给解法）**：`.rodata` 是一坨带对齐的字节流，里面混两类
+引用，定址方式根本不同：
+
+| 引用 | 载体 | 定址方式 | resolve 处 |
+|---|---|---|---|
+| `string_refs` | `(文本偏移, 内容字节)` | **按内容** | `elf/resolve.rs` 拿 data 查 `string_pool` |
+| `float_refs` | `(指令偏移, rodata 偏移)` | **按偏移**（SSE disp32 在 +4） | 偏移直接写进指令 |
+| `x87_float_refs` | 同上 | **按偏移**（x87 disp32 在 +2） | 同上 |
+| `label_addr_refs` | `(偏移, 标号名)` | 按标号名 | 与本缺陷无关 |
+
+按内容那类去重后自动指向唯一那份、根本不需要换算；按偏移那类才会被挪动 ⇒ 合并期必须做
+一次「chunk 局部偏移 → 最终偏移」的换算。这就是「条目表 + 末端定址」的实际落地形状，只
+是**没有真的换掉 `rodata: Vec<u8>` 的字段类型** —— `backend.rs:41` 用 `self.rodata.clone()`
+把它塞进跨后端公共的 `CommonImage`，改类型要动的是那个公共字段、波及所有后端（不在本轮
+可改范围）。按内容键重放拿到的是同一件事（同内容只落一份、偏移引用换算正确），代价小得
+多。
+
+**实现（三处，全在 `parallel/orchestration.rs` + `codegen.rs` 一个字段）**：
+
+1. `emit_func_chunk` 除增量字节 `new_rodata` 外，还回传 `pool_add: Vec<(内容键, chunk
+   局部偏移)>` = `string_pool` 相对快照的**差集**。差集判据用偏移 `>= rodata_base`（rodata
+   只增不减，快照里的条目必然落在基址之前）。**必须按 (偏移, 键) 升序**：`HashMap` 迭代序
+   随运行与哈希随机度变化，直接遍历它会让产物依赖调度之外的东西。
+2. `merge_chunk_rodata`（合并期重放）：按 slot 序逐 chunk 走，逐条目用
+   `rodata_entry_bytes(键)` 反推它落位的字节，问全局池「这个内容已经有了吗」—— 有 ⇒
+   **一个字节都不追加**，只把「局部偏移 → 已有那份的最终偏移」记进分段表；没有 ⇒ 落位、
+   登记、记映射。条目之间的缝隙（复合字面量的对齐 pad、不进池的 `__builtin_huge_val`
+   字节、sanitizer 的类型描述符）**原样搬运**并同样记进分段表 ⇒ 不需要知道 `align` 也能
+   还原字节。产出 `(局部起点, 最终起点, 长度)` 分段表，取代旧的单个 `rodata_delta`。
+3. `map_chunk_rodata_off`：把按偏移的引用换算成最终偏移（见下面「坐标空间」）。
+
+**内容键为什么能精确反推字节**：7 个内部化写入站点只有三种形状 —— 键 == 落位字节（字符串
+字面量、`__builtin_FILE`，都以 NUL 结尾）；`"f_"+hex` / `"x87f_"+hex`（SSE / x87 浮点常量，
+落位的是 hex 解码后的原始字节）；既无 `f_`/`x87f_` 前缀又不以 NUL 结尾的只剩 sanitizer 的
+`__FILE__`（键不含结尾 0，那多出来的 1 个 0 落进紧随其后的裸追加段，整体字节仍逐字相同）——
+而该路径在 worker 内**不可达**：`ParallelEmitCtx` 压根没带 `bounds_check` 字段。判别顺序把
+「以 NUL 结尾」放在第一位：浮点键全由十六进制字符组成，永不以 NUL 结尾 ⇒ `"f_00"` 这类
+字面量不会被误解码。反推不出来、或反推结果与 worker 实际落位的字节不符 ⇒ **E1104 硬错误**
+并提前返回，不静默降级。这是整个重放方案唯一的现实假设，猜错就编译失败，而不是产出错产物。
+
+**坐标空间（本轮实现里唯一的真 bug，由 E1104 抓出来）**：worker 回传的 `float_refs` /
+`x87_float_refs` 偏移是**含快照前缀的 worker 绝对坐标**，而 `pool_add` 与分段表是**chunk
+局部坐标**。第一版按局部坐标直接查表，`tests/fixtures/c/static_agg_by_value.c` 立刻报
+`offset-based reference points at chunk-local rodata offset 40 … increment 12 bytes`。修法是
+换算而不是查表：`off < rodata_base` ⇒ 该条目在全局初始化阶段就进了池、位置从不移动，**原值
+返回**；否则减基址换算成局部坐标再查段。顺带纠正了旧实现的一处隐性错：旧代码对所有引用
+无条件 `+rodata_delta`，恰好把前缀那一类推进了增量里。
+
+**E1105**：`compile_rel` 里那段「池里查不到就现场补拷贝」的兜底，正是 `main.c` 的 `.rodata`
+28 → 56 的直接来源（chunk 的新键没回登主池，ELF 阶段再补一份）。补拷贝保留（否则下一行
+`string_pool[&data]` 直接 panic），但先报 E1105 —— 条目登记与引用必须同时到达主 Codegen，
+缺一就是后端内部不变量破坏，不能靠「多产一份产物」把错盖住。
+
+**确定性（结果不得依赖 worker 完成顺序 / 调度 / 核数）**：(a) `pool_add` 按 (偏移, 键) 升序；
+(b) 合并严格按 slot 序 —— `emit_functions_parallel` 按 slot 逐个 merge，slot 序 == 源码序，
+worker 编号与 `fetch_add` 抢活结果都不进产物；(c) 快照基址只由「快照本身 + slot」决定。
+实测侧证：`taskset -c 0`（`available_parallelism()==1` ⇒ `degree<=1` 分支，那仍然是「一函数
+一 chunk + 按序合并」的同一条路，所以单核机器也在判据覆盖内）/ `-c 0,1` / 默认度数三档
+产物两两与串行相同；同一并行配置连跑 5 轮字节一致。
+
+**判据升级（`.work_tmp/p12_base/check_parallel_vs_serial.sh`）**：从「`.text` 逐字节 + 符号项
+（剔 Value/序号/`SECTION`）」改成**整个 `.o` 逐字节相同**；`.rodata` 差异从「单独报不失败」
+改成硬失败，并新增 `OTHER-BYTE-DIFF`（差异落在别的节 / 节尺寸 / pad）这一类，四类标签
+`TEXT-DIFF` / `SYMTAB-DIFF` / `RODATA-ONLY-MISMATCH` / `OTHER-BYTE-DIFF` 必须全为 0 才 rc=0。
+剔 Value 那个口子没有理由保留：N10 修完后不存在任何合法理由让并行与串行的符号地址不同。
+
+**反向证据（同一份判据必须还能红）**：拿修复前的 HEAD 二进制 `/tmp/dcc_head` 跑升级后的判据
+⇒ `RC=1`、`CODEGEN_DIFF_COUNT=107`：非 `-g` 层 `RODATA-ONLY-MISMATCH 42` / `SYMTAB-DIFF 1` /
+`TEXT-DIFF 7` / `OK 235` / `SKIP 8`（合计 293），`main.c` 那一行打印成
+`p=5264B s=5240B rod=56B/28B` —— 正是任务书点名的形状；`-g` 层另报 `RODATA-DIFF(-g) 44` /
+`OTHER-DIFF(-g) 6` / `TEXT-DIFF(-g) 7`（同一批 `.rodata` 重复在带调试信息的构建里也跑不掉，
+这是本轮把 `-g` 层从「只比 `.text` + `.debug_info`」升级成整 `.o` 逐字节后才看得见的那一半）。
+（42 对本轮工作区的 44：HEAD 二进制还没有 §11.26 那批 N12 修复，两个夹具在 HEAD 上
+属于 `TEXT-DIFF`/`SYMTAB-DIFF` 那一族，指纹不同类。）
+
+**测试用例（新增 9 条 integration + 8 条 lib 单测）**：
+
+* `tests/integration/parallel_rodata.rs`（新主题文件，壳 `tests/integration.rs` 加 1 行
+  `include!`）。形状覆盖：① 跨函数共用字符串，且刻意放一组 `"shared"` / `"shared-message"`
+  **前缀对**（按内容键去重必须精确相等，前缀匹配会把一份吃掉）；② 共用 double + `long
+  double`（`float_refs` 与 `x87_float_refs` 两条按偏移的通道）；③ 全局指针初值先把字面量
+  送进 `.rodata` 前缀、函数再复用同串与浮点（`off < rodata_base` 那条通道）；④ 复合字面量
+  的**对齐裸追加**与共用字符串混在同一段（`compound_lit_cache` 是 worker 局部的、跨函数不
+  共享，所以这条同时钉住「裸追加原样搬运」）；⑤ 真实夹具 `tests/fixtures/c/main.c`（不复制
+  源码，直接对仓库路径发射，`#include <stdio.h>` 的头搜索路径不该换环境）；⑥ `-g` 构建
+  下除 `.debug_*` / `.BTF*` / `.note*` / `.shstrtab` 以外的**所有**节（内容与节集合）必须
+  与串行相同 —— 把 N10 的不变式延伸到带调试信息的产物，同时为下面的行表缺口显式让路。
+* **防假绿**：每条用例第一步调 `n10_assert_parallel_eligible` —— 用 `dcc::cli::parse` 核对
+  `opt >= 2 && parallel_codegen && relocatable && !emit_asm`，用 `dcc::parser::parse` 数
+  「带体、非 alias、非 error 的顶层函数」`>= 2`，与 `emit/functions.rs:59` 的准入判据逐条
+  对应；少一条就是拿串行比串行。跑测试的环境若设了 `DCC_NO_PARALLEL`，这些用例会红 ——
+  那也是预期行为（此时比较本身无意义）。
+* `..._eligibility_check_has_teeth` 反过来验证这套核对**确实会红**：单带体函数 TU 必须
+  panic，「1 个带体 + 1 个原型」也必须 panic。
+* 指纹断言（不只是整文件 diff）：共用字面量在并行 `.rodata` 里出现次数**恰为 1**（修复前
+  是 3/3/2），失败时消息直接说「跨 worker 各存一份」，而不是丢出几 KB 字节 diff。
+* lib 侧 `parallel/orchestration.rs` 的 `mod tests` 加 8 条单测，钉住重放的机械性质：
+  三种内部化形状都能从键反推字节；同一内容键跨 chunk 只落一份；裸追加缝隙原样搬运且
+  可被引用映射；快照前缀偏移穿透不变；`pool_add` 乱序 / 键与落位字节不符 / 引用落在所有
+  段之外 ⇒ 一律 E1104 硬错误而不是静默合并；按偏移升序的重放结果与输入顺序无关。
+
+**残留风险（如实记录，不当成已交付）**：重放搬得动裸追加的**字节**，搬不回 pad 的**个数** ——
+pad 个数是按 worker 当时的 `rodata` 长度算的，而串行那边前面的条目可能已被去重（长度不同）。
+若某条裸追加之前的累计漂移不是 `align` 的倍数，pad 数就会不同，理论上是 `OTHER-BYTE-DIFF` 的
+候选来源；本轮 293 个夹具与上述 5 类形状都没出现，而它一旦出现的表现形式是判据红 +
+`parallel_rodata.rs` 相应用例红，不会静默。真要根除得让 pad 也进分段表，那要改
+`emit/expr/utils.rs` 里落位函数的签名（不在本轮可改范围）。另外 `tests/reproducibility.rs`
+里那条用例的文档注释还写着「夹具刻意不含字符串/浮点 ⇒ 不受 N10 干扰」，从本轮起那是历史；
+该文件不在本轮可改范围，故只在此登记。
+
+**全量核对（终轮实跑，二进制 `target/release/dcc` md5 `6ef06181…`，真树 `/root/dcc`）**：
+
+| 项 | 读数 | rc |
+|---|---|---|
+| `cargo test --release -j2 -- --test-threads=2` | 10 个 result 行**合计 3333 条全绿、0 失败**（lib 2148、integration 1069（含本主题 9 条）、errors 26、profile 53、reproducibility 8、cpp_abi_gcc_cross_check 9、perf_regression 4、fixdep 7、doc 9、main 0） | 0 |
+| `parallel::orchestration` 单测 | 16 条（旧 8 条标号命名空间 + 新 8 条 N10 重放） | 0 |
+| `check_fixtures.sh` | scanned=156 源文件 / fixtures=636 / all passed | 0 |
+| `check_fixtures_selftest.sh` | 5/5 PASS（五条规则都被证明真的会红） | 0 |
+| `check_reproducible_output.sh` | 5274 组合 × 3 次连跑字节一致 | 0 |
+| `check_opt_equivalence.sh`（JOBS=2） | **OPT-DIFF 0**、COMPILE-FAIL 55（存量、未增长：CF-NOMAIN 36 / CF-CROSS-TU 15 / CF-SRC-REJECT 4）、ADDR-NORM 2 | 0 |
+| `make golden-cross` | 校验 6、新捕获 0、失败 0 | 0 |
+| `check_frame_offsets_within_rsp.sh`（JOBS=2） | 580 个夹具，FRAME_OVER_COUNT=0 | 0 |
+| `check_parallel_vs_serial.sh`（升级后） | **OK 285 / TEXT-DIFF 0 / SYMTAB-DIFF 0 / RODATA-ONLY-MISMATCH 0 / OTHER-BYTE-DIFF 0 / TEXT-DIFF(-g) 0 / RODATA-DIFF(-g) 0 / OTHER-DIFF(-g) 0 / SKIP 8**（`CODEGEN_DIFF_COUNT=0`）；`-g` 层：G-OK 127 + G-DEBUGONLY-DIFF 158 + SKIP 8 = 293 | 0 |
+| 同上，拿 `/tmp/dcc_head`（修复前）跑 | OK 235 / **RODATA-ONLY-MISMATCH 42** / SYMTAB-DIFF 1 / TEXT-DIFF 7 / **RODATA-DIFF(-g) 44** / OTHER-DIFF(-g) 6 / TEXT-DIFF(-g) 7 / SKIP 8（`CODEGEN_DIFF_COUNT=107`） | **1** |
+| `n10_g_section_probe.sh`（逐节探测，独立于判据脚本） | G-OK 127 / **G-RODATA-DIFF 0** / **G-NONDEBUG-DIFF 0** / G-LAYOUT-DIFF 0 / G-DEBUGONLY-DIFF 158 / SKIP 8；参与差异的节恰为 `.debug_line` 158、`.rela.debug_line` 158、`.BTF.ext` 158 | 0 |
+| 三档哈希 `gen_hash.sh hash_n10.txt` | 879 行，三档 3d0b7b08… / 0432ddcc… / bbc2183c…，grand `a4e47418feb3132e…` —— 与 §11.30–§11.32 基线**逐字节相同**（`diff hash_p62pre.txt` 差分行 0），FAIL/NOARTIFACT 24（存量） | 0 |
+
+哈希为什么是「零变化」而不是「本轮允许改产物」的那批：`gen_hash.sh` 哈希的是 `-O0/-O2/-O3`
+的 `-S` 汇编文本，而 `-S` 恒走串行发射（`emit_asm` 直接挡在准入判据外）—— N10 从来就不在
+这张表的读数面上。真正变化的只有 ET_REL `.o` 的**并行侧**：42 个夹具的 `.rodata` 里那批重复
+副本消失（合计回收 7864 字节），其中 28 个是「整个内部化段翻倍」（`rod` 恰为串行的 2×，
+典型 `main.c` 56B→28B），14 个是部分条目翻倍（只有一部分字面量出现在 ≥2 个 chunk 里）。
+串行侧、`-S` 侧一个字节没动；`-g` 侧变的也只有并行那一半（`.rodata` 的重复副本，实测
+HEAD 二进制在 `-g` 下有 44 个夹具的 `.rodata` 不同），而行表/BTF 那三节本轮没动（见下）。
+所以本轮的效果是「并行产物回到与串行一致」，不是「重新定义布局」，当初登记的「必然改
+所有含字符串 TU 的 `.rodata` 布局」并没有发生：去重后的并行布局就是串行布局本身。
+
+测量口径说明（终轮）：上表**全部**在 `/root/dcc` 真树、真二进制（`target/release/dcc`，
+md5 `6ef06181…`）上重跑并互相印证，日志留在 `.work_tmp/p12_base/`：`n10_check_final.log`、
+`n10_red_proof2.log`（HEAD 反向对照）、`n10_batch3.log` 及其分项 `n10_{fixtures,
+fixtures_selftest,reproducible,opt_equiv,golden_cross,frame_offsets,hash}.log`、
+`n10_golden_cross_make.log`（`make golden-cross` 本体）、`n10_cargotest_final.log`、
+`n10_g_probe.log` + `n10_g_probe_detail.txt`、`hash_n10.txt`；驱动脚本 `n10_final_rerun.sh`
+（顺序跑，全程 `-j2` / `--test-threads=2` / `-P2`）。本轮中段曾有一段时间真树的 lib 不可
+编译（并行会话把 `src/ssa/pipelining.rs` / `src/ssa/location.rs` 停在 E0308/E0425 的中途
+状态，而那两个文件是本轮禁改项），当时 `cargo test` 与 `make golden-cross` 在同源副本
+`/tmp/n10_tree` 上取过一次读数（副本里只做了两件让编译通过的事：`pipelining.rs` 取 HEAD
+版、`location.rs:246` 补一个 `&`）；那两项在 14:04 已按上表在真树重跑，旧读数作废，不再
+作为依据。另需记录：同一时刻真树的 `tests/integration/dwarf_gdb.rs`（并行会话新增、未纳入
+版本管理）一度有一条用例红（`gdb_line_breakpoint_binds_on_line_that_has_a_dwarf_row`，
+用 `-g` 不带 `-O2` ⇒ 恒串行路径，与本节无关）；终轮 3333 条全绿时它也已经转绿。
+
+**`-g` 面：N10 已覆盖，行表/BTF 未覆盖（新登记，不属本轮可修范围）**：
+
+把 `-g` 那一对也升级成整 `.o` 逐字节后，实测 293 个夹具里 **G-OK 127 + G-DEBUGONLY-DIFF
+158 + SKIP 8**，而参与差异的节**恰好只有三节**：`.debug_line`、`.rela.debug_line`、
+`.BTF.ext`（三节各自 158 次，无一例外）；`.rodata`/`.text`/`.data`/`.eh_frame`/`.rela.text`/
+`.symtab`/`.strtab` 全部逐字节相同。两条工具（判据脚本的 `-g` 层与 `n10_g_section_probe.sh`）
+互相印证同一组数字。
+
+* **它不是 N10**：`main.c` 在 `-g` 下的 `.rodata` 并行/串行都是 28B；拿 `/tmp/dcc_head` 跑
+  同一逐节探测，那 44 个夹具在 `-g` 下也报 `.rodata` 差异（归到硬失败类 `RODATA-DIFF(-g)`），
+  修后归 0 —— 即 N10 在 `-g` 下也已消失。
+* **真正的根因**：行号事实存在 `Codegen::stmt_line_entries` / `asm_line_entries` /
+  `asm_insn_debug_entries` 三张表里（`emit/stmt.rs::note_src_line` 与 `asm/emit.rs` 在发射时
+  攒），`backend.rs` 拼成 `combined_line_entries` 后交给 `src/debug.rs::build_dwarf_cu` /
+  `build_btf_ext`。而 `FuncEmitChunk` 里**根本没有这三张表**（`grep line_entries
+  orchestration.rs` = 0 命中），于是 worker 编译的那些函数的行条目全部丢失：并行侧
+  `.debug_line` 比串行短（`main.c`：89B vs 120B），`.BTF.ext` 同理（63B vs 223B），而且
+  因为条目集不同，并行多 emit 了一个 `.rela.debug_line`、串行没有（节集合也不同）。
+* **为什么本轮不顺手修**：带回这三张表要给 `codegen.rs` 里的 `FuncEmitChunk` 加 debug 面
+  字段（本轮对 `codegen.rs` 的许可只限于 `string_pool`/`rodata`/`refs` 相关字段与函数），
+  并且要动 `src/debug.rs`（本轮禁改）与 `backend.rs`（不在许可清单）；而并行会话正在
+  Phase 6.2 的 DWARF 线表上开工（就是他们那条 `gdb_line_breakpoint_*` 用例的同一块）。
+  双十字位上都不允许，所以只把它钉成可观测的读数而不是默默删掉：判据脚本新增
+  `G_DEBUGONLY_PENDING` 一行（**不进**硬失败集合，但每次必打印），并新增一条测试用例
+  `parallel_rodata_g_build_non_debug_sections_match_serial`（钉住 `-g` 下非 debug/BTF 节的
+  内容与节集合必须与串行相同，那三节显式跳过并在注释放行）——一旦有人把行表接上，
+  `G_DEBUGONLY_PENDING` 会自己往 0 走，不需要改判据。
+* 旧口径的坑一并记在这里：第一版逐节比对用 `objcopy -O binary --only-section=X`，而
+  `sh_addr = 0` 的 `.debug_*` / `.comment` 会被按 VMA 排序后导出**空文件**（两侧都比空气
+  ⇒ 静默假绿，当时 158 条差异报成「无节参与」）；改用 `readelf -x <name>` 后才有上面
+  那组可信数字。
+
+### 11.35 多专家并行推进的一轮：6.2 / 6.3 / N10 / covindex 四项同时落地
+
+本轮换了工作方式：按**文件所有权互不相交**派四个并行任务（6.2 收尾、N10、6.3、covindex
+工具债），主线程继续 P12 主线。结果与交接中发现的问题都值得记下来。
+
+**交付**（数字均为本轮真树实跑）：
+| 项 | 状态 | 实测 |
+|---|---|---|
+| 6.2 DWARF 寄存器位置 | 完工（§11.30/§11.32 + 本轮收尾） | gdb 层 4 条用例绿：`DW_OP_reg` 路线验「改 %rbx 后 `print v` 跟着变」，`DW_OP_fbreg` 路线用观察点验「调试侧 CFA 与发射器实际栈槽是同一个事实」；行断点能绑；CU 区间改成 min/max 且带「源码序≠地址序」的反向对照 |
+| `-g` 禁寄存器家 | 已取消 | `register_homes_allowed` 恒真；`-g -O2` 下普通局部也拿 `DW_OP_regN`，并同时验「它是活寄存器」 |
+| N10 并行 `.rodata` | 完工（§11.33） | worker 回传「内容键 + 局部偏移」，合并期按内容重放；按偏移的引用走分段映射 |
+| 6.3 P16 真轮转 | 已实现并带自检 | 9 条用例绿，含「每个槽首次被读前必已被写」的发射序自检与 `DCC_SSA_OFF=pipe` 退回旧保守判据的反向对照 |
+| covindex 工具债 | 完工，且本轮补齐 | `gen_coverage_index.sh` rc=0，`rows total=1182`，`reported=0` |
+
+**并行之间互相揭示的两件事**（这类事是并行推进真正的价值，不是返工）：
+1. N10 的交付把判据升级成「整个 `.o` 逐字节相同」，于是暴露出**下一层**同类缺陷：
+   `FuncEmitChunk` 不带回 `stmt_line_entries`/`asm_line_entries`/`asm_insn_debug_entries`，
+   `-g -O2` 下行表与 `.BTF.ext` 每函数退化一行（158 个夹具）。本轮由 6.2 那条线补上回程，
+   现在 `G_DEBUGONLY_PENDING=0`、`OK 285 / SKIP 8`，硬失败类全为 0 ——
+   「并行不改产物」第一次对**整个 `.o`（含 `-g`）**无条件成立。判据升级本身才是这条缺陷的
+   发现器：旧判据只看 `.text` + `.debug_info`，那三节从来没被比过。
+2. 一个假绿风险被当场抓到：`p16_rotation.rs` 用 **CRLF** 行尾，而覆盖索引按「行尾即结束」
+   识别测试属性 —— 于是 9 条真实用例全被当成「非测试 fn」，报 14 条 STRUCT-HELPER。修法
+   是归一行尾（顺带 `src/codegen/shared/homes.rs` 也是 CRLF，一并改），并把 `dwarf_gdb.rs`
+   的 11 个共享助手按 §14 搬进 `tests/common/harness.rs` 并逐个登记判据类别。另外注释里
+   写出测试属性的**字面串**会被子串计数算成一条幽灵用例，也在源头改掉并在注释里写明这个坑。
+
+**还欠的（objective 未完成部分）**：5.1 前置一（下）「值现在在哪个寄存器」成为发射期可查事实、
+前置二 程序点级家存活、前置三（余）分配器可用的 caller-saved 保存/恢复通道、5.1.e 生产者本体
+（收益已量化 0/140，需前置二/三）。§11.18 那一组六项至此全部结清。
+
+### 11.36 并行交接的两条工具形状（补记，因为它会反复咬人）
+
+1. **行尾必须 LF**。覆盖索引一类「按行首/行尾匹配」的自检在 CRLF 文件上会把
+   `#[test]` 识别为不存在（行尾多一个 `\r`），于是一个文件里的**全部真用例**被误报成
+   「非测试 fn」。本轮 `tests/integration/p16_rotation.rs` 与 `src/codegen/shared/homes.rs`
+   都是并行任务写出的 CRLF 文件，归一后 STRUCT-HELPER 从 14 条直落到低真的 11 条。
+   复现/检查：`grep -qU $'\r' <file>`。
+2. **注释里不得写出被子串计数的记号**。`gen_coverage_index.sh` 的用例数是
+   `grep -c '#[test]'`（子串），所以主题文件的注释里写一次那个字面串就多一条幽灵用例，
+   表现为 `COUNT-TOTAL`/`COUNT-PER-FILE`/`STRUCT-HELPER` 三条同时红。本轮在
+   `p16_rotation.rs` 的注释里踩到，已改措辞并在原地写明这个坑。
+3. **共享助手的归宿是 `tests/common/harness.rs`**（§14）：本轮搬了 11 个（`dwarf_gdb_build*`、
+   `gdb_batch`、`gdb_bp_addr`、`readelf_*`、`parse_debug_info`、`var_location`、
+   `dwarf_reg_name`、`DwarfDieRow`、`DWARF_GDB_SRC`），并在 `CRIT_TABLE` 里逐个登记
+   类别（按助手**自己做什么**定，不按调用它的用例最终证明了什么定）。
+
+### 11.37 前置一（下）：「刚求出来的值在哪个寄存器」从约定变成可作废的记录
+
+前置一（上）把 296 个 `0` 抄本换成名字（§11.27 前后），但那只是**口径**统一：发射期仍然
+查不到「这个寄存器里现在握着谁的值」。前置二（程序点级家存活）与前置三（caller-saved
+保存/恢复）要消费的恰好是这条数据，所以本轮把它做出来。
+
+**先解决的是模型的可靠性，不是记录本身。** 一开始我想直接加持有表，随即实测否掉了这个顺序：
+`Codegen::emit` 并不是指令字节的唯一出口 —— 函数体发射路径上还有 4 处直接追写
+（`emit/functions.rs` 的三处 nop 填充、`emit/stmt.rs` 的 `mov r13,r10` 三个字节、
+`asm/constraint.rs` 里 `AsmOutcomeSink::push_code` 塞**任意用户 asm 字节**）。以「又发了一条
+指令」为失效点的记录，只要存在绕开出口的追写，就会**静默变陈旧**：查出来是 `Some(%rax)`
+而那里其实已经不是刚求出来的值。这类"看起来成立的事实其实会撒谎"比没有事实更危险。
+
+所以顺序是：
+
+1. **收口出口**：三处 nop 填充改 `self.emit(&[0x90])`、`mov r13,r10` 改
+   `self.emit(&[0x4D, 0x89, 0xD5])`、`push_code` 改 `self.emit(bytes)`。全部字节等价
+   （三档哈希见下）。
+2. **记录 + 单一失效点**：`Codegen::eval_holding: Option<RegId>`，写点是新加的
+   `gen_expr_value(&mut self, e) -> RegId`（它在 `gen_expr(e, EVAL_BASE)` **之后**才写，
+   顺序不能反，否则自己内部的发射会把自己清掉）；失效点就是 `emit` 一行
+   `self.eval_holding = None`。读接口 `eval_held()` 返回 `None` 的含义是「没有这条事实」，
+   不是「猜一个」。
+3. **逐函数复位**：`compile_func` 开头置 `None`。不复位的后果是新函数开头的 `eval_held()`
+   会拿到上一个函数留下的号 —— 那是本仓已经栽过两次的形状（`frame_layout`、`late_*`）。
+4. **判据**：`.work_tmp/p12_base/check_eval_base_single_source.sh` 加第 4 条 `EVAL-ONLY-SINK`
+   —— 函数体发射路径里不得出现 `self.code.push/extend/append`，白名单只剩 merge（接 worker
+   整段产物）与 TU 级拼装两处，因为它们不发指令；同时要求 `emit` 里**必须**还有那行失效，
+   否则白名单那两处就成了无人看守的漏洞。反向对照实测：临时把 `mov r13,r10` 改回
+   `self.code.push(0x4D)` → 立刻报 `非法出口=1`（还原后 `RAW_CODE_SINK_LINES=8 非法出口=0`）。
+5. **用例 2 条**（lib）：`eval_holding_is_recorded_and_invalidated_by_the_single_sink`
+   （两种写法**字节全等** + 记得到 + 任何新指令即作废）、
+   `eval_holding_is_reset_per_function`（拿真函数过 `compile_func`，不许活过一个函数）。
+
+**实测**：`cargo test` 9 个 target **3351 条全绿**；三档哈希 grand 仍 `a4e47418…`、
+879 行表与基线 `hash_p62pre.txt` **差分行 0** —— 本轮改动是纯结构性的，零产物变化。
+
+**这一步买到的是什么**：前置二现在有了可依附的对象（家/值在程序点上的存活与失效，必须
+先能问出「谁握着哪个号」）；前置三的保存通道同理 —— 它要在 call 前知道「哪些号里握着还要用的
+值」。**仍未做的**：目前还没有发射路径**消费** `eval_held()`（它只是被记录与被测试），
+所以它还不能单独解锁 5.1.e 的生产者；消费者与前置二/三一起做。
+
+### 11.38 前置三的收益面实测：87.8% 的池满拒绑需要的是**保存通道**，不是更大的池
+
+前置三（caller-saved 保存/恢复通道）要不要做、做完能救多少，以前没有数。本轮把数测出来，
+并且顺手证实了一件事：**没用例的度量会把设计带倒**。
+
+新增 `ssa::liveness::spans_call(func, base)`（只读诊断，不进任何分配决策，因此零产物影响）：
+按 `compute` 的同一套块序与同一套 `collect_uses_kind` 走一遍，收集 call 点与基名的
+`[首次定义, 最后使用]` 区间，判区间内是否含 call。口径与发号用的活性同源，避免出现
+「度量用的活性与发号用的活性不是一套」这种第二真源。
+
+**第一版是错的，而且错在漏报方向**：判据写成「扫到 call 那一刻就查区间」，可是
+`int v = n + 1; int a = sink(v); return v + a;` 这种形状里 v 的**最后使用在 call 之后**，
+那一刻 `last_use` 还没出现 ⇒ 判成「不跨」。改成先收集 call 点、末尾再判区间。这条错误是
+新加的用例 `spans_call_is_true_for_a_range_that_straddles_a_call` 第一次跑就抓出来的
+（它当场红），而那批用例正是按 §11.9 那条教训写的 —— 「一个 0 既可能是真结论也可能是
+度量算错，不验证就分不清」。
+
+**实测（`DCC_REGALLOC_DUMP` 全语料聚合，`collect_p0_tables.sh` 新增两列）**：
+
+| 指标 | 修好度量前 | 修好度量后 |
+|---|---|---|
+| 候选 / 池满被拒 | 658 / 148（22.49%） | 657 / 148（**22.53%**） |
+| 版本分裂可救 | 0 | 0（再次确认 §11.9 的 0/140） |
+| 池满拒中**不跨 call** | ~~25~~（漏报，虚高） | **18** |
+| 池满拒中**需要保存通道** | ~~123~~ | **130**（87.8%） |
+
+结论落在设计上了：
+
+1. **单纯把池从 4 个 callee-saved 扩到 caller-saved 救不了多少** —— 只有 18/148 个候选的
+   活区间不跨 call。这条否掉了「先扩池」的省力路线（§11.6 那次「扩池已被实测否决」的理由
+   是暂存约定，这次否的是收益面本身，两条独立证据同向）。
+2. **前置三的 store/load 通道才是主收益**：130/148。所以实现顺序确定为先建通道，
+   而不是先做「不跨 call 就直接发 caller-saved 号」这个 18 个的小优化。
+3. 顺带纠正一条本轮先前对 objective 的判断：我以为「局部 `register asm` 绑到 caller-saved
+   号跨 call 被毁」dcc 会算错 —— 实测 **gcc 与 dcc 都是 27**（`register int v asm("r8") = 42;`
+   跨一个 6 参数调用后读回 6），两侧一致。所以那不是缺陷，而是本就没有通道的语义空洞，
+   它正是前置三要填的东西。
+
+**验证**：`cargo test` 9 个 target **3353 条全绿**（新增 3 条 liveness 用例）；16 项测试用例
+脚本全部 `EXIT=0`；三档哈希 grand 仍 `a4e47418…`，与基线逐字节相同 —— 度量只在诊断开着时算，
+不进产物路径。
+
+**还欠的**：前置三的通道本体（call 前 `mov reg,[slot]`、call 后 `mov [slot],reg`，其中
+slot 走已有的 spill/late band 单一翻译点；延伸池的占用要并进 `RegBank` 的 owned 面，好让内联
+asm 的规划器自动避开它们；序言 `patch_callee_saves` 必须**不**保存延伸池）与前置二
+（程序点级活性，用来把「每个 call 都存/取全部延伸池家」收窄成「只在该家真活着时」）。
+
+### 11.39 前置三做到一半被实测叫停：挡住 caller-saved 家的不是通道，是**暂存约定**
+
+本轮把前置三的三件东西都建起来了，然后**实测把它们关回去**了。记录的原因比结果重要。
+
+**建起来的**（都在树里，且有用例）：
+1. `Codegen::home_overrides` —— 程序点级家覆盖（前置二的机制）。它挂在唯一的家读入口
+   `home_for` 上，所以存取两侧与地址类消费点看到的是同一个答案；`compile_func` 逐函数清空。
+2. `Codegen::ext_home_saves` —— 规划期为每个「住在 caller-saved 号里的自动绑定家」预留的
+   帧内保存槽（宽于 8 字节的对象直接退回内存家，因为窗口按 8 字节搬，只存下半就是丢高半）。
+   判据是 `v.home.is_some()`：`home` 只有分配器一个写入点，用户显式绑定的 `home` 恒为 `None`
+   —— 一开始我错用了 `register_name.is_some()`，而 `apply_bindings` 为了与旧代码同源会给
+   自动绑定**也**补写文本名，于是所有自动家都被当成显式的，保存槽一个都没建（产物上表现为
+   「绑定读数里有、`mov %rcx,-N(%r13)` 没有」）。
+3. `emit_sysv_call` 两端的存/取窗口（`persist_ext_homes` / `restore_ext_homes`，嵌套只回滚
+   自己那一层），以及 `AUTO_EXT_POOL` = `{rcx,rsi,rdi,r8,r9}`（`rax` 求值基址、`rdx` 128 位
+   返回高半、`r10` 静态链/非局部跳转、`r11` 帧寻址 scratch、`rsp/rbp/r13` 固定用途）。
+
+**顺带查出两条静默丢失**：`pool_reg_name` 只查 `POOL` ⇒ 延伸池家被判成
+「home-not-representable」；`to_loc_map` 用 `pooled_reg_of`（同样只认 callee-saved）⇒ 绑定在
+读数里存在、在产物里不存在。分开新增 `auto_reg_of`（名→整个自动池）与 `pooled_reg_of`
+（名→需要序言保存的那族），并把「池满」拒因从 5 处内联字符串抽成 `REASON_NO_FREE_REG`。
+
+**叫停的证据**：把号真的发出去之后（`-g` 的 DWARF 里 9 个家全在：`DW_OP_reg3/12/14/15/2/4/5/8/9`），
+最小复现
+
+```c
+static int n;
+int sink(int x) { n += x; return x * 3 + 1; }
+int f(void) { int a=sink(1),b=sink(2),c=sink(3); int d=sink(4),e=sink(5); n=a+b+c+d+e; return n; }
+```
+
+gcc -O2 给 50，dcc 给 **47**。反汇编里病灶是明写的：`e` 的家是 `%rcx`，而**紧跟其后的求值**把
+`%rcx` 当通用 scratch 连用三次（`movsxd %r12d,%rcx` / `movsxd %r14d,%rcx` / `movsxd %r15d,%rcx`），
+于是 `e` 读到了最后一次 scratch 留下的 `d` 的值（16 变 13，正好差 3）。
+
+结论有三条，都改变了后续做法：
+
+1. **保存通道护不住这个**。它护的是 call 序列（参数装载 + call + 栈参回收），而毁掉家的是
+   同一函数体里毫不相干的一条普通指令。所以前置三的真正前置不是「再多一个机制」，而是
+   **求值侧的硬编码 scratch 号必须去查占用事实**（`RegBank` 已经答得出「谁握着哪个号」，
+   现在只有 `alloc_temp` 在查它；实测这类硬编码位点数百处）。这就是 §11.6 那次「扩池被实测
+   否决、病灶是暂存约定」的同一条病灶拿到了具体形状。
+2. **所以 `auto_pool()` 现在只等于 `POOL`**，延伸池不发出任何家。关掉的判据写在
+   `tests/integration/opt_ssa_gate.rs::ext_pool_hands_out_no_homes_until_scratch_respects_occupancy`
+   里：它先断言被测源确实把自动池占满出现拒绑（不然就是空跑），再断言诊断里没有任何
+   `-> %rcx/%rsi/%rdi/%r8/%r9`。最大风险不是忘了做，而是**有人在没解决暂存约定时把池打开**，
+   而打开后只在少数源上错值。
+3. 顺手量到的另一条候选路也不成立：`%rbp` 是唯一「不需要通道」的 callee-saved 空闲号，
+   但全语料里有一处产物用它作基址（`sched_rq_lock_patterns.c` 的 `movsxd -64(%rbp),%ecx`），
+   所以它不是普遍空闲，不能直接进池。
+
+**机制留着的根据**：`abi/call.rs` 的两条直接用例证明通道本身是对的（存→覆盖→取回→撤销、
+嵌套只回滚一层、条目表空时一字不改地走原路）。「机制正确但没接线」与「机制是错的」必须
+分得开 —— 后者会让开池那天先花一天重做工具。
+
+**验证**：`cargo test --lib` 2160 条全绿；三档哈希 grand **回到 `a4e47418…`**、879 行，
+与基线逐字节相同 —— 本轮全部净效应是零产物变化（机制在内、发号关在外）。
+
+**下一步（前置三重新开池的唯一前提）**：把求值侧的硬编码 scratch 号换成「查 `RegBank`
+的可分配临时号」，并按 5.1 的老口径先量它会不会改变产物。这条属于前置一（下）的**消费者**
+一侧：可查的事实已经有了，没人查它。
+
+### 11.40 延伸池逐号审计：只有 `%rcx` 真的危；审计顺带抓出一条先前存在的错值缺陷 N13
+
+把延伸池发号改成**可按号开关**（`DCC_EXT_POOL=rcx,rsi,…`，默认空 ⇒ 产物路径与今天逐字相同），
+于是可以逐号在真程序上定案，而不是靠读代码猜哪个号危。审计入口 `.work_tmp/p12_base/audit_ext_pool.sh`。
+
+**逐号实测**（最小复现 `int a=sink(1),b=sink(2),c=sink(3); int d=sink(4),e=sink(5); n=a+b+c+d+e;`，
+gcc -O2 给 50）：
+
+| 单独开的号 | dcc 结果 | 判定 |
+|---|---|---|
+| 不开池 | 50 ✅ | 基线 |
+| `rcx` | **47** ❌ | 危：它是二元运算右操作数的固定暂存号（`emit/expr/binary.rs::gen_expr_decay(r, 1)` 与那批 rcx 专属字节） |
+| `rsi` / `rdi` / `r8` / `r9` | 50 ✅ | 这条形状上不危 |
+
+⇒ 前置三的真正阻塞点被缩到**一条约定**：右操作数暂存号硬编码成 `%rcx`。其余四个号（占
+收益面的大多数）在扩展证据之后是可用的，所以 `AUTO_EXT_POOL` 保留、`{rsi,rdi,r8,r9}` 列为
+候选、`rcx` 明确排除，直到暂存取号去查 `RegBank` 的占用事实。
+
+**审计意外抓出一条更重的缺陷（N13，尚未修）**：五个候选号给出**完全相同**的错误输出，
+说明错值与延伸池无关。剥到最小：
+
+```c
+struct Big { long a,b,c,d,e,f,g,h; };
+int main(void) { struct Big x = {1,2,3,4,5,6,7,8}; struct Big y = x;
+                 return (int)(y.a+y.b+y.c+y.d+y.e+y.f+y.g+y.h); }
+```
+
+gcc -O2 = 36，dcc -O2 = **218**；而 **-O0/-O1 两侧都是 36**（所以这是一个只在 -O2/-O3 出现的
+错值，且不需要任何调用参与）。
+
+**根因（本小节订正过一次：初版把它记成「成员读排在 `rep movsq` 之前」，那是误读
+`grep` 过滤后的行号，实际的读就在拷贝之后，不是病灶）**。剥到最小的复现只需要两个成员：
+
+```c
+struct S { long a, b; };
+int main(void){ struct S x={1,2}; struct S y=x; return (int)(y.a+y.b); }   /* gcc 3 / dcc 249 */
+```
+
+它 -O2 的 `.s` 里紧挨在拷贝前面的那三条才是病灶：
+
+```
+        mov %rdx, -88(%r13)          ← 把 x.b 写成一个从未被装载过的 %rdx
+  62:   lea -96(%r13), %rsi          ← 拷贝源 = x
+  63:   lea -80(%r13), %rdi          ← 拷贝目标 = y
+  65:   rep movsq  %ds:(%rsi),%es:(%rdi)
+```
+
+即：聚合拷贝的 lowering 在 `rep movsq` 前多发了一个**存回源对象第二个成员**的写，而且它的
+源寄存器（`%rdx`）从来没有被装载过。形状上看像是「双 GPR 拷 16 字节」那条路的残留：本该
+`mov 8(%rsi),%rdx` + `mov %rdx,8(%rdi)`，现在装载丢了、写目标也错到了源侧。
+按成员数逐个实测都是错的（n=2..8：gcc 3/6/10/15/21/28/36 vs dcc 249/172/128/165/43/130/26），
+所以不是某个尺寸专属的边界问题，而是这条路普遍错。修的位置在聚合拷贝的 lowering
+（`emit/expr/aggregate.rs` 与 SSA 侧重建它的站点，本轮没来得及定位到行）。
+
+**为什么全语料没抓到它**：`OPT-DIFF 0`、`check_fixtures.sh` 全绿、`check_reproducible_output.sh`
+全绿都成立，因为语料里没有「局部聚合初始化后整块赋值给另一个局部」这个形状（不是判据写错，
+是覆盖面缺了一块）。这就是这条缺陷值得记进设计文档的理由：**绿色的全语料不等于没有错值**，
+而新形状的探索本身是找出它的唯一手段。现已落成两条用例钉住形状：
+`agg_copy_matches_gcc_at_o0_and_o1`（低档对拍，今天就该绿）与
+`agg_copy_at_o2_still_diverges_from_gcc_is_the_recorded_n13`（`#[should_panic]` 断言它
+**现在仍然错**；修好后不再 panic ⇒ 用例反过来红，提示合并成四档对拍并把源收进正常夹具目录）。
+
+**本轮没做的事**：N13 的修复（它不在 objective 列的两组里，但是执行对拍能抓到的真错值，
+优先级高于延伸池开池）；上面那个 `%rdx` 写回的发射站点也还没定到行。下一轮从
+`agg_copy_at_o2_still_diverges_from_gcc_is_the_recorded_n13` 这条用例开始。
+
+### 11.41 N13 的分诊与一次失败的定点（记下来，因为它否掉了一个看似合理的假设）
+
+分诊两步，都是便宜的、能一票否决的实验：
+
+1. **SSA 往返还是后端？** `DCC_SSA_OFF=1`/`all` 都**仍然错**，且每次错值不同（201/121/217）⇒
+   与 SSA 无关，错值是未初始化内存 ⇒ 病灶在后端发射路径。
+2. **是不是「聚合拷贝的通用路」？** 读 `emit/expr/aggregate.rs` 会看到一条很合理的嫌疑：
+   那条 else 分支在 `gen_expr` 之后按 `rax:rdx`（128 位返回约定）把前 16 字节存进
+   `temp_off = dst_off - padded`，再 `lea temp_off,%rsi` 当源 —— 对 `y = x` 它会把垃圾 `%rdx`
+   写进**源对象自己身上**。于是按这个假设加了一条 `gen_lvalue_addr(r, 6)` 分支（内存左值直接
+   拿地址当源）。**结果产物一字未变**：这条分支今天不可达，`y = x` 根本不经过这里。
+
+⇒ 已把那条分支**回退**（留着就是一条今天没人走的路径，正是要避免的「影子分支」）。
+真正的发射点在 `aggregate.rs` 的三处 `rep movsq` 里的**另两处**（约 698 / 735 行，位于
+nested 块内），下一轮的第一步是给这三处各挂一个可辨认的临时标记（或按站点 `-S` 对拍），
+先把「谁发的」定死，再谈修 —— 这一轮已经证明：按代码形状猜站点会猜错，产物比对才是裁判。
+
+N13 的状态不变：仍然是**未修的实测错值**（`struct S{long a,b;} x={1,2}; y=x;` gcc 3 / dcc 错值），
+仍由 `agg_copy_at_o2_still_diverges_from_gcc_is_the_recorded_n13` 钉着。
+
+### 11.42 N13 已修：聚合拷贝的右值被 SSA 重建包成 `x + 0`，于是走错了「值在 rax:rdx」那条路
+
+上一轮的教训起作用了：这次不再按代码形状猜站点，而是给 `aggregate.rs` 三处 `rep movsq`
+各挂一个 stderr 标记跑一次 —— 一票定死是**第三处**（也就是上一轮我改过、发现"产物一字未变"
+而回退的那条链）。然后在同一条 `else` 分支里把到达此处的右值原样打出来，真相是：
+
+```
+AGG-RHS: Binop { op: Add, l: Ident { name: "x", ty: Struct("S",[a@0,b@8]) }, r: Int { v: 0, ty: Int }, .. }
+```
+
+**右值不是 `x`，而是 `x + 0`**，且那个 `Int{0}` 的 span 是 `"ssa"` —— SSA 重建把「把聚合值
+拷进目标」的 copy 形态写成 `src + 0`（与 `expr_rebuild.rs:95` 注释里那族 `fn + 0` 同一个写法，
+当年是为了保住指针高位才留下的）。于是聚合拷贝的所有分支判据（`is Call` / `is CompoundLit` /
+是不是内存对象）全部落空，走进通用路：
+
+* 通用路假定 `gen_expr` 之后**前 16 字节在 `rax:rdx`**（128 位返回约定）。内存聚合的求值给出
+  的是**地址**，`%rdx` 里是从未装载过的垃圾；
+* 临时区按 `dst_off - padded` 算，对 `y = x` 恰好等于**源对象自己的槽**，
+  于是 `store_stack(2, temp_off+8)` 把垃圾 `%rdx` 写进了 `x.b`，然后才 `rep movsq` 把它拷走。
+
+这就是「拷贝前那条 `mov %rdx, -88(%r13)`」的来历，也解释了为什么错值随环境变（读的是栈垃圾）。
+
+**修法**（`emit/expr/aggregate.rs`，在该分支链之前）：先剥掉那个 `+ 0`（仅当左操作数的类型是
+`Struct/Union/Array` 时，避免动到 `fn + 0` 那族有主的写法），剥完之后
+`self.gen_lvalue_addr(rhs, 6)` 就能认出「右值是一个内存对象」，直接把它的地址发进 rsi 当拷贝源，
+**不再做任何物化**。回退掉上一轮那条不可达分支的教训也在这里兑现：这次它真的被走到了。
+
+**实测**：
+* 修前/修后（同一份源，四档 × 三份夹具，与 gcc 对拍退出码与 stdout）：
+  `k2.c`（16 字节）-O2/-O3 由 249/185 → **3 ✅**；`n13.c`（64 字节）由 218/117 → **36 ✅**；
+  `st1.c`（聚合拷贝 + varargs + 6 参调用混合）由 244/235 → **216 ✅**。12/12 全对。
+* 用例：`agg_copy_at_o2_still_diverges_from_gcc_is_the_recorded_n13`（`#[should_panic]`，
+  按它自己写的收尾指示**删除**）换成两条常驻对拍 ——
+  `agg_copy_matches_gcc_at_all_levels`（四档，期望 336，退出码 256 取模后为 80）与
+  `agg_copy_with_varargs_and_six_arg_calls_matches_gcc`（四档，期望 216）。都绿。
+* 全量：`cargo test` **3358 条全绿**、**16 项测试用例脚本全部 `EXIT=0`**。
+* **三档哈希不变**（grand 仍 `a4e47418…`，与基线差分行 0）：语料里没有「局部聚合初始化后
+  整块赋值给另一个局部」这个形状 —— 与 §11.40 那条结论闭环了：**这个错值之所以能长期存在，
+  正是因为覆盖面缺这一块**；修它不改任何现有产物，只让新形状正确。
+
+**方法论上留一笔**：本轮连续两次被同一件事纠正 —— 上一轮我把根因写成"读排在拷贝之前"（误读
+`grep` 过滤后的行号），又按代码形状猜错站点。两次都是**产物/打印说话**才纠正过来的。所以
+"先加标记跑一次"应当是这类定位的默认第一步，而不是读完代码形成一个合理故事。
+
+### 11.43 前置三：右操作数暂存号不再写死 `%rcx`（纯重构，逐字节不变），但开池还差一个覆盖点
+
+把「`%rcx` 永远归右操作数暂存」这条约定换成**查占用事实**的取号器：
+
+* 新增单源候选表 `abi/regbank.rs::RHS_STAGE_CANDIDATES = [rcx, r8, r9, rsi, rdi]` 与
+  `RegBank::pick_rhs_stage(dst)`：跳过 `dst`（左右同归一个号会直接吃掉操作数）与任何被握着的号
+  （`allocated` 家 / `pinned` 钉住）。排除 `rax/rdx/r10/r11/rsp/rbp/r13` 的理由与
+  `AUTO_EXT_POOL` 同源，不在两处重述。
+* `emit/expr/binary.rs` 里那条约定涉及 **4 处** rcx 专属字节，全部参数化：`gen_expr_decay(r, 1)`、
+  `movslq %ecx,%rcx`(`48 63 C9`)、`imul rcx,rcx,imm32`(`48 69 C9`)、`idiv rcx`(`48 F7 F9`)。
+  通用形式在 `stage == 1` 时给出的字节与原字面量**完全相同**（ModRM 的 `reg`/`rm` 由同一个号填）。
+* `dst == 1` 那条 push/pop 特殊路**原样保留**（那是今天已有形状，不得顺手改掉）。
+* 用例 2 条：`rhs_stage_skips_regs_that_someone_holds`（无人握着时仍取 rcx ⇒ 今天的产物不变；
+  rcx 被握着时必须换号；只剩 dst 自己时报 `None` 而不是拿一个握着的号）、
+  `rhs_stage_candidates_exclude_regs_with_hard_uses`（候选表自己也要被检查，防止把有硬用途的号收进来）。
+  过程中我第一版把断言写成 `claim(1) == true`，用例立刻红 —— 真相是 `claim` 的返回值表示
+  「在 callee-saved 池里占了位」，池外号只进 `pinned`；取号器读的是 `is_pinned`。用例又一次
+  比我的假设可靠。
+
+**实测**：不开池时三档哈希与基线**差分行 0** ⇒ 这一整步是纯重构；`cargo test` 全绿。
+
+**但开池仍差一步**：`DCC_EXT_POOL=rcx` 跑原来那条最小复现**仍给 47**。产物说明这次改动生效了
+（已经没有 `movsxd %r12d,%rcx` 这类写 rcx 的暂存，而存取通道成对出现 `mov %rcx,-200(%r13)` /
+`mov -200(%r13),%rcx`，最后 `mov %eax,%ecx` 把 `e` 写进家），所以**还剩另一个覆盖 `%rcx` 的
+站点**在别的文件里（`grep` 该函数体内写 rcx 的指令只剩通道自己那几条 ⇒ 覆盖点很可能在
+`f` 之外，例如 `sink` 的调用约定/参数装载把 rcx 当 arg 号写，或求值里另一条以 rcx 为目的地的
+路径）。下一轮的做法与本轮一致：不猜，给候选点加标记跑一次定死。
+延伸池因此**仍然默认关**（`ext_pool_enabled()` 由 `DCC_EXT_POOL` 决定，产物路径不受影响）。
+
+### 11.44 暂存取号的兜底本身是个隐患（已修）；开池仍差一个「claim 看不见」的问题
+
+**修掉一个我自己引入的不 sound 兜底**：`pick_rhs_stage(dst).unwrap_or(1)` 的意思是
+「候选表全被握着时就拿 rcx」—— 而 rcx 恰恰可能就是那个正握着家的号。换成
+`pick_rhs_stage(dst).or_else(|| alloc_temp())`，两者都拿不到时报内部错误 **`E1135`**
+而不是静默拿一个有主的号（`alloc_temp` 只会发未占用的号并置 `used_by_self`，序言保存自动跟上）。
+
+**仍未解的、已经缩到一行的问题**：`DCC_EXT_POOL=rcx` 跑 `a+b+c+d+e`（`c` 的家是 `%rcx`）
+产物里仍然是 `movsxd %r15d, %rcx` —— 也就是 `pick_rhs_stage` 当时**没看见** rcx 被握着。
+已经排除的假设：
+* 不是兜底造成的（换掉兜底后仍复现）；
+* 不是 `binop()` 内部写死号（它按参数发号）；
+* 不是 `reset_reg_tracker` 只重放池内号（它对 `homes` 里所有 `reg()` 都 `claim`）；
+* 也不是家没建（保存槽 `-248(%r13)` 存在，而那个槽只有 `insert_home` 的延伸池分支会建，
+  同一条分支里紧挨着就 `claim(r.n)`；`claim` 对池外号也会 `pinned.insert`）。
+
+⇒ 下一步是**一行探针**：在 `pick_rhs_stage` 里打印它看到的 `pinned`/`allocated` 集合与返回值。
+本轮已到上下文上限，没有把它跑完。
+
+**验证**：`cargo test` **3360 条全绿**；三档哈希与基线**差分行 0**（本轮净效应仍是零产物变化）。
+延伸池默认仍关。
+
+### 11.45 前置三的真正病根：我上一轮参数化的是**一份零调用者的影子副本**
+
+探针一跑就给出答案（`DCC_STAGE_PROBE=1` 一条 STAGE 都没打）⇒ 取号器从未被调用。
+`grep -rn "gen_expr_binop" src/ | grep -v "fn gen_expr_binop"` = **零命中**：`emit/expr/binary.rs`
+那个 427 行的 `gen_expr_binop` 是死副本，活的那份一直内联在 `emit/expr/dispatch.rs::gen_expr`
+的 Binop 臂里（第 398–500 行）。所以上一轮"哈希逐字节不变"是**因为改的是死代码**，
+而不是因为重构保守 —— 这个区别很重要，本轮把它订正过来。
+
+本轮做的事：把同一套参数化应用到**活站点**（`dispatch.rs` 里 `gen_expr_decay(r, 1)`、
+`movslq`/`imul`/`idiv` 三处 rcx 专属字节、两处 `binop(*op, …, 1, …)`），兜底同样是
+`pick_rhs_stage → alloc_temp → E1135 硬错误`，`dst == 1` 的 push/pop 路原样保留。
+
+**实测（这是前置三关键的一步）**：最小复现 `a+b+c+d+e`（`c` 的家给 `%rcx`）
+
+| | 不开池 | rcx | rsi | rdi | r8 | r9 |
+|---|---|---|---|---|---|---|
+| 修前 | 50 | **47** | 50 | 50 | 50 | 50 |
+| 修后 | 50 | **50** | 50 | 50 | 50 | 50 |
+
+⇒ **「结果恒在 %rax / 右操作数恒在 %rcx」这类硬编码约定凌驾在占用事实之上**这条前置，
+现在真正解掉了：暂存取号会查 `RegBank` 的 `allocated`/`pinned`。
+不开池时三档哈希与基线**差分行 0**（纯重构）。
+
+**开池尚未干净**（所以默认仍关，这是实测而不是保守口号）：
+`DCC_EXT_POOL=rcx,rsi,rdi,r8,r9` 下
+* `check_fixtures.sh` **全绿**（执行对拍，rc=0）；
+* `check_opt_equivalence.sh` 报 **OPT-DIFF 4** + `CF-UNKNOWN 3`
+  （`c_attr_target_clones_cpu_builtin.c` / `..._is_matrix.c` / `..._matrix.c` 编译失败未定性）。
+⇒ 下一轮的清单是具体的：把那 4 项档位间不一致与 3 项编译失败逐个定性并修掉，然后才把
+`ext_pool_selection()` 的默认值从空改成 `{rsi,rdi,r8,r9}`（或全表），并按 §11.38 的
+收益面（130/148）重算绑定/拒绑两张表。
+
+**顺带一条该收尾的债**：`emit/expr/binary.rs::gen_expr_binop` 是零调用者的死副本，
+应删除（与本轮之前删掉的 1035 行 `emit/expr/init.rs` 同一族）。它存在本身就是危险源：
+本轮我就在它上面改了一次，得到的"证据"（哈希不变）完全是假的。
+
+### 11.46 删掉那份 464 行的死副本（它刚骗过我一次）
+
+`src/codegen/x86_64/emit/expr/binary.rs` 整文件只有 `gen_expr_binop` 一个函数，`binary::`
+在全仓**零引用**，文件头却写着「arm body 原样剪切进 `gen_expr_binop`, 语义 diff 为 0」——
+实际 `dispatch.rs::gen_expr` 的 Binop 臂从未改成调用它。**提取只做了一半，留下的是重复**。
+危害已经兑现过一次：上一轮我在它上面参数化右操作数暂存号，拿到的"三档哈希逐字节不变"
+完全是假证据（§11.45）。
+
+处置：删 `emit/expr/binary.rs`（464 行）+ `emit/expr/mod.rs` 里的 `pub mod binary;` 一行。
+与之前删 1035 行 `emit/expr/init.rs` 同一族、同一理由：**半完成的提取比不提取更危险**，
+因为它给"同一个事实有两份"提供了合法的伪装。
+
+**验证**：删除后 `cargo build` 干净、`cargo test` **3360 条全绿**、三档哈希与基线**差分行 0**。
+
+**开池的待办已量化**（`DCC_EXT_POOL=rcx,rsi,rdi,r8,r9`）：`check_fixtures.sh` 全绿（执行对拍），
+`check_opt_equivalence.sh` 报 **OPT-DIFF 4** + **CF-UNKNOWN 4**
+（`c_attr_target_clones_cpu_builtin.c` / `..._is_matrix.c` / `..._matrix.c` /
+`c_register_binding_width.c`；后两条不在 `tests/fixtures/` 下，是脚本自带语料，下一轮先定位路径再复现）。
+默认仍关池。
+
+### 11.47 延伸池的保存槽必须进晚分配预算；以及一条真实架构约束：候选表被"暂存"和"当家"双向挤占
+
+**修掉一条开池后才暴露的缺陷**：`insert_home` 会为每个住在 caller-saved 号里的自动绑定家
+申请 `<名#save>` 槽，而这条申请发生在规划预算**之后** ⇒ 发射期第一次用到就撞 `E1133`
+（实测 `register_binding_width.c`：`1 slots used, 0 reserved (last '<ci#save>')`；-O0 完全正常，
+因为只有 -O2 才跑寄存器绑定 pass）。修法是把它计入预算（`reserve_late_var_slots` 里在
+`late_slot_budget = slots` 之前扫一遍声明，对每个 `home` 为延伸池号的自动绑定加
+`var_alloc_slots(&v.ty)`），口径与申请处严格一致（`home` 只由分配器写；用户显式绑定的
+`home` 恒为 None ⇒ 不建槽，§11.38 那条 GNU C 语义保持不变）。
+
+**顺带得到一条以前没有的架构结论**（是新增的 `E1135` 硬错误替我测出来的）：
+
+| 配置 | `attr_target_clones_cpu_{builtin,is_matrix,matrix}.c` -O2 |
+|---|---|
+| 不开池 | ✅ 全部通过 |
+| 单开 `rcx` | ✅ 通过（`E1135` 触发次数 0） |
+| 开满 `{rcx,rsi,rdi,r8,r9}` | ❌ `E1135: 右操作数暂存取不到空闲号（dst=0）` |
+
+⇒ **`RHS_STAGE_CANDIDATES`（暂存候选）与 `AUTO_EXT_POOL`（可当家候选）是同一批号，
+两者会互相挤占**：家把 5 个 caller-saved 号全占了，暂存就没有寄存器可用。这不是 bug，
+而是本后端"表达式暂存必须落在寄存器里"这一形状的直接后果。所以开池的正解有两条，二选一：
+
+1. **让两者不相交**：延伸池只发候选表之外的号（`rdx`/`r10`/`r11` 都有硬用途 ⇒ 实际没有富余），
+   因此这条路要求先把暂存从"必须寄存器"放松成"可以落帧槽"；
+2. **给暂存加内存兜底**：候选表全被握着时，把右操作数存进一个帧槽、`binop` 前再装载回来
+   （代价是该次运算多两条访存指令，正确性不受影响）。
+
+`E1135` 现在的行为是**硬错误而不是静默拿有主的号**，这是对的：它把这条约束变成了可见的、
+可归因的失败，而不是一个偶发错值。默认仍然关池，直到上面两条之一落地。
+
+**验证**：`cargo build` 干净；不开池时上述 3 个夹具四档全通过。
+
+### 11.48 「给暂存留一个空闲候选」做成发号判据；延伸池与暂存候选合并成单源
+
+上一轮量出的挤占约束（§11.47）现在由**分配器**守住，而不是留给发射期兜底：
+
+* `src/ssa/regalloc.rs` 的挑号循环加判据 `stage_free_after`：取走某个延伸池号之后，
+  候选集合里必须还剩至少一个既未被用户绑定/文件作用域占用、也未被本次已发的家占用的号。
+  不满足就换下一个候选，换不出来就走原来的拒绑路径（`REASON_NO_FREE_REG`）。
+  只有分配器能看见所有候选的最终归属 —— 到发射期已经无从选择，所以判据必须写在这里。
+* **两份表合成一份**：以前 `regbank::RHS_STAGE_CANDIDATES` 与 `regalloc::AUTO_EXT_POOL` 各自
+  列了同样 5 个号，而"哪些号能暂存"与"哪些号能当家"本是同一事实的两面（正是这次挤占的来源）。
+  现在候选表由 `regalloc::auto_ext_pool_regs()` 单源提供，发射侧的
+  `regbank::rhs_stage_candidates()` 只是它的一个入口；排除项（`rax`/`rdx`/`r10`/`r11`/
+  `rsp`/`rbp`/`r13`）也只在分配器那侧写一次。
+
+**实测**（`DCC_EXT_POOL=rcx,rsi,rdi,r8,r9`，即五个号全开）：最小复现 `a+b+c+d+e`
+从「开 rcx 就 47」变成 **50**（逐号与全开各测一次，全对），`register_binding_width.c`
+（上一轮 `E1133` 那条）✅ 编译并运行正常。不开池时 `cargo test` 10 个 target 全 ok、
+三档哈希与基线**差分行 0**。
+
+**还剩一条具体的差距**（默认因此仍关池）：`attr_target_clones_cpu_{builtin,is_matrix,matrix}.c`
+在开池后报 `E1135`。已排除"分配器判据没生效"这一解释 —— 判据生效了（全开跑对得上），
+剩下的原因是**发射期还会 pin 分配器看不见的号**（内联 asm 的 clobber 禁号、`asm goto`
+的逃逸禁号那一类：`ban_escaping_asm_regs` / `RegBank::ban`）。所以正解是把这条判据的
+输入补全：让分配器在发号前就看到"这些号会被 asm 禁掉"的名单（与 §11.20/§11.26 那族
+「函数级事实没有下行/上行」的形状相同，是同一件事在这里的新实例）。下一步就做这个。
+
+### 11.49 订正：上一轮的"E1135 未解"是用**旧二进制**测出来的；发号约束实际有效
+
+上一轮那条命令里 `cargo build` 先报了 `E0603（module abi is private）` 而我没核实就继续跑测试，
+于是测的是**没有该约束的旧二进制**。本轮构建成功后重测，事实是：
+
+* `E1135` 不再触发；`attr_target_clones_cpu_{builtin,is_matrix,matrix}.c` 与
+  `register_binding_width.c` 在 `DCC_EXT_POOL=rcx,rsi,rdi,r8,r9` 下**全部编译并运行通过**；
+* `check_opt_equivalence.sh` 的 **CF-UNKNOWN 从 4 归 0**（COMPILE-FAIL 回到存量 55）。
+
+⇒ 发号判据 `stage_free_after`（§11.48）是有效的，不需要再去补"分配器看不见的 asm 禁号"
+（那 3 个夹具里根本没有内联 asm —— 我当时也验证过：`grep -cE "__asm__|asm *\(" = 0`，
+所以"发射期 pin"这个解释本来就是错的）。**这是同一个毛病的第三次**：不看构建结果就信测量。
+已把 `E1135` 的诊断改成点名"谁握着这些号"（alloc/pinned 两侧各自的状态都打出来），
+这样下次不需要靠猜。
+
+**开池仍不干净，且现在有了准确的清单**（同一轮 `check_opt_equivalence.sh` 开池读数：
+OPT-DIFF 5 条 / 3 个文件，未截断）：
+
+```
+OPT-DIFF c_register_binding_width.c -O3  base_rc=0 opt_rc=1
+OPT-DIFF c_rotate.c                 -O2  base_rc=0 opt_rc=4
+OPT-DIFF c_rotate.c                 -O3  base_rc=0 opt_rc=4
+OPT-DIFF c_strcasecmp.c             -O2  base_rc=0 opt_rc=5
+OPT-DIFF c_strcasecmp.c             -O3  base_rc=0 opt_rc=5
+```
+
+⇒ 档位间执行结果不同 = 延伸池家在某些形状上仍被毁（保存通道只盖住 `emit_sysv_call`
+那一段）。下一轮就这三个夹具做二分：它们与已通过的 `register_binding_width`（同族）差在
+哪个形状上（`c_rotate`/`strcasecmp` 都涉及字符循环 + libc 调用，嫌疑是 varargs/`putchar`
+那条调用路径或循环里的多家家同时存活）。默认因此仍关池。
+
+**验证（出厂状态，不开池）**：`cargo build` 干净、`cargo test` 10 个 target 全 ok、
+三档哈希与基线差分行 0。
+
+### 11.50 收尾轮的 P0：**默认档**全量 opt-eq 复测 —— 一条 REX.B 漏发解释 173/180 条
+
+上一轮那句「验证：不开池时 `cargo test` 10 个 target 全 ok、三档哈希差分行 0」**漏了
+最重要的一条判据**：它没有跑默认档的全量 `check_opt_equivalence.sh`。本轮一跑，默认档
+（`DCC_EXT_POOL` 不设）就是 **OPT-DIFF 180 条 / 92 个文件**，与开不开池无关。
+
+先把上一轮的读数订正清楚：§11.49 那条「OPT-DIFF 5 条 / 3 个文件」是 `ONLY=` 只挑三个
+夹具的**局部读数**，我当时把它当成了开池代价的全量结论；而「`r8,r9` 开池 177」也是同
+一批缺陷的另一种切面。两组数字都不能用来评价延伸池（见 §11.53）。
+
+**根因是一条编码缺陷**（不是分配策略）：`src/codegen/x86_64/emit/expr/utils.rs::binop`
+的比较臂把 REX 的两个扩展位写成了 `if/else if`：
+
+```rust
+if src >= 8 { rex |= 0x44; } else if dst >= 8 { rex |= 0x41; }   // 修前
+```
+
+`cmp r/m(dst), r(src)` 里 dst 在 r/m 字段（要 REX.B）、src 在 reg 字段（要 REX.R），
+两侧同为高 8 号时 `else if` 会丢掉 REX.B。这条形状以前是**死分支**：右操作数的暂存号
+写死 `%rcx`（号 1）。P16 前置三（§11.43/§11.45）把暂存号换成候选表首号 `%r8` 之后，
+`cmp %r8d, %r12d` 变成常走路径，编出来的三个字节是 `44 39 c4` —— objdump 念成
+`cmp %r8d,%esp`（mod=3 rm=100 本来就是非法编码）。实测指纹（`tests/fixtures/c/elifdef.c`，
+`r != 326` 那一次比较）：
+
+| 版本 | 那两条字节 | 读数 | -O2 退出码 |
+|---|---|---|---|
+| 10 月 5 日快照 | `41 39 c4`（`mov $326,%ecx` 起步） | `cmp %ecx,%r12d` | 0 |
+| 本轮修前 | `44 39 c4` | `cmp %r8d,%esp` | 1（值错） |
+
+修法就是「两个字段各自独立判」，与同文件 Add/Sub/And/Or/Xor 臂早先那次修复同一个口径
+—— 那一条已经写着「二者独立判断, 不可 else-if」的注释，比较臂是同族里**漏网的兄弟臂**。
+
+**实测**：默认档 180 → 7 条（4 个文件）。
+
+### 11.51 同族普查：把「点亮死分支」变成机器判据（新增 3 个矩阵 + 逐操作数判据）
+
+剩下 7 条逐个定性，全部是同一条「寄存器号 >=8 时该扩哪个字段」的家族，只是站点不同：
+
+| 站点 | 形状 | 错在哪一位 | 处置 |
+|---|---|---|---|
+| `emit/expr/lvalue.rs` 成员/位域装载 10 处 | `mov (dst) -> dst`（内存形自反） | REX 与 SIB 都不发：`dst>=8` 截成 `dst&7` ⇒ 读 `%rax`；`dst&7==4/5`（r12/r13）需要 SIB/disp8 | 收进新入口 `Codegen::emit_load_self_typed`（`instructions.rs`），ModRM/SIB 走 `emit_reg_indirect_modrm` 单源 |
+| `lvalue.rs` / `dispatch.rs` / `mem/addr.rs` 三份手抄 | `lea off(%r13), dst` | 前缀写死 `0x49`（W+B 给基址），漏 REX.R ⇒ 目的编成低 8 号 | 一律改走 `emit_lea_r13`（它已经在算 REX.R） |
+| `dispatch.rs` scale 路径 | `movslq`/`imul` 自反 | 只置 R（`0x04`）⇒ r/m 落回 `%eax`（`seg_qualifier.c` 拿指针低 32 位当下标） | `0x04` → `0x05` |
+| `dispatch.rs` ptr-ptr 除法 | `idiv r/m(stage)`，reg 字段是 `/7` | 置了 REX.R ⇒ `/7` 被抬成 `/15`（未定义操作码，`bootstrap_selftest` 跳到 `0xffffffffffffffff`） | `0x04` → `0x01` |
+| `dispatch.rs` AndAnd/OrOr | `setne r/m8(dst)` + `movzbq` 自反 | setne 一个前缀都不发；movzb 只置 B | setne 补 `0x41`，movzb `0x41`→`0x05` |
+| `int_ops.rs::gen_int_narrow_cast` 3 处 | `movs?xq dst,dst_low` | 只置 REX.B（同函数另一分支早已修 ⇒ 修了一半还剩一半） | `0x01` → `0x05` |
+| `cast.rs` 2 处 | 同上 | 同上 | `0x01` → `0x05` |
+| `functions.rs` 旧式 float 返回 | `cvtsd2ss xmm,xmm` | `let lo = xmm & 7` 之后再判 `lo >= 8`，掩蔽后的值永小于 8 ⇒ 判据恒假 | 直接按 `xmm >= 8` 置 `0x45` |
+| `float.rs::load_float_to_xmm` | `movss/movsd xmm, off(%r13)` | 先发 `0x44` 再固定发 `0x41`：x86 只认**最后**一条 REX，`0x44` 被覆盖 | 改走 `emit_xmm_r13_disp` 单源 |
+
+新增的机器判据（`src/codegen/x86_64/rex_matrix.rs`，本轮从 15 个矩阵加到 18 个）：
+
+* `binop_matrix`：表达式主干 16 个臂全跑 16×16（dst×src），加减与或异或/比较按 AT&T 序
+  `check_ordered` 定位，`imul` 用「两个意图名都在」，`idiv/div` 用新的 `check_divisor_line`
+  按行定位（它不在首条）。**以前这个函数根本不在矩阵里**，所以比较臂能错 180 条而门禁全绿。
+* `load_self_typed_matrix`：新入口按 16 号 × 4 宽度 × 2 符号性跑，判据是 `check_only_regs`
+  —— **逐操作数**核对：自反形两个意图名相同，「名字在不在」拓不出其中一侧被搬回低 8 号
+  （实测读数 `movsbq %r8b, %rax` 里 `%r8b` 明明在行上）。
+* `narrow_cast_promote_matrix`：截断与提升两个入口，并把「该不该发字节」按类型逐条写死，
+  免得「按设计不发」被当成「跑过了」。
+
+**反向对照已验**（不是空转）：把比较臂改回 `else if` ⇒ `binop_matrix` 红；把 `movsbq` 的
+`0x05` 改回 `0x01` ⇒ `narrow_cast_promote_matrix` 红，报
+`narrow_cast r8 Char: 读数是 movsbq %r8b, %rax，其中的 %rax 不在意图寄存器集 [...] 里`。
+
+**实测**：默认档全量 opt-eq **180 → 0**（COMPILE-FAIL 55 与 10 月 5 日存量持平，未增）；
+§11.50 那 4 个夹具（`elifdef`/`bootstrap_selftest`/`seg_qualifier`/`seg_object_body`/
+`static_agg_by_value`）四档全绿；`cargo test --lib` 2165 条全绿。
+
+### 11.52 顺带抓到一条解码侧缺陷（记为待办，本轮不修）
+
+`binop_matrix` 的 Mul 臂第一次跑就红，报的是 `imul r0,r1`：字节 `[0x48,0x0F,0xAF,0xC1]`
+objdump 念 `imul %rcx,%rax`，自家 `-S` 念 `imul %rax, %rcx`。根因在解码侧：
+`disasm::modrm_gp()` 返回 `(reg_name, mem)`，而 `imul`(0F AF)、`cmovcc`(0F 40-4F)、
+`cmpxchg`(0F B0/B1)、`xadd`(0F C1)、`bsf/bsr`(0F BC/BD) 这一族 Intel 形是 `op r, r/m`，
+AT&T 必须印成 `(r/m, r)` —— 调用点把元祖命名成 `(src, dst)` 就直接印反。
+`check_disasm_coverage.sh` 只数「读不出」与每函数条数，**次序颠倒没有判据**，所以这条
+能在 `-S` 文本里长期存在（产物字节是对的，只影响读数）。
+
+本轮处置：Mul 臂不迁就解码侧，判据降级为「两个意图寄存器名都必须在首行出现」，并在注释
+里点名这条缺陷。正解要单独一轮：给 disasm 的操作数次序按 opcode 分派成表（`op r/m,r` 与
+`op r,r/m` 两类），再用 `as` + `objdump` 做一次产物级交叉对账。
+
+### 11.53 延伸池的旧读数作废，重测读数
+
+`src/ssa/regalloc.rs` 里那段「逐号定案」引的两组数字（`r8,r9` 开池 177、
+`{rsi,rdi,r8,r9}` 开池 5）现在**证明与池无关**：默认关池在同一个 364 语料上就有 180 条，
+而 173 条由 §11.50 那一条 REX.B 解释。所以那两组数字量的是同一条缺陷，不是池的代价。
+修完之后重测（`DCC_EXT_POOL=r8,r9`，同一个 364 语料，全量 opt-eq）：
+
+| 配置 | OPT-DIFF | COMPILE-FAIL |
+|---|---|---|
+| 默认（关池） | **0** 条 | 55（与 10 月 5 日存量持平） |
+| `DCC_EXT_POOL=r8,r9` | **2** 条（`c_strcasecmp.c` 的 -O2/-O3，rc=5） | 58（新增 3 条） |
+
+⇒ 开池的真实代价从「177 条错值」降到「2 条错值 + 3 条编译失败」。新增那 3 条是
+`attr_target_clones_cpu_{builtin,is_matrix,matrix}.c`，仍在 §11.47 那条约束的形状上
+（延伸池号与暂存候选同一批号互相挤占）；`strcasecmp` 那 2 条则属 `rep movsb/rep movsq`
+那一族（上一轮把 `rsi`/`rdi` 从池里排除的理由仍然成立，但 `r8`/`r9` 当家后仍能在字符
+循环里被毁）。**所以默认仍关池**，且本表的可开号必须等 `strcasecmp` 那 2 条定性完。
+
+### 11.54 本轮遗留（下一轮的开工清单，都是具体证据不是泛泛待办）
+
+1. **`tests/fixtures/cpp_abi_overload/method_overloads.cpp` 与 g++ 不一致**（cargo 用例
+   `cpp_abi_overload_group` 红）：`m.f(2.5)` 应得 10，现得 -2147483644（= `0x80000004`，
+   即转换拿到 indefinite 之后的饱和值）。产物指纹：同一个函数体在 10 月 5 日快照里走
+   `emit_float_to_signed_saturation` 的 `dst == 1`（`%rcx`）那一支，字节正确；现在
+   暂存号是 `%r8d` ⇒ 走 `else` 支，而那一支的序列在 `dst != 1` 时本身就是错的（实测读数
+   `cvttsd2si %xmm0,%r8d` 之后的 `cmp %r9d,%eax` / `cmovne %r8,%r8` 与 `dst` 无关）。
+   又是同一条主线：**`dst>=8` 那一支以前是死分支**。修法要把 `else` 支按 `dst` 重写，
+   并给它上矩阵判据（本轮没动它）。
+2. **自家反汇编的操作数次序**（§11.52）：`0F AF`/`0F 40-4F`/`0F B0/B1`/`0F C1`/`0F BC/BD`
+   这一族 `op r, r/m` 在 `-S` 里印成 `(reg, rm)`，与 objdump 相反；`check_disasm_coverage.sh`
+   对次序颠倒没有判据。
+3. **延伸池仍不开**：等 11.53 那 2+3 条定性完，再把 `ext_pool_selection()` 的默认值从空
+   改成非空，并按当时的绑定/拒绑面重算表。
