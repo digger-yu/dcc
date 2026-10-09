@@ -513,7 +513,7 @@ impl Codegen {
         // 兜底路径必须是**异常**而不是常规：一个没在规划期登记的名字在这里只能按
         // `Type::Int` 猜一个槽（非 int 的对象因此被按错宽度存取），而且晚分配带的容量
         // 也因此无法预知（§11.23）。规划期现在已经把体内被引用的名字都登过
-        // （`reserve_late_var_slots`），所以走到这里就是后端不变量破坏：点名，本次
+        // （`plan_late_slot_budget`），所以走到这里就是后端不变量破坏：点名，本次
         // 编译失败（Error 级诊断），仍分配一个槽只为让后续流程不崩。
         self.report_internal_bug(
             "E1134",
@@ -521,7 +521,7 @@ impl Codegen {
                 "frame slot for '{}' was never planned; the emission-time fallback guesses Type::Int and is a backend invariant violation",
                 name
             ),
-            "把这个名字加进规划期登记（`func_setup::reserve_late_var_slots` / \
+            "把这个名字加进规划期登记（`func_setup::plan_late_slot_budget` / \
                  `collect_frame_var_decls`），或在发射点显式 register_var 并给出真实类型",
         );
         if std::env::var_os("DCC_LATE_ALLOC").is_some() {

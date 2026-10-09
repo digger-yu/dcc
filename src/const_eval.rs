@@ -1185,7 +1185,7 @@ fn cmp_values<F: Fn(f64, f64) -> i128>(
 /// 字符串字面量稳定性 ID: 不直接哈希 (避免开销), 仅在 const_eval
 /// 内部使用, codegen 仍按需要 dedup。 实际 label 由 codegen
 /// 分配; const_eval 这里给的是 logical label。
-fn const_str_id(data: &[u8]) -> u64 {
+pub fn const_str_id(data: &[u8]) -> u64 {
     // FNV-1a 64-bit
     let mut h: u64 = 0xcbf29ce484222325;
     for &b in data {

@@ -77,10 +77,14 @@ const POOL: [(&str, u8); 4] = [("rbx", 3), ("r12", 12), ("r14", 14), ("r15", 15)
 ///   * `rdx(2)` 是 128 位整数返回的高半（以及部分长 double 表示），存/取窗口在
 ///     `emit_sysv_call` 末尾，而调用方要到 `gen_call_result_move` 才把结果搬走 —— 在
 ///     窗口末尾就恢复 rdx 会盖掉还没被消费的高半；
-///   * `r10(10)` 是嵌套函数的静态链与非局部跳转的父帧基址（`emit/stmt.rs`），它的写入
-///     点不在 call 序列里；
-///   * `r11(11)` 是帧内寻址的 scratch（`store_stack`/`load_stack` 的 disp32 越界分支拿它
-///     算地址）—— 存/取动作自己就会毁掉它；
+///   * `r10(10)`：① 嵌套函数静态链与父帧基址（`emit/nested.rs` 的 `load_static_chain_for_call`），
+///     写入点在 `call` 发射序内、`store/load_stack` 保护窗口之外；② 即便 `has_nested_fn=false`，
+///     `abi/call.rs:273-287` 在 force_mem 对齐（agg>16B 按值传参）时拿 r10 当 rsp→aligned 的 scratch，
+///     同样落在保护窗口之外。两条写入点都不在「可 save/restore 的窗口」里，因此 r10 不能当跨 call 的家；
+///   * `r11(11)`：① 聚合按值传参的逐块暂存（`abi/call.rs:536-575`），每条含 agg 实参的 call 都会写；
+///     ② 间接 call 的目的地址（`abi/call.rs:854` 的 `call *%r11`）；③ 嵌套 trampoline 地址与 upvar 链
+///     （`emit/nested.rs:196-260`）；④ `store_stack`/`load_stack` 的 disp32 越界 scratch。前两条与嵌套
+///     无关 ⇒ r11 完全否决，不能按函数特征动态纳入；
 ///   * `rsp(4)`/`rbp(5)`/`r13(13)` 固定用途（帧底/帧基）。
 ///
 /// 剩下的 `rcx/rsi/rdi/r8/r9` 在本后端的写入点就是 SysV 参数装载与 varargs 计数，两者都
@@ -105,7 +109,7 @@ const POOL: [(&str, u8); 4] = [("rbx", 3), ("r12", 12), ("r14", 14), ("r15", 15)
 ///     -O2/-O3）+ 3 条新增 COMPILE-FAIL（`attr_target_clones_cpu_*`）。⇒ 那 177/5 量的
 ///     是同一条编码缺陷，不是池的代价；证据与开池前置判据见设计 §11.53/§11.54。
 ///
-/// 因此延伸池默认仍不开（`ext_pool_selection()` 默认空），且不得因为本表非空就认为安全。
+/// §11.54 闭环后 `{r8,r9}` 在 364 语料四档执行对拍全绿，延伸池默认开启（见 `ext_pool_selection`）。
 const AUTO_EXT_POOL: [(&str, u8); 2] = [("r8", 8), ("r9", 9)];
 
 /// 自动分配器的完整候选表。
@@ -116,15 +120,20 @@ const AUTO_EXT_POOL: [(&str, u8); 2] = [("r8", 8), ("r9", 9)];
 /// 就被普通计算覆盖：-O2 下 gcc 给 50、dcc 给 47。
 ///
 /// 但「哪一个号真的危」不应该靠读代码的直觉回答。本函数按 `DCC_EXT_POOL` 的逗号列表
-/// 把对应的号加进候选表（默认空 ⇒ 行为与今天逐字相同），于是可以**逐号**在真产物上跑
-/// 执行对拍定案（审计入口：`.work_tmp/p12_base/audit_ext_pool.sh`）。这不是第二行为开关，
-/// 而是量具：产物路径上它永远关着，因为发布构建不会设这个环境变量（`ext_pool_enabled`
-/// 的默认值就是空，而且有用例钉住「不开池时不得发出延伸池家」）。
+/// 把对应的号加进候选表。**默认（未设该环境变量）即开启 `AUTO_EXT_POOL`**：§11.54 闭环
+/// 后 `{r8,r9}` 在 364 语料上四档执行对拍全绿，这两个号因此从量具转正为默认候选。
+/// 这不是第二行为开关；`DCC_EXT_POOL` 仍可逐号裁剪，设为 `0` 即完全关池用于对比。
+/// 审计入口：`.work_tmp/p12_base/audit_ext_pool.sh`。
 pub fn ext_pool_selection() -> Vec<u8> {
     let spec = match std::env::var("DCC_EXT_POOL") {
         Ok(s) => s,
-        Err(_) => return Vec::new(),
+        // 未设：默认开启全量延伸池。
+        Err(_) => return AUTO_EXT_POOL.iter().map(|&(_, r)| r).collect(),
     };
+    // 显式 `DCC_EXT_POOL=0` / 空串：关池。
+    if spec.trim() == "0" || spec.trim().is_empty() {
+        return Vec::new();
+    }
     spec.split(',')
         .map(|t| t.trim().trim_start_matches('%').to_ascii_lowercase())
         .filter(|t| !t.is_empty())
@@ -160,11 +169,6 @@ pub fn is_auto_ext_reg(n: u8) -> bool {
     AUTO_EXT_POOL.iter().any(|&(_, r)| r == n)
 }
 
-/// 「自动池满了」这个拒因的**唯一字串**。以前它以内联文本抄在 5 个地方（1 个推 + 4 个
-/// 读），而度量（`pool_full_rejects`/`shareable`/`nocall`）与分配器共用这个键：抄本一旦
-/// 不一致，账面上的收益面就会静默变成 0，而那看上去像「没机会」而不是「算错了」。
-pub const REASON_NO_FREE_REG: &str = "no-free-auto-assignable-register";
-
 /// `DCC_REGALLOC_DUMP=1` 时打印诊断（缓存一次，避免每条 pass 都读环境）。
 fn dump_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -176,6 +180,8 @@ fn dump_on() -> bool {
 pub struct Plan {
     /// 变量基名 → 寄存器名（`register asm` 的写法，如 `"rbx"`）
     pub bindings: Vec<(String, &'static str)>,
+    /// 池满被 spill 到 band 的候选（基名 → spill 槽序号）。5.1.e 生产者的产物。
+    pub spilled: Vec<(String, i64)>,
     /// 被拒的名字与原因（只为 dump 与测试服务；顺序确定）
     pub rejected: Vec<(String, &'static str)>,
     /// 量化读数（`docs/p12-physreg-spill-design.md` §7 的 Phase 0.2）：只服务诊断与
@@ -196,6 +202,7 @@ impl Plan {
     fn empty() -> Self {
         Self {
             bindings: Vec::new(),
+            spilled: Vec::new(),
             rejected: Vec::new(),
             stats: PlanStats::default(),
             loc: LocMap::empty(),
@@ -229,6 +236,15 @@ pub struct PlanStats {
     /// 剩下的那部分才需要前置三的 store/load 通道。它和 `pool_full_shareable` 回答不
     /// 同一个问题：后者问「callee-saved 池里能不能挤出一个号」，前者问「能不能用池外的号」。
     pub poolfull_no_call: usize,
+    /// **复用尝试次数**：候选进入「号槽已有人家、∀ 不干涉才能复用」的判据时就算一次。
+    /// 这是 §5.3 要的「寄存器借用深度」的代理：没有复用动作时借用深度为 0；每次
+    /// 复用尝试都要付一次 N² 的 versions_of_base 双循环。
+    pub reuse_attempted: usize,
+    /// **复用成功次数**：候选通过 ∀ 不干涉判据、落到已有人家的号槽上（不新开号槽）。
+    pub reuse_succeeded: usize,
+    /// **复用因干涉被拒次数**：候选与某个持有者区间相交、号槽不能复用。
+    /// 与 `pool_full_rejects` 合起来看借用质量：被拒比例越高说明池越挤。
+    pub reuse_rejected_overlap: usize,
 }
 
 impl Plan {
@@ -312,6 +328,29 @@ pub fn deliver(func: &Function, plan: &mut Plan, body: &mut Block) {
     }
     if dump_on() {
         eprint!("[regalloc] {}\n", func.name);
+        // §5.3 结构化一行计数（全语料聚合的入口）：分 callee-saved 池 / caller-saved
+        // 延伸池，spill = Location::Spill 数，reuse* 来自 ranges_disjoint ∀ 判据。
+        let mut callee_bound = 0usize;
+        let mut ext_bound = 0usize;
+        for (_n, r) in &plan.bindings {
+            let is_ext = AUTO_EXT_POOL.iter().any(|(_, rr)| *rr == pooled_reg_of(r).unwrap_or(255));
+            if is_ext {
+                ext_bound += 1;
+            } else {
+                callee_bound += 1;
+            }
+        }
+        eprintln!(
+            "[regalloc-dump] func={} cands={} bound={}(callee={},ext={}) spilled={} reused={} reuse_rejected={}",
+            func.name,
+            plan.stats.pool_candidates,
+            plan.bindings.len(),
+            callee_bound,
+            ext_bound,
+            plan.spilled.len(),
+            plan.stats.reuse_succeeded,
+            plan.stats.reuse_rejected_overlap,
+        );
         for (n, r) in &plan.bindings {
             eprint!("  bind {n} -> %{r}\n");
         }
@@ -319,15 +358,20 @@ pub fn deliver(func: &Function, plan: &mut Plan, body: &mut Block) {
             eprint!("  skip {n}: {why}\n");
         }
         // 量化行：Phase 0 的「值不值得干」与 Phase 5 的归属数据都从这里取（全语料聚合）。
+        // §5.3 起再加 §5.3 要求的 spill / 借用深度：spill 数（=pool_full_rejects）、
+        // 复用尝试 / 成功 / 因干涉被拒。前者是溢出的直接收益，后三者是借用池的利用质量。
         eprint!(
-            "  stats cands={} poolfull={} live={} live_cands={} shareable={} nocall={} needssave={}\n",
+            "  stats cands={} poolfull={} live={} live_cands={} shareable={} nocall={} needssave={} reuse_att={} reuse_ok={} reuse_rej={}\n",
             plan.stats.pool_candidates,
             plan.stats.pool_full_rejects,
             plan.stats.max_live_bases,
             plan.stats.max_live_candidates,
             plan.stats.pool_full_shareable,
             plan.stats.poolfull_no_call,
-            plan.stats.pool_full_rejects.saturating_sub(plan.stats.poolfull_no_call)
+            plan.stats.pool_full_rejects.saturating_sub(plan.stats.poolfull_no_call),
+            plan.stats.reuse_attempted,
+            plan.stats.reuse_succeeded,
+            plan.stats.reuse_rejected_overlap
         );
     }
 }
@@ -458,6 +502,10 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
         let why: Option<&'static str> = if !func.original_locals.contains(name) {
             Some("not-a-user-local")
         } else if sc.has_nested_fn {
+            // Phase 5.2 嵌套函数干涉：upvar 经 r13 静态链逐层访问（emit/nested.rs
+            // load_upvar），本作用域内自动池号（rbx/r12/r14/r15/r8/r9）被整体拒绑，
+            // 等价于「外层变量全 spill」这一保守闸门。无需逐点 liveness 干涉：
+            // upvar 访问路径用的 r10/r11/r13 与自动池不相交（见 regbank 排除理由）。
             Some("nested-function-in-scope")
         } else if !info.bindable_ty {
             Some("type-not-bindable")
@@ -500,18 +548,47 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
             .then_with(|| a.name.cmp(&b.name))
     });
 
-    // 一个号只发给一个变量，绝不复用。
+    // Phase 5.1 真干涉驱动的号复用（保守路线）：
     //
-    // 为什么不能按「区间不相交就共用号」（我第一版就是这么写的，实测两处错值）：
-    // 后端的绑定表是**函数级**的 `名字 -> 号`（`Codegen::reg_bindings`），读写路径
-    // 每次都查同一张表，中间没有任何「重新绑到别的号」的时机。两个名字指向同一个号
-    // 就是同一个家被两人写，跟它们的 IR 区间是否重叠无关。实测形态：
-    //   char16_t c16 = 'A'; char32_t c32 = U'B'; if (c16 != 65) ...
-    //   SCCP 把比较折掉之后 `c16` 在 IR 里只剩定义那一个位置，区间退化成点，
-    //   于是被判成「与 c32 不相交」而共用 %rbx —— -O2 下 rc=3（gcc 是 0）。
-    // 结论：这个后端的架构决定了分配粒度是「整个函数」，区间只用来排序与选择，
-    // 不用来共用寄存器。
-    let mut used_slots: Vec<usize> = Vec::new();
+    // 旧规则「一个号只发给一个变量，绝不复用」在池只有 4 callee-saved + 2 延伸池时，
+    // 哪怕两个寿命完全错开的变量也不能同号，导致池不满的形状下仍然把低频值 spill 掉。
+    //
+    // 新规则：同一个号可以发给多个变量，**当且仅当**这些变量两两之间在逐点 liveness 下
+    // 完全不干涉（`ranges_disjoint` 的 ∀ 判据）。后端的 `homes` 按**名字**索引，两个
+    // 非干涉局部同时持有同一个 `Location::Reg(n)` 在 lookup 层面安全 —— 因为它们永远
+    // 不会在同一个程序点被同时读写。
+    //
+    // 历史 bug（`char16_t c16='A'; char32_t c32=U'B'; if (c16!=65)...`，SCCP 折掉后
+    // 区间退化成点被误判成不相交共用 %rbx）的根因不是「共享号」这件事本身，而是
+    // 用粗区间当干涉判据。这里用的是 `liveness::compute` 产出的逐点干涉表，那个错不会
+    // 再发生（`exists_disjoint_pair_is_not_the_same_as_disjoint_ranges` 用例钉住了
+    // 「∃ 不能代替 ∀」）。
+    //
+    // Phase 5.1 caller-saved 扩展：逐号实测否决记录（不是「待办」）。
+    // 设计上把 caller-saved 纳进自动池需要 `persist_ext_homes`/`restore_ext_homes`
+    // 这条已建成的通道（`abi/call.rs`）—— 它本身就是通用循环，对任意 caller-saved
+    // 号都能在 call 窗口两端存/取，`insert_home`（`emit/func_setup.rs`）也用
+    // `is_auto_ext_reg(r.n)` 泛化登记 `<名#save>` 槽，所以**通道不是扩展瓶颈**。
+    // 真正的否决是这些号在**非 call 路径上也有硬写入**，存/取窗口盖不住：
+    //   * `r10(10)` —— 嵌套函数静态链 trampoline 用 `movabs r10, imm64` 烘焙父帧指针
+    //     （`emit/nested.rs:123,187-195`），disp32 越界时用 `mov_imm(10, off)` 当缩放槽
+    //     （`nested.rs:169-186`）；同时 call 序列的帧对齐 scratch 也显式用 r10
+    //     （`abi/call.rs:273` `let _r10: u8 = 10;`）。写入点散在非调用路径上，
+    //     存/取窗口根本看不到，发它当家就是静默错值；
+    //   * `r11(11)` —— `load_trampoline_addr` 用 r11 承载 trampoline 地址
+    //     （`nested.rs:196-215`）、`load_upvar` 用 r11 当父级链暂存
+    //     （`nested.rs:216-260`）、间接 call 目的 `call *%r11`（`call.rs:854`）、
+    //     聚合传参在 `call.rs:536-575` 多处拿 r11 当暂存。这些全在 call 窗口内或紧邻
+    //     窗口，存/取动作自身就会踩掉 r11 里的家。
+    // 结论：自动池保持 `{r8, r9}`。若将来要再开号，判据不是「通道能不能存」
+    // （能）而是「这个号在后端所有发射路径上有没有非 call 的硬写入」—— 必须逐号
+    // 在四档执行对拍里验过，不靠推测。
+    let iv = crate::ssa::liveness::compute(func);
+    // 「号槽 → 持有该号的基名列表」。同一个号可以有多个人，只要它们两两不干涉。
+    let mut slot_holders: Vec<Vec<String>> = Vec::new();
+    // 已分配的 spill 槽序号（per-value Spill 家）。分配顺序由候选排序（accesses 降序）
+    // 隐含决定：先绑寄存器的是高频值，spill 掉的是池满后剩下的低频值。
+    let mut spill_slot_next: i64 = 0;
     for c in &cands {
         if !homes_allowed {
             // 本阶段不拦（`register_homes_allowed` 恒为 true）。保留这条分支形状是为了
@@ -529,7 +606,7 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
         let held_by_pool: Vec<u8> = pool
             .iter()
             .enumerate()
-            .filter(|(i, _)| used_slots.contains(i))
+            .filter(|(i, _)| slot_holders.get(*i).map_or(false, |v| !v.is_empty()))
             .map(|(_, (_, r))| *r)
             .collect();
         let stage_free_after = |rv: u8| -> bool {
@@ -542,22 +619,68 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
                     .iter()
                     .any(|&(_, c)| c != rv && !taken.contains(&c) && !held_by_pool.contains(&c))
         };
+        // 候选 c 的版本列表。用来跟每个已占号槽的持有者列表做「∀ 不干涉」判断。
+        let cv = crate::ssa::liveness::versions_of_base(func, &c.name);
         let pick = pool
             .iter()
             .enumerate()
             .find(|(i, (_, rv))| {
-                !taken.contains(rv) && !used_slots.contains(i) && stage_free_after(*rv)
+                if taken.contains(rv) {
+                    return false;
+                }
+                if !stage_free_after(*rv) {
+                    return false;
+                }
+                match slot_holders.get(*i) {
+                    // 号槽完全空闲：直接发。
+                    None => true,
+                    Some(v) if v.is_empty() => true,
+                    // 号槽已有人：必须与**所有**持有者两两不干涉（∀ 判据）才能复用。
+                    Some(holders) => {
+                        let ok = cv.iter().all(|cv_name| {
+                            holders.iter().all(|h| {
+                                let hv = crate::ssa::liveness::versions_of_base(func, h);
+                                iv.ranges_disjoint(&[cv_name.clone()], &hv)
+                            })
+                        });
+                        if !ok && dump_on() {
+                            eprintln!("  [regalloc-debug] {} 与 holders {:?} 不能共用号 {:?}（cv={:?}）", c.name, holders, rv, cv);
+                        }
+                        // §5.3 复用计数器：无条件累计（O(1) 自增，不依赖 dump_on；
+                        // 与 max_overlap 不同 —— 后者本身是 O(N²) 只在 dump 时算）。
+                        plan.stats.reuse_attempted += 1;
+                        if ok {
+                            plan.stats.reuse_succeeded += 1;
+                        } else {
+                            plan.stats.reuse_rejected_overlap += 1;
+                        }
+                        ok
+                    }
+                }
             })
             .map(|(i, (nm, _))| (i, *nm));
         match pick {
             Some((i, nm)) => {
-                used_slots.push(i);
+                // 把候选 c 记为该号槽的持有者。号槽第一次被占时要把槽位补到正确长度。
+                while slot_holders.len() <= i {
+                    slot_holders.push(Vec::new());
+                }
+                if dump_on() {
+                    let hv = crate::ssa::liveness::versions_of_base(func, &c.name);
+                    eprintln!("  [regalloc-debug] {} -> %{} (号槽 {}) versions={:?} slot_holders_now={:?}", c.name, nm, i, hv, slot_holders);
+                }
+                slot_holders[i].push(c.name.clone());
                 plan.bindings.push((c.name.clone(), nm));
             },
-            // 自动池满了：callee-saved 与延伸池一个都不剩（或剩下的会让暂存耗空）。
-            None => plan
-                .rejected
-                .push((c.name.clone(), REASON_NO_FREE_REG)),
+            // 自动池满了（callee-saved + 延伸池一个都不剩，或剩下的会让暂存耗空）。
+            // §11.54 闭环后延伸池已默认开，仍然池满时把这个候选 spill 到 band ——
+            // 这就是 5.1.e 的生产者本体。它仍进 bindings 表（带 Spill 家），
+            // 让 to_loc_map / apply_bindings 能把家一路交付到 AST 声明上。
+            None => {
+                let slot = spill_slot_next;
+                spill_slot_next += 1;
+                plan.spilled.push((c.name.clone(), slot));
+            },
         }
     }
     // 位置表（版本粒度）：从已定稿的 bindings + IR 建，供 `assign` 落地并由 IR 携带。
@@ -569,11 +692,7 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
     // 变成每次 -O2 每个函数都要付的固定成本。
     if dump_on() {
         plan.stats.pool_candidates = cands.len();
-        plan.stats.pool_full_rejects = plan
-            .rejected
-            .iter()
-            .filter(|(_, w)| *w == REASON_NO_FREE_REG)
-            .count();
+        plan.stats.pool_full_rejects = plan.spilled.len();
         plan.stats.max_live_bases =
             max_overlap(spans.values().map(|s| (s.first, s.last)).collect::<Vec<_>>());
         plan.stats.max_live_candidates =
@@ -588,16 +707,15 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
     plan
 }
 
-/// 池满被拒的候选里，活区间**不跨 call** 的个数（前置三的收益面，只读诊断）。
+/// 池满被 spill 的候选里，活区间**不跨 call** 的个数（前置三的收益面，只读诊断）。
 fn poolfull_no_call(func: &Function, plan: &Plan) -> usize {
-    plan.rejected
+    plan.spilled
         .iter()
-        .filter(|(_, why)| *why == REASON_NO_FREE_REG)
         .filter(|(name, _)| !crate::ssa::liveness::spans_call(func, name))
         .count()
 }
 
-/// 「池满被拒的候选里，有多少本可以复用某个已绑号」的计数（设计 §7 Phase 0 的归属数据）。
+/// 「池满被 spill 的候选里，有多少本可以复用某个已绑号」的计数（设计 §7 Phase 0 的归属数据）。
 ///
 /// 抽成函数而不是内联在诊断分支里，是为了它能被用例直接验证 —— 一个「0」既可能是
 /// 真结论（没机会），也可能是度量本身算错；不验证就分不清，而这两个结论会把 Phase 5
@@ -609,10 +727,7 @@ pub(crate) fn shareable_rejects(func: &Function, plan: &Plan) -> usize {
         return 0;
     }
     let mut shareable = 0usize;
-    for (cand, why) in &plan.rejected {
-        if *why != REASON_NO_FREE_REG {
-            continue;
-        }
+    for (cand, _slot) in &plan.spilled {
         let cv = crate::ssa::liveness::versions_of_base(func, cand);
         if cv.is_empty() {
             continue;
@@ -822,6 +937,10 @@ fn scan_stmt(s: &Stmt, sc: &mut Scan) {
         },
         Stmt::Invoke { call, .. } => scan_stmt(call, sc),
         Stmt::EhLandingPad { object, selector, .. } => {
+            // Phase 5.2 EH 落地垫干涉：按 Itanium ABI，落地垫入口假定 %rax=异常对象、
+            // %rdx=type selector，二者本就不属自动池（rax 是 EVAL_BASE、rdx 是 int128
+            // 高半）；callee-saved 号由 unwinder 按 FDE 的 DW_CFA_offset 还原成受保护
+            // 调用前值。故无需为落地垫新增干涉项。
             scan_expr(object, sc);
             scan_expr(selector, sc);
         },
@@ -937,7 +1056,11 @@ fn apply_bindings(b: &mut Block, plan: &mut Plan, splits: &Splits) {
     // 不放行，则分配器永远拿不到「把这个值存到溢出槽」这一项能力。
     let mut homes: HashMap<String, Location> = HashMap::new();
     let mut unrepresentable: Vec<String> = Vec::new();
-    for (local, loc) in plan.loc.fold_for_codegen(splits) {
+    let folded = plan.loc.fold_for_codegen(splits);
+    if dump_on() {
+        eprintln!("  [regalloc-debug] fold_for_codegen: {:?}", folded.iter().map(|(s,l)| (s.clone(), format!("{:?}", l))).collect::<Vec<_>>());
+    }
+    for (local, loc) in folded {
         match loc {
             Some(Location::Reg(r)) if r.bank == RegBank::Gp && pool_reg_name(r.n).is_some() => {
                 homes.insert(local, Location::Reg(r));
@@ -1138,12 +1261,20 @@ pub fn to_loc_map(plan: &Plan, func: &Function) -> LocMap {
         .iter()
         .filter_map(|(base, rn)| auto_reg_of(rn).map(|n| (base.as_str(), n)))
         .collect();
-    if wanted.is_empty() {
+    // 基名 → spill 槽序号。5.1.e 生产者的产物：池满时被 spill 的候选。
+    let spilled: HashMap<&str, i64> = plan
+        .spilled
+        .iter()
+        .map(|(base, slot)| (base.as_str(), *slot))
+        .collect();
+    if wanted.is_empty() && spilled.is_empty() {
         return out;
     }
     each_occurrence(func, |var, _, _, _| {
         if let Some(&n) = wanted.get(var.base.as_str()) {
             out.bind(var, Location::Reg(RegId { bank: RegBank::Gp, n }));
+        } else if let Some(&slot) = spilled.get(var.base.as_str()) {
+            out.bind(var, Location::Spill(slot));
         }
     });
     out
@@ -1244,34 +1375,88 @@ mod tests {
     /// 如果连它都报 0，那度量是坏了，而不是没机会。
     #[test]
     fn shareable_metric_is_not_vacuously_zero() {
-        // a..e 依次短命：每个只在自己那条语句里活。必须依赖形参：常量会被 SCCP 折叠，
+        // a..p 依次短命：每个只在自己那条语句里活。必须依赖形参：常量会被 SCCP 折叠，
         // 连 IR _presence 都没有（那就是 `fully_folded_locals_have_no_ir_presence` 记的现象），
         // 本用例就会退化成空跑 —— 第一版就是这么错的。
-        // 候选数要**多于自动池**。延伸池目前不开（见 `auto_pool`），所以自动池就是
-        // `POOL` 那 4 个 callee-saved；开池的那天本用例要跟着长到 10 个候选，而那
-        // 一天必须先解决暂存约定（设计 §11.39）。
-        let src = "long sink;\nlong f(long k){long a=k+1;sink=sink+a;long b=k+2;sink=sink+b;\
-                   long c=k+3;sink=sink+c;long d=k+4;sink=sink+d;long e=k+5;sink=sink+e;return sink;}\n";
+        //
+        // Phase 5.1 之后这些依次短命的变量**全部**能复用同一个号（两两不干涉），
+        // 所以 spilled 必须为 0、bindings 必须 >= 5（先绑满第一个号槽，后续都复用它）。
+        // 同时 `shareable_rejects` 必须为 0（因为已经没有 spilled 候选了）。
+        let src = "long sink;\nlong f(long k){\
+                   long a=k+1;sink=sink+a;long b=k+2;sink=sink+b;\
+                   long c=k+3;sink=sink+c;long d=k+4;sink=sink+d;long e=k+5;sink=sink+e;\
+                   long g=k+6;sink=sink+g;long h=k+7;sink=sink+h;\
+                   long i=k+8;sink=sink+i;long j=k+9;sink=sink+j;\
+                   long l=k+10;sink=sink+l;long m=k+11;sink=sink+m;\
+                   long n=k+12;sink=sink+n;long o=k+13;sink=sink+o;\
+                   long p=k+14;sink=sink+p;long q=k+15;sink=sink+q;return sink;}\n";
         let (ssa, _orig, _body, plan) = run_pipeline(src, "f", 2, &ctx_default());
         assert!(
-            plan.bindings.len() >= 4,
-            "被测源应先把自动池绑满（实得 {}），否则本用例是空跑",
+            plan.bindings.len() >= 5,
+            "被测源应先把第一个号槽绑满（实得 {}），否则本用例是空跑",
             plan.bindings.len()
         );
-        let pool_full = plan
-            .rejected
-            .iter()
-            .filter(|(_, w)| *w == REASON_NO_FREE_REG)
-            .count();
-        assert!(
-            pool_full >= 1,
-            "自动池只有 4 个号（延伸池未开），5 个候选应至少拒一个，实际 rejected={:?}",
-            plan.rejected
+        // Phase 5.1 真干涉复用：15 个依次短命的变量两两不干涉，全部能复用同一个号槽，
+        // 不再 spill。
+        assert_eq!(
+            plan.spilled.len(),
+            0,
+            "依次短命的变量两两不干涉，应全部复用同号零 spill，实际 spilled={:?}",
+            plan.spilled
         );
+        // 所有 bindings 都该指向同一个号（第一个空闲号，通常是 %rbx）。
+        let first_reg = plan.bindings[0].1;
         assert!(
-            shareable_rejects(&ssa, &plan) >= 1,
-            "依次短命的第 5 个变量本可复用已绑号；报 0 说明度量坏了（而不是没机会）"
+            plan.bindings.iter().all(|(_, r)| *r == first_reg),
+            "依次短命的变量应复用同一个号 {}，实际 bindings={:?}",
+            first_reg,
+            plan.bindings
         );
+        // 度量本身：没有 spilled 候选，shareable_rejects 应为 0（不再是「>= 1」）。
+        assert_eq!(
+            shareable_rejects(&ssa, &plan),
+            0,
+            "零 spill 时 shareable_rejects 必须为 0"
+        );
+    }
+
+    /// §5.3 度量侧：spill 次数、寄存器借用深度必须进 `DCC_REGALLOC_DUMP`。
+    ///
+    /// 这条用例钉住三件只有拆开才看得清的事：
+    /// 1. 依次短命变量（两两不干涉）→ reuse_attempted ≥ N-1（第一个之后每个都尝试复用号槽），
+    ///    reuse_succeeded == N-1，reuse_rejected_overlap == 0；
+    /// 2. spill 计数与 `plan.spilled.len()` 一致；
+    /// 3. `DCC_REGALLOC_DUMP` 的 stats 行格式里**必须**出现 reuse_att=/reuse_ok=/reuse_rej= 三个键
+    ///    （靠 grep 字符串，不是真去捕获 stderr —— 那是集成测试的事，本用例只钉 PlanStats 字段本身）。
+    #[test]
+    fn reuse_metrics_measure_the_borrow_depth() {
+        // 与 shareable_metric_is_not_vacuously_zero 同形源：15 个依次短命变量。
+        let src = "long sink;\nlong f(long k){\
+                   long a=k+1;sink=sink+a;long b=k+2;sink=sink+b;\
+                   long c=k+3;sink=sink+c;long d=k+4;sink=sink+d;long e=k+5;sink=sink+e;\
+                   long g=k+6;sink=sink+g;long h=k+7;sink=sink+h;\
+                   long i=k+8;sink=sink+i;long j=k+9;sink=sink+j;\
+                   long l=k+10;sink=sink+l;long m=k+11;sink=sink+m;\
+                   long n=k+12;sink=sink+n;long o=k+13;sink=sink+o;\
+                   long p=k+14;sink=sink+p;long q=k+15;sink=sink+q;return sink;}\n";
+        let (_ssa, _orig, _body, plan) = run_pipeline(src, "f", 2, &ctx_default());
+        // 15 个短命变量全部复用同一个号槽 ⇒ 第一个之后每个都要进「号槽已有人」分支。
+        assert!(
+            plan.stats.reuse_attempted >= plan.bindings.len() - 1,
+            "bindings={} 但复用尝试只有 {}，度量没在跑",
+            plan.bindings.len(), plan.stats.reuse_attempted
+        );
+        assert_eq!(
+            plan.stats.reuse_succeeded, plan.stats.reuse_attempted,
+            "依次短命的变量两两不干涉，每次复用尝试都该成功（att={} ok={}）",
+            plan.stats.reuse_attempted, plan.stats.reuse_succeeded
+        );
+        assert_eq!(
+            plan.stats.reuse_rejected_overlap, 0,
+            "不干涉的序列里不该有因重叠被拒的复用"
+        );
+        // 反向：spill 与 reused 不重叠 —— 这里 spill 为 0。
+        assert_eq!(plan.spilled.len(), 0, "依次短命变量不该 spill");
     }
 
     /// Phase 5.0 的核心不变式：决策前置不能漏掉后置事实。
@@ -1565,17 +1750,17 @@ mod tests {
         }
     }
 
-    /// 一个号只发给一个变量 —— 后端没有「中途换家」的能力。
+    /// 真干涉图驱动：**真同时活着**的变量不能复用同一个号（哪怕池里号不够）。
     ///
-    /// 这条是被实测打脸后收紧的。第一版按「IR 区间不相交就可以共用号」实现，
-    /// `tests/fixtures/c/char16_char32.c` 立刻错值（-O2 rc=3，gcc 与 -O0 是 0）：
-    /// 两个变量的比较被 SCCP 折掉之后，它们在 IR 里的区间退化成定义那一个点，
-    /// 于是被判成互不相交而共用 %rbx —— 可绑定表是**函数级**的 `名字 -> 号`，
-    /// 两个名字同号就是同一个家被两个人写，跟区间重叠与否无关。
+    /// Phase 5.1 之前的不变式是「一个号只发给一个变量」，它过强 —— 把寿命完全错开的
+    /// 变量也挡在号复用之外，导致池不满的形状下仍然 spill。现在的不变式换成了它的
+    /// 「精确版」：两个变量**真同时活着**（干涉表 `interferes(a,b) == true`）时不能同号，
+    /// 寿命不重叠时可以同号。
     ///
-    /// 形状换成「循环里三个各自被折掉一部分使用的累加器」：这条会真的绑到 >= 2 个
-    /// 变量（`tests::only_folded_locals_have_no_ir_presence` 记录的是另一半事实 ——
-    /// 全被折掉的名字连候选者都不是，所以那条不能拿来测复用）。
+    /// 这条测试用「循环里三个累加器 a/b/c 在循环体内同时活着」钉住前一半：三者必须拿到
+    /// **不同**的号（不能因为池号不够就让 a 和 b 共用一个号而把 c spill 掉）。
+    /// 「寿命不重叠能复用同号」的另一半由
+    /// `lifecycle_disjoint_variables_share_a_register` 钉住。
     #[test]
     fn each_register_goes_to_exactly_one_variable() {
         let src = "long s(long n){long a=0;long b=1;long c=2;for(long i=0;i<n;i++){a+=i;b+=a;c+=b;}return a+b+c;}\n";
@@ -1586,19 +1771,82 @@ mod tests {
             plan.bindings,
             plan.rejected
         );
+        // 循环里的 a/b/c 在循环体内同时活着，干涉表必然两两相交 —— 它们必须拿到不同的号。
         let regs: Vec<&str> = plan.bindings.iter().map(|(_, r)| *r).collect();
         let uniq: std::collections::HashSet<&str> = regs.iter().copied().collect();
         assert_eq!(
             regs.len(),
             uniq.len(),
-            "同一个号被发给了两个变量（后端没有中途换家的能力）：{:?}",
+            "同时活着的变量必须拿到不同的号（新不变式）：{:?}",
             plan.bindings
         );
         assert!(
-            regs.len() <= POOL.len(),
+            regs.len() <= POOL.len() + AUTO_EXT_POOL.len(),
             "绑定的变量数不可能超过池子大小：{:?}",
             plan.bindings
         );
+    }
+
+    /// 真干涉图驱动：**寿命不重叠**的两个变量必须能复用同一个号（Phase 5.1 核心目标）。
+    ///
+    /// 形状：先算 x 并立即用掉、再算 y 并立即用掉（x 死之后 y 才生），干涉表必然判定
+    /// `ranges_disjoint(versions(x), versions(y)) == true`。分配器必须把它们绑到同一个
+    /// 号 —— 而不是像 Phase 5.1 之前那样把后一个 spill 掉。
+    #[test]
+    fn lifecycle_disjoint_variables_share_a_register() {
+        let src = "long sink;\nlong f(long k){\
+                   long x=k+1;sink=sink+x;\
+                   long y=k+2;sink=sink+y;\
+                   return sink;}\n";
+        let (_, _, _, plan) = run_pipeline(src, "f", 2, &ctx_default());
+        let rx = reg_of(&plan, "x").expect("x 应被绑到一个寄存器");
+        let ry = reg_of(&plan, "y").expect("y 应被绑到一个寄存器");
+        assert_eq!(
+            rx, ry,
+            "x 与 y 寿命完全错开（x 先算先用，x 死后 y 才算），必须复用同一个号，\
+             实际 x->{rx} y->{ry}（bindings={:?} spilled={:?}）",
+            plan.bindings, plan.spilled
+        );
+        assert_eq!(
+            plan.spilled.len(),
+            0,
+            "寿命不重叠的两个变量不该被 spill：spilled={:?}",
+            plan.spilled
+        );
+    }
+
+    /// 真干涉图驱动：**真同时活着**的两个变量绝对不能复用同一个号。
+    ///
+    /// 形状：x 与 y 在同一个循环体内同时被读写（a+=x 之后再 y+=x，y 还没被消耗时
+    /// x 还在被下一轮读），干涉表必然判定它们相交。分配器必须给它们不同的号，
+    /// 池不够就 spill 后面那个，而不是硬塞同号（那就是 §7.20 的错值形态）。
+    #[test]
+    fn overlapping_live_variables_do_not_share_a_register() {
+        let src = "long f(long n){\
+                   long x=0;long y=0;\
+                   for(long i=0;i<n;i++){x+=i;y+=x;}\
+                   return x+y;}\n";
+        let (_, _, _, plan) = run_pipeline(src, "f", 2, &ctx_default());
+        let rx = reg_of(&plan, "x").expect("x 应被绑到一个寄存器或 spill");
+        let ry = reg_of(&plan, "y");
+        match ry {
+            Some(ry) => {
+                assert_ne!(
+                    rx, ry,
+                    "x 与 y 在循环体内同时活着，绝对不能复用同一个号：\
+                     x->{rx} y->{ry}（bindings={:?}）",
+                    plan.bindings
+                );
+            },
+            None => {
+                // y 被 spill 是合法的：它没有跟 x 同号。
+                assert!(
+                    plan.spilled.iter().any(|(n, _)| n == "y"),
+                    "y 没绑到号就必须出现在 spilled 列表里：spilled={:?}",
+                    plan.spilled
+                );
+            },
+        }
     }
 
     /// Phase 5.2a 的分工：**守得住的 clobber 不在这里让号**。

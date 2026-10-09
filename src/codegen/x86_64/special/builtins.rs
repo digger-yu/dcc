@@ -2537,11 +2537,11 @@ impl Codegen {
                 } else {
                     "strcasecmp"
                 };
-                let ar = [7u8, 6, 2, 1, 8, 9];
-                for (i, a) in args.iter().enumerate() {
-                    self.gen_expr(a, ar[i]);
-                }
-                self.call_label(libc_name);
+                // 不能在本函数里裸摆参数再 call_label：那样直接落在 `call_label`
+                // primitive 上，完全绕过 `emit_sysv_call` 的延伸池家存/取窗口
+                // （E1136 守卫只能事后报错，不能救场）。走统一入口让窗口盖住
+                // 「参数求值 + call + 栈参回收」全程。
+                self.emit_sysv_call(Some(libc_name), None, args, None);
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -2556,11 +2556,8 @@ impl Codegen {
                 } else {
                     "memchr"
                 };
-                let ar = [7u8, 6, 2, 1, 8, 9];
-                for (i, a) in args.iter().enumerate() {
-                    self.gen_expr(a, ar[i]);
-                }
-                self.call_label(libc_name);
+                // 同上：必须走 `emit_sysv_call` 统一窗口入口，不得裸摆参数后 call_label。
+                self.emit_sysv_call(Some(libc_name), None, args, None);
                 if dst != 0 {
                     self.mov(dst, 0);
                 }

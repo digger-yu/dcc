@@ -142,7 +142,18 @@ pub struct RegBank {
     /// 流带出「保存/恢复」守护的区间（P12 Phase 5.2a）。这种号此后不得再当临时值发出：
     /// 守护的一对 `push`/`pop` 只覆盖 fall-through 路径，跳走的那条路上没有 `pop`。
     /// 只在 `reset` 时回退（逐函数复位），因为「本函数里出现过这样一条 asm」是函数级事实。
-banned: u8,
+    banned: u8,
+    /// **per-asm-statement 生命周期的临时 pin**：内联汇编规划器（P12 Phase 6.2）在
+    /// 规划单条 asm 期间，把本条 asm 发出去过的 caller-saved 号临时钉住，避免规划器
+    /// 自维护一份「本条已占用」集合（那是 H4 说的第四套判据）。
+    ///
+    /// 与 `pinned` 的区别：`pinned` 是函数级的「变量的家 / 被 register asm 钉住」，
+    /// asm 编完后这些号的临时 pin **必须**通过 `release_tmp_pin` 清掉——caller-saved 号
+    /// 不属于 callee-saved 池，把它们永久 pin 住会让后续每条 asm 可选的号逐步耗空。
+    ///
+    /// callee-saved 池内的号由 `claim`（置 allocated+used_by_self）永久登记，**不进**
+    /// 本集合；本集合只管池外的 caller-saved 号（rax/rcx/rdx/rsi/rdi/r8-r11）。
+    tmp_pinned: HashSet<u8>,
 }
 
 impl Default for RegBank {
@@ -159,6 +170,7 @@ impl RegBank {
             used_by_self: 0,
             pinned: HashSet::new(),
             banned: 0,
+            tmp_pinned: HashSet::new(),
         }
     }
 
@@ -257,6 +269,34 @@ impl RegBank {
         true
     }
 
+    // ---- per-asm 临时 pin（P12 Phase 6.2） ----------------------------------
+
+    /// 把号临时 pin 住（本条 asm 内已发出的 caller-saved 号）。
+    ///
+    /// 只进 `tmp_pinned`：不置 `allocated`（caller-saved 号本就不在池内），也不进
+    /// 函数级的 `pinned`（否则 asm 编完后这些号会永久占着，导致后续 asm 无号可选）。
+    pub fn tmp_pin(&mut self, reg: u8) {
+        self.tmp_pinned.insert(reg);
+    }
+
+    /// 解开临时 pin。返回该号此前是否在临时 pin 集合里。
+    pub fn tmp_unpin(&mut self, reg: u8) -> bool {
+        self.tmp_pinned.remove(&reg)
+    }
+
+    /// 本条 asm 的全部临时 pin 集合（规划器 `pick` 的「已占用」集合读它）。
+    pub fn tmp_pinned_gp(&self) -> &HashSet<u8> {
+        &self.tmp_pinned
+    }
+
+    /// 清空所有 per-asm 临时 pin（本条 asm 编完后调用）。
+    ///
+    /// callee-saved 池内的号由 `claim` 永久登记（allocated+used_by_self），不受本调用
+    /// 影响；本调用只清 caller-saved 号的临时 pin。
+    pub fn clear_tmp_pins(&mut self) {
+        self.tmp_pinned.clear();
+    }
+
     /// 逐函数复位：清空占用与钉住集合，池定义不动。
     /// 调用方复位后必须立刻按当前绑定表逐个 `claim`（`reset_reg_tracker` 就是这条），
     /// 否则 file-scope 绑定「先填表、后清零」的顺序会让序言少一条保存。
@@ -265,6 +305,7 @@ impl RegBank {
         self.used_by_self = 0;
         self.banned = 0;
         self.pinned.clear();
+        self.tmp_pinned.clear();
     }
 
     /// **只**重建钉住集合，不动两个位图。

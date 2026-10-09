@@ -431,6 +431,17 @@ impl Codegen {
             let label = rest.trim();
             if !label.is_empty() && !Self::is_asm_directive(label) {
                 self.label(label);
+                // 非执行 pushsection: label 位置不在 self.code 而在自定义节数据内.
+                // 显式记录 (sec_idx, sec 内偏移) 供 symtab 构建阶段把 label 编码为
+                // STT_SECTION + offset 本地符号. 可执行 pushsection 已经由
+                // pushsection_code_ranges 反查, 无需额外登记.
+                let is_exec = self.extra_sections[sec_idx].flags & shared_elf::SHF_EXECINSTR
+                    != 0;
+                if !is_exec {
+                    let sec_off = self.extra_sections[sec_idx].data.len() as u64;
+                    self.pushsection_label_offsets
+                        .insert(label.to_string(), (sec_idx, sec_off));
+                }
             }
             return;
         }

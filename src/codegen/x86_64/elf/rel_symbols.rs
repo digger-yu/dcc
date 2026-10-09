@@ -876,6 +876,22 @@ impl Codegen {
         // .pushsection 非文本节: 为数字标签引用创建本地符号
         for rel in &self.pending_custom_sec_rels {
             if !self.sym_index.contains_key(&rel.symbol) {
+                // 优先从 pushsection_label_offsets 查 (sec_idx, sec_off) —— 这张表
+                // 在 emit_pushsection_data 的 label 分支显式登记非执行 pushsection 内
+                // 的 label 位置 (那些 label 位置不在 self.code, 不能走 pushsection_code_ranges).
+                if let Some(&(sec_idx, sec_off)) = self.pushsection_label_offsets.get(&rel.symbol)
+                {
+                    local_syms.push(ElfSym {
+                        name: rel.symbol.clone(),
+                        section: (sec_idx + 7) as u16,
+                        value: sec_off,
+                        size: 0,
+                        bind: STB_LOCAL,
+                        ty: STT_NOTYPE,
+                        visibility: STV_DEFAULT,
+                    });
+                    continue;
+                }
                 if let Some(&pos) = self.labels.get(&rel.symbol) {
                     // 若标签位于可执行 pushsection (.fixup/.altinstr_replacement)
                     // 代码区间内, 符号需指向自定义节而非 .text (代码已搬迁).

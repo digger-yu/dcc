@@ -246,12 +246,16 @@ impl Codegen {
                     }
                     self.gen_float_binop(*op, l, r);
                     // 浮点比较结果在 rax, 需要移动到 dst
+                    // `mov(dst, 0)` 是 rax→dst（与全仓 48 处 rax→dst 同形）；
+                    // 旧代码写反成 `mov(0, dst)`（dst→rax），把刚算好的布尔结果
+                    // 用 dst 里的陈旧家值抹掉（实测 cmp-mixed：右操作数暂存到 r8，
+                    // `mov r8, rax` 成了 `mov rax, r8`，rax=1 被盖成 117）。
                     if matches!(
                         op,
                         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne
                     ) {
                         if dst != 0 {
-                            self.mov(0, dst);
+                            self.mov(dst, 0);
                         }
                     } else if Self::is_integer_type(binop_ty) {
                         // 复合赋值脱糖形态: `int a += double d` 的 Binop.ty

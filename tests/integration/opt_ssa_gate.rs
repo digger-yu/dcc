@@ -949,19 +949,22 @@ fn vla_runtime_size_identity_matches_gcc_at_all_levels() {
 }
 
 // ============================================================================
-// Phase 5.1 前置三：延伸池（caller-saved 家）的发号已被实测否决，本用例钉住这个结论
+// Phase 5.1 闭环后：延伸池（caller-saved r8/r9）默认开启，发号与暂存约定已对齐。
 //
-// 形状：`e` 的家给成 %rcx 后，紧跟其后的求值把 %rcx 当通用 scratch 连用三次，家被普通
-// 计算覆盖 ⇒ -O2/-O3 少一个 3（gcc 50 / dcc 47）。完整证据与设计结论见
-// docs/p12-physreg-spill-design.md §11.39 与 `src/ssa/regalloc.rs::auto_pool` 的注释。
+// 本用例钉的性质从「延伸池不许发家」翻转成两条可观测不变式：
+//   1. 池满时确实走 spill 路径（stats.poolfull > 0），而不是静默拒绑或拿有主号；
+//   2. 真正的通用 scratch 号（%rcx/%rsi/%rdi——SysV 实参装载与 varargs 计数
+//      的约定号）永远不会被当成家发出去（它们在 auto_pool 候选表外）；
+//   3. 运行值与 gcc 对齐（开池后若有静默错值，此处立刻红）。
 //
-// 为什么这条用例值得留：否决之后最大的风险不是「忘了做」，而是**有人在没解决暂存约定的
-// 情况下把池打开**，而打开后只在少数源上错值。本用例让那种改动立刻红。
+// 旧用例断言「%r8/%r9 不许当_home」是 Phase 5.1 前置三未做完时的结论；当
+// `persist_ext_homes`/`restore_ext_homes` 与 `pick_rhs_stage` 就位后，这两个号
+// 转正为默认候选（见 `src/ssa/regalloc.rs::AUTO_EXT_POOL` 与 §11.54 闭环说明）。
 // ============================================================================
 
 #[test]
 fn ext_pool_hands_out_no_homes_until_scratch_respects_occupancy() {
-    // 12 个依次短命、各跨一次调用的局部：如果延伸池开着，一定会被用到。
+    // 12 个依次短命、各跨一次调用的局部：callee-saved 池满后延伸池必须顶上，再满就 spill。
     let src = r#"
 static long acc;
 long eat(long k) { acc += k; return k * 3 + 1; }
@@ -988,16 +991,23 @@ int main(void) { long r = f(7); return (int)(r % 251); }
         .output()
         .expect("跑 dcc");
     let diag = String::from_utf8_lossy(&out.stderr).to_string();
-    // 候选确实很多（否则本用例是在测一条不会执行的路径）：必须看到拒绑。
+    // 池必须真的满：callee-saved + 延伸池不够分，后面那批必须走 spill。
+    // （否则下面「延伸池当 home」是在测一条不会触发的路径，空跑。）
     assert!(
-        diag.contains("no-free-auto-assignable-register"),
-        "被测源必须把自动池占满并出现拒绑（否则下面的「没有延伸池家」是空跑）：\n{diag}"
+        diag.split_whitespace()
+            .any(|tok| tok.strip_prefix("poolfull=").and_then(|v| v.parse::<usize>().ok()).map_or(false, |n| n > 0)),
+        "被测源必须把自动池占满并出现 spill（否则本用例是空跑）：\n{diag}"
     );
-    for r in ["%rcx", "%rsi", "%rdi", "%r8", "%r9"] {
+    // 延伸池号 r8 应当被当 home 发出去（Phase 5.1 转正后的可见证据）。
+    assert!(
+        diag.contains("-> %r8 "),
+        "延伸池 %r8 没被发成家 —— 要么池没满、要么候选表漏了 r8：\n{diag}"
+    );
+    // 真正的通用 scratch 号（SysV 实参装载与 varargs 计数约定）永远不许当 home。
+    for r in ["%rcx", "%rsi", "%rdi"] {
         assert!(
-            !diag.contains(&format!("-> {r}")),
-            "延伸池号 {r} 被当成家发出去了，而暂存取号还没尊重占用事实 —— 这会产出静默错值 \
-             （实测形状见设计 §11.39）。要开池必须先让求值侧的 scratch 号查 `RegBank`。"
+            !diag.contains(&format!("-> {r} ")),
+            "scratch 号 {r} 被当成家发出去了 —— 这会踩到实参装载/varargs 约定，产出静默错值。"
         );
     }
     let _ = fs::remove_file(&sp);

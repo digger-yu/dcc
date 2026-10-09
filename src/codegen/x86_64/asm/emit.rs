@@ -58,6 +58,16 @@ impl Codegen {
         op_gp.sort_unstable();
         op_gp.dedup();
         let mut held = self.reg_bank.held_pool_regs();
+        // 延伸池家（r8/r9，caller-saved）：这些号不在 `reg_bank` 的 `allocated` 位掩码里
+        // （位宽只有 4 位，对应 callee-saved POOL），但它们也是「正被本函数持有值」的号。
+        // 普通 call 由 `persist_ext_homes`/`restore_ext_homes` 在栈槽里保值；内联 asm
+        // 走的是另一条路（直接发射用户模板，不经 `emit_sysv_call`），所以这里必须把
+        // 被本条 asm 毁掉的延伸池号一并纳入 push/pop 守护，否则循环计数器之类的家
+        // 会在 asm 体内被悄悄抹掉（实测 -O2 `one_guarded`/`two_guarded` 死循环：r8
+        // 持有的循环计数器被 `"r8"` clobber 毁掉，下一轮读回 0）。
+        for entry in &self.ext_home_saves {
+            held.push(entry.reg);
+        }
         // 帧基址与帧指针也是「正被持有值」的号：全部局部量都是 `%r13+disp`，帧基址被毁
         // 就是整个帧被毁。实测（本轮）`::: "r13"` 不守护也不报错，-O0/-O2 都是 SIGSEGV(139)，
         // 而 gcc 同一源得 9 —— 它把 r13 当成普通 callee-saved，而本端把它当帧基址。
@@ -71,6 +81,7 @@ impl Codegen {
             held.push(5u8);
         }
         held.sort_unstable();
+        held.dedup();
         held.into_iter()
             .filter(|r| clobber_gp.contains(r) && !op_gp.contains(r))
             .collect()

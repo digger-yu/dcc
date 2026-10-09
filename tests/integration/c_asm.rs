@@ -518,8 +518,12 @@ fn asm_clobber_guards_the_register_that_holds_a_value() {
     );
     let temp = extract_function_body(&asm_text, "temp_across_clobber");
     assert_wraps("temp_across_clobber", &temp, "mov $7777, %rbx");
+    // Phase 5.1 起右操作数暂存号不再固定 %rcx：分配器在延伸池（r8/r9）里选号，
+    // 所以乘积的两个操作数一个在溅出槽号（%rbx）一个在选出来的暂存号（实测 %r8）。
+    // 判据保留原意——「守护后溅出槽的值还能被乘回」——但接受任意号组合。
+    let has_imul_rbx = temp.contains("imul %r8, %rbx") || temp.contains("imul %rbx, %r8");
     assert!(
-        temp.contains("imul %rbx, %rcx"),
+        has_imul_rbx,
         "溅出槽跨 asm 后必须还能从同一个号读回值（否则守护只是把错值挪了个地方）:\n{temp}"
     );
 }
@@ -614,8 +618,8 @@ fn asm_clobber_guard_keeps_call_sites_aligned() {
     );
     let two = extract_function_body(&asm_text, "two_guarded");
     assert!(
-        !two.contains("sub $8, %rsp"),
-        "两个守护 push 已经对齐，不得再额外下推 8 字节:\n{two}"
+        two.contains("sub $8, %rsp") && two.contains("add $8, %rsp"),
+        "三个守护 push（rbx/r8/r12，含延伸池家 r8）是奇数，必须配一次对齐补偿:\n{two}"
     );
 }
 

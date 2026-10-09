@@ -107,7 +107,7 @@ pub struct Codegen {
     /// 逐函数复位（与 `expr_depth` 同处）。
     pub late_site_seq: u32,
     /// §11.23 步 2：规划期为「发射期才会冒出来的帧内对象」预扣的槽数上界。
-    /// 由 `reserve_late_var_slots()` 一次写下，逐函数复位。
+    /// 由 `plan_late_slot_budget()` 一次写下，逐函数复位。
     pub late_slot_budget: i64,
     /// 发射期**实际**新增的槽数（只统计 `frame_planned` 之后的新名字 `register_var`）。
     /// 它与 `late_slot_budget` 的差就是静态扫描的余量；超出即 `E1133`。
@@ -115,7 +115,7 @@ pub struct Codegen {
     /// 晚分配带的**字节游标**（§11.23 步 3）：带顶往下已吃了多少。它取代了
     /// 「晚分配挤在变量区水位里 + `min_used` 夹逼」那套现场让步，逐函数复位。
     pub late_var_cursor: i64,
-    /// 本函数的帧规划是否已经走完（`reserve_late_var_slots()` 的最后一件事）。
+    /// 本函数的帧规划是否已经走完（`plan_late_slot_budget()` 的最后一件事）。
     /// 只有在此之后的 `register_var` 新名字才算「晚分配」，才进 `late_slot_used`。
     pub frame_planned: bool,
     /// 最近一次「求值到基址」留下的**持有记录**：`Some(号)` 意思是「那个号里现在就是刚
@@ -318,6 +318,16 @@ pub struct Codegen {
     pub pushsection_exec_stack: Vec<(usize, u64)>,
     /// 可执行 pushsection 代码区间：(text 起始偏移，size, extra_sections 索引，节内偏移)
     pub pushsection_code_ranges: Vec<(u64, u64, usize, u64)>,
+    /// 非执行 pushsection 内命名 label 在自定义节数据中的位置：
+    /// label 名 → (extra_sections 索引, 节内偏移).
+    ///
+    /// 为什么需要独立一张表: `self.labels` 一律用 `self.code.len()` (text 坐标) 登记,
+    /// 对可执行 pushsection 后续由 `pushsection_code_ranges` 反查搬迁映射; 但非执行
+    /// pushsection (`.discard.call_table` / `.discard.retpoline_sites` 等) 内的 label
+    /// 位置不在 `self.code` 而在 `extra_sections[sec_idx].data`, 无法反推. 这张表
+    /// 在 `emit_pushsection_data` 的 label 分支显式记录 (sec_idx, data.len()), 供
+    /// symtab 构建阶段把 label 编码为 STT_SECTION + offset 本地符号.
+    pub pushsection_label_offsets: HashMap<String, (usize, u64)>,
     /// 延迟解析：pushsection 数据中标签差值表达式 (前向引用)
     pub deferred_pushsection_fixups: Vec<DeferredPushsectionFixup>,
     // -S 汇编文本输出
@@ -878,6 +888,7 @@ impl Codegen {
             pending_custom_sec_rels: vec![],
             pushsection_exec_stack: vec![],
             pushsection_code_ranges: vec![],
+            pushsection_label_offsets: HashMap::new(),
             deferred_pushsection_fixups: vec![],
             emit_asm_text: false,
             debug_level: 0,
@@ -1423,19 +1434,16 @@ impl Codegen {
         // 收集全局变量 → .data / .bss (或自定义 section)
         for decl in &prog.decls {
             if let Decl::Var(v) = decl {
-                if v.register_name.is_some() {
-                    // 与声明处同一个解析器：非法名在这里就报错（E0316）。
-                    // **只有真的拿到了家才跳过存储分配**：旧写法是无条件 `continue`，于是
-                    // 一个没认出来的名字会让这个全局对象既不进 .data/.bss 也不发符号
-                    // （实测产物里名字出现 0 次）。
-                    let home = self.resolve_asm_reg(v);
-                    if let Some(home) = home {
-                        // 文件作用域是唯一需要这句话的地方：与局部绑定不同，全局对象看起来
-                        // 「应该住在某处」，而绑到一个会被调用毁掉的号上时这个期望正是错的。
-                        self.diag_call_clobbered_global_binding(v, &home);
-                        self.global_homes.insert(v.name.name.clone(), (home, v.ty.clone()));
-                        continue;
-                    }
+                // Phase 3.2: 判据读 `v.home`（IR 位置表已解析出来的家），不再独立判
+                // `register_name.is_some()` —— 同一事实只有一处。用户文本名仍由
+                // `resolve_asm_reg` 这一份解析器翻译；没拿到家（非法名/保留号）就继续往下
+                // 走正常存储分配，与 rel_symbols 那侧（`global_homes.contains_key`）同源。
+                if let Some(loc) = v.home.or_else(|| self.resolve_asm_reg(v)) {
+                    // 文件作用域是唯一需要这句话的地方：与局部绑定不同，全局对象看起来
+                    // 「应该住在某处」，而绑到一个会被调用毁掉的号上时这个期望正是错的。
+                    self.diag_call_clobbered_global_binding(v, &loc);
+                    self.global_homes.insert(v.name.name.clone(), (loc, v.ty.clone()));
+                    continue;
                 }
                 let sz_raw = v.ty.size().max(1);
                 // 超大数组 (>1GB) 可能导致内存分配失败，视为外部声明不分配存储
@@ -2567,7 +2575,7 @@ mod tests {
         });
         // 本用例需要非零带：带顶/带底不得重合，否则「在带内」是空条件
         assert_eq!(cg.frame_layout.late_band_bytes, 16, "需要一个两槽的带");
-        // 预算与「规划已结束」由 `reserve_late_var_slots()` 写下，这里给同形的值
+        // 预算与「规划已结束」由 `plan_late_slot_budget()` 写下，这里给同形的值
         cg.late_slot_budget = 2;
         cg.frame_planned = true;
         let sret_anchor_before = cg.sret_region_base;

@@ -953,7 +953,7 @@ impl Codegen {
         let start = self.pos();
         self.label(&name);
         // 惰性检测：resolver 由 ld-linux 在重定位阶段调用, 那一刻没有任何 .init 跑过。
-        self.call_label(CPU_INIT_NAME);
+        self.call_cpu_init_with_ext_home_window();
         let l_ret = self.fresh_label();
         let mut emitted = 0usize;
         for arch in &cb.dispatch {
@@ -1150,10 +1150,20 @@ impl Codegen {
     // `__builtin_cpu_supports` / `__builtin_cpu_is` / `__builtin_cpu_init`
     // ========================================================================
 
+    /// `CPU_INIT_NAME` 唯一的 wrapper：无参、无返回值、不能走 `emit_sysv_call`（它是
+    /// ifunc 惰性检测入口，自己摆的参数会被 resolver 的静态链布局假设破坏）。
+    /// 但 `call_label` primitive 会撞上 E1136 —— 本函数若住在延伸池寄存器里，这次裸 call
+    /// 会把家毁掉。所以统一在这里开/关 persist/restore 窗口，与 `emit_sysv_call` 同源。
+    fn call_cpu_init_with_ext_home_window(&mut self) {
+        let n = self.persist_ext_homes();
+        self.call_label(CPU_INIT_NAME);
+        self.restore_ext_homes(n);
+    }
+
     /// `__builtin_cpu_init()`：确保检测跑过（与 gcc 一样返回 void，展开成一次调用）。
     pub fn emit_cpu_init_builtin(&mut self) {
         self.cpu_builtin_used = true;
-        self.call_label(CPU_INIT_NAME);
+        self.call_cpu_init_with_ext_home_window();
     }
 
     /// `__builtin_cpu_supports("<isa>")` → 0 / 1。
@@ -1197,7 +1207,7 @@ impl Codegen {
             return;
         }
         self.cpu_builtin_used = true;
-        self.call_label(CPU_INIT_NAME);
+        self.call_cpu_init_with_ext_home_window();
         let l_fail = self.fresh_label();
         let l_end = self.fresh_label();
         if !self.emit_feature_check(&name, &l_fail) {
@@ -1297,7 +1307,7 @@ impl Codegen {
         };
         let (slot, want) = compare;
         self.cpu_builtin_used = true;
-        self.call_label(CPU_INIT_NAME);
+        self.call_cpu_init_with_ext_home_window();
         let l_fail = self.fresh_label();
         let l_end = self.fresh_label();
         self.emit_model_rip(&RIP_MOV_EAX_M32, slot, None);

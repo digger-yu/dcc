@@ -637,7 +637,7 @@ impl Codegen {
             // 与上面同一根因、同一条轴: 复合字面量 / VM 尺寸元信息等只在代码生成
             // 时才 `register_var` 的对象现在有自己的一条带（§11.23 步 3），它的尺寸就是
             // 本函数在这里定下的 `late_slot_budget`，没有再挤变量区。
-            self.reserve_late_var_slots(f.body.as_ref());
+            self.plan_late_slot_budget(f.body.as_ref());
             // 帧布局**解算**（P12 Phase 2）：以前这里是一段现场求和，现在只保留
             // 输入；所有带边界由 `abi::layout::LayoutMap::resolve` 一次算完。
             // 求和项与求和顺序与搬迁前字面一致（`var_bytes + hdr + sret_need +
@@ -867,7 +867,7 @@ impl Codegen {
                 );
             }
             // 包含 padding 条目, 每个占 8 字节. 使用累加器替代 O(n) 遍历.
-            self.reserve_late_var_slots(f.body.as_ref());
+            self.plan_late_slot_budget(f.body.as_ref());
             let var_bytes: i64 = self.var_map_total_slots.saturating_mul(8);
             // 同一份布局解算（无参/`main` 分支）。该分支今天不**参与**变参 save area /
             // 静态链 / 位域 RMW 三个预留（见 `abi/layout.rs` 文件头记的「不对称 1」），

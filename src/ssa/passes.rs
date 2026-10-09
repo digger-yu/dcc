@@ -586,6 +586,57 @@ fn schedule_block(
         }
     }
 
+    // **具名基名定义屏障**：可移动的纯值计算（Bin/Un/Cast/Load/Select/AddrOf 等）
+    // 不得越过它**不读其基名**的「具名基名定义」往前搬。缺这条屏障时的错值形状：
+    //
+    //   p = &compute; q = &dispatch3;
+    //   printf("%ld", (long)(p - m), ...);   // _tbin_4 = p - m
+    //   printf("%ld", (long)(q - m), ...);
+    //
+    // 调度器把 `_tbin_4 = p - m`（纯 Bin，不读 q）提前到 `q = ...` 之前是合法的
+    // SSA 依赖；但 `inline_temps` 之后 `_tbin_4` 被内联到第一条 printf 的参数里，
+    // 它的**实际发射位置**回到 printf1（在 q 的 def 之后）。liveness 若按 SSA
+    // 顺序算（p.1 在 q def 前就死了），regalloc 就会把 p 与 q 绑到同一号
+    // —— 而实际发射时 printf1 读到的已是被 q 覆盖的那个号。这条屏障让
+    // 可移动计算与"它不读的具名 def"保持源码顺序（movable 必须先于该 def 排），
+    // 与 `inline_window_safe` 的窗口判据一致（窗口 [def_idx, use_pos) 里不能写
+    // 表达式读的基名，但同样不能让该窗口里的其他具名 def 改变寄存器归属假设）。
+    {
+        // 每个具名基名在本块内的定义点 (idx, base)。
+        let mut named_defs: Vec<(usize, String)> = Vec::new();
+        for (idx, inst) in insts.iter().enumerate() {
+            for base in inst_def_bases(inst) {
+                if named.contains(&base) {
+                    named_defs.push((idx, base));
+                }
+            }
+        }
+        // 对每条可移动计算 inst[idx]，若它位于某个具名 def 之后且不读该基名，
+        // 则加边 idx -> def_idx，要求 movable 不得越过该 def 前移。
+        for (idx, inst) in insts.iter().enumerate() {
+            if !inst_is_movable_value(&inst.kind) {
+                continue;
+            }
+            let mut reads_named: HashSet<String> = HashSet::new();
+            for u in operand_uses(&inst.kind) {
+                if let Some(sb) = base_of.get(&u) {
+                    if named.contains(sb) {
+                        reads_named.insert(sb.clone());
+                    }
+                }
+            }
+            for (def_idx, def_base) in &named_defs {
+                if *def_idx == idx {
+                    continue;
+                }
+                // 只挡前移：movable 在源码中位于 def 之后，禁止把它提前到 def 之前。
+                if *def_idx < idx && !reads_named.contains(def_base) {
+                    add_edge(idx, *def_idx);
+                }
+            }
+        }
+    }
+
     // 保持内存读不移动到更早的内存操作之前；它们仍可向下跨越
     // 后续非 memory asm，这正是该调度器需要释放的场景。
     for (idx, inst) in insts.iter().enumerate() {

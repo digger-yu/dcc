@@ -5,7 +5,24 @@
 > `src/ssa_passes.rs` → `src/ssa/passes.rs`、`ssa_gvn` → `src/ast_gvn.rs`。
 > 完整对照表与验收实测见 [`docs/ssa-module-layout-plan.md` §10](./ssa-module-layout-plan.md)。
 
-> **状态：已开工（2026-10 起，Phase 0 / Phase 1 / Phase 2 已完成；Phase 3 起未开工）。**
+> **状态（2026-10-09 终版）——全部落地：** Phase 0 / Phase 1 / Phase 2；Phase 3（Location 进 IR）；
+> Phase 4（codegen 不再分配变量家）；Phase 4.2（`plan_late_slot_budget` 预算器语义，命名残留已清）；
+> Phase 5.1.a–e（spill band + spill 家产出 + 号复用判据 `ranges_disjoint` ∀ +
+> 指令调度具名基名 def 屏障 + `DCC_REGALLOC_DUMP` 结构化计数）；
+> Phase 5.2（asm/嵌套/EH 三类干涉对象复核闭合）；
+> Phase 6.1（asm 规划器纯值对象，`chosen_gp`/`input_gp` 为 per-asm early-clobber 判据，非跨 asm 第二套判据）；
+> Phase 6.2（DWARF 发寄存器家、`-g` 守卫删除）；Phase 6.3（P16 真轮转）；
+> Phase 6.4（非 x86 后端非栈家硬错误）；Phase 3.2（三处 `register_name` 独立判据
+> 已统一到 `v.home`/`global_homes`/`home_for`）。
+>
+> caller-saved 池能力边界（r8/r9 默认开启，其余号逐号否决理由见 regalloc.rs 顶部注释）：
+> - rax：求值基址（EVAL_BASE_REG），不可同时是落点与变量家
+> - rdx：128 位整数返回高半，窗口末尾恢复会盖掉未消费结果
+> - rcx：x86 变长移位计数强制在 %cl，任何移位都会写它
+> - rsi/rdi：rep movsb/movsq 源目的，聚合拷贝非调用路径就重写
+> - r10：force_mem 对齐 scratch + 嵌套静态链，两条写入点都在 call 保护窗口外
+> - r11：聚合按值传参逐块暂存 + 间接 call 目的（call *%r11）+ disp32 越界 scratch
+>
 > Phase 0 的基线/量化读数、Phase 1 的零 diff 证据、Phase 2 的布局解算（含独立复核
 > 拓出并修掉的阻断级错编译）见本文 **§11 执行记录**；§6 的三个必答问题也在
 > §11.2 给出书面答案（开工评审已闭合）。Phase 3 开工前必读 **§11.5**（专家审计带回的
@@ -3059,3 +3076,372 @@ AT&T 必须印成 `(r/m, r)` —— 调用点把元祖命名成 `(src, dst)` 就
    对次序颠倒没有判据。
 3. **延伸池仍不开**：等 11.53 那 2+3 条定性完，再把 `ext_pool_selection()` 的默认值从空
    改成非空，并按当时的绑定/拒绑面重算表。
+
+### 11.55 11.54 前两条的闭环
+
+**§11.54-1（饱和转换 dst!=1 支）已修。** 根因不是「暂存号取错」，而是
+`emit_float_to_int_saturate` 的 `else` 支把 `r8/r9/r10` 当成空闲暂存 —— P16 暂存号
+参数化后 dst 自身就能落在这几个号上，序列于是把 dst 当暂存毁掉（`m.f(2.5)` 得到
+indefinite 之后的 `0x80000004`）。修法不是再补一张「哪些号能用」的表，而是把整个
+函数重写成**零额外 GPR 的分支算法**：`ucomis xmm0,xmm1` 判负/NaN 直接保留，`test dst,dst`
+后用 `jns` 判在范围内，正溢出才夹 INT_MAX。序列不引用 dst 之外任何固定号，dst 任意
+（含高 8 号）均成立。新增矩阵 `float_to_int_saturate_touches_only_dst`：3 浮点类型 ×
+32/64 位 × 16 个 dst，解码全部字节，断言整数指令只碰 dst，把「不得用额外 GPR」钉死。
+`cpp_abi_overload_group` 转绿。与 gcc 的差异只剩越界 float→int（gcc 给硬件 indefinite
+INT_MIN，dcc 给 INT_MAX）—— C 中该转换越界本就是 UB，已定义行为全部一致。
+
+**§11.54-2（反汇编操作数次序）已修。** 给 disasm 加了两字节操作数次序的唯一真源
+`two_byte_reg_role(op)`：`0F AF`/`0F 40-4F`/`0F BC/BD` 的 reg 字段是**目的**（AT&T
+`rm, reg`），`0F B0/B1`/`0F C1` 的 reg 字段是**源**（AT&T `reg, rm`），按 opcode
+逐族分派，不再靠调用点猜方向；顺带修正 `0xB0` 恒 8 位、三操作数 imul（`69`/`6B`）
+也印反两处。单测 `decodes_two_byte_operand_order_per_family` 的字节与文本全部由 `as`
+组装、`objdump -d` 反读而来。`check_disasm_coverage.sh` 新增第三条正交判据：对 GAS 可
+回炸的夹具，在自家 `-S` 文本与 objdump 两侧用同一把尺子（`order.awk`）提取次序敏感的
+双寄存器行，正序命中计 OK、反序存在即 ORDER-BAD 判红，分母为 0（全部回炸失败）也判红。
+
+### 11.56 延伸池默认开启 + 5.1.e 真 SPILL/RELOAD：P12 主体闭环
+
+**§11.54 第 3 条（延伸池仍不开）本轮解掉。** 前两轮（§11.53、§11.54）开池只留下
+2 条 `strcasecmp` 错值 + 3 条 `attr_target_clones` 编译失败。本轮定性根因不是「池号
+与暂存候选互相挤占」那种设计面的缺陷，而是**两条裸 `call_label` 绕过了家保存窗口**：
+
+1. `x86_64/special/builtins.rs` 里 `strcasecmp/strncasecmp/strncat/memchr` 四个
+   builtin 的快速路径手写 `gen_expr(a, ar[i])` 摆参 + 裸 `call_label(libc_name)`，
+   完全不走 `emit_sysv_call` 的 `persist_ext_homes()…restore_ext_homes(n)` 窗口；
+2. `x86_64/ifunc.rs` 三处 `CPU_INIT_NAME` 调用点裸 `call_label`，与 `emit_sysv_call`
+   同源的开/关窗口缺失。
+
+修法统一成**窗口单一入口**：builtin 四个臂改用 `self.emit_sysv_call(Some(name),
+None, args, None)`；ifunc 新增 `call_cpu_init_with_ext_home_window()`（`persist_ext_homes`
+→ `call_label(CPU_INIT_NAME)` → `restore_ext_homes(n)`），三处调用点全部改用。
+`call.rs` 里 `persist_ext_homes/restore_ext_homes` 提升为 `pub(crate)` 供 ifunc 复用。
+同时把 `instructions.rs::call_label` 的 **E1136 守卫**保留——一旦再有「有延伸池家的函数
+走裸 call」就直接报错，把这条缺陷钉死在编译期而不是运行期 rc=5。
+
+**5.1.e 生产者本体从「拒绑」改成「spill 到 band」。** 池满候选旧路径是
+`rejected.push((name, REASON_NO_FREE_REG))`，P12 要求的位置进 IR 形态应是
+`Location::Spill(slot)`。本轮在 `Plan` 上加 `spilled: Vec<(String, i64)>` 字段；
+池满分支改为 `slot = spill_slot_next; spill_slot_next += 1;
+plan.spilled.push((c.name, slot))`，`to_loc_map` 在 `each_occurrence` 回调里对
+已 spill 的变量 `out.bind(var, Location::Spill(slot))`。下游早有 Spill 消费链：
+`LocMap::fold_for_codegen`、`emit/mem/access.rs` 的 `stack_home_off/mov_from_stack/
+mov_to_stack`、`abi/layout.rs::spill_off(slot)` 三臂都已接好；spill band 尺寸由
+`stage_free_after` 保证 r9 暂存预留不被家占满，`count_spill_slot` 在 `pre_register_vars`
+里累加 `max(slot)+1` 导出。`REASON_NO_FREE_REG` 常量及其 `shareable_rejects/
+poolfull_no_call/stats` 引用全部删除（不再有「池满拒绑」这条路径）。
+
+**延伸池默认开启。** `ext_pool_selection()` 未设 `DCC_EXT_POOL` 环境变量时直接返回
+`AUTO_EXT_POOL = [("r8",8),("r9",9)]`；显式 `DCC_EXT_POOL=0` 或空串才关池。r9 因
+`stage_free_after` 暂存预留不发家，实际绑定分布为 rbx/r12/r14/r15/r8 五号。
+
+**本轮验收（全绿）：**
+
+| 门禁 | 结果 |
+|---|---|
+| `cargo check -j2` | 无错 |
+| `cargo test --lib` | **2167 passed, 0 failed**（旧 2165 + 新矩阵） |
+| `cargo clippy -j2` | 新代码无警告 |
+| `cargo build --release -j2` | 成功 |
+| `check_opt_equivalence.sh`（364 语料四档） | **OPT-DIFF=0**，COMPILE-FAIL 55 条与 10/05 持平 |
+| `check_disasm_coverage.sh`（四档） | 覆盖率 0.0514%（上限 324），操作数次序对账 **1694 条反序 0** |
+
+**测试调整：** `shareable_metric_is_not_vacuously_zero` 原断言是「5 个短命变量全部绑
+池」，开池后池从 4 号变 6 号、r9 又被暂存预留，绑不满。扩到 15 个短命变量必然把池
+挤到溢出，断言改为 `plan.spilled.len() >= 1` 且 `plan.bindings.len() >= 5`，把
+「池满确实走 spill 路径而非拒绑」也钉进判据。
+
+至此 P12 字面形态（位置进 IR、codegen 不再分配、真 SPILL/RELOAD、caller-saved 纳入
+分配、延伸池默认开启）主体闭环，未提交改动 9 个文件待用户审。
+
+## §11.57 指令调度屏障修复：p/q 同号覆盖（2026-10-08）
+
+### 症状
+
+`attr_target_clones_selected.c` 在 -O3 下输出 `delta=-240`（应为 `-448`）。
+-O0 正确。OPT-DIFF 从 0 涨到 1。
+
+### 根因链
+
+1. **指令调度器越序**：`instruction_scheduling`（O3 独有的块内列表调度 pass，
+   [passes.rs:102](src/ssa/passes.rs)）把纯值计算 `_tbin_4 = p - m` 提前到它不读的
+   具名基名定义 `q = &dispatch3` 之前——在 SSA 依赖图上这合法（`_tbin_4` 不读 `q`）。
+2. **inline_temps 回位**：随后 `inline_temps` 把 `_tbin_4` 内联到 `printf1` 的参数
+   表达式里，实际发射位置回到 printf1（在 q def 之后）。
+3. **liveness 误判**：基于 SSA 顺序计算的 liveness 误以为 `p.1` 在 `q.1 def` 前就
+   死了，regalloc 把 p 与 q 绑到同一物理寄存器（%r15）。
+4. **发射时覆盖**：实际发射到 printf1 时，`q = &dispatch3` 已经覆盖了 `p = &compute`
+   在 %r15 里的值，`p - m` 读的是 `q - m` → delta=-240。
+
+### 修复
+
+在 [passes.rs::schedule_block](src/ssa/passes.rs)（约第 589 行）增加一条**具名基名
+定义屏障**边：对每条可移动纯值计算 `inst[idx]`，若源码序上它位于某个具名基名 def
+之后、且它不读该基名，则加边 `idx -> def_idx`，禁止把它前移越过该 def。
+
+这与 `inline_window_safe` 的窗口判据语义一致——内联临时值时窗口 `[def_idx, use_pos)`
+不能改写它读的基名，但同样不能让该窗口里的其他具名 def 改变寄存器归属假设。
+
+**没有禁用号槽复用，也没有改 liveness 算法本身**——保留了 `ranges_disjoint` 的 ∀
+判据在正确的 SSA 顺序上工作。
+
+### 同轮顺带修复的两个真 bug
+
+- **asm_clobber 守护漏延伸池家**：[asm/emit.rs](src/codegen/x86_64/asm/emit.rs)
+  的 `asm_clobber_held_regs` 只查 `held_pool_regs()`，漏了 `ext_home_saves`（r8/r9）
+  的家。补入 `self.ext_home_saves` 后，内联 asm clobber 正确守护 r8/r9。
+- **浮点比较结果 mov 方向写反**：[dispatch.rs:254](src/codegen/x86_64/emit/expr/dispatch.rs)
+  的 `mov(0, dst)`（rax←dst）把刚算好的布尔结果用陈旧家值盖掉。翻成 `mov(dst, 0)`，
+  与全仓 48 处同形写法对齐。这修复了 `cmp-mixed`（long double vs int 混合比较）
+  got=118 want=2 的问题。
+
+### 验收（全绿）
+
+| 门禁 | 结果 |
+|---|---|
+| `cargo check` | 无错 |
+| `cargo test` | 3369 passed, 0 failed |
+| `cargo clippy --all-targets` | 无 error |
+| `cargo build` | 成功 |
+| `check_opt_equivalence.sh` | **OPT-DIFF=0**（从 1 降到 0） |
+
+## §11.58 Phase 5.2 三类干涉对象全局复核（2026-10-09）
+
+§7 5.2 列出的三类干涉对象（asm 操作数与 clobber / 嵌套函数按帧偏移访问外层变量 /
+异常落地垫的寄存器约定）在 §11.11 已分别交付（5.2a 真修后端守护、5.2b/5.2c 钉前提不收判据）。
+本轮按任务要求对三者做一次**全局复核**：从设计原文出发，沿分配器入口（`plan_for` 准入判据）、
+SSA 闸门（`is_structured`）、后端发射（`asm/emit.rs`、`emit/nested.rs`、`eh_tables.rs`）三层
+把每个对象的「消费者是否真的到得了分配器」走到底，结论是三者在当前管线上**全部自然闭合**，
+不需要新增判据或代码改动。
+
+### 1. asm 操作数与 clobber —— 自然闭合（三层冗余）
+
+**操作数**：出现在 inline asm `outputs`/`inputs` 里的变量根名由
+`regalloc.rs::collect_asm_operand` 收进 `sc.asm_names`，在 `plan_for` 准入判据里命中
+`inline-asm-operand` 整条拒绑（line 479-480）。无论约束是 `"r"`/`"=r"`/`"D"(rdi)`/`"b"(rbx)`，
+被引用的变量本身永不进 `cands`，所以分配器不可能把它绑到与 asm 约定冲突的号上。
+另外自动池号（rbx/r12/r14/r15/r8/r9）与常见固定约束号（rax/rcx/rdx/rsi/rdi/r10/r11）本就不相交，
+分配器也不会把别的变量绑到 `"D"`/`"S"` 这类固定号上去。
+
+**clobber**：在 §11.11（5.2a）已交付——`asm_clobber_held_regs` 在发射点两侧插 push/pop
+守护正常 volatile asm，`ban_escaping_asm_regs` + E0317 处理 asm goto。本轮额外核到
+§11.57 已经把 `ext_home_saves`（r8/r9 延伸池家）补进守护名单，clobber 那一半对自动池
+与延伸池都覆盖了。分配器这一侧不需要再加让号判据：守得住的 clobber 让号就等于把 P12 的
+收益扔掉（`guardable_asm_clobber_does_not_shrink_the_pool` 用例钉住），守不住的 asm goto
+所在函数带 `Stmt::AsmGoto`，被 `is_structured` 判为非结构化、整函数不进 SSA，分配器
+根本看不到这类函数（`escaping_asm_functions_do_not_reach_the_allocator` 用例钉住）。
+
+### 2. 嵌套函数按帧偏移访问外层变量 —— 自然闭合（双层闸门）
+
+`regalloc.rs:463-468` 的 `has_nested_fn` 判据对整个函数直接拒绑
+（`nested-function-in-scope`）。本轮又核到第二条更前置的闸门：含 `BlockItem::Decl(Decl::Func)`
+的函数在 `opt.rs` 里就被 `func_has_unsafe_ssa_pattern` 踢出 SSA 管线，准入判据实际命中
+数为 0（§11.11 5.2b 已实测）。嵌套函数的静态链走 r10/r11/r13（`emit/nested.rs` 的
+trampoline + `load_upvar`/`store_upvar`），这三个号都不在自动池里，与自动绑定的号无
+物理交集。外层变量的帧偏移由声明顺序累加决定（`func_setup.rs`），是否绑寄存器不会移动
+upvar 的偏移，因此绑不绑对嵌套体按帧偏移读外层变量这条路径本身没有语义影响——真正
+会坏的是「把被嵌套体捕获的外层变量绑到寄存器」，而那条已经被两道闸门一起挡住。用例
+`nested_function_bodies_are_never_auto_bound` 常驻反向对照（同 TU 里非嵌套热函数仍被
+规划）。
+
+### 3. EH 落地垫（Itanium zero-cost）的寄存器约定 —— 自然闭合（结构缺席）
+
+核到的事实链：
+1. EH 形态（`Stmt::Invoke` 受保护调用、`Stmt::EhLandingPad` 落地垫）在 AST 里由 C++
+   前端（`cpp/lower_ir.rs`）生成，落地垫块必带地垫标签与回入标签；
+2. 带 `Stmt::Label` 的函数被 `ssa::structure::is_structured_stmt` 判为 false，
+   `build_from_func` 返 `None`，整函数不进 SSA 管线；
+3. 因此分配器的 `plan_for` 根本看不到带 EH 的函数——`eh_landing_pad_functions_are_never_auto_bound`
+   用例实测同一个 C++ TU 里不带 EH 的热函数确实被规划（`[regalloc] hot` 命中），
+   三个带 EH 的（循环内 throw / 无循环 throw / catch(...)）一行 dump 都没有；
+4. `regalloc.rs:875-882` 里对 `Stmt::EhLandingPad` 的扫描（`object`/`selector` 两个
+   表达式）是防御性的：万一将来 EH 函数能进 SSA，落地垫入口按 Itanium ABI 假定
+   `%rax`=异常对象、`%rdx`=type selector，这两个号本就不在自动池（rax 是 EVAL_BASE、
+   rdx 是 int128 高半）；callee-saved 号由 unwinder 按 FDE 的 `DW_CFA_offset` 还原成
+   受保护调用前值，与分配器给变量绑的号语义一致。
+
+结论：分配器这一侧不需要为落地垫新增干涉项（liveness 在能进 SSA 的函数上本来就会
+按块边界算 live-in；落地垫函数今天到不了这条路径，加判据也是死代码）。EH 的*行为*
+正确性由 `cpp_abi_eh_group` 那套与 g++ 的交叉对照负责，本轮不动它。
+
+### 本轮验收
+
+| 门禁 | 结果 |
+|---|---|
+| `cargo check` | 无错 |
+| `cargo test` | 全绿 |
+| `check_opt_equivalence.sh` | **OPT-DIFF=0**，COMPILE-FAIL 分桶与基线持平 |
+
+本轮是一次纯复核（无代码改动），三类干涉对象的「前提一旦不成立就红」的用例（asm clobber
+正反对照、嵌套函数反向对照、EH 落地垫反向对照）都已在 §11.11 / §11.57 落地并随本轮测试
+全绿。
+
+## §11.59 对照方案全量核查与文档状态回写（2026-10-09）
+
+### 核查方法
+
+对照本设计文档 §7（实施步骤）与 §8（验收清单），逐项核查代码现状；同时对照
+`ssa-pass-upgrade-plan.md` 状态表 P12 行。
+
+### 验收清单实测结果
+
+| 脚本 | 结果 |
+|---|---|
+| `cargo check` | 无错 |
+| `cargo build` | 成功 |
+| `cargo test` | 3369 passed, 0 failed（2169 单元 + 1082 集成 + 其他） |
+| `cargo clippy --all-targets` | 无 error（预存在 style warning 非本轮引入） |
+| `check_opt_equivalence.sh` | **OPT-DIFF=0**，CF-UNKNOWN 不增 |
+| `check_reproducible_output.sh` | 5274 组合，三次连跑产物字节一致 |
+| `check_rex_hygiene.sh` | 662 组合，零多余 REX 位、零 %ah/%ch/%dh/%bh |
+| `check_disasm_coverage.sh` | 0.0509%，上限 81，OK |
+| `check_fixtures.sh` | 157 源文件 / 637 夹具，全绿 |
+| `check_pipe_structure.sh` | 流水确已落地且拒因可解释，OK |
+
+### 逐项状态回写
+
+- **Phase 3.2 已闭合**：三处 `register_name` 独立判据（codegen.rs:1426、
+  elf/rel_symbols.rs:97、emit/stmt.rs）已统一到 `v.home` / `global_homes` /
+  `home_for`，从「未落地」划掉。
+- **Phase 5.1 号复用已达成语义**：`ranges_disjoint` ∀ 判据 + 指令调度具名基名
+  def 屏障（§11.57）就是设计 §1 非目标明确允许的「有干涉模型 + 能溢出」形态——
+  不是池满即 spill 的无干涉循环。剩余字面收尾是 §5.3 度量侧（`DCC_REGALLOC_DUMP`
+  缺 spill/复用失败计数）。
+- **caller-saved 延伸池 r8/r9 默认开启**：persist/restore + ext_home_saves +
+  asm clobber 守护三件套已闭合。rax/rcx/rdx/rsi/rdi/r10/r11 因硬约束逐号实测
+  否决（regalloc.rs:76-106 有逐号注释），r10/r11 是下一个可扩展号，但这不是
+  「未完成」而是「按设计逐号评审后的当前能力边界」。
+- **Phase 4.2 语义已达成**：`max_expr_depth_stmt` 静态扫描 + LayoutMap 一次解算
+  已让 push/pop 槽位可数。`reserve_late_var_slots` 函数本体仍在，但语义已退化为
+  `late_slot_budget` 预算器（不再预扣水位）；push/pop 栈机 86 处按设计 §1 非目标
+  不需要重写。
+- **Phase 6.1 错值已修**：GP_POOL 从 9 扩到 13，池空返回 None 报 impossible
+  constraint，>9 GP 号静默复用错值闭合。规划器 HashSet 字段未拆是字面收尾。
+
+### 结论
+
+P12 字面形态的核心目标（谁住哪个物理寄存器一处决定 + 真 SPILL/RELOAD +
+codegen 不再分配 + caller-saved 延伸池 + 干涉对象接入）已全部达成。剩余四项
+收尾都是「命名/度量/逐号扩展/字面拆字段」级别的打磨，不影响正确性与产物。
+
+## §11.60 四项收尾的本轮闭环（2026-10-09）
+
+四项收尾（命名残留 / dump 结构化 / r10-r11 逐号评估 / planner 内部状态核查）
+与顺带修掉的 E0499 借用冲突，本轮一并闭环，无产物 diff。
+
+### 收尾 1 — `reserve_late_var_slots` 命名残留全量扫描
+
+全仓库 grep 后唯一残留是 `tests/integration/c_lang.rs:3498` 的一处注释，已改成
+`plan_late_slot_budget`；函数本体在 `emit/func_setup.rs` 早已改名。无代码调用点
+残留，无功能变化。
+
+### 收尾 2 — `DCC_REGALLOC_DUMP=1` 结构化一行计数
+
+在 `deliver()` 已有的 `[regalloc] func=...` 行之后新增一行
+`[regalloc-dump] func=<name> cands=N bound=N(callee=N,ext=N) spilled=N reused=N reuse_rejected=N`。
+`cands` 来自 `PlanStats::pool_candidates`；`bound` 拆 callee-saved 与 caller-saved
+延伸池两档；`spilled` 是 `Location::Spill` 数；`reuse*` 来自 ranges_disjoint 判据。
+只在 dump_on() 分支计算，非 dump 路径零开销，产物零影响。
+
+### 收尾 3 — r10/r11 是否可按函数特征动态纳入 caller-saved 池
+
+逐号读了写入点源码（`emit/nested.rs`、`abi/call.rs`），结论：**完全否决，不做
+动态扩展**。
+
+- **r10**：① 嵌套静态链（`nested.rs:191` `mov r10, r13`、`load_frame_via_chain`
+  disp32 越界分支）受 `has_nested_fn` 闸门保护；② **但** `abi/call.rs:273-287`
+  在 force_mem 对齐（agg>16B 按值传参的 call）时拿 r10 当 rsp→aligned 的 scratch，
+  这一条与嵌套无关，普适触发。两条写入点都在 `store_stack/load_stack` 保护窗口外
+  （即「call 序列内部」），因此即便 `has_nested_fn=false`，r10 也不能当跨 call 的家。
+- **r11**：① 聚合按值传参的逐块暂存（`abi/call.rs:536-575`），② 间接 call 目的
+  （`abi/call.rs:854` `call *%r11`），③ 嵌套 trampoline/upvar 链，④ disp32 越界
+  scratch。前两条与嵌套无关，普适触发。⇒ r11 完全否决。
+
+否决理由同步进 `regalloc.rs` 顶部 POOL/AUTO_EXT_POOL 的 doc 注释，精确到行号与
+触发条件。未来解除前置：把 force_mem 对齐 scratch 换成别的号（如 r8/r9 临时借用）、
+把 agg 逐块暂存改为栈上直接 staging，才谈得上重新评估 r10/r11。
+
+### 收尾 4 — `AsmRegisterPlanner` 的 `chosen_gp`/`input_gp` 是否是「第四套判据」
+
+Phase 6.2 重构后 planner 已改为纯值对象（构造时拿 `owned_gp` 快照，规划期纯本地
+台账，`finish(self, reg_bank)` 一次性 claim）。此时逐字段核对：
+
+- `used_gp`：owned_gp 快照 ∪ clobber ∪ 本条已发 ⇒ 不再是独立判据，只是规划期
+  本地台账，与 RegBank 的 `allocated/used_by_self` 位图在 `finish` 时一次性同步；
+- `chosen_gp`：本条 asm 里已被 planner 发过的 GP 号集合 ⇒ 是 early-clobber 输出
+  重分配判据所必需的 per-asm 内部状态，不是跨 asm 的判据，**保留**；
+- `input_gp`：标记哪些 chosen_gp 同时是 Input 操作数 ⇒ early-clobber 输出不得与
+  Input 号重合，同样是 per-asm 判据，**保留**。
+
+结论：这两个 HashSet 不是「第四套判据」，而是 planner 自身语义所需的最小内部状态。
+若删除，early-clobber 输出与 Input 号碰撞就无法被检测，会静默产出非法 asm 约束。
+
+### 顺带修复 — Phase 6.2 留下的 47 个 E0499 借用冲突
+
+震中在 `opmap.rs`：planner 持有 `&mut self.reg_bank` 贯穿整个 `build_asm_operand_map`，
+但操作数循环内大量调用 `self.prepare_asm_binding`、`self.asm_memory_operand_str`、
+`self.asm_reject`、`self.asm_reg_name_or_report` 等 `&mut self` 方法。修复方式与
+收尾 4 一致：planner 改回纯值对象，构造时拿 `owned_gp()` 快照，规划期纯本地，
+`finish` 一次性 claim；同时删除已死的 `own_asm_operand_gp` 函数（其职责由
+`planner.finish()` 替代）。
+
+### 验收
+
+- `cargo check`：零 warning 零 error
+- `cargo test`：2170 + 1082 + 其余套件全部通过，0 失败
+- `check_opt_equivalence.sh`：0 OPT-DIFF（COMPILE-FAIL 为夹具自身依赖，计数不增长）
+- `check_rex_hygiene.sh`：662 个「夹具×档位」组合零条多余 REX/ah-ch-dh-bh
+
+## §11.62 三类遗留缺陷修复（2026-10-09）
+
+§11.61 暴露的三类内核构建缺陷本轮已由专家 agent 修复并回归通过：
+
+| 缺陷 | 根因 | 修复位置 |
+|---|---|---|
+| E1103 自定义匿名段内部 label 未注册 symtab（~150 处） | label 落在 `extra_sections[sec_idx].data`，不在 `self.code`，走不到常规 `self.label()` 的 text 坐标反推路径；symtab 构建阶段找不到对应本地符号，静默用 STN_UNDEF(index=0) 发 PC32 重定位 | `codegen.rs` 新增 `pushsection_label_offsets: HashMap<String,(usize,u64)>`；`output.rs`/`emit_lines.rs` 在非执行 pushsection 显式登记；`rel_symbols.rs` 本地符号创建循环优先用该表 |
+| E0030 const 指针赋值过严（10 处） | `assign_target_name` 对所有 `Expr::Ident` lhs 都返回变量名，再查 const 标志直接报错；但内核大量使用 `struct pt_regs *const process` + `*process = (struct pt_regs){...}` 运行期回填模式，const 修饰指针本身而非所指对象 | `parser.rs`：`assign_target_name` 仅当 `Expr::Ident` 且类型为非 Ptr/Array/Func 的标量时返回 Some(name)，指针/数组/函数类型一律放行 |
+| vdso64 `.altinstructions` 复合表达式未求值 | pushsection 路径已加 `eval_pure_numeric_arith`，但 text 段内 `.long/.quad/.4byte` 伪指令（`emit_asm_code_data_directive`）只调 `parse_asm_imm_token`（纯数字字面量），`(20*32+ 2)` 直接落到 `pending_code_rels.push(R_X86_64_32, symbol=整串)` | `constraint.rs`：`eval_pure_numeric_arith` 改 `pub(crate)`；`directive_emit.rs`：`emit_asm_code_data_directive` 开头补同一求值分支，与 pushsection 对齐 |
+
+### 验收
+
+- `cargo check --all-targets -j1`：零 error
+- `cargo test -j1`：全套通过（>3300 用例），0 failed
+- `check_opt_equivalence.sh`：OPT-DIFF=0
+- `cd ~/linux-7.1 && make -j2`：`Kernel: arch/x86/boot/bzImage is ready (#17)`，3.3MB bzImage 产出，E1103/E0030/altinstructions 三类错误全部清零
+
+## §11.61 全量对照 review 与内核全树构建首次实测（2026-10-09）
+
+### 对照 §7 实施步骤 / §8 验收清单逐项核查结果
+
+8 项核查中 6 项合理闭合（spill 后端消费、Phase 4.2 预算器、Phase 5.2 干涉对象取舍、
+Phase 6.2 DWARF 编码、Phase 6.4 非 x86 硬错误、§8 字节对照记录），2 项为真缺口，
+本轮一并处理：
+
+1. **`docs/ssa-pass-upgrade-plan.md` 状态表过时**：P16 行仍写「⚠️ stub / 未实现真流水
+   调度」，行 811 仍写「真轮转仍未做」——但 `ssa/pipelining.rs:1754` 的
+   `benefit_verdict_rot` 与钉住用例 `gate_accepts_depth_two_load_chain_with_real_cells`
+   表明格子表 `{base}_s{k}` 已落地，depth≥2 循环现在被接受而非拒收。本轮已把 P16 行
+   改写为 ✅，「仍未做」段改成「已落地」说明段。P12 行本轮从 ◑ 改 ✅。
+2. **内核全树构建从未跑过**：本轮首次执行 `scripts/kernel_full_build.sh`（linux-7.1
+   x86_64 defconfig）。
+
+### 内核构建首次实测暴露的三类遗留缺陷（均不在 P12 改动域）
+
+构建过程共暴露 174 条 `error:`（去重后三类），全部为 dcc 编译器自身缺陷在真实规模
+下首次浮现，**与 P12 物理寄存器改动无因果关系**（错误码域远离寄存器分配/帧布局）：
+
+| 缺陷 | 计数 | 位置 | 根因 |
+|---|---|---|---|
+| **E1103 自定义段内部 label 漏注册 symtab** | ~150 | `elf/resolve.rs:44` | `.discard.call_table`、`.discard.retpoline_sites` 等自定义段里的 `.L.str.const.*` / `.L_ansi_cprng_seed.1` 等 dcc 生成 label 被发成 PC32 重定位，但 `rel_symbols.rs` 没把它们注册成 symtab 条目，ET_REL 下 index=0 会静默解成段起始。这是符号表构建对「自定义匿名段内部 label」场景的覆盖缺陷。 |
+| **E0030 const 变量赋值** | 10 | `parser.rs:9858` | 内核宏展开出的 `extern const` / `static const` 被通过指针或复合字面量路径赋值（典型如 `kernel/fork.c:985` 的 `process`、`kernel/cred.c:93` 的 `init_task`）。parser 阶段对「经指针写 const 对象」检测过严。 |
+| **vdso64 `.altinstructions` 表达式符号未求值** | 1 | `asm/emit_lines.rs:3267` | `.altinstructions` 段里 `*(20*32+ 2)= . - 628;` 这类复合表达式（常量运算 + 段差）未被汇编器表达式求值器计算，原样进了重定位符号名，链接器报 undefined。属汇编内建表达式求值器的覆盖缺陷。 |
+
+### 结论
+
+- **P12 本体**：§7 全部 Phase（0–6）字面落地，§8 除「内核全树构建」外全部验收。
+- **内核全树构建**：本轮首次跑完（exit 非 0），暴露的是 dcc 三块独立遗留缺陷，
+  不属于 P12 范围。它们需要在 P12 之外单独立项处理（建议编号为 P17 / P18 / P19：
+  ①自定义段匿名 label 注册；②parser const 指针赋值收窄；③汇编 altinstruction
+  表达式求值），不阻塞 P12 验收。
+- **文档状态表**：P12、P16 行均已回写至字面实际达成范围，`ssa-pass-upgrade-plan.md`
+  不再有与代码现状矛盾的「stub」标记。
+

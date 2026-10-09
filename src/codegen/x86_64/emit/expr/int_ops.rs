@@ -19,104 +19,62 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 impl Codegen {
     pub(crate) fn emit_float_to_int_saturate(&mut self, dst: u8, float_ty: &Type, is_64bit: bool) {
-        // Step 1: ucomiss/ucomisd xmm0, xmm1 — detect float sign.
-        //   xmm1 = 0.0 (from xorps).  Compare xmm0 vs 0.0:
-        //   CF=1 → xmm0 < 0 (negative), CF=0 → xmm0 >= 0 (positive).
-        //   xmm1 must be 0.0 for a well-defined comparison.
-        self.emit(&[0x0F, 0x57, 0xC9]); // xorps xmm1, xmm1 (xmm1 = 0.0)
-        if matches!(float_ty, Type::Float) {
-            self.emit(&[0x0F, 0x2E, 0xC1]); // ucomiss xmm0, xmm1
+        // 截断转换 (cvtt*2si) 已把结果写进 `dst`；范围外与 NaN 都得到整数 indefinite
+        // (INT_MIN)。这里把「正溢出」夹到 INT_MAX —— 负溢出本就该是 INT_MIN，无需改。
+        //
+        // 判据（不依赖任何额外 GPR 暂存，因此 `dst` 是任意号都成立，含高 8 号）：
+        //   * 源值 (xmm0) >= 0 而截断结果 (dst) < 0，只可能是正溢出 ⇒ dst = INT_MAX；
+        //   * 源值 < 0 而结果 == INT_MIN ⇒ 负溢出，INT_MIN 正是期望值；
+        //   * NaN：ucomisd 无序比较置 CF=1，落到下一条 Jb 出口 ⇒ 保留 INT_MIN
+        //     （与旧实现 setc→负支→保留 indefinite 的结果一致）；
+        //   * 其余情形结果在范围内，原样保留。
+        //
+        // 旧实现按 `dst == 1`（%rcx）分两支并把 r8/r9/r10 当空闲暂存：P16 把右操作数
+        // 暂存号参数化以后 `dst` 可以是高 8 号（实测 method_overloads.cpp：dst=%r8 走进
+        // else 支，r8 既是 dst 又被当暂存 ⇒ 2.5→int 得 0x80000004 而不是 10，§11.54-1）。
+        let (ucomis_op, ucomis_prefix): (u8, &[u8]) = if matches!(float_ty, Type::Float) {
+            (0x2E, &[][..]) // ucomiss：单精度无 66 前缀
         } else {
-            self.emit(&[0x66, 0x0F, 0x2E, 0xC1]); // ucomisd xmm0, xmm1
-        }
-        // Step 2: save CF (sign) into r9b immediately, before any
-        //   instruction can clobber flags.
-        //   r9 = 1 if negative/NaN, 0 if positive/zero.
-        self.emit(&[0x41, 0x0F, 0x92, 0xC1]); // setc r9b
-        self.emit(&[0x4D, 0x0F, 0xB6, 0xC9]); // movzx r9, r9b
+            (0x2E, &[0x66][..]) // ucomisd：double / long double(内部按 double)
+        };
+        // xorps xmm1, xmm1；ucomis{s,d} xmm0, xmm1（ModRM 0xC1：reg=xmm0, r/m=xmm1）。
+        // xmm1 是本后端浮点比较的约定 scratch（见 special/builtins.rs 同族站点）。
+        self.emit(&[0x0F, 0x57, 0xC9]);
+        let mut ucomis = ucomis_prefix.to_vec();
+        ucomis.extend_from_slice(&[0x0F, ucomis_op, 0xC1]);
+        self.emit(&ucomis);
 
-        if dst == 1 {
-            // dst is rcx — the trickiest case since rcx is our
-            // usual scratch register.  Strategy: save original to
-            // r8, compute saturated value in rcx, then:
-            //   cmovz rcx, r8 (not indefinite → restore original)
+        let l_done = self.fresh_label();
+        // CF=1（源 < 0，或 NaN 的无序比较）⇒ 结果要么是合法负数、要么是负溢出的
+        // INT_MIN（NaN 同样保留 indefinite），都不需要动 dst。
+        self.jmp_rel32(&l_done, JumpKind::Jb);
 
-            // Step 3a: save original dst to r8
-            self.mov(8, dst); // mov r8, rcx
-
-            // Step 3b: compare original with indefinite value.
-            if is_64bit {
-                // i64::MIN cannot be encoded as sign-extended imm32
-                // (low 32 bits are 0, not 0x80000000).  Save r9
-                // (sign), load indefinite into r9, compare, restore.
-                self.emit(&[0x41, 0x51]); // push r9
-                self.mov_imm(9, i64::MIN as i128); // r9 = indefinite
-                self.emit(&[0x4C, 0x39, 0xC8]); // cmp r8, r9
-                self.emit(&[0x41, 0x59]); // pop r9 (restore sign)
-            } else {
-                // 32-bit: i32::MIN = 0x80000000.
-                // cvttss2si (no REX.W) zero-extends to 0x0000000080000000.
-                // r8 has the same zero-extended value.
-                // Compare 32-bit: cmp r8d, imm32.
-                self.emit(&[0x41, 0x81, 0xF8]); // cmp r8d, imm32
-                self.emit(&i32::MIN.to_le_bytes());
-            }
-
-            // Step 3c: compute saturated value into rcx based on sign.
-            //   r8 = original, ZF = (original == indefinite).
-            //   r9 = sign (1=neg, 0=pos).
-            if is_64bit {
-                self.mov_imm(dst, i64::MAX as i128); // rcx = INT64_MAX
-                self.mov_imm(10, i64::MIN as i128); // r10 = INT64_MIN
-            } else {
-                self.mov_imm(dst, i32::MAX as i128); // ecx = INT32_MAX
-                self.mov_imm(10, i32::MIN as i128); // r10d = INT32_MIN
-            }
-            // cmovnz rcx, r10: if sign!=0 (negative), rcx = INT_MIN
-            self.emit(&[0x4D, 0x0F, 0x45, 0xCA]); // cmovnz rcx, r10
-                                                  // Now rcx = saturated value (INT_MAX or INT_MIN).
-
-            // Step 3d: if NOT indefinite (ZF=0), restore original.
-            //   if ZF=1 (indefinite): keep rcx = saturated.
-            //   if ZF=0 (not indefinite): rcx = r8 (original).
-            self.emit(&[0x49, 0x0F, 0x45, 0xC8]); // cmovnz rcx, r8
-                                                  // Now: rcx = saturated if indefinite, original otherwise.
+        // 源 >= 0。test dst, dst：SF=1（结果为负）即正溢出（正值截断不可能为负）。
+        // test r/m, r 编码 85 /r：dst 同时在 reg 与 r/m 两字段，高 8 号时 REX.R 与
+        // REX.B 必须各自独立置位（与 instructions.rs::mov 同一口径）。
+        let test_rex = if is_64bit { 0x48 } else { 0x40 }
+            | if dst >= 8 { 0x04 | 0x01 } else { 0 };
+        let modrm = 0xC0 | ((dst & 7) << 3) | (dst & 7);
+        if test_rex != 0x40 {
+            self.emit(&[test_rex, 0x85, modrm]);
         } else {
-            // dst is NOT rcx.  rcx is available as scratch.
-            // r8, r9 are available as scratch.
-
-            // Step 3a: compute saturated value into r8 based on sign.
-            //   r9 = sign (1=neg, 0=pos).  Use test to set flags.
-            if is_64bit {
-                self.mov_imm(8, i64::MAX as i128); // r8 = INT64_MAX
-                self.mov_imm(1, i64::MIN as i128); // rcx = INT64_MIN
-            } else {
-                self.mov_imm(8, i32::MAX as i128); // r8d = INT32_MAX
-                self.mov_imm(1, i32::MIN as i128); // ecx = INT32_MIN
-            }
-            // test r9, r9 → ZF=(r9==0)=(positive)
-            self.emit(&[0x4D, 0x85, 0xC9]); // test r9, r9
-                                            // cmovnz r8, rcx: if r9!=0 (negative), r8 = INT_MIN
-            self.emit(&[0x4C, 0x0F, 0x45, 0xC1]); // cmovnz r8, rcx
-                                                  // Now r8 = saturated value.
-
-            // Step 3b: check indefinite and select result.
-            //   Reload indefinite into rcx, compare with dst.
-            if is_64bit {
-                self.mov_imm(1, i64::MIN as i128);
-                self.emit(&[0x48, 0x39, 0xC8 | (dst & 7)]); // cmp dst, rcx
-            } else {
-                self.mov_imm(1, i32::MIN as i128);
-                if dst >= 8 {
-                    self.emit(&[0x44, 0x39, 0xC8 | (dst & 7)]);
-                } else {
-                    self.emit(&[0x39, 0xC8 | (dst & 7)]);
-                }
-            }
-            // cmovz dst, r8: if indefinite, dst = saturated.
-            let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 } | 0x01;
-            self.emit(&[rex, 0x0F, 0x44, 0xC0 | ((dst & 7) << 3)]);
+            self.emit(&[0x85, modrm]);
         }
+        // 结果非负 ⇒ 在范围内，保留。
+        self.jmp_rel32(&l_done, JumpKind::Jns);
+
+        // 正溢出：dst = INT_MAX。32 位目标用 mov $imm32, r32（0xC7 /0），64 位目标
+        // i64::MAX 超出 imm32，走 mov_imm 的 movabs 路径。
+        if is_64bit {
+            self.mov_imm(dst, i64::MAX as i128);
+        } else if dst >= 8 {
+            self.emit(&[0x41, 0xC7, 0xC0 | (dst & 7)]);
+            self.emit(&i32::MAX.to_le_bytes());
+        } else {
+            self.emit(&[0xC7, 0xC0 | (dst & 7)]);
+            self.emit(&i32::MAX.to_le_bytes());
+        }
+        self.label(&l_done);
     }
     pub(crate) fn emit_implicit_float_to_int(&mut self, dst: u8, float_ty: &Type, int_ty: &Type) {
         // 无符号目标: 不能沿用「有符号截断转换 + INT_MAX 饱和」—— 见

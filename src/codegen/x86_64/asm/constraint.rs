@@ -375,6 +375,13 @@ impl Codegen {
         if expr.is_empty() {
             return (0, None, None);
         }
+        // 纯数字算术表达式 (含括号、*、+、-): 在交给 find_expr_operator 之前先
+        // 尝试求值. 典型样本: `.altinstructions` 里 `.long (20*32+ 2)` — 整个
+        // 表达式是一个"无符号名"的立即数, 但因为带括号/星号, 老代码会把它整串
+        // 当 symbol 名发出去, 链接时报 undefined reference to '(20*32+ 2)'.
+        if let Some(v) = Self::eval_pure_numeric_arith(expr) {
+            return (v, None, None);
+        }
         // 查找 '-' 和 '+' 操作符 (不在引号/括号内)
         let (expr_before, op, expr_after) = Self::find_expr_operator(expr);
         if let Some(op) = op {
@@ -474,6 +481,110 @@ impl Codegen {
         }
         // 无符号十进制 (0..u64::MAX) 也是合法常量, 例如 `.quad 18446744073709551615`。
         expr.parse::<u64>().ok().map(|v| v as i64)
+    }
+
+    /// 求值"纯数字算术表达式": 仅由数字、空白、括号以及 + - * 组成 (GAS 对
+    /// `.long (20*32+ 2)` 这类 CPU 位号宏的立即数展开). 遇到任何字母/下划线
+    /// 或其他符号直接返回 None, 让上层走 symbol ± number 路径.
+    ///
+    /// 手写一个最小 Pratt parser (优先级: `*` > `+` `-`, 支持括号). 不引入
+    /// 外部依赖. 返回 None 当表达式含非数字 token 或求值失败.
+    pub(crate) fn eval_pure_numeric_arith(expr: &str) -> Option<i64> {
+        let s = expr.trim();
+        if s.is_empty() {
+            return None;
+        }
+        // 快速前置过滤: 不允许出现字母或下划线 (那一定是 symbol 引用).
+        if s.chars().any(|c| c.is_ascii_alphabetic() || c == '_') {
+            return None;
+        }
+        // 再过滤: 只允许数字、空白、括号、+ - * . ('.' 用作 PC, 但在纯数字上下文
+        // 出现说明不是纯数字, 直接 None).
+        if s.chars().any(|c| {
+            !c.is_ascii_digit() && !c.is_ascii_whitespace()
+                && c != '(' && c != ')' && c != '+' && c != '-' && c != '*'
+        }) {
+            return None;
+        }
+        let bytes = s.as_bytes();
+        let mut pos: usize = 0;
+        Self::parse_arith_expr(bytes, &mut pos)
+    }
+
+    fn parse_arith_expr(b: &[u8], pos: &mut usize) -> Option<i64> {
+        let mut lhs = Self::parse_arith_term(b, pos)?;
+        loop {
+            Self::skip_ws(b, pos);
+            if *pos >= b.len() {
+                return Some(lhs);
+            }
+            let op = b[*pos];
+            if op != b'+' && op != b'-' {
+                return Some(lhs);
+            }
+            *pos += 1;
+            let rhs = Self::parse_arith_term(b, pos)?;
+            lhs = if op == b'+' {
+                lhs.checked_add(rhs)?
+            } else {
+                lhs.checked_sub(rhs)?
+            };
+        }
+    }
+
+    fn parse_arith_term(b: &[u8], pos: &mut usize) -> Option<i64> {
+        let mut lhs = Self::parse_arith_atom(b, pos)?;
+        loop {
+            Self::skip_ws(b, pos);
+            if *pos >= b.len() || b[*pos] != b'*' {
+                return Some(lhs);
+            }
+            *pos += 1;
+            let rhs = Self::parse_arith_atom(b, pos)?;
+            lhs = lhs.checked_mul(rhs)?;
+        }
+    }
+
+    fn parse_arith_atom(b: &[u8], pos: &mut usize) -> Option<i64> {
+        Self::skip_ws(b, pos);
+        if *pos >= b.len() {
+            return None;
+        }
+        match b[*pos] {
+            b'(' => {
+                *pos += 1;
+                let v = Self::parse_arith_expr(b, pos)?;
+                Self::skip_ws(b, pos);
+                if *pos >= b.len() || b[*pos] != b')' {
+                    return None;
+                }
+                *pos += 1;
+                Some(v)
+            },
+            b'-' => {
+                *pos += 1;
+                let v = Self::parse_arith_atom(b, pos)?;
+                Some(v.checked_neg()?)
+            },
+            b'+' => {
+                *pos += 1;
+                Self::parse_arith_atom(b, pos)
+            },
+            c if c.is_ascii_digit() => {
+                let start = *pos;
+                while *pos < b.len() && b[*pos].is_ascii_digit() {
+                    *pos += 1;
+                }
+                std::str::from_utf8(&b[start..*pos]).ok()?.parse::<i64>().ok()
+            },
+            _ => None,
+        }
+    }
+
+    fn skip_ws(b: &[u8], pos: &mut usize) {
+        while *pos < b.len() && b[*pos].is_ascii_whitespace() {
+            *pos += 1;
+        }
     }
     pub(crate) fn parse_asm_imm_token(s: &str) -> Option<i64> {
         // 与数据伪指令共用同一份数值判据 (旧写法只按 i64 解 16 进制,

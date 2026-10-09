@@ -22,6 +22,15 @@ impl Codegen {
         for expr in Self::split_asm_args(args) {
             let expr = expr.trim();
             let off = self.pos();
+            // 纯数字算术表达式 (含括号、*、+、-): 直接求值成立即数. 典型样本
+            // `.altinstructions` 节里 `.long (20*32+ 2)` —— 内核 CPU 位号宏展开后
+            // 就是这种立即数. 老代码会把整串当 symbol 名发出去, 链接时报
+            // `undefined reference to '(20*32+ 2)'`.
+            if let Some(v) = Self::eval_pure_numeric_arith(expr) {
+                let bytes = v.to_le_bytes();
+                self.emit(&bytes[..size]);
+                continue;
+            }
             if let Some((symbol, addend)) = Self::parse_asm_pc_relative_long(expr) {
                 self.pending_code_rels.push(PendingCodeRel {
                     offset: off,

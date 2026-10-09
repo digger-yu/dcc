@@ -3589,6 +3589,15 @@ impl Codegen {
                         name.split('_').nth(3).unwrap_or("0").to_string(),
                         name.to_string(),
                     );
+                    // 非执行 pushsection: 数字 label 位置在自定义节数据内, 显式登记
+                    // 供 symtab 构建阶段编码为 STT_SECTION + offset 本地符号.
+                    let is_exec = self.extra_sections[sec_idx].flags & shared_elf::SHF_EXECINSTR
+                        != 0;
+                    if !is_exec {
+                        let sec_off = self.extra_sections[sec_idx].data.len() as u64;
+                        self.pushsection_label_offsets
+                            .insert(name.to_string(), (sec_idx, sec_off));
+                    }
                 }
                 self.emit_pushsection_data(trimmed, sec_idx, &locals, i, &numeric_label_map);
                 continue;

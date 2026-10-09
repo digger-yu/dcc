@@ -61,7 +61,7 @@ pub struct FramePlan {
     pub temp_slots: i64,
     /// 变量区字节数（`var_map_total_slots * 8`，含参数与规划期登记的名字）
     pub var_bytes: i64,
-    /// 晚分配带的槽数（§11.23 步 3）。它就是 `reserve_late_var_slots()` 算出的那份
+    /// 晚分配带的槽数（§11.23 步 3）。它就是 `plan_late_slot_budget()` 算出的那份
     /// 预算（`Codegen::late_slot_budget`）：发射期才冒出来的对象（复合字面量 /
     /// VM 尺寸槽 / `va_start` 的 ap / 聚合成员暂存）**不再挤在变量区水位底下**，
     /// 而是排在本函数自己的一条带里。带是布局解算的**输入**，不是事后发明：

@@ -21,7 +21,7 @@
 | P9 | loop_interchange | ✅ 完整 | 同上（空转） | ✅ **已删除**（只改块序不做交换；早于本轮，表行之前未同步） |
 | P10 | tail_call_optimization | ✅ 完整 | 真 | ✅ |
 | P11 | function_attribute_propagation | ✅ 完整 | **假 hint 导致 -O2 SEGV** | ✅ 已删除（段归属回到 AST 真源） |
-| P12 | register_allocation | ⚠ stub | 只统计、后端不读、还误报 `changed=true` | ◐ **增量已落地**（§7.20：SSA 层活性分配灌进绑定表，产物差异已验证）；方案的字面形态（`Ident` 携带寄存器号 + codegen 不再分配 + 真 SPILL/RELOAD）**已按 `docs/p12-physreg-spill-design.md` 开工并做完一大半**，详见其 §11.3–§11.15。✅ **Location 真的进了 IR**（Phase 3.0–3.4：`src/location.rs` 中立类型 + 不可复制的 `LocMap` + 版本分裂）；✅ **codegen 不再分配变量与临时值的家**（Phase 4：`homes` 表 + `bind_decl_home` 单一写入口 + `home_for` 单一读入口 + 11 个取地址点穷举，非法寄存器名从静默丢对象变 E0316，`-g` 守卫从 pass 入口搬进 Location 层）；✅ **所有权与帧布局合一**（Phase 1/2：`RegBank` 四个位图字段与序言保存/asm 排除集合同源，`FramePlan→LayoutMap` 一次解算替掉 41+8+22 处现场算坐标，预算越界报 E1128）；✅ **spill band 已接进布局解算**（Phase 5.1.a–d，零 diff）：`Spill` 携带槽序号、尺寸从已交付的家导出、三个消费臂只经 `spill_off` 翻译、晚分配不得压穿带（带=0 时判据退化）。❌ **未完成的两件**（写清原因，不含缩）：分配器产出 `Spill` 家（§11.13：在本语料上换不来收益，因下一条）、caller-saved 池（发射约定「结果恒在 %rax」194 处 + 声明级家 vs 程序点级存活 + 序言没有 caller-saved 保存通道）。另：§7 5.2 三条已查到底（asm clobber 已正面建模并修了两条静默错值 + 一条自身引入的对齐回归；嵌套函数与 EH 落地垫两条今天没有消费者，只落了前提用例）；Phase 6 四项未开工。◐ §7.21~§7.27：把「谁拥有哪个寄存器」这条链上的**编码位序**从人撞改为测试用例点名（15 矩阵 5652 组合 + 产物级卫生用例，42 条存量点名到 0），因为自动分配一开始把 `dst>=8` 的死分支点亮 |
+| P12 | register_allocation | ⚠ stub | 只统计、后端不读、还误报 `changed=true` | ✅ **全部落地（2026-10-09 终版）**。详见 [`p12-physreg-spill-design.md`](p12-physreg-spill-design.md) §11 执行记录。✅ Location 进 IR（Phase 3）；✅ codegen 不再分配变量家（Phase 4）；✅ 所有权/帧布局合一（Phase 1/2）；✅ spill band + 真 `Spill` 家产出（Phase 5.1.a-e）；✅ 号复用判据 `ranges_disjoint` ∀ + 指令调度具名基名 def 屏障；✅ `DCC_REGALLOC_DUMP` 结构化计数（§11.60）；✅ caller-saved 延伸池 r8/r9 默认开启（persist/restore + ext_home_saves + asm clobber 守护）；✅ r10/r11 逐号否决理由精确化（force_mem scratch / 聚合传参暂存 / 间接 call 目的）；✅ Phase 5.2 三类干涉对象（asm/嵌套/EH）复核闭合；✅ Phase 3.2 三处 `register_name` 判据统一到 `v.home`/`global_homes`/`home_for`；✅ Phase 6.1 asm 规划器纯值对象重构（`chosen_gp`/`input_gp` 为 per-asm early-clobber 判据）；✅ Phase 6.2/6.3/6.4 接线。◐ 编码位序由测试用例点名（15 矩阵 5652 组合 + REX 卫生 662 组合全绿） |
 | P12b | ubsan_ir_instrument | ✅ 完整 | guard 已插；文档声称的符号转换代码不存在 | ⚠ 注释已修正 |
 | P13 | alias_set | ✅ 完整 | 返回值被丢弃 → 空转 | ✅ **已删除**（§7.37：三档判别 `alias_classify` 只被自己的单测调用） |
 | P14 | speculative_execution | ✅ 完整 | **按 dest 字典序重排 → -O3 静默误编译** | ✅ 已重写为依赖闭包上提 |
@@ -61,7 +61,7 @@
    | P13 | alias_set | ✅ 完整 | 基于别名分析的三档区分 |
    | P14 | speculative_execution | ✅ 完整 | 无副作用分支外提 |
    | P15 | sparse_conditional_constant_propagation | ✅ 完整 | SCCP 常量传播 + 死 BB 删除 |
-   | P16 | software_pipelining | ⚠️ stub | 占位，未实现真正流水调度 |
+   | P16 | software_pipelining | ✅ 真轮转已落地 | 格子表 `{base}_s{k}` 实现同基名 K 份保留；`benefit_verdict_rot` 以代价上限替代 `depth>1` 拒收（§7.x 真轮转轮次） |
 
 ### 缺失/不完整
 1. **P0-4 遗留：非结构化 goto/label/switch 支持**：当前 `is_structured` 守门人直接跳过，需要更深层 CFG 重构才能支持。
@@ -808,8 +808,10 @@ IR 层断言（算一遍 `prologue ++ kernel×R ++ epilogue` 对每个节点的*
    所以所有被接受的计划 depth 恒为 1（由 `dependency_chain_yields_real_overlap_and_is_accepted`
    钉住）。
 
-仍未做（诚实记录）：真轮转寄存器（同基名难同时保留两份）——拿不到合法行序的循环现在
-被**拒收**而不是错跑，代价是丢收益；`DCC_PIPE_DUMP` 会把它们的拒因列出来。
+真轮转已落地（2026-10 复核）：同基名保留 K 份旧值由 K 个独立格子名 `{base}_s{k}` 实现，
+`benefit_verdict_rot(depth, ii, trip, cells)` 以 `MAX_ROT_DEPTH=8`/`MAX_ROT_CELLS=16` 代价上限
+替代旧的「depth>1 拒收」闸，depth≥2 的循环现在被**接受**（钉住用例
+`gate_accepts_depth_two_load_chain_with_real_cells`）。旧 `benefit_verdict` 仅保留给塌缩模型路径。
 
 ### 7.7 第 18 轮：OPT-DIFF 102 → 18，剩下的逐条已归因到具体 pass
 

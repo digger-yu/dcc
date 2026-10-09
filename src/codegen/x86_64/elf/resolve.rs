@@ -66,6 +66,28 @@ impl Codegen {
         None
     }
 
+    /// 把 `.L.str.const.<hash>` 形式的编译器内部 label 反向解析为 rodata 偏移.
+    ///
+    /// 内部 label 不进 symtab (GAS 约定), 所以自定义节里的 `.long .L.str.const.N`
+    /// 不能走普通的 `reloc_sym_index`. 正确做法是把这条重定位改成针对 `.rodata`
+    /// section symbol, addend 填字符串在 rodata 里的偏移.
+    ///
+    /// 反向查表: label 里的 hash 就是 `const_str_id(data)`, 遍历 string_pool 找
+    /// 匹配 data. string_pool 在真实内核 TU 里通常 < 几百条, 线性扫可控.
+    fn lookup_str_const_label_offset(
+        label: &str,
+        string_pool: &std::collections::HashMap<Vec<u8>, u64>,
+    ) -> Option<u64> {
+        let hash = label.strip_prefix(".L.str.const.")?;
+        let hash: u64 = hash.parse().ok()?;
+        for (data, &off) in string_pool.iter() {
+            if crate::const_eval::const_str_id(data) == hash {
+                return Some(off);
+            }
+        }
+        None
+    }
+
     pub fn resolve(&mut self, rodata_start: u64, data_start: u64) {
         for (p, name) in &self.pending_data_rels {
             self.disasm_data.insert(*p, name.clone());
@@ -257,6 +279,26 @@ impl Codegen {
         let mut custom_sec_relas: std::collections::BTreeMap<usize, Vec<ElfRela>> =
             std::collections::BTreeMap::new();
         for rel in std::mem::take(&mut self.pending_custom_sec_rels) {
+            // 编译器内部的字符串字面量 label (.L.str.const.<hash>) 在自定义节里
+            // 被引用时 (内联汇编 %c 把字面量 label 嵌入 .pushsection), 不注册到
+            // symtab —— 这是 GAS 的约定: 这类 label 是 rodata 里的位置标记,
+            // 不应当作独立符号发 UND 重定位. 正确做法是把它替换成对 .rodata
+            // section symbol 的重定位, addend = 字符串在 rodata 内的偏移.
+            if let Some(rodata_off) = Self::lookup_str_const_label_offset(&rel.symbol, &self.string_pool) {
+                let Some(rodata_sym) = self.reloc_sym_index(".rodata", ".rela<custom section> (str.const)") else {
+                    continue;
+                };
+                let abs_offset = rel.offset;
+                let rela = ElfRela {
+                    offset: abs_offset,
+                    sym_index: rodata_sym,
+                    rel_type: rel.rel_type,
+                    // 原 addend 保留 (表达式可能在 label 后再带 ±N).
+                    addend: rodata_off as i64 + rel.addend,
+                };
+                custom_sec_relas.entry(rel.sec_idx).or_default().push(rela);
+                continue;
+            }
             let Some(sym_idx) = self.reloc_sym_index(&rel.symbol, ".rela<custom section>") else {
                 continue;
             };

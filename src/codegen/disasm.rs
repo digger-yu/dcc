@@ -858,20 +858,44 @@ impl<'a> Dec<'a> {
             },
             0xB0 | 0xB1 => {
                 let rex = self.parse_rex();
-                let (src, dst) = self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
-                Some(self.finish(start, pfx, &format!("cmpxchg {src}, {dst}")))
+                // cmpxchg r/m, reg：reg 字段是源（见 [`two_byte_reg_role`]）。
+                // 0xB0 恒为 8 位形式；0xB1 宽度才随 0x66 / REX.W 走（as+objdump 反读）。
+                let width = if op == 0xB0 {
+                    1
+                } else {
+                    if rex.w { 8 } else { 4 }
+                };
+                let (reg_field, rm_field) = self.modrm_gp(&rex, width)?;
+                let ops = Self::two_byte_att_operands(
+                    &reg_field,
+                    &rm_field,
+                    Self::two_byte_reg_role(op)?,
+                );
+                Some(self.finish(start, pfx, &format!("cmpxchg {ops}")))
             },
-            // cmovcc r, r/m (non-REX)
+            // cmovcc r, r/m (non-REX)：reg 字段是目的
             0x40..=0x4F => {
                 let rex = self.parse_rex();
                 let cc = CC_NAMES[(op - 0x40) as usize];
-                let (src, dst) = self.modrm_gp(&rex, 4)?;
-                Some(self.finish(start, pfx, &format!("cmov{cc} {src}, {dst}")))
+                let (reg_field, rm_field) = self.modrm_gp(&rex, 4)?;
+                let ops = Self::two_byte_att_operands(
+                    &reg_field,
+                    &rm_field,
+                    Self::two_byte_reg_role(op)?,
+                );
+                Some(self.finish(start, pfx, &format!("cmov{cc} {ops}")))
             },
             0xC1 => {
                 let rex = self.parse_rex();
-                let (src, dst) = self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
-                Some(self.finish(start, pfx, &format!("xadd {src}, {dst}")))
+                // xadd r/m, reg：reg 字段是源
+                let (reg_field, rm_field) =
+                    self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
+                let ops = Self::two_byte_att_operands(
+                    &reg_field,
+                    &rm_field,
+                    Self::two_byte_reg_role(op)?,
+                );
+                Some(self.finish(start, pfx, &format!("xadd {ops}")))
             },
             // setcc r/m8 (无 REX 版本, dcc emit 0F 9x C0)
             0x90..=0x9F => {
@@ -921,16 +945,29 @@ impl<'a> Dec<'a> {
             },
             0xAF => {
                 let rex = self.parse_rex();
-                let (src, dst) = self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
-                Some(self.finish(start, pfx, &format!("imul {src}, {dst}")))
+                // imul r, r/m：reg 字段是目的
+                let (reg_field, rm_field) =
+                    self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
+                let ops = Self::two_byte_att_operands(
+                    &reg_field,
+                    &rm_field,
+                    Self::two_byte_reg_role(op)?,
+                );
+                Some(self.finish(start, pfx, &format!("imul {ops}")))
             },
-            // BSF / BSR（`0F BC` / `0F BD`）：扫位起点/终点，dcc 在 __builtin_ctz/clz
-            // 路径上会发。宽度由 REX.W 定，其他与 imul 同构。
+            // BSF / BSR（`0F BC` / `0F BD`）：reg 字段是目的（扫描结果写入它），
+            // dcc 在 __builtin_ctz/clz 路径上会发。宽度由 REX.W 定。
             0xBC | 0xBD => {
                 let rex = self.parse_rex();
-                let (rm, r) = self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
+                let (reg_field, rm_field) =
+                    self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
+                let ops = Self::two_byte_att_operands(
+                    &reg_field,
+                    &rm_field,
+                    Self::two_byte_reg_role(op)?,
+                );
                 let mn = if op == 0xBC { "bsf" } else { "bsr" };
-                Some(self.finish(start, pfx, &format!("{mn} {rm}, {r}")))
+                Some(self.finish(start, pfx, &format!("{mn} {ops}")))
             },
             // SHLD / SHRD（双入口之一）。本路径的开头 `peek() == 0x0F` 已经保证了
             // 没有 REX（带 REX 的整体走 decode_rex → decode_two_byte_rex），所以这里
@@ -1201,6 +1238,46 @@ impl<'a> Dec<'a> {
         Some((mn, form & 2 != 0, form & 1 == 0))
     }
 
+    /// 两字节（`0F xx`）操作数次序的唯一真源。
+    ///
+    /// 返回 ModRM 的 `reg` 字段在 AT&T 读数里是**源**还是**目的**。两字节指令没有
+    /// 单字节那种「方向位」，次序只能按 opcode 逐族钉死 —— 靠读代码猜方向必然出错，
+    /// 本轮用 `as` + `objdump -d` 产物级反读核对（探针见 §11.54）：
+    ///
+    /// `reg` 字段是**目的**（AT&T 打印 `rm, reg`）：
+    ///   * `0F AF` imul r, r/m
+    ///   * `0F 40..4F` cmovcc r, r/m
+    ///   * `0F BC` bsf r, r/m、`0F BD` bsr r, r/m
+    ///
+    /// `reg` 字段是**源**（AT&T 打印 `reg, rm`）：
+    ///   * `0F B0` cmpxchg r/m, reg、`0F B1` cmpxchg{8} r/m8, reg
+    ///   * `0F C1` xadd r/m, reg
+    ///
+    /// 落在这两族之外的 opcode 返回 None：调用方只对自己认得的指令取方向，不靠
+    /// 「默认值」蒙混 —— 一个新的两字节指令接进来，次序必须先在这张表里登记。
+    fn two_byte_reg_role(op: u8) -> Option<bool> {
+        match op {
+            0xAF | 0x40..=0x4F | 0xBC | 0xBD => Some(true),
+            0xB0 | 0xB1 | 0xC1 => Some(false),
+            _ => None,
+        }
+    }
+
+    /// 把 [`Self::modrm_gp`] 读到的 `(reg 字段, r/m 字段)` 按
+    /// [`Self::two_byte_reg_role`] 钉死的次序排成 AT&T 操作数串 `src, dst`。
+    ///
+    /// `reg_is_dst` 必须直接取自 [`Self::two_byte_reg_role`]，不在调用处再猜一次
+    /// 方向 —— 这正是本轮 imul/cmov（reg 是目的）与 cmpxchg/xadd（reg 是源）
+    /// 一度整族印反的那一位。集中到这一个函数后，六条臂只声明 opcode 与宽度，
+    /// 不再各自手写解构顺序。
+    fn two_byte_att_operands(reg_field: &str, rm_field: &str, reg_is_dst: bool) -> String {
+        if reg_is_dst {
+            format!("{rm_field}, {reg_field}")
+        } else {
+            format!("{reg_field}, {rm_field}")
+        }
+    }
+
     /// `mov r/m, imm` 共用的一小段（`C6` = imm8、`C7` = imm32，REX 与 legacy 两条路径同用）。
     ///
     /// ModRM 的 /digit 为 7 时这条编码**不是 mov**：`C6 /7` 是 XABORT、`C7 /7` 是 XBEGIN
@@ -1418,15 +1495,15 @@ impl<'a> Dec<'a> {
                 let src = self.decode_mem(&rex, mod_, rm, 4)?;
                 Some(self.finish(start, pfx, &format!("movsxd {src}, {dst}")))
             },
-            // --- IMUL r, r/m, imm32 ---
+            // --- IMUL r, r/m, imm32：reg 字段是目的
             0x69 => {
-                let (src, dst) = self.modrm_gp(&rex, width)?;
+                let (dst, src) = self.modrm_gp(&rex, width)?;
                 let imm = self.take_i32()?;
                 Some(self.finish(start, pfx, &format!("imul ${imm}, {src}, {dst}")))
             },
-            // --- IMUL r, r/m, imm8 ---
+            // --- IMUL r, r/m, imm8：reg 字段是目的
             0x6B => {
-                let (src, dst) = self.modrm_gp(&rex, width)?;
+                let (dst, src) = self.modrm_gp(&rex, width)?;
                 let imm = self.take_i8()? as i32;
                 Some(self.finish(start, pfx, &format!("imul ${imm}, {src}, {dst}")))
             },
@@ -1633,9 +1710,15 @@ impl<'a> Dec<'a> {
             // `48 0f bd c0`（bsrq %eax,%eax）仍报 UNKNOWN。两路径同表同一实现，
             // 不再按字节序列特判。
             0xBC | 0xBD => {
-                let (rm, r) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
+                let (reg_field, rm_field) =
+                    self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
+                let ops = Self::two_byte_att_operands(
+                    &reg_field,
+                    &rm_field,
+                    Self::two_byte_reg_role(op)?,
+                );
                 let mn = if op == 0xBC { "bsf" } else { "bsr" };
-                Some(self.finish(start, pfx, &format!("{mn} {rm}, {r}")))
+                Some(self.finish(start, pfx, &format!("{mn} {ops}")))
             },
             // SHLD / SHRD（双入口的另一条：带 REX 的那一批）。实测未读数里最大两堆
             // 就是 `48 0f a5`/`48 0f ad`（int128 移位路径发射 shld/shrd），只补非-REX
@@ -1654,12 +1737,30 @@ impl<'a> Dec<'a> {
                 Some((self.pos - start, body))
             },
             0xB0 | 0xB1 => {
-                let (src, dst) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
-                Some(self.finish(start, pfx, &format!("cmpxchg {src}, {dst}")))
+                // cmpxchg r/m, reg：reg 字段是源。0xB0 恒 8 位（REX 只用于扩展
+                // 字节寄存器号），0xB1 才随 REX.W 定宽（as+objdump 反读）。
+                let width = if op == 0xB0 {
+                    1
+                } else {
+                    if rex.w { 8 } else { 4 }
+                };
+                let (reg_field, rm_field) = self.modrm_gp(rex, width)?;
+                let ops = Self::two_byte_att_operands(
+                    &reg_field,
+                    &rm_field,
+                    Self::two_byte_reg_role(op)?,
+                );
+                Some(self.finish(start, pfx, &format!("cmpxchg {ops}")))
             },
             0xC1 => {
-                let (src, dst) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
-                Some(self.finish(start, pfx, &format!("xadd {src}, {dst}")))
+                let (reg_field, rm_field) =
+                    self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
+                let ops = Self::two_byte_att_operands(
+                    &reg_field,
+                    &rm_field,
+                    Self::two_byte_reg_role(op)?,
+                );
+                Some(self.finish(start, pfx, &format!("xadd {ops}")))
             },
             // movzx/movsx r64, r/m8|r16 (48 0F B6/B7/BE/BF)
             // dcc 用于窄类型加载/提升: *p (char/uchar), (u)short 提升
@@ -1681,10 +1782,16 @@ impl<'a> Dec<'a> {
                 };
                 Some(self.finish(start, pfx, &format!("{mn} {src}, {dst}")))
             },
-            // imul r64, r/m64 (48 0F AF)
+            // imul r, r/m (48 0F AF)：reg 字段是目的
             0xAF => {
-                let (src, dst) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
-                Some(self.finish(start, pfx, &format!("imul {src}, {dst}")))
+                let (reg_field, rm_field) =
+                    self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
+                let ops = Self::two_byte_att_operands(
+                    &reg_field,
+                    &rm_field,
+                    Self::two_byte_reg_role(op)?,
+                );
+                Some(self.finish(start, pfx, &format!("imul {ops}")))
             },
             // setcc r/m8 带 REX (41 0F 9x C7 → dil 等)
             0x90..=0x9F => {
@@ -1697,11 +1804,17 @@ impl<'a> Dec<'a> {
                 let r = self.reg(rex, rm | if rex.b { 8 } else { 0 }, 1);
                 Some(self.finish(start, pfx, &format!("set{} {r}", CC_NAMES[(op - 0x90) as usize])))
             },
-            // cmovcc r, r/m (REX)
+            // cmovcc r, r/m (REX)：reg 字段是目的
             0x40..=0x4F => {
                 let cc = CC_NAMES[(op - 0x40) as usize];
-                let (src, dst) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
-                Some(self.finish(start, pfx, &format!("cmov{cc} {src}, {dst}")))
+                let (reg_field, rm_field) =
+                    self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
+                let ops = Self::two_byte_att_operands(
+                    &reg_field,
+                    &rm_field,
+                    Self::two_byte_reg_role(op)?,
+                );
+                Some(self.finish(start, pfx, &format!("cmov{cc} {ops}")))
             },
             // 唯一兜底出口：整条长度由 [`Dec::unknown_len`] 算完再报 UNKNOWN（方法论
             // ③：不消费完 ModRM+disp+imm 就会把一条指令切成两段残渣）。
@@ -1955,15 +2068,15 @@ impl<'a> Dec<'a> {
                 let src = self.decode_mem(&rex, mod_, rm, w)?;
                 Some(self.finish(start, pfx, &format!("movsxd {src}, {dst}")))
             },
-            // IMUL r32, r/m32, imm32
+            // IMUL r, r/m, imm32：reg 字段是目的
             0x69 => {
-                let (src, dst) = self.modrm_gp(&rex, w)?;
+                let (dst, src) = self.modrm_gp(&rex, w)?;
                 let imm = self.take_i32()?;
                 Some(self.finish(start, pfx, &format!("imul ${imm}, {src}, {dst}")))
             },
-            // IMUL r32, r/m32, imm8
+            // IMUL r, r/m, imm8：reg 字段是目的
             0x6B => {
-                let (src, dst) = self.modrm_gp(&rex, w)?;
+                let (dst, src) = self.modrm_gp(&rex, w)?;
                 let imm = self.take_i8()? as i32;
                 Some(self.finish(start, pfx, &format!("imul ${imm}, {src}, {dst}")))
             },
@@ -3080,6 +3193,55 @@ mod tests {
             let out = one(bytes);
             assert!(out.contains(want), "{bytes:02x?} 应念成 {want:?}，实得:\n{out}");
             // 反向对照：不能因为长度算错而多出一条 UNKNOWN。
+            assert!(!out.contains("UNKNOWN"), "{bytes:02x?} 后续流被错位切碎:\n{out}");
+            assert!(out.contains("ret"), "{bytes:02x?} 后面那条 ret 没读回来:\n{out}");
+        }
+    }
+
+    /// 两字节（`0F xx`）操作数次序：`reg` 字段到底是源还是目的，逐族不同，没有
+    /// 方向位可查。下表的字节与期望文本全部由 `as` 组装、`objdump -d` 反读而来
+    /// （探针 .s 见 §11.54），把旧实现印反的三族一次钉死：
+    ///   * imul / cmovcc / bsf / bsr：`reg` 字段是**目的**（AT&T `rm, reg`）；
+    ///   * cmpxchg / xadd：`reg` 字段是**源**（AT&T `reg, rm`）。
+    /// ModRM 取 `C1`（reg=0, rm=1）与 `D3`（reg=2, rm=3），两侧名字不同，次序
+    /// 一旦印反断言立刻能看见。
+    #[test]
+    fn decodes_two_byte_operand_order_per_family() {
+        let one = |bytes: &[u8]| -> String {
+            let mut code = bytes.to_vec();
+            code.push(0xC3); // ret：错位时它不会以 `ret` 出现
+            disassemble_range(
+                &code,
+                0,
+                code.len(),
+                0,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+        };
+        let cases: &[(&[u8], &str)] = &[
+            // imul r, r/m
+            (&[0x0F, 0xAF, 0xC1], "imul %ecx, %eax"),
+            (&[0x48, 0x0F, 0xAF, 0xD3], "imul %rbx, %rdx"),
+            // cmovcc r, r/m
+            (&[0x0F, 0x40, 0xC1], "cmovo %ecx, %eax"),
+            (&[0x0F, 0x4F, 0xD3], "cmovg %ebx, %edx"),
+            (&[0x49, 0x0F, 0x44, 0xC0], "cmove %r8, %rax"),
+            // bsf / bsr r, r/m
+            (&[0x0F, 0xBC, 0xC1], "bsf %ecx, %eax"),
+            (&[0x48, 0x0F, 0xBD, 0xD3], "bsr %rbx, %rdx"),
+            // cmpxchg r/m, reg（reg 是源）
+            (&[0x0F, 0xB0, 0xC1], "cmpxchg %al, %cl"),
+            // xadd r/m, reg（reg 是源）
+            (&[0x0F, 0xC1, 0xD3], "xadd %edx, %ebx"),
+            // 三操作数 imul r, r/m, imm（reg 是目的）
+            (&[0x6B, 0xC1, 0x05], "imul $5, %ecx, %eax"),
+        ];
+        for (bytes, want) in cases {
+            let out = one(bytes);
+            assert!(out.contains(want), "{bytes:02x?} 应念成 {want:?}，实得:\n{out}");
             assert!(!out.contains("UNKNOWN"), "{bytes:02x?} 后续流被错位切碎:\n{out}");
             assert!(out.contains("ret"), "{bytes:02x?} 后面那条 ret 没读回来:\n{out}");
         }

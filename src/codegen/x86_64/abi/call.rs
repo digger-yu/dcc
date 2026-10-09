@@ -35,7 +35,7 @@ impl Codegen {
 
     /// 把所有延伸池家存进各自的槽并开启覆盖；返回**本次新开启**的个数（嵌套 call 只该
     /// 回滚自己那一层，不然内层会把外层正在用的覆盖一并抽掉）。
-    fn persist_ext_homes(&mut self) -> usize {
+    pub(crate) fn persist_ext_homes(&mut self) -> usize {
         let mut opened = 0usize;
         for i in 0..self.ext_home_saves.len() {
             // 先把需要的值拿够再调 `&mut self` 的方法：存/取本身就是方法调用，与覆盖表
@@ -57,7 +57,7 @@ impl Codegen {
     }
 
     /// 取回本层开启的那些家。倒序回滚，与开启顺序对偶。
-    fn restore_ext_homes(&mut self, opened: usize) {
+    pub(crate) fn restore_ext_homes(&mut self, opened: usize) {
         if opened == 0 {
             return;
         }

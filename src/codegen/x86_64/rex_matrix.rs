@@ -285,6 +285,66 @@ fn narrow_cast_promote_matrix() {
     }
 }
 
+/// `emit_float_to_int_saturate`：正溢出夹 INT_MAX。旧实现按 `dst==1` 分两支，
+/// else 支把 r8/r9/r10 当空闲暂存 —— P16 暂存号参数化后 dst 可以是任意号（含高 8
+/// 号），dst 自己被当暂存毁掉（实测 method_overloads.cpp 2.5→int 得 0x80000004）。
+/// 新实现零额外 GPR，故对 16 个 dst 全扫一遍：解码出的**整数**指令只允许碰 dst 自己。
+#[test]
+fn float_to_int_saturate_touches_only_dst() {
+    for float_ty in &[Type::Float, Type::Double, Type::LongDouble] {
+        for is_64bit in [false, true] {
+            for dst in 0..16u8 {
+                let mut c = cg();
+                c.emit_float_to_int_saturate(dst, float_ty, is_64bit);
+                let case = format!("saturate {float_ty:?} wide={is_64bit} dst=r{dst}");
+                let out = decode(&c.code);
+                // 整数宽度名：test 与 mov 立即数都按目标宽度出现。
+                let bits = if is_64bit { 64 } else { 32 };
+                let dst_name = name(dst, bits);
+                // 逐行扫描所有整数指令（ucomis/xorps 行允许出现 xmm0/xmm1）。
+                for line in out.lines().map(|l| l.trim()) {
+                    if line.starts_with("ucomis") || line.starts_with("xorps") {
+                        continue;
+                    }
+                    // jb/jns/jmp 的相对跳转与标号不含寄存器；test/mov 行必须只碰 dst。
+                    if line.starts_with('j') {
+                        continue;
+                    }
+                    if line.is_empty() || line.ends_with(':') {
+                        continue;
+                    }
+                    let mut regs = Vec::new();
+                    let chars: Vec<char> = line.chars().collect();
+                    let mut i = 0;
+                    while i < chars.len() {
+                        if chars[i] != '%' {
+                            i += 1;
+                            continue;
+                        }
+                        let mut j = i + 1;
+                        while j < chars.len() && chars[j].is_ascii_alphanumeric() {
+                            j += 1;
+                        }
+                        regs.push(line[i..j].to_string());
+                        i = j;
+                    }
+                    for r in &regs {
+                        assert_eq!(
+                            r, dst_name,
+                            "{case}: 整数指令 `{line}` 碰了 {r}，饱和序列不得使用 dst 之外的 GPR \
+                             （旧实现硬编码 r8/r9/r10 在 dst 命中时毁值）。全解码:\n{out}"
+                        );
+                    }
+                    assert!(
+                        regs.is_empty() || regs.iter().all(|r| r == dst_name),
+                        "{case}: 整数寄存器只能是 {dst_name}，实际 {regs:?}；行 `{line}`"
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn assert_no_legacy8(line: &str, code: &[u8], case: &str, expected: &[&str]) {
     for legacy in ["%ah", "%ch", "%dh", "%bh"] {
         assert!(

@@ -134,10 +134,74 @@ END {
 }
 AWK
 
+cat > "$TMP/order.awk" <<'AWK'
+# 提取「次序敏感、且两操作数都是寄存器」的指令，输出规范化后的二元组，每行一个。
+# 为什么必须有这条（与 UNKNOWN 上限、skew 条数三条正交）：`op r, r/m` 这一族
+# （imul/cmovcc/bsf/bsr 目的在 reg；cmpxchg/xadd 目的在 rm）在自家 `-S` 里可能把
+# 两个操作数印反 —— 行有名字、长度也对，UNKNOWN 数不到，skew 条数也不变。唯一的
+# 捕手是把两侧读数按同一把尺子规范化，再做集合对账。
+#
+# 归一化规则（去掉两家文本里无关紧要的差异）：
+#   * 行首允许有偏移列（objdump 带，dcc 不带），统一用助记词锚定；
+#   * 只收**两个操作数都带 %**（都是寄存器）的行 —— 内存操作数两侧打印约定不同，
+#     不纳入，免得把样式差异误记成次序错；
+#   * 操作数按 (助记词, 第一个%, 第二个%) 归一成 `mn op1 op2`。
+/imul|cmov[a-z]*[[:space:]]|cmpxchg|xadd|bsf|bsr/ {
+    # 去掉可能存在的偏移列，定位助记词（第一个非空白字段）。
+    line = $0
+    sub(/^[ \t]*[0-9a-f]+:[ \t]+/, "", line)
+    sub(/^[ \t]+/, "", line)
+    n = split(line, f, /[ \t]+/)
+    mn = f[1]
+    # 助记词必须命中这一族（cmov 用前缀匹配，防把 mov 也带进来）。
+    if (mn !~ /^(imul|cmov|cmpxchg|xadd|bsf|bsr)/) next
+    if (mn == "mov") next
+    # 从原始行里抓两个 %寄存器。
+    s = line
+    i1 = index(s, "%")
+    if (i1 == 0) next
+    rest = substr(s, i1)
+    p1 = rest
+    # 第一个寄存器到逗号为止，再截掉行内注释/后续列。
+    # 注意：不能写 gsub(/[,%].*$/, ...)——字符类 [,%] 会优先命中首字符 %，
+    # 把整个寄存器名删空，导致下面的 ^% 检查跳过全部行。
+    sub(/,.*/, "", p1)
+    gsub(/[ \t].*$/, "", p1)
+    # 找逗号后的第二个 %。
+    c = index(rest, ",")
+    if (c == 0) next
+    after = substr(rest, c + 1)
+    i2 = index(after, "%")
+    if (i2 == 0) next
+    p2 = substr(after, i2)
+    gsub(/[ \t].*$/, "", p2)
+    if (p1 !~ /^%/ || p2 !~ /^%/) next
+    print mn, p1, p2
+}
+AWK
+
+# 两侧集合对账：正序命中=OK；反序存在=次序错；dcc 有但 objdump 两边都没有=UNREAD。
+# 输入：order.awk 的 objdump 结果（文件1）与 dcc 结果（文件2）。
+cat > "$TMP/ordercmp.awk" <<'AWK'
+NR == FNR {
+    fwd[$1 " " $2 " " $3] = 1
+    rev[$1 " " $3 " " $2] = 1
+    next
+}
+{
+    key = $1 " " $2 " " $3
+    if (key in fwd) { ok++; next }
+    if (key in rev) { bad++; print "ORDER-BAD", key > "/dev/stderr"; next }
+    unread++
+}
+END { printf "ORDER %d %d %d\n", ok+0, bad+0, unread+0 }
+AWK
+
 total_unknown=0
 total_instr=0
 residues=()
 skew_files=()
+order_files=()
 # 单个夹具×档位的活直接写在下面 xargs 的 `bash -c` 里（并行下需要自己开临时文件，
 # 而 residue / counts 按档位聚合到主进程持有的两个文件）。两条约定：
 #   * 编译不过的夹具计 0 —— 那是 opt-eq 的范围，混进来只会让两个读数互相污染；
@@ -149,9 +213,11 @@ for lvl in $LEVELS; do
     : > "$cf"
     sf="$TMP/skew.$lvl"
     : > "$sf"
+    of="$TMP/order.$lvl"
+    : > "$of"
     find "$REPO/tests/fixtures/c" "$REPO/tests/fixtures/opt" -name '*.c' | sort \
       | xargs -P "$jobs" -I@ bash -c '
-            f=$1; lvl=$2; rf=$3; sf=$4
+            f=$1; lvl=$2; rf=$3; sf=$4; of=$5
             out=$(mktemp)
             if ! "$DCC" -O"$lvl" -std=gnu2x -I "$REPO/tests/fixtures/c" -I "$REPO" \
                     -S -o "$out" "$f" >/dev/null 2>&1; then
@@ -169,21 +235,37 @@ for lvl in $LEVELS; do
             obj=$(mktemp)
             if "$DCC" -O"$lvl" -std=gnu2x -I "$REPO/tests/fixtures/c" -I "$REPO" \
                     -c -o "$obj" "$f" >/dev/null 2>&1 && [ -s "$obj" ]; then
-                od=$(mktemp); dc=$(mktemp)
-                objdump -d --no-show-raw-insn "$obj" 2>/dev/null | awk -f "$TMP/od.awk" > "$od"
+                od=$(mktemp); dc=$(mktemp); oddump=$(mktemp)
+                objdump -d --no-show-raw-insn "$obj" 2>/dev/null > "$oddump"
+                awk -f "$TMP/od.awk" "$oddump" > "$od"
                 awk -v OD="$od" -f "$TMP/dc.awk" "$out" > "$dc"
                 awk -v LVL="$lvl" -v FN="$(basename "$f")" -f "$TMP/sk.awk" "$od" "$dc" >> "$sf"
-                rm -f "$od" "$dc"
+                # 操作数次序对账：只对这份 -S 文本是 GAS 可回炸的夹具做（回炸不成
+                # 说明产物路径另有差异，归 skew/UNKNOWN，不污染次序读数）。两侧都在
+                # **真实字节**（objdump）与自家文本（order.awk）上提取次序敏感的双
+                # 寄存器行，反序存在即 ORDER-BAD。
+                gas=$(mktemp)
+                if as -o "$gas" "$out" >/dev/null 2>&1; then
+                    dord=$(mktemp); oord=$(mktemp)
+                    awk -f "$TMP/order.awk" "$out" > "$dord"
+                    awk -f "$TMP/order.awk" "$oddump" > "$oord"
+                    awk -v LVL="$lvl" -v FN="$(basename "$f")" \
+                        -f "$TMP/ordercmp.awk" "$oord" "$dord" \
+                        >> "$of" 2>>"$of"
+                    rm -f "$dord" "$oord"
+                fi
+                rm -f "$gas" "$od" "$dc" "$oddump"
             fi
             rm -f "$obj"
             echo "$t $u"
             rm -f "$out"
-        ' _ @ "$lvl" "$rf" "$sf" >> "$cf"
+        ' _ @ "$lvl" "$rf" "$sf" "$of" >> "$cf"
     read -r instr unk < <(awk "{t+=\$1; u+=\$2} END{printf \"%d %d\\n\", t+0, u+0}" "$cf")
     total_instr=$((total_instr + instr))
     total_unknown=$((total_unknown + unk))
     residues+=("$rf")
     skew_files+=("$sf")
+    order_files+=("$of")
     printf '档位 -O%s: 指令行 %s, 读不出 %s\n' "$lvl" "$instr" "$unk"
 done
 
@@ -246,6 +328,26 @@ if [ "$skew_bad" -gt 0 ]; then
         exit 1
     fi
     echo "注意: 错位探测发现 $skew_bad 个函数条数不一致，但它还没进断言（SKEW_ASSERT=0）"
+fi
+
+# ---------------- 操作数次序对账结果 ----------------
+# 与 skew 同样的分母守卫：一次对账都没跑成（as 不可用、全部回炸失败）时，0 不是
+# 「次序全对」而是探测器空转，直接判红。
+order_all="$TMP/order.all"
+cat "${order_files[@]}" 2>/dev/null > "$order_all"
+# ordercmp 每行形状: `ORDER <ok> <bad> <unread>`，反序明细以 `ORDER-BAD ...` 另列。
+order_cmp=$(awk '$1 == "ORDER" { n += $2 + $3 } END { print n+0 }' "$order_all")
+order_bad=$(awk '$1 == "ORDER" { n += $3 } END { print n+0 }' "$order_all")
+echo "=== 操作数次序: 对账双寄存器行 $order_cmp 条, 反序 $order_bad 条"
+if [ "$order_bad" -gt 0 ]; then
+    echo "--- 反序的指令（自家 -S 与 objdump 次序相反）---"
+    grep "ORDER-BAD" "$order_all" | sort | uniq -c | sort -rn | head -15
+    echo "check_disasm_coverage: FAIL（操作数次序反序 $order_bad > 0）"
+    exit 1
+fi
+if [ "$order_cmp" -eq 0 ]; then
+    echo "check_disasm_coverage: FAIL（次序对账分母为 0：探测器空转，不是零次序错）"
+    exit 1
 fi
 
 ceiling=${CEILING:-$total_unknown}

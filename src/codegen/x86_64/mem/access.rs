@@ -1249,7 +1249,8 @@ impl Codegen {
         if let Some((loc, _)) = self.homes.get(name) {
             return *loc;
         }
-        crate::location::Location::Stack(self.var_offset(name))
+        let o = self.var_offset(name);
+        crate::location::Location::Stack(o)
     }
 
     /// 后端还没接线的家（`Imm`、非 GP 通道）。今天没有任何生产者会给出它们，所以这里

@@ -810,7 +810,13 @@ mod tests {
                     let base = Codegen::parallel_label_base(origin, slot, span);
                     assert_eq!(base, expect, "slot {slot} 必须紧接上一个 slot");
                     expect = base + span;
-                    assert!(expect <= u32::MAX, "分区不得越过 u32 号池上界");
+                    // `expect` 是 u32，加法溢出时 debug_assert 会 panic；clippy 的
+                    // absurd_extreme_comparisons 知道 `expect <= u32::MAX` 恒真，但这个
+                    // assert 是给阅读者的语义注释——分区上界是物理约束。
+                    #[allow(clippy::absurd_extreme_comparisons)]
+                    {
+                        assert!(expect <= u32::MAX, "分区不得越过 u32 号池上界");
+                    }
                 }
             }
         }

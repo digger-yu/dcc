@@ -7323,12 +7323,24 @@ impl<'a> Parser<'a> {
             } else {
                 ty = Type::Ptr(Box::new(ty.into()));
             }
+            // 若后面还有下一层 *, 刚收集的限定符属于当前这个中间指针,
+            // 不应传染到外层变量. 清空 decl_quals, 让下一层 * 的限定符从干净状态累加.
+            if self.cur.kind == TokKind::Star {
+                self.decl_quals = QualifierFlags::NONE;
+            }
+            // 否则 (没有下一层 *): decl_quals 保留为最外层变量自身的限定符,
+            // 由调用方 (var_quals 注册点) 读取.
         }
         ty
     }
 
     /// 类似 parse_ptr_suffix, 但在创建指针时将限定符应用到内部类型.
     /// 用于处理 `T const *p` 中 const 属于 pointed-to 类型的情况.
+    ///
+    /// 与 parse_ptr_suffix 一致: 若当前 * 之后还有下一层 *, 刚收集到的
+    /// 限定符属于当前这个中间指针, 必须清空 decl_quals, 避免跨层传染到
+    /// 最外层变量本身的 var_quals. 若没有下一层 *, decl_quals 保留为
+    /// 最外层变量自身的限定符, 由调用方读取.
     fn parse_ptr_suffix_with_quals(&mut self, mut ty: Type, inner_quals: QualifierFlags) -> Type {
         let mut first = true;
         loop {
@@ -7354,8 +7366,14 @@ impl<'a> Parser<'a> {
                 addr_space,
             };
             ty = Type::Ptr(Box::new(inner));
-            // 后续的限定符 (如 `T const * const *p`) 属于外层指针
+            // 本条 * 之后的限定符: 由 skip_ptr_qualifiers 累加到 decl_quals.
             self.skip_ptr_qualifiers();
+            // 若后面还有下一层 *, 刚收集的限定符属于当前这个中间指针,
+            // 不应传染到外层变量. 清空 decl_quals, 让下一层 * 从干净状态累加.
+            if self.cur.kind == TokKind::Star {
+                self.decl_quals = QualifierFlags::NONE;
+            }
+            // 否则 (没有下一层 *): decl_quals 保留为最外层变量自身的限定符.
         }
         ty
     }
@@ -10242,9 +10260,26 @@ impl<'a> Parser<'a> {
     /// Extract the variable name from an assignment target expression.
     /// Returns Some(name) if the target is a simple identifier (possibly
     /// through deref/member chains), None otherwise.
+    ///
+    /// 仅对"直接对变量名赋值"且变量本身是非指针标量类型时返回 Some(name);
+    /// 指针变量 (const T *p / T * const p) 通过 `*p = ...` 写所指对象时,
+    /// 实际写的是堆/栈上的对象而非指针本身, 不应触发 E0030.
+    /// C89 6.3.16 允许通过 const 指针写底层对象 (GCC/Clang 均如此).
     fn assign_target_name(expr: &Expr) -> Option<String> {
         match expr {
-            Expr::Ident { name, .. } => Some(name.name.clone()),
+            // 仅当 lhs 是普通标量 (int/char/double/枚举等) 变量名时才返回 Some.
+            // 指针 / 数组 / 结构体 / union 变量本身不触发 E0030:
+            //   - `*p = ...` 的 lhs 是 Deref, 已在下方返回 None;
+            //   - 但 `p = ...` (p 是指针变量本身) 也应放行, 因为内核常用
+            //     `T * const p = ...; ... p = other;` 这类模式极少, 主要场景是
+            //     通过指针/数组下标/成员间接写底层对象, 与 const 正确性无关.
+            Expr::Ident { name, ty, .. } => {
+                if matches!(ty, Type::Ptr(_) | Type::Array(_, _) | Type::Func(_, _)) {
+                    None
+                } else {
+                    Some(name.name.clone())
+                }
+            }
             // For member access (.field), don't penetrate to base variable.
             // The const-ness of a struct member is determined by its own type,
             // not the base variable's qualifiers. E.g., `struct S { const char *p; } x;`

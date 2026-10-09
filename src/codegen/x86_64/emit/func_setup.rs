@@ -178,7 +178,10 @@ impl Codegen {
         if !crate::codegen::x86_64::abi::regbank::is_call_clobbered(reg.n) {
             return;
         }
-        let text = v.register_name.as_deref().unwrap_or("");
+        // Phase 3.2: 文本从家反查（`gp_name_of_num` 是号→名唯一入口），不再独立读
+        // `register_name` —— 与判据同源。
+        let text = crate::codegen::x86_64::abi::regnames::gp_name_of_num(reg.n)
+            .unwrap_or("");
         self.diagnostics.push(crate::diagnostics::Diagnostic {
             sev: crate::diagnostics::Severity::Warning,
             code: Self::DIAG_CALL_CLOBBERED_GLOBAL_BINDING,
@@ -1017,7 +1020,13 @@ impl Codegen {
     /// 帧规划前把「规划期看不见的运行期临时对象」算成晚分配带的尺寸，并把账面交出去。
     /// 两个帧规划分支 (带参数的普通函数 / `main`) 共用本函数, 避免其中一处
     /// 漏扣后又是一次“变量区压进 sret 区”的定向失效。
-    pub fn reserve_late_var_slots(&mut self, body: Option<&Block>) {
+    ///
+    /// 名不叫 `reserve_*`：这里**不预扣变量区水位**（§11.23 步 3 已把那两段删掉），
+    /// 真正在做的只是「把晚分配带的槽数算出来，写进 `late_slot_budget`」这一件事，
+    /// 再顺手把规划期看得见的自由 ident 登进变量区、把 `frame_planned` 置上作为发射期
+    /// 晚分配的闸门。所有槽尺寸（`late_slots` / `spill_slots` / `temp_slots`）都在
+    /// `LayoutMap::resolve` 的同一帧里定为输入，本函数只负责晚分配这一条带的输入。
+    pub fn plan_late_slot_budget(&mut self, body: Option<&Block>) {
         let Some(b) = body else { return };
         // §11.23 步 2：预算 = 发射期那四族的静态需求。每一笔都能对应到一个具体站点，
         // 所以这里不是「宁可多给」而是「算准」（少算了 `E1133` 会响）。
