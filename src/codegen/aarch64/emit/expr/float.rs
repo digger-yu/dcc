@@ -2,11 +2,12 @@
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
 use crate::codegen::aarch64::codegen::Aarch64Codegen;
+use crate::codegen::aarch64::insn::Insn;
 
 impl Aarch64Codegen {
     pub(crate) fn mov_v_reg_s0(&mut self, reg: u8) {
         let insn = 0x1e204000u32 | ((reg as u32 & 7) << 5);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     pub(crate) fn mov_v_reg_v0(&mut self, reg: u8) {
@@ -14,31 +15,31 @@ impl Aarch64Codegen {
             return;
         }
         let insn = 0x4ea0_1c00u32 | (reg as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     pub(crate) fn dup_v0_4s_w0(&mut self) {
-        self.emit(&[0x00, 0x0c, 0x04, 0x4e]);
+        self.emit_insn(&Insn::raw(0x4e040c00));
     }
 
     pub(crate) fn mov_s1_s0(&mut self) {
-        self.emit(&[0x20, 0x00, 0x20, 0x1e]);
+        self.emit_insn(&Insn::raw(0x1e200020));
     }
 
     pub(crate) fn neg_s0(&mut self) {
-        self.emit(&[0x00, 0x00, 0xa0, 0x1e]); // fneg s0, s0
+        self.emit_insn(&Insn::raw(0x1ea00000)); // fneg s0, s0
     }
 
     pub(crate) fn mov_v1_v0(&mut self) {
-        self.emit(&[0x20, 0x00, 0x81, 0x4e]); // orr v1.16b, v0.16b, v0.16b
+        self.emit_insn(&Insn::raw(0x4e810020)); // orr v1.16b, v0.16b, v0.16b
     }
 
     pub(crate) fn zero_v0(&mut self) {
-        self.emit(&[0x00, 0x00, 0x80, 0x4e]); // movi v0.4s, #0
+        self.emit_insn(&Insn::raw(0x4e800000)); // movi v0.4s, #0
     }
 
     pub(crate) fn zero_v1(&mut self) {
-        self.emit(&[0x01, 0x00, 0x80, 0x4e]); // movi v1.4s, #0
+        self.emit_insn(&Insn::raw(0x4e800001)); // movi v1.4s, #0
     }
 
     /// `str st, [sp, #imm12]` — store single-precision float to stack.
@@ -46,7 +47,7 @@ impl Aarch64Codegen {
     pub(crate) fn str_st_sp(&mut self, reg: u8, off: i32) {
         let imm12 = (off / 4) as u32 & 0xfff;
         let insn = 0xbd000000u32 | imm12 << 10 | 31u32 << 5 | (reg as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// `ldr st, [sp, #imm12]` — load single-precision float from stack.
@@ -54,7 +55,7 @@ impl Aarch64Codegen {
     pub(crate) fn ldr_st_sp(&mut self, reg: u8, off: i32) {
         let imm12 = (off / 4) as u32 & 0xfff;
         let insn = 0xbd400000u32 | imm12 << 10 | 31u32 << 5 | (reg as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     pub(crate) fn str_s1_sp(&mut self, off: i32) {
@@ -80,7 +81,7 @@ impl Aarch64Codegen {
             | ((rm as u32 & 0x1f) << 16)
             | ((rn as u32 & 0x1f) << 5)
             | (rd as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// FSUB Sd, Sn, Sm — single-precision floating-point subtract
@@ -90,7 +91,7 @@ impl Aarch64Codegen {
             | ((rm as u32 & 0x1f) << 16)
             | ((rn as u32 & 0x1f) << 5)
             | (rd as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// Complex add helpers: component-wise

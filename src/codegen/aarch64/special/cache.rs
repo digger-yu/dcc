@@ -2,61 +2,62 @@
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
 use crate::codegen::aarch64::codegen::Aarch64Codegen;
+use crate::codegen::aarch64::insn::Insn;
 
 impl Aarch64Codegen {
     pub(crate) fn emit_dc_cvac(&mut self, reg: u8) {
         let insn = 0xd50b7420u32 | ((reg as u32 & 0x1f) << 5);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// dc civac, xN — Data Cache Clean and Invalidate by VA to PoC
     pub(crate) fn emit_dc_civac(&mut self, reg: u8) {
         let insn = 0xd50b7620u32 | ((reg as u32 & 0x1f) << 5);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// dc cvau, xN — Data Cache Clean by VA to PoU
     pub(crate) fn emit_dc_cvau(&mut self, reg: u8) {
         let insn = 0xd50b7520u32 | ((reg as u32 & 0x1f) << 5);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// dc ivac, xN — Data Cache Invalidate by VA to PoC
     pub(crate) fn emit_dc_ivac(&mut self, reg: u8) {
         let insn = 0xd5087600u32 | ((reg as u32 & 0x1f) << 5);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// ic ivau, xN — Instruction Cache Invalidate by VA to PoU
     pub(crate) fn emit_ic_ivau(&mut self, reg: u8) {
         let insn = 0xd50b7520u32 | ((reg as u32 & 0x1f) << 5);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// ic iallu — Instruction Cache Invalidate All to PoU
     pub(crate) fn emit_ic_iallu(&mut self) {
-        self.emit(&[0x7f, 0x78, 0x03, 0xd5]);
+        self.emit_insn(&Insn::raw(0xd503787f));
     }
 
     /// dsb ish
     pub(crate) fn emit_dsb_ish(&mut self) {
-        self.emit(&[0x9f, 0x3b, 0x03, 0xd5]);
+        self.emit_insn(&Insn::raw(0xd5033b9f));
     }
 
     /// dmb ish — 内部共享内存屏障 (memory clobber 编译器屏障)
     pub(crate) fn emit_dmb_ish(&mut self) {
         // DMB ISH: CRm=0xB, op2=4, Rt=0b0101 => D5033BBF
-        self.emit(&[0xbf, 0x3b, 0x03, 0xd5]);
+        self.emit_insn(&Insn::raw(0xd5033bbf));
     }
 
     /// dsb sy — 全系统屏障
     pub(crate) fn emit_dsb_sy(&mut self) {
-        self.emit(&[0xbf, 0x3f, 0x03, 0xd5]);
+        self.emit_insn(&Insn::raw(0xd5033fbf));
     }
 
     /// isb
     pub(crate) fn emit_isb(&mut self) {
-        self.emit(&[0xdf, 0x3b, 0x03, 0xd5]);
+        self.emit_insn(&Insn::raw(0xd5033bdf));
     }
 
     /// 同步 [start, end) 区间指令/数据缓存 (Linux __clear_cache 语义)
@@ -95,14 +96,14 @@ impl Aarch64Codegen {
     /// cmp xn, xm — 64 位寄存器比较 (subs wzr, xn, xm)
     pub(crate) fn emit_cmp_regs(&mut self, rn: u8, rm: u8) {
         let insn = 0xeb00001fu32 | ((rm as u32 & 0x1f) << 16) | ((rn as u32 & 0x1f) << 5);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// b.cond label — 条件分支 (占位 + 延迟修补)
     pub(crate) fn emit_bcond(&mut self, label: &str, cond: u8) {
         let pos = self.pos();
         let insn = 0x54000000u32 | (cond as u32 & 0xf);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
         if let Some(&target) = self.labels.get(label) {
             self.patch_bcond(pos, target, cond);
         } else {
@@ -127,7 +128,7 @@ impl Aarch64Codegen {
         if imm <= 0xfff {
             let insn =
                 0x91000000u32 | (imm << 10) | ((src as u32 & 0x1f) << 5) | (dst as u32 & 0x1f);
-            self.emit(&insn.to_le_bytes());
+            self.emit_insn(&Insn::raw(insn));
         } else {
             // 大立即数: movz x9, #imm; add xd, xn, x9
             self.mov_x_reg_imm(9, imm as u64);
@@ -141,7 +142,7 @@ impl Aarch64Codegen {
             | ((rm as u32 & 0x1f) << 16)
             | ((rn as u32 & 0x1f) << 5)
             | (dst as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// MADD Xd, Xn, Xm, XZR — 64-bit multiply (rd = rn * rm)
@@ -151,7 +152,7 @@ impl Aarch64Codegen {
             | (31u32 << 10) // ra = xzr
             | ((rn as u32 & 0x1f) << 5)
             | (dst as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// sub xd, xn, xm — 64 位寄存器减法
@@ -160,7 +161,7 @@ impl Aarch64Codegen {
             | ((rm as u32 & 0x1f) << 16)
             | ((rn as u32 & 0x1f) << 5)
             | (dst as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// and xd, xn, xm — 64 位寄存器与
@@ -169,7 +170,7 @@ impl Aarch64Codegen {
             | ((rm as u32 & 0x1f) << 16)
             | ((rn as u32 & 0x1f) << 5)
             | (dst as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// orr xd, xn, xm — 64 位寄存器或
@@ -178,7 +179,7 @@ impl Aarch64Codegen {
             | ((rm as u32 & 0x1f) << 16)
             | ((rn as u32 & 0x1f) << 5)
             | (dst as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// eor xd, xn, xm — 64 位寄存器异或
@@ -187,7 +188,7 @@ impl Aarch64Codegen {
             | ((rm as u32 & 0x1f) << 16)
             | ((rn as u32 & 0x1f) << 5)
             | (dst as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// LSR Xd, Xn, #shift — 64 位逻辑右移 (UBFM encoding)
@@ -204,7 +205,7 @@ impl Aarch64Codegen {
             | (imms << 10)
             | ((src as u32 & 0x1f) << 5)
             | (dst as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// LSL Xd, Xn, #shift — 64 位逻辑左移 (UBFM encoding)
@@ -221,7 +222,7 @@ impl Aarch64Codegen {
             | (imms << 10)
             | ((src as u32 & 0x1f) << 5)
             | (dst as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// ANDS Xd, Xn, Xm — 64 位寄存器与并设置标志
@@ -230,7 +231,7 @@ impl Aarch64Codegen {
             | ((rm as u32 & 0x1f) << 16)
             | ((rn as u32 & 0x1f) << 5)
             | (dst as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// MVN Xd, Xm — 按位取反 (ORN Xd, XZR, Xm)
@@ -240,6 +241,6 @@ impl Aarch64Codegen {
             | ((src as u32 & 0x1f) << 16)
             | (31u32 << 5) // XZR
             | (dst as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 }

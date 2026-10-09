@@ -1212,38 +1212,45 @@ fn compile_multiple_files(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         }
     }
 
-    // Parallel compilation using std::thread::scope
+    // Parallel compilation using std::thread::scope.
+    // Explicit 64 MiB stacks: workers run the full pipeline (including
+    // codegen/emit) on behalf of each file; the default 2 MiB spawned-thread
+    // stack overflows on deeply nested debug emit/parse frames, and spawned
+    // threads do not inherit the shell ulimit -s.
     let next_job = std::sync::atomic::AtomicUsize::new(0);
     let slots = std::sync::Mutex::new(vec![None; n]);
     std::thread::scope(|scope| {
         for _ in 0..degree {
-            scope.spawn(|| loop {
-                let idx = next_job.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if idx >= n {
-                    break;
-                }
-                let input = &cfg.inputs[idx];
-                let mut c = cfg.clone();
-                c.inputs = vec![input.clone()];
+            std::thread::Builder::new()
+                .stack_size(64 * 1024 * 1024)
+                .spawn_scoped(scope, || loop {
+                    let idx = next_job.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if idx >= n {
+                        break;
+                    }
+                    let input = &cfg.inputs[idx];
+                    let mut c = cfg.clone();
+                    c.inputs = vec![input.clone()];
 
-                let stem = input
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                if cfg.emit_asm {
-                    c.output = PathBuf::from(format!("{}.s", stem));
-                } else if cfg.relocatable {
-                    c.output = PathBuf::from(format!("{}.o", stem));
-                }
-                if cfg.gen_dep && !cfg.dep_no_compile {
-                    c.dep_file = Some(PathBuf::from(format!("{}.d", stem)));
-                    c.dep_target = Some(c.output.display().to_string());
-                }
+                    let stem = input
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    if cfg.emit_asm {
+                        c.output = PathBuf::from(format!("{}.s", stem));
+                    } else if cfg.relocatable {
+                        c.output = PathBuf::from(format!("{}.o", stem));
+                    }
+                    if cfg.gen_dep && !cfg.dep_no_compile {
+                        c.dep_file = Some(PathBuf::from(format!("{}.d", stem)));
+                        c.dep_target = Some(c.output.display().to_string());
+                    }
 
-                let result = run(c);
-                slots.lock().unwrap()[idx] = Some(result);
-            });
+                    let result = run(c);
+                    slots.lock().unwrap()[idx] = Some(result);
+                })
+                .expect("failed to spawn compilation worker thread");
         }
     });
 
@@ -2636,7 +2643,9 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
             tmp_guard.0.push(tmp_o.clone());
         }
 
-        // Parallel source compilation using std::thread::scope
+        // Parallel source compilation using std::thread::scope with explicit
+        // 64 MiB worker stacks (full per-file compile incl. codegen/emit; the
+        // default 2 MiB spawn stack overflows on deep debug emit frames).
         let degree = cfg
             .jobs
             .unwrap_or_else(|| {
@@ -2655,18 +2664,21 @@ fn run_builtin_linker(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         let results = std::sync::Mutex::new(vec![None; n_sources]);
         std::thread::scope(|scope| {
             for _ in 0..degree {
-                scope.spawn(|| loop {
-                    let j = next_job.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if j >= n_sources {
-                        break;
-                    }
-                    let (_, _inp) = source_tasks[j];
-                    let mut c = cfg.clone();
-                    c.output = tmp_objs[j].clone();
-                    c.relocatable = true;
-                    c.built_link = false;
-                    results.lock().unwrap()[j] = Some(run(c));
-                });
+                std::thread::Builder::new()
+                    .stack_size(64 * 1024 * 1024)
+                    .spawn_scoped(scope, || loop {
+                        let j = next_job.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if j >= n_sources {
+                            break;
+                        }
+                        let (_, _inp) = source_tasks[j];
+                        let mut c = cfg.clone();
+                        c.output = tmp_objs[j].clone();
+                        c.relocatable = true;
+                        c.built_link = false;
+                        results.lock().unwrap()[j] = Some(run(c));
+                    })
+                    .expect("failed to spawn built-link compilation worker thread");
             }
         });
         // Process results in order; first error aborts (matches prior

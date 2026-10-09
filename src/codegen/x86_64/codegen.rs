@@ -6,6 +6,7 @@ use crate::codegen::shared::elf;
 use crate::codegen::shared::elf::{ComdatGroup, ElfRela, ElfSection, ElfSym, ExtraRelaSection};
 use crate::codegen::x86_64::elf::attr_diag::AttrDiagFn;
 use crate::codegen::x86_64::ifunc;
+use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::mem::global;
 use crate::codegen::x86_64::FuncDecl;
 use crate::const_eval;
@@ -372,8 +373,6 @@ pub struct Codegen {
     /// 兜底表 —— 症状是 gdb 里 `break file.c:5` 报 `No line 5 in file`（语句级断点绑不上）。
     /// aarch64 / riscv 后端早就在语句发射入口记这一条（`src/codegen/aarch64/emit/block.rs`）。
     pub stmt_line_entries: Vec<(u64, u32)>,
-    // --- AsmEvent structured logging for -S output ---
-    pub asm_events: Vec<crate::codegen::asm_event::AsmEvent>,
     /// dcc 编不出、必须透传给 GAS 的内联汇编行 (TU 级降级判据的唯一真源)。
     pub asm_passthrough: Vec<crate::codegen::shared::asm_source::AsmPassthroughRecord>,
     /// 透传语句在 .text 内的起点与其原始行 (降级文本按位置插入)。
@@ -910,8 +909,6 @@ impl Codegen {
             asm_line_entries: Vec::new(),
             asm_insn_debug_entries: Vec::new(),
             stmt_line_entries: Vec::new(),
-            // --- AsmEvent structured logging ---
-            asm_events: Vec::new(),
             asm_passthrough: Vec::new(),
             asm_passthrough_regions: Vec::new(),
             asm_line_rejected: false,
@@ -1361,28 +1358,28 @@ impl Codegen {
         ctors.sort_by_key(|(p, _)| *p);
         dtors.sort_by_key(|(p, _)| *p);
         self.label("_start");
-        self.emit(&[0x49, 0x89, 0xe4]); // mov r12, rsp (保存原始 rsp, 用于 leave 后恢复)
-        self.emit(&[0x55]); // push rbp
-        self.emit(&[0x48, 0x89, 0xe5]); // mov rbp, rsp
+        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0xe4])); // mov r12, rsp (保存原始 rsp, 用于 leave 后恢复)
+        self.emit_insn(&Insn::raw_bytes(&[0x55])); // push rbp
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xe5])); // mov rbp, rsp
                                         // 调用 constructor 函数
         for (_p, ctor) in &ctors {
-            self.emit(&[0x48, 0x31, 0xc0]); // xor rax, rax (no variadic args)
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xc0])); // xor rax, rax (no variadic args)
             self.call_label(ctor);
         }
-        self.emit(&[0x48, 0x31, 0xc0]); // xor rax, rax
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xc0])); // xor rax, rax
         self.call_label("main");
         // 保存 main 返回值
-        self.emit(&[0x41, 0x89, 0xc5]); // mov r13d, eax
+        self.emit_insn(&Insn::raw_bytes(&[0x41, 0x89, 0xc5])); // mov r13d, eax
                                         // 调用 destructor 函数
         for (_p, dtor) in &dtors {
-            self.emit(&[0x48, 0x31, 0xc0]); // xor rax, rax
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xc0])); // xor rax, rax
             self.call_label(dtor);
         }
-        self.emit(&[0x4c, 0x89, 0xe4]); // mov rsp, r12 (恢复原始 rsp)
-        self.emit(&[0x44, 0x89, 0xef]); // mov edi, r13d (main 返回值)
-        self.emit(&[0xb8, 0x3c, 0x00, 0x00, 0x00]); // mov eax, 0x3c
-        self.emit(&[0x0f, 0x05]); // syscall
-        self.emit(&[0xeb, 0xfe]); // jmp self
+        self.emit_insn(&Insn::raw_bytes(&[0x4c, 0x89, 0xe4])); // mov rsp, r12 (恢复原始 rsp)
+        self.emit_insn(&Insn::raw_bytes(&[0x44, 0x89, 0xef])); // mov edi, r13d (main 返回值)
+        self.emit_insn(&Insn::raw_bytes(&[0xb8, 0x3c, 0x00, 0x00, 0x00])); // mov eax, 0x3c
+        self.emit_insn(&Insn::raw_bytes(&[0x0f, 0x05])); // syscall
+        self.emit_insn(&Insn::raw_bytes(&[0xeb, 0xfe])); // jmp self
                                   // 静态局部变量分析 pass + 预注册到 data/bss
         self.static_local_map = crate::static_locals::analyze_static_locals(prog);
         self.pre_register_static_locals();

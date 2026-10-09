@@ -11,6 +11,7 @@
 
 mod abi;
 mod baseline_mips;
+mod insn;
 mod registers;
 
 pub mod mips64; // MIPS64 N64 ABI adapter (use 'pub mod' for file-level module)

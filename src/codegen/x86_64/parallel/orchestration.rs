@@ -681,15 +681,22 @@ impl Codegen {
             let slots = Mutex::new(vec![None; n]);
             std::thread::scope(|scope| {
                 for _ in 0..degree {
-                    scope.spawn(|| loop {
-                        let i = next_job.fetch_add(1, Ordering::Relaxed);
-                        if i >= n {
-                            break;
-                        }
-                        let chunk =
-                            Self::emit_func_chunk(worker_ctx(i), top_funcs[i].clone(), prog);
-                        slots.lock().unwrap()[i] = Some(chunk);
-                    });
+                    // 显式给 worker 64 MiB 栈: Insn 临时量带 ~128 字节的
+                    // [Operand; 4] 数组, debug 构建下深层嵌套的地址/表达式
+                    // emit 递归帧很大, 默认 2 MiB worker 栈会溢出 (spawn 出的
+                    // 线程不受 shell ulimit -s 影响)。
+                    std::thread::Builder::new()
+                        .stack_size(64 * 1024 * 1024)
+                        .spawn_scoped(scope, || loop {
+                            let i = next_job.fetch_add(1, Ordering::Relaxed);
+                            if i >= n {
+                                break;
+                            }
+                            let chunk =
+                                Self::emit_func_chunk(worker_ctx(i), top_funcs[i].clone(), prog);
+                            slots.lock().unwrap()[i] = Some(chunk);
+                        })
+                        .expect("failed to spawn codegen worker thread");
                 }
             });
             slots

@@ -9,6 +9,8 @@ use crate::codegen::shared::elf::{
     self, ElfRela, ElfSection, ElfSym, SHF_ALLOC, SHF_GNU_RETAIN, SHT_PROGBITS, STB_GLOBAL,
     STB_LOCAL, STB_WEAK, STT_FUNC, STT_GNU_IFUNC,
 };
+use crate::codegen::mips::insn::Insn;
+use crate::codegen::shared::asm_operand::LayoutMap;
 use crate::ir::{Function, Global, Module, TypedStmt, ValueType};
 use crate::target::Target;
 use std::collections::HashMap;
@@ -30,6 +32,8 @@ pub struct MipsCodegen {
     pub relocations: Vec<ElfRela>,
     pub rodata_relocations: Vec<ElfRela>,
     pub func_sizes: HashMap<String, u64>,
+    /// 迁移期: 写入侧继续用此 HashMap; 读取侧请走 `Self::snapshot_layout()`。
+    /// 注: mips64.rs 平级模块直接读字段属遗留, 后续也要改走 snapshot。
     pub labels: HashMap<String, u64>,
     locals: HashMap<String, i32>,
     global_rodata: HashMap<String, u64>,
@@ -129,6 +133,23 @@ impl MipsCodegen {
 
     pub fn set_source_name(&mut self, name: impl Into<String>) {
         self.source_name = name.into();
+    }
+
+    /// 产出当前 `labels`/`func_sizes` 的只读快照 (`LayoutMap`)。
+    pub(crate) fn snapshot_layout(&self) -> LayoutMap {
+        let text_end = self.entry + self.code.len() as u64;
+        LayoutMap::snapshot(&self.labels, &self.func_sizes, text_end)
+    }
+
+    /// 指令记录统一发射入口 (MIPS 定长 4 字节, 大端).
+    pub(crate) fn emit_insn(&mut self, insn: &crate::codegen::mips::insn::Insn) -> bool {
+        match insn.encode_bytes() {
+            Some(bytes) => {
+                self.code.extend_from_slice(&bytes);
+                true
+            }
+            None => false,
+        }
     }
 
     /// 处理一条已解析的 asm 语句 —— 薄壳。
@@ -283,7 +304,7 @@ impl MipsCodegen {
         let jal_pos = self.code.len() as u64;
         self.start_call_pos = Some(jal_pos);
         let inst: u32 = 0b000011 << 26; // JAL with target 0
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
         self.emit_nop(); // delay slot
                          // move $a0, $v0 (save main return value)
         self.emit_addu(4, 2, 0); // addu $a0, $v0, $zero
@@ -292,7 +313,7 @@ impl MipsCodegen {
         // syscall
         let syscall_inst: u32 = 0b000000 << 26; // SPECIAL
         let syscall_inst = syscall_inst | 0b001000; // opcode 0.12 = syscall
-        self.code.extend_from_slice(&syscall_inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(syscall_inst));
         // Compile functions
         for func in &module.functions {
             let has_body = prog
@@ -443,12 +464,12 @@ impl MipsCodegen {
             let suffix_len = n.saturating_sub(prefix_len);
             for _ in 0..prefix_len {
                 // MIPS NOP: SLL $zero, $zero, 0 = 0x00000000
-                self.code.extend_from_slice(&0x00000000u32.to_be_bytes());
+                self.emit_insn(&Insn::raw(0x00000000));
             }
             func_start = self.code.len() as u64;
             self.labels.insert(func.name.clone(), func_start);
             for _ in 0..suffix_len {
-                self.code.extend_from_slice(&0x00000000u32.to_be_bytes());
+                self.emit_insn(&Insn::raw(0x00000000));
             }
         } else {
             func_start = self.code.len() as u64;
@@ -1062,14 +1083,14 @@ impl MipsCodegen {
                 match op {
                     UnOp::Neg => {
                         let inst: u32 = (2u32 << 11) | 0b100011;
-                        self.code.extend_from_slice(&inst.to_be_bytes());
+                        self.emit_insn(&Insn::raw(inst));
                     },
                     UnOp::Not => {
                         self.emit_sltiu(2, 2, 1);
                     },
                     UnOp::BitNot => {
                         let inst: u32 = (2u32 << 21) | (2u32 << 11) | 0b100111;
-                        self.code.extend_from_slice(&inst.to_be_bytes());
+                        self.emit_insn(&Insn::raw(inst));
                     },
                     UnOp::Plus => {},
                 }
@@ -1308,25 +1329,25 @@ impl MipsCodegen {
             BinOp::And => {
                 // R-type: rs=$t0(8), rt=$v0(2), rd=$v0(2), funct=AND
                 let inst: u32 = (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100100;
-                self.code.extend_from_slice(&inst.to_be_bytes());
+                self.emit_insn(&Insn::raw(inst));
             },
             BinOp::Or => {
                 let inst: u32 = (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100101;
-                self.code.extend_from_slice(&inst.to_be_bytes());
+                self.emit_insn(&Insn::raw(inst));
             },
             BinOp::Xor => {
                 let inst: u32 = (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100110;
-                self.code.extend_from_slice(&inst.to_be_bytes());
+                self.emit_insn(&Insn::raw(inst));
             },
             BinOp::Shl => {
                 // sllv $v0, $t0, $v0
                 let inst: u32 = (2u32 << 21) | (8u32 << 16) | (2u32 << 11) | 0b000100;
-                self.code.extend_from_slice(&inst.to_be_bytes());
+                self.emit_insn(&Insn::raw(inst));
             },
             BinOp::Shr => {
                 // srav $v0, $t0, $v0
                 let inst: u32 = (2u32 << 21) | (8u32 << 16) | (2u32 << 11) | 0b000111;
-                self.code.extend_from_slice(&inst.to_be_bytes());
+                self.emit_insn(&Insn::raw(inst));
             },
             BinOp::Lt => self.emit_slt(2, 8, 2),
             BinOp::Gt => self.emit_slt(2, 2, 8),
@@ -1352,13 +1373,13 @@ impl MipsCodegen {
                 self.emit_sltu(8, 0, 8); // $t0 = (lhs != 0)
                 self.emit_sltu(2, 0, 2); // $v0 = (rhs != 0)
                 let inst: u32 = (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100100;
-                self.code.extend_from_slice(&inst.to_be_bytes()); // and
+                self.emit_insn(&Insn::raw(inst)); // and
             },
             BinOp::OrOr => {
                 self.emit_sltu(8, 0, 8);
                 self.emit_sltu(2, 0, 2);
                 let inst: u32 = (8u32 << 21) | (2u32 << 16) | (2u32 << 11) | 0b100101;
-                self.code.extend_from_slice(&inst.to_be_bytes()); // or
+                self.emit_insn(&Insn::raw(inst)); // or
             },
         }
     }
@@ -1505,20 +1526,20 @@ impl MipsCodegen {
     fn emit_addiu(&mut self, rt: u8, rs: u8, imm: i16) {
         let inst =
             (0b001001 << 26) | ((rs as u32) << 21) | ((rt as u32) << 16) | (imm as u16 as u32);
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// SB rt, offset(base): store byte
     fn emit_sb(&mut self, rt: u8, base: u8, offset: i16) {
         let inst =
             (0b101000 << 26) | ((base as u32) << 21) | ((rt as u32) << 16) | (offset as u16 as u32);
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// LUI rt, imm: load upper immediate
     fn emit_lui(&mut self, rt: u8, imm: u16) {
         let inst = (0b001111 << 26) | ((rt as u32) << 16) | (imm as u32);
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// -fstack-clash-protection: emit page-sized probes when allocating a
@@ -1550,7 +1571,7 @@ impl MipsCodegen {
             let loop_end = self.code.len() as u64;
             let offset = (loop_start as i64 - loop_end as i64 - 4) / 4;
             let bne = (0b000101 << 26) | (8u32 << 21) | (offset as u16 as u32);
-            self.code.extend_from_slice(&bne.to_be_bytes());
+            self.emit_insn(&Insn::raw(bne));
             // delay slot
             self.emit_nop();
         }
@@ -1563,13 +1584,13 @@ impl MipsCodegen {
                 | ((base as u32) << 21)
                 | ((rt as u32) << 16)
                 | (offset as u16 as u32);
-            self.code.extend_from_slice(&inst.to_be_bytes());
+            self.emit_insn(&Insn::raw(inst));
         } else {
             let inst = (0b101011 << 26)
                 | ((base as u32) << 21)
                 | ((rt as u32) << 16)
                 | (offset as u16 as u32);
-            self.code.extend_from_slice(&inst.to_be_bytes());
+            self.emit_insn(&Insn::raw(inst));
         }
     }
 
@@ -1580,23 +1601,23 @@ impl MipsCodegen {
                 | ((base as u32) << 21)
                 | ((rt as u32) << 16)
                 | (offset as u16 as u32);
-            self.code.extend_from_slice(&inst.to_be_bytes());
+            self.emit_insn(&Insn::raw(inst));
         } else {
             let inst = (0b100011 << 26)
                 | ((base as u32) << 21)
                 | ((rt as u32) << 16)
                 | (offset as u16 as u32);
-            self.code.extend_from_slice(&inst.to_be_bytes());
+            self.emit_insn(&Insn::raw(inst));
         }
     }
 
     fn emit_jr(&mut self, rs: u8) {
         let inst = ((rs as u32) << 21) | 0b001000;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     fn emit_nop(&mut self) {
-        self.code.extend_from_slice(&[0u8; 4]);
+        self.emit_insn(&Insn::nop());
     }
 
     fn emit_load_imm(&mut self, rt: u8, val: i32) {
@@ -1608,12 +1629,12 @@ impl MipsCodegen {
             let lo = (val & 0xFFFF) as u16;
             // LUI rt, hi
             let inst = (0b001111 << 26) | ((rt as u32) << 16) | (hi as u32);
-            self.code.extend_from_slice(&inst.to_be_bytes());
+            self.emit_insn(&Insn::raw(inst));
             if lo != 0 {
                 // ORI rt, rt, lo
                 let inst =
                     (0b001101 << 26) | ((rt as u32) << 21) | ((rt as u32) << 16) | (lo as u32);
-                self.code.extend_from_slice(&inst.to_be_bytes());
+                self.emit_insn(&Insn::raw(inst));
             }
         }
     }
@@ -1621,56 +1642,56 @@ impl MipsCodegen {
     fn emit_addu(&mut self, rd: u8, rs: u8, rt: u8) {
         // R-type: opcode=0 (implicit), funct=ADDU
         let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0b100001;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     fn emit_subu(&mut self, rd: u8, rs: u8, rt: u8) {
         let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0b100011;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     fn emit_mul_r(&mut self, rd: u8, rs: u8, rt: u8) {
         // MUL rd, rs, rt (MIPS32r2 专用指令, 或回退到 mult+mflo)
         // 使用 mult + mflo 保证兼容性
         let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16);
-        self.code.extend_from_slice(&inst.to_be_bytes()); // mult rs, rt
+        self.emit_insn(&Insn::raw(inst)); // mult rs, rt
         self.emit_mflo(rd);
     }
 
     fn emit_div(&mut self, rs: u8, rt: u8) {
         let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16) | 0b010010;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     fn emit_mflo(&mut self, rd: u8) {
         let inst = ((rd as u32) << 16) | 0b010010;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     fn emit_mfhi(&mut self, rd: u8) {
         let inst = ((rd as u32) << 16) | 0b010000;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     fn emit_slt(&mut self, rd: u8, rs: u8, rt: u8) {
         let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0b101010;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     fn emit_sltu(&mut self, rd: u8, rs: u8, rt: u8) {
         let inst: u32 = ((rs as u32) << 21) | ((rt as u32) << 16) | ((rd as u32) << 11) | 0b101011;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     fn emit_sltiu(&mut self, rt: u8, rs: u8, imm: i16) {
         let inst =
             (0b001011 << 26) | ((rs as u32) << 21) | ((rt as u32) << 16) | (imm as u16 as u32);
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     fn emit_xori(&mut self, rt: u8, rs: u8, imm: u16) {
         let inst = (0b001110 << 26) | ((rs as u32) << 21) | ((rt as u32) << 16) | (imm as u32);
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     fn emit_beqz(&mut self, rs: u8, label: &str) {
@@ -1679,7 +1700,7 @@ impl MipsCodegen {
         self.pending_branches
             .push((pos, label.to_string(), BranchKind::Beqz));
         let inst: u32 = (0b000100 << 26) | ((rs as u32) << 21); // offset=0 placeholder
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     fn emit_bne(&mut self, rs: u8, rt: u8, label: &str) {
@@ -1688,7 +1709,7 @@ impl MipsCodegen {
         self.pending_branches
             .push((pos, label.to_string(), BranchKind::Bne));
         let inst: u32 = (0b000101 << 26) | ((rs as u32) << 21) | ((rt as u32) << 16); // offset=0 placeholder
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     fn emit_b(&mut self, label: &str) {
@@ -1697,7 +1718,7 @@ impl MipsCodegen {
         self.pending_branches
             .push((pos, label.to_string(), BranchKind::B));
         let inst: u32 = 0b000100 << 26; // BEQ $zero, $zero, offset=0
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     fn emit_jal(&mut self, name: &str) {
@@ -1705,7 +1726,7 @@ impl MipsCodegen {
         self.pending_bl_calls.push((pos, name.to_string()));
         // JAL 占位
         let inst: u32 = 0b000011 << 26;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     // 栈上局部变量加载/存储 (相对于 $fp)
@@ -1934,28 +1955,28 @@ impl MipsCodegen {
     fn emit_lwc1(&mut self, ft: u8, base: u8, offset: i16) {
         let inst =
             (0b110001 << 26) | ((base as u32) << 21) | ((ft as u32) << 16) | (offset as u16 as u32);
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// LDC1 ft, offset(base): Load Double to Coprocessor 1
     fn emit_ldc1(&mut self, ft: u8, base: u8, offset: i16) {
         let inst =
             (0b110101 << 26) | ((base as u32) << 21) | ((ft as u32) << 16) | (offset as u16 as u32);
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// SWC1 ft, offset(base): Store Word from Coprocessor 1
     fn emit_swc1(&mut self, ft: u8, base: u8, offset: i16) {
         let inst =
             (0b111001 << 26) | ((base as u32) << 21) | ((ft as u32) << 16) | (offset as u16 as u32);
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// SDC1 ft, offset(base): Store Double from Coprocessor 1
     fn emit_sdc1(&mut self, ft: u8, base: u8, offset: i16) {
         let inst =
             (0b111101 << 26) | ((base as u32) << 21) | ((ft as u32) << 16) | (offset as u16 as u32);
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// ADD.S fd, fs, ft / ADD.D fd, fs, ft
@@ -1966,7 +1987,7 @@ impl MipsCodegen {
             | ((ft as u32) << 16)
             | ((fs as u32) << 11)
             | ((fd as u32) << 6);
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// SUB.S fd, fs, ft / SUB.D fd, fs, ft
@@ -1978,7 +1999,7 @@ impl MipsCodegen {
             | ((fs as u32) << 11)
             | ((fd as u32) << 6)
             | 0b000001;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// MUL.S fd, fs, ft / MUL.D fd, fs, ft
@@ -1990,7 +2011,7 @@ impl MipsCodegen {
             | ((fs as u32) << 11)
             | ((fd as u32) << 6)
             | 0b000010;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// DIV.S fd, fs, ft / DIV.D fd, fs, ft
@@ -2002,7 +2023,7 @@ impl MipsCodegen {
             | ((fs as u32) << 11)
             | ((fd as u32) << 6)
             | 0b000011;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// NEG.S fd, fs / NEG.D fd, fs
@@ -2013,7 +2034,7 @@ impl MipsCodegen {
             | ((fs as u32) << 11)
             | ((fd as u32) << 6)
             | 0b000111;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// MOV.S fd, fs / MOV.D fd, fs
@@ -2024,7 +2045,7 @@ impl MipsCodegen {
             | ((fs as u32) << 11)
             | ((fd as u32) << 6)
             | 0b000100;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// C.EQ.S/C.EQ.D, C.LT.S/C.LT.D, C.LE.S/C.LE.D
@@ -2036,7 +2057,7 @@ impl MipsCodegen {
             | ((fs as u32) << 11)
             | ((cond as u32) << 4)
             | 0b010010;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// BC1T offset: Branch on FPU condition true
@@ -2046,7 +2067,7 @@ impl MipsCodegen {
             .push((pos, label.to_string(), BranchKind::B));
         // BC1T: opcode=010001 (17), rt=1 (BC1T), offset=0 placeholder
         let inst: u32 = (0b010001 << 26) | (1 << 16);
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// BC1F offset: Branch on FPU condition false
@@ -2056,20 +2077,20 @@ impl MipsCodegen {
             .push((pos, label.to_string(), BranchKind::B));
         // BC1F: opcode=010001 (17), rt=0 (BC1F), offset=0 placeholder
         let inst: u32 = 0b010001 << 26;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// MTC1 rt, fs: Move To Coprocessor 1 (GP -> FPU)
     fn emit_mtc1(&mut self, rt: u8, fs: u8) {
         let inst: u32 =
             (0b010001 << 26) | (0b00100 << 21) | ((rt as u32) << 16) | ((fs as u32) << 11);
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// MFC1 rt, fs: Move From Coprocessor 1 (FPU -> GP)
     fn emit_mfc1(&mut self, rt: u8, fs: u8) {
         let inst: u32 = (0b010001 << 26) | ((rt as u32) << 16) | ((fs as u32) << 11);
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// CVT.S.W fd, fs: Convert integer to float
@@ -2079,7 +2100,7 @@ impl MipsCodegen {
             | ((fs as u32) << 11)
             | ((fd as u32) << 6)
             | 0b100000;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// CVT.W.S fd, fs: Convert float to integer
@@ -2089,7 +2110,7 @@ impl MipsCodegen {
             | ((fs as u32) << 11)
             | ((fd as u32) << 6)
             | 0b100100;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// CVT.D.S fd, fs: Convert float to double
@@ -2099,7 +2120,7 @@ impl MipsCodegen {
             | ((fs as u32) << 11)
             | ((fd as u32) << 6)
             | 0b100010;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// CVT.S.D fd, fs: Convert double to float
@@ -2109,7 +2130,7 @@ impl MipsCodegen {
             | ((fs as u32) << 11)
             | ((fd as u32) << 6)
             | 0b100000;
-        self.code.extend_from_slice(&inst.to_be_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// 加载单精度浮点字面量到 $f0
@@ -2208,7 +2229,7 @@ impl MipsCodegen {
     /// SYNC 指令 — 内存屏障 (memory clobber 编译器屏障)
     fn emit_sync(&mut self) {
         // SYNC: opcode=0, funct=0x0F => 0x0000000F
-        self.code.extend_from_slice(&[0x00, 0x00, 0x00, 0x0F]);
+        self.emit_insn(&Insn::raw(0x0000000F));
     }
 }
 

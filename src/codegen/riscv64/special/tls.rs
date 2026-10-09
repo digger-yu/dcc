@@ -21,13 +21,13 @@ impl Riscv64Codegen {
             // addi a0, tp, imm (I-type)
             let imm = (off as u32) & 0xfff;
             let insn = ((imm << 20) | (4u32 << 15)) | (10u32 << 7) | 0x13;
-            self.emit(&insn.to_le_bytes());
+            self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
         } else {
             // 大偏移: lui + addi + add
             // lui a0, %tprel_hi20(sym)
             let hi20 = ((off as i64 + 0x800) >> 12) as u32;
             let insn_lui = (hi20 << 12) | (10u32 << 7) | 0x37;
-            self.emit(&insn_lui.to_le_bytes());
+            self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn_lui));
             let lui_pos = self.pos() - 4;
             self.relocations.push(ElfRela {
                 offset: lui_pos,
@@ -38,7 +38,7 @@ impl Riscv64Codegen {
             // addi a0, a0, %tprel_add_lo12(sym)
             let lo12 = (off as i32) & 0xfff;
             let insn_addi = (((lo12 as u32) << 20) | (10u32 << 15)) | (10u32 << 7) | 0x13;
-            self.emit(&insn_addi.to_le_bytes());
+            self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn_addi));
             let addi_pos = self.pos() - 4;
             self.relocations.push(ElfRela {
                 offset: addi_pos,
@@ -49,7 +49,7 @@ impl Riscv64Codegen {
             // add a0, a0, tp (x4)
             // add rd, rs1, rs2: 0x33 | rs2<<20 | rs1<<15 | funct3<<12 | rd<<7
             let insn_add = ((4u32 << 20) | (10u32 << 15)) | (10u32 << 7) | 0x33;
-            self.emit(&insn_add.to_le_bytes());
+            self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn_add));
         }
     }
 
@@ -63,7 +63,7 @@ impl Riscv64Codegen {
         let idx = self.ensure_sym(sym);
         // lui a5, %got_tpoff_hi20(sym)
         let insn_lui = (15u32 << 7) | 0x37;
-        self.emit(&insn_lui.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn_lui));
         let lui_pos = self.pos() - 4;
         self.relocations.push(ElfRela {
             offset: lui_pos,
@@ -74,7 +74,7 @@ impl Riscv64Codegen {
         // ld a5, %got_tpoff_lo12(sym)(a5) - I-type load
         // ld rd, imm(rs1): funct3=011, opcode=0000011
         let insn_ld = (15u32 << 15) | (0b011 << 12) | (15u32 << 7) | 0x03;
-        self.emit(&insn_ld.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn_ld));
         let ld_pos = self.pos() - 4;
         self.relocations.push(ElfRela {
             offset: ld_pos,
@@ -84,7 +84,7 @@ impl Riscv64Codegen {
         });
         // add a0, a5, tp (x4)
         let insn_add = ((4u32 << 20) | (15u32 << 15)) | (10u32 << 7) | 0x33;
-        self.emit(&insn_add.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn_add));
     }
 
     /// TLS Descriptor access: call descriptor to get TP offset
@@ -98,7 +98,7 @@ impl Riscv64Codegen {
         let idx = self.ensure_sym(sym);
         // lui a0, %tlsdesc_hi(sym)
         let insn_lui = (10u32 << 7) | 0x37;
-        self.emit(&insn_lui.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn_lui));
         let lui_pos = self.pos() - 4;
         self.relocations.push(ElfRela {
             offset: lui_pos,
@@ -108,7 +108,7 @@ impl Riscv64Codegen {
         });
         // ld a0, %tlsdesc_load_lo12(sym)(a0)
         let insn_ld = (10u32 << 15) | (0b011 << 12) | (10u32 << 7) | 0x03;
-        self.emit(&insn_ld.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn_ld));
         let ld_pos = self.pos() - 4;
         self.relocations.push(ElfRela {
             offset: ld_pos,
@@ -118,7 +118,7 @@ impl Riscv64Codegen {
         });
         // addi a0, a0, %tlsdesc_add_lo12(sym)
         let insn_addi = (10u32 << 15) | (10u32 << 7) | 0x13;
-        self.emit(&insn_addi.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn_addi));
         let addi_pos = self.pos() - 4;
         self.relocations.push(ElfRela {
             offset: addi_pos,
@@ -129,7 +129,7 @@ impl Riscv64Codegen {
         // jalr ra, a0, %tlsdesc_call(sym)
         // jalr rd, rs1, imm: opcode=1101100, rd=ra(1), rs1=a0(10)
         let insn_jalr = (10u32 << 15) | (1u32 << 7) | 0x67;
-        self.emit(&insn_jalr.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn_jalr));
         let jalr_pos = self.pos() - 4;
         self.relocations.push(ElfRela {
             offset: jalr_pos,
@@ -139,6 +139,6 @@ impl Riscv64Codegen {
         });
         // add a0, a0, tp (x4)
         let insn_add = ((4u32 << 20) | (10u32 << 15)) | (10u32 << 7) | 0x33;
-        self.emit(&insn_add.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn_add));
     }
 }

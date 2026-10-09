@@ -2,6 +2,7 @@
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
 use crate::ast::{Decl, Program};
+use crate::codegen::arm::insn::Insn;
 use crate::codegen::shared::asm_constraints::{
     self, resolve_asm_operands, resolve_asm_template_enhanced, AsmArch,
 };
@@ -12,6 +13,15 @@ use crate::target::Target;
 use std::collections::HashMap;
 
 use super::struct_def::ArmCodegen;
+use crate::codegen::shared::asm_operand::LayoutMap;
+
+impl ArmCodegen {
+    /// 产出当前 `labels`/`func_sizes` 的只读快照 (`LayoutMap`)。
+    pub(crate) fn snapshot_layout(&self) -> LayoutMap {
+        let text_end = self.entry + self.code.len() as u64;
+        LayoutMap::snapshot(&self.labels, &self.func_sizes, text_end)
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum BranchKind {
@@ -238,13 +248,13 @@ impl ArmCodegen {
         // BL placeholder (will be patched to main)
         let bl_pos = self.code.len() as u64;
         self.start_call_pos = Some(bl_pos);
-        self.code.extend_from_slice(&0xEB000000u32.to_le_bytes()); // BL offset=0
+        self.emit_insn(&Insn::raw(0xEB000000)); // BL offset=0
                                                                    // r0 already has main's return value
                                                                    // mov r7, #1 (__NR_exit)
         self.emit_mov_imm(7, 1);
         // svc #0
         let svc_inst: u32 = 0xEF000000; // SVC #0
-        self.code.extend_from_slice(&svc_inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(svc_inst));
         // Compile functions
         for func in &module.functions {
             let has_body = prog
@@ -374,6 +384,17 @@ impl ArmCodegen {
             AsmArch::Arm,
             false,
         )
+    }
+
+    /// 指令记录统一发射入口 (AArch32 定长 4 字节小端).
+    pub(crate) fn emit_insn(&mut self, insn: &crate::codegen::arm::insn::Insn) -> bool {
+        match insn.encode_bytes() {
+            Some(bytes) => {
+                self.code.extend_from_slice(&bytes);
+                true
+            }
+            None => false,
+        }
     }
 }
 

@@ -6,12 +6,12 @@ use crate::codegen::riscv64::codegen::{BranchKind, Riscv64Codegen};
 impl Riscv64Codegen {
     pub(crate) fn emit_slt(&mut self, rd: u8, rs1: u8, rs2: u8) {
         let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b010 << 12 | (rd as u32) << 7 | 0x33;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_sltu(&mut self, rd: u8, rs1: u8, rs2: u8) {
         let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b011 << 12 | (rd as u32) << 7 | 0x33;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_lw(&mut self, rd: u8, rs1: u8, off: i32) {
@@ -26,7 +26,7 @@ impl Riscv64Codegen {
         }
         let imm = off as u32 & 0xfff;
         let insn = imm << 20 | (rs1 as u32) << 15 | 0b010 << 12 | (rd as u32) << 7 | 0x03;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_sw(&mut self, rs2: u8, rs1: u8, off: i32) {
@@ -46,21 +46,21 @@ impl Riscv64Codegen {
             | 0b010 << 12
             | (imm & 0x1f) << 7
             | 0x23;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// LB - 加载字节 (有符号扩展)
     pub(crate) fn emit_lb(&mut self, rd: u8, rs1: u8, off: i32) {
         let imm = off as u32 & 0xfff;
         let insn = (imm << 20 | (rs1 as u32) << 15) | (rd as u32) << 7 | 0x03;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// LH - 加载半字 (有符号扩展)
     pub(crate) fn emit_lh(&mut self, rd: u8, rs1: u8, off: i32) {
         let imm = off as u32 & 0xfff;
         let insn = imm << 20 | (rs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0x03;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// SH - 存储半字
@@ -72,30 +72,30 @@ impl Riscv64Codegen {
             | 0b001 << 12
             | (imm & 0x1f) << 7
             | 0x23;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_jal(&mut self, rd: u8, _offset: i32) {
         let insn = (rd as u32) << 7 | 0x6f;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_jalr(&mut self, rd: u8, rs1: u8, imm: i32) {
         let imm = imm as u32 & 0xfff;
         let insn = (imm << 20 | (rs1 as u32) << 15) | (rd as u32) << 7 | 0x67;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_beq(&mut self, rs1: u8, rs2: u8, _offset: i32) {
         let insn = ((rs2 as u32) << 20 | (rs1 as u32) << 15) | 0x63;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// AUIPC rd, imm: rd = PC + imm << 12
     pub(crate) fn emit_auipc(&mut self, rd: u8, imm: i32) {
         let imm = (imm as u32 & 0xfffff) << 12;
         let insn = imm | (rd as u32) << 7 | 0x17;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// BNE rs1, rs2, label: Branch if not equal
@@ -103,7 +103,7 @@ impl Riscv64Codegen {
         let pos = self.pos();
         // BNE: funct3=001, opcode=1100011
         let insn = (1u32 << 12) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | 0x63;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
         if let Some(&target) = self.labels.get(label) {
             self.patch_bne(pos, rs1, rs2, target);
         } else {
@@ -140,7 +140,7 @@ impl Riscv64Codegen {
         let pos = self.pos();
         // funct3=000, opcode=1100011
         let insn = ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | 0x63;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
         if let Some(&target) = self.labels.get(label) {
             self.patch_branch(pos, rs1, rs2, target, 0);
         } else {
@@ -154,7 +154,7 @@ impl Riscv64Codegen {
         let pos = self.pos();
         // funct3=101, opcode=1100011
         let insn = (5u32 << 12) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | 0x63;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
         if let Some(&target) = self.labels.get(label) {
             self.patch_branch(pos, rs1, rs2, target, 5);
         } else {
@@ -168,7 +168,7 @@ impl Riscv64Codegen {
         let pos = self.pos();
         // funct3=100, opcode=1100011
         let insn = (4u32 << 12) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | 0x63;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
         if let Some(&target) = self.labels.get(label) {
             self.patch_branch(pos, rs1, rs2, target, 4);
         } else {
@@ -180,24 +180,24 @@ impl Riscv64Codegen {
     pub(crate) fn emit_auipc_a0(&mut self, imm: i32) {
         let imm = (imm as u32 & 0xfffff) << 12;
         let insn = imm | 10 << 7 | 0x17;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_ld_a0_a0(&mut self, off: i32) {
         let imm = off as u32 & 0xfff;
         let insn = imm << 20 | 10 << 15 | 0b011 << 12 | 10 << 7 | 0x03;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_flw_fa0_a0(&mut self, off: i32) {
         let imm = off as u32 & 0xfff;
         let insn = imm << 20 | 10 << 15 | 0b010 << 12 | 10 << 7 | 0x07;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_fadd_fa0(&mut self) {
         let insn: u32 = 0x08000053 | 10 << 20 | 10 << 15 | 10 << 7;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// Move fa0 to fa1: FSGNJ.S fa1, fa0, fa0
@@ -213,28 +213,28 @@ impl Riscv64Codegen {
     /// FADD.S fd, fs1, fs2: single-precision add
     pub(crate) fn emit_fadd_s(&mut self, fd: u8, fs1: u8, fs2: u8) {
         let insn = (((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7) | 0x53;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// FSUB.S fd, fs1, fs2: single-precision subtract
     pub(crate) fn emit_fsub_s(&mut self, fd: u8, fs1: u8, fs2: u8) {
         let insn =
             ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7 | 0b0000100 << 25 | 0x53;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// FMUL.S fd, fs1, fs2: single-precision multiply
     pub(crate) fn emit_fmul_s(&mut self, fd: u8, fs1: u8, fs2: u8) {
         let insn =
             ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7 | 0b0001000 << 25 | 0x53;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// FDIV.S fd, fs1, fs2: single-precision divide
     pub(crate) fn emit_fdiv_s(&mut self, fd: u8, fs1: u8, fs2: u8) {
         let insn =
             ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7 | 0b0001100 << 25 | 0x53;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// FADD.S fa0, fa1, fa0 (convenience for binary op)
@@ -265,7 +265,7 @@ impl Riscv64Codegen {
             | (rd as u32) << 7
             | 0b1010000 << 25
             | 0x53;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// FLT.S rd, fs1, fs2: single-precision less-than comparison
@@ -276,14 +276,14 @@ impl Riscv64Codegen {
             | (rd as u32) << 7
             | 0b1010000 << 25
             | 0x53;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// FLE.S rd, fs1, fs2: single-precision less-equal comparison
     pub(crate) fn emit_fle_s(&mut self, rd: u8, fs1: u8, fs2: u8) {
         let insn =
             ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (rd as u32) << 7 | 0b1010000 << 25 | 0x53;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// FSQRT.S fd, fs1: 单精度平方根, funct7=0101101
@@ -291,14 +291,14 @@ impl Riscv64Codegen {
         let insn = ((fs1 as u32) << 15) | (fd as u32) << 7 | 0b0101101 << 25 | 0x53;
         // rm field (bits [14:12]) = 000 (RNE) — encoded as part of funct7 shift
         let insn = insn & !(0b111 << 12); // clear rm bits
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// FMIN.S fd, fs1, fs2: 单精度最小值, funct7=0010101, funct3=000
     pub(crate) fn emit_fmin_s(&mut self, fd: u8, fs1: u8, fs2: u8) {
         let insn =
             ((fs2 as u32) << 20 | (fs1 as u32) << 15) | (fd as u32) << 7 | 0b0010100 << 25 | 0x53;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// FMAX.S fd, fs1, fs2: 单精度最大值, funct7=0010101, funct3=001
@@ -309,6 +309,6 @@ impl Riscv64Codegen {
             | (fd as u32) << 7
             | 0b0010100 << 25
             | 0x53;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 }

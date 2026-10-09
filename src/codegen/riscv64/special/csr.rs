@@ -7,19 +7,19 @@ impl Riscv64Codegen {
     /// CSRRW rd, csr, rs1: 原子读写 CSR
     pub(crate) fn emit_csrrw(&mut self, rd: u8, csr: u16, rs1: u8) {
         let insn = (csr as u32) << 20 | (rs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0x73;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// CSRRS rd, csr, rs1: 原子读并置位 CSR
     pub(crate) fn emit_csrrs(&mut self, rd: u8, csr: u16, rs1: u8) {
         let insn = (csr as u32) << 20 | (rs1 as u32) << 15 | 0b010 << 12 | (rd as u32) << 7 | 0x73;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// CSRRC rd, csr, rs1: 原子读并清位 CSR
     pub(crate) fn emit_csrrc(&mut self, rd: u8, csr: u16, rs1: u8) {
         let insn = (csr as u32) << 20 | (rs1 as u32) << 15 | 0b011 << 12 | (rd as u32) << 7 | 0x73;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// CSRRWI rd, csr, uimm: 立即数原子读写 CSR
@@ -29,7 +29,7 @@ impl Riscv64Codegen {
             | 0b101 << 12
             | (rd as u32) << 7
             | 0x73;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// CSRRSI rd, csr, uimm: 立即数原子读并置位 CSR
@@ -39,7 +39,7 @@ impl Riscv64Codegen {
             | 0b110 << 12
             | (rd as u32) << 7
             | 0x73;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// CSRRCI rd, csr, uimm: 立即数原子读并清位 CSR
@@ -49,45 +49,45 @@ impl Riscv64Codegen {
             | 0b111 << 12
             | (rd as u32) << 7
             | 0x73;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// MRET: 机器模式返回
     pub(crate) fn emit_mret(&mut self) {
         // 0x30200073: funct7=0011000, rs2=00010, rs1=00000, funct3=000, rd=00000
         let insn = 0x30200073u32;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// SRET: 监管模式返回
     pub(crate) fn emit_sret(&mut self) {
         let insn = 0x10200073u32;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// WFI: 等待中断
     pub(crate) fn emit_wfi(&mut self) {
         let insn = 0x10500073u32;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// SFENCE.VMA rs1, rs2: 虚拟内存屏障
     pub(crate) fn emit_sfence_vma(&mut self, rs1: u8, rs2: u8) {
         let insn = ((rs2 as u32) << 20 | (rs1 as u32) << 15) | 0x73;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// FENCE: 内存屏障 (全序)
     pub(crate) fn emit_fence(&mut self) {
         // FENCE pred=RW, succ=RW, fm=0
         let insn = 0x0ff0000fu32;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// FENCE.I: 指令获取屏障
     pub(crate) fn emit_fence_i(&mut self) {
         let insn = 0x0000100fu32;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     // ===== M8 新增: sret 辅助 =====
@@ -129,7 +129,7 @@ impl Riscv64Codegen {
         }
         let imm = off as u32 & 0xfff;
         let insn = imm << 20 | (rs1 as u32) << 15 | 0b011 << 12 | (rd as u32) << 7 | 0x03;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// -ftrivial-auto-var-init=zero: 零初始化栈帧
@@ -170,14 +170,14 @@ impl Riscv64Codegen {
             | 0b011 << 12
             | (imm & 0x1f) << 7
             | 0x23;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// LBU rd, offset(rs1): 无符号字节加载
     pub(crate) fn emit_lbu(&mut self, rd: u8, rs1: u8, off: i32) {
         let imm = off as u32 & 0xfff;
         let insn = imm << 20 | (rs1 as u32) << 15 | 0b100 << 12 | (rd as u32) << 7 | 0x03;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// SB rs2, offset(rs1): 字节存储
@@ -186,6 +186,6 @@ impl Riscv64Codegen {
         let insn = (((imm >> 5) & 0x7f) << 25 | (rs2 as u32) << 20 | (rs1 as u32) << 15)
             | (imm & 0x1f) << 7
             | 0x23;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 }

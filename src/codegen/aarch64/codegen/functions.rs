@@ -5,6 +5,7 @@ use crate::ast::{BlockItem, Decl, Expr, FuncDecl, Stmt, Type};
 use crate::codegen::aarch64::codegen::{
     aggregate_size, local_stack_size, stmt_has_call, Aarch64Codegen,
 };
+use crate::codegen::aarch64::insn::Insn;
 use crate::ir::Function;
 
 impl Aarch64Codegen {
@@ -198,7 +199,7 @@ impl Aarch64Codegen {
                                         | 0b010 << 10
                                         | 2 << 22
                                         | 0x2e000000;
-                                    self.emit(&insn.to_le_bytes());
+                                    self.emit_insn(&Insn::raw(insn));
                                 },
                                 Type::Double | Type::LongDouble => {
                                     // str d{fp_reg_idx}, [sp, #off]

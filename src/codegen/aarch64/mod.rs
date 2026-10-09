@@ -17,12 +17,16 @@
 //   special/*             - builtins, atomics, TLS, inline asm, cache/DSB,
 //                           MTE
 
+mod asm_dialect;
 mod backend;
 mod codegen;
 mod emit;
+#[cfg(test)]
+mod encode_truth_test;
 mod expression_impl;
 mod expression_impl2;
 mod expression_impl3;
+mod insn;
 mod special;
 
 #[cfg(test)]

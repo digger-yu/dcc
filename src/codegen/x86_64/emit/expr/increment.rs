@@ -7,6 +7,7 @@
 use crate::ast::find_field;
 use crate::ast::*;
 use crate::codegen::shared::elf as shared_elf;
+use crate::codegen::x86_64::insn::Insn;
 
 use crate::diagnostics::Span;
 
@@ -62,42 +63,42 @@ impl super::super::super::Codegen {
                 self.emit_global_addr(0, &name.name); // rax = &c
                 self.emit_seg(seg);
                 match inner_ty.size() {
-                    1 => self.emit(&[0x48, 0x0F, 0xB6, 0x00]),
-                    2 => self.emit(&[0x48, 0x0F, 0xB7, 0x00]),
-                    4 => self.emit(&[0x8B, 0x00]),
-                    _ => self.emit(&[0x48, 0x8B, 0x00]),
+                    1 => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB6, 0x00])); },
+                    2 => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB7, 0x00])); },
+                    4 => { self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x00])); },
+                    _ => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x00])); },
                 }
                 // rax = 值 (零扩展), 地址在 [rsp]
                 if !is_pre {
                     // 后缀：保存旧值到 rcx (返回用)
-                    self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC1])); // mov rcx, rax
                 }
                 // 3. 从栈恢复地址到 rax
-                self.emit(&[0x48, 0x8B, 0x04, 0x24]); // mov rax, [rsp]
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x04, 0x24])); // mov rax, [rsp]
                                                       // rax = 地址，加载值并递增
                 self.emit_seg(seg);
                 match inner_ty.size() {
-                    1 => self.emit(&[0x48, 0x0F, 0xB6, 0x00]),
-                    2 => self.emit(&[0x48, 0x0F, 0xB7, 0x00]),
-                    4 => self.emit(&[0x8B, 0x00]),
-                    _ => self.emit(&[0x48, 0x8B, 0x00]),
+                    1 => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB6, 0x00])); },
+                    2 => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB7, 0x00])); },
+                    4 => { self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x00])); },
+                    _ => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x00])); },
                 }
                 // rax = 值 (零扩展)
                 self.emit_inc_dec_reg(0, is_inc, step as i32); // rax = 新值
                                                                // 写回：地址仍在 [rsp], 用 rdx 暂存地址
-                self.emit(&[0x48, 0x8B, 0x14, 0x24]); // mov rdx, [rsp]
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x14, 0x24])); // mov rdx, [rsp]
                 self.emit_seg(seg);
                 match inner_ty.size() {
-                    1 => self.emit(&[0x88, 0x02]),       // mov [rdx], al
-                    2 => self.emit(&[0x66, 0x89, 0x02]), // mov [rdx], ax
-                    4 => self.emit(&[0x89, 0x02]),       // mov [rdx], eax
-                    _ => self.emit(&[0x48, 0x89, 0x02]), // mov [rdx], rax
+                    1 => { self.emit_insn(&Insn::raw_bytes(&[0x88, 0x02])); },       // mov [rdx], al
+                    2 => { self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x02])); }, // mov [rdx], ax
+                    4 => { self.emit_insn(&Insn::raw_bytes(&[0x89, 0x02])); },       // mov [rdx], eax
+                    _ => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x02])); }, // mov [rdx], rax
                 }
                 // 4. 清理栈并设置返回值
                 self.pop(2); // 弹出地址 (丢弃)
                 if !is_pre {
                     // 后缀：返回旧值 (在 rcx)
-                    self.emit(&[0x48, 0x89, 0xC8]); // mov rax, rcx
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC8])); // mov rax, rcx
                     if dst != 0 && dst != 1 {
                         self.mov(dst, 1);
                     } // dst = rcx
@@ -161,32 +162,32 @@ impl super::super::super::Codegen {
                 match ty_sz {
                     1 => {
                         let rex = 0x49u8 | if dst >= 8 { 0x04 } else { 0 };
-                        self.emit(&[rex, 0x88]);
+                        self.emit_insn(&Insn::raw_bytes(&[rex, 0x88]));
                         if off.abs() < 128 {
-                            self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
+                            self.emit_insn(&Insn::raw_bytes(&[0x45 | ((dst & 7) << 3), off as i8 as u8]));
                         } else {
-                            self.emit(&[0x85 | ((dst & 7) << 3)]);
-                            self.emit(&(off as i32).to_le_bytes());
+                            self.emit_insn(&Insn::raw_bytes(&[0x85 | ((dst & 7) << 3)]));
+                            self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
                         }
                     },
                     2 => {
                         let rex = 0x49u8 | if dst >= 8 { 0x04 } else { 0 };
-                        self.emit(&[0x66, rex, 0x89]);
+                        self.emit_insn(&Insn::raw_bytes(&[0x66, rex, 0x89]));
                         if off.abs() < 128 {
-                            self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
+                            self.emit_insn(&Insn::raw_bytes(&[0x45 | ((dst & 7) << 3), off as i8 as u8]));
                         } else {
-                            self.emit(&[0x85 | ((dst & 7) << 3)]);
-                            self.emit(&(off as i32).to_le_bytes());
+                            self.emit_insn(&Insn::raw_bytes(&[0x85 | ((dst & 7) << 3)]));
+                            self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
                         }
                     },
                     4 => {
                         let rex = 0x49u8 | if dst >= 8 { 0x04 } else { 0 };
-                        self.emit(&[rex, 0x89]);
+                        self.emit_insn(&Insn::raw_bytes(&[rex, 0x89]));
                         if off.abs() < 128 {
-                            self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
+                            self.emit_insn(&Insn::raw_bytes(&[0x45 | ((dst & 7) << 3), off as i8 as u8]));
                         } else {
-                            self.emit(&[0x85 | ((dst & 7) << 3)]);
-                            self.emit(&(off as i32).to_le_bytes());
+                            self.emit_insn(&Insn::raw_bytes(&[0x85 | ((dst & 7) << 3)]));
+                            self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
                         }
                     },
                     _ => self.store_stack(dst, off),
@@ -199,27 +200,27 @@ impl super::super::super::Codegen {
                     match (ty_sz, signed) {
                         (1, false) => {
                             // movzbl: zero-extend byte
-                            self.emit(&[rex_b, 0x0F, 0xB6]);
+                            self.emit_insn(&Insn::raw_bytes(&[rex_b, 0x0F, 0xB6]));
                         },
                         (1, true) => {
                             // movsbl: sign-extend byte
-                            self.emit(&[rex_b, 0x0F, 0xBE]);
+                            self.emit_insn(&Insn::raw_bytes(&[rex_b, 0x0F, 0xBE]));
                         },
                         (2, false) => {
                             // movzwl: zero-extend word
-                            self.emit(&[rex_b, 0x0F, 0xB7]);
+                            self.emit_insn(&Insn::raw_bytes(&[rex_b, 0x0F, 0xB7]));
                         },
                         (2, true) => {
                             // movswl: sign-extend word
-                            self.emit(&[rex_b, 0x0F, 0xBF]);
+                            self.emit_insn(&Insn::raw_bytes(&[rex_b, 0x0F, 0xBF]));
                         },
                         _ => {},
                     }
                     if off.abs() < 128 {
-                        self.emit(&[0x45 | ((dst & 7) << 3), off as i8 as u8]);
+                        self.emit_insn(&Insn::raw_bytes(&[0x45 | ((dst & 7) << 3), off as i8 as u8]));
                     } else {
-                        self.emit(&[0x85 | ((dst & 7) << 3)]);
-                        self.emit(&(off as i32).to_le_bytes());
+                        self.emit_insn(&Insn::raw_bytes(&[0x85 | ((dst & 7) << 3)]));
+                        self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
                     }
                 }
                 if !is_pre {
@@ -297,13 +298,13 @@ impl super::super::super::Codegen {
                 self.pop(1); // rcx = 地址
             }
             if let Some(seg) = seg_prefix {
-                self.emit(&[seg]);
+                self.emit_insn(&Insn::raw_bytes(&[seg]));
             }
             match mem_sz {
-                1 => self.emit(&[0x88, 0x01]),       // mov byte [rcx], al
-                2 => self.emit(&[0x66, 0x89, 0x01]), // mov word [rcx], ax
-                4 => self.emit(&[0x89, 0x01]),       // mov dword [rcx], eax
-                _ => self.emit(&[0x48, 0x89, 0x01]), // mov qword [rcx], rax
+                1 => { self.emit_insn(&Insn::raw_bytes(&[0x88, 0x01])); },       // mov byte [rcx], al
+                2 => { self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x01])); }, // mov word [rcx], ax
+                4 => { self.emit_insn(&Insn::raw_bytes(&[0x89, 0x01])); },       // mov dword [rcx], eax
+                _ => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x01])); }, // mov qword [rcx], rax
             }
             if is_pre {
                 if dst != 0 {
@@ -343,118 +344,118 @@ impl super::super::super::Codegen {
             }
         }
         if field_off != 0 {
-            self.emit(&[0x48, 0x05]);
-            self.emit(&(field_off as i32).to_le_bytes());
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x05]));
+            self.emit_insn(&Insn::raw_bytes(&(field_off as i32).to_le_bytes()));
         }
         // rax = container address
-        self.emit(&[0x49, 0x89, 0x45, addr_slot as u8]); // [r13+addr_slot] = addr
+        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x45, addr_slot as u8])); // [r13+addr_slot] = addr
 
         // 2. Load container, extract bitfield value
         match container_size {
-            4 => self.emit(&[0x8B, 0x00]),
-            8 => self.emit(&[0x48, 0x8B, 0x00]),
+            4 => { self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x00])); },
+            8 => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x00])); },
             2 => {
-                self.emit(&[0x66, 0x8B, 0x00]);
-                self.emit(&[0x48, 0x0F, 0xB7, 0xC0]);
+                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x00]));
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB7, 0xC0]));
             },
-            1 => self.emit(&[0x48, 0x0F, 0xB6, 0xC0]),
+            1 => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB6, 0xC0])); },
             _ => {},
         }
         if bit_off > 0 {
-            self.emit(&[0x48, 0xC1, 0xE8, bit_off as u8]);
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xE8, bit_off as u8]));
         }
         if bw < 64 {
             let mask = (1u64 << bw) - 1;
             if mask <= 0x7FFFFFFF {
                 // 掩码可符号扩展到 32 位：and eax, imm32
-                self.emit(&[0x48, 0x25]);
-                self.emit(&(mask as u32).to_le_bytes());
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x25]));
+                self.emit_insn(&Insn::raw_bytes(&(mask as u32).to_le_bytes()));
             } else if mask <= 0xFFFFFFFF {
                 // 掩码 fits 32 位零扩展：mov ecx, mask; and rax, rcx
-                self.emit(&[0x48, 0xB9]); // mov rcx, imm32 (zero-ext)
-                self.emit(&(mask as u32).to_le_bytes());
-                self.emit(&[0x48, 0x21, 0xC8]); // and rax, rcx
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB9])); // mov rcx, imm32 (zero-ext)
+                self.emit_insn(&Insn::raw_bytes(&(mask as u32).to_le_bytes()));
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC8])); // and rax, rcx
             } else {
                 // 掩码 > 32 位：movabs rcx, mask; and rax, rcx
-                self.emit(&[0x48, 0xB9]); // mov rcx, imm64
-                self.emit(&mask.to_le_bytes());
-                self.emit(&[0x48, 0x21, 0xC8]); // and rax, rcx
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB9])); // mov rcx, imm64
+                self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC8])); // and rax, rcx
             }
         }
         // rax = old bitfield value
-        self.emit(&[0x49, 0x89, 0x45, old_slot as u8]); // save old
+        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x45, old_slot as u8])); // save old
 
         // 3. Compute new value
         self.emit_inc_dec_reg(0, is_inc, 1);
         if bw < 64 {
             let mask = (1u64 << bw) - 1;
             if mask <= 0x7FFFFFFF {
-                self.emit(&[0x48, 0x25]);
-                self.emit(&(mask as u32).to_le_bytes());
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x25]));
+                self.emit_insn(&Insn::raw_bytes(&(mask as u32).to_le_bytes()));
             } else if mask <= 0xFFFFFFFF {
-                self.emit(&[0x48, 0xB9]);
-                self.emit(&(mask as u32).to_le_bytes());
-                self.emit(&[0x48, 0x21, 0xC8]);
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB9]));
+                self.emit_insn(&Insn::raw_bytes(&(mask as u32).to_le_bytes()));
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC8]));
             } else {
-                self.emit(&[0x48, 0xB9]);
-                self.emit(&mask.to_le_bytes());
-                self.emit(&[0x48, 0x21, 0xC8]);
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB9]));
+                self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC8]));
             }
         }
         // rax = new bitfield value
-        self.emit(&[0x49, 0x89, 0x45, new_slot as u8]); // save new
+        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x45, new_slot as u8])); // save new
 
         // 4. Write back: RMW on container
         // Reload address into rcx
-        self.emit(&[0x49, 0x8B, 0x4D, addr_slot as u8]); // rcx = addr
+        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x4D, addr_slot as u8])); // rcx = addr
                                                          // Load container into rcx
         match container_size {
-            4 => self.emit(&[0x8B, 0x09]),
-            8 => self.emit(&[0x48, 0x8B, 0x09]),
+            4 => { self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x09])); },
+            8 => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x09])); },
             2 => {
-                self.emit(&[0x66, 0x8B, 0x09]);
-                self.emit(&[0x48, 0x0F, 0xB7, 0xC9]);
+                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x09]));
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB7, 0xC9]));
             },
-            1 => self.emit(&[0x48, 0x0F, 0xB6, 0xC9]),
+            1 => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB6, 0xC9])); },
             _ => {},
         }
         // Clear target bits
         let bf_mask = if bw >= 64 { u64::MAX } else { (1u64 << bw) - 1 };
         let inv_mask = !(bf_mask << bit_off);
         if (inv_mask as u32 as i32 as i64 as u64) == inv_mask {
-            self.emit(&[0x48, 0x81, 0xE1]);
-            self.emit(&(inv_mask as u32).to_le_bytes());
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xE1]));
+            self.emit_insn(&Insn::raw_bytes(&(inv_mask as u32).to_le_bytes()));
         } else {
-            self.emit(&[0x49, 0xB8]);
-            self.emit(&inv_mask.to_le_bytes());
-            self.emit(&[0x4C, 0x21, 0xC1]);
+            self.emit_insn(&Insn::raw_bytes(&[0x49, 0xB8]));
+            self.emit_insn(&Insn::raw_bytes(&inv_mask.to_le_bytes()));
+            self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x21, 0xC1]));
         }
         // Load new value into rdx, shift, OR
-        self.emit(&[0x49, 0x8B, 0x55, new_slot as u8]); // rdx = new val
+        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x55, new_slot as u8])); // rdx = new val
         if bit_off > 0 {
-            self.emit(&[0x48, 0xC1, 0xE2, bit_off as u8]);
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xE2, bit_off as u8]));
         }
-        self.emit(&[0x48, 0x09, 0xD1]); // or rcx, rdx
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xD1])); // or rcx, rdx
                                         // Store container back
-        self.emit(&[0x49, 0x8B, 0x45, addr_slot as u8]); // rax = addr
+        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x45, addr_slot as u8])); // rax = addr
         match container_size {
-            4 => self.emit(&[0x89, 0x08]),
-            8 => self.emit(&[0x48, 0x89, 0x08]),
-            2 => self.emit(&[0x66, 0x89, 0x08]),
-            1 => self.emit(&[0x88, 0x08]),
+            4 => { self.emit_insn(&Insn::raw_bytes(&[0x89, 0x08])); },
+            8 => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x08])); },
+            2 => { self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x08])); },
+            1 => { self.emit_insn(&Insn::raw_bytes(&[0x88, 0x08])); },
             _ => {},
         }
 
         // 5. Set return value
         if is_pre {
             // Return new value
-            self.emit(&[0x49, 0x8B, 0x45, new_slot as u8]); // rax = new
+            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x45, new_slot as u8])); // rax = new
             if dst != 0 {
                 self.mov(dst, 0);
             }
         } else {
             // Return old value
-            self.emit(&[0x49, 0x8B, 0x45, old_slot as u8]); // rax = old
+            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x45, old_slot as u8])); // rax = old
             if dst != 0 {
                 self.mov(dst, 0);
             }
@@ -471,11 +472,11 @@ impl super::super::super::Codegen {
             0xE8 | (dst & 7) // /5 (SUB): reg=101, r/m=dst&7
         };
         if dst < 8 {
-            self.emit(&[0x48, 0x81, modrm]);
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, modrm]));
         } else {
-            self.emit(&[0x49, 0x81, modrm]);
+            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x81, modrm]));
         }
-        self.emit(&step.to_le_bytes());
+        self.emit_insn(&Insn::raw_bytes(&step.to_le_bytes()));
     }
 
     /// 浮点增量/减量：暂不实现 - 走 gen_float_inc_dec 路径

@@ -4,6 +4,7 @@
 use crate::codegen::shared::asm_constraints::{self, resolve_asm_operands};
 
 use crate::codegen::arm::codegen::ArmCodegen;
+use crate::codegen::arm::insn::Insn;
 
 impl ArmCodegen {
     // 与所有后端的 `emit_inline_asm` 签名保持一致, 打包成结构体收益有限。
@@ -107,6 +108,6 @@ impl ArmCodegen {
     /// DMB ISH — 内部共享内存屏障 (memory clobber 编译器屏障)
     pub(crate) fn emit_dmb(&mut self) {
         // DMB ISH: 0xF57FF05B (ARMv7+)
-        self.code.extend_from_slice(&[0x5B, 0xF0, 0x7F, 0xF5]);
+        self.emit_insn(&Insn::raw(0xF57FF05B));
     }
 }

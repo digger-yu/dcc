@@ -7,6 +7,7 @@ use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
 use crate::codegen::x86_64::asm::*;
+use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::*;
 use crate::const_eval::{self, ConstValue};
@@ -45,8 +46,8 @@ impl Codegen {
                 self.gen_expr(n_expr, Self::EVAL_BASE); // rax = 本维元素个数
                 let isz = inner.size() as i32;
                 if isz != 1 {
-                    self.emit(&[0x48, 0x69, 0xC0]); // imul rax, rax, imm32
-                    self.emit(&isz.to_le_bytes());
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x69, 0xC0])); // imul rax, rax, imm32
+                    self.emit_insn(&Insn::raw_bytes(&isz.to_le_bytes()));
                 }
             },
             Type::Array(inner, ArraySize::Const(n)) if Self::type_has_vla(&inner.base) => {
@@ -59,8 +60,8 @@ impl Codegen {
             },
             _ => {
                 let sz = ty.size().max(1) as i32;
-                self.emit(&[0x48, 0xC7, 0xC0]); // mov rax, imm32 (sign-ext)
-                self.emit(&sz.to_le_bytes());
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC0])); // mov rax, imm32 (sign-ext)
+                self.emit_insn(&Insn::raw_bytes(&sz.to_le_bytes()));
             },
         }
     }
@@ -116,9 +117,9 @@ impl Codegen {
             self.emit_mov_mem_r13(0, off + 16);
             // 对齐 16 字节后 sub rsp 分配数据区, 基址存入 [off]
             // (与 VLA 数组同一约定, gen_lvalue_addr/load_stack 统一读)
-            self.emit(&[0x48, 0x83, 0xc0, 0x0f]); // add rax, 15
-            self.emit(&[0x48, 0x83, 0xe0, 0xf0]); // and rax, -16
-            self.emit(&[0x48, 0x29, 0xC4]); // sub rsp, rax
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xc0, 0x0f])); // add rax, 15
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xe0, 0xf0])); // and rax, -16
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x29, 0xC4])); // sub rsp, rax
             self.store_stack(4, off);
             return;
         }
@@ -147,15 +148,15 @@ impl Codegen {
         }
         // rax *= stride: mov rcx, [r13+off+8]; imul rax, rcx
         self.emit_mov_mem_r13(1, off + 8);
-        self.emit(&[0x48, 0x0F, 0xAF, 0xC1]); // imul rax, rcx
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xAF, 0xC1])); // imul rax, rcx
                                               // mov [r13 + off + 16], rax: 声明时总大小 (未对齐), sizeof 取用
         self.emit_store_rax_r13(off + 16);
         // 对齐到 16 字节: (rax + 15) & ~15
-        self.emit(&[0x48, 0x83, 0xc0, 0x0f]); // add rax, 15
-        self.emit(&[0x48, 0x83, 0xe0, 0xf0]); // and rax, -16
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xc0, 0x0f])); // add rax, 15
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xe0, 0xf0])); // and rax, -16
                                               // 保存当前 rsp (VLA 基址)
                                               // sub rsp, rax: 48 29 C4
-        self.emit(&[0x48, 0x29, 0xC4]);
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x29, 0xC4]));
         self.store_stack(4, off);
         // 对齐 rsp 到 16 字节 (已经是 16 对齐的, 因为 rax 是 16 对齐的)
     }
@@ -202,7 +203,7 @@ impl Codegen {
         if tf_idx != fv_idx {
             let s0 = *slot_iter.next().unwrap();
             self.load_stack(11, s0);
-            self.emit(&add_acc_r11);
+            self.emit_insn(&Insn::raw_bytes(&add_acc_r11));
         }
         for f in fields
             .iter()
@@ -214,20 +215,20 @@ impl Codegen {
                 let m = (fa - 1) as i128;
                 // add/and r/m64=acc, imm32: acc>=8 需 REX.B(0x01)
                 let rex = 0x48 | if acc >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                self.emit(&[rex, 0x81, 0xC0 | (acc & 7)]);
+                self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xC0 | (acc & 7)]));
                 // imm32: 只能发 4 字节 (i128 to_le_bytes 是 16 字节)
-                self.emit(&(m as u32).to_le_bytes());
-                self.emit(&[rex, 0x81, 0xE0 | (acc & 7)]);
-                self.emit(&(!m as u64 as u32).to_le_bytes());
+                self.emit_insn(&Insn::raw_bytes(&(m as u32).to_le_bytes()));
+                self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xE0 | (acc & 7)]));
+                self.emit_insn(&Insn::raw_bytes(&(!m as u64 as u32).to_le_bytes()));
             }
             if f.ty.has_vla() {
                 let s = *slot_iter.next().unwrap();
                 self.load_stack(11, s);
-                self.emit(&add_acc_r11);
+                self.emit_insn(&Insn::raw_bytes(&add_acc_r11));
             } else {
                 let rex = 0x48 | if acc >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                self.emit(&[rex, 0x81, 0xC0 | (acc & 7)]);
-                self.emit(&(f.ty.size() as u32).to_le_bytes());
+                self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xC0 | (acc & 7)]));
+                self.emit_insn(&Insn::raw_bytes(&(f.ty.size() as u32).to_le_bytes()));
             }
         }
         // 目标字段偏移 = align_up(acc, tf 对齐)
@@ -239,14 +240,14 @@ impl Codegen {
             let m = (tfa - 1) as i128;
             // add/and r/m64=acc, imm32: acc>=8 需 REX.B(0x01)
             let rex = 0x48 | if acc >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-            self.emit(&[rex, 0x81, 0xC0 | (acc & 7)]);
-            self.emit(&(m as u32).to_le_bytes());
-            self.emit(&[rex, 0x81, 0xE0 | (acc & 7)]);
-            self.emit(&(!m as u64 as u32).to_le_bytes());
+            self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xC0 | (acc & 7)]));
+            self.emit_insn(&Insn::raw_bytes(&(m as u32).to_le_bytes()));
+            self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xE0 | (acc & 7)]));
+            self.emit_insn(&Insn::raw_bytes(&(!m as u64 as u32).to_le_bytes()));
         }
         // dst += acc: opcode 01 /r, r/m=dst(B), reg=acc(R)
         let rex = 0x48 | if acc >= 8 { 0x04 } else { 0 } | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-        self.emit(&[rex, 0x01, 0xC0 | ((acc & 7) << 3) | (dst & 7)]);
+        self.emit_insn(&Insn::raw_bytes(&[rex, 0x01, 0xC0 | ((acc & 7) << 3) | (dst & 7)]));
         true
     }
     pub(crate) fn gen_vm_struct_bind(&mut self, sd: &StructDef, is_union: bool) {

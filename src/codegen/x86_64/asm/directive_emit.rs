@@ -8,6 +8,7 @@ use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
 use crate::codegen::x86_64::asm::*;
 use crate::codegen::x86_64::Codegen;
+use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::*;
 use crate::const_eval::{self, ConstValue};
 use crate::debug::*;
@@ -28,7 +29,7 @@ impl Codegen {
             // `undefined reference to '(20*32+ 2)'`.
             if let Some(v) = Self::eval_pure_numeric_arith(expr) {
                 let bytes = v.to_le_bytes();
-                self.emit(&bytes[..size]);
+                self.emit_insn(&Insn::raw_bytes(&bytes[..size]));
                 continue;
             }
             if let Some((symbol, addend)) = Self::parse_asm_pc_relative_long(expr) {
@@ -38,12 +39,12 @@ impl Codegen {
                     rel_type: R_X86_64_PC32,
                     addend,
                 });
-                self.emit(&vec![0u8; size]);
+                self.emit_insn(&Insn::raw_bytes(&vec![0u8; size]));
                 continue;
             }
             if let Some(v) = Self::parse_asm_imm_token(expr) {
                 let bytes = v.to_le_bytes();
-                self.emit(&bytes[..size]);
+                self.emit_insn(&Insn::raw_bytes(&bytes[..size]));
             } else if size == 4 && !expr.is_empty() {
                 self.pending_code_rels.push(PendingCodeRel {
                     offset: off,
@@ -51,21 +52,21 @@ impl Codegen {
                     rel_type: R_X86_64_32,
                     addend: 0,
                 });
-                self.emit(&[0u8; 4]);
+                self.emit_insn(&Insn::raw_bytes(&[0u8; 4]));
             } else {
-                self.emit(&vec![0u8; size]);
+                self.emit_insn(&Insn::raw_bytes(&vec![0u8; size]));
             }
         }
     }
     pub(crate) fn emit_asm_desc(&mut self, op: &AsmOperand, ext: u8) {
         match op {
             AsmOperand::Reg(r, _) => {
-                self.emit(&[
+                self.emit_insn(&Insn::raw_bytes(&[
                     Self::rex(false, 0, 0, *r),
                     0x0F,
                     0x00,
                     ((ext & 7) << 3) | (r & 7),
-                ]);
+                ]));
             },
             AsmOperand::Mem {
                 disp,
@@ -73,7 +74,7 @@ impl Codegen {
                 index,
                 scale,
             } => {
-                self.emit(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0x00]);
+                self.emit_insn(&Insn::raw_bytes(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0x00]));
                 self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
             },
             _ => {
@@ -104,7 +105,7 @@ impl Codegen {
                         n.max(1)
                     };
                     while !self.code.is_empty() && !self.code.len().is_multiple_of(align) {
-                        self.emit(&[0x90]);
+                        self.emit_insn(&Insn::raw_bytes(&[0x90]));
                     }
                 }
                 true
@@ -138,9 +139,9 @@ impl Codegen {
                         self.asm_directives.push(t.to_string());
                     } else {
                         for b in s.bytes() {
-                            self.emit(&[b]);
+                            self.emit_insn(&Insn::raw_bytes(&[b]));
                         }
-                        self.emit(&[0]);
+                        self.emit_insn(&Insn::raw_bytes(&[0]));
                     }
                 }
                 true
@@ -157,7 +158,7 @@ impl Codegen {
                     let args_str = t[".ascii".len()..].trim();
                     let s = Self::parse_asm_quoted_string(args_str);
                     for b in s.bytes() {
-                        self.emit(&[b]);
+                        self.emit_insn(&Insn::raw_bytes(&[b]));
                     }
                 }
                 true
@@ -219,7 +220,7 @@ impl Codegen {
                                 None => data.len(),
                             };
                             if start < data.len() {
-                                self.emit(&data[start..end]);
+                                self.emit_insn(&Insn::raw_bytes(&data[start..end]));
                             }
                         }
                     }

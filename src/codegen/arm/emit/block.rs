@@ -6,6 +6,7 @@ use crate::ir::TypedStmt;
 
 use crate::codegen::arm::codegen::ArmCodegen;
 use crate::codegen::arm::codegen::BranchKind;
+use crate::codegen::arm::insn::Insn;
 
 impl ArmCodegen {
     pub(crate) fn gen_block_item(&mut self, item: &BlockItem, _ir: &TypedStmt) {
@@ -151,7 +152,7 @@ impl ArmCodegen {
                             let pos = self.code.len() as u64;
                             self.pending_branches
                                 .push((pos, lbl_case.clone(), BranchKind::Beq));
-                            self.code.extend_from_slice(&0x0A000000u32.to_le_bytes());
+                            self.emit_insn(&Insn::raw(0x0A000000));
                             case_labels.push((lbl_case, case));
                         }
                     } else {

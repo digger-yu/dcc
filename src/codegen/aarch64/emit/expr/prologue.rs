@@ -2,6 +2,7 @@
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
 use crate::codegen::aarch64::codegen::{Aarch64Codegen, BranchKind};
+use crate::codegen::aarch64::insn::Insn;
 use crate::codegen::shared::elf::{
     self, ElfRela, ElfSym, R_AARCH64_CALL26, STB_GLOBAL, STT_FUNC, STT_OBJECT,
 };
@@ -13,7 +14,7 @@ impl Aarch64Codegen {
         }
         if bytes <= 0xfff {
             let insn = 0xd100_0000u32 | ((bytes & 0xfff) << 10) | (31 << 5) | 31;
-            self.emit(&insn.to_le_bytes());
+            self.emit_insn(&Insn::raw(insn));
         }
     }
 
@@ -32,23 +33,23 @@ impl Aarch64Codegen {
             // Probe loop using x16 (ip0, ABI scratch) as counter
             // movz x16, #pages
             let movz = 0x52800010u32 | ((pages & 0xffff) << 5);
-            self.emit(&movz.to_le_bytes());
+            self.emit_insn(&Insn::raw(movz));
             // .probe_loop:
             let loop_start = self.pos();
             // sub sp, sp, #4096  (1 << 12, using shift encoding)
             let sub_insn = 0xd1000000u32 | (1u32 << 22) | (1u32 << 10) | (31u32 << 5) | 31;
-            self.emit(&sub_insn.to_le_bytes());
+            self.emit_insn(&Insn::raw(sub_insn));
             // strb wzr, [sp]  — probe the page
             let strb = 0x3900001fu32;
-            self.emit(&strb.to_le_bytes());
+            self.emit_insn(&Insn::raw(strb));
             // sub x16, x16, #1
             let sub_cnt = 0xd1000010u32 | (1u32 << 10);
-            self.emit(&sub_cnt.to_le_bytes());
+            self.emit_insn(&Insn::raw(sub_cnt));
             // cbnz x16, .probe_loop
             let loop_end = self.pos();
             let offset = (loop_start as i64 - loop_end as i64) as i32;
             let cbnz = 0xb5000010u32 | (((offset as u32 >> 2) & 0x7ffff) << 5);
-            self.emit(&cbnz.to_le_bytes());
+            self.emit_insn(&Insn::raw(cbnz));
         }
     }
 
@@ -58,42 +59,42 @@ impl Aarch64Codegen {
         }
         if bytes <= 0xfff {
             let insn = 0x9100_0000u32 | ((bytes & 0xfff) << 10) | (31 << 5) | 31;
-            self.emit(&insn.to_le_bytes());
+            self.emit_insn(&Insn::raw(insn));
         }
     }
 
     pub(crate) fn neg_w0(&mut self) {
-        self.emit(&[0x00, 0x00, 0x00, 0x4b]);
+        self.emit_insn(&Insn::raw(0x4b000000));
     }
 
     pub(crate) fn mvn_w0(&mut self) {
-        self.emit(&[0x20, 0x03, 0x20, 0x2a]);
+        self.emit_insn(&Insn::raw(0x2a200320));
     }
 
     pub(crate) fn cmp_w0_zero(&mut self) {
-        self.emit(&[0x1f, 0x00, 0x00, 0x71]);
-        self.emit(&[0xe0, 0x07, 0x9f, 0x1a]);
+        self.emit_insn(&Insn::raw(0x7100001f));
+        self.emit_insn(&Insn::raw(0x1a9f07e0));
     }
 
     pub(crate) fn cmp_w0_w1(&mut self) {
-        self.emit(&[0x3f, 0x00, 0x01, 0x6b]);
+        self.emit_insn(&Insn::raw(0x6b01001f));
     }
 
     /// cmp wn, #imm12 — 32 位立即数比较 (subs wzr, wn, #imm)
     pub(crate) fn emit_cmp_imm_w(&mut self, rn: u8, imm: u32) {
         let insn = 0x7100001fu32 | (imm << 10) | ((rn as u32 & 0x1f) << 5);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// add wd, wn, #imm12 — 32 位立即加法
     pub(crate) fn emit_add_imm_w(&mut self, dst: u8, src: u8, imm: u32) {
         let insn = 0x11000000u32 | (imm << 10) | ((src as u32 & 0x1f) << 5) | (dst as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     pub(crate) fn cbz_w0(&mut self, label: &str) {
         let pos = self.pos();
-        self.emit(&[0x00, 0x00, 0x00, 0x34]);
+        self.emit_insn(&Insn::raw(0x34000000));
         if let Some(&target) = self.labels.get(label) {
             self.patch_cbz(pos, target);
         } else {
@@ -104,7 +105,7 @@ impl Aarch64Codegen {
 
     pub(crate) fn b(&mut self, label: &str) {
         let pos = self.pos();
-        self.emit(&[0x00, 0x00, 0x00, 0x14]);
+        self.emit_insn(&Insn::raw(0x14000000));
         if let Some(&target) = self.labels.get(label) {
             self.patch_b26(pos, target);
         } else {
@@ -146,7 +147,7 @@ impl Aarch64Codegen {
             if self.lr_off >= 0 {
                 self.ldr_xt_sp(30, self.lr_off); // ldr x30, [sp, #lr_off] 恢复 lr
             }
-            self.emit(&0x9280dfffu32.to_le_bytes()); // and sp, sp, #0x00ffffffffffffff
+            self.emit_insn(&Insn::raw(0x9280dfff)); // and sp, sp, #0x00ffffffffffffff
             self.add_sp_imm(self.frame_bytes as u32);
         } else if self.frame_bytes > 0 {
             if self.lr_off >= 0 {
@@ -154,15 +155,15 @@ impl Aarch64Codegen {
             }
             self.add_sp_imm(self.frame_bytes as u32);
         }
-        self.emit(&[0xc0, 0x03, 0x5f, 0xd6]);
+        self.emit_insn(&Insn::raw(0xd65f03c0));
     }
 
     pub(crate) fn svc_zero(&mut self) {
-        self.emit(&[0x01, 0x00, 0x00, 0xd4]);
+        self.emit_insn(&Insn::raw(0xd4000001));
     }
 
     pub(crate) fn emit_bl_placeholder(&mut self) {
-        self.emit(&[0x00, 0x00, 0x00, 0x94]);
+        self.emit_insn(&Insn::raw(0x94000000));
     }
 
     /// 校验 BL 偏移是否在 ±128MiB 范围内 (imm26 × 4)
@@ -246,7 +247,7 @@ impl Aarch64Codegen {
         // Encoding: 1 immlo 10000 immhi Rd
         // immlo=00, immhi=0000000000000000000
         let adrp = 0x90000000u32 | (rd as u32 & 0x1f);
-        self.emit(&adrp.to_le_bytes());
+        self.emit_insn(&Insn::raw(adrp));
         if self.relocatable {
             let idx = self.ensure_sym("__stack_chk_guard");
             self.relocations.push(ElfRela {
@@ -265,7 +266,7 @@ impl Aarch64Codegen {
         // LDR Xt, [Xn, #imm] (unsigned offset, 64-bit)
         // imm12 = 0 (placeholder, patched by linker)
         let ldr = 0xf9400000u32 | (rt as u32 & 0x1f) | ((rn as u32 & 0x1f) << 5);
-        self.emit(&ldr.to_le_bytes());
+        self.emit_insn(&Insn::raw(ldr));
         if self.relocatable {
             let idx = self.ensure_sym("__stack_chk_guard");
             self.relocations.push(ElfRela {
@@ -281,7 +282,7 @@ impl Aarch64Codegen {
     pub(crate) fn emit_cmp_x_reg(&mut self, rn: u8, rm: u8) {
         // SUBS XZR, Xn, Xm => 0xEB000000 | Rm<<16 | Rn<<5 | 31
         let subs = 0xeb000000u32 | ((rm as u32 & 0x1f) << 16) | ((rn as u32 & 0x1f) << 5) | 31;
-        self.emit(&subs.to_le_bytes());
+        self.emit_insn(&Insn::raw(subs));
     }
 
     /// Emit B.NE label (branch if not equal, condition code 0x1)
@@ -290,7 +291,7 @@ impl Aarch64Codegen {
         // B.cond: 0x54000000 | imm19<<5 | cond
         // cond=0001 (NE)
         let bne = 0x54000001u32;
-        self.emit(&bne.to_le_bytes());
+        self.emit_insn(&Insn::raw(bne));
         if let Some(&target) = self.labels.get(label) {
             self.patch_bcond(pos, target, 0x1);
         } else {

@@ -4,6 +4,7 @@
 use crate::ast::BinOp;
 
 use crate::codegen::arm::codegen::ArmCodegen;
+use crate::codegen::arm::insn::Insn;
 
 impl ArmCodegen {
     // ===== VFP 浮点指令发射器 (ARMv7 VFPv3) =====
@@ -29,7 +30,7 @@ impl ArmCodegen {
             | imm8;
         // Adjust for U bit: if negative, clear U bit
         let inst = if fp_off < 0 { inst & !(1 << 23) } else { inst };
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VLDR: 加载双精度浮点数到 VFP 寄存器
@@ -51,7 +52,7 @@ impl ArmCodegen {
             | (dd_hi << 12)
             | imm8;
         let inst = if fp_off < 0 { inst & !(1 << 23) } else { inst };
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VSTR: 存储单精度浮点数从 VFP 寄存器到内存
@@ -70,7 +71,7 @@ impl ArmCodegen {
             | (sd_hi << 12)
             | imm8;
         let inst = if fp_off < 0 { inst & !(1 << 23) } else { inst };
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VSTR: 存储双精度浮点数从 VFP 寄存器到内存
@@ -89,7 +90,7 @@ impl ArmCodegen {
             | (dd_hi << 12)
             | imm8;
         let inst = if fp_off < 0 { inst & !(1 << 23) } else { inst };
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VADD: 单精度浮点加法 Sd = Sn + Sm
@@ -102,7 +103,7 @@ impl ArmCodegen {
         let sm_hi = ((sm >> 1) & 0xF) as u32;
         let sd_hi = ((sd >> 1) & 0xF) as u32;
         let inst = 0xEE300A00u32 | d_bit | (sn_hi << 16) | (sd_hi << 12) | n_bit | sm_hi | m_bit;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VSUB: 单精度浮点减法 Sd = Sn - Sm
@@ -120,7 +121,7 @@ impl ArmCodegen {
             | n_bit
             | sm_hi
             | m_bit;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VMUL: 单精度浮点乘法 Sd = Sn * Sm
@@ -138,7 +139,7 @@ impl ArmCodegen {
             | n_bit
             | sm_hi
             | m_bit;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VDIV: 单精度浮点除法 Sd = Sn / Sm (VFPv3+)
@@ -156,7 +157,7 @@ impl ArmCodegen {
             | n_bit
             | sm_hi
             | m_bit;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VADD: 双精度浮点加法 Dd = Dn + Dm
@@ -174,7 +175,7 @@ impl ArmCodegen {
             | n_bit
             | dm_hi
             | m_bit;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VSUB: 双精度浮点减法 Dd = Dn - Dm
@@ -192,7 +193,7 @@ impl ArmCodegen {
             | n_bit
             | dm_hi
             | m_bit;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VMUL: 双精度浮点乘法 Dd = Dn * Dm
@@ -210,7 +211,7 @@ impl ArmCodegen {
             | n_bit
             | dm_hi
             | m_bit;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VDIV: 双精度浮点除法 Dd = Dn / Dm (VFPv3+)
@@ -228,7 +229,7 @@ impl ArmCodegen {
             | n_bit
             | dm_hi
             | m_bit;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VCMP: 比较单精度浮点数并更新 FPSCR
@@ -239,7 +240,7 @@ impl ArmCodegen {
         let sm_hi = ((sm >> 1) & 0xF) as u32;
         // VCMP.S Sd, Sm: cond 1110 1011 1 D 00 Vd 1010 E 1 M 0 Vm
         let inst = 0xEEB40A40u32 | d_bit | (sd_hi << 12) | m_bit | sm_hi;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VCMP: 比较双精度浮点数并更新 FPSCR
@@ -250,13 +251,13 @@ impl ArmCodegen {
         let dm_hi = ((dm >> 1) & 0xF) as u32;
         // VCMP.D Dd, Dm
         let inst = 0xEEB40B40u32 | d_bit | (dd_hi << 12) | m_bit | dm_hi;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VMRS APSR_nzcv, FPSCR: 将 FPSCR 标志移到 ARM CPSR
     pub(crate) fn emit_vmrs_apsr(&mut self) {
         // VMRS APSR_nzcv, FPSCR: 0xEEF1FA10
-        self.code.extend_from_slice(&0xEEF1FA10u32.to_le_bytes());
+        self.emit_insn(&Insn::raw(0xEEF1FA10));
     }
 
     /// VMOV: 整数寄存器到单精度寄存器 VMOV Sd, Rn
@@ -265,7 +266,7 @@ impl ArmCodegen {
         let sd_hi = ((sd >> 1) & 0xF) as u32;
         // VMOV Sd, Rn: cond 1110 0000 0 D 00 Vd 1010 N 0 0 Rn
         let inst = 0xEE000A10u32 | d_bit | (sd_hi << 12) | (rn as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VMOV: 单精度寄存器到整数寄存器 VMOV Rn, Sm
@@ -274,7 +275,7 @@ impl ArmCodegen {
         let sm_hi = ((sm >> 1) & 0xF) as u32;
         // VMOV Rn, Sm: cond 1110 0000 1 D 00 Vn 1010 N 1 0 Rn
         let inst = 0xEE100A10u32 | m_bit | (sm_hi << 12) | (rn as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VMOV: 双精度寄存器对到两个整数寄存器 VMOV Rn, Rn+1, Dm
@@ -283,7 +284,7 @@ impl ArmCodegen {
         let dm_hi = ((dm >> 1) & 0xF) as u32;
         // VMOV r1, r2, Dm: cond 1100 0101 Rn1 Rn2 Dm_hi 1011 M 1 Dm_lo
         let inst = 0xEC500B10u32 | ((rn as u32) << 12) | (((rn + 1) as u32) << 16) | m_bit | dm_hi;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VMOV: 两个整数寄存器到双精度寄存器 VMOV Dm, Rn, Rn+1
@@ -292,7 +293,7 @@ impl ArmCodegen {
         let dm_hi = ((dm >> 1) & 0xF) as u32;
         // VMOV Dm, r1, r2
         let inst = 0xEC400B10u32 | ((rn as u32) << 12) | (((rn + 1) as u32) << 16) | m_bit | dm_hi;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VCVT: 单精度转整数 VCVT.S32.F32 Sd, Sm
@@ -303,7 +304,7 @@ impl ArmCodegen {
         let sm_hi = ((sm >> 1) & 0xF) as u32;
         // VCVT.S32.F32: cond 1111 1011 1 D 00 Vd 1010 11 M 0 Vm
         let inst = 0xEEBD0AC0u32 | d_bit | (sd_hi << 12) | m_bit | sm_hi;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VCVT: 整数转单精度 VCVT.F32.S32 Sd, Sm
@@ -314,7 +315,7 @@ impl ArmCodegen {
         let sm_hi = ((sm >> 1) & 0xF) as u32;
         // VCVT.F32.S32: cond 1111 1011 1 D 00 Vd 1010 11 M 0 Vm
         let inst = 0xEEB80AC0u32 | d_bit | (sd_hi << 12) | m_bit | sm_hi;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VCVT: 双精度转单精度 VCVT.F32.F64 Sd, Dm
@@ -325,7 +326,7 @@ impl ArmCodegen {
         let dm_hi = ((dm >> 1) & 0xF) as u32;
         // VCVT.F32.F64: cond 1111 1011 1 D 00 Vd 1011 11 M 0 Vm
         let inst = 0xEEBC0BC0u32 | d_bit | (sd_hi << 12) | m_bit | dm_hi;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VCVT: 单精度转双精度 VCVT.F64.F32 Dd, Sm
@@ -336,7 +337,7 @@ impl ArmCodegen {
         let sm_hi = ((sm >> 1) & 0xF) as u32;
         // VCVT.F64.F32: cond 1111 1011 1 D 00 Vd 1011 11 M 0 Vm
         let inst = 0xEEBB0AC0u32 | d_bit | (dd_hi << 12) | m_bit | sm_hi;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VNEG: 单精度取负 Sd = -Sm
@@ -347,7 +348,7 @@ impl ArmCodegen {
         let sm_hi = ((sm >> 1) & 0xF) as u32;
         // VNEG.S: cond 1111 1011 1 D 00 Vd 1010 01 M 0 Vm
         let inst = 0xEEB10A40u32 | d_bit | (sd_hi << 12) | m_bit | sm_hi;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// VNEG: 双精度取负 Dd = -Dm
@@ -358,7 +359,7 @@ impl ArmCodegen {
         let dm_hi = ((dm >> 1) & 0xF) as u32;
         // VNEG.D
         let inst = 0xEEB10B40u32 | d_bit | (dd_hi << 12) | m_bit | dm_hi;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// 加载单精度浮点字面量到 s0

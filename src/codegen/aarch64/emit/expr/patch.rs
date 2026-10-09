@@ -2,6 +2,7 @@
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
 use crate::codegen::aarch64::codegen::Aarch64Codegen;
+use crate::codegen::aarch64::insn::Insn;
 
 impl Aarch64Codegen {
     pub(crate) fn patch_bl(&mut self, at: u64, target: u64) {
@@ -19,7 +20,7 @@ impl Aarch64Codegen {
 
     pub(crate) fn emit_adr_placeholder(&mut self, rd: u8) {
         let insn = 0x1000_0000u32 | (rd as u32);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// 校验 ADR 偏移是否在 ±1MiB 范围内 (immhi[20:0] : immlo[1:0])
@@ -29,8 +30,8 @@ impl Aarch64Codegen {
 
     pub(crate) fn emit_ldr_s0_u32_placeholder(&mut self) {
         // ldr s0, [pc, #0]; b +8 (后续 patch_ldr_u32 修正偏移)
-        self.emit(&[0x00, 0x00, 0x00, 0xbd]);
-        self.emit(&[0x02, 0x00, 0x00, 0x14]);
+        self.emit_insn(&Insn::raw(0xbd000000));
+        self.emit_insn(&Insn::raw(0x14000002));
     }
 
     /// 校验 LDR literal 偏移是否在 ±1MiB 范围内 (imm19 × 4)
@@ -89,10 +90,10 @@ impl Aarch64Codegen {
     pub(crate) fn emit_adr_large(&mut self, rd: u8, target: u64) {
         // 先用 adrp 占位, 后续 patch
         let insn_adrp = 0x9000_0000u32 | (rd as u32);
-        self.emit(&insn_adrp.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn_adrp));
         // add rd, rd, #0 占位
         let insn_add = 0x9100_0000u32 | (rd as u32) << 5 | (rd as u32);
-        self.emit(&insn_add.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn_add));
         let pos = self.pos() - 8;
         self.pending_adr_exec.push((pos, rd, target));
     }

@@ -22,7 +22,7 @@ impl Riscv64Codegen {
                 | ((rd as u32 & 0x1f) << 7)
             },
         };
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// AMOADD - 原子加
@@ -41,7 +41,7 @@ impl Riscv64Codegen {
                 | ((rd as u32 & 0x1f) << 7)
             },
         };
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// AMOAND - 原子与
@@ -60,7 +60,7 @@ impl Riscv64Codegen {
                 | ((rd as u32 & 0x1f) << 7)
             },
         };
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// AMOOR - 原子或
@@ -79,7 +79,7 @@ impl Riscv64Codegen {
                 | ((rd as u32 & 0x1f) << 7)
             },
         };
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// AMOXOR - 原子异或
@@ -98,7 +98,7 @@ impl Riscv64Codegen {
                 | ((rd as u32 & 0x1f) << 7)
             },
         };
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// LR (Load Reserved) - 原子加载
@@ -115,7 +115,7 @@ impl Riscv64Codegen {
                 | ((rd as u32 & 0x1f) << 7)
             },
         };
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// SC (Store Conditional) - 条件存储
@@ -134,7 +134,7 @@ impl Riscv64Codegen {
                 | ((rd as u32 & 0x1f) << 7)
             },
         };
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// 按尺寸加载 (用于原子操作)

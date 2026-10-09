@@ -16,6 +16,7 @@
 mod backend;
 mod codegen;
 mod emit;
+mod insn;
 mod special;
 
 #[cfg(test)]

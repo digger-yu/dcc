@@ -5,6 +5,7 @@
 
 use crate::ast::Expr;
 use crate::codegen::x86_64::asm::AsmOpBinding;
+use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::{AsmDirectiveExpander, AsmLocalLabels, Codegen};
 
 /// Context for ASM operand binding
@@ -247,7 +248,7 @@ impl Codegen {
                 && self.code[code_len - 2] == 0xAE
                 && self.code[code_len - 1] == 0xF0;
             if !already_fenced {
-                self.emit(&[0x0F, 0xAE, 0xF0]); // mfence
+                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0])); // mfence
             }
         }
         // 记录 asm 块起始 PC (用于 DWARF 行号表)
@@ -277,7 +278,7 @@ impl Codegen {
         }
         if clobbers.iter().any(|c| c == "memory") || volatile {
             // memory clobber 或 volatile: 编译器屏障，防止指令重排越过 asm
-            self.emit(&[0x0F, 0xAE, 0xF0]); // mfence
+            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0])); // mfence
         }
     }
 
@@ -367,7 +368,7 @@ impl Codegen {
             }
         }
         if clobbers.iter().any(|c| c == "memory") {
-            self.emit(&[0x0F, 0xAE, 0xF0]); // mfence
+            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0])); // mfence
         }
     }
 }

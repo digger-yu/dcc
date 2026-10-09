@@ -91,15 +91,18 @@ fn build_aux_sections(cg: &mut ArmCodegen, input: &CompileInput<'_>) {
     let module = input.module;
 
     if opts.debug_level > 0 && opts.relocatable {
-        let func_pcs: Vec<(&str, u64, u64)> = module
-            .functions
-            .iter()
-            .filter_map(|f| {
-                cg.labels
-                    .get(&f.name)
-                    .map(|&pc| (f.name.as_str(), pc, pc + 64))
-            })
-            .collect();
+        let func_pcs: Vec<(&str, u64, u64)> = {
+            let layout = cg.snapshot_layout();
+            module
+                .functions
+                .iter()
+                .filter_map(|f| {
+                    layout
+                        .get(&f.name)
+                        .map(|pc| (f.name.as_str(), pc, pc + 64))
+                })
+                .collect()
+        };
         let dbg_opts = crate::debug::DebugOptions {
             level: opts.debug_level,
             dwarf_version: opts.dwarf_version,

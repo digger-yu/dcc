@@ -2,6 +2,7 @@
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
 use crate::codegen::aarch64::codegen::{aggregate_size, classify_hfa, Aarch64Codegen};
+use crate::codegen::aarch64::insn::Insn;
 use crate::ir::{ExprKind, TypedExpr, ValueType};
 
 impl Aarch64Codegen {
@@ -10,11 +11,11 @@ impl Aarch64Codegen {
             // fegetround(): 返回当前舍入模式 (不覆盖为 0)
             "fegetround" => {
                 // MRS X0, FPCR
-                self.emit(&0xD53B4400u32.to_le_bytes());
+                self.emit_insn(&Insn::raw(0xD53B4400));
                 // LSR W0, W0, #22 (UBFM W0,W0,#22,#31)
-                self.emit(&0x531C0000u32.to_le_bytes());
+                self.emit_insn(&Insn::raw(0x531C0000));
                 // AND W0, W0, #3
-                self.emit(&0x12000003u32.to_le_bytes());
+                self.emit_insn(&Insn::raw(0x12000003));
                 // W0 已包含舍入模式, 直接返回 (不设 0)
             },
             // fesetround(mode): 设置 FPCR 舍入位, 返回 0
@@ -25,23 +26,23 @@ impl Aarch64Codegen {
                 }
                 self.gen_expr(&args[0]); // W0 = mode
                                          // AND W0, W0, #3
-                self.emit(&0x12000003u32.to_le_bytes());
+                self.emit_insn(&Insn::raw(0x12000003));
                 // MOV W1, W0 (保存)
                 self.mov_w1_w0();
                 // MRS X2, FPCR
-                self.emit(&(0xD53B4400u32 | 2).to_le_bytes());
+                self.emit_insn(&Insn::raw(0xD53B4400u32 | 2));
                 // MOVZ W3, #0xFF3F (掩码低 16 位)
-                self.emit(&0x529FFC03u32.to_le_bytes());
+                self.emit_insn(&Insn::raw(0x529FFC03));
                 // MOVK W3, #0xFF3F, LSL #16 (掩码高 16 位)
-                self.emit(&0x729FFC03u32.to_le_bytes());
+                self.emit_insn(&Insn::raw(0x729FFC03));
                 // AND X2, X2, X3 (清除位 [23:22])
-                self.emit(&0x8A030042u32.to_le_bytes());
+                self.emit_insn(&Insn::raw(0x8A030042));
                 // LSL W1, W1, #22 (移到 FPCR 位)
-                self.emit(&0x531C0021u32.to_le_bytes());
+                self.emit_insn(&Insn::raw(0x531C0021));
                 // ORR X2, X2, X1 (合并新舍入模式)
-                self.emit(&0xAA010042u32.to_le_bytes());
+                self.emit_insn(&Insn::raw(0xAA010042));
                 // MSR FPCR, X2
-                self.emit(&(0xD51B4400u32 | 2).to_le_bytes());
+                self.emit_insn(&Insn::raw(0xD51B4400u32 | 2));
                 self.mov_w0_imm(0);
             },
             // feclearexcept(excepts): 清除 FPSR 异常标志, 返回 0
@@ -52,13 +53,13 @@ impl Aarch64Codegen {
                 }
                 self.gen_expr(&args[0]); // W0 = excepts
                                          // AND W0, W0, #0x1F
-                self.emit(&0x12000800u32.to_le_bytes());
+                self.emit_insn(&Insn::raw(0x12000800));
                 // MRS X1, FPSR
-                self.emit(&(0xD53B4420u32 | 1).to_le_bytes());
+                self.emit_insn(&Insn::raw(0xD53B4420u32 | 1));
                 // BIC X1, X1, X0 (清除选中的标志)
-                self.emit(&0x8A200021u32.to_le_bytes());
+                self.emit_insn(&Insn::raw(0x8A200021));
                 // MSR FPSR, X1
-                self.emit(&(0xD51B4420u32 | 1).to_le_bytes());
+                self.emit_insn(&Insn::raw(0xD51B4420u32 | 1));
                 self.mov_w0_imm(0);
             },
             // feraiseexcept(excepts): 置位 FPSR 异常标志, 返回 0
@@ -68,13 +69,13 @@ impl Aarch64Codegen {
                     return;
                 }
                 self.gen_expr(&args[0]); // W0 = excepts
-                self.emit(&0x12000800u32.to_le_bytes()); // AND W0, W0, #0x1F
+                self.emit_insn(&Insn::raw(0x12000800)); // AND W0, W0, #0x1F
                                                          // MRS X1, FPSR
-                self.emit(&(0xD53B4420u32 | 1).to_le_bytes());
+                self.emit_insn(&Insn::raw(0xD53B4420u32 | 1));
                 // ORR X1, X1, X0 (置位选中的标志)
-                self.emit(&0xAA000021u32.to_le_bytes());
+                self.emit_insn(&Insn::raw(0xAA000021));
                 // MSR FPSR, X1
-                self.emit(&(0xD51B4420u32 | 1).to_le_bytes());
+                self.emit_insn(&Insn::raw(0xD51B4420u32 | 1));
                 self.mov_w0_imm(0);
             },
             // fetestexcept(excepts): 返回 FPSR 中选中的异常标志位与
@@ -84,11 +85,11 @@ impl Aarch64Codegen {
                     return;
                 }
                 self.gen_expr(&args[0]); // W0 = excepts
-                self.emit(&0x12000800u32.to_le_bytes()); // AND W0, W0, #0x1F
+                self.emit_insn(&Insn::raw(0x12000800)); // AND W0, W0, #0x1F
                                                          // MRS X1, FPSR
-                self.emit(&(0xD53B4420u32 | 1).to_le_bytes());
+                self.emit_insn(&Insn::raw(0xD53B4420u32 | 1));
                 // AND W0, W1, W0 (返回选中的标志)
-                self.emit(&0x0A000020u32.to_le_bytes());
+                self.emit_insn(&Insn::raw(0x0A000020));
             },
             // fegetenv(envp): 保存 FPCR+FPSR 到 [envp]
             "fegetenv" | "feholdexcept" => {
@@ -100,14 +101,14 @@ impl Aarch64Codegen {
                                          // MOV X10, X0 (保存 envp)
                 self.emit_mov_x_reg(10, 0);
                 // MRS X1, FPCR; STR X1, [X10]
-                self.emit(&(0xD53B4400u32 | 1).to_le_bytes());
-                self.emit(&0xF9000141u32.to_le_bytes());
+                self.emit_insn(&Insn::raw(0xD53B4400u32 | 1));
+                self.emit_insn(&Insn::raw(0xF9000141));
                 // MRS X1, FPSR; STR X1, [X10, #8]
-                self.emit(&(0xD53B4420u32 | 1).to_le_bytes());
-                self.emit(&0xF9000141u32.to_le_bytes() /* STR X1, [X10, #8] */);
+                self.emit_insn(&Insn::raw(0xD53B4420u32 | 1));
+                self.emit_insn(&Insn::raw(0xF9000141) /* STR X1, [X10, #8] */);
                 if name == "feholdexcept" {
                     // 清除异常标志: MSR FPSR, XZR
-                    self.emit(&0xD51B443Fu32.to_le_bytes());
+                    self.emit_insn(&Insn::raw(0xD51B443F));
                 }
                 self.mov_w0_imm(0);
             },
@@ -121,11 +122,11 @@ impl Aarch64Codegen {
                                          // MOV X10, X0 (保存 envp)
                 self.emit_mov_x_reg(10, 0);
                 // LDR X1, [X10]; MSR FPCR, X1
-                self.emit(&0xF9400141u32.to_le_bytes());
-                self.emit(&(0xD51B4400u32 | 1).to_le_bytes());
+                self.emit_insn(&Insn::raw(0xF9400141));
+                self.emit_insn(&Insn::raw(0xD51B4400u32 | 1));
                 // LDR X1, [X10, #8]; MSR FPSR, X1
-                self.emit(&0xF9400141u32.to_le_bytes() /* LDR X1, [X10, #8] */);
-                self.emit(&(0xD51B4420u32 | 1).to_le_bytes());
+                self.emit_insn(&Insn::raw(0xF9400141) /* LDR X1, [X10, #8] */);
+                self.emit_insn(&Insn::raw(0xD51B4420u32 | 1));
                 self.mov_w0_imm(0);
             },
             _ => {
@@ -232,7 +233,7 @@ impl Aarch64Codegen {
         self.emit_add_x_reg(0, 1, 0);
         // s0 = [x0] (单精度加载)
         // ldr s0, [x0]: 0xBD400000 | (0<<10) | (0<<5) | 0
-        self.emit(&0xBD400000u32.to_le_bytes());
+        self.emit_insn(&Insn::raw(0xBD400000));
         // fp_offset += 8
         self.emit_ldr_x(1, 9, 4, 4); // w1 = 旧 fp_offset
         self.emit_add_imm_w(1, 1, 8);
@@ -243,7 +244,7 @@ impl Aarch64Codegen {
         // x1 = overflow_arg_area (从 va_list[8])
         self.emit_ldr_x(1, 9, 8, 8);
         // s0 = [x1]
-        self.emit(&0xBD400020u32.to_le_bytes()); // ldr s0, [x1]
+        self.emit_insn(&Insn::raw(0xBD400020)); // ldr s0, [x1]
                                                  // x1 += 8
         self.emit_add_imm_x(1, 1, 8);
         // 写回 overflow_arg_area
@@ -276,7 +277,7 @@ impl Aarch64Codegen {
         self.emit_add_x_reg(0, 1, 0);
         // d0 = [x0] (双精度加载)
         // ldr d0, [x0]: 0xFD400000
-        self.emit(&0xFD400000u32.to_le_bytes());
+        self.emit_insn(&Insn::raw(0xFD400000));
         // fp_offset += 8
         self.emit_ldr_x(1, 9, 4, 4); // w1 = 旧 fp_offset
         self.emit_add_imm_w(1, 1, 8);
@@ -287,7 +288,7 @@ impl Aarch64Codegen {
         // x1 = overflow_arg_area (从 va_list[8])
         self.emit_ldr_x(1, 9, 8, 8);
         // d0 = [x1]
-        self.emit(&0xFD400020u32.to_le_bytes()); // ldr d0, [x1]
+        self.emit_insn(&Insn::raw(0xFD400020)); // ldr d0, [x1]
                                                  // x1 += 8
         self.emit_add_imm_x(1, 1, 8);
         // 写回 overflow_arg_area

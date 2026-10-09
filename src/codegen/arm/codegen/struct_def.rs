@@ -17,6 +17,7 @@ pub struct ArmCodegen {
     pub(crate) relocations: Vec<ElfRela>,
     pub(crate) rodata_relocations: Vec<ElfRela>,
     pub(crate) func_sizes: HashMap<String, u64>,
+    /// 迁移期: 写入侧继续用此 HashMap; 读取侧请走 `Self::snapshot_layout()`。
     pub(crate) labels: HashMap<String, u64>,
     pub(crate) locals: HashMap<String, i32>,
     pub(crate) global_rodata: HashMap<String, u64>,

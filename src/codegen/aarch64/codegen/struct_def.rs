@@ -18,6 +18,8 @@ pub struct Aarch64Codegen {
     pub(crate) relocations: Vec<ElfRela>,
     pub(crate) rodata_relocations: Vec<ElfRela>,
     pub(crate) func_sizes: HashMap<String, u64>,
+    /// 迁移期: 写入侧继续用此 HashMap; 读取侧请走 `Self::snapshot_layout()`
+    /// 或 `LayoutMap::snapshot(&self.labels, &self.func_sizes, ...)`。
     pub(crate) labels: HashMap<String, u64>,
     /// 当前函数局部变量: name -> 栈偏移
     pub(crate) locals: HashMap<String, i32>,

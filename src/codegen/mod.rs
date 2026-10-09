@@ -1,7 +1,6 @@
 // src/codegen/mod.rs - 代码生成调度
 // 第一性原理：codegen 入口只做"按 target 选后端"。
 
-pub mod asm_event;
 pub mod coff;
 pub mod data;
 pub mod disasm;

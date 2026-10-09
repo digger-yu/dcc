@@ -88,7 +88,7 @@ impl Riscv64Codegen {
                 | ((off >> 11) & 1) << 7
                 | (1u32) << 12
                 | 0x63;
-            self.emit(&bne.to_le_bytes());
+            self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(bne));
         }
     }
 
@@ -108,7 +108,7 @@ impl Riscv64Codegen {
     }
 
     pub(crate) fn ecall(&mut self) {
-        self.emit(&[0x73, 0x00, 0x00, 0x00]);
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::ecall());
     }
 
     pub(crate) fn beqz_a0(&mut self, label: &str) {
@@ -283,7 +283,7 @@ impl Riscv64Codegen {
         }
         let imm = imm as u32 & 0xfff;
         let insn = (imm << 20 | (rs1 as u32) << 15) | (rd as u32) << 7 | 0x13;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// MV rd, rs — pseudo-instruction: ADDI rd, rs, 0
@@ -310,7 +310,7 @@ impl Riscv64Codegen {
         }
         let imm = (imm as u32 & 0xfffff) << 12;
         let insn = imm | (rd as u32) << 7 | 0x37;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_add(&mut self, rd: u8, rs1: u8, rs2: u8) {
@@ -326,18 +326,18 @@ impl Riscv64Codegen {
             return;
         }
         let insn = ((rs2 as u32) << 20 | (rs1 as u32) << 15) | (rd as u32) << 7 | 0x33;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_sub(&mut self, rd: u8, rs1: u8, rs2: u8) {
         let insn = ((rs2 as u32) << 20 | (rs1 as u32) << 15) | (rd as u32) << 7 | 0x33 | 0x40000000;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_mul(&mut self, rd: u8, rs1: u8, rs2: u8) {
         let insn =
             (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b0000001 << 12 | (rd as u32) << 7 | 0x33;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     // M7 修复: 整数除/取模 (RV64M 扩展)
@@ -355,7 +355,7 @@ impl Riscv64Codegen {
             | (rd as u32) << 7
             | 0x02000000
             | 0x33;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_divu(&mut self, rd: u8, rs1: u8, rs2: u8) {
@@ -365,7 +365,7 @@ impl Riscv64Codegen {
             | (rd as u32) << 7
             | 0x02000000
             | 0x33;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_rem(&mut self, rd: u8, rs1: u8, rs2: u8) {
@@ -375,7 +375,7 @@ impl Riscv64Codegen {
             | (rd as u32) << 7
             | 0x02000000
             | 0x33;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_remu(&mut self, rd: u8, rs1: u8, rs2: u8) {
@@ -385,7 +385,7 @@ impl Riscv64Codegen {
             | (rd as u32) << 7
             | 0x02000000
             | 0x33;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     // M7 修复: 移位指令 (RV64I 基础)
@@ -396,12 +396,12 @@ impl Riscv64Codegen {
     // IR 的 Shr 暂视为无符号 (srl), 有符号另由 AST 端 cast 处理
     pub(crate) fn emit_sll(&mut self, rd: u8, rs1: u8, rs2: u8) {
         let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0x33;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_srl(&mut self, rd: u8, rs1: u8, rs2: u8) {
         let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b101 << 12 | (rd as u32) << 7 | 0x33;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_sra(&mut self, rd: u8, rs1: u8, rs2: u8) {
@@ -411,28 +411,28 @@ impl Riscv64Codegen {
             | (rd as u32) << 7
             | 0x40000000
             | 0x33;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_and(&mut self, rd: u8, rs1: u8, rs2: u8) {
         let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b111 << 12 | (rd as u32) << 7 | 0x33;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_or(&mut self, rd: u8, rs1: u8, rs2: u8) {
         let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b110 << 12 | (rd as u32) << 7 | 0x33;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_xor(&mut self, rd: u8, rs1: u8, rs2: u8) {
         let insn = (rs2 as u32) << 20 | (rs1 as u32) << 15 | 0b100 << 12 | (rd as u32) << 7 | 0x33;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn emit_xori(&mut self, rd: u8, rs1: u8, imm: i32) {
         let imm = imm as u32 & 0xfff;
         let insn = imm << 20 | (rs1 as u32) << 15 | 0b100 << 12 | (rd as u32) << 7 | 0x13;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// SRLI rd, rs1, shamt — 64-bit logical right shift immediate
@@ -443,7 +443,7 @@ impl Riscv64Codegen {
         let shamt = (shamt as u32) & 0x3f;
         // I-type: imm[5:0]=shamt, rs1, funct3=101, rd, opcode=0010011
         let insn = shamt << 20 | (rs1 as u32) << 15 | 0b101 << 12 | (rd as u32) << 7 | 0x13;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// SLLI rd, rs1, shamt — 64-bit logical left shift immediate
@@ -453,7 +453,7 @@ impl Riscv64Codegen {
         }
         let shamt = (shamt as u32) & 0x3f;
         let insn = shamt << 20 | (rs1 as u32) << 15 | 0b001 << 12 | (rd as u32) << 7 | 0x13;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// SRAI rd, rs1, shamt — 64-bit arithmetic right shift immediate
@@ -465,21 +465,21 @@ impl Riscv64Codegen {
         // I-type: imm[11:0] = 0100000|shamt[5:0], rs1, funct3=101, rd, opcode=0010011
         let insn =
             0x40000000 | shamt << 20 | (rs1 as u32) << 15 | 0b101 << 12 | (rd as u32) << 7 | 0x13;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// ANDI rd, rs1, imm — AND immediate (12-bit signed)
     pub(crate) fn emit_andi(&mut self, rd: u8, rs1: u8, imm: i32) {
         let imm = imm as u32 & 0xfff;
         let insn = imm << 20 | (rs1 as u32) << 15 | 0b111 << 12 | (rd as u32) << 7 | 0x13;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// ORI rd, rs1, imm — OR immediate (12-bit signed)
     pub(crate) fn emit_ori(&mut self, rd: u8, rs1: u8, imm: i32) {
         let imm = imm as u32 & 0xfff;
         let insn = imm << 20 | (rs1 as u32) << 15 | 0b110 << 12 | (rd as u32) << 7 | 0x13;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// Load a 64-bit constant into a0 using AUIPC + LD from rodata.

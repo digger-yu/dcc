@@ -9,6 +9,7 @@ use crate::codegen::shared::*;
 use crate::codegen::x86_64::asm::*;
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::*;
+use crate::codegen::x86_64::insn::Insn;
 use crate::const_eval::{self, ConstValue};
 use crate::debug::*;
 use crate::diagnostics::{Diagnostic, Severity, Span};
@@ -34,104 +35,12 @@ pub(crate) fn cfa_frame_offset(frame_pointer: bool) -> u64 {
 
 impl Codegen {
     pub fn build_asm_output(&self, prog: &Program) -> String {
-        use crate::codegen::asm_event::{AsmEvent, AsmFormatter};
         use crate::codegen::disasm;
 
         let mut out = String::new();
         out.push_str(&format!("\t.file \"{}\"\n", self.source_name));
 
-        // --- Phase 9: Event-based formatter as default path ---
-        if self.emit_asm_text && !self.asm_events.is_empty() {
-            // Use structured event log (primary path)
-            let labels = disasm::label_map(self.labels.iter().map(|(n, o)| (o, n.as_str())));
-            let directives =
-                disasm::directive_map(self.asm_directives_at.iter().map(|(o, l)| (o, l.as_str())));
-            let calls_map = self.disasm_calls.clone();
-            let data_map = self.disasm_data.clone();
-
-            // Build symbol addresses for label references
-            let mut symbol_addrs = std::collections::HashMap::new();
-            for (name, addr) in &self.labels {
-                symbol_addrs.insert(name.clone(), *addr);
-            }
-
-            let mut formatter = AsmFormatter::new().with_symbol_addr(".text".to_string(), 0);
-            for (name, addr) in &self.labels {
-                formatter = formatter.with_symbol_addr(name.clone(), *addr);
-            }
-
-            // Filter events for text section and format
-            let text_events: Vec<&AsmEvent> = self
-                .asm_events
-                .iter()
-                .filter(|e| {
-                    matches!(
-                        e,
-                        AsmEvent::Inst(_) | AsmEvent::Label { .. } | AsmEvent::Directive { .. }
-                    )
-                })
-                .collect();
-
-            if !text_events.is_empty() {
-                out.push_str("\t.text\n");
-                out.push_str(&formatter.format_events(&text_events));
-            }
-
-            // Output rodata as raw bytes (simplified)
-            if !self.rodata.is_empty() {
-                out.push_str("\t.section .rodata\n");
-                for chunk in self.rodata.chunks(8) {
-                    let bytes: Vec<String> = chunk.iter().map(|b| format!("0x{:02x}", b)).collect();
-                    out.push_str(&format!("\t.byte {}\n", bytes.join(", ")));
-                }
-            }
-
-            // Fallback: emit function-level output using old disassembler if needed
-            // For complete implementation, we'd migrate all functions to event logging
-            // Here we keep existing behavior as transitional baseline
-            let mut funcs = Vec::new();
-            Self::collect_all_funcs(prog, &mut funcs);
-            funcs.sort_by_key(|name| self.labels.get(name).copied().unwrap_or(u64::MAX));
-
-            for name in &funcs {
-                if let Some(layout) = self.func_asm_layout.get(name) {
-                    let is_static = prog
-                        .decls
-                        .iter()
-                        .any(|d| matches!(d, Decl::Func(f) if f.name.name == *name && f.is_static));
-                    if !is_static {
-                        out.push_str(&format!("\t.globl {name}\n"));
-                        out.push_str(&format!("\t.type {}, @function\n", name));
-                        if self.emit_cfi {
-                            out.push_str("\t.cfi_startproc\n");
-                        }
-                        out.push_str(&disasm::disassemble_range(
-                            &layout.bytes,
-                            0,
-                            layout.bytes.len(),
-                            layout.text_start,
-                            &labels,
-                            &directives,
-                            &calls_map,
-                            &data_map,
-                        ));
-                        if self.emit_cfi {
-                            out.push_str("\t.cfi_endproc\n");
-                        }
-                        out.push_str(&format!("\t.size {}, .-{}\n", name, name));
-                    }
-                }
-            }
-            // 合成体（`__dcc_cpu_indicator_init` / `<f>.resolver`）不在 `prog.decls` 里，
-            // 上面的 `collect_all_funcs` 看不到它们，而它们确实有字节：`-S` 必须能
-            // 把 resolver 体渲出来（否则「`-c` 与 `-S` 同形」这条回归无法目测）。
-            // 渲染只是可读性，**不得**用它的读数判断机器码语义（自家反汇编器不可信）。
-            out.push_str(&self.render_ifunc_synth_asm());
-            return out;
-        }
-
-        // --- Legacy disassembly-only path (fallback/transition) ---
-        // Keep existing implementation for non-event mode
+        // --- Disassembly-only rendering path (legacy fallback for -S) ---
         use std::collections::BTreeMap;
         let labels = disasm::label_map(self.labels.iter().map(|(n, o)| (o, n.as_str())));
         let directives =
@@ -386,7 +295,7 @@ impl Codegen {
         // 获取当前函数地址 (lea rdi, [rip+0])
         // 实际地址需要回补到函数起始位置
         let lea_pos = self.pos();
-        self.emit(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00]); // lea rdi, [rip+disp32]
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00])); // lea rdi, [rip+disp32]
                                                                 // LEA 是直接 RIP-relative 寻址, 用 PC32 重定位
         self.pending_func_addr_rels
             .push((lea_pos + 3, self.current_func_name.clone(), true));
@@ -394,7 +303,7 @@ impl Codegen {
         // 获取调用者地址: 返回地址在 [r13+8]
         // (call 压入返回地址 → push r13 后 r13 指向 saved r13 →
         //  返回地址就在 r13+8, 无论中间 sub rsp 多少都不变)
-        self.emit(&[0x49, 0x8B, 0x75, 0x08]); // mov rsi, [r13+8]
+        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x75, 0x08])); // mov rsi, [r13+8]
 
         // call __cyg_profile_func_enter
         self.call_label("__cyg_profile_func_enter");
@@ -402,13 +311,13 @@ impl Codegen {
     pub(crate) fn emit_instrument_func_exit(&mut self) {
         // 获取当前函数地址 (lea rdi, [rip+0])
         let lea_pos = self.pos();
-        self.emit(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00]); // lea rdi, [rip+disp32]
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00])); // lea rdi, [rip+disp32]
                                                                 // LEA 是直接 RIP-relative 寻址, 用 PC32 重定位
         self.pending_func_addr_rels
             .push((lea_pos + 3, self.current_func_name.clone(), true));
 
         // 获取调用者地址: 返回地址在 [r13+8]
-        self.emit(&[0x49, 0x8B, 0x75, 0x08]); // mov rsi, [r13+8]
+        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x75, 0x08])); // mov rsi, [r13+8]
 
         // call __cyg_profile_func_exit
         self.call_label("__cyg_profile_func_exit");

@@ -8,6 +8,7 @@
 // 占位, 与生产 Cond arm 的 emit_truth_flags 约定不一致) 已按"以生产代码为准"作废。
 
 use crate::ast::{Expr, InitItem, Type};
+use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::{Codegen, JumpKind};
 
 impl Codegen {
@@ -92,7 +93,7 @@ impl Codegen {
                         e.ty()
                     ),
                 );
-                self.emit(&[0x0F, 0x0B]); // ud2
+                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x0B])); // ud2
                 self.mov_imm(dst, 0);
             }
         }

@@ -13,19 +13,20 @@
 // unimplemented!()）按"以生产代码为准"作废删除。
 
 use crate::codegen::x86_64::Codegen;
+use crate::codegen::x86_64::insn::Insn;
 
 impl Codegen {
     /// ET_EXEC：设置 FS 基址指向 TLS 模板（可写 PT_LOAD 段内）
     pub fn emit_tls_fs_setup(&mut self) {
         // lea rsi, [rip+disp32]  → TLS 模板地址
         let lea_pos = self.pos() + 3;
-        self.emit(&[0x48, 0x8D, 0x35, 0, 0, 0, 0]);
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x35, 0, 0, 0, 0]));
         self.pending_tls_rels
             .push((lea_pos, "__dcc_tls_base".to_string()));
         // mov rdi, 0x1002 (ARCH_SET_FS)
-        self.emit(&[0x48, 0xC7, 0xC7, 0x02, 0x00, 0x01, 0x00]);
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC7, 0x02, 0x00, 0x01, 0x00]));
         // mov rax, 158; syscall
-        self.emit(&[0x48, 0xC7, 0xC0, 0x9E, 0x00, 0x00, 0x00]);
-        self.emit(&[0x0F, 0x05]);
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC0, 0x9E, 0x00, 0x00, 0x00]));
+        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x05]));
     }
 }

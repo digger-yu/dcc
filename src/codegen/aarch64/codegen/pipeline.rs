@@ -14,6 +14,18 @@ use std::sync::Arc;
 
 use super::common::{align_rodata, align_up_u64, find_func, value_type_size, var_is_static};
 use super::struct_def::Aarch64Codegen;
+use crate::codegen::aarch64::insn::Insn;
+use crate::codegen::shared::asm_operand::LayoutMap;
+
+impl Aarch64Codegen {
+    /// 产出当前 `labels`/`func_sizes` 的只读快照 (`LayoutMap`)。
+    /// 迁移期内所有"想读标签/函数尺寸"的外部消费点都应走这里,
+    /// 而不是直接摸 `pub(crate) labels` 字段。
+    pub(crate) fn snapshot_layout(&self) -> LayoutMap {
+        let text_end = self.entry + self.code.len() as u64;
+        LayoutMap::snapshot(&self.labels, &self.func_sizes, text_end)
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum BranchKind {
@@ -141,6 +153,21 @@ impl Aarch64Codegen {
         self.label_serial += 1;
         self.emit_asm_stmt(&key, resolved, span_file, span_line);
     }
+
+    /// 指令记录发射入口 (统一通路)。
+    ///
+    /// 若该 `Insn` 已经能编码, 把 u32 小端字节推进 `self.code` 并记录 InsnRec
+    /// 供 `-S` 渲染; 否则返回 false, 调用方继续走旧 `self.emit(&[u8])` 路径
+    /// (迁移期不强制一次性替换所有 283 处)。
+    pub(crate) fn emit_insn(&mut self, insn: &crate::codegen::aarch64::insn::Insn) -> bool {
+        match insn.encode() {
+            Some(word) => {
+                self.emit(&word.to_le_bytes());
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 impl Aarch64Codegen {
@@ -153,13 +180,13 @@ impl Aarch64Codegen {
     /// MTE 调用点前缀: 调用外部 (非 MTE) 代码前清除 sp 的 tag。
     /// `and sp, x19, #0x00ffffffffffffff` (x19 = 本帧带 tag 的帧基址)
     pub(crate) fn mte_untag_sp_for_call(&mut self) {
-        self.emit(&0x9280de7fu32.to_le_bytes());
+        self.emit_insn(&Insn::raw(0x9280de7f));
     }
 
     /// MTE 调用点后缀: 调用返回后恢复本帧 tag。
     /// `add sp, x19, #0` (mov sp, x19)
     pub(crate) fn mte_retag_sp_after_call(&mut self) {
-        self.emit(&0x9100027fu32.to_le_bytes());
+        self.emit_insn(&Insn::raw(0x9100027f));
     }
 
     /// 当前函数是否需要 MTE tag 栈帧 (prologue 打 tag / 调用点 untag-retag)。
@@ -340,13 +367,13 @@ impl Aarch64Codegen {
                 let prefix_len = m.min(n);
                 let suffix_len = n.saturating_sub(prefix_len);
                 for _ in 0..prefix_len {
-                    self.emit(&0xd503201fu32.to_le_bytes());
+                    self.emit_insn(&Insn::raw(0xd503201f));
                 }
                 // 使用 asm label 覆盖符号名 (如果有)
                 let sym_name = self.resolve_asm_label(&func.name).to_string();
                 self.label(&sym_name);
                 for _ in 0..suffix_len {
-                    self.emit(&0xd503201fu32.to_le_bytes());
+                    self.emit_insn(&Insn::raw(0xd503201f));
                 }
             } else {
                 // 使用 asm label 覆盖符号名 (如果有)
@@ -413,13 +440,13 @@ impl Aarch64Codegen {
                 let suffix_len = n.saturating_sub(prefix_len);
                 for _ in 0..prefix_len {
                     // AArch64 NOP: 0xD503201F
-                    self.emit(&0xd503201fu32.to_le_bytes());
+                    self.emit_insn(&Insn::raw(0xd503201f));
                 }
                 // 使用 asm label 覆盖符号名 (如果有)
                 let sym_name = self.resolve_asm_label(&func.name).to_string();
                 self.label(&sym_name);
                 for _ in 0..suffix_len {
-                    self.emit(&0xd503201fu32.to_le_bytes());
+                    self.emit_insn(&Insn::raw(0xd503201f));
                 }
             } else {
                 // 使用 asm label 覆盖符号名 (如果有)

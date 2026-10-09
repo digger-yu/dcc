@@ -46,7 +46,7 @@ impl Riscv64Codegen {
                         // FLW fa0, off(sp)
                         let imm = off as u32 & 0xfff;
                         let insn = imm << 20 | 2 << 15 | 0b010 << 12 | 10 << 7 | 0x07;
-                        self.emit(&insn.to_le_bytes());
+                        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
                     } else {
                         self.emit_fld(10, 2, off);
                     }
@@ -90,7 +90,7 @@ impl Riscv64Codegen {
                                 // FSW fa0, off(sp)
                                 let imm = off as u32 & 0xfff;
                                 let insn = imm << 20 | 2 << 15 | 0b010 << 12 | 10 << 7 | 0x27;
-                                self.emit(&insn.to_le_bytes());
+                                self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
                             } else {
                                 self.emit_fsd(10, 2, off);
                             }
@@ -120,7 +120,7 @@ impl Riscv64Codegen {
                                 if bits <= 32 {
                                     let imm = (off + field_off as i32) as u32 & 0xfff;
                                     let insn = imm << 20 | 2 << 15 | 0b010 << 12 | 10 << 7 | 0x27;
-                                    self.emit(&insn.to_le_bytes());
+                                    self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
                                 } else {
                                     self.emit_fsd(10, 2, off + field_off as i32);
                                 }
@@ -156,7 +156,7 @@ impl Riscv64Codegen {
                             // FLW fa0, off+field_off(sp)
                             let imm = (off + field_off as i32) as u32 & 0xfff;
                             let insn = imm << 20 | 2 << 15 | 0b010 << 12 | 10 << 7 | 0x07;
-                            self.emit(&insn.to_le_bytes());
+                            self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
                         } else {
                             self.emit_fld(10, 2, off + field_off as i32);
                         }
@@ -296,11 +296,11 @@ impl Riscv64Codegen {
                         // FLW fa0, off(sp)
                         let imm = off as u32 & 0xfff;
                         let insn = imm << 20 | 2 << 15 | 0b010 << 12 | 10 << 7 | 0x07;
-                        self.emit(&insn.to_le_bytes());
+                        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
                         // FLW fa1, off+inner_size(sp)
                         let imm2 = (off + inner_size as i32) as u32 & 0xfff;
                         let insn2 = imm2 << 20 | 2 << 15 | 0b010 << 12 | 11 << 7 | 0x07;
-                        self.emit(&insn2.to_le_bytes());
+                        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn2));
                     } else {
                         self.emit_fld(10, 2, off);
                         self.emit_fld(11, 2, off + inner_size as i32);
@@ -375,7 +375,7 @@ impl Riscv64Codegen {
                         | 0b010 << 12
                         | (imm & 0x1f) << 7
                         | 0x27;
-                    self.emit(&insn.to_le_bytes());
+                    self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
                     // FSW fa1, tmp_imag(sp)
                     let imm2 = tmp_imag as u32;
                     let insn2 = ((imm2 >> 5) & 0x7f) << 25
@@ -384,7 +384,7 @@ impl Riscv64Codegen {
                         | 0b010 << 12
                         | (imm2 & 0x1f) << 7
                         | 0x27;
-                    self.emit(&insn2.to_le_bytes());
+                    self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn2));
                 } else {
                     self.emit_fsd(10, 2, tmp_real);
                     self.emit_fsd(11, 2, tmp_imag);
@@ -396,11 +396,11 @@ impl Riscv64Codegen {
                     // FLW fa2, tmp_real(sp)
                     let imm = tmp_real as u32 & 0xfff;
                     let insn = imm << 20 | 2 << 15 | 0b010 << 12 | 12 << 7 | 0x07;
-                    self.emit(&insn.to_le_bytes());
+                    self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
                     // FLW fa3, tmp_imag(sp)
                     let imm2 = tmp_imag as u32 & 0xfff;
                     let insn2 = imm2 << 20 | 2 << 15 | 0b010 << 12 | 13 << 7 | 0x07;
-                    self.emit(&insn2.to_le_bytes());
+                    self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn2));
                 } else {
                     self.emit_fld(12, 2, tmp_real);
                     self.emit_fld(13, 2, tmp_imag);

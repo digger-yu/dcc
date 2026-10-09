@@ -3,6 +3,7 @@
 // import paths were adjusted for the modular layout.
 use crate::ast::Type;
 use crate::codegen::aarch64::codegen::{Aarch64Codegen, HfaInfo};
+use crate::codegen::aarch64::insn::Insn;
 use crate::ir::{ExprKind, TypedExpr};
 
 impl Aarch64Codegen {
@@ -67,11 +68,11 @@ impl Aarch64Codegen {
             if hfa.elem_bits == 32 {
                 let imm12 = (elem_off / 4) as u32 & 0xfff;
                 let insn = 0xbd000000u32 | imm12 << 10 | 31 << 5 | (vreg as u32 & 0x1f);
-                self.emit(&insn.to_le_bytes());
+                self.emit_insn(&Insn::raw(insn));
             } else {
                 let imm12 = (elem_off / 8) as u32 & 0xfff;
                 let insn = 0xfd000000u32 | imm12 << 10 | 31 << 5 | (vreg as u32 & 0x1f);
-                self.emit(&insn.to_le_bytes());
+                self.emit_insn(&Insn::raw(insn));
             }
         }
     }

@@ -4,6 +4,7 @@
 use crate::ast::{find_field, BinOp, Expr, Type, UnOp};
 
 use crate::codegen::arm::codegen::ArmCodegen;
+use crate::codegen::arm::insn::Insn;
 
 impl ArmCodegen {
     pub(crate) fn gen_expr_from_ast(&mut self, expr: &Expr) {
@@ -205,7 +206,7 @@ impl ArmCodegen {
                 self.emit_pop(vec![1]); // 弹出到 r1
                                         // ldr r0, [r1]
                 let inst = 0xE5910000u32;
-                self.code.extend_from_slice(&inst.to_le_bytes());
+                self.emit_insn(&Insn::raw(inst));
             },
             // 数组索引: arr[idx]
             Expr::Index { arr, idx, .. } => {
@@ -222,7 +223,7 @@ impl ArmCodegen {
                 self.emit_push(vec![0]);
                 self.emit_pop(vec![1]);
                 let inst = 0xE5910000u32;
-                self.code.extend_from_slice(&inst.to_le_bytes());
+                self.emit_insn(&Insn::raw(inst));
             },
             // 结构体成员访问
             Expr::Member {
@@ -280,7 +281,7 @@ impl ArmCodegen {
                     }
                     // ldr r0, [r1] — 加载成员值
                     let inst = 0xE5910000u32;
-                    self.code.extend_from_slice(&inst.to_le_bytes());
+                    self.emit_insn(&Insn::raw(inst));
                 } else {
                     // s.member: r0 是结构体值 (已在寄存器中)
                     // 对于值类型, 需要取地址再加偏移

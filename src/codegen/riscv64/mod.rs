@@ -23,6 +23,7 @@ mod emit;
 mod expression_impl;
 mod expression_impl2;
 mod expression_impl3;
+mod insn;
 mod special;
 
 #[cfg(test)]

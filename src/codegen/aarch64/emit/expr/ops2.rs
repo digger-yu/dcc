@@ -2,18 +2,19 @@
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
 use crate::codegen::aarch64::codegen::Aarch64Codegen;
+use crate::codegen::aarch64::insn::Insn;
 
 impl Aarch64Codegen {
     pub(crate) fn mov_w0_imm(&mut self, imm: u32) {
         if imm <= 0xffff {
             let insn = 0x5280_0000u32 | ((imm & 0xffff) << 5);
-            self.emit(&insn.to_le_bytes());
+            self.emit_insn(&Insn::raw(insn));
             return;
         }
         let lo = imm & 0xffff;
         let hi = (imm >> 16) & 0xffff;
-        self.emit(&(0x5280_0000u32 | (lo << 5)).to_le_bytes());
-        self.emit(&(0x72a0_0000u32 | (hi << 5)).to_le_bytes());
+        self.emit_insn(&Insn::raw(0x5280_0000u32 | (lo << 5)));
+        self.emit_insn(&Insn::raw(0x72a0_0000u32 | (hi << 5)));
     }
 
     // M7 修复: 通用 x 寄存器装入任意立即数 (movz + 必要 movk)
@@ -36,7 +37,7 @@ impl Aarch64Codegen {
                 | (hw << 21)
                 | (part << 5)
                 | (reg as u32 & 0x1f);
-            self.emit(&insn.to_le_bytes());
+            self.emit_insn(&Insn::raw(insn));
         }
     }
 
@@ -47,11 +48,11 @@ impl Aarch64Codegen {
     pub(crate) fn mov_x_reg_sp_off(&mut self, reg: u8, off: i32) {
         if (0..4096).contains(&off) {
             let insn = 0x910003e0u32 | ((off as u32) << 10) | (reg as u32 & 0x1f);
-            self.emit(&insn.to_le_bytes());
+            self.emit_insn(&Insn::raw(insn));
         } else if off < 0 && off > -4096 {
             let pos = (-off) as u32;
             let insn = 0x510003e0u32 | (pos << 10) | (reg as u32 & 0x1f);
-            self.emit(&insn.to_le_bytes());
+            self.emit_insn(&Insn::raw(insn));
         } else {
             // 大偏移: movz x9, #off; add/sub xN, sp, x9
             let tmp: u8 = 9;
@@ -71,12 +72,12 @@ impl Aarch64Codegen {
 
     pub(crate) fn mov_x0_imm(&mut self, imm: u32) {
         let insn = 0xd280_0000u32 | ((imm & 0xffff) << 5);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     pub(crate) fn mov_x8_imm(&mut self, imm: u64) {
         let insn = 0xd280_0000u32 | (((imm & 0xffff) as u32) << 5) | 8;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     pub(crate) fn store_w0(&mut self, off: i32) {
@@ -90,13 +91,13 @@ impl Aarch64Codegen {
     pub(crate) fn str_wt_sp(&mut self, reg: u8, off: i32) {
         let imm12 = (off / 4) as u32 & 0xfff;
         let insn = 0xb900_0000u32 | imm12 << 10 | 31 << 5 | (reg as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     pub(crate) fn ldr_wt_sp(&mut self, reg: u8, off: i32) {
         let imm12 = (off / 4) as u32 & 0xfff;
         let insn = 0xb940_0000u32 | imm12 << 10 | 31 << 5 | (reg as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     // --- helpers for pointer/member/index codegen ---
@@ -105,7 +106,7 @@ impl Aarch64Codegen {
     pub(crate) fn emit_mov_x_reg(&mut self, dst: u8, src: u8) {
         // ORR Xd, XZR, Xn
         let insn = 0x2a00_0000u32 | (0x1f << 16) | ((src as u32 & 0x1f) << 5) | (dst as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// Store register rt to [sp + off] with given byte size (1/2/4/8)
@@ -114,12 +115,12 @@ impl Aarch64Codegen {
             1 => {
                 let imm12 = (off as u32) & 0xfff;
                 let insn = 0x39000000u32 | (imm12 << 10) | (31u32 << 5) | (rt as u32 & 0x1f);
-                self.emit(&insn.to_le_bytes());
+                self.emit_insn(&Insn::raw(insn));
             },
             2 => {
                 let imm12 = ((off / 2) as u32) & 0xfff;
                 let insn = 0x79000000u32 | (imm12 << 10) | (31u32 << 5) | (rt as u32 & 0x1f);
-                self.emit(&insn.to_le_bytes());
+                self.emit_insn(&Insn::raw(insn));
             },
             4 => self.str_wt_sp(rt, off),
             _ => self.emit_str_x(rt, 31, off as u32, 8),
@@ -135,7 +136,7 @@ impl Aarch64Codegen {
                 let imm12 = imm & 0xfff;
                 let insn =
                     0x39800000u32 | (imm12 << 10) | ((rs1 as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
-                self.emit(&insn.to_le_bytes());
+                self.emit_insn(&Insn::raw(insn));
             },
             (2, false) => self.emit_ldr_x(rt, rs1, imm, 2),
             (2, true) => {
@@ -143,7 +144,7 @@ impl Aarch64Codegen {
                 let imm12 = (imm / 2) & 0xfff;
                 let insn =
                     0x79800000u32 | (imm12 << 10) | ((rs1 as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
-                self.emit(&insn.to_le_bytes());
+                self.emit_insn(&Insn::raw(insn));
             },
             (4, _) => self.emit_ldr_x(rt, rs1, imm, 4),
             _ => self.emit_ldr_x(rt, rs1, imm, 8),
@@ -157,19 +158,19 @@ impl Aarch64Codegen {
                 let imm12 = imm & 0xfff;
                 let insn =
                     0x39000000u32 | (imm12 << 10) | ((rs1 as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
-                self.emit(&insn.to_le_bytes());
+                self.emit_insn(&Insn::raw(insn));
             },
             2 => {
                 let imm12 = (imm / 2) & 0xfff;
                 let insn =
                     0x79000000u32 | (imm12 << 10) | ((rs1 as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
-                self.emit(&insn.to_le_bytes());
+                self.emit_insn(&Insn::raw(insn));
             },
             4 => {
                 let imm12 = (imm / 4) & 0xfff;
                 let insn =
                     0xb9000000u32 | (imm12 << 10) | ((rs1 as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
-                self.emit(&insn.to_le_bytes());
+                self.emit_insn(&Insn::raw(insn));
             },
             _ => self.emit_str_x(rt, rs1, imm, 8),
         }
@@ -209,7 +210,7 @@ impl Aarch64Codegen {
         self.emit_label_raw(&lbl);
         // cbz x11, end
         let cbz = 0xb4000000u32 | (5u32 << 5) | 11;
-        self.emit(&cbz.to_le_bytes());
+        self.emit_insn(&Insn::raw(cbz));
         // ldr x9, [src_reg, x14]
         self.emit_ldr_x(9, src_reg, 0, 8); // TODO: register offset
                                            // str x9, [dst_reg, x14]
@@ -218,7 +219,7 @@ impl Aarch64Codegen {
         self.emit_add_imm_x(14, 14, 8);
         // sub x11, x11, #8
         let sub_insn = 0xd1000000u32 | (8u32 << 10) | (11u32 << 5) | 11;
-        self.emit(&sub_insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(sub_insn));
         // b loop
         // (simplified: for now just fall through for small sizes)
         self.emit_label_raw(&lbl_end);
@@ -245,7 +246,7 @@ impl Aarch64Codegen {
             // stp xzr, xzr, [sp, #off] (signed offset mode)
             let imm7 = ((off / 8) as u32) & 0x7f;
             let insn = 0xa900_0000u32 | (imm7 << 15) | (31u32 << 10) | (31u32 << 5) | 31;
-            self.emit(&insn.to_le_bytes());
+            self.emit_insn(&Insn::raw(insn));
         }
         // 处理剩余 8 字节 (当 frame 非 16 字节对齐时)
         let rem = frame_size % 16;
@@ -254,7 +255,7 @@ impl Aarch64Codegen {
             // str xzr, [sp, #off] (unsigned offset mode)
             let imm12 = ((off / 8) as u32) & 0xfff;
             let insn = 0xf900_0000u32 | (imm12 << 10) | (31u32 << 5) | 31;
-            self.emit(&insn.to_le_bytes());
+            self.emit_insn(&Insn::raw(insn));
         }
     }
 
@@ -265,7 +266,7 @@ impl Aarch64Codegen {
         );
         let imm12 = ((off / 8) as u32) & 0xfff;
         let insn = 0xf900_0000u32 | (imm12 << 10) | (31u32 << 5) | (reg as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     pub(crate) fn ldr_xt_sp(&mut self, reg: u8, off: i32) {
@@ -275,7 +276,7 @@ impl Aarch64Codegen {
         );
         let imm12 = ((off / 8) as u32) & 0xfff;
         let insn = 0xf940_0000u32 | (imm12 << 10) | (31u32 << 5) | (reg as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// `LDR Xt, [Xn, #imm]` — 寄存器间接 + 无符号偏移 (64-bit, scale=8)
@@ -287,7 +288,7 @@ impl Aarch64Codegen {
         );
         let imm12 = ((imm / 8) as u32) & 0xfff;
         let insn = 0xf940_0000u32 | (imm12 << 10) | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// `STR Xt, [Xn, #imm]` — 寄存器间接 + 无符号偏移 (64-bit, scale=8)
@@ -298,7 +299,7 @@ impl Aarch64Codegen {
         );
         let imm12 = ((imm / 8) as u32) & 0xfff;
         let insn = 0xf900_0000u32 | (imm12 << 10) | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     pub(crate) fn str_qt_sp(&mut self, reg: u8, off: i32) {
@@ -308,7 +309,7 @@ impl Aarch64Codegen {
         );
         let imm12 = ((off / 16) as u32) & 0xfff;
         let insn = 0x3d80_0000u32 | (imm12 << 10) | (31u32 << 5) | (reg as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     pub(crate) fn ldr_qt_sp(&mut self, reg: u8, off: i32) {
@@ -318,7 +319,7 @@ impl Aarch64Codegen {
         );
         let imm12 = ((off / 16) as u32) & 0xfff;
         let insn = 0x3dc0_0000u32 | (imm12 << 10) | (31u32 << 5) | (reg as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     pub(crate) fn str_q0_sp(&mut self, off: i32) {
@@ -332,31 +333,31 @@ impl Aarch64Codegen {
     pub(crate) fn extract_vector_lane_w0(&mut self, idx: usize) {
         let lane = (idx & 3) as u32;
         let insn = 0x0e04_3c00u32 | (lane << 11);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     pub(crate) fn mov_w14_w0(&mut self) {
-        self.emit(&[0xee, 0x03, 0x80, 0x2a]);
+        self.emit_insn(&Insn::raw(0x2a8003ee));
     }
 
     pub(crate) fn mov_w0_w14(&mut self) {
-        self.emit(&[0xe0, 0x03, 0x0e, 0x2a]);
+        self.emit_insn(&Insn::raw(0x2a0e03e0));
     }
 
     pub(crate) fn mov_w1_w0(&mut self) {
-        self.emit(&[0xe1, 0x03, 0x80, 0x2a]);
+        self.emit_insn(&Insn::raw(0x2a8003e1));
     }
 
     /// MOV W2, W0 — ORR W2, WZR, W0
     pub(crate) fn mov_w2_w0(&mut self) {
-        self.emit(&[0xe2, 0x03, 0x80, 0x2a]);
+        self.emit_insn(&Insn::raw(0x2a8003e2));
     }
 
     /// CMP Wn, Wm (alias of SUBS WZR, Wn, Wm) — 32-bit register compare
     pub(crate) fn emit_cmp_w_reg(&mut self, rn: u8, rm: u8) {
         // SUBS WZR, Wn, Wm => 0x6B000000 | Rm<<16 | Rn<<5 | 31
         let subs = 0x6b00001fu32 | ((rm as u32 & 0x1f) << 16) | ((rn as u32 & 0x1f) << 5);
-        self.emit(&subs.to_le_bytes());
+        self.emit_insn(&Insn::raw(subs));
     }
 
     pub(crate) fn mov_w_reg_w0(&mut self, reg: u8) {
@@ -366,13 +367,13 @@ impl Aarch64Codegen {
         // `MOV W0, Wreg` —— 目标/源颠倒, 导致第 2+ 个实参被丢 (单参因 reg=0
         // 时恰为 `mov w0,w0` no-op 而掩盖)。改为正确置 Rd=reg。
         let insn = 0x2a0003e0u32 | (reg as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// MOV Wd, Ws — general 32-bit register-to-register move
     pub(crate) fn mov_w_rd_rs(&mut self, rd: u8, rs: u8) {
         let insn = 0x2a0003e0u32 | ((rs as u32 & 0x1f) << 16) | (rd as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// MOV Xd, Xs — general 64-bit register-to-register move
@@ -382,7 +383,7 @@ impl Aarch64Codegen {
             return;
         }
         let insn = 0xaa0003e0u32 | ((src as u32 & 0x1f) << 16) | (dst as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// Load a local variable from stack into an arbitrary GP register (32-bit W)

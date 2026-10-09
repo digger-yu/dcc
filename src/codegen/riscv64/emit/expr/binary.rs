@@ -178,7 +178,7 @@ impl Riscv64Codegen {
         // RISC-V NOP 是 4 字节指令, 只能按 4 字节边界填充
         let nop_count = pad / 4;
         for _ in 0..nop_count {
-            self.emit(&[0x13, 0x00, 0x00, 0x00]); // NOP (addi x0, x0, 0)
+            self.emit_insn(&crate::codegen::riscv64::insn::Insn::nop()); // NOP (addi x0, x0, 0)
         }
     }
 
@@ -239,6 +239,17 @@ impl Riscv64Codegen {
 
     pub(crate) fn emit(&mut self, bytes: &[u8]) {
         self.code.extend_from_slice(bytes);
+    }
+
+    /// 指令记录统一发射入口 (RISC-V 支持 4 字节 / 2 字节两种长度).
+    pub(crate) fn emit_insn(&mut self, insn: &crate::codegen::riscv64::insn::Insn) -> bool {
+        match insn.encode_bytes() {
+            Some(bytes) => {
+                self.code.extend_from_slice(&bytes);
+                true
+            }
+            None => false,
+        }
     }
 
     pub(crate) fn li_a0(&mut self, imm: i32) {

@@ -6,6 +6,7 @@ use crate::codegen::aarch64::codegen::{
     is_aggregate, is_complex_ty, is_float_ty, is_vector_ty, trunc_i32, value_type_size,
     Aarch64Codegen,
 };
+use crate::codegen::aarch64::insn::Insn;
 use crate::ir::{ExprKind, ExprLiteral, TypedExpr, ValueType};
 
 impl Aarch64Codegen {
@@ -222,19 +223,19 @@ impl Aarch64Codegen {
                         ValueType::Float { bits: 32 } => {
                             if is_unsigned {
                                 // FCVTZU W0, S0: 0x1E190000
-                                self.emit(&0x1E190000u32.to_le_bytes());
+                                self.emit_insn(&Insn::raw(0x1E190000));
                             } else {
                                 // FCVTZS W0, S0: 0x1E180000
-                                self.emit(&0x1E180000u32.to_le_bytes());
+                                self.emit_insn(&Insn::raw(0x1E180000));
                             }
                         },
                         ValueType::Float { bits: 64 } => {
                             if is_unsigned {
                                 // FCVTZU W0, D0: 0x9E190000
-                                self.emit(&0x9E190000u32.to_le_bytes());
+                                self.emit_insn(&Insn::raw(0x9E190000));
                             } else {
                                 // FCVTZS W0, D0: 0x9E180000
-                                self.emit(&0x9E180000u32.to_le_bytes());
+                                self.emit_insn(&Insn::raw(0x9E180000));
                             }
                         },
                         _ => {},
@@ -383,7 +384,7 @@ impl Aarch64Codegen {
                             self.mov_x_reg_imm(12, sign_bit);
                             self.emit_ands_x_reg(12, 0, 12); // TST x0, sign_bit
                                                              // B.NE +2 (skip next ORR, 8 bytes = 2 insns)
-                            self.emit(&0x54000041u32.to_le_bytes());
+                            self.emit_insn(&Insn::raw(0x54000041));
                             let inv_mask: u64 = !((1u64 << bit_width) - 1);
                             self.mov_x_reg_imm(12, inv_mask);
                             self.emit_or_x_reg(0, 0, 12); // ORR x0, x0, x12
@@ -428,16 +429,16 @@ impl Aarch64Codegen {
                                                // Use LSL for power-of-2 sizes
                     match elem_sz {
                         2 => {
-                            self.emit(&[0x09, 0x01, 0x00, 0xd3]);
+                            self.emit_insn(&Insn::raw(0xd3000109));
                         }, // lsl x9, x9, #1
                         4 => {
-                            self.emit(&[0x09, 0x02, 0x00, 0xd3]);
+                            self.emit_insn(&Insn::raw(0xd3000209));
                         }, // lsl x9, x9, #2
                         8 => {
-                            self.emit(&[0x09, 0x03, 0x00, 0xd3]);
+                            self.emit_insn(&Insn::raw(0xd3000309));
                         }, // lsl x9, x9, #3
                         16 => {
-                            self.emit(&[0x09, 0x04, 0x00, 0xd3]);
+                            self.emit_insn(&Insn::raw(0xd3000409));
                         }, // lsl x9, x9, #4
                         _ => {
                             self.mov_x_reg_imm(10, elem_sz as u64);
@@ -553,16 +554,16 @@ impl Aarch64Codegen {
                 if elem_sz != 1 {
                     match elem_sz {
                         2 => {
-                            self.emit(&[0x09, 0x01, 0x00, 0xd3]);
+                            self.emit_insn(&Insn::raw(0xd3000109));
                         },
                         4 => {
-                            self.emit(&[0x09, 0x02, 0x00, 0xd3]);
+                            self.emit_insn(&Insn::raw(0xd3000209));
                         },
                         8 => {
-                            self.emit(&[0x09, 0x03, 0x00, 0xd3]);
+                            self.emit_insn(&Insn::raw(0xd3000309));
                         },
                         16 => {
-                            self.emit(&[0x09, 0x04, 0x00, 0xd3]);
+                            self.emit_insn(&Insn::raw(0xd3000409));
                         },
                         _ => {
                             self.mov_x_reg_imm(10, elem_sz as u64);

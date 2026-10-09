@@ -319,3 +319,21 @@ pub enum Operand { None,
 4. 记录度量基线四值。
 5. `disasm.rs` 边界回写 `backend_feature_matrix.md`。
 6. 建立 `docs/aarch64_encoding_defects.md`（G11 载体），先录入 §2 已确证的四组：`fcmp`、`emit_mov_x_reg`×11、`lsl` 计算式、HFA/向量/`fsub`/`fdiv` 的 10 个 `.inst` 字。**这六项不阻塞 P1/P2，但必须在 bug-fix 阶段一次性清零。**
+
+## 11. 执行进度（2026-10-09 更新）
+
+| 阶段 | 状态 | 落地 |
+| --- | --- | --- |
+| P0 基线 | 已完成 | 冻结基线 `mini_asm_encode_freeze.txt` 不变；死代码清理完成（`shared/asm.rs`、`instruction_traits.rs`、`operand_utils.rs`、`asm_event.rs`、`generated/`、`scripts/codegen-gen/` 已删） |
+| P1 操作数/记录模型 | 已完成 | `shared/asm_operand.rs`（`Operand`/`InsnRec`/`LayoutMap`）+ `shared/asm_engine.rs`（dialect/render）就位 |
+| P1.5 构建期生成 | 暂缓 | 生成器已删，统一走手写枚举（`Aarch64Opcode` 等），避免"存在但从不被构建"反模式 |
+| P2 aarch64 样板 | G1 门禁已通 | `aarch64/insn.rs` 类型化构造子 + `encode()` 直写顶部字节（sf 已含）；`encode_truth_test.rs` 通过 GAS 真值比对（14 条指令：nop/ret/br/blr/mov_reg/add_imm/sub_imm/mov_imm/svc/dmb/wfe/wfi/yield/isb 全与 `aarch64-linux-gnu-as` 输出逐字相等） |
+| G11 缺陷登记 | 已完成 | `docs/aarch64_encoding_defects.md` 22 条（F1–F22），迁移期只登记不修 |
+| P3–P6 arm/mips 步骤 0 | 已完成 | `arm/pipeline.rs::emit_insn`、`mips/baseline_mips.rs::emit_insn` 引入；84 处 arm + 61 处 mips `extend_from_slice(&inst.to_le_bytes())` 直写收敛为 `emit_insn(&Insn::raw(..))` |
+| G5 反假绿 | 已完成 | `encode_truth_test.rs` 在 `as` 不可用时 `ran == 0` 直接失败，杜绝空跑绿 |
+| 门禁 | `cargo check` 干净、2187 单元测试全绿、`cargo build` 成功、clippy 在本次改动文件上零警告（其余历史警告属 ssa/ 等无关模块） |
+
+| P2 LayoutMap 唯一入口 | 已完成 | `LayoutMap::snapshot()` + 四后端 `snapshot_layout()`（aarch64/arm/mips/riscv64）就位；跨模块消费点（arm/backend.rs、mips/mips64.rs 的 DWARF func_pcs、mips64 `layout()` 只读入口）已改为吃 `&LayoutMap`，不再直读 `pub labels`；后端内部 emit 阶段的 `self.labels` 读写（前向引用解析）保留 |
+| P2.5 规格副本清理 | 已完成 | 8 份 `x86_instructions/*.json`（内容实为 TOML，CRLF 差异）已删；`docs/instruction_spec_schema{,_v2}.json`、`scripts/validate_instruction_specs.sh`（jq 扫 JSON，从未接 CI）一并删除；`adding_new_isa.md` 示例改写为合法 TOML；全项目规格只留 TOML 一种格式 |
+
+**遗留**：x86_64 P9（962 处 asm 发射点迁入记录模型）待后续窗口推进。

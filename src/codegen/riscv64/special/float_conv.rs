@@ -6,7 +6,7 @@ use crate::codegen::riscv64::codegen::Riscv64Codegen;
 impl Riscv64Codegen {
     pub(crate) fn emit_fcvt_s_w_fa0(&mut self) {
         let insn = 0xD0000053u32 | (10 << 7) | (10 << 15);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     pub(crate) fn patch_jal(&mut self, at: u64, target: u64) {
@@ -91,12 +91,12 @@ impl Riscv64Codegen {
         debug_assert!(rd != 0 && imm != 0, "C.ADDI: rd!=0, imm!=0");
         let imm = imm as u16;
         let insn: u16 = (((imm >> 5) & 1) << 12) | (rd as u16) << 7 | (imm & 0x1f) << 2 | 0x01;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw16(insn));
     }
 
     /// C.NOP: CI 格式, rd=0, imm=0
     pub(crate) fn emit_c_nop(&mut self) {
-        self.emit(&0x0001u16.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw16(0x0001));
     }
 
     /// C.LI rd, imm (rd != 0): CI 格式
@@ -105,7 +105,7 @@ impl Riscv64Codegen {
         let imm = imm as u16;
         let insn: u16 =
             0b010 << 13 | ((imm >> 5) & 1) << 12 | (rd as u16) << 7 | (imm & 0x1f) << 2 | 0x01;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw16(insn));
     }
 
     /// C.LW rd', rs1', offset: CL 格式 (32-bit load)
@@ -117,7 +117,7 @@ impl Riscv64Codegen {
             | (((offset >> 2) & 1) as u16) << 6
             | (((offset >> 6) & 1) as u16) << 5
             | ((rd_prime & 7) as u16) << 2;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw16(insn));
     }
 
     /// C.SW rs2', rs1', offset: CS 格式 (32-bit store)
@@ -129,7 +129,7 @@ impl Riscv64Codegen {
             | (((offset >> 2) & 1) as u16) << 6
             | (((offset >> 6) & 1) as u16) << 5
             | ((rs2_prime & 7) as u16) << 2;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw16(insn));
     }
 
     /// C.J offset: CJ 格式, 20-bit signed offset (bit 0 = 0)
@@ -145,7 +145,7 @@ impl Riscv64Codegen {
             | (((off >> 1) & 7) as u16) << 3
             | (((off >> 5) & 1) as u16) << 2
             | 0x01;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw16(insn));
     }
 
     /// C.BEQZ rs1', offset: CB 格式, 8-bit signed offset
@@ -159,7 +159,7 @@ impl Riscv64Codegen {
             | ((off >> 6) & 3) << 5
             | ((off >> 1) & 7) << 2
             | 0x01;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw16(insn));
     }
 
     /// C.LD rd', rs1', offset: CL 格式 (64-bit load, RV64)
@@ -171,7 +171,7 @@ impl Riscv64Codegen {
             | (((offset >> 6) & 3) as u16) << 5
             | ((rd_prime & 7) as u16) << 2
             | 0x01;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw16(insn));
     }
 
     /// C.SD rs2', rs1', offset: CS 格式 (64-bit store, RV64)
@@ -183,21 +183,21 @@ impl Riscv64Codegen {
             | (((offset >> 6) & 3) as u16) << 5
             | ((rs2_prime & 7) as u16) << 2
             | 0x01;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw16(insn));
     }
 
     /// C.MV rd, rs2 (rd != 0, rs2 != 0): CR 格式
     pub(crate) fn emit_c_mv(&mut self, rd: u8, rs2: u8) {
         debug_assert!(rd != 0 && rs2 != 0);
         let insn: u16 = 0b100 << 12 | (rd as u16) << 7 | (rs2 as u16) << 2 | 0x02;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw16(insn));
     }
 
     /// C.ADD rd, rs2 (rd != 0, rs2 != 0): CR 格式, rd == rs1
     pub(crate) fn emit_c_add(&mut self, rd: u8, rs2: u8) {
         debug_assert!(rd != 0 && rs2 != 0);
         let insn: u16 = 0b100 << 12 | 1 << 12 | (rd as u16) << 7 | (rs2 as u16) << 2 | 0x02;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw16(insn));
     }
 
     /// C.LUI rd, imm (rd != 0, rd != 2, imm != 0, -32..=31): CI 格式
@@ -206,7 +206,7 @@ impl Riscv64Codegen {
         let imm = imm as u16;
         let insn: u16 =
             0b011 << 13 | ((imm >> 5) & 1) << 12 | (rd as u16) << 7 | (imm & 0x1f) << 2 | 0x01;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw16(insn));
     }
 
     /// C.BNEZ rs1', offset: CB 格式, 8-bit signed offset
@@ -220,7 +220,7 @@ impl Riscv64Codegen {
             | ((off >> 6) & 3) << 5
             | ((off >> 1) & 7) << 2
             | 0x01;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw16(insn));
     }
 
     /// C.ADDIW rd, imm (rd != 0, -32..=31): CI 格式, RV64
@@ -229,7 +229,7 @@ impl Riscv64Codegen {
         let imm = imm as u16;
         let insn: u16 =
             0b001 << 13 | ((imm >> 5) & 1) << 12 | (rd as u16) << 7 | (imm & 0x1f) << 2 | 0x01;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw16(insn));
     }
 
     // ===== M8 新增: FP 扩展子集 (D 扩展双精度) =====

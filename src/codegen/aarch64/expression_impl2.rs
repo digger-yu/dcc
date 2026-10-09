@@ -5,6 +5,7 @@ use crate::ast::{find_field, BinOp, UnOp};
 use crate::codegen::aarch64::codegen::{
     is_complex_ty, is_float_ty, is_vector_ty, trunc_i32, value_type_size, Aarch64Codegen,
 };
+use crate::codegen::aarch64::insn::Insn;
 use crate::ir::{ExprKind, ExprLiteral, TypedExpr, ValueType};
 
 impl Aarch64Codegen {
@@ -18,7 +19,7 @@ impl Aarch64Codegen {
                 if let Some(ExprLiteral::Int(v)) = expr.literal {
                     self.mov_w0_imm(trunc_i32(v));
                     // int 转 float: scvtf s0, w0
-                    self.emit(&[0x00, 0x00, 0x18, 0x1e]);
+                    self.emit_insn(&Insn::raw(0x1e180000));
                     return true;
                 }
             },
@@ -50,19 +51,19 @@ impl Aarch64Codegen {
                         ValueType::Float { bits: 32 } => {
                             if is_unsigned {
                                 // UCVTF S0, W0: 0x1E190000
-                                self.emit(&0x1E190000u32.to_le_bytes());
+                                self.emit_insn(&Insn::raw(0x1E190000));
                             } else {
                                 // SCVTF S0, W0: 0x1E180000
-                                self.emit(&0x1E180000u32.to_le_bytes());
+                                self.emit_insn(&Insn::raw(0x1E180000));
                             }
                         },
                         ValueType::Float { bits: 64 } => {
                             if is_unsigned {
                                 // UCVTF D0, W0: 0x9E190000
-                                self.emit(&0x9E190000u32.to_le_bytes());
+                                self.emit_insn(&Insn::raw(0x9E190000));
                             } else {
                                 // SCVTF D0, W0: 0x9E180000
-                                self.emit(&0x9E180000u32.to_le_bytes());
+                                self.emit_insn(&Insn::raw(0x9E180000));
                             }
                         },
                         _ => {},
@@ -172,7 +173,7 @@ impl Aarch64Codegen {
                 // gen_expr 不会调 gen_float_expr (ty 不是 float), 所以这里
                 // expr.ty 必然是 float, 直接返回 false 让上层走 fallback.
                 if !is_float_ty(&expr.ty) && !is_vector_ty(&expr.ty) && self.gen_expr(expr) {
-                    self.emit(&[0x00, 0x00, 0x18, 0x1e]); // scvtf s0, w0
+                    self.emit_insn(&Insn::raw(0x1e180000)); // scvtf s0, w0
                     return true;
                 }
             },
@@ -297,7 +298,7 @@ impl Aarch64Codegen {
                 if let Some(ExprLiteral::Int(v)) = expr.literal {
                     self.mov_w0_imm(trunc_i32(v));
                     // int to float: scvtf s0, w0
-                    self.emit(&[0x00, 0x00, 0x18, 0x1e]);
+                    self.emit_insn(&Insn::raw(0x1e180000));
                     self.zero_v1();
                     return true;
                 }
@@ -358,7 +359,7 @@ impl Aarch64Codegen {
                         // (gen_expr for float puts result in s0)
                     } else {
                         // int in w0 -> float in s0
-                        self.emit(&[0x00, 0x00, 0x18, 0x1e]); // scvtf s0, w0
+                        self.emit_insn(&Insn::raw(0x1e180000)); // scvtf s0, w0
                     }
                     self.zero_v1();
                 }

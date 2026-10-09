@@ -14,7 +14,7 @@ impl Riscv64Codegen {
             // fegetround(): CSRRW a0, frm, x0; SRLI a0, a0, 5
             "fegetround" => {
                 // CSRRW a0, frm, x0 = 0xC010F573
-                self.emit(&0xC010F573u32.to_le_bytes());
+                self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(0xC010F573));
                 // SRLI a0, a0, 5
                 self.emit_srli(10, 10, 5);
             },
@@ -27,7 +27,7 @@ impl Riscv64Codegen {
                 self.gen_expr(&args[0]); // a0 = mode
                 self.emit_slli(10, 10, 5); // 移到 frm 位 [7:5]
                                            // CSRRW x0, frm, a0 = 0xC0151073
-                self.emit(&0xC0151073u32.to_le_bytes());
+                self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(0xC0151073));
                 self.li_a0(0); // 返回 0
             },
             // feclearexcept(excepts): CSRC x0, fflags, a0; li a0, 0
@@ -40,7 +40,7 @@ impl Riscv64Codegen {
                                          // ANDI a0, a0, 0x1F (保留 5 位)
                 self.emit_andi(10, 10, 0x1F);
                 // CSRC x0, fflags, a0 = 0x40153073
-                self.emit(&0x40153073u32.to_le_bytes());
+                self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(0x40153073));
                 self.li_a0(0);
             },
             // feraiseexcept(excepts): CSRS x0, fflags, a0; li a0, 0
@@ -52,7 +52,7 @@ impl Riscv64Codegen {
                 self.gen_expr(&args[0]);
                 self.emit_andi(10, 10, 0x1F);
                 // CSRS x0, fflags, a0 = 0x40152073
-                self.emit(&0x40152073u32.to_le_bytes());
+                self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(0x40152073));
                 self.li_a0(0);
             },
             // fetestexcept(excepts): CSRRS a0, fflags, x0; AND a0, a0, a1
@@ -66,7 +66,7 @@ impl Riscv64Codegen {
                 // MV a1, a0 (保存)
                 self.mv_a1_a0();
                 // CSRRS a0, fflags, x0 = 0xC0102573
-                self.emit(&0xC0102573u32.to_le_bytes());
+                self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(0xC0102573));
                 // AND a0, a0, a1
                 self.emit_and(10, 10, 11);
             },
@@ -79,12 +79,12 @@ impl Riscv64Codegen {
                 }
                 self.gen_expr(&args[0]); // a0 = envp
                                          // CSRRS a1, fcsr, x0 (读取 fcsr)
-                self.emit(&0xC03025F3u32.to_le_bytes()); // CSRRS a1, fcsr, x0
+                self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(0xC03025F3)); // CSRRS a1, fcsr, x0
                                                          // SW a1, 0(a0) (存储到 [envp])
                 self.emit_sw(11, 10, 0);
                 if name == "feholdexcept" {
                     // CSRW fcsr, x0 (清除所有标志)
-                    self.emit(&0xC0301073u32.to_le_bytes());
+                    self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(0xC0301073));
                 }
                 self.li_a0(0);
             },
@@ -97,7 +97,7 @@ impl Riscv64Codegen {
                                          // LW a1, 0(a0) (从 [envp] 加载)
                 self.emit_lw(11, 10, 0);
                 // CSRRW x0, fcsr, a1 (写入 fcsr)
-                self.emit(&0xC0359073u32.to_le_bytes());
+                self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(0xC0359073));
                 self.li_a0(0);
             },
             _ => {

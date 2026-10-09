@@ -2,6 +2,7 @@
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
 use crate::ast::{BlockItem, Expr, FuncDecl, Stmt};
+use crate::codegen::arm::insn::Insn;
 use crate::codegen::shared::elf::{
     ElfSection, ElfSym, SHF_ALLOC, SHF_GNU_RETAIN, SHT_PROGBITS, STB_GLOBAL, STB_LOCAL, STB_WEAK,
     STT_FUNC, STT_GNU_IFUNC,
@@ -21,12 +22,12 @@ impl ArmCodegen {
             let suffix_len = n.saturating_sub(prefix_len);
             for _ in 0..prefix_len {
                 // ARM NOP: 0xE320F000
-                self.code.extend_from_slice(&0xE320F000u32.to_le_bytes());
+                self.emit_insn(&Insn::raw(0xE320F000));
             }
             func_start = self.code.len() as u64;
             self.labels.insert(func.name.clone(), func_start);
             for _ in 0..suffix_len {
-                self.code.extend_from_slice(&0xE320F000u32.to_le_bytes());
+                self.emit_insn(&Insn::raw(0xE320F000));
             }
         } else {
             func_start = self.code.len() as u64;
@@ -293,10 +294,10 @@ impl ArmCodegen {
     pub(crate) fn emit_str_fp_off(&mut self, rd: u8, off: i32) {
         if off >= 0 {
             let inst = 0xE58B0000 | ((rd as u32) << 12) | (off as u32 & 0xFFF);
-            self.code.extend_from_slice(&inst.to_le_bytes());
+            self.emit_insn(&Insn::raw(inst));
         } else {
             let inst = 0xE50B0000 | ((rd as u32) << 12) | ((-off) as u32 & 0xFFF);
-            self.code.extend_from_slice(&inst.to_le_bytes());
+            self.emit_insn(&Insn::raw(inst));
         }
     }
 
@@ -304,10 +305,10 @@ impl ArmCodegen {
     pub(crate) fn emit_ldr_fp_off(&mut self, rd: u8, off: i32) {
         if off >= 0 {
             let inst = 0xE59B0000 | ((rd as u32) << 12) | (off as u32 & 0xFFF);
-            self.code.extend_from_slice(&inst.to_le_bytes());
+            self.emit_insn(&Insn::raw(inst));
         } else {
             let inst = 0xE51B0000 | ((rd as u32) << 12) | ((-off) as u32 & 0xFFF);
-            self.code.extend_from_slice(&inst.to_le_bytes());
+            self.emit_insn(&Insn::raw(inst));
         }
     }
 

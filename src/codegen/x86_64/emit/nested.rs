@@ -7,6 +7,7 @@ use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
 use crate::codegen::x86_64::asm::*;
+use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::*;
 use crate::const_eval::{self, ConstValue};
@@ -74,23 +75,23 @@ impl Codegen {
         // rdi = r13 & ~0xFFF
         // 注意: mov rdi, r13 需要 REX.W + REX.B (r13 >= 8)
         // 4C 89 EF = mov rdi, r13 (REX.WR, src=r13 in r/m, dst=rdi in reg)
-        self.emit(&[0x4C, 0x89, 0xEF]); // mov rdi, r13
-        self.emit(&[0x48, 0x81, 0xE7]); // and rdi, ~0xFFF
-        self.emit(&0xFFFFF000u32.to_le_bytes());
+        self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0xEF])); // mov rdi, r13
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xE7])); // and rdi, ~0xFFF
+        self.emit_insn(&Insn::raw_bytes(&0xFFFFF000u32.to_le_bytes()));
         // rdi -= 0x1000 (下方页)
-        self.emit(&[0x48, 0x81, 0xEF]); // sub rdi, 0x1000
-        self.emit(&0x1000u32.to_le_bytes());
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xEF])); // sub rdi, 0x1000
+        self.emit_insn(&Insn::raw_bytes(&0x1000u32.to_le_bytes()));
         // rsi = 0x2000 (两页)
-        self.emit(&[0x48, 0xC7, 0xC6]); // mov rsi, 0x2000
-        self.emit(&0x2000i32.to_le_bytes());
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC6])); // mov rsi, 0x2000
+        self.emit_insn(&Insn::raw_bytes(&0x2000i32.to_le_bytes()));
         // rdx = 7 (PROT_READ|PROT_WRITE|PROT_EXEC)
-        self.emit(&[0x48, 0xC7, 0xC2]); // mov rdx, 7
-        self.emit(&7i32.to_le_bytes());
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC2])); // mov rdx, 7
+        self.emit_insn(&Insn::raw_bytes(&7i32.to_le_bytes()));
         // rax = 10 (SYS_mprotect)
-        self.emit(&[0x48, 0xC7, 0xC0]); // mov rax, 10
-        self.emit(&10i32.to_le_bytes());
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC0])); // mov rax, 10
+        self.emit_insn(&Insn::raw_bytes(&10i32.to_le_bytes()));
         // syscall
-        self.emit(&[0x0F, 0x05]);
+        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x05]));
         // syscall 破坏: rax, rcx, r11
         // 恢复 rax (可能被后续代码使用)
         // 注意: rcx, r11 被 syscall 破坏，但它们是 caller-saved，所以没问题
@@ -130,24 +131,24 @@ impl Codegen {
             // 而非调用时读取调用者 r13 — 否则外部函数调用函数指针时
             // 静态链会指向调用者帧, 嵌套函数访问父帧 upvar 时读到垃圾。
             // 写入字节 0-1: movabs r10 = 49 ba
-            self.emit(&[0xC6, 0x07, 0x49]); // mov BYTE [rdi+0], 0x49
-            self.emit(&[0xC6, 0x47, 0x01, 0xBA]); // mov BYTE [rdi+1], 0xBA
+            self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x07, 0x49])); // mov BYTE [rdi+0], 0x49
+            self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x47, 0x01, 0xBA])); // mov BYTE [rdi+1], 0xBA
                                                         // 写入字节 2-9: 定义父帧指针 (当前 r13 值)
                                                         // mov [rdi+2], r13 = 4C 89 6F 02 (REX.WB, r13 为源寄存器)
-            self.emit(&[0x4C, 0x89, 0x6F, 0x02]);
+            self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0x6F, 0x02]));
             // 写入字节 10-11: movabs r11 = 49 bb
-            self.emit(&[0xC6, 0x47, 0x0A, 0x49]); // mov BYTE [rdi+10], 0x49
-            self.emit(&[0xC6, 0x47, 0x0B, 0xBB]); // mov BYTE [rdi+11], 0xBB
+            self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x47, 0x0A, 0x49])); // mov BYTE [rdi+10], 0x49
+            self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x47, 0x0B, 0xBB])); // mov BYTE [rdi+11], 0xBB
                                                         // 写入字节 12-19: 函数地址 (rax 中的 8 字节)
-            self.emit(&[0x48, 0x89, 0x47, 0x0C]); // mov [rdi+12], rax
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x47, 0x0C])); // mov [rdi+12], rax
                                                   // 写入字节 20-22: jmp r11 = 41 ff e3
-            self.emit(&[0xC6, 0x47, 0x14, 0x41]); // mov BYTE [rdi+20], 0x41
-            self.emit(&[0xC6, 0x47, 0x15, 0xFF]); // mov BYTE [rdi+21], 0xFF
-            self.emit(&[0xC6, 0x47, 0x16, 0xE3]); // mov BYTE [rdi+22], 0xE3
+            self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x47, 0x14, 0x41])); // mov BYTE [rdi+20], 0x41
+            self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x47, 0x15, 0xFF])); // mov BYTE [rdi+21], 0xFF
+            self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x47, 0x16, 0xE3])); // mov BYTE [rdi+22], 0xE3
                                                         // 写入字节 23-31: nop 填充 (不执行)
-            self.emit(&[0xC6, 0x47, 0x17, 0x90]); // mov BYTE [rdi+23], 0x90
-            self.emit(&[0x48, 0xC7, 0x47, 0x18]); // mov QWORD [rdi+24]
-            self.emit(&0x9090909090909090u64.to_le_bytes());
+            self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x47, 0x17, 0x90])); // mov BYTE [rdi+23], 0x90
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0x47, 0x18])); // mov QWORD [rdi+24]
+            self.emit_insn(&Insn::raw_bytes(&0x9090909090909090u64.to_le_bytes()));
         }
     }
     pub(crate) fn gen_trampoline(&mut self, nested_name: &str) -> i64 {
@@ -173,14 +174,14 @@ impl Codegen {
                 self.load_stack(dst, off);
             } else if Self::fits_disp32(off) {
                 let rex = 0x48u8 | 0x01 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                self.emit(&[rex, 0x8B, 0x80 | ((dst & 7) << 3) | (dst & 7)]);
-                self.emit(&(off as i32).to_le_bytes());
+                self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, 0x80 | ((dst & 7) << 3) | (dst & 7)]));
+                self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
             } else {
                 // 罕见: 链槽偏移超出 disp32, 用 r10 作缩放槽
                 self.mov_imm(10, off as i128);
                 // mov dst, [dst + r10]: REX.X (r10 索引) + REX.R/B (dst 扩展)
                 let rex = 0x48u8 | 0x02 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                self.emit(&[rex, 0x8B, 0x80 | ((dst & 7) << 3) | 0x04, 0x10 | (dst & 7)]);
+                self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, 0x80 | ((dst & 7) << 3) | 0x04, 0x10 | (dst & 7)]));
             }
         }
     }
@@ -188,7 +189,7 @@ impl Codegen {
         if hops <= 0 {
             // mov r10, r13: reg 字段是 r13（REX.R），r/m 字段是 r10（REX.B）。
             // mod=11 没有 SIB，旧代码发的 0x4F 多了一个 REX.X（产物被 objdump 标成 rex.WRXB）。
-            self.emit(&[0x4D, 0x89, 0xEA]);
+            self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x89, 0xEA]));
             return;
         }
         self.load_frame_via_chain(10, hops, offs);
@@ -203,14 +204,14 @@ impl Codegen {
         let off = self.nested_tramp_offsets.get(unique).copied().unwrap_or(0);
         if Self::fits_disp32(off) {
             let rex = 0x48u8 | 0x01 | if dst >= 8 { 0x04 } else { 0 };
-            self.emit(&[rex, 0x8D, 0x80 | ((dst & 7) << 3) | 0x03]);
-            self.emit(&(off as i32).to_le_bytes());
+            self.emit_insn(&Insn::raw_bytes(&[rex, 0x8D, 0x80 | ((dst & 7) << 3) | 0x03]));
+            self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
         } else {
             self.mov_imm(10, off as i128);
             // lea dst, [r11 + r10]: REX.X (r10) + REX.B (r11) + REX.R (dst 扩展)
             let rex = 0x48u8 | 0x03 | if dst >= 8 { 0x04 } else { 0 };
-            self.emit(&[rex, 0x8D]);
-            self.emit(&[0x80 | ((dst & 7) << 3) | 0x04, 0x10 | 0x03]);
+            self.emit_insn(&Insn::raw_bytes(&[rex, 0x8D]));
+            self.emit_insn(&Insn::raw_bytes(&[0x80 | ((dst & 7) << 3) | 0x04, 0x10 | 0x03]));
         }
     }
     pub(crate) fn load_upvar(&mut self, reg: u8, parent_off: i64, size: usize, upvar_name: &str) {
@@ -227,37 +228,37 @@ impl Codegen {
                 // mov r11, [r11 + off]  (REX.W.RB if r11>=8)
                 let rex = 0x48u8 | if 11 >= 8 { 0x05u8 } else { 0 };
                 let modrm = 0x83 | ((11 & 7) << 3);
-                self.emit(&[rex, 0x8B, modrm]);
-                self.emit(&(off as i32).to_le_bytes());
+                self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, modrm]));
+                self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
             } else {
                 self.mov_imm(10, off as i128);
                 // lea r11, [r11 + r10]
-                self.emit(&[0x4D, 0x8D, 0x1C, 0xD3]);
+                self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x8D, 0x1C, 0xD3]));
             }
         }
         if Self::fits_disp32(parent_off) {
             let rex = 0x41 | if reg >= 8 { 0x04 } else { 0 };
             let modrm = 0x83 | ((reg & 7) << 3);
             match size {
-                1 => self.emit(&[rex, 0x0F, 0xB6, modrm]),
-                2 => self.emit(&[rex, 0x0F, 0xB7, modrm]),
-                4 => self.emit(&[rex, 0x8B, modrm]),
-                _ => self.emit(&[rex | 0x08, 0x8B, modrm]),
-            }
-            self.emit(&(parent_off as i32).to_le_bytes());
+                1 => self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xB6, modrm])),
+                2 => self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xB7, modrm])),
+                4 => self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, modrm])),
+                _ => self.emit_insn(&Insn::raw_bytes(&[rex | 0x08, 0x8B, modrm])),
+            };
+            self.emit_insn(&Insn::raw_bytes(&(parent_off as i32).to_le_bytes()));
         } else {
             self.mov_imm(10, parent_off as i128);
-            self.emit(&[0x4D, 0x8D, 0x1C, 0x13]); // lea r11, [r11+r10]
+            self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x8D, 0x1C, 0x13])); // lea r11, [r11+r10]
             let rex = match size {
                 1 | 2 | 4 => 0x41 | if reg >= 8 { 0x04 } else { 0 },
                 _ => 0x49 | if reg >= 8 { 0x04 } else { 0 },
             };
             match size {
-                1 => self.emit(&[rex, 0x0F, 0xB6]),
-                2 => self.emit(&[rex, 0x0F, 0xB7]),
-                4 => self.emit(&[rex, 0x8B]),
-                _ => self.emit(&[rex, 0x8B]),
-            }
+                1 => self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xB6])),
+                2 => self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xB7])),
+                4 => self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B])),
+                _ => self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B])),
+            };
             self.emit_reg_indirect_modrm(reg, 11);
         }
     }
@@ -318,45 +319,45 @@ impl Codegen {
             if Self::fits_disp32(off) {
                 let rex = 0x48u8 | if 11 >= 8 { 0x05u8 } else { 0 };
                 let modrm = 0x83 | ((11 & 7) << 3);
-                self.emit(&[rex, 0x8B, modrm]);
-                self.emit(&(off as i32).to_le_bytes());
+                self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, modrm]));
+                self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
             } else {
                 self.mov_imm(10, off as i128);
-                self.emit(&[0x4D, 0x8D, 0x1C, 0xD3]);
+                self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x8D, 0x1C, 0xD3]));
             }
         }
         if Self::fits_disp32(parent_off) {
             let rex = 0x41 | if reg >= 8 { 0x04 } else { 0 };
             let modrm = 0x83 | ((reg & 7) << 3);
             match size {
-                1 => self.emit(&[rex, 0x88, modrm]),
-                2 => self.emit(&[0x66, rex, 0x89, modrm]),
-                4 => self.emit(&[rex, 0x89, modrm]),
-                _ => self.emit(&[rex | 0x08, 0x89, modrm]),
-            }
-            self.emit(&(parent_off as i32).to_le_bytes());
+                1 => self.emit_insn(&Insn::raw_bytes(&[rex, 0x88, modrm])),
+                2 => self.emit_insn(&Insn::raw_bytes(&[0x66, rex, 0x89, modrm])),
+                4 => self.emit_insn(&Insn::raw_bytes(&[rex, 0x89, modrm])),
+                _ => self.emit_insn(&Insn::raw_bytes(&[rex | 0x08, 0x89, modrm])),
+            };
+            self.emit_insn(&Insn::raw_bytes(&(parent_off as i32).to_le_bytes()));
         } else {
             self.mov_imm(10, parent_off as i128);
-            self.emit(&[0x4D, 0x8D, 0x1C, 0x13]); // lea r11, [r11+r10]
+            self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x8D, 0x1C, 0x13])); // lea r11, [r11+r10]
             match size {
                 1 => {
                     let rex = 0x41 | if reg >= 8 { 0x04 } else { 0 };
-                    self.emit(&[rex, 0x88]);
+                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x88]));
                     self.emit_reg_indirect_modrm(reg, 11);
                 },
                 2 => {
                     let rex = 0x41 | if reg >= 8 { 0x04 } else { 0 };
-                    self.emit(&[0x66, rex, 0x89]);
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, rex, 0x89]));
                     self.emit_reg_indirect_modrm(reg, 11);
                 },
                 4 => {
                     let rex = 0x41 | if reg >= 8 { 0x04 } else { 0 };
-                    self.emit(&[rex, 0x89]);
+                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x89]));
                     self.emit_reg_indirect_modrm(reg, 11);
                 },
                 _ => {
                     let rex = 0x49 | if reg >= 8 { 0x04 } else { 0 };
-                    self.emit(&[rex, 0x89]);
+                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x89]));
                     self.emit_reg_indirect_modrm(reg, 11);
                 },
             }

@@ -4,6 +4,7 @@
 use super::struct_def::ArmCodegen;
 use super::BranchKind;
 use crate::ast::{BinOp, BlockItem, FuncDecl};
+use crate::codegen::arm::insn::Insn;
 use crate::codegen::shared::elf::{ElfSym, STB_GLOBAL, STT_FUNC};
 
 impl ArmCodegen {
@@ -199,7 +200,7 @@ impl ArmCodegen {
             reg_list |= 1 << r;
         }
         let inst = 0xE92D0000 | reg_list as u32;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_pop(&mut self, regs: Vec<u8>) {
@@ -208,18 +209,18 @@ impl ArmCodegen {
             reg_list |= 1 << r;
         }
         let inst = 0xE8BD0000 | reg_list as u32;
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_mov_reg(&mut self, rd: u8, rm: u8) {
         let inst = 0xE1A00000 | ((rd as u32) << 12) | (rm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_mov_imm(&mut self, rd: u8, imm: u8) {
         // MOV rd, #imm (立即数)
         let inst = 0xE3A00000 | ((rd as u32) << 12) | (imm as u32 & 0xFF);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_load_imm(&mut self, rd: u8, val: i32) {
@@ -229,7 +230,7 @@ impl ArmCodegen {
         } else if (-256..0).contains(&val) {
             // MVN rd, #(|val|-1)
             let inst = 0xE3E00000 | ((rd as u32) << 12) | ((-val - 1) as u32 & 0xFF);
-            self.code.extend_from_slice(&inst.to_le_bytes());
+            self.emit_insn(&Insn::raw(inst));
         } else {
             // 大整数: 使用 literal pool (简化为 movw/movt 序列)
             // ARMv7 支持 MOVW/MOVT
@@ -237,28 +238,28 @@ impl ArmCodegen {
             let hi = ((val >> 16) & 0xFFFF) as u32;
             // MOVW rd, #lo
             let inst = 0xE3000000 | ((rd as u32) << 12) | ((hi & 0xF) << 16) | lo;
-            self.code.extend_from_slice(&inst.to_le_bytes());
+            self.emit_insn(&Insn::raw(inst));
             if hi > 0 {
                 // MOVT rd, #hi
                 let inst = 0xE3400000 | ((rd as u32) << 12) | ((hi & 0xF) << 16) | (hi >> 4);
-                self.code.extend_from_slice(&inst.to_le_bytes());
+                self.emit_insn(&Insn::raw(inst));
             }
         }
     }
 
     pub(crate) fn emit_add(&mut self, rd: u8, rn: u8, rm: u8) {
         let inst = 0xE0800000 | ((rd as u32) << 12) | ((rn as u32) << 16) | (rm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_sub(&mut self, rd: u8, rn: u8, rm: u8) {
         let inst = 0xE0400000 | ((rd as u32) << 12) | ((rn as u32) << 16) | (rm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_sub_imm(&mut self, rd: u8, rn: u8, imm: u32) {
         let inst = 0xE2400000 | ((rd as u32) << 12) | ((rn as u32) << 16) | (imm & 0xFF);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// -fstack-clash-protection: emit page-sized probes when allocating a
@@ -282,75 +283,75 @@ impl ArmCodegen {
             self.emit_sub_imm(13, 13, 0x10);
             // strb r0, [sp]  — probe the page (r0 as scratch)
             let strb = 0xE5CD0000u32;
-            self.code.extend_from_slice(&strb.to_le_bytes());
+            self.emit_insn(&Insn::raw(strb));
             // subs r12, r12, #1  (subtract and set flags)
             let subs = 0xE25CC001u32;
-            self.code.extend_from_slice(&subs.to_le_bytes());
+            self.emit_insn(&Insn::raw(subs));
             // bne .probe_loop
             let loop_end = self.code.len() as u64;
             let offset = ((loop_start as i64 - loop_end as i64 - 8) / 4) as u32;
             let bne = 0x1A000000u32 | (offset & 0x00FFFFFF);
-            self.code.extend_from_slice(&bne.to_le_bytes());
+            self.emit_insn(&Insn::raw(bne));
         }
     }
 
     pub(crate) fn emit_add_imm(&mut self, rd: u8, rn: u8, imm: u32) {
         let inst = 0xE2800000 | ((rd as u32) << 12) | ((rn as u32) << 16) | (imm & 0xFF);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_mul(&mut self, rd: u8, rm: u8, rs: u8) {
         // MUL rd, rm, rs => rd = rm * rs
         let inst = 0xE0000090 | ((rd as u32) << 16) | ((rs as u32) << 8) | (rm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_and(&mut self, rd: u8, rn: u8, rm: u8) {
         let inst = 0xE0000000 | ((rd as u32) << 12) | ((rn as u32) << 16) | (rm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_orr(&mut self, rd: u8, rn: u8, rm: u8) {
         let inst = 0xE1800000 | ((rd as u32) << 12) | ((rn as u32) << 16) | (rm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_eor(&mut self, rd: u8, rn: u8, rm: u8) {
         let inst = 0xE0200000 | ((rd as u32) << 12) | ((rn as u32) << 16) | (rm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_lsl(&mut self, rd: u8, rm: u8, rs: u8) {
         // LSL rd, rm, rs (寄存器移位)
         let inst = 0xE1A00010 | ((rd as u32) << 12) | (rs as u32) << 8 | (rm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_asr(&mut self, rd: u8, rm: u8, rs: u8) {
         // ASR rd, rm, rs
         let inst = 0xE1A00050 | ((rd as u32) << 12) | (rs as u32) << 8 | (rm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_mvn(&mut self, rd: u8, rm: u8) {
         let inst = 0xE1E00000 | ((rd as u32) << 12) | (rm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_rsb_imm(&mut self, rd: u8, rn: u8, imm: u8) {
         // RSB rd, rn, #imm => rd = imm - rn
         let inst = 0xE2600000 | ((rd as u32) << 12) | ((rn as u32) << 16) | (imm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_cmp(&mut self, rn: u8, rm: u8) {
         let inst = 0xE1500000 | ((rn as u32) << 16) | (rm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_cmp_imm(&mut self, rn: u8, imm: u8) {
         let inst = 0xE3500000 | ((rn as u32) << 16) | (imm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     /// BNE label: Branch if not equal (condition code NE = 0x1)
@@ -360,7 +361,7 @@ impl ArmCodegen {
             .push((pos, label.to_string(), BranchKind::Beq));
         // BNE placeholder (condition = NE = 0x1)
         let inst: u32 = 0x0A000000; // B with condition NE
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_b(&mut self, label: &str) {
@@ -369,7 +370,7 @@ impl ArmCodegen {
         self.pending_branches
             .push((pos, label.to_string(), BranchKind::B));
         // 占位 B 指令 (AL condition)
-        self.code.extend_from_slice(&0xEA000000u32.to_le_bytes());
+        self.emit_insn(&Insn::raw(0xEA000000));
     }
 
     pub(crate) fn emit_beq(&mut self, label: &str) {
@@ -378,7 +379,7 @@ impl ArmCodegen {
         self.pending_branches
             .push((pos, label.to_string(), BranchKind::Beq));
         // 占位 BEQ 指令 (EQ condition = 0x0)
-        self.code.extend_from_slice(&0x0A000000u32.to_le_bytes());
+        self.emit_insn(&Insn::raw(0x0A000000));
     }
 
     pub(crate) fn emit_bl(&mut self, name: &str) {
@@ -387,49 +388,49 @@ impl ArmCodegen {
         let pos = self.code.len() as u64;
         self.pending_bl_calls.push((pos, name.to_string()));
         // 占位 BL 指令
-        self.code.extend_from_slice(&0xEB000000u32.to_le_bytes());
+        self.emit_insn(&Insn::raw(0xEB000000));
     }
 
     // 条件 MOV 指令
     pub(crate) fn emit_mov_cond(&mut self, cond: u8, rd: u8, imm: u8) {
         let inst = 0xE3B00000 | ((cond as u32) << 28) | ((rd as u32) << 12) | (imm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_moveq(&mut self, rd: u8, imm: u8) {
         // MOVEQ rd, #imm (cond = 0x0)
         let inst = 0x03A00000 | ((rd as u32) << 12) | (imm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_movne(&mut self, rd: u8, imm: u8) {
         // MOVNE rd, #imm (cond = 0x1)
         let inst = 0x13A00000 | ((rd as u32) << 12) | (imm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_movlt(&mut self, rd: u8, imm: u8) {
         // MOVLT rd, #imm (cond = 0xB)
         let inst = 0xB3A00000 | ((rd as u32) << 12) | (imm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_movgt(&mut self, rd: u8, imm: u8) {
         // MOVGT rd, #imm (cond = 0xC)
         let inst = 0xC3A00000 | ((rd as u32) << 12) | (imm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_movle(&mut self, rd: u8, imm: u8) {
         // MOVLE rd, #imm (cond = 0xD)
         let inst = 0xD3A00000 | ((rd as u32) << 12) | (imm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     pub(crate) fn emit_movge(&mut self, rd: u8, imm: u8) {
         // MOVGE rd, #imm (cond = 0xA)
         let inst = 0xA3A00000 | ((rd as u32) << 12) | (imm as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 
     // 栈上局部变量加载/存储
@@ -437,10 +438,10 @@ impl ArmCodegen {
         // LDR r0, [fp, #offset]
         if offset >= 0 {
             let inst = 0xE59B0000 | (offset as u32 & 0xFFF);
-            self.code.extend_from_slice(&inst.to_le_bytes());
+            self.emit_insn(&Insn::raw(inst));
         } else {
             let inst = 0xE51B0000 | ((-offset) as u32 & 0xFFF);
-            self.code.extend_from_slice(&inst.to_le_bytes());
+            self.emit_insn(&Insn::raw(inst));
         }
     }
 
@@ -448,10 +449,10 @@ impl ArmCodegen {
         // STR r0, [fp, #offset]
         if offset >= 0 {
             let inst = 0xE58B0000 | (offset as u32 & 0xFFF);
-            self.code.extend_from_slice(&inst.to_le_bytes());
+            self.emit_insn(&Insn::raw(inst));
         } else {
             let inst = 0xE50B0000 | ((-offset) as u32 & 0xFFF);
-            self.code.extend_from_slice(&inst.to_le_bytes());
+            self.emit_insn(&Insn::raw(inst));
         }
     }
 
@@ -461,10 +462,10 @@ impl ArmCodegen {
             // LDR rd, [fp, #off]
             if off >= 0 {
                 let inst = 0xE59B0000 | ((reg as u32) << 12) | (off as u32 & 0xFFF);
-                self.code.extend_from_slice(&inst.to_le_bytes());
+                self.emit_insn(&Insn::raw(inst));
             } else {
                 let inst = 0xE51B0000 | ((reg as u32) << 12) | ((-off) as u32 & 0xFFF);
-                self.code.extend_from_slice(&inst.to_le_bytes());
+                self.emit_insn(&Insn::raw(inst));
             }
         }
     }
@@ -475,10 +476,10 @@ impl ArmCodegen {
             // STR rd, [fp, #off]
             if off >= 0 {
                 let inst = 0xE58B0000 | ((reg as u32) << 12) | (off as u32 & 0xFFF);
-                self.code.extend_from_slice(&inst.to_le_bytes());
+                self.emit_insn(&Insn::raw(inst));
             } else {
                 let inst = 0xE50B0000 | ((reg as u32) << 12) | ((-off) as u32 & 0xFFF);
-                self.code.extend_from_slice(&inst.to_le_bytes());
+                self.emit_insn(&Insn::raw(inst));
             }
         }
     }
@@ -486,6 +487,6 @@ impl ArmCodegen {
     /// MOV rd, rs — register-to-register move
     pub(crate) fn emit_mov_rd_rs(&mut self, rd: u8, rs: u8) {
         let inst = 0xE1A00000u32 | ((rd as u32) << 12) | (rs as u32);
-        self.code.extend_from_slice(&inst.to_le_bytes());
+        self.emit_insn(&Insn::raw(inst));
     }
 }

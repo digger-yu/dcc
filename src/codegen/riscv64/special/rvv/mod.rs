@@ -10,7 +10,7 @@ impl Riscv64Codegen {
     pub(crate) fn emit_vsetvli(&mut self, rd: u8, rs1: u8, vtype: u32) {
         let insn =
             (vtype & 0x7ff) << 20 | (rs1 as u32) << 15 | 0b111 << 12 | (rd as u32) << 7 | 0x57; // OP-V
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VSETIVLI rd, uimm, vtype: 立即数设置向量类型
@@ -21,7 +21,7 @@ impl Riscv64Codegen {
             | 0b111 << 12
             | (rd as u32) << 7
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VLE32.V vd, (rs1), vm: 向量 32-bit 元素加载
@@ -29,7 +29,7 @@ impl Riscv64Codegen {
         let vm_bit = if vm { 1 << 25 } else { 0 };
         let insn =
             vm_bit | (rs1 as u32) << 15 | 0b010 << 12 | (vd as u32) << 7 | 0b0000111 << 25 | 0x07;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VSE32.V vs3, (rs1), vm: 向量 32-bit 元素存储
@@ -38,7 +38,7 @@ impl Riscv64Codegen {
         let insn = (vm_bit | (vs3 as u32) << 20 | (rs1 as u32) << 15 | 0b010 << 12)
             | 0b0000111 << 25
             | 0x27;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VADD.VV vd, vs2, vs1, vm: 向量加法
@@ -48,7 +48,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b1000001 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VMUL.VV vd, vs2, vs1, vm: 向量乘法 (取低 SEW 位)
@@ -61,7 +61,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b1010001 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VREDUCE.VS vd, vs2, vs1, vm: 向量归约 (简化)
@@ -71,7 +71,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b1100001 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     // ===== RVV 扩展: 完整向量指令集 =====
@@ -80,7 +80,7 @@ impl Riscv64Codegen {
     pub(crate) fn emit_vle8_v(&mut self, vd: u8, rs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
         let insn = (vm_bit | (rs1 as u32) << 15) | (vd as u32) << 7 | 0b0000111 << 25 | 0x07;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VLE16.V vd, (rs1), vm: 向量 16-bit 元素加载
@@ -88,7 +88,7 @@ impl Riscv64Codegen {
         let vm_bit = if vm { 1 << 25 } else { 0 };
         let insn =
             vm_bit | (rs1 as u32) << 15 | 0b101 << 12 | (vd as u32) << 7 | 0b0000111 << 25 | 0x07;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VLE64.V vd, (rs1), vm: 向量 64-bit 元素加载
@@ -96,14 +96,14 @@ impl Riscv64Codegen {
         let vm_bit = if vm { 1 << 25 } else { 0 };
         let insn =
             vm_bit | (rs1 as u32) << 15 | 0b011 << 12 | (vd as u32) << 7 | 0b0000111 << 25 | 0x07;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VSE8.V vs3, (rs1), vm
     pub(crate) fn emit_vse8_v(&mut self, vs3: u8, rs1: u8, vm: bool) {
         let vm_bit = if vm { 1 << 25 } else { 0 };
         let insn = (vm_bit | (vs3 as u32) << 20 | (rs1 as u32) << 15) | 0b0000111 << 25 | 0x27;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VSE16.V vs3, (rs1), vm
@@ -111,7 +111,7 @@ impl Riscv64Codegen {
         let vm_bit = if vm { 1 << 25 } else { 0 };
         let insn =
             vm_bit | (vs3 as u32) << 20 | (rs1 as u32) << 15 | 0b101 << 12 | 0b0000111 << 25 | 0x27;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VSE64.V vs3, (rs1), vm
@@ -119,7 +119,7 @@ impl Riscv64Codegen {
         let vm_bit = if vm { 1 << 25 } else { 0 };
         let insn =
             vm_bit | (vs3 as u32) << 20 | (rs1 as u32) << 15 | 0b011 << 12 | 0b0000111 << 25 | 0x27;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VSUB.VV vd, vs2, vs1, vm: 向量减法
@@ -131,7 +131,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b0000101 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VAND.VV vd, vs2, vs1, vm
@@ -144,7 +144,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b0010011 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VOR.VV vd, vs2, vs1, vm
@@ -157,7 +157,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b0010101 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VXOR.VV vd, vs2, vs1, vm
@@ -170,7 +170,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b0010111 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VSLL.VV vd, vs2, vs1, vm: 向量左移
@@ -183,7 +183,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b1000011 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VSRL.VV vd, vs2, vs1, vm: 向量逻辑右移
@@ -196,7 +196,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b1010001 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VSRA.VV vd, vs2, vs1, vm: 向量算术右移
@@ -209,7 +209,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b1010011 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     // --- 宽化/窄化指令 ---
@@ -224,7 +224,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b1100011 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VWSUB.VV vd, vs2, vs1, vm: 宽化减法
@@ -237,7 +237,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b1100101 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VWMUL.VV vd, vs2, vs1, vm: 宽化乘法
@@ -250,7 +250,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b1110111 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VWMULU.VV vd, vs2, vs1, vm: 宽化无符号乘法
@@ -260,7 +260,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b1110001 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VNSRL.WI vd, vs2, uimm, vm: 窄化右移 (立即数)
@@ -270,7 +270,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b1011001 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VNSRA.WI vd, vs2, uimm, vm: 窄化算术右移
@@ -280,7 +280,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b1011011 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     // --- 窄化钳位指令 ---
@@ -295,7 +295,7 @@ impl Riscv64Codegen {
             | 0b011 << 12
             | (vd as u32) << 7
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VNCLIPU.WV vd, vs2, vs1, vm: 无符号窄化钳位右移
@@ -308,7 +308,7 @@ impl Riscv64Codegen {
             | 0b010 << 12
             | (vd as u32) << 7
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     // --- 掩码指令 ---
@@ -321,7 +321,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b0110011 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VMOR.MM vd, vs2, vs1: 掩码 OR
@@ -332,7 +332,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b0110101 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VMXOR.MM vd, vs2, vs1: 掩码 XOR
@@ -343,14 +343,14 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b0110111 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VMNOT.M vd, vs2: 掩码 NOT (vmandn with v0=ones)
     pub(crate) fn emit_vmnot_m(&mut self, vd: u8, vs2: u8) {
         // VMNOT.M vd, vs2 = VMXNOR.M vd, vs2, v0 (all-ones mask)
         let insn = ((vs2 as u32) << 20) | 0b100 << 12 | (vd as u32) << 7 | 0b0111001 << 25 | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     // --- 浮点向量指令 ---
@@ -365,7 +365,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b0000001 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VFSUB.VV vd, vs2, vs1, vm: 浮点向量减法
@@ -378,7 +378,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b0000101 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VFMUL.VV vd, vs2, vs1, vm: 浮点向量乘法
@@ -391,7 +391,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b1001001 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VFDIV.VV vd, vs2, vs1, vm: 浮点向量除法
@@ -404,7 +404,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b1000001 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VFMADD.VV vd, vs1, vs2, vm: 浮点向量 fused multiply-add
@@ -417,7 +417,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b1010001 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VFMIN.VV vd, vs2, vs1, vm: 浮点向量 min
@@ -430,7 +430,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b0001001 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VFMAX.VV vd, vs2, vs1, vm: 浮点向量 max
@@ -443,7 +443,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b0001101 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     /// VFREDSUM.VS vd, vs2, vs1, vm: 浮点归约求和
@@ -456,7 +456,7 @@ impl Riscv64Codegen {
             | (vd as u32) << 7
             | 0b0000011 << 25
             | 0x57;
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(insn));
     }
 
     // ===== M8 新增: 特权指令 / CSR 访问 =====

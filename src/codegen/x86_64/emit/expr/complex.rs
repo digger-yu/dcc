@@ -6,6 +6,7 @@ use crate::ast::*;
 use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
+use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::asm::*;
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::*;
@@ -22,16 +23,16 @@ impl Codegen {
         let helper = if is_float { "__divsc3" } else { "__divdc3" };
         let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
         let r_imag_slot = inner_sz * 3;
-        self.emit(&[pfx, 0x0F, 0x10, 0x04, 0x24]);
-        self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, inner_sz as u8]);
-        self.emit(&[pfx, 0x0F, 0x10, 0x54, 0x24, (inner_sz * 2) as u8]);
-        self.emit(&[pfx, 0x0F, 0x10, 0x5C, 0x24, r_imag_slot as u8]);
+        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x04, 0x24]));
+        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, inner_sz as u8]));
+        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x54, 0x24, (inner_sz * 2) as u8]));
+        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x5C, 0x24, r_imag_slot as u8]));
         self.emit_call_extern(helper);
         if is_float {
-            self.emit(&[0x66, 0x0F, 0xD6, 0x04, 0x24]);
+            self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xD6, 0x04, 0x24]));
         } else {
-            self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]);
-            self.emit(&[pfx, 0x0F, 0x11, 0x4C, 0x24, inner_sz as u8]);
+            self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x04, 0x24]));
+            self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x4C, 0x24, inner_sz as u8]));
         }
     }
     fn emit_complex_div_limited(
@@ -45,45 +46,45 @@ impl Codegen {
         total_sz: i64,
     ) {
         // (a+bi)/(c+di): real=(ac+bd)/den, imag=(bc-ad)/den, den=c²+d².
-        self.emit(&[load_prefix, 0x0F, 0x10, 0x04, 0x24]);
-        self.emit(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, inner_sz as u8]);
-        self.emit(&[load_prefix, 0x0F, 0x10, 0x54, 0x24, total_sz as u8]);
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x04, 0x24]));
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, inner_sz as u8]));
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x54, 0x24, total_sz as u8]));
         let r_imag_slot = total_sz + inner_sz;
-        self.emit(&[load_prefix, 0x0F, 0x10, 0x5C, 0x24, r_imag_slot as u8]);
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x5C, 0x24, r_imag_slot as u8]));
         self.mov_xmm(6, 2);
-        self.emit(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(6, 6)]);
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(6, 6)]));
         self.mov_xmm(7, 3);
-        self.emit(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(7, 7)]);
-        self.emit(&[load_prefix, 0x0F, op_add, Self::modrm_reg_reg(6, 7)]);
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(7, 7)]));
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_add, Self::modrm_reg_reg(6, 7)]));
         self.mov_xmm(4, 0);
-        self.emit(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(4, 2)]);
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(4, 2)]));
         self.mov_xmm(7, 1);
-        self.emit(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(7, 3)]);
-        self.emit(&[load_prefix, 0x0F, op_add, Self::modrm_reg_reg(4, 7)]);
-        self.emit(&[load_prefix, 0x0F, op_div, Self::modrm_reg_reg(4, 6)]);
-        self.emit(&[load_prefix, 0x0F, 0x11, 0x24, 0x24]);
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(7, 3)]));
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_add, Self::modrm_reg_reg(4, 7)]));
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_div, Self::modrm_reg_reg(4, 6)]));
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x11, 0x24, 0x24]));
         self.mov_xmm(7, 1);
-        self.emit(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(7, 2)]);
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(7, 2)]));
         self.mov_xmm(5, 0);
-        self.emit(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(5, 3)]);
-        self.emit(&[load_prefix, 0x0F, op_sub, Self::modrm_reg_reg(7, 5)]);
-        self.emit(&[load_prefix, 0x0F, op_div, Self::modrm_reg_reg(7, 6)]);
-        self.emit(&[load_prefix, 0x0F, 0x11, 0x7C, 0x24, inner_sz as u8]);
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(5, 3)]));
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_sub, Self::modrm_reg_reg(7, 5)]));
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_div, Self::modrm_reg_reg(7, 6)]));
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x11, 0x7C, 0x24, inner_sz as u8]));
     }
     fn emit_complex_mul_call(&mut self, is_float: bool, inner_sz: i64) {
         let helper = if is_float { "__mulsc3" } else { "__muldc3" };
         let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
         let r_imag_slot = inner_sz * 3;
-        self.emit(&[pfx, 0x0F, 0x10, 0x04, 0x24]);
-        self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, inner_sz as u8]);
-        self.emit(&[pfx, 0x0F, 0x10, 0x54, 0x24, (inner_sz * 2) as u8]);
-        self.emit(&[pfx, 0x0F, 0x10, 0x5C, 0x24, r_imag_slot as u8]);
+        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x04, 0x24]));
+        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, inner_sz as u8]));
+        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x54, 0x24, (inner_sz * 2) as u8]));
+        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x5C, 0x24, r_imag_slot as u8]));
         self.emit_call_extern(helper);
         if is_float {
-            self.emit(&[0x66, 0x0F, 0xD6, 0x04, 0x24]);
+            self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xD6, 0x04, 0x24]));
         } else {
-            self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]);
-            self.emit(&[pfx, 0x0F, 0x11, 0x4C, 0x24, inner_sz as u8]);
+            self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x04, 0x24]));
+            self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x4C, 0x24, inner_sz as u8]));
         }
     }
     fn emit_complex_mul_limited(
@@ -95,23 +96,23 @@ impl Codegen {
         inner_sz: i64,
         total_sz: i64,
     ) {
-        self.emit(&[load_prefix, 0x0F, 0x10, 0x04, 0x24]);
-        self.emit(&[load_prefix, 0x0F, 0x10, 0x54, 0x24, total_sz as u8]);
-        self.emit(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, inner_sz as u8]);
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x04, 0x24]));
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x54, 0x24, total_sz as u8]));
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, inner_sz as u8]));
         let r_imag_slot = total_sz + inner_sz;
-        self.emit(&[load_prefix, 0x0F, 0x10, 0x5C, 0x24, r_imag_slot as u8]);
-        self.emit(&[0x66, 0x0F, 0x28, 0xE0]);
-        self.emit(&[load_prefix, 0x0F, op_mul, 0xE2]);
-        self.emit(&[0x66, 0x0F, 0x28, 0xE9]);
-        self.emit(&[load_prefix, 0x0F, op_mul, 0xEB]);
-        self.emit(&[load_prefix, 0x0F, op_sub, 0xE5]);
-        self.emit(&[load_prefix, 0x0F, 0x11, 0x24, 0x24]);
-        self.emit(&[0x66, 0x0F, 0x28, 0xE0]);
-        self.emit(&[load_prefix, 0x0F, op_mul, 0xE3]);
-        self.emit(&[0x66, 0x0F, 0x28, 0xE9]);
-        self.emit(&[load_prefix, 0x0F, op_mul, 0xEA]);
-        self.emit(&[load_prefix, 0x0F, op_add, 0xE5]);
-        self.emit(&[load_prefix, 0x0F, 0x11, 0x64, 0x24, inner_sz as u8]);
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x5C, 0x24, r_imag_slot as u8]));
+        self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x28, 0xE0]));
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, 0xE2]));
+        self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x28, 0xE9]));
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, 0xEB]));
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_sub, 0xE5]));
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x11, 0x24, 0x24]));
+        self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x28, 0xE0]));
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, 0xE3]));
+        self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x28, 0xE9]));
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, 0xEA]));
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_add, 0xE5]));
+        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x11, 0x64, 0x24, inner_sz as u8]));
     }
     /// 赋值表达式的值 = 左值转换后的值: 把已写入目标的结果按统一 complex
     /// rvalue 约定再物化到帧底复数带 (`complex_result_off`), 以 rax = 该带
@@ -124,7 +125,7 @@ impl Codegen {
             self.emit_agg_dst_addr(dst, 6);
             self.emit_lea_r13(7, result_off);
             self.mov_imm(1, total as i128);
-            self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
+            self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb
                                             // f/d rvalue 约定 xmm0=实部; LD rvalue 约定是帧内存+rax,
                                             // 消费端用 fld tbyte 读, 不碰 xmm0。
             if matches!(inner.base, Type::Float | Type::Double) {
@@ -187,7 +188,7 @@ impl Codegen {
             self.gen_complex_ld_binop(op, l, r, dst, result_off);
             return;
         }
-        self.emit(&[0x48, 0x83, 0xEC, save_sz as u8]);
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, save_sz as u8]));
         self.spill_complex_operand(l, 0, inner_sz, is_float, is_float_inner, &inner_ty);
         self.spill_complex_operand(r, total_sz, inner_sz, is_float, is_float_inner, &inner_ty);
         let (load_prefix, op_add, op_sub, op_mul, op_div) = if is_float {
@@ -204,32 +205,32 @@ impl Codegen {
                 let add_sub: u8 = if matches!(op, BinOp::Add) { 0x03 } else { 0x2B };
                 if inner_sz == 4 {
                     // 32 位分量运算, 避免 64 位加法把实部进位带进虚部
-                    self.emit(&[0x8B, 0x04, 0x24]); // mov eax, [rsp+0]
-                    self.emit(&[add_sub, 0x44, 0x24, total_sz as u8]);
-                    self.emit(&[0x89, 0x04, 0x24]); // mov [rsp+0], eax
-                    self.emit(&[0x8B, 0x44, 0x24, inner_sz as u8]); // mov eax, [rsp+inner]
-                    self.emit(&[add_sub, 0x44, 0x24, r_imag_slot as u8]);
-                    self.emit(&[0x89, 0x44, 0x24, inner_sz as u8]); // mov [rsp+inner], eax
+                    self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x04, 0x24])); // mov eax, [rsp+0]
+                    self.emit_insn(&Insn::raw_bytes(&[add_sub, 0x44, 0x24, total_sz as u8]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x89, 0x04, 0x24])); // mov [rsp+0], eax
+                    self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x44, 0x24, inner_sz as u8])); // mov eax, [rsp+inner]
+                    self.emit_insn(&Insn::raw_bytes(&[add_sub, 0x44, 0x24, r_imag_slot as u8]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x89, 0x44, 0x24, inner_sz as u8])); // mov [rsp+inner], eax
                 } else {
-                    self.emit(&[0x48, 0x8B, 0x04, 0x24]);
-                    self.emit(&[0x48, add_sub, 0x44, 0x24, total_sz as u8]);
-                    self.emit(&[0x48, 0x89, 0x04, 0x24]);
-                    self.emit(&[0x48, 0x8B, 0x44, 0x24, inner_sz as u8]);
-                    self.emit(&[0x48, add_sub, 0x44, 0x24, r_imag_slot as u8]);
-                    self.emit(&[0x48, 0x89, 0x44, 0x24, inner_sz as u8]);
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x04, 0x24]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, add_sub, 0x44, 0x24, total_sz as u8]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x04, 0x24]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x44, 0x24, inner_sz as u8]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, add_sub, 0x44, 0x24, r_imag_slot as u8]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x44, 0x24, inner_sz as u8]));
                 }
             },
             BinOp::Add | BinOp::Sub => {
                 let op_code = if matches!(op, BinOp::Add) { op_add } else { op_sub };
-                self.emit(&[load_prefix, 0x0F, 0x10, 0x04, 0x24]);
-                self.emit(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, total_sz as u8]);
-                self.emit(&[load_prefix, 0x0F, op_code, 0xC1]);
-                self.emit(&[load_prefix, 0x0F, 0x11, 0x04, 0x24]);
-                self.emit(&[load_prefix, 0x0F, 0x10, 0x44, 0x24, inner_sz as u8]);
+                self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x04, 0x24]));
+                self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, total_sz as u8]));
+                self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_code, 0xC1]));
+                self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x11, 0x04, 0x24]));
+                self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x44, 0x24, inner_sz as u8]));
                 let r_imag_slot = total_sz + inner_sz;
-                self.emit(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, r_imag_slot as u8]);
-                self.emit(&[load_prefix, 0x0F, op_code, 0xC1]);
-                self.emit(&[load_prefix, 0x0F, 0x11, 0x44, 0x24, inner_sz as u8]);
+                self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, r_imag_slot as u8]));
+                self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_code, 0xC1]));
+                self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x11, 0x44, 0x24, inner_sz as u8]));
             },
             BinOp::Mul if !is_float_inner => {
                 // 整数 complex 乘法: real=ac-bd, imag=ad+bc (GCC
@@ -287,20 +288,20 @@ impl Codegen {
                 let r_imag_slot = total_sz + inner_sz;
                 if float_inner {
                     // 浮点 complex: ucomi 比较实虚部
-                    self.emit(&[load_prefix, 0x0F, 0x10, 0x04, 0x24]); // xmm0 = l.real
-                    self.emit(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, total_sz as u8]); // xmm1 = r.real
+                    self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x04, 0x24])); // xmm0 = l.real
+                    self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, total_sz as u8])); // xmm1 = r.real
                     if is_float {
-                        self.emit(&[0x0F, 0x2E, 0xC8]); // ucomiss xmm1, xmm0
+                        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x2E, 0xC8])); // ucomiss xmm1, xmm0
                     } else {
-                        self.emit(&[0x66, 0x0F, 0x2E, 0xC8]); // ucomisd xmm1, xmm0
+                        self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x2E, 0xC8])); // ucomisd xmm1, xmm0
                     }
                     self.jmp_rel32(&false_label, JumpKind::Jne);
-                    self.emit(&[load_prefix, 0x0F, 0x10, 0x44, 0x24, inner_sz as u8]); // xmm0 = l.imag
-                    self.emit(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, r_imag_slot as u8]); // xmm1 = r.imag
+                    self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x44, 0x24, inner_sz as u8])); // xmm0 = l.imag
+                    self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, r_imag_slot as u8])); // xmm1 = r.imag
                     if is_float {
-                        self.emit(&[0x0F, 0x2E, 0xC8]);
+                        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x2E, 0xC8]));
                     } else {
-                        self.emit(&[0x66, 0x0F, 0x2E, 0xC8]);
+                        self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x2E, 0xC8]));
                     }
                     self.jmp_rel32(&false_label, JumpKind::Jne);
                 } else {
@@ -313,31 +314,31 @@ impl Codegen {
                         // 邻接垃圾导致 _Complex short/char 比较误判 (foo().x)。
                         match inner_sz {
                             4 => {
-                                self.emit(&[0x48, 0x8B, 0x04, 0x24]); // mov rax, [rsp+0]
-                                self.emit(&[0x48, 0x8B, 0x4C, 0x24, total_sz as u8]); // mov rcx, [rsp+total]
-                                self.emit(&[0x48, 0x39, 0xC8]); // cmp rax, rcx
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x04, 0x24])); // mov rax, [rsp+0]
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x4C, 0x24, total_sz as u8])); // mov rcx, [rsp+total]
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x39, 0xC8])); // cmp rax, rcx
                             },
                             2 => {
-                                self.emit(&[0x8B, 0x04, 0x24]); // mov eax, [rsp+0]
-                                self.emit(&[0x8B, 0x4C, 0x24, total_sz as u8]); // mov ecx, [rsp+total]
-                                self.emit(&[0x39, 0xC8]); // cmp eax, ecx
+                                self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x04, 0x24])); // mov eax, [rsp+0]
+                                self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x4C, 0x24, total_sz as u8])); // mov ecx, [rsp+total]
+                                self.emit_insn(&Insn::raw_bytes(&[0x39, 0xC8])); // cmp eax, ecx
                             },
                             _ => {
-                                self.emit(&[0x66, 0x8B, 0x04, 0x24]); // mov ax, [rsp+0]
-                                self.emit(&[0x66, 0x8B, 0x4C, 0x24, total_sz as u8]); // mov cx, [rsp+total]
-                                self.emit(&[0x66, 0x39, 0xC8]); // cmp ax, cx
+                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x04, 0x24])); // mov ax, [rsp+0]
+                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x4C, 0x24, total_sz as u8])); // mov cx, [rsp+total]
+                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x39, 0xC8])); // cmp ax, cx
                             },
                         }
                         self.jmp_rel32(&false_label, JumpKind::Jne);
                     } else {
                         // 8 字节内型: 实部/虚部各占独立 8 字节, 分两次比较
-                        self.emit(&[0x48, 0x8B, 0x04, 0x24]); // mov rax, [rsp+0]
-                        self.emit(&[0x48, 0x8B, 0x4C, 0x24, total_sz as u8]); // mov rcx, [rsp+total]
-                        self.emit(&[0x48, 0x39, 0xC8]); // cmp rax, rcx
+                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x04, 0x24])); // mov rax, [rsp+0]
+                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x4C, 0x24, total_sz as u8])); // mov rcx, [rsp+total]
+                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x39, 0xC8])); // cmp rax, rcx
                         self.jmp_rel32(&false_label, JumpKind::Jne);
-                        self.emit(&[0x48, 0x8B, 0x44, 0x24, inner_sz as u8]); // mov rax, [rsp+inner]
-                        self.emit(&[0x48, 0x8B, 0x4C, 0x24, r_imag_slot as u8]); // mov rcx, [rsp+total+inner]
-                        self.emit(&[0x48, 0x39, 0xC8]); // cmp rax, rcx
+                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x44, 0x24, inner_sz as u8])); // mov rax, [rsp+inner]
+                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x4C, 0x24, r_imag_slot as u8])); // mov rcx, [rsp+total+inner]
+                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x39, 0xC8])); // cmp rax, rcx
                         self.jmp_rel32(&false_label, JumpKind::Jne);
                     }
                 }
@@ -348,13 +349,13 @@ impl Codegen {
                 self.mov_imm(dst, if matches!(op, BinOp::EqEq) { 0 } else { 1 });
                 self.label(&end_label);
                 // 比较结果是整数, 不写 complex 结果区
-                self.emit(&[0x48, 0x83, 0xC4, save_sz as u8]);
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, save_sz as u8]));
                 return;
             },
             _ => {},
         }
         self.store_complex_pair_from_rsp(result_off, inner_sz, is_float);
-        self.emit(&[0x48, 0x83, 0xC4, save_sz as u8]);
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, save_sz as u8]));
         if is_float_inner {
             // 实部载入 xmm0，供浮点转换
             let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
@@ -477,7 +478,7 @@ impl Codegen {
             },
             BinOp::Add | BinOp::Sub => {
                 // 预留 64 字节（4×16），保持调用对齐（本分支无 call）
-                self.emit(&[0x48, 0x83, 0xEC, 0x40]);
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x40]));
                 self.spill_complex_ld_operand(l, 0);
                 self.spill_complex_ld_operand(r, 32);
                 // 先 fld 左、后 fld 右: st0=right, st1=left。
@@ -492,15 +493,15 @@ impl Codegen {
                 } else {
                     [0xDE, 0xE9]
                 };
-                self.emit(&real_op); // 弹出后 st0=real
+                self.emit_insn(&Insn::raw_bytes(&real_op)); // 弹出后 st0=real
                                      // 虚部同理, 结果压在 real 之上: st0=imag, st1=real
                 self.emit_x87_fld_at(4, 16, &Type::LongDouble);
                 self.emit_x87_fld_at(4, 48, &Type::LongDouble);
                 let imag_op = real_op;
-                self.emit(&imag_op);
+                self.emit_insn(&Insn::raw_bytes(&imag_op));
                 // 归一化到返回规范 st0=real, st1=imag（与 gcc add 的末尾
                 // fxch %st(1) 一致）
-                self.emit(&[0xD9, 0xC9]); // fxch st(1)
+                self.emit_insn(&Insn::raw_bytes(&[0xD9, 0xC9])); // fxch st(1)
             },
             BinOp::Mul | BinOp::Div => {
                 let helper = if matches!(op, BinOp::Mul) {
@@ -511,7 +512,7 @@ impl Codegen {
                 // gcc: subq $64,%rsp 后 fldt/fstpt 落 4 槽，再 8 次 pushq
                 // 传参（64 字节，与预留区同尺寸，push 后内容上移，
                 // 调用约定读的是 push 出来的栈），call，addq $64,%rsp。
-                self.emit(&[0x48, 0x83, 0xEC, 0x40]);
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x40]));
                 self.spill_complex_ld_operand(l, 0);
                 self.spill_complex_ld_operand(r, 32);
                 // 8 次 pushq 传参。最后 push 的 qword 落在最低地址（=首个
@@ -531,13 +532,13 @@ impl Codegen {
                 ];
                 let mut k = 0u8;
                 for (hi, lo) in pairs {
-                    self.emit(&[0xFF, 0x74, 0x24, hi + k * 8]); // push hi
+                    self.emit_insn(&Insn::raw_bytes(&[0xFF, 0x74, 0x24, hi + k * 8])); // push hi
                     k += 1;
-                    self.emit(&[0xFF, 0x74, 0x24, lo + k * 8]); // push lo
+                    self.emit_insn(&Insn::raw_bytes(&[0xFF, 0x74, 0x24, lo + k * 8])); // push lo
                     k += 1;
                 }
                 self.emit_call_extern(helper);
-                self.emit(&[0x48, 0x83, 0xC4, 0x40]); // add rsp, 64
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x40])); // add rsp, 64
                                                       // 返回 st0=real, st1=imag（fadd 分支同序，统一收尾）
             },
             _ => return,
@@ -547,7 +548,7 @@ impl Codegen {
         // （弹栈后 imag 升到 st0），再 fstpt imag。
         self.emit_x87_fstp_at(13, result_off as i32, &Type::LongDouble);
         self.emit_x87_fstp_at(13, result_off as i32 + 16, &Type::LongDouble);
-        self.emit(&[0x48, 0x83, 0xC4, 0x40]); // 释放 64 字节运算区
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x40])); // 释放 64 字节运算区
         self.emit_lea_r13(0, result_off); // rax = 结果区地址
     }
 
@@ -565,7 +566,7 @@ impl Codegen {
             self.emit_x87_fld_at(13, (ls + off) as i32, &Type::LongDouble);
             self.emit_x87_fld_at(13, (rs + off) as i32, &Type::LongDouble);
             // fucomip st0, st1 (DF E9): 比较 st1 vs st0, 弹 st0
-            self.emit(&[0xDF, 0xE9]);
+            self.emit_insn(&Insn::raw_bytes(&[0xDF, 0xE9]));
             self.jmp_rel32(&false_label, JumpKind::Jne);
             self.emit_x87_fstp_st0(); // 弹掉左值
         }
@@ -597,7 +598,7 @@ impl Codegen {
             self.emit_xmm0_r13_disp(&[rpfx, 0x41, 0x0F, 0x10], result_off + r_isz);
             self.emit_float_convert(&ri, inner);
         } else {
-            self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0, xmm0 (标量: 虚部 0)
+            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0 (标量: 虚部 0)
         }
     }
     pub(crate) fn gen_complex_init(&mut self, name: &str, inner: &Type, init: &Expr) {
@@ -703,16 +704,16 @@ impl Codegen {
                 // (值, 0) 同宽布局, 复用下方统一读取。
                 if matches!(init.ty(), Type::Float | Type::Double | Type::LongDouble) {
                     // 浮点标量源: 值在 xmm0, 截断为整数
-                    self.emit(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]); // cvttsd2si
+                    self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0])); // cvttsd2si
                 }
                 let s_isz = src_inner_sz as usize;
                 self.emit_store(0, result_off, s_isz);
-                self.emit(&[0x48, 0x31, 0xC0]); // xor rax, rax (虚部 = 0)
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xC0])); // xor rax, rax (虚部 = 0)
                 self.emit_store(0, result_off + src_inner_sz, s_isz);
             }
             self.load_stack(0, result_off);
             if src_inner_sz == 4 && inner_sz == 8 {
-                self.emit(&[0x48, 0x63, 0xC0]); // movsxd rax, eax
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x63, 0xC0])); // movsxd rax, eax
             }
             let sz = inner.size();
             self.store_stack(0, off);
@@ -730,7 +731,7 @@ impl Codegen {
                 self.gen_complex_imag_into_xmm0(init, inner);
             } else {
                 // 浮点虚部仅 inner_sz 字节，勿用 64 位 store 以免覆盖相邻实部
-                self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0, xmm0
+                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0
             }
             self.gen_float_store_at(imag_base, inner);
             let _ = imag_bytes;
@@ -741,10 +742,10 @@ impl Codegen {
                 // 而非目标的 inner_sz)
                 self.load_stack(0, result_off + src_inner_sz);
                 if src_inner_sz == 4 && inner_sz == 8 {
-                    self.emit(&[0x48, 0x63, 0xC0]); // movsxd rax, eax
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x63, 0xC0])); // movsxd rax, eax
                 }
             } else {
-                self.emit(&[0x48, 0x31, 0xC0]); // xor rax, rax
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xC0])); // xor rax, rax
             }
             // 整数虚部: 按内型宽度存储, 勿用 64 位 store 覆盖相邻实部
             // (如 y.imag 槽 = y.off+4, 8 字节 store 会踩到下一个变量的实部)
@@ -766,76 +767,76 @@ impl Codegen {
         // 预载 a/b (宽度扩展): r10 = a, r11 = b
         match inner_sz {
             8 => {
-                self.emit(&[0x4C, 0x8B, 0x54, 0x24, 0x00]); // mov r10, [rsp+0]
-                self.emit(&[0x4C, 0x8B, 0x5C, 0x24, inner_sz as u8]); // r11 = b
+                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x8B, 0x54, 0x24, 0x00])); // mov r10, [rsp+0]
+                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x8B, 0x5C, 0x24, inner_sz as u8])); // r11 = b
             },
             4 => {
-                self.emit(&[0x44, 0x8B, 0x54, 0x24, 0x00]); // mov r10d, [rsp+0]
-                self.emit(&[0x44, 0x8B, 0x5C, 0x24, inner_sz as u8]);
+                self.emit_insn(&Insn::raw_bytes(&[0x44, 0x8B, 0x54, 0x24, 0x00])); // mov r10d, [rsp+0]
+                self.emit_insn(&Insn::raw_bytes(&[0x44, 0x8B, 0x5C, 0x24, inner_sz as u8]));
             },
             2 => {
                 let ld = if is_signed { 0xBF } else { 0xB7 };
-                self.emit(&[0x44, 0x0F, ld, 0x54, 0x24, 0x00]);
-                self.emit(&[0x44, 0x0F, ld, 0x5C, 0x24, inner_sz as u8]);
+                self.emit_insn(&Insn::raw_bytes(&[0x44, 0x0F, ld, 0x54, 0x24, 0x00]));
+                self.emit_insn(&Insn::raw_bytes(&[0x44, 0x0F, ld, 0x5C, 0x24, inner_sz as u8]));
             },
             _ => {
                 let ld = if is_signed { 0xBE } else { 0xB6 };
-                self.emit(&[0x44, 0x0F, ld, 0x54, 0x24, 0x00]);
-                self.emit(&[0x44, 0x0F, ld, 0x5C, 0x24, inner_sz as u8]);
+                self.emit_insn(&Insn::raw_bytes(&[0x44, 0x0F, ld, 0x54, 0x24, 0x00]));
+                self.emit_insn(&Insn::raw_bytes(&[0x44, 0x0F, ld, 0x5C, 0x24, inner_sz as u8]));
             },
         }
         // 分支选择: |c| > |d| → lc
         if inner_sz == 8 {
-            self.emit(&[0x48, 0x8B, 0x44, 0x24, total_sz as u8]); // rax = c
-            self.emit(&[0x48, 0x8B, 0x54, 0x24, (total_sz + inner_sz) as u8]); // rdx = d
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x44, 0x24, total_sz as u8])); // rax = c
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x54, 0x24, (total_sz + inner_sz) as u8])); // rdx = d
             if is_signed {
                 // |rax| = (rax^(rax>>63)) - (rax>>63)
-                self.emit(&[0x48, 0x89, 0xC1]); // mov rcx, rax
-                self.emit(&[0x48, 0xC1, 0xF9, 0x3F]); // sar rcx, 63
-                self.emit(&[0x48, 0x31, 0xC8]); // xor rax, rcx
-                self.emit(&[0x48, 0x29, 0xC8]); // sub rax, rcx
-                self.emit(&[0x48, 0x89, 0xD1]); // mov rcx, rdx
-                self.emit(&[0x48, 0xC1, 0xF9, 0x3F]);
-                self.emit(&[0x48, 0x31, 0xCA]); // xor rdx, rcx
-                self.emit(&[0x48, 0x29, 0xCA]); // sub rdx, rcx
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC1])); // mov rcx, rax
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xF9, 0x3F])); // sar rcx, 63
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xC8])); // xor rax, rcx
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x29, 0xC8])); // sub rax, rcx
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xD1])); // mov rcx, rdx
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xF9, 0x3F]));
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xCA])); // xor rdx, rcx
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x29, 0xCA])); // sub rdx, rcx
             }
-            self.emit(&[0x48, 0x39, 0xD0]); // cmp rax, rdx
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x39, 0xD0])); // cmp rax, rdx
         } else {
             // eax = |c|, edx = |d| (inner<4 时按宽度扩展加载)
             match inner_sz {
                 4 => {
-                    self.emit(&[0x8B, 0x44, 0x24, total_sz as u8]);
-                    self.emit(&[0x8B, 0x54, 0x24, (total_sz + inner_sz) as u8]);
+                    self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x44, 0x24, total_sz as u8]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x54, 0x24, (total_sz + inner_sz) as u8]));
                 },
                 2 => {
                     let ld = if is_signed { 0xBF } else { 0xB7 };
-                    self.emit(&[0x0F, ld, 0x44, 0x24, total_sz as u8]);
-                    self.emit(&[0x0F, ld, 0x54, 0x24, (total_sz + inner_sz) as u8]);
+                    self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x44, 0x24, total_sz as u8]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x54, 0x24, (total_sz + inner_sz) as u8]));
                 },
                 _ => {
                     let ld = if is_signed { 0xBE } else { 0xB6 };
-                    self.emit(&[0x0F, ld, 0x44, 0x24, total_sz as u8]);
-                    self.emit(&[0x0F, ld, 0x54, 0x24, (total_sz + inner_sz) as u8]);
+                    self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x44, 0x24, total_sz as u8]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x54, 0x24, (total_sz + inner_sz) as u8]));
                 },
             }
             if is_signed {
-                self.emit(&[0x89, 0xC1]); // mov ecx, eax
-                self.emit(&[0xC1, 0xF9, 0x1F]); // sar ecx, 31
-                self.emit(&[0x31, 0xC8]); // xor eax, ecx
-                self.emit(&[0x29, 0xC8]); // sub eax, ecx
-                self.emit(&[0x89, 0xD1]); // mov ecx, edx
-                self.emit(&[0xC1, 0xF9, 0x1F]);
-                self.emit(&[0x31, 0xCA]); // xor edx, ecx
-                self.emit(&[0x29, 0xCA]); // sub edx, ecx
+                self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC1])); // mov ecx, eax
+                self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xF9, 0x1F])); // sar ecx, 31
+                self.emit_insn(&Insn::raw_bytes(&[0x31, 0xC8])); // xor eax, ecx
+                self.emit_insn(&Insn::raw_bytes(&[0x29, 0xC8])); // sub eax, ecx
+                self.emit_insn(&Insn::raw_bytes(&[0x89, 0xD1])); // mov ecx, edx
+                self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xF9, 0x1F]));
+                self.emit_insn(&Insn::raw_bytes(&[0x31, 0xCA])); // xor edx, ecx
+                self.emit_insn(&Insn::raw_bytes(&[0x29, 0xCA])); // sub edx, ecx
             }
-            self.emit(&[0x39, 0xD0]); // cmp eax, edx
+            self.emit_insn(&Insn::raw_bytes(&[0x39, 0xD0])); // cmp eax, edx
         }
         self.jmp_rel32(&lc, JumpKind::Ja);
         // ---- |d| >= |c| 分支: r = c/d ----
         self.label(&ld_);
         if inner_sz == 8 {
-            self.emit(&[0x48, 0x8B, 0x44, 0x24, total_sz as u8]); // rax = c
-            self.emit(&[0x48, 0x8B, 0x4C, 0x24, (total_sz + inner_sz) as u8]); // rcx = d
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x44, 0x24, total_sz as u8])); // rax = c
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x4C, 0x24, (total_sz + inner_sz) as u8])); // rcx = d
         } else {
             self.emit_c_ld32(inner_sz, total_sz, total_sz + inner_sz, is_signed);
             // eax=c, ecx=d
@@ -846,14 +847,14 @@ impl Codegen {
             self.emit_xor_edx(inner_sz);
         }
         self.emit_div_rm(inner_sz, is_signed, 0xF1); // idiv/div ecx
-        self.emit(&[0x89, 0xC6]); // mov esi, eax (r)
+        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC6])); // mov esi, eax (r)
                                   // den = d + r*c
-        self.emit(&[0x89, 0xF0]); // mov eax, esi
+        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xF0])); // mov eax, esi
         self.emit_imul_rm(inner_sz, total_sz); // imul rax, [rsp+total]
         self.emit_add_rm(inner_sz, total_sz + inner_sz); // add, [rsp+ti]
-        self.emit(&[0x89, 0xC7]); // mov edi, eax (den)
+        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC7])); // mov edi, eax (den)
                                   // real = (a*r + b) / den
-        self.emit(&[0x89, 0xF0]); // mov eax, esi
+        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xF0])); // mov eax, esi
         self.emit_imul_r10(inner_sz); // imul rax, r10
         self.emit_add_r11(inner_sz); // add rax, r11
         if is_signed {
@@ -864,7 +865,7 @@ impl Codegen {
         self.emit_div_rm(inner_sz, is_signed, 0xF7); // idiv/div edi
         self.emit_store_rsp0(inner_sz); // store real
                                         // imag = (b*r - a) / den
-        self.emit(&[0x89, 0xF0]); // mov eax, esi
+        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xF0])); // mov eax, esi
         self.emit_imul_r11(inner_sz); // imul rax, r11
         self.emit_mov_rcx_r10(inner_sz); // mov rcx, r10
         self.emit_sub_rax_rcx(inner_sz); // sub rax, rcx
@@ -879,8 +880,8 @@ impl Codegen {
         // ---- |c| > |d| 分支: r = d/c ----
         self.label(&lc);
         if inner_sz == 8 {
-            self.emit(&[0x48, 0x8B, 0x44, 0x24, (total_sz + inner_sz) as u8]); // rax = d
-            self.emit(&[0x48, 0x8B, 0x4C, 0x24, total_sz as u8]); // rcx = c
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x44, 0x24, (total_sz + inner_sz) as u8])); // rax = d
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x4C, 0x24, total_sz as u8])); // rcx = c
         } else {
             self.emit_c_ld32(inner_sz, total_sz + inner_sz, total_sz, is_signed);
             // eax=d, ecx=c
@@ -891,14 +892,14 @@ impl Codegen {
             self.emit_xor_edx(inner_sz);
         }
         self.emit_div_rm(inner_sz, is_signed, 0xF1); // idiv/div ecx
-        self.emit(&[0x89, 0xC6]); // mov esi, eax (r)
+        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC6])); // mov esi, eax (r)
                                   // den = c + r*d
-        self.emit(&[0x89, 0xF0]); // mov eax, esi
+        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xF0])); // mov eax, esi
         self.emit_imul_rm(inner_sz, total_sz + inner_sz); // imul rax, [rsp+ti]
         self.emit_add_rm(inner_sz, total_sz); // add, [rsp+total]
-        self.emit(&[0x89, 0xC7]); // mov edi, eax (den)
+        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC7])); // mov edi, eax (den)
                                   // real = (r*b + a) / den
-        self.emit(&[0x89, 0xF0]); // mov eax, esi
+        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xF0])); // mov eax, esi
         self.emit_imul_r11(inner_sz); // imul rax, r11
         self.emit_add_r10(inner_sz); // add rax, r10
         if is_signed {
@@ -909,14 +910,14 @@ impl Codegen {
         self.emit_div_rm(inner_sz, is_signed, 0xF7);
         self.emit_store_rsp0(inner_sz); // store real
                                         // imag = (b - r*a) / den
-        self.emit(&[0x89, 0xF0]); // mov eax, esi
+        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xF0])); // mov eax, esi
         self.emit_imul_r10(inner_sz); // imul rax, r10 (r*a)
         self.emit_mov_rcx_r11(inner_sz); // mov rcx, r11 (b)
         self.emit_sub_rcx_rax(inner_sz); // sub rcx, rax
         if inner_sz == 8 {
-            self.emit(&[0x48, 0x89, 0xC8]); // mov rax, rcx
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC8])); // mov rax, rcx
         } else {
-            self.emit(&[0x89, 0xC8]); // mov eax, ecx
+            self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC8])); // mov eax, ecx
         }
         if is_signed {
             self.emit_cqo(inner_sz);
@@ -930,22 +931,22 @@ impl Codegen {
     fn gen_complex_int_mul(&mut self, inner_sz: i64, total_sz: i64, inner_ty: &Type) {
         if inner_sz == 8 {
             // rax=a, rcx=c, rdx=b, rsi=d
-            self.emit(&[0x48, 0x8B, 0x04, 0x24]);
-            self.emit(&[0x48, 0x8B, 0x4C, 0x24, total_sz as u8]);
-            self.emit(&[0x48, 0x8B, 0x54, 0x24, inner_sz as u8]);
-            self.emit(&[0x48, 0x8B, 0x74, 0x24, (total_sz + inner_sz) as u8]);
-            self.emit(&[0x48, 0x89, 0xC7]); // rdi = a
-            self.emit(&[0x48, 0x0F, 0xAF, 0xF9]); // imul rdi, rcx (ac)
-            self.emit(&[0x49, 0x89, 0xD0]); // mov r8, rdx (b)
-            self.emit(&[0x4C, 0x0F, 0xAF, 0xC6]); // imul r8, rsi (bd)
-            self.emit(&[0x4C, 0x29, 0xC7]); // sub rdi, r8 (real)
-            self.emit(&[0x49, 0x89, 0xC0]); // mov r8, rax (a)
-            self.emit(&[0x4C, 0x0F, 0xAF, 0xC6]); // imul r8, rsi (ad)
-            self.emit(&[0x48, 0x89, 0xD0]); // rax = b
-            self.emit(&[0x48, 0x0F, 0xAF, 0xC1]); // imul rax, rcx (bc)
-            self.emit(&[0x4C, 0x01, 0xC0]); // add rax, r8 (imag)
-            self.emit(&[0x48, 0x89, 0x3C, 0x24]); // mov [rsp+0], rdi
-            self.emit(&[0x48, 0x89, 0x44, 0x24, inner_sz as u8]);
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x04, 0x24]));
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x4C, 0x24, total_sz as u8]));
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x54, 0x24, inner_sz as u8]));
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x74, 0x24, (total_sz + inner_sz) as u8]));
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC7])); // rdi = a
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xAF, 0xF9])); // imul rdi, rcx (ac)
+            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0xD0])); // mov r8, rdx (b)
+            self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x0F, 0xAF, 0xC6])); // imul r8, rsi (bd)
+            self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x29, 0xC7])); // sub rdi, r8 (real)
+            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0xC0])); // mov r8, rax (a)
+            self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x0F, 0xAF, 0xC6])); // imul r8, rsi (ad)
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xD0])); // rax = b
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xAF, 0xC1])); // imul rax, rcx (bc)
+            self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x01, 0xC0])); // add rax, r8 (imag)
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x3C, 0x24])); // mov [rsp+0], rdi
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x44, 0x24, inner_sz as u8]));
         } else {
             let (lsz, ld_s, ld_u) = match inner_sz {
                 4 => (0x8Bu8, 0u8, 0u8),
@@ -957,39 +958,39 @@ impl Codegen {
             let i = inner_sz as u8;
             let ti = (total_sz + inner_sz) as u8;
             if inner_sz == 4 {
-                self.emit(&[lsz, 0x04, 0x24]); // eax = a
-                self.emit(&[lsz, 0x4C, 0x24, t]); // ecx = c
-                self.emit(&[lsz, 0x54, 0x24, i]); // edx = b
-                self.emit(&[lsz, 0x74, 0x24, ti]); // esi = d
+                self.emit_insn(&Insn::raw_bytes(&[lsz, 0x04, 0x24])); // eax = a
+                self.emit_insn(&Insn::raw_bytes(&[lsz, 0x4C, 0x24, t])); // ecx = c
+                self.emit_insn(&Insn::raw_bytes(&[lsz, 0x54, 0x24, i])); // edx = b
+                self.emit_insn(&Insn::raw_bytes(&[lsz, 0x74, 0x24, ti])); // esi = d
             } else {
-                self.emit(&[0x0F, ld, 0x04, 0x24]);
-                self.emit(&[0x0F, ld, 0x4C, 0x24, t]);
-                self.emit(&[0x0F, ld, 0x54, 0x24, i]);
-                self.emit(&[0x0F, ld, 0x74, 0x24, ti]);
+                self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x04, 0x24]));
+                self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x4C, 0x24, t]));
+                self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x54, 0x24, i]));
+                self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x74, 0x24, ti]));
             }
-            self.emit(&[0x89, 0xC7]); // edi = a
-            self.emit(&[0x0F, 0xAF, 0xF9]); // imul edi, ecx (ac)
-            self.emit(&[0x41, 0x89, 0xD0]); // mov r8d, edx (b)
-            self.emit(&[0x44, 0x0F, 0xAF, 0xC6]); // imul r8d, esi (bd)
-            self.emit(&[0x44, 0x29, 0xC7]); // sub edi, r8d (real)
-            self.emit(&[0x41, 0x89, 0xC0]); // r8d = a
-            self.emit(&[0x44, 0x0F, 0xAF, 0xC6]); // imul r8d, esi (ad)
-            self.emit(&[0x89, 0xD0]); // eax = b
-            self.emit(&[0x0F, 0xAF, 0xC1]); // imul eax, ecx (bc)
-            self.emit(&[0x44, 0x01, 0xC0]); // add eax, r8d (imag)
+            self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC7])); // edi = a
+            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAF, 0xF9])); // imul edi, ecx (ac)
+            self.emit_insn(&Insn::raw_bytes(&[0x41, 0x89, 0xD0])); // mov r8d, edx (b)
+            self.emit_insn(&Insn::raw_bytes(&[0x44, 0x0F, 0xAF, 0xC6])); // imul r8d, esi (bd)
+            self.emit_insn(&Insn::raw_bytes(&[0x44, 0x29, 0xC7])); // sub edi, r8d (real)
+            self.emit_insn(&Insn::raw_bytes(&[0x41, 0x89, 0xC0])); // r8d = a
+            self.emit_insn(&Insn::raw_bytes(&[0x44, 0x0F, 0xAF, 0xC6])); // imul r8d, esi (ad)
+            self.emit_insn(&Insn::raw_bytes(&[0x89, 0xD0])); // eax = b
+            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAF, 0xC1])); // imul eax, ecx (bc)
+            self.emit_insn(&Insn::raw_bytes(&[0x44, 0x01, 0xC0])); // add eax, r8d (imag)
                                             // 存回 (截断到分量宽度)
             match inner_sz {
                 4 => {
-                    self.emit(&[0x89, 0x3C, 0x24]); // mov [rsp+0], edi
-                    self.emit(&[0x89, 0x44, 0x24, i]);
+                    self.emit_insn(&Insn::raw_bytes(&[0x89, 0x3C, 0x24])); // mov [rsp+0], edi
+                    self.emit_insn(&Insn::raw_bytes(&[0x89, 0x44, 0x24, i]));
                 },
                 2 => {
-                    self.emit(&[0x66, 0x89, 0x3C, 0x24]);
-                    self.emit(&[0x66, 0x89, 0x44, 0x24, i]);
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x3C, 0x24]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x44, 0x24, i]));
                 },
                 _ => {
-                    self.emit(&[0x88, 0x3C, 0x24]);
-                    self.emit(&[0x88, 0x44, 0x24, i]);
+                    self.emit_insn(&Insn::raw_bytes(&[0x88, 0x3C, 0x24]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x88, 0x44, 0x24, i]));
                 },
             }
         }
@@ -1018,7 +1019,7 @@ impl Codegen {
                 t @ (Type::Float | Type::Double) => {
                     let pfx = if matches!(t, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                     // 实部: xmm0 = [rax] → result_off
-                    self.emit(&[pfx, 0x0F, 0x10, 0x00]);
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x00]));
                     self.gen_float_store_at(result_off, t);
                     // 虚部: xmm0 = [rax+isz] → result_off+isz
                     self.emit_load_mem_typed_disp(isz as usize, t, isz);
@@ -1052,9 +1053,9 @@ impl Codegen {
                 // __real__ imaginary → 0
                 if matches!(&inner.base, Type::Float | Type::Double | Type::LongDouble) {
                     if matches!(&inner.base, Type::Float) {
-                        self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0, xmm0
+                        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0
                     } else {
-                        self.emit(&[0x66, 0x0F, 0x57, 0xC0]); // xorpd xmm0, xmm0
+                        self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x57, 0xC0])); // xorpd xmm0, xmm0
                     }
                 } else {
                     self.mov_imm(dst, 0);
@@ -1074,7 +1075,7 @@ impl Codegen {
             if is_real {
                 self.gen_expr(e, dst);
             } else if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
-                self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0, xmm0
+                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0
             } else {
                 self.mov_imm(dst, 0);
             }
@@ -1095,30 +1096,30 @@ impl Codegen {
                 self.emit_x87_fld_at(0, part_off as i32, &inner);
             } else if is_float {
                 let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-                self.emit(&[pfx, 0x0F, 0x10]); // movss/movsd xmm0, [rax+disp]
+                self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10])); // movss/movsd xmm0, [rax+disp]
                 if part_off == 0 {
-                    self.emit(&[0x00]);
+                    self.emit_insn(&Insn::raw_bytes(&[0x00]));
                 } else if part_off.abs() < 128 {
-                    self.emit(&[0x40, part_off as u8]);
+                    self.emit_insn(&Insn::raw_bytes(&[0x40, part_off as u8]));
                 } else {
-                    self.emit(&[0x80]);
-                    self.emit(&(part_off as i32).to_le_bytes());
+                    self.emit_insn(&Insn::raw_bytes(&[0x80]));
+                    self.emit_insn(&Insn::raw_bytes(&(part_off as i32).to_le_bytes()));
                 }
             } else {
                 // 整数内型: 先加分量偏移, 再按 size 加载到 rax
                 if part_off != 0 {
-                    self.emit(&[0x48, 0x05]);
-                    self.emit(&(part_off as i32).to_le_bytes());
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x05]));
+                    self.emit_insn(&Insn::raw_bytes(&(part_off as i32).to_le_bytes()));
                 }
                 let sz = inner.size();
                 match sz {
-                    1 => self.emit(&[0x0F, 0xB6, 0x00]), // movzx eax, byte [rax]
+                    1 => { self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x00])); }, // movzx eax, byte [rax]
                     2 => {
-                        self.emit(&[0x66, 0x8B, 0x00]);
-                        self.emit(&[0x48, 0x0F, 0xB7, 0xC0]);
+                        self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x00]));
+                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB7, 0xC0]));
                     },
-                    4 => self.emit(&[0x8B, 0x00]), // mov eax, [rax]
-                    _ => self.emit(&[0x48, 0x8B, 0x00]),
+                    4 => { self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x00])); }, // mov eax, [rax]
+                    _ => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x00])); },
                 }
             }
         } else if is_float {
@@ -1162,15 +1163,15 @@ impl Codegen {
                     // 整数分量 → 浮点返回: cvtsi2s{s,d} xmm0, eax/eax(64)
                     let pfx = if matches!(ty, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                     if inner.size() >= 8 {
-                        self.emit(&[pfx, 0x48, 0x0F, 0x2A, 0xC0]);
+                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x48, 0x0F, 0x2A, 0xC0]));
                     } else {
-                        self.emit(&[pfx, 0x0F, 0x2A, 0xC0]);
+                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x2A, 0xC0]));
                     }
                 },
                 (true, false) => {
                     // 浮点分量 → 整数返回: C6.3.1.7 向零截断
                     let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-                    self.emit(&[pfx, 0x48, 0x0F, 0x2C, 0xC0]);
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x48, 0x0F, 0x2C, 0xC0]));
                 },
                 (false, false) => {},
             }
@@ -1211,9 +1212,9 @@ impl Codegen {
                 // unpcklps xmm0,xmm1 → xmm0 = [real | imag]
                 // (注意 unpcklps 无 66 前缀; 66 0F 14 是 unpcklpd,
                 // 按 64 位双字打包 → 虚部被挤到 64..96 位, movsd 读丢)
-                self.emit(&[0xF3, 0x0F, 0x10, 0x00]);
-                self.emit(&[0xF3, 0x0F, 0x10, 0x48, 0x04]);
-                self.emit(&[0x0F, 0x14, 0xC1]);
+                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x00]));
+                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x48, 0x04]));
+                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x14, 0xC1]));
                 return;
             }
             self.emit_xmm_rax_disp(pfx, 0, 0); // xmm0 = 实部
@@ -1227,7 +1228,7 @@ impl Codegen {
         self.emit_xmm_r13_disp(pfx, 0x10, 1, result_off + inner_sz);
         if is_float {
             // 物化区 [real@0..4][imag@4..8] → 打包 xmm0 (unpcklps: 0F 14)
-            self.emit(&[0x0F, 0x14, 0xC1]); // unpcklps xmm0, xmm1
+            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x14, 0xC1])); // unpcklps xmm0, xmm1
         }
     }
     /// `_Complex` 返回值的交付总入口。先问“源是否已经是目标复数类型的
@@ -1312,7 +1313,7 @@ impl Codegen {
                 self.mov(6, 1);
                 self.emit_lea_r13(7, result_off);
                 self.mov_imm(1, (inner.size() * 2) as i128);
-                self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
+                self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb
                                                 // LD rvalue 消费端用 fld tbyte, 不经 xmm0 (见上)。
                 if matches!(inner.base, Type::Float | Type::Double) {
                     let pfx = if matches!(inner.base, Type::Float) {
@@ -1338,10 +1339,10 @@ impl Codegen {
             if src_isz == 0 {
                 // 标量 RHS: rax = 值 (浮点源先 cvttsd2si 截断)
                 if matches!(r.ty(), Type::Float | Type::Double | Type::LongDouble) {
-                    self.emit(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]); // cvttsd2si
+                    self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0])); // cvttsd2si
                 }
                 self.emit_store(0, result_off, isz as usize);
-                self.emit(&[0x48, 0x31, 0xC0]); // xor rax, rax (虚部 = 0)
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xC0])); // xor rax, rax (虚部 = 0)
                 self.emit_store(0, result_off + isz, isz as usize);
             } else if src_isz == isz {
                 // 同宽 complex RHS: 源已物化在 result_off (C99 6.3.1.7)
@@ -1362,8 +1363,8 @@ impl Codegen {
             self.mov(7, 1); // rdi = rcx (目标)
             self.emit_lea_r13(6, result_off); // rsi = 源
             self.mov_imm(1, (isz * 2) as i128); // rcx = 字节数
-            self.emit(&[0xFC]); // cld
-            self.emit(&[0xF3, 0xA4]); // rep movsb
+            self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
+            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
                                             // 统一 rvalue 约定: result_off 已含结果, rax=地址
             self.emit_lea_r13(0, result_off);
         }
@@ -1411,24 +1412,24 @@ impl Codegen {
                     self.gen_expr(r, dst);
                     self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
                     // 保存右操作数
-                    self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]); // movss/movsd [rsp], xmm0
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x04, 0x24])); // movss/movsd [rsp], xmm0
                     self.gen_expr(l, dst);
                     self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
                     // 加载右操作数到 xmm1
-                    self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]); // movss/movsd xmm1, [rsp]
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00])); // movss/movsd xmm1, [rsp]
                     let add_sub = if matches!(op, BinOp::Add) { 0x58u8 } else { 0x5Cu8 };
-                    self.emit(&[pfx, 0x0F, add_sub, 0xC1]); // addss/subss xmm0, xmm1 = l op r
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, add_sub, 0xC1])); // addss/subss xmm0, xmm1 = l op r
                                                             // 结果在 xmm0
                 },
                 BinOp::Mul => {
                     // imag * imag → real (负乘积): (a*i)*(b*i) = -a*b
                     self.gen_expr(l, dst);
                     self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
-                    self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]);
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x04, 0x24]));
                     self.gen_expr(r, dst);
                     self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
-                    self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]);
-                    self.emit(&[pfx, 0x0F, 0x59, 0xC1]); // mulss/mulsd xmm0, xmm1
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]));
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x59, 0xC1])); // mulss/mulsd xmm0, xmm1
                                                          // 取负: xor with sign bit
                     if matches!(inner_ty, Type::Float) {
                         // xorps xmm0, [neg_mask_f32]
@@ -1443,25 +1444,25 @@ impl Codegen {
                     // 先算 r 保存, 再算 l, 确保 xmm0=l, xmm1=r → l/r
                     self.gen_expr(r, dst);
                     self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
-                    self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]); // [rsp] = r
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x04, 0x24])); // [rsp] = r
                     self.gen_expr(l, dst);
                     self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
-                    self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]); // xmm1 = r
-                    self.emit(&[pfx, 0x0F, 0x5E, 0xC1]); // divsd xmm0, xmm1 = l/r
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00])); // xmm1 = r
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x5E, 0xC1])); // divsd xmm0, xmm1 = l/r
                                                          // 结果在 xmm0 (实数值)
                 },
                 BinOp::EqEq | BinOp::Ne => {
                     // 比较虚部
                     self.gen_expr(l, dst);
                     self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
-                    self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]);
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x04, 0x24]));
                     self.gen_expr(r, dst);
                     self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
-                    self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]);
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]));
                     if matches!(inner_ty, Type::Float) {
-                        self.emit(&[0x0F, 0x2E, 0xC8]); // ucomiss xmm1, xmm0
+                        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x2E, 0xC8])); // ucomiss xmm1, xmm0
                     } else {
-                        self.emit(&[0x66, 0x0F, 0x2E, 0xC8]); // ucomisd xmm1, xmm0
+                        self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x2E, 0xC8])); // ucomisd xmm1, xmm0
                     }
                     let false_label = self.fresh_label();
                     let end_label = self.fresh_label();
@@ -1484,61 +1485,61 @@ impl Codegen {
                     let inner_sz = inner_ty.size() as i64;
                     let total_sz = inner_sz * 2;
                     let save_sz = total_sz * 2;
-                    self.emit(&[0x48, 0x83, 0xEC, save_sz as u8]);
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, save_sz as u8]));
                     if l_imag && !r_imag {
                         // imag + real: real part = real, imag part = ±imag
                         // 先算实部 (来自 r)
                         self.gen_expr(r, dst);
                         self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
-                        self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]); // [rsp+0] = real
+                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x04, 0x24])); // [rsp+0] = real
                                                                    // 再算虚部 (来自 l)
                         self.gen_expr(l, dst);
                         self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
                         if matches!(op, BinOp::Sub) {
                             self.emit_float_neg(&inner_ty);
                         }
-                        self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, inner_sz as u8]);
+                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, inner_sz as u8]));
                     // [rsp+inner] = ±imag
                     } else {
                         // real ± imag: real part = real, imag part = ±imag
                         self.gen_expr(l, dst);
                         self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
-                        self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]); // [rsp+0] = real
+                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x04, 0x24])); // [rsp+0] = real
                         self.gen_expr(r, dst);
                         self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
                         if matches!(op, BinOp::Sub) {
                             self.emit_float_neg(&inner_ty);
                         }
-                        self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, inner_sz as u8]);
+                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, inner_sz as u8]));
                         // [rsp+inner] = ±imag
                     }
                     // 加载实部到 xmm0 供后续使用
-                    self.emit(&[pfx, 0x0F, 0x10, 0x04, 0x24]);
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x04, 0x24]));
                     // 将 (real, imag) 对拷贝到帧临时区供后续 complex 操作使用
                     let is_float_store = matches!(inner_ty, Type::Float);
                     self.store_complex_pair_from_rsp(result_off, inner_sz, is_float_store);
-                    self.emit(&[0x48, 0x83, 0xC4, save_sz as u8]);
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, save_sz as u8]));
                 },
                 BinOp::Mul => {
                     // real * imag → imag: 单浮点值乘法
                     self.gen_expr(l, dst);
                     self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
-                    self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]);
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x04, 0x24]));
                     self.gen_expr(r, dst);
                     self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
-                    self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]);
-                    self.emit(&[pfx, 0x0F, 0x59, 0xC1]); // mulss/mulsd xmm0, xmm1
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]));
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x59, 0xC1])); // mulss/mulsd xmm0, xmm1
                 },
                 BinOp::Div => {
                     // real / imag → imag: -(real/imag_mag)
                     // 先算 r 保存, 再算 l, 确保 xmm0=l, xmm1=r → l/r
                     self.gen_expr(r, dst);
                     self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
-                    self.emit(&[pfx, 0x0F, 0x11, 0x04, 0x24]); // [rsp] = r
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x04, 0x24])); // [rsp] = r
                     self.gen_expr(l, dst);
                     self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
-                    self.emit(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]); // xmm1 = r
-                    self.emit(&[pfx, 0x0F, 0x5E, 0xC1]); // divsd xmm0, xmm1 = l/r
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00])); // xmm1 = r
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x5E, 0xC1])); // divsd xmm0, xmm1 = l/r
                     self.emit_float_neg(&inner_ty);
                 },
                 _ => {},
@@ -1607,15 +1608,15 @@ impl Codegen {
                     // 相邻内存位模式。
                     if self.is_global_not_local(&name.name) {
                         self.emit_global_addr(0, &name.name);
-                        self.emit(&[v_pfx, 0x0F, 0x10, 0x00]);
+                        self.emit_insn(&Insn::raw_bytes(&[v_pfx, 0x0F, 0x10, 0x00]));
                     } else {
                         let off = self.var_offset(&name.name);
                         self.emit_xmm0_r13_disp(&[v_pfx, 0x41, 0x0F, 0x10], off);
                     }
                     self.emit_float_convert(&v_inner, op_inner);
-                    self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
-                    self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0, xmm0
-                    self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]);
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]));
                 } else if !is_cplx {
                     // 标量整数变量提升为整数 _Complex: 实部=按自身宽度
                     // 符号/零扩展加载, 虚部=0。旧路径把标量 home 当
@@ -1631,10 +1632,10 @@ impl Codegen {
                     self.emit_load_mem_typed(v_isz as usize, &v_inner);
                     if is_float_inner {
                         let cvt_pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
-                        self.emit(&[cvt_pfx, 0x48, 0x0F, 0x2A, 0xC0]);
-                        self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
-                        self.emit(&[0x0F, 0x57, 0xC0]);
-                        self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]);
+                        self.emit_insn(&Insn::raw_bytes(&[cvt_pfx, 0x48, 0x0F, 0x2A, 0xC0]));
+                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]));
+                        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0]));
+                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]));
                     } else {
                         self.store_rsp_qword(0, rsp_slot as usize);
                         self.mov_imm(0, 0);
@@ -1668,15 +1669,15 @@ impl Codegen {
                         } else {
                             self.emit_load_mem_typed_disp(v_isz as usize, &v_inner, v_isz);
                         }
-                        self.emit(&[cvt_pfx, 0x48, 0x0F, 0x2A, 0xC0]);
-                        self.emit(&[
+                        self.emit_insn(&Insn::raw_bytes(&[cvt_pfx, 0x48, 0x0F, 0x2A, 0xC0]));
+                        self.emit_insn(&Insn::raw_bytes(&[
                             pfx,
                             0x0F,
                             0x11,
                             0x44,
                             0x24,
                             (rsp_slot + part * inner_sz) as u8,
-                        ]);
+                        ]));
                     }
                 } else if !v_is_float && !is_float_inner {
                     // 整数 complex 变量参与整数运算: 分量按变量自身宽度
@@ -1701,27 +1702,27 @@ impl Codegen {
                     // 全局 complex 变量: 通过 RIP-relative 寻址加载
                     self.emit_global_addr(0, &name.name); // rax = &global
                                                           // 加载实部: movss/movsd xmm0, [rax]
-                    self.emit(&[v_pfx, 0x0F, 0x10, 0x00]);
+                    self.emit_insn(&Insn::raw_bytes(&[v_pfx, 0x0F, 0x10, 0x00]));
                     self.emit_float_convert(&v_inner, op_inner);
-                    self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]));
                     // 加载虚部: movss/movsd xmm0, [rax+v_isz]
                     if v_isz < 128 {
-                        self.emit(&[v_pfx, 0x0F, 0x10, 0x40, v_isz as u8]);
+                        self.emit_insn(&Insn::raw_bytes(&[v_pfx, 0x0F, 0x10, 0x40, v_isz as u8]));
                     } else {
-                        self.emit(&[v_pfx, 0x0F, 0x10, 0x80]);
-                        self.emit(&(v_isz as i32).to_le_bytes());
+                        self.emit_insn(&Insn::raw_bytes(&[v_pfx, 0x0F, 0x10, 0x80]));
+                        self.emit_insn(&Insn::raw_bytes(&(v_isz as i32).to_le_bytes()));
                     }
                     self.emit_float_convert(&v_inner, op_inner);
-                    self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]);
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]));
                 } else {
                     // 局部 complex 变量: 从 [r13+off] 加载
                     let off = self.var_offset(&name.name);
                     self.emit_xmm0_r13_disp(&[v_pfx, 0x41, 0x0F, 0x10], off);
                     self.emit_float_convert(&v_inner, op_inner);
-                    self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]));
                     self.emit_xmm0_r13_disp(&[v_pfx, 0x41, 0x0F, 0x10], off + v_isz);
                     self.emit_float_convert(&v_inner, op_inner);
-                    self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]);
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]));
                 }
             },
             _ => {
@@ -1757,11 +1758,11 @@ impl Codegen {
                         let e_pfx = if matches!(e_inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                         self.emit_xmm0_r13_disp(&[e_pfx, 0x41, 0x0F, 0x10], result_off);
                         self.emit_float_convert(&e_inner, op_inner);
-                        self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
+                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]));
                         // 虚部: [result_off+e_isz]
                         self.emit_xmm0_r13_disp(&[e_pfx, 0x41, 0x0F, 0x10], result_off + e_isz);
                         self.emit_float_convert(&e_inner, op_inner);
-                        self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]);
+                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]));
                     } else if is_float_inner {
                         // 整数源 → 浮点运算 inner: 分量按整数宽度加载后
                         // cvtsi2ss/cvtsi2sd (Ident 变量分支同构)。每轮重取
@@ -1770,31 +1771,31 @@ impl Codegen {
                         for part in 0..2 {
                             self.emit_lea_r13(0, result_off);
                             self.emit_load_mem_typed_disp(e_isz as usize, &e_inner, part * e_isz);
-                            self.emit(&[cvt_pfx, 0x48, 0x0F, 0x2A, 0xC0]);
-                            self.emit(&[
+                            self.emit_insn(&Insn::raw_bytes(&[cvt_pfx, 0x48, 0x0F, 0x2A, 0xC0]));
+                            self.emit_insn(&Insn::raw_bytes(&[
                                 pfx,
                                 0x0F,
                                 0x11,
                                 0x44,
                                 0x24,
                                 (rsp_slot + part * inner_sz) as u8,
-                            ]);
+                            ]));
                         }
                     } else if e_isz == inner_sz {
                         // 整数同宽: rax 指向物化区, 整块拷贝
-                        self.emit(&[0x48, 0x89, 0xC6]); // rsi = rax
-                        self.emit(&[0x48, 0x89, 0xE7]); // rdi = rsp
+                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC6])); // rsi = rax
+                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xE7])); // rdi = rsp
                         if rsp_slot != 0 {
                             if (-128..=127).contains(&rsp_slot) {
-                                self.emit(&[0x48, 0x83, 0xC7, rsp_slot as u8]);
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC7, rsp_slot as u8]));
                             } else {
-                                self.emit(&[0x48, 0x81, 0xC7]);
-                                self.emit(&(rsp_slot as i32).to_le_bytes());
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xC7]));
+                                self.emit_insn(&Insn::raw_bytes(&(rsp_slot as i32).to_le_bytes()));
                             }
                         }
                         let sz = (inner_sz * 2) as i128;
                         self.mov_imm(1, sz);
-                        self.emit(&[0xFC, 0xF3, 0xA4]); // cld; rep movsb
+                        self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb
                     } else {
                         // 整数跨宽 (提升只宽化: e_isz=4, inner_sz=8):
                         // 分量 movsxd 符号扩展到运算宽度存槽。每轮重取
@@ -1815,12 +1816,12 @@ impl Codegen {
                     if !matches!(e.ty(), Type::Float | Type::Double | Type::LongDouble) {
                         // cvtsi2ss/cvtsi2sd xmm0, rax (rax 已符号扩展)
                         let cvt_pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
-                        self.emit(&[cvt_pfx, 0x48, 0x0F, 0x2A, 0xC0]);
+                        self.emit_insn(&Insn::raw_bytes(&[cvt_pfx, 0x48, 0x0F, 0x2A, 0xC0]));
                     }
                     let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
-                    self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]);
-                    self.emit(&[0x0F, 0x57, 0xC0]); // xorps xmm0, xmm0
-                    self.emit(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]);
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]));
                 } else {
                     // 标量整数提升为整数 _Complex: 实部=值, 虚部=0
                     // 注意: 操作数槽在 [rsp+slot], 用 store_rsp_qword (非 r13 相对)
@@ -1832,9 +1833,9 @@ impl Codegen {
                             1 | 2 => self.gen_int_narrow_cast(0, &e.ty()),
                             4 => {
                                 if Self::is_signed_int(&e.ty()) {
-                                    self.emit(&[0x48, 0x63, 0xC0]); // movsxd rax, eax
+                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x63, 0xC0])); // movsxd rax, eax
                                 } else {
-                                    self.emit(&[0x89, 0xC0]); // mov eax, eax (零扩展高 32)
+                                    self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0])); // mov eax, eax (零扩展高 32)
                                 }
                             },
                             _ => {},
@@ -1877,16 +1878,16 @@ impl Codegen {
             self.emit_float_convert(&c.base, inner);
         }
         let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-        self.emit(&[pfx, 0x0F, 0x11, 0x01]); // movss/movsd [rcx], xmm0 (实部)
+        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x01])); // movss/movsd [rcx], xmm0 (实部)
         self.gen_complex_imag_into_xmm0(r, inner);
-        self.emit(&[pfx, 0x0F, 0x11, 0x41]); // movss/movsd [rcx+disp8], xmm0
-        self.emit(&[isz as u8]);
+        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x41])); // movss/movsd [rcx+disp8], xmm0
+        self.emit_insn(&Insn::raw_bytes(&[isz as u8]));
     }
     fn store_complex_pair_from_rsp(&mut self, result_off: i64, inner_sz: i64, is_float: bool) {
         let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
-        self.emit(&[pfx, 0x0F, 0x10, 0x04, 0x24]);
+        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x04, 0x24]));
         self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
-        self.emit(&[pfx, 0x0F, 0x10]);
+        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10]));
         self.emit_rsp_modrm_disp(0, inner_sz);
         self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
     }

@@ -3,6 +3,7 @@
 // import paths were adjusted for the modular layout.
 use crate::ast::{BinOp, Expr, Type};
 use crate::codegen::aarch64::codegen::{align_rodata, align_up_u64, Aarch64Codegen, BranchKind};
+use crate::codegen::aarch64::insn::Insn;
 use crate::codegen::shared::elf::{self, ElfRela, R_AARCH64_ADR_PREL_LO21};
 use crate::ir::ValueType;
 
@@ -46,19 +47,19 @@ impl Aarch64Codegen {
         match ty {
             Type::Char | Type::SChar | Type::Bool => {
                 // SXTB W0, W0: 0x13000000
-                self.emit(&[0x00, 0x00, 0x18, 0x13]);
+                self.emit_insn(&Insn::raw(0x13000000));
             },
             Type::Short => {
                 // SXTH W0, W0: 0x13000400
-                self.emit(&[0x00, 0x04, 0x18, 0x13]);
+                self.emit_insn(&Insn::raw(0x13000400));
             },
             Type::UChar => {
                 // UXTB W0, W0: 0x53000000
-                self.emit(&[0x00, 0x00, 0x00, 0x53]);
+                self.emit_insn(&Insn::raw(0x53000000));
             },
             Type::UShort => {
                 // UXTH W0, W0: 0x53000400
-                self.emit(&[0x00, 0x04, 0x00, 0x53]);
+                self.emit_insn(&Insn::raw(0x53000400));
             },
             _ => {}, // int/long/ptr 等不需要提升
         }
@@ -70,19 +71,19 @@ impl Aarch64Codegen {
             match (*bits, *signed) {
                 (1, _) | (8, true) => {
                     // SXTB W0, W0 (bool/char → sign-extend from 8 bits)
-                    self.emit(&[0x00, 0x00, 0x18, 0x13]);
+                    self.emit_insn(&Insn::raw(0x13000000));
                 },
                 (8, false) => {
                     // UXTB W0, W0 (uchar → zero-extend from 8 bits)
-                    self.emit(&[0x00, 0x00, 0x00, 0x53]);
+                    self.emit_insn(&Insn::raw(0x53000000));
                 },
                 (16, true) => {
                     // SXTH W0, W0 (short → sign-extend from 16 bits)
-                    self.emit(&[0x00, 0x04, 0x18, 0x13]);
+                    self.emit_insn(&Insn::raw(0x13000400));
                 },
                 (16, false) => {
                     // UXTH W0, W0 (ushort → zero-extend from 16 bits)
-                    self.emit(&[0x00, 0x04, 0x00, 0x53]);
+                    self.emit_insn(&Insn::raw(0x53000400));
                 },
                 _ => {}, // 32-bit 及以上不需要提升
             }
@@ -114,25 +115,25 @@ impl Aarch64Codegen {
                 bits: 8,
                 signed: true,
             } => {
-                self.emit(&[0x00, 0x00, 0x18, 0x13]);
+                self.emit_insn(&Insn::raw(0x13001800));
             },
             ValueType::Integer {
                 bits: 8,
                 signed: false,
             } => {
-                self.emit(&[0x00, 0x00, 0x14, 0x13]);
+                self.emit_insn(&Insn::raw(0x13001400));
             },
             ValueType::Integer {
                 bits: 16,
                 signed: true,
             } => {
-                self.emit(&[0x00, 0x00, 0x18, 0x12]);
+                self.emit_insn(&Insn::raw(0x12001800));
             },
             ValueType::Integer {
                 bits: 16,
                 signed: false,
             } => {
-                self.emit(&[0x00, 0x00, 0x14, 0x12]);
+                self.emit_insn(&Insn::raw(0x12001400));
             },
             ValueType::Integer { bits: 32, .. } => {},
             _ => {},
@@ -149,12 +150,24 @@ impl Aarch64Codegen {
 
     pub(crate) fn binop_w0_w1(&mut self, op: BinOp, is_signed: bool) {
         match op {
-            BinOp::Add => self.emit(&[0x00, 0x00, 0x01, 0x0b]),
-            BinOp::Sub => self.emit(&[0x00, 0x00, 0x01, 0x4b]),
-            BinOp::Mul => self.emit(&[0x00, 0x7c, 0x01, 0x1b]),
-            BinOp::And => self.emit(&[0x20, 0x00, 0x01, 0x0a]),
-            BinOp::Or => self.emit(&[0x20, 0x00, 0x01, 0x2a]),
-            BinOp::Xor => self.emit(&[0x20, 0x00, 0x01, 0x4a]),
+            BinOp::Add => {
+                self.emit_insn(&Insn::raw(0x0b010000));
+            }
+            BinOp::Sub => {
+                self.emit_insn(&Insn::raw(0x4b010000));
+            }
+            BinOp::Mul => {
+                self.emit_insn(&Insn::raw(0x1b017c00));
+            }
+            BinOp::And => {
+                self.emit_insn(&Insn::raw(0x0a010020));
+            }
+            BinOp::Or => {
+                self.emit_insn(&Insn::raw(0x2a010020));
+            }
+            BinOp::Xor => {
+                self.emit_insn(&Insn::raw(0x4a010020));
+            }
             // M7 修复: 移位指令正确编码
             // lslv w0, w0, w1: 0x1A302000 LE = 00 20 30 1A
             //   bits[31:21] = 0b00011010001 (lslv op)
@@ -169,14 +182,16 @@ impl Aarch64Codegen {
             // 32 位变量移位 (LSLV/LSRV/ASRV) 硬件自动掩码移位量
             // 到 5 位 (shamt & 31), 与 C 标准 int 宽度一致.
             // 常量求值阶段 (const_eval) 已拒绝无效移位量.
-            BinOp::Shl => self.emit(&[0x00, 0x20, 0x30, 0x1a]), // lslv w0, w0, w1
+            BinOp::Shl => {
+                self.emit_insn(&Insn::raw(0x1a302000));
+            } // lslv w0, w0, w1
             BinOp::Shr => {
                 if is_signed {
                     // asrv: 算术右移, 高位补符号位 (C11 6.5.7)
-                    self.emit(&[0x00, 0x20, 0x74, 0x1a]);
+                    self.emit_insn(&Insn::raw(0x1a742000));
                 } else {
                     // lsrv: 逻辑右移, 高位补 0
-                    self.emit(&[0x00, 0x20, 0x34, 0x1a]);
+                    self.emit_insn(&Insn::raw(0x1a342000));
                 }
             },
             // M7 修复: 真 sdiv / msub 替代 0
@@ -186,10 +201,12 @@ impl Aarch64Codegen {
             //        msub w0, w1, w0, w14 (w0 = w14 - w1*w0 = left mod right)
             // 编码来源: ARMv8 AArch64 指令集, sdiv 32-bit 形式
             // 限制: 不区分有/无符号 (始终有符号);调用方保证 IR 已 folding 常量
-            BinOp::Div => self.emit(&[0x20, 0x0c, 0xc0, 0x9a]), // sdiv w0, w0, w1
+            BinOp::Div => {
+                self.emit_insn(&Insn::raw(0x9ac00c20));
+            } // sdiv w0, w0, w1
             BinOp::Mod => {
-                self.emit(&[0x20, 0x0c, 0xc0, 0x9a]); // sdiv w0, w0, w1
-                self.emit(&[0xa0, 0x83, 0xb0, 0x9b]); // msub w0, w1, w0, w14
+                self.emit_insn(&Insn::raw(0x9ac00c20)); // sdiv w0, w0, w1
+                self.emit_insn(&Insn::raw(0x9bb083a0)); // msub w0, w1, w0, w14
             },
             BinOp::EqEq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 self.cmp_w0_w1();
@@ -203,7 +220,7 @@ impl Aarch64Codegen {
                     _ => 0x1,
                 };
                 let insn = 0x1a9f_0000u32 | (cond << 12) | 0x20;
-                self.emit(&insn.to_le_bytes());
+                self.emit_insn(&Insn::raw(insn));
             },
             BinOp::AndAnd | BinOp::OrOr => self.cmp_w0_zero(),
         }
@@ -211,24 +228,42 @@ impl Aarch64Codegen {
 
     pub(crate) fn float_binop_s0_s1(&mut self, op: BinOp) {
         match op {
-            BinOp::Add => self.emit(&[0x20, 0x00, 0x21, 0x1e]), // fadd s0, s0, s1
-            BinOp::Sub => self.emit(&[0x20, 0x00, 0x41, 0x1e]),
-            BinOp::Mul => self.emit(&[0x20, 0x00, 0x61, 0x1e]),
-            BinOp::Div => self.emit(&[0x20, 0x00, 0x81, 0x1e]),
+            BinOp::Add => {
+                self.emit_insn(&Insn::raw(0x1e210020));
+            } // fadd s0, s0, s1
+            BinOp::Sub => {
+                self.emit_insn(&Insn::raw(0x1e410020));
+            }
+            BinOp::Mul => {
+                self.emit_insn(&Insn::raw(0x1e610020));
+            }
+            BinOp::Div => {
+                self.emit_insn(&Insn::raw(0x1e810020));
+            }
             BinOp::EqEq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 self.fcmp_s0_s1();
                 self.fset_w0_from_fcmp(op);
             },
-            _ => self.emit(&[0x20, 0x00, 0x21, 0x1e]),
+            _ => {
+                self.emit_insn(&Insn::raw(0x1e210020));
+            }
         }
     }
 
     pub(crate) fn vector_binop_v0_v1(&mut self, op: BinOp) {
         match op {
-            BinOp::Add => self.emit(&[0x20, 0x14, 0x21, 0x4e]), // add v0.4s, v0.4s, v1.4s
-            BinOp::Sub => self.emit(&[0x20, 0x14, 0x41, 0x4e]),
-            BinOp::Mul => self.emit(&[0x20, 0x94, 0x81, 0x4e]),
-            _ => self.emit(&[0x20, 0x14, 0x21, 0x4e]),
+            BinOp::Add => {
+                self.emit_insn(&Insn::raw(0x4e211420));
+            } // add v0.4s, v0.4s, v1.4s
+            BinOp::Sub => {
+                self.emit_insn(&Insn::raw(0x4e411420));
+            }
+            BinOp::Mul => {
+                self.emit_insn(&Insn::raw(0x4e819420));
+            }
+            _ => {
+                self.emit_insn(&Insn::raw(0x4e211420));
+            }
         }
     }
 
@@ -281,7 +316,7 @@ impl Aarch64Codegen {
         // AArch64 NOP 是 4 字节指令, 只能按 4 字节边界填充
         let nop_count = pad / 4; // 整数个 NOP
         for _ in 0..nop_count {
-            self.emit(&[0x1F, 0x20, 0x03, 0xD5]); // NOP
+            self.emit_insn(&Insn::raw(0xd503201f)); // NOP
         }
     }
 
@@ -347,6 +382,7 @@ impl Aarch64Codegen {
         self.pending_bcond.retain(|(_, l, _)| l != name);
     }
 
+    /// 底层字节发射 (唯一出口); 只供 `emit_insn` 使用, 其它调用必须走 `emit_insn`.
     pub(crate) fn emit(&mut self, bytes: &[u8]) {
         self.code.extend_from_slice(bytes);
     }
@@ -368,7 +404,7 @@ impl Aarch64Codegen {
                 });
             }
             // ldr s0, [x9] — 绝对偏移 0
-            self.emit(&[0x20, 0x00, 0x40, 0xbd]);
+            self.emit_insn(&Insn::raw(0xbd400020));
         } else {
             let pos = self.pos();
             self.emit_ldr_s0_u32_placeholder();

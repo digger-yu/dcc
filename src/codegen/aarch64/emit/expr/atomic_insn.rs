@@ -2,6 +2,7 @@
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
 use crate::codegen::aarch64::codegen::Aarch64Codegen;
+use crate::codegen::aarch64::insn::Insn;
 
 impl Aarch64Codegen {
     // ===== 原子操作辅助指令 =====
@@ -14,7 +15,7 @@ impl Aarch64Codegen {
             4 => 0x88dffe00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
             _ => 0xc8dffe00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
         };
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// STLR (Store-Release) - 按尺寸选 8/16/32/64 位
@@ -25,7 +26,7 @@ impl Aarch64Codegen {
             4 => 0x889ffe00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
             _ => 0xc89ffe00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
         };
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// LDAXR (Load-Acquire Exclusive) - 按尺寸选 8/16/32/64 位
@@ -36,7 +37,7 @@ impl Aarch64Codegen {
             4 => 0x885ffe00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
             _ => 0xc85ffe00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
         };
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// LDXR (Load Exclusive) - 按尺寸选 8/16/32/64 位
@@ -47,7 +48,7 @@ impl Aarch64Codegen {
             4 => 0x885f7c00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
             _ => 0xc85f7c00u32 | ((rn as u32 & 0x1f) << 5) | (rt as u32 & 0x1f),
         };
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// STLXR (Store-Release Exclusive) - 按尺寸选 8/16/32/64 位
@@ -79,12 +80,12 @@ impl Aarch64Codegen {
                     | (rt as u32 & 0x1f)
             },
         };
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// CLREX - 清除 exclusive monitor
     pub(crate) fn emit_clrex(&mut self) {
-        self.emit(&0xd5033f5fu32.to_le_bytes());
+        self.emit_insn(&Insn::raw(0xd5033f5f));
     }
 
     /// CBNZ - Compare and Branch Non-Zero (32-bit)
@@ -92,7 +93,7 @@ impl Aarch64Codegen {
         let pos = self.pos();
         // cbnz w<rt>, #0 (placeholder)
         let insn = 0x35000000u32 | (rt as u32 & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
         if let Some(&target) = self.labels.get(label) {
             self.patch_cbnz(pos, target, rt);
         } else {
@@ -124,7 +125,7 @@ impl Aarch64Codegen {
         if dst_reg != 0 {
             // mov x0, dst_reg
             let insn = 0xaa0003e0u32 | ((dst_reg as u32 & 0x1f) << 16);
-            self.emit(&insn.to_le_bytes());
+            self.emit_insn(&Insn::raw(insn));
         }
         let mut remaining = size;
         let mut src_off = 0i32;
@@ -134,23 +135,23 @@ impl Aarch64Codegen {
                 // ldr x3, [x2, #src_off]
                 let imm12 = (src_off / 8) as u32 & 0xfff;
                 let insn_ldr = 0xf9400043u32 | (imm12 << 10);
-                self.emit(&insn_ldr.to_le_bytes());
+                self.emit_insn(&Insn::raw(insn_ldr));
                 // str x3, [x0, #src_off]
                 let insn_str = 0xf9000003u32 | (imm12 << 10);
-                self.emit(&insn_str.to_le_bytes());
+                self.emit_insn(&Insn::raw(insn_str));
             } else if chunk >= 4 {
                 let imm12 = (src_off / 4) as u32 & 0xfff;
                 let insn_ldr = 0xb9400043u32 | (imm12 << 10);
-                self.emit(&insn_ldr.to_le_bytes());
+                self.emit_insn(&Insn::raw(insn_ldr));
                 let insn_str = 0xb9000003u32 | (imm12 << 10);
-                self.emit(&insn_str.to_le_bytes());
+                self.emit_insn(&Insn::raw(insn_str));
             } else {
                 // byte-by-byte for tail
                 for b in 0..chunk as i32 {
                     let ldrb = 0x39400043u32 | (((src_off + b) as u32 & 0xfff) << 10);
-                    self.emit(&ldrb.to_le_bytes());
+                    self.emit_insn(&Insn::raw(ldrb));
                     let strb = 0x39000003u32 | (((src_off + b) as u32 & 0xfff) << 10);
-                    self.emit(&strb.to_le_bytes());
+                    self.emit_insn(&Insn::raw(strb));
                 }
             }
             src_off += chunk as i32;

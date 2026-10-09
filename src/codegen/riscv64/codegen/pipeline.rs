@@ -14,6 +14,15 @@ use std::sync::Arc;
 
 use super::common::{align_rodata, align_up_u64, find_func, value_type_size, var_is_static};
 use super::struct_def::{Riscv64Codegen, RvvConfig};
+use crate::codegen::shared::asm_operand::LayoutMap;
+
+impl Riscv64Codegen {
+    /// 产出当前 `labels`/`func_sizes` 的只读快照 (`LayoutMap`)。
+    pub(crate) fn snapshot_layout(&self) -> LayoutMap {
+        let text_end = self.entry + self.code.len() as u64;
+        LayoutMap::snapshot(&self.labels, &self.func_sizes, text_end)
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum BranchKind {

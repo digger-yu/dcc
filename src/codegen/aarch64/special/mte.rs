@@ -2,6 +2,7 @@
 // implementation. Pure move: semantics preserved; only visibility and
 // import paths were adjusted for the modular layout.
 use crate::codegen::aarch64::codegen::Aarch64Codegen;
+use crate::codegen::aarch64::insn::Insn;
 
 impl Aarch64Codegen {
     pub(crate) fn emit_irg(&mut self, rd: u8, rn: u8) {
@@ -10,7 +11,7 @@ impl Aarch64Codegen {
             | (0b000100 << 10)
             | (((rn as u32) & 0x1f) << 5)
             | ((rd as u32) & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// MTE: Add with Tag (ADDG)
@@ -25,7 +26,7 @@ impl Aarch64Codegen {
             | ((imm4 & 0xf) << 10)
             | (((rn as u32) & 0x1f) << 5)
             | ((rd as u32) & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// MTE: Subtract with Tag (SUBG)
@@ -39,7 +40,7 @@ impl Aarch64Codegen {
             | ((imm4 & 0xf) << 10)
             | (((rn as u32) & 0x1f) << 5)
             | ((rd as u32) & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// MTE: Store Allocation Tag (STG, signed-offset 形式)
@@ -55,7 +56,7 @@ impl Aarch64Codegen {
             | (0b10 << 10)
             | (((rn as u32) & 0x1f) << 5)
             | ((rt as u32) & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// MTE: Load Allocation Tag (LDG, signed-offset 形式)
@@ -68,7 +69,7 @@ impl Aarch64Codegen {
             | ((imm9 & 0x1ff) << 12)
             | (((rn as u32) & 0x1f) << 5)
             | ((rt as u32) & 0x1f);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 
     /// MTE: Set PSTATE.TCO (Tag Check Override)
@@ -76,6 +77,6 @@ impl Aarch64Codegen {
     /// 未在 prologue tag 栈帧流程中使用.
     pub(crate) fn emit_settco(&mut self, value: bool) {
         let insn = 0xd500401fu32 | ((value as u32) << 3);
-        self.emit(&insn.to_le_bytes());
+        self.emit_insn(&Insn::raw(insn));
     }
 }

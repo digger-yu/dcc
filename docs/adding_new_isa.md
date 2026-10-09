@@ -55,7 +55,7 @@ Before starting, ensure you have:
 cd /path/to/dcc
 cat README.md                    # Project overview
 cat ARCHITECTURE.md              # Core architecture
-cat src/codegen/data/instruction_spec_schema.json  # Data-driven spec format
+cat src/codegen/data/x86_instructions/add.toml     # Data-driven spec format (TOML)
 ```
 
 ### Time Budget
@@ -1134,55 +1134,49 @@ Create individual JSON files for each instruction following the schema:
 mkdir -p src/codegen/data/myisa_instructions
 ```
 
-**Example**: `src/codegen/data/myisa_instructions/add.json`
+**Example**: `src/codegen/data/myisa_instructions/add.toml`
 
-```json
-{
-  "$schema": "../../instruction_spec_schema.json",
-  "name": "add",
-  "description": "Integer addition - Rd = Rs + Rt",
-  "arch": "myisa",
-  "operands": [
-    {
-      "name": "rd",
-      "type": "reg",
-      "direction": "read_write",
-      "size": "64bit",
-      "description": "Destination register"
-    },
-    {
-      "name": "rs",
-      "type": "reg",
-      "direction": "read",
-      "size": "64bit",
-      "description": "Source register"
-    },
-    {
-      "name": "rt",
-      "type": "reg",
-      "direction": "read",
-      "size": "64bit",
-      "description": "Second source register"
-    }
-  ],
-  "encoding_spec": {
-    "formats": [
-      {
-        "name": "RegRegReg",
-        "description": "All three registers encoded",
-        "operand_pattern": "rd rs rt",
-        "opcode": [0x03],
-        "modrm_required": false,
-        "rex_prefix": false
-      }
-    ],
-    "default_format": "RegRegReg"
-  },
-  "semantics": {
-    "effect": "rd = rs + rt",
-    "flags_modified": ["ZF", "SF", "OF", "CF"]
-  }
-}
+```toml
+[package]
+name = "add"
+arch = "myisa"
+description = "Integer addition - Rd = Rs + Rt"
+
+[[operands]]
+name = "rd"
+op_type = "reg"
+direction = "readwrite"
+size = "64bit"
+description = "Destination register"
+
+[[operands]]
+name = "rs"
+op_type = "reg"
+direction = "read"
+size = "64bit"
+description = "Source register"
+
+[[operands]]
+name = "rt"
+op_type = "reg"
+direction = "read"
+size = "64bit"
+description = "Second source register"
+
+[encoding_spec]
+default_format = "RegRegReg"
+
+[[encoding_spec.formats]]
+name = "RegRegReg"
+description = "All three registers encoded"
+operand_pattern = "rd rs rt"
+opcode = [0x03]
+modrm_required = false
+rex_prefix = false
+
+[class_semantics]
+effect = "rd = rs + rt"
+flags_modified = ["ZF", "SF", "OF", "CF"]
 ```
 
 ### Step 2: Generate Code
@@ -1609,12 +1603,12 @@ pub trait Backend {
 
 ---
 
-## Appendix B: JSON Schema Reference
+## Appendix B: Spec Format Reference
 
-For detailed schema definition, see:
+For detailed spec format, see the actual TOML examples:
 
-- `docs/instruction_spec_schema.json`
-- `examples/instruction_spec_template.json`
+- `src/codegen/data/x86_instructions/add.toml`
+- `src/codegen/data/instruction_loader.rs` (the strongly-typed loader)
 
 ---
 
