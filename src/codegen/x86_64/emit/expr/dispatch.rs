@@ -554,7 +554,7 @@ impl Codegen {
                     }
                     // 除数也用同一个暂存号：写死 `1` 会在 `1` 握着某个家时把家踩掉。
                     self.mov_imm(stage, elem_size as i128);
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x99])); // cqo (符号扩展 rax→rdx:rax)
+                    self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B64)); // cqo (符号扩展 rax→rdx:rax)
                     // idiv r/m64 的 ModRM 是 /7 + rm=stage（stage=1 就是原来的 48 F7 F9）。
                     // 这里**不是**自反形：reg 字段是操作码扩展 `/7`，只有 r/m 拿着 stage，
                     // 所以扩它的是 REX.B。写 0x04(REX.R) 会把 /7 抬成 /15 = 未定义操作码。
@@ -902,7 +902,7 @@ impl Codegen {
                                         self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Xor, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // xor rdx, rdx
                                     }
                                 } else {
-                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x99])); // cqo (sign-extend rax→rdx:rax)
+                                    self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B64)); // cqo (sign-extend rax→rdx:rax)
                                 }
                             }
                             if self.is_global_not_local(&name.name) {

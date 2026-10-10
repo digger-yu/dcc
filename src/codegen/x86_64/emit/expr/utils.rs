@@ -184,7 +184,7 @@ impl Codegen {
             )); // mov ecx, ecx (zero-extends to rcx)
                     }
                     if is_signed {
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x99])); // cqto
+                        self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B64)); // cqto
                         self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xF9])); // idiv rcx
                     } else {
                         // P11: xor rdx, rdx via typed opcode.
@@ -210,7 +210,7 @@ impl Codegen {
                         self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | (src_byte << 3) | src_byte]));
                     }
                     if is_signed {
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x99])); // cqto
+                        self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B64)); // cqto
                         let mut rex = 0x48u8;
                         if src >= 8 {
                             rex |= 0x41;

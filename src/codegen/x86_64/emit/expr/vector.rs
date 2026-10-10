@@ -463,7 +463,7 @@ impl Codegen {
                     match elem_size {
                         8 => {
                             if signed {
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x99])); // cqo
+                                self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B64)); // cqo
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xF9])); // idiv rcx
                             } else {
                                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Xor, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // xor rdx, rdx
@@ -472,7 +472,7 @@ impl Codegen {
                         },
                         4 => {
                             if signed {
-                                self.emit_insn(&Insn::raw_bytes(&[0x99])); // cdq
+                                self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B32)); // cdq
                                 self.emit_insn(&Insn::raw_bytes(&[0xF7, 0xF9])); // idiv ecx
                             } else {
                                 self.emit_insn(&Insn::raw_bytes(&[0x31, 0xD2])); // xor edx, edx
@@ -481,7 +481,7 @@ impl Codegen {
                         },
                         2 => {
                             if signed {
-                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x99])); // cwd
+                                self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B16)); // cwd
                                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0xF7, 0xF9])); // idiv cx
                             } else {
                                 self.emit_insn(&Insn::raw_bytes(&[0x31, 0xD2])); // xor edx, edx

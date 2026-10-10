@@ -2289,10 +2289,12 @@ impl Codegen {
         }
     }
     pub(crate) fn emit_cqo(&mut self, inner_sz: i64) {
-        if inner_sz == 8 {
-            self.emit_insn(&Insn::raw_bytes(&[0x48]));
-        }
-        self.emit_insn(&Insn::raw_bytes(&[0x99]));
+        let w = if inner_sz == 8 {
+            crate::codegen::shared::asm_operand::Width::B64
+        } else {
+            crate::codegen::shared::asm_operand::Width::B32
+        };
+        self.emit_insn(&Insn::sign_extend_rax_to_rdx(w));
     }
     pub(crate) fn emit_div_rm(&mut self, inner_sz: i64, is_signed: bool, rm32: u8) {
         let op = if is_signed { rm32 + 8 } else { rm32 };
