@@ -70,15 +70,54 @@ impl Codegen {
                     },
                     4 => {
                         // mov eax, dword [rax] (自动 zero-extend 到 64 位)
-                        self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x00]));
+                        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0, base: Some(0), index: None, seg: None,
+                        }
+                    ),
+                },
+                &[],
+            ));
                     },
                     8 => {
                         // mov rax, qword [rax] (64 位无 truncation)
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x00]));
+                        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0, base: Some(0), index: None, seg: None,
+                        }
+                    ),
+                },
+                &[],
+            ));
                     },
                     _ => {
                         // 更大? 不可能, 条件已限定 <= 8
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x00]));
+                        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0, base: Some(0), index: None, seg: None,
+                        }
+                    ),
+                },
+                &[],
+            ));
                     },
                 }
                 if dst != 0 {

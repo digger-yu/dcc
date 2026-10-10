@@ -372,8 +372,34 @@ impl super::super::super::Codegen {
 
         // 2. Load container, extract bitfield value
         match container_size {
-            4 => { self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x00])); },
-            8 => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x00])); },
+            4 => { self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0, base: Some(0), index: None, seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); },
+            8 => { self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0, base: Some(0), index: None, seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); },
             2 => {
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x00]));
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB7, 0xC0]));

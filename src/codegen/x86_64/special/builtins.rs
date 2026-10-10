@@ -193,7 +193,20 @@ impl Codegen {
                     }
                 }
                 // 解引用 expected 指针, rax = *expected (实际期望值)
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x00])); // mov rax, [rax]
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0, base: Some(0), index: None, seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov rax, [rax]
                 self.gen_expr(&args[2], 6); // rsi = desired
                                             // lock cmpxchg [rdi], rsi: 按 sz 选尺寸
                 let sz = self.atomic_elem_size(args, 0);
@@ -263,7 +276,20 @@ impl Codegen {
                     }
                 }
                 // Dereference expected: rax = *expected_ptr
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x00])); // mov rax, [rax]
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0, base: Some(0), index: None, seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov rax, [rax]
                                                 // Now: rax = expected value, rsi = desired value, rdi = ptr
                 let sz = self.atomic_elem_size(args, 0);
                 self.emit_lock_cmpxchg_rdi_rsi(sz);
@@ -3923,7 +3949,20 @@ impl Codegen {
                     } else if is_float {
                         self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x00])); // movss xmm0, [rax] (4B)
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x00])); // mov rax, [rax]
+                        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0, base: Some(0), index: None, seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov rax, [rax]
                     }
                     // 5. 写 dst[i]
                     let ri_off = dst_off + (i * elem_size) as i64;

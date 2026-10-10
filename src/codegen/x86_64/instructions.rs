@@ -2280,8 +2280,34 @@ impl Codegen {
         match size {
             1 => self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0f, 0xb6, 0x00])), // movzbl (%rax), %rax
             2 => self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0f, 0xb7, 0x00])), // movzwl (%rax), %rax
-            4 => self.emit_insn(&Insn::raw_bytes(&[0x8b, 0x00])), // mov (%rax), %eax (零扩展到64位)
-            _ => self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8b, 0x00])),       // mov (%rax), %rax
+            4 => self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0, base: Some(0), index: None, seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )), // mov (%rax), %eax (零扩展到64位)
+            _ => self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0, base: Some(0), index: None, seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )),       // mov (%rax), %rax
         };
     }
     fn emit_lock_cmpxchg_rdi_rdx(&mut self, sz: usize) {

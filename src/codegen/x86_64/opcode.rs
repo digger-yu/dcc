@@ -1265,5 +1265,33 @@ mod tests {
             0x48, 0xB8, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00
         ]));
     }
+
+    // ---- MovRm mem->reg [rax+0] load forms (P11 Batch 2x) ----
+
+    #[test]
+    fn mov_rm_mov_rax_load_rax_b64() {
+        // mov rax, [rax]:  48 8B 00
+        let o = X86_64Opcode::MovRm {
+            width: Width::B64,
+            dst: reg(0, Width::B64),
+            src: Operand::Mem(MemOperand {
+                disp: 0, base: Some(0), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x8B, 0x00]));
+    }
+
+    #[test]
+    fn mov_rm_mov_eax_load_rax_b32() {
+        // mov eax, [rax]:  8B 00  (zero-extends to rax)
+        let o = X86_64Opcode::MovRm {
+            width: Width::B32,
+            dst: reg(0, Width::B32),
+            src: Operand::Mem(MemOperand {
+                disp: 0, base: Some(0), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0x8B, 0x00]));
+    }
 }
 

@@ -1381,8 +1381,34 @@ impl Codegen {
                         self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x45, addr_off as u8])); // mov [r13+addr_off], rax
                                                                         // 加载当前容器值 (结果统一放入 rax)
                         match container_size {
-                            4 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x00])); },       // mov eax, [rax] (零扩展)
-                            8 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x00])); }, // mov rax, [rax]
+                            4 => { let _ = self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0, base: Some(0), index: None, seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); },       // mov eax, [rax] (零扩展)
+                            8 => { let _ = self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0, base: Some(0), index: None, seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); }, // mov rax, [rax]
                             2 => {
                                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x00])); // mov ax, [rax]
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB7, 0xC0]));

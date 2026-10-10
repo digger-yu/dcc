@@ -507,7 +507,20 @@ impl Codegen {
         // ---- done: __int128 固定以 rdx:rax 交付 (SysV) ----
         self.label(&done);
         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x50, 0x08])); // mov rdx, 8(%rax)
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x00])); // mov rax, (%rax)
+        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0, base: Some(0), index: None, seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov rax, (%rax)
     }
 
     /// 全局 `va_list` + `__int128`：基址由 `lea r10, [rip+name]` 固定后交给
