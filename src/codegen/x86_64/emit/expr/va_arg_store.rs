@@ -963,7 +963,7 @@ impl Codegen {
             self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
         }
         self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 6, 8)); // mov rsi, r8
-        self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
+        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
         match vla_size_reg {
             // VLA: 运行时尺寸在 `sr`（不能放 rcx/rax：rcx = reg_save_area 已在
             // 字段装载时占用，而 `mov rcx, sz` 本身是 `rep movsb` 的计数）。
@@ -979,7 +979,7 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&(sz as u32).to_le_bytes()));
             },
         }
-        self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
+        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
                                   // 推进 overflow_arg_area: 当前对齐位置 + step。step 要么是编译期常量
                                   // (imm32)，要么在 r11 (VLA)；两者编码必须分开写——旧副本用同一条
                                   // `49 01 D0`（= `add r8, rdx`）冒充两者，两路都错。

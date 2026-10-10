@@ -95,8 +95,8 @@ impl Codegen {
         } else {
             self.mov_imm(1, es.max(1) as i128);
         }
-        self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
-        self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
+        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
+        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
     }
     /// 聚合**形态**判据: 结构体/联合体/数组/原子/向量。与「值模型」判据
     /// [`Self::value_is_whole_copy`] 分开, 两者一起构成聚合赋值分发的全部知识,
@@ -749,12 +749,12 @@ impl Codegen {
                             if qwords > 0 {
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32
                                 self.emit_insn(&Insn::raw_bytes(&(qwords as u32).to_le_bytes()));
-                                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x48, 0xA5])); // rep movsq
+                                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsq)); // rep movsq
                             }
                             if remainder > 0 {
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1]));
                                 self.emit_insn(&Insn::raw_bytes(&(remainder as u32).to_le_bytes()));
-                                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
+                                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
                             }
                         } else {
                             // 跨宽分量转换 (C99 6.3.1.7): 实/虚部分别转换后
@@ -786,12 +786,12 @@ impl Codegen {
                             if qwords > 0 {
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32
                                 self.emit_insn(&Insn::raw_bytes(&(qwords as u32).to_le_bytes()));
-                                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x48, 0xA5])); // rep movsq
+                                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsq)); // rep movsq
                             }
                             if remainder > 0 {
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1]));
                                 self.emit_insn(&Insn::raw_bytes(&(remainder as u32).to_le_bytes()));
-                                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
+                                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
                             }
                         }
                         // 赋值表达式值 = 左值转换后的值: result_off 已含
@@ -864,8 +864,8 @@ impl Codegen {
                 self.gen_sizeof_runtime(dst_ty, 11);
                 self.mov(1, 11);
             }
-            self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
+            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
+            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
             return;
         }
         let qwords = sz / 8;
@@ -873,12 +873,12 @@ impl Codegen {
         if qwords > 0 {
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32 (qwords)
             self.emit_insn(&Insn::raw_bytes(&(qwords as u32).to_le_bytes()));
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x48, 0xA5])); // rep movsq
+            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsq)); // rep movsq
         }
         if remainder > 0 {
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32 (remainder)
             self.emit_insn(&Insn::raw_bytes(&(remainder as u32).to_le_bytes()));
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
+            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
         }
     }
     pub(crate) fn gen_init_list(&mut self, var_name: &str, ty: &Type, inits: &[InitItem]) {
@@ -1595,8 +1595,8 @@ impl Codegen {
                                                                      // rsi = 源地址
                                     self.emit_lea_r13(6, src_off); // rsi = src
                                     self.mov_imm(1, sz as i128); // rcx = count
-                                    self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
-                                    self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
+                                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
+                                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
                                     src_addr_ok = true;
                                 }
                             } else if matches!(value, Expr::CompoundLit { .. }) {
@@ -1607,8 +1607,8 @@ impl Codegen {
                                 self.emit_lea_r13(7, store_off); // rdi = dest
                                 self.mov(6, 0); // rsi = rax
                                 self.mov_imm(1, sz as i128); // rcx = count
-                                self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
-                                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
+                                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
+                                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
                                 src_addr_ok = true;
                             } else if matches!(
                                 value,
@@ -1619,8 +1619,8 @@ impl Codegen {
                                     self.emit_lea_r13(7, store_off); // rdi = dest
                                     self.mov(6, 0); // rsi = rax
                                     self.mov_imm(1, sz as i128); // rcx = count
-                                    self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
-                                    self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
+                                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
+                                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
                                     src_addr_ok = true;
                                 }
                             }

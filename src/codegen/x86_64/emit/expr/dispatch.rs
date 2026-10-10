@@ -50,8 +50,8 @@ impl Codegen {
                 let temp_off = self.alloc_sret_slot(sz);
                 self.emit_lea_r13(7, temp_off); // rdi = sret 临时槽
                 self.mov_imm(1, sz as i128); // rcx = size
-                self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
-                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
                 self.emit_lea_r13(dst, temp_off);
             } else if Self::needs_memory_return(&e_ty) {
                 // Call + >16B: SysV ABI sret, rax 已是返回地址
@@ -726,8 +726,8 @@ impl Codegen {
                             self.emit_lea_r13(6, toff); // rsi = 临时槽
                         }
                         self.mov_imm(1, assign_l_ty.size() as i128);
-                        self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
-                        self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
+                        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
+                        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
                         return;
                     }
                     if rax_is_agg_addr {
@@ -1235,7 +1235,7 @@ impl Codegen {
                         // 忽略，挂一枚 `65` 的 rep movsb 会写到非段内存（旧实现把前缀发在
                         // `cld` 前面，那是给 cld 加的，等于什么都没做）。带段路径改走
                         // `copy_agg_to_seg`（常量尺寸）/ `copy_bytes_to_seg_runtime`（VLA）。
-                        self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
+                        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
                                             // 拷贝大小: VM struct/union 为运行时值 (声明点绑定
                                             // 槽优先), 其余为编译期 size
                         if assign_l_ty.has_vla() {
@@ -1249,7 +1249,7 @@ impl Codegen {
                             self.mov_imm(1, agg_sz as i128); // rcx = size
                         }
                         match seg_prefix {
-                            None => { let _ = self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); }, // rep movsb
+                            None => { let _ = self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); }, // rep movsb
                             Some(seg) if assign_l_ty.has_vla() => {
                                 self.copy_bytes_to_seg_runtime(seg)
                             },
@@ -1813,9 +1813,9 @@ impl Codegen {
                                 self.emit_lea_r13(6, temp_off); // rsi = source
                             }
                             self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rdi, rcx (dst)
-                            self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
+                            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
                             self.mov_imm(1, agg_sz as i128); // rcx = size (rep movsb counter)
-                            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
+                            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
                         } else {
                             self.push(0); // 保存目标地址
                             let size = field_info.as_ref().map_or(4, |f| f.ty.size());
@@ -2006,9 +2006,9 @@ impl Codegen {
                             let src_off = self.complex_result_off();
                             self.emit_lea_r13(6, src_off); // rsi = src
                             self.pop(7); // rdi = dst
-                            self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
+                            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
                             self.mov_imm(2, assign_sz as i128); // rcx = size
-                            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
+                            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
                         } else {
                             self.gen_expr(r, Self::EVAL_BASE);
                         }

@@ -62,6 +62,11 @@ impl Insn {
         )
     }
 
+    /// P11 Bucket I: 无操作数/固定前缀指令 (cld/mfence/rep movsb/stosb/movsq).
+    pub fn noarg(op: crate::codegen::x86_64::opcode::NoArgOp) -> Self {
+        Insn::new(X86_64Opcode::NoArg { op }, &[])
+    }
+
     /// asm/ 内联汇编路径专用 (P10 起原生路径已改用 raw_bytes).
     /// 语义与 raw_bytes 一致, 仅名字不同 —— 保留以避免改动内联汇编编码器的
     /// 几百处字面调用.

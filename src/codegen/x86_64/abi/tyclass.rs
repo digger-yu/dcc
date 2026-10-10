@@ -367,12 +367,12 @@ impl Codegen {
         if qwords > 0 {
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32 (qwords)
             self.emit_insn(&Insn::raw_bytes(&(qwords as u32).to_le_bytes()));
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x48, 0xA5])); // rep movsq
+            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsq)); // rep movsq
         }
         if remainder > 0 {
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32 (remainder)
             self.emit_insn(&Insn::raw_bytes(&(remainder as u32).to_le_bytes()));
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
+            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
         }
     }
     /// 号 → 64 位裸规范名。名字表只有一份（`abi/regnames.rs::bare_name_of_num`，

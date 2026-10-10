@@ -67,7 +67,7 @@ impl Codegen {
                 // lock prefix is full barrier; SEQ_CST needs explicit mfence
                 let ord = self.eval_mem_order(&args[2]);
                 if ord == 5 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0]));
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence));
                 }
                 if dst != 6 {
                     self.mov(dst, 6);
@@ -86,7 +86,7 @@ impl Codegen {
                 self.emit_atomic_xadd(sz);
                 let ord = self.eval_mem_order(&args[2]);
                 if ord == 5 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0]));
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence));
                 }
                 if dst != 6 {
                     self.mov(dst, 6);
@@ -105,7 +105,7 @@ impl Codegen {
                 });
                 let ord = self.eval_mem_order(&args[2]);
                 if ord == 5 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0]));
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence));
                 }
                 if dst != 1 {
                     self.mov(dst, 1);
@@ -124,7 +124,7 @@ impl Codegen {
                 });
                 let ord = self.eval_mem_order(&args[2]);
                 if ord == 5 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0]));
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence));
                 }
                 if dst != 1 {
                     self.mov(dst, 1);
@@ -143,7 +143,7 @@ impl Codegen {
                 });
                 let ord = self.eval_mem_order(&args[2]);
                 if ord == 5 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0]));
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence));
                 }
                 if dst != 1 {
                     self.mov(dst, 1);
@@ -174,7 +174,7 @@ impl Codegen {
                 });
                 let ord = self.eval_mem_order(&args[2]);
                 if ord == 5 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0]));
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence));
                 }
                 if dst != 1 {
                     self.mov(dst, 1);
@@ -193,7 +193,7 @@ impl Codegen {
                 };
                 // SEQ_CST pre-barrier
                 if sord == 5 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0]));
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence));
                 }
                 self.gen_expr(&args[0], 7); // rdi = ptr
                 self.gen_expr(&args[1], Self::EVAL_BASE); // rax = expected (cmpxchg 用 rax)
@@ -271,7 +271,7 @@ impl Codegen {
                 }, &[])); // movzx rax, dl
                                                       // SEQ_CST post-barrier
                 if sord == 5 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0]));
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence));
                 }
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -290,7 +290,7 @@ impl Codegen {
                     5
                 };
                 if sord == 5 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0]));
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence));
                 }
                 self.gen_expr(&args[0], 7); // rdi = ptr
                                             // First: compute desired value into rsi
@@ -388,7 +388,7 @@ impl Codegen {
                     src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B8),
                 }, &[])); // movzx rax, dl
                 if sord == 5 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0]));
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence));
                 }
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -414,7 +414,7 @@ impl Codegen {
                     },
                     _ => {
                         // SEQ_CST/ACQUIRE: mfence + store
-                        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0])); // mfence
+                        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence)); // mfence
                         self.emit_mov_to_mem(sz);
                     },
                 }
@@ -436,7 +436,7 @@ impl Codegen {
                     0 | 3 => {}, // RELAXED/RELEASE: no barrier needed
                     _ => {
                         // ACQUIRE/SEQ_CST: mfence after load
-                        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0]));
+                        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence));
                     },
                 }
                 true
@@ -452,7 +452,7 @@ impl Codegen {
                 self.emit_lock_xchg_rdi_rsi(sz);
                 let ord = self.eval_mem_order(&args[2]);
                 if ord == 5 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0]));
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence));
                 }
                 if dst != 6 {
                     self.mov(dst, 6);
@@ -787,13 +787,13 @@ impl Codegen {
             },
             "__sync_synchronize" => {
                 // mfence: full memory barrier
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0])); // mfence
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence)); // mfence
                 true
             },
             "__atomic_thread_fence" => {
                 // args: (mem_order)
                 // Hardware memory barrier (mfence for all orders on x86_64)
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0])); // mfence
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence)); // mfence
                 true
             },
             "__atomic_signal_fence" => {
@@ -814,7 +814,7 @@ impl Codegen {
                 self.emit_lock_xchg_rdi_rsi(sz);
                 let ord = self.eval_mem_order(&args[1]);
                 if ord == 5 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0]));
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence));
                 }
                 if dst != 6 {
                     self.mov(dst, 6);
@@ -837,7 +837,7 @@ impl Codegen {
                     _ => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0x07, 0x00, 0x00, 0x00, 0x00])); }
                 }
                 if ord == 5 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0xF0]));
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence));
                 }
                 true
             },
@@ -928,8 +928,8 @@ impl Codegen {
                 self.gen_expr(&args[2], 1); // rcx = n
                                             // 保存 rdi 作为返回值 (memcpy/memmove 返回 dst)
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // push rdi
-                self.emit_insn(&Insn::raw_bytes(&[0xfc])); // cld (清除方向标志)
-                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld (清除方向标志)
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rax (返回值 = dst)
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -947,8 +947,8 @@ impl Codegen {
                 self.gen_expr(&args[1], Self::EVAL_BASE); // rax = val
                 self.gen_expr(&args[2], 1); // rcx = n
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // push rdi
-                self.emit_insn(&Insn::raw_bytes(&[0xfc])); // cld
-                self.emit_insn(&Insn::raw_bytes(&[0xf3, 0xaa])); // rep stosb
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepStosb)); // rep stosb
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rax (返回值 = dst)
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -965,8 +965,8 @@ impl Codegen {
                 self.gen_expr(&args[1], 6); // rsi = src
                 self.gen_expr(&args[0], 7); // rdi = dst
                 self.gen_expr(&args[2], 1); // rcx = n
-                self.emit_insn(&Insn::raw_bytes(&[0xfc])); // cld
-                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
                                                 // rep movsb 后 rdi = dst+n, 移到 rax 作为返回值
                 self.mov(0, 7); // rax = rdi
                 if dst != 0 {
@@ -1601,9 +1601,9 @@ impl Codegen {
                         };
                         if src_ok {
                             // rep movsq 复制 3 个 qword
-                            self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
+                            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
                             self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1, 0x03, 0, 0, 0]));
-                            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x48, 0xA5])); // rep movsq
+                            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsq)); // rep movsq
                         }
                     }
                 }
@@ -3712,8 +3712,8 @@ impl Codegen {
                 self.gen_expr(&args[1], 6); // rsi = src
                 self.gen_expr(&args[0], 7); // rdi = dst
                 self.gen_expr(&args[2], 1); // rcx = n
-                self.emit_insn(&Insn::raw_bytes(&[0xfc])); // cld
-                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
                 if dst != 0 {
                     self.mov(dst, 7);
                 }
@@ -3727,8 +3727,8 @@ impl Codegen {
                 self.gen_expr(&args[0], 7); // rdi = dst
                 self.gen_expr(&args[1], Self::EVAL_BASE); // rax = val
                 self.gen_expr(&args[2], 1); // rcx = n
-                self.emit_insn(&Insn::raw_bytes(&[0xfc])); // cld
-                self.emit_insn(&Insn::raw_bytes(&[0xf3, 0xaa])); // rep stosb
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepStosb)); // rep stosb
                 if dst != 0 {
                     self.mov(dst, 7);
                 }

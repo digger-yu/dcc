@@ -1843,8 +1843,8 @@ impl Codegen {
             self.mov(7, 1); // rdi = rcx (目标)
             self.emit_lea_r13(6, result_off); // rsi = 源
             self.mov_imm(1, (isz * 2) as i128); // rcx = 字节数
-            self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
+            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
+            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
                                             // 统一 rvalue 约定: result_off 已含结果, rax=地址
             self.emit_lea_r13(0, result_off);
         }

@@ -58,6 +58,23 @@ pub(crate) enum StackOp {
     Pop,
 }
 
+/// P11 Bucket I: 无操作数/固定前缀指令 (cld/mfence/rep movsb/rep stosb/rep movsq).
+/// 所有形态均为固定字节序列, 无 ModRM/SIB/imm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum NoArgOp {
+    /// cld: FC (清除方向标志).
+    Cld,
+    /// mfence: 0F AE F0 (Store-Load 屏障).
+    Mfence,
+    /// rep movsb: F3 A4 (ES:[rdi] → R:[rsi], rcx 字节计数).
+    RepMovsb,
+    /// rep stosb: F3 AA (AL → ES:[rdi], rcx 字节计数).
+    RepStosb,
+    /// rep movsq: F3 48 A5 (qword 版本, 带 REX.W).
+    RepMovsq,
+}
+
 /// SIMD 算术 — 步骤 1 不实现.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -336,6 +353,9 @@ pub(crate) enum X86_64Opcode {
         bytes: Vec<u8>,
         mnemonic: Option<String>,
     },
+
+    /// P11 Bucket I: 无操作数/固定前缀指令 (cld/mfence/rep movsb/stosb/movsq).
+    NoArg { op: NoArgOp },
 }
 
 impl X86_64Opcode {
@@ -1412,6 +1432,17 @@ impl X86_64Opcode {
                 out.push(0xC0 | (reg_idx & 7));
                 Some(out)
             }
+            // P11 Bucket I: 无操作数/固定前缀指令.
+            X86_64Opcode::NoArg { op } => {
+                let bytes: &[u8] = match op {
+                    NoArgOp::Cld => &[0xFC],
+                    NoArgOp::Mfence => &[0x0F, 0xAE, 0xF0],
+                    NoArgOp::RepMovsb => &[0xF3, 0xA4],
+                    NoArgOp::RepStosb => &[0xF3, 0xAA],
+                    NoArgOp::RepMovsq => &[0xF3, 0x48, 0xA5],
+                };
+                Some(bytes.to_vec())
+            }
             _ => None,
         }
     }
@@ -1438,6 +1469,16 @@ impl X86_64Opcode {
             }
             X86_64Opcode::Raw { mnemonic, .. } => {
                 mnemonic.clone().unwrap_or_else(|| "/* raw */".into())
+            }
+            X86_64Opcode::NoArg { op } => {
+                let s: &str = match op {
+                    NoArgOp::Cld => "cld",
+                    NoArgOp::Mfence => "mfence",
+                    NoArgOp::RepMovsb => "rep movsb",
+                    NoArgOp::RepStosb => "rep stosb",
+                    NoArgOp::RepMovsq => "rep movsq",
+                };
+                String::from(s)
             }
             _ => String::from("/* unimplemented opcode variant */"),
         }
@@ -2646,6 +2687,37 @@ mod tests {
         // setnp r14b: 41 0F 9B C6  (reg=14 >=8 needs REX.B; reg&7=6, modrm=0xC6)
         let o = X86_64Opcode::Setcc { cc: CondCode::Np, dst: reg(14, Width::B8) };
         assert_eq!(o.encode(), Some(vec![0x41, 0x0F, 0x9B, 0xC6]));
+    }
+
+    // ---- P11 Bucket I: NoArg (cld/mfence/rep movsb/stosb/movsq) ----
+    #[test]
+    fn noarg_cld() {
+        let o = X86_64Opcode::NoArg { op: NoArgOp::Cld };
+        assert_eq!(o.encode(), Some(vec![0xFC]));
+    }
+
+    #[test]
+    fn noarg_mfence() {
+        let o = X86_64Opcode::NoArg { op: NoArgOp::Mfence };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0xAE, 0xF0]));
+    }
+
+    #[test]
+    fn noarg_rep_movsb() {
+        let o = X86_64Opcode::NoArg { op: NoArgOp::RepMovsb };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0xA4]));
+    }
+
+    #[test]
+    fn noarg_rep_stosb() {
+        let o = X86_64Opcode::NoArg { op: NoArgOp::RepStosb };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0xAA]));
+    }
+
+    #[test]
+    fn noarg_rep_movsq() {
+        let o = X86_64Opcode::NoArg { op: NoArgOp::RepMovsq };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0x48, 0xA5]));
     }
 }
 
