@@ -1279,9 +1279,15 @@ impl Codegen {
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x54, 0x24, inner_sz as u8]));
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x74, 0x24, (total_sz + inner_sz) as u8]));
             self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // rdi = a
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xAF, 0xF9])); // imul rdi, rcx (ac)
+            self.emit_insn(&Insn::imul_rm_reg(
+                crate::codegen::shared::asm_operand::Width::B64,
+                7, 1, // rdi, rcx (ac)
+            ));
             self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0xD0])); // mov r8, rdx (b)
-            self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x0F, 0xAF, 0xC6])); // imul r8, rsi (bd)
+            self.emit_insn(&Insn::imul_rm_reg(
+                crate::codegen::shared::asm_operand::Width::B64,
+                8, 6, // r8, rsi (bd)
+            ));
             self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x29, 0xC7])); // sub rdi, r8 (real)
             self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -1295,9 +1301,15 @@ impl Codegen {
                 },
                 &[],
             )); // mov r8, rax (a)
-            self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x0F, 0xAF, 0xC6])); // imul r8, rsi (ad)
+            self.emit_insn(&Insn::imul_rm_reg(
+                crate::codegen::shared::asm_operand::Width::B64,
+                8, 6, // r8, rsi (ad)
+            ));
             self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // rax = b
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xAF, 0xC1])); // imul rax, rcx (bc)
+            self.emit_insn(&Insn::imul_rm_reg(
+                crate::codegen::shared::asm_operand::Width::B64,
+                0, 1, // rax, rcx (bc)
+            ));
             self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x01, 0xC0])); // add rax, r8 (imag)
             self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -1350,9 +1362,15 @@ impl Codegen {
                 },
                 &[],
             )); // edi = a
-            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAF, 0xF9])); // imul edi, ecx (ac)
+            self.emit_insn(&Insn::imul_rm_reg(
+                crate::codegen::shared::asm_operand::Width::B32,
+                7, 1, // edi, ecx (ac)
+            ));
             self.emit_insn(&Insn::raw_bytes(&[0x41, 0x89, 0xD0])); // mov r8d, edx (b)
-            self.emit_insn(&Insn::raw_bytes(&[0x44, 0x0F, 0xAF, 0xC6])); // imul r8d, esi (bd)
+            self.emit_insn(&Insn::imul_rm_reg(
+                crate::codegen::shared::asm_operand::Width::B32,
+                8, 6, // r8d, esi (bd)
+            ));
             self.emit_insn(&Insn::raw_bytes(&[0x44, 0x29, 0xC7])); // sub edi, r8d (real)
             self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -1366,7 +1384,10 @@ impl Codegen {
                 },
                 &[],
             )); // r8d = a
-            self.emit_insn(&Insn::raw_bytes(&[0x44, 0x0F, 0xAF, 0xC6])); // imul r8d, esi (ad)
+            self.emit_insn(&Insn::imul_rm_reg(
+                crate::codegen::shared::asm_operand::Width::B32,
+                8, 6, // r8d, esi (ad)
+            ));
             self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,
@@ -1379,7 +1400,10 @@ impl Codegen {
                 },
                 &[],
             )); // eax = b
-            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAF, 0xC1])); // imul eax, ecx (bc)
+            self.emit_insn(&Insn::imul_rm_reg(
+                crate::codegen::shared::asm_operand::Width::B32,
+                0, 1, // eax, ecx (bc)
+            ));
             self.emit_insn(&Insn::raw_bytes(&[0x44, 0x01, 0xC0])); // add eax, r8d (imag)
                                             // 存回 (截断到分量宽度)
             match inner_sz {

@@ -445,7 +445,10 @@ impl Codegen {
                     }
                 },
                 BinOp::Mul => {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xAF, 0xC8]));
+                    self.emit_insn(&Insn::imul_rm_reg(
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        1, 0, // rcx, rax
+                    ));
                 }, // imul rcx, rax
                 BinOp::Div | BinOp::Mod => {
                     // 整数除法: xchg 后 rax=被除数, rcx=除数

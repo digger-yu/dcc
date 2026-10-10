@@ -127,17 +127,14 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
             },
             BinOp::Mul => {
-                // imul dst, src: dst is in reg field (needs REX.R), src in r/m (needs REX.B)
-                let mut rex = 0x48u8;
-                if dst >= 8 {
-                    rex |= 0x04;
-                }
-                if src >= 8 {
-                    rex |= 0x01;
-                }
+                // imul dst, src: 总是 B64 (REX.W=1). 走 ImulRm typed opcode 保带 GAS.
+                let insn = Insn::imul_rm_reg(
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    dst, src,
+                );
                 use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
                 let gas = format!("imul {}, {}", GAS_REG64[(src & 15) as usize], GAS_REG64[(dst & 15) as usize]);
-                self.emit_insn(&Insn::raw_with_gas(&[rex, 0x0F, 0xAF, 0xC0 | ((dst & 7) << 3) | (src & 7)], &gas));
+                self.emit_insn(&insn.with_gas(gas));
             },
             BinOp::Div | BinOp::Mod => {
                 // 有符号: cqto (符号扩展 rax→rdx:rax) + idiv

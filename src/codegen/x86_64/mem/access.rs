@@ -243,7 +243,10 @@ impl Codegen {
                 self.gen_expr(index, INDEX); // rcx = index
                                              // mov rdx, [r13+slot]; imul rcx, rdx
                 self.emit_mov_mem_r13(2, slot);
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xAF, 0xCA])); // imul rcx, rdx
+                self.emit_insn(&Insn::imul_rm_reg(
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    1, 2, // rcx, rdx
+                ));
                 self.pop(BASE); // rax = base
                 if *addend != 0 {
                     self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 1, *addend)); // add rcx, imm32
@@ -685,11 +688,17 @@ impl Codegen {
         {
             if let Some(slot) = self.vm_size_slot(elem_ty) {
                 self.emit_mov_mem_r13(2, slot);
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xAF, 0xCA])); // imul rcx, rdx
+                self.emit_insn(&Insn::imul_rm_reg(
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    1, 2, // rcx, rdx
+                ));
             } else {
                 self.gen_sizeof_runtime(elem_ty, 11);
-                // imul rcx, r11: REX.W+B (r11 作 r/m), modrm reg=rcx
-                self.emit_insn(&Insn::raw_bytes(&[0x49, 0x0F, 0xAF, 0xCB]));
+                // imul rcx, r11
+                self.emit_insn(&Insn::imul_rm_reg(
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    1, 11, // rcx, r11
+                ));
             }
             return;
         }
@@ -699,7 +708,10 @@ impl Codegen {
         if let Some(slot) = self.vla_runtime_stride_slot(arr, elem_ty) {
             // mov rdx, [r13+slot]; imul rcx, rdx
             self.emit_mov_mem_r13(2, slot);
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xAF, 0xCA]));
+            self.emit_insn(&Insn::imul_rm_reg(
+                crate::codegen::shared::asm_operand::Width::B64,
+                1, 2, // rcx, rdx
+            ));
         } else {
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x69, 0xC9])); // imul rcx, rcx, imm32
             self.emit_insn(&Insn::raw_bytes(&es.to_le_bytes()));

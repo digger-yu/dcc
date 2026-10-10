@@ -213,6 +213,13 @@ pub(crate) enum X86_64Opcode {
         src: Operand,
     },
 
+    /// IMUL r64, r/m64 (0F AF /r) — P11.
+    ImulRm {
+        width: crate::codegen::shared::asm_operand::Width,
+        dst: Operand,
+        src: Operand,
+    },
+
     /// INC/DEC/NOT/NEG/MUL/IMUL/DIV/IDIV — 步骤 1 不实现.
     UnaryRm {
         op: UnaryOp,
@@ -837,6 +844,39 @@ impl X86_64Opcode {
                     out.push(escap);
                 }
                 out.push(low);
+                out.push(0xC0 | ((*dst_idx & 7) << 3) | (*src_idx & 7));
+                Some(out)
+            }
+            X86_64Opcode::ImulRm { width, dst, src } => {
+                // P11: IMUL r, r/m — 0F AF /r (reg-reg 形态).
+                //   B32: 0F AF /r (无 REX.W)
+                //   B64: REX.W(0x48) 0F AF /r
+                // dst ModRM.reg; src ModRM.r/m. 内存形态暂不支持 (返回 None).
+                let (Operand::Reg(dst_idx, _), Operand::Reg(src_idx, _)) = (dst, src) else {
+                    return None;
+                };
+                let is_b64 = matches!(width, Width::B64);
+                let is_b32 = matches!(width, Width::B32);
+                if !is_b64 && !is_b32 {
+                    return None;
+                }
+                let mut rex: u8 = 0x40;
+                if is_b64 {
+                    rex |= 0x08;
+                }
+                if *dst_idx >= 8 {
+                    rex |= 0x04;
+                }
+                if *src_idx >= 8 {
+                    rex |= 0x01;
+                }
+                let need_rex = is_b64 || *dst_idx >= 8 || *src_idx >= 8;
+                let mut out = Vec::with_capacity(5);
+                if need_rex {
+                    out.push(rex);
+                }
+                out.push(0x0F);
+                out.push(0xAF);
                 out.push(0xC0 | ((*dst_idx & 7) << 3) | (*src_idx & 7));
                 Some(out)
             }
@@ -1717,6 +1757,63 @@ mod tests {
             src: reg(9, Width::B64),
         };
         assert_eq!(o.encode(), Some(vec![0x4D, 0x85, 0xC9]));
+    }
+
+    // ---- IMUL reg,reg (P11) ----
+
+    #[test]
+    fn imul_rm_eax_ecx_b32() {
+        // imul eax, ecx:  0F AF C1
+        let o = X86_64Opcode::ImulRm {
+            width: Width::B32,
+            dst: reg(0, Width::B32),
+            src: reg(1, Width::B32),
+        };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0xAF, 0xC1]));
+    }
+
+    #[test]
+    fn imul_rm_rax_rcx_b64() {
+        // imul rax, rcx:  48 0F AF C1
+        let o = X86_64Opcode::ImulRm {
+            width: Width::B64,
+            dst: reg(0, Width::B64),
+            src: reg(1, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x0F, 0xAF, 0xC1]));
+    }
+
+    #[test]
+    fn imul_rm_r8_r9_b64_high() {
+        // imul r8, r9:  4D 0F AF C1  (REX.W|R|B; reg=r8&7=0, r/m=r9&7=1)
+        let o = X86_64Opcode::ImulRm {
+            width: Width::B64,
+            dst: reg(8, Width::B64),
+            src: reg(9, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x4D, 0x0F, 0xAF, 0xC1]));
+    }
+
+    #[test]
+    fn imul_rm_r9_r8_b64_high_swap() {
+        // imul r9, r8:  4D 0F AF C8  (reg=r9&7=1, r/m=r8&7=0)
+        let o = X86_64Opcode::ImulRm {
+            width: Width::B64,
+            dst: reg(9, Width::B64),
+            src: reg(8, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x4D, 0x0F, 0xAF, 0xC8]));
+    }
+
+    #[test]
+    fn imul_rm_edx_ecx_b32() {
+        // imul edx, ecx:  0F AF D1  (reg=edx=2, r/m=ecx=1)
+        let o = X86_64Opcode::ImulRm {
+            width: Width::B32,
+            dst: reg(2, Width::B32),
+            src: reg(1, Width::B32),
+        };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0xAF, 0xD1]));
     }
 }
 

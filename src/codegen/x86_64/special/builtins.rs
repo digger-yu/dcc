@@ -2455,14 +2455,20 @@ impl Codegen {
                         if unsigned {
                             self.emit_insn(&Insn::raw_bytes(&[0xF7, 0xE1])); // mul ecx (edx:eax = eax*ecx)
                         } else {
-                            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAF, 0xC8])); // imul ecx, eax
+                            self.emit_insn(&Insn::imul_rm_reg(
+                                crate::codegen::shared::asm_operand::Width::B32,
+                                1, 0, // ecx, eax
+                            ));
                         }
                     },
                     (2, _) => {
                         if unsigned {
                             self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xE1])); // mul rcx (rdx:rax = rax*rcx)
                         } else {
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xAF, 0xC8])); // imul rcx, rax
+                            self.emit_insn(&Insn::imul_rm_reg(
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                1, 0, // rcx, rax
+                            ));
                         }
                     },
                     _ => unreachable!(),
@@ -4369,7 +4375,10 @@ impl Codegen {
                         self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xE0, shift as u8]));
                     } else {
                         self.mov_imm(10, elem_size as i128);
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xAF, 0xD0])); // imul rax, r10
+                        self.emit_insn(&Insn::imul_rm_reg(
+                            crate::codegen::shared::asm_operand::Width::B64,
+                            0, 10, // rax, r10
+                        ));
                     }
                     // 3. rax = rsi + rax → &src[j]
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xF0])); // add rax, rsi

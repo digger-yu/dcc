@@ -1028,14 +1028,10 @@ impl Codegen {
     // ========================================================================
 
     pub fn imul_reg(&mut self, dst: u8, src: u8) {
-        let mut rex = 0x48u8;
-        if dst >= 8 {
-            rex |= 0x04;
-        }
-        if src >= 8 {
-            rex |= 0x01;
-        }
-        self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xAF, 0xC0 | ((dst & 7) << 3) | (src & 7)]));
+        self.emit_insn(&Insn::imul_rm_reg(
+            crate::codegen::shared::asm_operand::Width::B64,
+            dst, src,
+        ));
     }
 
     pub fn imul_imm(&mut self, reg: u8, imm: i128) {
@@ -2329,13 +2325,21 @@ impl Codegen {
         ]));
     }
     pub(crate) fn emit_imul_r10(&mut self, inner_sz: i64) {
-        // imul rax/eax, r10: rm=r10 → REX.B (0x41/0x49)
-        let rex = if inner_sz == 8 { 0x49 } else { 0x41 };
-        self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xAF, 0xC2]));
+        // imul rax/eax, r10
+        let width = if inner_sz == 8 {
+            crate::codegen::shared::asm_operand::Width::B64
+        } else {
+            crate::codegen::shared::asm_operand::Width::B32
+        };
+        self.emit_insn(&Insn::imul_rm_reg(width, 0, 10));
     }
     pub(crate) fn emit_imul_r11(&mut self, inner_sz: i64) {
-        let rex = if inner_sz == 8 { 0x49 } else { 0x41 };
-        self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xAF, 0xC3]));
+        let width = if inner_sz == 8 {
+            crate::codegen::shared::asm_operand::Width::B64
+        } else {
+            crate::codegen::shared::asm_operand::Width::B32
+        };
+        self.emit_insn(&Insn::imul_rm_reg(width, 0, 11));
     }
     pub(crate) fn emit_imul_rm(&mut self, inner_sz: i64, off: i64) {
         let rex = if inner_sz == 8 { 0x48 } else { 0x00 };

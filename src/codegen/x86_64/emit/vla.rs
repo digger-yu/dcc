@@ -168,7 +168,10 @@ impl Codegen {
         }
         // rax *= stride: mov rcx, [r13+off+8]; imul rax, rcx
         self.emit_mov_mem_r13(1, off + 8);
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xAF, 0xC1])); // imul rax, rcx
+        self.emit_insn(&Insn::imul_rm_reg(
+            crate::codegen::shared::asm_operand::Width::B64,
+            0, 1, // rax, rcx
+        ));
                                               // mov [r13 + off + 16], rax: 声明时总大小 (未对齐), sizeof 取用
         self.emit_store_rax_r13(off + 16);
         // 对齐到 16 字节: (rax + 15) & ~15
