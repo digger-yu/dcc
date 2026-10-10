@@ -137,7 +137,17 @@ impl Codegen {
                             let idx_ty = idx_expr.ty();
                             if Self::is_signed_int(&idx_ty) && idx_ty.size() <= 4 {
                                 // movslq %ecx, %rcx: 48 63 C9
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x63, 0xC9]));
+                                let insn = Insn::new(
+                                    crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                                        sign: true,
+                                        from: crate::codegen::shared::asm_operand::Width::B32,
+                                        to: crate::codegen::shared::asm_operand::Width::B64,
+                                        dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64),
+                                        src: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B32),
+                                    },
+                                    &[],
+                                );
+                                self.emit_insn(&insn);
                             }
                             // 计算 stride = sizeof(elem) 并乘到 rcx
                             if Self::type_has_vla(&elem.base) {

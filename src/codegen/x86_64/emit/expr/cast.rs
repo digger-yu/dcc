@@ -550,23 +550,32 @@ impl Codegen {
                     match dst_bits {
                         8 => {
                             // movzbl %al, %eax (截断到 8 位, 零扩展到 32 位)
-                            // 自反 ModRM: dst 同时在 ModRM.reg 与 r/m ⇒ >=8 必须同时置 REX.R 与 REX.B(0x05)，
-                            // 只置一边就把另一个字段留在低 8 个寄存器上（读/写的都是别人的 %eax）。
-                            // <8 时一个前缀都不发：裸 0x40 什么都不扩，只多占一字节并被 objdump 标成 `rex mov`。
-                            if dst >= 8 {
-                                self.emit_insn(&Insn::raw_bytes(&[0x45]));
-                            }
-                            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                            // P11: MovExt encode 自动处理 REX (dst>=8 → REX.R+B=0x04+0x01=0x05).
+                            let insn = Insn::new(
+                                crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                                    sign: false,
+                                    from: crate::codegen::shared::asm_operand::Width::B8,
+                                    to: crate::codegen::shared::asm_operand::Width::B32,
+                                    dst: crate::codegen::x86_64::opcode::Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B32),
+                                    src: crate::codegen::x86_64::opcode::Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B8),
+                                },
+                                &[],
+                            );
+                            self.emit_insn(&insn);
                         },
                         16 => {
                             // movzwl %ax, %eax (截断到 16 位, 零扩展到 32 位)
-                            // 自反 ModRM: dst 同时在 ModRM.reg 与 r/m ⇒ >=8 必须同时置 REX.R 与 REX.B(0x05)，
-                            // 只置一边就把另一个字段留在低 8 个寄存器上（读/写的都是别人的 %eax）。
-                            // <8 时一个前缀都不发：裸 0x40 什么都不扩，只多占一字节并被 objdump 标成 `rex mov`。
-                            if dst >= 8 {
-                                self.emit_insn(&Insn::raw_bytes(&[0x45]));
-                            }
-                            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                            let insn = Insn::new(
+                                crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                                    sign: false,
+                                    from: crate::codegen::shared::asm_operand::Width::B16,
+                                    to: crate::codegen::shared::asm_operand::Width::B32,
+                                    dst: crate::codegen::x86_64::opcode::Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B32),
+                                    src: crate::codegen::x86_64::opcode::Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B16),
+                                },
+                                &[],
+                            );
+                            self.emit_insn(&insn);
                         },
                         32 => {
                             // mov dst32, dst32 (截断到 32 位, 零扩展到 64 位)
