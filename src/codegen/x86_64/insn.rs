@@ -421,6 +421,27 @@ impl Insn {
         )
     }
 
+    /// P11 Bucket G2: psllq/psrlq/psrad xmm, imm8.
+    ///   width: SimdWidth::Q=psllq, D=psrlq, W=psrad.
+    pub fn simd_shift_imm8(
+        width: crate::codegen::x86_64::opcode::SimdWidth,
+        dst_xmm: u8,
+        imm8: u8,
+    ) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::SimdShiftImm8 {
+                op: crate::codegen::x86_64::opcode::SimdArithOp::PShiftImm8,
+                width,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    dst_xmm,
+                    crate::codegen::shared::asm_operand::Width::B128,
+                ),
+                imm8,
+            },
+            &[],
+        )
+    }
+
     /// P11 Bucket E: stmxcsr/ldmxcsr [base+disp] (0F AE /3 or /2).
     pub fn mxcsr_mem(store: bool, base: u8, disp: i32) -> Self {
         Insn::new(

@@ -128,6 +128,23 @@ pub(crate) enum SimdArithOp {
     Divpd,
     /// P11 Bucket G: unpcklps xmm_dst, xmm_src (0F 14 /r) — low-half interleave.
     Unpcklps,
+    /// P11 Bucket G2: packed shift by imm8 (psllq/psrlq/psrad).
+    ///   psllq: 66 0F F3 /r ib, psrlq: 66 0F D3 /r ib, psrad: 66 0F E2 /r ib.
+    PShiftImm8,
+    /// P11 Bucket G2: packed compare equal (pcmpeqb/w/d).
+    ///   pcmpeqb: 66 0F 74 /r, pcmpeqw: 66 0F 75 /r, pcmpeqd: 66 0F 76 /r.
+    PCmpEq,
+    /// P11 Bucket G2: unsigned byte min/max (pminub/pmaxub).
+    ///   pminub: 0F DA /r, pmaxub: 0F DE /r.
+    PMinMaxUb,
+    /// P11 Bucket G2: pmaddwd 66 0F F5 /r.
+    PMaddwd,
+    /// P11 Bucket G2: psadbw 66 0F F6 /r.
+    PSadbw,
+    /// P11 Bucket G2: signed/unsigned saturating add/sub word.
+    ///   paddsw: 66 0F ED /r, psubsw: 66 0F E9 /r
+    ///   paddusw: 66 0F DD /r, psubusw: 66 0F D9 /r.
+    PSatW,
 }
 
 /// SIMD 宽度 — 步骤 4: SimdMov 用来发 xmm store/load 到 rsp 槽.
@@ -336,6 +353,16 @@ pub(crate) enum X86_64Opcode {
         width: SimdWidth,
         dst: Operand,
         src: Operand,
+    },
+
+    /// P11 Bucket G2: psllq/psrlq/psrad xmm, imm8.
+    ///   psllq: 66 0F F3 /r ib, psrlq: 66 0F D3 /r ib, psrad: 66 0F E2 /r ib.
+    /// op in {PShift::L/Q, R/Q, R/D} encoded via width.
+    SimdShiftImm8 {
+        op: SimdArithOp,
+        width: SimdWidth,
+        dst: Operand,
+        imm8: u8,
     },
 
     /// P11 Bucket H: setcc r/m8 (0F 9x /0, mod=11 reg8).
@@ -1527,6 +1554,23 @@ impl X86_64Opcode {
                     (SimdArithOp::PSub, SimdWidth::Q) => (0x66, 0xFB),
                     // P11 Bucket G: unpcklps xmm_dst, xmm_src (0F 14 /r, no legacy prefix).
                     (SimdArithOp::Unpcklps, _) => (0x00, 0x14),
+                    // P11 Bucket G2: pcmpeqb/w/d (66 0F 74/75/76 /r).
+                    (SimdArithOp::PCmpEq, SimdWidth::B) => (0x66, 0x74),
+                    (SimdArithOp::PCmpEq, SimdWidth::W) => (0x66, 0x75),
+                    (SimdArithOp::PCmpEq, SimdWidth::D) => (0x66, 0x76),
+                    // P11 Bucket G2: pminub/pmaxub (0F DA/DE /r, no legacy prefix).
+                    (SimdArithOp::PMinMaxUb, SimdWidth::B) => (0x00, 0xDA),
+                    (SimdArithOp::PMinMaxUb, SimdWidth::W) => (0x00, 0xDE),
+                    // P11 Bucket G2: pmaddwd/psadbw (66 0F F5/F6 /r).
+                    (SimdArithOp::PMaddwd, _) => (0x66, 0xF5),
+                    (SimdArithOp::PSadbw, _) => (0x66, 0xF6),
+                    // P11 Bucket G2: paddsw/psubsw/paddusw/psubusw (66 0F ED/E9/DD/D9 /r).
+                    //   Encode signed/unsigned + add/sub via SimdWidth:
+                    //   W=add signed, Q=sub signed, D=add unsigned, B=sub unsigned.
+                    (SimdArithOp::PSatW, SimdWidth::W) => (0x66, 0xED), // paddsw
+                    (SimdArithOp::PSatW, SimdWidth::Q) => (0x66, 0xE9), // psubsw
+                    (SimdArithOp::PSatW, SimdWidth::D) => (0x66, 0xDD), // paddusw
+                    (SimdArithOp::PSatW, SimdWidth::B) => (0x66, 0xD9), // psubusw
                     _ => return None,
                 };
                 let mut rex: u8 = 0x40;
@@ -1539,6 +1583,35 @@ impl X86_64Opcode {
                 out.push(0x0F);
                 out.push(opc2);
                 out.push(0xC0 | ((*dst_xmm & 7) << 3) | (*src_xmm & 7));
+                Some(out)
+            }
+            X86_64Opcode::SimdShiftImm8 { op, width, dst, imm8 } => {
+                // P11 Bucket G2: psllq/psrlq/psrad xmm, imm8.
+                //   psllq xmm0, imm8: 66 0F F3 C0 ib
+                //   psrlq xmm0, imm8: 66 0F D3 C0 ib
+                //   psrad xmm0, imm8: 66 0F E2 C0 ib
+                let Operand::Reg(dst_xmm, _) = dst else {
+                    return None;
+                };
+                // op=PShiftImm8, width selects: Q=psllq, D=psrlq, W=psrad.
+                let opc2: u8 = match (op, width) {
+                    (SimdArithOp::PShiftImm8, SimdWidth::Q) => 0xF3, // psllq
+                    (SimdArithOp::PShiftImm8, SimdWidth::D) => 0xD3, // psrlq
+                    (SimdArithOp::PShiftImm8, SimdWidth::W) => 0xE2, // psrad
+                    _ => return None,
+                };
+                let need_rex = *dst_xmm >= 8;
+                let mut out = Vec::with_capacity(7);
+                out.push(0x66);
+                if need_rex {
+                    let mut rex: u8 = 0x40;
+                    if *dst_xmm >= 8 { rex |= 0x04; }
+                    out.push(rex);
+                }
+                out.push(0x0F);
+                out.push(opc2);
+                out.push(0xC0 | ((*dst_xmm & 7) << 3) | (*dst_xmm & 7));
+                out.push(*imm8);
                 Some(out)
             }
             X86_64Opcode::ShldShrd { is_shld, width, dst, src } => {
@@ -3239,6 +3312,133 @@ mod tests {
             src: Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B128),
         };
         assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x54, 0xC1]));
+    }
+
+    // ---- P11 Bucket G2: pcmpeqb/w/d, pminub/pmaxub, pmaddwd/psadbw, sat w ----
+    #[test]
+    fn simd_pcmpeqb_xmm0_xmm1() {
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::PCmpEq, width: SimdWidth::B,
+            dst: xmm(0), src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x74, 0xC1]));
+    }
+
+    #[test]
+    fn simd_pcmpeqw_xmm0_xmm1() {
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::PCmpEq, width: SimdWidth::W,
+            dst: xmm(0), src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x75, 0xC1]));
+    }
+
+    #[test]
+    fn simd_pcmpeqd_xmm0_xmm1() {
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::PCmpEq, width: SimdWidth::D,
+            dst: xmm(0), src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x76, 0xC1]));
+    }
+
+    #[test]
+    fn simd_pminub_xmm0_xmm1() {
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::PMinMaxUb, width: SimdWidth::B,
+            dst: xmm(0), src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0xDA, 0xC1]));
+    }
+
+    #[test]
+    fn simd_pmaxub_xmm0_xmm1() {
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::PMinMaxUb, width: SimdWidth::W,
+            dst: xmm(0), src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0xDE, 0xC1]));
+    }
+
+    #[test]
+    fn simd_pmaddwd_xmm0_xmm1() {
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::PMaddwd, width: SimdWidth::O,
+            dst: xmm(0), src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0xF5, 0xC1]));
+    }
+
+    #[test]
+    fn simd_psadbw_xmm0_xmm1() {
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::PSadbw, width: SimdWidth::O,
+            dst: xmm(0), src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0xF6, 0xC1]));
+    }
+
+    #[test]
+    fn simd_paddsw_xmm0_xmm1() {
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::PSatW, width: SimdWidth::W,
+            dst: xmm(0), src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0xED, 0xC1]));
+    }
+
+    #[test]
+    fn simd_psubsw_xmm0_xmm1() {
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::PSatW, width: SimdWidth::Q,
+            dst: xmm(0), src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0xE9, 0xC1]));
+    }
+
+    #[test]
+    fn simd_paddusw_xmm0_xmm1() {
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::PSatW, width: SimdWidth::D,
+            dst: xmm(0), src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0xDD, 0xC1]));
+    }
+
+    #[test]
+    fn simd_psubusw_xmm0_xmm1() {
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::PSatW, width: SimdWidth::B,
+            dst: xmm(0), src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0xD9, 0xC1]));
+    }
+
+    #[test]
+    fn simd_psllq_xmm0_imm8() {
+        let o = X86_64Opcode::SimdShiftImm8 {
+            op: SimdArithOp::PShiftImm8, width: SimdWidth::Q,
+            dst: xmm(0), imm8: 1,
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0xF3, 0xC0, 0x01]));
+    }
+
+    #[test]
+    fn simd_psrlq_xmm0_imm8() {
+        let o = X86_64Opcode::SimdShiftImm8 {
+            op: SimdArithOp::PShiftImm8, width: SimdWidth::D,
+            dst: xmm(0), imm8: 2,
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0xD3, 0xC0, 0x02]));
+    }
+
+    #[test]
+    fn simd_psrad_xmm0_imm8() {
+        let o = X86_64Opcode::SimdShiftImm8 {
+            op: SimdArithOp::PShiftImm8, width: SimdWidth::W,
+            dst: xmm(0), imm8: 3,
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0xE2, 0xC0, 0x03]));
     }
 
     // ---- P11 Bucket K: movd/movq GPR↔XMM reg-reg ----
