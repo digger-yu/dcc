@@ -2127,11 +2127,25 @@ impl Codegen {
             return;
         }
         match sz {
-            1 => self.emit_insn(&Insn::raw_bytes(&[0x40, 0x20, 0xF2])), // and dl, sil
-            2 => self.emit_insn(&Insn::raw_bytes(&[0x66, 0x21, 0xF2])), // and dx, si
-            4 => self.emit_insn(&Insn::raw_bytes(&[0x21, 0xF2])),       // and edx, esi
-            _ => self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xF2])), // and rdx, rsi
-        };
+            1 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x40, 0x20, 0xF2])); } // and dl, sil
+            2 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x66, 0x21, 0xF2])); } // and dx, si
+            4 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x21, 0xF2])); }       // and edx, esi
+            _ => {
+                // P11: and rdx, rsi via typed opcode.
+                let insn = Insn::new(
+                    X86_64Opcode::AluRm {
+                        op: AluOp::And,
+                        width: Width::B64,
+                        dst: OpcodeOperand::Reg(2, Width::B64),
+                        src: OpcodeOperand::Reg(6, Width::B64),
+                    },
+                    &[],
+                );
+                if !self.emit_insn(&insn) {
+                    let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xF2])); // and rdx, rsi
+                }
+            }
+        }
     }
     pub(crate) fn emit_cas_loop<F: Fn(&mut Self, usize)>(&mut self, sz: usize, compute_new: F) {
         match sz {
@@ -2412,11 +2426,25 @@ impl Codegen {
             return;
         }
         match sz {
-            1 => self.emit_insn(&Insn::raw_bytes(&[0x40, 0x08, 0xF2])), // or dl, sil
-            2 => self.emit_insn(&Insn::raw_bytes(&[0x66, 0x09, 0xF2])), // or dx, si
-            4 => self.emit_insn(&Insn::raw_bytes(&[0x09, 0xF2])),       // or edx, esi
-            _ => self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xF2])), // or rdx, rsi
-        };
+            1 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x40, 0x08, 0xF2])); } // or dl, sil
+            2 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x66, 0x09, 0xF2])); } // or dx, si
+            4 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x09, 0xF2])); }       // or edx, esi
+            _ => {
+                // P11: or rdx, rsi via typed opcode.
+                let insn = Insn::new(
+                    X86_64Opcode::AluRm {
+                        op: AluOp::Or,
+                        width: Width::B64,
+                        dst: OpcodeOperand::Reg(2, Width::B64),
+                        src: OpcodeOperand::Reg(6, Width::B64),
+                    },
+                    &[],
+                );
+                if !self.emit_insn(&insn) {
+                    let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xF2])); // or rdx, rsi
+                }
+            }
+        }
     }
     pub(crate) fn emit_store_imm32_mem(&mut self, base: u8, disp: i32, imm: i32) {
         let mut rex: u8 = 0x40;
