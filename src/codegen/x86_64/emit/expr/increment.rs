@@ -6,8 +6,10 @@
 
 use crate::ast::find_field;
 use crate::ast::*;
+use crate::codegen::shared::asm_operand::Width;
 use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::opcode::{AluOp, Operand as OpcodeOperand, X86_64Opcode};
 
 use crate::diagnostics::Span;
 
@@ -392,12 +394,36 @@ impl super::super::super::Codegen {
                 // 掩码 fits 32 位零扩展：mov ecx, mask; and rax, rcx
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB9])); // mov rcx, imm32 (zero-ext)
                 self.emit_insn(&Insn::raw_bytes(&(mask as u32).to_le_bytes()));
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC8])); // and rax, rcx
+                // P11: 收敛到 AluRm{And, B64, rax, rcx}.
+                let insn = Insn::new(
+                    X86_64Opcode::AluRm {
+                        op: AluOp::And,
+                        width: Width::B64,
+                        dst: OpcodeOperand::Reg(0, Width::B64),
+                        src: OpcodeOperand::Reg(1, Width::B64),
+                    },
+                    &[],
+                );
+                if !self.emit_insn(&insn) {
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC8]));
+                }
             } else {
                 // 掩码 > 32 位：movabs rcx, mask; and rax, rcx
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB9])); // mov rcx, imm64
                 self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC8])); // and rax, rcx
+                // P11: 收敛到 AluRm{And, B64, rax, rcx}.
+                let insn = Insn::new(
+                    X86_64Opcode::AluRm {
+                        op: AluOp::And,
+                        width: Width::B64,
+                        dst: OpcodeOperand::Reg(0, Width::B64),
+                        src: OpcodeOperand::Reg(1, Width::B64),
+                    },
+                    &[],
+                );
+                if !self.emit_insn(&insn) {
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC8]));
+                }
             }
         }
         // rax = old bitfield value
@@ -413,11 +439,35 @@ impl super::super::super::Codegen {
             } else if mask <= 0xFFFFFFFF {
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB9]));
                 self.emit_insn(&Insn::raw_bytes(&(mask as u32).to_le_bytes()));
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC8]));
+                // P11: 收敛到 AluRm{And, B64, rax, rcx}.
+                let insn = Insn::new(
+                    X86_64Opcode::AluRm {
+                        op: AluOp::And,
+                        width: Width::B64,
+                        dst: OpcodeOperand::Reg(0, Width::B64),
+                        src: OpcodeOperand::Reg(1, Width::B64),
+                    },
+                    &[],
+                );
+                if !self.emit_insn(&insn) {
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC8]));
+                }
             } else {
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB9]));
                 self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC8]));
+                // P11: 收敛到 AluRm{And, B64, rax, rcx}.
+                let insn = Insn::new(
+                    X86_64Opcode::AluRm {
+                        op: AluOp::And,
+                        width: Width::B64,
+                        dst: OpcodeOperand::Reg(0, Width::B64),
+                        src: OpcodeOperand::Reg(1, Width::B64),
+                    },
+                    &[],
+                );
+                if !self.emit_insn(&insn) {
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC8]));
+                }
             }
         }
         // rax = new bitfield value
@@ -446,14 +496,38 @@ impl super::super::super::Codegen {
         } else {
             self.emit_insn(&Insn::raw_bytes(&[0x49, 0xB8]));
             self.emit_insn(&Insn::raw_bytes(&inv_mask.to_le_bytes()));
-            self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x21, 0xC1]));
+            // P11: 收敛到 AluRm{And, B64, rcx, r8}.
+            let insn = Insn::new(
+                X86_64Opcode::AluRm {
+                    op: AluOp::And,
+                    width: Width::B64,
+                    dst: OpcodeOperand::Reg(1, Width::B64),
+                    src: OpcodeOperand::Reg(8, Width::B64),
+                },
+                &[],
+            );
+            if !self.emit_insn(&insn) {
+                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x21, 0xC1]));
+            }
         }
         // Load new value into rdx, shift, OR
         self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x55, new_slot as u8])); // rdx = new val
         if bit_off > 0 {
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xE2, bit_off as u8]));
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xD1])); // or rcx, rdx
+        // P11: 收敛到 AluRm{Or, B64, rcx, rdx}.
+        let insn = Insn::new(
+            X86_64Opcode::AluRm {
+                op: AluOp::Or,
+                width: Width::B64,
+                dst: OpcodeOperand::Reg(1, Width::B64),
+                src: OpcodeOperand::Reg(2, Width::B64),
+            },
+            &[],
+        );
+        if !self.emit_insn(&insn) {
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xD1])); // or rcx, rdx
+        }
                                         // Store container back
         self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x45, addr_slot as u8])); // rax = addr
         match container_size {
