@@ -1836,10 +1836,14 @@ impl Codegen {
             // 例如: double 表达式赋值给 float 变量，需要 cvtsd2ss
             if matches!(elem_ty, Type::Float) && matches!(src_ty, Type::Double) {
                 // double -> float: cvtsd2ss xmm0, xmm0
-                self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x5A, 0xC0], "cvtsd2ss %xmm0, %xmm0"));
+                self.emit_insn(&Insn::simd_arith_reg(
+                    crate::codegen::x86_64::opcode::SimdArithOp::CvtSdSs,
+                    crate::codegen::x86_64::opcode::SimdWidth::SD, 0, 0));
             } else if matches!(elem_ty, Type::Double) && matches!(src_ty, Type::Float) {
                 // float -> double: cvtss2sd xmm0, xmm0
-                self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x5A, 0xC0], "cvtss2sd %xmm0, %xmm0"));
+                self.emit_insn(&Insn::simd_arith_reg(
+                    crate::codegen::x86_64::opcode::SimdArithOp::CvtSdSs,
+                    crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 0));
             }
             return;
         }

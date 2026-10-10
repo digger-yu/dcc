@@ -421,12 +421,16 @@ impl Codegen {
                                 && matches!(&func_ret_ty, Type::Double | Type::LongDouble)
                             {
                                 // cvtss2sd xmm0, xmm0
-                                self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x5A, 0xC0], "cvtss2sd %xmm0, %xmm0"));
+                                self.emit_insn(&Insn::simd_arith_reg(
+                                    crate::codegen::x86_64::opcode::SimdArithOp::CvtSdSs,
+                                    crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 0));
                             } else if matches!(&expr_ty, Type::Double | Type::LongDouble)
                                 && matches!(&func_ret_ty, Type::Float)
                             {
                                 // cvtsd2ss xmm0, xmm0
-                                self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x5A, 0xC0], "cvtsd2ss %xmm0, %xmm0"));
+                                self.emit_insn(&Insn::simd_arith_reg(
+                                    crate::codegen::x86_64::opcode::SimdArithOp::CvtSdSs,
+                                    crate::codegen::x86_64::opcode::SimdWidth::SD, 0, 0));
                             }
                             // Float/double -> integer return:
                             // convert xmm0 to integer in rax.

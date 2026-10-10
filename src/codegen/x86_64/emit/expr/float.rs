@@ -22,9 +22,9 @@ use std::sync::Arc;
 impl Codegen {
     pub(crate) fn emit_float_convert(&mut self, from: &Type, to: &Type) {
         if matches!(from, Type::Float) && !matches!(to, Type::Float) {
-            self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x5A, 0xC0], "cvtss2sd %xmm0, %xmm0")); // cvtss2sd xmm0, xmm0
+            self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::CvtSdSs, SimdWidth::SS, 0, 0)); // cvtss2sd xmm0, xmm0
         } else if !matches!(from, Type::Float) && matches!(to, Type::Float) {
-            self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x5A, 0xC0], "cvtsd2ss %xmm0, %xmm0")); // cvtsd2ss xmm0, xmm0
+            self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::CvtSdSs, SimdWidth::SD, 0, 0)); // cvtsd2ss xmm0, xmm0
         }
     }
     pub(crate) fn emit_float_neg(&mut self, ty: &Type) {
@@ -62,10 +62,10 @@ impl Codegen {
         }
         if src_is_single && !dst_is_single {
             // float → double: cvtss2sd xmm0, xmm0
-            self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x5A, 0xC0], "cvtss2sd %xmm0, %xmm0"));
+            self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::CvtSdSs, SimdWidth::SS, 0, 0));
         } else {
             // double/long-double → float: cvtsd2ss xmm0, xmm0
-            self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x5A, 0xC0], "cvtsd2ss %xmm0, %xmm0"));
+            self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::CvtSdSs, SimdWidth::SD, 0, 0));
         }
     }
     pub(crate) fn emit_float_to_ulong(&mut self, dst: u8, is_double: bool) {
@@ -99,14 +99,14 @@ impl Codegen {
         if !is_double {
             // float 情况: 先将 xmm0 从 float 提升为 double
             // cvtss2sd xmm0, xmm0: F3 0F 5A C0
-            self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x5A, 0xC0], "cvtss2sd %xmm0, %xmm0"));
+            self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::CvtSdSs, SimdWidth::SS, 0, 0));
         }
         // subsd xmm0, xmm1 (double 精度减 2^63)
         self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Sub, SimdWidth::SD, 0, 1));
         if !is_double {
             // float 情况: 减完后转回 float
             // cvtsd2ss xmm0, xmm0: F2 0F 5A C0
-            self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x5A, 0xC0], "cvtsd2ss %xmm0, %xmm0"));
+            self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::CvtSdSs, SimdWidth::SD, 0, 0));
         }
         // cvttss2si/cvttsd2si dst, xmm0 (余数, 现在 fits in int64)
         if is_double {
@@ -152,10 +152,10 @@ impl Codegen {
         let src_is_int = Self::is_integer_type(src_ty);
         if src_is_double && matches!(dst_ty, Type::Float) {
             // cvtsd2ss xmm0, xmm0: F2 0F 5A C0
-            self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x5A, 0xC0], "cvtsd2ss %xmm0, %xmm0"));
+            self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::CvtSdSs, SimdWidth::SD, 0, 0));
         } else if src_is_float && matches!(dst_ty, Type::Double) {
             // cvtss2sd xmm0, xmm0: F3 0F 5A C0
-            self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x5A, 0xC0], "cvtss2sd %xmm0, %xmm0"));
+            self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::CvtSdSs, SimdWidth::SS, 0, 0));
         } else if src_is_int {
             // rax = integer value, convert to float/double in xmm0
             // cvtsi2ss/cvtsi2sd xmm0, rax

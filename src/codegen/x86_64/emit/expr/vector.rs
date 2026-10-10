@@ -1040,13 +1040,13 @@ impl Codegen {
                     self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xF8, 0xC1])); // psubb xmm0, xmm1
                 },
                 (_, BinOp::And) => {
-                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xDB, 0xC1])); // pand xmm0, xmm1
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Pand, SimdWidth::O, 0, 1)); // pand xmm0, xmm1
                 },
                 (_, BinOp::Or) => {
-                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xEB, 0xC1])); // por xmm0, xmm1
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Por, SimdWidth::O, 0, 1)); // por xmm0, xmm1
                 },
                 (_, BinOp::Xor) => {
-                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xEF, 0xC1])); // pxor xmm0, xmm1
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Pxor, SimdWidth::O, 0, 1)); // pxor xmm0, xmm1
                 },
                 _ => return false, // 不支持的组合回退标量路径
             }

@@ -1897,8 +1897,9 @@ impl Codegen {
                     self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
                     // 加载右操作数到 xmm1
                     self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00])); // movss/movsd xmm1, [rsp]
-                    let add_sub = if matches!(op, BinOp::Add) { 0x58u8 } else { 0x5Cu8 };
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, add_sub, 0xC1])); // addss/subss xmm0, xmm1 = l op r
+                    let add_sub_op = if matches!(op, BinOp::Add) { SimdArithOp::Add } else { SimdArithOp::Sub };
+                    let width = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
+                    self.emit_insn(&Insn::simd_arith_reg(add_sub_op, width, 0, 1)); // addss/subss xmm0, xmm1 = l op r
                                                             // 结果在 xmm0
                 },
                 BinOp::Mul => {
@@ -1909,7 +1910,8 @@ impl Codegen {
                     self.gen_expr(r, dst);
                     self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
                     self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]));
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x59, 0xC1])); // mulss/mulsd xmm0, xmm1
+                    let mul_width = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Mul, mul_width, 0, 1)); // mulss/mulsd xmm0, xmm1
                                                          // 取负: xor with sign bit
                     if matches!(inner_ty, Type::Float) {
                         // xorps xmm0, [neg_mask_f32]
@@ -1928,7 +1930,8 @@ impl Codegen {
                     self.gen_expr(l, dst);
                     self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
                     self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00])); // xmm1 = r
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x5E, 0xC1])); // divsd xmm0, xmm1 = l/r
+                    let div_width = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Div, div_width, 0, 1)); // divsd xmm0, xmm1 = l/r
                                                          // 结果在 xmm0 (实数值)
                 },
                 BinOp::EqEq | BinOp::Ne => {
@@ -2008,7 +2011,8 @@ impl Codegen {
                     self.gen_expr(r, dst);
                     self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
                     self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]));
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x59, 0xC1])); // mulss/mulsd xmm0, xmm1
+                    let mul2_width = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Mul, mul2_width, 0, 1)); // mulss/mulsd xmm0, xmm1
                 },
                 BinOp::Div => {
                     // real / imag → imag: -(real/imag_mag)
@@ -2019,7 +2023,8 @@ impl Codegen {
                     self.gen_expr(l, dst);
                     self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
                     self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00])); // xmm1 = r
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x5E, 0xC1])); // divsd xmm0, xmm1 = l/r
+                    let div2_width = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Div, div2_width, 0, 1)); // divsd xmm0, xmm1 = l/r
                     self.emit_float_neg(&inner_ty);
                 },
                 _ => {},

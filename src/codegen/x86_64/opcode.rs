@@ -73,6 +73,13 @@ pub(crate) enum SimdArithOp {
     Comi,
     Xorps,
     Xorpd,
+    /// P11 Bucket F: pand/por/pxor (66 0F DB/EB/EF /r).
+    Pand,
+    Por,
+    Pxor,
+    /// P11 Bucket C: cvtsd2ss/cvtss2sd (F2/F3 0F 5A /r).
+    /// Convert between scalar double and scalar float in xmm.
+    CvtSdSs,
 }
 
 /// SIMD 宽度 — 步骤 4: SimdMov 用来发 xmm store/load 到 rsp 槽.
@@ -1227,6 +1234,23 @@ impl X86_64Opcode {
                     (SimdArithOp::Ucomi, SimdWidth::SD) => (0x66, 0x2E),
                     (SimdArithOp::Comi, SimdWidth::SS) => (0x00, 0x2F),
                     (SimdArithOp::Comi, SimdWidth::SD) => (0x66, 0x2F),
+                    // P11 Bucket F: pand/por/pxor reg-reg (all use 66 prefix + 128-bit).
+                    //   pand xmm0,xmm1:  66 0F DB C1
+                    //   por  xmm0,xmm1:  66 0F EB C1
+                    //   pxor xmm0,xmm1:  66 0F EF C1
+                    (SimdArithOp::Pand, _) => (0x66, 0xDB),
+                    (SimdArithOp::Por, _) => (0x66, 0xEB),
+                    (SimdArithOp::Pxor, _) => (0x66, 0xEF),
+                    // P11 Bucket E: sqrtsd/sqrtss reg-reg.
+                    //   sqrtsd xmm0,xmm1:  F2 0F 51 C1
+                    //   sqrtss xmm0,xmm1:  F3 0F 51 C1
+                    (SimdArithOp::Sqrt, SimdWidth::SD) => (0xF2, 0x51),
+                    (SimdArithOp::Sqrt, SimdWidth::SS) => (0xF3, 0x51),
+                    // P11 Bucket C: cvtsd2ss/cvtss2sd reg-reg.
+                    //   cvtsd2ss xmm0,xmm1:  F2 0F 5A C1
+                    //   cvtss2sd xmm0,xmm1:  F3 0F 5A C1
+                    (SimdArithOp::CvtSdSs, SimdWidth::SD) => (0xF2, 0x5A),
+                    (SimdArithOp::CvtSdSs, SimdWidth::SS) => (0xF3, 0x5A),
                     _ => return None,
                 };
                 let mut rex: u8 = 0x40;
@@ -2389,6 +2413,96 @@ mod tests {
             src: reg(0, Width::B64),
         };
         assert_eq!(o.encode(), Some(vec![0xF3, 0x48, 0x0F, 0x2A, 0xC0]));
+    }
+
+    // ---- SimdArith pand/por/pxor (P11 Bucket F) ----
+
+    #[test]
+    fn pand_xmm0_xmm1() {
+        // pand xmm0, xmm1:  66 0F DB C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Pand,
+            width: SimdWidth::O,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0xDB, 0xC1]));
+    }
+
+    #[test]
+    fn por_xmm0_xmm1() {
+        // por xmm0, xmm1:  66 0F EB C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Por,
+            width: SimdWidth::O,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0xEB, 0xC1]));
+    }
+
+    #[test]
+    fn pxor_xmm0_xmm1() {
+        // pxor xmm0, xmm1:  66 0F EF C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Pxor,
+            width: SimdWidth::O,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0xEF, 0xC1]));
+    }
+
+    // ---- SimdArith sqrtsd/sqrtss (P11 Bucket E) ----
+
+    #[test]
+    fn sqrtsd_xmm0_xmm1() {
+        // sqrtsd xmm0, xmm1:  F2 0F 51 C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Sqrt,
+            width: SimdWidth::SD,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF2, 0x0F, 0x51, 0xC1]));
+    }
+
+    #[test]
+    fn sqrtss_xmm0_xmm1() {
+        // sqrtss xmm0, xmm1:  F3 0F 51 C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Sqrt,
+            width: SimdWidth::SS,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0x0F, 0x51, 0xC1]));
+    }
+
+    // ---- SimdArith cvtsd2ss/cvtss2sd (P11 Bucket C) ----
+
+    #[test]
+    fn cvtsd2ss_xmm0_xmm1() {
+        // cvtsd2ss xmm0, xmm1:  F2 0F 5A C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::CvtSdSs,
+            width: SimdWidth::SD,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF2, 0x0F, 0x5A, 0xC1]));
+    }
+
+    #[test]
+    fn cvtss2sd_xmm0_xmm1() {
+        // cvtss2sd xmm0, xmm1:  F3 0F 5A C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::CvtSdSs,
+            width: SimdWidth::SS,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0x0F, 0x5A, 0xC1]));
     }
 
     // ---- Setcc r8 (P11 Bucket H) ----

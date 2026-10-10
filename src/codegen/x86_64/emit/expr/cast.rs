@@ -418,11 +418,15 @@ impl Codegen {
             // float ↔ double
             (Type::Float, Type::Double | Type::LongDouble) => {
                 // cvtss2sd xmm0, xmm0 (F3 0F 5A C0)
-                self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x5A, 0xC0], "cvtss2sd %xmm0, %xmm0"));
+                self.emit_insn(&Insn::simd_arith_reg(
+                    crate::codegen::x86_64::opcode::SimdArithOp::CvtSdSs,
+                    crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 0));
             },
             (Type::Double | Type::LongDouble, Type::Float) => {
                 // cvtsd2ss xmm0, xmm0 (F2 0F 5A C0)
-                self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x5A, 0xC0], "cvtsd2ss %xmm0, %xmm0"));
+                self.emit_insn(&Insn::simd_arith_reg(
+                    crate::codegen::x86_64::opcode::SimdArithOp::CvtSdSs,
+                    crate::codegen::x86_64::opcode::SimdWidth::SD, 0, 0));
             },
             // unsigned int (<=32bit) → float/double:
             // 零扩展到 64 位后值一定落在 signed int64 正半轴,

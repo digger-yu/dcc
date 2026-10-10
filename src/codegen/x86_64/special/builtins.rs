@@ -1927,12 +1927,12 @@ impl Codegen {
                 self.gen_expr(&args[0], Self::EVAL_BASE);
                 // 如果 a 是 float, 升为 double
                 if matches!(args[0].ty(), Type::Float) {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x5A, 0xC0], "cvtss2sd %xmm0, %xmm0"));
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::CvtSdSs, SimdWidth::SS, 0, 0));
                 }
                 self.gen_expr(&args[1], 1);
                 // 如果 b 是 float, 升为 double
                 if matches!(args[1].ty(), Type::Float) {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x5A, 0xC9], "cvtss2sd %xmm1, %xmm1"));
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::CvtSdSs, SimdWidth::SS, 1, 1));
                 }
                 // ucomisd xmm0, xmm1
                 self.emit_insn(&Insn::raw_with_gas(&[0x66, 0x0F, 0x2E, 0xC1], "ucomisd %xmm0, %xmm1"));
@@ -4429,7 +4429,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
-                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x51, 0xC0])); // sqrtsd xmm0, xmm0
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Sqrt, SimdWidth::SD, 0, 0)); // sqrtsd xmm0, xmm0
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -4443,7 +4443,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x51, 0xC0])); // sqrtss xmm0, xmm0
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Sqrt, SimdWidth::SS, 0, 0)); // sqrtss xmm0, xmm0
                 if dst != 0 {
                     self.mov(dst, 0);
                 }

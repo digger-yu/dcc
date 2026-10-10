@@ -755,9 +755,13 @@ impl Codegen {
                 // 形参是 float 但实参是 double → cvtsd2ss (double→float)
                 // 形参是 double 但实参是 float → cvtss2sd (float→double)
                 if matches!(effective_ty, Type::Float) && matches!(arg_ty, Type::Double) {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x5A, 0xC0], "cvtsd2ss %xmm0, %xmm0"));
+                    self.emit_insn(&Insn::simd_arith_reg(
+                        crate::codegen::x86_64::opcode::SimdArithOp::CvtSdSs,
+                        crate::codegen::x86_64::opcode::SimdWidth::SD, 0, 0));
                 } else if matches!(effective_ty, Type::Double) && matches!(arg_ty, Type::Float) {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x5A, 0xC0], "cvtss2sd %xmm0, %xmm0"));
+                    self.emit_insn(&Insn::simd_arith_reg(
+                        crate::codegen::x86_64::opcode::SimdArithOp::CvtSdSs,
+                        crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 0));
                 }
                 // C 语义: 可变参数函数的 float 参数默认提升为 double
                 // printf("%f", 1.0f) 实际传递的是 double 1.0
@@ -772,7 +776,9 @@ impl Codegen {
                 let promoted = (is_variadic || is_old_style) && matches!(effective_ty, Type::Float);
                 if promoted {
                     // cvtss2sd xmm0, xmm0: float → double
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x5A, 0xC0], "cvtss2sd %xmm0, %xmm0"));
+                    self.emit_insn(&Insn::simd_arith_reg(
+                        crate::codegen::x86_64::opcode::SimdArithOp::CvtSdSs,
+                        crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 0));
                 }
                 // 提升后的 float 按 double 语义 8 字节搬运 (movsd):
                 // movss 只写/读低 4 字节, double 高 4 字节成为垃圾,

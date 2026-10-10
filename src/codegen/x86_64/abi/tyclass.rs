@@ -306,7 +306,9 @@ impl Codegen {
                 // 浮点表达式 → xmm0; float 需提升到 double
                 self.gen_expr(e, Self::EVAL_BASE);
                 if matches!(expr_ty, Type::Float) && !matches!(declared_ret, Type::Float) {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x5A, 0xC0], "cvtss2sd %xmm0, %xmm0")); // cvtss2sd
+                    self.emit_insn(&Insn::simd_arith_reg(
+                        crate::codegen::x86_64::opcode::SimdArithOp::CvtSdSs,
+                        crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 0));
                 }
             }
             self.load_stack(7, sret_off); // rdi = sret 指针
