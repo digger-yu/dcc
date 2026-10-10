@@ -518,6 +518,62 @@ impl X86_64Opcode {
                         }
                     }
                 }
+                // 形态分支 A4 (P11 Bucket B): reg, [base+disp] (mem -> reg).
+                //   常见手写: 48 03 4X XX (add r64, [reg+disp8])
+                //             48 2B 4X XX (sub r64, [reg+disp8])
+                //             48 23 4X XX (and r64, [reg+disp8])
+                //   与 reg-reg 区别: 目的在 reg (ModRM.reg), 源在 mem (ModRM.r/m).
+                //   opc 用 03/2B/23/0B/33/3B (reg <- r/m).
+                if let (Operand::Reg(dst_idx, _), Operand::Mem(mem)) = (dst, src) {
+                    if mem.index.is_some() || mem.seg.is_some() {
+                        return None;
+                    }
+                    let base = match mem.base {
+                        Some(b) => b,
+                        None => return None,
+                    };
+                    let is_b64 = matches!(width, Width::B64);
+                    let is_b32 = matches!(width, Width::B32);
+                    if !is_b64 && !is_b32 {
+                        return None;
+                    }
+                    // opcode: reg <- r/m 形态 (03/0B/23/2B/33/3B).
+                    let opcode: u8 = match op {
+                        AluOp::Add => 0x03,
+                        AluOp::Or => 0x0B,
+                        AluOp::And => 0x23,
+                        AluOp::Sub => 0x2B,
+                        AluOp::Xor => 0x33,
+                        AluOp::Cmp => 0x3B,
+                        AluOp::Test => unreachable!(),
+                    };
+                    let mut rex: u8 = 0x40;
+                    if is_b64 { rex |= 0x08; }
+                    if *dst_idx >= 8 { rex |= 0x04; }
+                    if base >= 8 { rex |= 0x01; }
+                    let need_rex = is_b64 || *dst_idx >= 8 || base >= 8;
+                    // disp 长度: base=rbp(5) mod=00 → rip-relative, 需 disp=0 时走 mod=01.
+                    // base=rsp(4) 必须 SIB (rm_field=4).
+                    let disp = mem.disp;
+                    let (modrm_mod, disp_bytes): (u8, &[u8]) = if disp == 0 && base != 5 && base != 4 {
+                        (0, &[])
+                    } else if let Ok(d) = i8::try_from(disp) {
+                        (1, &[d as u8])
+                    } else {
+                        (2, &disp.to_le_bytes())
+                    };
+                    let rm_field = base & 7;
+                    let modrm = (modrm_mod << 6) | ((*dst_idx & 7) << 3) | rm_field;
+                    let mut out = Vec::with_capacity(12);
+                    if need_rex { out.push(rex); }
+                    out.push(opcode);
+                    out.push(modrm);
+                    if rm_field == 4 {
+                        out.push(0x24); // SIB: no index.
+                    }
+                    out.extend_from_slice(disp_bytes);
+                    return Some(out);
+                }
                 // 形态分支 B: reg, reg (reg-reg). 通用 ALU 族.
                 //   位序: 00=ADD r/m, r   01=OR   02=ADC   03=SBB
                 //         04=AND r/m, r  05=SUB r/m, r
@@ -1298,9 +1354,9 @@ impl X86_64Opcode {
                     out.push(modrm);
                     return Some(out);
                 }
-                // 步骤 4: 收敛 xmm store/load 到 rsp 槽.
-                //   load:  dst=Reg(xmm, B128), src=Mem(rsp=4, disp)
-                //   store: dst=Mem(rsp=4, disp), src=Reg(xmm, B128)
+                // P11 Bucket C: 收敛 xmm store/load 到 [base+disp] (base 任意, 含 rsp).
+                //   load:  dst=Reg(xmm, B128), src=Mem(base, disp)
+                //   store: dst=Mem(base, disp), src=Reg(xmm, B128)
                 // 与 emit_xmm_store_rsp / emit_xmm_load_rsp 逐字节对齐.
                 let (xmm_idx, mem, is_store) = match (dst, src) {
                     (Operand::Mem(mem), Operand::Reg(xmm, _)) => (*xmm, mem, true),
@@ -1311,41 +1367,62 @@ impl X86_64Opcode {
                     return None;
                 }
                 let base = mem.base?;
-                if base != 4 {
-                    // 只收敛 rsp 槽形态; 其他 base 走原手写.
-                    return None;
-                }
                 let _ = is_store;
-                // legacy 前缀: SS=F3, SD=F2, O/PS=无. PD/DQ 步骤 4 不用.
+                // legacy 前缀: SS=F3, SD=F2, O/PS=无. PD/DQ 本路径按 66 处理.
                 let pfx: u8 = match width {
                     SimdWidth::SS => 0xF3,
                     SimdWidth::SD => 0xF2,
+                    SimdWidth::PD => 0x66,
+                    SimdWidth::DQ => 0x66,
                     SimdWidth::O | SimdWidth::PS => 0x00,
                     _ => return None,
                 };
-                // REX: xmm>=8 → REX.R=0x04; base=rsp 已在 ModRM 里用 SIB 表达, 不发 REX.B.
-                let rex: u8 = if xmm_idx >= 8 { 0x44 } else { 0 };
-                let opc2: u8 = if *opcode10 { 0x10 } else { 0x11 };
+                // REX: xmm>=8 → REX.R=0x04; base>=8 → REX.B=0x01.
+                let mut rex: u8 = 0x40;
+                let mut need_rex = false;
+                if xmm_idx >= 8 {
+                    rex |= 0x04;
+                    need_rex = true;
+                }
+                if base >= 8 {
+                    rex |= 0x01;
+                    need_rex = true;
+                }
+                // opcode10: true=0x10 (load), false=0x11 (store). PD/DQ 复用 28/29.
+                let opc2: u8 = match (width, *opcode10) {
+                    (SimdWidth::PD | SimdWidth::DQ, true) => 0x28,
+                    (SimdWidth::PD | SimdWidth::DQ, false) => 0x29,
+                    (_, true) => 0x10,
+                    (_, false) => 0x11,
+                };
                 let disp = mem.disp;
-                let mut out = Vec::with_capacity(12);
+                // ModRM mod / disp 长度. base=rbp(5) 在 mod=00 是 rip-relative,
+                // 所以 disp=0 且 base=5 时走 mod=01 (disp8=0) 避免被解释成 rip.
+                // base=rsp(4): 保留旧行为 — disp=0 也走 mod=01 disp8=0 (G10 快照约定).
+                let (modrm_mod, disp_bytes): (u8, &[u8]) = if disp == 0 && base != 5 && base != 4 {
+                    (0, &[])
+                } else if let Ok(d) = i8::try_from(disp) {
+                    (1, &[d as u8])
+                } else {
+                    (2, &disp.to_le_bytes())
+                };
+                let rm_field = base & 7;
+                let mut out = Vec::with_capacity(16);
                 if pfx != 0 {
                     out.push(pfx);
                 }
-                if rex != 0 {
+                if need_rex {
                     out.push(rex);
                 }
                 out.push(0x0F);
                 out.push(opc2);
-                // ModRM/SIB: base=rsp=4 必须 SIB. disp8 vs disp32.
-                if let Ok(d) = i8::try_from(disp) {
-                    out.push(0x44 | ((xmm_idx & 7) << 3));
-                    out.push(0x24);
-                    out.push(d as u8);
-                } else {
-                    out.push(0x84 | ((xmm_idx & 7) << 3));
-                    out.push(0x24);
-                    out.extend_from_slice(&disp.to_le_bytes());
+                // ModRM: mod | reg(xmm) | rm(base). rm==4 时必须 SIB.
+                let modrm = (modrm_mod << 6) | ((xmm_idx & 7) << 3) | rm_field;
+                out.push(modrm);
+                if rm_field == 4 {
+                    out.push(0x24); // SIB: scale=0, index=4 (none), base=rsp&7.
                 }
+                out.extend_from_slice(disp_bytes);
                 Some(out)
             }
             X86_64Opcode::SimdArith { op, width, dst, src } => {
@@ -3159,6 +3236,80 @@ mod tests {
             src: Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B32),
         };
         assert_eq!(o.encode(), Some(vec![0x0F, 0x6E, 0xC0]));
+    }
+
+    // ---- P11 Bucket B: AluRm reg, [base+disp] ----
+
+    #[test]
+    fn alu_rm_add_r64_rsp_disp8() {
+        // add rax, [rsp+16]: 48 03 44 24 10 (reg=rax=0 modrm.reg; SIB)
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Add,
+            width: Width::B64,
+            dst: reg(0, Width::B64),
+            src: Operand::Mem(MemOperand {
+                disp: 16, base: Some(4), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x03, 0x44, 0x24, 0x10]));
+    }
+
+    #[test]
+    fn alu_rm_sub_r64_rax_disp8() {
+        // sub rax, [rax+8]: 48 2B 40 08 (reg=rax=0; rm=rax=0)
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Sub,
+            width: Width::B64,
+            dst: reg(0, Width::B64),
+            src: Operand::Mem(MemOperand {
+                disp: 8, base: Some(0), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x2B, 0x40, 0x08]));
+    }
+
+    #[test]
+    fn alu_rm_and_r64_r13_disp8() {
+        // and rax, [r13+16]: 49 23 45 10 (REX.WB: base=r13=13)
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::And,
+            width: Width::B64,
+            dst: reg(0, Width::B64),
+            src: Operand::Mem(MemOperand {
+                disp: 16, base: Some(13), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0x49, 0x23, 0x45, 0x10]));
+    }
+
+    // ---- P11 Bucket C: SimdMov any base+disp ----
+
+    #[test]
+    fn simd_mov_store_sd_xmm0_rax_disp8() {
+        // movsd [rax+8], xmm0: F2 0F 11 40 08
+        let o = X86_64Opcode::SimdMov {
+            width: SimdWidth::SD,
+            opcode10: false,
+            dst: Operand::Mem(MemOperand {
+                disp: 8, base: Some(0), index: None, seg: None,
+            }),
+            src: Operand::Reg(0, Width::B128),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF2, 0x0F, 0x11, 0x40, 0x08]));
+    }
+
+    #[test]
+    fn simd_mov_load_ss_xmm0_rsp_disp0() {
+        // movss xmm0, [rsp]: F3 0F 10 04 24 (保留旧行为: base=rsp disp=0 走 mod=01 disp8=0)
+        let o = X86_64Opcode::SimdMov {
+            width: SimdWidth::SS,
+            opcode10: true,
+            dst: Operand::Reg(0, Width::B128),
+            src: Operand::Mem(MemOperand {
+                disp: 0, base: Some(4), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0x0F, 0x10, 0x44, 0x24, 0]));
     }
 }
 

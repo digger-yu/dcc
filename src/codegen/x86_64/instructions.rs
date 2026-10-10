@@ -2285,8 +2285,8 @@ impl Codegen {
     }
     pub(crate) fn emit_c_ld32(&mut self, inner_sz: i64, off1: i64, off2: i64, signed: bool) {
         if inner_sz == 4 {
-            self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x44, 0x24, off1 as u8])); // mov eax, [rsp+off1]
-            self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x4C, 0x24, off2 as u8])); // mov ecx, [rsp+off2]
+            self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B32, 0, 4, off1 as i32)); // mov eax, [rsp+off1]
+            self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B32, 1, 4, off2 as i32)); // mov ecx, [rsp+off2]
         } else {
             let from = if inner_sz == 2 {
                 crate::codegen::shared::asm_operand::Width::B16

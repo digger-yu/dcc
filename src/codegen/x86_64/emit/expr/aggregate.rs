@@ -620,10 +620,9 @@ impl Codegen {
                                     }
                                     self.emit_insn(&Insn::cvt2sd_reg(false, SimdWidth::SD, 0, 0));
                                     if isz == 4 {
-                                        self.emit_insn(&Insn::raw_bytes(&[0x89, 0x41, isz as u8]));
+                                        self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B32, 0, 1, 4));
                                     } else {
-                                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x41]));
-                                        self.emit_insn(&Insn::raw_bytes(&(isz as i32).to_le_bytes()));
+                                        self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 0, 1, isz as i32));
                                     }
                                 }
                             }
@@ -1303,16 +1302,16 @@ impl Codegen {
                         // 生成初始化值 → rax
                         self.gen_expr(value, Self::EVAL_BASE);
                         // 保存值到栈临时槽: [r13-40]
-                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x45, 0xd8])); // mov [r13-40], rax
+                        self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 0, 13, -40)); // mov [r13-40], rax
                                                               // 用 mov rax, r13 + add rax, imm32 计算地址, 保存到 [r13-24]
-                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0xC5])); // mov rax, r13 (REX.W: 49 8B C5)
+                        self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 0, 13)); // mov rax, r13
                         if store_off != 0 {
                             let gas = format!("add ${}, %rax", store_off);
                             let mut bytes = vec![0x48, 0x05];
                             bytes.extend_from_slice(&(store_off as i32).to_le_bytes());
                             self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
                         }
-                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x45, 0xe8])); // mov [r13-24], rax
+                        self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 0, 13, -24)); // mov [r13-24], rax
                                                               // 加载容器值 → rax
                         match container_size {
                             4 => { self.emit_insn(&Insn::new(
@@ -1357,9 +1356,9 @@ impl Codegen {
                             _ => {},
                         }
                         // 保存容器值 → [r13-32]
-                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x45, 0xe0])); // mov [r13-32], rax
+                        self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 0, 13, -32)); // mov [r13-32], rax
                                                               // 加载保存的新值 → rax
-                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x45, 0xd8])); // mov rax, [r13-40]
+                        self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 0, 13, -40)); // mov rax, [r13-40]
                                                               // 掩码新值: and eax, (1<<bw)-1
                         if bw < 64 {
                             let mask: u64 = (1u64 << bw) - 1;
@@ -1384,7 +1383,7 @@ impl Codegen {
                             self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xE0, effective_bit_o as u8]));
                         }
                         // 加载保存的容器值 → rcx
-                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x4D, 0xe0])); // mov rcx, [r13-32]
+                        self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 1, 13, -32)); // mov rcx, [r13-32]
                                                               // 清除目标位: and rcx, inv_mask
                         let mask: u64 = if bw >= 64 { u64::MAX } else { (1u64 << bw) - 1 };
                         let inv_mask = !(mask << effective_bit_o);
@@ -1418,9 +1417,9 @@ impl Codegen {
                             }
                         }
                         // 保存更新后的容器值回 [r13-32]
-                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x4D, 0xe0])); // mov [r13-32], rcx
+                        self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 1, 13, -32)); // mov [r13-32], rcx
                                                               // 加载地址 → rdx
-                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x55, 0xe8])); // mov rdx, [r13-24]
+                        self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 2, 13, -24)); // mov rdx, [r13-24]
                                                               // 存储容器 (如果是最后一个位域且 reverse_sso, 需要先字节序反转)
                                                               // 检查是否还有后续位域在同一容器
                         let has_more_bitfields_in_container = {
@@ -1448,12 +1447,12 @@ impl Codegen {
                             // 当前实现: 反转容器中的字节序 (近似处理)
                             match container_size {
                                 2 => {
-                                    self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x4D, 0xe0])); // mov rcx, [r13-32]
+                                    self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 1, 13, -32)); // mov rcx, [r13-32]
                                     self.emit_insn(&Insn::raw_bytes(&[0x66, 0xC1, 0xC1, 0x08])); // rol cx, 8
-                                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x0A])); // mov [rdx], cx
+                                    self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B16, 1, 2, 0)); // mov [rdx], cx
                                 },
                                 4 => {
-                                    self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x4D, 0xe0])); // mov rcx, [r13-32]
+                                    self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 1, 13, -32)); // mov rcx, [r13-32]
                                     self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xC9])); // bswap ecx
                                     self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -1474,7 +1473,7 @@ impl Codegen {
             )); // mov [rdx], ecx
                                 },
                                 8 => {
-                                    self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x4D, 0xe0])); // mov rcx, [r13-32]
+                                    self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 1, 13, -32)); // mov rcx, [r13-32]
                                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xC9])); // bswap rcx
                                     self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
