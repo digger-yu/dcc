@@ -853,8 +853,11 @@ impl Codegen {
                                     self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x85, 0xC9])); // test r9, r9
                                 } else {
                                     // mov r8, case_high; cmp r9, r8
-                                    self.emit_insn(&Insn::raw_bytes(&[0x49, 0xB8])); // mov r8, imm64
-                                    self.emit_insn(&Insn::raw_bytes(&case_high.to_le_bytes()));
+                                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                        width: crate::codegen::shared::asm_operand::Width::B64,
+                                        dst: crate::codegen::x86_64::opcode::Operand::Reg(8, crate::codegen::shared::asm_operand::Width::B64),
+                                        src: crate::codegen::x86_64::opcode::Operand::Imm(case_high as i64),
+                                    }, &[]));
                                     self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x39, 0xC1])); // cmp r9, r8
                                 }
                                 self.jmp_rel32(&l_case, JumpKind::Je);

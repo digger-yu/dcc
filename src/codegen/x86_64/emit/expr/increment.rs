@@ -467,8 +467,11 @@ impl super::super::super::Codegen {
                 }
             } else {
                 // 掩码 > 32 位：movabs rcx, mask; and rax, rcx
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB9])); // mov rcx, imm64
-                self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64),
+                    src: crate::codegen::x86_64::opcode::Operand::Imm(mask as i64),
+                }, &[]));
                 // P11: 收敛到 AluRm{And, B64, rax, rcx}.
                 let insn = Insn::new(
                     X86_64Opcode::AluRm {
@@ -511,8 +514,11 @@ impl super::super::super::Codegen {
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC8]));
                 }
             } else {
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB9]));
-                self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64),
+                    src: crate::codegen::x86_64::opcode::Operand::Imm(mask as i64),
+                }, &[]));
                 // P11: 收敛到 AluRm{And, B64, rax, rcx}.
                 let insn = Insn::new(
                     X86_64Opcode::AluRm {
@@ -583,8 +589,11 @@ impl super::super::super::Codegen {
         if (inv_mask as u32 as i32 as i64 as u64) == inv_mask {
             self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 1, inv_mask as i64));
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0x49, 0xB8]));
-            self.emit_insn(&Insn::raw_bytes(&inv_mask.to_le_bytes()));
+            self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                width: crate::codegen::shared::asm_operand::Width::B64,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(8, crate::codegen::shared::asm_operand::Width::B64),
+                src: crate::codegen::x86_64::opcode::Operand::Imm(inv_mask as i64),
+            }, &[]));
             // P11: 收敛到 AluRm{And, B64, rcx, r8}.
             let insn = Insn::new(
                 X86_64Opcode::AluRm {

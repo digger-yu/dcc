@@ -1733,8 +1733,11 @@ impl Codegen {
             }
         }
         // mov rcx, frame_size / 8
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB9]));
-        self.emit_insn(&Insn::raw_bytes(&((frame_size as u64) / 8).to_le_bytes()));
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+            width: crate::codegen::shared::asm_operand::Width::B64,
+            dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64),
+            src: crate::codegen::x86_64::opcode::Operand::Imm(((frame_size as u64) / 8) as i64),
+        }, &[]));
         // rdi = r13 - frame_size (帧底部)
         self.emit_lea_r13(7, -frame_size);
         // rep stosq: F3 48 AB
