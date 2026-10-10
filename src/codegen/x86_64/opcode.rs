@@ -639,13 +639,21 @@ impl X86_64Opcode {
                     }
                     let mut out = Vec::with_capacity(11);
                     if is_b64 {
+                        // P11: 若 imm 落在 32 位无符号范围 [0, 0xFFFFFFFF], 可以用
+                        // 48 B8 + imm32 (零扩展) 编码为 7 字节, 而不是 10 字节 imm64.
+                        let imm_u64 = *imm as i64 as u64;
+                        let fits_imm32_zero_ext = imm_u64 <= 0xFFFF_FFFF;
                         let mut rex = 0x48u8;
                         if *reg_idx >= 8 {
                             rex |= 0x01;
                         }
                         out.push(rex);
                         out.push(0xB8 + (reg_idx & 7));
-                        out.extend_from_slice(&(*imm as i64).to_le_bytes());
+                        if fits_imm32_zero_ext {
+                            out.extend_from_slice(&(imm_u64 as u32).to_le_bytes());
+                        } else {
+                            out.extend_from_slice(&(*imm as i64).to_le_bytes());
+                        }
                     } else {
                         // B32
                         if *reg_idx >= 8 {
@@ -1396,14 +1404,27 @@ mod tests {
 
     #[test]
     fn mov_rm_mov_rax_imm64() {
-        // mov rax, 0x80000000:  48 B8 00 00 00 80 00 00 00 00
+        // mov rax, 0x80000000:  fits 32-bit zero-ext imm, encode as 48 B8 00 00 00 80 (7 bytes)
         let o = X86_64Opcode::MovRm {
             width: Width::B64,
             dst: reg(0, Width::B64),
             src: Operand::Imm(0x80000000),
         };
         assert_eq!(o.encode(), Some(vec![
-            0x48, 0xB8, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00
+            0x48, 0xB8, 0x00, 0x00, 0x00, 0x80
+        ]));
+    }
+
+    #[test]
+    fn mov_rm_mov_rax_imm64_high() {
+        // mov rax, 0x80000000_00000000: requires full imm64, 10 bytes.
+        let o = X86_64Opcode::MovRm {
+            width: Width::B64,
+            dst: reg(0, Width::B64),
+            src: Operand::Imm(0x8000_0000_0000_0000u64 as i64),
+        };
+        assert_eq!(o.encode(), Some(vec![
+            0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80
         ]));
     }
 

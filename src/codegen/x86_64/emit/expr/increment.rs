@@ -450,8 +450,15 @@ impl super::super::super::Codegen {
                 self.emit_insn(&Insn::raw_bytes(&(mask as u32).to_le_bytes()));
             } else if mask <= 0xFFFFFFFF {
                 // 掩码 fits 32 位零扩展：mov ecx, mask; and rax, rcx
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB9])); // mov rcx, imm32 (zero-ext)
-                self.emit_insn(&Insn::raw_bytes(&(mask as u32).to_le_bytes()));
+                // P11: MovRm B64+Imm 会自动选择 48 B9 + imm32 零扩展短形式 (7 bytes).
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64),
+                        src: crate::codegen::x86_64::opcode::Operand::Imm(mask as i64),
+                    },
+                    &[],
+                ));
                 // P11: 收敛到 AluRm{And, B64, rax, rcx}.
                 let insn = Insn::new(
                     X86_64Opcode::AluRm {
@@ -498,8 +505,15 @@ impl super::super::super::Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x25]));
                 self.emit_insn(&Insn::raw_bytes(&(mask as u32).to_le_bytes()));
             } else if mask <= 0xFFFFFFFF {
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB9]));
-                self.emit_insn(&Insn::raw_bytes(&(mask as u32).to_le_bytes()));
+                // P11: MovRm B64+Imm 会自动选择 48 B9 + imm32 零扩展短形式.
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64),
+                        src: crate::codegen::x86_64::opcode::Operand::Imm(mask as i64),
+                    },
+                    &[],
+                ));
                 // P11: 收敛到 AluRm{And, B64, rax, rcx}.
                 let insn = Insn::new(
                     X86_64Opcode::AluRm {
