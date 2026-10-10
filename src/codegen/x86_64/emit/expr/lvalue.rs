@@ -212,7 +212,21 @@ impl Codegen {
                         // n_imm 溢出/0/未知大小: 跳过检查 (留待运行时)
                     }
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xc8])); // add rax, rcx
+                // P11: add rax, rcx via typed opcode.
+                {
+                    let insn = Insn::new(
+                        crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                            op: crate::codegen::x86_64::opcode::AluOp::Add,
+                            width: crate::codegen::shared::asm_operand::Width::B64,
+                            dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                            src: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64),
+                        },
+                        &[],
+                    );
+                    if !self.emit_insn(&insn) {
+                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xc8])); // add rax, rcx
+                    }
+                }
                 // 语义层描述符接不住时的兼容路径：段限定基址同样要带前缀，
                 // 否则 `p[i]` 会退化成普通访问（单一入口见 `lvalue_seg_prefix`）。
                 self.emit_seg(self.lvalue_seg_prefix(e));
@@ -236,7 +250,21 @@ impl Codegen {
             self.gen_expr(idx, 1);
             self.pop(0);
             self.emit_index_scale(es, arr, elem_ty);
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xc8])); // add rax, rcx
+            // P11: add rax, rcx via typed opcode.
+            {
+                let insn = Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                        op: crate::codegen::x86_64::opcode::AluOp::Add,
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                        src: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64),
+                    },
+                    &[],
+                );
+                if !self.emit_insn(&insn) {
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xc8])); // add rax, rcx
+                }
+            }
             self.emit_seg(self.lvalue_seg_prefix(e));
             self.emit_load_mem_typed(es as usize, elem_ty);
             if dst != 0 && !matches!(elem_ty, Type::Float | Type::Double) {
