@@ -4452,7 +4452,23 @@ impl Codegen {
             "fegetround" => {
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x04, 0x24])); // mov eax, [rsp]
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(4),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov eax, [rsp]
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0x00, 0x60, 0x00, 0x00])); // and eax, 0x6000
                 self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE8, 0x03])); // shr eax, 3 → 控制字位 10-11
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 8])); // add rsp, 8
@@ -4705,7 +4721,23 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x21, 0xC1])); // and ecx, eax → ecx = *flagp & excepts
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x14, 0x24])); // mov edx, [rsp]
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        2, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(4),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov edx, [rsp]
                 self.emit_insn(&Insn::raw_bytes(&[0x09, 0xCA])); // or edx, ecx (置位选中标志)
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -4795,7 +4827,23 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x5F, 0x1C])); // stmxcsr [rdi+0x1C]
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x04, 0x24])); // mov eax, [rsp]
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(4),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov eax, [rsp]
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0xC0, 0xFF, 0xFF, 0xFF])); // and eax, ~0x3F
                 self.emit_insn(&Insn::raw_bytes(&[0x0D, 0x80, 0x1F, 0x00, 0x00])); // or eax, 0x1F80 (mask all)
                 self.emit_insn(&Insn::new(
@@ -4870,7 +4918,23 @@ impl Codegen {
                 // 在新环境中置位旧标志
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x04, 0x24])); // mov eax, [rsp]
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(4),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov eax, [rsp]
                 self.emit_insn(&Insn::raw_bytes(&[0x09, 0xC8])); // or eax, ecx
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -5125,7 +5189,23 @@ impl Codegen {
             "fegetexcept" => {
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x04, 0x24])); // mov eax, [rsp]
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(4),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov eax, [rsp]
                 self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE8, 0x07])); // shr eax, 7
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 8])); // add rsp, 8

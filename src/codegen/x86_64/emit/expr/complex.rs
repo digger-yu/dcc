@@ -205,7 +205,23 @@ impl Codegen {
                 let add_sub: u8 = if matches!(op, BinOp::Add) { 0x03 } else { 0x2B };
                 if inner_sz == 4 {
                     // 32 位分量运算, 避免 64 位加法把实部进位带进虚部
-                    self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x04, 0x24])); // mov eax, [rsp+0]
+                    self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(4),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov eax, [rsp+0]
                     self.emit_insn(&Insn::raw_bytes(&[add_sub, 0x44, 0x24, total_sz as u8]));
                     self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -377,7 +393,23 @@ impl Codegen {
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x39, 0xC8])); // cmp rax, rcx
                             },
                             2 => {
-                                self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x04, 0x24])); // mov eax, [rsp+0]
+                                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(4),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov eax, [rsp+0]
                                 self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x4C, 0x24, total_sz as u8])); // mov ecx, [rsp+total]
                                 self.emit_insn(&Insn::raw_bytes(&[0x39, 0xC8])); // cmp eax, ecx
                             },
