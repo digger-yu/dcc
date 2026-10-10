@@ -1048,16 +1048,40 @@ impl Codegen {
                 },
                 &[],
             )); },
-            2 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x04, 0x24])); },
-            _ => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x88, 0x04, 0x24])); },
+            2 => { let _ = self.emit_insn(&Insn::mov_rm_mem(
+                false,
+                crate::codegen::shared::asm_operand::Width::B16,
+                0, 4, 0,
+            )); },
+            _ => { let _ = self.emit_insn(&Insn::mov_rm_mem(
+                false,
+                crate::codegen::shared::asm_operand::Width::B8,
+                0, 4, 0,
+            )); },
         }
     }
     pub(crate) fn emit_store_rspi(&mut self, inner_sz: i64) {
         match inner_sz {
-            8 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x44, 0x24, inner_sz as u8])); },
-            4 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x89, 0x44, 0x24, inner_sz as u8])); },
-            2 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x44, 0x24, inner_sz as u8])); },
-            _ => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x88, 0x44, 0x24, inner_sz as u8])); },
+            8 => { let _ = self.emit_insn(&Insn::mov_rm_mem(
+                false,
+                crate::codegen::shared::asm_operand::Width::B64,
+                0, 4, inner_sz as i32,
+            )); },
+            4 => { let _ = self.emit_insn(&Insn::mov_rm_mem(
+                false,
+                crate::codegen::shared::asm_operand::Width::B32,
+                0, 4, inner_sz as i32,
+            )); },
+            2 => { let _ = self.emit_insn(&Insn::mov_rm_mem(
+                false,
+                crate::codegen::shared::asm_operand::Width::B16,
+                0, 4, inner_sz as i32,
+            )); },
+            _ => { let _ = self.emit_insn(&Insn::mov_rm_mem(
+                false,
+                crate::codegen::shared::asm_operand::Width::B8,
+                0, 4, inner_sz as i32,
+            )); },
         }
     }
     pub(crate) fn lookup_global_info(&self, source_name: &str) -> Option<&GlobalVar> {
