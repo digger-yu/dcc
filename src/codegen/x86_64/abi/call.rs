@@ -413,7 +413,23 @@ impl Codegen {
                             if disp < 128 {
                                 self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x48, disp as u8]));
                             } else {
-                                self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x88]));
+                                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(0),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            ));
                                 self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes()));
                             }
                         },

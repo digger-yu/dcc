@@ -445,7 +445,23 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&off.to_le_bytes()));
             },
             VaListLoc::R10 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x41, 0x8B, 0x02])); }, // mov eax, [r10]
-            VaListLoc::Rcx => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x01])); },       // mov eax, [rcx]
+            VaListLoc::Rcx => { let _ = self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(1),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); },       // mov eax, [rcx]
         }
         self.emit_insn(&Insn::raw_bytes(&[0x83, 0xF8, 0x27])); // cmp $39, %eax
         self.jmp_rel32(&mem, JumpKind::Ja);
@@ -680,7 +696,23 @@ impl Codegen {
         let overflow = self.fresh_label();
         let done = self.fresh_label();
         // eax = gp_offset (rcx + 0)
-        self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x01])); // mov eax, (rcx)
+        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(1),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov eax, (rcx)
         self.emit_insn(&Insn::raw_bytes(&[0x83, 0xF8, 0x30])); // cmp $48, %eax
         self.jmp_rel32(&overflow, JumpKind::Jge);
         // reg_save_area + gp_offset: 从 (rcx+16) 加载到 r11
@@ -768,7 +800,23 @@ impl Codegen {
 
         // 从 va_list 结构体 [rcx] 加载字段:
         //   rax = gp_offset, rdx = fp_offset, r8 = overflow_arg_area
-        self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x01])); // mov eax, [rcx]
+        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(1),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov eax, [rcx]
         self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x51, 0x04])); // mov edx, [rcx+4]
         self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x8B, 0x41, 0x08])); // mov r8, [rcx+8]
 

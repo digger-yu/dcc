@@ -192,7 +192,23 @@ impl Codegen {
                     // 32 位浮点分量位模式: 清符号位后按位 or (±0.0 → 0)。
                     // 不能用 eax 作目的地 — 32 位 load 零扩展会破坏 rax
                     // 中的槽地址, 后续 [rax+isz] 变成对实部位模式解引用。
-                    self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x08])); // mov ecx, [rax] (实部)
+                    self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(0),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov ecx, [rax] (实部)
                     self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x50, isz as u8])); // mov edx, [rax+isz]
                     self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE1, 0xFF, 0xFF, 0xFF, 0x7F]));
                     self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE2, 0xFF, 0xFF, 0xFF, 0x7F]));

@@ -536,7 +536,23 @@ impl super::super::super::Codegen {
         self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x4D, addr_slot as u8])); // rcx = addr
                                                          // Load container into rcx
         match container_size {
-            4 => { self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x09])); },
+            4 => { self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(1),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); },
             8 => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x09])); },
             2 => {
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x09]));

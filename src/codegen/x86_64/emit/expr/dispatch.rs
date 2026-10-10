@@ -1472,7 +1472,23 @@ impl Codegen {
                         self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x4D, addr_off as u8])); // mov rcx, [r13+addr_off]
                                                                         // rcx = [rcx] (从内存重新加载容器)
                         match container_size {
-                            4 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x09])); },       // mov ecx, [rcx]
+                            4 => { let _ = self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(1),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); },       // mov ecx, [rcx]
                             8 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x09])); }, // mov rcx, [rcx]
                             2 => {
                                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x09]));
@@ -1576,7 +1592,23 @@ impl Codegen {
                             self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x55, addr_off as u8])); // mov rdx, [r13+addr_off]
                                                                             // rdx = [rdx] (重新加载容器)
                             match container_size {
-                                4 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x12])); },       // mov edx, [rdx]
+                                4 => { let _ = self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        2, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(2),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); },       // mov edx, [rdx]
                                 8 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x12])); }, // mov rdx, [rdx]
                                 2 => {
                                     self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x12]));

@@ -2223,7 +2223,23 @@ impl Codegen {
             },
             4 => {
                 // 32-bit (zero-extends to 64-bit)
-                self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x07])); // mov eax, [rdi]
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(7),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov eax, [rdi]
                 let l_retry = self.fresh_label();
                 self.label(&l_retry);
                 self.emit_insn(&Insn::new(
@@ -2447,7 +2463,23 @@ impl Codegen {
         match sz {
             1 => self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x07])), // movzx eax, byte [rdi]
             2 => self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7, 0x07])), // movzx eax, word [rdi]
-            4 => self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x07])), // mov eax, [rdi] (zero-extends)
+            4 => self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(7),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )), // mov eax, [rdi] (zero-extends)
             _ => self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x07])), // mov rax, [rdi]
         };
         if dst != 0 {
