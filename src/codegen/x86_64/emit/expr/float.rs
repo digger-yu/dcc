@@ -586,7 +586,7 @@ impl Codegen {
             self.gen_expr(r, Self::EVAL_BASE);
             self.expr_depth -= 1;
             self.emit_scalar_to_xmm0_if_needed(r, &float_ty);
-            self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x28, 0xC8])); // movapd xmm1, xmm0 (r→xmm1)
+            self.emit_insn(&Insn::movapd_xmm(1, 0)); // movapd xmm1, xmm0 (r→xmm1)
             if is_float {
                 self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x04, 0x24])); // movss xmm0, [rsp]
             } else {
@@ -618,7 +618,7 @@ impl Codegen {
                 self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Mul, SimdWidth::SD, 0, 1)); // mulsd xmm0, xmm1
             }
             // n*r 暂存 xmm1, l 回到 xmm0
-            self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x28, 0xC8])); // movapd xmm1, xmm0
+            self.emit_insn(&Insn::movapd_xmm(1, 0)); // movapd xmm1, xmm0
             if is_float {
                 self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x04, 0x24])); // movss xmm0, [rsp]
             } else {
@@ -656,7 +656,7 @@ impl Codegen {
         // 整数右操作数 (如 x * 2): 转换到 xmm0, 否则 xmm1 会残留左操作数
         self.emit_scalar_to_xmm0_if_needed(r, &float_ty);
         // xmm1 = 右操作数, 恢复左操作数到 xmm0
-        self.emit_insn(&Insn::raw_with_gas(&[0x66, 0x0F, 0x28, 0xC8], "movapd %xmm0, %xmm1"));
+        self.emit_insn(&Insn::movapd_xmm(1, 0));
         if is_float {
             self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x10, 0x04, 0x24], "movss (%rsp), %xmm0"));
         } else {

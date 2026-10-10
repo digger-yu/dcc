@@ -233,6 +233,44 @@ impl Insn {
         Self::simd_xmm_reg_reg(0xF3, 0x11, dst_xmm, src_xmm)
     }
 
+    /// P11 Bucket G: movapd xmm_dst, xmm_src (66 0F 28 mod=11, load direction).
+    pub fn movapd_xmm(dst_xmm: u8, src_xmm: u8) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::SimdMov {
+                width: crate::codegen::x86_64::opcode::SimdWidth::PD,
+                opcode10: true,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    dst_xmm,
+                    crate::codegen::shared::asm_operand::Width::B128,
+                ),
+                src: crate::codegen::x86_64::opcode::Operand::Reg(
+                    src_xmm,
+                    crate::codegen::shared::asm_operand::Width::B128,
+                ),
+            },
+            &[],
+        )
+    }
+
+    /// P11 Bucket G: movaps xmm_dst, xmm_src (0F 28 mod=11, load direction).
+    pub fn movaps_xmm(dst_xmm: u8, src_xmm: u8) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::SimdMov {
+                width: crate::codegen::x86_64::opcode::SimdWidth::PS,
+                opcode10: true,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    dst_xmm,
+                    crate::codegen::shared::asm_operand::Width::B128,
+                ),
+                src: crate::codegen::x86_64::opcode::Operand::Reg(
+                    src_xmm,
+                    crate::codegen::shared::asm_operand::Width::B128,
+                ),
+            },
+            &[],
+        )
+    }
+
     /// P11 Bucket C+E: SimdArith reg-reg (addsd/subsd/mulsd/divsd/addss/subss/mulss/divss/xorps/xorpd).
     /// op: SimdArithOp::{Add, Sub, Mul, Div, Xorps, Xorpd}. width: SimdWidth::{SD, SS}.
     pub fn simd_arith_reg(

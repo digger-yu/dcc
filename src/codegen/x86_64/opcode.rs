@@ -1144,17 +1144,31 @@ impl X86_64Opcode {
                 // P11 Bucket 6: reg↔reg xmm↔xmm (mod=11).
                 //   dst=Reg(dst_xmm, Xmm), src=Reg(src_xmm, Xmm).
                 //   opcode2 = 0x10 (load) / 0x11 (store direction).
-                //   prefix: F3=SS, F2=SD.
+                //   P11 Bucket G: opcode10=false, opcode2=0x6F (movdqu load) / 0x7F (movdqu store).
+                //   prefix: F3=SS, F2=SD, 66=PD/DQ, none=PS/O.
                 if let (Operand::Reg(dst_xmm, _), Operand::Reg(src_xmm, _)) = (dst, src) {
-                    let pfx: u8 = match width {
-                        SimdWidth::SS => 0xF3,
-                        SimdWidth::SD => 0xF2,
-                        _ => return None,
+                    let (pfx, opc2): (u8, u8) = match (width, *opcode10) {
+                        // movss/movsd reg-reg
+                        (SimdWidth::SS, true) => (0xF3, 0x10),
+                        (SimdWidth::SS, false) => (0xF3, 0x11),
+                        (SimdWidth::SD, true) => (0xF2, 0x10),
+                        (SimdWidth::SD, false) => (0xF2, 0x11),
+                        // P11 Bucket G: movaps(PS/O)/movapd(PD)/movdqa(DQ) load/store reg-reg.
+                        //   movaps: 无 pfx, 0F 28 (load) / 0F 29 (store).
+                        //   movapd/movdqa: 66 pfx, 0F 28 / 0F 29.
+                        //   movdqu load: F3 pfx, 0F 6F; store: F3 pfx, 0F 7F.
+                        (SimdWidth::PS | SimdWidth::O, true) => (0x00, 0x28),
+                        (SimdWidth::PS | SimdWidth::O, false) => (0x00, 0x29),
+                        (SimdWidth::PD, true) => (0x66, 0x28),
+                        (SimdWidth::PD, false) => (0x66, 0x29),
+                        (SimdWidth::DQ, true) => (0x66, 0x6F),
+                        (SimdWidth::DQ, false) => (0x66, 0x7F),
                     };
-                    let opc2: u8 = if *opcode10 { 0x10 } else { 0x11 };
                     let need_rex = *dst_xmm >= 8 || *src_xmm >= 8;
                     let mut out = Vec::with_capacity(6);
-                    out.push(pfx);
+                    if pfx != 0 {
+                        out.push(pfx);
+                    }
                     if need_rex {
                         let mut rex: u8 = 0x40;
                         if *dst_xmm >= 8 { rex |= 0x04; }
@@ -2569,6 +2583,32 @@ mod tests {
             src: xmm(0),
         };
         assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x3A, 0x0A, 0xC0, 0x02]));
+    }
+
+    // ---- P11 Bucket G: movaps/movapd reg-reg ----
+
+    #[test]
+    fn movaps_xmm1_xmm0() {
+        // movaps xmm1, xmm0: 0F 28 C8
+        let o = X86_64Opcode::SimdMov {
+            width: SimdWidth::PS,
+            opcode10: true,
+            dst: xmm(1),
+            src: xmm(0),
+        };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0x28, 0xC8]));
+    }
+
+    #[test]
+    fn movapd_xmm1_xmm0() {
+        // movapd xmm1, xmm0: 66 0F 28 C8
+        let o = X86_64Opcode::SimdMov {
+            width: SimdWidth::PD,
+            opcode10: true,
+            dst: xmm(1),
+            src: xmm(0),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x28, 0xC8]));
     }
 
     // ---- Setcc r8 (P11 Bucket H) ----
