@@ -263,9 +263,9 @@ impl Codegen {
             let lhs_positive = self.fresh_label();
             self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x85, 0xC0])); // test r8, r8
             self.jmp_rel32(&lhs_positive, JumpKind::Jns);
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xD9])); // neg rcx
+            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 1)); // neg rcx
             self.emit_insn(&Insn::raw_bytes(&[0x49, 0x83, 0xD0, 0x00])); // adc r8, 0
-            self.emit_insn(&Insn::raw_bytes(&[0x49, 0xF7, 0xD8])); // neg r8
+            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 8)); // neg r8
             self.emit_insn(&Insn::alu_rm_reg_imm8(6, 6, 1)); // xor esi, 1
             self.emit_insn(&Insn::raw_bytes(&[0xBF, 1, 0, 0, 0])); // mov edi, 1
             self.label(&lhs_positive);
@@ -273,9 +273,9 @@ impl Codegen {
             let rhs_positive = self.fresh_label();
             self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x85, 0xDB])); // test r11, r11
             self.jmp_rel32(&rhs_positive, JumpKind::Jns);
-            self.emit_insn(&Insn::raw_bytes(&[0x49, 0xF7, 0xD9])); // neg r9
+            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 9)); // neg r9
             self.emit_insn(&Insn::raw_bytes(&[0x49, 0x83, 0xD3, 0x00])); // adc r11, 0
-            self.emit_insn(&Insn::raw_bytes(&[0x49, 0xF7, 0xDB])); // neg r11
+            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 11)); // neg r11
             self.emit_insn(&Insn::alu_rm_reg_imm8(6, 6, 1)); // xor esi, 1
             self.label(&rhs_positive);
         }
@@ -328,18 +328,18 @@ impl Codegen {
                 let positive = self.fresh_label();
                 self.emit_insn(&Insn::raw_bytes(&[0x85, 0xFF])); // test edi, edi
                 self.jmp_rel32(&positive, JumpKind::Je);
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xD8])); // neg rax
+                self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 0)); // neg rax
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xD2, 0x00])); // adc rdx, 0
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xDA])); // neg rdx
+                self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 2)); // neg rdx
                 self.label(&positive);
             }
         } else if signed {
             let positive = self.fresh_label();
             self.emit_insn(&Insn::raw_bytes(&[0x85, 0xF6])); // test esi, esi
             self.jmp_rel32(&positive, JumpKind::Je);
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xD8])); // neg rax
+            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 0)); // neg rax
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xD2, 0x00])); // adc rdx, 0
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xDA])); // neg rdx
+            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 2)); // neg rdx
             self.label(&positive);
         }
     }
@@ -490,7 +490,7 @@ impl Codegen {
                     }
 
                     // neg rax → 0/1 映射到 0/全1 (向量真值)
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xD8])); // neg rax
+                    self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 0)); // neg rax
                                                     // 复制 rax 到 rdx (让两个 64-bit 半部分都是相同值)
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rdx, rax
                                                     // 结果在 rax:rdx → 存回

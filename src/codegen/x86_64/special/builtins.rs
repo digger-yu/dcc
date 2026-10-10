@@ -1850,7 +1850,7 @@ impl Codegen {
                 },
                 &[],
             )); // mov edx, eax (edx = isinf)
-                self.emit_insn(&Insn::raw_bytes(&[0xF7, 0xD8])); // neg eax (eax = -isinf)
+                self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B32, 0)); // neg eax (eax = -isinf)
                 self.emit_insn(&Insn::raw_bytes(&[0x85, 0xF6])); // test esi, esi
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x44, 0xC2])); // cmove eax, edx
                 if dst != 0 {
@@ -4732,7 +4732,7 @@ impl Codegen {
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE); // rax = excepts
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
-                self.emit_insn(&Insn::raw_bytes(&[0xF7, 0xD0])); // not eax
+                self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Not, crate::codegen::shared::asm_operand::Width::B32, 0)); // not eax
                                           // 清除 MXCSR 异常标志
                 self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
@@ -5265,7 +5265,7 @@ impl Codegen {
                 &[],
             )); // mov edx, eax (edx = excepts)
                 self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE2, 0x07])); // shl edx, 7 (shift to mask position)
-                self.emit_insn(&Insn::raw_bytes(&[0xF7, 0xD2])); // not edx (invert: clear bit = enable)
+                self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Not, crate::codegen::shared::asm_operand::Width::B32, 2)); // not edx (invert: clear bit = enable)
                 self.emit_insn(&Insn::raw_bytes(&[0x21, 0xD1])); // and ecx, edx (clear mask bits in MXCSR)
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {

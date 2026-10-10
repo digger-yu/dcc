@@ -283,7 +283,7 @@ impl Codegen {
             // sub r10, rax (r10 -= rax, 结果为负): 0x29 sub r/m, r; REX.WB; modrm 0xC2 (reg=0=rax, r/m=2=r10 low)
             self.emit_insn(&Insn::raw_bytes(&[0x49, 0x29, 0xC2]));
             // neg r10 (padding = aligned - rsp_old): 0xF7 group 3, /5=NEG; REX.WB; modrm 0xDA (reg=101, r/m=2)
-            self.emit_insn(&Insn::raw_bytes(&[0x49, 0xF7, 0xDA]));
+            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 10));
             // sub rsp, r10 (应用 padding): 0x29 sub r/m, r; REX.WR; modrm 0xD4 (mod=3, reg=2=r10 low, r/m=4=rsp)
             self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x29, 0xD4]));
         }

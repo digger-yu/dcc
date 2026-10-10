@@ -645,7 +645,7 @@ impl Codegen {
                     };
                     self.emit_insn(&Insn::raw_bytes(&[0x0F, setcc, 0xC0])); // setcc al
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB6, 0xC0])); // movzx rax, al
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xD8])); // neg rax (0/1 → 0/all-ones)
+                    self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 0)); // neg rax (0/1 → 0/all-ones)
                     self.mov(1, 0); // rcx = 结果 (循环尾统一存 rcx)
                 },
                 _ => {

@@ -2569,10 +2569,10 @@ impl Codegen {
             return;
         }
         match sz {
-            1 => self.emit_insn(&Insn::raw_bytes(&[0x40, 0xF6, 0xDE])), // neg sil
-            2 => self.emit_insn(&Insn::raw_bytes(&[0x66, 0xF7, 0xDE])), // neg si
-            4 => self.emit_insn(&Insn::raw_bytes(&[0xF7, 0xDE])),       // neg esi
-            _ => self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xDE])), // neg rsi
+            1 => self.emit_insn(&Insn::raw_bytes(&[0x40, 0xF6, 0xDE])), // neg sil (B8 handled by caller)
+            2 => self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B16, 6)), // neg si
+            4 => self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B32, 6)), // neg esi
+            _ => self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 6)), // neg rsi
         };
     }
     pub(crate) fn emit_or_rdx_rsi(&mut self, sz: usize) {
