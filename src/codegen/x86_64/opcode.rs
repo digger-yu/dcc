@@ -279,6 +279,15 @@ pub(crate) enum X86_64Opcode {
         src: Operand,
     },
 
+    /// P11 Bucket 7: shld/shrd (double shift) reg-reg form with CL count.
+    /// shld 0F A5 / shrd 0F AD. dst=Reg(dst), src=Reg(src), count=CL implicitly.
+    ShldShrd {
+        is_shld: bool,
+        width: crate::codegen::shared::asm_operand::Width,
+        dst: Operand,
+        src: Operand,
+    },
+
     /// x87 — 步骤 4: 收敛固定 escap 无操作数 + 单内存操作数两种形态.
     /// op::Fixed 时 mem=None; op::FldMem/FstpMem/FildMem 时 mem=Some(MemOperand).
     X87 { op: X87Op, mem: Option<MemOperand> },
@@ -907,8 +916,8 @@ impl X86_64Opcode {
                         }
                         out.extend_from_slice(&disp_bytes[..disp_len]);
                         Some(out)
-                    }
-                    _ => None,
+            }
+            _ => None,
                 }
             }
             X86_64Opcode::ImulRm { width, dst, src } => {
@@ -1168,6 +1177,29 @@ impl X86_64Opcode {
                     out.push(0x24);
                     out.extend_from_slice(&disp.to_le_bytes());
                 }
+                Some(out)
+            }
+            X86_64Opcode::ShldShrd { is_shld, width, dst, src } => {
+                // P11 Bucket 7: shld/shrd reg-reg with CL count.
+                //  shld r64,r64,cl:  REX.W 0F A5 modrm(mod=11,reg=src,r/m=dst)
+                //  shrd r64,r64,cl:  REX.W 0F AD modrm(mod=11,reg=src,r/m=dst)
+                let (dst_idx, src_idx) = match (dst, src) {
+                    (Operand::Reg(d, _), Operand::Reg(s, _)) => (d, s),
+                    _ => return None,
+                };
+                let is_b64 = matches!(width, Width::B64);
+                let mut rex: u8 = 0x40;
+                if is_b64 { rex |= 0x08; }
+                if *src_idx >= 8 { rex |= 0x04; }
+                if *dst_idx >= 8 { rex |= 0x01; }
+                let need_rex = is_b64 || *src_idx >= 8 || *dst_idx >= 8;
+                let opc2: u8 = if *is_shld { 0xA5 } else { 0xAD };
+                let modrm: u8 = 0xC0 | ((src_idx & 7) << 3) | (dst_idx & 7);
+                let mut out = Vec::with_capacity(5);
+                if need_rex { out.push(rex); }
+                out.push(0x0F);
+                out.push(opc2);
+                out.push(modrm);
                 Some(out)
             }
             _ => None,

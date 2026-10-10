@@ -194,7 +194,15 @@ impl Codegen {
                 self.jmp_rel32(&l_end, JumpKind::Jmp);
                 // < 64: shld rdx, rax, cl; shl rax, cl
                 self.label(&l_small);
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xA5, 0xC2])); // shld rdx, rax, cl
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::ShldShrd {
+                        is_shld: true,
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64),
+                        src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                    },
+                    &[],
+                )); // shld rdx, rax, cl
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, 0xE0])); // shl rax, cl
                 self.label(&l_end);
                 // rax:rdx = result
@@ -236,7 +244,15 @@ impl Codegen {
                 self.jmp_rel32(&l_end, JumpKind::Jmp);
                 // < 64: shrd rax, rdx, cl; shift high with sign/zero fill
                 self.label(&l_small);
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xAD, 0xD0])); // shrd rax, rdx, cl
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::ShldShrd {
+                        is_shld: false,
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                        src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64),
+                    },
+                    &[],
+                )); // shrd rax, rdx, cl
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, if signed { 0xFA } else { 0xEA }]));
                 self.label(&l_end);
             },
