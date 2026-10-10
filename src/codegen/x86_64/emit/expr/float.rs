@@ -111,8 +111,28 @@ impl Codegen {
         // 加 2^63 整数校正
         self.mov_imm(scratch, 0x8000000000000000u64 as i128);
         // add dst, scratch: 01 /r (dst = r/m, scratch = reg)
-        let add_rex = 0x48 | if scratch >= 8 { 0x04 } else { 0 } | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-        self.emit_insn(&Insn::raw_bytes(&[add_rex, 0x01, 0xC0 | ((scratch & 7) << 3) | (dst & 7)]));
+        // P11: 收敛到 AluRm{Add, B64, dst, scratch}.
+        {
+            let insn = Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                    op: crate::codegen::x86_64::opcode::AluOp::Add,
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        dst,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        scratch,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                    ),
+                },
+                &[],
+            );
+            if !self.emit_insn(&insn) {
+                let add_rex = 0x48 | if scratch >= 8 { 0x04 } else { 0 } | if dst >= 8 { 0x01 } else { 0 };
+                self.emit_insn(&Insn::raw_bytes(&[add_rex, 0x01, 0xC0 | ((scratch & 7) << 3) | (dst & 7)]));
+            }
+        }
 
         self.label(&l_done);
     }
@@ -176,16 +196,62 @@ impl Codegen {
                     self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x50, isz as u8])); // mov edx, [rax+isz]
                     self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE1, 0xFF, 0xFF, 0xFF, 0x7F]));
                     self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE2, 0xFF, 0xFF, 0xFF, 0x7F]));
-                    self.emit_insn(&Insn::raw_bytes(&[0x09, 0xD1])); // or ecx, edx
+                    // P11: 收敛到 AluRm{Or, B32, rcx, rdx}.
+                    {
+                        let insn = Insn::new(
+                            crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                                op: crate::codegen::x86_64::opcode::AluOp::Or,
+                                width: crate::codegen::shared::asm_operand::Width::B32,
+                                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                    1,
+                                    crate::codegen::shared::asm_operand::Width::B32,
+                                ),
+                                src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                    2,
+                                    crate::codegen::shared::asm_operand::Width::B32,
+                                ),
+                            },
+                            &[],
+                        );
+                        if !self.emit_insn(&insn) {
+                            self.emit_insn(&Insn::raw_bytes(&[0x09, 0xD1])); // or ecx, edx
+                        }
+                    }
                     self.emit_insn(&Insn::raw_bytes(&[0x85, 0xC9])); // test ecx, ecx
                 },
                 Type::Double | Type::LongDouble => {
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x08])); // mov rcx, [rax]
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x50, isz as u8])); // mov rdx, [rax+isz]
                     self.mov_imm(0, 0x7FFF_FFFF_FFFF_FFFFi128); // rax = 符号掩码
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC1])); // and rcx, rax
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC2])); // and rdx, rax
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xD1])); // or rcx, rdx
+                    // P11: 收敛到 AluRm{And, B64, rcx, rax} / {And, B64, rdx, rax} / {Or, B64, rcx, rdx}.
+                    {
+                        let mk = |d: u8, s: u8, op: crate::codegen::x86_64::opcode::AluOp| {
+                            Insn::new(
+                                crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                                    op,
+                                    width: crate::codegen::shared::asm_operand::Width::B64,
+                                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                        d,
+                                        crate::codegen::shared::asm_operand::Width::B64,
+                                    ),
+                                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                        s,
+                                        crate::codegen::shared::asm_operand::Width::B64,
+                                    ),
+                                },
+                                &[],
+                            )
+                        };
+                        if !self.emit_insn(&mk(1, 0, crate::codegen::x86_64::opcode::AluOp::And)) {
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC1]));
+                        }
+                        if !self.emit_insn(&mk(2, 0, crate::codegen::x86_64::opcode::AluOp::And)) {
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC2]));
+                        }
+                        if !self.emit_insn(&mk(1, 2, crate::codegen::x86_64::opcode::AluOp::Or)) {
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xD1]));
+                        }
+                    }
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0x85, 0xC9])); // test rcx, rcx
                 },
                 _ => {
