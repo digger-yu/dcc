@@ -1588,11 +1588,11 @@ impl Codegen {
     }
 
     fn xor_ecx_ecx(&mut self) {
-        self.emit_insn(&Insn::raw_bytes(&[0x31, 0xC9]));
+        self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B32, 1, 1));
     }
 
     fn xor_eax_eax(&mut self) {
-        self.emit_insn(&Insn::raw_bytes(&[0x31, 0xC0]));
+        self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B32, 0, 0));
     }
 
     // ---- 分类链需要的形式（32 位通用寄存器间运算）----

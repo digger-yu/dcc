@@ -1729,7 +1729,7 @@ impl Codegen {
                 &[],
             );
             if !self.emit_insn(&insn) {
-                self.emit_insn(&Insn::raw_bytes(&[0x31, 0xC0]));
+                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B32, 0, 0));
             }
         }
         // mov rcx, frame_size / 8

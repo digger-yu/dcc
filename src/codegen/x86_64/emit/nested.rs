@@ -75,7 +75,7 @@ impl Codegen {
         // rdi = r13 & ~0xFFF
         // 注意: mov rdi, r13 需要 REX.W + REX.B (r13 >= 8)
         // 4C 89 EF = mov rdi, r13 (REX.WR, src=r13 in r/m, dst=rdi in reg)
-        self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0xEF])); // mov rdi, r13
+        self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 7, 13)); // mov rdi, r13
         self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 7, 0xFFFFF000u32 as i64)); // and rdi, ~0xFFF
         // rdi -= 0x1000 (下方页)
         self.emit_insn(&Insn::alu_rm_reg_imm32_b64(5, 7, 0x1000)); // sub rdi, 0x1000

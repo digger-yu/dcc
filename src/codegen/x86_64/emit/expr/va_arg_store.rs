@@ -962,7 +962,7 @@ impl Codegen {
             self.emit_insn(&Insn::raw_bytes(&[0x49, 0x81, 0xE0])); // and r8, imm32
             self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0xC6])); // mov rsi, r8
+        self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 6, 8)); // mov rsi, r8
         self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
         match vla_size_reg {
             // VLA: 运行时尺寸在 `sr`（不能放 rcx/rax：rcx = reg_save_area 已在

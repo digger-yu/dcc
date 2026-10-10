@@ -484,7 +484,7 @@ impl super::super::super::Codegen {
                     &[],
                 );
                 if !self.emit_insn(&insn) {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC8]));
+                    self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B64, 0, 1));
                 }
             } else {
                 // 掩码 > 32 位：movabs rcx, mask; and rax, rcx
@@ -504,7 +504,7 @@ impl super::super::super::Codegen {
                     &[],
                 );
                 if !self.emit_insn(&insn) {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC8]));
+                    self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B64, 0, 1));
                 }
             }
         }
@@ -539,7 +539,7 @@ impl super::super::super::Codegen {
                     &[],
                 );
                 if !self.emit_insn(&insn) {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC8]));
+                    self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B64, 0, 1));
                 }
             } else {
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -558,7 +558,7 @@ impl super::super::super::Codegen {
                     &[],
                 );
                 if !self.emit_insn(&insn) {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC8]));
+                    self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B64, 0, 1));
                 }
             }
         }
@@ -666,7 +666,7 @@ impl super::super::super::Codegen {
             &[],
         );
         if !self.emit_insn(&insn) {
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xD1])); // or rcx, rdx
+            self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Or, crate::codegen::shared::asm_operand::Width::B64, 1, 2)); // or rcx, rdx
         }
                                         // Store container back
         self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x45, addr_slot as u8])); // rax = addr

@@ -7,6 +7,7 @@
 
 use crate::ast::{Expr, Type, UnOp};
 use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::opcode::{SimdArithOp, SimdWidth};
 use crate::codegen::x86_64::{Codegen, JumpKind};
 
 impl Codegen {
@@ -48,10 +49,10 @@ impl Codegen {
                         &[],
                     );
                     if !self.emit_insn(&insn) {
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xD0])); // or rax, rdx
+                        self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Or, crate::codegen::shared::asm_operand::Width::B64, 0, 2)); // or rax, rdx
                     }
                     self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 0, 0)); // test rax, rax
-                    self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x94, 0xC0], "sete %al")); // sete al
+                    self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Eq, 0)); // sete al
                     self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xB6, 0xC0], "movzbq %al, %rax"));
                     // P11: xor rdx, rdx via typed opcode (high = 0).
                     let insn = Insn::new(
@@ -110,7 +111,7 @@ impl Codegen {
                         src: crate::codegen::x86_64::opcode::Operand::Imm(0x80000000u64 as i64),
                     }, &[]));
                     self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC1]));
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 1));
                 },
                 Type::Double => {
                     // 翻转 64 位符号位
@@ -120,7 +121,7 @@ impl Codegen {
                         src: crate::codegen::x86_64::opcode::Operand::Imm(0x8000000000000000u64 as i64),
                     }, &[]));
                     self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
-                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x57, 0xC1]));
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorpd, SimdWidth::PD, 0, 1));
                 },
                 _ => unreachable!(),
             }
@@ -368,7 +369,7 @@ impl Codegen {
                 let test_gas = format!("test {}, {}", test_reg, test_reg);
                 self.emit_insn(&Insn::raw_with_gas(&[rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)], &test_gas));
                 // sete al: 零 → 1, 非零 → 0 (0F 94 C0)
-                self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x94, 0xC0], "sete %al"));
+                self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Eq, 0));
                 // movzx dst, al (REX 0F B6 modrm)
                 // ModRM: mod=11, reg=dst, r/m=0(al) → 0xC0 | ((dst&7)<<3)
                 // REX.R (0x04) when dst>=8 (reg field extension)

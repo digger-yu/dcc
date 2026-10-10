@@ -808,7 +808,7 @@ impl Codegen {
                                                   // 每次比较前从帧内槽重新加载 switch 值到 rcx.
                             self.load_stack(1, sw_slot); // rcx = switch 值
                             self.load_stack(2, sw_lo_slot); // rdx = low
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x39, 0xD1])); // cmp rcx, rdx
+                            self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Cmp, crate::codegen::shared::asm_operand::Width::B64, 1, 2)); // cmp rcx, rdx
                                                             // 有符号用 jl (skip if < low), 无符号用 jb
                             let jk_lo = if switch_is_signed { JumpKind::Jl } else { JumpKind::Jb };
                             self.jmp_rel32(&l_next, jk_lo);
@@ -843,7 +843,7 @@ impl Codegen {
                                     // mov rdx, case_low; cmp rax, rdx
                                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0xBA])); // mov rdx, imm64
                                     self.emit_insn(&Insn::raw_bytes(&case_low.to_le_bytes()));
-                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x39, 0xD0])); // cmp rax, rdx
+                                    self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Cmp, crate::codegen::shared::asm_operand::Width::B64, 0, 2)); // cmp rax, rdx
                                 }
                                 let l_nomatch = self.fresh_label();
                                 self.jmp_rel32(&l_nomatch, JumpKind::Jne);
@@ -866,7 +866,7 @@ impl Codegen {
                                 self.gen_expr(val, 2);
                                 // gen_expr 可能覆写 rcx, 比较前重新加载
                                 self.load_stack(1, sw_slot); // rcx = switch 值
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x39, 0xD1]));
+                                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Cmp, crate::codegen::shared::asm_operand::Width::B64, 1, 2));
                                 self.jmp_rel32(&l_case, JumpKind::Je);
                             }
                         }

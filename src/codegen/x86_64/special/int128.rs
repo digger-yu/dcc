@@ -273,8 +273,8 @@ impl Codegen {
     /// 输入: r8:rcx dividend, r11:r9 divisor；输出: rdx:rax quotient/remainder。
     pub fn gen_int128_divmod(&mut self, signed: bool, want_remainder: bool) {
         // esi = 商符号，edi = 被除数符号（余数跟随被除数）。
-        self.emit_insn(&Insn::raw_bytes(&[0x31, 0xF6])); // xor esi, esi
-        self.emit_insn(&Insn::raw_bytes(&[0x31, 0xFF])); // xor edi, edi
+        self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B32, 6, 6)); // xor esi, esi
+        self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B32, 7, 7)); // xor edi, edi
         if signed {
             let lhs_positive = self.fresh_label();
             self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 8, 8)); // test r8, r8
@@ -482,11 +482,11 @@ impl Codegen {
                 // === 比较操作 (EqEq/Ne): 顺序 setcc + AND, 无需跳转 ===
                 BinOp::EqEq | BinOp::Ne => {
                     // 比较低 64-bit
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x39, 0xC1])); // cmp rax, rcx
-                    self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x94, 0xC0], "sete %al")); // sete al (al=1 if low equal)
+                    self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Cmp, crate::codegen::shared::asm_operand::Width::B64, 1, 0)); // cmp rax, rcx
+                    self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Eq, 0)); // sete al (al=1 if low equal)
                                                     // 比较高 64-bit
                     self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x39, 0xC2])); // cmp rdx, r8
-                    self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x94, 0xC4], "sete %ah")); // sete ah (ah=1 if high equal)
+                    self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Eq, 4)); // sete ah (ah=1 if high equal)
                                                     // AND 两个结果: al &= ah (都为1 → 两 chunk 都相等)
                                                     // Intel: and al, ah → opcode 0x20 (and r/m8, r8), modrm=0xE0 (mod=11, reg=ah=100, r/m=al=000)
                     self.emit_insn(&Insn::raw_bytes(&[0x20, 0xE0]));
@@ -519,7 +519,7 @@ impl Codegen {
                     self.emit_alu_rm_reg64(AluOp::And, 8, 2, &[0x4C, 0x21, 0xD0]); // and r8, rdx (high &= left)
                                                     // mov rax, rcx; mov rdx, r8
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
-                    self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0xC2]));
+                    self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 2, 8));
                     self.store_stack(0, result_off);
                     self.store_stack(2, result_off + 8);
                 },
@@ -527,7 +527,7 @@ impl Codegen {
                     self.emit_alu_rm_reg64(AluOp::Or, 1, 0, &[0x48, 0x09, 0xC1]); // or rcx, rax
                     self.emit_alu_rm_reg64(AluOp::Or, 8, 2, &[0x4C, 0x09, 0xD0]); // or r8, rdx
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
-                    self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0xC2]));
+                    self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 2, 8));
                     self.store_stack(0, result_off);
                     self.store_stack(2, result_off + 8);
                 },
@@ -535,7 +535,7 @@ impl Codegen {
                     self.emit_alu_rm_reg64(AluOp::Xor, 1, 0, &[0x48, 0x31, 0xC1]); // xor rcx, rax
                     self.emit_alu_rm_reg64(AluOp::Xor, 8, 2, &[0x4C, 0x31, 0xD0]); // xor r8, rdx
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
-                    self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0xC2]));
+                    self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 2, 8));
                     self.store_stack(0, result_off);
                     self.store_stack(2, result_off + 8);
                 },

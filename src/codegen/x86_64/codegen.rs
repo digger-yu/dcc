@@ -1383,9 +1383,9 @@ impl Codegen {
         ctors.sort_by_key(|(p, _)| *p);
         dtors.sort_by_key(|(p, _)| *p);
         self.label("_start");
-        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0xe4])); // mov r12, rsp (保存原始 rsp, 用于 leave 后恢复)
+        self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 12, 4)); // mov r12, rsp (保存原始 rsp, 用于 leave 后恢复)
         self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(5, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // push rbp
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xe5])); // mov rbp, rsp
+        self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 5, 4)); // mov rbp, rsp
                                         // 调用 constructor 函数
         for (_p, ctor) in &ctors {
             // P11: xor rax, rax via typed opcode (no variadic args)

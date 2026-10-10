@@ -130,6 +130,59 @@ impl Insn {
         Insn::raw_bytes(&[0x48, 0x83, 0xC4, v])
     }
 
+    /// P11 Bucket A: mov reg, reg (mod=11). width controls REX.W (B64) + REX.B/R (reg>=8).
+    /// Encoding: MOV r/m, r (0x89 for non-byte; 0x88 for B8).
+    pub fn mov_rm_reg(
+        width: crate::codegen::shared::asm_operand::Width,
+        dst_reg: u8,
+        src_reg: u8,
+    ) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                width,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(dst_reg, width),
+                src: crate::codegen::x86_64::opcode::Operand::Reg(src_reg, width),
+            },
+            &[],
+        )
+    }
+
+    /// P11 Bucket B: AluRm reg, reg (mod=11) — add/sub/and/or/xor/cmp.
+    pub fn alu_rm_reg_reg(
+        op: crate::codegen::x86_64::opcode::AluOp,
+        width: crate::codegen::shared::asm_operand::Width,
+        dst_reg: u8,
+        src_reg: u8,
+    ) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                op,
+                width,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(dst_reg, width),
+                src: crate::codegen::x86_64::opcode::Operand::Reg(src_reg, width),
+            },
+            &[],
+        )
+    }
+
+    /// P11 Bucket D: push/pop reg64 via Stack typed opcode (50+rd / 41 50+(rd&7)).
+    pub fn stack_op_reg(
+        op: crate::codegen::x86_64::opcode::StackOp,
+        reg_idx: u8,
+    ) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
+                op,
+                width: crate::codegen::shared::asm_operand::Width::B64,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    reg_idx,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                ),
+            },
+            &[],
+        )
+    }
+
     /// P11: 构造 B32 `and/eor/or/cmp eax|ecx|edx, imm8` (0x83 / ib, mod=11).
     /// modrm_reg 字段编码 AluOp, modrm_rm 字段编码低 3 位寄存器索引.
     /// 与 rsp 不同, 非 rsp 寄存器 0x83 形态不常带 REX.W (G10 快照逐字节约定).
@@ -178,6 +231,49 @@ impl Insn {
     /// P11: 构造 `movss xmm_dst, xmm_src` 存储方向 (F3 0F 11 mod=11).
     pub fn movss_xmm_store(dst_xmm: u8, src_xmm: u8) -> Self {
         Self::simd_xmm_reg_reg(0xF3, 0x11, dst_xmm, src_xmm)
+    }
+
+    /// P11 Bucket C+E: SimdArith reg-reg (addsd/subsd/mulsd/divsd/addss/subss/mulss/divss/xorps/xorpd).
+    /// op: SimdArithOp::{Add, Sub, Mul, Div, Xorps, Xorpd}. width: SimdWidth::{SD, SS}.
+    pub fn simd_arith_reg(
+        op: crate::codegen::x86_64::opcode::SimdArithOp,
+        width: crate::codegen::x86_64::opcode::SimdWidth,
+        dst_xmm: u8,
+        src_xmm: u8,
+    ) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::SimdArith {
+                op,
+                width,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    dst_xmm,
+                    crate::codegen::shared::asm_operand::Width::B128,
+                ),
+                src: crate::codegen::x86_64::opcode::Operand::Reg(
+                    src_xmm,
+                    crate::codegen::shared::asm_operand::Width::B128,
+                ),
+            },
+            &[],
+        )
+    }
+
+    /// P11 Bucket H: setcc r8 (0F 9x /0, mod=11).
+    /// reg_idx: Intel reg number (0=al,1=cl,2=dl,3=bl,4=ah..15=r15b).
+    pub fn setcc_reg(
+        cc: crate::codegen::x86_64::opcode::CondCode,
+        reg_idx: u8,
+    ) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::Setcc {
+                cc,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    reg_idx,
+                    crate::codegen::shared::asm_operand::Width::B8,
+                ),
+            },
+            &[],
+        )
     }
 
     /// Common reg↔reg xmm↔xmm encoder.

@@ -5,6 +5,7 @@ use crate::ast::*;
 use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::shared::asm_operand::Width;
 use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::opcode::{SimdArithOp, SimdWidth};
 use crate::codegen::x86_64::opcode::{AluOp, Operand as OpcodeOperand, ShiftAmount, ShiftOp, X86_64Opcode};
 use crate::codegen::x86_64::{AggDst, Codegen, JumpKind, VaListAddress};
 use crate::const_eval;
@@ -1083,7 +1084,7 @@ impl Codegen {
                                 &[],
                             );
                             if !self.emit_insn(&insn) {
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xc8])); // add rax, rcx (addr in rax)
+                                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Add, crate::codegen::shared::asm_operand::Width::B64, 0, 1)); // add rax, rcx (addr in rax)
                             }
                         }
                         self.push(0); // save addr
@@ -1139,7 +1140,7 @@ impl Codegen {
                                 &[],
                             );
                             if !self.emit_insn(&insn) {
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xc8])); // add rax, rcx (addr in rax)
+                                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Add, crate::codegen::shared::asm_operand::Width::B64, 0, 1)); // add rax, rcx (addr in rax)
                             }
                         }
                         self.push(0);
@@ -1450,7 +1451,7 @@ impl Codegen {
                                         &[],
                                     );
                                     if !self.emit_insn(&insn) {
-                                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xD0])); // and rax, rdx
+                                        self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B64, 0, 2)); // and rax, rdx
                                     }
                                 }
                             }
@@ -1548,7 +1549,7 @@ impl Codegen {
                                     &[],
                                 );
                                 if !self.emit_insn(&insn) {
-                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xD1])); // and rcx, rdx
+                                    self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B64, 1, 2)); // and rcx, rdx
                                 }
                             }
                         }
@@ -1565,7 +1566,7 @@ impl Codegen {
                                 &[],
                             );
                             if !self.emit_insn(&insn) {
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xC1])); // or rcx, rax
+                                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Or, crate::codegen::shared::asm_operand::Width::B64, 1, 0)); // or rcx, rax
                             }
                         }
                                                         // 加载地址: rdx = [r13 + addr_off]
@@ -1708,7 +1709,7 @@ impl Codegen {
                                             &[],
                                         );
                                         if !self.emit_insn(&insn) {
-                                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC2])); // and rdx, rax
+                                            self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B64, 2, 0)); // and rdx, rax
                                         }
                                     }
                                 }
@@ -2070,11 +2071,11 @@ impl Codegen {
                                     &[],
                                 );
                                 if !self.emit_insn(&insn) {
-                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xD0])); // or rax, rdx
+                                    self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Or, crate::codegen::shared::asm_operand::Width::B64, 0, 2)); // or rax, rdx
                                 }
                             }
                             self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 0, 0)); // test rax, rax
-                            self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x94, 0xC0], "sete %al")); // sete al
+                            self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Eq, 0)); // sete al
                             self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xB6, 0xC0], "movzbq %al, %rax"));
                             // P11: xor rdx, rdx via typed opcode (high = 0).
                             {
@@ -2129,7 +2130,7 @@ impl Codegen {
                                     src: crate::codegen::x86_64::opcode::Operand::Imm(0x80000000u64 as i64),
                                 }, &[]));
                                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
-                                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC1]));
+                                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 1));
                             },
                             _ => {
                                 // 翻转 64 位符号位（double，以及 -mno-sse 下
@@ -2140,7 +2141,7 @@ impl Codegen {
                                     src: crate::codegen::x86_64::opcode::Operand::Imm(0x8000000000000000u64 as i64),
                                 }, &[]));
                                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
-                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x57, 0xC1]));
+                                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorpd, SimdWidth::PD, 0, 1));
                             },
                         }
                     }
@@ -2398,7 +2399,7 @@ impl Codegen {
                         let test_gas = format!("test {}, {}", test_reg, test_reg);
                         self.emit_insn(&Insn::raw_with_gas(&[rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)], &test_gas));
                         // sete al: 零 → 1, 非零 → 0 (0F 94 C0)
-                        self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x94, 0xC0], "sete %al"));
+                        self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Eq, 0));
                         // movzx dst, al (REX 0F B6 modrm)
                         // ModRM: mod=11, reg=dst, r/m=0(al) → 0xC0 | ((dst&7)<<3)
                         // REX.R (0x04) when dst>=8 (reg field extension)

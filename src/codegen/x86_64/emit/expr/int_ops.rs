@@ -8,6 +8,7 @@ use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
 use crate::codegen::x86_64::asm::*;
 use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::opcode::{SimdArithOp, SimdWidth};
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::*;
 use crate::const_eval::{self, ConstValue};
@@ -40,7 +41,7 @@ impl Codegen {
         };
         // xorps xmm1, xmm1；ucomis{s,d} xmm0, xmm1（ModRM 0xC1：reg=xmm0, r/m=xmm1）。
         // xmm1 是本后端浮点比较的约定 scratch（见 special/builtins.rs 同族站点）。
-        self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x57, 0xC9], "xorps %xmm1, %xmm1"));
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 1, 1));
         let mut ucomis = ucomis_prefix.to_vec();
         ucomis.extend_from_slice(&[0x0F, ucomis_op, 0xC1]);
         let ucomis_gas = if matches!(float_ty, Type::Float) {

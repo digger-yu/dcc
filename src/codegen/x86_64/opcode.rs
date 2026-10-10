@@ -71,6 +71,8 @@ pub(crate) enum SimdArithOp {
     Sqrt,
     Ucomi,
     Comi,
+    Xorps,
+    Xorpd,
 }
 
 /// SIMD 宽度 — 步骤 4: SimdMov 用来发 xmm store/load 到 rsp 槽.
@@ -268,6 +270,10 @@ pub(crate) enum X86_64Opcode {
         dst: Operand,
         src: Operand,
     },
+
+    /// P11 Bucket H: setcc r/m8 (0F 9x /0, mod=11 reg8).
+    /// dst: Reg(reg_idx, B8) — reg_idx is Intel reg number (0=al..15=r15b).
+    Setcc { cc: CondCode, dst: Operand },
 
     /// SSE/AVX 移动 — 步骤 4: 收敛 xmm store/load 到 rsp 槽.
     /// width 决定 legacy 前缀 (F3=SS, F2=SD, 无=O/PS), opcode 决定 0F 10(load) / 0F 11(store).
@@ -1179,6 +1185,39 @@ impl X86_64Opcode {
                 }
                 Some(out)
             }
+            X86_64Opcode::SimdArith { op, width, dst, src } => {
+                // P11 Bucket C+E: SIMD scalar arith reg-reg (addsd/subss etc) + xorps/xorpd.
+                //   addsd: F2 0F 58 /r   subsd: F2 0F 5C /r   mulsd: F2 0F 59 /r   divsd: F2 0F 5E /r
+                //   addss: F3 0F 58 /r   subss: F3 0F 5C /r   mulss: F3 0F 59 /r   divss: F3 0F 5E /r
+                //   xorps: 0F 57 /r (无 legacy 前缀)   xorpd: 66 0F 57 /r
+                let (Operand::Reg(dst_xmm, _), Operand::Reg(src_xmm, _)) = (dst, src) else {
+                    return None;
+                };
+                let (pfx, opc2): (u8, u8) = match (op, width) {
+                    (SimdArithOp::Add, SimdWidth::SD) => (0xF2, 0x58),
+                    (SimdArithOp::Sub, SimdWidth::SD) => (0xF2, 0x5C),
+                    (SimdArithOp::Mul, SimdWidth::SD) => (0xF2, 0x59),
+                    (SimdArithOp::Div, SimdWidth::SD) => (0xF2, 0x5E),
+                    (SimdArithOp::Add, SimdWidth::SS) => (0xF3, 0x58),
+                    (SimdArithOp::Sub, SimdWidth::SS) => (0xF3, 0x5C),
+                    (SimdArithOp::Mul, SimdWidth::SS) => (0xF3, 0x59),
+                    (SimdArithOp::Div, SimdWidth::SS) => (0xF3, 0x5E),
+                    (SimdArithOp::Xorps, _) => (0x00, 0x57),
+                    (SimdArithOp::Xorpd, _) => (0x66, 0x57),
+                    _ => return None,
+                };
+                let mut rex: u8 = 0x40;
+                if *dst_xmm >= 8 { rex |= 0x04; }
+                if *src_xmm >= 8 { rex |= 0x01; }
+                let need_rex = *dst_xmm >= 8 || *src_xmm >= 8;
+                let mut out = Vec::with_capacity(6);
+                if pfx != 0 { out.push(pfx); }
+                if need_rex { out.push(rex); }
+                out.push(0x0F);
+                out.push(opc2);
+                out.push(0xC0 | ((*dst_xmm & 7) << 3) | (*src_xmm & 7));
+                Some(out)
+            }
             X86_64Opcode::ShldShrd { is_shld, width, dst, src } => {
                 // P11 Bucket 7: shld/shrd reg-reg with CL count.
                 //  shld r64,r64,cl:  REX.W 0F A5 modrm(mod=11,reg=src,r/m=dst)
@@ -1200,6 +1239,39 @@ impl X86_64Opcode {
                 out.push(0x0F);
                 out.push(opc2);
                 out.push(modrm);
+                Some(out)
+            }
+            X86_64Opcode::Setcc { cc, dst } => {
+                // P11 Bucket H: setcc r8 (0F 9x /0, mod=11).
+                //   sete al = 0F 94 C0; setne bl = 0F 95 C3; setb cl = 0F 92 C1.
+                let Operand::Reg(reg_idx, _) = dst else {
+                    return None;
+                };
+                let opc2: u8 = match cc {
+                    CondCode::Eq => 0x94,
+                    CondCode::Ne => 0x95,
+                    CondCode::B => 0x92,
+                    CondCode::Ae => 0x93,
+                    CondCode::Be => 0x96,
+                    CondCode::A => 0x97,
+                    CondCode::P => 0x9A,
+                    CondCode::Np => 0x9B,
+                    CondCode::Lt => 0x9C,
+                    CondCode::Ge => 0x9D,
+                    CondCode::Gt => 0x9F,
+                    CondCode::Le => 0x9E,
+                    _ => return None,
+                };
+                // Regs 8..15 (sil/dil/bpl etc) require REX prefix to avoid
+                // interpreting as ah/ch/dh/bh. We always emit REX.B set iff idx>=8.
+                let mut out = Vec::with_capacity(5);
+                if *reg_idx >= 8 {
+                    out.push(0x41);
+                }
+                out.push(0x0F);
+                out.push(opc2);
+                // mod=11, /0 reg field=0, r/m=reg_idx&7
+                out.push(0xC0 | (reg_idx & 7));
                 Some(out)
             }
             _ => None,
@@ -2043,6 +2115,157 @@ mod tests {
             src: reg(1, Width::B32),
         };
         assert_eq!(o.encode(), Some(vec![0x0F, 0xAF, 0xD1]));
+    }
+
+    // ---- SimdArith reg-reg (P11 Bucket C+E) ----
+
+    fn xmm(r: u8) -> Operand {
+        Operand::Reg(r, Width::B128)
+    }
+
+    #[test]
+    fn simd_addsd_xmm0_xmm1() {
+        // addsd xmm0, xmm1:  F2 0F 58 C1  (reg=xmm1, r/m=xmm0)
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Add,
+            width: SimdWidth::SD,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF2, 0x0F, 0x58, 0xC1]));
+    }
+
+    #[test]
+    fn simd_subsd_xmm0_xmm1() {
+        // subsd xmm0, xmm1:  F2 0F 5C C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Sub,
+            width: SimdWidth::SD,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF2, 0x0F, 0x5C, 0xC1]));
+    }
+
+    #[test]
+    fn simd_mulsd_xmm0_xmm1() {
+        // mulsd xmm0, xmm1:  F2 0F 59 C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Mul,
+            width: SimdWidth::SD,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF2, 0x0F, 0x59, 0xC1]));
+    }
+
+    #[test]
+    fn simd_divsd_xmm0_xmm1() {
+        // divsd xmm0, xmm1:  F2 0F 5E C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Div,
+            width: SimdWidth::SD,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF2, 0x0F, 0x5E, 0xC1]));
+    }
+
+    #[test]
+    fn simd_addss_xmm0_xmm1() {
+        // addss xmm0, xmm1:  F3 0F 58 C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Add,
+            width: SimdWidth::SS,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0x0F, 0x58, 0xC1]));
+    }
+
+    #[test]
+    fn simd_subss_xmm0_xmm1() {
+        // subss xmm0, xmm1:  F3 0F 5C C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Sub,
+            width: SimdWidth::SS,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0x0F, 0x5C, 0xC1]));
+    }
+
+    #[test]
+    fn simd_xorps_xmm0_xmm0() {
+        // xorps xmm0, xmm0:  0F 57 C0  (zero xmm0)
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Xorps,
+            width: SimdWidth::PS,
+            dst: xmm(0),
+            src: xmm(0),
+        };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0x57, 0xC0]));
+    }
+
+    #[test]
+    fn simd_xorpd_xmm0_xmm0() {
+        // xorpd xmm0, xmm0:  66 0F 57 C0
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Xorpd,
+            width: SimdWidth::PD,
+            dst: xmm(0),
+            src: xmm(0),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x57, 0xC0]));
+    }
+
+    #[test]
+    fn simd_xorps_xmm15_xmm15_high() {
+        // xorps xmm15, xmm15:  45 0F 57 FF  (REX.R+B set)
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Xorps,
+            width: SimdWidth::PS,
+            dst: xmm(15),
+            src: xmm(15),
+        };
+        assert_eq!(o.encode(), Some(vec![0x45, 0x0F, 0x57, 0xFF]));
+    }
+
+    // ---- Setcc r8 (P11 Bucket H) ----
+
+    #[test]
+    fn setcc_eq_al() {
+        // sete al: 0F 94 C0
+        let o = X86_64Opcode::Setcc { cc: CondCode::Eq, dst: reg(0, Width::B8) };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0x94, 0xC0]));
+    }
+
+    #[test]
+    fn setcc_ne_cl() {
+        // setne cl: 0F 95 C1
+        let o = X86_64Opcode::Setcc { cc: CondCode::Ne, dst: reg(1, Width::B8) };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0x95, 0xC1]));
+    }
+
+    #[test]
+    fn setcc_b_dl() {
+        // setb dl: 0F 92 C2
+        let o = X86_64Opcode::Setcc { cc: CondCode::B, dst: reg(2, Width::B8) };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0x92, 0xC2]));
+    }
+
+    #[test]
+    fn setcc_a_bl() {
+        // seta bl: 0F 97 C3
+        let o = X86_64Opcode::Setcc { cc: CondCode::A, dst: reg(3, Width::B8) };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0x97, 0xC3]));
+    }
+
+    #[test]
+    fn setcc_np_sil_high() {
+        // setnp r14b: 41 0F 9B C6  (reg=14 >=8 needs REX.B; reg&7=6, modrm=0xC6)
+        let o = X86_64Opcode::Setcc { cc: CondCode::Np, dst: reg(14, Width::B8) };
+        assert_eq!(o.encode(), Some(vec![0x41, 0x0F, 0x9B, 0xC6]));
     }
 }
 

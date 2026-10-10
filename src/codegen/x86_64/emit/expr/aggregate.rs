@@ -8,6 +8,7 @@ use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
 use crate::codegen::x86_64::asm::*;
 use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::opcode::{SimdArithOp, SimdWidth};
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::*;
 use crate::const_eval::{self, ConstValue};
@@ -32,14 +33,14 @@ impl Codegen {
         match ty {
             Type::Void => {},
             Type::Float | Type::Double | Type::LongDouble => {
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 0)); // xorps xmm0, xmm0
                 if dst != 0 {
                     self.mov_imm(dst, 0);
                 }
             },
             Type::Complex(inner) if matches!(&inner.base, Type::Float | Type::Double) => {
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC9])); // xorps xmm1, xmm1
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 0)); // xorps xmm0, xmm0
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 1, 1)); // xorps xmm1, xmm1
                 let result_off = self.complex_result_off();
                 let pfx = if matches!(&inner.base, Type::Float) {
                     0xF3u8
@@ -615,7 +616,7 @@ impl Codegen {
                                         let si = src_inner.clone().unwrap();
                                         self.gen_complex_imag_into_xmm0(r, &si);
                                     } else {
-                                        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0
+                                        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 0)); // xorps xmm0
                                     }
                                     self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]));
                                     if isz == 4 {
@@ -678,7 +679,7 @@ impl Codegen {
                                     let si = src_inner.clone().unwrap();
                                     self.gen_complex_imag_into_xmm0(r, &si);
                                 } else {
-                                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0
+                                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 0)); // xorps xmm0
                                 }
                                 self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]));
                                 self.emit_store(0, dst_off + isz, isz as usize);
@@ -1368,7 +1369,7 @@ impl Codegen {
                             } else {
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xBA]));
                                 self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xD0]));
+                                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B64, 0, 2));
                             }
                         }
                         // 左移到位置: shl rax, bit_o
@@ -1392,7 +1393,7 @@ impl Codegen {
                         } else {
                             self.emit_insn(&Insn::raw_bytes(&[0x48, 0xBA]));
                             self.emit_insn(&Insn::raw_bytes(&inv_mask.to_le_bytes()));
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xD1]));
+                            self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B64, 1, 2));
                         }
                         // 合并: or rcx, rax
                         // P11: 收敛到 AluRm{Or, B64, rcx, rax}.
@@ -1413,7 +1414,7 @@ impl Codegen {
                                 &[],
                             );
                             if !self.emit_insn(&insn) {
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xC1]));
+                                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Or, crate::codegen::shared::asm_operand::Width::B64, 1, 0));
                             }
                         }
                         // 保存更新后的容器值回 [r13-32]

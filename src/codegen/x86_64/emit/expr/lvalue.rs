@@ -224,7 +224,7 @@ impl Codegen {
                         &[],
                     );
                     if !self.emit_insn(&insn) {
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xc8])); // add rax, rcx
+                        self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Add, crate::codegen::shared::asm_operand::Width::B64, 0, 1)); // add rax, rcx
                     }
                 }
                 // 语义层描述符接不住时的兼容路径：段限定基址同样要带前缀，
@@ -262,7 +262,7 @@ impl Codegen {
                     &[],
                 );
                 if !self.emit_insn(&insn) {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xc8])); // add rax, rcx
+                    self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Add, crate::codegen::shared::asm_operand::Width::B64, 0, 1)); // add rax, rcx
                 }
             }
             self.emit_seg(self.lvalue_seg_prefix(e));

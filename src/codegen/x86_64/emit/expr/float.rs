@@ -8,6 +8,7 @@ use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
 use crate::codegen::x86_64::asm::*;
 use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::opcode::{SimdArithOp, SimdWidth};
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::*;
 use crate::const_eval::{self, ConstValue};
@@ -36,7 +37,7 @@ impl Codegen {
                     src: crate::codegen::x86_64::opcode::Operand::Imm(0x80000000u64 as i64),
                 }, &[]));
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC1]));
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 1));
             },
             _ => {
                 // movabs rax, 0x8000000000000000; movq xmm1, rax; xorpd xmm0, xmm1
@@ -46,7 +47,7 @@ impl Codegen {
                     src: crate::codegen::x86_64::opcode::Operand::Imm(0x8000000000000000u64 as i64),
                 }, &[]));
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x57, 0xC1]));
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorpd, SimdWidth::PD, 0, 1));
             },
         }
     }
@@ -102,7 +103,7 @@ impl Codegen {
             self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x5A, 0xC0], "cvtss2sd %xmm0, %xmm0"));
         }
         // subsd xmm0, xmm1 (double 精度减 2^63)
-        self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x5C, 0xC1]));
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Sub, SimdWidth::SD, 0, 1));
         if !is_double {
             // float 情况: 减完后转回 float
             // cvtsd2ss xmm0, xmm0: F2 0F 5A C0
@@ -256,7 +257,7 @@ impl Codegen {
                             &[],
                         );
                         if !self.emit_insn(&insn) {
-                            self.emit_insn(&Insn::raw_bytes(&[0x09, 0xD1])); // or ecx, edx
+                            self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Or, crate::codegen::shared::asm_operand::Width::B32, 1, 2)); // or ecx, edx
                         }
                     }
                     self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 1, 1)); // test ecx, ecx
@@ -301,13 +302,13 @@ impl Codegen {
                             )
                         };
                         if !self.emit_insn(&mk(1, 0, crate::codegen::x86_64::opcode::AluOp::And)) {
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC1]));
+                            self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B64, 1, 0));
                         }
                         if !self.emit_insn(&mk(2, 0, crate::codegen::x86_64::opcode::AluOp::And)) {
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC2]));
+                            self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B64, 2, 0));
                         }
                         if !self.emit_insn(&mk(1, 2, crate::codegen::x86_64::opcode::AluOp::Or)) {
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xD1]));
+                            self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Or, crate::codegen::shared::asm_operand::Width::B64, 1, 2));
                         }
                     }
                     self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 1, 1)); // test rcx, rcx
@@ -415,11 +416,11 @@ impl Codegen {
         if is_double {
             self.emit_insn(&Insn::raw_bytes(&[0xF2, cvt_rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]));
             // addsd xmm0, xmm0: 乘 2.0
-            self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x58, 0xC0]));
+            self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Add, SimdWidth::SD, 0, 0));
         } else {
             self.emit_insn(&Insn::raw_bytes(&[0xF3, cvt_rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]));
             // addss xmm0, xmm0: 乘 2.0
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x58, 0xC0]));
+            self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Add, SimdWidth::SS, 0, 0));
         }
         self.jmp_rel32(&l_done, JumpKind::Jmp);
 
@@ -596,9 +597,9 @@ impl Codegen {
             // 现在 xmm0=l, xmm1=r, [rsp]=l, save_bytes 字节尚未归还
             // r = l / r  (divss/divsd)
             if is_float {
-                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x5E, 0xC1])); // divss xmm0, xmm1
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Div, SimdWidth::SS, 0, 1)); // divss xmm0, xmm1
             } else {
-                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x5E, 0xC1])); // divsd xmm0, xmm1
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Div, SimdWidth::SD, 0, 1)); // divsd xmm0, xmm1
             }
             // trunc 截断到 int64
             if is_float {
@@ -614,9 +615,9 @@ impl Codegen {
             }
             // n * r
             if is_float {
-                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x59, 0xC1])); // mulss xmm0, xmm1
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Mul, SimdWidth::SS, 0, 1)); // mulss xmm0, xmm1
             } else {
-                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x59, 0xC1])); // mulsd xmm0, xmm1
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Mul, SimdWidth::SD, 0, 1)); // mulsd xmm0, xmm1
             }
             // n*r 暂存 xmm1, l 回到 xmm0
             self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x28, 0xC8])); // movapd xmm1, xmm0
@@ -627,9 +628,9 @@ impl Codegen {
             }
             // xmm0 = l - n*r
             if is_float {
-                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x5C, 0xC1])); // subss xmm0, xmm1
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Sub, SimdWidth::SS, 0, 1)); // subss xmm0, xmm1
             } else {
-                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x5C, 0xC1])); // subsd xmm0, xmm1
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Sub, SimdWidth::SD, 0, 1)); // subsd xmm0, xmm1
             }
             self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x83, 0xC4, save_bytes as u8], &format!("add ${save_bytes}, %rsp")));
             return;

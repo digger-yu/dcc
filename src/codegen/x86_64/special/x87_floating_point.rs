@@ -518,10 +518,10 @@ impl Codegen {
     pub fn emit_x87_setcc_flags(&mut self, op: BinOp) {
         match op {
             BinOp::Gt => {
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x97, 0xC0])); // seta al
+                self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::A, 0)); // seta al
             }
             BinOp::Ge => {
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x93, 0xC0])); // setae al
+                self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Ae, 0)); // setae al
             }
             _ => {
                 let invert = matches!(op, BinOp::Ne);
@@ -531,7 +531,7 @@ impl Codegen {
                     _ => 0x94,         // sete  (ZF=1) —— EqEq 与 Ne 共用
                 };
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, cc, 0xC0])); // setcc al
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x9B, 0xC1])); // setnp cl  (PF=0 → 1)
+                self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Np, 1)); // setnp cl  (PF=0 → 1)
                 self.emit_insn(&Insn::raw_bytes(&[0x20, 0xC8])); // and al, cl  → 排除 unordered
                 if invert {
                     self.emit_insn(&Insn::raw_bytes(&[0x34, 0x01])); // xor al, 1

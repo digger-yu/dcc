@@ -8,6 +8,7 @@ use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
 use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::asm::*;
+use crate::codegen::x86_64::opcode::{SimdArithOp, SimdWidth};
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::*;
 use crate::const_eval::{self, ConstValue};
@@ -390,7 +391,7 @@ impl Codegen {
                 &[],
             )); // mov rax, [rsp+0]
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x4C, 0x24, total_sz as u8])); // mov rcx, [rsp+total]
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x39, 0xC8])); // cmp rax, rcx
+                                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Cmp, crate::codegen::shared::asm_operand::Width::B64, 0, 1)); // cmp rax, rcx
                             },
                             2 => {
                                 self.emit_insn(&Insn::new(
@@ -411,7 +412,7 @@ impl Codegen {
                 &[],
             )); // mov eax, [rsp+0]
                                 self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x4C, 0x24, total_sz as u8])); // mov ecx, [rsp+total]
-                                self.emit_insn(&Insn::raw_bytes(&[0x39, 0xC8])); // cmp eax, ecx
+                                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Cmp, crate::codegen::shared::asm_operand::Width::B32, 0, 1)); // cmp eax, ecx
                             },
                             _ => {
                                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x04, 0x24])); // mov ax, [rsp+0]
@@ -437,11 +438,11 @@ impl Codegen {
                 &[],
             )); // mov rax, [rsp+0]
                         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x4C, 0x24, total_sz as u8])); // mov rcx, [rsp+total]
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x39, 0xC8])); // cmp rax, rcx
+                        self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Cmp, crate::codegen::shared::asm_operand::Width::B64, 0, 1)); // cmp rax, rcx
                         self.jmp_rel32(&false_label, JumpKind::Jne);
                         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x44, 0x24, inner_sz as u8])); // mov rax, [rsp+inner]
                         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x4C, 0x24, r_imag_slot as u8])); // mov rcx, [rsp+total+inner]
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x39, 0xC8])); // cmp rax, rcx
+                        self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Cmp, crate::codegen::shared::asm_operand::Width::B64, 0, 1)); // cmp rax, rcx
                         self.jmp_rel32(&false_label, JumpKind::Jne);
                     }
                 }
@@ -701,7 +702,7 @@ impl Codegen {
             self.emit_xmm0_r13_disp(&[rpfx, 0x41, 0x0F, 0x10], result_off + r_isz);
             self.emit_float_convert(&ri, inner);
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0 (标量: 虚部 0)
+            self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 0)); // xorps xmm0, xmm0 (标量: 虚部 0)
         }
     }
     pub(crate) fn gen_complex_init(&mut self, name: &str, inner: &Type, init: &Expr) {
@@ -848,7 +849,7 @@ impl Codegen {
                 self.gen_complex_imag_into_xmm0(init, inner);
             } else {
                 // 浮点虚部仅 inner_sz 字节，勿用 64 位 store 以免覆盖相邻实部
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 0)); // xorps xmm0, xmm0
             }
             self.gen_float_store_at(imag_base, inner);
             let _ = imag_bytes;
@@ -951,7 +952,7 @@ impl Codegen {
                         &[],
                     );
                     if !self.emit_insn(&insn) {
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x29, 0xC8])); // sub rax, rcx
+                        self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Sub, crate::codegen::shared::asm_operand::Width::B64, 0, 1)); // sub rax, rcx
                     }
                 }
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rdx
@@ -983,11 +984,11 @@ impl Codegen {
                         &[],
                     );
                     if !self.emit_insn(&insn) {
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x29, 0xCA])); // sub rdx, rcx
+                        self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Sub, crate::codegen::shared::asm_operand::Width::B64, 2, 1)); // sub rdx, rcx
                     }
                 }
             }
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x39, 0xD0])); // cmp rax, rdx
+            self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Cmp, crate::codegen::shared::asm_operand::Width::B64, 0, 2)); // cmp rax, rdx
         } else {
             // eax = |c|, edx = |d| (inner<4 时按宽度扩展加载)
             match inner_sz {
@@ -1020,8 +1021,8 @@ impl Codegen {
                 &[],
             )); // mov ecx, eax
                 self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xF9, 0x1F])); // sar ecx, 31
-                self.emit_insn(&Insn::raw_bytes(&[0x31, 0xC8])); // xor eax, ecx
-                self.emit_insn(&Insn::raw_bytes(&[0x29, 0xC8])); // sub eax, ecx
+                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B32, 0, 1)); // xor eax, ecx
+                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Sub, crate::codegen::shared::asm_operand::Width::B32, 0, 1)); // sub eax, ecx
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,
@@ -1035,10 +1036,10 @@ impl Codegen {
                 &[],
             )); // mov ecx, edx
                 self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xF9, 0x1F]));
-                self.emit_insn(&Insn::raw_bytes(&[0x31, 0xCA])); // xor edx, ecx
-                self.emit_insn(&Insn::raw_bytes(&[0x29, 0xCA])); // sub edx, ecx
+                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B32, 2, 1)); // xor edx, ecx
+                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Sub, crate::codegen::shared::asm_operand::Width::B32, 2, 1)); // sub edx, ecx
             }
-            self.emit_insn(&Insn::raw_bytes(&[0x39, 0xD0])); // cmp eax, edx
+            self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Cmp, crate::codegen::shared::asm_operand::Width::B32, 0, 2)); // cmp eax, edx
         }
         self.jmp_rel32(&lc, JumpKind::Ja);
         // ---- |d| >= |c| 分支: r = c/d ----
@@ -1480,9 +1481,9 @@ impl Codegen {
                 // __real__ imaginary → 0
                 if matches!(&inner.base, Type::Float | Type::Double | Type::LongDouble) {
                     if matches!(&inner.base, Type::Float) {
-                        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0
+                        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 0)); // xorps xmm0, xmm0
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x57, 0xC0])); // xorpd xmm0, xmm0
+                        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorpd, SimdWidth::PD, 0, 0)); // xorpd xmm0, xmm0
                     }
                 } else {
                     self.mov_imm(dst, 0);
@@ -1502,7 +1503,7 @@ impl Codegen {
             if is_real {
                 self.gen_expr(e, dst);
             } else if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 0)); // xorps xmm0, xmm0
             } else {
                 self.mov_imm(dst, 0);
             }
@@ -2092,7 +2093,7 @@ impl Codegen {
                     }
                     self.emit_float_convert(&v_inner, op_inner);
                     self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]));
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 0)); // xorps xmm0, xmm0
                     self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]));
                 } else if !is_cplx {
                     // 标量整数变量提升为整数 _Complex: 实部=按自身宽度
@@ -2111,7 +2112,7 @@ impl Codegen {
                         let cvt_pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
                         self.emit_insn(&Insn::raw_bytes(&[cvt_pfx, 0x48, 0x0F, 0x2A, 0xC0]));
                         self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]));
-                        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0]));
+                        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 0));
                         self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]));
                     } else {
                         self.store_rsp_qword(0, rsp_slot as usize);
@@ -2296,7 +2297,7 @@ impl Codegen {
                     }
                     let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
                     self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]));
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 0)); // xorps xmm0, xmm0
                     self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]));
                 } else {
                     // 标量整数提升为整数 _Complex: 实部=值, 虚部=0
