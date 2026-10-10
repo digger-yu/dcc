@@ -888,7 +888,19 @@ impl Codegen {
                                             | Type::ULongLong
                                     )
                                 {
-                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2])); // xor rdx, rdx
+                                    // P11: xor rdx, rdx via typed opcode.
+                                    let insn = Insn::new(
+                                        X86_64Opcode::AluRm {
+                                            op: AluOp::Xor,
+                                            width: Width::B64,
+                                            dst: OpcodeOperand::Reg(2, Width::B64),
+                                            src: OpcodeOperand::Reg(2, Width::B64),
+                                        },
+                                        &[],
+                                    );
+                                    if !self.emit_insn(&insn) {
+                                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2])); // xor rdx, rdx
+                                    }
                                 } else {
                                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0x99])); // cqo (sign-extend rax→rdx:rax)
                                 }
@@ -1059,7 +1071,21 @@ impl Codegen {
                         self.gen_expr(idx, 1); // rcx = index
                         self.pop(0); // 恢复基址到 rax
                         self.emit_index_scale(es, arr, elem_ty);
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xc8])); // add rax, rcx (addr in rax)
+                        // P11: add rax, rcx via typed opcode (addr in rax).
+                        {
+                            let insn = Insn::new(
+                                X86_64Opcode::AluRm {
+                                    op: AluOp::Add,
+                                    width: Width::B64,
+                                    dst: OpcodeOperand::Reg(0, Width::B64),
+                                    src: OpcodeOperand::Reg(1, Width::B64),
+                                },
+                                &[],
+                            );
+                            if !self.emit_insn(&insn) {
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xc8])); // add rax, rcx (addr in rax)
+                            }
+                        }
                         self.push(0); // save addr
                         let is_cx_float = matches!(elem_ty, Type::Complex(ref c)
                             if matches!(&c.base,
@@ -1101,7 +1127,21 @@ impl Codegen {
                         self.gen_expr(idx, 1);
                         self.pop(0);
                         self.emit_index_scale(es, arr, elem_ty);
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xc8])); // add rax, rcx (addr in rax)
+                        // P11: add rax, rcx via typed opcode (addr in rax).
+                        {
+                            let insn = Insn::new(
+                                X86_64Opcode::AluRm {
+                                    op: AluOp::Add,
+                                    width: Width::B64,
+                                    dst: OpcodeOperand::Reg(0, Width::B64),
+                                    src: OpcodeOperand::Reg(1, Width::B64),
+                                },
+                                &[],
+                            );
+                            if !self.emit_insn(&insn) {
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xc8])); // add rax, rcx (addr in rax)
+                            }
+                        }
                         self.push(0);
                         let is_cx_float2 = matches!(elem_ty, Type::Complex(ref c)
                             if matches!(&c.base,
@@ -1366,7 +1406,21 @@ impl Codegen {
                                 // >32 位掩码: movabs rdx, mask; and rax, rdx
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xBA])); // movabs rdx, imm64
                                 self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xD0])); // and rax, rdx
+                                // P11: and rax, rdx via typed opcode.
+                                {
+                                    let insn = Insn::new(
+                                        X86_64Opcode::AluRm {
+                                            op: AluOp::And,
+                                            width: Width::B64,
+                                            dst: OpcodeOperand::Reg(0, Width::B64),
+                                            src: OpcodeOperand::Reg(2, Width::B64),
+                                        },
+                                        &[],
+                                    );
+                                    if !self.emit_insn(&insn) {
+                                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xD0])); // and rax, rdx
+                                    }
+                                }
                             }
                         }
                         // 左移到位置: shl rax, bit_off
@@ -1867,11 +1921,39 @@ impl Codegen {
                             self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xD2])); // not rdx
                         },
                         UnOp::Not => {
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xD0])); // or rax, rdx
+                            // P11: or rax, rdx via typed opcode.
+                            {
+                                let insn = Insn::new(
+                                    X86_64Opcode::AluRm {
+                                        op: AluOp::Or,
+                                        width: Width::B64,
+                                        dst: OpcodeOperand::Reg(0, Width::B64),
+                                        src: OpcodeOperand::Reg(2, Width::B64),
+                                    },
+                                    &[],
+                                );
+                                if !self.emit_insn(&insn) {
+                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xD0])); // or rax, rdx
+                                }
+                            }
                             self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x85, 0xC0], "test %rax, %rax")); // test rax, rax
                             self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x94, 0xC0], "sete %al")); // sete al
                             self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xB6, 0xC0], "movzbq %al, %rax"));
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2])); // high = 0
+                            // P11: xor rdx, rdx via typed opcode (high = 0).
+                            {
+                                let insn = Insn::new(
+                                    X86_64Opcode::AluRm {
+                                        op: AluOp::Xor,
+                                        width: Width::B64,
+                                        dst: OpcodeOperand::Reg(2, Width::B64),
+                                        src: OpcodeOperand::Reg(2, Width::B64),
+                                    },
+                                    &[],
+                                );
+                                if !self.emit_insn(&insn) {
+                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2])); // high = 0
+                                }
+                            }
                         },
                         UnOp::Plus => {},
                     }
