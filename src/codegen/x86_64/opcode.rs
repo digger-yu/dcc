@@ -2110,6 +2110,99 @@ mod tests {
         assert_eq!(o.encode(), Some(vec![0x8B, 0x04, 0x24]));
     }
 
+    // ---- P11 Bucket A: MovRm reg<->mem with disp8/disp32 ----
+
+    #[test]
+    fn mov_rm_load_r64_base_disp8() {
+        // mov rcx, [r10+16]: 49 8B 4A 10 (REX.WB: B=1 r10=10; reg=rcx=1; disp=0x10)
+        let o = X86_64Opcode::MovRm {
+            width: Width::B64,
+            dst: reg(1, Width::B64),
+            src: Operand::Mem(MemOperand {
+                disp: 16, base: Some(10), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0x49, 0x8B, 0x4A, 0x10]));
+    }
+
+    #[test]
+    fn mov_rm_load_r64_base_disp32() {
+        // mov rax, [r13+disp32]: 49 8B 85 XX XX XX XX (REX.WB; reg=rax=0, base=r13)
+        let o = X86_64Opcode::MovRm {
+            width: Width::B64,
+            dst: reg(0, Width::B64),
+            src: Operand::Mem(MemOperand {
+                disp: 0x100, base: Some(13), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0x49, 0x8B, 0x85, 0x00, 0x01, 0, 0]));
+    }
+
+    #[test]
+    fn mov_rm_load_r32_base_disp8() {
+        // mov eax, [r10+4]: 41 8B 42 04 (REX.B; reg=eax=0)
+        let o = X86_64Opcode::MovRm {
+            width: Width::B32,
+            dst: reg(0, Width::B32),
+            src: Operand::Mem(MemOperand {
+                disp: 4, base: Some(10), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0x41, 0x8B, 0x42, 0x04]));
+    }
+
+    #[test]
+    fn mov_rm_store_r64_base_disp8() {
+        // mov [r10+8], rcx: 49 89 4A 08 (REX.WB; reg=rcx=1)
+        let o = X86_64Opcode::MovRm {
+            width: Width::B64,
+            dst: Operand::Mem(MemOperand {
+                disp: 8, base: Some(10), index: None, seg: None,
+            }),
+            src: reg(1, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x49, 0x89, 0x4A, 0x08]));
+    }
+
+    #[test]
+    fn mov_rm_store_r64_base_disp32() {
+        // mov [r13+disp32], rax: 49 89 85 XX XX XX XX
+        let o = X86_64Opcode::MovRm {
+            width: Width::B64,
+            dst: Operand::Mem(MemOperand {
+                disp: 0x100, base: Some(13), index: None, seg: None,
+            }),
+            src: reg(0, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x49, 0x89, 0x85, 0x00, 0x01, 0, 0]));
+    }
+
+    #[test]
+    fn mov_rm_store_r64_base_disp0() {
+        // mov [rdi], r9: 4C 89 0F (REX.WR: reg=r9=9; r/m=rdi=7)
+        let o = X86_64Opcode::MovRm {
+            width: Width::B64,
+            dst: Operand::Mem(MemOperand {
+                disp: 0, base: Some(7), index: None, seg: None,
+            }),
+            src: reg(9, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x4C, 0x89, 0x0F]));
+    }
+
+    #[test]
+    fn mov_rm_store_r64_base_disp8_sib_rsp() {
+        // mov [rsp+disp8], r9: 4C 89 4C 24 XX (SIB follows mod=01 rm=4)
+        let o = X86_64Opcode::MovRm {
+            width: Width::B64,
+            dst: Operand::Mem(MemOperand {
+                disp: 16, base: Some(4), index: None, seg: None,
+            }),
+            src: reg(9, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x4C, 0x89, 0x4C, 0x24, 0x10]));
+    }
+
     // ---- MovExt reg-reg (P11) ----
 
     #[test]

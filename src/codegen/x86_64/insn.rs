@@ -183,6 +183,28 @@ impl Insn {
         )
     }
 
+    /// P11 Bucket A: MovRm reg <-> mem [base+disp] (load or store).
+    /// load=true: mov reg, [base+disp] (0x8B / 0x8A). load=false: mov [base+disp], reg (0x89 / 0x88).
+    /// width: B8/B16/B32/B64. base: Intel reg number 0..15. disp: byte displacement (sign-ext).
+    pub fn mov_rm_mem(
+        load: bool,
+        width: crate::codegen::shared::asm_operand::Width,
+        reg_idx: u8,
+        base: u8,
+        disp: i32,
+    ) -> Self {
+        use crate::codegen::x86_64::opcode::{MemOperand, Operand, X86_64Opcode};
+        let reg = Operand::Reg(reg_idx, width);
+        let mem = Operand::Mem(MemOperand {
+            disp,
+            base: Some(base),
+            index: None,
+            seg: None,
+        });
+        let (dst, src) = if load { (reg, mem) } else { (mem, reg) };
+        Insn::new(X86_64Opcode::MovRm { width, dst, src }, &[])
+    }
+
     /// P11 Bucket B: AluRm reg, reg (mod=11) — add/sub/and/or/xor/cmp.
     pub fn alu_rm_reg_reg(
         op: crate::codegen::x86_64::opcode::AluOp,
