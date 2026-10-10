@@ -1762,14 +1762,20 @@ impl Codegen {
                 let is_f = matches!(arg_ty, Type::Float);
                 // 1. isinf: |x| == +Inf 且非 NaN
                 self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB8]));
-                self.emit_insn(&Insn::raw_bytes(&0x7FFFFFFFFFFFFFFFu64.to_le_bytes()));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                    src: crate::codegen::x86_64::opcode::Operand::Imm(0x7FFFFFFFFFFFFFFFu64 as i64),
+                }, &[]));
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8])); // movq xmm1, rax
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x54, 0xC1])); // andps xmm0, xmm1 (|x|)
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB8]));
                 // float +Inf bit pattern: 0x7F800000
                 let inf_bits: u64 = if is_f { 0x7F800000 } else { 0x7FF0000000000000 };
-                self.emit_insn(&Insn::raw_bytes(&inf_bits.to_le_bytes()));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                    src: crate::codegen::x86_64::opcode::Operand::Imm(inf_bits as i64),
+                }, &[]));
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8])); // movq xmm1, rax
                                                             // ucomiss (0F 2E) for float, ucomisd (66 0F 2E) for double
                 if is_f {
@@ -1867,15 +1873,21 @@ impl Codegen {
                 let is_f = matches!(arg_ty, Type::Float);
                 self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
                                             // 加载 abs_mask 到 xmm1
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB8]));
-                self.emit_insn(&Insn::raw_bytes(&0x7FFFFFFFFFFFFFFFu64.to_le_bytes()));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                    src: crate::codegen::x86_64::opcode::Operand::Imm(0x7FFFFFFFFFFFFFFFu64 as i64),
+                }, &[]));
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8])); // movq xmm1, rax
                                                             // andps xmm0, xmm1: |x|
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x54, 0xC1]));
                 // 加载 +Inf 到 xmm1
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB8]));
                 let inf_bits: u64 = if is_f { 0x7F800000 } else { 0x7FF0000000000000 };
-                self.emit_insn(&Insn::raw_bytes(&inf_bits.to_le_bytes()));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                    src: crate::codegen::x86_64::opcode::Operand::Imm(inf_bits as i64),
+                }, &[]));
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8])); // movq xmm1, rax
                                                             // ucomiss (0F 2E) for float, ucomisd (66 0F 2E) for double
                 if is_f {
@@ -1980,9 +1992,12 @@ impl Codegen {
                 }, &[])); // movzx ecx, cl
                                                 // 3. Inf 测试
                 self.gen_expr(&args[5], Self::EVAL_BASE);
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB8]));
                 let inf_bits: u64 = if is_f { 0x7F800000 } else { 0x7FF0000000000000 };
-                self.emit_insn(&Insn::raw_bytes(&inf_bits.to_le_bytes()));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                    src: crate::codegen::x86_64::opcode::Operand::Imm(inf_bits as i64),
+                }, &[]));
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8])); // movq xmm1, rax
                 self.emit_insn(&Insn::raw_bytes(&[cmp_prefix, 0x0F, cmp_opcode, 0xC1])); // ucomis{s,d} xmm0, xmm1
                 self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x94, 0xC2], "sete %dl")); // sete dl
@@ -3810,8 +3825,11 @@ impl Codegen {
                 let is_f = matches!(arg_ty, Type::Float);
                 self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
                                             // 加载 abs_mask 到 xmm1
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB8]));
-                self.emit_insn(&Insn::raw_bytes(&0x7FFFFFFFFFFFFFFFu64.to_le_bytes()));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                    src: crate::codegen::x86_64::opcode::Operand::Imm(0x7FFFFFFFFFFFFFFFu64 as i64),
+                }, &[]));
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8])); // movq xmm1, rax
                 if is_f {
                     self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x54, 0xC1])); // andps xmm0, xmm1
@@ -3950,13 +3968,19 @@ impl Codegen {
                 let arg_ty = args[0].ty();
                 let is_f = matches!(arg_ty, Type::Float);
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB8]));
-                self.emit_insn(&Insn::raw_bytes(&0x7FFFFFFFFFFFFFFFu64.to_le_bytes()));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                    src: crate::codegen::x86_64::opcode::Operand::Imm(0x7FFFFFFFFFFFFFFFu64 as i64),
+                }, &[]));
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x54, 0xC1]));
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB8]));
                 let inf_bits: u64 = if is_f { 0x7F800000 } else { 0x7FF0000000000000 };
-                self.emit_insn(&Insn::raw_bytes(&inf_bits.to_le_bytes()));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                    src: crate::codegen::x86_64::opcode::Operand::Imm(inf_bits as i64),
+                }, &[]));
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
                 if is_f {
                     self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x2E, 0xC1]));

@@ -1796,8 +1796,11 @@ impl Codegen {
         } else {
             0x8000_0000_0000_0000
         };
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB8]));
-        self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes())); // movabs rax, mask
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+            width: crate::codegen::shared::asm_operand::Width::B64,
+            dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+            src: crate::codegen::x86_64::opcode::Operand::Imm(mask as i64),
+        }, &[]));
         self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8])); // movq xmm1, rax
         if xmm == 1 {
             // xorps/xorpd xmm0, xmm1 → 目标为 xmm1 时借用 xmm2
