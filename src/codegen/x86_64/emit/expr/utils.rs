@@ -153,7 +153,18 @@ impl Codegen {
                 }
                 // 零扩展被除数 (rax) 从32位到64位
                 if need_zero_ext {
-                    self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0])); // mov eax, eax (zero-extends to rax)
+                    self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            ));; // mov eax, eax (zero-extends to rax)
                 }
                 if src == 2 {
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rcx (restore divisor)

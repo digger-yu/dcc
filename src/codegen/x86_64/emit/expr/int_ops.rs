@@ -320,7 +320,18 @@ impl Codegen {
         // rax = result
         // 7. 截断到目标类型宽度 (32位以下)
         if lv_sz == 4 && lv_ty.is_int() {
-            self.emit_insn(&Insn::raw_bytes(&[0x89, 0xc0])); // mov eax, eax (truncate to 32 bits)
+            self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            ));; // mov eax, eax (truncate to 32 bits)
         }
         // 8. 恢复地址并存储
         self.pop(1); // pop rcx (address)

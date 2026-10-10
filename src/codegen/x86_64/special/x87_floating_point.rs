@@ -207,7 +207,18 @@ impl Codegen {
             self.emit_insn(&Insn::raw_bytes(&[0xDE, 0xC1])); // faddp                          → 2h + b = x
         } else {
             if unsigned {
-                self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0])); // mov eax, eax → 零扩展高 32 位
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            ));; // mov eax, eax → 零扩展高 32 位
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x04, 0x24])); // mov [rsp], rax
                 self.emit_x87_mem_at(0xDB, 0, 4, 0, true); // fild qword [rsp]
             } else if sz >= 8 {

@@ -2415,7 +2415,18 @@ impl Codegen {
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x63, 0xc9])); // movsxd rcx, ecx
                             }
                             if b_uns {
-                                self.emit_insn(&Insn::raw_bytes(&[0x89, 0xc0])); // mov eax, eax
+                                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            ));; // mov eax, eax
                             } else {
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x63, 0xc0])); // movsxd rax, eax
                             }
@@ -2525,7 +2536,18 @@ impl Codegen {
                 match result_size {
                     4 => {
                         // 32 位: 截断到 eax
-                        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xc0])); // mov eax, eax (截断到 32 位，同时零扩展到 64 位)
+                        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            ));; // mov eax, eax (截断到 32 位，同时零扩展到 64 位)
                                                   // mov eax, eax 已经零扩展到 rax，直接复制到 rdx
                         self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rdx, rax
                         if !is_unsigned {
