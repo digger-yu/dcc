@@ -119,7 +119,27 @@ impl Codegen {
             // (与 VLA 数组同一约定, gen_lvalue_addr/load_stack 统一读)
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xc0, 0x0f])); // add rax, 15
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xe0, 0xf0])); // and rax, -16
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x29, 0xC4])); // sub rsp, rax
+            // P11: 收敛到 AluRm{Sub, B64, rsp, rax}.
+            {
+                let insn = Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                        op: crate::codegen::x86_64::opcode::AluOp::Sub,
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            4,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
+                        src: crate::codegen::x86_64::opcode::Operand::Reg(
+                            0,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
+                    },
+                    &[],
+                );
+                if !self.emit_insn(&insn) {
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x29, 0xC4])); // sub rsp, rax
+                }
+            }
             self.store_stack(4, off);
             return;
         }
@@ -156,7 +176,27 @@ impl Codegen {
         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xe0, 0xf0])); // and rax, -16
                                               // 保存当前 rsp (VLA 基址)
                                               // sub rsp, rax: 48 29 C4
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x29, 0xC4]));
+        // P11: 收敛到 AluRm{Sub, B64, rsp, rax}.
+        {
+            let insn = Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                    op: crate::codegen::x86_64::opcode::AluOp::Sub,
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        4,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                    ),
+                },
+                &[],
+            );
+            if !self.emit_insn(&insn) {
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x29, 0xC4]));
+            }
+        }
         self.store_stack(4, off);
         // 对齐 rsp 到 16 字节 (已经是 16 对齐的, 因为 rax 是 16 对齐的)
     }
