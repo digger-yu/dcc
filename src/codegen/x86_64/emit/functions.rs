@@ -1166,7 +1166,14 @@ impl Codegen {
             // C99 5.1.2.2.3: main 无 return 语句时隐式 return 0.
             // 否则 epilogue 直接 ret, eax 为启动代码残留值.
             if f.name.name == "main" && matches!(f.ret_ty, Type::Int) {
-                self.emit_insn(&Insn::raw_bytes(&[0xB8, 0, 0, 0, 0])); // mov eax, 0
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        width: crate::codegen::shared::asm_operand::Width::B32,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B32),
+                        src: crate::codegen::x86_64::opcode::Operand::Imm(0),
+                    },
+                    &[],
+                )); // mov eax, 0
             }
             // -finstrument-functions: 自然结尾的函数也需要 exit hook
             // (之前只在 Stmt::Return 路径发射, fallthrough 到函数末尾时遗漏)

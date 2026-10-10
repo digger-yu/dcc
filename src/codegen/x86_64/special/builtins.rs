@@ -1759,7 +1759,14 @@ impl Codegen {
                 // 我们用栈暂存 args[0..3] 到 r12-r15? 太复杂.
                 // 简化: 返回分类编号 (0..4), 由调用者按映射.
                 // 分类编号: NaN=0, Inf=1, Zero=2, Subnormal=3, Normal=4
-                self.emit_insn(&Insn::raw_bytes(&[0xB8, 0x04, 0x00, 0x00, 0x00])); // mov eax, 4 (Normal)
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        width: crate::codegen::shared::asm_operand::Width::B32,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B32),
+                        src: crate::codegen::x86_64::opcode::Operand::Imm(4),
+                    },
+                    &[],
+                )); // mov eax, 4 (Normal)
                                                             // eax=4 默认
                                                             // 若 NaN (ebx=1): eax = 0
                                                             // 若 Inf (edx=1): eax = 1
