@@ -1388,16 +1388,58 @@ impl Codegen {
         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xe5])); // mov rbp, rsp
                                         // 调用 constructor 函数
         for (_p, ctor) in &ctors {
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xc0])); // xor rax, rax (no variadic args)
+            // P11: xor rax, rax via typed opcode (no variadic args)
+            {
+                let insn = Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                        op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                        src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                    },
+                    &[],
+                );
+                if !self.emit_insn(&insn) {
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xc0])); // xor rax, rax (no variadic args)
+                }
+            }
             self.call_label(ctor);
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xc0])); // xor rax, rax
+        // P11: xor rax, rax via typed opcode (main call)
+        {
+            let insn = Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                    op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                },
+                &[],
+            );
+            if !self.emit_insn(&insn) {
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xc0])); // xor rax, rax
+            }
+        }
         self.call_label("main");
         // 保存 main 返回值
         self.emit_insn(&Insn::raw_bytes(&[0x41, 0x89, 0xc5])); // mov r13d, eax
                                         // 调用 destructor 函数
         for (_p, dtor) in &dtors {
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xc0])); // xor rax, rax
+            // P11: xor rax, rax via typed opcode
+            {
+                let insn = Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                        op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                        src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                    },
+                    &[],
+                );
+                if !self.emit_insn(&insn) {
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xc0])); // xor rax, rax
+                }
+            }
             self.call_label(dtor);
         }
         self.emit_insn(&Insn::raw_bytes(&[0x4c, 0x89, 0xe4])); // mov rsp, r12 (恢复原始 rsp)
