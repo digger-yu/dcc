@@ -986,7 +986,18 @@ impl Codegen {
         self.emit_insn(&Insn::raw_bytes(&[0x89, 0xF0])); // mov eax, esi
         self.emit_imul_rm(inner_sz, total_sz); // imul rax, [rsp+total]
         self.emit_add_rm(inner_sz, total_sz + inner_sz); // add, [rsp+ti]
-        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC7])); // mov edi, eax (den)
+        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        7, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov edi, eax (den)
                                   // real = (a*r + b) / den
         self.emit_insn(&Insn::raw_bytes(&[0x89, 0xF0])); // mov eax, esi
         self.emit_imul_r10(inner_sz); // imul rax, r10
@@ -1031,7 +1042,18 @@ impl Codegen {
         self.emit_insn(&Insn::raw_bytes(&[0x89, 0xF0])); // mov eax, esi
         self.emit_imul_rm(inner_sz, total_sz + inner_sz); // imul rax, [rsp+ti]
         self.emit_add_rm(inner_sz, total_sz); // add, [rsp+total]
-        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC7])); // mov edi, eax (den)
+        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        7, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov edi, eax (den)
                                   // real = (r*b + a) / den
         self.emit_insn(&Insn::raw_bytes(&[0x89, 0xF0])); // mov eax, esi
         self.emit_imul_r11(inner_sz); // imul rax, r11
@@ -1126,7 +1148,18 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x54, 0x24, i]));
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x74, 0x24, ti]));
             }
-            self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC7])); // edi = a
+            self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        7, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // edi = a
             self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAF, 0xF9])); // imul edi, ecx (ac)
             self.emit_insn(&Insn::raw_bytes(&[0x41, 0x89, 0xD0])); // mov r8d, edx (b)
             self.emit_insn(&Insn::raw_bytes(&[0x44, 0x0F, 0xAF, 0xC6])); // imul r8d, esi (bd)

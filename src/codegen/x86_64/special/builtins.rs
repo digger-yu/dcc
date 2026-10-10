@@ -1648,7 +1648,18 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x20, 0xD8])); // and al, bl
                                           // movzx eax, al
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0xC0]));
-                self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC7])); // mov edi, eax (edi = isinf)
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        7, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov edi, eax (edi = isinf)
                                           // 2. sign: 重新加载 x, 取符号位
                 self.gen_expr(&args[0], Self::EVAL_BASE);
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x50, 0xC0])); // movmskps eax, xmm0
