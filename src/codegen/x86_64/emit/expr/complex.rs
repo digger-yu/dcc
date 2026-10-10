@@ -1855,7 +1855,7 @@ impl Codegen {
                 // 按 64 位双字打包 → 虚部被挤到 64..96 位, movsd 读丢)
                 self.emit_insn(&Insn::simd_mov_mem_base(false, crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 0, 0));
                 self.emit_insn(&Insn::simd_mov_mem_base(false, crate::codegen::x86_64::opcode::SimdWidth::SS, 1, 0, 4));
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x14, 0xC1]));
+                self.emit_insn(&Insn::unpcklps_xmm(0, 1));
                 return;
             }
             self.emit_xmm_rax_disp(pfx, 0, 0); // xmm0 = 实部
@@ -1869,7 +1869,7 @@ impl Codegen {
         self.emit_xmm_r13_disp(pfx, 0x10, 1, result_off + inner_sz);
         if is_float {
             // 物化区 [real@0..4][imag@4..8] → 打包 xmm0 (unpcklps: 0F 14)
-            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x14, 0xC1])); // unpcklps xmm0, xmm1
+            self.emit_insn(&Insn::unpcklps_xmm(0, 1)); // unpcklps xmm0, xmm1
         }
     }
     /// `_Complex` 返回值的交付总入口。先问“源是否已经是目标复数类型的

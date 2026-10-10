@@ -118,6 +118,8 @@ pub(crate) enum SimdArithOp {
     Subpd,
     Mulpd,
     Divpd,
+    /// P11 Bucket G: unpcklps xmm_dst, xmm_src (0F 14 /r) — low-half interleave.
+    Unpcklps,
 }
 
 /// SIMD 宽度 — 步骤 4: SimdMov 用来发 xmm store/load 到 rsp 槽.
@@ -1515,6 +1517,8 @@ impl X86_64Opcode {
                     (SimdArithOp::PSub, SimdWidth::W) => (0x66, 0xF9),
                     (SimdArithOp::PSub, SimdWidth::D) => (0x66, 0xFA),
                     (SimdArithOp::PSub, SimdWidth::Q) => (0x66, 0xFB),
+                    // P11 Bucket G: unpcklps xmm_dst, xmm_src (0F 14 /r, no legacy prefix).
+                    (SimdArithOp::Unpcklps, _) => (0x00, 0x14),
                     _ => return None,
                 };
                 let mut rex: u8 = 0x40;
@@ -2848,6 +2852,18 @@ mod tests {
             src: xmm(1),
         };
         assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0xF9, 0xC1]));
+    }
+
+    #[test]
+    fn simd_unpcklps_xmm0_xmm1() {
+        // unpcklps xmm0, xmm1:  0F 14 C1  (no legacy prefix)
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Unpcklps,
+            width: SimdWidth::PS,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0x14, 0xC1]));
     }
 
     // ---- SimdArith packed float (P11 Bucket B) ----

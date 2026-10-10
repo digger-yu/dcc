@@ -658,6 +658,16 @@ impl Insn {
         )
     }
 
+    /// P11 Bucket G: unpcklps xmm_dst, xmm_src (0F 14 /r).
+    pub fn unpcklps_xmm(dst_xmm: u8, src_xmm: u8) -> Self {
+        Insn::simd_arith_reg(
+            crate::codegen::x86_64::opcode::SimdArithOp::Unpcklps,
+            crate::codegen::x86_64::opcode::SimdWidth::PS,
+            dst_xmm,
+            src_xmm,
+        )
+    }
+
     pub fn encode_bytes(&self) -> Option<Vec<u8>> {
         // 类型化变体: 让 opcode.rs 现场算字节. 尚未实现的变体返回 None →
         // 发射方必须切回 raw_bytes 兜底; 当前没有任何调用点依赖 None 分支.
