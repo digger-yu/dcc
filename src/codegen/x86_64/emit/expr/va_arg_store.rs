@@ -654,8 +654,13 @@ impl Codegen {
         }
         let ap_off = self.var_offset(ap_name);
         // r8 = overflow_arg_area (va_list + 8)
-        self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x8B, 0x85]));
-        self.emit_insn(&Insn::raw_bytes(&((ap_off + 8) as i32).to_le_bytes()));
+        self.emit_insn(&Insn::mov_rm_mem(
+            true,
+            crate::codegen::shared::asm_operand::Width::B64,
+            8,
+            13,
+            ap_off as i32 + 8,
+        )); // mov r8, [r13+ap_off+8]
         // r9 = (r8 + 15) & ~15 (16 字节对齐)
         self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x8D, 0x48, 0x0F])); // lea r9, [r8+15] (REX.WB: B=1 for r8)
         self.emit_insn(&Insn::raw_bytes(&[0x49, 0x81, 0xE1])); // and r9d, imm32
@@ -665,14 +670,25 @@ impl Codegen {
                                           // r9 += 16 (推进到下一个 16 字节对齐位置)
         self.emit_insn(&Insn::raw_bytes(&[0x49, 0x83, 0xC1, 0x10])); // add r9, 16
                                               // 写回 overflow_arg_area: [r13+ap_off+8] = r9
-        self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x89, 0x8D]));
-        self.emit_insn(&Insn::raw_bytes(&((ap_off + 8) as i32).to_le_bytes()));
+        self.emit_insn(&Insn::mov_rm_mem(
+            false,
+            crate::codegen::shared::asm_operand::Width::B64,
+            9,
+            13,
+            ap_off as i32 + 8,
+        )); // mov [r13+ap_off+8], r9 (disp32)
         // 结果在 st(0)（`long double` 的 rvalue 通道）
     }
     fn gen_va_arg_long_double_global(&mut self, ap_name: &str) {
         self.emit_global_addr(10, ap_name); // lea r10, [rip+gap]
                                             // rcx = overflow_arg_area ([r10+8]): REX.W+B (0x49) 使 rm=010→r10
-        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x4A, 0x08])); // mov rcx, [r10+8]
+        self.emit_insn(&Insn::mov_rm_mem(
+            true,
+            crate::codegen::shared::asm_operand::Width::B64,
+            1,
+            10,
+            8,
+        )); // mov rcx, [r10+8]
                                               // r9 = (rcx + 15) & ~15 (16 字节对齐)
         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x49, 0x0F])); // lea rcx, [rcx+15]
         self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::And, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(-16)}, &[])); // and rcx, ~15
@@ -681,7 +697,13 @@ impl Codegen {
                                            // rcx += 16 (推进到下一个 16 字节对齐位置)
         self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Add, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(16)}, &[])); // add rcx, 16
                                               // 写回 [r10+8]: REX.W+B 使 rm=010→r10, reg=001→rcx 源
-        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x4A, 0x08])); // mov [r10+8], rcx
+        self.emit_insn(&Insn::mov_rm_mem(
+            false,
+            crate::codegen::shared::asm_operand::Width::B64,
+            1,
+            10,
+            8,
+        )); // mov [r10+8], rcx
                                               // 结果在 st(0)（`long double` 的 rvalue 通道）
     }
     pub(crate) fn gen_va_arg_ptr(&mut self, arg_ty: &Type, dst: u8) {
@@ -700,8 +722,18 @@ impl Codegen {
         // Long double: SysV MEMORY 类, 从 overflow_arg_area 读取
         // (值通道是 st(0)，与其他 long double rvalue 一致)
         if matches!(arg_ty, Type::LongDouble) {
-            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0xCB])); // mov r11, rcx (回写基址)
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x49, 0x08])); // mov rcx, [rcx+8] (overflow)
+            self.emit_insn(&Insn::mov_rm_reg(
+                crate::codegen::shared::asm_operand::Width::B64,
+                11,
+                1,
+            )); // mov r11, rcx (回写基址)
+            self.emit_insn(&Insn::mov_rm_mem(
+                true,
+                crate::codegen::shared::asm_operand::Width::B64,
+                1,
+                1,
+                8,
+            )); // mov rcx, [rcx+8] (overflow)
                                                   // rcx = (rcx + 15) & ~15 (16 字节对齐)
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x49, 0x0F])); // lea rcx, [rcx+15]
             self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::And, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(-16)}, &[])); // and rcx, ~15
@@ -713,7 +745,13 @@ impl Codegen {
                                                   // 旧编码 0x4C,0x89,0x4B 实际是 mov [rbx+8],r9 (REX.R=1 无 REX.B,
                                                   // reg→r9, rm→rbx), 写入错误基址导致 stdarg-1 segfault; 正确的
                                                   // mov [r11+8],rcx 需 REX.B (reg=rcx 源, rm=r11 目标)。
-            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x4B, 0x08]));
+            self.emit_insn(&Insn::mov_rm_mem(
+                false,
+                crate::codegen::shared::asm_operand::Width::B64,
+                1,
+                11,
+                8,
+            ));
             return;
         }
         let step = (arg_ty.size().div_ceil(8) * 8) as i32;
@@ -741,7 +779,13 @@ impl Codegen {
         self.jmp_rel32(&overflow, JumpKind::Jge);
         // reg_save_area + gp_offset: 从 (rcx+16) 加载到 r11
         // REX 0x4C: R=1 使 reg=r11, B=0 使 rm=rcx (rm=001+REX.B 会变 r9)
-        self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x8B, 0x59, 0x10])); // mov r11, 16(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
+        self.emit_insn(&Insn::mov_rm_mem(
+            true,
+            crate::codegen::shared::asm_operand::Width::B64,
+            11,
+            1,
+            16,
+        )); // mov r11, 16(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
         let sz = arg_ty.size();
         let signed = Self::va_arg_ty_signed(arg_ty);
         match sz {
@@ -756,7 +800,13 @@ impl Codegen {
         self.jmp_rel32(&done, JumpKind::Jmp);
         self.label(&overflow);
         // overflow_arg_area: 从 (rcx+8) 加载
-        self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x8B, 0x59, 0x08])); // mov r11, 8(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
+        self.emit_insn(&Insn::mov_rm_mem(
+            true,
+            crate::codegen::shared::asm_operand::Width::B64,
+            11,
+            1,
+            8,
+        )); // mov r11, 8(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
         match sz {
             1 => self.emit_va_arg_int_load(1, signed, 0x41, &[0x03]),
             2 => self.emit_va_arg_int_load(2, signed, 0x41, &[0x03]),
@@ -764,10 +814,22 @@ impl Codegen {
             _ => self.emit_va_arg_int_load(8, signed, 0x41, &[0x03]),
         }
         self.push(0);
-        self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x8B, 0x59, 0x08])); // mov r11, 8(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
+        self.emit_insn(&Insn::mov_rm_mem(
+            true,
+            crate::codegen::shared::asm_operand::Width::B64,
+            11,
+            1,
+            8,
+        )); // mov r11, 8(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
         self.emit_insn(&Insn::raw_bytes(&[0x49, 0x83, 0xC3])); // add r11, step
         self.emit_insn(&Insn::raw_bytes(&step.to_le_bytes()[..1]));
-        self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0x59, 0x08])); // mov 8(rcx), r11 (REX.R=1: reg=r11)
+        self.emit_insn(&Insn::mov_rm_mem(
+            false,
+            crate::codegen::shared::asm_operand::Width::B64,
+            11,
+            1,
+            8,
+        )); // mov 8(rcx), r11 (REX.R=1: reg=r11)
         self.pop(0);
         self.label(&done);
         if dst != 0 {
@@ -780,11 +842,23 @@ impl Codegen {
         let overflow = self.fresh_label();
         let done = self.fresh_label();
         // eax = fp_offset (rcx + 4)
-        self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x41, 0x04])); // mov eax, 4(rcx)
+        self.emit_insn(&Insn::mov_rm_mem(
+            true,
+            crate::codegen::shared::asm_operand::Width::B32,
+            0,
+            1,
+            4,
+        )); // mov eax, 4(rcx)
         self.emit_insn(&Insn::raw_bytes(&[0x3D, 0xB0, 0x00, 0x00, 0x00])); // cmp $176, %eax
         self.jmp_rel32(&overflow, JumpKind::Jge);
         // reg_save_area + fp_offset
-        self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x8B, 0x59, 0x10])); // mov r11, 16(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
+        self.emit_insn(&Insn::mov_rm_mem(
+            true,
+            crate::codegen::shared::asm_operand::Width::B64,
+            11,
+            1,
+            16,
+        )); // mov r11, 16(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
         if matches!(arg_ty, Type::Float) {
             self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x41, 0x0F, 0x10, 0x04, 0x03])); // movss (r11,rax), xmm0
         } else {
@@ -796,17 +870,35 @@ impl Codegen {
         self.jmp_rel32(&done, JumpKind::Jmp);
         self.label(&overflow);
         // overflow_arg_area
-        self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x8B, 0x59, 0x08])); // mov r11, 8(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
+        self.emit_insn(&Insn::mov_rm_mem(
+            true,
+            crate::codegen::shared::asm_operand::Width::B64,
+            11,
+            1,
+            8,
+        )); // mov r11, 8(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
         if matches!(arg_ty, Type::Float) {
             self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x41, 0x0F, 0x10, 0x03])); // movss (r11), xmm0
         } else {
             self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x41, 0x0F, 0x10, 0x03])); // movsd (r11), xmm0
         }
         self.push(0);
-        self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x8B, 0x59, 0x08])); // mov r11, 8(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
+        self.emit_insn(&Insn::mov_rm_mem(
+            true,
+            crate::codegen::shared::asm_operand::Width::B64,
+            11,
+            1,
+            8,
+        )); // mov r11, 8(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
         self.emit_insn(&Insn::raw_bytes(&[0x49, 0x83, 0xC3])); // add r11, overflow_step
         self.emit_insn(&Insn::raw_bytes(&overflow_step.to_le_bytes()[..1]));
-        self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0x59, 0x08])); // mov 8(rcx), r11 (REX.R=1: reg=r11)
+        self.emit_insn(&Insn::mov_rm_mem(
+            false,
+            crate::codegen::shared::asm_operand::Width::B64,
+            11,
+            1,
+            8,
+        )); // mov 8(rcx), r11 (REX.R=1: reg=r11)
         self.pop(0);
         self.label(&done);
         if dst != 0 {
@@ -841,8 +933,20 @@ impl Codegen {
                 },
                 &[],
             )); // mov eax, [rcx]
-        self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x51, 0x04])); // mov edx, [rcx+4]
-        self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x8B, 0x41, 0x08])); // mov r8, [rcx+8]
+        self.emit_insn(&Insn::mov_rm_mem(
+            true,
+            crate::codegen::shared::asm_operand::Width::B32,
+            2,
+            1,
+            4,
+        )); // mov edx, [rcx+4]
+        self.emit_insn(&Insn::mov_rm_mem(
+            true,
+            crate::codegen::shared::asm_operand::Width::B64,
+            8,
+            1,
+            8,
+        )); // mov r8, [rcx+8]
 
         // 先把 va_list 指针留在 r11 (溢出区的 `rep movsb` 会毁 rcx, 且下面的
         // 偏移回写要靠 r11), 再把 reg_save_area 装进 rcx —— 装载体
