@@ -9,10 +9,28 @@
 // 与生产 `gen_int128_load/store` 行为不一致）已按"以生产代码为准"作废删除。
 
 use crate::ast::*;
+use crate::codegen::shared::asm_operand::Width;
 use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::opcode::{AluOp, Operand as OpcodeOperand, X86_64Opcode};
 use crate::codegen::x86_64::{Codegen, JumpKind};
 
 impl Codegen {
+    /// P11 helper: emit reg-reg ALU (B64) via typed opcode, raw_bytes fallback.
+    fn emit_alu_rm_reg64(&mut self, op: AluOp, dst: u8, src: u8, fallback: &[u8]) {
+        let insn = Insn::new(
+            X86_64Opcode::AluRm {
+                op,
+                width: Width::B64,
+                dst: OpcodeOperand::Reg(dst, Width::B64),
+                src: OpcodeOperand::Reg(src, Width::B64),
+            },
+            &[],
+        );
+        if !self.emit_insn(&insn) {
+            self.emit_insn(&Insn::raw_bytes(fallback));
+        }
+    }
+
     // P1-4: __int128 二元运算 codegen
     // 使用 rax:rdx = 右操作数, rcx:r8 = 左操作数, 结果 → rax:rdx
     pub fn gen_int128_binop(&mut self, op: BinOp, l: &Expr, r: &Expr, dst: u8) {
@@ -119,7 +137,7 @@ impl Codegen {
                 self.gen_int128_divmod(signed, matches!(op, BinOp::Mod));
             },
             BinOp::EqEq => {
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xC0])); // xor rax, rax
+                self.emit_alu_rm_reg64(AluOp::Xor, 0, 0, &[0x48, 0x31, 0xC0]); // xor rax, rax
                 self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x39, 0xC9])); // cmp rcx, r9 (low)
                 let lne = self.fresh_label();
                 self.jmp_rel32(&lne, JumpKind::Jne);
@@ -127,10 +145,10 @@ impl Codegen {
                 self.jmp_rel32(&lne, JumpKind::Jne);
                 self.mov_imm(0, 1);
                 self.label(&lne);
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2])); // xor rdx, rdx
+                self.emit_alu_rm_reg64(AluOp::Xor, 2, 2, &[0x48, 0x31, 0xD2]); // xor rdx, rdx
             },
             BinOp::Ne => {
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xC0])); // xor rax, rax
+                self.emit_alu_rm_reg64(AluOp::Xor, 0, 0, &[0x48, 0x31, 0xC0]); // xor rax, rax
                 self.mov_imm(0, 1);
                 let leq = self.fresh_label();
                 self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x39, 0xC9])); // cmp rcx, r9 (low)
@@ -161,7 +179,8 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xF9]));
                 self.emit_insn(&Insn::raw_bytes(&128u32.to_le_bytes())); // cmp rcx, 128
                 self.jmp_rel32(&l_under_128, JumpKind::Jl);
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xC0, 0x48, 0x31, 0xD2]));
+                self.emit_alu_rm_reg64(AluOp::Xor, 0, 0, &[0x48, 0x31, 0xC0]);
+                self.emit_alu_rm_reg64(AluOp::Xor, 2, 2, &[0x48, 0x31, 0xD2]);
                 self.jmp_rel32(&l_end, JumpKind::Jmp);
                 self.label(&l_under_128);
                 // cmp rcx, 64
@@ -170,7 +189,7 @@ impl Codegen {
                 self.jmp_rel32(&l_small, JumpKind::Jl);
                 // >= 64: rdx = rax << (cl-64), rax = 0
                 self.mov(8, 0); // r8 = rax = left_low (保存)
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xC0])); // xor rax, rax (low = 0)
+                self.emit_alu_rm_reg64(AluOp::Xor, 0, 0, &[0x48, 0x31, 0xC0]); // xor rax, rax (low = 0)
                 self.mov(2, 8); // rdx = r8 = left_low
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, 0xE2])); // shl rdx, cl
                 self.jmp_rel32(&l_end, JumpKind::Jmp);
@@ -197,7 +216,8 @@ impl Codegen {
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xF8, 63])); // sar rax, 63
                     self.mov(2, 0);
                 } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xC0, 0x48, 0x31, 0xD2]));
+                    self.emit_alu_rm_reg64(AluOp::Xor, 0, 0, &[0x48, 0x31, 0xC0]);
+                    self.emit_alu_rm_reg64(AluOp::Xor, 2, 2, &[0x48, 0x31, 0xD2]);
                 }
                 self.jmp_rel32(&l_end, JumpKind::Jmp);
                 self.label(&l_under_128);
@@ -213,7 +233,7 @@ impl Codegen {
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xFA, 63])); // sar rdx, 63
                 } else {
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, 0xE8])); // shr rax, cl
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2])); // high = 0
+                    self.emit_alu_rm_reg64(AluOp::Xor, 2, 2, &[0x48, 0x31, 0xD2]); // high = 0
                 }
                 self.jmp_rel32(&l_end, JumpKind::Jmp);
                 // < 64: shrd rax, rdx, cl; shift high with sign/zero fill
@@ -327,7 +347,7 @@ impl Codegen {
     pub fn gen_int128_cmp_ordering(&mut self, op: BinOp, is_signed: bool) {
         let l_end = self.fresh_label();
         let l_high = self.fresh_label();
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xC0])); // xor rax, rax
+        self.emit_alu_rm_reg64(AluOp::Xor, 0, 0, &[0x48, 0x31, 0xC0]); // xor rax, rax
                                         // 比较高 64 位: cmp r8, r11
         self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x39, 0xD8])); // cmp r8, r11
         let (cc_high, cc_low_eq) = match op {
@@ -470,8 +490,8 @@ impl Codegen {
                 },
                 // === 按位运算: 逐 chunk GP 运算, 结果在 rcx (low), r8 (high) ===
                 BinOp::And => {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC1])); // and rcx, rax (low &= left)
-                    self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x21, 0xD0])); // and r8, rdx (high &= left)
+                    self.emit_alu_rm_reg64(AluOp::And, 1, 0, &[0x48, 0x21, 0xC1]); // and rcx, rax (low &= left)
+                    self.emit_alu_rm_reg64(AluOp::And, 8, 2, &[0x4C, 0x21, 0xD0]); // and r8, rdx (high &= left)
                                                     // mov rax, rcx; mov rdx, r8
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC8]));
                     self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0xC2]));
@@ -479,16 +499,16 @@ impl Codegen {
                     self.store_stack(2, result_off + 8);
                 },
                 BinOp::Or => {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xC1])); // or rcx, rax
-                    self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x09, 0xD0])); // or r8, rdx
+                    self.emit_alu_rm_reg64(AluOp::Or, 1, 0, &[0x48, 0x09, 0xC1]); // or rcx, rax
+                    self.emit_alu_rm_reg64(AluOp::Or, 8, 2, &[0x4C, 0x09, 0xD0]); // or r8, rdx
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC8]));
                     self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0xC2]));
                     self.store_stack(0, result_off);
                     self.store_stack(2, result_off + 8);
                 },
                 BinOp::Xor => {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xC1])); // xor rcx, rax
-                    self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x31, 0xD0])); // xor r8, rdx
+                    self.emit_alu_rm_reg64(AluOp::Xor, 1, 0, &[0x48, 0x31, 0xC1]); // xor rcx, rax
+                    self.emit_alu_rm_reg64(AluOp::Xor, 8, 2, &[0x4C, 0x31, 0xD0]); // xor r8, rdx
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC8]));
                     self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0xC2]));
                     self.store_stack(0, result_off);
