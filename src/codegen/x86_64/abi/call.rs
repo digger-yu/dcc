@@ -539,8 +539,7 @@ impl Codegen {
                                 // 注意: 必须写入 rcx (寄存器 1), 下方 movsd [rcx] 硬编码 rcx
                                 self.emit_global_addr(1, &name.name);
                                 if chunk_off != 0 {
-                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xC1])); // add rcx, imm32
-                                    self.emit_insn(&Insn::raw_bytes(&(chunk_off as i32).to_le_bytes()));
+                                    self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 1, chunk_off as i64)); // add rcx, imm32
                                 }
                                 self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x01])); // movsd/movss xmm0, [rcx]
                             } else {

@@ -581,8 +581,7 @@ impl super::super::super::Codegen {
         let bf_mask = if bw >= 64 { u64::MAX } else { (1u64 << bw) - 1 };
         let inv_mask = !(bf_mask << bit_off);
         if (inv_mask as u32 as i32 as i64 as u64) == inv_mask {
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xE1]));
-            self.emit_insn(&Insn::raw_bytes(&(inv_mask as u32).to_le_bytes()));
+            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 1, inv_mask as i64));
         } else {
             self.emit_insn(&Insn::raw_bytes(&[0x49, 0xB8]));
             self.emit_insn(&Insn::raw_bytes(&inv_mask.to_le_bytes()));

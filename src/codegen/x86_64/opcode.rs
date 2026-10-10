@@ -313,6 +313,39 @@ impl X86_64Opcode {
                         return Some(out);
                     }
                 }
+                // 形态分支 A3 (P11 Bucket B): 非 RSP reg, imm32 — 走 0x81 / id 形式.
+                //   手写形态: 48 81 Cx / Dx / Ex (mod=11, /0 /1 /4 /5 /6 /7) + imm32 LE.
+                //   仅当 imm 超出 i8 范围或调用方明确用 imm32 形式时走这里;
+                //   本步保留调用点显式选择 (raw_bytes 双字节模式: 先发 opcode 三元组,
+                //   再单独发 imm32 LE), 故我们也提供一个等价的 AluRm encode 走相同字节.
+                if let (Operand::Reg(reg_idx, w), Operand::Imm(imm)) = (dst, src) {
+                    if matches!(w, Width::B64) && !matches!(op, AluOp::Test) {
+                        let i8v = i8::try_from(*imm);
+                        // 仅在 imm 超出 i8 范围时走 0x81 / id (避免和分支 A2 的 0x83 冲突).
+                        if i8v.is_err() {
+                            let reg_field: u8 = match op {
+                                AluOp::Add => 0,
+                                AluOp::Or => 1,
+                                AluOp::And => 4,
+                                AluOp::Sub => 5,
+                                AluOp::Xor => 6,
+                                AluOp::Cmp => 7,
+                                AluOp::Test => unreachable!(),
+                            };
+                            let mut rex: u8 = 0x48; // B64 必带 REX.W
+                            if *reg_idx >= 8 {
+                                rex |= 0x01;
+                            }
+                            let modrm: u8 = 0xC0 | (reg_field << 3) | (reg_idx & 7);
+                            let mut out = Vec::with_capacity(7);
+                            out.push(rex);
+                            out.push(0x81);
+                            out.push(modrm);
+                            out.extend_from_slice(&(*imm as i32).to_le_bytes());
+                            return Some(out);
+                        }
+                    }
+                }
                 // 形态分支 A2: 非 RSP 的 reg, imm. 只在 imm 可符号扩展到 i8 时收敛
                 // (即与手写 0x83 / ib 分支逐字节一致); 否则回退手写 (避免和
                 // 既有 emit_sub_rsp 的 0x81 / id 形态产生歧义).
@@ -1261,6 +1294,56 @@ mod tests {
             src: Operand::Imm(16),
         };
         assert_eq!(o.encode(), Some(vec![0x49, 0x83, 0xC1, 0x10]));
+    }
+
+    // ---- AluRm imm32 (0x81 / id) for arbitrary B64 reg (P11 Bucket B) ----
+
+    #[test]
+    fn alu_rm_add_rcx_imm32_b64() {
+        // add rcx, 4096 (imm 超出 i8):  48 81 C1 00 10 00 00
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Add,
+            width: Width::B64,
+            dst: reg(1, Width::B64),
+            src: Operand::Imm(4096),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x81, 0xC1, 0x00, 0x10, 0, 0]));
+    }
+
+    #[test]
+    fn alu_rm_and_rcx_imm32_b64() {
+        // and rcx, 4096:  48 81 E1 00 10 00 00
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::And,
+            width: Width::B64,
+            dst: reg(1, Width::B64),
+            src: Operand::Imm(4096),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x81, 0xE1, 0x00, 0x10, 0, 0]));
+    }
+
+    #[test]
+    fn alu_rm_cmp_rcx_imm32_b64() {
+        // cmp rcx, imm32:  48 81 F9 xx xx xx xx
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Cmp,
+            width: Width::B64,
+            dst: reg(1, Width::B64),
+            src: Operand::Imm(-1000),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x81, 0xF9, 0x18, 0xFC, 0xFF, 0xFF]));
+    }
+
+    #[test]
+    fn alu_rm_sub_rdi_imm32_b64() {
+        // sub rdi, 0x1000:  48 81 EF 00 10 00 00
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Sub,
+            width: Width::B64,
+            dst: reg(7, Width::B64),
+            src: Operand::Imm(0x1000),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x81, 0xEF, 0x00, 0x10, 0, 0]));
     }
 
     // ---- MovRm reg-reg (P11 Batch 2r) ----

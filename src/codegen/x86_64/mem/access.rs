@@ -227,8 +227,7 @@ impl Codegen {
                 self.pop(BASE); // rax = base (不能 pop 回 rcx, 否则覆盖索引)
                                 // add rcx, addend
                 if *addend != 0 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xC1])); // add rcx, imm32
-                    self.emit_insn(&Insn::raw_bytes(&(*addend as i32).to_le_bytes()));
+                    self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 1, *addend)); // add rcx, imm32
                 }
                 self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x01, 0xC8], "add %rcx, %rax")); // add rax, rcx
             },
@@ -247,8 +246,7 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xAF, 0xCA])); // imul rcx, rdx
                 self.pop(BASE); // rax = base
                 if *addend != 0 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xC1])); // add rcx, imm32
-                    self.emit_insn(&Insn::raw_bytes(&(*addend as i32).to_le_bytes()));
+                    self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 1, *addend)); // add rcx, imm32
                 }
                 self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x01, 0xC8], "add %rcx, %rax")); // add rax, rcx
             },

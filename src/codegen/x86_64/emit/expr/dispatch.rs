@@ -1519,8 +1519,7 @@ impl Codegen {
                         // and rcx, inv_mask
                         if (inv_mask as u32 as i32 as i64 as u64) == inv_mask {
                             // 可以用 imm32 符号扩展
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xE1])); // and rcx, imm32
-                            self.emit_insn(&Insn::raw_bytes(&(inv_mask as u32).to_le_bytes()));
+                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 1, inv_mask as i64)); // and rcx, imm32
                         } else {
                             // >32 位: movabs rdx, inv_mask; and rcx, rdx
                             self.emit_insn(&Insn::raw_bytes(&[0x48, 0xBA])); // movabs rdx, imm64
@@ -1669,8 +1668,7 @@ impl Codegen {
                             if bw < 64 {
                                 let mask: u64 = (1u64 << bw) - 1;
                                 if mask <= 0xFFFFFFFF {
-                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xE2])); // and rdx, imm32
-                                    self.emit_insn(&Insn::raw_bytes(&(mask as u32).to_le_bytes()));
+                                    self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 2, mask as i64)); // and rdx, imm32
                                 } else {
                                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0xBA])); // movabs rdx, mask
                                     self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
@@ -1916,8 +1914,7 @@ impl Codegen {
                         } else {
                             // 整数分量: 值在 rax, 按内型宽度存储
                             if part_off != 0 {
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xC1])); // add rcx, imm32
-                                self.emit_insn(&Insn::raw_bytes(&(part_off as i32).to_le_bytes()));
+                                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 1, part_off as i64)); // add rcx, imm32
                             }
                             match inner.size() {
                                 1 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x88, 0x01], "mov %al, (%rcx)")); },

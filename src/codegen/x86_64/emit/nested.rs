@@ -76,11 +76,9 @@ impl Codegen {
         // 注意: mov rdi, r13 需要 REX.W + REX.B (r13 >= 8)
         // 4C 89 EF = mov rdi, r13 (REX.WR, src=r13 in r/m, dst=rdi in reg)
         self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0xEF])); // mov rdi, r13
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xE7])); // and rdi, ~0xFFF
-        self.emit_insn(&Insn::raw_bytes(&0xFFFFF000u32.to_le_bytes()));
+        self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 7, 0xFFFFF000u32 as i64)); // and rdi, ~0xFFF
         // rdi -= 0x1000 (下方页)
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xEF])); // sub rdi, 0x1000
-        self.emit_insn(&Insn::raw_bytes(&0x1000u32.to_le_bytes()));
+        self.emit_insn(&Insn::alu_rm_reg_imm32_b64(5, 7, 0x1000)); // sub rdi, 0x1000
         // rsi = 0x2000 (两页)
         self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC6])); // mov rsi, 0x2000
         self.emit_insn(&Insn::raw_bytes(&0x2000i32.to_le_bytes()));

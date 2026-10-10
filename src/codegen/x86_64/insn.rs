@@ -139,6 +139,24 @@ impl Insn {
         Insn::raw_bytes(&[0x83, modrm, v])
     }
 
+    /// P11 Bucket B: 构造 B64 `add/or/and/sub/xor/cmp reg, imm32` (0x81 / id 形式).
+    /// 与 rsp 的 0x81 imm32 一致, 但任意 reg; 手写常拆成两条 emit_insn (opcode 三元组 + imm32).
+    /// op 编码: /0=add, /1=or, /4=and, /5=sub, /6=xor, /7=cmp.
+    pub fn alu_rm_reg_imm32_b64(op: u8, reg_idx: u8, imm: i64) -> Self {
+        let mut rex: u8 = 0x48;
+        if reg_idx >= 8 {
+            rex |= 0x01;
+        }
+        let modrm = 0xC0 | ((op & 0x7) << 3) | (reg_idx & 0x7);
+        let imm32 = (imm as i32).to_le_bytes();
+        let mut out = Vec::with_capacity(7);
+        out.push(rex);
+        out.push(0x81);
+        out.push(modrm);
+        out.extend_from_slice(&imm32);
+        Insn::raw_bytes(&out)
+    }
+
     /// P11: 构造 `movsd xmm_dst, xmm_src` (F2 0F 10 mod=11).
     /// 源/目的都在 xmm0..xmm15 (>=8 时带 REX.R/B 由 ModRM 低 3 位 + 前缀编码).
     pub fn movsd_xmm(dst_xmm: u8, src_xmm: u8) -> Self {

@@ -176,8 +176,7 @@ impl Codegen {
                 self.mov(1, 9); // rcx = r9 = shift_amount
                 let l_under_128 = self.fresh_label();
                 let l_end = self.fresh_label();
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xF9]));
-                self.emit_insn(&Insn::raw_bytes(&128u32.to_le_bytes())); // cmp rcx, 128
+                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(7, 1, 128)); // cmp rcx, 128
                 self.jmp_rel32(&l_under_128, JumpKind::Jl);
                 self.emit_alu_rm_reg64(AluOp::Xor, 0, 0, &[0x48, 0x31, 0xC0]);
                 self.emit_alu_rm_reg64(AluOp::Xor, 2, 2, &[0x48, 0x31, 0xD2]);
@@ -208,8 +207,7 @@ impl Codegen {
                 let signed = matches!(l.ty(), Type::Int128);
                 let l_under_128 = self.fresh_label();
                 let l_end = self.fresh_label();
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xF9]));
-                self.emit_insn(&Insn::raw_bytes(&128u32.to_le_bytes())); // cmp rcx, 128
+                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(7, 1, 128)); // cmp rcx, 128
                 self.jmp_rel32(&l_under_128, JumpKind::Jl);
                 if signed {
                     self.mov(0, 2);

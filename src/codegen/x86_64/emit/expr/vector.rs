@@ -42,8 +42,7 @@ impl Codegen {
             if (-128..=127).contains(&byte_off) {
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC1, byte_off as u8]));
             } else {
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xC1]));
-                self.emit_insn(&Insn::raw_bytes(&(byte_off as i32).to_le_bytes()));
+                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 1, byte_off));
             }
         }
         // mov [rcx], rax (按元素宽度)

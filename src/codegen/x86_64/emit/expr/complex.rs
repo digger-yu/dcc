@@ -2236,8 +2236,7 @@ impl Codegen {
                             if (-128..=127).contains(&rsp_slot) {
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC7, rsp_slot as u8]));
                             } else {
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xC7]));
-                                self.emit_insn(&Insn::raw_bytes(&(rsp_slot as i32).to_le_bytes()));
+                                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 7, rsp_slot as i64)); // add rdi, imm32
                             }
                         }
                         let sz = (inner_sz * 2) as i128;

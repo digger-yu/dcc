@@ -198,8 +198,7 @@ impl Codegen {
         // 不再在循环里按奇偶逐次 `add rdx,16`。
         let n_xmm = Self::va_arg_reg_counts(classes).1;
         if n_xmm > 0 {
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xC2])); // add rdx, imm32
-            self.emit_insn(&Insn::raw_bytes(&(n_xmm * 16).to_le_bytes()));
+            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 2, (n_xmm * 16) as i64)); // add rdx, imm32
         }
     }
     fn emit_va_arg_int_load(&mut self, sz: usize, signed: bool, rex: u8, modrm: &[u8]) {
