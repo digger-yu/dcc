@@ -1094,6 +1094,32 @@ impl X86_64Opcode {
                 }
             }
             X86_64Opcode::SimdMov { width, opcode10, dst, src } => {
+                // P11 Bucket 6: reg↔reg xmm↔xmm (mod=11).
+                //   dst=Reg(dst_xmm, Xmm), src=Reg(src_xmm, Xmm).
+                //   opcode2 = 0x10 (load) / 0x11 (store direction).
+                //   prefix: F3=SS, F2=SD.
+                if let (Operand::Reg(dst_xmm, _), Operand::Reg(src_xmm, _)) = (dst, src) {
+                    let pfx: u8 = match width {
+                        SimdWidth::SS => 0xF3,
+                        SimdWidth::SD => 0xF2,
+                        _ => return None,
+                    };
+                    let opc2: u8 = if *opcode10 { 0x10 } else { 0x11 };
+                    let need_rex = *dst_xmm >= 8 || *src_xmm >= 8;
+                    let mut out = Vec::with_capacity(6);
+                    out.push(pfx);
+                    if need_rex {
+                        let mut rex: u8 = 0x40;
+                        if *dst_xmm >= 8 { rex |= 0x04; }
+                        if *src_xmm >= 8 { rex |= 0x01; }
+                        out.push(rex);
+                    }
+                    out.push(0x0F);
+                    out.push(opc2);
+                    let modrm: u8 = 0xC0 | ((dst_xmm & 0x7) << 3) | (src_xmm & 0x7);
+                    out.push(modrm);
+                    return Some(out);
+                }
                 // 步骤 4: 收敛 xmm store/load 到 rsp 槽.
                 //   load:  dst=Reg(xmm, B128), src=Mem(rsp=4, disp)
                 //   store: dst=Mem(rsp=4, disp), src=Reg(xmm, B128)

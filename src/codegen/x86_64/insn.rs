@@ -184,20 +184,21 @@ impl Insn {
     /// opcode2 = 0x10 (mov load direction dst<-src) or 0x11 (store direction dst<-src).
     /// Both dst/src are register fields in ModRM: reg field = dst_xmm, r/m = src_xmm.
     fn simd_xmm_reg_reg(pfx: u8, opcode2: u8, dst_xmm: u8, src_xmm: u8) -> Self {
-        let mut out = Vec::with_capacity(5);
-        out.push(pfx);
-        let need_rex = dst_xmm >= 8 || src_xmm >= 8;
-        if need_rex {
-            let mut rex: u8 = 0x40;
-            if dst_xmm >= 8 { rex |= 0x04; }
-            if src_xmm >= 8 { rex |= 0x01; }
-            out.push(rex);
-        }
-        out.push(0x0F);
-        out.push(opcode2);
-        let modrm = 0xC0 | ((dst_xmm & 0x7) << 3) | (src_xmm & 0x7);
-        out.push(modrm);
-        Insn::raw_bytes(&out)
+        use crate::codegen::x86_64::opcode::{Operand, SimdWidth, X86_64Opcode};
+        let width = match pfx {
+            0xF3 => SimdWidth::SS,
+            0xF2 => SimdWidth::SD,
+            _ => SimdWidth::PS,
+        };
+        Insn::new(
+            X86_64Opcode::SimdMov {
+                width,
+                opcode10: opcode2 == 0x10,
+                dst: Operand::Reg(dst_xmm, crate::codegen::shared::asm_operand::Width::B128),
+                src: Operand::Reg(src_xmm, crate::codegen::shared::asm_operand::Width::B128),
+            },
+            &[],
+        )
     }
 
     /// P11: cqo / cdq / cwd sign-extend rax→rdx:rax.
