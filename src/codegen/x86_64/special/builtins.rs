@@ -1780,9 +1780,9 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8])); // movq xmm1, rax
                                                             // ucomiss (0F 2E) for float, ucomisd (66 0F 2E) for double
                 if is_f {
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x2E, 0xC1])); // ucomiss xmm0, xmm1
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SS, 0, 1)); // ucomiss xmm0, xmm1
                 } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x2E, 0xC1])); // ucomisd xmm0, xmm1
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SD, 0, 1)); // ucomisd xmm0, xmm1
                 }
                 // sete al (ZF=1): |x| == +Inf
                 self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Eq, 0));
@@ -1892,9 +1892,9 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8])); // movq xmm1, rax
                                                             // ucomiss (0F 2E) for float, ucomisd (66 0F 2E) for double
                 if is_f {
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x2E, 0xC1])); // ucomiss xmm0, xmm1
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SS, 0, 1)); // ucomiss xmm0, xmm1
                 } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x2E, 0xC1])); // ucomisd xmm0, xmm1
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SD, 0, 1)); // ucomisd xmm0, xmm1
                 }
                 // setb al (CF=1): |x| < +Inf
                 self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::B, 0));
@@ -1965,12 +1965,10 @@ impl Codegen {
                 let arg_ty = args[5].ty();
                 let is_f = matches!(arg_ty, Type::Float);
                 // 决定用 ucomiss 还是 ucomisd
-                // 0F 2E / 66 0F 2E
-                let cmp_prefix: u8 = if is_f { 0 } else { 0x66 };
-                let cmp_opcode: u8 = 0x2E;
+                let cmp_width = if is_f { SimdWidth::SS } else { SimdWidth::SD };
                 // 1. NaN 测试
                 self.gen_expr(&args[5], Self::EVAL_BASE);
-                self.emit_insn(&Insn::raw_bytes(&[cmp_prefix, 0x0F, cmp_opcode, 0xC0])); // ucomis{s,d} xmm0, xmm0
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, cmp_width, 0, 0)); // ucomis{s,d} xmm0, xmm0
                 self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::P, 3)); // setp bl
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
                     sign: false,
@@ -1982,7 +1980,7 @@ impl Codegen {
                                                 // 2. Zero 测试
                 self.gen_expr(&args[5], Self::EVAL_BASE);
                 self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 1, 1)); // xorps xmm1, xmm1
-                self.emit_insn(&Insn::raw_bytes(&[cmp_prefix, 0x0F, cmp_opcode, 0xC8])); // ucomis{s,d} xmm1, xmm0
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, cmp_width, 1, 0)); // ucomis{s,d} xmm1, xmm0
                 self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Eq, 1)); // sete cl
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
                     sign: false,
@@ -2000,7 +1998,7 @@ impl Codegen {
                     src: crate::codegen::x86_64::opcode::Operand::Imm(inf_bits as i64),
                 }, &[]));
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8])); // movq xmm1, rax
-                self.emit_insn(&Insn::raw_bytes(&[cmp_prefix, 0x0F, cmp_opcode, 0xC1])); // ucomis{s,d} xmm0, xmm1
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, cmp_width, 0, 1)); // ucomis{s,d} xmm0, xmm1
                 self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Eq, 2)); // sete dl
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
                     sign: false,
@@ -4001,9 +3999,9 @@ impl Codegen {
                 }, &[]));
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
                 if is_f {
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x2E, 0xC1]));
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SS, 0, 1));
                 } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x2E, 0xC1]));
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SD, 0, 1));
                 }
                 self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::B, 0));
                 self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Np, 3));
@@ -4039,7 +4037,7 @@ impl Codegen {
                 self.emit_insn(&Insn::movsd_xmm(0, 1)); // movsd xmm1, xmm0
                 self.emit_insn(&Insn::movsd_xmm(2, 0)); // movsd xmm0, xmm2
                                                       // ucomisd xmm0, xmm1: 比较 a vs b
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x2E, 0xC1]));
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SD, 0, 1));
                 match name {
                     "__builtin_isgreater" => {
                         // a > b: CF=0, ZF=0, PF=0 → seta al

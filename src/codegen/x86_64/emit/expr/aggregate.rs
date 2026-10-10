@@ -574,7 +574,7 @@ impl Codegen {
                                         );
                                     }
                                     // cvttsd2si rax, xmm0
-                                    self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]));
+                                    self.emit_insn(&Insn::cvt2sd_reg(false, SimdWidth::SD, 0, 0));
                                     if isz == 4 {
                                         self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -618,7 +618,7 @@ impl Codegen {
                                     } else {
                                         self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 0)); // xorps xmm0
                                     }
-                                    self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]));
+                                    self.emit_insn(&Insn::cvt2sd_reg(false, SimdWidth::SD, 0, 0));
                                     if isz == 4 {
                                         self.emit_insn(&Insn::raw_bytes(&[0x89, 0x41, isz as u8]));
                                     } else {
@@ -673,7 +673,7 @@ impl Codegen {
                                     self.emit_xmm0_r13_disp(&[rpfx, 0x41, 0x0F, 0x10], result_off);
                                 }
                                 // cvttsd2si rax, xmm0
-                                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]));
+                                self.emit_insn(&Insn::cvt2sd_reg(false, SimdWidth::SD, 0, 0));
                                 self.emit_store(0, dst_off, isz as usize);
                                 if src_complex {
                                     let si = src_inner.clone().unwrap();
@@ -681,7 +681,7 @@ impl Codegen {
                                 } else {
                                     self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 0)); // xorps xmm0
                                 }
-                                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]));
+                                self.emit_insn(&Insn::cvt2sd_reg(false, SimdWidth::SD, 0, 0));
                                 self.emit_store(0, dst_off + isz, isz as usize);
                             }
                         }
@@ -709,7 +709,7 @@ impl Codegen {
                             if matches!(r.ty(), Type::Float | Type::Double | Type::LongDouble) {
                                 // 浮点标量源: gen_expr 后值在 xmm0,
                                 // 先 cvttsd2si 截断为整数 (rax 未定义)
-                                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]));
+                                self.emit_insn(&Insn::cvt2sd_reg(false, SimdWidth::SD, 0, 0));
                             }
                             self.emit_store(0, result_off, scalar_isz);
                             // P11: 收敛到 AluRm{Xor, B64, rax, rax}.

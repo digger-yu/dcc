@@ -276,6 +276,27 @@ impl Insn {
         )
     }
 
+    /// P11 Bucket B: cvtsi2sd/cvtsi2ss (r64->xmm) or cvttsd2si/cvttss2si (xmm->r64).
+    /// to_xmm=true: r64->xmm (cvtsi2sd/cvtsi2ss). to_xmm=false: xmm->r64 (cvttsd2si/cvttss2si).
+    /// width=SimdWidth::SD uses F2 prefix, width=SimdWidth::SS uses F3 prefix.
+    pub fn cvt2sd_reg(
+        to_xmm: bool,
+        width: crate::codegen::x86_64::opcode::SimdWidth,
+        dst_idx: u8,
+        src_idx: u8,
+    ) -> Self {
+        use crate::codegen::shared::asm_operand::Width;
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::Cvt2Sd {
+                to_xmm,
+                width,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(dst_idx, Width::B128),
+                src: crate::codegen::x86_64::opcode::Operand::Reg(src_idx, Width::B128),
+            },
+            &[],
+        )
+    }
+
     /// Common reg↔reg xmm↔xmm encoder.
     /// opcode2 = 0x10 (mov load direction dst<-src) or 0x11 (store direction dst<-src).
     /// Both dst/src are register fields in ModRM: reg field = dst_xmm, r/m = src_xmm.

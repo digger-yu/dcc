@@ -73,11 +73,10 @@ impl Codegen {
         let scratch = if dst == 0 { 2 } else { 0 }; // rdx or rax
 
         // cvttss2si/cvttsd2si dst, xmm0 (REX.W 64 位结果)
-        let cvt_rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
         if is_double {
-            self.emit_insn(&Insn::raw_bytes(&[0xF2, cvt_rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
+            self.emit_insn(&Insn::cvt2sd_reg(false, SimdWidth::SD, dst, 0));
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, cvt_rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
+            self.emit_insn(&Insn::cvt2sd_reg(false, SimdWidth::SS, dst, 0));
         }
         // test dst, dst
         let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
@@ -111,9 +110,9 @@ impl Codegen {
         }
         // cvttss2si/cvttsd2si dst, xmm0 (余数, 现在 fits in int64)
         if is_double {
-            self.emit_insn(&Insn::raw_bytes(&[0xF2, cvt_rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
+            self.emit_insn(&Insn::cvt2sd_reg(false, SimdWidth::SD, dst, 0));
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, cvt_rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
+            self.emit_insn(&Insn::cvt2sd_reg(false, SimdWidth::SS, dst, 0));
         }
         // 加 2^63 整数校正
         self.mov_imm(scratch, 0x8000000000000000u64 as i128);
@@ -412,13 +411,12 @@ impl Codegen {
             amount: crate::codegen::x86_64::opcode::ShiftAmount::Imm8(1),
         }, &[]));
         // cvtsi2ss/sd xmm0, dst (REX.W 64 位操作数)
-        let cvt_rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
         if is_double {
-            self.emit_insn(&Insn::raw_bytes(&[0xF2, cvt_rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]));
+            self.emit_insn(&Insn::cvt2sd_reg(true, SimdWidth::SD, 0, dst));
             // addsd xmm0, xmm0: 乘 2.0
             self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Add, SimdWidth::SD, 0, 0));
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, cvt_rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]));
+            self.emit_insn(&Insn::cvt2sd_reg(true, SimdWidth::SS, 0, dst));
             // addss xmm0, xmm0: 乘 2.0
             self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Add, SimdWidth::SS, 0, 0));
         }
@@ -427,9 +425,9 @@ impl Codegen {
         // --- .pos: 正数路径 ---
         self.label(&l_pos);
         if is_double {
-            self.emit_insn(&Insn::raw_bytes(&[0xF2, cvt_rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]));
+            self.emit_insn(&Insn::cvt2sd_reg(true, SimdWidth::SD, 0, dst));
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, cvt_rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]));
+            self.emit_insn(&Insn::cvt2sd_reg(true, SimdWidth::SS, 0, dst));
         }
 
         self.label(&l_done);

@@ -185,9 +185,8 @@ impl Codegen {
             return;
         }
         // cvttrunc 到 64 位有符号 (REX.W): [2^31, 2^32) 不会触发 indefinite
-        let pfx = if is_single { 0xF3u8 } else { 0xF2u8 };
-        let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
-        self.emit_insn(&Insn::raw_bytes(&[pfx, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
+        let width = if is_single { SimdWidth::SS } else { SimdWidth::SD };
+        self.emit_insn(&Insn::cvt2sd_reg(false, width, dst, 0));
         // 负值钳 0: 先把 scratch 清零 (xor 会破坏 flags), 再 test 设 SF,
         // 最后 cmovs 选 0。
         let zero_reg = if dst == 0 { 2 } else { 0 };

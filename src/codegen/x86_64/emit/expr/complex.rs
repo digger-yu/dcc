@@ -353,17 +353,17 @@ impl Codegen {
                     self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x04, 0x24])); // xmm0 = l.real
                     self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, total_sz as u8])); // xmm1 = r.real
                     if is_float {
-                        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x2E, 0xC8])); // ucomiss xmm1, xmm0
+                        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SS, 1, 0)); // ucomiss xmm1, xmm0
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x2E, 0xC8])); // ucomisd xmm1, xmm0
+                        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SD, 1, 0)); // ucomisd xmm1, xmm0
                     }
                     self.jmp_rel32(&false_label, JumpKind::Jne);
                     self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x44, 0x24, inner_sz as u8])); // xmm0 = l.imag
                     self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, r_imag_slot as u8])); // xmm1 = r.imag
                     if is_float {
-                        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x2E, 0xC8]));
+                        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SS, 1, 0));
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x2E, 0xC8]));
+                        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SD, 1, 0));
                     }
                     self.jmp_rel32(&false_label, JumpKind::Jne);
                 } else {
@@ -808,7 +808,7 @@ impl Codegen {
                 // (值, 0) 同宽布局, 复用下方统一读取。
                 if matches!(init.ty(), Type::Float | Type::Double | Type::LongDouble) {
                     // 浮点标量源: 值在 xmm0, 截断为整数
-                    self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0])); // cvttsd2si
+                    self.emit_insn(&Insn::cvt2sd_reg(false, SimdWidth::SD, 0, 0)); // cvttsd2si rax, xmm0
                 }
                 let s_isz = src_inner_sz as usize;
                 self.emit_store(0, result_off, s_isz);
@@ -1625,17 +1625,19 @@ impl Codegen {
                 (true, true) => self.emit_float_convert(&inner, ty),
                 (false, true) => {
                     // 整数分量 → 浮点返回: cvtsi2s{s,d} xmm0, eax/eax(64)
-                    let pfx = if matches!(ty, Type::Float) { 0xF3u8 } else { 0xF2u8 };
+                    let width = if matches!(ty, Type::Float) { SimdWidth::SS } else { SimdWidth::SD };
                     if inner.size() >= 8 {
-                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x48, 0x0F, 0x2A, 0xC0]));
+                        self.emit_insn(&Insn::cvt2sd_reg(true, width, 0, 0));
                     } else {
+                        // 32-bit source: no REX.W. Keep raw_bytes (diverges from Cvt2Sd REX.W).
+                        let pfx = if matches!(ty, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                         self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x2A, 0xC0]));
                     }
                 },
                 (true, false) => {
                     // 浮点分量 → 整数返回: C6.3.1.7 向零截断
-                    let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x48, 0x0F, 0x2C, 0xC0]));
+                    let width = if matches!(inner, Type::Float) { SimdWidth::SS } else { SimdWidth::SD };
+                    self.emit_insn(&Insn::cvt2sd_reg(false, width, 0, 0));
                 },
                 (false, false) => {},
             }
@@ -1803,7 +1805,7 @@ impl Codegen {
             if src_isz == 0 {
                 // 标量 RHS: rax = 值 (浮点源先 cvttsd2si 截断)
                 if matches!(r.ty(), Type::Float | Type::Double | Type::LongDouble) {
-                    self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0])); // cvttsd2si
+                    self.emit_insn(&Insn::cvt2sd_reg(false, SimdWidth::SD, 0, 0)); // cvttsd2si rax, xmm0
                 }
                 self.emit_store(0, result_off, isz as usize);
                 // P11: xor rax, rax via typed opcode (虚部 = 0)
@@ -1938,9 +1940,9 @@ impl Codegen {
                     self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
                     self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]));
                     if matches!(inner_ty, Type::Float) {
-                        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x2E, 0xC8])); // ucomiss xmm1, xmm0
+                        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SS, 1, 0)); // ucomiss xmm1, xmm0
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x2E, 0xC8])); // ucomisd xmm1, xmm0
+                        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SD, 1, 0)); // ucomisd xmm1, xmm0
                     }
                     let false_label = self.fresh_label();
                     let end_label = self.fresh_label();
@@ -2109,8 +2111,8 @@ impl Codegen {
                     }
                     self.emit_load_mem_typed(v_isz as usize, &v_inner);
                     if is_float_inner {
-                        let cvt_pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
-                        self.emit_insn(&Insn::raw_bytes(&[cvt_pfx, 0x48, 0x0F, 0x2A, 0xC0]));
+                        let width = if is_float { SimdWidth::SS } else { SimdWidth::SD };
+                        self.emit_insn(&Insn::cvt2sd_reg(true, width, 0, 0));
                         self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]));
                         self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 0));
                         self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]));
@@ -2126,7 +2128,7 @@ impl Codegen {
                     // inner 存槽。旧实现统一走浮点 movsd 8B 读, 把
                     // (real|imag) 位模式当一个 double, emit_float_convert
                     // 对整数 no-op → 比较恒不等 (complex-6 test_int)。
-                    let cvt_pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
+                    let cvt_width = if is_float { SimdWidth::SS } else { SimdWidth::SD };
                     let v_is_global = self.is_global_not_local(&name.name);
                     let v_slot_off = if v_is_global { 0 } else { self.var_offset(&name.name) };
                     // 逐分量一轮: **每轮重取分量基址**。`emit_load_mem_typed{,_disp}`
@@ -2147,7 +2149,7 @@ impl Codegen {
                         } else {
                             self.emit_load_mem_typed_disp(v_isz as usize, &v_inner, v_isz);
                         }
-                        self.emit_insn(&Insn::raw_bytes(&[cvt_pfx, 0x48, 0x0F, 0x2A, 0xC0]));
+                        self.emit_insn(&Insn::cvt2sd_reg(true, cvt_width, 0, 0));
                         self.emit_insn(&Insn::raw_bytes(&[
                             pfx,
                             0x0F,
@@ -2245,11 +2247,11 @@ impl Codegen {
                         // 整数源 → 浮点运算 inner: 分量按整数宽度加载后
                         // cvtsi2ss/cvtsi2sd (Ident 变量分支同构)。每轮重取
                         // 基址: load 覆盖 rax。
-                        let cvt_pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
+                        let cvt_width = if is_float { SimdWidth::SS } else { SimdWidth::SD };
                         for part in 0..2 {
                             self.emit_lea_r13(0, result_off);
                             self.emit_load_mem_typed_disp(e_isz as usize, &e_inner, part * e_isz);
-                            self.emit_insn(&Insn::raw_bytes(&[cvt_pfx, 0x48, 0x0F, 0x2A, 0xC0]));
+                            self.emit_insn(&Insn::cvt2sd_reg(true, cvt_width, 0, 0));
                             self.emit_insn(&Insn::raw_bytes(&[
                                 pfx,
                                 0x0F,
@@ -2292,8 +2294,8 @@ impl Codegen {
                     self.gen_expr(e, Self::EVAL_BASE);
                     if !matches!(e.ty(), Type::Float | Type::Double | Type::LongDouble) {
                         // cvtsi2ss/cvtsi2sd xmm0, rax (rax 已符号扩展)
-                        let cvt_pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
-                        self.emit_insn(&Insn::raw_bytes(&[cvt_pfx, 0x48, 0x0F, 0x2A, 0xC0]));
+                        let cvt_width = if is_float { SimdWidth::SS } else { SimdWidth::SD };
+                        self.emit_insn(&Insn::cvt2sd_reg(true, cvt_width, 0, 0));
                     }
                     let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
                     self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]));

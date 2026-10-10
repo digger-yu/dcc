@@ -294,6 +294,20 @@ pub(crate) enum X86_64Opcode {
         src: Operand,
     },
 
+    /// P11 Bucket B: SSE 整数<->浮点转换 reg-reg.
+    ///   cvtsi2sd: F2 REX.W 0F 2A /r (r64 -> xmm) — integer_to_scalar_double.
+    ///   cvtsi2ss: F3 REX.W 0F 2A /r (r64 -> xmm) — integer_to_scalar_float.
+    ///   cvttsd2si: F2 REX.W 0F 2C /r (xmm -> r64, truncate).
+    ///   cvttss2si: F3 REX.W 0F 2C /r (xmm -> r64, truncate).
+    /// to_xmm=true 表示 r64->xmm 形态 (opcode 2A), 否则 xmm->r64 (opcode 2C).
+    /// width=SimdWidth::SD 用 F2 前缀, width=SimdWidth::SS 用 F3 前缀.
+    Cvt2Sd {
+        to_xmm: bool,
+        width: SimdWidth,
+        dst: Operand,
+        src: Operand,
+    },
+
     /// x87 — 步骤 4: 收敛固定 escap 无操作数 + 单内存操作数两种形态.
     /// op::Fixed 时 mem=None; op::FldMem/FstpMem/FildMem 时 mem=Some(MemOperand).
     X87 { op: X87Op, mem: Option<MemOperand> },
@@ -1204,6 +1218,15 @@ impl X86_64Opcode {
                     (SimdArithOp::Div, SimdWidth::SS) => (0xF3, 0x5E),
                     (SimdArithOp::Xorps, _) => (0x00, 0x57),
                     (SimdArithOp::Xorpd, _) => (0x66, 0x57),
+                    // P11 Bucket A: ucomiss/ucomisd/comiss/comisd reg-reg.
+                    //   ucomiss xmm1,xmm0:  0F 2E C8
+                    //   ucomisd xmm1,xmm0:  66 0F 2E C8
+                    //   comiss xmm1,xmm0:   0F 2F C8
+                    //   comisd xmm1,xmm0:   66 0F 2F C8
+                    (SimdArithOp::Ucomi, SimdWidth::SS) => (0x00, 0x2E),
+                    (SimdArithOp::Ucomi, SimdWidth::SD) => (0x66, 0x2E),
+                    (SimdArithOp::Comi, SimdWidth::SS) => (0x00, 0x2F),
+                    (SimdArithOp::Comi, SimdWidth::SD) => (0x66, 0x2F),
                     _ => return None,
                 };
                 let mut rex: u8 = 0x40;
@@ -1236,6 +1259,43 @@ impl X86_64Opcode {
                 let modrm: u8 = 0xC0 | ((src_idx & 7) << 3) | (dst_idx & 7);
                 let mut out = Vec::with_capacity(5);
                 if need_rex { out.push(rex); }
+                out.push(0x0F);
+                out.push(opc2);
+                out.push(modrm);
+                Some(out)
+            }
+            X86_64Opcode::Cvt2Sd { to_xmm, width, dst, src } => {
+                // P11 Bucket B: cvtsi2sd/cvtsi2ss (r64->xmm) / cvttsd2si/cvttss2si (xmm->r64).
+                //   cvtsi2sd r64,xmm:  F2 REX.W 0F 2A /r  modrm: reg=xmm, r/m=r64
+                //   cvtsi2ss r64,xmm:  F3 REX.W 0F 2A /r
+                //   cvttsd2si r64,xmm: F2 REX.W 0F 2C /r  modrm: reg=xmm, r/m=r64
+                //   cvttss2si r64,xmm: F3 REX.W 0F 2C /r
+                // Intel: modrm.reg = SSE operand, modrm.r/m = GPR.
+                let (Operand::Reg(dst_idx, _), Operand::Reg(src_idx, _)) = (dst, src) else {
+                    return None;
+                };
+                let pfx: u8 = match width {
+                    SimdWidth::SD => 0xF2,
+                    SimdWidth::SS => 0xF3,
+                    _ => return None,
+                };
+                // In both directions reg field (reg_xmm) goes in ModRM.reg slot,
+                // r64 in r/m slot. Determine which operand is xmm vs r64 by to_xmm flag.
+                let (xmm_idx, gpr_idx) = if *to_xmm {
+                    // dst=xmm, src=r64. modrm.reg=xmm(dst), r/m=gpr(src).
+                    (*dst_idx, *src_idx)
+                } else {
+                    // dst=r64, src=xmm. modrm.reg=xmm(src), r/m=gpr(dst).
+                    (*src_idx, *dst_idx)
+                };
+                let opc2: u8 = if *to_xmm { 0x2A } else { 0x2C };
+                let mut rex: u8 = 0x48; // REX.W always (64-bit GPR operand).
+                if xmm_idx >= 8 { rex |= 0x04; }
+                if gpr_idx >= 8 { rex |= 0x01; }
+                let modrm: u8 = 0xC0 | ((xmm_idx & 7) << 3) | (gpr_idx & 7);
+                let mut out = Vec::with_capacity(6);
+                out.push(pfx);
+                out.push(rex);
                 out.push(0x0F);
                 out.push(opc2);
                 out.push(modrm);
@@ -2229,6 +2289,106 @@ mod tests {
             src: xmm(15),
         };
         assert_eq!(o.encode(), Some(vec![0x45, 0x0F, 0x57, 0xFF]));
+    }
+
+    // ---- SimdArith ucomi/comi (P11 Bucket A) ----
+
+    #[test]
+    fn simd_ucomiss_xmm1_xmm0() {
+        // ucomiss xmm1, xmm0:  0F 2E C8
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Ucomi,
+            width: SimdWidth::SS,
+            dst: xmm(1),
+            src: xmm(0),
+        };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0x2E, 0xC8]));
+    }
+
+    #[test]
+    fn simd_ucomisd_xmm1_xmm0() {
+        // ucomisd xmm1, xmm0:  66 0F 2E C8
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Ucomi,
+            width: SimdWidth::SD,
+            dst: xmm(1),
+            src: xmm(0),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x2E, 0xC8]));
+    }
+
+    #[test]
+    fn simd_comiss_xmm0_xmm1() {
+        // comiss xmm0, xmm1:  0F 2F C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Comi,
+            width: SimdWidth::SS,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0x2F, 0xC1]));
+    }
+
+    #[test]
+    fn simd_comisd_xmm0_xmm1() {
+        // comisd xmm0, xmm1:  66 0F 2F C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Comi,
+            width: SimdWidth::SD,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x2F, 0xC1]));
+    }
+
+    // ---- Cvt2Sd (P11 Bucket B) ----
+
+    #[test]
+    fn cvttsd2si_rax_xmm0() {
+        // cvttsd2si rax, xmm0:  F2 48 0F 2C C0
+        let o = X86_64Opcode::Cvt2Sd {
+            to_xmm: false,
+            width: SimdWidth::SD,
+            dst: reg(0, Width::B64),
+            src: xmm(0),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF2, 0x48, 0x0F, 0x2C, 0xC0]));
+    }
+
+    #[test]
+    fn cvttss2si_rax_xmm0() {
+        // cvttss2si rax, xmm0:  F3 48 0F 2C C0
+        let o = X86_64Opcode::Cvt2Sd {
+            to_xmm: false,
+            width: SimdWidth::SS,
+            dst: reg(0, Width::B64),
+            src: xmm(0),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0x48, 0x0F, 0x2C, 0xC0]));
+    }
+
+    #[test]
+    fn cvtsi2sd_xmm0_rax() {
+        // cvtsi2sd xmm0, rax:  F2 48 0F 2A C0
+        let o = X86_64Opcode::Cvt2Sd {
+            to_xmm: true,
+            width: SimdWidth::SD,
+            dst: xmm(0),
+            src: reg(0, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF2, 0x48, 0x0F, 0x2A, 0xC0]));
+    }
+
+    #[test]
+    fn cvtsi2ss_xmm0_rax() {
+        // cvtsi2ss xmm0, rax:  F3 48 0F 2A C0
+        let o = X86_64Opcode::Cvt2Sd {
+            to_xmm: true,
+            width: SimdWidth::SS,
+            dst: xmm(0),
+            src: reg(0, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0x48, 0x0F, 0x2A, 0xC0]));
     }
 
     // ---- Setcc r8 (P11 Bucket H) ----
