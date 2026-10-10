@@ -1411,7 +1411,13 @@ impl Codegen {
             )); }, // mov rax, [rax]
                             2 => {
                                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x00])); // mov ax, [rax]
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB7, 0xC0]));
+                                // movzwq eax, eax
+                                self.emit_insn(&Insn::mov_ext(
+                                    false,
+                                    crate::codegen::shared::asm_operand::Width::B16,
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                    0, 0,
+                                ));
                             }, // movzx eax, ax
                             1 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x00])); }, // movzx eax, byte [rax]
                             _ => {},
@@ -1508,7 +1514,13 @@ impl Codegen {
             )); }, // mov rcx, [rcx]
                             2 => {
                                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x09]));
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB7, 0xC9]));
+                                // movzwq ecx, ecx
+                                self.emit_insn(&Insn::mov_ext(
+                                    false,
+                                    crate::codegen::shared::asm_operand::Width::B16,
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                    1, 1,
+                                ));
                             },
                             1 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x09])); },
                             _ => {},
@@ -1643,7 +1655,13 @@ impl Codegen {
             )); }, // mov rdx, [rdx]
                                 2 => {
                                     self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x12]));
-                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB7, 0xD2]));
+                                    // movzwq edx, edx
+                                    self.emit_insn(&Insn::mov_ext(
+                                        false,
+                                        crate::codegen::shared::asm_operand::Width::B16,
+                                        crate::codegen::shared::asm_operand::Width::B64,
+                                        2, 2,
+                                    ));
                                 },
                                 1 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x12])); },
                                 _ => {},

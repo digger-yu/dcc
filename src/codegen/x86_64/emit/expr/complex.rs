@@ -1547,7 +1547,13 @@ impl Codegen {
                     1 => { self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x00])); }, // movzx eax, byte [rax]
                     2 => {
                         self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x00]));
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB7, 0xC0]));
+                        // movzwq eax, eax
+                        self.emit_insn(&Insn::mov_ext(
+                            false,
+                            crate::codegen::shared::asm_operand::Width::B16,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                            0, 0,
+                        ));
                     },
                     4 => { self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {

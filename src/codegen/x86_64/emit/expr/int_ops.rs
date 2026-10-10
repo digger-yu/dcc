@@ -384,22 +384,31 @@ impl Codegen {
             Type::Bool | Type::Char | Type::SChar | Type::UChar => {
                 if is_signed {
                     // movsbq dst_low8, dst: 截断到 8 位并符号扩展
-                    // 自反 ModRM: dst 同时在 ModRM.reg 与 r/m ⇒ >=8 必须同时置 REX.R 与 REX.B。
-                    let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xBE, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                    self.emit_insn(&Insn::mov_ext(
+                        true,
+                        crate::codegen::shared::asm_operand::Width::B8,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        dst, dst,
+                    ));
                 } else {
-                    // movzbl dst_low8, dst: 截断到 8 位并零扩展
-                    // 同上：两个字段同一个号，只置 REX.B 会把 reg 留在低 8 号上。
-                    let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xB6, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                    // movzbq dst_low8, dst: 截断到 8 位并零扩展
+                    self.emit_insn(&Insn::mov_ext(
+                        false,
+                        crate::codegen::shared::asm_operand::Width::B8,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        dst, dst,
+                    ));
                 }
             },
             Type::Short | Type::UShort => {
                 if is_signed {
                     // movswq dst_low16, dst: 截断到 16 位并符号扩展
-                    // 同上：自反 ModRM 两个字段都要扩。
-                    let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xBF, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                    self.emit_insn(&Insn::mov_ext(
+                        true,
+                        crate::codegen::shared::asm_operand::Width::B16,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        dst, dst,
+                    ));
                 } else {
                     // movzwl: 32 位 mov 零扩展高 32 位, 再 and 0xFFFF
                     // 自反 ModRM: dst 同时在 ModRM.reg 与 r/m ⇒ >=8 必须同时置 REX.R 与 REX.B(0x05)，
@@ -436,23 +445,42 @@ impl Codegen {
         }
     }
     pub(crate) fn gen_int_promote(&mut self, dst: u8, ty: &Type) {
-        let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
         match ty {
             Type::Char | Type::SChar | Type::Bool => {
-                // movsx dst, dst_low8: 48 0F BE C0+dst,dst
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xBE, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                // movsbq dst, dst_low8
+                self.emit_insn(&Insn::mov_ext(
+                    true,
+                    crate::codegen::shared::asm_operand::Width::B8,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    dst, dst,
+                ));
             },
             Type::Short => {
-                // movsx dst, dst_low16: 48 0F BF C0+dst,dst
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xBF, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                // movswq dst, dst_low16
+                self.emit_insn(&Insn::mov_ext(
+                    true,
+                    crate::codegen::shared::asm_operand::Width::B16,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    dst, dst,
+                ));
             },
             Type::UChar => {
-                // movzx dst, dst_low8: 48 0F B6 C0+dst,dst
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xB6, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                // movzbq dst, dst_low8
+                self.emit_insn(&Insn::mov_ext(
+                    false,
+                    crate::codegen::shared::asm_operand::Width::B8,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    dst, dst,
+                ));
             },
             Type::UShort => {
-                // movzx dst, dst_low16: 48 0F B7 C0+dst,dst
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xB7, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                // movzwq dst, dst_low16
+                self.emit_insn(&Insn::mov_ext(
+                    false,
+                    crate::codegen::shared::asm_operand::Width::B16,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    dst, dst,
+                ));
             },
             _ => {}, // int/long/ptr 等不需要提升
         }
