@@ -190,7 +190,21 @@ impl Codegen {
         // 负值钳 0: 先把 scratch 清零 (xor 会破坏 flags), 再 test 设 SF,
         // 最后 cmovs 选 0。
         let zero_reg = if dst == 0 { 2 } else { 0 };
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xC0 | ((zero_reg & 7) << 3) | (zero_reg & 7)]));
+        // P11: xor reg,reg via typed opcode (zero_reg is always <8 here).
+        {
+            let insn = Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                    op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(zero_reg, crate::codegen::shared::asm_operand::Width::B64),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(zero_reg, crate::codegen::shared::asm_operand::Width::B64),
+                },
+                &[],
+            );
+            if !self.emit_insn(&insn) {
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xC0 | ((zero_reg & 7) << 3) | (zero_reg & 7)]));
+            }
+        }
         let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
         self.emit_insn(&Insn::raw_bytes(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
         let rex_cmov = 0x48 | if dst >= 8 { 0x04 } else { 0 };
