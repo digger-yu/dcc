@@ -2079,7 +2079,12 @@ impl Codegen {
                     // double/long double: 符号位是 bit 1
                     self.emit_insn(&Insn::alu_rm_reg_imm8(4, 0, 2)); // and eax, 2
                                                     // 归一化为 0/1: shr 1
-                    self.emit_insn(&Insn::raw_bytes(&[0xD1, 0xE8])); // shr eax, 1
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Shift {
+                        op: crate::codegen::x86_64::opcode::ShiftOp::Shr,
+                        width: crate::codegen::shared::asm_operand::Width::B32,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B32),
+                        amount: crate::codegen::x86_64::opcode::ShiftAmount::Imm8(1),
+                    }, &[])); // shr eax, 1
                 }
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -2305,7 +2310,12 @@ impl Codegen {
                 }
                 self.emit_insn(&Insn::raw_bytes(&[0xBA]));
                 self.emit_insn(&Insn::raw_bytes(&bits.to_le_bytes())); // mov edx, bits
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD1, 0xE8])); // shr rax, 1 (LSB -> CF)
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Shift {
+                    op: crate::codegen::x86_64::opcode::ShiftOp::Shr,
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                    amount: crate::codegen::x86_64::opcode::ShiftAmount::Imm8(1),
+                }, &[])); // shr rax, 1 (LSB -> CF)
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD1, 0xD1])); // rcl rcx, 1
                 self.emit_insn(&Insn::raw_bytes(&[0xFF, 0xCA])); // dec edx
                 self.emit_insn(&Insn::raw_bytes(&[0x75, 0xF6])); // jnz loop

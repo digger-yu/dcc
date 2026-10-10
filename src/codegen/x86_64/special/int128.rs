@@ -299,7 +299,12 @@ impl Codegen {
         let subtract = self.fresh_label();
         let next = self.fresh_label();
         self.label(&loop_label);
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD1, 0xE0])); // shl rax, 1
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Shift {
+            op: crate::codegen::x86_64::opcode::ShiftOp::Shl,
+            width: crate::codegen::shared::asm_operand::Width::B64,
+            dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+            amount: crate::codegen::x86_64::opcode::ShiftAmount::Imm8(1),
+        }, &[])); // shl rax, 1
         self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD1, 0xD2])); // rcl rdx, 1
         self.emit_insn(&Insn::raw_bytes(&[0x49, 0xD1, 0xD6])); // rcl r14, 1
         self.emit_insn(&Insn::raw_bytes(&[0x49, 0xD1, 0xD7])); // rcl r15, 1

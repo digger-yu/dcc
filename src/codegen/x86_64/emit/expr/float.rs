@@ -384,8 +384,12 @@ impl Codegen {
 
         // --- bit63=1: 值 >= 2^63 ---
         // shr dst, 1: 无符号除以 2 (清除 bit63)
-        let shr_rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-        self.emit_insn(&Insn::raw_bytes(&[shr_rex, 0xD1, 0xE8 | (dst & 7)]));
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Shift {
+            op: crate::codegen::x86_64::opcode::ShiftOp::Shr,
+            width: crate::codegen::shared::asm_operand::Width::B64,
+            dst: crate::codegen::x86_64::opcode::Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B64),
+            amount: crate::codegen::x86_64::opcode::ShiftAmount::Imm8(1),
+        }, &[]));
         // cvtsi2ss/sd xmm0, dst (REX.W 64 位操作数)
         let cvt_rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
         if is_double {
