@@ -981,9 +981,31 @@ impl Codegen {
             self.emit_xor_edx(inner_sz);
         }
         self.emit_div_rm(inner_sz, is_signed, 0xF1); // idiv/div ecx
-        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC6])); // mov esi, eax (r)
+        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        6, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov esi, eax (r)
                                   // den = d + r*c
-        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xF0])); // mov eax, esi
+        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        6, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov eax, esi
         self.emit_imul_rm(inner_sz, total_sz); // imul rax, [rsp+total]
         self.emit_add_rm(inner_sz, total_sz + inner_sz); // add, [rsp+ti]
         self.emit_insn(&Insn::new(
@@ -999,7 +1021,18 @@ impl Codegen {
                 &[],
             )); // mov edi, eax (den)
                                   // real = (a*r + b) / den
-        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xF0])); // mov eax, esi
+        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        6, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov eax, esi
         self.emit_imul_r10(inner_sz); // imul rax, r10
         self.emit_add_r11(inner_sz); // add rax, r11
         if is_signed {
@@ -1010,7 +1043,18 @@ impl Codegen {
         self.emit_div_rm(inner_sz, is_signed, 0xF7); // idiv/div edi
         self.emit_store_rsp0(inner_sz); // store real
                                         // imag = (b*r - a) / den
-        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xF0])); // mov eax, esi
+        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        6, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov eax, esi
         self.emit_imul_r11(inner_sz); // imul rax, r11
         self.emit_mov_rcx_r10(inner_sz); // mov rcx, r10
         self.emit_sub_rax_rcx(inner_sz); // sub rax, rcx
@@ -1037,9 +1081,31 @@ impl Codegen {
             self.emit_xor_edx(inner_sz);
         }
         self.emit_div_rm(inner_sz, is_signed, 0xF1); // idiv/div ecx
-        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC6])); // mov esi, eax (r)
+        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        6, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov esi, eax (r)
                                   // den = c + r*d
-        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xF0])); // mov eax, esi
+        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        6, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov eax, esi
         self.emit_imul_rm(inner_sz, total_sz + inner_sz); // imul rax, [rsp+ti]
         self.emit_add_rm(inner_sz, total_sz); // add, [rsp+total]
         self.emit_insn(&Insn::new(
@@ -1055,7 +1121,18 @@ impl Codegen {
                 &[],
             )); // mov edi, eax (den)
                                   // real = (r*b + a) / den
-        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xF0])); // mov eax, esi
+        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        6, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov eax, esi
         self.emit_imul_r11(inner_sz); // imul rax, r11
         self.emit_add_r10(inner_sz); // add rax, r10
         if is_signed {
@@ -1066,7 +1143,18 @@ impl Codegen {
         self.emit_div_rm(inner_sz, is_signed, 0xF7);
         self.emit_store_rsp0(inner_sz); // store real
                                         // imag = (b - r*a) / den
-        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xF0])); // mov eax, esi
+        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        6, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov eax, esi
         self.emit_imul_r10(inner_sz); // imul rax, r10 (r*a)
         self.emit_mov_rcx_r11(inner_sz); // mov rcx, r11 (b)
         self.emit_sub_rcx_rax(inner_sz); // sub rcx, rax
@@ -1177,7 +1265,18 @@ impl Codegen {
                 &[],
             )); // r8d = a
             self.emit_insn(&Insn::raw_bytes(&[0x44, 0x0F, 0xAF, 0xC6])); // imul r8d, esi (ad)
-            self.emit_insn(&Insn::raw_bytes(&[0x89, 0xD0])); // eax = b
+            self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        2, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // eax = b
             self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAF, 0xC1])); // imul eax, ecx (bc)
             self.emit_insn(&Insn::raw_bytes(&[0x44, 0x01, 0xC0])); // add eax, r8d (imag)
                                             // 存回 (截断到分量宽度)
