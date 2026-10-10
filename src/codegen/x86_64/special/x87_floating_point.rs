@@ -230,7 +230,23 @@ impl Codegen {
                 // 注意助记符陷阱（实测 objdump 已确认）：`fild m32int` 是 **DB /0**，
                 // 而 `D9 /0` 是 `fld m32fp`——写成 D9 会把整数的**位模式当 float32**
                 // 装载（3 变成 4.2e-45），不报错但语义全错。
-                self.emit_insn(&Insn::raw_bytes(&[0x89, 0x04, 0x24])); // mov [rsp], eax
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(4),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov [rsp], eax
                 self.emit_x87_mem_at(0xDB, 0, 4, 0, false); // fild dword [rsp]
             }
         }

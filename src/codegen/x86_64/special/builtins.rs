@@ -4622,7 +4622,23 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x04, 0x24])); // mov eax, [rsp]
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0xC0, 0xFF, 0xFF, 0xFF])); // and eax, ~0x3F
                 self.emit_insn(&Insn::raw_bytes(&[0x0D, 0x80, 0x1F, 0x00, 0x00])); // or eax, 0x1F80 (mask all)
-                self.emit_insn(&Insn::raw_bytes(&[0x89, 0x04, 0x24])); // mov [rsp], eax
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(4),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov [rsp], eax
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x14, 0x24])); // ldmxcsr [rsp]
                 self.emit_insn(&Insn::raw_bytes(&[0xD9, 0x3C, 0x24])); // fnstcw [rsp]
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x04, 0x24])); // mov ax, [rsp]
@@ -4680,7 +4696,23 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
                 self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x04, 0x24])); // mov eax, [rsp]
                 self.emit_insn(&Insn::raw_bytes(&[0x09, 0xC8])); // or eax, ecx
-                self.emit_insn(&Insn::raw_bytes(&[0x89, 0x04, 0x24])); // mov [rsp], eax
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(4),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov [rsp], eax
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x14, 0x24])); // ldmxcsr [rsp]
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 8])); // add rsp, 8
                 self.mov_imm(dst, 0); // 返回 0
