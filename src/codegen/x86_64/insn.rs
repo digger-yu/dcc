@@ -110,6 +110,12 @@ impl Insn {
         }
     }
 
+    /// P11: 给已构造的类型化 Insn 附加 GAS 文本 (等价于 raw_with_gas, 但不走 Raw 兜底).
+    pub fn with_gas(mut self, gas_line: String) -> Self {
+        self.gas_text = Some(gas_line);
+        self
+    }
+
     pub fn encode_bytes(&self) -> Option<Vec<u8>> {
         // 类型化变体: 让 opcode.rs 现场算字节. 尚未实现的变体返回 None →
         // 发射方必须切回 raw_bytes 兜底; 当前没有任何调用点依赖 None 分支.

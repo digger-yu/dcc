@@ -274,14 +274,9 @@ impl Codegen {
         let modrm = 0xC0u8 | ((dst & 7) << 3) | (src & 7);
         match sz {
             1 | 2 => {
-                // movzx dst, src8 / src16: 只取低位并清零高位。
-                // 位序必须分开判：REX.R 看 ModRM.reg（这里是 dst），REX.B 看 r/m
-                // （这里是 src）。而 spl/bpl/sil/dil 只要「有 REX 前缀」就合法，
-                // **不能**为此去置 REX.B —— 那会把字段索引搬到 +8 的高 8 个寄存器上。
-                // 实测踩过：置了 B 之后 `movzbl %sil,%ebx` 被编成 `movzbl %r14b,%ebx`。
-                let need_rex = dst >= 8 || src >= 8 || (sz == 1 && src >= 4);
-                let op = if sz == 1 { 0xB6 } else { 0xB7 };
-                // P9 方案 C: 挂 gas_text. AT&T 格式: movzbl src8, %dst32 / movzwl src16, %dst32.
+                // P11: 收敛到 MovExt (movzx r32, r8/r16).
+                use crate::codegen::x86_64::opcode::Operand as O;
+                let from = if sz == 1 { Width::B8 } else { Width::B16 };
                 let mnemonic = if sz == 1 { "movzbl" } else { "movzwl" };
                 let src8_name = if sz == 1 {
                     GAS_REG8[(src & 15) as usize]
@@ -289,18 +284,14 @@ impl Codegen {
                     GAS_REG16[(src & 15) as usize]
                 };
                 let gas = format!("{mnemonic} {src8_name}, {}", GAS_REG32[(dst & 15) as usize]);
-                if need_rex {
-                    let mut rex = 0x40u8;
-                    if dst >= 8 {
-                        rex |= 0x04;
-                    }
-                    if src >= 8 {
-                        rex |= 0x01;
-                    }
-                    self.emit_insn(&Insn::raw_with_gas(&[rex, 0x0F, op, modrm], &gas));
-                } else {
-                    self.emit_insn(&Insn::raw_with_gas(&[0x0F, op, modrm], &gas));
-                }
+                let op = X86_64Opcode::MovExt {
+                    sign: false,
+                    from,
+                    to: Width::B32,
+                    dst: O::Reg(dst, Width::B32),
+                    src: O::Reg(src, from),
+                };
+                self.emit_insn(&Insn::new(op, &[]).with_gas(gas));
             },
             4 => {
                 // mov dst32, src32: 32 位写自动清零高 32 位。dst == src 时也不能跳,
@@ -345,45 +336,30 @@ impl Codegen {
             }
             return;
         }
-        let modrm = 0xC0u8 | ((dst & 7) << 3) | (src & 7);
-        let mut rex = 0x48u8;
-        if dst >= 8 {
-            rex |= 0x04;
-        }
-        if src >= 8 {
-            rex |= 0x01;
-        }
-        // P9 方案 C: 挂 gas_text.
-        //   sz=1: movsbl src8, %dst64   (0F BE)
-        //   sz=2: movswl src16, %dst64  (0F BF)
-        //   sz=4: movsxd src32, %dst64 (63)
-        let (bytes, gas): (Vec<u8>, String) = match sz {
-            1 => (
-                vec![rex, 0x0F, 0xBE, modrm],
-                format!(
-                    "movsbl {}, {}",
-                    GAS_REG8[(src & 15) as usize],
-                    GAS_REG64[(dst & 15) as usize],
-                ),
-            ),
-            2 => (
-                vec![rex, 0x0F, 0xBF, modrm],
-                format!(
-                    "movswl {}, {}",
-                    GAS_REG16[(src & 15) as usize],
-                    GAS_REG64[(dst & 15) as usize],
-                ),
-            ),
-            _ => (
-                vec![rex, 0x63, modrm],
-                format!(
-                    "movsxd {}, {}",
-                    GAS_REG32[(src & 15) as usize],
-                    GAS_REG64[(dst & 15) as usize],
-                ),
-            ),
+        use crate::codegen::x86_64::opcode::Operand as O;
+        let (from, mnemonic) = match sz {
+            1 => (Width::B8, "movsbl"),
+            2 => (Width::B16, "movswl"),
+            _ => (Width::B32, "movsxd"),
         };
-        self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
+        let gas = format!(
+            "{} {}, {}",
+            mnemonic,
+            match sz {
+                1 => GAS_REG8[(src & 15) as usize],
+                2 => GAS_REG16[(src & 15) as usize],
+                _ => GAS_REG32[(src & 15) as usize],
+            },
+            GAS_REG64[(dst & 15) as usize],
+        );
+        let op = X86_64Opcode::MovExt {
+            sign: true,
+            from,
+            to: Width::B64,
+            dst: O::Reg(dst, Width::B64),
+            src: O::Reg(src, from),
+        };
+        self.emit_insn(&Insn::new(op, &[]).with_gas(gas));
     }
 
 
@@ -1954,33 +1930,22 @@ impl Codegen {
     /// Sign-extend a value in a register to full width.
     pub fn sign_extend_to_reg(&mut self, dst: u8, src: u8, from_bits: u8) {
         match from_bits {
-            8 => {
-                // movsx dst, byte src
-                let rex = encode_rex_full(true, dst, 0, src);
-                if let Some(r) = rex {
-                    self.emit_insn(&Insn::raw_bytes(&[r, 0x0F, 0xBE, 0xC0 | ((dst & 7) << 3) | (src & 7)]));
-                } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xBE, 0xC0 | ((dst & 7) << 3) | (src & 7)]));
-                }
-            },
-            16 => {
-                let rex = encode_rex_full(true, dst, 0, src);
-                if let Some(r) = rex {
-                    self.emit_insn(&Insn::raw_bytes(&[r, 0x0F, 0xBF, 0xC0 | ((dst & 7) << 3) | (src & 7)]));
-                } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xBF, 0xC0 | ((dst & 7) << 3) | (src & 7)]));
-                }
-            },
-            32 => {
-                let rex = encode_rex_full(true, dst, 0, src);
-                use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
-                use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
-                let gas = format!("movsxd {}, {}", GAS_REG32[(src & 15) as usize], GAS_REG64[(dst & 15) as usize]);
-                if let Some(r) = rex {
-                    self.emit_insn(&Insn::raw_with_gas(&[r, 0x63, 0xC0 | ((dst & 7) << 3) | (src & 7)], &gas));
-                } else {
-                    self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x63, 0xC0 | ((dst & 7) << 3) | (src & 7)], &gas));
-                }
+            8 | 16 | 32 => {
+                // P11: 收敛到 MovExt (sign=true, to=B64).
+                use crate::codegen::x86_64::opcode::Operand as O;
+                let from = match from_bits {
+                    8 => Width::B8,
+                    16 => Width::B16,
+                    _ => Width::B32,
+                };
+                let op = X86_64Opcode::MovExt {
+                    sign: true,
+                    from,
+                    to: Width::B64,
+                    dst: O::Reg(dst, Width::B64),
+                    src: O::Reg(src, from),
+                };
+                self.emit_insn(&Insn::new(op, &[]));
             },
             _ => {
                 if dst != src {

@@ -713,6 +713,62 @@ impl X86_64Opcode {
                 out.extend_from_slice(&disp_bytes[..disp_len]);
                 Some(out)
             }
+            X86_64Opcode::MovExt { sign, from, to, dst, src } => {
+                // P11: 收敛 movzx/movsx/movsxd 的 reg-reg 形态.
+                //   MOVZX r32, r/m8 (B8):  0F B6 /r
+                //   MOVZX r32, r/m16 (B16): 0F B7 /r
+                //   MOVSX r32, r/m8 (B8):  0F BE /r
+                //   MOVSX r32, r/m16 (B16): 0F BF /r
+                //   MOVSXD r64, r/m32 (B64): 63 /r (REX.W=1)
+                // dst ModRM.reg; src ModRM.r/m.
+                let (Operand::Reg(dst_idx, _), Operand::Reg(src_idx, _)) = (dst, src) else {
+                    return None;
+                };
+                use crate::codegen::shared::asm_operand::Width as W;
+                // 先确定 escap / 低 opcode / 是否需要 REX.W=1.
+                let (escap, low, rex_w): (u8, u8, bool) = match (sign, from, to) {
+                    // movzx 到 r32
+                    (false, W::B8, W::B32) => (0x0F, 0xB6, false),
+                    (false, W::B16, W::B32) => (0x0F, 0xB7, false),
+                    // movsx 到 r32
+                    (true, W::B8, W::B32) => (0x0F, 0xBE, false),
+                    (true, W::B16, W::B32) => (0x0F, 0xBF, false),
+                    // movsxd 到 r64 (from r/m32)
+                    (true, W::B32, W::B64) => (0x00, 0x63, true),
+                    // movsx/movzx 到 r64 (from B8/B16) 走同样 escap, REX.W=1
+                    (false, W::B8, W::B64) => (0x0F, 0xB6, true),
+                    (false, W::B16, W::B64) => (0x0F, 0xB7, true),
+                    (true, W::B8, W::B64) => (0x0F, 0xBE, true),
+                    (true, W::B16, W::B64) => (0x0F, 0xBF, true),
+                    _ => return None,
+                };
+                // REX: W=1 (B64 目标), R=dst>=8, B=src>=8.
+                // 额外: B8 源 (spl/bpl/sil/dil, src&7 ∈ {4,5,6,7}) 需 REX 让汇编器认成高字节.
+                let mut rex: u8 = 0x40;
+                if rex_w {
+                    rex |= 0x08;
+                }
+                if *dst_idx >= 8 {
+                    rex |= 0x04;
+                }
+                if *src_idx >= 8 {
+                    rex |= 0x01;
+                }
+                let need_rex = rex_w
+                    || *dst_idx >= 8
+                    || *src_idx >= 8
+                    || (*from == W::B8 && *src_idx >= 4);
+                let mut out = Vec::with_capacity(6);
+                if need_rex {
+                    out.push(rex);
+                }
+                if escap != 0 {
+                    out.push(escap);
+                }
+                out.push(low);
+                out.push(0xC0 | ((*dst_idx & 7) << 3) | (*src_idx & 7));
+                Some(out)
+            }
             X86_64Opcode::Stack { op, width, dst } => {
                 // 步骤 3: 收敛 push(reg) / pop(reg) — 硬件 PUSH/POP reg64 短形式.
                 //   PUSH r64:  50+rd  (rd<8) / 41 50+(rd&7)  (rd>=8, REX.B=0x41)
@@ -1318,6 +1374,113 @@ mod tests {
             }),
         };
         assert_eq!(o.encode(), Some(vec![0x8B, 0x04, 0x24]));
+    }
+
+    // ---- MovExt reg-reg (P11) ----
+
+    #[test]
+    fn mov_ext_movzx_r32_r8_no_rex() {
+        // movzx eax, al:  0F B6 C0  (no REX, src=al=0)
+        let o = X86_64Opcode::MovExt {
+            sign: false,
+            from: Width::B8,
+            to: Width::B32,
+            dst: reg(0, Width::B32),
+            src: reg(0, Width::B8),
+        };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0xB6, 0xC0]));
+    }
+
+    #[test]
+    fn mov_ext_movzx_r32_r8_sil_needs_rex() {
+        // movzx eax, sil:  40 0F B6 C6  (src=6=sil, 需要 REX)
+        let o = X86_64Opcode::MovExt {
+            sign: false,
+            from: Width::B8,
+            to: Width::B32,
+            dst: reg(0, Width::B32),
+            src: reg(6, Width::B8),
+        };
+        assert_eq!(o.encode(), Some(vec![0x40, 0x0F, 0xB6, 0xC6]));
+    }
+
+    #[test]
+    fn mov_ext_movzx_r32_r16_no_rex() {
+        // movzx eax, ax:  0F B7 C0
+        let o = X86_64Opcode::MovExt {
+            sign: false,
+            from: Width::B16,
+            to: Width::B32,
+            dst: reg(0, Width::B32),
+            src: reg(0, Width::B16),
+        };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0xB7, 0xC0]));
+    }
+
+    #[test]
+    fn mov_ext_movsx_r32_r8() {
+        // movsx eax, al:  0F BE C0
+        let o = X86_64Opcode::MovExt {
+            sign: true,
+            from: Width::B8,
+            to: Width::B32,
+            dst: reg(0, Width::B32),
+            src: reg(0, Width::B8),
+        };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0xBE, 0xC0]));
+    }
+
+    #[test]
+    fn mov_ext_movsx_r32_r16() {
+        // movsx eax, ax:  0F BF C0
+        let o = X86_64Opcode::MovExt {
+            sign: true,
+            from: Width::B16,
+            to: Width::B32,
+            dst: reg(0, Width::B32),
+            src: reg(0, Width::B16),
+        };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0xBF, 0xC0]));
+    }
+
+    #[test]
+    fn mov_ext_movsxd_r64_r32() {
+        // movsxd rax, eax:  48 63 C0
+        let o = X86_64Opcode::MovExt {
+            sign: true,
+            from: Width::B32,
+            to: Width::B64,
+            dst: reg(0, Width::B64),
+            src: reg(0, Width::B32),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x63, 0xC0]));
+    }
+
+    #[test]
+    fn mov_ext_movsx_r64_r16() {
+        // movsx r64, r16 (movswq):  48 0F BF C0
+        let o = X86_64Opcode::MovExt {
+            sign: true,
+            from: Width::B16,
+            to: Width::B64,
+            dst: reg(0, Width::B64),
+            src: reg(0, Width::B16),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x0F, 0xBF, 0xC0]));
+    }
+
+    #[test]
+    fn mov_ext_high_regs_r8_r15() {
+        // movsx r8d, dil:  44 0F BE C7  (dst=r8=8 -> reg&7=0, src=dil=7)
+        let o = X86_64Opcode::MovExt {
+            sign: true,
+            from: Width::B8,
+            to: Width::B32,
+            dst: reg(8, Width::B32),
+            src: reg(7, Width::B8),
+        };
+        // REX.R=0x04 (dst>=8), src=7>=4 requires REX anyway.
+        assert_eq!(o.encode(), Some(vec![0x44, 0x0F, 0xBE, 0xC7]));
     }
 }
 
