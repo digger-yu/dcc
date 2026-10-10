@@ -197,11 +197,23 @@ impl Codegen {
                 },
                 &[],
             ));
-                                                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB7, 0xC0]));
+                                                        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                                                            sign: false,
+                                                            from: crate::codegen::shared::asm_operand::Width::B16,
+                                                            to: crate::codegen::shared::asm_operand::Width::B64,
+                                                            dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                                                            src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B16),
+                                                        }, &[]));
                                                     }, // movzx
                                                     2 => {
                                                         self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x00]));
-                                                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB7, 0xC0]));
+                                                        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                                                            sign: false,
+                                                            from: crate::codegen::shared::asm_operand::Width::B16,
+                                                            to: crate::codegen::shared::asm_operand::Width::B64,
+                                                            dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                                                            src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B16),
+                                                        }, &[]));
                                                     },
                                                     1 => { self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x00])); }, // movzx al, [rax]
                                                     _ => {},
@@ -439,23 +451,53 @@ impl Codegen {
                                 match ret_bits {
                                     8 if is_signed => {
                                         // movsbl %al, %rax (sign-extend to 64-bit)
-                                        self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xBE, 0xC0], "movsbl %al, %rax"));
+                                        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                                            sign: true,
+                                            from: crate::codegen::shared::asm_operand::Width::B8,
+                                            to: crate::codegen::shared::asm_operand::Width::B64,
+                                            dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                                            src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B8),
+                                        }, &[]));
                                     },
                                     8 => {
                                         // movzbq %al, %rax (zero-extend to 64-bit)
-                                        self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xB6, 0xC0], "movzbq %al, %rax"));
+                                        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                                            sign: false,
+                                            from: crate::codegen::shared::asm_operand::Width::B8,
+                                            to: crate::codegen::shared::asm_operand::Width::B64,
+                                            dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                                            src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B8),
+                                        }, &[]));
                                     },
                                     16 if is_signed => {
                                         // movswq %ax, %rax (sign-extend to 64-bit)
-                                        self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xBF, 0xC0], "movswq %ax, %rax"));
+                                        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                                            sign: true,
+                                            from: crate::codegen::shared::asm_operand::Width::B16,
+                                            to: crate::codegen::shared::asm_operand::Width::B64,
+                                            dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                                            src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B16),
+                                        }, &[]));
                                     },
                                     16 => {
                                         // movzwq %ax, %rax (zero-extend to 64-bit)
-                                        self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xB7, 0xC0], "movzwq %ax, %rax"));
+                                        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                                            sign: false,
+                                            from: crate::codegen::shared::asm_operand::Width::B16,
+                                            to: crate::codegen::shared::asm_operand::Width::B64,
+                                            dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                                            src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B16),
+                                        }, &[]));
                                     },
                                     32 if is_signed => {
                                         // movsxd %eax, %rax (sign-extend to 64-bit)
-                                        self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x63, 0xC0], "movsxd %eax, %rax"));
+                                        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                                            sign: true,
+                                            from: crate::codegen::shared::asm_operand::Width::B32,
+                                            to: crate::codegen::shared::asm_operand::Width::B64,
+                                            dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                                            src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B32),
+                                        }, &[]));
                                     },
                                     32 => {
                                         // mov %eax, %eax (zero-extend to 64-bit)

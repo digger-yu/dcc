@@ -536,11 +536,23 @@ impl Codegen {
                 if invert {
                     self.emit_insn(&Insn::raw_bytes(&[0x34, 0x01])); // xor al, 1
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB6, 0xC0])); // movzx rax, al
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                    sign: false,
+                    from: crate::codegen::shared::asm_operand::Width::B8,
+                    to: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B8),
+                }, &[])); // movzx rax, al
             },
         }
         if matches!(op, BinOp::Gt | BinOp::Ge) {
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB6, 0xC0])); // movzx rax, al
+            self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                sign: false,
+                from: crate::codegen::shared::asm_operand::Width::B8,
+                to: crate::codegen::shared::asm_operand::Width::B64,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B8),
+            }, &[])); // movzx rax, al
         }
     }
 

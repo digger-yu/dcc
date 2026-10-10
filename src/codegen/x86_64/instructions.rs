@@ -2397,8 +2397,20 @@ impl Codegen {
             _ => self.emit_insn(&Insn::raw_bytes(&[0xF0, 0x48, 0x87, 0x37])), // lock xchg [rdi], rsi
         };
         match sz {
-            1 => { self.emit_insn(&Insn::raw_bytes(&[0x40, 0x0F, 0xB6, 0xF6])); } // movzbl sil, esi
-            2 => { self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7, 0xF6])); }       // movzwl si, esi
+            1 => { self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                sign: false,
+                from: crate::codegen::shared::asm_operand::Width::B8,
+                to: crate::codegen::shared::asm_operand::Width::B32,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B32),
+                src: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B8),
+            }, &[])); } // movzbl sil, esi
+            2 => { self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                sign: false,
+                from: crate::codegen::shared::asm_operand::Width::B16,
+                to: crate::codegen::shared::asm_operand::Width::B32,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B32),
+                src: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B16),
+            }, &[])); } // movzwl si, esi
             _ => {},
         };
     }

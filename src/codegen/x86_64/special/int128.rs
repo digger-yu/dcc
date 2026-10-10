@@ -470,7 +470,13 @@ impl Codegen {
                                                     // Intel: and al, ah → opcode 0x20 (and r/m8, r8), modrm=0xE0 (mod=11, reg=ah=100, r/m=al=000)
                     self.emit_insn(&Insn::raw_bytes(&[0x20, 0xE0]));
                     // 零扩展到 rax
-                    self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xB6, 0xC0], "movzbq %al, %rax")); // movzbq rax, al
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                        sign: false,
+                        from: crate::codegen::shared::asm_operand::Width::B8,
+                        to: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                        src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B8),
+                    }, &[])); // movzbq rax, al
                                                           // rax = 1 (两 chunk 都相等 → a==b) 或 0 (至少一个不等 → a!=b)
 
                     if matches!(op, BinOp::Ne) {
