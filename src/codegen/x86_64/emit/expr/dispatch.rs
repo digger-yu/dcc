@@ -1976,18 +1976,13 @@ impl Codegen {
                                     self.gen_expr(r, Self::EVAL_BASE); // xmm0 = 实部
                                     self.pop(1); // rcx = 目标地址
                                     self.emit_scalar_to_xmm0_if_needed(r, &inner.base);
-                                    let pfx = if matches!(inner.base, Type::Float) {
-                                        0xF3u8
-                                    } else {
-                                        0xF2u8
-                                    };
                                     let inner_sz = inner.size() as i64;
+                                    let swidth = if matches!(inner.base, Type::Float) { crate::codegen::x86_64::opcode::SimdWidth::SS } else { crate::codegen::x86_64::opcode::SimdWidth::SD };
                                     // 实部 → [rcx]
-                                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x01]));
+                                    self.emit_insn(&Insn::simd_mov_mem_base(true, swidth, 0, 1, 0));
                                     // 虚部 → xmm0 → [rcx+inner_sz]
                                     self.gen_complex_imag_into_xmm0(r, &inner.base);
-                                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x41]));
-                                    self.emit_insn(&Insn::raw_bytes(&[inner_sz as u8]));
+                                    self.emit_insn(&Insn::simd_mov_mem_base(true, swidth, 0, 1, inner_sz as i32));
                                     return;
                                 } else {
                                     // 无法取地址: 仅求值 RHS

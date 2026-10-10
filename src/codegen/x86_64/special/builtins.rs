@@ -4398,9 +4398,9 @@ impl Codegen {
                     self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Add, crate::codegen::shared::asm_operand::Width::B64, 0, 6)); // add rax, rsi
                                                     // 4. 读 *rax → xmm0 (标量, 只加载 elem_size 字节)
                     if is_double {
-                        self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x10, 0x00])); // movsd xmm0, [rax] (8B)
+                        self.emit_insn(&Insn::simd_mov_mem_base(false, crate::codegen::x86_64::opcode::SimdWidth::SD, 0, 0, 0)); // movsd xmm0, [rax] (8B)
                     } else if is_float {
-                        self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x00])); // movss xmm0, [rax] (4B)
+                        self.emit_insn(&Insn::simd_mov_mem_base(false, crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 0, 0)); // movss xmm0, [rax] (4B)
                     } else {
                         self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {

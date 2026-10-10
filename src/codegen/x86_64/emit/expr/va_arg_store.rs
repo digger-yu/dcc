@@ -878,9 +878,9 @@ impl Codegen {
             8,
         )); // mov r11, 8(rcx) (REX 0x4C=W|R: reg=r11, B=0 使 rm=rcx)
         if matches!(arg_ty, Type::Float) {
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x41, 0x0F, 0x10, 0x03])); // movss (r11), xmm0
+            self.emit_insn(&Insn::simd_mov_mem_base(false, crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 11, 0)); // movss (r11), xmm0
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x41, 0x0F, 0x10, 0x03])); // movsd (r11), xmm0
+            self.emit_insn(&Insn::simd_mov_mem_base(false, crate::codegen::x86_64::opcode::SimdWidth::SD, 0, 11, 0)); // movsd (r11), xmm0
         }
         self.push(0);
         self.emit_insn(&Insn::mov_rm_mem(

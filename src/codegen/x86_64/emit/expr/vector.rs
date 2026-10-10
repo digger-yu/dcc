@@ -288,7 +288,8 @@ impl Codegen {
                     }
                     self.emit_sub_rsp(8);
                     let spfx: u8 = if is_float { 0xF3 } else { 0xF2 };
-                    self.emit_insn(&Insn::raw_bytes(&[spfx, 0x0F, 0x11, 0x04, 0x24]));
+                    let swidth = if is_float { crate::codegen::x86_64::opcode::SimdWidth::SS } else { crate::codegen::x86_64::opcode::SimdWidth::SD };
+                    self.emit_insn(&Insn::simd_mov_mem(true, swidth, 0, 0));
                     // 加载右操作数: 向量按元素取, 标量直接求值 (广播)
                     if r_is_vec {
                         self.gen_scalar_vector_load_sse(r, i, elem_size, is_float);
@@ -297,7 +298,7 @@ impl Codegen {
                         self.emit_scalar_float_convert(&r.ty(), &elem_ty);
                     }
                     self.emit_insn(&Insn::raw_bytes(&[spfx, 0x0F, 0x10, 0xC8])); // movss xmm1, xmm0
-                    self.emit_insn(&Insn::raw_bytes(&[spfx, 0x0F, 0x10, 0x04, 0x24])); // xmm0 = left
+                    self.emit_insn(&Insn::simd_mov_mem(false, swidth, 0, 0)); // xmm0 = left
                     self.emit_add_rsp(8);
                     // xmm0=left, xmm1=right → cmp xmm0, xmm1, pred
                     self.emit_insn(&Insn::raw_bytes(&[cmp_pfx, 0x0F, 0xC2, 0xC1, pred]));

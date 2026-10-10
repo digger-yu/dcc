@@ -313,13 +313,13 @@ impl Codegen {
             }
             self.load_stack(7, sret_off); // rdi = sret 指针
             if matches!(declared_ret, Type::Float) {
-                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x11, 0x07])); // movss [rdi], xmm0
+                self.emit_insn(&Insn::simd_mov_mem_base(true, crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 7, 0)); // movss [rdi], xmm0
             } else if matches!(declared_ret, Type::LongDouble) {
                 // long double: 低 8 字节 double + 高 8 字节零
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xD6, 0x07])); // movq [rdi], xmm0
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0x47, 0x08, 0, 0, 0, 0])); // mov qword [rdi+8], 0
             } else {
-                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x11, 0x07])); // movsd [rdi], xmm0
+                self.emit_insn(&Insn::simd_mov_mem_base(true, crate::codegen::x86_64::opcode::SimdWidth::SD, 0, 7, 0)); // movsd [rdi], xmm0
             }
             return;
         }

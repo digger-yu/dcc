@@ -3391,5 +3391,35 @@ mod tests {
         };
         assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x6F, 0x54, 0x24, 0x10]));
     }
+
+    // ---- P11 Bucket E3: SimdMov [rax+disp8] sweep ----
+
+    #[test]
+    fn simd_mov_load_ss_xmm0_rax_disp0() {
+        // movss xmm0, [rax]: F3 0F 10 00 (mod=00, no SIB)
+        let o = X86_64Opcode::SimdMov {
+            width: SimdWidth::SS,
+            opcode10: true,
+            dst: Operand::Reg(0, Width::B128),
+            src: Operand::Mem(MemOperand {
+                disp: 0, base: Some(0), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0x0F, 0x10, 0x00]));
+    }
+
+    #[test]
+    fn simd_mov_load_ss_xmm0_rax_disp8() {
+        // movss xmm0, [rax+4]: F3 0F 10 40 04 (mod=01, reg=xmm0<<3=0, rm=rax=0)
+        let o = X86_64Opcode::SimdMov {
+            width: SimdWidth::SS,
+            opcode10: true,
+            dst: Operand::Reg(0, Width::B128),
+            src: Operand::Mem(MemOperand {
+                disp: 4, base: Some(0), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0x0F, 0x10, 0x40, 0x04]));
+    }
 }
 

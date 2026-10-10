@@ -1620,8 +1620,9 @@ impl Codegen {
             match &inner {
                 t @ (Type::Float | Type::Double) => {
                     let pfx = if matches!(t, Type::Float) { 0xF3u8 } else { 0xF2u8 };
+                    let swidth = if matches!(t, Type::Float) { crate::codegen::x86_64::opcode::SimdWidth::SS } else { crate::codegen::x86_64::opcode::SimdWidth::SD };
                     // 实部: xmm0 = [rax] → result_off
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x00]));
+                    self.emit_insn(&Insn::simd_mov_mem_base(false, swidth, 0, 0, 0));
                     self.gen_float_store_at(result_off, t);
                     // 虚部: xmm0 = [rax+isz] → result_off+isz
                     self.emit_load_mem_typed_disp(isz as usize, t, isz);
@@ -1852,8 +1853,8 @@ impl Codegen {
                 // unpcklps xmm0,xmm1 → xmm0 = [real | imag]
                 // (注意 unpcklps 无 66 前缀; 66 0F 14 是 unpcklpd,
                 // 按 64 位双字打包 → 虚部被挤到 64..96 位, movsd 读丢)
-                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x00]));
-                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x48, 0x04]));
+                self.emit_insn(&Insn::simd_mov_mem_base(false, crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 0, 0));
+                self.emit_insn(&Insn::simd_mov_mem_base(false, crate::codegen::x86_64::opcode::SimdWidth::SS, 1, 0, 4));
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x14, 0xC1]));
                 return;
             }
@@ -2351,13 +2352,14 @@ impl Codegen {
                     // 全局 complex 变量: 通过 RIP-relative 寻址加载
                     self.emit_global_addr(0, &name.name); // rax = &global
                                                           // 加载实部: movss/movsd xmm0, [rax]
-                    self.emit_insn(&Insn::raw_bytes(&[v_pfx, 0x0F, 0x10, 0x00]));
+                    let v_sw = if matches!(v_inner, Type::Float) { crate::codegen::x86_64::opcode::SimdWidth::SS } else { crate::codegen::x86_64::opcode::SimdWidth::SD };
+                    self.emit_insn(&Insn::simd_mov_mem_base(false, v_sw, 0, 0, 0));
                     self.emit_float_convert(&v_inner, op_inner);
                     let st_w = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
                     self.emit_insn(&Insn::simd_mov_mem(true, st_w, 0, rsp_slot as i32));
                     // 加载虚部: movss/movsd xmm0, [rax+v_isz]
                     if v_isz < 128 {
-                        self.emit_insn(&Insn::raw_bytes(&[v_pfx, 0x0F, 0x10, 0x40, v_isz as u8]));
+                        self.emit_insn(&Insn::simd_mov_mem_base(false, v_sw, 0, 0, v_isz as i32));
                     } else {
                         self.emit_insn(&Insn::raw_bytes(&[v_pfx, 0x0F, 0x10, 0x80]));
                         self.emit_insn(&Insn::raw_bytes(&(v_isz as i32).to_le_bytes()));
@@ -2520,11 +2522,10 @@ impl Codegen {
         if let Type::Complex(ref c) | Type::Imaginary(ref c) = r.ty() {
             self.emit_float_convert(&c.base, inner);
         }
-        let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x01])); // movss/movsd [rcx], xmm0 (实部)
+        let swidth = if matches!(inner, Type::Float) { crate::codegen::x86_64::opcode::SimdWidth::SS } else { crate::codegen::x86_64::opcode::SimdWidth::SD };
+        self.emit_insn(&Insn::simd_mov_mem_base(true, swidth, 0, 1, 0)); // movss/movsd [rcx], xmm0 (实部)
         self.gen_complex_imag_into_xmm0(r, inner);
-        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x41])); // movss/movsd [rcx+disp8], xmm0
-        self.emit_insn(&Insn::raw_bytes(&[isz as u8]));
+        self.emit_insn(&Insn::simd_mov_mem_base(true, swidth, 0, 1, isz as i32)); // movss/movsd [rcx+disp8], xmm0
     }
     fn store_complex_pair_from_rsp(&mut self, result_off: i64, inner_sz: i64, is_float: bool) {
         let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };

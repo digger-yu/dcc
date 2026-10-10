@@ -1190,9 +1190,9 @@ impl Codegen {
                     // 加载实部: [rax] → xmm0
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rsi, rax
                     if matches!(inner.base, Type::Float) {
-                        self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x06])); // movss xmm0, [rsi]
+                        self.emit_insn(&Insn::simd_mov_mem_base(false, crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 6, 0)); // movss xmm0, [rsi]
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x10, 0x06])); // movsd xmm0, [rsi]
+                        self.emit_insn(&Insn::simd_mov_mem_base(false, crate::codegen::x86_64::opcode::SimdWidth::SD, 0, 6, 0)); // movsd xmm0, [rsi]
                     }
                     // 保存实部 → [r13 + base_off]
                     self.emit_lea_r13(7, base_off);
@@ -1203,9 +1203,9 @@ impl Codegen {
                     self.emit_insn(&Insn::raw_bytes(&inner_sz_i64.to_le_bytes()));
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rsi, rax
                     if matches!(inner.base, Type::Float) {
-                        self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x06])); // movss xmm0, [rsi]
+                        self.emit_insn(&Insn::simd_mov_mem_base(false, crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 6, 0)); // movss xmm0, [rsi]
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x10, 0x06])); // movsd xmm0, [rsi]
+                        self.emit_insn(&Insn::simd_mov_mem_base(false, crate::codegen::x86_64::opcode::SimdWidth::SD, 0, 6, 0)); // movsd xmm0, [rsi]
                     }
                     // 保存虚部 → [r13 + base_off + inner_sz]
                     self.emit_lea_r13(7, base_off + inner_sz_i64);
@@ -1241,14 +1241,14 @@ impl Codegen {
                                                       // 存储实部: xmm0 → [rcx]
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rdx, rsi
                     if matches!(inner.base, Type::Float) {
-                        self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x02])); // movss xmm0, [rdx]
+                        self.emit_insn(&Insn::simd_mov_mem_base(false, crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 2, 0)); // movss xmm0, [rdx]
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x10, 0x02])); // movsd xmm0, [rdx]
+                        self.emit_insn(&Insn::simd_mov_mem_base(false, crate::codegen::x86_64::opcode::SimdWidth::SD, 0, 2, 0)); // movsd xmm0, [rdx]
                     }
                     if matches!(inner.base, Type::Float) {
-                        self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x11, 0x01], "movss %xmm0, (%rcx)"));
+                        self.emit_insn(&Insn::simd_mov_mem_base(true, crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 1, 0)); // movss [rcx], xmm0
                     } else {
-                        self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x11, 0x01], "movsd %xmm0, (%rcx)"));
+                        self.emit_insn(&Insn::simd_mov_mem_base(true, crate::codegen::x86_64::opcode::SimdWidth::SD, 0, 1, 0)); // movsd [rcx], xmm0
                     }
                     // 存储虚部: [rdx + inner_sz] → [rcx + inner_sz]
                     let inner_sz_i64 = inner_sz as i64;
@@ -1257,14 +1257,14 @@ impl Codegen {
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xc1, 0x00])); // add rcx, inner_sz
                     self.emit_insn(&Insn::raw_bytes(&inner_sz_i64.to_le_bytes()));
                     if matches!(inner.base, Type::Float) {
-                        self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x02])); // movss xmm0, [rdx]
+                        self.emit_insn(&Insn::simd_mov_mem_base(false, crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 2, 0)); // movss xmm0, [rdx]
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x10, 0x02])); // movsd xmm0, [rdx]
+                        self.emit_insn(&Insn::simd_mov_mem_base(false, crate::codegen::x86_64::opcode::SimdWidth::SD, 0, 2, 0)); // movsd xmm0, [rdx]
                     }
                     if matches!(inner.base, Type::Float) {
-                        self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x11, 0x01], "movss %xmm0, (%rcx)"));
+                        self.emit_insn(&Insn::simd_mov_mem_base(true, crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 1, 0)); // movss [rcx], xmm0
                     } else {
-                        self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x11, 0x01], "movsd %xmm0, (%rcx)"));
+                        self.emit_insn(&Insn::simd_mov_mem_base(true, crate::codegen::x86_64::opcode::SimdWidth::SD, 0, 1, 0)); // movsd [rcx], xmm0
                     }
                 }
             },

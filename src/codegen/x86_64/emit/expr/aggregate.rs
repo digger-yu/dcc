@@ -512,11 +512,6 @@ impl Codegen {
                         if staged_dst {
                             self.emit_agg_dst_addr(dst, 1); // rcx = 目标地址
                         }
-                        let spfx = if matches!(inner.base, Type::Float) {
-                            0xF3u8
-                        } else {
-                            0xF2u8
-                        };
                         for part in 0..2i64 {
                             // 每轮重取物化区基址: load 覆盖 rax。
                             self.emit_lea_r13(0, band_off);
@@ -524,8 +519,8 @@ impl Codegen {
                             self.emit_scalar_to_xmm0_if_needed_ty(&si, &inner.base);
                             if staged_dst {
                                 // movss/movsd [rcx + disp8], xmm0
-                                self.emit_insn(&Insn::raw_bytes(&[spfx, 0x0F, 0x11, 0x41]));
-                                self.emit_insn(&Insn::raw_bytes(&[(part * d_isz) as u8]));
+                                let swidth = if matches!(inner.base, Type::Float) { crate::codegen::x86_64::opcode::SimdWidth::SS } else { crate::codegen::x86_64::opcode::SimdWidth::SD };
+                                self.emit_insn(&Insn::simd_mov_mem_base(true, swidth, 0, 1, (part * d_isz) as i32));
                             } else {
                                 self.gen_float_store_at(dst_off + part * d_isz, &inner.base);
                             }

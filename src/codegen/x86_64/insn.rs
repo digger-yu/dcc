@@ -317,20 +317,21 @@ impl Insn {
         Self::simd_xmm_reg_reg(0xF3, 0x11, dst_xmm, src_xmm)
     }
 
-    /// P11 Bucket B: SimdMov [rsp+disp] store/load.
-    /// store=true: movss/movsd/movups [rsp+disp], xmm (0F 11).
-    /// store=false: movss/movsd/movups xmm, [rsp+disp] (0F 10).
-    /// width: SimdWidth::{SS, SD, O/PS, PD, DQ}. base=rsp(4), disp=i32.
-    pub fn simd_mov_mem(
+    /// P11 Bucket B/E3: SimdMov [base+disp] store/load.
+    /// store=true: movss/movsd/movups [base+disp], xmm (0F 11).
+    /// store=false: movss/movsd/movups xmm, [base+disp] (0F 10).
+    /// width: SimdWidth::{SS, SD, O/PS, PD, DQ}. base=gpr(4=rsp), disp=i32.
+    pub fn simd_mov_mem_base(
         store: bool,
         width: crate::codegen::x86_64::opcode::SimdWidth,
         xmm_reg: u8,
+        base: u8,
         disp: i32,
     ) -> Self {
         use crate::codegen::x86_64::opcode::{MemOperand, Operand, X86_64Opcode};
         let mem = Operand::Mem(MemOperand {
             disp,
-            base: Some(4),
+            base: Some(base),
             index: None,
             seg: None,
         });
@@ -345,6 +346,16 @@ impl Insn {
             },
             &[],
         )
+    }
+
+    /// P11 Bucket B: SimdMov [rsp+disp] store/load. base 固定=4 (rsp).
+    pub fn simd_mov_mem(
+        store: bool,
+        width: crate::codegen::x86_64::opcode::SimdWidth,
+        xmm_reg: u8,
+        disp: i32,
+    ) -> Self {
+        Self::simd_mov_mem_base(store, width, xmm_reg, 4, disp)
     }
 
     /// P11 Bucket G: movapd xmm_dst, xmm_src (66 0F 28 mod=11, load direction).

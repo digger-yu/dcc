@@ -949,8 +949,8 @@ impl Codegen {
             return;
         }
         match ty {
-            Type::Float => { self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x10, 0x00], "movss (%rax), %xmm0")); } // movss xmm0, [rax]
-            Type::Double => { self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x10, 0x00], "movsd (%rax), %xmm0")); } // movsd xmm0, [rax]
+            Type::Float => { self.emit_insn(&Insn::simd_mov_mem_base(false, crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 0, 0)); } // movss xmm0, [rax]
+            Type::Double => { self.emit_insn(&Insn::simd_mov_mem_base(false, crate::codegen::x86_64::opcode::SimdWidth::SD, 0, 0, 0)); } // movsd xmm0, [rax]
             _ => {
                 if size < 8 && Self::is_signed_int(ty) {
                     match size {
