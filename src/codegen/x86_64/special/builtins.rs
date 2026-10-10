@@ -1779,7 +1779,7 @@ impl Codegen {
                     src: crate::codegen::x86_64::opcode::Operand::Imm(0x7FFFFFFFFFFFFFFFu64 as i64),
                 }, &[]));
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8])); // movq xmm1, rax
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x54, 0xC1])); // andps xmm0, xmm1 (|x|)
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Andps, SimdWidth::O, 0, 1)); // andps xmm0, xmm1 (|x|)
                 // float +Inf bit pattern: 0x7F800000
                 let inf_bits: u64 = if is_f { 0x7F800000 } else { 0x7FF0000000000000 };
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -1891,7 +1891,7 @@ impl Codegen {
                 }, &[]));
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8])); // movq xmm1, rax
                                                             // andps xmm0, xmm1: |x|
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x54, 0xC1]));
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Andps, SimdWidth::O, 0, 1));
                 // 加载 +Inf 到 xmm1
                 let inf_bits: u64 = if is_f { 0x7F800000 } else { 0x7FF0000000000000 };
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -3862,9 +3862,9 @@ impl Codegen {
                 }, &[]));
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8])); // movq xmm1, rax
                 if is_f {
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x54, 0xC1])); // andps xmm0, xmm1
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Andps, SimdWidth::O, 0, 1)); // andps xmm0, xmm1
                 } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x54, 0xC1])); // andpd xmm0, xmm1
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Andpd, SimdWidth::O, 0, 1)); // andpd xmm0, xmm1
                 }
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -4004,7 +4004,7 @@ impl Codegen {
                     src: crate::codegen::x86_64::opcode::Operand::Imm(0x7FFFFFFFFFFFFFFFu64 as i64),
                 }, &[]));
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x54, 0xC1]));
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Andps, SimdWidth::O, 0, 1));
                 let inf_bits: u64 = if is_f { 0x7F800000 } else { 0x7FF0000000000000 };
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B64,

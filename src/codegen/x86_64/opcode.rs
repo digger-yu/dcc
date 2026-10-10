@@ -97,6 +97,10 @@ pub(crate) enum SimdArithOp {
     /// P11 Bucket C: cvtsd2ss/cvtss2sd (F2/F3 0F 5A /r).
     /// Convert between scalar double and scalar float in xmm.
     CvtSdSs,
+    /// P11 Bucket J: andps/andpd (0F 54 /r / 66 0F 54 /r) — bitwise AND of packed
+    /// single/double-precision floats. Used by isinf/fabs fast paths.
+    Andps,
+    Andpd,
 }
 
 /// SIMD 宽度 — 步骤 4: SimdMov 用来发 xmm store/load 到 rsp 槽.
@@ -1296,6 +1300,11 @@ impl X86_64Opcode {
                     //   cvtss2sd xmm0,xmm1:  F3 0F 5A C1
                     (SimdArithOp::CvtSdSs, SimdWidth::SD) => (0xF2, 0x5A),
                     (SimdArithOp::CvtSdSs, SimdWidth::SS) => (0xF3, 0x5A),
+                    // P11 Bucket J: andps/andpd reg-reg.
+                    //   andps xmm0,xmm1:  0F 54 C1
+                    //   andpd xmm0,xmm1:  66 0F 54 C1
+                    (SimdArithOp::Andps, _) => (0x00, 0x54),
+                    (SimdArithOp::Andpd, _) => (0x66, 0x54),
                     _ => return None,
                 };
                 let mut rex: u8 = 0x40;
@@ -2718,6 +2727,29 @@ mod tests {
     fn noarg_rep_movsq() {
         let o = X86_64Opcode::NoArg { op: NoArgOp::RepMovsq };
         assert_eq!(o.encode(), Some(vec![0xF3, 0x48, 0xA5]));
+    }
+
+    // ---- P11 Bucket J: andps/andpd reg-reg ----
+    #[test]
+    fn simd_andps_xmm0_xmm1() {
+        // andps xmm0, xmm1: 0F 54 C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Andps, width: SimdWidth::O,
+            dst: Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B128),
+            src: Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B128),
+        };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0x54, 0xC1]));
+    }
+
+    #[test]
+    fn simd_andpd_xmm0_xmm1() {
+        // andpd xmm0, xmm1: 66 0F 54 C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Andpd, width: SimdWidth::O,
+            dst: Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B128),
+            src: Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B128),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x54, 0xC1]));
     }
 }
 
