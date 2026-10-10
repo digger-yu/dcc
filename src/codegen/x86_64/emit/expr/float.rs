@@ -584,9 +584,9 @@ impl Codegen {
             self.emit_scalar_to_xmm0_if_needed(l, &float_ty);
             self.emit_insn(&Insn::sub_rsp_imm(save_bytes as i64));
             if is_float {
-                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x11, 0x04, 0x24])); // movss [rsp], xmm0
+                self.emit_insn(&Insn::simd_mov_mem(true, SimdWidth::SS, 0, 0)); // movss [rsp], xmm0
             } else {
-                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x11, 0x04, 0x24])); // movsd [rsp], xmm0
+                self.emit_insn(&Insn::simd_mov_mem(true, SimdWidth::SD, 0, 0)); // movsd [rsp], xmm0
             }
             self.expr_depth += 1;
             self.gen_expr(r, Self::EVAL_BASE);
@@ -594,9 +594,9 @@ impl Codegen {
             self.emit_scalar_to_xmm0_if_needed(r, &float_ty);
             self.emit_insn(&Insn::movapd_xmm(1, 0)); // movapd xmm1, xmm0 (r→xmm1)
             if is_float {
-                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x04, 0x24])); // movss xmm0, [rsp]
+                self.emit_insn(&Insn::simd_mov_mem(false, SimdWidth::SS, 0, 0)); // movss xmm0, [rsp]
             } else {
-                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x10, 0x04, 0x24])); // movsd xmm0, [rsp]
+                self.emit_insn(&Insn::simd_mov_mem(false, SimdWidth::SD, 0, 0)); // movsd xmm0, [rsp]
             }
             // 现在 xmm0=l, xmm1=r, [rsp]=l, save_bytes 字节尚未归还
             // r = l / r  (divss/divsd)
@@ -626,9 +626,9 @@ impl Codegen {
             // n*r 暂存 xmm1, l 回到 xmm0
             self.emit_insn(&Insn::movapd_xmm(1, 0)); // movapd xmm1, xmm0
             if is_float {
-                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x04, 0x24])); // movss xmm0, [rsp]
+                self.emit_insn(&Insn::simd_mov_mem(false, SimdWidth::SS, 0, 0)); // movss xmm0, [rsp]
             } else {
-                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x10, 0x04, 0x24])); // movsd xmm0, [rsp]
+                self.emit_insn(&Insn::simd_mov_mem(false, SimdWidth::SD, 0, 0)); // movsd xmm0, [rsp]
             }
             // xmm0 = l - n*r
             if is_float {
@@ -651,9 +651,9 @@ impl Codegen {
         // 保存 xmm0: sub rsp, save_bytes; movsd [rsp], xmm0
         self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x83, 0xEC, save_bytes as u8], &format!("sub ${save_bytes}, %rsp")));
         if is_float {
-            self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x11, 0x04, 0x24], "movss %xmm0, (%rsp)"));
+            self.emit_insn(&Insn::simd_mov_mem(true, SimdWidth::SS, 0, 0)); // movss %xmm0, (%rsp)
         } else {
-            self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x11, 0x04, 0x24], "movsd %xmm0, (%rsp)"));
+            self.emit_insn(&Insn::simd_mov_mem(true, SimdWidth::SD, 0, 0)); // movsd %xmm0, (%rsp)
         }
         // 计算右操作数到 xmm0
         self.expr_depth += 1;
@@ -664,9 +664,9 @@ impl Codegen {
         // xmm1 = 右操作数, 恢复左操作数到 xmm0
         self.emit_insn(&Insn::movapd_xmm(1, 0));
         if is_float {
-            self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x10, 0x04, 0x24], "movss (%rsp), %xmm0"));
+            self.emit_insn(&Insn::simd_mov_mem(false, SimdWidth::SS, 0, 0)); // movss (%rsp), %xmm0
         } else {
-            self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x10, 0x04, 0x24], "movsd (%rsp), %xmm0"));
+            self.emit_insn(&Insn::simd_mov_mem(false, SimdWidth::SD, 0, 0)); // movsd (%rsp), %xmm0
         }
         // 恢复 rsp
         self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x83, 0xC4, save_bytes as u8], &format!("add ${save_bytes}, %rsp")));

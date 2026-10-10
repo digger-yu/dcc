@@ -1367,7 +1367,6 @@ impl X86_64Opcode {
                     return None;
                 }
                 let base = mem.base?;
-                let _ = is_store;
                 // legacy 前缀: SS=F3, SD=F2, O/PS=无. PD/DQ 本路径按 66 处理.
                 let pfx: u8 = match width {
                     SimdWidth::SS => 0xF3,
@@ -1388,18 +1387,25 @@ impl X86_64Opcode {
                     rex |= 0x01;
                     need_rex = true;
                 }
-                // opcode10: true=0x10 (load), false=0x11 (store). PD/DQ 复用 28/29.
-                let opc2: u8 = match (width, *opcode10) {
-                    (SimdWidth::PD | SimdWidth::DQ, true) => 0x28,
-                    (SimdWidth::PD | SimdWidth::DQ, false) => 0x29,
-                    (_, true) => 0x10,
-                    (_, false) => 0x11,
+                // is_store 决定 opcode2: store=0x11/0x29, load=0x10/0x28.
+                //  (opcode10 字段仅用于 reg↔reg 分支; mem 分支靠 is_store 选择.)
+                let opc2: u8 = if is_store {
+                    match width {
+                        SimdWidth::PD | SimdWidth::DQ => 0x29,
+                        _ => 0x11,
+                    }
+                } else {
+                    match width {
+                        SimdWidth::PD | SimdWidth::DQ => 0x28,
+                        _ => 0x10,
+                    }
                 };
                 let disp = mem.disp;
                 // ModRM mod / disp 长度. base=rbp(5) 在 mod=00 是 rip-relative,
                 // 所以 disp=0 且 base=5 时走 mod=01 (disp8=0) 避免被解释成 rip.
-                // base=rsp(4): 保留旧行为 — disp=0 也走 mod=01 disp8=0 (G10 快照约定).
-                let (modrm_mod, disp_bytes): (u8, &[u8]) = if disp == 0 && base != 5 && base != 4 {
+                // base=rsp(4) 必须 SIB; 当 disp=0 时 SIB(base=rsp,index=none) 配合
+                // mod=00 即编码为 `modrm=0x04|xmm<<3, sib=0x24` (G10 快照约定).
+                let (modrm_mod, disp_bytes): (u8, &[u8]) = if disp == 0 && base != 5 {
                     (0, &[])
                 } else if let Ok(d) = i8::try_from(disp) {
                     (1, &[d as u8])
@@ -3300,7 +3306,7 @@ mod tests {
 
     #[test]
     fn simd_mov_load_ss_xmm0_rsp_disp0() {
-        // movss xmm0, [rsp]: F3 0F 10 04 24 (保留旧行为: base=rsp disp=0 走 mod=01 disp8=0)
+        // movss xmm0, [rsp]: F3 0F 10 04 24 (mod=00, SIB base=rsp, 无 disp)
         let o = X86_64Opcode::SimdMov {
             width: SimdWidth::SS,
             opcode10: true,
@@ -3309,7 +3315,7 @@ mod tests {
                 disp: 0, base: Some(4), index: None, seg: None,
             }),
         };
-        assert_eq!(o.encode(), Some(vec![0xF3, 0x0F, 0x10, 0x44, 0x24, 0]));
+        assert_eq!(o.encode(), Some(vec![0xF3, 0x0F, 0x10, 0x04, 0x24]));
     }
 }
 

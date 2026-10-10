@@ -328,9 +328,9 @@ impl Codegen {
                 }
                 self.emit_sub_rsp(8);
                 if is_float {
-                    self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x11, 0x04, 0x24]));
+                    self.emit_insn(&Insn::simd_mov_mem(true, SimdWidth::SS, 0, 0));
                 } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x11, 0x04, 0x24]));
+                    self.emit_insn(&Insn::simd_mov_mem(true, SimdWidth::SD, 0, 0));
                 }
                 // 加载右操作数: 向量按元素取, 标量直接求值 (广播)
                 if r_is_vec {
@@ -346,9 +346,9 @@ impl Codegen {
                     self.emit_insn(&Insn::movsd_xmm(1, 0)); // movsd xmm1, xmm0
                 }
                 if is_float {
-                    self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x04, 0x24]));
+                    self.emit_insn(&Insn::simd_mov_mem(false, SimdWidth::SS, 0, 0));
                 } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x10, 0x04, 0x24]));
+                    self.emit_insn(&Insn::simd_mov_mem(false, SimdWidth::SD, 0, 0));
                 }
                 self.emit_add_rsp(8);
                 self.emit_insn(&Insn::raw_bytes(&[prefix, 0x0F, opcode, 0xC1])); // xmm0 = left op right

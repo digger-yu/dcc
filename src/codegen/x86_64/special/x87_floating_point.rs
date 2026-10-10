@@ -150,10 +150,10 @@ impl Codegen {
         let is_float = matches!(ty, Type::Float);
         self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp, 16
         if is_float {
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x11, 0x04, 0x24])); // movss %xmm0, (%rsp)
+            self.emit_insn(&Insn::simd_mov_mem(true, SimdWidth::SS, 0, 0)); // movss %xmm0, (%rsp)
             self.emit_insn(&Insn::raw_bytes(&[0xD9, 0x04, 0x24])); // fld  dword (%rsp)
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x11, 0x04, 0x24])); // movsd %xmm0, (%rsp)
+            self.emit_insn(&Insn::simd_mov_mem(true, SimdWidth::SD, 0, 0)); // movsd %xmm0, (%rsp)
             self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x04, 0x24])); // fld  qword (%rsp)
         }
         self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp, 16
@@ -617,7 +617,7 @@ impl Codegen {
     pub fn emit_x87_to_xmm0(&mut self) {
         self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp, 16
         self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x1C, 0x24])); // fstp qword (%rsp)  ← 硬件完成 80→64 舍入
-        self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x10, 0x04, 0x24])); // movsd xmm0, (%rsp)
+        self.emit_insn(&Insn::simd_mov_mem(false, SimdWidth::SD, 0, 0)); // movsd xmm0, (%rsp)
         self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp, 16
     }
 
@@ -626,7 +626,7 @@ impl Codegen {
     pub fn emit_x87_to_xmm0_f32(&mut self) {
         self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp, 16
         self.emit_insn(&Insn::raw_bytes(&[0xD9, 0x1C, 0x24])); // fstp dword (%rsp)
-        self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x04, 0x24])); // movss xmm0, (%rsp)
+        self.emit_insn(&Insn::simd_mov_mem(false, SimdWidth::SS, 0, 0)); // movss xmm0, (%rsp)
         self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp, 16
     }
 

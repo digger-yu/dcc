@@ -339,7 +339,7 @@ impl Insn {
         Insn::new(
             X86_64Opcode::SimdMov {
                 width,
-                opcode10: !store,
+                opcode10: store,
                 dst,
                 src,
             },
