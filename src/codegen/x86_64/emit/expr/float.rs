@@ -30,15 +30,21 @@ impl Codegen {
         match ty {
             Type::Float => {
                 // movabs rax, 0x80000000; movq xmm1, rax; xorps xmm0, xmm1
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB8]));
-                self.emit_insn(&Insn::raw_bytes(&0x80000000u64.to_le_bytes()));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                    src: crate::codegen::x86_64::opcode::Operand::Imm(0x80000000u64 as i64),
+                }, &[]));
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC1]));
             },
             _ => {
                 // movabs rax, 0x8000000000000000; movq xmm1, rax; xorpd xmm0, xmm1
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB8]));
-                self.emit_insn(&Insn::raw_bytes(&0x8000000000000000u64.to_le_bytes()));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                    src: crate::codegen::x86_64::opcode::Operand::Imm(0x8000000000000000u64 as i64),
+                }, &[]));
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x57, 0xC1]));
             },
