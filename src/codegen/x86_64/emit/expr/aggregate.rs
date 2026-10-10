@@ -679,7 +679,27 @@ impl Codegen {
                                 self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]));
                             }
                             self.emit_store(0, result_off, scalar_isz);
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xC0])); // xor rax, rax
+                            // P11: 收敛到 AluRm{Xor, B64, rax, rax}.
+                            {
+                                let insn = Insn::new(
+                                    crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                                        op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                                        width: crate::codegen::shared::asm_operand::Width::B64,
+                                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            0,
+                                            crate::codegen::shared::asm_operand::Width::B64,
+                                        ),
+                                        src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            0,
+                                            crate::codegen::shared::asm_operand::Width::B64,
+                                        ),
+                                    },
+                                    &[],
+                                );
+                                if !self.emit_insn(&insn) {
+                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xC0])); // xor rax, rax
+                                }
+                            }
                             self.emit_store(0, result_off + scalar_isz as i64, scalar_isz);
                         }
                         let dst_isz = inner.size();
@@ -1312,7 +1332,27 @@ impl Codegen {
                             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xD1]));
                         }
                         // 合并: or rcx, rax
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xC1]));
+                        // P11: 收敛到 AluRm{Or, B64, rcx, rax}.
+                        {
+                            let insn = Insn::new(
+                                crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                                    op: crate::codegen::x86_64::opcode::AluOp::Or,
+                                    width: crate::codegen::shared::asm_operand::Width::B64,
+                                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                        1,
+                                        crate::codegen::shared::asm_operand::Width::B64,
+                                    ),
+                                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                        0,
+                                        crate::codegen::shared::asm_operand::Width::B64,
+                                    ),
+                                },
+                                &[],
+                            );
+                            if !self.emit_insn(&insn) {
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xC1]));
+                            }
+                        }
                         // 保存更新后的容器值回 [r13-32]
                         self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x4D, 0xe0])); // mov [r13-32], rcx
                                                               // 加载地址 → rdx
