@@ -1,4 +1,4 @@
-// src/codegen/x86_64/asm/render_one.rs - 单条 x86-64 机器码 → AT&T 汇编文本渲染.
+// src/codegen/x86_64/render_one.rs - 单条 x86-64 机器码 → AT&T 汇编文本渲染.
 //
 // P9 方案 C 收尾: 本文件由 src/codegen/disasm.rs 迁移而来. 生产路径只需要
 // `disassemble_one_at` (单指令解码) 与 label_map / directive_map (纯 BTreeMap

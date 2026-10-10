@@ -6,7 +6,7 @@
 // 输出完全一致** 的 AT&T GAS 行. 渲染器直接拿这行输出, 不再反推字节.
 //
 // 设计纪律:
-//   * 与 asm/render_one.rs 内的 REG64/REG32/... 表**逐条对齐** (值必须相同).
+//   * 与 render_one.rs 内的 REG64/REG32/... 表**逐条对齐** (值必须相同).
 //     两处都是硬编码字面量, 不对拍就是两份真相 —— 这里的表只服务发射点,
 //     render_one.rs 的表服务渲染期反推 (fallback 路径), 二者不能因为一份改了
 //     另一份没改而漂移.
@@ -15,13 +15,13 @@
 //   * 输出不含前导 tab / 不含末尾换行, 与 Insn::gas_text 字段语义一致.
 
 /// 64 位 GP 寄存器名 (AT&T, 带 %). 索引 = 物理寄存器号 0..15.
-/// 与 asm/render_one.rs::REG64 逐条对拍.
+/// 与 render_one.rs::REG64 逐条对拍.
 pub(crate) const REG64: [&str; 16] = [
     "%rax", "%rcx", "%rdx", "%rbx", "%rsp", "%rbp", "%rsi", "%rdi", "%r8", "%r9", "%r10",
     "%r11", "%r12", "%r13", "%r14", "%r15",
 ];
 
-/// 32 位 GP 寄存器名. 与 asm/render_one.rs::REG32 对拍.
+/// 32 位 GP 寄存器名. 与 render_one.rs::REG32 对拍.
 pub(crate) const REG32: [&str; 16] = [
     "%eax", "%ecx", "%edx", "%ebx", "%esp", "%ebp", "%esi", "%edi", "%r8d", "%r9d", "%r10d",
     "%r11d", "%r12d", "%r13d", "%r14d", "%r15d",
@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn reg_tables_match_render_one() {
-        // 这张表必须与 asm/render_one.rs 内的字面量完全一致. 不对拍就是两份真相.
+        // 这张表必须与 render_one.rs 内的字面量完全一致. 不对拍就是两份真相.
         assert_eq!(REG64[13], "%r13");
         assert_eq!(REG64[4], "%rsp");
         assert_eq!(REG32[0], "%eax");

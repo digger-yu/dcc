@@ -214,7 +214,7 @@ impl Codegen {
                 JumpKind::Jo => 0x80,
                 _ => unreachable!(),
             };
-            // 与 asm/render_one.rs 内助记符表逐条对齐:
+            // 与 render_one.rs 内助记符表逐条对齐:
             //   0x84=je 0x85=jne 0x8C=jl 0x8E=jle 0x8F=jg 0x8D=jge
             //   0x82=jb 0x87=ja  0x89=jns 0x80=jo
             let mnem = match kind {
