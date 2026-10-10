@@ -139,6 +139,24 @@ impl Insn {
         Insn::raw_bytes(&[0x83, modrm, v])
     }
 
+    /// P11: 构造 `movsd xmm_dst, xmm_src` (F2 0F 10 mod=11).
+    /// 源/目的都在 xmm0..xmm15 (>=8 时带 REX.R/B 由 ModRM 低 3 位 + 前缀编码).
+    pub fn movsd_xmm(dst_xmm: u8, src_xmm: u8) -> Self {
+        // F2 0F 10 modrm; mod=11, reg=dst, r/m=src.
+        let mut out = Vec::with_capacity(5);
+        out.push(0xF2);
+        let mut rex: u8 = 0x40;
+        if dst_xmm >= 8 { rex |= 0x04; }
+        if src_xmm >= 8 { rex |= 0x01; }
+        let need_rex = dst_xmm >= 8 || src_xmm >= 8;
+        if need_rex { out.push(rex); }
+        out.push(0x0F);
+        out.push(0x10);
+        let modrm = 0xC0 | ((dst_xmm & 0x7) << 3) | (src_xmm & 0x7);
+        out.push(modrm);
+        Insn::raw_bytes(&out)
+    }
+
     pub fn encode_bytes(&self) -> Option<Vec<u8>> {
         // 类型化变体: 让 opcode.rs 现场算字节. 尚未实现的变体返回 None →
         // 发射方必须切回 raw_bytes 兜底; 当前没有任何调用点依赖 None 分支.
