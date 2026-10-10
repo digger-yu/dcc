@@ -1199,10 +1199,10 @@ impl Codegen {
                     self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = arg0
                 }
                 if args.len() >= 2 {
-                    self.emit_insn(&Insn::movsd_xmm(0, 2)); // movsd xmm2, xmm0
+                    self.emit_insn(&Insn::movsd_xmm(2, 0)); // movsd xmm2, xmm0
                     self.gen_expr(&args[1], Self::EVAL_BASE); // xmm0 = arg1
-                    self.emit_insn(&Insn::movsd_xmm(0, 1)); // movsd xmm1, xmm0
-                    self.emit_insn(&Insn::movsd_xmm(2, 0)); // movsd xmm0, xmm2
+                    self.emit_insn(&Insn::movsd_xmm(1, 0)); // movsd xmm1, xmm0
+                    self.emit_insn(&Insn::movsd_xmm(0, 2)); // movsd xmm0, xmm2
                 }
                 self.call_label(libc_name);
                 if dst != 0 {
@@ -2731,7 +2731,7 @@ impl Codegen {
                     ),
                 },
                 &[],
-            ));; // mov eax, eax
+            )); // mov eax, eax
                             } else {
                                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
                                     sign: true,
@@ -2884,7 +2884,7 @@ impl Codegen {
                     ),
                 },
                 &[],
-            ));; // mov eax, eax (截断到 32 位，同时零扩展到 64 位)
+            )); // mov eax, eax (截断到 32 位，同时零扩展到 64 位)
                                                   // mov eax, eax 已经零扩展到 rax，直接复制到 rdx
                         self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rdx, rax
                         if !is_unsigned {
@@ -3276,7 +3276,9 @@ impl Codegen {
                         }
                     }
                     if dst != 2 {
-                        self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, dst, 0));
+                        // 结果在 rdx（sub rdx, rax 之后），不是 rax；此前误从 rax 取 bsr
+                        // 使 clrsbll(0x100000000) 得 32 而非 30（clrsbl 仅因 bsr==31 侥幸相等）。
+                        self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, dst, 2));
                     }
                 } else {
                     // 32-bit (及 16/8-bit) clrsb: 用 32-bit 操作.
@@ -3805,13 +3807,13 @@ impl Codegen {
                 // 加载 magnitude 到 xmm0
                 self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = magnitude
                                             // 备份 magnitude 到 xmm2
-                self.emit_insn(&Insn::movsd_xmm(0, 2)); // movsd xmm2, xmm0
+                self.emit_insn(&Insn::movsd_xmm(2, 0)); // movsd xmm2, xmm0
                                                       // 加载 sign 到 xmm0
                 self.gen_expr(&args[1], Self::EVAL_BASE); // xmm0 = sign
                                             // 移动到 xmm1
-                self.emit_insn(&Insn::movsd_xmm(0, 1)); // movsd xmm1, xmm0
+                self.emit_insn(&Insn::movsd_xmm(1, 0)); // movsd xmm1, xmm0
                                                       // 恢复 magnitude 到 xmm0
-                self.emit_insn(&Insn::movsd_xmm(2, 0)); // movsd xmm0, xmm2
+                self.emit_insn(&Insn::movsd_xmm(0, 2)); // movsd xmm0, xmm2
                                                       // 调用 libc copysign
                 self.call_label("copysign");
                 // 结果在 xmm0, 如果需要则移动到 dst
@@ -3878,10 +3880,10 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = magnitude (float)
-                self.emit_insn(&Insn::movsd_xmm(0, 2)); // movsd xmm2, xmm0 (backup)
+                self.emit_insn(&Insn::movsd_xmm(2, 0)); // movsd xmm2, xmm0 (backup)
                 self.gen_expr(&args[1], Self::EVAL_BASE); // xmm0 = sign (float)
-                self.emit_insn(&Insn::movsd_xmm(0, 1)); // movsd xmm1, xmm0
-                self.emit_insn(&Insn::movsd_xmm(2, 0)); // movsd xmm0, xmm2
+                self.emit_insn(&Insn::movsd_xmm(1, 0)); // movsd xmm1, xmm0
+                self.emit_insn(&Insn::movsd_xmm(0, 2)); // movsd xmm0, xmm2
                 self.call_label("copysignf");
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -3897,10 +3899,10 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = magnitude (long double)
-                self.emit_insn(&Insn::movsd_xmm(0, 2)); // movsd xmm2, xmm0 (backup)
+                self.emit_insn(&Insn::movsd_xmm(2, 0)); // movsd xmm2, xmm0 (backup)
                 self.gen_expr(&args[1], Self::EVAL_BASE); // xmm0 = sign (long double)
-                self.emit_insn(&Insn::movsd_xmm(0, 1)); // movsd xmm1, xmm0
-                self.emit_insn(&Insn::movsd_xmm(2, 0)); // movsd xmm0, xmm2
+                self.emit_insn(&Insn::movsd_xmm(1, 0)); // movsd xmm1, xmm0
+                self.emit_insn(&Insn::movsd_xmm(0, 2)); // movsd xmm0, xmm2
                 self.call_label("copysignl");
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -4046,10 +4048,10 @@ impl Codegen {
                 // 转发到 libc 比较
                 self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = a
                                             // 备份 a 到 xmm2
-                self.emit_insn(&Insn::movsd_xmm(0, 2)); // movsd xmm2, xmm0
+                self.emit_insn(&Insn::movsd_xmm(2, 0)); // movsd xmm2, xmm0
                 self.gen_expr(&args[1], Self::EVAL_BASE); // xmm0 = b
-                self.emit_insn(&Insn::movsd_xmm(0, 1)); // movsd xmm1, xmm0
-                self.emit_insn(&Insn::movsd_xmm(2, 0)); // movsd xmm0, xmm2
+                self.emit_insn(&Insn::movsd_xmm(1, 0)); // movsd xmm1, xmm0
+                self.emit_insn(&Insn::movsd_xmm(0, 2)); // movsd xmm0, xmm2
                                                       // ucomisd xmm0, xmm1: 比较 a vs b
                 self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SD, 0, 1));
                 match name {
@@ -4156,7 +4158,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = a
-                self.emit_insn(&Insn::movsd_xmm(0, 2)); // movsd xmm2, xmm0
+                self.emit_insn(&Insn::movsd_xmm(2, 0)); // movsd xmm2, xmm0
                 self.gen_expr(&args[1], Self::EVAL_BASE); // xmm0 = b
                 self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Min, SimdWidth::SD, 0, 2)); // minsd xmm0, xmm2
                 if dst != 0 {
@@ -4171,7 +4173,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::movss_xmm(0, 2)); // movss xmm2, xmm0
+                self.emit_insn(&Insn::movss_xmm(2, 0)); // movss xmm2, xmm0
                 self.gen_expr(&args[1], Self::EVAL_BASE);
                 self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Min, SimdWidth::SS, 0, 2)); // minss xmm0, xmm2
                 if dst != 0 {
@@ -4186,7 +4188,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::movsd_xmm(0, 2)); // movsd xmm2, xmm0
+                self.emit_insn(&Insn::movsd_xmm(2, 0)); // movsd xmm2, xmm0
                 self.gen_expr(&args[1], Self::EVAL_BASE);
                 self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Max, SimdWidth::SD, 0, 2)); // maxsd xmm0, xmm2
                 if dst != 0 {
@@ -4201,7 +4203,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::movss_xmm(0, 2)); // movss xmm2, xmm0
+                self.emit_insn(&Insn::movss_xmm(2, 0)); // movss xmm2, xmm0
                 self.gen_expr(&args[1], Self::EVAL_BASE);
                 self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Max, SimdWidth::SS, 0, 2)); // maxss xmm0, xmm2
                 if dst != 0 {
@@ -4213,10 +4215,10 @@ impl Codegen {
             "__builtin_fmaxl" | "__builtin_fminl" => {
                 if args.len() >= 2 {
                     self.gen_expr(&args[0], Self::EVAL_BASE);
-                    self.emit_insn(&Insn::movsd_xmm(0, 2));
-                    self.gen_expr(&args[1], Self::EVAL_BASE);
-                    self.emit_insn(&Insn::movsd_xmm(0, 1));
                     self.emit_insn(&Insn::movsd_xmm(2, 0));
+                    self.gen_expr(&args[1], Self::EVAL_BASE);
+                    self.emit_insn(&Insn::movsd_xmm(1, 0));
+                    self.emit_insn(&Insn::movsd_xmm(0, 2));
                 }
                 let lib_fn = if name == "__builtin_fmaxl" { "fmaxl" } else { "fminl" };
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
@@ -4712,7 +4714,7 @@ impl Codegen {
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,
                     dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        0, crate::codegen::shared::asm_operand::Width::B32
+                        1, crate::codegen::shared::asm_operand::Width::B32
                     ),
                     src: crate::codegen::x86_64::opcode::Operand::Mem(
                         crate::codegen::x86_64::opcode::MemOperand {
@@ -4775,7 +4777,7 @@ impl Codegen {
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,
                     dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        0, crate::codegen::shared::asm_operand::Width::B32
+                        1, crate::codegen::shared::asm_operand::Width::B32
                     ),
                     src: crate::codegen::x86_64::opcode::Operand::Mem(
                         crate::codegen::x86_64::opcode::MemOperand {
@@ -4827,7 +4829,7 @@ impl Codegen {
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,
                     dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        0, crate::codegen::shared::asm_operand::Width::B32
+                        1, crate::codegen::shared::asm_operand::Width::B32
                     ),
                     src: crate::codegen::x86_64::opcode::Operand::Mem(
                         crate::codegen::x86_64::opcode::MemOperand {
@@ -4879,7 +4881,7 @@ impl Codegen {
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,
                     dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        0, crate::codegen::shared::asm_operand::Width::B32
+                        1, crate::codegen::shared::asm_operand::Width::B32
                     ),
                     src: crate::codegen::x86_64::opcode::Operand::Mem(
                         crate::codegen::x86_64::opcode::MemOperand {

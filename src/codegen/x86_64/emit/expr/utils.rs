@@ -161,7 +161,7 @@ impl Codegen {
                     ),
                 },
                 &[],
-            ));; // mov eax, eax (zero-extends to rax)
+            )); // mov eax, eax (zero-extends to rax)
                 }
                 if src == 2 {
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rcx (restore divisor)

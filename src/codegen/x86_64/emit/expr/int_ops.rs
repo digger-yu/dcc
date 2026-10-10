@@ -331,7 +331,7 @@ impl Codegen {
                     ),
                 },
                 &[],
-            ));; // mov eax, eax (truncate to 32 bits)
+            )); // mov eax, eax (truncate to 32 bits)
         }
         // 8. 恢复地址并存储
         self.pop(1); // pop rcx (address)

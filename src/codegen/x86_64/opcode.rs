@@ -1228,28 +1228,28 @@ impl X86_64Opcode {
                             _ => return None,
                         };
                         // 0F AE needs a 0x0F escape byte before escap.
-                        let mut out = Vec::with_capacity(8);
+                        let mut out = Vec::with_capacity(16);
+                        // REX.B 仅当基址是扩展寄存器 (r8-r15) 时需要；/2 /3 /5 /7
+                        // 都是 opcode 扩展位（非寄存器），不影响 REX。
+                        if base >= 8 {
+                            out.push(0x41);
+                        }
                         if escap == 0xAE {
                             out.push(0x0F);
                         }
                         out.push(escap);
+                        // 统一按 mod=10 (disp32) 编码，与通用 X87 mem 分支一致：
+                        // 旧实现误发 mod=00/10 混合 + 缺 rm=100 的 SIB，指令字节长度
+                        // 与实际不符，导致 stmxcsr/ldmxcsr 之后整条指令流错位（SIGSEGV）。
                         let disp = mem.disp;
-                        // mod=00; if disp in [-128..=127], use disp8; else disp32.
-                        // base==4 (rsp) or base==13 (r13) → SIB byte.
                         if base == 4 || base == 13 {
-                            // modrm = 00 | reg<<3 | 100; SIB = 00 | base(100=rsp)
-                            out.push(0x80 | (reg_field << 3));
+                            // mod=10, rm=100 → 有 SIB；SIB base=rsp(100)/rbp(101)
+                            out.push(0x84 | (reg_field << 3));
                             out.push(0x20 | (base & 7));
                         } else {
-                            out.push((reg_field << 3) | (base & 7));
+                            out.push(0x80 | (reg_field << 3) | (base & 7));
                         }
-                        // Emit disp8 or disp32. All call sites in builtins.rs use
-                        // disp=0 or disp=0x1C (28), both fit signed-byte.
-                        if (-128..=127).contains(&disp) {
-                            out.push(disp as u8);
-                        } else {
-                            out.extend_from_slice(&disp.to_le_bytes());
-                        }
+                        out.extend_from_slice(&(disp as i32).to_le_bytes());
                         Some(out)
                     }
                 }

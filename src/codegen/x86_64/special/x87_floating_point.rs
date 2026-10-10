@@ -234,7 +234,7 @@ impl Codegen {
                     ),
                 },
                 &[],
-            ));; // mov eax, eax → 零扩展高 32 位
+            )); // mov eax, eax → 零扩展高 32 位
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B64,
