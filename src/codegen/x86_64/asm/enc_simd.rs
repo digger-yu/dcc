@@ -24,12 +24,12 @@ impl Codegen {
     /// `prefix` is 0x66/0xF2/0xF3/0x0F (0x0F means no legacy prefix).
     pub(crate) fn emit_sse_header(&mut self, prefix: u8, rex: u8) {
         if prefix == 0x66 || prefix == 0xF2 || prefix == 0xF3 {
-            self.emit_insn(&Insn::raw_bytes(&[prefix]));
+            self.emit_insn(&Insn::raw(&[prefix]));
         }
         if rex != 0 {
-            self.emit_insn(&Insn::raw_bytes(&[0x40 | rex]));
+            self.emit_insn(&Insn::raw(&[0x40 | rex]));
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x0F]));
+        self.emit_insn(&Insn::raw(&[0x0F]));
     }
     pub(crate) fn emit_asm_amx_3op(
         &mut self,
@@ -51,7 +51,7 @@ impl Codegen {
             },
         };
         self.emit_vex4_prefix(d, s2, 2, 0, s1, 0, pp);
-        self.emit_insn(&Insn::raw_bytes(&[opcode, Self::modrm_reg_reg(d, s2)]));
+        self.emit_insn(&Insn::raw(&[opcode, Self::modrm_reg_reg(d, s2)]));
     }
     pub(crate) fn emit_asm_evex_2op(
         &mut self,
@@ -73,7 +73,7 @@ impl Codegen {
         match (src, dst) {
             (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds)) if *ss >= 128 && *ds >= 128 => {
                 self.emit_evex_prefix(*d, *s, map, w, 0, l_bits, pp, 0);
-                self.emit_insn(&Insn::raw_bytes(&[opcode, Self::modrm_reg_reg(*d, *s)]));
+                self.emit_insn(&Insn::raw(&[opcode, Self::modrm_reg_reg(*d, *s)]));
             },
             (
                 AsmOperand::Mem {
@@ -85,7 +85,7 @@ impl Codegen {
                 AsmOperand::Reg(d, ds),
             ) if *ds >= 128 => {
                 self.emit_evex_prefix(*d, *base, map, w, 0, l_bits, pp, 0);
-                self.emit_insn(&Insn::raw_bytes(&[opcode]));
+                self.emit_insn(&Insn::raw(&[opcode]));
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             (
@@ -98,7 +98,7 @@ impl Codegen {
                 },
             ) if *ss >= 128 => {
                 self.emit_evex_prefix(*s, *base, map, w, 0, l_bits, pp, 0);
-                self.emit_insn(&Insn::raw_bytes(&[opcode]));
+                self.emit_insn(&Insn::raw(&[opcode]));
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             _ => {
@@ -125,7 +125,7 @@ impl Codegen {
             0u8
         };
         self.emit_evex_prefix(dst, src2, map, w, src1, l_bits, pp, 0);
-        self.emit_insn(&Insn::raw_bytes(&[opcode, Self::modrm_reg_reg(dst, src2)]));
+        self.emit_insn(&Insn::raw(&[opcode, Self::modrm_reg_reg(dst, src2)]));
     }
     pub(crate) fn emit_asm_fma_3op(
         &mut self,
@@ -158,7 +158,7 @@ impl Codegen {
             AsmOperand::Reg(s2, sz2) if *sz2 >= 128 => {
                 // reg-reg-reg: all three are registers
                 self.emit_vex4_prefix(d, *s2, 2, w, s1, l, pp);
-                self.emit_insn(&Insn::raw_bytes(&[opcode, Self::modrm_reg_reg(d, *s2)]));
+                self.emit_insn(&Insn::raw(&[opcode, Self::modrm_reg_reg(d, *s2)]));
             },
             AsmOperand::Mem {
                 disp,
@@ -168,7 +168,7 @@ impl Codegen {
             } => {
                 // reg-reg-mem: memory is in AT&T first operand
                 self.emit_vex4_prefix(d, *base, 2, w, s1, l, pp);
-                self.emit_insn(&Insn::raw_bytes(&[opcode]));
+                self.emit_insn(&Insn::raw(&[opcode]));
                 self.emit_asm_modrm_mem_only(d, *disp, *base, *index, *scale);
             },
             AsmOperand::SegMem {
@@ -180,15 +180,15 @@ impl Codegen {
             } => {
                 // reg-reg-segmem: 段前缀 + VEX + modrm
                 let (_code, pfx) = Self::seg_meta(*seg);
-                self.emit_insn(&Insn::raw_bytes(&[pfx]));
+                self.emit_insn(&Insn::raw(&[pfx]));
                 self.emit_vex4_prefix(d, *base, 2, w, s1, l, pp);
-                self.emit_insn(&Insn::raw_bytes(&[opcode]));
+                self.emit_insn(&Insn::raw(&[opcode]));
                 self.emit_asm_modrm_mem_only(d, *disp, *base, *index, *scale);
             },
             AsmOperand::SymDisp(sym, _) => {
                 // reg-reg-sym: RIP-relative
                 self.emit_vex4_prefix(d, 0, 2, w, s1, l, pp);
-                self.emit_insn(&Insn::raw_bytes(&[opcode, 0x05 | ((d & 7) << 3), 0, 0, 0, 0]));
+                self.emit_insn(&Insn::raw(&[opcode, 0x05 | ((d & 7) << 3), 0, 0, 0, 0]));
                 let pos = self.pos() - 4;
                 self.pending_data_rels.push((pos, sym.clone()));
             },
@@ -212,11 +212,11 @@ impl Codegen {
             scale,
         } = op
         {
-            self.emit_insn(&Insn::raw_bytes(&[Self::rex(rex_w, 0, index.unwrap_or(0), *base)]));
+            self.emit_insn(&Insn::raw(&[Self::rex(rex_w, 0, index.unwrap_or(0), *base)]));
             if has_0f {
-                self.emit_insn(&Insn::raw_bytes(&[0x0F]));
+                self.emit_insn(&Insn::raw(&[0x0F]));
             }
-            self.emit_insn(&Insn::raw_bytes(&[opcode]));
+            self.emit_insn(&Insn::raw(&[opcode]));
             self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
         } else if let AsmOperand::SegMem {
             seg,
@@ -227,19 +227,19 @@ impl Codegen {
         } = op
         {
             let (_code, pfx) = Self::seg_meta(*seg);
-            self.emit_insn(&Insn::raw_bytes(&[pfx, Self::rex(false, 0, index.unwrap_or(0), *base)]));
+            self.emit_insn(&Insn::raw(&[pfx, Self::rex(false, 0, index.unwrap_or(0), *base)]));
             if has_0f {
-                self.emit_insn(&Insn::raw_bytes(&[0x0F]));
+                self.emit_insn(&Insn::raw(&[0x0F]));
             }
-            self.emit_insn(&Insn::raw_bytes(&[opcode]));
+            self.emit_insn(&Insn::raw(&[opcode]));
             self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
         } else if let AsmOperand::SymDisp(sym, _) = op {
             // 全局变量 RIP-relative: mod=00 r/m=101
-            self.emit_insn(&Insn::raw_bytes(&[Self::rex(false, 0, 0, 0)]));
+            self.emit_insn(&Insn::raw(&[Self::rex(false, 0, 0, 0)]));
             if has_0f {
-                self.emit_insn(&Insn::raw_bytes(&[0x0F]));
+                self.emit_insn(&Insn::raw(&[0x0F]));
             }
-            self.emit_insn(&Insn::raw_bytes(&[opcode, 0x05 | (ext << 3), 0, 0, 0, 0]));
+            self.emit_insn(&Insn::raw(&[opcode, 0x05 | (ext << 3), 0, 0, 0, 0]));
             let pos = self.pos() - 4;
             self.pending_data_rels.push((pos, sym.clone()));
         } else {
@@ -251,7 +251,7 @@ impl Codegen {
             (AsmOperand::Reg(s, ss), AsmOperand::Reg(d, ds))
                 if *ss == ASM_REG_MMX && *ds == ASM_REG_MMX =>
             {
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, opcode, Self::modrm_reg_reg(*d, *s)]));
+                self.emit_insn(&Insn::raw(&[0x0F, opcode, Self::modrm_reg_reg(*d, *s)]));
             },
             (
                 AsmOperand::Mem {
@@ -262,7 +262,7 @@ impl Codegen {
                 },
                 AsmOperand::Reg(d, ds),
             ) if *ds == ASM_REG_MMX => {
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, opcode]));
+                self.emit_insn(&Insn::raw(&[0x0F, opcode]));
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             _ => {
@@ -281,7 +281,7 @@ impl Codegen {
         match dst {
             AsmOperand::Reg(r, sz) if *sz < 128 => {
                 self.emit_vex4_prefix(src_xmm, *r, 3, w, 0, 0, 1);
-                self.emit_insn(&Insn::raw_bytes(&[opcode, Self::modrm_reg_reg(src_xmm, *r), imm as u8]));
+                self.emit_insn(&Insn::raw(&[opcode, Self::modrm_reg_reg(src_xmm, *r), imm as u8]));
             },
             AsmOperand::Mem {
                 disp,
@@ -290,14 +290,14 @@ impl Codegen {
                 scale,
             } => {
                 self.emit_vex4_prefix(src_xmm, *base, 3, w, 0, 0, 1);
-                self.emit_insn(&Insn::raw_bytes(&[opcode]));
+                self.emit_insn(&Insn::raw(&[opcode]));
                 self.emit_asm_modrm_mem_only(src_xmm, *disp, *base, *index, *scale);
-                self.emit_insn(&Insn::raw_bytes(&[imm as u8]));
+                self.emit_insn(&Insn::raw(&[imm as u8]));
             },
             AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
                 // RIP-relative dest: mod=00 r/m=101
                 self.emit_vex4_prefix(src_xmm, 0, 3, w, 0, 0, 1);
-                self.emit_insn(&Insn::raw_bytes(&[opcode, 0x05 | ((src_xmm & 7) << 3), 0, 0, 0, 0, imm as u8]));
+                self.emit_insn(&Insn::raw(&[opcode, 0x05 | ((src_xmm & 7) << 3), 0, 0, 0, 0, imm as u8]));
                 let pos = self.pos() - 5;
                 self.pending_data_rels.push((pos, sym.clone()));
             },
@@ -317,7 +317,7 @@ impl Codegen {
         match src {
             AsmOperand::Reg(r, sz) if *sz < 128 => {
                 self.emit_vex4_prefix(dst_xmm, *r, 3, w, 0, 0, 1);
-                self.emit_insn(&Insn::raw_bytes(&[opcode, Self::modrm_reg_reg(dst_xmm, *r), imm as u8]));
+                self.emit_insn(&Insn::raw(&[opcode, Self::modrm_reg_reg(dst_xmm, *r), imm as u8]));
             },
             AsmOperand::Mem {
                 disp,
@@ -326,14 +326,14 @@ impl Codegen {
                 scale,
             } => {
                 self.emit_vex4_prefix(dst_xmm, *base, 3, w, 0, 0, 1);
-                self.emit_insn(&Insn::raw_bytes(&[opcode]));
+                self.emit_insn(&Insn::raw(&[opcode]));
                 self.emit_asm_modrm_mem_only(dst_xmm, *disp, *base, *index, *scale);
-                self.emit_insn(&Insn::raw_bytes(&[imm as u8]));
+                self.emit_insn(&Insn::raw(&[imm as u8]));
             },
             AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
                 // RIP-relative source: mod=00 r/m=101
                 self.emit_vex4_prefix(dst_xmm, 0, 3, w, 0, 0, 1);
-                self.emit_insn(&Insn::raw_bytes(&[opcode, 0x05 | ((dst_xmm & 7) << 3), 0, 0, 0, 0, imm as u8]));
+                self.emit_insn(&Insn::raw(&[opcode, 0x05 | ((dst_xmm & 7) << 3), 0, 0, 0, 0, imm as u8]));
                 let pos = self.pos() - 5;
                 self.pending_data_rels.push((pos, sym.clone()));
             },
@@ -359,12 +359,12 @@ impl Codegen {
         } = src
         {
             let (_code, pfx) = Self::seg_meta(*seg);
-            self.emit_insn(&Insn::raw_bytes(&[pfx]));
+            self.emit_insn(&Insn::raw(&[pfx]));
             if let AsmOperand::Reg(d, _) = dst {
                 if bits == 16 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x66]));
+                    self.emit_insn(&Insn::raw(&[0x66]));
                 }
-                self.emit_insn(&Insn::raw_bytes(&[Self::rex(w, *d, index.unwrap_or(0), *base), 0x0F, opcode]));
+                self.emit_insn(&Insn::raw(&[Self::rex(w, *d, index.unwrap_or(0), *base), 0x0F, opcode]));
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             }
             return;
@@ -373,9 +373,9 @@ impl Codegen {
             (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) => {
                 let r = Self::rex(w, *d, 0, *s);
                 if r != 0x40 {
-                    self.emit_insn(&Insn::raw_bytes(&[r]));
+                    self.emit_insn(&Insn::raw(&[r]));
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, opcode, Self::modrm_reg_reg(*d, *s)]));
+                self.emit_insn(&Insn::raw(&[0x0F, opcode, Self::modrm_reg_reg(*d, *s)]));
             },
             (
                 AsmOperand::Mem {
@@ -387,13 +387,13 @@ impl Codegen {
                 AsmOperand::Reg(d, _),
             ) => {
                 if bits == 16 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x66]));
+                    self.emit_insn(&Insn::raw(&[0x66]));
                 }
                 let r = Self::rex(w, *d, index.unwrap_or(0), *base);
                 if r != 0x40 {
-                    self.emit_insn(&Insn::raw_bytes(&[r]));
+                    self.emit_insn(&Insn::raw(&[r]));
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, opcode]));
+                self.emit_insn(&Insn::raw(&[0x0F, opcode]));
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             _ => {
@@ -416,7 +416,7 @@ impl Codegen {
         match src {
             AsmOperand::Reg(s, ss) if *ss == 128 => {
                 self.emit_vex4_prefix(dst, *s, map, w, vvvv, l, pp);
-                self.emit_insn(&Insn::raw_bytes(&[opcode, Self::modrm_reg_reg(dst, *s), imm as u8]));
+                self.emit_insn(&Insn::raw(&[opcode, Self::modrm_reg_reg(dst, *s), imm as u8]));
             },
             AsmOperand::Mem {
                 disp,
@@ -425,9 +425,9 @@ impl Codegen {
                 scale,
             } => {
                 self.emit_vex4_prefix(dst, *base, map, w, vvvv, l, pp);
-                self.emit_insn(&Insn::raw_bytes(&[opcode]));
+                self.emit_insn(&Insn::raw(&[opcode]));
                 self.emit_asm_modrm_mem_only(dst, *disp, *base, *index, *scale);
-                self.emit_insn(&Insn::raw_bytes(&[imm as u8]));
+                self.emit_insn(&Insn::raw(&[imm as u8]));
             },
             AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
                 // RIP-relative source: mod=00 r/m=101
@@ -436,7 +436,7 @@ impl Codegen {
                 } else {
                     self.emit_vex4_prefix(dst, 0, map, w, vvvv, l, pp);
                 }
-                self.emit_insn(&Insn::raw_bytes(&[opcode, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0, imm as u8]));
+                self.emit_insn(&Insn::raw(&[opcode, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0, imm as u8]));
                 let pos = self.pos() - 5;
                 self.pending_data_rels.push((pos, sym.clone()));
             },
@@ -463,7 +463,7 @@ impl Codegen {
         } = src
         {
             let (_code, pfx) = Self::seg_meta(*seg);
-            self.emit_insn(&Insn::raw_bytes(&[pfx]));
+            self.emit_insn(&Insn::raw(&[pfx]));
             if let AsmOperand::Reg(d, ds) = dst {
                 if is_xmm(*d, *ds) {
                     let mut rex = 0u8;
@@ -477,7 +477,7 @@ impl Codegen {
                         rex |= 0x02;
                     }
                     self.emit_sse_header(prefix, rex);
-                    self.emit_insn(&Insn::raw_bytes(&[opcode]));
+                    self.emit_insn(&Insn::raw(&[opcode]));
                     self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
                 }
             }
@@ -493,7 +493,7 @@ impl Codegen {
         } = dst
         {
             let (_code, pfx) = Self::seg_meta(*seg);
-            self.emit_insn(&Insn::raw_bytes(&[pfx]));
+            self.emit_insn(&Insn::raw(&[pfx]));
             if let AsmOperand::Reg(s, ss) = src {
                 if is_xmm(*s, *ss) {
                     let mut rex = 0u8;
@@ -507,7 +507,7 @@ impl Codegen {
                         rex |= 0x02;
                     }
                     self.emit_sse_header(prefix, rex);
-                    self.emit_insn(&Insn::raw_bytes(&[opcode]));
+                    self.emit_insn(&Insn::raw(&[opcode]));
                     self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
                 }
             }
@@ -525,7 +525,7 @@ impl Codegen {
                     rex |= 0x01;
                 }
                 self.emit_sse_header(prefix, rex);
-                self.emit_insn(&Insn::raw_bytes(&[opcode, Self::modrm_reg_reg(*d, *s)]));
+                self.emit_insn(&Insn::raw(&[opcode, Self::modrm_reg_reg(*d, *s)]));
             },
             (
                 AsmOperand::Mem {
@@ -547,7 +547,7 @@ impl Codegen {
                     rex |= 0x02;
                 }
                 self.emit_sse_header(prefix, rex);
-                self.emit_insn(&Insn::raw_bytes(&[opcode]));
+                self.emit_insn(&Insn::raw(&[opcode]));
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             (
@@ -570,7 +570,7 @@ impl Codegen {
                     rex |= 0x02;
                 }
                 self.emit_sse_header(prefix, rex);
-                self.emit_insn(&Insn::raw_bytes(&[opcode]));
+                self.emit_insn(&Insn::raw(&[opcode]));
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             _ => {
@@ -603,7 +603,7 @@ impl Codegen {
                     rex |= 0x01;
                 }
                 self.emit_sse_header(prefix, rex);
-                self.emit_insn(&Insn::raw_bytes(&[opcode, Self::modrm_reg_reg(*d, *s), imm8]));
+                self.emit_insn(&Insn::raw(&[opcode, Self::modrm_reg_reg(*d, *s), imm8]));
             },
             (
                 AsmOperand::Mem {
@@ -625,9 +625,9 @@ impl Codegen {
                     rex |= 0x02;
                 }
                 self.emit_sse_header(prefix, rex);
-                self.emit_insn(&Insn::raw_bytes(&[opcode]));
+                self.emit_insn(&Insn::raw(&[opcode]));
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
-                self.emit_insn(&Insn::raw_bytes(&[imm8]));
+                self.emit_insn(&Insn::raw(&[imm8]));
             },
             _ => {
                 self.asm_reject("unsupported sse cmp/shuffle operand pattern");
@@ -654,11 +654,11 @@ impl Codegen {
                 if *s >= 8 {
                     rex |= 0x01;
                 }
-                self.emit_insn(&Insn::raw_bytes(&[prefix]));
+                self.emit_insn(&Insn::raw(&[prefix]));
                 if rex != 0 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x40 | rex]));
+                    self.emit_insn(&Insn::raw(&[0x40 | rex]));
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x10, Self::modrm_reg_reg(*d, *s)]));
+                self.emit_insn(&Insn::raw(&[0x0F, 0x10, Self::modrm_reg_reg(*d, *s)]));
             },
             (
                 AsmOperand::Mem {
@@ -679,11 +679,11 @@ impl Codegen {
                 if index.unwrap_or(0) >= 8 {
                     rex |= 0x02;
                 }
-                self.emit_insn(&Insn::raw_bytes(&[prefix]));
+                self.emit_insn(&Insn::raw(&[prefix]));
                 if rex != 0 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x40 | rex]));
+                    self.emit_insn(&Insn::raw(&[0x40 | rex]));
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x10]));
+                self.emit_insn(&Insn::raw(&[0x0F, 0x10]));
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             (
@@ -705,11 +705,11 @@ impl Codegen {
                 if index.unwrap_or(0) >= 8 {
                     rex |= 0x02;
                 }
-                self.emit_insn(&Insn::raw_bytes(&[prefix]));
+                self.emit_insn(&Insn::raw(&[prefix]));
                 if rex != 0 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x40 | rex]));
+                    self.emit_insn(&Insn::raw(&[0x40 | rex]));
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x11]));
+                self.emit_insn(&Insn::raw(&[0x0F, 0x11]));
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             _ => {
@@ -748,7 +748,7 @@ impl Codegen {
                     rex |= 0x02;
                 }
                 self.emit_sse_header(prefix, rex);
-                self.emit_insn(&Insn::raw_bytes(&[load_op]));
+                self.emit_insn(&Insn::raw(&[load_op]));
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             // xmm -> mem (store)
@@ -772,7 +772,7 @@ impl Codegen {
                     rex |= 0x02;
                 }
                 self.emit_sse_header(prefix, rex);
-                self.emit_insn(&Insn::raw_bytes(&[store_op]));
+                self.emit_insn(&Insn::raw(&[store_op]));
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             // xmm -> xmm (reg-reg move, use load_op)
@@ -787,7 +787,7 @@ impl Codegen {
                     rex |= 0x01;
                 }
                 self.emit_sse_header(prefix, rex);
-                self.emit_insn(&Insn::raw_bytes(&[load_op, Self::modrm_reg_reg(*d, *s)]));
+                self.emit_insn(&Insn::raw(&[load_op, Self::modrm_reg_reg(*d, *s)]));
             },
             _ => {
                 self.asm_reject("unsupported sse packed mov operand pattern");
@@ -819,7 +819,7 @@ impl Codegen {
                 return;
             },
         };
-        self.emit_insn(&Insn::raw_bytes(&[0xC4, 0xE2, 0x7B, 0x4B]));
+        self.emit_insn(&Insn::raw(&[0xC4, 0xE2, 0x7B, 0x4B]));
         self.emit_asm_modrm_mem_only(tmm, disp, base, index, scale);
     }
     pub(crate) fn emit_asm_tilestored(&mut self, op0: &AsmOperand, op1: &AsmOperand) {
@@ -847,7 +847,7 @@ impl Codegen {
                 return;
             },
         };
-        self.emit_insn(&Insn::raw_bytes(&[0xC4, 0xE2, 0x7A, 0x4B]));
+        self.emit_insn(&Insn::raw(&[0xC4, 0xE2, 0x7A, 0x4B]));
         self.emit_asm_modrm_mem_only(tmm, disp, base, index, scale);
     }
     pub(crate) fn emit_asm_vex_2op(
@@ -867,7 +867,7 @@ impl Codegen {
                 } else {
                     self.emit_vex4_prefix(*d, *s, map, w, 0, l, pp);
                 }
-                self.emit_insn(&Insn::raw_bytes(&[opcode, Self::modrm_reg_reg(*d, *s)]));
+                self.emit_insn(&Insn::raw(&[opcode, Self::modrm_reg_reg(*d, *s)]));
             },
             (
                 AsmOperand::Mem {
@@ -883,7 +883,7 @@ impl Codegen {
                 } else {
                     self.emit_vex4_prefix(*d, *base, map, w, 0, l, pp);
                 }
-                self.emit_insn(&Insn::raw_bytes(&[opcode]));
+                self.emit_insn(&Insn::raw(&[opcode]));
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             (
@@ -900,7 +900,7 @@ impl Codegen {
                 } else {
                     self.emit_vex4_prefix(*s, *base, map, w, 0, l, pp);
                 }
-                self.emit_insn(&Insn::raw_bytes(&[opcode]));
+                self.emit_insn(&Insn::raw(&[opcode]));
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             (AsmOperand::SymDisp(sym, _), AsmOperand::Reg(d, ds)) if *ds == 128 => {
@@ -910,7 +910,7 @@ impl Codegen {
                 } else {
                     self.emit_vex4_prefix(*d, 0, map, w, 0, l, pp);
                 }
-                self.emit_insn(&Insn::raw_bytes(&[opcode, 0x05 | ((d & 7) << 3), 0, 0, 0, 0]));
+                self.emit_insn(&Insn::raw(&[opcode, 0x05 | ((d & 7) << 3), 0, 0, 0, 0]));
                 let pos = self.pos() - 4;
                 self.pending_data_rels.push((pos, sym.clone()));
             },
@@ -926,13 +926,13 @@ impl Codegen {
                 AsmOperand::Reg(d, ds),
             ) if *ds == 128 => {
                 let (_code, pfx) = Self::seg_meta(*seg);
-                self.emit_insn(&Insn::raw_bytes(&[pfx]));
+                self.emit_insn(&Insn::raw(&[pfx]));
                 if map == 1 {
                     self.emit_vex3_prefix(*d, 0, l, pp);
                 } else {
                     self.emit_vex4_prefix(*d, *base, map, w, 0, l, pp);
                 }
-                self.emit_insn(&Insn::raw_bytes(&[opcode]));
+                self.emit_insn(&Insn::raw(&[opcode]));
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             // Reg → SegMem: 段前缀 + VEX + mem
@@ -947,13 +947,13 @@ impl Codegen {
                 },
             ) if *ss == 128 => {
                 let (_code, pfx) = Self::seg_meta(*seg);
-                self.emit_insn(&Insn::raw_bytes(&[pfx]));
+                self.emit_insn(&Insn::raw(&[pfx]));
                 if map == 1 {
                     self.emit_vex3_prefix(*s, 0, l, pp);
                 } else {
                     self.emit_vex4_prefix(*s, *base, map, w, 0, l, pp);
                 }
-                self.emit_insn(&Insn::raw_bytes(&[opcode]));
+                self.emit_insn(&Insn::raw(&[opcode]));
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             (AsmOperand::Reg(s, ss), AsmOperand::SymDisp(sym, _)) if *ss == 128 => {
@@ -962,7 +962,7 @@ impl Codegen {
                 } else {
                     self.emit_vex4_prefix(*s, 0, map, w, 0, l, pp);
                 }
-                self.emit_insn(&Insn::raw_bytes(&[opcode, 0x05 | ((s & 7) << 3), 0, 0, 0, 0]));
+                self.emit_insn(&Insn::raw(&[opcode, 0x05 | ((s & 7) << 3), 0, 0, 0, 0]));
                 let pos = self.pos() - 4;
                 self.pending_data_rels.push((pos, sym.clone()));
             },
@@ -973,7 +973,7 @@ impl Codegen {
                 } else {
                     self.emit_vex4_prefix(*d, 0, map, w, 0, l, pp);
                 }
-                self.emit_insn(&Insn::raw_bytes(&[opcode, Self::modrm_reg_reg(0, *d)]));
+                self.emit_insn(&Insn::raw(&[opcode, Self::modrm_reg_reg(0, *d)]));
             },
             (AsmOperand::Reg(s, ss), AsmOperand::None) if *ss >= 128 => {
                 if map == 1 {
@@ -981,18 +981,18 @@ impl Codegen {
                 } else {
                     self.emit_vex4_prefix(*s, 0, map, w, 0, l, pp);
                 }
-                self.emit_insn(&Insn::raw_bytes(&[opcode, Self::modrm_reg_reg(0, *s)]));
+                self.emit_insn(&Insn::raw(&[opcode, Self::modrm_reg_reg(0, *s)]));
             },
             // crc32 类 GPR-GPR / GPR-Mem: 无 VEX 前缀, 0F 38 F0/F1 + ModR/M
             // pp=0 → F2 (crc32b/crc32l/crc32q), pp=1 → 66 (crc32w); w=1 → REX.W (crc32q)
             (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) if pp <= 1 => {
                 let prefix: u8 = if pp == 0 { 0xF2 } else { 0x66 };
                 // mandatory prefix must precede REX
-                self.emit_insn(&Insn::raw_bytes(&[prefix]));
+                self.emit_insn(&Insn::raw(&[prefix]));
                 if w == 1 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48]));
+                    self.emit_insn(&Insn::raw(&[0x48]));
                 } // REX.W
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x38, opcode, Self::modrm_reg_reg(*d, *s)]));
+                self.emit_insn(&Insn::raw(&[0x0F, 0x38, opcode, Self::modrm_reg_reg(*d, *s)]));
             },
             (
                 AsmOperand::Reg(s, _),
@@ -1004,11 +1004,11 @@ impl Codegen {
                 },
             ) if pp <= 1 => {
                 let prefix: u8 = if pp == 0 { 0xF2 } else { 0x66 };
-                self.emit_insn(&Insn::raw_bytes(&[prefix]));
+                self.emit_insn(&Insn::raw(&[prefix]));
                 if w == 1 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48]));
+                    self.emit_insn(&Insn::raw(&[0x48]));
                 } // REX.W
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x38, opcode]));
+                self.emit_insn(&Insn::raw(&[0x0F, 0x38, opcode]));
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             },
             (
@@ -1021,11 +1021,11 @@ impl Codegen {
                 AsmOperand::Reg(d, _),
             ) if pp <= 1 => {
                 let prefix: u8 = if pp == 0 { 0xF2 } else { 0x66 };
-                self.emit_insn(&Insn::raw_bytes(&[prefix]));
+                self.emit_insn(&Insn::raw(&[prefix]));
                 if w == 1 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48]));
+                    self.emit_insn(&Insn::raw(&[0x48]));
                 } // REX.W
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x38, opcode]));
+                self.emit_insn(&Insn::raw(&[0x0F, 0x38, opcode]));
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             },
             _ => {
@@ -1033,7 +1033,7 @@ impl Codegen {
                     "unsupported vex 2-op operand pattern (l:{}, pp:{}, map:{}, opcode:0x{:02x}, w:{}), src:{:?}, dst:{:?}",
                     l, pp, map, opcode, w, src, dst
                 ));
-                self.emit_insn(&Insn::raw_bytes(&[0x90]));
+                self.emit_insn(&Insn::raw(&[0x90]));
             },
         }
     }
@@ -1084,7 +1084,7 @@ impl Codegen {
                 scale,
             } => {
                 let (_code, pfx) = Self::seg_meta(*seg);
-                self.emit_insn(&Insn::raw_bytes(&[pfx]));
+                self.emit_insn(&Insn::raw(&[pfx]));
                 self.emit_asm_vex_3op_mem(
                     d, s1, *disp, *base, *index, *scale, 0, pp, map, opcode, 0,
                 );
@@ -1096,7 +1096,7 @@ impl Codegen {
                 } else {
                     self.emit_vex4_prefix(d, 0, map, 0, s1, 0, pp);
                 }
-                self.emit_insn(&Insn::raw_bytes(&[opcode, 0x05 | ((d & 7) << 3), 0, 0, 0, 0]));
+                self.emit_insn(&Insn::raw(&[opcode, 0x05 | ((d & 7) << 3), 0, 0, 0, 0]));
                 let pos = self.pos() - 4;
                 self.pending_data_rels.push((pos, sym.clone()));
             },
@@ -1124,7 +1124,7 @@ impl Codegen {
         } else {
             self.emit_vex4_prefix(dst, base, map, w, src1, l, pp);
         }
-        self.emit_insn(&Insn::raw_bytes(&[opcode]));
+        self.emit_insn(&Insn::raw(&[opcode]));
         self.emit_asm_modrm_mem_only(dst, disp, base, index, scale);
     }
     fn emit_asm_vex_3op_reg(
@@ -1143,11 +1143,11 @@ impl Codegen {
         } else {
             self.emit_vex4_prefix(dst, src2, map, w, src1, l, pp);
         }
-        self.emit_insn(&Insn::raw_bytes(&[opcode, Self::modrm_reg_reg(dst, src2)]));
+        self.emit_insn(&Insn::raw(&[opcode, Self::modrm_reg_reg(dst, src2)]));
     }
     pub(crate) fn emit_asm_vmread(&mut self, src: &AsmOperand, dst: &AsmOperand) {
         if let (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) = (src, dst) {
-            self.emit_insn(&Insn::raw_bytes(&[
+            self.emit_insn(&Insn::raw(&[
                 Self::rex(true, *d, 0, *s),
                 0x0F,
                 0x78,
@@ -1159,7 +1159,7 @@ impl Codegen {
     }
     pub(crate) fn emit_asm_vmwrite(&mut self, src: &AsmOperand, dst: &AsmOperand) {
         if let (AsmOperand::Reg(s, _), AsmOperand::Reg(d, _)) = (src, dst) {
-            self.emit_insn(&Insn::raw_bytes(&[
+            self.emit_insn(&Insn::raw(&[
                 Self::rex(true, *s, 0, *d),
                 0x0F,
                 0x79,
@@ -1180,7 +1180,7 @@ impl Codegen {
         match dst {
             AsmOperand::Reg(r, sz) if *sz < 128 => {
                 self.emit_vex4_prefix(src_xmm, *r, 3, w, 0, 0, 1);
-                self.emit_insn(&Insn::raw_bytes(&[opcode, Self::modrm_reg_reg(src_xmm, *r), imm as u8]));
+                self.emit_insn(&Insn::raw(&[opcode, Self::modrm_reg_reg(src_xmm, *r), imm as u8]));
             },
             AsmOperand::Mem {
                 disp,
@@ -1189,14 +1189,14 @@ impl Codegen {
                 scale,
             } => {
                 self.emit_vex4_prefix(src_xmm, *base, 3, w, 0, 0, 1);
-                self.emit_insn(&Insn::raw_bytes(&[opcode]));
+                self.emit_insn(&Insn::raw(&[opcode]));
                 self.emit_asm_modrm_mem_only(src_xmm, *disp, *base, *index, *scale);
-                self.emit_insn(&Insn::raw_bytes(&[imm as u8]));
+                self.emit_insn(&Insn::raw(&[imm as u8]));
             },
             AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
                 // RIP-relative dest: mod=00 r/m=101
                 self.emit_vex4_prefix(src_xmm, 0, 3, w, 0, 0, 1);
-                self.emit_insn(&Insn::raw_bytes(&[opcode, 0x05 | ((src_xmm & 7) << 3), 0, 0, 0, 0, imm as u8]));
+                self.emit_insn(&Insn::raw(&[opcode, 0x05 | ((src_xmm & 7) << 3), 0, 0, 0, 0, imm as u8]));
                 let pos = self.pos() - 5;
                 self.pending_data_rels.push((pos, sym.clone()));
             },
@@ -1217,7 +1217,7 @@ impl Codegen {
         match src {
             AsmOperand::Reg(r, sz) if *sz < 128 => {
                 self.emit_vex4_prefix(dst, *r, 3, w, vvvv, 0, 1);
-                self.emit_insn(&Insn::raw_bytes(&[opcode, Self::modrm_reg_reg(dst, *r), imm as u8]));
+                self.emit_insn(&Insn::raw(&[opcode, Self::modrm_reg_reg(dst, *r), imm as u8]));
             },
             AsmOperand::Mem {
                 disp,
@@ -1226,14 +1226,14 @@ impl Codegen {
                 scale,
             } => {
                 self.emit_vex4_prefix(dst, *base, 3, w, vvvv, 0, 1);
-                self.emit_insn(&Insn::raw_bytes(&[opcode]));
+                self.emit_insn(&Insn::raw(&[opcode]));
                 self.emit_asm_modrm_mem_only(dst, *disp, *base, *index, *scale);
-                self.emit_insn(&Insn::raw_bytes(&[imm as u8]));
+                self.emit_insn(&Insn::raw(&[imm as u8]));
             },
             AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
                 // RIP-relative source: mod=00 r/m=101
                 self.emit_vex4_prefix(dst, 0, 3, w, vvvv, 0, 1);
-                self.emit_insn(&Insn::raw_bytes(&[opcode, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0, imm as u8]));
+                self.emit_insn(&Insn::raw(&[opcode, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0, imm as u8]));
                 let pos = self.pos() - 5;
                 self.pending_data_rels.push((pos, sym.clone()));
             },
@@ -1249,10 +1249,10 @@ impl Codegen {
                 // 寄存器操作数: st(i) 或 %ax (fnstsw)
                 if no_modrm {
                     // fnstsw %ax: DF E0
-                    self.emit_insn(&Insn::raw_bytes(&[esc, 0xE0]));
+                    self.emit_insn(&Insn::raw(&[esc, 0xE0]));
                 } else {
                     // st(i) 操作数: 编码为 ESC C0+reg (mod=11, rm=reg)
-                    self.emit_insn(&Insn::raw_bytes(&[esc, 0xC0 | (ext << 3) | (r & 7)]));
+                    self.emit_insn(&Insn::raw(&[esc, 0xC0 | (ext << 3) | (r & 7)]));
                 }
             },
             AsmOperand::Mem {
@@ -1261,7 +1261,7 @@ impl Codegen {
                 index,
                 scale,
             } => {
-                self.emit_insn(&Insn::raw_bytes(&[esc]));
+                self.emit_insn(&Insn::raw(&[esc]));
                 self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
             },
             _ => {
@@ -1284,10 +1284,10 @@ impl Codegen {
                 // dst 是 %st (0), src 是 %st(i)
                 if *d == 0 {
                     // st, st(i) 形式: 使用 fwd 编码
-                    self.emit_insn(&Insn::raw_bytes(&[fwd_esc, 0xC0 | (fwd_ext << 3) | (s & 7)]));
+                    self.emit_insn(&Insn::raw(&[fwd_esc, 0xC0 | (fwd_ext << 3) | (s & 7)]));
                 } else {
                     // st(i), st 形式: 使用 rev 编码
-                    self.emit_insn(&Insn::raw_bytes(&[rev_esc, 0xC0 | (rev_ext << 3) | (d & 7)]));
+                    self.emit_insn(&Insn::raw(&[rev_esc, 0xC0 | (rev_ext << 3) | (d & 7)]));
                 }
             },
             _ => {

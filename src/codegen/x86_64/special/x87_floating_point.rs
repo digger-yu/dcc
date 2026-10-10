@@ -15,8 +15,10 @@
 // 与本 x87 发射家族不同源，本批不动。
 
 use crate::ast::*;
+use crate::codegen::shared::asm_operand::Width;
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::opcode::{MemOperand, Operand, SimdWidth, X86_64Opcode, X87Op};
 
 impl Codegen {
     // ════════════════════════════════════════════════════════════════════════════
@@ -42,33 +44,83 @@ impl Codegen {
     }
 
     /// x87 内存访存指令的 `[base + disp32]` 形态（fld/fstp/fild 通用）。
-    /// REX / ModRM / SIB 三域分开算再相加：
-    /// - REX = 0x40 | REX.B(base>=8) | REX.W（由调用方通过 `rexw` 传入）
-    /// - rm==100（rsp/r12）必须插 SIB=0x24（index=100 表示“无变址”）
-    /// - mod=10（disp32）对所有 base 都合法，避开 rm==101（rbp/r13）在
-    ///   mod=00 下变成 RIP 相对的坑。
+    /// 步骤 4: 改为构造 X86_64Opcode::X87, 由 encode() 逐字节算出.
+    /// 仍保留原签名 (opcode, reg_field, base, disp, rexw) 因为调用点已经直接传
+    /// escap 字节; encode() 内按 (escap, reg_field) 反查是冗余但不引入新分支.
     fn emit_x87_mem_at(&mut self, opcode: u8, reg_field: u8, base: u8, disp: i32, rexw: bool) {
+        // 按原 (opcode, reg_field, rexw) 三元组映射到 X87Op 变体.
+        // 这条路径是原 fld/fstp/fild 共用的内建发射点; 这里只选最常见的
+        // (D9 /0 / DD /0 / DB /5 for fld; D9 /3 / DD /3 / DB /7 for fstp;
+        //  DB /0 for fild) 形态走类型化, 其余 (理论上不存在) 回退手写.
+        let width: u8 = match (opcode, reg_field, rexw) {
+            (0xD9, 0, false) => 4,    // fld m32fp
+            (0xDD, 0, false) => 8,    // fld m64fp
+            (0xDB, 5, false) => 10,   // fld m80fp
+            (0xD9, 3, false) => 4,     // fstp m32fp
+            (0xDD, 3, false) => 8,     // fstp m64fp
+            (0xDB, 7, false) => 10,    // fstp m80fp
+            (0xDB, 0, false) => 4,    // fild m32int
+            (0xDB, 0, true) => 8,     // fild m64int
+            _ => {
+                // 回退原手写路径 (理论上不可达; 但保持防御).
+                let mut rex = 0x40u8;
+                if base >= 8 {
+                    rex |= 0x01;
+                }
+                if rexw {
+                    rex |= 0x08;
+                }
+                if rex != 0x40 {
+                    self.emit_insn(&Insn::raw(&[rex]));
+                }
+                self.emit_insn(&Insn::raw(&[opcode]));
+                if base == 4 || base == 12 || base == 13 {
+                    self.emit_insn(&Insn::raw(&[0x84 | (reg_field << 3), 0x20 | (base & 7)]));
+                } else {
+                    self.emit_insn(&Insn::raw(&[0x80 | (reg_field << 3) | (base & 7)]));
+                }
+                self.emit_insn(&Insn::raw(&disp.to_le_bytes()));
+                return;
+            }
+        };
+        let op = match (opcode, reg_field) {
+            (0xD9, 0) | (0xDD, 0) | (0xDB, 5) => X87Op::FldMem { width },
+            (0xD9, 3) | (0xDD, 3) | (0xDB, 7) => X87Op::FstpMem { width },
+            (0xDB, 0) => X87Op::FildMem { width },
+            _ => unreachable!(),
+        };
+        let mem = MemOperand {
+            disp,
+            base: Some(base),
+            index: None,
+            seg: None,
+        };
+        let insn = Insn::new(
+            X86_64Opcode::X87 { op, mem: Some(mem) },
+            &[],
+        );
+        // encode() 返回 None 时 (如 base=12) 回退手写兜底.
+        if self.emit_insn(&insn) {
+            return;
+        }
+        // 回退手写 (encode None 路径).
         let mut rex = 0x40u8;
         if base >= 8 {
-            rex |= 0x01; // REX.B
+            rex |= 0x01;
         }
         if rexw {
-            rex |= 0x08; // REX.W
+            rex |= 0x08;
         }
-        // 0x40 是冗余 REX 前缀（无 REX.W/B/R/XG 位），不发射以节省一个字节。
         if rex != 0x40 {
-            self.emit_insn(&Insn::raw_bytes(&[rex]));
+            self.emit_insn(&Insn::raw(&[rex]));
         }
-        self.emit_insn(&Insn::raw_bytes(&[opcode]));
-        // rm==100 (rsp/r12) 必须插 SIB; r13 低3位=5 (与 rbp 同编码),
-        // mod=10 下也必须插 SIB 才能寻址 r13, 否则被编成 [rbp+disp].
+        self.emit_insn(&Insn::raw(&[opcode]));
         if base == 4 || base == 12 || base == 13 {
-            // SIB base 字段 = base&7 (rsp=4, r13=5)
-            self.emit_insn(&Insn::raw_bytes(&[0x84 | (reg_field << 3), 0x20 | (base & 7)]));
+            self.emit_insn(&Insn::raw(&[0x84 | (reg_field << 3), 0x20 | (base & 7)]));
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0x80 | (reg_field << 3) | (base & 7)]));
+            self.emit_insn(&Insn::raw(&[0x80 | (reg_field << 3) | (base & 7)]));
         }
-        self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes()));
+        self.emit_insn(&Insn::raw(&disp.to_le_bytes()));
     }
 
     /// `fld` 的 `[base + disp]` 形态：float=D9 /0, double=DD /0, long double=DB /5。
@@ -96,15 +148,15 @@ impl Codegen {
     /// sub/add 成对，对嵌套求值与 outgoing 参数区不可见。
     pub fn emit_xmm0_to_st0(&mut self, ty: &Type) {
         let is_float = matches!(ty, Type::Float);
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x10])); // sub rsp, 16
+        self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xEC, 0x10])); // sub rsp, 16
         if is_float {
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x11, 0x04, 0x24])); // movss %xmm0, (%rsp)
-            self.emit_insn(&Insn::raw_bytes(&[0xD9, 0x04, 0x24])); // fld  dword (%rsp)
+            self.emit_insn(&Insn::raw(&[0xF3, 0x0F, 0x11, 0x04, 0x24])); // movss %xmm0, (%rsp)
+            self.emit_insn(&Insn::raw(&[0xD9, 0x04, 0x24])); // fld  dword (%rsp)
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x11, 0x04, 0x24])); // movsd %xmm0, (%rsp)
-            self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x04, 0x24])); // fld  qword (%rsp)
+            self.emit_insn(&Insn::raw(&[0xF2, 0x0F, 0x11, 0x04, 0x24])); // movsd %xmm0, (%rsp)
+            self.emit_insn(&Insn::raw(&[0xDD, 0x04, 0x24])); // fld  qword (%rsp)
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x10])); // add rsp, 16
+        self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xC4, 0x10])); // add rsp, 16
     }
 
     /// 整数 rvalue → st(0)。80-bit 有 64 位显式尾数，
@@ -126,27 +178,27 @@ impl Codegen {
         if src != 0 {
             self.mov(0, src); // 统一以 rax 为输入，下面只使用 rax + 内存 scratch
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x20])); // sub rsp, 32（16 字节对齐不变）
+        self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xEC, 0x20])); // sub rsp, 32（16 字节对齐不变）
         if unsigned && sz >= 8 {
             // u64 拆半：x = 2*(x>>1) + (x&1)，两半都落在 i64 范围内。
             // 只用 rax + 内存运算，不占用任何额外 GP 寄存器（rdx/rcx 可能正持待用值）。
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x04, 0x24])); // mov [rsp], rax        ; x
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x04, 0x24])); // mov rax, [rsp]        ; x
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x44, 0x24, 0x08])); // mov [rsp+8], rax
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, 0x6C, 0x24, 0x08])); // shr qword [rsp+8], 1  ; h = x>>1
-            self.emit_insn(&Insn::raw_bytes(&[0x83, 0xE0, 0x01])); // and eax, 1                  ; b = x&1
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x44, 0x24, 0x10])); // mov [rsp+16], rax
+            self.emit_insn(&Insn::raw(&[0x48, 0x89, 0x04, 0x24])); // mov [rsp], rax        ; x
+            self.emit_insn(&Insn::raw(&[0x48, 0x8B, 0x04, 0x24])); // mov rax, [rsp]        ; x
+            self.emit_insn(&Insn::raw(&[0x48, 0x89, 0x44, 0x24, 0x08])); // mov [rsp+8], rax
+            self.emit_insn(&Insn::raw(&[0x48, 0xD3, 0x6C, 0x24, 0x08])); // shr qword [rsp+8], 1  ; h = x>>1
+            self.emit_insn(&Insn::raw(&[0x83, 0xE0, 0x01])); // and eax, 1                  ; b = x&1
+            self.emit_insn(&Insn::raw(&[0x48, 0x89, 0x44, 0x24, 0x10])); // mov [rsp+16], rax
             self.emit_x87_mem_at(0xDB, 0, 4, 8, true); // fild qword [rsp+8]   st0 = h
-            self.emit_insn(&Insn::raw_bytes(&[0xD9, 0xC8])); // fadd st(0), st(0)            → 2h
+            self.emit_insn(&Insn::raw(&[0xD9, 0xC8])); // fadd st(0), st(0)            → 2h
             self.emit_x87_mem_at(0xDB, 0, 4, 16, true); // fild qword [rsp+16]  st0 = b
-            self.emit_insn(&Insn::raw_bytes(&[0xDE, 0xC1])); // faddp                          → 2h + b = x
+            self.emit_insn(&Insn::raw(&[0xDE, 0xC1])); // faddp                          → 2h + b = x
         } else {
             if unsigned {
-                self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0])); // mov eax, eax → 零扩展高 32 位
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x04, 0x24])); // mov [rsp], rax
+                self.emit_insn(&Insn::raw(&[0x89, 0xC0])); // mov eax, eax → 零扩展高 32 位
+                self.emit_insn(&Insn::raw(&[0x48, 0x89, 0x04, 0x24])); // mov [rsp], rax
                 self.emit_x87_mem_at(0xDB, 0, 4, 0, true); // fild qword [rsp]
             } else if sz >= 8 {
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x04, 0x24])); // mov [rsp], rax
+                self.emit_insn(&Insn::raw(&[0x48, 0x89, 0x04, 0x24])); // mov [rsp], rax
                 self.emit_x87_mem_at(0xDB, 0, 4, 0, true); // fild qword [rsp]
             } else {
                 // 窄有符号：只取内存里低 4 字节，fild 自行符号扩展，
@@ -154,11 +206,11 @@ impl Codegen {
                 // 注意助记符陷阱（实测 objdump 已确认）：`fild m32int` 是 **DB /0**，
                 // 而 `D9 /0` 是 `fld m32fp`——写成 D9 会把整数的**位模式当 float32**
                 // 装载（3 变成 4.2e-45），不报错但语义全错。
-                self.emit_insn(&Insn::raw_bytes(&[0x89, 0x04, 0x24])); // mov [rsp], eax
+                self.emit_insn(&Insn::raw(&[0x89, 0x04, 0x24])); // mov [rsp], eax
                 self.emit_x87_mem_at(0xDB, 0, 4, 0, false); // fild dword [rsp]
             }
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x20])); // add rsp, 32
+        self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xC4, 0x20])); // add rsp, 32
     }
 
     /// 把一个任意类型的 rvalue 搬到 x87 `st(0)`。
@@ -184,11 +236,29 @@ impl Codegen {
             return;
         }
         let pfx: u8 = if matches!(ty, Type::Float) { 0xF3 } else { 0xF2 };
+        // 把整条指令拼成**一条** raw_with_gas 发射（否则 REX/操作码/ModRM 各自落 record,
+        // gas_len_map 只给到首段长度, 后续 pos 漂移 → 后续指令全部 fallback/错位).
+        let base_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(base, 64)
+            .unwrap_or_else(|| "%rax".to_string());
+        let op_name = if matches!(ty, Type::Float) { "movss" } else { "movsd" };
+        let mut bytes: Vec<u8> = Vec::new();
         if base >= 8 {
-            self.emit_insn(&Insn::raw_bytes(&[0x41])); // REX.B
+            bytes.push(0x41); // REX.B
         }
-        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10])); // movss/movsd xmm0, [base]
-        self.emit_reg_indirect_modrm(0, base);
+        bytes.push(pfx);
+        bytes.extend_from_slice(&[0x0F, 0x10]);
+        // mod=00, reg=xmm0(0), r/m=base & 7
+        let rm = base & 7;
+        if rm == 4 {
+            bytes.extend_from_slice(&[0x04, 0x24]); // SIB [rsp]
+        } else if rm == 5 {
+            bytes.extend_from_slice(&[0x45, 0x00]);
+        } else {
+            bytes.push(rm);
+        }
+        // 注意: 操作数顺序 AT&T: 源 (mem) → 目标 (xmm0)
+        let gas = format!("{} ({}), %xmm0", op_name, base_name);
+        self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
     }
 
     /// 标量浮点 **值通道 → lvalue**：存到 `[base]`（`fstp tbyte` 或 `movss/movsd`）。
@@ -216,11 +286,26 @@ impl Codegen {
             self.emit_scalar_to_xmm0_if_needed_ty(src_ty, dst_ty);
         }
         let pfx: u8 = if matches!(dst_ty, Type::Float) { 0xF3 } else { 0xF2 };
+        // 整条拼成一条 raw_with_gas (防 gas_len 漂移, 同 load).
+        let base_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(base, 64)
+            .unwrap_or_else(|| "%rax".to_string());
+        let op_name = if matches!(dst_ty, Type::Float) { "movss" } else { "movsd" };
+        let mut bytes: Vec<u8> = Vec::new();
         if base >= 8 {
-            self.emit_insn(&Insn::raw_bytes(&[0x41])); // REX.B
+            bytes.push(0x41); // REX.B
         }
-        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11])); // movss/movsd [base], xmm0
-        self.emit_reg_indirect_modrm(0, base);
+        bytes.push(pfx);
+        bytes.extend_from_slice(&[0x0F, 0x11]);
+        let rm = base & 7;
+        if rm == 4 {
+            bytes.extend_from_slice(&[0x04, 0x24]);
+        } else if rm == 5 {
+            bytes.extend_from_slice(&[0x45, 0x00]);
+        } else {
+            bytes.push(rm);
+        }
+        let gas = format!("{} %xmm0, ({})", op_name, base_name);
+        self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
     }
 
     /// 内存中的标量浮点 lvalue → 指定 xmm（inline asm 的 xmm 约束输入）。
@@ -231,20 +316,20 @@ impl Codegen {
     pub fn emit_mem_float_to_xmm(&mut self, base: u8, disp: i32, ty: &Type, xmm: u8) {
         if self.float_in_st0(ty) {
             // sub rsp,16（scratch，同时保持调用对齐）
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x10]));
+            self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xEC, 0x10]));
             self.emit_x87_fld_at(base, disp, ty);
             self.emit_x87_fstp_at(4, 0, ty); // fstp tbyte [rsp]
                                              // 按 xmm 目标宽度舍入重读到 xmm
             let is_float = matches!(ty, Type::Float);
             let pfx: u8 = if is_float { 0xF3 } else { 0xF2 };
             // REX 必须在 mandatory prefix F2/F3 之后、操作码之前
-            self.emit_insn(&Insn::raw_bytes(&[pfx]));
+            self.emit_insn(&Insn::raw(&[pfx]));
             if xmm >= 8 {
-                self.emit_insn(&Insn::raw_bytes(&[0x44]));
+                self.emit_insn(&Insn::raw(&[0x44]));
             }
-            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x10]));
-            self.emit_insn(&Insn::raw_bytes(&[0x04 | ((xmm & 7) << 3), 0x24])); // mod=00 xmm, SIB [rsp]
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x10])); // add rsp,16
+            self.emit_insn(&Insn::raw(&[0x0F, 0x10]));
+            self.emit_insn(&Insn::raw(&[0x04 | ((xmm & 7) << 3), 0x24])); // mod=00 xmm, SIB [rsp]
+            self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xC4, 0x10])); // add rsp,16
             return;
         }
         let pfx: u8 = if matches!(ty, Type::Float) { 0xF3 } else { 0xF2 };
@@ -256,18 +341,18 @@ impl Codegen {
             rex |= 0x04; // REX.R
         }
         // REX 必须在 mandatory prefix F2/F3 之后、操作码之前
-        self.emit_insn(&Insn::raw_bytes(&[pfx]));
+        self.emit_insn(&Insn::raw(&[pfx]));
         if rex != 0x40 {
-            self.emit_insn(&Insn::raw_bytes(&[rex]));
+            self.emit_insn(&Insn::raw(&[rex]));
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x10]));
+        self.emit_insn(&Insn::raw(&[0x0F, 0x10]));
         // rm==100 (rsp/r12) 必须 SIB; r13 低3位=5 同样需要 SIB.
         if base == 4 || base == 12 || base == 13 {
-            self.emit_insn(&Insn::raw_bytes(&[0x84 | ((xmm & 7) << 3), 0x20 | (base & 7)]));
+            self.emit_insn(&Insn::raw(&[0x84 | ((xmm & 7) << 3), 0x20 | (base & 7)]));
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0x80 | ((xmm & 7) << 3) | (base & 7)]));
+            self.emit_insn(&Insn::raw(&[0x80 | ((xmm & 7) << 3) | (base & 7)]));
         }
-        self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes()));
+        self.emit_insn(&Insn::raw(&disp.to_le_bytes()));
     }
 
     /// xmm（f32/f64）→ 内存中的 `float_in_st0` lvalue（inline asm xmm
@@ -282,17 +367,17 @@ impl Codegen {
         dst_ty: &Type,
     ) {
         debug_assert!(self.float_in_st0(dst_ty));
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x10])); // sub rsp,16
+        self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xEC, 0x10])); // sub rsp,16
         let pfx: u8 = if matches!(src_ty, Type::Float) { 0xF3 } else { 0xF2 };
         // REX 必须在 mandatory prefix 之后
-        self.emit_insn(&Insn::raw_bytes(&[pfx]));
+        self.emit_insn(&Insn::raw(&[pfx]));
         if xmm >= 8 {
-            self.emit_insn(&Insn::raw_bytes(&[0x44]));
+            self.emit_insn(&Insn::raw(&[0x44]));
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x11, 0x04 | ((xmm & 7) << 3), 0x24])); // mov [rsp], xmm
+        self.emit_insn(&Insn::raw(&[0x0F, 0x11, 0x04 | ((xmm & 7) << 3), 0x24])); // mov [rsp], xmm
         self.emit_x87_fld_at(4, 0, src_ty); // fld [rsp]（精确拓宽）
         self.emit_x87_fstp_at(base, disp, dst_ty); // fstp tbyte/dword/qword [base+disp]
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x10])); // add rsp,16
+        self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xC4, 0x10])); // add rsp,16
     }
 
     /// x87 浮点比较: fucomip + 标志修正 -> rax (0/1)
@@ -306,11 +391,11 @@ impl Codegen {
         // 加载左操作数到 st(0)
         self.gen_expr(l, Self::EVAL_BASE); // st(0) = l
         self.emit_operand_to_st0(&l.ty(), 0);
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, save_bytes])); // sub rsp, 16
+        self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xEC, save_bytes])); // sub rsp, 16
         if is_ld {
-            self.emit_insn(&Insn::raw_bytes(&[0xDB, 0x3C, 0x24])); // fstp tbyte [rsp]
+            self.emit_insn(&Insn::raw(&[0xDB, 0x3C, 0x24])); // fstp tbyte [rsp]
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x1C, 0x24])); // fstp qword [rsp]
+            self.emit_insn(&Insn::raw(&[0xDD, 0x1C, 0x24])); // fstp qword [rsp]
         }
         self.expr_depth += 1;
         // 加载右操作数到 st(0)
@@ -319,14 +404,14 @@ impl Codegen {
         self.expr_depth -= 1;
         // 重新加载左操作数: st(0) = l, st(1) = r
         if is_ld {
-            self.emit_insn(&Insn::raw_bytes(&[0xDB, 0x2C, 0x24])); // fld tbyte [rsp]
+            self.emit_insn(&Insn::raw(&[0xDB, 0x2C, 0x24])); // fld tbyte [rsp]
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x04, 0x24])); // fld qword [rsp]
+            self.emit_insn(&Insn::raw(&[0xDD, 0x04, 0x24])); // fld qword [rsp]
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, save_bytes])); // add rsp, 16
+        self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xC4, save_bytes])); // add rsp, 16
                                                     // 现在 st(0) = l, st(1) = r
                                                     // fucomip st(0), st(1): 比较 st(0) vs st(1), 设置 EFLAGS, 弹出 st(0)
-        self.emit_insn(&Insn::raw_bytes(&[0xDF, 0xE9])); // fucomip st(0), st(1)
+        self.emit_insn(&Insn::raw(&[0xDF, 0xE9])); // fucomip st(0), st(1)
                                   // 实测（fnstsw 读 TOP 位）：FUCOMIP 只弹**一次**，
                                   // 弹出的是左操作数，右操作数仍留在 st(0)。不弹掉它，
                                   // 每个浮点比较就漏一层 x87 栈（8 层后溢出成静默错值，
@@ -345,10 +430,10 @@ impl Codegen {
     pub fn emit_x87_setcc_flags(&mut self, op: BinOp) {
         match op {
             BinOp::Gt => {
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x97, 0xC0])); // seta al
+                self.emit_insn(&Insn::raw(&[0x0F, 0x97, 0xC0])); // seta al
             }
             BinOp::Ge => {
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x93, 0xC0])); // setae al
+                self.emit_insn(&Insn::raw(&[0x0F, 0x93, 0xC0])); // setae al
             }
             _ => {
                 let invert = matches!(op, BinOp::Ne);
@@ -357,17 +442,17 @@ impl Codegen {
                     BinOp::Le => 0x96, // setbe (CF=1 || ZF=1)
                     _ => 0x94,         // sete  (ZF=1) —— EqEq 与 Ne 共用
                 };
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, cc, 0xC0])); // setcc al
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x9B, 0xC1])); // setnp cl  (PF=0 → 1)
-                self.emit_insn(&Insn::raw_bytes(&[0x20, 0xC8])); // and al, cl  → 排除 unordered
+                self.emit_insn(&Insn::raw(&[0x0F, cc, 0xC0])); // setcc al
+                self.emit_insn(&Insn::raw(&[0x0F, 0x9B, 0xC1])); // setnp cl  (PF=0 → 1)
+                self.emit_insn(&Insn::raw(&[0x20, 0xC8])); // and al, cl  → 排除 unordered
                 if invert {
-                    self.emit_insn(&Insn::raw_bytes(&[0x34, 0x01])); // xor al, 1
+                    self.emit_insn(&Insn::raw(&[0x34, 0x01])); // xor al, 1
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB6, 0xC0])); // movzx rax, al
+                self.emit_insn(&Insn::raw(&[0x48, 0x0F, 0xB6, 0xC0])); // movzx rax, al
             },
         }
         if matches!(op, BinOp::Gt | BinOp::Ge) {
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB6, 0xC0])); // movzx rax, al
+            self.emit_insn(&Insn::raw(&[0x48, 0x0F, 0xB6, 0xC0])); // movzx rax, al
         }
     }
 
@@ -384,11 +469,11 @@ impl Codegen {
             _ => (0xDDu8, 0u8),
         };
         if Self::fits_disp32(off) {
-            self.emit_insn(&Insn::raw_bytes(&[0x41, opcode]));
+            self.emit_insn(&Insn::raw(&[0x41, opcode]));
             self.emit_r13_modrm_disp(reg_field, off);
         } else {
             self.emit_lea_r13(11, off);
-            self.emit_insn(&Insn::raw_bytes(&[0x41, opcode]));
+            self.emit_insn(&Insn::raw(&[0x41, opcode]));
             self.emit_reg_indirect_modrm(reg_field, 11);
         }
     }
@@ -405,11 +490,11 @@ impl Codegen {
             _ => (0xDDu8, 3u8),
         };
         if Self::fits_disp32(off) {
-            self.emit_insn(&Insn::raw_bytes(&[0x41, opcode]));
+            self.emit_insn(&Insn::raw(&[0x41, opcode]));
             self.emit_r13_modrm_disp(reg_field, off);
         } else {
             self.emit_lea_r13(11, off);
-            self.emit_insn(&Insn::raw_bytes(&[0x41, opcode]));
+            self.emit_insn(&Insn::raw(&[0x41, opcode]));
             self.emit_reg_indirect_modrm(reg_field, 11);
         }
     }
@@ -417,38 +502,56 @@ impl Codegen {
     /// x87 fstp st(0): 彈出棧頂 (不存儲)
     pub fn emit_x87_fstp_st0(&mut self) {
         // fstp st(0): DD D9
-        self.emit_insn(&Insn::raw_bytes(&[0xDD, 0xD9]));
+        self.emit_insn(&Insn::new(
+            X86_64Opcode::X87 {
+                op: X87Op::Fixed { escap: 0xDD, modrm: 0xD9 },
+                mem: None,
+            },
+            &[],
+        ));
     }
 
     /// x87 st(0) (long double) → xmm0 (double): 先存成 f64 再装载。
     /// 自带 `sub/add rsp,16` 平衡：外层 `gen_float_binop` 会把操作数溢出到
     /// `[rsp]`，不能直接踩现有栈顶（旧版无 sub 的写法会静默覆盖那个溢出槽）。
     pub fn emit_x87_to_xmm0(&mut self) {
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x10])); // sub rsp, 16
-        self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x1C, 0x24])); // fstp qword (%rsp)  ← 硬件完成 80→64 舍入
-        self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x10, 0x04, 0x24])); // movsd xmm0, (%rsp)
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x10])); // add rsp, 16
+        self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xEC, 0x10])); // sub rsp, 16
+        self.emit_insn(&Insn::raw(&[0xDD, 0x1C, 0x24])); // fstp qword (%rsp)  ← 硬件完成 80→64 舍入
+        self.emit_insn(&Insn::raw(&[0xF2, 0x0F, 0x10, 0x04, 0x24])); // movsd xmm0, (%rsp)
+        self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xC4, 0x10])); // add rsp, 16
     }
 
     /// x87 st(0) (long double) → xmm0 (float)：单步 80→32 舍入，
     /// 不经 f64 双舍入（`fstp dword` 直接产出 float 位型）。
     pub fn emit_x87_to_xmm0_f32(&mut self) {
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x10])); // sub rsp, 16
-        self.emit_insn(&Insn::raw_bytes(&[0xD9, 0x1C, 0x24])); // fstp dword (%rsp)
-        self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x04, 0x24])); // movss xmm0, (%rsp)
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x10])); // add rsp, 16
+        self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xEC, 0x10])); // sub rsp, 16
+        self.emit_insn(&Insn::raw(&[0xD9, 0x1C, 0x24])); // fstp dword (%rsp)
+        self.emit_insn(&Insn::raw(&[0xF3, 0x0F, 0x10, 0x04, 0x24])); // movss xmm0, (%rsp)
+        self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xC4, 0x10])); // add rsp, 16
     }
 
     /// x87 fldz: 加載 +0.0 到 st(0)
     pub fn emit_x87_fldz(&mut self) {
         // fldz: D9 EE
-        self.emit_insn(&Insn::raw_bytes(&[0xD9, 0xEE]));
+        self.emit_insn(&Insn::new(
+            X86_64Opcode::X87 {
+                op: X87Op::Fixed { escap: 0xD9, modrm: 0xEE },
+                mem: None,
+            },
+            &[],
+        ));
     }
 
     /// x87 fld1: 加載 +1.0 到 st(0)
     pub fn emit_x87_fld1(&mut self) {
         // fld1: D9 E8
-        self.emit_insn(&Insn::raw_bytes(&[0xD9, 0xE8]));
+        self.emit_insn(&Insn::new(
+            X86_64Opcode::X87 {
+                op: X87Op::Fixed { escap: 0xD9, modrm: 0xE8 },
+                mem: None,
+            },
+            &[],
+        ));
     }
 
     /// x87 立即數加載: 將浮點常量存入 .rodata, 用 fld 加載到 st(0)
@@ -496,7 +599,7 @@ impl Codegen {
             (0xDDu8, 0x05u8)
         };
         let at = self.pos();
-        self.emit_insn(&Insn::raw_bytes(&[opcode, modrm, 0, 0, 0, 0]));
+        self.emit_insn(&Insn::raw(&[opcode, modrm, 0, 0, 0, 0]));
         // x87 fld [rip+disp32] 是 6 字节指令 (disp32 @ byte 2),
         // 不同于 SSE movsd/movss 的 8 字节 (disp32 @ byte 4).
         self.x87_float_refs.push((at, off as u64));
@@ -505,28 +608,20 @@ impl Codegen {
     /// x87 浮點二元運算: st(0) = st(0) op st(1), 然後彈出 st(0)
     /// 調用前: st(0) = 右操作數, st(1) = 左操作數
     pub fn emit_x87_binop(&mut self, op: BinOp, is_float: bool) {
-        match op {
-            BinOp::Add => {
-                // faddp st(1), st(0): DE C1
-                self.emit_insn(&Insn::raw_bytes(&[0xDE, 0xC1]));
+        let (escap, modrm): (u8, u8) = match op {
+            BinOp::Add => (0xDE, 0xC1),    // faddp st(1), st(0)
+            BinOp::Sub => (0xDE, 0xE9),    // fsubrp st(1), st(0)
+            BinOp::Mul => (0xDE, 0xC9),    // fmulp st(1), st(0)
+            BinOp::Div => (0xDE, 0xF9),    // fdivrp st(1), st(0)
+            _ => return,
+        };
+        self.emit_insn(&Insn::new(
+            X86_64Opcode::X87 {
+                op: X87Op::Fixed { escap, modrm },
+                mem: None,
             },
-            BinOp::Sub => {
-                // fsubp: st(1) = st(1) - st(0), 然後彈出
-                // 需要交換: st(0) 是右, st(1) 是左
-                // fsubrp st(1), st(0): DE E9 (反向減: st(1) = st(0) - st(1))
-                // 或 fsubp st(1), st(0): DE E9
-                self.emit_insn(&Insn::raw_bytes(&[0xDE, 0xE9]));
-            },
-            BinOp::Mul => {
-                // fmulp st(1), st(0): DE C9
-                self.emit_insn(&Insn::raw_bytes(&[0xDE, 0xC9]));
-            },
-            BinOp::Div => {
-                // fdivrp st(1), st(0): DE F9 (反向除: st(1) = st(0) / st(1))
-                self.emit_insn(&Insn::raw_bytes(&[0xDE, 0xF9]));
-            },
-            _ => {},
-        }
+            &[],
+        ));
         let _ = is_float;
     }
 
@@ -534,14 +629,25 @@ impl Codegen {
     /// 調用前: st(0) = 右操作數, st(1) = 左操作數
     pub fn emit_x87_cmp_and_pop(&mut self) {
         // fucomip st(0), st(1): DF E9
-        // 比較 st(0) vs st(1), 設置 EFLAGS, 然後彈出 st(0)
-        self.emit_insn(&Insn::raw_bytes(&[0xDF, 0xE9]));
+        self.emit_insn(&Insn::new(
+            X86_64Opcode::X87 {
+                op: X87Op::Fixed { escap: 0xDF, modrm: 0xE9 },
+                mem: None,
+            },
+            &[],
+        ));
     }
 
     /// x87 浮點取負: st(0) = -st(0)
     pub fn emit_x87_chs(&mut self) {
         // fchs: D9 E0
-        self.emit_insn(&Insn::raw_bytes(&[0xD9, 0xE0]));
+        self.emit_insn(&Insn::new(
+            X86_64Opcode::X87 {
+                op: X87Op::Fixed { escap: 0xD9, modrm: 0xE0 },
+                mem: None,
+            },
+            &[],
+        ));
     }
 }
 

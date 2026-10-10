@@ -20,13 +20,13 @@ impl Codegen {
     pub fn emit_tls_fs_setup(&mut self) {
         // lea rsi, [rip+disp32]  → TLS 模板地址
         let lea_pos = self.pos() + 3;
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x35, 0, 0, 0, 0]));
+        self.emit_insn(&Insn::raw(&[0x48, 0x8D, 0x35, 0, 0, 0, 0]));
         self.pending_tls_rels
             .push((lea_pos, "__dcc_tls_base".to_string()));
         // mov rdi, 0x1002 (ARCH_SET_FS)
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC7, 0x02, 0x00, 0x01, 0x00]));
+        self.emit_insn(&Insn::raw(&[0x48, 0xC7, 0xC7, 0x02, 0x00, 0x01, 0x00]));
         // mov rax, 158; syscall
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC0, 0x9E, 0x00, 0x00, 0x00]));
-        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x05]));
+        self.emit_insn(&Insn::raw(&[0x48, 0xC7, 0xC0, 0x9E, 0x00, 0x00, 0x00]));
+        self.emit_insn(&Insn::raw(&[0x0F, 0x05]));
     }
 }

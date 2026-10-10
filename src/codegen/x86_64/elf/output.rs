@@ -10,6 +10,7 @@ use crate::codegen::x86_64::asm::*;
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::*;
 use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::opcode::X86_64Opcode;
 use crate::const_eval::{self, ConstValue};
 use crate::debug::*;
 use crate::diagnostics::{Diagnostic, Severity, Span};
@@ -34,17 +35,102 @@ pub(crate) fn cfa_frame_offset(frame_pointer: bool) -> u64 {
 }
 
 impl Codegen {
+    /// P9 方案 C: 通用「遍历字节区间 → 按 pc 输出 GAS 行」辅助函数.
+    ///
+    /// 与老路径 `disassemble_range` 的差别:
+    /// - 按 pc 顺序逐条调用 `disassemble_one_at` (解码单条指令);
+    /// - 在每条指令**之前**插入该 pc 处的 labels / directives (与老 disassemble_range
+    ///   的循环语义完全一致);
+    /// - 失败/越界走 `.byte` 兜底 (与老路径一致, 避免静默跳过).
+    ///
+    /// `bytes` / `base_offset` 与 `disassemble_range` 同语义: `bytes` 是本段的**切片**,
+    /// `base_offset` 是它在 self.code 里的起点 (labels/calls/data 表的键用的是
+    /// 全 self.code 的绝对偏移). 所以函数内部计算 `off = base_offset + pos as u64`.
+    ///
+    /// 拆分出这个 helper 的原因: output.rs / ifunc.rs / 未来 v2 渲染器都需要同一
+    /// 段逻辑. 集中在一处修改, 别处只传切片.
+    pub(crate) fn render_byte_range(
+        bytes: &[u8],
+        start: usize,
+        end: usize,
+        base_offset: u64,
+        labels: &BTreeMap<u64, Vec<&str>>,
+        directives: &BTreeMap<u64, Vec<&str>>,
+        calls: &HashMap<u64, String>,
+        data: &HashMap<u64, String>,
+    ) -> String {
+        use crate::codegen::x86_64::asm::render_one::disassemble_one_at;
+        let mut out = String::new();
+        let mut pos = start;
+        while pos < end && pos < bytes.len() {
+            let off = base_offset + pos as u64;
+            if let Some(names) = labels.get(&off) {
+                for n in names {
+                    out.push_str(n);
+                    out.push_str(":\n");
+                }
+            }
+            if let Some(lines) = directives.get(&off) {
+                for line in lines {
+                    out.push('\t');
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+            match disassemble_one_at(bytes, pos, base_offset, calls, data, labels) {
+                Some((len, text)) if len > 0 => {
+                    out.push('\t');
+                    out.push_str(&text);
+                    out.push('\n');
+                    pos += len;
+                }
+                _ => {
+                    // `.byte` 兜底 —— 与老 disassemble_range 同语义.
+                    let mut byte_strs: Vec<String> = Vec::new();
+                    let mut p = pos;
+                    let end_pos = (pos + 1).min(bytes.len());
+                    while p < end_pos {
+                        byte_strs.push(format!("0x{:02x}", bytes[p]));
+                        p += 1;
+                    }
+                    out.push('\t');
+                    out.push_str(".byte ");
+                    out.push_str(&byte_strs.join(", "));
+                    out.push('\n');
+                    pos += 1;
+                }
+            }
+        }
+        out
+    }
+
     pub fn build_asm_output(&self, prog: &Program) -> String {
-        use crate::codegen::disasm;
+        use crate::codegen::x86_64::asm::render_one as tables;
 
         let mut out = String::new();
         out.push_str(&format!("\t.file \"{}\"\n", self.source_name));
 
         // --- Disassembly-only rendering path (legacy fallback for -S) ---
         use std::collections::BTreeMap;
-        let labels = disasm::label_map(self.labels.iter().map(|(n, o)| (o, n.as_str())));
+        let labels = tables::label_map(self.labels.iter().map(|(n, o)| (o, n.as_str())));
         let directives =
-            disasm::directive_map(self.asm_directives_at.iter().map(|(o, l)| (o, l.as_str())));
+            tables::directive_map(self.asm_directives_at.iter().map(|(o, l)| (o, l.as_str())));
+
+        // P9 方案 C 真闭环: gas_text_map 不再来自预反推. 直接由 insn_records 携带.
+        // 主循环用 gas_text_by_pc = 来自 insn_records 的 gas_text, 长度也从 record 推.
+        let mut gas_text_map: std::collections::HashMap<u64, String> =
+            std::collections::HashMap::new();
+        let mut gas_len_map: std::collections::HashMap<u64, usize> =
+            std::collections::HashMap::new();
+        for (pc, insn) in &self.insn_records {
+            if let Some(g) = &insn.gas_text {
+                // 长度: 类型化变体的字节由 op.encode() 现场算 (insn.bytes 为空);
+                // Raw 变体的字节也由 encode() 返回 (Raw::bytes 存 op 内).
+                let len = insn.encode_bytes().map(|b| b.len()).unwrap_or(0);
+                gas_text_map.insert(*pc, g.clone());
+                gas_len_map.insert(*pc, len.max(1));
+            }
+        }
 
         let mut funcs = Vec::new();
         Self::collect_all_funcs(prog, &mut funcs);
@@ -87,7 +173,7 @@ impl Codegen {
                     .min()
                     .unwrap_or(self.code.len() as u64);
                 if first_text > 0 {
-                    out.push_str(&disasm::disassemble_range(
+                    out.push_str(&Self::render_byte_range(
                         &self.code,
                         0,
                         first_text as usize,
@@ -140,30 +226,159 @@ impl Codegen {
                     })
                     .collect();
                 regions.sort_by_key(|(off, _)| *off);
-                let dis = |from: usize, to: usize| {
-                    disasm::disassemble_range(
+
+                // P9 方案 C 真闭环: 主循环改为「先按 insn_records 走」.
+                //
+                // 思路: insn_records 是发射时记录的 (pc, Insn) 完整清单, 每条 Insn
+                // 带 gas_text 与原始字节 (Raw::bytes). 渲染时:
+                //   1. 按 pc 顺序遍历本函数区间内的 insn_records;
+                //   2. 对每条记录, 若有 gas_text, 直接输出 (字节长度由 Raw::bytes 给,
+                //      与发射时一致; patch_callee_saves 只会在「未使用寄存器」时把 mov→nop,
+                //      那条 mov 的 gas_text 我们在 helper 里没填 (fallback), 会走 disasm
+                //      路径; 若填了 gas_text 而它恰好被 patch 成 nop, 我们需要
+                //      检查 code[p] 首字节是否 0x90 且整条被 nop 填充, 若是则改写为 nop).
+                //   3. 若没有 gas_text, 走 disassemble_one_at 拿 (len, text) —— 与老行为
+                //      完全一致.
+                //   4. insn_records 之间的 gap (对齐 nop/padding) 也走 disasm.
+                //
+                // G10 字节快照不受影响: 我们只改 -S 文本生成, 不改 self.code.
+                let base = layout.text_start;
+                let end_abs = base + layout.bytes.len() as u64;
+                // 先收集本函数区间内的 (pc, insn) 并按 pc 排序 (理论上已经有序, 但防御).
+                let mut recs: Vec<(u64, &Insn)> = self
+                    .insn_records
+                    .iter()
+                    .filter(|(pc, _)| *pc >= base && *pc < end_abs)
+                    .map(|(pc, insn)| (*pc, insn))
+                    .collect();
+                recs.sort_by_key(|(pc, _)| *pc);
+
+                // P9 方案 C 真闭环: gas_text_by_pc 来自 pre-built gas_text_map
+                // (渲染前一次性反推好). 关键: gas_text_map 的 key 是**整条指令的
+                // 起始 pc** (扫描 code 时逐指令前进得到), 不是单字节 record 的 pc.
+                // 所以 gas_text_by_pc 要**直接**从 gas_text_map 复制本函数区间内的条目,
+                // 不能按 insn_records 过滤 —— 否则只有 record 起点命中, 中段字节全部 fallback.
+                let func_start_abs = base;
+                let func_end_abs = base + layout.bytes.len() as u64;
+                let mut gas_text_by_pc: std::collections::HashMap<u64, &str> =
+                    std::collections::HashMap::new();
+                for (pc, g) in &gas_text_map {
+                    if *pc >= func_start_abs && *pc < func_end_abs {
+                        gas_text_by_pc.insert(*pc, g.as_str());
+                    }
+                }
+                // 合并 record 自带的 gas_text (若有).
+                for (pc, insn) in &recs {
+                    if let Some(g) = &insn.gas_text {
+                        gas_text_by_pc.entry(*pc).or_insert(g.as_str());
+                    }
+                }
+                let mut gas_hits: u64 = 0;
+                let mut total: u64 = 0;
+
+                // 把 disasm 解码单条指令封装成闭包; 对 gap 与无 gas_text 的指令都用它.
+                // 注意: labels/directives 已由外层 `dis` 循环统一输出, 这里只解码指令本身.
+                use crate::codegen::x86_64::asm::render_one::disassemble_one_at;
+                let disasm_one = |pos: usize, out: &mut String| -> usize {
+                    match disassemble_one_at(
                         &layout.bytes,
-                        from,
-                        to,
-                        layout.text_start,
-                        &labels,
-                        &directives,
+                        pos,
+                        base,
                         &self.disasm_calls,
                         &self.disasm_data,
-                    )
+                        &labels,
+                    ) {
+                        Some((len, text)) if len > 0 => {
+                            out.push('\t');
+                            out.push_str(&text);
+                            out.push('\n');
+                            len
+                        }
+                        _ => {
+                            // .byte 兜底.
+                            let mut byte_strs: Vec<String> = Vec::new();
+                            for p in pos..(pos + 1).min(layout.bytes.len()) {
+                                byte_strs.push(format!("0x{:02x}", layout.bytes[p]));
+                            }
+                            out.push('\t');
+                            out.push_str(".byte ");
+                            out.push_str(&byte_strs.join(", "));
+                            out.push('\n');
+                            1
+                        }
+                    }
                 };
+
+                let dis = |from: usize, to: usize, out: &mut String,
+                           gas_hits: &mut u64, total: &mut u64| {
+                    let mut pos = from;
+                    while pos < to && pos < layout.bytes.len() {
+                        let off_abs = base + pos as u64;
+                        // 1) labels/directives 前置.
+                        if let Some(names) = labels.get(&off_abs) {
+                            for n in names {
+                                out.push_str(n);
+                                out.push_str(":\n");
+                            }
+                        }
+                        if let Some(lines) = directives.get(&off_abs) {
+                            for line in lines {
+                                out.push('\t');
+                                out.push_str(line);
+                                out.push('\n');
+                            }
+                        }
+                        // 2) 主路径: gas_text_by_pc 命中. 若被 patch_callee_saves 改成全 nop,
+                        //    则不能用 gas_text (语义已变). patch_callee_saves 把 3 字节 mov
+                        //    改成 4 个 0x90. 此时该指令的 gas_text 是原 mov 的文本, 不能用.
+                        //    判定: 若 gas_text 对应的 disasm 长度 (gas_len_map) 与 code 中
+                        //    实际的 nop 序列长度不一致, 说明被 patch 过. 简单做法: 直接用
+                        //    gas_text, 因为 disasm_one 已经把 nop 解码为 "nop", 我们这里
+                        //    也用 gas_text 对应的 "mov %rsp,%r13" 会失真. 所以跳过:
+                        //    首字节 0x90 且 gas_text 不是 "nop" 开头 → 跳过.
+                        let first_byte_is_nop = layout.bytes[pos] == 0x90;
+                        let gas_is_nop = gas_text_by_pc
+                            .get(&off_abs)
+                            .map(|g| g.starts_with("nop"))
+                            .unwrap_or(false);
+                        if let Some(g) = gas_text_by_pc.get(&off_abs) {
+                            let len = gas_len_map.get(&off_abs).copied().unwrap_or(1).max(1);
+                            // 若首字节是 nop 但 gas_text 不是 nop (说明被 patch 过), 跳过.
+                            // 若首字节是 nop 且 gas_text 也是 nop, 用 gas_text (虽然 disasm
+                            // 已经给出了正确文本, 但我们这里直接用 gas_text 也一样).
+                            let skip = first_byte_is_nop && !gas_is_nop;
+                            if !skip {
+                                *total += 1;
+                                out.push('\t');
+                                out.push_str(g);
+                                out.push('\n');
+                                *gas_hits += 1;
+                                pos += len;
+                                continue;
+                            }
+                        }
+                        // 3) fallback: 无 gas_text 或被 patch 成 nop, 走 disasm_one 输出.
+                        *total += 1;
+                        let mut fb_out = String::new();
+                        let len = disasm_one(pos, &mut fb_out);
+                        out.push_str(&fb_out);
+                        pos += len;
+                    }
+                };
+
                 let mut cursor = 0usize;
                 for (off, lines) in &regions {
                     if *off > cursor {
-                        out.push_str(&dis(cursor, *off));
+                        dis(cursor, *off, &mut out, &mut gas_hits, &mut total);
                         cursor = *off;
                     }
                     for l in lines.iter() {
                         out.push_str(&format!("\t{l}\n"));
                     }
+                    // passthrough 不占字节, cursor 不动。
                 }
                 if cursor < layout.bytes.len() {
-                    out.push_str(&dis(cursor, layout.bytes.len()));
+                    dis(cursor, layout.bytes.len(), &mut out, &mut gas_hits, &mut total);
                 }
                 if self.emit_cfi {
                     out.push_str("\t.cfi_endproc\n");
@@ -254,6 +469,22 @@ impl Codegen {
         // 的符号（实测：`as /tmp/tc.s` rc=0 但 `compute.resolver` 变成 UND）。
         out.push_str(&self.render_ifunc_synth_asm());
 
+        // P9 方案 C 临时统计: DCC_GAS_STATS=1 时打印发射点 top 50 与全局 hit rate.
+        if std::env::var_os("DCC_GAS_STATS").is_some() {
+            let mut v: Vec<(&String, &usize)> = self.emit_insn_stats.iter().collect();
+            v.sort_by(|a, b| b.1.cmp(a.1));
+            eprintln!("=== EMIT-TOP {} entries ===", v.len());
+            for (k, n) in v.iter().take(50) {
+                eprintln!("  {n:5}  {k}");
+            }
+            let total: usize = self.emit_insn_gas_hits.values().sum();
+            let with_gas = self.emit_insn_gas_hits.get(&true).copied().unwrap_or(0);
+            eprintln!(
+                "=== EMIT-TOTAL total={total} has_gas={with_gas} ({:.1}%) ===",
+                if total > 0 { with_gas as f64 / total as f64 * 100.0 } else { 0.0 }
+            );
+        }
+
         out
     }
     pub fn build_cfi_ops(&self) -> Vec<u8> {
@@ -295,7 +526,7 @@ impl Codegen {
         // 获取当前函数地址 (lea rdi, [rip+0])
         // 实际地址需要回补到函数起始位置
         let lea_pos = self.pos();
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00])); // lea rdi, [rip+disp32]
+        self.emit_insn(&Insn::raw(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00])); // lea rdi, [rip+disp32]
                                                                 // LEA 是直接 RIP-relative 寻址, 用 PC32 重定位
         self.pending_func_addr_rels
             .push((lea_pos + 3, self.current_func_name.clone(), true));
@@ -303,7 +534,7 @@ impl Codegen {
         // 获取调用者地址: 返回地址在 [r13+8]
         // (call 压入返回地址 → push r13 后 r13 指向 saved r13 →
         //  返回地址就在 r13+8, 无论中间 sub rsp 多少都不变)
-        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x75, 0x08])); // mov rsi, [r13+8]
+        self.emit_insn(&Insn::raw(&[0x49, 0x8B, 0x75, 0x08])); // mov rsi, [r13+8]
 
         // call __cyg_profile_func_enter
         self.call_label("__cyg_profile_func_enter");
@@ -311,13 +542,13 @@ impl Codegen {
     pub(crate) fn emit_instrument_func_exit(&mut self) {
         // 获取当前函数地址 (lea rdi, [rip+0])
         let lea_pos = self.pos();
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00])); // lea rdi, [rip+disp32]
+        self.emit_insn(&Insn::raw(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00])); // lea rdi, [rip+disp32]
                                                                 // LEA 是直接 RIP-relative 寻址, 用 PC32 重定位
         self.pending_func_addr_rels
             .push((lea_pos + 3, self.current_func_name.clone(), true));
 
         // 获取调用者地址: 返回地址在 [r13+8]
-        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x75, 0x08])); // mov rsi, [r13+8]
+        self.emit_insn(&Insn::raw(&[0x49, 0x8B, 0x75, 0x08])); // mov rsi, [r13+8]
 
         // call __cyg_profile_func_exit
         self.call_label("__cyg_profile_func_exit");

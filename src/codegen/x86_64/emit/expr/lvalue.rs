@@ -176,7 +176,7 @@ impl Codegen {
                 self.pop(0); // 恢复基址到 rax
                 if self.bounds_check {
                     // 保存元素索引 (imul 会覆盖 rcx): libubsan handler 第二参数
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xce])); // mov rsi, rcx
+                    self.emit_insn(&Insn::raw(&[0x48, 0x89, 0xce])); // mov rsi, rcx
                 }
                 self.emit_index_scale(es, arr, elem_ty);
                 // -fbounds-check: 数组下标运行时边界检查
@@ -186,8 +186,8 @@ impl Codegen {
                         let ok_label = self.fresh_label();
                         let n_imm = (*n as i64) * (es as i64);
                         if n_imm > 0 && n_imm < i32::MAX as i64 {
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xf9])); // cmp rcx, imm32
-                            self.emit_insn(&Insn::raw_bytes(&(n_imm as i32).to_le_bytes()));
+                            self.emit_insn(&Insn::raw(&[0x48, 0x81, 0xf9])); // cmp rcx, imm32
+                            self.emit_insn(&Insn::raw(&(n_imm as i32).to_le_bytes()));
                             self.jmp_rel32(&ok_label, JumpKind::Jb);
                             // out of bounds: 调用 __ubsan_handle_out_of_bounds
                             // 签名: (OutOfBoundsData *Data, unsigned long Index)。
@@ -200,7 +200,7 @@ impl Codegen {
                                 &format!("{} [{}]", Self::ubsan_type_name(elem_ty), *n),
                                 span,
                             );
-                            self.emit_insn(&Insn::raw_bytes(&[0xe8, 0, 0, 0, 0])); // call rel32
+                            self.emit_insn(&Insn::raw(&[0xe8, 0, 0, 0, 0])); // call rel32
                                                             // call 位移起始于当前 code.len() - 4 (0xe8 之后).
                                                             // 与 trapv 处同号。- 4 错为 - 0 会让 R_X86_64_PLT32
                                                             // 盖到下一条指令首字节, 运行时 SIGILL.
@@ -212,7 +212,7 @@ impl Codegen {
                         // n_imm 溢出/0/未知大小: 跳过检查 (留待运行时)
                     }
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xc8])); // add rax, rcx
+                self.emit_insn(&Insn::raw(&[0x48, 0x01, 0xc8])); // add rax, rcx
                 // 语义层描述符接不住时的兼容路径：段限定基址同样要带前缀，
                 // 否则 `p[i]` 会退化成普通访问（单一入口见 `lvalue_seg_prefix`）。
                 self.emit_seg(self.lvalue_seg_prefix(e));
@@ -236,7 +236,7 @@ impl Codegen {
             self.gen_expr(idx, 1);
             self.pop(0);
             self.emit_index_scale(es, arr, elem_ty);
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xc8])); // add rax, rcx
+            self.emit_insn(&Insn::raw(&[0x48, 0x01, 0xc8])); // add rax, rcx
             self.emit_seg(self.lvalue_seg_prefix(e));
             self.emit_load_mem_typed(es as usize, elem_ty);
             if dst != 0 && !matches!(elem_ty, Type::Float | Type::Double) {
@@ -344,8 +344,11 @@ impl Codegen {
                     // 会把 /0 抬成 /8 = 未定义操作码。实测 `4c 81 c4` 被 objdump 读成
                     // `rex.WR add $0x1,%rsp`。
                     let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xC0 | (dst & 7)]));
-                    self.emit_insn(&Insn::raw_bytes(&field_off.to_le_bytes()));
+                    use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
+                    let gas = format!("add ${}, {}", field_off, GAS_REG64[(dst & 15) as usize]);
+                    let mut bytes = vec![rex, 0x81, 0xC0 | (dst & 7)];
+                    bytes.extend_from_slice(&field_off.to_le_bytes());
+                    self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
                 }
             }
         }
@@ -378,7 +381,7 @@ impl Codegen {
                     if f.bit_offset > 0 {
                         // `C1 /5 ib`：dst 在 r/m，需要 REX.B
                         let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                        self.emit_insn(&Insn::raw_bytes(&[rex, 0xC1, 0xE8 | (dst & 7), f.bit_offset as u8]));
+                        self.emit_insn(&Insn::raw(&[rex, 0xC1, 0xE8 | (dst & 7), f.bit_offset as u8]));
                     }
                     // 掩码: and dst, (1 << bw) - 1
                     if bw < 64 {
@@ -390,8 +393,8 @@ impl Codegen {
                         if mask <= 0x7FFFFFFF {
                             // 32 位有符号 imm32 可安全编码（`81 /4 id`：dst 在 r/m → REX.B）
                             let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xE0 | (dst & 7)]));
-                            self.emit_insn(&Insn::raw_bytes(&(mask as u32).to_le_bytes()));
+                            self.emit_insn(&Insn::raw(&[rex, 0x81, 0xE0 | (dst & 7)]));
+                            self.emit_insn(&Insn::raw(&(mask as u32).to_le_bytes()));
                         } else {
                             // >32 位掩码: movabs tmp, mask; and dst, tmp
                             // 使用 rcx 作为临时寄存器 (如 dst==rcx 则用 rdx)
@@ -399,13 +402,13 @@ impl Codegen {
                                                                     // movabs tmp, mask
                             // `48 B8+rd` 的寄存器号在 **opcode 低 3 位**，扩展它的也是 REX.B
                             let rex_tmp = 0x48 | if tmp >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            self.emit_insn(&Insn::raw_bytes(&[rex_tmp, 0xB8 | (tmp & 7)]));
-                            self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
+                            self.emit_insn(&Insn::raw(&[rex_tmp, 0xB8 | (tmp & 7)]));
+                            self.emit_insn(&Insn::raw(&mask.to_le_bytes()));
                             // and dst, tmp：tmp 在 reg 字段(REX.R)，dst 在 r/m(REX.B)
                             let rex = 0x48
                                 | if dst >= 8 { 0x01 } else { 0 }   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                                 | if tmp >= 8 { 0x04 } else { 0 };
-                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x21, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
+                            self.emit_insn(&Insn::raw(&[rex, 0x21, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
                         }
                     }
                     // 有符号位域: 符号扩展
@@ -432,37 +435,37 @@ impl Codegen {
                             // 32 位符号位: 可用 imm32 编码（`F7 /0 id`：dst 在 r/m → REX.B）
                             let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                             // test dst, (1 << (bw-1))
-                            self.emit_insn(&Insn::raw_bytes(&[rex, 0xF7, 0xC0 | (dst & 7)]));
-                            self.emit_insn(&Insn::raw_bytes(&((sign_bit as u32).to_le_bytes())));
+                            self.emit_insn(&Insn::raw(&[rex, 0xF7, 0xC0 | (dst & 7)]));
+                            self.emit_insn(&Insn::raw(&((sign_bit as u32).to_le_bytes())));
                             // jz +7 (跳过符号扩展)
-                            self.emit_insn(&Insn::raw_bytes(&[0x74, 0x07]));
+                            self.emit_insn(&Insn::raw(&[0x74, 0x07]));
                             // or dst, inv_mask  (填充高位)（`81 /1 id`：dst 在 r/m → REX.B）
                             let rex2 = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            self.emit_insn(&Insn::raw_bytes(&[rex2, 0x81, 0xC8 | (dst & 7)]));
-                            self.emit_insn(&Insn::raw_bytes(&(inv_mask as u32).to_le_bytes()));
+                            self.emit_insn(&Insn::raw(&[rex2, 0x81, 0xC8 | (dst & 7)]));
+                            self.emit_insn(&Insn::raw(&(inv_mask as u32).to_le_bytes()));
                         } else {
                             // >32 位: 用临时寄存器 (rcx/rdx)
                             let tmp = if dst != 1 { 1 } else { 2 };
                             // movabs tmp, sign_bit（opcode 低 3 位 → REX.B）
                             let rex_tmp = 0x48 | if tmp >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            self.emit_insn(&Insn::raw_bytes(&[rex_tmp, 0xB8 | (tmp & 7)]));
-                            self.emit_insn(&Insn::raw_bytes(&sign_bit.to_le_bytes()));
+                            self.emit_insn(&Insn::raw(&[rex_tmp, 0xB8 | (tmp & 7)]));
+                            self.emit_insn(&Insn::raw(&sign_bit.to_le_bytes()));
                             // test dst, tmp：tmp 在 reg(REX.R)，dst 在 r/m(REX.B)
                             let rex_t = 0x48
                                 | if dst >= 8 { 0x01 } else { 0 }   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                                 | if tmp >= 8 { 0x04 } else { 0 };
-                            self.emit_insn(&Insn::raw_bytes(&[rex_t, 0x85, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
+                            self.emit_insn(&Insn::raw(&[rex_t, 0x85, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
                             // jz +N (跳过 movabs + or)
                             // movabs tmp, inv_mask (2+8=10 bytes) + or (3 bytes) = 13 bytes
-                            self.emit_insn(&Insn::raw_bytes(&[0x74, 13]));
+                            self.emit_insn(&Insn::raw(&[0x74, 13]));
                             // movabs tmp, inv_mask
-                            self.emit_insn(&Insn::raw_bytes(&[rex_tmp, 0xB8 | (tmp & 7)]));
-                            self.emit_insn(&Insn::raw_bytes(&inv_mask.to_le_bytes()));
+                            self.emit_insn(&Insn::raw(&[rex_tmp, 0xB8 | (tmp & 7)]));
+                            self.emit_insn(&Insn::raw(&inv_mask.to_le_bytes()));
                             // or dst, tmp：tmp 在 reg(REX.R)，dst 在 r/m(REX.B)
                             let rex_o = 0x48
                                 | if dst >= 8 { 0x01 } else { 0 }   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                                 | if tmp >= 8 { 0x04 } else { 0 };
-                            self.emit_insn(&Insn::raw_bytes(&[rex_o, 0x09, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
+                            self.emit_insn(&Insn::raw(&[rex_o, 0x09, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
                         }
                     }
                 } else if let Type::Complex(inner) = &f.ty {
@@ -475,7 +478,7 @@ impl Codegen {
                     self.mov(6, dst); // rsi = 字段地址
                     self.emit_lea_r13(7, result_off); // rdi = 物化槽
                     self.mov_imm(1, (isz * 2) as i128);
-                    self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb
+                    self.emit_insn(&Insn::raw(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb
                     if matches!(inner.base, Type::Float | Type::Double | Type::LongDouble) {
                         // 浮点 inner 结果约定: xmm0 = 实部
                         let pfx = if matches!(inner.base, Type::Float) {
@@ -643,10 +646,10 @@ impl Codegen {
                     // 整数 complex 全局: 加载 16 字节到临时区
                     self.emit_global_addr(0, &name.name);
                     // rax = global addr, 拷贝到临时区
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC6])); // mov rsi, rax
+                    self.emit_insn(&Insn::raw(&[0x48, 0x89, 0xC6])); // mov rsi, rax
                     self.emit_lea_r13(7, result_off); // rdi = r13 + result_off
                     self.mov_imm(1, total_sz as i128);
-                    self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb
+                    self.emit_insn(&Insn::raw(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb
                 }
                 self.emit_lea_r13(0, result_off);
             } else {
@@ -668,7 +671,7 @@ impl Codegen {
             self.emit_lea_r13(6, src_off); // rsi = &var
             self.emit_lea_r13(7, result_off); // rdi = result_off
             self.mov_imm(1, total_sz as i128);
-            self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb
+            self.emit_insn(&Insn::raw(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb
             let pfx = if matches!(ty, Type::Complex(ref inner) if matches!(inner.base, Type::Float))
             {
                 0xF3u8

@@ -222,6 +222,10 @@ impl Codegen {
             stmt_line_entries: std::mem::take(&mut cg.stmt_line_entries),
             asm_line_entries: std::mem::take(&mut cg.asm_line_entries),
             asm_insn_debug_entries: std::mem::take(&mut cg.asm_insn_debug_entries),
+            asm_insn_log: std::mem::take(&mut cg.asm_insn_log),
+            insn_records: std::mem::take(&mut cg.insn_records),
+            emit_insn_stats: std::mem::take(&mut cg.emit_insn_stats),
+            emit_insn_gas_hits: std::mem::take(&mut cg.emit_insn_gas_hits),
             new_rodata,
             rodata_base,
             pool_add,
@@ -300,6 +304,12 @@ impl Codegen {
         }
         for &(pc, line, disc) in chunk.asm_insn_debug_entries.iter() {
             self.asm_insn_debug_entries.push((base + pc, line, disc));
+        }
+        for (pc, rec) in chunk.asm_insn_log {
+            self.asm_insn_log.push((base + pc, rec));
+        }
+        for (pc, rec) in chunk.insn_records {
+            self.insn_records.push((base + pc, rec));
         }
         for info in chunk.eh_funcs {
             let name = info.name.clone();
@@ -786,6 +796,10 @@ mod tests {
             stmt_line_entries: vec![],
             asm_line_entries: vec![],
             asm_insn_debug_entries: vec![],
+            asm_insn_log: vec![],
+            insn_records: vec![],
+            emit_insn_stats: std::collections::HashMap::new(),
+            emit_insn_gas_hits: std::collections::HashMap::new(),
             new_rodata: vec![],
             rodata_base: 0,
             pool_add: vec![],

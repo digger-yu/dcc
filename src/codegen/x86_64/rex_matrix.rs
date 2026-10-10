@@ -13,7 +13,7 @@
 //
 // 判据为什么是「名字」而不是「字节」：字节判据要再实现一遍编码器（同义反复，抓不到东西）；
 // 解码器是独立写的位解析器，它唯一的盲区是「看不见有没有 REX」，而那一块已由
-// `disasm::Rex.present` 与 `REG8_LEGACY` 补齐 —— 所以解码器现在两类都能抓：
+// `render_one::Rex.present` 与 `REG8_LEGACY` 补齐 —— 所以解码器现在两类都能抓：
 //   * 搬错字段 → 意图名缺席（`%sil` 读成 `%r14b`）；
 //   * 漏发 REX → 意图名读成 `%ah/%ch/%dh/%bh`，由下面的 legacy 反查直接判红。
 
@@ -21,7 +21,7 @@ use super::asm::operand::AsmOperand;
 use super::codegen::{Codegen, GlobalVar};
 use crate::ast::Type;
 use crate::cli::{Abi, Arch, Os, TargetTriple};
-use crate::codegen::disasm::disassemble_range;
+use crate::codegen::x86_64::asm::render_one::disassemble_one_at;
 use crate::diagnostics::Severity;
 use crate::target::Target;
 use std::collections::{BTreeMap, HashMap};
@@ -66,16 +66,22 @@ fn cg() -> Codegen {
 }
 
 fn decode(code: &[u8]) -> String {
-    disassemble_range(
-        code,
-        0,
-        code.len(),
-        0,
-        &BTreeMap::new(),
-        &BTreeMap::new(),
-        &HashMap::new(),
-        &HashMap::new(),
-    )
+    let mut out = String::new();
+    let mut pos = 0;
+    let labels: BTreeMap<u64, Vec<&str>> = BTreeMap::new();
+    let calls: HashMap<u64, String> = HashMap::new();
+    let data: HashMap<u64, String> = HashMap::new();
+    while pos < code.len() {
+        match disassemble_one_at(code, pos, 0, &calls, &data, &labels) {
+            Some((len, text)) if len > 0 => {
+                out.push_str(&text);
+                out.push('\n');
+                pos += len;
+            }
+            _ => break,
+        }
+    }
+    out
 }
 
 /// 断言一段字节的解码结果恰好含有意图操作数、且不含任何被搬错/漏发 REX 的痕迹。

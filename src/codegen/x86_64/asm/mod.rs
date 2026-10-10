@@ -7,13 +7,13 @@ pub mod binding; // AsmOpBinding / AsmDataExprValue (asm 操作数绑定数据)
                  // encoder 已按职责簇拆分为 constraint/opmap/template_resolve/directive_emit/
                  // naked/emit_lines/enc_mov/enc_alu/enc_ctrl/enc_simd/enc_misc（见本文件底部声明）
 pub mod directive;
-pub mod disasm; // Disassembler helper module
 pub mod emit;
 pub mod expansion; // Assembly directive expansion
 pub mod label;
 pub mod labels; // NEW: Numeric local label handling (Turn 34)
 pub mod operand;
 pub mod planner;
+pub mod render_one; // P9 方案 C: 单指令 x86-64 解码 → GAS 文本
 pub mod template; // NEW: Register allocator planning
 
 // Re-export main utilities

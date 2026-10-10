@@ -1706,24 +1706,24 @@ impl Codegen {
             return;
         }
         // 保存 rcx, rdi, rax (它们可能在后续代码中使用)
-        self.emit_insn(&Insn::raw_bytes(&[0x50])); // push rax
-        self.emit_insn(&Insn::raw_bytes(&[0x51])); // push rcx
-        self.emit_insn(&Insn::raw_bytes(&[0x57])); // push rdi
+        self.emit_insn(&Insn::raw(&[0x50])); // push rax
+        self.emit_insn(&Insn::raw(&[0x51])); // push rcx
+        self.emit_insn(&Insn::raw(&[0x57])); // push rdi
 
         // xor eax, eax (rax = 0)
-        self.emit_insn(&Insn::raw_bytes(&[0x31, 0xC0]));
+        self.emit_insn(&Insn::raw(&[0x31, 0xC0]));
         // mov rcx, frame_size / 8
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB9]));
-        self.emit_insn(&Insn::raw_bytes(&((frame_size as u64) / 8).to_le_bytes()));
+        self.emit_insn(&Insn::raw(&[0x48, 0xB9]));
+        self.emit_insn(&Insn::raw(&((frame_size as u64) / 8).to_le_bytes()));
         // rdi = r13 - frame_size (帧底部)
         self.emit_lea_r13(7, -frame_size);
         // rep stosq: F3 48 AB
-        self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x48, 0xAB]));
+        self.emit_insn(&Insn::raw(&[0xF3, 0x48, 0xAB]));
 
         // 恢复 rdi, rcx, rax
-        self.emit_insn(&Insn::raw_bytes(&[0x5F])); // pop rdi
-        self.emit_insn(&Insn::raw_bytes(&[0x59])); // pop rcx
-        self.emit_insn(&Insn::raw_bytes(&[0x58])); // pop rax
+        self.emit_insn(&Insn::raw(&[0x5F])); // pop rdi
+        self.emit_insn(&Insn::raw(&[0x59])); // pop rcx
+        self.emit_insn(&Insn::raw(&[0x58])); // pop rax
     }
 
     pub fn emit_stack_clash_probes(&mut self, frame_size: i64) {
@@ -1736,35 +1736,78 @@ impl Codegen {
         if pages > 0 {
             self.mov_imm(11, pages as i128);
             let loop_start = self.pos();
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xEC, 0x00, 0x10, 0x00, 0x00])); // sub rsp, 4096
-            self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x04, 0x24, 0x00])); // mov byte ptr [rsp], 0
-            self.emit_insn(&Insn::raw_bytes(&[0x49, 0xFF, 0xCB])); // dec r11
+            self.emit_insn(&Insn::raw(&[0x48, 0x81, 0xEC, 0x00, 0x10, 0x00, 0x00])); // sub rsp, 4096
+            self.emit_insn(&Insn::raw(&[0xC6, 0x04, 0x24, 0x00])); // mov byte ptr [rsp], 0
+            self.emit_insn(&Insn::raw(&[0x49, 0xFF, 0xCB])); // dec r11
             let loop_end = self.pos();
             let disp = loop_start as i64 - loop_end as i64 - 2;
-            self.emit_insn(&Insn::raw_bytes(&[disp as i8 as u8])); // jnz loop
+            self.emit_insn(&Insn::raw(&[disp as i8 as u8])); // jnz loop
         }
         self.emit_sub_rsp(remaining);
     }
 
     pub fn emit_xmm_r13_disp(&mut self, pfx: u8, op: u8, xmm: u8, off: i64) {
         let rex = 0x41 | if xmm >= 8 { 0x04 } else { 0 };
+        // P9 方案 C: 按 pfx/op 组合生成一条完整 gas 行. 调用方已把完整字节合成过,
+        // 我们这里把前缀+opcode 合并发射成单条 Insn, 便于渲染器直接输出 gas_text.
+        use crate::codegen::x86_64::emit::gas::{mem_disp as gas_mem_disp, XMM as GAS_XMM};
+        // op=0x11 = mov [r13+off], xmm ; op=0x10 = mov xmm, [r13+off]
+        let mnem_base = match op {
+            0x10 => "mov",
+            0x11 => "mov",
+            _ => "mov",
+        };
+        let pfx_sz = match pfx {
+            0xF3 => "ss", // movss
+            0xF2 => "sd", // movsd
+            0x66 => "apd",// movapd
+            0x00 => "q",  // movq (no SSE prefix)
+            _ => "",
+        };
+        let mnem = format!("{mnem_base}{pfx_sz}");
+        let mem = gas_mem_disp(13, off);
+        let xmm_name = GAS_XMM[(xmm & 15) as usize];
+        // 用单条发射合并 pfx+rex+0x0f+op+modrm+disp.
+        // 之前: pfx/rex/0F/op 由本函数发射, modrm+disp 由 emit_r13_modrm_disp 发射.
+        // 为了让渲染器一条 gas 行直接出, 这里我们在内部拼完整字节.
+        let mut bytes: Vec<u8> = Vec::new();
         if pfx != 0 {
-            self.emit_insn(&Insn::raw_bytes(&[pfx, rex, 0x0F, op]));
-        } else {
-            self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, op]));
+            bytes.push(pfx);
         }
-        if Self::fits_disp32(off) {
-            self.emit_r13_modrm_disp(xmm, off);
+        bytes.push(rex);
+        bytes.push(0x0F);
+        bytes.push(op);
+        // modrm: mod=01 (disp8) / 10 (disp32), reg=xmm, r/m=13=5
+        let reg_field = xmm & 7;
+        if Self::fits_disp8(off) {
+            bytes.push(0x45 | (reg_field << 3));
+            bytes.push(off as i8 as u8);
+        } else if Self::fits_disp32(off) {
+            bytes.push(0x85 | (reg_field << 3));
+            bytes.extend_from_slice(&(off as i32).to_le_bytes());
         } else {
-            self.emit_lea_r13(11, off);
-            let rex = 0x41 | if xmm >= 8 { 0x04 } else { 0 } | 0x01;
+            // fallback: 走原路径
             if pfx != 0 {
-                self.emit_insn(&Insn::raw_bytes(&[pfx, rex, 0x0F, op]));
+                self.emit_insn(&Insn::raw(&[pfx, rex, 0x0F, op]));
             } else {
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, op]));
+                self.emit_insn(&Insn::raw(&[rex, 0x0F, op]));
+            }
+            self.emit_lea_r13(11, off);
+            let rex2 = 0x41 | if xmm >= 8 { 0x04 } else { 0 } | 0x01;
+            if pfx != 0 {
+                self.emit_insn(&Insn::raw(&[pfx, rex2, 0x0F, op]));
+            } else {
+                self.emit_insn(&Insn::raw(&[rex2, 0x0F, op]));
             }
             self.emit_reg_indirect_modrm(xmm, 11);
+            return;
         }
+        let gas = if op == 0x11 {
+            format!("{mnem} {xmm_name}, {mem}")
+        } else {
+            format!("{mnem} {mem}, {xmm_name}")
+        };
+        self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
     }
 
     pub fn store_xmm32_stack(&mut self, xmm: u8, off: i64) {
@@ -1775,48 +1818,48 @@ impl Codegen {
         // Stack canary 检查: 在恢复 rsp 前验证金丝雀值
         if self.target.stack_protector && self.frame_layout.canary_fits() {
             // mov r11, [r13 - 8]  → 加载存储的 canary 到临时寄存器（槽位 = `abi::layout::CANARY_OFF`）
-            self.emit_insn(&Insn::raw_bytes(&[0x4d, 0x8b, 0x9d, 0xf8, 0xff, 0xff, 0xff]));
+            self.emit_insn(&Insn::raw(&[0x4d, 0x8b, 0x9d, 0xf8, 0xff, 0xff, 0xff]));
             // xor r11, seg:[0x28]  → 与原始 canary 比较
             // seg = fs (0x64) or gs (0x65) based on guard register
             let seg_prefix = match self.target.stack_protector_guard_reg {
                 crate::cli::StackGuardReg::Gs => 0x65u8,
                 _ => 0x64u8, // Fs is default
             };
-            self.emit_insn(&Insn::raw_bytes(&[seg_prefix, 0x4c, 0x33, 0x1c, 0x25, 0x28, 0x00, 0x00, 0x00]));
+            self.emit_insn(&Insn::raw(&[seg_prefix, 0x4c, 0x33, 0x1c, 0x25, 0x28, 0x00, 0x00, 0x00]));
             // Always call __stack_chk_fail on canary mismatch.
             // Both ET_REL and ET_EXEC use the same path:
             // __stack_chk_fail is emitted as an undefined global
             // symbol (provided by libc / kernel runtime).
-            self.emit_insn(&Insn::raw_bytes(&[0x74, 0x05])); // je .+5 (canary OK → skip)
+            self.emit_insn(&Insn::raw(&[0x74, 0x05])); // je .+5 (canary OK → skip)
             self.call_label("__stack_chk_fail");
         }
         // 恢复被调用者保存寄存器: rbx, r12, r14, r15
         // 同序言: 无条件发射, 未使用的寄存器由 patch_callee_saves 改为 nop
         // mov rbx, [r13 - 16]  (REX.WB: r13 needs REX.B)
         self.callee_save_patch_sites.push((self.pos(), 0x01));
-        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8b, 0x5d, 0xf0]));
+        self.emit_insn(&Insn::raw_with_gas(&[0x49, 0x8b, 0x5d, 0xf0], "mov -16(%r13), %rbx"));
         // mov r12, [r13 - 24]  (REX.WRB: r12 needs REX.R, r13 needs REX.B)
         self.callee_save_patch_sites.push((self.pos(), 0x02));
-        self.emit_insn(&Insn::raw_bytes(&[0x4d, 0x8b, 0x65, 0xe8]));
+        self.emit_insn(&Insn::raw_with_gas(&[0x4d, 0x8b, 0x65, 0xe8], "mov -24(%r13), %r12"));
         // mov r14, [r13 - 32]  (REX.WRB: r14 needs REX.R, r13 needs REX.B)
         self.callee_save_patch_sites.push((self.pos(), 0x04));
-        self.emit_insn(&Insn::raw_bytes(&[0x4d, 0x8b, 0x75, 0xe0]));
+        self.emit_insn(&Insn::raw_with_gas(&[0x4d, 0x8b, 0x75, 0xe0], "mov -32(%r13), %r14"));
         // mov r15, [r13 - 40]  (REX.WRB: r15 在 reg 字段需要 REX.R, r13 在 r/m 需要 REX.B)
         // 这里没有 SIB，REX.X 是多余的：旧代码发 0x4F = W|R|X|B，产物里被 objdump 标成
         // `rex.WRXB mov -0x28(%r13),%r15`（与序言侧同一个复制源）。
         self.callee_save_patch_sites.push((self.pos(), 0x08));
-        self.emit_insn(&Insn::raw_bytes(&[0x4d, 0x8b, 0x7d, 0xd8]));
+        self.emit_insn(&Insn::raw_with_gas(&[0x4d, 0x8b, 0x7d, 0xd8], "mov -40(%r13), %r15"));
         // mov rsp, r13: 恢复栈指针
-        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8b, 0xe5]));
-        self.emit_insn(&Insn::raw_bytes(&[0x41, 0x5d])); // pop r13
+        self.emit_insn(&Insn::raw_with_gas(&[0x49, 0x8b, 0xe5], "mov %r13, %rsp"));
+        self.emit_insn(&Insn::raw_with_gas(&[0x41, 0x5d], "pop %r13"));
         if self.target.frame_pointer {
-            self.emit_insn(&Insn::raw_bytes(&[0x5D])); // pop rbp
+            self.emit_insn(&Insn::raw_with_gas(&[0x5D], "pop %rbp")); // pop rbp
         }
         // noreturn: 在 ret 前插入 trap 指令 (ud2)
         // 防止函数未正常返回时 (如 panic/abort/longjmp)
         // 执行流落入调用者后续代码
         if self.current_is_noreturn {
-            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x0B])); // ud2 - undefined instruction trap
+            self.emit_insn(&Insn::raw(&[0x0F, 0x0B])); // ud2 - undefined instruction trap
         }
         self.emit_return_tail();
     }
@@ -1825,7 +1868,15 @@ impl Codegen {
         if self.target.function_return_thunk_extern {
             self.jmp_external("__x86_return_thunk");
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0xC3]));
+            // 步骤 3: 走类型化 Ret{add_imm: None} (C3).
+            let mut insn = Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::Ret { add_imm: None },
+                &[],
+            );
+            insn.gas_text = Some("ret".to_string());
+            if !self.emit_insn(&insn) {
+                self.emit_insn(&Insn::raw_with_gas(&[0xC3], "ret"));
+            }
         }
     }
 }

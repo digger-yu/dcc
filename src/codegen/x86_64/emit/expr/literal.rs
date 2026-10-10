@@ -40,7 +40,7 @@ impl Codegen {
                 let at = self.pos();
                 // LEA dst, [RIP + disp32]  (7 bytes, disp32 = placeholder 0)
                 let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x8D, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0]));
+                self.emit_insn(&Insn::raw(&[rex, 0x8D, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0]));
                 self.string_refs.push((at, data));
             },
             _ => {
@@ -137,7 +137,7 @@ impl Codegen {
                             let idx_ty = idx_expr.ty();
                             if Self::is_signed_int(&idx_ty) && idx_ty.size() <= 4 {
                                 // movslq %ecx, %rcx: 48 63 C9
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x63, 0xC9]));
+                                self.emit_insn(&Insn::raw(&[0x48, 0x63, 0xC9]));
                             }
                             // 计算 stride = sizeof(elem) 并乘到 rcx
                             if Self::type_has_vla(&elem.base) {
@@ -151,7 +151,7 @@ impl Codegen {
                                 if stride > 1 {
                                     if stride.is_power_of_two() {
                                         let shift = (stride.trailing_zeros() as u8).min(31);
-                                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xE1, shift])); // shl rcx, shift
+                                        self.emit_insn(&Insn::raw(&[0x48, 0xC1, 0xE1, shift])); // shl rcx, shift
                                     } else {
                                         self.imul_imm(1, stride as i128); // imul rcx, rcx, stride
                                     }
@@ -160,7 +160,7 @@ impl Codegen {
                             // dst += rcx
                             // add r/m64=dst(B), reg=rcx(R): dst>=8 需 REX.B(0x01)
                             let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x01, 0xC0 | ((1 & 7) << 3) | (dst & 7)]));
+                            self.emit_insn(&Insn::raw(&[rex, 0x01, 0xC0 | ((1 & 7) << 3) | (dst & 7)]));
                             // 下降到元素类型
                             cur_ty = elem.base.clone();
                         }

@@ -1171,7 +1171,7 @@ impl crate::codegen::shared::asm_source::AsmOutcomeSink for Codegen {
     fn push_code(&mut self, bytes: &[u8]) {
         // 走 `emit` 而不是直接追写 `self.code`：「一条指令被发出去了」必须只有一个出口，
         // 否则任何以「上一次发射」为依据的事实（如求值落点的持有记录）在这里会被静默绕过。
-        self.emit_insn(&Insn::raw_bytes(bytes));
+        self.emit_insn(&Insn::raw(bytes));
     }
     fn save_passthrough_region(&mut self, pc: u64, lines: Vec<String>) {
         self.asm_passthrough_regions.push((pc, lines));

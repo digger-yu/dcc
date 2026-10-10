@@ -2,8 +2,6 @@
 // 第一性原理：codegen 入口只做"按 target 选后端"。
 
 pub mod coff;
-pub mod data;
-pub mod disasm;
 // Note: backend, registry, features, elf, asm_constraints, mini_asm moved to shared/
 pub mod shared;
 pub mod x86_64;

@@ -28,23 +28,26 @@ impl Codegen {
                         if Self::fits_disp32(ioff) {
                             let rex = 0x48u8 | if dst >= 8 { 0x05u8 } else { 0 };
                             let modrm = 0x83 | ((dst & 7) << 3);
-                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, modrm]));
-                            self.emit_insn(&Insn::raw_bytes(&(ioff as i32).to_le_bytes()));
+                            self.emit_insn(&Insn::raw(&[rex, 0x8B, modrm]));
+                            self.emit_insn(&Insn::raw(&(ioff as i32).to_le_bytes()));
                         } else {
                             self.mov_imm(10, ioff as i128);
-                            self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x8D, 0x1C, 0xD3]));
+                            self.emit_insn(&Insn::raw(&[0x4D, 0x8D, 0x1C, 0xD3]));
                         }
                     }
                     if Self::type_has_vla(ty) {
                         let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
                         let modrm = 0x03 | ((dst & 7) << 3);
-                        self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, modrm]));
-                        self.emit_insn(&Insn::raw_bytes(&(parent_off as i32).to_le_bytes()));
+                        self.emit_insn(&Insn::raw(&[rex, 0x8B, modrm]));
+                        self.emit_insn(&Insn::raw(&(parent_off as i32).to_le_bytes()));
                     } else {
                         if parent_off != 0 {
                             let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xC0 | (dst & 7)]));
-                            self.emit_insn(&Insn::raw_bytes(&(parent_off as i32).to_le_bytes()));
+                            use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
+                            let gas = format!("add ${}, {}", parent_off, GAS_REG64[(dst & 15) as usize]);
+                            let mut bytes = vec![rex, 0x81, 0xC0 | (dst & 7)];
+                            bytes.extend_from_slice(&(parent_off as i32).to_le_bytes());
+                            self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
                         }
                     }
                     return true;
@@ -93,8 +96,11 @@ impl Codegen {
                     let off = off as i32;
                     if off != 0 {
                         let rex = 0x48 | if dst >= 8 { 0x41 } else { 0 };
-                        self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xC0 | (dst & 7)]));
-                        self.emit_insn(&Insn::raw_bytes(&off.to_le_bytes()));
+                        use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
+                        let gas = format!("add ${}, {}", off, GAS_REG64[(dst & 15) as usize]);
+                        let mut bytes = vec![rex, 0x81, 0xC0 | (dst & 7)];
+                        bytes.extend_from_slice(&off.to_le_bytes());
+                        self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
                     }
                 }
                 true
@@ -152,7 +158,7 @@ impl Codegen {
                 self.gen_expr(idx, 1); // rcx = index
                 self.pop(0);
                 self.emit_index_scale(es, arr, elem_ty);
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xC8])); // add rax, rcx
+                self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x01, 0xC8], "add %rcx, %rax")); // add rax, rcx
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -177,13 +183,18 @@ impl Codegen {
                     let off = self.stack_home_off(&name.name);
                     // REX.W + REX.B (r13) + REX.R (dst >= 8 → r10/r11/...)
                     let rex = 0x48u8 | 0x01 | (if dst >= 8 { 0x04 } else { 0 });
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x8D]));
+                    use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
+                    use crate::codegen::x86_64::emit::gas::mem_disp as gas_mem_disp;
+                    let gas = format!("lea {}, {}", gas_mem_disp(13, off), GAS_REG64[(dst & 15) as usize]);
+                    let mut bytes = vec![rex, 0x8D];
                     if off.abs() < 128 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x45 | ((dst & 7) << 3), off as i8 as u8]));
+                        bytes.push(0x45 | ((dst & 7) << 3));
+                        bytes.push(off as i8 as u8);
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0x85 | ((dst & 7) << 3)]));
-                        self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
+                        bytes.push(0x85 | ((dst & 7) << 3));
+                        bytes.extend_from_slice(&(off as i32).to_le_bytes());
                     }
+                    self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
                 }
                 return;
             }
@@ -230,13 +241,18 @@ impl Codegen {
                     let off = self.stack_home_off(&name.name);
                     // REX.W + REX.B (r13) + REX.R (当 dst >= 8, 编码 r10/r11/r12/...)
                     let rex = 0x48u8 | 0x01 | (if dst >= 8 { 0x04 } else { 0 });
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x8D]));
+                    use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
+                    use crate::codegen::x86_64::emit::gas::mem_disp as gas_mem_disp;
+                    let gas = format!("lea {}, {}", gas_mem_disp(13, off), GAS_REG64[(dst & 15) as usize]);
+                    let mut bytes = vec![rex, 0x8D];
                     if off.abs() < 128 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x45 | ((dst & 7) << 3), off as i8 as u8]));
+                        bytes.push(0x45 | ((dst & 7) << 3));
+                        bytes.push(off as i8 as u8);
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0x85 | ((dst & 7) << 3)]));
-                        self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
+                        bytes.push(0x85 | ((dst & 7) << 3));
+                        bytes.extend_from_slice(&(off as i32).to_le_bytes());
                     }
+                    self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
                 }
             } else if let Expr::Member {
                 expr,
@@ -281,8 +297,11 @@ impl Codegen {
                     let field_off = f.offset as i32;
                     if field_off != 0 {
                         let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                        self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xC0 | (dst & 7)]));
-                        self.emit_insn(&Insn::raw_bytes(&field_off.to_le_bytes()));
+                        use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
+                        let gas = format!("add ${}, {}", field_off, GAS_REG64[(dst & 15) as usize]);
+                        let mut bytes = vec![rex, 0x81, 0xC0 | (dst & 7)];
+                        bytes.extend_from_slice(&field_off.to_le_bytes());
+                        self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
                     }
                 }
             } else if let Expr::Deref { e: inner, .. } = e.as_ref() {
@@ -337,7 +356,7 @@ impl Codegen {
                 self.gen_expr(idx, 1);
                 self.pop(0);
                 self.emit_index_scale(es, arr, elem_ty);
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xC8])); // add rax, rcx
+                self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x01, 0xC8], "add %rcx, %rax")); // add rax, rcx
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -377,8 +396,11 @@ impl Codegen {
                 // 加上虚部偏移
                 if inner_sz != 0 {
                     let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xC0 | (dst & 7)]));
-                    self.emit_insn(&Insn::raw_bytes(&(inner_sz as i32).to_le_bytes()));
+                    use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
+                    let gas = format!("add ${}, {}", inner_sz, GAS_REG64[(dst & 15) as usize]);
+                    let mut bytes = vec![rex, 0x81, 0xC0 | (dst & 7)];
+                    bytes.extend_from_slice(&(inner_sz as i32).to_le_bytes());
+                    self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
                 }
             }
         }
@@ -393,7 +415,7 @@ impl Codegen {
             let label_name = self.c_label_to_asm(&label.name);
             let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
             let modrm = 0x05 | ((dst & 7) << 3);
-            self.emit_insn(&Insn::raw_bytes(&[rex, 0x8D, modrm, 0, 0, 0, 0]));
+            self.emit_insn(&Insn::raw(&[rex, 0x8D, modrm, 0, 0, 0, 0]));
             let disp32_pos = self.pos() - 4;
             self.label_addr_refs.push((disp32_pos, label_name));
         }

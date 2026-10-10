@@ -40,10 +40,15 @@ impl Codegen {
         };
         // xorps xmm1, xmm1；ucomis{s,d} xmm0, xmm1（ModRM 0xC1：reg=xmm0, r/m=xmm1）。
         // xmm1 是本后端浮点比较的约定 scratch（见 special/builtins.rs 同族站点）。
-        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC9]));
+        self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x57, 0xC9], "xorps %xmm1, %xmm1"));
         let mut ucomis = ucomis_prefix.to_vec();
         ucomis.extend_from_slice(&[0x0F, ucomis_op, 0xC1]);
-        self.emit_insn(&Insn::raw_bytes(&ucomis));
+        let ucomis_gas = if matches!(float_ty, Type::Float) {
+            "ucomiss %xmm1, %xmm0"
+        } else {
+            "ucomisd %xmm1, %xmm0"
+        };
+        self.emit_insn(&Insn::raw_with_gas(&ucomis, ucomis_gas));
 
         let l_done = self.fresh_label();
         // CF=1（源 < 0，或 NaN 的无序比较）⇒ 结果要么是合法负数、要么是负溢出的
@@ -56,10 +61,14 @@ impl Codegen {
         let test_rex = if is_64bit { 0x48 } else { 0x40 }
             | if dst >= 8 { 0x04 | 0x01 } else { 0 };
         let modrm = 0xC0 | ((dst & 7) << 3) | (dst & 7);
+        let bits = if is_64bit { 64 } else { 32 };
+        let test_gas_reg = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, bits)
+            .unwrap_or_else(|| "%eax".to_string());
+        let test_gas = format!("test {}, {}", test_gas_reg, test_gas_reg);
         if test_rex != 0x40 {
-            self.emit_insn(&Insn::raw_bytes(&[test_rex, 0x85, modrm]));
+            self.emit_insn(&Insn::raw_with_gas(&[test_rex, 0x85, modrm], &test_gas));
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0x85, modrm]));
+            self.emit_insn(&Insn::raw_with_gas(&[0x85, modrm], &test_gas));
         }
         // 结果非负 ⇒ 在范围内，保留。
         self.jmp_rel32(&l_done, JumpKind::Jns);
@@ -69,11 +78,17 @@ impl Codegen {
         if is_64bit {
             self.mov_imm(dst, i64::MAX as i128);
         } else if dst >= 8 {
-            self.emit_insn(&Insn::raw_bytes(&[0x41, 0xC7, 0xC0 | (dst & 7)]));
-            self.emit_insn(&Insn::raw_bytes(&i32::MAX.to_le_bytes()));
+            let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, 32)
+                .unwrap_or_else(|| "%eax".to_string());
+            let imm = i32::MAX.to_le_bytes();
+            let bytes = [0x41, 0xC7, 0xC0 | (dst & 7), imm[0], imm[1], imm[2], imm[3]];
+            self.emit_insn(&Insn::raw_with_gas(&bytes, &format!("mov $2147483647, {}", dst_name)));
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0xC7, 0xC0 | (dst & 7)]));
-            self.emit_insn(&Insn::raw_bytes(&i32::MAX.to_le_bytes()));
+            let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, 32)
+                .unwrap_or_else(|| "%eax".to_string());
+            let imm = i32::MAX.to_le_bytes();
+            let bytes = [0xC7, 0xC0 | (dst & 7), imm[0], imm[1], imm[2], imm[3]];
+            self.emit_insn(&Insn::raw_with_gas(&bytes, &format!("mov $2147483647, {}", dst_name)));
         }
         self.label(&l_done);
     }
@@ -98,10 +113,13 @@ impl Codegen {
                 // cvt 的 REX 只在真的扩了字段时才发：`0x40 | 0 | 0` 是什么也不扩的裸前缀，
                 // 多占一字节并被 objdump 标成 `rex cvttsd2si`（多余位的唯一读数）。
                 let rex = (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x04 } else { 0 });
+                let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, if wide { 64 } else { 32 })
+                    .unwrap_or_else(|| "%eax".to_string());
+                let gas = format!("cvttss2si %xmm0, {}", dst_name);
                 if rex != 0 {
-                    self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x40 | rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
+                    self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x40 | rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)], &gas));
                 } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
+                    self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)], &gas));
                 }
             },
             Type::Double => {
@@ -109,10 +127,13 @@ impl Codegen {
                 // cvt 的 REX 只在真的扩了字段时才发：`0x40 | 0 | 0` 是什么也不扩的裸前缀，
                 // 多占一字节并被 objdump 标成 `rex cvttsd2si`（多余位的唯一读数）。
                 let rex = (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x04 } else { 0 });
+                let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, if wide { 64 } else { 32 })
+                    .unwrap_or_else(|| "%eax".to_string());
+                let gas = format!("cvttsd2si %xmm0, {}", dst_name);
                 if rex != 0 {
-                    self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x40 | rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
+                    self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x40 | rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)], &gas));
                 } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
+                    self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)], &gas));
                 }
             },
             Type::LongDouble => {
@@ -126,13 +147,14 @@ impl Codegen {
                 // 落成 f64 到 xmm0, 再走按 xmm0 取值的 cvttsd2si。
                 self.emit_x87_to_xmm0();
                 // cvttsd2si dst, xmm0 (F2 REX 0F 2C /r)
-                // cvt 的 REX 只在真的扩了字段时才发：`0x40 | 0 | 0` 是什么也不扩的裸前缀，
-                // 多占一字节并被 objdump 标成 `rex cvttsd2si`（多余位的唯一读数）。
                 let rex = (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x04 } else { 0 });
+                let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, if wide { 64 } else { 32 })
+                    .unwrap_or_else(|| "%eax".to_string());
+                let gas = format!("cvttsd2si %xmm0, {}", dst_name);
                 if rex != 0 {
-                    self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x40 | rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
+                    self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x40 | rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)], &gas));
                 } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
+                    self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)], &gas));
                 }
             },
             _ => {},
@@ -164,15 +186,15 @@ impl Codegen {
         // cvttrunc 到 64 位有符号 (REX.W): [2^31, 2^32) 不会触发 indefinite
         let pfx = if is_single { 0xF3u8 } else { 0xF2u8 };
         let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
-        self.emit_insn(&Insn::raw_bytes(&[pfx, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
+        self.emit_insn(&Insn::raw(&[pfx, rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
         // 负值钳 0: 先把 scratch 清零 (xor 会破坏 flags), 再 test 设 SF,
         // 最后 cmovs 选 0。
         let zero_reg = if dst == 0 { 2 } else { 0 };
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xC0 | ((zero_reg & 7) << 3) | (zero_reg & 7)]));
+        self.emit_insn(&Insn::raw(&[0x48, 0x31, 0xC0 | ((zero_reg & 7) << 3) | (zero_reg & 7)]));
         let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-        self.emit_insn(&Insn::raw_bytes(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+        self.emit_insn(&Insn::raw(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
         let rex_cmov = 0x48 | if dst >= 8 { 0x04 } else { 0 };
-        self.emit_insn(&Insn::raw_bytes(&[
+        self.emit_insn(&Insn::raw(&[
             rex_cmov,
             0x0F,
             0x48,
@@ -202,7 +224,7 @@ impl Codegen {
             self.pop(1); // rcx = 旧值 (pop to rcx, not rdx!)
                          // rax = rhs, rcx = old → binop(rax=old, rcx=rhs)
                          // 交换: rax=rcx(old), rcx=rax(rhs)
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x87, 0xc1])); // xchg rax, rcx → rax=old, rcx=rhs
+            self.emit_insn(&Insn::raw(&[0x48, 0x87, 0xc1])); // xchg rax, rcx → rax=old, rcx=rhs
             let is_signed = Self::is_signed_int(&lv_ty);
             self.binop(binop_op, 0, 1, is_signed, &lv_ty, &rhs.ty());
             if dst != 0 {
@@ -215,14 +237,14 @@ impl Codegen {
         self.push(0); // push rax (address)
                       // 3. 读取旧值
         match lv_sz {
-            1 => { self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x00])); }, // movzx eax, byte [rax]
+            1 => { self.emit_insn(&Insn::raw(&[0x0F, 0xB6, 0x00])); }, // movzx eax, byte [rax]
             2 => {
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x00]));
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB7, 0xC0]));
+                self.emit_insn(&Insn::raw(&[0x66, 0x8B, 0x00]));
+                self.emit_insn(&Insn::raw(&[0x48, 0x0F, 0xB7, 0xC0]));
             }, // mov ax,[rax]; movzx eax,ax
-            4 => { self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x00])); },       // mov eax, [rax]
-            8 => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x00])); }, // mov rax, [rax]
-            _ => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x00])); }, // default: 8 bytes
+            4 => { self.emit_insn(&Insn::raw(&[0x8B, 0x00])); },       // mov eax, [rax]
+            8 => { self.emit_insn(&Insn::raw(&[0x48, 0x8B, 0x00])); }, // mov rax, [rax]
+            _ => { self.emit_insn(&Insn::raw(&[0x48, 0x8B, 0x00])); }, // default: 8 bytes
         }
         // rax = old value
         // 4. 保存旧值, 求值 RHS
@@ -238,22 +260,22 @@ impl Codegen {
                      // 需要: rax = old, rcx = rhs for binop.
                      // 当前: rcx = old, rax = rhs.
                      // 交换: xchg rax, rcx → rax=old, rcx=rhs
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x87, 0xc1])); // xchg rax, rcx
+        self.emit_insn(&Insn::raw(&[0x48, 0x87, 0xc1])); // xchg rax, rcx
                                         // Now rax = old, rcx = rhs. Compute binop(rax, rcx).
         let is_signed = Self::is_signed_int(&lv_ty);
         self.binop(binop_op, 0, 1, is_signed, &lv_ty, &rhs.ty());
         // rax = result
         // 7. 截断到目标类型宽度 (32位以下)
         if lv_sz == 4 && lv_ty.is_int() {
-            self.emit_insn(&Insn::raw_bytes(&[0x89, 0xc0])); // mov eax, eax (truncate to 32 bits)
+            self.emit_insn(&Insn::raw(&[0x89, 0xc0])); // mov eax, eax (truncate to 32 bits)
         }
         // 8. 恢复地址并存储
         self.pop(1); // pop rcx (address)
         match lv_sz {
-            1 => { self.emit_insn(&Insn::raw_bytes(&[0x88, 0x01])); },       // mov [rcx], al
-            2 => { self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x01])); }, // mov [rcx], ax
-            4 => { self.emit_insn(&Insn::raw_bytes(&[0x89, 0x01])); },       // mov [rcx], eax
-            _ => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x01])); }, // mov [rcx], rax
+            1 => { self.emit_insn(&Insn::raw(&[0x88, 0x01])); },       // mov [rcx], al
+            2 => { self.emit_insn(&Insn::raw(&[0x66, 0x89, 0x01])); }, // mov [rcx], ax
+            4 => { self.emit_insn(&Insn::raw(&[0x89, 0x01])); },       // mov [rcx], eax
+            _ => { self.emit_insn(&Insn::raw(&[0x48, 0x89, 0x01])); }, // mov [rcx], rax
         }
         // 9. 结果到 dst
         if dst != 0 {
@@ -268,12 +290,12 @@ impl Codegen {
                     // movsbq dst_low8, dst: 截断到 8 位并符号扩展
                     // 自反 ModRM: dst 同时在 ModRM.reg 与 r/m ⇒ >=8 必须同时置 REX.R 与 REX.B。
                     let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xBE, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                    self.emit_insn(&Insn::raw(&[rex, 0x0F, 0xBE, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
                 } else {
                     // movzbl dst_low8, dst: 截断到 8 位并零扩展
                     // 同上：两个字段同一个号，只置 REX.B 会把 reg 留在低 8 号上。
                     let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xB6, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                    self.emit_insn(&Insn::raw(&[rex, 0x0F, 0xB6, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
                 }
             },
             Type::Short | Type::UShort => {
@@ -281,19 +303,19 @@ impl Codegen {
                     // movswq dst_low16, dst: 截断到 16 位并符号扩展
                     // 同上：自反 ModRM 两个字段都要扩。
                     let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xBF, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                    self.emit_insn(&Insn::raw(&[rex, 0x0F, 0xBF, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
                 } else {
                     // movzwl: 32 位 mov 零扩展高 32 位, 再 and 0xFFFF
                     // 自反 ModRM: dst 同时在 ModRM.reg 与 r/m ⇒ >=8 必须同时置 REX.R 与 REX.B(0x05)，
                     // 只置一边就把另一个字段留在低 8 个寄存器上（读/写的都是别人的 %eax）。
                     // <8 时一个前缀都不发：裸 0x40 什么都不扩，只多占一字节并被 objdump 标成 `rex mov`。
                     if dst >= 8 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x45]));
+                        self.emit_insn(&Insn::raw(&[0x45]));
                     }
-                    self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                    self.emit_insn(&Insn::raw(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
                     let rex2 = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    self.emit_insn(&Insn::raw_bytes(&[rex2, 0x81, 0xE0 | (dst & 7)]));
-                    self.emit_insn(&Insn::raw_bytes(&0xFFFFu32.to_le_bytes()));
+                    self.emit_insn(&Insn::raw(&[rex2, 0x81, 0xE0 | (dst & 7)]));
+                    self.emit_insn(&Insn::raw(&0xFFFFu32.to_le_bytes()));
                 }
             },
             Type::Int | Type::UInt => {
@@ -303,9 +325,9 @@ impl Codegen {
                     // 只置一边就把另一个字段留在低 8 个寄存器上（读/写的都是别人的 %eax）。
                     // <8 时一个前缀都不发：裸 0x40 什么都不扩，只多占一字节并被 objdump 标成 `rex mov`。
                     if dst >= 8 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x45]));
+                        self.emit_insn(&Insn::raw(&[0x45]));
                     }
-                    self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                    self.emit_insn(&Insn::raw(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
                 }
                 // 有符号 int: 64 位寄存器低 32 位已正确, 无需操作
             },
@@ -322,19 +344,19 @@ impl Codegen {
         match ty {
             Type::Char | Type::SChar | Type::Bool => {
                 // movsx dst, dst_low8: 48 0F BE C0+dst,dst
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xBE, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                self.emit_insn(&Insn::raw(&[rex, 0x0F, 0xBE, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
             },
             Type::Short => {
                 // movsx dst, dst_low16: 48 0F BF C0+dst,dst
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xBF, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                self.emit_insn(&Insn::raw(&[rex, 0x0F, 0xBF, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
             },
             Type::UChar => {
                 // movzx dst, dst_low8: 48 0F B6 C0+dst,dst
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xB6, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                self.emit_insn(&Insn::raw(&[rex, 0x0F, 0xB6, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
             },
             Type::UShort => {
                 // movzx dst, dst_low16: 48 0F B7 C0+dst,dst
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xB7, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                self.emit_insn(&Insn::raw(&[rex, 0x0F, 0xB7, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
             },
             _ => {}, // int/long/ptr 等不需要提升
         }
@@ -359,14 +381,14 @@ impl Codegen {
             // 只置一边就把另一个字段留在低 8 个寄存器上（读/写的都是别人的 %eax）。
             // <8 时一个前缀都不发：裸 0x40 什么都不扩，只多占一字节并被 objdump 标成 `rex mov`。
             if dst >= 8 {
-                self.emit_insn(&Insn::raw_bytes(&[0x45]));
+                self.emit_insn(&Insn::raw(&[0x45]));
             }
-            self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+            self.emit_insn(&Insn::raw(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
         } else {
             // and dst, mask: 清除高位
             let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-            self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xE0 | (dst & 7)]));
-            self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
+            self.emit_insn(&Insn::raw(&[rex, 0x81, 0xE0 | (dst & 7)]));
+            self.emit_insn(&Insn::raw(&mask.to_le_bytes()));
         }
     }
 }

@@ -201,21 +201,21 @@ impl Codegen {
         let func_align = f.alignment.unwrap_or(1).max(min_align).max(1);
         self.text_align = self.text_align.max(func_align as u64);
         while !self.code.len().is_multiple_of(func_align) {
-            self.emit_insn(&Insn::raw_bytes(&[0x90]));
+            self.emit_insn(&Insn::raw(&[0x90]));
         }
         let func_start = if let Some((n, m)) = self.patchable_function_entry {
             let prefix_len = m.min(n);
             let suffix_len = n.saturating_sub(prefix_len);
             self.text_align = self.text_align.max(n.max(1) as u64);
             for _ in 0..prefix_len {
-                self.emit_insn(&Insn::raw_bytes(&[0x90]));
+                self.emit_insn(&Insn::raw(&[0x90]));
             }
             let func_start = self.pos();
             // 使用 asm label 覆盖符号名 (如果有)
             let sym_name = self.resolve_asm_label(&f.name.name).to_string();
             self.label(&sym_name);
             for _ in 0..suffix_len {
-                self.emit_insn(&Insn::raw_bytes(&[0x90]));
+                self.emit_insn(&Insn::raw(&[0x90]));
             }
             func_start
         } else {
@@ -245,11 +245,14 @@ impl Codegen {
             }
         }
         if self.target.frame_pointer {
-            self.emit_insn(&Insn::raw_bytes(&[0x55])); // push rbp
+            self.emit_insn(&Insn::raw_with_gas(&[0x55], "push %rbp"));
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x41, 0x55, 0x49, 0x89, 0xe5]));
+        // 序言固定序列: push %r13; mov %rsp, %r13. 拆成两条 Insn 以便 -S 渲染各自的 gas 行.
+        // 单条 5 字节发射会被 disasm 拆成两行 gas 文本, 渲染器无 gas_text 时只能 fallback.
+        self.emit_insn(&Insn::raw_with_gas(&[0x41, 0x55], "push %r13"));
+        self.emit_insn(&Insn::raw_with_gas(&[0x49, 0x89, 0xe5], "mov %rsp, %r13"));
         if self.target.frame_pointer {
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xE5])); // mov rbp, rsp
+            self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x89, 0xE5], "mov %rsp, %rbp"));
             // frame-pointer 模式下序言推了**两个**寄存器（rbp 与 r13），而入口时
             // rsp ≡ 8 (mod 16)，两次 8 字节之后仍就是 8 —— 本端的不变式是「体内每个 call
             // 点 rsp ≡ 0 (mod 16)」（`emit/stmt.rs` 里 pr44575 就是它的代价）。实测
@@ -258,7 +261,7 @@ impl Codegen {
             // 复位栈指针，所以这 8 字节不需要（也不应该）手写回去。
             // 它必须在 `cur_prologue_end` 之前发出：FDE 的 CFA 规则从那个偏移之后才生效，
             // 落在规则之外的 prologue 差异展开器就看不到了。
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x08])); // sub $8, rsp
+            self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x83, 0xEC, 0x08], "sub $8, %rsp"));
         }
         // C++ 零成本异常: 序言到此结束 —— FDE 的 CFA 规则必须从这一偏移之后
         // 才生效 (之前 rsp 还在变动, CFA 沿用 CIE 的 `rsp + 8`)。
@@ -703,9 +706,9 @@ impl Codegen {
                     crate::cli::StackGuardReg::Gs => 0x65u8,
                     _ => 0x64u8, // Fs is default
                 };
-                self.emit_insn(&Insn::raw_bytes(&[seg_prefix, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00]));
+                self.emit_insn(&Insn::raw(&[seg_prefix, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00]));
                 // mov [r13 - 8], rax  → 存储在帧顶部
-                self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x85, 0xf8, 0xff, 0xff, 0xff]));
+                self.emit_insn(&Insn::raw(&[0x49, 0x89, 0x85, 0xf8, 0xff, 0xff, 0xff]));
             }
             // KASAN 栈红区: 毒化整个帧, 然后解除变量区域的毒化
             if self.kasan && self.frame_layout.frame_size > 0 {
@@ -720,19 +723,19 @@ impl Codegen {
             // 未使用的寄存器指令由 patch_callee_saves 改写为 nop.
             // mov [r13 - 16], rbx  (REX.WB: r13 needs REX.B)
             self.callee_save_patch_sites.push((self.pos(), 0x01));
-            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x5d, 0xf0]));
+            self.emit_insn(&Insn::raw_with_gas(&[0x49, 0x89, 0x5d, 0xf0], "mov %rbx, -16(%r13)"));
             // mov [r13 - 24], r12  (REX.WRB: r12 needs REX.R, r13 needs REX.B)
             self.callee_save_patch_sites.push((self.pos(), 0x02));
-            self.emit_insn(&Insn::raw_bytes(&[0x4d, 0x89, 0x65, 0xe8]));
+            self.emit_insn(&Insn::raw_with_gas(&[0x4d, 0x89, 0x65, 0xe8], "mov %r12, -24(%r13)"));
             // mov [r13 - 32], r14  (REX.WRB: r14 needs REX.R, r13 needs REX.B)
             self.callee_save_patch_sites.push((self.pos(), 0x04));
-            self.emit_insn(&Insn::raw_bytes(&[0x4d, 0x89, 0x75, 0xe0]));
+            self.emit_insn(&Insn::raw_with_gas(&[0x4d, 0x89, 0x75, 0xe0], "mov %r14, -32(%r13)"));
             // mov [r13 - 40], r15  (REX.WRB: r15 需要 REX.R, r13 需要 REX.B)
             // 这里的 modrm 是 `mod=01 rm=101`（r13+disp8），**没有 SIB**，所以 REX.X
             // 是多余的：旧代码发 0x4F = W|R|X|B，产物里被 objdump 老实标成
             // `rex.WRXB mov %r15,-0x28(%r13)`。X 只在有 SIB 时表达 index 扩展。
             self.callee_save_patch_sites.push((self.pos(), 0x08));
-            self.emit_insn(&Insn::raw_bytes(&[0x4d, 0x89, 0x7d, 0xd8]));
+            self.emit_insn(&Insn::raw_with_gas(&[0x4d, 0x89, 0x7d, 0xd8], "mov %r15, -40(%r13)"));
             // 变参 reg save area 放在 frame 底部 (紧贴 rsp 之后).
             // 帧布局 (自下而上):
             //   r13+0 saved r13 / r13+8 ret addr
@@ -790,11 +793,11 @@ impl Codegen {
                         // 旧写法先算 `let lo = xmm & 7` 再拿 `lo >= 8` 判扩张，而掩蔽后的
                         // 值永远 <8，于是 xmm 落在 8..15 时两个字段都编成了低 8 号
                         // （写的不是 %xmm8-15而是 %xmm0-7）。
-                        self.emit_insn(&Insn::raw_bytes(&[0xF2]));
+                        self.emit_insn(&Insn::raw(&[0xF2]));
                         if xmm >= 8 {
-                            self.emit_insn(&Insn::raw_bytes(&[0x45])); // REX.R+B，同一个号既在 reg 又在 r/m
+                            self.emit_insn(&Insn::raw(&[0x45])); // REX.R+B，同一个号既在 reg 又在 r/m
                         }
-                        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x5A, 0xC0 | ((xmm & 7) << 3) | (xmm & 7)]));
+                        self.emit_insn(&Insn::raw(&[0x0F, 0x5A, 0xC0 | ((xmm & 7) << 3) | (xmm & 7)]));
                     }
                     self.store_xmm32_stack(xmm, off);
                 } else if wide128 || (ty.size() == 16 && matches!(ty, Type::Vector(_, _))) {
@@ -820,11 +823,11 @@ impl Codegen {
                 let incoming = 16i64 + arg_off;
                 // fld tbyte [r13+incoming]  DB /5: mod=10|reg=5|rm=101 = 0xAD, REX.B=0x41
                 // （写成 0x85 会漏掉 reg 字段而变成 `fildl m32int`，静默读 4 字节整数）
-                self.emit_insn(&Insn::raw_bytes(&[0x41, 0xDB, 0xAD]));
-                self.emit_insn(&Insn::raw_bytes(&(incoming as i32).to_le_bytes()));
+                self.emit_insn(&Insn::raw(&[0x41, 0xDB, 0xAD]));
+                self.emit_insn(&Insn::raw(&(incoming as i32).to_le_bytes()));
                 // fstp tbyte [r13+off]      DB /7: mod=10 reg=7 rm=101 → 0xBD
-                self.emit_insn(&Insn::raw_bytes(&[0x41, 0xDB, 0xBD]));
-                self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
+                self.emit_insn(&Insn::raw(&[0x41, 0xDB, 0xBD]));
+                self.emit_insn(&Insn::raw(&(off as i32).to_le_bytes()));
             }
             for (arg_off, off) in cld_param_stores {
                 // complex LD: 两个 16 字节栈槽, 逐分量 fldt/fstpt 直拷
@@ -832,10 +835,10 @@ impl Codegen {
                 for k in 0..2 {
                     let incoming = 16i64 + arg_off + k * 16;
                     let dst = off + k * 16;
-                    self.emit_insn(&Insn::raw_bytes(&[0x41, 0xDB, 0xAD]));
-                    self.emit_insn(&Insn::raw_bytes(&(incoming as i32).to_le_bytes()));
-                    self.emit_insn(&Insn::raw_bytes(&[0x41, 0xDB, 0xBD]));
-                    self.emit_insn(&Insn::raw_bytes(&(dst as i32).to_le_bytes()));
+                    self.emit_insn(&Insn::raw(&[0x41, 0xDB, 0xAD]));
+                    self.emit_insn(&Insn::raw(&(incoming as i32).to_le_bytes()));
+                    self.emit_insn(&Insn::raw(&[0x41, 0xDB, 0xBD]));
+                    self.emit_insn(&Insn::raw(&(dst as i32).to_le_bytes()));
                 }
             }
             for (arg_off, off) in stack_param_stores {
@@ -914,9 +917,9 @@ impl Codegen {
                     crate::cli::StackGuardReg::Gs => 0x65u8,
                     _ => 0x64u8, // Fs is default
                 };
-                self.emit_insn(&Insn::raw_bytes(&[seg_prefix, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00]));
+                self.emit_insn(&Insn::raw(&[seg_prefix, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00]));
                 // mov [r13 - 8], rax  → 存储在帧顶部
-                self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x85, 0xf8, 0xff, 0xff, 0xff]));
+                self.emit_insn(&Insn::raw(&[0x49, 0x89, 0x85, 0xf8, 0xff, 0xff, 0xff]));
             }
             // KASAN 栈红区: 毒化整个帧, 然后解除变量区域的毒化
             if self.kasan && self.frame_layout.frame_size > 0 {
@@ -1102,9 +1105,9 @@ impl Codegen {
                                                 | Type::ULong
                                                 | Type::ULongLong
                                         ) {
-                                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2]));
+                                            self.emit_insn(&Insn::raw(&[0x48, 0x31, 0xD2]));
                                         } else {
-                                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x99])); // cqo
+                                            self.emit_insn(&Insn::raw(&[0x48, 0x99])); // cqo
                                         }
                                     }
                                     let off = self.var_offset(&v.name.name);
@@ -1145,7 +1148,7 @@ impl Codegen {
             // C99 5.1.2.2.3: main 无 return 语句时隐式 return 0.
             // 否则 epilogue 直接 ret, eax 为启动代码残留值.
             if f.name.name == "main" && matches!(f.ret_ty, Type::Int) {
-                self.emit_insn(&Insn::raw_bytes(&[0xB8, 0, 0, 0, 0])); // mov eax, 0
+                self.emit_insn(&Insn::raw(&[0xB8, 0, 0, 0, 0])); // mov eax, 0
             }
             // -finstrument-functions: 自然结尾的函数也需要 exit hook
             // (之前只在 Stmt::Return 路径发射, fallthrough 到函数末尾时遗漏)

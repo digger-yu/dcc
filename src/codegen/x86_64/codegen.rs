@@ -364,6 +364,20 @@ pub struct Codegen {
     /// 用于在 -g 下生成 per-instruction.debug_line 条目，
     /// 使 GDB 能单步进入 asm 块内部每条指令 (类似 GCC.debug_insn 效果)
     pub asm_insn_debug_entries: Vec<(u64, u32, u16)>,
+    /// P9 步骤 5: 内联汇编每条指令的 (起始 pc, 包装好的 Raw Insn) 日志。
+    /// -S 渲染时按 pc 区间切片读这张表, 不再对这些字节跑 disasm 反汇编。
+    /// 原生 C 代码发射的指令不进这张表 (步骤 6 另起 self.insns)。
+    /// 当前只是"事后观察 self.code 增量"写入, 尚未有读取方 —— 步骤 6 起消费。
+    pub(crate) asm_insn_log: Vec<(u64, Insn)>,
+    /// P9 方案 C: 原生 C 代码每条发射指令的 (起始 pc, Insn) 记录.
+    /// -S 渲染器按 pc 遍历这张表直接输出 Insn.gas_text, 不再走 disasm 反推.
+    /// 与 asm_insn_log 分两张表的原因: asm_insn_log 只覆盖内联汇编块,
+    /// 原生 C 路径走 emit_insn → 这里. 两张表在 build_asm_output_v2 合并.
+    pub(crate) insn_records: Vec<(u64, Insn)>,
+    /// P9 方案 C 临时统计: DCC_GAS_STATS=1 时记录每个发射点的调用频率.
+    pub(crate) emit_insn_stats: std::collections::HashMap<String, usize>,
+    /// P9 方案 C 临时统计: (has_gas, count).
+    pub(crate) emit_insn_gas_hits: std::collections::HashMap<bool, usize>,
     /// 普通 C 语句的 DWARF 行号记录：(语句起始 PC, 源码行)。
     ///
     /// 为什么单开一张表：上面两张只覆盖内联 asm 块，它们的 PC 区间是「整块」且带
@@ -691,6 +705,13 @@ pub struct FuncEmitChunk {
     pub stmt_line_entries: Vec<(u64, u32)>,
     pub asm_line_entries: Vec<(u64, u64, u32)>,
     pub asm_insn_debug_entries: Vec<(u64, u32, u16)>,
+    /// P9 步骤 5: worker 采集的内联汇编指令日志 (chunk 相对 pc), 回主 Codegen 合并。
+    pub(crate) asm_insn_log: Vec<(u64, Insn)>,
+    /// P9 方案 C: worker 采集的原生 C 指令记录 (chunk 相对 pc), 合并时加 base。
+    pub(crate) insn_records: Vec<(u64, Insn)>,
+    /// P9 方案 C 临时统计 (worker 副本).
+    pub(crate) emit_insn_stats: std::collections::HashMap<String, usize>,
+    pub(crate) emit_insn_gas_hits: std::collections::HashMap<bool, usize>,
     /// rodata 增量：chunk 编译期间新增的 rodata 数据
     pub new_rodata: Vec<u8>,
     /// chunk 开始时的 rodata 大小 (用于计算增量)
@@ -908,6 +929,10 @@ impl Codegen {
             func_asm_layout: HashMap::new(),
             asm_line_entries: Vec::new(),
             asm_insn_debug_entries: Vec::new(),
+            asm_insn_log: Vec::new(),
+            insn_records: Vec::new(),
+            emit_insn_stats: std::collections::HashMap::new(),
+            emit_insn_gas_hits: std::collections::HashMap::new(),
             stmt_line_entries: Vec::new(),
             asm_passthrough: Vec::new(),
             asm_passthrough_regions: Vec::new(),
@@ -1358,28 +1383,28 @@ impl Codegen {
         ctors.sort_by_key(|(p, _)| *p);
         dtors.sort_by_key(|(p, _)| *p);
         self.label("_start");
-        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0xe4])); // mov r12, rsp (保存原始 rsp, 用于 leave 后恢复)
-        self.emit_insn(&Insn::raw_bytes(&[0x55])); // push rbp
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xe5])); // mov rbp, rsp
+        self.emit_insn(&Insn::raw(&[0x49, 0x89, 0xe4])); // mov r12, rsp (保存原始 rsp, 用于 leave 后恢复)
+        self.emit_insn(&Insn::raw(&[0x55])); // push rbp
+        self.emit_insn(&Insn::raw(&[0x48, 0x89, 0xe5])); // mov rbp, rsp
                                         // 调用 constructor 函数
         for (_p, ctor) in &ctors {
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xc0])); // xor rax, rax (no variadic args)
+            self.emit_insn(&Insn::raw(&[0x48, 0x31, 0xc0])); // xor rax, rax (no variadic args)
             self.call_label(ctor);
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xc0])); // xor rax, rax
+        self.emit_insn(&Insn::raw(&[0x48, 0x31, 0xc0])); // xor rax, rax
         self.call_label("main");
         // 保存 main 返回值
-        self.emit_insn(&Insn::raw_bytes(&[0x41, 0x89, 0xc5])); // mov r13d, eax
+        self.emit_insn(&Insn::raw(&[0x41, 0x89, 0xc5])); // mov r13d, eax
                                         // 调用 destructor 函数
         for (_p, dtor) in &dtors {
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xc0])); // xor rax, rax
+            self.emit_insn(&Insn::raw(&[0x48, 0x31, 0xc0])); // xor rax, rax
             self.call_label(dtor);
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x4c, 0x89, 0xe4])); // mov rsp, r12 (恢复原始 rsp)
-        self.emit_insn(&Insn::raw_bytes(&[0x44, 0x89, 0xef])); // mov edi, r13d (main 返回值)
-        self.emit_insn(&Insn::raw_bytes(&[0xb8, 0x3c, 0x00, 0x00, 0x00])); // mov eax, 0x3c
-        self.emit_insn(&Insn::raw_bytes(&[0x0f, 0x05])); // syscall
-        self.emit_insn(&Insn::raw_bytes(&[0xeb, 0xfe])); // jmp self
+        self.emit_insn(&Insn::raw(&[0x4c, 0x89, 0xe4])); // mov rsp, r12 (恢复原始 rsp)
+        self.emit_insn(&Insn::raw(&[0x44, 0x89, 0xef])); // mov edi, r13d (main 返回值)
+        self.emit_insn(&Insn::raw(&[0xb8, 0x3c, 0x00, 0x00, 0x00])); // mov eax, 0x3c
+        self.emit_insn(&Insn::raw(&[0x0f, 0x05])); // syscall
+        self.emit_insn(&Insn::raw(&[0xeb, 0xfe])); // jmp self
                                   // 静态局部变量分析 pass + 预注册到 data/bss
         self.static_local_map = crate::static_locals::analyze_static_locals(prog);
         self.pre_register_static_locals();

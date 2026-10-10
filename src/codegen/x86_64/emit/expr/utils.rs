@@ -7,6 +7,9 @@ use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
 use crate::codegen::x86_64::asm::*;
+use crate::codegen::x86_64::emit::gas::{
+    gp as gas_gp, REG32 as GAS_REG32, REG64 as GAS_REG64,
+};
 use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::*;
@@ -45,42 +48,83 @@ impl Codegen {
             && is_unsigned;
         if !is_cmp && !matches!(op, BinOp::Div | BinOp::Mod | BinOp::Mul | BinOp::Shl | BinOp::Shr)
         {
+            // P9 方案 C: REX 前缀与 opcode+ModRM 合并为单条 raw_with_gas,
+            // 不再分成两次 emit_insn (否则 gas_text 丢了整条指令, 且发射两份 record).
             // Add/Sub/And/Or/Xor (0x01/0x29/...): dst 在 r/m 字段 (需 REX.B),
-            // src 在 reg 字段 (需 REX.R). 二者独立判断, 不可 else-if,
-            // 否则双高位寄存器时 REX.B 丢失, dst 被截断为 dst&7.
-            // Note: Shl/Shr/Mul/Div/Mod emit their own REX prefixes internally.
+            // src 在 reg 字段 (需 REX.R). 二者独立判断, 不可 else-if.
             // REX.W=0 for 32-bit ops (auto zero-extend), REX.W=1 for 64-bit ops.
-            let mut rex = if use_32bit { 0x40u8 } else { 0x48u8 };
-            if src >= 8 {
-                rex |= 0x04;
-            }
-            if dst >= 8 {
-                rex |= 0x01;
-            }
-            // 32 位且 src/dst 都在低 8 个 ⇒ 这个 rex 就是裸 0x40，不扩任何字段。
-            // 它不改变语义，但会被 objdump 标成 `rex and %edx,%ecx` —— 那是多余位唯一
-            // 的读数，也是下一个人照抄的源头。64 位一支的 0x48 是 W 位，必须留。
-            if rex != 0x40 {
-                self.emit_insn(&Insn::raw_bytes(&[rex]));
-            }
         }
         let r = (src & 7) << 3;
         let m = dst & 7;
+        // GAS 宽度: 32 位用 %eXX, 64 位用 %rXX.
+        let (src_name, dst_name): (&str, &str) = if use_32bit {
+            (GAS_REG32[(src & 15) as usize], GAS_REG32[(dst & 15) as usize])
+        } else {
+            (GAS_REG64[(src & 15) as usize], GAS_REG64[(dst & 15) as usize])
+        };
+        // 通用: 拼完整 REX 前缀 (Add/Sub/And/Or/Xor 用).
+        let build_rex = |use_32bit: bool| -> u8 {
+            let mut rex = if use_32bit { 0x40u8 } else { 0x48u8 };
+            if src >= 8 { rex |= 0x04; }
+            if dst >= 8 { rex |= 0x01; }
+            rex
+        };
         match op {
             BinOp::Add => {
-                self.emit_insn(&Insn::raw_bytes(&[0x01, 0xC0 | r | m]));
+                let modrm = 0xC0 | r | m;
+                let rex = build_rex(use_32bit);
+                let bytes: Vec<u8> = if rex != 0x40 {
+                    vec![rex, 0x01, modrm]
+                } else {
+                    vec![0x01, modrm]
+                };
+                // AT&T: add src, dst (reg 字段=src 在前, r/m=dst 在后).
+                let gas = format!("add {src_name}, {dst_name}");
+                self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
             },
             BinOp::Sub => {
-                self.emit_insn(&Insn::raw_bytes(&[0x29, 0xC0 | r | m]));
+                let modrm = 0xC0 | r | m;
+                let rex = build_rex(use_32bit);
+                let bytes: Vec<u8> = if rex != 0x40 {
+                    vec![rex, 0x29, modrm]
+                } else {
+                    vec![0x29, modrm]
+                };
+                let gas = format!("sub {src_name}, {dst_name}");
+                self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
             },
             BinOp::And => {
-                self.emit_insn(&Insn::raw_bytes(&[0x21, 0xC0 | r | m]));
+                let modrm = 0xC0 | r | m;
+                let rex = build_rex(use_32bit);
+                let bytes: Vec<u8> = if rex != 0x40 {
+                    vec![rex, 0x21, modrm]
+                } else {
+                    vec![0x21, modrm]
+                };
+                let gas = format!("and {src_name}, {dst_name}");
+                self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
             },
             BinOp::Or => {
-                self.emit_insn(&Insn::raw_bytes(&[0x09, 0xC0 | r | m]));
+                let modrm = 0xC0 | r | m;
+                let rex = build_rex(use_32bit);
+                let bytes: Vec<u8> = if rex != 0x40 {
+                    vec![rex, 0x09, modrm]
+                } else {
+                    vec![0x09, modrm]
+                };
+                let gas = format!("or {src_name}, {dst_name}");
+                self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
             },
             BinOp::Xor => {
-                self.emit_insn(&Insn::raw_bytes(&[0x31, 0xC0 | r | m]));
+                let modrm = 0xC0 | r | m;
+                let rex = build_rex(use_32bit);
+                let bytes: Vec<u8> = if rex != 0x40 {
+                    vec![rex, 0x31, modrm]
+                } else {
+                    vec![0x31, modrm]
+                };
+                let gas = format!("xor {src_name}, {dst_name}");
+                self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
             },
             BinOp::Mul => {
                 // imul dst, src: dst is in reg field (needs REX.R), src in r/m (needs REX.B)
@@ -91,7 +135,9 @@ impl Codegen {
                 if src >= 8 {
                     rex |= 0x01;
                 }
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xAF, 0xC0 | ((dst & 7) << 3) | (src & 7)]));
+                use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
+                let gas = format!("imul {}, {}", GAS_REG64[(src & 15) as usize], GAS_REG64[(dst & 15) as usize]);
+                self.emit_insn(&Insn::raw_with_gas(&[rex, 0x0F, 0xAF, 0xC0 | ((dst & 7) << 3) | (src & 7)], &gas));
             },
             BinOp::Div | BinOp::Mod => {
                 // 有符号: cqto (符号扩展 rax→rdx:rax) + idiv
@@ -100,49 +146,49 @@ impl Codegen {
                 let op_size = lt.size().max(rt.size());
                 let need_zero_ext = !is_signed && op_size <= 4;
                 if src == 2 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x52])); // push rdx (save divisor)
+                    self.emit_insn(&Insn::raw(&[0x52])); // push rdx (save divisor)
                 }
                 if dst != 0 {
                     self.mov(0, dst); // rax = 被除数
                 }
                 // 零扩展被除数 (rax) 从32位到64位
                 if need_zero_ext {
-                    self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0])); // mov eax, eax (zero-extends to rax)
+                    self.emit_insn(&Insn::raw(&[0x89, 0xC0])); // mov eax, eax (zero-extends to rax)
                 }
                 if src == 2 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x59])); // pop rcx (restore divisor)
+                    self.emit_insn(&Insn::raw(&[0x59])); // pop rcx (restore divisor)
                                         // 零扩展除数 (rcx) 从32位到64位
                     if need_zero_ext {
-                        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC9])); // mov ecx, ecx (zero-extends to rcx)
+                        self.emit_insn(&Insn::raw(&[0x89, 0xC9])); // mov ecx, ecx (zero-extends to rcx)
                     }
                     if is_signed {
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x99])); // cqto
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xF9])); // idiv rcx
+                        self.emit_insn(&Insn::raw(&[0x48, 0x99])); // cqto
+                        self.emit_insn(&Insn::raw(&[0x48, 0xF7, 0xF9])); // idiv rcx
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2])); // xor rdx, rdx
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xF1])); // div rcx
+                        self.emit_insn(&Insn::raw(&[0x48, 0x31, 0xD2])); // xor rdx, rdx
+                        self.emit_insn(&Insn::raw(&[0x48, 0xF7, 0xF1])); // div rcx
                     }
                 } else {
                     // 零扩展除数从32位到64位
                     if need_zero_ext {
                         // mov src, src (zero-extends to 64-bit)
                         let src_byte = src & 7;
-                        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | (src_byte << 3) | src_byte]));
+                        self.emit_insn(&Insn::raw(&[0x89, 0xC0 | (src_byte << 3) | src_byte]));
                     }
                     if is_signed {
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x99])); // cqto
+                        self.emit_insn(&Insn::raw(&[0x48, 0x99])); // cqto
                         let mut rex = 0x48u8;
                         if src >= 8 {
                             rex |= 0x41;
                         }
-                        self.emit_insn(&Insn::raw_bytes(&[rex, 0xF7, 0xF8 | (src & 7)])); // idiv src
+                        self.emit_insn(&Insn::raw(&[rex, 0xF7, 0xF8 | (src & 7)])); // idiv src
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2])); // xor rdx, rdx
+                        self.emit_insn(&Insn::raw(&[0x48, 0x31, 0xD2])); // xor rdx, rdx
                         let mut rex = 0x48u8;
                         if src >= 8 {
                             rex |= 0x41;
                         }
-                        self.emit_insn(&Insn::raw_bytes(&[rex, 0xF7, 0xF0 | (src & 7)])); // div src
+                        self.emit_insn(&Insn::raw(&[rex, 0xF7, 0xF0 | (src & 7)])); // div src
                     }
                 }
                 if matches!(op, BinOp::Mod) {
@@ -167,28 +213,28 @@ impl Codegen {
                     if dst >= 8 {
                         rex |= 0x41;
                     }
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0xD3, sub | m]));
+                    self.emit_insn(&Insn::raw(&[rex, 0xD3, sub | m]));
                 } else if dst == 1 {
                     // dst=rcx 且移位量在 src: xchg 后在 src 上移位, 再搬回 rcx
                     let mut rex = 0x48u8;
                     if src >= 8 {
                         rex |= 0x41;
                     }
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x87, 0xC8 | (src & 7)])); // xchg rcx, src
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0xD3, sub | (src & 7)])); // shl/shr src, cl
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, 0xC8 | (src & 7)])); // mov rcx, src
+                    self.emit_insn(&Insn::raw(&[rex, 0x87, 0xC8 | (src & 7)])); // xchg rcx, src
+                    self.emit_insn(&Insn::raw(&[rex, 0xD3, sub | (src & 7)])); // shl/shr src, cl
+                    self.emit_insn(&Insn::raw(&[rex, 0x8B, 0xC8 | (src & 7)])); // mov rcx, src
                 } else {
                     // 移位量搬到 cl 后对 dst 移位
                     let mut rex1 = 0x48u8;
                     if src >= 8 {
                         rex1 |= 0x41;
                     }
-                    self.emit_insn(&Insn::raw_bytes(&[rex1, 0x8B, 0xC8 | (src & 7)])); // mov rcx, src
+                    self.emit_insn(&Insn::raw(&[rex1, 0x8B, 0xC8 | (src & 7)])); // mov rcx, src
                     let mut rex = 0x48u8;
                     if dst >= 8 {
                         rex |= 0x41;
                     }
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0xD3, sub | m]));
+                    self.emit_insn(&Insn::raw(&[rex, 0xD3, sub | m]));
                 }
             },
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne => {
@@ -211,6 +257,12 @@ impl Codegen {
                 // 从死分支变成常走分支，漏掉的 REX.B 会让 `cmp %r8d,%r12d` 解码成
                 // `cmp %r8d,%esp`（mod=3 rm=100 是非法编码，objdump 直接点名 %esp）。
                 // 位序判据见 docs/ssa-pass-upgrade-plan.md §7.21，机器判据见 rex_matrix::binop_matrix。
+                // P9 方案 C: cmp+setcc+movzbq 合并发射时挂 gas_text, 避免事后反推.
+                let (cmp_src_name, cmp_dst_name): (&str, &str) = if use_32bit {
+                    (GAS_REG32[(src & 15) as usize], GAS_REG32[(dst & 15) as usize])
+                } else {
+                    (GAS_REG64[(src & 15) as usize], GAS_REG64[(dst & 15) as usize])
+                };
                 let mut rex = if use_32bit { 0u8 } else { 0x48u8 };
                 if src >= 8 {
                     rex |= 0x44;
@@ -219,44 +271,30 @@ impl Codegen {
                     rex |= 0x41;
                 }
                 // 32 位比较且两侧都在低 8 号 ⇒ rex 为 0，不发前缀（64 位的 0x48 是 W 位）。
-                if rex != 0 {
-                    self.emit_insn(&Insn::raw_bytes(&[rex]));
-                }
-                self.emit_insn(&Insn::raw_bytes(&[0x39, 0xC0 | ((src & 7) << 3) | (dst & 7)]));
-                let cc = match op {
-                    BinOp::Lt => {
-                        if is_signed {
-                            0x9C
-                        } else {
-                            0x92
-                        }
-                    },
-                    BinOp::Le => {
-                        if is_signed {
-                            0x9E
-                        } else {
-                            0x96
-                        }
-                    },
-                    BinOp::Gt => {
-                        if is_signed {
-                            0x9F
-                        } else {
-                            0x97
-                        }
-                    },
-                    BinOp::Ge => {
-                        if is_signed {
-                            0x9D
-                        } else {
-                            0x93
-                        }
-                    },
-                    BinOp::EqEq => 0x94,
-                    BinOp::Ne => 0x95,
+                let modrm = 0xC0 | ((src & 7) << 3) | (dst & 7);
+                let cmp_bytes: Vec<u8> = if rex != 0 {
+                    vec![rex, 0x39, modrm]
+                } else {
+                    vec![0x39, modrm]
+                };
+                // AT&T 序: cmp src, dst (reg 字段在前, r/m 字段在后).
+                self.emit_insn(&Insn::raw_with_gas(&cmp_bytes, &format!("cmp {cmp_src_name}, {cmp_dst_name}")));
+                // setcc al + movzbq %al, %rax 拆开各自挂 gas.
+                let (cc, cc_letter): (u8, &str) = match op {
+                    BinOp::Lt if is_signed => (0x9C, "setl"),
+                    BinOp::Lt => (0x92, "setb"),
+                    BinOp::Le if is_signed => (0x9E, "setle"),
+                    BinOp::Le => (0x96, "setbe"),
+                    BinOp::Gt if is_signed => (0x9F, "setg"),
+                    BinOp::Gt => (0x97, "seta"),
+                    BinOp::Ge if is_signed => (0x9D, "setge"),
+                    BinOp::Ge => (0x93, "setae"),
+                    BinOp::EqEq => (0x94, "sete"),
+                    BinOp::Ne => (0x95, "setne"),
                     _ => unreachable!(),
                 };
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, cc, 0xC0, 0x48, 0x0F, 0xB6, 0xC0]));
+                self.emit_insn(&Insn::raw_with_gas(&[0x0F, cc, 0xC0], &format!("{cc_letter} %al")));
+                self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xB6, 0xC0], "movzbq %al, %rax"));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }

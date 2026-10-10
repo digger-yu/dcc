@@ -118,23 +118,29 @@ for pat in 't_*' 'kernel_dcc_files.txt' 'kernel_dir_compile.log' \
            '*.o' '*.s' '*.log' \
            'avx512_*' 'asm_*' 'bf*' 'a[0-9]' \
            'build_policy*' 'noinitramfs*' \
-           '*_test_output.log' '*_test.log'; do
+           '*_test_output.log' '*_test.log' \
+           'opteq_*' 'n10*' 'parse*' 'audit' \
+           'dcc_p62_*' 'dcc_head' 'dccrv' \
+           'fx*' 'n[0-9]*' 'p[0-9]*' \
+           'orig_ssa.rs' 'review_test.txt' \
+           'p1_names.txt' 'base_names.txt' 'cur_raw.txt'; do
     s=$(glob_size /tmp -maxdepth 1 -name "$pat")
     tmp_misc=$((tmp_misc + s))
 done
 SIZES+=("$tmp_misc")
-LABELS+=("${CYAN}/tmp 杂项${NC}  (调试 .o/.s / 内核日志 / PCH / 测试产物)")
-DETAILS+=("*.o / *.s / kernel_build*.log / avx512_* / test_* / dcc-pch-* 等")
+LABELS+=("${CYAN}/tmp 杂项${NC}  (调试 .o/.s / 内核日志 / PCH / 测试产物 / 专家 agent 调试目录)")
+DETAILS+=("*.o / *.s / kernel_build*.log / avx512_* / opteq_* / n10* / parse* / audit / dcc_p62_* 等")
 
-# 4) 工作区 profile / coverage 文件
+# 4) 工作区 profile / coverage / perf 文件
 prof_size=0
-for ext in '*.profraw' '*.profdata' '*.dcc.profdata' '*.gcda' '*.gcno'; do
-    s=$(recursive_size "$DCC_ROOT" -name "$ext")
+for ext in '*.profraw' '*.profdata' '*.dcc.profdata' '*.gcda' '*.gcno' \
+           'perf.data' 'perf.data.old' '*.pgort.c'; do
+    s=$(recursive_size "$DCC_ROOT" -name "$ext" -not -path '*/target/*' -not -path '*/.work_tmp/*')
     prof_size=$((prof_size + s))
 done
 SIZES+=("$prof_size")
-LABELS+=("${CYAN}工作区 profile/coverage${NC}  (.profraw / .profdata / .gcda / .gcno)")
-DETAILS+=("路径: $DCC_ROOT 下递归查找")
+LABELS+=("${CYAN}工作区 profile/coverage/perf${NC}  (.profraw / .profdata / .gcda / .gcno / perf.data / *.pgort.c)")
+DETAILS+=("路径: $DCC_ROOT 下递归查找（排除 target/ 与 .work_tmp/）")
 
 # 5) 工作区 PCH 文件
 pch_size=0
@@ -146,7 +152,14 @@ SIZES+=("$pch_size")
 LABELS+=("${CYAN}工作区 PCH${NC}  (*.pch / *.gch)")
 DETAILS+=("路径: $DCC_ROOT 下递归查找")
 
-# 6) Rust target/
+# 6) .work_tmp/（专家 agent A/B 对比 target 副本 / 探针二进制 / 快照日志）
+WORK_TMP="$DCC_ROOT/.work_tmp"
+s=$(dir_size "$WORK_TMP")
+SIZES+=("$s")
+LABELS+=("${CYAN}.work_tmp/${NC}  (专家 agent 临时工作区：A/B target 副本 / 探针 / 快照日志)")
+DETAILS+=("路径: $WORK_TMP  (内容可再生，清空后仅留 README.md)")
+
+# 7) Rust target/
 TARGET_DIR="$DCC_ROOT/target"
 s=$(dir_size "$TARGET_DIR")
 SIZES+=("$s")
@@ -229,7 +242,12 @@ clean_tmp_misc() {
                '/tmp/avx512_*' '/tmp/asm_*' \
                '/tmp/bf' '/tmp/bf2' '/tmp/a1' '/tmp/a2' \
                '/tmp/build_policy*' '/tmp/noinitramfs*' \
-               '/tmp/*_test_output.log' '/tmp/*_test.log'; do
+               '/tmp/*_test_output.log' '/tmp/*_test.log' \
+               '/tmp/opteq_*' '/tmp/n10*' '/tmp/parse*' '/tmp/audit' \
+               '/tmp/dcc_p62_*' '/tmp/dcc_head' '/tmp/dccrv' \
+               '/tmp/fx*' '/tmp/n[0-9]*' '/tmp/p[0-9]*' \
+               '/tmp/orig_ssa.rs' '/tmp/review_test.txt' \
+               '/tmp/p1_names.txt' '/tmp/base_names.txt' '/tmp/cur_raw.txt'; do
         for f in $pat; do
             [[ -e "$f" ]] || continue
             rm -rf "$f"
@@ -240,19 +258,21 @@ clean_tmp_misc() {
 }
 
 clean_profile() {
-    echo -e "${YELLOW}[4/6] 清理工作区 profile/coverage ...${NC}"
+    echo -e "${YELLOW}[4/7] 清理工作区 profile/coverage/perf ...${NC}"
     local n=0
-    for ext in '*.profraw' '*.profdata' '*.dcc.profdata' '*.gcda' '*.gcno'; do
+    for ext in '*.profraw' '*.profdata' '*.dcc.profdata' '*.gcda' '*.gcno' \
+               'perf.data' 'perf.data.old' '*.pgort.c'; do
         while IFS= read -r -d '' f; do
             rm -f "$f"
             n=$((n + 1))
-        done < <(find "$DCC_ROOT" -name "$ext" -print0 2>/dev/null)
+        done < <(find "$DCC_ROOT" -name "$ext" \
+                     -not -path '*/target/*' -not -path '*/.work_tmp/*' -print0 2>/dev/null)
     done
     echo -e "  ${GREEN}已删除${NC} $n 个文件"
 }
 
 clean_pch() {
-    echo -e "${YELLOW}[5/6] 清理工作区 PCH ...${NC}"
+    echo -e "${YELLOW}[5/7] 清理工作区 PCH ...${NC}"
     local n=0
     for ext in '*.pch' '*.gch'; do
         while IFS= read -r -d '' f; do
@@ -263,8 +283,20 @@ clean_pch() {
     echo -e "  ${GREEN}已删除${NC} $n 个文件"
 }
 
+clean_work_tmp() {
+    echo -e "${YELLOW}[6/7] 清理 .work_tmp/ ...${NC}"
+    if [[ -d "$WORK_TMP" ]]; then
+        # 保留 README.md，清空其他所有内容
+        find "$WORK_TMP" -mindepth 1 ! -name 'README.md' -exec rm -rf {} +
+        local n=$(count_files "$WORK_TMP" -mindepth 1 ! -name 'README.md')
+        echo -e "  ${GREEN}已删除${NC} $n 项（保留 README.md）"
+    else
+        echo "  跳过（目录不存在）"
+    fi
+}
+
 clean_target() {
-    echo -e "${YELLOW}[6/6] 清理 Rust target/ ...${NC}"
+    echo -e "${YELLOW}[7/7] 清理 Rust target/ ...${NC}"
     if [[ -d "$TARGET_DIR" ]]; then
         rm -rf "$TARGET_DIR"
         echo -e "  ${GREEN}已删除${NC} $TARGET_DIR"
@@ -283,9 +315,10 @@ if [[ "$MODE" == "--all" ]]; then
     clean_tmp_misc
     clean_profile
     clean_pch
+    clean_work_tmp
     clean_target
 else
-    # 交互式：默认清理 1-5（不含 target/）
+    # 交互式：默认清理 1-6（不含 target/）
     echo -e "${GREEN}${BOLD}═══ 安全清理（不含 Rust target/）═══${NC}"
     echo -e "  使用 ${CYAN}--all${NC} 可额外清理 target/（需重新 cargo build）"
     echo ""
@@ -294,6 +327,7 @@ else
     clean_tmp_misc
     clean_profile
     clean_pch
+    clean_work_tmp
 fi
 
 echo ""

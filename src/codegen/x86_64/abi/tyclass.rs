@@ -306,18 +306,18 @@ impl Codegen {
                 // 浮点表达式 → xmm0; float 需提升到 double
                 self.gen_expr(e, Self::EVAL_BASE);
                 if matches!(expr_ty, Type::Float) && !matches!(declared_ret, Type::Float) {
-                    self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x5A, 0xC0])); // cvtss2sd
+                    self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x5A, 0xC0], "cvtss2sd %xmm0, %xmm0")); // cvtss2sd
                 }
             }
             self.load_stack(7, sret_off); // rdi = sret 指针
             if matches!(declared_ret, Type::Float) {
-                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x11, 0x07])); // movss [rdi], xmm0
+                self.emit_insn(&Insn::raw(&[0xF3, 0x0F, 0x11, 0x07])); // movss [rdi], xmm0
             } else if matches!(declared_ret, Type::LongDouble) {
                 // long double: 低 8 字节 double + 高 8 字节零
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xD6, 0x07])); // movq [rdi], xmm0
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0x47, 0x08, 0, 0, 0, 0])); // mov qword [rdi+8], 0
+                self.emit_insn(&Insn::raw(&[0x66, 0x0F, 0xD6, 0x07])); // movq [rdi], xmm0
+                self.emit_insn(&Insn::raw(&[0x48, 0xC7, 0x47, 0x08, 0, 0, 0, 0])); // mov qword [rdi+8], 0
             } else {
-                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x11, 0x07])); // movsd [rdi], xmm0
+                self.emit_insn(&Insn::raw(&[0xF2, 0x0F, 0x11, 0x07])); // movsd [rdi], xmm0
             }
             return;
         }
@@ -363,14 +363,14 @@ impl Codegen {
         let qwords = sz / 8;
         let remainder = sz % 8;
         if qwords > 0 {
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32 (qwords)
-            self.emit_insn(&Insn::raw_bytes(&(qwords as u32).to_le_bytes()));
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x48, 0xA5])); // rep movsq
+            self.emit_insn(&Insn::raw(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32 (qwords)
+            self.emit_insn(&Insn::raw(&(qwords as u32).to_le_bytes()));
+            self.emit_insn(&Insn::raw(&[0xF3, 0x48, 0xA5])); // rep movsq
         }
         if remainder > 0 {
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32 (remainder)
-            self.emit_insn(&Insn::raw_bytes(&(remainder as u32).to_le_bytes()));
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
+            self.emit_insn(&Insn::raw(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32 (remainder)
+            self.emit_insn(&Insn::raw(&(remainder as u32).to_le_bytes()));
+            self.emit_insn(&Insn::raw(&[0xF3, 0xA4])); // rep movsb
         }
     }
     /// 号 → 64 位裸规范名。名字表只有一份（`abi/regnames.rs::bare_name_of_num`，
@@ -730,7 +730,7 @@ impl Codegen {
     /// 发一枚已算好的段前缀（`None` 时不发任何东西 —— 误发会污染下一条指令）。
     pub(crate) fn emit_seg(&mut self, seg: Option<u8>) {
         if let Some(seg) = seg {
-            self.emit_insn(&Insn::raw_bytes(&[seg]));
+            self.emit_insn(&Insn::raw(&[seg]));
         }
     }
     /// 紧接其后的那一笔内存访问要不要带段前缀：就地判、就地发。
@@ -739,7 +739,7 @@ impl Codegen {
     /// 段前缀只作用于它后面的那一条指令。
     pub(crate) fn emit_seg_for(&mut self, lv: &Expr) {
         if let Some(seg) = self.lvalue_seg_prefix(lv) {
-            self.emit_insn(&Insn::raw_bytes(&[seg]));
+            self.emit_insn(&Insn::raw(&[seg]));
         }
     }
     /// `Self::rex()` 恒返回 ≥0x40，因此「一个字段都不用扩」时它给出的是一枚**不扩任何字段
@@ -752,7 +752,7 @@ impl Codegen {
     pub(crate) fn emit_rex_if_used(&mut self, w: bool, r: u8, x: u8, b: u8, byte_ctx: bool) {
         if byte_ctx || w || r >= 8 || x >= 8 || b >= 8 {
             let v = Self::rex(w, r, x, b);
-            self.emit_insn(&Insn::raw_bytes(&[v]));
+            self.emit_insn(&Insn::raw(&[v]));
         }
     }
 

@@ -40,6 +40,7 @@ mod emit;
 pub mod ifunc;
 mod insn;
 mod instructions;
+mod opcode;
 mod mem;
 mod parallel;
 /// REX 位序穷举门禁（编字节 → 自家解码器读回 → 比对意图寄存器名）
