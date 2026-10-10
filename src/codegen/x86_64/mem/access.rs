@@ -997,7 +997,23 @@ impl Codegen {
     }
     pub(crate) fn emit_store_rsp0(&mut self, inner_sz: i64) {
         match inner_sz {
-            8 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x04, 0x24])); },
+            8 => { let _ = self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(4),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                },
+                &[],
+            )); },
             4 => { let _ = self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,

@@ -2015,7 +2015,23 @@ impl Codegen {
                         if matches!(arg_ty, Type::Float | Type::Double | Type::LongDouble) {
                             self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x11, 0x44, 0x24, 0])); // movsd [rsp+0], xmm0
                         } else {
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x44, 0x24, 0])); // mov [rsp+0], rax
+                            self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(4),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                },
+                &[],
+            )); // mov [rsp+0], rax
                         }
                         stack_off += 8;
                     }
@@ -3178,7 +3194,23 @@ impl Codegen {
             "__builtin_apply_args" => {
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xEC]));
                 self.emit_insn(&Insn::raw_bytes(&448u32.to_le_bytes())); // sub rsp, 448
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x3C, 0x24])); // mov [rsp], rdi
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(4),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        7, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                },
+                &[],
+            )); // mov [rsp], rdi
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x74, 0x24, 0x08])); // mov [rsp+8], rsi
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x54, 0x24, 0x10])); // mov [rsp+16], rdx
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x4C, 0x24, 0x18])); // mov [rsp+24], rcx

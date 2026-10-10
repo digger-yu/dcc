@@ -182,7 +182,23 @@ impl Codegen {
         if unsigned && sz >= 8 {
             // u64 拆半：x = 2*(x>>1) + (x&1)，两半都落在 i64 范围内。
             // 只用 rax + 内存运算，不占用任何额外 GP 寄存器（rdx/rcx 可能正持待用值）。
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x04, 0x24])); // mov [rsp], rax        ; x
+            self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(4),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                },
+                &[],
+            )); // mov [rsp], rax        ; x
             self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B64,
@@ -219,10 +235,42 @@ impl Codegen {
                 },
                 &[],
             ));; // mov eax, eax → 零扩展高 32 位
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x04, 0x24])); // mov [rsp], rax
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(4),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                },
+                &[],
+            )); // mov [rsp], rax
                 self.emit_x87_mem_at(0xDB, 0, 4, 0, true); // fild qword [rsp]
             } else if sz >= 8 {
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x04, 0x24])); // mov [rsp], rax
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(4),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                },
+                &[],
+            )); // mov [rsp], rax
                 self.emit_x87_mem_at(0xDB, 0, 4, 0, true); // fild qword [rsp]
             } else {
                 // 窄有符号：只取内存里低 4 字节，fild 自行符号扩展，
