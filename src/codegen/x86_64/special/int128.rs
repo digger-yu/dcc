@@ -184,7 +184,7 @@ impl Codegen {
                 self.jmp_rel32(&l_end, JumpKind::Jmp);
                 self.label(&l_under_128);
                 // cmp rcx, 64
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xF9, 64])); // cmp rcx, 64
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Cmp, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(64)}, &[])); // cmp rcx, 64
                 let l_small = self.fresh_label();
                 self.jmp_rel32(&l_small, JumpKind::Jl);
                 // >= 64: rdx = rax << (cl-64), rax = 0
@@ -221,7 +221,7 @@ impl Codegen {
                 }
                 self.jmp_rel32(&l_end, JumpKind::Jmp);
                 self.label(&l_under_128);
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xF9, 64])); // cmp rcx, 64
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Cmp, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(64)}, &[])); // cmp rcx, 64
                 let l_small = self.fresh_label();
                 self.jmp_rel32(&l_small, JumpKind::Jl);
                 // >= 64: rax = high >> (cl-64), high = sign/zero fill
@@ -313,7 +313,7 @@ impl Codegen {
         self.label(&subtract);
         self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x29, 0xCE])); // sub r14, r9
         self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x19, 0xDF])); // sbb r15, r11
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC8, 0x01])); // or rax, 1
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Or, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(1)}, &[])); // or rax, 1
         self.label(&next);
         self.emit_insn(&Insn::raw_bytes(&[0x49, 0xFF, 0xCA])); // dec r10
         self.jmp_rel32(&loop_label, JumpKind::Jne);
@@ -477,7 +477,7 @@ impl Codegen {
 
                     if matches!(op, BinOp::Ne) {
                         // 取反: rax = !rax (0→1, 1→0)
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xF0, 0x01])); // xor rax, 1
+                        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Xor, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(1)}, &[])); // xor rax, 1
                     }
 
                     // neg rax → 0/1 映射到 0/全1 (向量真值)

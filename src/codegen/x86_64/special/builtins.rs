@@ -2575,7 +2575,7 @@ impl Codegen {
                 // 5. 检查移位量是否溢出 (b >= type_bits 或 b < 0)
                 let overflow_label = self.fresh_label();
                 let end_label = self.fresh_label();
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xf9, 0x00])); // cmp rcx, 0
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Cmp, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(0)}, &[])); // cmp rcx, 0
                 self.jmp_rel32(&overflow_label, JumpKind::Jl); // jl overflow (负数)
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xf9])); // cmp rcx, type_bits
                 self.emit_insn(&Insn::raw_bytes(&[type_bits as u8]));
@@ -3161,8 +3161,8 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], 1); // rcx = size (dcc 编码: 1 = rcx)
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xc1, 0x0f])); // add rcx, 15
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xe1, 0xf0])); // and rcx, ~15
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Add, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(15)}, &[])); // add rcx, 15
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::And, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(-16)}, &[])); // and rcx, ~15
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x29, 0xcc])); // sub rsp, rcx
                 if dst != 4 && dst != 12 {
                     let rex = if dst >= 8 { 0x49 } else { 0x48 };
@@ -4360,7 +4360,7 @@ impl Codegen {
                 self.gen_expr(&args[0], 7); // rdi = envp
                 let l_default = self.fresh_label();
                 let l_done = self.fresh_label();
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xFF, 0xFF])); // cmp rdi, -1
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Cmp, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(-1)}, &[])); // cmp rdi, -1
                 self.jmp_rel32(&l_default, JumpKind::Je);
                 self.emit_insn(&Insn::raw_bytes(&[0xD9, 0x27])); // fldenv [rdi]
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x57, 0x1C])); // ldmxcsr [rdi+0x1C]
@@ -4417,7 +4417,7 @@ impl Codegen {
                                                    // 恢复环境 (同 fesetenv 内联)
                 let l_default = self.fresh_label();
                 let l_done = self.fresh_label();
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xFF, 0xFF])); // cmp rdi, -1
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Cmp, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(-1)}, &[])); // cmp rdi, -1
                 self.jmp_rel32(&l_default, JumpKind::Je);
                 self.emit_insn(&Insn::raw_bytes(&[0xD9, 0x27])); // fldenv [rdi]
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x57, 0x1C])); // ldmxcsr [rdi+0x1C]

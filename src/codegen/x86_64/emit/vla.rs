@@ -117,8 +117,8 @@ impl Codegen {
             self.emit_mov_mem_r13(0, off + 16);
             // 对齐 16 字节后 sub rsp 分配数据区, 基址存入 [off]
             // (与 VLA 数组同一约定, gen_lvalue_addr/load_stack 统一读)
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xc0, 0x0f])); // add rax, 15
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xe0, 0xf0])); // and rax, -16
+            self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Add, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(15)}, &[])); // add rax, 15
+            self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::And, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(-16)}, &[])); // and rax, -16
             // P11: 收敛到 AluRm{Sub, B64, rsp, rax}.
             {
                 let insn = Insn::new(
@@ -172,8 +172,8 @@ impl Codegen {
                                               // mov [r13 + off + 16], rax: 声明时总大小 (未对齐), sizeof 取用
         self.emit_store_rax_r13(off + 16);
         // 对齐到 16 字节: (rax + 15) & ~15
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xc0, 0x0f])); // add rax, 15
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xe0, 0xf0])); // and rax, -16
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Add, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(15)}, &[])); // add rax, 15
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::And, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(-16)}, &[])); // and rax, -16
                                               // 保存当前 rsp (VLA 基址)
                                               // sub rsp, rax: 48 29 C4
         // P11: 收敛到 AluRm{Sub, B64, rsp, rax}.

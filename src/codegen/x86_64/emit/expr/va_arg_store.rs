@@ -482,8 +482,8 @@ impl Codegen {
             VaListLoc::R10 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x42, 0x08])); }, // mov rax, [r10+8]
             VaListLoc::Rcx => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x41, 0x08])); }, // mov rax, [rcx+8]
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC0, 0x0F])); // add rax, 15
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xE0, 0xF0])); // and rax, -16
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Add, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(15)}, &[])); // add rax, 15
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::And, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(-16)}, &[])); // and rax, -16
         match loc {
             VaListLoc::Slot(off) => {
                 self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x85])); // mov [r13+disp32], rax
@@ -622,11 +622,11 @@ impl Codegen {
         self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x4A, 0x08])); // mov rcx, [r10+8]
                                               // r9 = (rcx + 15) & ~15 (16 字节对齐)
         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x49, 0x0F])); // lea rcx, [rcx+15]
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xE1, 0xF0])); // and rcx, ~15
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::And, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(-16)}, &[])); // and rcx, ~15
                                               // 从 overflow_arg_area load 真 80-bit 到 st(0) (D9)。
         self.emit_ld80_load_to_st0(false); // fld tbyte (%rcx) → st(0)，无损
                                            // rcx += 16 (推进到下一个 16 字节对齐位置)
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC1, 0x10])); // add rcx, 16
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Add, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(16)}, &[])); // add rcx, 16
                                               // 写回 [r10+8]: REX.W+B 使 rm=010→r10, reg=001→rcx 源
         self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x4A, 0x08])); // mov [r10+8], rcx
                                               // 结果在 st(0)（`long double` 的 rvalue 通道）
@@ -651,11 +651,11 @@ impl Codegen {
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x49, 0x08])); // mov rcx, [rcx+8] (overflow)
                                                   // rcx = (rcx + 15) & ~15 (16 字节对齐)
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x49, 0x0F])); // lea rcx, [rcx+15]
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xE1, 0xF0])); // and rcx, ~15
+            self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::And, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(-16)}, &[])); // and rcx, ~15
                                                   // 从 overflow_arg_area load 真 80-bit 到 st(0) (D9)。
             self.emit_ld80_load_to_st0(false); // fld tbyte (%rcx) → st(0)，无损
                                                // rcx += 16
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC1, 0x10])); // add rcx, 16
+            self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Add, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(16)}, &[])); // add rcx, 16
                                                   // 写回推进后的 overflow_arg_area 到 [r11+8] (r11 = va_list 地址)。
                                                   // 旧编码 0x4C,0x89,0x4B 实际是 mov [rbx+8],r9 (REX.R=1 无 REX.B,
                                                   // reg→r9, rm→rbx), 写入错误基址导致 stdarg-1 segfault; 正确的
@@ -878,7 +878,7 @@ impl Codegen {
             Some(sr) => {
                 self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8D, 0x40 | (sr & 7)])); // lea rax, [sr+7]
                 self.emit_insn(&Insn::raw_bytes(&[0x07]));
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xE0, 0xF8])); // and rax, -8
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::And, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(-8)}, &[])); // and rax, -8
                 self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0xC3])); // mov r11, rax (暂存 step)
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax (计数 = 对齐后尺寸)
             },
