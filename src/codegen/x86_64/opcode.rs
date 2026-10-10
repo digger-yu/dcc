@@ -1256,11 +1256,6 @@ impl X86_64Opcode {
                             return None;
                         }
                         let base = mem.base?;
-                        if base == 12 {
-                            // r12 需要 SIB, 原 emit_x87_mem_at 已处理但 r12 极少用;
-                            // 本步跳过以降低复杂度.
-                            return None;
-                        }
                         // escap 字节 + reg 位段.
                         let (escap, reg_field, rexw): (u8, u8, bool) = match (op, *width) {
                             (X87Op::FldMem { .. }, 4) => (0xD9, 0, false),   // fld m32fp
@@ -1288,14 +1283,30 @@ impl X86_64Opcode {
                             out.push(rex);
                         }
                         out.push(escap);
-                        // rm==100 (rsp=4) 必须插 SIB; r13=13 (低3位=5) 在原代码里也走 SIB.
-                        if base == 4 || base == 13 {
-                            out.push(0x84 | (reg_field << 3));
-                            out.push(0x20 | (base & 7));
+                        // P11 Bucket H2: 按 disp 大小选 mod, 支持任意 base (含 r12).
+                        //   disp=0 且 base!=5(rbp) → mod=00; base=5 强制 disp8=0.
+                        //   i8 范围 → mod=01 + disp8.
+                        //   其余 → mod=10 + disp32.
+                        // rm=4 (rsp/r12) 必须插 SIB (SIB base=base&7=4=rsp or 4=r12).
+                        // rm=5 (rbp/r13) 在 mod=00 时是 rip-relative, 因此 disp=0 且 base=5
+                        //   时强制 mod=01 disp8=0.
+                        let rm = base & 7;
+                        let (modrm_mod, disp_bytes): (u8, Vec<u8>) = if disp == 0 && rm != 5 {
+                            (0u8, Vec::new())
+                        } else if disp == 0 && rm == 5 {
+                            // rbp/r13: mod=00 会被解码成 rip-relative, 故强制 mod=01 disp8=0.
+                            (1u8, vec![0u8])
+                        } else if let Ok(d) = i8::try_from(disp) {
+                            (1u8, vec![d as u8])
                         } else {
-                            out.push(0x80 | (reg_field << 3) | (base & 7));
+                            (2u8, disp.to_le_bytes().to_vec())
+                        };
+                        out.push((modrm_mod << 6) | (reg_field << 3) | rm);
+                        if rm == 4 {
+                            // rsp/r12: SIB byte base=rsp/r12&7=4 (index=4=no index, scale=0).
+                            out.push(0x24);
                         }
-                        out.extend_from_slice(&disp.to_le_bytes());
+                        out.extend_from_slice(&disp_bytes);
                         Some(out)
                     }
                     X87Op::MxcsrMem { store } | X87Op::FcwMem { store } => {
@@ -1309,10 +1320,7 @@ impl X86_64Opcode {
                             return None;
                         }
                         let base = mem.base?;
-                        if base == 12 {
-                            return None;
-                        }
-                        // escap + reg_field (mod=00, SIB if rm==100) + disp.
+                        // escap + reg_field + disp.
                         let (escap, reg_field): (u8, u8) = match op {
                             X87Op::MxcsrMem { store: true } => (0xAE, 3),   // stmxcsr
                             X87Op::MxcsrMem { store: false } => (0xAE, 2),  // ldmxcsr
@@ -1331,18 +1339,23 @@ impl X86_64Opcode {
                             out.push(0x0F);
                         }
                         out.push(escap);
-                        // 统一按 mod=10 (disp32) 编码，与通用 X87 mem 分支一致：
-                        // 旧实现误发 mod=00/10 混合 + 缺 rm=100 的 SIB，指令字节长度
-                        // 与实际不符，导致 stmxcsr/ldmxcsr 之后整条指令流错位（SIGSEGV）。
+                        // P11 Bucket H2: 按 disp 大小选 mod, 支持任意 base (含 r12).
+                        let rm = base & 7;
                         let disp = mem.disp;
-                        if base == 4 || base == 13 {
-                            // mod=10, rm=100 → 有 SIB；SIB base=rsp(100)/rbp(101)
-                            out.push(0x84 | (reg_field << 3));
-                            out.push(0x20 | (base & 7));
+                        let (modrm_mod, disp_bytes): (u8, Vec<u8>) = if disp == 0 && rm != 5 {
+                            (0u8, Vec::new())
+                        } else if disp == 0 && rm == 5 {
+                            (1u8, vec![0u8])
+                        } else if let Ok(d) = i8::try_from(disp) {
+                            (1u8, vec![d as u8])
                         } else {
-                            out.push(0x80 | (reg_field << 3) | (base & 7));
+                            (2u8, disp.to_le_bytes().to_vec())
+                        };
+                        out.push((modrm_mod << 6) | (reg_field << 3) | rm);
+                        if rm == 4 {
+                            out.push(0x24);
                         }
-                        out.extend_from_slice(&(disp as i32).to_le_bytes());
+                        out.extend_from_slice(&disp_bytes);
                         Some(out)
                     }
                 }
@@ -3652,6 +3665,108 @@ mod tests {
             }),
         };
         assert_eq!(o.encode(), Some(vec![0xF3, 0x0F, 0x10, 0x40, 0x04]));
+    }
+
+    // ---- P11 Bucket H2: X87 fld/fstp/fild [base+disp] sweep ----
+
+    #[test]
+    fn x87_fld_m32_rsp_disp0() {
+        // fld dword [rsp]: D9 04 24 (mod=00, SIB base=rsp)
+        let o = X86_64Opcode::X87 {
+            op: X87Op::FldMem { width: 4 },
+            mem: Some(MemOperand { disp: 0, base: Some(4), index: None, seg: None }),
+        };
+        assert_eq!(o.encode(), Some(vec![0xD9, 0x04, 0x24]));
+    }
+
+    #[test]
+    fn x87_fld_m32_rsp_disp8() {
+        // fld dword [rsp+8]: D9 44 24 08 (mod=01, SIB base=rsp)
+        let o = X86_64Opcode::X87 {
+            op: X87Op::FldMem { width: 4 },
+            mem: Some(MemOperand { disp: 8, base: Some(4), index: None, seg: None }),
+        };
+        assert_eq!(o.encode(), Some(vec![0xD9, 0x44, 0x24, 0x08]));
+    }
+
+    #[test]
+    fn x87_fld_m64_rax_disp0() {
+        // fld qword [rax]: DD 00 (mod=00, rm=rax, no SIB)
+        let o = X86_64Opcode::X87 {
+            op: X87Op::FldMem { width: 8 },
+            mem: Some(MemOperand { disp: 0, base: Some(0), index: None, seg: None }),
+        };
+        assert_eq!(o.encode(), Some(vec![0xDD, 0x00]));
+    }
+
+    #[test]
+    fn x87_fld_m64_rcx_disp8() {
+        // fld qword [rcx+16]: DD 41 10 (mod=01, reg=0, rm=rcx=1)
+        let o = X86_64Opcode::X87 {
+            op: X87Op::FldMem { width: 8 },
+            mem: Some(MemOperand { disp: 16, base: Some(1), index: None, seg: None }),
+        };
+        assert_eq!(o.encode(), Some(vec![0xDD, 0x41, 0x10]));
+    }
+
+    #[test]
+    fn x87_fstp_m64_rsp_disp0() {
+        // fstp qword [rsp]: DD 1C 24 (mod=00, SIB base=rsp, reg=3)
+        let o = X86_64Opcode::X87 {
+            op: X87Op::FstpMem { width: 8 },
+            mem: Some(MemOperand { disp: 0, base: Some(4), index: None, seg: None }),
+        };
+        assert_eq!(o.encode(), Some(vec![0xDD, 0x1C, 0x24]));
+    }
+
+    #[test]
+    fn x87_fstp_tbyte_rsp_disp0() {
+        // fstp tbyte [rsp]: DB 3C 24 (mod=00, SIB base=rsp, reg=7)
+        let o = X86_64Opcode::X87 {
+            op: X87Op::FstpMem { width: 10 },
+            mem: Some(MemOperand { disp: 0, base: Some(4), index: None, seg: None }),
+        };
+        assert_eq!(o.encode(), Some(vec![0xDB, 0x3C, 0x24]));
+    }
+
+    #[test]
+    fn x87_fild_m64_rsp_disp8_rexw() {
+        // fild qword [rsp+8]: 48 DB 04 24 08 (REX.W, mod=01, SIB)
+        let o = X86_64Opcode::X87 {
+            op: X87Op::FildMem { width: 8 },
+            mem: Some(MemOperand { disp: 8, base: Some(4), index: None, seg: None }),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0xDB, 0x44, 0x24, 0x08]));
+    }
+
+    #[test]
+    fn x87_fcw_fnstcw_rsp_disp0() {
+        // fnstcw [rsp]: D9 3C 24 (mod=00, SIB base=rsp, reg=7)
+        let o = X86_64Opcode::X87 {
+            op: X87Op::FcwMem { store: true },
+            mem: Some(MemOperand { disp: 0, base: Some(4), index: None, seg: None }),
+        };
+        assert_eq!(o.encode(), Some(vec![0xD9, 0x3C, 0x24]));
+    }
+
+    #[test]
+    fn x87_mxcsr_stmxcsr_rsp_disp0() {
+        // stmxcsr [rsp]: 0F AE 1C 24 (mod=00, SIB base=rsp, reg=3)
+        let o = X86_64Opcode::X87 {
+            op: X87Op::MxcsrMem { store: true },
+            mem: Some(MemOperand { disp: 0, base: Some(4), index: None, seg: None }),
+        };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0xAE, 0x1C, 0x24]));
+    }
+
+    #[test]
+    fn x87_fld_m64_rdi_disp8() {
+        // fld qword [rdi+0x1C]: DD 47 1C (mod=01, reg=0, rm=rdi=7)
+        let o = X86_64Opcode::X87 {
+            op: X87Op::FldMem { width: 8 },
+            mem: Some(MemOperand { disp: 0x1C, base: Some(7), index: None, seg: None }),
+        };
+        assert_eq!(o.encode(), Some(vec![0xDD, 0x47, 0x1C]));
     }
 }
 

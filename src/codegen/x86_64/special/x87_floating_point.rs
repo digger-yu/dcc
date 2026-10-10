@@ -151,10 +151,10 @@ impl Codegen {
         self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp, 16
         if is_float {
             self.emit_insn(&Insn::simd_mov_mem(true, SimdWidth::SS, 0, 0)); // movss %xmm0, (%rsp)
-            self.emit_insn(&Insn::raw_bytes(&[0xD9, 0x04, 0x24])); // fld  dword (%rsp)
+            self.emit_x87_fld_at(4, 0, &Type::Float); // fld dword (%rsp)
         } else {
             self.emit_insn(&Insn::simd_mov_mem(true, SimdWidth::SD, 0, 0)); // movsd %xmm0, (%rsp)
-            self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x04, 0x24])); // fld  qword (%rsp)
+            self.emit_x87_fld_at(4, 0, &Type::Double); // fld qword (%rsp)
         }
         self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp, 16
     }
@@ -481,9 +481,9 @@ impl Codegen {
         self.emit_operand_to_st0(&l.ty(), 0);
         self.emit_insn(&Insn::sub_rsp_imm(save_bytes as i64)); // sub rsp, 16
         if is_ld {
-            self.emit_insn(&Insn::raw_bytes(&[0xDB, 0x3C, 0x24])); // fstp tbyte [rsp]
+            self.emit_x87_fstp_at(4, 0, &Type::LongDouble); // fstp tbyte [rsp]
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x1C, 0x24])); // fstp qword [rsp]
+            self.emit_x87_fstp_at(4, 0, &Type::Double); // fstp qword [rsp]
         }
         self.expr_depth += 1;
         // 加载右操作数到 st(0)
@@ -492,9 +492,9 @@ impl Codegen {
         self.expr_depth -= 1;
         // 重新加载左操作数: st(0) = l, st(1) = r
         if is_ld {
-            self.emit_insn(&Insn::raw_bytes(&[0xDB, 0x2C, 0x24])); // fld tbyte [rsp]
+            self.emit_x87_fld_at(4, 0, &Type::LongDouble); // fld tbyte [rsp]
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x04, 0x24])); // fld qword [rsp]
+            self.emit_x87_fld_at(4, 0, &Type::Double); // fld qword [rsp]
         }
         self.emit_insn(&Insn::add_rsp_imm(save_bytes as i64)); // add rsp, 16
                                                     // 现在 st(0) = l, st(1) = r
@@ -616,7 +616,7 @@ impl Codegen {
     /// `[rsp]`，不能直接踩现有栈顶（旧版无 sub 的写法会静默覆盖那个溢出槽）。
     pub fn emit_x87_to_xmm0(&mut self) {
         self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp, 16
-        self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x1C, 0x24])); // fstp qword (%rsp)  ← 硬件完成 80→64 舍入
+        self.emit_x87_fstp_at(4, 0, &Type::Double); // fstp qword (%rsp)  ← 硬件完成 80→64 舍入
         self.emit_insn(&Insn::simd_mov_mem(false, SimdWidth::SD, 0, 0)); // movsd xmm0, (%rsp)
         self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp, 16
     }
@@ -625,7 +625,7 @@ impl Codegen {
     /// 不经 f64 双舍入（`fstp dword` 直接产出 float 位型）。
     pub fn emit_x87_to_xmm0_f32(&mut self) {
         self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp, 16
-        self.emit_insn(&Insn::raw_bytes(&[0xD9, 0x1C, 0x24])); // fstp dword (%rsp)
+        self.emit_x87_fstp_at(4, 0, &Type::Float); // fstp dword (%rsp)
         self.emit_insn(&Insn::simd_mov_mem(false, SimdWidth::SS, 0, 0)); // movss xmm0, (%rsp)
         self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp, 16
     }
