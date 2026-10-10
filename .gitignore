@@ -165,3 +165,6 @@ compile_output.txt
 
 # 本地迁移/调试暂存目录（不进入提交面）
 .work_tmp/
+
+# cargo-fuzz 本地构建输出（顶层 fuzz/ 目录，非版本跟踪）
+fuzz/
