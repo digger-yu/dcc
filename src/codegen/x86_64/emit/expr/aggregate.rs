@@ -1343,7 +1343,11 @@ impl Codegen {
                 &[],
             )); }, // mov rax, [rax]
                             2 => {
-                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x00]));
+                                self.emit_insn(&Insn::mov_rm_mem(
+                                    true,
+                                    crate::codegen::shared::asm_operand::Width::B16,
+                                    0, 0, 0,
+                                ));
                                 // movzwq eax, eax
                                 self.emit_insn(&Insn::mov_ext(
                                     false,
@@ -1352,7 +1356,11 @@ impl Codegen {
                                     0, 0,
                                 ));
                             },
-                            1 => { self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x00])); },
+                            1 => { self.emit_insn(&Insn::mov_rm_mem(
+                                true,
+                                crate::codegen::shared::asm_operand::Width::B8,
+                                0, 0, 0,
+                            )); },
                             _ => {},
                         }
                         // 保存容器值 → [r13-32]
@@ -1530,8 +1538,16 @@ impl Codegen {
                 },
                 &[],
             )); }, // mov [rdx], rcx
-                                        2 => { self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x0A])); },
-                                        1 => { self.emit_insn(&Insn::raw_bytes(&[0x88, 0x0A])); },
+                                        2 => { self.emit_insn(&Insn::mov_rm_mem(
+                                            false,
+                                            crate::codegen::shared::asm_operand::Width::B16,
+                                            1, 2, 0,
+                                        )); },
+                                        1 => { self.emit_insn(&Insn::mov_rm_mem(
+                                            false,
+                                            crate::codegen::shared::asm_operand::Width::B8,
+                                            1, 2, 0,
+                                        )); },
                                         _ => {},
                                     }
                                 },
@@ -1572,8 +1588,16 @@ impl Codegen {
                 },
                 &[],
             )); }, // mov [rdx], rcx
-                                2 => { self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x0A])); },
-                                1 => { self.emit_insn(&Insn::raw_bytes(&[0x88, 0x0A])); },
+                                2 => { self.emit_insn(&Insn::mov_rm_mem(
+                                    false,
+                                    crate::codegen::shared::asm_operand::Width::B16,
+                                    1, 2, 0,
+                                )); },
+                                1 => { self.emit_insn(&Insn::mov_rm_mem(
+                                    false,
+                                    crate::codegen::shared::asm_operand::Width::B8,
+                                    1, 2, 0,
+                                )); },
                                 _ => {},
                             }
                         }
