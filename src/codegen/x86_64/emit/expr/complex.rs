@@ -188,7 +188,7 @@ impl Codegen {
             self.gen_complex_ld_binop(op, l, r, dst, result_off);
             return;
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, save_sz as u8]));
+        self.emit_insn(&Insn::sub_rsp_imm(save_sz as i64));
         self.spill_complex_operand(l, 0, inner_sz, is_float, is_float_inner, &inner_ty);
         self.spill_complex_operand(r, total_sz, inner_sz, is_float, is_float_inner, &inner_ty);
         let (load_prefix, op_add, op_sub, op_mul, op_div) = if is_float {
@@ -452,13 +452,13 @@ impl Codegen {
                 self.mov_imm(dst, if matches!(op, BinOp::EqEq) { 0 } else { 1 });
                 self.label(&end_label);
                 // 比较结果是整数, 不写 complex 结果区
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, save_sz as u8]));
+                self.emit_insn(&Insn::add_rsp_imm(save_sz as i64));
                 return;
             },
             _ => {},
         }
         self.store_complex_pair_from_rsp(result_off, inner_sz, is_float);
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, save_sz as u8]));
+        self.emit_insn(&Insn::add_rsp_imm(save_sz as i64));
         if is_float_inner {
             // 实部载入 xmm0，供浮点转换
             let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
@@ -581,7 +581,7 @@ impl Codegen {
             },
             BinOp::Add | BinOp::Sub => {
                 // 预留 64 字节（4×16），保持调用对齐（本分支无 call）
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x40]));
+                self.emit_insn(&Insn::sub_rsp_imm(64));
                 self.spill_complex_ld_operand(l, 0);
                 self.spill_complex_ld_operand(r, 32);
                 // 先 fld 左、后 fld 右: st0=right, st1=left。
@@ -615,7 +615,7 @@ impl Codegen {
                 // gcc: subq $64,%rsp 后 fldt/fstpt 落 4 槽，再 8 次 pushq
                 // 传参（64 字节，与预留区同尺寸，push 后内容上移，
                 // 调用约定读的是 push 出来的栈），call，addq $64,%rsp。
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x40]));
+                self.emit_insn(&Insn::sub_rsp_imm(64));
                 self.spill_complex_ld_operand(l, 0);
                 self.spill_complex_ld_operand(r, 32);
                 // 8 次 pushq 传参。最后 push 的 qword 落在最低地址（=首个
@@ -641,7 +641,7 @@ impl Codegen {
                     k += 1;
                 }
                 self.emit_call_extern(helper);
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x40])); // add rsp, 64
+                self.emit_insn(&Insn::add_rsp_imm(64)); // add rsp, 64
                                                       // 返回 st0=real, st1=imag（fadd 分支同序，统一收尾）
             },
             _ => return,
@@ -651,7 +651,7 @@ impl Codegen {
         // （弹栈后 imag 升到 st0），再 fstpt imag。
         self.emit_x87_fstp_at(13, result_off as i32, &Type::LongDouble);
         self.emit_x87_fstp_at(13, result_off as i32 + 16, &Type::LongDouble);
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x40])); // 释放 64 字节运算区
+        self.emit_insn(&Insn::add_rsp_imm(64)); // 释放 64 字节运算区
         self.emit_lea_r13(0, result_off); // rax = 结果区地址
     }
 
@@ -1932,7 +1932,7 @@ impl Codegen {
                     let inner_sz = inner_ty.size() as i64;
                     let total_sz = inner_sz * 2;
                     let save_sz = total_sz * 2;
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, save_sz as u8]));
+                    self.emit_insn(&Insn::sub_rsp_imm(save_sz as i64));
                     if l_imag && !r_imag {
                         // imag + real: real part = real, imag part = ±imag
                         // 先算实部 (来自 r)
@@ -1965,7 +1965,7 @@ impl Codegen {
                     // 将 (real, imag) 对拷贝到帧临时区供后续 complex 操作使用
                     let is_float_store = matches!(inner_ty, Type::Float);
                     self.store_complex_pair_from_rsp(result_off, inner_sz, is_float_store);
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, save_sz as u8]));
+                    self.emit_insn(&Insn::add_rsp_imm(save_sz as i64));
                 },
                 BinOp::Mul => {
                     // real * imag → imag: 单浮点值乘法

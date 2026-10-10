@@ -1077,7 +1077,7 @@ impl Codegen {
                 // rdi = buf
                 self.gen_expr(&args[0], 7);
                 // 栈上临时区
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x28])); // sub rsp, 40
+                self.emit_insn(&Insn::sub_rsp_imm(0x28)); // sub rsp, 40
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0x04, 0x24, 0, 0, 0, 0])); // mov qword [rsp], 0
                                                                   // 保存 callee-saved pool 寄存器
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x5C, 0x24, 0x08])); // mov [rsp+8], rbx
@@ -1123,7 +1123,7 @@ impl Codegen {
                 let rex = 0x48u8 | if dst >= 8 { 0x44 } else { 0 };
                 let modrm = 0x04u8 | ((dst & 7) << 3);
                 self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, modrm, 0x24])); // mov dst, [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x28])); // add rsp, 40
+                self.emit_insn(&Insn::add_rsp_imm(0x28)); // add rsp, 40
                 true
             },
             // __builtin_longjmp(buf, val): 恢复 rsp/r13 后跳转到 receiver.
@@ -2055,7 +2055,7 @@ impl Codegen {
                 if stack_off != 0 {
                     // sub rsp, stack_off
                     if stack_off < 128 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, stack_off as u8]));
+                        self.emit_insn(&Insn::sub_rsp_imm(stack_off as i64));
                     } else {
                         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xEC]));
                         self.emit_insn(&Insn::raw_bytes(&stack_off.to_le_bytes()));
@@ -2077,7 +2077,7 @@ impl Codegen {
                 if stack_off != 0 {
                     // add rsp, stack_off
                     if stack_off < 128 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, stack_off as u8]));
+                        self.emit_insn(&Insn::add_rsp_imm(stack_off as i64));
                     } else {
                         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xC4]));
                         self.emit_insn(&Insn::raw_bytes(&stack_off.to_le_bytes()));
@@ -4482,7 +4482,7 @@ impl Codegen {
         match name {
             // fegetround(): 返回当前舍入模式 (FE_TONEAREST=0, FE_DOWNWARD=0x400, ...)
             "fegetround" => {
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
+                self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -4503,7 +4503,7 @@ impl Codegen {
             )); // mov eax, [rsp]
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0x00, 0x60, 0x00, 0x00])); // and eax, 0x6000
                 self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE8, 0x03])); // shr eax, 3 → 控制字位 10-11
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 8])); // add rsp, 8
+                self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -4518,7 +4518,7 @@ impl Codegen {
                 self.gen_expr(&args[0], Self::EVAL_BASE); // rax = mode
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0x00, 0x0C, 0x00, 0x00])); // and eax, 0xC00
                 self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE0, 0x03])); // shl eax, 3 → MXCSR 位 13-14
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
+                self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -4554,7 +4554,7 @@ impl Codegen {
                 &[],
             )); // mov [rsp], ecx
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x14, 0x24])); // ldmxcsr [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 8])); // add rsp, 8
+                self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                 self.mov_imm(dst, 0); // 返回 0
                 true
             },
@@ -4569,7 +4569,7 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
                 self.emit_insn(&Insn::raw_bytes(&[0xF7, 0xD0])); // not eax
                                           // 清除 MXCSR 异常标志
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
+                self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -4604,7 +4604,7 @@ impl Codegen {
                 &[],
             )); // mov [rsp], ecx
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x14, 0x24])); // ldmxcsr [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 8])); // add rsp, 8
+                self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                                                    // 清除 x87 FPU 状态字异常标志 (fnclex 清除所有异常)
                                                    // 注: fnclex 清除所有 6 个异常标志, 与 excepts 掩码无关
                                                    // 这是安全的因为 C11 允许清除额外的异常
@@ -4621,7 +4621,7 @@ impl Codegen {
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE); // rax = excepts
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
+                self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -4656,7 +4656,7 @@ impl Codegen {
                 &[],
             )); // mov [rsp], ecx
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x14, 0x24])); // ldmxcsr [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 8])); // add rsp, 8
+                self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                                                    // fwait 同步 x87: 检查 MXCSR 中刚置位的异常标志
                                                    // 如果异常未被屏蔽, x87 会产生相应的异常
                 self.emit_insn(&Insn::raw_bytes(&[0x9B])); // fwait
@@ -4673,7 +4673,7 @@ impl Codegen {
                 self.gen_expr(&args[0], Self::EVAL_BASE); // rax = excepts
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
                                                             // 测试 MXCSR 异常标志
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
+                self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -4691,14 +4691,14 @@ impl Codegen {
             )); // mov ecx, [rsp]
                 self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00])); // and ecx, 0x3F
                 self.emit_insn(&Insn::raw_bytes(&[0x21, 0xC1])); // and ecx, eax (ecx = MXCSR & excepts)
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 8])); // add rsp, 8
+                self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                                                    // 测试 x87 FPU 状态字异常标志
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
+                self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0xDF, 0xE0])); // fnstsw ax (x87 状态字 -> ax)
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x25, 0x3F, 0x00])); // and ax, 0x3F
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x21, 0xC0])); // and ax, ax (保留 excepts 位)
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7, 0xC0])); // movzx eax, ax (零扩展到 eax)
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 8])); // add rsp, 8
+                self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                                                    // 合并 MXCSR 和 x87 结果 (OR)
                 self.emit_insn(&Insn::raw_bytes(&[0x09, 0xC1])); // or ecx, eax
                 self.mov(0, 1); // rax = rcx
@@ -4716,7 +4716,7 @@ impl Codegen {
                 self.gen_expr(&args[0], 7); // rdi = flagp
                 self.gen_expr(&args[1], Self::EVAL_BASE); // rax = excepts
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
+                self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -4735,7 +4735,7 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00])); // and ecx, 0x3F
                 self.emit_insn(&Insn::raw_bytes(&[0x21, 0xC1])); // and ecx, eax
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x0F])); // mov [rdi], cx
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 8])); // add rsp, 8
+                self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                 self.mov_imm(dst, 0); // 返回 0
                 true
             },
@@ -4751,7 +4751,7 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00])); // and ecx, 0x3F
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
                 self.emit_insn(&Insn::raw_bytes(&[0x21, 0xC1])); // and ecx, eax → ecx = *flagp & excepts
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
+                self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -4789,7 +4789,7 @@ impl Codegen {
                 &[],
             )); // mov [rsp], edx
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x14, 0x24])); // ldmxcsr [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 8])); // add rsp, 8
+                self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                 self.mov_imm(dst, 0); // 返回 0
                 true
             },
@@ -4838,12 +4838,12 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x57, 0x1C])); // ldmxcsr [rdi+0x1C]
                 self.jmp_rel32(&l_done, JumpKind::Jmp);
                 self.label(&l_default);
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
+                self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0xC7, 0x04, 0x24, 0x7F, 0x03])); // mov word [rsp], 0x037F
                 self.emit_insn(&Insn::raw_bytes(&[0xD9, 0x2C, 0x24])); // fldcw [rsp]
                 self.emit_insn(&Insn::raw_bytes(&[0xC7, 0x04, 0x24, 0x80, 0x1F, 0x00, 0x00])); // mov dword [rsp], 0x1F80
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x14, 0x24])); // ldmxcsr [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 8])); // add rsp, 8
+                self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                 self.label(&l_done);
                 self.mov_imm(dst, 0); // 返回 0
                 true
@@ -4857,7 +4857,7 @@ impl Codegen {
                 self.gen_expr(&args[0], 7); // rdi = envp
                 self.emit_insn(&Insn::raw_bytes(&[0xD9, 0x37])); // fnstenv [rdi]
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x5F, 0x1C])); // stmxcsr [rdi+0x1C]
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
+                self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -4901,7 +4901,7 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x83, 0xC8, 0x3F])); // or ax, 0x3F
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x04, 0x24])); // mov [rsp], ax
                 self.emit_insn(&Insn::raw_bytes(&[0xD9, 0x2C, 0x24])); // fldcw [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 8])); // add rsp, 8
+                self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                 self.mov_imm(dst, 0); // 返回 0
                 true
             },
@@ -4913,7 +4913,7 @@ impl Codegen {
                 }
                 self.gen_expr(&args[0], 7); // rdi = envp
                                             // rcx = 旧 SSE 异常标志
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
+                self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -4930,7 +4930,7 @@ impl Codegen {
                 &[],
             )); // mov ecx, [rsp]
                 self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00])); // and ecx, 0x3F
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 8])); // add rsp, 8
+                self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                                                    // 恢复环境 (同 fesetenv 内联)
                 let l_default = self.fresh_label();
                 let l_done = self.fresh_label();
@@ -4940,15 +4940,15 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x57, 0x1C])); // ldmxcsr [rdi+0x1C]
                 self.jmp_rel32(&l_done, JumpKind::Jmp);
                 self.label(&l_default);
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
+                self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0xC7, 0x04, 0x24, 0x7F, 0x03])); // mov word [rsp], 0x037F
                 self.emit_insn(&Insn::raw_bytes(&[0xD9, 0x2C, 0x24])); // fldcw [rsp]
                 self.emit_insn(&Insn::raw_bytes(&[0xC7, 0x04, 0x24, 0x80, 0x1F, 0x00, 0x00])); // mov dword [rsp], 0x1F80
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x14, 0x24])); // ldmxcsr [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 8])); // add rsp, 8
+                self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                 self.label(&l_done);
                 // 在新环境中置位旧标志
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
+                self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -4986,7 +4986,7 @@ impl Codegen {
                 &[],
             )); // mov [rsp], eax
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x14, 0x24])); // ldmxcsr [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 8])); // add rsp, 8
+                self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                 self.mov_imm(dst, 0); // 返回 0
                 true
             },
@@ -4999,7 +4999,7 @@ impl Codegen {
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE); // rax = excepts
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
+                self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -5034,7 +5034,7 @@ impl Codegen {
                 &[],
             )); // mov [rsp], ecx
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x14, 0x24])); // ldmxcsr [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 8])); // add rsp, 8
+                self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                 self.mov_imm(dst, 0);
                 true
             },
@@ -5048,7 +5048,7 @@ impl Codegen {
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE); // rax = excepts
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
+                self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -5114,7 +5114,7 @@ impl Codegen {
                 &[],
             )); // mov [rsp], ecx
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x14, 0x24])); // ldmxcsr [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 8])); // add rsp, 8
+                self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                                                    // eax = 旧的启用掩码
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -5143,7 +5143,7 @@ impl Codegen {
                 },
                 &[],
             )); // mov edx, eax (save excepts in edx)
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x10])); // sub rsp, 16
+                self.emit_insn(&Insn::sub_rsp_imm(0x10)); // sub rsp, 16
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -5211,7 +5211,7 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x14, 0x24])); // ldmxcsr [rsp]
                                                       // 恢复旧掩码作为返回值
                 self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x44, 0x24, 0x08])); // mov eax, [rsp+8]
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x10])); // add rsp, 16
+                self.emit_insn(&Insn::add_rsp_imm(0x10)); // add rsp, 16
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -5219,7 +5219,7 @@ impl Codegen {
             },
             // fegetexcept(): GNU extension 返回当前启用的异常掩码
             "fegetexcept" => {
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 8])); // sub rsp, 8
+                self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -5240,7 +5240,7 @@ impl Codegen {
             )); // mov eax, [rsp]
                 self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE8, 0x07])); // shr eax, 7
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 8])); // add rsp, 8
+                self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                 if dst != 0 {
                     self.mov(dst, 0);
                 }

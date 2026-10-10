@@ -218,7 +218,7 @@ impl Codegen {
                     if k > 0 {
                         // add rcx, [rsp]; add rsp, 8  (合并上一层的部分和)
                         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x03, 0x0C, 0x24]));
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x08]));
+                        self.emit_insn(&Insn::add_rsp_imm(8));
                     }
                     if k + 1 < terms.len() {
                         self.push(INDEX); // 部分和入栈, 供下一层合并
@@ -515,7 +515,7 @@ impl Codegen {
             ty
         };
         if self.float_in_st0(effective_ty) {
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x10])); // sub rsp,16
+            self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp,16
                                                   // fld tbyte [rip+x]
             let (opcode, modrm) = match effective_ty {
                 Type::Float => (0xD9u8, 0x05u8),
@@ -536,7 +536,7 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x44]));
             }
             self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x10, 0x04 | ((xmm & 7) << 3), 0x24]));
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x10])); // add rsp,16
+            self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp,16
             return;
         }
         self.emit_global_float_load_to_xmm(xmm, name, ty);
@@ -563,7 +563,7 @@ impl Codegen {
             src_ty
         };
         debug_assert!(self.float_in_st0(effective_dst));
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x10])); // sub rsp,16
+        self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp,16
         let pfx: u8 = if matches!(effective_src, Type::Float) {
             0xF3
         } else {
@@ -586,7 +586,7 @@ impl Codegen {
         let dp = self.pos() + 2;
         self.emit_insn(&Insn::raw_bytes(&[opcode, modrm, 0, 0, 0, 0])); // fstp [rip+x]
         self.push_global_float_rel(dp, name);
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x10])); // add rsp,16
+        self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp,16
     }
 
     pub(crate) fn emit_ident_base_addr(&mut self, name: &str, arr_ty: &Type, dst: u8) {
