@@ -85,7 +85,7 @@ impl Codegen {
         match op {
             BinOp::Add => {
                 // add rcx, r9 (low): REX.W+R(r9=9) = 0x4C
-                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x01, 0xC9])); // add rcx, r9
+                self.emit_insn(&Insn::new(X86_64Opcode::AluRm { op: AluOp::Add, width: Width::B64, dst: OpcodeOperand::Reg(1, Width::B64), src: OpcodeOperand::Reg(9, Width::B64) }, &[])); // add rcx, r9
                                                 // adc r8, r11 (high): REX.W+R(r11)+B(r8) = 0x4D
                 self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x11, 0xD8])); // adc r8, r11
                 self.mov(0, 1); // rax = result_low
@@ -93,27 +93,27 @@ impl Codegen {
             },
             BinOp::Sub => {
                 // sub rcx, r9 (low): REX.W+R(r9) = 0x4C
-                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x29, 0xC9])); // sub rcx, r9
+                self.emit_insn(&Insn::new(X86_64Opcode::AluRm { op: AluOp::Sub, width: Width::B64, dst: OpcodeOperand::Reg(1, Width::B64), src: OpcodeOperand::Reg(9, Width::B64) }, &[])); // sub rcx, r9
                                                 // sbb r8, r11 (high): REX.W+R(r11)+B(r8) = 0x4D
                 self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x19, 0xD8])); // sbb r8, r11
                 self.mov(0, 1);
                 self.mov(2, 8);
             },
             BinOp::And => {
-                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x21, 0xC9])); // and rcx, r9
-                self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x21, 0xD8])); // and r8, r11
+                self.emit_insn(&Insn::new(X86_64Opcode::AluRm { op: AluOp::And, width: Width::B64, dst: OpcodeOperand::Reg(1, Width::B64), src: OpcodeOperand::Reg(9, Width::B64) }, &[])); // and rcx, r9
+                self.emit_insn(&Insn::new(X86_64Opcode::AluRm { op: AluOp::And, width: Width::B64, dst: OpcodeOperand::Reg(8, Width::B64), src: OpcodeOperand::Reg(11, Width::B64) }, &[])); // and r8, r11
                 self.mov(0, 1);
                 self.mov(2, 8);
             },
             BinOp::Or => {
-                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x09, 0xC9])); // or rcx, r9
-                self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x09, 0xD8])); // or r8, r11
+                self.emit_insn(&Insn::new(X86_64Opcode::AluRm { op: AluOp::Or, width: Width::B64, dst: OpcodeOperand::Reg(1, Width::B64), src: OpcodeOperand::Reg(9, Width::B64) }, &[])); // or rcx, r9
+                self.emit_insn(&Insn::new(X86_64Opcode::AluRm { op: AluOp::Or, width: Width::B64, dst: OpcodeOperand::Reg(8, Width::B64), src: OpcodeOperand::Reg(11, Width::B64) }, &[])); // or r8, r11
                 self.mov(0, 1);
                 self.mov(2, 8);
             },
             BinOp::Xor => {
-                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x31, 0xC9])); // xor rcx, r9
-                self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x31, 0xD8])); // xor r8, r11
+                self.emit_insn(&Insn::new(X86_64Opcode::AluRm { op: AluOp::Xor, width: Width::B64, dst: OpcodeOperand::Reg(1, Width::B64), src: OpcodeOperand::Reg(9, Width::B64) }, &[])); // xor rcx, r9
+                self.emit_insn(&Insn::new(X86_64Opcode::AluRm { op: AluOp::Xor, width: Width::B64, dst: OpcodeOperand::Reg(8, Width::B64), src: OpcodeOperand::Reg(11, Width::B64) }, &[])); // xor r8, r11
                 self.mov(0, 1);
                 self.mov(2, 8);
             },
@@ -125,10 +125,10 @@ impl Codegen {
                 self.mov(10, 2); // r10 = a0*b0 高位
                 self.mov(0, 1);
                 self.emit_insn(&Insn::raw_bytes(&[0x49, 0xF7, 0xE3])); // mul r11
-                self.emit_insn(&Insn::raw_bytes(&[0x49, 0x01, 0xC2])); // add r10, rax
+                self.emit_insn(&Insn::new(X86_64Opcode::AluRm { op: AluOp::Add, width: Width::B64, dst: OpcodeOperand::Reg(10, Width::B64), src: OpcodeOperand::Reg(0, Width::B64) }, &[])); // add r10, rax
                 self.mov(0, 8);
                 self.emit_insn(&Insn::raw_bytes(&[0x49, 0xF7, 0xE1])); // mul r9
-                self.emit_insn(&Insn::raw_bytes(&[0x49, 0x01, 0xC2])); // add r10, rax
+                self.emit_insn(&Insn::new(X86_64Opcode::AluRm { op: AluOp::Add, width: Width::B64, dst: OpcodeOperand::Reg(10, Width::B64), src: OpcodeOperand::Reg(0, Width::B64) }, &[])); // add r10, rax
                 self.mov(0, 14);
                 self.mov(2, 10);
             },
@@ -138,10 +138,10 @@ impl Codegen {
             },
             BinOp::EqEq => {
                 self.emit_alu_rm_reg64(AluOp::Xor, 0, 0, &[0x48, 0x31, 0xC0]); // xor rax, rax
-                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x39, 0xC9])); // cmp rcx, r9 (low)
+                self.emit_insn(&Insn::new(X86_64Opcode::AluRm { op: AluOp::Cmp, width: Width::B64, dst: OpcodeOperand::Reg(1, Width::B64), src: OpcodeOperand::Reg(9, Width::B64) }, &[])); // cmp rcx, r9 (low)
                 let lne = self.fresh_label();
                 self.jmp_rel32(&lne, JumpKind::Jne);
-                self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x39, 0xD8])); // cmp r8, r11 (high)
+                self.emit_insn(&Insn::new(X86_64Opcode::AluRm { op: AluOp::Cmp, width: Width::B64, dst: OpcodeOperand::Reg(8, Width::B64), src: OpcodeOperand::Reg(11, Width::B64) }, &[])); // cmp r8, r11 (high)
                 self.jmp_rel32(&lne, JumpKind::Jne);
                 self.mov_imm(0, 1);
                 self.label(&lne);
@@ -151,9 +151,9 @@ impl Codegen {
                 self.emit_alu_rm_reg64(AluOp::Xor, 0, 0, &[0x48, 0x31, 0xC0]); // xor rax, rax
                 self.mov_imm(0, 1);
                 let leq = self.fresh_label();
-                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x39, 0xC9])); // cmp rcx, r9 (low)
+                self.emit_insn(&Insn::new(X86_64Opcode::AluRm { op: AluOp::Cmp, width: Width::B64, dst: OpcodeOperand::Reg(1, Width::B64), src: OpcodeOperand::Reg(9, Width::B64) }, &[])); // cmp rcx, r9 (low)
                 self.jmp_rel32(&leq, JumpKind::Jne);
-                self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x39, 0xD8])); // cmp r8, r11 (high)
+                self.emit_insn(&Insn::new(X86_64Opcode::AluRm { op: AluOp::Cmp, width: Width::B64, dst: OpcodeOperand::Reg(8, Width::B64), src: OpcodeOperand::Reg(11, Width::B64) }, &[])); // cmp r8, r11 (high)
                 self.jmp_rel32(&leq, JumpKind::Jne);
                 self.mov_imm(0, 0);
                 self.label(&leq);
