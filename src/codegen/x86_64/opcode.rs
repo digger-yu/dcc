@@ -1387,16 +1387,18 @@ impl X86_64Opcode {
                     rex |= 0x01;
                     need_rex = true;
                 }
-                // is_store 决定 opcode2: store=0x11/0x29, load=0x10/0x28.
+                // is_store 决定 opcode2: store=0x11/0x29/0x7F, load=0x10/0x28/0x6F.
                 //  (opcode10 字段仅用于 reg↔reg 分支; mem 分支靠 is_store 选择.)
                 let opc2: u8 = if is_store {
                     match width {
-                        SimdWidth::PD | SimdWidth::DQ => 0x29,
+                        SimdWidth::DQ => 0x7F,
+                        SimdWidth::PD => 0x29,
                         _ => 0x11,
                     }
                 } else {
                     match width {
-                        SimdWidth::PD | SimdWidth::DQ => 0x28,
+                        SimdWidth::DQ => 0x6F,
+                        SimdWidth::PD => 0x28,
                         _ => 0x10,
                     }
                 };
@@ -3316,6 +3318,78 @@ mod tests {
             }),
         };
         assert_eq!(o.encode(), Some(vec![0xF3, 0x0F, 0x10, 0x04, 0x24]));
+    }
+
+    // ---- P11 Bucket E2: SimdMov [rsp+disp8] sweep ----
+
+    #[test]
+    fn simd_mov_store_sd_xmm0_rsp_disp8() {
+        // movsd [rsp+8], xmm0: F2 0F 11 44 24 08 (mod=01, SIB base=rsp)
+        let o = X86_64Opcode::SimdMov {
+            width: SimdWidth::SD,
+            opcode10: false,
+            dst: Operand::Mem(MemOperand {
+                disp: 8, base: Some(4), index: None, seg: None,
+            }),
+            src: Operand::Reg(0, Width::B128),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF2, 0x0F, 0x11, 0x44, 0x24, 0x08]));
+    }
+
+    #[test]
+    fn simd_mov_load_sd_xmm1_rsp_disp8() {
+        // movsd xmm1, [rsp+8]: F2 0F 10 4C 24 08
+        let o = X86_64Opcode::SimdMov {
+            width: SimdWidth::SD,
+            opcode10: true,
+            dst: Operand::Reg(1, Width::B128),
+            src: Operand::Mem(MemOperand {
+                disp: 8, base: Some(4), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF2, 0x0F, 0x10, 0x4C, 0x24, 0x08]));
+    }
+
+    #[test]
+    fn simd_mov_store_ss_xmm0_rsp_disp0() {
+        // movss [rsp], xmm0: F3 0F 11 04 24 (mod=00)
+        let o = X86_64Opcode::SimdMov {
+            width: SimdWidth::SS,
+            opcode10: false,
+            dst: Operand::Mem(MemOperand {
+                disp: 0, base: Some(4), index: None, seg: None,
+            }),
+            src: Operand::Reg(0, Width::B128),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0x0F, 0x11, 0x04, 0x24]));
+    }
+
+    #[test]
+    fn simd_mov_store_dq_xmm0_rsp_disp8() {
+        // movdqa [rsp+16], xmm0: 66 0F 7F 44 24 10
+        let o = X86_64Opcode::SimdMov {
+            width: SimdWidth::DQ,
+            opcode10: false,
+            dst: Operand::Mem(MemOperand {
+                disp: 16, base: Some(4), index: None, seg: None,
+            }),
+            src: Operand::Reg(0, Width::B128),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x7F, 0x44, 0x24, 0x10]));
+    }
+
+    #[test]
+    fn simd_mov_load_dq_xmm2_rsp_disp8() {
+        // movdqa xmm2, [rsp+16]: 66 0F 6F 54 24 10
+        let o = X86_64Opcode::SimdMov {
+            width: SimdWidth::DQ,
+            opcode10: true,
+            dst: Operand::Reg(2, Width::B128),
+            src: Operand::Mem(MemOperand {
+                disp: 16, base: Some(4), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x6F, 0x54, 0x24, 0x10]));
     }
 }
 

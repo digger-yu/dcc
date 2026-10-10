@@ -79,11 +79,12 @@ impl Codegen {
         total_sz: i64,
     ) {
         // (a+bi)/(c+di): real=(ac+bd)/den, imag=(bc-ad)/den, den=c²+d².
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x04, 0x24]));
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, inner_sz as u8]));
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x54, 0x24, total_sz as u8]));
+        let w = if load_prefix == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
+        self.emit_insn(&Insn::simd_mov_mem(false, w, 0, 0));
+        self.emit_insn(&Insn::simd_mov_mem(false, w, 1, inner_sz as i32));
+        self.emit_insn(&Insn::simd_mov_mem(false, w, 2, total_sz as i32));
         let r_imag_slot = total_sz + inner_sz;
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x5C, 0x24, r_imag_slot as u8]));
+        self.emit_insn(&Insn::simd_mov_mem(false, w, 3, r_imag_slot as i32));
         self.mov_xmm(6, 2);
         self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(6, 6)]));
         self.mov_xmm(7, 3);
@@ -95,14 +96,14 @@ impl Codegen {
         self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(7, 3)]));
         self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_add, Self::modrm_reg_reg(4, 7)]));
         self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_div, Self::modrm_reg_reg(4, 6)]));
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x11, 0x24, 0x24]));
+        self.emit_insn(&Insn::simd_mov_mem(true, w, 0, 0));
         self.mov_xmm(7, 1);
         self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(7, 2)]));
         self.mov_xmm(5, 0);
         self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(5, 3)]));
         self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_sub, Self::modrm_reg_reg(7, 5)]));
         self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_div, Self::modrm_reg_reg(7, 6)]));
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x11, 0x7C, 0x24, inner_sz as u8]));
+        self.emit_insn(&Insn::simd_mov_mem(true, w, 5, inner_sz as i32));
     }
     fn emit_complex_mul_call(&mut self, is_float: bool, inner_sz: i64) {
         let helper = if is_float { "__mulsc3" } else { "__muldc3" };
@@ -159,23 +160,24 @@ impl Codegen {
         inner_sz: i64,
         total_sz: i64,
     ) {
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x04, 0x24]));
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x54, 0x24, total_sz as u8]));
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, inner_sz as u8]));
+        let w = if load_prefix == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
+        self.emit_insn(&Insn::simd_mov_mem(false, w, 0, 0));
+        self.emit_insn(&Insn::simd_mov_mem(false, w, 2, total_sz as i32));
+        self.emit_insn(&Insn::simd_mov_mem(false, w, 1, inner_sz as i32));
         let r_imag_slot = total_sz + inner_sz;
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x5C, 0x24, r_imag_slot as u8]));
+        self.emit_insn(&Insn::simd_mov_mem(false, w, 3, r_imag_slot as i32));
         self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x28, 0xE0]));
         self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, 0xE2]));
         self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x28, 0xE9]));
         self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, 0xEB]));
         self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_sub, 0xE5]));
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x11, 0x24, 0x24]));
+        self.emit_insn(&Insn::simd_mov_mem(true, w, 0, 0));
         self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x28, 0xE0]));
         self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, 0xE3]));
         self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x28, 0xE9]));
         self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, 0xEA]));
         self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_add, 0xE5]));
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x11, 0x64, 0x24, inner_sz as u8]));
+        self.emit_insn(&Insn::simd_mov_mem(true, w, 4, inner_sz as i32));
     }
     /// 赋值表达式的值 = 左值转换后的值: 把已写入目标的结果按统一 complex
     /// rvalue 约定再物化到帧底复数带 (`complex_result_off`), 以 rax = 该带
@@ -346,14 +348,14 @@ impl Codegen {
             },
             BinOp::Add | BinOp::Sub => {
                 let op_code = if matches!(op, BinOp::Add) { op_add } else { op_sub };
-                self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x04, 0x24]));
-                self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, total_sz as u8]));
-                self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_code, 0xC1]));
-                self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x11, 0x04, 0x24]));
                 let ld_width = if load_prefix == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
+                self.emit_insn(&Insn::simd_mov_mem(false, ld_width, 0, 0));
+                self.emit_insn(&Insn::simd_mov_mem(false, ld_width, 1, total_sz as i32));
+                self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_code, 0xC1]));
+                self.emit_insn(&Insn::simd_mov_mem(true, ld_width, 0, 0));
                 self.emit_insn(&Insn::simd_mov_mem(false, ld_width, 0, inner_sz as i32));
                 let r_imag_slot = total_sz + inner_sz;
-                self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, r_imag_slot as u8]));
+                self.emit_insn(&Insn::simd_mov_mem(false, ld_width, 1, r_imag_slot as i32));
                 self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_code, 0xC1]));
                 self.emit_insn(&Insn::simd_mov_mem(true, ld_width, 0, inner_sz as i32));
             },
@@ -413,17 +415,17 @@ impl Codegen {
                 let r_imag_slot = total_sz + inner_sz;
                 if float_inner {
                     // 浮点 complex: ucomi 比较实虚部
-                    self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x04, 0x24])); // xmm0 = l.real
-                    self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, total_sz as u8])); // xmm1 = r.real
+                    let ld_w = if load_prefix == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
+                    self.emit_insn(&Insn::simd_mov_mem(false, ld_w, 0, 0)); // xmm0 = l.real
+                    self.emit_insn(&Insn::simd_mov_mem(false, ld_w, 1, total_sz as i32)); // xmm1 = r.real
                     if is_float {
                         self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SS, 1, 0)); // ucomiss xmm1, xmm0
                     } else {
                         self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SD, 1, 0)); // ucomisd xmm1, xmm0
                     }
                     self.jmp_rel32(&false_label, JumpKind::Jne);
-                    let ld_w = if load_prefix == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
                     self.emit_insn(&Insn::simd_mov_mem(false, ld_w, 0, inner_sz as i32)); // xmm0 = l.imag
-                    self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, r_imag_slot as u8])); // xmm1 = r.imag
+                    self.emit_insn(&Insn::simd_mov_mem(false, ld_w, 1, r_imag_slot as i32)); // xmm1 = r.imag
                     if is_float {
                         self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SS, 1, 0));
                     } else {
@@ -2054,6 +2056,7 @@ impl Codegen {
         } else {
             0xF2u8
         };
+        let w = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
 
         if l_imag && r_imag {
             // imag op imag: 两个操作数都是单浮点值
@@ -2064,26 +2067,24 @@ impl Codegen {
                     self.gen_expr(r, dst);
                     self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
                     // 保存右操作数
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x04, 0x24])); // movss/movsd [rsp], xmm0
+                    self.emit_insn(&Insn::simd_mov_mem(true, w, 0, 0)); // movss/movsd [rsp], xmm0
                     self.gen_expr(l, dst);
                     self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
                     // 加载右操作数到 xmm1
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00])); // movss/movsd xmm1, [rsp]
+                    self.emit_insn(&Insn::simd_mov_mem(false, w, 1, 0)); // movss/movsd xmm1, [rsp]
                     let add_sub_op = if matches!(op, BinOp::Add) { SimdArithOp::Add } else { SimdArithOp::Sub };
-                    let width = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
-                    self.emit_insn(&Insn::simd_arith_reg(add_sub_op, width, 0, 1)); // addss/subss xmm0, xmm1 = l op r
+                    self.emit_insn(&Insn::simd_arith_reg(add_sub_op, w, 0, 1)); // addss/subss xmm0, xmm1 = l op r
                                                             // 结果在 xmm0
                 },
                 BinOp::Mul => {
                     // imag * imag → real (负乘积): (a*i)*(b*i) = -a*b
                     self.gen_expr(l, dst);
                     self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x04, 0x24]));
+                    self.emit_insn(&Insn::simd_mov_mem(true, w, 0, 0));
                     self.gen_expr(r, dst);
                     self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]));
-                    let mul_width = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
-                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Mul, mul_width, 0, 1)); // mulss/mulsd xmm0, xmm1
+                    self.emit_insn(&Insn::simd_mov_mem(false, w, 1, 0));
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Mul, w, 0, 1)); // mulss/mulsd xmm0, xmm1
                                                          // 取负: xor with sign bit
                     if matches!(inner_ty, Type::Float) {
                         // xorps xmm0, [neg_mask_f32]
@@ -2098,22 +2099,21 @@ impl Codegen {
                     // 先算 r 保存, 再算 l, 确保 xmm0=l, xmm1=r → l/r
                     self.gen_expr(r, dst);
                     self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x04, 0x24])); // [rsp] = r
+                    self.emit_insn(&Insn::simd_mov_mem(true, w, 0, 0)); // [rsp] = r
                     self.gen_expr(l, dst);
                     self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00])); // xmm1 = r
-                    let div_width = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
-                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Div, div_width, 0, 1)); // divsd xmm0, xmm1 = l/r
+                    self.emit_insn(&Insn::simd_mov_mem(false, w, 1, 0)); // xmm1 = r
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Div, w, 0, 1)); // divsd xmm0, xmm1 = l/r
                                                          // 结果在 xmm0 (实数值)
                 },
                 BinOp::EqEq | BinOp::Ne => {
                     // 比较虚部
                     self.gen_expr(l, dst);
                     self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x04, 0x24]));
+                    self.emit_insn(&Insn::simd_mov_mem(true, w, 0, 0));
                     self.gen_expr(r, dst);
                     self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]));
+                    self.emit_insn(&Insn::simd_mov_mem(false, w, 1, 0));
                     if matches!(inner_ty, Type::Float) {
                         self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SS, 1, 0)); // ucomiss xmm1, xmm0
                     } else {
@@ -2146,32 +2146,30 @@ impl Codegen {
                         // 先算实部 (来自 r)
                         self.gen_expr(r, dst);
                         self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
-                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x04, 0x24])); // [rsp+0] = real
+                        self.emit_insn(&Insn::simd_mov_mem(true, w, 0, 0)); // [rsp+0] = real
                                                                    // 再算虚部 (来自 l)
                         self.gen_expr(l, dst);
                         self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
                         if matches!(op, BinOp::Sub) {
                             self.emit_float_neg(&inner_ty);
                         }
-                        let st_w = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
-                        self.emit_insn(&Insn::simd_mov_mem(true, st_w, 0, inner_sz as i32));
+                        self.emit_insn(&Insn::simd_mov_mem(true, w, 0, inner_sz as i32));
                     // [rsp+inner] = ±imag
                     } else {
                         // real ± imag: real part = real, imag part = ±imag
                         self.gen_expr(l, dst);
                         self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
-                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x04, 0x24])); // [rsp+0] = real
+                        self.emit_insn(&Insn::simd_mov_mem(true, w, 0, 0)); // [rsp+0] = real
                         self.gen_expr(r, dst);
                         self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
                         if matches!(op, BinOp::Sub) {
                             self.emit_float_neg(&inner_ty);
                         }
-                        let st_w2 = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
-                        self.emit_insn(&Insn::simd_mov_mem(true, st_w2, 0, inner_sz as i32));
+                        self.emit_insn(&Insn::simd_mov_mem(true, w, 0, inner_sz as i32));
                         // [rsp+inner] = ±imag
                     }
                     // 加载实部到 xmm0 供后续使用
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x04, 0x24]));
+                    self.emit_insn(&Insn::simd_mov_mem(false, w, 0, 0));
                     // 将 (real, imag) 对拷贝到帧临时区供后续 complex 操作使用
                     let is_float_store = matches!(inner_ty, Type::Float);
                     self.store_complex_pair_from_rsp(result_off, inner_sz, is_float_store);
@@ -2181,24 +2179,22 @@ impl Codegen {
                     // real * imag → imag: 单浮点值乘法
                     self.gen_expr(l, dst);
                     self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x04, 0x24]));
+                    self.emit_insn(&Insn::simd_mov_mem(true, w, 0, 0));
                     self.gen_expr(r, dst);
                     self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00]));
-                    let mul2_width = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
-                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Mul, mul2_width, 0, 1)); // mulss/mulsd xmm0, xmm1
+                    self.emit_insn(&Insn::simd_mov_mem(false, w, 1, 0));
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Mul, w, 0, 1)); // mulss/mulsd xmm0, xmm1
                 },
                 BinOp::Div => {
                     // real / imag → imag: -(real/imag_mag)
                     // 先算 r 保存, 再算 l, 确保 xmm0=l, xmm1=r → l/r
                     self.gen_expr(r, dst);
                     self.emit_scalar_to_xmm0_if_needed(r, &inner_ty);
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x04, 0x24])); // [rsp] = r
+                    self.emit_insn(&Insn::simd_mov_mem(true, w, 0, 0)); // [rsp] = r
                     self.gen_expr(l, dst);
                     self.emit_scalar_to_xmm0_if_needed(l, &inner_ty);
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x4C, 0x24, 0x00])); // xmm1 = r
-                    let div2_width = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
-                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Div, div2_width, 0, 1)); // divsd xmm0, xmm1 = l/r
+                    self.emit_insn(&Insn::simd_mov_mem(false, w, 1, 0)); // xmm1 = r
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Div, w, 0, 1)); // divsd xmm0, xmm1 = l/r
                     self.emit_float_neg(&inner_ty);
                 },
                 _ => {},
@@ -2532,10 +2528,10 @@ impl Codegen {
     }
     fn store_complex_pair_from_rsp(&mut self, result_off: i64, inner_sz: i64, is_float: bool) {
         let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
-        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x04, 0x24]));
+        let w = if is_float { SimdWidth::SS } else { SimdWidth::SD };
+        self.emit_insn(&Insn::simd_mov_mem(false, w, 0, 0));
         self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
-        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10]));
-        self.emit_rsp_modrm_disp(0, inner_sz);
+        self.emit_insn(&Insn::simd_mov_mem(false, w, 0, inner_sz as i32));
         self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
     }
 }
