@@ -565,7 +565,7 @@ impl Codegen {
         self.align(16);
         let start = self.pos();
         self.label(CPU_INIT_NAME);
-        self.emit_insn(&Insn::raw_bytes(&[0x53])); // push rbx
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(3, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // push rbx
         // 幂等守卫: if (model.init_done) goto done
         let l_done = self.fresh_label();
         self.emit_model_rip(&RIP_MOV_EAX_M32, cpu_isa::SLOT_INIT_DONE, None);
@@ -655,7 +655,7 @@ impl Codegen {
             Some(1),
         );
         self.label(&l_done);
-        self.emit_insn(&Insn::raw_bytes(&[0x5B])); // pop rbx
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(3, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rbx
         self.ret();
         let size = self.pos() - start;
         self.func_sizes.insert(CPU_INIT_NAME.to_string(), size);

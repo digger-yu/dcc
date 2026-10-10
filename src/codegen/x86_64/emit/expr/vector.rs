@@ -362,14 +362,14 @@ impl Codegen {
             } else {
                 self.gen_expr(l, Self::EVAL_BASE);
             }
-            self.emit_insn(&Insn::raw_bytes(&[0x50])); // push rax (暂存 l 值)
+            self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // push rax (暂存 l 值)
                                 // 加载右操作数: 向量按元素取, 标量直接求值 (广播)
             if r_is_vec {
                 self.gen_scalar_vector_load(r, i, elem_size);
             } else {
                 self.gen_expr(r, Self::EVAL_BASE);
             }
-            self.emit_insn(&Insn::raw_bytes(&[0x59])); // pop rcx (恢复 l 值)
+            self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rcx (恢复 l 值)
             match op {
                 BinOp::Add => {
                     // P11: 收敛到 AluRm{Add, B64, rcx, rax}.

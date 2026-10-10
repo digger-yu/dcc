@@ -1706,9 +1706,9 @@ impl Codegen {
             return;
         }
         // 保存 rcx, rdi, rax (它们可能在后续代码中使用)
-        self.emit_insn(&Insn::raw_bytes(&[0x50])); // push rax
-        self.emit_insn(&Insn::raw_bytes(&[0x51])); // push rcx
-        self.emit_insn(&Insn::raw_bytes(&[0x57])); // push rdi
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // push rax
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // push rcx
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // push rdi
 
         // xor eax, eax (rax = 0)
         // P11: 收敛到 AluRm{Xor, B32, rax, rax}.
@@ -1741,9 +1741,9 @@ impl Codegen {
         self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x48, 0xAB]));
 
         // 恢复 rdi, rcx, rax
-        self.emit_insn(&Insn::raw_bytes(&[0x5F])); // pop rdi
-        self.emit_insn(&Insn::raw_bytes(&[0x59])); // pop rcx
-        self.emit_insn(&Insn::raw_bytes(&[0x58])); // pop rax
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rdi
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rcx
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rax
     }
 
     pub fn emit_stack_clash_probes(&mut self, frame_size: i64) {

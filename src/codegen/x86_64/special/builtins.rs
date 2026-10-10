@@ -812,10 +812,10 @@ impl Codegen {
                 self.gen_expr(&args[0], 7); // rdi = dst
                 self.gen_expr(&args[2], 1); // rcx = n
                                             // 保存 rdi 作为返回值 (memcpy/memmove 返回 dst)
-                self.emit_insn(&Insn::raw_bytes(&[0x57])); // push rdi
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // push rdi
                 self.emit_insn(&Insn::raw_bytes(&[0xfc])); // cld (清除方向标志)
                 self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
-                self.emit_insn(&Insn::raw_bytes(&[0x58])); // pop rax (返回值 = dst)
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rax (返回值 = dst)
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -831,10 +831,10 @@ impl Codegen {
                 self.gen_expr(&args[0], 7); // rdi = dst
                 self.gen_expr(&args[1], Self::EVAL_BASE); // rax = val
                 self.gen_expr(&args[2], 1); // rcx = n
-                self.emit_insn(&Insn::raw_bytes(&[0x57])); // push rdi
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // push rdi
                 self.emit_insn(&Insn::raw_bytes(&[0xfc])); // cld
                 self.emit_insn(&Insn::raw_bytes(&[0xf3, 0xaa])); // rep stosb
-                self.emit_insn(&Insn::raw_bytes(&[0x58])); // pop rax (返回值 = dst)
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rax (返回值 = dst)
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -2729,7 +2729,7 @@ impl Codegen {
                 self.gen_expr(&args[2], Self::EVAL_BASE); // xmm0 = arg2
                 self.emit_insn(&Insn::raw_bytes(&[prefix, 0x0F, 0x11, 0xC2])); // mov[sd|ss] xmm2, xmm0
                 self.emit_insn(&Insn::raw_bytes(&[prefix, 0x0F, opcode, 0xC3])); // mov[sd|ss] xmm0, xmm3 (恢复 arg0)
-                self.emit_insn(&Insn::raw_bytes(&[0x54])); // push rsp
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // push rsp
                                     // 调用 libm 中对应函数: fma / fmaf / fmal
                 let fn_name = match name {
                     "__builtin_fmaf" => "fmaf",
@@ -2737,7 +2737,7 @@ impl Codegen {
                     _ => "fma",
                 };
                 self.call_label(fn_name);
-                self.emit_insn(&Insn::raw_bytes(&[0x5c])); // pop rsp
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rsp
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -3052,7 +3052,7 @@ impl Codegen {
                 // add dst,rcx: dst in r/m only → REX.B
                 let rex_add = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                 // push rcx
-                self.emit_insn(&Insn::raw_bytes(&[0x51]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 // mov rcx, rax  (save original input; rcx = rax)
                 // REX.W 89 C1
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
@@ -3070,7 +3070,7 @@ impl Codegen {
                 // add dst, rcx  (reg=rcx=001, r/m=dst)
                 self.emit_insn(&Insn::raw_bytes(&[rex_add, 0x01, 0xC8 | (dst & 7)]));
                 // pop rcx
-                self.emit_insn(&Insn::raw_bytes(&[0x59]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 true
             },
             // __builtin_dynamic_object_size: dynamic variant of object_size.
@@ -3637,9 +3637,9 @@ impl Codegen {
                 } else {
                     self.mov_imm(7, 0);
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x54]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 self.call_label("nan");
-                self.emit_insn(&Insn::raw_bytes(&[0x5c]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -3651,9 +3651,9 @@ impl Codegen {
                 } else {
                     self.mov_imm(7, 0);
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x54]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 self.call_label("nanf");
-                self.emit_insn(&Insn::raw_bytes(&[0x5c]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -3665,9 +3665,9 @@ impl Codegen {
                 } else {
                     self.mov_imm(7, 0);
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x54]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 self.call_label("nanl");
-                self.emit_insn(&Insn::raw_bytes(&[0x5c]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -3743,9 +3743,9 @@ impl Codegen {
                     self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x11, 0xD0]));
                 }
                 let lib_fn = if name == "__builtin_fmaxl" { "fmaxl" } else { "fminl" };
-                self.emit_insn(&Insn::raw_bytes(&[0x54]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 self.call_label(lib_fn);
-                self.emit_insn(&Insn::raw_bytes(&[0x5c]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -3757,9 +3757,9 @@ impl Codegen {
                     self.gen_expr(&args[0], 7); // rdi = c
                     self.gen_expr(&args[1], 6); // rsi = stream
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x54]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 self.call_label("fputc");
-                self.emit_insn(&Insn::raw_bytes(&[0x5c]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -3773,9 +3773,9 @@ impl Codegen {
                     self.gen_expr(&args[2], 2); // rdx = nmemb
                     self.gen_expr(&args[3], 1); // rcx = stream
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x54]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 self.call_label("fwrite");
-                self.emit_insn(&Insn::raw_bytes(&[0x5c]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -3789,9 +3789,9 @@ impl Codegen {
                     self.gen_expr(&args[2], 2);
                     self.gen_expr(&args[3], 1);
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x54]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 self.call_label("fread");
-                self.emit_insn(&Insn::raw_bytes(&[0x5c]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -3837,9 +3837,9 @@ impl Codegen {
                     if !args.is_empty() {
                         self.gen_expr(&args[0], 7);
                     }
-                    self.emit_insn(&Insn::raw_bytes(&[0x54]));
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                     self.call_label(lib_name);
-                    self.emit_insn(&Insn::raw_bytes(&[0x5c]));
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                     if dst != 0 {
                         self.mov(dst, 0);
                     }
@@ -3850,9 +3850,9 @@ impl Codegen {
                     } else {
                         self.mov_imm(7, 0);
                     }
-                    self.emit_insn(&Insn::raw_bytes(&[0x54]));
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                     self.call_label(lib_name);
-                    self.emit_insn(&Insn::raw_bytes(&[0x5c]));
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                     if dst != 0 {
                         self.mov(dst, 0);
                     }
@@ -3862,9 +3862,9 @@ impl Codegen {
                         let reg = [7, 6, 2, 1][i]; // rdi, rsi, rdx, rcx
                         self.gen_expr(arg, reg);
                     }
-                    self.emit_insn(&Insn::raw_bytes(&[0x54]));
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                     self.call_label(lib_name);
-                    self.emit_insn(&Insn::raw_bytes(&[0x5c]));
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                     if dst != 0 {
                         self.mov(dst, 0);
                     }
@@ -4013,9 +4013,9 @@ impl Codegen {
                 if !args.is_empty() {
                     self.gen_expr(&args[0], Self::EVAL_BASE);
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x54]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 self.call_label("floorl");
-                self.emit_insn(&Insn::raw_bytes(&[0x5c]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -4051,9 +4051,9 @@ impl Codegen {
                 if !args.is_empty() {
                     self.gen_expr(&args[0], Self::EVAL_BASE);
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x54]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 self.call_label("ceill");
-                self.emit_insn(&Insn::raw_bytes(&[0x5c]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -4089,9 +4089,9 @@ impl Codegen {
                 if !args.is_empty() {
                     self.gen_expr(&args[0], Self::EVAL_BASE);
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x54]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 self.call_label("roundl");
-                self.emit_insn(&Insn::raw_bytes(&[0x5c]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -4127,9 +4127,9 @@ impl Codegen {
                 if !args.is_empty() {
                     self.gen_expr(&args[0], Self::EVAL_BASE);
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x54]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 self.call_label("truncl");
-                self.emit_insn(&Insn::raw_bytes(&[0x5c]));
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }

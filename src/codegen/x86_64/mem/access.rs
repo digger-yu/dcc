@@ -897,7 +897,7 @@ impl Codegen {
     /// 尺寸是编译期常量（VLA + 段限定的聚合不在本路径：上面 `size()` 对 VLA 不可信）。
     pub(crate) fn copy_agg_to_seg(&mut self, size: usize, seg: u8) {
         // rax 在本路径上是存活值（聚合赋值的地址/值约定），当暂存器用前先压后复。
-        self.emit_insn(&Insn::raw_bytes(&[0x50])); // push rax
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // push rax
         // `mod_ << 6 | rm`：rsi=110 / rdi=111 都不需要 SIB；reg 域固定 000（rax/al）。
         let disp_bytes = |me: &mut Self, mod_: u8, off: usize| {
             if mod_ == 1 {
@@ -962,7 +962,7 @@ impl Codegen {
                 off += w;
             }
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x58])); // pop rax
+        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rax
     }
     /// 尺寸只有运行期才能定（VLA 聚合）且目标带段时的逐字节搬运：
     /// `rsi` = 源、`rdi` = 目标、`rcx` = 己计好的字节数（与 `rep movsb` 同一约定）。

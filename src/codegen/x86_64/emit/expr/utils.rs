@@ -146,7 +146,7 @@ impl Codegen {
                 let op_size = lt.size().max(rt.size());
                 let need_zero_ext = !is_signed && op_size <= 4;
                 if src == 2 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x52])); // push rdx (save divisor)
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // push rdx (save divisor)
                 }
                 if dst != 0 {
                     self.mov(0, dst); // rax = 被除数
@@ -156,7 +156,7 @@ impl Codegen {
                     self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0])); // mov eax, eax (zero-extends to rax)
                 }
                 if src == 2 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x59])); // pop rcx (restore divisor)
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rcx (restore divisor)
                                         // 零扩展除数 (rcx) 从32位到64位
                     if need_zero_ext {
                         self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC9])); // mov ecx, ecx (zero-extends to rcx)
