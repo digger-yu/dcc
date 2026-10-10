@@ -2031,13 +2031,13 @@ impl Codegen {
                     self.gen_expr(e, Self::EVAL_BASE);
                     match op {
                         UnOp::Neg => {
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xD8])); // neg rax
+                            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 0)); // neg rax
                             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xD2, 0x00])); // adc rdx, 0
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xDA])); // neg rdx
+                            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 2)); // neg rdx
                         },
                         UnOp::BitNot => {
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xD0])); // not rax
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xD2])); // not rdx
+                            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Not, crate::codegen::shared::asm_operand::Width::B64, 0)); // not rax
+                            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Not, crate::codegen::shared::asm_operand::Width::B64, 2)); // not rdx
                         },
                         UnOp::Not => {
                             // P11: or rax, rdx via typed opcode.
@@ -2286,17 +2286,17 @@ impl Codegen {
                     match inner_sz {
                         8 => {
                             self.load_stack(0, result_off + 8);
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xD8])); // neg rax
+                            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 0)); // neg rax
                             self.store_stack(0, result_off + 8);
                         },
                         4 => {
                             self.load_stack(0, result_off + 4);
-                            self.emit_insn(&Insn::raw_bytes(&[0xF7, 0xD8])); // neg eax
+                            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B32, 0)); // neg eax
                             self.emit_store(0, result_off + 4, 4);
                         },
                         2 => {
                             self.load_stack(0, result_off + 2);
-                            self.emit_insn(&Insn::raw_bytes(&[0x66, 0xF7, 0xD8])); // neg ax
+                            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B16, 0)); // neg ax
                             self.emit_store(0, result_off + 2, 2);
                         },
                         _ => {

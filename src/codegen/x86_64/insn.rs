@@ -213,6 +213,24 @@ impl Insn {
         Insn::raw_bytes(&out)
     }
 
+    /// P11: NOT / NEG single-register unary via UnaryRm typed opcode.
+    /// op: UnaryOp::Not or UnaryOp::Neg. width: B16/B32/B64. reg_idx: x86_64
+    /// physical register index 0..15.
+    pub fn unary_rm_reg(
+        op: crate::codegen::x86_64::opcode::UnaryOp,
+        width: crate::codegen::shared::asm_operand::Width,
+        reg_idx: u8,
+    ) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::UnaryRm {
+                op,
+                width,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(reg_idx, width),
+            },
+            &[],
+        )
+    }
+
     pub fn encode_bytes(&self) -> Option<Vec<u8>> {
         // 类型化变体: 让 opcode.rs 现场算字节. 尚未实现的变体返回 None →
         // 发射方必须切回 raw_bytes 兜底; 当前没有任何调用点依赖 None 分支.
