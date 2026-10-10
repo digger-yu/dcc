@@ -2135,7 +2135,7 @@ impl Codegen {
                         // 第 7+ 个参数: 压栈
                         self.gen_expr(a, Self::EVAL_BASE);
                         if matches!(arg_ty, Type::Float | Type::Double | Type::LongDouble) {
-                            self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x11, 0x44, 0x24, 0])); // movsd [rsp+0], xmm0
+                            self.emit_insn(&Insn::simd_mov_mem(true, crate::codegen::x86_64::opcode::SimdWidth::SD, 0, 0)); // movsd [rsp+0], xmm0
                         } else {
                             self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -3406,9 +3406,7 @@ impl Codegen {
                     let off = 48 + k * 16;
                     // movdqu [rsp+off], xmmK: F3 0F 7F /r (modrm.reg = K)
                     if off < 128 {
-                        self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x7F, 0x44, 0x24, off as u8]));
-                        let n = self.code.len();
-                        self.code[n - 3] |= (k as u8) << 3; // modrm
+                        self.emit_insn(&Insn::simd_mov_mem(true, crate::codegen::x86_64::opcode::SimdWidth::DQ, k as u8, off as i32));
                     } else {
                         self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x7F, 0x84, 0x24]));
                         self.emit_insn(&Insn::raw_bytes(&off.to_le_bytes()));

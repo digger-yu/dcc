@@ -350,11 +350,12 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, total_sz as u8]));
                 self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_code, 0xC1]));
                 self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x11, 0x04, 0x24]));
-                self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x44, 0x24, inner_sz as u8]));
+                let ld_width = if load_prefix == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
+                self.emit_insn(&Insn::simd_mov_mem(false, ld_width, 0, inner_sz as i32));
                 let r_imag_slot = total_sz + inner_sz;
                 self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, r_imag_slot as u8]));
                 self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_code, 0xC1]));
-                self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x11, 0x44, 0x24, inner_sz as u8]));
+                self.emit_insn(&Insn::simd_mov_mem(true, ld_width, 0, inner_sz as i32));
             },
             BinOp::Mul if !is_float_inner => {
                 // 整数 complex 乘法: real=ac-bd, imag=ad+bc (GCC
@@ -420,7 +421,8 @@ impl Codegen {
                         self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SD, 1, 0)); // ucomisd xmm1, xmm0
                     }
                     self.jmp_rel32(&false_label, JumpKind::Jne);
-                    self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x44, 0x24, inner_sz as u8])); // xmm0 = l.imag
+                    let ld_w = if load_prefix == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
+                    self.emit_insn(&Insn::simd_mov_mem(false, ld_w, 0, inner_sz as i32)); // xmm0 = l.imag
                     self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, 0x10, 0x4C, 0x24, r_imag_slot as u8])); // xmm1 = r.imag
                     if is_float {
                         self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SS, 1, 0));
@@ -2043,7 +2045,8 @@ impl Codegen {
                         if matches!(op, BinOp::Sub) {
                             self.emit_float_neg(&inner_ty);
                         }
-                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, inner_sz as u8]));
+                        let st_w = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
+                        self.emit_insn(&Insn::simd_mov_mem(true, st_w, 0, inner_sz as i32));
                     // [rsp+inner] = ±imag
                     } else {
                         // real ± imag: real part = real, imag part = ±imag
@@ -2055,7 +2058,8 @@ impl Codegen {
                         if matches!(op, BinOp::Sub) {
                             self.emit_float_neg(&inner_ty);
                         }
-                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, inner_sz as u8]));
+                        let st_w2 = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
+                        self.emit_insn(&Insn::simd_mov_mem(true, st_w2, 0, inner_sz as i32));
                         // [rsp+inner] = ±imag
                     }
                     // 加载实部到 xmm0 供后续使用
@@ -2161,9 +2165,10 @@ impl Codegen {
                         self.emit_xmm0_r13_disp(&[v_pfx, 0x41, 0x0F, 0x10], off);
                     }
                     self.emit_float_convert(&v_inner, op_inner);
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]));
+                    let st_w = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
+                    self.emit_insn(&Insn::simd_mov_mem(true, st_w, 0, rsp_slot as i32));
                     self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 0)); // xorps xmm0, xmm0
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]));
+                    self.emit_insn(&Insn::simd_mov_mem(true, st_w, 0, (rsp_slot + inner_sz) as i32));
                 } else if !is_cplx {
                     // 标量整数变量提升为整数 _Complex: 实部=按自身宽度
                     // 符号/零扩展加载, 虚部=0。旧路径把标量 home 当
@@ -2180,9 +2185,9 @@ impl Codegen {
                     if is_float_inner {
                         let width = if is_float { SimdWidth::SS } else { SimdWidth::SD };
                         self.emit_insn(&Insn::cvt2sd_reg(true, width, 0, 0));
-                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]));
+                        self.emit_insn(&Insn::simd_mov_mem(true, width, 0, rsp_slot as i32));
                         self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 0));
-                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]));
+                        self.emit_insn(&Insn::simd_mov_mem(true, width, 0, (rsp_slot + inner_sz) as i32));
                     } else {
                         self.store_rsp_qword(0, rsp_slot as usize);
                         self.mov_imm(0, 0);
@@ -2217,14 +2222,7 @@ impl Codegen {
                             self.emit_load_mem_typed_disp(v_isz as usize, &v_inner, v_isz);
                         }
                         self.emit_insn(&Insn::cvt2sd_reg(true, cvt_width, 0, 0));
-                        self.emit_insn(&Insn::raw_bytes(&[
-                            pfx,
-                            0x0F,
-                            0x11,
-                            0x44,
-                            0x24,
-                            (rsp_slot + part * inner_sz) as u8,
-                        ]));
+                        self.emit_insn(&Insn::simd_mov_mem(true, cvt_width, 0, (rsp_slot + part * inner_sz) as i32));
                     }
                 } else if !v_is_float && !is_float_inner {
                     // 整数 complex 变量参与整数运算: 分量按变量自身宽度
@@ -2251,7 +2249,8 @@ impl Codegen {
                                                           // 加载实部: movss/movsd xmm0, [rax]
                     self.emit_insn(&Insn::raw_bytes(&[v_pfx, 0x0F, 0x10, 0x00]));
                     self.emit_float_convert(&v_inner, op_inner);
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]));
+                    let st_w = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
+                    self.emit_insn(&Insn::simd_mov_mem(true, st_w, 0, rsp_slot as i32));
                     // 加载虚部: movss/movsd xmm0, [rax+v_isz]
                     if v_isz < 128 {
                         self.emit_insn(&Insn::raw_bytes(&[v_pfx, 0x0F, 0x10, 0x40, v_isz as u8]));
@@ -2260,16 +2259,17 @@ impl Codegen {
                         self.emit_insn(&Insn::raw_bytes(&(v_isz as i32).to_le_bytes()));
                     }
                     self.emit_float_convert(&v_inner, op_inner);
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]));
+                    self.emit_insn(&Insn::simd_mov_mem(true, st_w, 0, (rsp_slot + inner_sz) as i32));
                 } else {
                     // 局部 complex 变量: 从 [r13+off] 加载
                     let off = self.var_offset(&name.name);
                     self.emit_xmm0_r13_disp(&[v_pfx, 0x41, 0x0F, 0x10], off);
                     self.emit_float_convert(&v_inner, op_inner);
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]));
+                    let st_w = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
+                    self.emit_insn(&Insn::simd_mov_mem(true, st_w, 0, rsp_slot as i32));
                     self.emit_xmm0_r13_disp(&[v_pfx, 0x41, 0x0F, 0x10], off + v_isz);
                     self.emit_float_convert(&v_inner, op_inner);
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]));
+                    self.emit_insn(&Insn::simd_mov_mem(true, st_w, 0, (rsp_slot + inner_sz) as i32));
                 }
             },
             _ => {
@@ -2298,18 +2298,18 @@ impl Codegen {
                     let e_isz = e_inner.size() as i64;
                     let e_is_float =
                         matches!(&e_inner, Type::Float | Type::Double | Type::LongDouble);
-                    let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
+                    let st_w = if is_float { SimdWidth::SS } else { SimdWidth::SD };
                     self.gen_expr(e, Self::EVAL_BASE);
                     if e_is_float && is_float_inner {
                         // 实部: [result_off] (e 自身宽度) → cvt → [rsp+slot]
                         let e_pfx = if matches!(e_inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                         self.emit_xmm0_r13_disp(&[e_pfx, 0x41, 0x0F, 0x10], result_off);
                         self.emit_float_convert(&e_inner, op_inner);
-                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]));
+                        self.emit_insn(&Insn::simd_mov_mem(true, st_w, 0, rsp_slot as i32));
                         // 虚部: [result_off+e_isz]
                         self.emit_xmm0_r13_disp(&[e_pfx, 0x41, 0x0F, 0x10], result_off + e_isz);
                         self.emit_float_convert(&e_inner, op_inner);
-                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]));
+                        self.emit_insn(&Insn::simd_mov_mem(true, st_w, 0, (rsp_slot + inner_sz) as i32));
                     } else if is_float_inner {
                         // 整数源 → 浮点运算 inner: 分量按整数宽度加载后
                         // cvtsi2ss/cvtsi2sd (Ident 变量分支同构)。每轮重取
@@ -2319,14 +2319,7 @@ impl Codegen {
                             self.emit_lea_r13(0, result_off);
                             self.emit_load_mem_typed_disp(e_isz as usize, &e_inner, part * e_isz);
                             self.emit_insn(&Insn::cvt2sd_reg(true, cvt_width, 0, 0));
-                            self.emit_insn(&Insn::raw_bytes(&[
-                                pfx,
-                                0x0F,
-                                0x11,
-                                0x44,
-                                0x24,
-                                (rsp_slot + part * inner_sz) as u8,
-                            ]));
+                            self.emit_insn(&Insn::simd_mov_mem(true, cvt_width, 0, (rsp_slot + part * inner_sz) as i32));
                         }
                     } else if e_isz == inner_sz {
                         // 整数同宽: rax 指向物化区, 整块拷贝
@@ -2364,10 +2357,10 @@ impl Codegen {
                         let cvt_width = if is_float { SimdWidth::SS } else { SimdWidth::SD };
                         self.emit_insn(&Insn::cvt2sd_reg(true, cvt_width, 0, 0));
                     }
-                    let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, rsp_slot as u8]));
+                    let st_w = if is_float { SimdWidth::SS } else { SimdWidth::SD };
+                    self.emit_insn(&Insn::simd_mov_mem(true, st_w, 0, rsp_slot as i32));
                     self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 0)); // xorps xmm0, xmm0
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x44, 0x24, (rsp_slot + inner_sz) as u8]));
+                    self.emit_insn(&Insn::simd_mov_mem(true, st_w, 0, (rsp_slot + inner_sz) as i32));
                 } else {
                     // 标量整数提升为整数 _Complex: 实部=值, 虚部=0
                     // 注意: 操作数槽在 [rsp+slot], 用 store_rsp_qword (非 r13 相对)

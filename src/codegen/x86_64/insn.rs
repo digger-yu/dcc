@@ -291,6 +291,36 @@ impl Insn {
         Self::simd_xmm_reg_reg(0xF3, 0x11, dst_xmm, src_xmm)
     }
 
+    /// P11 Bucket B: SimdMov [rsp+disp] store/load.
+    /// store=true: movss/movsd/movups [rsp+disp], xmm (0F 11).
+    /// store=false: movss/movsd/movups xmm, [rsp+disp] (0F 10).
+    /// width: SimdWidth::{SS, SD, O/PS, PD, DQ}. base=rsp(4), disp=i32.
+    pub fn simd_mov_mem(
+        store: bool,
+        width: crate::codegen::x86_64::opcode::SimdWidth,
+        xmm_reg: u8,
+        disp: i32,
+    ) -> Self {
+        use crate::codegen::x86_64::opcode::{MemOperand, Operand, X86_64Opcode};
+        let mem = Operand::Mem(MemOperand {
+            disp,
+            base: Some(4),
+            index: None,
+            seg: None,
+        });
+        let reg = Operand::Reg(xmm_reg, crate::codegen::shared::asm_operand::Width::B128);
+        let (dst, src) = if store { (mem, reg) } else { (reg, mem) };
+        Insn::new(
+            X86_64Opcode::SimdMov {
+                width,
+                opcode10: !store,
+                dst,
+                src,
+            },
+            &[],
+        )
+    }
+
     /// P11 Bucket G: movapd xmm_dst, xmm_src (66 0F 28 mod=11, load direction).
     pub fn movapd_xmm(dst_xmm: u8, src_xmm: u8) -> Self {
         Insn::new(
