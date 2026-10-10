@@ -165,7 +165,19 @@ impl Codegen {
                         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x99])); // cqto
                         self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xF9])); // idiv rcx
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2])); // xor rdx, rdx
+                        // P11: xor rdx, rdx via typed opcode.
+                        let insn = Insn::new(
+                            crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                                op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                                width: crate::codegen::shared::asm_operand::Width::B64,
+                                dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64),
+                                src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64),
+                            },
+                            &[],
+                        );
+                        if !self.emit_insn(&insn) {
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2])); // xor rdx, rdx
+                        }
                         self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xF1])); // div rcx
                     }
                 } else {
@@ -183,7 +195,19 @@ impl Codegen {
                         }
                         self.emit_insn(&Insn::raw_bytes(&[rex, 0xF7, 0xF8 | (src & 7)])); // idiv src
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2])); // xor rdx, rdx
+                        // P11: xor rdx, rdx via typed opcode.
+                        let insn = Insn::new(
+                            crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                                op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                                width: crate::codegen::shared::asm_operand::Width::B64,
+                                dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64),
+                                src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64),
+                            },
+                            &[],
+                        );
+                        if !self.emit_insn(&insn) {
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2])); // xor rdx, rdx
+                        }
                         let mut rex = 0x48u8;
                         if src >= 8 {
                             rex |= 0x41;
