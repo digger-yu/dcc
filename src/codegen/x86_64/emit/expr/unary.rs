@@ -50,7 +50,7 @@ impl Codegen {
                     if !self.emit_insn(&insn) {
                         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xD0])); // or rax, rdx
                     }
-                    self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x85, 0xC0], "test %rax, %rax")); // test rax, rax
+                    self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 0, 0)); // test rax, rax
                     self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x94, 0xC0], "sete %al")); // sete al
                     self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xB6, 0xC0], "movzbq %al, %rax"));
                     // P11: xor rdx, rdx via typed opcode (high = 0).

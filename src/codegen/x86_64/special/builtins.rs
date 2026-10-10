@@ -1310,7 +1310,7 @@ impl Codegen {
                 }
                 self.call_label("memcmp");
                 // test eax, eax; setz al; movzx eax, al
-                self.emit_insn(&Insn::raw_bytes(&[0x85, 0xc0])); // test eax, eax
+                self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 0, 0)); // test eax, eax
                 self.emit_insn(&Insn::raw_bytes(&[0x0f, 0x94, 0xc0])); // setz al
                 self.emit_insn(&Insn::raw_bytes(&[0x0f, 0xb6, 0xc0])); // movzx eax, al
                 if dst != 0 {
@@ -1851,7 +1851,7 @@ impl Codegen {
                 &[],
             )); // mov edx, eax (edx = isinf)
                 self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B32, 0)); // neg eax (eax = -isinf)
-                self.emit_insn(&Insn::raw_bytes(&[0x85, 0xF6])); // test esi, esi
+                self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 6, 6)); // test esi, esi
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x44, 0xC2])); // cmove eax, edx
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -2738,11 +2738,17 @@ impl Codegen {
                             self.emit_insn(&Insn::raw_bytes(&[0x48, 0xf7, 0xe9])); // imul rcx
                             let ok = self.fresh_label();
                             if a_uns {
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x85, 0xc9])); // test rcx, rcx
+                                self.emit_insn(&Insn::test_rm_reg(
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                    1, 1,
+                                )); // test rcx, rcx
                                 self.jmp_rel32(&ok, JumpKind::Jns);
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xf2])); // add rdx, rsi
                             } else {
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x85, 0xf6])); // test rsi, rsi
+                                self.emit_insn(&Insn::test_rm_reg(
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                    6, 6,
+                                )); // test rsi, rsi
                                 self.jmp_rel32(&ok, JumpKind::Jns);
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xca])); // add rdx, rcx
                             }
@@ -2806,7 +2812,10 @@ impl Codegen {
                             // 128 位积对 signed res 恒 fit (输入≤64 位,
                             // 积≤2^126); 对 unsigned res 不 fit ⟺ 积<0
                             if res_uns {
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x85, 0xd2])); // test rdx, rdx
+                                self.emit_insn(&Insn::test_rm_reg(
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                    2, 2,
+                                )); // test rdx, rdx
                                 self.emit_insn(&Insn::raw_bytes(&[0x0f, 0x98, 0xc0])); // sets al
                             } else {
                                 self.emit_insn(&Insn::raw_bytes(&[0x31, 0xc0])); // xor eax, eax

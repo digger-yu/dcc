@@ -259,7 +259,7 @@ impl Codegen {
                             self.emit_insn(&Insn::raw_bytes(&[0x09, 0xD1])); // or ecx, edx
                         }
                     }
-                    self.emit_insn(&Insn::raw_bytes(&[0x85, 0xC9])); // test ecx, ecx
+                    self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 1, 1)); // test ecx, ecx
                 },
                 Type::Double | Type::LongDouble => {
                     self.emit_insn(&Insn::new(
@@ -310,7 +310,7 @@ impl Codegen {
                             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xD1]));
                         }
                     }
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x85, 0xC9])); // test rcx, rcx
+                    self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 1, 1)); // test rcx, rcx
                 },
                 _ => {
                     // 整数分量: 任一分量非零即真。result_off 8 字节
@@ -335,7 +335,7 @@ impl Codegen {
                 &[],
             )); // mov rcx, [rax]
                             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0B, 0x48, isz as u8])); // or rcx, [rax+isz]
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x85, 0xC9])); // test rcx, rcx
+                            self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 1, 1)); // test rcx, rcx
                         },
                         8 => {
                             self.emit_insn(&Insn::new(
@@ -352,7 +352,7 @@ impl Codegen {
                 },
                 &[],
             )); // mov rax, [rax]
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x85, 0xC0]));
+                            self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 0, 0));
                         },
                         4 => {
                             self.emit_insn(&Insn::new(
@@ -369,12 +369,12 @@ impl Codegen {
                 },
                 &[],
             )); // mov eax, [rax]
-                            self.emit_insn(&Insn::raw_with_gas(&[0x85, 0xC0], "test %eax, %eax"));
+                            self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 0, 0)); // test eax, eax
                         },
                         _ => {
                             // total==2 (_Complex char 等)
                             self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7, 0x00])); // movzx eax, word [rax]
-                            self.emit_insn(&Insn::raw_with_gas(&[0x85, 0xC0], "test %eax, %eax"));
+                            self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 0, 0)); // test eax, eax
                         },
                     }
                 },
@@ -385,9 +385,9 @@ impl Codegen {
         // test %rax,%rax (48 85 C0), 否则高 32 位非零值会被
         // test %eax,%eax (85 C0) 误判为零.
         if ty.size() > 4 {
-            self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x85, 0xc0], "test %rax, %rax")); // test %rax, %rax
+            self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 0, 0)); // test rax, rax
         } else {
-            self.emit_insn(&Insn::raw_with_gas(&[0x85, 0xc0], "test %eax, %eax")); // test %eax, %eax
+            self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 0, 0)); // test eax, eax
         }
     }
     pub(crate) fn emit_ulong_to_float(&mut self, dst: u8, is_double: bool) {

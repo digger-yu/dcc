@@ -326,7 +326,7 @@ impl Codegen {
             self.mov(2, 15);
             if signed {
                 let positive = self.fresh_label();
-                self.emit_insn(&Insn::raw_bytes(&[0x85, 0xFF])); // test edi, edi
+                self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 7, 7)); // test edi, edi
                 self.jmp_rel32(&positive, JumpKind::Je);
                 self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 0)); // neg rax
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xD2, 0x00])); // adc rdx, 0
@@ -335,7 +335,7 @@ impl Codegen {
             }
         } else if signed {
             let positive = self.fresh_label();
-            self.emit_insn(&Insn::raw_bytes(&[0x85, 0xF6])); // test esi, esi
+            self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 6, 6)); // test esi, esi
             self.jmp_rel32(&positive, JumpKind::Je);
             self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 0)); // neg rax
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xD2, 0x00])); // adc rdx, 0

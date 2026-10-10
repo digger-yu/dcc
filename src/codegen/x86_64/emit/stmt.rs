@@ -514,7 +514,7 @@ impl Codegen {
                         && matches!(ret_ty, Type::Ptr(_) | Type::Func(_, _))
                     {
                         // test rax, rax; jnz .ok; ud2; .ok:
-                        self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x85, 0xc0], "test %rax, %rax")); // test rax, rax
+                        self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 0, 0)); // test rax, rax
                         let ok_label = self.fresh_label();
                         self.jmp_rel32(&ok_label, JumpKind::Jne);
                         self.emit_insn(&Insn::raw_with_gas(&[0x0f, 0x0b], "ud2")); // ud2 - undefined instruction trap
