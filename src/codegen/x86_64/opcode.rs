@@ -73,6 +73,14 @@ pub(crate) enum NoArgOp {
     RepStosb,
     /// rep movsq: F3 48 A5 (qword 版本, 带 REX.W).
     RepMovsq,
+    /// syscall: 0F 05 (fast system call into 64-bit kernel).
+    Syscall,
+    /// int3: CC (debugger breakpoint).
+    Int3,
+    /// xgetbv: 0F 01 D0 (x87 control/status -> EDX:EAX).
+    Xgetbv,
+    /// ret near: C3 (return to caller).
+    RetNear,
 }
 
 /// SIMD 算术 — 步骤 1 不实现.
@@ -1663,6 +1671,10 @@ impl X86_64Opcode {
                     NoArgOp::RepMovsb => &[0xF3, 0xA4],
                     NoArgOp::RepStosb => &[0xF3, 0xAA],
                     NoArgOp::RepMovsq => &[0xF3, 0x48, 0xA5],
+                    NoArgOp::Syscall => &[0x0F, 0x05],
+                    NoArgOp::Int3 => &[0xCC],
+                    NoArgOp::Xgetbv => &[0x0F, 0x01, 0xD0],
+                    NoArgOp::RetNear => &[0xC3],
                 };
                 Some(bytes.to_vec())
             }
@@ -1728,6 +1740,10 @@ impl X86_64Opcode {
                     NoArgOp::RepMovsb => "rep movsb",
                     NoArgOp::RepStosb => "rep stosb",
                     NoArgOp::RepMovsq => "rep movsq",
+                    NoArgOp::Syscall => "syscall",
+                    NoArgOp::Int3 => "int3",
+                    NoArgOp::Xgetbv => "xgetbv",
+                    NoArgOp::RetNear => "ret",
                 };
                 String::from(s)
             }

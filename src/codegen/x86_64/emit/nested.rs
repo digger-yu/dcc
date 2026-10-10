@@ -89,7 +89,7 @@ impl Codegen {
         self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC0])); // mov rax, 10
         self.emit_insn(&Insn::raw_bytes(&10i32.to_le_bytes()));
         // syscall
-        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x05]));
+        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Syscall));
         // syscall 破坏: rax, rcx, r11
         // 恢复 rax (可能被后续代码使用)
         // 注意: rcx, r11 被 syscall 破坏，但它们是 caller-saved，所以没问题

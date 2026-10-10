@@ -27,6 +27,6 @@ impl Codegen {
         self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC7, 0x02, 0x00, 0x01, 0x00]));
         // mov rax, 158; syscall
         self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC0, 0x9E, 0x00, 0x00, 0x00]));
-        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x05]));
+        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Syscall));
     }
 }

@@ -1074,7 +1074,7 @@ impl Codegen {
             },
             // __builtin_debugtrap(): 调试断点, 生成 int3
             "__builtin_debugtrap" => {
-                self.emit_insn(&Insn::raw_bytes(&[0xCC])); // int3
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Int3)); // int3
                 true
             },
             // __builtin_stack_save(): 保存栈指针, 返回当前 rsp

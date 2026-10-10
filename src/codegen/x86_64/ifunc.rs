@@ -1584,7 +1584,7 @@ impl Codegen {
     }
 
     fn xgetbv(&mut self) {
-        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x01, 0xD0]));
+        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Xgetbv));
     }
 
     fn xor_ecx_ecx(&mut self) {
@@ -1641,7 +1641,7 @@ impl Codegen {
             &[],
         );
         if !self.emit_insn(&insn) {
-            self.emit_insn(&Insn::raw_bytes(&[0xC3]));
+            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RetNear));
         }
     }
 }
