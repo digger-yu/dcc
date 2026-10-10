@@ -2586,7 +2586,7 @@ impl Codegen {
             return;
         }
         if inner_sz == 8 {
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2]));
+            self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Xor, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
         } else {
             self.emit_insn(&Insn::raw_bytes(&[0x31, 0xD2]));
         }
@@ -2615,7 +2615,7 @@ impl Codegen {
             1 => self.emit_insn(&Insn::raw_bytes(&[0x40, 0x30, 0xF2])), // xor dl, sil
             2 => self.emit_insn(&Insn::raw_bytes(&[0x66, 0x31, 0xF2])), // xor dx, si
             4 => self.emit_insn(&Insn::raw_bytes(&[0x31, 0xF2])),       // xor edx, esi
-            _ => self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xF2])), // xor rdx, rsi
+            _ => self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Xor, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B64)}, &[])), // xor rdx, rsi
         };
     }
 }
