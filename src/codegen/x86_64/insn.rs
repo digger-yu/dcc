@@ -297,6 +297,32 @@ impl Insn {
         )
     }
 
+    /// P11 Bucket D: roundsd/roundss reg-reg with imm8 (rounding mode).
+    /// width=SimdWidth::SD → roundsd (66 0F 3A 0B /r ib).
+    /// width=SimdWidth::SS → roundss (66 0F 3A 0A /r ib).
+    pub fn simd_round_reg(
+        width: crate::codegen::x86_64::opcode::SimdWidth,
+        imm8: u8,
+        dst_idx: u8,
+        src_idx: u8,
+    ) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::SimdRound {
+                width,
+                imm8,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    dst_idx,
+                    crate::codegen::shared::asm_operand::Width::B128,
+                ),
+                src: crate::codegen::x86_64::opcode::Operand::Reg(
+                    src_idx,
+                    crate::codegen::shared::asm_operand::Width::B128,
+                ),
+            },
+            &[],
+        )
+    }
+
     /// Common reg↔reg xmm↔xmm encoder.
     /// opcode2 = 0x10 (mov load direction dst<-src) or 0x11 (store direction dst<-src).
     /// Both dst/src are register fields in ModRM: reg field = dst_xmm, r/m = src_xmm.

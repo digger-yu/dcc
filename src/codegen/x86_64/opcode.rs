@@ -315,6 +315,17 @@ pub(crate) enum X86_64Opcode {
         src: Operand,
     },
 
+    /// P11 Bucket D: roundsd/roundss reg-reg with imm8.
+    ///   roundsd xmm0,xmm0,imm8: 66 0F 3A 0B /r ib
+    ///   roundss xmm0,xmm0,imm8: 66 0F 3A 0A /r ib
+    /// width=SimdWidth::SD → opc2=0x0B; SS → opc2=0x0A. imm8 = rounding mode.
+    SimdRound {
+        width: SimdWidth,
+        imm8: u8,
+        dst: Operand,
+        src: Operand,
+    },
+
     /// x87 — 步骤 4: 收敛固定 escap 无操作数 + 单内存操作数两种形态.
     /// op::Fixed 时 mem=None; op::FldMem/FstpMem/FildMem 时 mem=Some(MemOperand).
     X87 { op: X87Op, mem: Option<MemOperand> },
@@ -1323,6 +1334,35 @@ impl X86_64Opcode {
                 out.push(0x0F);
                 out.push(opc2);
                 out.push(modrm);
+                Some(out)
+            }
+            X86_64Opcode::SimdRound { width, imm8, dst, src } => {
+                // P11 Bucket D: roundsd/roundss reg-reg with imm8.
+                //   roundsd xmm0,xmm0,imm: 66 0F 3A 0B /r ib
+                //   roundss xmm0,xmm0,imm: 66 0F 3A 0A /r ib
+                let (Operand::Reg(dst_idx, _), Operand::Reg(src_idx, _)) = (dst, src) else {
+                    return None;
+                };
+                let opc2: u8 = match width {
+                    SimdWidth::SD => 0x0B,
+                    SimdWidth::SS => 0x0A,
+                    _ => return None,
+                };
+                // REX if xmm>=8 (reg field).
+                let need_rex = *dst_idx >= 8 || *src_idx >= 8;
+                let mut out = Vec::with_capacity(8);
+                out.push(0x66);
+                if need_rex {
+                    let mut rex: u8 = 0x40;
+                    if *dst_idx >= 8 { rex |= 0x04; }
+                    if *src_idx >= 8 { rex |= 0x01; }
+                    out.push(rex);
+                }
+                out.push(0x0F);
+                out.push(0x3A);
+                out.push(opc2);
+                out.push(0xC0 | ((*dst_idx & 7) << 3) | (*src_idx & 7));
+                out.push(*imm8);
                 Some(out)
             }
             X86_64Opcode::Setcc { cc, dst } => {
@@ -2503,6 +2543,32 @@ mod tests {
             src: xmm(1),
         };
         assert_eq!(o.encode(), Some(vec![0xF3, 0x0F, 0x5A, 0xC1]));
+    }
+
+    // ---- SimdRound roundsd/roundss (P11 Bucket D) ----
+
+    #[test]
+    fn roundsd_xmm0_xmm0_imm01() {
+        // roundsd xmm0, xmm0, 0x01:  66 0F 3A 0B C0 01
+        let o = X86_64Opcode::SimdRound {
+            width: SimdWidth::SD,
+            imm8: 0x01,
+            dst: xmm(0),
+            src: xmm(0),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x01]));
+    }
+
+    #[test]
+    fn roundss_xmm0_xmm0_imm02() {
+        // roundss xmm0, xmm0, 0x02:  66 0F 3A 0A C0 02
+        let o = X86_64Opcode::SimdRound {
+            width: SimdWidth::SS,
+            imm8: 0x02,
+            dst: xmm(0),
+            src: xmm(0),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x3A, 0x0A, 0xC0, 0x02]));
     }
 
     // ---- Setcc r8 (P11 Bucket H) ----

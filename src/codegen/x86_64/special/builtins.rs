@@ -4468,7 +4468,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x01]));
+                self.emit_insn(&Insn::simd_round_reg(SimdWidth::SD, 0x01, 0, 0));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -4480,7 +4480,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x3A, 0x0A, 0xC0, 0x01]));
+                self.emit_insn(&Insn::simd_round_reg(SimdWidth::SS, 0x01, 0, 0));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -4506,7 +4506,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x02]));
+                self.emit_insn(&Insn::simd_round_reg(SimdWidth::SD, 0x02, 0, 0));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -4518,7 +4518,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x3A, 0x0A, 0xC0, 0x02]));
+                self.emit_insn(&Insn::simd_round_reg(SimdWidth::SS, 0x02, 0, 0));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -4544,7 +4544,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x00]));
+                self.emit_insn(&Insn::simd_round_reg(SimdWidth::SD, 0x00, 0, 0));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -4556,7 +4556,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x3A, 0x0A, 0xC0, 0x00]));
+                self.emit_insn(&Insn::simd_round_reg(SimdWidth::SS, 0x00, 0, 0));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -4582,7 +4582,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x3A, 0x0B, 0xC0, 0x03]));
+                self.emit_insn(&Insn::simd_round_reg(SimdWidth::SD, 0x03, 0, 0));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -4594,7 +4594,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x3A, 0x0A, 0xC0, 0x03]));
+                self.emit_insn(&Insn::simd_round_reg(SimdWidth::SS, 0x03, 0, 0));
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
