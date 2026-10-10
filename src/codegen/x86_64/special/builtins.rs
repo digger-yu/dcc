@@ -4708,7 +4708,19 @@ impl Codegen {
                 },
                 &[],
             )); // mov ecx, [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE1, 0xFF, 0x9F, 0xFF, 0xFF])); // and ecx, 0xFFFF9FFF
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                        op: crate::codegen::x86_64::opcode::AluOp::And,
+                        width: crate::codegen::shared::asm_operand::Width::B32,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            1, crate::codegen::shared::asm_operand::Width::B32
+                        ),
+                        src: crate::codegen::x86_64::opcode::Operand::Imm(
+                            0xFFFF_9FFF_u32 as i32 as i64
+                        ),
+                    },
+                    &[],
+                )); // and ecx, 0xFFFF9FFF
                 self.emit_insn(&Insn::raw_bytes(&[0x09, 0xC1])); // or ecx, eax
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {

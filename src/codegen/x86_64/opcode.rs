@@ -326,7 +326,7 @@ impl X86_64Opcode {
                 //   本步保留调用点显式选择 (raw_bytes 双字节模式: 先发 opcode 三元组,
                 //   再单独发 imm32 LE), 故我们也提供一个等价的 AluRm encode 走相同字节.
                 if let (Operand::Reg(reg_idx, w), Operand::Imm(imm)) = (dst, src) {
-                    if matches!(w, Width::B64) && !matches!(op, AluOp::Test) {
+                    if !matches!(op, AluOp::Test) {
                         let i8v = i8::try_from(*imm);
                         // 仅在 imm 超出 i8 范围时走 0x81 / id (避免和分支 A2 的 0x83 冲突).
                         if i8v.is_err() {
@@ -339,17 +339,27 @@ impl X86_64Opcode {
                                 AluOp::Cmp => 7,
                                 AluOp::Test => unreachable!(),
                             };
-                            let mut rex: u8 = 0x48; // B64 必带 REX.W
-                            if *reg_idx >= 8 {
-                                rex |= 0x01;
+                            let is_b64 = matches!(w, Width::B64);
+                            let is_b32 = matches!(w, Width::B32);
+                            if is_b64 || is_b32 {
+                                let mut rex: u8 = 0x40;
+                                if is_b64 {
+                                    rex |= 0x08; // REX.W
+                                }
+                                if *reg_idx >= 8 {
+                                    rex |= 0x01;
+                                }
+                                let need_rex = is_b64 || *reg_idx >= 8;
+                                let modrm: u8 = 0xC0 | (reg_field << 3) | (reg_idx & 7);
+                                let mut out = Vec::with_capacity(7);
+                                if need_rex {
+                                    out.push(rex);
+                                }
+                                out.push(0x81);
+                                out.push(modrm);
+                                out.extend_from_slice(&(*imm as i32).to_le_bytes());
+                                return Some(out);
                             }
-                            let modrm: u8 = 0xC0 | (reg_field << 3) | (reg_idx & 7);
-                            let mut out = Vec::with_capacity(7);
-                            out.push(rex);
-                            out.push(0x81);
-                            out.push(modrm);
-                            out.extend_from_slice(&(*imm as i32).to_le_bytes());
-                            return Some(out);
                         }
                     }
                 }
@@ -1197,6 +1207,30 @@ mod tests {
             src: Operand::Imm(4096),
         };
         assert_eq!(o.encode(), Some(vec![0x48, 0x81, 0xC4, 0x00, 0x10, 0, 0]));
+    }
+
+    #[test]
+    fn alu_rm_and_ecx_imm32_b32() {
+        // and ecx, 0xFFFF9FFF (imm32): 81 E1 FF 9F FF FF (B32, no REX.W)
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::And,
+            width: Width::B32,
+            dst: reg(1, Width::B32),
+            src: Operand::Imm(0xFFFF_9FFF_u32 as i32 as i64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x81, 0xE1, 0xFF, 0x9F, 0xFF, 0xFF]));
+    }
+
+    #[test]
+    fn alu_rm_cmp_edx_imm32_b32() {
+        // cmp edx, 0x7FFF_FFFF: 81 FA FF FF FF 7F (B32, imm32)
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Cmp,
+            width: Width::B32,
+            dst: reg(2, Width::B32),
+            src: Operand::Imm(0x7FFF_FFFF),
+        };
+        assert_eq!(o.encode(), Some(vec![0x81, 0xFA, 0xFF, 0xFF, 0xFF, 0x7F]));
     }
 
     // ---- reg-reg form (P11 Batch 2 opening) ----

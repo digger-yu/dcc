@@ -216,8 +216,28 @@ impl Codegen {
                 &[],
             )); // mov ecx, [rax] (实部)
                     self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x50, isz as u8])); // mov edx, [rax+isz]
-                    self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE1, 0xFF, 0xFF, 0xFF, 0x7F]));
-                    self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE2, 0xFF, 0xFF, 0xFF, 0x7F]));
+                    self.emit_insn(&Insn::new(
+                        crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                            op: crate::codegen::x86_64::opcode::AluOp::And,
+                            width: crate::codegen::shared::asm_operand::Width::B32,
+                            dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                1, crate::codegen::shared::asm_operand::Width::B32
+                            ),
+                            src: crate::codegen::x86_64::opcode::Operand::Imm(0x7FFF_FFFF),
+                        },
+                        &[],
+                    ));
+                    self.emit_insn(&Insn::new(
+                        crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                            op: crate::codegen::x86_64::opcode::AluOp::And,
+                            width: crate::codegen::shared::asm_operand::Width::B32,
+                            dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                2, crate::codegen::shared::asm_operand::Width::B32
+                            ),
+                            src: crate::codegen::x86_64::opcode::Operand::Imm(0x7FFF_FFFF),
+                        },
+                        &[],
+                    ));
                     // P11: 收敛到 AluRm{Or, B32, rcx, rdx}.
                     {
                         let insn = Insn::new(
