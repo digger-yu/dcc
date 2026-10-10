@@ -227,7 +227,23 @@ impl Codegen {
                         self.emit_insn(&Insn::raw_bytes(&slot.to_le_bytes()));
                     }
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x06])); // mov [rsi], rax
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(6),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                },
+                &[],
+            )); // mov [rsi], rax
                 self.label(&l_skip);
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB6, 0xC2])); // movzx rax, dl
                                                       // SEQ_CST post-barrier
@@ -307,7 +323,23 @@ impl Codegen {
                         self.emit_insn(&Insn::raw_bytes(&slot.to_le_bytes()));
                     }
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x06])); // mov [rsi], rax
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(6),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                },
+                &[],
+            )); // mov [rsi], rax
                 self.label(&l_skip);
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB6, 0xC2])); // movzx rax, dl
                 if sord == 5 {
@@ -1044,7 +1076,23 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x05, 0, 0, 0, 0]));
                 let disp_pos = self.pos() - 4;
                 self.label_addr_refs.push((disp_pos, recv.clone()));
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x07])); // mov [rdi], rax
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(7),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                },
+                &[],
+            )); // mov [rdi], rax
                                                 // 直接路径跳过 receiver
                 self.jmp_rel32(&cont, JumpKind::Jmp);
                 // receiver: longjmp 落点 (rsp/r13 已恢复到捕获点)
@@ -1374,7 +1422,23 @@ impl Codegen {
                 },
                 &[],
             )); }       // mov [rcx], eax
-                    _ => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x01])); } // mov [rcx], rax
+                    _ => { self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(1),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                },
+                &[],
+            )); } // mov [rcx], rax
                 }
                 true
             },

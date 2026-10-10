@@ -2483,7 +2483,23 @@ impl Codegen {
                 },
                 &[],
             )),       // mov [rdi], esi
-            _ => self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x37])), // mov [rdi], rsi
+            _ => self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(7),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        6, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                },
+                &[],
+            )), // mov [rdi], rsi
         };
     }
     pub(crate) fn emit_neg(&mut self, sz: usize) {

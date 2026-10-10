@@ -1546,7 +1546,23 @@ impl Codegen {
                 },
                 &[],
             )); },       // mov [rdx], ecx
-                            8 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x0A])); }, // mov [rdx], rcx
+                            8 => { let _ = self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(2),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                },
+                &[],
+            )); }, // mov [rdx], rcx
                             2 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x0A])); }, // mov [rdx], cx
                             1 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x88, 0x0A])); },       // mov [rdx], cl
                             _ => {},
