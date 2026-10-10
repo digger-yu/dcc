@@ -1711,7 +1711,27 @@ impl Codegen {
         self.emit_insn(&Insn::raw_bytes(&[0x57])); // push rdi
 
         // xor eax, eax (rax = 0)
-        self.emit_insn(&Insn::raw_bytes(&[0x31, 0xC0]));
+        // P11: 收敛到 AluRm{Xor, B32, rax, rax}.
+        {
+            let insn = Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                    op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0,
+                        crate::codegen::shared::asm_operand::Width::B32,
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0,
+                        crate::codegen::shared::asm_operand::Width::B32,
+                    ),
+                },
+                &[],
+            );
+            if !self.emit_insn(&insn) {
+                self.emit_insn(&Insn::raw_bytes(&[0x31, 0xC0]));
+            }
+        }
         // mov rcx, frame_size / 8
         self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB9]));
         self.emit_insn(&Insn::raw_bytes(&((frame_size as u64) / 8).to_le_bytes()));
