@@ -671,7 +671,7 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&imag_op));
                 // 归一化到返回规范 st0=real, st1=imag（与 gcc add 的末尾
                 // fxch %st(1) 一致）
-                self.emit_insn(&Insn::raw_bytes(&[0xD9, 0xC9])); // fxch st(1)
+                self.emit_insn(&Insn::x87_fixed(0xD9, 0xC9)); // fxch st(1)
             },
             BinOp::Mul | BinOp::Div => {
                 let helper = if matches!(op, BinOp::Mul) {
@@ -736,7 +736,7 @@ impl Codegen {
             self.emit_x87_fld_at(13, (ls + off) as i32, &Type::LongDouble);
             self.emit_x87_fld_at(13, (rs + off) as i32, &Type::LongDouble);
             // fucomip st0, st1 (DF E9): 比较 st1 vs st0, 弹 st0
-            self.emit_insn(&Insn::raw_bytes(&[0xDF, 0xE9]));
+            self.emit_insn(&Insn::x87_fixed(0xDF, 0xE9)); // fucomip st0, st1
             self.jmp_rel32(&false_label, JumpKind::Jne);
             self.emit_x87_fstp_st0(); // 弹掉左值
         }

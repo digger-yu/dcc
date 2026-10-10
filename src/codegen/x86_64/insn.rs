@@ -453,6 +453,19 @@ impl Insn {
         )
     }
 
+    /// P11 Bucket H: fixed x87 escap sequence with no memory operand.
+    /// Example: faddp=(0xDE,0xC1), fmulp=(0xDE,0xC9), fsubrp=(0xDE,0xE1),
+    /// fdivrp=(0xDE,0xF1), fucomip=(0xDF,0xE9), fxch st(1)=(0xD9,0xC9).
+    pub fn x87_fixed(escap: u8, modrm: u8) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::X87 {
+                op: crate::codegen::x86_64::opcode::X87Op::Fixed { escap, modrm },
+                mem: None,
+            },
+            &[],
+        )
+    }
+
     /// P11 Bucket H: setcc r8 (0F 9x /0, mod=11).
     /// reg_idx: Intel reg number (0=al,1=cl,2=dl,3=bl,4=ah..15=r15b).
     pub fn setcc_reg(

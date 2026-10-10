@@ -218,9 +218,9 @@ impl Codegen {
             self.emit_insn(&Insn::alu_rm_reg_imm8(4, 0, 1)); // and eax, 1                  ; b = x&1
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x44, 0x24, 0x10])); // mov [rsp+16], rax
             self.emit_x87_mem_at(0xDB, 0, 4, 8, true); // fild qword [rsp+8]   st0 = h
-            self.emit_insn(&Insn::raw_bytes(&[0xD9, 0xC8])); // fadd st(0), st(0)            → 2h
+            self.emit_insn(&Insn::x87_fixed(0xD9, 0xC8)); // fadd st(0), st(0)            → 2h
             self.emit_x87_mem_at(0xDB, 0, 4, 16, true); // fild qword [rsp+16]  st0 = b
-            self.emit_insn(&Insn::raw_bytes(&[0xDE, 0xC1])); // faddp                          → 2h + b = x
+            self.emit_insn(&Insn::x87_fixed(0xDE, 0xC1)); // faddp                          → 2h + b = x
         } else {
             if unsigned {
                 self.emit_insn(&Insn::new(
@@ -499,7 +499,7 @@ impl Codegen {
         self.emit_insn(&Insn::add_rsp_imm(save_bytes as i64)); // add rsp, 16
                                                     // 现在 st(0) = l, st(1) = r
                                                     // fucomip st(0), st(1): 比较 st(0) vs st(1), 设置 EFLAGS, 弹出 st(0)
-        self.emit_insn(&Insn::raw_bytes(&[0xDF, 0xE9])); // fucomip st(0), st(1)
+        self.emit_insn(&Insn::x87_fixed(0xDF, 0xE9)); // fucomip st(0), st(1)
                                   // 实测（fnstsw 读 TOP 位）：FUCOMIP 只弹**一次**，
                                   // 弹出的是左操作数，右操作数仍留在 st(0)。不弹掉它，
                                   // 每个浮点比较就漏一层 x87 栈（8 层后溢出成静默错值，

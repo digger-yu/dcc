@@ -521,7 +521,7 @@ impl Codegen {
                 }
                 // 现在 st(0) = l, st(1) = r
                 // 做 l/r
-                self.emit_insn(&Insn::raw_bytes(&[0xDE, 0xF9])); // fdivrp: st(1) = st(0)/st(1) = l/r, pop
+                self.emit_insn(&Insn::x87_fixed(0xDE, 0xF9)); // fdivrp: st(1) = st(0)/st(1) = l/r, pop
                                           // 现在 st(0) = l/r
                                           // trunc to int64
                 self.emit_insn(&Insn::raw_bytes(&[0xDF, 0x7C, 0x24, 0x00])); // fistp qword [rsp] (truncate to int64)
@@ -563,10 +563,10 @@ impl Codegen {
                                                 // 对于加法/乘法: 可交换, 直接做
                                                 // 对于减法/除法: 需要用反向版本 fsubrp/fdivrp
             match op {
-                BinOp::Add => { self.emit_insn(&Insn::raw_bytes(&[0xDE, 0xC1])); } // faddp: st(1) = st(1) + st(0), pop
-                BinOp::Mul => { self.emit_insn(&Insn::raw_bytes(&[0xDE, 0xC9])); } // fmulp: st(1) = st(1) * st(0), pop
-                BinOp::Sub => { self.emit_insn(&Insn::raw_bytes(&[0xDE, 0xE1])); } // fsubrp: st(1) = st(0) - st(1) = l - r, pop
-                BinOp::Div => { self.emit_insn(&Insn::raw_bytes(&[0xDE, 0xF1])); } // fdivrp: st(1) = st(0) / st(1) = l / r, pop
+                BinOp::Add => { self.emit_insn(&Insn::x87_fixed(0xDE, 0xC1)); } // faddp: st(1) = st(1) + st(0), pop
+                BinOp::Mul => { self.emit_insn(&Insn::x87_fixed(0xDE, 0xC9)); } // fmulp: st(1) = st(1) * st(0), pop
+                BinOp::Sub => { self.emit_insn(&Insn::x87_fixed(0xDE, 0xE1)); } // fsubrp: st(1) = st(0) - st(1) = l - r, pop
+                BinOp::Div => { self.emit_insn(&Insn::x87_fixed(0xDE, 0xF1)); } // fdivrp: st(1) = st(0) / st(1) = l / r, pop
                 _ => {},
             }
             // 结果在 st(0) (x87 约定)
