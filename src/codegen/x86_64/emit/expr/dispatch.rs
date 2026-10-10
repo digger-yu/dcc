@@ -2301,7 +2301,7 @@ impl Codegen {
                         },
                         _ => {
                             self.load_stack(0, result_off + 1);
-                            self.emit_insn(&Insn::raw_bytes(&[0xF6, 0xD8])); // neg al
+                            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B8, 0)); // neg al
                             self.emit_store(0, result_off + 1, 1);
                         },
                     }
