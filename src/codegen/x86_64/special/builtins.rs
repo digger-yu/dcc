@@ -3986,7 +3986,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x11, 0xC2])); // movss xmm2, xmm0
+                self.emit_insn(&Insn::movss_xmm(0, 2)); // movss xmm2, xmm0
                 self.gen_expr(&args[1], Self::EVAL_BASE);
                 self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x5D, 0xC2])); // minss xmm0, xmm2
                 if dst != 0 {
@@ -4016,7 +4016,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x11, 0xC2])); // movss xmm2, xmm0
+                self.emit_insn(&Insn::movss_xmm(0, 2)); // movss xmm2, xmm0
                 self.gen_expr(&args[1], Self::EVAL_BASE);
                 self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x5F, 0xC2])); // maxss xmm0, xmm2
                 if dst != 0 {
