@@ -161,31 +161,40 @@ impl Insn {
     /// 源/目的都在 xmm0..xmm15 (>=8 时带 REX.R/B 由 ModRM 低 3 位 + 前缀编码).
     pub fn movsd_xmm(dst_xmm: u8, src_xmm: u8) -> Self {
         // F2 0F 10 modrm; mod=11, reg=dst, r/m=src.
-        let mut out = Vec::with_capacity(5);
-        out.push(0xF2);
-        let mut rex: u8 = 0x40;
-        if dst_xmm >= 8 { rex |= 0x04; }
-        if src_xmm >= 8 { rex |= 0x01; }
-        let need_rex = dst_xmm >= 8 || src_xmm >= 8;
-        if need_rex { out.push(rex); }
-        out.push(0x0F);
-        out.push(0x10);
-        let modrm = 0xC0 | ((dst_xmm & 0x7) << 3) | (src_xmm & 0x7);
-        out.push(modrm);
-        Insn::raw_bytes(&out)
+        Self::simd_xmm_reg_reg(0xF2, 0x10, dst_xmm, src_xmm)
     }
 
     /// P11: 构造 `movss xmm_dst, xmm_src` (F3 0F 10 mod=11).
     pub fn movss_xmm(dst_xmm: u8, src_xmm: u8) -> Self {
+        Self::simd_xmm_reg_reg(0xF3, 0x10, dst_xmm, src_xmm)
+    }
+
+    /// P11: 构造 `movsd xmm_dst, xmm_src` 存储方向 (F2 0F 11 mod=11):
+    ///   mod=11, reg=src (源 xmm), r/m=dst (目的 xmm).
+    pub fn movsd_xmm_store(dst_xmm: u8, src_xmm: u8) -> Self {
+        Self::simd_xmm_reg_reg(0xF2, 0x11, dst_xmm, src_xmm)
+    }
+
+    /// P11: 构造 `movss xmm_dst, xmm_src` 存储方向 (F3 0F 11 mod=11).
+    pub fn movss_xmm_store(dst_xmm: u8, src_xmm: u8) -> Self {
+        Self::simd_xmm_reg_reg(0xF3, 0x11, dst_xmm, src_xmm)
+    }
+
+    /// Common reg↔reg xmm↔xmm encoder.
+    /// opcode2 = 0x10 (mov load direction dst<-src) or 0x11 (store direction dst<-src).
+    /// Both dst/src are register fields in ModRM: reg field = dst_xmm, r/m = src_xmm.
+    fn simd_xmm_reg_reg(pfx: u8, opcode2: u8, dst_xmm: u8, src_xmm: u8) -> Self {
         let mut out = Vec::with_capacity(5);
-        out.push(0xF3);
-        let mut rex: u8 = 0x40;
-        if dst_xmm >= 8 { rex |= 0x04; }
-        if src_xmm >= 8 { rex |= 0x01; }
+        out.push(pfx);
         let need_rex = dst_xmm >= 8 || src_xmm >= 8;
-        if need_rex { out.push(rex); }
+        if need_rex {
+            let mut rex: u8 = 0x40;
+            if dst_xmm >= 8 { rex |= 0x04; }
+            if src_xmm >= 8 { rex |= 0x01; }
+            out.push(rex);
+        }
         out.push(0x0F);
-        out.push(0x10);
+        out.push(opcode2);
         let modrm = 0xC0 | ((dst_xmm & 0x7) << 3) | (src_xmm & 0x7);
         out.push(modrm);
         Insn::raw_bytes(&out)

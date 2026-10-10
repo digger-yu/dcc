@@ -1669,9 +1669,9 @@ impl Codegen {
                 if dst != 0 {
                     // dst 应当是 x86 通用寄存器. 使用 movsd/movss 拷贝.
                     if is_float {
-                        self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x11, 0xC0 | (dst & 7)]));
+                        self.emit_insn(&Insn::movss_xmm_store(dst, 0));
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x11, 0xC0 | (dst & 7)]));
+                        self.emit_insn(&Insn::movsd_xmm_store(dst, 0));
                     }
                 }
                 // 走 float_refs 通道: ET_EXEC resolve() 直接按下一条 RIP
@@ -1700,9 +1700,9 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[prefix, 0x0F, 0x10, 0x05, 0, 0, 0, 0]));
                 if dst != 0 {
                     if is_float {
-                        self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x11, 0xC0 | (dst & 7)]));
+                        self.emit_insn(&Insn::movss_xmm_store(dst, 0));
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x11, 0xC0 | (dst & 7)]));
+                        self.emit_insn(&Insn::movsd_xmm_store(dst, 0));
                     }
                 }
                 // 走 float_refs 通道 (同 __builtin_huge_val 实现)
@@ -2097,7 +2097,7 @@ impl Codegen {
                             self.gen_expr(a, Self::EVAL_BASE); // xmm0
                             if i != 0 {
                                 // movaps xmm{i}, xmm0
-                                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x11, 0xC0 | ((i as u8) << 3)]));
+                                self.emit_insn(&Insn::movss_xmm_store(i as u8, 0));
                             }
                         } else {
                             self.gen_expr(a, gp_regs[i]);
