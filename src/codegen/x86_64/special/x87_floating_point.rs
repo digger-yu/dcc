@@ -215,7 +215,7 @@ impl Codegen {
             )); // mov rax, [rsp]        ; x
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x44, 0x24, 0x08])); // mov [rsp+8], rax
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, 0x6C, 0x24, 0x08])); // shr qword [rsp+8], 1  ; h = x>>1
-            self.emit_insn(&Insn::raw_bytes(&[0x83, 0xE0, 0x01])); // and eax, 1                  ; b = x&1
+            self.emit_insn(&Insn::alu_rm_reg_imm8(4, 0, 1)); // and eax, 1                  ; b = x&1
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x44, 0x24, 0x10])); // mov [rsp+16], rax
             self.emit_x87_mem_at(0xDB, 0, 4, 8, true); // fild qword [rsp+8]   st0 = h
             self.emit_insn(&Insn::raw_bytes(&[0xD9, 0xC8])); // fadd st(0), st(0)            → 2h

@@ -1759,7 +1759,7 @@ impl Codegen {
                                           // 2. sign: 重新加载 x, 取符号位
                 self.gen_expr(&args[0], Self::EVAL_BASE);
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x50, 0xC0])); // movmskps eax, xmm0
-                self.emit_insn(&Insn::raw_bytes(&[0x83, 0xE0, 0x01])); // and eax, 1 (eax = sign)
+                self.emit_insn(&Insn::alu_rm_reg_imm8(4, 0, 1)); // and eax, 1 (eax = sign)
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,
@@ -1982,10 +1982,10 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x50, 0xC0]));
                 if is_f {
                     // float: 符号位是 bit 0
-                    self.emit_insn(&Insn::raw_bytes(&[0x83, 0xE0, 0x01])); // and eax, 1
+                    self.emit_insn(&Insn::alu_rm_reg_imm8(4, 0, 1)); // and eax, 1
                 } else {
                     // double/long double: 符号位是 bit 1
-                    self.emit_insn(&Insn::raw_bytes(&[0x83, 0xE0, 0x02])); // and eax, 2
+                    self.emit_insn(&Insn::alu_rm_reg_imm8(4, 0, 2)); // and eax, 2
                                                     // 归一化为 0/1: shr 1
                     self.emit_insn(&Insn::raw_bytes(&[0xD1, 0xE8])); // shr eax, 1
                 }
@@ -2168,7 +2168,7 @@ impl Codegen {
                         self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Xor, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // xor rax, rcx
                     }
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x83, 0xE0, 1])); // and eax, 1
+                self.emit_insn(&Insn::alu_rm_reg_imm8(4, 0, 1)); // and eax, 1
                 if dst != 0 {
                     self.mov(dst, 0);
                 }

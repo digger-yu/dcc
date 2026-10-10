@@ -268,7 +268,7 @@ impl Codegen {
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xD9])); // neg rcx
             self.emit_insn(&Insn::raw_bytes(&[0x49, 0x83, 0xD0, 0x00])); // adc r8, 0
             self.emit_insn(&Insn::raw_bytes(&[0x49, 0xF7, 0xD8])); // neg r8
-            self.emit_insn(&Insn::raw_bytes(&[0x83, 0xF6, 0x01])); // xor esi, 1
+            self.emit_insn(&Insn::alu_rm_reg_imm8(6, 6, 1)); // xor esi, 1
             self.emit_insn(&Insn::raw_bytes(&[0xBF, 1, 0, 0, 0])); // mov edi, 1
             self.label(&lhs_positive);
 
@@ -278,7 +278,7 @@ impl Codegen {
             self.emit_insn(&Insn::raw_bytes(&[0x49, 0xF7, 0xD9])); // neg r9
             self.emit_insn(&Insn::raw_bytes(&[0x49, 0x83, 0xD3, 0x00])); // adc r11, 0
             self.emit_insn(&Insn::raw_bytes(&[0x49, 0xF7, 0xDB])); // neg r11
-            self.emit_insn(&Insn::raw_bytes(&[0x83, 0xF6, 0x01])); // xor esi, 1
+            self.emit_insn(&Insn::alu_rm_reg_imm8(6, 6, 1)); // xor esi, 1
             self.label(&rhs_positive);
         }
 

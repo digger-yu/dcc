@@ -310,7 +310,7 @@ impl Codegen {
         // eax = gp_offset
         self.emit_insn(&Insn::raw_bytes(&[0x41, 0x8B, 0x85]));
         self.emit_insn(&Insn::raw_bytes(&(ap_off as i32).to_le_bytes()));
-        self.emit_insn(&Insn::raw_bytes(&[0x83, 0xF8, 0x30])); // cmp $48, %eax
+        self.emit_insn(&Insn::alu_rm_reg_imm8(7, 0, 0x30)); // cmp $48, %eax
         self.jmp_rel32(&overflow, JumpKind::Jge);
         // reg_save_area + gp_offset
         self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x8D]));
@@ -479,7 +479,7 @@ impl Codegen {
                 &[],
             )); },       // mov eax, [rcx]
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x83, 0xF8, 0x27])); // cmp $39, %eax
+        self.emit_insn(&Insn::alu_rm_reg_imm8(7, 0, 0x27)); // cmp $39, %eax
         self.jmp_rel32(&mem, JumpKind::Ja);
 
         // ---- 寄存器保存区路径 ----
@@ -578,7 +578,7 @@ impl Codegen {
 
         self.emit_global_addr(10, ap_name); // lea r10, [rip+gap]
         self.emit_insn(&Insn::raw_bytes(&[0x41, 0x8B, 0x02])); // mov eax, [r10] (gp_offset)
-        self.emit_insn(&Insn::raw_bytes(&[0x83, 0xF8, 0x30])); // cmp $48, %eax
+        self.emit_insn(&Insn::alu_rm_reg_imm8(7, 0, 0x30)); // cmp $48, %eax
         self.jmp_rel32(&overflow, JumpKind::Jge);
         // 寄存器保存区路径：rcx = reg_save_area
         self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x4A, 0x10])); // mov rcx, [r10+16]
@@ -745,7 +745,7 @@ impl Codegen {
                 },
                 &[],
             )); // mov eax, (rcx)
-        self.emit_insn(&Insn::raw_bytes(&[0x83, 0xF8, 0x30])); // cmp $48, %eax
+        self.emit_insn(&Insn::alu_rm_reg_imm8(7, 0, 0x30)); // cmp $48, %eax
         self.jmp_rel32(&overflow, JumpKind::Jge);
         // reg_save_area + gp_offset: 从 (rcx+16) 加载到 r11
         // REX 0x4C: R=1 使 reg=r11, B=0 使 rm=rcx (rm=001+REX.B 会变 r9)
