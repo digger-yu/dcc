@@ -278,13 +278,21 @@ impl Codegen {
             },
             (Type::UShort, Type::Short) => {
                 // movswl dst, dst (sign-extend 16→32, zero-extend to 64)
-                let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xBF, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                self.emit_insn(&Insn::mov_ext(
+                    true,
+                    crate::codegen::shared::asm_operand::Width::B16,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    dst, dst,
+                ));
             },
             (Type::UChar, Type::SChar | Type::Char) => {
                 // movsbl dst, dst (sign-extend 8→32, zero to 64)
-                let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xBE, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                self.emit_insn(&Insn::mov_ext(
+                    true,
+                    crate::codegen::shared::asm_operand::Width::B8,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    dst, dst,
+                ));
             },
             // int → float/double
             // 源整数值由 gen_expr(e, dst) 求值到 dst 寄存器,
@@ -487,13 +495,21 @@ impl Codegen {
                         // 截断到 8/16 位后符号扩展
                         let bits = dst_ty.size() * 8;
                         if bits == 8 {
-                            // movsx dst, dst_byte (REX.W 0F BE C0)
-                            let rex = 0x48 | if dst >= 8 { 0x05 } else { 0x40 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xBE, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                            // movsbq dst, dst (sign-extend 8→64)
+                            self.emit_insn(&Insn::mov_ext(
+                                true,
+                                crate::codegen::shared::asm_operand::Width::B8,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                dst, dst,
+                            ));
                         } else {
-                            // movsx dst, dst_word (REX.W 0F BF C0)
-                            let rex = 0x48 | if dst >= 8 { 0x05 } else { 0x40 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xBF, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                            // movswq dst, dst (sign-extend 16→64)
+                            self.emit_insn(&Insn::mov_ext(
+                                true,
+                                crate::codegen::shared::asm_operand::Width::B16,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                dst, dst,
+                            ));
                         }
                     },
                     Type::UShort => {
@@ -596,15 +612,21 @@ impl Codegen {
                     match dst_bits {
                         8 => {
                             // movsbq %al, %rax (截断到 8 位, 符号扩展)
-                            // 自反 ModRM: dst 同时在 reg 与 r/m ⇒ >=8 两个扩展位都要置。
-                            let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xBE, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                            self.emit_insn(&Insn::mov_ext(
+                                true,
+                                crate::codegen::shared::asm_operand::Width::B8,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                dst, dst,
+                            ));
                         },
                         16 => {
                             // movswq %ax, %rax (截断到 16 位, 符号扩展)
-                            // 同上。
-                            let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xBF, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                            self.emit_insn(&Insn::mov_ext(
+                                true,
+                                crate::codegen::shared::asm_operand::Width::B16,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                dst, dst,
+                            ));
                         },
                         _ => {},
                     }

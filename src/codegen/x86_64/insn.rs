@@ -213,6 +213,28 @@ impl Insn {
         Insn::raw_bytes(&out)
     }
 
+    /// P11: movzx/movsx/movsxd via MovExt typed opcode (reg-reg form).
+    /// sign: true=movsx/movsxd, false=movzx.
+    /// from: source width (B8/B16/B32). to: dest width (B32/B64).
+    pub fn mov_ext(
+        sign: bool,
+        from: crate::codegen::shared::asm_operand::Width,
+        to: crate::codegen::shared::asm_operand::Width,
+        dst_reg: u8,
+        src_reg: u8,
+    ) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                sign,
+                from,
+                to,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(dst_reg, to),
+                src: crate::codegen::x86_64::opcode::Operand::Reg(src_reg, from),
+            },
+            &[],
+        )
+    }
+
     /// P11: NOT / NEG single-register unary via UnaryRm typed opcode.
     /// op: UnaryOp::Not or UnaryOp::Neg. width: B16/B32/B64. reg_idx: x86_64
     /// physical register index 0..15.

@@ -1588,5 +1588,44 @@ mod tests {
         // REX.R=0x04 (dst>=8), src=7>=4 requires REX anyway.
         assert_eq!(o.encode(), Some(vec![0x44, 0x0F, 0xBE, 0xC7]));
     }
+
+    #[test]
+    fn mov_ext_self_ref_sxw_r64() {
+        // movsx rax, al (self):  48 0F BE C0
+        let o = X86_64Opcode::MovExt {
+            sign: true,
+            from: Width::B8,
+            to: Width::B64,
+            dst: reg(0, Width::B64),
+            src: reg(0, Width::B8),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x0F, 0xBE, 0xC0]));
+    }
+
+    #[test]
+    fn mov_ext_self_ref_sxw_r64_high() {
+        // movsx r8, r8b (self, dst=src=r8):  4D 0F BE C0
+        let o = X86_64Opcode::MovExt {
+            sign: true,
+            from: Width::B8,
+            to: Width::B64,
+            dst: reg(8, Width::B64),
+            src: reg(8, Width::B8),
+        };
+        assert_eq!(o.encode(), Some(vec![0x4D, 0x0F, 0xBE, 0xC0]));
+    }
+
+    #[test]
+    fn mov_ext_self_ref_sxw_r64_r16() {
+        // movsx rax, ax (self):  48 0F BF C0
+        let o = X86_64Opcode::MovExt {
+            sign: true,
+            from: Width::B16,
+            to: Width::B64,
+            dst: reg(0, Width::B64),
+            src: reg(0, Width::B16),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x0F, 0xBF, 0xC0]));
+    }
 }
 
