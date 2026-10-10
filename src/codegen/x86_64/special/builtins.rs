@@ -2647,7 +2647,7 @@ impl Codegen {
                             // __int128 输入: 128×128 乘积需 256 位精度才能
                             // 精确判溢出, 退回硬件近似 (imul 低 64 位 + 标志)
                             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0f, 0xaf, 0xc1])); // imul rax, rcx
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x99])); // cqo: rdx = 近似积高 64
+                            self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B64)); // cqo: rdx = 近似积高 64
                             let res_ty = match &args[2].ty() {
                                 Type::Ptr(p) => p.base.clone(),
                                 other => other.clone(),
@@ -3218,7 +3218,7 @@ impl Codegen {
                 self.gen_expr(&args[0], Self::EVAL_BASE); // rax = x
                 if bits == 64 {
                     // 64-bit clrsb: 用 cqo 复制符号到 rdx, 然后 xor rax, rdx.
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x99])); // cqo (REX.W)
+                    self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B64)); // cqo (REX.W)
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Xor, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // xor rax, rdx
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xBD, 0xC0])); // bsr rax, rax
@@ -3268,7 +3268,7 @@ impl Codegen {
                     self.emit_insn(&Insn::raw_bytes(&[0x25, mb[0], mb[1], mb[2], mb[3]]));
                     // 计算 s_bits 到 edx: 0 或 mask32 (32-bit).
                     if bits == 32 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x99])); // cdq: edx = sign(eax) = 0 或 0xFFFFFFFF
+                        self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B32)); // cdq: edx = sign(eax) = 0 或 0xFFFFFFFF
                     } else if bits == 16 {
                         self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE0, 16])); // shl eax, 16
                         self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xF8, 31])); // sar eax, 31 → 0 或 -1

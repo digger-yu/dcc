@@ -200,6 +200,19 @@ impl Insn {
         Insn::raw_bytes(&out)
     }
 
+    /// P11: cqo / cdq / cwd sign-extend rax→rdx:rax.
+    /// width=B64 → 48 99 (cqo); width=B32 → 99 (cdq); width=B16 → 66 99 (cwd).
+    pub fn sign_extend_rax_to_rdx(width: crate::codegen::shared::asm_operand::Width) -> Self {
+        let mut out = Vec::with_capacity(3);
+        match width {
+            crate::codegen::shared::asm_operand::Width::B64 => out.push(0x48),
+            crate::codegen::shared::asm_operand::Width::B16 => out.push(0x66),
+            _ => {},
+        }
+        out.push(0x99);
+        Insn::raw_bytes(&out)
+    }
+
     pub fn encode_bytes(&self) -> Option<Vec<u8>> {
         // 类型化变体: 让 opcode.rs 现场算字节. 尚未实现的变体返回 None →
         // 发射方必须切回 raw_bytes 兜底; 当前没有任何调用点依赖 None 分支.
