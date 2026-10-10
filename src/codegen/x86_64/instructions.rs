@@ -2057,11 +2057,18 @@ impl Codegen {
         self.emit_insn(&Insn::raw_bytes(&[rex, 0x01, 0xD8]));
     }
     pub(crate) fn emit_add_rm(&mut self, inner_sz: i64, off: i64) {
-        let rex = if inner_sz == 8 { 0x48 } else { 0x00 };
-        if rex != 0 {
-            self.emit_insn(&Insn::raw_bytes(&[rex]));
-        }
-        self.emit_insn(&Insn::raw_bytes(&[0x03, 0x44, 0x24, off as u8])); // add rax/eax, [rsp+off]
+        let width = if inner_sz == 8 {
+            crate::codegen::shared::asm_operand::Width::B64
+        } else {
+            crate::codegen::shared::asm_operand::Width::B32
+        };
+        self.emit_insn(&Insn::alu_rm_mem(
+            crate::codegen::x86_64::opcode::AluOp::Add,
+            width,
+            0,
+            4,
+            off as i32,
+        )); // add rax/eax, [rsp+off]
     }
     pub(crate) fn emit_align_padding(&mut self, alignment: u32) {
         if alignment <= 1 {

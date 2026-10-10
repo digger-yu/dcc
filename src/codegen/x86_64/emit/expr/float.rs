@@ -334,7 +334,13 @@ impl Codegen {
                 },
                 &[],
             )); // mov rcx, [rax]
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0B, 0x48, isz as u8])); // or rcx, [rax+isz]
+                            self.emit_insn(&Insn::alu_rm_mem(
+                                crate::codegen::x86_64::opcode::AluOp::Or,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                1,
+                                0,
+                                isz as i32,
+                            )); // or rcx, [rax+isz]
                             self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 1, 1)); // test rcx, rcx
                         },
                         8 => {

@@ -223,6 +223,32 @@ impl Insn {
         )
     }
 
+    /// P11 Bucket C: AluRm reg, [base+disp] (reg <- mem) — add/sub/and/or/xor/cmp.
+    /// width: B64 (REX.W) or B32. base: Intel reg number 0..15. disp: byte displacement.
+    pub fn alu_rm_mem(
+        op: crate::codegen::x86_64::opcode::AluOp,
+        width: crate::codegen::shared::asm_operand::Width,
+        dst_reg: u8,
+        base: u8,
+        disp: i32,
+    ) -> Self {
+        use crate::codegen::x86_64::opcode::{MemOperand, Operand, X86_64Opcode};
+        Insn::new(
+            X86_64Opcode::AluRm {
+                op,
+                width,
+                dst: Operand::Reg(dst_reg, width),
+                src: Operand::Mem(MemOperand {
+                    disp,
+                    base: Some(base),
+                    index: None,
+                    seg: None,
+                }),
+            },
+            &[],
+        )
+    }
+
     /// P11 Bucket D: push/pop reg64 via Stack typed opcode (50+rd / 41 50+(rd&7)).
     pub fn stack_op_reg(
         op: crate::codegen::x86_64::opcode::StackOp,

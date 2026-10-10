@@ -217,7 +217,13 @@ impl Codegen {
                     }
                     if k > 0 {
                         // add rcx, [rsp]; add rsp, 8  (合并上一层的部分和)
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x03, 0x0C, 0x24]));
+                        self.emit_insn(&Insn::alu_rm_mem(
+                            crate::codegen::x86_64::opcode::AluOp::Add,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                            1,
+                            4,
+                            0,
+                        ));
                         self.emit_insn(&Insn::add_rsp_imm(8));
                     }
                     if k + 1 < terms.len() {
