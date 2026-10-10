@@ -30,16 +30,16 @@
 make build
 
 # 运行所有测试
-./tools/diff_test/diff_test.sh
+./tests/diff_test/diff_test.sh
 
 # 运行单个测试
-./tools/diff_test/diff_test.sh simple_add
+./tests/diff_test/diff_test.sh simple_add
 
 # 列出可用测试
-./tools/diff_test/diff_test.sh --list
+./tests/diff_test/diff_test.sh --list
 
 # 详细输出
-./tools/diff_test/diff_test.sh --verbose
+./tests/diff_test/diff_test.sh --verbose
 ```
 
 ## 输出示例
@@ -52,7 +52,7 @@ make build
 [INFO] Testing: simple_add
 Extracted: /tmp/dcc-diff-test-xxx/simple_add/simple_add_dcc.{symbols,relocs,sections}
 Extracted: /tmp/dcc-diff-test-xxx/simple_add/simple_add_gcc.{symbols,relocs,sections}
-Report generated: /root/dcc/tools/diff_test/reports/simple_add_report.txt
+Report generated: /root/dcc/tests/diff_test/reports/simple_add_report.txt
 
 ┌─────────────────────────────────────────┐
 │           TEST SUMMARY                  │
@@ -112,14 +112,14 @@ Relocation type distribution:
 
 ```bash
 # 创建新测试用例
-cat > tools/diff_test/fixtures/my_test.c << 'EOF'
+cat > tests/diff_test/fixtures/my_test.c << 'EOF'
 int my_function(int x) {
     return x * 2;
 }
 EOF
 
 # 运行测试
-./tools/diff_test/diff_test.sh my_test
+./tests/diff_test/diff_test.sh my_test
 ```
 
 ## 常见差异类型
@@ -151,7 +151,7 @@ SIZE(dcc=78 vs gcc=24)
 ## 架构
 
 ```
-tools/diff_test/
+tests/diff_test/
 ├── diff_test.sh          # 主入口脚本
 ├── lib/
 │   ├── elf_dump.sh       # ELF 信息提取（符号表、重定位）

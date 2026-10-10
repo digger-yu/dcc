@@ -12,7 +12,7 @@ cargo build --release 2>&1 | tail -3
 echo ""
 echo "[Step 2] Creating test case in diff_test/fixtures..."
 
-cat > tools/diff_test/fixtures/int128_float_args.c << 'EOF'
+cat > tests/diff_test/fixtures/int128_float_args.c << 'EOF'
 typedef __int128 int128_t;
 typedef unsigned __int128 uint128_t;
 
@@ -52,14 +52,14 @@ EOF
 # Step 3: Run diff_test
 echo ""
 echo "[Step 3] Running diff_test on int128_float_args..."
-./tools/diff_test/diff_test.sh int128_float_args
+./tests/diff_test/diff_test.sh int128_float_args
 
 # Step 4: Runtime verification
 echo ""
 echo "[Step 4] Runtime verification..."
 
-gcc -std=c11 -O2 -o /tmp/int128_float_gcc tools/diff_test/fixtures/int128_float_args.c
-/root/dcc/target/release/dcc -o /tmp/int128_float_dcc tools/diff_test/fixtures/int128_float_args.c
+gcc -std=c11 -O2 -o /tmp/int128_float_gcc tests/diff_test/fixtures/int128_float_args.c
+/root/dcc/target/release/dcc -o /tmp/int128_float_dcc tests/diff_test/fixtures/int128_float_args.c
 
 /tmp/int128_float_gcc 2>/dev/null || gcc_ret=$?
 /tmp/int128_float_dcc 2>/dev/null || dcc_ret=$?
