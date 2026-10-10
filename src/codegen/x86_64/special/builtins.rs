@@ -2995,7 +2995,18 @@ impl Codegen {
                     // xor eax, edx: eax = x ^ s_bits (按类型宽度处理)
                     self.emit_insn(&Insn::raw_bytes(&[0x31, 0xD0]));
                     // mov ecx, eax: 保存 x^s_bits 到 ecx, 用于 test
-                    self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC1]));
+                    self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            ));
                     // bsr eax, eax (32-bit) - 可能为 UB for 0, 但 cmove 兜底
                     self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xBD, 0xC0]));
                     // mov edx, 0xFFFFFFFF (sentinel)

@@ -943,7 +943,18 @@ impl Codegen {
                 },
             }
             if is_signed {
-                self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC1])); // mov ecx, eax
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov ecx, eax
                 self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xF9, 0x1F])); // sar ecx, 31
                 self.emit_insn(&Insn::raw_bytes(&[0x31, 0xC8])); // xor eax, ecx
                 self.emit_insn(&Insn::raw_bytes(&[0x29, 0xC8])); // sub eax, ecx
