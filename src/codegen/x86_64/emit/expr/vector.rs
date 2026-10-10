@@ -342,7 +342,7 @@ impl Codegen {
                 if is_float {
                     self.emit_insn(&Insn::movss_xmm(1, 0)); // movss xmm1, xmm0
                 } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x10, 0xC8])); // movsd xmm1, xmm0
+                    self.emit_insn(&Insn::movsd_xmm(1, 0)); // movsd xmm1, xmm0
                 }
                 if is_float {
                     self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x04, 0x24]));
