@@ -506,7 +506,7 @@ impl Codegen {
                     self.mov(6, dst); // rsi = 字段地址
                     self.emit_lea_r13(7, result_off); // rdi = 物化槽
                     self.mov_imm(1, (isz * 2) as i128);
-                    self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // cld; rep movsb
                     if matches!(inner.base, Type::Float | Type::Double | Type::LongDouble) {
                         // 浮点 inner 结果约定: xmm0 = 实部
                         let pfx = if matches!(inner.base, Type::Float) {
@@ -677,7 +677,7 @@ impl Codegen {
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rsi, rax
                     self.emit_lea_r13(7, result_off); // rdi = r13 + result_off
                     self.mov_imm(1, total_sz as i128);
-                    self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // cld; rep movsb
                 }
                 self.emit_lea_r13(0, result_off);
             } else {
@@ -699,7 +699,7 @@ impl Codegen {
             self.emit_lea_r13(6, src_off); // rsi = &var
             self.emit_lea_r13(7, result_off); // rdi = result_off
             self.mov_imm(1, total_sz as i128);
-            self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb
+            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // cld; rep movsb
             let pfx = if matches!(ty, Type::Complex(ref inner) if matches!(inner.base, Type::Float))
             {
                 0xF3u8

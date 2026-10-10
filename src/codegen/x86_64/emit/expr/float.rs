@@ -862,7 +862,7 @@ impl Codegen {
             self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
             self.emit_lea_r13(7, dst_off);
             self.mov_imm(1, src_ty.size() as i128);
-            self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4]));
+            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb));
             return;
         }
         self.gen_expr(e, Self::EVAL_BASE);
@@ -876,7 +876,7 @@ impl Codegen {
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rsi, rax
                 self.emit_lea_r13(7, dst_off); // lea rdi, [r13 + dst_off]
                 self.mov_imm(1, sz as i128); // mov rcx, sz
-                self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4])); // rep movsb
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
             },
             Type::Float => self.store_xmm32_stack(0, dst_off),
             Type::Double | Type::LongDouble => self.store_xmm64_stack(0, dst_off),

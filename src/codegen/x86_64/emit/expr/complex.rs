@@ -126,7 +126,7 @@ impl Codegen {
             self.emit_agg_dst_addr(dst, 6);
             self.emit_lea_r13(7, result_off);
             self.mov_imm(1, total as i128);
-            self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb
+            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // cld; rep movsb
                                             // f/d rvalue 约定 xmm0=实部; LD rvalue 约定是帧内存+rax,
                                             // 消费端用 fld tbyte 读, 不碰 xmm0。
             if matches!(inner.base, Type::Float | Type::Double) {
@@ -1779,7 +1779,7 @@ impl Codegen {
                 self.mov(6, 1);
                 self.emit_lea_r13(7, result_off);
                 self.mov_imm(1, (inner.size() * 2) as i128);
-                self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // cld; rep movsb
                                                 // LD rvalue 消费端用 fld tbyte, 不经 xmm0 (见上)。
                 if matches!(inner.base, Type::Float | Type::Double) {
                     let pfx = if matches!(inner.base, Type::Float) {
@@ -2279,7 +2279,7 @@ impl Codegen {
                         }
                         let sz = (inner_sz * 2) as i128;
                         self.mov_imm(1, sz);
-                        self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb
+                        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // cld; rep movsb
                     } else {
                         // 整数跨宽 (提升只宽化: e_isz=4, inner_sz=8):
                         // 分量 movsxd 符号扩展到运算宽度存槽。每轮重取

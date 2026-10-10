@@ -27,7 +27,7 @@ impl Codegen {
         self.emit_lea_r13(6, src_off);
         self.emit_lea_r13(7, dst_off);
         self.mov_imm(1, size as i128);
-        self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4]));
+        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb));
     }
     fn emit_address_descriptor(
         &mut self,

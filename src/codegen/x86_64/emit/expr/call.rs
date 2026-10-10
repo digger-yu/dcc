@@ -173,7 +173,7 @@ impl Codegen {
                 self.mov(6, 0); // rsi = rax (缓冲地址)
                 self.emit_lea_r13(7, result_off); // rdi = r13+result_off
                 self.mov_imm(1, ty.size() as i128);
-                self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // cld; rep movsb
                 let _ = off;
             } else if matches!(inner.base, Type::Float) {
                 // SysV ABI: _Complex float 是单个 8 字节 SSE 类,

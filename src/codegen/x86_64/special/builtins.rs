@@ -2532,7 +2532,7 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&176u32.to_le_bytes())); // add rsi, 176
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1]));
                 self.emit_insn(&Insn::raw_bytes(&size.to_le_bytes())); // mov rcx, size
-                self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // cld; rep movsb
                                                       // 从缓冲区恢复 GP 寄存器实参 (rdi..r9)
                 self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x8B, 0x9C, 0x24]));
                 self.emit_insn(&Insn::raw_bytes(&buf_off.to_le_bytes())); // mov r11, [rsp+buf_off]
@@ -3420,7 +3420,7 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0xBC, 0x24]));
                 self.emit_insn(&Insn::raw_bytes(&176u32.to_le_bytes())); // lea rdi, [rsp+176]
                 self.emit_insn(&Insn::raw_bytes(&[0xB9, 32, 0, 0, 0])); // mov ecx, 32 (qwords)
-                self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0x48, 0xA5])); // cld; rep movsq
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsq)); // cld; rep movsq
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x04, 0x24])); // lea rax, [rsp]
                 if dst != 0 {
                     self.mov(dst, 0);
