@@ -176,7 +176,7 @@ impl Codegen {
                 self.pop(0); // 恢复基址到 rax
                 if self.bounds_check {
                     // 保存元素索引 (imul 会覆盖 rcx): libubsan handler 第二参数
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xce])); // mov rsi, rcx
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rsi, rcx
                 }
                 self.emit_index_scale(es, arr, elem_ty);
                 // -fbounds-check: 数组下标运行时边界检查
@@ -674,7 +674,7 @@ impl Codegen {
                     // 整数 complex 全局: 加载 16 字节到临时区
                     self.emit_global_addr(0, &name.name);
                     // rax = global addr, 拷贝到临时区
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC6])); // mov rsi, rax
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rsi, rax
                     self.emit_lea_r13(7, result_off); // rdi = r13 + result_off
                     self.mov_imm(1, total_sz as i128);
                     self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb

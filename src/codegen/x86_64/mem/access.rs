@@ -1068,7 +1068,7 @@ impl Codegen {
                 if dst != 1 {
                     // 把地址移到 rcx
                     if dst == 0 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC1])); // mov rcx, rax
+                        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax
                     } else {
                         self.push(dst);
                         self.pop(1); // rcx = addr
@@ -1115,7 +1115,7 @@ impl Codegen {
                     };
                     let base_off = result_off;
                     // 加载实部: [rax] → xmm0
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xc6])); // mov rsi, rax
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rsi, rax
                     if matches!(inner.base, Type::Float) {
                         self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x06])); // movss xmm0, [rsi]
                     } else {
@@ -1128,7 +1128,7 @@ impl Codegen {
                     let inner_sz_i64 = inner_sz as i64;
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xc0, 0x00])); // add rax, inner_sz
                     self.emit_insn(&Insn::raw_bytes(&inner_sz_i64.to_le_bytes()));
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xc6])); // mov rsi, rax
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rsi, rax
                     if matches!(inner.base, Type::Float) {
                         self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x06])); // movss xmm0, [rsi]
                     } else {
@@ -1153,7 +1153,7 @@ impl Codegen {
                 if dst != 1 {
                     // 把地址移到 rcx
                     if dst == 0 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xc1])); // mov rcx, rax
+                        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax
                     } else {
                         self.push(dst);
                         self.pop(1); // rcx = addr
@@ -1166,7 +1166,7 @@ impl Codegen {
                     let result_off = self.complex_result_off();
                     self.emit_lea_r13(6, result_off); // rsi = source
                                                       // 存储实部: xmm0 → [rcx]
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xf2])); // mov rdx, rsi
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rdx, rsi
                     if matches!(inner.base, Type::Float) {
                         self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x02])); // movss xmm0, [rdx]
                     } else {

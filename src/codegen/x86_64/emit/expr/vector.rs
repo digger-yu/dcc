@@ -472,10 +472,10 @@ impl Codegen {
                             // 8 位除法余数在 ah (非 rdx): ror rax,8
                             // 后取低字节
                             self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xC8, 0x08])); // ror rax, 8
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC1])); // mov rcx, rax
+                            self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax
                         } else {
                             // 余数在 rdx, 移到 rcx
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xD1])); // mov rcx, rdx
+                            self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rdx
                         }
                     } else {
                         self.mov(1, 0); // rcx = 商 (rax)
@@ -767,7 +767,7 @@ impl Codegen {
                 // vector lvalue: 取地址后整块拷贝到临时槽
                 // (不能回退 gen_expr: 会递归回本函数)
                 if self.gen_lvalue_addr(e, Self::EVAL_BASE) {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC6])); // mov rsi, rax
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rsi, rax
                     self.emit_lea_r13(7, temp_off); // rdi = 临时槽
                     self.mov_imm(1, vec_size as i128);
                     self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
@@ -789,7 +789,7 @@ impl Codegen {
             _ => {
                 self.gen_expr(e, Self::EVAL_BASE);
                 let total_bytes = elem_size * count;
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC6])); // mov rsi, rax
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rsi, rax
                 self.emit_lea_r13(7, temp_off); // rdi = 临时区
                 self.mov_imm(1, total_bytes as i128);
                 self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
@@ -876,13 +876,13 @@ impl Codegen {
         let result_off = self.vector_temp_base(result_slot, vec_size);
         if self.gen_lvalue_addr(e, Self::EVAL_BASE) {
             // 保存源地址到 rcx (后续 load/store 会破坏 rax)
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC1])); // mov rcx, rax
+            self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax
         } else {
             // rvalue 内层 (如 -(-a)): 物化到更深的槽, 逐元素从那里读
             self.gen_vector_load_into_slot(e, result_slot + 1);
             let src_off = self.vector_temp_base(result_slot + 1, vec_size);
             self.emit_lea_r13(6, src_off); // rsi = 源
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xF1])); // mov rcx, rsi
+            self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rsi
         }
         for i in 0..count {
             let off = (i * elem_size) as i64;

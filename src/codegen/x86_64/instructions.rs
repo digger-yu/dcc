@@ -2196,8 +2196,8 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x07])); // mov rax, [rdi]
                 let l_retry = self.fresh_label();
                 self.label(&l_retry);
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC1])); // mov rcx, rax
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC2])); // mov rdx, rax
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rdx, rax
                 compute_new(self, sz);
                 self.emit_lock_cmpxchg_rdi_rdx(sz);
                 let l_done = self.fresh_label();

@@ -483,7 +483,7 @@ impl Codegen {
                     // neg rax → 0/1 映射到 0/全1 (向量真值)
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xD8])); // neg rax
                                                     // 复制 rax 到 rdx (让两个 64-bit 半部分都是相同值)
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC2])); // mov rdx, rax
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rdx, rax
                                                     // 结果在 rax:rdx → 存回
                     self.store_stack(0, result_off);
                     self.store_stack(2, result_off + 8);
@@ -493,7 +493,7 @@ impl Codegen {
                     self.emit_alu_rm_reg64(AluOp::And, 1, 0, &[0x48, 0x21, 0xC1]); // and rcx, rax (low &= left)
                     self.emit_alu_rm_reg64(AluOp::And, 8, 2, &[0x4C, 0x21, 0xD0]); // and r8, rdx (high &= left)
                                                     // mov rax, rcx; mov rdx, r8
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC8]));
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                     self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0xC2]));
                     self.store_stack(0, result_off);
                     self.store_stack(2, result_off + 8);
@@ -501,7 +501,7 @@ impl Codegen {
                 BinOp::Or => {
                     self.emit_alu_rm_reg64(AluOp::Or, 1, 0, &[0x48, 0x09, 0xC1]); // or rcx, rax
                     self.emit_alu_rm_reg64(AluOp::Or, 8, 2, &[0x4C, 0x09, 0xD0]); // or r8, rdx
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC8]));
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                     self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0xC2]));
                     self.store_stack(0, result_off);
                     self.store_stack(2, result_off + 8);
@@ -509,7 +509,7 @@ impl Codegen {
                 BinOp::Xor => {
                     self.emit_alu_rm_reg64(AluOp::Xor, 1, 0, &[0x48, 0x31, 0xC1]); // xor rcx, rax
                     self.emit_alu_rm_reg64(AluOp::Xor, 8, 2, &[0x4C, 0x31, 0xD0]); // xor r8, rdx
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC8]));
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                     self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0xC2]));
                     self.store_stack(0, result_off);
                     self.store_stack(2, result_off + 8);

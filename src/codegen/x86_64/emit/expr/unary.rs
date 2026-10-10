@@ -154,7 +154,7 @@ impl Codegen {
             if self.gen_lvalue_addr(e, Self::EVAL_BASE) {
                 // lvalue (变量/字段/下标): 用 rcx 保存地址 (flip_sign_xmm
                 // 会破坏 rax 但不动 rcx), 逐分量加载/flip/store
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC1])); // mov rcx, rax
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax
                 let imag_off = inner_sz; // 变量内存虚部槽 (连续布局)
                                          // 实部: [rcx] → xmm0 → flip → [result_off]
                 self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x01])); // movss/movsd xmm0, [rcx]
@@ -222,7 +222,7 @@ impl Codegen {
             if matches!(inner, Type::Float | Type::Double) {
                 let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                 if self.gen_lvalue_addr(e, Self::EVAL_BASE) {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC1])); // mov rcx, rax
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax
                     let imag_off = inner_sz;
                     // 实部: [rcx] → xmm0 → [result_off] (不变)
                     self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x01])); // movss/movsd xmm0, [rcx]

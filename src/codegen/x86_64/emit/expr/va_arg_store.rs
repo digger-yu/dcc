@@ -880,7 +880,7 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x07]));
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xE0, 0xF8])); // and rax, -8
                 self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0xC3])); // mov r11, rax (暂存 step)
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC1])); // mov rcx, rax (计数 = 对齐后尺寸)
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax (计数 = 对齐后尺寸)
             },
             None => {
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32 (= sz)
