@@ -4927,7 +4927,12 @@ impl Codegen {
                 }
                 self.gen_expr(&args[0], 7); // rdi = flagp
                 self.gen_expr(&args[1], Self::EVAL_BASE); // rax = excepts
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7, 0x0F])); // movzx ecx, word [rdi]
+                self.emit_insn(&Insn::mov_ext_mem(
+                    false,
+                    crate::codegen::shared::asm_operand::Width::B16,
+                    crate::codegen::shared::asm_operand::Width::B32,
+                    1, 7, 0,
+                )); // movzx ecx, word [rdi]
                 self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00])); // and ecx, 0x3F
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
                 self.emit_insn(&Insn::raw_bytes(&[0x21, 0xC1])); // and ecx, eax → ecx = *flagp & excepts
@@ -4980,7 +4985,12 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], 7); // rdi = flagp
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7, 0x0F])); // movzx ecx, word [rdi]
+                self.emit_insn(&Insn::mov_ext_mem(
+                    false,
+                    crate::codegen::shared::asm_operand::Width::B16,
+                    crate::codegen::shared::asm_operand::Width::B32,
+                    1, 7, 0,
+                )); // movzx ecx, word [rdi]
                 self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00])); // and ecx, 0x3F
                 self.gen_expr(&args[1], Self::EVAL_BASE); // rax = excepts
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F

@@ -2115,7 +2115,12 @@ impl Codegen {
         match sz {
             1 => {
                 // 8-bit: al/al, sil/dl/ah 8 位子寄存器参与
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x07])); // movzx eax, byte [rdi]
+                self.emit_insn(&Insn::mov_ext_mem(
+                    false,
+                    crate::codegen::shared::asm_operand::Width::B8,
+                    crate::codegen::shared::asm_operand::Width::B32,
+                    0, 7, 0,
+                )); // movzx eax, byte [rdi]
                 let l_retry = self.fresh_label();
                 self.label(&l_retry);
                 self.emit_insn(&Insn::new(
@@ -2151,7 +2156,12 @@ impl Codegen {
             },
             2 => {
                 // 16-bit: ax/si/dx 子寄存器
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7, 0x07])); // movzx eax, word [rdi]
+                self.emit_insn(&Insn::mov_ext_mem(
+                    false,
+                    crate::codegen::shared::asm_operand::Width::B16,
+                    crate::codegen::shared::asm_operand::Width::B32,
+                    0, 7, 0,
+                )); // movzx eax, word [rdi]
                 let l_retry = self.fresh_label();
                 self.label(&l_retry);
                 self.emit_insn(&Insn::new(
@@ -2274,14 +2284,21 @@ impl Codegen {
             self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x44, 0x24, off1 as u8])); // mov eax, [rsp+off1]
             self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x4C, 0x24, off2 as u8])); // mov ecx, [rsp+off2]
         } else {
-            let ld = match (inner_sz, signed) {
-                (2, true) => 0xBF,
-                (2, false) => 0xB7,
-                (_, true) => 0xBE,
-                (_, false) => 0xB6,
+            let from = if inner_sz == 2 {
+                crate::codegen::shared::asm_operand::Width::B16
+            } else {
+                crate::codegen::shared::asm_operand::Width::B8
             };
-            self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x44, 0x24, off1 as u8])); // movsx/movzx eax
-            self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x4C, 0x24, off2 as u8])); // movsx/movzx ecx
+            self.emit_insn(&Insn::mov_ext_mem(
+                signed, from,
+                crate::codegen::shared::asm_operand::Width::B32,
+                0, 4, off1 as i32,
+            )); // movsx/movzx eax
+            self.emit_insn(&Insn::mov_ext_mem(
+                signed, from,
+                crate::codegen::shared::asm_operand::Width::B32,
+                1, 4, off2 as i32,
+            )); // movsx/movzx ecx
         }
     }
     pub(crate) fn emit_cqo(&mut self, inner_sz: i64) {
@@ -2463,8 +2480,18 @@ impl Codegen {
     }
     pub(crate) fn emit_mov_from_mem(&mut self, sz: usize, dst: u8) {
         match sz {
-            1 => self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x07])), // movzx eax, byte [rdi]
-            2 => self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7, 0x07])), // movzx eax, word [rdi]
+            1 => self.emit_insn(&Insn::mov_ext_mem(
+                false,
+                crate::codegen::shared::asm_operand::Width::B8,
+                crate::codegen::shared::asm_operand::Width::B32,
+                0, 7, 0,
+            )), // movzx eax, byte [rdi]
+            2 => self.emit_insn(&Insn::mov_ext_mem(
+                false,
+                crate::codegen::shared::asm_operand::Width::B16,
+                crate::codegen::shared::asm_operand::Width::B32,
+                0, 7, 0,
+            )), // movzx eax, word [rdi]
             4 => self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,

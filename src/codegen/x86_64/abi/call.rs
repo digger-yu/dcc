@@ -392,21 +392,21 @@ impl Codegen {
                     match chunk_sz {
                         1 => {
                             // movzx ecx, byte [rax+disp]
-                            if disp < 128 {
-                                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x48, disp as u8]));
-                            } else {
-                                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x88]));
-                                self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes()));
-                            }
+                            self.emit_insn(&Insn::mov_ext_mem(
+                                false,
+                                crate::codegen::shared::asm_operand::Width::B8,
+                                crate::codegen::shared::asm_operand::Width::B32,
+                                1, 0, disp as i32,
+                            ));
                         },
                         2 => {
                             // movzx ecx, word [rax+disp]
-                            if disp < 128 {
-                                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7, 0x48, disp as u8]));
-                            } else {
-                                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7, 0x88]));
-                                self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes()));
-                            }
+                            self.emit_insn(&Insn::mov_ext_mem(
+                                false,
+                                crate::codegen::shared::asm_operand::Width::B16,
+                                crate::codegen::shared::asm_operand::Width::B32,
+                                1, 0, disp as i32,
+                            ));
                         },
                         4 => {
                             // mov ecx, dword [rax+disp] (自动 zero-extend 到 64 位)

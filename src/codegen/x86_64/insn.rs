@@ -235,6 +235,37 @@ impl Insn {
         )
     }
 
+    /// P11 Bucket 1: movzx/movsx/movsxd via MovExt typed opcode (mem-load form).
+    /// sign: true=movsx/movsxd, false=movzx.
+    /// from: source memory width (B8/B16/B32). to: dest width (B32/B64).
+    /// base: x86_64 physical register index 0..15. disp: byte displacement.
+    pub fn mov_ext_mem(
+        sign: bool,
+        from: crate::codegen::shared::asm_operand::Width,
+        to: crate::codegen::shared::asm_operand::Width,
+        dst_reg: u8,
+        base: u8,
+        disp: i32,
+    ) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                sign,
+                from,
+                to,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(dst_reg, to),
+                src: crate::codegen::x86_64::opcode::Operand::Mem(
+                    crate::codegen::x86_64::opcode::MemOperand {
+                        disp,
+                        base: Some(base),
+                        index: None,
+                        seg: None,
+                    },
+                ),
+            },
+            &[],
+        )
+    }
+
     /// P11: NOT / NEG single-register unary via UnaryRm typed opcode.
     /// op: UnaryOp::Not or UnaryOp::Neg. width: B16/B32/B64. reg_idx: x86_64
     /// physical register index 0..15.

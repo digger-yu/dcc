@@ -792,16 +792,13 @@ impl X86_64Opcode {
                 Some(out)
             }
             X86_64Opcode::MovExt { sign, from, to, dst, src } => {
-                // P11: 收敛 movzx/movsx/movsxd 的 reg-reg 形态.
+                // P11: 收敛 movzx/movsx/movsxd 的 reg-reg 与 reg-mem 形态.
                 //   MOVZX r32, r/m8 (B8):  0F B6 /r
                 //   MOVZX r32, r/m16 (B16): 0F B7 /r
                 //   MOVSX r32, r/m8 (B8):  0F BE /r
                 //   MOVSX r32, r/m16 (B16): 0F BF /r
                 //   MOVSXD r64, r/m32 (B64): 63 /r (REX.W=1)
-                // dst ModRM.reg; src ModRM.r/m.
-                let (Operand::Reg(dst_idx, _), Operand::Reg(src_idx, _)) = (dst, src) else {
-                    return None;
-                };
+                // dst ModRM.reg; src ModRM.r/m (reg 或 mem).
                 use crate::codegen::shared::asm_operand::Width as W;
                 // 先确定 escap / 低 opcode / 是否需要 REX.W=1.
                 let (escap, low, rex_w): (u8, u8, bool) = match (sign, from, to) {
@@ -820,32 +817,89 @@ impl X86_64Opcode {
                     (true, W::B16, W::B64) => (0x0F, 0xBF, true),
                     _ => return None,
                 };
-                // REX: W=1 (B64 目标), R=dst>=8, B=src>=8.
-                // 额外: B8 源 (spl/bpl/sil/dil, src&7 ∈ {4,5,6,7}) 需 REX 让汇编器认成高字节.
-                let mut rex: u8 = 0x40;
-                if rex_w {
-                    rex |= 0x08;
+                match (dst, src) {
+                    (Operand::Reg(dst_idx, _), Operand::Reg(src_idx, _)) => {
+                        // REX: W=1 (B64 目标), R=dst>=8, B=src>=8.
+                        // 额外: B8 源 (spl/bpl/sil/dil, src&7 ∈ {4,5,6,7}) 需 REX 让汇编器认成高字节.
+                        let mut rex: u8 = 0x40;
+                        if rex_w {
+                            rex |= 0x08;
+                        }
+                        if *dst_idx >= 8 {
+                            rex |= 0x04;
+                        }
+                        if *src_idx >= 8 {
+                            rex |= 0x01;
+                        }
+                        let need_rex = rex_w
+                            || *dst_idx >= 8
+                            || *src_idx >= 8
+                            || (*from == W::B8 && *src_idx >= 4);
+                        let mut out = Vec::with_capacity(6);
+                        if need_rex {
+                            out.push(rex);
+                        }
+                        if escap != 0 {
+                            out.push(escap);
+                        }
+                        out.push(low);
+                        out.push(0xC0 | ((*dst_idx & 7) << 3) | (*src_idx & 7));
+                        Some(out)
+                    }
+                    (Operand::Reg(dst_idx, _), Operand::Mem(mem)) => {
+                        // mem -> reg (load). 有 index/seg 就回退手写 (本步只接 base+disp).
+                        if mem.index.is_some() || mem.seg.is_some() {
+                            return None;
+                        }
+                        let base = match mem.base {
+                            Some(b) => b,
+                            None => return None,
+                        };
+                        // REX: W (B64), R=dst>=8, B=base>=8.
+                        let mut rex: u8 = 0x40;
+                        if rex_w {
+                            rex |= 0x08;
+                        }
+                        if *dst_idx >= 8 {
+                            rex |= 0x04;
+                        }
+                        if base >= 8 {
+                            rex |= 0x01;
+                        }
+                        let need_rex = rex_w || *dst_idx >= 8 || base >= 8;
+                        // ModRM mod / disp 长度: base=rbp(5) 在 mod=00 时是 rip-relative,
+                        // 这里只接显式 disp, 因此 disp=0 且 base=5 时走 disp32 (mod=10) 以
+                        // 避免被解释成 [rip+disp32].
+                        let disp = mem.disp;
+                        let (modrm_mod, disp_len, disp_bytes): (u8, usize, [u8; 4]) =
+                            if disp == 0 && base != 5 {
+                                (0, 0, [0; 4])
+                            } else if let Ok(d) = i8::try_from(disp) {
+                                (1, 1, [d as u8, 0, 0, 0])
+                            } else {
+                                (2, 4, disp.to_le_bytes())
+                            };
+                        let reg_field = *dst_idx & 7;
+                        let rm_field = base & 7;
+                        let mut out = Vec::with_capacity(16);
+                        if need_rex {
+                            out.push(rex);
+                        }
+                        if escap != 0 {
+                            out.push(escap);
+                        }
+                        out.push(low);
+                        let modrm = (modrm_mod << 6) | (reg_field << 3) | rm_field;
+                        out.push(modrm);
+                        if rm_field == 4 {
+                            // SIB: scale=0, index=4 (no index), base=rm_field.
+                            out.push(0x24);
+                        }
+                        out.extend_from_slice(&disp_bytes[..disp_len]);
+                        Some(out)
+                    }
+                    _ => None,
                 }
-                if *dst_idx >= 8 {
-                    rex |= 0x04;
-                }
-                if *src_idx >= 8 {
-                    rex |= 0x01;
-                }
-                let need_rex = rex_w
-                    || *dst_idx >= 8
-                    || *src_idx >= 8
-                    || (*from == W::B8 && *src_idx >= 4);
-                let mut out = Vec::with_capacity(6);
-                if need_rex {
-                    out.push(rex);
-                }
-                if escap != 0 {
-                    out.push(escap);
-                }
-                out.push(low);
-                out.push(0xC0 | ((*dst_idx & 7) << 3) | (*src_idx & 7));
-                Some(out)
             }
             X86_64Opcode::ImulRm { width, dst, src } => {
                 // P11: IMUL r, r/m — 0F AF /r (reg-reg 形态).
@@ -1695,6 +1749,89 @@ mod tests {
             src: reg(0, Width::B16),
         };
         assert_eq!(o.encode(), Some(vec![0x48, 0x0F, 0xBF, 0xC0]));
+    }
+
+    // ---- MovExt reg-mem (P11) ----
+
+    #[test]
+    fn mov_ext_movzx_load_byte_b32_disp8() {
+        // movzx ecx, byte [rax+disp8]:  0F B6 48 disp
+        let o = X86_64Opcode::MovExt {
+            sign: false,
+            from: Width::B8,
+            to: Width::B32,
+            dst: reg(1, Width::B32),
+            src: Operand::Mem(MemOperand {
+                disp: 8, base: Some(0), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0xB6, 0x48, 0x08]));
+    }
+
+    #[test]
+    fn mov_ext_movzx_load_byte_b32_disp32() {
+        // movzx ecx, byte [rax+disp32]:  0F B6 88 disp32
+        let o = X86_64Opcode::MovExt {
+            sign: false,
+            from: Width::B8,
+            to: Width::B32,
+            dst: reg(1, Width::B32),
+            src: Operand::Mem(MemOperand {
+                disp: 0x12345678, base: Some(0), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![
+            0x0F, 0xB6, 0x88,
+            0x78, 0x56, 0x34, 0x12,
+        ]));
+    }
+
+    #[test]
+    fn mov_ext_movsx_load_word_b64_disp0() {
+        // movswq rax, [rbx]:  48 0F BF 03  (mod=00, reg=rax=0, r/m=rbx=3)
+        let o = X86_64Opcode::MovExt {
+            sign: true,
+            from: Width::B16,
+            to: Width::B64,
+            dst: reg(0, Width::B64),
+            src: Operand::Mem(MemOperand {
+                disp: 0, base: Some(3), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x0F, 0xBF, 0x03]));
+    }
+
+    #[test]
+    fn mov_ext_movsxd_load_b64_from_rsp() {
+        // movsxd rax, dword [rsp]:  48 63 04 24  (SIB for rsp)
+        let o = X86_64Opcode::MovExt {
+            sign: true,
+            from: Width::B32,
+            to: Width::B64,
+            dst: reg(0, Width::B64),
+            src: Operand::Mem(MemOperand {
+                disp: 0, base: Some(4), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x63, 0x04, 0x24]));
+    }
+
+    #[test]
+    fn mov_ext_movzx_load_byte_b64_with_rex_b() {
+        // movzbq r8, [r11]:  4C 0F B6 03  (REX.W=1, REX.B=base=11&7=3 -> 0x0B=base>=8, dst=r8>=8)
+        // REX = 0x48|0x04(R)|0x01(B) = 0x4D? Let's re-derive:
+        //   rex_w=1 -> 0x48; dst=8>=8 -> REX.R=0x04; base=11>=8 -> REX.B=0x01. Total 0x4D.
+        //   modrm = mod(0) | reg(0) | rm(3) = 0x03.
+        let o = X86_64Opcode::MovExt {
+            sign: false,
+            from: Width::B8,
+            to: Width::B64,
+            dst: reg(8, Width::B64),
+            src: Operand::Mem(MemOperand {
+                disp: 0, base: Some(11), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0x4D, 0x0F, 0xB6, 0x03]));
     }
 
     // ---- TEST reg,reg (P11) ----
