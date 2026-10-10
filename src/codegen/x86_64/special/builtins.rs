@@ -2443,7 +2443,18 @@ impl Codegen {
                         // rax = b, rcx = a: 按各自类型扩展到 64 位
                         if op_sz < 8 {
                             if a_uns {
-                                self.emit_insn(&Insn::raw_bytes(&[0x89, 0xc9])); // mov ecx, ecx
+                                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov ecx, ecx
                             } else {
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x63, 0xc9])); // movsxd rcx, ecx
                             }
@@ -4734,7 +4745,18 @@ impl Codegen {
                 &[],
             )); // mov ecx, [rsp]
                                                 // 保存旧的启用掩码 (屏蔽位取反 = 启用位)
-                self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC8])); // mov eax, ecx
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov eax, ecx
                 self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE8, 0x07])); // shr eax, 7
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
                                                             // 清除屏蔽位 (启用陷阱): 屏蔽位在 7-12
@@ -4802,7 +4824,18 @@ impl Codegen {
                 &[],
             )); // mov ecx, [rsp] (ecx = MXCSR)
                                                 // 计算旧的启用掩码
-                self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC8])); // mov eax, ecx
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov eax, ecx
                 self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE8, 0x07])); // shr eax, 7
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
                                                             // 保存旧掩码到 [rsp+8]

@@ -958,7 +958,18 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xF9, 0x1F])); // sar ecx, 31
                 self.emit_insn(&Insn::raw_bytes(&[0x31, 0xC8])); // xor eax, ecx
                 self.emit_insn(&Insn::raw_bytes(&[0x29, 0xC8])); // sub eax, ecx
-                self.emit_insn(&Insn::raw_bytes(&[0x89, 0xD1])); // mov ecx, edx
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        2, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov ecx, edx
                 self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xF9, 0x1F]));
                 self.emit_insn(&Insn::raw_bytes(&[0x31, 0xCA])); // xor edx, ecx
                 self.emit_insn(&Insn::raw_bytes(&[0x29, 0xCA])); // sub edx, ecx
@@ -1161,7 +1172,18 @@ impl Codegen {
         if inner_sz == 8 {
             self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rax, rcx
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC8])); // mov eax, ecx
+            self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov eax, ecx
         }
         if is_signed {
             self.emit_cqo(inner_sz);

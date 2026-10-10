@@ -170,7 +170,18 @@ impl Codegen {
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rcx (restore divisor)
                                         // 零扩展除数 (rcx) 从32位到64位
                     if need_zero_ext {
-                        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC9])); // mov ecx, ecx (zero-extends to rcx)
+                        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov ecx, ecx (zero-extends to rcx)
                     }
                     if is_signed {
                         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x99])); // cqto
