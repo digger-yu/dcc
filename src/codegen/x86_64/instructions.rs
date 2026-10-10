@@ -2052,11 +2052,39 @@ impl Codegen {
     // ---- 以下为自 monolith（28a9063）恢复的底层指令编码原语 ----
 
     pub(crate) fn emit_add_r10(&mut self, inner_sz: i64) {
+        // P11: AluRm{Add, reg-reg}. rax=0 (dst), r10=10 (src).
+        let width = if inner_sz == 8 { Width::B64 } else { Width::B32 };
+        let insn = Insn::new(
+            X86_64Opcode::AluRm {
+                op: AluOp::Add,
+                width,
+                dst: OpcodeOperand::Reg(0, width),
+                src: OpcodeOperand::Reg(10, width),
+            },
+            &[],
+        );
+        if self.emit_insn(&insn) {
+            return;
+        }
         // add rax/eax, r10: reg=r10 → REX.R+W (0x4C)
         let rex = if inner_sz == 8 { 0x4C } else { 0x44 };
         self.emit_insn(&Insn::raw_bytes(&[rex, 0x01, 0xD0]));
     }
     pub(crate) fn emit_add_r11(&mut self, inner_sz: i64) {
+        // P11: AluRm{Add, reg-reg}. rax=0 (dst), r11=11 (src).
+        let width = if inner_sz == 8 { Width::B64 } else { Width::B32 };
+        let insn = Insn::new(
+            X86_64Opcode::AluRm {
+                op: AluOp::Add,
+                width,
+                dst: OpcodeOperand::Reg(0, width),
+                src: OpcodeOperand::Reg(11, width),
+            },
+            &[],
+        );
+        if self.emit_insn(&insn) {
+            return;
+        }
         let rex = if inner_sz == 8 { 0x4C } else { 0x44 };
         self.emit_insn(&Insn::raw_bytes(&[rex, 0x01, 0xD8]));
     }
