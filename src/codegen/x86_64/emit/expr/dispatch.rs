@@ -5,7 +5,7 @@ use crate::ast::*;
 use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::shared::asm_operand::Width;
 use crate::codegen::x86_64::insn::Insn;
-use crate::codegen::x86_64::opcode::{Operand as OpcodeOperand, ShiftAmount, ShiftOp, X86_64Opcode};
+use crate::codegen::x86_64::opcode::{AluOp, Operand as OpcodeOperand, ShiftAmount, ShiftOp, X86_64Opcode};
 use crate::codegen::x86_64::{AggDst, Codegen, JumpKind, VaListAddress};
 use crate::const_eval;
 
@@ -1413,10 +1413,38 @@ impl Codegen {
                             // >32 位: movabs rdx, inv_mask; and rcx, rdx
                             self.emit_insn(&Insn::raw_bytes(&[0x48, 0xBA])); // movabs rdx, imm64
                             self.emit_insn(&Insn::raw_bytes(&inv_mask.to_le_bytes()));
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xD1])); // and rcx, rdx
+                            // P11: and rcx, rdx via typed opcode.
+                            {
+                                let insn = Insn::new(
+                                    X86_64Opcode::AluRm {
+                                        op: AluOp::And,
+                                        width: Width::B64,
+                                        dst: OpcodeOperand::Reg(1, Width::B64),
+                                        src: OpcodeOperand::Reg(2, Width::B64),
+                                    },
+                                    &[],
+                                );
+                                if !self.emit_insn(&insn) {
+                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xD1])); // and rcx, rdx
+                                }
+                            }
                         }
                         // or rcx, rax
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xC1])); // or rcx, rax
+                        // P11: or rcx, rax via typed opcode.
+                        {
+                            let insn = Insn::new(
+                                X86_64Opcode::AluRm {
+                                    op: AluOp::Or,
+                                    width: Width::B64,
+                                    dst: OpcodeOperand::Reg(1, Width::B64),
+                                    src: OpcodeOperand::Reg(0, Width::B64),
+                                },
+                                &[],
+                            );
+                            if !self.emit_insn(&insn) {
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xC1])); // or rcx, rax
+                            }
+                        }
                                                         // 加载地址: rdx = [r13 + addr_off]
                         self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x55, addr_off as u8])); // mov rdx, [r13+addr_off]
                                                                         // 存储容器 (结果在 rcx 中)
@@ -1476,7 +1504,21 @@ impl Codegen {
                                                                                     // since (1<<63)-1 > u32::MAX but bw<64 means bw<=63
                                                                                     // (1u64<<63)-1 = 0x7FFFFFFFFFFFFFFF which doesn't fit in u32
                                                                                     // Fall through to movabs path
-                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC2])); // and rdx, rax
+                                    // P11: and rdx, rax via typed opcode.
+                                    {
+                                        let insn = Insn::new(
+                                            X86_64Opcode::AluRm {
+                                                op: AluOp::And,
+                                                width: Width::B64,
+                                                dst: OpcodeOperand::Reg(2, Width::B64),
+                                                src: OpcodeOperand::Reg(0, Width::B64),
+                                            },
+                                            &[],
+                                        );
+                                        if !self.emit_insn(&insn) {
+                                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC2])); // and rdx, rax
+                                        }
+                                    }
                                 }
                             }
                             // sign-extend if signed bitfield
