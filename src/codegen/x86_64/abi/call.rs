@@ -438,7 +438,23 @@ impl Codegen {
                             if disp < 128 {
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x48, disp as u8]));
                             } else {
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x88]));
+                                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(0),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            ));
                                 self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes()));
                             }
                         },
@@ -578,7 +594,23 @@ impl Codegen {
                             // VLA: mov rax, [rcx + chunk*8], then move to r11
                             let disp = (chunk * 8) as i32;
                             if disp == 0 {
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x01])); // mov rax, [rcx]
+                                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(1),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov rax, [rcx]
                             } else if disp < 128 {
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x41, disp as u8])); // mov rax, [rcx+disp8]
                             } else {
@@ -932,7 +964,23 @@ impl Codegen {
             // mov rax, [rcx + chunk*8]
             let disp = (chunk * 8) as i32;
             if disp == 0 {
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x01])); // mov rax, [rcx]
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(1),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov rax, [rcx]
             } else if disp < 128 {
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x41])); // mov rax, [rcx+disp8]
                 self.emit_insn(&Insn::raw_bytes(&[disp as u8]));

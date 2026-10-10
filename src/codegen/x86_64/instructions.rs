@@ -2275,7 +2275,23 @@ impl Codegen {
             },
             _ => {
                 // 64-bit
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x07])); // mov rax, [rdi]
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(7),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov rax, [rdi]
                 let l_retry = self.fresh_label();
                 self.label(&l_retry);
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax
@@ -2480,7 +2496,23 @@ impl Codegen {
                 },
                 &[],
             )), // mov eax, [rdi] (zero-extends)
-            _ => self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x07])), // mov rax, [rdi]
+            _ => self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(7),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )), // mov rax, [rdi]
         };
         if dst != 0 {
             self.mov(dst, 0);

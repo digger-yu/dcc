@@ -553,7 +553,23 @@ impl super::super::super::Codegen {
                 },
                 &[],
             )); },
-            8 => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x09])); },
+            8 => { self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(1),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); },
             2 => {
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x09]));
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB7, 0xC9]));

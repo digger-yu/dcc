@@ -236,7 +236,23 @@ impl Codegen {
                     self.emit_insn(&Insn::raw_bytes(&[0x85, 0xC9])); // test ecx, ecx
                 },
                 Type::Double | Type::LongDouble => {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x08])); // mov rcx, [rax]
+                    self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(0),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov rcx, [rax]
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x50, isz as u8])); // mov rdx, [rax+isz]
                     self.mov_imm(0, 0x7FFF_FFFF_FFFF_FFFFi128); // rax = 符号掩码
                     // P11: 收敛到 AluRm{And, B64, rcx, rax} / {And, B64, rdx, rax} / {Or, B64, rcx, rdx}.
@@ -275,7 +291,23 @@ impl Codegen {
                     // 对齐, ≤8 字节复数可一次整槽载入覆盖两分量。
                     match total {
                         16 => {
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x08])); // mov rcx, [rax]
+                            self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(0),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov rcx, [rax]
                             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0B, 0x48, isz as u8])); // or rcx, [rax+isz]
                             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x85, 0xC9])); // test rcx, rcx
                         },

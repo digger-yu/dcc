@@ -334,7 +334,23 @@ impl Codegen {
             1 => self.emit_va_arg_int_load(1, signed, 0x40, &[0x01]),
             2 => self.emit_va_arg_int_load(2, signed, 0x40, &[0x01]),
             4 => self.emit_va_arg_int_load(4, signed, 0x40, &[0x01]),
-            _ => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x01])); },
+            _ => { let _ = self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(1),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); },
         }
         self.push(0);
         self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x8D]));
@@ -582,7 +598,23 @@ impl Codegen {
             1 => self.emit_va_arg_int_load(1, gsigned, 0x40, &[0x01]),
             2 => self.emit_va_arg_int_load(2, gsigned, 0x40, &[0x01]),
             4 => self.emit_va_arg_int_load(4, gsigned, 0x40, &[0x01]),
-            _ => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x01])); },
+            _ => { let _ = self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(1),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); },
         }
         self.push(0);
         self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x4A, 0x08])); // mov rcx, [r10+8]

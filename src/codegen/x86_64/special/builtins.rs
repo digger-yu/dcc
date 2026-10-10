@@ -276,7 +276,23 @@ impl Codegen {
                     self.gen_expr(&args[2], Self::EVAL_BASE);
                 }
                 // rax = address of desired variable
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x30])); // mov rsi, [rax] (rsi = desired value)
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        6, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(0),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov rsi, [rax] (rsi = desired value)
                                                 // Then: compute expected value into rax (last, for cmpxchg)
                 self.gen_expr(&args[1], Self::EVAL_BASE); // rax = expected_ptr
                 let slot = -8 - (self.expr_depth as i32 * 8);
@@ -2415,7 +2431,23 @@ impl Codegen {
             "__builtin_return" => {
                 if !args.is_empty() {
                     self.gen_expr(&args[0], 6); // rsi = result block
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x06])); // mov rax, [rsi]
+                    self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(6),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov rax, [rsi]
                 }
                 if self.target.instrument_functions && !self.current_no_instrument {
                     self.emit_instrument_func_exit();
