@@ -21,7 +21,7 @@ use super::asm::operand::AsmOperand;
 use super::codegen::{Codegen, GlobalVar};
 use crate::ast::Type;
 use crate::cli::{Abi, Arch, Os, TargetTriple};
-use crate::codegen::x86_64::asm::render_one::disassemble_one_at;
+use crate::codegen::x86_64::render_one::disassemble_one_at;
 use crate::diagnostics::Severity;
 use crate::target::Target;
 use std::collections::{BTreeMap, HashMap};

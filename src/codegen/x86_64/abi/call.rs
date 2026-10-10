@@ -273,19 +273,19 @@ impl Codegen {
             // 再 sub rsp, padding.
             let _r10: u8 = 10; // caller-saved scratch
                                // mov r10, rsp: REX.W=1 B=1; 0x89 mov r/m, r; modrm 0xE2 (mod=3, reg=4=rsp, r/m=2=r10 low)
-            self.emit_insn(&Insn::raw(&[0x49, 0x89, 0xE2]));
+            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0xE2]));
             // lea rax, [rsp + frame_align - 1]; and rax, ~(frame_align - 1)
-            self.emit_insn(&Insn::raw(&[0x48, 0x8D, 0x44, 0x24]));
-            self.emit_insn(&Insn::raw(&[(frame_align - 1) as u8]));
-            self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xE0]));
-            self.emit_insn(&Insn::raw(&[!(frame_align - 1) as u8]));
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x44, 0x24]));
+            self.emit_insn(&Insn::raw_bytes(&[(frame_align - 1) as u8]));
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xE0]));
+            self.emit_insn(&Insn::raw_bytes(&[!(frame_align - 1) as u8]));
             // rax = aligned, r10 = rsp_old
             // sub r10, rax (r10 -= rax, 结果为负): 0x29 sub r/m, r; REX.WB; modrm 0xC2 (reg=0=rax, r/m=2=r10 low)
-            self.emit_insn(&Insn::raw(&[0x49, 0x29, 0xC2]));
+            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x29, 0xC2]));
             // neg r10 (padding = aligned - rsp_old): 0xF7 group 3, /5=NEG; REX.WB; modrm 0xDA (reg=101, r/m=2)
-            self.emit_insn(&Insn::raw(&[0x49, 0xF7, 0xDA]));
+            self.emit_insn(&Insn::raw_bytes(&[0x49, 0xF7, 0xDA]));
             // sub rsp, r10 (应用 padding): 0x29 sub r/m, r; REX.WR; modrm 0xD4 (mod=3, reg=2=r10 low, r/m=4=rsp)
-            self.emit_insn(&Insn::raw(&[0x4C, 0x29, 0xD4]));
+            self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x29, 0xD4]));
         }
         self.emit_sub_rsp(frame_bytes as i64);
 
@@ -374,42 +374,42 @@ impl Codegen {
                     let chunk_sz = remaining.min(8);
                     // zero-extend chunk_sz 字节到 rcx (寄存器 1)
                     // xor rcx, rcx; movzx ecx/ecx, [rax+disp]
-                    self.emit_insn(&Insn::raw(&[0x48, 0x31, 0xD1])); // xor rcx, rcx
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD1])); // xor rcx, rcx
                     match chunk_sz {
                         1 => {
                             // movzx ecx, byte [rax+disp]
                             if disp < 128 {
-                                self.emit_insn(&Insn::raw(&[0x0F, 0xB6, 0x48, disp as u8]));
+                                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x48, disp as u8]));
                             } else {
-                                self.emit_insn(&Insn::raw(&[0x0F, 0xB6, 0x88]));
-                                self.emit_insn(&Insn::raw(&disp.to_le_bytes()));
+                                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x88]));
+                                self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes()));
                             }
                         },
                         2 => {
                             // movzx ecx, word [rax+disp]
                             if disp < 128 {
-                                self.emit_insn(&Insn::raw(&[0x0F, 0xB7, 0x48, disp as u8]));
+                                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7, 0x48, disp as u8]));
                             } else {
-                                self.emit_insn(&Insn::raw(&[0x0F, 0xB7, 0x88]));
-                                self.emit_insn(&Insn::raw(&disp.to_le_bytes()));
+                                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7, 0x88]));
+                                self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes()));
                             }
                         },
                         4 => {
                             // mov ecx, dword [rax+disp] (自动 zero-extend 到 64 位)
                             if disp < 128 {
-                                self.emit_insn(&Insn::raw(&[0x8B, 0x48, disp as u8]));
+                                self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x48, disp as u8]));
                             } else {
-                                self.emit_insn(&Insn::raw(&[0x8B, 0x88]));
-                                self.emit_insn(&Insn::raw(&disp.to_le_bytes()));
+                                self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x88]));
+                                self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes()));
                             }
                         },
                         _ => {
                             // 8字节块: mov rcx, [rax+disp]
                             if disp < 128 {
-                                self.emit_insn(&Insn::raw(&[0x48, 0x8B, 0x48, disp as u8]));
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x48, disp as u8]));
                             } else {
-                                self.emit_insn(&Insn::raw(&[0x48, 0x8B, 0x88]));
-                                self.emit_insn(&Insn::raw(&disp.to_le_bytes()));
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x88]));
+                                self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes()));
                             }
                         },
                     }
@@ -493,10 +493,10 @@ impl Codegen {
                                 // 注意: 必须写入 rcx (寄存器 1), 下方 movsd [rcx] 硬编码 rcx
                                 self.emit_global_addr(1, &name.name);
                                 if chunk_off != 0 {
-                                    self.emit_insn(&Insn::raw(&[0x48, 0x81, 0xC1])); // add rcx, imm32
-                                    self.emit_insn(&Insn::raw(&(chunk_off as i32).to_le_bytes()));
+                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xC1])); // add rcx, imm32
+                                    self.emit_insn(&Insn::raw_bytes(&(chunk_off as i32).to_le_bytes()));
                                 }
-                                self.emit_insn(&Insn::raw(&[pfx, 0x0F, 0x10, 0x01])); // movsd/movss xmm0, [rcx]
+                                self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x01])); // movsd/movss xmm0, [rcx]
                             } else {
                                 let var_off = self.var_offset(&name.name) + chunk_off;
                                 self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], var_off);
@@ -541,19 +541,19 @@ impl Codegen {
                         // static 存储期聚合按值传参错, auto 存储期反而正常。
                         if self.is_global_not_local(&name.name) {
                             self.emit_global_addr(11, &name.name);
-                            self.emit_insn(&Insn::raw(&[0x49, 0x8B, 0x83]));
-                            self.emit_insn(&Insn::raw(&((chunk * 8) as i32).to_le_bytes()));
+                            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x83]));
+                            self.emit_insn(&Insn::raw_bytes(&((chunk * 8) as i32).to_le_bytes()));
                             self.mov(11, 0); // r11 = rax (data), for subsequent store
                         } else if is_vla_local {
                             // VLA: mov rax, [rcx + chunk*8], then move to r11
                             let disp = (chunk * 8) as i32;
                             if disp == 0 {
-                                self.emit_insn(&Insn::raw(&[0x48, 0x8B, 0x01])); // mov rax, [rcx]
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x01])); // mov rax, [rcx]
                             } else if disp < 128 {
-                                self.emit_insn(&Insn::raw(&[0x48, 0x8B, 0x41, disp as u8])); // mov rax, [rcx+disp8]
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x41, disp as u8])); // mov rax, [rcx+disp8]
                             } else {
-                                self.emit_insn(&Insn::raw(&[0x48, 0x8B, 0x81]));
-                                self.emit_insn(&Insn::raw(&disp.to_le_bytes())); // mov rax, [rcx+disp32]
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x81]));
+                                self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes())); // mov rax, [rcx+disp32]
                             }
                             self.mov(11, 0); // r11 = rax (data), for subsequent store
                         } else {
@@ -616,9 +616,9 @@ impl Codegen {
                                     | Type::ULongLong
                             )
                         {
-                            self.emit_insn(&Insn::raw(&[0x48, 0x31, 0xD2])); // xor rdx, rdx
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2])); // xor rdx, rdx
                         } else {
-                            self.emit_insn(&Insn::raw(&[0x48, 0x99])); // cqo
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x99])); // cqo
                         }
                     }
                     for (chunk, loc) in arg_locs.iter().enumerate() {
@@ -727,9 +727,9 @@ impl Codegen {
                                 | Type::ULongLong
                         )
                     {
-                        self.emit_insn(&Insn::raw(&[0x48, 0x31, 0xD2]));
+                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2]));
                     } else {
-                        self.emit_insn(&Insn::raw(&[0x48, 0x99]));
+                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x99]));
                     }
                 }
                 for (chunk, loc) in arg_locs.iter().enumerate() {
@@ -808,12 +808,12 @@ impl Codegen {
                                 // 且只在 staging 偏移 >= 128（参数多到需要 disp32）
                                 // 时触发，正是变参 SSE 装载的典型规模）。与
                                 // `emit_xmm_load_rsp` 等helper 同用作 `as u32`。
-                                self.emit_insn(&Insn::raw(&[0x0F, 0x10]));
+                                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x10]));
                                 if slot < 128 {
-                                    self.emit_insn(&Insn::raw(&[0x44 | ((reg & 7) << 3), 0x24, slot as u8]));
+                                    self.emit_insn(&Insn::raw_bytes(&[0x44 | ((reg & 7) << 3), 0x24, slot as u8]));
                                 } else {
-                                    self.emit_insn(&Insn::raw(&[0x84 | ((reg & 7) << 3), 0x24]));
-                                    self.emit_insn(&Insn::raw(&(slot as u32).to_le_bytes()));
+                                    self.emit_insn(&Insn::raw_bytes(&[0x84 | ((reg & 7) << 3), 0x24]));
+                                    self.emit_insn(&Insn::raw_bytes(&(slot as u32).to_le_bytes()));
                                 }
                                 i += 2; // 跳过下一个 entry
                                 continue;
@@ -857,7 +857,7 @@ impl Codegen {
                 self.call_label("__x86_indirect_call_thunk_r11");
             } else {
                 // `call *%r11`：FF /2 的 r/m 是 r11（REX.B 足够），REX.W 对 call 无意义
-                self.emit_insn(&Insn::raw(&[0x41, 0xFF, 0xD3]));
+                self.emit_insn(&Insn::raw_bytes(&[0x41, 0xFF, 0xD3]));
             }
         }
         self.emit_add_rsp(frame_bytes as i64);
@@ -876,13 +876,13 @@ impl Codegen {
             // mov rax, [rcx + chunk*8]
             let disp = (chunk * 8) as i32;
             if disp == 0 {
-                self.emit_insn(&Insn::raw(&[0x48, 0x8B, 0x01])); // mov rax, [rcx]
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x01])); // mov rax, [rcx]
             } else if disp < 128 {
-                self.emit_insn(&Insn::raw(&[0x48, 0x8B, 0x41])); // mov rax, [rcx+disp8]
-                self.emit_insn(&Insn::raw(&[disp as u8]));
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x41])); // mov rax, [rcx+disp8]
+                self.emit_insn(&Insn::raw_bytes(&[disp as u8]));
             } else {
-                self.emit_insn(&Insn::raw(&[0x48, 0x8B, 0x81])); // mov rax, [rcx+disp32]
-                self.emit_insn(&Insn::raw(&disp.to_le_bytes()));
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x81])); // mov rax, [rcx+disp32]
+                self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes()));
             }
             match *loc {
                 ArgLoc::Stack(off) => self.store_rsp_qword(0, off),

@@ -59,7 +59,7 @@ impl Codegen {
         calls: &HashMap<u64, String>,
         data: &HashMap<u64, String>,
     ) -> String {
-        use crate::codegen::x86_64::asm::render_one::disassemble_one_at;
+        use crate::codegen::x86_64::render_one::disassemble_one_at;
         let mut out = String::new();
         let mut pos = start;
         while pos < end && pos < bytes.len() {
@@ -105,7 +105,7 @@ impl Codegen {
     }
 
     pub fn build_asm_output(&self, prog: &Program) -> String {
-        use crate::codegen::x86_64::asm::render_one as tables;
+        use crate::codegen::x86_64::render_one as tables;
 
         let mut out = String::new();
         out.push_str(&format!("\t.file \"{}\"\n", self.source_name));
@@ -129,6 +129,41 @@ impl Codegen {
                 let len = insn.encode_bytes().map(|b| b.len()).unwrap_or(0);
                 gas_text_map.insert(*pc, g.clone());
                 gas_len_map.insert(*pc, len.max(1));
+            }
+        }
+        // P10 闭环: 对所有「insn_records 里存在但没有 gas_text」的记录, 在渲染前
+        // 一次性用 disassemble_one_at 反推出 GAS 文本回填. 这一步与发射期字节
+        // (self.code) 完全只读, 不改变 .text; 因此 G10 快照不受影响.
+        //
+        // 目的: 让渲染主循环 100% 走 gas_text_by_pc 命中路径, 不再需要 fallback
+        // 分支. 若某条指令的字节解码失败 (越界 / 未知 opcode), 仍保留原样并在
+        // 主循环里走 .byte 兜底 (这种情况应在 -S hit rate 检查里暴露).
+        for (pc, insn) in &self.insn_records {
+            if insn.gas_text.is_some() {
+                continue;
+            }
+            let bytes = match insn.encode_bytes() {
+                Some(b) => b,
+                None => continue,
+            };
+            // 用 self.code 从 pc 起反推单条指令; 长度 == bytes.len() 才接受 (
+            // 否则说明字节流与解码器不一致, 交由主循环 fallback 处理).
+            if *pc as usize + bytes.len() > self.code.len() {
+                continue;
+            }
+            match tables::disassemble_one_at(
+                &self.code,
+                *pc as usize,
+                0,
+                &self.disasm_calls,
+                &self.disasm_data,
+                &labels,
+            ) {
+                Some((len, text)) if len == bytes.len() => {
+                    gas_text_map.insert(*pc, text);
+                    gas_len_map.insert(*pc, bytes.len());
+                }
+                _ => {}
             }
         }
 
@@ -278,7 +313,7 @@ impl Codegen {
 
                 // 把 disasm 解码单条指令封装成闭包; 对 gap 与无 gas_text 的指令都用它.
                 // 注意: labels/directives 已由外层 `dis` 循环统一输出, 这里只解码指令本身.
-                use crate::codegen::x86_64::asm::render_one::disassemble_one_at;
+                use crate::codegen::x86_64::render_one::disassemble_one_at;
                 let disasm_one = |pos: usize, out: &mut String| -> usize {
                     match disassemble_one_at(
                         &layout.bytes,
@@ -526,7 +561,7 @@ impl Codegen {
         // 获取当前函数地址 (lea rdi, [rip+0])
         // 实际地址需要回补到函数起始位置
         let lea_pos = self.pos();
-        self.emit_insn(&Insn::raw(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00])); // lea rdi, [rip+disp32]
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00])); // lea rdi, [rip+disp32]
                                                                 // LEA 是直接 RIP-relative 寻址, 用 PC32 重定位
         self.pending_func_addr_rels
             .push((lea_pos + 3, self.current_func_name.clone(), true));
@@ -534,7 +569,7 @@ impl Codegen {
         // 获取调用者地址: 返回地址在 [r13+8]
         // (call 压入返回地址 → push r13 后 r13 指向 saved r13 →
         //  返回地址就在 r13+8, 无论中间 sub rsp 多少都不变)
-        self.emit_insn(&Insn::raw(&[0x49, 0x8B, 0x75, 0x08])); // mov rsi, [r13+8]
+        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x75, 0x08])); // mov rsi, [r13+8]
 
         // call __cyg_profile_func_enter
         self.call_label("__cyg_profile_func_enter");
@@ -542,13 +577,13 @@ impl Codegen {
     pub(crate) fn emit_instrument_func_exit(&mut self) {
         // 获取当前函数地址 (lea rdi, [rip+0])
         let lea_pos = self.pos();
-        self.emit_insn(&Insn::raw(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00])); // lea rdi, [rip+disp32]
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00])); // lea rdi, [rip+disp32]
                                                                 // LEA 是直接 RIP-relative 寻址, 用 PC32 重定位
         self.pending_func_addr_rels
             .push((lea_pos + 3, self.current_func_name.clone(), true));
 
         // 获取调用者地址: 返回地址在 [r13+8]
-        self.emit_insn(&Insn::raw(&[0x49, 0x8B, 0x75, 0x08])); // mov rsi, [r13+8]
+        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x75, 0x08])); // mov rsi, [r13+8]
 
         // call __cyg_profile_func_exit
         self.call_label("__cyg_profile_func_exit");

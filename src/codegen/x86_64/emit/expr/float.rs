@@ -30,17 +30,17 @@ impl Codegen {
         match ty {
             Type::Float => {
                 // movabs rax, 0x80000000; movq xmm1, rax; xorps xmm0, xmm1
-                self.emit_insn(&Insn::raw(&[0x48, 0xB8]));
-                self.emit_insn(&Insn::raw(&0x80000000u64.to_le_bytes()));
-                self.emit_insn(&Insn::raw(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
-                self.emit_insn(&Insn::raw(&[0x0F, 0x57, 0xC1]));
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB8]));
+                self.emit_insn(&Insn::raw_bytes(&0x80000000u64.to_le_bytes()));
+                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
+                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC1]));
             },
             _ => {
                 // movabs rax, 0x8000000000000000; movq xmm1, rax; xorpd xmm0, xmm1
-                self.emit_insn(&Insn::raw(&[0x48, 0xB8]));
-                self.emit_insn(&Insn::raw(&0x8000000000000000u64.to_le_bytes()));
-                self.emit_insn(&Insn::raw(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
-                self.emit_insn(&Insn::raw(&[0x66, 0x0F, 0x57, 0xC1]));
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB8]));
+                self.emit_insn(&Insn::raw_bytes(&0x8000000000000000u64.to_le_bytes()));
+                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
+                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x57, 0xC1]));
             },
         }
     }
@@ -68,9 +68,9 @@ impl Codegen {
         // cvttss2si/cvttsd2si dst, xmm0 (REX.W 64 位结果)
         let cvt_rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
         if is_double {
-            self.emit_insn(&Insn::raw(&[0xF2, cvt_rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
+            self.emit_insn(&Insn::raw_bytes(&[0xF2, cvt_rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
         } else {
-            self.emit_insn(&Insn::raw(&[0xF3, cvt_rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
+            self.emit_insn(&Insn::raw_bytes(&[0xF3, cvt_rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
         }
         // test dst, dst
         let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
@@ -96,7 +96,7 @@ impl Codegen {
             self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x5A, 0xC0], "cvtss2sd %xmm0, %xmm0"));
         }
         // subsd xmm0, xmm1 (double 精度减 2^63)
-        self.emit_insn(&Insn::raw(&[0xF2, 0x0F, 0x5C, 0xC1]));
+        self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x5C, 0xC1]));
         if !is_double {
             // float 情况: 减完后转回 float
             // cvtsd2ss xmm0, xmm0: F2 0F 5A C0
@@ -104,15 +104,15 @@ impl Codegen {
         }
         // cvttss2si/cvttsd2si dst, xmm0 (余数, 现在 fits in int64)
         if is_double {
-            self.emit_insn(&Insn::raw(&[0xF2, cvt_rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
+            self.emit_insn(&Insn::raw_bytes(&[0xF2, cvt_rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
         } else {
-            self.emit_insn(&Insn::raw(&[0xF3, cvt_rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
+            self.emit_insn(&Insn::raw_bytes(&[0xF3, cvt_rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)]));
         }
         // 加 2^63 整数校正
         self.mov_imm(scratch, 0x8000000000000000u64 as i128);
         // add dst, scratch: 01 /r (dst = r/m, scratch = reg)
         let add_rex = 0x48 | if scratch >= 8 { 0x04 } else { 0 } | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-        self.emit_insn(&Insn::raw(&[add_rex, 0x01, 0xC0 | ((scratch & 7) << 3) | (dst & 7)]));
+        self.emit_insn(&Insn::raw_bytes(&[add_rex, 0x01, 0xC0 | ((scratch & 7) << 3) | (dst & 7)]));
 
         self.label(&l_done);
     }
@@ -154,13 +154,13 @@ impl Codegen {
             // 只置一边就把另一个字段留在低 8 个寄存器上（读/写的都是别人的 %eax）。
             // <8 时一个前缀都不发：裸 0x40 什么都不扩，只多占一字节并被 objdump 标成 `rex mov`。
             if dst >= 8 {
-                self.emit_insn(&Insn::raw(&[0x45]));
+                self.emit_insn(&Insn::raw_bytes(&[0x45]));
             }
-            self.emit_insn(&Insn::raw(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+            self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
         } else {
             let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-            self.emit_insn(&Insn::raw(&[rex, 0x81, 0xE0 | (dst & 7)]));
-            self.emit_insn(&Insn::raw(&mask.to_le_bytes()));
+            self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xE0 | (dst & 7)]));
+            self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
         }
     }
     pub(crate) fn emit_truth_flags(&mut self, ty: &Type) {
@@ -172,42 +172,42 @@ impl Codegen {
                     // 32 位浮点分量位模式: 清符号位后按位 or (±0.0 → 0)。
                     // 不能用 eax 作目的地 — 32 位 load 零扩展会破坏 rax
                     // 中的槽地址, 后续 [rax+isz] 变成对实部位模式解引用。
-                    self.emit_insn(&Insn::raw(&[0x8B, 0x08])); // mov ecx, [rax] (实部)
-                    self.emit_insn(&Insn::raw(&[0x8B, 0x50, isz as u8])); // mov edx, [rax+isz]
-                    self.emit_insn(&Insn::raw(&[0x81, 0xE1, 0xFF, 0xFF, 0xFF, 0x7F]));
-                    self.emit_insn(&Insn::raw(&[0x81, 0xE2, 0xFF, 0xFF, 0xFF, 0x7F]));
-                    self.emit_insn(&Insn::raw(&[0x09, 0xD1])); // or ecx, edx
-                    self.emit_insn(&Insn::raw(&[0x85, 0xC9])); // test ecx, ecx
+                    self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x08])); // mov ecx, [rax] (实部)
+                    self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x50, isz as u8])); // mov edx, [rax+isz]
+                    self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE1, 0xFF, 0xFF, 0xFF, 0x7F]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE2, 0xFF, 0xFF, 0xFF, 0x7F]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x09, 0xD1])); // or ecx, edx
+                    self.emit_insn(&Insn::raw_bytes(&[0x85, 0xC9])); // test ecx, ecx
                 },
                 Type::Double | Type::LongDouble => {
-                    self.emit_insn(&Insn::raw(&[0x48, 0x8B, 0x08])); // mov rcx, [rax]
-                    self.emit_insn(&Insn::raw(&[0x48, 0x8B, 0x50, isz as u8])); // mov rdx, [rax+isz]
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x08])); // mov rcx, [rax]
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x50, isz as u8])); // mov rdx, [rax+isz]
                     self.mov_imm(0, 0x7FFF_FFFF_FFFF_FFFFi128); // rax = 符号掩码
-                    self.emit_insn(&Insn::raw(&[0x48, 0x21, 0xC1])); // and rcx, rax
-                    self.emit_insn(&Insn::raw(&[0x48, 0x21, 0xC2])); // and rdx, rax
-                    self.emit_insn(&Insn::raw(&[0x48, 0x09, 0xD1])); // or rcx, rdx
-                    self.emit_insn(&Insn::raw(&[0x48, 0x85, 0xC9])); // test rcx, rcx
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC1])); // and rcx, rax
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC2])); // and rdx, rax
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xD1])); // or rcx, rdx
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x85, 0xC9])); // test rcx, rcx
                 },
                 _ => {
                     // 整数分量: 任一分量非零即真。result_off 8 字节
                     // 对齐, ≤8 字节复数可一次整槽载入覆盖两分量。
                     match total {
                         16 => {
-                            self.emit_insn(&Insn::raw(&[0x48, 0x8B, 0x08])); // mov rcx, [rax]
-                            self.emit_insn(&Insn::raw(&[0x48, 0x0B, 0x48, isz as u8])); // or rcx, [rax+isz]
-                            self.emit_insn(&Insn::raw(&[0x48, 0x85, 0xC9])); // test rcx, rcx
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x08])); // mov rcx, [rax]
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0B, 0x48, isz as u8])); // or rcx, [rax+isz]
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x85, 0xC9])); // test rcx, rcx
                         },
                         8 => {
-                            self.emit_insn(&Insn::raw(&[0x48, 0x8B, 0x00])); // mov rax, [rax]
-                            self.emit_insn(&Insn::raw(&[0x48, 0x85, 0xC0]));
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x00])); // mov rax, [rax]
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x85, 0xC0]));
                         },
                         4 => {
-                            self.emit_insn(&Insn::raw(&[0x8B, 0x00])); // mov eax, [rax]
+                            self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x00])); // mov eax, [rax]
                             self.emit_insn(&Insn::raw_with_gas(&[0x85, 0xC0], "test %eax, %eax"));
                         },
                         _ => {
                             // total==2 (_Complex char 等)
-                            self.emit_insn(&Insn::raw(&[0x0F, 0xB7, 0x00])); // movzx eax, word [rax]
+                            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7, 0x00])); // movzx eax, word [rax]
                             self.emit_insn(&Insn::raw_with_gas(&[0x85, 0xC0], "test %eax, %eax"));
                         },
                     }
@@ -239,26 +239,26 @@ impl Codegen {
         // --- bit63=1: 值 >= 2^63 ---
         // shr dst, 1: 无符号除以 2 (清除 bit63)
         let shr_rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-        self.emit_insn(&Insn::raw(&[shr_rex, 0xD1, 0xE8 | (dst & 7)]));
+        self.emit_insn(&Insn::raw_bytes(&[shr_rex, 0xD1, 0xE8 | (dst & 7)]));
         // cvtsi2ss/sd xmm0, dst (REX.W 64 位操作数)
         let cvt_rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
         if is_double {
-            self.emit_insn(&Insn::raw(&[0xF2, cvt_rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]));
+            self.emit_insn(&Insn::raw_bytes(&[0xF2, cvt_rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]));
             // addsd xmm0, xmm0: 乘 2.0
-            self.emit_insn(&Insn::raw(&[0xF2, 0x0F, 0x58, 0xC0]));
+            self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x58, 0xC0]));
         } else {
-            self.emit_insn(&Insn::raw(&[0xF3, cvt_rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]));
+            self.emit_insn(&Insn::raw_bytes(&[0xF3, cvt_rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]));
             // addss xmm0, xmm0: 乘 2.0
-            self.emit_insn(&Insn::raw(&[0xF3, 0x0F, 0x58, 0xC0]));
+            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x58, 0xC0]));
         }
         self.jmp_rel32(&l_done, JumpKind::Jmp);
 
         // --- .pos: 正数路径 ---
         self.label(&l_pos);
         if is_double {
-            self.emit_insn(&Insn::raw(&[0xF2, cvt_rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]));
+            self.emit_insn(&Insn::raw_bytes(&[0xF2, cvt_rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]));
         } else {
-            self.emit_insn(&Insn::raw(&[0xF3, cvt_rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]));
+            self.emit_insn(&Insn::raw_bytes(&[0xF3, cvt_rex, 0x0F, 0x2A, 0xC0 | (dst & 7)]));
         }
 
         self.label(&l_done);
@@ -266,18 +266,18 @@ impl Codegen {
     pub(crate) fn emit_xmm_rax_disp(&mut self, pfx: u8, xmm: u8, off: i64) {
         let rex = if xmm >= 8 { Some(0x44) } else { None };
         if let Some(rex) = rex {
-            self.emit_insn(&Insn::raw(&[pfx, rex, 0x0F, 0x10]));
+            self.emit_insn(&Insn::raw_bytes(&[pfx, rex, 0x0F, 0x10]));
         } else {
-            self.emit_insn(&Insn::raw(&[pfx, 0x0F, 0x10]));
+            self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10]));
         }
         let reg = (xmm & 7) << 3;
         if off == 0 {
-            self.emit_insn(&Insn::raw(&[reg]));
+            self.emit_insn(&Insn::raw_bytes(&[reg]));
         } else if (-128..=127).contains(&off) {
-            self.emit_insn(&Insn::raw(&[0x40 | reg, off as i8 as u8]));
+            self.emit_insn(&Insn::raw_bytes(&[0x40 | reg, off as i8 as u8]));
         } else {
-            self.emit_insn(&Insn::raw(&[0x80 | reg]));
-            self.emit_insn(&Insn::raw(&(off as i32).to_le_bytes()));
+            self.emit_insn(&Insn::raw_bytes(&[0x80 | reg]));
+            self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
         }
     }
     pub(crate) fn emit_zero_extend(&mut self, dst: u8, src_ty: &Type) {
@@ -293,14 +293,14 @@ impl Codegen {
             // 只置一边就把另一个字段留在低 8 个寄存器上（读/写的都是别人的 %eax）。
             // <8 时一个前缀都不发：裸 0x40 什么都不扩，只多占一字节并被 objdump 标成 `rex mov`。
             if dst >= 8 {
-                self.emit_insn(&Insn::raw(&[0x45]));
+                self.emit_insn(&Insn::raw_bytes(&[0x45]));
             }
-            self.emit_insn(&Insn::raw(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+            self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
         } else {
             // and dst, imm32: REX.W 81 /4 id
             let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-            self.emit_insn(&Insn::raw(&[rex, 0x81, 0xE0 | (dst & 7)]));
-            self.emit_insn(&Insn::raw(&mask.to_le_bytes()));
+            self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xE0 | (dst & 7)]));
+            self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
         }
     }
     pub(crate) fn gen_float_binop(&mut self, op: BinOp, l: &Expr, r: &Expr) {
@@ -326,11 +326,11 @@ impl Codegen {
                 self.gen_expr(l, Self::EVAL_BASE); // st(0) = l
                 self.emit_operand_to_st0(&l.ty(), 0);
                 // 保存 st(0) 到栈临时区 (固定 16 字节: ld 要装 tbyte 且保持对齐)
-                self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xEC, 16])); // sub rsp, 16
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 16])); // sub rsp, 16
                 if is_long_double {
-                    self.emit_insn(&Insn::raw(&[0xDB, 0x3C, 0x24])); // fstp tbyte [rsp]
+                    self.emit_insn(&Insn::raw_bytes(&[0xDB, 0x3C, 0x24])); // fstp tbyte [rsp]
                 } else {
-                    self.emit_insn(&Insn::raw(&[0xDD, 0x1C, 0x24])); // fstp qword [rsp]
+                    self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x1C, 0x24])); // fstp qword [rsp]
                 }
                 self.expr_depth += 1;
                 self.gen_expr(r, Self::EVAL_BASE); // st(0) = r
@@ -340,22 +340,22 @@ impl Codegen {
                 // 交换: 需要 st(0) = l, st(1) = r 才能做 fdiv
                 // 先加载 l 到 st(0)
                 if is_long_double {
-                    self.emit_insn(&Insn::raw(&[0xDB, 0x2C, 0x24])); // fld tbyte [rsp]
+                    self.emit_insn(&Insn::raw_bytes(&[0xDB, 0x2C, 0x24])); // fld tbyte [rsp]
                 } else {
-                    self.emit_insn(&Insn::raw(&[0xDD, 0x04, 0x24])); // fld qword [rsp]
+                    self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x04, 0x24])); // fld qword [rsp]
                 }
                 // 现在 st(0) = l, st(1) = r
                 // 做 l/r
-                self.emit_insn(&Insn::raw(&[0xDE, 0xF9])); // fdivrp: st(1) = st(0)/st(1) = l/r, pop
+                self.emit_insn(&Insn::raw_bytes(&[0xDE, 0xF9])); // fdivrp: st(1) = st(0)/st(1) = l/r, pop
                                           // 现在 st(0) = l/r
                                           // trunc to int64
-                self.emit_insn(&Insn::raw(&[0xDF, 0x7C, 0x24, 0x00])); // fistp qword [rsp] (truncate to int64)
+                self.emit_insn(&Insn::raw_bytes(&[0xDF, 0x7C, 0x24, 0x00])); // fistp qword [rsp] (truncate to int64)
                                                       // 重新加载 r
-                self.emit_insn(&Insn::raw(&[0xDD, 0x04, 0x24])); // fld qword [rsp] -- 但已被 fistp 覆盖
+                self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x04, 0x24])); // fld qword [rsp] -- 但已被 fistp 覆盖
                                                 // 简化处理: 直接用 x87 做减法模拟 fmod
                                                 // 实际上内核很少用浮点取模, 这里先简单处理
                                                 // （C 的 `%` 本身不允许浮点操作数）
-                self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xC4, 16])); // add rsp, 16
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 16])); // add rsp, 16
                 self.emit_x87_fldz(); // 结果置 0 (简化处理)
                 return;
             }
@@ -365,11 +365,11 @@ impl Codegen {
                                  // 整数 / 宽浮点操作数经 Layer0 唯一入口搬到 st(0)
             self.emit_operand_to_st0(&l.ty(), 0);
             // 保存 l 到刚分配的 16 字节槽 (long double 用 tbyte, 否则 qword)
-            self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xEC, 16])); // sub rsp, 16
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 16])); // sub rsp, 16
             if is_long_double {
-                self.emit_insn(&Insn::raw(&[0xDB, 0x3C, 0x24])); // fstp tbyte [rsp]
+                self.emit_insn(&Insn::raw_bytes(&[0xDB, 0x3C, 0x24])); // fstp tbyte [rsp]
             } else {
-                self.emit_insn(&Insn::raw(&[0xDD, 0x1C, 0x24])); // fstp qword [rsp]
+                self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x1C, 0x24])); // fstp qword [rsp]
             }
             self.expr_depth += 1;
             self.gen_expr(r, Self::EVAL_BASE); // st(0) = r
@@ -377,21 +377,21 @@ impl Codegen {
             self.expr_depth -= 1;
             // 重新加载 l
             if is_long_double {
-                self.emit_insn(&Insn::raw(&[0xDB, 0x2C, 0x24])); // fld tbyte [rsp]
+                self.emit_insn(&Insn::raw_bytes(&[0xDB, 0x2C, 0x24])); // fld tbyte [rsp]
             } else {
-                self.emit_insn(&Insn::raw(&[0xDD, 0x04, 0x24])); // fld qword [rsp]
+                self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x04, 0x24])); // fld qword [rsp]
             }
-            self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xC4, 16])); // add rsp, 16
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 16])); // add rsp, 16
                                                 // 执行运算: st(0) = 左, st(1) = 右
                                                 // x87 的 fxxxp 是 st(1) op st(0), 然后 pop
                                                 // 当前: st(0) = l, st(1) = r
                                                 // 对于加法/乘法: 可交换, 直接做
                                                 // 对于减法/除法: 需要用反向版本 fsubrp/fdivrp
             match op {
-                BinOp::Add => { self.emit_insn(&Insn::raw(&[0xDE, 0xC1])); } // faddp: st(1) = st(1) + st(0), pop
-                BinOp::Mul => { self.emit_insn(&Insn::raw(&[0xDE, 0xC9])); } // fmulp: st(1) = st(1) * st(0), pop
-                BinOp::Sub => { self.emit_insn(&Insn::raw(&[0xDE, 0xE1])); } // fsubrp: st(1) = st(0) - st(1) = l - r, pop
-                BinOp::Div => { self.emit_insn(&Insn::raw(&[0xDE, 0xF1])); } // fdivrp: st(1) = st(0) / st(1) = l / r, pop
+                BinOp::Add => { self.emit_insn(&Insn::raw_bytes(&[0xDE, 0xC1])); } // faddp: st(1) = st(1) + st(0), pop
+                BinOp::Mul => { self.emit_insn(&Insn::raw_bytes(&[0xDE, 0xC9])); } // fmulp: st(1) = st(1) * st(0), pop
+                BinOp::Sub => { self.emit_insn(&Insn::raw_bytes(&[0xDE, 0xE1])); } // fsubrp: st(1) = st(0) - st(1) = l - r, pop
+                BinOp::Div => { self.emit_insn(&Insn::raw_bytes(&[0xDE, 0xF1])); } // fdivrp: st(1) = st(0) / st(1) = l / r, pop
                 _ => {},
             }
             // 结果在 st(0) (x87 约定)
@@ -407,28 +407,28 @@ impl Codegen {
             let save_bytes = (self.expr_depth as i32 + 1) * 8;
             self.gen_expr(l, Self::EVAL_BASE);
             self.emit_scalar_to_xmm0_if_needed(l, &float_ty);
-            self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xEC, save_bytes as u8]));
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, save_bytes as u8]));
             if is_float {
-                self.emit_insn(&Insn::raw(&[0xF3, 0x0F, 0x11, 0x04, 0x24])); // movss [rsp], xmm0
+                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x11, 0x04, 0x24])); // movss [rsp], xmm0
             } else {
-                self.emit_insn(&Insn::raw(&[0xF2, 0x0F, 0x11, 0x04, 0x24])); // movsd [rsp], xmm0
+                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x11, 0x04, 0x24])); // movsd [rsp], xmm0
             }
             self.expr_depth += 1;
             self.gen_expr(r, Self::EVAL_BASE);
             self.expr_depth -= 1;
             self.emit_scalar_to_xmm0_if_needed(r, &float_ty);
-            self.emit_insn(&Insn::raw(&[0x66, 0x0F, 0x28, 0xC8])); // movapd xmm1, xmm0 (r→xmm1)
+            self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x28, 0xC8])); // movapd xmm1, xmm0 (r→xmm1)
             if is_float {
-                self.emit_insn(&Insn::raw(&[0xF3, 0x0F, 0x10, 0x04, 0x24])); // movss xmm0, [rsp]
+                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x04, 0x24])); // movss xmm0, [rsp]
             } else {
-                self.emit_insn(&Insn::raw(&[0xF2, 0x0F, 0x10, 0x04, 0x24])); // movsd xmm0, [rsp]
+                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x10, 0x04, 0x24])); // movsd xmm0, [rsp]
             }
             // 现在 xmm0=l, xmm1=r, [rsp]=l, save_bytes 字节尚未归还
             // r = l / r  (divss/divsd)
             if is_float {
-                self.emit_insn(&Insn::raw(&[0xF3, 0x0F, 0x5E, 0xC1])); // divss xmm0, xmm1
+                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x5E, 0xC1])); // divss xmm0, xmm1
             } else {
-                self.emit_insn(&Insn::raw(&[0xF2, 0x0F, 0x5E, 0xC1])); // divsd xmm0, xmm1
+                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x5E, 0xC1])); // divsd xmm0, xmm1
             }
             // trunc 截断到 int64
             if is_float {
@@ -444,22 +444,22 @@ impl Codegen {
             }
             // n * r
             if is_float {
-                self.emit_insn(&Insn::raw(&[0xF3, 0x0F, 0x59, 0xC1])); // mulss xmm0, xmm1
+                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x59, 0xC1])); // mulss xmm0, xmm1
             } else {
-                self.emit_insn(&Insn::raw(&[0xF2, 0x0F, 0x59, 0xC1])); // mulsd xmm0, xmm1
+                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x59, 0xC1])); // mulsd xmm0, xmm1
             }
             // n*r 暂存 xmm1, l 回到 xmm0
-            self.emit_insn(&Insn::raw(&[0x66, 0x0F, 0x28, 0xC8])); // movapd xmm1, xmm0
+            self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x28, 0xC8])); // movapd xmm1, xmm0
             if is_float {
-                self.emit_insn(&Insn::raw(&[0xF3, 0x0F, 0x10, 0x04, 0x24])); // movss xmm0, [rsp]
+                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x04, 0x24])); // movss xmm0, [rsp]
             } else {
-                self.emit_insn(&Insn::raw(&[0xF2, 0x0F, 0x10, 0x04, 0x24])); // movsd xmm0, [rsp]
+                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x10, 0x04, 0x24])); // movsd xmm0, [rsp]
             }
             // xmm0 = l - n*r
             if is_float {
-                self.emit_insn(&Insn::raw(&[0xF3, 0x0F, 0x5C, 0xC1])); // subss xmm0, xmm1
+                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x5C, 0xC1])); // subss xmm0, xmm1
             } else {
-                self.emit_insn(&Insn::raw(&[0xF2, 0x0F, 0x5C, 0xC1])); // subsd xmm0, xmm1
+                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x5C, 0xC1])); // subsd xmm0, xmm1
             }
             self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x83, 0xC4, save_bytes as u8], &format!("add ${save_bytes}, %rsp")));
             return;
@@ -674,11 +674,11 @@ impl Codegen {
     }
     pub(crate) fn load_mem_xmm(&mut self, xmm: u8, elem_size: usize, is_float: bool) {
         if is_float {
-            self.emit_insn(&Insn::raw(&[0xF3, 0x0F, 0x10, ((xmm & 7) << 3)]));
+            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, ((xmm & 7) << 3)]));
         } else if elem_size == 8 {
-            self.emit_insn(&Insn::raw(&[0xF2, 0x0F, 0x10, ((xmm & 7) << 3)]));
+            self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x10, ((xmm & 7) << 3)]));
         } else {
-            self.emit_insn(&Insn::raw(&[0xF3, 0x0F, 0x10, ((xmm & 7) << 3)]));
+            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, ((xmm & 7) << 3)]));
         }
     }
     pub(crate) fn materialize_bits_to_slot(&mut self, e: &Expr, dst_off: i64) {
@@ -690,10 +690,10 @@ impl Codegen {
             return;
         }
         if self.gen_lvalue_addr(e, Self::EVAL_BASE) {
-            self.emit_insn(&Insn::raw(&[0x48, 0x89, 0xC6]));
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC6]));
             self.emit_lea_r13(7, dst_off);
             self.mov_imm(1, src_ty.size() as i128);
-            self.emit_insn(&Insn::raw(&[0xFC, 0xF3, 0xA4]));
+            self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4]));
             return;
         }
         self.gen_expr(e, Self::EVAL_BASE);
@@ -704,10 +704,10 @@ impl Codegen {
                 let sz = src_ty.size();
                 // rsi = source address (rax), rdi = destination address (r13 + dst_off)
                 // rcx = size in bytes
-                self.emit_insn(&Insn::raw(&[0x48, 0x89, 0xC6])); // mov rsi, rax
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC6])); // mov rsi, rax
                 self.emit_lea_r13(7, dst_off); // lea rdi, [r13 + dst_off]
                 self.mov_imm(1, sz as i128); // mov rcx, sz
-                self.emit_insn(&Insn::raw(&[0xFC, 0xF3, 0xA4])); // rep movsb
+                self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4])); // rep movsb
             },
             Type::Float => self.store_xmm32_stack(0, dst_off),
             Type::Double | Type::LongDouble => self.store_xmm64_stack(0, dst_off),
@@ -732,9 +732,9 @@ impl Codegen {
             rex |= 0x01; // REX.B
         }
         if rex != 0 {
-            self.emit_insn(&Insn::raw(&[0x40 | rex]));
+            self.emit_insn(&Insn::raw_bytes(&[0x40 | rex]));
         }
-        self.emit_insn(&Insn::raw(&[0x0F, 0x28, 0xC0 | ((dst & 7) << 3) | (src & 7)]));
+        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x28, 0xC0 | ((dst & 7) << 3) | (src & 7)]));
     }
     pub(crate) fn mov_xmm_to_xmm(&mut self, dst: u8, src: u8) {
         if dst == src {
@@ -748,7 +748,7 @@ impl Codegen {
             rex |= 0x01;
         }
         let modrm = 0xC0 | ((dst & 7) << 3) | (src & 7);
-        self.emit_insn(&Insn::raw(&[rex, 0x0F, 0x28, modrm]));
+        self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0x28, modrm]));
     }
     pub(crate) fn try_gen_fp_contract(&mut self, op: BinOp, l: &Expr, r: &Expr, dst: u8) -> bool {
         if !matches!(op, BinOp::Add | BinOp::Sub) {

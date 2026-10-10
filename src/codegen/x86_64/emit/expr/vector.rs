@@ -40,25 +40,25 @@ impl Codegen {
         let byte_off = (elem_idx * elem_size) as i64;
         if byte_off != 0 {
             if (-128..=127).contains(&byte_off) {
-                self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xC1, byte_off as u8]));
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC1, byte_off as u8]));
             } else {
-                self.emit_insn(&Insn::raw(&[0x48, 0x81, 0xC1]));
-                self.emit_insn(&Insn::raw(&(byte_off as i32).to_le_bytes()));
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xC1]));
+                self.emit_insn(&Insn::raw_bytes(&(byte_off as i32).to_le_bytes()));
             }
         }
         // mov [rcx], rax (按元素宽度)
         match elem_size {
             1 => {
-                self.emit_insn(&Insn::raw(&[0x88, 0x01]));
+                self.emit_insn(&Insn::raw_bytes(&[0x88, 0x01]));
             },
             2 => {
-                self.emit_insn(&Insn::raw(&[0x66, 0x89, 0x01]));
+                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x01]));
             },
             4 => {
-                self.emit_insn(&Insn::raw(&[0x89, 0x01]));
+                self.emit_insn(&Insn::raw_bytes(&[0x89, 0x01]));
             },
             _ => {
-                self.emit_insn(&Insn::raw(&[0x48, 0x89, 0x01]));
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x01]));
             },
         }
     }
@@ -219,8 +219,8 @@ impl Codegen {
             )
         {
             // SIMD 快速路径: 结果已写入 result_off, rax = &result[0]
-            self.emit_insn(&Insn::raw(&[0x49, 0x8D, 0x85]));
-            self.emit_insn(&Insn::raw(&(result_off as i32).to_le_bytes()));
+            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8D, 0x85]));
+            self.emit_insn(&Insn::raw_bytes(&(result_off as i32).to_le_bytes()));
             return;
         }
 
@@ -256,7 +256,7 @@ impl Codegen {
                     }
                     self.emit_sub_rsp(8);
                     let spfx: u8 = if is_float { 0xF3 } else { 0xF2 };
-                    self.emit_insn(&Insn::raw(&[spfx, 0x0F, 0x11, 0x04, 0x24]));
+                    self.emit_insn(&Insn::raw_bytes(&[spfx, 0x0F, 0x11, 0x04, 0x24]));
                     // 加载右操作数: 向量按元素取, 标量直接求值 (广播)
                     if r_is_vec {
                         self.gen_scalar_vector_load_sse(r, i, elem_size, is_float);
@@ -264,18 +264,18 @@ impl Codegen {
                         self.gen_expr(r, Self::EVAL_BASE);
                         self.emit_scalar_float_convert(&r.ty(), &elem_ty);
                     }
-                    self.emit_insn(&Insn::raw(&[spfx, 0x0F, 0x10, 0xC8])); // movss xmm1, xmm0
-                    self.emit_insn(&Insn::raw(&[spfx, 0x0F, 0x10, 0x04, 0x24])); // xmm0 = left
+                    self.emit_insn(&Insn::raw_bytes(&[spfx, 0x0F, 0x10, 0xC8])); // movss xmm1, xmm0
+                    self.emit_insn(&Insn::raw_bytes(&[spfx, 0x0F, 0x10, 0x04, 0x24])); // xmm0 = left
                     self.emit_add_rsp(8);
                     // xmm0=left, xmm1=right → cmp xmm0, xmm1, pred
-                    self.emit_insn(&Insn::raw(&[cmp_pfx, 0x0F, 0xC2, 0xC1, pred]));
-                    self.emit_insn(&Insn::raw(&[0x66, 0x48, 0x0F, 0x7E, 0xC0])); // movq rax, xmm0
+                    self.emit_insn(&Insn::raw_bytes(&[cmp_pfx, 0x0F, 0xC2, 0xC1, pred]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x7E, 0xC0])); // movq rax, xmm0
                     let off = result_off + (i * elem_size) as i64;
                     self.emit_store(0, off, elem_size);
                 }
                 self.vector_op_slot = saved_op_slot;
-                self.emit_insn(&Insn::raw(&[0x49, 0x8D, 0x85]));
-                self.emit_insn(&Insn::raw(&(result_off as i32).to_le_bytes()));
+                self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8D, 0x85]));
+                self.emit_insn(&Insn::raw_bytes(&(result_off as i32).to_le_bytes()));
                 return;
             }
             let (prefix, opcode) = match op {
@@ -296,9 +296,9 @@ impl Codegen {
                 }
                 self.emit_sub_rsp(8);
                 if is_float {
-                    self.emit_insn(&Insn::raw(&[0xF3, 0x0F, 0x11, 0x04, 0x24]));
+                    self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x11, 0x04, 0x24]));
                 } else {
-                    self.emit_insn(&Insn::raw(&[0xF2, 0x0F, 0x11, 0x04, 0x24]));
+                    self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x11, 0x04, 0x24]));
                 }
                 // 加载右操作数: 向量按元素取, 标量直接求值 (广播)
                 if r_is_vec {
@@ -309,17 +309,17 @@ impl Codegen {
                     self.emit_scalar_float_convert(&r.ty(), &elem_ty);
                 }
                 if is_float {
-                    self.emit_insn(&Insn::raw(&[0xF3, 0x0F, 0x10, 0xC8])); // movss xmm1, xmm0
+                    self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0xC8])); // movss xmm1, xmm0
                 } else {
-                    self.emit_insn(&Insn::raw(&[0xF2, 0x0F, 0x10, 0xC8])); // movsd xmm1, xmm0
+                    self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x10, 0xC8])); // movsd xmm1, xmm0
                 }
                 if is_float {
-                    self.emit_insn(&Insn::raw(&[0xF3, 0x0F, 0x10, 0x04, 0x24]));
+                    self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x04, 0x24]));
                 } else {
-                    self.emit_insn(&Insn::raw(&[0xF2, 0x0F, 0x10, 0x04, 0x24]));
+                    self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x10, 0x04, 0x24]));
                 }
                 self.emit_add_rsp(8);
-                self.emit_insn(&Insn::raw(&[prefix, 0x0F, opcode, 0xC1])); // xmm0 = left op right
+                self.emit_insn(&Insn::raw_bytes(&[prefix, 0x0F, opcode, 0xC1])); // xmm0 = left op right
                 self.store_vector_elem_xmm(
                     0,
                     result_off + (i * elem_size) as i64,
@@ -328,8 +328,8 @@ impl Codegen {
                 );
             }
             self.vector_op_slot = saved_op_slot;
-            self.emit_insn(&Insn::raw(&[0x49, 0x8D, 0x85]));
-            self.emit_insn(&Insn::raw(&(result_off as i32).to_le_bytes()));
+            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8D, 0x85]));
+            self.emit_insn(&Insn::raw_bytes(&(result_off as i32).to_le_bytes()));
             return;
         }
         // __int128 / 16-byte 整数元素: GP 寄存器无法承载, 用 XMM 处理
@@ -348,8 +348,8 @@ impl Codegen {
                 r_is_vec,
                 saved_op_slot,
             );
-            self.emit_insn(&Insn::raw(&[0x49, 0x8D, 0x85]));
-            self.emit_insn(&Insn::raw(&(result_off as i32).to_le_bytes()));
+            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8D, 0x85]));
+            self.emit_insn(&Insn::raw_bytes(&(result_off as i32).to_le_bytes()));
             return;
         }
         for i in 0..count {
@@ -362,28 +362,28 @@ impl Codegen {
             } else {
                 self.gen_expr(l, Self::EVAL_BASE);
             }
-            self.emit_insn(&Insn::raw(&[0x50])); // push rax (暂存 l 值)
+            self.emit_insn(&Insn::raw_bytes(&[0x50])); // push rax (暂存 l 值)
                                 // 加载右操作数: 向量按元素取, 标量直接求值 (广播)
             if r_is_vec {
                 self.gen_scalar_vector_load(r, i, elem_size);
             } else {
                 self.gen_expr(r, Self::EVAL_BASE);
             }
-            self.emit_insn(&Insn::raw(&[0x59])); // pop rcx (恢复 l 值)
+            self.emit_insn(&Insn::raw_bytes(&[0x59])); // pop rcx (恢复 l 值)
             match op {
                 BinOp::Add => {
-                    self.emit_insn(&Insn::raw(&[0x48, 0x01, 0xC1]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xC1]));
                 },
                 BinOp::Sub => {
-                    self.emit_insn(&Insn::raw(&[0x48, 0x29, 0xC1]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x29, 0xC1]));
                 },
                 BinOp::Mul => {
-                    self.emit_insn(&Insn::raw(&[0x48, 0x0F, 0xAF, 0xC8]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xAF, 0xC8]));
                 }, // imul rcx, rax
                 BinOp::Div | BinOp::Mod => {
                     // 整数除法: xchg 后 rax=被除数, rcx=除数
                     let is_mod = matches!(op, BinOp::Mod);
-                    self.emit_insn(&Insn::raw(&[0x48, 0x91])); // xchg rax, rcx
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x91])); // xchg rax, rcx
                     let signed = matches!(
                         elem_ty,
                         Type::SChar
@@ -396,38 +396,38 @@ impl Codegen {
                     match elem_size {
                         8 => {
                             if signed {
-                                self.emit_insn(&Insn::raw(&[0x48, 0x99])); // cqo
-                                self.emit_insn(&Insn::raw(&[0x48, 0xF7, 0xF9])); // idiv rcx
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x99])); // cqo
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xF9])); // idiv rcx
                             } else {
-                                self.emit_insn(&Insn::raw(&[0x48, 0x31, 0xD2])); // xor rdx, rdx
-                                self.emit_insn(&Insn::raw(&[0x48, 0xF7, 0xF1])); // div rcx
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2])); // xor rdx, rdx
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xF1])); // div rcx
                             }
                         },
                         4 => {
                             if signed {
-                                self.emit_insn(&Insn::raw(&[0x99])); // cdq
-                                self.emit_insn(&Insn::raw(&[0xF7, 0xF9])); // idiv ecx
+                                self.emit_insn(&Insn::raw_bytes(&[0x99])); // cdq
+                                self.emit_insn(&Insn::raw_bytes(&[0xF7, 0xF9])); // idiv ecx
                             } else {
-                                self.emit_insn(&Insn::raw(&[0x31, 0xD2])); // xor edx, edx
-                                self.emit_insn(&Insn::raw(&[0xF7, 0xF1])); // div ecx
+                                self.emit_insn(&Insn::raw_bytes(&[0x31, 0xD2])); // xor edx, edx
+                                self.emit_insn(&Insn::raw_bytes(&[0xF7, 0xF1])); // div ecx
                             }
                         },
                         2 => {
                             if signed {
-                                self.emit_insn(&Insn::raw(&[0x66, 0x99])); // cwd
-                                self.emit_insn(&Insn::raw(&[0x66, 0xF7, 0xF9])); // idiv cx
+                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x99])); // cwd
+                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0xF7, 0xF9])); // idiv cx
                             } else {
-                                self.emit_insn(&Insn::raw(&[0x31, 0xD2])); // xor edx, edx
-                                self.emit_insn(&Insn::raw(&[0x66, 0xF7, 0xF1])); // div cx
+                                self.emit_insn(&Insn::raw_bytes(&[0x31, 0xD2])); // xor edx, edx
+                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0xF7, 0xF1])); // div cx
                             }
                         },
                         _ => {
                             if signed {
-                                self.emit_insn(&Insn::raw(&[0x66, 0x98])); // cbw
-                                self.emit_insn(&Insn::raw(&[0xF6, 0xF9])); // idiv cl
+                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x98])); // cbw
+                                self.emit_insn(&Insn::raw_bytes(&[0xF6, 0xF9])); // idiv cl
                             } else {
-                                self.emit_insn(&Insn::raw(&[0x31, 0xD2])); // xor edx, edx
-                                self.emit_insn(&Insn::raw(&[0xF6, 0xF1])); // div cl
+                                self.emit_insn(&Insn::raw_bytes(&[0x31, 0xD2])); // xor edx, edx
+                                self.emit_insn(&Insn::raw_bytes(&[0xF6, 0xF1])); // div cl
                             }
                         },
                     }
@@ -435,42 +435,42 @@ impl Codegen {
                         if elem_size == 1 {
                             // 8 位除法余数在 ah (非 rdx): ror rax,8
                             // 后取低字节
-                            self.emit_insn(&Insn::raw(&[0x48, 0xC1, 0xC8, 0x08])); // ror rax, 8
-                            self.emit_insn(&Insn::raw(&[0x48, 0x89, 0xC1])); // mov rcx, rax
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xC8, 0x08])); // ror rax, 8
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC1])); // mov rcx, rax
                         } else {
                             // 余数在 rdx, 移到 rcx
-                            self.emit_insn(&Insn::raw(&[0x48, 0x89, 0xD1])); // mov rcx, rdx
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xD1])); // mov rcx, rdx
                         }
                     } else {
                         self.mov(1, 0); // rcx = 商 (rax)
                     }
                 },
                 BinOp::Xor => {
-                    self.emit_insn(&Insn::raw(&[0x48, 0x31, 0xC1])); // xor rcx, rax
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xC1])); // xor rcx, rax
                 },
                 BinOp::And => {
-                    self.emit_insn(&Insn::raw(&[0x48, 0x21, 0xC1])); // and rcx, rax
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xC1])); // and rcx, rax
                 },
                 BinOp::Or => {
-                    self.emit_insn(&Insn::raw(&[0x48, 0x09, 0xC1])); // or rcx, rax
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xC1])); // or rcx, rax
                 },
                 BinOp::Shl | BinOp::Shr => {
                     // rcx=l_val, rax=r_val. x86 shift: shl/sar r/m, cl
                     // xchg -> rax=l, rcx=r; shift rax by cl; mov rcx,rax
-                    self.emit_insn(&Insn::raw(&[0x48, 0x91])); // xchg rax, rcx
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x91])); // xchg rax, rcx
                     let signed = matches!(
                         elem_ty,
                         Type::SChar | Type::Short | Type::Int | Type::Long | Type::LongLong
                     );
                     match op {
                         BinOp::Shl => {
-                            self.emit_insn(&Insn::raw(&[0x48, 0xD3, 0xE0])); // shl rax, cl
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, 0xE0])); // shl rax, cl
                         },
                         BinOp::Shr if signed => {
-                            self.emit_insn(&Insn::raw(&[0x48, 0xD3, 0xF8])); // sar rax, cl
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, 0xF8])); // sar rax, cl
                         },
                         BinOp::Shr => {
-                            self.emit_insn(&Insn::raw(&[0x48, 0xD3, 0xE8])); // shr rax, cl (unsigned)
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, 0xE8])); // shr rax, cl (unsigned)
                         },
                         _ => unreachable!(),
                     }
@@ -489,7 +489,7 @@ impl Codegen {
                             | Type::Int128
                     );
                     // rcx=left, rax=right → cmp rcx, rax
-                    self.emit_insn(&Insn::raw(&[0x48, 0x39, 0xC1]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x39, 0xC1]));
                     let setcc: u8 = match op {
                         BinOp::EqEq => 0x94,
                         BinOp::Ne => 0x95,
@@ -522,13 +522,13 @@ impl Codegen {
                             }
                         },
                     };
-                    self.emit_insn(&Insn::raw(&[0x0F, setcc, 0xC0])); // setcc al
-                    self.emit_insn(&Insn::raw(&[0x48, 0x0F, 0xB6, 0xC0])); // movzx rax, al
-                    self.emit_insn(&Insn::raw(&[0x48, 0xF7, 0xD8])); // neg rax (0/1 → 0/all-ones)
+                    self.emit_insn(&Insn::raw_bytes(&[0x0F, setcc, 0xC0])); // setcc al
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB6, 0xC0])); // movzx rax, al
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xD8])); // neg rax (0/1 → 0/all-ones)
                     self.mov(1, 0); // rcx = 结果 (循环尾统一存 rcx)
                 },
                 _ => {
-                    self.emit_insn(&Insn::raw(&[0x48, 0x01, 0xC1]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x01, 0xC1]));
                 },
             }
             let off = result_off + (i * elem_size) as i64;
@@ -538,8 +538,8 @@ impl Codegen {
         self.vector_op_slot = saved_op_slot;
         // rax = &result[0]: 聚合/向量返回值需要调用者能拿到结果地址
         // (gen_expr → gen_sret_return 兜底分支用 rax 作为 rep movsq 源指针)
-        self.emit_insn(&Insn::raw(&[0x49, 0x8D, 0x85]));
-        self.emit_insn(&Insn::raw(&(result_off as i32).to_le_bytes()));
+        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8D, 0x85]));
+        self.emit_insn(&Insn::raw_bytes(&(result_off as i32).to_le_bytes()));
     }
     pub(crate) fn gen_vector_init_rvalue(
         &mut self,
@@ -562,7 +562,7 @@ impl Codegen {
                 self.emit_scalar_to_xmm0_if_needed(v, elem_ty);
             } else {
                 if matches!(elem_ty, Type::Float | Type::Double) {
-                    self.emit_insn(&Insn::raw(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0
+                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0
                 } else {
                     self.mov_imm(0, 0);
                 }
@@ -574,7 +574,7 @@ impl Codegen {
             } else if elem_size == 16 {
                 // 128-bit 元素 (__int128/__uint128): rax=低64, rdx=高64
                 // 若来自 InitList 的标量 (如 0), 需确保 rdx=0
-                self.emit_insn(&Insn::raw(&[0x48, 0x31, 0xD2])); // xor rdx, rdx (安全覆盖垃圾高字节)
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2])); // xor rdx, rdx (安全覆盖垃圾高字节)
                 self.store_stack(0, off);
                 self.store_stack(2, off + 8);
             } else {
@@ -659,11 +659,11 @@ impl Codegen {
                 // vector lvalue: 取地址后整块拷贝到临时槽
                 // (不能回退 gen_expr: 会递归回本函数)
                 if self.gen_lvalue_addr(e, Self::EVAL_BASE) {
-                    self.emit_insn(&Insn::raw(&[0x48, 0x89, 0xC6])); // mov rsi, rax
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC6])); // mov rsi, rax
                     self.emit_lea_r13(7, temp_off); // rdi = 临时槽
                     self.mov_imm(1, vec_size as i128);
-                    self.emit_insn(&Insn::raw(&[0xFC])); // cld
-                    self.emit_insn(&Insn::raw(&[0xF3, 0xA4])); // rep movsb
+                    self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
+                    self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
                 }
             },
             Expr::Call { .. } => {
@@ -681,11 +681,11 @@ impl Codegen {
             _ => {
                 self.gen_expr(e, Self::EVAL_BASE);
                 let total_bytes = elem_size * count;
-                self.emit_insn(&Insn::raw(&[0x48, 0x89, 0xC6])); // mov rsi, rax
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC6])); // mov rsi, rax
                 self.emit_lea_r13(7, temp_off); // rdi = 临时区
                 self.mov_imm(1, total_bytes as i128);
-                self.emit_insn(&Insn::raw(&[0xFC])); // cld
-                self.emit_insn(&Insn::raw(&[0xF3, 0xA4])); // rep movsb
+                self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
+                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
             },
         }
     }
@@ -714,12 +714,12 @@ impl Codegen {
             if is_float_elem || is_double_elem {
                 self.load_stack_xmm(0, src_off, elem_size, is_float_elem);
             } else {
-                self.emit_insn(&Insn::raw(&[0x49, 0x8D])); // lea rax, [r13 + src_off]
+                self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8D])); // lea rax, [r13 + src_off]
                 if src_off.abs() < 128 {
-                    self.emit_insn(&Insn::raw(&[0x45, src_off as i8 as u8]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x45, src_off as i8 as u8]));
                 } else {
-                    self.emit_insn(&Insn::raw(&[0x85]));
-                    self.emit_insn(&Insn::raw(&(src_off as i32).to_le_bytes()));
+                    self.emit_insn(&Insn::raw_bytes(&[0x85]));
+                    self.emit_insn(&Insn::raw_bytes(&(src_off as i32).to_le_bytes()));
                 }
                 self.emit_load_mem(elem_size);
             }
@@ -768,30 +768,30 @@ impl Codegen {
         let result_off = self.vector_temp_base(result_slot, vec_size);
         if self.gen_lvalue_addr(e, Self::EVAL_BASE) {
             // 保存源地址到 rcx (后续 load/store 会破坏 rax)
-            self.emit_insn(&Insn::raw(&[0x48, 0x89, 0xC1])); // mov rcx, rax
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC1])); // mov rcx, rax
         } else {
             // rvalue 内层 (如 -(-a)): 物化到更深的槽, 逐元素从那里读
             self.gen_vector_load_into_slot(e, result_slot + 1);
             let src_off = self.vector_temp_base(result_slot + 1, vec_size);
             self.emit_lea_r13(6, src_off); // rsi = 源
-            self.emit_insn(&Insn::raw(&[0x48, 0x89, 0xF1])); // mov rcx, rsi
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xF1])); // mov rcx, rsi
         }
         for i in 0..count {
             let off = (i * elem_size) as i64;
             // 加载元素到 rax: 从 [rcx+off]
             if (-128..128).contains(&off) {
-                self.emit_insn(&Insn::raw(&[0x48, 0x8B, 0x41, off as u8])); // mov rax, [rcx+disp8]
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x41, off as u8])); // mov rax, [rcx+disp8]
             } else {
-                self.emit_insn(&Insn::raw(&[0x48, 0x8B, 0x81])); // mov rax, [rcx+disp32]
-                self.emit_insn(&Insn::raw(&(off as i32).to_le_bytes()));
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x81])); // mov rax, [rcx+disp32]
+                self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
             }
             // 应用操作
             match op {
                 UnOp::Neg => {
-                    self.emit_insn(&Insn::raw(&[0x48, 0xf7, 0xd8])); // neg rax
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xf7, 0xd8])); // neg rax
                 },
                 UnOp::BitNot => {
-                    self.emit_insn(&Insn::raw(&[0x48, 0xf7, 0xd0])); // not rax
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xf7, 0xd0])); // not rax
                 },
                 _ => {},
             }
@@ -848,7 +848,7 @@ impl Codegen {
                 BinOp::Div => 0x5E,
                 _ => return false,
             };
-            self.emit_insn(&Insn::raw(&[0x0F, opcode, 0xC1])); // addps/subps/mulps/divps xmm0, xmm1
+            self.emit_insn(&Insn::raw_bytes(&[0x0F, opcode, 0xC1])); // addps/subps/mulps/divps xmm0, xmm1
         } else if is_double {
             // packed double: addpd=0x58, subpd=0x5C, mulpd=0x59, divpd=0x5E
             let opcode = match op {
@@ -858,46 +858,46 @@ impl Codegen {
                 BinOp::Div => 0x5E,
                 _ => return false,
             };
-            self.emit_insn(&Insn::raw(&[0x66, 0x0F, opcode, 0xC1])); // addpd/subpd/mulpd/divpd xmm0, xmm1
+            self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, opcode, 0xC1])); // addpd/subpd/mulpd/divpd xmm0, xmm1
         } else {
             // 整数向量: SSE2 packed integer
             match (elem_size, op) {
                 (4, BinOp::Add) => {
-                    self.emit_insn(&Insn::raw(&[0x66, 0x0F, 0xFE, 0xC1])); // paddd xmm0, xmm1
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xFE, 0xC1])); // paddd xmm0, xmm1
                 },
                 (4, BinOp::Sub) => {
-                    self.emit_insn(&Insn::raw(&[0x66, 0x0F, 0xFA, 0xC1])); // psubd xmm0, xmm1
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xFA, 0xC1])); // psubd xmm0, xmm1
                 },
                 (4, BinOp::Mul) => {
                     // pmulld: SSE4.1 66 0F 38 40 /r
-                    self.emit_insn(&Insn::raw(&[0x66, 0x0F, 0x38, 0x40, 0xC1])); // pmulld xmm0, xmm1
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x38, 0x40, 0xC1])); // pmulld xmm0, xmm1
                 },
                 (8, BinOp::Add) => {
-                    self.emit_insn(&Insn::raw(&[0x66, 0x0F, 0xD4, 0xC1])); // paddq xmm0, xmm1
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xD4, 0xC1])); // paddq xmm0, xmm1
                 },
                 (8, BinOp::Sub) => {
-                    self.emit_insn(&Insn::raw(&[0x66, 0x0F, 0xFB, 0xC1])); // psubq xmm0, xmm1
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xFB, 0xC1])); // psubq xmm0, xmm1
                 },
                 (2, BinOp::Add) => {
-                    self.emit_insn(&Insn::raw(&[0x66, 0x0F, 0xFD, 0xC1])); // paddw xmm0, xmm1
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xFD, 0xC1])); // paddw xmm0, xmm1
                 },
                 (2, BinOp::Sub) => {
-                    self.emit_insn(&Insn::raw(&[0x66, 0x0F, 0xF9, 0xC1])); // psubw xmm0, xmm1
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xF9, 0xC1])); // psubw xmm0, xmm1
                 },
                 (1, BinOp::Add) => {
-                    self.emit_insn(&Insn::raw(&[0x66, 0x0F, 0xFC, 0xC1])); // paddb xmm0, xmm1
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xFC, 0xC1])); // paddb xmm0, xmm1
                 },
                 (1, BinOp::Sub) => {
-                    self.emit_insn(&Insn::raw(&[0x66, 0x0F, 0xF8, 0xC1])); // psubb xmm0, xmm1
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xF8, 0xC1])); // psubb xmm0, xmm1
                 },
                 (_, BinOp::And) => {
-                    self.emit_insn(&Insn::raw(&[0x66, 0x0F, 0xDB, 0xC1])); // pand xmm0, xmm1
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xDB, 0xC1])); // pand xmm0, xmm1
                 },
                 (_, BinOp::Or) => {
-                    self.emit_insn(&Insn::raw(&[0x66, 0x0F, 0xEB, 0xC1])); // por xmm0, xmm1
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xEB, 0xC1])); // por xmm0, xmm1
                 },
                 (_, BinOp::Xor) => {
-                    self.emit_insn(&Insn::raw(&[0x66, 0x0F, 0xEF, 0xC1])); // pxor xmm0, xmm1
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xEF, 0xC1])); // pxor xmm0, xmm1
                 },
                 _ => return false, // 不支持的组合回退标量路径
             }

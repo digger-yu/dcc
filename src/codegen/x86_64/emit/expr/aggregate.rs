@@ -32,14 +32,14 @@ impl Codegen {
         match ty {
             Type::Void => {},
             Type::Float | Type::Double | Type::LongDouble => {
-                self.emit_insn(&Insn::raw(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0
+                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0
                 if dst != 0 {
                     self.mov_imm(dst, 0);
                 }
             },
             Type::Complex(inner) if matches!(&inner.base, Type::Float | Type::Double) => {
-                self.emit_insn(&Insn::raw(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0
-                self.emit_insn(&Insn::raw(&[0x0F, 0x57, 0xC9])); // xorps xmm1, xmm1
+                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0, xmm0
+                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC9])); // xorps xmm1, xmm1
                 let result_off = self.complex_result_off();
                 let pfx = if matches!(&inner.base, Type::Float) {
                     0xF3u8
@@ -94,8 +94,8 @@ impl Codegen {
         } else {
             self.mov_imm(1, es.max(1) as i128);
         }
-        self.emit_insn(&Insn::raw(&[0xFC])); // cld
-        self.emit_insn(&Insn::raw(&[0xF3, 0xA4])); // rep movsb
+        self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
+        self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
     }
     /// 聚合**形态**判据: 结构体/联合体/数组/原子/向量。与「值模型」判据
     /// [`Self::value_is_whole_copy`] 分开, 两者一起构成聚合赋值分发的全部知识,
@@ -523,8 +523,8 @@ impl Codegen {
                             self.emit_scalar_to_xmm0_if_needed_ty(&si, &inner.base);
                             if staged_dst {
                                 // movss/movsd [rcx + disp8], xmm0
-                                self.emit_insn(&Insn::raw(&[spfx, 0x0F, 0x11, 0x41]));
-                                self.emit_insn(&Insn::raw(&[(part * d_isz) as u8]));
+                                self.emit_insn(&Insn::raw_bytes(&[spfx, 0x0F, 0x11, 0x41]));
+                                self.emit_insn(&Insn::raw_bytes(&[(part * d_isz) as u8]));
                             } else {
                                 self.gen_float_store_at(dst_off + part * d_isz, &inner.base);
                             }
@@ -573,24 +573,24 @@ impl Codegen {
                                         );
                                     }
                                     // cvttsd2si rax, xmm0
-                                    self.emit_insn(&Insn::raw(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]));
+                                    self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]));
                                     if isz == 4 {
-                                        self.emit_insn(&Insn::raw(&[0x89, 0x01])); // mov [rcx], eax
+                                        self.emit_insn(&Insn::raw_bytes(&[0x89, 0x01])); // mov [rcx], eax
                                     } else {
-                                        self.emit_insn(&Insn::raw(&[0x48, 0x89, 0x01])); // mov [rcx], rax
+                                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x01])); // mov [rcx], rax
                                     }
                                     if src_complex {
                                         let si = src_inner.clone().unwrap();
                                         self.gen_complex_imag_into_xmm0(r, &si);
                                     } else {
-                                        self.emit_insn(&Insn::raw(&[0x0F, 0x57, 0xC0])); // xorps xmm0
+                                        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0
                                     }
-                                    self.emit_insn(&Insn::raw(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]));
+                                    self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]));
                                     if isz == 4 {
-                                        self.emit_insn(&Insn::raw(&[0x89, 0x41, isz as u8]));
+                                        self.emit_insn(&Insn::raw_bytes(&[0x89, 0x41, isz as u8]));
                                     } else {
-                                        self.emit_insn(&Insn::raw(&[0x48, 0x89, 0x41]));
-                                        self.emit_insn(&Insn::raw(&(isz as i32).to_le_bytes()));
+                                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x41]));
+                                        self.emit_insn(&Insn::raw_bytes(&(isz as i32).to_le_bytes()));
                                     }
                                 }
                             }
@@ -640,15 +640,15 @@ impl Codegen {
                                     self.emit_xmm0_r13_disp(&[rpfx, 0x41, 0x0F, 0x10], result_off);
                                 }
                                 // cvttsd2si rax, xmm0
-                                self.emit_insn(&Insn::raw(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]));
+                                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]));
                                 self.emit_store(0, dst_off, isz as usize);
                                 if src_complex {
                                     let si = src_inner.clone().unwrap();
                                     self.gen_complex_imag_into_xmm0(r, &si);
                                 } else {
-                                    self.emit_insn(&Insn::raw(&[0x0F, 0x57, 0xC0])); // xorps xmm0
+                                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC0])); // xorps xmm0
                                 }
-                                self.emit_insn(&Insn::raw(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]));
+                                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]));
                                 self.emit_store(0, dst_off + isz, isz as usize);
                             }
                         }
@@ -676,10 +676,10 @@ impl Codegen {
                             if matches!(r.ty(), Type::Float | Type::Double | Type::LongDouble) {
                                 // 浮点标量源: gen_expr 后值在 xmm0,
                                 // 先 cvttsd2si 截断为整数 (rax 未定义)
-                                self.emit_insn(&Insn::raw(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]));
+                                self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0]));
                             }
                             self.emit_store(0, result_off, scalar_isz);
-                            self.emit_insn(&Insn::raw(&[0x48, 0x31, 0xC0])); // xor rax, rax
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xC0])); // xor rax, rax
                             self.emit_store(0, result_off + scalar_isz as i64, scalar_isz);
                         }
                         let dst_isz = inner.size();
@@ -694,14 +694,14 @@ impl Codegen {
                             let qwords = sz / 8;
                             let remainder = sz % 8;
                             if qwords > 0 {
-                                self.emit_insn(&Insn::raw(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32
-                                self.emit_insn(&Insn::raw(&(qwords as u32).to_le_bytes()));
-                                self.emit_insn(&Insn::raw(&[0xF3, 0x48, 0xA5])); // rep movsq
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32
+                                self.emit_insn(&Insn::raw_bytes(&(qwords as u32).to_le_bytes()));
+                                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x48, 0xA5])); // rep movsq
                             }
                             if remainder > 0 {
-                                self.emit_insn(&Insn::raw(&[0x48, 0xC7, 0xC1]));
-                                self.emit_insn(&Insn::raw(&(remainder as u32).to_le_bytes()));
-                                self.emit_insn(&Insn::raw(&[0xF3, 0xA4])); // rep movsb
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1]));
+                                self.emit_insn(&Insn::raw_bytes(&(remainder as u32).to_le_bytes()));
+                                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
                             }
                         } else {
                             // 跨宽分量转换 (C99 6.3.1.7): 实/虚部分别转换后
@@ -731,14 +731,14 @@ impl Codegen {
                             let qwords = sz / 8;
                             let remainder = sz % 8;
                             if qwords > 0 {
-                                self.emit_insn(&Insn::raw(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32
-                                self.emit_insn(&Insn::raw(&(qwords as u32).to_le_bytes()));
-                                self.emit_insn(&Insn::raw(&[0xF3, 0x48, 0xA5])); // rep movsq
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32
+                                self.emit_insn(&Insn::raw_bytes(&(qwords as u32).to_le_bytes()));
+                                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x48, 0xA5])); // rep movsq
                             }
                             if remainder > 0 {
-                                self.emit_insn(&Insn::raw(&[0x48, 0xC7, 0xC1]));
-                                self.emit_insn(&Insn::raw(&(remainder as u32).to_le_bytes()));
-                                self.emit_insn(&Insn::raw(&[0xF3, 0xA4])); // rep movsb
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1]));
+                                self.emit_insn(&Insn::raw_bytes(&(remainder as u32).to_le_bytes()));
+                                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
                             }
                         }
                         // 赋值表达式值 = 左值转换后的值: result_off 已含
@@ -811,21 +811,21 @@ impl Codegen {
                 self.gen_sizeof_runtime(dst_ty, 11);
                 self.mov(1, 11);
             }
-            self.emit_insn(&Insn::raw(&[0xFC])); // cld
-            self.emit_insn(&Insn::raw(&[0xF3, 0xA4])); // rep movsb
+            self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
+            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
             return;
         }
         let qwords = sz / 8;
         let remainder = sz % 8;
         if qwords > 0 {
-            self.emit_insn(&Insn::raw(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32 (qwords)
-            self.emit_insn(&Insn::raw(&(qwords as u32).to_le_bytes()));
-            self.emit_insn(&Insn::raw(&[0xF3, 0x48, 0xA5])); // rep movsq
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32 (qwords)
+            self.emit_insn(&Insn::raw_bytes(&(qwords as u32).to_le_bytes()));
+            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x48, 0xA5])); // rep movsq
         }
         if remainder > 0 {
-            self.emit_insn(&Insn::raw(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32 (remainder)
-            self.emit_insn(&Insn::raw(&(remainder as u32).to_le_bytes()));
-            self.emit_insn(&Insn::raw(&[0xF3, 0xA4])); // rep movsb
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32 (remainder)
+            self.emit_insn(&Insn::raw_bytes(&(remainder as u32).to_le_bytes()));
+            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
         }
     }
     pub(crate) fn gen_init_list(&mut self, var_name: &str, ty: &Type, inits: &[InitItem]) {
@@ -1250,41 +1250,41 @@ impl Codegen {
                         // 生成初始化值 → rax
                         self.gen_expr(value, Self::EVAL_BASE);
                         // 保存值到栈临时槽: [r13-40]
-                        self.emit_insn(&Insn::raw(&[0x49, 0x89, 0x45, 0xd8])); // mov [r13-40], rax
+                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x45, 0xd8])); // mov [r13-40], rax
                                                               // 用 mov rax, r13 + add rax, imm32 计算地址, 保存到 [r13-24]
-                        self.emit_insn(&Insn::raw(&[0x49, 0x8B, 0xC5])); // mov rax, r13 (REX.W: 49 8B C5)
+                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0xC5])); // mov rax, r13 (REX.W: 49 8B C5)
                         if store_off != 0 {
                             let gas = format!("add ${}, %rax", store_off);
                             let mut bytes = vec![0x48, 0x05];
                             bytes.extend_from_slice(&(store_off as i32).to_le_bytes());
                             self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
                         }
-                        self.emit_insn(&Insn::raw(&[0x49, 0x89, 0x45, 0xe8])); // mov [r13-24], rax
+                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x45, 0xe8])); // mov [r13-24], rax
                                                               // 加载容器值 → rax
                         match container_size {
-                            4 => { self.emit_insn(&Insn::raw(&[0x8B, 0x00])); },       // mov eax, [rax]
-                            8 => { self.emit_insn(&Insn::raw(&[0x48, 0x8B, 0x00])); }, // mov rax, [rax]
+                            4 => { self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x00])); },       // mov eax, [rax]
+                            8 => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x00])); }, // mov rax, [rax]
                             2 => {
-                                self.emit_insn(&Insn::raw(&[0x66, 0x8B, 0x00]));
-                                self.emit_insn(&Insn::raw(&[0x48, 0x0F, 0xB7, 0xC0]));
+                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x00]));
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB7, 0xC0]));
                             },
-                            1 => { self.emit_insn(&Insn::raw(&[0x0F, 0xB6, 0x00])); },
+                            1 => { self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x00])); },
                             _ => {},
                         }
                         // 保存容器值 → [r13-32]
-                        self.emit_insn(&Insn::raw(&[0x49, 0x89, 0x45, 0xe0])); // mov [r13-32], rax
+                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x45, 0xe0])); // mov [r13-32], rax
                                                               // 加载保存的新值 → rax
-                        self.emit_insn(&Insn::raw(&[0x49, 0x8B, 0x45, 0xd8])); // mov rax, [r13-40]
+                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x45, 0xd8])); // mov rax, [r13-40]
                                                               // 掩码新值: and eax, (1<<bw)-1
                         if bw < 64 {
                             let mask: u64 = (1u64 << bw) - 1;
                             if mask <= 0xFFFFFFFF {
-                                self.emit_insn(&Insn::raw(&[0x48, 0x25]));
-                                self.emit_insn(&Insn::raw(&(mask as u32).to_le_bytes()));
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x25]));
+                                self.emit_insn(&Insn::raw_bytes(&(mask as u32).to_le_bytes()));
                             } else {
-                                self.emit_insn(&Insn::raw(&[0x48, 0xBA]));
-                                self.emit_insn(&Insn::raw(&mask.to_le_bytes()));
-                                self.emit_insn(&Insn::raw(&[0x48, 0x21, 0xD0]));
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xBA]));
+                                self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xD0]));
                             }
                         }
                         // 左移到位置: shl rax, bit_o
@@ -1296,27 +1296,27 @@ impl Codegen {
                             bit_o
                         };
                         if effective_bit_o > 0 {
-                            self.emit_insn(&Insn::raw(&[0x48, 0xC1, 0xE0, effective_bit_o as u8]));
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xE0, effective_bit_o as u8]));
                         }
                         // 加载保存的容器值 → rcx
-                        self.emit_insn(&Insn::raw(&[0x49, 0x8B, 0x4D, 0xe0])); // mov rcx, [r13-32]
+                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x4D, 0xe0])); // mov rcx, [r13-32]
                                                               // 清除目标位: and rcx, inv_mask
                         let mask: u64 = if bw >= 64 { u64::MAX } else { (1u64 << bw) - 1 };
                         let inv_mask = !(mask << effective_bit_o);
                         if (inv_mask as u32 as i32 as i64 as u64) == inv_mask {
-                            self.emit_insn(&Insn::raw(&[0x48, 0x81, 0xE1]));
-                            self.emit_insn(&Insn::raw(&(inv_mask as u32).to_le_bytes()));
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xE1]));
+                            self.emit_insn(&Insn::raw_bytes(&(inv_mask as u32).to_le_bytes()));
                         } else {
-                            self.emit_insn(&Insn::raw(&[0x48, 0xBA]));
-                            self.emit_insn(&Insn::raw(&inv_mask.to_le_bytes()));
-                            self.emit_insn(&Insn::raw(&[0x48, 0x21, 0xD1]));
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xBA]));
+                            self.emit_insn(&Insn::raw_bytes(&inv_mask.to_le_bytes()));
+                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x21, 0xD1]));
                         }
                         // 合并: or rcx, rax
-                        self.emit_insn(&Insn::raw(&[0x48, 0x09, 0xC1]));
+                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xC1]));
                         // 保存更新后的容器值回 [r13-32]
-                        self.emit_insn(&Insn::raw(&[0x49, 0x89, 0x4D, 0xe0])); // mov [r13-32], rcx
+                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x4D, 0xe0])); // mov [r13-32], rcx
                                                               // 加载地址 → rdx
-                        self.emit_insn(&Insn::raw(&[0x49, 0x8B, 0x55, 0xe8])); // mov rdx, [r13-24]
+                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x55, 0xe8])); // mov rdx, [r13-24]
                                                               // 存储容器 (如果是最后一个位域且 reverse_sso, 需要先字节序反转)
                                                               // 检查是否还有后续位域在同一容器
                         let has_more_bitfields_in_container = {
@@ -1344,37 +1344,37 @@ impl Codegen {
                             // 当前实现: 反转容器中的字节序 (近似处理)
                             match container_size {
                                 2 => {
-                                    self.emit_insn(&Insn::raw(&[0x49, 0x8B, 0x4D, 0xe0])); // mov rcx, [r13-32]
-                                    self.emit_insn(&Insn::raw(&[0x66, 0xC1, 0xC1, 0x08])); // rol cx, 8
-                                    self.emit_insn(&Insn::raw(&[0x66, 0x89, 0x0A])); // mov [rdx], cx
+                                    self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x4D, 0xe0])); // mov rcx, [r13-32]
+                                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0xC1, 0xC1, 0x08])); // rol cx, 8
+                                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x0A])); // mov [rdx], cx
                                 },
                                 4 => {
-                                    self.emit_insn(&Insn::raw(&[0x49, 0x8B, 0x4D, 0xe0])); // mov rcx, [r13-32]
-                                    self.emit_insn(&Insn::raw(&[0x0F, 0xC9])); // bswap ecx
-                                    self.emit_insn(&Insn::raw(&[0x89, 0x0A])); // mov [rdx], ecx
+                                    self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x4D, 0xe0])); // mov rcx, [r13-32]
+                                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xC9])); // bswap ecx
+                                    self.emit_insn(&Insn::raw_bytes(&[0x89, 0x0A])); // mov [rdx], ecx
                                 },
                                 8 => {
-                                    self.emit_insn(&Insn::raw(&[0x49, 0x8B, 0x4D, 0xe0])); // mov rcx, [r13-32]
-                                    self.emit_insn(&Insn::raw(&[0x48, 0x0F, 0xC9])); // bswap rcx
-                                    self.emit_insn(&Insn::raw(&[0x48, 0x89, 0x0A])); // mov [rdx], rcx
+                                    self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x4D, 0xe0])); // mov rcx, [r13-32]
+                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xC9])); // bswap rcx
+                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x0A])); // mov [rdx], rcx
                                 },
                                 _ => {
                                     // 其他大小: 不反转 (1字节无需反转)
                                     match container_size {
-                                        4 => { self.emit_insn(&Insn::raw(&[0x89, 0x0A])); },       // mov [rdx], ecx
-                                        8 => { self.emit_insn(&Insn::raw(&[0x48, 0x89, 0x0A])); }, // mov [rdx], rcx
-                                        2 => { self.emit_insn(&Insn::raw(&[0x66, 0x89, 0x0A])); },
-                                        1 => { self.emit_insn(&Insn::raw(&[0x88, 0x0A])); },
+                                        4 => { self.emit_insn(&Insn::raw_bytes(&[0x89, 0x0A])); },       // mov [rdx], ecx
+                                        8 => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x0A])); }, // mov [rdx], rcx
+                                        2 => { self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x0A])); },
+                                        1 => { self.emit_insn(&Insn::raw_bytes(&[0x88, 0x0A])); },
                                         _ => {},
                                     }
                                 },
                             }
                         } else {
                             match container_size {
-                                4 => { self.emit_insn(&Insn::raw(&[0x89, 0x0A])); },       // mov [rdx], ecx
-                                8 => { self.emit_insn(&Insn::raw(&[0x48, 0x89, 0x0A])); }, // mov [rdx], rcx
-                                2 => { self.emit_insn(&Insn::raw(&[0x66, 0x89, 0x0A])); },
-                                1 => { self.emit_insn(&Insn::raw(&[0x88, 0x0A])); },
+                                4 => { self.emit_insn(&Insn::raw_bytes(&[0x89, 0x0A])); },       // mov [rdx], ecx
+                                8 => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x0A])); }, // mov [rdx], rcx
+                                2 => { self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x0A])); },
+                                1 => { self.emit_insn(&Insn::raw_bytes(&[0x88, 0x0A])); },
                                 _ => {},
                             }
                         }
@@ -1395,8 +1395,8 @@ impl Codegen {
                                                                      // rsi = 源地址
                                     self.emit_lea_r13(6, src_off); // rsi = src
                                     self.mov_imm(1, sz as i128); // rcx = count
-                                    self.emit_insn(&Insn::raw(&[0xFC])); // cld
-                                    self.emit_insn(&Insn::raw(&[0xF3, 0xA4])); // rep movsb
+                                    self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
+                                    self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
                                     src_addr_ok = true;
                                 }
                             } else if matches!(value, Expr::CompoundLit { .. }) {
@@ -1407,8 +1407,8 @@ impl Codegen {
                                 self.emit_lea_r13(7, store_off); // rdi = dest
                                 self.mov(6, 0); // rsi = rax
                                 self.mov_imm(1, sz as i128); // rcx = count
-                                self.emit_insn(&Insn::raw(&[0xFC])); // cld
-                                self.emit_insn(&Insn::raw(&[0xF3, 0xA4])); // rep movsb
+                                self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
+                                self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
                                 src_addr_ok = true;
                             } else if matches!(
                                 value,
@@ -1419,8 +1419,8 @@ impl Codegen {
                                     self.emit_lea_r13(7, store_off); // rdi = dest
                                     self.mov(6, 0); // rsi = rax
                                     self.mov_imm(1, sz as i128); // rcx = count
-                                    self.emit_insn(&Insn::raw(&[0xFC])); // cld
-                                    self.emit_insn(&Insn::raw(&[0xF3, 0xA4])); // rep movsb
+                                    self.emit_insn(&Insn::raw_bytes(&[0xFC])); // cld
+                                    self.emit_insn(&Insn::raw_bytes(&[0xF3, 0xA4])); // rep movsb
                                     src_addr_ok = true;
                                 }
                             }
@@ -1446,13 +1446,13 @@ impl Codegen {
                         if reverse_sso && sz > 1 {
                             match sz {
                                 2 => {
-                                    self.emit_insn(&Insn::raw(&[0x66, 0xC1, 0xC0, 0x08])); // rol ax, 8
+                                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0xC1, 0xC0, 0x08])); // rol ax, 8
                                 },
                                 4 => {
-                                    self.emit_insn(&Insn::raw(&[0x0F, 0xC8])); // bswap eax
+                                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xC8])); // bswap eax
                                 },
                                 8 => {
-                                    self.emit_insn(&Insn::raw(&[0x48, 0x0F, 0xC8])); // bswap rax
+                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xC8])); // bswap rax
                                 },
                                 _ => {},
                             }
@@ -1553,7 +1553,7 @@ impl Codegen {
                         let rex = 0x48
                             | if tmp >= 8 { 0x04 } else { 0 }
                             | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                        self.emit_insn(&Insn::raw(&[rex, 0x01, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
+                        self.emit_insn(&Insn::raw_bytes(&[rex, 0x01, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
                         acc_open = true;
                     } else {
                         // 动态区: dst = align_up(dst, fa) + sizeof(f)
@@ -1561,22 +1561,22 @@ impl Codegen {
                         if fa > 1 {
                             let m = (fa - 1) as i128;
                             let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            self.emit_insn(&Insn::raw(&[rex, 0x81, 0xC0 | (dst & 7)]));
+                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xC0 | (dst & 7)]));
                             // imm32: 只能发 4 字节 (i128 to_le_bytes 是 16 字节)
-                            self.emit_insn(&Insn::raw(&(m as u32).to_le_bytes()));
-                            self.emit_insn(&Insn::raw(&[rex, 0x81, 0xE0 | (dst & 7)]));
-                            self.emit_insn(&Insn::raw(&(!m as u64 as u32).to_le_bytes()));
+                            self.emit_insn(&Insn::raw_bytes(&(m as u32).to_le_bytes()));
+                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xE0 | (dst & 7)]));
+                            self.emit_insn(&Insn::raw_bytes(&(!m as u64 as u32).to_le_bytes()));
                         }
                         if f.ty.has_vla() {
                             self.gen_sizeof_runtime(&f.ty, tmp);
                             let rex = 0x48
                                 | if tmp >= 8 { 0x04 } else { 0 }
                                 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            self.emit_insn(&Insn::raw(&[rex, 0x01, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
+                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x01, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
                         } else {
                             let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            self.emit_insn(&Insn::raw(&[rex, 0x81, 0xC0 | (dst & 7)]));
-                            self.emit_insn(&Insn::raw(&(f.ty.size() as u32).to_le_bytes()));
+                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xC0 | (dst & 7)]));
+                            self.emit_insn(&Insn::raw_bytes(&(f.ty.size() as u32).to_le_bytes()));
                         }
                     }
                 }
@@ -1587,11 +1587,11 @@ impl Codegen {
                     let m = (*salign - 1) as i128;
                     // add/and r/m64=dst, imm32: dst>=8 需 REX.B(0x01)
                     let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    self.emit_insn(&Insn::raw(&[rex, 0x81, 0xC0 | (dst & 7)]));
+                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xC0 | (dst & 7)]));
                     // imm32: 只能发 4 字节 (i128 to_le_bytes 是 16 字节)
-                    self.emit_insn(&Insn::raw(&(m as u32).to_le_bytes()));
-                    self.emit_insn(&Insn::raw(&[rex, 0x81, 0xE0 | (dst & 7)]));
-                    self.emit_insn(&Insn::raw(&(!m as u64 as u32).to_le_bytes()));
+                    self.emit_insn(&Insn::raw_bytes(&(m as u32).to_le_bytes()));
+                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xE0 | (dst & 7)]));
+                    self.emit_insn(&Insn::raw_bytes(&(!m as u64 as u32).to_le_bytes()));
                 }
             },
             Type::Union(_, fields, _, false) => {
@@ -1610,8 +1610,8 @@ impl Codegen {
                             let rex = 0x48
                                 | if tmp >= 8 { 0x04 } else { 0 }
                                 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            self.emit_insn(&Insn::raw(&[rex, 0x39, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
-                            self.emit_insn(&Insn::raw(&[rex, 0x0F, 0x47, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
+                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x39, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
+                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0x47, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
                         } else {
                             self.mov(dst, tmp);
                             acc_open = true;
@@ -1625,8 +1625,8 @@ impl Codegen {
                     self.mov_imm(tmp, static_max as i128);
                     let rex =
                         0x48 | if tmp >= 8 { 0x04 } else { 0 } | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    self.emit_insn(&Insn::raw(&[rex, 0x39, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
-                    self.emit_insn(&Insn::raw(&[rex, 0x0F, 0x47, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
+                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x39, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
+                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0x47, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
                 } else if !acc_open {
                     self.mov_imm(dst, static_max as i128);
                 }

@@ -47,21 +47,12 @@ impl Insn {
     /// 直接用字节切片构造 (迁移期兜底, 逐步替换为类型化构造子).
     /// x86_64 变长, 因此直接保留字节切片, 不做 u32/u16 拼装.
     ///
-    /// P9 方案 C: 这个名字是历史遗留别名 (raw_bytes), 现存 4000+ 处调用点.
-    /// 新代码**不应**用这个构造子; 用 `raw_with_gas(bytes, "gas text")` 直接携带
-    /// 发射点已知的 GAS 文本, 或用类型化构造子 (`Insn::new(X86_64Opcode::...)`).
-    ///
-    /// 注: P9 收敛完成后仓库里已经没有 `Insn::raw_bytes(..)` 字面调用点.
-    /// 保留这个名字仅为兼容可能出现的外部 / 测试直接引用.
+    /// P10 收敛: 原生发射路径一律用 raw_bytes (语义等价于 raw), 保留 raw
+    /// 这个名字仅供 asm/ 内联汇编编码器继续使用 (那里走 raw_with_mnemonic).
+    /// 新代码不要直接调这个构造子, 用 raw_with_gas(bytes, "gas text") 携带
+    /// 发射点已知的 GAS 文本, 或类型化构造子 Insn::new(X86_64Opcode::...).
     #[doc(hidden)]
     pub fn raw_bytes(b: &[u8]) -> Self {
-        Insn::raw(b)
-    }
-
-    /// P9 方案 C 收敛后使用的主构造子 (替代 raw_bytes). 语义与 raw_bytes 一致,
-    /// 但名字反映「这是字节切片兜底路径」而非「这是标准入口」. 现存调用点逐步迁移,
-    /// 完成后 raw_bytes 这个名字将从仓库中消除.
-    pub fn raw(b: &[u8]) -> Self {
         Insn::new(
             X86_64Opcode::Raw {
                 bytes: b.to_vec(),
@@ -69,6 +60,13 @@ impl Insn {
             },
             &[],
         )
+    }
+
+    /// asm/ 内联汇编路径专用 (P10 起原生路径已改用 raw_bytes).
+    /// 语义与 raw_bytes 一致, 仅名字不同 —— 保留以避免改动内联汇编编码器的
+    /// 几百处字面调用.
+    pub fn raw(b: &[u8]) -> Self {
+        Insn::raw_bytes(b)
     }
 
     pub fn nop() -> Self {
@@ -136,7 +134,7 @@ mod tests {
     fn raw_bytes_passthrough() {
         // x86_64 本机小端, 字节原样落盘
         assert_eq!(
-            Insn::raw(&[0x48, 0x8B, 0x05, 0x34, 0x12, 0x00, 0x00]).encode_bytes(),
+            Insn::raw_bytes(&[0x48, 0x8B, 0x05, 0x34, 0x12, 0x00, 0x00]).encode_bytes(),
             Some(vec![0x48, 0x8B, 0x05, 0x34, 0x12, 0x00, 0x00]),
         );
     }
@@ -148,6 +146,6 @@ mod tests {
 
     #[test]
     fn raw_bytes_empty() {
-        assert_eq!(Insn::raw(&[]).encode_bytes(), Some(Vec::new()));
+        assert_eq!(Insn::raw_bytes(&[]).encode_bytes(), Some(Vec::new()));
     }
 }

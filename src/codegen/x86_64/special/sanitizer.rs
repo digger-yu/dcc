@@ -80,8 +80,8 @@ impl Codegen {
         let fs = self.frame_layout.frame_size;
         self.emit_lea_r13(7, self.frame_layout.frame_base());
         // mov esi, frame_size
-        self.emit_insn(&Insn::raw(&[0xbe]));
-        self.emit_insn(&Insn::raw(&(fs as i32).to_le_bytes()));
+        self.emit_insn(&Insn::raw_bytes(&[0xbe]));
+        self.emit_insn(&Insn::raw_bytes(&(fs as i32).to_le_bytes()));
         // call __asan_poison_memory_region (PLT)
         self.emit_call_extern("__asan_poison_memory_region");
     }
@@ -101,8 +101,8 @@ impl Codegen {
         for (off, sz) in vars {
             self.emit_lea_r13(7, off);
             // mov esi, size
-            self.emit_insn(&Insn::raw(&[0xbe]));
-            self.emit_insn(&Insn::raw(&(sz as u32).to_le_bytes()));
+            self.emit_insn(&Insn::raw_bytes(&[0xbe]));
+            self.emit_insn(&Insn::raw_bytes(&(sz as u32).to_le_bytes()));
             // call __asan_unpoison_memory_region
             self.emit_call_extern("__asan_unpoison_memory_region");
         }
@@ -187,7 +187,7 @@ impl Codegen {
         }
         // 生成 LEA rdi, [rip+disp32] 占位
         let lea_pos = self.code.len() as u64;
-        self.emit_insn(&Insn::raw(&[0x48, 0x8D, 0x3D, 0, 0, 0, 0])); // lea rdi, [rip+disp32]
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x3D, 0, 0, 0, 0])); // lea rdi, [rip+disp32]
         self.ubsan_lea_refs.push((lea_pos, data_off));
         // 绝对指针槽: Filename@0, ArrayType@16, IndexType@24 → rodata 目标
         self.ubsan_ptr_refs.push((data_off, 0, file_off));

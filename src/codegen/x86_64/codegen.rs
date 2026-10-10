@@ -1383,28 +1383,28 @@ impl Codegen {
         ctors.sort_by_key(|(p, _)| *p);
         dtors.sort_by_key(|(p, _)| *p);
         self.label("_start");
-        self.emit_insn(&Insn::raw(&[0x49, 0x89, 0xe4])); // mov r12, rsp (保存原始 rsp, 用于 leave 后恢复)
-        self.emit_insn(&Insn::raw(&[0x55])); // push rbp
-        self.emit_insn(&Insn::raw(&[0x48, 0x89, 0xe5])); // mov rbp, rsp
+        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0xe4])); // mov r12, rsp (保存原始 rsp, 用于 leave 后恢复)
+        self.emit_insn(&Insn::raw_bytes(&[0x55])); // push rbp
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xe5])); // mov rbp, rsp
                                         // 调用 constructor 函数
         for (_p, ctor) in &ctors {
-            self.emit_insn(&Insn::raw(&[0x48, 0x31, 0xc0])); // xor rax, rax (no variadic args)
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xc0])); // xor rax, rax (no variadic args)
             self.call_label(ctor);
         }
-        self.emit_insn(&Insn::raw(&[0x48, 0x31, 0xc0])); // xor rax, rax
+        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xc0])); // xor rax, rax
         self.call_label("main");
         // 保存 main 返回值
-        self.emit_insn(&Insn::raw(&[0x41, 0x89, 0xc5])); // mov r13d, eax
+        self.emit_insn(&Insn::raw_bytes(&[0x41, 0x89, 0xc5])); // mov r13d, eax
                                         // 调用 destructor 函数
         for (_p, dtor) in &dtors {
-            self.emit_insn(&Insn::raw(&[0x48, 0x31, 0xc0])); // xor rax, rax
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xc0])); // xor rax, rax
             self.call_label(dtor);
         }
-        self.emit_insn(&Insn::raw(&[0x4c, 0x89, 0xe4])); // mov rsp, r12 (恢复原始 rsp)
-        self.emit_insn(&Insn::raw(&[0x44, 0x89, 0xef])); // mov edi, r13d (main 返回值)
-        self.emit_insn(&Insn::raw(&[0xb8, 0x3c, 0x00, 0x00, 0x00])); // mov eax, 0x3c
-        self.emit_insn(&Insn::raw(&[0x0f, 0x05])); // syscall
-        self.emit_insn(&Insn::raw(&[0xeb, 0xfe])); // jmp self
+        self.emit_insn(&Insn::raw_bytes(&[0x4c, 0x89, 0xe4])); // mov rsp, r12 (恢复原始 rsp)
+        self.emit_insn(&Insn::raw_bytes(&[0x44, 0x89, 0xef])); // mov edi, r13d (main 返回值)
+        self.emit_insn(&Insn::raw_bytes(&[0xb8, 0x3c, 0x00, 0x00, 0x00])); // mov eax, 0x3c
+        self.emit_insn(&Insn::raw_bytes(&[0x0f, 0x05])); // syscall
+        self.emit_insn(&Insn::raw_bytes(&[0xeb, 0xfe])); // jmp self
                                   // 静态局部变量分析 pass + 预注册到 data/bss
         self.static_local_map = crate::static_locals::analyze_static_locals(prog);
         self.pre_register_static_locals();

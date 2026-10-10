@@ -565,11 +565,11 @@ impl Codegen {
         self.align(16);
         let start = self.pos();
         self.label(CPU_INIT_NAME);
-        self.emit_insn(&Insn::raw(&[0x53])); // push rbx
+        self.emit_insn(&Insn::raw_bytes(&[0x53])); // push rbx
         // 幂等守卫: if (model.init_done) goto done
         let l_done = self.fresh_label();
         self.emit_model_rip(&RIP_MOV_EAX_M32, cpu_isa::SLOT_INIT_DONE, None);
-        self.emit_insn(&Insn::raw(&[0x85, 0xC0])); // test eax, eax
+        self.emit_insn(&Insn::raw_bytes(&[0x85, 0xC0])); // test eax, eax
         self.jmp_rel32(&l_done, JumpKind::Jne);
 
         for probe in cpu_isa::PROBES {
@@ -655,7 +655,7 @@ impl Codegen {
             Some(1),
         );
         self.label(&l_done);
-        self.emit_insn(&Insn::raw(&[0x5B])); // pop rbx
+        self.emit_insn(&Insn::raw_bytes(&[0x5B])); // pop rbx
         self.ret();
         let size = self.pos() - start;
         self.func_sizes.insert(CPU_INIT_NAME.to_string(), size);
@@ -1097,10 +1097,10 @@ impl Codegen {
         if self.ifunc_synth.is_empty() {
             return String::new();
         }
-        let labels = crate::codegen::x86_64::asm::render_one::label_map(
+        let labels = crate::codegen::x86_64::render_one::label_map(
             self.labels.iter().map(|(n, o)| (o, n.as_str())),
         );
-        let directives = crate::codegen::x86_64::asm::render_one::directive_map(
+        let directives = crate::codegen::x86_64::render_one::directive_map(
             self.asm_directives_at
                 .iter()
                 .map(|(o, l)| (o, l.as_str())),
@@ -1525,9 +1525,9 @@ impl Codegen {
 
     /// [`Self::emit_model_rip`] 的底层形式：符号名与「符号内字节偏移」显式给出。
     fn emit_model_rip_sym(&mut self, form: &RipForm, sym: &str, off_in_sym: i64, imm: Option<u32>) {
-        self.emit_insn(&Insn::raw(form.prefix));
+        self.emit_insn(&Insn::raw_bytes(form.prefix));
         let disp_pos = self.pos();
-        self.emit_insn(&Insn::raw(&[0, 0, 0, 0]));
+        self.emit_insn(&Insn::raw_bytes(&[0, 0, 0, 0]));
         let addend = off_in_sym - form.delta;
         self.pending_code_rels.push(PendingCodeRel {
             offset: disp_pos,
@@ -1539,15 +1539,15 @@ impl Codegen {
         self.disasm_data.insert(disp_pos, sym.to_string());
         if form.imm_after {
             let v = imm.unwrap_or(0);
-            self.emit_insn(&Insn::raw(&v.to_le_bytes()));
+            self.emit_insn(&Insn::raw_bytes(&v.to_le_bytes()));
         }
     }
 
     /// 引用一个**已定义标号**（变体实现体）：`lea rax, [rip + <sym>]`。
     fn emit_lea_sym(&mut self, sym: &str) {
-        self.emit_insn(&Insn::raw(RIP_LEA_RAX.prefix));
+        self.emit_insn(&Insn::raw_bytes(RIP_LEA_RAX.prefix));
         let disp_pos = self.pos();
-        self.emit_insn(&Insn::raw(&[0, 0, 0, 0]));
+        self.emit_insn(&Insn::raw_bytes(&[0, 0, 0, 0]));
         self.pending_code_rels.push(PendingCodeRel {
             offset: disp_pos,
             symbol: sym.to_string(),
@@ -1558,41 +1558,41 @@ impl Codegen {
     }
 
     fn mov_eax_imm32(&mut self, v: u32) {
-        self.emit_insn(&Insn::raw(&[0xB8]));
-        self.emit_insn(&Insn::raw(&v.to_le_bytes()));
+        self.emit_insn(&Insn::raw_bytes(&[0xB8]));
+        self.emit_insn(&Insn::raw_bytes(&v.to_le_bytes()));
     }
 
     fn mov_ecx_imm32(&mut self, v: u32) {
-        self.emit_insn(&Insn::raw(&[0xB9]));
-        self.emit_insn(&Insn::raw(&v.to_le_bytes()));
+        self.emit_insn(&Insn::raw_bytes(&[0xB9]));
+        self.emit_insn(&Insn::raw_bytes(&v.to_le_bytes()));
     }
 
     /// `and eax, imm32`。不能用 `83 E0 ib`：avx512 的 XCR0 掩码 `0xE6` 超出有符号
     /// imm8 的范围（`0x83 /4 ib` 的 imm8 是 sign-extended，`0xE6` 会变成 `-26`）。
     fn and_eax_imm32(&mut self, v: u32) {
-        self.emit_insn(&Insn::raw(&[0x25]));
-        self.emit_insn(&Insn::raw(&v.to_le_bytes()));
+        self.emit_insn(&Insn::raw_bytes(&[0x25]));
+        self.emit_insn(&Insn::raw_bytes(&v.to_le_bytes()));
     }
 
     fn cmp_eax_imm32(&mut self, v: u32) {
-        self.emit_insn(&Insn::raw(&[0x3D]));
-        self.emit_insn(&Insn::raw(&v.to_le_bytes()));
+        self.emit_insn(&Insn::raw_bytes(&[0x3D]));
+        self.emit_insn(&Insn::raw_bytes(&v.to_le_bytes()));
     }
 
     fn cpuid(&mut self) {
-        self.emit_insn(&Insn::raw(&[0x0F, 0xA2]));
+        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xA2]));
     }
 
     fn xgetbv(&mut self) {
-        self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xD0]));
+        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x01, 0xD0]));
     }
 
     fn xor_ecx_ecx(&mut self) {
-        self.emit_insn(&Insn::raw(&[0x31, 0xC9]));
+        self.emit_insn(&Insn::raw_bytes(&[0x31, 0xC9]));
     }
 
     fn xor_eax_eax(&mut self) {
-        self.emit_insn(&Insn::raw(&[0x31, 0xC0]));
+        self.emit_insn(&Insn::raw_bytes(&[0x31, 0xC0]));
     }
 
     // ---- 分类链需要的形式（32 位通用寄存器间运算）----
@@ -1602,36 +1602,36 @@ impl Codegen {
 
     /// `mov dst, src`（`89 /r`，`/r` 的 reg 字段是**源**）。
     fn mov_r32_r32(&mut self, dst: u8, src: u8) {
-        self.emit_insn(&Insn::raw(&[0x89, 0xC0 | (src << 3) | dst]));
+        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | (src << 3) | dst]));
     }
 
     /// `add dst, src`（`01 /r`）。
     fn add_r32_r32(&mut self, dst: u8, src: u8) {
-        self.emit_insn(&Insn::raw(&[0x01, 0xC0 | (src << 3) | dst]));
+        self.emit_insn(&Insn::raw_bytes(&[0x01, 0xC0 | (src << 3) | dst]));
     }
 
     /// `mov r32, imm32`（`B8 + r`）。
     fn mov_r32_imm32(&mut self, r: u8, v: u32) {
-        self.emit_insn(&Insn::raw(&[0xB8 + r]));
-        self.emit_insn(&Insn::raw(&v.to_le_bytes()));
+        self.emit_insn(&Insn::raw_bytes(&[0xB8 + r]));
+        self.emit_insn(&Insn::raw_bytes(&v.to_le_bytes()));
     }
 
     /// `shr r32, imm8`（`C1 /5 ib`）。
     fn shr_r32_imm8(&mut self, r: u8, n: u8) {
-        self.emit_insn(&Insn::raw(&[0xC1, 0xE8 | r, n]));
+        self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE8 | r, n]));
     }
 
     /// `and r32, imm32`（`81 /4 id`）。不能用 `83 /4 ib`：扩展 model 的掩码
     /// `0xf0` 与扩展 family 的 `0xff` 超出有符号 imm8 的范围。
     fn and_r32_imm32(&mut self, r: u8, v: u32) {
-        self.emit_insn(&Insn::raw(&[0x81, 0xE0 | r]));
-        self.emit_insn(&Insn::raw(&v.to_le_bytes()));
+        self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE0 | r]));
+        self.emit_insn(&Insn::raw_bytes(&v.to_le_bytes()));
     }
 
     /// `cmp r32, imm32`（`81 /7 id`）。
     fn cmp_r32_imm32(&mut self, r: u8, v: u32) {
-        self.emit_insn(&Insn::raw(&[0x81, 0xF8 | r]));
-        self.emit_insn(&Insn::raw(&v.to_le_bytes()));
+        self.emit_insn(&Insn::raw_bytes(&[0x81, 0xF8 | r]));
+        self.emit_insn(&Insn::raw_bytes(&v.to_le_bytes()));
     }
 
     fn ret(&mut self) {
@@ -1641,7 +1641,7 @@ impl Codegen {
             &[],
         );
         if !self.emit_insn(&insn) {
-            self.emit_insn(&Insn::raw(&[0xC3]));
+            self.emit_insn(&Insn::raw_bytes(&[0xC3]));
         }
     }
 }

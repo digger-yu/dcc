@@ -28,18 +28,18 @@ impl Codegen {
                         if Self::fits_disp32(ioff) {
                             let rex = 0x48u8 | if dst >= 8 { 0x05u8 } else { 0 };
                             let modrm = 0x83 | ((dst & 7) << 3);
-                            self.emit_insn(&Insn::raw(&[rex, 0x8B, modrm]));
-                            self.emit_insn(&Insn::raw(&(ioff as i32).to_le_bytes()));
+                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, modrm]));
+                            self.emit_insn(&Insn::raw_bytes(&(ioff as i32).to_le_bytes()));
                         } else {
                             self.mov_imm(10, ioff as i128);
-                            self.emit_insn(&Insn::raw(&[0x4D, 0x8D, 0x1C, 0xD3]));
+                            self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x8D, 0x1C, 0xD3]));
                         }
                     }
                     if Self::type_has_vla(ty) {
                         let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
                         let modrm = 0x03 | ((dst & 7) << 3);
-                        self.emit_insn(&Insn::raw(&[rex, 0x8B, modrm]));
-                        self.emit_insn(&Insn::raw(&(parent_off as i32).to_le_bytes()));
+                        self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, modrm]));
+                        self.emit_insn(&Insn::raw_bytes(&(parent_off as i32).to_le_bytes()));
                     } else {
                         if parent_off != 0 {
                             let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
@@ -415,7 +415,7 @@ impl Codegen {
             let label_name = self.c_label_to_asm(&label.name);
             let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
             let modrm = 0x05 | ((dst & 7) << 3);
-            self.emit_insn(&Insn::raw(&[rex, 0x8D, modrm, 0, 0, 0, 0]));
+            self.emit_insn(&Insn::raw_bytes(&[rex, 0x8D, modrm, 0, 0, 0, 0]));
             let disp32_pos = self.pos() - 4;
             self.label_addr_refs.push((disp32_pos, label_name));
         }

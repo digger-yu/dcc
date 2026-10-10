@@ -28,20 +28,20 @@ impl Codegen {
             self.gen_expr(e, Self::EVAL_BASE);
             match op {
                 UnOp::Neg => {
-                    self.emit_insn(&Insn::raw(&[0x48, 0xF7, 0xD8])); // neg rax
-                    self.emit_insn(&Insn::raw(&[0x48, 0x83, 0xD2, 0x00])); // adc rdx, 0
-                    self.emit_insn(&Insn::raw(&[0x48, 0xF7, 0xDA])); // neg rdx
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xD8])); // neg rax
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xD2, 0x00])); // adc rdx, 0
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xDA])); // neg rdx
                 },
                 UnOp::BitNot => {
-                    self.emit_insn(&Insn::raw(&[0x48, 0xF7, 0xD0])); // not rax
-                    self.emit_insn(&Insn::raw(&[0x48, 0xF7, 0xD2])); // not rdx
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xD0])); // not rax
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xD2])); // not rdx
                 },
                 UnOp::Not => {
-                    self.emit_insn(&Insn::raw(&[0x48, 0x09, 0xD0])); // or rax, rdx
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x09, 0xD0])); // or rax, rdx
                     self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x85, 0xC0], "test %rax, %rax")); // test rax, rax
                     self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x94, 0xC0], "sete %al")); // sete al
                     self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xB6, 0xC0], "movzbq %al, %rax"));
-                    self.emit_insn(&Insn::raw(&[0x48, 0x31, 0xD2])); // high = 0
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2])); // high = 0
                 },
                 UnOp::Plus => {},
             }
@@ -80,17 +80,17 @@ impl Codegen {
                     // 翻转 32 位符号位: movabs rax, 0x8000_0000
                     //   66 48 0f 6e c8 movq xmm1, rax
                     //   0f 57 c1       xorps xmm0, xmm1
-                    self.emit_insn(&Insn::raw(&[0x48, 0xB8]));
-                    self.emit_insn(&Insn::raw(&0x80000000u64.to_le_bytes()));
-                    self.emit_insn(&Insn::raw(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
-                    self.emit_insn(&Insn::raw(&[0x0F, 0x57, 0xC1]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB8]));
+                    self.emit_insn(&Insn::raw_bytes(&0x80000000u64.to_le_bytes()));
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x57, 0xC1]));
                 },
                 Type::Double => {
                     // 翻转 64 位符号位
-                    self.emit_insn(&Insn::raw(&[0x48, 0xB8]));
-                    self.emit_insn(&Insn::raw(&0x8000000000000000u64.to_le_bytes()));
-                    self.emit_insn(&Insn::raw(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
-                    self.emit_insn(&Insn::raw(&[0x66, 0x0F, 0x57, 0xC1]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xB8]));
+                    self.emit_insn(&Insn::raw_bytes(&0x8000000000000000u64.to_le_bytes()));
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x57, 0xC1]));
                 },
                 _ => unreachable!(),
             }
@@ -130,15 +130,15 @@ impl Codegen {
             if self.gen_lvalue_addr(e, Self::EVAL_BASE) {
                 // lvalue (变量/字段/下标): 用 rcx 保存地址 (flip_sign_xmm
                 // 会破坏 rax 但不动 rcx), 逐分量加载/flip/store
-                self.emit_insn(&Insn::raw(&[0x48, 0x89, 0xC1])); // mov rcx, rax
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC1])); // mov rcx, rax
                 let imag_off = inner_sz; // 变量内存虚部槽 (连续布局)
                                          // 实部: [rcx] → xmm0 → flip → [result_off]
-                self.emit_insn(&Insn::raw(&[pfx, 0x0F, 0x10, 0x01])); // movss/movsd xmm0, [rcx]
+                self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x01])); // movss/movsd xmm0, [rcx]
                 self.flip_sign_xmm(0, &inner);
                 self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
                 // 虚部: [rcx+off] → xmm0 → flip → [result_off+inner_sz]
-                self.emit_insn(&Insn::raw(&[pfx, 0x0F, 0x10, 0x81]));
-                self.emit_insn(&Insn::raw(&(imag_off as i32).to_le_bytes()));
+                self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x81]));
+                self.emit_insn(&Insn::raw_bytes(&(imag_off as i32).to_le_bytes()));
                 self.flip_sign_xmm(0, &inner);
                 self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
             } else {
@@ -146,12 +146,12 @@ impl Codegen {
                 self.gen_expr(e, Self::EVAL_BASE);
                 if matches!(e, Expr::Call { .. }) {
                     // SSE 返回: 虚部在 xmm1, 物化到临时区
-                    self.emit_insn(&Insn::raw(&[pfx, 0x41, 0x0F, 0x11]));
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x41, 0x0F, 0x11]));
                     if (result_off + inner_sz).abs() < 128 {
-                        self.emit_insn(&Insn::raw(&[0x4D, (result_off + inner_sz) as u8]));
+                        self.emit_insn(&Insn::raw_bytes(&[0x4D, (result_off + inner_sz) as u8]));
                     } else {
-                        self.emit_insn(&Insn::raw(&[0x8D]));
-                        self.emit_insn(&Insn::raw(&((result_off + inner_sz) as i32).to_le_bytes()));
+                        self.emit_insn(&Insn::raw_bytes(&[0x8D]));
+                        self.emit_insn(&Insn::raw_bytes(&((result_off + inner_sz) as i32).to_le_bytes()));
                     }
                 }
                 // 实部翻转符号位并写回临时区
@@ -198,14 +198,14 @@ impl Codegen {
             if matches!(inner, Type::Float | Type::Double) {
                 let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                 if self.gen_lvalue_addr(e, Self::EVAL_BASE) {
-                    self.emit_insn(&Insn::raw(&[0x48, 0x89, 0xC1])); // mov rcx, rax
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xC1])); // mov rcx, rax
                     let imag_off = inner_sz;
                     // 实部: [rcx] → xmm0 → [result_off] (不变)
-                    self.emit_insn(&Insn::raw(&[pfx, 0x0F, 0x10, 0x01])); // movss/movsd xmm0, [rcx]
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x01])); // movss/movsd xmm0, [rcx]
                     self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
                     // 虚部: [rcx+off] → xmm0 → flip → [result_off+inner_sz]
-                    self.emit_insn(&Insn::raw(&[pfx, 0x0F, 0x10, 0x81]));
-                    self.emit_insn(&Insn::raw(&(imag_off as i32).to_le_bytes()));
+                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x81]));
+                    self.emit_insn(&Insn::raw_bytes(&(imag_off as i32).to_le_bytes()));
                     self.flip_sign_xmm(0, &inner);
                     self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
                 } else {
@@ -233,7 +233,7 @@ impl Codegen {
                 self.mov(6, 0); // rsi = &src
                 self.emit_lea_r13(7, result_off); // rdi = r13+result_off
                 self.mov_imm(1, (inner_sz * 2) as i128);
-                self.emit_insn(&Insn::raw(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb
+                self.emit_insn(&Insn::raw_bytes(&[0xFC, 0xF3, 0xA4])); // cld; rep movsb
             } else {
                 self.gen_expr(e, Self::EVAL_BASE);
                 // rvalue 已按统一约定物化到 result_off (rax=地址);
@@ -244,22 +244,22 @@ impl Codegen {
             match inner_sz {
                 8 => {
                     self.load_stack(0, result_off + 8);
-                    self.emit_insn(&Insn::raw(&[0x48, 0xF7, 0xD8])); // neg rax
+                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xD8])); // neg rax
                     self.store_stack(0, result_off + 8);
                 },
                 4 => {
                     self.load_stack(0, result_off + 4);
-                    self.emit_insn(&Insn::raw(&[0xF7, 0xD8])); // neg eax
+                    self.emit_insn(&Insn::raw_bytes(&[0xF7, 0xD8])); // neg eax
                     self.emit_store(0, result_off + 4, 4);
                 },
                 2 => {
                     self.load_stack(0, result_off + 2);
-                    self.emit_insn(&Insn::raw(&[0x66, 0xF7, 0xD8])); // neg ax
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0xF7, 0xD8])); // neg ax
                     self.emit_store(0, result_off + 2, 2);
                 },
                 _ => {
                     self.load_stack(0, result_off + 1);
-                    self.emit_insn(&Insn::raw(&[0xF6, 0xD8])); // neg al
+                    self.emit_insn(&Insn::raw_bytes(&[0xF6, 0xD8])); // neg al
                     self.emit_store(0, result_off + 1, 1);
                 },
             }
@@ -296,15 +296,15 @@ impl Codegen {
                     // 寄存器值已符号扩展到 64 位, 必须用
                     // REX.W neg 保持上 32 位一致
                     let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    self.emit_insn(&Insn::raw(&[rex, 0xf7, 0xd8 | (dst & 7)]));
+                    self.emit_insn(&Insn::raw_bytes(&[rex, 0xf7, 0xd8 | (dst & 7)]));
                 } else if use_32bit_neg {
                     // 32-bit neg for trapv: 检测 32 位溢出
                     let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    self.emit_insn(&Insn::raw(&[rex, 0xf7, 0xd8 | (dst & 7)]));
+                    self.emit_insn(&Insn::raw_bytes(&[rex, 0xf7, 0xd8 | (dst & 7)]));
                 } else {
                     // 32 位无符号: REX 前缀无 .W
                     let rex = 0x40 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    self.emit_insn(&Insn::raw(&[rex, 0xf7, 0xd8 | (dst & 7)]));
+                    self.emit_insn(&Insn::raw_bytes(&[rex, 0xf7, 0xd8 | (dst & 7)]));
                 }
                 // -ftrapv: 有符号取负溢出检查 (e.g. -INT_MIN)
                 // neg 在操作数为类型最小值时置 OF=1
@@ -314,7 +314,7 @@ impl Codegen {
                     self.jmp_rel32(&trap_label, JumpKind::Jo);
                     self.jmp_rel32(&ok, JumpKind::Jmp);
                     self.label(&trap_label);
-                    self.emit_insn(&Insn::raw(&[0xe8, 0, 0, 0, 0])); // call rel32
+                    self.emit_insn(&Insn::raw_bytes(&[0xe8, 0, 0, 0, 0])); // call rel32
                     let call_at = self.code.len() as u64 - 4;
                     self.pending_func_rels
                         .push((call_at, "__dcc_trapv_overflow".to_string()));
@@ -348,7 +348,7 @@ impl Codegen {
             },
             UnOp::BitNot => {
                 let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                self.emit_insn(&Insn::raw(&[rex, 0xf7, 0xd0 | (dst & 7)]));
+                self.emit_insn(&Insn::raw_bytes(&[rex, 0xf7, 0xd0 | (dst & 7)]));
                 // not flips all 64 bits. The result must be
                 // truncated to the expression type width, then
                 // re-extended. For types < int, C integer
@@ -376,7 +376,7 @@ impl Codegen {
                         use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
                         let gas = format!("mov {}, {}", GAS_REG32[(dst & 15) as usize], GAS_REG32[(dst & 15) as usize]);
                         if dst >= 8 {
-                            self.emit_insn(&Insn::raw(&[0x45]));
+                            self.emit_insn(&Insn::raw_bytes(&[0x45]));
                         }
                         self.emit_insn(&Insn::raw_with_gas(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)], &gas));
                     }

@@ -13,7 +13,8 @@ pub mod label;
 pub mod labels; // NEW: Numeric local label handling (Turn 34)
 pub mod operand;
 pub mod planner;
-pub mod render_one; // P9 方案 C: 单指令 x86-64 解码 → GAS 文本
+// P10: render_one 已移出本目录 (x86_64/render_one.rs), 它现在只服务原生
+// 发射路径的 -S 文本反推, 不再是内联汇编专属.
 pub mod template; // NEW: Register allocator planning
 
 // Re-export main utilities
