@@ -2079,6 +2079,25 @@ impl Codegen {
         }
     }
     pub(crate) fn emit_and_rdx_rsi(&mut self, sz: usize) {
+        // P11: 收敛到 AluRm{And, reg-reg}. rdx=2, rsi=6.
+        let width = match sz {
+            1 => Width::B8,
+            2 => Width::B16,
+            4 => Width::B32,
+            _ => Width::B64,
+        };
+        let insn = Insn::new(
+            X86_64Opcode::AluRm {
+                op: AluOp::And,
+                width,
+                dst: OpcodeOperand::Reg(2, width),
+                src: OpcodeOperand::Reg(6, width),
+            },
+            &[],
+        );
+        if self.emit_insn(&insn) {
+            return;
+        }
         match sz {
             1 => self.emit_insn(&Insn::raw_bytes(&[0x40, 0x20, 0xF2])), // and dl, sil
             2 => self.emit_insn(&Insn::raw_bytes(&[0x66, 0x21, 0xF2])), // and dx, si
@@ -2345,6 +2364,25 @@ impl Codegen {
         };
     }
     pub(crate) fn emit_or_rdx_rsi(&mut self, sz: usize) {
+        // P11: AluRm{Or, reg-reg}. rdx=2, rsi=6.
+        let width = match sz {
+            1 => Width::B8,
+            2 => Width::B16,
+            4 => Width::B32,
+            _ => Width::B64,
+        };
+        let insn = Insn::new(
+            X86_64Opcode::AluRm {
+                op: AluOp::Or,
+                width,
+                dst: OpcodeOperand::Reg(2, width),
+                src: OpcodeOperand::Reg(6, width),
+            },
+            &[],
+        );
+        if self.emit_insn(&insn) {
+            return;
+        }
         match sz {
             1 => self.emit_insn(&Insn::raw_bytes(&[0x40, 0x08, 0xF2])), // or dl, sil
             2 => self.emit_insn(&Insn::raw_bytes(&[0x66, 0x09, 0xF2])), // or dx, si
@@ -2411,6 +2449,23 @@ impl Codegen {
         slot
     }
     pub(crate) fn emit_sub_rax_rcx(&mut self, inner_sz: i64) {
+        // P11: AluRm{Sub, reg-reg}. rax=0, rcx=1.
+        let width = match inner_sz {
+            8 => Width::B64,
+            _ => Width::B32,
+        };
+        let insn = Insn::new(
+            X86_64Opcode::AluRm {
+                op: AluOp::Sub,
+                width,
+                dst: OpcodeOperand::Reg(0, width),
+                src: OpcodeOperand::Reg(1, width),
+            },
+            &[],
+        );
+        if self.emit_insn(&insn) {
+            return;
+        }
         let rex = if inner_sz == 8 { 0x48 } else { 0x00 };
         if rex != 0 {
             self.emit_insn(&Insn::raw_bytes(&[rex]));
@@ -2418,11 +2473,28 @@ impl Codegen {
         self.emit_insn(&Insn::raw_bytes(&[0x29, 0xC8])); // sub rax/eax, rcx
     }
     pub(crate) fn emit_sub_rcx_rax(&mut self, inner_sz: i64) {
+        // P11: AluRm{Sub, reg-reg}. rcx=1, rax=0.
+        let width = match inner_sz {
+            8 => Width::B64,
+            _ => Width::B32,
+        };
+        let insn = Insn::new(
+            X86_64Opcode::AluRm {
+                op: AluOp::Sub,
+                width,
+                dst: OpcodeOperand::Reg(1, width),
+                src: OpcodeOperand::Reg(0, width),
+            },
+            &[],
+        );
+        if self.emit_insn(&insn) {
+            return;
+        }
         let rex = if inner_sz == 8 { 0x48 } else { 0x00 };
         if rex != 0 {
             self.emit_insn(&Insn::raw_bytes(&[rex]));
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x29, 0xC1])); // sub rcx/eax? rcx, rax
+        self.emit_insn(&Insn::raw_bytes(&[0x29, 0xC1])); // sub rcx/ecx, rax/eax
     }
     pub(crate) fn emit_vex3_prefix(&mut self, r: u8, v: u8, l: u8, pp: u8) {
         let r_inv = if r >= 8 { 0u8 } else { 1u8 };
@@ -2440,6 +2512,23 @@ impl Codegen {
         ]));
     }
     pub(crate) fn emit_xor_edx(&mut self, inner_sz: i64) {
+        // P11: AluRm{Xor, reg-reg}. edx=2 → edx=2.
+        let width = match inner_sz {
+            8 => Width::B64,
+            _ => Width::B32,
+        };
+        let insn = Insn::new(
+            X86_64Opcode::AluRm {
+                op: AluOp::Xor,
+                width,
+                dst: OpcodeOperand::Reg(2, width),
+                src: OpcodeOperand::Reg(2, width),
+            },
+            &[],
+        );
+        if self.emit_insn(&insn) {
+            return;
+        }
         if inner_sz == 8 {
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x31, 0xD2]));
         } else {
@@ -2447,6 +2536,25 @@ impl Codegen {
         }
     }
     pub(crate) fn emit_xor_rdx_rsi(&mut self, sz: usize) {
+        // P11: AluRm{Xor, reg-reg}. rdx=2, rsi=6.
+        let width = match sz {
+            1 => Width::B8,
+            2 => Width::B16,
+            4 => Width::B32,
+            _ => Width::B64,
+        };
+        let insn = Insn::new(
+            X86_64Opcode::AluRm {
+                op: AluOp::Xor,
+                width,
+                dst: OpcodeOperand::Reg(2, width),
+                src: OpcodeOperand::Reg(6, width),
+            },
+            &[],
+        );
+        if self.emit_insn(&insn) {
+            return;
+        }
         match sz {
             1 => self.emit_insn(&Insn::raw_bytes(&[0x40, 0x30, 0xF2])), // xor dl, sil
             2 => self.emit_insn(&Insn::raw_bytes(&[0x66, 0x31, 0xF2])), // xor dx, si

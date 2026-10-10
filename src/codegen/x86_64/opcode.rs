@@ -290,31 +290,89 @@ impl X86_64Opcode {
         use crate::codegen::shared::asm_operand::Width;
         match self {
             X86_64Opcode::AluRm { op, width, dst, src } => {
-                // 步骤 1 打样: 只覆盖 (Add|Sub, B64, Rsp=Reg(4), Imm(imm32)).
-                // 这正是 emit_sub_rsp / emit_add_rsp 现行手写字节:
+                // 形态分支 A (优先): (Add|Sub, B64, Rsp=Reg(4), Imm(imm32)).
+                // emit_sub_rsp / emit_add_rsp 现行手写字节:
                 //   sub rsp, imm32:  48 81 EC <imm32 LE>
                 //   add rsp, imm32:  48 81 C4 <imm32 LE>
-                let (Operand::Reg(reg_idx, Width::B64), Operand::Imm(imm)) = (dst, src) else {
+                if let (Operand::Reg(reg_idx, Width::B64), Operand::Imm(imm)) = (dst, src) {
+                    if *reg_idx == 4 {
+                        let (opcode, modrm_reg_field): (u8, u8) = match op {
+                            AluOp::Add => (0x81, 0b000), // /0
+                            AluOp::Sub => (0x81, 0b101), // /5
+                            _ => return None,
+                        };
+                        let rex = 0x48u8;
+                        let modrm = 0xC0 | (modrm_reg_field << 3) | (reg_idx & 7);
+                        let imm32 = (*imm as i32).to_le_bytes();
+                        let mut out = Vec::with_capacity(3 + 4);
+                        out.push(rex);
+                        out.push(opcode);
+                        out.push(modrm);
+                        out.extend_from_slice(&imm32);
+                        return Some(out);
+                    }
+                }
+                // 形态分支 B: reg, reg (reg-reg). 通用 ALU 族.
+                //   位序: 00=ADD r/m, r   01=OR   02=ADC   03=SBB
+                //         04=AND r/m, r  05=SUB r/m, r
+                //         06=XOR r/m, r 07=CMP r/m, r
+                //   0x20=ADD r, r/m      0x21=OR   0x28=AND   0x29=SUB
+                //         0x30=XOR       0x31=CMP  (同一 op 的反向 0x08/0x09/0x21/...)
+                //
+                //   ModRM.reg 放 src (源寄存器), ModRM.r/m 放 dst (目的寄存器 r/m).
+                //   对 AND/OR/XOR/SUB 等 (comm: 目的在 r/m 字段), opc=0x20/0x21/0x29/0x30/0x31.
+                //   对 ADD, 目的在 r/m: 用 0x00 (add r/m, r).
+                let (Operand::Reg(dst_idx, _), Operand::Reg(src_idx, _)) = (dst, src) else {
                     return None;
                 };
-                if *reg_idx != 4 || *width != Width::B64 {
+                // TEST 走 0x84/0x85 (无 ModRM.reg 语义), 暂不收敛.
+                if matches!(op, AluOp::Test) {
                     return None;
                 }
-                let (opcode, modrm_reg_field): (u8, u8) = match op {
-                    AluOp::Add => (0x81, 0b000), // /0
-                    AluOp::Sub => (0x81, 0b101), // /5
-                    _ => return None,
+                // opc_base: "目的在 r/m" 的 opc (00/08/21/29/31). modrm_reg_field 恒为 src.
+                //   B8:   0x00/0x08/0x20/0x28/0x30/0x38
+                //   B16+: 0x01/0x09/0x21/0x29/0x31/0x39
+                let is_byte8 = matches!(width, Width::B8);
+                let opc_base: u8 = match op {
+                    AluOp::Add => if is_byte8 { 0x00 } else { 0x01 },
+                    AluOp::Or => if is_byte8 { 0x08 } else { 0x09 },
+                    AluOp::And => if is_byte8 { 0x20 } else { 0x21 },
+                    AluOp::Sub => if is_byte8 { 0x28 } else { 0x29 },
+                    AluOp::Xor => if is_byte8 { 0x30 } else { 0x31 },
+                    AluOp::Cmp => if is_byte8 { 0x38 } else { 0x39 },
+                    AluOp::Test => return None,
                 };
-                // ModRM: mod=11 (reg) | reg_field | r/m=rsp(=4).
-                // reg_idx < 8, 所以 REX.B=0; REX.W=1 (64-bit 操作数).
-                let rex = 0x48u8;
-                let modrm = 0xC0 | (modrm_reg_field << 3) | (reg_idx & 7);
-                let imm32 = (*imm as i32).to_le_bytes();
-                let mut out = Vec::with_capacity(3 + 4);
-                out.push(rex);
-                out.push(opcode);
-                out.push(modrm);
-                out.extend_from_slice(&imm32);
+                // REX: W=1 仅 B64; R=1 当 src>=8 (ModRM.reg 字段); B=1 当 dst>=8 (ModRM.r/m 字段).
+                // 特殊: B8 (spl/bpl/sil/dil, src 或 dst ∈ {4,5,6,7}) 时必须发一个 REX 前缀
+                // 让汇编器把这些认成高 8 字节而非 ah/ch/dh/bh. 参考 emit_neg 与 monolith
+                // `and dl, sil` 手写的 0x40.
+                let mut rex: u8 = 0x40;
+                if matches!(width, Width::B64) {
+                    rex |= 0x08;
+                }
+                if *src_idx >= 8 {
+                    rex |= 0x04;
+                }
+                if *dst_idx >= 8 {
+                    rex |= 0x01;
+                }
+                // 需要真发 REX: B64 或任一字段>=8, 或 B8 形态涉及 src/dst ∈ {4,5,6,7}.
+                let need_high_byte =
+                    is_byte8 && (*src_idx >= 4 || *dst_idx >= 4);
+                let need_rex = matches!(width, Width::B64)
+                    || *src_idx >= 8
+                    || *dst_idx >= 8
+                    || need_high_byte;
+                let mut out = Vec::with_capacity(4);
+                if matches!(width, Width::B16) {
+                    out.push(0x66);
+                }
+                if need_rex {
+                    out.push(rex);
+                }
+                out.push(opc_base);
+                // ModRM: mod=11, reg=src, r/m=dst.
+                out.push(0xC0 | ((*src_idx & 7) << 3) | (*dst_idx & 7));
                 Some(out)
             }
             X86_64Opcode::Lea { dst, mem, rip_relative } => {
@@ -776,3 +834,179 @@ impl X86_64Opcode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codegen::shared::asm_operand::Width;
+
+    fn reg(r: u8, w: Width) -> Operand {
+        Operand::Reg(r, w)
+    }
+
+    #[test]
+    fn alu_rm_rsp_imm32_sub_b64() {
+        // sub rsp, imm32: 48 81 EC <imm32 LE>
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Sub,
+            width: Width::B64,
+            dst: reg(4, Width::B64),
+            src: Operand::Imm(16),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x81, 0xEC, 0x10, 0, 0, 0]));
+    }
+
+    #[test]
+    fn alu_rm_rsp_imm32_add_b64() {
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Add,
+            width: Width::B64,
+            dst: reg(4, Width::B64),
+            src: Operand::Imm(8),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x81, 0xC4, 0x08, 0, 0, 0]));
+    }
+
+    // ---- reg-reg form (P11 Batch 2 opening) ----
+
+    #[test]
+    fn alu_rm_reg_reg_and_b8_sil_dl() {
+        // and dl, sil (sz=1): 40 20 F2  (from instructions.rs::emit_and_rdx_rsi)
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::And,
+            width: Width::B8,
+            dst: reg(2, Width::B8), // dl (rdx=2)
+            src: reg(6, Width::B8), // sil (rsi=6)
+        };
+        assert_eq!(o.encode(), Some(vec![0x40, 0x20, 0xF2]));
+    }
+
+    #[test]
+    fn alu_rm_reg_reg_and_b16_dx_si() {
+        // and dx, si (sz=2): 66 21 F2
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::And,
+            width: Width::B16,
+            dst: reg(2, Width::B16),
+            src: reg(6, Width::B16),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x21, 0xF2]));
+    }
+
+    #[test]
+    fn alu_rm_reg_reg_and_b32_edx_esi() {
+        // and edx, esi (sz=4): 21 F2
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::And,
+            width: Width::B32,
+            dst: reg(2, Width::B32),
+            src: reg(6, Width::B32),
+        };
+        assert_eq!(o.encode(), Some(vec![0x21, 0xF2]));
+    }
+
+    #[test]
+    fn alu_rm_reg_reg_and_b64_rdx_rsi() {
+        // and rdx, rsi (sz=8): 48 21 F2
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::And,
+            width: Width::B64,
+            dst: reg(2, Width::B64),
+            src: reg(6, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x21, 0xF2]));
+    }
+
+    #[test]
+    fn alu_rm_reg_reg_or_all_widths() {
+        // or dl, sil:    40 08 F2
+        // or dx, si:     66 09 F2
+        // or edx, esi:   09 F2
+        // or rdx, rsi:   48 09 F2
+        for (w, expect) in [
+            (Width::B8, vec![0x40, 0x08, 0xF2]),
+            (Width::B16, vec![0x66, 0x09, 0xF2]),
+            (Width::B32, vec![0x09, 0xF2]),
+            (Width::B64, vec![0x48, 0x09, 0xF2]),
+        ] {
+            let o = X86_64Opcode::AluRm {
+                op: AluOp::Or,
+                width: w,
+                dst: reg(2, w),
+                src: reg(6, w),
+            };
+            assert_eq!(o.encode(), Some(expect), "width={:?}", w);
+        }
+    }
+
+    #[test]
+    fn alu_rm_reg_reg_xor_all_widths() {
+        // xor dl, sil:    40 30 F2
+        // xor dx, si:     66 31 F2
+        // xor edx, esi:   31 F2
+        // xor rdx, rsi:   48 31 F2
+        for (w, expect) in [
+            (Width::B8, vec![0x40, 0x30, 0xF2]),
+            (Width::B16, vec![0x66, 0x31, 0xF2]),
+            (Width::B32, vec![0x31, 0xF2]),
+            (Width::B64, vec![0x48, 0x31, 0xF2]),
+        ] {
+            let o = X86_64Opcode::AluRm {
+                op: AluOp::Xor,
+                width: w,
+                dst: reg(2, w),
+                src: reg(6, w),
+            };
+            assert_eq!(o.encode(), Some(expect), "width={:?}", w);
+        }
+    }
+
+    #[test]
+    fn alu_rm_reg_reg_sub_b64_rax_rcx() {
+        // sub rax, rcx (sz=8): 48 29 C8   (from emit_sub_rax_rcx)
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Sub,
+            width: Width::B64,
+            dst: reg(0, Width::B64),
+            src: reg(1, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x29, 0xC8]));
+    }
+
+    #[test]
+    fn alu_rm_reg_reg_sub_b32_rcx_rax() {
+        // sub ecx, eax (sz=4): 29 C1   (from emit_sub_rcx_rax)
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Sub,
+            width: Width::B32,
+            dst: reg(1, Width::B32),
+            src: reg(0, Width::B32),
+        };
+        assert_eq!(o.encode(), Some(vec![0x29, 0xC1]));
+    }
+
+    #[test]
+    fn alu_rm_reg_reg_xor_b32_edx_edx() {
+        // xor edx, edx (from emit_xor_edx): 31 D2
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Xor,
+            width: Width::B32,
+            dst: reg(2, Width::B32),
+            src: reg(2, Width::B32),
+        };
+        assert_eq!(o.encode(), Some(vec![0x31, 0xD2]));
+    }
+
+    #[test]
+    fn alu_rm_reg_reg_xor_b64_rdx_rdx() {
+        // xor rdx, rdx (sz=8): 48 31 D2
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Xor,
+            width: Width::B64,
+            dst: reg(2, Width::B64),
+            src: reg(2, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x31, 0xD2]));
+    }
+}
+
