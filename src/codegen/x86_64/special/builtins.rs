@@ -161,12 +161,16 @@ impl Codegen {
                 self.gen_expr(&args[1], 6);
                 self.emit_cas_loop(sz, |cg, s| {
                     cg.emit_and_rdx_rsi(s);
-                    match s {
-                        1 => cg.emit(&[0x40, 0xF6, 0xD2]), // not dl
-                        2 => cg.emit(&[0x66, 0xF7, 0xD2]), // not dx
-                        4 => cg.emit(&[0xF7, 0xD2]),       // not edx
-                        _ => cg.emit(&[0x48, 0xF7, 0xD2]), // not rdx
-                    }
+                    // P11 Bucket L: not dl/dx/edx/rdx via UnaryRm::Not.
+                    let w = match s {
+                        1 => crate::codegen::shared::asm_operand::Width::B8,
+                        2 => crate::codegen::shared::asm_operand::Width::B16,
+                        4 => crate::codegen::shared::asm_operand::Width::B32,
+                        _ => crate::codegen::shared::asm_operand::Width::B64,
+                    };
+                    cg.emit_insn(&crate::codegen::x86_64::insn::Insn::unary_rm_reg(
+                        crate::codegen::x86_64::opcode::UnaryOp::Not, w, 2,
+                    ));
                 });
                 let ord = self.eval_mem_order(&args[2]);
                 if ord == 5 {
@@ -540,12 +544,15 @@ impl Codegen {
                 self.emit_cas_loop(sz, |cg, s| {
                     // and rdx, rsi; not rdx
                     cg.emit_and_rdx_rsi(s);
-                    match s {
-                        1 => cg.emit(&[0x40, 0xF6, 0xD2]), // not dl
-                        2 => cg.emit(&[0x66, 0xF7, 0xD2]), // not dx
-                        4 => cg.emit(&[0xF7, 0xD2]),       // not edx
-                        _ => cg.emit(&[0x48, 0xF7, 0xD2]), // not rdx
-                    }
+                    let w = match s {
+                        1 => crate::codegen::shared::asm_operand::Width::B8,
+                        2 => crate::codegen::shared::asm_operand::Width::B16,
+                        4 => crate::codegen::shared::asm_operand::Width::B32,
+                        _ => crate::codegen::shared::asm_operand::Width::B64,
+                    };
+                    cg.emit_insn(&crate::codegen::x86_64::insn::Insn::unary_rm_reg(
+                        crate::codegen::x86_64::opcode::UnaryOp::Not, w, 2,
+                    ));
                 });
                 if dst != 1 {
                     self.mov(dst, 1);
@@ -696,12 +703,15 @@ impl Codegen {
                 self.gen_expr(&args[1], 6);
                 self.emit_cas_loop(sz, |cg, s| {
                     cg.emit_and_rdx_rsi(s);
-                    match s {
-                        1 => cg.emit(&[0x40, 0xF6, 0xD2]),
-                        2 => cg.emit(&[0x66, 0xF7, 0xD2]),
-                        4 => cg.emit(&[0xF7, 0xD2]),
-                        _ => cg.emit(&[0x48, 0xF7, 0xD2]),
-                    }
+                    let w = match s {
+                        1 => crate::codegen::shared::asm_operand::Width::B8,
+                        2 => crate::codegen::shared::asm_operand::Width::B16,
+                        4 => crate::codegen::shared::asm_operand::Width::B32,
+                        _ => crate::codegen::shared::asm_operand::Width::B64,
+                    };
+                    cg.emit_insn(&crate::codegen::x86_64::insn::Insn::unary_rm_reg(
+                        crate::codegen::x86_64::opcode::UnaryOp::Not, w, 2,
+                    ));
                 });
                 if dst != 2 {
                     self.mov(dst, 2);
@@ -2200,7 +2210,11 @@ impl Codegen {
                 // bsr dst, dst → dst = 最高位位置
                 self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xBD, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
                 // clz = (bits - 1) - dst
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0xF7, 0xD8 | (dst & 7)])); // neg dst
+                self.emit_insn(&Insn::unary_rm_reg(
+                    crate::codegen::x86_64::opcode::UnaryOp::Neg,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    dst,
+                ));
                 self.emit_insn(&Insn::raw_bytes(&[
                     rex,
                     0x83,

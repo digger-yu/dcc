@@ -990,9 +990,10 @@ impl Codegen {
         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x85, 0xC9, 0x74, 0x10]));
         self.emit_insn(&Insn::raw_bytes(&[0x8A, 0x06])); // mov al, [rsi]
         self.emit_insn(&Insn::raw_bytes(&[seg, 0x88, 0x07])); // mov seg:[rdi], al
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xFF, 0xC6])); // inc rsi
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xFF, 0xC7])); // inc rdi
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xFF, 0xC9])); // dec rcx
+        // P11 Bucket M: inc rsi/rdi + dec rcx via UnaryRm typed opcode.
+        self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Inc, crate::codegen::shared::asm_operand::Width::B64, 6));
+        self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Inc, crate::codegen::shared::asm_operand::Width::B64, 7));
+        self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Dec, crate::codegen::shared::asm_operand::Width::B64, 1));
         self.emit_insn(&Insn::raw_bytes(&[0x75, 0xF0])); // jnz -> 回到 mov al,[rsi]
     }
     pub(crate) fn emit_rsp_modrm_disp(&mut self, reg_field: u8, off: i64) {
