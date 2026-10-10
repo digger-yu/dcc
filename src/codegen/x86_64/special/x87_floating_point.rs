@@ -183,7 +183,20 @@ impl Codegen {
             // u64 拆半：x = 2*(x>>1) + (x&1)，两半都落在 i64 范围内。
             // 只用 rax + 内存运算，不占用任何额外 GP 寄存器（rdx/rcx 可能正持待用值）。
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x04, 0x24])); // mov [rsp], rax        ; x
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x04, 0x24])); // mov rax, [rsp]        ; x
+            self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0, base: Some(4), index: None, seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov rax, [rsp]        ; x
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x44, 0x24, 0x08])); // mov [rsp+8], rax
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, 0x6C, 0x24, 0x08])); // shr qword [rsp+8], 1  ; h = x>>1
             self.emit_insn(&Insn::raw_bytes(&[0x83, 0xE0, 0x01])); // and eax, 1                  ; b = x&1

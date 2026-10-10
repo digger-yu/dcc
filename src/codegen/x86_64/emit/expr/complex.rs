@@ -212,7 +212,20 @@ impl Codegen {
                     self.emit_insn(&Insn::raw_bytes(&[add_sub, 0x44, 0x24, r_imag_slot as u8]));
                     self.emit_insn(&Insn::raw_bytes(&[0x89, 0x44, 0x24, inner_sz as u8])); // mov [rsp+inner], eax
                 } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x04, 0x24]));
+                    self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0, base: Some(4), index: None, seg: None,
+                        }
+                    ),
+                },
+                &[],
+            ));
                     self.emit_insn(&Insn::raw_bytes(&[0x48, add_sub, 0x44, 0x24, total_sz as u8]));
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x04, 0x24]));
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x44, 0x24, inner_sz as u8]));
@@ -314,7 +327,20 @@ impl Codegen {
                         // 邻接垃圾导致 _Complex short/char 比较误判 (foo().x)。
                         match inner_sz {
                             4 => {
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x04, 0x24])); // mov rax, [rsp+0]
+                                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0, base: Some(4), index: None, seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov rax, [rsp+0]
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x4C, 0x24, total_sz as u8])); // mov rcx, [rsp+total]
                                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x39, 0xC8])); // cmp rax, rcx
                             },
@@ -332,7 +358,20 @@ impl Codegen {
                         self.jmp_rel32(&false_label, JumpKind::Jne);
                     } else {
                         // 8 字节内型: 实部/虚部各占独立 8 字节, 分两次比较
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x04, 0x24])); // mov rax, [rsp+0]
+                        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0, base: Some(4), index: None, seg: None,
+                        }
+                    ),
+                },
+                &[],
+            )); // mov rax, [rsp+0]
                         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x4C, 0x24, total_sz as u8])); // mov rcx, [rsp+total]
                         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x39, 0xC8])); // cmp rax, rcx
                         self.jmp_rel32(&false_label, JumpKind::Jne);
@@ -1015,7 +1054,20 @@ impl Codegen {
     fn gen_complex_int_mul(&mut self, inner_sz: i64, total_sz: i64, inner_ty: &Type) {
         if inner_sz == 8 {
             // rax=a, rcx=c, rdx=b, rsi=d
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x04, 0x24]));
+            self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B64
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0, base: Some(4), index: None, seg: None,
+                        }
+                    ),
+                },
+                &[],
+            ));
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x4C, 0x24, total_sz as u8]));
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x54, 0x24, inner_sz as u8]));
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x74, 0x24, (total_sz + inner_sz) as u8]));

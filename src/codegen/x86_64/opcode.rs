@@ -1293,5 +1293,31 @@ mod tests {
         };
         assert_eq!(o.encode(), Some(vec![0x8B, 0x00]));
     }
+
+    #[test]
+    fn mov_rm_mov_rax_load_rsp_b64() {
+        // mov rax, [rsp]:  48 8B 04 24  (SIB 跟随 rsp)
+        let o = X86_64Opcode::MovRm {
+            width: Width::B64,
+            dst: reg(0, Width::B64),
+            src: Operand::Mem(MemOperand {
+                disp: 0, base: Some(4), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x8B, 0x04, 0x24]));
+    }
+
+    #[test]
+    fn mov_rm_mov_eax_load_rsp_b32() {
+        // mov eax, [rsp]:  8B 04 24  (mod=00, reg=eax=0, SIB=24)
+        let o = X86_64Opcode::MovRm {
+            width: Width::B32,
+            dst: reg(0, Width::B32),
+            src: Operand::Mem(MemOperand {
+                disp: 0, base: Some(4), index: None, seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0x8B, 0x04, 0x24]));
+    }
 }
 
