@@ -2466,7 +2466,23 @@ impl Codegen {
         match sz {
             1 => self.emit_insn(&Insn::raw_bytes(&[0x40, 0x88, 0x37])), // mov [rdi], sil
             2 => self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x37])), // mov [rdi], si
-            4 => self.emit_insn(&Insn::raw_bytes(&[0x89, 0x37])),       // mov [rdi], esi
+            4 => self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(7),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        6, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )),       // mov [rdi], esi
             _ => self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x37])), // mov [rdi], rsi
         };
     }

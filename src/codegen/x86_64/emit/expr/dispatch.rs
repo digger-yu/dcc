@@ -1529,7 +1529,23 @@ impl Codegen {
                         self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x55, addr_off as u8])); // mov rdx, [r13+addr_off]
                                                                         // 存储容器 (结果在 rcx 中)
                         match container_size {
-                            4 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x89, 0x0A])); },       // mov [rdx], ecx
+                            4 => { let _ = self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(2),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        1, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); },       // mov [rdx], ecx
                             8 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x0A])); }, // mov [rdx], rcx
                             2 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x0A])); }, // mov [rdx], cx
                             1 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x88, 0x0A])); },       // mov [rdx], cl

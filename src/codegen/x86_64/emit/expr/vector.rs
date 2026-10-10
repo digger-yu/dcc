@@ -55,7 +55,23 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x01]));
             },
             4 => {
-                self.emit_insn(&Insn::raw_bytes(&[0x89, 0x01]));
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(1),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            ));
             },
             _ => {
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x01]));

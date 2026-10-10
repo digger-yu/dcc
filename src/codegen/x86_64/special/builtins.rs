@@ -1357,7 +1357,23 @@ impl Codegen {
                 match var_size {
                     1 => { self.emit_insn(&Insn::raw_bytes(&[0x88, 0x01])); }       // mov [rcx], al
                     2 => { self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x01])); } // mov [rcx], ax
-                    4 => { self.emit_insn(&Insn::raw_bytes(&[0x89, 0x01])); }       // mov [rcx], eax
+                    4 => { self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(1),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); }       // mov [rcx], eax
                     _ => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x01])); } // mov [rcx], rax
                 }
                 true
