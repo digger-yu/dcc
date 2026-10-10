@@ -2155,7 +2155,18 @@ impl Codegen {
                 let l_retry = self.fresh_label();
                 self.label(&l_retry);
                 self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC1])); // mov ecx, eax
-                self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC2])); // mov edx, eax
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        2, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov edx, eax
                 compute_new(self, sz);
                 self.emit_lock_cmpxchg_rdi_rdx(sz);
                 let l_done = self.fresh_label();
@@ -2169,7 +2180,18 @@ impl Codegen {
                 let l_retry = self.fresh_label();
                 self.label(&l_retry);
                 self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC1])); // mov ecx, eax
-                self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC2])); // mov edx, eax
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        2, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov edx, eax
                 compute_new(self, sz);
                 self.emit_lock_cmpxchg_rdi_rdx(sz);
                 let l_done = self.fresh_label();
@@ -2183,7 +2205,18 @@ impl Codegen {
                 let l_retry = self.fresh_label();
                 self.label(&l_retry);
                 self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC1])); // mov ecx, eax
-                self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC2])); // mov edx, eax
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        2, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov edx, eax
                 compute_new(self, sz);
                 self.emit_lock_cmpxchg_rdi_rdx(sz);
                 let l_done = self.fresh_label();

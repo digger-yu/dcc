@@ -1656,7 +1656,18 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC6])); // mov esi, eax (esi = sign)
                                           // 3. 合成: eax=isinf, edx=isinf, eax=-isinf; 若 sign==0, eax=edx
                 self.emit_insn(&Insn::raw_bytes(&[0x89, 0xF8])); // mov eax, edi (eax = isinf)
-                self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC2])); // mov edx, eax (edx = isinf)
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        2, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov edx, eax (edx = isinf)
                 self.emit_insn(&Insn::raw_bytes(&[0xF7, 0xD8])); // neg eax (eax = -isinf)
                 self.emit_insn(&Insn::raw_bytes(&[0x85, 0xF6])); // test esi, esi
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x44, 0xC2])); // cmove eax, edx
@@ -2925,7 +2936,18 @@ impl Codegen {
                         self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE0, 16])); // shl eax, 16
                         self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xF8, 31])); // sar eax, 31 → 0 或 -1
                         self.emit_insn(&Insn::raw_bytes(&[0x25, 0xFF, 0xFF, 0x00, 0x00])); // and eax, 0xFFFF → 保留符号扩展
-                        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC2])); // mov edx, eax
+                        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        2, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov edx, eax
                         // 恢复原始16位值到eax的低16位，高位清零
                         self.emit_insn(&Insn::raw_bytes(&[0x25, 0xFF, 0xFF, 0x00, 0x00])); // and eax, 0xFFFF
                     } else {
@@ -2933,7 +2955,18 @@ impl Codegen {
                         self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE0, 24])); // shl eax, 24
                         self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xF8, 31])); // sar eax, 31 → 0 或 -1
                         self.emit_insn(&Insn::raw_bytes(&[0x25, 0xFF, 0x00, 0x00, 0x00])); // and eax, 0xFF → 保留符号扩展
-                        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC2])); // mov edx, eax
+                        self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        2, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov edx, eax
                         // 恢复原始8位值到eax的低8位，高位清零
                         self.emit_insn(&Insn::raw_bytes(&[0x25, 0xFF, 0x00, 0x00, 0x00])); // and eax, 0xFF
                     }
@@ -4629,7 +4662,18 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
                                                             // 清除屏蔽位 (启用陷阱): 屏蔽位在 7-12
                                                             // eax = excepts (from gen_expr above), copy to edx
-                self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC2])); // mov edx, eax (edx = excepts)
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        2, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov edx, eax (edx = excepts)
                 self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE2, 0x07])); // shl edx, 7 (shift to mask position)
                 self.emit_insn(&Insn::raw_bytes(&[0xF7, 0xD2])); // not edx (invert: clear bit = enable)
                 self.emit_insn(&Insn::raw_bytes(&[0x21, 0xD1])); // and ecx, edx (clear mask bits in MXCSR)
@@ -4652,7 +4696,18 @@ impl Codegen {
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE); // rax = excepts
                 self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
-                self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC2])); // mov edx, eax (save excepts in edx)
+                self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        2, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0, crate::codegen::shared::asm_operand::Width::B32
+                    ),
+                },
+                &[],
+            )); // mov edx, eax (save excepts in edx)
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x10])); // sub rsp, 16
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAE, 0x1C, 0x24])); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
