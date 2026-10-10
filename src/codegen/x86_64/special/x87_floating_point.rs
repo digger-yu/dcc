@@ -148,7 +148,7 @@ impl Codegen {
     /// sub/add 成对，对嵌套求值与 outgoing 参数区不可见。
     pub fn emit_xmm0_to_st0(&mut self, ty: &Type) {
         let is_float = matches!(ty, Type::Float);
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x10])); // sub rsp, 16
+        self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp, 16
         if is_float {
             self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x11, 0x04, 0x24])); // movss %xmm0, (%rsp)
             self.emit_insn(&Insn::raw_bytes(&[0xD9, 0x04, 0x24])); // fld  dword (%rsp)
@@ -156,7 +156,7 @@ impl Codegen {
             self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x11, 0x04, 0x24])); // movsd %xmm0, (%rsp)
             self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x04, 0x24])); // fld  qword (%rsp)
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x10])); // add rsp, 16
+        self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp, 16
     }
 
     /// 整数 rvalue → st(0)。80-bit 有 64 位显式尾数，
@@ -178,7 +178,7 @@ impl Codegen {
         if src != 0 {
             self.mov(0, src); // 统一以 rax 为输入，下面只使用 rax + 内存 scratch
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x20])); // sub rsp, 32（16 字节对齐不变）
+        self.emit_insn(&Insn::sub_rsp_imm(32)); // sub rsp, 32（16 字节对齐不变）
         if unsigned && sz >= 8 {
             // u64 拆半：x = 2*(x>>1) + (x&1)，两半都落在 i64 范围内。
             // 只用 rax + 内存运算，不占用任何额外 GP 寄存器（rdx/rcx 可能正持待用值）。
@@ -298,7 +298,7 @@ impl Codegen {
                 self.emit_x87_mem_at(0xDB, 0, 4, 0, false); // fild dword [rsp]
             }
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x20])); // add rsp, 32
+        self.emit_insn(&Insn::add_rsp_imm(32)); // add rsp, 32
     }
 
     /// 把一个任意类型的 rvalue 搬到 x87 `st(0)`。
@@ -404,7 +404,7 @@ impl Codegen {
     pub fn emit_mem_float_to_xmm(&mut self, base: u8, disp: i32, ty: &Type, xmm: u8) {
         if self.float_in_st0(ty) {
             // sub rsp,16（scratch，同时保持调用对齐）
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x10]));
+            self.emit_insn(&Insn::sub_rsp_imm(16));
             self.emit_x87_fld_at(base, disp, ty);
             self.emit_x87_fstp_at(4, 0, ty); // fstp tbyte [rsp]
                                              // 按 xmm 目标宽度舍入重读到 xmm
@@ -417,7 +417,7 @@ impl Codegen {
             }
             self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x10]));
             self.emit_insn(&Insn::raw_bytes(&[0x04 | ((xmm & 7) << 3), 0x24])); // mod=00 xmm, SIB [rsp]
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x10])); // add rsp,16
+            self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp,16
             return;
         }
         let pfx: u8 = if matches!(ty, Type::Float) { 0xF3 } else { 0xF2 };
@@ -455,7 +455,7 @@ impl Codegen {
         dst_ty: &Type,
     ) {
         debug_assert!(self.float_in_st0(dst_ty));
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x10])); // sub rsp,16
+        self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp,16
         let pfx: u8 = if matches!(src_ty, Type::Float) { 0xF3 } else { 0xF2 };
         // REX 必须在 mandatory prefix 之后
         self.emit_insn(&Insn::raw_bytes(&[pfx]));
@@ -465,7 +465,7 @@ impl Codegen {
         self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x11, 0x04 | ((xmm & 7) << 3), 0x24])); // mov [rsp], xmm
         self.emit_x87_fld_at(4, 0, src_ty); // fld [rsp]（精确拓宽）
         self.emit_x87_fstp_at(base, disp, dst_ty); // fstp tbyte/dword/qword [base+disp]
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x10])); // add rsp,16
+        self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp,16
     }
 
     /// x87 浮点比较: fucomip + 标志修正 -> rax (0/1)
@@ -479,7 +479,7 @@ impl Codegen {
         // 加载左操作数到 st(0)
         self.gen_expr(l, Self::EVAL_BASE); // st(0) = l
         self.emit_operand_to_st0(&l.ty(), 0);
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, save_bytes])); // sub rsp, 16
+        self.emit_insn(&Insn::sub_rsp_imm(save_bytes as i64)); // sub rsp, 16
         if is_ld {
             self.emit_insn(&Insn::raw_bytes(&[0xDB, 0x3C, 0x24])); // fstp tbyte [rsp]
         } else {
@@ -496,7 +496,7 @@ impl Codegen {
         } else {
             self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x04, 0x24])); // fld qword [rsp]
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, save_bytes])); // add rsp, 16
+        self.emit_insn(&Insn::add_rsp_imm(save_bytes as i64)); // add rsp, 16
                                                     // 现在 st(0) = l, st(1) = r
                                                     // fucomip st(0), st(1): 比较 st(0) vs st(1), 设置 EFLAGS, 弹出 st(0)
         self.emit_insn(&Insn::raw_bytes(&[0xDF, 0xE9])); // fucomip st(0), st(1)
@@ -603,19 +603,19 @@ impl Codegen {
     /// 自带 `sub/add rsp,16` 平衡：外层 `gen_float_binop` 会把操作数溢出到
     /// `[rsp]`，不能直接踩现有栈顶（旧版无 sub 的写法会静默覆盖那个溢出槽）。
     pub fn emit_x87_to_xmm0(&mut self) {
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x10])); // sub rsp, 16
+        self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp, 16
         self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x1C, 0x24])); // fstp qword (%rsp)  ← 硬件完成 80→64 舍入
         self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x10, 0x04, 0x24])); // movsd xmm0, (%rsp)
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x10])); // add rsp, 16
+        self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp, 16
     }
 
     /// x87 st(0) (long double) → xmm0 (float)：单步 80→32 舍入，
     /// 不经 f64 双舍入（`fstp dword` 直接产出 float 位型）。
     pub fn emit_x87_to_xmm0_f32(&mut self) {
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 0x10])); // sub rsp, 16
+        self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp, 16
         self.emit_insn(&Insn::raw_bytes(&[0xD9, 0x1C, 0x24])); // fstp dword (%rsp)
         self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, 0x04, 0x24])); // movss xmm0, (%rsp)
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 0x10])); // add rsp, 16
+        self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp, 16
     }
 
     /// x87 fldz: 加載 +0.0 到 st(0)

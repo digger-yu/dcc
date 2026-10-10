@@ -116,6 +116,20 @@ impl Insn {
         self
     }
 
+    /// P11: 构造 `sub rsp, imm8` (imm 可装进 i8, 走 0x83 短形式, 48 83 EC ib).
+    /// 注意: 这个形态**不**走 AluRm.encode() (因为 AluRm 默认走 0x81 imm32),
+    /// 直接内联手写字节以保持 G10 快照逐字节一致.
+    pub fn sub_rsp_imm(imm: i64) -> Self {
+        let v = imm as i8 as u8;
+        Insn::raw_bytes(&[0x48, 0x83, 0xEC, v])
+    }
+
+    /// P11: 构造 `add rsp, imm8` (imm 可装进 i8, 走 0x83 短形式, 48 83 C4 ib).
+    pub fn add_rsp_imm(imm: i64) -> Self {
+        let v = imm as i8 as u8;
+        Insn::raw_bytes(&[0x48, 0x83, 0xC4, v])
+    }
+
     pub fn encode_bytes(&self) -> Option<Vec<u8>> {
         // 类型化变体: 让 opcode.rs 现场算字节. 尚未实现的变体返回 None →
         // 发射方必须切回 raw_bytes 兜底; 当前没有任何调用点依赖 None 分支.

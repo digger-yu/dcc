@@ -290,8 +290,9 @@ impl X86_64Opcode {
         use crate::codegen::shared::asm_operand::Width;
         match self {
             X86_64Opcode::AluRm { op, width, dst, src } => {
-                // 形态分支 A (优先): (Add|Sub, B64, Rsp=Reg(4), Imm(imm32)).
-                // emit_sub_rsp / emit_add_rsp 现行手写字节:
+                // 形态分支 A: (Add|Sub, B64, Rsp=Reg(4), Imm).
+                // 手写约定: 所有 emit_sub_rsp / emit_add_rsp 走 0x81 / id (imm32 LE),
+                // 即使 imm 很小也带 4 字节立即数 (G10 快照依赖此行为).
                 //   sub rsp, imm32:  48 81 EC <imm32 LE>
                 //   add rsp, imm32:  48 81 C4 <imm32 LE>
                 if let (Operand::Reg(reg_idx, Width::B64), Operand::Imm(imm)) = (dst, src) {
@@ -1012,25 +1013,26 @@ mod tests {
 
     #[test]
     fn alu_rm_rsp_imm32_sub_b64() {
-        // sub rsp, imm32: 48 81 EC <imm32 LE>
+        // sub rsp, 4096 (imm 超出 i8, 走 0x81 / id): 48 81 EC 00 10 00 00
         let o = X86_64Opcode::AluRm {
             op: AluOp::Sub,
             width: Width::B64,
             dst: reg(4, Width::B64),
-            src: Operand::Imm(16),
+            src: Operand::Imm(4096),
         };
-        assert_eq!(o.encode(), Some(vec![0x48, 0x81, 0xEC, 0x10, 0, 0, 0]));
+        assert_eq!(o.encode(), Some(vec![0x48, 0x81, 0xEC, 0x00, 0x10, 0, 0]));
     }
 
     #[test]
     fn alu_rm_rsp_imm32_add_b64() {
+        // add rsp, 4096: 48 81 C4 00 10 00 00
         let o = X86_64Opcode::AluRm {
             op: AluOp::Add,
             width: Width::B64,
             dst: reg(4, Width::B64),
-            src: Operand::Imm(8),
+            src: Operand::Imm(4096),
         };
-        assert_eq!(o.encode(), Some(vec![0x48, 0x81, 0xC4, 0x08, 0, 0, 0]));
+        assert_eq!(o.encode(), Some(vec![0x48, 0x81, 0xC4, 0x00, 0x10, 0, 0]));
     }
 
     // ---- reg-reg form (P11 Batch 2 opening) ----
@@ -1179,7 +1181,7 @@ mod tests {
 
     #[test]
     fn alu_rm_sub_rsp_imm8_b64() {
-        // sub rsp, 16 (A2 分支不覆盖 rsp; rsp 走 0x81 / id): 48 81 EC 10 00 00 00
+        // sub rsp, 16: AluRm 走 0x81 / id (imm32 形式): 48 81 EC 10 00 00 00
         let o = X86_64Opcode::AluRm {
             op: AluOp::Sub,
             width: Width::B64,
@@ -1203,7 +1205,7 @@ mod tests {
 
     #[test]
     fn alu_rm_add_rsp_imm8_b64() {
-        // add rsp, 16 (rsp 走 0x81 / id): 48 81 C4 10 00 00 00
+        // add rsp, 16: AluRm 走 0x81 / id: 48 81 C4 10 00 00 00
         let o = X86_64Opcode::AluRm {
             op: AluOp::Add,
             width: Width::B64,

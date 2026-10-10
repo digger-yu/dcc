@@ -466,7 +466,7 @@ impl Codegen {
                 self.gen_expr(l, Self::EVAL_BASE); // st(0) = l
                 self.emit_operand_to_st0(&l.ty(), 0);
                 // 保存 st(0) 到栈临时区 (固定 16 字节: ld 要装 tbyte 且保持对齐)
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 16])); // sub rsp, 16
+                self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp, 16
                 if is_long_double {
                     self.emit_insn(&Insn::raw_bytes(&[0xDB, 0x3C, 0x24])); // fstp tbyte [rsp]
                 } else {
@@ -495,7 +495,7 @@ impl Codegen {
                                                 // 简化处理: 直接用 x87 做减法模拟 fmod
                                                 // 实际上内核很少用浮点取模, 这里先简单处理
                                                 // （C 的 `%` 本身不允许浮点操作数）
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 16])); // add rsp, 16
+                self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp, 16
                 self.emit_x87_fldz(); // 结果置 0 (简化处理)
                 return;
             }
@@ -505,7 +505,7 @@ impl Codegen {
                                  // 整数 / 宽浮点操作数经 Layer0 唯一入口搬到 st(0)
             self.emit_operand_to_st0(&l.ty(), 0);
             // 保存 l 到刚分配的 16 字节槽 (long double 用 tbyte, 否则 qword)
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, 16])); // sub rsp, 16
+            self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp, 16
             if is_long_double {
                 self.emit_insn(&Insn::raw_bytes(&[0xDB, 0x3C, 0x24])); // fstp tbyte [rsp]
             } else {
@@ -521,7 +521,7 @@ impl Codegen {
             } else {
                 self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x04, 0x24])); // fld qword [rsp]
             }
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC4, 16])); // add rsp, 16
+            self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp, 16
                                                 // 执行运算: st(0) = 左, st(1) = 右
                                                 // x87 的 fxxxp 是 st(1) op st(0), 然后 pop
                                                 // 当前: st(0) = l, st(1) = r
@@ -547,7 +547,7 @@ impl Codegen {
             let save_bytes = (self.expr_depth as i32 + 1) * 8;
             self.gen_expr(l, Self::EVAL_BASE);
             self.emit_scalar_to_xmm0_if_needed(l, &float_ty);
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xEC, save_bytes as u8]));
+            self.emit_insn(&Insn::sub_rsp_imm(save_bytes as i64));
             if is_float {
                 self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x11, 0x04, 0x24])); // movss [rsp], xmm0
             } else {
