@@ -332,6 +332,38 @@ impl Insn {
         )
     }
 
+    /// P11 Bucket E: stmxcsr/ldmxcsr [base+disp] (0F AE /3 or /2).
+    pub fn mxcsr_mem(store: bool, base: u8, disp: i32) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::X87 {
+                op: crate::codegen::x86_64::opcode::X87Op::MxcsrMem { store },
+                mem: Some(crate::codegen::x86_64::opcode::MemOperand {
+                    disp,
+                    base: Some(base),
+                    index: None,
+                    seg: None,
+                }),
+            },
+            &[],
+        )
+    }
+
+    /// P11 Bucket E: fnstcw/fldcw [base+disp] (D9 /7 or /5).
+    pub fn fcw_mem(store: bool, base: u8, disp: i32) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::X87 {
+                op: crate::codegen::x86_64::opcode::X87Op::FcwMem { store },
+                mem: Some(crate::codegen::x86_64::opcode::MemOperand {
+                    disp,
+                    base: Some(base),
+                    index: None,
+                    seg: None,
+                }),
+            },
+            &[],
+        )
+    }
+
     /// P11 Bucket H: setcc r8 (0F 9x /0, mod=11).
     /// reg_idx: Intel reg number (0=al,1=cl,2=dl,3=bl,4=ah..15=r15b).
     pub fn setcc_reg(

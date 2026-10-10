@@ -101,6 +101,23 @@ pub(crate) enum SimdArithOp {
     /// single/double-precision floats. Used by isinf/fabs fast paths.
     Andps,
     Andpd,
+    /// P11 Bucket A2: orps/orpd (0F 56 /r / 66 0F 56 /r) — bitwise OR packed.
+    Orps,
+    Orpd,
+    /// P11 Bucket B: packed integer add/sub across widths (paddb/w/d/q).
+    /// paddb=66 0F FC /r, paddw=66 0F FD /r, paddd=66 0F FE /r, paddq=66 0F D4 /r.
+    /// psubb=66 0F F8 /r, psubw=66 0F F9 /r, psubd=66 0F FA /r, psubq=66 0F FB /r.
+    PAdd,
+    PSub,
+    /// P11 Bucket B: packed float arithmetic (addps/subps/mulps/divps / pd variants).
+    Addps,
+    Subps,
+    Mulps,
+    Divps,
+    Addpd,
+    Subpd,
+    Mulpd,
+    Divpd,
 }
 
 /// SIMD 宽度 — 步骤 4: SimdMov 用来发 xmm store/load 到 rsp 槽.
@@ -118,6 +135,11 @@ pub(crate) enum SimdWidth {
     DQ,
     /// 128-bit 通用 (movups/movaps 无 legacy 前缀)
     O,
+    /// P11 Bucket B: packed-integer element sizes (used by PAdd/PSub).
+    B, // 8-bit elements (paddb/psubb)
+    W, // 16-bit elements (paddw/psubw)
+    D, // 32-bit elements (paddd/psubd)
+    Q, // 64-bit elements (paddq/psubq)
 }
 
 /// x87 操作. 步骤 4: 覆盖固定 escap 字节 (无操作数) 与单内存操作数两类.
@@ -143,6 +165,13 @@ pub(crate) enum X87Op {
     FstpMem { width: u8 },
     /// fild m32int / m64int. width: 4=m32int, 8=m64int (带 REX.W).
     FildMem { width: u8 },
+    /// P11 Bucket E: stmxcsr/ldmxcsr m32 — 0F AE /3 (store) or /2 (load).
+    /// Encoding: 0F AE modrm(mod=00, reg=2|3, r/m=base) + SIB(disp8|disp32).
+    MxcsrMem { store: bool },
+    /// P11 Bucket E: fnstcw/fldcw m16 — D9 /7 (store) or /5 (load).
+    ///   fnstcw [rsp]: D9 3C 24 (SIB mod=00, reg=7, rm=4, disp8=0).
+    ///   fldcw  [rsp]: D9 2C 24 (SIB mod=00, reg=5, rm=4, disp8=0).
+    FcwMem { store: bool },
 }
 
 /// 移位数量: CL 或 imm8 — 步骤 1 不实现.
@@ -1176,6 +1205,53 @@ impl X86_64Opcode {
                         out.extend_from_slice(&disp.to_le_bytes());
                         Some(out)
                     }
+                    X87Op::MxcsrMem { store } | X87Op::FcwMem { store } => {
+                        let _ = store;
+                        #[allow(clippy::question_mark)]
+                        let mem = match mem {
+                            Some(m) => m,
+                            None => return None,
+                        };
+                        if mem.index.is_some() || mem.seg.is_some() {
+                            return None;
+                        }
+                        let base = mem.base?;
+                        if base == 12 {
+                            return None;
+                        }
+                        // escap + reg_field (mod=00, SIB if rm==100) + disp.
+                        let (escap, reg_field): (u8, u8) = match op {
+                            X87Op::MxcsrMem { store: true } => (0xAE, 3),   // stmxcsr
+                            X87Op::MxcsrMem { store: false } => (0xAE, 2),  // ldmxcsr
+                            X87Op::FcwMem { store: true } => (0xD9, 7),     // fnstcw
+                            X87Op::FcwMem { store: false } => (0xD9, 5),    // fldcw
+                            _ => return None,
+                        };
+                        // 0F AE needs a 0x0F escape byte before escap.
+                        let mut out = Vec::with_capacity(8);
+                        if escap == 0xAE {
+                            out.push(0x0F);
+                        }
+                        out.push(escap);
+                        let disp = mem.disp;
+                        // mod=00; if disp in [-128..=127], use disp8; else disp32.
+                        // base==4 (rsp) or base==13 (r13) → SIB byte.
+                        if base == 4 || base == 13 {
+                            // modrm = 00 | reg<<3 | 100; SIB = 00 | base(100=rsp)
+                            out.push(0x80 | (reg_field << 3));
+                            out.push(0x20 | (base & 7));
+                        } else {
+                            out.push((reg_field << 3) | (base & 7));
+                        }
+                        // Emit disp8 or disp32. All call sites in builtins.rs use
+                        // disp=0 or disp=0x1C (28), both fit signed-byte.
+                        if (-128..=127).contains(&disp) {
+                            out.push(disp as u8);
+                        } else {
+                            out.extend_from_slice(&disp.to_le_bytes());
+                        }
+                        Some(out)
+                    }
                 }
             }
             X86_64Opcode::SimdMov { width, opcode10, dst, src } => {
@@ -1201,6 +1277,9 @@ impl X86_64Opcode {
                         (SimdWidth::PD, false) => (0x66, 0x29),
                         (SimdWidth::DQ, true) => (0x66, 0x6F),
                         (SimdWidth::DQ, false) => (0x66, 0x7F),
+                        // P11 Bucket B: B/W/D/Q widths are only valid in SimdArith,
+                        // not SimdMov; reject to keep this match exhaustive.
+                        _ => return None,
                     };
                     let need_rex = *dst_xmm >= 8 || *src_xmm >= 8;
                     let mut out = Vec::with_capacity(6);
@@ -1319,6 +1398,38 @@ impl X86_64Opcode {
                     //   andpd xmm0,xmm1:  66 0F 54 C1
                     (SimdArithOp::Andps, _) => (0x00, 0x54),
                     (SimdArithOp::Andpd, _) => (0x66, 0x54),
+                    // P11 Bucket A2: maxsd/maxss/minsd/minss scalar.
+                    //   maxsd xmm0,xmm1: F2 0F 5F C1   maxss xmm0,xmm1: F3 0F 5F C1
+                    //   minsd xmm0,xmm1: F2 0F 5D C1   minss xmm0,xmm1: F3 0F 5D C1
+                    (SimdArithOp::Max, SimdWidth::SD) => (0xF2, 0x5F),
+                    (SimdArithOp::Max, SimdWidth::SS) => (0xF3, 0x5F),
+                    (SimdArithOp::Min, SimdWidth::SD) => (0xF2, 0x5D),
+                    (SimdArithOp::Min, SimdWidth::SS) => (0xF3, 0x5D),
+                    // P11 Bucket A2: orps/orpd bitwise OR.
+                    //   orps xmm0,xmm1: 0F 56 C1   orpd xmm0,xmm1: 66 0F 56 C1
+                    (SimdArithOp::Orps, _) => (0x00, 0x56),
+                    (SimdArithOp::Orpd, _) => (0x66, 0x56),
+                    // P11 Bucket B: packed float arith (addps/subps/mulps/divps / pd).
+                    //   addps 0F 58, subps 0F 5C, mulps 0F 59, divps 0F 5E
+                    //   addpd 66 0F 58, subpd 66 0F 5C, mulpd 66 0F 59, divpd 66 0F 5E
+                    (SimdArithOp::Addps, _) => (0x00, 0x58),
+                    (SimdArithOp::Subps, _) => (0x00, 0x5C),
+                    (SimdArithOp::Mulps, _) => (0x00, 0x59),
+                    (SimdArithOp::Divps, _) => (0x00, 0x5E),
+                    (SimdArithOp::Addpd, _) => (0x66, 0x58),
+                    (SimdArithOp::Subpd, _) => (0x66, 0x5C),
+                    (SimdArithOp::Mulpd, _) => (0x66, 0x59),
+                    (SimdArithOp::Divpd, _) => (0x66, 0x5E),
+                    // P11 Bucket B: packed integer add/sub (paddb/w/d/q, psubb/w/d/q).
+                    //   All use 66 prefix; opcode varies by element width.
+                    (SimdArithOp::PAdd, SimdWidth::B) => (0x66, 0xFC),
+                    (SimdArithOp::PAdd, SimdWidth::W) => (0x66, 0xFD),
+                    (SimdArithOp::PAdd, SimdWidth::D) => (0x66, 0xFE),
+                    (SimdArithOp::PAdd, SimdWidth::Q) => (0x66, 0xD4),
+                    (SimdArithOp::PSub, SimdWidth::B) => (0x66, 0xF8),
+                    (SimdArithOp::PSub, SimdWidth::W) => (0x66, 0xF9),
+                    (SimdArithOp::PSub, SimdWidth::D) => (0x66, 0xFA),
+                    (SimdArithOp::PSub, SimdWidth::Q) => (0x66, 0xFB),
                     _ => return None,
                 };
                 let mut rex: u8 = 0x40;
@@ -2459,6 +2570,132 @@ mod tests {
             src: xmm(15),
         };
         assert_eq!(o.encode(), Some(vec![0x45, 0x0F, 0x57, 0xFF]));
+    }
+
+    // ---- SimdArith max/min/orps/orpd (P11 Bucket A2) ----
+
+    #[test]
+    fn simd_minsd_xmm0_xmm2() {
+        // minsd xmm0, xmm2:  F2 0F 5D C2
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Min,
+            width: SimdWidth::SD,
+            dst: xmm(0),
+            src: xmm(2),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF2, 0x0F, 0x5D, 0xC2]));
+    }
+
+    #[test]
+    fn simd_minss_xmm0_xmm2() {
+        // minss xmm0, xmm2:  F3 0F 5D C2
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Min,
+            width: SimdWidth::SS,
+            dst: xmm(0),
+            src: xmm(2),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0x0F, 0x5D, 0xC2]));
+    }
+
+    #[test]
+    fn simd_maxsd_xmm0_xmm2() {
+        // maxsd xmm0, xmm2:  F2 0F 5F C2
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Max,
+            width: SimdWidth::SD,
+            dst: xmm(0),
+            src: xmm(2),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF2, 0x0F, 0x5F, 0xC2]));
+    }
+
+    #[test]
+    fn simd_maxss_xmm0_xmm2() {
+        // maxss xmm0, xmm2:  F3 0F 5F C2
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Max,
+            width: SimdWidth::SS,
+            dst: xmm(0),
+            src: xmm(2),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0x0F, 0x5F, 0xC2]));
+    }
+
+    #[test]
+    fn simd_orps_xmm0_xmm1() {
+        // orps xmm0, xmm1:  0F 56 C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Orps,
+            width: SimdWidth::PS,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0x56, 0xC1]));
+    }
+
+    #[test]
+    fn simd_orpd_xmm0_xmm1() {
+        // orpd xmm0, xmm1:  66 0F 56 C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Orpd,
+            width: SimdWidth::PD,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x56, 0xC1]));
+    }
+
+    // ---- SimdArith packed integer (P11 Bucket B) ----
+
+    #[test]
+    fn simd_paddq_xmm0_xmm1() {
+        // paddq xmm0, xmm1:  66 0F D4 C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::PAdd,
+            width: SimdWidth::Q,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0xD4, 0xC1]));
+    }
+
+    #[test]
+    fn simd_psubw_xmm0_xmm1() {
+        // psubw xmm0, xmm1:  66 0F F9 C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::PSub,
+            width: SimdWidth::W,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0xF9, 0xC1]));
+    }
+
+    // ---- SimdArith packed float (P11 Bucket B) ----
+
+    #[test]
+    fn simd_addps_xmm0_xmm1() {
+        // addps xmm0, xmm1:  0F 58 C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Addps,
+            width: SimdWidth::PS,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0x58, 0xC1]));
+    }
+
+    #[test]
+    fn simd_mulpd_xmm0_xmm1() {
+        // mulpd xmm0, xmm1:  66 0F 59 C1
+        let o = X86_64Opcode::SimdArith {
+            op: SimdArithOp::Mulpd,
+            width: SimdWidth::PD,
+            dst: xmm(0),
+            src: xmm(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x59, 0xC1]));
     }
 
     // ---- SimdArith ucomi/comi (P11 Bucket A) ----

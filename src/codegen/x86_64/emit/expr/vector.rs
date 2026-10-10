@@ -989,55 +989,55 @@ impl Codegen {
         self.emit_movdqu_r13_to_xmm(1, right_off);
 
         if is_float {
-            // packed single: addps=0x58, subps=0x5C, mulps=0x59, divps=0x5E
-            let opcode = match op {
-                BinOp::Add => 0x58,
-                BinOp::Sub => 0x5C,
-                BinOp::Mul => 0x59,
-                BinOp::Div => 0x5E,
+            // packed single: addps/subps/mulps/divps (P11 Bucket B typed).
+            let sop = match op {
+                BinOp::Add => SimdArithOp::Addps,
+                BinOp::Sub => SimdArithOp::Subps,
+                BinOp::Mul => SimdArithOp::Mulps,
+                BinOp::Div => SimdArithOp::Divps,
                 _ => return false,
             };
-            self.emit_insn(&Insn::raw_bytes(&[0x0F, opcode, 0xC1])); // addps/subps/mulps/divps xmm0, xmm1
+            self.emit_insn(&Insn::simd_arith_reg(sop, SimdWidth::PS, 0, 1));
         } else if is_double {
-            // packed double: addpd=0x58, subpd=0x5C, mulpd=0x59, divpd=0x5E
-            let opcode = match op {
-                BinOp::Add => 0x58,
-                BinOp::Sub => 0x5C,
-                BinOp::Mul => 0x59,
-                BinOp::Div => 0x5E,
+            // packed double: addpd/subpd/mulpd/divpd (P11 Bucket B typed).
+            let dop = match op {
+                BinOp::Add => SimdArithOp::Addpd,
+                BinOp::Sub => SimdArithOp::Subpd,
+                BinOp::Mul => SimdArithOp::Mulpd,
+                BinOp::Div => SimdArithOp::Divpd,
                 _ => return false,
             };
-            self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, opcode, 0xC1])); // addpd/subpd/mulpd/divpd xmm0, xmm1
+            self.emit_insn(&Insn::simd_arith_reg(dop, SimdWidth::PD, 0, 1));
         } else {
             // 整数向量: SSE2 packed integer
             match (elem_size, op) {
                 (4, BinOp::Add) => {
-                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xFE, 0xC1])); // paddd xmm0, xmm1
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::PAdd, SimdWidth::D, 0, 1)); // paddd xmm0, xmm1
                 },
                 (4, BinOp::Sub) => {
-                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xFA, 0xC1])); // psubd xmm0, xmm1
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::PSub, SimdWidth::D, 0, 1)); // psubd xmm0, xmm1
                 },
                 (4, BinOp::Mul) => {
                     // pmulld: SSE4.1 66 0F 38 40 /r
                     self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x38, 0x40, 0xC1])); // pmulld xmm0, xmm1
                 },
                 (8, BinOp::Add) => {
-                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xD4, 0xC1])); // paddq xmm0, xmm1
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::PAdd, SimdWidth::Q, 0, 1)); // paddq xmm0, xmm1
                 },
                 (8, BinOp::Sub) => {
-                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xFB, 0xC1])); // psubq xmm0, xmm1
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::PSub, SimdWidth::Q, 0, 1)); // psubq xmm0, xmm1
                 },
                 (2, BinOp::Add) => {
-                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xFD, 0xC1])); // paddw xmm0, xmm1
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::PAdd, SimdWidth::W, 0, 1)); // paddw xmm0, xmm1
                 },
                 (2, BinOp::Sub) => {
-                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xF9, 0xC1])); // psubw xmm0, xmm1
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::PSub, SimdWidth::W, 0, 1)); // psubw xmm0, xmm1
                 },
                 (1, BinOp::Add) => {
-                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xFC, 0xC1])); // paddb xmm0, xmm1
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::PAdd, SimdWidth::B, 0, 1)); // paddb xmm0, xmm1
                 },
                 (1, BinOp::Sub) => {
-                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xF8, 0xC1])); // psubb xmm0, xmm1
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::PSub, SimdWidth::B, 0, 1)); // psubb xmm0, xmm1
                 },
                 (_, BinOp::And) => {
                     self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Pand, SimdWidth::O, 0, 1)); // pand xmm0, xmm1
