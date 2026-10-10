@@ -32,15 +32,15 @@ run_rel() {
 
 cargo build
 
-run_rel examples/advanced/elf_attrs.c p2_elf_attrs
-run_rel examples/advanced/va_list.c p4_va_list
-run_rel examples/advanced/nested_func.c nested_function
-run_rel examples/advanced/atomic.c p5_atomic
-run_rel examples/advanced/runtime_features.c p6_runtime_features
-run_rel examples/basics/switch.c p7_switch_control_flow
+run_rel tests/fixtures/smoke/elf_attrs.c p2_elf_attrs
+run_rel tests/fixtures/smoke/va_list.c p4_va_list
+run_rel tests/fixtures/smoke/nested_func.c nested_function
+run_rel tests/fixtures/smoke/atomic.c p5_atomic
+run_rel tests/fixtures/smoke/runtime_features.c p6_runtime_features
+run_rel tests/fixtures/smoke/switch.c p7_switch_control_flow
 
 attrs_object="$TMP/attrs-readelf.o"
-if "$DCC" -c examples/advanced/elf_attrs.c -o "$attrs_object"; then
+if "$DCC" -c tests/fixtures/smoke/elf_attrs.c -o "$attrs_object"; then
     sections="$(readelf -SW "$attrs_object")"
     symbols="$(readelf -sW "$attrs_object")"
     relocs="$(readelf -rW "$attrs_object")"

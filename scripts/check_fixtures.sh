@@ -8,7 +8,7 @@
 #       放宽规则的过渡开关，未引用即红；存量债由 §7.4 逐个判定清零。
 #
 # 5 项检查（全部 exit 1 级；前缀标签纯 ASCII，便于 grep 断言）:
-#   ① MISSING:                被引用的 fixture / example 文件不存在
+#   ① MISSING:                被引用的 fixture 文件不存在
 #   ② UNREFERENCED:           非白名单目录下 .c/.s/.cpp/.h 未被任何引用命中
 #   ③ FORBIDDEN-ARCHIVE-REF:  任何 .rs/.sh/.yml 引用 tests/fixtures/_archive/ 下文件
 #   ④ FORBIDDEN-NAME:         相对 git ls-tree -r HEAD 新增的 m<N>_ 前缀 fixture
@@ -99,8 +99,6 @@ note_need() { [[ -v NEED_EXIST["$1"] ]] || NEED_EXIST["$1"]="$2"; }
 # --- 引用形式正则（ERE，作为字符串传入使用处，不加引号展开）----------------
 # (1)(2) include_str!("<任意个 ../>fixtures/…")   (3) "tests/fixtures/…" 字面量
 RE_FX='(\.\./)*(tests/)?fixtures/[A-Za-z0-9_./+-]+\.(c|s|cpp|h)'
-# examples 引用（include_str!("../examples/…")、scripts/*.sh、CI yml）
-RE_EX='(\.\./)*examples/[A-Za-z0-9_./+-]+\.(c|s|cpp|h)'
 # (4) .join("x.c"/"x.s"/"x.cpp"/"x.h")
 RE_JOIN='\.join\("([^"]+\.(c|s|cpp|h))"'
 # (5) 含 fixture 字样的行里的裸引号字面量（覆盖 offload_fixture("x.c") 这类助手函数）
@@ -125,9 +123,9 @@ handle_path_ref() { # $1=loc(file:line) $2=引用 token $3=匹配前一个字符
     return 0
 }
 
-# 只接受本门禁管辖的两棵树: tests/fixtures/** 与 examples/**。
+# 只接受本测试用例脚本管辖的唯一树: tests/fixtures/**（含 smoke/ 子树）。
 # 前缀合法形式: `fixtures/…`、`../fixtures/…`（任意个 ../）、`tests/fixtures/…`。
-# 若 `fixtures/` 前还有其它目录成分（如 tools/diff_test/fixtures/x.c —— 另一个测试
+# 若 `fixtures/` 前还有其它目录成分（如 tests/diff_test/fixtures/x.c —— 另一个测试
 # 树自己的运行时夹具），必须当作「域外」丢弃，否则会把它强行当成 tests/fixtures/x.c
 # 而报假 MISSING。判断依据：token 裸起头于 fixtures/ 且匹配前一个字符是 '/'。
 resolve_scope() { # $1=tok $2=prevc → 设置 RESOLVED; 返回 0/1/2
@@ -138,13 +136,7 @@ resolve_scope() { # $1=tok $2=prevc → 设置 RESOLVED; 返回 0/1/2
         RESOLVED="tests/fixtures/$tail"
         return 0
     fi
-    if [[ "$t" =~ ^((\.\./)*)examples/(.+)$ ]]; then
-        pre="${BASH_REMATCH[1]}"; tail="${BASH_REMATCH[3]}"
-        if [[ -z "$pre" && "$pc" == "/" ]]; then return 1; fi
-        RESOLVED="examples/$tail"
-        return 0
-    fi
-    if [[ "$t" == *"/fixtures/"* || "$t" == *"/examples/"* ]]; then return 1; fi
+    if [[ "$t" == *"/fixtures/"* ]]; then return 1; fi
     return 2
 }
 
@@ -165,7 +157,7 @@ extract_line_refs() { # $1=loc $2=整行 $3=ERE 字符串
 
 # ---------------------------------------------------------------------------
 # 扫描面（§7.3）: tests/*.rs、tests/integration/*.rs、tests/common/*.rs、
-#   scripts/*.sh、.github/workflows/*.yml|yaml、examples/**（含清单与源码）
+#   scripts/*.sh、.github/workflows/*.yml|yaml
 # 门禁脚本自身不入面：check_fixtures*.sh 内含白名单字面量 "tests/fixtures/…"，
 # 若当作引用命中会造成假绿（自引用豁免，不是规则放宽）。
 # ---------------------------------------------------------------------------
@@ -190,11 +182,10 @@ add_surface tests/common 1 '*.rs'
 add_surface scripts 1 '*.sh'
 add_surface .github/workflows 1 '*.yml'
 add_surface .github/workflows 1 '*.yaml'
-add_surface examples 0 '*.c' '*.cpp' '*.h' '*.md' '*.txt' '*.json'
 
 sort -u "$WORK/surface" 2>/dev/null | grep -vE '^scripts/check_fixtures(_selftest)?\.sh$' >"$WORK/srcs"
 if [[ ! -s "$WORK/srcs" ]]; then
-    fail_fatal "扫描面为 0 个源文件（tests/ scripts/ .github/ examples/ 全部未命中）—— 拒绝假绿"
+    fail_fatal "扫描面为 0 个源文件（tests/ scripts/ .github/ 全部未命中）—— 拒绝假绿"
 fi
 
 # ===========================================================================
@@ -204,20 +195,17 @@ while IFS= read -r src; do
     [[ -f "$src" ]] || continue
     scanned=$((scanned + 1))
 
-    # (a) fixtures / examples 字面量路径
+    # (a) fixtures 字面量路径
     : >>"$WORK/names.txt"
     while IFS= read -r hit; do
         ln="${hit%%:*}"
         line="${hit#*:}"
-        [[ "$line" == *fixtures/* || "$line" == *examples/* ]] || continue
+        [[ "$line" == *fixtures/* ]] || continue
         extract_line_refs "$src:$ln" "$line" "$RE_FX"
-        # examples 自描注释（examples/x.c 里首行写 `// examples/x.c`）不是引用，
-        # 只从 .rs/.sh/.yml 抽 examples 引用，否则会对自己的 banner 注释报假 MISSING
-        [[ "$src" == examples/* ]] || extract_line_refs "$src:$ln" "$line" "$RE_EX"
-    done < <(grep -nE 'fixtures/|examples/' "$src" 2>/dev/null || true)
+    done < <(grep -nE 'fixtures/' "$src" 2>/dev/null || true)
 
     # (b) 显式路径引用（.join("tests/fixtures/…") / .join("../fixtures/…")）——
-    #     只有带 fixtures//examples/ 标记的参数才按路径解析；不带标记的带斜杠参数
+    #     只有带 fixtures/ 标记的参数才按路径解析；不带标记的带斜杠参数
     #     （如 tmp.join("src/main.c")）是临时文件，不参与存在性判定。
     while IFS= read -r hit; do
         ln="${hit%%:*}"
@@ -226,7 +214,7 @@ while IFS= read -r src; do
         while [[ -n "$rest" && "$rest" =~ $RE_JOIN ]]; do
             fname="${BASH_REMATCH[1]}"
             m="${BASH_REMATCH[0]}"
-            if [[ "$fname" == *fixtures/* || "$fname" == *examples/* ]]; then
+            if [[ "$fname" == *fixtures/* ]]; then
                 handle_path_ref "$src:$ln" "$fname"
             fi
             rest="${rest#*"$m"}"
@@ -280,11 +268,11 @@ while IFS= read -r p; do
 done <"$WORK/live.txt"
 
 # (e) 名字候选解析（来自上面 (c) 的「fixture 同引号字面量」）
-#     优先序: 含 fixtures//examples/ 标记 → 按路径解析；其次相对夹具根存在；
+#     优先序: 含 fixtures/ 标记 → 按路径解析；其次相对夹具根存在；
 #     再次按 basename 在夹具树（排除 _archive）内匹配；都不中 → MISSING
 while IFS=$'\t' read -r key loc; do
     [[ -n "$key" ]] || continue
-    if [[ "$key" == *fixtures/* || "$key" == *examples/* ]]; then
+    if [[ "$key" == *fixtures/* ]]; then
         handle_path_ref "$loc" "$key" ""
         continue
     fi
@@ -320,7 +308,7 @@ if [[ -s "$WORK/archive.txt" ]]; then
 fi
 
 # ===========================================================================
-# ① MISSING — 被引用的 fixture / example 必须存在
+# ① MISSING — 被引用的 fixture 必须存在
 # ===========================================================================
 : >>"$WORK/missing.txt"
 while IFS= read -r p; do
@@ -395,7 +383,7 @@ done <"$WORK/live.txt"
 # 退出语义：任何提前失败路径都不会走到这里，也不会打印成功文案
 # ===========================================================================
 echo "---"
-echo "scanned=$scanned source files (tests/*.rs, tests/integration/*.rs, tests/common/*.rs, scripts/*.sh, .github/workflows/*.yml, examples/**)"
+echo "scanned=$scanned source files (tests/*.rs, tests/integration/*.rs, tests/common/*.rs, scripts/*.sh, .github/workflows/*.yml)"
 echo "fixtures=$(wc -l <"$WORK/live.txt" | tr -d ' ') candidate files under tests/fixtures (excluding _archive/)"
 echo "whitelist: ${WHITELIST_DIRS[*]} + tests/fixtures/cpp_abi_*"
 if [[ $errors -gt 0 ]]; then

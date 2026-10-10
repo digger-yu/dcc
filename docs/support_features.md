@@ -9,11 +9,11 @@
 | 特性 | 证据 |
 |------|------|
 | typed IR + 严格语义 | `cargo test` integration（static_assert / unknown typedef / int128）+ `tests/errors.rs` snapshot（E1003–E1008 等）；IR lowering 保留类型定义 (StructDef/UnionDef/EnumDef/Typedef)；`Module::type_info()` 提供结构化类型信息查询（struct/union 字段布局、enum 变体、typedef 别名），优化 pass 和 LTO 可直接查询而无需回溯 AST；`Type::Named` 预扫描解析 + W1013 降级；`ArraySize::Var` 尝试常量求值；StmtExpr 保留所有 block items |
-| SysV va_list（GP） | `examples/test_p4_va_list.c` |
-| SysV va_list SSE | `examples/test_p4_va_list.c`（GP + float/double） |
-| asm goto + computed goto | `examples/test_asm_goto.c` |
-| 自定义 ELF section / WEAK / HIDDEN | `examples/test_p2_elf_attrs.c` + readelf 断言 |
-| __int128 / register asm / 全局符号 | `examples/test_p1_features.c` |
+| SysV va_list（GP） | `tests/fixtures/smoke/va_list.c` |
+| SysV va_list SSE | `tests/fixtures/smoke/va_list.c`（GP + float/double） |
+| asm goto + computed goto | （示例已随 examples/ 清理移除；前端能力保留） |
+| 自定义 ELF section / WEAK / HIDDEN | `tests/fixtures/smoke/elf_attrs.c` + readelf 断言 |
+| __int128 / register asm / 全局符号 | `tests/fixtures/c/int128_log.c` |
 | 预处理 forced-include 注释安全 | `tests/fixtures/c/comment.h` |
 | mod/devicetable 生成 TU | `devicetable-offsets.c` 直接 `-S` 输出 50+ `SIZE_*` 行 |
 | DWARF + BTF（完整类型信息） | `-g` 生成 `.debug_*` + `.BTF`（含编译单元中所有类型的完整 BTF 信息，支持 pahole -J 直接解析）；BTF 输出保留 const/volatile/restrict 限定符（BTF_KIND_CONST/VOLATILE/RESTRICT），struct/union 字段限定符正确传播，满足 BPF CO-RE 需求 |
@@ -22,7 +22,7 @@
 | QEMU bzImage boot 门禁 | `scripts/qemu_boot_matrix.sh` 在 bzImage 存在时默认硬门禁，缺 QEMU 或缺 boot log 关键字符串均失败；`kernel_full_check.sh` strict 模式导出 `REQUIRE_QEMU_BOOT=1`；`strict_qemu_boot_*` 集成测试固化契约；2026-08-27 实际验证：`qemu-system-x86_64` 加载 dcc 编译的 Linux 7.1 bzImage，串口启动日志正常（需启用 `CONFIG_SERIAL_8250_CONSOLE`） |
 | Linux vmlinux 完整 ELF 内核映像 | dcc 编译 Linux 7.1 全树生成 16MB vmlinux (ET_EXEC x86-64)；零 objtool 错误；`__ex_table` 异常表、`.fixup` 修复代码、嵌套 `.pushsection`/`.popsection` 完整支持；vdso64.so.dbg 正确生成 |
 | Linux kernel object corpus | 固化真实 Linux `.o` 样本：`tests/fixtures/corpus/io_delay.o`、`fair.o`、`clz_ctz.o`；`kernel_object_corpus_*` 测试校验 ELF64/ET_REL/ORC 节和代表性函数符号 |
-| CI/examples 路径防回归 | `.github/workflows/kernel-bench.yml` 与 `scripts/bench_phase_e.sh` 使用当前 `examples/*/*` 路径；`scripts/check_fixtures.sh` 扫描 workflows/scripts 中的 examples 引用并要求文件存在 |
+| CI/fixtures 路径防回归 | `.github/workflows/kernel-bench.yml` 与 `scripts/bench_phase_e.sh` 使用当前 `tests/fixtures/smoke/*` 路径；`scripts/check_fixtures.sh` 扫描 workflows/scripts 中的 tests/fixtures 引用并要求文件存在 |
 
 ## 优化器
 
@@ -337,7 +337,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | dcc++ 端到端编译 | `dcc -x c++ foo.cpp` / `dcc foo.cpp`（按扩展名自动识别） |
 | dcc++ 局部类变量 + 方法调用改写 | `Counter c;` → `struct Counter c; _ZN7CounterC1Ev(&c);` |
 | dcc++ 隐式 this 注入 | 类方法体内未限定成员 `n_` 自动改写为 `this->n_` |
-| dcc++ 多类 + 隐式 this | `examples/m9_cpp_multi.cpp` |
+| dcc++ 多类 + 隐式 this | `tests/integration/cpp_lang.rs` |
 | dcc++ 复合操作符 / C 关键字 | `->` / `->*` / `--` / `-=` / `++` / `+=` 等 23 个复合操作符 |
 | dcc++ 完整 SFINAE | `src/cpp/m10.rs::SfinaeCtx` + `try_substitute` |
 | dcc++ partial specialization | `template <T> class Foo<T*> {}` 偏特化匹配；多形参 pattern |

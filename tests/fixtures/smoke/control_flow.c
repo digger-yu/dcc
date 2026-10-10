@@ -1,4 +1,4 @@
-// examples/control.c - 测试 if/while 控制流
+// tests/fixtures/smoke/control_flow.c - 测试 if/while 控制流
 int main() {
     int x = 0;
     int i = 0;

@@ -378,7 +378,7 @@ fn o2_dce_preserves_outputless_inline_asm() {
 /// 内联 asm 约束 (=r / +m / memory clobber) 编译通过。
 #[test]
 fn asm_constraints_compile() {
-    let source = include_str!("../../examples/assembly/constraints.c");
+    let source = include_str!("../../tests/fixtures/smoke/constraints.c");
     let (output, obj) = run_object_test("asm-constraints", source);
     let _ = fs::remove_file(obj);
     assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));

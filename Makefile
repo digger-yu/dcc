@@ -28,7 +28,7 @@ test:
 	DCC_REPO="$(DCC_REPO)" bash scripts/check_fixtures.sh
 	DCC_REPO="$(DCC_REPO)" bash scripts/check_fixtures_selftest.sh
 
-# test-all = Tier 0 全量 + examples 端到端冒烟（scripts/test_all.sh 只做薄编排，
+# test-all = Tier 0 全量 + tests/fixtures/smoke 端到端冒烟（scripts/test_all.sh 只做薄编排，
 # 不复制任何断言逻辑；以前它没有任何调用点，此处接入）。门禁不在这里重复跑。
 # 末尾再接入优化档位执行等价门禁：Tier 0 不跑 -O 档位，而优化器的正确性定义恰好
 # 是「不改行为」—— 本轮修完的一批静默误编译（死循环/SEGV/截断）全部由它暴露。

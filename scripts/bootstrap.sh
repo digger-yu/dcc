@@ -133,10 +133,10 @@ echo ""
 echo "── 阶段 4: 多文件编译压力测试 ──"
 
 EXTRA_SRCS=(
-    "$REPO_ROOT/examples/basics/hello.c"
-    "$REPO_ROOT/examples/basics/arith.c"
-    "$REPO_ROOT/examples/basics/fib.c"
-    "$REPO_ROOT/examples/basics/control_flow.c"
+    "$REPO_ROOT/tests/fixtures/smoke/hello.c"
+    "$REPO_ROOT/tests/fixtures/smoke/arith.c"
+    "$REPO_ROOT/tests/fixtures/smoke/fib.c"
+    "$REPO_ROOT/tests/fixtures/smoke/control_flow.c"
 )
 
 MULTI_PASS=0

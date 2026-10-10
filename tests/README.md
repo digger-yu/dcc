@@ -115,7 +115,7 @@ tests/
 
 1. 首行注释固定为 `// included from tests/integration.rs — not a standalone cargo target`。
 2. 子文件内**禁止**出现 `use` / `mod` / `fn main`（导入权与 harness 挂载权只属于壳）。
-3. 夹具路径一律 `include_str!("../fixtures/…")`；`../examples/…` 同理加一层。
+3. 夹具路径一律 `include_str!("../fixtures/…")`（冒烟语料同在 `../fixtures/smoke/…`）。
 4. 运行时路径继续用 `env!("CARGO_MANIFEST_DIR")`，**不得**改成相对路径。
 5. 单文件 ≤ 4000 行，超限按二级主题再切并同样走 `include!`。
 6. 跨主题复用的助手进 `tests/common/harness.rs`（体量自成一体时可落它的 `harness/` 子模块，

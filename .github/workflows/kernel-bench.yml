@@ -75,10 +75,10 @@ jobs:
           DCC=$GITHUB_WORKSPACE/bin/dcc
           PASS=0; FAIL=0
           for test in \
-            examples/basics/hello.c:42:hello \
-            examples/basics/arith.c:23:arith \
-            examples/basics/control_flow.c:100:control \
-            examples/pointers/function_call.c:42:call; do
+            tests/fixtures/smoke/hello.c:42:hello \
+            tests/fixtures/smoke/arith.c:23:arith \
+            tests/fixtures/smoke/control_flow.c:100:control \
+            tests/fixtures/smoke/function_call.c:42:call; do
             source=${test%%:*}
             rest=${test#*:}
             expected=${rest%%:*}

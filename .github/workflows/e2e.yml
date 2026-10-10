@@ -1,8 +1,8 @@
-# 第一性原理: e2e 验证——每个 example 编译+运行，验证退出码
+# 第一性原理: e2e 验证——每个 smoke 用例编译+运行，验证退出码
 #
 # 优化: 拆分为 build → test / reproducibility / e2e 四个 job, 并行执行.
 #   - test 失败不阻塞 e2e, 反之亦然 (两个 job 各自独立挡合并).
-#   - e2e 各 step **不设** continue-on-error: 任一 example 编译/运行/退出码不符即 job
+#   - e2e 各 step **不设** continue-on-error: 任一 smoke 用例编译/运行/退出码不符即 job
 #     变红（方案 §9 Tier 1 把 "End-to-end compile and run" 列为门禁）; Summary step
 #     仍用 `if: always()` 保留全部 rc 明细, 但它不再充当掩盖失败的出口。
 
@@ -134,7 +134,7 @@ jobs:
       - name: Compile hello.c
         id: hello
         run: |
-          ./bin/dcc -std=gnu23 -o hello examples/basics/hello.c
+          ./bin/dcc -std=gnu23 -o hello tests/fixtures/smoke/hello.c
           chmod +x hello
           rc=0; ./hello || rc=$?
           echo "exit code: $rc"
@@ -144,7 +144,7 @@ jobs:
       - name: Compile arith.c
         id: arith
         run: |
-          ./bin/dcc -std=gnu23 -o arith examples/basics/arith.c
+          ./bin/dcc -std=gnu23 -o arith tests/fixtures/smoke/arith.c
           chmod +x arith
           rc=0; ./arith || rc=$?
           echo "arith exit: $rc"
@@ -154,7 +154,7 @@ jobs:
       - name: Compile control.c
         id: control
         run: |
-          ./bin/dcc -std=gnu23 -o control examples/basics/control_flow.c
+          ./bin/dcc -std=gnu23 -o control tests/fixtures/smoke/control_flow.c
           chmod +x control
           rc=0; ./control || rc=$?
           echo "control exit: $rc"
@@ -164,7 +164,7 @@ jobs:
       - name: Compile call.c
         id: call
         run: |
-          ./bin/dcc -std=gnu23 -o call examples/pointers/call_by_assign.c
+          ./bin/dcc -std=gnu23 -o call tests/fixtures/smoke/call_by_assign.c
           chmod +x call
           rc=0; ./call || rc=$?
           echo "call exit: $rc"
@@ -174,7 +174,7 @@ jobs:
       - name: Test error diagnostics
         id: errdiag
         run: |
-          out=$(./bin/dcc -std=gnu23 -o /tmp/should_fail examples/advanced/bad_syntax.c 2>&1 || true)
+          out=$(./bin/dcc -std=gnu23 -o /tmp/should_fail tests/fixtures/smoke/bad_syntax.c 2>&1 || true)
           echo "$out" | head -20
           echo "$out" | grep -q 'error\[E0006\]'
           echo "$out" | grep -q 'hint:'

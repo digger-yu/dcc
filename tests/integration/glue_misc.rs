@@ -77,30 +77,28 @@ fn m15_strict_warning_compile() {
 #[cfg(unix)]
 fn m2_6_batch_compile() {
     let fixtures = [
-        "basics/hello.c",
-        "basics/arith.c",
-        "basics/control_flow.c",
-        "basics/fib.c",
-        "structs/basic_struct.c",
-        "basics/switch.c",
-        "pointers/function_call.c",
-        "structs/bitfield.c",
-        "structs/global_array.c",
-        "basics/logic.c",
-        "pointers/rel_ops.c",
-        "pointers/pointer_arith.c",
+        "tests/fixtures/smoke/hello.c",
+        "tests/fixtures/smoke/arith.c",
+        "tests/fixtures/smoke/control_flow.c",
+        "tests/fixtures/smoke/fib.c",
+        "tests/fixtures/smoke/basic_struct.c",
+        "tests/fixtures/smoke/switch.c",
+        "tests/fixtures/smoke/function_call.c",
+        "tests/fixtures/smoke/bitfield.c",
+        "tests/fixtures/smoke/global_array.c",
+        "tests/fixtures/smoke/logic.c",
+        "tests/fixtures/smoke/rel_ops.c",
+        "tests/fixtures/smoke/pointer_arith.c",
     ];
     let dcc = env!("CARGO_BIN_EXE_dcc");
     let mut pass = 0u32;
     let mut fail = 0u32;
     let dir = std::env::temp_dir();
-    for name in &fixtures {
-        let src = format!("examples/{name}");
-        if !std::path::Path::new(&src).exists() {
-            continue;
-        }
-        // fixture 名含子目录 (如 basics/hello.c), 拍平避免父目录不存在
-        let flat = name.replace(['/', '\\'], "-");
+    for src in &fixtures {
+        // smoke 夹具为必备文件, 缺失即硬失败 (不再静默 continue 跳过)
+        assert!(std::path::Path::new(src).exists(), "smoke fixture missing: {src}");
+        // 路径含子目录 (tests/fixtures/smoke/...), 拍平避免父目录不存在
+        let flat = src.replace(['/', '\\'], "-");
         let obj = dir.join(format!("dcc-m2-6-{flat}-{}.o", std::process::id()));
         let out = Command::new(dcc)
             .args(["-c", "-o"])
@@ -113,7 +111,7 @@ fn m2_6_batch_compile() {
             pass += 1;
         } else {
             fail += 1;
-            eprintln!("FAIL {name}: {}", String::from_utf8_lossy(&out.stderr));
+            eprintln!("FAIL {src}: {}", String::from_utf8_lossy(&out.stderr));
         }
     }
     assert!(fail == 0, "batch compile: {pass} passed, {fail} failed");

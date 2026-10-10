@@ -1,4 +1,4 @@
-// examples/fib.c - 检验控制流和函数调用
+// tests/fixtures/smoke/fib.c - 检验控制流和函数调用
 int fib(int n) {
     if (n < 2) return n;
     return fib(n - 1) + fib(n - 2);

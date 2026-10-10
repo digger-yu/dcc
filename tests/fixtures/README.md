@@ -61,7 +61,7 @@
 
 扫描面（`check_fixtures.sh` 与 `gen_coverage_index.sh` 共用同一定义）：
 `tests/*.rs`、`tests/integration/*.rs`、`tests/common/*.rs`、`scripts/*.sh`、
-`.github/workflows/*.yml`、`examples/`。
+`.github/workflows/*.yml`。
 
 `cpp_abi_*/` 目录族的语义是**整目录被 `check_group()` 引用**：夹具文件清单不在 `.rs` 里维护
 （`fixtures_in(group)` 仍按目录列举 `*.cpp`）。但**主题组本身必须登记**：新增 `cpp_abi_<主题>/`
@@ -139,7 +139,7 @@ C++ 侧同理：语义属模板等**语言面**的补测进 `cpp_lang.rs`，不�
 - 壳 `tests/integration.rs` 不含任何夹具引用（它只有 `use` + `#[path] mod harness` + `include!` 列表）。
 - **禁止**子文件写裸 `fixtures/...`（`include_str!` 按当前文件位置解析，会指向 `tests/integration/fixtures/`）。
 - 运行时拼出来的路径继续用 `env!("CARGO_MANIFEST_DIR")`，**不得**改成相对路径（它与文件位置无关）。
-- `examples/` 从 `tests/integration/*.rs` 引用时同样加一层：`../../examples/...`。
+- 冒烟语料在 `tests/fixtures/smoke/`，从 `tests/integration/*.rs` 用 `include_str!` 引用时写作 `../../fixtures/smoke/...`。
 
 ---
 

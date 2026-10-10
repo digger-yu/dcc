@@ -436,7 +436,7 @@ END {
                 }
             }
             if (line ~ /Command::new|assert!|assert_eq!|assert_ne!|panic!\(|\.expect\(|todo!\(/) signal = 1
-            if (line ~ /include_str!|[Ff]ixture|examples/) {
+            if (line ~ /include_str!|[Ff]ixture/) {
                 r2 = line
                 while (match(r2, /"[^"]*\.(c|s|cpp|h)"/)) {
                     t = substr(r2, RSTART + 1, RLENGTH - 2)
@@ -510,7 +510,6 @@ resolve_tok() { # $1=token → stdout: 仓库相对路径（解析不出则空�
     local t="$1" cnt first
     case "$t" in
         *fixtures/*) printf 'tests/fixtures/%s' "${t##*fixtures/}"; return ;;
-        *examples/*) printf 'examples/%s' "${t##*examples/}"; return ;;
         cpp_abi_*)   printf 'tests/fixtures/%s' "$t"; return ;;
     esac
     if [[ -f "tests/fixtures/$t" ]]; then printf 'tests/fixtures/%s' "$t"; return; fi
@@ -595,7 +594,7 @@ while IFS=$'\t' read -r kind file fn ign feat cfgs helps fixtok signal; do
         p="$(resolve_tok "$t")"
         if [[ -z "$p" ]]; then
             case "$t" in
-                *fixtures/* | *examples/* | cpp_abi_*)
+                *fixtures/* | cpp_abi_*)
                     warn_err "FIXTURE-ABSENT: $file::$fn 引用 \`$t\` 在 tests/fixtures 下不存在"
                     printf '%s\t%s\t%s\n' "$file" "$fn" "$t" >>"$WORK/gaps.tsv" ;;
             esac

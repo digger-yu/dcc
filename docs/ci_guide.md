@@ -21,8 +21,8 @@ git push origin main
 **push/PR 自动跑**:
 - `dcc-e2e`: ~1–2 分钟
   - `cargo test --release`（单元 + integration + errors snapshot）
-  - hello/arith/control/call 等 example 编译运行
-  - `examples/advanced/bad_syntax.c` 错误诊断断言（`error[E0006]` + `hint:`）
+  - hello/arith/control/call 等 smoke 用例编译运行
+  - `tests/fixtures/smoke/bad_syntax.c` 错误诊断断言（`error[E0006]` + `hint:`）
 
 **仅手动触发**（不自动跑，节省 Actions 额度）:
 - `kernel-benchmark`: 约 15–20 分钟, 编 Linux 内核 (Actions → kernel-benchmark → Run workflow)

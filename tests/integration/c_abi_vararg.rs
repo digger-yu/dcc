@@ -558,7 +558,7 @@ int main(void) {
 /// SysV va_list GP + SSE 浮点路径编译通过。
 #[test]
 fn va_list_sse_compiles() {
-    let source = include_str!("../../examples/advanced/va_list.c");
+    let source = include_str!("../../tests/fixtures/smoke/va_list.c");
     let (output, obj) = run_object_test("va-list-sse", source);
     let _ = fs::remove_file(obj);
     assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));

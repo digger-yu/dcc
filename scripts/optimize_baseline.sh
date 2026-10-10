@@ -21,13 +21,13 @@ echo ""
 # "file not found -> skip" 分支, 一个数据都没采到却仍打印 "Baseline Collection Complete"。
 # 现在逐项按语义等价选型, 全部经 dcc 实验可编译(见下方 rc 判定)。
 BENCHMARKS=(
-    "examples/basics/arith.c:simple_add"
-    "examples/basics/compound_assign.c:basic_subtract"
-    "examples/basics/logic.c:binary_operations"
-    "examples/basics/switch.c:if_else_branching"
-    "examples/basics/control_flow.c:loop_iteration"
-    "examples/floats/float_cast.c:type_casting"
-    "examples/structs/global_array.c:array_indexing"
+    "tests/fixtures/smoke/arith.c:simple_add"
+    "tests/fixtures/smoke/compound_assign.c:basic_subtract"
+    "tests/fixtures/smoke/logic.c:binary_operations"
+    "tests/fixtures/smoke/switch.c:if_else_branching"
+    "tests/fixtures/smoke/control_flow.c:loop_iteration"
+    "tests/fixtures/smoke/float_cast.c:type_casting"
+    "tests/fixtures/smoke/global_array.c:array_indexing"
 )
 
 echo "Running compilation benchmarks..."

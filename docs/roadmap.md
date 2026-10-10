@@ -5,8 +5,8 @@
 | 里程碑 | 标题 | 状态 | 核心验证 |
 |--------|------|------|----------|
 | **M0** | 最小 hello world | ✅ 完成 | `int main(){return 42;}` -> a.out, exit 42 |
-| **M1** | C89/99 子集 + 控制流 | ✅ 完成 | examples/fib.c -> fib(10)=55 |
-| **M2** | struct/union/enum + 指针 | ✅ 完成 | examples/struct_test.c |
+| **M1** | C89/99 子集 + 控制流 | ✅ 完成 | tests/fixtures/smoke/fib.c -> fib(10)=55 |
+| **M2** | struct/union/enum + 指针 | ✅ 完成 | tests/diff_test/fixtures/struct_test.c |
 | **M3** | 全局类型注册表 | ✅ 完成 | 头文件缓存 (~/.dcc/cache/)，内容哈希失效 |
 | **M4** | 预处理 + builtin | ✅ 完成 | linux/init/main.c 解析成功; Linux 6.1 内核头文件预处理无错误, 输出体积接近 GCC (~1.5x, 100K vs 99K 行) |
 | **M5** | **自举 (dcc 编 dcc)** | ✅ 完成 | `scripts/bootstrap.sh` 5 阶段流程: dcc0 构建 → 编译自举测试 (14 组) → 运行验证 → 确定性对比 (byte + semantic) → 多文件一致性; `tests/fixtures/c/bootstrap_selftest.c` 覆盖 struct/func_ptr/recursion/linked_list/bitops/enum+union/string/long_long/inline_asm/variadic_macro/_Static_assert/stmt_expr/goto/switch_range/static_array；`src/bootstrap.rs` 三层对比基础设施；`make bootstrap` 一键验证 |

@@ -1,4 +1,4 @@
-// examples/call.c - 测试函数调用
+// tests/fixtures/smoke/function_call.c - 测试函数调用
 int add(int a, int b) {
     return a + b;
 }
