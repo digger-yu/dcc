@@ -261,7 +261,7 @@ impl Codegen {
         self.emit_insn(&Insn::raw_bytes(&[0x31, 0xFF])); // xor edi, edi
         if signed {
             let lhs_positive = self.fresh_label();
-            self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x85, 0xC0])); // test r8, r8
+            self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 8, 8)); // test r8, r8
             self.jmp_rel32(&lhs_positive, JumpKind::Jns);
             self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 1)); // neg rcx
             self.emit_insn(&Insn::raw_bytes(&[0x49, 0x83, 0xD0, 0x00])); // adc r8, 0
@@ -271,7 +271,7 @@ impl Codegen {
             self.label(&lhs_positive);
 
             let rhs_positive = self.fresh_label();
-            self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x85, 0xDB])); // test r11, r11
+            self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 11, 11)); // test r11, r11
             self.jmp_rel32(&rhs_positive, JumpKind::Jns);
             self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 9)); // neg r9
             self.emit_insn(&Insn::raw_bytes(&[0x49, 0x83, 0xD3, 0x00])); // adc r11, 0
@@ -284,7 +284,7 @@ impl Codegen {
         self.mov(10, 9);
         self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x09, 0xDA])); // or r10, r11
         let divisor_ok = self.fresh_label();
-        self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x85, 0xD2])); // test r10, r10
+        self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 10, 10)); // test r10, r10
         self.jmp_rel32(&divisor_ok, JumpKind::Jne);
         self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x0B])); // ud2
         self.label(&divisor_ok);

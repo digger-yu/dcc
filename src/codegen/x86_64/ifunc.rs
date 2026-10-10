@@ -569,7 +569,7 @@ impl Codegen {
         // 幂等守卫: if (model.init_done) goto done
         let l_done = self.fresh_label();
         self.emit_model_rip(&RIP_MOV_EAX_M32, cpu_isa::SLOT_INIT_DONE, None);
-        self.emit_insn(&Insn::raw_bytes(&[0x85, 0xC0])); // test eax, eax
+        self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 0, 0)); // test eax, eax
         self.jmp_rel32(&l_done, JumpKind::Jne);
 
         for probe in cpu_isa::PROBES {

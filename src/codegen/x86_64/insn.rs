@@ -253,6 +253,24 @@ impl Insn {
         )
     }
 
+    /// P11: TEST reg, reg via AluRm typed opcode.
+    /// width: B32/B64 (common forms). dst/src: x86_64 physical register indices 0..15.
+    pub fn test_rm_reg(
+        width: crate::codegen::shared::asm_operand::Width,
+        dst_reg: u8,
+        src_reg: u8,
+    ) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                op: crate::codegen::x86_64::opcode::AluOp::Test,
+                width,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(dst_reg, width),
+                src: crate::codegen::x86_64::opcode::Operand::Reg(src_reg, width),
+            },
+            &[],
+        )
+    }
+
     pub fn encode_bytes(&self) -> Option<Vec<u8>> {
         // 类型化变体: 让 opcode.rs 现场算字节. 尚未实现的变体返回 None →
         // 发射方必须切回 raw_bytes 兜底; 当前没有任何调用点依赖 None 分支.

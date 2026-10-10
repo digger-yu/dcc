@@ -838,7 +838,7 @@ impl Codegen {
                                 // 比较低 64 位: switch_low vs case_low
                                 self.load_stack(0, sw_slot); // rax = switch low
                                 if case_low == 0 {
-                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x85, 0xC0])); // test rax, rax
+                                    self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 0, 0)); // test rax, rax
                                 } else {
                                     // mov rdx, case_low; cmp rax, rdx
                                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0xBA])); // mov rdx, imm64
@@ -850,7 +850,7 @@ impl Codegen {
                                 // 低 64 位匹配, 检查高 64 位
                                 self.load_stack(9, sw_slot + 8); // r9 = switch high
                                 if case_high == 0 {
-                                    self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x85, 0xC9])); // test r9, r9
+                                    self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 9, 9)); // test r9, r9
                                 } else {
                                     // mov r8, case_high; cmp r9, r8
                                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {

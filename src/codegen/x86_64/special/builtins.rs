@@ -2037,11 +2037,11 @@ impl Codegen {
                                                             // 实际上分类值由调用者映射, 我们这里返回 0/1/2/4 即可
                                                             // cmovne: 当 ebx=1 (NaN) 时 eax=0; edx=1 (Inf) 时 eax=1; ecx=1 (Zero) 时 eax=2
                                                             // 注意 cmovne 条件是 ZF=0 (非零), cmove 条件是 ZF=1 (零)
-                self.emit_insn(&Insn::raw_bytes(&[0x85, 0xC9])); // test ecx, ecx (Zero?)
+                self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 1, 1)); // test ecx, ecx (Zero?)
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x45, 0xC7])); // cmovne eax, edi (Zero=2)
-                self.emit_insn(&Insn::raw_bytes(&[0x85, 0xD2])); // test edx, edx (Inf?)
+                self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 2, 2)); // test edx, edx (Inf?)
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x45, 0xC6])); // cmovne eax, esi (Inf=1)
-                self.emit_insn(&Insn::raw_bytes(&[0x85, 0xDB])); // test ebx, ebx (NaN?)
+                self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 3, 3)); // test ebx, ebx (NaN?)
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x45, 0xC5])); // cmovne eax, ebp (NaN=0)
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -3223,7 +3223,7 @@ impl Codegen {
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xBD, 0xC0])); // bsr rax, rax
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC2, 0xFF, 0xFF, 0xFF, 0xFF])); // mov rdx, -1
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x85, 0xC9])); // test rcx, rcx
+                    self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 1, 1)); // test rcx, rcx
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0x44, 0xC2])); // cmove rax, rdx
                     self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC2, 0x3E, 0x00, 0x00, 0x00])); // mov rdx, 62
                     // P11: 收敛到 AluRm{Sub, B64, rdx, rax}.
@@ -3327,7 +3327,7 @@ impl Codegen {
                     // mov edx, 0xFFFFFFFF (sentinel)
                     self.emit_insn(&Insn::raw_bytes(&[0xBA, 0xFF, 0xFF, 0xFF, 0xFF]));
                     // test ecx, ecx: 设置 ZF 基于 ecx (0 ⇒ ZF=1), 覆盖 bsr 的 ZF
-                    self.emit_insn(&Insn::raw_bytes(&[0x85, 0xC9]));
+                    self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 1, 1));
                     // cmove eax, edx: 如果 x^s_bits==0, eax = edx = -1
                     // ModR/M = 0xC2 = 11_000_010: reg=eax(0), rm=edx(2) ⇒ Intel cmove eax, edx
                     self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x44, 0xC2]));
@@ -3485,7 +3485,7 @@ impl Codegen {
                 let rex_bsf = 0x48 | if dst >= 8 { 0x04 } else { 0 };
                 self.emit_insn(&Insn::raw_bytes(&[rex_bsf, 0x0F, 0xBC, 0xC0 | ((dst & 7) << 3) | 1]));
                 // test rcx, rcx  (48 85 C9)
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x85, 0xC9]));
+                self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 1, 1));
                 // setnz cl  (0F 95 C1)
                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x95, 0xC1]));
                 // movzx ecx, cl  (0F B6 C9)

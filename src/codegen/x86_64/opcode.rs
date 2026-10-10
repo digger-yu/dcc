@@ -400,9 +400,38 @@ impl X86_64Opcode {
                 let (Operand::Reg(dst_idx, _), Operand::Reg(src_idx, _)) = (dst, src) else {
                     return None;
                 };
-                // TEST 走 0x84/0x85 (无 ModRM.reg 语义), 暂不收敛.
+                // TEST reg,reg:  85 /r (B32) / REX.W + 85 /r (B64).
+                //   ModRM.reg 字段放 0 (/0, TEST 不读取该字段), r/m 放 dst; src 被忽略?
+                //   但手写形态 modrm = 0xC0 | (src<<3) | dst —— 虽然 TEST 只按 r/m 做 AND
+                //   并置 flags, ModRM.reg 字段仍按 dst 本身填 (常见手写: test rax, rax
+                //   modrm=C0; test rcx, rdx modrm=C1|... 实际 dst=r/m, src=reg).
+                //   本实现沿用: reg=src, r/m=dst, mod=11. opcode=85 (B32) 或 REX.W+85 (B64).
                 if matches!(op, AluOp::Test) {
-                    return None;
+                    let is_b64 = matches!(width, Width::B64);
+                    let is_byte8 = matches!(width, Width::B8);
+                    let mut rex: u8 = 0x40;
+                    if is_b64 {
+                        rex |= 0x08;
+                    }
+                    if *src_idx >= 8 {
+                        rex |= 0x04;
+                    }
+                    if *dst_idx >= 8 {
+                        rex |= 0x01;
+                    }
+                    let need_high_byte = is_byte8 && (*src_idx >= 4 || *dst_idx >= 4);
+                    let need_rex = is_b64 || *src_idx >= 8 || *dst_idx >= 8 || need_high_byte;
+                    let mut out = Vec::with_capacity(4);
+                    if matches!(width, Width::B16) {
+                        out.push(0x66);
+                    }
+                    if need_rex {
+                        out.push(rex);
+                    }
+                    // TEST r/m, r: opcode 0x84 (B8) / 0x85 (B16/B32/B64).
+                    out.push(if is_byte8 { 0x84 } else { 0x85 });
+                    out.push(0xC0 | ((*src_idx & 7) << 3) | (*dst_idx & 7));
+                    return Some(out);
                 }
                 // opc_base: "目的在 r/m" 的 opc (00/08/21/29/31). modrm_reg_field 恒为 src.
                 //   B8:   0x00/0x08/0x20/0x28/0x30/0x38
@@ -1626,6 +1655,68 @@ mod tests {
             src: reg(0, Width::B16),
         };
         assert_eq!(o.encode(), Some(vec![0x48, 0x0F, 0xBF, 0xC0]));
+    }
+
+    // ---- TEST reg,reg (P11) ----
+
+    #[test]
+    fn test_rm_eax_eax_b32() {
+        // test eax, eax:  85 C0
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Test,
+            width: Width::B32,
+            dst: reg(0, Width::B32),
+            src: reg(0, Width::B32),
+        };
+        assert_eq!(o.encode(), Some(vec![0x85, 0xC0]));
+    }
+
+    #[test]
+    fn test_rm_rax_rax_b64() {
+        // test rax, rax:  48 85 C0
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Test,
+            width: Width::B64,
+            dst: reg(0, Width::B64),
+            src: reg(0, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x85, 0xC0]));
+    }
+
+    #[test]
+    fn test_rm_rcx_rcx_b32() {
+        // test ecx, ecx:  85 C9
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Test,
+            width: Width::B32,
+            dst: reg(1, Width::B32),
+            src: reg(1, Width::B32),
+        };
+        assert_eq!(o.encode(), Some(vec![0x85, 0xC9]));
+    }
+
+    #[test]
+    fn test_rm_edx_edx_b32() {
+        // test edx, edx:  85 D2 (self-ref: dst=src=edx=2)
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Test,
+            width: Width::B32,
+            dst: reg(2, Width::B32),
+            src: reg(2, Width::B32),
+        };
+        assert_eq!(o.encode(), Some(vec![0x85, 0xD2]));
+    }
+
+    #[test]
+    fn test_rm_r9_r9_b64_high() {
+        // test r9, r9:  4D 85 C9  (REX.R+B since both r/m and reg >=8)
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Test,
+            width: Width::B64,
+            dst: reg(9, Width::B64),
+            src: reg(9, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x4D, 0x85, 0xC9]));
     }
 }
 
