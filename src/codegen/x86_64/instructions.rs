@@ -1797,7 +1797,7 @@ impl Codegen {
             dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
             src: crate::codegen::x86_64::opcode::Operand::Imm(mask as i64),
         }, &[]));
-        self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8])); // movq xmm1, rax
+        self.emit_insn(&Insn::gpr_xmm(true, crate::codegen::shared::asm_operand::Width::B64, 0, 1)); // movq xmm1, rax
         if xmm == 1 {
             // xorps/xorpd xmm0, xmm1 → 目标为 xmm1 时借用 xmm2
             self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xD0])); // movq xmm2, rax

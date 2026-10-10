@@ -67,6 +67,37 @@ impl Insn {
         Insn::new(X86_64Opcode::NoArg { op }, &[])
     }
 
+    /// P11 Bucket K: movd/movq GPR↔XMM reg-reg.
+    /// to_xmm=true: GPR→XMM (0x6E). width=B64 → movq (66 REX.W); B32 → movd.
+    pub fn gpr_xmm(
+        to_xmm: bool,
+        width: crate::codegen::shared::asm_operand::Width,
+        gpr_idx: u8,
+        xmm_idx: u8,
+    ) -> Self {
+        let (dst, src) = if to_xmm {
+            (
+                crate::codegen::x86_64::opcode::Operand::Reg(
+                    xmm_idx,
+                    crate::codegen::shared::asm_operand::Width::B128,
+                ),
+                crate::codegen::x86_64::opcode::Operand::Reg(gpr_idx, width),
+            )
+        } else {
+            (
+                crate::codegen::x86_64::opcode::Operand::Reg(gpr_idx, width),
+                crate::codegen::x86_64::opcode::Operand::Reg(
+                    xmm_idx,
+                    crate::codegen::shared::asm_operand::Width::B128,
+                ),
+            )
+        };
+        Insn::new(
+            X86_64Opcode::GprXmm { to_xmm, width, dst, src },
+            &[],
+        )
+    }
+
     /// asm/ 内联汇编路径专用 (P10 起原生路径已改用 raw_bytes).
     /// 语义与 raw_bytes 一致, 仅名字不同 —— 保留以避免改动内联汇编编码器的
     /// 几百处字面调用.

@@ -2129,7 +2129,7 @@ impl Codegen {
                                     dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
                                     src: crate::codegen::x86_64::opcode::Operand::Imm(0x80000000u64 as i64),
                                 }, &[]));
-                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
+                                self.emit_insn(&Insn::gpr_xmm(true, crate::codegen::shared::asm_operand::Width::B64, 0, 1));
                                 self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 1));
                             },
                             _ => {
@@ -2140,7 +2140,7 @@ impl Codegen {
                                     dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
                                     src: crate::codegen::x86_64::opcode::Operand::Imm(0x8000000000000000u64 as i64),
                                 }, &[]));
-                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xC8]));
+                                self.emit_insn(&Insn::gpr_xmm(true, crate::codegen::shared::asm_operand::Width::B64, 0, 1));
                                 self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorpd, SimdWidth::PD, 0, 1));
                             },
                         }

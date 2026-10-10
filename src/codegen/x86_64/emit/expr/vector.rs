@@ -301,7 +301,7 @@ impl Codegen {
                     self.emit_add_rsp(8);
                     // xmm0=left, xmm1=right → cmp xmm0, xmm1, pred
                     self.emit_insn(&Insn::raw_bytes(&[cmp_pfx, 0x0F, 0xC2, 0xC1, pred]));
-                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x7E, 0xC0])); // movq rax, xmm0
+                    self.emit_insn(&Insn::gpr_xmm(false, crate::codegen::shared::asm_operand::Width::B64, 0, 0)); // movq rax, xmm0
                     let off = result_off + (i * elem_size) as i64;
                     self.emit_store(0, off, elem_size);
                 }

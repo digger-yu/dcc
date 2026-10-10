@@ -360,6 +360,20 @@ pub(crate) enum X86_64Opcode {
 
     /// P11 Bucket I: 无操作数/固定前缀指令 (cld/mfence/rep movsb/stosb/movsq).
     NoArg { op: NoArgOp },
+
+    /// P11 Bucket K: movd/movq GPR↔XMM reg-reg (0F 6E / 0F 7E, with 66 prefix +
+    /// optional REX.W).
+    ///   movq r64->xmm:  66 REX.W 0F 6E /r  (modrm.reg=xmm, r/m=gpr)
+    ///   movq xmm->r64:  66 REX.W 0F 7E /r  (modrm.reg=xmm, r/m=gpr)
+    ///   movd r32->xmm:    0F 6E /r (no 66, no REX.W)
+    ///   movd xmm->r32:    0F 7E /r
+    /// to_xmm=true: GPR→XMM (0x6E); false: XMM→GPR (0x7E). width=B64 emits REX.W.
+    GprXmm {
+        to_xmm: bool,
+        width: crate::codegen::shared::asm_operand::Width,
+        dst: Operand,
+        src: Operand,
+    },
 }
 
 impl X86_64Opcode {
@@ -1451,6 +1465,34 @@ impl X86_64Opcode {
                     NoArgOp::RepMovsq => &[0xF3, 0x48, 0xA5],
                 };
                 Some(bytes.to_vec())
+            }
+            // P11 Bucket K: movd/movq GPR↔XMM reg-reg.
+            X86_64Opcode::GprXmm { to_xmm, width, dst, src } => {
+                let (Operand::Reg(dst_idx, _), Operand::Reg(src_idx, _)) = (dst, src) else {
+                    return None;
+                };
+                // to_xmm=true: GPR→XMM (0x6E). to_xmm=false: XMM→GPR (0x7E).
+                // modrm.reg=xmm (dst if to_xmm else src), modrm.r/m=gpr.
+                let (xmm_idx, gpr_idx) = if *to_xmm {
+                    (*dst_idx, *src_idx)
+                } else {
+                    (*src_idx, *dst_idx)
+                };
+                let is_b64 = matches!(width, crate::codegen::shared::asm_operand::Width::B64);
+                let opc2: u8 = if *to_xmm { 0x6E } else { 0x7E };
+                // movq (B64) needs 66 legacy prefix + REX.W. movd (B32) needs neither.
+                let mut rex: u8 = 0x40;
+                if is_b64 { rex |= 0x08; }
+                if xmm_idx >= 8 { rex |= 0x04; }
+                if gpr_idx >= 8 { rex |= 0x01; }
+                let need_rex = is_b64 || xmm_idx >= 8 || gpr_idx >= 8;
+                let mut out = Vec::with_capacity(6);
+                if is_b64 { out.push(0x66); }
+                if need_rex { out.push(rex); }
+                out.push(0x0F);
+                out.push(opc2);
+                out.push(0xC0 | ((xmm_idx & 7) << 3) | (gpr_idx & 7));
+                Some(out)
             }
             _ => None,
         }
@@ -2750,6 +2792,43 @@ mod tests {
             src: Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B128),
         };
         assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x54, 0xC1]));
+    }
+
+    // ---- P11 Bucket K: movd/movq GPR↔XMM reg-reg ----
+    #[test]
+    fn gprxmm_movq_rax_to_xmm1() {
+        // movq xmm1, rax: 66 48 0F 6E C8  (xmm=1, gpr=0; modrm=0xC8)
+        let o = X86_64Opcode::GprXmm {
+            to_xmm: true,
+            width: crate::codegen::shared::asm_operand::Width::B64,
+            dst: Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B128),
+            src: Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x48, 0x0F, 0x6E, 0xC8]));
+    }
+
+    #[test]
+    fn gprxmm_movq_xmm0_to_rax() {
+        // movq rax, xmm0: 66 48 0F 7E C0  (xmm=0, gpr=0; modrm=0xC0)
+        let o = X86_64Opcode::GprXmm {
+            to_xmm: false,
+            width: crate::codegen::shared::asm_operand::Width::B64,
+            dst: Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+            src: Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B128),
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x48, 0x0F, 0x7E, 0xC0]));
+    }
+
+    #[test]
+    fn gprxmm_movd_eax_to_xmm0() {
+        // movd xmm0, eax: 0F 6E C0  (no 66, no REX.W; B32)
+        let o = X86_64Opcode::GprXmm {
+            to_xmm: true,
+            width: crate::codegen::shared::asm_operand::Width::B32,
+            dst: Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B128),
+            src: Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B32),
+        };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0x6E, 0xC0]));
     }
 }
 
