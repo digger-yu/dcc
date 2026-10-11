@@ -1858,7 +1858,10 @@ impl X86_64Opcode {
                     CondCode::Ge => 0x9D,
                     CondCode::Gt => 0x9F,
                     CondCode::Le => 0x9E,
-                    _ => return None,
+                    CondCode::S => 0x98,
+                    CondCode::Ns => 0x99,
+                    CondCode::O => 0x90,
+                    CondCode::No => 0x91,
                 };
                 // Regs 8..15 (sil/dil/bpl etc) require REX prefix to avoid
                 // interpreting as ah/ch/dh/bh. We always emit REX.B set iff idx>=8.
@@ -3554,6 +3557,20 @@ mod tests {
         // setnp r14b: 41 0F 9B C6  (reg=14 >=8 needs REX.B; reg&7=6, modrm=0xC6)
         let o = X86_64Opcode::Setcc { cc: CondCode::Np, dst: reg(14, Width::B8) };
         assert_eq!(o.encode(), Some(vec![0x41, 0x0F, 0x9B, 0xC6]));
+    }
+
+    #[test]
+    fn setcc_s_al() {
+        // sets al: 0F 98 C0
+        let o = X86_64Opcode::Setcc { cc: CondCode::S, dst: reg(0, Width::B8) };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0x98, 0xC0]));
+    }
+
+    #[test]
+    fn setcc_o_dl() {
+        // seto dl: 0F 90 C2
+        let o = X86_64Opcode::Setcc { cc: CondCode::O, dst: reg(2, Width::B8) };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0x90, 0xC2]));
     }
 
     // ---- P11 Bucket I: NoArg (cld/mfence/rep movsb/stosb/movsq) ----
