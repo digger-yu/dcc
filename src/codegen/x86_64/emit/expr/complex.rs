@@ -1783,15 +1783,8 @@ impl Codegen {
                 self.emit_x87_fld_at(0, part_off as i32, &inner);
             } else if is_float {
                 let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-                self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10])); // movss/movsd xmm0, [rax+disp]
-                if part_off == 0 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x00]));
-                } else if part_off.abs() < 128 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x40, part_off as u8]));
-                } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0x80]));
-                    self.emit_insn(&Insn::raw_bytes(&(part_off as i32).to_le_bytes()));
-                }
+                let ld_w = if pfx == 0xF3u8 { SimdWidth::SS } else { SimdWidth::SD };
+                self.emit_insn(&Insn::simd_mov_mem_base(false, ld_w, 0, 0, part_off as i32));
             } else {
                 // 整数内型: 先加分量偏移, 再按 size 加载到 rax
                 if part_off != 0 {
@@ -1804,9 +1797,9 @@ impl Codegen {
                 }
                 let sz = inner.size();
                 match sz {
-                    1 => { self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x00])); }, // movzx eax, byte [rax]
+                    1 => { self.emit_insn(&Insn::mov_ext_mem(false, crate::codegen::shared::asm_operand::Width::B8, crate::codegen::shared::asm_operand::Width::B32, 0, 0, 0)); }, // movzx eax, byte [rax]
                     2 => {
-                        self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x00]));
+                        self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B16, 0, 0, 0));
                         // movzwq eax, eax
                         self.emit_insn(&Insn::mov_ext(
                             false,
@@ -2513,7 +2506,7 @@ impl Codegen {
                         self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // rdi = rsp
                         if rsp_slot != 0 {
                             if (-128..=127).contains(&rsp_slot) {
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC7, rsp_slot as u8]));
+                                self.emit_insn(&Insn::alu_rm_reg_imm8_b64(0, 7, rsp_slot));
                             } else {
                                 self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 7, rsp_slot as i64)); // add rdi, imm32
                             }
