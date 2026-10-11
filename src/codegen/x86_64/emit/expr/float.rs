@@ -431,21 +431,20 @@ impl Codegen {
         self.label(&l_done);
     }
     pub(crate) fn emit_xmm_rax_disp(&mut self, pfx: u8, xmm: u8, off: i64) {
-        let rex = if xmm >= 8 { Some(0x44) } else { None };
-        if let Some(rex) = rex {
-            self.emit_insn(&Insn::raw_bytes(&[pfx, rex, 0x0F, 0x10]));
+        // movss/movsd xmm, [rax+off]. P11 Bucket AC: 收敛到 simd_mov_mem_base.
+        // pfx: F3=SS (movss), F2=SD (movsd).
+        let width = if pfx == 0xF3 {
+            crate::codegen::x86_64::opcode::SimdWidth::SS
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10]));
-        }
-        let reg = (xmm & 7) << 3;
-        if off == 0 {
-            self.emit_insn(&Insn::raw_bytes(&[reg]));
-        } else if (-128..=127).contains(&off) {
-            self.emit_insn(&Insn::raw_bytes(&[0x40 | reg, off as i8 as u8]));
-        } else {
-            self.emit_insn(&Insn::raw_bytes(&[0x80 | reg]));
-            self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
-        }
+            crate::codegen::x86_64::opcode::SimdWidth::SD
+        };
+        self.emit_insn(&Insn::simd_mov_mem_base(
+            false,
+            width,
+            xmm,
+            0,
+            off as i32,
+        ));
     }
     pub(crate) fn emit_zero_extend(&mut self, dst: u8, src_ty: &Type) {
         let (mask, is_32bit) = match src_ty {
@@ -656,44 +655,113 @@ impl Codegen {
         self.emit_insn(&Insn::add_rsp_imm_gas(save_bytes as i64, &format!("add ${save_bytes}, %rsp")));
                                                           // 现在 xmm0=左, xmm1=右 → xmm0 op xmm1 = 左 op 右
                                                           // 执行运算
-        let (prefix, opcode, mnem) = match op {
-            BinOp::Add => (if is_float { 0xF3 } else { 0xF2 }, 0x58, if is_float { "addss" } else { "addsd" }),
-            BinOp::Sub => (if is_float { 0xF3 } else { 0xF2 }, 0x5C, if is_float { "subss" } else { "subsd" }),
-            BinOp::Mul => (if is_float { 0xF3 } else { 0xF2 }, 0x59, if is_float { "mulss" } else { "mulsd" }),
-            BinOp::Div => (if is_float { 0xF3 } else { 0xF2 }, 0x5E, if is_float { "divss" } else { "divsd" }),
+        // xmm0 op xmm1 -> xmm0. P11 Bucket AC: 收敛到 simd_arith_reg.
+        let (arith_op, width, mnem): (
+            crate::codegen::x86_64::opcode::SimdArithOp,
+            crate::codegen::x86_64::opcode::SimdWidth,
+            &'static str,
+        ) = match (op, is_float) {
+            (BinOp::Add, true) => (
+                crate::codegen::x86_64::opcode::SimdArithOp::Add,
+                crate::codegen::x86_64::opcode::SimdWidth::SS,
+                "addss",
+            ),
+            (BinOp::Add, false) => (
+                crate::codegen::x86_64::opcode::SimdArithOp::Add,
+                crate::codegen::x86_64::opcode::SimdWidth::SD,
+                "addsd",
+            ),
+            (BinOp::Sub, true) => (
+                crate::codegen::x86_64::opcode::SimdArithOp::Sub,
+                crate::codegen::x86_64::opcode::SimdWidth::SS,
+                "subss",
+            ),
+            (BinOp::Sub, false) => (
+                crate::codegen::x86_64::opcode::SimdArithOp::Sub,
+                crate::codegen::x86_64::opcode::SimdWidth::SD,
+                "subsd",
+            ),
+            (BinOp::Mul, true) => (
+                crate::codegen::x86_64::opcode::SimdArithOp::Mul,
+                crate::codegen::x86_64::opcode::SimdWidth::SS,
+                "mulss",
+            ),
+            (BinOp::Mul, false) => (
+                crate::codegen::x86_64::opcode::SimdArithOp::Mul,
+                crate::codegen::x86_64::opcode::SimdWidth::SD,
+                "mulsd",
+            ),
+            (BinOp::Div, true) => (
+                crate::codegen::x86_64::opcode::SimdArithOp::Div,
+                crate::codegen::x86_64::opcode::SimdWidth::SS,
+                "divss",
+            ),
+            (BinOp::Div, false) => (
+                crate::codegen::x86_64::opcode::SimdArithOp::Div,
+                crate::codegen::x86_64::opcode::SimdWidth::SD,
+                "divsd",
+            ),
             // 比较运算
-            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne => {
+            (BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne, _) => {
                 self.gen_float_cmp(op, &float_ty);
                 return;
             },
             _ => return, // 不支持的运算
         };
-        // xmm0 op xmm1 -> xmm0
-        self.emit_insn(&Insn::raw_with_gas(&[prefix, 0x0F, opcode, 0xC1], &format!("{mnem} %xmm1, %xmm0")));
+        self.emit_insn(&Insn::simd_arith_reg(arith_op, width, 0, 1).with_gas(format!(
+            "{mnem} %xmm1, %xmm0"
+        )));
     }
     fn gen_float_cmp(&mut self, op: BinOp, ty: &Type) {
         let is_float = matches!(ty, Type::Float);
         // xmm0 = 左操作数, xmm1 = 右操作数
-        // ucomiss/ucomisd xmm0, xmm1 (比较 左 vs 右)
-        if is_float {
-            self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x2E, 0xC1], "ucomiss %xmm1, %xmm0"));
+        // ucomiss/ucomisd xmm1, xmm0 (比较 左 vs 右).
+        // P11 Bucket AC: 收敛到 simd_arith_reg{Ucomi}.
+        let width = if is_float {
+            crate::codegen::x86_64::opcode::SimdWidth::SS
         } else {
-            self.emit_insn(&Insn::raw_with_gas(&[0x66, 0x0F, 0x2E, 0xC1], "ucomisd %xmm1, %xmm0"));
-        }
-        // 设置条件码
+            crate::codegen::x86_64::opcode::SimdWidth::SD
+        };
+        let ucomi_mnem = if is_float { "ucomiss" } else { "ucomisd" };
+        self.emit_insn(&Insn::simd_arith_reg(
+            crate::codegen::x86_64::opcode::SimdArithOp::Ucomi,
+            width,
+            0,
+            1,
+        )
+        .with_gas(format!("{ucomi_mnem} %xmm1, %xmm0")));
+        // 设置条件码.
+        // ucomiss/ucomisd 后: CF/ZF/PF 按 IEEE 无序比较设置. 与
+        // signed ordered compare 后 jb/jbe/ja/jae/je/jne 一一对应:
+        //   Lt => CF=1        => setb (jb)
+        //   Le => CF=1 or ZF=1 => setbe (jbe)
+        //   Gt => CF=0 and ZF=0 => seta (ja)
+        //   Ge => CF=0        => setae (jae)
+        //   EqEq => ZF=1      => sete (je)
+        //   Ne  => ZF=0       => setne (jne)
         let cc = match op {
-            BinOp::Lt => (0x92, "jb"),
-            BinOp::Le => (0x96, "jbe"),
-            BinOp::Gt => (0x97, "ja"),
-            BinOp::Ge => (0x93, "jae"),
-            BinOp::EqEq => (0x94, "je"),
-            BinOp::Ne => (0x95, "jne"),
-            _ => (0x94, "je"),
+            BinOp::Lt => (crate::codegen::x86_64::opcode::CondCode::B, "setb"),
+            BinOp::Le => (crate::codegen::x86_64::opcode::CondCode::Be, "setbe"),
+            BinOp::Gt => (crate::codegen::x86_64::opcode::CondCode::A, "seta"),
+            BinOp::Ge => (crate::codegen::x86_64::opcode::CondCode::Ae, "setae"),
+            BinOp::EqEq => (crate::codegen::x86_64::opcode::CondCode::Eq, "sete"),
+            BinOp::Ne => (crate::codegen::x86_64::opcode::CondCode::Ne, "setne"),
+            _ => (crate::codegen::x86_64::opcode::CondCode::Eq, "sete"),
         };
         // setcc al
-        self.emit_insn(&Insn::raw_with_gas(&[0x0F, cc.0, 0xC0], &format!("set{al} %al", al = &cc.1[1..])));
-        // movzx rax, al
-        self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xB6, 0xC0], "movzbq %al, %rax"));
+        self.emit_insn(&Insn::setcc_reg(cc.0, 0).with_gas(format!(
+            "{al} %al",
+            al = cc.1
+        )));
+        // movzbq rax, al: movzx r64, r/m8 (from B8 to B64, REX.W=1).
+        self.emit_insn(&Insn::mov_ext(
+            false,
+            crate::codegen::shared::asm_operand::Width::B8,
+            crate::codegen::shared::asm_operand::Width::B64,
+            0,
+            0,
+        )
+        .with_gas("movzbq %al, %rax".into()));
     }
     pub(crate) fn gen_float_imm_load(&mut self, c: FloatConst, ty: &Type) {
         // x87 通路（long double 恒真 / -mno-sse）：真 80-bit 常量落 .rodata,
@@ -832,13 +900,16 @@ impl Codegen {
         self.emit_xmm_r13_disp(pfx, 0x10, xmm, off);
     }
     pub(crate) fn load_mem_xmm(&mut self, xmm: u8, elem_size: usize, is_float: bool) {
-        if is_float {
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, ((xmm & 7) << 3)]));
-        } else if elem_size == 8 {
-            self.emit_insn(&Insn::raw_bytes(&[0xF2, 0x0F, 0x10, ((xmm & 7) << 3)]));
+        // 从 [rax] 加载 (rax 已由 caller 写入 global vector element 地址).
+        // is_float || elem_size==8: SS/F3 (movss 标量单精度) ; 否则 SD/F2?
+        // 实际上原代码三分支: is_float→F3, !is_float && elem_size==8→F2, else→F3.
+        // 与 simd_mov_mem_base(false, SS/SD, xmm, base=rax(0), disp=0) 一致.
+        let width = if !is_float && elem_size == 8 {
+            SimdWidth::SD
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x0F, 0x10, ((xmm & 7) << 3)]));
-        }
+            SimdWidth::SS
+        };
+        self.emit_insn(&Insn::simd_mov_mem_base(false, width, xmm, 0, 0));
     }
     pub(crate) fn materialize_bits_to_slot(&mut self, e: &Expr, dst_off: i64) {
         let src_ty = e.ty();
@@ -889,15 +960,9 @@ impl Codegen {
         if dst == src {
             return;
         }
-        let mut rex = 0x40u8;
-        if dst >= 8 {
-            rex |= 0x04;
-        }
-        if src >= 8 {
-            rex |= 0x01;
-        }
-        let modrm = 0xC0 | ((dst & 7) << 3) | (src & 7);
-        self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0x28, modrm]));
+        // movaps xmm_dst, xmm_src (0F 28 mod=11).
+        // P11 Bucket AC: 收敛到 movaps_xmm.
+        self.emit_insn(&Insn::movaps_xmm(dst, src));
     }
     pub(crate) fn try_gen_fp_contract(&mut self, op: BinOp, l: &Expr, r: &Expr, dst: u8) -> bool {
         if !matches!(op, BinOp::Add | BinOp::Sub) {
