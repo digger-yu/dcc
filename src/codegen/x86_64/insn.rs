@@ -299,6 +299,20 @@ impl Insn {
         Insn::raw_bytes(&[0x83, modrm, v])
     }
 
+    /// P11 Bucket K: 构造 B64 `add/or/and/sub/xor/cmp reg, imm8` (REX.W 0x83 / ib, 短形式).
+    /// 与 `alu_rm_reg_imm8` (B32 无 REX.W) 不同: 本构造器固定 REX.W, 用于
+    /// 全局地址/帧指针等 64 位寄存器的小立即数加 (如 `add rax, offset`).
+    /// op 编码: /0=add, /1=or, /4=and, /5=sub, /6=xor, /7=cmp.
+    pub fn alu_rm_reg_imm8_b64(op: u8, reg_idx: u8, imm: i64) -> Self {
+        let mut rex: u8 = 0x48;
+        if reg_idx >= 8 {
+            rex |= 0x01;
+        }
+        let modrm = 0xC0 | ((op & 0x7) << 3) | (reg_idx & 0x7);
+        let v = imm as i8 as u8;
+        Insn::raw_bytes(&[rex, 0x83, modrm, v])
+    }
+
     /// P11 Bucket B: 构造 B64 `add/or/and/sub/xor/cmp reg, imm32` (0x81 / id 形式).
     /// 与 rsp 的 0x81 imm32 一致, 但任意 reg; 手写常拆成两条 emit_insn (opcode 三元组 + imm32).
     /// op 编码: /0=add, /1=or, /4=and, /5=sub, /6=xor, /7=cmp.
@@ -566,6 +580,27 @@ impl Insn {
             crate::codegen::x86_64::opcode::X86_64Opcode::X87 {
                 op: crate::codegen::x86_64::opcode::X87Op::Fixed { escap, modrm },
                 mem: None,
+            },
+            &[],
+        )
+    }
+
+    /// P11 Bucket W: x87 load/store memory form (fld/fstp/fild [base+disp]).
+    /// width: 4=m32fp, 8=m64fp, 10=m80fp. base: intel reg number (4=rsp).
+    pub fn x87_mem(
+        op: crate::codegen::x86_64::opcode::X87Op,
+        base: u8,
+        disp: i32,
+    ) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::X87 {
+                op,
+                mem: Some(crate::codegen::x86_64::opcode::MemOperand {
+                    disp,
+                    base: Some(base),
+                    index: None,
+                    seg: None,
+                }),
             },
             &[],
         )
@@ -870,5 +905,25 @@ mod tests {
         // movabs r11, imm: REX.W+B, BB (B8|3=BB)
         let bytes = Insn::movabs_reg_imm64(11, 0xDEADBEEF).encode_bytes().unwrap();
         assert_eq!(&bytes[..2], &[0x49, 0xBB]);
+    }
+
+    /// P11 Bucket K: alu_rm_reg_imm8_b64 = REX.W 0x83 / ib.
+    #[test]
+    fn alu_rm_reg_imm8_b64_basic() {
+        // add rax, 8: 48 83 C0 08 (op=/0, reg=0=rax)
+        assert_eq!(
+            Insn::alu_rm_reg_imm8_b64(0, 0, 8).encode_bytes(),
+            Some(vec![0x48, 0x83, 0xC0, 0x08]),
+        );
+        // sub rdx, 16: 48 83 EA 10 (op=/5<<3|2 = 0x28|2 = 0x2A, modrm=C0|0x2A = EA)
+        assert_eq!(
+            Insn::alu_rm_reg_imm8_b64(0b101, 2, 16).encode_bytes(),
+            Some(vec![0x48, 0x83, 0xEA, 0x10]),
+        );
+        // add r8, -4: REX.W+B, 83, C0|0 = C0, fc
+        assert_eq!(
+            Insn::alu_rm_reg_imm8_b64(0, 8, -4).encode_bytes(),
+            Some(vec![0x49, 0x83, 0xC0, 0xFC]),
+        );
     }
 }
