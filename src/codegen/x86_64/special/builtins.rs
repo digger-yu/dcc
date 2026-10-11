@@ -2329,16 +2329,24 @@ impl Codegen {
                         self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Xor, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // xor rcx, rcx
                     }
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0xBA]));
-                self.emit_insn(&Insn::raw_bytes(&bits.to_le_bytes())); // mov edx, bits
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B32),
+                    src: crate::codegen::x86_64::opcode::Operand::Imm(bits as i64),
+                }, &[])); // mov edx, bits
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Shift {
                     op: crate::codegen::x86_64::opcode::ShiftOp::Shr,
                     width: crate::codegen::shared::asm_operand::Width::B64,
                     dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
                     amount: crate::codegen::x86_64::opcode::ShiftAmount::Imm8(1),
                 }, &[])); // shr rax, 1 (LSB -> CF)
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD1, 0xD1])); // rcl rcx, 1
-                self.emit_insn(&Insn::raw_bytes(&[0xFF, 0xCA])); // dec edx
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Shift {
+                    op: crate::codegen::x86_64::opcode::ShiftOp::Rcl,
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64),
+                    amount: crate::codegen::x86_64::opcode::ShiftAmount::Imm8(1),
+                }, &[])); // rcl rcx, 1
+                self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Dec, crate::codegen::shared::asm_operand::Width::B32, 2)); // dec edx
                 self.emit_insn(&Insn::raw_bytes(&[0x75, 0xF6])); // jnz loop
                 if dst != 1 {
                     self.mov(dst, 1);
