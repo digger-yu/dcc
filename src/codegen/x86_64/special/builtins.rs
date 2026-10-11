@@ -1786,7 +1786,7 @@ impl Codegen {
                 // setnp bl (NOT PF): 非 NaN
                 self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Np, 3));
                 // and al, bl: 既等于 Inf 又非 NaN
-                self.emit_insn(&Insn::raw_bytes(&[0x20, 0xD8])); // and al, bl
+                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B8, 0, 3)); // and al, bl
                                           // movzx eax, al
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
                     sign: false,
@@ -1899,7 +1899,7 @@ impl Codegen {
                 //   0F 9B C3 = setnp bl
                 self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Np, 3));
                 // and al, bl: 两者都成立才是 finite
-                self.emit_insn(&Insn::raw_bytes(&[0x20, 0xD8])); // and al, bl
+                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B8, 0, 3)); // and al, bl
                                           // movzx eax, al
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
                     sign: false,
@@ -2027,9 +2027,30 @@ impl Codegen {
                                                             // 若 Zero (ecx=1): eax = 2
                                                             // 链: 先 mov eax, 4; test ecx cmove eax, 2; test edx cmove eax, 1; test ebx cmove eax, 0
                                                             // 准备 3 个常量:
-                self.emit_insn(&Insn::raw_bytes(&[0xBF, 0x02, 0x00, 0x00, 0x00])); // mov edi, 2
-                self.emit_insn(&Insn::raw_bytes(&[0xBE, 0x01, 0x00, 0x00, 0x00])); // mov esi, 1
-                self.emit_insn(&Insn::raw_bytes(&[0xBD, 0x00, 0x00, 0x00, 0x00])); // mov ebp, 0
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        width: crate::codegen::shared::asm_operand::Width::B32,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B32),
+                        src: crate::codegen::x86_64::opcode::Operand::Imm(2),
+                    },
+                    &[],
+                )); // mov edi, 2
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        width: crate::codegen::shared::asm_operand::Width::B32,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B32),
+                        src: crate::codegen::x86_64::opcode::Operand::Imm(1),
+                    },
+                    &[],
+                )); // mov esi, 1
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        width: crate::codegen::shared::asm_operand::Width::B32,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(5, crate::codegen::shared::asm_operand::Width::B32),
+                        src: crate::codegen::x86_64::opcode::Operand::Imm(0),
+                    },
+                    &[],
+                )); // mov ebp, 0
                                                             // 实际上分类值由调用者映射, 我们这里返回 0/1/2/4 即可
                                                             // cmovne: 当 ebx=1 (NaN) 时 eax=0; edx=1 (Inf) 时 eax=1; ecx=1 (Zero) 时 eax=2
                                                             // 注意 cmovne 条件是 ZF=0 (非零), cmove 条件是 ZF=1 (零)
@@ -2244,7 +2265,7 @@ impl Codegen {
                 self.gen_expr(&args[0], Self::EVAL_BASE);
                 for shift in [32u8, 16, 8, 4, 2, 1] {
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xE9, shift])); // shr rcx, shift
+                    self.emit_insn(&Insn::shift_reg_imm8_c1_b64(0b101, 1, shift)); // shr rcx, shift
                     // P11: 收敛到 AluRm{Xor, B64, rax, rcx}.
                     let insn = Insn::new(
                         crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
@@ -4006,7 +4027,7 @@ impl Codegen {
                 }
                 self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::B, 0));
                 self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Np, 3));
-                self.emit_insn(&Insn::raw_bytes(&[0x20, 0xD8]));
+                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B8, 0, 3)); // and al, bl
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
                     sign: false,
                     from: crate::codegen::shared::asm_operand::Width::B8,
@@ -4060,7 +4081,7 @@ impl Codegen {
                         // a != b and not unordered: ZF=0 and PF=0
                         self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Ne, 0)); // setne al (ZF=0)
                         self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Np, 3)); // setnp bl (PF=0)
-                        self.emit_insn(&Insn::raw_bytes(&[0x20, 0xD8])); // and al, bl
+                        self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B8, 0, 3)); // and al, bl
                     },
                     _ => {
                         self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::A, 0)); // seta al (default)
