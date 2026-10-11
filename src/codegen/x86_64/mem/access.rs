@@ -780,10 +780,8 @@ impl Codegen {
                 _ => (0xDDu8, 0u8),
             };
             let (scale2, sib2) = if elem_size == 16 {
-                // imul idx, idx, 16
-                let rex_i = 0x48u8 | if idx_reg >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                self.emit_insn(&Insn::raw_bytes(&[rex_i, 0x69, 0xC0 | ((idx_reg & 7) << 3) | (idx_reg & 7)]));
-                self.emit_insn(&Insn::raw_bytes(&16i32.to_le_bytes()));
+                // P11 Bucket AE: imul idx, idx, 16 via typed imul_rm_reg_imm32_b64.
+                self.emit_insn(&Insn::imul_rm_reg_imm32_b64(idx_reg, 16));
                 (0u8, (0u8 << 6) | ((idx_reg & 7) << 3) | 3)
             } else {
                 (scale, sib)
