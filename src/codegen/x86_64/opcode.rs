@@ -1110,15 +1110,17 @@ impl X86_64Opcode {
                     }
                     _ => return None,
                 };
-                // 本步只支持 base-only 或 scale=1 的 [base+index] (无 seg / 无其他 scale).
-                // 其他 scale (2/4/8) 和 seg 前缀先回退手写.
+                // 本步支持 base-only 或 [base+index*scale] (scale=1/2/4/8, disp=0).
+                // seg 前缀 / 其他 scale 先回退手写.
                 if mem.seg.is_some() {
                     return None;
                 }
                 let (index_reg, index_scale) = match mem.index {
                     None => (None, 0u8),
                     Some((ir, s)) => {
-                        if s != 1 { return None; }
+                        if s != 1 && s != 2 && s != 4 && s != 8 {
+                            return None;
+                        }
                         (Some(ir), s)
                     }
                 };
@@ -1264,12 +1266,12 @@ impl X86_64Opcode {
                         Some(out)
                     }
                     (Operand::Reg(dst_idx, _), Operand::Mem(mem)) => {
-                        // mem -> reg (load). 支持 base+disp / [base+index*1+disp].
-                        // 非 scale=1 的 index / seg 前缀回退手写.
+                        // mem -> reg (load). 支持 base+disp / [base+index*scale+disp=0].
+                        // 非 scale ∈ {1,2,4,8} 的 index / seg 前缀回退手写.
                         let (index_reg, index_scale) = match mem.index {
                             None => (None, 0u8),
                             Some((ir, s)) => {
-                                if s != 1 || mem.seg.is_some() {
+                                if s != 1 && s != 2 && s != 4 && s != 8 {
                                     return None;
                                 }
                                 (Some(ir), s)
@@ -1330,8 +1332,9 @@ impl X86_64Opcode {
                         let modrm = (modrm_mod << 6) | (reg_field << 3) | modrm_rm;
                         out.push(modrm);
                         if need_sib {
-                            // SIB: scale=0 (scale=1), index=index_reg&7 (无 index 则 4=ESP).
-                            let scale_bits = match index_scale { 1 => 0, _ => 0 };
+                            // SIB: scale_bits = log2(scale) (0=1,1=2,2=4,3=8);
+                            // index=index_reg&7 (无 index 则 4=ESP).
+                            let scale_bits = match index_scale { 1 => 0, 2 => 1, 4 => 2, 8 => 3, _ => 0 };
                             let index_field = index_reg.map(|ir| ir & 7).unwrap_or(4);
                             out.push((scale_bits << 6) | (index_field << 3) | rm_field);
                         }

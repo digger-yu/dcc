@@ -277,7 +277,7 @@ impl Codegen {
             }
         };
         if use_sib_index_rax {
-            self.emit_insn(&Insn::mov_ext_mem_sib(signed, from, to, 0, base, 0));
+            self.emit_insn(&Insn::mov_ext_mem_sib(signed, from, to, 0, base, 0, 1));
         } else {
             self.emit_insn(&Insn::mov_ext_mem(signed, from, to, 0, base, 0));
         }

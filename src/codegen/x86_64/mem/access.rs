@@ -834,34 +834,38 @@ impl Codegen {
             // 按 elem_size 和符号性选加载指令:
             // signed: movsbq/movswq/movsxd (符号扩展)
             // unsigned: movzbq/movzwq/mov (零扩展)
+            // P11 Bucket AE: 收敛到 typed mov_ext_mem_sib / mov_rm_mem_sib.
+            // base=r11(11), index=idx_reg, scale = elem_size (真实乘数 1/2/4/8).
+            // elem_size==16 时上面已经 imul idx,idx,16, 这里用 scale=1 (字节偏移).
+            use crate::codegen::shared::asm_operand::Width::*;
             let is_signed = Self::is_signed_int(elem_ty);
-            let mut rex = 0x48u8 | 0x01; // REX.W + REX.B (SIB base=r11)
-            if dst_gp >= 8 {
-                rex |= 0x04; // REX.R
-            }
-            if idx_reg >= 8 {
-                rex |= 0x02; // REX.X
-            }
-            if is_signed {
-                // 符号扩展加载: 保留 REX.W
-                self.emit_seg(seg);
-                match elem_size {
-                    1 => { let _ = self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xBE, modrm | ((dst_gp & 7) << 3), sib])); } // movsbq
-                    2 => { let _ = self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xBF, modrm | ((dst_gp & 7) << 3), sib])); } // movswq
-                    4 => { let _ = self.emit_insn(&Insn::raw_bytes(&[rex, 0x63, modrm | ((dst_gp & 7) << 3), sib])); }       // movsxd
-                    _ => { let _ = self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, modrm | ((dst_gp & 7) << 3), sib])); } // mov 64-bit
-                }
-            } else {
-                // 零扩展加载: 去掉 REX.W
-                if elem_size != 8 {
-                    rex &= !0x08;
-                }
-                self.emit_seg(seg);
-                match elem_size {
-                    1 => { let _ = self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xB6, modrm | ((dst_gp & 7) << 3), sib])); } // movzbq
-                    2 => { let _ = self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xB7, modrm | ((dst_gp & 7) << 3), sib])); } // movzwq
-                    _ => { let _ = self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, modrm | ((dst_gp & 7) << 3), sib])); } // mov 32/64
-                }
+            let sib_scale: u8 = match elem_size { 2 => 2, 4 => 4, 8 => 8, _ => 1 };
+            self.emit_seg(seg);
+            match (is_signed, elem_size) {
+                (true, 1) => { let _ = self.emit_insn(&Insn::mov_ext_mem_sib(
+                    true, B8, B64, dst_gp, 11, idx_reg, sib_scale,
+                )); },
+                (true, 2) => { let _ = self.emit_insn(&Insn::mov_ext_mem_sib(
+                    true, B16, B64, dst_gp, 11, idx_reg, sib_scale,
+                )); },
+                (true, 4) => { let _ = self.emit_insn(&Insn::mov_ext_mem_sib(
+                    true, B32, B64, dst_gp, 11, idx_reg, sib_scale,
+                )); },
+                (true, _) => { let _ = self.emit_insn(&Insn::mov_rm_mem_sib(
+                    true, B64, dst_gp, 11, idx_reg, sib_scale,
+                )); },
+                (false, 1) => { let _ = self.emit_insn(&Insn::mov_ext_mem_sib(
+                    false, B8, B64, dst_gp, 11, idx_reg, sib_scale,
+                )); },
+                (false, 2) => { let _ = self.emit_insn(&Insn::mov_ext_mem_sib(
+                    false, B16, B64, dst_gp, 11, idx_reg, sib_scale,
+                )); },
+                (false, 8) => { let _ = self.emit_insn(&Insn::mov_rm_mem_sib(
+                    true, B64, dst_gp, 11, idx_reg, sib_scale,
+                )); },
+                (false, _) => { let _ = self.emit_insn(&Insn::mov_rm_mem_sib(
+                    true, B32, dst_gp, 11, idx_reg, sib_scale,
+                )); },
             }
         }
     }

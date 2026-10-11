@@ -311,6 +311,28 @@ impl Insn {
         Insn::new(X86_64Opcode::MovRm { width, dst, src }, &[])
     }
 
+    /// P11 Bucket AE: MovRm reg <-> mem [base+index*scale] (load or store, disp=0).
+    /// scale ∈ {1,2,4,8}. base: Intel reg number 0..15 (含 r11=11 等).
+    pub fn mov_rm_mem_sib(
+        load: bool,
+        width: crate::codegen::shared::asm_operand::Width,
+        reg_idx: u8,
+        base: u8,
+        index: u8,
+        scale: u8,
+    ) -> Self {
+        use crate::codegen::x86_64::opcode::{MemOperand, Operand, X86_64Opcode};
+        let reg = Operand::Reg(reg_idx, width);
+        let mem = Operand::Mem(MemOperand {
+            disp: 0,
+            base: Some(base),
+            index: Some((index, scale)),
+            seg: None,
+        });
+        let (dst, src) = if load { (reg, mem) } else { (mem, reg) };
+        Insn::new(X86_64Opcode::MovRm { width, dst, src }, &[])
+    }
+
     /// P11 Bucket B: AluRm reg, reg (mod=11) — add/sub/and/or/xor/cmp.
     pub fn alu_rm_reg_reg(
         op: crate::codegen::x86_64::opcode::AluOp,
@@ -1262,7 +1284,7 @@ impl Insn {
     }
 
     /// P11 Bucket X: movzx/movsx/movsxd via MovExt typed opcode, mem-load SIB form
-    /// `dst, [base+index*1]`. index_scale 仅接受 1 (SIB scale=0); 其余走手写回退.
+    /// `dst, [base+index*scale]`. scale ∈ {1,2,4,8}. 其余走手写回退.
     pub fn mov_ext_mem_sib(
         sign: bool,
         from: crate::codegen::shared::asm_operand::Width,
@@ -1270,6 +1292,7 @@ impl Insn {
         dst_reg: u8,
         base: u8,
         index: u8,
+        scale: u8,
     ) -> Self {
         Insn::new(
             crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
@@ -1281,7 +1304,7 @@ impl Insn {
                     crate::codegen::x86_64::opcode::MemOperand {
                         disp: 0,
                         base: Some(base),
-                        index: Some((index, 1)),
+                        index: Some((index, scale)),
                         seg: None,
                     },
                 ),
