@@ -213,10 +213,10 @@ impl Codegen {
                 },
                 &[],
             )); // mov rax, [rsp]        ; x
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x44, 0x24, 0x08])); // mov [rsp+8], rax
+            self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 0, 4, 8)); // mov [rsp+8], rax
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, 0x6C, 0x24, 0x08])); // shr qword [rsp+8], 1  ; h = x>>1
             self.emit_insn(&Insn::alu_rm_reg_imm8(4, 0, 1)); // and eax, 1                  ; b = x&1
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x44, 0x24, 0x10])); // mov [rsp+16], rax
+            self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 0, 4, 16)); // mov [rsp+16], rax
             self.emit_x87_mem_at(0xDB, 0, 4, 8, true); // fild qword [rsp+8]   st0 = h
             self.emit_insn(&Insn::x87_fixed(0xD9, 0xC8)); // fadd st(0), st(0)            → 2h
             self.emit_x87_mem_at(0xDB, 0, 4, 16, true); // fild qword [rsp+16]  st0 = b
@@ -409,38 +409,14 @@ impl Codegen {
             self.emit_x87_fstp_at(4, 0, ty); // fstp tbyte [rsp]
                                              // 按 xmm 目标宽度舍入重读到 xmm
             let is_float = matches!(ty, Type::Float);
-            let pfx: u8 = if is_float { 0xF3 } else { 0xF2 };
             // REX 必须在 mandatory prefix F2/F3 之后、操作码之前
-            self.emit_insn(&Insn::raw_bytes(&[pfx]));
-            if xmm >= 8 {
-                self.emit_insn(&Insn::raw_bytes(&[0x44]));
-            }
-            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x10]));
-            self.emit_insn(&Insn::raw_bytes(&[0x04 | ((xmm & 7) << 3), 0x24])); // mod=00 xmm, SIB [rsp]
+            let width = if is_float { SimdWidth::SS } else { SimdWidth::SD };
+            self.emit_insn(&Insn::simd_mov_mem_base(false, width, xmm, 4, 0));
             self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp,16
             return;
         }
-        let pfx: u8 = if matches!(ty, Type::Float) { 0xF3 } else { 0xF2 };
-        let mut rex = 0x40u8;
-        if base >= 8 {
-            rex |= 0x01; // REX.B
-        }
-        if xmm >= 8 {
-            rex |= 0x04; // REX.R
-        }
-        // REX 必须在 mandatory prefix F2/F3 之后、操作码之前
-        self.emit_insn(&Insn::raw_bytes(&[pfx]));
-        if rex != 0x40 {
-            self.emit_insn(&Insn::raw_bytes(&[rex]));
-        }
-        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x10]));
-        // rm==100 (rsp/r12) 必须 SIB; r13 低3位=5 同样需要 SIB.
-        if base == 4 || base == 12 || base == 13 {
-            self.emit_insn(&Insn::raw_bytes(&[0x84 | ((xmm & 7) << 3), 0x20 | (base & 7)]));
-        } else {
-            self.emit_insn(&Insn::raw_bytes(&[0x80 | ((xmm & 7) << 3) | (base & 7)]));
-        }
-        self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes()));
+        let width = if matches!(ty, Type::Float) { SimdWidth::SS } else { SimdWidth::SD };
+        self.emit_insn(&Insn::simd_mov_mem_base(false, width, xmm, base, disp));
     }
 
     /// xmm（f32/f64）→ 内存中的 `float_in_st0` lvalue（inline asm xmm
@@ -456,13 +432,8 @@ impl Codegen {
     ) {
         debug_assert!(self.float_in_st0(dst_ty));
         self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp,16
-        let pfx: u8 = if matches!(src_ty, Type::Float) { 0xF3 } else { 0xF2 };
-        // REX 必须在 mandatory prefix 之后
-        self.emit_insn(&Insn::raw_bytes(&[pfx]));
-        if xmm >= 8 {
-            self.emit_insn(&Insn::raw_bytes(&[0x44]));
-        }
-        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x11, 0x04 | ((xmm & 7) << 3), 0x24])); // mov [rsp], xmm
+        let width = if matches!(src_ty, Type::Float) { SimdWidth::SS } else { SimdWidth::SD };
+        self.emit_insn(&Insn::simd_mov_mem_base(true, width, xmm, 4, 0)); // mov [rsp], xmm
         self.emit_x87_fld_at(4, 0, src_ty); // fld [rsp]（精确拓宽）
         self.emit_x87_fstp_at(base, disp, dst_ty); // fstp tbyte/dword/qword [base+disp]
         self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp,16
@@ -525,13 +496,14 @@ impl Codegen {
             }
             _ => {
                 let invert = matches!(op, BinOp::Ne);
-                let cc: u8 = match op {
-                    BinOp::Lt => 0x92, // setb  (CF=1)
-                    BinOp::Le => 0x96, // setbe (CF=1 || ZF=1)
-                    _ => 0x94,         // sete  (ZF=1) —— EqEq 与 Ne 共用
+                use crate::codegen::x86_64::opcode::CondCode;
+                let cc: CondCode = match op {
+                    BinOp::Lt => CondCode::B,    // setb  (CF=1)
+                    BinOp::Le => CondCode::Be,   // setbe (CF=1 || ZF=1)
+                    _ => CondCode::Eq,           // sete  (ZF=1) —— EqEq 与 Ne 共用
                 };
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, cc, 0xC0])); // setcc al
-                self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Np, 1)); // setnp cl  (PF=0 → 1)
+                self.emit_insn(&Insn::setcc_reg(cc, 0)); // setcc al
+                self.emit_insn(&Insn::setcc_reg(CondCode::Np, 1)); // setnp cl  (PF=0 → 1)
                 self.emit_insn(&Insn::raw_bytes(&[0x20, 0xC8])); // and al, cl  → 排除 unordered
                 if invert {
                     self.emit_insn(&Insn::raw_bytes(&[0x34, 0x01])); // xor al, 1
