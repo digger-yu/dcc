@@ -59,17 +59,26 @@ impl Codegen {
         // 源 >= 0。test dst, dst：SF=1（结果为负）即正溢出（正值截断不可能为负）。
         // test r/m, r 编码 85 /r：dst 同时在 reg 与 r/m 两字段，高 8 号时 REX.R 与
         // REX.B 必须各自独立置位（与 instructions.rs::mov 同一口径）。
-        let test_rex = if is_64bit { 0x48 } else { 0x40 }
-            | if dst >= 8 { 0x04 | 0x01 } else { 0 };
         let modrm = 0xC0 | ((dst & 7) << 3) | (dst & 7);
         let bits = if is_64bit { 64 } else { 32 };
         let test_gas_reg = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, bits)
             .unwrap_or_else(|| "%eax".to_string());
         let test_gas = format!("test {}, {}", test_gas_reg, test_gas_reg);
-        if test_rex != 0x40 {
-            self.emit_insn(&Insn::raw_with_gas(&[test_rex, 0x85, modrm], &test_gas));
+        // P11: test dst, dst via AluRm typed.
+        let test_width = if is_64bit {
+            crate::codegen::shared::asm_operand::Width::B64
         } else {
-            self.emit_insn(&Insn::raw_with_gas(&[0x85, modrm], &test_gas));
+            crate::codegen::shared::asm_operand::Width::B32
+        };
+        let insn = Insn::test_rm_reg(test_width, dst, dst);
+        if !self.emit_insn(&insn) {
+            let test_rex = if is_64bit { 0x48 } else { 0x40 }
+                | if dst >= 8 { 0x04 | 0x01 } else { 0 };
+            if test_rex != 0x40 {
+                self.emit_insn(&Insn::raw_with_gas(&[test_rex, 0x85, modrm], &test_gas));
+            } else {
+                self.emit_insn(&Insn::raw_with_gas(&[0x85, modrm], &test_gas));
+            }
         }
         // 结果非负 ⇒ 在范围内，保留。
         self.jmp_rel32(&l_done, JumpKind::Jns);
@@ -206,7 +215,11 @@ impl Codegen {
             }
         }
         let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-        self.emit_insn(&Insn::raw_bytes(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+        // P11: test dst, dst via AluRm typed (B64 自反).
+        let insn = Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, dst, dst);
+        if !self.emit_insn(&insn) {
+            self.emit_insn(&Insn::raw_bytes(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+        }
         let rex_cmov = 0x48 | if dst >= 8 { 0x04 } else { 0 };
         self.emit_insn(&Insn::raw_bytes(&[
             rex_cmov,
@@ -251,7 +264,13 @@ impl Codegen {
         self.push(0); // push rax (address)
                       // 3. 读取旧值
         match lv_sz {
-            1 => { self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x00])); }, // movzx eax, byte [rax]
+            1 => {
+                // P11: movzx eax, byte [rax] via MovExt typed.
+                let insn = Insn::mov_ext_mem(false, crate::codegen::shared::asm_operand::Width::B8, crate::codegen::shared::asm_operand::Width::B32, 0, 0, 0);
+                if !self.emit_insn(&insn) {
+                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x00]));
+                }
+            }, // movzx eax, byte [rax]
             2 => {
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x00]));
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB7, 0xC0]));
@@ -336,8 +355,20 @@ impl Codegen {
         // 8. 恢复地址并存储
         self.pop(1); // pop rcx (address)
         match lv_sz {
-            1 => { self.emit_insn(&Insn::raw_bytes(&[0x88, 0x01])); },       // mov [rcx], al
-            2 => { self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x01])); }, // mov [rcx], ax
+            1 => {
+                // P11: mov [rcx], al via mov_rm_mem typed.
+                let insn = Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B8, 0, 1, 0);
+                if !self.emit_insn(&insn) {
+                    self.emit_insn(&Insn::raw_bytes(&[0x88, 0x01]));
+                }
+            },       // mov [rcx], al
+            2 => {
+                // P11: mov [rcx], ax via mov_rm_mem typed.
+                let insn = Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B16, 0, 1, 0);
+                if !self.emit_insn(&insn) {
+                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x01]));
+                }
+            }, // mov [rcx], ax
             4 => { self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,
@@ -414,13 +445,29 @@ impl Codegen {
                     // 自反 ModRM: dst 同时在 ModRM.reg 与 r/m ⇒ >=8 必须同时置 REX.R 与 REX.B(0x05)，
                     // 只置一边就把另一个字段留在低 8 个寄存器上（读/写的都是别人的 %eax）。
                     // <8 时一个前缀都不发：裸 0x40 什么都不扩，只多占一字节并被 objdump 标成 `rex mov`。
-                    if dst >= 8 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x45]));
+                    // P11: mov dst32, dst32 via MovRm typed.
+                    let insn = Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B32, dst, dst);
+                    if !self.emit_insn(&insn) {
+                        if dst >= 8 {
+                            self.emit_insn(&Insn::raw_bytes(&[0x45]));
+                        }
+                        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
                     }
-                    self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
-                    let rex2 = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    self.emit_insn(&Insn::raw_bytes(&[rex2, 0x81, 0xE0 | (dst & 7)]));
-                    self.emit_insn(&Insn::raw_bytes(&0xFFFFu32.to_le_bytes()));
+                    // P11: and dst64, 0xFFFF via AluRm typed.
+                    let insn = Insn::new(
+                        crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                            op: crate::codegen::x86_64::opcode::AluOp::And,
+                            width: crate::codegen::shared::asm_operand::Width::B64,
+                            dst: crate::codegen::x86_64::opcode::Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B64),
+                            src: crate::codegen::x86_64::opcode::Operand::Imm(0xFFFF),
+                        },
+                        &[],
+                    );
+                    if !self.emit_insn(&insn) {
+                        let rex2 = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
+                        self.emit_insn(&Insn::raw_bytes(&[rex2, 0x81, 0xE0 | (dst & 7)]));
+                        self.emit_insn(&Insn::raw_bytes(&0xFFFFu32.to_le_bytes()));
+                    }
                 }
             },
             Type::Int | Type::UInt => {
@@ -429,10 +476,14 @@ impl Codegen {
                     // 自反 ModRM: dst 同时在 ModRM.reg 与 r/m ⇒ >=8 必须同时置 REX.R 与 REX.B(0x05)，
                     // 只置一边就把另一个字段留在低 8 个寄存器上（读/写的都是别人的 %eax）。
                     // <8 时一个前缀都不发：裸 0x40 什么都不扩，只多占一字节并被 objdump 标成 `rex mov`。
-                    if dst >= 8 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x45]));
+                    // P11: mov dst32, dst32 via MovRm typed.
+                    let insn = Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B32, dst, dst);
+                    if !self.emit_insn(&insn) {
+                        if dst >= 8 {
+                            self.emit_insn(&Insn::raw_bytes(&[0x45]));
+                        }
+                        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
                     }
-                    self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
                 }
                 // 有符号 int: 64 位寄存器低 32 位已正确, 无需操作
             },
@@ -504,15 +555,31 @@ impl Codegen {
             // 自反 ModRM: dst 同时在 ModRM.reg 与 r/m ⇒ >=8 必须同时置 REX.R 与 REX.B(0x05)，
             // 只置一边就把另一个字段留在低 8 个寄存器上（读/写的都是别人的 %eax）。
             // <8 时一个前缀都不发：裸 0x40 什么都不扩，只多占一字节并被 objdump 标成 `rex mov`。
-            if dst >= 8 {
-                self.emit_insn(&Insn::raw_bytes(&[0x45]));
+            // P11: mov dst32, dst32 via MovRm typed.
+            let insn = Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B32, dst, dst);
+            if !self.emit_insn(&insn) {
+                if dst >= 8 {
+                    self.emit_insn(&Insn::raw_bytes(&[0x45]));
+                }
+                self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
             }
-            self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
         } else {
-            // and dst, mask: 清除高位
-            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-            self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xE0 | (dst & 7)]));
-            self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
+            // P11: and dst64, mask via AluRm typed.
+            let insn = Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                    op: crate::codegen::x86_64::opcode::AluOp::And,
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B64),
+                    src: crate::codegen::x86_64::opcode::Operand::Imm(mask as i64),
+                },
+                &[],
+            );
+            if !self.emit_insn(&insn) {
+                // and dst, mask: 清除高位
+                let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
+                self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xE0 | (dst & 7)]));
+                self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
+            }
         }
     }
 }
