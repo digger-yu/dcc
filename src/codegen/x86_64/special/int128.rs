@@ -11,7 +11,10 @@
 use crate::ast::*;
 use crate::codegen::shared::asm_operand::Width;
 use crate::codegen::x86_64::insn::Insn;
-use crate::codegen::x86_64::opcode::{AluOp, Operand as OpcodeOperand, X86_64Opcode};
+use crate::codegen::x86_64::opcode::{
+    AluOp, MemOperand, NoArgOp, Operand as OpcodeOperand, ShiftAmount, ShiftOp, UnaryOp,
+    X86_64Opcode,
+};
 use crate::codegen::x86_64::{Codegen, JumpKind};
 
 impl Codegen {
@@ -23,6 +26,116 @@ impl Codegen {
                 width: Width::B64,
                 dst: OpcodeOperand::Reg(dst, Width::B64),
                 src: OpcodeOperand::Reg(src, Width::B64),
+            },
+            &[],
+        );
+        if !self.emit_insn(&insn) {
+            self.emit_insn(&Insn::raw_bytes(fallback));
+        }
+    }
+
+    /// P11 Bucket M: emit unary op (B64) via typed UnaryRm, raw_bytes fallback.
+    fn emit_unary64(&mut self, op: UnaryOp, dst: u8, fallback: &[u8]) {
+        let insn = Insn::new(
+            X86_64Opcode::UnaryRm {
+                op,
+                width: Width::B64,
+                dst: OpcodeOperand::Reg(dst, Width::B64),
+            },
+            &[],
+        );
+        if !self.emit_insn(&insn) {
+            self.emit_insn(&Insn::raw_bytes(fallback));
+        }
+    }
+
+    /// P11 Bucket M: emit shift (B64) via typed Shift, raw_bytes fallback.
+    fn emit_shift64(&mut self, op: ShiftOp, dst: u8, amount: ShiftAmount, fallback: &[u8]) {
+        let insn = Insn::new(
+            X86_64Opcode::Shift {
+                op,
+                width: Width::B64,
+                dst: OpcodeOperand::Reg(dst, Width::B64),
+                amount,
+            },
+            &[],
+        );
+        if !self.emit_insn(&insn) {
+            self.emit_insn(&Insn::raw_bytes(fallback));
+        }
+    }
+
+    /// P11 Bucket M: emit B64 mov reg ← [base+disp] (load) or [base+disp] → reg (store).
+    fn emit_mov_mem64(&mut self, dst: u8, src: u8, mem: MemOperand, fallback: &[u8]) {
+        // dst=reg, src=Mem => load; dst=Mem, src=reg => store.  Here we pass both regs
+        // via parameters: load_reg = reg receiving; store_reg = reg stored.
+        let (dst_op, src_op) = if mem.base.is_some() && dst == u8::MAX {
+            // store: dst=Mem(r/m), src=reg(store_reg).
+            (OpcodeOperand::Mem(mem), OpcodeOperand::Reg(src, Width::B64))
+        } else {
+            (OpcodeOperand::Reg(dst, Width::B64), OpcodeOperand::Mem(mem))
+        };
+        let insn = Insn::new(
+            X86_64Opcode::MovRm { width: Width::B64, dst: dst_op, src: src_op },
+            &[],
+        );
+        if !self.emit_insn(&insn) {
+            self.emit_insn(&Insn::raw_bytes(fallback));
+        }
+    }
+
+    /// P11 Bucket M: emit reg,imm8 ALU (B64) via typed opcode, raw_bytes fallback.
+    fn emit_alu_rm_reg_imm8_b64(&mut self, op: AluOp, dst: u8, imm: i64, fallback: &[u8]) {
+        let insn = Insn::new(
+            X86_64Opcode::AluRm {
+                op,
+                width: Width::B64,
+                dst: OpcodeOperand::Reg(dst, Width::B64),
+                src: OpcodeOperand::Imm(imm),
+            },
+            &[],
+        );
+        if !self.emit_insn(&insn) {
+            self.emit_insn(&Insn::raw_bytes(fallback));
+        }
+    }
+
+    /// P11 Bucket M: emit load rax/rdx = [r11+disp] (global var low/high).
+    fn emit_load_r11_disp64(&mut self, reg: u8, disp: i32, fallback: &[u8]) {
+        let mem = MemOperand { disp, base: Some(11), index: None, seg: None };
+        self.emit_mov_mem64(reg, 0, mem, fallback);
+    }
+
+    /// P11 Bucket M: emit store [r11+disp] = reg (global var low/high).
+    fn emit_store_r11_disp64(&mut self, reg: u8, disp: i32, fallback: &[u8]) {
+        let mem = MemOperand { disp, base: Some(11), index: None, seg: None };
+        // dst=Mem, src=reg. Use u8::MAX as sentinel since reg=0..15 is real.
+        self.emit_mov_mem64(u8::MAX, reg, mem, fallback);
+    }
+
+    /// P11 Bucket M: emit mov r32, imm32 (B32 short form B8+r + imm32).
+    fn emit_mov_imm32_b32(&mut self, reg: u8, imm: i64, fallback: &[u8]) {
+        let insn = Insn::new(
+            X86_64Opcode::MovRm {
+                width: Width::B32,
+                dst: OpcodeOperand::Reg(reg, Width::B32),
+                src: OpcodeOperand::Imm(imm),
+            },
+            &[],
+        );
+        if !self.emit_insn(&insn) {
+            self.emit_insn(&Insn::raw_bytes(fallback));
+        }
+    }
+
+    /// P11 Bucket M: emit AluRm reg,reg (B8) with raw_bytes fallback.
+    fn emit_alu_rm_reg8(&mut self, op: AluOp, dst: u8, src: u8, fallback: &[u8]) {
+        let insn = Insn::new(
+            X86_64Opcode::AluRm {
+                op,
+                width: Width::B8,
+                dst: OpcodeOperand::Reg(dst, Width::B8),
+                src: OpcodeOperand::Reg(src, Width::B8),
             },
             &[],
         );
@@ -87,7 +200,7 @@ impl Codegen {
                 // add rcx, r9 (low): REX.W+R(r9=9) = 0x4C
                 self.emit_insn(&Insn::new(X86_64Opcode::AluRm { op: AluOp::Add, width: Width::B64, dst: OpcodeOperand::Reg(1, Width::B64), src: OpcodeOperand::Reg(9, Width::B64) }, &[])); // add rcx, r9
                                                 // adc r8, r11 (high): REX.W+R(r11)+B(r8) = 0x4D
-                self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x11, 0xD8])); // adc r8, r11
+                self.emit_alu_rm_reg64(AluOp::Adc, 8, 11, &[0x4D, 0x11, 0xD8]);
                 self.mov(0, 1); // rax = result_low
                 self.mov(2, 8); // rdx = result_high
             },
@@ -95,7 +208,7 @@ impl Codegen {
                 // sub rcx, r9 (low): REX.W+R(r9) = 0x4C
                 self.emit_insn(&Insn::new(X86_64Opcode::AluRm { op: AluOp::Sub, width: Width::B64, dst: OpcodeOperand::Reg(1, Width::B64), src: OpcodeOperand::Reg(9, Width::B64) }, &[])); // sub rcx, r9
                                                 // sbb r8, r11 (high): REX.W+R(r11)+B(r8) = 0x4D
-                self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x19, 0xD8])); // sbb r8, r11
+                self.emit_alu_rm_reg64(AluOp::Sbb, 8, 11, &[0x4D, 0x19, 0xD8]);
                 self.mov(0, 1);
                 self.mov(2, 8);
             },
@@ -120,14 +233,14 @@ impl Codegen {
             BinOp::Mul => {
                 // 低 128 位 = a0*b0 + ((a0*b1 + a1*b0) << 64)。
                 self.mov(0, 1); // rax = a0
-                self.emit_insn(&Insn::raw_bytes(&[0x49, 0xF7, 0xE1])); // mul r9
+                self.emit_unary64(UnaryOp::Mul, 9, &[0x49, 0xF7, 0xE1]); // mul r9
                 self.mov(14, 0); // 保存低 64 位
                 self.mov(10, 2); // r10 = a0*b0 高位
                 self.mov(0, 1);
-                self.emit_insn(&Insn::raw_bytes(&[0x49, 0xF7, 0xE3])); // mul r11
+                self.emit_unary64(UnaryOp::Mul, 11, &[0x49, 0xF7, 0xE3]); // mul r11
                 self.emit_insn(&Insn::new(X86_64Opcode::AluRm { op: AluOp::Add, width: Width::B64, dst: OpcodeOperand::Reg(10, Width::B64), src: OpcodeOperand::Reg(0, Width::B64) }, &[])); // add r10, rax
                 self.mov(0, 8);
-                self.emit_insn(&Insn::raw_bytes(&[0x49, 0xF7, 0xE1])); // mul r9
+                self.emit_unary64(UnaryOp::Mul, 9, &[0x49, 0xF7, 0xE1]); // mul r9
                 self.emit_insn(&Insn::new(X86_64Opcode::AluRm { op: AluOp::Add, width: Width::B64, dst: OpcodeOperand::Reg(10, Width::B64), src: OpcodeOperand::Reg(0, Width::B64) }, &[])); // add r10, rax
                 self.mov(0, 14);
                 self.mov(2, 10);
@@ -190,7 +303,7 @@ impl Codegen {
                 self.mov(8, 0); // r8 = rax = left_low (保存)
                 self.emit_alu_rm_reg64(AluOp::Xor, 0, 0, &[0x48, 0x31, 0xC0]); // xor rax, rax (low = 0)
                 self.mov(2, 8); // rdx = r8 = left_low
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, 0xE2])); // shl rdx, cl
+                self.emit_shift64(ShiftOp::Shl, 2, ShiftAmount::Cl, &[0x48, 0xD3, 0xE2]); // shl rdx, cl
                 self.jmp_rel32(&l_end, JumpKind::Jmp);
                 // < 64: shld rdx, rax, cl; shl rax, cl
                 self.label(&l_small);
@@ -203,7 +316,7 @@ impl Codegen {
                     },
                     &[],
                 )); // shld rdx, rax, cl
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, 0xE0])); // shl rax, cl
+                self.emit_shift64(ShiftOp::Shl, 0, ShiftAmount::Cl, &[0x48, 0xD3, 0xE0]); // shl rax, cl
                 self.label(&l_end);
                 // rax:rdx = result
             },
@@ -219,7 +332,7 @@ impl Codegen {
                 self.jmp_rel32(&l_under_128, JumpKind::Jl);
                 if signed {
                     self.mov(0, 2);
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xF8, 63])); // sar rax, 63
+                    self.emit_shift64(ShiftOp::Sar, 0, ShiftAmount::Imm8(63), &[0x48, 0xC1, 0xF8, 63]); // sar rax, 63
                     self.mov(2, 0);
                 } else {
                     self.emit_alu_rm_reg64(AluOp::Xor, 0, 0, &[0x48, 0x31, 0xC0]);
@@ -234,11 +347,11 @@ impl Codegen {
                 self.mov(8, 2); // r8 = rdx = left_high (保存)
                 self.mov(0, 8); // rax = r8 = left_high
                 if signed {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, 0xF8])); // sar rax, cl
+                    self.emit_shift64(ShiftOp::Sar, 0, ShiftAmount::Cl, &[0x48, 0xD3, 0xF8]); // sar rax, cl
                     self.mov(2, 8);
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xFA, 63])); // sar rdx, 63
+                    self.emit_shift64(ShiftOp::Sar, 2, ShiftAmount::Imm8(63), &[0x48, 0xC1, 0xFA, 63]); // sar rdx, 63
                 } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, 0xE8])); // shr rax, cl
+                    self.emit_shift64(ShiftOp::Shr, 0, ShiftAmount::Cl, &[0x48, 0xD3, 0xE8]); // shr rax, cl
                     self.emit_alu_rm_reg64(AluOp::Xor, 2, 2, &[0x48, 0x31, 0xD2]); // high = 0
                 }
                 self.jmp_rel32(&l_end, JumpKind::Jmp);
@@ -253,7 +366,12 @@ impl Codegen {
                     },
                     &[],
                 )); // shrd rax, rdx, cl
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, if signed { 0xFA } else { 0xEA }]));
+                self.emit_shift64(
+                    if signed { ShiftOp::Sar } else { ShiftOp::Shr },
+                    2,
+                    ShiftAmount::Cl,
+                    &[0x48, 0xD3, if signed { 0xFA } else { 0xEA }],
+                );
                 self.label(&l_end);
             },
             BinOp::AndAnd | BinOp::OrOr => {
@@ -280,17 +398,17 @@ impl Codegen {
             self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 8, 8)); // test r8, r8
             self.jmp_rel32(&lhs_positive, JumpKind::Jns);
             self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 1)); // neg rcx
-            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x83, 0xD0, 0x00])); // adc r8, 0
+            self.emit_alu_rm_reg_imm8_b64(AluOp::Adc, 8, 0, &[0x49, 0x83, 0xD0, 0x00]); // adc r8, 0
             self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 8)); // neg r8
             self.emit_insn(&Insn::alu_rm_reg_imm8(6, 6, 1)); // xor esi, 1
-            self.emit_insn(&Insn::raw_bytes(&[0xBF, 1, 0, 0, 0])); // mov edi, 1
+            self.emit_mov_imm32_b32(7, 1, &[0xBF, 1, 0, 0, 0]); // mov edi, 1
             self.label(&lhs_positive);
 
             let rhs_positive = self.fresh_label();
             self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 11, 11)); // test r11, r11
             self.jmp_rel32(&rhs_positive, JumpKind::Jns);
             self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 9)); // neg r9
-            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x83, 0xD3, 0x00])); // adc r11, 0
+            self.emit_alu_rm_reg_imm8_b64(AluOp::Adc, 11, 0, &[0x49, 0x83, 0xD3, 0x00]); // adc r11, 0
             self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 11)); // neg r11
             self.emit_insn(&Insn::alu_rm_reg_imm8(6, 6, 1)); // xor esi, 1
             self.label(&rhs_positive);
@@ -298,19 +416,18 @@ impl Codegen {
 
         // C 对零除未定义；用 ud2 明确终止，绝不制造数值 0。
         self.mov(10, 9);
-        self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x09, 0xDA])); // or r10, r11
+        self.emit_alu_rm_reg64(AluOp::Or, 10, 11, &[0x4D, 0x09, 0xDA]); // or r10, r11
         let divisor_ok = self.fresh_label();
         self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 10, 10)); // test r10, r10
         self.jmp_rel32(&divisor_ok, JumpKind::Jne);
-        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x0B])); // ud2
+        self.emit_insn(&Insn::new(X86_64Opcode::NoArg { op: NoArgOp::Ud2 }, &[])); // ud2
         self.label(&divisor_ok);
 
         self.mov(0, 1); // quotient/dividend low
         self.mov(2, 8); // quotient/dividend high
-        self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x31, 0xF6])); // xor r14, r14 (remainder low)
-        self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x31, 0xFF])); // xor r15, r15 (remainder high)
-        self.emit_insn(&Insn::raw_bytes(&[0x41, 0xBA]));
-        self.emit_insn(&Insn::raw_bytes(&128u32.to_le_bytes())); // mov r10d, 128
+        self.emit_alu_rm_reg64(AluOp::Xor, 14, 14, &[0x4D, 0x31, 0xF6]); // xor r14, r14
+        self.emit_alu_rm_reg64(AluOp::Xor, 15, 15, &[0x4D, 0x31, 0xFF]); // xor r15, r15
+        self.emit_mov_imm32_b32(10, 128, &[0x41, 0xBA, 0x80, 0x00, 0x00, 0x00]); // mov r10d, 128
         let loop_label = self.fresh_label();
         let subtract = self.fresh_label();
         let next = self.fresh_label();
@@ -321,20 +438,20 @@ impl Codegen {
             dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
             amount: crate::codegen::x86_64::opcode::ShiftAmount::Imm8(1),
         }, &[])); // shl rax, 1
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD1, 0xD2])); // rcl rdx, 1
-        self.emit_insn(&Insn::raw_bytes(&[0x49, 0xD1, 0xD6])); // rcl r14, 1
-        self.emit_insn(&Insn::raw_bytes(&[0x49, 0xD1, 0xD7])); // rcl r15, 1
-        self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x39, 0xDF])); // cmp r15, r11
+        self.emit_shift64(ShiftOp::Rcl, 2, ShiftAmount::Imm8(1), &[0x48, 0xD1, 0xD2]); // rcl rdx, 1
+        self.emit_shift64(ShiftOp::Rcl, 14, ShiftAmount::Imm8(1), &[0x49, 0xD1, 0xD6]); // rcl r14, 1
+        self.emit_shift64(ShiftOp::Rcl, 15, ShiftAmount::Imm8(1), &[0x49, 0xD1, 0xD7]); // rcl r15, 1
+        self.emit_alu_rm_reg64(AluOp::Cmp, 15, 11, &[0x4D, 0x39, 0xDF]); // cmp r15, r11
         self.jmp_rel32(&next, JumpKind::Jb);
         self.jmp_rel32(&subtract, JumpKind::Ja);
-        self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x39, 0xCE])); // cmp r14, r9
+        self.emit_alu_rm_reg64(AluOp::Cmp, 14, 9, &[0x4D, 0x39, 0xCE]); // cmp r14, r9
         self.jmp_rel32(&next, JumpKind::Jb);
         self.label(&subtract);
-        self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x29, 0xCE])); // sub r14, r9
-        self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x19, 0xDF])); // sbb r15, r11
+        self.emit_alu_rm_reg64(AluOp::Sub, 14, 9, &[0x4D, 0x29, 0xCE]); // sub r14, r9
+        self.emit_alu_rm_reg64(AluOp::Sbb, 15, 11, &[0x4D, 0x19, 0xDF]); // sbb r15, r11
         self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Or, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(1)}, &[])); // or rax, 1
         self.label(&next);
-        self.emit_insn(&Insn::raw_bytes(&[0x49, 0xFF, 0xCA])); // dec r10
+        self.emit_unary64(UnaryOp::Dec, 10, &[0x49, 0xFF, 0xCA]); // dec r10
         self.jmp_rel32(&loop_label, JumpKind::Jne);
 
         if want_remainder {
@@ -345,7 +462,7 @@ impl Codegen {
                 self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 7, 7)); // test edi, edi
                 self.jmp_rel32(&positive, JumpKind::Je);
                 self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 0)); // neg rax
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xD2, 0x00])); // adc rdx, 0
+                self.emit_alu_rm_reg_imm8_b64(AluOp::Adc, 2, 0, &[0x48, 0x83, 0xD2, 0x00]); // adc rdx, 0
                 self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 2)); // neg rdx
                 self.label(&positive);
             }
@@ -354,7 +471,7 @@ impl Codegen {
             self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 6, 6)); // test esi, esi
             self.jmp_rel32(&positive, JumpKind::Je);
             self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 0)); // neg rax
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xD2, 0x00])); // adc rdx, 0
+            self.emit_alu_rm_reg_imm8_b64(AluOp::Adc, 2, 0, &[0x48, 0x83, 0xD2, 0x00]); // adc rdx, 0
             self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 2)); // neg rdx
             self.label(&positive);
         }
@@ -368,27 +485,30 @@ impl Codegen {
         let l_high = self.fresh_label();
         self.emit_alu_rm_reg64(AluOp::Xor, 0, 0, &[0x48, 0x31, 0xC0]); // xor rax, rax
                                         // 比较高 64 位: cmp r8, r11
-        self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x39, 0xD8])); // cmp r8, r11
-        let (cc_high, cc_low_eq) = match op {
-            BinOp::Lt if is_signed => (0x9C, 0x92),
-            BinOp::Le if is_signed => (0x9C, 0x96),
-            BinOp::Gt if is_signed => (0x9F, 0x97),
-            BinOp::Ge if is_signed => (0x9F, 0x93),
-            BinOp::Lt => (0x92, 0x92),
-            BinOp::Le => (0x92, 0x96),
-            BinOp::Gt => (0x97, 0x97),
-            BinOp::Ge => (0x97, 0x93),
+        self.emit_alu_rm_reg64(AluOp::Cmp, 8, 11, &[0x4D, 0x39, 0xD8]); // cmp r8, r11
+        // P11 Bucket M: map (op, signed) to typed CondCode. cc 编码:
+        //   0x92=B, 0x93=Ae, 0x96=Be, 0x97=A, 0x9C=Lt, 0x9D=Ge, 0x9E=Le, 0x9F=Gt.
+        use crate::codegen::x86_64::opcode::CondCode;
+        let (cc_high, cc_low_eq): (CondCode, CondCode) = match op {
+            BinOp::Lt if is_signed => (CondCode::Lt, CondCode::B),
+            BinOp::Le if is_signed => (CondCode::Lt, CondCode::Be),
+            BinOp::Gt if is_signed => (CondCode::Gt, CondCode::A),
+            BinOp::Ge if is_signed => (CondCode::Gt, CondCode::Ae),
+            BinOp::Lt => (CondCode::B, CondCode::B),
+            BinOp::Le => (CondCode::B, CondCode::Be),
+            BinOp::Gt => (CondCode::A, CondCode::A),
+            BinOp::Ge => (CondCode::A, CondCode::Ae),
             _ => unreachable!(),
         };
         // 高半部不等时直接使用高半部比较结果。
         self.jmp_rel32(&l_high, JumpKind::Jne);
         // 高半部相等: 比较低半部 cmp rcx, r9
-        self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x39, 0xC9])); // cmp rcx, r9
-        self.emit_insn(&Insn::raw_bytes(&[0x0F, cc_low_eq, 0xC0])); // setcc al
+        self.emit_alu_rm_reg64(AluOp::Cmp, 1, 9, &[0x4C, 0x39, 0xC9]); // cmp rcx, r9
+        self.emit_insn(&Insn::new(X86_64Opcode::Setcc { cc: cc_low_eq, dst: OpcodeOperand::Reg(0, Width::B8) }, &[])); // setcc al
         self.jmp_rel32(&l_end, JumpKind::Jmp);
         // 高半部不等: 使用高半部比较结果
         self.label(&l_high);
-        self.emit_insn(&Insn::raw_bytes(&[0x0F, cc_high, 0xC0])); // setcc al
+        self.emit_insn(&Insn::new(X86_64Opcode::Setcc { cc: cc_high, dst: OpcodeOperand::Reg(0, Width::B8) }, &[])); // setcc al
         self.label(&l_end);
         self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Xor, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // xor rdx, rdx
     }
@@ -397,8 +517,8 @@ impl Codegen {
     pub fn gen_int128_load(&mut self, name: &str) {
         if self.is_global_var(name) {
             self.emit_global_addr(11, name); // r11 = &global (resolve_global_key inside)
-            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x03])); // rax = [r11]
-            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x53, 0x08])); // rdx = [r11+8]
+            self.emit_load_r11_disp64(0, 0, &[0x49, 0x8B, 0x03]); // rax = [r11]
+            self.emit_load_r11_disp64(2, 8, &[0x49, 0x8B, 0x53, 0x08]); // rdx = [r11+8]
         } else {
             let off = self.var_offset(name);
             // rax = [r13 + off] (low)
@@ -412,8 +532,8 @@ impl Codegen {
     pub fn gen_int128_store(&mut self, name: &str) {
         if self.is_global_var(name) {
             self.emit_global_addr(11, name);
-            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x03])); // [r11] = rax
-            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x53, 0x08])); // [r11+8] = rdx
+            self.emit_store_r11_disp64(0, 0, &[0x49, 0x89, 0x03]); // [r11] = rax
+            self.emit_store_r11_disp64(2, 8, &[0x49, 0x89, 0x53, 0x08]); // [r11+8] = rdx
         } else {
             let off = self.var_offset(name);
             self.store_stack(0, off); // low → [r13+off]
@@ -485,11 +605,11 @@ impl Codegen {
                     self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Cmp, crate::codegen::shared::asm_operand::Width::B64, 1, 0)); // cmp rax, rcx
                     self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Eq, 0)); // sete al (al=1 if low equal)
                                                     // 比较高 64-bit
-                    self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x39, 0xC2])); // cmp rdx, r8
+                    self.emit_alu_rm_reg64(AluOp::Cmp, 2, 8, &[0x4C, 0x39, 0xC2]); // cmp rdx, r8
                     self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Eq, 4)); // sete ah (ah=1 if high equal)
                                                     // AND 两个结果: al &= ah (都为1 → 两 chunk 都相等)
                                                     // Intel: and al, ah → opcode 0x20 (and r/m8, r8), modrm=0xE0 (mod=11, reg=ah=100, r/m=al=000)
-                    self.emit_insn(&Insn::raw_bytes(&[0x20, 0xE0]));
+                    self.emit_alu_rm_reg8(AluOp::And, 0, 4, &[0x20, 0xE0]);
                     // 零扩展到 rax
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
                         sign: false,

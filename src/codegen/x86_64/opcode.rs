@@ -21,6 +21,10 @@ pub(crate) enum AluOp {
     Xor,
     Cmp,
     Test,
+    /// P11 Bucket M: ADC r/m64, r64 (0x11 /r) and r64, r/m64 (0x13 /r).
+    Adc,
+    /// P11 Bucket M: SBB r/m64, r64 (0x19 /r) and r64, r/m64 (0x1B /r).
+    Sbb,
 }
 
 /// 一元操作 (INC/DEC/NOT/NEG/MUL/IMUL/DIV/IDIV) — 步骤 1 不实现.
@@ -36,6 +40,9 @@ pub(crate) enum UnaryOp {
     Div,
     Idiv,
 }
+
+/// P11 Bucket M: UnaryOp::Mul uses /4 modrm_reg_field. Neg/Not are covered above.
+// (no change to enum body; we just lift the #[allow(dead_code)] for Mul usage)
 
 /// 移位族 — 步骤 1 不实现.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +88,8 @@ pub(crate) enum NoArgOp {
     Xgetbv,
     /// ret near: C3 (return to caller).
     RetNear,
+    /// P11 Bucket M: ud2 = 0F 0B (explicit undefined for zero-div UB).
+    Ud2,
 }
 
 /// SIMD 算术 — 步骤 1 不实现.
@@ -484,6 +493,8 @@ impl X86_64Opcode {
                             let reg_field: u8 = match op {
                                 AluOp::Add => 0,
                                 AluOp::Or => 1,
+                                AluOp::Adc => 2,
+                                AluOp::Sbb => 3,
                                 AluOp::And => 4,
                                 AluOp::Sub => 5,
                                 AluOp::Xor => 6,
@@ -525,6 +536,8 @@ impl X86_64Opcode {
                             let reg_field: u8 = match op {
                                 AluOp::Add => 0,
                                 AluOp::Or => 1,
+                                AluOp::Adc => 2,
+                                AluOp::Sbb => 3,
                                 AluOp::And => 4,
                                 AluOp::Sub => 5,
                                 AluOp::Xor => 6,
@@ -578,6 +591,8 @@ impl X86_64Opcode {
                     let opcode: u8 = match op {
                         AluOp::Add => 0x03,
                         AluOp::Or => 0x0B,
+                        AluOp::Adc => 0x13,
+                        AluOp::Sbb => 0x1B,
                         AluOp::And => 0x23,
                         AluOp::Sub => 0x2B,
                         AluOp::Xor => 0x33,
@@ -664,6 +679,9 @@ impl X86_64Opcode {
                 let opc_base: u8 = match op {
                     AluOp::Add => if is_byte8 { 0x00 } else { 0x01 },
                     AluOp::Or => if is_byte8 { 0x08 } else { 0x09 },
+                    // P11 Bucket M: ADC r/m,r = 10/11; SBB r/m,r = 18/19.
+                    AluOp::Adc => if is_byte8 { 0x10 } else { 0x11 },
+                    AluOp::Sbb => if is_byte8 { 0x18 } else { 0x19 },
                     AluOp::And => if is_byte8 { 0x20 } else { 0x21 },
                     AluOp::Sub => if is_byte8 { 0x28 } else { 0x29 },
                     AluOp::Xor => if is_byte8 { 0x30 } else { 0x31 },
@@ -783,6 +801,9 @@ impl X86_64Opcode {
                     UnaryOp::Dec => (if is_byte { 0xFE } else { 0xFF }, 0b001),
                     UnaryOp::Not => (if is_byte { 0xF6 } else { 0xF7 }, 0b010),
                     UnaryOp::Neg => (if is_byte { 0xF6 } else { 0xF7 }, 0b011),
+                    // P11 Bucket M: MUL r64 = F7 /4 (REX.W=1, modrm mod=11 reg=/4 r/m=reg).
+                    // Uses RAX:RDX implicitly. No B8 form for MUL, so gate via is_byte.
+                    UnaryOp::Mul => (0xF7, 0b100),
                     _ => return None,
                 };
                 let mut out = Vec::with_capacity(4);
@@ -823,6 +844,8 @@ impl X86_64Opcode {
                     ShiftOp::Shl | ShiftOp::Sal => 0b100,
                     ShiftOp::Shr => 0b101,
                     ShiftOp::Sar => 0b111,
+                    // P11 Bucket M: RCL by imm8/CL — modrm_reg_field = /2.
+                    ShiftOp::Rcl => 0b010,
                     _ => return None,
                 };
                 let mut rex: u8 = 0x40;
@@ -1817,6 +1840,7 @@ impl X86_64Opcode {
                     NoArgOp::Int3 => &[0xCC],
                     NoArgOp::Xgetbv => &[0x0F, 0x01, 0xD0],
                     NoArgOp::RetNear => &[0xC3],
+                    NoArgOp::Ud2 => &[0x0F, 0x0B],
                 };
                 Some(bytes.to_vec())
             }
@@ -1886,6 +1910,7 @@ impl X86_64Opcode {
                     NoArgOp::Int3 => "int3",
                     NoArgOp::Xgetbv => "xgetbv",
                     NoArgOp::RetNear => "ret",
+                    NoArgOp::Ud2 => "ud2",
                 };
                 String::from(s)
             }
@@ -3935,6 +3960,99 @@ mod tests {
         };
         let got = o.encode();
         assert_eq!(got, Some(vec![0x4B, 0x8D, 0x04, 0x1D]), "got {:?}", got);
+    }
+
+    // ---- P11 Bucket M: Adc/Sbb/Mul/Rcl/Ud2 ----
+
+    #[test]
+    fn alu_rm_adc_r8_r11_b64() {
+        // adc r8, r11: REX.W R=1(r11) B=1(r8) → 4D 11 D8
+        // opcode ADC r/m,r = 0x11 (B64); modrm mod=11 reg=r11&7=3, r/m=r8&7=0 → 0xD8
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Adc,
+            width: Width::B64,
+            dst: reg(8, Width::B64),
+            src: reg(11, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x4D, 0x11, 0xD8]));
+    }
+
+    #[test]
+    fn alu_rm_sbb_r8_r11_b64() {
+        // sbb r8, r11: 4D 19 D8
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Sbb,
+            width: Width::B64,
+            dst: reg(8, Width::B64),
+            src: reg(11, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x4D, 0x19, 0xD8]));
+    }
+
+    #[test]
+    fn alu_rm_adc_r8_imm0_b64() {
+        // adc r8, 0: REX.W B=1(r8) → 49 83 D0 00
+        // 0x83 /2 ib. modrm mod=11 reg=/2, r/m=r8&7=0 → 0xD0.
+        let o = X86_64Opcode::AluRm {
+            op: AluOp::Adc,
+            width: Width::B64,
+            dst: reg(8, Width::B64),
+            src: Operand::Imm(0),
+        };
+        assert_eq!(o.encode(), Some(vec![0x49, 0x83, 0xD0, 0x00]));
+    }
+
+    #[test]
+    fn unary_mul_r9_b64() {
+        // mul r9: REX.W B=1(r9) → 49 F7 E1 (/4)
+        let o = X86_64Opcode::UnaryRm {
+            op: UnaryOp::Mul,
+            width: Width::B64,
+            dst: reg(9, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x49, 0xF7, 0xE1]));
+    }
+
+    #[test]
+    fn unary_mul_r11_b64() {
+        // mul r11: REX.W B=1(r11) → 49 F7 E3
+        let o = X86_64Opcode::UnaryRm {
+            op: UnaryOp::Mul,
+            width: Width::B64,
+            dst: reg(11, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x49, 0xF7, 0xE3]));
+    }
+
+    #[test]
+    fn shift_rcl_rdx_1_b64() {
+        // rcl rdx, 1: REX.W=48 D1 /2 → 48 D1 D2
+        let o = X86_64Opcode::Shift {
+            op: ShiftOp::Rcl,
+            width: Width::B64,
+            dst: reg(2, Width::B64),
+            amount: ShiftAmount::Imm8(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0xD1, 0xD2]));
+    }
+
+    #[test]
+    fn shift_rcl_r14_1_b64() {
+        // rcl r14, 1: REX.W|B(r14) = 49 D1 D6 (/2)
+        let o = X86_64Opcode::Shift {
+            op: ShiftOp::Rcl,
+            width: Width::B64,
+            dst: reg(14, Width::B64),
+            amount: ShiftAmount::Imm8(1),
+        };
+        assert_eq!(o.encode(), Some(vec![0x49, 0xD1, 0xD6]));
+    }
+
+    #[test]
+    fn noarg_ud2() {
+        // ud2: 0F 0B
+        let o = X86_64Opcode::NoArg { op: NoArgOp::Ud2 };
+        assert_eq!(o.encode(), Some(vec![0x0F, 0x0B]));
     }
 }
 
