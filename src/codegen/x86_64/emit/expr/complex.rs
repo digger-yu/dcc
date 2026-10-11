@@ -71,10 +71,10 @@ impl Codegen {
     fn emit_complex_div_limited(
         &mut self,
         load_prefix: u8,
-        op_add: u8,
-        op_sub: u8,
-        op_mul: u8,
-        op_div: u8,
+        _op_add: u8,
+        _op_sub: u8,
+        _op_mul: u8,
+        _op_div: u8,
         inner_sz: i64,
         total_sz: i64,
     ) {
@@ -86,23 +86,23 @@ impl Codegen {
         let r_imag_slot = total_sz + inner_sz;
         self.emit_insn(&Insn::simd_mov_mem(false, w, 3, r_imag_slot as i32));
         self.mov_xmm(6, 2);
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(6, 6)]));
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Mul, w, 6, 6));
         self.mov_xmm(7, 3);
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(7, 7)]));
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_add, Self::modrm_reg_reg(6, 7)]));
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Mul, w, 7, 7));
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Add, w, 6, 7));
         self.mov_xmm(4, 0);
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(4, 2)]));
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Mul, w, 4, 2));
         self.mov_xmm(7, 1);
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(7, 3)]));
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_add, Self::modrm_reg_reg(4, 7)]));
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_div, Self::modrm_reg_reg(4, 6)]));
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Mul, w, 7, 3));
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Add, w, 4, 7));
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Div, w, 4, 6));
         self.emit_insn(&Insn::simd_mov_mem(true, w, 0, 0));
         self.mov_xmm(7, 1);
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(7, 2)]));
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Mul, w, 7, 2));
         self.mov_xmm(5, 0);
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, Self::modrm_reg_reg(5, 3)]));
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_sub, Self::modrm_reg_reg(7, 5)]));
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_div, Self::modrm_reg_reg(7, 6)]));
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Mul, w, 5, 3));
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Sub, w, 7, 5));
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Div, w, 7, 6));
         self.emit_insn(&Insn::simd_mov_mem(true, w, 5, inner_sz as i32));
     }
     fn emit_complex_mul_call(&mut self, is_float: bool, inner_sz: i64) {
@@ -154,9 +154,9 @@ impl Codegen {
     fn emit_complex_mul_limited(
         &mut self,
         load_prefix: u8,
-        op_add: u8,
-        op_sub: u8,
-        op_mul: u8,
+        _op_add: u8,
+        _op_sub: u8,
+        _op_mul: u8,
         inner_sz: i64,
         total_sz: i64,
     ) {
@@ -166,17 +166,17 @@ impl Codegen {
         self.emit_insn(&Insn::simd_mov_mem(false, w, 1, inner_sz as i32));
         let r_imag_slot = total_sz + inner_sz;
         self.emit_insn(&Insn::simd_mov_mem(false, w, 3, r_imag_slot as i32));
-        self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x28, 0xE0]));
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, 0xE2]));
-        self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x28, 0xE9]));
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, 0xEB]));
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_sub, 0xE5]));
+        self.emit_insn(&Insn::movapd_xmm(0, 6));
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Mul, w, 0, 2));
+        self.emit_insn(&Insn::movapd_xmm(1, 7));
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Mul, w, 1, 3));
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Sub, w, 1, 5));
         self.emit_insn(&Insn::simd_mov_mem(true, w, 0, 0));
-        self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x28, 0xE0]));
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, 0xE3]));
-        self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x28, 0xE9]));
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_mul, 0xEA]));
-        self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_add, 0xE5]));
+        self.emit_insn(&Insn::movapd_xmm(0, 6));
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Mul, w, 0, 3));
+        self.emit_insn(&Insn::movapd_xmm(1, 7));
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Mul, w, 1, 6));
+        self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Add, w, 1, 5));
         self.emit_insn(&Insn::simd_mov_mem(true, w, 4, inner_sz as i32));
     }
     /// 赋值表达式的值 = 左值转换后的值: 把已写入目标的结果按统一 complex
@@ -678,12 +678,12 @@ impl Codegen {
                 } else {
                     [0xDE, 0xE9]
                 };
-                self.emit_insn(&Insn::raw_bytes(&real_op)); // 弹出后 st0=real
+                self.emit_insn(&Insn::x87_fixed(real_op[0], real_op[1])); // 弹出后 st0=real
                                      // 虚部同理, 结果压在 real 之上: st0=imag, st1=real
                 self.emit_x87_fld_at(4, 16, &Type::LongDouble);
                 self.emit_x87_fld_at(4, 48, &Type::LongDouble);
                 let imag_op = real_op;
-                self.emit_insn(&Insn::raw_bytes(&imag_op));
+                self.emit_insn(&Insn::x87_fixed(imag_op[0], imag_op[1]));
                 // 归一化到返回规范 st0=real, st1=imag（与 gcc add 的末尾
                 // fxch %st(1) 一致）
                 self.emit_insn(&Insn::x87_fixed(0xD9, 0xC9)); // fxch st(1)
