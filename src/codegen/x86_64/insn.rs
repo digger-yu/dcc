@@ -331,6 +331,76 @@ impl Insn {
         Insn::raw_bytes(&out)
     }
 
+    /// P11 Bucket X: cmp eax, imm32 (0x3D id, no ModRM). 用于 va_arg 中与
+    /// fp_offset / gp_offset 边界值的直接比较. imm 是 32 位有符号数.
+    pub fn cmp_eax_imm32(imm: i32) -> Self {
+        let imm32 = imm.to_le_bytes();
+        let mut out = Vec::with_capacity(5);
+        out.push(0x3D);
+        out.extend_from_slice(&imm32);
+        Insn::raw_bytes(&out)
+    }
+
+    /// P11 Bucket X: B32 `alu dword [base+disp], imm8` (0x83 / ib, no REX.W).
+    /// 用于 va_arg gp_offset / fp_offset 字段的就地加 (如 `add dword [r13+disp], imm8`).
+    /// op 编码: /0=add, /4=and, /5=sub, /7=cmp. base>=8 时自动加 REX.B.
+    /// disp 必须能装入 i32 (本函数不做长度选择; 由 callsite 决定 mod=01/10).
+    /// 当 disp 落在 i8 时走 mod=01, 否则 mod=10 disp32.
+    pub fn alu_mem_imm8_b32(op: u8, base: u8, disp: i32, imm: i32) -> Self {
+        let mut rex: u8 = 0x40;
+        if base >= 8 {
+            rex |= 0x01;
+        }
+        let need_rex = base >= 8;
+        let rm_field = base & 7;
+        let (modrm_mod, disp_bytes, disp_len): (u8, [u8; 4], usize) =
+            if let Ok(d) = i8::try_from(disp) {
+                let mut b = [0u8; 4];
+                b[0] = d as u8;
+                (1, b, 1)
+            } else {
+                (2, disp.to_le_bytes(), 4)
+            };
+        let modrm = (modrm_mod << 6) | ((op & 0x7) << 3) | rm_field;
+        let v = imm as i8 as u8;
+        let mut out = Vec::with_capacity(8);
+        if need_rex {
+            out.push(rex);
+        }
+        out.push(0x83);
+        out.push(modrm);
+        out.extend_from_slice(&disp_bytes[..disp_len]);
+        out.push(v);
+        Insn::raw_bytes(&out)
+    }
+
+    /// P11 Bucket X: B64 `alu qword [base+disp], imm32` (0x81 / id, REX.W).
+    /// 用于 va_arg overflow_arg_area / reg_save_area 字段的就地加.
+    pub fn alu_mem_imm32_b64(op: u8, base: u8, disp: i32, imm: i32) -> Self {
+        let mut rex: u8 = 0x48;
+        if base >= 8 {
+            rex |= 0x01;
+        }
+        let rm_field = base & 7;
+        let (modrm_mod, disp_bytes, disp_len): (u8, [u8; 4], usize) =
+            if let Ok(d) = i8::try_from(disp) {
+                let mut b = [0u8; 4];
+                b[0] = d as u8;
+                (1, b, 1)
+            } else {
+                (2, disp.to_le_bytes(), 4)
+            };
+        let modrm = (modrm_mod << 6) | ((op & 0x7) << 3) | rm_field;
+        let imm32 = imm.to_le_bytes();
+        let mut out = Vec::with_capacity(11);
+        out.push(rex);
+        out.push(0x81);
+        out.push(modrm);
+        out.extend_from_slice(&disp_bytes[..disp_len]);
+        out.extend_from_slice(&imm32);
+        Insn::raw_bytes(&out)
+    }
+
     /// P11 Bucket T: 构造 B64 `shl/shr/sar reg, imm8` 强制 C1 形式 (总是带 imm8 字节).
     /// 与 typed `Shift{amount: Imm8(1)}` 自动走 D1 短形式不同, 位域读取点
     /// (lvalue.rs 位域右移) 固定使用 `REX.W C1 /r ib` 形态 (即使 imm=1 也发 4 字节).
@@ -822,6 +892,35 @@ impl Insn {
                         disp,
                         base: Some(base),
                         index: None,
+                        seg: None,
+                    },
+                ),
+            },
+            &[],
+        )
+    }
+
+    /// P11 Bucket X: movzx/movsx/movsxd via MovExt typed opcode, mem-load SIB form
+    /// `dst, [base+index*1]`. index_scale 仅接受 1 (SIB scale=0); 其余走手写回退.
+    pub fn mov_ext_mem_sib(
+        sign: bool,
+        from: crate::codegen::shared::asm_operand::Width,
+        to: crate::codegen::shared::asm_operand::Width,
+        dst_reg: u8,
+        base: u8,
+        index: u8,
+    ) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                sign,
+                from,
+                to,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(dst_reg, to),
+                src: crate::codegen::x86_64::opcode::Operand::Mem(
+                    crate::codegen::x86_64::opcode::MemOperand {
+                        disp: 0,
+                        base: Some(base),
+                        index: Some((index, 1)),
                         seg: None,
                     },
                 ),
