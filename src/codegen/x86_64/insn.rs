@@ -294,6 +294,56 @@ impl Insn {
         Insn::raw_bytes(&out)
     }
 
+    /// P11 Bucket T: 构造 B64 `shl/shr/sar reg, imm8` 强制 C1 形式 (总是带 imm8 字节).
+    /// 与 typed `Shift{amount: Imm8(1)}` 自动走 D1 短形式不同, 位域读取点
+    /// (lvalue.rs 位域右移) 固定使用 `REX.W C1 /r ib` 形态 (即使 imm=1 也发 4 字节).
+    /// op 编码: /4=shl, /5=shr, /7=sar.
+    pub fn shift_reg_imm8_c1_b64(op_field: u8, reg_idx: u8, imm8: u8) -> Self {
+        let mut rex: u8 = 0x48;
+        if reg_idx >= 8 {
+            rex |= 0x01;
+        }
+        let modrm = 0xC0 | ((op_field & 0x7) << 3) | (reg_idx & 0x7);
+        Insn::raw_bytes(&[rex, 0xC1, modrm, imm8])
+    }
+
+    /// P11 Bucket T: 构造 B64 `test reg, imm32` (REX.W F7 /0 id).
+    /// 与 `test_rm_reg` (reg,reg 形态 85) 不同, 这是 TEST r/m64, imm32.
+    /// 位域符号位测试 (sign_bit <= 0xFFFFFFFF) 固定走这个形态.
+    pub fn test_rm_reg_imm32_b64(reg_idx: u8, imm: i64) -> Self {
+        let mut rex: u8 = 0x48;
+        if reg_idx >= 8 {
+            rex |= 0x01;
+        }
+        // F7 /0: modrm_reg_field=/0, r/m=reg_idx.
+        let modrm = 0xC0 | (reg_idx & 0x7);
+        let imm32 = (imm as i32).to_le_bytes();
+        let mut out = Vec::with_capacity(7);
+        out.push(rex);
+        out.push(0xF7);
+        out.push(modrm);
+        out.extend_from_slice(&imm32);
+        Insn::raw_bytes(&out)
+    }
+
+    /// P11 Bucket T: 构造 `movabs r64, imm64` (REX.W B8+rd, 10 字节).
+    /// 与 `mov_imm` 不同: mov_imm 在 |imm|<=i32 时走 C7 /0 符号扩展短形式;
+    /// 位域 mask/inv_mask 路径需要立即数就是完整 64 位 (不能符号扩展),
+    /// 故固定走 B8+rd 形式.
+    pub fn movabs_reg_imm64(reg_idx: u8, imm: u64) -> Self {
+        let mut rex: u8 = 0x48;
+        if reg_idx >= 8 {
+            rex |= 0x01;
+        }
+        let modrm_opc = 0xB8 | (reg_idx & 0x7);
+        let imm64 = imm.to_le_bytes();
+        let mut out = Vec::with_capacity(10);
+        out.push(rex);
+        out.push(modrm_opc);
+        out.extend_from_slice(&imm64);
+        Insn::raw_bytes(&out)
+    }
+
     /// P11: 构造 `movsd xmm_dst, xmm_src` (F2 0F 10 mod=11).
     /// 源/目的都在 xmm0..xmm15 (>=8 时带 REX.R/B 由 ModRM 低 3 位 + 前缀编码).
     pub fn movsd_xmm(dst_xmm: u8, src_xmm: u8) -> Self {
@@ -739,5 +789,52 @@ mod tests {
     #[test]
     fn raw_bytes_empty() {
         assert_eq!(Insn::raw_bytes(&[]).encode_bytes(), Some(Vec::new()));
+    }
+
+    /// P11 Bucket T: shift_reg_imm8_c1_b64 强制 C1 形式 (即使 imm=1 也带 imm8 字节).
+    #[test]
+    fn shift_reg_imm8_c1_b64_basic() {
+        // shr rax, 1: 48 C1 E8 01 (reg=0=rax, op=/5, imm8=1)
+        assert_eq!(
+            Insn::shift_reg_imm8_c1_b64(0b101, 0, 1).encode_bytes(),
+            Some(vec![0x48, 0xC1, 0xE8, 0x01]),
+        );
+        // shr r8, 3: REX.W+B, C1, E8|(8&7=0), 03
+        assert_eq!(
+            Insn::shift_reg_imm8_c1_b64(0b101, 8, 3).encode_bytes(),
+            Some(vec![0x49, 0xC1, 0xE8, 0x03]),
+        );
+        // shl rbx, 4: op=/4, reg=3=rbx → modrm=C0|(4<<3)|3 = C0|0x20|3 = 0xE3
+        assert_eq!(
+            Insn::shift_reg_imm8_c1_b64(0b100, 3, 4).encode_bytes(),
+            Some(vec![0x48, 0xC1, 0xE3, 0x04]),
+        );
+    }
+
+    /// P11 Bucket T: test_rm_reg_imm32_b64 = REX.W F7 /0 id.
+    #[test]
+    fn test_rm_reg_imm32_b64_basic() {
+        // test rax, 0x8000 (0x00008000, imm32 LE = 00 80 00 00)
+        let bytes = Insn::test_rm_reg_imm32_b64(0, 0x8000).encode_bytes().unwrap();
+        assert_eq!(&bytes[..3], &[0x48, 0xF7, 0xC0]);
+        assert_eq!(&bytes[3..], &[0x00, 0x80, 0x00, 0x00]);
+        // test r8d: REX.W+B, F7, C0|0= C0, imm32
+        let bytes = Insn::test_rm_reg_imm32_b64(8, 0x1234).encode_bytes().unwrap();
+        assert_eq!(&bytes[..3], &[0x49, 0xF7, 0xC0]);
+        assert_eq!(&bytes[3..], &[0x34, 0x12, 0x00, 0x00]);
+    }
+
+    /// P11 Bucket T: movabs_reg_imm64 = REX.W B8+rd imm64.
+    #[test]
+    fn movabs_reg_imm64_basic() {
+        // movabs rax, 0x0000000080000000
+        let imm: u64 = 0x0000000080000000;
+        let bytes = Insn::movabs_reg_imm64(0, imm).encode_bytes().unwrap();
+        assert_eq!(bytes.len(), 10);
+        assert_eq!(&bytes[..2], &[0x48, 0xB8]);
+        assert_eq!(&bytes[2..], &imm.to_le_bytes());
+        // movabs r11, imm: REX.W+B, BB (B8|3=BB)
+        let bytes = Insn::movabs_reg_imm64(11, 0xDEADBEEF).encode_bytes().unwrap();
+        assert_eq!(&bytes[..2], &[0x49, 0xBB]);
     }
 }

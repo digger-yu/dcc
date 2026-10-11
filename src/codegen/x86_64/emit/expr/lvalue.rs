@@ -186,8 +186,8 @@ impl Codegen {
                         let ok_label = self.fresh_label();
                         let n_imm = (*n as i64) * (es as i64);
                         if n_imm > 0 && n_imm < i32::MAX as i64 {
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xf9])); // cmp rcx, imm32
-                            self.emit_insn(&Insn::raw_bytes(&(n_imm as i32).to_le_bytes()));
+                            // cmp rcx, imm32 (81 /7 id, B64). 走类型化 imm32 构造器.
+                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(7, 1, n_imm));
                             self.jmp_rel32(&ok_label, JumpKind::Jb);
                             // out of bounds: 调用 __ubsan_handle_out_of_bounds
                             // 签名: (OutOfBoundsData *Data, unsigned long Index)。
@@ -407,9 +407,13 @@ impl Codegen {
                     }
                     // 右移 bit_offset 位
                     if f.bit_offset > 0 {
-                        // `C1 /5 ib`：dst 在 r/m，需要 REX.B
-                        let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                        self.emit_insn(&Insn::raw_bytes(&[rex, 0xC1, 0xE8 | (dst & 7), f.bit_offset as u8]));
+                        // `C1 /5 ib` (shr dst, imm8, B64): dst 在 r/m → REX.B.
+                        // 走 Bucket T 强制 C1 形式构造器 (即使 imm=1 也发 4 字节).
+                        self.emit_insn(&Insn::shift_reg_imm8_c1_b64(
+                            0b101,
+                            dst,
+                            f.bit_offset as u8,
+                        ));
                     }
                     // 掩码: and dst, (1 << bw) - 1
                     if bw < 64 {
@@ -419,24 +423,26 @@ impl Codegen {
                         // (例如 bw=32 时 mask=0xFFFFFFFF 会被
                         // 符号扩展为 0xFFFFFFFFFFFFFFFF, 变成 no-op).
                         if mask <= 0x7FFFFFFF {
-                            // 32 位有符号 imm32 可安全编码（`81 /4 id`：dst 在 r/m → REX.B）
-                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xE0 | (dst & 7)]));
-                            self.emit_insn(&Insn::raw_bytes(&(mask as u32).to_le_bytes()));
+                            // 32 位有符号 imm32 可安全编码 (81 /4 id, B64).
+                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(
+                                4,
+                                dst,
+                                mask as i64,
+                            ));
                         } else {
                             // >32 位掩码: movabs tmp, mask; and dst, tmp
                             // 使用 rcx 作为临时寄存器 (如 dst==rcx 则用 rdx)
                             let tmp = if dst != 1 { 1 } else { 2 }; // rcx or rdx
-                                                                    // movabs tmp, mask
-                            // `48 B8+rd` 的寄存器号在 **opcode 低 3 位**，扩展它的也是 REX.B
-                            let rex_tmp = 0x48 | if tmp >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            self.emit_insn(&Insn::raw_bytes(&[rex_tmp, 0xB8 | (tmp & 7)]));
-                            self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
-                            // and dst, tmp：tmp 在 reg 字段(REX.R)，dst 在 r/m(REX.B)
-                            let rex = 0x48
-                                | if dst >= 8 { 0x01 } else { 0 }   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                                | if tmp >= 8 { 0x04 } else { 0 };
-                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x21, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
+                            // movabs tmp, imm64: Bucket T 强制 B8+rd 形式 (不能走 mov_imm
+                            // 的 C7 /0 符号扩展短形式, 否则高 32 位 mask 会被截断).
+                            self.emit_insn(&Insn::movabs_reg_imm64(tmp, mask));
+                            // and dst, tmp: tmp 在 reg 字段(REX.R), dst 在 r/m(REX.B).
+                            self.emit_insn(&Insn::alu_rm_reg_reg(
+                                crate::codegen::x86_64::opcode::AluOp::And,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                dst,
+                                tmp,
+                            ));
                         }
                     }
                     // 有符号位域: 符号扩展
@@ -460,40 +466,43 @@ impl Codegen {
                         let sign_bit: u64 = 1u64 << (bw - 1);
                         let inv_mask: u64 = !((1u64 << bw) - 1);
                         if sign_bit <= 0xFFFFFFFF {
-                            // 32 位符号位: 可用 imm32 编码（`F7 /0 id`：dst 在 r/m → REX.B）
-                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            // test dst, (1 << (bw-1))
-                            self.emit_insn(&Insn::raw_bytes(&[rex, 0xF7, 0xC0 | (dst & 7)]));
-                            self.emit_insn(&Insn::raw_bytes(&((sign_bit as u32).to_le_bytes())));
-                            // jz +7 (跳过符号扩展)
+                            // 32 位符号位: 可用 imm32 编码 (REX.W F7 /0 id, B64).
+                            // test dst, sign_bit.
+                            self.emit_insn(&Insn::test_rm_reg_imm32_b64(
+                                dst,
+                                sign_bit as i64,
+                            ));
+                            // jz +7 (跳过符号扩展): rel8 短跳, 固定偏移.
                             self.emit_insn(&Insn::raw_bytes(&[0x74, 0x07]));
-                            // or dst, inv_mask  (填充高位)（`81 /1 id`：dst 在 r/m → REX.B）
-                            let rex2 = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            self.emit_insn(&Insn::raw_bytes(&[rex2, 0x81, 0xC8 | (dst & 7)]));
-                            self.emit_insn(&Insn::raw_bytes(&(inv_mask as u32).to_le_bytes()));
+                            // or dst, inv_mask (填充高位, 81 /1 id, B64).
+                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(
+                                1,
+                                dst,
+                                inv_mask as i64,
+                            ));
                         } else {
                             // >32 位: 用临时寄存器 (rcx/rdx)
                             let tmp = if dst != 1 { 1 } else { 2 };
-                            // movabs tmp, sign_bit（opcode 低 3 位 → REX.B）
-                            let rex_tmp = 0x48 | if tmp >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            self.emit_insn(&Insn::raw_bytes(&[rex_tmp, 0xB8 | (tmp & 7)]));
-                            self.emit_insn(&Insn::raw_bytes(&sign_bit.to_le_bytes()));
-                            // test dst, tmp：tmp 在 reg(REX.R)，dst 在 r/m(REX.B)
-                            let rex_t = 0x48
-                                | if dst >= 8 { 0x01 } else { 0 }   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                                | if tmp >= 8 { 0x04 } else { 0 };
-                            self.emit_insn(&Insn::raw_bytes(&[rex_t, 0x85, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
+                            // movabs tmp, sign_bit: Bucket T 强制 B8+rd 形式.
+                            self.emit_insn(&Insn::movabs_reg_imm64(tmp, sign_bit));
+                            // test dst, tmp: tmp 在 reg(REX.R), dst 在 r/m(REX.B).
+                            self.emit_insn(&Insn::test_rm_reg(
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                dst,
+                                tmp,
+                            ));
                             // jz +N (跳过 movabs + or)
-                            // movabs tmp, inv_mask (2+8=10 bytes) + or (3 bytes) = 13 bytes
+                            // movabs tmp, inv_mask (2+8=10 bytes) + or (3 bytes) = 13 bytes.
                             self.emit_insn(&Insn::raw_bytes(&[0x74, 13]));
-                            // movabs tmp, inv_mask
-                            self.emit_insn(&Insn::raw_bytes(&[rex_tmp, 0xB8 | (tmp & 7)]));
-                            self.emit_insn(&Insn::raw_bytes(&inv_mask.to_le_bytes()));
-                            // or dst, tmp：tmp 在 reg(REX.R)，dst 在 r/m(REX.B)
-                            let rex_o = 0x48
-                                | if dst >= 8 { 0x01 } else { 0 }   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                                | if tmp >= 8 { 0x04 } else { 0 };
-                            self.emit_insn(&Insn::raw_bytes(&[rex_o, 0x09, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
+                            // movabs tmp, inv_mask.
+                            self.emit_insn(&Insn::movabs_reg_imm64(tmp, inv_mask));
+                            // or dst, tmp: tmp 在 reg(REX.R), dst 在 r/m(REX.B).
+                            self.emit_insn(&Insn::alu_rm_reg_reg(
+                                crate::codegen::x86_64::opcode::AluOp::Or,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                dst,
+                                tmp,
+                            ));
                         }
                     }
                 } else if let Type::Complex(inner) = &f.ty {
