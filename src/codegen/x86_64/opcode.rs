@@ -934,10 +934,18 @@ impl X86_64Opcode {
                     }
                     _ => return None,
                 };
-                // 本步只支持 base-only (无 index / 无 seg). 有 index 就先回退手写.
-                if mem.index.is_some() || mem.seg.is_some() {
+                // 本步只支持 base-only 或 scale=1 的 [base+index] (无 seg / 无其他 scale).
+                // 其他 scale (2/4/8) 和 seg 前缀先回退手写.
+                if mem.seg.is_some() {
                     return None;
                 }
+                let (index_reg, index_scale) = match mem.index {
+                    None => (None, 0u8),
+                    Some((ir, s)) => {
+                        if s != 1 { return None; }
+                        (Some(ir), s)
+                    }
+                };
                 let base = mem.base?;
                 let is_store = matches!(dst, Operand::Mem(_));
                 let (opcode, need_prefix66, need_rex_w) = match width {
@@ -947,8 +955,7 @@ impl X86_64Opcode {
                     Width::B64 => (if is_store { 0x89 } else { 0x8B }, false, true),
                     _ => return None,
                 };
-                // REX: 本步只处理 store_rsp_qword / load_rsp_qword, 其 base=rsp(=4),
-                // 所以 REX.B 只来自 base>=8; 但通用实现里两个字段都算.
+                // REX: W (B64), R=reg>=8, B=base>=8, X=index>=8.
                 let mut rex: u8 = 0x40;
                 if need_rex_w {
                     rex |= 0x08;
@@ -959,19 +966,28 @@ impl X86_64Opcode {
                 if base >= 8 {
                     rex |= 0x01; // REX.B
                 }
+                if let Some(ir) = index_reg {
+                    if ir >= 8 {
+                        rex |= 0x02; // REX.X
+                    }
+                }
                 // 判断是否需要真的发 REX 前缀: 没有任何字段被扩展, 且 width!=B64,
                 // 那就保持裸 opcode (避免多一个 0x40 前缀). B64 总是发 REX.W.
-                let need_rex = need_rex_w || reg_idx >= 8 || base >= 8;
+                let need_rex = need_rex_w || reg_idx >= 8 || base >= 8
+                    || index_reg.map_or(false, |ir| ir >= 8);
 
-                // ModRM / SIB / disp: base=rsp(4) 必须发 SIB; 其余 base 走普通 ModRM.
-                // base=rbp(5) 在 mod=00 时是 rip-relative, 但我们这里永远带 disp,
-                // 所以 mod=01/10 时 base=rbp 是合法的 [rbp+disp] 不需要额外前缀.
+                // ModRM / SIB / disp: 有 index 时必须发 SIB; 无 index 时仅 base=rsp(4)
+                // 必须发 SIB; 其余 base 走普通 ModRM.
+                // base=rbp(5) 在 mod=00 时是 rip-relative, 但当有 SIB 时 (rsp / index)
+                // mod=00 仍合法. base=rbp(5) 且无 SIB 时必须发 disp (mod=01/10).
                 let disp = mem.disp;
+                let need_sib = index_reg.is_some() || (base & 7) == 4;
                 let modrm_mod: u8;
                 let disp_bytes: [u8; 4];
                 let disp_len: usize;
-                if disp == 0 && base != 5 {
-                    // mod=00, 无 disp
+                if disp == 0 && (base != 5 || need_sib) {
+                    // mod=00, 无 disp. base=rbp(5) 且无 SIB 时 mod=00 = rip-relative,
+                    // 必须走 disp.
                     modrm_mod = 0;
                     disp_len = 0;
                     disp_bytes = [0; 4];
@@ -997,13 +1013,18 @@ impl X86_64Opcode {
                     out.push(rex);
                 }
                 out.push(opcode);
-                // ModRM 字节: mod | reg_field | rm_field.
-                // rm_field==4 (rsp/r12) 时必须跟一个 SIB.
-                let modrm = (modrm_mod << 6) | (reg_field << 3) | rm_field;
+                // ModRM 字节: mod | reg_field | rm_field. 有 SIB 时 rm_field 必须为 4
+                // (R/M=100) 以标识后续 SIB 字节; 实际 base 号放在 SIB 的 base 字段.
+                let modrm_rm = if need_sib { 4 } else { rm_field };
+                let modrm = (modrm_mod << 6) | (reg_field << 3) | modrm_rm;
                 out.push(modrm);
-                if rm_field == 4 {
-                    // SIB: scale=0 (无 index), index=4 (ESP 编码 = no index), base=rm_field.
-                    out.push(0x24);
+                if need_sib {
+                    // SIB: scale = log2(scale) (0=1, 1=2, 2=4, 3=8);
+                    // index=4 (ESP) 编码 = 无 index; base = rm_field.
+                    let scale_bits = match index_scale { 1 => 0, 2 => 1, 4 => 2, 8 => 3, _ => 0 };
+                    let index_field = index_reg.map(|ir| ir & 7).unwrap_or(4);
+                    let sib = (scale_bits << 6) | (index_field << 3) | rm_field;
+                    out.push(sib);
                 }
                 out.extend_from_slice(&disp_bytes[..disp_len]);
                 Some(out)
@@ -1413,9 +1434,16 @@ impl X86_64Opcode {
                     (Operand::Reg(xmm, _), Operand::Mem(mem)) => (*xmm, mem, false),
                     _ => return None,
                 };
-                if mem.index.is_some() || mem.seg.is_some() {
+                if mem.seg.is_some() {
                     return None;
                 }
+                let (index_reg, index_scale) = match mem.index {
+                    None => (None, 0u8),
+                    Some((ir, s)) => {
+                        if s != 1 { return None; }
+                        (Some(ir), s)
+                    }
+                };
                 let base = mem.base?;
                 // legacy 前缀: SS=F3, SD=F2, O/PS=无. PD/DQ 本路径按 66 处理.
                 let pfx: u8 = match width {
@@ -1426,7 +1454,7 @@ impl X86_64Opcode {
                     SimdWidth::O | SimdWidth::PS => 0x00,
                     _ => return None,
                 };
-                // REX: xmm>=8 → REX.R=0x04; base>=8 → REX.B=0x01.
+                // REX: xmm>=8 → REX.R=0x04; base>=8 → REX.B=0x01; index>=8 → REX.X=0x02.
                 let mut rex: u8 = 0x40;
                 let mut need_rex = false;
                 if xmm_idx >= 8 {
@@ -1436,6 +1464,12 @@ impl X86_64Opcode {
                 if base >= 8 {
                     rex |= 0x01;
                     need_rex = true;
+                }
+                if let Some(ir) = index_reg {
+                    if ir >= 8 {
+                        rex |= 0x02;
+                        need_rex = true;
+                    }
                 }
                 // is_store 决定 opcode2: store=0x11/0x29/0x7F, load=0x10/0x28/0x6F.
                 //  (opcode10 字段仅用于 reg↔reg 分支; mem 分支靠 is_store 选择.)
@@ -1454,10 +1488,12 @@ impl X86_64Opcode {
                 };
                 let disp = mem.disp;
                 // ModRM mod / disp 长度. base=rbp(5) 在 mod=00 是 rip-relative,
-                // 所以 disp=0 且 base=5 时走 mod=01 (disp8=0) 避免被解释成 rip.
+                // 但当有 SIB (rsp / index) 时 mod=00 仍合法. base=rbp(5) 且无 SIB
+                // 时必须走 mod=01 (disp8=0) 避免被解释成 rip.
                 // base=rsp(4) 必须 SIB; 当 disp=0 时 SIB(base=rsp,index=none) 配合
                 // mod=00 即编码为 `modrm=0x04|xmm<<3, sib=0x24` (G10 快照约定).
-                let (modrm_mod, disp_bytes): (u8, &[u8]) = if disp == 0 && base != 5 {
+                let need_sib = index_reg.is_some() || (base & 7) == 4;
+                let (modrm_mod, disp_bytes): (u8, &[u8]) = if disp == 0 && (base != 5 || need_sib) {
                     (0, &[])
                 } else if let Ok(d) = i8::try_from(disp) {
                     (1, &[d as u8])
@@ -1474,11 +1510,15 @@ impl X86_64Opcode {
                 }
                 out.push(0x0F);
                 out.push(opc2);
-                // ModRM: mod | reg(xmm) | rm(base). rm==4 时必须 SIB.
-                let modrm = (modrm_mod << 6) | ((xmm_idx & 7) << 3) | rm_field;
+                // ModRM: mod | reg(xmm) | rm(base). rm==4 或有 index 时必须 SIB.
+                // 有 SIB 时 rm 必须置 4 (R/M=100) 以标识 SIB 字节.
+                let modrm_rm = if need_sib { 4 } else { rm_field };
+                let modrm = (modrm_mod << 6) | ((xmm_idx & 7) << 3) | modrm_rm;
                 out.push(modrm);
-                if rm_field == 4 {
-                    out.push(0x24); // SIB: scale=0, index=4 (none), base=rsp&7.
+                if need_sib {
+                    let scale_bits = match index_scale { 1 => 0, 2 => 1, 4 => 2, 8 => 3, _ => 0 };
+                    let index_field = index_reg.map(|ir| ir & 7).unwrap_or(4);
+                    out.push((scale_bits << 6) | (index_field << 3) | rm_field);
                 }
                 out.extend_from_slice(disp_bytes);
                 Some(out)
@@ -2392,6 +2432,67 @@ mod tests {
             src: reg(9, Width::B64),
         };
         assert_eq!(o.encode(), Some(vec![0x4C, 0x89, 0x4C, 0x24, 0x10]));
+    }
+
+    // ---- P11 Bucket J: SIB [base+index*1] forms ----
+
+    #[test]
+    fn mov_rm_load_r64_base_index_no_rex() {
+        // mov r9, (%rcx,%rax): 4C 8B 0C 01 (REX.WR: reg=r9=9; SIB scale=0 idx=rax=0 base=rcx=1)
+        let o = X86_64Opcode::MovRm {
+            width: Width::B64,
+            dst: reg(9, Width::B64),
+            src: Operand::Mem(MemOperand {
+                disp: 0, base: Some(1), index: Some((0, 1)), seg: None,
+            }),
+        };
+        // reg field = r9 & 7 = 1, modrm = (0<<6)|(1<<3)|rm=4 (SIB) = 0x0C.
+        // SIB = scale=0 idx=rax=0 base=rcx&7=1 = 0x01.
+        assert_eq!(o.encode(), Some(vec![0x4C, 0x8B, 0x0C, 0x01]));
+    }
+
+    #[test]
+    fn mov_rm_load_r64_base_index_rex_x() {
+        // mov rax, (%rcx,%r8): 49 8B 04 01 (REX.WX: X=1 because index=r8>=8; SIB idx=r8&7=0)
+        let o = X86_64Opcode::MovRm {
+            width: Width::B64,
+            dst: reg(0, Width::B64),
+            src: Operand::Mem(MemOperand {
+                disp: 0, base: Some(1), index: Some((8, 1)), seg: None,
+            }),
+        };
+        // REX = 0x40 | W=0x08 | X=0x02 (index=r8>=8) = 0x4A. base=rcx=1 no B, reg=rax=0 no R.
+        assert_eq!(o.encode(), Some(vec![0x4A, 0x8B, 0x04, 0x01]));
+    }
+
+    #[test]
+    fn simd_movsd_load_base_index() {
+        // movsd xmm0, (r11,rax), xmm0: F2 41 0F 10 04 03
+        //   legacy F2 (SD), REX.B=0x41 (base=r11=11 &7=3), 0F 10 (load),
+        //   ModRM mod=00 reg=xmm0=0 rm=3 (r11&7), SIB scale=0 idx=rax=0 base=r11&7=3.
+        let o = X86_64Opcode::SimdMov {
+            width: SimdWidth::SD,
+            opcode10: false,
+            dst: Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B128),
+            src: Operand::Mem(MemOperand {
+                disp: 0, base: Some(11), index: Some((0, 1)), seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF2, 0x41, 0x0F, 0x10, 0x04, 0x03]));
+    }
+
+    #[test]
+    fn simd_movss_load_base_index() {
+        // movss xmm0, (r11,rax), xmm0: F3 41 0F 10 04 03
+        let o = X86_64Opcode::SimdMov {
+            width: SimdWidth::SS,
+            opcode10: false,
+            dst: Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B128),
+            src: Operand::Mem(MemOperand {
+                disp: 0, base: Some(11), index: Some((0, 1)), seg: None,
+            }),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0x41, 0x0F, 0x10, 0x04, 0x03]));
     }
 
     // ---- MovExt reg-reg (P11) ----
