@@ -517,6 +517,19 @@ pub(crate) enum X86_64Opcode {
         reg_idx: u8,
         mem: MemOperand,
     },
+
+    /// P11 Bucket AF: cmpss/cmpsd xmm_dst, xmm_src, imm8 (C2 /r ib).
+    ///   cmpss: F3 0F C2 /r ib   cmpsd: F2 0F C2 /r ib.
+    /// width=SimdWidth::SS → F3, SimdWidth::SD → F2. imm8 = comparison predicate.
+    SimdCmpImm8 {
+        width: SimdWidth,
+        imm8: u8,
+        dst: Operand,
+        src: Operand,
+    },
+
+    /// P11 Bucket AF: pmulld xmm_dst, xmm_src (SSE4.1: 66 0F 38 40 /r).
+    Pmulld { dst: Operand, src: Operand },
 }
 
 impl X86_64Opcode {
@@ -1968,6 +1981,52 @@ impl X86_64Opcode {
                 out.push(opc2);
                 out.push(0xC0 | ((*dst_idx & 7) << 3) | (*src_idx & 7));
                 out.push(*imm8);
+                Some(out)
+            }
+            X86_64Opcode::SimdCmpImm8 { width, imm8, dst, src } => {
+                // P11 Bucket AF: cmpss/cmpsd xmm_dst, xmm_src, imm8.
+                //   cmpss: F3 0F C2 /r ib   cmpsd: F2 0F C2 /r ib.
+                let (Operand::Reg(dst_idx, _), Operand::Reg(src_idx, _)) = (dst, src) else {
+                    return None;
+                };
+                let pfx: u8 = match width {
+                    SimdWidth::SS => 0xF3,
+                    SimdWidth::SD => 0xF2,
+                    _ => return None,
+                };
+                let need_rex = *dst_idx >= 8 || *src_idx >= 8;
+                let mut out = Vec::with_capacity(6);
+                out.push(pfx);
+                if need_rex {
+                    let mut rex: u8 = 0x40;
+                    if *dst_idx >= 8 { rex |= 0x04; }
+                    if *src_idx >= 8 { rex |= 0x01; }
+                    out.push(rex);
+                }
+                out.push(0x0F);
+                out.push(0xC2);
+                out.push(0xC0 | ((*dst_idx & 7) << 3) | (*src_idx & 7));
+                out.push(*imm8);
+                Some(out)
+            }
+            X86_64Opcode::Pmulld { dst, src } => {
+                // P11 Bucket AF: pmulld xmm_dst, xmm_src (66 0F 38 40 /r).
+                let (Operand::Reg(dst_idx, _), Operand::Reg(src_idx, _)) = (dst, src) else {
+                    return None;
+                };
+                let need_rex = *dst_idx >= 8 || *src_idx >= 8;
+                let mut out = Vec::with_capacity(6);
+                out.push(0x66);
+                if need_rex {
+                    let mut rex: u8 = 0x40;
+                    if *dst_idx >= 8 { rex |= 0x04; }
+                    if *src_idx >= 8 { rex |= 0x01; }
+                    out.push(rex);
+                }
+                out.push(0x0F);
+                out.push(0x38);
+                out.push(0x40);
+                out.push(0xC0 | ((*dst_idx & 7) << 3) | (*src_idx & 7));
                 Some(out)
             }
             X86_64Opcode::Setcc { cc, dst } => {

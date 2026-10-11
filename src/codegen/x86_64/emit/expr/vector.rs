@@ -26,12 +26,10 @@ impl Codegen {
         if byte_off != 0 {
             if (-128..=127).contains(&byte_off) {
                 let gas = format!("add ${}, %rax", byte_off);
-                self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x83, 0xC0, byte_off as u8], &gas));
+                self.emit_insn(&Insn::alu_rm_reg_imm8_b64(0, 0, byte_off).with_gas(gas));
             } else {
                 let gas = format!("add ${}, %rax", byte_off);
-                let mut bytes = vec![0x48, 0x05];
-                bytes.extend_from_slice(&(byte_off as i32).to_le_bytes());
-                self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
+                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 0, byte_off).with_gas(gas));
             }
         }
         self.emit_load_mem(elem_size);
@@ -41,7 +39,7 @@ impl Codegen {
         let byte_off = (elem_idx * elem_size) as i64;
         if byte_off != 0 {
             if (-128..=127).contains(&byte_off) {
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xC1, byte_off as u8]));
+                self.emit_insn(&Insn::alu_rm_reg_imm8_b64(0, 1, byte_off));
             } else {
                 self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 1, byte_off));
             }
@@ -151,14 +149,10 @@ impl Codegen {
                 if off != 0 {
                     if (-128..=127).contains(&off) {
                         let gas = format!("add ${}, %rax", off);
-                        self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x83, 0xC0, off as u8], &gas));
+                        self.emit_insn(&Insn::alu_rm_reg_imm8_b64(0, 0, off).with_gas(gas));
                     } else {
                         let gas = format!("add ${}, %rax", off);
-                        let bytes = vec![0x48, 0x05]
-                            .into_iter()
-                            .chain((off as i32).to_le_bytes().into_iter())
-                            .collect::<Vec<u8>>();
-                        self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
+                        self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 0, off).with_gas(gas));
                     }
                 }
                 self.emit_load_mem(elem_size);
@@ -188,14 +182,10 @@ impl Codegen {
                     if byte_off != 0 {
                         if (-128..=127).contains(&byte_off) {
                             let gas = format!("add ${}, %rax", byte_off);
-                            self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x83, 0xC0, byte_off as u8], &gas));
+                            self.emit_insn(&Insn::alu_rm_reg_imm8_b64(0, 0, byte_off).with_gas(gas));
                         } else {
                             let gas = format!("add ${}, %rax", byte_off);
-                            let bytes = vec![0x48, 0x05]
-                                .into_iter()
-                                .chain((byte_off as i32).to_le_bytes().into_iter())
-                                .collect::<Vec<u8>>();
-                            self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
+                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 0, byte_off).with_gas(gas));
                         }
                     }
                     self.load_mem_xmm(0, elem_size, is_float);
@@ -280,7 +270,6 @@ impl Codegen {
                 // nle=6。SSE 无直接大于谓词, 用 nlt/nle 取反表达:
                 // Gt → nle = !(xmm0<=xmm1) = xmm0>xmm1; NaN 时
                 // lt/le 为假 (ordered 数值语义)
-                let cmp_pfx: u8 = if is_float { 0xF3 } else { 0xF2 };
                 let pred: u8 = match op {
                     BinOp::EqEq => 0,
                     BinOp::Ne => 4,
@@ -298,7 +287,6 @@ impl Codegen {
                         self.emit_scalar_float_convert(&l.ty(), &elem_ty);
                     }
                     self.emit_sub_rsp(8);
-                    let spfx: u8 = if is_float { 0xF3 } else { 0xF2 };
                     let swidth = if is_float { crate::codegen::x86_64::opcode::SimdWidth::SS } else { crate::codegen::x86_64::opcode::SimdWidth::SD };
                     self.emit_insn(&Insn::simd_mov_mem(true, swidth, 0, 0));
                     // 加载右操作数: 向量按元素取, 标量直接求值 (广播)
@@ -308,11 +296,25 @@ impl Codegen {
                         self.gen_expr(r, Self::EVAL_BASE);
                         self.emit_scalar_float_convert(&r.ty(), &elem_ty);
                     }
-                    self.emit_insn(&Insn::raw_bytes(&[spfx, 0x0F, 0x10, 0xC8])); // movss xmm1, xmm0
+                    // movss/movsd xmm1, xmm0: spfx=SS(0xF3)/SD(0xF2), 0F 10 C8.
+                    match swidth {
+                        crate::codegen::x86_64::opcode::SimdWidth::SS => {
+                            self.emit_insn(&Insn::movss_xmm(1, 0));
+                        },
+                        crate::codegen::x86_64::opcode::SimdWidth::SD => {
+                            self.emit_insn(&Insn::movsd_xmm(1, 0));
+                        },
+                        _ => unreachable!(),
+                    }
                     self.emit_insn(&Insn::simd_mov_mem(false, swidth, 0, 0)); // xmm0 = left
                     self.emit_add_rsp(8);
-                    // xmm0=left, xmm1=right → cmp xmm0, xmm1, pred
-                    self.emit_insn(&Insn::raw_bytes(&[cmp_pfx, 0x0F, 0xC2, 0xC1, pred]));
+                    // xmm0=left, xmm1=right → cmpss/cmpsd xmm0, xmm1, pred
+                    let cmp_width = if is_float {
+                        crate::codegen::x86_64::opcode::SimdWidth::SS
+                    } else {
+                        crate::codegen::x86_64::opcode::SimdWidth::SD
+                    };
+                    self.emit_insn(&Insn::simd_cmp_imm8(cmp_width, pred, 0, 1));
                     self.emit_insn(&Insn::gpr_xmm(false, crate::codegen::shared::asm_operand::Width::B64, 0, 0)); // movq rax, xmm0
                     let off = result_off + (i * elem_size) as i64;
                     self.emit_store(0, off, elem_size);
@@ -328,6 +330,16 @@ impl Codegen {
                 BinOp::Div => (if is_float { 0xF3 } else { 0xF2 }, 0x5E), // divss/divsd
                 _ => return,
             };
+            // P11 Bucket AF: 通过 SimdArith typed 编码 scalar ss/sd arith.
+            let simd_op = match op {
+                BinOp::Add => SimdArithOp::Add,
+                BinOp::Sub => SimdArithOp::Sub,
+                BinOp::Mul => SimdArithOp::Mul,
+                BinOp::Div => SimdArithOp::Div,
+                _ => unreachable!(),
+            };
+            let simd_width = if is_float { SimdWidth::SS } else { SimdWidth::SD };
+            let _ = (prefix, opcode);
             for i in 0..count {
                 // 加载左操作数: 向量按元素取, 标量直接求值 (广播)
                 if l_is_vec {
@@ -362,7 +374,7 @@ impl Codegen {
                     self.emit_insn(&Insn::simd_mov_mem(false, SimdWidth::SD, 0, 0));
                 }
                 self.emit_add_rsp(8);
-                self.emit_insn(&Insn::raw_bytes(&[prefix, 0x0F, opcode, 0xC1])); // xmm0 = left op right
+                self.emit_insn(&Insn::simd_arith_reg(simd_op, simd_width, 0, 1)); // xmm0 = left op right
                 self.store_vector_elem_xmm(
                     0,
                     result_off + (i * elem_size) as i64,
@@ -624,39 +636,39 @@ impl Codegen {
                     );
                     // rcx=left, rax=right → cmp rcx, rax
                     self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Cmp, crate::codegen::shared::asm_operand::Width::B64, 1, 0));
-                    let setcc: u8 = match op {
-                        BinOp::EqEq => 0x94,
-                        BinOp::Ne => 0x95,
+                    let cc = match op {
+                        BinOp::EqEq => crate::codegen::x86_64::opcode::CondCode::Eq,
+                        BinOp::Ne => crate::codegen::x86_64::opcode::CondCode::Ne,
                         BinOp::Lt => {
                             if signed {
-                                0x9C
+                                crate::codegen::x86_64::opcode::CondCode::Lt
                             } else {
-                                0x92
+                                crate::codegen::x86_64::opcode::CondCode::B
                             }
                         },
                         BinOp::Le => {
                             if signed {
-                                0x9E
+                                crate::codegen::x86_64::opcode::CondCode::Le
                             } else {
-                                0x96
+                                crate::codegen::x86_64::opcode::CondCode::Be
                             }
                         },
                         BinOp::Gt => {
                             if signed {
-                                0x9F
+                                crate::codegen::x86_64::opcode::CondCode::Gt
                             } else {
-                                0x97
+                                crate::codegen::x86_64::opcode::CondCode::A
                             }
                         },
                         _ => {
                             if signed {
-                                0x9D
+                                crate::codegen::x86_64::opcode::CondCode::Ge
                             } else {
-                                0x93
+                                crate::codegen::x86_64::opcode::CondCode::Ae
                             }
                         },
                     };
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, setcc, 0xC0])); // setcc al
+                    self.emit_insn(&Insn::setcc_reg(cc, 0)); // setcc al
                     // movzbq al, al
                     self.emit_insn(&Insn::mov_ext(
                         false,
@@ -1029,8 +1041,7 @@ impl Codegen {
                     self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::PSub, SimdWidth::D, 0, 1)); // psubd xmm0, xmm1
                 },
                 (4, BinOp::Mul) => {
-                    // pmulld: SSE4.1 66 0F 38 40 /r
-                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0x38, 0x40, 0xC1])); // pmulld xmm0, xmm1
+                    self.emit_insn(&Insn::pmulld_xmm(0, 1)); // pmulld xmm0, xmm1
                 },
                 (8, BinOp::Add) => {
                     self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::PAdd, SimdWidth::Q, 0, 1)); // paddq xmm0, xmm1

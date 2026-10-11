@@ -1354,6 +1354,48 @@ impl Insn {
         )
     }
 
+    /// P11 Bucket AF: cmpss/cmpsd xmm_dst, xmm_src, imm8 predicate.
+    /// width=SimdWidth::SS → cmpss (F3 prefix); SimdWidth::SD → cmpsd (F2 prefix).
+    pub fn simd_cmp_imm8(
+        width: crate::codegen::x86_64::opcode::SimdWidth,
+        imm8: u8,
+        dst_xmm: u8,
+        src_xmm: u8,
+    ) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::SimdCmpImm8 {
+                width,
+                imm8,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    dst_xmm,
+                    crate::codegen::shared::asm_operand::Width::B128,
+                ),
+                src: crate::codegen::x86_64::opcode::Operand::Reg(
+                    src_xmm,
+                    crate::codegen::shared::asm_operand::Width::B128,
+                ),
+            },
+            &[],
+        )
+    }
+
+    /// P11 Bucket AF: pmulld xmm_dst, xmm_src (66 0F 38 40 /r).
+    pub fn pmulld_xmm(dst_xmm: u8, src_xmm: u8) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::Pmulld {
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    dst_xmm,
+                    crate::codegen::shared::asm_operand::Width::B128,
+                ),
+                src: crate::codegen::x86_64::opcode::Operand::Reg(
+                    src_xmm,
+                    crate::codegen::shared::asm_operand::Width::B128,
+                ),
+            },
+            &[],
+        )
+    }
+
     pub fn encode_bytes(&self) -> Option<Vec<u8>> {
         // 类型化变体: 让 opcode.rs 现场算字节. 尚未实现的变体返回 None →
         // 发射方必须切回 raw_bytes 兜底; 当前没有任何调用点依赖 None 分支.
@@ -1724,6 +1766,44 @@ mod tests {
         assert_eq!(
             Insn::store_imm_mem(B16, 4, 0, 0x037F).encode_bytes(),
             Some(vec![0x66, 0xC7, 0x04, 0x24, 0x7F, 0x03]),
+        );
+    }
+
+    /// P11 Bucket AF: simd_cmp_imm8 cmpss/cmpsd reg-reg with imm8 predicate.
+    #[test]
+    fn simd_cmp_imm8_basic() {
+        use crate::codegen::x86_64::opcode::SimdWidth;
+        // cmpss xmm0, xmm1, 1 (pred=lt): F3 0F C2 C1 01 (modrm C1: reg=0, r/m=1)
+        assert_eq!(
+            Insn::simd_cmp_imm8(SimdWidth::SS, 1, 0, 1).encode_bytes(),
+            Some(vec![0xF3, 0x0F, 0xC2, 0xC1, 0x01]),
+        );
+        // cmpsd xmm0, xmm1, 0 (eq): F2 0F C2 C1 00
+        assert_eq!(
+            Insn::simd_cmp_imm8(SimdWidth::SD, 0, 0, 1).encode_bytes(),
+            Some(vec![0xF2, 0x0F, 0xC2, 0xC1, 0x00]),
+        );
+        // cmpss xmm8, xmm9, 4: REX.R (xmm8 reg) | REX.B (xmm9 r/m) = 0x04 | 0x01 = 0x45
+        // modrm C0 | ((8&7)<<3) | (9&7) = C0 | 0 | 1 = C1
+        assert_eq!(
+            Insn::simd_cmp_imm8(SimdWidth::SS, 4, 8, 9).encode_bytes(),
+            Some(vec![0xF3, 0x45, 0x0F, 0xC2, 0xC1, 0x04]),
+        );
+    }
+
+    /// P11 Bucket AF: pmulld xmm_dst, xmm_src (66 0F 38 40 /r).
+    #[test]
+    fn pmulld_basic() {
+        // pmulld xmm0, xmm1: 66 0F 38 40 C1
+        assert_eq!(
+            Insn::pmulld_xmm(0, 1).encode_bytes(),
+            Some(vec![0x66, 0x0F, 0x38, 0x40, 0xC1]),
+        );
+        // pmulld xmm8, xmm9: REX.R (dst reg=xmm8) | REX.B (src r/m=xmm9) = 0x45
+        // modrm C0 | ((8&7)<<3) | (9&7) = C0 | 0 | 1 = C1
+        assert_eq!(
+            Insn::pmulld_xmm(8, 9).encode_bytes(),
+            Some(vec![0x66, 0x45, 0x0F, 0x38, 0x40, 0xC1]),
         );
     }
 }
