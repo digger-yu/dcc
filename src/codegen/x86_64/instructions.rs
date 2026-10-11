@@ -911,9 +911,16 @@ impl Codegen {
             self.emit_insn(&insn);
         } else {
             self.mov_imm(11, bytes as i128);
-            let b = [0x4C, 0x29, 0xDC]; // sub rsp, r11
-            let gas = format!("sub {}, {}", GAS_REG64[11], GAS_REG64[4]);
-            self.emit_insn(&Insn::raw_with_gas(&b, &gas));
+            // sub rsp, r11:  4C 29 DC (typed AluRm B64 Sub reg-reg).
+            self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                    op: crate::codegen::x86_64::opcode::AluOp::Sub,
+                    width: Width::B64,
+                    dst: OpcodeOperand::Reg(4, Width::B64),
+                    src: OpcodeOperand::Reg(11, Width::B64),
+                },
+                &[],
+            ));
         }
     }
 
@@ -937,9 +944,16 @@ impl Codegen {
             self.emit_insn(&insn);
         } else {
             self.mov_imm(11, bytes as i128);
-            let b = [0x4C, 0x01, 0xDC]; // add rsp, r11
-            let gas = format!("add {}, {}", GAS_REG64[11], GAS_REG64[4]);
-            self.emit_insn(&Insn::raw_with_gas(&b, &gas));
+            // add rsp, r11:  4C 01 DC (typed AluRm B64 Add reg-reg).
+            self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                    op: crate::codegen::x86_64::opcode::AluOp::Add,
+                    width: Width::B64,
+                    dst: OpcodeOperand::Reg(4, Width::B64),
+                    src: OpcodeOperand::Reg(11, Width::B64),
+                },
+                &[],
+            ));
         }
     }
 
@@ -1773,15 +1787,31 @@ impl Codegen {
             self.emit_ulong_to_float(0, is_double);
         } else if matches!(elem_ty, Type::Float) {
             if is_64bit || is_unsigned_small {
-                // cvtsi2ssq xmm0, rax (REX.W + F3 0F 2A C0)
-                self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x48, 0x0F, 0x2A, 0xC0], "cvtsi2ss %rax, %xmm0"));
+                // cvtsi2ssq xmm0, rax: F3 48 0F 2A C0 (typed Cvt2Sd, byte-identical).
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::Cvt2Sd {
+                        to_xmm: true,
+                        width: crate::codegen::x86_64::opcode::SimdWidth::SS,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B128),
+                        src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                    },
+                    &[],
+                ));
             } else {
                 self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x2A, 0xC0], "cvtsi2ss %eax, %xmm0"));
             }
         } else {
             if is_64bit || is_unsigned_small {
-                // cvtsi2sdq xmm0, rax (REX.W + F2 0F 2A C0)
-                self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x48, 0x0F, 0x2A, 0xC0], "cvtsi2sd %rax, %xmm0"));
+                // cvtsi2sdq xmm0, rax: F2 48 0F 2A C0 (typed Cvt2Sd, byte-identical).
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::Cvt2Sd {
+                        to_xmm: true,
+                        width: crate::codegen::x86_64::opcode::SimdWidth::SD,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B128),
+                        src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                    },
+                    &[],
+                ));
             } else {
                 self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x2A, 0xC0], "cvtsi2sd %eax, %xmm0"));
             }
