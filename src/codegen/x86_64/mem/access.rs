@@ -202,8 +202,8 @@ impl Codegen {
                     self.gen_expr(&term.index, INDEX); // rcx = 本层下标
                     if term.stride != 1 {
                         let stride_i32 = term.stride as i32;
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x69, 0xC9])); // imul rcx, rcx, imm32
-                        self.emit_insn(&Insn::raw_bytes(&stride_i32.to_le_bytes()));
+                        // P11 Bucket K: imul rcx, rcx, imm32 via typed constructor.
+                        self.emit_insn(&Insn::imul_rm_reg_imm32_b64(1, stride_i32));
                     }
                     if k > 0 {
                         // add rcx, [rsp]; add rsp, 8  (合并上一层的部分和)
@@ -531,13 +531,13 @@ impl Codegen {
             self.push_global_float_rel(dp1, name);
             self.emit_x87_fstp_at(4, 0, effective_ty); // fstp tbyte [rsp]
             let is_float = matches!(effective_ty, Type::Float);
-            let pfx: u8 = if is_float { 0xF3 } else { 0xF2 };
-            // REX 必须在 mandatory prefix 之后
-            self.emit_insn(&Insn::raw_bytes(&[pfx]));
-            if xmm >= 8 {
-                self.emit_insn(&Insn::raw_bytes(&[0x44]));
-            }
-            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x10, 0x04 | ((xmm & 7) << 3), 0x24]));
+            let swidth = if is_float {
+                crate::codegen::x86_64::opcode::SimdWidth::SS
+            } else {
+                crate::codegen::x86_64::opcode::SimdWidth::SD
+            };
+            // P11 Bucket K: movss/movsd xmm, [rsp] via typed constructor.
+            self.emit_insn(&Insn::simd_mov_mem_base(false, swidth, xmm, 4, 0));
             self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp,16
             return;
         }
@@ -566,17 +566,13 @@ impl Codegen {
         };
         debug_assert!(self.float_in_st0(effective_dst));
         self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp,16
-        let pfx: u8 = if matches!(effective_src, Type::Float) {
-            0xF3
+        let swidth = if matches!(effective_src, Type::Float) {
+            crate::codegen::x86_64::opcode::SimdWidth::SS
         } else {
-            0xF2
+            crate::codegen::x86_64::opcode::SimdWidth::SD
         };
-        // REX 必须在 mandatory prefix 之后
-        self.emit_insn(&Insn::raw_bytes(&[pfx]));
-        if xmm >= 8 {
-            self.emit_insn(&Insn::raw_bytes(&[0x44]));
-        }
-        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x11, 0x04 | ((xmm & 7) << 3), 0x24])); // mov [rsp],xmm
+        // P11 Bucket K: movss/movsd [rsp], xmm via typed constructor.
+        self.emit_insn(&Insn::simd_mov_mem_base(true, swidth, xmm, 4, 0));
         self.emit_x87_fld_at(4, 0, effective_src); // fld [rsp]
         let (opcode, modrm) = match effective_dst {
             Type::Float => (0xD9u8, 0x1Du8),
@@ -720,8 +716,8 @@ impl Codegen {
                 1, 2, // rcx, rdx
             ));
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x69, 0xC9])); // imul rcx, rcx, imm32
-            self.emit_insn(&Insn::raw_bytes(&es.to_le_bytes()));
+            // P11 Bucket K: imul rcx, rcx, imm32 via typed constructor.
+            self.emit_insn(&Insn::imul_rm_reg_imm32_b64(1, es));
         }
     }
     pub(crate) fn emit_load_global_indexed(
@@ -850,53 +846,85 @@ impl Codegen {
         }
     }
     pub(crate) fn emit_load_mem_typed_disp(&mut self, size: usize, ty: &Type, disp: i64) {
-        let (modrm, has_disp) = if disp == 0 {
-            (0x00u8, false)
-        } else if (-128..=127).contains(&disp) {
-            (0x40u8, true)
-        } else {
-            (0x80u8, true)
-        };
+        // P11 Bucket K: 收敛到 typed 构造器. 基址恒为 rax (调用方约定);
+        // ModRM mod/disp 由 encode() 自动处理 (disp=0 → mod=00; disp8 → mod=01; disp32 → mod=10).
+        let disp_i32 = disp as i32;
         match ty {
             Type::Float | Type::Double | Type::LongDouble => {
                 // long double 走 `fld tbyte`（见 emit_load_scalar_float_at），
-                // 旧写法把 LongDouble 归入 movsd 分支依赖“高 8 字节为 0”的旧不变量。
-                // `modrm` 已按 disp 选好 mod 且 reg 域为 0，x87 只需把 reg 域换 /0 /5。
+                // 旧写法把 LongDouble 归入 movsd 分支依赖"高 8 字节为 0"的旧不变量。
                 if self.float_in_st0(ty) {
-                    let (opcode, rf) = match ty {
-                        Type::Float => (0xD9u8, 0u8),
-                        Type::LongDouble => (0xDBu8, 5u8),
-                        _ => (0xDDu8, 0u8),
+                    let width: u8 = match ty {
+                        Type::Float => 4,
+                        Type::LongDouble => 10,
+                        _ => 8,
                     };
-                    self.emit_insn(&Insn::raw_bytes(&[opcode, (rf << 3) | modrm]));
+                    self.emit_insn(&Insn::x87_mem(
+                        crate::codegen::x86_64::opcode::X87Op::FldMem { width },
+                        0,
+                        disp_i32,
+                    ));
                 } else {
-                    let pfx: u8 = if matches!(ty, Type::Float) { 0xF3 } else { 0xF2 };
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, modrm]));
+                    let swidth = if matches!(ty, Type::Float) {
+                        crate::codegen::x86_64::opcode::SimdWidth::SS
+                    } else {
+                        crate::codegen::x86_64::opcode::SimdWidth::SD
+                    };
+                    // movss/movsd xmm0, [rax+disp]
+                    self.emit_insn(&Insn::simd_mov_mem_base(false, swidth, 0, 0, disp_i32));
                 }
             },
             _ => {
-                if size < 8 && Self::is_signed_int(ty) {
+                let signed4 = Self::is_signed_int(ty);
+                if size < 8 && signed4 {
                     match size {
-                        1 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xBE, modrm])); },
-                        2 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xBF, modrm])); },
-                        _ => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x63, modrm])); },
+                        1 => { let _ = self.emit_insn(&Insn::mov_ext_mem(
+                            true,
+                            crate::codegen::shared::asm_operand::Width::B8,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                            0, 0, disp_i32,
+                        )); },
+                        2 => { let _ = self.emit_insn(&Insn::mov_ext_mem(
+                            true,
+                            crate::codegen::shared::asm_operand::Width::B16,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                            0, 0, disp_i32,
+                        )); },
+                        _ => { let _ = self.emit_insn(&Insn::mov_ext_mem(
+                            true,
+                            crate::codegen::shared::asm_operand::Width::B32,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                            0, 0, disp_i32,
+                        )); },
                     }
                 } else {
                     match size {
-                        1 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB6, modrm])); },
-                        2 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB7, modrm])); },
-                        4 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x8B, modrm])); },
-                        _ => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, modrm])); },
+                        1 => { let _ = self.emit_insn(&Insn::mov_ext_mem(
+                            false,
+                            crate::codegen::shared::asm_operand::Width::B8,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                            0, 0, disp_i32,
+                        )); },
+                        2 => { let _ = self.emit_insn(&Insn::mov_ext_mem(
+                            false,
+                            crate::codegen::shared::asm_operand::Width::B16,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                            0, 0, disp_i32,
+                        )); },
+                        _ => {
+                            // 4 字节: B32 load (无 REX.W); 8 字节: B64 load.
+                            let w = if size == 4 {
+                                crate::codegen::shared::asm_operand::Width::B32
+                            } else {
+                                crate::codegen::shared::asm_operand::Width::B64
+                            };
+                            self.emit_insn(&Insn::mov_rm_mem(
+                                true, w, 0, 0, disp_i32,
+                            ));
+                        },
                     }
                 }
             },
-        }
-        if has_disp {
-            if (-128..=127).contains(&disp) {
-                self.emit_insn(&Insn::raw_bytes(&[disp as u8]));
-            } else {
-                self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes()));
-            }
         }
     }
     pub(crate) fn emit_load_mem_typed_seg(&mut self, size: usize, ty: &Type, seg_prefix: u8) {
@@ -1231,8 +1259,14 @@ impl Codegen {
                     self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], base_off + inner_sz_i64);
                     // 恢复 xmm0 到实部
                     self.emit_lea_r13(6, base_off);
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x41, 0x0F, 0x10, 0xf0])); // movss xmm0, [r13 + off]
-                                                               // 返回地址在 rax/dst
+                    // P11 Bucket K: movss/movsd xmm0, [r13+base_off] via typed constructor.
+                    let swidth = if matches!(inner.base, Type::Float) {
+                        crate::codegen::x86_64::opcode::SimdWidth::SS
+                    } else {
+                        crate::codegen::x86_64::opcode::SimdWidth::SD
+                    };
+                    self.emit_insn(&Insn::simd_mov_mem_base(false, swidth, 0, 13, base_off as i32));
+                    // 返回地址在 rax/dst
                     self.emit_lea_r13(0, base_off);
                     if dst != 0 {
                         self.mov(dst, 0);
