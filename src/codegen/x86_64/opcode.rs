@@ -451,6 +451,29 @@ pub(crate) enum X86_64Opcode {
         dst: Operand,
         src: Operand,
     },
+
+    /// P11 Bucket N6: BSF/BSR reg, reg (0F BC / 0F BD).
+    ///   BSF r64,r/m64:  REX.W 0F BC /r
+    ///   BSR r64,r/m64:  REX.W 0F BD /r
+    ///   BSF r32,r/m32:    0F BC /r
+    ///   BSR r32,r/m32:    0F BD /r
+    /// dst ModRM.reg (destination), src ModRM.r/m (source).
+    BitScan {
+        is_bsr: bool,
+        width: crate::codegen::shared::asm_operand::Width,
+        dst: Operand,
+        src: Operand,
+    },
+
+    /// P11 Bucket N6: CMOVcc r64,r/m64 (0F 40..4F /r).
+    ///  B64 强制 REX.W=0x48. dst ModRM.reg (destination), src ModRM.r/m (source).
+    ///  B32 无 REX.W.
+    Cmovcc {
+        cc: CondCode,
+        width: crate::codegen::shared::asm_operand::Width,
+        dst: Operand,
+        src: Operand,
+    },
 }
 
 impl X86_64Opcode {
@@ -1938,6 +1961,69 @@ impl X86_64Opcode {
                 out.push(0x0F);
                 out.push(opc2);
                 out.push(0xC0 | ((xmm_idx & 7) << 3) | (gpr_idx & 7));
+                Some(out)
+            }
+            // P11 Bucket N6: BSF/BSR reg, reg.
+            X86_64Opcode::BitScan { is_bsr, width, dst, src } => {
+                let (Operand::Reg(dst_idx, _), Operand::Reg(src_idx, _)) = (dst, src) else {
+                    return None;
+                };
+                let is_b64 = matches!(width, Width::B64);
+                let is_b32 = matches!(width, Width::B32);
+                if !is_b64 && !is_b32 {
+                    return None;
+                }
+                let mut rex: u8 = 0x40;
+                if is_b64 { rex |= 0x08; }
+                if *dst_idx >= 8 { rex |= 0x04; } // ModRM.reg = dst
+                if *src_idx >= 8 { rex |= 0x01; } // ModRM.r/m = src
+                let need_rex = is_b64 || *dst_idx >= 8 || *src_idx >= 8;
+                let opc2: u8 = if *is_bsr { 0xBD } else { 0xBC };
+                let mut out = Vec::with_capacity(5);
+                if need_rex { out.push(rex); }
+                out.push(0x0F);
+                out.push(opc2);
+                out.push(0xC0 | ((*dst_idx & 7) << 3) | (*src_idx & 7));
+                Some(out)
+            }
+            // P11 Bucket N6: CMOVcc reg, reg (B64/B32).
+            X86_64Opcode::Cmovcc { cc, width, dst, src } => {
+                let (Operand::Reg(dst_idx, _), Operand::Reg(src_idx, _)) = (dst, src) else {
+                    return None;
+                };
+                let is_b64 = matches!(width, Width::B64);
+                let is_b32 = matches!(width, Width::B32);
+                if !is_b64 && !is_b32 {
+                    return None;
+                }
+                let mut rex: u8 = 0x40;
+                if is_b64 { rex |= 0x08; }
+                if *dst_idx >= 8 { rex |= 0x04; }
+                if *src_idx >= 8 { rex |= 0x01; }
+                let need_rex = is_b64 || *dst_idx >= 8 || *src_idx >= 8;
+                let opc2: u8 = match cc {
+                    CondCode::Eq => 0x44,
+                    CondCode::Ne => 0x45,
+                    CondCode::B => 0x42,
+                    CondCode::Ae => 0x43,
+                    CondCode::Be => 0x46,
+                    CondCode::A => 0x47,
+                    CondCode::Lt => 0x4C,
+                    CondCode::Ge => 0x4D,
+                    CondCode::Gt => 0x4F,
+                    CondCode::Le => 0x4E,
+                    CondCode::S => 0x48,
+                    CondCode::Ns => 0x49,
+                    CondCode::P => 0x4A,
+                    CondCode::Np => 0x4B,
+                    CondCode::O => 0x40,
+                    CondCode::No => 0x41,
+                };
+                let mut out = Vec::with_capacity(5);
+                if need_rex { out.push(rex); }
+                out.push(0x0F);
+                out.push(opc2);
+                out.push(0xC0 | ((*dst_idx & 7) << 3) | (*src_idx & 7));
                 Some(out)
             }
             _ => None,

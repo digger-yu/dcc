@@ -98,6 +98,46 @@ impl Insn {
         )
     }
 
+    /// P11 Bucket N6: BSF/BSR reg, reg (0F BC/BD).
+    /// is_bsr=true → BSR (0F BD); false → BSF (0F BC).
+    /// width=B64 发 REX.W; B32 不发. dst ModRM.reg, src ModRM.r/m.
+    pub fn bit_scan_reg_reg(
+        is_bsr: bool,
+        width: crate::codegen::shared::asm_operand::Width,
+        dst_idx: u8,
+        src_idx: u8,
+    ) -> Self {
+        use crate::codegen::x86_64::opcode::Operand;
+        Insn::new(
+            X86_64Opcode::BitScan {
+                is_bsr,
+                width,
+                dst: Operand::Reg(dst_idx, width),
+                src: Operand::Reg(src_idx, width),
+            },
+            &[],
+        )
+    }
+
+    /// P11 Bucket N6: CMOVcc reg, reg (B64/B32).
+    pub fn cmovcc_reg_reg(
+        cc: crate::codegen::x86_64::opcode::CondCode,
+        width: crate::codegen::shared::asm_operand::Width,
+        dst_idx: u8,
+        src_idx: u8,
+    ) -> Self {
+        use crate::codegen::x86_64::opcode::Operand;
+        Insn::new(
+            X86_64Opcode::Cmovcc {
+                cc,
+                width,
+                dst: Operand::Reg(dst_idx, width),
+                src: Operand::Reg(src_idx, width),
+            },
+            &[],
+        )
+    }
+
     /// asm/ 内联汇编路径专用 (P10 起原生路径已改用 raw_bytes).
     /// 语义与 raw_bytes 一致, 仅名字不同 —— 保留以避免改动内联汇编编码器的
     /// 几百处字面调用.
@@ -1343,6 +1383,65 @@ mod tests {
         assert_eq!(
             Insn::alu_rm_reg_imm32_b64_full(0, 8, 1).encode_bytes(),
             Some(vec![0x49, 0x81, 0xC0, 0x01, 0x00, 0x00, 0x00]),
+        );
+    }
+
+    /// P11 Bucket N6: bit_scan_reg_reg (BSF/BSR B64/B32 reflexive + cross).
+    #[test]
+    fn bit_scan_reg_reg_basic() {
+        use crate::codegen::shared::asm_operand::Width::*;
+        // bsr rax, rax: 48 0F BD C0
+        assert_eq!(
+            Insn::bit_scan_reg_reg(true, B64, 0, 0).encode_bytes(),
+            Some(vec![0x48, 0x0F, 0xBD, 0xC0]),
+        );
+        // bsf r8, r8: reflexive r8 → REX.W|R+B = 4D, 0F BC C0
+        assert_eq!(
+            Insn::bit_scan_reg_reg(false, B64, 8, 8).encode_bytes(),
+            Some(vec![0x4D, 0x0F, 0xBC, 0xC0]),
+        );
+        // bsr eax, eax: 0F BD C0 (no REX.W)
+        assert_eq!(
+            Insn::bit_scan_reg_reg(true, B32, 0, 0).encode_bytes(),
+            Some(vec![0x0F, 0xBD, 0xC0]),
+        );
+        // bsf ecx, eax: 0F BC C8 (dst=1 in reg field, src=0 in r/m; modrm=C0|(1<<3)|0=C8)
+        assert_eq!(
+            Insn::bit_scan_reg_reg(false, B32, 1, 0).encode_bytes(),
+            Some(vec![0x0F, 0xBC, 0xC8]),
+        );
+        // bsf r8, rcx: dst=8 (reg field=0, REX.R=0x04), src=1 (r/m field=1), B64.
+        //   REX=0x48|0x04=0x4C; modrm=C0|(0<<3)|1=C1.
+        assert_eq!(
+            Insn::bit_scan_reg_reg(false, B64, 8, 1).encode_bytes(),
+            Some(vec![0x4C, 0x0F, 0xBC, 0xC1]),
+        );
+    }
+
+    /// P11 Bucket N6: cmovcc_reg_reg (B64/B32).
+    #[test]
+    fn cmovcc_reg_reg_basic() {
+        use crate::codegen::shared::asm_operand::Width::*;
+        use crate::codegen::x86_64::opcode::CondCode::*;
+        // cmove rax, rdx: 48 0F 44 C2 (dst=0 reg, src=2 r/m)
+        assert_eq!(
+            Insn::cmovcc_reg_reg(Eq, B64, 0, 2).encode_bytes(),
+            Some(vec![0x48, 0x0F, 0x44, 0xC2]),
+        );
+        // cmovne eax, edi: 0F 45 C7 (dst=0, src=7)
+        assert_eq!(
+            Insn::cmovcc_reg_reg(Ne, B32, 0, 7).encode_bytes(),
+            Some(vec![0x0F, 0x45, 0xC7]),
+        );
+        // cmovne eax, esi: 0F 45 C6
+        assert_eq!(
+            Insn::cmovcc_reg_reg(Ne, B32, 0, 6).encode_bytes(),
+            Some(vec![0x0F, 0x45, 0xC6]),
+        );
+        // cmovne eax, ebp: 0F 45 C5
+        assert_eq!(
+            Insn::cmovcc_reg_reg(Ne, B32, 0, 5).encode_bytes(),
+            Some(vec![0x0F, 0x45, 0xC5]),
         );
     }
 }
