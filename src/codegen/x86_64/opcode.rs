@@ -78,6 +78,8 @@ pub(crate) enum NoArgOp {
     RepMovsb,
     /// rep stosb: F3 AA (AL → ES:[rdi], rcx 字节计数).
     RepStosb,
+    /// rep stosq: F3 48 AB (RAX → ES:[rdi], rcx qword 计数).
+    RepStosq,
     /// rep movsq: F3 48 A5 (qword 版本, 带 REX.W).
     RepMovsq,
     /// syscall: 0F 05 (fast system call into 64-bit kernel).
@@ -1854,6 +1856,7 @@ impl X86_64Opcode {
                     NoArgOp::Mfence => &[0x0F, 0xAE, 0xF0],
                     NoArgOp::RepMovsb => &[0xF3, 0xA4],
                     NoArgOp::RepStosb => &[0xF3, 0xAA],
+                    NoArgOp::RepStosq => &[0xF3, 0x48, 0xAB],
                     NoArgOp::RepMovsq => &[0xF3, 0x48, 0xA5],
                     NoArgOp::Syscall => &[0x0F, 0x05],
                     NoArgOp::Int3 => &[0xCC],
@@ -1924,6 +1927,7 @@ impl X86_64Opcode {
                     NoArgOp::Mfence => "mfence",
                     NoArgOp::RepMovsb => "rep movsb",
                     NoArgOp::RepStosb => "rep stosb",
+                    NoArgOp::RepStosq => "rep stosq",
                     NoArgOp::RepMovsq => "rep movsq",
                     NoArgOp::Syscall => "syscall",
                     NoArgOp::Int3 => "int3",
@@ -3457,6 +3461,12 @@ mod tests {
     fn noarg_rep_stosb() {
         let o = X86_64Opcode::NoArg { op: NoArgOp::RepStosb };
         assert_eq!(o.encode(), Some(vec![0xF3, 0xAA]));
+    }
+
+    #[test]
+    fn noarg_rep_stosq() {
+        let o = X86_64Opcode::NoArg { op: NoArgOp::RepStosq };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0x48, 0xAB]));
     }
 
     #[test]

@@ -1741,7 +1741,7 @@ impl Codegen {
         // rdi = r13 - frame_size (帧底部)
         self.emit_lea_r13(7, -frame_size);
         // rep stosq: F3 48 AB
-        self.emit_insn(&Insn::raw_bytes(&[0xF3, 0x48, 0xAB]));
+        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepStosq));
 
         // 恢复 rdi, rcx, rax
         self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rdi
@@ -1761,7 +1761,12 @@ impl Codegen {
             let loop_start = self.pos();
             self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xEC, 0x00, 0x10, 0x00, 0x00])); // sub rsp, 4096
             self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x04, 0x24, 0x00])); // mov byte ptr [rsp], 0
-            self.emit_insn(&Insn::raw_bytes(&[0x49, 0xFF, 0xCB])); // dec r11
+            // dec r11: 49 FF CB (REX.W B64, /1 modrm=11 001 011)
+            self.emit_insn(&Insn::unary_rm_reg(
+                crate::codegen::x86_64::opcode::UnaryOp::Dec,
+                crate::codegen::shared::asm_operand::Width::B64,
+                11,
+            ));
             let loop_end = self.pos();
             let disp = loop_start as i64 - loop_end as i64 - 2;
             self.emit_insn(&Insn::raw_bytes(&[disp as i8 as u8])); // jnz loop
@@ -1841,7 +1846,13 @@ impl Codegen {
         // Stack canary 检查: 在恢复 rsp 前验证金丝雀值
         if self.target.stack_protector && self.frame_layout.canary_fits() {
             // mov r11, [r13 - 8]  → 加载存储的 canary 到临时寄存器（槽位 = `abi::layout::CANARY_OFF`）
-            self.emit_insn(&Insn::raw_bytes(&[0x4d, 0x8b, 0x9d, 0xf8, 0xff, 0xff, 0xff]));
+            self.emit_insn(&Insn::mov_rm_mem(
+                true,
+                crate::codegen::shared::asm_operand::Width::B64,
+                11,
+                13,
+                -8,
+            ));
             // xor r11, seg:[0x28]  → 与原始 canary 比较
             // seg = fs (0x64) or gs (0x65) based on guard register
             let seg_prefix = match self.target.stack_protector_guard_reg {
@@ -1860,29 +1871,78 @@ impl Codegen {
         // 同序言: 无条件发射, 未使用的寄存器由 patch_callee_saves 改为 nop
         // mov rbx, [r13 - 16]  (REX.WB: r13 needs REX.B)
         self.callee_save_patch_sites.push((self.pos(), 0x01));
-        self.emit_insn(&Insn::raw_with_gas(&[0x49, 0x8b, 0x5d, 0xf0], "mov -16(%r13), %rbx"));
+        self.emit_insn(
+            &Insn::mov_rm_mem(
+                true,
+                crate::codegen::shared::asm_operand::Width::B64,
+                3,
+                13,
+                -16,
+            )
+            .with_gas("mov -16(%r13), %rbx".to_string()),
+        );
         // mov r12, [r13 - 24]  (REX.WRB: r12 needs REX.R, r13 needs REX.B)
         self.callee_save_patch_sites.push((self.pos(), 0x02));
-        self.emit_insn(&Insn::raw_with_gas(&[0x4d, 0x8b, 0x65, 0xe8], "mov -24(%r13), %r12"));
+        self.emit_insn(
+            &Insn::mov_rm_mem(
+                true,
+                crate::codegen::shared::asm_operand::Width::B64,
+                12,
+                13,
+                -24,
+            )
+            .with_gas("mov -24(%r13), %r12".to_string()),
+        );
         // mov r14, [r13 - 32]  (REX.WRB: r14 needs REX.R, r13 needs REX.B)
         self.callee_save_patch_sites.push((self.pos(), 0x04));
-        self.emit_insn(&Insn::raw_with_gas(&[0x4d, 0x8b, 0x75, 0xe0], "mov -32(%r13), %r14"));
+        self.emit_insn(
+            &Insn::mov_rm_mem(
+                true,
+                crate::codegen::shared::asm_operand::Width::B64,
+                14,
+                13,
+                -32,
+            )
+            .with_gas("mov -32(%r13), %r14".to_string()),
+        );
         // mov r15, [r13 - 40]  (REX.WRB: r15 在 reg 字段需要 REX.R, r13 在 r/m 需要 REX.B)
         // 这里没有 SIB，REX.X 是多余的：旧代码发 0x4F = W|R|X|B，产物里被 objdump 标成
         // `rex.WRXB mov -0x28(%r13),%r15`（与序言侧同一个复制源）。
         self.callee_save_patch_sites.push((self.pos(), 0x08));
-        self.emit_insn(&Insn::raw_with_gas(&[0x4d, 0x8b, 0x7d, 0xd8], "mov -40(%r13), %r15"));
+        self.emit_insn(
+            &Insn::mov_rm_mem(
+                true,
+                crate::codegen::shared::asm_operand::Width::B64,
+                15,
+                13,
+                -40,
+            )
+            .with_gas("mov -40(%r13), %r15".to_string()),
+        );
         // mov rsp, r13: 恢复栈指针
-        self.emit_insn(&Insn::raw_with_gas(&[0x49, 0x8b, 0xe5], "mov %r13, %rsp"));
-        self.emit_insn(&Insn::raw_with_gas(&[0x41, 0x5d], "pop %r13"));
+        self.emit_insn(
+            &Insn::mov_rm_reg(
+                crate::codegen::shared::asm_operand::Width::B64,
+                4,
+                13,
+            )
+            .with_gas("mov %r13, %rsp".to_string()),
+        );
+        self.emit_insn(
+            &Insn::stack_op_reg(crate::codegen::x86_64::opcode::StackOp::Pop, 13)
+                .with_gas("pop %r13".to_string()),
+        );
         if self.target.frame_pointer {
-            self.emit_insn(&Insn::raw_with_gas(&[0x5D], "pop %rbp")); // pop rbp
+            self.emit_insn(
+                &Insn::stack_op_reg(crate::codegen::x86_64::opcode::StackOp::Pop, 5)
+                    .with_gas("pop %rbp".to_string()),
+            );
         }
         // noreturn: 在 ret 前插入 trap 指令 (ud2)
         // 防止函数未正常返回时 (如 panic/abort/longjmp)
         // 执行流落入调用者后续代码
         if self.current_is_noreturn {
-            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x0B])); // ud2 - undefined instruction trap
+            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Ud2));
         }
         self.emit_return_tail();
     }
