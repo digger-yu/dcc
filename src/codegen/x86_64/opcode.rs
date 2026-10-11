@@ -759,6 +759,25 @@ impl X86_64Opcode {
                     out.push(modrm);
                     out.extend_from_slice(disp_bytes);
                     Some(out)
+                } else if mem.index.is_none() && (base == 4 || base == 12) {
+                    // 路径 A2: base=rsp(4) 或 r12(12) 且无 index — 必须插 SIB
+                    // (SIB base=base&7=4, index=4=ESP 编码=无 index). 支持任意 disp.
+                    let (modrm_mod, disp_bytes): (u8, &[u8]) = if i8::try_from(disp).is_ok() {
+                        (1, &disp.to_le_bytes()[..1])
+                    } else {
+                        (2, &disp.to_le_bytes()[..4])
+                    };
+                    // modrm: reg=dst, r/m=100 (SIB follows).
+                    let modrm = (modrm_mod << 6) | ((*dst_idx & 7) << 3) | 0x04;
+                    // SIB: scale=0, index=4(no index), base=base&7.
+                    let sib = 0x20 | (base & 7);
+                    let mut out = Vec::with_capacity(8);
+                    out.push(rex);
+                    out.push(0x8D);
+                    out.push(modrm);
+                    out.push(sib);
+                    out.extend_from_slice(disp_bytes);
+                    Some(out)
                 } else if let Some((index_idx, scale)) = mem.index {
                     // 路径 B: 有 index — SIB. 本步支持 disp=0, scale∈{1,2,4,8}.
                     if disp != 0 {
@@ -3960,6 +3979,20 @@ mod tests {
         };
         let got = o.encode();
         assert_eq!(got, Some(vec![0x4B, 0x8D, 0x04, 0x1D]), "got {:?}", got);
+    }
+
+    #[test]
+    fn lea_rax_rsp_disp8() {
+        // lea rax, [rsp+disp8]: REX.W 48 8D 44 24 <disp8>
+        // rex: W=1, R=0(dst=rax=0), B=0(base=rsp=4<8)
+        // modrm: mod=01(disp8), reg=0(dst=rax=0), r/m=100(SIB) → 0x44
+        // sib: scale=0, index=4(no index), base=4(rsp) → 0x24
+        let o = X86_64Opcode::Lea {
+            dst: reg(0, Width::B64),
+            mem: MemOperand { disp: 0x0F, base: Some(4), index: None, seg: None },
+            rip_relative: false,
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x8D, 0x44, 0x24, 0x0F]));
     }
 
     // ---- P11 Bucket M: Adc/Sbb/Mul/Rcl/Ud2 ----

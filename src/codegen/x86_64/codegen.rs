@@ -1422,7 +1422,10 @@ impl Codegen {
         }
         self.call_label("main");
         // 保存 main 返回值
-        self.emit_insn(&Insn::raw_bytes(&[0x41, 0x89, 0xc5])); // mov r13d, eax
+        self.emit_insn(&Insn::mov_rm_reg(
+            crate::codegen::shared::asm_operand::Width::B32,
+            13, 0,
+        )); // mov r13d, eax
                                         // 调用 destructor 函数
         for (_p, dtor) in &dtors {
             // P11: xor rax, rax via typed opcode
@@ -1442,10 +1445,24 @@ impl Codegen {
             }
             self.call_label(dtor);
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x4c, 0x89, 0xe4])); // mov rsp, r12 (恢复原始 rsp)
-        self.emit_insn(&Insn::raw_bytes(&[0x44, 0x89, 0xef])); // mov edi, r13d (main 返回值)
-        self.emit_insn(&Insn::raw_bytes(&[0xb8, 0x3c, 0x00, 0x00, 0x00])); // mov eax, 0x3c
-        self.emit_insn(&Insn::raw_bytes(&[0x0f, 0x05])); // syscall
+        self.emit_insn(&Insn::mov_rm_reg(
+            crate::codegen::shared::asm_operand::Width::B64,
+            4, 12,
+        )); // mov rsp, r12 (恢复原始 rsp)
+        self.emit_insn(&Insn::mov_rm_reg(
+            crate::codegen::shared::asm_operand::Width::B32,
+            7, 13,
+        )); // mov edi, r13d (main 返回值)
+        // mov eax, 0x3c
+        self.emit_insn(&Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                width: crate::codegen::shared::asm_operand::Width::B32,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B32),
+                src: crate::codegen::x86_64::opcode::Operand::Imm(0x3c),
+            },
+            &[],
+        ));
+        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Syscall));
         self.emit_insn(&Insn::raw_bytes(&[0xeb, 0xfe])); // jmp self
                                   // 静态局部变量分析 pass + 预注册到 data/bss
         self.static_local_map = crate::static_locals::analyze_static_locals(prog);
