@@ -1463,47 +1463,24 @@ impl Codegen {
         }
         match sz {
             4 => {
-                let rex_r = if reg >= 8 { 0x04 } else { 0 };
-                let modrm = 0x45 | ((reg & 7) << 3); // mod=01, r/m=%r13(5)
-                use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
-                let reg_name = GAS_REG64[(reg & 15) as usize];
-                let (bytes, is_signed) = if signed4 {
-                    // movsxd r64, dword [r13+off] (REX.W + 0x63 /r)
-                    let mut b: Vec<u8> = vec![0x49 | rex_r, 0x63];
-                    if off.abs() < 128 {
-                        b.push(modrm);
-                        b.push(off as i8 as u8);
-                    } else {
-                        b.push(0x85 | ((reg & 7) << 3));
-                        b.extend_from_slice(&(off as i32).to_le_bytes());
-                    }
-                    (b, true)
+                // P11 Bucket K: movsxd r64,[r13+off] / mov r32,[r13+off] via typed constructors.
+                // base=13 (r13) forces disp32 when off==0 (encode() 对 base==5 & !SIB 强制 mod=10),
+                // 与原手写 mod=01 disp8=0 / mod=10 disp32 分支等价; off 实际非零, 走 mod=01/10 自然路径.
+                let off_i32 = off as i32;
+                if signed4 {
+                    self.emit_insn(&Insn::mov_ext_mem(
+                        true,
+                        crate::codegen::shared::asm_operand::Width::B32,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        reg, 13, off_i32,
+                    ));
                 } else {
-                    // mov r32, dword [r13+off] (无 REX.W: 高 32 位清零)
-                    let mut b: Vec<u8> = vec![0x41 | rex_r, 0x8B];
-                    if off.abs() < 128 {
-                        b.push(modrm);
-                        b.push(off as i8 as u8);
-                    } else {
-                        b.push(0x85 | ((reg & 7) << 3));
-                        b.extend_from_slice(&(off as i32).to_le_bytes());
-                    }
-                    (b, false)
-                };
-                let gas = if is_signed {
-                    format!("movsxd {}(%r13), {}", off, reg_name)
-                } else {
-                    // 32 位形式: %eax/%ecx/.../%r8d..%r15d
-                    let r32 = match reg & 15 {
-                        0 => "%eax", 1 => "%ecx", 2 => "%edx", 3 => "%ebx",
-                        4 => "%esp", 5 => "%ebp", 6 => "%esi", 7 => "%edi",
-                        8 => "%r8d", 9 => "%r9d", 10 => "%r10d", 11 => "%r11d",
-                        12 => "%r12d", 13 => "%r13d", 14 => "%r14d", 15 => "%r15d",
-                        _ => "%eax",
-                    };
-                    format!("mov {}, {}(%r13)", r32, off)
-                };
-                self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
+                    self.emit_insn(&Insn::mov_rm_mem(
+                        true,
+                        crate::codegen::shared::asm_operand::Width::B32,
+                        reg, 13, off_i32,
+                    ));
+                }
             },
             1 | 2 => {
                 self.load_stack_sized(reg, off, sz);
