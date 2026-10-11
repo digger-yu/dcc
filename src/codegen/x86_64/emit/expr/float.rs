@@ -8,7 +8,7 @@ use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
 use crate::codegen::x86_64::asm::*;
 use crate::codegen::x86_64::insn::Insn;
-use crate::codegen::x86_64::opcode::{SimdArithOp, SimdWidth};
+use crate::codegen::x86_64::opcode::{SimdArithOp, SimdWidth, X87Op};
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::*;
 use crate::const_eval::{self, ConstValue};
@@ -78,11 +78,10 @@ impl Codegen {
         } else {
             self.emit_insn(&Insn::cvt2sd_reg(false, SimdWidth::SS, dst, 0));
         }
-        // test dst, dst
-        let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
+        // test dst, dst (REX.W + 85 /r, 自反 ModRM: dst>=8 同时置 REX.R+B)
         use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
         let test_gas = format!("test {}, {}", GAS_REG64[(dst & 15) as usize], GAS_REG64[(dst & 15) as usize]);
-        self.emit_insn(&Insn::raw_with_gas(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)], &test_gas));
+        self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, dst, dst).with_gas(test_gas));
         // jns .done (非负 → 正确)
         self.jmp_rel32(&l_done, JumpKind::Jns);
 
@@ -161,10 +160,10 @@ impl Codegen {
             // cvtsi2ss/cvtsi2sd xmm0, rax
             if matches!(dst_ty, Type::Float) {
                 // cvtsi2ss xmm0, rax: F3 48 0F 2A C0
-                self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x48, 0x0F, 0x2A, 0xC0], "cvtsi2ss %rax, %xmm0"));
+                self.emit_insn(&Insn::cvt2sd_reg(true, SimdWidth::SS, 0, 0).with_gas("cvtsi2ss %rax, %xmm0".into()));
             } else {
                 // cvtsi2sd xmm0, rax: F2 48 0F 2A C0
-                self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x48, 0x0F, 0x2A, 0xC0], "cvtsi2sd %rax, %xmm0"));
+                self.emit_insn(&Insn::cvt2sd_reg(true, SimdWidth::SD, 0, 0).with_gas("cvtsi2sd %rax, %xmm0".into()));
             }
         }
     }
@@ -176,17 +175,11 @@ impl Codegen {
             _ => return,
         };
         if is_32bit {
-            // 自反 ModRM: dst 同时在 ModRM.reg 与 r/m ⇒ >=8 必须同时置 REX.R 与 REX.B(0x05)，
-            // 只置一边就把另一个字段留在低 8 个寄存器上（读/写的都是别人的 %eax）。
-            // <8 时一个前缀都不发：裸 0x40 什么都不扩，只多占一字节并被 objdump 标成 `rex mov`。
-            if dst >= 8 {
-                self.emit_insn(&Insn::raw_bytes(&[0x45]));
-            }
-            self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+            // mov dst32, dst32 (89 /r, 自反 ModRM: dst>=8 同时置 REX.R+B)
+            self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B32, dst, dst));
         } else {
-            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-            self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xE0 | (dst & 7)]));
-            self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
+            // and dst64, imm32 (REX.W 81 /4 id)
+            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, dst, mask as i64));
         }
     }
     pub(crate) fn emit_truth_flags(&mut self, ty: &Type) {
@@ -215,7 +208,7 @@ impl Codegen {
                 },
                 &[],
             )); // mov ecx, [rax] (实部)
-                    self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x50, isz as u8])); // mov edx, [rax+isz]
+                    self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B32, 2, 0, isz as i32)); // mov edx, [rax+isz]
                     self.emit_insn(&Insn::new(
                         crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
                             op: crate::codegen::x86_64::opcode::AluOp::And,
@@ -279,7 +272,7 @@ impl Codegen {
                 },
                 &[],
             )); // mov rcx, [rax]
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x50, isz as u8])); // mov rdx, [rax+isz]
+                    self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 2, 0, isz as i32)); // mov rdx, [rax+isz]
                     self.mov_imm(0, 0x7FFF_FFFF_FFFF_FFFFi128); // rax = 符号掩码
                     // P11: 收敛到 AluRm{And, B64, rcx, rax} / {And, B64, rdx, rax} / {Or, B64, rcx, rdx}.
                     {
@@ -379,7 +372,7 @@ impl Codegen {
                         },
                         _ => {
                             // total==2 (_Complex char 等)
-                            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7, 0x00])); // movzx eax, word [rax]
+                            self.emit_insn(&Insn::mov_ext_mem(false, crate::codegen::shared::asm_operand::Width::B16, crate::codegen::shared::asm_operand::Width::B32, 0, 0, 0)); // movzx eax, word [rax]
                             self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 0, 0)); // test eax, eax
                         },
                     }
@@ -400,11 +393,10 @@ impl Codegen {
         let l_pos = self.fresh_label();
         let l_done = self.fresh_label();
 
-        // test dst, dst
-        let test_rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
+        // test dst, dst (REX.W + 85 /r, 自反 ModRM: dst>=8 同时置 REX.R+B)
         use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
         let test_gas = format!("test {}, {}", GAS_REG64[(dst & 15) as usize], GAS_REG64[(dst & 15) as usize]);
-        self.emit_insn(&Insn::raw_with_gas(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)], &test_gas));
+        self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, dst, dst).with_gas(test_gas));
         // jns .pos (bit63=0 → 正数, 直接转换)
         self.jmp_rel32(&l_pos, JumpKind::Jns);
 
@@ -463,19 +455,11 @@ impl Codegen {
             _ => return,
         };
         if is_32bit {
-            // mov dst32, dst32: 89 /r (32 位操作数自动零扩展高 32 位)
-            // 自反 ModRM: dst 同时在 ModRM.reg 与 r/m ⇒ >=8 必须同时置 REX.R 与 REX.B(0x05)，
-            // 只置一边就把另一个字段留在低 8 个寄存器上（读/写的都是别人的 %eax）。
-            // <8 时一个前缀都不发：裸 0x40 什么都不扩，只多占一字节并被 objdump 标成 `rex mov`。
-            if dst >= 8 {
-                self.emit_insn(&Insn::raw_bytes(&[0x45]));
-            }
-            self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+            // mov dst32, dst32: 89 /r (32 位操作数自动零扩展高 32 位, 自反 ModRM)
+            self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B32, dst, dst));
         } else {
-            // and dst, imm32: REX.W 81 /4 id
-            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-            self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xE0 | (dst & 7)]));
-            self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
+            // and dst64, imm32: REX.W 81 /4 id
+            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, dst, mask as i64));
         }
     }
     pub(crate) fn gen_float_binop(&mut self, op: BinOp, l: &Expr, r: &Expr) {
@@ -503,9 +487,9 @@ impl Codegen {
                 // 保存 st(0) 到栈临时区 (固定 16 字节: ld 要装 tbyte 且保持对齐)
                 self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp, 16
                 if is_long_double {
-                    self.emit_insn(&Insn::raw_bytes(&[0xDB, 0x3C, 0x24])); // fstp tbyte [rsp]
+                    self.emit_insn(&Insn::x87_mem(X87Op::FstpMem { width: 10 }, 4, 0)); // fstp tbyte [rsp]
                 } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x1C, 0x24])); // fstp qword [rsp]
+                    self.emit_insn(&Insn::x87_mem(X87Op::FstpMem { width: 8 }, 4, 0)); // fstp qword [rsp]
                 }
                 self.expr_depth += 1;
                 self.gen_expr(r, Self::EVAL_BASE); // st(0) = r
@@ -515,9 +499,9 @@ impl Codegen {
                 // 交换: 需要 st(0) = l, st(1) = r 才能做 fdiv
                 // 先加载 l 到 st(0)
                 if is_long_double {
-                    self.emit_insn(&Insn::raw_bytes(&[0xDB, 0x2C, 0x24])); // fld tbyte [rsp]
+                    self.emit_insn(&Insn::x87_mem(X87Op::FldMem { width: 10 }, 4, 0)); // fld tbyte [rsp]
                 } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x04, 0x24])); // fld qword [rsp]
+                    self.emit_insn(&Insn::x87_mem(X87Op::FldMem { width: 8 }, 4, 0)); // fld qword [rsp]
                 }
                 // 现在 st(0) = l, st(1) = r
                 // 做 l/r
@@ -526,7 +510,7 @@ impl Codegen {
                                           // trunc to int64
                 self.emit_insn(&Insn::raw_bytes(&[0xDF, 0x7C, 0x24, 0x00])); // fistp qword [rsp] (truncate to int64)
                                                       // 重新加载 r
-                self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x04, 0x24])); // fld qword [rsp] -- 但已被 fistp 覆盖
+                self.emit_insn(&Insn::x87_mem(X87Op::FldMem { width: 8 }, 4, 0)); // fld qword [rsp] -- 但已被 fistp 覆盖
                                                 // 简化处理: 直接用 x87 做减法模拟 fmod
                                                 // 实际上内核很少用浮点取模, 这里先简单处理
                                                 // （C 的 `%` 本身不允许浮点操作数）
@@ -542,9 +526,9 @@ impl Codegen {
             // 保存 l 到刚分配的 16 字节槽 (long double 用 tbyte, 否则 qword)
             self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp, 16
             if is_long_double {
-                self.emit_insn(&Insn::raw_bytes(&[0xDB, 0x3C, 0x24])); // fstp tbyte [rsp]
+                self.emit_insn(&Insn::x87_mem(X87Op::FstpMem { width: 10 }, 4, 0)); // fstp tbyte [rsp]
             } else {
-                self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x1C, 0x24])); // fstp qword [rsp]
+                self.emit_insn(&Insn::x87_mem(X87Op::FstpMem { width: 8 }, 4, 0)); // fstp qword [rsp]
             }
             self.expr_depth += 1;
             self.gen_expr(r, Self::EVAL_BASE); // st(0) = r
@@ -552,9 +536,9 @@ impl Codegen {
             self.expr_depth -= 1;
             // 重新加载 l
             if is_long_double {
-                self.emit_insn(&Insn::raw_bytes(&[0xDB, 0x2C, 0x24])); // fld tbyte [rsp]
+                self.emit_insn(&Insn::x87_mem(X87Op::FldMem { width: 10 }, 4, 0)); // fld tbyte [rsp]
             } else {
-                self.emit_insn(&Insn::raw_bytes(&[0xDD, 0x04, 0x24])); // fld qword [rsp]
+                self.emit_insn(&Insn::x87_mem(X87Op::FldMem { width: 8 }, 4, 0)); // fld qword [rsp]
             }
             self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp, 16
                                                 // 执行运算: st(0) = 左, st(1) = 右
@@ -607,15 +591,15 @@ impl Codegen {
             }
             // trunc 截断到 int64
             if is_float {
-                self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x48, 0x0F, 0x2C, 0xC0], "cvttss2si %xmm0, %rax"));
+                self.emit_insn(&Insn::cvt2sd_reg(false, SimdWidth::SS, 0, 0).with_gas("cvttss2si %xmm0, %rax".into()));
             } else {
-                self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x48, 0x0F, 0x2C, 0xC0], "cvttsd2si %xmm0, %rax"));
+                self.emit_insn(&Insn::cvt2sd_reg(false, SimdWidth::SD, 0, 0).with_gas("cvttsd2si %xmm0, %rax".into()));
             }
             // int → float
             if is_float {
-                self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x48, 0x0F, 0x2A, 0xC0], "cvtsi2ss %rax, %xmm0"));
+                self.emit_insn(&Insn::cvt2sd_reg(true, SimdWidth::SS, 0, 0).with_gas("cvtsi2ss %rax, %xmm0".into()));
             } else {
-                self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x48, 0x0F, 0x2A, 0xC0], "cvtsi2sd %rax, %xmm0"));
+                self.emit_insn(&Insn::cvt2sd_reg(true, SimdWidth::SD, 0, 0).with_gas("cvtsi2sd %rax, %xmm0".into()));
             }
             // n * r
             if is_float {
