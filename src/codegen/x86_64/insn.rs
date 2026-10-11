@@ -172,6 +172,23 @@ impl Insn {
         )
     }
 
+    /// P11 Bucket N8: LOCK XADD [base], reg — 手写形态 (base-only, disp=0).
+    pub fn lock_xadd_base(
+        width: crate::codegen::shared::asm_operand::Width,
+        reg_idx: u8,
+        base: u8,
+    ) -> Self {
+        use crate::codegen::x86_64::opcode::MemOperand;
+        Insn::new(
+            X86_64Opcode::LockXaddRm {
+                width,
+                reg_idx,
+                mem: MemOperand { disp: 0, base: Some(base), index: None, seg: None },
+            },
+            &[],
+        )
+    }
+
     /// asm/ 内联汇编路径专用 (P10 起原生路径已改用 raw_bytes).
     /// 语义与 raw_bytes 一致, 仅名字不同 —— 保留以避免改动内联汇编编码器的
     /// 几百处字面调用.
@@ -1013,6 +1030,24 @@ impl Insn {
         Insn::new(
             crate::codegen::x86_64::opcode::X86_64Opcode::X87 {
                 op,
+                mem: Some(crate::codegen::x86_64::opcode::MemOperand {
+                    disp,
+                    base: Some(base),
+                    index: None,
+                    seg: None,
+                }),
+            },
+            &[],
+        )
+    }
+
+    /// P11 Bucket N8: x87 fnstenv/fldenv [base+disp].
+    ///   store=true  → fnstenv [mem] (D9 /7).
+    ///   store=false → fldenv  [mem] (D9 /4).
+    pub fn x87_env_mem(store: bool, base: u8, disp: i32) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::X87 {
+                op: crate::codegen::x86_64::opcode::X87Op::EnvMem { store },
                 mem: Some(crate::codegen::x86_64::opcode::MemOperand {
                     disp,
                     base: Some(base),

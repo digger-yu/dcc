@@ -210,6 +210,11 @@ pub(crate) enum X87Op {
     ///   fnstcw [rsp]: D9 3C 24 (SIB mod=00, reg=7, rm=4, disp8=0).
     ///   fldcw  [rsp]: D9 2C 24 (SIB mod=00, reg=5, rm=4, disp8=0).
     FcwMem { store: bool },
+    /// P11 Bucket N8: fnstenv/fldenv m14/28 — D9 /7 (store) or /4 (load).
+    ///  mem 为 base-only [base+disp0], base∈{rdi(7)} 本批使用. 无 SIB.
+    ///   fnstenv [rdi]: D9 37
+    ///   fldenv  [rdi]: D9 27
+    EnvMem { store: bool },
 }
 
 /// 移位数量: CL 或 imm8 — 步骤 1 不实现.
@@ -495,6 +500,19 @@ pub(crate) enum X86_64Opcode {
     ///    B32: F0 87 ModRM
     ///    B64: F0 48 87 ModRM
     LockXchgRm {
+        width: crate::codegen::shared::asm_operand::Width,
+        reg_idx: u8,
+        mem: MemOperand,
+    },
+
+    /// P11 Bucket N8: LOCK XADD r/m8/16/32/64, r8/16/32/64.
+    ///  手写约定 (emit_atomic_xadd in special/builtins.rs):
+    ///    B8:  F0 40 0F C0 ModRM     (REX=0x40 用于 sil/dil 高字节)
+    ///    B16: 66 F0 0F C1 ModRM
+    ///    B32: F0 0F C1 ModRM        (无 REX.W)
+    ///    B64: F0 48 0F C1 ModRM     (REX.W=0x48)
+    ///  mem 端为 [base+disp0] base-only 形态.
+    LockXaddRm {
         width: crate::codegen::shared::asm_operand::Width,
         reg_idx: u8,
         mem: MemOperand,
@@ -1522,7 +1540,7 @@ impl X86_64Opcode {
                         out.extend_from_slice(&disp_bytes);
                         Some(out)
                     }
-                    X87Op::MxcsrMem { store } | X87Op::FcwMem { store } => {
+                    X87Op::MxcsrMem { store } | X87Op::FcwMem { store } | X87Op::EnvMem { store } => {
                         let _ = store;
                         #[allow(clippy::question_mark)]
                         let mem = match mem {
@@ -1539,6 +1557,8 @@ impl X86_64Opcode {
                             X87Op::MxcsrMem { store: false } => (0xAE, 2),  // ldmxcsr
                             X87Op::FcwMem { store: true } => (0xD9, 7),     // fnstcw
                             X87Op::FcwMem { store: false } => (0xD9, 5),    // fldcw
+                            X87Op::EnvMem { store: true } => (0xD9, 6),      // fnstenv [mem]
+                            X87Op::EnvMem { store: false } => (0xD9, 4),     // fldenv [mem]
                             _ => return None,
                         };
                         // 0F AE needs a 0x0F escape byte before escap.
@@ -2162,6 +2182,36 @@ impl X86_64Opcode {
                 out.push(0xF0);
                 if need_rex { out.push(rex); }
                 out.push(opcode);
+                let modrm = ((*reg_idx & 7) << 3) | (base & 7);
+                out.push(modrm);
+                Some(out)
+            }
+            // P11 Bucket N8: LOCK XADD r/m, reg. 与 LockXchgRm 平行, 但 escap=0F,
+            // opc2: B8=C0 / B16/B32/B64=C1. LOCK 前缀放在 REX 之前.
+            X86_64Opcode::LockXaddRm { width, reg_idx, mem } => {
+                let base = mem.base?;
+                if mem.seg.is_some() || mem.index.is_some() || mem.disp != 0 {
+                    return None;
+                }
+                let is_b8 = matches!(width, Width::B8);
+                let is_b16 = matches!(width, Width::B16);
+                let is_b32 = matches!(width, Width::B32);
+                let is_b64 = matches!(width, Width::B64);
+                if !(is_b8 || is_b16 || is_b32 || is_b64) {
+                    return None;
+                }
+                let opc2: u8 = if is_b8 { 0xC0 } else { 0xC1 };
+                let mut rex: u8 = 0x40;
+                if is_b64 { rex |= 0x08; }
+                if *reg_idx >= 8 { rex |= 0x04; }
+                if base >= 8 { rex |= 0x01; }
+                let need_rex = is_b8 || is_b64 || *reg_idx >= 8 || base >= 8;
+                let mut out = Vec::with_capacity(8);
+                if is_b16 { out.push(0x66); }
+                out.push(0xF0);
+                if need_rex { out.push(rex); }
+                out.push(0x0F);
+                out.push(opc2);
                 let modrm = ((*reg_idx & 7) << 3) | (base & 7);
                 out.push(modrm);
                 Some(out)
@@ -4761,6 +4811,70 @@ mod tests {
             mem: MemOperand { disp: 0, base: Some(7), index: None, seg: None },
         };
         assert_eq!(o.encode(), Some(vec![0xF0, 0x48, 0x87, 0x37]));
+    }
+
+    #[test]
+    fn lock_xadd_rdi_rsi_b8() {
+        // lock xadd [rdi], sil: F0 40 0F C0 37
+        let o = X86_64Opcode::LockXaddRm {
+            width: Width::B8,
+            reg_idx: 6,
+            mem: MemOperand { disp: 0, base: Some(7), index: None, seg: None },
+        };
+        assert_eq!(o.encode(), Some(vec![0xF0, 0x40, 0x0F, 0xC0, 0x37]));
+    }
+
+    #[test]
+    fn lock_xadd_rdi_rsi_b16() {
+        // lock xadd [rdi], si: 66 F0 0F C1 37
+        let o = X86_64Opcode::LockXaddRm {
+            width: Width::B16,
+            reg_idx: 6,
+            mem: MemOperand { disp: 0, base: Some(7), index: None, seg: None },
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0xF0, 0x0F, 0xC1, 0x37]));
+    }
+
+    #[test]
+    fn lock_xadd_rdi_rsi_b32() {
+        // lock xadd [rdi], esi: F0 0F C1 37
+        let o = X86_64Opcode::LockXaddRm {
+            width: Width::B32,
+            reg_idx: 6,
+            mem: MemOperand { disp: 0, base: Some(7), index: None, seg: None },
+        };
+        assert_eq!(o.encode(), Some(vec![0xF0, 0x0F, 0xC1, 0x37]));
+    }
+
+    #[test]
+    fn lock_xadd_rdi_rsi_b64() {
+        // lock xadd [rdi], rsi: F0 48 0F C1 37
+        let o = X86_64Opcode::LockXaddRm {
+            width: Width::B64,
+            reg_idx: 6,
+            mem: MemOperand { disp: 0, base: Some(7), index: None, seg: None },
+        };
+        assert_eq!(o.encode(), Some(vec![0xF0, 0x48, 0x0F, 0xC1, 0x37]));
+    }
+
+    #[test]
+    fn x87_fnstenv_rdi() {
+        // fnstenv [rdi]: D9 37
+        let o = X86_64Opcode::X87 {
+            op: X87Op::EnvMem { store: true },
+            mem: Some(MemOperand { disp: 0, base: Some(7), index: None, seg: None }),
+        };
+        assert_eq!(o.encode(), Some(vec![0xD9, 0x37]));
+    }
+
+    #[test]
+    fn x87_fldenv_rdi() {
+        // fldenv [rdi]: D9 27
+        let o = X86_64Opcode::X87 {
+            op: X87Op::EnvMem { store: false },
+            mem: Some(MemOperand { disp: 0, base: Some(7), index: None, seg: None }),
+        };
+        assert_eq!(o.encode(), Some(vec![0xD9, 0x27]));
     }
 }
 

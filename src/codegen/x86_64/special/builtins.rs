@@ -22,10 +22,10 @@ use std::sync::Arc;
 impl Codegen {
     fn emit_atomic_xadd(&mut self, sz: usize) {
         match sz {
-            1 => { self.emit_insn(&Insn::raw_bytes(&[0xF0, 0x40, 0x0F, 0xC0, 0x37])); } // lock xadd [rdi], sil
-            2 => { self.emit_insn(&Insn::raw_bytes(&[0x66, 0xF0, 0x0F, 0xC1, 0x37])); } // lock xadd [rdi], si
-            4 => { self.emit_insn(&Insn::raw_bytes(&[0xF0, 0x0F, 0xC1, 0x37])); }       // lock xadd [rdi], esi
-            _ => { self.emit_insn(&Insn::raw_bytes(&[0xF0, 0x48, 0x0F, 0xC1, 0x37])); } // lock xadd [rdi], rsi
+            1 => { self.emit_insn(&Insn::lock_xadd_base(crate::codegen::shared::asm_operand::Width::B8, 6, 7)); } // lock xadd [rdi], sil
+            2 => { self.emit_insn(&Insn::lock_xadd_base(crate::codegen::shared::asm_operand::Width::B16, 6, 7)); } // lock xadd [rdi], si
+            4 => { self.emit_insn(&Insn::lock_xadd_base(crate::codegen::shared::asm_operand::Width::B32, 6, 7)); }       // lock xadd [rdi], esi
+            _ => { self.emit_insn(&Insn::lock_xadd_base(crate::codegen::shared::asm_operand::Width::B64, 6, 7)); } // lock xadd [rdi], rsi
         }
         // 零扩展 8/16 位子寄存器返回值到 64 位 rsi
         match sz {
@@ -1597,7 +1597,7 @@ impl Codegen {
                         if src_ok {
                             // rep movsq 复制 3 个 qword
                             self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1, 0x03, 0, 0, 0]));
+                            self.emit_insn(&Insn::mov_reg_imm32_b64(1, 3));
                             self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsq)); // rep movsq
                         }
                     }
@@ -2171,8 +2171,7 @@ impl Codegen {
                     if stack_off < 128 {
                         self.emit_insn(&Insn::sub_rsp_imm(stack_off as i64));
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xEC]));
-                        self.emit_insn(&Insn::raw_bytes(&stack_off.to_le_bytes()));
+                        self.emit_insn(&Insn::alu_rm_reg_imm32_b64(5, 4, stack_off as i64)); // sub rsp, stack_off
                     }
                 }
                 // 3. 调整 RSP 对齐 (call 需要 16 字节对齐)
@@ -2193,8 +2192,7 @@ impl Codegen {
                     if stack_off < 128 {
                         self.emit_insn(&Insn::add_rsp_imm(stack_off as i64));
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xC4]));
-                        self.emit_insn(&Insn::raw_bytes(&stack_off.to_le_bytes()));
+                        self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 4, stack_off as i64)); // add rsp, stack_off
                     }
                 }
                 if dst != 0 {
@@ -2546,34 +2544,26 @@ impl Codegen {
                 let buf_off = size + 16;
                 self.gen_builtin_fn_ptr(&args[0], 10); // r10 = fn
                 self.gen_expr(&args[1], 6); // rsi = data
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xEC]));
-                self.emit_insn(&Insn::raw_bytes(&frame.to_le_bytes())); // sub rsp, frame
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0xB4, 0x24]));
-                self.emit_insn(&Insn::raw_bytes(&buf_off.to_le_bytes())); // mov [rsp+buf_off], rsi
+                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(5, 4, frame as i64)); // sub rsp, frame
+                self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 6, 4, buf_off)); // mov [rsp+buf_off], rsi
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(4, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rdi, rsp
                                                 // 栈参数区在缓冲区 GP+XMM 保存区 (176 字节) 之后
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xC6]));
-                self.emit_insn(&Insn::raw_bytes(&176u32.to_le_bytes())); // add rsi, 176
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1]));
-                self.emit_insn(&Insn::raw_bytes(&size.to_le_bytes())); // mov rcx, size
+                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 6, 176)); // add rsi, 176
+                self.emit_insn(&Insn::mov_reg_imm32_b64(1, size)); // mov rcx, size
                 self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // cld; rep movsb
                                                       // 从缓冲区恢复 GP 寄存器实参 (rdi..r9)
-                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x8B, 0x9C, 0x24]));
-                self.emit_insn(&Insn::raw_bytes(&buf_off.to_le_bytes())); // mov r11, [rsp+buf_off]
-                self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x3B])); // mov rdi, [r11] (REX.W+B)
-                self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x73, 0x08])); // mov rsi, [r11+8]
-                self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x53, 0x10])); // mov rdx, [r11+16]
-                self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x4B, 0x18])); // mov rcx, [r11+24]
-                self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x8B, 0x43, 0x20])); // mov r8, [r11+32]
-                self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x8B, 0x4B, 0x28])); // mov r9, [r11+40]
+                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 11, 4, buf_off)); // mov r11, [rsp+buf_off]
+                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 7, 11, 0)); // mov rdi, [r11] (REX.W+B)
+                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 6, 11, 8)); // mov rsi, [r11+8]
+                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 2, 11, 16)); // mov rdx, [r11+16]
+                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 1, 11, 24)); // mov rcx, [r11+24]
+                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 8, 11, 32)); // mov r8, [r11+32]
+                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 9, 11, 40)); // mov r9, [r11+40]
                 self.emit_insn(&Insn::raw_bytes(&[0x41, 0xFF, 0xD2])); // call r10
                                                 // 结果块: [0]=rax, [8]=rdx (16 字节整数返回约定)
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x84, 0x24]));
-                self.emit_insn(&Insn::raw_bytes(&size.to_le_bytes())); // mov [rsp+size], rax
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x94, 0x24]));
-                self.emit_insn(&Insn::raw_bytes(&(size + 8).to_le_bytes())); // mov [rsp+size+8], rdx
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x84, 0x24]));
-                self.emit_insn(&Insn::raw_bytes(&size.to_le_bytes())); // lea rax, [rsp+size]
+                self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 0, 4, size)); // mov [rsp+size], rax
+                self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 2, 4, size + 8)); // mov [rsp+size+8], rdx
+                self.emit_insn(&Insn::lea_reg_base_disp(0, 4, size)); // lea rax, [rsp+size]
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -2878,9 +2868,9 @@ impl Codegen {
                             }
                             self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Cmp, crate::codegen::shared::asm_operand::Width::B64, 2, 7)); // cmp rdx, rdi
                             self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Ne, 0)); // setne al
-                            self.emit_insn(&Insn::raw_bytes(&[0x4c, 0x39, 0xde])); // cmp rsi, r11
+                            self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Cmp, crate::codegen::shared::asm_operand::Width::B64, 6, 11)); // cmp rsi, r11
                             self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Ne, 2)); // setne dl
-                            self.emit_insn(&Insn::raw_bytes(&[0x08, 0xd0])); // or al, dl
+                            self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Or, crate::codegen::shared::asm_operand::Width::B8, 0, 2)); // or al, dl
                             self.emit_insn(&Insn::mov_ext(false, crate::codegen::shared::asm_operand::Width::B8, crate::codegen::shared::asm_operand::Width::B32, 0, 0)); // movzx eax, al
                         }
                         if dst != 0 {
@@ -3010,8 +3000,7 @@ impl Codegen {
                 let end_label = self.fresh_label();
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Cmp, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(0)}, &[])); // cmp rcx, 0
                 self.jmp_rel32(&overflow_label, JumpKind::Jl); // jl overflow (负数)
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xf9])); // cmp rcx, type_bits
-                self.emit_insn(&Insn::raw_bytes(&[type_bits as u8]));
+                self.emit_insn(&Insn::alu_rm_reg_imm8_b64(7, 1, type_bits as i64)); // cmp rcx, type_bits
                 self.jmp_rel32(&overflow_label, JumpKind::Jge); // jge overflow (>= type_bits)
                                                                 // 6. 正常移位
                                                                 // rax = a (被移值), rcx = b (移位量)
@@ -3044,7 +3033,7 @@ impl Codegen {
                 // overflow 处理:
                 self.label(&overflow_label);
                 // 存储 0 到 *ptr (溢出时结果为 0)
-                self.emit_insn(&Insn::raw_bytes(&[0x49, 0xc7, 0x02, 0x00, 0x00, 0x00, 0x00])); // mov qword [r10], 0
+                self.emit_insn(&Insn::store_imm_mem(crate::codegen::shared::asm_operand::Width::B64, 10, 0, 0)); // mov qword [r10], 0
                                                                         // 返回 1 (有溢出)
                 self.mov_imm(dst, 1);
                 self.label(&end_label);
@@ -3279,10 +3268,10 @@ impl Codegen {
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Xor, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // xor rax, rdx
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax
                     self.emit_insn(&Insn::bit_scan_reg_reg(true, crate::codegen::shared::asm_operand::Width::B64, 0, 0)); // bsr rax, rax
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC2, 0xFF, 0xFF, 0xFF, 0xFF])); // mov rdx, -1
+                    self.emit_insn(&Insn::mov_reg_imm32_b64(2, -1)); // mov rdx, -1
                     self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 1, 1)); // test rcx, rcx
                     self.emit_insn(&Insn::cmovcc_reg_reg(crate::codegen::x86_64::opcode::CondCode::Eq, crate::codegen::shared::asm_operand::Width::B64, 0, 2)); // cmove rax, rdx
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC2, 0x3E, 0x00, 0x00, 0x00])); // mov rdx, 62
+                    self.emit_insn(&Insn::mov_reg_imm32_b64(2, 62)); // mov rdx, 62
                     // P11: 收敛到 AluRm{Sub, B64, rdx, rax}.
                     {
                         let insn = Insn::new(
@@ -3407,30 +3396,13 @@ impl Codegen {
             // 缓冲区占用 rsp 下方 448 字节 (16 对齐); 由随后 __builtin_apply
             // 尾部统一回收 (含自身栈参区与结果区), 见 apply 代码注释.
             "__builtin_apply_args" => {
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xEC]));
-                self.emit_insn(&Insn::raw_bytes(&448u32.to_le_bytes())); // sub rsp, 448
-                self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B64,
-                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
-                        crate::codegen::x86_64::opcode::MemOperand {
-                            disp: 0,
-                            base: Some(4),
-                            index: None,
-                            seg: None,
-                        }
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Reg(
-                        7, crate::codegen::shared::asm_operand::Width::B64
-                    ),
-                },
-                &[],
-            )); // mov [rsp], rdi
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x74, 0x24, 0x08])); // mov [rsp+8], rsi
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x54, 0x24, 0x10])); // mov [rsp+16], rdx
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x4C, 0x24, 0x18])); // mov [rsp+24], rcx
-                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0x44, 0x24, 0x20])); // mov [rsp+32], r8
-                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0x4C, 0x24, 0x28])); // mov [rsp+40], r9
+                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(5, 4, 448)); // sub rsp, 448
+                self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 7, 4, 0)); // mov [rsp], rdi
+                self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 6, 4, 8)); // mov [rsp+8], rsi
+                self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 2, 4, 16)); // mov [rsp+16], rdx
+                self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 1, 4, 24)); // mov [rsp+24], rcx
+                self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 8, 4, 32)); // mov [rsp+32], r8
+                self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 9, 4, 40)); // mov [rsp+40], r9
                 for k in 0..8u32 {
                     let off = 48 + k * 16;
                     // movdqu [rsp+off], xmmK: F3 0F 7F /r (modrm.reg = K)
@@ -3445,12 +3417,11 @@ impl Codegen {
                     }
                 }
                 // 拷贝传入栈参数: rsi = r13+16 (首栈参), rdi = rsp+176
-                self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8D, 0x75, 0x10])); // lea rsi, [r13+16]
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0xBC, 0x24]));
-                self.emit_insn(&Insn::raw_bytes(&176u32.to_le_bytes())); // lea rdi, [rsp+176]
+                self.emit_insn(&Insn::lea_reg_base_disp(6, 13, 16)); // lea rsi, [r13+16]
+                self.emit_insn(&Insn::lea_reg_base_disp(7, 4, 176)); // lea rdi, [rsp+176]
                 self.emit_insn(&Insn::raw_bytes(&[0xB9, 32, 0, 0, 0])); // mov ecx, 32 (qwords)
                 self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsq)); // cld; rep movsq
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x04, 0x24])); // lea rax, [rsp]
+                self.emit_insn(&Insn::lea_reg_base_disp(0, 4, 0)); // lea rax, [rsp]
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
@@ -5062,7 +5033,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], 7); // rdi = envp
-                self.emit_insn(&Insn::raw_bytes(&[0xD9, 0x37])); // fnstenv [rdi]
+                self.emit_insn(&Insn::x87_env_mem(true, 7, 0)); // fnstenv [rdi]
                 self.emit_insn(&Insn::mxcsr_mem(true, 7, 0x1C)); // stmxcsr [rdi+0x1C]
                 self.mov_imm(dst, 0); // 返回 0
                 true
@@ -5078,7 +5049,7 @@ impl Codegen {
                 let l_done = self.fresh_label();
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Cmp, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(-1)}, &[])); // cmp rdi, -1
                 self.jmp_rel32(&l_default, JumpKind::Je);
-                self.emit_insn(&Insn::raw_bytes(&[0xD9, 0x27])); // fldenv [rdi]
+                self.emit_insn(&Insn::x87_env_mem(false, 7, 0)); // fldenv [rdi]
                 self.emit_insn(&Insn::mxcsr_mem(false, 7, 0x1C)); // ldmxcsr [rdi+0x1C]
                 self.jmp_rel32(&l_done, JumpKind::Jmp);
                 self.label(&l_default);
@@ -5099,7 +5070,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], 7); // rdi = envp
-                self.emit_insn(&Insn::raw_bytes(&[0xD9, 0x37])); // fnstenv [rdi]
+                self.emit_insn(&Insn::x87_env_mem(true, 7, 0)); // fnstenv [rdi]
                 self.emit_insn(&Insn::mxcsr_mem(true, 7, 0x1C)); // stmxcsr [rdi+0x1C]
                 self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::mxcsr_mem(true, 4, 0)); // stmxcsr [rsp]
@@ -5180,7 +5151,7 @@ impl Codegen {
                 let l_done = self.fresh_label();
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Cmp, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(-1)}, &[])); // cmp rdi, -1
                 self.jmp_rel32(&l_default, JumpKind::Je);
-                self.emit_insn(&Insn::raw_bytes(&[0xD9, 0x27])); // fldenv [rdi]
+                self.emit_insn(&Insn::x87_env_mem(false, 7, 0)); // fldenv [rdi]
                 self.emit_insn(&Insn::mxcsr_mem(false, 7, 0x1C)); // ldmxcsr [rdi+0x1C]
                 self.jmp_rel32(&l_done, JumpKind::Jmp);
                 self.label(&l_default);
