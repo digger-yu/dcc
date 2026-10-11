@@ -1761,14 +1761,7 @@ impl Codegen {
     }
 
     pub fn emit_movq_gp_to_xmm(&mut self, xmm: u8, gp: u8) {
-        let mut rex = 0x48;
-        if xmm >= 8 {
-            rex |= 0x04;
-        }
-        if gp >= 8 {
-            rex |= 0x01;
-        }
-        self.emit_insn(&Insn::raw_bytes(&[0x66, rex, 0x0F, 0x6E, 0xC0 | ((xmm & 7) << 3) | (gp & 7)]));
+        self.emit_insn(&Insn::gpr_xmm(true, crate::codegen::shared::asm_operand::Width::B64, gp, xmm));
     }
 
     pub fn flip_sign_xmm(&mut self, xmm: u8, ty: &Type) {
@@ -1785,7 +1778,7 @@ impl Codegen {
         self.emit_insn(&Insn::gpr_xmm(true, crate::codegen::shared::asm_operand::Width::B64, 0, 1)); // movq xmm1, rax
         if xmm == 1 {
             // xorps/xorpd xmm0, xmm1 → 目标为 xmm1 时借用 xmm2
-            self.emit_insn(&Insn::raw_bytes(&[0x66, 0x48, 0x0F, 0x6E, 0xD0])); // movq xmm2, rax
+            self.emit_insn(&Insn::gpr_xmm(true, crate::codegen::shared::asm_operand::Width::B64, 0, 2)); // movq xmm2, rax
             if matches!(ty, Type::Float) {
                 self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 1, 2)); // xorps xmm1, xmm2
             } else {
@@ -2437,18 +2430,7 @@ impl Codegen {
         };
     }
     pub(crate) fn emit_movd_gp_to_xmm(&mut self, xmm: u8, gp: u8) {
-        let mut rex = 0x40;
-        if xmm >= 8 {
-            rex |= 0x04;
-        }
-        if gp >= 8 {
-            rex |= 0x01;
-        }
-        self.emit_insn(&Insn::raw_bytes(&[0x66]));
-        if rex != 0x40 {
-            self.emit_insn(&Insn::raw_bytes(&[rex]));
-        }
-        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x6E, 0xC0 | ((xmm & 7) << 3) | (gp & 7)]));
+        self.emit_insn(&Insn::gpr_xmm(true, crate::codegen::shared::asm_operand::Width::B32, gp, xmm));
     }
     pub(crate) fn emit_movdqu_r13_to_xmm(&mut self, xmm_reg: u8, off: i64) {
         if Self::fits_disp32(off) {
