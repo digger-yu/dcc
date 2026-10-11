@@ -81,14 +81,11 @@ impl Codegen {
         // rdi -= 0x1000 (下方页)
         self.emit_insn(&Insn::alu_rm_reg_imm32_b64(5, 7, 0x1000)); // sub rdi, 0x1000
         // rsi = 0x2000 (两页)
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC6])); // mov rsi, 0x2000
-        self.emit_insn(&Insn::raw_bytes(&0x2000i32.to_le_bytes()));
+        self.emit_insn(&Insn::mov_reg_imm32_b64(6, 0x2000)); // mov rsi, 0x2000
         // rdx = 7 (PROT_READ|PROT_WRITE|PROT_EXEC)
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC2])); // mov rdx, 7
-        self.emit_insn(&Insn::raw_bytes(&7i32.to_le_bytes()));
+        self.emit_insn(&Insn::mov_reg_imm32_b64(2, 7)); // mov rdx, 7
         // rax = 10 (SYS_mprotect)
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC0])); // mov rax, 10
-        self.emit_insn(&Insn::raw_bytes(&10i32.to_le_bytes()));
+        self.emit_insn(&Insn::mov_reg_imm32_b64(0, 10)); // mov rax, 10
         // syscall
         self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Syscall));
         // syscall 破坏: rax, rcx, r11
