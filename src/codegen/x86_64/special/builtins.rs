@@ -1061,15 +1061,14 @@ impl Codegen {
                 // rex 必带 W 位 (0x48), neg 始终是 3 字节, skip offset = 3.
                 // 之前硬编码 4 导致跳转越过 neg 的末尾 1 字节, 落到
                 // 下一条指令的中间, 触发 mid-instruction decode.
-                let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)])); // test dst, dst
+                self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, dst, dst)); // test dst, dst
                 self.emit_insn(&Insn::raw_bytes(&[0x79, 0x03])); // jns +3 (跳过 neg, 含 1 字节 W REX)
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0xf7, 0xd8 | (dst & 7)])); // neg dst
+                self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, dst)); // neg dst
                 true
             },
             // __builtin_unreachable: 不可达, 生成 ud2
             "__builtin_unreachable" | "__builtin_trap" => {
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x0B])); // ud2
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Ud2)); // ud2
                 true
             },
             // __builtin_debugtrap(): 调试断点, 生成 int3
@@ -1079,16 +1078,14 @@ impl Codegen {
             },
             // __builtin_stack_save(): 保存栈指针, 返回当前 rsp
             "__builtin_stack_save" => {
-                let rex = if dst >= 8 { 0x49 } else { 0x48 };
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x89, 0xe0 | (dst & 7)])); // mov dst, rsp
+                self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, dst, 4)); // mov dst, rsp
                 true
             },
             // __builtin_stack_restore(p): 恢复栈指针, 设置 rsp = p
             "__builtin_stack_restore" => {
                 if !args.is_empty() {
                     self.gen_expr(&args[0], dst);
-                    let rex = if dst >= 8 { 0x49 } else { 0x48 };
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x89, 0xc4 | ((dst & 7) << 3)])); // mov rsp, dst
+                    self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 4, dst)); // mov rsp, dst
                 }
                 true
             },
@@ -1154,16 +1151,14 @@ impl Codegen {
                 self.jmp_rel32(&cont, JumpKind::Jmp);
                 // receiver: longjmp 落点 (rsp/r13 已恢复到捕获点)
                 self.label(&recv);
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x5C, 0x24, 0x08])); // mov rbx, [rsp+8]
-                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x8B, 0x64, 0x24, 0x10])); // mov r12, [rsp+16]
-                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x8B, 0x74, 0x24, 0x18])); // mov r14, [rsp+24]
-                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x8B, 0x7C, 0x24, 0x20])); // mov r15, [rsp+32]
+                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 3, 4, 8)); // mov rbx, [rsp+8]
+                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 12, 4, 0x10)); // mov r12, [rsp+16]
+                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 14, 4, 0x18)); // mov r14, [rsp+24]
+                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 15, 4, 0x20)); // mov r15, [rsp+32]
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0x04, 0x24, 1, 0, 0, 0])); // mov qword [rsp], 1
                 self.label(&cont);
                 // 结果 → dst
-                let rex = 0x48u8 | if dst >= 8 { 0x44 } else { 0 };
-                let modrm = 0x04u8 | ((dst & 7) << 3);
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, modrm, 0x24])); // mov dst, [rsp]
+                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, dst, 4, 0)); // mov dst, [rsp]
                 self.emit_insn(&Insn::add_rsp_imm(0x28)); // add rsp, 40
                 true
             },
@@ -1177,8 +1172,8 @@ impl Codegen {
                 if args.len() >= 2 {
                     self.gen_expr(&args[1], 6); // rsi = val (副作用)
                 }
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x67, 0x08])); // mov rsp, [rdi+8]
-                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x8B, 0x6F, 0x10])); // mov r13, [rdi+16]
+                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 4, 7, 8)); // mov rsp, [rdi+8]
+                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 13, 7, 0x10)); // mov r13, [rdi+16]
                 self.emit_insn(&Insn::raw_bytes(&[0xFF, 0x27])); // jmp [rdi]
                 true
             },
@@ -1618,20 +1613,12 @@ impl Codegen {
                 self.gen_expr(&args[0], dst);
                 if name == "__builtin_bswap64" {
                     // bswap 的寄存器编码在 opcode 低三位，扩展寄存器使用 REX.B。
-                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xC8 | (dst & 7)]));
+                    self.emit_insn(&Insn::bswap_reg(crate::codegen::shared::asm_operand::Width::B64, dst));
                 } else if name == "__builtin_bswap32" {
-                    if dst >= 8 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x41]));
-                    }
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xC8 | (dst & 7)]));
+                    self.emit_insn(&Insn::bswap_reg(crate::codegen::shared::asm_operand::Width::B32, dst));
                 } else {
                     // x86 没有 bswap16；rol r16, 8 等价于交换两个字节。
-                    self.emit_insn(&Insn::raw_bytes(&[0x66]));
-                    if dst >= 8 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x41]));
-                    }
-                    self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xC0 | (dst & 7), 8]));
+                    self.emit_insn(&Insn::rol_reg_imm8_b16(dst, 8));
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
                         sign: false,
                         from: crate::codegen::shared::asm_operand::Width::B16,
@@ -2340,14 +2327,14 @@ impl Codegen {
             // __builtin_frame_address(level): 帧指针
             "__builtin_frame_address" => {
                 // 本后端使用 r13 作为稳定帧指针；[r13] 是调用者保存的 r13。
-                self.emit_insn(&Insn::raw_with_gas(&[0x4C, 0x89, 0xE8], "mov %r13, %rax")); // mov rax, r13
+                self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 0, 13)); // mov rax, r13
                 let level = if let Some(Expr::Int { v, .. }) = args.first() {
                     *v as i32
                 } else {
                     0
                 };
                 for _ in 0..level {
-                    self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x8B, 0x00], "mov (%rax), %rax")); // mov rax, [rax]
+                    self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 0, 0, 0)); // mov rax, [rax]
                 }
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -2357,16 +2344,16 @@ impl Codegen {
             // __builtin_return_address(level): 返回地址
             "__builtin_return_address" => {
                 // push r13 后 r13 指向保存的旧 r13，返回地址位于 [r13+8]。
-                self.emit_insn(&Insn::raw_with_gas(&[0x4C, 0x89, 0xE8], "mov %r13, %rax")); // mov rax, r13
+                self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 0, 13)); // mov rax, r13
                 let level = if let Some(Expr::Int { v, .. }) = args.first() {
                     *v as i32
                 } else {
                     0
                 };
                 for _ in 0..level {
-                    self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x8B, 0x00], "mov (%rax), %rax")); // mov rax, [rax]
+                    self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 0, 0, 0)); // mov rax, [rax]
                 }
-                self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x8B, 0x40, 0x08], "mov 8(%rax), %rax")); // mov rax, [rax+8]
+                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 0, 0, 8)); // mov rax, [rax+8]
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
