@@ -620,7 +620,7 @@ impl Codegen {
             } else {
                 self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Sub, SimdWidth::SD, 0, 1)); // subsd xmm0, xmm1
             }
-            self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x83, 0xC4, save_bytes as u8], &format!("add ${save_bytes}, %rsp")));
+            self.emit_insn(&Insn::add_rsp_imm_gas(save_bytes as i64, &format!("add ${save_bytes}, %rsp")));
             return;
         }
         // 保存左操作数到 rsp 下方 (红区)
@@ -633,7 +633,7 @@ impl Codegen {
         // xmm0 before saving (e.g. `1.0 - x` where x is int).
         self.emit_scalar_to_xmm0_if_needed(l, &float_ty);
         // 保存 xmm0: sub rsp, save_bytes; movsd [rsp], xmm0
-        self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x83, 0xEC, save_bytes as u8], &format!("sub ${save_bytes}, %rsp")));
+        self.emit_insn(&Insn::sub_rsp_imm_gas(save_bytes as i64, &format!("sub ${save_bytes}, %rsp")));
         if is_float {
             self.emit_insn(&Insn::simd_mov_mem(true, SimdWidth::SS, 0, 0)); // movss %xmm0, (%rsp)
         } else {
@@ -653,7 +653,7 @@ impl Codegen {
             self.emit_insn(&Insn::simd_mov_mem(false, SimdWidth::SD, 0, 0)); // movsd (%rsp), %xmm0
         }
         // 恢复 rsp
-        self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x83, 0xC4, save_bytes as u8], &format!("add ${save_bytes}, %rsp")));
+        self.emit_insn(&Insn::add_rsp_imm_gas(save_bytes as i64, &format!("add ${save_bytes}, %rsp")));
                                                           // 现在 xmm0=左, xmm1=右 → xmm0 op xmm1 = 左 op 右
                                                           // 执行运算
         let (prefix, opcode, mnem) = match op {
@@ -883,17 +883,7 @@ impl Codegen {
         if dst == src {
             return;
         }
-        let mut rex = 0u8;
-        if dst >= 8 {
-            rex |= 0x04; // REX.R
-        }
-        if src >= 8 {
-            rex |= 0x01; // REX.B
-        }
-        if rex != 0 {
-            self.emit_insn(&Insn::raw_bytes(&[0x40 | rex]));
-        }
-        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x28, 0xC0 | ((dst & 7) << 3) | (src & 7)]));
+        self.emit_insn(&Insn::movaps_xmm(dst, src));
     }
     pub(crate) fn mov_xmm_to_xmm(&mut self, dst: u8, src: u8) {
         if dst == src {

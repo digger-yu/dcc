@@ -166,6 +166,21 @@ impl Insn {
         Insn::raw_bytes(&[0x48, 0x83, 0xC4, v])
     }
 
+    /// P11 Bucket Z: add/sub rsp, imm8 with attached GAS text.
+    pub fn add_rsp_imm_gas(imm: i64, gas: &str) -> Self {
+        let v = imm as i8 as u8;
+        let mut insn = Insn::raw_bytes(&[0x48, 0x83, 0xC4, v]);
+        insn.gas_text = Some(gas.to_string());
+        insn
+    }
+
+    pub fn sub_rsp_imm_gas(imm: i64, gas: &str) -> Self {
+        let v = imm as i8 as u8;
+        let mut insn = Insn::raw_bytes(&[0x48, 0x83, 0xEC, v]);
+        insn.gas_text = Some(gas.to_string());
+        insn
+    }
+
     /// P11 Bucket A: mov reg, reg (mod=11). width controls REX.W (B64) + REX.B/R (reg>=8).
     /// Encoding: MOV r/m, r (0x89 for non-byte; 0x88 for B8).
     pub fn mov_rm_reg(
