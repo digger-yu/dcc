@@ -392,6 +392,43 @@ impl Insn {
         Insn::raw_bytes(&out)
     }
 
+    /// P11 Bucket W: bswap r32/r64 (0F C8+rd / REX.W 0F C8+rd).
+    /// width: B32 (no REX) or B64 (REX.W). reg_idx: intel register number.
+    pub fn bswap_reg(width: crate::codegen::shared::asm_operand::Width, reg_idx: u8) -> Self {
+        let mut out = Vec::with_capacity(3);
+        if matches!(width, crate::codegen::shared::asm_operand::Width::B64) {
+            let mut rex: u8 = 0x48;
+            if reg_idx >= 8 {
+                rex |= 0x01;
+            }
+            out.push(rex);
+        }
+        out.push(0x0F);
+        out.push(0xC8 | (reg_idx & 0x7));
+        Insn::raw_bytes(&out)
+    }
+
+    /// P11 Bucket W: rol r16, imm8 (66 C1 /0 ib). Used for SSO 2-byte
+    /// byte-swap: rol cx, 8 (or any other r16).
+    pub fn rol_reg_imm8_b16(reg_idx: u8, imm8: u8) -> Self {
+        let mut rex: u8 = 0;
+        let mut body = Vec::with_capacity(5);
+        body.push(0x66);
+        if reg_idx >= 8 {
+            rex = 0x41;
+        }
+        body.push(0xC1);
+        // modrm: mod=11, reg field=/0 (rol), r/m=reg_idx.
+        body.push(0xC0 | (reg_idx & 0x7));
+        body.push(imm8);
+        let mut out = Vec::with_capacity(body.len() + 1);
+        if rex != 0 {
+            out.push(rex);
+        }
+        out.extend_from_slice(&body);
+        Insn::raw_bytes(&out)
+    }
+
     /// P11 Bucket W: mov r64, imm32 (REX.W C7 /0 id, sign-extended 32-bit
     /// immediate). Used for small immediates (rep counters, small ints)
     /// where the imm64 form would waste bytes. Self-absorbs REX.B for
@@ -1010,5 +1047,29 @@ mod tests {
             Insn::mov_reg_imm32_b64(8, 5).encode_bytes(),
             Some(vec![0x49, 0xC7, 0xC0, 0x05, 0x00, 0x00, 0x00]),
         );
+    }
+
+    #[test]
+    fn bswap_reg_basic() {
+        use crate::codegen::shared::asm_operand::Width::*;
+        // bswap ecx: 0F C9
+        assert_eq!(Insn::bswap_reg(B32, 1).encode_bytes(),
+            Some(vec![0x0F, 0xC9]));
+        // bswap rcx: 48 0F C9
+        assert_eq!(Insn::bswap_reg(B64, 1).encode_bytes(),
+            Some(vec![0x48, 0x0F, 0xC9]));
+        // bswap rax: 48 0F C8
+        assert_eq!(Insn::bswap_reg(B64, 0).encode_bytes(),
+            Some(vec![0x48, 0x0F, 0xC8]));
+    }
+
+    #[test]
+    fn rol_reg_imm8_b16_basic() {
+        // rol cx, 8: 66 C1 C1 08
+        assert_eq!(Insn::rol_reg_imm8_b16(1, 8).encode_bytes(),
+            Some(vec![0x66, 0xC1, 0xC1, 0x08]));
+        // rol ax, 8: 66 C1 C0 08
+        assert_eq!(Insn::rol_reg_imm8_b16(0, 8).encode_bytes(),
+            Some(vec![0x66, 0xC1, 0xC0, 0x08]));
     }
 }
