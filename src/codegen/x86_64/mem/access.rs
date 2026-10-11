@@ -1549,15 +1549,14 @@ impl Codegen {
         }
     }
     pub(crate) fn store_stack_imm32(&mut self, off: i64, val: i32) {
-        // mov dword [r13+off], imm32
+        // P11 Bucket AE: mov dword [r13+off], imm32 via store_imm32_mem.
+        // r13=13 (>=8) 自动发 REX.B=0x01 (0x41); C7 /0 id.
         if Self::fits_disp32(off) {
-            self.emit_insn(&Insn::raw_bytes(&[0x41, 0xC7]));
-            self.emit_r13_modrm_disp(0, off);
+            self.emit_insn(&Insn::store_imm32_mem(13, off as i32, val));
         } else {
             self.emit_lea_r13(11, off);
-            self.emit_insn(&Insn::raw_bytes(&[0x41, 0xC7]));
-            self.emit_reg_indirect_modrm(0, 11);
+            // [r11] direct store: base=11 (>=8) REX.B. disp=0, rm=11&7=3, mod=00.
+            self.emit_insn(&Insn::store_imm32_mem(11, 0, val));
         }
-        self.emit_insn(&Insn::raw_bytes(&val.to_le_bytes()));
     }
 }
