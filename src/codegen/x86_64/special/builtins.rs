@@ -810,7 +810,7 @@ impl Codegen {
                 }
                 let sz = self.atomic_elem_size(args, 0);
                 self.gen_expr(&args[0], 7); // rdi = ptr
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC6, 0x01, 0x00, 0x00, 0x00])); // mov rsi, 1
+                self.emit_insn(&Insn::mov_reg_imm32_b64(6, 1)); // mov rsi, 1
                 self.emit_lock_xchg_rdi_rsi(sz);
                 let ord = self.eval_mem_order(&args[1]);
                 if ord == 5 {
@@ -1119,16 +1119,16 @@ impl Codegen {
                 self.gen_expr(&args[0], 7);
                 // 栈上临时区
                 self.emit_insn(&Insn::sub_rsp_imm(0x28)); // sub rsp, 40
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0x04, 0x24, 0, 0, 0, 0])); // mov qword [rsp], 0
-                                                                  // 保存 callee-saved pool 寄存器
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x5C, 0x24, 0x08])); // mov [rsp+8], rbx
-                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0x64, 0x24, 0x10])); // mov [rsp+16], r12
-                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0x74, 0x24, 0x18])); // mov [rsp+24], r14
-                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0x7C, 0x24, 0x20])); // mov [rsp+32], r15
+                self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 0, 4, 0)); // mov qword [rsp], 0 placeholder
+                // 保存 callee-saved pool 寄存器
+                self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 3, 4, 8)); // mov [rsp+8], rbx
+                self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 12, 4, 0x10)); // mov [rsp+16], r12
+                self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 14, 4, 0x18)); // mov [rsp+24], r14
+                self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 15, 4, 0x20)); // mov [rsp+32], r15
                                                             // buf[1] = rsp (含临时区)
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x67, 0x08])); // mov [rdi+8], rsp
+                self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 4, 7, 8)); // mov [rdi+8], rsp
                                                       // buf[2] = r13
-                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0x6F, 0x10])); // mov [rdi+16], r13
+                self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 13, 7, 0x10)); // mov [rdi+16], r13
                                                       // buf[0] = receiver 地址: lea rax, [rip+recv] → mov [rdi], rax
                 self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x05, 0, 0, 0, 0]));
                 let disp_pos = self.pos() - 4;
