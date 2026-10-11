@@ -190,7 +190,7 @@ impl Codegen {
                 // xmm0=实部 → [result_off]
                 self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
                 // xmm1=虚部 → xmm0 → [result_off+isz]
-                self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0xC1])); // movsd xmm0, xmm1
+                self.emit_insn(&Insn::movsd_xmm(0, 1)); // movsd xmm0, xmm1
                 self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + isz);
                 // 实部重载 xmm0 (dcc complex rvalue 约定)
                 self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], result_off);
