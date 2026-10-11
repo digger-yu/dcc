@@ -1920,13 +1920,11 @@ impl Codegen {
             .with_gas("mov -40(%r13), %r15".to_string()),
         );
         // mov rsp, r13: 恢复栈指针
+        // P11: 必须保留 0x49 0x8b 0xe5 形式 (mov r/m64,r64 中 rsp 是 r/m, 需
+        // REX.B=1 扩展 r13/r/m). mov_rm_reg 走 0x89 形式导致 REX 字节不同, 破坏
+        // G10 快照字节一致性. 这里保留 hand-written 形态以维持 byte-identical.
         self.emit_insn(
-            &Insn::mov_rm_reg(
-                crate::codegen::shared::asm_operand::Width::B64,
-                4,
-                13,
-            )
-            .with_gas("mov %r13, %rsp".to_string()),
+            &Insn::raw_with_gas(&[0x49, 0x8b, 0xe5], "mov %r13, %rsp"),
         );
         self.emit_insn(
             &Insn::stack_op_reg(crate::codegen::x86_64::opcode::StackOp::Pop, 13)
