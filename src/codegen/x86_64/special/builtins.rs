@@ -2472,32 +2472,41 @@ impl Codegen {
                         let insn = Insn::new(mk_addsub(1, 8), &[]);
                         if !self.emit_insn(&insn) { self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Sub, crate::codegen::shared::asm_operand::Width::B64, 1, 0)); }
                     } // sub rcx, rax
-                    (2, 1) => { self.emit_insn(&Insn::raw_bytes(&[0xF6, if unsigned { 0xE1 } else { 0xE9 }])); } // mul/imul cl
+                    (2, 1) => {
+                        // B8 imul: 手写无 REX (0xF6 /5 E9), encoder 强制发 REX 40 前缀,
+                        // 字节不等价, 此处保留手写以保持 G10 快照逐字节一致.
+                        self.emit_insn(&Insn::raw_bytes(&[0xF6, if unsigned { 0xE1 } else { 0xE9 }]));
+                    } // mul/imul cl
                     (2, 2) => {
                         if unsigned {
                             self.emit_insn(&Insn::raw_bytes(&[0x66, 0xF7, 0xE1])); // mul cx (dx:ax = ax*cx)
                         } else {
-                            self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xAF, 0xC8])); // imul cx, ax
+                            // imul cx, ax (双操作数形式 0F AF, 不是单操作数 F7 /5)
+                            self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xAF, 0xC8]));
                         }
                     },
                     (2, 4) => {
                         if unsigned {
                             self.emit_insn(&Insn::raw_bytes(&[0xF7, 0xE1])); // mul ecx (edx:eax = eax*ecx)
                         } else {
-                            self.emit_insn(&Insn::imul_rm_reg(
-                                crate::codegen::shared::asm_operand::Width::B32,
-                                1, 0, // ecx, eax
-                            ));
+                            // imul ecx (单操作数 F7 /5)
+                            self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::UnaryRm {
+                                op: crate::codegen::x86_64::opcode::UnaryOp::Imul,
+                                width: crate::codegen::shared::asm_operand::Width::B32,
+                                dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B32),
+                            }, &[]));
                         }
                     },
                     (2, _) => {
                         if unsigned {
                             self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xE1])); // mul rcx (rdx:rax = rax*rcx)
                         } else {
-                            self.emit_insn(&Insn::imul_rm_reg(
-                                crate::codegen::shared::asm_operand::Width::B64,
-                                1, 0, // rcx, rax
-                            ));
+                            // imul rcx (单操作数 REX.W F7 /5)
+                            self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::UnaryRm {
+                                op: crate::codegen::x86_64::opcode::UnaryOp::Imul,
+                                width: crate::codegen::shared::asm_operand::Width::B64,
+                                dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64),
+                            }, &[]));
                         }
                     },
                     _ => unreachable!(),
@@ -3180,21 +3189,28 @@ impl Codegen {
                 // result = rotate(args[0], shift)
                 self.gen_expr(&args[0], dst);
                 self.gen_expr(&args[1], 1); // rcx = shift
+                let rot_op = if n.starts_with("__builtin_rotateleft") {
+                    crate::codegen::x86_64::opcode::ShiftOp::Rol
+                } else {
+                    crate::codegen::x86_64::opcode::ShiftOp::Ror
+                };
                 if width == 64 {
-                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    if n.starts_with("__builtin_rotateleft") {
-                        self.emit_insn(&Insn::raw_bytes(&[rex, 0xD3, 0xC0 | (dst & 7)])); // rol dst, cl
-                    } else {
-                        self.emit_insn(&Insn::raw_bytes(&[rex, 0xD3, 0xC8 | (dst & 7)])); // ror dst, cl
-                    }
+                    // rol/ror dst, cl (REX.W D3 /0 / /1)
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Shift {
+                        op: rot_op,
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B64),
+                        amount: crate::codegen::x86_64::opcode::ShiftAmount::Cl,
+                    }, &[]));
                 } else if width == 32 {
                     // 32-bit 操作: mov 到 eax, rol/ror eax, cl, mov 回 dst
                     self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | (dst & 7)])); // mov eax, dst (截断到 32 位)
-                    if n.starts_with("__builtin_rotateleft") {
-                        self.emit_insn(&Insn::raw_bytes(&[0xD3, 0xC0])); // rol eax, cl
-                    } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0xD3, 0xC8])); // ror eax, cl
-                    }
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Shift {
+                        op: rot_op,
+                        width: crate::codegen::shared::asm_operand::Width::B32,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B32),
+                        amount: crate::codegen::x86_64::opcode::ShiftAmount::Cl,
+                    }, &[]));
                     if dst >= 8 {
                         // mov dst, eax  (REX.B 89 C0+reg)
                         self.emit_insn(&Insn::raw_bytes(&[0x41, 0x89, 0xC0 | (dst & 7)]));
@@ -3202,23 +3218,21 @@ impl Codegen {
                         self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | (dst & 7)]));
                     }
                 } else if width == 16 {
-                    // 16-bit 操作
-                    self.emit_insn(&Insn::raw_bytes(&[0x66]));
-                    if dst >= 8 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x41]));
-                    }
-                    if n.starts_with("__builtin_rotateleft") {
-                        self.emit_insn(&Insn::raw_bytes(&[0xD3, 0xC0 | (dst & 7)])); // rol r16, cl
-                    } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0xD3, 0xC8 | (dst & 7)])); // ror r16, cl
-                    }
+                    // 16-bit 操作: 66 D3 /0/1, REX.B 当 dst>=8
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Shift {
+                        op: rot_op,
+                        width: crate::codegen::shared::asm_operand::Width::B16,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B16),
+                        amount: crate::codegen::x86_64::opcode::ShiftAmount::Cl,
+                    }, &[]));
                 } else {
-                    // 8-bit 操作
-                    if n.starts_with("__builtin_rotateleft") {
-                        self.emit_insn(&Insn::raw_bytes(&[0xD2, 0xC0 | (dst & 7)])); // rol r8, cl
-                    } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0xD2, 0xC8 | (dst & 7)])); // ror r8, cl
-                    }
+                    // 8-bit 操作: D2 /0/1 (ROL/ror r8, cl)
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Shift {
+                        op: rot_op,
+                        width: crate::codegen::shared::asm_operand::Width::B8,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B8),
+                        amount: crate::codegen::x86_64::opcode::ShiftAmount::Cl,
+                    }, &[]));
                 }
                 true
             },

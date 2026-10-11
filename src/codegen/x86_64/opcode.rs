@@ -825,6 +825,9 @@ impl X86_64Opcode {
                     // P11 Bucket M: MUL r64 = F7 /4 (REX.W=1, modrm mod=11 reg=/4 r/m=reg).
                     // Uses RAX:RDX implicitly. No B8 form for MUL, so gate via is_byte.
                     UnaryOp::Mul => (0xF7, 0b100),
+                    // P11 Bucket N5: IMUL r32/r64 (single-operand, RAX implicit) = F7 /5.
+                    // B8 uses F6 like MUL/NOT/NEG (byte form).
+                    UnaryOp::Imul => (if is_byte { 0xF6 } else { 0xF7 }, 0b101),
                     _ => return None,
                 };
                 let mut out = Vec::with_capacity(4);
@@ -867,8 +870,12 @@ impl X86_64Opcode {
                     ShiftOp::Sar => 0b111,
                     // P11 Bucket M: RCL by imm8/CL — modrm_reg_field = /2.
                     ShiftOp::Rcl => 0b010,
-                    _ => return None,
+                    // P11 Bucket N5: ROL= /0, ROR= /1 (D3/D1/C1 ModRM=11.. field).
+                    ShiftOp::Rol => 0b000,
+                    ShiftOp::Ror => 0b001,
+                    ShiftOp::Rcr => 0b011,
                 };
+                let is_b8 = matches!(width, Width::B8);
                 let mut rex: u8 = 0x40;
                 if matches!(width, Width::B64) {
                     rex |= 0x08;
@@ -880,14 +887,24 @@ impl X86_64Opcode {
                 if matches!(width, Width::B16) {
                     out.push(0x66);
                 }
-                let need_rex = matches!(width, Width::B64) || *reg_idx >= 8;
+                // 8-bit shifts: REX.B still required for r8-r15; no REX.W.
+                // Also spl/bpl/sil/dil (4..7) require REX to select high-byte names.
+                let need_rex = matches!(width, Width::B64)
+                    || *reg_idx >= 8
+                    || (is_b8 && *reg_idx >= 4);
                 if need_rex {
                     out.push(rex);
                 }
                 let opc_byte: u8 = match amount {
-                    ShiftAmount::Cl => 0xD3,
-                    ShiftAmount::Imm8(1) => 0xD1, // imm=1 的短形式 (原代码一直这么用)
-                    ShiftAmount::Imm8(_) => 0xC1,
+                    ShiftAmount::Cl => {
+                        if is_b8 { 0xD2 } else { 0xD3 }
+                    }
+                    ShiftAmount::Imm8(1) => {
+                        if is_b8 { 0xD0 } else { 0xD1 }
+                    }
+                    ShiftAmount::Imm8(_) => {
+                        if is_b8 { 0xC0 } else { 0xC1 }
+                    }
                 };
                 out.push(opc_byte);
                 out.push(0xC0 | (modrm_reg_field << 3) | (reg_idx & 7));
@@ -4206,6 +4223,39 @@ mod tests {
     }
 
     #[test]
+    fn unary_imul_ecx_b32() {
+        // imul ecx (single-operand): F7 /5 → F7 E9 (mod=11, reg=/5=101, r/m=ecx=1)
+        let o = X86_64Opcode::UnaryRm {
+            op: UnaryOp::Imul,
+            width: Width::B32,
+            dst: reg(1, Width::B32),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF7, 0xE9]));
+    }
+
+    #[test]
+    fn unary_imul_rcx_b64() {
+        // imul rcx (single-operand): REX.W=48 F7 /5 → 48 F7 E9
+        let o = X86_64Opcode::UnaryRm {
+            op: UnaryOp::Imul,
+            width: Width::B64,
+            dst: reg(1, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0xF7, 0xE9]));
+    }
+
+    #[test]
+    fn unary_imul_cl_b8() {
+        // imul cl (single-operand): F6 /5 → REX 40 F6 E9 (8-bit always gets REX prefix per UnaryRm rule)
+        let o = X86_64Opcode::UnaryRm {
+            op: UnaryOp::Imul,
+            width: Width::B8,
+            dst: reg(1, Width::B8),
+        };
+        assert_eq!(o.encode(), Some(vec![0x40, 0xF6, 0xE9]));
+    }
+
+    #[test]
     fn shift_rcl_rdx_1_b64() {
         // rcl rdx, 1: REX.W=48 D1 /2 → 48 D1 D2
         let o = X86_64Opcode::Shift {
@@ -4227,6 +4277,90 @@ mod tests {
             amount: ShiftAmount::Imm8(1),
         };
         assert_eq!(o.encode(), Some(vec![0x49, 0xD1, 0xD6]));
+    }
+
+    #[test]
+    fn shift_rol_rax_cl_b64() {
+        // rol rax, cl: REX.W 48 D3 C0 (/0)
+        let o = X86_64Opcode::Shift {
+            op: ShiftOp::Rol,
+            width: Width::B64,
+            dst: reg(0, Width::B64),
+            amount: ShiftAmount::Cl,
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0xD3, 0xC0]));
+    }
+
+    #[test]
+    fn shift_ror_r10_cl_b64() {
+        // ror r10, cl: REX.W|B(r10)=49 D3 CA (/1; mod=11, reg=/1=001, r/m=r10&7=2)
+        let o = X86_64Opcode::Shift {
+            op: ShiftOp::Ror,
+            width: Width::B64,
+            dst: reg(10, Width::B64),
+            amount: ShiftAmount::Cl,
+        };
+        assert_eq!(o.encode(), Some(vec![0x49, 0xD3, 0xCA]));
+    }
+
+    #[test]
+    fn shift_rol_eax_cl_b32() {
+        // rol eax, cl: D3 C0 (no REX, no REX.W)
+        let o = X86_64Opcode::Shift {
+            op: ShiftOp::Rol,
+            width: Width::B32,
+            dst: reg(0, Width::B32),
+            amount: ShiftAmount::Cl,
+        };
+        assert_eq!(o.encode(), Some(vec![0xD3, 0xC0]));
+    }
+
+    #[test]
+    fn shift_ror_eax_cl_b32() {
+        // ror eax, cl: D3 C8
+        let o = X86_64Opcode::Shift {
+            op: ShiftOp::Ror,
+            width: Width::B32,
+            dst: reg(0, Width::B32),
+            amount: ShiftAmount::Cl,
+        };
+        assert_eq!(o.encode(), Some(vec![0xD3, 0xC8]));
+    }
+
+    #[test]
+    fn shift_rol_r16_cl_b16() {
+        // rol r16, cl: 66 D3 C0 (r16=eax-like reg0=ax)
+        let o = X86_64Opcode::Shift {
+            op: ShiftOp::Rol,
+            width: Width::B16,
+            dst: reg(0, Width::B16),
+            amount: ShiftAmount::Cl,
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0xD3, 0xC0]));
+    }
+
+    #[test]
+    fn shift_rol_r8_cl_b8() {
+        // rol r8b, cl: REX.B=41 D2 C0 (/0); r8 idx=8 (REX.B=1, no REX.W)
+        let o = X86_64Opcode::Shift {
+            op: ShiftOp::Rol,
+            width: Width::B8,
+            dst: reg(8, Width::B8),
+            amount: ShiftAmount::Cl,
+        };
+        assert_eq!(o.encode(), Some(vec![0x41, 0xD2, 0xC0]));
+    }
+
+    #[test]
+    fn shift_ror_al_cl_b8() {
+        // ror al, cl: D2 C8 (no REX, al=0 not high-byte)
+        let o = X86_64Opcode::Shift {
+            op: ShiftOp::Ror,
+            width: Width::B8,
+            dst: reg(0, Width::B8),
+            amount: ShiftAmount::Cl,
+        };
+        assert_eq!(o.encode(), Some(vec![0xD2, 0xC8]));
     }
 
     #[test]
