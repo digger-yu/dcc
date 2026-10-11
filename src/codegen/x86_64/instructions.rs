@@ -1860,7 +1860,7 @@ impl Codegen {
             // 自反 `mov %eax,%eax`：dst 恒为 0 ⇒ 没有任何字段需要扩展，裸 0x40 只会
             // 多占一字节并被 objdump 标成 `rex mov %eax,%eax`。
             debug_assert!(dst < 8);
-            self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+            self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B32, dst, dst));
         }
         // 无符号 64 位类型: cvtsi2ssq/cvtsi2sdq 将有符号 64 位
         // 解释转换, 对 >INT63 的值产生错误结果.
@@ -2375,8 +2375,8 @@ impl Codegen {
     }
     pub(crate) fn emit_load_mem(&mut self, size: usize) {
         match size {
-            1 => self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0f, 0xb6, 0x00])), // movzbl (%rax), %rax
-            2 => self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0f, 0xb7, 0x00])), // movzwl (%rax), %rax
+            1 => self.emit_insn(&Insn::mov_ext_mem(false, crate::codegen::shared::asm_operand::Width::B8, crate::codegen::shared::asm_operand::Width::B64, 0, 0, 0)), // movzbl (%rax), %rax
+            2 => self.emit_insn(&Insn::mov_ext_mem(false, crate::codegen::shared::asm_operand::Width::B16, crate::codegen::shared::asm_operand::Width::B64, 0, 0, 0)), // movzwl (%rax), %rax
             4 => self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,
@@ -2540,12 +2540,12 @@ impl Codegen {
         }
     }
     pub(crate) fn emit_mov_rcx_r10(&mut self, inner_sz: i64) {
-        let rex = if inner_sz == 8 { 0x4C } else { 0x44 };
-        self.emit_insn(&Insn::raw_bytes(&[rex, 0x89, 0xD1]));
+        let width = if inner_sz == 8 { Width::B64 } else { Width::B32 };
+        self.emit_insn(&Insn::mov_rm_reg(width, 1, 10));
     }
     pub(crate) fn emit_mov_rcx_r11(&mut self, inner_sz: i64) {
-        let rex = if inner_sz == 8 { 0x4C } else { 0x44 };
-        self.emit_insn(&Insn::raw_bytes(&[rex, 0x89, 0xD9]));
+        let width = if inner_sz == 8 { Width::B64 } else { Width::B32 };
+        self.emit_insn(&Insn::mov_rm_reg(width, 1, 11));
     }
     pub(crate) fn emit_mov_to_mem(&mut self, sz: usize) {
         match sz {
