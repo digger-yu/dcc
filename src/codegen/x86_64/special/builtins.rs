@@ -778,10 +778,10 @@ impl Codegen {
                 self.gen_expr(&args[0], 7); // rdi = ptr
                                             // mov [rdi], 0 (size-dependent)
                 match sz {
-                    1 => { self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x07, 0x00])); } // mov byte [rdi], 0
-                    2 => { self.emit_insn(&Insn::raw_bytes(&[0x66, 0xC7, 0x07, 0x00, 0x00])); } // mov word [rdi], 0
-                    4 => { self.emit_insn(&Insn::raw_bytes(&[0xC7, 0x07, 0x00, 0x00, 0x00, 0x00])); } // mov dword [rdi], 0
-                    _ => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0x07, 0x00, 0x00, 0x00, 0x00])); } // mov qword [rdi], 0
+                    1 => { self.emit_insn(&Insn::store_imm_mem(crate::codegen::shared::asm_operand::Width::B8, 7, 0, 0)); } // mov byte [rdi], 0
+                    2 => { self.emit_insn(&Insn::store_imm_mem(crate::codegen::shared::asm_operand::Width::B16, 7, 0, 0)); } // mov word [rdi], 0
+                    4 => { self.emit_insn(&Insn::store_imm_mem(crate::codegen::shared::asm_operand::Width::B32, 7, 0, 0)); } // mov dword [rdi], 0
+                    _ => { self.emit_insn(&Insn::store_imm_mem(crate::codegen::shared::asm_operand::Width::B64, 7, 0, 0)); } // mov qword [rdi], 0
                 }
                 true
             },
@@ -831,10 +831,10 @@ impl Codegen {
                 let ord = self.eval_mem_order(&args[1]);
                 self.gen_expr(&args[0], 7); // rdi = ptr
                 match sz {
-                    1 => { self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x07, 0x00])); }
-                    2 => { self.emit_insn(&Insn::raw_bytes(&[0x66, 0xC7, 0x07, 0x00, 0x00])); }
-                    4 => { self.emit_insn(&Insn::raw_bytes(&[0xC7, 0x07, 0x00, 0x00, 0x00, 0x00])); }
-                    _ => { self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0x07, 0x00, 0x00, 0x00, 0x00])); }
+                    1 => { self.emit_insn(&Insn::store_imm_mem(crate::codegen::shared::asm_operand::Width::B8, 7, 0, 0)); }
+                    2 => { self.emit_insn(&Insn::store_imm_mem(crate::codegen::shared::asm_operand::Width::B16, 7, 0, 0)); }
+                    4 => { self.emit_insn(&Insn::store_imm_mem(crate::codegen::shared::asm_operand::Width::B32, 7, 0, 0)); }
+                    _ => { self.emit_insn(&Insn::store_imm_mem(crate::codegen::shared::asm_operand::Width::B64, 7, 0, 0)); }
                 }
                 if ord == 5 {
                     self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Mfence));
@@ -1155,7 +1155,7 @@ impl Codegen {
                 self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 12, 4, 0x10)); // mov r12, [rsp+16]
                 self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 14, 4, 0x18)); // mov r14, [rsp+24]
                 self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 15, 4, 0x20)); // mov r15, [rsp+32]
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0x04, 0x24, 1, 0, 0, 0])); // mov qword [rsp], 1
+                self.emit_insn(&Insn::store_imm_mem(crate::codegen::shared::asm_operand::Width::B64, 4, 0, 1)); // mov qword [rsp], 1
                 self.label(&cont);
                 // 结果 → dst
                 self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, dst, 4, 0)); // mov dst, [rsp]
@@ -5083,9 +5083,9 @@ impl Codegen {
                 self.jmp_rel32(&l_done, JumpKind::Jmp);
                 self.label(&l_default);
                 self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0xC7, 0x04, 0x24, 0x7F, 0x03])); // mov word [rsp], 0x037F
+                self.emit_insn(&Insn::store_imm_mem(crate::codegen::shared::asm_operand::Width::B16, 4, 0, 0x037F)); // mov word [rsp], 0x037F
                 self.emit_insn(&Insn::fcw_mem(false, 4, 0)); // fldcw [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0xC7, 0x04, 0x24, 0x80, 0x1F, 0x00, 0x00])); // mov dword [rsp], 0x1F80
+                self.emit_insn(&Insn::store_imm_mem(crate::codegen::shared::asm_operand::Width::B32, 4, 0, 0x1F80)); // mov dword [rsp], 0x1F80
                 self.emit_insn(&Insn::mxcsr_mem(false, 4, 0)); // ldmxcsr [rsp]
                 self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                 self.label(&l_done);
@@ -5185,9 +5185,9 @@ impl Codegen {
                 self.jmp_rel32(&l_done, JumpKind::Jmp);
                 self.label(&l_default);
                 self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0xC7, 0x04, 0x24, 0x7F, 0x03])); // mov word [rsp], 0x037F
+                self.emit_insn(&Insn::store_imm_mem(crate::codegen::shared::asm_operand::Width::B16, 4, 0, 0x037F)); // mov word [rsp], 0x037F
                 self.emit_insn(&Insn::fcw_mem(false, 4, 0)); // fldcw [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0xC7, 0x04, 0x24, 0x80, 0x1F, 0x00, 0x00])); // mov dword [rsp], 0x1F80
+                self.emit_insn(&Insn::store_imm_mem(crate::codegen::shared::asm_operand::Width::B32, 4, 0, 0x1F80)); // mov dword [rsp], 0x1F80
                 self.emit_insn(&Insn::mxcsr_mem(false, 4, 0)); // ldmxcsr [rsp]
                 self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                 self.label(&l_done);

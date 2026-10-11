@@ -519,6 +519,89 @@ impl Insn {
         Insn::raw_bytes(&out)
     }
 
+    /// P11 Bucket N7: `mov [base+disp], imm` (C6 /0 ib / C7 /0 id).
+    /// width ∈ B8/B16/B32/B64. base: 0..15. disp: 任意 i32. imm: 立即数 (按宽度截断).
+    /// 手写约定 (builtins.rs / atomic clear / longjmp / fenv default env):
+    ///   B8  → C6 /0 ib (imm8)
+    ///   B16 → 66 C7 /0 id (imm16 经 imm32 槽)
+    ///   B32 → C7 /0 id (imm32)
+    ///   B64 → REX.W C7 /0 id (imm32 符号扩展)
+    /// 当 base=4 (rsp) 时自动发 SIB; base=5 (rbp) 且 disp=0 时强制 disp8 (mod=01).
+    /// 仅 base>=8 时发 REX.B (B64 时 OR REX.W=0x48). 保持逐字节等价.
+    pub fn store_imm_mem(
+        width: crate::codegen::shared::asm_operand::Width,
+        base: u8,
+        disp: i32,
+        imm: i64,
+    ) -> Self {
+        use crate::codegen::shared::asm_operand::Width::*;
+        let is_b8 = matches!(width, B8);
+        let is_b16 = matches!(width, B16);
+        let is_b32 = matches!(width, B32);
+        let is_b64 = matches!(width, B64);
+        let opcode: u8 = if is_b8 { 0xC6 } else { 0xC7 };
+        // REX: W=B64, B=base>=8. 对于 B8 spl/bpl/sil/dil 高字节不需要 REX
+        // (因为 dst 是 memory, 不是 register high-byte).
+        let mut rex: u8 = 0x40;
+        if is_b64 {
+            rex |= 0x08;
+        }
+        let need_rex_b = base >= 8;
+        if need_rex_b {
+            rex |= 0x01;
+        }
+        let need_rex = is_b64 || need_rex_b;
+        let rm_field = base & 7;
+        // SIB: base 物理号 = 4 (rsp) 时必须发 SIB; 其余 base 走普通 ModRM.
+        let need_sib = rm_field == 4;
+        // mod=00/01/10 选择: base=rbp(5) 且无 SIB 时 mod=00 = rip-relative,
+        // 必须走 disp. 其余 disp=0 可走 mod=00.
+        let modrm_mod: u8;
+        let disp_bytes: [u8; 4];
+        let disp_len: usize;
+        if disp == 0 && rm_field != 5 || need_sib {
+            // mod=00, 无 disp. base=rbp(5) 有 SIB 时 mod=00 仍合法.
+            modrm_mod = 0;
+            disp_len = 0;
+            disp_bytes = [0; 4];
+        } else if let Ok(d) = i8::try_from(disp) {
+            modrm_mod = 1;
+            disp_len = 1;
+            disp_bytes = [d as u8, 0, 0, 0];
+        } else {
+            modrm_mod = 2;
+            disp_len = 4;
+            disp_bytes = disp.to_le_bytes();
+        }
+        let modrm_rm = if need_sib { 4 } else { rm_field };
+        // /0 = mov m8/m16/m32/m64, imm. reg field = 0.
+        let modrm = (modrm_mod << 6) | 0x00 | modrm_rm;
+        let mut out = Vec::with_capacity(16);
+        if is_b16 {
+            out.push(0x66);
+        }
+        if need_rex {
+            out.push(rex);
+        }
+        out.push(opcode);
+        out.push(modrm);
+        if need_sib {
+            // SIB: scale=0 (scale=1), index=4 (ESP=无 index), base=rm_field.
+            let sib = (0u8 << 6) | (4u8 << 3) | rm_field;
+            out.push(sib);
+        }
+        out.extend_from_slice(&disp_bytes[..disp_len]);
+        if is_b8 {
+            out.push((imm & 0xFF) as u8);
+        } else if is_b16 {
+            // imm16 经 imm32 槽 (C7 固定 id 形式, 66 前缀).
+            out.extend_from_slice(&(imm as i16).to_le_bytes());
+        } else if is_b32 || is_b64 {
+            out.extend_from_slice(&(imm as i32).to_le_bytes());
+        }
+        Insn::raw_bytes(&out)
+    }
+
     /// P11 Bucket T: 构造 B64 `shl/shr/sar reg, imm8` 强制 C1 形式 (总是带 imm8 字节).
     /// 与 typed `Shift{amount: Imm8(1)}` 自动走 D1 短形式不同, 位域读取点
     /// (lvalue.rs 位域右移) 固定使用 `REX.W C1 /r ib` 形态 (即使 imm=1 也发 4 字节).
@@ -1505,6 +1588,47 @@ mod tests {
         assert_eq!(
             Insn::cmovcc_reg_reg(Ne, B32, 0, 5).encode_bytes(),
             Some(vec![0x0F, 0x45, 0xC5]),
+        );
+    }
+
+    /// P11 Bucket N7: store_imm_mem C6 /0 / C7 /0.
+    #[test]
+    fn store_imm_mem_basic() {
+        use crate::codegen::shared::asm_operand::Width::*;
+        // mov byte [rdi], 0: C6 07 00 (base=7=rdi, mod=00, /0, rm=7)
+        assert_eq!(
+            Insn::store_imm_mem(B8, 7, 0, 0).encode_bytes(),
+            Some(vec![0xC6, 0x07, 0x00]),
+        );
+        // mov word [rdi], 0: 66 C7 07 00 00
+        assert_eq!(
+            Insn::store_imm_mem(B16, 7, 0, 0).encode_bytes(),
+            Some(vec![0x66, 0xC7, 0x07, 0x00, 0x00]),
+        );
+        // mov dword [rdi], 0: C7 07 00 00 00 00
+        assert_eq!(
+            Insn::store_imm_mem(B32, 7, 0, 0).encode_bytes(),
+            Some(vec![0xC7, 0x07, 0x00, 0x00, 0x00, 0x00]),
+        );
+        // mov qword [rdi], 0: 48 C7 07 00 00 00 00
+        assert_eq!(
+            Insn::store_imm_mem(B64, 7, 0, 0).encode_bytes(),
+            Some(vec![0x48, 0xC7, 0x07, 0x00, 0x00, 0x00, 0x00]),
+        );
+        // mov qword [rsp], 1: 48 C7 04 24 01 00 00 00 (SIB)
+        assert_eq!(
+            Insn::store_imm_mem(B64, 4, 0, 1).encode_bytes(),
+            Some(vec![0x48, 0xC7, 0x04, 0x24, 0x01, 0x00, 0x00, 0x00]),
+        );
+        // mov dword [rsp], 0x1F80: C7 04 24 80 1F 00 00
+        assert_eq!(
+            Insn::store_imm_mem(B32, 4, 0, 0x1F80).encode_bytes(),
+            Some(vec![0xC7, 0x04, 0x24, 0x80, 0x1F, 0x00, 0x00]),
+        );
+        // mov word [rsp], 0x037F: 66 C7 04 24 7F 03
+        assert_eq!(
+            Insn::store_imm_mem(B16, 4, 0, 0x037F).encode_bytes(),
+            Some(vec![0x66, 0xC7, 0x04, 0x24, 0x7F, 0x03]),
         );
     }
 }
