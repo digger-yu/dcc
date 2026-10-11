@@ -1516,9 +1516,18 @@ impl X86_64Opcode {
                             Some(m) => m,
                             None => return None,
                         };
-                        if mem.index.is_some() || mem.seg.is_some() {
+                        if mem.seg.is_some() {
                             return None;
                         }
+                        let (index_reg, index_scale) = match mem.index {
+                            None => (None, 0u8),
+                            Some((ir, s)) => {
+                                if s != 1 && s != 2 && s != 4 && s != 8 {
+                                    return None;
+                                }
+                                (Some(ir), s)
+                            }
+                        };
                         let base = mem.base?;
                         // escap 字节 + reg 位段.
                         let (escap, reg_field, rexw): (u8, u8, bool) = match (op, *width) {
@@ -1532,10 +1541,15 @@ impl X86_64Opcode {
                             (X87Op::FildMem { .. }, 8) => (0xDB, 0, true),    // fild m64int
                             _ => return None,
                         };
-                        // REX: base>=8 → REX.B; rexw → REX.W.
+                        // REX: base>=8 → REX.B; index>=8 → REX.X; rexw → REX.W.
                         let mut rex: u8 = 0x40;
                         if base >= 8 {
                             rex |= 0x01;
+                        }
+                        if let Some(ir) = index_reg {
+                            if ir >= 8 {
+                                rex |= 0x02;
+                            }
                         }
                         if rexw {
                             rex |= 0x08;
@@ -1554,8 +1568,10 @@ impl X86_64Opcode {
                         // rm=4 (rsp/r12) 必须插 SIB (SIB base=base&7=4=rsp or 4=r12).
                         // rm=5 (rbp/r13) 在 mod=00 时是 rip-relative, 因此 disp=0 且 base=5
                         //   时强制 mod=01 disp8=0.
+                        // P11 Bucket AE: 有 index 时必须发 SIB, modrm.rm=4 (SIB follow).
                         let rm = base & 7;
-                        let (modrm_mod, disp_bytes): (u8, Vec<u8>) = if disp == 0 && rm != 5 {
+                        let need_sib = index_reg.is_some() || rm == 4;
+                        let (modrm_mod, disp_bytes): (u8, Vec<u8>) = if disp == 0 && (rm != 5 || need_sib) {
                             (0u8, Vec::new())
                         } else if disp == 0 && rm == 5 {
                             // rbp/r13: mod=00 会被解码成 rip-relative, 故强制 mod=01 disp8=0.
@@ -1565,10 +1581,13 @@ impl X86_64Opcode {
                         } else {
                             (2u8, disp.to_le_bytes().to_vec())
                         };
-                        out.push((modrm_mod << 6) | (reg_field << 3) | rm);
-                        if rm == 4 {
-                            // rsp/r12: SIB byte base=rsp/r12&7=4 (index=4=no index, scale=0).
-                            out.push(0x24);
+                        let modrm_rm = if need_sib { 4 } else { rm };
+                        out.push((modrm_mod << 6) | (reg_field << 3) | modrm_rm);
+                        if need_sib {
+                            // SIB: scale<<6 | index<<3 | base. index=4(ESP) 表示无 index.
+                            let scale_bits = match index_scale { 1 => 0, 2 => 1, 4 => 2, 8 => 3, _ => 0 };
+                            let index_field = index_reg.map(|ir| ir & 7).unwrap_or(4);
+                            out.push((scale_bits << 6) | (index_field << 3) | rm);
                         }
                         out.extend_from_slice(&disp_bytes);
                         Some(out)

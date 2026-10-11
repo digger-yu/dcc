@@ -1122,6 +1122,27 @@ impl Insn {
         )
     }
 
+    /// P11 Bucket AE: x87 mem [base + index*scale] SIB form. disp=0.
+    pub fn x87_mem_sib(
+        op: crate::codegen::x86_64::opcode::X87Op,
+        base: u8,
+        index: u8,
+        scale: u8,
+    ) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::X87 {
+                op,
+                mem: Some(crate::codegen::x86_64::opcode::MemOperand {
+                    disp: 0,
+                    base: Some(base),
+                    index: Some((index, scale)),
+                    seg: None,
+                }),
+            },
+            &[],
+        )
+    }
+
     /// P11 Bucket N8: x87 fnstenv/fldenv [base+disp].
     ///   store=true  → fnstenv [mem] (D9 /7).
     ///   store=false → fldenv  [mem] (D9 /4).

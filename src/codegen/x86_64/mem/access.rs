@@ -754,18 +754,11 @@ impl Codegen {
         // 内存访问**的那一笔上（上面的 LEA 不算访问，贴了是空操作）。本函数是「全局数组
         // 下标」这一族的单一入口，所以在此处统一处理，而不是回到各个调用点分支。
         let seg = self.global_seg_prefix(global);
-        let scale = match elem_size {
-            2 => 1u8,
-            4 => 2,
-            8 => 3,
-            _ => 0,
-        };
         // lea r11, [rip + disp32] (RIP-relative, 链接时修补 PC 相对位移)
         let lea_pos = self.pos();
         self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x8D, 0x1D, 0, 0, 0, 0]));
         self.pending_data_rels
             .push((lea_pos + 3, global.to_string()));
-        let sib = (scale << 6) | ((idx_reg & 7) << 3) | 3; // base=r11 (REX.B)
         let is_float = matches!(elem_ty, Type::Float);
         let is_double = matches!(elem_ty, Type::Double | Type::LongDouble);
         if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble)
@@ -774,25 +767,22 @@ impl Codegen {
             // long double（及 -mno-sse 下的全部浮点）：`fld tbyte [r11 + idx*scale]`。
             // 旧写法对 LongDouble 发 movsd，只拿到低 8 字节。
             // 16 字节元素无法用 SIB scale 表达（最大 8），先把索引乘成字节偏移。
-            let (opcode, rf) = match elem_ty {
-                Type::Float => (0xD9u8, 0u8),
-                Type::LongDouble => (0xDBu8, 5u8),
-                _ => (0xDDu8, 0u8),
+            use crate::codegen::x86_64::opcode::X87Op;
+            let x87_op = match elem_ty {
+                Type::Float => X87Op::FldMem { width: 4 },
+                Type::LongDouble => X87Op::FldMem { width: 10 },
+                _ => X87Op::FldMem { width: 8 },
             };
-            let (scale2, sib2) = if elem_size == 16 {
+            let sib_scale: u8 = if elem_size == 16 {
                 // P11 Bucket AE: imul idx, idx, 16 via typed imul_rm_reg_imm32_b64.
                 self.emit_insn(&Insn::imul_rm_reg_imm32_b64(idx_reg, 16));
-                (0u8, (0u8 << 6) | ((idx_reg & 7) << 3) | 3)
+                1 // 已经 imul 过, 这里 scale=1 (字节偏移)
             } else {
-                (scale, sib)
+                // 与上面 scale (log2) 对应: 2->2, 4->4, 8->8, else->1.
+                match elem_size { 2 => 2, 4 => 4, 8 => 8, _ => 1 }
             };
-            let _ = scale2;
-            let mut rex = 0x41u8; // REX.B: SIB base=r11
-            if idx_reg >= 8 {
-                rex |= 0x02; // REX.X
-            }
             self.emit_seg(seg);
-            self.emit_insn(&Insn::raw_bytes(&[rex, opcode, 0x04 | ((rf & 7) << 3), sib2]));
+            let _ = self.emit_insn(&Insn::x87_mem_sib(x87_op, 11, idx_reg, sib_scale));
         } else if is_float {
             // P11 Bucket AE: movss xmm0, [r11 + idx*scale] via typed simd_mov_mem_base_sib.
             // elem_size_to_sib_scale: 2->2,4->4,8->8,else->1 (与上面 sib_scale 一致).
