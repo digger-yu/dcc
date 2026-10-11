@@ -2434,28 +2434,34 @@ impl Codegen {
         };
     }
     fn emit_lock_cmpxchg_rdi_rdx(&mut self, sz: usize) {
-        match sz {
-            1 => self.emit_insn(&Insn::raw_bytes(&[0xF0, 0x40, 0x0F, 0xB0, 0x17])), // lock cmpxchg [rdi], dl
-            2 => self.emit_insn(&Insn::raw_bytes(&[0x66, 0xF0, 0x0F, 0xB1, 0x17])), // lock cmpxchg [rdi], dx
-            4 => self.emit_insn(&Insn::raw_bytes(&[0xF0, 0x0F, 0xB1, 0x17])),       // lock cmpxchg [rdi], edx
-            _ => self.emit_insn(&Insn::raw_bytes(&[0xF0, 0x48, 0x0F, 0xB1, 0x17])), // lock cmpxchg [rdi], rdx
+        use crate::codegen::shared::asm_operand::Width;
+        let w = match sz {
+            1 => Width::B8,
+            2 => Width::B16,
+            4 => Width::B32,
+            _ => Width::B64,
         };
+        self.emit_insn(&Insn::lock_cmpxchg_base(w, 2, 7)); // reg=rdx=2, base=rdi=7
     }
     pub(crate) fn emit_lock_cmpxchg_rdi_rsi(&mut self, sz: usize) {
-        match sz {
-            1 => self.emit_insn(&Insn::raw_bytes(&[0xF0, 0x40, 0x0F, 0xB0, 0x37])), // lock cmpxchg [rdi], sil
-            2 => self.emit_insn(&Insn::raw_bytes(&[0x66, 0xF0, 0x0F, 0xB1, 0x37])), // lock cmpxchg [rdi], si
-            4 => self.emit_insn(&Insn::raw_bytes(&[0xF0, 0x0F, 0xB1, 0x37])),       // lock cmpxchg [rdi], esi
-            _ => self.emit_insn(&Insn::raw_bytes(&[0xF0, 0x48, 0x0F, 0xB1, 0x37])), // lock cmpxchg [rdi], rsi
+        use crate::codegen::shared::asm_operand::Width;
+        let w = match sz {
+            1 => Width::B8,
+            2 => Width::B16,
+            4 => Width::B32,
+            _ => Width::B64,
         };
+        self.emit_insn(&Insn::lock_cmpxchg_base(w, 6, 7)); // reg=rsi=6, base=rdi=7
     }
     pub(crate) fn emit_lock_xchg_rdi_rsi(&mut self, sz: usize) {
-        match sz {
-            1 => self.emit_insn(&Insn::raw_bytes(&[0xF0, 0x40, 0x86, 0x37])), // lock xchg [rdi], sil
-            2 => self.emit_insn(&Insn::raw_bytes(&[0x66, 0xF0, 0x87, 0x37])), // lock xchg [rdi], si
-            4 => self.emit_insn(&Insn::raw_bytes(&[0xF0, 0x87, 0x37])),       // lock xchg [rdi], esi
-            _ => self.emit_insn(&Insn::raw_bytes(&[0xF0, 0x48, 0x87, 0x37])), // lock xchg [rdi], rsi
+        use crate::codegen::shared::asm_operand::Width;
+        let w = match sz {
+            1 => Width::B8,
+            2 => Width::B16,
+            4 => Width::B32,
+            _ => Width::B64,
         };
+        self.emit_insn(&Insn::lock_xchg_base(w, 6, 7)); // reg=rsi=6, base=rdi=7
         match sz {
             1 => { self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
                 sign: false,

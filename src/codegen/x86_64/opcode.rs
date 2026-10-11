@@ -474,6 +474,31 @@ pub(crate) enum X86_64Opcode {
         dst: Operand,
         src: Operand,
     },
+
+    /// P11 Bucket O3: LOCK CMPXCHG r/m8/16/32/64, r8/16/32/64.
+    ///  手写约定 (instructions.rs emit_lock_cmpxchg_rdi_rdx/rsi):
+    ///    B8:  F0 40 0F B0 ModRM   (REX=0x40 用于 sil/dil 高字节, W=0)
+    ///    B16: 66 F0 0F B1 ModRM
+    ///    B32: F0 0F B1 ModRM      (无 REX.W)
+    ///    B64: F0 48 0F B1 ModRM   (REX.W=0x48)
+    ///  mem 端为 [base+disp0] base-only 形态 (本批只覆盖 rdi 固定 base).
+    LockCmpxchgRm {
+        width: crate::codegen::shared::asm_operand::Width,
+        reg_idx: u8,
+        mem: MemOperand,
+    },
+
+    /// P11 Bucket O3: LOCK XCHG r/m8/16/32/64, r8/16/32/64.
+    ///  手写约定 (emit_lock_xchg_rdi_rsi):
+    ///    B8:  F0 40 86 ModRM
+    ///    B16: 66 F0 87 ModRM
+    ///    B32: F0 87 ModRM
+    ///    B64: F0 48 87 ModRM
+    LockXchgRm {
+        width: crate::codegen::shared::asm_operand::Width,
+        reg_idx: u8,
+        mem: MemOperand,
+    },
 }
 
 impl X86_64Opcode {
@@ -2067,6 +2092,78 @@ impl X86_64Opcode {
                 out.push(0x0F);
                 out.push(opc2);
                 out.push(0xC0 | ((*dst_idx & 7) << 3) | (*src_idx & 7));
+                Some(out)
+            }
+            // P11 Bucket O3: LOCK CMPXCHG r/m, reg.
+            //  手写约定: 立即数/内存形态为 [base+disp0] base-only.
+            //  字节序: [66?] [REX?] F0 0F (B0|B1) ModRM.
+            //    B8:  REX=0x40 强制发 (sil/dil 高字节); opc2=B0; 无 66.
+            //    B16: 66 + opc2=B1; REX 仅当 reg>=8/base>=8 时发.
+            //    B32: 无 66, opc2=B1; REX 仅当 reg>=8/base>=8 时发.
+            //    B64: REX.W=0x48, opc2=B1.
+            X86_64Opcode::LockCmpxchgRm { width, reg_idx, mem } => {
+                let base = mem.base?;
+                if mem.seg.is_some() || mem.index.is_some() || mem.disp != 0 {
+                    return None;
+                }
+                let is_b8 = matches!(width, Width::B8);
+                let is_b16 = matches!(width, Width::B16);
+                let is_b32 = matches!(width, Width::B32);
+                let is_b64 = matches!(width, Width::B64);
+                if !(is_b8 || is_b16 || is_b32 || is_b64) {
+                    return None;
+                }
+                let opc2: u8 = if is_b8 { 0xB0 } else { 0xB1 };
+                let mut rex: u8 = 0x40;
+                if is_b64 { rex |= 0x08; }
+                if *reg_idx >= 8 { rex |= 0x04; } // ModRM.reg = reg
+                if base >= 8 { rex |= 0x01; }     // ModRM.r/m = base
+                // 手写: B8 强制发 0x40 REX (即使 reg=6=sil, base=7=rdi).
+                //       B64 强制发 REX.W.
+                //       B16/B32: 仅在 reg>=8 / base>=8 时才发 REX.
+                // 字节序 (手写约定): [66] F0 [REX] 0F opc2 ModRM.
+                let need_rex = is_b8 || is_b64 || *reg_idx >= 8 || base >= 8;
+                let mut out = Vec::with_capacity(8);
+                if is_b16 { out.push(0x66); }
+                out.push(0xF0);
+                if need_rex { out.push(rex); }
+                out.push(0x0F);
+                out.push(opc2);
+                // mod=00 (disp=0, base!=5), reg=reg_idx&7, rm=base&7.
+                let modrm = ((*reg_idx & 7) << 3) | (base & 7);
+                out.push(modrm);
+                Some(out)
+            }
+            // P11 Bucket O3: LOCK XCHG r/m, reg.
+            //  B8:  REX=0x40 强制发, opcode=0x86.
+            //  B16: 66 + opcode=0x87.
+            //  B32: opcode=0x87.
+            //  B64: REX.W=0x48, opcode=0x87.
+            X86_64Opcode::LockXchgRm { width, reg_idx, mem } => {
+                let base = mem.base?;
+                if mem.seg.is_some() || mem.index.is_some() || mem.disp != 0 {
+                    return None;
+                }
+                let is_b8 = matches!(width, Width::B8);
+                let is_b16 = matches!(width, Width::B16);
+                let is_b32 = matches!(width, Width::B32);
+                let is_b64 = matches!(width, Width::B64);
+                if !(is_b8 || is_b16 || is_b32 || is_b64) {
+                    return None;
+                }
+                let opcode: u8 = if is_b8 { 0x86 } else { 0x87 };
+                let mut rex: u8 = 0x40;
+                if is_b64 { rex |= 0x08; }
+                if *reg_idx >= 8 { rex |= 0x04; }
+                if base >= 8 { rex |= 0x01; }
+                let need_rex = is_b8 || is_b64 || *reg_idx >= 8 || base >= 8;
+                let mut out = Vec::with_capacity(8);
+                if is_b16 { out.push(0x66); }
+                out.push(0xF0);
+                if need_rex { out.push(rex); }
+                out.push(opcode);
+                let modrm = ((*reg_idx & 7) << 3) | (base & 7);
+                out.push(modrm);
                 Some(out)
             }
             _ => None,
@@ -4552,6 +4649,118 @@ mod tests {
         // ud2: 0F 0B
         let o = X86_64Opcode::NoArg { op: NoArgOp::Ud2 };
         assert_eq!(o.encode(), Some(vec![0x0F, 0x0B]));
+    }
+
+    // ---- P11 Bucket O3: LOCK CMPXCHG / XCHG r/m ----
+
+    #[test]
+    fn lock_cmpxchg_rdi_rdx_b8() {
+        // lock cmpxchg [rdi], dl: F0 40 0F B0 17
+        let o = X86_64Opcode::LockCmpxchgRm {
+            width: Width::B8,
+            reg_idx: 2,
+            mem: MemOperand { disp: 0, base: Some(7), index: None, seg: None },
+        };
+        assert_eq!(o.encode(), Some(vec![0xF0, 0x40, 0x0F, 0xB0, 0x17]));
+    }
+
+    #[test]
+    fn lock_cmpxchg_rdi_rdx_b16() {
+        // lock cmpxchg [rdi], dx: 66 F0 0F B1 17
+        let o = X86_64Opcode::LockCmpxchgRm {
+            width: Width::B16,
+            reg_idx: 2,
+            mem: MemOperand { disp: 0, base: Some(7), index: None, seg: None },
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0xF0, 0x0F, 0xB1, 0x17]));
+    }
+
+    #[test]
+    fn lock_cmpxchg_rdi_rdx_b32() {
+        // lock cmpxchg [rdi], edx: F0 0F B1 17
+        let o = X86_64Opcode::LockCmpxchgRm {
+            width: Width::B32,
+            reg_idx: 2,
+            mem: MemOperand { disp: 0, base: Some(7), index: None, seg: None },
+        };
+        assert_eq!(o.encode(), Some(vec![0xF0, 0x0F, 0xB1, 0x17]));
+    }
+
+    #[test]
+    fn lock_cmpxchg_rdi_rdx_b64() {
+        // lock cmpxchg [rdi], rdx: F0 48 0F B1 17
+        let o = X86_64Opcode::LockCmpxchgRm {
+            width: Width::B64,
+            reg_idx: 2,
+            mem: MemOperand { disp: 0, base: Some(7), index: None, seg: None },
+        };
+        assert_eq!(o.encode(), Some(vec![0xF0, 0x48, 0x0F, 0xB1, 0x17]));
+    }
+
+    #[test]
+    fn lock_cmpxchg_rdi_rsi_b8() {
+        // lock cmpxchg [rdi], sil: F0 40 0F B0 37
+        let o = X86_64Opcode::LockCmpxchgRm {
+            width: Width::B8,
+            reg_idx: 6,
+            mem: MemOperand { disp: 0, base: Some(7), index: None, seg: None },
+        };
+        assert_eq!(o.encode(), Some(vec![0xF0, 0x40, 0x0F, 0xB0, 0x37]));
+    }
+
+    #[test]
+    fn lock_cmpxchg_rdi_rsi_b64() {
+        // lock cmpxchg [rdi], rsi: F0 48 0F B1 37
+        let o = X86_64Opcode::LockCmpxchgRm {
+            width: Width::B64,
+            reg_idx: 6,
+            mem: MemOperand { disp: 0, base: Some(7), index: None, seg: None },
+        };
+        assert_eq!(o.encode(), Some(vec![0xF0, 0x48, 0x0F, 0xB1, 0x37]));
+    }
+
+    #[test]
+    fn lock_xchg_rdi_rsi_b8() {
+        // lock xchg [rdi], sil: F0 40 86 37
+        let o = X86_64Opcode::LockXchgRm {
+            width: Width::B8,
+            reg_idx: 6,
+            mem: MemOperand { disp: 0, base: Some(7), index: None, seg: None },
+        };
+        assert_eq!(o.encode(), Some(vec![0xF0, 0x40, 0x86, 0x37]));
+    }
+
+    #[test]
+    fn lock_xchg_rdi_rsi_b16() {
+        // lock xchg [rdi], si: 66 F0 87 37
+        let o = X86_64Opcode::LockXchgRm {
+            width: Width::B16,
+            reg_idx: 6,
+            mem: MemOperand { disp: 0, base: Some(7), index: None, seg: None },
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0xF0, 0x87, 0x37]));
+    }
+
+    #[test]
+    fn lock_xchg_rdi_rsi_b32() {
+        // lock xchg [rdi], esi: F0 87 37
+        let o = X86_64Opcode::LockXchgRm {
+            width: Width::B32,
+            reg_idx: 6,
+            mem: MemOperand { disp: 0, base: Some(7), index: None, seg: None },
+        };
+        assert_eq!(o.encode(), Some(vec![0xF0, 0x87, 0x37]));
+    }
+
+    #[test]
+    fn lock_xchg_rdi_rsi_b64() {
+        // lock xchg [rdi], rsi: F0 48 87 37
+        let o = X86_64Opcode::LockXchgRm {
+            width: Width::B64,
+            reg_idx: 6,
+            mem: MemOperand { disp: 0, base: Some(7), index: None, seg: None },
+        };
+        assert_eq!(o.encode(), Some(vec![0xF0, 0x48, 0x87, 0x37]));
     }
 }
 

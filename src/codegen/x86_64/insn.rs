@@ -138,6 +138,40 @@ impl Insn {
         )
     }
 
+    /// P11 Bucket O3: LOCK CMPXCHG [base], reg — 手写形态 (base-only, disp=0).
+    pub fn lock_cmpxchg_base(
+        width: crate::codegen::shared::asm_operand::Width,
+        reg_idx: u8,
+        base: u8,
+    ) -> Self {
+        use crate::codegen::x86_64::opcode::MemOperand;
+        Insn::new(
+            X86_64Opcode::LockCmpxchgRm {
+                width,
+                reg_idx,
+                mem: MemOperand { disp: 0, base: Some(base), index: None, seg: None },
+            },
+            &[],
+        )
+    }
+
+    /// P11 Bucket O3: LOCK XCHG [base], reg — 手写形态 (base-only, disp=0).
+    pub fn lock_xchg_base(
+        width: crate::codegen::shared::asm_operand::Width,
+        reg_idx: u8,
+        base: u8,
+    ) -> Self {
+        use crate::codegen::x86_64::opcode::MemOperand;
+        Insn::new(
+            X86_64Opcode::LockXchgRm {
+                width,
+                reg_idx,
+                mem: MemOperand { disp: 0, base: Some(base), index: None, seg: None },
+            },
+            &[],
+        )
+    }
+
     /// asm/ 内联汇编路径专用 (P10 起原生路径已改用 raw_bytes).
     /// 语义与 raw_bytes 一致, 仅名字不同 —— 保留以避免改动内联汇编编码器的
     /// 几百处字面调用.
