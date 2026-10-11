@@ -390,10 +390,9 @@ impl Codegen {
     // ========================================================================
 
     pub fn push(&mut self, reg: u8) {
-        // 步骤 3: 走类型化 Stack{Push, B64, Reg(reg)}. 原手写字节按 reg 号 if/else:
+        // P11 O4: 类型化 Stack{Push, B64, Reg(reg)}. encode() 已按 reg 号合并:
         //   reg<8:  0x50 + reg
         //   reg>=8: 0x41, 0x50 + (reg & 7)
-        // encode() 已按同一规则合并. 兜底保留原手写 if/else 分支以防形态未命中.
         let gas = format!("push {}", GAS_REG64[(reg & 15) as usize]);
         let insn = Insn::new(
             X86_64Opcode::Stack {
@@ -403,41 +402,13 @@ impl Codegen {
             },
             &[],
         );
-        // 直接覆盖 gas_text: 类型化构造子默认 gas_text=None.
         let mut insn = insn;
         insn.gas_text = Some(gas);
-        if self.emit_insn(&insn) {
-            return;
-        }
-        // 兜底: 理论上 B64 reg 形态恒命中, 只在 encode 意外返回 None 时走.
-        let (lo, hi) = match reg {
-            0 => (0x50, None),
-            1 => (0x51, None),
-            2 => (0x52, None),
-            3 => (0x53, None),
-            7 => (0x57, None),
-            6 => (0x56, None),
-            8 => (0x50, Some(0x41)),
-            9 => (0x51, Some(0x41)),
-            10 => (0x52, Some(0x41)),
-            11 => (0x53, Some(0x41)),
-            12 => (0x54, Some(0x41)),
-            13 => (0x55, Some(0x41)),
-            14 => (0x56, Some(0x41)),
-            15 => (0x57, Some(0x41)),
-            _ => panic!("push: unsupported reg {}", reg),
-        };
-        let bytes: Vec<u8> = if let Some(pfx) = hi {
-            vec![pfx, lo]
-        } else {
-            vec![lo]
-        };
-        let gas = format!("push {}", GAS_REG64[(reg & 15) as usize]);
-        self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
+        self.emit_insn(&insn);
     }
 
     pub fn pop(&mut self, reg: u8) {
-        // 步骤 3: 走类型化 Stack{Pop, B64, Reg(reg)}.
+        // P11 O4: 类型化 Stack{Pop, B64, Reg(reg)}. encode() 已按 reg 号合并:
         //   reg<8:  0x58 + reg
         //   reg>=8: 0x41, 0x58 + (reg & 7)
         let gas = format!("pop {}", GAS_REG64[(reg & 15) as usize]);
@@ -451,43 +422,14 @@ impl Codegen {
         );
         let mut insn = insn;
         insn.gas_text = Some(gas);
-        if self.emit_insn(&insn) {
-            return;
-        }
-        // 兜底.
-        let (lo, hi) = match reg {
-            0 => (0x58, None),
-            1 => (0x59, None),
-            2 => (0x5a, None),
-            3 => (0x5b, None),
-            7 => (0x5f, None),
-            6 => (0x5e, None),
-            8 => (0x58, Some(0x41)),
-            9 => (0x59, Some(0x41)),
-            10 => (0x5a, Some(0x41)),
-            11 => (0x5b, Some(0x41)),
-            12 => (0x5c, Some(0x41)),
-            13 => (0x5d, Some(0x41)),
-            14 => (0x5e, Some(0x41)),
-            15 => (0x5f, Some(0x41)),
-            _ => panic!("pop: unsupported reg {}", reg),
-        };
-        let bytes: Vec<u8> = if let Some(pfx) = hi {
-            vec![pfx, lo]
-        } else {
-            vec![lo]
-        };
-        let gas = format!("pop {}", GAS_REG64[(reg & 15) as usize]);
-        self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
+        self.emit_insn(&insn);
     }
 
     pub fn store_rsp_qword(&mut self, reg: u8, off: usize) {
-        // 步骤 2a: 走类型化 MovRm{B64, [rsp+off], reg}. 原手写字节:
-        //   rex=48|(reg>=8?04:0), 0x89, ModRM[44|(reg<<3)|24|off], disp8/disp32.
-        // encode() 会自己处理 SIB (rm=4=rsp) / disp8 / disp32 / REX.R.
-        // P9 方案 C: 挂 gas_text. AT&T: mov %reg, off(%rsp).
+        // P11 O4: 类型化 MovRm{B64, [rsp+off], reg}. encode() 自处理 SIB
+        // (rm=4=rsp) / disp8 / disp32 / REX.R.
         let gas = format!("mov {}, {}", GAS_REG64[(reg & 15) as usize], gas_mem_disp(4, off as i64));
-        let mut insn = Insn::new(
+        let insn = Insn::new(
             X86_64Opcode::MovRm {
                 width: Width::B64,
                 dst: OpcodeOperand::Mem(MemOperand::bp_disp(4, off as i32)),
@@ -495,27 +437,16 @@ impl Codegen {
             },
             &[],
         );
+        let mut insn = insn;
         insn.gas_text = Some(gas);
-        let ok = self.emit_insn(&insn);
-        if !ok {
-            // encode 未实现兜底: 保留原始手写路径 (理论上本形态恒命中).
-            let rex = 0x48 | if reg >= 8 { 0x04 } else { 0 };
-            let mut bytes: Vec<u8> = vec![rex, 0x89];
-            if off < 128 {
-                bytes.extend_from_slice(&[0x44 | ((reg & 7) << 3), 0x24, off as u8]);
-            } else {
-                bytes.push(0x84 | ((reg & 7) << 3));
-                bytes.push(0x24);
-                bytes.extend_from_slice(&(off as u32).to_le_bytes());
-            }
-            self.emit_insn(&Insn::raw_with_gas(&bytes, &format!("mov {}, {}", GAS_REG64[(reg & 15) as usize], gas_mem_disp(4, off as i64))));
-        }
+        self.emit_insn(&insn);
     }
 
     pub fn load_rsp_qword(&mut self, reg: u8, off: usize) {
-        // P9 方案 C: 挂 gas_text. AT&T: mov off(%rsp), %reg.
+        // P11 O4: 类型化 MovRm{B64, reg, [rsp+off]}. encode() 自处理 SIB
+        // (rm=4=rsp) / disp8 / disp32 / REX.R.
         let gas = format!("mov {}, {}", gas_mem_disp(4, off as i64), GAS_REG64[(reg & 15) as usize]);
-        let mut insn = Insn::new(
+        let insn = Insn::new(
             X86_64Opcode::MovRm {
                 width: Width::B64,
                 dst: OpcodeOperand::Reg(reg, Width::B64),
@@ -523,20 +454,9 @@ impl Codegen {
             },
             &[],
         );
+        let mut insn = insn;
         insn.gas_text = Some(gas);
-        let ok = self.emit_insn(&insn);
-        if !ok {
-            let rex = 0x48 | if reg >= 8 { 0x04 } else { 0 };
-            let mut bytes: Vec<u8> = vec![rex, 0x8B];
-            if off < 128 {
-                bytes.extend_from_slice(&[0x44 | ((reg & 7) << 3), 0x24, off as u8]);
-            } else {
-                bytes.push(0x84 | ((reg & 7) << 3));
-                bytes.push(0x24);
-                bytes.extend_from_slice(&(off as u32).to_le_bytes());
-            }
-            self.emit_insn(&Insn::raw_with_gas(&bytes, &format!("mov {}, {}", gas_mem_disp(4, off as i64), GAS_REG64[(reg & 15) as usize])));
-        }
+        self.emit_insn(&insn);
     }
 
     // ========================================================================
@@ -2299,8 +2219,8 @@ impl Codegen {
         self.emit_insn(&Insn::sign_extend_rax_to_rdx(w));
     }
     pub(crate) fn emit_div_rm(&mut self, inner_sz: i64, is_signed: bool, rm32: u8) {
-        // Bucket O: rm32 is a pre-computed ModRM byte (mod=11, /6 or /7 reg field).
-        // Extract r/m = rm32 & 0x07; register numbers 0..7 only (callers use ecx/edi).
+        // P11 O4: Div/Idiv via UnaryRm typed opcode. rm32 is pre-computed ModRM
+        // byte from callers; extract r/m index 0..7 (ecx=1, edi=7).
         let reg_idx = rm32 & 0x07;
         let width = if inner_sz == 8 {
             crate::codegen::shared::asm_operand::Width::B64
@@ -2312,18 +2232,7 @@ impl Codegen {
         } else {
             crate::codegen::x86_64::opcode::UnaryOp::Div
         };
-        let typed = Insn::unary_rm_reg(op, width, reg_idx);
-        if typed.encode_bytes().is_some() {
-            self.emit_insn(&typed);
-        } else {
-            // Fallback (legacy hand-written bytes).
-            let op_byte = if is_signed { rm32 + 8 } else { rm32 };
-            if inner_sz == 8 {
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, op_byte]));
-            } else {
-                self.emit_insn(&Insn::raw_bytes(&[0xF7, op_byte]));
-            }
-        }
+        self.emit_insn(&Insn::unary_rm_reg(op, width, reg_idx));
     }
     pub(crate) fn emit_evex_prefix(
         &mut self,
@@ -2367,8 +2276,8 @@ impl Codegen {
         self.emit_insn(&Insn::imul_rm_reg(width, 0, 11));
     }
     pub(crate) fn emit_imul_rm(&mut self, inner_sz: i64, off: i64) {
-        // P11: imul rax/eax, [rsp+off] — ImulRm mem form (SIB).
-        // 原手写: (REX.W) 0F AF 44 24 off(disp8).
+        // P11 O4: imul rax/eax, [rsp+off] — ImulRm mem form (SIB).
+        // encode() 自处理 REX.W / ModRM[SIB=4] / disp8.
         let width = if inner_sz == 8 {
             crate::codegen::shared::asm_operand::Width::B64
         } else {
@@ -2389,15 +2298,7 @@ impl Codegen {
             },
             &[],
         );
-        if self.emit_insn(&insn) {
-            return;
-        }
-        // 兜底 (理论上不会走到).
-        let rex = if inner_sz == 8 { 0x48 } else { 0x00 };
-        if rex != 0 {
-            self.emit_insn(&Insn::raw_bytes(&[rex]));
-        }
-        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAF, 0x44, 0x24, off as u8]));
+        self.emit_insn(&insn);
     }
     pub(crate) fn emit_load_mem(&mut self, size: usize) {
         match size {
@@ -2485,7 +2386,8 @@ impl Codegen {
     }
     pub(crate) fn emit_movdqu_r13_to_xmm(&mut self, xmm_reg: u8, off: i64) {
         if Self::fits_disp32(off) {
-            // P11: movdqu xmm, [r13+off] via SimdMov mem form (DQ width, load).
+            // P11 O4: movdqu xmm, [r13+off] via SimdMov mem form (DQ width, load).
+            // encode() 自处理 F3 pfx / REX.R/B / ModRM[SIB if needed] / disp8 / disp32.
             let insn = Insn::simd_mov_mem_base(
                 false,
                 crate::codegen::x86_64::opcode::SimdWidth::DQ,
@@ -2493,12 +2395,7 @@ impl Codegen {
                 13,
                 off as i32,
             );
-            if self.emit_insn(&insn) {
-                return;
-            }
-            let rex = 0x41 | if xmm_reg >= 8 { 0x04 } else { 0 };
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, rex, 0x0F, 0x6F]));
-            self.emit_r13_modrm_disp(xmm_reg, off);
+            self.emit_insn(&insn);
         } else {
             self.emit_lea_r13(11, off);
             let rex = 0x41 | if xmm_reg >= 8 { 0x04 } else { 0 } | 0x01;
@@ -2508,7 +2405,8 @@ impl Codegen {
     }
     pub(crate) fn emit_movdqu_xmm_to_r13(&mut self, xmm_reg: u8, off: i64) {
         if Self::fits_disp32(off) {
-            // P11: movdqu [r13+off], xmm via SimdMov mem form (DQ width, store).
+            // P11 O4: movdqu [r13+off], xmm via SimdMov mem form (DQ width, store).
+            // encode() 自处理 F3 pfx / REX.R/B / ModRM / disp8 / disp32.
             let insn = Insn::simd_mov_mem_base(
                 true,
                 crate::codegen::x86_64::opcode::SimdWidth::DQ,
@@ -2516,12 +2414,7 @@ impl Codegen {
                 13,
                 off as i32,
             );
-            if self.emit_insn(&insn) {
-                return;
-            }
-            let rex = 0x41 | if xmm_reg >= 8 { 0x04 } else { 0 };
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, rex, 0x0F, 0x7F]));
-            self.emit_r13_modrm_disp(xmm_reg, off);
+            self.emit_insn(&insn);
         } else {
             self.emit_lea_r13(11, off);
             let rex = 0x41 | if xmm_reg >= 8 { 0x04 } else { 0 } | 0x01;
@@ -2735,8 +2628,8 @@ impl Codegen {
         self.emit_insn(&Insn::store_imm32_mem(base, disp, imm));
     }
     pub(crate) fn emit_store_reg_mem(&mut self, base: u8, disp: i32, src: u8) {
-        // B64 reg->mem store. 手写约定 disp=0 && base=rbp(5) 走 mod=01 disp8=0
-        // (非 rip-relative), 与 MovRm 现有编码一致.
+        // P11 O4: B64 reg->mem store via MovRm typed opcode.
+        // encode() 自处理 REX.W/R/B / ModRM / SIB / disp8 / disp32.
         let insn = Insn::new(
             X86_64Opcode::MovRm {
                 width: Width::B64,
@@ -2750,26 +2643,7 @@ impl Codegen {
             },
             &[],
         );
-        if !self.emit_insn(&insn) {
-            // 兜底: 手写原逻辑
-            let mut rex: u8 = 0x48;
-            if src >= 8 {
-                rex |= 0x04;
-            }
-            if base >= 8 {
-                rex |= 0x01;
-            }
-            let rm = base & 7;
-            if disp == 0 && rm != 5 {
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x89, ((src & 7) << 3) | rm]));
-            } else if disp.abs() < 128 {
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x89, 0x40 | ((src & 7) << 3) | rm]));
-                self.emit_insn(&Insn::raw_bytes(&(disp as i8).to_le_bytes()));
-            } else {
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x89, 0x80 | ((src & 7) << 3) | rm]));
-                self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes()));
-            }
-        }
+        self.emit_insn(&insn);
     }
     pub(crate) fn emit_string_ptr_slot(
         &mut self,
@@ -2796,7 +2670,7 @@ impl Codegen {
         slot
     }
     pub(crate) fn emit_sub_rax_rcx(&mut self, inner_sz: i64) {
-        // P11: AluRm{Sub, reg-reg}. rax=0, rcx=1.
+        // P11 O4: AluRm{Sub, reg-reg}. rax=0, rcx=1.
         let width = match inner_sz {
             8 => Width::B64,
             _ => Width::B32,
@@ -2810,17 +2684,10 @@ impl Codegen {
             },
             &[],
         );
-        if self.emit_insn(&insn) {
-            return;
-        }
-        let rex = if inner_sz == 8 { 0x48 } else { 0x00 };
-        if rex != 0 {
-            self.emit_insn(&Insn::raw_bytes(&[rex]));
-        }
-        self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Sub, crate::codegen::shared::asm_operand::Width::B32, 0, 1)); // sub rax/eax, rcx
+        self.emit_insn(&insn);
     }
     pub(crate) fn emit_sub_rcx_rax(&mut self, inner_sz: i64) {
-        // P11: AluRm{Sub, reg-reg}. rcx=1, rax=0.
+        // P11 O4: AluRm{Sub, reg-reg}. rcx=1, rax=0.
         let width = match inner_sz {
             8 => Width::B64,
             _ => Width::B32,
@@ -2834,14 +2701,7 @@ impl Codegen {
             },
             &[],
         );
-        if self.emit_insn(&insn) {
-            return;
-        }
-        let rex = if inner_sz == 8 { 0x48 } else { 0x00 };
-        if rex != 0 {
-            self.emit_insn(&Insn::raw_bytes(&[rex]));
-        }
-        self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Sub, crate::codegen::shared::asm_operand::Width::B32, 1, 0)); // sub rcx/ecx, rax/eax
+        self.emit_insn(&insn);
     }
     pub(crate) fn emit_vex3_prefix(&mut self, r: u8, v: u8, l: u8, pp: u8) {
         let r_inv = if r >= 8 { 0u8 } else { 1u8 };
