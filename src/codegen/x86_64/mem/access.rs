@@ -603,10 +603,13 @@ impl Codegen {
             self.load_stack(dst, self.static_chain_offset);
             for &ioff in &intermediates {
                 if Self::fits_disp32(ioff) {
-                    let rex = 0x48u8 | if dst >= 8 { 0x05u8 } else { 0 };
-                    let modrm = 0x83 | ((dst & 7) << 3);
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, modrm]));
-                    self.emit_insn(&Insn::raw_bytes(&(ioff as i32).to_le_bytes()));
+                    // P11 Bucket K: mov dst,[dst+ioff] via typed constructor
+                    // (self-relative load, base==dst, disp32).
+                    self.emit_insn(&Insn::mov_rm_mem(
+                        true,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        dst, dst, ioff as i32,
+                    ));
                 } else {
                     self.mov_imm(10, ioff as i128);
                     // lea r11, [r11+r10] — P11 Bucket P typed Lea SIB.
@@ -630,10 +633,13 @@ impl Codegen {
                 // 原 bug 用 0x03 (mod=00, rm=rbx) 导致 mov (%rbx), dst +
                 // 垃圾字节被后续指令流误解析 → SIGILL.
                 if Self::fits_disp32(parent_off) {
-                    let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: 自反 ModRM, reg 与 r/m 都要扩, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                    let modrm = 0x80 | ((dst & 7) << 3) | (dst & 7);
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, modrm]));
-                    self.emit_insn(&Insn::raw_bytes(&(parent_off as i32).to_le_bytes()));
+                    // P11 Bucket K: mov dst,[dst+parent_off] via typed constructor
+                    // (self-relative load, mod=10 disp32).
+                    self.emit_insn(&Insn::mov_rm_mem(
+                        true,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        dst, dst, parent_off as i32,
+                    ));
                 } else {
                     self.mov_imm(10, parent_off as i128);
                     // lea dst, [dst + r10]
