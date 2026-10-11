@@ -243,7 +243,11 @@ impl Codegen {
             self.pop(1); // rcx = 旧值 (pop to rcx, not rdx!)
                          // rax = rhs, rcx = old → binop(rax=old, rcx=rhs)
                          // 交换: rax=rcx(old), rcx=rax(rhs)
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x87, 0xc1])); // xchg rax, rcx → rax=old, rcx=rhs
+            // P11 Bucket AH: typed xchg rax, rcx B64 (ModRM form = 48 87 C1).
+            self.emit_insn(&Insn::xchg_reg(
+                crate::codegen::shared::asm_operand::Width::B64,
+                0, 1, false,
+            ));
             let is_signed = Self::is_signed_int(&lv_ty);
             self.binop(binop_op, 0, 1, is_signed, &lv_ty, &rhs.ty());
             if dst != 0 {
@@ -331,7 +335,11 @@ impl Codegen {
                      // 需要: rax = old, rcx = rhs for binop.
                      // 当前: rcx = old, rax = rhs.
                      // 交换: xchg rax, rcx → rax=old, rcx=rhs
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x87, 0xc1])); // xchg rax, rcx
+        // P11 Bucket AH: typed xchg rax, rcx B64 (ModRM form = 48 87 C1).
+        self.emit_insn(&Insn::xchg_reg(
+            crate::codegen::shared::asm_operand::Width::B64,
+            0, 1, false,
+        ));
         let is_signed = Self::is_signed_int(&lv_ty);
         self.binop(binop_op, 0, 1, is_signed, &lv_ty, &rhs.ty());
         // rax = result

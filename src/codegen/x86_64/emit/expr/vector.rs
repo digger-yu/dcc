@@ -475,7 +475,11 @@ impl Codegen {
                 BinOp::Div | BinOp::Mod => {
                     // 整数除法: xchg 后 rax=被除数, rcx=除数
                     let is_mod = matches!(op, BinOp::Mod);
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x91])); // xchg rax, rcx
+                    // P11 Bucket AH: typed xchg rax, rcx B64 (shortcut form = 48 91).
+                    self.emit_insn(&Insn::xchg_reg(
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        0, 1, true,
+                    ));
                     let signed = matches!(
                         elem_ty,
                         Type::SChar
@@ -603,7 +607,11 @@ impl Codegen {
                 BinOp::Shl | BinOp::Shr => {
                     // rcx=l_val, rax=r_val. x86 shift: shl/sar r/m, cl
                     // xchg -> rax=l, rcx=r; shift rax by cl; mov rcx,rax
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x91])); // xchg rax, rcx
+                    // P11 Bucket AH: typed xchg rax, rcx B64 (shortcut form = 48 91).
+                    self.emit_insn(&Insn::xchg_reg(
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        0, 1, true,
+                    ));
                     let signed = matches!(
                         elem_ty,
                         Type::SChar | Type::Short | Type::Int | Type::Long | Type::LongLong

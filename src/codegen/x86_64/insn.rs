@@ -1128,6 +1128,26 @@ impl Insn {
         )
     }
 
+    /// P11 Bucket AH: xchg reg, reg (B8/B16/B32/B64).
+    /// prefer_shortcut=true → dst=rax 走 accumulator-shortcut 0x90+src;
+    /// prefer_shortcut=false → 强制 ModRM form (与 int_ops.rs 手写 48 87 C1 对齐).
+    pub fn xchg_reg(
+        width: crate::codegen::shared::asm_operand::Width,
+        dst_idx: u8,
+        src_idx: u8,
+        prefer_shortcut: bool,
+    ) -> Self {
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::XchgRm {
+                width,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(dst_idx, width),
+                src: crate::codegen::x86_64::opcode::Operand::Reg(src_idx, width),
+                prefer_shortcut,
+            },
+            &[],
+        )
+    }
+
     /// P11 Bucket D: roundsd/roundss reg-reg with imm8 (rounding mode).
     /// width=SimdWidth::SD → roundsd (66 0F 3A 0B /r ib).
     /// width=SimdWidth::SS → roundss (66 0F 3A 0A /r ib).

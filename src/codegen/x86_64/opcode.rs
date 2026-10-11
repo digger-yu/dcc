@@ -518,6 +518,23 @@ pub(crate) enum X86_64Opcode {
         mem: MemOperand,
     },
 
+    /// P11 Bucket AH: XCHG r8/16/32/64, r8/16/32/64 (reg↔reg only).
+    ///  手写约定 (int_ops.rs / vector.rs):
+    ///    B8:  [REX] 86 ModRM      (REX=0x40 on byte ops for sil/dil high-byte)
+    ///    B16: 66 [REX] 87 ModRM
+    ///    B32: [REX] 87 ModRM
+    ///    B64: [REX.W] 87 ModRM
+    ///  若 dst=rax(0) 则走 accumulator-shortcut 0x90+reg (无 ModRM):
+    ///    B16: 66 90+reg   B32/B64: [REX.W] 90+reg.
+    XchgRm {
+        width: crate::codegen::shared::asm_operand::Width,
+        dst: Operand,
+        src: Operand,
+        /// 若 true 且 dst=rax, 走 accumulator-shortcut (0x90+src).
+        /// 若 false, 强制走 ModRM form (用于 G10 快照字节一致).
+        prefer_shortcut: bool,
+    },
+
     /// P11 Bucket AF: cmpss/cmpsd xmm_dst, xmm_src, imm8 (C2 /r ib).
     ///   cmpss: F3 0F C2 /r ib   cmpsd: F2 0F C2 /r ib.
     /// width=SimdWidth::SS → F3, SimdWidth::SD → F2. imm8 = comparison predicate.
@@ -2272,6 +2289,45 @@ impl X86_64Opcode {
                 out.push(0x0F);
                 out.push(opc2);
                 let modrm = ((*reg_idx & 7) << 3) | (base & 7);
+                out.push(modrm);
+                Some(out)
+            }
+            // P11 Bucket AH: XCHG reg, reg.
+            //  字节序: [66] [REX] (0x86|B8 | 0x87|else) [ModRM=11 reg rm].
+            //  若 dst=rax(0) 则走 accumulator-shortcut 0x90+src (无 ModRM).
+            X86_64Opcode::XchgRm { width, dst, src, prefer_shortcut } => {
+                let (Operand::Reg(dst_idx, _), Operand::Reg(src_idx, _)) = (dst, src) else {
+                    return None;
+                };
+                let is_b8 = matches!(width, Width::B8);
+                let is_b16 = matches!(width, Width::B16);
+                let is_b32 = matches!(width, Width::B32);
+                let is_b64 = matches!(width, Width::B64);
+                if !(is_b8 || is_b16 || is_b32 || is_b64) {
+                    return None;
+                }
+                let dst_idx = *dst_idx;
+                let src_idx = *src_idx;
+                // Accumulator-shortcut form: dst=rax(0), B16/B32/B64, prefer_shortcut=true.
+                if *prefer_shortcut && dst_idx == 0 && !is_b8 {
+                    let mut out = Vec::with_capacity(3);
+                    if is_b16 { out.push(0x66); }
+                    if is_b64 { out.push(0x48); }
+                    out.push(0x90 + (src_idx & 7));
+                    return Some(out);
+                }
+                // ModRM form: mod=11, reg=dst&7, rm=src&7.
+                let opcode: u8 = if is_b8 { 0x86 } else { 0x87 };
+                let mut rex: u8 = 0x40;
+                if is_b64 { rex |= 0x08; }
+                if dst_idx >= 8 { rex |= 0x04; }
+                if src_idx >= 8 { rex |= 0x01; }
+                let need_rex = is_b8 || is_b64 || dst_idx >= 8 || src_idx >= 8;
+                let modrm = 0xC0 | ((dst_idx & 7) << 3) | (src_idx & 7);
+                let mut out = Vec::with_capacity(5);
+                if is_b16 { out.push(0x66); }
+                if need_rex { out.push(rex); }
+                out.push(opcode);
                 out.push(modrm);
                 Some(out)
             }
@@ -4934,6 +4990,93 @@ mod tests {
             mem: Some(MemOperand { disp: 0, base: Some(7), index: None, seg: None }),
         };
         assert_eq!(o.encode(), Some(vec![0xD9, 0x27]));
+    }
+
+    // ---- P11 Bucket AH: xchg reg, reg ----
+
+    #[test]
+    fn xchg_rcx_rax_b64_modrm() {
+        // xchg rcx, rax (ModRM form): 48 87 C8
+        let o = X86_64Opcode::XchgRm {
+            width: Width::B64,
+            dst: reg(1, Width::B64),
+            src: reg(0, Width::B64),
+            prefer_shortcut: false,
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x87, 0xC8]));
+    }
+
+    #[test]
+    fn xchg_rax_rcx_b64_modrm() {
+        // xchg rax, rcx (ModRM form, prefer_shortcut=false): 48 87 C1
+        // Matches handwritten form in int_ops.rs.
+        let o = X86_64Opcode::XchgRm {
+            width: Width::B64,
+            dst: reg(0, Width::B64),
+            src: reg(1, Width::B64),
+            prefer_shortcut: false,
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x87, 0xC1]));
+    }
+
+    #[test]
+    fn xchg_rax_rcx_b64_shortcut() {
+        // xchg rax, rcx (accumulator-shortcut form, vector.rs): 48 91
+        let o = X86_64Opcode::XchgRm {
+            width: Width::B64,
+            dst: reg(0, Width::B64),
+            src: reg(1, Width::B64),
+            prefer_shortcut: true,
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x91]));
+    }
+
+    #[test]
+    fn xchg_rax_rcx_b32_no_rex() {
+        // xchg eax, ecx (B32, accumulator-shortcut): 91
+        let o = X86_64Opcode::XchgRm {
+            width: Width::B32,
+            dst: reg(0, Width::B32),
+            src: reg(1, Width::B32),
+            prefer_shortcut: true,
+        };
+        assert_eq!(o.encode(), Some(vec![0x91]));
+    }
+
+    #[test]
+    fn xchg_rax_rcx_b16_shortcut() {
+        // xchg ax, cx (B16, accumulator-shortcut): 66 91
+        let o = X86_64Opcode::XchgRm {
+            width: Width::B16,
+            dst: reg(0, Width::B16),
+            src: reg(1, Width::B16),
+            prefer_shortcut: true,
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x91]));
+    }
+
+    #[test]
+    fn xchg_dl_sil_b8_modrm() {
+        // xchg dl, sil (B8, ModRM form with REX=0x40 for sil): 40 86 D6
+        let o = X86_64Opcode::XchgRm {
+            width: Width::B8,
+            dst: reg(2, Width::B8),
+            src: reg(6, Width::B8),
+            prefer_shortcut: false,
+        };
+        assert_eq!(o.encode(), Some(vec![0x40, 0x86, 0xD6]));
+    }
+
+    #[test]
+    fn xchg_rdx_rsi_b16_modrm() {
+        // xchg dx, si (B16, ModRM): 66 87 D6
+        let o = X86_64Opcode::XchgRm {
+            width: Width::B16,
+            dst: reg(2, Width::B16),
+            src: reg(6, Width::B16),
+            prefer_shortcut: false,
+        };
+        assert_eq!(o.encode(), Some(vec![0x66, 0x87, 0xD6]));
     }
 }
 
