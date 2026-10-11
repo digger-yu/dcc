@@ -34,22 +34,22 @@ impl Codegen {
         // 旧实现按 `dst == 1`（%rcx）分两支并把 r8/r9/r10 当空闲暂存：P16 把右操作数
         // 暂存号参数化以后 `dst` 可以是高 8 号（实测 method_overloads.cpp：dst=%r8 走进
         // else 支，r8 既是 dst 又被当暂存 ⇒ 2.5→int 得 0x80000004 而不是 10，§11.54-1）。
-        let (ucomis_op, ucomis_prefix): (u8, &[u8]) = if matches!(float_ty, Type::Float) {
-            (0x2E, &[][..]) // ucomiss：单精度无 66 前缀
-        } else {
-            (0x2E, &[0x66][..]) // ucomisd：double / long double(内部按 double)
-        };
         // xorps xmm1, xmm1；ucomis{s,d} xmm0, xmm1（ModRM 0xC1：reg=xmm0, r/m=xmm1）。
         // xmm1 是本后端浮点比较的约定 scratch（见 special/builtins.rs 同族站点）。
         self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 1, 1));
-        let mut ucomis = ucomis_prefix.to_vec();
-        ucomis.extend_from_slice(&[0x0F, ucomis_op, 0xC1]);
+        // P11: ucomiss/ucomisd xmm1, xmm0 via SimdArith typed (ModRM C1 matches handwritten).
+        let ucomis_w = if matches!(float_ty, Type::Float) {
+            SimdWidth::SS
+        } else {
+            SimdWidth::SD
+        };
         let ucomis_gas = if matches!(float_ty, Type::Float) {
             "ucomiss %xmm1, %xmm0"
         } else {
             "ucomisd %xmm1, %xmm0"
         };
-        self.emit_insn(&Insn::raw_with_gas(&ucomis, ucomis_gas));
+        let insn = Insn::simd_arith_reg(SimdArithOp::Ucomi, ucomis_w, 0, 1).with_gas(ucomis_gas.to_string());
+        self.emit_insn(&insn);
 
         let l_done = self.fresh_label();
         // CF=1（源 < 0，或 NaN 的无序比较）⇒ 结果要么是合法负数、要么是负溢出的
@@ -220,13 +220,8 @@ impl Codegen {
         if !self.emit_insn(&insn) {
             self.emit_insn(&Insn::raw_bytes(&[test_rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
         }
-        let rex_cmov = 0x48 | if dst >= 8 { 0x04 } else { 0 };
-        self.emit_insn(&Insn::raw_bytes(&[
-            rex_cmov,
-            0x0F,
-            0x48,
-            0xC0 | ((dst & 7) << 3) | (zero_reg & 7),
-        ]));
+        // P11: cmovs dst, zero_reg via cmovcc_reg_reg_b64 typed.
+        self.emit_insn(&Insn::cmovcc_reg_reg_b64(0x48, dst, zero_reg));
         self.emit_truncate_to_unsigned(dst, int_ty);
     }
     pub(crate) fn gen_compound_assign_single_eval(
@@ -272,9 +267,16 @@ impl Codegen {
                 }
             }, // movzx eax, byte [rax]
             2 => {
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x00]));
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x0F, 0xB7, 0xC0]));
-            }, // mov ax,[rax]; movzx eax,ax
+                // P11: mov ax,[rax] via mov_rm_mem typed (B16, load=true).
+                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B16, 0, 0, 0));
+                // P11: movzx rax,ax via mov_ext typed (B16->B64, REX.W=1 → 4 bytes, matches handwritten [0x48,0x0F,0xB7,0xC0]).
+                self.emit_insn(&Insn::mov_ext(
+                    false,
+                    crate::codegen::shared::asm_operand::Width::B16,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    0, 0,
+                ));
+            }, // mov ax,[rax]; movzx rax,ax
             4 => { self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,
@@ -333,7 +335,6 @@ impl Codegen {
                      // 当前: rcx = old, rax = rhs.
                      // 交换: xchg rax, rcx → rax=old, rcx=rhs
         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x87, 0xc1])); // xchg rax, rcx
-                                        // Now rax = old, rcx = rhs. Compute binop(rax, rcx).
         let is_signed = Self::is_signed_int(&lv_ty);
         self.binop(binop_op, 0, 1, is_signed, &lv_ty, &rhs.ty());
         // rax = result
