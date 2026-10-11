@@ -897,7 +897,12 @@ impl Codegen {
             }
             self.load_stack(0, result_off);
             if src_inner_sz == 4 && inner_sz == 8 {
-                self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x63, 0xC0], "movsxd %eax, %rax"));
+                self.emit_insn(&Insn::mov_ext(
+                    true,
+                    crate::codegen::shared::asm_operand::Width::B32,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    0, 0,
+                ).with_gas("movsxd %eax, %rax".into()));
             }
             let sz = inner.size();
             self.store_stack(0, off);
@@ -926,7 +931,12 @@ impl Codegen {
                 // 而非目标的 inner_sz)
                 self.load_stack(0, result_off + src_inner_sz);
                 if src_inner_sz == 4 && inner_sz == 8 {
-                    self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x63, 0xC0], "movsxd %eax, %rax"));
+                    self.emit_insn(&Insn::mov_ext(
+                        true,
+                        crate::codegen::shared::asm_operand::Width::B32,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        0, 0,
+                    ).with_gas("movsxd %eax, %rax".into()));
                 }
             } else {
                 // P11: xor rax, rax via typed opcode.
@@ -973,14 +983,37 @@ impl Codegen {
                 self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B32, 11, 4, inner_sz as i32));
             },
             2 => {
-                let ld = if is_signed { 0xBF } else { 0xB7 };
-                self.emit_insn(&Insn::raw_bytes(&[0x44, 0x0F, ld, 0x54, 0x24, 0x00]));
-                self.emit_insn(&Insn::raw_bytes(&[0x44, 0x0F, ld, 0x5C, 0x24, inner_sz as u8]));
+                // movsx/movzx r10, [rsp+0]; movsx/movzx r11, [rsp+inner_sz].
+                // B16 -> B64 sign-extend.
+                let sign = is_signed;
+                self.emit_insn(&Insn::mov_ext_mem(
+                    sign,
+                    crate::codegen::shared::asm_operand::Width::B16,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    10, 4, 0,
+                ));
+                self.emit_insn(&Insn::mov_ext_mem(
+                    sign,
+                    crate::codegen::shared::asm_operand::Width::B16,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    11, 4, inner_sz as i32,
+                ));
             },
             _ => {
-                let ld = if is_signed { 0xBE } else { 0xB6 };
-                self.emit_insn(&Insn::raw_bytes(&[0x44, 0x0F, ld, 0x54, 0x24, 0x00]));
-                self.emit_insn(&Insn::raw_bytes(&[0x44, 0x0F, ld, 0x5C, 0x24, inner_sz as u8]));
+                // B8 -> B64 sign/zero-extend.
+                let sign = is_signed;
+                self.emit_insn(&Insn::mov_ext_mem(
+                    sign,
+                    crate::codegen::shared::asm_operand::Width::B8,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    10, 4, 0,
+                ));
+                self.emit_insn(&Insn::mov_ext_mem(
+                    sign,
+                    crate::codegen::shared::asm_operand::Width::B8,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    11, 4, inner_sz as i32,
+                ));
             },
         }
         // 分支选择: |c| > |d| → lc
@@ -990,7 +1023,7 @@ impl Codegen {
             if is_signed {
                 // |rax| = (rax^(rax>>63)) - (rax>>63)
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xF9, 0x3F])); // sar rcx, 63
+                self.emit_insn(&Insn::shift_reg_imm8_c1_b64(0b111, 1, 0x3F)); // sar rcx, 63
                 // P11: xor rax, rcx via typed opcode.
                 {
                     let insn = Insn::new(
@@ -1022,7 +1055,7 @@ impl Codegen {
                     }
                 }
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rdx
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xF9, 0x3F]));
+                self.emit_insn(&Insn::shift_reg_imm8_c1_b64(0b111, 1, 0x3F)); // sar rcx, 63
                 // P11: xor rdx, rcx via typed opcode.
                 {
                     let insn = Insn::new(
@@ -1063,14 +1096,34 @@ impl Codegen {
                     self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B32, 2, 4, (total_sz + inner_sz) as i32));
                 },
                 2 => {
-                    let ld = if is_signed { 0xBF } else { 0xB7 };
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x44, 0x24, total_sz as u8]));
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x54, 0x24, (total_sz + inner_sz) as u8]));
+                    let sign = is_signed;
+                    self.emit_insn(&Insn::mov_ext_mem(
+                        sign,
+                        crate::codegen::shared::asm_operand::Width::B16,
+                        crate::codegen::shared::asm_operand::Width::B32,
+                        0, 4, total_sz as i32,
+                    ));
+                    self.emit_insn(&Insn::mov_ext_mem(
+                        sign,
+                        crate::codegen::shared::asm_operand::Width::B16,
+                        crate::codegen::shared::asm_operand::Width::B32,
+                        2, 4, (total_sz + inner_sz) as i32,
+                    ));
                 },
                 _ => {
-                    let ld = if is_signed { 0xBE } else { 0xB6 };
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x44, 0x24, total_sz as u8]));
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x54, 0x24, (total_sz + inner_sz) as u8]));
+                    let sign = is_signed;
+                    self.emit_insn(&Insn::mov_ext_mem(
+                        sign,
+                        crate::codegen::shared::asm_operand::Width::B8,
+                        crate::codegen::shared::asm_operand::Width::B32,
+                        0, 4, total_sz as i32,
+                    ));
+                    self.emit_insn(&Insn::mov_ext_mem(
+                        sign,
+                        crate::codegen::shared::asm_operand::Width::B8,
+                        crate::codegen::shared::asm_operand::Width::B32,
+                        2, 4, (total_sz + inner_sz) as i32,
+                    ));
                 },
             }
             if is_signed {
@@ -1086,7 +1139,7 @@ impl Codegen {
                 },
                 &[],
             )); // mov ecx, eax
-                self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xF9, 0x1F])); // sar ecx, 31
+                self.emit_insn(&Insn::shift_reg_imm8_c1_b32(0b111, 1, 0x1F)); // sar ecx, 31
                 self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B32, 0, 1)); // xor eax, ecx
                 self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Sub, crate::codegen::shared::asm_operand::Width::B32, 0, 1)); // sub eax, ecx
                 self.emit_insn(&Insn::new(
@@ -1101,7 +1154,7 @@ impl Codegen {
                 },
                 &[],
             )); // mov ecx, edx
-                self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xF9, 0x1F]));
+                self.emit_insn(&Insn::shift_reg_imm8_c1_b32(0b111, 1, 0x1F)); // sar ecx, 31
                 self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B32, 2, 1)); // xor edx, ecx
                 self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Sub, crate::codegen::shared::asm_operand::Width::B32, 2, 1)); // sub edx, ecx
             }
@@ -1441,7 +1494,7 @@ impl Codegen {
                 inner_sz as i32,
             ));
         } else {
-            let (lsz, ld_s, ld_u) = match inner_sz {
+            let (_lsz, ld_s, ld_u) = match inner_sz {
                 4 => (0x8Bu8, 0u8, 0u8),
                 2 => (0x0Fu8, 0xBFu8, 0xB7u8), // movsx/movzx r32, m16
                 _ => (0x0Fu8, 0xBEu8, 0xB6u8), // movsx/movzx r32, m8
@@ -2478,9 +2531,17 @@ impl Codegen {
                             1 | 2 => self.gen_int_narrow_cast(0, &e.ty()),
                             4 => {
                                 if Self::is_signed_int(&e.ty()) {
-                                    self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x63, 0xC0], "movsxd %eax, %rax"));
+                                    self.emit_insn(&Insn::mov_ext(
+                                        true,
+                                        crate::codegen::shared::asm_operand::Width::B32,
+                                        crate::codegen::shared::asm_operand::Width::B64,
+                                        0, 0,
+                                    ).with_gas("movsxd %eax, %rax".into()));
                                 } else {
-                                    self.emit_insn(&Insn::raw_with_gas(&[0x89, 0xC0], "mov %eax, %eax"));
+                                    self.emit_insn(&Insn::mov_rm_reg(
+                                        crate::codegen::shared::asm_operand::Width::B32,
+                                        0, 0,
+                                    ).with_gas("mov %eax, %eax".into()));
                                 }
                             },
                             _ => {},

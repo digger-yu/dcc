@@ -355,6 +355,22 @@ impl Insn {
         Insn::raw_bytes(&[rex, 0xD3, modrm])
     }
 
+    /// P11 Bucket W: B32 `shl/shr/sar reg, imm8` (C1 /r ib, no REX.W).
+    /// op 编码: /4=shl, /5=shr, /7=sar.
+    pub fn shift_reg_imm8_c1_b32(op_field: u8, reg_idx: u8, imm8: u8) -> Self {
+        let rex: u8 = 0x40;
+        let need_rex = reg_idx >= 8;
+        let modrm = 0xC0 | ((op_field & 0x7) << 3) | (reg_idx & 0x7);
+        let mut out = Vec::with_capacity(4);
+        if need_rex {
+            out.push(rex | 0x01);
+        }
+        out.push(0xC1);
+        out.push(modrm);
+        out.push(imm8);
+        Insn::raw_bytes(&out)
+    }
+
     /// P11 Bucket T: 构造 B64 `test reg, imm32` (REX.W F7 /0 id).
     /// 与 `test_rm_reg` (reg,reg 形态 85) 不同, 这是 TEST r/m64, imm32.
     /// 位域符号位测试 (sign_bit <= 0xFFFFFFFF) 固定走这个形态.
@@ -1071,5 +1087,12 @@ mod tests {
         // rol ax, 8: 66 C1 C0 08
         assert_eq!(Insn::rol_reg_imm8_b16(0, 8).encode_bytes(),
             Some(vec![0x66, 0xC1, 0xC0, 0x08]));
+    }
+
+    #[test]
+    fn shift_reg_imm8_c1_b32_basic() {
+        // sar ecx, 31: C1 F9 1F
+        assert_eq!(Insn::shift_reg_imm8_c1_b32(0b111, 1, 0x1F).encode_bytes(),
+            Some(vec![0xC1, 0xF9, 0x1F]));
     }
 }
