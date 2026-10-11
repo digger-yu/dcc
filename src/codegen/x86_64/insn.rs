@@ -933,6 +933,35 @@ impl Insn {
         )
     }
 
+    /// P11 Bucket AE: SimdMov [base + index*scale] load/store (SIB form).
+    pub fn simd_mov_mem_base_sib(
+        store: bool,
+        width: crate::codegen::x86_64::opcode::SimdWidth,
+        xmm_reg: u8,
+        base: u8,
+        index: u8,
+        scale: u8,
+    ) -> Self {
+        use crate::codegen::x86_64::opcode::{MemOperand, Operand, X86_64Opcode};
+        let mem = Operand::Mem(MemOperand {
+            disp: 0,
+            base: Some(base),
+            index: Some((index, scale)),
+            seg: None,
+        });
+        let reg = Operand::Reg(xmm_reg, crate::codegen::shared::asm_operand::Width::B128);
+        let (dst, src) = if store { (mem, reg) } else { (reg, mem) };
+        Insn::new(
+            X86_64Opcode::SimdMov {
+                width,
+                opcode10: store,
+                dst,
+                src,
+            },
+            &[],
+        )
+    }
+
     /// P11 Bucket B: SimdMov [rsp+disp] store/load. base 固定=4 (rsp).
     pub fn simd_mov_mem(
         store: bool,

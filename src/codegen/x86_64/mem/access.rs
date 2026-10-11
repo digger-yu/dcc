@@ -766,7 +766,6 @@ impl Codegen {
         self.pending_data_rels
             .push((lea_pos + 3, global.to_string()));
         let sib = (scale << 6) | ((idx_reg & 7) << 3) | 3; // base=r11 (REX.B)
-        let modrm = 0x04; // mod=00, rm=100 (SIB), reg 字段在下方按目标寄存器填充
         let is_float = matches!(elem_ty, Type::Float);
         let is_double = matches!(elem_ty, Type::Double | Type::LongDouble);
         if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble)
@@ -795,41 +794,24 @@ impl Codegen {
             self.emit_seg(seg);
             self.emit_insn(&Insn::raw_bytes(&[rex, opcode, 0x04 | ((rf & 7) << 3), sib2]));
         } else if is_float {
-            let xmm = 0u8; // 浮点表达式结果约定在 xmm0
-            let mut rex = 0x41u8; // REX.B: SIB base=r11 (REX 前缀必须 0x40-0x4F)
-            if xmm >= 8 {
-                rex |= 0x04;
-            }
-            if idx_reg >= 8 {
-                rex |= 0x02;
-            }
-            let mut ins = Vec::new();
-            // 前缀顺序: F3 (legacy) 必须在 REX 之前, 否则 REX 字节被当成指令
-            ins.push(0xF3);
-            if rex != 0 {
-                ins.push(rex);
-            }
-            ins.extend_from_slice(&[0x0F, 0x10, modrm | ((xmm & 7) << 3), sib]);
+            // P11 Bucket AE: movss xmm0, [r11 + idx*scale] via typed simd_mov_mem_base_sib.
+            // elem_size_to_sib_scale: 2->2,4->4,8->8,else->1 (与上面 sib_scale 一致).
+            let sib_scale: u8 = match elem_size { 2 => 2, 4 => 4, 8 => 8, _ => 1 };
             self.emit_seg(seg);
-            self.emit_insn(&Insn::raw_bytes(&ins));
+            let _ = self.emit_insn(&Insn::simd_mov_mem_base_sib(
+                false,
+                crate::codegen::x86_64::opcode::SimdWidth::SS,
+                0, 11, idx_reg, sib_scale,
+            ));
         } else if is_double {
-            let xmm = 0u8;
-            let mut rex = 0x41u8; // REX.B: SIB base=r11 (REX 前缀必须 0x40-0x4F)
-            if xmm >= 8 {
-                rex |= 0x04;
-            }
-            if idx_reg >= 8 {
-                rex |= 0x02;
-            }
-            let mut ins = Vec::new();
-            // 前缀顺序: F2 (legacy) 必须在 REX 之前, 否则 REX 字节被当成指令
-            ins.push(0xF2);
-            if rex != 0 {
-                ins.push(rex);
-            }
-            ins.extend_from_slice(&[0x0F, 0x10, modrm | ((xmm & 7) << 3), sib]);
+            // P11 Bucket AE: movsd xmm0, [r11 + idx*scale] via typed simd_mov_mem_base_sib.
+            let sib_scale: u8 = match elem_size { 2 => 2, 4 => 4, 8 => 8, _ => 1 };
             self.emit_seg(seg);
-            self.emit_insn(&Insn::raw_bytes(&ins));
+            let _ = self.emit_insn(&Insn::simd_mov_mem_base_sib(
+                false,
+                crate::codegen::x86_64::opcode::SimdWidth::SD,
+                0, 11, idx_reg, sib_scale,
+            ));
         } else {
             // 按 elem_size 和符号性选加载指令:
             // signed: movsbq/movswq/movsxd (符号扩展)
