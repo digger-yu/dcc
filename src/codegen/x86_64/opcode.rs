@@ -704,55 +704,71 @@ impl X86_64Opcode {
                 Some(out)
             }
             X86_64Opcode::Lea { dst, mem, rip_relative } => {
-                // 步骤 2b: 收敛 emit_lea_r13. 形态限定为 LEA reg64, [base+disp];
-                // 不支持 index/seg/rip_relative (rip 相对由 emit_lea_sym 单独处理).
-                //
-                // 原手写 (instructions.rs::emit_lea_r13):
-                //   49|rex_r, 0x8D, <modrm>, [disp8 | disp32]
-                // 其中 base 固定是 r13=13:
-                //   disp8:  modrm = 0x45 | ((dst&7)<<3)            (mod=01, r/m=5)
-                //   disp32: modrm = 0x85 | ((dst&7)<<3)            (mod=10, r/m=5)
-                // REX.B=1 因为 base=r13 (>=8), REX.R=1 因为 dst>=8, REX.W=0 因为 LEA
-                // 本身就是 64-bit 地址运算 (不需要 REX.W; 原代码就是 0x49 不带 W).
+                // P11 Bucket P: 扩展 Lea.encode() 支持 SIB index.
+                // 已有形态: LEA reg64, [base+disp] (无 index, base != rsp/r12).
+                // 新增形态: LEA reg64, [base + index*scale + disp] (scale=1 无 disp).
+                //   - REX: W=1(B64) R=dst>=8 X=index>=8 B=base>=8.
+                //   - ModRM: mod=00(无 disp), reg=dst, r/m=100(=SIB follow).
+                //   - SIB: scale<<6 | (index&7)<<3 | (base&7).
                 let (Operand::Reg(dst_idx, Width::B64), mem) = (dst, mem) else {
                     return None;
                 };
-                if mem.index.is_some() || mem.seg.is_some() || *rip_relative {
+                if mem.seg.is_some() || *rip_relative {
                     return None;
                 }
                 let base = mem.base?;
-                if base == 4 || base == 12 {
-                    // rsp/r12 需要 SIB — 本步不支持, 回退手写.
-                    return None;
-                }
                 let disp = mem.disp;
-                // 复用 emit_lea_r13 分支: disp=0 且 base==rbp/13 时 mod=00 会被解释为
-                // rip 相对, 但原代码只在 fits_disp32(off) 分支里发 modrm — 意味着 off=0
-                // 且 base=5 时也走 mod=01 (disp=0). 我们保持与原代码一致: off=0 走
-                // disp8(=0). 这对 rbp/r13 是必须的 (否则变成 rip 相对).
-                let (modrm_mod, disp_bytes): (u8, &[u8]) = if i8::try_from(disp).is_ok() {
-                    (1, &disp.to_le_bytes()[..1])
-                } else {
-                    (2, &disp.to_le_bytes()[..4])
-                };
-                let mut rex: u8 = 0x40; // 基础 REX 前缀. W 由调用方指定 (B64 → W=1).
+                let mut rex: u8 = 0x40;
                 if *dst_idx >= 8 {
                     rex |= 0x04; // REX.R
                 }
                 if base >= 8 {
                     rex |= 0x01; // REX.B
                 }
-                // 对 B64 宽度补 REX.W=1 (匹配原 emit_lea_r13 手写 0x49).
-                if matches!(dst, Operand::Reg(_, Width::B64)) {
-                    rex |= 0x08;
+                rex |= 0x08; // REX.W=1 for B64 lea
+
+                // 路径 A: 无 index, 且 base != rsp/r12 — 原有 bp+disp 逻辑.
+                if mem.index.is_none() && base != 4 && base != 12 {
+                    let (modrm_mod, disp_bytes): (u8, &[u8]) = if i8::try_from(disp).is_ok() {
+                        (1, &disp.to_le_bytes()[..1])
+                    } else {
+                        (2, &disp.to_le_bytes()[..4])
+                    };
+                    let modrm = (modrm_mod << 6) | ((*dst_idx & 7) << 3) | (base & 7);
+                    let mut out = Vec::with_capacity(8);
+                    out.push(rex);
+                    out.push(0x8D);
+                    out.push(modrm);
+                    out.extend_from_slice(disp_bytes);
+                    Some(out)
+                } else if let Some((index_idx, scale)) = mem.index {
+                    // 路径 B: 有 index — SIB. 本步支持 disp=0, scale∈{1,2,4,8}.
+                    if disp != 0 {
+                        return None;
+                    }
+                    let sc_bits = match scale {
+                        1 => 0u8,
+                        2 => 1,
+                        4 => 2,
+                        8 => 3,
+                        _ => return None,
+                    };
+                    if index_idx >= 8 {
+                        rex |= 0x02; // REX.X
+                    }
+                    // modrm: mod=00, reg=dst, r/m=100 (SIB follows).
+                    let modrm = ((*dst_idx & 7) << 3) | 0x04;
+                    let sib = (sc_bits << 6) | ((index_idx & 7) << 3) | (base & 7);
+                    let mut out = Vec::with_capacity(6);
+                    out.push(rex);
+                    out.push(0x8D);
+                    out.push(modrm);
+                    out.push(sib);
+                    Some(out)
+                } else {
+                    // base == rsp/r12 且无 index — 仍走手写兜底.
+                    None
                 }
-                let modrm = (modrm_mod << 6) | ((*dst_idx & 7) << 3) | (base & 7);
-                let mut out = Vec::with_capacity(8);
-                out.push(rex);
-                out.push(0x8D);
-                out.push(modrm);
-                out.extend_from_slice(disp_bytes);
-                Some(out)
             }
             X86_64Opcode::UnaryRm { op, width, dst } => {
                 // 步骤 2c: 收敛 increment() / emit_neg() 这类"单 reg 目的"形态.
@@ -3868,6 +3884,57 @@ mod tests {
             mem: Some(MemOperand { disp: 0x1C, base: Some(7), index: None, seg: None }),
         };
         assert_eq!(o.encode(), Some(vec![0xDD, 0x47, 0x1C]));
+    }
+
+    // ---- Lea SIB index (P11 Bucket P) ----
+
+    #[test]
+    fn lea_rax_rdx_rax_sib_scale1() {
+        // lea rax, (%rdx,%rax): REX.W 48 8D 04 02
+        // rex: W=1, R=0(dst=rax=0), X=0(index=rax=0), B=0(base=rdx=2)
+        // modrm: mod=00, reg=0, r/m=100(SIB) → 0x04
+        // sib: scale=0(×1), index=rax=0, base=rdx=2 → 0x02
+        let o = X86_64Opcode::Lea {
+            dst: reg(0, Width::B64),
+            mem: MemOperand { disp: 0, base: Some(2), index: Some((0, 1)), seg: None },
+            rip_relative: false,
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x8D, 0x04, 0x02]));
+    }
+
+    #[test]
+    fn lea_r11_r11_r10_sib_scale1() {
+        // lea r11, [r11+r10]: REX.WRXB 4F 8D 1C 13
+        // rex: W=1 R=1(dst=r11=11>8) X=1(index=r10=10>8) B=1(base=r11=11>8)
+        //   = 0x40 | 0x08 | 0x04 | 0x02 | 0x01 = 0x4F
+        // modrm: mod=00 reg=3(dst&7=3) r/m=100 → 0x1C
+        // sib: scale=0, index=2(r10&7=2), base=3(r11&7=3) → 0x13
+        // 注: nested.rs 里写死的 0x4D 对应 dst=r10(非 r11); 当 dst=r11 时 REX.R=1.
+        let o = X86_64Opcode::Lea {
+            dst: reg(11, Width::B64),
+            mem: MemOperand { disp: 0, base: Some(11), index: Some((10, 1)), seg: None },
+            rip_relative: false,
+        };
+        let got = o.encode();
+        assert_eq!(got, Some(vec![0x4F, 0x8D, 0x1C, 0x13]), "got {:?}", got);
+    }
+
+    #[test]
+    fn lea_rax_r13_r11_sib_scale1() {
+        // lea rax, [r13+r11]: REX.WXB 4B 8D 04 1D
+        // rex: W=1 R=0(dst=rax=0) X=1(index=r11=11>8) B=1(base=r13=13>8)
+        //   = 0x40 | 0x08 | 0x02 | 0x01 = 0x4B
+        // modrm: mod=00 reg=0(dst=rax=0) r/m=100 → 0x04
+        // sib: scale=0(×1), index=3(r11&7=3), base=5(r13&7=5) → 0x1D
+        // 注: 原 nested.rs 里写死的 0x49/0x1C/D3 对应 base=r11 (非 r13),
+        // 那里 dst=rax=0, base=r11=11, index=r10=10 — 是另一个形态.
+        let o = X86_64Opcode::Lea {
+            dst: reg(0, Width::B64),
+            mem: MemOperand { disp: 0, base: Some(13), index: Some((11, 1)), seg: None },
+            rip_relative: false,
+        };
+        let got = o.encode();
+        assert_eq!(got, Some(vec![0x4B, 0x8D, 0x04, 0x1D]), "got {:?}", got);
     }
 }
 

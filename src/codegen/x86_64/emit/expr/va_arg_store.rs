@@ -8,6 +8,7 @@ use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
 use crate::codegen::x86_64::asm::*;
 use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::opcode::{MemOperand, Operand, X86_64Opcode};
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::*;
 use crate::const_eval::{self, ConstValue};
@@ -522,7 +523,18 @@ impl Codegen {
                     crate::codegen::shared::asm_operand::Width::B64, 2, 1, 16));
             },
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x04, 0x02])); // lea rax, (%rdx,%rax)
+        // P11 Bucket P: lea rax, (%rdx,%rax) → typed Lea SIB.
+        let insn = Insn::new(
+            X86_64Opcode::Lea {
+                dst: Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                mem: MemOperand { disp: 0, base: Some(2), index: Some((0, 1)), seg: None },
+                rip_relative: false,
+            },
+            &[],
+        );
+        if !self.emit_insn(&insn) {
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x04, 0x02])); // 兜底
+        }
         match loc {
             VaListLoc::Slot(off) => {
                 self.emit_insn(&Insn::raw_bytes(&[0x41, 0x83, 0x85])); // add dword [r13+disp32], 16

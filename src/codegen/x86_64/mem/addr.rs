@@ -6,6 +6,8 @@
 use crate::ast::*;
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::opcode::{MemOperand, Operand, X86_64Opcode};
+use crate::codegen::shared::asm_operand::Width;
 
 impl Codegen {
     /// 计算任意 lvalue 表达式的地址到 rax (dst != 0 时再 mov).
@@ -32,7 +34,18 @@ impl Codegen {
                             self.emit_insn(&Insn::raw_bytes(&(ioff as i32).to_le_bytes()));
                         } else {
                             self.mov_imm(10, ioff as i128);
-                            self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x8D, 0x1C, 0xD3]));
+                            // lea r11, [r11+r10] — P11 Bucket P typed Lea SIB.
+                            let insn = Insn::new(
+                                X86_64Opcode::Lea {
+                                    dst: Operand::Reg(11, Width::B64),
+                                    mem: MemOperand { disp: 0, base: Some(11), index: Some((10, 1)), seg: None },
+                                    rip_relative: false,
+                                },
+                                &[],
+                            );
+                            if !self.emit_insn(&insn) {
+                                self.emit_insn(&Insn::raw_bytes(&[0x4F, 0x8D, 0x1C, 0xD3])); // 兜底
+                            }
                         }
                     }
                     if Self::type_has_vla(ty) {
