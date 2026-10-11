@@ -392,6 +392,25 @@ impl Insn {
         Insn::raw_bytes(&out)
     }
 
+    /// P11 Bucket W: mov r64, imm32 (REX.W C7 /0 id, sign-extended 32-bit
+    /// immediate). Used for small immediates (rep counters, small ints)
+    /// where the imm64 form would waste bytes. Self-absorbs REX.B for
+    /// reg_idx >= 8.
+    pub fn mov_reg_imm32_b64(reg_idx: u8, imm: i32) -> Self {
+        let mut rex: u8 = 0x48;
+        if reg_idx >= 8 {
+            rex |= 0x01;
+        }
+        // C7 /0 id: mod=11, reg field=0 (/0), r/m=reg_idx.
+        let modrm = 0xC0 | (reg_idx & 0x7);
+        let mut out = Vec::with_capacity(7);
+        out.push(rex);
+        out.push(0xC7);
+        out.push(modrm);
+        out.extend_from_slice(&imm.to_le_bytes());
+        Insn::raw_bytes(&out)
+    }
+
     /// P11: 构造 `movsd xmm_dst, xmm_src` (F2 0F 10 mod=11).
     /// 源/目的都在 xmm0..xmm15 (>=8 时带 REX.R/B 由 ModRM 低 3 位 + 前缀编码).
     pub fn movsd_xmm(dst_xmm: u8, src_xmm: u8) -> Self {
@@ -975,6 +994,21 @@ mod tests {
         assert_eq!(
             Insn::idiv_rm_reg_b64(8).encode_bytes(),
             Some(vec![0x49, 0xF7, 0xF8]),
+        );
+    }
+
+    /// P11 Bucket W: mov_reg_imm32_b64 = REX.W C7 /0 id.
+    #[test]
+    fn mov_reg_imm32_b64_basic() {
+        // mov rcx, 0x10: 48 C7 C1 10 00 00 00
+        assert_eq!(
+            Insn::mov_reg_imm32_b64(1, 0x10).encode_bytes(),
+            Some(vec![0x48, 0xC7, 0xC1, 0x10, 0x00, 0x00, 0x00]),
+        );
+        // mov r8, 5: REX.W+B, C7, C0 (mod=11, /0, r/m=0 with REX.B), 05 00 00 00
+        assert_eq!(
+            Insn::mov_reg_imm32_b64(8, 5).encode_bytes(),
+            Some(vec![0x49, 0xC7, 0xC0, 0x05, 0x00, 0x00, 0x00]),
         );
     }
 }
