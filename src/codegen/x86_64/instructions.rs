@@ -1063,25 +1063,13 @@ impl Codegen {
             return;
         }
         // 兜底 (理论上本形态恒命中, 仅当 encode 返回 None 时走).
-        if sz == 1 {
-            let rex = 0x40u8 | if reg >= 8 { 0x01 } else { 0 };
-            self.emit_insn(&Insn::raw_bytes(&[rex, 0xFE, 0xC0 | (reg & 7)]));
-        } else if sz == 2 {
-            if reg >= 8 {
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x41, 0xFF, 0xC0 | (reg & 7)]));
-            } else {
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0xFF, 0xC0 | (reg & 7)]));
-            }
-        } else if sz == 4 {
-            if reg >= 8 {
-                self.emit_insn(&Insn::raw_bytes(&[0x41, 0xFF, 0xC0 | (reg & 7)]));
-            } else {
-                self.emit_insn(&Insn::raw_bytes(&[0xFF, 0xC0 | (reg & 7)]));
-            }
-        } else {
-            let rex = if reg >= 8 { 0x49 } else { 0x48 };
-            self.emit_insn(&Insn::raw_bytes(&[rex, 0xFF, 0xC0 | (reg & 7)]));
-        }
+        let width = match sz {
+            1 => Width::B8,
+            2 => Width::B16,
+            4 => Width::B32,
+            _ => Width::B64,
+        };
+        self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Inc, width, reg));
     }
 
     // ========================================================================
@@ -2703,22 +2691,40 @@ impl Codegen {
         self.emit_insn(&Insn::raw_bytes(&imm.to_le_bytes()));
     }
     pub(crate) fn emit_store_reg_mem(&mut self, base: u8, disp: i32, src: u8) {
-        let mut rex: u8 = 0x48;
-        if src >= 8 {
-            rex |= 0x04; // REX.R
-        }
-        if base >= 8 {
-            rex |= 0x01; // REX.B
-        }
-        let rm = base & 7;
-        if disp == 0 && rm != 5 {
-            self.emit_insn(&Insn::raw_bytes(&[rex, 0x89, ((src & 7) << 3) | rm]));
-        } else if disp.abs() < 128 {
-            self.emit_insn(&Insn::raw_bytes(&[rex, 0x89, 0x40 | ((src & 7) << 3) | rm]));
-            self.emit_insn(&Insn::raw_bytes(&(disp as i8).to_le_bytes()));
-        } else {
-            self.emit_insn(&Insn::raw_bytes(&[rex, 0x89, 0x80 | ((src & 7) << 3) | rm]));
-            self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes()));
+        // B64 reg->mem store. 手写约定 disp=0 && base=rbp(5) 走 mod=01 disp8=0
+        // (非 rip-relative), 与 MovRm 现有编码一致.
+        let insn = Insn::new(
+            X86_64Opcode::MovRm {
+                width: Width::B64,
+                dst: OpcodeOperand::Mem(crate::codegen::x86_64::opcode::MemOperand {
+                    disp,
+                    base: Some(base),
+                    index: None,
+                    seg: None,
+                }),
+                src: OpcodeOperand::Reg(src, Width::B64),
+            },
+            &[],
+        );
+        if !self.emit_insn(&insn) {
+            // 兜底: 手写原逻辑
+            let mut rex: u8 = 0x48;
+            if src >= 8 {
+                rex |= 0x04;
+            }
+            if base >= 8 {
+                rex |= 0x01;
+            }
+            let rm = base & 7;
+            if disp == 0 && rm != 5 {
+                self.emit_insn(&Insn::raw_bytes(&[rex, 0x89, ((src & 7) << 3) | rm]));
+            } else if disp.abs() < 128 {
+                self.emit_insn(&Insn::raw_bytes(&[rex, 0x89, 0x40 | ((src & 7) << 3) | rm]));
+                self.emit_insn(&Insn::raw_bytes(&(disp as i8).to_le_bytes()));
+            } else {
+                self.emit_insn(&Insn::raw_bytes(&[rex, 0x89, 0x80 | ((src & 7) << 3) | rm]));
+                self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes()));
+            }
         }
     }
     pub(crate) fn emit_string_ptr_slot(
