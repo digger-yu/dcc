@@ -543,18 +543,14 @@ impl Codegen {
                         if bf_width < 64 && bf_width > 32 {
                             let mask: u64 = if bf_width == 0 { 0 } else { (1u64 << bf_width) - 1 };
                             if mask <= 0x7FFFFFFF {
-                                let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                                self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xE0 | (dst & 7)]));
-                                self.emit_insn(&Insn::raw_bytes(&(mask as u32).to_le_bytes()));
+                                // and dst, imm32 (REX.W 81 /4 id)
+                                let _ = self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0b100, dst, mask as i64));
                             } else {
                                 let tmp = if dst != 1 { 1u8 } else { 2u8 };
-                                let rex_tmp = 0x48 | if tmp >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                                self.emit_insn(&Insn::raw_bytes(&[rex_tmp, 0xB8 | (tmp & 7)]));
-                                self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
-                                let rex = 0x48
-                                    | if dst >= 8 { 0x44 } else { 0 }
-                                    | if tmp >= 8 { 0x04 } else { 0 };
-                                self.emit_insn(&Insn::raw_bytes(&[rex, 0x21, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
+                                // movabs tmp, imm64
+                                let _ = self.emit_insn(&Insn::movabs_reg_imm64(tmp, mask));
+                                // and dst, tmp
+                                let _ = self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::And, Width::B64, dst, tmp));
                             }
                         }
                     }
@@ -787,14 +783,12 @@ impl Codegen {
                                 Type::Bool | Type::UChar | Type::UShort => false,
                                 _ => true,
                             };
-                            // reg 与 r/m 同为 dst: dst >= r8 时 REX 需同时置 R|B
-                            let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            let modrm = 0xC0 | ((dst & 7) << 3) | (dst & 7);
+                            // reg 与 r/m 同为 dst: movsx/movzx reflexive 自反 ModRM.
                             match (l_sz, l_signed) {
-                                (1, true) => { let _ = self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xBE, modrm])); },
-                                (1, false) => { let _ = self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xB6, modrm])); },
-                                (2, true) => { let _ = self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xBF, modrm])); },
-                                (2, false) => { let _ = self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xB7, modrm])); },
+                                (1, true) => { let _ = self.emit_insn(&Insn::mov_ext(true, Width::B8, Width::B64, dst, dst)); },
+                                (1, false) => { let _ = self.emit_insn(&Insn::mov_ext(false, Width::B8, Width::B64, dst, dst)); },
+                                (2, true) => { let _ = self.emit_insn(&Insn::mov_ext(true, Width::B16, Width::B64, dst, dst)); },
+                                (2, false) => { let _ = self.emit_insn(&Insn::mov_ext(false, Width::B16, Width::B64, dst, dst)); },
                                 _ => {},
                             }
                         }
@@ -1293,7 +1287,8 @@ impl Codegen {
                         let val_off = (-16 - depth * 16) as i8; // 值槽
                                                                 // rax = 容器地址
                                                                 // 保存地址到帧临时槽1: [r13 + addr_off]
-                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x45, addr_off as u8])); // mov [r13+addr_off], rax
+                        // mov [r13+addr_off], rax (r13=13)
+                        self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 13, addr_off as i32));
                                                                         // 加载当前容器值 (结果统一放入 rax)
                         match container_size {
                             4 => { let _ = self.emit_insn(&Insn::new(
@@ -1325,20 +1320,18 @@ impl Codegen {
                 &[],
             )); }, // mov rax, [rax]
                             2 => {
-                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x00])); // mov ax, [rax]
-                                // movzwq eax, eax
-                                self.emit_insn(&Insn::mov_ext(
-                                    false,
-                                    crate::codegen::shared::asm_operand::Width::B16,
-                                    crate::codegen::shared::asm_operand::Width::B64,
-                                    0, 0,
-                                ));
-                            }, // movzx eax, ax
-                            1 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x00])); }, // movzx eax, byte [rax]
+                                // mov ax, [rax]; movzx rax, ax
+                                let _ = self.emit_insn(&Insn::mov_rm_mem(true, Width::B16, 0, 0, 0));
+                                self.emit_insn(&Insn::mov_ext(false, Width::B16, Width::B64, 0, 0));
+                            },
+                            1 => {
+                                // movzx rax, byte [rax]
+                                let _ = self.emit_insn(&Insn::mov_ext_mem(false, Width::B8, Width::B64, 0, 0, 0));
+                            },
                             _ => {},
                         }
                         // 保存容器值到帧临时槽2: [r13 + val_off]
-                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x45, val_off as u8])); // mov [r13+val_off], rax
+                        self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 13, val_off as i32));
                                                                        // 计算右值 (递增嵌套深度, 防止内部位域 RMW 覆盖本层帧槽)
                         self.bf_rmw_depth += 1;
                         self.gen_expr(r, Self::EVAL_BASE); // rax = 新值
@@ -1347,27 +1340,13 @@ impl Codegen {
                         if bw < 64 {
                             let mask: u64 = (1u64 << bw) - 1;
                             if mask <= 0xFFFFFFFF {
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x25])); // and eax, imm32
-                                self.emit_insn(&Insn::raw_bytes(&(mask as u32).to_le_bytes()));
+                                // and eax, imm32 (REX.W 81 /4 id, 但 REX.W 不影响 imm32 形式；
+                                // 实际 x86-64: 48 25 id = and rax, sign-extended imm32 — 与 alu_rm_reg_imm32_b64 一致)
+                                let _ = self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0b100, 0, mask as i64));
                             } else {
                                 // >32 位掩码: movabs rdx, mask; and rax, rdx
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xBA])); // movabs rdx, imm64
-                                self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
-                                // P11: and rax, rdx via typed opcode.
-                                {
-                                    let insn = Insn::new(
-                                        X86_64Opcode::AluRm {
-                                            op: AluOp::And,
-                                            width: Width::B64,
-                                            dst: OpcodeOperand::Reg(0, Width::B64),
-                                            src: OpcodeOperand::Reg(2, Width::B64),
-                                        },
-                                        &[],
-                                    );
-                                    if !self.emit_insn(&insn) {
-                                        self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B64, 0, 2)); // and rax, rdx
-                                    }
-                                }
+                                let _ = self.emit_insn(&Insn::movabs_reg_imm64(2, mask));
+                                let _ = self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::And, Width::B64, 0, 2));
                             }
                         }
                         // 左移到位置: shl rax, bit_off
@@ -1390,7 +1369,7 @@ impl Codegen {
                         // rax = 移位后的新值
                         // 重新从内存加载容器值 (RHS 求值可能已修改内存中的容器)
                         // rcx = [r13 + addr_off] (地址)
-                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x4D, addr_off as u8])); // mov rcx, [r13+addr_off]
+                        self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 1, 13, addr_off as i32)); // mov rcx, [r13+addr_off]
                                                                         // rcx = [rcx] (从内存重新加载容器)
                         match container_size {
                             4 => { let _ = self.emit_insn(&Insn::new(
@@ -1428,16 +1407,13 @@ impl Codegen {
                 &[],
             )); }, // mov rcx, [rcx]
                             2 => {
-                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x09]));
-                                // movzwq ecx, ecx
-                                self.emit_insn(&Insn::mov_ext(
-                                    false,
-                                    crate::codegen::shared::asm_operand::Width::B16,
-                                    crate::codegen::shared::asm_operand::Width::B64,
-                                    1, 1,
-                                ));
+                                // movzx rcx, word [rcx]
+                                let _ = self.emit_insn(&Insn::mov_ext_mem(false, Width::B16, Width::B64, 1, 1, 0));
                             },
-                            1 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x09])); },
+                            1 => {
+                                // movzx rcx, byte [rcx]
+                                let _ = self.emit_insn(&Insn::mov_ext_mem(false, Width::B8, Width::B64, 1, 1, 0));
+                            },
                             _ => {},
                         }
                         // 清除目标位: inv_mask = ~(((1<<bw)-1) << bit_off)
@@ -1449,42 +1425,13 @@ impl Codegen {
                             self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 1, inv_mask as i64)); // and rcx, imm32
                         } else {
                             // >32 位: movabs rdx, inv_mask; and rcx, rdx
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xBA])); // movabs rdx, imm64
-                            self.emit_insn(&Insn::raw_bytes(&inv_mask.to_le_bytes()));
-                            // P11: and rcx, rdx via typed opcode.
-                            {
-                                let insn = Insn::new(
-                                    X86_64Opcode::AluRm {
-                                        op: AluOp::And,
-                                        width: Width::B64,
-                                        dst: OpcodeOperand::Reg(1, Width::B64),
-                                        src: OpcodeOperand::Reg(2, Width::B64),
-                                    },
-                                    &[],
-                                );
-                                if !self.emit_insn(&insn) {
-                                    self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B64, 1, 2)); // and rcx, rdx
-                                }
-                            }
+                            let _ = self.emit_insn(&Insn::movabs_reg_imm64(2, inv_mask));
+                            let _ = self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::And, Width::B64, 1, 2));
                         }
                         // or rcx, rax
-                        // P11: or rcx, rax via typed opcode.
-                        {
-                            let insn = Insn::new(
-                                X86_64Opcode::AluRm {
-                                    op: AluOp::Or,
-                                    width: Width::B64,
-                                    dst: OpcodeOperand::Reg(1, Width::B64),
-                                    src: OpcodeOperand::Reg(0, Width::B64),
-                                },
-                                &[],
-                            );
-                            if !self.emit_insn(&insn) {
-                                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Or, crate::codegen::shared::asm_operand::Width::B64, 1, 0)); // or rcx, rax
-                            }
-                        }
+                        let _ = self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::Or, Width::B64, 1, 0));
                                                         // 加载地址: rdx = [r13 + addr_off]
-                        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x55, addr_off as u8])); // mov rdx, [r13+addr_off]
+                        self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 2, 13, addr_off as i32)); // mov rdx, [r13+addr_off]
                                                                         // 存储容器 (结果在 rcx 中)
                         match container_size {
                             4 => { let _ = self.emit_insn(&Insn::new(
@@ -1521,8 +1468,8 @@ impl Codegen {
                 },
                 &[],
             )); }, // mov [rdx], rcx
-                            2 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x0A])); }, // mov [rdx], cx
-                            1 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x88, 0x0A])); },       // mov [rdx], cl
+                            2 => { let _ = self.emit_insn(&Insn::mov_rm_mem(false, Width::B16, 1, 2, 0)); }, // mov [rdx], cx
+                            1 => { let _ = self.emit_insn(&Insn::mov_rm_mem(false, Width::B8, 1, 2, 0)); },      // mov [rdx], cl
                             _ => {},
                         }
                         // 位域赋值表达式的结果 = 截断并符号扩展后的值 (C11 6.5.16p3)
@@ -1531,8 +1478,8 @@ impl Codegen {
                             let f = field_info.as_ref().unwrap();
                             let is_signed = Self::is_signed_int(&f.ty);
                             // rdx = [r13 + addr_off] (地址)
-                            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x55, addr_off as u8])); // mov rdx, [r13+addr_off]
-                                                                            // rdx = [rdx] (重新加载容器)
+                            self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 2, 13, addr_off as i32)); // mov rdx, [r13+addr_off]
+                                                            // rdx = [rdx] (重新加载容器)
                             match container_size {
                                 4 => { let _ = self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -1569,16 +1516,13 @@ impl Codegen {
                 &[],
             )); }, // mov rdx, [rdx]
                                 2 => {
-                                    self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x12]));
-                                    // movzwq edx, edx
-                                    self.emit_insn(&Insn::mov_ext(
-                                        false,
-                                        crate::codegen::shared::asm_operand::Width::B16,
-                                        crate::codegen::shared::asm_operand::Width::B64,
-                                        2, 2,
-                                    ));
+                                    // movzx rdx, word [rdx]
+                                    let _ = self.emit_insn(&Insn::mov_ext_mem(false, Width::B16, Width::B64, 2, 2, 0));
                                 },
-                                1 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x12])); },
+                                1 => {
+                                    // movzx rdx, byte [rdx]
+                                    let _ = self.emit_insn(&Insn::mov_ext_mem(false, Width::B8, Width::B64, 2, 2, 0));
+                                },
                                 _ => {},
                             }
                             // shr rdx, bit_off
@@ -1603,29 +1547,9 @@ impl Codegen {
                                 if mask <= 0xFFFFFFFF {
                                     self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 2, mask as i64)); // and rdx, imm32
                                 } else {
-                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xBA])); // movabs rdx, mask
-                                    self.emit_insn(&Insn::raw_bytes(&mask.to_le_bytes()));
-                                    // re-load address for the and
-                                    self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x45, addr_off as u8])); // mov rax, [r13+addr_off]
-                                                                                    // Actually this path is complex; for bw<=63 mask fits in 32 bits
-                                                                                    // since (1<<63)-1 > u32::MAX but bw<64 means bw<=63
-                                                                                    // (1u64<<63)-1 = 0x7FFFFFFFFFFFFFFF which doesn't fit in u32
-                                                                                    // Fall through to movabs path
-                                    // P11: and rdx, rax via typed opcode.
-                                    {
-                                        let insn = Insn::new(
-                                            X86_64Opcode::AluRm {
-                                                op: AluOp::And,
-                                                width: Width::B64,
-                                                dst: OpcodeOperand::Reg(2, Width::B64),
-                                                src: OpcodeOperand::Reg(0, Width::B64),
-                                            },
-                                            &[],
-                                        );
-                                        if !self.emit_insn(&insn) {
-                                            self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B64, 2, 0)); // and rdx, rax
-                                        }
-                                    }
+                                    // >32 位: movabs rax, mask; and rdx, rax
+                                    let _ = self.emit_insn(&Insn::movabs_reg_imm64(0, mask));
+                                    let _ = self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::And, Width::B64, 2, 0));
                                 }
                             }
                             // sign-extend if signed bitfield
