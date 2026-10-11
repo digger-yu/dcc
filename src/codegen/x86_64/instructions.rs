@@ -1901,14 +1901,14 @@ impl Codegen {
             let nops = alignment - pos;
             // Use multi-byte NOP sequences
             for _ in 0..nops {
-                self.emit_insn(&Insn::raw_with_gas(&[0x90], "nop"));
+                self.emit_insn(&Insn::nop());
             }
         }
     }
 
     /// Emit a single NOP.
     pub fn nop(&mut self) {
-        self.emit_insn(&Insn::raw_with_gas(&[0x90], "nop"));
+        self.emit_insn(&Insn::nop());
     }
 
     pub fn maybe_align_jump(&mut self) {
@@ -2032,8 +2032,8 @@ impl Codegen {
             return;
         }
         // add rax/eax, r10: reg=r10 → REX.R+W (0x4C)
-        let rex = if inner_sz == 8 { 0x4C } else { 0x44 };
-        self.emit_insn(&Insn::raw_bytes(&[rex, 0x01, 0xD0]));
+        let width = if inner_sz == 8 { Width::B64 } else { Width::B32 };
+        self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Add, width, 0, 10));
     }
     pub(crate) fn emit_add_r11(&mut self, inner_sz: i64) {
         // P11: AluRm{Add, reg-reg}. rax=0 (dst), r11=11 (src).
@@ -2050,8 +2050,8 @@ impl Codegen {
         if self.emit_insn(&insn) {
             return;
         }
-        let rex = if inner_sz == 8 { 0x4C } else { 0x44 };
-        self.emit_insn(&Insn::raw_bytes(&[rex, 0x01, 0xD8]));
+        let width = if inner_sz == 8 { Width::B64 } else { Width::B32 };
+        self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Add, width, 0, 11));
     }
     pub(crate) fn emit_add_rm(&mut self, inner_sz: i64, off: i64) {
         let width = if inner_sz == 8 {
@@ -2075,7 +2075,7 @@ impl Codegen {
         let aligned = (pos + alignment as u64 - 1) & !(alignment as u64 - 1);
         let pad = (aligned - pos) as usize;
         for _ in 0..pad {
-            self.emit_insn(&Insn::raw_bytes(&[0x90])); // NOP
+            self.emit_insn(&Insn::nop()); // NOP
         }
     }
     pub(crate) fn emit_and_rdx_rsi(&mut self, sz: usize) {
@@ -2099,8 +2099,8 @@ impl Codegen {
             return;
         }
         match sz {
-            1 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x40, 0x20, 0xF2])); } // and dl, sil
-            2 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x66, 0x21, 0xF2])); } // and dx, si
+            1 => { let _ = self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B8, 2, 6)); } // and dl, sil
+            2 => { let _ = self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B16, 2, 6)); } // and dx, si
             4 => { let _ = self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B32, 2, 6)); }       // and edx, esi
             _ => {
                 // P11: and rdx, rsi via typed opcode.
@@ -2549,8 +2549,40 @@ impl Codegen {
     }
     pub(crate) fn emit_mov_to_mem(&mut self, sz: usize) {
         match sz {
-            1 => self.emit_insn(&Insn::raw_bytes(&[0x40, 0x88, 0x37])), // mov [rdi], sil
-            2 => self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x37])), // mov [rdi], si
+            1 => self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B8,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(7),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        6, crate::codegen::shared::asm_operand::Width::B8
+                    ),
+                },
+                &[],
+            )), // mov [rdi], sil
+            2 => self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B16,
+                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                        crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: Some(7),
+                            index: None,
+                            seg: None,
+                        }
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        6, crate::codegen::shared::asm_operand::Width::B16
+                    ),
+                },
+                &[],
+            )),       // mov [rdi], si
             4 => self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,
@@ -2608,7 +2640,7 @@ impl Codegen {
             return;
         }
         match sz {
-            1 => self.emit_insn(&Insn::raw_bytes(&[0x40, 0xF6, 0xDE])), // neg sil (B8 handled by caller)
+            1 => self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B8, 6)), // neg sil
             2 => self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B16, 6)), // neg si
             4 => self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B32, 6)), // neg esi
             _ => self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 6)), // neg rsi
@@ -2635,8 +2667,8 @@ impl Codegen {
             return;
         }
         match sz {
-            1 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x40, 0x08, 0xF2])); } // or dl, sil
-            2 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x66, 0x09, 0xF2])); } // or dx, si
+            1 => { let _ = self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Or, crate::codegen::shared::asm_operand::Width::B8, 2, 6)); } // or dl, sil
+            2 => { let _ = self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Or, crate::codegen::shared::asm_operand::Width::B16, 2, 6)); } // or dx, si
             4 => { let _ = self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Or, crate::codegen::shared::asm_operand::Width::B32, 2, 6)); }       // or edx, esi
             _ => {
                 // P11: or rdx, rsi via typed opcode.
@@ -2821,8 +2853,8 @@ impl Codegen {
             return;
         }
         match sz {
-            1 => self.emit_insn(&Insn::raw_bytes(&[0x40, 0x30, 0xF2])), // xor dl, sil
-            2 => self.emit_insn(&Insn::raw_bytes(&[0x66, 0x31, 0xF2])), // xor dx, si
+            1 => self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B8, 2, 6)), // xor dl, sil
+            2 => self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B16, 2, 6)), // xor dx, si
             4 => self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B32, 2, 6)),       // xor edx, esi
             _ => self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Xor, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B64)}, &[])), // xor rdx, rsi
         };

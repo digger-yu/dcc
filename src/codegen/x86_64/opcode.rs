@@ -1033,8 +1033,11 @@ impl X86_64Opcode {
                 }
                 // 判断是否需要真的发 REX 前缀: 没有任何字段被扩展, 且 width!=B64,
                 // 那就保持裸 opcode (避免多一个 0x40 前缀). B64 总是发 REX.W.
+                // B8 特殊: reg 字段 ∈ {4,5,6,7} 是 spl/bpl/sil/dil 高 8 字节, 必须 REX.
+                let need_high_byte = matches!(width, Width::B8) && (reg_idx >= 4 || base >= 4);
                 let need_rex = need_rex_w || reg_idx >= 8 || base >= 8
-                    || index_reg.map_or(false, |ir| ir >= 8);
+                    || index_reg.map_or(false, |ir| ir >= 8)
+                    || need_high_byte;
 
                 // ModRM / SIB / disp: 有 index 时必须发 SIB; 无 index 时仅 base=rsp(4)
                 // 必须发 SIB; 其余 base 走普通 ModRM.
