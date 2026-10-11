@@ -161,16 +161,18 @@ impl Codegen {
                                 if stride > 1 {
                                     if stride.is_power_of_two() {
                                         let shift = (stride.trailing_zeros() as u8).min(31);
-                                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xE1, shift])); // shl rcx, shift
+                                        self.emit_insn(&Insn::shift_reg_imm8_c1_b64(0b100, 1, shift)); // shl rcx, shift
                                     } else {
                                         self.imul_imm(1, stride as i128); // imul rcx, rcx, stride
                                     }
                                 }
                             }
                             // dst += rcx
-                            // add r/m64=dst(B), reg=rcx(R): dst>=8 需 REX.B(0x01)
-                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x01, 0xC0 | ((1 & 7) << 3) | (dst & 7)]));
+                            self.emit_insn(&Insn::alu_rm_reg_reg(
+                                crate::codegen::x86_64::opcode::AluOp::Add,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                dst, 1,
+                            ));
                             // 下降到元素类型
                             cur_ty = elem.base.clone();
                         }
