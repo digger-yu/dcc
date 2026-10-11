@@ -851,6 +851,9 @@ impl X86_64Opcode {
                     // P11 Bucket N5: IMUL r32/r64 (single-operand, RAX implicit) = F7 /5.
                     // B8 uses F6 like MUL/NOT/NEG (byte form).
                     UnaryOp::Imul => (if is_byte { 0xF6 } else { 0xF7 }, 0b101),
+                    // P11 Bucket O: DIV r/m = F7 /6; IDIV r/m = F7 /7. B8 uses F6.
+                    UnaryOp::Div => (if is_byte { 0xF6 } else { 0xF7 }, 0b110),
+                    UnaryOp::Idiv => (if is_byte { 0xF6 } else { 0xF7 }, 0b111),
                     _ => return None,
                 };
                 let mut out = Vec::with_capacity(4);
@@ -4339,6 +4342,39 @@ mod tests {
             dst: reg(1, Width::B8),
         };
         assert_eq!(o.encode(), Some(vec![0x40, 0xF6, 0xE9]));
+    }
+
+    #[test]
+    fn unary_div_ecx_b64() {
+        // div rcx: REX.W=48 F7 /6 (modrm = 0xC0 | 0x30 | 1 = 0xF1) → 48 F7 F1
+        let o = X86_64Opcode::UnaryRm {
+            op: UnaryOp::Div,
+            width: Width::B64,
+            dst: reg(1, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0xF7, 0xF1]));
+    }
+
+    #[test]
+    fn unary_idiv_ecx_b32() {
+        // idiv ecx: F7 /7 (modrm = 0xC0 | 0x38 | 1 = 0xF9) → F7 F9
+        let o = X86_64Opcode::UnaryRm {
+            op: UnaryOp::Idiv,
+            width: Width::B32,
+            dst: reg(1, Width::B32),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF7, 0xF9]));
+    }
+
+    #[test]
+    fn unary_idiv_edi_b64() {
+        // idiv rdi: REX.W=48 F7 /7 (modrm = 0xC0 | 0x38 | 7 = 0xFF) → 48 F7 FF
+        let o = X86_64Opcode::UnaryRm {
+            op: UnaryOp::Idiv,
+            width: Width::B64,
+            dst: reg(7, Width::B64),
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0xF7, 0xFF]));
     }
 
     #[test]

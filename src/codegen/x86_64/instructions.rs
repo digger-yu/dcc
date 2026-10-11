@@ -2299,11 +2299,30 @@ impl Codegen {
         self.emit_insn(&Insn::sign_extend_rax_to_rdx(w));
     }
     pub(crate) fn emit_div_rm(&mut self, inner_sz: i64, is_signed: bool, rm32: u8) {
-        let op = if is_signed { rm32 + 8 } else { rm32 };
-        if inner_sz == 8 {
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, op]));
+        // Bucket O: rm32 is a pre-computed ModRM byte (mod=11, /6 or /7 reg field).
+        // Extract r/m = rm32 & 0x07; register numbers 0..7 only (callers use ecx/edi).
+        let reg_idx = rm32 & 0x07;
+        let width = if inner_sz == 8 {
+            crate::codegen::shared::asm_operand::Width::B64
         } else {
-            self.emit_insn(&Insn::raw_bytes(&[0xF7, op]));
+            crate::codegen::shared::asm_operand::Width::B32
+        };
+        let op = if is_signed {
+            crate::codegen::x86_64::opcode::UnaryOp::Idiv
+        } else {
+            crate::codegen::x86_64::opcode::UnaryOp::Div
+        };
+        let typed = Insn::unary_rm_reg(op, width, reg_idx);
+        if typed.encode_bytes().is_some() {
+            self.emit_insn(&typed);
+        } else {
+            // Fallback (legacy hand-written bytes).
+            let op_byte = if is_signed { rm32 + 8 } else { rm32 };
+            if inner_sz == 8 {
+                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, op_byte]));
+            } else {
+                self.emit_insn(&Insn::raw_bytes(&[0xF7, op_byte]));
+            }
         }
     }
     pub(crate) fn emit_evex_prefix(
