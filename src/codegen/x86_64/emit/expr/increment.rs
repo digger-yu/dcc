@@ -216,19 +216,19 @@ impl super::super::super::Codegen {
                     match (ty_sz, signed) {
                         (1, false) => {
                             // movzbl: zero-extend byte
-                            self.emit_insn(&Insn::raw_bytes(&[rex_b, 0x0F, 0xB6]));
+                            self.emit_insn(&Insn::mov_ext_prefix_no_modrm(rex_b, 0xB6));
                         },
                         (1, true) => {
                             // movsbl: sign-extend byte
-                            self.emit_insn(&Insn::raw_bytes(&[rex_b, 0x0F, 0xBE]));
+                            self.emit_insn(&Insn::mov_ext_prefix_no_modrm(rex_b, 0xBE));
                         },
                         (2, false) => {
                             // movzwl: zero-extend word
-                            self.emit_insn(&Insn::raw_bytes(&[rex_b, 0x0F, 0xB7]));
+                            self.emit_insn(&Insn::mov_ext_prefix_no_modrm(rex_b, 0xB7));
                         },
                         (2, true) => {
                             // movswl: sign-extend word
-                            self.emit_insn(&Insn::raw_bytes(&[rex_b, 0x0F, 0xBF]));
+                            self.emit_insn(&Insn::mov_ext_prefix_no_modrm(rex_b, 0xBF));
                         },
                         _ => {},
                     }
@@ -395,11 +395,7 @@ impl super::super::super::Codegen {
         }
         if field_off != 0 {
             let gas = format!("add ${}, %rax", field_off);
-            let bytes = vec![0x48, 0x05]
-                .into_iter()
-                .chain((field_off as i32).to_le_bytes().into_iter())
-                .collect::<Vec<u8>>();
-            self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
+            self.emit_insn(&Insn::alu_acc_imm32_b64_acc_gas(0x05, field_off as i32, &gas));
         }
         // rax = container address
         self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 13, addr_slot as i32)); // [r13+addr_slot] = addr
@@ -484,8 +480,7 @@ impl super::super::super::Codegen {
                     &[],
                 );
                 if !self.emit_insn(&insn) {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x25]));
-                    self.emit_insn(&Insn::raw_bytes(&(mask as u32).to_le_bytes()));
+                    self.emit_insn(&Insn::alu_acc_imm32_b64_acc(0x25, mask as i32));
                 }
             } else if mask <= 0xFFFFFFFF {
                 // 掩码 fits 32 位零扩展：mov ecx, mask; and rax, rcx
@@ -552,8 +547,7 @@ impl super::super::super::Codegen {
                     &[],
                 );
                 if !self.emit_insn(&insn) {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x25]));
-                    self.emit_insn(&Insn::raw_bytes(&(mask as u32).to_le_bytes()));
+                    self.emit_insn(&Insn::alu_acc_imm32_b64_acc(0x25, mask as i32));
                 }
             } else if mask <= 0xFFFFFFFF {
                 // P11: MovRm B64+Imm 会自动选择 48 B9 + imm32 零扩展短形式.
@@ -762,25 +756,13 @@ impl super::super::super::Codegen {
 
     /// 增量/减量单个寄存器 (ADD/SUB reg, immediate)
     fn emit_inc_dec_reg(&mut self, dst: u8, is_inc: bool, step: i32) {
-        // ModRM: mod=11, reg=opcode extension (/0=add, /5=sub), r/m=dst register
-        let modrm = if is_inc {
-            0xC0 | (dst & 7) // /0 (ADD): reg=000, r/m=dst&7
-        } else {
-            0xE8 | (dst & 7) // /5 (SUB): reg=101, r/m=dst&7
-        };
+        let op_ext = if is_inc { 0u8 } else { 5u8 };
         use crate::codegen::x86_64::emit::gas::{REG64 as GAS_REG64, dec_imm as gas_dec_imm};
         let mnem = if is_inc { "add" } else { "sub" };
         let reg_name = GAS_REG64[(dst & 15) as usize];
         let imm = gas_dec_imm(step as i64);
         let gas = format!("{mnem} {imm}, {reg_name}");
-        let mut bytes: Vec<u8> = Vec::new();
-        if dst < 8 {
-            bytes.extend_from_slice(&[0x48, 0x81, modrm]);
-        } else {
-            bytes.extend_from_slice(&[0x49, 0x81, modrm]);
-        }
-        bytes.extend_from_slice(&step.to_le_bytes());
-        self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
+        self.emit_insn(&Insn::alu_rm_reg_imm32_b64_full_gas(op_ext, dst, step, &gas));
     }
 
     /// 浮点增量/减量：暂不实现 - 走 gen_float_inc_dec 路径

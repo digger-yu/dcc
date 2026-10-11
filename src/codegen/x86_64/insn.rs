@@ -593,6 +593,37 @@ impl Insn {
         Insn::raw_bytes(&[rex, 0x0F, cc, modrm])
     }
 
+    /// P11 Bucket Z: encode movzx/movsx prefix (REX.B, optional REX.R if dst>=8)
+    /// plus 0F B6/B7/BE/BF, without the ModRM byte — used by upvar reload fallbacks
+    /// that emit ModRM in a separate emit_insn call. REX.B=0x01 (src/base>=8).
+    pub fn mov_ext_prefix_no_modrm(rex_b: u8, opcode: u8) -> Self {
+        Insn::raw_bytes(&[rex_b, 0x0F, opcode])
+    }
+
+    /// P11 Bucket Z: alu reg64, imm32 (REX.W 81 /0 add /5 sub) — imm32 LE.
+    /// op_ext: 0=add (/0), 5=sub (/5). REX.W=0x48, REX.B=0x01 if reg>=8.
+    pub fn alu_rm_reg_imm32_b64_full(op_ext: u8, reg_idx: u8, imm: i32) -> Self {
+        let mut rex: u8 = 0x48;
+        if reg_idx >= 8 {
+            rex |= 0x01;
+        }
+        let modrm = 0xC0 | (op_ext << 3) | (reg_idx & 7);
+        let imm32 = imm.to_le_bytes();
+        let mut out = Vec::with_capacity(7);
+        out.push(rex);
+        out.push(0x81);
+        out.push(modrm);
+        out.extend_from_slice(&imm32);
+        Insn::raw_bytes(&out)
+    }
+
+    /// P11 Bucket Z: alu reg64, imm32 with attached gas text.
+    pub fn alu_rm_reg_imm32_b64_full_gas(op_ext: u8, reg_idx: u8, imm: i32, gas: &str) -> Self {
+        let mut insn = Self::alu_rm_reg_imm32_b64_full(op_ext, reg_idx, imm);
+        insn.gas_text = Some(gas.to_string());
+        insn
+    }
+
     /// P11: 构造 `movsd xmm_dst, xmm_src` (F2 0F 10 mod=11).
     /// 源/目的都在 xmm0..xmm15 (>=8 时带 REX.R/B 由 ModRM 低 3 位 + 前缀编码).
     pub fn movsd_xmm(dst_xmm: u8, src_xmm: u8) -> Self {
@@ -1279,6 +1310,39 @@ mod tests {
         assert_eq!(
             Insn::cmovcc_reg_reg_b64(0x47, 8, 9).encode_bytes(),
             Some(vec![0x4D, 0x0F, 0x47, 0xC1]),
+        );
+    }
+
+    #[test]
+    fn mov_ext_prefix_no_modrm_basic() {
+        // movzbl (upvar reload fallback): REX.B=0x41, 0F B6
+        assert_eq!(
+            Insn::mov_ext_prefix_no_modrm(0x41, 0xB6).encode_bytes(),
+            Some(vec![0x41, 0x0F, 0xB6]),
+        );
+    }
+
+    #[test]
+    fn alu_rm_reg_imm32_b64_full_basic() {
+        // add rax, 1 (op_ext=0): 48 81 C0 01 00 00 00
+        assert_eq!(
+            Insn::alu_rm_reg_imm32_b64_full(0, 0, 1).encode_bytes(),
+            Some(vec![0x48, 0x81, 0xC0, 0x01, 0x00, 0x00, 0x00]),
+        );
+        // add rcx, 1: 48 81 C1 01 00 00 00
+        assert_eq!(
+            Insn::alu_rm_reg_imm32_b64_full(0, 1, 1).encode_bytes(),
+            Some(vec![0x48, 0x81, 0xC1, 0x01, 0x00, 0x00, 0x00]),
+        );
+        // sub rdx, 1 (op_ext=5): 48 81 EA 01 00 00 00
+        assert_eq!(
+            Insn::alu_rm_reg_imm32_b64_full(5, 2, 1).encode_bytes(),
+            Some(vec![0x48, 0x81, 0xEA, 0x01, 0x00, 0x00, 0x00]),
+        );
+        // add r8, 1: REX.W+B=49, 81 C0 (r/m=0 field, reg=0 field), 01 00 00 00
+        assert_eq!(
+            Insn::alu_rm_reg_imm32_b64_full(0, 8, 1).encode_bytes(),
+            Some(vec![0x49, 0x81, 0xC0, 0x01, 0x00, 0x00, 0x00]),
         );
     }
 }
