@@ -172,15 +172,42 @@ impl Codegen {
             if i == 0 {
                 self.load_stack(dst, off);
             } else if Self::fits_disp32(off) {
-                let rex = 0x48u8 | 0x01 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, 0x80 | ((dst & 7) << 3) | (dst & 7)]));
-                self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
+                // mov dst, [dst + off]: REX.W.RB 自反 ModRM (同一寄存器既在 reg 又在 r/m).
+                self.emit_insn(&Insn::mov_rm_mem(
+                    true,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    dst,
+                    dst,
+                    off as i32,
+                ));
             } else {
                 // 罕见: 链槽偏移超出 disp32, 用 r10 作缩放槽
                 self.mov_imm(10, off as i128);
-                // mov dst, [dst + r10]: REX.X (r10 索引) + REX.R/B (dst 扩展)
-                let rex = 0x48u8 | 0x02 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, 0x80 | ((dst & 7) << 3) | 0x04, 0x10 | (dst & 7)]));
+                // mov dst, [dst + r10]: REX.W.X.RB (自反 ModRM + SIB).
+                // base=dst, index=r10, disp=0.
+                let insn = Insn::new(
+                    X86_64Opcode::MovRm {
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B64),
+                        src: Operand::Mem(MemOperand {
+                            disp: 0,
+                            base: Some(dst),
+                            index: Some((10, 1)),
+                            seg: None,
+                        }),
+                    },
+                    &[],
+                );
+                if !self.emit_insn(&insn) {
+                    // 兜底手写
+                    let rex = 0x48u8 | 0x02 | if dst >= 8 { 0x05 } else { 0 };
+                    self.emit_insn(&Insn::raw_bytes(&[
+                        rex,
+                        0x8B,
+                        0x80 | ((dst & 7) << 3) | 0x04,
+                        0x10 | (dst & 7),
+                    ]));
+                }
             }
         }
     }
@@ -188,7 +215,11 @@ impl Codegen {
         if hops <= 0 {
             // mov r10, r13: reg 字段是 r13（REX.R），r/m 字段是 r10（REX.B）。
             // mod=11 没有 SIB，旧代码发的 0x4F 多了一个 REX.X（产物被 objdump 标成 rex.WRXB）。
-            self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x89, 0xEA]));
+            self.emit_insn(&Insn::mov_rm_reg(
+                crate::codegen::shared::asm_operand::Width::B64,
+                10,
+                13,
+            ));
             return;
         }
         self.load_frame_via_chain(10, hops, offs);
@@ -202,15 +233,37 @@ impl Codegen {
         self.load_frame_via_chain(11, hops, offs);
         let off = self.nested_tramp_offsets.get(unique).copied().unwrap_or(0);
         if Self::fits_disp32(off) {
-            let rex = 0x48u8 | 0x01 | if dst >= 8 { 0x04 } else { 0 };
-            self.emit_insn(&Insn::raw_bytes(&[rex, 0x8D, 0x80 | ((dst & 7) << 3) | 0x03]));
-            self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
+            // lea dst, [r11 + off]: REX.W.B (r11>=8), reg=dst, r/m=3.
+            let insn = Insn::new(
+                X86_64Opcode::Lea {
+                    dst: Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B64),
+                    mem: MemOperand { disp: off as i32, base: Some(11), index: None, seg: None },
+                    rip_relative: false,
+                },
+                &[],
+            );
+            if !self.emit_insn(&insn) {
+                // 兜底手写
+                let rex = 0x48u8 | 0x01 | if dst >= 8 { 0x04 } else { 0 };
+                self.emit_insn(&Insn::raw_bytes(&[rex, 0x8D, 0x80 | ((dst & 7) << 3) | 0x03]));
+                self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
+            }
         } else {
             self.mov_imm(10, off as i128);
             // lea dst, [r11 + r10]: REX.X (r10) + REX.B (r11) + REX.R (dst 扩展)
-            let rex = 0x48u8 | 0x03 | if dst >= 8 { 0x04 } else { 0 };
-            self.emit_insn(&Insn::raw_bytes(&[rex, 0x8D]));
-            self.emit_insn(&Insn::raw_bytes(&[0x80 | ((dst & 7) << 3) | 0x04, 0x10 | 0x03]));
+            let insn = Insn::new(
+                X86_64Opcode::Lea {
+                    dst: Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B64),
+                    mem: MemOperand { disp: 0, base: Some(11), index: Some((10, 1)), seg: None },
+                    rip_relative: false,
+                },
+                &[],
+            );
+            if !self.emit_insn(&insn) {
+                let rex = 0x48u8 | 0x03 | if dst >= 8 { 0x04 } else { 0 };
+                self.emit_insn(&Insn::raw_bytes(&[rex, 0x8D]));
+                self.emit_insn(&Insn::raw_bytes(&[0x80 | ((dst & 7) << 3) | 0x04, 0x10 | 0x03]));
+            }
         }
     }
     pub(crate) fn load_upvar(&mut self, reg: u8, parent_off: i64, size: usize, upvar_name: &str) {
@@ -224,11 +277,14 @@ impl Codegen {
             .unwrap_or_default();
         for &off in &intermediates {
             if Self::fits_disp32(off) {
-                // mov r11, [r11 + off]  (REX.W.RB if r11>=8)
-                let rex = 0x48u8 | if 11 >= 8 { 0x05u8 } else { 0 };
-                let modrm = 0x83 | ((11 & 7) << 3);
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, modrm]));
-                self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
+                // mov r11, [r11 + off]: REX.W.B (r11>=8), mod=10 (disp32).
+                self.emit_insn(&Insn::mov_rm_mem(
+                    true,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    11,
+                    11,
+                    off as i32,
+                ));
             } else {
                 self.mov_imm(10, off as i128);
                 // lea r11, [r11 + r10] — P11 Bucket P typed Lea SIB.
@@ -246,15 +302,39 @@ impl Codegen {
             }
         }
         if Self::fits_disp32(parent_off) {
-            let rex = 0x41 | if reg >= 8 { 0x04 } else { 0 };
-            let modrm = 0x83 | ((reg & 7) << 3);
-            match size {
-                1 => self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xB6, modrm])),
-                2 => self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0xB7, modrm])),
-                4 => self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, modrm])),
-                _ => self.emit_insn(&Insn::raw_bytes(&[rex | 0x08, 0x8B, modrm])),
+            // [reg <- [r11 + parent_off]] load.
+            // size=1: movzx reg8, byte [r11+off] (0F B6 /r)  to B64 (REX.W)
+            // size=2: movzx reg16, word [r11+off] (0F B7 /r)  to B64 (REX.W)
+            // size=4: mov reg32, dword [r11+off] (0x8B /r)    to B32 (无 REX.W)
+            // size=_: mov reg64, qword [r11+off] (0x8B /r)   to B64 (REX.W)
+            // 注: 原 REX 用 0x41+B(reg>=8) (无 REX.W) for size 1/2/4;
+            // 0x49+B(reg>=8) for size>=8. 与 typed encoder 的 (from=B8/B16/B32, to=B64)
+            // 完全同形.
+            let (sign, from) = match size {
+                1 => (false, crate::codegen::shared::asm_operand::Width::B8),
+                2 => (false, crate::codegen::shared::asm_operand::Width::B16),
+                _ => (false, crate::codegen::shared::asm_operand::Width::B32),
             };
-            self.emit_insn(&Insn::raw_bytes(&(parent_off as i32).to_le_bytes()));
+            match size {
+                1 | 2 => {
+                    self.emit_insn(&Insn::mov_ext_mem(
+                        sign,
+                        from,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        reg,
+                        11,
+                        parent_off as i32,
+                    ));
+                },
+                4 | _ => {
+                    let width = if size == 4 {
+                        crate::codegen::shared::asm_operand::Width::B32
+                    } else {
+                        crate::codegen::shared::asm_operand::Width::B64
+                    };
+                    self.emit_insn(&Insn::mov_rm_mem(true, width, reg, 11, parent_off as i32));
+                },
+            };
         } else {
             self.mov_imm(10, parent_off as i128);
             // lea r11, [r11+r10] — P11 Bucket P typed Lea SIB.
@@ -337,10 +417,14 @@ impl Codegen {
             .unwrap_or_default();
         for &off in &intermediates {
             if Self::fits_disp32(off) {
-                let rex = 0x48u8 | if 11 >= 8 { 0x05u8 } else { 0 };
-                let modrm = 0x83 | ((11 & 7) << 3);
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, modrm]));
-                self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
+                // mov r11, [r11 + off]: REX.W.B (r11>=8), mod=10 (disp32).
+                self.emit_insn(&Insn::mov_rm_mem(
+                    true,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    11,
+                    11,
+                    off as i32,
+                ));
             } else {
                 self.mov_imm(10, off as i128);
                 // lea r11, [r11+r10] — P11 Bucket P typed Lea SIB.
@@ -358,15 +442,18 @@ impl Codegen {
             }
         }
         if Self::fits_disp32(parent_off) {
-            let rex = 0x41 | if reg >= 8 { 0x04 } else { 0 };
-            let modrm = 0x83 | ((reg & 7) << 3);
-            match size {
-                1 => self.emit_insn(&Insn::raw_bytes(&[rex, 0x88, modrm])),
-                2 => self.emit_insn(&Insn::raw_bytes(&[0x66, rex, 0x89, modrm])),
-                4 => self.emit_insn(&Insn::raw_bytes(&[rex, 0x89, modrm])),
-                _ => self.emit_insn(&Insn::raw_bytes(&[rex | 0x08, 0x89, modrm])),
+            // [r11+off] <- reg store.
+            // size=1: mov byte [r11+off], reg8 (0x88 /r)
+            // size=2: mov word [r11+off], reg16 (66 0x89 /r)
+            // size=4: mov dword [r11+off], reg32 (0x89 /r, 无 REX.W)
+            // size=_: mov qword [r11+off], reg64 (REX.W 0x89 /r)
+            let width = match size {
+                1 => crate::codegen::shared::asm_operand::Width::B8,
+                2 => crate::codegen::shared::asm_operand::Width::B16,
+                4 => crate::codegen::shared::asm_operand::Width::B32,
+                _ => crate::codegen::shared::asm_operand::Width::B64,
             };
-            self.emit_insn(&Insn::raw_bytes(&(parent_off as i32).to_le_bytes()));
+            self.emit_insn(&Insn::mov_rm_mem(false, width, reg, 11, parent_off as i32));
         } else {
             self.mov_imm(10, parent_off as i128);
             // lea r11, [r11+r10] — P11 Bucket P typed Lea SIB.

@@ -1602,18 +1602,41 @@ impl Codegen {
 
     /// `mov dst, src`（`89 /r`，`/r` 的 reg 字段是**源**）。
     fn mov_r32_r32(&mut self, dst: u8, src: u8) {
-        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | (src << 3) | dst]));
+        self.emit_insn(&Insn::mov_rm_reg(
+            crate::codegen::shared::asm_operand::Width::B32,
+            dst,
+            src,
+        ));
     }
 
     /// `add dst, src`（`01 /r`）。
     fn add_r32_r32(&mut self, dst: u8, src: u8) {
-        self.emit_insn(&Insn::raw_bytes(&[0x01, 0xC0 | (src << 3) | dst]));
+        self.emit_insn(&Insn::alu_rm_reg_reg(
+            crate::codegen::x86_64::opcode::AluOp::Add,
+            crate::codegen::shared::asm_operand::Width::B32,
+            dst,
+            src,
+        ));
     }
 
     /// `mov r32, imm32`（`B8 + r`）。
     fn mov_r32_imm32(&mut self, r: u8, v: u32) {
-        self.emit_insn(&Insn::raw_bytes(&[0xB8 + r]));
-        self.emit_insn(&Insn::raw_bytes(&v.to_le_bytes()));
+        // 手写形态: B8+r + imm32 LE (无 REX 当 r<8; r>=8 走 41 B8+(r&7)).
+        // typed MovRm B32 Reg,Imm 已在 encoder L946-979 实现等价字节.
+        use crate::codegen::shared::asm_operand::Width;
+        use crate::codegen::x86_64::opcode::{Operand, X86_64Opcode};
+        let insn = Insn::new(
+            X86_64Opcode::MovRm {
+                width: Width::B32,
+                dst: Operand::Reg(r, Width::B32),
+                src: Operand::Imm(v as i64),
+            },
+            &[],
+        );
+        if !self.emit_insn(&insn) {
+            self.emit_insn(&Insn::raw_bytes(&[0xB8 + r]));
+            self.emit_insn(&Insn::raw_bytes(&v.to_le_bytes()));
+        }
     }
 
     /// `shr r32, imm8`（`C1 /5 ib`）。
@@ -1624,11 +1647,14 @@ impl Codegen {
     /// `and r32, imm32`（`81 /4 id`）。不能用 `83 /4 ib`：扩展 model 的掩码
     /// `0xf0` 与扩展 family 的 `0xff` 超出有符号 imm8 的范围。
     fn and_r32_imm32(&mut self, r: u8, v: u32) {
+        // 手写形态固定是 81 /4 id (mod=11, 4 字节 imm)。encoder 里 AluRm 只在 imm 超出 i8
+        // 时才走 81 / id; 对 imm8 范围内的值会走 83 / ib。为保持快照逐字节一致,
+        // 本函数直接发手写字节, 不走 typed 路径。
         self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE0 | r]));
         self.emit_insn(&Insn::raw_bytes(&v.to_le_bytes()));
     }
 
-    /// `cmp r32, imm32`（`81 /7 id`）。
+    /// `cmp r32, imm32`（`81 /7 id`）。同上, 手写固定 81 /7 id, 不走 typed。
     fn cmp_r32_imm32(&mut self, r: u8, v: u32) {
         self.emit_insn(&Insn::raw_bytes(&[0x81, 0xF8 | r]));
         self.emit_insn(&Insn::raw_bytes(&v.to_le_bytes()));
