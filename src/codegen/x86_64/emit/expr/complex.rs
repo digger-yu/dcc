@@ -267,7 +267,6 @@ impl Codegen {
                 // 栈布局: [rsp+0]=l.real, [rsp+inner]=l.imag,
                 //         [rsp+total]=r.real, [rsp+total+inner]=r.imag
                 let r_imag_slot = total_sz + inner_sz;
-                let add_sub: u8 = if matches!(op, BinOp::Add) { 0x03 } else { 0x2B };
                 if inner_sz == 4 {
                     // 32 位分量运算, 避免 64 位加法把实部进位带进虚部
                     self.emit_insn(&Insn::new(
@@ -287,7 +286,11 @@ impl Codegen {
                 },
                 &[],
             )); // mov eax, [rsp+0]
-                    self.emit_insn(&Insn::raw_bytes(&[add_sub, 0x44, 0x24, total_sz as u8]));
+                    self.emit_insn(&Insn::alu_rm_mem(
+                        if matches!(op, BinOp::Add) { crate::codegen::x86_64::opcode::AluOp::Add } else { crate::codegen::x86_64::opcode::AluOp::Sub },
+                        crate::codegen::shared::asm_operand::Width::B32,
+                        0, 4, total_sz as i32,
+                    ));
                     self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,
@@ -306,7 +309,11 @@ impl Codegen {
                 &[],
             )); // mov [rsp+0], eax
                     self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B32, 0, 4, inner_sz as i32)); // mov eax, [rsp+inner]
-                    self.emit_insn(&Insn::raw_bytes(&[add_sub, 0x44, 0x24, r_imag_slot as u8]));
+                    self.emit_insn(&Insn::alu_rm_mem(
+                        if matches!(op, BinOp::Add) { crate::codegen::x86_64::opcode::AluOp::Add } else { crate::codegen::x86_64::opcode::AluOp::Sub },
+                        crate::codegen::shared::asm_operand::Width::B32,
+                        0, 4, r_imag_slot as i32,
+                    ));
                     self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B32, 0, 4, inner_sz as i32)); // mov [rsp+inner], eax
                 } else {
                     self.emit_insn(&Insn::new(
@@ -323,7 +330,11 @@ impl Codegen {
                 },
                 &[],
             ));
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, add_sub, 0x44, 0x24, total_sz as u8]));
+                    self.emit_insn(&Insn::alu_rm_mem(
+                        if matches!(op, BinOp::Add) { crate::codegen::x86_64::opcode::AluOp::Add } else { crate::codegen::x86_64::opcode::AluOp::Sub },
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        0, 4, total_sz as i32,
+                    ));
                     self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B64,
@@ -342,21 +353,25 @@ impl Codegen {
                 &[],
             ));
                     self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 0, 4, inner_sz as i32));
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, add_sub, 0x44, 0x24, r_imag_slot as u8]));
+                    self.emit_insn(&Insn::alu_rm_mem(
+                        if matches!(op, BinOp::Add) { crate::codegen::x86_64::opcode::AluOp::Add } else { crate::codegen::x86_64::opcode::AluOp::Sub },
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        0, 4, r_imag_slot as i32,
+                    ));
                     self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 0, 4, inner_sz as i32));
                 }
             },
             BinOp::Add | BinOp::Sub => {
-                let op_code = if matches!(op, BinOp::Add) { op_add } else { op_sub };
                 let ld_width = if load_prefix == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
+                let simd_op = if matches!(op, BinOp::Add) { SimdArithOp::Add } else { SimdArithOp::Sub };
                 self.emit_insn(&Insn::simd_mov_mem(false, ld_width, 0, 0));
                 self.emit_insn(&Insn::simd_mov_mem(false, ld_width, 1, total_sz as i32));
-                self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_code, 0xC1]));
+                self.emit_insn(&Insn::simd_arith_reg(simd_op, ld_width, 0, 1));
                 self.emit_insn(&Insn::simd_mov_mem(true, ld_width, 0, 0));
                 self.emit_insn(&Insn::simd_mov_mem(false, ld_width, 0, inner_sz as i32));
                 let r_imag_slot = total_sz + inner_sz;
                 self.emit_insn(&Insn::simd_mov_mem(false, ld_width, 1, r_imag_slot as i32));
-                self.emit_insn(&Insn::raw_bytes(&[load_prefix, 0x0F, op_code, 0xC1]));
+                self.emit_insn(&Insn::simd_arith_reg(simd_op, ld_width, 0, 1));
                 self.emit_insn(&Insn::simd_mov_mem(true, ld_width, 0, inner_sz as i32));
             },
             BinOp::Mul if !is_float_inner => {
@@ -481,9 +496,9 @@ impl Codegen {
                                 self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Cmp, crate::codegen::shared::asm_operand::Width::B32, 0, 1)); // cmp eax, ecx
                             },
                             _ => {
-                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x04, 0x24])); // mov ax, [rsp+0]
-                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x4C, 0x24, total_sz as u8])); // mov cx, [rsp+total]
-                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x39, 0xC8])); // cmp ax, cx
+                                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B16, 0, 4, 0)); // mov ax, [rsp+0]
+                                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B16, 1, 4, total_sz as i32)); // mov cx, [rsp+total]
+                                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Cmp, crate::codegen::shared::asm_operand::Width::B16, 0, 1)); // cmp ax, cx
                             },
                         }
                         self.jmp_rel32(&false_label, JumpKind::Jne);
@@ -1446,7 +1461,11 @@ impl Codegen {
                 crate::codegen::shared::asm_operand::Width::B64,
                 8, 6, // r8, rsi (bd)
             ));
-            self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x29, 0xC7])); // sub rdi, r8 (real)
+            self.emit_insn(&Insn::alu_rm_reg_reg(
+                crate::codegen::x86_64::opcode::AluOp::Sub,
+                crate::codegen::shared::asm_operand::Width::B64,
+                7, 8,
+            )); // sub rdi, r8 (real)
             self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B64,
@@ -1468,7 +1487,11 @@ impl Codegen {
                 crate::codegen::shared::asm_operand::Width::B64,
                 0, 1, // rax, rcx (bc)
             ));
-            self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x01, 0xC0])); // add rax, r8 (imag)
+            self.emit_insn(&Insn::alu_rm_reg_reg(
+                crate::codegen::x86_64::opcode::AluOp::Add,
+                crate::codegen::shared::asm_operand::Width::B64,
+                0, 8,
+            )); // add rax, r8 (imag)
             self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B64,
@@ -1563,7 +1586,11 @@ impl Codegen {
                 crate::codegen::shared::asm_operand::Width::B32,
                 8, 6, // r8d, esi (bd)
             ));
-            self.emit_insn(&Insn::raw_bytes(&[0x44, 0x29, 0xC7])); // sub edi, r8d (real)
+            self.emit_insn(&Insn::alu_rm_reg_reg(
+                crate::codegen::x86_64::opcode::AluOp::Sub,
+                crate::codegen::shared::asm_operand::Width::B32,
+                7, 8,
+            )); // sub edi, r8d (real)
             self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,
@@ -1596,7 +1623,11 @@ impl Codegen {
                 crate::codegen::shared::asm_operand::Width::B32,
                 0, 1, // eax, ecx (bc)
             ));
-            self.emit_insn(&Insn::raw_bytes(&[0x44, 0x01, 0xC0])); // add eax, r8d (imag)
+            self.emit_insn(&Insn::alu_rm_reg_reg(
+                crate::codegen::x86_64::opcode::AluOp::Add,
+                crate::codegen::shared::asm_operand::Width::B32,
+                0, 8,
+            )); // add eax, r8d (imag)
                                             // 存回 (截断到分量宽度)
             match inner_sz {
                 4 => {
@@ -2317,7 +2348,8 @@ impl Codegen {
                     // 相邻内存位模式。
                     if self.is_global_not_local(&name.name) {
                         self.emit_global_addr(0, &name.name);
-                        self.emit_insn(&Insn::raw_bytes(&[v_pfx, 0x0F, 0x10, 0x00]));
+                        let ld_w = if v_pfx == 0xF3u8 { SimdWidth::SS } else { SimdWidth::SD };
+                        self.emit_insn(&Insn::simd_mov_mem_base(false, ld_w, 0, 0, 0));
                     } else {
                         let off = self.var_offset(&name.name);
                         self.emit_xmm0_r13_disp(&[v_pfx, 0x41, 0x0F, 0x10], off);
@@ -2411,12 +2443,7 @@ impl Codegen {
                     let st_w = if pfx == 0xF3 { SimdWidth::SS } else { SimdWidth::SD };
                     self.emit_insn(&Insn::simd_mov_mem(true, st_w, 0, rsp_slot as i32));
                     // 加载虚部: movss/movsd xmm0, [rax+v_isz]
-                    if v_isz < 128 {
-                        self.emit_insn(&Insn::simd_mov_mem_base(false, v_sw, 0, 0, v_isz as i32));
-                    } else {
-                        self.emit_insn(&Insn::raw_bytes(&[v_pfx, 0x0F, 0x10, 0x80]));
-                        self.emit_insn(&Insn::raw_bytes(&(v_isz as i32).to_le_bytes()));
-                    }
+                    self.emit_insn(&Insn::simd_mov_mem_base(false, v_sw, 0, 0, v_isz as i32));
                     self.emit_float_convert(&v_inner, op_inner);
                     self.emit_insn(&Insn::simd_mov_mem(true, st_w, 0, (rsp_slot + inner_sz) as i32));
                 } else {
