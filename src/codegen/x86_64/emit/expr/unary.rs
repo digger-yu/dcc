@@ -179,13 +179,13 @@ impl Codegen {
                 // 会破坏 rax 但不动 rcx), 逐分量加载/flip/store
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax
                 let imag_off = inner_sz; // 变量内存虚部槽 (连续布局)
-                                         // 实部: [rcx] → xmm0 → flip → [result_off]
-                self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x01])); // movss/movsd xmm0, [rcx]
+                let swidth = if matches!(inner, Type::Float) { SimdWidth::SS } else { SimdWidth::SD };
+                // 实部: [rcx] → xmm0 → flip → [result_off]
+                self.emit_insn(&Insn::simd_mov_mem_base(false, swidth, 0, 1, 0)); // movss/movsd xmm0, [rcx]
                 self.flip_sign_xmm(0, &inner);
                 self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
                 // 虚部: [rcx+off] → xmm0 → flip → [result_off+inner_sz]
-                self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x81]));
-                self.emit_insn(&Insn::raw_bytes(&(imag_off as i32).to_le_bytes()));
+                self.emit_insn(&Insn::simd_mov_mem_base(false, swidth, 0, 1, imag_off as i32));
                 self.flip_sign_xmm(0, &inner);
                 self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
             } else {
@@ -247,12 +247,12 @@ impl Codegen {
                 if self.gen_lvalue_addr(e, Self::EVAL_BASE) {
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax
                     let imag_off = inner_sz;
+                    let swidth = if matches!(inner, Type::Float) { SimdWidth::SS } else { SimdWidth::SD };
                     // 实部: [rcx] → xmm0 → [result_off] (不变)
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x01])); // movss/movsd xmm0, [rcx]
+                    self.emit_insn(&Insn::simd_mov_mem_base(false, swidth, 0, 1, 0)); // movss/movsd xmm0, [rcx]
                     self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
                     // 虚部: [rcx+off] → xmm0 → flip → [result_off+inner_sz]
-                    self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x81]));
-                    self.emit_insn(&Insn::raw_bytes(&(imag_off as i32).to_le_bytes()));
+                    self.emit_insn(&Insn::simd_mov_mem_base(false, swidth, 0, 1, imag_off as i32));
                     self.flip_sign_xmm(0, &inner);
                     self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
                 } else {
