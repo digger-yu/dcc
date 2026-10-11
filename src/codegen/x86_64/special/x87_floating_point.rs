@@ -504,9 +504,15 @@ impl Codegen {
                 };
                 self.emit_insn(&Insn::setcc_reg(cc, 0)); // setcc al
                 self.emit_insn(&Insn::setcc_reg(CondCode::Np, 1)); // setnp cl  (PF=0 → 1)
-                self.emit_insn(&Insn::raw_bytes(&[0x20, 0xC8])); // and al, cl  → 排除 unordered
+                self.emit_insn(&Insn::alu_rm_reg_reg(
+                    crate::codegen::x86_64::opcode::AluOp::And,
+                    crate::codegen::shared::asm_operand::Width::B8,
+                    0,
+                    1,
+                )); // and al, cl  → 排除 unordered
                 if invert {
-                    self.emit_insn(&Insn::raw_bytes(&[0x34, 0x01])); // xor al, 1
+                    // xor al, 1 = 34 01 (no REX). 80 /6 ib would grow the insn; keep raw.
+                    self.emit_insn(&Insn::raw_bytes(&[0x34, 0x01]));
                 }
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
                     sign: false,
