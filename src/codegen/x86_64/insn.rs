@@ -794,6 +794,27 @@ impl Insn {
         )
     }
 
+    /// P11: IMUL r64, r/m64, imm32 (REX.W 69 /r id). Reflexive form where
+    /// dst==src (both held by `reg_idx`); self-absorbs REX.R+B when reg>=8.
+    pub fn imul_rm_reg_imm32_b64(reg_idx: u8, imm: i32) -> Self {
+        let rex = 0x48u8 | if reg_idx >= 8 { 0x05 } else { 0 };
+        let modrm = 0xC0 | ((reg_idx & 7) << 3) | (reg_idx & 7);
+        let mut bytes = Vec::with_capacity(2 + 1 + 4);
+        bytes.push(rex);
+        bytes.push(0x69);
+        bytes.push(modrm);
+        bytes.extend_from_slice(&imm.to_le_bytes());
+        Insn::raw_bytes(&bytes)
+    }
+
+    /// P11: IDIV r/m64 (REX.W F7 /7). Only r/m field holds `reg_idx`; reg
+    /// field is the /7 opcode extension. Self-absorbs REX.B when reg>=8
+    /// (do NOT set REX.R -- it would shift /7 out of range).
+    pub fn idiv_rm_reg_b64(reg_idx: u8) -> Self {
+        let rex = 0x48u8 | if reg_idx >= 8 { 0x01 } else { 0 };
+        Insn::raw_bytes(&[rex, 0xF7, 0xF8 | (reg_idx & 7)])
+    }
+
     /// P11: IMUL reg, reg (0F AF /r) via ImulRm typed opcode.
     /// width: B32/B64. dst/src: x86_64 physical register indices 0..15.
     pub fn imul_rm_reg(
@@ -924,6 +945,36 @@ mod tests {
         assert_eq!(
             Insn::alu_rm_reg_imm8_b64(0, 8, -4).encode_bytes(),
             Some(vec![0x49, 0x83, 0xC0, 0xFC]),
+        );
+    }
+
+    /// P11 Bucket L: imul_rm_reg_imm32_b64 reflexive = REX.W 69 /r id.
+    #[test]
+    fn imul_rm_reg_imm32_b64_basic() {
+        // imul rcx, rcx, 4: 48 69 C9 04 00 00 00 (reg=1=rcx)
+        assert_eq!(
+            Insn::imul_rm_reg_imm32_b64(1, 4).encode_bytes(),
+            Some(vec![0x48, 0x69, 0xC9, 0x04, 0x00, 0x00, 0x00]),
+        );
+        // imul r8, r8, 1: REX.W|R|B, 69, C0 (reg=8=0, both fields 0)
+        assert_eq!(
+            Insn::imul_rm_reg_imm32_b64(8, 1).encode_bytes(),
+            Some(vec![0x4D, 0x69, 0xC0, 0x01, 0x00, 0x00, 0x00]),
+        );
+    }
+
+    /// P11 Bucket L: idiv_rm_reg_b64 = REX.W F7 /7.
+    #[test]
+    fn idiv_rm_reg_b64_basic() {
+        // idiv rcx: 48 F7 F9 (reg field = /7 = 111b << 3 = 0x38; r/m = 1)
+        assert_eq!(
+            Insn::idiv_rm_reg_b64(1).encode_bytes(),
+            Some(vec![0x48, 0xF7, 0xF9]),
+        );
+        // idiv r8: REX.W+B, F7, F8|0 = F8
+        assert_eq!(
+            Insn::idiv_rm_reg_b64(8).encode_bytes(),
+            Some(vec![0x49, 0xF7, 0xF8]),
         );
     }
 }

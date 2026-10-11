@@ -5,7 +5,7 @@ use crate::ast::*;
 use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::shared::asm_operand::Width;
 use crate::codegen::x86_64::insn::Insn;
-use crate::codegen::x86_64::opcode::{SimdArithOp, SimdWidth};
+use crate::codegen::x86_64::opcode::{CondCode, SimdArithOp, SimdWidth};
 use crate::codegen::x86_64::opcode::{AluOp, Operand as OpcodeOperand, ShiftAmount, ShiftOp, X86_64Opcode};
 use crate::codegen::x86_64::{AggDst, Codegen, JumpKind, VaListAddress};
 use crate::const_eval;
@@ -171,46 +171,33 @@ impl Codegen {
                     self.gen_expr_decay(l, dst);
                     // P1-4: int128 操作数的高 64 位在 rdx, 与 dst(low) 或合并后
                     // 再 test, 否则高 1 低 0 的 __int128 会被误判为 0.
-                    if matches!(l.ty(), Type::Int128 | Type::UInt128) {
-                        let or_rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                        use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
-                        let or_gas = format!("or %rdx, {}", GAS_REG64[(dst & 15) as usize]);
-                        self.emit_insn(&Insn::raw_with_gas(&[or_rex, 0x09, 0xC0 | (2 << 3) | (dst & 7)], &or_gas));
-                    }
-                    let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                     use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
+                    use crate::codegen::x86_64::emit::gas::REG8 as GAS_REG8;
+                    if matches!(l.ty(), Type::Int128 | Type::UInt128) {
+                        // or dst64, rdx (REX.W 09 /r, r/m=dst reg field=rdx(2))
+                        let or_gas = format!("or %rdx, {}", GAS_REG64[(dst & 15) as usize]);
+                        self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::Or, Width::B64, dst, 2).with_gas(or_gas));
+                    }
+                    // test dst64, dst64 (REX.W 85 /r, reflexive ModRM)
                     let test_gas = format!("test {0}, {0}", GAS_REG64[(dst & 15) as usize]);
-                    self.emit_insn(&Insn::raw_with_gas(&[rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)], &test_gas));
+                    self.emit_insn(&Insn::test_rm_reg(Width::B64, dst, dst).with_gas(test_gas));
                     match op {
                         BinOp::AndAnd => {
                             self.jmp_rel32(&l_false, JumpKind::Je);
                             self.gen_expr_decay(r, dst);
                             if matches!(r.ty(), Type::Int128 | Type::UInt128) {
-                                let or_rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                                use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
                                 let or_gas = format!("or %rdx, {}", GAS_REG64[(dst & 15) as usize]);
-                                self.emit_insn(&Insn::raw_with_gas(&[or_rex, 0x09, 0xC0 | (2 << 3) | (dst & 7)], &or_gas));
+                                self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::Or, Width::B64, dst, 2).with_gas(or_gas));
                             }
-                            use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
                             let test_gas = format!("test {0}, {0}", GAS_REG64[(dst & 15) as usize]);
-                            self.emit_insn(&Insn::raw_with_gas(&[rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)], &test_gas));
-                            // setne dst_low: 结果写入 dst 的低 8 位, 而非固定 al
+                            self.emit_insn(&Insn::test_rm_reg(Width::B64, dst, dst).with_gas(test_gas));
+                            // setne dst_low: 结果写入 dst 的低 8 位, 而非固定 al.
                             // `0F 95 /r` 的目的在 **r/m** ⇒ dst>=8 需要 REX.B.
-                            // 必须把 REX 前缀并入同一条 Insn, 否则 disasm fallback 会
-                            // 把 0x41 当成独立指令 (inc %ecx) 渲染, -S 直接出错.
-                            use crate::codegen::x86_64::emit::gas::REG8 as GAS_REG8;
                             let setne_gas = format!("setne {}", GAS_REG8[(dst & 15) as usize]);
-                            let setne_bytes: &[u8] = if dst >= 8 {
-                                &[0x44, 0x0F, 0x95, 0xC0 | (dst & 7)]
-                            } else {
-                                &[0x0F, 0x95, 0xC0 | (dst & 7)]
-                            };
-                            self.emit_insn(&Insn::raw_with_gas(setne_bytes, &setne_gas));
-                            // movzb dst, dst_low: 零扩展 dst 低 8 位到整个 dst
-                            // 自反 ModRM: dst 同时在 reg 与 r/m ⇒ 两个扩展位都要置（0x05）。
-                            let rex2 = 0x48 | if dst >= 8 { 0x05 } else { 0 };
+                            self.emit_insn(&Insn::setcc_reg(CondCode::Ne, dst).with_gas(setne_gas));
+                            // movzb dst64, dst_low8 (0F B6 /r reflexive)
                             let movzb_gas = format!("movzbq {}, {}", GAS_REG8[(dst & 15) as usize], GAS_REG64[(dst & 15) as usize]);
-                            self.emit_insn(&Insn::raw_with_gas(&[rex2, 0x0F, 0xB6, 0xC0 | ((dst & 7) << 3) | (dst & 7)], &movzb_gas));
+                            self.emit_insn(&Insn::mov_ext(false, Width::B8, Width::B64, dst, dst).with_gas(movzb_gas));
                             self.jmp_rel32(&l_end, JumpKind::Jmp);
                             self.label(&l_false);
                             self.mov_imm(dst, 0);
@@ -220,31 +207,15 @@ impl Codegen {
                             self.jmp_rel32(&l_false, JumpKind::Jne);
                             self.gen_expr_decay(r, dst);
                             if matches!(r.ty(), Type::Int128 | Type::UInt128) {
-                                let or_rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                                use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
                                 let or_gas = format!("or %rdx, {}", GAS_REG64[(dst & 15) as usize]);
-                                self.emit_insn(&Insn::raw_with_gas(&[or_rex, 0x09, 0xC0 | (2 << 3) | (dst & 7)], &or_gas));
+                                self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::Or, Width::B64, dst, 2).with_gas(or_gas));
                             }
-                            use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
                             let test_gas = format!("test {0}, {0}", GAS_REG64[(dst & 15) as usize]);
-                            self.emit_insn(&Insn::raw_with_gas(&[rex, 0x85, 0xC0 | ((dst & 7) << 3) | (dst & 7)], &test_gas));
-                            // setne dst_low: 结果写入 dst 的低 8 位, 而非固定 al
-                            // `0F 95 /r` 的目的在 **r/m** ⇒ dst>=8 需要 REX.B.
-                            // 必须把 REX 前缀并入同一条 Insn, 否则 disasm fallback 会
-                            // 把 0x41 当成独立指令 (inc %ecx) 渲染, -S 直接出错.
-                            use crate::codegen::x86_64::emit::gas::REG8 as GAS_REG8;
+                            self.emit_insn(&Insn::test_rm_reg(Width::B64, dst, dst).with_gas(test_gas));
                             let setne_gas = format!("setne {}", GAS_REG8[(dst & 15) as usize]);
-                            let setne_bytes: &[u8] = if dst >= 8 {
-                                &[0x44, 0x0F, 0x95, 0xC0 | (dst & 7)]
-                            } else {
-                                &[0x0F, 0x95, 0xC0 | (dst & 7)]
-                            };
-                            self.emit_insn(&Insn::raw_with_gas(setne_bytes, &setne_gas));
-                            // movzb dst, dst_low: 零扩展 dst 低 8 位到整个 dst
-                            // 自反 ModRM: dst 同时在 reg 与 r/m ⇒ 两个扩展位都要置（0x05）。
-                            let rex2 = 0x48 | if dst >= 8 { 0x05 } else { 0 };
+                            self.emit_insn(&Insn::setcc_reg(CondCode::Ne, dst).with_gas(setne_gas));
                             let movzb_gas = format!("movzbq {}, {}", GAS_REG8[(dst & 15) as usize], GAS_REG64[(dst & 15) as usize]);
-                            self.emit_insn(&Insn::raw_with_gas(&[rex2, 0x0F, 0xB6, 0xC0 | ((dst & 7) << 3) | (dst & 7)], &movzb_gas));
+                            self.emit_insn(&Insn::mov_ext(false, Width::B8, Width::B64, dst, dst).with_gas(movzb_gas));
                             self.jmp_rel32(&l_end, JumpKind::Jmp);
                             self.label(&l_false);
                             self.mov_imm(dst, 1);
@@ -425,18 +396,8 @@ impl Codegen {
                 if let Some(reg) = callee_reg {
                     self.mov(reg, dst);
                 } else {
-                    // mov [r13+slot_off], dst
-                    let mut rex = 0x49u8;
-                    if dst >= 8 {
-                        rex |= 0x04;
-                    }
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x89]));
-                    if slot_off.abs() < 128 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x45 | ((dst & 7) << 3), slot_off as i8 as u8]));
-                    } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0x85 | ((dst & 7) << 3)]));
-                        self.emit_insn(&Insn::raw_bytes(&slot_off.to_le_bytes()));
-                    }
+                    // mov [r13+slot_off], dst (r13=13)
+                    self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, dst, 13, slot_off));
                 }
                 self.expr_depth += 1;
                 // 右操作数的暂存号。以前这里与下面三处字节都写死 `1`（`%rcx`），意思就是
@@ -488,19 +449,14 @@ impl Codegen {
                     // 负值零扩展后成为大正数, 乘积错误 (pr44575 类 bug)
                     let r_ty = r.ty();
                     if Self::is_signed_int(&r_ty) && r_ty.size() <= 4 {
-                        // movslq r64, r32（同归一个号 ⇒ ModRM 两个字段同一个号；stage=1 就是原来的 48 63 C9）
-                        // 自反 ModRM ⇒ stage>=8 要**同时**置 REX.R（reg 字段）与 REX.B（r/m 字段）：
-                        // 只置 R 会把 r/m 留在低 8 号上（实测读成 `%eax`，拿指针低 32 位当索引）。
-                        let rex = 0x48u8 | if stage >= 8 { 0x05 } else { 0 };
+                        // movslq r64, r32（自反 ModRM）
                         use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
                         use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
                         let gas = format!("movsxd {}, {}", GAS_REG32[(stage & 15) as usize], GAS_REG64[(stage & 15) as usize]);
-                        self.emit_insn(&Insn::raw_with_gas(&[rex, 0x63, 0xC0 | ((stage & 7) << 3) | (stage & 7)], &gas));
+                        let _ = self.emit_insn(&Insn::mov_ext(true, Width::B32, Width::B64, stage, stage).with_gas(gas));
                     }
-                    // imul r64, r64, imm32（stage=1 就是原来的 48 69 C9）：同上，两个字段都是 stage。
-                    let rex = 0x48u8 | if stage >= 8 { 0x05 } else { 0 };
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x69, 0xC0 | ((stage & 7) << 3) | (stage & 7)]));
-                    self.emit_insn(&Insn::raw_bytes(&(scale as i32).to_le_bytes()));
+                    // imul r64, r64, imm32（自反 ModRM）
+                    let _ = self.emit_insn(&Insn::imul_rm_reg_imm32_b64(stage, scale as i32));
                 }
                 if let Some(reg) = callee_reg {
                     // 被调用者保存寄存器路径: 左操作数在 reg, 右操作数在 rcx(1).
@@ -512,38 +468,13 @@ impl Codegen {
                 } else if dst == 1 {
                     // 帧槽路径, dst == rcx: push/pop 避免恢复覆盖右操作数
                     self.push(1); // push rcx (右操作数)
-                                  // 恢复左操作数到 dst
-                    {
-                        let mut rex = 0x49u8;
-                        if dst >= 8 {
-                            rex |= 0x04;
-                        }
-                        self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B]));
-                        if slot_off.abs() < 128 {
-                            self.emit_insn(&Insn::raw_bytes(&[0x45 | ((dst & 7) << 3), slot_off as i8 as u8]));
-                        } else {
-                            self.emit_insn(&Insn::raw_bytes(&[0x85 | ((dst & 7) << 3)]));
-                            self.emit_insn(&Insn::raw_bytes(&slot_off.to_le_bytes()));
-                        }
-                    }
+                    // 恢复左操作数到 dst: mov dst, [r13+slot_off] (r13=13)
+                    self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, dst, 13, slot_off));
                     self.pop(2); // pop rdx (右操作数)
                     self.binop(*op, dst, 2, is_signed, &l.ty(), &r.ty());
                 } else {
-                    // 帧槽路径: 恢复左操作数
-                    // mov dst, [r13+slot_off]
-                    {
-                        let mut rex = 0x49u8;
-                        if dst >= 8 {
-                            rex |= 0x04;
-                        }
-                        self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B]));
-                        if slot_off.abs() < 128 {
-                            self.emit_insn(&Insn::raw_bytes(&[0x45 | ((dst & 7) << 3), slot_off as i8 as u8]));
-                        } else {
-                            self.emit_insn(&Insn::raw_bytes(&[0x85 | ((dst & 7) << 3)]));
-                            self.emit_insn(&Insn::raw_bytes(&slot_off.to_le_bytes()));
-                        }
-                    }
+                    // 帧槽路径: 恢复左操作数 (mov dst, [r13+slot_off])
+                    self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, dst, 13, slot_off));
                     self.binop(*op, dst, stage, is_signed, &l.ty(), &r.ty());
                 }
                 // ptr - ptr: 字节差 ÷ 元素大小 = 元素数.
@@ -556,11 +487,8 @@ impl Codegen {
                     // 除数也用同一个暂存号：写死 `1` 会在 `1` 握着某个家时把家踩掉。
                     self.mov_imm(stage, elem_size as i128);
                     self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B64)); // cqo (符号扩展 rax→rdx:rax)
-                    // idiv r/m64 的 ModRM 是 /7 + rm=stage（stage=1 就是原来的 48 F7 F9）。
-                    // 这里**不是**自反形：reg 字段是操作码扩展 `/7`，只有 r/m 拿着 stage，
-                    // 所以扩它的是 REX.B。写 0x04(REX.R) 会把 /7 抬成 /15 = 未定义操作码。
-                    let rex = 0x48u8 | if stage >= 8 { 0x01 } else { 0 };
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0xf7, 0xF8 | (stage & 7)]));
+                    // idiv r/m64: reg field = /7 opcode extension, only r/m holds stage.
+                    let _ = self.emit_insn(&Insn::idiv_rm_reg_b64(stage));
                     if dst != 0 {
                         self.mov(dst, 0); // dst = 商
                     }
@@ -574,20 +502,16 @@ impl Codegen {
                         && matches!(*op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Shl)
                     {
                         if Self::is_signed_int(&res_ty) {
-                            // movsxd dst, dst32 (符号扩展)
-                            let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
+                            // movsxd dst, dst32 (符号扩展, 自反 ModRM)
                             use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
                             use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
                             let gas = format!("movsxd {}, {}", GAS_REG32[(dst & 15) as usize], GAS_REG64[(dst & 15) as usize]);
-                            self.emit_insn(&Insn::raw_with_gas(&[rex, 0x63, 0xC0 | ((dst & 7) << 3) | (dst & 7)], &gas));
+                            let _ = self.emit_insn(&Insn::mov_ext(true, Width::B32, Width::B64, dst, dst).with_gas(gas));
                         } else {
-                            // mov dst32, dst32 (零扩展)
+                            // mov dst32, dst32 (零扩展到 64 位)
                             use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
                             let gas = format!("mov {}, {}", GAS_REG32[(dst & 15) as usize], GAS_REG32[(dst & 15) as usize]);
-                            if dst >= 8 {
-                                self.emit_insn(&Insn::raw_bytes(&[0x45]));
-                            }
-                            self.emit_insn(&Insn::raw_with_gas(&[0x8B, 0xC0 | ((dst & 7) << 3) | (dst & 7)], &gas));
+                            let _ = self.emit_insn(&Insn::mov_rm_reg(Width::B32, dst, dst).with_gas(gas));
                         }
                     }
                 }
@@ -1048,12 +972,9 @@ impl Codegen {
                                 self.gen_expr(r, Self::EVAL_BASE); // rax = val
                                 self.pop(1); // rcx = addr
                                 self.emit_seg_for(lv);
-                                match es {
-                                    1 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x88, 0x01], "mov %al, (%rcx)")); },
-                                    2 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x66, 0x89, 0x01], "mov %ax, (%rcx)")); },
-                                    4 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x89, 0x01], "mov %eax, (%rcx)")); },
-                                    _ => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x89, 0x01], "mov %rax, (%rcx)")); },
-                                }
+                                // mov [rcx], rax/eax/ax/al (size from es)
+                                let w = match es { 1 => Width::B8, 2 => Width::B16, 4 => Width::B32, _ => Width::B64 };
+                                let _ = self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
                                 return;
                             }
                         }
@@ -1106,12 +1027,8 @@ impl Codegen {
                             if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
                                 self.emit_store_scalar_float_at(&r.ty(), elem_ty, 1);
                             } else {
-                                match es {
-                                    1 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x88, 0x01], "mov %al, (%rcx)")); },
-                                    2 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x66, 0x89, 0x01], "mov %ax, (%rcx)")); },
-                                    4 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x89, 0x01], "mov %eax, (%rcx)")); },
-                                    _ => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x89, 0x01], "mov %rax, (%rcx)")); },
-                                }
+                                let w = match es { 1 => Width::B8, 2 => Width::B16, 4 => Width::B32, _ => Width::B64 };
+                                let _ = self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
                             }
                         }
                     } else {
@@ -1162,12 +1079,8 @@ impl Codegen {
                             if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
                                 self.emit_store_scalar_float_at(&r.ty(), elem_ty, 1);
                             } else {
-                                match es {
-                                    1 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x88, 0x01], "mov %al, (%rcx)")); },
-                                    2 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x66, 0x89, 0x01], "mov %ax, (%rcx)")); },
-                                    4 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x89, 0x01], "mov %eax, (%rcx)")); },
-                                    _ => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x89, 0x01], "mov %rax, (%rcx)")); },
-                                }
+                                let w = match es { 1 => Width::B8, 2 => Width::B16, 4 => Width::B32, _ => Width::B64 };
+                                let _ = self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
                             }
                         }
                     }
@@ -1282,11 +1195,12 @@ impl Codegen {
                                 // 只写低 n 字节). 旧实现恒用 8 字节 movq,
                                 // 会越界覆盖相邻内存 (如 decNumber
                                 // *up=(Unit)out 破坏后续单元 → 系数全 0).
-                                match assign_l_ty.size() {
-                                    1 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x88, 0x01], "mov %al, (%rcx)")); },       // mov [rcx], al
-                                    2 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x66, 0x89, 0x01], "mov %ax, (%rcx)")); }, // mov [rcx], ax
-                                    4 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x89, 0x01], "mov %eax, (%rcx)")); },       // mov [rcx], eax
-                                    _ => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x89, 0x01], "mov %rax, (%rcx)")); }, // mov [rcx], rax
+                                {
+                                    // mov [rcx], al/ax/eax/rax sized by assign_l_ty.
+                                    let w = match assign_l_ty.size() {
+                                        1 => Width::B8, 2 => Width::B16, 4 => Width::B32, _ => Width::B64
+                                    };
+                                    let _ = self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
                                 }
                             }
                         }
@@ -1852,36 +1766,26 @@ impl Codegen {
                                     // 单一真源：收浮影子副本
                                     } else {
                                         self.emit_seg(self.lvalue_seg_prefix(lv));
-                                        match size {
-                                            1 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x88, 0x01], "mov %al, (%rcx)")); },
-                                            2 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x66, 0x89, 0x01], "mov %ax, (%rcx)")); },
-                                            4 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x89, 0x01], "mov %eax, (%rcx)")); },
-                                            8 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x89, 0x01], "mov %rax, (%rcx)")); },
-                                            16 => {
-                                                // __int128: rax:rdx → [rcx]:[rcx+8]
-                                                // 两笔写入都要前缀（段前缀只作用下一条指令）
-                                                self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x89, 0x01], "mov %rax, (%rcx)"));
-                                                self.emit_seg(self.lvalue_seg_prefix(lv));
-                                                self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x89, 0x51, 0x08], "mov %rdx, 8(%rcx)"));
-                                                // mov [rcx+8], rdx
-                                            },
-                                            _ => {},
+                                        // mov [rcx], rax/eax/ax/al sized by `size`
+                                        let w = match size { 1 => Width::B8, 2 => Width::B16, 4 => Width::B32, 8 => Width::B64, _ => Width::B64 };
+                                        if size <= 8 {
+                                            let _ = self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
+                                        } else if size == 16 {
+                                            // __int128: rax:rdx → [rcx]:[rcx+8]
+                                            let _ = self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 1, 0));
+                                            self.emit_seg(self.lvalue_seg_prefix(lv));
+                                            let _ = self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 2, 1, 8));
                                         }
                                     }
                                 } else {
                                     self.emit_seg(self.lvalue_seg_prefix(lv));
-                                    match size {
-                                        1 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x88, 0x01], "mov %al, (%rcx)")); },
-                                        2 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x66, 0x89, 0x01], "mov %ax, (%rcx)")); },
-                                        4 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x89, 0x01], "mov %eax, (%rcx)")); },
-                                        8 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x89, 0x01], "mov %rax, (%rcx)")); },
-                                        16 => {
-                                            self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x89, 0x01], "mov %rax, (%rcx)"));
-                                            self.emit_seg(self.lvalue_seg_prefix(lv));
-                                            self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x89, 0x51, 0x08], "mov %rdx, 8(%rcx)"));
-                                            // mov [rcx+8], rdx
-                                        },
-                                        _ => {},
+                                    let w = match size { 1 => Width::B8, 2 => Width::B16, 4 => Width::B32, 8 => Width::B64, _ => Width::B64 };
+                                    if size <= 8 {
+                                        let _ = self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
+                                    } else if size == 16 {
+                                        let _ = self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 1, 0));
+                                        self.emit_seg(self.lvalue_seg_prefix(lv));
+                                        let _ = self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 2, 1, 8));
                                     }
                                 }
                             }
@@ -1935,12 +1839,9 @@ impl Codegen {
                             if part_off != 0 {
                                 self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 1, part_off as i64)); // add rcx, imm32
                             }
-                            match inner.size() {
-                                1 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x88, 0x01], "mov %al, (%rcx)")); },
-                                2 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x66, 0x89, 0x01], "mov %ax, (%rcx)")); },
-                                4 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x89, 0x01], "mov %eax, (%rcx)")); },
-                                _ => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x89, 0x01], "mov %rax, (%rcx)")); },
-                            }
+                            // mov [rcx], al/ax/eax/rax sized by inner.size()
+                            let w = match inner.size() { 1 => Width::B8, 2 => Width::B16, 4 => Width::B32, _ => Width::B64 };
+                            let _ = self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
                         }
                     } else {
                         // 非 lvalue (如 __imag__ (a+b)): 不可赋值, 仅求值右操作数
@@ -2015,12 +1916,9 @@ impl Codegen {
                             self.emit_store_scalar_float_at(&r.ty(), &assign_l_ty, 1);
                         // 单一真源：收浮影子副本
                         } else {
-                            match assign_sz {
-                                1 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x88, 0x01], "mov %al, (%rcx)")); },       // mov [rcx], al
-                                2 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x66, 0x89, 0x01], "mov %ax, (%rcx)")); }, // mov [rcx], ax
-                                4 => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x89, 0x01], "mov %eax, (%rcx)")); },       // mov [rcx], eax
-                                _ => { let _ = self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x89, 0x01], "mov %rax, (%rcx)")); }, // mov [rcx], rax
-                            }
+                            // mov [rcx], al/ax/eax/rax sized by assign_sz
+                            let w = match assign_sz { 1 => Width::B8, 2 => Width::B16, 4 => Width::B32, _ => Width::B64 };
+                            let _ = self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
                         }
                     } else {
                         // gen_lvalue_addr 失败: 无法取地址, 仅求值 RHS
