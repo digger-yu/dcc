@@ -59,46 +59,43 @@ impl Codegen {
         // 源 >= 0。test dst, dst：SF=1（结果为负）即正溢出（正值截断不可能为负）。
         // test r/m, r 编码 85 /r：dst 同时在 reg 与 r/m 两字段，高 8 号时 REX.R 与
         // REX.B 必须各自独立置位（与 instructions.rs::mov 同一口径）。
-        let modrm = 0xC0 | ((dst & 7) << 3) | (dst & 7);
-        let bits = if is_64bit { 64 } else { 32 };
-        let test_gas_reg = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, bits)
-            .unwrap_or_else(|| "%eax".to_string());
-        let test_gas = format!("test {}, {}", test_gas_reg, test_gas_reg);
         // P11: test dst, dst via AluRm typed.
         let test_width = if is_64bit {
             crate::codegen::shared::asm_operand::Width::B64
         } else {
             crate::codegen::shared::asm_operand::Width::B32
         };
-        let insn = Insn::test_rm_reg(test_width, dst, dst);
-        if !self.emit_insn(&insn) {
-            let test_rex = if is_64bit { 0x48 } else { 0x40 }
-                | if dst >= 8 { 0x04 | 0x01 } else { 0 };
-            if test_rex != 0x40 {
-                self.emit_insn(&Insn::raw_with_gas(&[test_rex, 0x85, modrm], &test_gas));
-            } else {
-                self.emit_insn(&Insn::raw_with_gas(&[0x85, modrm], &test_gas));
-            }
-        }
+        let test_gas_reg = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, if is_64bit { 64 } else { 32 })
+            .unwrap_or_else(|| "%eax".to_string());
+        let test_gas = format!("test {}, {}", test_gas_reg, test_gas_reg);
+        self.emit_insn(&Insn::test_rm_reg(test_width, dst, dst).with_gas(test_gas));
         // 结果非负 ⇒ 在范围内，保留。
         self.jmp_rel32(&l_done, JumpKind::Jns);
 
         // 正溢出：dst = INT_MAX。32 位目标用 mov $imm32, r32（0xC7 /0），64 位目标
         // i64::MAX 超出 imm32，走 mov_imm 的 movabs 路径。
+        //
+        // 注意: 手写固定 C7 /0 id 形式 (不是 B8+r accumulator 形式), G10 快照
+        // 依赖此字节数, 不能用 MovRm B32+Imm (走 B8+r) 替换.
         if is_64bit {
             self.mov_imm(dst, i64::MAX as i128);
-        } else if dst >= 8 {
-            let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, 32)
-                .unwrap_or_else(|| "%eax".to_string());
-            let imm = i32::MAX.to_le_bytes();
-            let bytes = [0x41, 0xC7, 0xC0 | (dst & 7), imm[0], imm[1], imm[2], imm[3]];
-            self.emit_insn(&Insn::raw_with_gas(&bytes, &format!("mov $2147483647, {}", dst_name)));
         } else {
             let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, 32)
                 .unwrap_or_else(|| "%eax".to_string());
+            let gas = format!("mov $2147483647, {}", dst_name);
+            // P11: 复用 mov_reg_imm32_b64 的 C7 /0 编码逻辑 —— 但手写是 B32
+            // (无 REX.W), 仅在 dst>=8 时发 REX.B (0x41). 用专门的 C7 构造器.
+            let rex: u8 = if dst >= 8 { 0x41 } else { 0 };
+            let modrm = 0xC0 | (dst & 7);
             let imm = i32::MAX.to_le_bytes();
-            let bytes = [0xC7, 0xC0 | (dst & 7), imm[0], imm[1], imm[2], imm[3]];
-            self.emit_insn(&Insn::raw_with_gas(&bytes, &format!("mov $2147483647, {}", dst_name)));
+            let mut bytes = Vec::with_capacity(7);
+            if rex != 0 {
+                bytes.push(rex);
+            }
+            bytes.push(0xC7);
+            bytes.push(modrm);
+            bytes.extend_from_slice(&imm);
+            self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
         }
         self.label(&l_done);
     }

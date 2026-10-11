@@ -64,43 +64,62 @@ impl super::super::super::Codegen {
                               // 2. 加载当前值到 rax
                 self.emit_global_addr(0, &name.name); // rax = &c
                 self.emit_seg(seg);
+                // P11: 收敛到 typed mov_ext_mem / mov_rm_mem / mov_rm_reg.
+                // 字节序列固定 (rax/rsp/rdx/rcx 都是低 8 号寄存器, 无 REX.B/R),
+                // 与手写 raw_with_gas 逐字节一致.
                 match inner_ty.size() {
-                    1 => { self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xB6, 0x00], "movzbq (%rax), %rax")); },
-                    2 => { self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xB7, 0x00], "movzwq (%rax), %rax")); },
-                    4 => { self.emit_insn(&Insn::raw_with_gas(&[0x8B, 0x00], "mov (%rax), %eax")); },
-                    _ => { self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x8B, 0x00], "mov (%rax), %rax")); },
+                    1 => { self.emit_insn(&Insn::mov_ext_mem(false, Width::B8, Width::B64, 0, 0, 0)
+                        .with_gas("movzbq (%rax), %rax".to_string())); },
+                    2 => { self.emit_insn(&Insn::mov_ext_mem(false, Width::B16, Width::B64, 0, 0, 0)
+                        .with_gas("movzwq (%rax), %rax".to_string())); },
+                    4 => { self.emit_insn(&Insn::mov_rm_mem(true, Width::B32, 0, 0, 0)
+                        .with_gas("mov (%rax), %eax".to_string())); },
+                    _ => { self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 0, 0, 0)
+                        .with_gas("mov (%rax), %rax".to_string())); },
                 }
                 // rax = 值 (零扩展), 地址在 [rsp]
                 if !is_pre {
                     // 后缀：保存旧值到 rcx (返回用)
-                    self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x89, 0xC1], "mov %rax, %rcx"));
+                    self.emit_insn(&Insn::mov_rm_reg(Width::B64, 1, 0)
+                        .with_gas("mov %rax, %rcx".to_string()));
                 }
                 // 3. 从栈恢复地址到 rax
-                self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x8B, 0x04, 0x24], "mov (%rsp), %rax"));
+                self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 0, 4, 0)
+                    .with_gas("mov (%rsp), %rax".to_string()));
                                                       // rax = 地址，加载值并递增
                 self.emit_seg(seg);
                 match inner_ty.size() {
-                    1 => { self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xB6, 0x00], "movzbq (%rax), %rax")); },
-                    2 => { self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xB7, 0x00], "movzwq (%rax), %rax")); },
-                    4 => { self.emit_insn(&Insn::raw_with_gas(&[0x8B, 0x00], "mov (%rax), %eax")); },
-                    _ => { self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x8B, 0x00], "mov (%rax), %rax")); },
+                    1 => { self.emit_insn(&Insn::mov_ext_mem(false, Width::B8, Width::B64, 0, 0, 0)
+                        .with_gas("movzbq (%rax), %rax".to_string())); },
+                    2 => { self.emit_insn(&Insn::mov_ext_mem(false, Width::B16, Width::B64, 0, 0, 0)
+                        .with_gas("movzwq (%rax), %rax".to_string())); },
+                    4 => { self.emit_insn(&Insn::mov_rm_mem(true, Width::B32, 0, 0, 0)
+                        .with_gas("mov (%rax), %eax".to_string())); },
+                    _ => { self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 0, 0, 0)
+                        .with_gas("mov (%rax), %rax".to_string())); },
                 }
                 // rax = 值 (零扩展)
                 self.emit_inc_dec_reg(0, is_inc, step as i32); // rax = 新值
                                                                // 写回：地址仍在 [rsp], 用 rdx 暂存地址
-                self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x8B, 0x14, 0x24], "mov (%rsp), %rdx"));
+                self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 2, 4, 0)
+                    .with_gas("mov (%rsp), %rdx".to_string()));
                 self.emit_seg(seg);
                 match inner_ty.size() {
-                    1 => { self.emit_insn(&Insn::raw_with_gas(&[0x88, 0x02], "mov %al, (%rdx)")); },
-                    2 => { self.emit_insn(&Insn::raw_with_gas(&[0x66, 0x89, 0x02], "mov %ax, (%rdx)")); },
-                    4 => { self.emit_insn(&Insn::raw_with_gas(&[0x89, 0x02], "mov %eax, (%rdx)")); },
-                    _ => { self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x89, 0x02], "mov %rax, (%rdx)")); },
+                    1 => { self.emit_insn(&Insn::mov_rm_mem(false, Width::B8, 0, 2, 0)
+                        .with_gas("mov %al, (%rdx)".to_string())); },
+                    2 => { self.emit_insn(&Insn::mov_rm_mem(false, Width::B16, 0, 2, 0)
+                        .with_gas("mov %ax, (%rdx)".to_string())); },
+                    4 => { self.emit_insn(&Insn::mov_rm_mem(false, Width::B32, 0, 2, 0)
+                        .with_gas("mov %eax, (%rdx)".to_string())); },
+                    _ => { self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 2, 0)
+                        .with_gas("mov %rax, (%rdx)".to_string())); },
                 }
                 // 4. 清理栈并设置返回值
                 self.pop(2); // 弹出地址 (丢弃)
                 if !is_pre {
                     // 后缀：返回旧值 (在 rcx)
-                    self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x89, 0xC8], "mov %rcx, %rax"));
+                    self.emit_insn(&Insn::mov_rm_reg(Width::B64, 0, 1)
+                        .with_gas("mov %rcx, %rax".to_string()));
                     if dst != 0 && dst != 1 {
                         self.mov(dst, 1);
                     } // dst = rcx
@@ -452,7 +471,7 @@ impl super::super::super::Codegen {
             _ => {},
         }
         if bit_off > 0 {
-            // sar rax, imm8
+            // sar rax, imm8 (P11: Shift typed 总是 Some).
             let insn = Insn::new(
                 X86_64Opcode::Shift {
                     op: crate::codegen::x86_64::opcode::ShiftOp::Sar,
@@ -462,9 +481,7 @@ impl super::super::super::Codegen {
                 },
                 &[],
             );
-            if !self.emit_insn(&insn) {
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xE8, bit_off as u8]));
-            }
+            self.emit_insn(&insn);
         }
         if bw < 64 {
             let mask = (1u64 << bw) - 1;
@@ -667,7 +684,7 @@ impl super::super::super::Codegen {
                 dst: crate::codegen::x86_64::opcode::Operand::Reg(8, crate::codegen::shared::asm_operand::Width::B64),
                 src: crate::codegen::x86_64::opcode::Operand::Imm(inv_mask as i64),
             }, &[]));
-            // P11: 收敛到 AluRm{And, B64, rcx, r8}.
+            // P11: AluRm{And, B64, rcx, r8} (typed 总是 Some).
             let insn = Insn::new(
                 X86_64Opcode::AluRm {
                     op: AluOp::And,
@@ -677,14 +694,12 @@ impl super::super::super::Codegen {
                 },
                 &[],
             );
-            if !self.emit_insn(&insn) {
-                self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x21, 0xC1]));
-            }
+            self.emit_insn(&insn);
         }
         // Load new value into rdx, shift, OR
         self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 2, 13, new_slot as i32)); // rdx = new val
         if bit_off > 0 {
-            // shl rdx, imm8
+            // shl rdx, imm8 (P11: Shift typed 总是 Some).
             let insn = Insn::new(
                 X86_64Opcode::Shift {
                     op: crate::codegen::x86_64::opcode::ShiftOp::Shl,
@@ -694,9 +709,7 @@ impl super::super::super::Codegen {
                 },
                 &[],
             );
-            if !self.emit_insn(&insn) {
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xE2, bit_off as u8]));
-            }
+            self.emit_insn(&insn);
         }
         // P11: 收敛到 AluRm{Or, B64, rcx, rdx}.
         let insn = Insn::new(
