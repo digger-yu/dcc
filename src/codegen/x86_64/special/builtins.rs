@@ -2508,8 +2508,12 @@ impl Codegen {
                     },
                     _ => unreachable!(),
                 }
-                let cc = if unsigned { 0x92 } else { 0x90 }; // setb / seto
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, cc, 0xC0]));
+                let cc = if unsigned {
+                    crate::codegen::x86_64::opcode::CondCode::B
+                } else {
+                    crate::codegen::x86_64::opcode::CondCode::O
+                };
+                self.emit_insn(&Insn::setcc_reg(cc, 0)); // setb / seto al
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
                     sign: false,
                     from: crate::codegen::shared::asm_operand::Width::B8,
@@ -3192,7 +3196,7 @@ impl Codegen {
                     }, &[]));
                 } else if width == 32 {
                     // 32-bit 操作: mov 到 eax, rol/ror eax, cl, mov 回 dst
-                    self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | (dst & 7)])); // mov eax, dst (截断到 32 位)
+                    self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 0, dst)); // mov eax, dst (截断到 32 位)
                     self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Shift {
                         op: rot_op,
                         width: crate::codegen::shared::asm_operand::Width::B32,
@@ -3201,9 +3205,9 @@ impl Codegen {
                     }, &[]));
                     if dst >= 8 {
                         // mov dst, eax  (REX.B 89 C0+reg)
-                        self.emit_insn(&Insn::raw_bytes(&[0x41, 0x89, 0xC0 | (dst & 7)]));
+                        self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B32, dst, 0));
                     } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | (dst & 7)]));
+                        self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B32, dst, 0));
                     }
                 } else if width == 16 {
                     // 16-bit 操作: 66 D3 /0/1, REX.B 当 dst>=8
@@ -5120,9 +5124,9 @@ impl Codegen {
             )); // mov [rsp], eax
                 self.emit_insn(&Insn::mxcsr_mem(false, 4, 0)); // ldmxcsr [rsp]
                 self.emit_insn(&Insn::fcw_mem(true, 4, 0)); // fnstcw [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, 0x04, 0x24])); // mov ax, [rsp]
+                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B16, 0, 4, 0)); // mov ax, [rsp]
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x83, 0xC8, 0x3F])); // or ax, 0x3F
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x04, 0x24])); // mov [rsp], ax
+                self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B16, 0, 4, 0)); // mov [rsp], ax
                 self.emit_insn(&Insn::fcw_mem(false, 4, 0)); // fldcw [rsp]
                 self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                 self.mov_imm(dst, 0); // 返回 0
@@ -5494,7 +5498,7 @@ impl Codegen {
         // Still emit fallback code so codegen can continue
         // for diagnostics of other functions.
         if matches!(ty, Type::Void) {
-            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x0B])); // ud2
+            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Ud2)); // ud2
             return;
         }
         self.emit_zero_value(ty, dst, sret_off);
