@@ -1744,16 +1744,8 @@ impl Codegen {
                             self.emit_x87_fstp_at(1, part_off as i32, &inner);
                         } else if is_float_inner {
                             self.emit_scalar_to_xmm0_if_needed(r, &inner);
-                            let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
-                            self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11])); // movss/movsd [rcx+disp], xmm0
-                            if part_off == 0 {
-                                self.emit_insn(&Insn::raw_bytes(&[0x01]));
-                            } else if part_off.abs() < 128 {
-                                self.emit_insn(&Insn::raw_bytes(&[0x41, part_off as u8]));
-                            } else {
-                                self.emit_insn(&Insn::raw_bytes(&[0x81]));
-                                self.emit_insn(&Insn::raw_bytes(&(part_off as i32).to_le_bytes()));
-                            }
+                            let swidth = if matches!(inner, Type::Float) { SimdWidth::SS } else { SimdWidth::SD };
+                            self.emit_insn(&Insn::simd_mov_mem_base(true, swidth, 0, 1, part_off as i32)); // movss/movsd [rcx+disp], xmm0
                         } else {
                             // 整数分量: 值在 rax, 按内型宽度存储
                             if part_off != 0 {
