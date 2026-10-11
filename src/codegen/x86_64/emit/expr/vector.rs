@@ -49,10 +49,22 @@ impl Codegen {
         // mov [rcx], rax (按元素宽度)
         match elem_size {
             1 => {
-                self.emit_insn(&Insn::raw_bytes(&[0x88, 0x01]));
+                self.emit_insn(&Insn::mov_rm_mem(
+                    false,
+                    crate::codegen::shared::asm_operand::Width::B8,
+                    0,
+                    1,
+                    0,
+                ));
             },
             2 => {
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x01]));
+                self.emit_insn(&Insn::mov_rm_mem(
+                    false,
+                    crate::codegen::shared::asm_operand::Width::B16,
+                    0,
+                    1,
+                    0,
+                ));
             },
             4 => {
                 self.emit_insn(&Insn::new(
@@ -251,8 +263,7 @@ impl Codegen {
             )
         {
             // SIMD 快速路径: 结果已写入 result_off, rax = &result[0]
-            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8D, 0x85]));
-            self.emit_insn(&Insn::raw_bytes(&(result_off as i32).to_le_bytes()));
+            self.emit_insn(&Insn::lea_reg_base_disp(0, 13, result_off as i32));
             return;
         }
 
@@ -307,8 +318,7 @@ impl Codegen {
                     self.emit_store(0, off, elem_size);
                 }
                 self.vector_op_slot = saved_op_slot;
-                self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8D, 0x85]));
-                self.emit_insn(&Insn::raw_bytes(&(result_off as i32).to_le_bytes()));
+                self.emit_insn(&Insn::lea_reg_base_disp(0, 13, result_off as i32));
                 return;
             }
             let (prefix, opcode) = match op {
@@ -361,8 +371,7 @@ impl Codegen {
                 );
             }
             self.vector_op_slot = saved_op_slot;
-            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8D, 0x85]));
-            self.emit_insn(&Insn::raw_bytes(&(result_off as i32).to_le_bytes()));
+            self.emit_insn(&Insn::lea_reg_base_disp(0, 13, result_off as i32));
             return;
         }
         // __int128 / 16-byte 整数元素: GP 寄存器无法承载, 用 XMM 处理
@@ -381,8 +390,7 @@ impl Codegen {
                 r_is_vec,
                 saved_op_slot,
             );
-            self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8D, 0x85]));
-            self.emit_insn(&Insn::raw_bytes(&(result_off as i32).to_le_bytes()));
+            self.emit_insn(&Insn::lea_reg_base_disp(0, 13, result_off as i32));
             return;
         }
         for i in 0..count {
@@ -590,13 +598,13 @@ impl Codegen {
                     );
                     match op {
                         BinOp::Shl => {
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, 0xE0])); // shl rax, cl
+                            self.emit_insn(&Insn::shift_reg_cl_b64(0b100, 0)); // shl rax, cl
                         },
                         BinOp::Shr if signed => {
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, 0xF8])); // sar rax, cl
+                            self.emit_insn(&Insn::shift_reg_cl_b64(0b111, 0)); // sar rax, cl
                         },
                         BinOp::Shr => {
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, 0xE8])); // shr rax, cl (unsigned)
+                            self.emit_insn(&Insn::shift_reg_cl_b64(0b101, 0)); // shr rax, cl
                         },
                         _ => unreachable!(),
                     }
@@ -688,8 +696,7 @@ impl Codegen {
         self.vector_op_slot = saved_op_slot;
         // rax = &result[0]: 聚合/向量返回值需要调用者能拿到结果地址
         // (gen_expr → gen_sret_return 兜底分支用 rax 作为 rep movsq 源指针)
-        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8D, 0x85]));
-        self.emit_insn(&Insn::raw_bytes(&(result_off as i32).to_le_bytes()));
+        self.emit_insn(&Insn::lea_reg_base_disp(0, 13, result_off as i32));
     }
     pub(crate) fn gen_vector_init_rvalue(
         &mut self,
@@ -864,13 +871,7 @@ impl Codegen {
             if is_float_elem || is_double_elem {
                 self.load_stack_xmm(0, src_off, elem_size, is_float_elem);
             } else {
-                self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8D])); // lea rax, [r13 + src_off]
-                if src_off.abs() < 128 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x45, src_off as i8 as u8]));
-                } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0x85]));
-                    self.emit_insn(&Insn::raw_bytes(&(src_off as i32).to_le_bytes()));
-                }
+                self.emit_insn(&Insn::lea_reg_base_disp(0, 13, src_off as i32)); // lea rax, [r13 + src_off]
                 self.emit_load_mem(elem_size);
             }
             if is_global {
@@ -929,19 +930,28 @@ impl Codegen {
         for i in 0..count {
             let off = (i * elem_size) as i64;
             // 加载元素到 rax: 从 [rcx+off]
-            if (-128..128).contains(&off) {
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x41, off as u8])); // mov rax, [rcx+disp8]
-            } else {
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, 0x81])); // mov rax, [rcx+disp32]
-                self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
-            }
+            self.emit_insn(&Insn::mov_rm_mem(
+                true,
+                crate::codegen::shared::asm_operand::Width::B64,
+                0,
+                1,
+                off as i32,
+            )); // mov rax, [rcx+off]
             // 应用操作
             match op {
                 UnOp::Neg => {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xf7, 0xd8])); // neg rax
+                    self.emit_insn(&Insn::unary_rm_reg(
+                        crate::codegen::x86_64::opcode::UnaryOp::Neg,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        0,
+                    )); // neg rax
                 },
                 UnOp::BitNot => {
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xf7, 0xd0])); // not rax
+                    self.emit_insn(&Insn::unary_rm_reg(
+                        crate::codegen::x86_64::opcode::UnaryOp::Not,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        0,
+                    )); // not rax
                 },
                 _ => {},
             }

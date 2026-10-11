@@ -267,6 +267,29 @@ impl Insn {
         )
     }
 
+    /// P11 Bucket V: LEA reg64, [base+disp]. disp 可为任意大小.
+    /// 复用 Lea.encode() 路径 A/A2 (无 index).
+    pub fn lea_reg_base_disp(
+        dst_reg: u8,
+        base: u8,
+        disp: i32,
+    ) -> Self {
+        use crate::codegen::x86_64::opcode::{MemOperand, Operand, X86_64Opcode};
+        Insn::new(
+            X86_64Opcode::Lea {
+                dst: Operand::Reg(dst_reg, crate::codegen::shared::asm_operand::Width::B64),
+                mem: MemOperand {
+                    disp,
+                    base: Some(base),
+                    index: None,
+                    seg: None,
+                },
+                rip_relative: false,
+            },
+            &[],
+        )
+    }
+
     /// P11: 构造 B32 `and/eor/or/cmp eax|ecx|edx, imm8` (0x83 / ib, mod=11).
     /// modrm_reg 字段编码 AluOp, modrm_rm 字段编码低 3 位寄存器索引.
     /// 与 rsp 不同, 非 rsp 寄存器 0x83 形态不常带 REX.W (G10 快照逐字节约定).
@@ -305,6 +328,17 @@ impl Insn {
         }
         let modrm = 0xC0 | ((op_field & 0x7) << 3) | (reg_idx & 0x7);
         Insn::raw_bytes(&[rex, 0xC1, modrm, imm8])
+    }
+
+    /// P11 Bucket V: B64 `shl/shr/sar reg, cl` 强制 D3 形式 (REX.W D3 /r).
+    /// op 编码: /4=shl, /5=shr, /7=sar.
+    pub fn shift_reg_cl_b64(op_field: u8, reg_idx: u8) -> Self {
+        let mut rex: u8 = 0x48;
+        if reg_idx >= 8 {
+            rex |= 0x01;
+        }
+        let modrm = 0xC0 | ((op_field & 0x7) << 3) | (reg_idx & 0x7);
+        Insn::raw_bytes(&[rex, 0xD3, modrm])
     }
 
     /// P11 Bucket T: 构造 B64 `test reg, imm32` (REX.W F7 /0 id).
