@@ -400,16 +400,13 @@ impl Codegen {
             }
         }
         // 从 [rax] 加载到 xmm
-        let pfx = if is_float { 0xF3u8 } else { 0xF2u8 };
-        let op_name = if is_float { "movss" } else { "movsd" };
-        let mut xmm_bytes: Vec<u8> = Vec::new();
-        xmm_bytes.push(pfx);
-        if xmm >= 8 {
-            xmm_bytes.push(0x44);
-        }
-        xmm_bytes.extend_from_slice(&[0x0F, 0x10, 0x00]);
-        let gas = format!("{}, (%rax), %xmm{}", op_name, xmm);
-        self.emit_insn(&Insn::raw_with_gas(&xmm_bytes, &gas));
+        // P11 Bucket AE: movss/movsd xmm, [rax] via typed simd_mov_mem_base.
+        let swidth = if is_float {
+            crate::codegen::x86_64::opcode::SimdWidth::SS
+        } else {
+            crate::codegen::x86_64::opcode::SimdWidth::SD
+        };
+        self.emit_insn(&Insn::simd_mov_mem_base(false, swidth, xmm, 0, 0));
     }
 
     /// 全局量 `name + offset` 的 x87 `fld`（用于 `_Complex long double`
@@ -425,12 +422,16 @@ impl Codegen {
                 self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 0, offset as i64));
             }
         }
-        let (opcode, reg_field) = match ty {
-            Type::Float => (0xD9u8, 0u8),
-            Type::LongDouble => (0xDBu8, 5u8),
-            _ => (0xDDu8, 0u8),
+        // P11 Bucket AE: fld [rax] via typed x87_mem.
+        let width: u8 = match ty {
+            Type::Float => 4,
+            Type::LongDouble => 10,
+            _ => 8,
         };
-        self.emit_insn(&Insn::raw_bytes(&[opcode, (reg_field << 3) | 0x00]));
+        self.emit_insn(&Insn::x87_mem(
+            crate::codegen::x86_64::opcode::X87Op::FldMem { width },
+            0, 0,
+        ));
     }
     /// 全局标量浮点 store 的**单一真源**。
     /// 前置：`src_ty` 的 rvalue 已按通道约定求值（整数在 rax、float/double 在
@@ -962,54 +963,45 @@ impl Codegen {
     pub(crate) fn copy_agg_to_seg(&mut self, size: usize, seg: u8) {
         // rax 在本路径上是存活值（聚合赋值的地址/值约定），当暂存器用前先压后复。
         self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // push rax
-        // `mod_ << 6 | rm`：rsi=110 / rdi=111 都不需要 SIB；reg 域固定 000（rax/al）。
-        let disp_bytes = |me: &mut Self, mod_: u8, off: usize| {
-            if mod_ == 1 {
-                me.emit(&[off as u8]);
-            } else if mod_ == 2 {
-                me.emit(&(off as i32).to_le_bytes());
-            }
-        };
         // 一笔「读 [rsi+off] 的 w 字节」：rax 作暂存（源侧是通用地址空间，不需前缀）
+        // P11 Bucket AE: 收敛到 typed mov_rm_mem (base=rsi=6, reg=rax=0).
         macro_rules! load_at {
             ($w:expr, $off:expr) => {{
-                let (mod_, need_disp) = if $off == 0 {
-                    (0u8, false)
-                } else if $off < 128 {
-                    (1u8, true)
-                } else {
-                    (2u8, true)
-                };
+                let off_i32: i32 = $off as i32;
                 match $w {
-                    8 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8B, (mod_ << 6) | 0x06])); },
-                    4 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x8B, (mod_ << 6) | 0x06])); },
-                    2 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x66, 0x8B, (mod_ << 6) | 0x06])); },
-                    _ => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x8A, (mod_ << 6) | 0x06])); },
-                }
-                if need_disp {
-                    disp_bytes(self, mod_, $off);
+                    8 => { let _ = self.emit_insn(&Insn::mov_rm_mem(
+                        true, crate::codegen::shared::asm_operand::Width::B64, 0, 6, off_i32,
+                    )); },
+                    4 => { let _ = self.emit_insn(&Insn::mov_rm_mem(
+                        true, crate::codegen::shared::asm_operand::Width::B32, 0, 6, off_i32,
+                    )); },
+                    2 => { let _ = self.emit_insn(&Insn::mov_rm_mem(
+                        true, crate::codegen::shared::asm_operand::Width::B16, 0, 6, off_i32,
+                    )); },
+                    _ => { let _ = self.emit_insn(&Insn::mov_rm_mem(
+                        true, crate::codegen::shared::asm_operand::Width::B8, 0, 6, off_i32,
+                    )); },
                 }
             }};
         }
         // 一笔「写 al/rax 到 seg:[rdi+off]」—— 前缀逐笔发，不共享
         macro_rules! store_at {
             ($w:expr, $off:expr) => {{
-                let (mod_, need_disp) = if $off == 0 {
-                    (0u8, false)
-                } else if $off < 128 {
-                    (1u8, true)
-                } else {
-                    (2u8, true)
-                };
+                let off_i32: i32 = $off as i32;
                 self.emit_insn(&Insn::raw_bytes(&[seg]));
                 match $w {
-                    8 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, (mod_ << 6) | 0x07])); },
-                    4 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x89, (mod_ << 6) | 0x07])); },
-                    2 => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, (mod_ << 6) | 0x07])); },
-                    _ => { let _ = self.emit_insn(&Insn::raw_bytes(&[0x88, (mod_ << 6) | 0x07])); },
-                }
-                if need_disp {
-                    disp_bytes(self, mod_, $off);
+                    8 => { let _ = self.emit_insn(&Insn::mov_rm_mem(
+                        false, crate::codegen::shared::asm_operand::Width::B64, 0, 7, off_i32,
+                    )); },
+                    4 => { let _ = self.emit_insn(&Insn::mov_rm_mem(
+                        false, crate::codegen::shared::asm_operand::Width::B32, 0, 7, off_i32,
+                    )); },
+                    2 => { let _ = self.emit_insn(&Insn::mov_rm_mem(
+                        false, crate::codegen::shared::asm_operand::Width::B16, 0, 7, off_i32,
+                    )); },
+                    _ => { let _ = self.emit_insn(&Insn::mov_rm_mem(
+                        false, crate::codegen::shared::asm_operand::Width::B8, 0, 7, off_i32,
+                    )); },
                 }
             }};
         }
