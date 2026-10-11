@@ -3312,8 +3312,7 @@ impl Codegen {
                     } else {
                         0x000000FF
                     };
-                    let mb = mask32.to_le_bytes();
-                    self.emit_insn(&Insn::raw_bytes(&[0x25, mb[0], mb[1], mb[2], mb[3]]));
+                    self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, mask32 as i32));
                     // 计算 s_bits 到 edx: 0 或 mask32 (32-bit).
                     if bits == 32 {
                         self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B32)); // cdq: edx = sign(eax) = 0 或 0xFFFFFFFF
@@ -3385,8 +3384,11 @@ impl Codegen {
                     self.emit_insn(&Insn::cmovcc_reg_reg(crate::codegen::x86_64::opcode::CondCode::Eq, crate::codegen::shared::asm_operand::Width::B32, 0, 2));
                     // mov ecx, (bits-2)
                     let bm2: u32 = (bits - 2) as u32;
-                    let b = bm2.to_le_bytes();
-                    self.emit_insn(&Insn::raw_bytes(&[0xB9, b[0], b[1], b[2], b[3]]));
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        width: crate::codegen::shared::asm_operand::Width::B32,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B32),
+                        src: crate::codegen::x86_64::opcode::Operand::Imm(bm2 as i32 as i64),
+                    }, &[]));
                     // sub ecx, eax: ecx = clrsb
                     self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Sub, crate::codegen::shared::asm_operand::Width::B32, 1, 0));
                     // mov dst, ecx (REX.W; ecx 零扩展到 dst)
@@ -3503,16 +3505,14 @@ impl Codegen {
                 // gen_expr always returns result in rax (reg 0).
                 self.gen_expr(&args[0], Self::EVAL_BASE);
                 // xor dst,dst: dst in both reg and r/m → REX.R+REX.B
-                let rex_xor = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                 // add dst,rcx: dst in r/m only → REX.B
-                let rex_add = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                 // push rcx
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 // mov rcx, rax  (save original input; rcx = rax)
                 // REX.W 89 C1
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 // xor dst, dst  (zero dst for input==0 case)
-                self.emit_insn(&Insn::raw_bytes(&[rex_xor, 0x31, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B64, dst, dst));
                 // bsf dst, rcx  (dst in reg → REX.R)
                 self.emit_insn(&Insn::bit_scan_reg_reg(false, crate::codegen::shared::asm_operand::Width::B64, dst, 1));
                 // test rcx, rcx  (48 85 C9)
@@ -3528,7 +3528,7 @@ impl Codegen {
                     src: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B8),
                 }, &[]));
                 // add dst, rcx  (reg=rcx=001, r/m=dst)
-                self.emit_insn(&Insn::raw_bytes(&[rex_add, 0x01, 0xC8 | (dst & 7)]));
+                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Add, crate::codegen::shared::asm_operand::Width::B64, dst, 1));
                 // pop rcx
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                 true
@@ -3589,11 +3589,9 @@ impl Codegen {
                 }
                 self.gen_expr(&args[0], dst);
                 // sub dst, '0' (0x30)
-                let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };   // 位序: 该寄存器只在 r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xE8 | (dst & 7)]));
-                self.emit_insn(&Insn::raw_bytes(&0x30u32.to_le_bytes()));
+                self.emit_insn(&Insn::alu_rm_reg_imm32_b64_full(0x5, dst, 0x30));
                 // cmp dst, 9
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x83, 0xF8 | (dst & 7), 9]));
+                self.emit_insn(&Insn::alu_rm_reg_imm8_b64(0x7, dst, 9));
                 // setbe al (unsigned <= 9)
                 self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Be, 0));
                 // movzx eax, al
