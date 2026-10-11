@@ -534,6 +534,50 @@ impl Insn {
         Insn::raw_bytes(&out)
     }
 
+    /// P11 Bucket Z: B64 `add/and/or/sub/xor/cmp rax, imm32` accumulator-only
+    /// form (REX.W 0x05 / 0x25 / 0x0D / 0x2D / 0x35 / 0x3D, no ModRM).
+    /// op_encoding: 0x05=add, 0x0D=or, 0x11=adc (unused), 0x19=sbb,
+    /// 0x21=and, 0x29=sub, 0x31=xor, 0x39=cmp (rm-reg) etc. For imm32-only
+    /// use the accumulator opcodes: 0x05 add / 0x0D or / 0x13 adc /
+    /// 0x1B sbb / 0x25 and / 0x2D sub / 0x35 xor / 0x3D cmp.
+    pub fn alu_acc_imm32_b64_acc(opcode_no_modrm: u8, imm: i32) -> Self {
+        let imm32 = imm.to_le_bytes();
+        let mut out = Vec::with_capacity(6);
+        out.push(0x48);
+        out.push(opcode_no_modrm);
+        out.extend_from_slice(&imm32);
+        Insn::raw_bytes(&out)
+    }
+
+    /// P11 Bucket Z: accumulator ALU with gas text (preserves -S rendering).
+    /// Constructs the same bytes as [`Self::alu_acc_imm32_b64_acc`] but
+    /// attaches the provided GAS text so the -S renderer emits it verbatim.
+    pub fn alu_acc_imm32_b64_acc_gas(opcode_no_modrm: u8, imm: i32, gas: &str) -> Self {
+        let imm32 = imm.to_le_bytes();
+        let mut out = Vec::with_capacity(6);
+        out.push(0x48);
+        out.push(opcode_no_modrm);
+        out.extend_from_slice(&imm32);
+        let mut insn = Insn::raw_bytes(&out);
+        insn.gas_text = Some(gas.to_string());
+        insn
+    }
+
+    /// P11 Bucket Z: B64 `cmovcc r_dst, r_src` (REX.W 0F 40+cc mod=11).
+    /// cc: condition code byte offset, e.g. 0x47 = cmova. Self-absorbs
+    /// REX.R (dst>=8) / REX.B (src>=8).
+    pub fn cmovcc_reg_reg_b64(cc: u8, dst_reg: u8, src_reg: u8) -> Self {
+        let mut rex: u8 = 0x48;
+        if dst_reg >= 8 {
+            rex |= 0x04;
+        }
+        if src_reg >= 8 {
+            rex |= 0x01;
+        }
+        let modrm = 0xC0 | ((dst_reg & 7) << 3) | (src_reg & 7);
+        Insn::raw_bytes(&[rex, 0x0F, cc, modrm])
+    }
+
     /// P11: 构造 `movsd xmm_dst, xmm_src` (F2 0F 10 mod=11).
     /// 源/目的都在 xmm0..xmm15 (>=8 时带 REX.R/B 由 ModRM 低 3 位 + 前缀编码).
     pub fn movsd_xmm(dst_xmm: u8, src_xmm: u8) -> Self {
@@ -1193,5 +1237,33 @@ mod tests {
         // sar ecx, 31: C1 F9 1F
         assert_eq!(Insn::shift_reg_imm8_c1_b32(0b111, 1, 0x1F).encode_bytes(),
             Some(vec![0xC1, 0xF9, 0x1F]));
+    }
+
+    #[test]
+    fn alu_acc_imm32_b64_acc_basic() {
+        // add rax, 0x1234: 48 05 34 12 00 00
+        assert_eq!(
+            Insn::alu_acc_imm32_b64_acc(0x05, 0x1234).encode_bytes(),
+            Some(vec![0x48, 0x05, 0x34, 0x12, 0x00, 0x00]),
+        );
+        // and rax, 0xFF: 48 25 FF 00 00 00
+        assert_eq!(
+            Insn::alu_acc_imm32_b64_acc(0x25, 0xFF).encode_bytes(),
+            Some(vec![0x48, 0x25, 0xFF, 0x00, 0x00, 0x00]),
+        );
+    }
+
+    #[test]
+    fn cmovcc_reg_reg_b64_basic() {
+        // cmova rax, rcx: 48 0F 47 C1 (dst=0, src=1)
+        assert_eq!(
+            Insn::cmovcc_reg_reg_b64(0x47, 0, 1).encode_bytes(),
+            Some(vec![0x48, 0x0F, 0x47, 0xC1]),
+        );
+        // cmova r8, r9: REX.W|R+B = 4D, 0F 47 C1 (dst=8→0 field, src=9→1 field)
+        assert_eq!(
+            Insn::cmovcc_reg_reg_b64(0x47, 8, 9).encode_bytes(),
+            Some(vec![0x4D, 0x0F, 0x47, 0xC1]),
+        );
     }
 }

@@ -1297,9 +1297,9 @@ impl Codegen {
                         if store_off != 0 {
                             // add rax, imm32: 48 05 id (accumulator-only form)
                             let gas = format!("add ${}, %rax", store_off);
-                            let mut bytes = vec![0x48, 0x05];
-                            bytes.extend_from_slice(&(store_off as i32).to_le_bytes());
-                            self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
+                            self.emit_insn(&Insn::alu_acc_imm32_b64_acc_gas(
+                                0x05, store_off as i32, &gas,
+                            ));
                         }
                         self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B64, 0, 13, -24)); // mov [r13-24], rax
                                                               // 加载容器值 → rax
@@ -1364,8 +1364,9 @@ impl Codegen {
                                 // and rax, imm32 (zero-extended): 48 25 id. Preserve
                                 // G10 byte-exact emission (REX.W forced by codegen even
                                 // though upper 32 bits are already 0).
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x25]));
-                                self.emit_insn(&Insn::raw_bytes(&(mask as u32).to_le_bytes()));
+                                self.emit_insn(&Insn::alu_acc_imm32_b64_acc(
+                                    0x25, mask as u32 as i32,
+                                ));
                             } else {
                                 self.emit_insn(&Insn::movabs_reg_imm64(2, mask));
                                 self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B64, 0, 2));
@@ -1809,12 +1810,8 @@ impl Codegen {
                             // dst = max(dst, tmp): cmp dst, tmp; cmova dst, tmp
                             // cmp/cmovcc reg-reg: AluRm{Cmp, B64} + typed cmov.
                             self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Cmp, crate::codegen::shared::asm_operand::Width::B64, dst, tmp));
-                            // cmova dst, tmp: 0F 47 /r. No typed opcode yet;
-                            // preserve raw byte emission (byte-exact G10).
-                            let rex = 0x48
-                                | if tmp >= 8 { 0x04 } else { 0 }
-                                | if dst >= 8 { 0x01 } else { 0 };
-                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0x47, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
+                            // cmova dst, tmp: 0F 47 /r.
+                            self.emit_insn(&Insn::cmovcc_reg_reg_b64(0x47, dst, tmp));
                         } else {
                             self.mov(dst, tmp);
                             acc_open = true;
@@ -1827,9 +1824,7 @@ impl Codegen {
                     // dst = max(dst, static_max)
                     self.mov_imm(tmp, static_max as i128);
                     self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Cmp, crate::codegen::shared::asm_operand::Width::B64, dst, tmp));
-                    let rex =
-                        0x48 | if tmp >= 8 { 0x04 } else { 0 } | if dst >= 8 { 0x01 } else { 0 };
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, 0x47, 0xC0 | ((tmp & 7) << 3) | (dst & 7)]));
+                    self.emit_insn(&Insn::cmovcc_reg_reg_b64(0x47, dst, tmp));
                 } else if !acc_open {
                     self.mov_imm(dst, static_max as i128);
                 }
