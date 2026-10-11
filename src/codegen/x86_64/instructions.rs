@@ -954,9 +954,9 @@ impl Codegen {
             _ => {
                 if size < 8 && Self::is_signed_int(ty) {
                     match size {
-                        1 => { self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xBE, 0x00], "movsbq (%rax), %rax")); } // movsbq rax, [rax]
-                        2 => { self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xBF, 0x00], "movswq (%rax), %rax")); } // movswq rax, [rax]
-                        _ => { self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x63, 0x00], "movsxd (%rax), %rax")); }       // movsxd rax, [rax]
+                        1 => { self.emit_insn(&Insn::mov_ext_mem(true, crate::codegen::shared::asm_operand::Width::B8, crate::codegen::shared::asm_operand::Width::B64, 0, 0, 0)); } // movsbq rax, [rax]
+                        2 => { self.emit_insn(&Insn::mov_ext_mem(true, crate::codegen::shared::asm_operand::Width::B16, crate::codegen::shared::asm_operand::Width::B64, 0, 0, 0)); } // movswq rax, [rax]
+                        _ => { self.emit_insn(&Insn::mov_ext_mem(true, crate::codegen::shared::asm_operand::Width::B32, crate::codegen::shared::asm_operand::Width::B64, 0, 0, 0)); }       // movsxd rax, [rax]
                     };
                 } else {
                     self.emit_load_mem(size);
@@ -1035,10 +1035,7 @@ impl Codegen {
     }
 
     pub fn imul_imm(&mut self, reg: u8, imm: i128) {
-        let rex = if reg >= 8 { 0x4D } else { 0x48 };
-        let modrm = 0xC0 | ((reg & 7) << 3) | (reg & 7);
-        self.emit_insn(&Insn::raw_bytes(&[rex, 0x69, modrm]));
-        self.emit_insn(&Insn::raw_bytes(&(imm as i32).to_le_bytes()));
+        self.emit_insn(&Insn::imul_rm_reg_imm32_b64(reg, imm as i32));
     }
 
     /// Increment register by 1.
