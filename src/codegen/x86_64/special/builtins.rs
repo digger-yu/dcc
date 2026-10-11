@@ -3314,9 +3314,9 @@ impl Codegen {
                     if bits == 32 {
                         self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B32)); // cdq: edx = sign(eax) = 0 或 0xFFFFFFFF
                     } else if bits == 16 {
-                        self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE0, 16])); // shl eax, 16
-                        self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xF8, 31])); // sar eax, 31 → 0 或 -1
-                        self.emit_insn(&Insn::raw_bytes(&[0x25, 0xFF, 0xFF, 0x00, 0x00])); // and eax, 0xFFFF → 保留符号扩展
+                        self.emit_insn(&Insn::shift_reg_imm8_c1_b32(0b100, 0, 16)); // shl eax, 16
+                        self.emit_insn(&Insn::shift_reg_imm8_c1_b32(0b111, 0, 31)); // sar eax, 31 → 0 或 -1
+                        self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, 0xFFFF)); // and eax, 0xFFFF → 保留符号扩展
                         self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,
@@ -3330,12 +3330,12 @@ impl Codegen {
                 &[],
             )); // mov edx, eax
                         // 恢复原始16位值到eax的低16位，高位清零
-                        self.emit_insn(&Insn::raw_bytes(&[0x25, 0xFF, 0xFF, 0x00, 0x00])); // and eax, 0xFFFF
+                        self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, 0xFFFF)); // and eax, 0xFFFF
                     } else {
                         // bits == 8
-                        self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE0, 24])); // shl eax, 24
-                        self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xF8, 31])); // sar eax, 31 → 0 或 -1
-                        self.emit_insn(&Insn::raw_bytes(&[0x25, 0xFF, 0x00, 0x00, 0x00])); // and eax, 0xFF → 保留符号扩展
+                        self.emit_insn(&Insn::shift_reg_imm8_c1_b32(0b100, 0, 24)); // shl eax, 24
+                        self.emit_insn(&Insn::shift_reg_imm8_c1_b32(0b111, 0, 31)); // sar eax, 31 → 0 或 -1
+                        self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, 0xFF)); // and eax, 0xFF → 保留符号扩展
                         self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,
@@ -3349,7 +3349,7 @@ impl Codegen {
                 &[],
             )); // mov edx, eax
                         // 恢复原始8位值到eax的低8位，高位清零
-                        self.emit_insn(&Insn::raw_bytes(&[0x25, 0xFF, 0x00, 0x00, 0x00])); // and eax, 0xFF
+                        self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, 0xFF)); // and eax, 0xFF
                     }
                     // xor eax, edx: eax = x ^ s_bits (按类型宽度处理)
                     self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B32, 0, 2));
@@ -3369,7 +3369,11 @@ impl Codegen {
                     // bsr eax, eax (32-bit) - 可能为 UB for 0, 但 cmove 兜底
                     self.emit_insn(&Insn::bit_scan_reg_reg(true, crate::codegen::shared::asm_operand::Width::B32, 0, 0));
                     // mov edx, 0xFFFFFFFF (sentinel)
-                    self.emit_insn(&Insn::raw_bytes(&[0xBA, 0xFF, 0xFF, 0xFF, 0xFF]));
+                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        width: crate::codegen::shared::asm_operand::Width::B32,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B32),
+                        src: crate::codegen::x86_64::opcode::Operand::Imm(-1),
+                    }, &[]));
                     // test ecx, ecx: 设置 ZF 基于 ecx (0 ⇒ ZF=1), 覆盖 bsr 的 ZF
                     self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 1, 1));
                     // cmove eax, edx: 如果 x^s_bits==0, eax = edx = -1
@@ -3419,7 +3423,11 @@ impl Codegen {
                 // 拷贝传入栈参数: rsi = r13+16 (首栈参), rdi = rsp+176
                 self.emit_insn(&Insn::lea_reg_base_disp(6, 13, 16)); // lea rsi, [r13+16]
                 self.emit_insn(&Insn::lea_reg_base_disp(7, 4, 176)); // lea rdi, [rsp+176]
-                self.emit_insn(&Insn::raw_bytes(&[0xB9, 32, 0, 0, 0])); // mov ecx, 32 (qwords)
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    width: crate::codegen::shared::asm_operand::Width::B32,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B32),
+                    src: crate::codegen::x86_64::opcode::Operand::Imm(32),
+                }, &[])); // mov ecx, 32 (qwords)
                 self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsq)); // cld; rep movsq
                 self.emit_insn(&Insn::lea_reg_base_disp(0, 4, 0)); // lea rax, [rsp]
                 if dst != 0 {
@@ -4385,7 +4393,7 @@ impl Codegen {
                     if elem_size == 1 {
                     } else if elem_size.is_power_of_two() {
                         let shift = elem_size.trailing_zeros();
-                        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xE0, shift as u8]));
+                        self.emit_insn(&Insn::shift_reg_imm8_c1_b64(0b100, 0, shift as u8));
                     } else {
                         self.mov_imm(10, elem_size as i128);
                         self.emit_insn(&Insn::imul_rm_reg(
@@ -4688,8 +4696,8 @@ impl Codegen {
                 },
                 &[],
             )); // mov eax, [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x25, 0x00, 0x60, 0x00, 0x00])); // and eax, 0x6000
-                self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE8, 0x03])); // shr eax, 3 → 控制字位 10-11
+                self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, 0x6000)); // and eax, 0x6000
+                self.emit_insn(&Insn::shift_reg_imm8_c1_b32(0b101, 0, 0x03)); // shr eax, 3 → 控制字位 10-11
                 self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -4703,8 +4711,8 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE); // rax = mode
-                self.emit_insn(&Insn::raw_bytes(&[0x25, 0x00, 0x0C, 0x00, 0x00])); // and eax, 0xC00
-                self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE0, 0x03])); // shl eax, 3 → MXCSR 位 13-14
+                self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, 0xC00)); // and eax, 0xC00
+                self.emit_insn(&Insn::shift_reg_imm8_c1_b32(0b100, 0, 0x03)); // shl eax, 3 → MXCSR 位 13-14
                 self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::mxcsr_mem(true, 4, 0)); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
@@ -4765,7 +4773,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE); // rax = excepts
-                self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
+                self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, 0x3F)); // and eax, 0x3F
                 self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Not, crate::codegen::shared::asm_operand::Width::B32, 0)); // not eax
                                           // 清除 MXCSR 异常标志
                 self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
@@ -4807,7 +4815,7 @@ impl Codegen {
                                                    // 清除 x87 FPU 状态字异常标志 (fnclex 清除所有异常)
                                                    // 注: fnclex 清除所有 6 个异常标志, 与 excepts 掩码无关
                                                    // 这是安全的因为 C11 允许清除额外的异常
-                self.emit_insn(&Insn::raw_bytes(&[0xDB, 0xE2])); // fnclex
+                self.emit_insn(&Insn::x87_fixed(0xDB, 0xE2)); // fnclex
                 self.mov_imm(dst, 0); // 返回 0
                 true
             },
@@ -4819,7 +4827,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE); // rax = excepts
-                self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
+                self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, 0x3F)); // and eax, 0x3F
                 self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::mxcsr_mem(true, 4, 0)); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
@@ -4870,7 +4878,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE); // rax = excepts
-                self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
+                self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, 0x3F)); // and eax, 0x3F
                                                             // 测试 MXCSR 异常标志
                 self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::mxcsr_mem(true, 4, 0)); // stmxcsr [rsp]
@@ -4888,14 +4896,14 @@ impl Codegen {
                 },
                 &[],
             )); // mov ecx, [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00])); // and ecx, 0x3F
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::And, width: crate::codegen::shared::asm_operand::Width::B32, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B32), src: crate::codegen::x86_64::opcode::Operand::Imm(0x3F)}, &[])); // and ecx, 0x3F
                 self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B32, 1, 0)); // and ecx, eax (ecx = MXCSR & excepts)
                 self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                                                    // 测试 x87 FPU 状态字异常标志
                 self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
-                self.emit_insn(&Insn::raw_bytes(&[0xDF, 0xE0])); // fnstsw ax (x87 状态字 -> ax)
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x25, 0x3F, 0x00])); // and ax, 0x3F
-                self.emit_insn(&Insn::raw_bytes(&[0x66, 0x21, 0xC0])); // and ax, ax (保留 excepts 位)
+                self.emit_insn(&Insn::x87_fixed(0xDF, 0xE0)); // fnstsw ax (x87 状态字 -> ax)
+                self.emit_insn(&Insn::alu_acc_imm16_b16_acc(0x25, 0x3F)); // and ax, 0x3F
+                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B16, 0, 0)); // and ax, ax (保留 excepts 位)
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
                     sign: false,
                     from: crate::codegen::shared::asm_operand::Width::B16,
@@ -4920,7 +4928,7 @@ impl Codegen {
                 }
                 self.gen_expr(&args[0], 7); // rdi = flagp
                 self.gen_expr(&args[1], Self::EVAL_BASE); // rax = excepts
-                self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
+                self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, 0x3F)); // and eax, 0x3F
                 self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::mxcsr_mem(true, 4, 0)); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
@@ -4937,7 +4945,7 @@ impl Codegen {
                 },
                 &[],
             )); // mov ecx, [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00])); // and ecx, 0x3F
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::And, width: crate::codegen::shared::asm_operand::Width::B32, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B32), src: crate::codegen::x86_64::opcode::Operand::Imm(0x3F)}, &[])); // and ecx, 0x3F
                 self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B32, 1, 0)); // and ecx, eax
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x89, 0x0F])); // mov [rdi], cx
                 self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
@@ -4958,8 +4966,8 @@ impl Codegen {
                     crate::codegen::shared::asm_operand::Width::B32,
                     1, 7, 0,
                 )); // movzx ecx, word [rdi]
-                self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00])); // and ecx, 0x3F
-                self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::And, width: crate::codegen::shared::asm_operand::Width::B32, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B32), src: crate::codegen::x86_64::opcode::Operand::Imm(0x3F)}, &[])); // and ecx, 0x3F
+                self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, 0x3F)); // and eax, 0x3F
                 self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B32, 1, 0)); // and ecx, eax → ecx = *flagp & excepts
                 self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::mxcsr_mem(true, 4, 0)); // stmxcsr [rsp]
@@ -5016,9 +5024,9 @@ impl Codegen {
                     crate::codegen::shared::asm_operand::Width::B32,
                     1, 7, 0,
                 )); // movzx ecx, word [rdi]
-                self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00])); // and ecx, 0x3F
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::And, width: crate::codegen::shared::asm_operand::Width::B32, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B32), src: crate::codegen::x86_64::opcode::Operand::Imm(0x3F)}, &[])); // and ecx, 0x3F
                 self.gen_expr(&args[1], Self::EVAL_BASE); // rax = excepts
-                self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
+                self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, 0x3F)); // and eax, 0x3F
                 self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B32, 1, 0)); // and ecx, eax
                 self.mov(0, 1); // rax = rcx
                 if dst != 0 {
@@ -5091,8 +5099,8 @@ impl Codegen {
                 },
                 &[],
             )); // mov eax, [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x25, 0xC0, 0xFF, 0xFF, 0xFF])); // and eax, ~0x3F
-                self.emit_insn(&Insn::raw_bytes(&[0x0D, 0x80, 0x1F, 0x00, 0x00])); // or eax, 0x1F80 (mask all)
+                self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, 0xFFFFC0)); // and eax, ~0x3F
+                self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x0D, 0x1F80)); // or eax, 0x1F80 (mask all)
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,
@@ -5144,7 +5152,7 @@ impl Codegen {
                 },
                 &[],
             )); // mov ecx, [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0x81, 0xE1, 0x3F, 0x00, 0x00, 0x00])); // and ecx, 0x3F
+                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::And, width: crate::codegen::shared::asm_operand::Width::B32, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B32), src: crate::codegen::x86_64::opcode::Operand::Imm(0x3F)}, &[])); // and ecx, 0x3F
                 self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                                                    // 恢复环境 (同 fesetenv 内联)
                 let l_default = self.fresh_label();
@@ -5213,7 +5221,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE); // rax = excepts
-                self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
+                self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, 0x3F)); // and eax, 0x3F
                 self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::mxcsr_mem(true, 4, 0)); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
@@ -5262,7 +5270,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE); // rax = excepts
-                self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
+                self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, 0x3F)); // and eax, 0x3F
                 self.emit_insn(&Insn::sub_rsp_imm(8)); // sub rsp, 8
                 self.emit_insn(&Insn::mxcsr_mem(true, 4, 0)); // stmxcsr [rsp]
                 self.emit_insn(&Insn::new(
@@ -5292,8 +5300,8 @@ impl Codegen {
                 },
                 &[],
             )); // mov eax, ecx
-                self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE8, 0x07])); // shr eax, 7
-                self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
+                self.emit_insn(&Insn::shift_reg_imm8_c1_b32(0b101, 0, 0x07)); // shr eax, 7
+                self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, 0x3F)); // and eax, 0x3F
                                                             // 清除屏蔽位 (启用陷阱): 屏蔽位在 7-12
                                                             // eax = excepts (from gen_expr above), copy to edx
                 self.emit_insn(&Insn::new(
@@ -5308,7 +5316,7 @@ impl Codegen {
                 },
                 &[],
             )); // mov edx, eax (edx = excepts)
-                self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE2, 0x07])); // shl edx, 7 (shift to mask position)
+                self.emit_insn(&Insn::shift_reg_imm8_c1_b32(0b100, 2, 0x07)); // shl edx, 7 (shift to mask position)
                 self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Not, crate::codegen::shared::asm_operand::Width::B32, 2)); // not edx (invert: clear bit = enable)
                 self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B32, 1, 2)); // and ecx, edx (clear mask bits in MXCSR)
                 self.emit_insn(&Insn::new(
@@ -5345,7 +5353,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE); // rax = excepts
-                self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
+                self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, 0x3F)); // and eax, 0x3F
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,
@@ -5387,10 +5395,10 @@ impl Codegen {
                 },
                 &[],
             )); // mov eax, ecx
-                self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE8, 0x07])); // shr eax, 7
-                self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
+                self.emit_insn(&Insn::shift_reg_imm8_c1_b32(0b101, 0, 0x07)); // shr eax, 7
+                self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, 0x3F)); // and eax, 0x3F
                                                             // 保存旧掩码到 [rsp+8]
-                self.emit_insn(&Insn::raw_bytes(&[0x89, 0x44, 0x24, 0x08])); // mov [rsp+8], eax
+                self.emit_insn(&Insn::mov_rm_mem(false, crate::codegen::shared::asm_operand::Width::B32, 0, 4, 8)); // mov [rsp+8], eax
                                                       // 设置屏蔽位 (禁用陷阱)
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -5404,7 +5412,7 @@ impl Codegen {
                 },
                 &[],
             )); // mov eax, edx (eax = excepts)
-                self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE0, 0x07])); // shl eax, 7
+                self.emit_insn(&Insn::shift_reg_imm8_c1_b32(0b100, 0, 0x07)); // shl eax, 7
                 self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Or, crate::codegen::shared::asm_operand::Width::B32, 1, 0)); // or ecx, eax
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -5425,7 +5433,7 @@ impl Codegen {
             )); // mov [rsp], ecx
                 self.emit_insn(&Insn::mxcsr_mem(false, 4, 0)); // ldmxcsr [rsp]
                                                       // 恢复旧掩码作为返回值
-                self.emit_insn(&Insn::raw_bytes(&[0x8B, 0x44, 0x24, 0x08])); // mov eax, [rsp+8]
+                self.emit_insn(&Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B32, 0, 4, 8)); // mov eax, [rsp+8]
                 self.emit_insn(&Insn::add_rsp_imm(0x10)); // add rsp, 16
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -5453,8 +5461,8 @@ impl Codegen {
                 },
                 &[],
             )); // mov eax, [rsp]
-                self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE8, 0x07])); // shr eax, 7
-                self.emit_insn(&Insn::raw_bytes(&[0x25, 0x3F, 0x00, 0x00, 0x00])); // and eax, 0x3F
+                self.emit_insn(&Insn::shift_reg_imm8_c1_b32(0b101, 0, 0x07)); // shr eax, 7
+                self.emit_insn(&Insn::alu_acc_imm32_b32_acc(0x25, 0x3F)); // and eax, 0x3F
                 self.emit_insn(&Insn::add_rsp_imm(8)); // add rsp, 8
                 if dst != 0 {
                     self.mov(dst, 0);

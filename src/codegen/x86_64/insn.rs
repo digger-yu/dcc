@@ -659,6 +659,13 @@ impl Insn {
         Insn::raw_bytes(&out)
     }
 
+    /// P11 Bucket N9: B16 `shl/shr/sar reg, imm8` (66 C1 /r ib, no REX).
+    /// op 编码: /4=shl, /5=shr, /7=sar.
+    pub fn shift_reg_imm8_c1_b16(op_field: u8, reg_idx: u8, imm8: u8) -> Self {
+        let modrm = 0xC0 | ((op_field & 0x7) << 3) | (reg_idx & 0x7);
+        Insn::raw_bytes(&[0x66, 0xC1, modrm, imm8])
+    }
+
     /// P11 Bucket T: 构造 B64 `test reg, imm32` (REX.W F7 /0 id).
     /// 与 `test_rm_reg` (reg,reg 形态 85) 不同, 这是 TEST r/m64, imm32.
     /// 位域符号位测试 (sign_bit <= 0xFFFFFFFF) 固定走这个形态.
@@ -764,6 +771,29 @@ impl Insn {
         out.push(0x48);
         out.push(opcode_no_modrm);
         out.extend_from_slice(&imm32);
+        Insn::raw_bytes(&out)
+    }
+
+    /// P11 Bucket N9: B32 `add/and/or/sub/xor/cmp eax, imm32` accumulator-only
+    /// form (0x05 / 0x25 / 0x0D / 0x2D / 0x35 / 0x3D, no REX, no ModRM).
+    /// op_encoding same as `alu_acc_imm32_b64_acc` but without REX.W.
+    pub fn alu_acc_imm32_b32_acc(opcode_no_modrm: u8, imm: i32) -> Self {
+        let imm32 = imm.to_le_bytes();
+        let mut out = Vec::with_capacity(5);
+        out.push(opcode_no_modrm);
+        out.extend_from_slice(&imm32);
+        Insn::raw_bytes(&out)
+    }
+
+    /// P11 Bucket N9: B16 `add/and/or/sub/xor/cmp ax, imm16` accumulator-only
+    /// form (0x66 0x05 / 0x25 / 0x0D / 0x2D / 0x35 / 0x3D, no REX, no ModRM).
+    /// imm16 LE. op_encoding same as `alu_acc_imm32_b32_acc` but with 0x66 prefix.
+    pub fn alu_acc_imm16_b16_acc(opcode_no_modrm: u8, imm: i16) -> Self {
+        let imm16 = imm.to_le_bytes();
+        let mut out = Vec::with_capacity(4);
+        out.push(0x66);
+        out.push(opcode_no_modrm);
+        out.extend_from_slice(&imm16);
         Insn::raw_bytes(&out)
     }
 
@@ -1507,6 +1537,13 @@ mod tests {
     }
 
     #[test]
+    fn shift_reg_imm8_c1_b16_basic() {
+        // shl ax, 3: 66 C1 E0 03
+        assert_eq!(Insn::shift_reg_imm8_c1_b16(0b100, 0, 3).encode_bytes(),
+            Some(vec![0x66, 0xC1, 0xE0, 0x03]));
+    }
+
+    #[test]
     fn alu_acc_imm32_b64_acc_basic() {
         // add rax, 0x1234: 48 05 34 12 00 00
         assert_eq!(
@@ -1517,6 +1554,29 @@ mod tests {
         assert_eq!(
             Insn::alu_acc_imm32_b64_acc(0x25, 0xFF).encode_bytes(),
             Some(vec![0x48, 0x25, 0xFF, 0x00, 0x00, 0x00]),
+        );
+    }
+
+    #[test]
+    fn alu_acc_imm32_b32_acc_basic() {
+        // and eax, 0x3F: 25 3F 00 00 00
+        assert_eq!(
+            Insn::alu_acc_imm32_b32_acc(0x25, 0x3F).encode_bytes(),
+            Some(vec![0x25, 0x3F, 0x00, 0x00, 0x00]),
+        );
+        // or eax, 0x1F80: 0D 80 1F 00 00
+        assert_eq!(
+            Insn::alu_acc_imm32_b32_acc(0x0D, 0x1F80).encode_bytes(),
+            Some(vec![0x0D, 0x80, 0x1F, 0x00, 0x00]),
+        );
+    }
+
+    #[test]
+    fn alu_acc_imm16_b16_acc_basic() {
+        // and ax, 0x3F: 66 25 3F 00
+        assert_eq!(
+            Insn::alu_acc_imm16_b16_acc(0x25, 0x3F).encode_bytes(),
+            Some(vec![0x66, 0x25, 0x3F, 0x00]),
         );
     }
 
