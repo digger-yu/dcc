@@ -1517,50 +1517,15 @@ impl Codegen {
                 inner_sz as i32,
             ));
         } else {
-            let (_lsz, ld_s, ld_u) = match inner_sz {
-                4 => (0x8Bu8, 0u8, 0u8),
-                2 => (0x0Fu8, 0xBFu8, 0xB7u8), // movsx/movzx r32, m16
-                _ => (0x0Fu8, 0xBEu8, 0xB6u8), // movsx/movzx r32, m8
-            };
-            let ld = if Self::is_signed_int(inner_ty) { ld_s } else { ld_u };
-            let t = total_sz as u8;
-            let i = inner_sz as u8;
-            let ti = (total_sz + inner_sz) as u8;
-            if inner_sz == 4 {
-                self.emit_insn(&Insn::mov_rm_mem(
-                    true,
-                    crate::codegen::shared::asm_operand::Width::B32,
-                    0,
-                    4,
-                    0,
-                )); // eax = a
-                self.emit_insn(&Insn::mov_rm_mem(
-                    true,
-                    crate::codegen::shared::asm_operand::Width::B32,
-                    1,
-                    4,
-                    total_sz as i32,
-                )); // ecx = c
-                self.emit_insn(&Insn::mov_rm_mem(
-                    true,
-                    crate::codegen::shared::asm_operand::Width::B32,
-                    2,
-                    4,
-                    inner_sz as i32,
-                )); // edx = b
-                self.emit_insn(&Insn::mov_rm_mem(
-                    true,
-                    crate::codegen::shared::asm_operand::Width::B32,
-                    6,
-                    4,
-                    total_sz as i32 + inner_sz as i32,
-                )); // esi = d
-            } else {
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x04, 0x24]));
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x4C, 0x24, t]));
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x54, 0x24, i]));
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, ld, 0x74, 0x24, ti]));
-            }
+                use crate::codegen::shared::asm_operand::Width;
+                let (from_w, sign) = match inner_sz {
+                    2 => (Width::B16, Self::is_signed_int(inner_ty)),
+                    _ => (Width::B8, Self::is_signed_int(inner_ty)),
+                };
+                self.emit_insn(&Insn::mov_ext_mem(sign, from_w, Width::B32, 0, 4, 0));
+                self.emit_insn(&Insn::mov_ext_mem(sign, from_w, Width::B32, 1, 4, total_sz as i32));
+                self.emit_insn(&Insn::mov_ext_mem(sign, from_w, Width::B32, 2, 4, inner_sz as i32));
+                self.emit_insn(&Insn::mov_ext_mem(sign, from_w, Width::B32, 6, 4, (total_sz + inner_sz) as i32));
             self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     width: crate::codegen::shared::asm_operand::Width::B32,
