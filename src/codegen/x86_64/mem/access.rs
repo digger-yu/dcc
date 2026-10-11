@@ -642,11 +642,26 @@ impl Codegen {
                     ));
                 } else {
                     self.mov_imm(10, parent_off as i128);
-                    // lea dst, [dst + r10]
-                    self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x8D, 0x1C, 0xD0 | (dst & 7)]));
-                    // mov dst, [dst]
-                    let rex = 0x48 | if dst >= 8 { 0x04 } else { 0 };
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B, (dst & 7)]));
+                    // P11 Bucket AE: lea dst, [dst + r10] via typed Lea SIB.
+                    // REX.WXB=0x4F, modrm=0x1C, sib=0xD0|(dst&7) (index=r10, base=dst).
+                    let insn = Insn::new(
+                        X86_64Opcode::Lea {
+                            dst: Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B64),
+                            mem: MemOperand { disp: 0, base: Some(dst), index: Some((10, 1)), seg: None },
+                            rip_relative: false,
+                        },
+                        &[],
+                    );
+                    if !self.emit_insn(&insn) {
+                        self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x8D, 0x1C, 0xD0 | (dst & 7)])); // 兜底
+                    }
+                    // P11 Bucket AE: mov dst, [dst] via typed MovRm (mod=00, no disp).
+                    // 与原手写 [rex, 0x8B, (dst&7)] 逐字节等价.
+                    self.emit_insn(&Insn::mov_rm_mem(
+                        true,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        dst, dst, 0,
+                    ));
                 }
             } else {
                 // 普通数组/向量: 起源帧 + parent_off 即数据地址
