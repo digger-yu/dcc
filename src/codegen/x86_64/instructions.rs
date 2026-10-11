@@ -2367,11 +2367,37 @@ impl Codegen {
         self.emit_insn(&Insn::imul_rm_reg(width, 0, 11));
     }
     pub(crate) fn emit_imul_rm(&mut self, inner_sz: i64, off: i64) {
+        // P11: imul rax/eax, [rsp+off] — ImulRm mem form (SIB).
+        // 原手写: (REX.W) 0F AF 44 24 off(disp8).
+        let width = if inner_sz == 8 {
+            crate::codegen::shared::asm_operand::Width::B64
+        } else {
+            crate::codegen::shared::asm_operand::Width::B32
+        };
+        let insn = Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::ImulRm {
+                width,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(0, width),
+                src: crate::codegen::x86_64::opcode::Operand::Mem(
+                    crate::codegen::x86_64::opcode::MemOperand {
+                        disp: off as i32,
+                        base: Some(4),
+                        index: None,
+                        seg: None,
+                    },
+                ),
+            },
+            &[],
+        );
+        if self.emit_insn(&insn) {
+            return;
+        }
+        // 兜底 (理论上不会走到).
         let rex = if inner_sz == 8 { 0x48 } else { 0x00 };
         if rex != 0 {
             self.emit_insn(&Insn::raw_bytes(&[rex]));
         }
-        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAF, 0x44, 0x24, off as u8])); // imul rax/eax, [rsp+off]
+        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xAF, 0x44, 0x24, off as u8]));
     }
     pub(crate) fn emit_load_mem(&mut self, size: usize) {
         match size {
@@ -2453,6 +2479,17 @@ impl Codegen {
     }
     pub(crate) fn emit_movdqu_r13_to_xmm(&mut self, xmm_reg: u8, off: i64) {
         if Self::fits_disp32(off) {
+            // P11: movdqu xmm, [r13+off] via SimdMov mem form (DQ width, load).
+            let insn = Insn::simd_mov_mem_base(
+                false,
+                crate::codegen::x86_64::opcode::SimdWidth::DQ,
+                xmm_reg,
+                13,
+                off as i32,
+            );
+            if self.emit_insn(&insn) {
+                return;
+            }
             let rex = 0x41 | if xmm_reg >= 8 { 0x04 } else { 0 };
             self.emit_insn(&Insn::raw_bytes(&[0xF3, rex, 0x0F, 0x6F]));
             self.emit_r13_modrm_disp(xmm_reg, off);
@@ -2465,6 +2502,17 @@ impl Codegen {
     }
     pub(crate) fn emit_movdqu_xmm_to_r13(&mut self, xmm_reg: u8, off: i64) {
         if Self::fits_disp32(off) {
+            // P11: movdqu [r13+off], xmm via SimdMov mem form (DQ width, store).
+            let insn = Insn::simd_mov_mem_base(
+                true,
+                crate::codegen::x86_64::opcode::SimdWidth::DQ,
+                xmm_reg,
+                13,
+                off as i32,
+            );
+            if self.emit_insn(&insn) {
+                return;
+            }
             let rex = 0x41 | if xmm_reg >= 8 { 0x04 } else { 0 };
             self.emit_insn(&Insn::raw_bytes(&[0xF3, rex, 0x0F, 0x7F]));
             self.emit_r13_modrm_disp(xmm_reg, off);
@@ -2677,19 +2725,8 @@ impl Codegen {
         }
     }
     pub(crate) fn emit_store_imm32_mem(&mut self, base: u8, disp: i32, imm: i32) {
-        let mut rex: u8 = 0x40;
-        if base >= 8 {
-            rex |= 0x01; // REX.B
-        }
-        let rm = base & 7;
-        if disp.abs() < 128 {
-            self.emit_insn(&Insn::raw_bytes(&[rex, 0xC7, 0x40 | rm]));
-            self.emit_insn(&Insn::raw_bytes(&(disp as i8).to_le_bytes()));
-        } else {
-            self.emit_insn(&Insn::raw_bytes(&[rex, 0xC7, 0x80 | rm]));
-            self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes()));
-        }
-        self.emit_insn(&Insn::raw_bytes(&imm.to_le_bytes()));
+        // P11: mov dword [base+disp], imm32 via store_imm32_mem constructor.
+        self.emit_insn(&Insn::store_imm32_mem(base, disp, imm));
     }
     pub(crate) fn emit_store_reg_mem(&mut self, base: u8, disp: i32, src: u8) {
         // B64 reg->mem store. 手写约定 disp=0 && base=rbp(5) 走 mod=01 disp8=0

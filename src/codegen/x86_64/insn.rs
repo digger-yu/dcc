@@ -456,6 +456,35 @@ impl Insn {
         Insn::raw_bytes(&out)
     }
 
+    /// P11 Bucket O2: `mov dword [base+disp], imm32` (C7 /0 id).
+    /// 手写约定 (va_arg_store / builtins): REX.B 置位当 base>=8;
+    /// mod=01 disp8 if fits, 否则 mod=10 disp32. 无 REX.W (imm32 形式).
+    pub fn store_imm32_mem(base: u8, disp: i32, imm: i32) -> Self {
+        let mut rex: u8 = 0x40;
+        if base >= 8 {
+            rex |= 0x01;
+        }
+        let rm_field = base & 7;
+        let (modrm_mod, disp_bytes, disp_len): (u8, [u8; 4], usize) =
+            if let Ok(d) = i8::try_from(disp) {
+                let mut b = [0u8; 4];
+                b[0] = d as u8;
+                (1, b, 1)
+            } else {
+                (2, disp.to_le_bytes(), 4)
+            };
+        // /0 = C7 mov m32, imm32.
+        let modrm = (modrm_mod << 6) | 0x00 | rm_field;
+        let imm32 = imm.to_le_bytes();
+        let mut out = Vec::with_capacity(11);
+        out.push(rex);
+        out.push(0xC7);
+        out.push(modrm);
+        out.extend_from_slice(&disp_bytes[..disp_len]);
+        out.extend_from_slice(&imm32);
+        Insn::raw_bytes(&out)
+    }
+
     /// P11 Bucket T: 构造 B64 `shl/shr/sar reg, imm8` 强制 C1 形式 (总是带 imm8 字节).
     /// 与 typed `Shift{amount: Imm8(1)}` 自动走 D1 短形式不同, 位域读取点
     /// (lvalue.rs 位域右移) 固定使用 `REX.W C1 /r ib` 形态 (即使 imm=1 也发 4 字节).
