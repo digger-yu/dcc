@@ -1789,11 +1789,7 @@ impl Codegen {
                 // 整数内型: 先加分量偏移, 再按 size 加载到 rax
                 if part_off != 0 {
                     let gas = format!("add ${}, %rax", part_off);
-                    let bytes = vec![0x48, 0x05]
-                        .into_iter()
-                        .chain((part_off as i32).to_le_bytes().into_iter())
-                        .collect::<Vec<u8>>();
-                    self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
+                    self.emit_insn(&Insn::alu_acc_imm32_b64_acc_gas(0x05, part_off as i32, &gas));
                 }
                 let sz = inner.size();
                 match sz {
