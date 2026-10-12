@@ -308,18 +308,39 @@ impl Codegen {
                 if matches!(expr_ty, Type::Float) && !matches!(declared_ret, Type::Float) {
                     self.emit_insn(&Insn::simd_arith_reg(
                         crate::codegen::x86_64::opcode::SimdArithOp::CvtSdSs,
-                        crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 0));
+                        crate::codegen::x86_64::opcode::SimdWidth::SS,
+                        0,
+                        0,
+                    ));
                 }
             }
             self.load_stack(7, sret_off); // rdi = sret 指针
             if matches!(declared_ret, Type::Float) {
-                self.emit_insn(&Insn::simd_mov_mem_base(true, crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 7, 0)); // movss [rdi], xmm0
+                self.emit_insn(&Insn::simd_mov_mem_base(
+                    true,
+                    crate::codegen::x86_64::opcode::SimdWidth::SS,
+                    0,
+                    7,
+                    0,
+                )); // movss [rdi], xmm0
             } else if matches!(declared_ret, Type::LongDouble) {
                 // long double: 低 8 字节 double + 高 8 字节零
                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x0F, 0xD6, 0x07])); // movq [rdi], xmm0
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0x47, 0x08, 0, 0, 0, 0])); // mov qword [rdi+8], 0
+                self.emit_insn(&Insn::store_imm_mem(
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    7,
+                    8,
+                    0,
+                ));
+            // mov qword [rdi+8], 0
             } else {
-                self.emit_insn(&Insn::simd_mov_mem_base(true, crate::codegen::x86_64::opcode::SimdWidth::SD, 0, 7, 0)); // movsd [rdi], xmm0
+                self.emit_insn(&Insn::simd_mov_mem_base(
+                    true,
+                    crate::codegen::x86_64::opcode::SimdWidth::SD,
+                    0,
+                    7,
+                    0,
+                )); // movsd [rdi], xmm0
             }
             return;
         }
@@ -365,14 +386,14 @@ impl Codegen {
         let qwords = sz / 8;
         let remainder = sz % 8;
         if qwords > 0 {
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32 (qwords)
-            self.emit_insn(&Insn::raw_bytes(&(qwords as u32).to_le_bytes()));
-            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsq)); // rep movsq
+            self.emit_insn(&Insn::mov_reg_imm32_b64(1, qwords as i32));
+            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsq));
+            // rep movsq
         }
         if remainder > 0 {
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC1])); // mov rcx, imm32 (remainder)
-            self.emit_insn(&Insn::raw_bytes(&(remainder as u32).to_le_bytes()));
-            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
+            self.emit_insn(&Insn::mov_reg_imm32_b64(1, remainder as i32));
+            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb));
+            // rep movsb
         }
     }
     /// 号 → 64 位裸规范名。名字表只有一份（`abi/regnames.rs::bare_name_of_num`，
@@ -399,7 +420,7 @@ impl Codegen {
                     "规划器发出了池外的寄存器号：检查 asm/planner 的号源与 abi/regbank 的池定义",
                 );
                 "rax"
-            }
+            },
         }
     }
     pub(crate) fn is_integer_type(ty: &Type) -> bool {
@@ -607,7 +628,9 @@ impl Codegen {
             // 地址算术（`*(p + 1)` / `*(p + i)`）：结果类型已带段，但万一上游只
             // 给了一侧的操作数带段，这里一并下潜。
             Expr::Binop { l, r, .. } => {
-                return self.lvalue_seg_prefix(l).or_else(|| self.lvalue_seg_prefix(r))
+                return self
+                    .lvalue_seg_prefix(l)
+                    .or_else(|| self.lvalue_seg_prefix(r))
             },
             _ => None,
         };
@@ -675,8 +698,9 @@ impl Codegen {
                 cg.lvalue_seg_prefix(inner)
             },
             // 括号 / 指针到指针的隐式转换等薄壳：继续看里层值
-            Expr::Cast { e: inner, .. } => Self::addr_seg_carried_by_value(inner, cg)
-                .or_else(|| Self::ptr_seg_prefix(&e.ty())),
+            Expr::Cast { e: inner, .. } => {
+                Self::addr_seg_carried_by_value(inner, cg).or_else(|| Self::ptr_seg_prefix(&e.ty()))
+            },
             // `(a, &gv)` （sanitizer 包裹也是这形）：逗号表达式的值是右操作数
             Expr::Comma { r, .. } => Self::addr_seg_carried_by_value(r, cg),
             // 三目 `cond ? t1 : t2`：两侧同段才登记（宁漏不误）。

@@ -68,58 +68,112 @@ impl super::super::super::Codegen {
                 // 字节序列固定 (rax/rsp/rdx/rcx 都是低 8 号寄存器, 无 REX.B/R),
                 // 与手写 raw_with_gas 逐字节一致.
                 match inner_ty.size() {
-                    1 => { self.emit_insn(&Insn::mov_ext_mem(false, Width::B8, Width::B64, 0, 0, 0)
-                        .with_gas("movzbq (%rax), %rax".to_string())); },
-                    2 => { self.emit_insn(&Insn::mov_ext_mem(false, Width::B16, Width::B64, 0, 0, 0)
-                        .with_gas("movzwq (%rax), %rax".to_string())); },
-                    4 => { self.emit_insn(&Insn::mov_rm_mem(true, Width::B32, 0, 0, 0)
-                        .with_gas("mov (%rax), %eax".to_string())); },
-                    _ => { self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 0, 0, 0)
-                        .with_gas("mov (%rax), %rax".to_string())); },
+                    1 => {
+                        self.emit_insn(
+                            &Insn::mov_ext_mem(false, Width::B8, Width::B64, 0, 0, 0)
+                                .with_gas("movzbq (%rax), %rax".to_string()),
+                        );
+                    },
+                    2 => {
+                        self.emit_insn(
+                            &Insn::mov_ext_mem(false, Width::B16, Width::B64, 0, 0, 0)
+                                .with_gas("movzwq (%rax), %rax".to_string()),
+                        );
+                    },
+                    4 => {
+                        self.emit_insn(
+                            &Insn::mov_rm_mem(true, Width::B32, 0, 0, 0)
+                                .with_gas("mov (%rax), %eax".to_string()),
+                        );
+                    },
+                    _ => {
+                        self.emit_insn(
+                            &Insn::mov_rm_mem(true, Width::B64, 0, 0, 0)
+                                .with_gas("mov (%rax), %rax".to_string()),
+                        );
+                    },
                 }
                 // rax = 值 (零扩展), 地址在 [rsp]
                 if !is_pre {
                     // 后缀：保存旧值到 rcx (返回用)
-                    self.emit_insn(&Insn::mov_rm_reg(Width::B64, 1, 0)
-                        .with_gas("mov %rax, %rcx".to_string()));
+                    self.emit_insn(
+                        &Insn::mov_rm_reg(Width::B64, 1, 0).with_gas("mov %rax, %rcx".to_string()),
+                    );
                 }
                 // 3. 从栈恢复地址到 rax
-                self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 0, 4, 0)
-                    .with_gas("mov (%rsp), %rax".to_string()));
-                                                      // rax = 地址，加载值并递增
+                self.emit_insn(
+                    &Insn::mov_rm_mem(true, Width::B64, 0, 4, 0)
+                        .with_gas("mov (%rsp), %rax".to_string()),
+                );
+                // rax = 地址，加载值并递增
                 self.emit_seg(seg);
                 match inner_ty.size() {
-                    1 => { self.emit_insn(&Insn::mov_ext_mem(false, Width::B8, Width::B64, 0, 0, 0)
-                        .with_gas("movzbq (%rax), %rax".to_string())); },
-                    2 => { self.emit_insn(&Insn::mov_ext_mem(false, Width::B16, Width::B64, 0, 0, 0)
-                        .with_gas("movzwq (%rax), %rax".to_string())); },
-                    4 => { self.emit_insn(&Insn::mov_rm_mem(true, Width::B32, 0, 0, 0)
-                        .with_gas("mov (%rax), %eax".to_string())); },
-                    _ => { self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 0, 0, 0)
-                        .with_gas("mov (%rax), %rax".to_string())); },
+                    1 => {
+                        self.emit_insn(
+                            &Insn::mov_ext_mem(false, Width::B8, Width::B64, 0, 0, 0)
+                                .with_gas("movzbq (%rax), %rax".to_string()),
+                        );
+                    },
+                    2 => {
+                        self.emit_insn(
+                            &Insn::mov_ext_mem(false, Width::B16, Width::B64, 0, 0, 0)
+                                .with_gas("movzwq (%rax), %rax".to_string()),
+                        );
+                    },
+                    4 => {
+                        self.emit_insn(
+                            &Insn::mov_rm_mem(true, Width::B32, 0, 0, 0)
+                                .with_gas("mov (%rax), %eax".to_string()),
+                        );
+                    },
+                    _ => {
+                        self.emit_insn(
+                            &Insn::mov_rm_mem(true, Width::B64, 0, 0, 0)
+                                .with_gas("mov (%rax), %rax".to_string()),
+                        );
+                    },
                 }
                 // rax = 值 (零扩展)
                 self.emit_inc_dec_reg(0, is_inc, step as i32); // rax = 新值
                                                                // 写回：地址仍在 [rsp], 用 rdx 暂存地址
-                self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 2, 4, 0)
-                    .with_gas("mov (%rsp), %rdx".to_string()));
+                self.emit_insn(
+                    &Insn::mov_rm_mem(true, Width::B64, 2, 4, 0)
+                        .with_gas("mov (%rsp), %rdx".to_string()),
+                );
                 self.emit_seg(seg);
                 match inner_ty.size() {
-                    1 => { self.emit_insn(&Insn::mov_rm_mem(false, Width::B8, 0, 2, 0)
-                        .with_gas("mov %al, (%rdx)".to_string())); },
-                    2 => { self.emit_insn(&Insn::mov_rm_mem(false, Width::B16, 0, 2, 0)
-                        .with_gas("mov %ax, (%rdx)".to_string())); },
-                    4 => { self.emit_insn(&Insn::mov_rm_mem(false, Width::B32, 0, 2, 0)
-                        .with_gas("mov %eax, (%rdx)".to_string())); },
-                    _ => { self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 2, 0)
-                        .with_gas("mov %rax, (%rdx)".to_string())); },
+                    1 => {
+                        self.emit_insn(
+                            &Insn::mov_rm_mem(false, Width::B8, 0, 2, 0)
+                                .with_gas("mov %al, (%rdx)".to_string()),
+                        );
+                    },
+                    2 => {
+                        self.emit_insn(
+                            &Insn::mov_rm_mem(false, Width::B16, 0, 2, 0)
+                                .with_gas("mov %ax, (%rdx)".to_string()),
+                        );
+                    },
+                    4 => {
+                        self.emit_insn(
+                            &Insn::mov_rm_mem(false, Width::B32, 0, 2, 0)
+                                .with_gas("mov %eax, (%rdx)".to_string()),
+                        );
+                    },
+                    _ => {
+                        self.emit_insn(
+                            &Insn::mov_rm_mem(false, Width::B64, 0, 2, 0)
+                                .with_gas("mov %rax, (%rdx)".to_string()),
+                        );
+                    },
                 }
                 // 4. 清理栈并设置返回值
                 self.pop(2); // 弹出地址 (丢弃)
                 if !is_pre {
                     // 后缀：返回旧值 (在 rcx)
-                    self.emit_insn(&Insn::mov_rm_reg(Width::B64, 0, 1)
-                        .with_gas("mov %rcx, %rax".to_string()));
+                    self.emit_insn(
+                        &Insn::mov_rm_reg(Width::B64, 0, 1).with_gas("mov %rcx, %rax".to_string()),
+                    );
                     if dst != 0 && dst != 1 {
                         self.mov(dst, 1);
                     } // dst = rcx
@@ -183,9 +237,15 @@ impl super::super::super::Codegen {
                 match ty_sz {
                     1 => {
                         let rex = 0x49u8 | if dst >= 8 { 0x04 } else { 0 };
-                        use crate::codegen::x86_64::emit::gas::{REG8 as GAS_REG8, mem_disp as gas_mem_disp};
+                        use crate::codegen::x86_64::emit::gas::{
+                            mem_disp as gas_mem_disp, REG8 as GAS_REG8,
+                        };
                         let mut bytes = vec![rex, 0x88];
-                        let gas = format!("mov {}, {}", GAS_REG8[(dst & 15) as usize], gas_mem_disp(13, off));
+                        let gas = format!(
+                            "mov {}, {}",
+                            GAS_REG8[(dst & 15) as usize],
+                            gas_mem_disp(13, off)
+                        );
                         if off.abs() < 128 {
                             bytes.push(0x45 | ((dst & 7) << 3));
                             bytes.push(off as i8 as u8);
@@ -197,9 +257,15 @@ impl super::super::super::Codegen {
                     },
                     2 => {
                         let rex = 0x49u8 | if dst >= 8 { 0x04 } else { 0 };
-                        use crate::codegen::x86_64::emit::gas::{REG16 as GAS_REG16, mem_disp as gas_mem_disp};
+                        use crate::codegen::x86_64::emit::gas::{
+                            mem_disp as gas_mem_disp, REG16 as GAS_REG16,
+                        };
                         let mut bytes = vec![0x66, rex, 0x89];
-                        let gas = format!("mov {}, {}", GAS_REG16[(dst & 15) as usize], gas_mem_disp(13, off));
+                        let gas = format!(
+                            "mov {}, {}",
+                            GAS_REG16[(dst & 15) as usize],
+                            gas_mem_disp(13, off)
+                        );
                         if off.abs() < 128 {
                             bytes.push(0x45 | ((dst & 7) << 3));
                             bytes.push(off as i8 as u8);
@@ -211,11 +277,17 @@ impl super::super::super::Codegen {
                     },
                     4 => {
                         let rex = 0x49u8 | if dst >= 8 { 0x04 } else { 0 };
-                        use crate::codegen::x86_64::emit::gas::{REG64 as GAS_REG64, mem_disp as gas_mem_disp};
+                        use crate::codegen::x86_64::emit::gas::{
+                            mem_disp as gas_mem_disp, REG64 as GAS_REG64,
+                        };
                         let mut bytes = vec![rex, 0x89];
                         // 注意: 这里 REX.W=1 + 0x89 是 mov r/m64, r64 (存 8 字节),
                         // 即使是 int n++ 也用 8-byte store (与原字节一致, G10 硬约束).
-                        let gas = format!("mov {}, {}", GAS_REG64[(dst & 15) as usize], gas_mem_disp(13, off));
+                        let gas = format!(
+                            "mov {}, {}",
+                            GAS_REG64[(dst & 15) as usize],
+                            gas_mem_disp(13, off)
+                        );
                         if off.abs() < 128 {
                             bytes.push(0x45 | ((dst & 7) << 3));
                             bytes.push(off as i8 as u8);
@@ -252,7 +324,10 @@ impl super::super::super::Codegen {
                         _ => {},
                     }
                     if off.abs() < 128 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x45 | ((dst & 7) << 3), off as i8 as u8]));
+                        self.emit_insn(&Insn::raw_bytes(&[
+                            0x45 | ((dst & 7) << 3),
+                            off as i8 as u8,
+                        ]));
                     } else {
                         self.emit_insn(&Insn::raw_bytes(&[0x85 | ((dst & 7) << 3)]));
                         self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
@@ -333,47 +408,59 @@ impl super::super::super::Codegen {
                 self.pop(1); // rcx = 地址
             }
             if let Some(seg) = seg_prefix {
-                self.emit_insn(&Insn::raw_bytes(&[seg]));
+                self.emit_insn(&Insn::seg_prefix(seg));
             }
             match mem_sz {
                 // mov byte [rcx], al
-                1 => { self.emit_insn(&Insn::mov_rm_mem(false, Width::B8, 0, 1, 0)); },
+                1 => {
+                    self.emit_insn(&Insn::mov_rm_mem(false, Width::B8, 0, 1, 0));
+                },
                 // mov word [rcx], ax
-                2 => { self.emit_insn(&Insn::mov_rm_mem(false, Width::B16, 0, 1, 0)); },
-                4 => { self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B32,
-                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
-                        crate::codegen::x86_64::opcode::MemOperand {
-                            disp: 0,
-                            base: Some(1),
-                            index: None,
-                            seg: None,
-                        }
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Reg(
-                        0, crate::codegen::shared::asm_operand::Width::B32
-                    ),
+                2 => {
+                    self.emit_insn(&Insn::mov_rm_mem(false, Width::B16, 0, 1, 0));
                 },
-                &[],
-            )); },       // mov dword [rcx], eax
-                _ => { self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B64,
-                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
-                        crate::codegen::x86_64::opcode::MemOperand {
-                            disp: 0,
-                            base: Some(1),
-                            index: None,
-                            seg: None,
-                        }
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Reg(
-                        0, crate::codegen::shared::asm_operand::Width::B64
-                    ),
-                },
-                &[],
-            )); }, // mov qword [rcx], rax
+                4 => {
+                    self.emit_insn(&Insn::new(
+                        crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                            rip_relative: false,
+                            width: crate::codegen::shared::asm_operand::Width::B32,
+                            dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                                crate::codegen::x86_64::opcode::MemOperand {
+                                    disp: 0,
+                                    base: Some(1),
+                                    index: None,
+                                    seg: None,
+                                },
+                            ),
+                            src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                0,
+                                crate::codegen::shared::asm_operand::Width::B32,
+                            ),
+                        },
+                        &[],
+                    ));
+                }, // mov dword [rcx], eax
+                _ => {
+                    self.emit_insn(&Insn::new(
+                        crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                            rip_relative: false,
+                            width: crate::codegen::shared::asm_operand::Width::B64,
+                            dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                                crate::codegen::x86_64::opcode::MemOperand {
+                                    disp: 0,
+                                    base: Some(1),
+                                    index: None,
+                                    seg: None,
+                                },
+                            ),
+                            src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                0,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                            ),
+                        },
+                        &[],
+                    ));
+                }, // mov qword [rcx], rax
             }
             if is_pre {
                 if dst != 0 {
@@ -421,34 +508,48 @@ impl super::super::super::Codegen {
 
         // 2. Load container, extract bitfield value
         match container_size {
-            4 => { self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B32,
-                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        0, crate::codegen::shared::asm_operand::Width::B32
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Mem(
-                        crate::codegen::x86_64::opcode::MemOperand {
-                            disp: 0, base: Some(0), index: None, seg: None,
-                        }
-                    ),
-                },
-                &[],
-            )); },
-            8 => { self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B64,
-                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        0, crate::codegen::shared::asm_operand::Width::B64
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Mem(
-                        crate::codegen::x86_64::opcode::MemOperand {
-                            disp: 0, base: Some(0), index: None, seg: None,
-                        }
-                    ),
-                },
-                &[],
-            )); },
+            4 => {
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        rip_relative: false,
+                        width: crate::codegen::shared::asm_operand::Width::B32,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            0,
+                            crate::codegen::shared::asm_operand::Width::B32,
+                        ),
+                        src: crate::codegen::x86_64::opcode::Operand::Mem(
+                            crate::codegen::x86_64::opcode::MemOperand {
+                                disp: 0,
+                                base: Some(0),
+                                index: None,
+                                seg: None,
+                            },
+                        ),
+                    },
+                    &[],
+                ));
+            },
+            8 => {
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        rip_relative: false,
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            0,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
+                        src: crate::codegen::x86_64::opcode::Operand::Mem(
+                            crate::codegen::x86_64::opcode::MemOperand {
+                                disp: 0,
+                                base: Some(0),
+                                index: None,
+                                seg: None,
+                            },
+                        ),
+                    },
+                    &[],
+                ));
+            },
             2 => {
                 self.emit_insn(&Insn::mov_rm_mem(true, Width::B16, 0, 0, 0));
                 // movzwq eax, eax
@@ -456,7 +557,8 @@ impl super::super::super::Codegen {
                     false,
                     crate::codegen::shared::asm_operand::Width::B16,
                     crate::codegen::shared::asm_operand::Width::B64,
-                    0, 0,
+                    0,
+                    0,
                 ));
             },
             1 => {
@@ -465,7 +567,8 @@ impl super::super::super::Codegen {
                     false,
                     crate::codegen::shared::asm_operand::Width::B8,
                     crate::codegen::shared::asm_operand::Width::B64,
-                    0, 0,
+                    0,
+                    0,
                 ));
             },
             _ => {},
@@ -504,8 +607,12 @@ impl super::super::super::Codegen {
                 // P11: MovRm B64+Imm 会自动选择 48 B9 + imm32 零扩展短形式 (7 bytes).
                 self.emit_insn(&Insn::new(
                     crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        rip_relative: false,
                         width: crate::codegen::shared::asm_operand::Width::B64,
-                        dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64),
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            1,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
                         src: crate::codegen::x86_64::opcode::Operand::Imm(mask as i64),
                     },
                     &[],
@@ -521,15 +628,27 @@ impl super::super::super::Codegen {
                     &[],
                 );
                 if !self.emit_insn(&insn) {
-                    self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B64, 0, 1));
+                    self.emit_insn(&Insn::alu_rm_reg_reg(
+                        crate::codegen::x86_64::opcode::AluOp::And,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        0,
+                        1,
+                    ));
                 }
             } else {
                 // 掩码 > 32 位：movabs rcx, mask; and rax, rcx
-                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B64,
-                    dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64),
-                    src: crate::codegen::x86_64::opcode::Operand::Imm(mask as i64),
-                }, &[]));
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        rip_relative: false,
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            1,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
+                        src: crate::codegen::x86_64::opcode::Operand::Imm(mask as i64),
+                    },
+                    &[],
+                ));
                 // P11: 收敛到 AluRm{And, B64, rax, rcx}.
                 let insn = Insn::new(
                     X86_64Opcode::AluRm {
@@ -541,7 +660,12 @@ impl super::super::super::Codegen {
                     &[],
                 );
                 if !self.emit_insn(&insn) {
-                    self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B64, 0, 1));
+                    self.emit_insn(&Insn::alu_rm_reg_reg(
+                        crate::codegen::x86_64::opcode::AluOp::And,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        0,
+                        1,
+                    ));
                 }
             }
         }
@@ -570,8 +694,12 @@ impl super::super::super::Codegen {
                 // P11: MovRm B64+Imm 会自动选择 48 B9 + imm32 零扩展短形式.
                 self.emit_insn(&Insn::new(
                     crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        rip_relative: false,
                         width: crate::codegen::shared::asm_operand::Width::B64,
-                        dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64),
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            1,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
                         src: crate::codegen::x86_64::opcode::Operand::Imm(mask as i64),
                     },
                     &[],
@@ -587,14 +715,26 @@ impl super::super::super::Codegen {
                     &[],
                 );
                 if !self.emit_insn(&insn) {
-                    self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B64, 0, 1));
+                    self.emit_insn(&Insn::alu_rm_reg_reg(
+                        crate::codegen::x86_64::opcode::AluOp::And,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        0,
+                        1,
+                    ));
                 }
             } else {
-                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B64,
-                    dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64),
-                    src: crate::codegen::x86_64::opcode::Operand::Imm(mask as i64),
-                }, &[]));
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        rip_relative: false,
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            1,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
+                        src: crate::codegen::x86_64::opcode::Operand::Imm(mask as i64),
+                    },
+                    &[],
+                ));
                 // P11: 收敛到 AluRm{And, B64, rax, rcx}.
                 let insn = Insn::new(
                     X86_64Opcode::AluRm {
@@ -606,7 +746,12 @@ impl super::super::super::Codegen {
                     &[],
                 );
                 if !self.emit_insn(&insn) {
-                    self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::And, crate::codegen::shared::asm_operand::Width::B64, 0, 1));
+                    self.emit_insn(&Insn::alu_rm_reg_reg(
+                        crate::codegen::x86_64::opcode::AluOp::And,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        0,
+                        1,
+                    ));
                 }
             }
         }
@@ -616,42 +761,50 @@ impl super::super::super::Codegen {
         // 4. Write back: RMW on container
         // Reload address into rcx
         self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 1, 13, addr_slot as i32)); // rcx = addr
-                                                         // Load container into rcx
+                                                                                      // Load container into rcx
         match container_size {
-            4 => { self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B32,
-                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        1, crate::codegen::shared::asm_operand::Width::B32
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Mem(
-                        crate::codegen::x86_64::opcode::MemOperand {
-                            disp: 0,
-                            base: Some(1),
-                            index: None,
-                            seg: None,
-                        }
-                    ),
-                },
-                &[],
-            )); },
-            8 => { self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B64,
-                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        1, crate::codegen::shared::asm_operand::Width::B64
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Mem(
-                        crate::codegen::x86_64::opcode::MemOperand {
-                            disp: 0,
-                            base: Some(1),
-                            index: None,
-                            seg: None,
-                        }
-                    ),
-                },
-                &[],
-            )); },
+            4 => {
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        rip_relative: false,
+                        width: crate::codegen::shared::asm_operand::Width::B32,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            1,
+                            crate::codegen::shared::asm_operand::Width::B32,
+                        ),
+                        src: crate::codegen::x86_64::opcode::Operand::Mem(
+                            crate::codegen::x86_64::opcode::MemOperand {
+                                disp: 0,
+                                base: Some(1),
+                                index: None,
+                                seg: None,
+                            },
+                        ),
+                    },
+                    &[],
+                ));
+            },
+            8 => {
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        rip_relative: false,
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            1,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
+                        src: crate::codegen::x86_64::opcode::Operand::Mem(
+                            crate::codegen::x86_64::opcode::MemOperand {
+                                disp: 0,
+                                base: Some(1),
+                                index: None,
+                                seg: None,
+                            },
+                        ),
+                    },
+                    &[],
+                ));
+            },
             2 => {
                 self.emit_insn(&Insn::mov_rm_mem(true, Width::B16, 1, 1, 0));
                 // movzwq ecx, ecx
@@ -659,7 +812,8 @@ impl super::super::super::Codegen {
                     false,
                     crate::codegen::shared::asm_operand::Width::B16,
                     crate::codegen::shared::asm_operand::Width::B64,
-                    1, 1,
+                    1,
+                    1,
                 ));
             },
             1 => {
@@ -668,7 +822,8 @@ impl super::super::super::Codegen {
                     false,
                     crate::codegen::shared::asm_operand::Width::B8,
                     crate::codegen::shared::asm_operand::Width::B64,
-                    1, 1,
+                    1,
+                    1,
                 ));
             },
             _ => {},
@@ -679,11 +834,18 @@ impl super::super::super::Codegen {
         if (inv_mask as u32 as i32 as i64 as u64) == inv_mask {
             self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 1, inv_mask as i64));
         } else {
-            self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                width: crate::codegen::shared::asm_operand::Width::B64,
-                dst: crate::codegen::x86_64::opcode::Operand::Reg(8, crate::codegen::shared::asm_operand::Width::B64),
-                src: crate::codegen::x86_64::opcode::Operand::Imm(inv_mask as i64),
-            }, &[]));
+            self.emit_insn(&Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                    rip_relative: false,
+                    width: crate::codegen::shared::asm_operand::Width::B64,
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        8,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Imm(inv_mask as i64),
+                },
+                &[],
+            ));
             // P11: AluRm{And, B64, rcx, r8} (typed 总是 Some).
             let insn = Insn::new(
                 X86_64Opcode::AluRm {
@@ -722,31 +884,46 @@ impl super::super::super::Codegen {
             &[],
         );
         if !self.emit_insn(&insn) {
-            self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Or, crate::codegen::shared::asm_operand::Width::B64, 1, 2)); // or rcx, rdx
+            self.emit_insn(&Insn::alu_rm_reg_reg(
+                crate::codegen::x86_64::opcode::AluOp::Or,
+                crate::codegen::shared::asm_operand::Width::B64,
+                1,
+                2,
+            )); // or rcx, rdx
         }
-                                        // Store container back
+        // Store container back
         self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 0, 13, addr_slot as i32)); // rax = addr
         match container_size {
-            4 => { self.emit_insn(&Insn::mov_rm_mem(false, Width::B32, 0, 2, 0)); },
-            8 => { self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B64,
-                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
-                        crate::codegen::x86_64::opcode::MemOperand {
-                            disp: 0,
-                            base: Some(2),
-                            index: None,
-                            seg: None,
-                        }
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Reg(
-                        0, crate::codegen::shared::asm_operand::Width::B64
-                    ),
-                },
-                &[],
-            )); },
-            2 => { self.emit_insn(&Insn::mov_rm_mem(false, Width::B16, 0, 2, 0)); },
-            1 => { self.emit_insn(&Insn::mov_rm_mem(false, Width::B8, 0, 2, 0)); },
+            4 => {
+                self.emit_insn(&Insn::mov_rm_mem(false, Width::B32, 0, 2, 0));
+            },
+            8 => {
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        rip_relative: false,
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                            crate::codegen::x86_64::opcode::MemOperand {
+                                disp: 0,
+                                base: Some(2),
+                                index: None,
+                                seg: None,
+                            },
+                        ),
+                        src: crate::codegen::x86_64::opcode::Operand::Reg(
+                            0,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
+                    },
+                    &[],
+                ));
+            },
+            2 => {
+                self.emit_insn(&Insn::mov_rm_mem(false, Width::B16, 0, 2, 0));
+            },
+            1 => {
+                self.emit_insn(&Insn::mov_rm_mem(false, Width::B8, 0, 2, 0));
+            },
             _ => {},
         }
 
@@ -770,7 +947,7 @@ impl super::super::super::Codegen {
     /// 增量/减量单个寄存器 (ADD/SUB reg, immediate)
     fn emit_inc_dec_reg(&mut self, dst: u8, is_inc: bool, step: i32) {
         let op_ext = if is_inc { 0u8 } else { 5u8 };
-        use crate::codegen::x86_64::emit::gas::{REG64 as GAS_REG64, dec_imm as gas_dec_imm};
+        use crate::codegen::x86_64::emit::gas::{dec_imm as gas_dec_imm, REG64 as GAS_REG64};
         let mnem = if is_inc { "add" } else { "sub" };
         let reg_name = GAS_REG64[(dst & 15) as usize];
         let imm = gas_dec_imm(step as i64);

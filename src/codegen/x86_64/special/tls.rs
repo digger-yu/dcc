@@ -12,8 +12,8 @@
 // 抽象，TLS 模型由 tls_model 字符串 + 重定位类型直接决定，且函数体全是
 // unimplemented!()）按"以生产代码为准"作废删除。
 
-use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::Codegen;
 
 impl Codegen {
     /// ET_EXEC：设置 FS 基址指向 TLS 模板（可写 PT_LOAD 段内）
@@ -24,9 +24,9 @@ impl Codegen {
         self.pending_tls_rels
             .push((lea_pos, "__dcc_tls_base".to_string()));
         // mov rdi, 0x1002 (ARCH_SET_FS)
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC7, 0x02, 0x00, 0x01, 0x00]));
+        self.emit_insn(&Insn::mov_reg_imm32_b64(7, 0x1002));
         // mov rax, 158; syscall
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0xC0, 0x9E, 0x00, 0x00, 0x00]));
+        self.emit_insn(&Insn::mov_reg_imm32_b64(0, 158));
         self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Syscall));
     }
 }

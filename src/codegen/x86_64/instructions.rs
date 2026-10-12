@@ -1337,7 +1337,7 @@ impl Codegen {
     #[inline]
     pub(crate) fn emit_global_seg(&mut self, resolved: &str) {
         if let Some(seg) = self.global_seg_prefix(resolved) {
-            self.emit_insn(&Insn::raw_bytes(&[seg]));
+            self.emit_insn(&Insn::seg_prefix(seg));
         }
     }
 
