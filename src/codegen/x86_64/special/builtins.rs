@@ -1722,10 +1722,11 @@ impl Codegen {
                 let is_f = matches!(arg_ty, Type::Float);
                 self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
                                             // ucomis{s,d} xmm0, xmm0
+                // P11 Bucket N11: typed simd_arith_reg(Ucomi).
                 if is_f {
-                    self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x2E, 0xC0], "ucomiss %xmm0, %xmm0"));
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SS, 0, 0)); // ucomiss xmm0, xmm0
                 } else {
-                    self.emit_insn(&Insn::raw_with_gas(&[0x66, 0x0F, 0x2E, 0xC0], "ucomisd %xmm0, %xmm0"));
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SD, 0, 0)); // ucomisd xmm0, xmm0
                 }
                 // setp al (PF=1 ⇒ NaN)
                 self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::P, 0));
@@ -1931,7 +1932,8 @@ impl Codegen {
                     self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::CvtSdSs, SimdWidth::SS, 1, 1));
                 }
                 // ucomisd xmm0, xmm1
-                self.emit_insn(&Insn::raw_with_gas(&[0x66, 0x0F, 0x2E, 0xC1], "ucomisd %xmm0, %xmm1"));
+                // P11 Bucket N11: typed simd_arith_reg(Ucomi, SD).
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SD, 0, 1)); // ucomisd xmm0, xmm1
                 // setp al
                 self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::P, 0));
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
