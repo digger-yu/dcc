@@ -414,7 +414,7 @@ mod tests {
         };
         let l = LayoutMap::resolve(&p);
         let hdr = 48 + 3 * 8; // 72
-        let raw = 80 + hdr + 64 + 0 + 8 + CX_FRAME_BAND + 176 + 512 + 32 + 256 + 176;
+        let raw = 80 + hdr + 64 + 0 + 8 + CX_FRAME_BAND + 176 + 512 + BF_RMW_RESERVE + 256 + 176;
         let frame_size = (raw + 15) & !15;
         assert_eq!(l.hdr, hdr);
         assert_eq!(l.frame_size, frame_size);
