@@ -528,7 +528,9 @@ impl<'a> Dec<'a> {
                         .to_string(),
                 );
             }
-        } else if mod_ == 0 && rm == 5 {
+        } else if mod_ == 0 && rm == 5 && !rex.b {
+            // 无 REX.B: rm=5 mod=00 是 RIP-relative. 有 REX.B 时 rm_ext=13=r13,
+            // 是绝对基址 (不是 RIP) — 走 else 分支.
             disp32_off = Some(self.abs_off());
             disp = self.take_i32()?;
             base = Some("%rip".to_string());

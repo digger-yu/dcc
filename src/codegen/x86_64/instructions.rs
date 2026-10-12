@@ -618,6 +618,39 @@ impl Codegen {
     /// 必须走这条。ModRM/SIB 交给 `emit_reg_indirect_modrm`，因此 base 可以是任意
     /// GP（含需要 SIB 的 rsp/r12 与需要 disp8 的 rbp/r13）。
     pub fn store_reg_to_ptr(&mut self, src: u8, base: u8, sz: usize) {
+        // P11 O6: 收敛到 MovRm{width, [base], src}. encode() 自处理 REX.R/B /
+        // need_high_byte (spl/bpl/sil/dil 需 REX) / SIB (rsp=4 base) / mod=00.
+        use crate::codegen::shared::asm_operand::Width as W;
+        let width = match sz {
+            1 => W::B8,
+            2 => W::B16,
+            4 => W::B32,
+            _ => W::B64,
+        };
+        let gas_reg_lo = match sz {
+            1 => GAS_REG8[(src & 15) as usize].to_string(),
+            2 => GAS_REG16[(src & 15) as usize].to_string(),
+            4 => GAS_REG32[(src & 15) as usize].to_string(),
+            _ => GAS_REG64[(src & 15) as usize].to_string(),
+        };
+        let gas = format!("mov {}, ({})", gas_reg_lo, GAS_REG64[(base & 15) as usize]);
+        let insn = Insn::new(
+            X86_64Opcode::MovRm {
+                width,
+                dst: OpcodeOperand::Mem(MemOperand {
+                    disp: 0,
+                    base: Some(base),
+                    index: None,
+                    seg: None,
+                }),
+                src: OpcodeOperand::Reg(src, width),
+            },
+            &[],
+        ).with_gas(gas);
+        if self.emit_insn(&insn) {
+            return;
+        }
+        // 兜底: 原手写字节序列.
         // `88 /r`（mov r/m8, r8）的位序：ModRM.reg 是**值**寄存器 src，r/m 是基址
         // base。所以 REX.R 只看 src>=8，REX.B 只看 base>=8。
         // src 落在 r4-r7（spl/bpl/sil/dil）时只需要「存在 REX 前缀」，绝不能去置
