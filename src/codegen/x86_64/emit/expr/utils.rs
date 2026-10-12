@@ -322,8 +322,8 @@ impl Codegen {
                     0xE8 // shr: 逻辑右移, 高位补 0
                 };
                 if src == 1 {
-                    // 移位量已在 cl
-                    let op_field = (sub & 7) >> 0; // sub is 0xE0=shl(/4), 0xE8=shr(/5), 0xF8=sar(/7)
+                    // 移位量已在 cl; sub 为 0xE0/0xE8/0xF8, ModRM /n 字段在 bit[5:3].
+                    let op_field = (sub >> 3) & 0x07;
                     self.emit_insn(&Insn::shift_reg_cl_b64(op_field, dst));
                 } else if dst == 1 {
                     // dst=rcx 且移位量在 src: xchg 后在 src 上移位, 再搬回 rcx
@@ -333,7 +333,7 @@ impl Codegen {
                         src,
                         false,
                     )); // xchg rcx, src
-                    let op_field = sub & 7;
+                    let op_field = (sub >> 3) & 0x07;
                     self.emit_insn(&Insn::shift_reg_cl_b64(op_field, src)); // shl/shr src, cl
                     // mov rcx, src: 手写用 0x8B (mov r/m64, r64 反向), 非 0x89 形式; 保留 raw.
                     let mut rex = 0x48u8;
@@ -349,7 +349,7 @@ impl Codegen {
                         rex1 |= 0x41;
                     }
                     self.emit_insn(&Insn::raw_bytes(&[rex1, 0x8B, 0xC8 | (src & 7)])); // mov rcx, src
-                    let op_field = sub & 7;
+                    let op_field = (sub >> 3) & 0x07;
                     self.emit_insn(&Insn::shift_reg_cl_b64(op_field, dst));
                 }
             },
@@ -409,19 +409,28 @@ impl Codegen {
                 );
                 self.emit_insn(&cmp_insn.with_gas(format!("cmp {cmp_src_name}, {cmp_dst_name}")));
                 // setcc al + movzbq %al, %rax 拆开各自挂 gas.
-                let (cc_letter, cond_code): (&str, crate::codegen::x86_64::opcode::CondCode) = match op {
-                    BinOp::Lt if is_signed => ("setl", crate::codegen::x86_64::opcode::CondCode::Lt),
-                    BinOp::Lt => ("setb", crate::codegen::x86_64::opcode::CondCode::B),
-                    BinOp::Le if is_signed => ("setle", crate::codegen::x86_64::opcode::CondCode::Le),
-                    BinOp::Le => ("setbe", crate::codegen::x86_64::opcode::CondCode::Be),
-                    BinOp::Gt if is_signed => ("setg", crate::codegen::x86_64::opcode::CondCode::Gt),
-                    BinOp::Gt => ("seta", crate::codegen::x86_64::opcode::CondCode::A),
-                    BinOp::Ge if is_signed => ("setge", crate::codegen::x86_64::opcode::CondCode::Ge),
-                    BinOp::Ge => ("setae", crate::codegen::x86_64::opcode::CondCode::Ae),
-                    BinOp::EqEq => ("sete", crate::codegen::x86_64::opcode::CondCode::Eq),
-                    BinOp::Ne => ("setne", crate::codegen::x86_64::opcode::CondCode::Ne),
-                    _ => unreachable!(),
-                };
+                let (cc_letter, cond_code): (&str, crate::codegen::x86_64::opcode::CondCode) =
+                    match op {
+                        BinOp::Lt if is_signed => {
+                            ("setl", crate::codegen::x86_64::opcode::CondCode::Lt)
+                        },
+                        BinOp::Lt => ("setb", crate::codegen::x86_64::opcode::CondCode::B),
+                        BinOp::Le if is_signed => {
+                            ("setle", crate::codegen::x86_64::opcode::CondCode::Le)
+                        },
+                        BinOp::Le => ("setbe", crate::codegen::x86_64::opcode::CondCode::Be),
+                        BinOp::Gt if is_signed => {
+                            ("setg", crate::codegen::x86_64::opcode::CondCode::Gt)
+                        },
+                        BinOp::Gt => ("seta", crate::codegen::x86_64::opcode::CondCode::A),
+                        BinOp::Ge if is_signed => {
+                            ("setge", crate::codegen::x86_64::opcode::CondCode::Ge)
+                        },
+                        BinOp::Ge => ("setae", crate::codegen::x86_64::opcode::CondCode::Ae),
+                        BinOp::EqEq => ("sete", crate::codegen::x86_64::opcode::CondCode::Eq),
+                        BinOp::Ne => ("setne", crate::codegen::x86_64::opcode::CondCode::Ne),
+                        _ => unreachable!(),
+                    };
                 self.emit_insn(&Insn::setcc_reg(cond_code, 0).with_gas(format!("{cc_letter} %al")));
                 self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xB6, 0xC0], "movzbq %al, %rax"));
                 if dst != 0 {

@@ -455,8 +455,8 @@ pub(crate) enum X86_64Opcode {
     /// optional REX.W).
     ///   movq r64->xmm:  66 REX.W 0F 6E /r  (modrm.reg=xmm, r/m=gpr)
     ///   movq xmm->r64:  66 REX.W 0F 7E /r  (modrm.reg=xmm, r/m=gpr)
-    ///   movd r32->xmm:    0F 6E /r (no 66, no REX.W)
-    ///   movd xmm->r32:    0F 7E /r
+    ///   movd r32->xmm:  66 0F 6E /r (66 -> SSE2 XMM; no REX.W)
+    ///   movd xmm->r32:  66 0F 7E /r
     /// to_xmm=true: GPR→XMM (0x6E); false: XMM→GPR (0x7E). width=B64 emits REX.W.
     GprXmm {
         to_xmm: bool,
@@ -1937,24 +1937,36 @@ impl X86_64Opcode {
                         // not SimdMov; reject to keep this match exhaustive.
                         _ => return None,
                     };
-                    let need_rex = *dst_xmm >= 8 || *src_xmm >= 8;
+                    // 0x10/0x28/0x6F (load direction, opcode10=true):
+                    //   semantic dst <- src; ModRM.reg=dst, ModRM.r/m=src.
+                    // 0x11/0x29/0x7F (store direction, opcode10=false):
+                    //   Intel encoding places the *source* operand in ModRM.reg
+                    //   and the *destination* in ModRM.r/m; REX.R/REX.B follow
+                    //   the physical field positions (reg/r/m), not the
+                    //   semantic dst/src naming.
+                    let (reg_field, rm_field) = if *opcode10 {
+                        (*dst_xmm, *src_xmm)
+                    } else {
+                        (*src_xmm, *dst_xmm)
+                    };
+                    let need_rex = reg_field >= 8 || rm_field >= 8;
                     let mut out = Vec::with_capacity(6);
                     if pfx != 0 {
                         out.push(pfx);
                     }
                     if need_rex {
                         let mut rex: u8 = 0x40;
-                        if *dst_xmm >= 8 {
-                            rex |= 0x04;
+                        if reg_field >= 8 {
+                            rex |= 0x04; // REX.R extends ModRM.reg
                         }
-                        if *src_xmm >= 8 {
-                            rex |= 0x01;
+                        if rm_field >= 8 {
+                            rex |= 0x01; // REX.B extends ModRM.r/m
                         }
                         out.push(rex);
                     }
                     out.push(0x0F);
                     out.push(opc2);
-                    let modrm: u8 = 0xC0 | ((dst_xmm & 0x7) << 3) | (src_xmm & 0x7);
+                    let modrm: u8 = 0xC0 | ((reg_field & 0x7) << 3) | (rm_field & 0x7);
                     out.push(modrm);
                     return Some(out);
                 }
@@ -2567,7 +2579,10 @@ impl X86_64Opcode {
                 };
                 let is_b64 = matches!(width, crate::codegen::shared::asm_operand::Width::B64);
                 let opc2: u8 = if *to_xmm { 0x6E } else { 0x7E };
-                // movq (B64) needs 66 legacy prefix + REX.W. movd (B32) needs neither.
+                // dcc always transfers to/from an XMM register, so both the
+                // SSE2 MOVD (B32) and MOVQ (B64) forms require the 66 legacy
+                // prefix; without it 0F 6E/7E decode as the MMX MOVD (mm
+                // registers). MOVQ additionally needs REX.W.
                 let mut rex: u8 = 0x40;
                 if is_b64 {
                     rex |= 0x08;
@@ -2580,9 +2595,7 @@ impl X86_64Opcode {
                 }
                 let need_rex = is_b64 || xmm_idx >= 8 || gpr_idx >= 8;
                 let mut out = Vec::with_capacity(6);
-                if is_b64 {
-                    out.push(0x66);
-                }
+                out.push(0x66);
                 if need_rex {
                     out.push(rex);
                 }
@@ -4994,14 +5007,14 @@ mod tests {
 
     #[test]
     fn gprxmm_movd_eax_to_xmm0() {
-        // movd xmm0, eax: 0F 6E C0  (no 66, no REX.W; B32)
+        // movd xmm0, eax: 66 0F 6E C0  (66 prefix -> SSE2 XMM, no REX.W; B32)
         let o = X86_64Opcode::GprXmm {
             to_xmm: true,
             width: crate::codegen::shared::asm_operand::Width::B32,
             dst: Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B128),
             src: Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B32),
         };
-        assert_eq!(o.encode(), Some(vec![0x0F, 0x6E, 0xC0]));
+        assert_eq!(o.encode(), Some(vec![0x66, 0x0F, 0x6E, 0xC0]));
     }
 
     // ---- P11 Bucket B: AluRm reg, [base+disp] ----
