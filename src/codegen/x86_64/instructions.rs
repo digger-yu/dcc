@@ -1268,9 +1268,24 @@ impl Codegen {
         // pointee 的段，也认符号本体的段）；本函数只负责把裸地址算出来，与 gcc 同形
         // （gcc: `leaq arr(%rip),%rax` + `movl %gs:(%rax,%rdi,4),%eax`）。
         let disp32_pos = self.pos() + 3;
-        let rex = if reg >= 8 { 0x4C } else { 0x48 };
+        // P11 Bucket O7: 收敛到 typed Lea (rip_relative=true). 输出 [REX.W|REX.R,
+        // 0x8D, modrm=0x05|((reg&7)<<3), disp32×4] — 与 raw_with_gas 手写逐字节一致.
         let gas = format!("lea {}(%rip), {}", resolved, GAS_REG64[(reg & 15) as usize]);
-        self.emit_insn(&Insn::raw_with_gas(&[rex, 0x8D, 0x05 | ((reg & 7) << 3), 0, 0, 0, 0], &gas));
+        let mut insn = Insn::new(
+            X86_64Opcode::Lea {
+                dst: OpcodeOperand::Reg(reg, Width::B64),
+                mem: MemOperand {
+                    disp: 0,
+                    base: None,
+                    index: None,
+                    seg: None,
+                },
+                rip_relative: true,
+            },
+            &[],
+        );
+        insn.gas_text = Some(gas);
+        self.emit_insn(&insn);
         self.pending_data_rels.push((disp32_pos, resolved));
     }
 
@@ -1948,7 +1963,17 @@ impl Codegen {
                     &[],
                 ));
             } else {
-                self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x2A, 0xC0], "cvtsi2ss %eax, %xmm0"));
+                // cvtsi2ss xmm0, eax: F3 0F 2A C0 (typed Cvt2Sd B32, byte-identical).
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::Cvt2Sd {
+                        to_xmm: true,
+                        width: crate::codegen::x86_64::opcode::SimdWidth::SS,
+                        gpr_64: false,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B128),
+                        src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B32),
+                    },
+                    &[],
+                ));
             }
         } else {
             if is_64bit || is_unsigned_small {
@@ -1964,7 +1989,17 @@ impl Codegen {
                     &[],
                 ));
             } else {
-                self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x2A, 0xC0], "cvtsi2sd %eax, %xmm0"));
+                // cvtsi2sd xmm0, eax: F2 0F 2A C0 (typed Cvt2Sd B32, byte-identical).
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::Cvt2Sd {
+                        to_xmm: true,
+                        width: crate::codegen::x86_64::opcode::SimdWidth::SD,
+                        gpr_64: false,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B128),
+                        src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B32),
+                    },
+                    &[],
+                ));
             }
         }
     }

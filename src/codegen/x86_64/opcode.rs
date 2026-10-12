@@ -833,8 +833,28 @@ impl X86_64Opcode {
                 let (Operand::Reg(dst_idx, Width::B64), mem) = (dst, mem) else {
                     return None;
                 };
-                if mem.seg.is_some() || *rip_relative {
+                if mem.seg.is_some() {
                     return None;
+                }
+                // P11: LEA reg64, [rip+disp32] (mod=00 r/m=101). disp32 reloc is patched
+                // by callers (pending_data_rels). REX only carries REX.R for dst>=8;
+                // REX.B is irrelevant (no base register).
+                if *rip_relative {
+                    if mem.base.is_some() || mem.index.is_some() {
+                        return None;
+                    }
+                    let mut rex: u8 = 0x48; // REX.W=1 for B64
+                    if *dst_idx >= 8 {
+                        rex |= 0x04; // REX.R
+                    }
+                    let modrm = 0x05 | ((*dst_idx & 7) << 3); // mod=00, r/m=101 (rip-rel)
+                    let disp = mem.disp;
+                    let mut out = Vec::with_capacity(7);
+                    out.push(rex);
+                    out.push(0x8D);
+                    out.push(modrm);
+                    out.extend_from_slice(&disp.to_le_bytes());
+                    return Some(out);
                 }
                 let base = mem.base?;
                 let disp = mem.disp;
@@ -4633,6 +4653,30 @@ mod tests {
             rip_relative: false,
         };
         assert_eq!(o.encode(), Some(vec![0x48, 0x8D, 0x44, 0x24, 0x0F]));
+    }
+
+    #[test]
+    fn lea_eax_rip_relative() {
+        // lea rax, [rip+disp32=0]: 48 8D 05 00 00 00 00
+        // rex: W=1 R=0(dst=rax=0) modrm: mod=00 reg=0 r/m=101(rip-rel) → 0x05
+        let o = X86_64Opcode::Lea {
+            dst: reg(0, Width::B64),
+            mem: MemOperand { disp: 0, base: None, index: None, seg: None },
+            rip_relative: true,
+        };
+        assert_eq!(o.encode(), Some(vec![0x48, 0x8D, 0x05, 0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn lea_r8_rip_relative() {
+        // lea r8, [rip+disp32=0]: 4C 8D 05 00 00 00 00
+        // rex: W=1 R=1(dst=r8=8>7) → 0x4C
+        let o = X86_64Opcode::Lea {
+            dst: reg(8, Width::B64),
+            mem: MemOperand { disp: 0, base: None, index: None, seg: None },
+            rip_relative: true,
+        };
+        assert_eq!(o.encode(), Some(vec![0x4C, 0x8D, 0x05, 0, 0, 0, 0]));
     }
 
     // ---- P11 Bucket M: Adc/Sbb/Mul/Rcl/Ud2 ----
