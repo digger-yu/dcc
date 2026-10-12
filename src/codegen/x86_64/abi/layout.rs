@@ -44,8 +44,15 @@ pub const CX_FRAME_BAND: i64 = 48;
 pub const VEC_RESERVE: i64 = 512;
 /// 嵌套函数 trampoline 空间：256 字节（最多 8 个，每个 32 字节）。实际代码在生成期按需写入。
 pub const TRAMP_RESERVE: i64 = 256;
-/// 位域 RMW 临时槽：32 字节（2 级嵌套，每级 16 字节）。
-pub const BF_RMW_RESERVE: i64 = 32;
+/// 位域 RMW 临时槽带。每层嵌套占 3 个 8B 槽（24B），对齐 16 ⇒ 每层 32B。
+/// 预留从 32B 提到 64B，覆盖 F3 九层嵌套夹具的 disp32 回绕路径。
+pub const BF_RMW_RESERVE: i64 = 64;
+/// 每层嵌套占用的字节数（3 个 8B 槽，按 16 对齐补到 32B）。
+/// 两套几何（写 2 槽 @16 vs 自增 3 槽 @24）统一为 3 槽/层 @32。
+pub const BF_RMW_SLOT_BYTES: i64 = 32;
+/// 每层内的三个槽：slot 0 = 容器地址、slot 1 = 容器旧值 / 提取后旧值、
+/// slot 2 = 新值（仅自增路径使用；写路径的第 3 槽留空）。
+pub const BF_RMW_PER_DEPTH: i64 = 3;
 /// 帧头里固定不动的部分：saved r13(8) + ret addr(8) + callee-saved 保存区(32)。
 pub const FIXED_HDR: i64 = 48;
 /// 栈顶金丝雀槽（`%r13 - 8`）。发射点手写字节 `mov [r13-8], rax` 与序言/尾声
@@ -126,6 +133,10 @@ pub struct LayoutMap {
     pub sret_ptr_off: i64,
     /// trampoline 区的顶（`-frame_size + tramp_reserve`）
     pub tramp_top: i64,
+    /// 位域 RMW 带的顶（紧邻 trampoline 带之上，即 tramp_top + tramp_reserve）。
+    /// 每个槽 = `bf_rmw_band_top() - depth*32 - slot_idx*8`（slot_idx ∈ {0,1,2}）。
+    /// 这是发射器唯一能读的位域 RMW 坐标；写/自增路径不得再从 -8/-16/-24 硬算。
+    pub bf_rmw_band_top: i64,
     /// spill band 的顶（排在 sret/物化区之下、向量区之上；见 `spill_off`）
     pub spill_band_top: i64,
     /// 晚分配带的顶（变量区正下方，`-(hdr + var_bytes)`；见 `late_band_bottom`）
@@ -172,6 +183,7 @@ impl LayoutMap {
             rvalue_off: 8,
             sret_ptr_off: 0,
             tramp_top: TRAMP_RESERVE,
+            bf_rmw_band_top: TRAMP_RESERVE + TRAMP_RESERVE,
             spill_band_top: 0,
             late_band_top: 0,
             arena_room: 0,
@@ -235,6 +247,7 @@ impl LayoutMap {
             rvalue_off: -frame_size + 8,
             sret_ptr_off: -frame_size + CX_FRAME_BAND + p.va_slots + p.static_chain_slot,
             tramp_top: -frame_size + p.tramp_reserve,
+            bf_rmw_band_top: -frame_size + p.tramp_reserve + p.bf_rmw_reserve,
             spill_band_top: sret_region_base - p.sret_need,
             late_band_top,
             // 诊断读数：帧大小减去帧头、减去晚分配带、再减去帧底那摞带。
@@ -322,8 +335,17 @@ impl LayoutMap {
         self.vec_temp_off + slot * slot_bytes
     }
 
+    /// Bitfield RMW slot offset: depth selects the layer, slot_idx the slot in that layer.
+    /// Each layer = 3 x 8B slots (24B, aligned to 32B). Unified for write / inc-dec paths.
+    pub fn bf_rmw_slot(&self, depth: i64, slot_idx: i64) -> i32 {
+        if self.bf_rmw_reserve > 0 {
+            (self.bf_rmw_band_top - depth * BF_RMW_SLOT_BYTES - slot_idx * 8) as i32
+        } else {
+            (-8 - depth * 16 - slot_idx * 8) as i32
+        }
+    }
+
     /// 表达式第 `depth` 层溅出槽的偏移（帧头 temp 带内）。
-    ///
     /// 搬迁前有 `emit/expr/dispatch.rs` 与 `emit/expr/binary.rs` 两处直接写
     /// `-(48 + depth*8)`（裸 48，且是 **i32** 乘法），与 `FIXED_HDR`/`hdr_of` 同一个
     /// 魔数有三个出处。
