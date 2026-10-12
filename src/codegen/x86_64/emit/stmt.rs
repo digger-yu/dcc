@@ -211,9 +211,13 @@ impl Codegen {
                                                         }, &[]));
                                                     }, // movzx
                                                     2 => {
-                                                        self.emit_insn(&Insn::raw_bytes(&[
-                                                            0x66, 0x8B, 0x00,
-                                                        ]));
+                                                        self.emit_insn(&Insn::mov_rm_mem(
+                                                            true,
+                                                            crate::codegen::shared::asm_operand::Width::B16,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                        ));
                                                         self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
         rip_relative: false,
                                                             sign: false,
@@ -224,9 +228,14 @@ impl Codegen {
                                                         }, &[]));
                                                     },
                                                     1 => {
-                                                        self.emit_insn(&Insn::raw_bytes(&[
-                                                            0x0F, 0xB6, 0x00,
-                                                        ]));
+                                                        self.emit_insn(&Insn::mov_ext_mem(
+                                                            false,
+                                                            crate::codegen::shared::asm_operand::Width::B8,
+                                                            crate::codegen::shared::asm_operand::Width::B32,
+                                                            0,
+                                                            0,
+                                                            0,
+                                                        ));
                                                     }, // movzx al, [rax]
                                                     _ => {},
                                                 }
