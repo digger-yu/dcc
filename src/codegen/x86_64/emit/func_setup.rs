@@ -7,8 +7,8 @@
 use crate::ast::*;
 use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::x86_64::abi::layout::LayoutMap;
-use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::Codegen;
 use std::collections::HashMap;
 
 /// 用户写了不是寄存器的寄存器名（与 `report_internal_bug` 不同：这是**用户代码错误**，
@@ -181,8 +181,7 @@ impl Codegen {
         }
         // Phase 3.2: 文本从家反查（`gp_name_of_num` 是号→名唯一入口），不再独立读
         // `register_name` —— 与判据同源。
-        let text = crate::codegen::x86_64::abi::regnames::gp_name_of_num(reg.n)
-            .unwrap_or("");
+        let text = crate::codegen::x86_64::abi::regnames::gp_name_of_num(reg.n).unwrap_or("");
         self.diagnostics.push(crate::diagnostics::Diagnostic {
             sev: crate::diagnostics::Severity::Warning,
             code: Self::DIAG_CALL_CLOBBERED_GLOBAL_BINDING,
@@ -274,7 +273,13 @@ impl Codegen {
         }
     }
 
-    fn diag_reserved_reg(&mut self, name: &str, text: &str, why: &str, span: &crate::diagnostics::Span) {
+    fn diag_reserved_reg(
+        &mut self,
+        name: &str,
+        text: &str,
+        why: &str,
+        span: &crate::diagnostics::Span,
+    ) {
         use crate::diagnostics::{Diagnostic, Severity};
         self.diagnostics.push(Diagnostic {
             sev: Severity::Error,
@@ -283,7 +288,8 @@ impl Codegen {
             span: span.clone(),
             hint: Some(
                 "本后端可当变量之家的 callee-saved 号只有 rbx/r12/r14/r15（%r13 是帧基址、\n\
-                 %rbp 在 -fno-omit-frame-pointer 下是帧指针，都不行；%rsp 当只读别名是可以的）".to_string(),
+                 %rbp 在 -fno-omit-frame-pointer 下是帧指针，都不行；%rsp 当只读别名是可以的）"
+                    .to_string(),
             ),
             source_line: None,
         });
@@ -323,7 +329,7 @@ impl Codegen {
             Some(loc) => {
                 self.insert_home(&v.name.name, loc, v.ty.clone(), explicit);
                 true
-            }
+            },
             None => false,
         }
     }
@@ -350,7 +356,9 @@ impl Codegen {
         // 不能拿 caller-saved 家：只能存下半就会丢高半。这类家退回到内存，而不是
         // 默默存一半（错值比少一个寄存器难得多，也检不出来）。
         let wide_ext_home = !explicit
-            && loc.reg().is_some_and(|r| crate::ssa::regalloc::is_auto_ext_reg(r.n))
+            && loc
+                .reg()
+                .is_some_and(|r| crate::ssa::regalloc::is_auto_ext_reg(r.n))
             && ty.size() > 8;
         let loc = if wide_ext_home {
             crate::location::Location::Stack(self.register_var(name, &ty))
@@ -365,12 +373,13 @@ impl Codegen {
             if !explicit && crate::ssa::regalloc::is_auto_ext_reg(r.n) {
                 let slot_name = format!("<{}#save>", name);
                 let slot_off = self.register_var(&slot_name, &ty);
-                self.ext_home_saves.push(crate::codegen::x86_64::codegen::ExtHomeSave {
-                    name: name.to_string(),
-                    reg: r.n,
-                    slot_off,
-                    size: ty.size(),
-                });
+                self.ext_home_saves
+                    .push(crate::codegen::x86_64::codegen::ExtHomeSave {
+                        name: name.to_string(),
+                        reg: r.n,
+                        slot_off,
+                        size: ty.size(),
+                    });
             }
         }
     }
@@ -752,7 +761,9 @@ impl Codegen {
             Decl::Typedef { .. } | Decl::Func(_) | Decl::EnumDef(_) => {},
             // 文件作用域 asm（块级也能写）的操作数是普通表达式，里面有复合字面量与
             // `va_start` 的可能。
-            Decl::GlobalAsm { outputs, inputs, .. } => {
+            Decl::GlobalAsm {
+                outputs, inputs, ..
+            } => {
                 for e in outputs.iter().chain(inputs.iter()) {
                     Self::late_need_expr(e, need);
                 }
@@ -861,7 +872,7 @@ impl Codegen {
             | Stmt::Fallthrough { .. } => {},
         }
     }
-    
+
     /// 表达式树里的晚分配站点：
     /// - `CompoundLit` → 一个名字含发射序的对象，按 `var_alloc_slots(ty)` 预扣（向量形态例外：
     ///   `gen_expr_compound_lit` 对 `Type::Vector` 走 `vector_temp_base`，那不在变量区）；
@@ -1162,7 +1173,7 @@ impl Codegen {
             return Some(match *loc {
                 crate::location::Location::Spill(slot) => {
                     crate::location::Location::Stack(self.frame_layout.spill_off(slot))
-                }
+                },
                 other => other,
             });
         }
@@ -1202,7 +1213,9 @@ impl Codegen {
             Stmt::Expr { e, .. } => Self::collect_free_idents_expr(e, out),
             Stmt::Return { val: Some(e), .. } => Self::collect_free_idents_expr(e, out),
             Stmt::GotoIndirect { expr, .. } => Self::collect_free_idents_expr(expr, out),
-            Stmt::If { cond, then_, else_, .. } => {
+            Stmt::If {
+                cond, then_, else_, ..
+            } => {
                 Self::collect_free_idents_expr(cond, out);
                 Self::collect_free_idents_stmt(then_, out);
                 if let Some(e) = else_ {
@@ -1213,7 +1226,13 @@ impl Codegen {
                 Self::collect_free_idents_expr(cond, out);
                 Self::collect_free_idents_stmt(body, out);
             },
-            Stmt::For { init, cond, step, body, .. } => {
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+                ..
+            } => {
                 if let Some(i) = init {
                     Self::collect_free_idents_stmt(i, out);
                 }
@@ -1297,7 +1316,9 @@ impl Codegen {
                 Self::collect_free_idents_expr(l, out);
                 Self::collect_free_idents_expr(r, out);
             },
-            E::Cond { cond, then_, else_, .. } => {
+            E::Cond {
+                cond, then_, else_, ..
+            } => {
                 Self::collect_free_idents_expr(cond, out);
                 Self::collect_free_idents_expr(then_, out);
                 Self::collect_free_idents_expr(else_, out);
@@ -1329,10 +1350,7 @@ impl Codegen {
         }
     }
 
-    fn collect_free_idents_designator(
-        d: &crate::ast::Designator,
-        out: &mut Vec<(String, Type)>,
-    ) {
+    fn collect_free_idents_designator(d: &crate::ast::Designator, out: &mut Vec<(String, Type)>) {
         use crate::ast::Designator as D;
         match d {
             D::Field(_) => {},
@@ -1431,7 +1449,9 @@ impl Codegen {
             Stmt::Block { b, .. } => {
                 Self::collect_frame_var_decls(&b.items, static_local_map, func_name, out);
             },
-            Stmt::If { cond, then_, else_, .. } => {
+            Stmt::If {
+                cond, then_, else_, ..
+            } => {
                 Self::collect_frame_var_decls_expr(cond, static_local_map, func_name, out);
                 Self::collect_frame_var_decls_stmt(then_, static_local_map, func_name, out);
                 if let Some(e) = else_ {
@@ -1445,7 +1465,13 @@ impl Codegen {
                 Self::collect_frame_var_decls_stmt(body, static_local_map, func_name, out);
             },
             // `for` 的 init 也是声明的宿主（`for (int i = 0; …)`）
-            Stmt::For { init, cond, step, body, .. } => {
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+                ..
+            } => {
                 if let Some(i) = init {
                     Self::collect_frame_var_decls_stmt(i, static_local_map, func_name, out);
                 }
@@ -1460,7 +1486,12 @@ impl Codegen {
             Stmt::Switch { expr, cases, .. } => {
                 Self::collect_frame_var_decls_expr(expr, static_local_map, func_name, out);
                 for case in cases {
-                    Self::collect_frame_var_decls(&case.body.items, static_local_map, func_name, out);
+                    Self::collect_frame_var_decls(
+                        &case.body.items,
+                        static_local_map,
+                        func_name,
+                        out,
+                    );
                 }
             },
             Stmt::Label { stmt, .. } => {
@@ -1542,7 +1573,9 @@ impl Codegen {
                 Self::collect_frame_var_decls_expr(l, static_local_map, func_name, out);
                 Self::collect_frame_var_decls_expr(r, static_local_map, func_name, out);
             },
-            E::Cond { cond, then_, else_, .. } => {
+            E::Cond {
+                cond, then_, else_, ..
+            } => {
                 Self::collect_frame_var_decls_expr(cond, static_local_map, func_name, out);
                 Self::collect_frame_var_decls_expr(then_, static_local_map, func_name, out);
                 Self::collect_frame_var_decls_expr(else_, static_local_map, func_name, out);
@@ -1557,12 +1590,7 @@ impl Codegen {
                 for it in inits {
                     match it {
                         crate::ast::InitItem::Expr(x) => {
-                            Self::collect_frame_var_decls_expr(
-                                x,
-                                static_local_map,
-                                func_name,
-                                out,
-                            )
+                            Self::collect_frame_var_decls_expr(x, static_local_map, func_name, out)
                         },
                         crate::ast::InitItem::Designated { designator, value } => {
                             Self::collect_frame_var_decls_designator(
@@ -1600,21 +1628,14 @@ impl Codegen {
         use crate::ast::Designator as D;
         match d {
             D::Field(_) => {},
-            D::Index(x) => {
-                Self::collect_frame_var_decls_expr(x, static_local_map, func_name, out)
-            },
+            D::Index(x) => Self::collect_frame_var_decls_expr(x, static_local_map, func_name, out),
             D::Range(a, b) => {
                 Self::collect_frame_var_decls_expr(a, static_local_map, func_name, out);
                 Self::collect_frame_var_decls_expr(b, static_local_map, func_name, out);
             },
             D::Chain(items) => {
                 for sub in items {
-                    Self::collect_frame_var_decls_designator(
-                        sub,
-                        static_local_map,
-                        func_name,
-                        out,
-                    );
+                    Self::collect_frame_var_decls_designator(sub, static_local_map, func_name, out);
                 }
             },
         }
@@ -1706,9 +1727,39 @@ impl Codegen {
             return;
         }
         // 保存 rcx, rdi, rax (它们可能在后续代码中使用)
-        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // push rax
-        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // push rcx
-        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // push rdi
+        self.emit_insn(&Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
+                op: crate::codegen::x86_64::opcode::StackOp::Push,
+                width: crate::codegen::shared::asm_operand::Width::B64,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    0,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                ),
+            },
+            &[],
+        )); // push rax
+        self.emit_insn(&Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
+                op: crate::codegen::x86_64::opcode::StackOp::Push,
+                width: crate::codegen::shared::asm_operand::Width::B64,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    1,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                ),
+            },
+            &[],
+        )); // push rcx
+        self.emit_insn(&Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
+                op: crate::codegen::x86_64::opcode::StackOp::Push,
+                width: crate::codegen::shared::asm_operand::Width::B64,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    7,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                ),
+            },
+            &[],
+        )); // push rdi
 
         // xor eax, eax (rax = 0)
         // P11: 收敛到 AluRm{Xor, B32, rax, rax}.
@@ -1729,24 +1780,66 @@ impl Codegen {
                 &[],
             );
             if !self.emit_insn(&insn) {
-                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B32, 0, 0));
+                self.emit_insn(&Insn::alu_rm_reg_reg(
+                    crate::codegen::x86_64::opcode::AluOp::Xor,
+                    crate::codegen::shared::asm_operand::Width::B32,
+                    0,
+                    0,
+                ));
             }
         }
         // mov rcx, frame_size / 8
-        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-            width: crate::codegen::shared::asm_operand::Width::B64,
-            dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64),
-            src: crate::codegen::x86_64::opcode::Operand::Imm(((frame_size as u64) / 8) as i64),
-        }, &[]));
+        self.emit_insn(&Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                rip_relative: false,
+                width: crate::codegen::shared::asm_operand::Width::B64,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    1,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                ),
+                src: crate::codegen::x86_64::opcode::Operand::Imm(((frame_size as u64) / 8) as i64),
+            },
+            &[],
+        ));
         // rdi = r13 - frame_size (帧底部)
         self.emit_lea_r13(7, -frame_size);
         // rep stosq: F3 48 AB
         self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepStosq));
 
         // 恢复 rdi, rcx, rax
-        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rdi
-        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rcx
-        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rax
+        self.emit_insn(&Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
+                op: crate::codegen::x86_64::opcode::StackOp::Pop,
+                width: crate::codegen::shared::asm_operand::Width::B64,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    7,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                ),
+            },
+            &[],
+        )); // pop rdi
+        self.emit_insn(&Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
+                op: crate::codegen::x86_64::opcode::StackOp::Pop,
+                width: crate::codegen::shared::asm_operand::Width::B64,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    1,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                ),
+            },
+            &[],
+        )); // pop rcx
+        self.emit_insn(&Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
+                op: crate::codegen::x86_64::opcode::StackOp::Pop,
+                width: crate::codegen::shared::asm_operand::Width::B64,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    0,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                ),
+            },
+            &[],
+        )); // pop rax
     }
 
     pub fn emit_stack_clash_probes(&mut self, frame_size: i64) {
@@ -1759,9 +1852,10 @@ impl Codegen {
         if pages > 0 {
             self.mov_imm(11, pages as i128);
             let loop_start = self.pos();
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x81, 0xEC, 0x00, 0x10, 0x00, 0x00])); // sub rsp, 4096
+            // sub rsp, 4096: 走 emit_sub_rsp (AluRm{Sub, B64, rsp, imm32} 类型化)
+            self.emit_sub_rsp(4096);
             self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x04, 0x24, 0x00])); // mov byte ptr [rsp], 0
-            // dec r11: 49 FF CB (REX.W B64, /1 modrm=11 001 011)
+                                                                         // dec r11: 49 FF CB (REX.W B64, /1 modrm=11 001 011)
             self.emit_insn(&Insn::unary_rm_reg(
                 crate::codegen::x86_64::opcode::UnaryOp::Dec,
                 crate::codegen::shared::asm_operand::Width::B64,
@@ -1786,10 +1880,10 @@ impl Codegen {
             _ => "mov",
         };
         let pfx_sz = match pfx {
-            0xF3 => "ss", // movss
-            0xF2 => "sd", // movsd
-            0x66 => "apd",// movapd
-            0x00 => "q",  // movq (no SSE prefix)
+            0xF3 => "ss",  // movss
+            0xF2 => "sd",  // movsd
+            0x66 => "apd", // movapd
+            0x00 => "q",   // movq (no SSE prefix)
             _ => "",
         };
         let mnem = format!("{mnem_base}{pfx_sz}");
@@ -1859,7 +1953,9 @@ impl Codegen {
                 crate::cli::StackGuardReg::Gs => 0x65u8,
                 _ => 0x64u8, // Fs is default
             };
-            self.emit_insn(&Insn::raw_bytes(&[seg_prefix, 0x4c, 0x33, 0x1c, 0x25, 0x28, 0x00, 0x00, 0x00]));
+            self.emit_insn(&Insn::raw_bytes(&[
+                seg_prefix, 0x4c, 0x33, 0x1c, 0x25, 0x28, 0x00, 0x00, 0x00,
+            ]));
             // Always call __stack_chk_fail on canary mismatch.
             // Both ET_REL and ET_EXEC use the same path:
             // __stack_chk_fail is emitted as an undefined global
@@ -1872,60 +1968,34 @@ impl Codegen {
         // mov rbx, [r13 - 16]  (REX.WB: r13 needs REX.B)
         self.callee_save_patch_sites.push((self.pos(), 0x01));
         self.emit_insn(
-            &Insn::mov_rm_mem(
-                true,
-                crate::codegen::shared::asm_operand::Width::B64,
-                3,
-                13,
-                -16,
-            )
-            .with_gas("mov -16(%r13), %rbx".to_string()),
+            &Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 3, 13, -16)
+                .with_gas("mov -16(%r13), %rbx".to_string()),
         );
         // mov r12, [r13 - 24]  (REX.WRB: r12 needs REX.R, r13 needs REX.B)
         self.callee_save_patch_sites.push((self.pos(), 0x02));
         self.emit_insn(
-            &Insn::mov_rm_mem(
-                true,
-                crate::codegen::shared::asm_operand::Width::B64,
-                12,
-                13,
-                -24,
-            )
-            .with_gas("mov -24(%r13), %r12".to_string()),
+            &Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 12, 13, -24)
+                .with_gas("mov -24(%r13), %r12".to_string()),
         );
         // mov r14, [r13 - 32]  (REX.WRB: r14 needs REX.R, r13 needs REX.B)
         self.callee_save_patch_sites.push((self.pos(), 0x04));
         self.emit_insn(
-            &Insn::mov_rm_mem(
-                true,
-                crate::codegen::shared::asm_operand::Width::B64,
-                14,
-                13,
-                -32,
-            )
-            .with_gas("mov -32(%r13), %r14".to_string()),
+            &Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 14, 13, -32)
+                .with_gas("mov -32(%r13), %r14".to_string()),
         );
         // mov r15, [r13 - 40]  (REX.WRB: r15 在 reg 字段需要 REX.R, r13 在 r/m 需要 REX.B)
         // 这里没有 SIB，REX.X 是多余的：旧代码发 0x4F = W|R|X|B，产物里被 objdump 标成
         // `rex.WRXB mov -0x28(%r13),%r15`（与序言侧同一个复制源）。
         self.callee_save_patch_sites.push((self.pos(), 0x08));
         self.emit_insn(
-            &Insn::mov_rm_mem(
-                true,
-                crate::codegen::shared::asm_operand::Width::B64,
-                15,
-                13,
-                -40,
-            )
-            .with_gas("mov -40(%r13), %r15".to_string()),
+            &Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 15, 13, -40)
+                .with_gas("mov -40(%r13), %r15".to_string()),
         );
         // mov rsp, r13: 恢复栈指针
         // P11: 必须保留 0x49 0x8b 0xe5 形式 (mov r/m64,r64 中 rsp 是 r/m, 需
         // REX.B=1 扩展 r13/r/m). mov_rm_reg 走 0x89 形式导致 REX 字节不同, 破坏
         // G10 快照字节一致性. 这里保留 hand-written 形态以维持 byte-identical.
-        self.emit_insn(
-            &Insn::raw_with_gas(&[0x49, 0x8b, 0xe5], "mov %r13, %rsp"),
-        );
+        self.emit_insn(&Insn::raw_with_gas(&[0x49, 0x8b, 0xe5], "mov %r13, %rsp"));
         self.emit_insn(
             &Insn::stack_op_reg(crate::codegen::x86_64::opcode::StackOp::Pop, 13)
                 .with_gas("pop %r13".to_string()),
@@ -1950,10 +2020,8 @@ impl Codegen {
             self.jmp_external("__x86_return_thunk");
         } else {
             // 步骤 3: 走类型化 Ret{add_imm: None} (C3).
-            let mut insn = Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::Ret { add_imm: None },
-                &[],
-            );
+            let mut insn =
+                Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Ret { add_imm: None }, &[]);
             insn.gas_text = Some("ret".to_string());
             if !self.emit_insn(&insn) {
                 self.emit_insn(&Insn::raw_with_gas(&[0xC3], "ret"));
