@@ -13,6 +13,26 @@
 use crate::codegen::shared::asm_operand::{InsnRec, Operand};
 use crate::codegen::x86_64::opcode::X86_64Opcode;
 
+/// P12-A: explicit expect on `emit_insn() -> bool`.
+///
+/// `emit_insn` returns `false` when `encode()` returns `None` (an uncovered
+/// opcode shape). Callers must not silently drop that signal.  Typed
+/// constructors whose declared shapes all encode successfully should call
+/// `.expect("...")` to panic loudly at the first uncovered shape.
+pub trait BoolExpect {
+    #[track_caller]
+    fn expect(self, msg: &str);
+}
+
+impl BoolExpect for bool {
+    #[track_caller]
+    fn expect(self, msg: &str) {
+        if !self {
+            panic!("emit_insn encode returned None: {}", msg);
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Insn {
     pub op: X86_64Opcode,
