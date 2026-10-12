@@ -885,13 +885,11 @@ impl Codegen {
                 // 不写指数字节，配合槽高位清零会把值读成 0）。故改为槽→槽的
                 // `fldt`/`fstpt` 直拷，不再有任何精度损失。
                 let incoming = 16i64 + arg_off;
-                // fld tbyte [r13+incoming]  DB /5: mod=10|reg=5|rm=101 = 0xAD, REX.B=0x41
-                // （写成 0x85 会漏掉 reg 字段而变成 `fildl m32int`，静默读 4 字节整数）
-                self.emit_insn(&Insn::raw_bytes(&[0x41, 0xDB, 0xAD]));
-                self.emit_insn(&Insn::raw_bytes(&(incoming as i32).to_le_bytes()));
-                // fstp tbyte [r13+off]      DB /7: mod=10 reg=7 rm=101 → 0xBD
-                self.emit_insn(&Insn::raw_bytes(&[0x41, 0xDB, 0xBD]));
-                self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
+                // P11 Bucket AR: typed x87 fldt/fstpt via emit_x87_fld_at/fstp_at
+                // (base=r13). Width=10 m80fp maps to (0xDB, /5, /7); encoder
+                // derives REX.B=0x41 and mod=10 disp32 automatically.
+                self.emit_x87_fld_at(13, incoming as i32, &Type::LongDouble);
+                self.emit_x87_fstp_at(13, off as i32, &Type::LongDouble);
             }
             for (arg_off, off) in cld_param_stores {
                 // complex LD: 两个 16 字节栈槽, 逐分量 fldt/fstpt 直拷
@@ -899,10 +897,8 @@ impl Codegen {
                 for k in 0..2 {
                     let incoming = 16i64 + arg_off + k * 16;
                     let dst = off + k * 16;
-                    self.emit_insn(&Insn::raw_bytes(&[0x41, 0xDB, 0xAD]));
-                    self.emit_insn(&Insn::raw_bytes(&(incoming as i32).to_le_bytes()));
-                    self.emit_insn(&Insn::raw_bytes(&[0x41, 0xDB, 0xBD]));
-                    self.emit_insn(&Insn::raw_bytes(&(dst as i32).to_le_bytes()));
+                    self.emit_x87_fld_at(13, incoming as i32, &Type::LongDouble);
+                    self.emit_x87_fstp_at(13, dst as i32, &Type::LongDouble);
                 }
             }
             for (arg_off, off) in stack_param_stores {
@@ -1232,6 +1228,7 @@ impl Codegen {
             if f.name.name == "main" && matches!(f.ret_ty, Type::Int) {
                 self.emit_insn(&Insn::new(
                     crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        rip_relative: false,
                         width: crate::codegen::shared::asm_operand::Width::B32,
                         dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B32),
                         src: crate::codegen::x86_64::opcode::Operand::Imm(0),

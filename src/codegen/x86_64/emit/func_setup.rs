@@ -1854,7 +1854,12 @@ impl Codegen {
             let loop_start = self.pos();
             // sub rsp, 4096: 走 emit_sub_rsp (AluRm{Sub, B64, rsp, imm32} 类型化)
             self.emit_sub_rsp(4096);
-            self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x04, 0x24, 0x00])); // mov byte ptr [rsp], 0
+            self.emit_insn(&Insn::store_imm_mem(
+                crate::codegen::shared::asm_operand::Width::B8,
+                4,
+                0,
+                0,
+            )); // mov byte ptr [rsp], 0 (C6 /0 ib with SIB for base=4)
                                                                          // dec r11: 49 FF CB (REX.W B64, /1 modrm=11 001 011)
             self.emit_insn(&Insn::unary_rm_reg(
                 crate::codegen::x86_64::opcode::UnaryOp::Dec,
