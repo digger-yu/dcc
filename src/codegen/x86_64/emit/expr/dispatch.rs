@@ -2,11 +2,13 @@
 // gen_expr 主 dispatcher: 由单体 x86_64.rs L9887-13640 逐字搬迁。
 
 use crate::ast::*;
-use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::shared::asm_operand::Width;
+use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::opcode::{
+    AluOp, Operand as OpcodeOperand, ShiftAmount, ShiftOp, UnaryOp, X86_64Opcode,
+};
 use crate::codegen::x86_64::opcode::{CondCode, SimdArithOp, SimdWidth};
-use crate::codegen::x86_64::opcode::{AluOp, Operand as OpcodeOperand, ShiftAmount, ShiftOp, UnaryOp, X86_64Opcode};
 use crate::codegen::x86_64::{AggDst, Codegen, JumpKind, VaListAddress};
 use crate::const_eval;
 
@@ -176,7 +178,9 @@ impl Codegen {
                     if matches!(l.ty(), Type::Int128 | Type::UInt128) {
                         // or dst64, rdx (REX.W 09 /r, r/m=dst reg field=rdx(2))
                         let or_gas = format!("or %rdx, {}", GAS_REG64[(dst & 15) as usize]);
-                        self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::Or, Width::B64, dst, 2).with_gas(or_gas));
+                        self.emit_insn(
+                            &Insn::alu_rm_reg_reg(AluOp::Or, Width::B64, dst, 2).with_gas(or_gas),
+                        );
                     }
                     // test dst64, dst64 (REX.W 85 /r, reflexive ModRM)
                     let test_gas = format!("test {0}, {0}", GAS_REG64[(dst & 15) as usize]);
@@ -187,17 +191,29 @@ impl Codegen {
                             self.gen_expr_decay(r, dst);
                             if matches!(r.ty(), Type::Int128 | Type::UInt128) {
                                 let or_gas = format!("or %rdx, {}", GAS_REG64[(dst & 15) as usize]);
-                                self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::Or, Width::B64, dst, 2).with_gas(or_gas));
+                                self.emit_insn(
+                                    &Insn::alu_rm_reg_reg(AluOp::Or, Width::B64, dst, 2)
+                                        .with_gas(or_gas),
+                                );
                             }
                             let test_gas = format!("test {0}, {0}", GAS_REG64[(dst & 15) as usize]);
-                            self.emit_insn(&Insn::test_rm_reg(Width::B64, dst, dst).with_gas(test_gas));
+                            self.emit_insn(
+                                &Insn::test_rm_reg(Width::B64, dst, dst).with_gas(test_gas),
+                            );
                             // setne dst_low: 结果写入 dst 的低 8 位, 而非固定 al.
                             // `0F 95 /r` 的目的在 **r/m** ⇒ dst>=8 需要 REX.B.
                             let setne_gas = format!("setne {}", GAS_REG8[(dst & 15) as usize]);
                             self.emit_insn(&Insn::setcc_reg(CondCode::Ne, dst).with_gas(setne_gas));
                             // movzb dst64, dst_low8 (0F B6 /r reflexive)
-                            let movzb_gas = format!("movzbq {}, {}", GAS_REG8[(dst & 15) as usize], GAS_REG64[(dst & 15) as usize]);
-                            self.emit_insn(&Insn::mov_ext(false, Width::B8, Width::B64, dst, dst).with_gas(movzb_gas));
+                            let movzb_gas = format!(
+                                "movzbq {}, {}",
+                                GAS_REG8[(dst & 15) as usize],
+                                GAS_REG64[(dst & 15) as usize]
+                            );
+                            self.emit_insn(
+                                &Insn::mov_ext(false, Width::B8, Width::B64, dst, dst)
+                                    .with_gas(movzb_gas),
+                            );
                             self.jmp_rel32(&l_end, JumpKind::Jmp);
                             self.label(&l_false);
                             self.mov_imm(dst, 0);
@@ -208,14 +224,26 @@ impl Codegen {
                             self.gen_expr_decay(r, dst);
                             if matches!(r.ty(), Type::Int128 | Type::UInt128) {
                                 let or_gas = format!("or %rdx, {}", GAS_REG64[(dst & 15) as usize]);
-                                self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::Or, Width::B64, dst, 2).with_gas(or_gas));
+                                self.emit_insn(
+                                    &Insn::alu_rm_reg_reg(AluOp::Or, Width::B64, dst, 2)
+                                        .with_gas(or_gas),
+                                );
                             }
                             let test_gas = format!("test {0}, {0}", GAS_REG64[(dst & 15) as usize]);
-                            self.emit_insn(&Insn::test_rm_reg(Width::B64, dst, dst).with_gas(test_gas));
+                            self.emit_insn(
+                                &Insn::test_rm_reg(Width::B64, dst, dst).with_gas(test_gas),
+                            );
                             let setne_gas = format!("setne {}", GAS_REG8[(dst & 15) as usize]);
                             self.emit_insn(&Insn::setcc_reg(CondCode::Ne, dst).with_gas(setne_gas));
-                            let movzb_gas = format!("movzbq {}, {}", GAS_REG8[(dst & 15) as usize], GAS_REG64[(dst & 15) as usize]);
-                            self.emit_insn(&Insn::mov_ext(false, Width::B8, Width::B64, dst, dst).with_gas(movzb_gas));
+                            let movzb_gas = format!(
+                                "movzbq {}, {}",
+                                GAS_REG8[(dst & 15) as usize],
+                                GAS_REG64[(dst & 15) as usize]
+                            );
+                            self.emit_insn(
+                                &Insn::mov_ext(false, Width::B8, Width::B64, dst, dst)
+                                    .with_gas(movzb_gas),
+                            );
                             self.jmp_rel32(&l_end, JumpKind::Jmp);
                             self.label(&l_false);
                             self.mov_imm(dst, 1);
@@ -376,10 +404,9 @@ impl Codegen {
                 //       / r13-(48+temp*8).. 变量 (基址 hdr 含 temp_slots)
                 // 注意: binop 槽公式只用 48 (callee-saved 区大小),
                 // temp_slots 只体现在变量基址 hdr 中, 不可重复计入.
-                let slot_off =
-                    crate::codegen::x86_64::abi::layout::LayoutMap::temp_slot_off(
-                        self.expr_depth as i64,
-                    );
+                let slot_off = crate::codegen::x86_64::abi::layout::LayoutMap::temp_slot_off(
+                    self.expr_depth as i64,
+                );
                 // 尝试使用被调用者保存寄存器代替帧槽 (减少内存访问).
                 // callee-saved 跨 call 保活 (ABI 保证 + 本编译器序言保存
                 // callee_saved_used 集合), 因此含 call 的表达式同样安全;
@@ -422,13 +449,16 @@ impl Codegen {
                             // 候选表与临时号池全满：不得退到一个正握着家的号上。
                             // 诊断里点名「谁握着这些号」：不写就只能靠猜，而本仓已经因为
                             // 猜错过两次（§11.45/§11.46）。
-                            let holders: Vec<String> = rhs_names.iter().map(|&c| {
-                                format!(
-                                    "{c}(alloc={},pinned={})",
-                                    self.reg_bank.is_allocated(c),
-                                    self.reg_bank.is_pinned(c)
-                                )
-                            }).collect();
+                            let holders: Vec<String> = rhs_names
+                                .iter()
+                                .map(|&c| {
+                                    format!(
+                                        "{c}(alloc={},pinned={})",
+                                        self.reg_bank.is_allocated(c),
+                                        self.reg_bank.is_pinned(c)
+                                    )
+                                })
+                                .collect();
                             self.report_internal_bug(
                                 "E1135",
                                 format!(
@@ -438,7 +468,7 @@ impl Codegen {
                                 "扩 RHS 候选集，或让有硬用途的号不进候选表；不得静默拿有主的号",
                             );
                             1
-                        }
+                        },
                     }
                 };
                 self.gen_expr_decay(r, stage);
@@ -452,8 +482,15 @@ impl Codegen {
                         // movslq r64, r32（自反 ModRM）
                         use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
                         use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
-                        let gas = format!("movsxd {}, {}", GAS_REG32[(stage & 15) as usize], GAS_REG64[(stage & 15) as usize]);
-                        let _ = self.emit_insn(&Insn::mov_ext(true, Width::B32, Width::B64, stage, stage).with_gas(gas));
+                        let gas = format!(
+                            "movsxd {}, {}",
+                            GAS_REG32[(stage & 15) as usize],
+                            GAS_REG64[(stage & 15) as usize]
+                        );
+                        let _ = self.emit_insn(
+                            &Insn::mov_ext(true, Width::B32, Width::B64, stage, stage)
+                                .with_gas(gas),
+                        );
                     }
                     // imul r64, r64, imm32（自反 ModRM）
                     let _ = self.emit_insn(&Insn::imul_rm_reg_imm32_b64(stage, scale as i32));
@@ -468,7 +505,7 @@ impl Codegen {
                 } else if dst == 1 {
                     // 帧槽路径, dst == rcx: push/pop 避免恢复覆盖右操作数
                     self.push(1); // push rcx (右操作数)
-                    // 恢复左操作数到 dst: mov dst, [r13+slot_off] (r13=13)
+                                  // 恢复左操作数到 dst: mov dst, [r13+slot_off] (r13=13)
                     self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, dst, 13, slot_off));
                     self.pop(2); // pop rdx (右操作数)
                     self.binop(*op, dst, 2, is_signed, &l.ty(), &r.ty());
@@ -486,8 +523,10 @@ impl Codegen {
                     }
                     // 除数也用同一个暂存号：写死 `1` 会在 `1` 握着某个家时把家踩掉。
                     self.mov_imm(stage, elem_size as i128);
-                    self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B64)); // cqo (符号扩展 rax→rdx:rax)
-                    // idiv r/m64: reg field = /7 opcode extension, only r/m holds stage.
+                    self.emit_insn(&Insn::sign_extend_rax_to_rdx(
+                        crate::codegen::shared::asm_operand::Width::B64,
+                    )); // cqo (符号扩展 rax→rdx:rax)
+                        // idiv r/m64: reg field = /7 opcode extension, only r/m holds stage.
                     let _ = self.emit_insn(&Insn::idiv_rm_reg_b64(stage));
                     if dst != 0 {
                         self.mov(dst, 0); // dst = 商
@@ -505,13 +544,25 @@ impl Codegen {
                             // movsxd dst, dst32 (符号扩展, 自反 ModRM)
                             use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
                             use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
-                            let gas = format!("movsxd {}, {}", GAS_REG32[(dst & 15) as usize], GAS_REG64[(dst & 15) as usize]);
-                            let _ = self.emit_insn(&Insn::mov_ext(true, Width::B32, Width::B64, dst, dst).with_gas(gas));
+                            let gas = format!(
+                                "movsxd {}, {}",
+                                GAS_REG32[(dst & 15) as usize],
+                                GAS_REG64[(dst & 15) as usize]
+                            );
+                            let _ = self.emit_insn(
+                                &Insn::mov_ext(true, Width::B32, Width::B64, dst, dst)
+                                    .with_gas(gas),
+                            );
                         } else {
                             // mov dst32, dst32 (零扩展到 64 位)
                             use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
-                            let gas = format!("mov {}, {}", GAS_REG32[(dst & 15) as usize], GAS_REG32[(dst & 15) as usize]);
-                            let _ = self.emit_insn(&Insn::mov_rm_reg(Width::B32, dst, dst).with_gas(gas));
+                            let gas = format!(
+                                "mov {}, {}",
+                                GAS_REG32[(dst & 15) as usize],
+                                GAS_REG32[(dst & 15) as usize]
+                            );
+                            let _ = self
+                                .emit_insn(&Insn::mov_rm_reg(Width::B32, dst, dst).with_gas(gas));
                         }
                     }
                 }
@@ -544,13 +595,22 @@ impl Codegen {
                             let mask: u64 = if bf_width == 0 { 0 } else { (1u64 << bf_width) - 1 };
                             if mask <= 0x7FFFFFFF {
                                 // and dst, imm32 (REX.W 81 /4 id)
-                                let _ = self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0b100, dst, mask as i64));
+                                let _ = self.emit_insn(&Insn::alu_rm_reg_imm32_b64(
+                                    0b100,
+                                    dst,
+                                    mask as i64,
+                                ));
                             } else {
                                 let tmp = if dst != 1 { 1u8 } else { 2u8 };
                                 // movabs tmp, imm64
                                 let _ = self.emit_insn(&Insn::movabs_reg_imm64(tmp, mask));
                                 // and dst, tmp
-                                let _ = self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::And, Width::B64, dst, tmp));
+                                let _ = self.emit_insn(&Insn::alu_rm_reg_reg(
+                                    AluOp::And,
+                                    Width::B64,
+                                    dst,
+                                    tmp,
+                                ));
                             }
                         }
                     }
@@ -638,7 +698,21 @@ impl Codegen {
                         self.push(0);
                     }
                     if self.gen_lvalue_addr(lv, Self::EVAL_BASE) {
-                        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rdi, rax
+                        self.emit_insn(&Insn::new(
+                            crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                rip_relative: false,
+                                width: crate::codegen::shared::asm_operand::Width::B64,
+                                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                    7,
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                ),
+                                src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                    0,
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                ),
+                            },
+                            &[],
+                        )); // mov rdi, rax
                         if rax_is_agg_addr {
                             self.pop(6); // rsi = 聚合缓冲区地址
                         } else {
@@ -647,7 +721,9 @@ impl Codegen {
                         }
                         self.mov_imm(1, assign_l_ty.size() as i128);
                         self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
-                        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
+                        self.emit_insn(&Insn::noarg(
+                            crate::codegen::x86_64::opcode::NoArgOp::RepMovsb,
+                        )); // rep movsb
                         return;
                     }
                     if rax_is_agg_addr {
@@ -785,10 +861,42 @@ impl Codegen {
                             };
                             // reg 与 r/m 同为 dst: movsx/movzx reflexive 自反 ModRM.
                             match (l_sz, l_signed) {
-                                (1, true) => { let _ = self.emit_insn(&Insn::mov_ext(true, Width::B8, Width::B64, dst, dst)); },
-                                (1, false) => { let _ = self.emit_insn(&Insn::mov_ext(false, Width::B8, Width::B64, dst, dst)); },
-                                (2, true) => { let _ = self.emit_insn(&Insn::mov_ext(true, Width::B16, Width::B64, dst, dst)); },
-                                (2, false) => { let _ = self.emit_insn(&Insn::mov_ext(false, Width::B16, Width::B64, dst, dst)); },
+                                (1, true) => {
+                                    let _ = self.emit_insn(&Insn::mov_ext(
+                                        true,
+                                        Width::B8,
+                                        Width::B64,
+                                        dst,
+                                        dst,
+                                    ));
+                                },
+                                (1, false) => {
+                                    let _ = self.emit_insn(&Insn::mov_ext(
+                                        false,
+                                        Width::B8,
+                                        Width::B64,
+                                        dst,
+                                        dst,
+                                    ));
+                                },
+                                (2, true) => {
+                                    let _ = self.emit_insn(&Insn::mov_ext(
+                                        true,
+                                        Width::B16,
+                                        Width::B64,
+                                        dst,
+                                        dst,
+                                    ));
+                                },
+                                (2, false) => {
+                                    let _ = self.emit_insn(&Insn::mov_ext(
+                                        false,
+                                        Width::B16,
+                                        Width::B64,
+                                        dst,
+                                        dst,
+                                    ));
+                                },
                                 _ => {},
                             }
                         }
@@ -818,10 +926,27 @@ impl Codegen {
                                         &[],
                                     );
                                     if !self.emit_insn(&insn) {
-                                        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Xor, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // xor rdx, rdx
+                                        self.emit_insn(&Insn::new(
+                                            crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                                                op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                                                width:
+                                                    crate::codegen::shared::asm_operand::Width::B64,
+                                                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                                    2,
+                                                    crate::codegen::shared::asm_operand::Width::B64,
+                                                ),
+                                                src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                                    2,
+                                                    crate::codegen::shared::asm_operand::Width::B64,
+                                                ),
+                                            },
+                                            &[],
+                                        )); // xor rdx, rdx
                                     }
                                 } else {
-                                    self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B64)); // cqo (sign-extend rax→rdx:rax)
+                                    self.emit_insn(&Insn::sign_extend_rax_to_rdx(
+                                        crate::codegen::shared::asm_operand::Width::B64,
+                                    )); // cqo (sign-extend rax→rdx:rax)
                                 }
                             }
                             if self.is_global_not_local(&name.name) {
@@ -967,7 +1092,12 @@ impl Codegen {
                                 self.pop(1); // rcx = addr
                                 self.emit_seg_for(lv);
                                 // mov [rcx], rax/eax/ax/al (size from es)
-                                let w = match es { 1 => Width::B8, 2 => Width::B16, 4 => Width::B32, _ => Width::B64 };
+                                let w = match es {
+                                    1 => Width::B8,
+                                    2 => Width::B16,
+                                    4 => Width::B32,
+                                    _ => Width::B64,
+                                };
                                 let _ = self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
                                 return;
                             }
@@ -999,7 +1129,12 @@ impl Codegen {
                                 &[],
                             );
                             if !self.emit_insn(&insn) {
-                                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Add, crate::codegen::shared::asm_operand::Width::B64, 0, 1)); // add rax, rcx (addr in rax)
+                                self.emit_insn(&Insn::alu_rm_reg_reg(
+                                    crate::codegen::x86_64::opcode::AluOp::Add,
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                    0,
+                                    1,
+                                )); // add rax, rcx (addr in rax)
                             }
                         }
                         self.push(0); // save addr
@@ -1021,7 +1156,12 @@ impl Codegen {
                             if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
                                 self.emit_store_scalar_float_at(&r.ty(), elem_ty, 1);
                             } else {
-                                let w = match es { 1 => Width::B8, 2 => Width::B16, 4 => Width::B32, _ => Width::B64 };
+                                let w = match es {
+                                    1 => Width::B8,
+                                    2 => Width::B16,
+                                    4 => Width::B32,
+                                    _ => Width::B64,
+                                };
                                 let _ = self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
                             }
                         }
@@ -1051,7 +1191,12 @@ impl Codegen {
                                 &[],
                             );
                             if !self.emit_insn(&insn) {
-                                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Add, crate::codegen::shared::asm_operand::Width::B64, 0, 1)); // add rax, rcx (addr in rax)
+                                self.emit_insn(&Insn::alu_rm_reg_reg(
+                                    crate::codegen::x86_64::opcode::AluOp::Add,
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                    0,
+                                    1,
+                                )); // add rax, rcx (addr in rax)
                             }
                         }
                         self.push(0);
@@ -1073,7 +1218,12 @@ impl Codegen {
                             if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
                                 self.emit_store_scalar_float_at(&r.ty(), elem_ty, 1);
                             } else {
-                                let w = match es { 1 => Width::B8, 2 => Width::B16, 4 => Width::B32, _ => Width::B64 };
+                                let w = match es {
+                                    1 => Width::B8,
+                                    2 => Width::B16,
+                                    4 => Width::B32,
+                                    _ => Width::B64,
+                                };
                                 let _ = self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
                             }
                         }
@@ -1137,14 +1287,14 @@ impl Codegen {
                         self.gen_expr(ptr_e, Self::EVAL_BASE); // rax = ptr value
                         self.mov(7, 0); // rdi = rax
                                         // 3. 拷贝到段限定目标
-                        //
-                        // 带段时**不能**用 `rep movsb`：64 位模式下字符串指令的段前缀被 CPU
-                        // 忽略，挂一枚 `65` 的 rep movsb 会写到非段内存（旧实现把前缀发在
-                        // `cld` 前面，那是给 cld 加的，等于什么都没做）。带段路径改走
-                        // `copy_agg_to_seg`（常量尺寸）/ `copy_bytes_to_seg_runtime`（VLA）。
+                                        //
+                                        // 带段时**不能**用 `rep movsb`：64 位模式下字符串指令的段前缀被 CPU
+                                        // 忽略，挂一枚 `65` 的 rep movsb 会写到非段内存（旧实现把前缀发在
+                                        // `cld` 前面，那是给 cld 加的，等于什么都没做）。带段路径改走
+                                        // `copy_agg_to_seg`（常量尺寸）/ `copy_bytes_to_seg_runtime`（VLA）。
                         self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
-                                            // 拷贝大小: VM struct/union 为运行时值 (声明点绑定
-                                            // 槽优先), 其余为编译期 size
+                                                                                                    // 拷贝大小: VM struct/union 为运行时值 (声明点绑定
+                                                                                                    // 槽优先), 其余为编译期 size
                         if assign_l_ty.has_vla() {
                             if let Some(slot) = self.vm_size_slot(&assign_l_ty) {
                                 self.emit_mov_mem_r13(1, slot);
@@ -1156,7 +1306,11 @@ impl Codegen {
                             self.mov_imm(1, agg_sz as i128); // rcx = size
                         }
                         match seg_prefix {
-                            None => { let _ = self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); }, // rep movsb
+                            None => {
+                                let _ = self.emit_insn(&Insn::noarg(
+                                    crate::codegen::x86_64::opcode::NoArgOp::RepMovsb,
+                                ));
+                            }, // rep movsb
                             Some(seg) if assign_l_ty.has_vla() => {
                                 self.copy_bytes_to_seg_runtime(seg)
                             },
@@ -1192,7 +1346,10 @@ impl Codegen {
                                 {
                                     // mov [rcx], al/ax/eax/rax sized by assign_l_ty.
                                     let w = match assign_l_ty.size() {
-                                        1 => Width::B8, 2 => Width::B16, 4 => Width::B32, _ => Width::B64
+                                        1 => Width::B8,
+                                        2 => Width::B16,
+                                        4 => Width::B32,
+                                        _ => Width::B64,
                                     };
                                     let _ = self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
                                 }
@@ -1283,52 +1440,80 @@ impl Codegen {
                         let val_off = (-16 - depth * 16) as i8; // 值槽
                                                                 // rax = 容器地址
                                                                 // 保存地址到帧临时槽1: [r13 + addr_off]
-                        // mov [r13+addr_off], rax (r13=13)
-                        self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 13, addr_off as i32));
-                                                                        // 加载当前容器值 (结果统一放入 rax)
+                                                                // mov [r13+addr_off], rax (r13=13)
+                        self.emit_insn(&Insn::mov_rm_mem(
+                            false,
+                            Width::B64,
+                            0,
+                            13,
+                            addr_off as i32,
+                        ));
+                        // 加载当前容器值 (结果统一放入 rax)
                         match container_size {
-                            4 => { let _ = self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B32,
-                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        0, crate::codegen::shared::asm_operand::Width::B32
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Mem(
-                        crate::codegen::x86_64::opcode::MemOperand {
-                            disp: 0, base: Some(0), index: None, seg: None,
-                        }
-                    ),
-                },
-                &[],
-            )); },       // mov eax, [rax] (零扩展)
-                            8 => { let _ = self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B64,
-                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        0, crate::codegen::shared::asm_operand::Width::B64
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Mem(
-                        crate::codegen::x86_64::opcode::MemOperand {
-                            disp: 0, base: Some(0), index: None, seg: None,
-                        }
-                    ),
-                },
-                &[],
-            )); }, // mov rax, [rax]
+                            4 => {
+                                let _ = self.emit_insn(&Insn::new(
+                                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                        rip_relative: false,
+                                        width: crate::codegen::shared::asm_operand::Width::B32,
+                                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            0,
+                                            crate::codegen::shared::asm_operand::Width::B32,
+                                        ),
+                                        src: crate::codegen::x86_64::opcode::Operand::Mem(
+                                            crate::codegen::x86_64::opcode::MemOperand {
+                                                disp: 0,
+                                                base: Some(0),
+                                                index: None,
+                                                seg: None,
+                                            },
+                                        ),
+                                    },
+                                    &[],
+                                ));
+                            }, // mov eax, [rax] (零扩展)
+                            8 => {
+                                let _ = self.emit_insn(&Insn::new(
+                                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                        rip_relative: false,
+                                        width: crate::codegen::shared::asm_operand::Width::B64,
+                                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            0,
+                                            crate::codegen::shared::asm_operand::Width::B64,
+                                        ),
+                                        src: crate::codegen::x86_64::opcode::Operand::Mem(
+                                            crate::codegen::x86_64::opcode::MemOperand {
+                                                disp: 0,
+                                                base: Some(0),
+                                                index: None,
+                                                seg: None,
+                                            },
+                                        ),
+                                    },
+                                    &[],
+                                ));
+                            }, // mov rax, [rax]
                             2 => {
                                 // mov ax, [rax]; movzx rax, ax
-                                let _ = self.emit_insn(&Insn::mov_rm_mem(true, Width::B16, 0, 0, 0));
+                                let _ =
+                                    self.emit_insn(&Insn::mov_rm_mem(true, Width::B16, 0, 0, 0));
                                 self.emit_insn(&Insn::mov_ext(false, Width::B16, Width::B64, 0, 0));
                             },
                             1 => {
                                 // movzx rax, byte [rax]
-                                let _ = self.emit_insn(&Insn::mov_ext_mem(false, Width::B8, Width::B64, 0, 0, 0));
+                                let _ = self.emit_insn(&Insn::mov_ext_mem(
+                                    false,
+                                    Width::B8,
+                                    Width::B64,
+                                    0,
+                                    0,
+                                    0,
+                                ));
                             },
                             _ => {},
                         }
                         // 保存容器值到帧临时槽2: [r13 + val_off]
                         self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 13, val_off as i32));
-                                                                       // 计算右值 (递增嵌套深度, 防止内部位域 RMW 覆盖本层帧槽)
+                        // 计算右值 (递增嵌套深度, 防止内部位域 RMW 覆盖本层帧槽)
                         self.bf_rmw_depth += 1;
                         self.gen_expr(r, Self::EVAL_BASE); // rax = 新值
                         self.bf_rmw_depth -= 1;
@@ -1338,11 +1523,20 @@ impl Codegen {
                             if mask <= 0xFFFFFFFF {
                                 // and eax, imm32 (REX.W 81 /4 id, 但 REX.W 不影响 imm32 形式；
                                 // 实际 x86-64: 48 25 id = and rax, sign-extended imm32 — 与 alu_rm_reg_imm32_b64 一致)
-                                let _ = self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0b100, 0, mask as i64));
+                                let _ = self.emit_insn(&Insn::alu_rm_reg_imm32_b64(
+                                    0b100,
+                                    0,
+                                    mask as i64,
+                                ));
                             } else {
                                 // >32 位掩码: movabs rdx, mask; and rax, rdx
                                 let _ = self.emit_insn(&Insn::movabs_reg_imm64(2, mask));
-                                let _ = self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::And, Width::B64, 0, 2));
+                                let _ = self.emit_insn(&Insn::alu_rm_reg_reg(
+                                    AluOp::And,
+                                    Width::B64,
+                                    0,
+                                    2,
+                                ));
                             }
                         }
                         // 左移到位置: shl rax, bit_off
@@ -1366,49 +1560,71 @@ impl Codegen {
                         // 重新从内存加载容器值 (RHS 求值可能已修改内存中的容器)
                         // rcx = [r13 + addr_off] (地址)
                         self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 1, 13, addr_off as i32)); // mov rcx, [r13+addr_off]
-                                                                        // rcx = [rcx] (从内存重新加载容器)
+                                                                                                     // rcx = [rcx] (从内存重新加载容器)
                         match container_size {
-                            4 => { let _ = self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B32,
-                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        1, crate::codegen::shared::asm_operand::Width::B32
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Mem(
-                        crate::codegen::x86_64::opcode::MemOperand {
-                            disp: 0,
-                            base: Some(1),
-                            index: None,
-                            seg: None,
-                        }
-                    ),
-                },
-                &[],
-            )); },       // mov ecx, [rcx]
-                            8 => { let _ = self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B64,
-                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        1, crate::codegen::shared::asm_operand::Width::B64
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Mem(
-                        crate::codegen::x86_64::opcode::MemOperand {
-                            disp: 0,
-                            base: Some(1),
-                            index: None,
-                            seg: None,
-                        }
-                    ),
-                },
-                &[],
-            )); }, // mov rcx, [rcx]
+                            4 => {
+                                let _ = self.emit_insn(&Insn::new(
+                                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                        rip_relative: false,
+                                        width: crate::codegen::shared::asm_operand::Width::B32,
+                                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            1,
+                                            crate::codegen::shared::asm_operand::Width::B32,
+                                        ),
+                                        src: crate::codegen::x86_64::opcode::Operand::Mem(
+                                            crate::codegen::x86_64::opcode::MemOperand {
+                                                disp: 0,
+                                                base: Some(1),
+                                                index: None,
+                                                seg: None,
+                                            },
+                                        ),
+                                    },
+                                    &[],
+                                ));
+                            }, // mov ecx, [rcx]
+                            8 => {
+                                let _ = self.emit_insn(&Insn::new(
+                                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                        rip_relative: false,
+                                        width: crate::codegen::shared::asm_operand::Width::B64,
+                                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            1,
+                                            crate::codegen::shared::asm_operand::Width::B64,
+                                        ),
+                                        src: crate::codegen::x86_64::opcode::Operand::Mem(
+                                            crate::codegen::x86_64::opcode::MemOperand {
+                                                disp: 0,
+                                                base: Some(1),
+                                                index: None,
+                                                seg: None,
+                                            },
+                                        ),
+                                    },
+                                    &[],
+                                ));
+                            }, // mov rcx, [rcx]
                             2 => {
                                 // movzx rcx, word [rcx]
-                                let _ = self.emit_insn(&Insn::mov_ext_mem(false, Width::B16, Width::B64, 1, 1, 0));
+                                let _ = self.emit_insn(&Insn::mov_ext_mem(
+                                    false,
+                                    Width::B16,
+                                    Width::B64,
+                                    1,
+                                    1,
+                                    0,
+                                ));
                             },
                             1 => {
                                 // movzx rcx, byte [rcx]
-                                let _ = self.emit_insn(&Insn::mov_ext_mem(false, Width::B8, Width::B64, 1, 1, 0));
+                                let _ = self.emit_insn(&Insn::mov_ext_mem(
+                                    false,
+                                    Width::B8,
+                                    Width::B64,
+                                    1,
+                                    1,
+                                    0,
+                                ));
                             },
                             _ => {},
                         }
@@ -1418,54 +1634,70 @@ impl Codegen {
                         // and rcx, inv_mask
                         if (inv_mask as u32 as i32 as i64 as u64) == inv_mask {
                             // 可以用 imm32 符号扩展
-                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 1, inv_mask as i64)); // and rcx, imm32
+                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 1, inv_mask as i64));
+                        // and rcx, imm32
                         } else {
                             // >32 位: movabs rdx, inv_mask; and rcx, rdx
                             let _ = self.emit_insn(&Insn::movabs_reg_imm64(2, inv_mask));
-                            let _ = self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::And, Width::B64, 1, 2));
+                            let _ =
+                                self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::And, Width::B64, 1, 2));
                         }
                         // or rcx, rax
                         let _ = self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::Or, Width::B64, 1, 0));
-                                                        // 加载地址: rdx = [r13 + addr_off]
+                        // 加载地址: rdx = [r13 + addr_off]
                         self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 2, 13, addr_off as i32)); // mov rdx, [r13+addr_off]
-                                                                        // 存储容器 (结果在 rcx 中)
+                                                                                                     // 存储容器 (结果在 rcx 中)
                         match container_size {
-                            4 => { let _ = self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B32,
-                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
-                        crate::codegen::x86_64::opcode::MemOperand {
-                            disp: 0,
-                            base: Some(2),
-                            index: None,
-                            seg: None,
-                        }
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Reg(
-                        1, crate::codegen::shared::asm_operand::Width::B32
-                    ),
-                },
-                &[],
-            )); },       // mov [rdx], ecx
-                            8 => { let _ = self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B64,
-                    dst: crate::codegen::x86_64::opcode::Operand::Mem(
-                        crate::codegen::x86_64::opcode::MemOperand {
-                            disp: 0,
-                            base: Some(2),
-                            index: None,
-                            seg: None,
-                        }
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Reg(
-                        1, crate::codegen::shared::asm_operand::Width::B64
-                    ),
-                },
-                &[],
-            )); }, // mov [rdx], rcx
-                            2 => { let _ = self.emit_insn(&Insn::mov_rm_mem(false, Width::B16, 1, 2, 0)); }, // mov [rdx], cx
-                            1 => { let _ = self.emit_insn(&Insn::mov_rm_mem(false, Width::B8, 1, 2, 0)); },      // mov [rdx], cl
+                            4 => {
+                                let _ = self.emit_insn(&Insn::new(
+                                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                        rip_relative: false,
+                                        width: crate::codegen::shared::asm_operand::Width::B32,
+                                        dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                                            crate::codegen::x86_64::opcode::MemOperand {
+                                                disp: 0,
+                                                base: Some(2),
+                                                index: None,
+                                                seg: None,
+                                            },
+                                        ),
+                                        src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            1,
+                                            crate::codegen::shared::asm_operand::Width::B32,
+                                        ),
+                                    },
+                                    &[],
+                                ));
+                            }, // mov [rdx], ecx
+                            8 => {
+                                let _ = self.emit_insn(&Insn::new(
+                                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                        rip_relative: false,
+                                        width: crate::codegen::shared::asm_operand::Width::B64,
+                                        dst: crate::codegen::x86_64::opcode::Operand::Mem(
+                                            crate::codegen::x86_64::opcode::MemOperand {
+                                                disp: 0,
+                                                base: Some(2),
+                                                index: None,
+                                                seg: None,
+                                            },
+                                        ),
+                                        src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            1,
+                                            crate::codegen::shared::asm_operand::Width::B64,
+                                        ),
+                                    },
+                                    &[],
+                                ));
+                            }, // mov [rdx], rcx
+                            2 => {
+                                let _ =
+                                    self.emit_insn(&Insn::mov_rm_mem(false, Width::B16, 1, 2, 0));
+                            }, // mov [rdx], cx
+                            1 => {
+                                let _ =
+                                    self.emit_insn(&Insn::mov_rm_mem(false, Width::B8, 1, 2, 0));
+                            }, // mov [rdx], cl
                             _ => {},
                         }
                         // 位域赋值表达式的结果 = 截断并符号扩展后的值 (C11 6.5.16p3)
@@ -1474,50 +1706,78 @@ impl Codegen {
                             let f = field_info.as_ref().unwrap();
                             let is_signed = Self::is_signed_int(&f.ty);
                             // rdx = [r13 + addr_off] (地址)
-                            self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 2, 13, addr_off as i32)); // mov rdx, [r13+addr_off]
-                                                            // rdx = [rdx] (重新加载容器)
+                            self.emit_insn(&Insn::mov_rm_mem(
+                                true,
+                                Width::B64,
+                                2,
+                                13,
+                                addr_off as i32,
+                            )); // mov rdx, [r13+addr_off]
+                                // rdx = [rdx] (重新加载容器)
                             match container_size {
-                                4 => { let _ = self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B32,
-                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        2, crate::codegen::shared::asm_operand::Width::B32
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Mem(
-                        crate::codegen::x86_64::opcode::MemOperand {
-                            disp: 0,
-                            base: Some(2),
-                            index: None,
-                            seg: None,
-                        }
-                    ),
-                },
-                &[],
-            )); },       // mov edx, [rdx]
-                                8 => { let _ = self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B64,
-                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        2, crate::codegen::shared::asm_operand::Width::B64
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Mem(
-                        crate::codegen::x86_64::opcode::MemOperand {
-                            disp: 0,
-                            base: Some(2),
-                            index: None,
-                            seg: None,
-                        }
-                    ),
-                },
-                &[],
-            )); }, // mov rdx, [rdx]
+                                4 => {
+                                    let _ = self.emit_insn(&Insn::new(
+                                        crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                            rip_relative: false,
+                                            width: crate::codegen::shared::asm_operand::Width::B32,
+                                            dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                                2,
+                                                crate::codegen::shared::asm_operand::Width::B32,
+                                            ),
+                                            src: crate::codegen::x86_64::opcode::Operand::Mem(
+                                                crate::codegen::x86_64::opcode::MemOperand {
+                                                    disp: 0,
+                                                    base: Some(2),
+                                                    index: None,
+                                                    seg: None,
+                                                },
+                                            ),
+                                        },
+                                        &[],
+                                    ));
+                                }, // mov edx, [rdx]
+                                8 => {
+                                    let _ = self.emit_insn(&Insn::new(
+                                        crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                            rip_relative: false,
+                                            width: crate::codegen::shared::asm_operand::Width::B64,
+                                            dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                                2,
+                                                crate::codegen::shared::asm_operand::Width::B64,
+                                            ),
+                                            src: crate::codegen::x86_64::opcode::Operand::Mem(
+                                                crate::codegen::x86_64::opcode::MemOperand {
+                                                    disp: 0,
+                                                    base: Some(2),
+                                                    index: None,
+                                                    seg: None,
+                                                },
+                                            ),
+                                        },
+                                        &[],
+                                    ));
+                                }, // mov rdx, [rdx]
                                 2 => {
                                     // movzx rdx, word [rdx]
-                                    let _ = self.emit_insn(&Insn::mov_ext_mem(false, Width::B16, Width::B64, 2, 2, 0));
+                                    let _ = self.emit_insn(&Insn::mov_ext_mem(
+                                        false,
+                                        Width::B16,
+                                        Width::B64,
+                                        2,
+                                        2,
+                                        0,
+                                    ));
                                 },
                                 1 => {
                                     // movzx rdx, byte [rdx]
-                                    let _ = self.emit_insn(&Insn::mov_ext_mem(false, Width::B8, Width::B64, 2, 2, 0));
+                                    let _ = self.emit_insn(&Insn::mov_ext_mem(
+                                        false,
+                                        Width::B8,
+                                        Width::B64,
+                                        2,
+                                        2,
+                                        0,
+                                    ));
                                 },
                                 _ => {},
                             }
@@ -1534,18 +1794,28 @@ impl Codegen {
                                     &[],
                                 );
                                 if !self.emit_insn(&insn) {
-                                    self.emit_insn(&Insn::shift_reg_imm8_c1_b64(5, 2, bit_off as u8));
+                                    self.emit_insn(&Insn::shift_reg_imm8_c1_b64(
+                                        5,
+                                        2,
+                                        bit_off as u8,
+                                    ));
                                 }
                             }
                             // mask to bw bits
                             if bw < 64 {
                                 let mask: u64 = (1u64 << bw) - 1;
                                 if mask <= 0xFFFFFFFF {
-                                    self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 2, mask as i64)); // and rdx, imm32
+                                    self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 2, mask as i64));
+                                // and rdx, imm32
                                 } else {
                                     // >32 位: movabs rax, mask; and rdx, rax
                                     let _ = self.emit_insn(&Insn::movabs_reg_imm64(0, mask));
-                                    let _ = self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::And, Width::B64, 2, 0));
+                                    let _ = self.emit_insn(&Insn::alu_rm_reg_reg(
+                                        AluOp::And,
+                                        Width::B64,
+                                        2,
+                                        0,
+                                    ));
                                 }
                             }
                             // sign-extend if signed bitfield
@@ -1613,7 +1883,21 @@ impl Codegen {
                                 // Lvalue RHS: get source address directly
                                 self.gen_lvalue_addr(r, Self::EVAL_BASE); // rax = source address
                                 self.pop(1); // rcx = target address
-                                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rsi, rax
+                                self.emit_insn(&Insn::new(
+                                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                        rip_relative: false,
+                                        width: crate::codegen::shared::asm_operand::Width::B64,
+                                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            6,
+                                            crate::codegen::shared::asm_operand::Width::B64,
+                                        ),
+                                        src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            0,
+                                            crate::codegen::shared::asm_operand::Width::B64,
+                                        ),
+                                    },
+                                    &[],
+                                )); // mov rsi, rax
                             } else if rhs_is_ident {
                                 // Ident RHS: struct variable address via LEA
                                 if let Expr::Ident { name, .. } = &**r {
@@ -1628,17 +1912,31 @@ impl Codegen {
                             } else if rhs_is_compound {
                                 self.gen_expr(r, Self::EVAL_BASE); // rax = compound lit temp address
                                 self.pop(1); // rcx = target address
-                                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(6, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rsi, rax
+                                self.emit_insn(&Insn::new(
+                                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                        rip_relative: false,
+                                        width: crate::codegen::shared::asm_operand::Width::B64,
+                                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            6,
+                                            crate::codegen::shared::asm_operand::Width::B64,
+                                        ),
+                                        src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            0,
+                                            crate::codegen::shared::asm_operand::Width::B64,
+                                        ),
+                                    },
+                                    &[],
+                                )); // mov rsi, rax
                             } else {
                                 // General RHS: evaluate, store rax:rdx to temp
                                 self.gen_expr(r, Self::EVAL_BASE);
                                 self.pop(1); // rcx = target address
-                                // 发射器自己的暂存对象：它属于「发射期才登记的晚分配」那一族
-                                // （与 `__compound_lit_*` / `__vmsize_*` 同口径），所以在本发射点
-                                // **显式** `register_var` 并给出真实类型，而不是去碰 `var_offset` 的
-                                // 规划命中路径。尺寸是 16 字节而不是 8：下面 `agg_sz > 8` 时还要写
-                                // `temp_off + 8`（rdx），旧写法按 `Type::Int` 懒注册一个槽，第二半就
-                                // 落在相邻对象的下半字节上。
+                                             // 发射器自己的暂存对象：它属于「发射期才登记的晚分配」那一族
+                                             // （与 `__compound_lit_*` / `__vmsize_*` 同口径），所以在本发射点
+                                             // **显式** `register_var` 并给出真实类型，而不是去碰 `var_offset` 的
+                                             // 规划命中路径。尺寸是 16 字节而不是 8：下面 `agg_sz > 8` 时还要写
+                                             // `temp_off + 8`（rdx），旧写法按 `Type::Int` 懒注册一个槽，第二半就
+                                             // 落在相邻对象的下半字节上。
                                 let temp_off = self.register_var("<agg_member_tmp>", &Type::Int128);
                                 self.store_stack(0, temp_off);
                                 if agg_sz > 8 {
@@ -1646,10 +1944,28 @@ impl Codegen {
                                 }
                                 self.emit_lea_r13(6, temp_off); // rsi = source
                             }
-                            self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rdi, rcx (dst)
-                            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
+                            self.emit_insn(&Insn::new(
+                                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                    rip_relative: false,
+                                    width: crate::codegen::shared::asm_operand::Width::B64,
+                                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                        7,
+                                        crate::codegen::shared::asm_operand::Width::B64,
+                                    ),
+                                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                        1,
+                                        crate::codegen::shared::asm_operand::Width::B64,
+                                    ),
+                                },
+                                &[],
+                            )); // mov rdi, rcx (dst)
+                            self.emit_insn(&Insn::noarg(
+                                crate::codegen::x86_64::opcode::NoArgOp::Cld,
+                            )); // cld
                             self.mov_imm(1, agg_sz as i128); // rcx = size (rep movsb counter)
-                            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
+                            self.emit_insn(&Insn::noarg(
+                                crate::codegen::x86_64::opcode::NoArgOp::RepMovsb,
+                            )); // rep movsb
                         } else {
                             self.push(0); // 保存目标地址
                             let size = field_info.as_ref().map_or(4, |f| f.ty.size());
@@ -1674,9 +1990,29 @@ impl Codegen {
                                         let isz = cinner.base.size();
                                         let result_off = self.complex_result_off();
                                         self.emit_lea_r13(6, result_off); // rsi
-                                        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(7, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rdi, rcx
+                                        self.emit_insn(&Insn::new(
+                                            crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                                rip_relative: false,
+                                                width:
+                                                    crate::codegen::shared::asm_operand::Width::B64,
+                                                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                                    7,
+                                                    crate::codegen::shared::asm_operand::Width::B64,
+                                                ),
+                                                src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                                    1,
+                                                    crate::codegen::shared::asm_operand::Width::B64,
+                                                ),
+                                            },
+                                            &[],
+                                        )); // mov rdi, rcx
                                         self.mov_imm(1, (isz * 2) as i128);
-                                        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // cld; rep movsb
+                                        self.emit_insn(&Insn::noarg(
+                                            crate::codegen::x86_64::opcode::NoArgOp::Cld,
+                                        ));
+                                        self.emit_insn(&Insn::noarg(
+                                            crate::codegen::x86_64::opcode::NoArgOp::RepMovsb,
+                                        )); // cld; rep movsb
                                     } else if matches!(
                                         fty,
                                         Type::Float | Type::Double | Type::LongDouble
@@ -1687,25 +2023,63 @@ impl Codegen {
                                     } else {
                                         self.emit_seg(self.lvalue_seg_prefix(lv));
                                         // mov [rcx], rax/eax/ax/al sized by `size`
-                                        let w = match size { 1 => Width::B8, 2 => Width::B16, 4 => Width::B32, 8 => Width::B64, _ => Width::B64 };
+                                        let w = match size {
+                                            1 => Width::B8,
+                                            2 => Width::B16,
+                                            4 => Width::B32,
+                                            8 => Width::B64,
+                                            _ => Width::B64,
+                                        };
                                         if size <= 8 {
-                                            let _ = self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
+                                            let _ = self
+                                                .emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
                                         } else if size == 16 {
                                             // __int128: rax:rdx → [rcx]:[rcx+8]
-                                            let _ = self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 1, 0));
+                                            let _ = self.emit_insn(&Insn::mov_rm_mem(
+                                                false,
+                                                Width::B64,
+                                                0,
+                                                1,
+                                                0,
+                                            ));
                                             self.emit_seg(self.lvalue_seg_prefix(lv));
-                                            let _ = self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 2, 1, 8));
+                                            let _ = self.emit_insn(&Insn::mov_rm_mem(
+                                                false,
+                                                Width::B64,
+                                                2,
+                                                1,
+                                                8,
+                                            ));
                                         }
                                     }
                                 } else {
                                     self.emit_seg(self.lvalue_seg_prefix(lv));
-                                    let w = match size { 1 => Width::B8, 2 => Width::B16, 4 => Width::B32, 8 => Width::B64, _ => Width::B64 };
+                                    let w = match size {
+                                        1 => Width::B8,
+                                        2 => Width::B16,
+                                        4 => Width::B32,
+                                        8 => Width::B64,
+                                        _ => Width::B64,
+                                    };
                                     if size <= 8 {
-                                        let _ = self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
+                                        let _ =
+                                            self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
                                     } else if size == 16 {
-                                        let _ = self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 1, 0));
+                                        let _ = self.emit_insn(&Insn::mov_rm_mem(
+                                            false,
+                                            Width::B64,
+                                            0,
+                                            1,
+                                            0,
+                                        ));
                                         self.emit_seg(self.lvalue_seg_prefix(lv));
-                                        let _ = self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 2, 1, 8));
+                                        let _ = self.emit_insn(&Insn::mov_rm_mem(
+                                            false,
+                                            Width::B64,
+                                            2,
+                                            1,
+                                            8,
+                                        ));
                                     }
                                 }
                             }
@@ -1744,15 +2118,31 @@ impl Codegen {
                             self.emit_x87_fstp_at(1, part_off as i32, &inner);
                         } else if is_float_inner {
                             self.emit_scalar_to_xmm0_if_needed(r, &inner);
-                            let swidth = if matches!(inner, Type::Float) { SimdWidth::SS } else { SimdWidth::SD };
-                            self.emit_insn(&Insn::simd_mov_mem_base(true, swidth, 0, 1, part_off as i32)); // movss/movsd [rcx+disp], xmm0
+                            let swidth = if matches!(inner, Type::Float) {
+                                SimdWidth::SS
+                            } else {
+                                SimdWidth::SD
+                            };
+                            self.emit_insn(&Insn::simd_mov_mem_base(
+                                true,
+                                swidth,
+                                0,
+                                1,
+                                part_off as i32,
+                            )); // movss/movsd [rcx+disp], xmm0
                         } else {
                             // 整数分量: 值在 rax, 按内型宽度存储
                             if part_off != 0 {
-                                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 1, part_off as i64)); // add rcx, imm32
+                                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 1, part_off as i64));
+                                // add rcx, imm32
                             }
                             // mov [rcx], al/ax/eax/rax sized by inner.size()
-                            let w = match inner.size() { 1 => Width::B8, 2 => Width::B16, 4 => Width::B32, _ => Width::B64 };
+                            let w = match inner.size() {
+                                1 => Width::B8,
+                                2 => Width::B16,
+                                4 => Width::B32,
+                                _ => Width::B64,
+                            };
                             let _ = self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
                         }
                     } else {
@@ -1790,12 +2180,22 @@ impl Codegen {
                                     self.pop(1); // rcx = 目标地址
                                     self.emit_scalar_to_xmm0_if_needed(r, &inner.base);
                                     let inner_sz = inner.size() as i64;
-                                    let swidth = if matches!(inner.base, Type::Float) { crate::codegen::x86_64::opcode::SimdWidth::SS } else { crate::codegen::x86_64::opcode::SimdWidth::SD };
+                                    let swidth = if matches!(inner.base, Type::Float) {
+                                        crate::codegen::x86_64::opcode::SimdWidth::SS
+                                    } else {
+                                        crate::codegen::x86_64::opcode::SimdWidth::SD
+                                    };
                                     // 实部 → [rcx]
                                     self.emit_insn(&Insn::simd_mov_mem_base(true, swidth, 0, 1, 0));
                                     // 虚部 → xmm0 → [rcx+inner_sz]
                                     self.gen_complex_imag_into_xmm0(r, &inner.base);
-                                    self.emit_insn(&Insn::simd_mov_mem_base(true, swidth, 0, 1, inner_sz as i32));
+                                    self.emit_insn(&Insn::simd_mov_mem_base(
+                                        true,
+                                        swidth,
+                                        0,
+                                        1,
+                                        inner_sz as i32,
+                                    ));
                                     return;
                                 } else {
                                     // 无法取地址: 仅求值 RHS
@@ -1814,9 +2214,13 @@ impl Codegen {
                             let src_off = self.complex_result_off();
                             self.emit_lea_r13(6, src_off); // rsi = src
                             self.pop(7); // rdi = dst
-                            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); // cld
+                            self.emit_insn(&Insn::noarg(
+                                crate::codegen::x86_64::opcode::NoArgOp::Cld,
+                            )); // cld
                             self.mov_imm(2, assign_sz as i128); // rcx = size
-                            self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb
+                            self.emit_insn(&Insn::noarg(
+                                crate::codegen::x86_64::opcode::NoArgOp::RepMovsb,
+                            )); // rep movsb
                         } else {
                             self.gen_expr(r, Self::EVAL_BASE);
                         }
@@ -1829,7 +2233,12 @@ impl Codegen {
                         // 单一真源：收浮影子副本
                         } else {
                             // mov [rcx], al/ax/eax/rax sized by assign_sz
-                            let w = match assign_sz { 1 => Width::B8, 2 => Width::B16, 4 => Width::B32, _ => Width::B64 };
+                            let w = match assign_sz {
+                                1 => Width::B8,
+                                2 => Width::B16,
+                                4 => Width::B32,
+                                _ => Width::B64,
+                            };
                             let _ = self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
                         }
                     } else {
@@ -1855,8 +2264,12 @@ impl Codegen {
                     self.gen_expr(e, Self::EVAL_BASE);
                     match op {
                         UnOp::Neg => {
-                            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 0)); // neg rax
-                            // P11: adc rdx, 0 via AluRm typed (imm=0 fits i8).
+                            self.emit_insn(&Insn::unary_rm_reg(
+                                crate::codegen::x86_64::opcode::UnaryOp::Neg,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                0,
+                            )); // neg rax
+                                // P11: adc rdx, 0 via AluRm typed (imm=0 fits i8).
                             let insn_adc = Insn::new(
                                 X86_64Opcode::AluRm {
                                     op: AluOp::Adc,
@@ -1867,13 +2280,26 @@ impl Codegen {
                                 &[],
                             );
                             if !self.emit_insn(&insn_adc) {
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xD2, 0x00])); // adc rdx, 0
+                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x83, 0xD2, 0x00]));
+                                // adc rdx, 0
                             }
-                            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 2)); // neg rdx
+                            self.emit_insn(&Insn::unary_rm_reg(
+                                crate::codegen::x86_64::opcode::UnaryOp::Neg,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                2,
+                            )); // neg rdx
                         },
                         UnOp::BitNot => {
-                            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Not, crate::codegen::shared::asm_operand::Width::B64, 0)); // not rax
-                            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Not, crate::codegen::shared::asm_operand::Width::B64, 2)); // not rdx
+                            self.emit_insn(&Insn::unary_rm_reg(
+                                crate::codegen::x86_64::opcode::UnaryOp::Not,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                0,
+                            )); // not rax
+                            self.emit_insn(&Insn::unary_rm_reg(
+                                crate::codegen::x86_64::opcode::UnaryOp::Not,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                2,
+                            )); // not rdx
                         },
                         UnOp::Not => {
                             // P11: or rax, rdx via typed opcode.
@@ -1888,12 +2314,27 @@ impl Codegen {
                                     &[],
                                 );
                                 if !self.emit_insn(&insn) {
-                                    self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Or, crate::codegen::shared::asm_operand::Width::B64, 0, 2)); // or rax, rdx
+                                    self.emit_insn(&Insn::alu_rm_reg_reg(
+                                        crate::codegen::x86_64::opcode::AluOp::Or,
+                                        crate::codegen::shared::asm_operand::Width::B64,
+                                        0,
+                                        2,
+                                    )); // or rax, rdx
                                 }
                             }
-                            self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 0, 0)); // test rax, rax
-                            self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Eq, 0)); // sete al
-                            self.emit_insn(&Insn::mov_ext(false, Width::B8, Width::B64, 0, 0).with_gas("movzbq %al, %rax".to_string()));
+                            self.emit_insn(&Insn::test_rm_reg(
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                0,
+                                0,
+                            )); // test rax, rax
+                            self.emit_insn(&Insn::setcc_reg(
+                                crate::codegen::x86_64::opcode::CondCode::Eq,
+                                0,
+                            )); // sete al
+                            self.emit_insn(
+                                &Insn::mov_ext(false, Width::B8, Width::B64, 0, 0)
+                                    .with_gas("movzbq %al, %rax".to_string()),
+                            );
                             // P11: xor rdx, rdx via typed opcode (high = 0).
                             {
                                 let insn = Insn::new(
@@ -1906,7 +2347,21 @@ impl Codegen {
                                     &[],
                                 );
                                 if !self.emit_insn(&insn) {
-                                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Xor, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // high = 0
+                                    self.emit_insn(&Insn::new(
+                                        crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                                            op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                                            width: crate::codegen::shared::asm_operand::Width::B64,
+                                            dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                                2,
+                                                crate::codegen::shared::asm_operand::Width::B64,
+                                            ),
+                                            src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                                2,
+                                                crate::codegen::shared::asm_operand::Width::B64,
+                                            ),
+                                        },
+                                        &[],
+                                    )); // high = 0
                                 }
                             }
                         },
@@ -1941,24 +2396,62 @@ impl Codegen {
                                 // 翻转 32 位符号位: movabs rax, 0x8000_0000
                                 //   66 48 0f 6e c8 movq xmm1, rax
                                 //   0f 57 c1       xorps xmm0, xmm1
-                                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                                    width: crate::codegen::shared::asm_operand::Width::B64,
-                                    dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
-                                    src: crate::codegen::x86_64::opcode::Operand::Imm(0x80000000u64 as i64),
-                                }, &[]));
-                                self.emit_insn(&Insn::gpr_xmm(true, crate::codegen::shared::asm_operand::Width::B64, 0, 1));
-                                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorps, SimdWidth::PS, 0, 1));
+                                self.emit_insn(&Insn::new(
+                                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                        rip_relative: false,
+                                        width: crate::codegen::shared::asm_operand::Width::B64,
+                                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            0,
+                                            crate::codegen::shared::asm_operand::Width::B64,
+                                        ),
+                                        src: crate::codegen::x86_64::opcode::Operand::Imm(
+                                            0x80000000u64 as i64,
+                                        ),
+                                    },
+                                    &[],
+                                ));
+                                self.emit_insn(&Insn::gpr_xmm(
+                                    true,
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                    0,
+                                    1,
+                                ));
+                                self.emit_insn(&Insn::simd_arith_reg(
+                                    SimdArithOp::Xorps,
+                                    SimdWidth::PS,
+                                    0,
+                                    1,
+                                ));
                             },
                             _ => {
                                 // 翻转 64 位符号位（double，以及 -mno-sse 下
                                 // 担心遗漏的兼容分支已由上方 st(0) 接走）
-                                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                                    width: crate::codegen::shared::asm_operand::Width::B64,
-                                    dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
-                                    src: crate::codegen::x86_64::opcode::Operand::Imm(0x8000000000000000u64 as i64),
-                                }, &[]));
-                                self.emit_insn(&Insn::gpr_xmm(true, crate::codegen::shared::asm_operand::Width::B64, 0, 1));
-                                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Xorpd, SimdWidth::PD, 0, 1));
+                                self.emit_insn(&Insn::new(
+                                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                        rip_relative: false,
+                                        width: crate::codegen::shared::asm_operand::Width::B64,
+                                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            0,
+                                            crate::codegen::shared::asm_operand::Width::B64,
+                                        ),
+                                        src: crate::codegen::x86_64::opcode::Operand::Imm(
+                                            0x8000000000000000u64 as i64,
+                                        ),
+                                    },
+                                    &[],
+                                ));
+                                self.emit_insn(&Insn::gpr_xmm(
+                                    true,
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                    0,
+                                    1,
+                                ));
+                                self.emit_insn(&Insn::simd_arith_reg(
+                                    SimdArithOp::Xorpd,
+                                    SimdWidth::PD,
+                                    0,
+                                    1,
+                                ));
                             },
                         }
                     }
@@ -1999,15 +2492,39 @@ impl Codegen {
                     if self.gen_lvalue_addr(e, Self::EVAL_BASE) {
                         // lvalue (变量/字段/下标): 用 rcx 保存地址 (flip_sign_xmm
                         // 会破坏 rax 但不动 rcx), 逐分量加载/flip/store
-                        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax
+                        self.emit_insn(&Insn::new(
+                            crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                rip_relative: false,
+                                width: crate::codegen::shared::asm_operand::Width::B64,
+                                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                    1,
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                ),
+                                src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                    0,
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                ),
+                            },
+                            &[],
+                        )); // mov rcx, rax
                         let imag_off = inner_sz; // 变量内存虚部槽 (连续布局)
-                        let swidth = if matches!(inner, Type::Float) { SimdWidth::SS } else { SimdWidth::SD };
+                        let swidth = if matches!(inner, Type::Float) {
+                            SimdWidth::SS
+                        } else {
+                            SimdWidth::SD
+                        };
                         // 实部: [rcx] → xmm0 → flip → [result_off]
                         self.emit_insn(&Insn::simd_mov_mem_base(false, swidth, 0, 1, 0)); // movss/movsd xmm0, [rcx]
                         self.flip_sign_xmm(0, &inner);
                         self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
                         // 虚部: [rcx+off] → xmm0 → flip → [result_off+inner_sz]
-                        self.emit_insn(&Insn::simd_mov_mem_base(false, swidth, 0, 1, imag_off as i32));
+                        self.emit_insn(&Insn::simd_mov_mem_base(
+                            false,
+                            swidth,
+                            0,
+                            1,
+                            imag_off as i32,
+                        ));
                         self.flip_sign_xmm(0, &inner);
                         self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
                     } else {
@@ -2017,10 +2534,15 @@ impl Codegen {
                             // SSE 返回: 虚部在 xmm1, 物化到临时区
                             self.emit_insn(&Insn::raw_bytes(&[pfx, 0x41, 0x0F, 0x11]));
                             if (result_off + inner_sz).abs() < 128 {
-                                self.emit_insn(&Insn::raw_bytes(&[0x4D, (result_off + inner_sz) as u8]));
+                                self.emit_insn(&Insn::raw_bytes(&[
+                                    0x4D,
+                                    (result_off + inner_sz) as u8,
+                                ]));
                             } else {
                                 self.emit_insn(&Insn::raw_bytes(&[0x8D]));
-                                self.emit_insn(&Insn::raw_bytes(&((result_off + inner_sz) as i32).to_le_bytes()));
+                                self.emit_insn(&Insn::raw_bytes(
+                                    &((result_off + inner_sz) as i32).to_le_bytes(),
+                                ));
                             }
                         }
                         // 实部翻转符号位并写回临时区
@@ -2067,14 +2589,38 @@ impl Codegen {
                     if matches!(inner, Type::Float | Type::Double | Type::LongDouble) {
                         let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                         if self.gen_lvalue_addr(e, Self::EVAL_BASE) {
-                            self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax
+                            self.emit_insn(&Insn::new(
+                                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                    rip_relative: false,
+                                    width: crate::codegen::shared::asm_operand::Width::B64,
+                                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                        1,
+                                        crate::codegen::shared::asm_operand::Width::B64,
+                                    ),
+                                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                        0,
+                                        crate::codegen::shared::asm_operand::Width::B64,
+                                    ),
+                                },
+                                &[],
+                            )); // mov rcx, rax
                             let imag_off = inner_sz;
-                            let swidth = if matches!(inner, Type::Float) { SimdWidth::SS } else { SimdWidth::SD };
+                            let swidth = if matches!(inner, Type::Float) {
+                                SimdWidth::SS
+                            } else {
+                                SimdWidth::SD
+                            };
                             // 实部: [rcx] → xmm0 → [result_off] (不变)
                             self.emit_insn(&Insn::simd_mov_mem_base(false, swidth, 0, 1, 0)); // movss/movsd xmm0, [rcx]
                             self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
                             // 虚部: [rcx+off] → xmm0 → flip → [result_off+inner_sz]
-                            self.emit_insn(&Insn::simd_mov_mem_base(false, swidth, 0, 1, imag_off as i32));
+                            self.emit_insn(&Insn::simd_mov_mem_base(
+                                false,
+                                swidth,
+                                0,
+                                1,
+                                imag_off as i32,
+                            ));
                             self.flip_sign_xmm(0, &inner);
                             self.emit_xmm0_r13_disp(
                                 &[pfx, 0x41, 0x0F, 0x11],
@@ -2111,7 +2657,10 @@ impl Codegen {
                         self.mov(6, 0); // rsi = &src
                         self.emit_lea_r13(7, result_off); // rdi = r13+result_off
                         self.mov_imm(1, (inner_sz * 2) as i128);
-                        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // cld; rep movsb
+                        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld));
+                        self.emit_insn(&Insn::noarg(
+                            crate::codegen::x86_64::opcode::NoArgOp::RepMovsb,
+                        )); // cld; rep movsb
                     } else {
                         self.gen_expr(e, Self::EVAL_BASE);
                         // rvalue 已按统一约定物化到 result_off (rax=地址);
@@ -2122,22 +2671,38 @@ impl Codegen {
                     match inner_sz {
                         8 => {
                             self.load_stack(0, result_off + 8);
-                            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, 0)); // neg rax
+                            self.emit_insn(&Insn::unary_rm_reg(
+                                crate::codegen::x86_64::opcode::UnaryOp::Neg,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                0,
+                            )); // neg rax
                             self.store_stack(0, result_off + 8);
                         },
                         4 => {
                             self.load_stack(0, result_off + 4);
-                            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B32, 0)); // neg eax
+                            self.emit_insn(&Insn::unary_rm_reg(
+                                crate::codegen::x86_64::opcode::UnaryOp::Neg,
+                                crate::codegen::shared::asm_operand::Width::B32,
+                                0,
+                            )); // neg eax
                             self.emit_store(0, result_off + 4, 4);
                         },
                         2 => {
                             self.load_stack(0, result_off + 2);
-                            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B16, 0)); // neg ax
+                            self.emit_insn(&Insn::unary_rm_reg(
+                                crate::codegen::x86_64::opcode::UnaryOp::Neg,
+                                crate::codegen::shared::asm_operand::Width::B16,
+                                0,
+                            )); // neg ax
                             self.emit_store(0, result_off + 2, 2);
                         },
                         _ => {
                             self.load_stack(0, result_off + 1);
-                            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B8, 0)); // neg al
+                            self.emit_insn(&Insn::unary_rm_reg(
+                                crate::codegen::x86_64::opcode::UnaryOp::Neg,
+                                crate::codegen::shared::asm_operand::Width::B8,
+                                0,
+                            )); // neg al
                             self.emit_store(0, result_off + 1, 1);
                         },
                     }
@@ -2171,13 +2736,16 @@ impl Codegen {
                         let use_32bit_neg = ty_size == 4 && is_signed && self.trapv;
                         if ty_size >= 8 || (ty_size >= 4 && is_signed && !use_32bit_neg) {
                             // 64-bit neg: REX.W neg
-                            let _ = self.emit_insn(&Insn::unary_rm_reg(UnaryOp::Neg, Width::B64, dst));
+                            let _ =
+                                self.emit_insn(&Insn::unary_rm_reg(UnaryOp::Neg, Width::B64, dst));
                         } else if use_32bit_neg {
                             // 32-bit neg for trapv: 检测 32 位溢出
-                            let _ = self.emit_insn(&Insn::unary_rm_reg(UnaryOp::Neg, Width::B32, dst));
+                            let _ =
+                                self.emit_insn(&Insn::unary_rm_reg(UnaryOp::Neg, Width::B32, dst));
                         } else {
                             // 32 位无符号: REX 前缀无 .W
-                            let _ = self.emit_insn(&Insn::unary_rm_reg(UnaryOp::Neg, Width::B32, dst));
+                            let _ =
+                                self.emit_insn(&Insn::unary_rm_reg(UnaryOp::Neg, Width::B32, dst));
                         }
                         // -ftrapv: 有符号取负溢出检查 (e.g. -INT_MIN)
                         // neg 在操作数为类型最小值时置 OF=1
@@ -2197,23 +2765,38 @@ impl Codegen {
                             if e.ty().size() == 4 {
                                 use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
                                 use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
-                                let gas = format!("movsxd {}, {}", GAS_REG32[(dst & 15) as usize], GAS_REG64[(dst & 15) as usize]);
-                                let _ = self.emit_insn(&Insn::mov_ext(true, Width::B32, Width::B64, dst, dst).with_gas(gas));
+                                let gas = format!(
+                                    "movsxd {}, {}",
+                                    GAS_REG32[(dst & 15) as usize],
+                                    GAS_REG64[(dst & 15) as usize]
+                                );
+                                let _ = self.emit_insn(
+                                    &Insn::mov_ext(true, Width::B32, Width::B64, dst, dst)
+                                        .with_gas(gas),
+                                );
                             }
                         }
                     },
                     UnOp::Not => {
                         // 逻辑非: !x = (x == 0) ? 1 : 0
                         // test dst, dst (reflexive B64)
-                        let test_reg = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, 64)
-                            .unwrap_or_else(|| "%rax".to_string());
+                        let test_reg =
+                            crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, 64)
+                                .unwrap_or_else(|| "%rax".to_string());
                         let test_gas = format!("test {}, {}", test_reg, test_reg);
-                        let _ = self.emit_insn(&Insn::test_rm_reg(Width::B64, dst, dst).with_gas(test_gas));
+                        let _ = self
+                            .emit_insn(&Insn::test_rm_reg(Width::B64, dst, dst).with_gas(test_gas));
                         // sete al: 零 → 1, 非零 → 0 (0F 94 C0)
-                        self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Eq, 0));
+                        self.emit_insn(&Insn::setcc_reg(
+                            crate::codegen::x86_64::opcode::CondCode::Eq,
+                            0,
+                        ));
                         // movzx dst, al (0F B6 /r: reg=dst, r/m=al=0)
                         let movzbq_gas = format!("movzbq %al, {}", test_reg);
-                        let _ = self.emit_insn(&Insn::mov_ext(false, Width::B8, Width::B64, dst, 0).with_gas(movzbq_gas));
+                        let _ = self.emit_insn(
+                            &Insn::mov_ext(false, Width::B8, Width::B64, dst, 0)
+                                .with_gas(movzbq_gas),
+                        );
                     },
                     UnOp::BitNot => {
                         let _ = self.emit_insn(&Insn::unary_rm_reg(UnaryOp::Not, Width::B64, dst));
@@ -2234,13 +2817,26 @@ impl Codegen {
                                 // movsxd dst, dst (sign-extend 32→64)
                                 use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
                                 use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
-                                let gas = format!("movsxd {}, {}", GAS_REG32[(dst & 15) as usize], GAS_REG64[(dst & 15) as usize]);
-                                let _ = self.emit_insn(&Insn::mov_ext(true, Width::B32, Width::B64, dst, dst).with_gas(gas));
+                                let gas = format!(
+                                    "movsxd {}, {}",
+                                    GAS_REG32[(dst & 15) as usize],
+                                    GAS_REG64[(dst & 15) as usize]
+                                );
+                                let _ = self.emit_insn(
+                                    &Insn::mov_ext(true, Width::B32, Width::B64, dst, dst)
+                                        .with_gas(gas),
+                                );
                             } else {
                                 // mov dst32, dst32 (zero-extend 32→64)
                                 use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
-                                let gas = format!("mov {}, {}", GAS_REG32[(dst & 15) as usize], GAS_REG32[(dst & 15) as usize]);
-                                let _ = self.emit_insn(&Insn::mov_rm_reg(Width::B32, dst, dst).with_gas(gas));
+                                let gas = format!(
+                                    "mov {}, {}",
+                                    GAS_REG32[(dst & 15) as usize],
+                                    GAS_REG32[(dst & 15) as usize]
+                                );
+                                let _ = self.emit_insn(
+                                    &Insn::mov_rm_reg(Width::B32, dst, dst).with_gas(gas),
+                                );
                             }
                         } else if result_sz < 8 {
                             unreachable!()
@@ -2335,11 +2931,18 @@ impl Codegen {
                                 // movslq %ecx, %rcx: 48 63 C9
                                 let insn = Insn::new(
                                     X86_64Opcode::MovExt {
+                                        rip_relative: false,
                                         sign: true,
                                         from: crate::codegen::shared::asm_operand::Width::B32,
                                         to: crate::codegen::shared::asm_operand::Width::B64,
-                                        dst: OpcodeOperand::Reg(1, crate::codegen::shared::asm_operand::Width::B64),
-                                        src: OpcodeOperand::Reg(1, crate::codegen::shared::asm_operand::Width::B32),
+                                        dst: OpcodeOperand::Reg(
+                                            1,
+                                            crate::codegen::shared::asm_operand::Width::B64,
+                                        ),
+                                        src: OpcodeOperand::Reg(
+                                            1,
+                                            crate::codegen::shared::asm_operand::Width::B32,
+                                        ),
                                     },
                                     &[],
                                 );
@@ -2368,7 +2971,9 @@ impl Codegen {
                                             &[],
                                         );
                                         if !self.emit_insn(&insn) {
-                                            self.emit_insn(&Insn::shift_reg_imm8_c1_b64(4, 1, shift));
+                                            self.emit_insn(&Insn::shift_reg_imm8_c1_b64(
+                                                4, 1, shift,
+                                            ));
                                         }
                                     } else {
                                         self.imul_imm(1, stride as i128); // imul rcx, rcx, stride
@@ -2423,9 +3028,23 @@ impl Codegen {
                 // 使用 LEA dst, [RIP + disp32] + label_addr_refs 延迟解析
                 // 前缀标签名以避免与函数符号名冲突
                 let label_name = self.c_label_to_asm(&label.name);
-                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-                let modrm = 0x05 | ((dst & 7) << 3);
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x8D, modrm, 0, 0, 0, 0]));
+                // P11: LEA dst, [rip+disp32] via typed Lea RIP-relative (encoder 字节等价).
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::Lea {
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            dst,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
+                        mem: crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: None,
+                            index: None,
+                            seg: None,
+                        },
+                        rip_relative: true,
+                    },
+                    &[],
+                ));
                 let disp32_pos = self.pos() - 4;
                 self.label_addr_refs.push((disp32_pos, label_name));
             },
@@ -2481,7 +3100,8 @@ impl Codegen {
                             // 不会报错，只会把变量留在两处都不认的状态里。
                             self.bind_decl_home(v);
                             if let Some(ref fn_name) = v.cleanup_fn {
-                                self.cleanup_vars.push((v.name.name.clone(), fn_name.clone()));
+                                self.cleanup_vars
+                                    .push((v.name.name.clone(), fn_name.clone()));
                             }
                             self.register_var(&v.name.name, &v.ty);
                             // 定义+声明一体的 struct/union 类型绑定 +
@@ -2571,10 +3191,23 @@ impl Codegen {
                 }
                 let at = self.pos();
                 // LEA dst, [RIP + disp32]  (7 bytes, disp32 = placeholder 0)
-                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-                use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
-                let gas = format!("lea 0(%rip), {}", GAS_REG64[(dst & 15) as usize]);
-                self.emit_insn(&Insn::raw_with_gas(&[rex, 0x8D, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0], &gas));
+                // P11: typed Lea RIP-relative (encoder 字节等价).
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::Lea {
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            dst,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
+                        mem: crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: None,
+                            index: None,
+                            seg: None,
+                        },
+                        rip_relative: true,
+                    },
+                    &[],
+                ));
                 self.string_refs.push((at, data));
             },
             Expr::Float { c, ty, .. } => {
@@ -2645,9 +3278,13 @@ impl Codegen {
                         let off = self.stack_home_off(&name.name);
                         // REX.W + REX.B (r13) + REX.R (当 dst >= 8, 编码 r10/r11/r12/...)
                         let rex = 0x48u8 | 0x01 | (if dst >= 8 { 0x04 } else { 0 });
-                        use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
                         use crate::codegen::x86_64::emit::gas::mem_disp as gas_mem_disp;
-                        let gas = format!("lea {}, {}", gas_mem_disp(13, off), GAS_REG64[(dst & 15) as usize]);
+                        use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
+                        let gas = format!(
+                            "lea {}, {}",
+                            gas_mem_disp(13, off),
+                            GAS_REG64[(dst & 15) as usize]
+                        );
                         let mut bytes = vec![rex, 0x8D];
                         if off.abs() < 128 {
                             bytes.push(0x45 | ((dst & 7) << 3));
@@ -2701,8 +3338,11 @@ impl Codegen {
                         let field_off = f.offset as i32;
                         if field_off != 0 {
                             use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
-                            let gas = format!("add ${}, {}", field_off, GAS_REG64[(dst & 15) as usize]);
-                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64_full_gas(0, dst, field_off, &gas));
+                            let gas =
+                                format!("add ${}, {}", field_off, GAS_REG64[(dst & 15) as usize]);
+                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64_full_gas(
+                                0, dst, field_off, &gas,
+                            ));
                         }
                     }
                 } else if let Expr::Deref { e: inner, .. } = e.as_ref() {
@@ -2757,7 +3397,10 @@ impl Codegen {
                     self.gen_expr(idx, 1);
                     self.pop(0);
                     self.emit_index_scale(es, arr, elem_ty);
-                    self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::Add, Width::B64, 0, 1).with_gas("add %rcx, %rax".to_string())); // add rax, rcx
+                    self.emit_insn(
+                        &Insn::alu_rm_reg_reg(AluOp::Add, Width::B64, 0, 1)
+                            .with_gas("add %rcx, %rax".to_string()),
+                    ); // add rax, rcx
                     if dst != 0 {
                         self.mov(dst, 0);
                     }
@@ -2798,7 +3441,12 @@ impl Codegen {
                     if inner_sz != 0 {
                         use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
                         let gas = format!("add ${}, {}", inner_sz, GAS_REG64[(dst & 15) as usize]);
-                        self.emit_insn(&Insn::alu_rm_reg_imm32_b64_full_gas(0, dst, inner_sz as i32, &gas));
+                        self.emit_insn(&Insn::alu_rm_reg_imm32_b64_full_gas(
+                            0,
+                            dst,
+                            inner_sz as i32,
+                            &gas,
+                        ));
                     }
                 }
             },

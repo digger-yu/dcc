@@ -62,62 +62,91 @@ impl Codegen {
                 match sz {
                     1 => {
                         // P11: movzx eax, byte [rax] via MovExt mem typed.
-                        self.emit_insn(&Insn::mov_ext_mem(false, crate::codegen::shared::asm_operand::Width::B8, crate::codegen::shared::asm_operand::Width::B32, 0, 0, 0));
+                        self.emit_insn(&Insn::mov_ext_mem(
+                            false,
+                            crate::codegen::shared::asm_operand::Width::B8,
+                            crate::codegen::shared::asm_operand::Width::B32,
+                            0,
+                            0,
+                            0,
+                        ));
                     },
                     2 => {
                         // P11: movzx eax, word [rax] via MovExt mem typed.
-                        self.emit_insn(&Insn::mov_ext_mem(false, crate::codegen::shared::asm_operand::Width::B16, crate::codegen::shared::asm_operand::Width::B32, 0, 0, 0));
+                        self.emit_insn(&Insn::mov_ext_mem(
+                            false,
+                            crate::codegen::shared::asm_operand::Width::B16,
+                            crate::codegen::shared::asm_operand::Width::B32,
+                            0,
+                            0,
+                            0,
+                        ));
                     },
                     4 => {
                         // mov eax, dword [rax] (自动 zero-extend 到 64 位)
                         self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B32,
-                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        0, crate::codegen::shared::asm_operand::Width::B32
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Mem(
-                        crate::codegen::x86_64::opcode::MemOperand {
-                            disp: 0, base: Some(0), index: None, seg: None,
-                        }
-                    ),
-                },
-                &[],
-            ));
+                            crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                rip_relative: false,
+                                width: crate::codegen::shared::asm_operand::Width::B32,
+                                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                    0,
+                                    crate::codegen::shared::asm_operand::Width::B32,
+                                ),
+                                src: crate::codegen::x86_64::opcode::Operand::Mem(
+                                    crate::codegen::x86_64::opcode::MemOperand {
+                                        disp: 0,
+                                        base: Some(0),
+                                        index: None,
+                                        seg: None,
+                                    },
+                                ),
+                            },
+                            &[],
+                        ));
                     },
                     8 => {
                         // mov rax, qword [rax] (64 位无 truncation)
                         self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B64,
-                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        0, crate::codegen::shared::asm_operand::Width::B64
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Mem(
-                        crate::codegen::x86_64::opcode::MemOperand {
-                            disp: 0, base: Some(0), index: None, seg: None,
-                        }
-                    ),
-                },
-                &[],
-            ));
+                            crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                rip_relative: false,
+                                width: crate::codegen::shared::asm_operand::Width::B64,
+                                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                    0,
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                ),
+                                src: crate::codegen::x86_64::opcode::Operand::Mem(
+                                    crate::codegen::x86_64::opcode::MemOperand {
+                                        disp: 0,
+                                        base: Some(0),
+                                        index: None,
+                                        seg: None,
+                                    },
+                                ),
+                            },
+                            &[],
+                        ));
                     },
                     _ => {
                         // 更大? 不可能, 条件已限定 <= 8
                         self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    width: crate::codegen::shared::asm_operand::Width::B64,
-                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        0, crate::codegen::shared::asm_operand::Width::B64
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Mem(
-                        crate::codegen::x86_64::opcode::MemOperand {
-                            disp: 0, base: Some(0), index: None, seg: None,
-                        }
-                    ),
-                },
-                &[],
-            ));
+                            crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                                rip_relative: false,
+                                width: crate::codegen::shared::asm_operand::Width::B64,
+                                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                    0,
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                ),
+                                src: crate::codegen::x86_64::opcode::Operand::Mem(
+                                    crate::codegen::x86_64::opcode::MemOperand {
+                                        disp: 0,
+                                        base: Some(0),
+                                        index: None,
+                                        seg: None,
+                                    },
+                                ),
+                            },
+                            &[],
+                        ));
                     },
                 }
                 if dst != 0 {
@@ -230,16 +259,38 @@ impl Codegen {
                         crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
                             op: crate::codegen::x86_64::opcode::AluOp::Xor,
                             width: crate::codegen::shared::asm_operand::Width::B64,
-                            dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64),
-                            src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64),
+                            dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                2,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                            ),
+                            src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                2,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                            ),
                         },
                         &[],
                     );
                     if !self.emit_insn(&insn) {
-                        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Xor, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
+                        self.emit_insn(&Insn::new(
+                            crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                                op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                                width: crate::codegen::shared::asm_operand::Width::B64,
+                                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                    2,
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                ),
+                                src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                    2,
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                ),
+                            },
+                            &[],
+                        ));
                     }
                 } else {
-                    self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B64));
+                    self.emit_insn(&Insn::sign_extend_rax_to_rdx(
+                        crate::codegen::shared::asm_operand::Width::B64,
+                    ));
                 }
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -254,13 +305,19 @@ impl Codegen {
                 // P11: movsxd dst, dst (sign-extend 32→64) via MovExt typed.
                 use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
                 use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
-                let gas = format!("movsxd {}, {}", GAS_REG32[(dst & 15) as usize], GAS_REG64[(dst & 15) as usize]);
+                let gas = format!(
+                    "movsxd {}, {}",
+                    GAS_REG32[(dst & 15) as usize],
+                    GAS_REG64[(dst & 15) as usize]
+                );
                 let insn = Insn::mov_ext(
                     true,
                     crate::codegen::shared::asm_operand::Width::B32,
                     crate::codegen::shared::asm_operand::Width::B64,
-                    dst, dst,
-                ).with_gas(gas);
+                    dst,
+                    dst,
+                )
+                .with_gas(gas);
                 self.emit_insn(&insn);
             },
             // signed → unsigned same-size: 截断到类型宽度并零扩展
@@ -274,7 +331,8 @@ impl Codegen {
                     // P11: mov dst32, dst32 via MovRm B32 typed (self-MODRM, REX.R+B=0x05 when dst>=8).
                     self.emit_insn(&Insn::mov_rm_reg(
                         crate::codegen::shared::asm_operand::Width::B32,
-                        dst, dst,
+                        dst,
+                        dst,
                     ));
                 }
                 // 64-bit: 无需处理 (已经是 64 位)
@@ -285,7 +343,8 @@ impl Codegen {
                     true,
                     crate::codegen::shared::asm_operand::Width::B16,
                     crate::codegen::shared::asm_operand::Width::B64,
-                    dst, dst,
+                    dst,
+                    dst,
                 ));
             },
             (Type::UChar, Type::SChar | Type::Char) => {
@@ -294,7 +353,8 @@ impl Codegen {
                     true,
                     crate::codegen::shared::asm_operand::Width::B8,
                     crate::codegen::shared::asm_operand::Width::B64,
-                    dst, dst,
+                    dst,
+                    dst,
                 ));
             },
             // int → float/double
@@ -305,36 +365,45 @@ impl Codegen {
                 src @ (Type::Int | Type::Long | Type::LongLong | Type::Char | Type::Short),
                 Type::Float,
             ) => {
-                // cvtsi2ss xmm0, dst (F3 0F 2A /r)
+                // P11: cvtsi2ss xmm0, dst via typed Cvt2Sd. 字节与 disasm 输出均与
+                // 手写 raw_with_gas 路径逐条等价 (encoder 只在 wide||dst>=8 时发 REX).
                 let wide = matches!(src, Type::Long | Type::LongLong);
-                // cvt 的 REX 只在真的扩了字段时才发：`0x40 | 0 | 0` 是什么也不扩的裸前缀，
-                // 多占一字节并被 objdump 标成 `rex cvttsd2si`（多余位的唯一读数）。
-                let rex = (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x01 } else { 0 });
-                let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, if wide { 64 } else { 32 })
-                    .unwrap_or_else(|| "%eax".to_string());
-                let gas = format!("cvtsi2ss {}, %xmm0", dst_name);
-                if rex != 0 {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x40 | rex, 0x0F, 0x2A, 0xC0 | (dst & 7)], &gas));
+                if wide {
+                    self.emit_insn(&Insn::cvt2sd_reg(
+                        true,
+                        crate::codegen::x86_64::opcode::SimdWidth::SS,
+                        0,
+                        dst,
+                    ));
                 } else {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x2A, 0xC0 | (dst & 7)], &gas));
+                    self.emit_insn(&Insn::cvt2sd_reg_b32(
+                        true,
+                        crate::codegen::x86_64::opcode::SimdWidth::SS,
+                        0,
+                        dst,
+                    ));
                 }
             },
             (
                 src @ (Type::Int | Type::Long | Type::LongLong | Type::Char | Type::Short),
                 Type::Double | Type::LongDouble,
             ) => {
-                // cvtsi2sd xmm0, dst (F2 0F 2A /r)
+                // P11: cvtsi2sd xmm0, dst via typed Cvt2Sd. 同上字节等价.
                 let wide = matches!(src, Type::Long | Type::LongLong);
-                // cvt 的 REX 只在真的扩了字段时才发：`0x40 | 0 | 0` 是什么也不扩的裸前缀，
-                // 多占一字节并被 objdump 标成 `rex cvttsd2si`（多余位的唯一读数）。
-                let rex = (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x01 } else { 0 });
-                let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, if wide { 64 } else { 32 })
-                    .unwrap_or_else(|| "%eax".to_string());
-                let gas = format!("cvtsi2sd {}, %xmm0", dst_name);
-                if rex != 0 {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x40 | rex, 0x0F, 0x2A, 0xC0 | (dst & 7)], &gas));
+                if wide {
+                    self.emit_insn(&Insn::cvt2sd_reg(
+                        true,
+                        crate::codegen::x86_64::opcode::SimdWidth::SD,
+                        0,
+                        dst,
+                    ));
                 } else {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x2A, 0xC0 | (dst & 7)], &gas));
+                    self.emit_insn(&Insn::cvt2sd_reg_b32(
+                        true,
+                        crate::codegen::x86_64::opcode::SimdWidth::SD,
+                        0,
+                        dst,
+                    ));
                 }
             },
             // float/double → int
@@ -346,13 +415,22 @@ impl Codegen {
                 // cvt 的 REX 只在真的扩了字段时才发：`0x40 | 0 | 0` 是什么也不扩的裸前缀，
                 // 多占一字节并被 objdump 标成 `rex cvttsd2si`（多余位的唯一读数）。
                 let rex = (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x04 } else { 0 });
-                let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, if wide { 64 } else { 32 })
-                    .unwrap_or_else(|| "%eax".to_string());
+                let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(
+                    dst,
+                    if wide { 64 } else { 32 },
+                )
+                .unwrap_or_else(|| "%eax".to_string());
                 let gas = format!("cvttss2si %xmm0, {}", dst_name);
                 if rex != 0 {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x40 | rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)], &gas));
+                    self.emit_insn(&Insn::raw_with_gas(
+                        &[0xF3, 0x40 | rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)],
+                        &gas,
+                    ));
                 } else {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)], &gas));
+                    self.emit_insn(&Insn::raw_with_gas(
+                        &[0xF3, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)],
+                        &gas,
+                    ));
                 }
                 self.emit_float_to_int_saturate(dst, &Type::Float, wide);
             },
@@ -362,13 +440,22 @@ impl Codegen {
                 // cvt 的 REX 只在真的扩了字段时才发：`0x40 | 0 | 0` 是什么也不扩的裸前缀，
                 // 多占一字节并被 objdump 标成 `rex cvttsd2si`（多余位的唯一读数）。
                 let rex = (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x04 } else { 0 });
-                let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, if wide { 64 } else { 32 })
-                    .unwrap_or_else(|| "%eax".to_string());
+                let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(
+                    dst,
+                    if wide { 64 } else { 32 },
+                )
+                .unwrap_or_else(|| "%eax".to_string());
                 let gas = format!("cvttsd2si %xmm0, {}", dst_name);
                 if rex != 0 {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x40 | rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)], &gas));
+                    self.emit_insn(&Insn::raw_with_gas(
+                        &[0xF2, 0x40 | rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)],
+                        &gas,
+                    ));
                 } else {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)], &gas));
+                    self.emit_insn(&Insn::raw_with_gas(
+                        &[0xF2, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)],
+                        &gas,
+                    ));
                 }
                 self.emit_float_to_int_saturate(dst, &Type::Double, wide);
             },
@@ -382,13 +469,22 @@ impl Codegen {
                 // cvt 的 REX 只在真的扩了字段时才发：`0x40 | 0 | 0` 是什么也不扩的裸前缀，
                 // 多占一字节并被 objdump 标成 `rex cvttsd2si`（多余位的唯一读数）。
                 let rex = (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x04 } else { 0 });
-                let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, if wide { 64 } else { 32 })
-                    .unwrap_or_else(|| "%eax".to_string());
+                let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(
+                    dst,
+                    if wide { 64 } else { 32 },
+                )
+                .unwrap_or_else(|| "%eax".to_string());
                 let gas = format!("cvttsd2si %xmm0, {}", dst_name);
                 if rex != 0 {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x40 | rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)], &gas));
+                    self.emit_insn(&Insn::raw_with_gas(
+                        &[0xF2, 0x40 | rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)],
+                        &gas,
+                    ));
                 } else {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)], &gas));
+                    self.emit_insn(&Insn::raw_with_gas(
+                        &[0xF2, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)],
+                        &gas,
+                    ));
                 }
                 self.emit_float_to_int_saturate(dst, &Type::LongDouble, wide);
             },
@@ -410,9 +506,20 @@ impl Codegen {
                     },
                 }
                 if is_f32 {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x2C, 0xC0], "cvttss2si %xmm0, %eax"));
+                    // P11: cvttss2si eax, xmm0 — dst/gpr 固定 0, encoder 字节与手写等价.
+                    self.emit_insn(&Insn::cvt2sd_reg_b32(
+                        false,
+                        crate::codegen::x86_64::opcode::SimdWidth::SS,
+                        0,
+                        0,
+                    ));
                 } else {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x2C, 0xC0], "cvttsd2si %xmm0, %eax"));
+                    self.emit_insn(&Insn::cvt2sd_reg_b32(
+                        false,
+                        crate::codegen::x86_64::opcode::SimdWidth::SD,
+                        0,
+                        0,
+                    ));
                 }
                 if dst != 0 {
                     self.mov(dst, 0);
@@ -423,13 +530,19 @@ impl Codegen {
                 // cvtss2sd xmm0, xmm0 (F3 0F 5A C0)
                 self.emit_insn(&Insn::simd_arith_reg(
                     crate::codegen::x86_64::opcode::SimdArithOp::CvtSdSs,
-                    crate::codegen::x86_64::opcode::SimdWidth::SS, 0, 0));
+                    crate::codegen::x86_64::opcode::SimdWidth::SS,
+                    0,
+                    0,
+                ));
             },
             (Type::Double | Type::LongDouble, Type::Float) => {
                 // cvtsd2ss xmm0, xmm0 (F2 0F 5A C0)
                 self.emit_insn(&Insn::simd_arith_reg(
                     crate::codegen::x86_64::opcode::SimdArithOp::CvtSdSs,
-                    crate::codegen::x86_64::opcode::SimdWidth::SD, 0, 0));
+                    crate::codegen::x86_64::opcode::SimdWidth::SD,
+                    0,
+                    0,
+                ));
             },
             // unsigned int (<=32bit) → float/double:
             // 零扩展到 64 位后值一定落在 signed int64 正半轴,
@@ -441,11 +554,9 @@ impl Codegen {
                 let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, 64)
                     .unwrap_or_else(|| "%rax".to_string());
                 let gas = format!("cvtsi2ss {}, %xmm0", dst_name);
-                let insn = Insn::cvt2sd_reg(
-                    true,
-                    crate::codegen::x86_64::opcode::SimdWidth::SS,
-                    0, dst,
-                ).with_gas(gas);
+                let insn =
+                    Insn::cvt2sd_reg(true, crate::codegen::x86_64::opcode::SimdWidth::SS, 0, dst)
+                        .with_gas(gas);
                 self.emit_insn(&insn);
             },
             (
@@ -457,11 +568,9 @@ impl Codegen {
                 let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, 64)
                     .unwrap_or_else(|| "%rax".to_string());
                 let gas = format!("cvtsi2sd {}, %xmm0", dst_name);
-                let insn = Insn::cvt2sd_reg(
-                    true,
-                    crate::codegen::x86_64::opcode::SimdWidth::SD,
-                    0, dst,
-                ).with_gas(gas);
+                let insn =
+                    Insn::cvt2sd_reg(true, crate::codegen::x86_64::opcode::SimdWidth::SD, 0, dst)
+                        .with_gas(gas);
                 self.emit_insn(&insn);
             },
             // unsigned long/longlong → float/double:
@@ -502,7 +611,10 @@ impl Codegen {
                 match dst_ty {
                     Type::Bool | Type::UChar => {
                         // P11: and dst64, 0xFF via AluRm B64 imm32 typed (REX.W=0x48|B).
-                        self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0x4 /* /4=and */, dst, 0xFF));
+                        self.emit_insn(&Insn::alu_rm_reg_imm32_b64(
+                            0x4, /* /4=and */
+                            dst, 0xFF,
+                        ));
                     },
                     Type::Char | Type::SChar | Type::Short => {
                         // 截断到 8/16 位后符号扩展
@@ -513,7 +625,8 @@ impl Codegen {
                                 true,
                                 crate::codegen::shared::asm_operand::Width::B8,
                                 crate::codegen::shared::asm_operand::Width::B64,
-                                dst, dst,
+                                dst,
+                                dst,
                             ));
                         } else {
                             // movswq dst, dst (sign-extend 16→64)
@@ -521,23 +634,33 @@ impl Codegen {
                                 true,
                                 crate::codegen::shared::asm_operand::Width::B16,
                                 crate::codegen::shared::asm_operand::Width::B64,
-                                dst, dst,
+                                dst,
+                                dst,
                             ));
                         }
                     },
                     Type::UShort => {
                         // P11: and dst64, 0xFFFF via AluRm B64 imm32 typed.
-                        self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0x4 /* /4=and */, dst, 0xFFFF));
+                        self.emit_insn(&Insn::alu_rm_reg_imm32_b64(
+                            0x4, /* /4=and */
+                            dst, 0xFFFF,
+                        ));
                     },
                     Type::UInt => {
                         // mov eax, eax (32位零扩展到64位)
                         // P11: via MovRm B32 typed (self-MODRM, REX.R+B=0x05 when dst>=8).
                         use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
-                        let gas = format!("mov {}, {}", GAS_REG32[(dst & 15) as usize], GAS_REG32[(dst & 15) as usize]);
+                        let gas = format!(
+                            "mov {}, {}",
+                            GAS_REG32[(dst & 15) as usize],
+                            GAS_REG32[(dst & 15) as usize]
+                        );
                         let insn = Insn::mov_rm_reg(
                             crate::codegen::shared::asm_operand::Width::B32,
-                            dst, dst,
-                        ).with_gas(gas);
+                            dst,
+                            dst,
+                        )
+                        .with_gas(gas);
                         self.emit_insn(&insn);
                     },
                     Type::Int => {
@@ -547,13 +670,19 @@ impl Codegen {
                         // P11: via MovExt typed (REX.W=1, REX.R+B self-MODRM).
                         use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
                         use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
-                        let gas = format!("movsxd {}, {}", GAS_REG32[(dst & 15) as usize], GAS_REG64[(dst & 15) as usize]);
+                        let gas = format!(
+                            "movsxd {}, {}",
+                            GAS_REG32[(dst & 15) as usize],
+                            GAS_REG64[(dst & 15) as usize]
+                        );
                         let insn = Insn::mov_ext(
                             true,
                             crate::codegen::shared::asm_operand::Width::B32,
                             crate::codegen::shared::asm_operand::Width::B64,
-                            dst, dst,
-                        ).with_gas(gas);
+                            dst,
+                            dst,
+                        )
+                        .with_gas(gas);
                         self.emit_insn(&insn);
                     },
                     _ => {},
@@ -585,11 +714,18 @@ impl Codegen {
                             // P11: MovExt encode 自动处理 REX (dst>=8 → REX.R+B=0x04+0x01=0x05).
                             let insn = Insn::new(
                                 crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                                    rip_relative: false,
                                     sign: false,
                                     from: crate::codegen::shared::asm_operand::Width::B8,
                                     to: crate::codegen::shared::asm_operand::Width::B32,
-                                    dst: crate::codegen::x86_64::opcode::Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B32),
-                                    src: crate::codegen::x86_64::opcode::Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B8),
+                                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                        dst,
+                                        crate::codegen::shared::asm_operand::Width::B32,
+                                    ),
+                                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                        dst,
+                                        crate::codegen::shared::asm_operand::Width::B8,
+                                    ),
                                 },
                                 &[],
                             );
@@ -599,11 +735,18 @@ impl Codegen {
                             // movzwl %ax, %eax (截断到 16 位, 零扩展到 32 位)
                             let insn = Insn::new(
                                 crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                                    rip_relative: false,
                                     sign: false,
                                     from: crate::codegen::shared::asm_operand::Width::B16,
                                     to: crate::codegen::shared::asm_operand::Width::B32,
-                                    dst: crate::codegen::x86_64::opcode::Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B32),
-                                    src: crate::codegen::x86_64::opcode::Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B16),
+                                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                        dst,
+                                        crate::codegen::shared::asm_operand::Width::B32,
+                                    ),
+                                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                        dst,
+                                        crate::codegen::shared::asm_operand::Width::B16,
+                                    ),
                                 },
                                 &[],
                             );
@@ -614,7 +757,8 @@ impl Codegen {
                             // P11: via MovRm B32 typed (self-MODRM, REX.R+B=0x05 when dst>=8).
                             self.emit_insn(&Insn::mov_rm_reg(
                                 crate::codegen::shared::asm_operand::Width::B32,
-                                dst, dst,
+                                dst,
+                                dst,
                             ));
                         },
                         _ => {},
@@ -630,7 +774,8 @@ impl Codegen {
                                 true,
                                 crate::codegen::shared::asm_operand::Width::B8,
                                 crate::codegen::shared::asm_operand::Width::B64,
-                                dst, dst,
+                                dst,
+                                dst,
                             ));
                         },
                         16 => {
@@ -639,7 +784,8 @@ impl Codegen {
                                 true,
                                 crate::codegen::shared::asm_operand::Width::B16,
                                 crate::codegen::shared::asm_operand::Width::B64,
-                                dst, dst,
+                                dst,
+                                dst,
                             ));
                         },
                         _ => {},
