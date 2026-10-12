@@ -8,6 +8,7 @@ use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
 use crate::codegen::x86_64::asm::*;
 use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::insn::BoolExpect;
 use crate::codegen::x86_64::opcode::{SimdArithOp, SimdWidth};
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::*;
@@ -794,7 +795,7 @@ impl Codegen {
                             let qwords = sz / 8;
                             let remainder = sz % 8;
                             if qwords > 0 {
-                                let _ = self.emit_insn(&Insn::mov_reg_imm32_b64(1, qwords as i32)); // mov rcx, imm32
+                                self.emit_insn(&Insn::mov_reg_imm32_b64(1, qwords as i32)).expect("typed-opcode: mov_reg_imm32_b64"); // mov rcx, imm32
                                 self.emit_insn(&Insn::noarg(
                                     crate::codegen::x86_64::opcode::NoArgOp::RepMovsq,
                                 )); // rep movsq
@@ -834,7 +835,7 @@ impl Codegen {
                             let qwords = sz / 8;
                             let remainder = sz % 8;
                             if qwords > 0 {
-                                let _ = self.emit_insn(&Insn::mov_reg_imm32_b64(1, qwords as i32)); // mov rcx, imm32
+                                self.emit_insn(&Insn::mov_reg_imm32_b64(1, qwords as i32)).expect("typed-opcode: mov_reg_imm32_b64"); // mov rcx, imm32
                                 self.emit_insn(&Insn::noarg(
                                     crate::codegen::x86_64::opcode::NoArgOp::RepMovsq,
                                 )); // rep movsq
@@ -931,12 +932,12 @@ impl Codegen {
         let qwords = sz / 8;
         let remainder = sz % 8;
         if qwords > 0 {
-            let _ = self.emit_insn(&Insn::mov_reg_imm32_b64(1, qwords as i32)); // mov rcx, imm32 (qwords)
+            self.emit_insn(&Insn::mov_reg_imm32_b64(1, qwords as i32)).expect("typed-opcode: mov_reg_imm32_b64"); // mov rcx, imm32 (qwords)
             self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsq));
             // rep movsq
         }
         if remainder > 0 {
-            let _ = self.emit_insn(&Insn::mov_reg_imm32_b64(1, remainder as i32)); // mov rcx, imm32 (remainder)
+            self.emit_insn(&Insn::mov_reg_imm32_b64(1, remainder as i32)).expect("typed-opcode: mov_reg_imm32_b64"); // mov rcx, imm32 (remainder)
             self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb));
             // rep movsb
         }
