@@ -99,7 +99,12 @@ impl Insn {
             )
         };
         Insn::new(
-            X86_64Opcode::GprXmm { to_xmm, width, dst, src },
+            X86_64Opcode::GprXmm {
+                to_xmm,
+                width,
+                dst,
+                src,
+            },
             &[],
         )
     }
@@ -155,7 +160,12 @@ impl Insn {
             X86_64Opcode::LockCmpxchgRm {
                 width,
                 reg_idx,
-                mem: MemOperand { disp: 0, base: Some(base), index: None, seg: None },
+                mem: MemOperand {
+                    disp: 0,
+                    base: Some(base),
+                    index: None,
+                    seg: None,
+                },
             },
             &[],
         )
@@ -172,7 +182,12 @@ impl Insn {
             X86_64Opcode::LockXchgRm {
                 width,
                 reg_idx,
-                mem: MemOperand { disp: 0, base: Some(base), index: None, seg: None },
+                mem: MemOperand {
+                    disp: 0,
+                    base: Some(base),
+                    index: None,
+                    seg: None,
+                },
             },
             &[],
         )
@@ -189,7 +204,12 @@ impl Insn {
             X86_64Opcode::LockXaddRm {
                 width,
                 reg_idx,
-                mem: MemOperand { disp: 0, base: Some(base), index: None, seg: None },
+                mem: MemOperand {
+                    disp: 0,
+                    base: Some(base),
+                    index: None,
+                    seg: None,
+                },
             },
             &[],
         )
@@ -287,6 +307,7 @@ impl Insn {
     ) -> Self {
         Insn::new(
             crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                rip_relative: false,
                 width,
                 dst: crate::codegen::x86_64::opcode::Operand::Reg(dst_reg, width),
                 src: crate::codegen::x86_64::opcode::Operand::Reg(src_reg, width),
@@ -314,7 +335,15 @@ impl Insn {
             seg: None,
         });
         let (dst, src) = if load { (reg, mem) } else { (mem, reg) };
-        Insn::new(X86_64Opcode::MovRm { width, dst, src }, &[])
+        Insn::new(
+            X86_64Opcode::MovRm {
+                rip_relative: false,
+                width,
+                dst,
+                src,
+            },
+            &[],
+        )
     }
 
     /// P11 Bucket AE: MovRm reg <-> mem [base+index*scale] (load or store, disp=0).
@@ -336,7 +365,73 @@ impl Insn {
             seg: None,
         });
         let (dst, src) = if load { (reg, mem) } else { (mem, reg) };
-        Insn::new(X86_64Opcode::MovRm { width, dst, src }, &[])
+        Insn::new(
+            X86_64Opcode::MovRm {
+                rip_relative: false,
+                width,
+                dst,
+                src,
+            },
+            &[],
+        )
+    }
+
+    /// P11 Bucket O8: MovRm reg <-> [rip+disp32] (RIP-relative load/store).
+    /// load=true: mov reg, [rip+disp32]; load=false: mov [rip+disp32], reg.
+    /// width: B8/B16/B32/B64. disp: 32-bit displacement (usually 0, patched later).
+    pub fn mov_rm_rip(
+        load: bool,
+        width: crate::codegen::shared::asm_operand::Width,
+        reg_idx: u8,
+        disp: i32,
+    ) -> Self {
+        use crate::codegen::x86_64::opcode::{MemOperand, Operand, X86_64Opcode};
+        let reg = Operand::Reg(reg_idx, width);
+        let mem = Operand::Mem(MemOperand {
+            disp,
+            base: None,
+            index: None,
+            seg: None,
+        });
+        let (dst, src) = if load { (reg, mem) } else { (mem, reg) };
+        Insn::new(
+            X86_64Opcode::MovRm {
+                rip_relative: true,
+                width,
+                dst,
+                src,
+            },
+            &[],
+        )
+    }
+
+    /// P11 Bucket O8: MovExt reg <- [rip+disp32] (RIP-relative movzx/movsx/movsxd).
+    /// sign: true=movsx/movsxd, false=movzx.
+    /// from: source memory width (B8/B16/B32). to: dest width (B32/B64).
+    pub fn mov_ext_rip(
+        sign: bool,
+        from: crate::codegen::shared::asm_operand::Width,
+        to: crate::codegen::shared::asm_operand::Width,
+        dst_reg: u8,
+        disp: i32,
+    ) -> Self {
+        use crate::codegen::x86_64::opcode::{MemOperand, Operand, X86_64Opcode};
+        Insn::new(
+            X86_64Opcode::MovExt {
+                rip_relative: true,
+                sign,
+                from,
+                to,
+                dst: Operand::Reg(dst_reg, to),
+                src: Operand::Mem(MemOperand {
+                    disp,
+                    base: None,
+                    index: None,
+                    seg: None,
+                }),
+            },
+            &[],
+        )
     }
 
     /// P11 Bucket B: AluRm reg, reg (mod=11) — add/sub/and/or/xor/cmp.
@@ -384,10 +479,7 @@ impl Insn {
     }
 
     /// P11 Bucket D: push/pop reg64 via Stack typed opcode (50+rd / 41 50+(rd&7)).
-    pub fn stack_op_reg(
-        op: crate::codegen::x86_64::opcode::StackOp,
-        reg_idx: u8,
-    ) -> Self {
+    pub fn stack_op_reg(op: crate::codegen::x86_64::opcode::StackOp, reg_idx: u8) -> Self {
         Insn::new(
             crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
                 op,
@@ -403,11 +495,7 @@ impl Insn {
 
     /// P11 Bucket V: LEA reg64, [base+disp]. disp 可为任意大小.
     /// 复用 Lea.encode() 路径 A/A2 (无 index).
-    pub fn lea_reg_base_disp(
-        dst_reg: u8,
-        base: u8,
-        disp: i32,
-    ) -> Self {
+    pub fn lea_reg_base_disp(dst_reg: u8, base: u8, disp: i32) -> Self {
         use crate::codegen::x86_64::opcode::{MemOperand, Operand, X86_64Opcode};
         Insn::new(
             X86_64Opcode::Lea {
@@ -1177,11 +1265,7 @@ impl Insn {
 
     /// P11 Bucket W: x87 load/store memory form (fld/fstp/fild [base+disp]).
     /// width: 4=m32fp, 8=m64fp, 10=m80fp. base: intel reg number (4=rsp).
-    pub fn x87_mem(
-        op: crate::codegen::x86_64::opcode::X87Op,
-        base: u8,
-        disp: i32,
-    ) -> Self {
+    pub fn x87_mem(op: crate::codegen::x86_64::opcode::X87Op, base: u8, disp: i32) -> Self {
         Insn::new(
             crate::codegen::x86_64::opcode::X86_64Opcode::X87 {
                 op,
@@ -1237,10 +1321,7 @@ impl Insn {
 
     /// P11 Bucket H: setcc r8 (0F 9x /0, mod=11).
     /// reg_idx: Intel reg number (0=al,1=cl,2=dl,3=bl,4=ah..15=r15b).
-    pub fn setcc_reg(
-        cc: crate::codegen::x86_64::opcode::CondCode,
-        reg_idx: u8,
-    ) -> Self {
+    pub fn setcc_reg(cc: crate::codegen::x86_64::opcode::CondCode, reg_idx: u8) -> Self {
         Insn::new(
             crate::codegen::x86_64::opcode::X86_64Opcode::Setcc {
                 cc,
@@ -1387,6 +1468,7 @@ impl Insn {
     ) -> Self {
         Insn::new(
             crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                rip_relative: false,
                 sign,
                 from,
                 to,
@@ -1411,6 +1493,7 @@ impl Insn {
     ) -> Self {
         Insn::new(
             crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                rip_relative: false,
                 sign,
                 from,
                 to,
@@ -1441,6 +1524,7 @@ impl Insn {
     ) -> Self {
         Insn::new(
             crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                rip_relative: false,
                 sign,
                 from,
                 to,
@@ -1647,11 +1731,15 @@ mod tests {
     #[test]
     fn test_rm_reg_imm32_b64_basic() {
         // test rax, 0x8000 (0x00008000, imm32 LE = 00 80 00 00)
-        let bytes = Insn::test_rm_reg_imm32_b64(0, 0x8000).encode_bytes().unwrap();
+        let bytes = Insn::test_rm_reg_imm32_b64(0, 0x8000)
+            .encode_bytes()
+            .unwrap();
         assert_eq!(&bytes[..3], &[0x48, 0xF7, 0xC0]);
         assert_eq!(&bytes[3..], &[0x00, 0x80, 0x00, 0x00]);
         // test r8d: REX.W+B, F7, C0|0= C0, imm32
-        let bytes = Insn::test_rm_reg_imm32_b64(8, 0x1234).encode_bytes().unwrap();
+        let bytes = Insn::test_rm_reg_imm32_b64(8, 0x1234)
+            .encode_bytes()
+            .unwrap();
         assert_eq!(&bytes[..3], &[0x49, 0xF7, 0xC0]);
         assert_eq!(&bytes[3..], &[0x34, 0x12, 0x00, 0x00]);
     }
@@ -1666,7 +1754,9 @@ mod tests {
         assert_eq!(&bytes[..2], &[0x48, 0xB8]);
         assert_eq!(&bytes[2..], &imm.to_le_bytes());
         // movabs r11, imm: REX.W+B, BB (B8|3=BB)
-        let bytes = Insn::movabs_reg_imm64(11, 0xDEADBEEF).encode_bytes().unwrap();
+        let bytes = Insn::movabs_reg_imm64(11, 0xDEADBEEF)
+            .encode_bytes()
+            .unwrap();
         assert_eq!(&bytes[..2], &[0x49, 0xBB]);
     }
 
@@ -1709,15 +1799,9 @@ mod tests {
     #[test]
     fn idiv_rm_reg_b64_basic() {
         // idiv rcx: 48 F7 F9 (reg field = /7 = 111b << 3 = 0x38; r/m = 1)
-        assert_eq!(
-            Insn::idiv_rm_reg_b64(1).encode_bytes(),
-            Some(vec![0x48, 0xF7, 0xF9]),
-        );
+        assert_eq!(Insn::idiv_rm_reg_b64(1).encode_bytes(), Some(vec![0x48, 0xF7, 0xF9]),);
         // idiv r8: REX.W+B, F7, F8|0 = F8
-        assert_eq!(
-            Insn::idiv_rm_reg_b64(8).encode_bytes(),
-            Some(vec![0x49, 0xF7, 0xF8]),
-        );
+        assert_eq!(Insn::idiv_rm_reg_b64(8).encode_bytes(), Some(vec![0x49, 0xF7, 0xF8]),);
     }
 
     /// P11 Bucket W: mov_reg_imm32_b64 = REX.W C7 /0 id.
@@ -1739,38 +1823,37 @@ mod tests {
     fn bswap_reg_basic() {
         use crate::codegen::shared::asm_operand::Width::*;
         // bswap ecx: 0F C9
-        assert_eq!(Insn::bswap_reg(B32, 1).encode_bytes(),
-            Some(vec![0x0F, 0xC9]));
+        assert_eq!(Insn::bswap_reg(B32, 1).encode_bytes(), Some(vec![0x0F, 0xC9]));
         // bswap rcx: 48 0F C9
-        assert_eq!(Insn::bswap_reg(B64, 1).encode_bytes(),
-            Some(vec![0x48, 0x0F, 0xC9]));
+        assert_eq!(Insn::bswap_reg(B64, 1).encode_bytes(), Some(vec![0x48, 0x0F, 0xC9]));
         // bswap rax: 48 0F C8
-        assert_eq!(Insn::bswap_reg(B64, 0).encode_bytes(),
-            Some(vec![0x48, 0x0F, 0xC8]));
+        assert_eq!(Insn::bswap_reg(B64, 0).encode_bytes(), Some(vec![0x48, 0x0F, 0xC8]));
     }
 
     #[test]
     fn rol_reg_imm8_b16_basic() {
         // rol cx, 8: 66 C1 C1 08
-        assert_eq!(Insn::rol_reg_imm8_b16(1, 8).encode_bytes(),
-            Some(vec![0x66, 0xC1, 0xC1, 0x08]));
+        assert_eq!(Insn::rol_reg_imm8_b16(1, 8).encode_bytes(), Some(vec![0x66, 0xC1, 0xC1, 0x08]));
         // rol ax, 8: 66 C1 C0 08
-        assert_eq!(Insn::rol_reg_imm8_b16(0, 8).encode_bytes(),
-            Some(vec![0x66, 0xC1, 0xC0, 0x08]));
+        assert_eq!(Insn::rol_reg_imm8_b16(0, 8).encode_bytes(), Some(vec![0x66, 0xC1, 0xC0, 0x08]));
     }
 
     #[test]
     fn shift_reg_imm8_c1_b32_basic() {
         // sar ecx, 31: C1 F9 1F
-        assert_eq!(Insn::shift_reg_imm8_c1_b32(0b111, 1, 0x1F).encode_bytes(),
-            Some(vec![0xC1, 0xF9, 0x1F]));
+        assert_eq!(
+            Insn::shift_reg_imm8_c1_b32(0b111, 1, 0x1F).encode_bytes(),
+            Some(vec![0xC1, 0xF9, 0x1F])
+        );
     }
 
     #[test]
     fn shift_reg_imm8_c1_b16_basic() {
         // shl ax, 3: 66 C1 E0 03
-        assert_eq!(Insn::shift_reg_imm8_c1_b16(0b100, 0, 3).encode_bytes(),
-            Some(vec![0x66, 0xC1, 0xE0, 0x03]));
+        assert_eq!(
+            Insn::shift_reg_imm8_c1_b16(0b100, 0, 3).encode_bytes(),
+            Some(vec![0x66, 0xC1, 0xE0, 0x03])
+        );
     }
 
     #[test]
@@ -1921,10 +2004,7 @@ mod tests {
     fn store_imm_mem_basic() {
         use crate::codegen::shared::asm_operand::Width::*;
         // mov byte [rdi], 0: C6 07 00 (base=7=rdi, mod=00, /0, rm=7)
-        assert_eq!(
-            Insn::store_imm_mem(B8, 7, 0, 0).encode_bytes(),
-            Some(vec![0xC6, 0x07, 0x00]),
-        );
+        assert_eq!(Insn::store_imm_mem(B8, 7, 0, 0).encode_bytes(), Some(vec![0xC6, 0x07, 0x00]),);
         // mov word [rdi], 0: 66 C7 07 00 00
         assert_eq!(
             Insn::store_imm_mem(B16, 7, 0, 0).encode_bytes(),
@@ -1983,10 +2063,7 @@ mod tests {
     #[test]
     fn pmulld_basic() {
         // pmulld xmm0, xmm1: 66 0F 38 40 C1
-        assert_eq!(
-            Insn::pmulld_xmm(0, 1).encode_bytes(),
-            Some(vec![0x66, 0x0F, 0x38, 0x40, 0xC1]),
-        );
+        assert_eq!(Insn::pmulld_xmm(0, 1).encode_bytes(), Some(vec![0x66, 0x0F, 0x38, 0x40, 0xC1]),);
         // pmulld xmm8, xmm9: REX.R (dst reg=xmm8) | REX.B (src r/m=xmm9) = 0x45
         // modrm C0 | ((8&7)<<3) | (9&7) = C0 | 0 | 1 = C1
         assert_eq!(
@@ -1999,20 +2076,11 @@ mod tests {
     #[test]
     fn short_jump_rel8_basic() {
         // jz +16: 74 10
-        assert_eq!(
-            Insn::short_jump_rel8(0x74, 0x10).encode_bytes(),
-            Some(vec![0x74, 0x10]),
-        );
+        assert_eq!(Insn::short_jump_rel8(0x74, 0x10).encode_bytes(), Some(vec![0x74, 0x10]),);
         // jnz -16: 75 F0 (i8=-16 → u8=0xF0)
-        assert_eq!(
-            Insn::short_jump_rel8(0x75, -16).encode_bytes(),
-            Some(vec![0x75, 0xF0]),
-        );
+        assert_eq!(Insn::short_jump_rel8(0x75, -16).encode_bytes(), Some(vec![0x75, 0xF0]),);
         // jns +3: 79 03
-        assert_eq!(
-            Insn::short_jump_rel8(0x79, 3).encode_bytes(),
-            Some(vec![0x79, 0x03]),
-        );
+        assert_eq!(Insn::short_jump_rel8(0x79, 3).encode_bytes(), Some(vec![0x79, 0x03]),);
     }
 
     /// P11 Bucket AI: popcnt_reg_reg_b64 reflexive (F3 [REX.W] 0F B8 /r).
@@ -2039,24 +2107,12 @@ mod tests {
     #[test]
     fn movmskps_gpr_xmm_basic() {
         // movmskps eax, xmm0: 0F 50 C0 (no REX)
-        assert_eq!(
-            Insn::movmskps_gpr_xmm(0, 0).encode_bytes(),
-            Some(vec![0x0F, 0x50, 0xC0]),
-        );
+        assert_eq!(Insn::movmskps_gpr_xmm(0, 0).encode_bytes(), Some(vec![0x0F, 0x50, 0xC0]),);
         // movmskps eax, xmm1: 0F 50 C1
-        assert_eq!(
-            Insn::movmskps_gpr_xmm(0, 1).encode_bytes(),
-            Some(vec![0x0F, 0x50, 0xC1]),
-        );
+        assert_eq!(Insn::movmskps_gpr_xmm(0, 1).encode_bytes(), Some(vec![0x0F, 0x50, 0xC1]),);
         // movmskps r8d, xmm0: REX.B=0x41, 0F 50 C0
-        assert_eq!(
-            Insn::movmskps_gpr_xmm(8, 0).encode_bytes(),
-            Some(vec![0x41, 0x0F, 0x50, 0xC0]),
-        );
+        assert_eq!(Insn::movmskps_gpr_xmm(8, 0).encode_bytes(), Some(vec![0x41, 0x0F, 0x50, 0xC0]),);
         // movmskps eax, xmm8: REX.R=0x44, 0F 50 C0 (src field=0 with REX.R)
-        assert_eq!(
-            Insn::movmskps_gpr_xmm(0, 8).encode_bytes(),
-            Some(vec![0x44, 0x0F, 0x50, 0xC0]),
-        );
+        assert_eq!(Insn::movmskps_gpr_xmm(0, 8).encode_bytes(), Some(vec![0x44, 0x0F, 0x50, 0xC0]),);
     }
 }
