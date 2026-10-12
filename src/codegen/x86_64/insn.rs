@@ -62,6 +62,12 @@ impl Insn {
         )
     }
 
+    /// P11 Bucket AK: 段覆盖前缀 (FS=0x64 / GS=0x65). 单字节, 仅作用于下一条
+    /// 指令. 取代散落的 `Insn::raw_bytes(&[seg])` 调用点.
+    pub fn seg_prefix(seg: u8) -> Self {
+        Insn::raw_bytes(&[seg])
+    }
+
     /// P11 Bucket I: 无操作数/固定前缀指令 (cld/mfence/rep movsb/stosb/movsq).
     pub fn noarg(op: crate::codegen::x86_64::opcode::NoArgOp) -> Self {
         Insn::new(X86_64Opcode::NoArg { op }, &[])

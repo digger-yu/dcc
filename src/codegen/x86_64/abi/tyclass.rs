@@ -732,7 +732,7 @@ impl Codegen {
     /// 发一枚已算好的段前缀（`None` 时不发任何东西 —— 误发会污染下一条指令）。
     pub(crate) fn emit_seg(&mut self, seg: Option<u8>) {
         if let Some(seg) = seg {
-            self.emit_insn(&Insn::raw_bytes(&[seg]));
+            self.emit_insn(&Insn::seg_prefix(seg));
         }
     }
     /// 紧接其后的那一笔内存访问要不要带段前缀：就地判、就地发。
@@ -741,7 +741,7 @@ impl Codegen {
     /// 段前缀只作用于它后面的那一条指令。
     pub(crate) fn emit_seg_for(&mut self, lv: &Expr) {
         if let Some(seg) = self.lvalue_seg_prefix(lv) {
-            self.emit_insn(&Insn::raw_bytes(&[seg]));
+            self.emit_insn(&Insn::seg_prefix(seg));
         }
     }
     /// `Self::rex()` 恒返回 ≥0x40，因此「一个字段都不用扩」时它给出的是一枚**不扩任何字段

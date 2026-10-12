@@ -924,7 +924,7 @@ impl Codegen {
         }
     }
     pub(crate) fn emit_load_mem_typed_seg(&mut self, size: usize, ty: &Type, seg_prefix: u8) {
-        self.emit_insn(&Insn::raw_bytes(&[seg_prefix]));
+        self.emit_insn(&Insn::seg_prefix(seg_prefix));
         self.emit_load_mem_typed(size, ty);
     }
     /// 段限定（`__seg_gs`/`__seg_fs`）目标上的聚合拷贝：`rsi` = 源，`rdi` = 目标。
@@ -964,7 +964,7 @@ impl Codegen {
         macro_rules! store_at {
             ($w:expr, $off:expr) => {{
                 let off_i32: i32 = $off as i32;
-                self.emit_insn(&Insn::raw_bytes(&[seg]));
+                self.emit_insn(&Insn::seg_prefix(seg));
                 match $w {
                     8 => { let _ = self.emit_insn(&Insn::mov_rm_mem(
                         false, crate::codegen::shared::asm_operand::Width::B64, 0, 7, off_i32,
@@ -1018,7 +1018,7 @@ impl Codegen {
         self.emit_insn(&Insn::mov_rm_mem(
             true, crate::codegen::shared::asm_operand::Width::B8, 0, 6, 0,
         ));
-        self.emit_insn(&Insn::raw_bytes(&[seg])); // seg prefix
+        self.emit_insn(&Insn::seg_prefix(seg)); // seg prefix
         // mov seg:[rdi], al (B8 store: 88 /r)
         self.emit_insn(&Insn::mov_rm_mem(
             false, crate::codegen::shared::asm_operand::Width::B8, 0, 7, 0,
@@ -1028,16 +1028,6 @@ impl Codegen {
         self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Inc, crate::codegen::shared::asm_operand::Width::B64, 7));
         self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Dec, crate::codegen::shared::asm_operand::Width::B64, 1));
         self.emit_insn(&Insn::short_jump_rel8(0x75, -16)); // jnz -> 回到 mov al,[rsi]
-    }
-    pub(crate) fn emit_rsp_modrm_disp(&mut self, reg_field: u8, off: i64) {
-        if off == 0 {
-            self.emit_insn(&Insn::raw_bytes(&[0x04 | ((reg_field & 7) << 3), 0x24]));
-        } else if Self::fits_disp8(off) {
-            self.emit_insn(&Insn::raw_bytes(&[0x44 | ((reg_field & 7) << 3), 0x24, off as i8 as u8]));
-        } else {
-            self.emit_insn(&Insn::raw_bytes(&[0x84 | ((reg_field & 7) << 3), 0x24]));
-            self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
-        }
     }
     pub(crate) fn emit_store_rsp0(&mut self, inner_sz: i64) {
         match inner_sz {
@@ -1155,7 +1145,7 @@ impl Codegen {
                 // 基址是 `__seg_gs`/`__seg_fs` 指针时（`p[i]`、`q->a`、`a[i].f`）必须
                 // 带段前缀；判据单一入口见 [`Codegen::lvalue_seg_prefix`]。
                 if let Some(seg) = self.lvalue_seg_prefix(original_expr) {
-                    self.emit_insn(&Insn::raw_bytes(&[seg]));
+                    self.emit_insn(&Insn::seg_prefix(seg));
                 }
                 self.emit_load_mem_typed(elem_size, &elem_ty);
                 if dst != 0 && !self.is_scalar_float_channel_ty(&elem_ty) {
@@ -1182,12 +1172,12 @@ impl Codegen {
                     // 旧写法无条件 `movsd [rcx], xmm0` 会把陈旧 xmm0 写进
                     // long double 对象，并把真正的 80-bit 值漏在 x87 栈上。
                     if let Some(seg) = seg {
-                        self.emit_insn(&Insn::raw_bytes(&[seg]));
+                        self.emit_insn(&Insn::seg_prefix(seg));
                     }
                     self.emit_store_scalar_float_at(&elem_ty, &elem_ty, 1);
                 } else {
                     if let Some(seg) = seg {
-                        self.emit_insn(&Insn::raw_bytes(&[seg]));
+                        self.emit_insn(&Insn::seg_prefix(seg));
                     }
                     match elem_size {
                         1 => { let _ = self.emit_insn(&Insn::mov_rm_mem(
