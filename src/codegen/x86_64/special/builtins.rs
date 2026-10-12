@@ -1411,7 +1411,7 @@ impl Codegen {
                     0x10,
                 )); // mov [rdi+16], r13
                     // buf[0] = receiver 地址: lea rax, [rip+recv] → mov [rdi], rax
-                self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x05, 0, 0, 0, 0]));
+                self.emit_insn(&Insn::lea_rip(0));
                 let disp_pos = self.pos() - 4;
                 self.label_addr_refs.push((disp_pos, recv.clone()));
                 self.emit_insn(&Insn::new(
@@ -1507,7 +1507,7 @@ impl Codegen {
                     7,
                     0x10,
                 )); // mov r13, [rdi+16]
-                self.emit_insn(&Insn::raw_bytes(&[0xFF, 0x27])); // jmp [rdi]
+                self.emit_insn(&Insn::jmp_rm_mem(7, 0)); // jmp [rdi]
                 true
             },
             // __builtin_va_arg_pack: 返回 0 (placeholder)
@@ -2082,9 +2082,9 @@ impl Codegen {
                 //   F3 0F 10 05 disp32 (movss, 4 字节) 或
                 //   F2 0F 10 05 disp32 (movsd, 8 字节)
                 // disp32 在 code_pos+4, 加 REX 不需要 (xmm0 < 8).
-                let prefix = if is_float { 0xF3 } else { 0xF2 };
+                let width = if is_float { SimdWidth::SS } else { SimdWidth::SD };
                 let code_pos = self.pos();
-                self.emit_insn(&Insn::raw_bytes(&[prefix, 0x0F, 0x10, 0x05, 0, 0, 0, 0]));
+                self.emit_insn(&Insn::simd_mov_rip(false, width, 0));
                 // 结果在 xmm0. 若调用方 dst 不是 0, 移动到 dst.
                 if dst != 0 {
                     // dst 应当是 x86 通用寄存器. 使用 movsd/movss 拷贝.
@@ -2115,9 +2115,9 @@ impl Codegen {
                 };
                 let off = self.rodata.len() as u64;
                 self.rodata.extend_from_slice(&bytes);
-                let prefix = if is_float { 0xF3 } else { 0xF2 };
+                let width = if is_float { SimdWidth::SS } else { SimdWidth::SD };
                 let code_pos = self.pos();
-                self.emit_insn(&Insn::raw_bytes(&[prefix, 0x0F, 0x10, 0x05, 0, 0, 0, 0]));
+                self.emit_insn(&Insn::simd_mov_rip(false, width, 0));
                 if dst != 0 {
                     if is_float {
                         self.emit_insn(&Insn::movss_xmm_store(dst, 0));
@@ -4331,7 +4331,7 @@ impl Codegen {
                     },
                     &[],
                 )); // xor dl, 1 (反转: 溢出=1)
-                                                                       // 7. 存储截断结果到 *ptr
+                    // 7. 存储截断结果到 *ptr
                 match result_size {
                     4 => {
                         self.emit_insn(&Insn::mov_rm_mem(

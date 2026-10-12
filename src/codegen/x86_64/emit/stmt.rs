@@ -1129,7 +1129,7 @@ impl Codegen {
                     &[],
                 );
                 if !self.emit_insn(&insn) {
-                    self.emit_insn(&Insn::raw_bytes(&[0xFF, 0xE0])); // jmp rax
+                    self.emit_insn(&Insn::jmp_rm_reg(0)); // jmp rax
                 }
             },
             Stmt::Fallthrough { .. } => {},

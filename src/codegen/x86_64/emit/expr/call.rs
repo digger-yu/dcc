@@ -126,7 +126,7 @@ impl Codegen {
                 // 理论上不应到达此处 (常量折叠应消除调用).
                 // 作为安全网, 发射 ud2 (unreachable) 避免生成对外部
                 // 未定义函数的调用, 防止链接失败.
-                self.emit_insn(&Insn::raw_bytes(&[0x0f, 0x0b])); // ud2
+                self.emit_insn(&Insn::ud2()); // ud2
             } else {
                 self.emit_sysv_call(Some(&name_name), None, args, sret_off);
                 self.gen_call_result_move(ty, dst, sret_off);
@@ -173,7 +173,8 @@ impl Codegen {
                 self.mov(6, 0); // rsi = rax (缓冲地址)
                 self.emit_lea_r13(7, result_off); // rdi = r13+result_off
                 self.mov_imm(1, ty.size() as i128);
-                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld)); self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // cld; rep movsb
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld));
+                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // cld; rep movsb
                 let _ = off;
             } else if matches!(inner.base, Type::Float) {
                 // SysV ABI: _Complex float 是单个 8 字节 SSE 类,

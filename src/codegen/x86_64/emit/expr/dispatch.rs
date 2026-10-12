@@ -628,7 +628,7 @@ impl Codegen {
                     // 未溢出: 跳过 trap 直接到 ok
                     self.jmp_rel32(&ok, JumpKind::Jmp);
                     self.label(&trap_label);
-                    self.emit_insn(&Insn::raw_bytes(&[0xe8, 0, 0, 0, 0])); // call rel32
+                    self.emit_insn(&Insn::call_rel32()); // call rel32
                     let call_at = self.code.len() as u64 - 4;
                     self.pending_func_rels
                         .push((call_at, "__dcc_trapv_overflow".to_string()));
@@ -2755,7 +2755,7 @@ impl Codegen {
                             self.jmp_rel32(&trap_label, JumpKind::Jo);
                             self.jmp_rel32(&ok, JumpKind::Jmp);
                             self.label(&trap_label);
-                            self.emit_insn(&Insn::raw_bytes(&[0xe8, 0, 0, 0, 0])); // call rel32
+                            self.emit_insn(&Insn::call_rel32()); // call rel32
                             let call_at = self.code.len() as u64 - 4;
                             self.pending_func_rels
                                 .push((call_at, "__dcc_trapv_overflow".to_string()));
@@ -3502,13 +3502,13 @@ impl Codegen {
                             e.ty()
                         ),
                     );
-                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x0B])); // ud2
+                    self.emit_insn(&Insn::ud2()); // ud2
                     self.mov_imm(dst, 0);
                 }
             },
             _ => {
                 self.expr_warn(e, "codegen unsupported expression; emitted as ud2");
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x0B])); // ud2
+                self.emit_insn(&Insn::ud2()); // ud2
                 self.mov_imm(dst, 0);
             },
         }

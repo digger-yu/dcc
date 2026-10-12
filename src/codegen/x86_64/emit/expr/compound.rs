@@ -93,7 +93,7 @@ impl Codegen {
                         e.ty()
                     ),
                 );
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x0B])); // ud2
+                self.emit_insn(&Insn::ud2()); // ud2
                 self.mov_imm(dst, 0);
             }
         }

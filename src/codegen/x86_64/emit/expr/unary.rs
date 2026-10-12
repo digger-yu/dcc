@@ -35,18 +35,18 @@ impl Codegen {
                         0,
                     )); // neg rax
                         // P11: adc rdx, 0 via AluRm typed (imm=0 fits i8).
-                        self.emit_insn(&Insn::new(
-                            crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
-                                op: crate::codegen::x86_64::opcode::AluOp::Adc,
-                                width: crate::codegen::shared::asm_operand::Width::B64,
-                                dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                                    2,
-                                    crate::codegen::shared::asm_operand::Width::B64,
-                                ),
-                                src: crate::codegen::x86_64::opcode::Operand::Imm(0),
-                            },
-                            &[],
-                        ));
+                    self.emit_insn(&Insn::new(
+                        crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                            op: crate::codegen::x86_64::opcode::AluOp::Adc,
+                            width: crate::codegen::shared::asm_operand::Width::B64,
+                            dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                2,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                            ),
+                            src: crate::codegen::x86_64::opcode::Operand::Imm(0),
+                        },
+                        &[],
+                    ));
                     self.emit_insn(&Insn::unary_rm_reg(
                         crate::codegen::x86_64::opcode::UnaryOp::Neg,
                         crate::codegen::shared::asm_operand::Width::B64,
@@ -91,7 +91,7 @@ impl Codegen {
                         crate::codegen::x86_64::opcode::CondCode::Eq,
                         0,
                     )); // sete al
-                    // P11: movzbq al, rax via MovExt typed.
+                        // P11: movzbq al, rax via MovExt typed.
                     self.emit_insn(&Insn::mov_ext(
                         false,
                         crate::codegen::shared::asm_operand::Width::B8,
@@ -479,7 +479,7 @@ impl Codegen {
                     self.jmp_rel32(&trap_label, JumpKind::Jo);
                     self.jmp_rel32(&ok, JumpKind::Jmp);
                     self.label(&trap_label);
-                    self.emit_insn(&Insn::raw_bytes(&[0xe8, 0, 0, 0, 0])); // call rel32
+                    self.emit_insn(&Insn::call_rel32()); // call rel32
                     let call_at = self.code.len() as u64 - 4;
                     self.pending_func_rels
                         .push((call_at, "__dcc_trapv_overflow".to_string()));
