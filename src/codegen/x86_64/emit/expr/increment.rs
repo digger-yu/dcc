@@ -484,11 +484,14 @@ impl super::super::super::Codegen {
         is_pre: bool,
         is_inc: bool,
     ) {
-        // Use bf_rmw_depth for frame temp slots (same as bitfield write)
-        let depth = self.bf_rmw_depth as i32;
-        let addr_slot = (-8 - depth * 24) as i8;
-        let old_slot = (-16 - depth * 24) as i8;
-        let new_slot = (-24 - depth * 24) as i8;
+        // Use bf_rmw_depth for frame temp slots (same as bitfield write).
+        // 走 LayoutMap::bf_rmw_slot 取 BF_RMW 专用带, 不再从 -8/-16/-24 硬算.
+        // 几何与 dispatch.rs 位域写 RMW 统一为 3 槽/层 (24B 对齐 32B),
+        // slot 0=容器地址, slot 1=旧值, slot 2=新值.
+        let depth = self.bf_rmw_depth as i64;
+        let addr_slot = self.frame_layout.bf_rmw_slot(depth, 0);
+        let old_slot = self.frame_layout.bf_rmw_slot(depth, 1);
+        let new_slot = self.frame_layout.bf_rmw_slot(depth, 2);
         self.bf_rmw_depth += 1;
 
         // 1. Get container address, save to frame slot
@@ -504,7 +507,7 @@ impl super::super::super::Codegen {
             self.emit_insn(&Insn::alu_acc_imm32_b64_acc_gas(0x05, field_off as i32, &gas));
         }
         // rax = container address
-        self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 13, addr_slot as i32)); // [r13+addr_slot] = addr
+        self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 13, addr_slot)); // [r13+addr_slot] = addr
 
         // 2. Load container, extract bitfield value
         match container_size {
@@ -671,7 +674,7 @@ impl super::super::super::Codegen {
             }
         }
         // rax = old bitfield value
-        self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 13, old_slot as i32)); // save old
+        self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 13, old_slot)); // save old
 
         // 3. Compute new value
         self.emit_inc_dec_reg(0, is_inc, 1);
@@ -757,11 +760,11 @@ impl super::super::super::Codegen {
             }
         }
         // rax = new bitfield value
-        self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 13, new_slot as i32)); // save new
+        self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 13, new_slot)); // save new
 
         // 4. Write back: RMW on container
         // Reload address into rcx
-        self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 1, 13, addr_slot as i32)); // rcx = addr
+        self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 1, 13, addr_slot)); // rcx = addr
                                                                                       // Load container into rcx
         match container_size {
             4 => {
@@ -860,7 +863,7 @@ impl super::super::super::Codegen {
             self.emit_insn(&insn);
         }
         // Load new value into rdx, shift, OR
-        self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 2, 13, new_slot as i32)); // rdx = new val
+        self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 2, 13, new_slot)); // rdx = new val
         if bit_off > 0 {
             // shl rdx, imm8 (P11: Shift typed 总是 Some).
             let insn = Insn::new(
@@ -895,7 +898,7 @@ impl super::super::super::Codegen {
         // Store container back. 基线 raw: addr 在 rax(0), 合并值在 rcx(1):
         //   sz=4: 89 08 = mov %ecx, (%rax);  sz=2: 66 89 01 = mov %ax,(%rcx) 特例见下
         //   sz=1: 88 08 = mov %cl,(%rax);    sz=8: 48 89 01 = mov %rcx,(%rcx) 特例见下
-        self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 0, 13, addr_slot as i32)); // rax = addr
+        self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 0, 13, addr_slot)); // rax = addr
         match container_size {
             4 => {
                 self.emit_insn(&Insn::mov_rm_mem(false, Width::B32, 1, 0, 0));
@@ -915,13 +918,13 @@ impl super::super::super::Codegen {
         // 5. Set return value
         if is_pre {
             // Return new value
-            self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 0, 13, new_slot as i32)); // rax = new
+            self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 0, 13, new_slot)); // rax = new
             if dst != 0 {
                 self.mov(dst, 0);
             }
         } else {
             // Return old value
-            self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 0, 13, old_slot as i32)); // rax = old
+            self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 0, 13, old_slot)); // rax = old
             if dst != 0 {
                 self.mov(dst, 0);
             }
