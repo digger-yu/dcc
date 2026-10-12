@@ -40,6 +40,9 @@ mod insn;
 mod instructions;
 mod mem;
 mod opcode;
+/// P12-B: encode() 矩阵单测基础设施. 只在 `cargo test` 下编译.
+#[cfg(test)]
+mod opcode_encode_matrix;
 mod parallel;
 /// P10: x86-64 指令解码器 → GAS AT&T 文本.
 /// 原生发射路径在 -S 渲染时用它把字节反推为文本 (等价于之前的
