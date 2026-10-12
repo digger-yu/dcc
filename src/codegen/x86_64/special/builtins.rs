@@ -2221,7 +2221,6 @@ impl Codegen {
                     "__builtin_clz" => 32,
                     _ => args[0].ty().size() as i32 * 8,
                 };
-                let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
                 // bsr dst, dst → dst = 最高位位置
                 self.emit_insn(&Insn::bit_scan_reg_reg(true, crate::codegen::shared::asm_operand::Width::B64, dst, dst));
                 // clz = (bits - 1) - dst
@@ -2230,12 +2229,8 @@ impl Codegen {
                     crate::codegen::shared::asm_operand::Width::B64,
                     dst,
                 ));
-                self.emit_insn(&Insn::raw_bytes(&[
-                    rex,
-                    0x83,
-                    0xC0 | ((dst & 7) << 3) | (dst & 7),
-                    (bits - 1) as u8,
-                ])); // add dst, bits-1
+                // P11 Bucket N11: add dst, bits-1 via typed alu_rm_reg_imm8_b64 (op=/0=add).
+                self.emit_insn(&Insn::alu_rm_reg_imm8_b64(0, dst, (bits - 1) as i64));
                 true
             },
             // __builtin_ctz/ctzl/ctzll: 尾随零计数
