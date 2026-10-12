@@ -78,15 +78,15 @@ impl Codegen {
         // 4C 89 EF = mov rdi, r13 (REX.WR, src=r13 in r/m, dst=rdi in reg)
         self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 7, 13)); // mov rdi, r13
         self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 7, 0xFFFFF000u32 as i64)); // and rdi, ~0xFFF
-        // rdi -= 0x1000 (下方页)
+                                                                                 // rdi -= 0x1000 (下方页)
         self.emit_insn(&Insn::alu_rm_reg_imm32_b64(5, 7, 0x1000)); // sub rdi, 0x1000
-        // rsi = 0x2000 (两页)
+                                                                   // rsi = 0x2000 (两页)
         self.emit_insn(&Insn::mov_reg_imm32_b64(6, 0x2000)); // mov rsi, 0x2000
-        // rdx = 7 (PROT_READ|PROT_WRITE|PROT_EXEC)
+                                                             // rdx = 7 (PROT_READ|PROT_WRITE|PROT_EXEC)
         self.emit_insn(&Insn::mov_reg_imm32_b64(2, 7)); // mov rdx, 7
-        // rax = 10 (SYS_mprotect)
+                                                        // rax = 10 (SYS_mprotect)
         self.emit_insn(&Insn::mov_reg_imm32_b64(0, 10)); // mov rax, 10
-        // syscall
+                                                         // syscall
         self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Syscall));
         // syscall 破坏: rax, rcx, r11
         // 恢复 rax (可能被后续代码使用)
@@ -106,8 +106,10 @@ impl Codegen {
         tramp_names.sort();
         // 名字与槽位一起拿成 owned 列表：循环体里全是 `&mut self`，借着
         // HashMap 的键就不能再发射。
-        let ordered: Vec<(String, i64)> =
-            tramp_names.iter().map(|n| ((*n).clone(), self.trampoline_slots[*n])).collect();
+        let ordered: Vec<(String, i64)> = tramp_names
+            .iter()
+            .map(|n| ((*n).clone(), self.trampoline_slots[*n]))
+            .collect();
         for (name, tramp_off) in &ordered {
             let tramp_off = *tramp_off;
             // 加载嵌套函数地址到 rax
@@ -126,25 +128,31 @@ impl Codegen {
             // 关键: 静态链必须在写入时捕获定义父帧的 r13 值烘焙为立即数,
             // 而非调用时读取调用者 r13 — 否则外部函数调用函数指针时
             // 静态链会指向调用者帧, 嵌套函数访问父帧 upvar 时读到垃圾。
+            use crate::codegen::shared::asm_operand::Width::*;
             // 写入字节 0-1: movabs r10 = 49 ba
-            self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x07, 0x49])); // mov BYTE [rdi+0], 0x49
-            self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x47, 0x01, 0xBA])); // mov BYTE [rdi+1], 0xBA
-                                                        // 写入字节 2-9: 定义父帧指针 (当前 r13 值)
-                                                        // mov [rdi+2], r13 = 4C 89 6F 02 (REX.WB, r13 为源寄存器)
-            self.emit_insn(&Insn::raw_bytes(&[0x4C, 0x89, 0x6F, 0x02]));
+            // store_imm_mem(B8, base=rdi=7, disp=0, imm=0x49) = C6 07 49
+            self.emit_insn(&Insn::store_imm_mem(B8, 7, 0, 0x49));
+            // store_imm_mem(B8, 7, 1, 0xBA) = C6 47 01 BA
+            self.emit_insn(&Insn::store_imm_mem(B8, 7, 1, 0xBA));
+            // 写入字节 2-9: 定义父帧指针 (当前 r13 值)
+            // mov_rm_mem(load=false, B64, src=r13=13, base=rdi=7, disp=2) = 4C 89 6F 02
+            self.emit_insn(&Insn::mov_rm_mem(false, B64, 13, 7, 2));
             // 写入字节 10-11: movabs r11 = 49 bb
-            self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x47, 0x0A, 0x49])); // mov BYTE [rdi+10], 0x49
-            self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x47, 0x0B, 0xBB])); // mov BYTE [rdi+11], 0xBB
-                                                        // 写入字节 12-19: 函数地址 (rax 中的 8 字节)
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0x89, 0x47, 0x0C])); // mov [rdi+12], rax
-                                                  // 写入字节 20-22: jmp r11 = 41 ff e3
-            self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x47, 0x14, 0x41])); // mov BYTE [rdi+20], 0x41
-            self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x47, 0x15, 0xFF])); // mov BYTE [rdi+21], 0xFF
-            self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x47, 0x16, 0xE3])); // mov BYTE [rdi+22], 0xE3
-                                                        // 写入字节 23-31: nop 填充 (不执行)
-            self.emit_insn(&Insn::raw_bytes(&[0xC6, 0x47, 0x17, 0x90])); // mov BYTE [rdi+23], 0x90
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC7, 0x47, 0x18])); // mov QWORD [rdi+24]
-            self.emit_insn(&Insn::raw_bytes(&0x9090909090909090u64.to_le_bytes()));
+            self.emit_insn(&Insn::store_imm_mem(B8, 7, 0x0A, 0x49));
+            self.emit_insn(&Insn::store_imm_mem(B8, 7, 0x0B, 0xBB));
+            // 写入字节 12-19: 函数地址 (rax 中的 8 字节)
+            // mov_rm_mem(false, B64, rax=0, rdi=7, 0x0C) = 48 89 47 0C
+            self.emit_insn(&Insn::mov_rm_mem(false, B64, 0, 7, 0x0C));
+            // 写入字节 20-22: jmp r11 = 41 ff e3
+            self.emit_insn(&Insn::store_imm_mem(B8, 7, 0x14, 0x41));
+            self.emit_insn(&Insn::store_imm_mem(B8, 7, 0x15, 0xFF));
+            self.emit_insn(&Insn::store_imm_mem(B8, 7, 0x16, 0xE3));
+            // 写入字节 23: nop 填充 (不执行)
+            self.emit_insn(&Insn::store_imm_mem(B8, 7, 0x17, 0x90));
+            // 写入字节 24-31: nop 填充 (不执行)
+            // store_imm_mem(B64, 7, 0x18, 0x9090909090909090)
+            //   = 48 C7 47 18 90 90 90 90 90 90 90 90 (12 bytes, imm32=0x90909090 零扩展)
+            self.emit_insn(&Insn::store_imm_mem(B64, 7, 0x18, 0x9090909090909090u64 as i64));
         }
     }
     pub(crate) fn gen_trampoline(&mut self, nested_name: &str) -> i64 {
@@ -156,8 +164,7 @@ impl Codegen {
         let tramp_size: i64 = 32;
         // Trampoline 槽位位于帧底部 trampoline reserve (256 字节) 内
         // 从 reserve 顶部向下分配: 第一个槽在 tramp_top(-frame_size+256) 之下
-        let offset =
-            self.frame_layout.tramp_top - self.trampoline_total_size as i64 - tramp_size;
+        let offset = self.frame_layout.tramp_top - self.trampoline_total_size as i64 - tramp_size;
         self.trampoline_total_size += tramp_size as i32;
         self.trampoline_slots
             .insert(nested_name.to_string(), offset);
@@ -184,6 +191,7 @@ impl Codegen {
                 // base=dst, index=r10, disp=0.
                 let insn = Insn::new(
                     X86_64Opcode::MovRm {
+                        rip_relative: false,
                         width: crate::codegen::shared::asm_operand::Width::B64,
                         dst: Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B64),
                         src: Operand::Mem(MemOperand {
@@ -225,7 +233,12 @@ impl Codegen {
             let insn = Insn::new(
                 X86_64Opcode::Lea {
                     dst: Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B64),
-                    mem: MemOperand { disp: off as i32, base: Some(11), index: None, seg: None },
+                    mem: MemOperand {
+                        disp: off as i32,
+                        base: Some(11),
+                        index: None,
+                        seg: None,
+                    },
                     rip_relative: false,
                 },
                 &[],
@@ -237,7 +250,12 @@ impl Codegen {
             let insn = Insn::new(
                 X86_64Opcode::Lea {
                     dst: Operand::Reg(dst, crate::codegen::shared::asm_operand::Width::B64),
-                    mem: MemOperand { disp: 0, base: Some(11), index: Some((10, 1)), seg: None },
+                    mem: MemOperand {
+                        disp: 0,
+                        base: Some(11),
+                        index: Some((10, 1)),
+                        seg: None,
+                    },
                     rip_relative: false,
                 },
                 &[],
@@ -270,7 +288,12 @@ impl Codegen {
                 let insn = Insn::new(
                     X86_64Opcode::Lea {
                         dst: Operand::Reg(11, crate::codegen::shared::asm_operand::Width::B64),
-                        mem: MemOperand { disp: 0, base: Some(11), index: Some((10, 1)), seg: None },
+                        mem: MemOperand {
+                            disp: 0,
+                            base: Some(11),
+                            index: Some((10, 1)),
+                            seg: None,
+                        },
                         rip_relative: false,
                     },
                     &[],
@@ -318,7 +341,12 @@ impl Codegen {
             let insn = Insn::new(
                 X86_64Opcode::Lea {
                     dst: Operand::Reg(11, crate::codegen::shared::asm_operand::Width::B64),
-                    mem: MemOperand { disp: 0, base: Some(11), index: Some((10, 1)), seg: None },
+                    mem: MemOperand {
+                        disp: 0,
+                        base: Some(11),
+                        index: Some((10, 1)),
+                        seg: None,
+                    },
                     rip_relative: false,
                 },
                 &[],
@@ -339,6 +367,7 @@ impl Codegen {
                     // movzx reg, byte[r11] SIB 形态: index=r10 (恒为 10).
                     let sib_insn = Insn::new(
                         X86_64Opcode::MovExt {
+                            rip_relative: false,
                             sign: false,
                             from,
                             to: crate::codegen::shared::asm_operand::Width::B64,
@@ -362,6 +391,7 @@ impl Codegen {
                     };
                     let mov_insn = Insn::new(
                         X86_64Opcode::MovRm {
+                            rip_relative: false,
                             width,
                             dst: Operand::Reg(reg, width),
                             src: Operand::Mem(MemOperand {
@@ -447,7 +477,12 @@ impl Codegen {
                 let insn = Insn::new(
                     X86_64Opcode::Lea {
                         dst: Operand::Reg(11, crate::codegen::shared::asm_operand::Width::B64),
-                        mem: MemOperand { disp: 0, base: Some(11), index: Some((10, 1)), seg: None },
+                        mem: MemOperand {
+                            disp: 0,
+                            base: Some(11),
+                            index: Some((10, 1)),
+                            seg: None,
+                        },
                         rip_relative: false,
                     },
                     &[],
@@ -474,7 +509,12 @@ impl Codegen {
             let insn = Insn::new(
                 X86_64Opcode::Lea {
                     dst: Operand::Reg(11, crate::codegen::shared::asm_operand::Width::B64),
-                    mem: MemOperand { disp: 0, base: Some(11), index: Some((10, 1)), seg: None },
+                    mem: MemOperand {
+                        disp: 0,
+                        base: Some(11),
+                        index: Some((10, 1)),
+                        seg: None,
+                    },
                     rip_relative: false,
                 },
                 &[],
@@ -490,6 +530,7 @@ impl Codegen {
             };
             let store_insn = Insn::new(
                 X86_64Opcode::MovRm {
+                    rip_relative: false,
                     width,
                     dst: Operand::Mem(MemOperand {
                         disp: 0,

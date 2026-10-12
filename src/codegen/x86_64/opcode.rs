@@ -94,6 +94,8 @@ pub(crate) enum NoArgOp {
     RetNear,
     /// P11 Bucket M: ud2 = 0F 0B (explicit undefined for zero-div UB).
     Ud2,
+    /// P11 Bucket AS: fwait = 9B (x87 synchronization prefix).
+    Fwait,
 }
 
 /// SIMD 算术 — 步骤 1 不实现.
@@ -655,7 +657,9 @@ impl X86_64Opcode {
                             };
                             let is_b64 = matches!(w, Width::B64);
                             let is_b32 = matches!(w, Width::B32);
-                            if is_b64 || is_b32 {
+                            let is_b16 = matches!(w, Width::B16);
+                            let is_b8 = matches!(w, Width::B8);
+                            if is_b64 || is_b32 || is_b16 || is_b8 {
                                 let mut rex: u8 = 0x40;
                                 if is_b64 {
                                     rex |= 0x08;
@@ -663,13 +667,17 @@ impl X86_64Opcode {
                                 if *reg_idx >= 8 {
                                     rex |= 0x01;
                                 }
-                                let need_rex = is_b64 || *reg_idx >= 8;
+                                let need_rex = is_b64 || *reg_idx >= 8
+                                    || (is_b8 && *reg_idx >= 4);
                                 let modrm: u8 = 0xC0 | (reg_field << 3) | (reg_idx & 7);
-                                let mut out = Vec::with_capacity(4);
+                                let mut out = Vec::with_capacity(6);
+                                if is_b16 {
+                                    out.push(0x66);
+                                }
                                 if need_rex {
                                     out.push(rex);
                                 }
-                                out.push(0x83);
+                                out.push(if is_b8 { 0x80 } else { 0x83 });
                                 out.push(modrm);
                                 out.push(v as u8);
                                 return Some(out);
@@ -2431,6 +2439,7 @@ impl X86_64Opcode {
                     NoArgOp::Cpuid => &[0x0F, 0xA2],
                     NoArgOp::RetNear => &[0xC3],
                     NoArgOp::Ud2 => &[0x0F, 0x0B],
+                    NoArgOp::Fwait => &[0x9B],
                 };
                 Some(bytes.to_vec())
             },
@@ -2814,6 +2823,7 @@ impl X86_64Opcode {
                     NoArgOp::Cpuid => "cpuid",
                     NoArgOp::RetNear => "ret",
                     NoArgOp::Ud2 => "ud2",
+                    NoArgOp::Fwait => "fwait",
                 };
                 String::from(s)
             },
