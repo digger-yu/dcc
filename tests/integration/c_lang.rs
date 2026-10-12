@@ -1817,6 +1817,53 @@ fn bitfield_runtime() {
     assert_eq!(code, 0, "bitfield runtime checks failed (exit={code})");
 }
 
+/// F1: bitfield write RMW temp slots must not clobber the
+/// callee-saved spill region (rbx at -16(%r13) etc). Regression
+/// for H1 in the x86_64 frame-offset-gatekeeper plan.
+#[test]
+#[cfg(unix)]
+fn bitfield_rmw_header() {
+    let src = include_str!("../fixtures/c/bitfield_rmw_header.c");
+    let (out, code) = run_host_link_and_run("bitfield-rmw-header", src);
+    assert!(
+        out.status.success(),
+        "bitfield_rmw_header compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "bitfield_rmw_header checks failed (exit={code})");
+}
+
+/// F1b: mixed bitfield write + inc/dec RMW nesting must not overlap
+/// despite sharing the bf_rmw_depth counter. Regression for H1b.
+#[test]
+#[cfg(unix)]
+fn bitfield_rmw_mixed_nest() {
+    let src = include_str!("../fixtures/c/bitfield_rmw_mixed_nest.c");
+    let (out, code) = run_host_link_and_run("bitfield-rmw-mixed-nest", src);
+    assert!(
+        out.status.success(),
+        "bitfield_rmw_mixed_nest compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "bitfield_rmw_mixed_nest checks failed (exit={code})");
+}
+
+/// F3: deeply nested bitfield RMW must not wrap i8 offsets into
+/// positive r13 displacements that stomp on the caller's frame.
+/// Regression for H1/H2.
+#[test]
+#[cfg(unix)]
+fn bitfield_rmw_deep_nest() {
+    let src = include_str!("../fixtures/c/bitfield_rmw_deep_nest.c");
+    let (out, code) = run_host_link_and_run("bitfield-rmw-deep-nest", src);
+    assert!(
+        out.status.success(),
+        "bitfield_rmw_deep_nest compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "bitfield_rmw_deep_nest checks failed (exit={code})");
+}
+
 /// M2.3: integer promotion and implicit conversion rules.
 #[test]
 #[cfg(unix)]

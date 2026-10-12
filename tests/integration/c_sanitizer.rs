@@ -855,6 +855,28 @@ fn m3_10_stack_canary() {
     assert_eq!(code, 0, "Stack canary checks failed (exit={code})");
 }
 
+/// F2: bitfield RMW temp slots must not overwrite the canary. Built
+/// with -fstack-protector=all so every function installs a canary at
+/// -8(%r13) — any bitfield RMW write into that slot aborts here.
+#[test]
+#[cfg(unix)]
+fn bitfield_rmw_canary() {
+    let src = include_str!("../fixtures/c/bitfield_rmw_canary.c");
+    let (out, exe) = run_compile_and_run_flags(
+        "bitfield-rmw-canary",
+        src,
+        &["-fstack-protector=all"],
+    );
+    assert!(
+        out.status.success(),
+        "bitfield_rmw_canary compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let code = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(code, 0, "bitfield_rmw_canary checks failed (exit={code})");
+}
+
 /// PCH 损坏内容 (非合法 PCH 格式): 验证 W0401 warning 回退
 #[test]
 fn pch_negative_corrupted_content() {
