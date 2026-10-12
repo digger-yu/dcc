@@ -555,6 +555,33 @@ pub(crate) enum X86_64Opcode {
 
     /// P11 Bucket AF: pmulld xmm_dst, xmm_src (SSE4.1: 66 0F 38 40 /r).
     Pmulld { dst: Operand, src: Operand },
+
+    /// P11 Bucket P11R: direct call rel32 (E8 id). Emits `E8 00 00 00 00`;
+    /// the rel32 field is patched later via PendingJump/pending_func_rels.
+    /// No REX, no ModRM — opcode is fixed.
+    CallRel32,
+
+    /// P11 Bucket P11R: direct jmp rel32 (E9 id). Emits `E9 00 00 00 00`;
+    /// rel32 field patched later via PendingJump/pending_func_rels.
+    JmpRel32,
+
+    /// P11 Bucket P11R: jmp r/m64 (FF /4). Used for indirect jumps through
+    /// memory [base+disp] (reg form already covered by Jmp).
+    /// modrm_mod chosen by disp size (00/01/10); SIB emitted when base=rsp/r12.
+    JmpRmMem { base: u8, disp: i32 },
+
+    /// P11 Bucket P11R: push m64 [rsp+disp8] (FF /6). Only base=rsp(4) SIB
+    /// form is encoded here (used by complex.rs spill pushes).
+    PushMemDisp8 { base: u8, disp: i8 },
+
+    /// P11 Bucket P11R: movss/movsd [rip+disp32], xmm or xmm, [rip+disp32].
+    /// mod=00 r/m=101 (rip-relative). disp32 is patched via float_refs /
+    /// pending_tls_rels / pending_data_rels.
+    SimdMovRip {
+        store: bool,
+        width: SimdWidth,
+        xmm: u8,
+    },
 }
 
 impl X86_64Opcode {
@@ -667,8 +694,7 @@ impl X86_64Opcode {
                                 if *reg_idx >= 8 {
                                     rex |= 0x01;
                                 }
-                                let need_rex = is_b64 || *reg_idx >= 8
-                                    || (is_b8 && *reg_idx >= 4);
+                                let need_rex = is_b64 || *reg_idx >= 8 || (is_b8 && *reg_idx >= 4);
                                 let modrm: u8 = 0xC0 | (reg_field << 3) | (reg_idx & 7);
                                 let mut out = Vec::with_capacity(6);
                                 if is_b16 {
@@ -2386,6 +2412,85 @@ impl X86_64Opcode {
                 out.push(0x38);
                 out.push(0x40);
                 out.push(0xC0 | ((*dst_idx & 7) << 3) | (*src_idx & 7));
+                Some(out)
+            },
+            // P11 Bucket P11R: direct call rel32 (E8 00 00 00 00).
+            // 5 bytes total; rel32 field is patched later by pending_func_rels.
+            X86_64Opcode::CallRel32 => Some(vec![0xE8, 0, 0, 0, 0]),
+            // P11 Bucket P11R: direct jmp rel32 (E9 00 00 00 00).
+            X86_64Opcode::JmpRel32 => Some(vec![0xE9, 0, 0, 0, 0]),
+            // P11 Bucket P11R: jmp r/m64 (FF /4).
+            // Used for indirect jump through memory [base+disp].
+            // modrm_mod chosen by disp size; SIB emitted when base=rsp(4)/r12(12).
+            X86_64Opcode::JmpRmMem { base, disp } => {
+                let rm_field = base & 7;
+                let need_sib = rm_field == 4;
+                // mod=00 if disp=0 and base!=rbp(5); base=rbp(5) at mod=00 is
+                // rip-relative, so force mod=01 disp8=0 to keep [rbp+disp].
+                let (modrm_mod, disp_bytes): (u8, Vec<u8>) =
+                    if *disp == 0 && rm_field != 5 {
+                        (0u8, Vec::new())
+                    } else if *disp == 0 && rm_field == 5 {
+                        (1u8, vec![0u8])
+                    } else if let Ok(d) = i8::try_from(*disp) {
+                        (1u8, vec![d as u8])
+                    } else {
+                        (2u8, disp.to_le_bytes().to_vec())
+                    };
+                let mut out = Vec::with_capacity(8);
+                if *base >= 8 {
+                    out.push(0x41); // REX.B
+                }
+                out.push(0xFF);
+                let modrm_rm = if need_sib { 4 } else { rm_field };
+                // /4 = reg field 0b100.
+                out.push((modrm_mod << 6) | (0b100 << 3) | modrm_rm);
+                if need_sib {
+                    // SIB: scale=0, index=4(no index), base=rm_field.
+                    out.push(0x20 | rm_field);
+                }
+                out.extend_from_slice(&disp_bytes);
+                Some(out)
+            },
+            // P11 Bucket P11R: push m64 [rsp+disp8] (FF /6).
+            // Only base=rsp(4) SIB form is encoded (used by complex.rs spills).
+            X86_64Opcode::PushMemDisp8 { base, disp } => {
+                let rm_field = *base & 7;
+                let need_sib = rm_field == 4;
+                // /6 push mem. mod=01, disp8.
+                let modrm_rm = if need_sib { 4 } else { rm_field };
+                let mut out = Vec::with_capacity(4);
+                if *base >= 8 {
+                    out.push(0x41);
+                }
+                out.push(0xFF);
+                out.push((1u8 << 6) | (0b110 << 3) | modrm_rm);
+                if need_sib {
+                    out.push(0x20 | rm_field);
+                }
+                out.push(*disp as u8);
+                Some(out)
+            },
+            // P11 Bucket P11R: movss/movsd [rip+disp32] load/store.
+            // pfx: SS=F3, SD=F2. store=true: 0F 11, false: 0F 10.
+            // mod=00 r/m=101, reg=xmm (REX.R if xmm>=8).
+            X86_64Opcode::SimdMovRip { store, width, xmm } => {
+                let pfx: u8 = match width {
+                    SimdWidth::SS => 0xF3,
+                    SimdWidth::SD => 0xF2,
+                    _ => return None,
+                };
+                let opc2: u8 = if *store { 0x11 } else { 0x10 };
+                let mut out = Vec::with_capacity(8);
+                out.push(pfx);
+                if *xmm >= 8 {
+                    out.push(0x44); // REX.R
+                }
+                out.push(0x0F);
+                out.push(opc2);
+                // mod=00, reg=xmm&7, r/m=101 (rip-rel).
+                out.push(((*xmm & 7) << 3) | 0x05);
+                out.extend_from_slice(&0i32.to_le_bytes());
                 Some(out)
             },
             X86_64Opcode::Setcc { cc, dst } => {
