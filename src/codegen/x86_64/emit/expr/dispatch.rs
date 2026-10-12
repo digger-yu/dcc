@@ -1434,10 +1434,15 @@ impl Codegen {
                         let bw = f.bit_width.unwrap();
                         let container_size = f.ty.size();
                         let bit_off = f.bit_offset;
-                        // 按嵌套深度计算帧槽偏移 (避免嵌套位域 RMW 互相覆盖)
-                        let depth = self.bf_rmw_depth as i32;
-                        let addr_off = (-8 - depth * 16) as i8; // 地址槽
-                        let val_off = (-16 - depth * 16) as i8; // 值槽
+                        // 按嵌套深度计算帧槽偏移 (避免嵌套位域 RMW 互相覆盖).
+                        // 走 LayoutMap::bf_rmw_slot 取 BF_RMW 专用带, 不再从 -8/-16
+                        // 硬算 (原写法与金丝雀 -8、callee-saved -16..-40 同格,
+                        // depth>=8 时 i8 回绕成 +120(%r13) 写调用者帧/返回地址).
+                        // slot 0 = 容器地址, slot 1 = 容器值. 统一为 3 槽/层,
+                        // 与自增路径 (increment.rs) 几何一致, 消灭 H1b 同格.
+                        let depth = self.bf_rmw_depth as i64;
+                        let addr_off = self.frame_layout.bf_rmw_slot(depth, 0);
+                        let val_off = self.frame_layout.bf_rmw_slot(depth, 1);
                                                                 // rax = 容器地址
                                                                 // 保存地址到帧临时槽1: [r13 + addr_off]
                                                                 // mov [r13+addr_off], rax (r13=13)
@@ -1446,7 +1451,7 @@ impl Codegen {
                             Width::B64,
                             0,
                             13,
-                            addr_off as i32,
+                            addr_off,
                         ));
                         // 加载当前容器值 (结果统一放入 rax)
                         match container_size {
@@ -1512,7 +1517,7 @@ impl Codegen {
                             _ => {},
                         }
                         // 保存容器值到帧临时槽2: [r13 + val_off]
-                        self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 13, val_off as i32));
+                        self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 13, val_off));
                         // 计算右值 (递增嵌套深度, 防止内部位域 RMW 覆盖本层帧槽)
                         self.bf_rmw_depth += 1;
                         self.gen_expr(r, Self::EVAL_BASE); // rax = 新值
@@ -1559,7 +1564,7 @@ impl Codegen {
                         // rax = 移位后的新值
                         // 重新从内存加载容器值 (RHS 求值可能已修改内存中的容器)
                         // rcx = [r13 + addr_off] (地址)
-                        self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 1, 13, addr_off as i32)); // mov rcx, [r13+addr_off]
+                        self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 1, 13, addr_off)); // mov rcx, [r13+addr_off]
                                                                                                      // rcx = [rcx] (从内存重新加载容器)
                         match container_size {
                             4 => {
@@ -1645,7 +1650,7 @@ impl Codegen {
                         // or rcx, rax
                         let _ = self.emit_insn(&Insn::alu_rm_reg_reg(AluOp::Or, Width::B64, 1, 0));
                         // 加载地址: rdx = [r13 + addr_off]
-                        self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 2, 13, addr_off as i32)); // mov rdx, [r13+addr_off]
+                        self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 2, 13, addr_off)); // mov rdx, [r13+addr_off]
                                                                                                      // 存储容器 (结果在 rcx 中)
                         match container_size {
                             4 => {
@@ -1711,7 +1716,7 @@ impl Codegen {
                                 Width::B64,
                                 2,
                                 13,
-                                addr_off as i32,
+                                addr_off,
                             )); // mov rdx, [r13+addr_off]
                                 // rdx = [rdx] (重新加载容器)
                             match container_size {
