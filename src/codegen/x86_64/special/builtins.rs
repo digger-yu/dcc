@@ -198,16 +198,10 @@ impl Codegen {
                 self.gen_expr(&args[0], 7); // rdi = ptr
                 self.gen_expr(&args[1], Self::EVAL_BASE); // rax = expected (cmpxchg 用 rax)
                                             // 保存 expected 到帧临时槽, 因为还需要写入
-                let slot = -8 - (self.expr_depth as i32 * 8);
+                let slot = -8i64 - (self.expr_depth as i64 * 8);
                 {
-                    let rex = 0x49u8;
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x89]));
-                    if slot.abs() < 128 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x45, slot as i8 as u8]));
-                    } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0x85]));
-                        self.emit_insn(&Insn::raw_bytes(&slot.to_le_bytes()));
-                    }
+                    // P11 Bucket N11: store rax to r13 slot via store_stack.
+                    self.store_stack(0, slot);
                 }
                 // 解引用 expected 指针, rax = *expected (实际期望值)
                 self.emit_insn(&Insn::new(
@@ -235,14 +229,8 @@ impl Codegen {
                 // 失败: 将 rax (当前值) 写入 [expected_ptr]
                 // 把 expected 指针加载到 rsi (而非 rax, rax 保留当前值)
                 {
-                    let rex = 0x49u8;
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B]));
-                    if slot.abs() < 128 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x75, slot as i8 as u8])); // modrm: [r13+disp8], reg=rsi
-                    } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0xB5])); // modrm: [r13+disp32], reg=rsi
-                        self.emit_insn(&Insn::raw_bytes(&slot.to_le_bytes()));
-                    }
+                    // P11 Bucket N11: load rsi from r13 slot via load_stack.
+                    self.load_stack(6, slot);
                 }
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -318,17 +306,11 @@ impl Codegen {
             )); // mov rsi, [rax] (rsi = desired value)
                                                 // Then: compute expected value into rax (last, for cmpxchg)
                 self.gen_expr(&args[1], Self::EVAL_BASE); // rax = expected_ptr
-                let slot = -8 - (self.expr_depth as i32 * 8);
+                let slot = -8i64 - (self.expr_depth as i64 * 8);
                 // Save expected_ptr to stack slot
                 {
-                    let rex = 0x49u8;
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x89]));
-                    if slot.abs() < 128 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x45, slot as i8 as u8]));
-                    } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0x85]));
-                        self.emit_insn(&Insn::raw_bytes(&slot.to_le_bytes()));
-                    }
+                    // P11 Bucket N11: store rax to r13 slot via store_stack.
+                    self.store_stack(0, slot);
                 }
                 // Dereference expected: rax = *expected_ptr
                 self.emit_insn(&Insn::new(
@@ -353,14 +335,8 @@ impl Codegen {
                 self.jmp_rel32(&l_skip, JumpKind::Je);
                 // Failure: write current rax to *expected_ptr
                 {
-                    let rex = 0x49u8;
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B]));
-                    if slot.abs() < 128 {
-                        self.emit_insn(&Insn::raw_bytes(&[0x75, slot as i8 as u8]));
-                    } else {
-                        self.emit_insn(&Insn::raw_bytes(&[0xB5]));
-                        self.emit_insn(&Insn::raw_bytes(&slot.to_le_bytes()));
-                    }
+                    // P11 Bucket N11: load rsi from r13 slot via load_stack.
+                    self.load_stack(6, slot);
                 }
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
