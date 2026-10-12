@@ -560,9 +560,33 @@ impl Codegen {
 
     pub fn store_stack(&mut self, reg: u8, off: i64) {
         if Self::fits_disp32(off) {
-            // 手写完整字节序列 (REX+0x89+ModRM+disp), 携带 gas_text.
-            // 形态: mov %reg, off(%r13) —— reg 在 ModRM.reg, r/m=r13=13=5 (低 3 位).
-            // REX:  0x49 = REX.W + REX.B (r13 是 r/m 高位, 需 B=1). reg>=8 加 REX.R.
+            // P11 O6: 收敛到 MovRm{B64, [r13+off], reg}. encode() 自处理
+            // REX.W/B (r13 base) / REX.R (reg) / ModRM disp8|disp32.
+            // 原手写: 49|rex_r, 0x89, modrm(disp8/disp32).
+            use crate::codegen::shared::asm_operand::Width as W;
+            let gas = format!(
+                "mov {}, {}",
+                GAS_REG64[(reg & 15) as usize],
+                gas_mem_disp(13, off)
+            );
+            let mut insn = Insn::new(
+                X86_64Opcode::MovRm {
+                    width: W::B64,
+                    dst: OpcodeOperand::Mem(MemOperand {
+                        disp: off as i32,
+                        base: Some(13),
+                        index: None,
+                        seg: None,
+                    }),
+                    src: OpcodeOperand::Reg(reg, W::B64),
+                },
+                &[],
+            );
+            insn.gas_text = Some(gas);
+            if self.emit_insn(&insn) {
+                return;
+            }
+            // 兜底: 原手写字节序列.
             let mut rex: u8 = 0x49;
             if reg >= 8 {
                 rex |= 0x04;
@@ -571,7 +595,7 @@ impl Codegen {
             let (modrm, disp_bytes) = gas_modrm_disp_bytes(reg_field, 13, off);
             let mut bytes: Vec<u8> = Vec::with_capacity(2 + 1 + disp_bytes.len());
             bytes.push(rex);
-            bytes.push(0x89); // mov r/m64, r64
+            bytes.push(0x89);
             bytes.push(modrm);
             bytes.extend_from_slice(&disp_bytes);
             let gas = format!("mov {}, {}", GAS_REG64[(reg & 15) as usize], gas_mem_disp(13, off));
@@ -664,11 +688,82 @@ impl Codegen {
 
     pub fn load_stack_sized(&mut self, reg: u8, off: i64, size: usize) {
         if Self::fits_disp32(off) {
-            // 与原手写完全对齐:
-            //   size=1:  0x41|rex_r, 0x0F, 0xB6, modrm(disp8/disp32) — movzbl
-            //   size=2:  0x41|rex_r, 0x0F, 0xB7                       — movzwl
-            //   size=4:  0x41|rex_r, 0x8B                             — movl
-            //   size=8:  0x49|rex_r, 0x8B                             — movq
+            // P11 O6: 收敛到 MovExt / MovRm typed opcode. 与原手写逐字节对齐:
+            //   size=1: MovExt{sign=false, from=B8, to=B32, reg, [r13+off]}  (0F B6)
+            //   size=2: MovExt{sign=false, from=B16, to=B32, reg, [r13+off]} (0F B7)
+            //   size=4: MovRm{B32, reg, [r13+off]}                          (8B)
+            //   size=8: MovRm{B64, reg, [r13+off]}                          (48 8B)
+            // encode() 自处理 REX.R/B / ModRM disp8|disp32 (off=-128 边界与原手写 i8::try_from 一致).
+            use crate::codegen::shared::asm_operand::Width as W;
+            let (op, mnem, reg_name): (X86_64Opcode, &str, &str) = match size {
+                1 => (
+                    X86_64Opcode::MovExt {
+                        sign: false,
+                        from: W::B8,
+                        to: W::B32,
+                        dst: OpcodeOperand::Reg(reg, W::B32),
+                        src: OpcodeOperand::Mem(MemOperand {
+                            disp: off as i32,
+                            base: Some(13),
+                            index: None,
+                            seg: None,
+                        }),
+                    },
+                    "movzbl",
+                    GAS_REG32[(reg & 15) as usize],
+                ),
+                2 => (
+                    X86_64Opcode::MovExt {
+                        sign: false,
+                        from: W::B16,
+                        to: W::B32,
+                        dst: OpcodeOperand::Reg(reg, W::B32),
+                        src: OpcodeOperand::Mem(MemOperand {
+                            disp: off as i32,
+                            base: Some(13),
+                            index: None,
+                            seg: None,
+                        }),
+                    },
+                    "movzwl",
+                    GAS_REG32[(reg & 15) as usize],
+                ),
+                4 => (
+                    X86_64Opcode::MovRm {
+                        width: W::B32,
+                        dst: OpcodeOperand::Reg(reg, W::B32),
+                        src: OpcodeOperand::Mem(MemOperand {
+                            disp: off as i32,
+                            base: Some(13),
+                            index: None,
+                            seg: None,
+                        }),
+                    },
+                    "mov",
+                    GAS_REG32[(reg & 15) as usize],
+                ),
+                _ => (
+                    X86_64Opcode::MovRm {
+                        width: W::B64,
+                        dst: OpcodeOperand::Reg(reg, W::B64),
+                        src: OpcodeOperand::Mem(MemOperand {
+                            disp: off as i32,
+                            base: Some(13),
+                            index: None,
+                            seg: None,
+                        }),
+                    },
+                    "mov",
+                    GAS_REG64[(reg & 15) as usize],
+                ),
+            };
+            let gas = format!("{} {}, {}", mnem, gas_mem_disp(13, off), reg_name);
+            let mut insn = Insn::new(op, &[]);
+            insn.gas_text = Some(gas);
+            if self.emit_insn(&insn) {
+                return;
+            }
+            // 兜底: 原手写字节序列 (理论上不会走到).
             let rex_r = if reg >= 8 { 0x04 } else { 0 };
             let (opc_prefix, opc): (u8, &[u8]) = match size {
                 1 => (0x41 | rex_r, &[0x0F, 0xB6]),
@@ -682,11 +777,6 @@ impl Codegen {
             bytes.extend_from_slice(opc);
             bytes.push(modrm);
             bytes.extend_from_slice(&disp_bytes);
-            // GAS 助记符 (与 objdump/老 disassemble_range 输出对齐):
-            //   size=1: movzbl off(%r13), %reg32  (0x0F 0xB6)
-            //   size=2: movzwl off(%r13), %reg32  (0x0F 0xB7)
-            //   size=4: mov    off(%r13), %reg32  (0x8B, REX.W=0)
-            //   size=8: mov   off(%r13), %reg64  (0x8B, REX.W=1)  ← 老反推输出是 "mov", 不是 "movq"
             let (mnem, reg_name): (&str, &str) = match size {
                 1 => ("movzbl", GAS_REG32[(reg & 15) as usize]),
                 2 => ("movzwl", GAS_REG32[(reg & 15) as usize]),
@@ -712,10 +802,44 @@ impl Codegen {
     }
 
     pub fn emit_store(&mut self, src_reg: u8, offset: i64, size: usize) {
+        use crate::codegen::shared::asm_operand::Width as W;
         use crate::codegen::x86_64::emit::gas::{REG64 as GAS_REG64, REG8 as GAS_REG8, REG16 as GAS_REG16, REG32 as GAS_REG32};
         let emit_direct = |this: &mut Self, src_reg: u8, offset: i64, size: usize| {
-            // 构造完整字节串 + 完整 gas_text, 一条 Insn 发射.
-            let mut bytes: Vec<u8> = Vec::new();
+            // P11 O6: 收敛到 MovRm{width, [r13+offset], src_reg}. encode() 自处理
+            // 0x66 前缀 / REX.W/B / ModRM disp8|disp32.
+            // B8 说明: base=r13(13)>=8 → REX.B 恒发, 与手写 0x41|rex_r 等价.
+            let width = match size {
+                1 => W::B8,
+                2 => W::B16,
+                4 => W::B32,
+                8 => W::B64,
+                _ => return,
+            };
+            let gas_reg_lo = match size {
+                1 => GAS_REG8[(src_reg & 15) as usize].to_string(),
+                2 => GAS_REG16[(src_reg & 15) as usize].to_string(),
+                4 => GAS_REG32[(src_reg & 15) as usize].to_string(),
+                _ => GAS_REG64[(src_reg & 15) as usize].to_string(),
+            };
+            let gas = format!("mov {}, {}(%r13)", gas_reg_lo, offset);
+            let mut insn = Insn::new(
+                X86_64Opcode::MovRm {
+                    width,
+                    dst: OpcodeOperand::Mem(MemOperand {
+                        disp: offset as i32,
+                        base: Some(13),
+                        index: None,
+                        seg: None,
+                    }),
+                    src: OpcodeOperand::Reg(src_reg, width),
+                },
+                &[],
+            );
+            insn.gas_text = Some(gas);
+            if this.emit_insn(&insn) {
+                return;
+            }
+            // 兜底: 原手写字节序列.
             let (rex, op, width_prefix) = match size {
                 1 => (0x41u8 | if src_reg >= 8 { 0x04 } else { 0 }, 0x88u8, None),
                 2 => (0x41u8 | if src_reg >= 8 { 0x04 } else { 0 }, 0x89u8, Some(0x66u8)),
@@ -723,30 +847,22 @@ impl Codegen {
                 8 => (0x49u8 | if src_reg >= 8 { 0x04 } else { 0 }, 0x89u8, None),
                 _ => return,
             };
+            let mut bytes: Vec<u8> = Vec::new();
             if let Some(p) = width_prefix { bytes.push(p); }
             bytes.push(rex);
             bytes.push(op);
-            // emit_r13_modrm_disp: fits_disp8 或 fits_disp32.
             let off_u8: u8 = (offset & 0xFF) as u8;
             let modrm_disp8: u8 = 0x45 | ((src_reg & 7) << 3);
             let modrm_disp32: u8 = 0x85 | ((src_reg & 7) << 3);
-            let gas_reg_lo = match size {
-                1 => GAS_REG8[(src_reg & 15) as usize].to_string(),
-                2 => GAS_REG16[(src_reg & 15) as usize].to_string(),
-                4 => GAS_REG32[(src_reg & 15) as usize].to_string(),
-                _ => GAS_REG64[(src_reg & 15) as usize].to_string(),
-            };
             if Self::fits_disp8(offset) {
                 bytes.push(modrm_disp8);
                 bytes.push(off_u8);
-                let gas = format!("mov {}, {}(%r13)", gas_reg_lo, offset);
-                this.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
             } else if Self::fits_disp32(offset) {
                 bytes.push(modrm_disp32);
                 bytes.extend_from_slice(&(offset as i32).to_le_bytes());
-                let gas = format!("mov {}, {}(%r13)", gas_reg_lo, offset);
-                this.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
             }
+            let gas = format!("mov {}, {}(%r13)", gas_reg_lo, offset);
+            this.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
         };
 
         if Self::fits_disp32(offset) {
