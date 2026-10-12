@@ -1370,10 +1370,8 @@ impl Codegen {
                 self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x29, 0xcc], "sub %rcx, %rsp"));
                                                 // 返回新 rsp 到 dst
                 if dst != 4 && dst != 12 {
-                    let rex = if dst >= 8 { 0x49 } else { 0x48 };
-                    let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, 64)
-                        .unwrap_or_else(|| "%rax".to_string());
-                    self.emit_insn(&Insn::raw_with_gas(&[rex, 0x89, 0xe0 | (dst & 7)], &format!("mov %rsp, {}", dst_name)));
+                    // P11 Bucket N11: mov dst, rsp via typed mov_rm_reg (B64, src=rsp=4).
+                    self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, dst, 4));
                 }
                 true
             },
@@ -3693,8 +3691,8 @@ impl Codegen {
                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::And, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Imm(-16)}, &[])); // and rcx, ~15
                 self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Sub, crate::codegen::shared::asm_operand::Width::B64, 4, 1)); // sub rsp, rcx
                 if dst != 4 && dst != 12 {
-                    let rex = if dst >= 8 { 0x49 } else { 0x48 };
-                    self.emit_insn(&Insn::raw_bytes(&[rex, 0x89, 0xe0 | (dst & 7)])); // mov dst, rsp
+                    // P11 Bucket N11: mov dst, rsp via typed mov_rm_reg (B64, src=rsp=4).
+                    self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, dst, 4)); // mov dst, rsp
                 }
                 true
             },
@@ -4004,7 +4002,8 @@ impl Codegen {
                     self.gen_expr(&args[1], 6); // rsi = dst
                     self.gen_expr(&args[2], 2); // rdx = len
                                                 // 交换 rdi, rsi
-                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0x87, 0xFE])); // xchg rsi, rdi
+                    // P11 Bucket N11: xchg rsi, rdi via typed xchg_reg (B64, modrm form).
+                    self.emit_insn(&Insn::xchg_reg(crate::codegen::shared::asm_operand::Width::B64, 6, 7, false)); // xchg rsi, rdi
                 }
                 self.call_label("memmove");
                 if dst != 7 {
