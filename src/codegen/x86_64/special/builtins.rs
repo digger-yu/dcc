@@ -1364,10 +1364,11 @@ impl Codegen {
                 // 计算分配大小到 rcx (dcc 寄存器编码: 1 = rcx)
                 self.gen_expr(&args[0], 1); // rcx = size
                                             // 对齐到 16 字节: rcx = (rcx + 15) & ~15
-                self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x83, 0xc1, 0x0f], "add $15, %rcx"));
-                self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x83, 0xe1, 0xf0], "and $-16, %rcx"));
+                // P11 Bucket N11: typed alu_rm_reg_imm8_b64 for add/and rcx, imm8.
+                self.emit_insn(&Insn::alu_rm_reg_imm8_b64(0, 1, 15)); // add rcx, 15
+                self.emit_insn(&Insn::alu_rm_reg_imm8_b64(4, 1, -16)); // and rcx, -16
                                                       // sub rsp, rcx
-                self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x29, 0xcc], "sub %rcx, %rsp"));
+                self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Sub, crate::codegen::shared::asm_operand::Width::B64, 4, 1)); // sub rsp, rcx
                                                 // 返回新 rsp 到 dst
                 if dst != 4 && dst != 12 {
                     // P11 Bucket N11: mov dst, rsp via typed mov_rm_reg (B64, src=rsp=4).
@@ -2818,7 +2819,8 @@ impl Codegen {
                         } else if a_uns {
                             self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Mul, crate::codegen::shared::asm_operand::Width::B64, 1)); // mul rcx
                         } else {
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xf7, 0xe9])); // imul rcx
+                            // P11 Bucket N11: imul rcx via typed unary_rm_reg(Imul, B64, rcx=1).
+                            self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Imul, crate::codegen::shared::asm_operand::Width::B64, 1)); // imul rcx
                         }
                         let res_ty = match &args[2].ty() {
                             Type::Ptr(p) => p.base.clone(),
