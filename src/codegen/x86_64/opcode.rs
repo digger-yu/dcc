@@ -416,6 +416,8 @@ pub(crate) enum X86_64Opcode {
     Cvt2Sd {
         to_xmm: bool,
         width: SimdWidth,
+        /// true → GPR operand is r64 (REX.W=1); false → r32 (no REX.W).
+        gpr_64: bool,
         dst: Operand,
         src: Operand,
     },
@@ -1958,7 +1960,7 @@ impl X86_64Opcode {
                 out.push(modrm);
                 Some(out)
             }
-            X86_64Opcode::Cvt2Sd { to_xmm, width, dst, src } => {
+            X86_64Opcode::Cvt2Sd { to_xmm, width, gpr_64, dst, src } => {
                 // P11 Bucket B: cvtsi2sd/cvtsi2ss (r64->xmm) / cvttsd2si/cvttss2si (xmm->r64).
                 //   cvtsi2sd r64,xmm:  F2 REX.W 0F 2A /r  modrm: reg=xmm, r/m=r64
                 //   cvtsi2ss r64,xmm:  F3 REX.W 0F 2A /r
@@ -1983,13 +1985,17 @@ impl X86_64Opcode {
                     (*src_idx, *dst_idx)
                 };
                 let opc2: u8 = if *to_xmm { 0x2A } else { 0x2C };
-                let mut rex: u8 = 0x48; // REX.W always (64-bit GPR operand).
+                let mut rex: u8 = if *gpr_64 { 0x48 } else { 0x40 };
                 if xmm_idx >= 8 { rex |= 0x04; }
                 if gpr_idx >= 8 { rex |= 0x01; }
                 let modrm: u8 = 0xC0 | ((xmm_idx & 7) << 3) | (gpr_idx & 7);
                 let mut out = Vec::with_capacity(6);
                 out.push(pfx);
-                out.push(rex);
+                // P11: 只在真有字段扩位时才发 REX 字节 (B32 路径若两 idx 均<8 则裸 REX 是多余的).
+                let needs_rex = *gpr_64 || xmm_idx >= 8 || gpr_idx >= 8;
+                if needs_rex {
+                    out.push(rex);
+                }
                 out.push(0x0F);
                 out.push(opc2);
                 out.push(modrm);
@@ -3797,6 +3803,7 @@ mod tests {
         let o = X86_64Opcode::Cvt2Sd {
             to_xmm: false,
             width: SimdWidth::SD,
+            gpr_64: true,
             dst: reg(0, Width::B64),
             src: xmm(0),
         };
@@ -3809,6 +3816,7 @@ mod tests {
         let o = X86_64Opcode::Cvt2Sd {
             to_xmm: false,
             width: SimdWidth::SS,
+            gpr_64: true,
             dst: reg(0, Width::B64),
             src: xmm(0),
         };
@@ -3821,6 +3829,7 @@ mod tests {
         let o = X86_64Opcode::Cvt2Sd {
             to_xmm: true,
             width: SimdWidth::SD,
+            gpr_64: true,
             dst: xmm(0),
             src: reg(0, Width::B64),
         };
@@ -3833,10 +3842,37 @@ mod tests {
         let o = X86_64Opcode::Cvt2Sd {
             to_xmm: true,
             width: SimdWidth::SS,
+            gpr_64: true,
             dst: xmm(0),
             src: reg(0, Width::B64),
         };
         assert_eq!(o.encode(), Some(vec![0xF3, 0x48, 0x0F, 0x2A, 0xC0]));
+    }
+
+    #[test]
+    fn cvttss2si_eax_xmm0_b32() {
+        // cvttss2si eax, xmm0: F3 0F 2C C0 (no REX.W)
+        let o = X86_64Opcode::Cvt2Sd {
+            to_xmm: false,
+            width: SimdWidth::SS,
+            gpr_64: false,
+            dst: reg(0, Width::B32),
+            src: xmm(0),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0x0F, 0x2C, 0xC0]));
+    }
+
+    #[test]
+    fn cvttss2si_r8d_xmm0_b32_highreg() {
+        // cvttss2si r8d, xmm0: F3 41 0F 2C C0 (REX.B for r/m=r8)
+        let o = X86_64Opcode::Cvt2Sd {
+            to_xmm: false,
+            width: SimdWidth::SS,
+            gpr_64: false,
+            dst: reg(8, Width::B32),
+            src: xmm(0),
+        };
+        assert_eq!(o.encode(), Some(vec![0xF3, 0x41, 0x0F, 0x2C, 0xC0]));
     }
 
     // ---- SimdArith pand/por/pxor (P11 Bucket F) ----

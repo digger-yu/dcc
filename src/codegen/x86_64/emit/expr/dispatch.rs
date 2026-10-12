@@ -1170,7 +1170,7 @@ impl Codegen {
                                 Type::Float | Type::Double | Type::LongDouble));
                         if is_cx_ptr {
                             if let Some(seg) = seg_prefix {
-                                self.emit_insn(&Insn::raw_bytes(&[seg]));
+                                self.emit_insn(&Insn::seg_prefix(seg));
                             }
                             if let Type::Complex(ref cinner) = assign_l_ty {
                                 self.store_complex_at_rcx(r, &cinner.base);
@@ -1179,7 +1179,7 @@ impl Codegen {
                             self.gen_expr(r, Self::EVAL_BASE); // rax = val
                             self.pop(1); // rcx = addr                            // __seg_gs/__seg_fs 指针存储: 发射段前缀 (%gs:/%fs:)
                             if let Some(seg) = seg_prefix {
-                                self.emit_insn(&Insn::raw_bytes(&[seg]));
+                                self.emit_insn(&Insn::seg_prefix(seg));
                             }
                             if matches!(&assign_l_ty, Type::Float | Type::Double | Type::LongDouble)
                             {

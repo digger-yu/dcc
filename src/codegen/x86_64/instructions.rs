@@ -1941,6 +1941,7 @@ impl Codegen {
                     crate::codegen::x86_64::opcode::X86_64Opcode::Cvt2Sd {
                         to_xmm: true,
                         width: crate::codegen::x86_64::opcode::SimdWidth::SS,
+                        gpr_64: true,
                         dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B128),
                         src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
                     },
@@ -1956,6 +1957,7 @@ impl Codegen {
                     crate::codegen::x86_64::opcode::X86_64Opcode::Cvt2Sd {
                         to_xmm: true,
                         width: crate::codegen::x86_64::opcode::SimdWidth::SD,
+                        gpr_64: true,
                         dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B128),
                         src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
                     },

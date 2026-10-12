@@ -1267,6 +1267,27 @@ impl Insn {
             crate::codegen::x86_64::opcode::X86_64Opcode::Cvt2Sd {
                 to_xmm,
                 width,
+                gpr_64: true,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(dst_idx, Width::B128),
+                src: crate::codegen::x86_64::opcode::Operand::Reg(src_idx, Width::B128),
+            },
+            &[],
+        )
+    }
+
+    /// P11 Bucket AL: B32 variant of cvt2sd (no REX.W, e.g. cvttss2si r32, xmm0).
+    pub fn cvt2sd_reg_b32(
+        to_xmm: bool,
+        width: crate::codegen::x86_64::opcode::SimdWidth,
+        dst_idx: u8,
+        src_idx: u8,
+    ) -> Self {
+        use crate::codegen::shared::asm_operand::Width;
+        Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::Cvt2Sd {
+                to_xmm,
+                width,
+                gpr_64: false,
                 dst: crate::codegen::x86_64::opcode::Operand::Reg(dst_idx, Width::B128),
                 src: crate::codegen::x86_64::opcode::Operand::Reg(src_idx, Width::B128),
             },

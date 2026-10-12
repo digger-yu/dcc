@@ -493,37 +493,37 @@ impl Codegen {
                         8 => {
                             if signed {
                                 self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B64)); // cqo
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xF9])); // idiv rcx
+                                self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Idiv, crate::codegen::shared::asm_operand::Width::B64, 1)); // idiv rcx
                             } else {
                                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Xor, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // xor rdx, rdx
-                                self.emit_insn(&Insn::raw_bytes(&[0x48, 0xF7, 0xF1])); // div rcx
+                                self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Div, crate::codegen::shared::asm_operand::Width::B64, 1)); // div rcx
                             }
                         },
                         4 => {
                             if signed {
                                 self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B32)); // cdq
-                                self.emit_insn(&Insn::raw_bytes(&[0xF7, 0xF9])); // idiv ecx
+                                self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Idiv, crate::codegen::shared::asm_operand::Width::B32, 1)); // idiv ecx
                             } else {
                                 self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B32, 2, 2)); // xor edx, edx
-                                self.emit_insn(&Insn::raw_bytes(&[0xF7, 0xF1])); // div ecx
+                                self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Div, crate::codegen::shared::asm_operand::Width::B32, 1)); // div ecx
                             }
                         },
                         2 => {
                             if signed {
                                 self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B16)); // cwd
-                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0xF7, 0xF9])); // idiv cx
+                                self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Idiv, crate::codegen::shared::asm_operand::Width::B16, 1)); // idiv cx
                             } else {
                                 self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B32, 2, 2)); // xor edx, edx
-                                self.emit_insn(&Insn::raw_bytes(&[0x66, 0xF7, 0xF1])); // div cx
+                                self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Div, crate::codegen::shared::asm_operand::Width::B16, 1)); // div cx
                             }
                         },
                         _ => {
                             if signed {
                                 self.emit_insn(&Insn::raw_bytes(&[0x66, 0x98])); // cbw
-                                self.emit_insn(&Insn::raw_bytes(&[0xF6, 0xF9])); // idiv cl
+                                self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Idiv, crate::codegen::shared::asm_operand::Width::B8, 1)); // idiv cl
                             } else {
                                 self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B32, 2, 2)); // xor edx, edx
-                                self.emit_insn(&Insn::raw_bytes(&[0xF6, 0xF1])); // div cl
+                                self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Div, crate::codegen::shared::asm_operand::Width::B8, 1)); // div cl
                             }
                         },
                     }
@@ -531,7 +531,7 @@ impl Codegen {
                         if elem_size == 1 {
                             // 8 位除法余数在 ah (非 rdx): ror rax,8
                             // 后取低字节
-                            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0xC8, 0x08])); // ror rax, 8
+                            self.emit_insn(&Insn::shift_reg_imm8_c1_b64(0b001, 0, 0x08)); // ror rax, 8
                             self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax
                         } else {
                             // 余数在 rdx, 移到 rcx

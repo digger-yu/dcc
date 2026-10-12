@@ -119,29 +119,29 @@ impl Codegen {
                 // cvttss2si dst, xmm0 (F3 REX 0F 2C /r)
                 // cvt 的 REX 只在真的扩了字段时才发：`0x40 | 0 | 0` 是什么也不扩的裸前缀，
                 // 多占一字节并被 objdump 标成 `rex cvttsd2si`（多余位的唯一读数）。
-                let rex = (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x04 } else { 0 });
                 let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, if wide { 64 } else { 32 })
                     .unwrap_or_else(|| "%eax".to_string());
                 let gas = format!("cvttss2si %xmm0, {}", dst_name);
-                if rex != 0 {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x40 | rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)], &gas));
+                // P11 Bucket AL: typed cvt2sd (gpr_64=wide) — encoder now omits bare REX
+                // when no field is extended, matching handwritten byte layout.
+                let insn = if wide {
+                    Insn::cvt2sd_reg(false, crate::codegen::x86_64::opcode::SimdWidth::SS, dst, 0)
                 } else {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF3, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)], &gas));
-                }
+                    Insn::cvt2sd_reg_b32(false, crate::codegen::x86_64::opcode::SimdWidth::SS, dst, 0)
+                }.with_gas(gas);
+                self.emit_insn(&insn);
             },
             Type::Double => {
                 // cvttsd2si dst, xmm0 (F2 REX 0F 2C /r)
-                // cvt 的 REX 只在真的扩了字段时才发：`0x40 | 0 | 0` 是什么也不扩的裸前缀，
-                // 多占一字节并被 objdump 标成 `rex cvttsd2si`（多余位的唯一读数）。
-                let rex = (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x04 } else { 0 });
                 let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, if wide { 64 } else { 32 })
                     .unwrap_or_else(|| "%eax".to_string());
                 let gas = format!("cvttsd2si %xmm0, {}", dst_name);
-                if rex != 0 {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x40 | rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)], &gas));
+                let insn = if wide {
+                    Insn::cvt2sd_reg(false, crate::codegen::x86_64::opcode::SimdWidth::SD, dst, 0)
                 } else {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)], &gas));
-                }
+                    Insn::cvt2sd_reg_b32(false, crate::codegen::x86_64::opcode::SimdWidth::SD, dst, 0)
+                }.with_gas(gas);
+                self.emit_insn(&insn);
             },
             Type::LongDouble => {
                 // long double 的值通道是 **x87 st(0)** (80-bit 值模型, 见
@@ -153,16 +153,15 @@ impl Codegen {
                 // 现在与显式转换共用同一个 Layer0 原语: 先把 st(0) 硬件舍入
                 // 落成 f64 到 xmm0, 再走按 xmm0 取值的 cvttsd2si。
                 self.emit_x87_to_xmm0();
-                // cvttsd2si dst, xmm0 (F2 REX 0F 2C /r)
-                let rex = (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x04 } else { 0 });
                 let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(dst, if wide { 64 } else { 32 })
                     .unwrap_or_else(|| "%eax".to_string());
                 let gas = format!("cvttsd2si %xmm0, {}", dst_name);
-                if rex != 0 {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x40 | rex, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)], &gas));
+                let insn = if wide {
+                    Insn::cvt2sd_reg(false, crate::codegen::x86_64::opcode::SimdWidth::SD, dst, 0)
                 } else {
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF2, 0x0F, 0x2C, 0xC0 | ((dst & 7) << 3)], &gas));
-                }
+                    Insn::cvt2sd_reg_b32(false, crate::codegen::x86_64::opcode::SimdWidth::SD, dst, 0)
+                }.with_gas(gas);
+                self.emit_insn(&insn);
             },
             _ => {},
         }
