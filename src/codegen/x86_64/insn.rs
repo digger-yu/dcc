@@ -1599,6 +1599,12 @@ impl Insn {
         Insn::raw_bytes(&[rex, 0xF7, 0xF8 | (reg_idx & 7)])
     }
 
+    /// P11: DIV r/m64 (REX.W F7 /6). Same encoding shape as IDIV but /6.
+    pub fn div_rm_reg_b64(reg_idx: u8) -> Self {
+        let rex = 0x48u8 | if reg_idx >= 8 { 0x01 } else { 0 };
+        Insn::raw_bytes(&[rex, 0xF7, 0xF0 | (reg_idx & 7)])
+    }
+
     /// P11: IMUL reg, reg (0F AF /r) via ImulRm typed opcode.
     /// width: B32/B64. dst/src: x86_64 physical register indices 0..15.
     pub fn imul_rm_reg(
@@ -1802,6 +1808,15 @@ mod tests {
         assert_eq!(Insn::idiv_rm_reg_b64(1).encode_bytes(), Some(vec![0x48, 0xF7, 0xF9]),);
         // idiv r8: REX.W+B, F7, F8|0 = F8
         assert_eq!(Insn::idiv_rm_reg_b64(8).encode_bytes(), Some(vec![0x49, 0xF7, 0xF8]),);
+    }
+
+    /// P11 Bucket AN: div_rm_reg_b64 = REX.W F7 /6.
+    #[test]
+    fn div_rm_reg_b64_basic() {
+        // div rcx: 48 F7 F1 (reg field = /6 = 110b << 3 = 0x30; r/m = 1)
+        assert_eq!(Insn::div_rm_reg_b64(1).encode_bytes(), Some(vec![0x48, 0xF7, 0xF1]),);
+        // div r8: REX.W+B, F7, F0|0 = F0
+        assert_eq!(Insn::div_rm_reg_b64(8).encode_bytes(), Some(vec![0x49, 0xF7, 0xF0]),);
     }
 
     /// P11 Bucket W: mov_reg_imm32_b64 = REX.W C7 /0 id.
