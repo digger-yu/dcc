@@ -195,16 +195,7 @@ impl Codegen {
                     },
                     &[],
                 );
-                if !self.emit_insn(&insn) {
-                    // 兜底手写
-                    let rex = 0x48u8 | 0x02 | if dst >= 8 { 0x05 } else { 0 };
-                    self.emit_insn(&Insn::raw_bytes(&[
-                        rex,
-                        0x8B,
-                        0x80 | ((dst & 7) << 3) | 0x04,
-                        0x10 | (dst & 7),
-                    ]));
-                }
+                self.emit_insn(&insn);
             }
         }
     }
@@ -239,12 +230,7 @@ impl Codegen {
                 },
                 &[],
             );
-            if !self.emit_insn(&insn) {
-                // 兜底手写
-                let rex = 0x48u8 | 0x01 | if dst >= 8 { 0x04 } else { 0 };
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x8D, 0x80 | ((dst & 7) << 3) | 0x03]));
-                self.emit_insn(&Insn::raw_bytes(&(off as i32).to_le_bytes()));
-            }
+            self.emit_insn(&insn);
         } else {
             self.mov_imm(10, off as i128);
             // lea dst, [r11 + r10]: REX.X (r10) + REX.B (r11) + REX.R (dst 扩展)
@@ -256,11 +242,7 @@ impl Codegen {
                 },
                 &[],
             );
-            if !self.emit_insn(&insn) {
-                let rex = 0x48u8 | 0x03 | if dst >= 8 { 0x04 } else { 0 };
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x8D]));
-                self.emit_insn(&Insn::raw_bytes(&[0x80 | ((dst & 7) << 3) | 0x04, 0x10 | 0x03]));
-            }
+            self.emit_insn(&insn);
         }
     }
     pub(crate) fn load_upvar(&mut self, reg: u8, parent_off: i64, size: usize, upvar_name: &str) {
@@ -293,12 +275,7 @@ impl Codegen {
                     },
                     &[],
                 );
-                if !self.emit_insn(&insn) {
-                    // lea r11, [r11+r10]: REX=0x4F (WRXB all high), ModRM=0x1C, SIB=0xD3.
-                    // P11 Bucket AC: 固定字节 (dst=11, base=11, index=10), 与 typed encoder
-                    // 输出逐字节等价 — 保留作不可达 fallback.
-                    self.emit_insn(&Insn::raw_bytes(&[0x4F, 0x8D, 0x1C, 0xD3])); // 兜底
-                }
+                self.emit_insn(&insn);
             }
         }
         if Self::fits_disp32(parent_off) {
@@ -337,7 +314,7 @@ impl Codegen {
             };
         } else {
             self.mov_imm(10, parent_off as i128);
-            // lea r11, [r11+r10] — P11 Bucket P typed Lea SIB.
+            // lea r11, [r11 + r10] — P11 Bucket P typed Lea SIB.
             let insn = Insn::new(
                 X86_64Opcode::Lea {
                     dst: Operand::Reg(11, crate::codegen::shared::asm_operand::Width::B64),
@@ -346,9 +323,7 @@ impl Codegen {
                 },
                 &[],
             );
-            if !self.emit_insn(&insn) {
-                self.emit_insn(&Insn::raw_bytes(&[0x4F, 0x8D, 0x1C, 0xD3])); // 兜底
-            }
+            self.emit_insn(&insn);
             // size=1/2/4: movzx/mov 从 [r11] (SIB 后 r11 已是合成基址, 无 disp=0).
             // size>=8:   mov reg, [r11] (REX.W).
             // 走 mov_ext_mem_sib / mov_rm_mem_sib 不可行 (r11+index*1), 但 typed
@@ -377,12 +352,7 @@ impl Codegen {
                         },
                         &[],
                     );
-                    if !self.emit_insn(&sib_insn) {
-                        let rex = 0x41 | if reg >= 8 { 0x04 } else { 0 };
-                        let opc = if size == 1 { 0xB6 } else { 0xB7 };
-                        self.emit_insn(&Insn::raw_bytes(&[rex, 0x0F, opc]));
-                        self.emit_reg_indirect_modrm(reg, 11);
-                    }
+                    self.emit_insn(&sib_insn);
                 },
                 4 | _ => {
                     let width = if size == 4 {
@@ -403,15 +373,7 @@ impl Codegen {
                         },
                         &[],
                     );
-                    if !self.emit_insn(&mov_insn) {
-                        let rex = if size == 4 {
-                            0x41 | if reg >= 8 { 0x04 } else { 0 }
-                        } else {
-                            0x49 | if reg >= 8 { 0x04 } else { 0 }
-                        };
-                        self.emit_insn(&Insn::raw_bytes(&[rex, 0x8B]));
-                        self.emit_reg_indirect_modrm(reg, 11);
-                    }
+                    self.emit_insn(&mov_insn);
                 },
             }
         }
@@ -481,7 +443,7 @@ impl Codegen {
                 ));
             } else {
                 self.mov_imm(10, off as i128);
-                // lea r11, [r11+r10] — P11 Bucket P typed Lea SIB.
+                // lea r11, [r11 + r10] — P11 Bucket P typed Lea SIB.
                 let insn = Insn::new(
                     X86_64Opcode::Lea {
                         dst: Operand::Reg(11, crate::codegen::shared::asm_operand::Width::B64),
@@ -490,9 +452,7 @@ impl Codegen {
                     },
                     &[],
                 );
-                if !self.emit_insn(&insn) {
-                    self.emit_insn(&Insn::raw_bytes(&[0x4F, 0x8D, 0x1C, 0xD3])); // 兜底
-                }
+                self.emit_insn(&insn);
             }
         }
         if Self::fits_disp32(parent_off) {
@@ -510,7 +470,7 @@ impl Codegen {
             self.emit_insn(&Insn::mov_rm_mem(false, width, reg, 11, parent_off as i32));
         } else {
             self.mov_imm(10, parent_off as i128);
-            // lea r11, [r11+r10] — P11 Bucket P typed Lea SIB.
+            // lea r11, [r11 + r10] — P11 Bucket P typed Lea SIB.
             let insn = Insn::new(
                 X86_64Opcode::Lea {
                     dst: Operand::Reg(11, crate::codegen::shared::asm_operand::Width::B64),
@@ -519,9 +479,7 @@ impl Codegen {
                 },
                 &[],
             );
-            if !self.emit_insn(&insn) {
-                self.emit_insn(&Insn::raw_bytes(&[0x4F, 0x8D, 0x1C, 0xD3])); // 兜底
-            }
+            self.emit_insn(&insn);
             // size=1/2/4/_: mov reg8/16/32/64 -> [r11] SIB 形态 (index=r10).
             // 走 typed MovRm 编码; 仅在 typed encoder 失败时才落到手写兜底.
             let width = match size {
@@ -543,30 +501,7 @@ impl Codegen {
                 },
                 &[],
             );
-            if !self.emit_insn(&store_insn) {
-                match size {
-                    1 => {
-                        let rex = 0x41 | if reg >= 8 { 0x04 } else { 0 };
-                        self.emit_insn(&Insn::raw_bytes(&[rex, 0x88]));
-                        self.emit_reg_indirect_modrm(reg, 11);
-                    },
-                    2 => {
-                        let rex = 0x41 | if reg >= 8 { 0x04 } else { 0 };
-                        self.emit_insn(&Insn::raw_bytes(&[0x66, rex, 0x89]));
-                        self.emit_reg_indirect_modrm(reg, 11);
-                    },
-                    4 => {
-                        let rex = 0x41 | if reg >= 8 { 0x04 } else { 0 };
-                        self.emit_insn(&Insn::raw_bytes(&[rex, 0x89]));
-                        self.emit_reg_indirect_modrm(reg, 11);
-                    },
-                    _ => {
-                        let rex = 0x49 | if reg >= 8 { 0x04 } else { 0 };
-                        self.emit_insn(&Insn::raw_bytes(&[rex, 0x89]));
-                        self.emit_reg_indirect_modrm(reg, 11);
-                    },
-                }
-            }
+            self.emit_insn(&store_insn);
         }
     }
 }

@@ -62,17 +62,11 @@ impl Codegen {
                 match sz {
                     1 => {
                         // P11: movzx eax, byte [rax] via MovExt mem typed.
-                        let insn = Insn::mov_ext_mem(false, crate::codegen::shared::asm_operand::Width::B8, crate::codegen::shared::asm_operand::Width::B32, 0, 0, 0);
-                        if !self.emit_insn(&insn) {
-                            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x00]));
-                        }
+                        self.emit_insn(&Insn::mov_ext_mem(false, crate::codegen::shared::asm_operand::Width::B8, crate::codegen::shared::asm_operand::Width::B32, 0, 0, 0));
                     },
                     2 => {
                         // P11: movzx eax, word [rax] via MovExt mem typed.
-                        let insn = Insn::mov_ext_mem(false, crate::codegen::shared::asm_operand::Width::B16, crate::codegen::shared::asm_operand::Width::B32, 0, 0, 0);
-                        if !self.emit_insn(&insn) {
-                            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7, 0x00]));
-                        }
+                        self.emit_insn(&Insn::mov_ext_mem(false, crate::codegen::shared::asm_operand::Width::B16, crate::codegen::shared::asm_operand::Width::B32, 0, 0, 0));
                     },
                     4 => {
                         // mov eax, dword [rax] (自动 zero-extend 到 64 位)
@@ -267,10 +261,7 @@ impl Codegen {
                     crate::codegen::shared::asm_operand::Width::B64,
                     dst, dst,
                 ).with_gas(gas);
-                if !self.emit_insn(&insn) {
-                    let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
-                    self.emit_insn(&Insn::raw_with_gas(&[rex, 0x63, 0xC0 | ((dst & 7) << 3) | (dst & 7)], &insn.gas_text.clone().unwrap()));
-                }
+                self.emit_insn(&insn);
             },
             // signed → unsigned same-size: 截断到类型宽度并零扩展
             // 如 (unsigned int)(signed_expr) 需要确保高位为 0
@@ -281,16 +272,10 @@ impl Codegen {
                 let sz = ty.size();
                 if sz <= 4 {
                     // P11: mov dst32, dst32 via MovRm B32 typed (self-MODRM, REX.R+B=0x05 when dst>=8).
-                    let insn = Insn::mov_rm_reg(
+                    self.emit_insn(&Insn::mov_rm_reg(
                         crate::codegen::shared::asm_operand::Width::B32,
                         dst, dst,
-                    );
-                    if !self.emit_insn(&insn) {
-                        if dst >= 8 {
-                            self.emit_insn(&Insn::raw_bytes(&[0x45]));
-                        }
-                        self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
-                    }
+                    ));
                 }
                 // 64-bit: 无需处理 (已经是 64 位)
             },
@@ -461,10 +446,7 @@ impl Codegen {
                     crate::codegen::x86_64::opcode::SimdWidth::SS,
                     0, dst,
                 ).with_gas(gas);
-                if !self.emit_insn(&insn) {
-                    let rex = 0x48 | (if dst >= 8 { 0x01 } else { 0 });
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF3, rex, 0x0F, 0x2A, 0xC0 | (dst & 7)], &insn.gas_text.clone().unwrap()));
-                }
+                self.emit_insn(&insn);
             },
             (
                 src @ (Type::Bool | Type::UChar | Type::UShort | Type::UInt),
@@ -480,10 +462,7 @@ impl Codegen {
                     crate::codegen::x86_64::opcode::SimdWidth::SD,
                     0, dst,
                 ).with_gas(gas);
-                if !self.emit_insn(&insn) {
-                    let rex = 0x48 | (if dst >= 8 { 0x01 } else { 0 });
-                    self.emit_insn(&Insn::raw_with_gas(&[0xF2, rex, 0x0F, 0x2A, 0xC0 | (dst & 7)], &insn.gas_text.clone().unwrap()));
-                }
+                self.emit_insn(&insn);
             },
             // unsigned long/longlong → float/double:
             // 64 位无符号值可能超过 signed int64 范围.
@@ -523,12 +502,7 @@ impl Codegen {
                 match dst_ty {
                     Type::Bool | Type::UChar => {
                         // P11: and dst64, 0xFF via AluRm B64 imm32 typed (REX.W=0x48|B).
-                        let insn = Insn::alu_rm_reg_imm32_b64(0x4 /* /4=and */, dst, 0xFF);
-                        if !self.emit_insn(&insn) {
-                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
-                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xE0 | (dst & 7)]));
-                            self.emit_insn(&Insn::raw_bytes(&0xFFu32.to_le_bytes()));
-                        }
+                        self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0x4 /* /4=and */, dst, 0xFF));
                     },
                     Type::Char | Type::SChar | Type::Short => {
                         // 截断到 8/16 位后符号扩展
@@ -553,12 +527,7 @@ impl Codegen {
                     },
                     Type::UShort => {
                         // P11: and dst64, 0xFFFF via AluRm B64 imm32 typed.
-                        let insn = Insn::alu_rm_reg_imm32_b64(0x4 /* /4=and */, dst, 0xFFFF);
-                        if !self.emit_insn(&insn) {
-                            let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
-                            self.emit_insn(&Insn::raw_bytes(&[rex, 0x81, 0xE0 | (dst & 7)]));
-                            self.emit_insn(&Insn::raw_bytes(&0xFFFFu32.to_le_bytes()));
-                        }
+                        self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0x4 /* /4=and */, dst, 0xFFFF));
                     },
                     Type::UInt => {
                         // mov eax, eax (32位零扩展到64位)
@@ -569,12 +538,7 @@ impl Codegen {
                             crate::codegen::shared::asm_operand::Width::B32,
                             dst, dst,
                         ).with_gas(gas);
-                        if !self.emit_insn(&insn) {
-                            if dst >= 8 {
-                                self.emit_insn(&Insn::raw_bytes(&[0x45]));
-                            }
-                            self.emit_insn(&Insn::raw_with_gas(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)], &insn.gas_text.clone().unwrap()));
-                        }
+                        self.emit_insn(&insn);
                     },
                     Type::Int => {
                         // movsxd dst, dst (sign-extend 32→64)
@@ -590,10 +554,7 @@ impl Codegen {
                             crate::codegen::shared::asm_operand::Width::B64,
                             dst, dst,
                         ).with_gas(gas);
-                        if !self.emit_insn(&insn) {
-                            let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };
-                            self.emit_insn(&Insn::raw_with_gas(&[rex, 0x63, 0xC0 | ((dst & 7) << 3) | (dst & 7)], &insn.gas_text.clone().unwrap()));
-                        }
+                        self.emit_insn(&insn);
                     },
                     _ => {},
                 }
@@ -651,16 +612,10 @@ impl Codegen {
                         32 => {
                             // mov dst32, dst32 (截断到 32 位, 零扩展到 64 位)
                             // P11: via MovRm B32 typed (self-MODRM, REX.R+B=0x05 when dst>=8).
-                            let insn = Insn::mov_rm_reg(
+                            self.emit_insn(&Insn::mov_rm_reg(
                                 crate::codegen::shared::asm_operand::Width::B32,
                                 dst, dst,
-                            );
-                            if !self.emit_insn(&insn) {
-                                if dst >= 8 {
-                                    self.emit_insn(&Insn::raw_bytes(&[0x45]));
-                                }
-                                self.emit_insn(&Insn::raw_bytes(&[0x89, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
-                            }
+                            ));
                         },
                         _ => {},
                     }
