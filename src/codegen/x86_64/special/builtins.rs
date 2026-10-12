@@ -1231,25 +1231,30 @@ impl Codegen {
                     if self.gen_lvalue_addr(arg, Self::EVAL_BASE) {
                         self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::MovRm { width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // mov rcx, rax
                         let imag_off = inner_sz;
+                        // P11 Bucket N11: typed-encode xmm load from [rcx]/[rcx+disp32].
+                        let simd_w = if matches!(inner, Type::Float) {
+                            crate::codegen::x86_64::opcode::SimdWidth::SS
+                        } else {
+                            crate::codegen::x86_64::opcode::SimdWidth::SD
+                        };
                         // 实部: [rcx] → xmm0 → [result_off] (不变)
-                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x01]));
+                        self.emit_insn(&Insn::simd_mov_mem_base(false, simd_w, 0, 1, 0));
                         self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
                         // 虚部: [rcx+off] → xmm0 → flip → [result_off+inner_sz]
-                        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x10, 0x81]));
-                        self.emit_insn(&Insn::raw_bytes(&(imag_off as i32).to_le_bytes()));
+                        self.emit_insn(&Insn::simd_mov_mem_base(false, simd_w, 0, 1, imag_off as i32));
                         self.flip_sign_xmm(0, &inner);
                         self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
                     } else {
                         self.gen_expr(arg, Self::EVAL_BASE);
                         if matches!(arg, Expr::Call { .. }) {
                             // SSE 返回: 虚部在 xmm1, 物化到临时区
-                            self.emit_insn(&Insn::raw_bytes(&[pfx, 0x41, 0x0F, 0x11]));
-                            if (result_off + inner_sz).abs() < 128 {
-                                self.emit_insn(&Insn::raw_bytes(&[0x4D, (result_off + inner_sz) as u8]));
+                            // P11 Bucket N11: typed-encode xmm1 store to r13 slot (base=13).
+                            let simd_w = if matches!(inner, Type::Float) {
+                                crate::codegen::x86_64::opcode::SimdWidth::SS
                             } else {
-                                self.emit_insn(&Insn::raw_bytes(&[0x8D]));
-                                self.emit_insn(&Insn::raw_bytes(&((result_off + inner_sz) as i32).to_le_bytes()));
-                            }
+                                crate::codegen::x86_64::opcode::SimdWidth::SD
+                            };
+                            self.emit_insn(&Insn::simd_mov_mem_base(true, simd_w, 1, 13, (result_off + inner_sz) as i32));
                         }
                         // 实部: xmm0 → [result_off] (不变)
                         self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
