@@ -68,6 +68,8 @@ pub(crate) fn normalize_objdump(raw: &str) -> String {
             continue;
         }
         // 函数标题行: `0000000000000000 <name>:`
+        // objdump 输出行首没有前导空格, 且以 `:` 结尾; 也能匹配到
+        // `0000000000000000 <store_d>:` 这类形态。
         if trimmed.ends_with(':') && !trimmed.starts_with(' ') {
             flush_nop(&mut out, &mut nop_run);
             let body = trimmed.trim_start();
@@ -75,7 +77,11 @@ pub(crate) fn normalize_objdump(raw: &str) -> String {
             let body = body.trim_start_matches(|c: char| c.is_ascii_hexdigit());
             let body = body.trim_start();
             if let Some(angle) = body.strip_prefix('<') {
-                let name = angle.trim_end_matches('>').trim_end_matches(':');
+                // `<name>:` -> 剥掉尾部 `>` 再剥 `:`
+                let name = angle
+                    .trim_end_matches(':')
+                    .trim_end_matches('>')
+                    .trim_end_matches(':');
                 out.push(format!("{name}:"));
             } else {
                 out.push(trimmed.to_string());
@@ -108,6 +114,23 @@ pub(crate) fn normalize_objdump(raw: &str) -> String {
         let instr = match instr.find(" #") {
             Some(hash) => instr[..hash].trim_end().to_string(),
             None => instr,
+        };
+        // 归一化跳转目标: `jne 67 <u128_eq+0x67>` -> `jne <u128_eq>`
+        // 相对偏移在不同编译间会漂移, 函数名才是可比对的锚点。
+        let instr = if mn.starts_with('j') || mn == "call" || mn == "ret" {
+            // 形如 `jne 67 <name+0xNN>` 或 `callq 0x0 <foo>`
+            if let Some(angle_pos) = instr.find('<') {
+                let after_angle = &instr[angle_pos + 1..];
+                let end_angle = after_angle.find('>').unwrap_or(after_angle.len());
+                let sym = &after_angle[..end_angle];
+                // 剥掉 `+0x..` 后缀
+                let sym = sym.split('+').next().unwrap_or(sym);
+                format!("{} <{}>", mn, sym)
+            } else {
+                instr
+            }
+        } else {
+            instr
         };
 
         // 折叠连续 nop
@@ -258,10 +281,31 @@ fn unified_diff(want: &str, got: &str) -> String {
 /// 用例清单: 与 tests/snapshots/x86_64/<name>/ 一一对应。
 ///
 /// 新增用例时: (1) 建目录 + input.c + config.toml;
-///             (2) 跑 `DCC_SNAP_GENERATE=1 cargo test --test disasm_snapshot`
-///                 生成 expected.s; (3) 人工 review 后把名字加进下面列表。
+///             (2) 用当前 HEAD 的 dcc 编译, 归一化后写入 expected.s;
+///             (3) 人工 review 后把名字加进下面列表。
 const CASES: &[&str] = &[
-    // 占位: 提交 1 阶段为空, 提交 2/3 逐个填入。
+    // --- P11 已修复回归现场 (7 个) ---
+    "movsd_store",
+    "bitfield_shl",
+    "movd_int_xmm",
+    "simd_mov_sib",
+    "bitfield_shr",
+    "bitfield_inc",
+    "uint128_eq",
+    // --- 日常热点 (13 个) ---
+    "func_prologue",
+    "arithmetic_basic",
+    "memory_load",
+    "if_else_loop",
+    "float_basic",
+    "struct_passing",
+    "global_riprelative",
+    "va_arg_simple",
+    "nested_func",
+    "simd_128",
+    "long_double",
+    "atomic_basic",
+    "func_ptr_call",
 ];
 
 #[test]

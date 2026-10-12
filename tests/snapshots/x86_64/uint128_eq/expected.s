@@ -1,0 +1,37 @@
+u128_eq:
+push %r13
+mov %rsp,%r13
+sub $0x400,%rsp
+<nop padding>
+mov %rdi,-0x48(%r13)
+mov %rsi,-0x40(%r13)
+mov %rdx,-0x58(%r13)
+mov %rcx,-0x50(%r13)
+mov -0x48(%r13),%rax
+mov -0x40(%r13),%rdx
+push %rax
+push %rdx
+mov -0x58(%r13),%rax
+mov -0x50(%r13),%rdx
+push %rax
+push %rdx
+pop %r11
+pop %r9
+pop %r8
+pop %rcx
+push %r14
+push %r15
+xor %rax,%rax
+cmp %r9,%rcx
+jne <u128_eq>
+cmp %r11,%r8
+jne <u128_eq>
+mov $0x1,%rax
+xor %rdx,%rdx
+pop %r15
+pop %r14
+movslq %eax,%rax
+<nop padding>
+mov %r13,%rsp
+pop %r13
+ret

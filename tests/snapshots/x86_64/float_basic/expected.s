@@ -1,0 +1,74 @@
+muladd_f:
+push %r13
+mov %rsp,%r13
+sub $0x400,%rsp
+<nop padding>
+movss %xmm0,-0x48(%r13)
+movss %xmm1,-0x50(%r13)
+movss %xmm2,-0x58(%r13)
+movss -0x48(%r13),%xmm0
+sub $0x8,%rsp
+movss %xmm0,(%rsp)
+movss -0x50(%r13),%xmm0
+movapd %xmm0,%xmm1
+movss (%rsp),%xmm0
+add $0x8,%rsp
+mulss %xmm1,%xmm0
+sub $0x8,%rsp
+movss %xmm0,(%rsp)
+movss -0x58(%r13),%xmm0
+movapd %xmm0,%xmm1
+movss (%rsp),%xmm0
+add $0x8,%rsp
+addss %xmm1,%xmm0
+<nop padding>
+mov %r13,%rsp
+pop %r13
+ret
+<nop padding>
+muladd_d:
+push %r13
+mov %rsp,%r13
+sub $0x400,%rsp
+<nop padding>
+movsd %xmm0,-0x48(%r13)
+movsd %xmm1,-0x50(%r13)
+movsd %xmm2,-0x58(%r13)
+movsd -0x48(%r13),%xmm0
+sub $0x8,%rsp
+movsd %xmm0,(%rsp)
+movsd -0x50(%r13),%xmm0
+movapd %xmm0,%xmm1
+movsd (%rsp),%xmm0
+add $0x8,%rsp
+mulsd %xmm1,%xmm0
+sub $0x8,%rsp
+movsd %xmm0,(%rsp)
+movsd -0x58(%r13),%xmm0
+movapd %xmm0,%xmm1
+movsd (%rsp),%xmm0
+add $0x8,%rsp
+addsd %xmm1,%xmm0
+<nop padding>
+mov %r13,%rsp
+pop %r13
+ret
+<nop padding>
+recip:
+push %r13
+mov %rsp,%r13
+sub $0x3f0,%rsp
+<nop padding>
+movsd %xmm0,-0x40(%r13)
+movsd 0x0(%rip),%xmm0
+sub $0x8,%rsp
+movsd %xmm0,(%rsp)
+movsd -0x40(%r13),%xmm0
+movapd %xmm0,%xmm1
+movsd (%rsp),%xmm0
+add $0x8,%rsp
+divsd %xmm1,%xmm0
+<nop padding>
+mov %r13,%rsp
+pop %r13
+ret

@@ -1,0 +1,67 @@
+sum_pair:
+push %r13
+mov %rsp,%r13
+sub $0x3f0,%rsp
+mov %rbx,-0x10(%r13)
+<nop padding>
+mov %rdi,-0x48(%r13)
+mov %rsi,-0x40(%r13)
+lea -0x48(%r13),%rax
+mov (%rax),%rax
+mov %rax,%rbx
+lea -0x48(%r13),%r8
+add $0x8,%r8
+mov (%r8),%r8
+add %r8,%rbx
+mov %rbx,%rax
+mov -0x10(%r13),%rbx
+<nop padding>
+mov %r13,%rsp
+pop %r13
+ret
+sum_ptf:
+push %r13
+mov %rsp,%r13
+sub $0x3f0,%rsp
+<nop padding>
+movsd %xmm0,-0x40(%r13)
+lea -0x40(%r13),%rax
+movss (%rax),%xmm0
+sub $0x8,%rsp
+movss %xmm0,(%rsp)
+lea -0x40(%r13),%rax
+add $0x4,%rax
+movss (%rax),%xmm0
+movapd %xmm0,%xmm1
+movss (%rsp),%xmm0
+add $0x8,%rsp
+addss %xmm1,%xmm0
+<nop padding>
+mov %r13,%rsp
+pop %r13
+ret
+<nop padding>
+make_pair:
+push %r13
+mov %rsp,%r13
+sub $0x410,%rsp
+<nop padding>
+mov %rdi,-0x50(%r13)
+mov %rsi,-0x58(%r13)
+lea -0x48(%r13),%rax
+push %rax
+mov -0x50(%r13),%rax
+pop %rcx
+mov %rax,(%rcx)
+lea -0x48(%r13),%rax
+add $0x8,%rax
+push %rax
+mov -0x58(%r13),%rax
+pop %rcx
+mov %rax,(%rcx)
+mov -0x48(%r13),%rax
+mov -0x40(%r13),%rdx
+<nop padding>
+mov %r13,%rsp
+pop %r13
+ret
