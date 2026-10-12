@@ -8,6 +8,7 @@ use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
 use crate::codegen::x86_64::asm::*;
 use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::insn::BoolExpect;
 use crate::codegen::x86_64::opcode::{MemOperand, Operand, X86_64Opcode};
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::*;
@@ -480,7 +481,7 @@ impl Codegen {
             2 => self.emit_va_arg_int_load(2, signed, 0x40, &[0x01]),
             4 => self.emit_va_arg_int_load(4, signed, 0x40, &[0x01]),
             _ => {
-                let _ = self.emit_insn(&Insn::new(
+                self.emit_insn(&Insn::new(
                     crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                         rip_relative: false,
                         width: crate::codegen::shared::asm_operand::Width::B64,
@@ -498,7 +499,7 @@ impl Codegen {
                         ),
                     },
                     &[],
-                ));
+                )).expect("typed-opcode: new");
             },
         }
         self.push(0);
