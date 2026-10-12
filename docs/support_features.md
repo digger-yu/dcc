@@ -28,7 +28,7 @@
 
 | 特性 | 说明 |
 |------|------|
-| 线性扫描寄存器分配 (P12) | `-O3` 启用; 计算每个 SSA 值的活跃区间 `[def_pos, last_use_pos]`, 按起点排序后扫描分配 14 个通用寄存器 (x86-64), 考虑 asm 寄存器压力动态缩减可用池; 寄存器耗尽时溢出 active 中终点最远的区间; 结果以 `__dcc_regalloc_done` hint 编码 `(total<<16)|(alloc<<8)|spill` 写入 entry BB, codegen 据此优化物理寄存器分配; 支持 phi 节点/terminator 使用位置追踪 |
+| 线性扫描寄存器分配 (P12) | `-O3` 启用；SSA 层按活跃区间把局部变量绑定到物理寄存器家（callee-saved `POOL` 4 个：rbx/r12/r14/r15 + caller-saved 延伸池 r8/r9 默认开启），家经 `VarDecl::home` / `LocMap` 进入产物；候选号在 caller 边界走 persist/restore 窗口保护，寄存器耗尽时把活区间溢出到 `Location::Spill` 栈槽并在 def/use 点物化；asm clobber、嵌套函数、EH 已接入守护；DWARF 对有寄存器家的局部发 `DW_OP_regN`。设计文档见 `.qoder/specs/p12-physreg-spill-design.md` |
 | UBSAN IR 层插桩 (P12b) | `-O3` 启用; 在优化后的 SSA IR 上扫描可能 UB 的指令 (除法/取余/移位/有符号加减乘/取反), 插入 `__dcc_ubsan_*` guard; 与 AST 层 sanitizer 互补: AST 层在 SSA 构造前插桩, 优化可能消除检查; IR 层在优化后插桩, 能捕获优化新建的操作; 编译期已知安全的操作 (如除以非零常量) 跳过插桩; guard 作为 pass hint 在 SSA→AST 重建时自动过滤 |
 
 ## Sanitizer 插桩
@@ -531,7 +531,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 | `-march=<name>` / `-mtune=<name>` / `-mcpu=<name>` | 微架构精确调优: x86-64-v2/v3/v4、native、sandybridge/haswell/skylake/icelake-server/sapphirerapids/granite-rapids；ARM cortex-a53/a72/a76/neoverse-n1/v1；`-march=native` 使用 CPUID 检测结果；`-mcpu=` ARM 等价 -march + -mtune |
 | `-Ofast` / `-ffast-math` / `-ffp-contract=` | `-Ofast` 等价 `-O3 -ffast-math`；`-ffast-math` 允许浮点重结合/倒数/非IEEE快速路径, 隐含 `-fno-strict-aliasing -fno-strict-overflow`；`-ffp-contract=fast\|on\|off\|default` 控制 FP 收缩 (FMA) 策略 |
 | 向量化指示 | `#pragma simd` / `#pragma vector always` / `#pragma unroll[N]` 向量化指示由预处理收集到 `openmp_pragmas`; Fortran 风格 `!DIR$ IVDEP` / `!DIR$ VECTOR ALWAYS` / `!DIR$ UNROLL(N)` 等价支持; driver 据此设置循环 `vectorize_hint` (Always/Never/Ivdep/Unroll) |
-| SSA pass 全家族 (16 pass) | P1 跨函数 DCE (call graph reachability, 删除不可达 static) / P2 强度削减 (Mul→Shl, 无符号 Div→Shr) / P3 归纳变量优化 (回边检测) / P4 别名分析 (Steensgaard union-find, 支持 strict-aliasing 类型区分) / P5 指令调度 (BB 内 list scheduling) / P6 PGO (profdata hot/cold) / P7 自动并行 (`#pragma omp simd` 标注插入) / P8 循环分块 (tile_size=4, 外层+内层+尾部循环) / P9 循环交换 (block_order swap) / P10 TCO (尾递归→Jump) / P11 函数属性传播 (cold/hot/noreturn) / P12 寄存器分配 (SSA 值计数) / P13 别名集合 (identity/disjoint/overlap) / P14 投机执行 (纯计算外提) / P15 SCCP (lattice + worklist) / P16 软件流水 (prologue/kernel/epilogue 标注) |
+| SSA pass 全家族 (16 pass) | P1 跨函数 DCE (call graph reachability, 删除不可达 static) / P2 强度削减 (Mul→Shl, 无符号 Div→Shr) / P3 归纳变量优化 (回边检测) / P4 别名分析 (Steensgaard union-find, 支持 strict-aliasing 类型区分) / P5 指令调度 (BB 内 list scheduling) / P6 PGO (profdata hot/cold) / P7 自动并行 (`#pragma omp simd` 标注插入) / P8 循环分块 (tile_size=4, 外层+内层+尾部循环) / P9 循环交换 (block_order swap) / P10 TCO (尾递归→Jump) / P11 函数属性传播 (cold/hot/noreturn) / P12 寄存器分配 (SSA 物理寄存器家 + spill 物化, 见上一行) / P13 别名集合 (identity/disjoint/overlap) / P14 投机执行 (纯计算外提) / P15 SCCP (lattice + worklist) / P16 软件流水 (prologue/kernel/epilogue 标注) |
 | const/volatile/restrict 限定符优化利用 | `qualifier_aware_optimization()` pass 在 `-O2` 及以上启用：**const** 收集全局 `const` 变量为只读集合，检测对 const 全局变量的存储操作；**volatile** 访问 volatile 全局变量的函数跳过 SSA 优化以保护 load/store 顺序不被重排；**restrict** 函数参数 restrict 限定符信息可供未来别名分析改进使用（当前 P4 别名分析为类型不敏感，保守处理） |
 
 ## 调试信息
@@ -570,7 +570,7 @@ Musl sysroot：`--sysroot=<path>` + `TargetTriple::musl_loader_path()`。
 |------|------|
 | asm 周围指令重排别名分析 | 指令调度将任何 `__dcc_asm_*` 符号引用视为调度屏障; memory clobber 产生 Store 到 `__dcc_asm_memory_barrier` 被 Store 分支捕获; 防御性检查扩展到 Bin/Un/Load/Cast 操作数 |
 | DCE 不消除无副作用无输出 asm | 所有 inline asm 视为潜在副作用，DCE 不消除 (GCC 兼容) |
-| 寄存器分配器 asm 统一规划 | `register_allocation` 统计 asm 标记寄存器压力 (`asm_reg_pressure` 计入 `__dcc_asm_*` Store 数); 总压力 = SSA 值数 + asm 压力; codegen 侧 `parse_clobber_registers` 排除 clobbered 寄存器 |
+| 寄存器分配器 asm 统一规划 | P12 物理寄存器家已落地（见上）：asm clobber 经 `parse_clobber_registers` 从候选池排除，early-clobber 在 Phase 6.1 已重构为 per-asm 纯值对象；旧 stub 时期的 asm 压力统计与 entry-BB hint 指令已删除（历史注释见 `src/ssa/rebuild.rs`）。 |
 
 ## 内联 asm 调试信息
 

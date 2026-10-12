@@ -978,6 +978,8 @@ pub fn tail_call_optimization(func: &mut Function) -> bool {
 //      aarch64 `x0/w0`; riscv64 `a0/a1`), `ArchRegPool` 只服务 inline asm 操作数绑定。
 //      要真做必须先有「寄存器直用 + 溢出物化」的发射后端 —— 后端级重写, 需单独立项
 //      (含与 golden baseline / 产物可复现门禁的逐字节对撞), 不属本方案范围。
+//      **2026-10 已完成**: 立项即 `docs/p12-physreg-spill-design.md`, 物理寄存器家、
+//      `Location::Spill`、caller-saved 延伸池与 persist/restore 窗口均已落地合入。
 //
 // 删而非留的理由: 不影响产物的 pass 不叫「已完成」, 叫死代码; 而它的区间计算与扫描
 // 算法已在 git 历史里, 后端重写时可直接取回。本文件的头注释同步修正了 P12 的条目。
