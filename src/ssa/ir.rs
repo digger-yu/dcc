@@ -578,7 +578,7 @@ pub(crate) fn rename_kind_uses(k: &mut InstKind, map: &HashMap<String, SsaVar>) 
         },
         InstKind::MemberLoad { obj, .. } | InstKind::MemberAddr { obj, .. } => {
             rename_operand(obj, map)
-        }
+        },
         InstKind::MemberStore { obj, src, .. } => {
             rename_operand(obj, map);
             rename_operand(src, map);
@@ -699,8 +699,8 @@ pub(super) fn collect_uses_kind(k: &InstKind) -> Vec<String> {
                 push(i, &mut v);
             }
         },
-        InstKind::AddrOf { .. } | InstKind::PreservedDecl { .. } => {}
-        InstKind::EhLandingPad { .. } => {}
+        InstKind::AddrOf { .. } | InstKind::PreservedDecl { .. } => {},
+        InstKind::EhLandingPad { .. } => {},
     }
     v
 }
@@ -823,12 +823,12 @@ pub(crate) fn term_operand_ssa_vars(t: &Terminator) -> Vec<SsaVar> {
             for (v, _) in pairs {
                 out.push(v.clone());
             }
-        }
-        _ => {}
+        },
+        _ => {},
     };
     match t {
         Terminator::Ret { val: Some(o) } => take(o),
-        Terminator::Ret { val: None } | Terminator::Jump(_) | Terminator::Unreachable => {}
+        Terminator::Ret { val: None } | Terminator::Jump(_) | Terminator::Unreachable => {},
         Terminator::Branch { cond, .. } => take(cond),
         Terminator::SwitchTable { idx, .. } => take(idx),
     }
@@ -921,4 +921,3 @@ pub(super) fn inst_written_bases(
     }
     out
 }
-

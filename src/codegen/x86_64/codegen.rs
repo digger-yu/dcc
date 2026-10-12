@@ -103,7 +103,7 @@ pub struct Codegen {
     /// 初值取 `unresolved()`：它等于「旧公式喂旧零镜像」的结果，所以下游即使在
     /// 解算之前读帧底坐标（串行/并行首函数、`naked` 早返）也与搬迁前逐字相同。
     pub frame_layout: crate::codegen::x86_64::abi::layout::LayoutMap,
-    pub expr_depth: u32,     // 当前表达式嵌套深度 (用于帧临时槽分配)
+    pub expr_depth: u32, // 当前表达式嵌套深度 (用于帧临时槽分配)
     /// 晚分配站点的**发射序**计数（P12 Phase 5.1.a 配套，见 `Codegen::next_late_site`）。
     /// 逐函数复位（与 `expr_depth` 同处）。
     pub late_site_seq: u32,
@@ -1107,8 +1107,7 @@ impl Codegen {
                     // 属性，不挂在任何表达式的类型上，所以只能在此处进表。与 TLS 是两条
                     // 独立的轴（上面 `is_thread_local` 那支不干涉本支）。
                     if v.addr_space.is_segment() {
-                        self.global_seg
-                            .insert(v.name.name.clone(), v.addr_space);
+                        self.global_seg.insert(v.name.name.clone(), v.addr_space);
                     }
                 },
                 _ => {},
@@ -1162,7 +1161,7 @@ impl Codegen {
                 },
                 crate::ast::BlockItem::Stmt(s) => out.extend(Self::collect_seg_statics_of_stmt(s)),
                 // StructDef/UnionDef/EnumDef/Typedef 等声明不含对象本体
-                _ => {}
+                _ => {},
             }
         }
         out
@@ -1180,9 +1179,7 @@ impl Codegen {
                 }
                 out
             },
-            Stmt::If {
-                then_, else_, ..
-            } => {
+            Stmt::If { then_, else_, .. } => {
                 let mut out = Self::collect_seg_statics_of_stmt(then_);
                 if let Some(e) = else_ {
                     out.extend(Self::collect_seg_statics_of_stmt(e));
@@ -1384,9 +1381,19 @@ impl Codegen {
         dtors.sort_by_key(|(p, _)| *p);
         self.label("_start");
         self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 12, 4)); // mov r12, rsp (保存原始 rsp, 用于 leave 后恢复)
-        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(5, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // push rbp
+        self.emit_insn(&Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
+                op: crate::codegen::x86_64::opcode::StackOp::Push,
+                width: crate::codegen::shared::asm_operand::Width::B64,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    5,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                ),
+            },
+            &[],
+        )); // push rbp
         self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 5, 4)); // mov rbp, rsp
-                                        // 调用 constructor 函数
+                                                                                                  // 调用 constructor 函数
         for (_p, ctor) in &ctors {
             // P11: xor rax, rax via typed opcode (no variadic args)
             {
@@ -1394,13 +1401,33 @@ impl Codegen {
                     crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
                         op: crate::codegen::x86_64::opcode::AluOp::Xor,
                         width: crate::codegen::shared::asm_operand::Width::B64,
-                        dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
-                        src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            0,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
+                        src: crate::codegen::x86_64::opcode::Operand::Reg(
+                            0,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
                     },
                     &[],
                 );
                 if !self.emit_insn(&insn) {
-                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Xor, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // xor rax, rax (no variadic args)
+                    self.emit_insn(&Insn::new(
+                        crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                            op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                            width: crate::codegen::shared::asm_operand::Width::B64,
+                            dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                0,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                            ),
+                            src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                0,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                            ),
+                        },
+                        &[],
+                    )); // xor rax, rax (no variadic args)
                 }
             }
             self.call_label(ctor);
@@ -1411,22 +1438,39 @@ impl Codegen {
                 crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
                     op: crate::codegen::x86_64::opcode::AluOp::Xor,
                     width: crate::codegen::shared::asm_operand::Width::B64,
-                    dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
-                    src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                    ),
+                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                        0,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                    ),
                 },
                 &[],
             );
             if !self.emit_insn(&insn) {
-                self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Xor, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // xor rax, rax
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                        op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            0,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
+                        src: crate::codegen::x86_64::opcode::Operand::Reg(
+                            0,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
+                    },
+                    &[],
+                )); // xor rax, rax
             }
         }
         self.call_label("main");
         // 保存 main 返回值
-        self.emit_insn(&Insn::mov_rm_reg(
-            crate::codegen::shared::asm_operand::Width::B32,
-            13, 0,
-        )); // mov r13d, eax
-                                        // 调用 destructor 函数
+        self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 13, 0)); // mov r13d, eax
+                                                                                                   // 调用 destructor 函数
         for (_p, dtor) in &dtors {
             // P11: xor rax, rax via typed opcode
             {
@@ -1434,37 +1478,55 @@ impl Codegen {
                     crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
                         op: crate::codegen::x86_64::opcode::AluOp::Xor,
                         width: crate::codegen::shared::asm_operand::Width::B64,
-                        dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
-                        src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64),
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            0,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
+                        src: crate::codegen::x86_64::opcode::Operand::Reg(
+                            0,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
                     },
                     &[],
                 );
                 if !self.emit_insn(&insn) {
-                    self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Xor, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // xor rax, rax
+                    self.emit_insn(&Insn::new(
+                        crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                            op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                            width: crate::codegen::shared::asm_operand::Width::B64,
+                            dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                0,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                            ),
+                            src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                0,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                            ),
+                        },
+                        &[],
+                    )); // xor rax, rax
                 }
             }
             self.call_label(dtor);
         }
-        self.emit_insn(&Insn::mov_rm_reg(
-            crate::codegen::shared::asm_operand::Width::B64,
-            4, 12,
-        )); // mov rsp, r12 (恢复原始 rsp)
-        self.emit_insn(&Insn::mov_rm_reg(
-            crate::codegen::shared::asm_operand::Width::B32,
-            7, 13,
-        )); // mov edi, r13d (main 返回值)
-        // mov eax, 0x3c
+        self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 4, 12)); // mov rsp, r12 (恢复原始 rsp)
+        self.emit_insn(&Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 7, 13)); // mov edi, r13d (main 返回值)
+                                                                                                   // mov eax, 0x3c
         self.emit_insn(&Insn::new(
             crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                rip_relative: false,
                 width: crate::codegen::shared::asm_operand::Width::B32,
-                dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B32),
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    0,
+                    crate::codegen::shared::asm_operand::Width::B32,
+                ),
                 src: crate::codegen::x86_64::opcode::Operand::Imm(0x3c),
             },
             &[],
         ));
         self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Syscall));
-        self.emit_insn(&Insn::raw_bytes(&[0xeb, 0xfe])); // jmp self
-                                  // 静态局部变量分析 pass + 预注册到 data/bss
+        self.emit_insn(&Insn::short_jump_rel8(0xEB, -2)); // jmp self
+                                                         // 静态局部变量分析 pass + 预注册到 data/bss
         self.static_local_map = crate::static_locals::analyze_static_locals(prog);
         self.pre_register_static_locals();
         self.collect_static_local_segments(prog);
@@ -1523,7 +1585,8 @@ impl Codegen {
                     // 文件作用域是唯一需要这句话的地方：与局部绑定不同，全局对象看起来
                     // 「应该住在某处」，而绑到一个会被调用毁掉的号上时这个期望正是错的。
                     self.diag_call_clobbered_global_binding(v, &loc);
-                    self.global_homes.insert(v.name.name.clone(), (loc, v.ty.clone()));
+                    self.global_homes
+                        .insert(v.name.name.clone(), (loc, v.ty.clone()));
                     continue;
                 }
                 let sz_raw = v.ty.size().max(1);
@@ -2517,10 +2580,7 @@ mod tests {
         cg.code = vec![0xE9, 0, 0, 0, 0];
         cg.pending.push(jump(".Lnope"));
         cg.patch_local_jumps(&[]);
-        assert!(
-            cg.pending_code_rels.is_empty(),
-            "内部标号不得变成外部重定位"
-        );
+        assert!(cg.pending_code_rels.is_empty(), "内部标号不得变成外部重定位");
         assert_eq!(err_codes(&cg), vec!["E1102"]);
         assert!(cg.diagnostics[0].msg.contains(".Lnope"));
     }
@@ -2585,7 +2645,8 @@ mod tests {
         });
         assert_eq!(cg.frame_layout.spill_band_bytes, 24, "本用例需要一个非零 band");
         let want = cg.frame_layout.spill_off(1);
-        cg.homes.insert("v".to_string(), (Location::Spill(1), Type::Long));
+        cg.homes
+            .insert("v".to_string(), (Location::Spill(1), Type::Long));
         assert_eq!(cg.stack_home_off("v"), want, "取地址必须走 spill_off");
 
         cg.code.clear();
@@ -2596,7 +2657,8 @@ mod tests {
         let write_spill = cg.code.clone();
 
         // 换成显式 `Stack(want)`（同一个坐标）：两条发射序列必须逐字节相同
-        cg.homes.insert("v".to_string(), (Location::Stack(want), Type::Long));
+        cg.homes
+            .insert("v".to_string(), (Location::Stack(want), Type::Long));
         cg.code.clear();
         cg.mov_from_stack(0, "v");
         let read_stack = cg.code.clone();
@@ -2617,7 +2679,8 @@ mod tests {
         cg.register_var("v", &crate::ast::Type::Long);
         assert_ne!(cg.stack_home_off("v"), want, "本用例必须真的在比较两个不同的坐标");
         // 而带外的家（Imm）仍得走点名报错，不得静默当成帧内坐标
-        cg.homes.insert("w".to_string(), (Location::Imm(7), Type::Long));
+        cg.homes
+            .insert("w".to_string(), (Location::Imm(7), Type::Long));
         cg.stack_home_off("w");
         assert!(
             err_codes(&cg).contains(&"E1129"),
@@ -2701,7 +2764,10 @@ mod tests {
         assert_eq!(a.code, b.code, "持有记录不是只读事实：它改了发射字节");
         assert_eq!(
             held,
-            RegId { bank: RBank::Gp, n: Codegen::EVAL_BASE },
+            RegId {
+                bank: RBank::Gp,
+                n: Codegen::EVAL_BASE
+            },
             "落点必须由求值基址给出，而不是用例里手写一个 0"
         );
         assert_eq!(a.eval_held(), Some(held), "刚求完就应该查得到");

@@ -77,7 +77,7 @@ fn decode(code: &[u8]) -> String {
                 out.push_str(&text);
                 out.push('\n');
                 pos += len;
-            }
+            },
             _ => break,
         }
     }
@@ -127,10 +127,7 @@ fn check_ordered(cg: &Codegen, case: &str, expected: &[&str]) {
 
 fn first_line(cg: &Codegen, case: &str) -> String {
     assert!(
-        !cg
-            .diagnostics
-            .iter()
-            .any(|d| d.sev == Severity::Error),
+        !cg.diagnostics.iter().any(|d| d.sev == Severity::Error),
         "{case}: 编码阶段就报错了: {:?}",
         cg.diagnostics
             .iter()
@@ -156,7 +153,8 @@ fn first_line(cg: &Codegen, case: &str) -> String {
 fn check_divisor_line(cg: &Codegen, case: &str, mn: &str, reg: &str) {
     let out = decode(&cg.code);
     assert!(
-        out.lines().any(|l| l.trim().starts_with(mn) && l.contains(reg)),
+        out.lines()
+            .any(|l| l.trim().starts_with(mn) && l.contains(reg)),
         "{case}: 没读到 `{mn} ... {reg}` 这一行（除数字段的 REX 位丢了就会读成别的号）。\
          字节 = {:?}, 解码 = {out}",
         cg.code
@@ -204,7 +202,11 @@ fn check_only_regs(cg: &Codegen, case: &str, allowed: &[impl AsRef<str>]) {
         }
         let got = &body[i..j];
         seen += 1;
-        let want = allowed.iter().map(|a| a.as_ref()).collect::<Vec<_>>().join(" ");
+        let want = allowed
+            .iter()
+            .map(|a| a.as_ref())
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(
             allowed.iter().any(|a| a.as_ref() == got),
             "{case}: 读数是 `{line}`，其中的 {got} 不在意图寄存器集 [{want}] 里 —— \
@@ -218,7 +220,10 @@ fn check_only_regs(cg: &Codegen, case: &str, allowed: &[impl AsRef<str>]) {
 
 /// 某个号的全部宽度名（一个自反形的两个字段都只能出现这些名字）。
 fn own_names(dst: u8) -> Vec<String> {
-    [8usize, 16, 32, 64].iter().map(|&b| name(dst, b).to_string()).collect()
+    [8usize, 16, 32, 64]
+        .iter()
+        .map(|&b| name(dst, b).to_string())
+        .collect()
 }
 
 /// `emit_load_self_typed`：地址与目的地同一个号的按类型装载。
@@ -430,7 +435,14 @@ fn binop_matrix() {
             }
         }
         // 比较臂：首条就是 cmp（窄无符号的零扩展在 ULong 上提前返回，不会插到前面）。
-        for op in [BinOp::Lt, BinOp::Le, BinOp::Gt, BinOp::Ge, BinOp::EqEq, BinOp::Ne] {
+        for op in [
+            BinOp::Lt,
+            BinOp::Le,
+            BinOp::Gt,
+            BinOp::Ge,
+            BinOp::EqEq,
+            BinOp::Ne,
+        ] {
             for dst in 0..16u8 {
                 for src in 0..16u8 {
                     for signed in [false, true] {
@@ -491,8 +503,12 @@ fn binop_matrix() {
                     let mut c = cg();
                     c.binop(op, dst, src, signed, &Type::Long, &Type::Long);
                     let mn = if signed { "idiv" } else { "div" };
-                    check_divisor_line(&c, &format!("{op:?} r{dst}/r{src} signed={signed}"), mn,
-                                       name(src, 64));
+                    check_divisor_line(
+                        &c,
+                        &format!("{op:?} r{dst}/r{src} signed={signed}"),
+                        mn,
+                        name(src, 64),
+                    );
                 }
             }
         }
@@ -553,7 +569,12 @@ fn emit_asm_mov_imm_to_mem_matrix() {
             let mut c = cg();
             c.emit_asm_mov(
                 &AsmOperand::Imm(0x41),
-                &AsmOperand::Mem { disp: -8, base, index: None, scale: 0 },
+                &AsmOperand::Mem {
+                    disp: -8,
+                    base,
+                    index: None,
+                    scale: 0,
+                },
                 bits,
             );
             check(
@@ -610,11 +631,7 @@ fn emit_asm_shift_imm_matrix() {
                 cgx.emit_asm_shift(&AsmOperand::Imm(v), &AsmOperand::Reg(d, bits), 7, bits);
                 // 第一行可能是前置的 mov（bits 不等于 8 时不会），移位总在同一行：
                 // 目的寄存器的宽度就是这条指令的宽度。
-                check(
-                    &cgx,
-                    &format!("sar ${v} r{d} bits={bits}"),
-                    &[name(d, bits as usize)],
-                );
+                check(&cgx, &format!("sar ${v} r{d} bits={bits}"), &[name(d, bits as usize)]);
             }
         }
     }
@@ -631,7 +648,12 @@ fn emit_asm_mov_reg_to_mem_matrix() {
                 let mut c = cg();
                 c.emit_asm_mov(
                     &AsmOperand::Reg(src, bits),
-                    &AsmOperand::Mem { disp: 0, base, index: None, scale: 0 },
+                    &AsmOperand::Mem {
+                        disp: 0,
+                        base,
+                        index: None,
+                        scale: 0,
+                    },
                     bits,
                 );
                 check_ordered(
@@ -682,11 +704,19 @@ fn frame_access_helpers_matrix() {
                 c.load_stack_sized(reg, off, size);
                 // 窄尺寸走 movzx，目的寄存器读回来是 32 位。
                 let w = if size < 4 { 32 } else { size * 8 };
-                check(&c, &format!("load_stack_sized r{reg} size={size} off={off}"), &[name(reg, w)]);
+                check(
+                    &c,
+                    &format!("load_stack_sized r{reg} size={size} off={off}"),
+                    &[name(reg, w)],
+                );
 
                 let mut c = cg();
                 c.emit_store(reg, off, size);
-                check(&c, &format!("emit_store r{reg} size={size} off={off}"), &[name(reg, size * 8)]);
+                check(
+                    &c,
+                    &format!("emit_store r{reg} size={size} off={off}"),
+                    &[name(reg, size * 8)],
+                );
             }
 
             if small {

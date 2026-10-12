@@ -63,11 +63,11 @@ impl Insn {
             Riscv64Opcode::RawU32 => {
                 let w = Self::imm_val(&self.ops[0]) as u32;
                 Some(w.to_le_bytes().to_vec())
-            }
+            },
             Riscv64Opcode::RawU16 => {
                 let w = Self::imm_val(&self.ops[0]) as u16;
                 Some(w.to_le_bytes().to_vec())
-            }
+            },
         }
     }
 
@@ -114,7 +114,10 @@ mod tests {
 
     #[test]
     fn raw32_passthrough() {
-        assert_eq!(Insn::raw(0xC010F573).encode_bytes(), Some(0xC010F573u32.to_le_bytes().to_vec()));
+        assert_eq!(
+            Insn::raw(0xC010F573).encode_bytes(),
+            Some(0xC010F573u32.to_le_bytes().to_vec())
+        );
     }
 
     #[test]

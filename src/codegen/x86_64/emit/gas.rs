@@ -17,8 +17,8 @@
 /// 64 位 GP 寄存器名 (AT&T, 带 %). 索引 = 物理寄存器号 0..15.
 /// 与 render_one.rs::REG64 逐条对拍.
 pub(crate) const REG64: [&str; 16] = [
-    "%rax", "%rcx", "%rdx", "%rbx", "%rsp", "%rbp", "%rsi", "%rdi", "%r8", "%r9", "%r10",
-    "%r11", "%r12", "%r13", "%r14", "%r15",
+    "%rax", "%rcx", "%rdx", "%rbx", "%rsp", "%rbp", "%rsi", "%rdi", "%r8", "%r9", "%r10", "%r11",
+    "%r12", "%r13", "%r14", "%r15",
 ];
 
 /// 32 位 GP 寄存器名. 与 render_one.rs::REG32 对拍.
@@ -36,14 +36,14 @@ pub(crate) const REG16: [&str; 16] = [
 /// 8 位低半字节 GP 寄存器名 (含 %spl/%bpl/%sil/%dil; 只在有 REX 前缀时合法).
 /// 高半字节 (%ah/%ch/%dh/%bh) 不由号反查, 所以不进这张表.
 pub(crate) const REG8: [&str; 16] = [
-    "%al", "%cl", "%dl", "%bl", "%spl", "%bpl", "%sil", "%dil", "%r8b", "%r9b", "%r10b",
-    "%r11b", "%r12b", "%r13b", "%r14b", "%r15b",
+    "%al", "%cl", "%dl", "%bl", "%spl", "%bpl", "%sil", "%dil", "%r8b", "%r9b", "%r10b", "%r11b",
+    "%r12b", "%r13b", "%r14b", "%r15b",
 ];
 
 /// XMM 寄存器名.
 pub(crate) const XMM: [&str; 16] = [
-    "%xmm0", "%xmm1", "%xmm2", "%xmm3", "%xmm4", "%xmm5", "%xmm6", "%xmm7", "%xmm8",
-    "%xmm9", "%xmm10", "%xmm11", "%xmm12", "%xmm13", "%xmm14", "%xmm15",
+    "%xmm0", "%xmm1", "%xmm2", "%xmm3", "%xmm4", "%xmm5", "%xmm6", "%xmm7", "%xmm8", "%xmm9",
+    "%xmm10", "%xmm11", "%xmm12", "%xmm13", "%xmm14", "%xmm15",
 ];
 
 /// 按宽度 (1/2/4/8 字节) 取 64/32/16/8 位 GP 名.

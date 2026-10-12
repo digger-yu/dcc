@@ -53,10 +53,10 @@ pub mod dump;
 pub mod expr_rebuild;
 pub mod inline_temps;
 pub mod ir;
-pub mod location;
 pub mod liveness;
-pub mod lower;
+pub mod location;
 pub mod loop_exit;
+pub mod lower;
 // passes.rs        M16 优化 pass 集合 (P1..Pn: 跨函数 DCE / 强度削减 / IVOP / GVN / 调度…),
 //                  本目录之外的消费者只走 run_with_opts / cross_function_dce_with_roots。
 pub mod passes;
@@ -93,12 +93,12 @@ pub use ir::{
 };
 // `LocMap` 是 `pub struct Function` 的 `pub` 字段类型，与 `OrderedNameSet` 同理必须保 `pub`；
 // 其余三个是 `Location` 的组成件，后端消费时要按名字读，所以也对外。
-pub use location::{LocMap, Location, RegBank, RegId, Splits};
-pub use structure::lower_switches_in_func;
 pub use build::build_from_func;
+pub use dump::dump_function;
+pub use location::{LocMap, Location, RegBank, RegId, Splits};
 pub use loop_exit::has_multi_exit_cycle;
 pub use rebuild::rebuild_block;
-pub use dump::dump_function;
+pub use structure::lower_switches_in_func;
 
 // 仅在 `ssa` 子系统内部共享的判据与工具 (收编 passes/pipelining/regalloc 后，
 // 它们的消费者已都是兄弟模块)。下面只保留「兄弟模块确实按 `crate::ssa::X`

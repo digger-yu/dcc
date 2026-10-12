@@ -2006,7 +2006,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
                     log_cpp_path_summary(cfg, stats);
                     Err(diags)
                 },
-            }
+            };
         },
     };
     stats.record_native();
@@ -2274,12 +2274,10 @@ fn write_emit_output(
             .map_err(|e| io_diag("write error (stdout)", &e.to_string()))?;
         return Ok(out);
     }
-    let mut f = fs::File::create(&out).map_err(|e| {
-        io_diag(&format!("cannot write {}", out.display()), &e.to_string())
-    })?;
-    f.write_all(&bytes).map_err(|e| {
-        io_diag(&format!("cannot write {}", out.display()), &e.to_string())
-    })?;
+    let mut f = fs::File::create(&out)
+        .map_err(|e| io_diag(&format!("cannot write {}", out.display()), &e.to_string()))?;
+    f.write_all(&bytes)
+        .map_err(|e| io_diag(&format!("cannot write {}", out.display()), &e.to_string()))?;
     // 权限位按实际形态定: 文本永远不拿执行位。
     if !emitted.is_text() && !emit_asm {
         #[cfg(unix)]

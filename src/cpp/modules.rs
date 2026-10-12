@@ -2861,13 +2861,21 @@ mod tests {
         let ctor_mangled = plan
             .mangled_name_of("Rect_ctor_complete")
             .expect("ctor 反查应命中");
-        assert!(ctor_mangled.starts_with("_ZN4RectC1"), "ctor mangled 形如 Itanium C1: {}", ctor_mangled);
+        assert!(
+            ctor_mangled.starts_with("_ZN4RectC1"),
+            "ctor mangled 形如 Itanium C1: {}",
+            ctor_mangled
+        );
 
         // 析构函数: `Rect_dtor_complete` -> `_ZN4RectD1Ev`
         let dtor_mangled = plan
             .mangled_name_of("Rect_dtor_complete")
             .expect("dtor 反查应命中");
-        assert!(dtor_mangled.starts_with("_ZN4RectD1"), "dtor mangled 形如 Itanium D1: {}", dtor_mangled);
+        assert!(
+            dtor_mangled.starts_with("_ZN4RectD1"),
+            "dtor mangled 形如 Itanium D1: {}",
+            dtor_mangled
+        );
 
         // 不在改名表里的名字必须返回 None (而不是空串或 panic)
         assert!(plan.mangled_name_of("unknown_symbol").is_none());

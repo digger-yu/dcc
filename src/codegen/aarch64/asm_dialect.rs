@@ -38,7 +38,7 @@ pub fn parse_reg(name: &str) -> Option<(u8, Width)> {
         "sp" | "xzr" => return Some((31, Width::B64)),
         "wzr" => return Some((31, Width::B32)),
         "lr" => return Some((30, Width::B64)),
-        _ => {}
+        _ => {},
     }
     // 第一个字符决定宽度, 其余是寄存器编号。
     let mut chars = name.chars();
@@ -67,7 +67,13 @@ pub fn render_operand(op: &Operand) -> String {
         Operand::None => String::new(),
         Operand::Reg { idx, width } => reg_name(*idx, *width),
         Operand::Imm { value, .. } => format!("#{}", value),
-        Operand::Mem { base, index, scale, disp, writeback } => {
+        Operand::Mem {
+            base,
+            index,
+            scale,
+            disp,
+            writeback,
+        } => {
             let mut s = String::new();
             if *disp != 0 {
                 s.push_str(&format!("#{}, ", disp));
@@ -88,14 +94,14 @@ pub fn render_operand(op: &Operand) -> String {
                 s.push('!');
             }
             s
-        }
+        },
         Operand::Sym { name, addend } => {
             if *addend != 0 {
                 format!("{}{:+}", name, addend)
             } else {
                 name.clone()
             }
-        }
+        },
         Operand::Addr { label, .. } => label.clone(),
         Operand::Vector { idx, arr } => {
             let suffix = match arr {
@@ -108,11 +114,11 @@ pub fn render_operand(op: &Operand) -> String {
                 Arrangement::Multiple => ".multiple",
             };
             format!("v{}{}", idx, suffix)
-        }
+        },
         Operand::Pad { bytes } => {
             let hex: Vec<String> = bytes.iter().map(|b| format!("0x{:02x}", b)).collect();
             format!(".byte {}", hex.join(", "))
-        }
+        },
         Operand::PoolData { bytes, alignment } => {
             let mut s = format!(".p2align {}", alignment);
             for chunk in bytes.chunks(4) {
@@ -123,7 +129,7 @@ pub fn render_operand(op: &Operand) -> String {
                 s.push_str(&format!("\n.word 0x{:08x}", v));
             }
             s
-        }
+        },
     }
 }
 

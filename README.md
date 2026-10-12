@@ -1,7 +1,8 @@
 # dcc
 
 > 一个极简 C 编译器。<br>
-"Make doesn't strictly require GCC, <br> but you obviously need a C compiler to build C code. <br> Try dcc; it's noticeably faster."
+"Make doesn't strictly require GCC, <br> but you obviously need a C compiler to build C code. <br> Try dcc; it's noticeably faster."<br> <br> 
+"This is a personal research project.<br>  It is not production-ready. Bugs and missing features are known.<br>  Issues and patches are welcome, but I cannot promise timely responses."
 
 ## 目录
 

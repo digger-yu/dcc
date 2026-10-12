@@ -11,9 +11,7 @@ use crate::ast::{BinOp, BlockItem, Decl, Expr, QualType, Stmt, Type};
 use crate::diagnostics::Span;
 
 use crate::ssa::build::Builder;
-use crate::ssa::cfg::{
-    collect_all_preds, compute_dominators, find_loop_body, ordered_block_names,
-};
+use crate::ssa::cfg::{collect_all_preds, compute_dominators, find_loop_body, ordered_block_names};
 use crate::ssa::ir::{
     rename_uses_in, Function, Inst, InstKind, Operand, OrderedNameSet, Phi, SsaVar, Terminator,
 };
@@ -360,7 +358,9 @@ pub(super) fn insert_loop_phis(func: &mut Function) {
                     }
                 })
                 .or_insert(p.version);
-            outside_defs.entry(p.base.clone()).or_insert_with(|| p.clone());
+            outside_defs
+                .entry(p.base.clone())
+                .or_insert_with(|| p.clone());
         }
         for bb_name in ordered_block_names(func) {
             let Some(bb) = func.blocks.get(&bb_name) else {
@@ -395,8 +395,10 @@ pub(super) fn insert_loop_phis(func: &mut Function) {
         let preheader = all_preds
             .get(&header)
             .map(|ps| {
-                let mut outside: Vec<&String> =
-                    ps.iter().filter(|p| !in_body.contains(p.as_str())).collect();
+                let mut outside: Vec<&String> = ps
+                    .iter()
+                    .filter(|p| !in_body.contains(p.as_str()))
+                    .collect();
                 outside.sort();
                 outside.first().map(|p| (*p).clone())
             })
@@ -426,10 +428,7 @@ pub(super) fn insert_loop_phis(func: &mut Function) {
             new_phis.push(Phi {
                 dest: phi_dest.clone(),
                 incoming: vec![
-                    (
-                        entry_var.clone(),
-                        preheader.clone().unwrap_or_else(|| "__entry".into()),
-                    ),
+                    (entry_var.clone(), preheader.clone().unwrap_or_else(|| "__entry".into())),
                     (body_var.clone(), latch.clone()),
                 ],
             });
@@ -568,4 +567,3 @@ pub(super) fn insert_label_phis(
         }
     }
 }
-

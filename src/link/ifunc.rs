@@ -159,9 +159,7 @@ pub fn collect_from_bundle(
 ///
 /// 成功时返回 `(ifunc 名, 被绑到的变体名)` 列表，调用方**无条件**打印 —— 这是
 /// 「静态路径放弃了 CPUID 派发」这件事的唯一对外说明口。
-pub fn bind_static_exec_ifuncs(
-    layout: &mut Layout,
-) -> Result<Vec<(String, String)>, Vec<String>> {
+pub fn bind_static_exec_ifuncs(layout: &mut Layout) -> Result<Vec<(String, String)>, Vec<String>> {
     use crate::codegen::shared::elf::{STT_FUNC, STT_GNU_IFUNC};
 
     // 变体表：`<base>.default` -> (section, value, size, vaddr)。一次扫描，避免每个 IFUNC 都 O(n) 查。
@@ -180,8 +178,8 @@ pub fn bind_static_exec_ifuncs(
     let mut bound = Vec::new();
     let mut unresolvable = Vec::new();
     for i in 0..layout.symbols.len() {
-        let is_ifunc = layout.symbols[i].kind == STT_GNU_IFUNC
-            || layout.symbols[i].ty == STT_GNU_IFUNC;
+        let is_ifunc =
+            layout.symbols[i].kind == STT_GNU_IFUNC || layout.symbols[i].ty == STT_GNU_IFUNC;
         if !is_ifunc {
             continue;
         }
@@ -293,7 +291,7 @@ mod tests {
     /// 只够 `bind_static_exec_ifuncs` 用 (它只看 symbols 的 name/ty/kind/value/size/vaddr
     /// 以及 sections[i].vaddr), 不参与地址分配。
     fn layout_with_symbols(symbols: Vec<OutputSymbol>) -> Layout {
-        use crate::codegen::shared::elf::{SHT_PROGBITS, SHF_ALLOC, SHF_EXECINSTR};
+        use crate::codegen::shared::elf::{SHF_ALLOC, SHF_EXECINSTR, SHT_PROGBITS};
         use crate::link::layout::{OutputSection, OutputSectionKind};
         let text = OutputSection {
             kind: OutputSectionKind::Text,
@@ -366,11 +364,7 @@ mod tests {
         ]);
         let bound = bind_static_exec_ifuncs(&mut layout).expect("default 变体存在, 应可绑");
         assert_eq!(bound, vec![("compute".to_string(), "compute.default".to_string())]);
-        let compute = layout
-            .symbols
-            .iter()
-            .find(|s| s.name == "compute")
-            .unwrap();
+        let compute = layout.symbols.iter().find(|s| s.name == "compute").unwrap();
         let default = layout
             .symbols
             .iter()

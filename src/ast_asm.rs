@@ -67,7 +67,10 @@ fn walk_decl(d: &Decl, out: &mut HashSet<String>) {
         },
         // 这三类里没有表达式（类型/枚举定义不携带 asm），GlobalAsm 只有裸文本、
         // 没有操作数也没有 clobber 名单。
-        Decl::StructDef(_) | Decl::UnionDef(_) | Decl::EnumDef(_) | Decl::Typedef { .. }
+        Decl::StructDef(_)
+        | Decl::UnionDef(_)
+        | Decl::EnumDef(_)
+        | Decl::Typedef { .. }
         | Decl::GlobalAsm { .. } => {},
     }
 }
@@ -80,7 +83,9 @@ fn walk_stmt(st: &Stmt, out: &mut HashSet<String>) {
                 walk_expr(e, out);
             }
         },
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             walk_expr(cond, out);
             walk_stmt(then_, out);
             if let Some(x) = else_ {
@@ -136,11 +141,15 @@ fn walk_stmt(st: &Stmt, out: &mut HashSet<String>) {
             }
         },
         Stmt::Invoke { call, .. } => walk_stmt(call, out),
-        Stmt::EhLandingPad { object, selector, .. } => {
+        Stmt::EhLandingPad {
+            object, selector, ..
+        } => {
             walk_expr(object, out);
             walk_expr(selector, out);
         },
-        Stmt::Goto { .. } | Stmt::Break { .. } | Stmt::Continue { .. }
+        Stmt::Goto { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
         | Stmt::Fallthrough { .. } => {},
     }
 }
@@ -188,7 +197,9 @@ fn walk_expr(e: &Expr, out: &mut HashSet<String>) {
             walk_expr(l, out);
             walk_expr(r, out);
         },
-        Expr::Cond { cond, then_, else_, .. } => {
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
             walk_expr(cond, out);
             walk_expr(then_, out);
             walk_expr(else_, out);

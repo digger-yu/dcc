@@ -24,7 +24,8 @@ const K: [u32; 64] = [
 
 fn sha256(data: &[u8]) -> [u8; 32] {
     let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
     ];
     let bitlen = (data.len() as u64).wrapping_mul(8);
     let mut padded = data.to_vec();
@@ -186,11 +187,11 @@ fn g10_snapshot_text_sha256() {
                     "G10 baseline drift for {name}: expected {} got {}",
                     expected, hash
                 );
-            }
+            },
             Err(_) => {
                 std::fs::write(&path, format!("{hash}\n")).expect("write baseline");
                 generated.push(format!("{name} -> {path:?} ({hash})"));
-            }
+            },
         }
     }
     if !generated.is_empty() {

@@ -4131,12 +4131,8 @@ impl<'a> CppParser<'a> {
                     match &self.peek {
                         Some(CppTok::C(Tok { kind, .. })) => {
                             match kind {
-                                TokKind::LParen | TokKind::LBracket | TokKind::LBrace => {
-                                    depth += 1
-                                },
-                                TokKind::RParen | TokKind::RBracket | TokKind::RBrace => {
-                                    depth -= 1
-                                },
+                                TokKind::LParen | TokKind::LBracket | TokKind::LBrace => depth += 1,
+                                TokKind::RParen | TokKind::RBracket | TokKind::RBrace => depth -= 1,
                                 _ => {},
                             }
                             self.bump();
@@ -5269,7 +5265,8 @@ impl<'a> CppParser<'a> {
 
     /// 解析 struct/union 聚合声明 (M30.2: is_union 区分 union 关键字)
     fn parse_aggr_decl(&mut self, is_union: bool) -> Result<CppDecl, CppParseError> {
-        self.parse_aggr_decl_impl(is_union, true, None).map(|(d, _)| d)
+        self.parse_aggr_decl_impl(is_union, true, None)
+            .map(|(d, _)| d)
     }
 
     /// 聚合体定义的核心解析。返回 `(声明, 源码里的 tag 名)`。
@@ -5333,14 +5330,13 @@ impl<'a> CppParser<'a> {
         self.bump();
         // M30.4: 匿名聚合体分配唯一名 (`__anon_aggr_1`, `__anon_aggr_2`, ...)
         // 避免多个匿名 union/struct 共享同名导致构造函数/typeinfo 重复定义.
-        let anon_name =
-            name.clone().unwrap_or_else(|| match anon_fallback_name {
-                Some(given) => given,
-                None => {
-                    self.anon_counter += 1;
-                    format!("__anon_aggr_{}", self.anon_counter)
-                },
-            });
+        let anon_name = name.clone().unwrap_or_else(|| match anon_fallback_name {
+            Some(given) => given,
+            None => {
+                self.anon_counter += 1;
+                format!("__anon_aggr_{}", self.anon_counter)
+            },
+        });
         let ctx_name = anon_name.clone();
         let mut members = vec![];
         // G22: `struct`/`union` 体内默认 public
@@ -5391,8 +5387,7 @@ impl<'a> CppParser<'a> {
                     kind: TokKind::Ident,
                     ..
                 }))
-            )
-        {
+            ) {
             Some(self.expect_ident()?)
         } else {
             None
@@ -5410,7 +5405,11 @@ impl<'a> CppParser<'a> {
             // 匿名定义 + 实例: AnonAggr 一体发射 (实例名保留, 成员
             // 字段引用 `h->temp.i` 在 C 中合法).
             (None, Some(inst)) => Ok((
-                CppDecl::AnonAggr { is_union, members, name: inst },
+                CppDecl::AnonAggr {
+                    is_union,
+                    members,
+                    name: inst,
+                },
                 None,
             )),
             // 带 tag 定义 (变量实例罕见, 忽略实例名)
@@ -5710,16 +5709,22 @@ impl<'a> CppParser<'a> {
             let t2 = self.peek_token_at(2);
             let t3 = self.peek_token_at(3);
             let at_lparen = |t: &Option<CppTok>| {
-                matches!(t, Some(CppTok::C(Tok {
-                    kind: TokKind::LParen,
-                    ..
-                })))
+                matches!(
+                    t,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::LParen,
+                        ..
+                    }))
+                )
             };
             let at_ident = |t: &Option<CppTok>| {
-                matches!(t, Some(CppTok::C(Tok {
-                    kind: TokKind::Ident,
-                    ..
-                })))
+                matches!(
+                    t,
+                    Some(CppTok::C(Tok {
+                        kind: TokKind::Ident,
+                        ..
+                    }))
+                )
             };
             if at_lparen(&t2) {
                 // `struct Tag (*fp)(...)` 函数指针成员
@@ -6331,8 +6336,8 @@ impl<'a> CppParser<'a> {
         // 记下 `extern` 关键字前的位置, 块形态截取原文时直接拿整段
         let full_start = self.lex.pos - "extern".len();
         self.bump(); // consume 'extern'
-        // [link.spec]/2: 一个 linkage-specification 可以带多个链接字符串
-        // (`extern "C" "ISO"`), 逐个吃掉。
+                     // [link.spec]/2: 一个 linkage-specification 可以带多个链接字符串
+                     // (`extern "C" "ISO"`), 逐个吃掉。
         loop {
             if let Some(CppTok::C(Tok {
                 kind: TokKind::StringLit,
@@ -9192,10 +9197,9 @@ impl<'a> CppParser<'a> {
                 };
                 Some(MangleType::NtExpr(nt, vec![conv(l)?, conv(r)?]))
             },
-            CppExpr::Ternary { cond, then, els } => Some(MangleType::NtExpr(
-                NtOp::Cond,
-                vec![conv(cond)?, conv(then)?, conv(els)?],
-            )),
+            CppExpr::Ternary { cond, then, els } => {
+                Some(MangleType::NtExpr(NtOp::Cond, vec![conv(cond)?, conv(then)?, conv(els)?]))
+            },
             // 整型常量表达式里的转换保持数值 (`(int)x` / `static_cast<int>(x)`),
             // 而 `NonType` 不携带宽度/符号 -> 只透传操作数。
             CppExpr::Cast(_, inner) | CppExpr::StaticCast { expr: inner, .. } => conv(inner),
@@ -9606,8 +9610,11 @@ impl<'a> CppParser<'a> {
                 self.bump();
             }
         }
-        let spec_words: Vec<&str> =
-            if is_builtin_base { full_name.split(' ').collect() } else { Vec::new() };
+        let spec_words: Vec<&str> = if is_builtin_base {
+            full_name.split(' ').collect()
+        } else {
+            Vec::new()
+        };
         // 先按简单类型说明符集合归一; 不是合法组合 (`auto` / 类名 / `struct X`
         // 等) 再退回原有的拼写表, 保持那些形态的既有行为不变。
         let mut ty = match canonical_simple_type(&spec_words) {
@@ -10401,14 +10408,10 @@ impl<'a> CppParser<'a> {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                "(",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected("(", format!("{:?}", self.peek), self.span()));
         }
         self.bump(); // (
-        // declarator 外层指针层: `(*h)` 一层, `(**pp)` 两层。
+                     // declarator 外层指针层: `(*h)` 一层, `(**pp)` 两层。
         let mut ptr_layers = 0usize;
         while matches!(
             &self.peek,
@@ -10485,7 +10488,6 @@ impl<'a> CppParser<'a> {
             is_const: quals.is_const,
         }])
     }
-
 
     /// M30: 完成全局变量声明尾部: 名后的 `[...]` / `= init` 与逗号之后的
     /// 其余 declarator, 整条声明按 init-declarator 列表展开成 N 个
@@ -11949,11 +11951,7 @@ impl<'a> CppParser<'a> {
                 ..
             }))
         ) {
-            return Err(CppParseError::Unexpected(
-                ":",
-                format!("{:?}", self.peek),
-                self.span(),
-            ));
+            return Err(CppParseError::Unexpected(":", format!("{:?}", self.peek), self.span()));
         }
         self.bump();
         // 末尾操作数是 conditional-expression (不含逗号运算符)
@@ -13983,7 +13981,7 @@ impl<'a> CppParser<'a> {
                             match kind {
                                 TokKind::LBracket => depth += 1,
                                 TokKind::RBracket => depth -= 1,
-                                _ => {}
+                                _ => {},
                             }
                             self.bump();
                         },
@@ -15832,7 +15830,11 @@ fn canonical_simple_type(words: &[&str]) -> Option<MangleType> {
         if short || char_ || int_ || long > 1 {
             return None;
         }
-        return Some(if long == 1 { MangleType::LongDouble } else { MangleType::Double });
+        return Some(if long == 1 {
+            MangleType::LongDouble
+        } else {
+            MangleType::Double
+        });
     }
     // `char` 是三态的: 裸 `char` 是独立类型 (`MangleType::Char`), 与
     // `signed char` / `unsigned char` 在 [basic.types] 里是三个不同类型。
@@ -15853,7 +15855,11 @@ fn canonical_simple_type(words: &[&str]) -> Option<MangleType> {
         if long != 0 {
             return None;
         }
-        return Some(if unsigned { MangleType::Ushort } else { MangleType::Short });
+        return Some(if unsigned {
+            MangleType::Ushort
+        } else {
+            MangleType::Short
+        });
     }
     match long {
         0 => Some(if unsigned { MangleType::Uint } else { MangleType::Int }),
@@ -15895,14 +15901,8 @@ mod canonical_simple_type_tests {
     fn previously_missing_signed_combinations() {
         assert_eq!(t(&["signed", "short", "int"]), Some(MangleType::Short));
         assert_eq!(t(&["signed", "long", "int"]), Some(MangleType::Long));
-        assert_eq!(
-            t(&["signed", "long", "long", "int"]),
-            Some(MangleType::LongLong)
-        );
-        assert_eq!(
-            t(&["unsigned", "long", "long"]),
-            Some(MangleType::UlongLong)
-        );
+        assert_eq!(t(&["signed", "long", "long", "int"]), Some(MangleType::LongLong));
+        assert_eq!(t(&["unsigned", "long", "long"]), Some(MangleType::UlongLong));
     }
 
     #[test]
@@ -16132,11 +16132,7 @@ mod tests {
         // 反护栏: `int f(int);` 仍必须是 FreeFn, 不得被新分支抢走。
         let mut q = CppParser::new(b"int f(int);", "t.cpp");
         let d = q.parse_top_level().unwrap();
-        assert!(
-            matches!(&d[0], CppDecl::FreeFn { .. }),
-            "误把函数声明当函数指针: {:?}",
-            d
-        );
+        assert!(matches!(&d[0], CppDecl::FreeFn { .. }), "误把函数声明当函数指针: {:?}", d);
     }
 
     /// M54: 全局数组声明符的**维度必须折进类型** —— 旧实现把 `[...]` 整段
@@ -16338,7 +16334,8 @@ mod tests {
     #[test]
     fn parse_namespace_with_attributes() {
         let cases = [
-            b"namespace std __attribute__((__visibility__(\"default\"))) { struct A {}; }".as_slice(),
+            b"namespace std __attribute__((__visibility__(\"default\"))) { struct A {}; }"
+                .as_slice(),
             b"namespace [[gnu::hidden]] bar { struct B {}; }".as_slice(),
             b"namespace VISIBLE(default) { struct C {}; }".as_slice(),
         ];

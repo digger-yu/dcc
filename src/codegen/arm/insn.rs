@@ -48,7 +48,7 @@ impl Insn {
             ArmOpcode::RawU32 => {
                 let w = Self::imm_val(&self.ops[0]) as u32;
                 Some(w.to_le_bytes().to_vec())
-            }
+            },
         }
     }
 
@@ -77,6 +77,9 @@ mod tests {
 
     #[test]
     fn raw_passthrough() {
-        assert_eq!(Insn::raw(0xEB000000).encode_bytes(), Some(0xEB000000u32.to_le_bytes().to_vec()));
+        assert_eq!(
+            Insn::raw(0xEB000000).encode_bytes(),
+            Some(0xEB000000u32.to_le_bytes().to_vec())
+        );
     }
 }

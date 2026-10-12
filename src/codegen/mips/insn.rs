@@ -48,7 +48,7 @@ impl Insn {
             MipsOpcode::RawU32 => {
                 let w = Self::imm_val(&self.ops[0]) as u32;
                 Some(w.to_be_bytes().to_vec())
-            }
+            },
         }
     }
 

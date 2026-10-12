@@ -56,9 +56,9 @@ impl AsmFallback {
         match s {
             "error" => Ok(AsmFallback::Error),
             "gas" => Ok(AsmFallback::Gas),
-            other => Err(format!(
-                "unknown --asm-fallback value '{other}' (expected 'gas' or 'error')"
-            )),
+            other => {
+                Err(format!("unknown --asm-fallback value '{other}' (expected 'gas' or 'error')"))
+            },
         }
     }
 
@@ -89,9 +89,9 @@ pub struct Config {
     pub defines: Vec<(String, Option<String>)>, // -D NAME=VALUE
     pub dump_ast: bool,
     pub verbose: bool,
-    pub relocatable: bool,                    // -c / -r
-    pub link_mode: bool,                      // -r 合并 .o（依赖 host ld/objcopy，非内置链接器）
-    pub emit_asm: bool,                       // -S: 输出汇编文本 .s
+    pub relocatable: bool, // -c / -r
+    pub link_mode: bool,   // -r 合并 .o（依赖 host ld/objcopy，非内置链接器）
+    pub emit_asm: bool,    // -S: 输出汇编文本 .s
     /// --asm-fallback=gas|error: 内联汇编编不出时是报错还是整 TU 降级为 GAS 文本
     pub asm_fallback: AsmFallback,
     pub preprocess_only: bool,                // -E: 只做预处理

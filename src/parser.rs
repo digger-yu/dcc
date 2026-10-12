@@ -7243,7 +7243,8 @@ impl<'a> Parser<'a> {
                     | "__attribute__"
                     | "_ms_restrict"
                     | "_restrict"
-            ) || Self::seg_qualifier_text(&self.cur.text))
+            )
+            || Self::seg_qualifier_text(&self.cur.text))
         {
             // 段地址空间限定符走唯一入口（记录到 spec_addr_space 并消费），不在
             // const/volatile/restrict 那一族里重复处理。
@@ -10279,7 +10280,7 @@ impl<'a> Parser<'a> {
                 } else {
                     Some(name.name.clone())
                 }
-            }
+            },
             // For member access (.field), don't penetrate to base variable.
             // The const-ness of a struct member is determined by its own type,
             // not the base variable's qualifiers. E.g., `struct S { const char *p; } x;`
@@ -12478,9 +12479,7 @@ impl<'a> Parser<'a> {
             Expr::SizeofTy { ty, .. } | Expr::AlignofTy { ty, .. } => {
                 Self::collect_upvars_type(ty, local_vars, parent_locals, out);
             },
-            Expr::Offsetof {
-                ty, indices, ..
-            } => {
+            Expr::Offsetof { ty, indices, .. } => {
                 Self::collect_upvars_type(ty, local_vars, parent_locals, out);
                 for idx in indices {
                     Self::collect_upvars_expr(idx, local_vars, parent_locals, out);

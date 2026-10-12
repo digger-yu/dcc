@@ -158,7 +158,12 @@ struct SwitchArm {
 ///      只会执行 `x`。空体标签 (`case 1: case 2: …`) 是合法的「共享分支」，按值
 ///      合并即可；非空体且没自带退出语义的就是真 fallthrough ⇒ 放弃降级。
 fn lower_switch_stmt(s: &Stmt) -> Option<Stmt> {
-    let Stmt::Switch { expr, cases, span: _ } = s else {
+    let Stmt::Switch {
+        expr,
+        cases,
+        span: _,
+    } = s
+    else {
         return None;
     };
     if cases.is_empty() {
@@ -428,4 +433,3 @@ fn expr_ty(e: &Expr) -> Type {
         _ => Type::Int,
     }
 }
-

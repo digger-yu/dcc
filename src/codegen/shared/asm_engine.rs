@@ -84,11 +84,13 @@ pub fn render_reg_aarch64(idx: u8, w: Width) -> String {
 pub fn render_reg_riscv(idx: u8, _w: Width) -> String {
     // RISC-V ABI 名表 (简化版): x0..x31 用 ABI 名, 后端可覆盖
     const ABI: [&str; 32] = [
-        "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3",
-        "a4", "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11",
-        "t3", "t4", "t5", "t6",
+        "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4",
+        "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4",
+        "t5", "t6",
     ];
-    ABI.get(idx as usize).map(|s| s.to_string()).unwrap_or_else(|| format!("x{}", idx))
+    ABI.get(idx as usize)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("x{}", idx))
 }
 
 /// 渲染单个操作数为 asm 文本。
@@ -113,18 +115,36 @@ pub fn render_operand(isa: AsmIsa, op: &Operand) -> String {
             AsmIsa::X86_64 => format!("${}", value),
             _ => format!("{}", value),
         },
-        Operand::Mem { base, index, scale, disp, writeback } => {
+        Operand::Mem {
+            base,
+            index,
+            scale,
+            disp,
+            writeback,
+        } => {
             let mut s = String::new();
             if *disp != 0 {
                 s.push_str(&disp.to_string());
             }
             s.push('[');
             if let Some(b) = base {
-                s.push_str(&render_operand(isa, &Operand::Reg { idx: *b, width: Width::B64 }));
+                s.push_str(&render_operand(
+                    isa,
+                    &Operand::Reg {
+                        idx: *b,
+                        width: Width::B64,
+                    },
+                ));
             }
             if let Some(i) = index {
                 s.push_str(", ");
-                s.push_str(&render_operand(isa, &Operand::Reg { idx: *i, width: Width::B64 }));
+                s.push_str(&render_operand(
+                    isa,
+                    &Operand::Reg {
+                        idx: *i,
+                        width: Width::B64,
+                    },
+                ));
                 if *scale != 1 {
                     s.push_str(&format!(", {}", scale));
                 }
@@ -134,14 +154,14 @@ pub fn render_operand(isa: AsmIsa, op: &Operand) -> String {
                 s.push('!');
             }
             s
-        }
+        },
         Operand::Sym { name, addend } => {
             if *addend != 0 {
                 format!("{}{:+}", name, addend)
             } else {
                 name.clone()
             }
-        }
+        },
         Operand::Addr { label, .. } => label.clone(),
         Operand::Vector { idx, arr } => {
             let suffix = match arr {
@@ -154,11 +174,11 @@ pub fn render_operand(isa: AsmIsa, op: &Operand) -> String {
                 Arrangement::Multiple => ".multiple",
             };
             format!("v{}{}", idx, suffix)
-        }
+        },
         Operand::Pad { bytes } => {
             let hex: Vec<String> = bytes.iter().map(|b| format!("0x{:02x}", b)).collect();
             format!(".byte {}", hex.join(", "))
-        }
+        },
         Operand::PoolData { bytes, alignment } => {
             let words: Vec<String> = bytes
                 .chunks(4)
@@ -171,7 +191,7 @@ pub fn render_operand(isa: AsmIsa, op: &Operand) -> String {
                 })
                 .collect();
             format!(".p2align {}; .word {}", alignment, words.join(", "))
-        }
+        },
     }
 }
 
@@ -219,11 +239,7 @@ pub fn render_insn_fallback(isa: AsmIsa, rec: &InsnRec) -> String {
 }
 
 /// 把指令序列渲染成 `.s` 文本。
-pub fn render_text_section(
-    isa: AsmIsa,
-    recs: &[InsnRec],
-    layout: &LayoutMap,
-) -> String {
+pub fn render_text_section(isa: AsmIsa, recs: &[InsnRec], layout: &LayoutMap) -> String {
     let mut s = String::new();
     s.push_str("\n.text\n");
     for rec in recs {
@@ -253,13 +269,7 @@ mod tests {
 
     #[test]
     fn render_imm() {
-        assert_eq!(
-            render_operand(AsmIsa::AArch64, &Operand::uimm(4, 12)),
-            "#4"
-        );
-        assert_eq!(
-            render_operand(AsmIsa::X86_64, &Operand::uimm(4, 32)),
-            "$4"
-        );
+        assert_eq!(render_operand(AsmIsa::AArch64, &Operand::uimm(4, 12)), "#4");
+        assert_eq!(render_operand(AsmIsa::X86_64, &Operand::uimm(4, 32)), "$4");
     }
 }

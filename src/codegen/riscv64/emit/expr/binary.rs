@@ -247,7 +247,7 @@ impl Riscv64Codegen {
             Some(bytes) => {
                 self.code.extend_from_slice(&bytes);
                 true
-            }
+            },
             None => false,
         }
     }

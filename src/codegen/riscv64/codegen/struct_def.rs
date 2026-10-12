@@ -73,8 +73,7 @@ pub struct Riscv64Codegen {
     pub(crate) raw_func_asm_lines: Vec<(String, Vec<String>)>,
     /// dcc 编不出、必须透传给 GAS 的行记录 (TU 级降级判据, 由 asm_source 产出)。
     /// 注意: 这里只记事实, 不在本后端报错也不降级。
-    pub(crate) asm_passthrough:
-        Vec<crate::codegen::shared::asm_source::AsmPassthroughRecord>,
+    pub(crate) asm_passthrough: Vec<crate::codegen::shared::asm_source::AsmPassthroughRecord>,
     /// 透传语句在 .text 内的起点与其 GAS 行 (降级时按位插入文本)。
     pub(crate) asm_passthrough_regions: Vec<(u64, Vec<String>)>,
     /// 编译诊断

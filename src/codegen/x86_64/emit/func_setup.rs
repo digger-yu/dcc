@@ -1859,8 +1859,8 @@ impl Codegen {
                 4,
                 0,
                 0,
-            )); // mov byte ptr [rsp], 0 (C6 /0 ib with SIB for base=4)
-                                                                         // dec r11: 49 FF CB (REX.W B64, /1 modrm=11 001 011)
+            )); // mov byte ptr [rsp], 0
+                // dec r11: 49 FF CB (REX.W B64, /1 modrm=11 001 011)
             self.emit_insn(&Insn::unary_rm_reg(
                 crate::codegen::x86_64::opcode::UnaryOp::Dec,
                 crate::codegen::shared::asm_operand::Width::B64,

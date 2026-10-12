@@ -73,10 +73,8 @@ impl Codegen {
         let mut descended: Vec<(String, Block)> = Vec::new();
         for nf in &directs {
             let orig_name = nf.name.name.clone();
-            let unique_name = format!(
-                "{}_{}.{}",
-                orig_name, parent_name, self.nested_func_rename_counter
-            );
+            let unique_name =
+                format!("{}_{}.{}", orig_name, parent_name, self.nested_func_rename_counter);
             self.nested_func_rename_counter += 1;
             self.nested_func_renames
                 .entry(parent_name.to_string())

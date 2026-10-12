@@ -79,14 +79,14 @@ impl ArchKind {
     pub fn dwarf_reg_of_gp_hw(self, hw: u8) -> Option<u8> {
         match self {
             ArchKind::X86_64 => match hw {
-                0 => Some(0),  // rax
-                1 => Some(2),  // rcx
-                2 => Some(1),  // rdx
-                3 => Some(3),  // rbx
-                4 => Some(7),  // rsp
-                5 => Some(6),  // rbp
-                6 => Some(4),  // rsi
-                7 => Some(5),  // rdi
+                0 => Some(0), // rax
+                1 => Some(2), // rcx
+                2 => Some(1), // rdx
+                3 => Some(3), // rbx
+                4 => Some(7), // rsp
+                5 => Some(6), // rbp
+                6 => Some(4), // rsi
+                7 => Some(5), // rdi
                 // r8..r15 两侧同序；APX 的 r16..r31 也在 DWARF 的 reg16..reg31 上
                 n @ 8..=31 => Some(n),
                 _ => None,
@@ -1324,11 +1324,7 @@ pub fn normalize_cu(cu: &CompileUnit) -> CompileUnit {
     }
 
     // 2) 按起始 PC 升序；同 PC（不该发生，但输入错了也不得让行表倒退）再按名字定序
-    merged.sort_by(|a, b| {
-        a.low_pc
-            .cmp(&b.low_pc)
-            .then_with(|| a.name.cmp(&b.name))
-    });
+    merged.sort_by(|a, b| a.low_pc.cmp(&b.low_pc).then_with(|| a.name.cmp(&b.name)));
 
     // 3) CU 范围 = 所有函数区间的 min/max
     if let Some(lo) = merged.iter().map(|f| f.low_pc).min() {
@@ -5603,9 +5599,7 @@ mod tests {
         // 1) 变量名必须在表里（不在此时，`.debug_info` 里那个 strp 就是节外指针）
         let needle = b"zz_local_name\0";
         assert!(
-            with.str
-                .windows(needle.len())
-                .any(|w| w == needle),
+            with.str.windows(needle.len()).any(|w| w == needle),
             "DW_TAG_variable 的名字没进 .debug_str ⇒ strp 指向节外"
         );
         // 2) 已有串的偏移不得变动：新表必须以旧表为前缀
@@ -5812,7 +5806,13 @@ mod tests {
         // 函数 DIE 自己的区间也得一条一个、按地址升序（第 2 条 reloc 起）
         let func_los: Vec<u64> = sec.debug_info_relocs[1..]
             .iter()
-            .map(|(off, _)| u64::from_le_bytes(sec.info[*off as usize..*off as usize + 8].try_into().unwrap()))
+            .map(|(off, _)| {
+                u64::from_le_bytes(
+                    sec.info[*off as usize..*off as usize + 8]
+                        .try_into()
+                        .unwrap(),
+                )
+            })
             .collect();
         assert_eq!(func_los, vec![0x10, 0x200, 0x400], "DW_TAG_subprogram 必须按地址升序");
     }
@@ -5914,6 +5914,12 @@ mod tests {
         let expect: std::collections::BTreeSet<(u64, u32)> =
             entries.iter().map(|e| (e.pc, e.line)).collect();
         let got: std::collections::BTreeSet<(u64, u32)> = rows.iter().cloned().collect();
-        assert_eq!(got, expect, "行表少行或多行（输入 {} 行，解码 {} 行）", expect.len(), rows.len());
+        assert_eq!(
+            got,
+            expect,
+            "行表少行或多行（输入 {} 行，解码 {} 行）",
+            expect.len(),
+            rows.len()
+        );
     }
 }

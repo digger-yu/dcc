@@ -2031,23 +2031,19 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                         .or_else(|| {
                             // 十进制扫描失败 (如十六进制浮点 / 特殊格式):
                             // 经 f64 中转仍是一个可编译的常量, 不阻断整份编译。
-                            s
-                                .parse::<f64>()
-                                .ok()
-                                .map(|v| {
-                                    Operand::Float(
-                                        FloatConst::LongDouble(crate::float80::from_f64(v)),
-                                        Type::LongDouble,
-                                    )
-                                })
+                            s.parse::<f64>().ok().map(|v| {
+                                Operand::Float(
+                                    FloatConst::LongDouble(crate::float80::from_f64(v)),
+                                    Type::LongDouble,
+                                )
+                            })
                         })
                         .ok_or_else(|| {
                             LowerIrError::Internal(format!("cannot lower float literal {s:?}"))
                         }),
-                    Type::Float => Ok(Operand::Float(
-                        FloatConst::F32(s.parse().unwrap_or(0.0)),
-                        Type::Float,
-                    )),
+                    Type::Float => {
+                        Ok(Operand::Float(FloatConst::F32(s.parse().unwrap_or(0.0)), Type::Float))
+                    },
                     other => Ok(Operand::Float(FloatConst::F64(s.parse().unwrap_or(0.0)), other)),
                 }
             },

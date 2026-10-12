@@ -174,12 +174,7 @@ pub fn collect_clone_bases(prog: &Program) -> Vec<CloneBase> {
         if f.target_clones.is_empty() || f.body.is_some() {
             continue;
         }
-        let Some(default_arch) = f
-            .target_clones
-            .iter()
-            .find(|a| *a == "default")
-            .cloned()
-        else {
+        let Some(default_arch) = f.target_clones.iter().find(|a| *a == "default").cloned() else {
             continue;
         };
         let arches: Vec<String> = f.target_clones.clone();
@@ -243,7 +238,14 @@ fn validate_clone_arch(arch: &str) -> Result<(), String> {
 }
 
 fn push_diag(diags: &mut Vec<Diagnostic>, sev: Severity, msg: String, span: Span, hint: String) {
-    diags.push(Diagnostic { sev, code: DIAG_BAD_CLONE, msg, span, hint: Some(hint), source_line: None });
+    diags.push(Diagnostic {
+        sev,
+        code: DIAG_BAD_CLONE,
+        msg,
+        span,
+        hint: Some(hint),
+        source_line: None,
+    });
 }
 
 /// 就地展开 `prog` 里所有 `target_clones` 函数。
@@ -565,8 +567,18 @@ impl Codegen {
         self.align(16);
         let start = self.pos();
         self.label(CPU_INIT_NAME);
-        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Push, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(3, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // push rbx
-        // 幂等守卫: if (model.init_done) goto done
+        self.emit_insn(&Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
+                op: crate::codegen::x86_64::opcode::StackOp::Push,
+                width: crate::codegen::shared::asm_operand::Width::B64,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    3,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                ),
+            },
+            &[],
+        )); // push rbx
+            // 幂等守卫: if (model.init_done) goto done
         let l_done = self.fresh_label();
         self.emit_model_rip(&RIP_MOV_EAX_M32, cpu_isa::SLOT_INIT_DONE, None);
         self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B32, 0, 0)); // test eax, eax
@@ -649,13 +661,19 @@ impl Codegen {
         self.emit_classify_chain();
 
         // model.init_done = 1
-        self.emit_model_rip(
-            &RIP_MOV_M32_IMM32,
-            cpu_isa::SLOT_INIT_DONE,
-            Some(1),
-        );
+        self.emit_model_rip(&RIP_MOV_M32_IMM32, cpu_isa::SLOT_INIT_DONE, Some(1));
         self.label(&l_done);
-        self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Stack { op: crate::codegen::x86_64::opcode::StackOp::Pop, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(3, crate::codegen::shared::asm_operand::Width::B64)}, &[])); // pop rbx
+        self.emit_insn(&Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
+                op: crate::codegen::x86_64::opcode::StackOp::Pop,
+                width: crate::codegen::shared::asm_operand::Width::B64,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                    3,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                ),
+            },
+            &[],
+        )); // pop rbx
         self.ret();
         let size = self.pos() - start;
         self.func_sizes.insert(CPU_INIT_NAME.to_string(), size);
@@ -915,7 +933,11 @@ impl Codegen {
                 }
                 if !r.cpu_subtype.is_empty() {
                     if let Some(id) = self.class_id_or_diag(r.cpu_subtype, false) {
-                        self.emit_model_rip(&RIP_MOV_M32_IMM32, cpu_isa::SLOT_CPU_SUBTYPE, Some(id));
+                        self.emit_model_rip(
+                            &RIP_MOV_M32_IMM32,
+                            cpu_isa::SLOT_CPU_SUBTYPE,
+                            Some(id),
+                        );
                     }
                 }
                 self.jmp_rel32(&l_end, JumpKind::Jmp);
@@ -1079,9 +1101,10 @@ impl Codegen {
                 .pending
                 .iter()
                 .any(|p| p.target == CPU_INIT_NAME || p.target == CPU_MODEL_NAME)
-            || self.pending_code_rels.iter().any(|r| {
-                r.symbol == CPU_INIT_NAME || r.symbol == CPU_MODEL_NAME
-            })
+            || self
+                .pending_code_rels
+                .iter()
+                .any(|r| r.symbol == CPU_INIT_NAME || r.symbol == CPU_MODEL_NAME)
     }
 
     /// `-S` 渲染合成体：绑定指示（`.globl` / `.weak`，LOCAL 什么都不发）+
@@ -1101,9 +1124,7 @@ impl Codegen {
             self.labels.iter().map(|(n, o)| (o, n.as_str())),
         );
         let directives = crate::codegen::x86_64::render_one::directive_map(
-            self.asm_directives_at
-                .iter()
-                .map(|(o, l)| (o, l.as_str())),
+            self.asm_directives_at.iter().map(|(o, l)| (o, l.as_str())),
         );
         let mut out = String::new();
         out.push_str("\t.text\n");
@@ -1364,10 +1385,13 @@ impl Codegen {
                   __builtin_cpu_*) is only emitted for relocatable output"
                 .to_string(),
             span: Span::point("<codegen>", 0, 0),
-            hint: Some("compile to a .o and link it (the default `dcc prog.c -o prog` path \
+            hint: Some(
+                "compile to a .o and link it (the default `dcc prog.c -o prog` path \
                         produces a .o and links with the host linker, which resolves IFUNC \
                         natively); -fbuiltin-linker / direct ET_EXEC codegen has no \
-                        R_X86_64_IRELATIVE machinery".to_string()),
+                        R_X86_64_IRELATIVE machinery"
+                    .to_string(),
+            ),
             source_line: None,
         });
     }
@@ -1584,11 +1608,21 @@ impl Codegen {
     }
 
     fn xor_ecx_ecx(&mut self) {
-        self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B32, 1, 1));
+        self.emit_insn(&Insn::alu_rm_reg_reg(
+            crate::codegen::x86_64::opcode::AluOp::Xor,
+            crate::codegen::shared::asm_operand::Width::B32,
+            1,
+            1,
+        ));
     }
 
     fn xor_eax_eax(&mut self) {
-        self.emit_insn(&Insn::alu_rm_reg_reg(crate::codegen::x86_64::opcode::AluOp::Xor, crate::codegen::shared::asm_operand::Width::B32, 0, 0));
+        self.emit_insn(&Insn::alu_rm_reg_reg(
+            crate::codegen::x86_64::opcode::AluOp::Xor,
+            crate::codegen::shared::asm_operand::Width::B32,
+            0,
+            0,
+        ));
     }
 
     // ---- 分类链需要的形式（32 位通用寄存器间运算）----
@@ -1621,6 +1655,7 @@ impl Codegen {
         use crate::codegen::x86_64::opcode::{Operand, X86_64Opcode};
         let insn = Insn::new(
             X86_64Opcode::MovRm {
+                rip_relative: false,
                 width: Width::B32,
                 dst: Operand::Reg(r, Width::B32),
                 src: Operand::Imm(v as i64),
@@ -1664,10 +1699,8 @@ impl Codegen {
 
     fn ret(&mut self) {
         // 步骤 3: 走类型化 Ret{add_imm: None} (C3).
-        let insn = Insn::new(
-            crate::codegen::x86_64::opcode::X86_64Opcode::Ret { add_imm: None },
-            &[],
-        );
+        let insn =
+            Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::Ret { add_imm: None }, &[]);
         if !self.emit_insn(&insn) {
             self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RetNear));
         }
@@ -1733,7 +1766,12 @@ mod tests {
             "unexpected errors: {diags:?}"
         );
         let names = decl_names(&prog);
-        for want in ["multiply", "multiply.avx", "multiply.sse4_2", "multiply.default"] {
+        for want in [
+            "multiply",
+            "multiply.avx",
+            "multiply.sse4_2",
+            "multiply.default",
+        ] {
             assert!(names.iter().any(|n| n == want), "missing '{want}' in {names:?}");
         }
         for d in &prog.decls {

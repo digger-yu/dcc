@@ -10,8 +10,8 @@
 //! 设计原则: 实例化 = 纯 AST 变换, 不依赖 lower 上下文;
 //! 隐式推导需要调用点类型信息, 由 lower 计算好实参类型后调用.
 
-use crate::cpp::feature_degrade::SfinaeCtx;
 use crate::cpp::cpp_const_eval::eval_nt_expr;
+use crate::cpp::feature_degrade::SfinaeCtx;
 use crate::cpp::mangle::MangleType;
 use crate::cpp::parser::{
     ClassDecl, CppBody, CppDecl, CppExpr, CppStmt, DeclSpec, InitDeclarator, SizeofArg,
@@ -445,7 +445,10 @@ impl TemplateRegistry {
         match prefixes.as_slice() {
             [only] => {
                 // 使用点自己带了前缀时必须是同一个前缀 (`a::print` 不能归到 `std::print`)
-                let want = name.strip_suffix(short).unwrap_or("").trim_end_matches("::");
+                let want = name
+                    .strip_suffix(short)
+                    .unwrap_or("")
+                    .trim_end_matches("::");
                 if want.is_empty() || want == *only {
                     format!("{only}::{short}")
                 } else {
@@ -871,15 +874,13 @@ impl TemplateRegistry {
         name: &str,
         args: &[MangleType],
     ) -> Option<(usize, Vec<MangleType>)> {
-        self.candidates_named(name)
-            .into_iter()
-            .find_map(|(i, td)| {
-                let r = self.resolve_args(td, args)?;
-                if !self.signature_is_viable(td, &r) {
-                    return None;
-                }
-                Some((i, r))
-            })
+        self.candidates_named(name).into_iter().find_map(|(i, td)| {
+            let r = self.resolve_args(td, args)?;
+            if !self.signature_is_viable(td, &r) {
+                return None;
+            }
+            Some((i, r))
+        })
     }
 
     /// [temp.deduct]/8: 候选的**签名** (返回类型 + 形参类型 + 被用到的默认实参)
@@ -919,21 +920,27 @@ impl TemplateRegistry {
         match ty {
             MangleType::TplMember { name, args, member } => {
                 self.class_member_exists(name, args, member, depth)
-                    && args.iter().all(|a| self.dependent_names_exist(a, depth + 1))
+                    && args
+                        .iter()
+                        .all(|a| self.dependent_names_exist(a, depth + 1))
             },
-            MangleType::Template { args, .. } => {
-                args.iter().all(|a| self.dependent_names_exist(a, depth + 1))
-            },
-            MangleType::NtExpr(_, operands) => {
-                operands.iter().all(|a| self.dependent_names_exist(a, depth + 1))
-            },
+            MangleType::Template { args, .. } => args
+                .iter()
+                .all(|a| self.dependent_names_exist(a, depth + 1)),
+            MangleType::NtExpr(_, operands) => operands
+                .iter()
+                .all(|a| self.dependent_names_exist(a, depth + 1)),
             MangleType::Pointer(t) | MangleType::Reference(t) | MangleType::Array(t, _) => {
                 self.dependent_names_exist(t, depth + 1)
             },
-            MangleType::VariadicPack(p) => p.iter().all(|a| self.dependent_names_exist(a, depth + 1)),
+            MangleType::VariadicPack(p) => {
+                p.iter().all(|a| self.dependent_names_exist(a, depth + 1))
+            },
             MangleType::Function { ret, params } => {
                 self.dependent_names_exist(ret, depth + 1)
-                    && params.iter().all(|a| self.dependent_names_exist(a, depth + 1))
+                    && params
+                        .iter()
+                        .all(|a| self.dependent_names_exist(a, depth + 1))
             },
             _ => true,
         }
@@ -1025,17 +1032,15 @@ impl TemplateRegistry {
         name: &str,
         call_arg_tys: &[MangleType],
     ) -> Option<(usize, Vec<MangleType>)> {
-        self.candidates_named(name)
-            .into_iter()
-            .find_map(|(i, td)| {
-                let r = self.deduce_args(td, call_arg_tys)?;
-                // [temp.deduct]/8: 推导成功但签名里的依赖名代入后不存在 —— 替换
-                // 失败, 该候选从候选集剔除 (下一个候选仍可能被选中)
-                if !self.signature_is_viable(td, &r) {
-                    return None;
-                }
-                Some((i, r))
-            })
+        self.candidates_named(name).into_iter().find_map(|(i, td)| {
+            let r = self.deduce_args(td, call_arg_tys)?;
+            // [temp.deduct]/8: 推导成功但签名里的依赖名代入后不存在 —— 替换
+            // 失败, 该候选从候选集剔除 (下一个候选仍可能被选中)
+            if !self.signature_is_viable(td, &r) {
+                return None;
+            }
+            Some((i, r))
+        })
     }
 
     /// G13: 实例化模板类 - 优先匹配全特化 > 偏特化 > 主模板
@@ -1425,7 +1430,9 @@ impl TemplateRegistry {
         for key in [qualified.clone(), c.name.clone()] {
             // 末段名只在尚未登记时写入: 同一个短名在不同命名空间里属于两个类,
             // 先登记者赢 (完整限定键仍然准确命中, 回退键只是便利)。
-            self.plain_classes.entry(key).or_insert_with(|| info.clone());
+            self.plain_classes
+                .entry(key)
+                .or_insert_with(|| info.clone());
         }
         for m in &c.members {
             if let CppDecl::Class(inner) = m {
@@ -1447,7 +1454,9 @@ impl TemplateRegistry {
             format!("{prefix}::{name}")
         };
         for key in [qualified, name.to_string()] {
-            self.type_aliases.entry(key).or_insert_with(|| target.clone());
+            self.type_aliases
+                .entry(key)
+                .or_insert_with(|| target.clone());
         }
     }
 
@@ -1530,7 +1539,12 @@ impl TemplateRegistry {
     ///
     /// traits 的 `value` 几乎总是**继承**来的 (`struct is_pointer<T*> : true_type {}`),
     /// 所以上溯不是可选项。
-    fn class_decl_const(&self, c: &crate::cpp::parser::ClassDecl, member: &str, depth: u32) -> Option<i64> {
+    fn class_decl_const(
+        &self,
+        c: &crate::cpp::parser::ClassDecl,
+        member: &str,
+        depth: u32,
+    ) -> Option<i64> {
         if depth >= MAX_FOLD_DEPTH {
             return None;
         }
@@ -1788,7 +1802,9 @@ impl TemplateRegistry {
                 args: self.fold_args_inner(args, depth),
             },
             MangleType::Pointer(t) => MangleType::Pointer(Box::new(self.fold_arg(t, depth + 1))),
-            MangleType::Reference(t) => MangleType::Reference(Box::new(self.fold_arg(t, depth + 1))),
+            MangleType::Reference(t) => {
+                MangleType::Reference(Box::new(self.fold_arg(t, depth + 1)))
+            },
             MangleType::Array(t, n) => MangleType::Array(Box::new(self.fold_arg(t, depth + 1)), *n),
             MangleType::VariadicPack(p) => MangleType::VariadicPack(self.fold_args_inner(p, depth)),
             MangleType::Function { ret, params } => MangleType::Function {
@@ -1826,7 +1842,10 @@ fn substitute_class_consts(
     let mut out = c.clone();
     for b in &mut out.bases {
         if let Some(ta) = &mut b.template_args {
-            *ta = ta.iter().map(|t| substitute_type(t, params, args)).collect();
+            *ta = ta
+                .iter()
+                .map(|t| substitute_type(t, params, args))
+                .collect();
         }
     }
     for m in &mut out.members {
@@ -1847,10 +1866,8 @@ fn substitute_class_consts(
 fn plain_class_info(c: &crate::cpp::parser::ClassDecl) -> PlainClassInfo {
     let mut info = PlainClassInfo::default();
     for b in &c.bases {
-        info.bases.push((
-            b.name.clone(),
-            b.template_args.clone().unwrap_or_default(),
-        ));
+        info.bases
+            .push((b.name.clone(), b.template_args.clone().unwrap_or_default()));
     }
     collect_class_consts(&c.members, &mut info.consts);
     collect_member_names(&c.members, &mut info.member_names);
@@ -2152,12 +2169,18 @@ pub fn substitute_expr(e: &CppExpr, params: &[String], args: &[MangleType]) -> C
             member,
         } => CppExpr::TplStaticAccess {
             name: name.clone(),
-            args: targs.iter().map(|a| substitute_type(a, params, args)).collect(),
+            args: targs
+                .iter()
+                .map(|a| substitute_type(a, params, args))
+                .collect(),
             member: member.clone(),
         },
         CppExpr::TemplateIdent { name, args: targs } => CppExpr::TemplateIdent {
             name: name.clone(),
-            args: targs.iter().map(|a| substitute_type(a, params, args)).collect(),
+            args: targs
+                .iter()
+                .map(|a| substitute_type(a, params, args))
+                .collect(),
         },
         CppExpr::PtrMember(o, s) => {
             CppExpr::PtrMember(Box::new(substitute_expr(o, params, args)), s.clone())
@@ -3718,13 +3741,34 @@ pub fn cxx_type_to_mangle(ty: &crate::cpp::sema::CxxType) -> MangleType {
     match ty {
         CxxType::Void => MangleType::Void,
         CxxType::Bool => MangleType::Bool,
-        CxxType::Integer { bits: 16, signed: false } => MangleType::Ushort,
-        CxxType::Integer { bits: 32, signed: false } => MangleType::Uint,
-        CxxType::Integer { bits: 64, signed: false } => MangleType::Ulong,
-        CxxType::Integer { bits: 8, signed: true } => MangleType::Schar,
-        CxxType::Integer { bits: 16, signed: true } => MangleType::Short,
-        CxxType::Integer { bits: 32, signed: true } => MangleType::Int,
-        CxxType::Integer { bits: 64, signed: true } => MangleType::Long,
+        CxxType::Integer {
+            bits: 16,
+            signed: false,
+        } => MangleType::Ushort,
+        CxxType::Integer {
+            bits: 32,
+            signed: false,
+        } => MangleType::Uint,
+        CxxType::Integer {
+            bits: 64,
+            signed: false,
+        } => MangleType::Ulong,
+        CxxType::Integer {
+            bits: 8,
+            signed: true,
+        } => MangleType::Schar,
+        CxxType::Integer {
+            bits: 16,
+            signed: true,
+        } => MangleType::Short,
+        CxxType::Integer {
+            bits: 32,
+            signed: true,
+        } => MangleType::Int,
+        CxxType::Integer {
+            bits: 64,
+            signed: true,
+        } => MangleType::Long,
         CxxType::Integer { .. } => MangleType::Int,
         CxxType::Float { bits: 32 } => MangleType::Float,
         CxxType::Float { bits: 64 } => MangleType::Double,

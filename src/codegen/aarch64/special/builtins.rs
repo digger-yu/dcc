@@ -70,7 +70,7 @@ impl Aarch64Codegen {
                 }
                 self.gen_expr(&args[0]); // W0 = excepts
                 self.emit_insn(&Insn::raw(0x12000800)); // AND W0, W0, #0x1F
-                                                         // MRS X1, FPSR
+                                                        // MRS X1, FPSR
                 self.emit_insn(&Insn::raw(0xD53B4420u32 | 1));
                 // ORR X1, X1, X0 (置位选中的标志)
                 self.emit_insn(&Insn::raw(0xAA000021));
@@ -86,7 +86,7 @@ impl Aarch64Codegen {
                 }
                 self.gen_expr(&args[0]); // W0 = excepts
                 self.emit_insn(&Insn::raw(0x12000800)); // AND W0, W0, #0x1F
-                                                         // MRS X1, FPSR
+                                                        // MRS X1, FPSR
                 self.emit_insn(&Insn::raw(0xD53B4420u32 | 1));
                 // AND W0, W1, W0 (返回选中的标志)
                 self.emit_insn(&Insn::raw(0x0A000020));
@@ -245,7 +245,7 @@ impl Aarch64Codegen {
         self.emit_ldr_x(1, 9, 8, 8);
         // s0 = [x1]
         self.emit_insn(&Insn::raw(0xBD400020)); // ldr s0, [x1]
-                                                 // x1 += 8
+                                                // x1 += 8
         self.emit_add_imm_x(1, 1, 8);
         // 写回 overflow_arg_area
         self.emit_str_x(1, 9, 8, 8);
@@ -289,7 +289,7 @@ impl Aarch64Codegen {
         self.emit_ldr_x(1, 9, 8, 8);
         // d0 = [x1]
         self.emit_insn(&Insn::raw(0xFD400020)); // ldr d0, [x1]
-                                                 // x1 += 8
+                                                // x1 += 8
         self.emit_add_imm_x(1, 1, 8);
         // 写回 overflow_arg_area
         self.emit_str_x(1, 9, 8, 8);

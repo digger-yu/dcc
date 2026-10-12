@@ -85,7 +85,9 @@ pub(super) fn loop_shape(
         if !is_back_edge(name, header, doms) {
             continue;
         }
-        let Some(bb) = func.blocks.get(name) else { continue };
+        let Some(bb) = func.blocks.get(name) else {
+            continue;
+        };
         // 后继从 terminator 现取: `term_succs` 的文档写明 SSA pass 改过 terminator 后
         // `b.succs` 可能过期, 读旧边集会**漏掉真存在的出口边** (静默误编译的方向)。
         if term_succs(&bb.term).iter().any(|s| *s == header) {
@@ -177,12 +179,7 @@ enum ExitClass {
     IntoPad,
 }
 
-fn exit_class_of(
-    folded: &str,
-    func: &Function,
-    header: &str,
-    body: &HashSet<String>,
-) -> ExitClass {
+fn exit_class_of(folded: &str, func: &Function, header: &str, body: &HashSet<String>) -> ExitClass {
     let Some(bb) = func.blocks.get(folded) else {
         return ExitClass::Shared;
     };
@@ -203,7 +200,8 @@ fn exit_class_of(
     }
     if bb.phis.is_empty()
         && !bb.insts.iter().all(|i| is_pass_hint_inst(&i.kind))
-        && bb.preds
+        && bb
+            .preds
             .iter()
             .all(|p| p.as_str() == header || body.contains(p.as_str()))
     {
@@ -231,7 +229,9 @@ pub(super) fn loop_exit_plan(
     srcs.sort();
     let mut edges: Vec<(String, String)> = Vec::new();
     for name in srcs.iter() {
-        let Some(b) = func.blocks.get(name) else { continue };
+        let Some(b) = func.blocks.get(name) else {
+            continue;
+        };
         for s in term_succs(&b.term) {
             if s == header || body.contains(s) || is_back_edge(name, s, doms) {
                 continue;
@@ -287,7 +287,9 @@ pub(super) fn loop_exit_plan(
     };
     let mut tail_exits: Vec<String> = Vec::new();
     for l in latches.iter() {
-        let Some(b) = func.blocks.get(l) else { continue };
+        let Some(b) = func.blocks.get(l) else {
+            continue;
+        };
         for s in term_succs(&b.term) {
             if s == header || body.contains(s) || is_back_edge(l, s, doms) {
                 continue;
@@ -466,12 +468,8 @@ pub(super) fn loop_exit_owner(
         None => return LoopExitOwner::Unsupported,
     };
     let plan = loop_exit_plan(func, header, body, &latches, doms);
-    let cls = exit_class_of(
-        &resolve_loop_exit_stub(target, func, header, body),
-        func,
-        header,
-        body,
-    );
+    let cls =
+        exit_class_of(&resolve_loop_exit_stub(target, func, header, body), func, header, body);
     owner_of(target, cls, plan.cont.as_deref(), func, header, body, doms)
 }
 
@@ -505,4 +503,3 @@ pub fn has_multi_exit_cycle(func: &Function) -> bool {
     }
     false
 }
-

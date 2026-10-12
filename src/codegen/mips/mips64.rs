@@ -200,11 +200,7 @@ mod backend {
                 module
                     .functions
                     .iter()
-                    .filter_map(|f| {
-                        layout
-                            .get(&f.name)
-                            .map(|pc| (f.name.as_str(), pc, pc + 64))
-                    })
+                    .filter_map(|f| layout.get(&f.name).map(|pc| (f.name.as_str(), pc, pc + 64)))
                     .collect()
             };
             let dbg_opts = crate::debug::DebugOptions {

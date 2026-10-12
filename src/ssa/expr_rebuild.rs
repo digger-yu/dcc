@@ -800,14 +800,18 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
             span: sp.clone(),
             // 与 `inst_to_expr_resolved` 共用同一推型规则（本函数目前无调用点，
             // 但两套规则一旦分叉，将来启用它就会拿到错类型）。
-            ty: unary_result_ty(None, op, &match e {
-                Operand::Var(v) => v.ty.clone(),
-                Operand::Float(_, t) => t.clone(),
-                Operand::SymAddr(_, t) => t.clone(),
-                Operand::FnAddr(_, t) => t.clone(),
-                Operand::Int(_) => Type::Int,
-                _ => Type::Int,
-            }),
+            ty: unary_result_ty(
+                None,
+                op,
+                &match e {
+                    Operand::Var(v) => v.ty.clone(),
+                    Operand::Float(_, t) => t.clone(),
+                    Operand::SymAddr(_, t) => t.clone(),
+                    Operand::FnAddr(_, t) => t.clone(),
+                    Operand::Int(_) => Type::Int,
+                    _ => Type::Int,
+                },
+            ),
         },
         InstKind::Cast { ty, e } => Expr::Cast {
             ty: ty.clone(),
@@ -1038,4 +1042,3 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
         },
     }
 }
-

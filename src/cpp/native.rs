@@ -1215,7 +1215,12 @@ fn collect_template_refs_from_decl(
             }
             collect_template_refs_from_body(body, done, out);
         },
-        CppDecl::Ctor { params, inits, body, .. } => {
+        CppDecl::Ctor {
+            params,
+            inits,
+            body,
+            ..
+        } => {
             for (_, t) in params {
                 collect_template_refs_from_type(t, done, out);
             }
@@ -1844,10 +1849,8 @@ fn replace_template_type(ty: &MangleType, reg: &TemplateRegistry) -> MangleType 
                 return MangleType::Class(inst_name);
             }
             // 未实例化，递归替换参数后保留
-            let new_args: Vec<MangleType> = args
-                .iter()
-                .map(|a| replace_template_type(a, reg))
-                .collect();
+            let new_args: Vec<MangleType> =
+                args.iter().map(|a| replace_template_type(a, reg)).collect();
             MangleType::Template {
                 name: name.clone(),
                 args: new_args,
@@ -1879,10 +1882,8 @@ fn replace_template_type(ty: &MangleType, reg: &TemplateRegistry) -> MangleType 
                 // 嵌套**类**成员 (`X<T>::node`) 才是“实例名::成员”这个类名
                 MangleType::Class(format!("{}::{}", inst, member))
             } else {
-                let new_args: Vec<MangleType> = args
-                    .iter()
-                    .map(|a| replace_template_type(a, reg))
-                    .collect();
+                let new_args: Vec<MangleType> =
+                    args.iter().map(|a| replace_template_type(a, reg)).collect();
                 MangleType::TplMember {
                     name: name.clone(),
                     args: new_args,
@@ -1894,8 +1895,10 @@ fn replace_template_type(ty: &MangleType, reg: &TemplateRegistry) -> MangleType 
         // 一个能折的 `X<Args>::member`), 然后整棵试折 —— 叶子全成常量时子式就得到
         // `NonType`, 否则保留结构 (下一次实例化代入更多实参后再折)。
         MangleType::NtExpr(op, operands) => {
-            let new_ops: Vec<MangleType> =
-                operands.iter().map(|a| replace_template_type(a, reg)).collect();
+            let new_ops: Vec<MangleType> = operands
+                .iter()
+                .map(|a| replace_template_type(a, reg))
+                .collect();
             reg.fold_constant(&MangleType::NtExpr(*op, new_ops))
         },
         other => other.clone(),
@@ -2317,7 +2320,9 @@ fn build_class_abis(
             has_virtual,
             // `union` 与 `struct` 的字段布局完全不同 ([class.union]), 这个标记
             // 只能从声明带来, 不能由布局结果反推。
-            sema.get_class_info(cid).map(|i| i.is_union).unwrap_or(false),
+            sema.get_class_info(cid)
+                .map(|i| i.is_union)
+                .unwrap_or(false),
         );
         // ABI 符号 (_ZTV/_ZTI/_ZTS) 必须用**限定**名: `ns::Widget` 的 typeinfo
         // 是 `_ZTIN2ns6WidgetE`, 不是 `_ZTI6Widget` (后者会和全局 `Widget` 撞
@@ -2480,8 +2485,14 @@ fn collect_rtti_needed(
     // 基类闭包: 每条 typeinfo 都会引用它的基类 typeinfo
     let mut frontier: Vec<ClassId> = needed.iter().copied().collect();
     while let Some(cid) = frontier.pop() {
-        let Some(abi) = abi_map.get(&cid) else { continue };
-        for b in abi.bases.iter().map(|b| b.base).chain(abi.virtual_bases.iter().map(|v| v.base))
+        let Some(abi) = abi_map.get(&cid) else {
+            continue;
+        };
+        for b in abi
+            .bases
+            .iter()
+            .map(|b| b.base)
+            .chain(abi.virtual_bases.iter().map(|v| v.base))
         {
             if needed.insert(b) {
                 frontier.push(b);
@@ -5363,7 +5374,8 @@ template<typename T> struct enable_if<true, T> { typedef T type; };
         // ```
         // `true_type` 不是类名而是别名, `value` 的初值又是个裸形参名, 两者都要能
         // 展开, 否则整个 `<type_traits>` 惯用法在实参折叠里都是 0。
-        let reg = registry_of(b"\
+        let reg = registry_of(
+            b"\
 template<typename T, T v> struct integral_constant {
   static const T value = v;
   typedef T value_type;
@@ -5372,7 +5384,8 @@ typedef integral_constant<bool, true> true_type;
 typedef integral_constant<bool, false> false_type;
 template<typename T> struct is_pointer : false_type {};
 template<typename T> struct is_pointer<T*> : true_type {};
-");
+",
+        );
         let ptr = MangleType::TplMember {
             name: "is_pointer".to_string(),
             args: vec![MangleType::Pointer(Box::new(MangleType::Int))],
@@ -5460,10 +5473,7 @@ template<typename T> struct is_pointer<T*> : true_type {};
         };
         assert_eq!(c.name, "__dcc_template_enable_if_n1_int");
         // 未折叠的实参表也必须得到同一个实例 (折叠是入口的必做步骤)
-        assert_eq!(
-            reg.instance_typedef("enable_if", &args, "type"),
-            Some(MangleType::Int)
-        );
+        assert_eq!(reg.instance_typedef("enable_if", &args, "type"), Some(MangleType::Int));
         assert_eq!(
             reg.instance_class_name("enable_if", &args),
             Some("__dcc_template_enable_if_n1_int".to_string())
@@ -5488,17 +5498,20 @@ template<typename T> typename enable_if<!is_pointer<T>::value, int>::type pick(T
 ";
         let reg = registry_of(src);
         // 候选下标是注册表主表的全局位置 (前面还有 traits 模板), 按重载集自己取
-        let picks: Vec<usize> = reg.candidates_named("pick").into_iter().map(|(i, _)| i).collect();
+        let picks: Vec<usize> = reg
+            .candidates_named("pick")
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
         assert_eq!(picks.len(), 2, "两个 pick 候选应全部在候选集里: {picks:?}");
         let ptr_arg = MangleType::Pointer(Box::new(MangleType::Int));
-        let (idx_ptr, _) = reg.deduce_for_call("pick", &[ptr_arg]).expect("指针候选可选");
+        let (idx_ptr, _) = reg
+            .deduce_for_call("pick", &[ptr_arg])
+            .expect("指针候选可选");
         let (idx_val, _) = reg
             .deduce_for_call("pick", &[MangleType::Int])
             .expect("非指针候选可选");
-        assert_ne!(
-            idx_ptr, idx_val,
-            "SFINAE 没有剔除不可行候选 (两个实参选了同一个)"
-        );
+        assert_ne!(idx_ptr, idx_val, "SFINAE 没有剔除不可行候选 (两个实参选了同一个)");
         assert_eq!(idx_ptr, picks[0], "指针实参应选到 is_pointer 为真的那个候选");
         assert_eq!(idx_val, picks[1], "非标量实参应选到取反子式为真的那个候选");
     }

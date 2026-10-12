@@ -165,9 +165,9 @@ fn is_opaque_expr(e: &Expr) -> bool {
         Expr::Call { .. } | Expr::AsmExpr { .. } | Expr::VaArg { .. } | Expr::StmtExpr { .. } => {
             true
         },
-        Expr::Binop { l, r, .. }
-        | Expr::Assign { l, r, .. }
-        | Expr::Comma { l, r, .. } => is_opaque_expr(l) || is_opaque_expr(r),
+        Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } | Expr::Comma { l, r, .. } => {
+            is_opaque_expr(l) || is_opaque_expr(r)
+        },
         Expr::Unary { e: inner, .. }
         | Expr::Cast { e: inner, .. }
         | Expr::Real { e: inner, .. }
@@ -206,7 +206,11 @@ fn written_root_chain(e: &Expr, out: &mut HashSet<String>) {
                 out.insert(String::new());
             }
         },
-        Expr::Member { expr: base, is_arrow, .. } => {
+        Expr::Member {
+            expr: base,
+            is_arrow,
+            ..
+        } => {
             if *is_arrow {
                 out.insert(String::new());
             } else {
@@ -300,7 +304,9 @@ fn collect_scope(b: &Block, s: &mut FnScope) {
 fn collect_scope_stmt(st: &Stmt, s: &mut FnScope) {
     match st {
         Stmt::Block { b, .. } => collect_scope(b, s),
-        Stmt::If { then_, else_, cond, .. } => {
+        Stmt::If {
+            then_, else_, cond, ..
+        } => {
             collect_scope_stmt(then_, s);
             if let Some(e) = else_ {
                 collect_scope_stmt(e, s);
@@ -398,7 +404,9 @@ fn walk_stmt_addr_of(st: &Stmt, on_root: &mut dyn FnMut(&str)) {
                 walk_expr_addr_of(v, on_root);
             }
         },
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             walk_expr_addr_of(cond, on_root);
             walk_stmt_addr_of(then_, on_root);
             if let Some(el) = else_ {
@@ -413,7 +421,13 @@ fn walk_stmt_addr_of(st: &Stmt, on_root: &mut dyn FnMut(&str)) {
             walk_stmt_addr_of(body, on_root);
             walk_expr_addr_of(cond, on_root);
         },
-        Stmt::For { init, cond, step, body, .. } => {
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(i) = init {
                 walk_stmt_addr_of(i, on_root);
             }
@@ -433,16 +447,26 @@ fn walk_stmt_addr_of(st: &Stmt, on_root: &mut dyn FnMut(&str)) {
         },
         Stmt::Label { stmt, .. } => walk_stmt_addr_of(stmt, on_root),
         // `&&label` 跳板只涉及标号，不涉及对象地址。
-        Stmt::Goto { .. } | Stmt::Break { .. } | Stmt::Continue { .. }
+        Stmt::Goto { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
         | Stmt::Fallthrough { .. } => {},
         Stmt::GotoIndirect { expr, .. } => walk_expr_addr_of(expr, on_root),
         // asm goto 的操作数与普通 asm 同一处理（内存约束 = 把对象地址交出去）。
-        Stmt::AsmGoto { outputs, output_constraints, inputs, input_constraints, .. } => {
+        Stmt::AsmGoto {
+            outputs,
+            output_constraints,
+            inputs,
+            input_constraints,
+            ..
+        } => {
             walk_asm_operands_addr_of(outputs, output_constraints, on_root);
             walk_asm_operands_addr_of(inputs, input_constraints, on_root);
         },
         Stmt::Invoke { call, .. } => walk_stmt_addr_of(call, on_root),
-        Stmt::EhLandingPad { object, selector, .. } => {
+        Stmt::EhLandingPad {
+            object, selector, ..
+        } => {
             walk_expr_addr_of(object, on_root);
             walk_expr_addr_of(selector, on_root);
         },
@@ -450,13 +474,13 @@ fn walk_stmt_addr_of(st: &Stmt, on_root: &mut dyn FnMut(&str)) {
 }
 
 /// 把一组 asm 操作数与其约束串配对遍历：内存约束的操作数根对象算「地址已被取走」。
-fn walk_asm_operands_addr_of(
-    ops: &[Expr],
-    constraints: &[String],
-    on_root: &mut dyn FnMut(&str),
-) {
+fn walk_asm_operands_addr_of(ops: &[Expr], constraints: &[String], on_root: &mut dyn FnMut(&str)) {
     for (i, o) in ops.iter().enumerate() {
-        if constraints.get(i).map(|c| constraint_is_memory(c)).unwrap_or(false) {
+        if constraints
+            .get(i)
+            .map(|c| constraint_is_memory(c))
+            .unwrap_or(false)
+        {
             if let Some(root) = ident_root_name(o) {
                 on_root(&root);
             }
@@ -468,7 +492,8 @@ fn walk_asm_operands_addr_of(
 
 /// 该约束是否要求内存操作数（而不是寄存器）。保守判定：只要出现内存类约束字母。
 fn constraint_is_memory(c: &str) -> bool {
-    c.chars().any(|ch| matches!(ch, 'm' | 'Q' | 'g' | 's' | 'O' | 'v'))
+    c.chars()
+        .any(|ch| matches!(ch, 'm' | 'Q' | 'g' | 's' | 'O' | 'v'))
 }
 
 fn walk_expr_addr_of(e: &Expr, on_root: &mut dyn FnMut(&str)) {
@@ -526,7 +551,13 @@ fn walk_expr_addr_of(e: &Expr, on_root: &mut dyn FnMut(&str)) {
                 }
             }
         },
-        Expr::AsmExpr { outputs, output_constraints, inputs, input_constraints, .. } => {
+        Expr::AsmExpr {
+            outputs,
+            output_constraints,
+            inputs,
+            input_constraints,
+            ..
+        } => {
             walk_asm_operands_addr_of(outputs, output_constraints, on_root);
             walk_asm_operands_addr_of(inputs, input_constraints, on_root);
         },
@@ -558,7 +589,9 @@ fn ident_root_name(e: &Expr) -> Option<String> {
         Expr::Ident { name, .. } => Some(name.name.clone()),
         Expr::Index { arr, .. } => ident_root_name(arr),
         Expr::Member {
-            expr: base, is_arrow, ..
+            expr: base,
+            is_arrow,
+            ..
         } if !is_arrow => ident_root_name(base),
         Expr::Cast { e: inner, .. } => ident_root_name(inner),
         _ => None,
@@ -584,10 +617,7 @@ fn gvn_block(block: &mut Block, fenv_access: bool, scope: &FnScope) {
                             let prev = prev.clone();
                             *init = ident_expr(&prev, init.ty());
                             tr.copies.insert(name, prev);
-                        } else if !opaque
-                            && !deps.contains(&name)
-                            && !key_is_bare_constant(&key)
-                        {
+                        } else if !opaque && !deps.contains(&name) && !key_is_bare_constant(&key) {
                             // `x = x + 1` 形态不得入表: 平名字下「旧 x + 1」与「新 x」
                             // 无法区分, 入表就等于给后面一条错误的替换。
                             tr.avail.insert(key, (name, deps));
@@ -630,9 +660,7 @@ fn gvn_stmt(s: &mut Stmt, tr: &mut ValTrack, fenv_access: bool, scope: &FnScope)
                             let prev = prev.clone();
                             **r = ident_expr(&prev, r.ty());
                             tr.copies.insert(target.clone(), prev);
-                        } else if !opaque
-                            && !deps.contains(&target)
-                            && !key_is_bare_constant(&key)
+                        } else if !opaque && !deps.contains(&target) && !key_is_bare_constant(&key)
                         {
                             tr.avail.insert(key, (target.clone(), deps.clone()));
                         }
@@ -915,7 +943,9 @@ fn collect_assignments_stmt(
                 collect_assignments(sub, assigned, decl_counts);
             }
         },
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             collect_expr_writes(cond, assigned);
             collect_assignments_stmt(then_, assigned, decl_counts);
             if let Some(e) = else_ {
@@ -931,7 +961,11 @@ fn collect_assignments_stmt(
             collect_expr_writes(cond, assigned);
         },
         Stmt::For {
-            init, cond, step, body, ..
+            init,
+            cond,
+            step,
+            body,
+            ..
         } => {
             if let Some(i) = init {
                 collect_assignments_stmt(i, assigned, decl_counts);
@@ -967,15 +1001,17 @@ fn collect_assignments_stmt(
 fn rewrite_stmt_aliases(s: &mut Stmt, alias: &HashMap<String, String>) -> bool {
     match s {
         Stmt::Expr { e, .. } => rewrite_expr_aliases(e, alias),
-        Stmt::Return { val, .. } => {
-            val.as_mut().map_or(true, |e| rewrite_expr_aliases(e, alias))
-        },
+        Stmt::Return { val, .. } => val
+            .as_mut()
+            .map_or(true, |e| rewrite_expr_aliases(e, alias)),
         Stmt::If {
             cond, then_, else_, ..
         } => {
             rewrite_expr_aliases(cond, alias)
                 && rewrite_stmt_aliases(then_, alias)
-                && else_.as_mut().map_or(true, |e| rewrite_stmt_aliases(e, alias))
+                && else_
+                    .as_mut()
+                    .map_or(true, |e| rewrite_stmt_aliases(e, alias))
         },
         Stmt::Block { b, .. } => rewrite_block_aliases(b, alias),
         Stmt::While { cond, body, .. } => {
@@ -991,7 +1027,8 @@ fn rewrite_stmt_aliases(s: &mut Stmt, alias: &HashMap<String, String>) -> bool {
             body,
             ..
         } => {
-            init.as_mut().map_or(true, |i| rewrite_stmt_aliases(i, alias))
+            init.as_mut()
+                .map_or(true, |i| rewrite_stmt_aliases(i, alias))
                 && cond
                     .as_mut()
                     .map_or(true, |c| rewrite_expr_aliases(c, alias))
@@ -1033,9 +1070,7 @@ fn rewrite_expr_aliases(e: &mut Expr, alias: &HashMap<String, String>) -> bool {
             }
             true
         },
-        Expr::Binop { l, r, .. }
-        | Expr::Assign { l, r, .. }
-        | Expr::Comma { l, r, .. } => {
+        Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } | Expr::Comma { l, r, .. } => {
             rewrite_expr_aliases(l, alias) && rewrite_expr_aliases(r, alias)
         },
         Expr::Unary { e: inner, .. }
@@ -1064,13 +1099,11 @@ fn rewrite_expr_aliases(e: &mut Expr, alias: &HashMap<String, String>) -> bool {
         // 关键补漏: 经函数指针变量的调用 —— 被调者与每个实参都可能是被合并的名字。
         Expr::Call { callee, args, .. } => {
             rewrite_expr_aliases(callee, alias)
-                && args
-                    .iter_mut()
-                    .all(|a| rewrite_expr_aliases(a, alias))
+                && args.iter_mut().all(|a| rewrite_expr_aliases(a, alias))
         },
-        Expr::Offsetof { indices, .. } => indices
-            .iter_mut()
-            .all(|i| rewrite_expr_aliases(i, alias)),
+        Expr::Offsetof { indices, .. } => {
+            indices.iter_mut().all(|i| rewrite_expr_aliases(i, alias))
+        },
         // 字面量形态不引用变量。
         Expr::Int { .. }
         | Expr::Float { .. }
@@ -1405,10 +1438,7 @@ mod tests {
             "下标的根对象才是逸出的那个"
         );
         assert_eq!(
-            escapes(
-                "struct S{int g;};\nint f(void){ struct S s; return (int)(long)&s.g; }\n",
-                "f"
-            ),
+            escapes("struct S{int g;};\nint f(void){ struct S s; return (int)(long)&s.g; }\n", "f"),
             ["s"]
         );
         assert_eq!(
@@ -1422,7 +1452,10 @@ mod tests {
             "asm 内存约束操作数 = 把对象地址交出去"
         );
         assert_eq!(
-            escapes("int f(void){ int x; int *q = (int *[]){ &x }[0]; return (int)(long)q; }\n", "f"),
+            escapes(
+                "int f(void){ int x; int *q = (int *[]){ &x }[0]; return (int)(long)q; }\n",
+                "f"
+            ),
             ["x"],
             "复合字面量的初始化式里也得递归"
         );

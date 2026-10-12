@@ -307,9 +307,14 @@ int many(void) {
         // `&(&m[i])[j]` 这种嵌套取址，从错值恶化成段错误；判据见 `is_addr_producer`）。
         // 所以旧版那句「emitted 恰好等于 6 个用户局部」已经不再是要守的性质 ——
         // 把它换成下面三条：前缀 = 源码序、余下全是 `_` 前缀的合成值、30 轮恒等。
-        let head: Vec<&str> = emitted.iter().take(expected_locals.len()).map(String::as_str).collect();
+        let head: Vec<&str> = emitted
+            .iter()
+            .take(expected_locals.len())
+            .map(String::as_str)
+            .collect();
         assert_eq!(
-            head, expected_locals,
+            head,
+            expected_locals,
             "round {round}: rebuild_block 的前 {n} 条局部声明必须是源码声明序（实际 {emitted:?}）",
             n = expected_locals.len()
         );
@@ -354,10 +359,8 @@ fn parallel_codegen_preserves_program_level_facts() {
     assert!(exists, "夹具不存在：{}", src.display());
 
     let emit = |serial: bool, tag: &str| -> Vec<u8> {
-        let out = std::env::temp_dir().join(format!(
-            "dcc-repro-par-{tag}-{}.o",
-            std::process::id()
-        ));
+        let out =
+            std::env::temp_dir().join(format!("dcc-repro-par-{tag}-{}.o", std::process::id()));
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
         cmd.arg("--target")
             .arg("x86_64-linux-gnu")
@@ -385,13 +388,10 @@ fn parallel_codegen_preserves_program_level_facts() {
     let par = emit(false, "par");
     let ser = emit(true, "ser");
     assert!(!par.is_empty(), "并行 .o 为空（假绿）");
-    assert!(
-        par.len() > 200,
-        "并行 .o 只有 {} 字节，太小，多半没走到分块发射",
-        par.len()
-    );
+    assert!(par.len() > 200, "并行 .o 只有 {} 字节，太小，多半没走到分块发射", par.len());
     assert_eq!(
-        par, ser,
+        par,
+        ser,
         "并行与串行的 .o 不逐字节相同（并行改了产物）：并行 {}B / 串行 {}B",
         par.len(),
         ser.len()

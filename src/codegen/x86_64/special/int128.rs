@@ -753,10 +753,10 @@ impl Codegen {
         let l_end = self.fresh_label();
         let l_high = self.fresh_label();
         self.emit_alu_rm_reg64(AluOp::Xor, 0, 0); // xor rax, rax
-                                                                       // 比较高 64 位: cmp r8, r11
+                                                  // 比较高 64 位: cmp r8, r11
         self.emit_alu_rm_reg64(AluOp::Cmp, 8, 11); // cmp r8, r11
-                                                                        // P11 Bucket M: map (op, signed) to typed CondCode. cc 编码:
-                                                                        //   0x92=B, 0x93=Ae, 0x96=Be, 0x97=A, 0x9C=Lt, 0x9D=Ge, 0x9E=Le, 0x9F=Gt.
+                                                   // P11 Bucket M: map (op, signed) to typed CondCode. cc 编码:
+                                                   //   0x92=B, 0x93=Ae, 0x96=Be, 0x97=A, 0x9C=Lt, 0x9D=Ge, 0x9E=Le, 0x9F=Gt.
         use crate::codegen::x86_64::opcode::CondCode;
         let (cc_high, cc_low_eq): (CondCode, CondCode) = match op {
             BinOp::Lt if is_signed => (CondCode::Lt, CondCode::B),
@@ -1010,7 +1010,7 @@ impl Codegen {
                 BinOp::And => {
                     self.emit_alu_rm_reg64(AluOp::And, 1, 0); // and rcx, rax (low &= left)
                     self.emit_alu_rm_reg64(AluOp::And, 8, 2); // and r8, rdx (high &= left)
-                                                                                   // mov rax, rcx; mov rdx, r8
+                                                              // mov rax, rcx; mov rdx, r8
                     self.emit_insn(&Insn::new(
                         crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                             rip_relative: false,

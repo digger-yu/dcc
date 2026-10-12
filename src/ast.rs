@@ -74,8 +74,8 @@ pub struct VarDecl {
     /// 汇成一张家表（优先级：用户指定 > 自动分配，与今天的 `apply_bindings` 一致）。
     /// 因为 `Location` 是 `Copy`，本字段不打破 `VarDecl: Clone`。
     pub home: Option<crate::location::Location>,
-    pub cleanup_fn: Option<String>,    // __attribute__((cleanup(fn)))
-    pub is_thread_local: bool,         // _Thread_local / __thread
+    pub cleanup_fn: Option<String>, // __attribute__((cleanup(fn)))
+    pub is_thread_local: bool,      // _Thread_local / __thread
     /// __attribute__((no_sanitize("address"|"undefined"|"thread"|"kernel-address")))
     pub no_sanitize: Vec<String>,
     /// __attribute__((alias("target"))): 变量符号别名

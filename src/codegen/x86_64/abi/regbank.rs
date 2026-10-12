@@ -496,10 +496,7 @@ mod tests {
         assert_eq!(bank.used_mask(), 0x01, "序言那条保存不能跟着消失");
 
         bank.claim(reg);
-        assert!(
-            !bank.release(reg),
-            "变量的家不是临时值：被钉住的号不允许被标回空闲"
-        );
+        assert!(!bank.release(reg), "变量的家不是临时值：被钉住的号不允许被标回空闲");
         assert_eq!(bank.allocated_mask(), 0x01);
     }
 
@@ -536,10 +533,7 @@ mod tests {
             "resync_pins 不得顺手改位图（naked 路径上旧代码就是不改）"
         );
         let owned = bank.owned_gp();
-        assert!(
-            !owned.contains(&8),
-            "绑定表里已经没有 %r8，排除集合必须跟着变小"
-        );
+        assert!(!owned.contains(&8), "绑定表里已经没有 %r8，排除集合必须跟着变小");
         assert!(owned.contains(&12), "新绑定必须被钉住");
         // 位图没动 ⇒ %rbx 仍然占用溅出池（它不会再被当临时值发出，也不会被归还）
         assert!(bank.is_allocated(3));
@@ -791,7 +785,11 @@ mod rhs_stage_tests {
         for n in rhs_stage_candidates().into_iter().skip(1) {
             c.claim(n);
         }
-        assert_eq!(c.pick_rhs_stage(rhs_stage_candidates()[0]), None, "只剩 dst 自己时必须报 None，由调用方去拿真正的临时号");
+        assert_eq!(
+            c.pick_rhs_stage(rhs_stage_candidates()[0]),
+            None,
+            "只剩 dst 自己时必须报 None，由调用方去拿真正的临时号"
+        );
     }
 
     /// 候选表本身不得把「有主」的号收进来：这些号在别处各有硬用途（求值基址、128 位返回

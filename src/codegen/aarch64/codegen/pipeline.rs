@@ -143,12 +143,7 @@ impl Aarch64Codegen {
     }
 
     /// 兼容旧名: 无显式 key 的调用点 (naked / 单行)。
-    pub(crate) fn encode_and_emit_asm(
-        &mut self,
-        resolved: &str,
-        span_file: &str,
-        span_line: u32,
-    ) {
+    pub(crate) fn encode_and_emit_asm(&mut self, resolved: &str, span_file: &str, span_line: u32) {
         let key = format!("__inline_{}", self.label_serial);
         self.label_serial += 1;
         self.emit_asm_stmt(&key, resolved, span_file, span_line);
@@ -164,7 +159,7 @@ impl Aarch64Codegen {
             Some(word) => {
                 self.emit(&word.to_le_bytes());
                 true
-            }
+            },
             None => false,
         }
     }

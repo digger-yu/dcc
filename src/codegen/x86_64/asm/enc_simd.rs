@@ -297,7 +297,15 @@ impl Codegen {
             AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
                 // RIP-relative dest: mod=00 r/m=101
                 self.emit_vex4_prefix(src_xmm, 0, 3, w, 0, 0, 1);
-                self.emit_insn(&Insn::raw(&[opcode, 0x05 | ((src_xmm & 7) << 3), 0, 0, 0, 0, imm as u8]));
+                self.emit_insn(&Insn::raw(&[
+                    opcode,
+                    0x05 | ((src_xmm & 7) << 3),
+                    0,
+                    0,
+                    0,
+                    0,
+                    imm as u8,
+                ]));
                 let pos = self.pos() - 5;
                 self.pending_data_rels.push((pos, sym.clone()));
             },
@@ -333,7 +341,15 @@ impl Codegen {
             AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
                 // RIP-relative source: mod=00 r/m=101
                 self.emit_vex4_prefix(dst_xmm, 0, 3, w, 0, 0, 1);
-                self.emit_insn(&Insn::raw(&[opcode, 0x05 | ((dst_xmm & 7) << 3), 0, 0, 0, 0, imm as u8]));
+                self.emit_insn(&Insn::raw(&[
+                    opcode,
+                    0x05 | ((dst_xmm & 7) << 3),
+                    0,
+                    0,
+                    0,
+                    0,
+                    imm as u8,
+                ]));
                 let pos = self.pos() - 5;
                 self.pending_data_rels.push((pos, sym.clone()));
             },
@@ -364,7 +380,11 @@ impl Codegen {
                 if bits == 16 {
                     self.emit_insn(&Insn::raw(&[0x66]));
                 }
-                self.emit_insn(&Insn::raw(&[Self::rex(w, *d, index.unwrap_or(0), *base), 0x0F, opcode]));
+                self.emit_insn(&Insn::raw(&[
+                    Self::rex(w, *d, index.unwrap_or(0), *base),
+                    0x0F,
+                    opcode,
+                ]));
                 self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
             }
             return;
@@ -436,7 +456,15 @@ impl Codegen {
                 } else {
                     self.emit_vex4_prefix(dst, 0, map, w, vvvv, l, pp);
                 }
-                self.emit_insn(&Insn::raw(&[opcode, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0, imm as u8]));
+                self.emit_insn(&Insn::raw(&[
+                    opcode,
+                    0x05 | ((dst & 7) << 3),
+                    0,
+                    0,
+                    0,
+                    0,
+                    imm as u8,
+                ]));
                 let pos = self.pos() - 5;
                 self.pending_data_rels.push((pos, sym.clone()));
             },
@@ -1196,7 +1224,15 @@ impl Codegen {
             AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
                 // RIP-relative dest: mod=00 r/m=101
                 self.emit_vex4_prefix(src_xmm, 0, 3, w, 0, 0, 1);
-                self.emit_insn(&Insn::raw(&[opcode, 0x05 | ((src_xmm & 7) << 3), 0, 0, 0, 0, imm as u8]));
+                self.emit_insn(&Insn::raw(&[
+                    opcode,
+                    0x05 | ((src_xmm & 7) << 3),
+                    0,
+                    0,
+                    0,
+                    0,
+                    imm as u8,
+                ]));
                 let pos = self.pos() - 5;
                 self.pending_data_rels.push((pos, sym.clone()));
             },
@@ -1233,7 +1269,15 @@ impl Codegen {
             AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
                 // RIP-relative source: mod=00 r/m=101
                 self.emit_vex4_prefix(dst, 0, 3, w, vvvv, 0, 1);
-                self.emit_insn(&Insn::raw(&[opcode, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0, imm as u8]));
+                self.emit_insn(&Insn::raw(&[
+                    opcode,
+                    0x05 | ((dst & 7) << 3),
+                    0,
+                    0,
+                    0,
+                    0,
+                    imm as u8,
+                ]));
                 let pos = self.pos() - 5;
                 self.pending_data_rels.push((pos, sym.clone()));
             },

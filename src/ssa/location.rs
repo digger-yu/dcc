@@ -59,13 +59,17 @@ type Versions = Vec<(String, Location, Type)>;
 
 impl LocMap {
     pub fn empty() -> Self {
-        Self { map: HashMap::new() }
+        Self {
+            map: HashMap::new(),
+        }
     }
 
     /// 显式复制（命名即声明语义）。`apply_plan` 这类「克隆整个函数再提交」的
     /// 路径用它，而不是依赖 derive 的静默行为。
     pub fn fork(&self) -> Self {
-        Self { map: self.map.clone() }
+        Self {
+            map: self.map.clone(),
+        }
     }
 
     /// 绑定一个 SSA 值的家。基名与类型从 `SsaVar` 取，所以下面的折叠与分裂
@@ -73,7 +77,11 @@ impl LocMap {
     pub fn bind(&mut self, v: &crate::ssa::ir::SsaVar, loc: Location) {
         self.map.insert(
             v.name(),
-            LocEntry { base: v.base.clone(), loc, ty: v.ty.clone() },
+            LocEntry {
+                base: v.base.clone(),
+                loc,
+                ty: v.ty.clone(),
+            },
         );
     }
 
@@ -153,15 +161,19 @@ impl LocMap {
     pub fn fold_for_codegen(&self, splits: &Splits) -> Vec<(String, Option<Location>)> {
         let mut acc: BTreeMap<String, Option<Location>> = BTreeMap::new();
         for (ssa, e) in self.map.iter() {
-            let local = splits.by_ssa.get(ssa).cloned().unwrap_or_else(|| e.base.clone());
+            let local = splits
+                .by_ssa
+                .get(ssa)
+                .cloned()
+                .unwrap_or_else(|| e.base.clone());
             match acc.get(&local) {
-                Some(Some(prev)) if *prev == e.loc => {}
+                Some(Some(prev)) if *prev == e.loc => {},
                 Some(_) => {
                     acc.insert(local, None);
-                }
+                },
                 None => {
                     acc.insert(local, Some(e.loc));
-                }
+                },
             }
         }
         acc.into_iter().collect()
@@ -176,7 +188,8 @@ impl LocMap {
     /// （一个号不得发给两个变量）的反面形状。所以「什么算被占用」必须只有一份答案，
     /// 否则流水造的名字与分裂造的名字可以互相撞上而两边都自查通过。
     pub fn reserved_names(func: &crate::ssa::ir::Function) -> std::collections::HashSet<String> {
-        let mut used: std::collections::HashSet<String> = func.original_locals.iter().cloned().collect();
+        let mut used: std::collections::HashSet<String> =
+            func.original_locals.iter().cloned().collect();
         used.extend(func.params.iter().map(|p| p.base.clone()));
         for bb in func.blocks.values() {
             for phi in &bb.phis {
@@ -190,7 +203,7 @@ impl LocMap {
         }
         used
     }
-    
+
     /// 分配一个分裂名：`{base}_s{k}`，`k` 从 `start` 起往上找第一个没被占用的；
     /// `used.insert` 同时就是登记，所以同一基名内与跨基名都不会重名。
     ///
@@ -211,7 +224,7 @@ impl LocMap {
             k += 1;
         }
     }
-    
+
     /// 由本表算出版本分裂表：**只允许分裂用户局部变量**。
     /// 自动分配本来就把 `not-a-user-local` 当拒因，而合成临时值的基名还被
     /// `is_synthetic_temp_base` 按前缀判过（改名会让那条判据隔两层不一致）。
@@ -264,7 +277,7 @@ impl LocMap {
             Some(e) => {
                 self.map.insert(new.to_string(), e);
                 true
-            }
+            },
             None => false,
         }
     }
@@ -310,7 +323,10 @@ pub struct Splits {
 impl Splits {
     /// SSA 版本在 AST 里该用的局部名（没分裂就是基名）。
     pub fn ast_name(&self, v: &crate::ssa::ir::SsaVar) -> String {
-        self.by_ssa.get(&v.name()).cloned().unwrap_or_else(|| v.base.clone())
+        self.by_ssa
+            .get(&v.name())
+            .cloned()
+            .unwrap_or_else(|| v.base.clone())
     }
 
     /// 分裂名字 → 它的类型（重建生成声明用）。
@@ -372,7 +388,10 @@ mod tests {
     }
 
     fn gp(n: u8) -> Location {
-        Location::Reg(RegId { bank: RegBank::Gp, n })
+        Location::Reg(RegId {
+            bank: RegBank::Gp,
+            n,
+        })
     }
 
     /// `fork` 必须是**独立**副本：改副本不能影响原件。
@@ -416,7 +435,10 @@ mod tests {
         m.bind(&v("j", 0), gp(12));
         assert_eq!(
             m.fold_by_base(),
-            vec![("i".to_string(), Some(gp(3))), ("j".to_string(), Some(gp(12)))]
+            vec![
+                ("i".to_string(), Some(gp(3))),
+                ("j".to_string(), Some(gp(12)))
+            ]
         );
 
         // (b) 同基名不同号 ⇒ 不可表示，必须点名而不是默默取一个
@@ -436,8 +458,14 @@ mod tests {
     /// 编号域按通道解释：`n` 相同的两个号不是同一个家。
     #[test]
     fn reg_numbers_are_per_bank() {
-        let gp0 = Location::Reg(RegId { bank: RegBank::Gp, n: 0 });
-        let simd0 = Location::Reg(RegId { bank: RegBank::Simd, n: 0 });
+        let gp0 = Location::Reg(RegId {
+            bank: RegBank::Gp,
+            n: 0,
+        });
+        let simd0 = Location::Reg(RegId {
+            bank: RegBank::Simd,
+            n: 0,
+        });
         assert_ne!(gp0, simd0, "同一个数在两个通道里是两个不同的寄存器");
         let mut m = LocMap::empty();
         m.bind(&v("a", 0), gp0);
@@ -514,10 +542,7 @@ mod tests {
         }
         versions.sort();
         versions.dedup();
-        assert!(
-            versions.len() >= 2,
-            "这条用例需要 x 至少两个 SSA 版本，实得 {versions:?}"
-        );
+        assert!(versions.len() >= 2, "这条用例需要 x 至少两个 SSA 版本，实得 {versions:?}");
         // 故意给两个版本不同的家 → 必须分裂
         let mut m2 = LocMap::empty();
         for (i, name) in versions.iter().enumerate() {
@@ -548,9 +573,9 @@ mod tests {
                             *declared = true;
                             assert_eq!(v.ty, Type::Long, "分裂局部的类型不能退成 int");
                         }
-                    }
+                    },
                     crate::ast::BlockItem::Stmt(s) => scan_stmt(s, declared, assigned),
-                    _ => {}
+                    _ => {},
                 }
             }
         }
@@ -565,14 +590,14 @@ mod tests {
                     for c in cases {
                         scan(&c.body, declared, assigned);
                     }
-                }
+                },
                 crate::ast::Stmt::If { then_, else_, .. } => {
                     scan_stmt(then_, declared, assigned);
                     if let Some(e) = else_ {
                         scan_stmt(e, declared, assigned);
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
         fn scan_expr(e: &crate::ast::Expr, declared: &mut bool, assigned: &mut bool) {
@@ -584,20 +609,20 @@ mod tests {
                         }
                     }
                     scan_expr(r, declared, assigned);
-                }
+                },
                 crate::ast::Expr::Ident { name, .. } => {
                     if name.name.ends_with("_s1") {
                         *assigned |= true;
                     }
-                }
+                },
                 crate::ast::Expr::Binop { l, r, .. } | crate::ast::Expr::Comma { l, r, .. } => {
                     scan_expr(l, declared, assigned);
                     scan_expr(r, declared, assigned);
-                }
+                },
                 crate::ast::Expr::Unary { e, .. }
                 | crate::ast::Expr::Cast { e, .. }
                 | crate::ast::Expr::Deref { e, .. } => scan_expr(e, declared, assigned),
-                _ => {}
+                _ => {},
             }
         }
         scan(&body, &mut declared, &mut assigned);

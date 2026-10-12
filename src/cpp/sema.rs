@@ -303,13 +303,9 @@ impl CxxType {
         };
         Some(match (a, b) {
             // 两侧浮: 取较宽者 (float < double < long double)
-            (Fam::Flt(x), Fam::Flt(y)) => CxxType::Float {
-                bits: x.max(y),
-            },
+            (Fam::Flt(x), Fam::Flt(y)) => CxxType::Float { bits: x.max(y) },
             // 一浮一整: 浮点族吸收整点族 ([expr.arith.conv]/1)
-            (Fam::Flt(x), Fam::Int(..)) | (Fam::Int(..), Fam::Flt(x)) => {
-                CxxType::Float { bits: x }
-            },
+            (Fam::Flt(x), Fam::Int(..)) | (Fam::Int(..), Fam::Flt(x)) => CxxType::Float { bits: x },
             (Fam::Int(x, xs), Fam::Int(y, ys)) => {
                 if x != y {
                     // 宽度不等: 取较宽者的秩与符号
@@ -1235,11 +1231,7 @@ impl Sema {
     ///
     /// 只处理能折成编译期整数的形态; 拿不到时返回 None, 让调用点回到普通的
     /// 成员访问路径 (那才是 `obj.member` 的本意)。
-    fn qualified_class_constant_expr(
-        &mut self,
-        cls_name: &str,
-        member: &str,
-    ) -> Option<HirExprId> {
+    fn qualified_class_constant_expr(&mut self, cls_name: &str, member: &str) -> Option<HirExprId> {
         let class_sym = self
             .lookup_unqualified(cls_name)
             .into_iter()
@@ -1270,12 +1262,7 @@ impl Sema {
     /// (例如 traits 体里写 `is_pointer<T>::value`, 上下文里 `T` 是形参) 则推迟求值
     /// 返回 `None`, 让上游保留为 `NtExpr` 形态等待代入实参后再折; 否则按基类链
     /// 正常取值。默认 `false` 与原行为完全一致。
-    fn class_constant_member(
-        &self,
-        class_sym: SymbolId,
-        member: &str,
-        depth: u32,
-    ) -> Option<i128> {
+    fn class_constant_member(&self, class_sym: SymbolId, member: &str, depth: u32) -> Option<i128> {
         self.class_constant_member_with_ctx(class_sym, member, depth, false)
     }
 
@@ -2145,7 +2132,10 @@ impl Sema {
     /// 类是否已**完整定义** (有类体)。这是完整性的唯一真源 (见
     /// [`ClassInfo::is_complete`] 注释: 不能用 `class_scope().is_some()` 反推)。
     pub fn is_class_complete(&self, class: ClassId) -> bool {
-        self.class_infos.get(class.0).map(|c| c.is_complete).unwrap_or(false)
+        self.class_infos
+            .get(class.0)
+            .map(|c| c.is_complete)
+            .unwrap_or(false)
     }
 
     /// 不完整类型的可读诊断名 (`'struct Foo'` / `'Foo'`)。
@@ -2190,7 +2180,9 @@ impl Sema {
     fn nearest_enclosing_namespace_scope(&self) -> ScopeId {
         let mut cur = self.current_scope;
         for _ in 0..64 {
-            let Some(sc) = self.scopes.get(cur.0) else { break };
+            let Some(sc) = self.scopes.get(cur.0) else {
+                break;
+            };
             match sc.kind {
                 ScopeKind::Class | ScopeKind::Function | ScopeKind::Block => match sc.parent {
                     Some(p) => cur = p,
@@ -2220,8 +2212,12 @@ impl Sema {
             Some(sym) => sym,
             None => {
                 // add_symbol 无条件写入 self.current_scope (= target)。
-                let sym =
-                    self.add_symbol(name.to_string(), CxxSymbolKind::Class, CxxType::Void, Access::Public);
+                let sym = self.add_symbol(
+                    name.to_string(),
+                    CxxSymbolKind::Class,
+                    CxxType::Void,
+                    Access::Public,
+                );
                 if let Some(s) = self.symbols.get_mut(sym.0) {
                     s.ty = CxxType::Class(ClassId(sym.0));
                 }
@@ -7845,8 +7841,7 @@ impl Sema {
                         let class_scope = self.get_symbol(owner).map(|s| s.scope);
                         if let Some(class_scope) = class_scope {
                             let env = self.class_scope_const_env(class_scope);
-                            if let Some(v) =
-                                crate::cpp::cpp_const_eval::eval_cpp_const(expr, &env)
+                            if let Some(v) = crate::cpp::cpp_const_eval::eval_cpp_const(expr, &env)
                             {
                                 self.static_const_values.insert(field_sym, v);
                             }
@@ -8745,10 +8740,15 @@ impl Sema {
         let targs = crate::cpp::parser::TemplateArgs {
             params: params.to_vec(),
         };
-        self.templates
-            .register_with_prefix(ns_prefix, &targs, &requires.map(str::to_string), &decl);
+        self.templates.register_with_prefix(
+            ns_prefix,
+            &targs,
+            &requires.map(str::to_string),
+            &decl,
+        );
         if let CppDecl::Class(ref c) = &*decl {
-            self.template_anchor.insert(c.name.clone(), self.templates.anchors.len());
+            self.template_anchor
+                .insert(c.name.clone(), self.templates.anchors.len());
         }
         Ok(())
     }
@@ -8826,9 +8826,7 @@ impl Sema {
             Mt::TplMember { args, .. } => args.iter().any(Self::is_dependent_type),
             Mt::NtExpr(_, operands) => operands.iter().any(Self::is_dependent_type),
             Mt::VariadicPack(items) => items.iter().any(Self::is_dependent_type),
-            Mt::Pointer(t)
-            | Mt::Reference(t)
-            | Mt::Array(t, _) => Self::is_dependent_type(t),
+            Mt::Pointer(t) | Mt::Reference(t) | Mt::Array(t, _) => Self::is_dependent_type(t),
             _ => false,
         }
     }
@@ -8960,15 +8958,21 @@ impl Sema {
         }
         self.cache_miss_count += 1;
         let pushed = self.current_template_params.clone();
-        if let Some(td) = self.templates.templates.iter().find(|t| t.name == name).cloned() {
+        if let Some(td) = self
+            .templates
+            .templates
+            .iter()
+            .find(|t| t.name == name)
+            .cloned()
+        {
             self.current_template_params = td.param_names.clone();
         }
         let result = self.templates.instantiate_class(name, args);
         self.current_template_params = pushed;
         result.map(|_| {
-            crate::cpp::mangle::MangleType::Class(
-                crate::cpp::template::instantiated_class_name(name, args),
-            )
+            crate::cpp::mangle::MangleType::Class(crate::cpp::template::instantiated_class_name(
+                name, args,
+            ))
         })
     }
 
@@ -8988,9 +8992,9 @@ impl Sema {
         self.cache_miss_count += 1;
         let result = self.templates.instantiate_fn(name, args);
         result.map(|_| {
-            crate::cpp::mangle::MangleType::Class(
-                crate::cpp::template::instantiated_fn_name(name, args),
-            )
+            crate::cpp::mangle::MangleType::Class(crate::cpp::template::instantiated_fn_name(
+                name, args,
+            ))
         })
     }
 
@@ -9021,7 +9025,8 @@ impl Sema {
             return Some((spec.class.name.clone(), vec![], args.to_vec()));
         }
         // 再走偏特化排序
-        let mut best: Option<(usize, String, Vec<String>, Vec<crate::cpp::mangle::MangleType>)> = None;
+        let mut best: Option<(usize, String, Vec<String>, Vec<crate::cpp::mangle::MangleType>)> =
+            None;
         for entry in &self.templates.partials {
             if entry.name != name {
                 continue;
@@ -10363,8 +10368,8 @@ mod tests {
     /// 定义一个不完整类型的对象 (全局/局部) 必须硬错 ([basic.types]/4)。
     #[test]
     fn object_definition_of_incomplete_type_is_rejected() {
-        let g = hir_of_src("struct Fwd;\nstruct Fwd g;")
-            .expect_err("不完整类型全局对象定义必须报错");
+        let g =
+            hir_of_src("struct Fwd;\nstruct Fwd g;").expect_err("不完整类型全局对象定义必须报错");
         assert!(g.contains("incomplete"), "诊断应是不完整类型错误, 实得: {g}");
         let l = hir_of_src("struct Fwd;\nvoid f() { struct Fwd v; }")
             .expect_err("不完整类型局部对象定义必须报错");
@@ -10376,10 +10381,7 @@ mod tests {
     #[test]
     fn enum_key_does_not_introduce_new_tag() {
         let src = "struct S { enum never_seen *p; };";
-        assert!(
-            hir_of_src(src).is_err(),
-            "enum key 不得按需引入新枚举, 未知应报错"
-        );
+        assert!(hir_of_src(src).is_err(), "enum key 不得按需引入新枚举, 未知应报错");
     }
 
     /// 按值形参 / 按值返回 (函数有定义时) 都要求完整类型。
@@ -10389,8 +10391,7 @@ mod tests {
             .expect_err("不完整类型按值形参必须报错");
         assert!(param.contains("incomplete"), "实得: {param}");
         // 指针形参天然放行 (下面不得报错)。
-        hir_of_src("struct Fwd;\nvoid f(struct Fwd *v);")
-            .expect("不完整类型指针形参应放行");
+        hir_of_src("struct Fwd;\nvoid f(struct Fwd *v);").expect("不完整类型指针形参应放行");
         // 按值返回: 仅当函数有定义时要求完整 (纯声明允许)。
         let ret = hir_of_src("struct Fwd;\nstruct Fwd g() { return g(); }")
             .expect_err("不完整类型按值返回定义必须报错");
@@ -10415,7 +10416,6 @@ mod tests {
         let err = hir_of_src(src).expect_err("不完整基类必须报错");
         assert!(err.contains("incomplete") || err.contains("base"), "实得: {err}");
     }
-
 
     /// 类内成员函数体里的裸字段名 (定义在方法之后的 `private` 字段) 必须
     /// 能解析 —— 这是 iterator_traits 夹具的真实形态 (CountIt::p_).
@@ -11390,16 +11390,16 @@ struct Fin : Mid { int use_missing() { return nowhere_to_find(); } };
     // ===== Stage 8.6 / 8.7 / 10.5: 模板与约束测试 =====
 
     #[test]
-fn test_instantiate_class() {
-    // 注册一个类模板, 然后测试实例化
-    let mut sema = Sema::new();
-    // 测试实例化: 传入 int 作为模板参数 (注意: 需要先注册模板, 此处暂不完整测试注册流程, 仅验证 API 存在且调用不 panic)
-    let ty_int = MangleType::Int;
-    // 调用实例化, 对于未注册的模板, 应返回 None 而不是 panic
-    let result = sema.instantiate_class("NonExistent", &[ty_int]);
-    assert!(result.is_none(), "未注册的模板应返回 None");
-    // API 存在性验证通过
-}
+    fn test_instantiate_class() {
+        // 注册一个类模板, 然后测试实例化
+        let mut sema = Sema::new();
+        // 测试实例化: 传入 int 作为模板参数 (注意: 需要先注册模板, 此处暂不完整测试注册流程, 仅验证 API 存在且调用不 panic)
+        let ty_int = MangleType::Int;
+        // 调用实例化, 对于未注册的模板, 应返回 None 而不是 panic
+        let result = sema.instantiate_class("NonExistent", &[ty_int]);
+        assert!(result.is_none(), "未注册的模板应返回 None");
+        // API 存在性验证通过
+    }
 
     #[test]
     fn test_pick_partial_exists() {

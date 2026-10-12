@@ -119,7 +119,11 @@ impl Codegen {
                 scale,
             } => {
                 // 内存间接端口: movzwl mem, %edx + in DX
-                self.emit_insn(&Insn::raw(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0xB7]));
+                self.emit_insn(&Insn::raw(&[
+                    Self::rex(false, 0, index.unwrap_or(0), *base),
+                    0x0F,
+                    0xB7,
+                ]));
                 self.emit_asm_modrm_mem_only(2, *disp, *base, *index, *scale);
                 if bits == 8 {
                     self.emit_insn(&Insn::raw(&[0xEC]));
@@ -281,7 +285,11 @@ impl Codegen {
                 scale,
             } => {
                 // 内存间接端口: movzwl mem, %edx + out DX
-                self.emit_insn(&Insn::raw(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0xB7]));
+                self.emit_insn(&Insn::raw(&[
+                    Self::rex(false, 0, index.unwrap_or(0), *base),
+                    0x0F,
+                    0xB7,
+                ]));
                 self.emit_asm_modrm_mem_only(2, *disp, *base, *index, *scale);
                 if bits == 8 {
                     self.emit_insn(&Insn::raw(&[0xEE]));

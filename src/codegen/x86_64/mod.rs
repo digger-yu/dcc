@@ -23,9 +23,7 @@ mod abi;
 // 共享层 `codegen::shared::homes` 与 `codegen::asm_event` 需要「x86_64 上哪个 `register asm`
 // 名字合法」与「号→名」这两条判据（它自己有各 target 的名字表，x86_64 这张是 132 条的
 // 那一份）。`abi` 本身保持私有：只导出这几个函数，不放开整个模块。
-pub(crate) use self::abi::regnames::{
-    att_name_of_num, bare_name_of_num, is_user_register_name,
-};
+pub(crate) use self::abi::regnames::{att_name_of_num, bare_name_of_num, is_user_register_name};
 /// x86_64 代码生成器 - 所有子模块声明
 mod asm;
 mod backend;
@@ -40,16 +38,16 @@ mod emit;
 pub mod ifunc;
 mod insn;
 mod instructions;
-mod opcode;
 mod mem;
+mod opcode;
 mod parallel;
-/// REX 位序穷举门禁（编字节 → 自家解码器读回 → 比对意图寄存器名）
-#[cfg(test)]
-mod rex_matrix;
 /// P10: x86-64 指令解码器 → GAS AT&T 文本.
 /// 原生发射路径在 -S 渲染时用它把字节反推为文本 (等价于之前的
 /// `render_one`, P10 起从 asm/ 移出, 不再是内联汇编专属).
 pub(crate) mod render_one;
+/// REX 位序穷举门禁（编字节 → 自家解码器读回 → 比对意图寄存器名）
+#[cfg(test)]
+mod rex_matrix;
 mod special;
 
 // ============================================================================

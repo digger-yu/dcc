@@ -113,12 +113,7 @@ fn arch_xcr0_mask(arch: &str) -> u32 {
 /// `avx_vnni` 与 `amx-*` 系都不可克隆）。这个前提由单元测试
 /// `linker_path_cloneable_bits_have_no_subleaf` 钉住 —— 有人加了带子叶的可克隆
 /// 特性时该测试变红，提醒在这里补门控，而不是默默发一条读错寄存器的检测。
-fn emit_cpuid_leaf(
-    code: &mut Vec<u8>,
-    current: &mut Option<(u32, u32)>,
-    leaf: u32,
-    subleaf: u32,
-) {
+fn emit_cpuid_leaf(code: &mut Vec<u8>, current: &mut Option<(u32, u32)>, leaf: u32, subleaf: u32) {
     if *current == Some((leaf, subleaf)) {
         return;
     }
@@ -280,13 +275,14 @@ pub fn generate_resolver_code(tcf: &TargetClonesFunc) -> (Vec<u8>, Vec<(usize, u
         if xcr0_mask != 0 {
             // 检查 OSXSAVE：位号不在此处重写，由 `cpu_isa::osxsave_bit()` 从
             // `FEATURES["osxsave"]` 反查（旧版在这里硬写 `1 << 27`，位表就有两份）。
-            let (osx_leaf, osx_subleaf, osx_reg, osx_mask) = cpu_isa::osxsave_bit().unwrap_or_else(|| {
-                panic!(
-                    "internal bug: cpu_isa::FEATURES 里没有 \"osxsave\" 位，链接期 resolver \
+            let (osx_leaf, osx_subleaf, osx_reg, osx_mask) =
+                cpu_isa::osxsave_bit().unwrap_or_else(|| {
+                    panic!(
+                        "internal bug: cpu_isa::FEATURES 里没有 \"osxsave\" 位，链接期 resolver \
                      无法做 XSAVE 门控（不能静默退成「不门控」：那会在不支持 xgetbv 的机器上 \
                      #UD）。补回该位或改走 codegen 侧 resolver。"
-                );
-            });
+                    );
+                });
             emit_cpuid_leaf(&mut code, &mut current_leaf, osx_leaf, osx_subleaf);
             // test reg, mask
             emit_test_reg_imm32(&mut code, osx_reg, osx_mask);
@@ -311,12 +307,7 @@ pub fn generate_resolver_code(tcf: &TargetClonesFunc) -> (Vec<u8>, Vec<(usize, u
         // 而滤掉那一位，会让 `avx` 只剩 XCR0 判据 —— XCR0 只能证明 OS 使能了
         // 状态，不能证明 CPU 支持该指令。
         for cpuid_bit in &bits {
-            emit_cpuid_leaf(
-                &mut code,
-                &mut current_leaf,
-                cpuid_bit.leaf,
-                cpuid_bit.subleaf,
-            );
+            emit_cpuid_leaf(&mut code, &mut current_leaf, cpuid_bit.leaf, cpuid_bit.subleaf);
             // test reg, (1 << bit)
             emit_test_reg_imm32(&mut code, cpuid_bit.reg, 1u32 << cpuid_bit.bit);
             // je .skip_variant (feature not present)
@@ -570,7 +561,9 @@ mod tests {
     ///  那会让「内置链接器选的变体」与「宿主链接器选的变体」不一致。）
     #[test]
     fn bit_table_is_the_shared_cpu_isa_source() {
-        for name in ["sse4.2", "avx", "avx2", "avx512f", "fma", "bmi2", "popcnt", "sse3"] {
+        for name in [
+            "sse4.2", "avx", "avx2", "avx512f", "fma", "bmi2", "popcnt", "sse3",
+        ] {
             let forwarded = arch_to_cpuid_bits(name);
             let truth: Vec<CpuidBit> = cpu_isa::cpuid_bits(name).to_vec();
             assert_eq!(forwarded.len(), truth.len(), "{name} 不是薄转发");
@@ -730,7 +723,8 @@ mod tests {
         assert_eq!(jcc, &[0x0F, 0x84], "OSXSAVE 门控方反了");
         // avx 自身位（leaf1/ECX#28）必须真的被测试，不能只靠 XCR0
         assert!(
-            code.windows(6).any(|w| w == [0xF7, 0xC1, 0x00, 0x00, 0x00, 0x10]),
+            code.windows(6)
+                .any(|w| w == [0xF7, 0xC1, 0x00, 0x00, 0x00, 0x10]),
             "没测 leaf1/ECX#28（AVX 本身），旧实现把它滤掉了"
         );
         // XCR0 需求值必须从 cpu_isa 来（avx = 0x6），并且以 imm32 形式发射

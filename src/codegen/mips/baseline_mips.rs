@@ -1,16 +1,16 @@
 // src/codegen/mips.rs - MIPS32 后端 (O32 ABI)
 
 use crate::ast::{BinOp, BlockItem, Decl, Expr, FuncDecl, Program, Stmt, UnOp};
+use crate::codegen::mips::insn::Insn;
 use crate::codegen::shared::asm_constraints::{
     self, resolve_asm_operands, resolve_asm_template_enhanced, AsmArch,
 };
+use crate::codegen::shared::asm_operand::LayoutMap;
 use crate::codegen::shared::asm_source::AsmPassthroughRecord;
 use crate::codegen::shared::elf::{
     self, ElfRela, ElfSection, ElfSym, SHF_ALLOC, SHF_GNU_RETAIN, SHT_PROGBITS, STB_GLOBAL,
     STB_LOCAL, STB_WEAK, STT_FUNC, STT_GNU_IFUNC,
 };
-use crate::codegen::mips::insn::Insn;
-use crate::codegen::shared::asm_operand::LayoutMap;
 use crate::ir::{Function, Global, Module, TypedStmt, ValueType};
 use crate::target::Target;
 use std::collections::HashMap;
@@ -147,7 +147,7 @@ impl MipsCodegen {
             Some(bytes) => {
                 self.code.extend_from_slice(&bytes);
                 true
-            }
+            },
             None => false,
         }
     }

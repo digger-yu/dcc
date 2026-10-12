@@ -284,8 +284,12 @@ impl Codegen {
             // symtab —— 这是 GAS 的约定: 这类 label 是 rodata 里的位置标记,
             // 不应当作独立符号发 UND 重定位. 正确做法是把它替换成对 .rodata
             // section symbol 的重定位, addend = 字符串在 rodata 内的偏移.
-            if let Some(rodata_off) = Self::lookup_str_const_label_offset(&rel.symbol, &self.string_pool) {
-                let Some(rodata_sym) = self.reloc_sym_index(".rodata", ".rela<custom section> (str.const)") else {
+            if let Some(rodata_off) =
+                Self::lookup_str_const_label_offset(&rel.symbol, &self.string_pool)
+            {
+                let Some(rodata_sym) =
+                    self.reloc_sym_index(".rodata", ".rela<custom section> (str.const)")
+                else {
                     continue;
                 };
                 let abs_offset = rel.offset;
@@ -481,11 +485,7 @@ impl Codegen {
         // - LEA 指令 (instrument hook): 直接计算函数地址 → PC32
         // - MOV 指令 (外部函数 GOT 间接加载): GOTPCREL
         for (code_off, func_name, is_lea) in std::mem::take(&mut self.pending_func_addr_rels) {
-            let site = if is_lea {
-                "func addr PC32"
-            } else {
-                "func addr GOTPCREL"
-            };
+            let site = if is_lea { "func addr PC32" } else { "func addr GOTPCREL" };
             let Some(sym_idx) = self.reloc_sym_index(&func_name, site) else {
                 continue;
             };

@@ -152,22 +152,22 @@ impl Aarch64Codegen {
         match op {
             BinOp::Add => {
                 self.emit_insn(&Insn::raw(0x0b010000));
-            }
+            },
             BinOp::Sub => {
                 self.emit_insn(&Insn::raw(0x4b010000));
-            }
+            },
             BinOp::Mul => {
                 self.emit_insn(&Insn::raw(0x1b017c00));
-            }
+            },
             BinOp::And => {
                 self.emit_insn(&Insn::raw(0x0a010020));
-            }
+            },
             BinOp::Or => {
                 self.emit_insn(&Insn::raw(0x2a010020));
-            }
+            },
             BinOp::Xor => {
                 self.emit_insn(&Insn::raw(0x4a010020));
-            }
+            },
             // M7 修复: 移位指令正确编码
             // lslv w0, w0, w1: 0x1A302000 LE = 00 20 30 1A
             //   bits[31:21] = 0b00011010001 (lslv op)
@@ -184,7 +184,7 @@ impl Aarch64Codegen {
             // 常量求值阶段 (const_eval) 已拒绝无效移位量.
             BinOp::Shl => {
                 self.emit_insn(&Insn::raw(0x1a302000));
-            } // lslv w0, w0, w1
+            }, // lslv w0, w0, w1
             BinOp::Shr => {
                 if is_signed {
                     // asrv: 算术右移, 高位补符号位 (C11 6.5.7)
@@ -203,7 +203,7 @@ impl Aarch64Codegen {
             // 限制: 不区分有/无符号 (始终有符号);调用方保证 IR 已 folding 常量
             BinOp::Div => {
                 self.emit_insn(&Insn::raw(0x9ac00c20));
-            } // sdiv w0, w0, w1
+            }, // sdiv w0, w0, w1
             BinOp::Mod => {
                 self.emit_insn(&Insn::raw(0x9ac00c20)); // sdiv w0, w0, w1
                 self.emit_insn(&Insn::raw(0x9bb083a0)); // msub w0, w1, w0, w14
@@ -230,23 +230,23 @@ impl Aarch64Codegen {
         match op {
             BinOp::Add => {
                 self.emit_insn(&Insn::raw(0x1e210020));
-            } // fadd s0, s0, s1
+            }, // fadd s0, s0, s1
             BinOp::Sub => {
                 self.emit_insn(&Insn::raw(0x1e410020));
-            }
+            },
             BinOp::Mul => {
                 self.emit_insn(&Insn::raw(0x1e610020));
-            }
+            },
             BinOp::Div => {
                 self.emit_insn(&Insn::raw(0x1e810020));
-            }
+            },
             BinOp::EqEq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 self.fcmp_s0_s1();
                 self.fset_w0_from_fcmp(op);
             },
             _ => {
                 self.emit_insn(&Insn::raw(0x1e210020));
-            }
+            },
         }
     }
 
@@ -254,16 +254,16 @@ impl Aarch64Codegen {
         match op {
             BinOp::Add => {
                 self.emit_insn(&Insn::raw(0x4e211420));
-            } // add v0.4s, v0.4s, v1.4s
+            }, // add v0.4s, v0.4s, v1.4s
             BinOp::Sub => {
                 self.emit_insn(&Insn::raw(0x4e411420));
-            }
+            },
             BinOp::Mul => {
                 self.emit_insn(&Insn::raw(0x4e819420));
-            }
+            },
             _ => {
                 self.emit_insn(&Insn::raw(0x4e211420));
-            }
+            },
         }
     }
 

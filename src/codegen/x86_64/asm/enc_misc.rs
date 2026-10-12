@@ -7,8 +7,8 @@ use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
 use crate::codegen::x86_64::asm::*;
-use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::*;
 use crate::const_eval::{self, ConstValue};
 use crate::debug::*;
@@ -75,7 +75,11 @@ impl Codegen {
                 index,
                 scale,
             } => {
-                self.emit_insn(&Insn::raw(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0x01]));
+                self.emit_insn(&Insn::raw(&[
+                    Self::rex(false, 0, index.unwrap_or(0), *base),
+                    0x0F,
+                    0x01,
+                ]));
                 self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
             },
             AsmOperand::SegMem {
@@ -126,7 +130,11 @@ impl Codegen {
                     scale,
                 } => {
                     let (_code, pfx) = Self::seg_meta(*seg);
-                    self.emit_insn(&Insn::raw(&[pfx, 0x66, Self::rex(false, *d, index.unwrap_or(0), *base)]));
+                    self.emit_insn(&Insn::raw(&[
+                        pfx,
+                        0x66,
+                        Self::rex(false, *d, index.unwrap_or(0), *base),
+                    ]));
                     self.emit_insn(&Insn::raw(&[0x0F, 0x38, 0x82]));
                     self.emit_asm_modrm_mem_only(*d, *disp, *base, *index, *scale);
                 },
@@ -146,7 +154,11 @@ impl Codegen {
             scale,
         } = op
         {
-            self.emit_insn(&Insn::raw(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0x18]));
+            self.emit_insn(&Insn::raw(&[
+                Self::rex(false, 0, index.unwrap_or(0), *base),
+                0x0F,
+                0x18,
+            ]));
             self.emit_asm_modrm_mem_only(hint, *disp, *base, *index, *scale);
         } else if let AsmOperand::SegMem {
             seg,

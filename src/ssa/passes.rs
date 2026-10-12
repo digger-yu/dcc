@@ -144,7 +144,10 @@ pub fn run_pipelining(func: &mut Function) -> bool {
             },
             Ok(p) => {
                 if dump {
-                    eprint!("\n==== [P16] 计划 =====\n{}", crate::ssa::pipelining::dump_plan(func, &p));
+                    eprint!(
+                        "\n==== [P16] 计划 =====\n{}",
+                        crate::ssa::pipelining::dump_plan(func, &p)
+                    );
                 }
                 match crate::ssa::pipelining::apply_plan(func, &p.lp, &p.inst) {
                     Ok(()) => {
@@ -452,7 +455,6 @@ fn find_induction_vars(func: &Function) -> HashSet<String> {
     }
     ivs
 }
-
 
 // =====================================================================
 // P5. 指令调度 (list scheduling within basic block)
@@ -861,7 +863,6 @@ fn asm_constraints_touch_memory(constraints: &[String]) -> bool {
     constraints.iter().any(|c| c.contains('m'))
 }
 
-
 // =====================================================================
 // P8 循环分块 / P9 循环交换 —— 已删除 (伪实现会静默误编译)
 // =====================================================================
@@ -1253,9 +1254,11 @@ fn slice_is_movable(insts: &[Inst], picked: &HashSet<usize>) -> bool {
 /// 那是可观察行为 ⇒ 除数不是已知非零常量时, 不得把这条除法上提。
 fn may_trap(kind: &InstKind) -> bool {
     match kind {
-        InstKind::Bin { op: BinOp::Div | BinOp::Mod, r, .. } => {
-            !matches!(r, Operand::Int(v) if *v != 0)
-        },
+        InstKind::Bin {
+            op: BinOp::Div | BinOp::Mod,
+            r,
+            ..
+        } => !matches!(r, Operand::Int(v) if *v != 0),
         _ => false,
     }
 }
@@ -2602,10 +2605,7 @@ pub fn gvn(func: &mut Function) -> bool {
                     continue;
                 }
                 let local_only = fp_sensitive
-                    || matches!(
-                        &key,
-                        ValKey::Load(_) | ValKey::Member(..) | ValKey::Index(..)
-                    );
+                    || matches!(&key, ValKey::Load(_) | ValKey::Member(..) | ValKey::Index(..));
                 let table = if local_only { &mut local } else { &mut cur };
                 let hit = table.get(&key).cloned();
                 match hit {
@@ -2641,9 +2641,7 @@ pub fn gvn(func: &mut Function) -> bool {
                             // 指向已删定义的引用: 实测 `if (_tbin_2)` 读一个从未赋值的临时名,
                             // `cont(4)` 由 5 变 0。
                             if register_rename(&mut renames, &var_table, &dest, &prev) {
-                                dead.entry(bb_name.clone())
-                                    .or_default()
-                                    .insert(dest.name());
+                                dead.entry(bb_name.clone()).or_default().insert(dest.name());
                             }
                         }
                     },
@@ -2771,11 +2769,7 @@ fn val_key(k: &InstKind, _defs: &HashMap<String, InstKind>) -> Option<ValKey> {
         InstKind::Bin { op, l, r } => {
             // 除/模可能陷阱: 多执行一次会新增可观察行为, 仅当已命中同样形状时
             // 才能删 (而删的是重复执行, 不会新增陷阱) —— 故允许入表与复用。
-            Some(ValKey::Bin(
-                format!("{op:?}"),
-                operand_identity(l),
-                operand_identity(r),
-            ))
+            Some(ValKey::Bin(format!("{op:?}"), operand_identity(l), operand_identity(r)))
         },
         InstKind::Un { op, e } => Some(ValKey::Un(format!("{op:?}"), operand_identity(e))),
         InstKind::Cast { ty, e } => Some(ValKey::Cast(type_tag_of(ty), operand_identity(e))),
@@ -2786,23 +2780,15 @@ fn val_key(k: &InstKind, _defs: &HashMap<String, InstKind>) -> Option<ValKey> {
             operand_identity(then_),
             operand_identity(else_),
         )),
-        InstKind::Load {
-            e, ty, is_volatile,
-        } if !is_volatile => Some(ValKey::Load(format!(
-            "{}:{}", operand_identity(e), type_tag_of(ty)
-        ))),
-        InstKind::MemberLoad {
-            obj, field, ty, ..
-        } => Some(ValKey::Member(
-            operand_identity(obj),
-            field.clone(),
-            type_tag_of(ty),
-        )),
-        InstKind::IndexLoad { arr, idx, ty, .. } => Some(ValKey::Index(
-            operand_identity(arr),
-            operand_identity(idx),
-            type_tag_of(ty),
-        )),
+        InstKind::Load { e, ty, is_volatile } if !is_volatile => {
+            Some(ValKey::Load(format!("{}:{}", operand_identity(e), type_tag_of(ty))))
+        },
+        InstKind::MemberLoad { obj, field, ty, .. } => {
+            Some(ValKey::Member(operand_identity(obj), field.clone(), type_tag_of(ty)))
+        },
+        InstKind::IndexLoad { arr, idx, ty, .. } => {
+            Some(ValKey::Index(operand_identity(arr), operand_identity(idx), type_tag_of(ty)))
+        },
         _ => None,
     }
 }
@@ -2896,9 +2882,7 @@ fn local_object_names(func: &Function) -> HashSet<String> {
 
 fn store_of(k: &InstKind, defs: &HashMap<String, InstKind>) -> Option<(StoreLoc, bool)> {
     match k {
-        InstKind::Store {
-            e, is_volatile, ..
-        } => Some((access_loc(e, defs), *is_volatile)),
+        InstKind::Store { e, is_volatile, .. } => Some((access_loc(e, defs), *is_volatile)),
         InstKind::IndexStore {
             arr, is_volatile, ..
         } => Some((access_loc(arr, defs), *is_volatile)),
@@ -2912,9 +2896,9 @@ fn store_of(k: &InstKind, defs: &HashMap<String, InstKind>) -> Option<(StoreLoc,
 /// 把一条指令对内存的影响归一成 `FutureAccess`; 纯值运算返回 `None` (不影哩判定)。
 fn access_of(k: &InstKind, defs: &HashMap<String, InstKind>) -> Option<FutureAccess> {
     match k {
-        InstKind::Load {
-            e, is_volatile, ..
-        } => Some(FutureAccess::Read(access_loc(e, defs), *is_volatile)),
+        InstKind::Load { e, is_volatile, .. } => {
+            Some(FutureAccess::Read(access_loc(e, defs), *is_volatile))
+        },
         InstKind::IndexLoad {
             arr, is_volatile, ..
         } => Some(FutureAccess::Read(access_loc(arr, defs), *is_volatile)),
@@ -2964,8 +2948,7 @@ fn find_dead_store(
                 continue;
             }
             let mut future: Vec<FutureAccess> = Vec::new();
-            let reached_end =
-                collect_future(func, &bb_name, idx + 1, defs, preds, &mut future);
+            let reached_end = collect_future(func, &bb_name, idx + 1, defs, preds, &mut future);
             if is_dead_store(&name, &future, escapes, reached_end) {
                 return Some((bb_name.clone(), idx));
             }
@@ -3106,7 +3089,9 @@ fn escaping_bases(func: &Function) -> HashSet<String> {
                     mark_op(l, &mut mark, &mut escape);
                     mark_op(r, &mut mark, &mut escape);
                 },
-                InstKind::Un { e, .. } | InstKind::Cast { e, .. } => mark_op(e, &mut mark, &mut escape),
+                InstKind::Un { e, .. } | InstKind::Cast { e, .. } => {
+                    mark_op(e, &mut mark, &mut escape)
+                },
                 // `Load{e}` 的 `e` 是**地址位置** (读那个对象), 不是逃逸: 把
                 // `_addr = &x; v = *_addr;` 算成逃逸会让 `x` 的写永远删不掉。
                 InstKind::Load { .. } => {},
@@ -3120,7 +3105,9 @@ fn escaping_bases(func: &Function) -> HashSet<String> {
                     mark_op(then_, &mut mark, &mut escape);
                     mark_op(else_, &mut mark, &mut escape);
                 },
-                InstKind::InlineAsm { inputs, outputs, .. } => {
+                InstKind::InlineAsm {
+                    inputs, outputs, ..
+                } => {
                     for i in inputs {
                         mark_op(i, &mut mark, &mut escape);
                     }
@@ -4080,7 +4067,6 @@ mod tests {
         assert_eq!(bb.insts[2].dest.as_ref().map(|v| v.name()), Some("a.1".into()));
     }
 
-
     /// DCE eliminates pure (non-volatile, no outputs, no memory
     /// clobber) asm when its results are unused.
     #[test]
@@ -4227,17 +4213,20 @@ mod tests {
                 span: span.clone(),
             },
         ];
-        f.blocks.get_mut("entry").unwrap().term = Terminator::Ret { val: Some(Operand::Var(c)) };
+        f.blocks.get_mut("entry").unwrap().term = Terminator::Ret {
+            val: Some(Operand::Var(c)),
+        };
         assert!(gvn(&mut f), "重复的 x+1 应被归一");
         let bb = f.blocks.get("entry").unwrap();
         assert_eq!(bb.insts.len(), 2, "第二条同形计算应被删除");
         // 归一后两个操作数指向同一个 SSA 名, 且该名仍有定义。
-        let defined: Vec<String> =
-            bb.insts.iter().filter_map(|i| i.dest.as_ref().map(|d| d.name())).collect();
+        let defined: Vec<String> = bb
+            .insts
+            .iter()
+            .filter_map(|i| i.dest.as_ref().map(|d| d.name()))
+            .collect();
         assert_eq!(defined, vec!["_a.1", "_c"], "保留的必须是先出现的那个定义");
-        let uses_a = bb.insts[1]
-            .kind
-            .clone();
+        let uses_a = bb.insts[1].kind.clone();
         match uses_a {
             InstKind::Bin { l, r, .. } => {
                 assert_eq!(operand_identity(&l), "_a.1");
@@ -4291,7 +4280,9 @@ mod tests {
                 span: span.clone(),
             },
         ];
-        bb.term = Terminator::Ret { val: Some(Operand::Var(l2)) };
+        bb.term = Terminator::Ret {
+            val: Some(Operand::Var(l2)),
+        };
         let before = f.blocks.get("entry").unwrap().insts.len();
         gvn(&mut f);
         let after = f.blocks.get("entry").unwrap().insts.len();
@@ -4316,10 +4307,10 @@ mod tests {
                 },
                 span: span.clone(),
             };
-            f.blocks.get_mut("entry").unwrap().insts =
-                vec![dup(a.clone()), dup(b.clone())];
-            f.blocks.get_mut("entry").unwrap().term =
-                Terminator::Ret { val: Some(Operand::Var(b)) };
+            f.blocks.get_mut("entry").unwrap().insts = vec![dup(a.clone()), dup(b.clone())];
+            f.blocks.get_mut("entry").unwrap().term = Terminator::Ret {
+                val: Some(Operand::Var(b)),
+            };
             f
         };
         // FENV_ACCESS ON: 舍入模式/异常标志可被观测 ⇒ 浮点计算不得归一。
@@ -4362,17 +4353,18 @@ mod tests {
             },
             span: span.clone(),
         }];
-        f.blocks.get_mut("entry").unwrap().term =
-            Terminator::Branch {
-                cond: Operand::Var(p),
-                t: merge.clone(),
-                f: merge.clone(),
-            };
+        f.blocks.get_mut("entry").unwrap().term = Terminator::Branch {
+            cond: Operand::Var(p),
+            t: merge.clone(),
+            f: merge.clone(),
+        };
         f.blocks.get_mut(&merge).unwrap().phis = vec![crate::ssa::Phi {
             dest: x.clone(),
             incoming: vec![(q1.clone(), "entry".to_string()), (q1, "entry".to_string())],
         }];
-        f.blocks.get_mut(&merge).unwrap().term = Terminator::Ret { val: Some(Operand::Var(x)) };
+        f.blocks.get_mut(&merge).unwrap().term = Terminator::Ret {
+            val: Some(Operand::Var(x)),
+        };
         assert!(gvn(&mut f), "所有入边同值的 phi 应退化");
         assert!(f.blocks.get(&merge).unwrap().phis.is_empty(), "退化后 phi 必须被删除");
     }
@@ -4421,7 +4413,9 @@ mod tests {
                 span: span.clone(),
             },
         ];
-        bb.term = Terminator::Ret { val: Some(Operand::Var(keep)) };
+        bb.term = Terminator::Ret {
+            val: Some(Operand::Var(keep)),
+        };
         assert!(dead_store_elim(&mut f), "被覆盖且未被读的写应被删除");
         let bb = f.blocks.get("entry").unwrap();
         let stores: Vec<&Inst> = bb
@@ -4513,7 +4507,11 @@ mod tests {
             .insts
             .iter()
             .filter_map(|i| match &i.kind {
-                InstKind::Store { e, src, is_volatile } => Some((
+                InstKind::Store {
+                    e,
+                    src,
+                    is_volatile,
+                } => Some((
                     format!("{:?}", access_loc(e, &collect_defs(&f))),
                     format!("{src:?}"),
                     *is_volatile,
@@ -4553,7 +4551,9 @@ mod tests {
             dest: z.clone(),
             incoming: vec![(y_var("a"), taken.clone()), (y_var("b"), not_taken.clone())],
         }];
-        f.blocks.get_mut(&merged).unwrap().term = Terminator::Ret { val: Some(Operand::Var(z)) };
+        f.blocks.get_mut(&merged).unwrap().term = Terminator::Ret {
+            val: Some(Operand::Var(z)),
+        };
         assert!(jump_threading(&mut f), "常量分支应被折叠成无条件跳");
         // 折叠后 `entry → taken → merged` 又是一条空跳板链, 同轮里的链合并会再推一步:
         // 这里只要求「不再是 Branch」且「不得再走到 not_taken」。
@@ -4563,10 +4563,7 @@ mod tests {
         }
         // 不可达的 not_taken 被剔除; merged 的 phi 只剩一个入边 ⇒ 退化。
         assert!(!f.blocks.contains_key(&not_taken), "未走到的块应成为不可达而被剔除");
-        assert!(
-            f.blocks.get(&merged).unwrap().phis.is_empty(),
-            "只剩一个入边的 phi 必须退化"
-        );
+        assert!(f.blocks.get(&merged).unwrap().phis.is_empty(), "只剩一个入边的 phi 必须退化");
     }
 
     #[test]
@@ -4577,7 +4574,9 @@ mod tests {
         let end = f.add_block("end".into());
         f.blocks.get_mut("entry").unwrap().term = Terminator::Jump(mid.clone());
         f.blocks.get_mut(&mid).unwrap().term = Terminator::Jump(end.clone());
-        f.blocks.get_mut(&end).unwrap().term = Terminator::Ret { val: Some(Operand::Int(0)) };
+        f.blocks.get_mut(&end).unwrap().term = Terminator::Ret {
+            val: Some(Operand::Int(0)),
+        };
         assert!(jump_threading(&mut f), "空跳板块应被合并掉");
         assert!(
             matches!(&f.blocks.get("entry").unwrap().term, Terminator::Jump(t) if t == &end),
@@ -4630,8 +4629,9 @@ mod tests {
                 span: span.clone(),
             },
         ];
-        f.blocks.get_mut("entry").unwrap().term =
-            Terminator::Ret { val: Some(Operand::Var(s2)) };
+        f.blocks.get_mut("entry").unwrap().term = Terminator::Ret {
+            val: Some(Operand::Var(s2)),
+        };
         let def_names = |f: &Function| -> Vec<String> {
             f.blocks
                 .get("entry")
@@ -4660,10 +4660,7 @@ mod tests {
             dest: Some(g1),
             kind: InstKind::Bin {
                 op: BinOp::Add,
-                l: Operand::SymAddr(
-                    "add".into(),
-                    Type::Ptr(Box::new(QualType::new(Type::Int))),
-                ),
+                l: Operand::SymAddr("add".into(), Type::Ptr(Box::new(QualType::new(Type::Int)))),
                 r: Operand::Int(0),
             },
             span: span.clone(),
@@ -4690,12 +4687,10 @@ mod tests {
         sv(base, 1, Type::Int)
     }
 
-
     /// 断言一个块内不存在「使用早于定义」的序列 (调度类 pass 的通用不变式)。
     /// 参数名的定义在函数入口之前, 因此预先计入已定义集。
     fn assert_uses_follow_defs(f: &Function) {
-        let mut defined: HashSet<String> =
-            f.params.iter().map(|p| p.name()).collect();
+        let mut defined: HashSet<String> = f.params.iter().map(|p| p.name()).collect();
         let bb = f.blocks.get("entry").unwrap();
         for inst in &bb.insts {
             for u in operand_uses(&inst.kind) {
@@ -4729,7 +4724,9 @@ mod tests {
         let (m, _w) = crate::ir::lower(prog).unwrap();
         let mut checked = 0;
         for decl in m.source().decls.iter() {
-            let crate::ast::Decl::Func(f) = decl else { continue };
+            let crate::ast::Decl::Func(f) = decl else {
+                continue;
+            };
             let Some(ssa) = crate::ssa::build_from_func(f) else {
                 continue;
             };
@@ -4739,10 +4736,7 @@ mod tests {
                 .values()
                 .flat_map(|b| b.phis.iter().map(|p| p.dest.base.clone()))
                 .collect();
-            if matches!(
-                f.name.name.as_str(),
-                "wh" | "dw" | "nest" | "cont" | "brk" | "carry"
-            ) {
+            if matches!(f.name.name.as_str(), "wh" | "dw" | "nest" | "cont" | "brk" | "carry") {
                 assert!(
                     phi_bases.contains("s") || phi_bases.contains("i") || phi_bases.contains("n"),
                     "{}: 循环携带变量没有任何 phi ⇒ IR 不在 SSA 形式上",
@@ -4967,9 +4961,13 @@ mod tests {
                     for i in &b.insts {
                         if let InstKind::Call { callee, args, .. } = &i.kind {
                             match callee {
-                                Operand::SymAddr(n, _) if n == "g" => ld_arg = args.first().cloned(),
-                                Operand::SymAddr(n, _) if n == "h" => int_arg = args.first().cloned(),
-                                _ => {}
+                                Operand::SymAddr(n, _) if n == "g" => {
+                                    ld_arg = args.first().cloned()
+                                },
+                                Operand::SymAddr(n, _) if n == "h" => {
+                                    int_arg = args.first().cloned()
+                                },
+                                _ => {},
                             }
                         }
                     }

@@ -106,7 +106,8 @@ impl Codegen {
         self.diagnostics.push(Diagnostic {
             sev: Severity::Error,
             code: Self::DIAG_RESERVED_REG,
-            msg: "asm clobber 了 %rsp：栈指针是局部寻址、序言保存与内联 asm 守护的基座，守无可守".to_string(),
+            msg: "asm clobber 了 %rsp：栈指针是局部寻址、序言保存与内联 asm 守护的基座，守无可守"
+                .to_string(),
             span: Span::point(&file, line.max(1), 1),
             hint: Some(
                 "要改栈请在模板里自己 push/pop 平衡回去；GCC 同样不允许 clobber %rsp".to_string(),

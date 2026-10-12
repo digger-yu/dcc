@@ -177,7 +177,7 @@ pub(super) fn dangling_refs(func: &Function) -> Vec<String> {
             Terminator::Ret { val: Some(o) } => names.extend(collect_uses_operand(o)),
             Terminator::Branch { cond, .. } => names.extend(collect_uses_operand(cond)),
             Terminator::SwitchTable { idx, .. } => names.extend(collect_uses_operand(idx)),
-            _ => {}
+            _ => {},
         }
         for n in names {
             if !defined.contains(&n) {
@@ -233,14 +233,20 @@ pub(super) fn duplicate_ssa_defs(func: &Function) -> Vec<String> {
 pub(super) fn refresh_cfg(func: &mut Function) {
     let preds = collect_all_preds(func);
     for bb in func.blocks.values_mut() {
-        bb.succs = term_succs(&bb.term).into_iter().map(|s| s.to_string()).collect();
+        bb.succs = term_succs(&bb.term)
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
         bb.preds = preds.get(&bb.name).cloned().unwrap_or_default();
     }
 }
 
 /// 从终结符派生后继的共享入点 (与 `term_succs` 同一真源, 供 `ssa` 内的 pass 使用)。
 pub(super) fn term_succs_pub(term: &Terminator) -> Vec<String> {
-    term_succs(term).into_iter().map(|s| s.to_string()).collect()
+    term_succs(term)
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// Find the body blocks of a natural loop (header, latch).
@@ -263,7 +269,11 @@ pub(super) fn find_loop_body(func: &Function, header: &str, latch: &str) -> Vec<
 /// 反向 DFS: 只从单个 latch 出发会漏掉其它 latch 所在的分支区域, SSA→AST
 /// 重建时那部分会被误判为“循环外后继”而发成 `break` (continue 语义丢失,
 /// 循环提前终止)。
-pub(super) fn find_loop_body_multi(func: &Function, header: &str, latches: &[String]) -> Vec<String> {
+pub(super) fn find_loop_body_multi(
+    func: &Function,
+    header: &str,
+    latches: &[String],
+) -> Vec<String> {
     let mut body: HashSet<String> = HashSet::new();
     body.insert(header.to_string());
     // Reverse DFS from every latch, not going through header
@@ -315,7 +325,11 @@ pub(super) fn ordered_block_names(func: &Function) -> Vec<String> {
 }
 
 /// Check if a block is the target of a back edge (cycle entry).
-pub(super) fn is_cycle_entry(bb_name: &str, func: &Function, doms: &HashMap<String, HashSet<String>>) -> bool {
+pub(super) fn is_cycle_entry(
+    bb_name: &str,
+    func: &Function,
+    doms: &HashMap<String, HashSet<String>>,
+) -> bool {
     for (name, bb) in &func.blocks {
         if !is_back_edge(name, bb_name, doms) {
             continue;
@@ -431,7 +445,12 @@ pub(super) fn compute_ipdoms(func: &Function) -> HashMap<String, String> {
         }
     }
     post.reverse();
-    let num: HashMap<&str, usize> = post.iter().copied().enumerate().map(|(i, n)| (n, i)).collect();
+    let num: HashMap<&str, usize> = post
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(i, n)| (n, i))
+        .collect();
     // 4. 不动点迭代 (Cooper–Harvey–Kennedy)
     //
     // 注意两张表用途不同:**遍历序**用反向图的邻接 (`rev`, 即从出口能走到谁),
@@ -498,4 +517,3 @@ fn intersect_post_dom<'a>(
 pub(super) fn is_back_edge(from: &str, to: &str, doms: &HashMap<String, HashSet<String>>) -> bool {
     doms.get(from).map(|d| d.contains(to)).unwrap_or(false)
 }
-

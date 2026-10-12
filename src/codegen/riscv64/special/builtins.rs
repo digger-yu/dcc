@@ -80,7 +80,7 @@ impl Riscv64Codegen {
                 self.gen_expr(&args[0]); // a0 = envp
                                          // CSRRS a1, fcsr, x0 (读取 fcsr)
                 self.emit_insn(&crate::codegen::riscv64::insn::Insn::raw(0xC03025F3)); // CSRRS a1, fcsr, x0
-                                                         // SW a1, 0(a0) (存储到 [envp])
+                                                                                       // SW a1, 0(a0) (存储到 [envp])
                 self.emit_sw(11, 10, 0);
                 if name == "feholdexcept" {
                     // CSRW fcsr, x0 (清除所有标志)

@@ -101,12 +101,7 @@ impl ArmCodegen {
     }
 
     /// 兼容旧名: 无显式 key 的调用点 (naked / 单行)。
-    pub(crate) fn encode_and_emit_asm(
-        &mut self,
-        resolved: &str,
-        span_file: &str,
-        span_line: u32,
-    ) {
+    pub(crate) fn encode_and_emit_asm(&mut self, resolved: &str, span_file: &str, span_line: u32) {
         let key = format!("__inline_{}", self.label_serial);
         self.label_serial += 1;
         self.emit_asm_stmt(&key, resolved, span_file, span_line);
@@ -249,8 +244,8 @@ impl ArmCodegen {
         let bl_pos = self.code.len() as u64;
         self.start_call_pos = Some(bl_pos);
         self.emit_insn(&Insn::raw(0xEB000000)); // BL offset=0
-                                                                   // r0 already has main's return value
-                                                                   // mov r7, #1 (__NR_exit)
+                                                // r0 already has main's return value
+                                                // mov r7, #1 (__NR_exit)
         self.emit_mov_imm(7, 1);
         // svc #0
         let svc_inst: u32 = 0xEF000000; // SVC #0
@@ -392,7 +387,7 @@ impl ArmCodegen {
             Some(bytes) => {
                 self.code.extend_from_slice(&bytes);
                 true
-            }
+            },
             None => false,
         }
     }

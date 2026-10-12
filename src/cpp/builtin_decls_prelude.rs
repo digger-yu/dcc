@@ -64,8 +64,12 @@ pub const GNUC_VA_LIST_TYPE_NAME: &str = "__gnuc_va_list";
 /// `__builtin_va_start(ap, last)`, 而 C++ 没有隐式函数声明, 未声明即
 /// `undeclared identifier`。各 x86_64/aarch64/riscv64 后端都按**名字**拦截这些
 /// 调用并就地生成取参序列, 所以这里只需要声明出让 sema 的名字查找通过。
-pub const VA_BUILTIN_FUNCS: &[&str] =
-    &["__builtin_va_start", "__builtin_va_end", "__builtin_va_copy", "__builtin_va_arg"];
+pub const VA_BUILTIN_FUNCS: &[&str] = &[
+    "__builtin_va_start",
+    "__builtin_va_end",
+    "__builtin_va_copy",
+    "__builtin_va_arg",
+];
 
 /// GCC 内建函数的 (名字, 原型) 表 —— **单一真源**。
 ///
@@ -88,17 +92,47 @@ pub const BUILTIN_FUNC_DECLS: &[(&str, &str)] = &[
     ("__builtin_bswap32", "unsigned int __builtin_bswap32 (unsigned int);"),
     ("__builtin_bswap64", "unsigned long __builtin_bswap64 (unsigned long);"),
     ("__builtin_bitreverse8", "unsigned char __builtin_bitreverse8 (unsigned char);"),
-    ("__builtin_bitreverse16", "unsigned short __builtin_bitreverse16 (unsigned short);"),
+    (
+        "__builtin_bitreverse16",
+        "unsigned short __builtin_bitreverse16 (unsigned short);",
+    ),
     ("__builtin_bitreverse32", "unsigned int __builtin_bitreverse32 (unsigned int);"),
-    ("__builtin_bitreverse64", "unsigned long __builtin_bitreverse64 (unsigned long);"),
-    ("__builtin_rotateleft8", "unsigned char __builtin_rotateleft8 (unsigned char, unsigned char);"),
-    ("__builtin_rotateleft16", "unsigned short __builtin_rotateleft16 (unsigned short, unsigned short);"),
-    ("__builtin_rotateleft32", "unsigned int __builtin_rotateleft32 (unsigned int, unsigned int);"),
-    ("__builtin_rotateleft64", "unsigned long __builtin_rotateleft64 (unsigned long, unsigned long);"),
-    ("__builtin_rotateright8", "unsigned char __builtin_rotateright8 (unsigned char, unsigned char);"),
-    ("__builtin_rotateright16", "unsigned short __builtin_rotateright16 (unsigned short, unsigned short);"),
-    ("__builtin_rotateright32", "unsigned int __builtin_rotateright32 (unsigned int, unsigned int);"),
-    ("__builtin_rotateright64", "unsigned long __builtin_rotateright64 (unsigned long, unsigned long);"),
+    (
+        "__builtin_bitreverse64",
+        "unsigned long __builtin_bitreverse64 (unsigned long);",
+    ),
+    (
+        "__builtin_rotateleft8",
+        "unsigned char __builtin_rotateleft8 (unsigned char, unsigned char);",
+    ),
+    (
+        "__builtin_rotateleft16",
+        "unsigned short __builtin_rotateleft16 (unsigned short, unsigned short);",
+    ),
+    (
+        "__builtin_rotateleft32",
+        "unsigned int __builtin_rotateleft32 (unsigned int, unsigned int);",
+    ),
+    (
+        "__builtin_rotateleft64",
+        "unsigned long __builtin_rotateleft64 (unsigned long, unsigned long);",
+    ),
+    (
+        "__builtin_rotateright8",
+        "unsigned char __builtin_rotateright8 (unsigned char, unsigned char);",
+    ),
+    (
+        "__builtin_rotateright16",
+        "unsigned short __builtin_rotateright16 (unsigned short, unsigned short);",
+    ),
+    (
+        "__builtin_rotateright32",
+        "unsigned int __builtin_rotateright32 (unsigned int, unsigned int);",
+    ),
+    (
+        "__builtin_rotateright64",
+        "unsigned long __builtin_rotateright64 (unsigned long, unsigned long);",
+    ),
     // ===== 位计数 ([gcc] Other Builtins): 结果一律 int =====
     ("__builtin_clz", "int __builtin_clz (unsigned int);"),
     ("__builtin_clzl", "int __builtin_clzl (unsigned long);"),
@@ -119,13 +153,25 @@ pub const BUILTIN_FUNC_DECLS: &[(&str, &str)] = &[
     ("__builtin_clrsbl", "int __builtin_clrsbl (long);"),
     ("__builtin_clrsbll", "int __builtin_clrsbll (long long);"),
     // ===== 内存 / 字符串操作类内建 (后端自己发序列, 不进 libc) =====
-    ("__builtin_bcmp", "int __builtin_bcmp (const void *, const void *, unsigned long);"),
+    (
+        "__builtin_bcmp",
+        "int __builtin_bcmp (const void *, const void *, unsigned long);",
+    ),
     ("__builtin_bcopy", "void __builtin_bcopy (const void *, void *, unsigned long);"),
     ("__builtin_bzero", "void __builtin_bzero (void *, unsigned long);"),
-    ("__builtin_mempcpy", "void *__builtin_mempcpy (void *, const void *, unsigned long);"),
+    (
+        "__builtin_mempcpy",
+        "void *__builtin_mempcpy (void *, const void *, unsigned long);",
+    ),
     ("__builtin_stpcpy", "char *__builtin_stpcpy (char *, const char *);"),
-    ("__builtin_memcpy_inline", "int __builtin_memcpy_inline (void *, const void *, unsigned long);"),
-    ("__builtin_memset_inline", "int __builtin_memset_inline (void *, int, unsigned long);"),
+    (
+        "__builtin_memcpy_inline",
+        "int __builtin_memcpy_inline (void *, const void *, unsigned long);",
+    ),
+    (
+        "__builtin_memset_inline",
+        "int __builtin_memset_inline (void *, int, unsigned long);",
+    ),
     // ===== 控制流 / 优化提示 =====
     ("__builtin_expect", "long __builtin_expect (long, long);"),
     (
@@ -139,7 +185,10 @@ pub const BUILTIN_FUNC_DECLS: &[(&str, &str)] = &[
     ("__builtin_prefetch", "void __builtin_prefetch (const void *, ...);"),
     ("__builtin_constant_p", "int __builtin_constant_p (...);"),
     ("__builtin_object_size", "long __builtin_object_size (const void *, ...);"),
-    ("__builtin_dynamic_object_size", "long __builtin_dynamic_object_size (const void *, ...);"),
+    (
+        "__builtin_dynamic_object_size",
+        "long __builtin_dynamic_object_size (const void *, ...);",
+    ),
     ("__builtin_choose_expr", "long __builtin_choose_expr (...);"),
     ("__builtin_classify_type", "int __builtin_classify_type (...);"),
     ("__builtin_types_compatible_p", "int __builtin_types_compatible_p (...);"),
@@ -177,10 +226,16 @@ pub const BUILTIN_FUNC_DECLS: &[(&str, &str)] = &[
     ("__builtin_fmaxl", "long double __builtin_fmaxl (long double, long double);"),
     ("__builtin_copysign", "double __builtin_copysign (double, double);"),
     ("__builtin_copysignf", "float __builtin_copysignf (float, float);"),
-    ("__builtin_copysignl", "long double __builtin_copysignl (long double, long double);"),
+    (
+        "__builtin_copysignl",
+        "long double __builtin_copysignl (long double, long double);",
+    ),
     ("__builtin_fma", "double __builtin_fma (double, double, double);"),
     ("__builtin_fmaf", "float __builtin_fmaf (float, float, float);"),
-    ("__builtin_fmal", "long double __builtin_fmal (long double, long double, long double);"),
+    (
+        "__builtin_fmal",
+        "long double __builtin_fmal (long double, long double, long double);",
+    ),
     ("__builtin_signbit", "int __builtin_signbit (double);"),
     ("__builtin_signbitf", "int __builtin_signbitf (float);"),
     ("__builtin_signbitl", "int __builtin_signbitl (long double);"),
@@ -272,7 +327,12 @@ mod tests {
         let c_side = include_str!("../parser.rs");
         // C 侧定义的结构体名与四个字段
         assert!(c_side.contains(VA_LIST_STRUCT_NAME), "C 前端已不再使用 {VA_LIST_STRUCT_NAME}");
-        for field in ["gp_offset", "fp_offset", "overflow_arg_area", "reg_save_area"] {
+        for field in [
+            "gp_offset",
+            "fp_offset",
+            "overflow_arg_area",
+            "reg_save_area",
+        ] {
             assert!(prelude_source().contains(field), "前导缺少字段 {field}");
             assert!(c_side.contains(field), "C 前端缺少字段 {field}");
         }
@@ -344,7 +404,9 @@ fn dump_prelude() {
     let mut p = crate::cpp::parser::CppParser::new(src.as_bytes(), "<p>");
     let ds = p.parse_top_level().unwrap();
     for d in &ds {
-        if let crate::cpp::parser::CppDecl::Opaque(t) = d { println!("OPAQUE: {t}"); }
+        if let crate::cpp::parser::CppDecl::Opaque(t) = d {
+            println!("OPAQUE: {t}");
+        }
     }
     println!("total decls = {}", ds.len());
     for d in &ds {

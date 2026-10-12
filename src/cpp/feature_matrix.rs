@@ -202,8 +202,8 @@ impl CppFeature {
             Self::StaticInitGuard => "static init guard",
             Self::Coroutine => "coroutine",
             Self::Concept => "concept",
-        Self::Module => "module",
-        Self::DependentTemplateArg => "dependent template arg",
+            Self::Module => "module",
+            Self::DependentTemplateArg => "dependent template arg",
         }
     }
 

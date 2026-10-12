@@ -612,7 +612,16 @@ impl Codegen {
             let rex = if *d >= 8 { 0x4C } else { 0x48 };
             let modrm = 0x05 | ((d & 7) << 3);
             if bits == 8 {
-                self.emit_insn(&Insn::raw(&[Self::rex(false, *d, 0, 0), 0x0F, 0xB6, modrm, 0, 0, 0, 0]));
+                self.emit_insn(&Insn::raw(&[
+                    Self::rex(false, *d, 0, 0),
+                    0x0F,
+                    0xB6,
+                    modrm,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]));
             } else if bits == 16 {
                 self.emit_insn(&Insn::raw(&[
                     0x66,
@@ -642,7 +651,16 @@ impl Codegen {
             if bits == 8 {
                 self.emit_insn(&Insn::raw(&[Self::rex(false, *s, 0, 0), 0x88, modrm, 0, 0, 0, 0]));
             } else if bits == 16 {
-                self.emit_insn(&Insn::raw(&[0x66, Self::rex(false, *s, 0, 0), 0x89, modrm, 0, 0, 0, 0]));
+                self.emit_insn(&Insn::raw(&[
+                    0x66,
+                    Self::rex(false, *s, 0, 0),
+                    0x89,
+                    modrm,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]));
             } else if bits == 32 {
                 self.emit_insn(&Insn::raw(&[Self::rex(false, *s, 0, 0), 0x89, modrm, 0, 0, 0, 0]));
             } else {
@@ -760,7 +778,12 @@ impl Codegen {
                 let need_rex = *base >= 8 || index.map_or(false, |i| i >= 8);
                 if bits == 8 {
                     if need_rex {
-                        self.emit_insn(&Insn::raw(&[Self::rex(false, 0, index.unwrap_or(0), *base)]));
+                        self.emit_insn(&Insn::raw(&[Self::rex(
+                            false,
+                            0,
+                            index.unwrap_or(0),
+                            *base,
+                        )]));
                     }
                     self.emit_asm_modrm_mem(0xC6, 0, *disp, *base, *index, *scale, false);
                     self.emit_insn(&Insn::raw(&[*v as u8]));
@@ -770,7 +793,12 @@ impl Codegen {
                         self.emit_insn(&Insn::raw(&[0x66]));
                     }
                     if bits == 64 || need_rex {
-                        self.emit_insn(&Insn::raw(&[Self::rex(bits == 64, 0, index.unwrap_or(0), *base)]));
+                        self.emit_insn(&Insn::raw(&[Self::rex(
+                            bits == 64,
+                            0,
+                            index.unwrap_or(0),
+                            *base,
+                        )]));
                     }
                     self.emit_asm_modrm_mem(0xC7, 0, *disp, *base, *index, *scale, false);
                     self.emit_insn(&Insn::raw(&(*v as i32).to_le_bytes()));
@@ -807,7 +835,12 @@ impl Codegen {
                 } else {
                     // 32-bit 立即数
                     if bits != 16 && bits != 8 {
-                        self.emit_insn(&Insn::raw(&[Self::rex(false, 0, index.unwrap_or(0), *base)]));
+                        self.emit_insn(&Insn::raw(&[Self::rex(
+                            false,
+                            0,
+                            index.unwrap_or(0),
+                            *base,
+                        )]));
                     }
                     self.emit_asm_modrm_mem(0xC7, 0, *disp, *base, *index, *scale, false);
                     self.emit_insn(&Insn::raw(&(*v as i32).to_le_bytes()));
@@ -832,7 +865,11 @@ impl Codegen {
             let (_code, pfx) = Self::seg_meta(*seg);
             self.emit_insn(&Insn::raw(&[pfx]));
             if let AsmOperand::Reg(s, _) = src {
-                self.emit_insn(&Insn::raw(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, opcode]));
+                self.emit_insn(&Insn::raw(&[
+                    Self::rex(w, *s, index.unwrap_or(0), *base),
+                    0x0F,
+                    opcode,
+                ]));
                 self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
             }
             return;
@@ -842,11 +879,36 @@ impl Codegen {
                 let rex = if *s >= 8 { 0x4C } else { 0x48 };
                 let modrm = 0x05 | ((s & 7) << 3);
                 if bits == 8 {
-                    self.emit_insn(&Insn::raw(&[Self::rex(false, *s, 0, 0), 0x88, modrm, 0, 0, 0, 0]));
+                    self.emit_insn(&Insn::raw(&[
+                        Self::rex(false, *s, 0, 0),
+                        0x88,
+                        modrm,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ]));
                 } else if bits == 16 {
-                    self.emit_insn(&Insn::raw(&[0x66, Self::rex(false, *s, 0, 0), 0x89, modrm, 0, 0, 0, 0]));
+                    self.emit_insn(&Insn::raw(&[
+                        0x66,
+                        Self::rex(false, *s, 0, 0),
+                        0x89,
+                        modrm,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ]));
                 } else if bits == 32 {
-                    self.emit_insn(&Insn::raw(&[Self::rex(false, *s, 0, 0), 0x89, modrm, 0, 0, 0, 0]));
+                    self.emit_insn(&Insn::raw(&[
+                        Self::rex(false, *s, 0, 0),
+                        0x89,
+                        modrm,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ]));
                 } else {
                     self.emit_insn(&Insn::raw(&[rex, 0x89, modrm, 0, 0, 0, 0]));
                 }
@@ -868,7 +930,11 @@ impl Codegen {
             if bits == 16 {
                 self.emit_insn(&Insn::raw(&[0x66]));
             }
-            self.emit_insn(&Insn::raw(&[Self::rex(w, *s, index.unwrap_or(0), *base), 0x0F, opcode]));
+            self.emit_insn(&Insn::raw(&[
+                Self::rex(w, *s, index.unwrap_or(0), *base),
+                0x0F,
+                opcode,
+            ]));
             self.emit_asm_modrm_mem_only(*s, *disp, *base, *index, *scale);
         } else {
             self.asm_reject("unsupported movnt operand pattern");
@@ -915,13 +981,13 @@ impl Codegen {
                 match src_bits {
                     8 => {
                         self.emit_insn(&Insn::raw(&[0x0F, 0xBE, Self::modrm_reg_reg(*d, *s)]));
-                    }
+                    },
                     16 => {
                         self.emit_insn(&Insn::raw(&[0x0F, 0xBF, Self::modrm_reg_reg(*d, *s)]));
-                    }
+                    },
                     32 => {
                         self.emit_insn(&Insn::raw(&[0x63, Self::modrm_reg_reg(*d, *s)]));
-                    }
+                    },
                     _ => {
                         self.asm_reject("unsupported movsx source size");
                     },
@@ -1052,10 +1118,10 @@ impl Codegen {
                 match src_bits {
                     8 => {
                         self.emit_insn(&Insn::raw(&[0x0F, 0xB6, Self::modrm_reg_reg(*d, *s)]));
-                    }
+                    },
                     16 => {
                         self.emit_insn(&Insn::raw(&[0x0F, 0xB7, Self::modrm_reg_reg(*d, *s)]));
-                    }
+                    },
                     _ => {
                         self.asm_reject("unsupported movzx source size");
                     },
@@ -1114,19 +1180,19 @@ impl Codegen {
                 match *seg {
                     0 => {
                         self.emit_insn(&Insn::raw(&[0x07]));
-                    } // pop %es
+                    }, // pop %es
                     2 => {
                         self.emit_insn(&Insn::raw(&[0x17]));
-                    } // pop %ss
+                    }, // pop %ss
                     3 => {
                         self.emit_insn(&Insn::raw(&[0x1F]));
-                    } // pop %ds
+                    }, // pop %ds
                     4 => {
                         self.emit_insn(&Insn::raw(&[0x0F, 0xA1]));
-                    } // pop %fs
+                    }, // pop %fs
                     5 => {
                         self.emit_insn(&Insn::raw(&[0x0F, 0xA9]));
-                    } // pop %gs
+                    }, // pop %gs
                     _ => {
                         self.asm_reject(&format!("pop: unknown segment {}", seg));
                     },
@@ -1149,7 +1215,11 @@ impl Codegen {
                 scale,
             } => {
                 let (_code, pfx) = Self::seg_meta(*seg);
-                self.emit_insn(&Insn::raw(&[pfx, Self::rex(false, 0, index.unwrap_or(0), *base), 0x8F]));
+                self.emit_insn(&Insn::raw(&[
+                    pfx,
+                    Self::rex(false, 0, index.unwrap_or(0), *base),
+                    0x8F,
+                ]));
                 self.emit_asm_modrm_mem_only(0, *disp, *base, *index, *scale);
             },
             _ => {
@@ -1171,22 +1241,22 @@ impl Codegen {
                 match *seg {
                     0 => {
                         self.emit_insn(&Insn::raw(&[0x06]));
-                    } // push %es
+                    }, // push %es
                     1 => {
                         self.emit_insn(&Insn::raw(&[0x0E]));
-                    } // push %cs
+                    }, // push %cs
                     2 => {
                         self.emit_insn(&Insn::raw(&[0x16]));
-                    } // push %ss
+                    }, // push %ss
                     3 => {
                         self.emit_insn(&Insn::raw(&[0x1E]));
-                    } // push %ds
+                    }, // push %ds
                     4 => {
                         self.emit_insn(&Insn::raw(&[0x0F, 0xA0]));
-                    } // push %fs
+                    }, // push %fs
                     5 => {
                         self.emit_insn(&Insn::raw(&[0x0F, 0xA8]));
-                    } // push %gs
+                    }, // push %gs
                     _ => {
                         self.asm_reject(&format!("push: unknown segment {}", seg));
                     },
@@ -1236,7 +1306,11 @@ impl Codegen {
                 scale,
             } => {
                 let (_code, pfx) = Self::seg_meta(*seg);
-                self.emit_insn(&Insn::raw(&[pfx, Self::rex(false, 0, index.unwrap_or(0), *base), 0xFF]));
+                self.emit_insn(&Insn::raw(&[
+                    pfx,
+                    Self::rex(false, 0, index.unwrap_or(0), *base),
+                    0xFF,
+                ]));
                 self.emit_asm_modrm_mem_only(6, *disp, *base, *index, *scale);
             },
             AsmOperand::SymDisp(sym, _) => {
@@ -1342,7 +1416,11 @@ impl Codegen {
             scale,
         } = op
         {
-            self.emit_insn(&Insn::raw(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0x01]));
+            self.emit_insn(&Insn::raw(&[
+                Self::rex(false, 0, index.unwrap_or(0), *base),
+                0x0F,
+                0x01,
+            ]));
             self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
         } else if let AsmOperand::SegMem {
             seg,

@@ -871,7 +871,11 @@ impl<'a> Dec<'a> {
                 let width = if op == 0xB0 {
                     1
                 } else {
-                    if rex.w { 8 } else { 4 }
+                    if rex.w {
+                        8
+                    } else {
+                        4
+                    }
                 };
                 let (reg_field, rm_field) = self.modrm_gp(&rex, width)?;
                 let ops = Self::two_byte_att_operands(
@@ -896,8 +900,7 @@ impl<'a> Dec<'a> {
             0xC1 => {
                 let rex = self.parse_rex();
                 // xadd r/m, reg：reg 字段是源
-                let (reg_field, rm_field) =
-                    self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
+                let (reg_field, rm_field) = self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
                 let ops = Self::two_byte_att_operands(
                     &reg_field,
                     &rm_field,
@@ -954,8 +957,7 @@ impl<'a> Dec<'a> {
             0xAF => {
                 let rex = self.parse_rex();
                 // imul r, r/m：reg 字段是目的
-                let (reg_field, rm_field) =
-                    self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
+                let (reg_field, rm_field) = self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
                 let ops = Self::two_byte_att_operands(
                     &reg_field,
                     &rm_field,
@@ -967,8 +969,7 @@ impl<'a> Dec<'a> {
             // dcc 在 __builtin_ctz/clz 路径上会发。宽度由 REX.W 定。
             0xBC | 0xBD => {
                 let rex = self.parse_rex();
-                let (reg_field, rm_field) =
-                    self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
+                let (reg_field, rm_field) = self.modrm_gp(&rex, if rex.w { 8 } else { 4 })?;
                 let ops = Self::two_byte_att_operands(
                     &reg_field,
                     &rm_field,
@@ -1718,8 +1719,7 @@ impl<'a> Dec<'a> {
             // `48 0f bd c0`（bsrq %eax,%eax）仍报 UNKNOWN。两路径同表同一实现，
             // 不再按字节序列特判。
             0xBC | 0xBD => {
-                let (reg_field, rm_field) =
-                    self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
+                let (reg_field, rm_field) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
                 let ops = Self::two_byte_att_operands(
                     &reg_field,
                     &rm_field,
@@ -1750,7 +1750,11 @@ impl<'a> Dec<'a> {
                 let width = if op == 0xB0 {
                     1
                 } else {
-                    if rex.w { 8 } else { 4 }
+                    if rex.w {
+                        8
+                    } else {
+                        4
+                    }
                 };
                 let (reg_field, rm_field) = self.modrm_gp(rex, width)?;
                 let ops = Self::two_byte_att_operands(
@@ -1761,8 +1765,7 @@ impl<'a> Dec<'a> {
                 Some(self.finish(start, pfx, &format!("cmpxchg {ops}")))
             },
             0xC1 => {
-                let (reg_field, rm_field) =
-                    self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
+                let (reg_field, rm_field) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
                 let ops = Self::two_byte_att_operands(
                     &reg_field,
                     &rm_field,
@@ -1792,8 +1795,7 @@ impl<'a> Dec<'a> {
             },
             // imul r, r/m (48 0F AF)：reg 字段是目的
             0xAF => {
-                let (reg_field, rm_field) =
-                    self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
+                let (reg_field, rm_field) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
                 let ops = Self::two_byte_att_operands(
                     &reg_field,
                     &rm_field,
@@ -1815,8 +1817,7 @@ impl<'a> Dec<'a> {
             // cmovcc r, r/m (REX)：reg 字段是目的
             0x40..=0x4F => {
                 let cc = CC_NAMES[(op - 0x40) as usize];
-                let (reg_field, rm_field) =
-                    self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
+                let (reg_field, rm_field) = self.modrm_gp(rex, if rex.w { 8 } else { 4 })?;
                 let ops = Self::two_byte_att_operands(
                     &reg_field,
                     &rm_field,
@@ -2992,4 +2993,3 @@ fn consume_modrm_and_optional_parts(code: &[u8], pos: usize) -> usize {
 
     len.min(code.len() - pos)
 }
-

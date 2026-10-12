@@ -7,8 +7,8 @@ use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
 use crate::codegen::x86_64::asm::*;
-use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::*;
 use crate::const_eval::{self, ConstValue};
 use crate::debug::*;
@@ -74,7 +74,11 @@ impl Codegen {
                 index,
                 scale,
             } => {
-                self.emit_insn(&Insn::raw(&[Self::rex(false, 0, index.unwrap_or(0), *base), 0x0F, 0x00]));
+                self.emit_insn(&Insn::raw(&[
+                    Self::rex(false, 0, index.unwrap_or(0), *base),
+                    0x0F,
+                    0x00,
+                ]));
                 self.emit_asm_modrm_mem_only(ext, *disp, *base, *index, *scale);
             },
             _ => {

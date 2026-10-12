@@ -209,9 +209,9 @@ impl LayoutMap {
             .saturating_add(p.tramp_reserve)
             .saturating_add(p.stack_reserve);
         let frame_size = (raw.saturating_add(15)) & !15; // 16 字节对齐
-        // 变量区底下就是晚分配带，sret/物化区再排到带底下。今天之前 sret 顶是
-        // 「变量区（已含晚分配预扣）的底」，数值与本式相同（预算全部吃满时），
-        // 区别在于晚分配现在只能在自己带里动，不得再压低本锚点。
+                                                         // 变量区底下就是晚分配带，sret/物化区再排到带底下。今天之前 sret 顶是
+                                                         // 「变量区（已含晚分配预扣）的底」，数值与本式相同（预算全部吃满时），
+                                                         // 区别在于晚分配现在只能在自己带里动，不得再压低本锚点。
         let late_band_top = -(hdr.saturating_add(p.var_bytes));
         let sret_region_base = late_band_top.saturating_sub(late_band_bytes);
         Self {
@@ -229,11 +229,7 @@ impl LayoutMap {
             late_band_bytes,
             frame_size,
             sret_region_base,
-            vec_temp_off: -frame_size
-                + CX_FRAME_BAND
-                + p.va_slots
-                + p.static_chain_slot
-                + 8,
+            vec_temp_off: -frame_size + CX_FRAME_BAND + p.va_slots + p.static_chain_slot + 8,
             variadic_reg_save_off: -frame_size + CX_FRAME_BAND,
             static_chain_off: -frame_size + CX_FRAME_BAND + p.va_slots,
             rvalue_off: -frame_size + 8,
@@ -404,7 +400,8 @@ mod tests {
         assert_eq!(l.vec_temp_off, -frame_size + CX_FRAME_BAND + 176 + 8 + 8);
         assert_eq!(l.variadic_reg_save_off, -frame_size + CX_FRAME_BAND);
         assert_eq!(
-            l.sret_ptr_off, -frame_size + CX_FRAME_BAND + 176 + 8,
+            l.sret_ptr_off,
+            -frame_size + CX_FRAME_BAND + 176 + 8,
             "搬迁前 `functions.rs:822` 的 sret 指针槽"
         );
         assert_eq!(l.rvalue_off, -frame_size + 8);

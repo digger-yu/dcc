@@ -75,13 +75,21 @@ pub struct Resources {
 
 impl Default for Resources {
     fn default() -> Self {
-        Resources { alu: 2, flo: 1, load: 1, store: 1, heavy: 1 }
+        Resources {
+            alu: 2,
+            flo: 1,
+            load: 1,
+            store: 1,
+            heavy: 1,
+        }
     }
 }
 
 fn res_of(k: &InstKind) -> ResKind {
     match k {
-        InstKind::Call { .. } | InstKind::Invoke { .. } | InstKind::InlineAsm { .. } => ResKind::Heavy,
+        InstKind::Call { .. } | InstKind::Invoke { .. } | InstKind::InlineAsm { .. } => {
+            ResKind::Heavy
+        },
         InstKind::Store { .. } | InstKind::IndexStore { .. } | InstKind::MemberStore { .. } => {
             ResKind::Store
         },
@@ -176,7 +184,9 @@ fn kind_uses(k: &InstKind) -> Vec<SsaVar> {
                 push(i, &mut v);
             }
         },
-        InstKind::AddrOf { .. } | InstKind::PreservedDecl { .. } | InstKind::EhLandingPad { .. } => {},
+        InstKind::AddrOf { .. }
+        | InstKind::PreservedDecl { .. }
+        | InstKind::EhLandingPad { .. } => {},
     }
     v
 }
@@ -301,7 +311,12 @@ pub fn build_dep_graph(
         }
         // 去重键含方向：否则会误丢反向边。
         if seen.insert((from, to, distance)) {
-            edges.push(Edge { from, to, distance, latency });
+            edges.push(Edge {
+                from,
+                to,
+                distance,
+                latency,
+            });
         }
     };
 
@@ -327,7 +342,9 @@ pub fn build_dep_graph(
                     read_bases(from).iter().any(|x| x == b)
                         || written_base(from).as_deref() == Some(b.as_str())
                 },
-                None => my_reads.iter().any(|b| written_base(from).as_deref() == Some(b.as_str())),
+                None => my_reads
+                    .iter()
+                    .any(|b| written_base(from).as_deref() == Some(b.as_str())),
             };
             if need {
                 let (a, c) = if from < to { (from, to) } else { (to, from) };
@@ -495,14 +512,16 @@ pub fn modulo_schedule(g: &DepGraph, ii: usize, r: &Resources) -> Option<Vec<usi
         return Some(Vec::new());
     }
     let ii = ii.max(1);
-    let cap_of = |k: ResKind| match k {
-        ResKind::Alu => r.alu,
-        ResKind::Flo => r.flo,
-        ResKind::Load => r.load,
-        ResKind::Store => r.store,
-        ResKind::Heavy => r.heavy,
-    }
-    .max(1);
+    let cap_of = |k: ResKind| {
+        match k {
+            ResKind::Alu => r.alu,
+            ResKind::Flo => r.flo,
+            ResKind::Load => r.load,
+            ResKind::Store => r.store,
+            ResKind::Heavy => r.heavy,
+        }
+        .max(1)
+    };
 
     let mut floor = vec![0usize; n];
     for _ in 0..(2 * n + 8) {
@@ -543,7 +562,12 @@ mod tests {
         Span::point("", 0, 0)
     }
     fn v(base: &str, version: u32) -> SsaVar {
-        SsaVar { base: base.to_string(), version, ty: Type::Int, span: sp() }
+        SsaVar {
+            base: base.to_string(),
+            version,
+            ty: Type::Int,
+            span: sp(),
+        }
     }
     fn vr(base: &str, version: u32) -> Operand {
         Operand::Var(v(base, version))
@@ -552,16 +576,34 @@ mod tests {
         Operand::Int(i as i128)
     }
     fn inst(dest: Option<SsaVar>, kind: InstKind) -> Inst {
-        Inst { dest, kind, span: sp() }
+        Inst {
+            dest,
+            kind,
+            span: sp(),
+        }
     }
     fn bin(dest: SsaVar, l: Operand, op: BinOp, r: Operand) -> Inst {
         inst(Some(dest), InstKind::Bin { op, l, r })
     }
     fn ld(dest: SsaVar, e: Operand) -> Inst {
-        inst(Some(dest), InstKind::Load { e, ty: Type::Int, is_volatile: false })
+        inst(
+            Some(dest),
+            InstKind::Load {
+                e,
+                ty: Type::Int,
+                is_volatile: false,
+            },
+        )
     }
     fn st(e: Operand, src: Operand) -> Inst {
-        inst(None, InstKind::Store { e, src, is_volatile: false })
+        inst(
+            None,
+            InstKind::Store {
+                e,
+                src,
+                is_volatile: false,
+            },
+        )
     }
     fn bb(name: &str, phis: Vec<Phi>) -> BasicBlock {
         BasicBlock {
@@ -574,7 +616,10 @@ mod tests {
         }
     }
     fn phi(base: &str, version: u32) -> Phi {
-        Phi { dest: v(base, version), incoming: vec![(v(base, version - 1), "bb_0".to_string())] }
+        Phi {
+            dest: v(base, version),
+            incoming: vec![(v(base, version - 1), "bb_0".to_string())],
+        }
     }
 
     /// bb_0 = 循环头（承载 phi），bb_1 = 体（调度区所在）。
@@ -600,8 +645,10 @@ mod tests {
     #[test]
     fn no_carried_dependency_gives_ii_1() {
         let f = func(&["a"]);
-        let nodes =
-            vec![bin(v("t", 1), vr("a", 1), BinOp::Add, ic(1)), bin(v("u", 1), vr("t", 1), BinOp::Add, ic(1))];
+        let nodes = vec![
+            bin(v("t", 1), vr("a", 1), BinOp::Add, ic(1)),
+            bin(v("u", 1), vr("t", 1), BinOp::Add, ic(1)),
+        ];
         let g = graph(&f, &nodes, &[]);
         assert!(g.edges.iter().all(|e| e.distance == 0), "无携带依赖");
         assert_eq!(rec_mii(&g), 1);
@@ -618,8 +665,12 @@ mod tests {
             bin(v("s", 3), vr("s", 2), BinOp::Add, ic(1)),
         ];
         let g = graph(&f, &nodes, &[("i.2", 0), ("s.2", 1)]);
-        let carried: Vec<(usize, usize, u32)> =
-            g.edges.iter().filter(|e| e.distance > 0).map(|e| (e.from, e.to, e.distance)).collect();
+        let carried: Vec<(usize, usize, u32)> = g
+            .edges
+            .iter()
+            .filter(|e| e.distance > 0)
+            .map(|e| (e.from, e.to, e.distance))
+            .collect();
         assert_eq!(carried.len(), 2, "两条携带依赖：{carried:?}");
         assert!(carried.iter().all(|&(from, to, _)| from == to), "递归应是自环：{carried:?}");
         assert_eq!(rec_mii(&g), 1, "latency=1 的递归 ⇒ RecMII=1");
@@ -642,7 +693,10 @@ mod tests {
         ];
         let g = graph(&f, &nodes, &[("s.2", 3)]);
         assert_eq!(rec_mii(&g), 4, "环 s_2→p→q→r→s_3→回卷：延迟 4 ÷ 距离 1");
-        let r = Resources { alu: 4, ..Default::default() };
+        let r = Resources {
+            alu: 4,
+            ..Default::default()
+        };
         assert!(modulo_schedule(&g, 1, &r).is_none(), "II=1 无法满足 4 周期递归环");
         let s = modulo_schedule(&g, 4, &r).expect("II=4 应可行");
         assert!(edges_satisfied(&g, 4, &s));
@@ -651,10 +705,34 @@ mod tests {
     #[test]
     fn res_mii_counts_load_slots() {
         let f = func(&["a"]);
-        let nodes = vec![ld(v("x", 1), vr("a", 1)), ld(v("y", 1), vr("a", 2)), ld(v("z", 1), vr("a", 3))];
+        let nodes = vec![
+            ld(v("x", 1), vr("a", 1)),
+            ld(v("y", 1), vr("a", 2)),
+            ld(v("z", 1), vr("a", 3)),
+        ];
         let g = graph(&f, &nodes, &[]);
-        assert_eq!(res_mii(&g, &Resources { load: 1, ..Default::default() }), 3, "3 次 load ÷ 1 槽");
-        assert_eq!(res_mii(&g, &Resources { load: 2, ..Default::default() }), 2, "2 槽时向上取整");
+        assert_eq!(
+            res_mii(
+                &g,
+                &Resources {
+                    load: 1,
+                    ..Default::default()
+                }
+            ),
+            3,
+            "3 次 load ÷ 1 槽"
+        );
+        assert_eq!(
+            res_mii(
+                &g,
+                &Resources {
+                    load: 2,
+                    ..Default::default()
+                }
+            ),
+            2,
+            "2 槽时向上取整"
+        );
     }
 
     /// 基名塌缩序是正确性问题：重建 AST 把各版本还原成同一个名字，因此同一
@@ -671,7 +749,10 @@ mod tests {
         let s = modulo_schedule(&g, 2, &Resources::default()).expect("II=2 可容纳");
         assert!(edges_satisfied(&g, 2, &s), "调度不得颠倒塌缩序");
 
-        let nodes2 = vec![bin(v("t", 1), vr("x", 1), BinOp::Add, ic(1)), ld(v("y", 1), vr("t", 1))];
+        let nodes2 = vec![
+            bin(v("t", 1), vr("x", 1), BinOp::Add, ic(1)),
+            ld(v("y", 1), vr("t", 1)),
+        ];
         let g2 = graph(&f, &nodes2, &[]);
         assert!(g2.succs(0).any(|e| e.to == 1), "定义 t 必须先于把 t 当地址的装载");
     }
@@ -679,7 +760,11 @@ mod tests {
     #[test]
     fn memory_ops_serialize() {
         let f = func(&["a", "t"]);
-        let nodes = vec![st(vr("a", 1), ic(0)), ld(v("t", 1), vr("a", 2)), st(vr("a", 1), vr("t", 1))];
+        let nodes = vec![
+            st(vr("a", 1), ic(0)),
+            ld(v("t", 1), vr("a", 2)),
+            st(vr("a", 1), vr("t", 1)),
+        ];
         let g = graph(&f, &nodes, &[]);
         for (from, to) in [(0usize, 1usize), (1, 2), (0, 2)] {
             assert!(g.succs(from).any(|e| e.to == to), "内存操作 {from}→{to} 必须定序");
@@ -693,7 +778,10 @@ mod tests {
         let mut f = func(&["x"]);
         f.blocks.get_mut("bb_0").unwrap().phis = vec![phi("x", 1)];
         // 0: t = load x_1（lat 2）  1: x_2 = t + 1；x_1 由节点 1 的上一次迭代提供。
-        let nodes = vec![ld(v("t", 1), vr("x", 1)), bin(v("x", 2), vr("t", 1), BinOp::Add, ic(1))];
+        let nodes = vec![
+            ld(v("t", 1), vr("x", 1)),
+            bin(v("x", 2), vr("t", 1), BinOp::Add, ic(1)),
+        ];
         let g = graph(&f, &nodes, &[("x.1", 1)]);
         assert_eq!(rec_mii(&g), 3, "环 0→1→0：延迟 2+1 ÷ 距离 1");
         let r = Resources::default();
@@ -773,13 +861,22 @@ fn as_var(o: &Operand) -> Option<SsaVar> {
 }
 
 fn as_int(o: &Operand) -> Option<i64> {
-    if let Operand::Int(i) = o { Some(*i as i64) } else { None }
+    if let Operand::Int(i) = o {
+        Some(*i as i64)
+    } else {
+        None
+    }
 }
 
 /// `x = v + 0` / `x = 0 + v` 是构建器的**拷贝惯用法**（用它物化一个值），
 /// 绝不允许被当成步长 —— 把它计成一步会让真正的 `+1` 冲突、整条递推被误拒。
 fn copy_source(k: &InstKind) -> Option<SsaVar> {
-    if let InstKind::Bin { op: BinOp::Add, l, r } = k {
+    if let InstKind::Bin {
+        op: BinOp::Add,
+        l,
+        r,
+    } = k
+    {
         if let (Some(v), Some(0)) = (as_var(l), as_int(r)) {
             return Some(v);
         }
@@ -816,7 +913,12 @@ fn stepped_source(k: &InstKind) -> Option<(SsaVar, i64)> {
 
 /// 从 phi 的 latch 侧值出发沿拷贝链回溯，要求恰好遇到**一次**真实步进、
 /// 且链最终回到归纳变量自身。返回步长。
-fn iv_step(nodes: &[Inst], def_of: &HashMap<String, usize>, start: &SsaVar, iv: &SsaVar) -> Option<i64> {
+fn iv_step(
+    nodes: &[Inst],
+    def_of: &HashMap<String, usize>,
+    start: &SsaVar,
+    iv: &SsaVar,
+) -> Option<i64> {
     let mut cur = start.clone();
     let mut step: Option<i64> = None;
     for _ in 0..8 {
@@ -849,13 +951,20 @@ fn const_def_outside(func: &Function, region: &[String], base: &str) -> Option<i
         if region.contains(&name) {
             continue;
         }
-        let Some(bb) = func.blocks.get(&name) else { continue };
+        let Some(bb) = func.blocks.get(&name) else {
+            continue;
+        };
         for inst in &bb.insts {
             let Some(d) = &inst.dest else { continue };
             if d.base != base {
                 continue;
             }
-            if let InstKind::Bin { op: BinOp::Add, l, r } = &inst.kind {
+            if let InstKind::Bin {
+                op: BinOp::Add,
+                l,
+                r,
+            } = &inst.kind
+            {
                 if let (Some(a), Some(b)) = (as_int(l), as_int(r)) {
                     if found.is_some() {
                         return None; // 多处常量定义 ⇒ 进循环时的值不确定
@@ -932,7 +1041,9 @@ fn is_nested_in_other_loop(
         if name == header {
             continue;
         }
-        let Some(bb) = func.blocks.get(&name) else { continue };
+        let Some(bb) = func.blocks.get(&name) else {
+            continue;
+        };
         if bb.phis.is_empty() {
             continue;
         }
@@ -942,7 +1053,10 @@ fn is_nested_in_other_loop(
             .collect();
         latches.dedup();
         for lt in latches {
-            if crate::ssa::find_loop_body(func, &name, &lt).iter().any(|b| b == header) {
+            if crate::ssa::find_loop_body(func, &name, &lt)
+                .iter()
+                .any(|b| b == header)
+            {
                 return true;
             }
         }
@@ -968,8 +1082,10 @@ pub fn classify_loop(func: &Function, header: &str) -> Result<PipelinedLoop, &'s
     }
 
     // latch = 被头支配的前驱，必须唯一。
-    let mut latches: Vec<String> =
-        pred_names(func, header).into_iter().filter(|p| dominates(&doms, header, p)).collect();
+    let mut latches: Vec<String> = pred_names(func, header)
+        .into_iter()
+        .filter(|p| dominates(&doms, header, p))
+        .collect();
     latches.dedup();
     if latches.is_empty() {
         return Err("没有回边");
@@ -982,8 +1098,9 @@ pub fn classify_loop(func: &Function, header: &str) -> Result<PipelinedLoop, &'s
     // 环内成员用**自然循环体**集合，不用支配关系：循环出口同样受头支配（实测
     // `while.end` 的支配集含 `while.cond`），拿支配当环内判据会把出口当成第二个
     // 环内后继，然后把整个 `while` 形态错拒。
-    let body: HashSet<String> =
-        crate::ssa::find_loop_body(func, header, &latch).into_iter().collect();
+    let body: HashSet<String> = crate::ssa::find_loop_body(func, header, &latch)
+        .into_iter()
+        .collect();
     let (region_bbs, mut exits) = walk_region(func, header, &latch, &body)?;
     // 链必须覆盖整个自然循环体：少一个块就意味着环内还有分支（嵌套或 if）。
     if region_bbs.len() != body.len() {
@@ -1002,10 +1119,16 @@ pub fn classify_loop(func: &Function, header: &str) -> Result<PipelinedLoop, &'s
     let exit = exits.remove(0);
 
     // preheader = 区域外的头前驱，必须恰好一个。
-    let outside: Vec<String> =
-        pred_names(func, header).into_iter().filter(|p| *p != latch).collect();
+    let outside: Vec<String> = pred_names(func, header)
+        .into_iter()
+        .filter(|p| *p != latch)
+        .collect();
     if outside.len() != 1 {
-        return Err(if outside.is_empty() { "头没有区域外前驱（不可达循环）" } else { "多个区域外前驱（循环被多路进入）" });
+        return Err(if outside.is_empty() {
+            "头没有区域外前驱（不可达循环）"
+        } else {
+            "多个区域外前驱（循环被多路进入）"
+        });
     }
     let preheader = outside[0].clone();
     if region_bbs.contains(&preheader) {
@@ -1036,7 +1159,10 @@ pub fn classify_loop(func: &Function, header: &str) -> Result<PipelinedLoop, &'s
         .or_else(|| branch_cond_var(&func.blocks[header].term))
         .ok_or("循环判定不是变量比较")?;
     // 条件的生产者必须就在调度区里，否则 kernel 无法自己判定是否继续。
-    let cond_at = match nodes.iter().position(|i| i.dest.as_ref().map(|d| d.name()) == Some(cond_name.clone())) {
+    let cond_at = match nodes
+        .iter()
+        .position(|i| i.dest.as_ref().map(|d| d.name()) == Some(cond_name.clone()))
+    {
         Some(p) => p,
         None => return Err("循环条件由调度区外计算，kernel 无法自洽判定"),
     };
@@ -1068,15 +1194,19 @@ pub fn classify_loop(func: &Function, header: &str) -> Result<PipelinedLoop, &'s
     //
     // 比较的位置两种循环形态不同：`for` 在 preheader（`for.cond` 算 `i<8`），
     // `while` 在头块自身。两边都有时不猜哪个控制回边，直接拒。
-    let (bound_var, op, limit, var_left) = match (loop_bound(func, header), loop_bound(func, &preheader)) {
-        (Some(a), None) => a,
-        (None, Some(a)) => a,
-        (Some(_), Some(_)) => return Err("头块与 preheader 各有一个入环比较（不猜哪个控制回边）"),
-        (None, None) => return Err("入环比较不是「变量 vs 常量」，trip 未知"),
-    };
+    let (bound_var, op, limit, var_left) =
+        match (loop_bound(func, header), loop_bound(func, &preheader)) {
+            (Some(a), None) => a,
+            (None, Some(a)) => a,
+            (Some(_), Some(_)) => {
+                return Err("头块与 preheader 各有一个入环比较（不猜哪个控制回边）")
+            },
+            (None, None) => return Err("入环比较不是「变量 vs 常量」，trip 未知"),
+        };
     let op = if var_left { op } else { flip_cmp(op) };
     let iv_base = bound_var.base.clone();
-    let init = const_def_outside(func, &region_bbs, &iv_base).ok_or("归纳变量初值不是区域外的唯一常量定义")?;
+    let init = const_def_outside(func, &region_bbs, &iv_base)
+        .ok_or("归纳变量初值不是区域外的唯一常量定义")?;
     let phi_dest = bb
         .phis
         .iter()
@@ -1087,15 +1217,24 @@ pub fn classify_loop(func: &Function, header: &str) -> Result<PipelinedLoop, &'s
         .phis
         .iter()
         .find(|p| p.dest.base == iv_base)
-        .and_then(|p| p.incoming.iter().find(|(_, from)| *from == latch).map(|(s, _)| s.clone()))
+        .and_then(|p| {
+            p.incoming
+                .iter()
+                .find(|(_, from)| *from == latch)
+                .map(|(s, _)| s.clone())
+        })
         .ok_or("归纳变量没有 latch 侧 phi")?;
-    let step = iv_step(&nodes, &def_of, &start, &phi_dest).ok_or("归纳变量不是「沿拷贝链恰好一步」的线性递推")?;
+    let step = iv_step(&nodes, &def_of, &start, &phi_dest)
+        .ok_or("归纳变量不是「沿拷贝链恰好一步」的线性递推")?;
     if step <= 0 {
         return Err("步长非正（本层只旋转上升的归纳变量）");
     }
     let span = match op {
         BinOp::Lt => limit.checked_sub(init).ok_or("trip 计算溢出")?,
-        BinOp::Le => limit.checked_sub(init).and_then(|d| d.checked_add(1)).ok_or("trip 计算溢出")?,
+        BinOp::Le => limit
+            .checked_sub(init)
+            .and_then(|d| d.checked_add(1))
+            .ok_or("trip 计算溢出")?,
         BinOp::Gt | BinOp::Ge => return Err("下降比较（本层只处理上升归纳变量）"),
         _ => return Err("比较运算符异常"),
     };
@@ -1124,7 +1263,10 @@ pub fn classify_loop(func: &Function, header: &str) -> Result<PipelinedLoop, &'s
 }
 
 fn bb_phis_empty(func: &Function, name: &str) -> bool {
-    func.blocks.get(name).map(|b| b.phis.is_empty()).unwrap_or(false)
+    func.blocks
+        .get(name)
+        .map(|b| b.phis.is_empty())
+        .unwrap_or(false)
 }
 
 /// 该指令能否被**按迭代复制**成多份实例。
@@ -1146,7 +1288,11 @@ fn inst_is_materializable(k: &InstKind) -> bool {
 }
 
 fn branch_cond_var(term: &crate::ssa::Terminator) -> Option<String> {
-    if let crate::ssa::Terminator::Branch { cond: Operand::Var(v), .. } = term {
+    if let crate::ssa::Terminator::Branch {
+        cond: Operand::Var(v),
+        ..
+    } = term
+    {
         Some(v.name())
     } else {
         None
@@ -1251,8 +1397,10 @@ mod shape_tests {
 
     const RED: &str = "int red(int n,int*a){int s=0;for(int i=0;i<8;i++)s+=a[i];return s;}\n";
     const DEC: &str = "int dec(int n){int s=0;while(n>0){s+=n;n--;}return s;}\n";
-    const UNKNOWN: &str = "int unknown(int n,int*a){int s=0;for(int i=0;i<n;i++)s+=a[i];return s;}\n";
-    const NEST: &str = "int nest(int n){int s=0;for(int i=0;i<4;i++)for(int j=0;j<4;j++)s+=1;return s;}\n";
+    const UNKNOWN: &str =
+        "int unknown(int n,int*a){int s=0;for(int i=0;i<n;i++)s+=a[i];return s;}\n";
+    const NEST: &str =
+        "int nest(int n){int s=0;for(int i=0;i<4;i++)for(int j=0;j<4;j++)s+=1;return s;}\n";
 
     #[test]
     fn recognizes_the_real_for_shape() {
@@ -1280,7 +1428,13 @@ mod shape_tests {
                 .get(&p.dest.name())
                 .unwrap_or_else(|| panic!("phi {} 没有 phi_sources", p.dest.name()));
             let d = l.nodes[idx].dest.as_ref().unwrap();
-            let want = p.incoming.iter().find(|(_, from)| *from == l.latch).unwrap().0.clone();
+            let want = p
+                .incoming
+                .iter()
+                .find(|(_, from)| *from == l.latch)
+                .unwrap()
+                .0
+                .clone();
             assert_eq!(d.name(), want.name(), "phi_sources 必须指向 latch 侧生产者");
         }
     }
@@ -1308,7 +1462,11 @@ mod shape_tests {
         let src = "int dec2(int m){int n=8,s=0;while(n>0){s+=n;n=n-1;}return s+m;}\n";
         let f = fn_ssa(src, "dec2");
         let errs = classify_any(&f).expect_err("下降归纳变量不该被旋转");
-        assert!(errs.iter().any(|(_, e)| *e == "步长非正（本层只旋转上升的归纳变量）"), "{errs:?}");
+        assert!(
+            errs.iter()
+                .any(|(_, e)| *e == "步长非正（本层只旋转上升的归纳变量）"),
+            "{errs:?}"
+        );
     }
 
     /// 翻转逻辑的两面都要钉住：`0 < i` 等价于 `i > 0`（下降）⇒ 必须被拒；
@@ -1320,7 +1478,11 @@ mod shape_tests {
         let src_down = "int d(int n,int*a){int s=0;for(int i=0;0<i;i++)s+=a[i];return s;}\n";
         let f = fn_ssa(src_down, "d");
         let errs = classify_any(&f).expect_err("0<i 等价于 i>0，是下降循环");
-        assert!(errs.iter().any(|(_, e)| *e == "下降比较（本层只处理上升归纳变量）"), "{errs:?}");
+        assert!(
+            errs.iter()
+                .any(|(_, e)| *e == "下降比较（本层只处理上升归纳变量）"),
+            "{errs:?}"
+        );
 
         // `8 > i`：变量在右，翻转后是 Lt ⇒ 上升，收，trip=4（ceil(8/2)）。
         let src_up = "int u(int n,int*a){int s=0;for(int i=0;8>i;i+=2)s+=a[i];return s;}\n";
@@ -1345,8 +1507,15 @@ mod shape_tests {
         let f = fn_ssa(NEST, "nest");
         let r = rejections(&f, &Resources::default());
         assert_eq!(r.len(), 2, "两个头都必须被拒：{r:?}");
-        assert!(r.iter().any(|(_, e)| e.contains("嵌在其它循环之内")), "内层需给出嵌套原因：{r:?}");
-        assert!(r.iter().any(|(_, e)| e.contains("直线链") || e.contains("带 phi")), "外层需给出形状原因：{r:?}");
+        assert!(
+            r.iter().any(|(_, e)| e.contains("嵌在其它循环之内")),
+            "内层需给出嵌套原因：{r:?}"
+        );
+        assert!(
+            r.iter()
+                .any(|(_, e)| e.contains("直线链") || e.contains("带 phi")),
+            "外层需给出形状原因：{r:?}"
+        );
         assert!(plans_for(&f, &Resources::default()).is_empty(), "嵌套场景不得产出任何计划");
     }
 
@@ -1377,11 +1546,16 @@ mod shape_tests {
     fn dependency_chain_yields_real_overlap_and_is_accepted() {
         let src = "int ch(int n){int a=0,b=0,c=0,d=0,e=0,f=0;for(int i=0;i<24;i++){a+=1;b+=a;c+=b;d+=c;e+=d;f+=e;}return f+n;}\n";
         let f = fn_ssa(src, "ch");
-        let p = plan_for_header(&f, "for.body").unwrap_or_else(|e| panic!("依赖链循环应过闸门：{e}"));
+        let p =
+            plan_for_header(&f, "for.body").unwrap_or_else(|e| panic!("依赖链循环应过闸门：{e}"));
         assert!(p.inst.depth >= 1, "依赖链必须给出跳迭代重叠：ii={} stage={:?}", p.ii, p.stage);
         assert_eq!(p.inst.depth, 1, "本层只做一级轮转，接受的计划 depth 必须恰为 1");
         assert_eq!(p.inst.kernel.len() + p.inst.depth, p.lp.trip);
-        assert_eq!(p.inst.flatten().len(), p.lp.nodes.len() * p.lp.trip, "实例覆盖 = 节点数 × 迭代数");
+        assert_eq!(
+            p.inst.flatten().len(),
+            p.lp.nodes.len() * p.lp.trip,
+            "实例覆盖 = 节点数 × 迭代数"
+        );
     }
 
     /// 步长 2 的上升归纳变量是可流水的，trip 向上取整（i=0,2,4,6 ⇒ 4 次）。
@@ -1574,8 +1748,9 @@ impl InstancePlan {
             return false;
         }
         // 2. 序恒等：与 T 序逐元素相等（不只是「非降」，而是同一个序列）。
-        let mut want: Vec<(usize, usize)> =
-            (0..n).flat_map(|p| (0..trip).map(move |k| (p, k))).collect();
+        let mut want: Vec<(usize, usize)> = (0..n)
+            .flat_map(|p| (0..trip).map(move |k| (p, k)))
+            .collect();
         want.sort_by_key(|x| self.key(stage, &pos, x));
         want.iter().eq(got.iter())
     }
@@ -1619,7 +1794,15 @@ pub fn instance_plan(stage: &[usize], ii: usize, trip: usize) -> Option<Instance
     let tkey = |x: &(usize, usize)| (stage[x.0] + x.1 * ii, pos[x.0], x.0);
     prologue.sort_by_key(tkey);
     epilogue.sort_by_key(tkey);
-    let plan = InstancePlan { ii, depth, shift, kernel, prologue, epilogue, cells: Vec::new() };
+    let plan = InstancePlan {
+        ii,
+        depth,
+        shift,
+        kernel,
+        prologue,
+        epilogue,
+        cells: Vec::new(),
+    };
     // 覆盖完整性与序恒等全交给 verify：它不通过就不返回计划，而不是返回一个
     // 「看起来对」的切分。
     plan.verify(stage).then_some(plan)
@@ -1653,10 +1836,7 @@ mod instance_tests {
         assert_eq!(p.shift, vec![0, 1]);
         assert_eq!(p.prologue, vec![(1, 0)], "轮开始前先灌入节点 1 的第 0 轮");
         assert_eq!(p.epilogue, vec![(0, 2)], "轮结束后排空节点 0 的最后一轮");
-        assert_eq!(
-            p.flatten(),
-            vec![(1, 0), (0, 0), (1, 1), (0, 1), (1, 2), (0, 2)]
-        );
+        assert_eq!(p.flatten(), vec![(1, 0), (0, 0), (1, 1), (0, 1), (1, 2), (0, 2)]);
         assert!(p.verify(&[1, 0]));
     }
 
@@ -1695,7 +1875,9 @@ mod instance_tests {
         let (m, _w) = crate::ir::lower(prog).unwrap();
         let mut done = false;
         for decl in m.source().decls.iter() {
-            let crate::ast::Decl::Func(f) = decl else { continue };
+            let crate::ast::Decl::Func(f) = decl else {
+                continue;
+            };
             if f.name.name != "red" {
                 continue;
             }
@@ -1707,7 +1889,11 @@ mod instance_tests {
             let stage = modulo_schedule(&g, ii, &r).expect("MII 处必须可行");
             let plan = instance_plan(&stage, ii, l.trip).expect("真实循环必须能切三段");
             assert!(plan.verify(&stage), "切分必须与 T 序逐元素相等");
-            assert_eq!(plan.flatten().len(), l.nodes.len() * l.trip, "实例覆盖数 = 节点数 × 迭代数");
+            assert_eq!(
+                plan.flatten().len(),
+                l.nodes.len() * l.trip,
+                "实例覆盖数 = 节点数 × 迭代数"
+            );
             assert_eq!(plan.kernel.len() + plan.depth, l.trip);
             done = true;
         }
@@ -1751,7 +1937,12 @@ pub const MAX_ROT_CELLS: usize = 16;
 
 /// 轮转路径的收益判据：前两条与塌缩模型完全一致（这样「depth=0 / trip 太短」的拒因
 /// 文案在两模型下相同），只把 `depth > 1` 换成上限判据。
-pub fn benefit_verdict_rot(depth: usize, ii: usize, trip: usize, cells: usize) -> Result<(), &'static str> {
+pub fn benefit_verdict_rot(
+    depth: usize,
+    ii: usize,
+    trip: usize,
+    cells: usize,
+) -> Result<(), &'static str> {
     if depth == 0 {
         return Err("无跳迭代重叠 (depth=0)：流水只是搬动指令");
     }
@@ -1774,7 +1965,15 @@ fn rot_cell_ty_supported(ty: &crate::ast::Type) -> bool {
     use crate::ast::Type as T;
     !matches!(
         ty,
-        T::Complex(_) | T::Imaginary(_) | T::Array(..) | T::Struct(..) | T::Union(..) | T::Vector(..) | T::Atomic(_) | T::Func(..) | T::Void
+        T::Complex(_)
+            | T::Imaginary(_)
+            | T::Array(..)
+            | T::Struct(..)
+            | T::Union(..)
+            | T::Vector(..)
+            | T::Atomic(_)
+            | T::Func(..)
+            | T::Void
     )
 }
 
@@ -1874,7 +2073,11 @@ fn has_cell(cells: &[RotCell], q: usize, lag: i64) -> bool {
 /// 名字也在这里定下来（`LocMap::reserve_split_name`，与版本分裂同一个分配器），
 /// 落地只照抄，不再分配一次 —— 于是「同一个基名的 K 份版本各自有位置」这件事在
 /// 计划里就是可观测的，而不是等到 AST 才发现名字撞了。
-pub fn needed_cells(func: &Function, lp: &PipelinedLoop, plan: &InstancePlan) -> Result<Vec<RotCell>, &'static str> {
+pub fn needed_cells(
+    func: &Function,
+    lp: &PipelinedLoop,
+    plan: &InstancePlan,
+) -> Result<Vec<RotCell>, &'static str> {
     let row = match plan.row() {
         Some(r) => r.clone(),
         None => return Err("kernel 行不合法（无法算轮转格）"),
@@ -1889,36 +2092,37 @@ pub fn needed_cells(func: &Function, lp: &PipelinedLoop, plan: &InstancePlan) ->
     let mut keys: std::collections::BTreeMap<(usize, i64), Option<String>> =
         std::collections::BTreeMap::new();
     let cs = cond_shift(plan.depth);
-    let mut note = |p_shift: usize, q: usize, carried: bool, key: String| -> Result<(), &'static str> {
-        let back = back_rounds(p_shift, shift[q], carried);
-        if back < 1 {
-            return Ok(()); // 本轮前向（靠行内序）或区域外引用：不需要格子
-        }
-        let d = lp.nodes[q].dest.as_ref().ok_or("轮转生产者没有输出")?;
-        if !rot_cell_ty_supported(&d.ty) {
-            return Err("轮转值的类型不是可拷贝标量（聚合/数组/向量/复数/_Atomic）");
-        }
-        // 格子的初值就是实例 `(q, shift[q] - back)`，而 `back_rounds` 展开后它恰等于
-        // `p_shift - (携带?1:0)`（只与读者有关，与生产者无关）。它为负意味着「要的
-        // 是进循环前的那份值」，于是这一格必须能从**一个确定的 phi** 拿到初值；
-        // 两个不同的携带 phi 共享同一格就是两个可能不同的初值 ⇒ 拒。初值不是
-        // 「进循环前」那一档时没有这个约束：同一个 (生产者, lag) 本来就是同一个实例，
-        // 被两个名字读完全等价（实测 `rb` 里判定读 `i.2`、体内读 `i.3` 就是同一份值的
-        // 两个名字，把它们拆成两格既错也白）。
-        let want = p_shift as i64 - if carried { 1 } else { 0 };
-        let seed = if want < 0 { Some(key) } else { None };
-        match keys.get(&(q, back)) {
-            None => {
-                keys.insert((q, back), seed);
-            },
-            Some(prev) => {
-                if *prev != seed {
-                    return Err("同一轮转格被两个不同的携带名字读（初值可能不同）");
-                }
-            },
-        }
-        Ok(())
-    };
+    let mut note =
+        |p_shift: usize, q: usize, carried: bool, key: String| -> Result<(), &'static str> {
+            let back = back_rounds(p_shift, shift[q], carried);
+            if back < 1 {
+                return Ok(()); // 本轮前向（靠行内序）或区域外引用：不需要格子
+            }
+            let d = lp.nodes[q].dest.as_ref().ok_or("轮转生产者没有输出")?;
+            if !rot_cell_ty_supported(&d.ty) {
+                return Err("轮转值的类型不是可拷贝标量（聚合/数组/向量/复数/_Atomic）");
+            }
+            // 格子的初值就是实例 `(q, shift[q] - back)`，而 `back_rounds` 展开后它恰等于
+            // `p_shift - (携带?1:0)`（只与读者有关，与生产者无关）。它为负意味着「要的
+            // 是进循环前的那份值」，于是这一格必须能从**一个确定的 phi** 拿到初值；
+            // 两个不同的携带 phi 共享同一格就是两个可能不同的初值 ⇒ 拒。初值不是
+            // 「进循环前」那一档时没有这个约束：同一个 (生产者, lag) 本来就是同一个实例，
+            // 被两个名字读完全等价（实测 `rb` 里判定读 `i.2`、体内读 `i.3` 就是同一份值的
+            // 两个名字，把它们拆成两格既错也白）。
+            let want = p_shift as i64 - if carried { 1 } else { 0 };
+            let seed = if want < 0 { Some(key) } else { None };
+            match keys.get(&(q, back)) {
+                None => {
+                    keys.insert((q, back), seed);
+                },
+                Some(prev) => {
+                    if *prev != seed {
+                        return Err("同一轮转格被两个不同的携带名字读（初值可能不同）");
+                    }
+                },
+            }
+            Ok(())
+        };
     for &p in &row {
         for v in kind_uses(&lp.nodes[p].kind) {
             let key = v.name();
@@ -1943,9 +2147,19 @@ pub fn needed_cells(func: &Function, lp: &PipelinedLoop, plan: &InstancePlan) ->
     let mut used = crate::ssa::location::LocMap::reserved_names(func);
     let mut out: Vec<RotCell> = Vec::new();
     for (&(q, lag), seed) in &keys {
-        let base = lp.nodes[q].dest.as_ref().ok_or("轮转生产者没有输出")?.base.clone();
+        let base = lp.nodes[q]
+            .dest
+            .as_ref()
+            .ok_or("轮转生产者没有输出")?
+            .base
+            .clone();
         let home = crate::ssa::location::LocMap::reserve_split_name(&mut used, &base, 1);
-        out.push(RotCell { q, lag, home, seed: seed.clone() });
+        out.push(RotCell {
+            q,
+            lag,
+            home,
+            seed: seed.clone(),
+        });
     }
     Ok(out)
 }
@@ -2098,13 +2312,15 @@ pub fn emitted_reads_match(lp: &PipelinedLoop, plan: &InstancePlan) -> Result<()
     // 与携带值在 `k == 0` 时的读法同一个口径（模型里就是 `None`）。
     let want_of = |c: &RotCell| -> i64 { plan.shift[c.q] as i64 - c.lag };
     let seed_one = |slot: &mut HashMap<String, Option<(usize, usize)>>,
-                   c: &RotCell| -> Result<(), &'static str> {
+                    c: &RotCell|
+     -> Result<(), &'static str> {
         let want = plan.shift[c.q] as i64 - c.lag;
         let Some(b) = base_of[c.q].clone() else {
             return Err("轮转生产者没有输出");
         };
         let cur = slot.get(&b).copied().unwrap_or(None);
-        let expect: Option<(usize, usize)> = if want < 0 { None } else { Some((c.q, want as usize)) };
+        let expect: Option<(usize, usize)> =
+            if want < 0 { None } else { Some((c.q, want as usize)) };
         if cur != expect {
             return Err("轮转格的播种点拿不到预期实例（基名槽在锚点已被同基名的另一次写盖住）");
         }
@@ -2115,7 +2331,8 @@ pub fn emitted_reads_match(lp: &PipelinedLoop, plan: &InstancePlan) -> Result<()
     // 两套语义：`a_s3 = a_s2; a_s2 = a_s1; a_s1 = a;` 是自下而上的链，先写小 lag 就会
     // 把本轮的新值传下去（每一格都拿到同一个最新值），链就白轮了。
     let shift_cells = |slot: &mut HashMap<String, Option<(usize, usize)>>,
-                       r: usize| -> Result<(), &'static str> {
+                       r: usize|
+     -> Result<(), &'static str> {
         let mut order: Vec<usize> = (0..cells.len()).collect();
         order.sort_by(|&x, &y| {
             let (a, b) = (&cells[x], &cells[y]);
@@ -2264,7 +2481,10 @@ mod emit_order_tests {
         let f = fn_ssa(CHAIN6, "c6");
         let p = plan_for_header(&f, "for.body").expect("chain6 应过闸门");
         let naive = naive_row(&p.stage, p.ii, p.lp.nodes.len());
-        let bad = p.inst.with_row(&p.stage, &naive).expect("旧行序仍是合法切分");
+        let bad = p
+            .inst
+            .with_row(&p.stage, &naive)
+            .expect("旧行序仍是合法切分");
         let e = emitted_reads_match(&p.lp, &bad).expect_err("旧行序必须被发射序自检拒掉");
         assert!(e.contains("不是模型指定的实例"), "实得：{e}");
         // 「被拒时原 IR 必须逐字不变」这条断言靠的就是副本独立 —— 显式 `fork()`。
@@ -2368,7 +2588,14 @@ pub fn plan_for_header_with(
                 }
             },
             Ok(()) => match emit_check(&lp, &inst, &stage) {
-                Ok(p) => return Ok(PipelinePlan { lp, ii, stage, inst: p }),
+                Ok(p) => {
+                    return Ok(PipelinePlan {
+                        lp,
+                        ii,
+                        stage,
+                        inst: p,
+                    })
+                },
                 Err(e) => last_emit = Some(e),
             },
         }
@@ -2386,11 +2613,20 @@ pub fn plan_for_header_with(
             emit_check(&lp, &with_cells, &stage)
         })();
         match rot {
-            Ok(p) => return Ok(PipelinePlan { lp, ii, stage, inst: p }),
+            Ok(p) => {
+                return Ok(PipelinePlan {
+                    lp,
+                    ii,
+                    stage,
+                    inst: p,
+                })
+            },
             Err(e) => last_rot = Some(e),
         }
     }
-    Err(last_rot.or(last_emit).unwrap_or("MII 到节点数之间找不到可行调度"))
+    Err(last_rot
+        .or(last_emit)
+        .unwrap_or("MII 到节点数之间找不到可行调度"))
 }
 
 /// 用默认资源模型跑闸门。
@@ -2464,7 +2700,9 @@ mod gate_tests {
         let g = build_dep_graph(&p.lp.nodes, &f, &f.blocks["for.body"], &p.lp.phi_sources);
         assert!(edges_satisfied(&g, p.ii, &p.stage));
         // 同一入口给出的原因清单里不能再有 for.body。
-        assert!(rejections(&f, &Resources::default()).into_iter().all(|(n, _)| n != "for.body"));
+        assert!(rejections(&f, &Resources::default())
+            .into_iter()
+            .all(|(n, _)| n != "for.body"));
     }
 
     /// 分类器必须认得出「体内只写内存、没有标量递推」这类循环：它的结构（单 latch、
@@ -2474,7 +2712,8 @@ mod gate_tests {
     fn classifier_recognizes_pure_store_loop() {
         let src = "int wr(int n,int*a){for(int i=0;i<8;i++)a[i]=i;return n;}\n";
         let f = fn_ssa(src, "wr");
-        let lp = classify_loop(&f, "for.body").unwrap_or_else(|e| panic!("纯写循环的结构合法，分类器不该拒：{e}"));
+        let lp = classify_loop(&f, "for.body")
+            .unwrap_or_else(|e| panic!("纯写循环的结构合法，分类器不该拒：{e}"));
         assert_eq!(lp.trip, 8);
         // 如果闸门接受，计划必须自洽（逐边满足 + 实例覆盖完整）。
         for p in plans_for(&f, &Resources::default()) {
@@ -2509,8 +2748,14 @@ mod gate_tests {
                    int tiny(int n,int*a){int s=0;for(int i=0;i<2;i++)s+=a[i];return s;}\n";
         for name in ["red", "tiny"] {
             let f = fn_ssa(src, name);
-            let rej: Vec<String> = rejections(&f, &Resources::default()).into_iter().map(|(b, _)| b).collect();
-            let got: Vec<String> = plans_for(&f, &Resources::default()).into_iter().map(|p| p.lp.header.clone()).collect();
+            let rej: Vec<String> = rejections(&f, &Resources::default())
+                .into_iter()
+                .map(|(b, _)| b)
+                .collect();
+            let got: Vec<String> = plans_for(&f, &Resources::default())
+                .into_iter()
+                .map(|p| p.lp.header.clone())
+                .collect();
             for b in crate::ssa::ordered_block_names(&f) {
                 if f.blocks[&b].phis.is_empty() {
                     continue;
@@ -2537,8 +2782,15 @@ mod gate_tests {
         let f = fn_ssa(src, "rl");
         let p = plan_for_header(&f, "for.body")
             .unwrap_or_else(|e| panic!("depth>1 的依赖载入链应被真轮转接受，实际被拒：{e}"));
-        assert!(p.inst.depth >= 2, "样本必须真的跨过一级（否则测不到旧判据）：depth={}", p.inst.depth);
-        assert!(!p.inst.cells.is_empty(), "接受了 depth≥2 却没有格子表 ⇒ 走的是塌缩模型，判据形同虚设");
+        assert!(
+            p.inst.depth >= 2,
+            "样本必须真的跨过一级（否则测不到旧判据）：depth={}",
+            p.inst.depth
+        );
+        assert!(
+            !p.inst.cells.is_empty(),
+            "接受了 depth≥2 却没有格子表 ⇒ 走的是塌缩模型，判据形同虚设"
+        );
 
         // 每格一个 (生产者, lag)，且 home 互不相同 —— 「同一个基名的 K 份值各有位置」
         // 的全部含义。
@@ -2546,13 +2798,21 @@ mod gate_tests {
         let mut homes = std::collections::BTreeSet::new();
         for c in &p.inst.cells {
             assert!(c.lag >= 1, "格子只服务跳 ≥ 1 轮的读：{:?}", c);
-            assert!(keys.insert((c.q, c.lag)), "同一 (生产者, lag) 被分配了两个格子：{:?}", p.inst.cells);
+            assert!(
+                keys.insert((c.q, c.lag)),
+                "同一 (生产者, lag) 被分配了两个格子：{:?}",
+                p.inst.cells
+            );
             assert!(homes.insert(c.home.clone()), "两个格子拿到同一个家：{:?}", p.inst.cells);
         }
         // 名字必须是共享分配器的产物（`{base}_s{k}`），且不得与任何已有基名同名。
         let reserved = crate::ssa::location::LocMap::reserved_names(&f);
         for c in &p.inst.cells {
-            assert!(c.home.contains("_s"), "格子名应由 `reserve_split_name` 给出 `{{base}}_s{{k}}`，实际 {}", c.home);
+            assert!(
+                c.home.contains("_s"),
+                "格子名应由 `reserve_split_name` 给出 `{{base}}_s{{k}}`，实际 {}",
+                c.home
+            );
             assert!(!reserved.contains(&c.home), "格子名 {} 与已有局部/形参/phi dest 同名", c.home);
         }
         // 计划的实例覆盖与图自洽性不因格子而改变（格子只换存储位置，不换时序）。
@@ -2598,8 +2858,14 @@ mod gate_tests {
     /// 塌缩模型一致（这样拒因在两模型下可对比），后两条才是轮转自己的上限。
     #[test]
     fn benefit_verdict_rot_covers_each_rule() {
-        assert_eq!(benefit_verdict_rot(0, 3, 8, 4), Err("无跳迭代重叠 (depth=0)：流水只是搬动指令"));
-        assert_eq!(benefit_verdict_rot(2, 3, 5, 4), Err("trip 太短：prologue/epilogue 开销盖过收益"));
+        assert_eq!(
+            benefit_verdict_rot(0, 3, 8, 4),
+            Err("无跳迭代重叠 (depth=0)：流水只是搬动指令")
+        );
+        assert_eq!(
+            benefit_verdict_rot(2, 3, 5, 4),
+            Err("trip 太短：prologue/epilogue 开销盖过收益")
+        );
         assert_eq!(
             benefit_verdict_rot(MAX_ROT_DEPTH + 1, 3, 64, 0),
             Err("轮转级数超上限：prologue/epilogue 代价盖过收益")
@@ -2651,7 +2917,10 @@ fn resolve_operand(
     let key = v.name();
     if let Some(&q) = ctx.lp.phi_sources.get(&key) {
         if k == 0 {
-            let src = ctx.phi_from_pre.get(&key).ok_or("phi 没有 preheader 侧输入")?;
+            let src = ctx
+                .phi_from_pre
+                .get(&key)
+                .ok_or("phi 没有 preheader 侧输入")?;
             return Ok(src.clone());
         }
         let name = names
@@ -2690,66 +2959,113 @@ where
     F: Fn(&Operand) -> Result<Operand, &'static str>,
 {
     Ok(match k {
-        InstKind::Bin { op, l, r } => InstKind::Bin { op: *op, l: f(l)?, r: f(r)? },
-        InstKind::Un { op, e } => InstKind::Un { op: *op, e: f(e)? },
-        InstKind::Cast { ty, e } => InstKind::Cast { ty: ty.clone(), e: f(e)? },
-        InstKind::AddrOf { base } => InstKind::AddrOf { base: base.clone() },
-        InstKind::Load { e, ty, is_volatile } => {
-            InstKind::Load { e: f(e)?, ty: ty.clone(), is_volatile: *is_volatile }
+        InstKind::Bin { op, l, r } => InstKind::Bin {
+            op: *op,
+            l: f(l)?,
+            r: f(r)?,
         },
-        InstKind::Store { e, src, is_volatile } => {
-            InstKind::Store { e: f(e)?, src: f(src)?, is_volatile: *is_volatile }
+        InstKind::Un { op, e } => InstKind::Un { op: *op, e: f(e)? },
+        InstKind::Cast { ty, e } => InstKind::Cast {
+            ty: ty.clone(),
+            e: f(e)?,
+        },
+        InstKind::AddrOf { base } => InstKind::AddrOf { base: base.clone() },
+        InstKind::Load { e, ty, is_volatile } => InstKind::Load {
+            e: f(e)?,
+            ty: ty.clone(),
+            is_volatile: *is_volatile,
+        },
+        InstKind::Store {
+            e,
+            src,
+            is_volatile,
+        } => InstKind::Store {
+            e: f(e)?,
+            src: f(src)?,
+            is_volatile: *is_volatile,
         },
         InstKind::IndexAddr { arr, idx, ty } => InstKind::IndexAddr {
             arr: f(arr)?,
             idx: f(idx)?,
             ty: ty.clone(),
         },
-        InstKind::IndexLoad { arr, idx, ty, is_volatile } => InstKind::IndexLoad {
+        InstKind::IndexLoad {
+            arr,
+            idx,
+            ty,
+            is_volatile,
+        } => InstKind::IndexLoad {
             arr: f(arr)?,
             idx: f(idx)?,
             ty: ty.clone(),
             is_volatile: *is_volatile,
         },
-        InstKind::IndexStore { arr, idx, src, ty, is_volatile } => InstKind::IndexStore {
+        InstKind::IndexStore {
+            arr,
+            idx,
+            src,
+            ty,
+            is_volatile,
+        } => InstKind::IndexStore {
             arr: f(arr)?,
             idx: f(idx)?,
             src: f(src)?,
             ty: ty.clone(),
             is_volatile: *is_volatile,
         },
-        InstKind::Call { callee, args, ret_ty } => InstKind::Call {
+        InstKind::Call {
+            callee,
+            args,
+            ret_ty,
+        } => InstKind::Call {
             callee: f(callee)?,
             args: args.iter().map(f).collect::<Result<Vec<_>, _>>()?,
             ret_ty: ret_ty.clone(),
         },
-        InstKind::MemberAddr { obj, obj_ty, field, ty, is_arrow } => InstKind::MemberAddr {
+        InstKind::MemberAddr {
+            obj,
+            obj_ty,
+            field,
+            ty,
+            is_arrow,
+        } => InstKind::MemberAddr {
             obj: f(obj)?,
             obj_ty: obj_ty.clone(),
             field: field.clone(),
             ty: ty.clone(),
             is_arrow: *is_arrow,
         },
-        InstKind::MemberLoad { obj, obj_ty, field, ty, is_volatile, is_arrow } => {
-            InstKind::MemberLoad {
-                obj: f(obj)?,
-                obj_ty: obj_ty.clone(),
-                field: field.clone(),
-                ty: ty.clone(),
-                is_volatile: *is_volatile,
-                is_arrow: *is_arrow,
-            }
+        InstKind::MemberLoad {
+            obj,
+            obj_ty,
+            field,
+            ty,
+            is_volatile,
+            is_arrow,
+        } => InstKind::MemberLoad {
+            obj: f(obj)?,
+            obj_ty: obj_ty.clone(),
+            field: field.clone(),
+            ty: ty.clone(),
+            is_volatile: *is_volatile,
+            is_arrow: *is_arrow,
         },
-        InstKind::MemberStore { obj, obj_ty, field, src, ty, is_volatile, is_arrow } => {
-            InstKind::MemberStore {
-                obj: f(obj)?,
-                obj_ty: obj_ty.clone(),
-                field: field.clone(),
-                src: f(src)?,
-                ty: ty.clone(),
-                is_volatile: *is_volatile,
-                is_arrow: *is_arrow,
-            }
+        InstKind::MemberStore {
+            obj,
+            obj_ty,
+            field,
+            src,
+            ty,
+            is_volatile,
+            is_arrow,
+        } => InstKind::MemberStore {
+            obj: f(obj)?,
+            obj_ty: obj_ty.clone(),
+            field: field.clone(),
+            src: f(src)?,
+            ty: ty.clone(),
+            is_volatile: *is_volatile,
+            is_arrow: *is_arrow,
         },
         InstKind::Select { cond, then_, else_ } => InstKind::Select {
             cond: f(cond)?,
@@ -2787,7 +3103,9 @@ pub fn materialize(
         if lp.region_bbs.contains(&name) {
             continue;
         }
-        let Some(bb) = func.blocks.get(&name) else { continue };
+        let Some(bb) = func.blocks.get(&name) else {
+            continue;
+        };
         for inst in &bb.insts {
             if let Some(d) = &inst.dest {
                 external.insert(d.name());
@@ -2802,7 +3120,12 @@ pub fn materialize(
             }
         }
     }
-    let ctx = ResolveCtx { lp, def_of: &def_of, phi_from_pre: &phi_from_pre, external: &external };
+    let ctx = ResolveCtx {
+        lp,
+        def_of: &def_of,
+        phi_from_pre: &phi_from_pre,
+        external: &external,
+    };
 
     let mut names: HashMap<(usize, usize), String> = HashMap::new();
     let mut insts: Vec<Inst> = Vec::new();
@@ -2826,7 +3149,11 @@ pub fn materialize(
             ty: d.ty.clone(),
             span: d.span.clone(),
         });
-        insts.push(Inst { dest, kind, span: src.span.clone() });
+        insts.push(Inst {
+            dest,
+            kind,
+            span: src.span.clone(),
+        });
         names.insert((p, k), out);
     }
     // 覆盖性：每个 (节点,迭代) 都要有名字，且序列长度与实例数一致。
@@ -2886,11 +3213,7 @@ mod materialize_tests {
             }
         }
         // 携带值确实跨轮引用（否则说明物化把递归拍平了，那是错的）。
-        let crossed = m
-            .names
-            .iter()
-            .filter(|((_, k), _)| *k > 0)
-            .count();
+        let crossed = m.names.iter().filter(|((_, k), _)| *k > 0).count();
         assert!(crossed > 0, "应有跨轮实例");
     }
 
@@ -3005,12 +3328,21 @@ fn apply_into(
     }
     // 拼接序里先剔除同一条判定指令，才能与 `lp.nodes`（调度区不含条件）对齐。
     let cond_dest = lp.cond.dest.as_ref().map(|d| d.name());
-    if let Some(p) = expect.iter().position(|i| i.dest.as_ref().map(|d| d.name()) == cond_dest) {
+    if let Some(p) = expect
+        .iter()
+        .position(|i| i.dest.as_ref().map(|d| d.name()) == cond_dest)
+    {
         expect.remove(p);
     }
     // 只比 kind（不比 span）：同一条指令换了位置仍是同样的语义。
-    let same_kind = |a: &Inst, b: &Inst| -> bool { format!("{:?}", a.kind) == format!("{:?}", b.kind) };
-    if expect.len() != n || !expect.iter().zip(lp.nodes.iter()).all(|(a, b)| same_kind(a, b)) {
+    let same_kind =
+        |a: &Inst, b: &Inst| -> bool { format!("{:?}", a.kind) == format!("{:?}", b.kind) };
+    if expect.len() != n
+        || !expect
+            .iter()
+            .zip(lp.nodes.iter())
+            .all(|(a, b)| same_kind(a, b))
+    {
         return Err("计划与当前 IR 不匹配（区域已变）");
     }
     let header = lp.header.clone();
@@ -3052,7 +3384,12 @@ fn apply_into(
         let src = &lp.nodes[p];
         let Some(d) = &src.dest else { continue };
         let v = alloc.fresh(&d.base);
-        let nv = SsaVar { base: d.base.clone(), version: v, ty: d.ty.clone(), span: d.span.clone() };
+        let nv = SsaVar {
+            base: d.base.clone(),
+            version: v,
+            ty: d.ty.clone(),
+            span: d.span.clone(),
+        };
         if k >= shift[p] && k < shift[p] + rounds {
             // kernel 内的实例：每轮复用同一个名字，所以只能分配一次。
             if kernel_name[p].is_none() {
@@ -3117,87 +3454,99 @@ fn apply_into(
     let mut seed_after: HashMap<(usize, usize), Vec<Inst>> = HashMap::new();
     let mut row_copies: Vec<Inst> = Vec::new();
     if cells.is_empty() {
-    // 塔缩模型只能表达一级轮转（头块上一对 phi：上一轮 / 本轮）。depth > 1 而没有格子
-    // 意味着「行内序能护住但引用关系已经超出一级」的形状，走到这里就是上游判据改了
-    // 而这里没跟进 ⇒ 必须点名拒，不能默默拿本轮的值当上一轮。
-    if plan.depth > 1 {
-        return Err("多级流水需要轮转格但格子表为空（上游判据与本处不一致）");
-    }
-    // 生产者节点 → (一个读者, 被读的名字, 是否携带值)
-    let mut rot: HashMap<usize, (Option<usize>, String, bool)> = HashMap::new();
-    for &p in row {
-        for v in kind_uses(&lp.nodes[p].kind) {
-            let key = v.name();
-            let carried = lp.phi_sources.contains_key(&key);
-            let src = if carried { lp.phi_sources.get(&key) } else { def_of.get(&key) };
-            let Some(&q) = src else { continue };
-            match back_rounds(shift[p], shift[q], carried) {
-                0 => {},
-                1 => {
-                    // 同一生产者的多个读者必须落在同一个初值实例上，否则一个 phi
-                    // 服不了两个读者。
-                    if let Some((p2, _, co2)) = rot.insert(q, (Some(p), key.clone(), carried)) {
-                        if init_iter(q, p2, co2) != init_iter(q, Some(p), carried) {
-                            return Err("同一轮转生产者的初值实例不一致");
+        // 塔缩模型只能表达一级轮转（头块上一对 phi：上一轮 / 本轮）。depth > 1 而没有格子
+        // 意味着「行内序能护住但引用关系已经超出一级」的形状，走到这里就是上游判据改了
+        // 而这里没跟进 ⇒ 必须点名拒，不能默默拿本轮的值当上一轮。
+        if plan.depth > 1 {
+            return Err("多级流水需要轮转格但格子表为空（上游判据与本处不一致）");
+        }
+        // 生产者节点 → (一个读者, 被读的名字, 是否携带值)
+        let mut rot: HashMap<usize, (Option<usize>, String, bool)> = HashMap::new();
+        for &p in row {
+            for v in kind_uses(&lp.nodes[p].kind) {
+                let key = v.name();
+                let carried = lp.phi_sources.contains_key(&key);
+                let src = if carried {
+                    lp.phi_sources.get(&key)
+                } else {
+                    def_of.get(&key)
+                };
+                let Some(&q) = src else { continue };
+                match back_rounds(shift[p], shift[q], carried) {
+                    0 => {},
+                    1 => {
+                        // 同一生产者的多个读者必须落在同一个初值实例上，否则一个 phi
+                        // 服不了两个读者。
+                        if let Some((p2, _, co2)) = rot.insert(q, (Some(p), key.clone(), carried)) {
+                            if init_iter(q, p2, co2) != init_iter(q, Some(p), carried) {
+                                return Err("同一轮转生产者的初值实例不一致");
+                            }
                         }
-                    }
-                },
-                _ => return Err("跳轮引用需要超过一级轮转寄存器"),
+                    },
+                    _ => return Err("跳轮引用需要超过一级轮转寄存器"),
+                }
             }
         }
-    }
-    // 判定指令也占一个位置：它在 body 之前执行（见下的 `khead` 块），所以它的「轮偏移」
-    // 是 `cond_shift`；而它读的是 body 节点上一轮的输出 ⇒ 那些节点同样需要轮转 phi。
-    // 不把它们收进来，head 就会引用一个尚未产出的名字。
-    for v in kind_uses(&lp.cond.kind) {
-        let key = v.name();
-        let Some(&q) = lp.phi_sources.get(&key).or_else(|| def_of.get(&key)) else { continue };
-        let carried = lp.phi_sources.contains_key(&key);
-        if back_rounds(cs, shift[q], carried) != 1 {
-            return Err("判定所需的跳轮偏移不是一级轮转");
-        }
-        if let Some((p2, _, co2)) = rot.insert(q, (None, key.clone(), carried)) {
-            if init_iter(q, p2, co2) != init_iter(q, None, carried) {
-                return Err("同一轮转生产者的初值实例不一致");
+        // 判定指令也占一个位置：它在 body 之前执行（见下的 `khead` 块），所以它的「轮偏移」
+        // 是 `cond_shift`；而它读的是 body 节点上一轮的输出 ⇒ 那些节点同样需要轮转 phi。
+        // 不把它们收进来，head 就会引用一个尚未产出的名字。
+        for v in kind_uses(&lp.cond.kind) {
+            let key = v.name();
+            let Some(&q) = lp.phi_sources.get(&key).or_else(|| def_of.get(&key)) else {
+                continue;
+            };
+            let carried = lp.phi_sources.contains_key(&key);
+            if back_rounds(cs, shift[q], carried) != 1 {
+                return Err("判定所需的跳轮偏移不是一级轮转");
+            }
+            if let Some((p2, _, co2)) = rot.insert(q, (None, key.clone(), carried)) {
+                if init_iter(q, p2, co2) != init_iter(q, None, carried) {
+                    return Err("同一轮转生产者的初值实例不一致");
+                }
             }
         }
-    }
-    let mut rot_nodes: Vec<usize> = rot.keys().copied().collect();
-    rot_nodes.sort_unstable();
-    for &q in &rot_nodes {
-        let (p, key, carried) = rot[&q].clone();
-        let src_var = lp.nodes[q].dest.as_ref().ok_or("轮转生产者没有输出")?;
-        let v = alloc.fresh(&src_var.base);
-        let dest = SsaVar {
-            base: src_var.base.clone(),
-            version: v,
-            ty: src_var.ty.clone(),
-            span: src_var.span.clone(),
-        };
-        // 第 0 轮需要的实例；负数表示「进循环前的值」，用原 phi 的 preheader 侧输入。
-        let want = init_iter(q, p, carried);
-        let pre_val: Operand = if want < 0 {
-            phi_pre.get(&key).cloned().ok_or("phi 没有 preheader 侧输入")?
-        } else {
-            inst_name
-                .get(&(q, want as usize))
-                .cloned()
-                .map(Operand::Var)
-                .ok_or("轮转 phi 的初值实例没有被物化")?
-        };
-        let lat_val = kernel_name[q].clone().ok_or("轮转生产者不在 kernel 内")?;
-        rot_dest.insert(q, dest.clone());
-        kernel_phis.push(Phi {
-            dest,
-            incoming: vec![
-                (match pre_val {
-                    Operand::Var(x) => x,
-                    _ => return Err("轮转 phi 的初值必须是变量"),
-                }, preheader.clone()),
-                (lat_val, header.clone()),
-            ],
-        });
-    }
+        let mut rot_nodes: Vec<usize> = rot.keys().copied().collect();
+        rot_nodes.sort_unstable();
+        for &q in &rot_nodes {
+            let (p, key, carried) = rot[&q].clone();
+            let src_var = lp.nodes[q].dest.as_ref().ok_or("轮转生产者没有输出")?;
+            let v = alloc.fresh(&src_var.base);
+            let dest = SsaVar {
+                base: src_var.base.clone(),
+                version: v,
+                ty: src_var.ty.clone(),
+                span: src_var.span.clone(),
+            };
+            // 第 0 轮需要的实例；负数表示「进循环前的值」，用原 phi 的 preheader 侧输入。
+            let want = init_iter(q, p, carried);
+            let pre_val: Operand = if want < 0 {
+                phi_pre
+                    .get(&key)
+                    .cloned()
+                    .ok_or("phi 没有 preheader 侧输入")?
+            } else {
+                inst_name
+                    .get(&(q, want as usize))
+                    .cloned()
+                    .map(Operand::Var)
+                    .ok_or("轮转 phi 的初值实例没有被物化")?
+            };
+            let lat_val = kernel_name[q].clone().ok_or("轮转生产者不在 kernel 内")?;
+            rot_dest.insert(q, dest.clone());
+            kernel_phis.push(Phi {
+                dest,
+                incoming: vec![
+                    (
+                        match pre_val {
+                            Operand::Var(x) => x,
+                            _ => return Err("轮转 phi 的初值必须是变量"),
+                        },
+                        preheader.clone(),
+                    ),
+                    (lat_val, header.clone()),
+                ],
+            });
+        }
     } else {
         // ---------- 分支 B：真轮转（每个 (生产者, lag) 一个独立基名 = 一个自己的家） ----------
         //
@@ -3218,7 +3567,12 @@ fn apply_into(
         };
         let mk = |home: &str, src: &SsaVar, alloc: &mut VersionAllocator| -> SsaVar {
             let v = alloc.fresh(home);
-            SsaVar { base: home.to_string(), version: v, ty: src.ty.clone(), span: src.span.clone() }
+            SsaVar {
+                base: home.to_string(),
+                version: v,
+                ty: src.ty.clone(),
+                span: src.span.clone(),
+            }
         };
         // 1. 每格一个 phi dest（行尾拷贝与读者都引用它）。`cells` 已是 (q asc, lag asc)
         //    的确定序，HashMap 的随机序不得泄进名字版本（它直接决定产物字节）。
@@ -3228,7 +3582,10 @@ fn apply_into(
             if cell_read.insert((c.q, c.lag), dest.clone()).is_some() {
                 return Err("轮转格重复（同一 (生产者, lag) 被分配了两次）");
             }
-            kernel_phis.push(Phi { dest, incoming: Vec::new() });
+            kernel_phis.push(Phi {
+                dest,
+                incoming: Vec::new(),
+            });
         }
         // 2. 播种：`want = shift[q] - lag`（与 `seed_cells` 、`init_iter` 同一个公式）。
         let mut seed_name: HashMap<(usize, i64), SsaVar> = HashMap::new();
@@ -3242,7 +3599,10 @@ fn apply_into(
                     .seed
                     .as_ref()
                     .ok_or("轮转格初值是进循环前的值，但没有确定的携带名")?;
-                phi_pre.get(sk).cloned().ok_or("phi 没有 preheader 侧输入")?
+                phi_pre
+                    .get(sk)
+                    .cloned()
+                    .ok_or("phi 没有 preheader 侧输入")?
             } else {
                 inst_name
                     .get(&(c.q, want as usize))
@@ -3250,19 +3610,27 @@ fn apply_into(
                     .map(Operand::Var)
                     .ok_or("轮转格的初值实例没有被物化")?
             };
-            let Operand::Var(x) = val else { return Err("轮转格的初值必须是变量") };
+            let Operand::Var(x) = val else {
+                return Err("轮转格的初值必须是变量");
+            };
             let dest = mk(&c.home, src, &mut alloc);
             seed_name.insert((c.q, c.lag), dest.clone());
             let inst = Inst {
                 dest: Some(dest),
                 // 同型 `Cast` = 原样搬运（实测发 `mov`/`fldt`+`fstpt`，不是 `+0` 那条）。
-                kind: InstKind::Cast { ty: src.ty.clone(), e: Operand::Var(x) },
+                kind: InstKind::Cast {
+                    ty: src.ty.clone(),
+                    e: Operand::Var(x),
+                },
                 span: src.span.clone(),
             };
             if want < 0 {
                 seed_first.push(inst);
             } else {
-                seed_after.entry((c.q, want as usize)).or_default().push(inst);
+                seed_after
+                    .entry((c.q, want as usize))
+                    .or_default()
+                    .push(inst);
             }
         }
         // 3. 行尾拷贝链：先按 (q asc, lag desc) 把名字分配完（后面的要引用前面的 dest，
@@ -3285,24 +3653,47 @@ fn apply_into(
                     .map(Operand::Var)
                     .ok_or("轮转拷贝链缺一级格子")?
             };
-            let Operand::Var(x) = from else { return Err("轮转拷贝的源必须是变量") };
-            let dest = copy_name.get(&(c.q, c.lag)).cloned().ok_or("轮转拷贝没有名字")?;
+            let Operand::Var(x) = from else {
+                return Err("轮转拷贝的源必须是变量");
+            };
+            let dest = copy_name
+                .get(&(c.q, c.lag))
+                .cloned()
+                .ok_or("轮转拷贝没有名字")?;
             row_copies.push(Inst {
                 dest: Some(dest),
-                kind: InstKind::Cast { ty: src.ty.clone(), e: Operand::Var(x) },
+                kind: InstKind::Cast {
+                    ty: src.ty.clone(),
+                    e: Operand::Var(x),
+                },
                 span: src.span.clone(),
             });
         }
         // 4. 把 phi 的两个 incoming 回填（同基名：见上面第 1 条）。
         for (i, c) in cells.iter().enumerate() {
             let phi = &mut kernel_phis[i];
-            let dest = cell_read.get(&(c.q, c.lag)).cloned().ok_or("轮转格没有 phi")?;
+            let dest = cell_read
+                .get(&(c.q, c.lag))
+                .cloned()
+                .ok_or("轮转格没有 phi")?;
             if phi.dest != dest {
                 return Err("轮转格 phi 与回填不同名（格子表与 phi 表失同）");
             }
             phi.incoming = vec![
-                (seed_name.get(&(c.q, c.lag)).cloned().ok_or("轮转格没有播种指令")?, preheader.clone()),
-                (copy_name.get(&(c.q, c.lag)).cloned().ok_or("轮转格没有行尾拷贝")?, header.clone()),
+                (
+                    seed_name
+                        .get(&(c.q, c.lag))
+                        .cloned()
+                        .ok_or("轮转格没有播种指令")?,
+                    preheader.clone(),
+                ),
+                (
+                    copy_name
+                        .get(&(c.q, c.lag))
+                        .cloned()
+                        .ok_or("轮转格没有行尾拷贝")?,
+                    header.clone(),
+                ),
             ];
         }
         // 5. 格子基名当用户局部看：重建靠它声明局部，`dead_inst_elim` 靠它不删赋值，
@@ -3334,9 +3725,15 @@ fn apply_into(
             Some(k) => {
                 let want = k as i64 - if carried { 1 } else { 0 };
                 if want < 0 {
-                    return Ok(phi_pre.get(&key).cloned().ok_or("phi 没有 preheader 侧输入")?);
+                    return Ok(phi_pre
+                        .get(&key)
+                        .cloned()
+                        .ok_or("phi 没有 preheader 侧输入")?);
                 }
-                let sv = inst_name.get(&(q, want as usize)).cloned().ok_or("依赖的生产者实例尚未物化")?;
+                let sv = inst_name
+                    .get(&(q, want as usize))
+                    .cloned()
+                    .ok_or("依赖的生产者实例尚未物化")?;
                 // prologue 在 kernel 之前执行，不得引用 kernel 内的名字；epilogue 在
                 // kernel 之后，引用它正好合法。
                 if k < shift[p] && want >= shift[q] as i64 && want < (shift[q] + rounds) as i64 {
@@ -3352,7 +3749,10 @@ fn apply_into(
                     return Ok(Operand::Var(d));
                 }
                 if back == 1 {
-                    let d = rot_dest.get(&q).cloned().ok_or("需要轮转 phi 但生产者不在轮转集合里")?;
+                    let d = rot_dest
+                        .get(&q)
+                        .cloned()
+                        .ok_or("需要轮转 phi 但生产者不在轮转集合里")?;
                     return Ok(Operand::Var(d));
                 }
                 if back >= 2 {
@@ -3385,7 +3785,11 @@ fn apply_into(
             (Some(_), None) => Some(kernel_name[p].clone().ok_or("kernel 实例没有被命名")?),
             (None, _) => None,
         };
-        Ok(Inst { dest, kind, span: src.span.clone() })
+        Ok(Inst {
+            dest,
+            kind,
+            span: src.span.clone(),
+        })
     };
 
     // 轮转格的播种：读「进循环前的值」那些排在 prologue **之前**，其余插在它读的
@@ -3419,7 +3823,12 @@ fn apply_into(
     let mut cond_dest_kern: Option<SsaVar> = None;
     if let Some(d) = &lp.cond.dest {
         let v2 = alloc.fresh(&d.base);
-        cond_dest_kern = Some(SsaVar { base: d.base.clone(), version: v2, ty: d.ty.clone(), span: d.span.clone() });
+        cond_dest_kern = Some(SsaVar {
+            base: d.base.clone(),
+            version: v2,
+            ty: d.ty.clone(),
+            span: d.span.clone(),
+        });
     }
     // prologue 里每个节点最后一次输出的名字，供 preheader 的判定取「最新值」。
     // kernel 头部的判定：使用轮转 phi 的值（上一轮结果），决定是否继续循环
@@ -3429,7 +3838,7 @@ fn apply_into(
             prologue_last.insert(p, sv.clone());
         }
     }
-    
+
     // kernel 判定：使用轮转 phi / 轮转格的值（上一轮结果），决定是否继续循环
     let mk_cond_kern = |dest: &Option<SsaVar>| -> Result<Inst, &'static str> {
         let f = |o: &Operand| -> Result<Operand, &'static str> {
@@ -3437,22 +3846,33 @@ fn apply_into(
                 return Ok(o.clone());
             };
             let key = v.name();
-            let q = lp.phi_sources.get(&key).copied().or_else(|| def_of.get(&key).copied());
+            let q = lp
+                .phi_sources
+                .get(&key)
+                .copied()
+                .or_else(|| def_of.get(&key).copied());
             match q {
                 Some(q) => {
                     let back = back_rounds(cs, shift[q], lp.phi_sources.contains_key(&key));
-                    let d = cell_read
-                        .get(&(q, back))
-                        .cloned()
-                        .or_else(|| if back == 1 { rot_dest.get(&q).cloned() } else { None });
+                    let d = cell_read.get(&(q, back)).cloned().or_else(|| {
+                        if back == 1 {
+                            rot_dest.get(&q).cloned()
+                        } else {
+                            None
+                        }
+                    });
                     Ok(d.map(Operand::Var).unwrap_or_else(|| o.clone()))
                 },
                 None => Ok(o.clone()),
             }
         };
-        Ok(Inst { dest: dest.clone(), kind: rewrite_kind(&lp.cond.kind, &f)?, span: lp.cond.span.clone() })
+        Ok(Inst {
+            dest: dest.clone(),
+            kind: rewrite_kind(&lp.cond.kind, &f)?,
+            span: lp.cond.span.clone(),
+        })
     };
-    
+
     let cond_kern = mk_cond_kern(&cond_dest_kern)?;
     let cond_var_kern = cond_dest_kern.clone().ok_or("判定指令没有输出")?;
     // kernel 的 head 块名：由 body 名派生，多循环场景下也不会相撞。
@@ -3517,7 +3937,10 @@ fn apply_into(
     let reroute = |o: &Operand| -> Result<Operand, &'static str> {
         if let Operand::Var(v) = o {
             if let Some(&q) = def_of.get(&v.name()) {
-                let sv = last_of.get(&q).cloned().ok_or("区域外引用找不到对应的最后实例")?;
+                let sv = last_of
+                    .get(&q)
+                    .cloned()
+                    .ok_or("区域外引用找不到对应的最后实例")?;
                 return Ok(Operand::Var(sv));
             }
         }
@@ -3548,7 +3971,10 @@ fn apply_into(
                             _ => return Err("phi 输入必须是变量"),
                         }
                     }
-                    Ok(Phi { dest: p.dest.clone(), incoming: inc })
+                    Ok(Phi {
+                        dest: p.dest.clone(),
+                        incoming: inc,
+                    })
                 })
                 .collect::<Result<Vec<Phi>, &'static str>>()?;
             let term = match &bb.term {
@@ -3564,13 +3990,16 @@ fn apply_into(
                     t: t.clone(),
                     f: f.clone(),
                 },
-                crate::ssa::Terminator::SwitchTable { idx, values, targets, default } => {
-                    crate::ssa::Terminator::SwitchTable {
-                        idx: reroute(idx)?,
-                        values: values.clone(),
-                        targets: targets.clone(),
-                        default: default.clone(),
-                    }
+                crate::ssa::Terminator::SwitchTable {
+                    idx,
+                    values,
+                    targets,
+                    default,
+                } => crate::ssa::Terminator::SwitchTable {
+                    idx: reroute(idx)?,
+                    values: values.clone(),
+                    targets: targets.clone(),
+                    default: default.clone(),
                 },
                 crate::ssa::Terminator::Unreachable => crate::ssa::Terminator::Unreachable,
             };
@@ -3615,23 +4044,52 @@ pub fn dump_plan(func: &Function, p: &PipelinePlan) -> String {
         func.name, lp.header, lp.latch, lp.preheader, lp.exit, lp.region_bbs, lp.iv_base, lp.trip
     ));
     for (i, nd) in lp.nodes.iter().enumerate() {
-        let d = nd.dest.as_ref().map(|x| x.name()).unwrap_or_else(|| "-".to_string());
+        let d = nd
+            .dest
+            .as_ref()
+            .map(|x| x.name())
+            .unwrap_or_else(|| "-".to_string());
         s.push_str(&format!("  node[{i}] {d} = {:?}\n", nd.kind));
     }
-    let cd = lp.cond.dest.as_ref().map(|x| x.name()).unwrap_or_else(|| "-".to_string());
+    let cd = lp
+        .cond
+        .dest
+        .as_ref()
+        .map(|x| x.name())
+        .unwrap_or_else(|| "-".to_string());
     s.push_str(&format!("  cond    {cd} = {:?}\n", lp.cond.kind));
-    let mut ps: Vec<(String, usize)> = lp.phi_sources.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    let mut ps: Vec<(String, usize)> = lp
+        .phi_sources
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
     ps.sort();
     s.push_str(&format!("  phi_sources={ps:?}\n"));
     s.push_str(&format!("  ii={} stage={:?}\n", p.ii, p.stage));
     let inst = &p.inst;
     s.push_str(&format!(
         "  depth={} shift={:?} rounds={} row={:?}\n",
-        inst.depth, inst.shift, inst.kernel.len(), inst.kernel.first()
+        inst.depth,
+        inst.shift,
+        inst.kernel.len(),
+        inst.kernel.first()
     ));
-    let names: Vec<String> = lp.nodes.iter().map(|n| n.dest.as_ref().map(|x| x.name()).unwrap_or_else(|| "-".to_string())).collect();
+    let names: Vec<String> = lp
+        .nodes
+        .iter()
+        .map(|n| {
+            n.dest
+                .as_ref()
+                .map(|x| x.name())
+                .unwrap_or_else(|| "-".to_string())
+        })
+        .collect();
     let show = |v: &[(usize, usize)]| -> Vec<String> {
-        v.iter().map(|&(q, k)| format!("{}#{k}[{}]", names.get(q).map(String::as_str).unwrap_or("?"), q)).collect()
+        v.iter()
+            .map(|&(q, k)| {
+                format!("{}#{k}[{}]", names.get(q).map(String::as_str).unwrap_or("?"), q)
+            })
+            .collect()
     };
     s.push_str(&format!("  prologue ={:?}\n", show(&inst.prologue)));
     s.push_str(&format!("  epilogue ={:?}\n", show(&inst.epilogue)));
@@ -3643,11 +4101,23 @@ pub fn dump_plan(func: &Function, p: &PipelinePlan) -> String {
         let cells: Vec<String> = inst
             .cells
             .iter()
-            .map(|c| format!("{}#{}:lag{}->{}", names.get(c.q).map(String::as_str).unwrap_or("?"), c.q, c.lag, c.home))
+            .map(|c| {
+                format!(
+                    "{}#{}:lag{}->{}",
+                    names.get(c.q).map(String::as_str).unwrap_or("?"),
+                    c.q,
+                    c.lag,
+                    c.home
+                )
+            })
             .collect();
         s.push_str(&format!("  rot_cells={cells:?}\n"));
     }
-    s.push_str(&format!("  verify={} flatten_len={}\n", inst.verify(&p.stage), inst.flatten().len()));
+    s.push_str(&format!(
+        "  verify={} flatten_len={}\n",
+        inst.verify(&p.stage),
+        inst.flatten().len()
+    ));
     s
 }
 
@@ -3760,7 +4230,11 @@ mod apply_tests {
         if let Some(d) = stale.nodes.get(1).and_then(|i| i.dest.clone()) {
             stale.nodes[1] = Inst {
                 dest: Some(d),
-                kind: InstKind::Bin { op: BinOp::Mul, l: Operand::Int(3), r: Operand::Int(3) },
+                kind: InstKind::Bin {
+                    op: BinOp::Mul,
+                    l: Operand::Int(3),
+                    r: Operand::Int(3),
+                },
                 span: stale.nodes[1].span.clone(),
             };
         }
@@ -3786,5 +4260,3 @@ mod apply_tests {
         assert_eq!(snapshot(&f), before, "落地失败时原 IR 必须逐字不变");
     }
 }
-
-

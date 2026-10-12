@@ -389,16 +389,8 @@ mod tests {
         }
         for num in 16..32u8 {
             let name = gp_name_of_num(num).unwrap_or_else(|| panic!("APX 号 {num} 没有规范名"));
-            assert_eq!(
-                clobber(name),
-                Some(num),
-                "clobber 名单仍要认 APX 号 {num}（{name}）"
-            );
-            assert_eq!(
-                user(name),
-                None,
-                "全局寄存器变量不能占 APX 号 {num}：与 gcc 同判据"
-            );
+            assert_eq!(clobber(name), Some(num), "clobber 名单仍要认 APX 号 {num}（{name}）");
+            assert_eq!(user(name), None, "全局寄存器变量不能占 APX 号 {num}：与 gcc 同判据");
         }
         assert_eq!(gp_name_of_num(3), Some("rbx"));
         assert_eq!(gp_name_of_num(13), Some("r13"));

@@ -125,9 +125,7 @@ pub(crate) fn collect_expected(decls: &[CppDecl], out: &mut BTreeSet<Entity>) {
 }
 
 /// 同一份源码分别过两条路径。
-pub(crate) fn lower_both(
-    src: &str,
-) -> (Vec<CppDecl>, Vec<CxxSymbol>, HirTranslationUnit, String) {
+pub(crate) fn lower_both(src: &str) -> (Vec<CppDecl>, Vec<CxxSymbol>, HirTranslationUnit, String) {
     let mut parser = CppParser::new(src.as_bytes(), "correspondence.cpp");
     let decls = parser
         .parse_top_level()

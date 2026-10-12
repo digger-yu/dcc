@@ -146,7 +146,10 @@ fn parse_imm_core(s: &str) -> Option<i64> {
     if digits.is_empty() {
         return None;
     }
-    let v = match digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+    let v = match digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
         Some(h) => {
             if h.is_empty() {
                 return None;
@@ -1110,7 +1113,6 @@ pub fn encode_mips(mnemonic: &str, operands: &[String], is_64bit: bool) -> Optio
 
         // CACHE / PREF: 不做静默 NOP 兜底 (需要 op 立即数 + base 寄存器 +
         // 可选索引的复合格式)。返回 None -> asm_source 标记为透传给 GAS。
-
         _ => None,
     }
 }
@@ -1140,22 +1142,76 @@ mod tests {
                     "wfe", "wfi", "whilelt", "yield",
                 ],
                 &[
-                    "x0", "x1", "x2", "x3", "x30", "sp", "xzr", "lr", "w0", "w1", "w15", "wzr",
-                    "s0", "s1", "d0", "d1", "v0", "v1", "v0.2d", "v1.2d", "v0.16b", "v0.4s",
-                    "z0", "z1", "p0", "p1", "p0.d", "#0", "#1", "#8", "#0xff", "#0x1ff", "#-1",
-                    "0", "8", "0xff", "ish", "ishld", "ishst", "osh", "oshld", "oshst", "sy",
-                    "[x0]", "[x0, #8]", "[sp, #16]", "[x1, x2]",
+                    "x0",
+                    "x1",
+                    "x2",
+                    "x3",
+                    "x30",
+                    "sp",
+                    "xzr",
+                    "lr",
+                    "w0",
+                    "w1",
+                    "w15",
+                    "wzr",
+                    "s0",
+                    "s1",
+                    "d0",
+                    "d1",
+                    "v0",
+                    "v1",
+                    "v0.2d",
+                    "v1.2d",
+                    "v0.16b",
+                    "v0.4s",
+                    "z0",
+                    "z1",
+                    "p0",
+                    "p1",
+                    "p0.d",
+                    "#0",
+                    "#1",
+                    "#8",
+                    "#0xff",
+                    "#0x1ff",
+                    "#-1",
+                    "0",
+                    "8",
+                    "0xff",
+                    "ish",
+                    "ishld",
+                    "ishst",
+                    "osh",
+                    "oshld",
+                    "oshst",
+                    "sy",
+                    "[x0]",
+                    "[x0, #8]",
+                    "[sp, #16]",
+                    "[x1, x2]",
                 ],
             ),
             "riscv64" => (
                 &[
-                    "add", "addi", "cache", "ebreak", "ecall", "fence", "fence.i", "msr", "nop",
-                    "pause", "ret", "sfence.vma", "sub", "wfi",
+                    "add",
+                    "addi",
+                    "cache",
+                    "ebreak",
+                    "ecall",
+                    "fence",
+                    "fence.i",
+                    "msr",
+                    "nop",
+                    "pause",
+                    "ret",
+                    "sfence.vma",
+                    "sub",
+                    "wfi",
                 ],
                 &[
                     "x0", "x1", "x2", "x10", "x15", "zero", "ra", "sp", "gp", "tp", "t0", "t6",
-                    "a0", "a7", "s0", "0", "1", "8", "-1", "0x7ff", "-2048", "1111", "rw",
-                    "rw,w", "iorw", "ow",
+                    "a0", "a7", "s0", "0", "1", "8", "-1", "0x7ff", "-2048", "1111", "rw", "rw,w",
+                    "iorw", "ow",
                 ],
             ),
             "arm" => (
@@ -1297,8 +1353,7 @@ mod tests {
         let golden = include_str!("../../../tests/fixtures/asm/mini_asm_encode_freeze.txt");
         let got = freeze_report();
         assert_eq!(
-            got,
-            golden,
+            got, golden,
             "mini_asm 编码行为与冻结基线不一致; 若为有意变更, 跑 --ignored regen 并审阅 diff",
         );
     }

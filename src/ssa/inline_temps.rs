@@ -123,13 +123,7 @@ fn inline_window_safe(
         //   * 真的无人读 ⇒ 丢掉定义是安全的（也确实是原来的收益来源）；
         //   * 只被 phi 读 ⇒ **不能丢**（见 `read_by_phi`：重建把 phi 的 dest 别名到
         //     第一个 incoming，那条定义就是槽的初始化）。
-        None => {
-            return if read_by_phi(func, ssa_name) {
-                None
-            } else {
-                Some(info)
-            }
-        },
+        None => return if read_by_phi(func, ssa_name) { None } else { Some(info) },
     };
     if u_bb != def_bb || u_pos <= def_idx {
         return None;
@@ -284,10 +278,8 @@ pub(super) fn plan_inlined_temps(func: &Function) -> InlinePlan {
             // 内联等于把定义点丢掉、在使用处重算: 前者会让 LSDA 里登记
             // 的地址区间指向一条不存在的调用指令 (异常找不到帧), 后者会
             // 让落地垫序言不再是一条独立语句 (rax/rdx 被覆盖)。
-            let is_eh_pinned = matches!(
-                inst.kind,
-                InstKind::Invoke { .. } | InstKind::EhLandingPad { .. }
-            );
+            let is_eh_pinned =
+                matches!(inst.kind, InstKind::Invoke { .. } | InstKind::EhLandingPad { .. });
             // 地址类临时值一律不内联：`AddrOf`/`MemberAddr`/`IndexAddr` 的结果重建后是
             // `Expr::AddrOf{ .. }`，把它就地塞进任一父表达式都会让地址语义漂移（父级按
             // 指针值重算步长 / 再包一层取址）。保留成真实临时变量后，消费方走 codegen 的
@@ -308,14 +300,7 @@ pub(super) fn plan_inlined_temps(func: &Function) -> InlinePlan {
                     // `int s=0; while(n>0){int step=2; s+=step*n; n--;}` 的
                     // `a(4)` 在 -O3 返回 6 而不是 12。因此内联必须过窗口判定。
                     match inline_window_safe(
-                        func,
-                        &ssa_name,
-                        bb_name,
-                        idx,
-                        inst,
-                        &def_pos,
-                        &addr_base,
-                        &subst,
+                        func, &ssa_name, bb_name, idx, inst, &def_pos, &addr_base, &subst,
                         &expanded,
                     ) {
                         Some(info) => {
@@ -359,7 +344,6 @@ pub(super) fn plan_inlined_temps(func: &Function) -> InlinePlan {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,7 +352,12 @@ mod tests {
     use crate::ssa::{BasicBlock, Phi, SsaVar};
 
     fn v(base: &str, version: u32) -> SsaVar {
-        SsaVar { base: base.to_string(), version, ty: Type::Int, span: Span::point("", 0, 0) }
+        SsaVar {
+            base: base.to_string(),
+            version,
+            ty: Type::Int,
+            span: Span::point("", 0, 0),
+        }
     }
     fn blk(name: &str, phis: Vec<Phi>) -> BasicBlock {
         BasicBlock {
@@ -396,12 +385,18 @@ mod tests {
     fn a_phi_incoming_counts_as_a_read() {
         let f = func(vec![Phi {
             dest: v("_tbin", 2),
-            incoming: vec![(v("_tbin", 1), "pre".to_string()), (v("_tbin", 3), "head".to_string())],
+            incoming: vec![
+                (v("_tbin", 1), "pre".to_string()),
+                (v("_tbin", 3), "head".to_string()),
+            ],
         }]);
         assert!(read_by_phi(&f, "_tbin.1"), "phi 的 incoming 必须算一次读");
         assert!(read_by_phi(&f, "_tbin.3"), "latch 侧那份同样是 phi 的入边");
         assert!(!read_by_phi(&f, "_tbin.2"), "phi 的 dest 不是它自己的入边");
-        assert!(!read_by_phi(&f, "nobody.reads.me"), "无人读就是无人读（这条捷径是本 pass 的收益来源）");
+        assert!(
+            !read_by_phi(&f, "nobody.reads.me"),
+            "无人读就是无人读（这条捷径是本 pass 的收益来源）"
+        );
         assert!(find_use_site(&f, "_tbin.1").is_none(), "本例正是要暴露「指令侧无人读」这一面");
     }
 
@@ -411,7 +406,10 @@ mod tests {
     fn an_unread_name_is_still_recognised_as_unread() {
         let f = func(vec![Phi {
             dest: v("a", 2),
-            incoming: vec![(v("a", 1), "pre".to_string()), (v("a", 3), "head".to_string())],
+            incoming: vec![
+                (v("a", 1), "pre".to_string()),
+                (v("a", 3), "head".to_string()),
+            ],
         }]);
         assert!(!read_by_phi(&f, "nobody.reads.me"));
         assert!(find_use_site(&f, "nobody.reads.me").is_none());

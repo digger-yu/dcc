@@ -971,12 +971,7 @@ impl Codegen {
     /// caller-saved 号，所以这个 scratch 一定不是本句 asm 的任何操作数寄存器；
     /// `alloc_callee_saved` 同时置 `reg_allocated` 与 `callee_saved_used`，因此它也不会
     /// 与外层表达式的溅出槽相撞，并且序言会真的保存它。写回结束立刻归还。
-    fn writeback_asm_general_lvalue(
-        &mut self,
-        expr: &Expr,
-        src: u8,
-        xmm_width: u8,
-    ) -> bool {
+    fn writeback_asm_general_lvalue(&mut self, expr: &Expr, src: u8, xmm_width: u8) -> bool {
         let ty = expr.ty();
         let effective_ty = match &ty {
             Type::Imaginary(inner) => inner.base.clone(),
@@ -1141,7 +1136,11 @@ impl Codegen {
                     self.emit_insn(&Insn::raw(&(off as i32).to_le_bytes()));
                 },
                 32 => {
-                    self.emit_insn(&Insn::raw(&[Self::rex(true, reg, 0, 13), 0x89, 0x85 | ((reg & 7) << 3)]));
+                    self.emit_insn(&Insn::raw(&[
+                        Self::rex(true, reg, 0, 13),
+                        0x89,
+                        0x85 | ((reg & 7) << 3),
+                    ]));
                     self.emit_insn(&Insn::raw(&(off as i32).to_le_bytes()));
                 },
                 _ => {
@@ -1252,7 +1251,11 @@ impl Codegen {
             // 旧实现用 `mov %eax, [r13+off]` (4 字节), C codegen 后续用 64-bit 读
             // (mov -off(%r13), %rax) 会读到未初始化高 32 位.
             // 改为 `mov %rax, [r13+off]` (REX.W + REX.B, 8 字节), 保证 64-bit 槽整体更新.
-            self.emit_insn(&Insn::raw(&[Self::rex(true, reg, 0, 13), 0x89, 0x85 | ((reg & 7) << 3)]));
+            self.emit_insn(&Insn::raw(&[
+                Self::rex(true, reg, 0, 13),
+                0x89,
+                0x85 | ((reg & 7) << 3),
+            ]));
             self.emit_insn(&Insn::raw(&(off as i32).to_le_bytes()));
         } else {
             self.store_stack(reg, off);

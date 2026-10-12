@@ -415,7 +415,9 @@ fn address_from_storage(storage: StorageInfo, ty: &Type) -> AddressDescriptor {
         // 判据取两份的并 —— `obj_type` 是解析器给出的身份，`ty.has_vla()` 直接
         // 描述类型（它能兼顾 `int a[2][n]` 这种外层常量、内层运行时的形状，
         // `storage_type_from_ast` 对它们只报 Array）。
-        (StorageClass::Stack, _) if matches!(storage.obj_type, StorageType::Vla { .. }) || ty.has_vla() => {
+        (StorageClass::Stack, _)
+            if matches!(storage.obj_type, StorageType::Vla { .. }) || ty.has_vla() =>
+        {
             AddressBase::StackSlotLoad {
                 offset: storage.stack_offset.unwrap_or(0),
             }
@@ -669,9 +671,7 @@ pub fn expr_has_side_effects(e: &Expr) -> bool {
         | Expr::Cast { e, .. }
         | Expr::Real { e, .. }
         | Expr::Imag { e, .. } => expr_has_side_effects(e),
-        Expr::Index { arr, idx, .. } => {
-            expr_has_side_effects(arr) || expr_has_side_effects(idx)
-        },
+        Expr::Index { arr, idx, .. } => expr_has_side_effects(arr) || expr_has_side_effects(idx),
         Expr::Member { expr, .. } => expr_has_side_effects(expr),
         Expr::Cond {
             cond, then_, else_, ..
@@ -696,9 +696,7 @@ pub fn exprs_structurally_equal(a: &Expr, b: &Expr) -> bool {
     match (a, b) {
         (Expr::Ident { name: na, .. }, Expr::Ident { name: nb, .. }) => na.name == nb.name,
         (Expr::Int { v: va, .. }, Expr::Int { v: vb, .. }) => va == vb,
-        (Expr::Deref { e: ea, .. }, Expr::Deref { e: eb, .. }) => {
-            exprs_structurally_equal(ea, eb)
-        },
+        (Expr::Deref { e: ea, .. }, Expr::Deref { e: eb, .. }) => exprs_structurally_equal(ea, eb),
         (
             Expr::Index {
                 arr: aa, idx: ia, ..
@@ -743,9 +741,7 @@ pub fn exprs_structurally_equal(a: &Expr, b: &Expr) -> bool {
                 r: rb,
                 ..
             },
-        ) => {
-            oa == ob && exprs_structurally_equal(la, lb) && exprs_structurally_equal(ra, rb)
-        },
+        ) => oa == ob && exprs_structurally_equal(la, lb) && exprs_structurally_equal(ra, rb),
         (Expr::Cast { e: ea, .. }, Expr::Cast { e: eb, .. }) => exprs_structurally_equal(ea, eb),
         (Expr::Comma { l: la, r: ra, .. }, Expr::Comma { l: lb, r: rb, .. }) => {
             exprs_structurally_equal(la, lb) && exprs_structurally_equal(ra, rb)
@@ -831,7 +827,12 @@ pub mod cpu_isa {
         ($leaf:expr, $sub:expr, $reg:expr, $name:literal, $bit:literal, $prio:literal, $cloneable:literal) => {
             IsaFeature {
                 name: $name,
-                bits: &[CpuidBit { leaf: $leaf, subleaf: $sub, reg: $reg, bit: $bit }],
+                bits: &[CpuidBit {
+                    leaf: $leaf,
+                    subleaf: $sub,
+                    reg: $reg,
+                    bit: $bit,
+                }],
                 xcr0_mask: 0,
                 clone_priority: $prio,
                 cloneable: $cloneable,
@@ -911,9 +912,24 @@ pub mod cpu_isa {
             IsaFeature {
                 name: $name,
                 bits: &[
-                    CpuidBit { leaf: 1, subleaf: 0, reg: REG_ECX, bit: 28 },
-                    CpuidBit { leaf: 7, subleaf: 0, reg: REG_EBX, bit: 16 },
-                    CpuidBit { leaf: 7, subleaf: 0, reg: $own_reg, bit: $own_bit },
+                    CpuidBit {
+                        leaf: 1,
+                        subleaf: 0,
+                        reg: REG_ECX,
+                        bit: 28,
+                    },
+                    CpuidBit {
+                        leaf: 7,
+                        subleaf: 0,
+                        reg: REG_EBX,
+                        bit: 16,
+                    },
+                    CpuidBit {
+                        leaf: 7,
+                        subleaf: 0,
+                        reg: $own_reg,
+                        bit: $own_bit,
+                    },
                 ],
                 xcr0_mask: 0xE6,
                 clone_priority: $prio,
@@ -1056,7 +1072,12 @@ pub mod cpu_isa {
     const FEATURES_TAIL: &[IsaFeature] = &[
         IsaFeature {
             name: "avx",
-            bits: &[CpuidBit { leaf: 1, subleaf: 0, reg: REG_ECX, bit: 28 }],
+            bits: &[CpuidBit {
+                leaf: 1,
+                subleaf: 0,
+                reg: REG_ECX,
+                bit: 28,
+            }],
             xcr0_mask: 0x6,
             clone_priority: 65,
             cloneable: true,
@@ -1064,8 +1085,18 @@ pub mod cpu_isa {
         IsaFeature {
             name: "fma",
             bits: &[
-                CpuidBit { leaf: 1, subleaf: 0, reg: REG_ECX, bit: 12 },
-                CpuidBit { leaf: 1, subleaf: 0, reg: REG_ECX, bit: 28 },
+                CpuidBit {
+                    leaf: 1,
+                    subleaf: 0,
+                    reg: REG_ECX,
+                    bit: 12,
+                },
+                CpuidBit {
+                    leaf: 1,
+                    subleaf: 0,
+                    reg: REG_ECX,
+                    bit: 28,
+                },
             ],
             xcr0_mask: 0x6,
             clone_priority: 75,
@@ -1074,8 +1105,18 @@ pub mod cpu_isa {
         IsaFeature {
             name: "avx2",
             bits: &[
-                CpuidBit { leaf: 1, subleaf: 0, reg: REG_ECX, bit: 28 },
-                CpuidBit { leaf: 7, subleaf: 0, reg: REG_EBX, bit: 5 },
+                CpuidBit {
+                    leaf: 1,
+                    subleaf: 0,
+                    reg: REG_ECX,
+                    bit: 28,
+                },
+                CpuidBit {
+                    leaf: 7,
+                    subleaf: 0,
+                    reg: REG_EBX,
+                    bit: 5,
+                },
             ],
             xcr0_mask: 0x6,
             clone_priority: 85,
@@ -1089,8 +1130,18 @@ pub mod cpu_isa {
         IsaFeature {
             name: "avx_vnni",
             bits: &[
-                CpuidBit { leaf: 1, subleaf: 0, reg: REG_ECX, bit: 28 },
-                CpuidBit { leaf: 7, subleaf: 1, reg: REG_EAX, bit: 4 },
+                CpuidBit {
+                    leaf: 1,
+                    subleaf: 0,
+                    reg: REG_ECX,
+                    bit: 28,
+                },
+                CpuidBit {
+                    leaf: 7,
+                    subleaf: 1,
+                    reg: REG_EAX,
+                    bit: 4,
+                },
             ],
             xcr0_mask: 0x6,
             clone_priority: 0,
@@ -1100,14 +1151,24 @@ pub mod cpu_isa {
         // （`cpuinfo.h` 的 `if (avx_usable) { if (ecx & bit_XOP) ... }`），所以带 0x6。
         IsaFeature {
             name: "xop",
-            bits: &[CpuidBit { leaf: 0x8000_0001, subleaf: 0, reg: REG_ECX, bit: 11 }],
+            bits: &[CpuidBit {
+                leaf: 0x8000_0001,
+                subleaf: 0,
+                reg: REG_ECX,
+                bit: 11,
+            }],
             xcr0_mask: 0x6,
             clone_priority: 0,
             cloneable: false,
         },
         IsaFeature {
             name: "avx512vp2intersect",
-            bits: &[CpuidBit { leaf: 7, subleaf: 0, reg: REG_EDX, bit: 8 }],
+            bits: &[CpuidBit {
+                leaf: 7,
+                subleaf: 0,
+                reg: REG_EDX,
+                bit: 8,
+            }],
             xcr0_mask: 0xE6,
             clone_priority: 0,
             cloneable: false,
@@ -1118,7 +1179,12 @@ pub mod cpu_isa {
         // gcc 的 `FEATURE_AVX512BF16` 在「有 bf16 而无 f」的假想 CPU 上给出不同答案。
         IsaFeature {
             name: "avx512bf16",
-            bits: &[CpuidBit { leaf: 7, subleaf: 1, reg: REG_EAX, bit: 5 }],
+            bits: &[CpuidBit {
+                leaf: 7,
+                subleaf: 1,
+                reg: REG_EAX,
+                bit: 5,
+            }],
             xcr0_mask: 0xE6,
             clone_priority: 0,
             cloneable: false,
@@ -1313,7 +1379,10 @@ pub mod cpu_isa {
         CpuidProbe {
             leaf: 1,
             subleaf: 0,
-            gate: Gate::LeafAtLeast { slot: SLOT_LEAF0_EAX, min: 1 },
+            gate: Gate::LeafAtLeast {
+                slot: SLOT_LEAF0_EAX,
+                min: 1,
+            },
             out_eax: Some(SLOT_LEAF1_EAX),
             out_ebx: Some(SLOT_LEAF1_EBX),
             out_ecx: Some(SLOT_LEAF1_ECX),
@@ -1322,7 +1391,10 @@ pub mod cpu_isa {
         CpuidProbe {
             leaf: 7,
             subleaf: 0,
-            gate: Gate::LeafAtLeast { slot: SLOT_LEAF0_EAX, min: 7 },
+            gate: Gate::LeafAtLeast {
+                slot: SLOT_LEAF0_EAX,
+                min: 7,
+            },
             // leaf 7 的 EAX 是「最大子 leaf 号」（本机 1）。它不是特性字（`cache_slot`
             // 对 (7,0):EAX 返回 None），但没有它就发不出 `(7,1)` 那一叶的门控 ——
             // gcc 在 `cpu_indicator_init` 里同样先 `__cpuid_count (7, 0, max_subleaf_level, ...)`
@@ -1340,7 +1412,10 @@ pub mod cpu_isa {
             //（= PREFETCHWT1 那一侧的字段），得到一个看起来合理的假答案。
             leaf: 7,
             subleaf: 1,
-            gate: Gate::LeafAtLeast { slot: SLOT_LEAF7_MAX, min: 1 },
+            gate: Gate::LeafAtLeast {
+                slot: SLOT_LEAF7_MAX,
+                min: 1,
+            },
             out_eax: Some(SLOT_LEAF7S1_EAX),
             out_ebx: None,
             out_ecx: None,
@@ -1350,7 +1425,10 @@ pub mod cpu_isa {
             // 紧凑 XSAVE 状态位（`xsaveopt`）。gcc 的门控就是「最大基本叶 >= 0xD」。
             leaf: 0xd,
             subleaf: 1,
-            gate: Gate::LeafAtLeast { slot: SLOT_LEAF0_EAX, min: 0xd },
+            gate: Gate::LeafAtLeast {
+                slot: SLOT_LEAF0_EAX,
+                min: 0xd,
+            },
             out_eax: Some(SLOT_LEAFD1_EAX),
             out_ebx: None,
             out_ecx: None,
@@ -1374,7 +1452,10 @@ pub mod cpu_isa {
         CpuidProbe {
             leaf: 0x8000_0001,
             subleaf: 0,
-            gate: Gate::LeafAtLeast { slot: SLOT_EXT_MAX_EAX, min: 0x8000_0001 },
+            gate: Gate::LeafAtLeast {
+                slot: SLOT_EXT_MAX_EAX,
+                min: 0x8000_0001,
+            },
             out_eax: None,
             out_ebx: None,
             out_ecx: Some(SLOT_EXT1_ECX),
@@ -1384,7 +1465,10 @@ pub mod cpu_isa {
             // `clzero`（AMD znver 分类守卫）。同样靠扩展叶最大值门控。
             leaf: 0x8000_0008,
             subleaf: 0,
-            gate: Gate::LeafAtLeast { slot: SLOT_EXT_MAX_EAX, min: 0x8000_0008 },
+            gate: Gate::LeafAtLeast {
+                slot: SLOT_EXT_MAX_EAX,
+                min: 0x8000_0008,
+            },
             out_eax: None,
             out_ebx: Some(SLOT_EXT8_EBX),
             out_ecx: None,
@@ -1562,10 +1646,30 @@ pub mod cpu_isa {
     }
 
     pub static VENDOR_SIGS: &[VendorSig] = &[
-        VendorSig { bx: INTEL_BX, dx: INTEL_DX, cx: INTEL_CX, kind: VENDOR_INTEL },
-        VendorSig { bx: AMD_BX, dx: AMD_DX, cx: AMD_CX, kind: VENDOR_AMD },
-        VendorSig { bx: CENTAUR_BX, dx: CENTAUR_DX, cx: CENTAUR_CX, kind: VENDOR_CENTAUR },
-        VendorSig { bx: SHANGHAI_BX, dx: SHANGHAI_DX, cx: SHANGHAI_CX, kind: VENDOR_ZHAOXIN },
+        VendorSig {
+            bx: INTEL_BX,
+            dx: INTEL_DX,
+            cx: INTEL_CX,
+            kind: VENDOR_INTEL,
+        },
+        VendorSig {
+            bx: AMD_BX,
+            dx: AMD_DX,
+            cx: AMD_CX,
+            kind: VENDOR_AMD,
+        },
+        VendorSig {
+            bx: CENTAUR_BX,
+            dx: CENTAUR_DX,
+            cx: CENTAUR_CX,
+            kind: VENDOR_CENTAUR,
+        },
+        VendorSig {
+            bx: SHANGHAI_BX,
+            dx: SHANGHAI_DX,
+            cx: SHANGHAI_CX,
+            kind: VENDOR_ZHAOXIN,
+        },
     ];
 
     /// leaf 0 的三个 dword → 厂商 kind（无匹配 = `VENDOR_UNKNOWN`）。
@@ -1690,7 +1794,10 @@ pub mod cpu_isa {
         /// 无符号 `>=`。
         Ge(u32),
         /// `lo <= v <= hi`（闭区间，`lo <= hi` 由不变量测试钉住）。
-        Range { lo: u32, hi: u32 },
+        Range {
+            lo: u32,
+            hi: u32,
+        },
     }
 
     impl MPred {
@@ -1755,49 +1862,194 @@ pub mod cpu_isa {
             family: MPred::Eq(0x06),
             group_type: "",
             rules: &[
-                ClassRule { model: MPred::In(&[0x1c, 0x26]), guard: Guard::None, cpu_type: "bonnell", cpu_subtype: "" },
+                ClassRule {
+                    model: MPred::In(&[0x1c, 0x26]),
+                    guard: Guard::None,
+                    cpu_type: "bonnell",
+                    cpu_subtype: "",
+                },
                 // gcc 把 Silvermont（0x37/0x4a/0x4d/0x5d）与 Airmont（0x4c/0x5a/0x75）
                 // 归成同一个 `INTEL_SILVERMONT`（Airmont 只是注释，不单独注册）。
-                ClassRule { model: MPred::In(&[0x37, 0x4a, 0x4d, 0x5d, 0x4c, 0x5a, 0x75]), guard: Guard::None, cpu_type: "silvermont", cpu_subtype: "" },
-                ClassRule { model: MPred::In(&[0x5c, 0x5f]), guard: Guard::None, cpu_type: "goldmont", cpu_subtype: "" },
-                ClassRule { model: MPred::Eq(0x7a), guard: Guard::None, cpu_type: "goldmont-plus", cpu_subtype: "" },
-                ClassRule { model: MPred::In(&[0x86, 0x96, 0x9c]), guard: Guard::None, cpu_type: "tremont", cpu_subtype: "" },
-                ClassRule { model: MPred::Eq(0x57), guard: Guard::None, cpu_type: "knl", cpu_subtype: "" },
-                ClassRule { model: MPred::Eq(0x85), guard: Guard::None, cpu_type: "knm", cpu_subtype: "" },
+                ClassRule {
+                    model: MPred::In(&[0x37, 0x4a, 0x4d, 0x5d, 0x4c, 0x5a, 0x75]),
+                    guard: Guard::None,
+                    cpu_type: "silvermont",
+                    cpu_subtype: "",
+                },
+                ClassRule {
+                    model: MPred::In(&[0x5c, 0x5f]),
+                    guard: Guard::None,
+                    cpu_type: "goldmont",
+                    cpu_subtype: "",
+                },
+                ClassRule {
+                    model: MPred::Eq(0x7a),
+                    guard: Guard::None,
+                    cpu_type: "goldmont-plus",
+                    cpu_subtype: "",
+                },
+                ClassRule {
+                    model: MPred::In(&[0x86, 0x96, 0x9c]),
+                    guard: Guard::None,
+                    cpu_type: "tremont",
+                    cpu_subtype: "",
+                },
+                ClassRule {
+                    model: MPred::Eq(0x57),
+                    guard: Guard::None,
+                    cpu_type: "knl",
+                    cpu_subtype: "",
+                },
+                ClassRule {
+                    model: MPred::Eq(0x85),
+                    guard: Guard::None,
+                    cpu_type: "knm",
+                    cpu_subtype: "",
+                },
                 // 以下都是 `INTEL_COREI7` + 一个 subtype（gcc 每行都先
                 // `CHECK___builtin_cpu_is("corei7")` 再查子型名 —— 两个名字分别比较
                 // `__cpu_type` 与 `__cpu_subtype`，与本表同形）。
-                ClassRule { model: MPred::In(&[0x1a, 0x1e, 0x1f, 0x2e]), guard: Guard::None, cpu_type: "corei7", cpu_subtype: "nehalem" },
-                ClassRule { model: MPred::In(&[0x25, 0x2c, 0x2f]), guard: Guard::None, cpu_type: "corei7", cpu_subtype: "westmere" },
-                ClassRule { model: MPred::In(&[0x2a, 0x2d]), guard: Guard::None, cpu_type: "corei7", cpu_subtype: "sandybridge" },
-                ClassRule { model: MPred::In(&[0x3a, 0x3e]), guard: Guard::None, cpu_type: "corei7", cpu_subtype: "ivybridge" },
-                ClassRule { model: MPred::In(&[0x3c, 0x3f, 0x45, 0x46]), guard: Guard::None, cpu_type: "corei7", cpu_subtype: "haswell" },
-                ClassRule { model: MPred::In(&[0x3d, 0x47, 0x4f, 0x56]), guard: Guard::None, cpu_type: "corei7", cpu_subtype: "broadwell" },
+                ClassRule {
+                    model: MPred::In(&[0x1a, 0x1e, 0x1f, 0x2e]),
+                    guard: Guard::None,
+                    cpu_type: "corei7",
+                    cpu_subtype: "nehalem",
+                },
+                ClassRule {
+                    model: MPred::In(&[0x25, 0x2c, 0x2f]),
+                    guard: Guard::None,
+                    cpu_type: "corei7",
+                    cpu_subtype: "westmere",
+                },
+                ClassRule {
+                    model: MPred::In(&[0x2a, 0x2d]),
+                    guard: Guard::None,
+                    cpu_type: "corei7",
+                    cpu_subtype: "sandybridge",
+                },
+                ClassRule {
+                    model: MPred::In(&[0x3a, 0x3e]),
+                    guard: Guard::None,
+                    cpu_type: "corei7",
+                    cpu_subtype: "ivybridge",
+                },
+                ClassRule {
+                    model: MPred::In(&[0x3c, 0x3f, 0x45, 0x46]),
+                    guard: Guard::None,
+                    cpu_type: "corei7",
+                    cpu_subtype: "haswell",
+                },
+                ClassRule {
+                    model: MPred::In(&[0x3d, 0x47, 0x4f, 0x56]),
+                    guard: Guard::None,
+                    cpu_type: "corei7",
+                    cpu_subtype: "broadwell",
+                },
                 // Skylake(0x4e/0x5e) / Kaby Lake(0x8e/0x9e) / Comet Lake(0xa5/0xa6) 共用
                 // 一个 `INTEL_COREI7_SKYLAKE`（gcc 13.3 就是这么归的）。
-                ClassRule { model: MPred::In(&[0x4e, 0x5e, 0x8e, 0x9e, 0xa5, 0xa6]), guard: Guard::None, cpu_type: "corei7", cpu_subtype: "skylake" },
-                ClassRule { model: MPred::Eq(0xa7), guard: Guard::None, cpu_type: "corei7", cpu_subtype: "rocketlake" },
+                ClassRule {
+                    model: MPred::In(&[0x4e, 0x5e, 0x8e, 0x9e, 0xa5, 0xa6]),
+                    guard: Guard::None,
+                    cpu_type: "corei7",
+                    cpu_subtype: "skylake",
+                },
+                ClassRule {
+                    model: MPred::Eq(0xa7),
+                    guard: Guard::None,
+                    cpu_type: "corei7",
+                    cpu_subtype: "rocketlake",
+                },
                 // model 0x55 一个 `case` 三个去向（守卫链，顺序就是 gcc 的 if 链）：
                 // avx512bf16 → Cooper Lake，否且 avx512vnni → Cascade Lake，
                 // 否则「有 AVX-512 的 Skylake」。三条都写同一个类型 corei7。
-                ClassRule { model: MPred::Eq(0x55), guard: Guard::Has("avx512bf16"), cpu_type: "corei7", cpu_subtype: "cooperlake" },
-                ClassRule { model: MPred::Eq(0x55), guard: Guard::Has("avx512vnni"), cpu_type: "corei7", cpu_subtype: "cascadelake" },
-                ClassRule { model: MPred::Eq(0x55), guard: Guard::None, cpu_type: "corei7", cpu_subtype: "skylake-avx512" },
-                ClassRule { model: MPred::Eq(0x66), guard: Guard::None, cpu_type: "corei7", cpu_subtype: "cannonlake" },
-                ClassRule { model: MPred::In(&[0x6a, 0x6c]), guard: Guard::None, cpu_type: "corei7", cpu_subtype: "icelake-server" },
-                ClassRule { model: MPred::In(&[0x7e, 0x7d, 0x9d]), guard: Guard::None, cpu_type: "corei7", cpu_subtype: "icelake-client" },
-                ClassRule { model: MPred::In(&[0x8c, 0x8d]), guard: Guard::None, cpu_type: "corei7", cpu_subtype: "tigerlake" },
+                ClassRule {
+                    model: MPred::Eq(0x55),
+                    guard: Guard::Has("avx512bf16"),
+                    cpu_type: "corei7",
+                    cpu_subtype: "cooperlake",
+                },
+                ClassRule {
+                    model: MPred::Eq(0x55),
+                    guard: Guard::Has("avx512vnni"),
+                    cpu_type: "corei7",
+                    cpu_subtype: "cascadelake",
+                },
+                ClassRule {
+                    model: MPred::Eq(0x55),
+                    guard: Guard::None,
+                    cpu_type: "corei7",
+                    cpu_subtype: "skylake-avx512",
+                },
+                ClassRule {
+                    model: MPred::Eq(0x66),
+                    guard: Guard::None,
+                    cpu_type: "corei7",
+                    cpu_subtype: "cannonlake",
+                },
+                ClassRule {
+                    model: MPred::In(&[0x6a, 0x6c]),
+                    guard: Guard::None,
+                    cpu_type: "corei7",
+                    cpu_subtype: "icelake-server",
+                },
+                ClassRule {
+                    model: MPred::In(&[0x7e, 0x7d, 0x9d]),
+                    guard: Guard::None,
+                    cpu_type: "corei7",
+                    cpu_subtype: "icelake-client",
+                },
+                ClassRule {
+                    model: MPred::In(&[0x8c, 0x8d]),
+                    guard: Guard::None,
+                    cpu_type: "corei7",
+                    cpu_subtype: "tigerlake",
+                },
                 // Alder Lake 一族（含 Raptor Lake / Meteor Lake 的 model）在 gcc 13.3
                 // 里全部归到 `INTEL_COREI7_ALDERLAKE`。
-                ClassRule { model: MPred::In(&[0xbe, 0x97, 0x9a, 0xb7, 0xba, 0xbf, 0xaa, 0xac]), guard: Guard::None, cpu_type: "corei7", cpu_subtype: "alderlake" },
-                ClassRule { model: MPred::In(&[0x8f, 0xcf]), guard: Guard::None, cpu_type: "corei7", cpu_subtype: "sapphirerapids" },
+                ClassRule {
+                    model: MPred::In(&[0xbe, 0x97, 0x9a, 0xb7, 0xba, 0xbf, 0xaa, 0xac]),
+                    guard: Guard::None,
+                    cpu_type: "corei7",
+                    cpu_subtype: "alderlake",
+                },
+                ClassRule {
+                    model: MPred::In(&[0x8f, 0xcf]),
+                    guard: Guard::None,
+                    cpu_type: "corei7",
+                    cpu_subtype: "sapphirerapids",
+                },
                 // Sierra Forest / Grand Ridge 是**只有类型没有子型**的 E-core/P-cores 新类。
-                ClassRule { model: MPred::Eq(0xaf), guard: Guard::None, cpu_type: "sierraforest", cpu_subtype: "" },
-                ClassRule { model: MPred::Eq(0xad), guard: Guard::None, cpu_type: "corei7", cpu_subtype: "graniterapids" },
-                ClassRule { model: MPred::Eq(0xae), guard: Guard::None, cpu_type: "corei7", cpu_subtype: "graniterapids-d" },
-                ClassRule { model: MPred::Eq(0xb6), guard: Guard::None, cpu_type: "grandridge", cpu_subtype: "" },
+                ClassRule {
+                    model: MPred::Eq(0xaf),
+                    guard: Guard::None,
+                    cpu_type: "sierraforest",
+                    cpu_subtype: "",
+                },
+                ClassRule {
+                    model: MPred::Eq(0xad),
+                    guard: Guard::None,
+                    cpu_type: "corei7",
+                    cpu_subtype: "graniterapids",
+                },
+                ClassRule {
+                    model: MPred::Eq(0xae),
+                    guard: Guard::None,
+                    cpu_type: "corei7",
+                    cpu_subtype: "graniterapids-d",
+                },
+                ClassRule {
+                    model: MPred::Eq(0xb6),
+                    guard: Guard::None,
+                    cpu_type: "grandridge",
+                    cpu_subtype: "",
+                },
                 // Penryn(0x17/0x1d) + Merom(0x0f) → `INTEL_CORE2`。
-                ClassRule { model: MPred::In(&[0x17, 0x1d, 0x0f]), guard: Guard::None, cpu_type: "core2", cpu_subtype: "" },
+                ClassRule {
+                    model: MPred::In(&[0x17, 0x1d, 0x0f]),
+                    guard: Guard::None,
+                    cpu_type: "core2",
+                    cpu_subtype: "",
+                },
             ],
         },
         // ---- AMD family 10h ----
@@ -1806,9 +2058,24 @@ pub mod cpu_isa {
             family: MPred::Eq(0x10),
             group_type: "amdfam10h",
             rules: &[
-                ClassRule { model: MPred::Eq(0x2), guard: Guard::None, cpu_type: "", cpu_subtype: "barcelona" },
-                ClassRule { model: MPred::Eq(0x4), guard: Guard::None, cpu_type: "", cpu_subtype: "shanghai" },
-                ClassRule { model: MPred::Eq(0x8), guard: Guard::None, cpu_type: "", cpu_subtype: "istanbul" },
+                ClassRule {
+                    model: MPred::Eq(0x2),
+                    guard: Guard::None,
+                    cpu_type: "",
+                    cpu_subtype: "barcelona",
+                },
+                ClassRule {
+                    model: MPred::Eq(0x4),
+                    guard: Guard::None,
+                    cpu_type: "",
+                    cpu_subtype: "shanghai",
+                },
+                ClassRule {
+                    model: MPred::Eq(0x8),
+                    guard: Guard::None,
+                    cpu_type: "",
+                    cpu_subtype: "istanbul",
+                },
             ],
         },
         // ---- AMD family 14h / 16h：只有类型 ----
@@ -1833,16 +2100,61 @@ pub mod cpu_isa {
             family: MPred::Eq(0x15),
             group_type: "amdfam15h",
             rules: &[
-                ClassRule { model: MPred::Eq(0x2), guard: Guard::None, cpu_type: "", cpu_subtype: "bdver2" },
-                ClassRule { model: MPred::Le(0x0f), guard: Guard::None, cpu_type: "", cpu_subtype: "bdver1" },
-                ClassRule { model: MPred::Le(0x2f), guard: Guard::None, cpu_type: "", cpu_subtype: "bdver2" },
-                ClassRule { model: MPred::Le(0x4f), guard: Guard::None, cpu_type: "", cpu_subtype: "bdver3" },
-                ClassRule { model: MPred::Le(0x7f), guard: Guard::None, cpu_type: "", cpu_subtype: "bdver4" },
+                ClassRule {
+                    model: MPred::Eq(0x2),
+                    guard: Guard::None,
+                    cpu_type: "",
+                    cpu_subtype: "bdver2",
+                },
+                ClassRule {
+                    model: MPred::Le(0x0f),
+                    guard: Guard::None,
+                    cpu_type: "",
+                    cpu_subtype: "bdver1",
+                },
+                ClassRule {
+                    model: MPred::Le(0x2f),
+                    guard: Guard::None,
+                    cpu_type: "",
+                    cpu_subtype: "bdver2",
+                },
+                ClassRule {
+                    model: MPred::Le(0x4f),
+                    guard: Guard::None,
+                    cpu_type: "",
+                    cpu_subtype: "bdver3",
+                },
+                ClassRule {
+                    model: MPred::Le(0x7f),
+                    guard: Guard::None,
+                    cpu_type: "",
+                    cpu_subtype: "bdver4",
+                },
                 // model 落在 0x80+ 时 gcc 改用特性位区分（下面四条 `Any` + 守卫）。
-                ClassRule { model: MPred::Any, guard: Guard::Has("avx2"), cpu_type: "", cpu_subtype: "bdver4" },
-                ClassRule { model: MPred::Any, guard: Guard::Has("xsaveopt"), cpu_type: "", cpu_subtype: "bdver3" },
-                ClassRule { model: MPred::Any, guard: Guard::Has("bmi"), cpu_type: "", cpu_subtype: "bdver2" },
-                ClassRule { model: MPred::Any, guard: Guard::Has("xop"), cpu_type: "", cpu_subtype: "bdver1" },
+                ClassRule {
+                    model: MPred::Any,
+                    guard: Guard::Has("avx2"),
+                    cpu_type: "",
+                    cpu_subtype: "bdver4",
+                },
+                ClassRule {
+                    model: MPred::Any,
+                    guard: Guard::Has("xsaveopt"),
+                    cpu_type: "",
+                    cpu_subtype: "bdver3",
+                },
+                ClassRule {
+                    model: MPred::Any,
+                    guard: Guard::Has("bmi"),
+                    cpu_type: "",
+                    cpu_subtype: "bdver2",
+                },
+                ClassRule {
+                    model: MPred::Any,
+                    guard: Guard::Has("xop"),
+                    cpu_type: "",
+                    cpu_subtype: "bdver1",
+                },
             ],
         },
         // ---- AMD family 17h (Zen1/2) ----
@@ -1851,12 +2163,32 @@ pub mod cpu_isa {
             family: MPred::Eq(0x17),
             group_type: "amdfam17h",
             rules: &[
-                ClassRule { model: MPred::Le(0x1f), guard: Guard::None, cpu_type: "", cpu_subtype: "znver1" },
-                ClassRule { model: MPred::Ge(0x30), guard: Guard::None, cpu_type: "", cpu_subtype: "znver2" },
+                ClassRule {
+                    model: MPred::Le(0x1f),
+                    guard: Guard::None,
+                    cpu_type: "",
+                    cpu_subtype: "znver1",
+                },
+                ClassRule {
+                    model: MPred::Ge(0x30),
+                    guard: Guard::None,
+                    cpu_type: "",
+                    cpu_subtype: "znver2",
+                },
                 // model 0x20..0x2f 靠 CLWB/CLZERO 区分（本轮把 clwb 从错的 EBX#30
                 // 改成 EBX#24，这条守卫才真的是 CLWB）。
-                ClassRule { model: MPred::Any, guard: Guard::Has("clwb"), cpu_type: "", cpu_subtype: "znver2" },
-                ClassRule { model: MPred::Any, guard: Guard::Has("clzero"), cpu_type: "", cpu_subtype: "znver1" },
+                ClassRule {
+                    model: MPred::Any,
+                    guard: Guard::Has("clwb"),
+                    cpu_type: "",
+                    cpu_subtype: "znver2",
+                },
+                ClassRule {
+                    model: MPred::Any,
+                    guard: Guard::Has("clzero"),
+                    cpu_type: "",
+                    cpu_subtype: "znver1",
+                },
             ],
         },
         // ---- AMD family 19h (Zen3/4) ----
@@ -1865,11 +2197,36 @@ pub mod cpu_isa {
             family: MPred::Eq(0x19),
             group_type: "amdfam19h",
             rules: &[
-                ClassRule { model: MPred::Le(0x0f), guard: Guard::None, cpu_type: "", cpu_subtype: "znver3" },
-                ClassRule { model: MPred::Range { lo: 0x10, hi: 0x1f }, guard: Guard::None, cpu_type: "", cpu_subtype: "znver4" },
-                ClassRule { model: MPred::Range { lo: 0x60, hi: 0xaf }, guard: Guard::None, cpu_type: "", cpu_subtype: "znver4" },
-                ClassRule { model: MPred::Any, guard: Guard::Has("avx512f"), cpu_type: "", cpu_subtype: "znver4" },
-                ClassRule { model: MPred::Any, guard: Guard::Has("vaes"), cpu_type: "", cpu_subtype: "znver3" },
+                ClassRule {
+                    model: MPred::Le(0x0f),
+                    guard: Guard::None,
+                    cpu_type: "",
+                    cpu_subtype: "znver3",
+                },
+                ClassRule {
+                    model: MPred::Range { lo: 0x10, hi: 0x1f },
+                    guard: Guard::None,
+                    cpu_type: "",
+                    cpu_subtype: "znver4",
+                },
+                ClassRule {
+                    model: MPred::Range { lo: 0x60, hi: 0xaf },
+                    guard: Guard::None,
+                    cpu_type: "",
+                    cpu_subtype: "znver4",
+                },
+                ClassRule {
+                    model: MPred::Any,
+                    guard: Guard::Has("avx512f"),
+                    cpu_type: "",
+                    cpu_subtype: "znver4",
+                },
+                ClassRule {
+                    model: MPred::Any,
+                    guard: Guard::Has("vaes"),
+                    cpu_type: "",
+                    cpu_subtype: "znver3",
+                },
             ],
         },
         // 本表**故意没有** AMD family 1Ah（znver5）那组。不是“还没做”：gcc 13.3 的
@@ -1894,7 +2251,12 @@ pub mod cpu_isa {
                 // **没有**「分类结果反向清除特性位」这个机制，所以在这类 CPU 上
                 // `__builtin_cpu_supports("avx")` 会与 gcc 飘（本机观察不到：不是
                 // Zhaoxin）。已记进 `docs/wp_ifunc_real_fix.md` 的未闭合清单。
-                ClassRule { model: MPred::Eq(0x3b), guard: Guard::None, cpu_type: "", cpu_subtype: "lujiazui" },
+                ClassRule {
+                    model: MPred::Eq(0x3b),
+                    guard: Guard::None,
+                    cpu_type: "",
+                    cpu_subtype: "lujiazui",
+                },
             ],
         },
     ];
@@ -1918,13 +2280,33 @@ pub mod cpu_isa {
 
     /// 逐条对应 gcc 13.3 `cpu_indicator_init`（同一个文件的 1047-1105 行）。
     pub static DECODE_RULES: &[DecodeRule] = &[
-        DecodeRule { kind: VENDOR_INTEL, family_eq: 0x0f, ops: &[Adjust::AddExtFamily, Adjust::AddExtModel] },
-        DecodeRule { kind: VENDOR_INTEL, family_eq: 0x06, ops: &[Adjust::AddExtModel] },
-        DecodeRule { kind: VENDOR_AMD, family_eq: 0x0f, ops: &[Adjust::AddExtFamily, Adjust::AddExtModel] },
+        DecodeRule {
+            kind: VENDOR_INTEL,
+            family_eq: 0x0f,
+            ops: &[Adjust::AddExtFamily, Adjust::AddExtModel],
+        },
+        DecodeRule {
+            kind: VENDOR_INTEL,
+            family_eq: 0x06,
+            ops: &[Adjust::AddExtModel],
+        },
+        DecodeRule {
+            kind: VENDOR_AMD,
+            family_eq: 0x0f,
+            ops: &[Adjust::AddExtFamily, Adjust::AddExtModel],
+        },
         // Centaur 串且 family<7 的机器不会走到分类（`KIND_PROMOTES` 不提升），
         // 但它的 model 调整与 Zhaoxin 同形，所以两条都列。
-        DecodeRule { kind: VENDOR_CENTAUR, family_eq: 0x07, ops: &[Adjust::AddExtModel] },
-        DecodeRule { kind: VENDOR_ZHAOXIN, family_eq: 0x07, ops: &[Adjust::AddExtModel] },
+        DecodeRule {
+            kind: VENDOR_CENTAUR,
+            family_eq: 0x07,
+            ops: &[Adjust::AddExtModel],
+        },
+        DecodeRule {
+            kind: VENDOR_ZHAOXIN,
+            family_eq: 0x07,
+            ops: &[Adjust::AddExtModel],
+        },
     ];
 
     /// 厂商 kind 的升级规则（gcc：Centaur 串但 family>=7 就不是“老 Centaur”而是 Zhaoxin）。
@@ -2133,7 +2515,10 @@ pub mod cpu_isa {
 
     /// 按名字查 `__builtin_cpu_is` 的比较目标（`None` = 本表没这个名）。
     pub fn cpu_is_match(name: &str) -> Option<&'static CpuIsMatch> {
-        CPU_IS_NAMES.iter().find(|(n, _)| *n == name).map(|(_, m)| m)
+        CPU_IS_NAMES
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, m)| m)
     }
 
     /// 全部接受的型号名（诊断文案与矩阵夹具用）。
@@ -2179,13 +2564,22 @@ pub mod cpu_isa {
                 if !r.cpu_type.is_empty() {
                     cur_type = r.cpu_type;
                 }
-                return ProcessorClass { cpu_type: cur_type, cpu_subtype: r.cpu_subtype };
+                return ProcessorClass {
+                    cpu_type: cur_type,
+                    cpu_subtype: r.cpu_subtype,
+                };
             }
             // 本组没任何规则命中：gcc 同样只留下组级类型（subtype 不写），
             // 并且**不会**再去试后面的组（`switch (family)` 只进一个 case）。
-            return ProcessorClass { cpu_type: cur_type, cpu_subtype: "" };
+            return ProcessorClass {
+                cpu_type: cur_type,
+                cpu_subtype: "",
+            };
         }
-        ProcessorClass { cpu_type: "", cpu_subtype: "" }
+        ProcessorClass {
+            cpu_type: "",
+            cpu_subtype: "",
+        }
     }
 
     /// 按 `CpuIsMatch` 判定一个型号名是否命中给定的 `(kind, class)`。
@@ -2229,7 +2623,13 @@ pub mod cpu_isa {
         let c0 = __cpuid(0);
         let kind = vendor_kind(c0.ebx, c0.edx, c0.ecx);
         if kind == VENDOR_UNKNOWN {
-            return (VENDOR_UNKNOWN, ProcessorClass { cpu_type: "", cpu_subtype: "" });
+            return (
+                VENDOR_UNKNOWN,
+                ProcessorClass {
+                    cpu_type: "",
+                    cpu_subtype: "",
+                },
+            );
         }
         let eax = __cpuid_count(1, 0).eax;
         let (family, model) = decode_family_model(eax, kind);
@@ -2267,7 +2667,10 @@ pub mod cpu_isa {
             assert_eq!(got, vec!["avx512f", "bmi2", "fma", "avx", "popcnt", "sse4.2", "mmx"]);
             // 声明顺序不影响结果。
             input.reverse();
-            assert_eq!(dispatch_order(&input), vec!["avx512f", "bmi2", "fma", "avx", "popcnt", "sse4.2", "mmx"]);
+            assert_eq!(
+                dispatch_order(&input),
+                vec!["avx512f", "bmi2", "fma", "avx", "popcnt", "sse4.2", "mmx"]
+            );
         }
 
         #[test]
@@ -2280,8 +2683,24 @@ pub mod cpu_isa {
                 assert!(is_cloneable(n), "{n} 应可作为 target_clones ISA");
             }
             for n in [
-                "avx512vl", "avx512bw", "f16c", "cx16", "movbe", "xsave", "osxsave", "cmov", "fxsr",
-                "lzcnt", "abm", "sha", "adx", "rdrnd", "rdseed", "gfni", "vaes", "not_a_real_arch",
+                "avx512vl",
+                "avx512bw",
+                "f16c",
+                "cx16",
+                "movbe",
+                "xsave",
+                "osxsave",
+                "cmov",
+                "fxsr",
+                "lzcnt",
+                "abm",
+                "sha",
+                "adx",
+                "rdrnd",
+                "rdseed",
+                "gfni",
+                "vaes",
+                "not_a_real_arch",
             ] {
                 assert!(!is_cloneable(n), "{n} 在 gcc 13 里不能作为 target_clones ISA");
             }
@@ -2334,7 +2753,10 @@ pub mod cpu_isa {
         #[test]
         fn probe_slots_are_within_model_size() {
             for p in PROBES {
-                for slot in [p.out_eax, p.out_ebx, p.out_ecx, p.out_edx].into_iter().flatten() {
+                for slot in [p.out_eax, p.out_ebx, p.out_ecx, p.out_edx]
+                    .into_iter()
+                    .flatten()
+                {
                     assert!(slot < SLOT_WORDS, "槽 {} 超出 SLOT_WORDS={}", slot, SLOT_WORDS);
                 }
                 if let Gate::LeafAtLeast { slot, .. } = p.gate {
@@ -2362,35 +2784,71 @@ pub mod cpu_isa {
             // 每个槽由哪一条探测写入（只能用它自己的 EAX）。
             let writer_of = |slot: usize| {
                 PROBES.iter().position(|p| {
-                    [p.out_eax, p.out_ebx, p.out_ecx, p.out_edx].into_iter().flatten().any(|s| s == slot)
+                    [p.out_eax, p.out_ebx, p.out_ecx, p.out_edx]
+                        .into_iter()
+                        .flatten()
+                        .any(|s| s == slot)
                 })
             };
             for (i, p) in PROBES.iter().enumerate() {
-                let Gate::LeafAtLeast { slot, min } = p.gate else { continue };
+                let Gate::LeafAtLeast { slot, min } = p.gate else {
+                    continue;
+                };
                 let filler = writer_of(slot).unwrap_or_else(|| {
-                    panic!("探测 leaf {:#x} 的门控槽 {} 没有任何探测写入（永远读到 0）", p.leaf, slot)
+                    panic!(
+                        "探测 leaf {:#x} 的门控槽 {} 没有任何探测写入（永远读到 0）",
+                        p.leaf, slot
+                    )
                 });
-                assert!(filler < i, "探测 leaf {:#x} 在它用来门控的槽 {} 被填之前就跑了", p.leaf, slot);
+                assert!(
+                    filler < i,
+                    "探测 leaf {:#x} 在它用来门控的槽 {} 被填之前就跑了",
+                    p.leaf,
+                    slot
+                );
                 let is_ext = p.leaf >= 0x8000_0000;
                 if slot == SLOT_LEAF0_EAX {
                     // 基本叶最大值的值域是 0..0x7FFF_FFFF：拿它门控任何 >= 0x8000_0000 的
                     // min 都是永假（也即扩展叶探测必须无条件跑）。
-                    assert!(min < 0x8000_0000, "leaf {:#x} 用基本叶最大值({:#x})门控 min={:#x} —— 永假", p.leaf, min, min);
+                    assert!(
+                        min < 0x8000_0000,
+                        "leaf {:#x} 用基本叶最大值({:#x})门控 min={:#x} —— 永假",
+                        p.leaf,
+                        min,
+                        min
+                    );
                     assert!(!is_ext, "leaf {:#x} 是扩展叶，不能用 SLOT_LEAF0_EAX 门控", p.leaf);
                 } else if slot == SLOT_EXT_MAX_EAX {
-                    assert!(min >= 0x8000_0000, "leaf {:#x} 用扩展叶最大值门控，但 min={:#x} 不在其值域", p.leaf, min);
+                    assert!(
+                        min >= 0x8000_0000,
+                        "leaf {:#x} 用扩展叶最大值门控，但 min={:#x} 不在其值域",
+                        p.leaf,
+                        min
+                    );
                     assert!(is_ext, "leaf {:#x} 是基本叶，不该用 SLOT_EXT_MAX_EAX 门控", p.leaf);
                 }
             }
             // 显式钉住两个「最大值」源探测的形状：leaf 0（基本最大值）与
             // leaf 0x8000_0000（扩展最大值）都必须无条件跑 —— 前者是所有门控的根，
             // 后者一旦带门控就只能是上面那种永假形状。
-            let root = PROBES.iter().find(|p| p.leaf == 0).expect("PROBES 必须包含 leaf 0");
+            let root = PROBES
+                .iter()
+                .find(|p| p.leaf == 0)
+                .expect("PROBES 必须包含 leaf 0");
             assert!(matches!(root.gate, Gate::None), "leaf 0 不能带门控（它是所有门控的根）");
-            let ext_root =
-                PROBES.iter().find(|p| p.leaf == 0x8000_0000).expect("PROBES 必须包含 leaf 0x8000_0000");
-            assert!(matches!(ext_root.gate, Gate::None), "leaf 0x8000_0000 必须无条件跑（否则扩展叶特性全体静默读 0）");
-            assert_eq!(ext_root.out_eax, Some(SLOT_EXT_MAX_EAX), "leaf 0x8000_0000 的 EAX 就是扩展叶最大值");
+            let ext_root = PROBES
+                .iter()
+                .find(|p| p.leaf == 0x8000_0000)
+                .expect("PROBES 必须包含 leaf 0x8000_0000");
+            assert!(
+                matches!(ext_root.gate, Gate::None),
+                "leaf 0x8000_0000 必须无条件跑（否则扩展叶特性全体静默读 0）"
+            );
+            assert_eq!(
+                ext_root.out_eax,
+                Some(SLOT_EXT_MAX_EAX),
+                "leaf 0x8000_0000 的 EAX 就是扩展叶最大值"
+            );
         }
 
         /// 本表与宿主侧命令式检测器在同一台真机上必须给出相同答案。
@@ -2479,11 +2937,20 @@ pub mod cpu_isa {
         fn vendor_dwords_rebuild_the_vendor_strings() {
             fn bytes_of(v: u32) -> [u8; 4] {
                 // CPUID 返回的是小端 dword：最低字节是字符串的第一字符。
-                [(v & 0xff) as u8, ((v >> 8) & 0xff) as u8, ((v >> 16) & 0xff) as u8, ((v >> 24) & 0xff) as u8]
+                [
+                    (v & 0xff) as u8,
+                    ((v >> 8) & 0xff) as u8,
+                    ((v >> 16) & 0xff) as u8,
+                    ((v >> 24) & 0xff) as u8,
+                ]
             }
             fn rebuild(bx: u32, dx: u32, cx: u32) -> String {
                 let mut s = String::new();
-                for b in bytes_of(bx).iter().chain(bytes_of(dx).iter()).chain(bytes_of(cx).iter()) {
+                for b in bytes_of(bx)
+                    .iter()
+                    .chain(bytes_of(dx).iter())
+                    .chain(bytes_of(cx).iter())
+                {
                     s.push(*b as char);
                 }
                 s
@@ -2643,7 +3110,9 @@ pub mod cpu_isa {
             }
             for s in &written_subs {
                 assert!(
-                    CPU_IS_NAMES.iter().any(|(_, m)| *m == CpuIsMatch::Subtype(s)),
+                    CPU_IS_NAMES
+                        .iter()
+                        .any(|(_, m)| *m == CpuIsMatch::Subtype(s)),
                     "分类表写了子型号 '{s}'，但没有任何名字比它"
                 );
             }
@@ -2659,7 +3128,10 @@ pub mod cpu_isa {
                         assert!(subtype_id(s).is_some(), "'{s}' 解不出 id");
                     },
                     CpuIsMatch::Vendor(v) => {
-                        assert!(*v == VENDOR_INTEL || *v == VENDOR_AMD, "'{name}' 的厂商值 {v} 不在 kind 值域");
+                        assert!(
+                            *v == VENDOR_INTEL || *v == VENDOR_AMD,
+                            "'{name}' 的厂商值 {v} 不在 kind 值域"
+                        );
                     },
                 }
             }
@@ -2675,7 +3147,11 @@ pub mod cpu_isa {
             for g in CLASSIFY {
                 let mut terminal_seen = false;
                 for r in g.rules {
-                    assert!(!terminal_seen, "组 (vendor {}, family {:?}) 里有规则排在兵底之后（死代码）", g.vendor, g.family);
+                    assert!(
+                        !terminal_seen,
+                        "组 (vendor {}, family {:?}) 里有规则排在兵底之后（死代码）",
+                        g.vendor, g.family
+                    );
                     match r.model {
                         MPred::Range { lo, hi } => assert!(lo <= hi, "空区间 {lo:#x}..{hi:#x}"),
                         MPred::In(list) => {
@@ -2775,25 +3251,82 @@ pub mod cpu_isa {
             // 本机 `gcc 13.3` 对每个候选名字单独编译+链接+运行的实测结果（排序后），
             // `COMPILE-OR-LINK-FAIL` 的那些不列在这里（dcc 也必须拒）。
             const EXPECTED: &[&str] = &[
-                "alderlake", "amd", "amdfam10h", "amdfam15h", "amdfam17h", "amdfam19h",
-                "atom", "barcelona", "bdver1", "bdver2", "bdver3", "bdver4", "bonnell",
-                "broadwell", "btver1", "btver2", "cannonlake", "cascadelake", "cooperlake",
-                "core2", "corei7", "goldmont", "goldmont-plus", "grandridge",
-                "graniterapids", "graniterapids-d", "haswell", "icelake-client",
-                "icelake-server", "intel", "istanbul", "ivybridge", "knl", "knm", "lujiazui",
-                "nehalem", "rocketlake", "sandybridge", "sapphirerapids", "shanghai",
-                "sierraforest", "silvermont", "skylake", "skylake-avx512", "tigerlake",
-                "tremont", "westmere", "znver1", "znver2", "znver3", "znver4",
+                "alderlake",
+                "amd",
+                "amdfam10h",
+                "amdfam15h",
+                "amdfam17h",
+                "amdfam19h",
+                "atom",
+                "barcelona",
+                "bdver1",
+                "bdver2",
+                "bdver3",
+                "bdver4",
+                "bonnell",
+                "broadwell",
+                "btver1",
+                "btver2",
+                "cannonlake",
+                "cascadelake",
+                "cooperlake",
+                "core2",
+                "corei7",
+                "goldmont",
+                "goldmont-plus",
+                "grandridge",
+                "graniterapids",
+                "graniterapids-d",
+                "haswell",
+                "icelake-client",
+                "icelake-server",
+                "intel",
+                "istanbul",
+                "ivybridge",
+                "knl",
+                "knm",
+                "lujiazui",
+                "nehalem",
+                "rocketlake",
+                "sandybridge",
+                "sapphirerapids",
+                "shanghai",
+                "sierraforest",
+                "silvermont",
+                "skylake",
+                "skylake-avx512",
+                "tigerlake",
+                "tremont",
+                "westmere",
+                "znver1",
+                "znver2",
+                "znver3",
+                "znver4",
             ];
             assert_eq!(EXPECTED.len(), 51, "实测集本身就是 51 个");
             let mut got: Vec<&str> = cpu_is_names();
             got.sort_unstable();
-            assert_eq!(got.len(), got.iter().collect::<std::collections::HashSet<_>>().len(), "名字重复");
+            assert_eq!(
+                got.len(),
+                got.iter().collect::<std::collections::HashSet<_>>().len(),
+                "名字重复"
+            );
             assert_eq!(got, EXPECTED, "`__builtin_cpu_is` 名字集与 gcc 13.3 实测集不一致");
             // gcc 13.3 拒绝的写法也必须被本表拒掉（`emit_cpu_is` 据此逐调用点报 E1125）。
             for n in [
-                "athlon", "pentium4", "k6", "amdfam10", "znver5", "amdfam1ah", "generic",
-                "centaur", "zhaoxin", "emeraldrapids", "raptorlake", "gracemont", "",
+                "athlon",
+                "pentium4",
+                "k6",
+                "amdfam10",
+                "znver5",
+                "amdfam1ah",
+                "generic",
+                "centaur",
+                "zhaoxin",
+                "emeraldrapids",
+                "raptorlake",
+                "gracemont",
+                "",
             ] {
                 assert!(cpu_is_match(n).is_none(), "{n} 在 gcc 13.3 里不合法，dcc 也不能接受");
             }
@@ -2808,7 +3341,10 @@ pub mod cpu_isa {
         fn decode_formula_matches_gcc_for_each_vendor() {
             // eax: ext_family=0x0(<<20) ext_model=0x2(<<12) family=0xf(<<8) model=0x3(<<4)
             let raw_f15m3_with_ext = 0x0002_0f30u32;
-            assert_eq!(decode_family_model(raw_f15m3_with_ext, VENDOR_INTEL), (0x0f + 0x00, 0x03 + 0x20));
+            assert_eq!(
+                decode_family_model(raw_f15m3_with_ext, VENDOR_INTEL),
+                (0x0f + 0x00, 0x03 + 0x20)
+            );
             // family==0xf 时 gcc 同时加扩展 family：造一个 ext_family=6 的 0x0f 情号
             let raw = 0x0062_0f30u32; // ext_family=6, ext_model=0x20, family=0xf, model=3
             assert_eq!(decode_family_model(raw, VENDOR_INTEL), (0x0f + 6, 0x03 + 0x20));
@@ -2836,7 +3372,11 @@ pub mod cpu_isa {
                 let eax = __cpuid_count(1, 0).eax;
                 let (f, m) = decode_family_model(eax, VENDOR_INTEL);
                 let c = classify(VENDOR_INTEL, f, m, |_| false);
-                assert_eq!((f, m), (6, 0xa7), "本机 family/model 应为 6/0xa7（gcc 报 rocketlake=1）");
+                assert_eq!(
+                    (f, m),
+                    (6, 0xa7),
+                    "本机 family/model 应为 6/0xa7（gcc 报 rocketlake=1）"
+                );
                 assert_eq!(c.cpu_type, "corei7");
                 assert_eq!(c.cpu_subtype, "rocketlake");
             }
@@ -2899,11 +3439,21 @@ pub mod cpu_isa {
             for g in CLASSIFY {
                 let mut cases: Vec<ProcessorClass> = Vec::new();
                 if !g.group_type.is_empty() {
-                    cases.push(ProcessorClass { cpu_type: g.group_type, cpu_subtype: "" });
+                    cases.push(ProcessorClass {
+                        cpu_type: g.group_type,
+                        cpu_subtype: "",
+                    });
                 }
                 for r in g.rules {
-                    let t = if r.cpu_type.is_empty() { g.group_type } else { r.cpu_type };
-                    cases.push(ProcessorClass { cpu_type: t, cpu_subtype: r.cpu_subtype });
+                    let t = if r.cpu_type.is_empty() {
+                        g.group_type
+                    } else {
+                        r.cpu_type
+                    };
+                    cases.push(ProcessorClass {
+                        cpu_type: t,
+                        cpu_subtype: r.cpu_subtype,
+                    });
                 }
                 for c in &cases {
                     let subs: Vec<&str> = CPU_IS_NAMES
@@ -2912,7 +3462,10 @@ pub mod cpu_isa {
                         .filter(|(n, _)| cpu_is_holds(n, g.vendor, c))
                         .map(|(n, _)| *n)
                         .collect();
-                    assert!(subs.len() <= 1, "组合 {c:?} 同时命中两个子型名 {subs:?}（子型必须互斥）");
+                    assert!(
+                        subs.len() <= 1,
+                        "组合 {c:?} 同时命中两个子型名 {subs:?}（子型必须互斥）"
+                    );
                     if let Some(s) = subs.first() {
                         // 子型 ⇒ 类型：产生该子型的那条规则同时也写了类型。
                         // **唯一例外**是 Zhaoxin 组：gcc 13.3/15.3 的名字表里没有任何

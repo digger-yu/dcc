@@ -349,18 +349,9 @@ mod tests {
         s.record_legacy();
         s.record_unsupported_feature(CppFeature::Concept, CppSupportLevel::Parsed);
         s.record_unsupported_feature(CppFeature::Concept, CppSupportLevel::Parsed);
-        s.record_unsupported_feature(
-            CppFeature::PartialSpecialization,
-            CppSupportLevel::Parsed,
-        );
-        s.record_unsupported_feature(
-            CppFeature::PartialSpecialization,
-            CppSupportLevel::Parsed,
-        );
-        s.record_unsupported_feature(
-            CppFeature::PartialSpecialization,
-            CppSupportLevel::Parsed,
-        );
+        s.record_unsupported_feature(CppFeature::PartialSpecialization, CppSupportLevel::Parsed);
+        s.record_unsupported_feature(CppFeature::PartialSpecialization, CppSupportLevel::Parsed);
+        s.record_unsupported_feature(CppFeature::PartialSpecialization, CppSupportLevel::Parsed);
         let sum = s.summary();
         // 排序按计数降序: PartialSpecialization (3) 先, Concept (2) 后
         assert!(
@@ -368,11 +359,7 @@ mod tests {
             "summary 缺 PartialSpecialization 行: {}",
             sum
         );
-        assert!(
-            sum.contains("Concept@Parsed: 2"),
-            "summary 缺 Concept 行: {}",
-            sum
-        );
+        assert!(sum.contains("Concept@Parsed: 2"), "summary 缺 Concept 行: {}", sum);
         // 前缀 native/legacy 不变
         assert!(sum.contains("native=2 legacy=1"));
     }

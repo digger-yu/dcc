@@ -7,10 +7,10 @@
 //! `harness/elf.rs`（ELF64 解析）、`harness/{driver_cli,cpp_frontend}.rs`（驱动 CLI 与 C++ 前端）。
 //! 因本文件由 `#[path]` 挂载（子模块默认解析落到 `tests/common/`），需显式写前缀。
 
-#[path = "harness/driver_cli.rs"]
-mod driver_cli;
 #[path = "harness/cpp_frontend.rs"]
 mod cpp_frontend;
+#[path = "harness/driver_cli.rs"]
+mod driver_cli;
 #[path = "harness/elf.rs"]
 mod elf;
 // 单入口重导出：同一 harness 被多个 target 共用（`integration` 与 `profile`），
@@ -36,11 +36,12 @@ pub(crate) fn run_syntax_test(name: &str, source: &str) -> std::process::Output 
     output
 }
 
-
-pub(crate) fn run_object_test(name: &str, source: &str) -> (std::process::Output, std::path::PathBuf) {
+pub(crate) fn run_object_test(
+    name: &str,
+    source: &str,
+) -> (std::process::Output, std::path::PathBuf) {
     run_object_test_flags(name, source, &[])
 }
-
 
 pub(crate) fn run_object_test_flags(
     name: &str,
@@ -65,7 +66,6 @@ pub(crate) fn run_object_test_flags(
     let _ = fs::remove_file(source_path);
     (output, object_path)
 }
-
 
 pub(crate) fn run_asm_output_test(name: &str, source: &str) -> (std::process::Output, String) {
     run_asm_output_test_flags(name, source, "")
@@ -101,12 +101,13 @@ pub(crate) fn run_asm_output_test_flags(
     (output, asm_text)
 }
 
-
 /// 编译为可执行文件并返回路径（Linux 远程测试用）
-pub(crate) fn run_compile_and_run(name: &str, source: &str) -> (std::process::Output, std::path::PathBuf) {
+pub(crate) fn run_compile_and_run(
+    name: &str,
+    source: &str,
+) -> (std::process::Output, std::path::PathBuf) {
     run_compile_and_run_flags(name, source, &[])
 }
-
 
 /// 带额外参数的编译并运行
 pub(crate) fn run_compile_and_run_flags(
@@ -133,7 +134,6 @@ pub(crate) fn run_compile_and_run_flags(
     let _ = fs::remove_file(source_path);
     (output, exe_path)
 }
-
 
 /// 运行上限时间 (秒), 由 `DCC_TEST_EXE_TIMEOUT_SECS` 覆盖, 默认 20。
 const EXE_TIMEOUT_DEFAULT: u64 = 20;
@@ -200,11 +200,9 @@ pub(crate) fn run_exe_bounded(path: &std::path::Path) -> (i32, Vec<u8>, Vec<u8>)
     (status.code().unwrap_or(-1), stdout, stderr)
 }
 
-
 pub(crate) fn run_exe(path: &std::path::Path) -> i32 {
     run_exe_bounded(path).0
 }
-
 
 /// GCC 交叉验证: 同一份 C 源分别用 `gcc -O0` 与 dcc 编译链接并运行, 要求
 /// **退出码相同**且 **stdout 逐字节一致**, 然后返回该退出码供调用方再断言具体值。
@@ -251,7 +249,6 @@ pub(crate) fn run_gcc_cross_check(name: &str, source: &str) -> i32 {
     assert_eq!(gcode, dcode, "{name}: gcc 与 dcc 的退出码不一致");
     dcode
 }
-
 
 /// 带优化档位的 gcc 交叉对照: 同一 C 源由 `gcc -O0` 与 `dcc <dcc_flags>` 各自编译,
 /// 要求 stdout 逐字节一致且退出码相同, 返回该退出码供调用方再断言具体值。
@@ -300,15 +297,9 @@ pub(crate) fn run_gcc_cross_check_opt(name: &str, source: &str, dcc_flags: &[&st
         "{name} [{}]: gcc 与 dcc 的 stdout 不一致 (gcc_rc={gcode} dcc_rc={dcode})",
         dcc_flags.join(" ")
     );
-    assert_eq!(
-        gcode, dcode,
-        "{name} [{}]: gcc 与 dcc 的退出码不一致",
-        dcc_flags.join(" ")
-    );
+    assert_eq!(gcode, dcode, "{name} [{}]: gcc 与 dcc 的退出码不一致", dcc_flags.join(" "));
     dcode
 }
-
-
 
 /// 带环境变量与档位的汇编输出：给「某条 pass 是否真的改变了产物」这类断言用。
 ///
@@ -456,7 +447,6 @@ pub(crate) fn run_gcc_two_tu_cross_check(name: &str, provider: &str, consumer: &
     want.0
 }
 
-
 /// C++ 夹具的 g++ 逐字节 + 退出码对照。实现**完全委派**
 /// [`cpp_coroutine_cross_check`] (同一真源: g++ -std=c++20 参照、`dcc -c`、
 /// 主机 gcc 链接、3 轮自洽), 只是换个与协程无关的名字 —— 块名/迭代序
@@ -465,7 +455,6 @@ pub(crate) fn run_gcc_two_tu_cross_check(name: &str, provider: &str, consumer: &
 pub(crate) fn cpp_gcc_cross_check(name: &str, source: &str) {
     cpp_coroutine_cross_check(name, source)
 }
-
 
 #[cfg(unix)]
 pub(crate) fn run_sanitized_binary(
@@ -490,7 +479,6 @@ pub(crate) fn run_sanitized_binary(
     (compile, run, log, exe_path)
 }
 
-
 #[cfg(unix)]
 pub(crate) fn assert_runtime_fails_with(run: &std::process::Output, log: &str, needles: &[&str]) {
     assert!(
@@ -504,7 +492,6 @@ pub(crate) fn assert_runtime_fails_with(run: &std::process::Output, log: &str, n
     );
 }
 
-
 #[cfg(unix)]
 pub(crate) fn assert_exit_code(run: &std::process::Output, code: i32, log: &str) {
     assert_eq!(
@@ -514,7 +501,6 @@ pub(crate) fn assert_exit_code(run: &std::process::Output, code: i32, log: &str)
     );
 }
 
-
 pub(crate) fn tool_exists(name: &str) -> bool {
     Command::new("sh")
         .args(["-c", &format!("command -v {name} >/dev/null 2>&1")])
@@ -522,7 +508,6 @@ pub(crate) fn tool_exists(name: &str) -> bool {
         .map(|s| s.success())
         .unwrap_or(false)
 }
-
 
 pub(crate) fn qemu_runtime_target(
     name: &str,
@@ -566,7 +551,6 @@ pub(crate) fn qemu_runtime_target(
     Some(())
 }
 
-
 pub(crate) fn compile_legacy_asm_object(name: &str, source: &str) -> (Vec<u8>, String) {
     let (output, obj_path) = run_object_test(name, source);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -588,7 +572,6 @@ pub(crate) fn compile_legacy_asm_object(name: &str, source: &str) -> (Vec<u8>, S
     (text, disasm)
 }
 
-
 pub(crate) fn assert_bytes_present(text: &[u8], needle: &[u8], label: &str) {
     assert!(
         text.windows(needle.len()).any(|w| w == needle),
@@ -596,15 +579,16 @@ pub(crate) fn assert_bytes_present(text: &[u8], needle: &[u8], label: &str) {
     );
 }
 
-
 pub(crate) fn assert_disasm_present(disasm: &str, needle: &str) {
     assert!(disasm.contains(needle), "missing disassembly pattern `{needle}`:\n{disasm}");
 }
 
-
 /// C++ 前端集成测试: 编译 .cpp 到 .o (m17_* fixture 用)
 /// 与 run_object_test 类似, 但显式写 .cpp 扩展名以触发 C++ 前端.
-pub(crate) fn run_cpp_object_test(name: &str, source: &str) -> (std::process::Output, std::path::PathBuf) {
+pub(crate) fn run_cpp_object_test(
+    name: &str,
+    source: &str,
+) -> (std::process::Output, std::path::PathBuf) {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-cpp-{name}-{}.cpp", std::process::id()));
     let object_path = dir.join(format!("dcc-cpp-{name}-{}.o", std::process::id()));
@@ -618,7 +602,6 @@ pub(crate) fn run_cpp_object_test(name: &str, source: &str) -> (std::process::Ou
     let _ = fs::remove_file(source_path);
     (output, object_path)
 }
-
 
 /// M51: 用主机 g++ 把 dcc 产出的 .o 链接成可执行文件并运行, 返回退出码.
 /// 链接失败返回 -2, 主机没有 g++ 返回 -100 (便于和夹具自身的断言退出码区分).
@@ -650,7 +633,6 @@ pub(crate) fn host_link_cpp_object_and_run(name: &str, object: &std::path::Path)
     run.status.code().unwrap_or(-3)
 }
 
-
 /// M51 配套真值: 用主机 g++ **原生**编译并运行同一 C++ 夹具, 返回退出码.
 /// 与 `host_link_cpp_object_and_run` 配对使用: 后者跑的是 dcc 产出的代码,
 /// 前者是 g++ 自己的代码, 两者退出码必须相等. 主机无 g++ 返回 -100,
@@ -681,14 +663,12 @@ pub(crate) fn gxx_native_cpp_exit_code(name: &str, source: &str) -> i32 {
     run.status.code().unwrap_or(-3)
 }
 
-
 /// dcc -c + 主机 gcc 链接 + 运行. 用于验证运行时行为 (libc 调用等).
 /// 返回 (编译输出, 链接+运行退出码). 退出码 0 表示通过.
 /// link_extra_args: 传给 gcc 的额外参数 (如 "-lm" 用于 libm 转发).
 pub(crate) fn run_host_link_and_run(name: &str, source: &str) -> (std::process::Output, i32) {
     run_host_link_and_run_with(name, source, &[])
 }
-
 
 pub(crate) fn run_host_link_and_run_with(
     name: &str,
@@ -743,7 +723,6 @@ pub(crate) fn run_host_link_and_run_with(
     (compile, code)
 }
 
-
 /// 解析外部 GCC 源码树位置 (供 M7 libdecnumber / M26.6 cc1plus 两个集成用例共用).
 ///
 /// 契约 (不留"静默绿"缺口):
@@ -771,7 +750,6 @@ pub(crate) fn gcc_src_tree_or_skip(required_subdir: &str) -> Option<std::path::P
     None
 }
 
-
 /// 从汇编文本中提取 `funcname:` 到下一个 `.size funcname, .-funcname` 的内容
 pub(crate) fn extract_function_body(asm: &str, name: &str) -> String {
     let label = format!("\n{name}:\n");
@@ -786,7 +764,6 @@ pub(crate) fn extract_function_body(asm: &str, name: &str) -> String {
         .unwrap_or(asm.len());
     asm[start..end].to_string()
 }
-
 
 /// 通用工具：编译一个 C 源文件并返回 output + 可执行路径
 #[allow(dead_code)]
@@ -813,7 +790,6 @@ pub(crate) fn run_compile_o(
     }
     (output, exe_path)
 }
-
 
 // ---------- kernel object corpus ----------
 
@@ -851,7 +827,6 @@ pub(crate) fn assert_kernel_corpus_object(rel: &str, expected_symbol: &str) {
         "missing expected function {expected_symbol} in {path:?}: {funcs:?}"
     );
 }
-
 
 /// M53: 模板 / 别名模板 / 协程-awaitor 夹具的统一交叉验证.
 ///
@@ -908,13 +883,11 @@ pub(crate) fn cpp_std20_exit_code_cross_check(name: &str, source: &str) {
     }
 }
 
-
 // =========================================================================
 // Section 11.4: x86_64 SysV va_arg 全栈支持
 // =========================================================================
 
 pub(crate) const VA_LIST_TYPEDEF: &str = "typedef __builtin_va_list va_list;\n";
-
 
 // ====== M26: 协程真状态机 / modules BMF / GCC ABI 运行时 ======
 
@@ -1012,7 +985,6 @@ pub(crate) fn cpp_coroutine_cross_check(name: &str, source: &str) {
     }
 }
 
-
 /// M28: 在 `dir` 里写 `<name>.cpp` 并用 dcc 编译为 `<name>.o`.
 /// `emit_bmf` = true 时附 `--emit-module-file=<dir>/<name>.bmf`.
 /// 返回子进程 Output (调用方自行断言 status / 读 stderr).
@@ -1036,10 +1008,13 @@ pub(crate) fn dcc_compile_module(
         .unwrap_or_else(|e| panic!("run dcc on {}: {}", name, e))
 }
 
-
 /// M28: 用 host gcc 链接若干 .o 并运行, 返回退出码 (链接失败 = -2).
 #[cfg(unix)]
-pub(crate) fn host_link_objects_and_run(exe: &std::path::Path, objs: &[&std::path::Path], cxx: bool) -> i32 {
+pub(crate) fn host_link_objects_and_run(
+    exe: &std::path::Path,
+    objs: &[&std::path::Path],
+    cxx: bool,
+) -> i32 {
     let linker = if cxx { "g++" } else { "gcc" };
     let mut cmd = Command::new(linker);
     for o in objs {
@@ -1058,7 +1033,6 @@ pub(crate) fn host_link_objects_and_run(exe: &std::path::Path, objs: &[&std::pat
         .unwrap_or_else(|e| panic!("run {}: {}", exe.display(), e));
     run.status.code().unwrap_or(-1)
 }
-
 
 // =====================================================================
 // Stage 0: C++ 三态路径 (`--cxx-native=off|on|auto`) 集成测试.
@@ -1083,7 +1057,6 @@ pub(crate) fn host_cc_available() -> bool {
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
-
 
 #[cfg(unix)]
 pub(crate) fn run_cpp_with_mode(
@@ -1116,7 +1089,6 @@ pub(crate) fn run_cpp_with_mode(
         Some((output, object_path))
     }
 }
-
 
 #[cfg(unix)]
 pub(crate) fn path_decision_in(stderr: &[u8]) -> &'static str {
@@ -1192,7 +1164,11 @@ pub(crate) fn asm_fallback_compile(
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/asm/asm_fallback_gas.c");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
-    cmd.arg("-c").arg("-o").arg(&obj_path).args(extra).arg(&fixture);
+    cmd.arg("-c")
+        .arg("-o")
+        .arg(&obj_path)
+        .args(extra)
+        .arg(&fixture);
     let output = cmd.output().expect("run dcc");
     (
         String::from_utf8_lossy(&output.stderr).to_string(),
@@ -1337,7 +1313,11 @@ pub(crate) fn elf64_all_rela(data: &[u8]) -> Vec<(u64, u32, u32, i64)> {
 ///
 /// 不清理临时 exe：调用方要 `file`/`readelf`/运行它。PID 进文件名避免并行用例互踩，
 /// 由调用方末尾删。（自 `tests/integration/c_attr_builtin.rs` 上移。）
-pub(crate) fn dcc_link_exe(tag: &str, src: &str, flags: &[&str]) -> (bool, String, std::path::PathBuf) {
+pub(crate) fn dcc_link_exe(
+    tag: &str,
+    src: &str,
+    flags: &[&str],
+) -> (bool, String, std::path::PathBuf) {
     let dir = std::env::temp_dir();
     let pid = std::process::id();
     let sf = dir.join(format!("dcc-ifuncdyn-{tag}-{pid}.c"));
@@ -1351,11 +1331,7 @@ pub(crate) fn dcc_link_exe(tag: &str, src: &str, flags: &[&str]) -> (bool, Strin
     cmd.args(["-o"]).arg(&exe).arg(&sf);
     let out = cmd.output().expect("运行 dcc");
     let _ = fs::remove_file(&sf);
-    (
-        out.status.success(),
-        String::from_utf8_lossy(&out.stderr).to_string(),
-        exe,
-    )
+    (out.status.success(), String::from_utf8_lossy(&out.stderr).to_string(), exe)
 }
 
 /// 只编成 `.o` 并把它读回来（`.o` 侧的静态判据用）。
@@ -1372,7 +1348,12 @@ pub(crate) fn dcc_obj_bytes(tag: &str, src: &str, flags: &[&str]) -> Vec<u8> {
     }
     cmd.args(["-o"]).arg(&obj).arg(&sf);
     let out = cmd.output().expect("运行 dcc -c");
-    assert!(out.status.success(), "compile [{}]: {}", flags.join(" "), String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "compile [{}]: {}",
+        flags.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = fs::remove_file(&sf);
     let bytes = fs::read(&obj).expect("读回 .o");
     let _ = fs::remove_file(&obj);
@@ -1439,11 +1420,7 @@ pub(crate) fn assert_all_levels_match_gcc(tag: &str, src: &str, why: &str) {
         return;
     }
     for flag in ["-O0", "-O1", "-O2", "-O3"] {
-        assert_eq!(
-            run_gcc_cross_check_opt(tag, src, &[flag]),
-            0,
-            "{flag}: {why}"
-        );
+        assert_eq!(run_gcc_cross_check_opt(tag, src, &[flag]), 0, "{flag}: {why}");
     }
 }
 
@@ -1480,8 +1457,6 @@ pub(crate) fn dcc_asm_with_pipe(name: &str, src: &str, ssa_off: Option<&str>) ->
     let _ = fs::remove_file(&ap);
     text
 }
-
-
 
 // ============================================================================
 // Phase 6.2 收尾：gdb 实读 dcc `-g` 产物的共享助手（自 tests/integration/dwarf_gdb.rs 搬入）
@@ -1619,7 +1594,10 @@ pub(crate) fn readelf_attr(line: &str) -> Option<(&str, &str)> {
 /// readelf 打的整数值：`0x401110`、`0x12d`，以及未重定位的 `.o` 里的裸 `0`。
 pub(crate) fn readelf_int(v: &str) -> Option<u64> {
     let t = v.trim();
-    let body = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+    let body = t
+        .strip_prefix("0x")
+        .or_else(|| t.strip_prefix("0X"))
+        .unwrap_or(t);
     u64::from_str_radix(body, if body == t { 10 } else { 16 }).ok()
 }
 
@@ -1631,11 +1609,7 @@ pub(crate) fn readelf_debug_info_dump(path: &std::path::Path) -> String {
         .arg(path)
         .output()
         .expect("运行 readelf");
-    assert!(
-        out.status.success(),
-        "readelf 失败：{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "readelf 失败：{}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
@@ -1650,21 +1624,26 @@ pub(crate) fn parse_debug_info(dump: &str) -> Vec<DwarfDieRow> {
             }
             let tail = &line[p + 1..];
             let tag = tail.split(')').next().unwrap_or("").to_string();
-            cur = Some(DwarfDieRow { tag, ..Default::default() });
+            cur = Some(DwarfDieRow {
+                tag,
+                ..Default::default()
+            });
             continue;
         }
         let Some(row) = cur.as_mut() else { continue };
-        let Some((attr, value)) = readelf_attr(line) else { continue };
+        let Some((attr, value)) = readelf_attr(line) else {
+            continue;
+        };
         match attr {
             "name" => {
                 row.name = value.rsplit(": ").next().unwrap_or(value).to_string();
-            }
+            },
             "low_pc" => row.low = readelf_int(value),
             "high_pc" => row.high = readelf_int(value),
             "decl_line" => row.decl_line = readelf_int(value),
             "frame_base" => row.frame_base = true,
             "location" => row.location = value.to_string(),
-            _ => {}
+            _ => {},
         }
     }
     if let Some(prev) = cur.take() {

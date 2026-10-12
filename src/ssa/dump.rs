@@ -31,4 +31,3 @@ pub fn dump_function(func: &Function) -> String {
     s.push_str("}\n");
     s
 }
-

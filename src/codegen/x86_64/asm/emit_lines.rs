@@ -45,68 +45,182 @@ impl Codegen {
         let __step5_start = self.code.len() as u64;
         match mnemonic {
             // 无操作数指令
-            "nop" => { let _ = self.emit_insn(&Insn::raw(&[0x90])); },
+            "nop" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x90]));
+            },
             // 裸段前缀作为独立指令 (旧式汇编风格)
-            "ds" => { let _ = self.emit_insn(&Insn::raw(&[0x3E])); },
-            "es" => { let _ = self.emit_insn(&Insn::raw(&[0x26])); },
-            "cs" => { let _ = self.emit_insn(&Insn::raw(&[0x2E])); },
-            "ss" => { let _ = self.emit_insn(&Insn::raw(&[0x36])); },
-            "fs" => { let _ = self.emit_insn(&Insn::raw(&[0x64])); },
-            "gs" => { let _ = self.emit_insn(&Insn::raw(&[0x65])); },
+            "ds" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x3E]));
+            },
+            "es" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x26]));
+            },
+            "cs" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x2E]));
+            },
+            "ss" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x36]));
+            },
+            "fs" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x64]));
+            },
+            "gs" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x65]));
+            },
             "ret" | "retq" => self.emit_return_tail(),
-            "leave" | "leaveq" => { let _ = self.emit_insn(&Insn::raw(&[0xC9])); },
-            "cdq" => { let _ = self.emit_insn(&Insn::raw(&[0x99])); },
-            "cdqe" => { let _ = self.emit_insn(&Insn::raw(&[0x48, 0x98])); },
-            "cqo" => { let _ = self.emit_insn(&Insn::raw(&[0x48, 0x99])); },
-            "cbtw" => { let _ = self.emit_insn(&Insn::raw(&[0x66, 0x98])); },
-            "cwtl" => { let _ = self.emit_insn(&Insn::raw(&[0x98])); },
-            "cltd" => { let _ = self.emit_insn(&Insn::raw(&[0x99])); },
-            "clac" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xCA])); },
-            "stac" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xCB])); },
-            "cli" => { let _ = self.emit_insn(&Insn::raw(&[0xFA])); },
-            "sti" => { let _ = self.emit_insn(&Insn::raw(&[0xFB])); },
-            "cld" => { let _ = self.emit_insn(&Insn::raw(&[0xFC])); },
-            "std" => { let _ = self.emit_insn(&Insn::raw(&[0xFD])); },
-            "hlt" => { let _ = self.emit_insn(&Insn::raw(&[0xF4])); },
-            "fwait" => { let _ = self.emit_insn(&Insn::raw(&[0x9B])); },
+            "leave" | "leaveq" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xC9]));
+            },
+            "cdq" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x99]));
+            },
+            "cdqe" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x48, 0x98]));
+            },
+            "cqo" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x48, 0x99]));
+            },
+            "cbtw" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x66, 0x98]));
+            },
+            "cwtl" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x98]));
+            },
+            "cltd" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x99]));
+            },
+            "clac" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xCA]));
+            },
+            "stac" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xCB]));
+            },
+            "cli" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xFA]));
+            },
+            "sti" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xFB]));
+            },
+            "cld" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xFC]));
+            },
+            "std" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xFD]));
+            },
+            "hlt" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xF4]));
+            },
+            "fwait" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x9B]));
+            },
             // x87 无操作数指令 (D9 编码空间)
-            "fnop" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xD0])); },
-            "fchs" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xE0])); },
-            "fabs" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xE1])); },
-            "ftst" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xE4])); },
-            "fxam" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xE5])); },
-            "fld1" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xE8])); },
-            "fldl2t" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xE9])); },
-            "fldl2e" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xEA])); },
-            "fldpi" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xEB])); },
-            "fldlg2" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xEC])); },
-            "fldln2" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xED])); },
-            "fldz" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xEE])); },
-            "f2xm1" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF0])); },
-            "fyl2x" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF1])); },
-            "fptan" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF2])); },
-            "fpatan" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF3])); },
-            "fxtract" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF4])); },
-            "fprem1" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF5])); },
-            "fdecstp" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF6])); },
-            "fincstp" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF7])); },
-            "fprem" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF8])); },
-            "fyl2xp1" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF9])); },
-            "fsqrt" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xFA])); },
-            "fsincos" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xFB])); },
-            "frndint" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xFC])); },
-            "fscale" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xFD])); },
-            "fsin" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xFE])); },
-            "fcos" => { let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xFF])); },
+            "fnop" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xD0]));
+            },
+            "fchs" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xE0]));
+            },
+            "fabs" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xE1]));
+            },
+            "ftst" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xE4]));
+            },
+            "fxam" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xE5]));
+            },
+            "fld1" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xE8]));
+            },
+            "fldl2t" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xE9]));
+            },
+            "fldl2e" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xEA]));
+            },
+            "fldpi" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xEB]));
+            },
+            "fldlg2" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xEC]));
+            },
+            "fldln2" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xED]));
+            },
+            "fldz" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xEE]));
+            },
+            "f2xm1" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF0]));
+            },
+            "fyl2x" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF1]));
+            },
+            "fptan" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF2]));
+            },
+            "fpatan" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF3]));
+            },
+            "fxtract" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF4]));
+            },
+            "fprem1" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF5]));
+            },
+            "fdecstp" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF6]));
+            },
+            "fincstp" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF7]));
+            },
+            "fprem" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF8]));
+            },
+            "fyl2xp1" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xF9]));
+            },
+            "fsqrt" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xFA]));
+            },
+            "fsincos" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xFB]));
+            },
+            "frndint" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xFC]));
+            },
+            "fscale" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xFD]));
+            },
+            "fsin" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xFE]));
+            },
+            "fcos" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD9, 0xFF]));
+            },
             // x87 比较 (无操作数/栈顶)
-            "fcom" => { let _ = self.emit_insn(&Insn::raw(&[0xD8, 0xD1])); },
-            "fcomp" => { let _ = self.emit_insn(&Insn::raw(&[0xD8, 0xD9])); },
-            "fcompp" => { let _ = self.emit_insn(&Insn::raw(&[0xDE, 0xD9])); },
-            "fucom" => { let _ = self.emit_insn(&Insn::raw(&[0xDD, 0xE1])); },
-            "fucomp" => { let _ = self.emit_insn(&Insn::raw(&[0xDD, 0xE9])); },
-            "fucomip" => { let _ = self.emit_insn(&Insn::raw(&[0xDF, 0xE9])); },
+            "fcom" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD8, 0xD1]));
+            },
+            "fcomp" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xD8, 0xD9]));
+            },
+            "fcompp" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xDE, 0xD9]));
+            },
+            "fucom" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xDD, 0xE1]));
+            },
+            "fucomp" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xDD, 0xE9]));
+            },
+            "fucomip" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xDF, 0xE9]));
+            },
             // x87 控制 (无操作数)
-            "fninit" => { let _ = self.emit_insn(&Insn::raw(&[0xDB, 0xE3])); },
+            "fninit" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xDB, 0xE3]));
+            },
             // x87 加载/存储 (单操作数: 内存或 st(i))
             "fld" | "flds" | "fldl" | "fldt" if ops.len() == 1 => {
                 self.emit_asm_x87_mem(&ops[0], 0xD9, 0, false)
@@ -178,43 +292,99 @@ impl Codegen {
             "fcomp" | "fcomps" | "fcompl" if ops.len() == 1 => {
                 self.emit_asm_x87_mem(&ops[0], 0xD8, 3, false)
             },
-            "pause" => { let _ = self.emit_insn(&Insn::raw(&[0xF3, 0x90])); },
-            "mfence" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0xAE, 0xF0])); },
-            "lfence" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0xAE, 0xE8])); },
-            "sfence" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0xAE, 0xF8])); },
-            "syscall" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x05])); },
-            "sysenter" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x34])); },
-            "sysexit" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x35])); },
-            "rdtsc" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x31])); },
-            "rdpmc" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x33])); },
-            "xchg%eax,%eax" | "xchg %eax,%eax" => { let _ = self.emit_insn(&Insn::raw(&[0x90])); }, // nop alias
-            "ud2" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x0B])); },
-            "clc" => { let _ = self.emit_insn(&Insn::raw(&[0xF8])); },
-            "stc" => { let _ = self.emit_insn(&Insn::raw(&[0xF9])); },
-            "cmc" => { let _ = self.emit_insn(&Insn::raw(&[0xF5])); },
-            "sahf" => { let _ = self.emit_insn(&Insn::raw(&[0x9E])); },
-            "lahf" => { let _ = self.emit_insn(&Insn::raw(&[0x9F])); },
+            "pause" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xF3, 0x90]));
+            },
+            "mfence" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0xAE, 0xF0]));
+            },
+            "lfence" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0xAE, 0xE8]));
+            },
+            "sfence" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0xAE, 0xF8]));
+            },
+            "syscall" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x05]));
+            },
+            "sysenter" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x34]));
+            },
+            "sysexit" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x35]));
+            },
+            "rdtsc" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x31]));
+            },
+            "rdpmc" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x33]));
+            },
+            "xchg%eax,%eax" | "xchg %eax,%eax" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x90]));
+            }, // nop alias
+            "ud2" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x0B]));
+            },
+            "clc" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xF8]));
+            },
+            "stc" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xF9]));
+            },
+            "cmc" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xF5]));
+            },
+            "sahf" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x9E]));
+            },
+            "lahf" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x9F]));
+            },
 
             // cpuid
-            "cpuid" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0xA2])); },
+            "cpuid" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0xA2]));
+            },
 
             // 字符串操作
-            "movsb" => { let _ = self.emit_insn(&Insn::raw(&[0xA4])); },
-            "movsw" => { let _ = self.emit_insn(&Insn::raw(&[0x66, 0xA5])); },
+            "movsb" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xA4]));
+            },
+            "movsw" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x66, 0xA5]));
+            },
             // `movsd` 有两个互不相干的意思：没有操作数时是字符串搬移 ([rsi] -> [rdi])，
             // 带两个操作数时是 SSE 标量双精度搬移。这里必须按操作数个数分开：以前这一支
             // 没有守卫，先于下面 `"movsd" if ops.len() == 2` 的 SSE 分支命中，于是
             // `movsd %xmm1, %xmm0` 被编成 0xA5（`rep movsd`）—— 实测带 `"=x"` 输出的
             // 程序一跑就段错误。`movsl` 没有这层歧义（SSE 侧叫 movss/movsd），保持原样。
-            "movsl" => { let _ = self.emit_insn(&Insn::raw(&[0xA5])); },
-            "movsd" if ops.is_empty() => { let _ = self.emit_insn(&Insn::raw(&[0xA5])); },
-            "movsq" => { let _ = self.emit_insn(&Insn::raw(&[0x48, 0xA5])); },
-            "stosb" => { let _ = self.emit_insn(&Insn::raw(&[0xAA])); },
-            "stosw" => { let _ = self.emit_insn(&Insn::raw(&[0x66, 0xAB])); },
-            "stosl" | "stosd" => { let _ = self.emit_insn(&Insn::raw(&[0xAB])); },
-            "stosq" => { let _ = self.emit_insn(&Insn::raw(&[0x48, 0xAB])); },
-            "scasb" => { let _ = self.emit_insn(&Insn::raw(&[0xAE])); },
-            "cmpsb" => { let _ = self.emit_insn(&Insn::raw(&[0xA6])); },
+            "movsl" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xA5]));
+            },
+            "movsd" if ops.is_empty() => {
+                let _ = self.emit_insn(&Insn::raw(&[0xA5]));
+            },
+            "movsq" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x48, 0xA5]));
+            },
+            "stosb" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xAA]));
+            },
+            "stosw" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x66, 0xAB]));
+            },
+            "stosl" | "stosd" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xAB]));
+            },
+            "stosq" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x48, 0xAB]));
+            },
+            "scasb" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xAE]));
+            },
+            "cmpsb" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xA6]));
+            },
 
             // push/pop 寄存器
             "push" | "pushq" | "pushl" | "pushw" if ops.len() == 1 => {
@@ -432,7 +602,11 @@ impl Codegen {
                     },
                 ) = (&ops[0], &ops[1])
                 {
-                    self.emit_insn(&Insn::raw(&[Self::rex(false, *d, index.unwrap_or(0), *base), 0x0F, 0x02]));
+                    self.emit_insn(&Insn::raw(&[
+                        Self::rex(false, *d, index.unwrap_or(0), *base),
+                        0x0F,
+                        0x02,
+                    ]));
                     self.emit_asm_modrm_mem_only(*d & 7, *disp, *base, *index, *scale);
                 } else {
                     self.asm_reject("lar needs reg, reg/mem operands");
@@ -453,20 +627,36 @@ impl Codegen {
             "outb" if ops.len() == 2 => self.emit_asm_out(&ops[0], &ops[1], 8),
             "outw" if ops.len() == 2 => self.emit_asm_out(&ops[0], &ops[1], 16),
             "outl" if ops.len() == 2 => self.emit_asm_out(&ops[0], &ops[1], 32),
-            "outsb" => { let _ = self.emit_insn(&Insn::raw(&[0x6E])); },
-            "outsw" => { let _ = self.emit_insn(&Insn::raw(&[0x66, 0x6F])); },
-            "outsl" => { let _ = self.emit_insn(&Insn::raw(&[0x6F])); },
+            "outsb" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x6E]));
+            },
+            "outsw" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x66, 0x6F]));
+            },
+            "outsl" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x6F]));
+            },
             "inb" if ops.len() == 2 => self.emit_asm_in(&ops[0], &ops[1], 8),
             "inw" if ops.len() == 2 => self.emit_asm_in(&ops[0], &ops[1], 16),
             "inl" if ops.len() == 2 => self.emit_asm_in(&ops[0], &ops[1], 32),
             // 裸 in/out (无后缀): 默认 32 位, 支持立即数/DX/内存间接端口
             "in" if ops.len() == 2 => self.emit_asm_in_bare(&ops[0], &ops[1]),
             "out" if ops.len() == 2 => self.emit_asm_out_bare(&ops[0], &ops[1]),
-            "insb" => { let _ = self.emit_insn(&Insn::raw(&[0x6C])); },
-            "insw" => { let _ = self.emit_insn(&Insn::raw(&[0x66, 0x6D])); },
-            "insl" => { let _ = self.emit_insn(&Insn::raw(&[0x6D])); },
-            "iret" | "iretl" => { let _ = self.emit_insn(&Insn::raw(&[0xCF])); },
-            "iretq" => { let _ = self.emit_insn(&Insn::raw(&[0x48, 0xCF])); },
+            "insb" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x6C]));
+            },
+            "insw" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x66, 0x6D]));
+            },
+            "insl" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x6D]));
+            },
+            "iret" | "iretl" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xCF]));
+            },
+            "iretq" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x48, 0xCF]));
+            },
             // 位扫描: tzcnt/lzcnt = F3 + bsf/bsr
             "tzcnt" if ops.len() == 2 => {
                 self.emit_insn(&Insn::raw(&[0xF3]));
@@ -477,8 +667,12 @@ impl Codegen {
                 self.emit_asm_scan(&ops[0], &ops[1], 0xBD, 64);
             },
             // PKRU: rdpkru 0F 01 EE, wrpkru 0F 01 EF
-            "rdpkru" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xEE])); },
-            "wrpkru" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xEF])); },
+            "rdpkru" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xEE]));
+            },
+            "wrpkru" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xEF]));
+            },
             // rdrand: F3 0F C7 /6; rdseed: F3 0F C7 /7 (reg or mem)
             "rdrand" if ops.len() == 1 => match &ops[0] {
                 AsmOperand::Reg(d, _) => {
@@ -567,25 +761,63 @@ impl Codegen {
                 },
             },
             "invlpg" if ops.len() == 1 => self.emit_asm_sys_mem(&ops[0], 0x01, 0x01),
-            "invlpga" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xDF])); },
-            "swapgs" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xF8])); },
-            "monitor" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xC8])); },
-            "mwait" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xC9])); },
-            "monitorx" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xFA])); },
-            "mwaitx" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xFB])); },
-            "wbinvd" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x09])); },
-            "invd" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x08])); },
-            "cpuid" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0xA2])); },
-            "rdtsc" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x31])); },
-            "rdtscp" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xF9])); },
-            "rdpmc" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x33])); },
-            "syscall" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x05])); },
-            "sysret" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x07])); },
-            "sysenter" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x34])); },
-            "sysexit" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x35])); },
-            "vmlaunch" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xC2])); },
-            "vmresume" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xC3])); },
-            "vmxoff" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xC4])); },
+            "invlpga" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xDF]));
+            },
+            "swapgs" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xF8]));
+            },
+            "monitor" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xC8]));
+            },
+            "mwait" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xC9]));
+            },
+            "monitorx" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xFA]));
+            },
+            "mwaitx" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xFB]));
+            },
+            "wbinvd" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x09]));
+            },
+            "invd" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x08]));
+            },
+            "cpuid" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0xA2]));
+            },
+            "rdtsc" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x31]));
+            },
+            "rdtscp" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xF9]));
+            },
+            "rdpmc" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x33]));
+            },
+            "syscall" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x05]));
+            },
+            "sysret" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x07]));
+            },
+            "sysenter" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x34]));
+            },
+            "sysexit" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x35]));
+            },
+            "vmlaunch" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xC2]));
+            },
+            "vmresume" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xC3]));
+            },
+            "vmxoff" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xC4]));
+            },
             "vmptrld" if ops.len() == 1 => self.emit_asm_sys_mem(&ops[0], 0x01, 0x03),
             "vmptrst" if ops.len() == 1 => self.emit_asm_sys_mem(&ops[0], 0x01, 0x07),
             "vmclear" if ops.len() == 1 => self.emit_asm_sys_mem(&ops[0], 0x01, 0x04),
@@ -634,25 +866,63 @@ impl Codegen {
                     self.asm_reject("wrussq needs reg, mem operands");
                 }
             },
-            "ud2" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x0B])); },
-            "hlt" => { let _ = self.emit_insn(&Insn::raw(&[0xF4])); },
-            "cli" => { let _ = self.emit_insn(&Insn::raw(&[0xFA])); },
-            "sti" => { let _ = self.emit_insn(&Insn::raw(&[0xFB])); },
-            "cld" => { let _ = self.emit_insn(&Insn::raw(&[0xFC])); },
-            "std" => { let _ = self.emit_insn(&Insn::raw(&[0xFD])); },
-            "clc" => { let _ = self.emit_insn(&Insn::raw(&[0xF8])); },
-            "stc" => { let _ = self.emit_insn(&Insn::raw(&[0xF9])); },
-            "cmc" => { let _ = self.emit_insn(&Insn::raw(&[0xF5])); },
-            "lahf" => { let _ = self.emit_insn(&Insn::raw(&[0x9F])); },
-            "sahf" => { let _ = self.emit_insn(&Insn::raw(&[0x9E])); },
-            "pushf" | "pushfl" => { let _ = self.emit_insn(&Insn::raw(&[0x9C])); },
-            "popf" | "popfl" => { let _ = self.emit_insn(&Insn::raw(&[0x9D])); },
-            "pushfq" => { let _ = self.emit_insn(&Insn::raw(&[0x9C])); },
-            "popfq" => { let _ = self.emit_insn(&Insn::raw(&[0x9D])); },
-            "stac" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xCB])); },
-            "clac" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xCA])); },
-            "endbr64" => { let _ = self.emit_insn(&Insn::raw(&[0xF3, 0x0F, 0x1E, 0xFA])); },
-            "endbr32" => { let _ = self.emit_insn(&Insn::raw(&[0xF3, 0x0F, 0x1E, 0xFB])); },
+            "ud2" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x0B]));
+            },
+            "hlt" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xF4]));
+            },
+            "cli" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xFA]));
+            },
+            "sti" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xFB]));
+            },
+            "cld" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xFC]));
+            },
+            "std" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xFD]));
+            },
+            "clc" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xF8]));
+            },
+            "stc" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xF9]));
+            },
+            "cmc" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xF5]));
+            },
+            "lahf" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x9F]));
+            },
+            "sahf" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x9E]));
+            },
+            "pushf" | "pushfl" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x9C]));
+            },
+            "popf" | "popfl" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x9D]));
+            },
+            "pushfq" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x9C]));
+            },
+            "popfq" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x9D]));
+            },
+            "stac" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xCB]));
+            },
+            "clac" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xCA]));
+            },
+            "endbr64" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xF3, 0x0F, 0x1E, 0xFA]));
+            },
+            "endbr32" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xF3, 0x0F, 0x1E, 0xFB]));
+            },
             // fxsave/fxrstor = 0F AE /0 /1, ldmxcsr/stmxcsr = 0F AE /2 /3
             "fxsave" if ops.len() == 1 => self.emit_asm_fpu_load(&ops[0], 0xAE, 0, true, false),
             "fxrstor" if ops.len() == 1 => self.emit_asm_fpu_load(&ops[0], 0xAE, 1, true, false),
@@ -663,11 +933,21 @@ impl Codegen {
             // fnsave/fnstenv = D9/DD /6 (无 0F 前缀)
             "fnsave" if ops.len() == 1 => self.emit_asm_fpu_load(&ops[0], 0xDD, 6, false, false),
             "fnstenv" if ops.len() == 1 => self.emit_asm_fpu_load(&ops[0], 0xD9, 6, false, false),
-            "lfence" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0xAE, 0xE8])); },
-            "sfence" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0xAE, 0xF8])); },
-            "mfence" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0xAE, 0xF0])); },
-            "pause" => { let _ = self.emit_insn(&Insn::raw(&[0xF3, 0x90])); },
-            "int3" => { let _ = self.emit_insn(&Insn::raw(&[0xCC])); },
+            "lfence" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0xAE, 0xE8]));
+            },
+            "sfence" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0xAE, 0xF8]));
+            },
+            "mfence" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0xAE, 0xF0]));
+            },
+            "pause" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xF3, 0x90]));
+            },
+            "int3" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xCC]));
+            },
             "int" if ops.len() == 1 => self.emit_asm_int(&ops[0]),
 
             // 标量 SSE（内联 asm 约束常用）
@@ -836,11 +1116,19 @@ impl Codegen {
             "movntiq" if ops.len() == 2 => self.emit_asm_movnt(&ops[0], &ops[1], 64),
             // invpcid: 66 0F 38 82 /r (reg, m128)
             "invpcid" if ops.len() == 2 => self.emit_asm_invpcid(&ops[0], &ops[1]),
-            "vmcall" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xC1])); },
-            "vmmcall" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xD9])); },
+            "vmcall" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xC1]));
+            },
+            "vmmcall" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xD9]));
+            },
             // SVM: clgi (0F 01 DD), stgi (0F 01 DC), vmsave (0F 01 DB)
-            "clgi" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xDD])); },
-            "stgi" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xDC])); },
+            "clgi" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xDD]));
+            },
+            "stgi" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xDC]));
+            },
             "vmsave" if ops.len() == 1 => self.emit_asm_sys_mem(&ops[0], 0x01, 0x06),
 
             // 跳转
@@ -864,7 +1152,9 @@ impl Codegen {
             "call" if ops.len() == 1 => self.emit_asm_call(&ops[0]),
 
             // 远跳转/远调用/远返回 (far jumps/calls/returns)
-            "retf" | "retfw" | "retfl" | "retfq" if ops.is_empty() => { let _ = self.emit_insn(&Insn::raw(&[0xCB])); },
+            "retf" | "retfw" | "retfl" | "retfq" if ops.is_empty() => {
+                let _ = self.emit_insn(&Insn::raw(&[0xCB]));
+            },
             "retf" | "retfw" | "retfl" | "retfq" if ops.len() == 1 => {
                 match &ops[0] {
                     AsmOperand::Imm(v) => {
@@ -882,7 +1172,9 @@ impl Codegen {
                     },
                 }
             },
-            "lret" | "lretw" | "lretl" | "lretq" if ops.is_empty() => { let _ = self.emit_insn(&Insn::raw(&[0xCB])); },
+            "lret" | "lretw" | "lretl" | "lretq" if ops.is_empty() => {
+                let _ = self.emit_insn(&Insn::raw(&[0xCB]));
+            },
             "lret" | "lretw" | "lretl" | "lretq" if ops.len() == 1 => {
                 match &ops[0] {
                     AsmOperand::Imm(v) => {
@@ -1034,10 +1326,18 @@ impl Codegen {
             "cmpxchg8b" if ops.len() == 1 => self.emit_asm_cmpxchg8b(&ops[0]),
 
             // 特殊寄存器
-            "rdmsr" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x32])); },
-            "wrmsr" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x30])); },
-            "xgetbv" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xD0])); },
-            "xsetbv" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xD1])); },
+            "rdmsr" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x32]));
+            },
+            "wrmsr" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x30]));
+            },
+            "xgetbv" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xD0]));
+            },
+            "xsetbv" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xD1]));
+            },
             "movq" if ops.len() == 2 && mnemonic == "movq" => {
                 self.emit_asm_mov(&ops[0], &ops[1], 64)
             },
@@ -1068,7 +1368,9 @@ impl Codegen {
                     self.asm_reject("xbegin needs label or imm");
                 }
             },
-            "xend" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xD5])); },
+            "xend" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xD5]));
+            },
             "xabort" if ops.len() == 1 => {
                 if let AsmOperand::Imm(v) = &ops[0] {
                     self.emit_insn(&Insn::raw(&[0xC6, 0xF8, *v as u8]));
@@ -1080,7 +1382,9 @@ impl Codegen {
                     self.asm_reject("xabort needs imm8");
                 }
             },
-            "xtest" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xD6])); },
+            "xtest" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x01, 0xD6]));
+            },
 
             // === AES-NI (66 0F 38 DC-DF) ===
             // aesenc aesi, xesi   : 66 0F 38 DC /r
@@ -1337,7 +1641,11 @@ impl Codegen {
                 {
                     if *ss == 128 && *ds == 128 {
                         self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
-                        self.emit_insn(&Insn::raw(&[0x1D, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                        self.emit_insn(&Insn::raw(&[
+                            0x1D,
+                            Self::modrm_reg_reg(*d, *s),
+                            *imm as u8,
+                        ]));
                     }
                 } else if let (
                     AsmOperand::Imm(imm),
@@ -1367,7 +1675,15 @@ impl Codegen {
                     if *ss == 128 {
                         // RIP-relative dest: mod=00 r/m=101
                         self.emit_vex4_prefix(*s, 0, 3, 0, 0, 0, 1);
-                        self.emit_insn(&Insn::raw(&[0x1D, 0x05 | ((s & 7) << 3), 0, 0, 0, 0, *imm as u8]));
+                        self.emit_insn(&Insn::raw(&[
+                            0x1D,
+                            0x05 | ((s & 7) << 3),
+                            0,
+                            0,
+                            0,
+                            0,
+                            *imm as u8,
+                        ]));
                         let pos = self.pos() - 5;
                         self.pending_data_rels.push((pos, sym.clone()));
                     }
@@ -1390,7 +1706,11 @@ impl Codegen {
                         match src {
                             AsmOperand::Reg(s, ss) if *ss == 128 => {
                                 self.emit_vex3_prefix(*d, 0, 0, 1);
-                                self.emit_insn(&Insn::raw(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                                self.emit_insn(&Insn::raw(&[
+                                    0x70,
+                                    Self::modrm_reg_reg(*d, *s),
+                                    *imm as u8,
+                                ]));
                             },
                             AsmOperand::Mem {
                                 disp,
@@ -1405,7 +1725,15 @@ impl Codegen {
                             },
                             AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
                                 self.emit_vex3_prefix(*d, 0, 0, 1);
-                                self.emit_insn(&Insn::raw(&[0x70, 0x05 | ((d & 7) << 3), 0, 0, 0, 0, *imm as u8]));
+                                self.emit_insn(&Insn::raw(&[
+                                    0x70,
+                                    0x05 | ((d & 7) << 3),
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                    *imm as u8,
+                                ]));
                                 let pos = self.pos() - 5;
                                 self.pending_data_rels.push((pos, sym.clone()));
                             },
@@ -1428,7 +1756,11 @@ impl Codegen {
                         match src {
                             AsmOperand::Reg(s, ss) if *ss == 128 => {
                                 self.emit_vex3_prefix(*d, 0, 0, 3);
-                                self.emit_insn(&Insn::raw(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                                self.emit_insn(&Insn::raw(&[
+                                    0x70,
+                                    Self::modrm_reg_reg(*d, *s),
+                                    *imm as u8,
+                                ]));
                             },
                             AsmOperand::Mem {
                                 disp,
@@ -1443,7 +1775,15 @@ impl Codegen {
                             },
                             AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
                                 self.emit_vex3_prefix(*d, 0, 0, 3);
-                                self.emit_insn(&Insn::raw(&[0x70, 0x05 | ((d & 7) << 3), 0, 0, 0, 0, *imm as u8]));
+                                self.emit_insn(&Insn::raw(&[
+                                    0x70,
+                                    0x05 | ((d & 7) << 3),
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                    *imm as u8,
+                                ]));
                                 let pos = self.pos() - 5;
                                 self.pending_data_rels.push((pos, sym.clone()));
                             },
@@ -1466,7 +1806,11 @@ impl Codegen {
                         match src {
                             AsmOperand::Reg(s, ss) if *ss == 128 => {
                                 self.emit_vex3_prefix(*d, 0, 0, 2);
-                                self.emit_insn(&Insn::raw(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                                self.emit_insn(&Insn::raw(&[
+                                    0x70,
+                                    Self::modrm_reg_reg(*d, *s),
+                                    *imm as u8,
+                                ]));
                             },
                             AsmOperand::Mem {
                                 disp,
@@ -1481,7 +1825,15 @@ impl Codegen {
                             },
                             AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
                                 self.emit_vex3_prefix(*d, 0, 0, 2);
-                                self.emit_insn(&Insn::raw(&[0x70, 0x05 | ((d & 7) << 3), 0, 0, 0, 0, *imm as u8]));
+                                self.emit_insn(&Insn::raw(&[
+                                    0x70,
+                                    0x05 | ((d & 7) << 3),
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                    *imm as u8,
+                                ]));
                                 let pos = self.pos() - 5;
                                 self.pending_data_rels.push((pos, sym.clone()));
                             },
@@ -1700,7 +2052,11 @@ impl Codegen {
                         match src {
                             AsmOperand::Reg(s, ss) if *ss == 128 => {
                                 self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
-                                self.emit_insn(&Insn::raw(&[0x21, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                                self.emit_insn(&Insn::raw(&[
+                                    0x21,
+                                    Self::modrm_reg_reg(*d, *s),
+                                    *imm as u8,
+                                ]));
                             },
                             AsmOperand::Mem {
                                 disp,
@@ -1715,7 +2071,15 @@ impl Codegen {
                             },
                             AsmOperand::SymDisp(sym, _) | AsmOperand::Sym(sym) => {
                                 self.emit_vex4_prefix(*d, 0, 3, 0, 0, 0, 1);
-                                self.emit_insn(&Insn::raw(&[0x21, 0x05 | ((d & 7) << 3), 0, 0, 0, 0, *imm as u8]));
+                                self.emit_insn(&Insn::raw(&[
+                                    0x21,
+                                    0x05 | ((d & 7) << 3),
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                    *imm as u8,
+                                ]));
                                 let pos = self.pos() - 5;
                                 self.pending_data_rels.push((pos, sym.clone()));
                             },
@@ -1871,7 +2235,11 @@ impl Codegen {
                             // vextractpd to XMM register: VEX.NDS.128.66.0F3A.WIG 19 /r
                             AsmOperand::Reg(d, ds) if *ds == 128 => {
                                 self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
-                                self.emit_insn(&Insn::raw(&[0x19, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                                self.emit_insn(&Insn::raw(&[
+                                    0x19,
+                                    Self::modrm_reg_reg(*d, *s),
+                                    *imm as u8,
+                                ]));
                             },
                             // vextractpd to GPR or memory: same as vpextr path
                             _ => {
@@ -1932,7 +2300,11 @@ impl Codegen {
                 {
                     if *ss == 128 && *ds == 128 {
                         self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
-                        self.emit_insn(&Insn::raw(&[0x08, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                        self.emit_insn(&Insn::raw(&[
+                            0x08,
+                            Self::modrm_reg_reg(*d, *s),
+                            *imm as u8,
+                        ]));
                     }
                 } else {
                     self.emit_insn(&Insn::raw(&[0x90]));
@@ -1944,7 +2316,11 @@ impl Codegen {
                 {
                     if *ss == 128 && *ds == 128 {
                         self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
-                        self.emit_insn(&Insn::raw(&[0x09, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                        self.emit_insn(&Insn::raw(&[
+                            0x09,
+                            Self::modrm_reg_reg(*d, *s),
+                            *imm as u8,
+                        ]));
                     }
                 } else {
                     self.emit_insn(&Insn::raw(&[0x90]));
@@ -1956,7 +2332,11 @@ impl Codegen {
                 {
                     if *ss == 128 && *ds == 128 {
                         self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
-                        self.emit_insn(&Insn::raw(&[0x0A, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                        self.emit_insn(&Insn::raw(&[
+                            0x0A,
+                            Self::modrm_reg_reg(*d, *s),
+                            *imm as u8,
+                        ]));
                     }
                 } else {
                     self.emit_insn(&Insn::raw(&[0x90]));
@@ -1968,7 +2348,11 @@ impl Codegen {
                 {
                     if *ss == 128 && *ds == 128 {
                         self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
-                        self.emit_insn(&Insn::raw(&[0x0B, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                        self.emit_insn(&Insn::raw(&[
+                            0x0B,
+                            Self::modrm_reg_reg(*d, *s),
+                            *imm as u8,
+                        ]));
                     }
                 } else {
                     self.emit_insn(&Insn::raw(&[0x90]));
@@ -2090,7 +2474,11 @@ impl Codegen {
                 {
                     if *ss == 128 && *ds == 128 {
                         self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
-                        self.emit_insn(&Insn::raw(&[0x0C, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                        self.emit_insn(&Insn::raw(&[
+                            0x0C,
+                            Self::modrm_reg_reg(*d, *s),
+                            *imm as u8,
+                        ]));
                     }
                 } else {
                     self.emit_insn(&Insn::raw(&[0x90]));
@@ -2102,7 +2490,11 @@ impl Codegen {
                 {
                     if *ss == 128 && *ds == 128 {
                         self.emit_vex4_prefix(*d, *s, 3, 0, 0, 0, 1);
-                        self.emit_insn(&Insn::raw(&[0x0D, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                        self.emit_insn(&Insn::raw(&[
+                            0x0D,
+                            Self::modrm_reg_reg(*d, *s),
+                            *imm as u8,
+                        ]));
                     }
                 } else {
                     self.emit_insn(&Insn::raw(&[0x90]));
@@ -2116,7 +2508,11 @@ impl Codegen {
                 {
                     if *ss == 128 && *ds == 128 {
                         self.emit_vex3_prefix(*d, *s, 0, 0);
-                        self.emit_insn(&Insn::raw(&[0xC6, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                        self.emit_insn(&Insn::raw(&[
+                            0xC6,
+                            Self::modrm_reg_reg(*d, *s),
+                            *imm as u8,
+                        ]));
                     }
                 } else {
                     self.emit_insn(&Insn::raw(&[0x90]));
@@ -2128,7 +2524,11 @@ impl Codegen {
                 {
                     if *ss == 128 && *ds == 128 {
                         self.emit_vex3_prefix(*d, *s, 0, 1);
-                        self.emit_insn(&Insn::raw(&[0xC6, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                        self.emit_insn(&Insn::raw(&[
+                            0xC6,
+                            Self::modrm_reg_reg(*d, *s),
+                            *imm as u8,
+                        ]));
                     }
                 } else {
                     self.emit_insn(&Insn::raw(&[0x90]));
@@ -2215,7 +2615,11 @@ impl Codegen {
                 {
                     if *ss == 128 && *ds == 128 {
                         self.emit_vex4_prefix(*d, *s, 3, 0, 0, 1, 1);
-                        self.emit_insn(&Insn::raw(&[0x06, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                        self.emit_insn(&Insn::raw(&[
+                            0x06,
+                            Self::modrm_reg_reg(*d, *s),
+                            *imm as u8,
+                        ]));
                     }
                 } else {
                     self.emit_insn(&Insn::raw(&[0x90]));
@@ -2227,7 +2631,11 @@ impl Codegen {
                 {
                     if *ss == 128 && *ds == 128 {
                         self.emit_vex4_prefix(*d, *s, 3, 0, 0, 1, 1);
-                        self.emit_insn(&Insn::raw(&[0x46, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                        self.emit_insn(&Insn::raw(&[
+                            0x46,
+                            Self::modrm_reg_reg(*d, *s),
+                            *imm as u8,
+                        ]));
                     }
                 } else {
                     self.emit_insn(&Insn::raw(&[0x90]));
@@ -2240,7 +2648,11 @@ impl Codegen {
                 {
                     if *ss == 128 && *ds == 128 {
                         self.emit_vex4_prefix(*d, *s, 3, 0, 0, 1, 1);
-                        self.emit_insn(&Insn::raw(&[0x18, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                        self.emit_insn(&Insn::raw(&[
+                            0x18,
+                            Self::modrm_reg_reg(*d, *s),
+                            *imm as u8,
+                        ]));
                     }
                 } else {
                     self.emit_insn(&Insn::raw(&[0x90]));
@@ -2252,7 +2664,11 @@ impl Codegen {
                 {
                     if *ss == 128 && *ds == 128 {
                         self.emit_vex4_prefix(*d, *s, 3, 0, 0, 1, 1);
-                        self.emit_insn(&Insn::raw(&[0x38, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                        self.emit_insn(&Insn::raw(&[
+                            0x38,
+                            Self::modrm_reg_reg(*d, *s),
+                            *imm as u8,
+                        ]));
                     }
                 } else {
                     self.emit_insn(&Insn::raw(&[0x90]));
@@ -2265,7 +2681,11 @@ impl Codegen {
                 {
                     if *ss == 128 && *ds == 128 {
                         self.emit_vex4_prefix(*s, *d, 3, 0, 0, 1, 1);
-                        self.emit_insn(&Insn::raw(&[0x19, Self::modrm_reg_reg(*s, *d), *imm as u8]));
+                        self.emit_insn(&Insn::raw(&[
+                            0x19,
+                            Self::modrm_reg_reg(*s, *d),
+                            *imm as u8,
+                        ]));
                     }
                 } else {
                     self.emit_insn(&Insn::raw(&[0x90]));
@@ -2277,7 +2697,11 @@ impl Codegen {
                 {
                     if *ss == 128 && *ds == 128 {
                         self.emit_vex4_prefix(*s, *d, 3, 0, 0, 1, 1);
-                        self.emit_insn(&Insn::raw(&[0x39, Self::modrm_reg_reg(*s, *d), *imm as u8]));
+                        self.emit_insn(&Insn::raw(&[
+                            0x39,
+                            Self::modrm_reg_reg(*s, *d),
+                            *imm as u8,
+                        ]));
                     }
                 } else {
                     self.emit_insn(&Insn::raw(&[0x90]));
@@ -2351,7 +2775,11 @@ impl Codegen {
                 {
                     if *ss == 128 && *ds == 128 {
                         self.emit_vex3_prefix(*d, 0, 0, 1);
-                        self.emit_insn(&Insn::raw(&[0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                        self.emit_insn(&Insn::raw(&[
+                            0x70,
+                            Self::modrm_reg_reg(*d, *s),
+                            *imm as u8,
+                        ]));
                     }
                 } else {
                     self.emit_insn(&Insn::raw(&[0x90]));
@@ -2505,8 +2933,12 @@ impl Codegen {
             },
 
             // vzeroupper / vzeroall : 0F 77 (vex.128.0F)
-            "vzeroupper" => { let _ = self.emit_insn(&Insn::raw(&[0xC5, 0xF8, 0x77])); },
-            "vzeroall" => { let _ = self.emit_insn(&Insn::raw(&[0xC5, 0xFC, 0x77])); },
+            "vzeroupper" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xC5, 0xF8, 0x77]));
+            },
+            "vzeroall" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xC5, 0xFC, 0x77]));
+            },
 
             // vpmovmskb : 0F D7 /r (vex.128/256.0F D7)
             "vpmovmskb" if ops.len() == 2 => {
@@ -2713,7 +3145,9 @@ impl Codegen {
             "movbel" if ops.len() == 2 => self.emit_asm_movbe(&ops[0], &ops[1], 32),
 
             // === MMX 指令 ===
-            "emms" => { let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x77])); },
+            "emms" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x0F, 0x77]));
+            },
             "packsswb" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x63),
             "packssdw" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x6B),
             "packuswb" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x67),
@@ -2730,7 +3164,12 @@ impl Codegen {
                     if *ds == ASM_REG_MMX {
                         match src {
                             AsmOperand::Reg(s, ss) if *ss == ASM_REG_MMX => {
-                                self.emit_insn(&Insn::raw(&[0x0F, 0x70, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                                self.emit_insn(&Insn::raw(&[
+                                    0x0F,
+                                    0x70,
+                                    Self::modrm_reg_reg(*d, *s),
+                                    *imm as u8,
+                                ]));
                             },
                             AsmOperand::Mem {
                                 disp,
@@ -2813,16 +3252,36 @@ impl Codegen {
             "pcmpgtd" if ops.len() == 2 => self.emit_asm_mmx_2op(&ops[0], &ops[1], 0x66),
 
             // === 字符串操作 (无操作数) ===
-            "lodsb" => { let _ = self.emit_insn(&Insn::raw(&[0xAC])); },
-            "lodsw" => { let _ = self.emit_insn(&Insn::raw(&[0x66, 0xAD])); },
-            "lodsl" | "lodsd" => { let _ = self.emit_insn(&Insn::raw(&[0xAD])); },
-            "lodsq" => { let _ = self.emit_insn(&Insn::raw(&[0x48, 0xAD])); },
-            "cmpsw" => { let _ = self.emit_insn(&Insn::raw(&[0x66, 0xA7])); },
-            "cmpsl" | "cmpsd" => { let _ = self.emit_insn(&Insn::raw(&[0xA7])); },
-            "cmpsq" => { let _ = self.emit_insn(&Insn::raw(&[0x48, 0xA7])); },
-            "scasw" => { let _ = self.emit_insn(&Insn::raw(&[0x66, 0xAF])); },
-            "scasl" | "scasd" => { let _ = self.emit_insn(&Insn::raw(&[0xAF])); },
-            "scasq" => { let _ = self.emit_insn(&Insn::raw(&[0x48, 0xAF])); },
+            "lodsb" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xAC]));
+            },
+            "lodsw" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x66, 0xAD]));
+            },
+            "lodsl" | "lodsd" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xAD]));
+            },
+            "lodsq" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x48, 0xAD]));
+            },
+            "cmpsw" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x66, 0xA7]));
+            },
+            "cmpsl" | "cmpsd" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xA7]));
+            },
+            "cmpsq" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x48, 0xA7]));
+            },
+            "scasw" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x66, 0xAF]));
+            },
+            "scasl" | "scasd" => {
+                let _ = self.emit_insn(&Insn::raw(&[0xAF]));
+            },
+            "scasq" => {
+                let _ = self.emit_insn(&Insn::raw(&[0x48, 0xAF]));
+            },
 
             // === 循环指令 (单操作数: 相对偏移) ===
             "loop" if ops.len() == 1 => {
@@ -2853,7 +3312,12 @@ impl Codegen {
             },
             "enter" if ops.len() == 2 => {
                 if let (AsmOperand::Imm(imm16), AsmOperand::Imm(imm8)) = (&ops[0], &ops[1]) {
-                    self.emit_insn(&Insn::raw(&[0xC8, *imm16 as u8, (*imm16 >> 8) as u8, *imm8 as u8]));
+                    self.emit_insn(&Insn::raw(&[
+                        0xC8,
+                        *imm16 as u8,
+                        (*imm16 >> 8) as u8,
+                        *imm8 as u8,
+                    ]));
                 } else {
                     self.asm_reject("enter needs imm16, imm8");
                 }
@@ -2999,7 +3463,11 @@ impl Codegen {
                 {
                     if *s <= 15 && *d <= 15 {
                         self.emit_vex4_prefix(*d, *s, 3, 1, 0, 0, 3);
-                        self.emit_insn(&Insn::raw(&[0xF0, Self::modrm_reg_reg(*d, *s), *imm as u8]));
+                        self.emit_insn(&Insn::raw(&[
+                            0xF0,
+                            Self::modrm_reg_reg(*d, *s),
+                            *imm as u8,
+                        ]));
                     } else {
                         self.asm_reject("rorx needs GPR operands");
                     }
@@ -3640,8 +4108,8 @@ impl Codegen {
                     );
                     // 非执行 pushsection: 数字 label 位置在自定义节数据内, 显式登记
                     // 供 symtab 构建阶段编码为 STT_SECTION + offset 本地符号.
-                    let is_exec = self.extra_sections[sec_idx].flags & shared_elf::SHF_EXECINSTR
-                        != 0;
+                    let is_exec =
+                        self.extra_sections[sec_idx].flags & shared_elf::SHF_EXECINSTR != 0;
                     if !is_exec {
                         let sec_off = self.extra_sections[sec_idx].data.len() as u64;
                         self.pushsection_label_offsets

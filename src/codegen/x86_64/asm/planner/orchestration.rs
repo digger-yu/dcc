@@ -1,7 +1,7 @@
 // This file contains the register planner that handles operand mapping
+use crate::codegen::x86_64::abi::regbank::RegBank;
 /// for x86_64 inline assembly constructs.
 use std::collections::HashSet;
-use crate::codegen::x86_64::abi::regbank::RegBank;
 
 /// Register use classification
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -54,9 +54,7 @@ impl AsmRegisterPlanner {
     /// Legacy `q`/`Q` 约束专用池（只含可做 32/64 位别名的号）。
     pub const GP_LEGACY_POOL: [u8; 6] = [0, 1, 2, 3, 6, 7];
     /// XMM pool
-    pub const XMM_POOL: [u8; 16] = [
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-    ];
+    pub const XMM_POOL: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
     /// MMX pool
     pub const MMX_POOL: [u8; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
 
@@ -203,9 +201,7 @@ impl AsmRegisterPlanner {
             // 也就是把一个已经发出去的寄存器再发一次 —— 于是同一句 asm 的两个 q
             // 操作数共享寄存器，或者直接盖掉某个 `register asm` 变量的家
             // （实测 `after=22`，gcc 是 100）。
-            if let Some(reg) =
-                Self::pick(&Self::GP_LEGACY_POOL, &self.used_gp, seed, None)
-            {
+            if let Some(reg) = Self::pick(&Self::GP_LEGACY_POOL, &self.used_gp, seed, None) {
                 self.reserve_gp(reg, use_kind);
                 return Some((reg, false));
             }

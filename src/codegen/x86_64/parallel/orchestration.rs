@@ -97,7 +97,11 @@ impl Codegen {
 
     /// slot `i` 的 `.L` 区间基址。必须只依赖 `origin` + `i` (源码序), 绝不依赖
     /// worker 编号 / 完成顺序, 否则产物随调度抖动。
-    pub(in crate::codegen::x86_64) fn parallel_label_base(origin: u32, slot: usize, span: u32) -> u32 {
+    pub(in crate::codegen::x86_64) fn parallel_label_base(
+        origin: u32,
+        slot: usize,
+        span: u32,
+    ) -> u32 {
         ((origin as u64) + (slot as u64) * (span as u64)).min(u32::MAX as u64) as u32
     }
 
@@ -300,7 +304,8 @@ impl Codegen {
             self.stmt_line_entries.push((base + pc, line));
         }
         for &(pc_start, pc_end, line) in chunk.asm_line_entries.iter() {
-            self.asm_line_entries.push((base + pc_start, base + pc_end, line));
+            self.asm_line_entries
+                .push((base + pc_start, base + pc_end, line));
         }
         for &(pc, line, disc) in chunk.asm_insn_debug_entries.iter() {
             self.asm_insn_debug_entries.push((base + pc, line, disc));
@@ -367,11 +372,23 @@ impl Codegen {
         // - `float_refs` / `x87_float_refs` 按**偏移**定址 ⇒ 靠重放时记录的
         //   「chunk 局部偏移 → 最终偏移」分段映射来换算（取代 `rodata_delta`）。
         for &(pos, off) in &chunk.float_refs {
-            let mapped = self.map_chunk_rodata_off(&chunk_name, rodata_base, rodata_inc_len, &rodata_segs, off);
+            let mapped = self.map_chunk_rodata_off(
+                &chunk_name,
+                rodata_base,
+                rodata_inc_len,
+                &rodata_segs,
+                off,
+            );
             self.float_refs.push((base + pos, mapped));
         }
         for &(pos, off) in &chunk.x87_float_refs {
-            let mapped = self.map_chunk_rodata_off(&chunk_name, rodata_base, rodata_inc_len, &rodata_segs, off);
+            let mapped = self.map_chunk_rodata_off(
+                &chunk_name,
+                rodata_base,
+                rodata_inc_len,
+                &rodata_segs,
+                off,
+            );
             self.x87_float_refs.push((base + pos, mapped));
         }
         for mut p in chunk.pending {
@@ -536,7 +553,7 @@ impl Codegen {
                         format!("cannot derive laid bytes from content key {:?}", key),
                     );
                     return segs;
-                }
+                },
             };
             // 校验：反推的字节必须就是 worker 当时落进去的那些字节。这一条是
             // 整个重放方案唯一的现实假设，猜错就编译失败，不会默默产出错产物。
@@ -558,7 +575,7 @@ impl Codegen {
                     self.rodata.extend_from_slice(&bytes);
                     self.string_pool.insert(key.clone(), s);
                     s
-                }
+                },
             };
             segs.push((o as u64, start, bytes.len() as u64));
             local = o + bytes.len();
@@ -883,10 +900,7 @@ mod tests {
             "诊断要点出冲突标号与归属函数: {}",
             d.msg
         );
-        assert_eq!(
-            cg.labels[".L1"], first,
-            "绝不得用后一个 chunk 的定义覆盖先一个"
-        );
+        assert_eq!(cg.labels[".L1"], first, "绝不得用后一个 chunk 的定义覆盖先一个");
     }
 
     /// 分区后的正常局面: 不同函数交出不同名标号, 不得产生任何诊断。
@@ -898,21 +912,16 @@ mod tests {
         let mut a = chunk("p1");
         a.label_base = Codegen::parallel_label_base(origin, 0, span);
         a.label_used = 2;
-        a.labels
-            .insert(format!(".L{}", a.label_base), 0x10);
+        a.labels.insert(format!(".L{}", a.label_base), 0x10);
         let mut b = chunk("p2");
         b.label_base = Codegen::parallel_label_base(origin, 1, span);
         b.label_used = 2;
-        b.labels
-            .insert(format!(".L{}", b.label_base), 0x20);
+        b.labels.insert(format!(".L{}", b.label_base), 0x20);
         cg.merge_func_chunk(a.clone(), 1);
         cg.merge_func_chunk(b.clone(), 1);
         assert!(cg.diagnostics.is_empty(), "unexpected: {:?}", error_codes(&cg));
         // 两个函数的同名偏移不得互相顶掉: 此处名字本身就不同。
-        assert_ne!(
-            format!(".L{}", a.label_base),
-            format!(".L{}", b.label_base)
-        );
+        assert_ne!(format!(".L{}", a.label_base), format!(".L{}", b.label_base));
         cg.check_label_partition(&[a, b]);
         assert!(cg.diagnostics.is_empty(), "unexpected: {:?}", error_codes(&cg));
     }
@@ -958,9 +967,7 @@ mod tests {
         let mut b = chunk("p2");
         b.label_base = Codegen::parallel_label_base(top, 1, span);
         b.label_used = 7;
-        let high_water = a
-            .label_base
-            .max(b.label_base.saturating_add(b.label_used));
+        let high_water = a.label_base.max(b.label_base.saturating_add(b.label_used));
         cg.next_label = cg.next_label.max(high_water);
         assert!(cg.next_label > b.label_base + b.label_used - 1);
         // 主游标后续取号不得与任何 chunk 重名。
@@ -993,12 +1000,7 @@ mod tests {
 
     /// 带 rodata 增量的最小 chunk。`entries` = `(内容键, chunk 局部偏移)`，
     /// 调用方必须按偏移升序传入（`emit_func_chunk` 里就是那个序）。
-    fn rodata_chunk(
-        name: &str,
-        base: u64,
-        bytes: &[u8],
-        entries: &[(&str, u64)],
-    ) -> FuncEmitChunk {
+    fn rodata_chunk(name: &str, base: u64, bytes: &[u8], entries: &[(&str, u64)]) -> FuncEmitChunk {
         let mut c = chunk(name);
         c.rodata_base = base;
         c.new_rodata = bytes.to_vec();
@@ -1017,10 +1019,7 @@ mod tests {
         // 空串只剩一个 NUL
         assert_eq!(Codegen::rodata_entry_bytes(b"\0").unwrap(), vec![0u8]);
         // 长得像浮点键、但带结尾 NUL 的字面量必须按字面量算（浮点键永不以 NUL 结尾）
-        assert_eq!(
-            Codegen::rodata_entry_bytes(b"f_00\0").unwrap(),
-            b"f_00\0".to_vec()
-        );
+        assert_eq!(Codegen::rodata_entry_bytes(b"f_00\0").unwrap(), b"f_00\0".to_vec());
         // SSE double π：键是十六进制，落位是解码后的 8 字节
         assert_eq!(
             Codegen::rodata_entry_bytes(b"f_400921fb54442d18").unwrap(),
@@ -1032,10 +1031,7 @@ mod tests {
             vec![0u8; 10]
         );
         // sanitizer 形状（键不含 NUL）：按字面量算，多出的那个 0 归紧随其后的裸追加段
-        assert_eq!(
-            Codegen::rodata_entry_bytes(b"main.c").unwrap(),
-            b"main.c".to_vec()
-        );
+        assert_eq!(Codegen::rodata_entry_bytes(b"main.c").unwrap(), b"main.c".to_vec());
         // 反推不出来的形状一律 `None`（由调用方报 E1104，绝不猜）
         assert!(Codegen::rodata_entry_bytes(b"f_4").is_none());
         assert!(Codegen::rodata_entry_bytes(b"f_zz").is_none());
@@ -1055,10 +1051,7 @@ mod tests {
             &[("abc\0", 0), ("f_0102030405060708", 4)],
         );
         let _ = cg.merge_chunk_rodata(&c1);
-        assert_eq!(
-            cg.rodata,
-            b"abc\0\x01\x02\x03\x04\x05\x06\x07\x08".to_vec()
-        );
+        assert_eq!(cg.rodata, b"abc\0\x01\x02\x03\x04\x05\x06\x07\x08".to_vec());
         assert_eq!(cg.string_pool.len(), 2);
         // chunk 2: 同一个字符串 + 一个新字符串 ⇒ 只有新的那份能追加进来
         let c2 = rodata_chunk("f2", 12, b"abc\0xyz\0", &[("abc\0", 0), ("xyz\0", 4)]);

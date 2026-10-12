@@ -1,10 +1,12 @@
 //! 循环优化：不变式外提（LICM）、展开、SIMD 向量逐元素循环向量化。
 
-use crate::ast::{ArraySize, BinOp, Block, BlockItem, Decl, Expr, FuncDecl, Ident, Program, Stmt, Type};
-use std::collections::{HashMap, HashSet};
+use crate::ast::{
+    ArraySize, BinOp, Block, BlockItem, Decl, Expr, FuncDecl, Ident, Program, Stmt, Type,
+};
 use crate::const_eval;
 use crate::diagnostics::Span;
 use crate::ir::Module;
+use std::collections::{HashMap, HashSet};
 
 /// `-O2+` LICM；`-O3` 额外展开与向量循环向量化。
 ///
@@ -84,7 +86,10 @@ impl GlobalFacts {
             match d {
                 Decl::Var(v) => {
                     f.globals.insert(v.name.name.clone());
-                    if v.quals.is_volatile() || v.quals.is_atomic() || matches!(v.ty, Type::Atomic(_)) {
+                    if v.quals.is_volatile()
+                        || v.quals.is_atomic()
+                        || matches!(v.ty, Type::Atomic(_))
+                    {
                         f.volatile_globals.insert(v.name.name.clone());
                     }
                 },
@@ -205,7 +210,12 @@ impl LicmCtx {
                 }
             }
         }
-        LicmCtx { observable, volatiles, shadow_names, decl_counts: scan.decl_counts.clone() }
+        LicmCtx {
+            observable,
+            volatiles,
+            shadow_names,
+            decl_counts: scan.decl_counts.clone(),
+        }
     }
 
     /// 该标识符是否可被外提候选当作"稳定的纯读"。
@@ -247,7 +257,13 @@ fn licm_block(block: &mut Block, ctx: &LicmCtx) {
     let mut out: Vec<BlockItem> = Vec::with_capacity(items.len());
     for item in items {
         match item {
-            BlockItem::Stmt(Stmt::For { init, cond, step, mut body, span }) => {
+            BlockItem::Stmt(Stmt::For {
+                init,
+                cond,
+                step,
+                mut body,
+                span,
+            }) => {
                 let hoisted = licm_loop(
                     init.as_deref(),
                     cond.as_ref(),
@@ -257,17 +273,30 @@ fn licm_block(block: &mut Block, ctx: &LicmCtx) {
                     ctx,
                 );
                 out.extend(hoisted);
-                out.push(BlockItem::Stmt(Stmt::For { init, cond, step, body, span }));
+                out.push(BlockItem::Stmt(Stmt::For {
+                    init,
+                    cond,
+                    step,
+                    body,
+                    span,
+                }));
             },
-            BlockItem::Stmt(Stmt::While { cond, mut body, span }) => {
+            BlockItem::Stmt(Stmt::While {
+                cond,
+                mut body,
+                span,
+            }) => {
                 // 根因 1：这里过去传 `None`，与 For 分支各走各的判据。现在两条分支
                 // 只差"哪个表达式是 cond"，栅栏由同一个 `scan_*` 收集器产出。
-                let hoisted =
-                    licm_loop(None, Some(&cond), None, &mut body, LoopKind::While, ctx);
+                let hoisted = licm_loop(None, Some(&cond), None, &mut body, LoopKind::While, ctx);
                 out.extend(hoisted);
                 out.push(BlockItem::Stmt(Stmt::While { cond, body, span }));
             },
-            BlockItem::Stmt(Stmt::Do { mut body, cond, span }) => {
+            BlockItem::Stmt(Stmt::Do {
+                mut body,
+                cond,
+                span,
+            }) => {
                 // do-while 的 cond 在体内语句之后求值，但它读的仍是"本轮迭代后的值"，
                 // 因此名字栅栏与 while 完全同构，同样共用收集器。
                 let hoisted = licm_loop(None, Some(&cond), None, &mut body, LoopKind::Do, ctx);
@@ -301,8 +330,13 @@ fn licm_loop(
     // 非块体（`while (c) f();`）里没有声明可外提，而存储类语句一律不外提（见
     // `hoistable_item` 的说明），故直接返回；旧实现把这种体塞进伪块再 drain，
     // 一旦误判就会把整个体搬空——同一根因的另一条路径。
-    let Stmt::Block { b, .. } = body else { return Vec::new() };
-    let mut scan = NameScan { observable: ctx.observable.clone(), ..NameScan::default() };
+    let Stmt::Block { b, .. } = body else {
+        return Vec::new();
+    };
+    let mut scan = NameScan {
+        observable: ctx.observable.clone(),
+        ..NameScan::default()
+    };
     if let Some(i) = init {
         scan_stmt(&mut scan, i, Site::Ctl);
     }
@@ -326,8 +360,11 @@ fn split_invariants(body: &mut Block, scan: &NameScan, ctx: &LicmCtx) -> Vec<Blo
     if scan.reject_all {
         return Vec::new();
     }
-    let keep: Vec<bool> =
-        body.items.iter().map(|it| !hoistable_item(it, scan, ctx)).collect();
+    let keep: Vec<bool> = body
+        .items
+        .iter()
+        .map(|it| !hoistable_item(it, scan, ctx))
+        .collect();
     if keep.iter().all(|k| *k) {
         return Vec::new();
     }
@@ -362,7 +399,10 @@ fn degenerate_split(all: &[BlockItem], keep: &[bool], scan: &NameScan) -> bool {
         return false;
     }
     let reaches_cond = |scope: Option<bool>| -> bool {
-        let mut local = NameScan { observable: scan.observable.clone(), ..NameScan::default() };
+        let mut local = NameScan {
+            observable: scan.observable.clone(),
+            ..NameScan::default()
+        };
         for (i, it) in all.iter().enumerate() {
             // None = 外提前的完整体；Some(true) = 外提后仍留在体内的项。
             if scope.is_some_and(|k| keep[i] != k) {
@@ -383,7 +423,9 @@ fn degenerate_split(all: &[BlockItem], keep: &[bool], scan: &NameScan) -> bool {
 /// "循环前就被赋值"，与源语义不符（GCC/LLVM 的 LICM 同样只外提 load 与纯计算，
 /// 不外提 store）。根因 2 的教训正是"把体内每条语句都当不变式"，故此处宁可窄。
 fn hoistable_item(item: &BlockItem, scan: &NameScan, ctx: &LicmCtx) -> bool {
-    let BlockItem::Decl(Decl::Var(v)) = item else { return false };
+    let BlockItem::Decl(Decl::Var(v)) = item else {
+        return false;
+    };
     let name = v.name.name.as_str();
     // static / _Thread_local 的存储期不是"每轮迭代"；extern 根本没有本帧槽位；
     // cleanup / register asm / alias 的语义都锚定在声明所在作用域，搬动即改变语义。
@@ -440,9 +482,7 @@ fn expr_mentions(e: &Expr, scan: &NameScan, ctx: &LicmCtx) -> bool {
         | Expr::SizeofTy { .. }
         | Expr::AlignofTy { .. } => false,
         // 仍含运行期子表达式的"看似编译期"形态
-        Expr::Offsetof { indices, .. } => {
-            indices.iter().any(|i| expr_mentions(i, scan, ctx))
-        },
+        Expr::Offsetof { indices, .. } => indices.iter().any(|i| expr_mentions(i, scan, ctx)),
         Expr::SizeofExpr { e: inner, .. } | Expr::AlignofExpr { e: inner, .. } => {
             // sizeof/alignof 的操作数不求值（除 VLA），但 dcc 的语义里仍按读处理：
             // 只要它读到的东西可能被改写，外提就不安全，故与子表达式同判。
@@ -454,7 +494,9 @@ fn expr_mentions(e: &Expr, scan: &NameScan, ctx: &LicmCtx) -> bool {
         | Expr::Cast { e: inner, .. }
         | Expr::Real { e: inner, .. }
         | Expr::Imag { e: inner, .. } => expr_mentions(inner, scan, ctx),
-        Expr::Cond { cond, then_, else_, .. } => {
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
             expr_mentions(cond, scan, ctx)
                 || expr_mentions(then_, scan, ctx)
                 || expr_mentions(else_, scan, ctx)
@@ -465,9 +507,11 @@ fn expr_mentions(e: &Expr, scan: &NameScan, ctx: &LicmCtx) -> bool {
             !stable_object_read(arr, scan, ctx) || expr_mentions(idx, scan, ctx)
         },
         // `.` 成员读可判定（根对象有名字）；`->` 经指针，同 `p[i]` 一样不可判定。
-        Expr::Member { expr: base, is_arrow, .. } => {
-            *is_arrow || !stable_object_read(base, scan, ctx)
-        },
+        Expr::Member {
+            expr: base,
+            is_arrow,
+            ..
+        } => *is_arrow || !stable_object_read(base, scan, ctx),
         // 以下形态都无法用名字栅栏表达其读写集合 ⇒ 不是不变式（根因 3 的 fail-safe）。
         Expr::Deref { .. } | Expr::AddrOf { .. } => true,
         Expr::Call { .. } | Expr::AsmExpr { .. } => true,
@@ -493,18 +537,18 @@ fn stable_object_read(e: &Expr, scan: &NameScan, ctx: &LicmCtx) -> bool {
                 && ctx.read_is_stable(name.name.as_str(), scan)
         },
         Expr::Index { arr, .. } => stable_object_read(arr, scan, ctx),
-        Expr::Member { expr: base, is_arrow, .. } => {
-            !is_arrow && stable_object_read(base, scan, ctx)
-        },
+        Expr::Member {
+            expr: base,
+            is_arrow,
+            ..
+        } => !is_arrow && stable_object_read(base, scan, ctx),
         _ => false,
     }
 }
 
 fn type_has_vla(ty: &Type) -> bool {
     match ty {
-        Type::Array(inner, size) => {
-            matches!(size, ArraySize::Var(_)) || type_has_vla(&inner.base)
-        },
+        Type::Array(inner, size) => matches!(size, ArraySize::Var(_)) || type_has_vla(&inner.base),
         Type::Ptr(inner) => type_has_vla(&inner.base),
         Type::Atomic(inner) => type_has_vla(&inner.base),
         Type::Complex(inner) | Type::Imaginary(inner) => type_has_vla(&inner.base),
@@ -569,7 +613,9 @@ fn scan_stmt(s: &mut NameScan, st: &Stmt, site: Site) {
                 scan_expr(s, e, site);
             }
         },
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             scan_expr(s, cond, Site::Body);
             scan_stmt(s, then_, site);
             if let Some(el) = else_ {
@@ -585,7 +631,13 @@ fn scan_stmt(s: &mut NameScan, st: &Stmt, site: Site) {
             scan_stmt(s, body, site);
             scan_expr(s, cond, Site::Body);
         },
-        Stmt::For { init, cond, step, body, .. } => {
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(i) = init {
                 scan_stmt(s, i, site);
             }
@@ -632,7 +684,9 @@ fn scan_stmt(s: &mut NameScan, st: &Stmt, site: Site) {
             s.reject_all = true;
             scan_stmt(s, call, site);
         },
-        Stmt::EhLandingPad { object, selector, .. } => {
+        Stmt::EhLandingPad {
+            object, selector, ..
+        } => {
             s.reject_all = true;
             scan_expr(s, object, Site::Body);
             scan_expr(s, selector, Site::Body);
@@ -661,7 +715,9 @@ fn scan_expr(s: &mut NameScan, e: &Expr, site: Site) {
         | Expr::AlignofExpr { e: inner, .. }
         | Expr::Real { e: inner, .. }
         | Expr::Imag { e: inner, .. } => scan_expr(s, inner, site),
-        Expr::Cond { cond, then_, else_, .. } => {
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
             scan_expr(s, cond, site);
             scan_expr(s, then_, site);
             scan_expr(s, else_, site);
@@ -786,8 +842,10 @@ struct Lvalue {
 /// `*(p+i) = x` 同义 ⇒ 间接写。`s.f = x` 写在 s 上，`p->f = x` 写在 p 指向的对象上。
 fn lvalue_of(e: &Expr) -> Lvalue {
     match e {
-        Expr::Ident { name, ty, .. } => {
-            Lvalue { root: Some(name.name.clone()), indirect: false, is_arr: matches!(ty, Type::Array(..)) }
+        Expr::Ident { name, ty, .. } => Lvalue {
+            root: Some(name.name.clone()),
+            indirect: false,
+            is_arr: matches!(ty, Type::Array(..)),
         },
         Expr::Index { arr, ty, .. } => {
             let base = lvalue_of(arr);
@@ -798,7 +856,12 @@ fn lvalue_of(e: &Expr) -> Lvalue {
                 is_arr: matches!(ty, Type::Array(..)),
             }
         },
-        Expr::Member { expr: base, is_arrow, ty, .. } => {
+        Expr::Member {
+            expr: base,
+            is_arrow,
+            ty,
+            ..
+        } => {
             let b = lvalue_of(base);
             Lvalue {
                 root: b.root,
@@ -806,12 +869,18 @@ fn lvalue_of(e: &Expr) -> Lvalue {
                 is_arr: matches!(ty, Type::Array(..)),
             }
         },
-        Expr::Deref { ty, .. } => {
-            Lvalue { root: None, indirect: true, is_arr: matches!(ty, Type::Array(..)) }
+        Expr::Deref { ty, .. } => Lvalue {
+            root: None,
+            indirect: true,
+            is_arr: matches!(ty, Type::Array(..)),
         },
         Expr::Cast { e: inner, .. } => lvalue_of(inner),
         // 其余形态（调用结果、复合字面量、位域之外的怪左值…）一律判不了。
-        _ => Lvalue { root: None, indirect: false, is_arr: false },
+        _ => Lvalue {
+            root: None,
+            indirect: false,
+            is_arr: false,
+        },
     }
 }
 
@@ -966,22 +1035,21 @@ fn unroll_stmt_is_safe(s: &Stmt, break_shielded: bool, cont_shielded: bool) -> b
     match s {
         Stmt::Break { .. } => break_shielded,
         Stmt::Continue { .. } | Stmt::Fallthrough { .. } => cont_shielded,
-        Stmt::Label { .. } | Stmt::Goto { .. } | Stmt::GotoIndirect { .. } | Stmt::AsmGoto { .. } => {
-            false
-        },
+        Stmt::Label { .. }
+        | Stmt::Goto { .. }
+        | Stmt::GotoIndirect { .. }
+        | Stmt::AsmGoto { .. } => false,
         Stmt::Invoke { .. } | Stmt::EhLandingPad { .. } => false,
         Stmt::Expr { .. } | Stmt::Return { .. } => true,
         Stmt::Block { b, .. } => b
             .items
             .iter()
             .all(|i| unroll_item_is_safe(i, break_shielded, cont_shielded)),
-        Stmt::If {
-            then_, else_, ..
-        } => {
+        Stmt::If { then_, else_, .. } => {
             unroll_stmt_is_safe(then_, break_shielded, cont_shielded)
-                && else_.as_ref().map_or(true, |e| {
-                    unroll_stmt_is_safe(e, break_shielded, cont_shielded)
-                })
+                && else_
+                    .as_ref()
+                    .map_or(true, |e| unroll_stmt_is_safe(e, break_shielded, cont_shielded))
         },
         // 更内层的循环同时屏蔽 break 与 continue。
         Stmt::For { body, .. } | Stmt::While { body, .. } | Stmt::Do { body, .. } => {
@@ -1045,8 +1113,8 @@ fn rewrite_stmt_ivars(s: &mut Stmt, ivar: &str, value: i128) -> bool {
         Stmt::If {
             cond, then_, else_, ..
         } => {
-            let mut ok = rewrite_expr_ivars(cond, ivar, value)
-                && rewrite_stmt_ivars(then_, ivar, value);
+            let mut ok =
+                rewrite_expr_ivars(cond, ivar, value) && rewrite_stmt_ivars(then_, ivar, value);
             if let Some(e) = else_ {
                 ok = rewrite_stmt_ivars(e, ivar, value) && ok;
             }
@@ -1082,8 +1150,14 @@ fn rewrite_stmt_ivars(s: &mut Stmt, ivar: &str, value: i128) -> bool {
                 return false;
             }
             cases.iter_mut().all(|c| {
-                let mut ok = c.val.as_mut().map_or(true, |e| rewrite_expr_ivars(e, ivar, value));
-                ok = c.range_end.as_mut().map_or(true, |e| rewrite_expr_ivars(e, ivar, value))
+                let mut ok = c
+                    .val
+                    .as_mut()
+                    .map_or(true, |e| rewrite_expr_ivars(e, ivar, value));
+                ok = c
+                    .range_end
+                    .as_mut()
+                    .map_or(true, |e| rewrite_expr_ivars(e, ivar, value))
                     && ok;
                 c.body
                     .items
@@ -1133,7 +1207,9 @@ fn rewrite_expr_ivars(e: &mut Expr, ivar: &str, value: i128) -> bool {
         // 下方的 `_ => false` 就等于「体内只要出现任何其它名字就不展开」，
         // 把本 pass 整体关掉。)
         Expr::Ident { .. } => true,
-        Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } | Expr::Index { arr: l, idx: r, .. } => {
+        Expr::Binop { l, r, .. }
+        | Expr::Assign { l, r, .. }
+        | Expr::Index { arr: l, idx: r, .. } => {
             rewrite_expr_ivars(l, ivar, value) && rewrite_expr_ivars(r, ivar, value)
         },
         Expr::Unary { e: inner, .. }
@@ -1148,10 +1224,7 @@ fn rewrite_expr_ivars(e: &mut Expr, ivar: &str, value: i128) -> bool {
         | Expr::PreDec { e: inner, .. } => rewrite_expr_ivars(inner, ivar, value),
         Expr::Member { expr: base, .. } => rewrite_expr_ivars(base, ivar, value),
         Expr::Cond {
-            cond,
-            then_,
-            else_,
-            ..
+            cond, then_, else_, ..
         } => {
             rewrite_expr_ivars(cond, ivar, value)
                 && rewrite_expr_ivars(then_, ivar, value)
@@ -1161,8 +1234,7 @@ fn rewrite_expr_ivars(e: &mut Expr, ivar: &str, value: i128) -> bool {
             if !rewrite_expr_ivars(callee, ivar, value) {
                 return false;
             }
-            args.iter_mut()
-                .all(|a| rewrite_expr_ivars(a, ivar, value))
+            args.iter_mut().all(|a| rewrite_expr_ivars(a, ivar, value))
         },
         // 其余形态 (语句表达式 / 初始化列表 / 复合字面量 / va_arg / 内联汇编 /
         // 标签取址 / 未来新增的任何表达式) 一律按「覆盖不到」处理。
@@ -1561,7 +1633,6 @@ fn stmt_span(s: &Stmt) -> Span {
     }
 }
 
-
 /// 检测简单 for 循环: `for (int ivar = 0; ivar < hi; ivar++)` (常量下界 0 + 步长 1)。
 fn detect_simple_for(
     init: &Option<Box<Stmt>>,
@@ -1822,10 +1893,7 @@ fn try_tile_nest(
     let inner_stmt = single_for_stmt(body)?;
     let inner = match inner_stmt {
         Stmt::For {
-            init,
-            cond,
-            step,
-            ..
+            init, cond, step, ..
         } => tile_detect_counted(init, cond, step)?,
         _ => return None,
     };
@@ -1848,19 +1916,11 @@ fn try_tile_nest(
     if n <= ts || m <= ts {
         return None;
     }
-    if !tile_body_is_safe(
-        inner_body,
-        &[outer.0.name.name.as_str(), inner.0.name.name.as_str()],
-    ) {
+    if !tile_body_is_safe(inner_body, &[outer.0.name.name.as_str(), inner.0.name.name.as_str()]) {
         return None;
     }
     Some(BlockItem::Stmt(build_blocked_nest(
-        &outer,
-        &inner,
-        inner_body,
-        tile_size,
-        ctr,
-        span,
+        &outer, &inner, inner_body, tile_size, ctr, span,
     )))
 }
 
@@ -1993,23 +2053,13 @@ fn build_blocked_nest(
     );
     let tj_loop = stmt_for(
         re_decl(idecl, &tj_name, lit(idecl, 0)),
-        bin(
-            BinOp::Lt,
-            ident(&tj_name, &idecl.ty),
-            ibound.clone(),
-            &idecl.ty,
-        ),
+        bin(BinOp::Lt, ident(&tj_name, &idecl.ty), ibound.clone(), &idecl.ty),
         stride_step(&tj_name, idecl),
         i_loop,
     );
     stmt_for(
         re_decl(odecl, &ti_name, lit(odecl, 0)),
-        bin(
-            BinOp::Lt,
-            ident(&ti_name, &odecl.ty),
-            obound.clone(),
-            &odecl.ty,
-        ),
+        bin(BinOp::Lt, ident(&ti_name, &odecl.ty), obound.clone(), &odecl.ty),
         stride_step(&ti_name, odecl),
         tj_loop,
     )
@@ -2467,9 +2517,9 @@ mod tile_equiv_tests {
         match e {
             Expr::Int { v, .. } => *v,
             Expr::Char { v, .. } => *v,
-            Expr::Ident { name, .. } => *env.get(&name.name).unwrap_or_else(|| {
-                panic!("解释器: 读了未赋值的名字 {}", name.name)
-            }),
+            Expr::Ident { name, .. } => *env
+                .get(&name.name)
+                .unwrap_or_else(|| panic!("解释器: 读了未赋值的名字 {}", name.name)),
             Expr::Binop { op, l, r, .. } => {
                 let a = eval_expr(l, env);
                 let b = eval_expr(r, env);
@@ -2485,7 +2535,11 @@ mod tile_equiv_tests {
                     o => panic!("解释器: 未覆盖的二元运算 {:?}", o),
                 }
             },
-            Expr::Unary { op: crate::ast::UnOp::Neg, e: inner, .. } => -eval_expr(inner, env),
+            Expr::Unary {
+                op: crate::ast::UnOp::Neg,
+                e: inner,
+                ..
+            } => -eval_expr(inner, env),
             Expr::Cast { e: inner, .. } => eval_expr(inner, env),
             other => panic!("解释器: 未覆盖的表达式形态 {:?}", other),
         }
@@ -2615,16 +2669,13 @@ mod tile_equiv_tests {
         sorted_before.sort();
         sorted_after.sort();
         assert_eq!(
-            sorted_before, sorted_after,
+            sorted_before,
+            sorted_after,
             "分块改变了迭代空间 (执行次数 {} vs {}, 且多重集不同)",
             seq_before.len(),
             seq_after.len()
         );
-        assert_eq!(
-            seq_after.len(),
-            seq_before.len(),
-            "分块不得改变体内写入次数"
-        );
+        assert_eq!(seq_after.len(), seq_before.len(), "分块不得改变体内写入次数");
     }
 
     /// 分块必须**逐字保留循环体** (不做任何名字替换) —— 这是它不依赖名字分析、

@@ -9,8 +9,8 @@ use crate::ssa::cfg::{
 };
 use crate::ssa::expr_rebuild::infer_binop_type;
 use crate::ssa::loop_exit::{
-    is_eh_pad, loop_exit_owner, loop_exit_plan, loop_shape, resolve_loop_exit_stub,
-    LoopExitOwner, LoopExitPlan,
+    is_eh_pad, loop_exit_owner, loop_exit_plan, loop_shape, resolve_loop_exit_stub, LoopExitOwner,
+    LoopExitPlan,
 };
 use crate::ssa::rebuild::{
     branch_join, is_loop_exit_pure_return, is_lower_ir_temp_base, is_pass_hint_inst,
@@ -52,7 +52,9 @@ fn nested_branch_cfg() -> Function {
     f.blocks.get_mut("B2").unwrap().term = Terminator::Jump("M2".into());
     f.blocks.get_mut("M2").unwrap().term = Terminator::Jump("M".into());
     f.blocks.get_mut("M").unwrap().term = Terminator::Jump("E".into());
-    f.blocks.get_mut("E").unwrap().term = Terminator::Ret { val: Some(Operand::Int(0)) };
+    f.blocks.get_mut("E").unwrap().term = Terminator::Ret {
+        val: Some(Operand::Int(0)),
+    };
     f
 }
 
@@ -125,16 +127,14 @@ fn collect_all_preds_yields_canonical_deterministic_order() {
 
     // 3) 这个序会随 `refresh_cfg` 落进缓存并进 dump 读数，一起钉住。
     refresh_cfg(&mut f);
-    assert_eq!(
-        f.blocks["join"].preds,
-        preds["join"],
-        "bb.preds 缓存必须与派生结果同序"
-    );
+    assert_eq!(f.blocks["join"].preds, preds["join"], "bb.preds 缓存必须与派生结果同序");
     let d1 = dump_function(&f);
     let d2 = dump_function(&f);
     assert_eq!(d1, d2, "同一 IR 两次读数必须逐字一致");
     assert!(
-        d1.contains("join: preds=[\"entry\", \"in0\", \"in1\", \"in2\", \"in3\", \"in4\", \"in5\"]"),
+        d1.contains(
+            "join: preds=[\"entry\", \"in0\", \"in1\", \"in2\", \"in3\", \"in4\", \"in5\"]"
+        ),
         "dump 里的 preds 行未按规范序输出:\n{d1}"
     );
 
@@ -509,9 +509,7 @@ fn eh_pads_are_never_loop_members_or_continuations() {
     headers.sort();
     let (header, latches, body) = headers
         .iter()
-        .filter_map(|h| {
-            loop_shape(&func, h, &doms).map(|(l, b)| (h.to_string(), l, b))
-        })
+        .filter_map(|h| loop_shape(&func, h, &doms).map(|(l, b)| (h.to_string(), l, b)))
         .next()
         .expect("应找到一个循环");
     assert!(!latches.is_empty(), "反向对照：该循环应有 latch");
@@ -566,10 +564,7 @@ fn subobject_array_decay_is_represented_as_member_addr() {
 
     let zero_len = "struct Z { int count; int data[0]; };\n\
                     int t(struct Z* z){ return z->data[0] + z->data[2]; }\n";
-    assert!(
-        n_member_addr(zero_len, "t") >= 1,
-        "零长数组成员的下标基址必须走 MemberAddr"
-    );
+    assert!(n_member_addr(zero_len, "t") >= 1, "零长数组成员的下标基址必须走 MemberAddr");
     // 条数不钉死：构建期不做 CSE，`data[0] + data[2]` 现在发两次衰减（实测 2 条），
     // 以后的 pass 把它合成一条不是错。只钉「有没有」与「不该有的地方没有」。
     let flex = "struct F { int count; int data[]; };\n\
@@ -587,15 +582,9 @@ fn subobject_array_decay_is_represented_as_member_addr() {
     );
 
     let fixed_2d = "int t(void){ int a[3][4]; a[2][1] = 5; return a[2][1]; }\n";
-    assert!(
-        try_build(fixed_2d, "t").is_some(),
-        "固定大小二维数组仍应走 SSA 往返"
-    );
+    assert!(try_build(fixed_2d, "t").is_some(), "固定大小二维数组仍应走 SSA 往返");
     let ptr_elem = "int t(int* p){ p[2] = 9; return p[2]; }\n";
-    assert!(
-        try_build(ptr_elem, "t").is_some(),
-        "指针下标（无需衰减）不得被误挡"
-    );
+    assert!(try_build(ptr_elem, "t").is_some(), "指针下标（无需衰减）不得被误挡");
     assert_eq!(
         n_member_addr(ptr_elem, "t"),
         0,
@@ -694,8 +683,7 @@ fn multi_exit_cycle_predicate_is_narrow_and_sound() {
         ),
     ];
     for (why, fname, src) in unblocked {
-        let func = try_build(src, fname)
-            .unwrap_or_else(|| panic!("{why}: 应能进 SSA 建 IR"));
+        let func = try_build(src, fname).unwrap_or_else(|| panic!("{why}: 应能进 SSA 建 IR"));
         assert!(!has_multi_exit_cycle(&func), "{why}: 不该被判为不可表达");
     }
 
@@ -767,7 +755,8 @@ fn multi_exit_cycle_predicate_is_narrow_and_sound() {
     }
     // 同形状但侧出口是 `return`（而不是 break）⇒ 必须仍然放行：这一对是上面那两条
     // 反向对照，证明挡的是「头块 break 到续体」而不是「所有带写的节点头」。
-    let near_miss = "int a(int n){int i=0,s=0;do{s+=i;i++;if(i==3)return 42;}while(i<n);return s+i;}\n";
+    let near_miss =
+        "int a(int n){int i=0,s=0;do{s+=i;i++;if(i==3)return 42;}while(i<n);return s+i;}\n";
     let nm = try_build(near_miss, "a").expect("near miss 应能建 IR");
     assert!(
         !has_multi_exit_cycle(&nm),
@@ -799,7 +788,9 @@ fn shape_owners(
         names.sort();
         let mut owners = Vec::new();
         for name in names {
-            let Some(b) = func.blocks.get(name) else { continue };
+            let Some(b) = func.blocks.get(name) else {
+                continue;
+            };
             for s in term_succs(&b.term) {
                 if s == header || body.contains(s) || is_back_edge(name, s, &doms) {
                     continue;
@@ -947,7 +938,9 @@ fn has_multi_exit_cycle_before_shape_gate(func: &Function) -> bool {
     let mut headers: Vec<&String> = func.blocks.keys().collect();
     headers.sort();
     for header in headers {
-        let Some(hb) = func.blocks.get(header) else { continue };
+        let Some(hb) = func.blocks.get(header) else {
+            continue;
+        };
         let latches: Vec<String> = hb
             .preds
             .iter()
@@ -964,7 +957,9 @@ fn has_multi_exit_cycle_before_shape_gate(func: &Function) -> bool {
         let mut names: Vec<&String> = body.iter().chain(std::iter::once(header)).collect();
         names.sort();
         for name in names {
-            let Some(b) = func.blocks.get(name) else { continue };
+            let Some(b) = func.blocks.get(name) else {
+                continue;
+            };
             for s in term_succs(&b.term) {
                 if s == header || body.contains(s) || is_back_edge(name, s, &doms) {
                     continue;
@@ -987,8 +982,14 @@ fn shape_probe_report(func: &Function) -> String {
     let mut out = String::new();
     out.push_str("  -- blocks --\n");
     for name in &func.block_order {
-        let Some(bb) = func.blocks.get(name) else { continue };
-        let stmts = bb.insts.iter().filter(|i| !is_pass_hint_inst(&i.kind)).count();
+        let Some(bb) = func.blocks.get(name) else {
+            continue;
+        };
+        let stmts = bb
+            .insts
+            .iter()
+            .filter(|i| !is_pass_hint_inst(&i.kind))
+            .count();
         out.push_str(&format!(
             "    {:<16} stmts={} phis={} preds={:?} term={:?}\n",
             bb.name,
@@ -1035,20 +1036,37 @@ fn shape_probe_report(func: &Function) -> String {
         names.sort();
         let mut distinct: Vec<String> = Vec::new();
         for name in names {
-            let Some(b) = func.blocks.get(name) else { continue };
+            let Some(b) = func.blocks.get(name) else {
+                continue;
+            };
             for s in term_succs(&b.term) {
                 if s == header || body.contains(s) || is_back_edge(name, s, &doms) {
                     continue;
                 }
-                let Some(tb) = func.blocks.get(s) else { continue };
+                let Some(tb) = func.blocks.get(s) else {
+                    continue;
+                };
                 let pure_ret = is_loop_exit_pure_return(s, func);
-                let stmts = tb.insts.iter().filter(|i| !is_pass_hint_inst(&i.kind)).count();
-                let stub = stmts == 0 && tb.phis.is_empty() && matches!(tb.term, Terminator::Jump(_));
-                let all_in = tb.preds.iter().all(|p| p.as_str() == header || body.contains(p.as_str()));
-                let head_direct = term_succs(&hb.term).iter().any(|x| *x == s);
-                let latch_exit = body
+                let stmts = tb
+                    .insts
                     .iter()
-                    .any(|m| m != header && func.blocks.get(m).map(|b| term_succs(&b.term).iter().any(|x| *x == s)).unwrap_or(false));
+                    .filter(|i| !is_pass_hint_inst(&i.kind))
+                    .count();
+                let stub =
+                    stmts == 0 && tb.phis.is_empty() && matches!(tb.term, Terminator::Jump(_));
+                let all_in = tb
+                    .preds
+                    .iter()
+                    .all(|p| p.as_str() == header || body.contains(p.as_str()));
+                let head_direct = term_succs(&hb.term).iter().any(|x| *x == s);
+                let latch_exit = body.iter().any(|m| {
+                    m != header
+                        && func
+                            .blocks
+                            .get(m)
+                            .map(|b| term_succs(&b.term).iter().any(|x| *x == s))
+                            .unwrap_or(false)
+                });
                 let folded = probe_fold_stub(s, func, &body);
                 out.push_str(&format!(
                     "    EXIT {name}->{s}: term={:?} phis={} stmts={stmts} preds={:?} pure_return={pure_ret} \
@@ -1087,7 +1105,9 @@ fn shape_probe_report(func: &Function) -> String {
             let mut enames: Vec<&String> = pl_body.iter().collect();
             enames.sort();
             for name in enames {
-                let Some(b) = func.blocks.get(name) else { continue };
+                let Some(b) = func.blocks.get(name) else {
+                    continue;
+                };
                 for s in term_succs(&b.term) {
                     if s == header || pl_body.contains(s) || is_back_edge(name, s, &doms) {
                         continue;
@@ -1112,7 +1132,11 @@ fn probe_fold_stub(target: &str, func: &Function, body: &HashSet<String>) -> Str
         let Some(bb) = func.blocks.get(&cur) else {
             return cur;
         };
-        let stmts = bb.insts.iter().filter(|i| !is_pass_hint_inst(&i.kind)).count();
+        let stmts = bb
+            .insts
+            .iter()
+            .filter(|i| !is_pass_hint_inst(&i.kind))
+            .count();
         let is_stub = stmts == 0 && bb.phis.is_empty();
         match &bb.term {
             Terminator::Jump(n) if is_stub && !body.contains(n) => cur = n.clone(),
@@ -1128,7 +1152,10 @@ fn probe_fold_stub(target: &str, func: &Function, body: &HashSet<String>) -> Str
 /// 放弃 SSA」也能把测试做绿（那其实就是「SSA 整层空转」那种假绿）。
 #[test]
 fn unlowerable_expr_bails_out_of_ssa_instead_of_becoming_zero() {
-    assert!(try_build("int a(void){ return (int[]){1,2,3}[1]; }\n", "a").is_none(), "复合字面量不可降级");
+    assert!(
+        try_build("int a(void){ return (int[]){1,2,3}[1]; }\n", "a").is_none(),
+        "复合字面量不可降级"
+    );
     // `&x[2]` 曾经也只能退 SSA（IR 里没有「下标的左值地址」形态），现已由
     // `InstKind::IndexAddr` 表达。这里不只断言「能进管线」，而是钉住 IR 里
     // 确实出现了那条指令：只查 is_some 的话，将来删了它又换回退路也能做绿。
@@ -1143,7 +1170,10 @@ fn unlowerable_expr_bails_out_of_ssa_instead_of_becoming_zero() {
             .count();
         assert!(n >= 1, "`&x[2]` 必须发 IndexAddr，实得 {n} 条");
     }
-    assert!(try_build("int c(void){ int x[4]; x[2] = 9; return x[2]; }\n", "c").is_some(), "对照组必须仍进 SSA 管线");
+    assert!(
+        try_build("int c(void){ int x[4]; x[2] = 9; return x[2]; }\n", "c").is_some(),
+        "对照组必须仍进 SSA 管线"
+    );
 }
 
 /// 一般的「左值地址」形态：`&m[i][j]`（下标基址本身是计算出来的数组行）过去只能
@@ -1169,11 +1199,9 @@ fn nested_lvalue_addr_goes_through_ssa_as_index_addr_chain() {
         "`&m[i][j]` 应逐层发 >=2 条 IndexAddr（行 + 元素）"
     );
     // 三维：至少 3 条（两层行 + 元素）。
-    let d3 = "int t(int i,int j,int k){ int m[2][3][4]; int *p = &m[i][j][k]; return (int)(long)p; }\n";
-    assert!(
-        count_idx_addr(d3, "t") >= 3,
-        "`&m[i][j][k]` 应逐层发 >=3 条 IndexAddr"
-    );
+    let d3 =
+        "int t(int i,int j,int k){ int m[2][3][4]; int *p = &m[i][j][k]; return (int)(long)p; }\n";
+    assert!(count_idx_addr(d3, "t") >= 3, "`&m[i][j][k]` 应逐层发 >=3 条 IndexAddr");
     // 反向对照：不经计算行的 `&m[0][j]`（基址是具名数组，不需内层行地址）仍只需 1 层？
     // 不——`m[0]` 仍是 Index，会递归发一条行地址；故也 >=2。真正只需 1 条的是一维。
     let d1 = "int t(int i){ int a[4]; int *p = &a[i]; return (int)(long)p; }\n";
@@ -1199,11 +1227,7 @@ fn mem_lvalue_rmw_emits_load_and_store_in_ir() {
         ("int f(int *p){ return ++*p; }\n", "f", "`++*p`"),
         ("int f(int *p){ return (*p)++; }\n", "f", "`(*p)++`"),
         ("int f(int a[4], int i){ return a[i]++; }\n", "f", "`a[i]++`"),
-        (
-            "struct S{int f;}; int f(struct S *q){ return ++q->f; }\n",
-            "f",
-            "`++q->f`",
-        ),
+        ("struct S{int f;}; int f(struct S *q){ return ++q->f; }\n", "f", "`++q->f`"),
     ];
     for (src, name, what) in cases {
         let func = try_build(src, name).unwrap_or_else(|| panic!("{what} 现在应能进 SSA"));
@@ -1287,9 +1311,10 @@ fn ternary_with_side_effect_branches_bails_out() {
     let f = try_build("int t2(int c,int a,int b){ return c ? a + 1 : b + 2; }\n", "t2")
         .expect("纯三元表达式仍应进 SSA 管线");
     assert!(
-        f.blocks
-            .values()
-            .any(|bb| bb.insts.iter().any(|i| matches!(i.kind, InstKind::Select { .. }))),
+        f.blocks.values().any(|bb| bb
+            .insts
+            .iter()
+            .any(|i| matches!(i.kind, InstKind::Select { .. }))),
         "纯分支仍降级成 Select（否则本判据只是在关掉整层优化）"
     );
 }
@@ -1310,8 +1335,9 @@ fn unrecognised_assign_lvalue_bails_instead_of_dropping_the_store() {
         .is_none(),
         "复数字段赋值不能被静默丢弃"
     );
-    let ok = try_build("struct S{double a;}; double g(struct S *p){ p->a = 1; return p->a; }\n", "g")
-        .expect("受支持的左值仍应进 SSA 管线");
+    let ok =
+        try_build("struct S{double a;}; double g(struct S *p){ p->a = 1; return p->a; }\n", "g")
+            .expect("受支持的左值仍应进 SSA 管线");
     assert!(
         ok.blocks.values().any(|bb| bb
             .insts
@@ -1330,11 +1356,8 @@ fn unrecognised_assign_lvalue_bails_instead_of_dropping_the_store() {
 #[test]
 fn aggregate_assignment_to_named_object_bails() {
     assert!(
-        try_build(
-            "struct P { long a; long b; }; struct P g; void f(struct P p){ g = p; }\n",
-            "f"
-        )
-        .is_none(),
+        try_build("struct P { long a; long b; }; struct P g; void f(struct P p){ g = p; }\n", "f")
+            .is_none(),
         "聚合整体赋值不得降级成一次标量 Store"
     );
     assert!(
@@ -1353,12 +1376,18 @@ fn aggregate_assignment_to_named_object_bails() {
 fn infer_binop_type_keeps_complex_results() {
     let sp = Span::point("t.c", 1, 1);
     let cx = || Expr::Ident {
-        name: crate::ast::Ident { name: "x".into(), span: sp.clone() },
+        name: crate::ast::Ident {
+            name: "x".into(),
+            span: sp.clone(),
+        },
         span: sp.clone(),
         ty: Type::Complex(Box::new(QualType::new(Type::Double))),
     };
     let dbl = || Expr::Ident {
-        name: crate::ast::Ident { name: "y".into(), span: sp.clone() },
+        name: crate::ast::Ident {
+            name: "y".into(),
+            span: sp.clone(),
+        },
         span: sp.clone(),
         ty: Type::Double,
     };

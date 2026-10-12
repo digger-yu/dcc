@@ -93,19 +93,33 @@ pub enum Operand {
 impl Operand {
     /// 寄存器简写 (默认 64-bit, 用于 aarch64 xN / x86 r64)。
     pub fn reg64(idx: u8) -> Self {
-        Operand::Reg { idx, width: Width::B64 }
+        Operand::Reg {
+            idx,
+            width: Width::B64,
+        }
     }
     /// 32-bit 寄存器 (wN / eN / r32)。
     pub fn reg32(idx: u8) -> Self {
-        Operand::Reg { idx, width: Width::B32 }
+        Operand::Reg {
+            idx,
+            width: Width::B32,
+        }
     }
     /// 立即数简写 (无符号)。
     pub fn uimm(value: i64, bits: u8) -> Self {
-        Operand::Imm { value, bits, signed: false }
+        Operand::Imm {
+            value,
+            bits,
+            signed: false,
+        }
     }
     /// 立即数简写 (有符号)。
     pub fn simm(value: i64, bits: u8) -> Self {
-        Operand::Imm { value, bits, signed: true }
+        Operand::Imm {
+            value,
+            bits,
+            signed: true,
+        }
     }
 }
 
@@ -132,7 +146,13 @@ impl InsnRec {
         let mut arr = [Operand::None, Operand::None, Operand::None, Operand::None];
         let n = ops.len().min(4);
         arr[..n].clone_from_slice(&ops[..n]);
-        InsnRec { opcode, ops: arr, nops: n as u8, pc: 0, bytes_len: 0 }
+        InsnRec {
+            opcode,
+            ops: arr,
+            nops: n as u8,
+            pc: 0,
+            bytes_len: 0,
+        }
     }
     /// 取第 i 个操作数 (越界返回 None)。
     pub fn op(&self, i: usize) -> &Operand {
@@ -195,7 +215,13 @@ mod tests {
     fn insn_rec_ctors() {
         let r = InsnRec::new(42, &[Operand::reg64(0), Operand::reg32(1), Operand::uimm(4, 12)]);
         assert_eq!(r.nops, 3);
-        assert_eq!(r.op(0), &Operand::Reg { idx: 0, width: Width::B64 });
+        assert_eq!(
+            r.op(0),
+            &Operand::Reg {
+                idx: 0,
+                width: Width::B64
+            }
+        );
         assert_eq!(r.op(3), &Operand::None);
     }
 

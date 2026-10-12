@@ -54,8 +54,7 @@ impl Interference {
     /// （见设计 §11.9 的订正）。它仍然有用：回答「同基名的不同版本能不能拿到不同的家」，
     /// 那件事确实只需一对不重叠的版本 + 分裂成两个真局部。
     pub fn bases_have_disjoint_pair(&self, a: &[String], b: &[String]) -> bool {
-        a.iter()
-            .any(|x| b.iter().any(|y| !self.interferes(x, y)))
+        a.iter().any(|x| b.iter().any(|y| !self.interferes(x, y)))
     }
 
     /// **共用一个号的真正条件**：两边的全部版本两两都不干涉（∀，不是 ∃）。
@@ -83,13 +82,13 @@ fn term_point(t: &Terminator) -> Point {
             for v in operand_vars(o) {
                 uses.insert(v);
             }
-        }
+        },
         Terminator::Branch { cond, .. } | Terminator::SwitchTable { idx: cond, .. } => {
             for v in operand_vars(cond) {
                 uses.insert(v);
             }
-        }
-        Terminator::Ret { val: None } | Terminator::Jump(_) | Terminator::Unreachable => {}
+        },
+        Terminator::Ret { val: None } | Terminator::Jump(_) | Terminator::Unreachable => {},
     }
     Point { uses, def: None }
 }
@@ -205,8 +204,14 @@ pub fn compute(func: &Function) -> Interference {
                 }
                 cf.remove(def);
                 for o in cf.iter() {
-                    out.conflicts.entry(def.clone()).or_default().insert(o.clone());
-                    out.conflicts.entry(o.clone()).or_default().insert(def.clone());
+                    out.conflicts
+                        .entry(def.clone())
+                        .or_default()
+                        .insert(o.clone());
+                    out.conflicts
+                        .entry(o.clone())
+                        .or_default()
+                        .insert(def.clone());
                 }
             }
             // 走到这点之前：读让它活起来，写让它在此之前不存在
@@ -283,8 +288,13 @@ pub fn spans_call(func: &Function, base: &str) -> bool {
         }
         for inst in &bb.insts {
             seq += 1;
-            let is_call = matches!(inst.kind, crate::ssa::InstKind::Call { .. } | crate::ssa::InstKind::Invoke { .. });
-            let reads = collect_uses_kind(&inst.kind).iter().any(|v| versions.contains(v));
+            let is_call = matches!(
+                inst.kind,
+                crate::ssa::InstKind::Call { .. } | crate::ssa::InstKind::Invoke { .. }
+            );
+            let reads = collect_uses_kind(&inst.kind)
+                .iter()
+                .any(|v| versions.contains(v));
             let writes = inst.dest.as_ref().map(|d| d.base == base).unwrap_or(false);
             if writes {
                 first_def.get_or_insert(seq);
@@ -297,7 +307,11 @@ pub fn spans_call(func: &Function, base: &str) -> bool {
             }
         }
         let tp_uses_base = match &bb.term {
-            Terminator::Ret { val: Some(o) } | Terminator::Branch { cond: o, .. } | Terminator::SwitchTable { idx: o, .. } => operand_vars(o).iter().any(|v| versions.contains(v)),
+            Terminator::Ret { val: Some(o) }
+            | Terminator::Branch { cond: o, .. }
+            | Terminator::SwitchTable { idx: o, .. } => {
+                operand_vars(o).iter().any(|v| versions.contains(v))
+            },
             _ => false,
         };
         seq += 1;
@@ -339,7 +353,8 @@ mod tests {
     /// 必须判成互相干涉 —— 它们今天各自占一个 callee-saved，共用即错值。
     #[test]
     fn loop_carried_values_interfere() {
-        let func = ssa_of("long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i;return acc;}", "s");
+        let func =
+            ssa_of("long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i;return acc;}", "s");
         let iv = compute(&func);
         let acc = versions_of_base(&func, "acc");
         let i = versions_of_base(&func, "i");
@@ -381,7 +396,10 @@ mod tests {
             ("long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i;return acc;}", "s"),
             ("long f(long a,long b){long t=a+1;long u=b+t;long v=t*u;return v+t;}", "f"),
             ("long g(long n){long r=1;while(n>1){r=r*n;n=n-1;}return r;}", "g"),
-            ("long h(long n){long x=0;for(long i=0;i<n;i++){long y=i*2;x=x+y;}return x;}", "h"),
+            (
+                "long h(long n){long x=0;for(long i=0;i<n;i++){long y=i*2;x=x+y;}return x;}",
+                "h",
+            ),
         ] {
             let func = ssa_of(src, fname);
             let iv = compute(&func);
@@ -415,7 +433,8 @@ mod tests {
     /// 根本没有版本可测（本轮第一轮就踩了这个空跑坑）。
     #[test]
     fn sequential_disjoint_values_do_not_interfere() {
-        let src = "long f(void){long a=1;long b=a+1;long c=b+b;long d=7;long e=d+d;long g=e+c;return g;}";
+        let src =
+            "long f(void){long a=1;long b=a+1;long c=b+b;long d=7;long e=d+d;long g=e+c;return g;}";
         let (prog, _d) = crate::parser::parse(src.as_bytes(), "t.c");
         let (m, _w) = crate::ir::lower(prog).unwrap();
         let fd = m
@@ -474,17 +493,15 @@ mod tests {
             iv.bases_have_disjoint_pair(&acc, &i),
             "循环里应有不重叠的版本对（否则两个判据没区别，用例就是空跑）"
         );
-        assert!(
-            !iv.ranges_disjoint(&acc, &i),
-            "acc 与 i 的活区整体相交，不得判为可共用一个号"
-        );
+        assert!(!iv.ranges_disjoint(&acc, &i), "acc 与 i 的活区整体相交，不得判为可共用一个号");
     }
 
     /// 干涉关系必须**对称**：单向记账会让 `interferes(b,a)` 漏判，而漏判的后果就是两个
     /// 同时活着的值共用一个号。逐边反向检查，缺一条就把边名报出来。
     #[test]
     fn interference_is_symmetric() {
-        let func = ssa_of("long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i*2;return acc;}", "s");
+        let func =
+            ssa_of("long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i*2;return acc;}", "s");
         let iv = compute(&func);
         let mut broken = Vec::new();
         for (name, set) in &iv.conflicts {
@@ -525,11 +542,9 @@ mod tests {
     /// 不跨 call 的两个形状都必须报 false：「先算完再用」与「根本不参与 call」。
     #[test]
     fn spans_call_is_false_when_the_range_ends_before_the_call() {
-        let f1 = ssa_of("int sink(int); int q(void){int v = 42; int a = v + 1; return sink(a);}", "q");
-        assert!(
-            !spans_call(&f1, "v"),
-            "v 的最后使用在 call 之前 ⇒ 不需要保存通道"
-        );
+        let f1 =
+            ssa_of("int sink(int); int q(void){int v = 42; int a = v + 1; return sink(a);}", "q");
+        assert!(!spans_call(&f1, "v"), "v 的最后使用在 call 之前 ⇒ 不需要保存通道");
         let f2 = ssa_of("int q(void){int v = 42; return v + 1;}", "q");
         assert!(!spans_call(&f2, "v"), "函数里一个 call 都没有");
         // 反向对照：基名不存在时必须报 false而不是崩，也不能报成 true

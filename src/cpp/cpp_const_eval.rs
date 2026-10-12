@@ -1379,7 +1379,10 @@ pub fn eval_cpp_const(e: &CppExpr, locals: &HashMap<String, i128>) -> Option<i12
 /// `TemplateRegistry::fold_args` 逐级变成 `NonType`, 这里把运算符语义解释一次。
 /// 语义与 [`eval_cpp_const`] (表达式语境) 同一口径: 除零 / 移位越界不猜值,
 /// 返 None 表示“仍求不出来”。
-pub fn eval_nt_expr(op: crate::cpp::mangle::NtOp, operands: &[crate::cpp::mangle::MangleType]) -> Option<i64> {
+pub fn eval_nt_expr(
+    op: crate::cpp::mangle::NtOp,
+    operands: &[crate::cpp::mangle::MangleType],
+) -> Option<i64> {
     use crate::cpp::mangle::MangleType as M;
     use crate::cpp::mangle::NtOp;
     if operands.len() != op.arity() {

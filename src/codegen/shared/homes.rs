@@ -19,9 +19,9 @@
 // x86_64 由 `codegen::x86_64::abi::regnames` 那一份表管（它有 `%` 前缀、位宽形态与
 // 保留号规则，比这里的一层复杂得多），所以 `check_program_homes` 对 x86_64 直接返回空。
 
-use crate::cli::Arch;
 use crate::ast::Program;
 use crate::ast::{Block, BlockItem, Decl, Stmt, VarDecl};
+use crate::cli::Arch;
 use crate::diagnostics::Diagnostic;
 use crate::diagnostics::Severity;
 
@@ -39,12 +39,9 @@ pub enum HomeSupport {
 pub fn home_support(arch: Arch) -> HomeSupport {
     match arch {
         Arch::X86_64 => HomeSupport::StackAndRegister,
-        Arch::AArch64
-        | Arch::Arm
-        | Arch::RiscV64
-        | Arch::RiscV32
-        | Arch::Mips
-        | Arch::Mips64 => HomeSupport::StackOnly,
+        Arch::AArch64 | Arch::Arm | Arch::RiscV64 | Arch::RiscV32 | Arch::Mips | Arch::Mips64 => {
+            HomeSupport::StackOnly
+        },
     }
 }
 
@@ -60,25 +57,25 @@ pub fn target_reg_names(arch: Arch) -> &'static [&'static str] {
         // x86_64 由 `abi/regnames.rs` 那张 132 条的表管（带位宽形态与 % 规则）。
         Arch::X86_64 => &[],
         Arch::AArch64 => &[
-            "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12",
-            "x13", "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24",
-            "x25", "x26", "x27", "x28", "x29", "x30", "sp",
+            "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
+            "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25",
+            "x26", "x27", "x28", "x29", "x30", "sp",
         ],
         Arch::RiscV64 | Arch::RiscV32 => &[
-            "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12",
-            "x13", "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24",
-            "x25", "x26", "x27", "x28", "x29", "x30", "x31",
+            "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
+            "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25",
+            "x26", "x27", "x28", "x29", "x30", "x31",
             // riscv ABI 别名（实测 gcc 同样接受）
-            "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "s0",
-            "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "a0", "a1",
-            "a2", "a3", "a4", "a5", "a6", "a7", "fp",
+            "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "s0", "s1",
+            "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "a0", "a1", "a2", "a3",
+            "a4", "a5", "a6", "a7", "fp",
         ],
         Arch::Arm => &[
-            "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12",
-            "r13", "r14", "r15",
+            "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12", "r13",
+            "r14", "r15",
             // arm AAPCS 别名（gcc 的 arm 手册拿 `asm ("a5")` 举例）
-            "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "v1", "v2", "v3", "v4", "v5",
-            "v6", "v7", "v8", "ip", "fp", "sp", "lr", "pc",
+            "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "v1", "v2", "v3", "v4", "v5", "v6",
+            "v7", "v8", "ip", "fp", "sp", "lr", "pc",
         ],
         Arch::Mips | Arch::Mips64 => &[
             // 数字号与 ABI 名两套都收（内核与 gcc 文档两边都有人用）。
@@ -86,11 +83,10 @@ pub fn target_reg_names(arch: Arch) -> &'static [&'static str] {
             // 收 `at`/`v1`/`fp`/`sp`/`ra`/`28`），mips64 与 arm 的交叉 gcc 本机没装。
             // 对只支持栈的后端而言，这张表**只影响诊断措辞**（两侧都是错误），
             // 所以取两张 ABI 的并集不会误拒合法程序，也不会保留静默。
-            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14",
-            "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27",
-            "28", "29", "30", "31",
-            "zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "t0",
-            "t1", "t2", "t3", "t4", "t5", "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5",
+            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
+            "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29",
+            "30", "31", "zero", "at", "v0", "v1", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7",
+            "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5",
             "s6", "s7", "t8", "t9", "k0", "k1", "gp", "sp", "fp", "s8", "ra",
         ],
     }
@@ -153,7 +149,10 @@ fn check_decl(arch: Arch, d: &Decl, out: &mut Vec<Diagnostic>) {
             }
         },
         // 类型定义与 asm 声明不携带家
-        Decl::StructDef(_) | Decl::UnionDef(_) | Decl::EnumDef(_) | Decl::Typedef { .. }
+        Decl::StructDef(_)
+        | Decl::UnionDef(_)
+        | Decl::EnumDef(_)
+        | Decl::Typedef { .. }
         | Decl::GlobalAsm { .. } => {},
     }
 }
@@ -173,13 +172,17 @@ fn check_block(arch: Arch, b: &Block, out: &mut Vec<Diagnostic>) {
 fn check_stmt(arch: Arch, s: &Stmt, out: &mut Vec<Diagnostic>) {
     match s {
         Stmt::Expr { e, .. } => check_expr(arch, e, out),
-        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Goto { .. }
+        Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::Goto { .. }
         | Stmt::Fallthrough { .. } => {},
         Stmt::GotoIndirect { expr, .. } => check_expr(arch, expr, out),
         Stmt::Return { val: Some(e), .. } => check_expr(arch, e, out),
         Stmt::Return { val: None, .. } => {},
         Stmt::Block { b, .. } => check_block(arch, b, out),
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             check_expr(arch, cond, out);
             check_stmt(arch, then_, out);
             if let Some(e) = else_ {
@@ -190,7 +193,13 @@ fn check_stmt(arch: Arch, s: &Stmt, out: &mut Vec<Diagnostic>) {
             check_expr(arch, cond, out);
             check_stmt(arch, body, out);
         },
-        Stmt::For { init, cond, step, body, .. } => {
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(i) = init {
                 check_stmt(arch, i, out);
             }
@@ -269,7 +278,9 @@ fn check_expr(arch: Arch, e: &crate::ast::Expr, out: &mut Vec<Diagnostic>) {
             check_expr(arch, l, out);
             check_expr(arch, r, out);
         },
-        E::Cond { cond, then_, else_, .. } => {
+        E::Cond {
+            cond, then_, else_, ..
+        } => {
             check_expr(arch, cond, out);
             check_expr(arch, then_, out);
             check_expr(arch, else_, out);
@@ -360,7 +371,9 @@ fn check_var(arch: Arch, v: &VarDecl, out: &mut Vec<Diagnostic>) {
                 ),
                 span: v.span.clone(),
                 source_line: None,
-                hint: Some("该 target 可用的寄存器名见 gcc 的 global register variables 一节".to_string()),
+                hint: Some(
+                    "该 target 可用的寄存器名见 gcc 的 global register variables 一节".to_string(),
+                ),
             });
         } else {
             // 名字是本 target 的寄存器，但本后端实现不了这个家：报**警告**而不是错误。
@@ -445,12 +458,7 @@ mod tests {
             Arch::Mips,
             Arch::Mips64,
         ] {
-            assert_eq!(
-                home_support(a),
-                HomeSupport::StackOnly,
-                "{:?} 必须显式声明只支持栈",
-                a
-            );
+            assert_eq!(home_support(a), HomeSupport::StackOnly, "{:?} 必须显式声明只支持栈", a);
         }
     }
 
@@ -496,14 +504,16 @@ mod tests {
         }
 
         // 反向对照：栈家（含「后端定槽」的占位形态）不得报任何东西
-        for arch in [Arch::AArch64, Arch::RiscV64, Arch::Arm, Arch::Mips, Arch::X86_64] {
+        for arch in [
+            Arch::AArch64,
+            Arch::RiscV64,
+            Arch::Arm,
+            Arch::Mips,
+            Arch::X86_64,
+        ] {
             let mut prog = parse_ok("int gv;\nint main(void){return gv;}\n");
             set_home(&mut prog, Location::Stack(-16));
-            assert!(
-                check_program_homes(arch, &prog).is_empty(),
-                "{:?} 上栈家是能力面内的事",
-                arch
-            );
+            assert!(check_program_homes(arch, &prog).is_empty(), "{:?} 上栈家是能力面内的事", arch);
             set_home(&mut prog, Location::backend_assigned_stack());
             assert!(check_program_homes(arch, &prog).is_empty());
         }

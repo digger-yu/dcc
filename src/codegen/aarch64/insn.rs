@@ -33,10 +33,10 @@ pub enum Aarch64Opcode {
     AddShiftedReg,
     SubImm,
     SubShiftedReg,
-    MovImm,   // movz
-    MovReg,   // orr rd, xzr, rm
+    MovImm, // movz
+    MovReg, // orr rd, xzr, rm
     MvnReg,
-    LdrImm,   // ldr rt, [rn, #imm]
+    LdrImm, // ldr rt, [rn, #imm]
     StrImm,
     LdrbImm,
     StrbImm,
@@ -44,7 +44,7 @@ pub enum Aarch64Opcode {
     StrhImm,
     Adr,
     Adrp,
-    CmpImm,   // subs xzr, rn, #imm
+    CmpImm, // subs xzr, rn, #imm
     CmpReg,
     Cset,
     Csel,
@@ -67,7 +67,7 @@ pub enum Aarch64Opcode {
     FccmpD,
     FnegS,
     FmovS,
-    ScvtfS,  // int -> float (signed 32-bit)
+    ScvtfS, // int -> float (signed 32-bit)
     ScvtfD,
     FcvtzsS, // float -> int (signed 32-bit)
     FcvtzsD,
@@ -156,7 +156,13 @@ impl Insn {
     }
 
     fn is_64(op: &Operand) -> bool {
-        matches!(op, Operand::Reg { width: Width::B64, .. })
+        matches!(
+            op,
+            Operand::Reg {
+                width: Width::B64,
+                ..
+            }
+        )
     }
 
     fn imm_val(op: &Operand) -> i64 {
@@ -186,7 +192,7 @@ impl Insn {
                 let rm = Self::reg_idx(&self.op(1)) as u32;
                 let top = if sf != 0 { 0xaa } else { 0x2a };
                 (top << 24) | (rm << 16) | (31 << 5) | rd
-            }
+            },
             Aarch64Opcode::MovImm => {
                 // movz rd, #imm16. 顶部字节已含 sf: 64位=0xd2, 32位=0x52, opc=10
                 let rd = Self::reg_idx(&self.op(0)) as u32;
@@ -194,7 +200,7 @@ impl Insn {
                 let hw = Self::imm_val(&self.op(2)) as u32 & 3;
                 let top = if sf != 0 { 0xd2 } else { 0x52 };
                 (top << 24) | (1 << 23) | (hw << 21) | ((imm & 0xffff) << 5) | rd
-            }
+            },
             Aarch64Opcode::AddImm => {
                 // 顶部字节已含 sf: 64位=0x91, 32位=0x11
                 let rd = Self::reg_idx(&self.op(0)) as u32;
@@ -202,7 +208,7 @@ impl Insn {
                 let imm = Self::imm_val(&self.op(2)) as u32;
                 let top = if sf != 0 { 0x91 } else { 0x11 };
                 (top << 24) | ((imm & 0xfff) << 10) | (rn << 5) | rd
-            }
+            },
             Aarch64Opcode::SubImm => {
                 // 顶部字节已含 sf: 64位=0xd1, 32位=0x51
                 let rd = Self::reg_idx(&self.op(0)) as u32;
@@ -210,30 +216,30 @@ impl Insn {
                 let imm = Self::imm_val(&self.op(2)) as u32;
                 let top = if sf != 0 { 0xd1 } else { 0x51 };
                 (top << 24) | ((imm & 0xfff) << 10) | (rn << 5) | rd
-            }
+            },
             Aarch64Opcode::CmpImm => {
                 // subs xzr, rn, #imm. 顶部字节已含 sf: 64位=0xf1, 32位=0x71
                 let rn = Self::reg_idx(&self.op(0)) as u32;
                 let imm = Self::imm_val(&self.op(1)) as u32;
                 let top = if sf != 0 { 0xf1 } else { 0x71 };
                 (top << 24) | ((imm & 0xfff) << 10) | (rn << 5) | 31
-            }
+            },
             Aarch64Opcode::Svc => {
                 let imm = Self::imm_val(&self.op(0)) as u32;
                 0xd4000001 | ((imm & 0xffff) << 5)
-            }
+            },
             Aarch64Opcode::Dmb => {
                 // GAS 真值: dmb sy = d5033fbf;  dmb ish = d5033bbf
                 // 位布局: 0xd5030000 | (CRm=0x3 << 12) | (opt << 8) | 0xbf
                 let opt = Self::imm_val(&self.op(0)) as u32;
                 0xd5030000 | (0x3 << 12) | ((opt & 0xf) << 8) | 0xbf
-            }
+            },
             Aarch64Opcode::Dsb => {
                 // GAS 真值: dsb sy = d5033f9f;  dsb ish = d5033b9f
                 // 位布局: 0xd5030000 | (CRm=0x3 << 12) | (opt << 8) | 0x9f
                 let opt = Self::imm_val(&self.op(0)) as u32;
                 0xd5030000 | (0x3 << 12) | ((opt & 0xf) << 8) | 0x9f
-            }
+            },
             Aarch64Opcode::Isb => 0xd5033fdf,
             Aarch64Opcode::Wfe => 0xd503205f,
             Aarch64Opcode::Wfi => 0xd503207f,
@@ -279,34 +285,46 @@ impl Insn {
     }
     pub fn mov_reg(rd: u8, rm: u8, is64: bool) -> Self {
         let w = if is64 { Width::B64 } else { Width::B32 };
-        Insn::new(Aarch64Opcode::MovReg, &[
-            Operand::Reg { idx: rd, width: w },
-            Operand::Reg { idx: rm, width: w },
-        ])
+        Insn::new(
+            Aarch64Opcode::MovReg,
+            &[
+                Operand::Reg { idx: rd, width: w },
+                Operand::Reg { idx: rm, width: w },
+            ],
+        )
     }
     pub fn mov_imm(rd: u8, imm: i64, is64: bool) -> Self {
         let w = if is64 { Width::B64 } else { Width::B32 };
-        Insn::new(Aarch64Opcode::MovImm, &[
-            Operand::Reg { idx: rd, width: w },
-            Operand::uimm(imm, 16),
-            Operand::uimm(0, 2), // hw=0
-        ])
+        Insn::new(
+            Aarch64Opcode::MovImm,
+            &[
+                Operand::Reg { idx: rd, width: w },
+                Operand::uimm(imm, 16),
+                Operand::uimm(0, 2), // hw=0
+            ],
+        )
     }
     pub fn add_imm(rd: u8, rn: u8, imm: i64, is64: bool) -> Self {
         let w = if is64 { Width::B64 } else { Width::B32 };
-        Insn::new(Aarch64Opcode::AddImm, &[
-            Operand::Reg { idx: rd, width: w },
-            Operand::Reg { idx: rn, width: w },
-            Operand::uimm(imm, 12),
-        ])
+        Insn::new(
+            Aarch64Opcode::AddImm,
+            &[
+                Operand::Reg { idx: rd, width: w },
+                Operand::Reg { idx: rn, width: w },
+                Operand::uimm(imm, 12),
+            ],
+        )
     }
     pub fn sub_imm(rd: u8, rn: u8, imm: i64, is64: bool) -> Self {
         let w = if is64 { Width::B64 } else { Width::B32 };
-        Insn::new(Aarch64Opcode::SubImm, &[
-            Operand::Reg { idx: rd, width: w },
-            Operand::Reg { idx: rn, width: w },
-            Operand::uimm(imm, 12),
-        ])
+        Insn::new(
+            Aarch64Opcode::SubImm,
+            &[
+                Operand::Reg { idx: rd, width: w },
+                Operand::Reg { idx: rn, width: w },
+                Operand::uimm(imm, 12),
+            ],
+        )
     }
     pub fn svc(imm: i64) -> Self {
         Insn::new(Aarch64Opcode::Svc, &[Operand::uimm(imm, 16)])

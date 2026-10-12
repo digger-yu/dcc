@@ -4,8 +4,8 @@
 
 pub mod expr;
 pub mod func_setup;
-pub(crate) mod gas;
 pub mod functions;
+pub(crate) mod gas;
 pub mod nested;
 pub mod stmt;
 pub mod vla;

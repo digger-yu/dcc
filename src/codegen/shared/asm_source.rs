@@ -67,9 +67,11 @@ impl AsmIsa {
     pub fn line_comment_tokens(self) -> &'static [&'static str] {
         match self {
             // x86 AT&T/GAS: `#`; RISC-V、MIPS: `#`
-            AsmIsa::X86_64 | AsmIsa::RiscV64 | AsmIsa::RiscV32 | AsmIsa::Mips32 | AsmIsa::Mips64 => {
-                &["#"]
-            },
+            AsmIsa::X86_64
+            | AsmIsa::RiscV64
+            | AsmIsa::RiscV32
+            | AsmIsa::Mips32
+            | AsmIsa::Mips64 => &["#"],
             // AArch64 GAS: `//` (而 `#` 是立即数前缀, 绝不能截断)
             AsmIsa::AArch64 => &["//"],
             // ARM GAS: `@` (同样 `#` 是立即数前缀)
@@ -340,11 +342,9 @@ pub fn default_encode(isa: AsmIsa, mnemonic: &str, operands: &[String]) -> Optio
         "aarch64" => crate::codegen::shared::mini_asm::encode_aarch64(mnemonic, operands),
         "riscv64" => crate::codegen::shared::mini_asm::encode_riscv64(mnemonic, operands),
         "arm" => crate::codegen::shared::mini_asm::encode_arm(mnemonic, operands),
-        "mips" => crate::codegen::shared::mini_asm::encode_mips(
-            mnemonic,
-            operands,
-            isa == AsmIsa::Mips64,
-        ),
+        "mips" => {
+            crate::codegen::shared::mini_asm::encode_mips(mnemonic, operands, isa == AsmIsa::Mips64)
+        },
         _ => None,
     }
 }
@@ -380,38 +380,13 @@ pub fn known_mnemonics(isa: AsmIsa) -> &'static [&'static str] {
             "wfi",
         ],
         AsmIsa::Arm => &[
-            "add",
-            "bx",
-            "clrex",
-            "dmb",
-            "dsb",
-            "isb",
-            "mov",
-            "nop",
-            "sev",
-            "sevl",
-            "sub",
-            "svc",
-            "swi",
-            "wfe",
-            "wfi",
-            "yield",
+            "add", "bx", "clrex", "dmb", "dsb", "isb", "mov", "nop", "sev", "sevl", "sub", "svc",
+            "swi", "wfe", "wfi", "yield",
         ],
         // `cache` 曾以静默 NOP 冒充支持, 已移除。
         AsmIsa::Mips32 | AsmIsa::Mips64 => &[
-            "add",
-            "addu",
-            "break",
-            "daddu",
-            "jalr",
-            "jr",
-            "move",
-            "nop",
-            "ssnop",
-            "sub",
-            "subu",
-            "sync",
-            "syscall",
+            "add", "addu", "break", "daddu", "jalr", "jr", "move", "nop", "ssnop", "sub", "subu",
+            "sync", "syscall",
         ],
         // x86_64 由自研汇编器负责, 名单不在此表
         AsmIsa::X86_64 => &[],
@@ -571,7 +546,9 @@ pub fn note_backend_reject<S: AsmOutcomeSink + ?Sized>(
 /// 否则会出现“同一个缺陷在 5 个后端有 5 种措辞/行为”的分叉。
 ///
 /// `supported_hint` 为该架构的已支持助记符列表 (供用户判断该改写法还是该降级)。
-pub fn passthrough_diagnostics(records: &[AsmPassthroughRecord]) -> Vec<crate::diagnostics::Diagnostic> {
+pub fn passthrough_diagnostics(
+    records: &[AsmPassthroughRecord],
+) -> Vec<crate::diagnostics::Diagnostic> {
     use crate::diagnostics::{Diagnostic, Span};
     if records.is_empty() {
         return Vec::new();
@@ -581,7 +558,10 @@ pub fn passthrough_diagnostics(records: &[AsmPassthroughRecord]) -> Vec<crate::d
     let mut out = Vec::new();
     let mut seen: Vec<(&str, u32)> = Vec::new();
     for r in records {
-        if seen.iter().any(|(f, l)| *f == r.file.as_str() && *l == r.line) {
+        if seen
+            .iter()
+            .any(|(f, l)| *f == r.file.as_str() && *l == r.line)
+        {
             continue;
         }
         seen.push((&r.file, r.line));
@@ -739,10 +719,7 @@ mod tests {
         // 回归: `%0:` 这类解析后的标签定义不得被当成指令而报 E0311。
         for head in ["%0:", "1:", "$L:", "foo:"] {
             let sn = analyze(AsmIsa::AArch64, head);
-            assert!(
-                !sn.needs_gas_text(),
-                "'{head}' is a label definition, not an instruction"
-            );
+            assert!(!sn.needs_gas_text(), "'{head}' is a label definition, not an instruction");
             assert!(sn.bytes.is_empty());
         }
         // 含冒号的 directive 仍按 directive 处理
@@ -832,7 +809,12 @@ mod tests {
             for m in known_mnemonics(isa) {
                 let arm = format!("\"{m}\"");
                 assert!(
-                    body.contains(&arm) || body.find("pub fn encode_").map(|n| &body[..n]).unwrap_or("").contains(&arm),
+                    body.contains(&arm)
+                        || body
+                            .find("pub fn encode_")
+                            .map(|n| &body[..n])
+                            .unwrap_or("")
+                            .contains(&arm),
                     "known_mnemonics({isa:?}) lists '{m}' but {table} has no such arm"
                 );
             }

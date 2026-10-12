@@ -104,7 +104,11 @@ impl Builder {
 
     /// 当前块已有的指令数（用来框出「刚降级出来的那段指令」）。
     fn cur_inst_count(&self) -> usize {
-        self.func.blocks.get(&self.cur).map(|b| b.insts.len()).unwrap_or(usize::MAX)
+        self.func
+            .blocks
+            .get(&self.cur)
+            .map(|b| b.insts.len())
+            .unwrap_or(usize::MAX)
     }
 
     /// 下标 `from` 之后新发射的指令是否全部**纯且不陷获** —— 把它无条件执行是否等价。
@@ -128,7 +132,9 @@ impl Builder {
             }
             match &i.kind {
                 InstKind::Bin { op, .. } => !matches!(op, BinOp::Div | BinOp::Mod),
-                InstKind::Un { .. } | InstKind::Cast { .. } | InstKind::Select { .. }
+                InstKind::Un { .. }
+                | InstKind::Cast { .. }
+                | InstKind::Select { .. }
                 | InstKind::AddrOf { .. } => true,
                 _ => false,
             }
@@ -180,11 +186,7 @@ impl Builder {
     /// `*(&sym) = v`, 后端按符号表解析 `sym` 并拿到真实对象宽度 —— 静态存储的
     /// 既有通路, 不新增形态。
     fn named_addr_operand(&mut self, name: &str, obj_ty: &Type, span: &Span) -> Operand {
-        let addr = self.fresh(
-            "naddr",
-            Type::Ptr(Box::new(QualType::new(obj_ty.clone()))),
-            span,
-        );
+        let addr = self.fresh("naddr", Type::Ptr(Box::new(QualType::new(obj_ty.clone()))), span);
         self.emit(Inst {
             dest: Some(addr.clone()),
             kind: InstKind::AddrOf {
@@ -241,10 +243,8 @@ impl Builder {
         // `lower_expr_into`（定义一个聚合类型的 SSA 变量），不走 Store。
         // 与其「只写一半」，不如让整个函数放弃 SSA 化，留在 AST 通道上由
         // gen_struct_assign 正确处理 —— 与不可降级表达式、不认识左值同一条规则。
-        if matches!(
-            obj_ty,
-            Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)
-        ) {
+        if matches!(obj_ty, Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _))
+        {
             self.unsupported("聚合对象的整体赋值无法在 IR 里表达");
             return value;
         }
@@ -381,16 +381,14 @@ impl Builder {
                 | Type::Enum(..)
         )
     }
-    
+
     /// 内存左值访问的 volatile 判据 —— 与 `Expr::Deref` / `Expr::Index` / `Expr::Member`
     /// 三条**右值**降级各自的判据一致（集中到这里，避免读侧与写侧用两套口径）。
     fn lvalue_is_volatile(&self, lv: &Expr) -> bool {
         match lv {
             Expr::Deref { e, .. } => matches!(&e.ty(), Type::Ptr(qt) if qt.is_volatile()),
             Expr::Index { arr, .. } => matches!(arr.ty(), Type::Array(qt, _) if qt.is_volatile()),
-            Expr::Member {
-                expr, is_arrow, ..
-            } => {
+            Expr::Member { expr, is_arrow, .. } => {
                 if *is_arrow {
                     matches!(&expr.ty(), Type::Ptr(qt) if qt.is_volatile())
                 } else if let Expr::Ident { name, .. } = expr.as_ref() {
@@ -709,7 +707,13 @@ impl Builder {
                             .get(name.name.as_str())
                             .map(|q| q.is_volatile())
                             .unwrap_or(false);
-                        return self.store_to_named_object(&name.name, var_ty, ro, span, is_volatile);
+                        return self.store_to_named_object(
+                            &name.name,
+                            var_ty,
+                            ro,
+                            span,
+                            is_volatile,
+                        );
                     }
                     let is_volatile = self
                         .func
@@ -786,15 +790,15 @@ impl Builder {
                     ..
                 } = r.as_ref()
                 {
-                    let rhs_e: Option<&Expr> =
-                        if crate::semantics::exprs_structurally_equal(l, bl) {
-                            Some(br.as_ref())
-                        } else if crate::semantics::exprs_structurally_equal(l, br) {
-                            // parser 对可交换运算符会把操作数交换位置（read 在右）
-                            Some(bl.as_ref())
-                        } else {
-                            None
-                        };
+                    let rhs_e: Option<&Expr> = if crate::semantics::exprs_structurally_equal(l, bl)
+                    {
+                        Some(br.as_ref())
+                    } else if crate::semantics::exprs_structurally_equal(l, br) {
+                        // parser 对可交换运算符会把操作数交换位置（read 在右）
+                        Some(bl.as_ref())
+                    } else {
+                        None
+                    };
                     if let Some(rhs_e) = rhs_e {
                         // 只对**标量整数/指针**左值走读—改—写。其余形态（聚合、浮点、
                         // C++ 流对象当左值用等）留在旧路径上：那些形状下旧路径本来就
@@ -835,8 +839,7 @@ impl Builder {
                 // `(unsigned short)` 的宽度与符号在 IR 里消失 —— 实测 -O2 下 SCCP 把常量
                 // 折成 -1，而 gcc 是 65535。改成两步：先按表达式自己的类型算出结果，
                 // 再显式转成目标类型，两层转换都留在 IR 里。
-                let outer: Option<SsaVar> =
-                    target.as_ref().filter(|t| &t.ty != ty).cloned();
+                let outer: Option<SsaVar> = target.as_ref().filter(|t| &t.ty != ty).cloned();
                 let dest: SsaVar = match (&target, &outer) {
                     (Some(t), None) => t.clone(),
                     _ => self.fresh("cast", ty.clone(), span),
@@ -1476,7 +1479,10 @@ impl Builder {
             // 返 0（原因与实测见 `Builder::unsupported`）。这里必须是 catch-all：
             // 以后新增的 `Expr` 变体要落在「不优化」而不是「错值」这一边。
             other => {
-                self.unsupported(&format!("表达式无法在 SSA 里忠实表达（{:?}）", expr_shape(other)));
+                self.unsupported(&format!(
+                    "表达式无法在 SSA 里忠实表达（{:?}）",
+                    expr_shape(other)
+                ));
                 Operand::Int(0)
             },
         }
@@ -2095,4 +2101,3 @@ fn build_ssa(f: &FuncDecl, addr_taken: HashSet<String>) -> Option<Function> {
     refresh_cfg(&mut func);
     Some(func)
 }
-

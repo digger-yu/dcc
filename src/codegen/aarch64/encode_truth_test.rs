@@ -26,27 +26,83 @@ struct Case {
 
 fn truth_cases() -> Vec<Case> {
     vec![
-        Case { insn: Insn::nop(), gas: "nop", desc: "nop" },
-        Case { insn: Insn::ret(), gas: "ret", desc: "ret x30" },
-        Case { insn: Insn::br(9), gas: "br x9", desc: "br x9" },
-        Case { insn: Insn::blr(10), gas: "blr x10", desc: "blr x10" },
+        Case {
+            insn: Insn::nop(),
+            gas: "nop",
+            desc: "nop",
+        },
+        Case {
+            insn: Insn::ret(),
+            gas: "ret",
+            desc: "ret x30",
+        },
+        Case {
+            insn: Insn::br(9),
+            gas: "br x9",
+            desc: "br x9",
+        },
+        Case {
+            insn: Insn::blr(10),
+            gas: "blr x10",
+            desc: "blr x10",
+        },
         // mov x9, x10 = orr x9, xzr, x10 (64-bit sf=1) — 构造子语义正确的代表元
-        Case { insn: Insn::mov_reg(9, 10, true), gas: "mov x9, x10", desc: "mov x9,x10 (sf=1)" },
+        Case {
+            insn: Insn::mov_reg(9, 10, true),
+            gas: "mov x9, x10",
+            desc: "mov x9,x10 (sf=1)",
+        },
         // movz x0, #42
-        Case { insn: Insn::mov_imm(0, 42, true), gas: "mov x0, #42", desc: "movz x0,#42" },
+        Case {
+            insn: Insn::mov_imm(0, 42, true),
+            gas: "mov x0, #42",
+            desc: "movz x0,#42",
+        },
         // add x0, x1, #4
-        Case { insn: Insn::add_imm(0, 1, 4, true), gas: "add x0, x1, #4", desc: "add x0,x1,#4" },
+        Case {
+            insn: Insn::add_imm(0, 1, 4, true),
+            gas: "add x0, x1, #4",
+            desc: "add x0,x1,#4",
+        },
         // sub x0, x1, #4
-        Case { insn: Insn::sub_imm(0, 1, 4, true), gas: "sub x0, x1, #4", desc: "sub x0,x1,#4" },
+        Case {
+            insn: Insn::sub_imm(0, 1, 4, true),
+            gas: "sub x0, x1, #4",
+            desc: "sub x0,x1,#4",
+        },
         // svc #0
-        Case { insn: Insn::svc(0), gas: "svc #0", desc: "svc #0" },
+        Case {
+            insn: Insn::svc(0),
+            gas: "svc #0",
+            desc: "svc #0",
+        },
         // dmb sy (imm=15)
-        Case { insn: Insn::new(Aarch64Opcode::Dmb, &[Operand::uimm(15, 4)]), gas: "dmb sy", desc: "dmb sy" },
+        Case {
+            insn: Insn::new(Aarch64Opcode::Dmb, &[Operand::uimm(15, 4)]),
+            gas: "dmb sy",
+            desc: "dmb sy",
+        },
         // wfe / wfi / yield / sev / sevl / isb
-        Case { insn: Insn::new(Aarch64Opcode::Wfe, &[]), gas: "wfe", desc: "wfe" },
-        Case { insn: Insn::new(Aarch64Opcode::Wfi, &[]), gas: "wfi", desc: "wfi" },
-        Case { insn: Insn::new(Aarch64Opcode::Yield, &[]), gas: "yield", desc: "yield" },
-        Case { insn: Insn::new(Aarch64Opcode::Isb, &[]), gas: "isb", desc: "isb" },
+        Case {
+            insn: Insn::new(Aarch64Opcode::Wfe, &[]),
+            gas: "wfe",
+            desc: "wfe",
+        },
+        Case {
+            insn: Insn::new(Aarch64Opcode::Wfi, &[]),
+            gas: "wfi",
+            desc: "wfi",
+        },
+        Case {
+            insn: Insn::new(Aarch64Opcode::Yield, &[]),
+            gas: "yield",
+            desc: "yield",
+        },
+        Case {
+            insn: Insn::new(Aarch64Opcode::Isb, &[]),
+            gas: "isb",
+            desc: "isb",
+        },
     ]
 }
 
@@ -63,13 +119,22 @@ fn assemble_truth(gas: &str) -> Option<u32> {
     let src = dir.join(format!("dcc-g1-{pid}.s"));
     let obj = dir.join(format!("dcc-g1-{pid}.o"));
     std::fs::write(&src, format!(".text\n_start:\n  {}\n", gas)).ok()?;
-    let st = Command::new(as_bin).arg(&src).arg("-o").arg(&obj).output().ok()?;
+    let st = Command::new(as_bin)
+        .arg(&src)
+        .arg("-o")
+        .arg(&obj)
+        .output()
+        .ok()?;
     if !st.status.success() {
         // as 拒绝了这条助记符 —— 该构造子对应的文本有问题, 不算通过。
         return None;
     }
     let out = Command::new(objdump_bin)
-        .args(["-d", "--architecture=aarch64", &format!("{}", obj.display())])
+        .args([
+            "-d",
+            "--architecture=aarch64",
+            &format!("{}", obj.display()),
+        ])
         .output()
         .ok()?;
     let txt = String::from_utf8_lossy(&out.stdout);
@@ -109,10 +174,7 @@ fn g1_encode_matches_gas() {
         }
     }
     // G5 反假绿: 必须至少真跑一条, 否则说明 as 不可用, 不算绿。
-    assert!(
-        ran > 0,
-        "G1 反假绿: aarch64-linux-gnu-as 不可用或全部被拒, 门禁空跑"
-    );
+    assert!(ran > 0, "G1 反假绿: aarch64-linux-gnu-as 不可用或全部被拒, 门禁空跑");
     assert_eq!(
         mismatches, 0,
         "G1: {}/{} 条指令编码与 GAS 真值不一致 (详见上方 eprintln)",

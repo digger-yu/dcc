@@ -502,8 +502,13 @@ impl Codegen {
         // 再过滤: 只允许数字、空白、括号、+ - * . ('.' 用作 PC, 但在纯数字上下文
         // 出现说明不是纯数字, 直接 None).
         if s.chars().any(|c| {
-            !c.is_ascii_digit() && !c.is_ascii_whitespace()
-                && c != '(' && c != ')' && c != '+' && c != '-' && c != '*'
+            !c.is_ascii_digit()
+                && !c.is_ascii_whitespace()
+                && c != '('
+                && c != ')'
+                && c != '+'
+                && c != '-'
+                && c != '*'
         }) {
             return None;
         }
@@ -576,7 +581,10 @@ impl Codegen {
                 while *pos < b.len() && b[*pos].is_ascii_digit() {
                     *pos += 1;
                 }
-                std::str::from_utf8(&b[start..*pos]).ok()?.parse::<i64>().ok()
+                std::str::from_utf8(&b[start..*pos])
+                    .ok()?
+                    .parse::<i64>()
+                    .ok()
             },
             _ => None,
         }

@@ -46,14 +46,14 @@ pub struct CpuFeatures {
 
     // --- AVX-VNNI (VEX form, non-512) ---
     // CPUID leaf 7 **sub-leaf 1**, EAX[bit 4]（旧代码错读子叶 0 的 ECX#4 = OSPKE，已修）
-    pub avx_vnni: bool,   // CPUID leaf 7 **sub-leaf 1**, EAX[bit 4]（不是子叶 0 的 ECX#4）
+    pub avx_vnni: bool, // CPUID leaf 7 **sub-leaf 1**, EAX[bit 4]（不是子叶 0 的 ECX#4）
 
     // --- CPUID leaf 7 sub-leaf 0, EDX ---
     pub avx512_4vnniw: bool,
     pub avx512_4fmaps: bool,
 
     // --- CET (Control-flow Enforcement Technology) ---
-    pub cet_ss: bool,  // CPUID leaf 7, ECX[bit 7]: CET_SS
+    pub cet_ss: bool, // CPUID leaf 7, ECX[bit 7]: CET_SS
     /// CPUID leaf 7, EDX[bit 14]: SERIALIZE（序列化合约指令）
     pub serialize: bool,
     /// CPUID leaf 7, EBX[bit 24]: CLWB（需要 OS 已开 xsave：与 `semantics::cpu_isa` 同口径）

@@ -745,10 +745,7 @@ fn rebuild_bb(
             // 只在直线条带区做: 循环体内由 rebuild_cycle 自己处理收敛。
             let join = if loop_ctx.is_none() {
                 let bj = branch_join(bb_name, t, f, func);
-                let raw = if bj
-                    .as_deref()
-                    .is_some_and(|j| func.blocks.contains_key(j))
-                {
+                let raw = if bj.as_deref().is_some_and(|j| func.blocks.contains_key(j)) {
                     bj
                 } else {
                     // 虚拟后支配者占位名 (`compute_ipdoms` 的 `\u{1}[postdom-exit]`) 不是块:
@@ -765,8 +762,7 @@ fn rebuild_bb(
                 // 个**到达它的臂, 兄弟臂因共享 `visited` 拿到空 (实测 -O2 下
                 // `if(k==1){for(...)}else{while(k-->0)...}` 的 else 臂丢掉整个累加并落到
                 // 函数尾部返回 0)。折叠条件与 [`resolve_loop_exit_stub`] 完全同一套。
-                raw
-                    .filter(|j| func.blocks.contains_key(j.as_str()) && j.as_str() != bb_name)
+                raw.filter(|j| func.blocks.contains_key(j.as_str()) && j.as_str() != bb_name)
                     .map(|j| fold_join(&j, func, stop_at))
             } else {
                 None
@@ -1533,4 +1529,3 @@ fn emit_rebuild_inst(
         }));
     }
 }
-

@@ -678,11 +678,11 @@ pub fn apply_post_lowering_conversions(s: &str) -> String {
 }
 
 /// Stage 10.4: `strip_cpp_keywords` 默认编译下不再存在.
-    /// 仅 `--features legacy-strip-debug` 启用时该函数才会编译,
-    /// 配套的两个内部调用点 (extern "C" 块递归 + 模板文本清洗) 也同步
-    /// 门控. native 路径不再依赖字符级关键字剥离.
-    #[cfg(feature = "legacy-strip-debug")]
-    pub fn strip_cpp_keywords(s: &str) -> String {
+/// 仅 `--features legacy-strip-debug` 启用时该函数才会编译,
+/// 配套的两个内部调用点 (extern "C" 块递归 + 模板文本清洗) 也同步
+/// 门控. native 路径不再依赖字符级关键字剥离.
+#[cfg(feature = "legacy-strip-debug")]
+pub fn strip_cpp_keywords(s: &str) -> String {
     // 先做整体文本替换 (多 token 构造需要先处理)
     let s = replace_cpp_constructs(s);
     // 前置 C++ 内置类型定义, 确保系统头文件中的类型可用
@@ -3535,7 +3535,9 @@ impl Lower {
                         "    /* static member {} {}{} */\n",
                         self.mangle_to_c_ns(ty),
                         name,
-                        init.as_ref().map(|_| " with in-class initializer").unwrap_or("")
+                        init.as_ref()
+                            .map(|_| " with in-class initializer")
+                            .unwrap_or("")
                     ));
                 } else if *is_mutable {
                     // M27: mutable 成员跟踪 + C 端注释标记

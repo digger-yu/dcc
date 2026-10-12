@@ -47,7 +47,11 @@ impl Codegen {
         raw.extend(self.pending_rodata_rels.iter().map(|(_, n, _, _)| n));
         raw.extend(self.pending_debug_info_relocs.iter().map(|(_, n)| n));
         raw.extend(self.pending_custom_sec_rels.iter().map(|r| &r.symbol));
-        raw.extend(self.pending_label_diff_rels.iter().flat_map(|(_, a, b, _)| [a, b]));
+        raw.extend(
+            self.pending_label_diff_rels
+                .iter()
+                .flat_map(|(_, a, b, _)| [a, b]),
+        );
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut out: Vec<String> = Vec::new();
         for name in raw {
@@ -629,9 +633,11 @@ impl Codegen {
                 );
                 continue;
             };
-            let size = self.func_sizes.get(&resolver_label).copied().unwrap_or_else(|| {
-                self.compute_func_size_fallback(&resolver_label, func_start)
-            });
+            let size = self
+                .func_sizes
+                .get(&resolver_label)
+                .copied()
+                .unwrap_or_else(|| self.compute_func_size_fallback(&resolver_label, func_start));
             let bind = if f.is_weak {
                 STB_WEAK
             } else if f.is_static {
@@ -879,8 +885,7 @@ impl Codegen {
                 // 优先从 pushsection_label_offsets 查 (sec_idx, sec_off) —— 这张表
                 // 在 emit_pushsection_data 的 label 分支显式登记非执行 pushsection 内
                 // 的 label 位置 (那些 label 位置不在 self.code, 不能走 pushsection_code_ranges).
-                if let Some(&(sec_idx, sec_off)) = self.pushsection_label_offsets.get(&rel.symbol)
-                {
+                if let Some(&(sec_idx, sec_off)) = self.pushsection_label_offsets.get(&rel.symbol) {
                     local_syms.push(ElfSym {
                         name: rel.symbol.clone(),
                         section: (sec_idx + 7) as u16,

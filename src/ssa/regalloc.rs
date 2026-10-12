@@ -56,7 +56,7 @@
 // 什么没跑」在产物上长得一模一样，没有这个窗口就只能猜。
 
 use crate::ast::{Block, BlockItem, Decl, Expr, InitItem, Stmt, Type};
-use crate::ssa::{Function, LocMap, Location, RegBank, RegId, SsaVar, Splits};
+use crate::ssa::{Function, LocMap, Location, RegBank, RegId, Splits, SsaVar};
 use std::collections::{HashMap, HashSet};
 
 /// 可分配的物理寄存器：x86_64 后端表达式溅出池里那四个 callee-saved 号。
@@ -137,7 +137,12 @@ pub fn ext_pool_selection() -> Vec<u8> {
     spec.split(',')
         .map(|t| t.trim().trim_start_matches('%').to_ascii_lowercase())
         .filter(|t| !t.is_empty())
-        .filter_map(|t| AUTO_EXT_POOL.iter().find(|(nm, _)| *nm == t).map(|(_, r)| *r))
+        .filter_map(|t| {
+            AUTO_EXT_POOL
+                .iter()
+                .find(|(nm, _)| *nm == t)
+                .map(|(_, r)| *r)
+        })
         .collect()
 }
 
@@ -256,16 +261,17 @@ impl Plan {
 /// 用户手写的 `register asm` 用的是不是池子里的号（是则该号已被占用）。
 pub fn pooled_reg_of(asm_name: &str) -> Option<u8> {
     let n = asm_name.trim_start_matches('%').to_ascii_lowercase();
-    POOL.iter()
-        .find(|(nm, _)| *nm == n)
-        .map(|(_, r)| *r)
+    POOL.iter().find(|(nm, _)| *nm == n).map(|(_, r)| *r)
 }
 
 /// 号 → `register asm` 的写法。**自动池整张表都是候选**（callee-saved + 延伸池）：以前
 /// 只查 `POOL`，于是分配器给的延伸池家在这里变成 `None`，被归到
 /// 「不可表示」而静默退回内存 —— 那看上去只在绑定读数里有，到不了产物。
 fn pool_reg_name(n: u8) -> Option<&'static str> {
-    auto_pool().into_iter().find(|(_, v)| *v == n).map(|(nm, _)| nm)
+    auto_pool()
+        .into_iter()
+        .find(|(_, v)| *v == n)
+        .map(|(nm, _)| nm)
 }
 
 /// 名 → **整个自动池**里的号（callee-saved 加延伸池）。与 `pooled_reg_of` 不是一回事：
@@ -274,7 +280,10 @@ fn pool_reg_name(n: u8) -> Option<&'static str> {
 /// 池外：用错了就会把延伸池的绑定静默丢掉（实测就是这个形状：绑定读数里有、产物里没有）。
 pub fn auto_reg_of(asm_name: &str) -> Option<u8> {
     let n = asm_name.trim_start_matches('%').to_ascii_lowercase();
-    auto_pool().into_iter().find(|(nm, _)| *nm == n).map(|(_, r)| r)
+    auto_pool()
+        .into_iter()
+        .find(|(nm, _)| *nm == n)
+        .map(|(_, r)| r)
 }
 
 /// 调用方需要的上下文。
@@ -333,7 +342,9 @@ pub fn deliver(func: &Function, plan: &mut Plan, body: &mut Block) {
         let mut callee_bound = 0usize;
         let mut ext_bound = 0usize;
         for (_n, r) in &plan.bindings {
-            let is_ext = AUTO_EXT_POOL.iter().any(|(_, rr)| *rr == pooled_reg_of(r).unwrap_or(255));
+            let is_ext = AUTO_EXT_POOL
+                .iter()
+                .any(|(_, rr)| *rr == pooled_reg_of(r).unwrap_or(255));
             if is_ext {
                 ext_bound += 1;
             } else {
@@ -390,7 +401,11 @@ fn post_rebuild_conflicts(plan: &Plan, rebuilt: &Block) -> Vec<(String, &'static
             Some("address-escaped")
         } else if post.asm_names.contains(base) {
             Some("inline-asm-operand")
-        } else if post.infos.get(base.as_str()).map_or(false, |i| i.user_bound) {
+        } else if post
+            .infos
+            .get(base.as_str())
+            .map_or(false, |i| i.user_bound)
+        {
             Some("already-register-asm")
         } else {
             None
@@ -594,7 +609,8 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
             // 本阶段不拦（`register_homes_allowed` 恒为 true）。保留这条分支形状是为了
             // 让「拦」与「拒因可诊断」同时成立：谁重新拦上，名字仍然会带原因进
             // `rejected`，而不是退回到「看不到为什么没绑」。
-            plan.rejected.push((c.name.clone(), "register-home-disallowed-by-location-policy"));
+            plan.rejected
+                .push((c.name.clone(), "register-home-disallowed-by-location-policy"));
             continue;
         }
         // 发号前先算出「哪些号已经归属某个家」：本次检查需要它，而不能到发射期才发现全满。
@@ -644,7 +660,10 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
                             })
                         });
                         if !ok && dump_on() {
-                            eprintln!("  [regalloc-debug] {} 与 holders {:?} 不能共用号 {:?}（cv={:?}）", c.name, holders, rv, cv);
+                            eprintln!(
+                                "  [regalloc-debug] {} 与 holders {:?} 不能共用号 {:?}（cv={:?}）",
+                                c.name, holders, rv, cv
+                            );
                         }
                         // §5.3 复用计数器：无条件累计（O(1) 自增，不依赖 dump_on；
                         // 与 max_overlap 不同 —— 后者本身是 O(N²) 只在 dump 时算）。
@@ -655,7 +674,7 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
                             plan.stats.reuse_rejected_overlap += 1;
                         }
                         ok
-                    }
+                    },
                 }
             })
             .map(|(i, (nm, _))| (i, *nm));
@@ -693,8 +712,12 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
     if dump_on() {
         plan.stats.pool_candidates = cands.len();
         plan.stats.pool_full_rejects = plan.spilled.len();
-        plan.stats.max_live_bases =
-            max_overlap(spans.values().map(|s| (s.first, s.last)).collect::<Vec<_>>());
+        plan.stats.max_live_bases = max_overlap(
+            spans
+                .values()
+                .map(|s| (s.first, s.last))
+                .collect::<Vec<_>>(),
+        );
         plan.stats.max_live_candidates =
             max_overlap(cands.iter().map(|c| (c.first, c.last)).collect());
         // 干涉分桶：池满被拒的候选里，有多少本可以复用某个已绑号（只是版本不重叠）。
@@ -936,7 +959,9 @@ fn scan_stmt(s: &Stmt, sc: &mut Scan) {
             }
         },
         Stmt::Invoke { call, .. } => scan_stmt(call, sc),
-        Stmt::EhLandingPad { object, selector, .. } => {
+        Stmt::EhLandingPad {
+            object, selector, ..
+        } => {
             // Phase 5.2 EH 落地垫干涉：按 Itanium ABI，落地垫入口假定 %rax=异常对象、
             // %rdx=type selector，二者本就不属自动池（rax 是 EVAL_BASE、rdx 是 int128
             // 高半）；callee-saved 号由 unwinder 按 FDE 的 DW_CFA_offset 还原成受保护
@@ -944,7 +969,9 @@ fn scan_stmt(s: &Stmt, sc: &mut Scan) {
             scan_expr(object, sc);
             scan_expr(selector, sc);
         },
-        Stmt::Goto { .. } | Stmt::Break { .. } | Stmt::Continue { .. }
+        Stmt::Goto { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
         | Stmt::Fallthrough { .. } => {},
     }
 }
@@ -1058,17 +1085,23 @@ fn apply_bindings(b: &mut Block, plan: &mut Plan, splits: &Splits) {
     let mut unrepresentable: Vec<String> = Vec::new();
     let folded = plan.loc.fold_for_codegen(splits);
     if dump_on() {
-        eprintln!("  [regalloc-debug] fold_for_codegen: {:?}", folded.iter().map(|(s,l)| (s.clone(), format!("{:?}", l))).collect::<Vec<_>>());
+        eprintln!(
+            "  [regalloc-debug] fold_for_codegen: {:?}",
+            folded
+                .iter()
+                .map(|(s, l)| (s.clone(), format!("{:?}", l)))
+                .collect::<Vec<_>>()
+        );
     }
     for (local, loc) in folded {
         match loc {
             Some(Location::Reg(r)) if r.bank == RegBank::Gp && pool_reg_name(r.n).is_some() => {
                 homes.insert(local, Location::Reg(r));
-            }
+            },
             Some(Location::Spill(slot)) => {
                 // 溢出槽就是内存：它不需要名字表里的文本名，也不占用任何寄存器
                 homes.insert(local, Location::Spill(slot));
-            }
+            },
             Some(_) => unrepresentable.push(local),
             None => unrepresentable.push(local),
         }
@@ -1099,9 +1132,7 @@ fn apply_bindings(b: &mut Block, plan: &mut Plan, splits: &Splits) {
                 }
             },
             Stmt::While { body, .. } | Stmt::Do { body, .. } => stmt(body, map),
-            Stmt::For {
-                init, body, ..
-            } => {
+            Stmt::For { init, body, .. } => {
                 if let Some(i) = init {
                     stmt(i, map);
                 }
@@ -1272,7 +1303,13 @@ pub fn to_loc_map(plan: &Plan, func: &Function) -> LocMap {
     }
     each_occurrence(func, |var, _, _, _| {
         if let Some(&n) = wanted.get(var.base.as_str()) {
-            out.bind(var, Location::Reg(RegId { bank: RegBank::Gp, n }));
+            out.bind(
+                var,
+                Location::Reg(RegId {
+                    bank: RegBank::Gp,
+                    n,
+                }),
+            );
         } else if let Some(&slot) = spilled.get(var.base.as_str()) {
             out.bind(var, Location::Spill(slot));
         }
@@ -1305,9 +1342,8 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("源里没有函数 {fname}"));
-        let mut ssa = crate::ssa::build_from_func(&f).unwrap_or_else(|| {
-            panic!("{fname} 应能 SSA 化（否则这条测试测不到分配）")
-        });
+        let mut ssa = crate::ssa::build_from_func(&f)
+            .unwrap_or_else(|| panic!("{fname} 应能 SSA 化（否则这条测试测不到分配）"));
         crate::ssa::passes::run_with_opts(&mut ssa, level, true);
         let orig = f.body.clone().expect("被测函数必须有体");
         let mut body = crate::ssa::rebuild_block(&ssa);
@@ -1316,7 +1352,10 @@ mod tests {
     }
 
     fn ctx_default() -> Ctx {
-        Ctx { debug_info: false, taken_regs: HashSet::new() }
+        Ctx {
+            debug_info: false,
+            taken_regs: HashSet::new(),
+        }
     }
 
     fn bound_names(plan: &Plan) -> Vec<String> {
@@ -1345,14 +1384,20 @@ mod tests {
     #[test]
     fn debug_info_no_longer_gates_the_register_home() {
         let src = "long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i;return acc;}\n";
-        let gctx = Ctx { debug_info: true, taken_regs: HashSet::new() };
+        let gctx = Ctx {
+            debug_info: true,
+            taken_regs: HashSet::new(),
+        };
         let (_ssa, _orig, _body, plan) = run_pipeline(src, "s", 2, &gctx);
         assert!(
             !plan.bindings.is_empty(),
             "-g 下应照样绑得上（Phase 6.2 已接线 DW_OP_regN，实际 {:?}）",
             plan.bindings
         );
-        for w in ["debug-info-forbids-register-home", "register-home-disallowed-by-location-policy"] {
+        for w in [
+            "debug-info-forbids-register-home",
+            "register-home-disallowed-by-location-policy",
+        ] {
             assert!(
                 !plan.rejected.iter().any(|(_, r)| *r == w),
                 "旧拒因 {w} 不得再出现在 -g 的拒因里，实际 {:?}",
@@ -1413,11 +1458,7 @@ mod tests {
             plan.bindings
         );
         // 度量本身：没有 spilled 候选，shareable_rejects 应为 0（不再是「>= 1」）。
-        assert_eq!(
-            shareable_rejects(&ssa, &plan),
-            0,
-            "零 spill 时 shareable_rejects 必须为 0"
-        );
+        assert_eq!(shareable_rejects(&ssa, &plan), 0, "零 spill 时 shareable_rejects 必须为 0");
     }
 
     /// §5.3 度量侧：spill 次数、寄存器借用深度必须进 `DCC_REGALLOC_DUMP`。
@@ -1444,17 +1485,15 @@ mod tests {
         assert!(
             plan.stats.reuse_attempted >= plan.bindings.len() - 1,
             "bindings={} 但复用尝试只有 {}，度量没在跑",
-            plan.bindings.len(), plan.stats.reuse_attempted
+            plan.bindings.len(),
+            plan.stats.reuse_attempted
         );
         assert_eq!(
             plan.stats.reuse_succeeded, plan.stats.reuse_attempted,
             "依次短命的变量两两不干涉，每次复用尝试都该成功（att={} ok={}）",
             plan.stats.reuse_attempted, plan.stats.reuse_succeeded
         );
-        assert_eq!(
-            plan.stats.reuse_rejected_overlap, 0,
-            "不干涉的序列里不该有因重叠被拒的复用"
-        );
+        assert_eq!(plan.stats.reuse_rejected_overlap, 0, "不干涉的序列里不该有因重叠被拒的复用");
         // 反向：spill 与 reused 不重叠 —— 这里 spill 为 0。
         assert_eq!(plan.spilled.len(), 0, "依次短命变量不该 spill");
     }
@@ -1486,12 +1525,17 @@ mod tests {
                     crate::ast::Decl::Func(f) if f.body.is_some() => f,
                     _ => continue,
                 };
-                let Some(mut ssa) = crate::ssa::build_from_func(f) else { continue };
+                let Some(mut ssa) = crate::ssa::build_from_func(f) else {
+                    continue;
+                };
                 crate::ssa::passes::run_with_opts(&mut ssa, 2, true);
                 if crate::ssa::has_multi_exit_cycle(&ssa) {
                     continue;
                 }
-                let ctx = Ctx { debug_info: false, taken_regs: HashSet::new() };
+                let ctx = Ctx {
+                    debug_info: false,
+                    taken_regs: HashSet::new(),
+                };
                 let mut plan = plan_for(&ssa, f.body.as_ref().unwrap(), &ctx);
                 plan.loc = to_loc_map(&plan, &ssa);
                 let rebuilt = crate::ssa::rebuild_block(&ssa);
@@ -1499,7 +1543,8 @@ mod tests {
                 assert!(
                     conflicts.is_empty(),
                     "{path} 的 {}：决策前置漏掉了后置事实 {:?}",
-                    f.name.name, conflicts
+                    f.name.name,
+                    conflicts
                 );
                 checked += 1;
                 if !plan.bindings.is_empty() {
@@ -1566,7 +1611,10 @@ mod tests {
                             // Phase 4.1b：家与文本名必须同时存在且同号（后端即将只读前者）。
                             assert_eq!(
                                 v.home,
-                                Some(Location::Reg(RegId { bank: RegBank::Gp, n: got })),
+                                Some(Location::Reg(RegId {
+                                    bank: RegBank::Gp,
+                                    n: got
+                                })),
                                 "{} 的 home 与 register_name 不同源",
                                 v.name.name
                             );
@@ -1580,9 +1628,9 @@ mod tests {
                                 v.name.name
                             );
                         }
-                    }
+                    },
                     BlockItem::Stmt(s) => stmt_walk(s, table, n),
-                    _ => {}
+                    _ => {},
                 }
             }
         }
@@ -1594,15 +1642,15 @@ mod tests {
                     if let Some(e) = else_ {
                         walk_then(e, table, n);
                     }
-                }
+                },
                 Stmt::While { body, .. } | Stmt::Do { body, .. } => stmt_walk(body, table, n),
                 Stmt::For { body, .. } => stmt_walk(body, table, n),
                 Stmt::Switch { cases, .. } => {
                     for c in cases {
                         walk(&c.body, table, n);
                     }
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
         fn walk_then(s: &Stmt, table: &HashMap<String, u8>, n: &mut usize) {
@@ -1620,11 +1668,7 @@ mod tests {
     fn to_loc_map_agrees_with_the_plan_at_base_granularity() {
         let src = "long s(long n){long acc=0;for(long i=0;i<n;i++)acc+=i;return acc;}\n";
         let (ssa, _orig, _body, plan) = run_pipeline(src, "s", 2, &ctx_default());
-        assert!(
-            plan.bindings.len() >= 2,
-            "被测源应至少绑两个变量，实际 {:?}",
-            plan.bindings
-        );
+        assert!(plan.bindings.len() >= 2, "被测源应至少绑两个变量，实际 {:?}", plan.bindings);
 
         let loc = to_loc_map(&plan, &ssa);
 
@@ -1636,7 +1680,13 @@ mod tests {
             .iter()
             .map(|(b, rn)| {
                 let n = pooled_reg_of(rn).expect("绑定名必须是池里的号");
-                (b.clone(), Some(Location::Reg(RegId { bank: RegBank::Gp, n })))
+                (
+                    b.clone(),
+                    Some(Location::Reg(RegId {
+                        bank: RegBank::Gp,
+                        n,
+                    })),
+                )
             })
             .collect();
         want.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1687,10 +1737,7 @@ mod tests {
                 }
             }
         }
-        assert!(
-            seen >= 2,
-            "分配结果必须写进重建后的 AST（带 register_name 的声明数 = {seen}）"
-        );
+        assert!(seen >= 2, "分配结果必须写进重建后的 AST（带 register_name 的声明数 = {seen}）");
     }
 
     /// 同一个名字连续跑两次必须给出**逐字相同**的结果：候选集来自 HashMap，
@@ -1737,12 +1784,7 @@ mod tests {
         // 每个都断言两条：既没被绑，又有一个**具体**的拒绝原因（原因可能是
         // 「类型不行 / 不是普通局部 / IR 里没它」，都成立即安全）。
         for name in ["v", "st", "d", "arr", "p", "at"] {
-            assert_eq!(
-                reg_of(&plan, name),
-                None,
-                "{name} 不该被绑，实际 {:?}",
-                plan.bindings
-            );
+            assert_eq!(reg_of(&plan, name), None, "{name} 不该被绑，实际 {:?}", plan.bindings);
             assert!(
                 reason_of(&plan, name).is_some(),
                 "{name} 应有一个可诊断的拒绝原因（dump 里看得见才叫可诊断）"
@@ -1926,7 +1968,8 @@ mod tests {
     /// 「区间退化成点 ⇒ 与别人不相交」而共用了 %rbx。
     #[test]
     fn fully_folded_locals_have_no_ir_presence() {
-        let src = "long s(void){long a=65;long b=66;if(a!=65)return 3;if(b!=66)return 4;return 0;}\n";
+        let src =
+            "long s(void){long a=65;long b=66;if(a!=65)return 3;if(b!=66)return 4;return 0;}\n";
         let (_, _, _, plan) = run_pipeline(src, "s", 2, &ctx_default());
         assert!(plan.bindings.is_empty(), "全被折掉的名字不该被绑：{:?}", plan.bindings);
         assert_eq!(reason_of(&plan, "a"), Some("no-ir-presence"));
@@ -2016,18 +2059,12 @@ mod tests {
         gctx.debug_info = true;
         let (_, _, _, gplan) = run_pipeline(src, "s", 2, &gctx);
         let (_, _, _, nplan) = run_pipeline(src, "s", 2, &ctx_default());
-        assert!(
-            !gplan.bindings.is_empty(),
-            "空对空也能让下面的相等成立，所以先要求非空"
-        );
+        assert!(!gplan.bindings.is_empty(), "空对空也能让下面的相等成立，所以先要求非空");
         assert_eq!(
             gplan.bindings, nplan.bindings,
             "-g 与非 -g 的绑定表必须逐项相等（号也一样，否则 DWARF 与机器码会错位）"
         );
-        assert_eq!(
-            gplan.rejected, nplan.rejected,
-            "-g 与非 -g 的拒因表也必须逐项相等"
-        );
+        assert_eq!(gplan.rejected, nplan.rejected, "-g 与非 -g 的拒因表也必须逐项相等");
     }
 
     /// `DCC_OPT_SKIP=ssa_regalloc` 关掉的是调用点，这里验证 pass 自己也能整体退回：

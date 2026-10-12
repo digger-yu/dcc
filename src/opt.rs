@@ -166,12 +166,7 @@ fn opt_skipped(name: &str) -> bool {
 /// rebuild_cycle 将循环 CFG 重建为 while 循环 AST。
 /// 注意: rebuild_cycle 对含循环函数的重建尚不完全正确,
 /// 因此含循环的函数仍走 AST pass 路径。
-fn run_ssa_passes(
-    module: &mut Module,
-    level: u8,
-    strict_aliasing: bool,
-    debug_info: bool,
-) {
+fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_info: bool) {
     let prog = module.source_mut();
     // Collect volatile global variable names - SSA passes must not
     // propagate constants through volatile accesses.
@@ -249,9 +244,9 @@ fn run_ssa_passes(
                         debug_info,
                         taken_regs: taken_regs.clone(),
                     };
-                    f.body.as_ref().map(|orig| {
-                        crate::ssa::regalloc::plan_and_split(&mut ssa, orig, &ctx)
-                    })
+                    f.body
+                        .as_ref()
+                        .map(|orig| crate::ssa::regalloc::plan_and_split(&mut ssa, orig, &ctx))
                 };
                 let rebuilt = crate::ssa::rebuild_block(&ssa);
                 f.body = Some(rebuilt);
@@ -271,9 +266,7 @@ fn run_ssa_passes(
 ///
 /// 为什么必须让开而不是复用：后端对每个函数都会把 file-scope 绑定重新灌进绑定表，
 /// 两个变量共享一个寄存器就是静默错值（§7.15 修的是同一类问题）。
-fn file_scope_bound_regs(
-    decls: &[crate::ast::Decl],
-) -> std::collections::HashSet<u8> {
+fn file_scope_bound_regs(decls: &[crate::ast::Decl]) -> std::collections::HashSet<u8> {
     let mut out = std::collections::HashSet::new();
     for d in decls {
         if let crate::ast::Decl::Var(v) = d {
@@ -685,23 +678,29 @@ fn expr_has_unsafe_ssa_pattern(e: &Expr) -> bool {
         | E::Index { arr: l, idx: r, .. } => {
             expr_has_unsafe_ssa_pattern(l) || expr_has_unsafe_ssa_pattern(r)
         },
-        E::Cond { cond, then_, else_, .. } => {
+        E::Cond {
+            cond, then_, else_, ..
+        } => {
             expr_has_unsafe_ssa_pattern(cond)
                 || expr_has_unsafe_ssa_pattern(then_)
                 || expr_has_unsafe_ssa_pattern(else_)
         },
         E::Call { callee, args, .. } => {
-            expr_has_unsafe_ssa_pattern(callee)
-                || args.iter().any(expr_has_unsafe_ssa_pattern)
+            expr_has_unsafe_ssa_pattern(callee) || args.iter().any(expr_has_unsafe_ssa_pattern)
         },
         E::StmtExpr { block, .. } => block_has_unsafe_ssa_pattern(block),
-        E::CompoundLit { inits, .. } | E::InitList { inits, .. } => inits.iter().any(|it| match it
-        {
-            crate::ast::InitItem::Expr(x) => expr_has_unsafe_ssa_pattern(x),
-            crate::ast::InitItem::Designated { value, .. } => expr_has_unsafe_ssa_pattern(value),
-        }),
+        E::CompoundLit { inits, .. } | E::InitList { inits, .. } => {
+            inits.iter().any(|it| match it {
+                crate::ast::InitItem::Expr(x) => expr_has_unsafe_ssa_pattern(x),
+                crate::ast::InitItem::Designated { value, .. } => {
+                    expr_has_unsafe_ssa_pattern(value)
+                },
+            })
+        },
         E::VaArg { ap, .. } => expr_has_unsafe_ssa_pattern(ap),
-        E::AsmExpr { outputs, inputs, .. } => {
+        E::AsmExpr {
+            outputs, inputs, ..
+        } => {
             outputs.iter().any(expr_has_unsafe_ssa_pattern)
                 || inputs.iter().any(expr_has_unsafe_ssa_pattern)
         },
