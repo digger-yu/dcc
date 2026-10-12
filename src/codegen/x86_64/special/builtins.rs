@@ -1793,7 +1793,7 @@ impl Codegen {
                     );
                 }
                 // mov %gs:[rax], dst (段前缀 + 按类型加载)
-                self.emit_insn(&Insn::raw_bytes(&[0x65])); // GS segment prefix
+                self.emit_insn(&Insn::seg_prefix(0x65)); // GS segment prefix
                 self.emit_load_mem_typed(var_size, &arg.ty());
                 if dst != 0 && !matches!(arg.ty(), Type::Float | Type::Double) {
                     self.mov(dst, 0);
@@ -1835,7 +1835,7 @@ impl Codegen {
                 self.gen_expr(&args[1], Self::EVAL_BASE);
                 self.pop(1); // rcx = addr
                              // mov %gs:[rcx], rax (段前缀 + 存储)
-                self.emit_insn(&Insn::raw_bytes(&[0x65])); // GS segment prefix
+                self.emit_insn(&Insn::seg_prefix(0x65)); // GS segment prefix
                 match var_size {
                     1 => {
                         self.emit_insn(&Insn::raw_bytes(&[0x88, 0x01]));
@@ -1923,7 +1923,7 @@ impl Codegen {
                 self.gen_expr(&args[1], Self::EVAL_BASE);
                 self.pop(1); // rcx = addr
                              // add %gs:[rcx], rax (段前缀 + 加法)
-                self.emit_insn(&Insn::raw_bytes(&[0x65])); // GS segment prefix
+                self.emit_insn(&Insn::seg_prefix(0x65)); // GS segment prefix
                 match var_size {
                     1 => {
                         self.emit_insn(&Insn::raw_bytes(&[0x00, 0x01]));
@@ -5143,8 +5143,25 @@ impl Codegen {
                     self.string_pool.insert(data.clone(), o);
                 }
                 let at = self.pos();
-                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x8D, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0]));
+                // P11 O9: lea dst, [rip+string] — Lea rip-relative, disp placeholder
+                // 后由 string_refs 回填.
+                let insn = Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::Lea {
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            dst,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
+                        mem: crate::codegen::x86_64::opcode::MemOperand {
+                            disp: 0,
+                            base: None,
+                            index: None,
+                            seg: None,
+                        },
+                        rip_relative: true,
+                    },
+                    &[],
+                );
+                self.emit_insn(&insn);
                 self.string_refs.push((at, data));
                 if dst != 0 {
                     self.mov(dst, 0);

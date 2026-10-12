@@ -2838,9 +2838,16 @@ impl Codegen {
             self.emit_insn(&insn);
         } else {
             self.emit_lea_r13(11, off);
-            let rex = 0x41 | if xmm_reg >= 8 { 0x04 } else { 0 } | 0x01;
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, rex, 0x0F, 0x6F]));
-            self.emit_reg_indirect_modrm(xmm_reg, 11);
+            // P11 O9: 大 disp 回退路径改用 simd_mov_mem_base (base=r11, disp=0).
+            // encode() 输出 F3 [REX.B|REX.R] 0F 6F modrm=03|(xmm&7)<<3,
+            // 与原手写逐字节一致.
+            self.emit_insn(&Insn::simd_mov_mem_base(
+                false,
+                crate::codegen::x86_64::opcode::SimdWidth::DQ,
+                xmm_reg,
+                11,
+                0,
+            ));
         }
     }
     pub(crate) fn emit_movdqu_xmm_to_r13(&mut self, xmm_reg: u8, off: i64) {
@@ -2857,9 +2864,14 @@ impl Codegen {
             self.emit_insn(&insn);
         } else {
             self.emit_lea_r13(11, off);
-            let rex = 0x41 | if xmm_reg >= 8 { 0x04 } else { 0 } | 0x01;
-            self.emit_insn(&Insn::raw_bytes(&[0xF3, rex, 0x0F, 0x7F]));
-            self.emit_reg_indirect_modrm(xmm_reg, 11);
+            // P11 O9: 同 load 路径, 大 disp 回退改用 simd_mov_mem_base store.
+            self.emit_insn(&Insn::simd_mov_mem_base(
+                true,
+                crate::codegen::x86_64::opcode::SimdWidth::DQ,
+                xmm_reg,
+                11,
+                0,
+            ));
         }
     }
     pub(crate) fn emit_mov_from_mem(&mut self, sz: usize, dst: u8) {
