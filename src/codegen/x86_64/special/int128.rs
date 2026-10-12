@@ -943,7 +943,9 @@ impl Codegen {
                     )); // sete ah (ah=1 if high equal)
                         // AND 两个结果: al &= ah (都为1 → 两 chunk 都相等)
                         // Intel: and al, ah → opcode 0x20 (and r/m8, r8), modrm=0xE0 (mod=11, reg=ah=100, r/m=al=000)
-                    self.emit_alu_rm_reg8(AluOp::And, 0, 4);
+                        // 必须无 REX: 有 REX 时字段 4 会被重映射为 spl 而非 ah.
+                        // 保持基线 raw_bytes 以避免 AluRm B8 编码器对 src>=4 强发 REX.
+                    self.emit_insn(&Insn::raw_bytes(&[0x20, 0xE0]));
                     // 零扩展到 rax
                     self.emit_insn(&Insn::new(
                         crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {

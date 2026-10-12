@@ -574,10 +574,11 @@ impl super::super::super::Codegen {
             _ => {},
         }
         if bit_off > 0 {
-            // sar rax, imm8 (P11: Shift typed 总是 Some).
+            // shr rax, imm8 (P11: Shift typed 总是 Some). 基线 raw_bytes 用
+            // 0x48 C1 E8 ib (/5 = SHR); 位域提取先逻辑右移再按 bw 掩码.
             let insn = Insn::new(
                 X86_64Opcode::Shift {
-                    op: crate::codegen::x86_64::opcode::ShiftOp::Sar,
+                    op: crate::codegen::x86_64::opcode::ShiftOp::Shr,
                     width: Width::B64,
                     dst: OpcodeOperand::Reg(0, Width::B64),
                     amount: crate::codegen::x86_64::opcode::ShiftAmount::Imm8(bit_off as u8),
@@ -891,38 +892,22 @@ impl super::super::super::Codegen {
                 2,
             )); // or rcx, rdx
         }
-        // Store container back
+        // Store container back. 基线 raw: addr 在 rax(0), 合并值在 rcx(1):
+        //   sz=4: 89 08 = mov %ecx, (%rax);  sz=2: 66 89 01 = mov %ax,(%rcx) 特例见下
+        //   sz=1: 88 08 = mov %cl,(%rax);    sz=8: 48 89 01 = mov %rcx,(%rcx) 特例见下
         self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 0, 13, addr_slot as i32)); // rax = addr
         match container_size {
             4 => {
-                self.emit_insn(&Insn::mov_rm_mem(false, Width::B32, 0, 2, 0));
+                self.emit_insn(&Insn::mov_rm_mem(false, Width::B32, 1, 0, 0));
             },
             8 => {
-                self.emit_insn(&Insn::new(
-                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                        rip_relative: false,
-                        width: crate::codegen::shared::asm_operand::Width::B64,
-                        dst: crate::codegen::x86_64::opcode::Operand::Mem(
-                            crate::codegen::x86_64::opcode::MemOperand {
-                                disp: 0,
-                                base: Some(2),
-                                index: None,
-                                seg: None,
-                            },
-                        ),
-                        src: crate::codegen::x86_64::opcode::Operand::Reg(
-                            0,
-                            crate::codegen::shared::asm_operand::Width::B64,
-                        ),
-                    },
-                    &[],
-                ));
+                self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 1, 0, 0));
             },
             2 => {
-                self.emit_insn(&Insn::mov_rm_mem(false, Width::B16, 0, 2, 0));
+                self.emit_insn(&Insn::mov_rm_mem(false, Width::B16, 1, 0, 0));
             },
             1 => {
-                self.emit_insn(&Insn::mov_rm_mem(false, Width::B8, 0, 2, 0));
+                self.emit_insn(&Insn::mov_rm_mem(false, Width::B8, 1, 0, 0));
             },
             _ => {},
         }

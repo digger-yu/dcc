@@ -1985,7 +1985,7 @@ impl X86_64Opcode {
                 let (index_reg, index_scale) = match mem.index {
                     None => (None, 0u8),
                     Some((ir, s)) => {
-                        if s != 1 {
+                        if s != 1 && s != 2 && s != 4 && s != 8 {
                             return None;
                         }
                         (Some(ir), s)
