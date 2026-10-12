@@ -473,7 +473,7 @@ impl Codegen {
                                 sign_bit as i64,
                             ));
                             // jz +7 (跳过符号扩展): rel8 短跳, 固定偏移.
-                            self.emit_insn(&Insn::raw_bytes(&[0x74, 0x07]));
+                            self.emit_insn(&Insn::short_jump_rel8(0x74, 0x07));
                             // or dst, inv_mask (填充高位, 81 /1 id, B64).
                             self.emit_insn(&Insn::alu_rm_reg_imm32_b64(
                                 1,
@@ -493,7 +493,7 @@ impl Codegen {
                             ));
                             // jz +N (跳过 movabs + or)
                             // movabs tmp, inv_mask (2+8=10 bytes) + or (3 bytes) = 13 bytes.
-                            self.emit_insn(&Insn::raw_bytes(&[0x74, 13]));
+                            self.emit_insn(&Insn::short_jump_rel8(0x74, 13));
                             // movabs tmp, inv_mask.
                             self.emit_insn(&Insn::movabs_reg_imm64(tmp, inv_mask));
                             // or dst, tmp: tmp 在 reg(REX.R), dst 在 r/m(REX.B).

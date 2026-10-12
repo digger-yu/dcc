@@ -725,6 +725,46 @@ impl Insn {
         Insn::raw_bytes(&out)
     }
 
+    /// P11 Bucket AI: short conditional jump (jcc rel8, 2 bytes).
+    /// cc_byte = 0x70..0x7F (jo/jno/jb/jae/je/jne/jbe/ja/js/jns/jp/jnp/jl/jge/jle/jg).
+    /// rel8: signed byte displacement (already accounts for next-instruction PC).
+    /// Used by fixed-offset loops/skips (mem/access.rs, builtins.rs, lvalue.rs,
+    /// func_setup.rs canary). The displacement is a compile-time constant.
+    pub fn short_jump_rel8(cc_byte: u8, rel8: i8) -> Self {
+        Insn::raw_bytes(&[cc_byte, rel8 as u8])
+    }
+
+    /// P11 Bucket AI: popcnt r64, r64 reflexive (F3 [REX.W] 0F B8 /r).
+    /// dst==src (both held by `reg_idx`); reflexive ModRM. Self-absorbs REX.R+B
+    /// when reg>=8 (0x4D when reg>=8, 0x48 otherwise).
+    pub fn popcnt_reg_reg_b64(reg_idx: u8) -> Self {
+        let rex: u8 = 0x48 | if reg_idx >= 8 { 0x05 } else { 0 };
+        let modrm = 0xC0 | ((reg_idx & 7) << 3) | (reg_idx & 7);
+        Insn::raw_bytes(&[0xF3, rex, 0x0F, 0xB8, modrm])
+    }
+
+    /// P11 Bucket AI: movmskps r32, xmm (0F 50 /r).
+    /// dst_idx: Intel GPR register number (0=eax..15=r15d). src_idx: xmm register.
+    pub fn movmskps_gpr_xmm(dst_idx: u8, src_idx: u8) -> Self {
+        let mut rex: u8 = 0x40;
+        if dst_idx >= 8 {
+            rex |= 0x01;
+        }
+        if src_idx >= 8 {
+            rex |= 0x04;
+        }
+        let need_rex = dst_idx >= 8 || src_idx >= 8;
+        let modrm = 0xC0 | ((dst_idx & 7) << 3) | (src_idx & 7);
+        let mut out = Vec::with_capacity(4);
+        if need_rex {
+            out.push(rex);
+        }
+        out.push(0x0F);
+        out.push(0x50);
+        out.push(modrm);
+        Insn::raw_bytes(&out)
+    }
+
     /// P11 Bucket W: bswap r32/r64 (0F C8+rd / REX.W 0F C8+rd).
     /// width: B32 (no REX) or B64 (REX.W). reg_idx: intel register number.
     pub fn bswap_reg(width: crate::codegen::shared::asm_operand::Width, reg_idx: u8) -> Self {
@@ -1897,6 +1937,71 @@ mod tests {
         assert_eq!(
             Insn::pmulld_xmm(8, 9).encode_bytes(),
             Some(vec![0x66, 0x45, 0x0F, 0x38, 0x40, 0xC1]),
+        );
+    }
+
+    /// P11 Bucket AI: short_jump_rel8 (jcc rel8, 2 bytes).
+    #[test]
+    fn short_jump_rel8_basic() {
+        // jz +16: 74 10
+        assert_eq!(
+            Insn::short_jump_rel8(0x74, 0x10).encode_bytes(),
+            Some(vec![0x74, 0x10]),
+        );
+        // jnz -16: 75 F0 (i8=-16 → u8=0xF0)
+        assert_eq!(
+            Insn::short_jump_rel8(0x75, -16).encode_bytes(),
+            Some(vec![0x75, 0xF0]),
+        );
+        // jns +3: 79 03
+        assert_eq!(
+            Insn::short_jump_rel8(0x79, 3).encode_bytes(),
+            Some(vec![0x79, 0x03]),
+        );
+    }
+
+    /// P11 Bucket AI: popcnt_reg_reg_b64 reflexive (F3 [REX.W] 0F B8 /r).
+    #[test]
+    fn popcnt_reg_reg_b64_basic() {
+        // popcnt rax, rax: F3 48 0F B8 C0 (reg=0, reflexive)
+        assert_eq!(
+            Insn::popcnt_reg_reg_b64(0).encode_bytes(),
+            Some(vec![0xF3, 0x48, 0x0F, 0xB8, 0xC0]),
+        );
+        // popcnt rcx, rcx: F3 48 0F B8 C9 (reg=1, reflexive modrm=C0|(1<<3)|1=C9)
+        assert_eq!(
+            Insn::popcnt_reg_reg_b64(1).encode_bytes(),
+            Some(vec![0xF3, 0x48, 0x0F, 0xB8, 0xC9]),
+        );
+        // popcnt r8, r8: reflexive r8 → REX.W|R+B = 4D, modrm C0|0|0 = C0
+        assert_eq!(
+            Insn::popcnt_reg_reg_b64(8).encode_bytes(),
+            Some(vec![0xF3, 0x4D, 0x0F, 0xB8, 0xC0]),
+        );
+    }
+
+    /// P11 Bucket AI: movmskps_gpr_xmm (0F 50 /r).
+    #[test]
+    fn movmskps_gpr_xmm_basic() {
+        // movmskps eax, xmm0: 0F 50 C0 (no REX)
+        assert_eq!(
+            Insn::movmskps_gpr_xmm(0, 0).encode_bytes(),
+            Some(vec![0x0F, 0x50, 0xC0]),
+        );
+        // movmskps eax, xmm1: 0F 50 C1
+        assert_eq!(
+            Insn::movmskps_gpr_xmm(0, 1).encode_bytes(),
+            Some(vec![0x0F, 0x50, 0xC1]),
+        );
+        // movmskps r8d, xmm0: REX.B=0x41, 0F 50 C0
+        assert_eq!(
+            Insn::movmskps_gpr_xmm(8, 0).encode_bytes(),
+            Some(vec![0x41, 0x0F, 0x50, 0xC0]),
+        );
+        // movmskps eax, xmm8: REX.R=0x44, 0F 50 C0 (src field=0 with REX.R)
+        assert_eq!(
+            Insn::movmskps_gpr_xmm(0, 8).encode_bytes(),
+            Some(vec![0x44, 0x0F, 0x50, 0xC0]),
         );
     }
 }

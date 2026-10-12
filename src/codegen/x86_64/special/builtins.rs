@@ -1038,7 +1038,7 @@ impl Codegen {
                 // 之前硬编码 4 导致跳转越过 neg 的末尾 1 字节, 落到
                 // 下一条指令的中间, 触发 mid-instruction decode.
                 self.emit_insn(&Insn::test_rm_reg(crate::codegen::shared::asm_operand::Width::B64, dst, dst)); // test dst, dst
-                self.emit_insn(&Insn::raw_bytes(&[0x79, 0x03])); // jns +3 (跳过 neg, 含 1 字节 W REX)
+                self.emit_insn(&Insn::short_jump_rel8(0x79, 0x03)); // jns +3 (跳过 neg, 含 1 字节 W REX)
                 self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Neg, crate::codegen::shared::asm_operand::Width::B64, dst)); // neg dst
                 true
             },
@@ -1790,7 +1790,7 @@ impl Codegen {
             )); // mov edi, eax (edi = isinf)
                                           // 2. sign: 重新加载 x, 取符号位
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x50, 0xC0])); // movmskps eax, xmm0
+                self.emit_insn(&Insn::movmskps_gpr_xmm(0, 0)); // movmskps eax, xmm0
                 self.emit_insn(&Insn::alu_rm_reg_imm8(4, 0, 1)); // and eax, 1 (eax = sign)
                 self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -2070,7 +2070,7 @@ impl Codegen {
                 let is_f = matches!(arg_ty, Type::Float);
                 self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
                                             // movmskps eax, xmm0
-                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x50, 0xC0]));
+                self.emit_insn(&Insn::movmskps_gpr_xmm(0, 0));
                 if is_f {
                     // float: 符号位是 bit 0
                     self.emit_insn(&Insn::alu_rm_reg_imm8(4, 0, 1)); // and eax, 1
@@ -2233,9 +2233,8 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], dst);
-                let rex = 0x48 | if dst >= 8 { 0x05 } else { 0 };   // 位序: REX.R+B: 自反 ModRM, 同一个寄存器既在 reg 又在 r/m, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
-                // popcnt dst, dst: F3 0F B8 /r
-                self.emit_insn(&Insn::raw_bytes(&[0xF3, rex, 0x0F, 0xB8, 0xC0 | ((dst & 7) << 3) | (dst & 7)]));
+                // popcnt dst, dst: F3 [REX.W] 0F B8 /r (reflexive)
+                self.emit_insn(&Insn::popcnt_reg_reg_b64(dst));
                 true
             },
             // __builtin_parity/parityl/parityll: 奇偶校验 (popcount & 1)
@@ -2330,7 +2329,7 @@ impl Codegen {
                     amount: crate::codegen::x86_64::opcode::ShiftAmount::Imm8(1),
                 }, &[])); // rcl rcx, 1
                 self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Dec, crate::codegen::shared::asm_operand::Width::B32, 2)); // dec edx
-                self.emit_insn(&Insn::raw_bytes(&[0x75, 0xF6])); // jnz loop
+                self.emit_insn(&Insn::short_jump_rel8(0x75, -10)); // jnz loop
                 if dst != 1 {
                     self.mov(dst, 1);
                 }

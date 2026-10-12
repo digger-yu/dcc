@@ -1864,7 +1864,7 @@ impl Codegen {
             // Both ET_REL and ET_EXEC use the same path:
             // __stack_chk_fail is emitted as an undefined global
             // symbol (provided by libc / kernel runtime).
-            self.emit_insn(&Insn::raw_bytes(&[0x74, 0x05])); // je .+5 (canary OK → skip)
+            self.emit_insn(&Insn::short_jump_rel8(0x74, 0x05)); // je .+5 (canary OK → skip)
             self.call_label("__stack_chk_fail");
         }
         // 恢复被调用者保存寄存器: rbx, r12, r14, r15

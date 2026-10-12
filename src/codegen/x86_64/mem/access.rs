@@ -1013,7 +1013,7 @@ impl Codegen {
         self.emit_insn(&Insn::test_rm_reg(
             crate::codegen::shared::asm_operand::Width::B64, 1, 1,
         ));
-        self.emit_insn(&Insn::raw_bytes(&[0x74, 0x10])); // jz +16
+        self.emit_insn(&Insn::short_jump_rel8(0x74, 0x10)); // jz +16
         // mov al, [rsi] (B8 load: 8A /r, no REX needed since al/rsi < 8)
         self.emit_insn(&Insn::mov_rm_mem(
             true, crate::codegen::shared::asm_operand::Width::B8, 0, 6, 0,
@@ -1027,7 +1027,7 @@ impl Codegen {
         self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Inc, crate::codegen::shared::asm_operand::Width::B64, 6));
         self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Inc, crate::codegen::shared::asm_operand::Width::B64, 7));
         self.emit_insn(&Insn::unary_rm_reg(crate::codegen::x86_64::opcode::UnaryOp::Dec, crate::codegen::shared::asm_operand::Width::B64, 1));
-        self.emit_insn(&Insn::raw_bytes(&[0x75, 0xF0])); // jnz -> 回到 mov al,[rsi]
+        self.emit_insn(&Insn::short_jump_rel8(0x75, -16)); // jnz -> 回到 mov al,[rsi]
     }
     pub(crate) fn emit_rsp_modrm_disp(&mut self, reg_field: u8, off: i64) {
         if off == 0 {
