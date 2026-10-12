@@ -1558,29 +1558,25 @@ impl Codegen {
     }
 
     fn mov_eax_imm32(&mut self, v: u32) {
-        self.emit_insn(&Insn::raw_bytes(&[0xB8]));
-        self.emit_insn(&Insn::raw_bytes(&v.to_le_bytes()));
+        self.emit_insn(&Insn::mov_eax_imm32(v));
     }
 
     fn mov_ecx_imm32(&mut self, v: u32) {
-        self.emit_insn(&Insn::raw_bytes(&[0xB9]));
-        self.emit_insn(&Insn::raw_bytes(&v.to_le_bytes()));
+        self.emit_insn(&Insn::mov_ecx_imm32(v));
     }
 
     /// `and eax, imm32`。不能用 `83 E0 ib`：avx512 的 XCR0 掩码 `0xE6` 超出有符号
     /// imm8 的范围（`0x83 /4 ib` 的 imm8 是 sign-extended，`0xE6` 会变成 `-26`）。
     fn and_eax_imm32(&mut self, v: u32) {
-        self.emit_insn(&Insn::raw_bytes(&[0x25]));
-        self.emit_insn(&Insn::raw_bytes(&v.to_le_bytes()));
+        self.emit_insn(&Insn::and_eax_imm32(v));
     }
 
     fn cmp_eax_imm32(&mut self, v: u32) {
-        self.emit_insn(&Insn::raw_bytes(&[0x3D]));
-        self.emit_insn(&Insn::raw_bytes(&v.to_le_bytes()));
+        self.emit_insn(&Insn::cmp_eax_imm32(v as i32));
     }
 
     fn cpuid(&mut self) {
-        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xA2]));
+        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cpuid));
     }
 
     fn xgetbv(&mut self) {
@@ -1621,8 +1617,6 @@ impl Codegen {
 
     /// `mov r32, imm32`（`B8 + r`）。
     fn mov_r32_imm32(&mut self, r: u8, v: u32) {
-        // 手写形态: B8+r + imm32 LE (无 REX 当 r<8; r>=8 走 41 B8+(r&7)).
-        // typed MovRm B32 Reg,Imm 已在 encoder L946-979 实现等价字节.
         use crate::codegen::shared::asm_operand::Width;
         use crate::codegen::x86_64::opcode::{Operand, X86_64Opcode};
         let insn = Insn::new(
@@ -1633,15 +1627,23 @@ impl Codegen {
             },
             &[],
         );
-        if !self.emit_insn(&insn) {
-            self.emit_insn(&Insn::raw_bytes(&[0xB8 + r]));
-            self.emit_insn(&Insn::raw_bytes(&v.to_le_bytes()));
-        }
+        self.emit_insn(&insn);
     }
 
     /// `shr r32, imm8`（`C1 /5 ib`）。
     fn shr_r32_imm8(&mut self, r: u8, n: u8) {
-        self.emit_insn(&Insn::raw_bytes(&[0xC1, 0xE8 | r, n]));
+        use crate::codegen::shared::asm_operand::Width;
+        use crate::codegen::x86_64::opcode::{Operand, ShiftAmount, ShiftOp, X86_64Opcode};
+        let insn = Insn::new(
+            X86_64Opcode::Shift {
+                op: ShiftOp::Shr,
+                width: Width::B32,
+                dst: Operand::Reg(r, Width::B32),
+                amount: ShiftAmount::Imm8(n),
+            },
+            &[],
+        );
+        self.emit_insn(&insn);
     }
 
     /// `and r32, imm32`（`81 /4 id`）。不能用 `83 /4 ib`：扩展 model 的掩码

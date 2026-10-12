@@ -49,9 +49,9 @@ impl Codegen {
     /// escap 字节; encode() 内按 (escap, reg_field) 反查是冗余但不引入新分支.
     fn emit_x87_mem_at(&mut self, opcode: u8, reg_field: u8, base: u8, disp: i32, rexw: bool) {
         // 按原 (opcode, reg_field, rexw) 三元组映射到 X87Op 变体.
-        // 这条路径是原 fld/fstp/fild 共用的内建发射点; 这里只选最常见的
+        // 这条路径是原 fld/fstp/fild 共用的内建发射点; encode() 已覆盖全部
         // (D9 /0 / DD /0 / DB /5 for fld; D9 /3 / DD /3 / DB /7 for fstp;
-        //  DB /0 for fild) 形态走类型化, 其余 (理论上不存在) 回退手写.
+        //  DB /0 for fild) 形态, 含任意 base (含 r12 / rsp 的 SIB 兜底).
         let width: u8 = match (opcode, reg_field, rexw) {
             (0xD9, 0, false) => 4,    // fld m32fp
             (0xDD, 0, false) => 8,    // fld m64fp
@@ -61,27 +61,7 @@ impl Codegen {
             (0xDB, 7, false) => 10,    // fstp m80fp
             (0xDB, 0, false) => 4,    // fild m32int
             (0xDB, 0, true) => 8,     // fild m64int
-            _ => {
-                // 回退原手写路径 (理论上不可达; 但保持防御).
-                let mut rex = 0x40u8;
-                if base >= 8 {
-                    rex |= 0x01;
-                }
-                if rexw {
-                    rex |= 0x08;
-                }
-                if rex != 0x40 {
-                    self.emit_insn(&Insn::raw_bytes(&[rex]));
-                }
-                self.emit_insn(&Insn::raw_bytes(&[opcode]));
-                if base == 4 || base == 12 || base == 13 {
-                    self.emit_insn(&Insn::raw_bytes(&[0x84 | (reg_field << 3), 0x20 | (base & 7)]));
-                } else {
-                    self.emit_insn(&Insn::raw_bytes(&[0x80 | (reg_field << 3) | (base & 7)]));
-                }
-                self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes()));
-                return;
-            }
+            _ => unreachable!("emit_x87_mem_at: unknown opcode/reg_field/rexw tuple (op={opcode:#x}, reg={reg_field}, rexw={rexw})"),
         };
         let op = match (opcode, reg_field) {
             (0xD9, 0) | (0xDD, 0) | (0xDB, 5) => X87Op::FldMem { width },
@@ -99,28 +79,7 @@ impl Codegen {
             X86_64Opcode::X87 { op, mem: Some(mem) },
             &[],
         );
-        // encode() 返回 None 时 (如 base=12) 回退手写兜底.
-        if self.emit_insn(&insn) {
-            return;
-        }
-        // 回退手写 (encode None 路径).
-        let mut rex = 0x40u8;
-        if base >= 8 {
-            rex |= 0x01;
-        }
-        if rexw {
-            rex |= 0x08;
-        }
-        if rex != 0x40 {
-            self.emit_insn(&Insn::raw_bytes(&[rex]));
-        }
-        self.emit_insn(&Insn::raw_bytes(&[opcode]));
-        if base == 4 || base == 12 || base == 13 {
-            self.emit_insn(&Insn::raw_bytes(&[0x84 | (reg_field << 3), 0x20 | (base & 7)]));
-        } else {
-            self.emit_insn(&Insn::raw_bytes(&[0x80 | (reg_field << 3) | (base & 7)]));
-        }
-        self.emit_insn(&Insn::raw_bytes(&disp.to_le_bytes()));
+        self.emit_insn(&insn);
     }
 
     /// `fld` 的 `[base + disp]` 形态：float=D9 /0, double=DD /0, long double=DB /5。

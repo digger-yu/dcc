@@ -475,6 +475,34 @@ impl Insn {
         Insn::raw_bytes(&out)
     }
 
+    /// P11 Bucket AK: mov eax, imm32 (B8 id, no ModRM). 用于 ifunc CPUID 分类链.
+    pub fn mov_eax_imm32(v: u32) -> Self {
+        let imm32 = v.to_le_bytes();
+        let mut out = Vec::with_capacity(5);
+        out.push(0xB8);
+        out.extend_from_slice(&imm32);
+        Insn::raw_bytes(&out)
+    }
+
+    /// P11 Bucket AK: mov ecx, imm32 (B9 id, no ModRM). 用于 ifunc CPUID 分类链.
+    pub fn mov_ecx_imm32(v: u32) -> Self {
+        let imm32 = v.to_le_bytes();
+        let mut out = Vec::with_capacity(5);
+        out.push(0xB9);
+        out.extend_from_slice(&imm32);
+        Insn::raw_bytes(&out)
+    }
+
+    /// P11 Bucket AK: and eax, imm32 (25 id, no ModRM). 固定 32 位立即数形式,
+    /// 用于 XCR0 掩码 (如 0xE6) 超出 sign-extended imm8 范围的场景.
+    pub fn and_eax_imm32(v: u32) -> Self {
+        let imm32 = v.to_le_bytes();
+        let mut out = Vec::with_capacity(5);
+        out.push(0x25);
+        out.extend_from_slice(&imm32);
+        Insn::raw_bytes(&out)
+    }
+
     /// P11 Bucket X: B32 `alu dword [base+disp], imm8` (0x83 / ib, no REX.W).
     /// 用于 va_arg gp_offset / fp_offset 字段的就地加 (如 `add dword [r13+disp], imm8`).
     /// op 编码: /0=add, /4=and, /5=sub, /7=cmp. base>=8 时自动加 REX.B.

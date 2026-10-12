@@ -88,6 +88,8 @@ pub(crate) enum NoArgOp {
     Int3,
     /// xgetbv: 0F 01 D0 (x87 control/status -> EDX:EAX).
     Xgetbv,
+    /// cpuid: 0F A2 (CPU feature identification).
+    Cpuid,
     /// ret near: C3 (return to caller).
     RetNear,
     /// P11 Bucket M: ud2 = 0F 0B (explicit undefined for zero-div UB).
@@ -2116,6 +2118,7 @@ impl X86_64Opcode {
                     NoArgOp::Syscall => &[0x0F, 0x05],
                     NoArgOp::Int3 => &[0xCC],
                     NoArgOp::Xgetbv => &[0x0F, 0x01, 0xD0],
+                    NoArgOp::Cpuid => &[0x0F, 0xA2],
                     NoArgOp::RetNear => &[0xC3],
                     NoArgOp::Ud2 => &[0x0F, 0x0B],
                 };
@@ -2391,6 +2394,7 @@ impl X86_64Opcode {
                     NoArgOp::Syscall => "syscall",
                     NoArgOp::Int3 => "int3",
                     NoArgOp::Xgetbv => "xgetbv",
+                    NoArgOp::Cpuid => "cpuid",
                     NoArgOp::RetNear => "ret",
                     NoArgOp::Ud2 => "ud2",
                 };
