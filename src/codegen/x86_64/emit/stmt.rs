@@ -407,7 +407,8 @@ impl Codegen {
                                             crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
                                                 rip_relative: false,
                                                 sign: false,
-                                                from: crate::codegen::shared::asm_operand::Width::B8,
+                                                from:
+                                                    crate::codegen::shared::asm_operand::Width::B8,
                                                 to: crate::codegen::shared::asm_operand::Width::B64,
                                                 dst: crate::codegen::x86_64::opcode::Operand::Reg(
                                                     0,
@@ -431,7 +432,8 @@ impl Codegen {
                                             crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
                                                 rip_relative: false,
                                                 sign: false,
-                                                from: crate::codegen::shared::asm_operand::Width::B16,
+                                                from:
+                                                    crate::codegen::shared::asm_operand::Width::B16,
                                                 to: crate::codegen::shared::asm_operand::Width::B64,
                                                 dst: crate::codegen::x86_64::opcode::Operand::Reg(
                                                     0,
@@ -853,11 +855,11 @@ impl Codegen {
                     self.current_func_is_nested && !self.local_labels.contains(&target.name);
                 if is_nonlocal {
                     // mov r13, r10  (恢复父帧指针)
-                    // 编码: 4D 89 D5
-                    //   REX.WRB = 0x4D (W=1, R=1 for r10, B=1 for r13)
-                    //   opcode  = 0x89 (mov r/m64, r64)
-                    //   ModRM   = 0xD5 (mod=11, reg=r10&7=010, r/m=r13&7=101)
-                    self.emit_insn(&Insn::raw_bytes(&[0x4D, 0x89, 0xD5]));
+                    self.emit_insn(&Insn::mov_rm_reg(
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        13,
+                        10,
+                    ));
                 }
                 let lbl = self.c_label_to_asm(&target.name);
                 self.jmp_rel32(&lbl, JumpKind::Jmp);
@@ -992,7 +994,7 @@ impl Codegen {
                                 1,
                                 8,
                             )); // cmp rcx, r8
-                                                                                   // 有符号用 jg (skip if > high), 无符号用 ja
+                                // 有符号用 jg (skip if > high), 无符号用 ja
                             let jk_hi = if switch_is_signed { JumpKind::Jg } else { JumpKind::Ja };
                             self.jmp_rel32(&l_next, jk_hi);
                             self.jmp_rel32(&l_case, JumpKind::Jmp);
@@ -1022,8 +1024,7 @@ impl Codegen {
                                     )); // test rax, rax
                                 } else {
                                     // mov rdx, case_low; cmp rax, rdx
-                                    self.emit_insn(&Insn::raw_bytes(&[0x48, 0xBA])); // mov rdx, imm64
-                                    self.emit_insn(&Insn::raw_bytes(&case_low.to_le_bytes()));
+                                    self.emit_insn(&Insn::movabs_reg_imm64(2, case_low as u64));
                                     self.emit_insn(&Insn::alu_rm_reg_reg(
                                         crate::codegen::x86_64::opcode::AluOp::Cmp,
                                         crate::codegen::shared::asm_operand::Width::B64,

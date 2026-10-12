@@ -7,10 +7,10 @@ use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
 use crate::codegen::x86_64::asm::*;
-use crate::codegen::x86_64::Codegen;
-use crate::codegen::x86_64::*;
 use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::opcode::X86_64Opcode;
+use crate::codegen::x86_64::Codegen;
+use crate::codegen::x86_64::*;
 use crate::const_eval::{self, ConstValue};
 use crate::debug::*;
 use crate::diagnostics::{Diagnostic, Severity, Span};
@@ -83,7 +83,7 @@ impl Codegen {
                     out.push_str(&text);
                     out.push('\n');
                     pos += len;
-                }
+                },
                 _ => {
                     // `.byte` 兜底 —— 与老 disassemble_range 同语义.
                     let mut byte_strs: Vec<String> = Vec::new();
@@ -98,7 +98,7 @@ impl Codegen {
                     out.push_str(&byte_strs.join(", "));
                     out.push('\n');
                     pos += 1;
-                }
+                },
             }
         }
         out
@@ -162,8 +162,8 @@ impl Codegen {
                 Some((len, text)) if len == bytes.len() => {
                     gas_text_map.insert(*pc, text);
                     gas_len_map.insert(*pc, bytes.len());
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
 
@@ -328,7 +328,7 @@ impl Codegen {
                             out.push_str(&text);
                             out.push('\n');
                             len
-                        }
+                        },
                         _ => {
                             // .byte 兜底.
                             let mut byte_strs: Vec<String> = Vec::new();
@@ -340,12 +340,15 @@ impl Codegen {
                             out.push_str(&byte_strs.join(", "));
                             out.push('\n');
                             1
-                        }
+                        },
                     }
                 };
 
-                let dis = |from: usize, to: usize, out: &mut String,
-                           gas_hits: &mut u64, total: &mut u64| {
+                let dis = |from: usize,
+                           to: usize,
+                           out: &mut String,
+                           gas_hits: &mut u64,
+                           total: &mut u64| {
                     let mut pos = from;
                     while pos < to && pos < layout.bytes.len() {
                         let off_abs = base + pos as u64;
@@ -516,7 +519,11 @@ impl Codegen {
             let with_gas = self.emit_insn_gas_hits.get(&true).copied().unwrap_or(0);
             eprintln!(
                 "=== EMIT-TOTAL total={total} has_gas={with_gas} ({:.1}%) ===",
-                if total > 0 { with_gas as f64 / total as f64 * 100.0 } else { 0.0 }
+                if total > 0 {
+                    with_gas as f64 / total as f64 * 100.0
+                } else {
+                    0.0
+                }
             );
         }
 
@@ -539,7 +546,8 @@ impl Codegen {
         }
         let mut ops = Vec::new();
         // CFA = rsp + 16 (无 frame_pointer) / rsp + 24 (有 frame_pointer)
-        let cfa_off: u32 = crate::codegen::x86_64::elf::output::cfa_frame_offset(self.target.frame_pointer) as u32;
+        let cfa_off: u32 =
+            crate::codegen::x86_64::elf::output::cfa_frame_offset(self.target.frame_pointer) as u32;
         // DW_CFA_def_cfa (0x0c) uleb128(rsp=7) uleb128(offset)
         ops.push(0x0c);
         enc_uleb128(&mut ops, 7);
@@ -562,14 +570,20 @@ impl Codegen {
         // 实际地址需要回补到函数起始位置
         let lea_pos = self.pos();
         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00])); // lea rdi, [rip+disp32]
-                                                                // LEA 是直接 RIP-relative 寻址, 用 PC32 重定位
+                                                                                       // LEA 是直接 RIP-relative 寻址, 用 PC32 重定位
         self.pending_func_addr_rels
             .push((lea_pos + 3, self.current_func_name.clone(), true));
 
         // 获取调用者地址: 返回地址在 [r13+8]
         // (call 压入返回地址 → push r13 后 r13 指向 saved r13 →
         //  返回地址就在 r13+8, 无论中间 sub rsp 多少都不变)
-        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x75, 0x08])); // mov rsi, [r13+8]
+        self.emit_insn(&Insn::mov_rm_mem(
+            true,
+            crate::codegen::shared::asm_operand::Width::B64,
+            6,
+            13,
+            8,
+        )); // mov rsi, [r13+8]
 
         // call __cyg_profile_func_enter
         self.call_label("__cyg_profile_func_enter");
@@ -578,12 +592,18 @@ impl Codegen {
         // 获取当前函数地址 (lea rdi, [rip+0])
         let lea_pos = self.pos();
         self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00])); // lea rdi, [rip+disp32]
-                                                                // LEA 是直接 RIP-relative 寻址, 用 PC32 重定位
+                                                                                       // LEA 是直接 RIP-relative 寻址, 用 PC32 重定位
         self.pending_func_addr_rels
             .push((lea_pos + 3, self.current_func_name.clone(), true));
 
         // 获取调用者地址: 返回地址在 [r13+8]
-        self.emit_insn(&Insn::raw_bytes(&[0x49, 0x8B, 0x75, 0x08])); // mov rsi, [r13+8]
+        self.emit_insn(&Insn::mov_rm_mem(
+            true,
+            crate::codegen::shared::asm_operand::Width::B64,
+            6,
+            13,
+            8,
+        )); // mov rsi, [r13+8]
 
         // call __cyg_profile_func_exit
         self.call_label("__cyg_profile_func_exit");
@@ -610,8 +630,7 @@ impl Codegen {
                 // 显式记录 (sec_idx, sec 内偏移) 供 symtab 构建阶段把 label 编码为
                 // STT_SECTION + offset 本地符号. 可执行 pushsection 已经由
                 // pushsection_code_ranges 反查, 无需额外登记.
-                let is_exec = self.extra_sections[sec_idx].flags & shared_elf::SHF_EXECINSTR
-                    != 0;
+                let is_exec = self.extra_sections[sec_idx].flags & shared_elf::SHF_EXECINSTR != 0;
                 if !is_exec {
                     let sec_off = self.extra_sections[sec_idx].data.len() as u64;
                     self.pushsection_label_offsets

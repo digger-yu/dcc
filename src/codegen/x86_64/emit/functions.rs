@@ -123,8 +123,12 @@ impl Codegen {
         // `reg_bindings` 算的；如果 `pinned` 等到 reset 才清，naked 函数里的内联 asm
         // 就会拿上一个函数的绑定当本函数家的名单（多排除会换发号，少排除会盖掉变量）。
         // 只同步名单，不动位图 —— 位图在 naked 路径上旧代码就是保留残值的。
-        self.reg_bank
-            .resync_pins(self.homes.values().filter_map(|(l, _)| l.reg()).map(|r| r.n));
+        self.reg_bank.resync_pins(
+            self.homes
+                .values()
+                .filter_map(|(l, _)| l.reg())
+                .map(|r| r.n),
+        );
         self.cleanup_vars.clear();
         self.sret_watermark = 0;
         self.sret_region_base = 0;
@@ -257,21 +261,13 @@ impl Codegen {
                 .with_gas("push %r13".to_string()),
         );
         self.emit_insn(
-            &Insn::mov_rm_reg(
-                crate::codegen::shared::asm_operand::Width::B64,
-                13,
-                4,
-            )
-            .with_gas("mov %rsp, %r13".to_string()),
+            &Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 13, 4)
+                .with_gas("mov %rsp, %r13".to_string()),
         );
         if self.target.frame_pointer {
             self.emit_insn(
-                &Insn::mov_rm_reg(
-                    crate::codegen::shared::asm_operand::Width::B64,
-                    5,
-                    4,
-                )
-                .with_gas("mov %rsp, %rbp".to_string()),
+                &Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 5, 4)
+                    .with_gas("mov %rsp, %rbp".to_string()),
             );
             // frame-pointer 模式下序言推了**两个**寄存器（rbp 与 r13），而入口时
             // rsp ≡ 8 (mod 16)，两次 8 字节之后仍就是 8 —— 本端的不变式是「体内每个 call
@@ -281,9 +277,7 @@ impl Codegen {
             // 复位栈指针，所以这 8 字节不需要（也不应该）手写回去。
             // 它必须在 `cur_prologue_end` 之前发出：FDE 的 CFA 规则从那个偏移之后才生效，
             // 落在规则之外的 prologue 差异展开器就看不到了。
-            self.emit_insn(
-                &Insn::sub_rsp_imm(8).with_gas("sub $8, %rsp".to_string()),
-            );
+            self.emit_insn(&Insn::sub_rsp_imm(8).with_gas("sub $8, %rsp".to_string()));
         }
         // C++ 零成本异常: 序言到此结束 —— FDE 的 CFA 规则必须从这一偏移之后
         // 才生效 (之前 rsp 还在变动, CFA 沿用 CIE 的 `rsp + 8`)。
@@ -728,7 +722,9 @@ impl Codegen {
                     crate::cli::StackGuardReg::Gs => 0x65u8,
                     _ => 0x64u8, // Fs is default
                 };
-                self.emit_insn(&Insn::raw_bytes(&[seg_prefix, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00]));
+                self.emit_insn(&Insn::raw_bytes(&[
+                    seg_prefix, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00,
+                ]));
                 // mov [r13 - 8], rax  → 存储在帧顶部
                 self.emit_insn(&Insn::mov_rm_mem(
                     false,
@@ -861,7 +857,11 @@ impl Codegen {
                         if xmm >= 8 {
                             self.emit_insn(&Insn::raw_bytes(&[0x45])); // REX.R+B，同一个号既在 reg 又在 r/m
                         }
-                        self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x5A, 0xC0 | ((xmm & 7) << 3) | (xmm & 7)]));
+                        self.emit_insn(&Insn::raw_bytes(&[
+                            0x0F,
+                            0x5A,
+                            0xC0 | ((xmm & 7) << 3) | (xmm & 7),
+                        ]));
                     }
                     self.store_xmm32_stack(xmm, off);
                 } else if wide128 || (ty.size() == 16 && matches!(ty, Type::Vector(_, _))) {
@@ -885,9 +885,7 @@ impl Codegen {
                 // 不写指数字节，配合槽高位清零会把值读成 0）。故改为槽→槽的
                 // `fldt`/`fstpt` 直拷，不再有任何精度损失。
                 let incoming = 16i64 + arg_off;
-                // P11 Bucket AR: typed x87 fldt/fstpt via emit_x87_fld_at/fstp_at
-                // (base=r13). Width=10 m80fp maps to (0xDB, /5, /7); encoder
-                // derives REX.B=0x41 and mod=10 disp32 automatically.
+                // P11 Bucket AR: typed x87 fldt/fstpt via emit_x87_fld_at/fstp_at (base=r13).
                 self.emit_x87_fld_at(13, incoming as i32, &Type::LongDouble);
                 self.emit_x87_fstp_at(13, off as i32, &Type::LongDouble);
             }
@@ -977,9 +975,17 @@ impl Codegen {
                     crate::cli::StackGuardReg::Gs => 0x65u8,
                     _ => 0x64u8, // Fs is default
                 };
-                self.emit_insn(&Insn::raw_bytes(&[seg_prefix, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00]));
+                self.emit_insn(&Insn::raw_bytes(&[
+                    seg_prefix, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00,
+                ]));
                 // mov [r13 - 8], rax  → 存储在帧顶部
-                self.emit_insn(&Insn::raw_bytes(&[0x49, 0x89, 0x85, 0xf8, 0xff, 0xff, 0xff]));
+                self.emit_insn(&Insn::mov_rm_mem(
+                    false,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    0,
+                    13,
+                    -8,
+                ));
             }
             // KASAN 栈红区: 毒化整个帧, 然后解除变量区域的毒化
             if self.kasan && self.frame_layout.frame_size > 0 {
@@ -1185,7 +1191,9 @@ impl Codegen {
                                                 self.emit_insn(&Insn::new(crate::codegen::x86_64::opcode::X86_64Opcode::AluRm { op: crate::codegen::x86_64::opcode::AluOp::Xor, width: crate::codegen::shared::asm_operand::Width::B64, dst: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64), src: crate::codegen::x86_64::opcode::Operand::Reg(2, crate::codegen::shared::asm_operand::Width::B64)}, &[]));
                                             }
                                         } else {
-                                            self.emit_insn(&Insn::sign_extend_rax_to_rdx(crate::codegen::shared::asm_operand::Width::B64)); // cqo
+                                            self.emit_insn(&Insn::sign_extend_rax_to_rdx(
+                                                crate::codegen::shared::asm_operand::Width::B64,
+                                            )); // cqo
                                         }
                                     }
                                     let off = self.var_offset(&v.name.name);
@@ -1230,7 +1238,10 @@ impl Codegen {
                     crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                         rip_relative: false,
                         width: crate::codegen::shared::asm_operand::Width::B32,
-                        dst: crate::codegen::x86_64::opcode::Operand::Reg(0, crate::codegen::shared::asm_operand::Width::B32),
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            0,
+                            crate::codegen::shared::asm_operand::Width::B32,
+                        ),
                         src: crate::codegen::x86_64::opcode::Operand::Imm(0),
                     },
                     &[],
