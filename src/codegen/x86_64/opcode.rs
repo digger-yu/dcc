@@ -10,6 +10,100 @@
 // 输出与原手写逐字节相同的字节; 其余变体先定义不实现 (render 返回占位串,
 // encode 走 None → 发射方必须先用上再切), 禁止一次性铺开.
 
+//! # x86_64 编码约定 (P11 实战踩坑钉死, P12-C)
+//!
+//! 本文件的类型化 Opcode 构造子对以下常见编码陷阱有明确约定. 后续维护者
+//! 不能"凭直觉"改寄存器号、REX 条件或 op_field 提取位 — 每条都是 P11 期
+//! 间 gcc-torture 真实回归换来的教训.
+//!
+//! 物理寄存器号 (Intel 约定): rax=0, rcx=1, rdx=2, rbx=3, rsp=4, rbp=5,
+//! rsi=6, rdi=7, r8..r15 = 8..15. XMM0..XMM15 同号编号.
+//!
+//! ## B8 寄存器字段 4..7 的 REX 二义
+//!
+//! x86_64 字节操作数 (B8) 的 ModRM.reg / r/m 字段取值 4..7 时, 是否存在
+//! REX 前缀决定了解码出的物理寄存器完全不同:
+//!
+//! - **无 REX**: 字段 4..7 → ah / ch / dh / bh (旧 x86 高字节寄存器).
+//! - **有 REX**: 字段 4..7 → spl / bpl / sil / dil (低字节扩展寄存器).
+//!
+//! 字段 0..3 在两种情况下都解码为 al / cl / dl / bl, 没有二义.
+//!
+//! **dcc 类型化 Opcode 约定 (AluRm B8 / MovRm B8 / Shift B8 / MovExt 源
+//!   B8)**: 调用方传入的寄存器号 0..3 = al/cl/dl/bl; 4..7 = spl/bpl/sil/dil
+//!   (编码器会自动发 REX); 8..15 = r8b..r15b (REX.B/R 自动置位).
+//!
+//! **如果调用方真的需要 ah/ch/dh/bh (无 REX 的高字节)**, 不能走任何类型化
+//! 构造子 — 因为类型化构造子看到 src/dst ∈ {4,5,6,7} 就会强发 REX, 把它
+//! 重映射成 spl/bpl/sil/dil (P11 回归 #7: uint128 `and al, ah` 被编成
+//! `and al, spl` 的根因). 这种情况必须用 `X86_64Opcode::Raw` 手写字节.
+//!
+//! 对应 P11 回归: #7 int128 and al,ah.
+//!
+//! ## Shift Group op_field 提取位
+//!
+//! x86 移位 group (SHL/SHR/SAR/ROL/ROR, 操作码 0xC0/0xC1/0xD0/0xD1/0xD2/
+//! 0xD3) 的 /n 字段 (区分具体移位种类) 位于 **ModRM.reg 字段 = bit[5:3]**,
+//! 而不是 bit[2:0]. 合法取值:
+//!
+//! - ROL = /0 (bit[5:3] = 0b000)
+//! - ROR = /1 (bit[5:3] = 0b001)
+//! - RCL = /2
+//! - RCR = /3
+//! - SHL/SAL = /4 (bit[5:3] = 0b100)
+//! - SHR = /5 (bit[5:3] = 0b101)
+//! - SAL=SHL, SAR = /7 (bit[5:3] = 0b111)
+//!
+//! **提取公式**: `op_field = (sub_byte >> 3) & 7`, **不是** `sub_byte & 7`.
+//! (P11 回归 #2: shl 被编成 rol 就是因为写成了 `sub & 7` — 取到了 r/m
+//! 字段而不是 reg 字段.)
+//!
+//! ## SimdMov SIB scale 白名单
+//!
+//! SimdMov (movsd/movss/movaps/movapd/movdqa/movdqu) 的内存寻址带 SIB 时,
+//! scale 必须是全集 {1, 2, 4, 8}, 不能只放行 scale=1.
+//!
+//! P11 回归 #4: `movsd (%r11,%rcx,8),%xmm0` (double 数组下标) 因编码器只
+//! 认 scale=1 而 encode() 返回 None, 整条指令被 `let _ = emit_insn(...)`
+//! 静默吞掉, 后续 store 把未初始化的 xmm0 写回栈, 表现为 gcc-torture 用
+//! 例随机崩溃.
+//!
+//! 白名单: scale=1 → SIB bits[7:6]=00; scale=2 → 01; scale=4 → 10;
+//! scale=8 → 11. 其他值返回 None 并由调用方走 raw_bytes 兜底.
+//!
+//! ## movsd/movss store vs load 方向
+//!
+//! SSE 标量浮点 load/store 的 ModRM.reg 与 r/m 字段物理位置随方向反转:
+//!
+//! - **store 类操作码** (0x11=movsd/movss store, 0x29=movapd/movaps store,
+//!   0x7F=movdqu store): ModRM.reg 字段 = **源寄存器 (xmm)**,
+//!   ModRM.r/m 字段 = **目的内存**. Intel 编码规范把"被寻址的内存"放 r/m,
+//!   因此源 (xmm) 自然落在 reg 位段.
+//! - **load 类操作码** (0x10=movsd/movss load, 0x28=movapd/movaps load,
+//!   0x6F=movdqu load): ModRM.reg 字段 = **目的寄存器 (xmm)**,
+//!   ModRM.r/m 字段 = **源内存**.
+//!
+//! REX.R / REX.B 跟随物理字段位置 (reg → REX.R, r/m → REX.B), 而不是
+//! 语义上的 dst/src. P11 回归 #1: store 方向字段被交换成"reg=mem,
+//! r/m=xmm", 导致 store 字节流在 Intel 眼里是把 xmm 当 r/m 基址 — 语义
+//! 完全错位.
+//!
+//! ## movd/movq 的 66 前缀
+//!
+//! dcc 始终只使用 XMM 寄存器 (不用 MMX mm0..mm7). 因此 MOVD (B32 整数
+//! ↔ xmm) 与 MOVQ (B64 整数 ↔ xmm) 都必须发 **66 legacy 前缀**:
+//!
+//! - `66 0F 6E /r` = movd xmm, r32 / movq xmm, r64 (后者还要 REX.W).
+//! - `66 0F 7E /r` = movd r32, xmm / movq r64, xmm.
+//!
+//! 缺 66 前缀时, `0F 6E` / `0F 7E` 被解码为 **MMX 版本** MOVD/MOVQ
+//! (操作 mm0..mm7), 与 XMM 完全不等价 — 而且 dcc 的 XMM 寄存器状态在
+//! 错误解码下会被静默破坏.
+//!
+//! P11 回归 #3: B32 MOVD 缺 66 前缀, 在 SSE2 目标上行为未定义.
+//!
+//! 任何 GprXmm / SimdMov B32 变体都不能省 66 前缀.
+
 /// GPR ALU 操作族. 共享同一 ModRM.reg 编码位段: /0 ADD, /1 OR, /2 ADC, /3 SBB,
 /// /4 AND, /5 SUB, /6 XOR, /7 CMP. TEST 走 0x84/0x85 (无 ModRM.reg 语义).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -595,6 +689,9 @@ impl X86_64Opcode {
                 dst,
                 src,
             } => {
+                // [约定] 见顶部 "B8 寄存器字段 4..7 的 REX 二义": B8 形态
+                //   src/dst ∈ {4,5,6,7} 一律当 spl/bpl/sil/dil 并强发 REX;
+                //   需要 ah/ch/dh/bh 的调用方必须走 Raw.
                 // 形态分支 A: (Add|Sub, B64, Rsp=Reg(4), Imm).
                 // 手写约定: 所有 emit_sub_rsp / emit_add_rsp 走 0x81 / id (imm32 LE),
                 // 即使 imm 很小也带 4 字节立即数 (G10 快照依赖此行为).
@@ -1085,6 +1182,10 @@ impl X86_64Opcode {
                 dst,
                 amount,
             } => {
+                // [约定] 见顶部 "Shift Group op_field 提取位": op_field 位于
+                //   ModRM.reg (bit[5:3]), 提取公式 = (sub >> 3) & 7, 不
+                //   是 sub & 7 (否则 shl 会被错编成 rol, P11 回归 #2).
+                //   同时 B8 形态遵守 "B8 REX 二义" 约定 (4..7 → spl/...).
                 // 步骤 2d: 收敛 emit/expr/dispatch.rs 里的 imm8/CL 移位.
                 //   SHL/SAL: /4; SHR: /5; SAR: /7.
                 //   imm8=1 时用 D1 /4 形式; 其余 imm8 用 C1 /4 + imm8; CL 用 D3 /4.
@@ -1160,6 +1261,8 @@ impl X86_64Opcode {
                 src,
                 rip_relative,
             } => {
+                // [约定] 见顶部 "B8 寄存器字段 4..7 的 REX 二义": B8 mov 形
+                //   态 src/dst ∈ {4,5,6,7} 一律当 spl/bpl/sil/dil 并发 REX.
                 // P11 Bucket O8: rip-relative mov reg, [rip+disp32] / mov [rip+disp32], reg.
                 //   load (dst=Reg, src=Mem): 0x8B, ModRM = 00_ddd_101 (reg=dst, r/m=101=rip).
                 //   store (dst=Mem, src=Reg): 0x89, ModRM = 00_ddd_101 (reg=src, r/m=101=rip).
@@ -1414,6 +1517,9 @@ impl X86_64Opcode {
                 src,
                 rip_relative,
             } => {
+                // [约定] 见顶部 "B8 寄存器字段 4..7 的 REX 二义": 从 B8 源
+                //   (movzx/movsx from B8) 读取 spl/bpl/sil/dil (src&7 ∈
+                //   4..7) 必须发 REX; 读 ah/ch/dh/bh 走 Raw.
                 // P11: 收敛 movzx/movsx/movsxd 的 reg-reg 与 reg-mem 形态.
                 //   MOVZX r32, r/m8 (B8):  0F B6 /r
                 //   MOVZX r32, r/m16 (B16): 0F B7 /r
@@ -1911,6 +2017,12 @@ impl X86_64Opcode {
                 dst,
                 src,
             } => {
+                // [约定] 见顶部 "movsd/movss store vs load 方向" 与
+                //   "SimdMov SIB scale 白名单":
+                //   - store (0x11/0x29/0x7F) ModRM.reg=源 xmm, r/m=目的 mem;
+                //     load (0x10/0x28/0x6F) 相反. REX.R/REX.B 跟随物理位段.
+                //   - SIB scale 必须全集 {1,2,4,8}; 只放行 scale=1 会导致
+                //     movsd(%r11,%rcx,8) 整条被静默吞掉 (P11 回归 #4).
                 // P11 Bucket 6: reg↔reg xmm↔xmm (mod=11).
                 //   dst=Reg(dst_xmm, Xmm), src=Reg(src_xmm, Xmm).
                 //   opcode2 = 0x10 (load) / 0x11 (store direction).
@@ -2567,6 +2679,9 @@ impl X86_64Opcode {
                 dst,
                 src,
             } => {
+                // [约定] 见顶部 "movd/movq 的 66 前缀": dcc 只用 XMM,
+                //   0F 6E/7E 必发 66 legacy 前缀; 缺省会被解码成 MMX MOVD.
+                //   B64 额外发 REX.W (MOVQ).
                 let (Operand::Reg(dst_idx, _), Operand::Reg(src_idx, _)) = (dst, src) else {
                     return None;
                 };
