@@ -12,6 +12,7 @@ use crate::codegen::x86_64::emit::gas::{
     REG64 as GAS_REG64, REG8 as GAS_REG8, XMM as GAS_XMM,
 };
 use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::insn::BoolExpect;
 use crate::codegen::x86_64::opcode::{
     AluOp, MemOperand, Operand as OpcodeOperand, SimdArithOp, SimdWidth, X86_64Opcode,
 };
@@ -2290,28 +2291,28 @@ impl Codegen {
         }
         match sz {
             1 => {
-                let _ = self.emit_insn(&Insn::alu_rm_reg_reg(
+                self.emit_insn(&Insn::alu_rm_reg_reg(
                     crate::codegen::x86_64::opcode::AluOp::And,
                     crate::codegen::shared::asm_operand::Width::B8,
                     2,
                     6,
-                ));
+                )).expect("typed-opcode: alu_rm_reg_reg");
             }, // and dl, sil
             2 => {
-                let _ = self.emit_insn(&Insn::alu_rm_reg_reg(
+                self.emit_insn(&Insn::alu_rm_reg_reg(
                     crate::codegen::x86_64::opcode::AluOp::And,
                     crate::codegen::shared::asm_operand::Width::B16,
                     2,
                     6,
-                ));
+                )).expect("typed-opcode: alu_rm_reg_reg");
             }, // and dx, si
             4 => {
-                let _ = self.emit_insn(&Insn::alu_rm_reg_reg(
+                self.emit_insn(&Insn::alu_rm_reg_reg(
                     crate::codegen::x86_64::opcode::AluOp::And,
                     crate::codegen::shared::asm_operand::Width::B32,
                     2,
                     6,
-                ));
+                )).expect("typed-opcode: alu_rm_reg_reg");
             }, // and edx, esi
             _ => {
                 // P11: and rdx, rsi via typed opcode.
@@ -2325,12 +2326,12 @@ impl Codegen {
                     &[],
                 );
                 if !self.emit_insn(&insn) {
-                    let _ = self.emit_insn(&Insn::alu_rm_reg_reg(
+                    self.emit_insn(&Insn::alu_rm_reg_reg(
                         crate::codegen::x86_64::opcode::AluOp::And,
                         crate::codegen::shared::asm_operand::Width::B64,
                         2,
                         6,
-                    )); // and rdx, rsi
+                    )).expect("typed-opcode: alu_rm_reg_reg"); // and rdx, rsi
                 }
             },
         }
@@ -3088,28 +3089,28 @@ impl Codegen {
         }
         match sz {
             1 => {
-                let _ = self.emit_insn(&Insn::alu_rm_reg_reg(
+                self.emit_insn(&Insn::alu_rm_reg_reg(
                     crate::codegen::x86_64::opcode::AluOp::Or,
                     crate::codegen::shared::asm_operand::Width::B8,
                     2,
                     6,
-                ));
+                )).expect("typed-opcode: alu_rm_reg_reg");
             }, // or dl, sil
             2 => {
-                let _ = self.emit_insn(&Insn::alu_rm_reg_reg(
+                self.emit_insn(&Insn::alu_rm_reg_reg(
                     crate::codegen::x86_64::opcode::AluOp::Or,
                     crate::codegen::shared::asm_operand::Width::B16,
                     2,
                     6,
-                ));
+                )).expect("typed-opcode: alu_rm_reg_reg");
             }, // or dx, si
             4 => {
-                let _ = self.emit_insn(&Insn::alu_rm_reg_reg(
+                self.emit_insn(&Insn::alu_rm_reg_reg(
                     crate::codegen::x86_64::opcode::AluOp::Or,
                     crate::codegen::shared::asm_operand::Width::B32,
                     2,
                     6,
-                ));
+                )).expect("typed-opcode: alu_rm_reg_reg");
             }, // or edx, esi
             _ => {
                 // P11: or rdx, rsi via typed opcode.
@@ -3123,12 +3124,12 @@ impl Codegen {
                     &[],
                 );
                 if !self.emit_insn(&insn) {
-                    let _ = self.emit_insn(&Insn::alu_rm_reg_reg(
+                    self.emit_insn(&Insn::alu_rm_reg_reg(
                         crate::codegen::x86_64::opcode::AluOp::Or,
                         crate::codegen::shared::asm_operand::Width::B64,
                         2,
                         6,
-                    )); // or rdx, rsi
+                    )).expect("typed-opcode: alu_rm_reg_reg"); // or rdx, rsi
                 }
             },
         }
