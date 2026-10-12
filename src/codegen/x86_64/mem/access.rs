@@ -8,7 +8,7 @@ use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
 use crate::codegen::x86_64::asm::*;
 use crate::codegen::x86_64::insn::Insn;
-use crate::codegen::x86_64::opcode::{MemOperand, Operand, X86_64Opcode};
+use crate::codegen::x86_64::opcode::{MemOperand, Operand, SimdWidth, X86_64Opcode};
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::*;
 use crate::const_eval::{self, ConstValue};
@@ -499,10 +499,10 @@ impl Codegen {
             .unwrap_or((8, false, 0));
         let tls_exec = is_tls && !self.relocatable;
         let is_float = matches!(effective_ty, Type::Float);
-        let pfx = if is_float { 0xF3 } else { 0xF2 };
+        let width = if is_float { SimdWidth::SS } else { SimdWidth::SD };
         self.emit_global_seg(&resolved);
         let pos = self.pos() + 4;
-        self.emit_insn(&Insn::raw_bytes(&[pfx, 0x0F, 0x11, 0x05, 0, 0, 0, 0]));
+        self.emit_insn(&Insn::simd_mov_rip(true, width, 0));
         if tls_exec {
             self.pending_tls_rels.push((pos, resolved.clone()));
         } else {

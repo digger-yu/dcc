@@ -39,8 +39,7 @@ impl Codegen {
                 }
                 let at = self.pos();
                 // LEA dst, [RIP + disp32]  (7 bytes, disp32 = placeholder 0)
-                let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-                self.emit_insn(&Insn::raw_bytes(&[rex, 0x8D, 0x05 | ((dst & 7) << 3), 0, 0, 0, 0]));
+                self.emit_insn(&Insn::lea_rip(dst));
                 self.string_refs.push((at, data));
             },
             _ => {
@@ -139,11 +138,18 @@ impl Codegen {
                                 // movslq %ecx, %rcx: 48 63 C9
                                 let insn = Insn::new(
                                     crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                                        rip_relative: false,
                                         sign: true,
                                         from: crate::codegen::shared::asm_operand::Width::B32,
                                         to: crate::codegen::shared::asm_operand::Width::B64,
-                                        dst: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B64),
-                                        src: crate::codegen::x86_64::opcode::Operand::Reg(1, crate::codegen::shared::asm_operand::Width::B32),
+                                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            1,
+                                            crate::codegen::shared::asm_operand::Width::B64,
+                                        ),
+                                        src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            1,
+                                            crate::codegen::shared::asm_operand::Width::B32,
+                                        ),
                                     },
                                     &[],
                                 );
@@ -161,7 +167,9 @@ impl Codegen {
                                 if stride > 1 {
                                     if stride.is_power_of_two() {
                                         let shift = (stride.trailing_zeros() as u8).min(31);
-                                        self.emit_insn(&Insn::shift_reg_imm8_c1_b64(0b100, 1, shift)); // shl rcx, shift
+                                        self.emit_insn(&Insn::shift_reg_imm8_c1_b64(
+                                            0b100, 1, shift,
+                                        )); // shl rcx, shift
                                     } else {
                                         self.imul_imm(1, stride as i128); // imul rcx, rcx, stride
                                     }
@@ -171,7 +179,8 @@ impl Codegen {
                             self.emit_insn(&Insn::alu_rm_reg_reg(
                                 crate::codegen::x86_64::opcode::AluOp::Add,
                                 crate::codegen::shared::asm_operand::Width::B64,
-                                dst, 1,
+                                dst,
+                                1,
                             ));
                             // 下降到元素类型
                             cur_ty = elem.base.clone();

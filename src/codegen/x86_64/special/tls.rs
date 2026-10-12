@@ -20,7 +20,7 @@ impl Codegen {
     pub fn emit_tls_fs_setup(&mut self) {
         // lea rsi, [rip+disp32]  → TLS 模板地址
         let lea_pos = self.pos() + 3;
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x35, 0, 0, 0, 0]));
+        self.emit_insn(&Insn::lea_rip(6));
         self.pending_tls_rels
             .push((lea_pos, "__dcc_tls_base".to_string()));
         // mov rdi, 0x1002 (ARCH_SET_FS)

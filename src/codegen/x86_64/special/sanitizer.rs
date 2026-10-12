@@ -187,7 +187,7 @@ impl Codegen {
         }
         // 生成 LEA rdi, [rip+disp32] 占位
         let lea_pos = self.code.len() as u64;
-        self.emit_insn(&Insn::raw_bytes(&[0x48, 0x8D, 0x3D, 0, 0, 0, 0])); // lea rdi, [rip+disp32]
+        self.emit_insn(&Insn::lea_rip(7)); // lea rdi, [rip+disp32]
         self.ubsan_lea_refs.push((lea_pos, data_off));
         // 绝对指针槽: Filename@0, ArrayType@16, IndexType@24 → rodata 目标
         self.ubsan_ptr_refs.push((data_off, 0, file_off));

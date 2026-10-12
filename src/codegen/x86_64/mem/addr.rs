@@ -434,9 +434,7 @@ impl Codegen {
             // 使用 LEA dst, [RIP + disp32] + label_addr_refs 延迟解析
             // 前缀标签名以避免与函数符号名冲突
             let label_name = self.c_label_to_asm(&label.name);
-            let rex = 0x48 | if dst >= 8 { 0x44 } else { 0 };
-            let modrm = 0x05 | ((dst & 7) << 3);
-            self.emit_insn(&Insn::raw_bytes(&[rex, 0x8D, modrm, 0, 0, 0, 0]));
+            self.emit_insn(&Insn::lea_rip(dst));
             let disp32_pos = self.pos() - 4;
             self.label_addr_refs.push((disp32_pos, label_name));
         }
