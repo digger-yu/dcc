@@ -12,7 +12,7 @@ mov $0x7,%rdx
 mov $0xa,%rax
 syscall
 lea 0x0(%rip),%rax
-lea -0x320(%r13),%rdi
+lea -0x1a8(%r13),%rdi
 movb $0x49,(%rdi)
 movb $0xba,0x1(%rdi)
 mov %r13,0x2(%rdi)

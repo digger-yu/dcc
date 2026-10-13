@@ -1864,6 +1864,65 @@ fn bitfield_rmw_deep_nest() {
     assert_eq!(code, 0, "bitfield_rmw_deep_nest checks failed (exit={code})");
 }
 
+/// F4/F5/F6 smoke-compile (object-only; no link, since fixtures reference
+/// extern pick() or rely on x87 _Imaginary lowering without a driver main).
+fn compile_only(name: &str, src: &str) -> std::process::Output {
+    let dir = std::env::temp_dir();
+    let src_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
+    let obj_path = dir.join(format!("dcc-{name}-{}.o", std::process::id()));
+    std::fs::write(&src_path, src).expect("write fixture");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-std=gnu23", "-O2", "-c", "-o"])
+        .arg(&obj_path)
+        .arg(&src_path)
+        .output()
+        .expect("run dcc");
+    let _ = std::fs::remove_file(&src_path);
+    let _ = std::fs::remove_file(&obj_path);
+    out
+}
+
+/// F4: escaping nested function + deep vector chain must not have the
+/// trampoline band overlap the vector temp band (H3 fix, P2).
+#[test]
+#[cfg(unix)]
+fn frame_band_tramp_vec() {
+    let src = include_str!("../fixtures/c/frame_band_tramp_vec.c");
+    let out = compile_only("frame-band-tramp-vec", src);
+    assert!(
+        out.status.success(),
+        "frame_band_tramp_vec compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// F5: _Imaginary long double negation must go through x87 fchs (V1).
+#[test]
+#[cfg(unix)]
+fn imaginary_ld_neg() {
+    let src = include_str!("../fixtures/c/imaginary_ld_neg.c");
+    let out = compile_only("imaginary-ld-neg", src);
+    assert!(
+        out.status.success(),
+        "imaginary_ld_neg compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// F6: _Imaginary long double four-operand arithmetic must go through
+/// x87 faddp/fsubrp/fmulp+fchs/fdivrp (V2).
+#[test]
+#[cfg(unix)]
+fn imaginary_ld_arith() {
+    let src = include_str!("../fixtures/c/imaginary_ld_arith.c");
+    let out = compile_only("imaginary-ld-arith", src);
+    assert!(
+        out.status.success(),
+        "imaginary_ld_arith compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// M2.3: integer promotion and implicit conversion rules.
 #[test]
 #[cfg(unix)]

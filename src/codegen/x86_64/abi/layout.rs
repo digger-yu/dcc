@@ -183,7 +183,7 @@ impl LayoutMap {
             rvalue_off: 8,
             sret_ptr_off: 0,
             tramp_top: TRAMP_RESERVE,
-            bf_rmw_band_top: TRAMP_RESERVE + TRAMP_RESERVE,
+            bf_rmw_band_top: TRAMP_RESERVE,
             spill_band_top: 0,
             late_band_top: 0,
             arena_room: 0,
@@ -226,6 +226,7 @@ impl LayoutMap {
                                                          // 区别在于晚分配现在只能在自己带里动，不得再压低本锚点。
         let late_band_top = -(hdr.saturating_add(p.var_bytes));
         let sret_region_base = late_band_top.saturating_sub(late_band_bytes);
+        let vec_temp_off = -frame_size + CX_FRAME_BAND + p.va_slots + p.static_chain_slot + 8;
         Self {
             temp_slots: p.temp_slots,
             hdr,
@@ -241,13 +242,18 @@ impl LayoutMap {
             late_band_bytes,
             frame_size,
             sret_region_base,
-            vec_temp_off: -frame_size + CX_FRAME_BAND + p.va_slots + p.static_chain_slot + 8,
+            vec_temp_off,
             variadic_reg_save_off: -frame_size + CX_FRAME_BAND,
             static_chain_off: -frame_size + CX_FRAME_BAND + p.va_slots,
             rvalue_off: -frame_size + 8,
             sret_ptr_off: -frame_size + CX_FRAME_BAND + p.va_slots + p.static_chain_slot,
-            tramp_top: -frame_size + p.tramp_reserve,
-            bf_rmw_band_top: -frame_size + p.tramp_reserve + p.bf_rmw_reserve,
+            // P2 (H3 修复): trampoline 带从帧底 (与 CX/vec 区重叠) 移到 vec 区与 bf_rmw 带之上，
+            // 让它独占 `[tramp_top - tramp_reserve, tramp_top)` 这段 256B。新位置的推导：
+            // vec 带自 `vec_temp_off` 向下生长 `vec_reserve` 字节；bf_rmw 紧贴其下；
+            // trampoline 再贴 bf_rmw 之下。帧大小的求和项不变 (frame_size 字节总数不变)，
+            // 但三条带不再相交 —— 之前它们都落在 `-frame_size + 0..256` 那一段。
+            tramp_top: vec_temp_off + p.vec_reserve + p.bf_rmw_reserve,
+            bf_rmw_band_top: vec_temp_off + p.vec_reserve,
             spill_band_top: sret_region_base - p.sret_need,
             late_band_top,
             // 诊断读数：帧大小减去帧头、减去晚分配带、再减去帧底那摞带。
