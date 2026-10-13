@@ -90,6 +90,13 @@ impl Codegen {
             ty,
             Type::Complex(c) if matches!(&c.base, Type::Float | Type::Double)
         );
+        // P4 V4: `_Imaginary` 标量与同内型实型同 ABI。`_Imaginary long double`
+        // 是 80-bit x87 tbyte, st(0) 返回, 参数走内存 (与 `long double` 对称);
+        // `_Imaginary float/double` 走 SSE 单 eightbyte, 不需要独立分类臂。
+        let is_imag_ld = matches!(
+            ty,
+            Type::Imaginary(i) if matches!(&i.base, Type::LongDouble)
+        );
         // 对齐 **大于 16 字节** 的类型整体走内存: SysV ABI 3.2.3p2 的
         // "如果对齐超过 16 字节, 则归类为 MEMORY" 与 GCC `classify_argument`
         // 里的 `if (align > 128) return CLASS_MEMORY;` (GCC 4.6 起的 ABI 变更)。
@@ -101,6 +108,7 @@ impl Codegen {
         // SSE/GP 路径 (见下方 X87 分类), 不能让此规则抢先压成 Memory。
         let force_memory = size > 64
             || matches!(ty, Type::LongDouble)
+            || is_imag_ld
             || (matches!(ty, Type::Complex(_)) && !is_complex_ld && !is_complex_sse)
             || Self::type_has_vla(ty)
             || (ty.align() > 16 && !is_complex_ld);
@@ -569,6 +577,11 @@ impl Codegen {
         // 同一个 `classes_force_mem` 判据在两侧的结论相反，故只在此处特判，
         // 不改 `classes_force_mem` 本身（它还被 caller 与 va_arg 复用）。
         if matches!(ty, Type::LongDouble) {
+            return false;
+        }
+        // P4 V4: `_Imaginary long double` 与 `long double` 对称 — st(0) 返回,
+        // 参数走内存 (force_memory 已置位)。
+        if matches!(ty, Type::Imaginary(i) if matches!(&i.base, Type::LongDouble)) {
             return false;
         }
         // `_Complex long double` 同样是例外：SysV ABI 3.2.3p2 规定

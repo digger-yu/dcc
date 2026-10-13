@@ -20,5 +20,4 @@ pub mod cast;
 pub mod compound;
 pub mod increment;
 pub mod literal;
-pub mod unary;
 pub mod va_arg;

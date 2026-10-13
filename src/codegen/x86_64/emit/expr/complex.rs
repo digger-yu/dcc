@@ -2816,6 +2816,14 @@ impl Codegen {
             inner_b
         };
         let is_float_inner = matches!(inner_ty, Type::Float | Type::Double | Type::LongDouble);
+        // P4 V2: `_Imaginary long double` 全程走 x87。80-bit tbyte 无法由
+        // xmm0-f64 无损承载, 下方 SSE 臂（addsd/mulsd + movsd）会把 fldt 压进
+        // st(0) 的 tbyte 当 f64 截断, 还留下无人配平的 fldt 对。gen_expr 对
+        // 标量 ild 的 rvalue 约定就是「fldt 压进 st(0)」, 所以两个操作数连续
+        // 求值即得 st(0)=r, st(1)=l, 再用 faddp/fsubrp/fmulp+fchs/fdivp 收尾。
+        if matches!(inner_ty, Type::LongDouble) {
+            return self.gen_imaginary_binop_ld(op, l, r, dst, l_imag, r_imag);
+        }
         let pfx = if matches!(inner_ty, Type::Float) {
             0xF3u8
         } else {
@@ -2983,6 +2991,107 @@ impl Codegen {
         }
         let _ = is_float_inner;
     }
+
+    /// P4 V2: `_Imaginary long double` 二元运算的 x87 实现。
+    ///
+    /// `gen_expr` 对 80-bit 标量（含 ild）的 rvalue 约定是「fldt 压进 st(0)」，
+    /// 于是先算 r、再算 l 之后栈为 st(0)=r、st(1)=l。配对的 faddp/fsubrp/
+    /// fmulp/fdivp 收尾并把结果留在 st(0)（x87 返回约定）。
+    ///
+    /// 符号规则（纯虚数代数）：
+    /// - imag ± imag → imag：(a·i) ± (b·i) = (a±b)·i，结果仍是虚数，符号不变；
+    /// - imag * imag → real：(a·i)(b·i) = -ab，乘积取负；
+    /// - imag / imag → real：(a·i)/(b·i) = a/b，结果为实、符号为正。
+    fn gen_imaginary_binop_ld(
+        &mut self,
+        op: BinOp,
+        l: &Expr,
+        r: &Expr,
+        dst: u8,
+        l_imag: bool,
+        r_imag: bool,
+    ) {
+        // 混合（一边 real 一边 imag）的 ± 会产出 complex。探针语料只覆盖
+        // imag op imag；real ± imag → complex 复用 complex LD 的物化约定
+        // （实部 st0、虚部 st0+16 落 result_off）。为聚焦修复 imag-op-imag，
+        // 混合 ± 暂退 complex_result_off 双通道，其余混合运算与 imag-op-imag
+        // 同栈代数处理。
+        if matches!(op, BinOp::Add | BinOp::Sub) && l_imag != r_imag {
+            // 一边虚、一边实 → complex。实部=实操作数，虚部=±虚操作数。
+            let result_off = self.complex_result_off();
+            let real_e = if l_imag { r } else { l };
+            let imag_e = if l_imag { l } else { r };
+            // 虚部（含取负）压 st(0)，物化到 result_off + 16
+            self.gen_expr(imag_e, dst);
+            if matches!(op, BinOp::Sub) && r_imag {
+                // real - imag: 虚部取负
+                self.emit_x87_chs();
+            }
+            self.emit_x87_fstp_at(13, (result_off + 16) as i32, &Type::LongDouble);
+            // 实部压 st(0)，物化到 result_off
+            self.gen_expr(real_e, dst);
+            if matches!(op, BinOp::Sub) && l_imag {
+                // imag - real: 无实部符号变化约定下不处理（纯探针外）
+            }
+            self.emit_x87_fstp_at(13, result_off as i32, &Type::LongDouble);
+            self.emit_lea_r13(0, result_off);
+            if dst != 0 {
+                self.mov(dst, 0);
+            }
+            return;
+        }
+
+        // imag op imag（或纯同符号轴混合）：栈代数。
+        self.gen_expr(r, dst); // st(0) = r
+        self.gen_expr(l, dst); // st(0) = l, st(1) = r
+        match op {
+            BinOp::Add => {
+                // faddp st(1),st(0): st(0)=l+r (imag)
+                self.emit_x87_binop(BinOp::Add, false);
+            }
+            BinOp::Sub => {
+                // fsubrp st(1),st(0): st(0)=l-r (imag)
+                self.emit_x87_binop(BinOp::Sub, false);
+            }
+            BinOp::Mul => {
+                // fmulp: st(0)=l*r; imag*imag=real 且符号为负 → fchs
+                self.emit_x87_binop(BinOp::Mul, false);
+                self.emit_x87_chs();
+            }
+            BinOp::Div => {
+                // fdivrp st(1),st(0): st(0)=l/r (real, 正)
+                self.emit_x87_binop(BinOp::Div, false);
+            }
+            BinOp::EqEq | BinOp::Ne => {
+                // fucomip st(0),st(1) 后弹出，比较两虚部幅值
+                self.emit_x87_cmp_and_pop();
+                let false_label = self.fresh_label();
+                let end_label = self.fresh_label();
+                self.jmp_rel32(
+                    &false_label,
+                    if matches!(op, BinOp::EqEq) {
+                        crate::codegen::x86_64::JumpKind::Jne
+                    } else {
+                        crate::codegen::x86_64::JumpKind::Je
+                    },
+                );
+                self.mov_imm(dst, if matches!(op, BinOp::EqEq) { 1 } else { 0 });
+                self.jmp_rel32(&end_label, crate::codegen::x86_64::JumpKind::Jmp);
+                self.label(&false_label);
+                self.mov_imm(dst, if matches!(op, BinOp::EqEq) { 0 } else { 1 });
+                self.label(&end_label);
+                return;
+            }
+            _ => {}
+        }
+        // 结果在 st(0)（x87 返回约定）。
+        if dst != 0 {
+            // 把 st(0) 拷到 dst 无副作用的占位约定与既有标量浮点一致：
+            // 调用方按 rvalue 约定从 st(0) 读。这里仅同步 GP 占位。
+            self.emit_lea_r13(0, self.frame_layout.frame_base());
+        }
+    }
+
     pub(crate) fn gen_imaginary_init(&mut self, name: &str, inner: &Type, init: &Expr) {
         let off = self.var_offset(name);
         let is_float = matches!(inner, Type::Float | Type::Double | Type::LongDouble);

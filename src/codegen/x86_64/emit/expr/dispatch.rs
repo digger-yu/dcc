@@ -2393,8 +2393,13 @@ impl Codegen {
                     };
                     // 单一判据：st(0) 通道用 `fchs`（翻转 80-bit 的符号位，
                     // 不经 xmm0、不丢尾数）；否则才用 xorpd 翻符号位掩码。
-                    // `Imaginary` 参内型的符号位存在内存对里，不适用 st(0)。
-                    if self.float_in_st0(neg_ty) && !matches!(e_ty, Type::Imaginary(_)) {
+                    // `neg_ty` 已是去掉 Imaginary 包装后的内型：`_Imaginary long
+                    // double` 的内型是 LongDouble ⇒ float_in_st0 为真 ⇒ fchs。旧实现
+                    // 在此叠加 `!matches!(e_ty, Imaginary(_))` 把 imaginary 整体排除出
+                    // st(0) 通道, 于是 ild 走 xorpd: fldt 已把值压进 st(0), 却对陈旧
+                    // xmm0 翻符号位, st(0) 从不 fchs、函数直接 ret ⇒ 值错 + x87 栈
+                    // 泄漏。删除该例外: imaginary 的内型判词与实浮点完全同口径。
+                    if self.float_in_st0(neg_ty) {
                         self.emit_x87_chs();
                     } else {
                         match neg_ty {
