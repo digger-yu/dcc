@@ -148,9 +148,20 @@ pub(super) fn infer_binop_type(op: &BinOp, l: &Expr, r: &Expr) -> Type {
     // 类型选择 `gen_complex_binop`，类型一变复数加减就退化成标量浮点/整数运算。
     // 实测：`double _Complex add_dc(x,y){ return x + y; }` 在 -O2 得到 (1.0e9, 0)，
     // 而 gcc 与 -O0 都是 (6, 8)。
-    if matches!(&lt, Type::Complex(_) | Type::Imaginary(_))
-        || matches!(&rt, Type::Complex(_) | Type::Imaginary(_))
-    {
+    let is_ca = matches!(&lt, Type::Complex(_));
+    let is_cb = matches!(&rt, Type::Complex(_));
+    let is_ia = matches!(&lt, Type::Imaginary(_));
+    let is_ib = matches!(&rt, Type::Imaginary(_));
+    if is_ca || is_cb || is_ia || is_ib {
+        // 复数 / 虚数二元运算的结果 shape 必须与 parser.rs 的 binop 类型推导
+        // 保持一致: imag ± imag → imag; imag * imag → real (取负); imag / imag
+        // → real; real ± imag → complex; real * imag / real / imag → imag;
+        // 所有 complex_* 组合 → complex.
+        // 旧实现把 _Imaginary 与 _Complex 混为一谈一律返回 Complex(inner),
+        // 导致 O2 SSA→AST 重建后 `_Imaginary long double + _Imaginary long double`
+        // 被标注为 Complex(LongDouble), 消费端 `emit_operand_to_st0` 认为它
+        // 不在 st(0) 通道, 转而 emit_int_to_st0 → `fild qword [rsp]` 把
+        // faddp 算好的 st(0) 覆盖成 rax 里的垃圾 (REX 卫生门禁抓的就是它)。
         let real_part = |t: &Type| -> Type {
             match t {
                 Type::Complex(q) | Type::Imaginary(q) => q.base.clone(),
@@ -167,7 +178,30 @@ pub(super) fn infer_binop_type(op: &BinOp, l: &Expr, r: &Expr) -> Type {
             }
         };
         let base = if rank(&li) >= rank(&ri) { li } else { ri };
-        return Type::Complex(Box::new(QualType::new(base)));
+        if is_ca || is_cb {
+            // 任一侧复数: 结果恒复数 (C11 6.3.1.8p4)。
+            return Type::Complex(Box::new(QualType::new(base)));
+        }
+        // 两侧皆为虚数 / 一边虚一边实。
+        return match op {
+            BinOp::Add | BinOp::Sub if is_ia && is_ib => {
+                // imag ± imag → imag
+                Type::Imaginary(Box::new(QualType::new(base)))
+            }
+            BinOp::Mul | BinOp::Div if is_ia && is_ib => {
+                // imag * imag → real (负); imag / imag → real
+                base
+            }
+            BinOp::Add | BinOp::Sub => {
+                // real ± imag → complex
+                Type::Complex(Box::new(QualType::new(base)))
+            }
+            BinOp::Mul | BinOp::Div => {
+                // real * imag → imag; real / imag → imag
+                Type::Imaginary(Box::new(QualType::new(base)))
+            }
+            _ => base,
+        };
     }
     if matches!(&lt, Type::Float | Type::Double | Type::LongDouble)
         || matches!(&rt, Type::Float | Type::Double | Type::LongDouble)

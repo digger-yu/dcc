@@ -71,7 +71,13 @@ impl Codegen {
                     // 函数声明返回 long double 时, 即使表达式类型是 int/double
                     // (隐式转换), 也必须走 sret 写回 (调用方从 sret 槽读值).
                     let func_ret_is_ld = matches!(self.current_func_ret_ty, Type::LongDouble);
-                    if func_ret_is_ld && self.current_sret_offset.is_none() {
+                    // P4 V4: `_Imaginary long double` 与 `long double` 对称 — rvalue
+                    // 已在 st(0), 不需要任何中转 (emit_operand_to_st0 对 LD 是 no-op)。
+                    let func_ret_is_imag_ld = matches!(
+                        &self.current_func_ret_ty,
+                        Type::Imaginary(i) if matches!(&i.base, Type::LongDouble)
+                    );
+                    if (func_ret_is_ld || func_ret_is_imag_ld) && self.current_sret_offset.is_none() {
                         // D10-3（已简化）：SysV 规定标量 `long double` 返回值在 **st(0)**。
                         // 本后端 `long double` 的 rvalue 值通道已经就是 st(0)，所以
                         // 返回表达式本身就是 `fldt`/x87 运算的终点，**不需要任何中转**。

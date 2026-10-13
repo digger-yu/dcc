@@ -810,7 +810,7 @@ impl Codegen {
                         }
                     }
                 }
-            } else if matches!(effective_ty, Type::LongDouble) {
+            } else if matches!(effective_ty, Type::LongDouble) || matches!(effective_ty, Type::Imaginary(_)) {
                 // SysV: x87 类实参永远走 16 字节栈槽（不是寄存器保存区），内容是
                 // `fstpt` 形式的真 80-bit 编码。具名形参与变参**同一规则**：早先本处
                 // 限定“仅变参”，是因为误信了 i386 cdecl 的“具名 x87 参数走 st(0)”。

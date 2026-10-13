@@ -257,8 +257,9 @@ CLI 矩阵：`-fprofile-generate[=dir]` / `-fprofile-use=file` / `-fauto-profile
 |------|------|
 | 向量/SIMD | 全局 SIMD 向量复制 + 浮点 SIMD 标量逐元素 + 非 Ident 向量 rvalue + 同尺寸 vector/scalar、vector/vector、complex/vector cast；IR validator 对 binop/unop/cast 使用显式白名单，并用 E1007/E1008 测试拒绝不同尺寸或未枚举转换 |
 | 复数 | `_Complex` 算术完整支持 + 字面量 + `__real__` / `__imag__` 关键字；IR validator 对 binop/unop/cast 使用显式白名单，并固化 complex/vector 同尺寸边界与 complex→signed integer 枚举转换 |
-| `_Imaginary` 类型 | C99 `_Imaginary` 类型支持：`_Imaginary` / `_Imaginary float` / `_Imaginary double` / `_Imaginary long double`；字面量构造 (`3.0if`)；算术运算 (+/-/*/%)；与 `_Complex` 混合运算；x86_64 codegen 完整实现；IR validator 白名单覆盖 |
+| `_Imaginary` 类型 | C99 `_Imaginary` 类型支持：`_Imaginary` / `_Imaginary float` / `_Imaginary double` / `_Imaginary long double`；字面量构造 (`3.0if`)；算术运算 (+/-/*/%)；与 `_Complex` 混合运算；x86_64 codegen 完整实现；IR validator 白名单覆盖。`_Imaginary long double` 走 x87 st(0) 通道（与 `long double` 同通道），SSA→AST 重建与 parser.rs 二元类型推导一致：imag±imag→imag、imag*imag/imag→real、real±imag→complex、real*imag/real/imag→imag；`emit_operand_to_st0` 与 `float_in_st0` 单一真源识别 `Type::Imaginary(inner)` 并委托 `inner.base`，避免把 st(0) 已算好的结果用 `fild qword [rsp]` 覆盖 |
 | float 取模 | 软件 fmod = l - trunc(l/r) * r，零 libc 依赖；float validator 支持 `%` 并拒绝未枚举运算/转换 |
+| 帧偏移守门人与值通道统一 | x86_64 帧分配由 `SretRule` 枚举 + `reconcile_frame_demand` 扫描单一真源：位域 RMW 不再手写帧偏移、trampoline band 按深链向量深度动态预留（`vec_need = max_vec_chain_depth × slot 字节`，替代原固定 512）、Decl 初始化 save/restore 与 sret watermark 配对；双通道（GP/x87 st(0)）经 `emit_operand_to_st0` 单一交界入口，`float_in_st0` 单一谓词识别标量浮点与 `Type::Imaginary(inner)`；REX 卫生门禁 (`scripts/check_rex_hygiene.sh`) 对 678 个「夹具×档位」组合零违规 |
 | int128 `&&` / `||` | `or rdx, dst` 合并高 64 位后再 test |
 | 全局数组 RIP+SIB | `emit_load_global_indexed`：`[rip+disp32+idx*scale]` 单指令加载 |
 | 浮点字面量 rodata | `v.to_le_bytes()` 直接写入 `.rodata`，IEEE 754 精确 |

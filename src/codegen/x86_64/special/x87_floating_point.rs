@@ -31,16 +31,29 @@ impl Codegen {
     /// 「`long double` 局部槽低 8 字节 = f64 位型、高 8 字节 = 0，rvalue 走 xmm0-f64」。
     /// 判据只有两条来源，**不得在任何调用点再叠加局部条件**：
     /// - `long double` 恒为真：80-bit 扩展精度无法由 xmm0-f64 通道无损承载；
+    /// - `_Imaginary(inner)` 按 inner 通道：inner=LongDouble 时真（P4 V2），
+    ///   其余内型跟随标量浮点规则（SSE 默认走 xmm0）；
     /// - 其余浮点类型仅在 `-mno-sse` 目标下为真 —— 复用既有 x87 通路，
     ///   不新造第二套并行约定。
     pub fn float_in_st0(&self, ty: &Type) -> bool {
-        matches!(ty, Type::LongDouble) || !self.target.sse
+        match ty {
+            Type::LongDouble => true,
+            // P4: 虚数内型沿用其标量通道。IL D 已在 gen_imaginary_binop_ld
+            // 与 gen_unary 中把 rvalue 放到 st(0), 不应被当成 int 经 fild 重写。
+            Type::Imaginary(inner) => self.float_in_st0(&inner.base),
+            _ => !self.target.sse,
+        }
     }
 
     /// 是否为“标量浮点”类型（值走 xmm/st(0) 而非 GP 寄存器）。
     /// 单一判据：帧访问出口用它决定“要不要把 rax 里的整数值搬回 dst”。
     pub fn is_scalar_float_channel_ty(&self, ty: &Type) -> bool {
-        matches!(ty, Type::Float | Type::Double | Type::LongDouble)
+        match ty {
+            Type::Float | Type::Double | Type::LongDouble => true,
+            // P4 V4: imaginary 内型按内型判。
+            Type::Imaginary(inner) => self.is_scalar_float_channel_ty(&inner.base),
+            _ => false,
+        }
     }
 
     /// x87 内存访存指令的 `[base + disp32]` 形态（fld/fstp/fild 通用）。
