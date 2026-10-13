@@ -306,6 +306,17 @@ const CASES: &[&str] = &[
     "long_double",
     "atomic_basic",
     "func_ptr_call",
+    // --- P12-F 追加: 真实 torture 回归现场 (独立 oracle) ---
+    "loop-8",
+    "cmpsf-1",
+    "bitfld-3",
+    "pr55750",
+    "20040705-1",
+    "20040629-1",
+    "pr105613",
+    "pr28982a",
+    "pr28982b",
+    "pr70460",
 ];
 
 #[test]
