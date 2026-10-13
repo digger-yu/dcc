@@ -100,17 +100,25 @@ impl Codegen {
     /// 指令记录统一发射入口 (x86_64 变长, 字节原样直写).
     #[track_caller]
     pub(crate) fn emit_insn(&mut self, insn: &crate::codegen::x86_64::insn::Insn) -> bool {
-        // 临时统计: DCC_GAS_STATS=1 时按 caller 统计发射频率.
+        // 临时统计: DCC_GAS_STATS=1 时按 caller 统计发射频率 + gas_text 覆盖率.
         if std::env::var_os("DCC_GAS_STATS").is_some() {
             let loc = std::panic::Location::caller();
             let key = format!("{}:{}", loc.file(), loc.line());
-            self.emit_insn_stats
-                .entry(key)
-                .and_modify(|c| *c += 1)
-                .or_insert(1);
             let has_gas = insn.gas_text.is_some();
             self.emit_insn_gas_hits
                 .entry(has_gas)
+                .and_modify(|c| *c += 1)
+                .or_insert(1);
+            // DCC_GAS_STATS=2: 只统计 has_gas=false 的调用点 (fallback 来源).
+            if !has_gas {
+                let miss_key = format!("MISS {key}");
+                self.emit_insn_stats
+                    .entry(miss_key)
+                    .and_modify(|c| *c += 1)
+                    .or_insert(1);
+            }
+            self.emit_insn_stats
+                .entry(key)
                 .and_modify(|c| *c += 1)
                 .or_insert(1);
         }
@@ -121,7 +129,17 @@ impl Codegen {
                 // 不改变发射字节 —— 只是多写一份 (pc, insn) 到 Vec, 对 .text 段零影响.
                 let pc = self.code.len() as u64;
                 self.emit(&bytes);
-                self.insn_records.push((pc, insn.clone()));
+                // P9 fallback 清零: gas_text 为 None 时, 现场用 op.render() 兜底填充.
+                // 这样 -S 渲染器 100% 走 record 直出, 不再需要 disasm_one 反推.
+                // 只补 /* raw */ 这种占位文本: 真正带 mnemonic 的 Raw (nop 等) 会出真实助记符.
+                let mut rec = insn.clone();
+                if rec.gas_text.is_none() {
+                    let r = rec.op.render();
+                    if !r.is_empty() && !r.starts_with("/* raw */") {
+                        rec.gas_text = Some(r);
+                    }
+                }
+                self.insn_records.push((pc, rec));
                 true
             },
             None => false,
