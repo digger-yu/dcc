@@ -41,8 +41,10 @@ DCC="${DCC:-target/release/dcc}"
 # 尚未下沉到交叉后端, 拿来当门禁会刷屏红. 门禁的作用是"已下沉的部分",
 # 所以这里只跑**显式列举的 fixture**, 允许空 (空时输出 "全部 skip", 由 G5 显式打印).
 #
-# 想扩大 corpus: CORPUS=tests/fixtures/c scripts/check_asm_text_parity.sh
-CORPUS="${CORPUS:-}"
+# 默认 corpus: tests/fixtures/asm/parity —— 专门为本门禁下沉的"5 后端都能 -c/-S"
+# 的纯 C fixture (无 stdio 头、无 arch 内联 asm、无未支持 IR). 想临时扩大:
+#   CORPUS=tests/fixtures/c scripts/check_asm_text_parity.sh
+CORPUS="${CORPUS:-tests/fixtures/asm/parity}"
 # 5 个声明了 Feature::GasTextOutput 的后端 (见 docs/backend_feature_matrix.md).
 # mips64 故意不在此列 —— 无 mips64-as, 无 parity 可比对.
 ARCHES="${ARCHES:-x86_64-linux-gnu aarch64-linux-gnu arm-linux-gnueabi mips-linux-gnu riscv64-linux-gnu}"
@@ -77,20 +79,33 @@ assembler_for() { # $1=triple
     esac
 }
 
+# triple → <triple>-objcopy 命令名; host 归一成 "objcopy".
+# 必须用 triple 版: host objcopy 不认交叉 ELF (aarch64/arm/mips/riscv64 都会
+# "Unable to recognise the format"), 导致 .text 提取为空.
+objcopy_for() { # $1=triple
+    case "$1" in
+        x86_64-linux-gnu) echo "objcopy" ;;
+        aarch64-linux-gnu) echo "aarch64-linux-gnu-objcopy" ;;
+        arm-linux-gnueabi) echo "arm-linux-gnueabi-objcopy" ;;
+        mips-linux-gnu)    echo "mips-linux-gnu-objcopy" ;;
+        riscv64-linux-gnu) echo "riscv64-linux-gnu-objcopy" ;;
+        *) echo "" ;;
+    esac
+}
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-# 提取 .text 段的字节并算 sha256 —— 用 objcopy 而不是 readelf -x, 因为
-# readelf 输出带地址前缀, 每次 layout 抖动会让 sha256 变.
-#   $1=.o path  $2=assembler objdump prefix (可选, 交叉用)
+# 提取 .text 段的字节并算 sha256 —— 用 <triple>-objcopy 而不是 readelf -x,
+# 因为 readelf 输出带地址前缀, 每次 layout 抖动会让 sha256 变.
+#   $1=.o path  $2=objcopy cmd
 # 输出: "<sha256>" 或空串 (失败/无 .text).
-text_hash() { # $1=obj
-    local obj="$1"
-    local bin
-    if ! command -v objcopy >/dev/null 2>&1; then
+text_hash() { # $1=obj  $2=objcopy
+    local obj="$1" oc="$2"
+    if [ -z "$oc" ] || ! command -v "$oc" >/dev/null 2>&1; then
         return 0
     fi
-    bin=$(objcopy -O binary --only-section=.text "$obj" /dev/stdout 2>/dev/null | sha256sum | cut -d' ' -f1) || bin=""
+    bin=$("$oc" -O binary --only-section=.text "$obj" /dev/stdout 2>/dev/null | sha256sum | cut -d' ' -f1) || bin=""
     printf '%s' "$bin"
 }
 
@@ -102,6 +117,7 @@ for src in "${SOURCES[@]}"; do
     name=$(basename "$src")
     for arch in $ARCHES; do
         as=$(assembler_for "$arch")
+        oc=$(objcopy_for "$arch")
         if [ -z "$as" ]; then
             echo "ASM-PARITY-SKIP: $name | $arch (无对应 <triple>-as 映射)"
             skipped=$((skipped + 1))
@@ -109,6 +125,11 @@ for src in "${SOURCES[@]}"; do
         fi
         if ! command -v "$as" >/dev/null 2>&1; then
             echo "ASM-PARITY-SKIP: $name | $arch (本机缺 $as)"
+            skipped=$((skipped + 1))
+            continue
+        fi
+        if ! command -v "$oc" >/dev/null 2>&1; then
+            echo "ASM-PARITY-SKIP: $name | $arch (本机缺 $oc)"
             skipped=$((skipped + 1))
             continue
         fi
@@ -138,8 +159,8 @@ for src in "${SOURCES[@]}"; do
             continue
         fi
 
-        ha=$(text_hash "$o_a")
-        hb=$(text_hash "$o_b")
+        ha=$(text_hash "$o_a" "$oc")
+        hb=$(text_hash "$o_b" "$oc")
         if [ -z "$ha" ] || [ -z "$hb" ]; then
             echo "PARITY-FAIL $name | $arch: .text 提取失败 (ha='$ha' hb='$hb')"
             bad=$((bad + 1))

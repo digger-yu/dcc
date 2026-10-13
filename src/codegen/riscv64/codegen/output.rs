@@ -67,7 +67,8 @@ impl Riscv64Codegen {
                 }
             }
             if let Some(size) = self.func_sizes.get(&func.name) {
-                out.push_str(&format!("\t// IR lowering, {} bytes\n", size));
+                // RISC-V GAS 行注释是 `#` 不是 `//` (后者是 C++ 注释, 被 as 当 junk).
+                out.push_str(&format!("\t# IR lowering, {} bytes\n", size));
             }
             out.push_str("\tret\n");
         }
