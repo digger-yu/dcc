@@ -89,7 +89,10 @@ impl Codegen {
     /// 求值落点的持有记录（`eval_holding`）以「又发了一条指令」为失效点，
     /// 多一个出口就等于那条事实会静默变陈旧。判据：
     /// `.work_tmp/p12_base/check_eval_base_single_source.sh`。
-    pub fn emit(&mut self, b: &[u8]) {
+    ///
+    /// P9 Stage E: 私有到 crate —— 外部模块 (mem/abi 子模块) 仍可访问,
+    /// 但不再跨 crate 暴露 (dcc 目前是单 crate, 语义等价于 `pub`).
+    pub(crate) fn emit(&mut self, b: &[u8]) {
         self.code.extend_from_slice(b);
         self.eval_holding = None;
     }
