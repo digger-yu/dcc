@@ -115,7 +115,9 @@ impl Aarch64Codegen {
     }
 
     pub(crate) fn patch_b26(&mut self, at: u64, target: u64) {
-        let pc = at + 4;
+        // AArch64 B/BL PC-relative 基准是指令自身地址 (at), 无 ARM32 的 PC+8 流水线偏移。
+        // objdump 实证: b at=0x1000 target=0x1018, imm26=6 = (0x18)>>2, 即 (target - at)>>2。
+        let pc = at;
         let imm26 = ((target as i64 - pc as i64) >> 2) as u32 & 0x03ff_ffff;
         let insn = 0x1400_0000u32 | imm26;
         let off = at as usize;
@@ -125,7 +127,7 @@ impl Aarch64Codegen {
     }
 
     pub(crate) fn patch_cbz(&mut self, at: u64, target: u64) {
-        let pc = at + 4;
+        let pc = at;
         let imm19 = ((target as i64 - pc as i64) >> 2) as u32 & 0x7ffff;
         let insn = 0x3400_0000u32 | imm19;
         let off = at as usize;

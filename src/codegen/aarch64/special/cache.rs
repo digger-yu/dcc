@@ -114,7 +114,8 @@ impl Aarch64Codegen {
 
     /// 修补条件分支偏移
     pub(crate) fn patch_bcond(&mut self, at: u64, target: u64, cond: u8) {
-        let pc = at + 4;
+        // AArch64 B.cond PC-relative 基准是指令自身地址 (at), 与 B/BL/CBZ 一致。
+        let pc = at;
         let imm19 = (((target as i64 - pc as i64) >> 2) as u32) & 0x7ffff;
         let insn = 0x54000000u32 | imm19 | (cond as u32 & 0xf);
         let off = at as usize;

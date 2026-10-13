@@ -36,7 +36,20 @@ G11 修复进展:
 - **SVE 五条 (whilelt/fadd/add/ld1w/st1w) 未修**: 基址骨架缺
   size[31:30]/Pg[11:10]/M[9] 字段, 与 objdump 差距大, 属"简化子集硬
   编码"。按红线约束, 不在待删除的 match 链上继续堆操作数解析; 走
-  P1-1/P1-2/P1-3 统一管线落地后再重写。
+  P1-1/P1-2/P1-3 统一管线落地后再重写。objdump 对照 (2026-10-14,
+  `-march=armv8-a+sve`):
+
+  | 助记符 (输入) | mini_asm 当前输出 | objdump 真值 | 差异 |
+  |---|---|---|---|
+  | whilelt p0.b, x0, x1 | `0x2528a420` | `0x25211400` | 骨架完全错 |
+  | fadd z0.s, z1.s, z2.s | `0x65020020` | `0x65820020` | bit22 size 字段错 |
+  | add z0.s, z1.s, z2.s | `0x45020020` | `0x04a20020` | 骨架完全错 |
+  | ld1w z0.s, p0/z, [x1] | `0x85800020` | `0xa540a020` | 骨架完全错 |
+  | st1w z0.s, p0, [x1] | `0xe5800020` | `0xe540e020` | 骨架完全错 |
+
+  结论: 这 5 条 SVE 内联汇编**产出的字节无法被真实 CPU 正确译码**, 但内
+  联汇编路径要求用户手写 SVE 形态, 现有 C 代码不触发; 不接 P1 统一管线
+  前不在 match 链上继续修。
 
 触发条件: 内联汇编写出 `ld1 v0.16b, x1`、SVE `fadd z0.s, z1.s, z2.s`
 等对应形态即命中, 产字节但语义可能错。
@@ -73,30 +86,38 @@ G11 修复: 入队侧 `ops.rs` 改为统一调用 `emit_adr_large(0, target)`
 `emit_adr_placeholder(0)` + `R_AARCH64_ADR_PREL_LO21` 重定位, 由链接器
 回填, 不经过 `patch_adr`; 既有测试地址模型都很小, 无 >1MiB 距离用例。
 
-## A.14 PC 基准三种写法矛盾 (不写成定论)
+## A.14 PC 基准三种写法矛盾 (已修复于 G11, objdump 实证)
 
 位置 (同一 `at: u64` 参数, 三种 pc 基准):
 
-| pc 基准 | 符号 | 位置 |
-| --- | --- | --- |
-| `at` | `patch_bl` | patch.rs:12 |
-| `at` | `patch_adr` | patch.rs:58 |
-| `at + 4` | `patch_b26` | prologue.rs:118 |
-| `at + 4` | `patch_cbz` | prologue.rs:128 |
-| `at + 4` | `patch_bcond` | cache.rs:117 |
-| `at + 4` | `patch_cbnz` | atomic_insn.rs:106 |
-| `at + 8` | `patch_ldr_u32` | patch.rs:43 |
+| pc 基准 | 符号 | 位置 | objdump 实证结论 |
+| --- | --- | --- | --- |
+| `at` | `patch_bl` | patch.rs:12 | 正确 (AArch64 硬件基准) |
+| `at` | `patch_adr` | patch.rs:62 | 正确 |
+| `at + 4` → `at` | `patch_b26` | prologue.rs:119 | **原 at+4 错, 已改为 at** |
+| `at + 4` → `at` | `patch_cbz` | prologue.rs:130 | **原 at+4 错, 已改为 at** |
+| `at + 4` → `at` | `patch_bcond` | cache.rs:118 | **原 at+4 错, 已改为 at** |
+| `at + 4` → `at` | `patch_cbnz` | atomic_insn.rs:107 | **原 at+4 错, 已改为 at** |
+| `at + 8` | `patch_ldr_u32` | patch.rs:43 | 正确 (ldr literal 后紧跟 b +8 双 slot, 独立理由) |
 
-现象: AArch64 所有 PC-relative 分支均以指令自身地址为基准 (无流水线
-偏移; patch.rs:9-11 注释自述 "at+4 是 ARM32 的 PC+8 流水线偏移")。
-`at` 与 `at+4` 两组在同一 ISA 下不可能都对 — 若 `at` 正确, 则
-b26/cbz/bcond/cbnz 四条主通路全部把目标算偏后 4 字节; 反之则
-patch_bl/patch_adr 偏前 4 字节。`patch_ldr_u32` 的 `at+8` 有独立理由
-(ldr literal 后紧跟 `b +8` 两条 slot 布局), 不参与矛盾。
+objdump 实证 (2026-10-14):
+```
+.org 0x1000
+b  target      ; at=0x1000 target=0x1018 → 14000006, imm26=6 = (0x18)>>2 = (target-at)>>2
+bl target      ; at=0x1004 target=0x1018 → 94000005, imm26=5 = (0x14)>>2 = (target-at)>>2
+cbz x0,target  ; at=0x1008 target=0x1018 → b4000080, imm19=4 = (0x10)>>2 = (target-at)>>2
+```
+GNU as 产出的机器码证明 AArch64 所有 PC-relative 分支均以**指令自身地址
+`at`** 为基准, 无 ARM32 的 PC+8 流水线偏移。原 at+4 写法把 imm 多减了 1,
+导致 ET_EXEC 模式下分支目标偏前 4 字节。
 
-调用面: `self.b(` / `emit_bcond(` / `emit_cbnz(` 合计约 64 处调用点
-(6 个文件)。若整组都错, aarch64 分支将完全不可用, 与编译器能产出可
-运行程序矛盾 — 说明至少有一组约定是对的, 但静态读码无法收口是哪组。
+**为何此前未暴露**: dcc 默认产出 ET_REL (relocatable) 目标文件, branch 指
+令的 imm 占位由 R_AARCH64_JUMP26 / R_AARCH64_CONDBR19 重定位项链接器回填,
+**不经过 dcc 自己的 patch_b26/patch_cbz PC 基准计算**; 只有 ET_EXEC 直产
+物模式才走 dcc 自己的 patch, 而该模式无测试覆盖。
+
+修复: `patch_b26/patch_cbz/patch_bcond/patch_cbnz` 的 `pc = at + 4` 统一改
+为 `pc = at`。`patch_bl/patch_adr/patch_ldr_u32` 基准本就正确, 未动。
 
 为何未暴露: 单测只断言机器码字段非空 / 冻结快照, 没有 runtime 执行
 跳转验证。

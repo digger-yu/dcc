@@ -103,7 +103,7 @@ impl Aarch64Codegen {
 
     /// 修补 CBNZ 偏移
     pub(crate) fn patch_cbnz(&mut self, at: u64, target: u64, rt: u8) {
-        let pc = at + 4;
+        let pc = at;
         let imm19 = (((target as i64 - pc as i64) >> 2) as u32) & 0x7ffff;
         let insn = 0x35000000u32 | (imm19 << 5) | (rt as u32 & 0x1f);
         let off = at as usize;
