@@ -87,6 +87,31 @@ impl AsmIsa {
             _ => &[],
         }
     }
+
+    /// 降级粒度 (P7 基线 6 的 ISA 属性):
+    ///   * 定长 ISA (aarch64/A32 arm/mips/x86_64) 逐语句分流,
+    ///     已知行仍直发字节、未知行单独透传;
+    ///   * 变长 ISA (riscv64 含 16/32 位压缩指令) 必须整 TU 分流,
+    ///     否则两条路径在同一函数内的 PC 偏移对不齐。
+    /// x86_64 虽变长但其 `-S` 走自研完整汇编器、不降级, 返回 WholeTu
+    /// 只是把"整 TU 渲染"这一事实显式化, 不影响直发路径。
+    pub fn degrade_granularity(self) -> DegradeGranularity {
+        match self {
+            AsmIsa::AArch64 | AsmIsa::Arm | AsmIsa::Mips32 | AsmIsa::Mips64 => {
+                DegradeGranularity::PerStatement
+            }
+            AsmIsa::RiscV64 | AsmIsa::RiscV32 | AsmIsa::X86_64 => DegradeGranularity::WholeTu,
+        }
+    }
+}
+
+/// 降级分流粒度 (定长 vs 变长 ISA 的结构性差异)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DegradeGranularity {
+    /// 已知行直发字节, 未知行单独透传 (定长 ISA)。
+    PerStatement,
+    /// 整 TU 改走 GAS 文本 (变长 ISA 或 x86_64 自研汇编器)。
+    WholeTu,
 }
 
 /// 一行 asm 源文本的词法分类。
@@ -742,6 +767,21 @@ mod tests {
         // AsmIsa 是枚举, 不存在 `arch: &str` 拼错导致全 TU 落入 `_ => None` 的路径
         assert!(!AsmIsa::X86_64.uses_mini_asm());
         assert_eq!(AsmIsa::Mips64.mini_asm_key(), Some("mips"));
+    }
+
+    #[test]
+    fn degrade_granularity_is_length_class_anchored() {
+        use DegradeGranularity::*;
+        // 定长 ISA: 逐语句分流
+        assert_eq!(AsmIsa::AArch64.degrade_granularity(), PerStatement);
+        assert_eq!(AsmIsa::Arm.degrade_granularity(), PerStatement);
+        assert_eq!(AsmIsa::Mips32.degrade_granularity(), PerStatement);
+        assert_eq!(AsmIsa::Mips64.degrade_granularity(), PerStatement);
+        // 变长 ISA (RISC-V 含 16/32 位压缩): 整 TU 分流
+        assert_eq!(AsmIsa::RiscV64.degrade_granularity(), WholeTu);
+        assert_eq!(AsmIsa::RiscV32.degrade_granularity(), WholeTu);
+        // x86_64 自研完整汇编器, 不存在"半分流"; 事实就是整 TU 渲染
+        assert_eq!(AsmIsa::X86_64.degrade_granularity(), WholeTu);
     }
 
     #[test]
