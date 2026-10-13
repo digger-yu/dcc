@@ -48,8 +48,7 @@ jobs:
         run: cargo build --release
 
       - name: Run asm text parity gate
-        # 空 corpus (默认): 门禁显式打印 skip, 不报错. 显式 CORPUS= 传入
-        # 时才真跑 parity. 这样门禁先以"结构上线"的形式接入 CI,
-        # 等后续下沉了完整 fixture 再逐步扩大 corpus.
+        # 默认 corpus=tests/fixtures/asm/parity (10 个纯 C fixture, 5 后端都能跑).
+        # 脚本在缺 triple-as/objcopy 时显式 ASM-PARITY-SKIP (G5 反假绿).
         run: |
           bash scripts/check_asm_text_parity.sh
