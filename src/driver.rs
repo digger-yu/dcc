@@ -1129,7 +1129,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
             }
         }
     }
-    let out = write_emit_output(&cfg.output, &emitted, cfg.emit_asm)?;
+    let out = write_emit_output(&cfg.output, &emitted, cfg.emit_asm, &cfg)?;
 
     // 自举回归对比: -c/--bootstrap-compare=<ref.o> 模式.
     // 编译结束后, 把当前 .o 与 ref.o 做三层对比 (byte / struct /
@@ -2253,14 +2253,37 @@ fn write_module_interface(
 ///      报 bad ELF magic —— 所以输出名按**实际产物形态**改为同名 `.s`;
 ///   2. 0755 只适用于真正产出可执行文件 —— 旧判据用 CLI 标志, 一降级就会给
 ///      文本文件加执行位。
+///
+/// P7-3: 当请求 `-c` (relocatable) 且后端能产可汇编的 GAS 文本 (`Emitted::Text`
+/// 且后端有 `GasTextOutput`) 时, 把文本喂给目标对应的 `<triple>-as` 汇出 `.o`,
+/// 而不是退化为写 `.s`。`cfg.target` 决定用哪个交叉汇编器; `-S` 路径不受影响
+/// (用户就要文本)。
 /// 返回最终写入路径 (调用方的 bootstrap 对比需要它)。
 fn write_emit_output(
     requested: &std::path::Path,
     emitted: &crate::codegen::shared::asm_source::Emitted,
     emit_asm: bool,
+    cfg: &Config,
 ) -> Result<std::path::PathBuf, Vec<Diagnostic>> {
     use std::io::Write;
-    // 名字修正只针对“请求的是目标文件、实际发的是文本”这一组合;
+    // -c 且降级到文本: 尝试用目标 as 汇出 .o, 否则退化为写 .s (旧行为)。
+    if let (false, crate::codegen::shared::asm_source::Emitted::Text(text)) = (emit_asm, emitted)
+    {
+        let wants_object = requested
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e == "o" || e == "obj")
+            .unwrap_or(false);
+        if wants_object {
+            // P7-3: 不允许"静默跳过" —— as 缺失/失败必须作为诊断上抛。
+            // 后端若没声明 GasTextOutput, codegen 侧已 E0312; 走到这里说明
+            // 能力声明与本机工具链不一致 (如交叉 as 被卸), 直接报错。
+            let path = assemble_gas_text(text, requested, cfg)?;
+            eprintln!("dcc: wrote {}", path.display());
+            return Ok(path);
+        }
+    }
+    // 名字修正只针对"请求的是目标文件、实际发的是文本"这一组合;
     // -S 本身就要文本, 不改名。
     let out = if emitted.is_text() && !emit_asm {
         requested.with_extension("s")
@@ -2290,6 +2313,89 @@ fn write_emit_output(
     }
     eprintln!("dcc: wrote {}", out.display());
     Ok(out)
+}
+
+/// 把降级得到的 GAS 文本交给目标对应 `<triple>-as` 汇编成 `.o`。
+///
+/// 复用 `run_assembler_driver` 的 as 调用骨架, 但按 `cfg.target` 选择前缀:
+///   * host x86_64: 直接 `as` (本机 `as` 就是 x86_64)
+///   * aarch64-linux-gnu: `aarch64-linux-gnu-as`
+///   * riscv64-linux-gnu: `riscv64-linux-gnu-as`
+///   * arm-linux-gnueabi: `arm-linux-gnueabi-as`
+///   * mips-linux-gnu: `mips-linux-gnu-as` (o32 大端)
+///   * mips64-linux-gnu: 不可用 (本机无 mips64-as) —— 调用方必须已用
+///     `Feature::GasTextOutput` 闸门挡住, 走到这里就是诊断级错误。
+fn assemble_gas_text(
+    text: &str,
+    out: &std::path::Path,
+    cfg: &Config,
+) -> Result<std::path::PathBuf, Vec<Diagnostic>> {
+    let cmd_name = assembler_cmd_name(&cfg.target);
+    // 写临时 .s
+    let tmp = std::env::temp_dir().join(format!("dcc-as-{}-{}.s", std::process::id(), out.file_name().unwrap_or_default().to_string_lossy()));
+    fs::write(&tmp, text.as_bytes()).map_err(|e| {
+        vec![Diagnostic::err(
+            "E0101",
+            format!("cannot write temp asm {}: {}", tmp.display(), e),
+            crate::diagnostics::Span::point("", 0, 0),
+        )]
+    })?;
+    let status = Command::new(&cmd_name)
+        .arg("-o")
+        .arg(out)
+        .arg(&tmp)
+        .output()
+        .map_err(|e| {
+            vec![Diagnostic::err(
+                "E0312",
+                format!(
+                    "--asm-fallback=gas requires '{cmd_name}', but it could not be \
+                     invoked: {e}. Install the binutils package for target '{}' \
+                     or use --asm-fallback=error",
+                    cfg.target.as_str()
+                ),
+                crate::diagnostics::Span::point("", 0, 0),
+            )]
+        })?;
+    let _ = fs::remove_file(&tmp);
+    if !status.status.success() {
+        let stderr = String::from_utf8_lossy(&status.stderr);
+        let stdout = String::from_utf8_lossy(&status.stdout);
+        let mut msg = format!("{cmd_name} failed");
+        for chunk in [stderr.trim_end(), stdout.trim_end()] {
+            if !chunk.is_empty() {
+                msg.push_str(": ");
+                msg.push_str(chunk);
+            }
+        }
+        return Err(vec![Diagnostic::err(
+            "E0102",
+            msg,
+            crate::diagnostics::Span::point("", 0, 0),
+        )]);
+    }
+    Ok(out.to_path_buf())
+}
+
+/// 把 `cfg.target` 翻译成本机可执行的 `<triple>-as` 命令名。
+/// 找不到对应交叉工具链的后端应已在 codegen 侧被 `GasTextOutput` 闸门挡住;
+/// 若漏过, 这里给出与 host `as` 一致的名字, 让调用以"找不到命令"的形式失败。
+fn assembler_cmd_name(t: &crate::cli::TargetTriple) -> String {
+    use crate::cli::{Arch, Os};
+    // host: 直接 as (run_assembler_driver 的旧行为)
+    let host = crate::cli::TargetTriple::host();
+    if t.arch == host.arch && t.os == host.os {
+        return "as".to_string();
+    }
+    match (t.arch, t.os) {
+        (Arch::AArch64, Os::Linux) => "aarch64-linux-gnu-as".to_string(),
+        (Arch::RiscV64, Os::Linux) => "riscv64-linux-gnu-as".to_string(),
+        (Arch::Arm, Os::Linux) => "arm-linux-gnueabi-as".to_string(),
+        (Arch::Mips, Os::Linux) => "mips-linux-gnu-as".to_string(),
+        (Arch::Mips64, Os::Linux) => "mips64-linux-gnu-as".to_string(),
+        // 未覆盖组合: 退回 as, 让系统报错而不是静默成功
+        _ => "as".to_string(),
+    }
 }
 
 fn io_diag(what: &str, detail: &str) -> Vec<Diagnostic> {
@@ -2503,7 +2609,7 @@ fn emit_native_program(
             }
         }
     }
-    let out = write_emit_output(&cfg.output, &emitted, cfg.emit_asm)?;
+    let out = write_emit_output(&cfg.output, &emitted, cfg.emit_asm, &cfg)?;
 
     // 自举回归对比 (与 run() 一致)
     if let Some(ref_path) = cfg.bootstrap_compare.as_ref() {
