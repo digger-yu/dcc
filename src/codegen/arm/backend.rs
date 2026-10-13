@@ -17,7 +17,8 @@ impl Backend for ArmCodegen {
     }
 
     fn features(&self) -> FeatureSet {
-        FeatureSet::tier2_cross()
+        // 2026-10 本机具备 arm-linux-gnueabi-as; arm 是 A32 定长 ISA (PerStatement)。
+        FeatureSet::tier2_cross().with_gas_text_output()
     }
 
     fn compile(&mut self, input: &CompileInput<'_>) -> Result<CommonImage, Vec<Diagnostic>> {

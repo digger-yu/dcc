@@ -190,6 +190,10 @@ impl FeatureSet {
                 Feature::CfiUnwind,
                 Feature::ObjectFormat(ObjectFmt::Elf),
                 Feature::Dwarf(4),
+                // 2026-10 本机已具备 aarch64-linux-gnu-as:
+                // -S 渲染由 shared/asm_engine 完成, 透传行逐字来自同一次 analyze,
+                // 因此产出的 .s 可被真 GAS 接受 (G4/G5 反假绿由门禁脚本钉住)。
+                Feature::GasTextOutput,
             ],
         }
     }
@@ -219,6 +223,9 @@ impl FeatureSet {
                 Feature::ObjectFormat(ObjectFmt::Elf),
                 Feature::Dwarf(4),
                 Feature::RiscVBorrowedRegs,
+                // 2026-10 本机具备 riscv64-linux-gnu-as; riscv64 是变长 ISA,
+                // 降级粒度为 WholeTu (见 AsmIsa::degrade_granularity)。
+                Feature::GasTextOutput,
             ],
         }
     }
@@ -259,6 +266,16 @@ impl FeatureSet {
                 Feature::Dwarf(4),
             ],
         }
+    }
+
+    /// 为 tier2_cross 追加 `GasTextOutput`。
+    ///
+    /// 三个 tier2 后端对该能力的可达性**不一致** (本机工具链:
+    /// `arm-linux-gnueabi-as` 与 `mips-linux-gnu-as` 齐备, 缺 mips64),
+    /// 因此不放进共用 ctor —— 那会让 mips64 谎报能力。
+    pub fn with_gas_text_output(mut self) -> Self {
+        self.features.push(Feature::GasTextOutput);
+        self
     }
 }
 

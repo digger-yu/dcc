@@ -2386,7 +2386,9 @@ mod backend {
             Arch::Mips
         }
         fn features(&self) -> FeatureSet {
-            FeatureSet::tier2_cross()
+            // 2026-10 本机具备 mips-linux-gnu-as (o32, 大端); mips 是定长 ISA (PerStatement)。
+            // mips64 后端不具备 (见 mips64.rs 的 features())。
+            FeatureSet::tier2_cross().with_gas_text_output()
         }
         fn compile(&mut self, input: &CompileInput<'_>) -> Result<CommonImage, Vec<Diagnostic>> {
             self.set_source_name(&input.opts.source_name);
