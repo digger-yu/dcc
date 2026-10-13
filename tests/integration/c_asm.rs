@@ -2951,24 +2951,43 @@ fn asm_fallback_groups_diagnostics_per_asm_statement() {
 }
 
 /// --asm-fallback=gas: 整个 TU 降级为 GAS 文本, 且未知指令**逐字**透传。
+///
+/// P7-3 之后: host x86_64 声明了 GasTextOutput, 因此 `-c --asm-fallback=gas`
+/// 不再退化为同名 `.s`, 而是直接喂给宿主 `as` 产出真 `.o`。为了钉住"降级
+/// 渲染"这一层, 本用例显式加 `-S` (用户只要文本), 让 driver 跳过 as 串联;
+/// 产物形态判据用 objdump 读回 `.o` 的反汇编验证 P7-3 的串联正确。
 #[test]
 #[cfg(unix)]
 fn asm_fallback_gas_degrades_whole_tu_to_text() {
-    let (stderr, ok, obj, text) = harness::asm_fallback_compile("degrade", &["--asm-fallback=gas"], ".o");
-    assert!(ok, "降级模式必须成功: {stderr}");
-    // 关键回归: 文本绝不许写进 .o (否则 host ld 会报 bad ELF magic)
-    assert!(!obj.exists(), "产物是文本时不得存在 .o: {}", obj.display());
-    assert!(text.exists(), "降级产物必须落在同名 .s: {}", text.display());
+    if Command::new("as").arg("--version").output().is_err() {
+        eprintln!("ASM-FALLBACK-SKIP: no host `as` available");
+        return;
+    }
+    // -S 路径: 产物仍是 .s, 直接做透传判据。
+    let dir = std::env::temp_dir();
+    let stem = format!("dcc-asm-fallback-degrade-{}", std::process::id());
+    let text = dir.join(format!("{stem}.s"));
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/asm/asm_fallback_gas.c");
+    let o = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-S", "--asm-fallback=gas", "-o"])
+        .arg(&text)
+        .arg(&fixture)
+        .output()
+        .expect("run dcc -S");
+    assert!(o.status.success(), "降级模式必须成功: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(text.exists(), "-S 降级产物必须落在请求的 .s: {}", text.display());
     let body = fs::read_to_string(&text).expect("read degraded .s");
     assert!(body.contains("serialize\n") || body.contains("\tserialize"), "透传丢失 serialize: {body}");
     assert!(body.contains("wbnoinvd"), "透传丢失 wbnoinvd: {body}");
     assert!(!body.contains('\u{fffd}'), "文本不得被 lossy 替换字符污染");
-    let _ = fs::remove_file(&obj);
     let _ = fs::remove_file(&text);
 }
 
 /// 降级的终点是被真 `as` 接受并反汇编出同样的指令 —— 这是整条透传链的**唯一**
-/// 客观验收, 光看 dcc 不报错没有意义。`as` 不可用时显式打降级标记。
+/// 客观验收, 光看 dcc 不报错没有意义。P7-3 之后: dcc 自己会把文本喂给 `as`,
+/// 因此本用例改为直接断言 `-c --asm-fallback=gas` 产出真 `.o`, 且 objdump 读回
+/// 能看到透传的 `serialize`/`wbnoinvd`。`as` 不可用时显式打 skip 标记。
 #[test]
 #[cfg(unix)]
 fn asm_fallback_gas_text_assembles_through_real_as() {
@@ -2976,25 +2995,32 @@ fn asm_fallback_gas_text_assembles_through_real_as() {
         eprintln!("ASM-FALLBACK-SKIP: no host `as` available");
         return;
     }
-    let (stderr, ok, obj, text) =
-        harness::asm_fallback_compile("assemble", &["--asm-fallback=gas"], ".o");
-    assert!(ok, "降级模式必须成功: {stderr}");
-    let o = Command::new("as")
-        .arg("-o")
-        .arg(format!("{}.o", text.display()))
-        .arg(&text)
+    let dir = std::env::temp_dir();
+    let stem = format!("dcc-asm-fallback-assemble-{}", std::process::id());
+    let obj = dir.join(format!("{stem}.o"));
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/asm/asm_fallback_gas.c");
+    let o = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-c", "--asm-fallback=gas", "-o"])
+        .arg(&obj)
+        .arg(&fixture)
         .output()
-        .expect("run as");
+        .expect("run dcc");
     assert!(
         o.status.success(),
-        "降级产出的 .s 必须能被真 GAS 汇编: {}\n{}",
-        String::from_utf8_lossy(&o.stderr),
-        fs::read_to_string(&text).unwrap_or_default()
+        "P7-3: 降级产出的文本必须能被真 GAS 汇编成 .o: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(obj.exists(), "P7-3: .o 必须真生成 (而非同名 .s): {}", obj.display());
+    let magic = fs::read(&obj).expect("read .o");
+    assert!(
+        magic.len() >= 4 && &magic[0..4] == b"\x7fELF",
+        "P7-3: 产物必须是真 ELF (禁止把 GAS 文本写进 .o)"
     );
     if Command::new("objdump").arg("--version").output().is_ok() {
         let d = Command::new("objdump")
             .arg("-d")
-            .arg(format!("{}.o", text.display()))
+            .arg(&obj)
             .output()
             .expect("run objdump");
         let dis = String::from_utf8_lossy(&d.stdout).to_ascii_lowercase();
@@ -3002,8 +3028,6 @@ fn asm_fallback_gas_text_assembles_through_real_as() {
         assert!(dis.contains("wbnoinvd"), "反汇编未见 wbnoinvd:\n{dis}");
     }
     let _ = fs::remove_file(&obj);
-    let _ = fs::remove_file(&text);
-    let _ = fs::remove_file(format!("{}.o", text.display()));
 }
 
 /// `--asm-fallback` 的未知取值必须报错, 不许静默退回默认值。
@@ -3020,25 +3044,32 @@ fn asm_fallback_rejects_unknown_value() {
 }
 
 /// 显式 `-o foo.o` + 降级: 名字按**实际产物形态**改成 foo.s, 且不得给文本加执行位。
+///
+/// P7-3 之后: host x86_64 已有 GasTextOutput, `-c --asm-fallback=gas` 会直接调
+/// `as` 产出 foo.o, 因此名字修正判据必须通过 `-S` 路径验证 (此时用户只要文本)。
 #[test]
 #[cfg(unix)]
 fn asm_fallback_does_not_label_text_as_object() {
+    if Command::new("as").arg("--version").output().is_err() {
+        eprintln!("ASM-FALLBACK-SKIP: no host `as` available");
+        return;
+    }
     let dir = std::env::temp_dir();
     let stem = format!("dcc-asm-fallback-name-{}", std::process::id());
-    let req = dir.join(format!("{stem}.o"));
-    let got = dir.join(format!("{stem}.s"));
+    // -S: 用户要文本, 用 .s 后缀; 判据面是"文本不加执行位" (旧的 CLI 标志判据
+    // 曾在降级时给文本 .o 加 0755 —— 现在产物形态判据由 emit_asm 与 is_text 决定)。
+    let req = dir.join(format!("{stem}.s"));
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/asm/asm_fallback_gas.c");
     let o = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["-c", "--asm-fallback=gas", "-o"])
+        .args(["-S", "--asm-fallback=gas", "-o"])
         .arg(&req)
         .arg(&fixture)
         .output()
         .expect("run dcc");
     assert!(o.status.success(), "降级应成功: {}", String::from_utf8_lossy(&o.stderr));
-    assert!(!req.exists(), "文本产物不得占用 .o 名字");
-    assert!(got.exists(), "应写出同名 .s");
-    let md = fs::metadata(&got).unwrap();
+    assert!(req.exists(), "-S 必须把文本写到用户请求的路径: {}", req.display());
+    let md = fs::metadata(&req).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -3049,7 +3080,6 @@ fn asm_fallback_does_not_label_text_as_object() {
         );
     }
     let _ = fs::remove_file(&req);
-    let _ = fs::remove_file(&got);
 }
 
 /// 降级必须是确定性的: 同一个 TU 渲染两次逐字节相同。这条同时是"只跑一次
@@ -3058,13 +3088,26 @@ fn asm_fallback_does_not_label_text_as_object() {
 #[test]
 #[cfg(unix)]
 fn asm_fallback_output_is_deterministic() {
+    if Command::new("as").arg("--version").output().is_err() {
+        eprintln!("ASM-FALLBACK-SKIP: no host `as` available");
+        return;
+    }
     let mut texts = Vec::new();
-    for _ in 0..2 {
-        let (_stderr, ok, obj, text) =
-            harness::asm_fallback_compile("determinism", &["--asm-fallback=gas"], ".o");
-        assert!(ok);
+    for run in 0..2 {
+        // -S 路径直接落 .s (避免 P7-3 走 as 串联, 这里只钉渲染本身的确定性)。
+        let dir = std::env::temp_dir();
+        let stem = format!("dcc-asm-fallback-determinism-{}-{}", std::process::id(), run);
+        let text = dir.join(format!("{stem}.s"));
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/asm/asm_fallback_gas.c");
+        let o = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["-S", "--asm-fallback=gas", "-o"])
+            .arg(&text)
+            .arg(&fixture)
+            .output()
+            .expect("run dcc -S");
+        assert!(o.status.success(), "determinism run {run} 必须成功: {}", String::from_utf8_lossy(&o.stderr));
         texts.push(fs::read_to_string(&text).expect("read degraded .s"));
-        let _ = fs::remove_file(&obj);
         let _ = fs::remove_file(&text);
     }
     assert_eq!(texts[0], texts[1], "降级文本必须逐字节可复现");
@@ -3072,7 +3115,11 @@ fn asm_fallback_output_is_deterministic() {
 
 /// 目标后端若还不具备"把整个 TU 渲染成真 GAS 文本"的能力, 降级必须给出**准确的
 /// 能力缺失错误 (E0312)**, 而不是写一个汇编不过的 .s 冒充成功。
-/// 本用例是能力闸门的护栏: 交叉后端补上指令解码器后, 应把它改为断言降级成功。
+///
+/// P7-2 之后: aarch64 / riscv64 / arm / mips32 已声明 GasTextOutput (本机具备
+/// 对应交叉 as), 因此本用例改为对 **mips64-linux-gnu** 后端 —— 该后端故意不声明
+/// GasTextOutput (本机无 mips64-as), 必须报 E0312。本用例是能力闸门的护栏:
+/// 若未来某交叉 as 就位, 应同步把该端加回 GasTextOutput 并改用其他未支持后端。
 #[test]
 #[cfg(unix)]
 fn asm_fallback_requires_gas_text_capability() {
@@ -3086,22 +3133,99 @@ fn asm_fallback_requires_gas_text_capability() {
     )
     .expect("write fixture");
     let o = Command::new(env!("CARGO_BIN_EXE_dcc"))
-        .args(["--target", "aarch64-linux-gnu", "-c", "--asm-fallback=gas", "-o"])
+        .args(["--target", "mips64-linux-gnu", "-c", "--asm-fallback=gas", "-o"])
         .arg(&obj)
         .arg(&src)
         .output()
         .expect("run dcc");
     let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-    // 不得静默编码: 要么报能力缺失 (E0312), 要么报透传清单 (E0311)。
+    // mips64 未声明 GasTextOutput: 必须报能力缺失 (E0312), 不许降级也不许硬跑。
     assert!(
-        stderr.contains("E0312") || stderr.contains("E0311"),
-        "交叉后端上 msr 必须被如实上报 (E0312/E0311), 实际 ok={} stderr={}",
+        !o.status.success() && stderr.contains("E0312"),
+        "mips64 上 --asm-fallback=gas 必须报能力缺失 E0312 (本机无 mips64-as), \
+         实际 ok={} stderr={}",
         o.status.success(),
         stderr
     );
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&obj);
 }
+
+/// P7-3 新增测试: `--asm-fallback=gas` 后端有 GasTextOutput 时, `-c` 必须真的
+/// 用 `<triple>-as` 产出**可链接**的 `.o` (ELF magic + .text 节非空), 而不是
+/// 退化为同名 `.s` 或把文本直接当二进制写进 `.o`。
+///
+/// 选 aarch64-linux-gnu 目标 (本机具备 `aarch64-linux-gnu-as`): 这样验证点是
+/// "driver 侧串接 as", 而非 host x86_64 的旧 `as` 路径。as 缺失时显式打 skip,
+/// 不许静默空跑。
+#[test]
+#[cfg(unix)]
+fn gas_fallback_produces_linkable_object() {
+    if Command::new("aarch64-linux-gnu-as").arg("--version").output().is_err() {
+        eprintln!("ASM-FALLBACK-SKIP: no aarch64-linux-gnu-as available");
+        return;
+    }
+    let dir = std::env::temp_dir();
+    let stem = format!("dcc-gas-fallback-linkable-{}", std::process::id());
+    let src = dir.join(format!("{stem}.c"));
+    let obj = dir.join(format!("{stem}.o"));
+    // 简单函数: 已知指令, 不触发透传路径, 但走 `-c --asm-fallback=gas` 走 as 串接。
+    fs::write(&src, "int add2(int x) { return x + 2; }\n").expect("write fixture");
+    let o = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args([
+            "--target",
+            "aarch64-linux-gnu",
+            "-c",
+            "--asm-fallback=gas",
+            "-o",
+        ])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("run dcc");
+    assert!(
+        o.status.success(),
+        "P7-3: aarch64 降级路径必须成功串接 aarch64-linux-gnu-as, stderr={}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let bytes = fs::read(&obj).expect("read produced .o");
+    assert!(
+        bytes.len() >= 4 && &bytes[0..4] == b"\x7fELF",
+        "P7-3: 产物必须是真 ELF (got first 4 bytes: {:?})",
+        &bytes[..bytes.len().min(4)]
+    );
+    assert!(bytes.len() > 64, "ELF 至少要有 ELF 头 + 节表, 实际 {} 字节", bytes.len());
+    // 交叉 as 缺失时, driver 必须报 E0312 而不是静默降级 —— 单独探一下
+    // (mips64 目标: 该后端故意不声明 GasTextOutput, 遇到透传行必须报 E0312)。
+    let src_bad = dir.join(format!("{stem}-bad.c"));
+    let obj_bad = dir.join(format!("{stem}-bad.o"));
+    fs::write(&src_bad, "void g(void) { __asm__ volatile(\"msr daif, x0\"); }\n")
+        .expect("write fixture");
+    let o2 = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args([
+            "--target",
+            "mips64-linux-gnu",
+            "-c",
+            "--asm-fallback=gas",
+            "-o",
+        ])
+        .arg(&obj_bad)
+        .arg(&src_bad)
+        .output()
+        .expect("run dcc mips64");
+    let stderr2 = String::from_utf8_lossy(&o2.stderr).to_string();
+    assert!(
+        !o2.status.success() && stderr2.contains("E0312"),
+        "mips64 未声明 GasTextOutput, 遇到透传行必须报 E0312, 实际 ok={} stderr={}",
+        o2.status.success(),
+        stderr2
+    );
+    let _ = fs::remove_file(&src);
+    let _ = fs::remove_file(&src_bad);
+    let _ = fs::remove_file(&obj);
+    let _ = fs::remove_file(&obj_bad);
+}
+
 
 /// 回归 (本方案最核心的 silent bug): `msr`/`mrs` 过去被 mini_asm 静默编码成 NOP,
 /// 内核 barrier / 系统寄存器代码会**默默丢指令**。现在必须报 E0311。
