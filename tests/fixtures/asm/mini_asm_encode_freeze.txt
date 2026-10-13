@@ -1,7 +1,7 @@
 # mini_asm 编码行为冻结基线 (双向表改造的差分对照)
 # 重新生成: cargo test --lib encode_freeze -- --ignored
 # DIGEST 行钉住「全部可编码输入 -> 字节」的完整行为; SAMPLE 行为等距抽样, 供人工定位。
-DIGEST aarch64 rows=148254 bytes=5147483 fnv1a64=846508badb538db1
+DIGEST aarch64 rows=148254 bytes=5147483 fnv1a64=c89eef41b2a64e29
 DIGEST riscv64 rows=93904 bytes=3373325 fnv1a64=4da15f81372ce5b2
 DIGEST arm rows=118787 bytes=3560943 fnv1a64=89195609c2ab9613
 DIGEST mips32 rows=69020 bytes=2147831 fnv1a64=00f3bf5001b0c729

@@ -4,7 +4,7 @@
 本文只登记现象与位置, 不在此擅自修改编码行为; 每条给出触发条件与当前为何未暴露。
 行号以符号名为准, 漂移后按符号检索。
 
-## A.5 mini_asm 编码存疑 (未暴露)
+## A.5 mini_asm 编码存疑 (部分修复于 G11)
 
 位置: `src/codegen/shared/mini_asm.rs`
 
@@ -25,6 +25,19 @@
    (按 pd/rn/rm 低位拼接, 无 predicate 语境), 却**未标** simplified —
    标签与 fadd/add/ld1w/st1w 不一致, 同型存疑被漏标。
 
+G11 修复进展:
+
+- **ld1/st1 已由 objdump 真值确证并修正**: ld1 v0,[x1] 与 st1 v3,[x5]
+  经 `aarch64-linux-gnu-as` + `objdump -d` 对照, LD1 基址应为
+  `0x4C407000` (bit12 length=1 单结构, 旧代码 `0x4c407400` 等价, 仅清
+  注释对齐); ST1 基址应为 `0x4C007000` (旧代码 `0x4c006400` 把 bit12
+  错清 0, 是真错误)。单测期望值同步更新, 冻结基线 golden 重新生成
+  (aarch64 DIGEST: `846508badb538db1` → `c89eef41b2a64e29`)。
+- **SVE 五条 (whilelt/fadd/add/ld1w/st1w) 未修**: 基址骨架缺
+  size[31:30]/Pg[11:10]/M[9] 字段, 与 objdump 差距大, 属"简化子集硬
+  编码"。按红线约束, 不在待删除的 match 链上继续堆操作数解析; 走
+  P1-1/P1-2/P1-3 统一管线落地后再重写。
+
 触发条件: 内联汇编写出 `ld1 v0.16b, x1`、SVE `fadd z0.s, z1.s, z2.s`
 等对应形态即命中, 产字节但语义可能错。
 
@@ -37,26 +50,21 @@
 A.14 的 runtime objdump 复核; 改编码行为属有意变更, 需显式重新生成
 冻结基线并人工审阅 diff (mini_asm.rs:1365 `regenerate_encode_freeze`)。
 
-## A.13 patch_adr 越界退化已发生失效 (未暴露)
+## A.13 patch_adr 越界退化已发生失效 (已修复于 G11)
 
 位置:
 
 - 入队: `src/codegen/aarch64/emit/expr/ops.rs:35-41` (`load_global_addr_w0`
-  非 relocatable 分支, 只占 1 个 slot: `emit_adr_placeholder(0)` +
-  `pending_adr_exec.push((pos, 0, target))`)
+  非 relocatable 分支)
 - drain: `src/codegen/aarch64/codegen/pipeline.rs:591-594`
   (`finalize_exec` 逐条调 `patch_adr(at, rd, target)`)
-- 失效点: `src/codegen/aarch64/emit/expr/patch.rs:57-86` (`patch_adr`)
+- 失效点: `src/codegen/aarch64/emit/expr/patch.rs:57-91` (`patch_adr`)
 
-现象: 当 `target - pc` 超出 ADR 的 ±1MiB 范围时, 越界分支
-(patch.rs:60-78) 只把原 slot 原地改写为 ADRP 即 `return`。页内偏移
-`_lo_off` (patch.rs:64) 算了即丢; 原地 patch 无法插入 ADD 指令字节
-(注释 patch.rs:73-76 已自认)。结果: rd 得到的是页基址而非目标地址,
-低端 12 位丢失 → 引用该全局常量的访存全部错位。
-
-正确修法已存在但是死码: `emit_adr_large` (patch.rs:90-99) 按 ADRP+ADD
-双 slot 占位并入队, 全仓零调用 (grep 仅命中 patch.rs:75 的注释与函数
-定义本身)。
+G11 修复: 入队侧 `ops.rs` 改为统一调用 `emit_adr_large(0, target)`
+预留 8 字节 (ADRP 占位 + ADD rd,rd,#0 占位), `patch_adr` 重写为双 slot
+语义: 越界时原地填 ADRP+ADD 完整双指令; 未越界时填 ADR 并把 at+4
+占位清 NOP。死码 `emit_adr_large` 接入生产路径, 页内偏移 `lo_off`
+不再计算即丢。
 
 触发条件: 非 relocatable (ET_EXEC / 直接产物) 模式下, 被引用的 rodata
 全局常量距代码段 >1MiB。

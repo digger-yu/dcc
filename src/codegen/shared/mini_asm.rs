@@ -530,8 +530,9 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
         "ld1" if operands.len() == 2 && is_neon_reg(&operands[0]) => {
             let (vt, _) = req_neon_reg(operands, 0)?;
             let (xn, _) = a64_reg_at(operands, 1)?;
-            // LD1 (single structure, 128-bit): 0x4C007400 | Rn | Vt
-            let insn: u32 = 0x4c407400 | ((xn as u32 & 0x1f) << 5) | (vt as u32 & 0x1f);
+            // LD1 (single structure, 128-bit): 0x4C407000 | Rn | Vt
+            // objdump 真值 (vt=0, xn=1): 4c407020, 基址骨架正确。
+            let insn: u32 = 0x4c407000 | ((xn as u32 & 0x1f) << 5) | (vt as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
         },
 
@@ -539,8 +540,10 @@ pub fn encode_aarch64(mnemonic: &str, operands: &[String]) -> Option<Vec<u8>> {
         "st1" if operands.len() == 2 && is_neon_reg(&operands[0]) => {
             let (vt, _) = req_neon_reg(operands, 0)?;
             let (xn, _) = a64_reg_at(operands, 1)?;
-            // ST1 (single structure, 128-bit): 0x4C006400 | Rn | Vt
-            let insn: u32 = 0x4c006400 | ((xn as u32 & 0x1f) << 5) | (vt as u32 & 0x1f);
+            // ST1 (single structure, 128-bit): 0x4C007000 | Rn | Vt
+            // bit12 (length=1 单结构) 与 LD1 一致, 仅 bit22 (load=1/store=0) 翻转。
+            // 旧基址 0x4c006400 把 bit12 错清 0, 被 objdump 证伪。
+            let insn: u32 = 0x4c007000 | ((xn as u32 & 0x1f) << 5) | (vt as u32 & 0x1f);
             Some(insn.to_le_bytes().to_vec())
         },
 
@@ -1571,7 +1574,7 @@ mod tests {
         let bytes = encode_aarch64("ld1", &ops).unwrap();
         assert_eq!(bytes.len(), 4);
         let insn = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        assert_eq!(insn, 0x4c407420);
+        assert_eq!(insn, 0x4c407020);
     }
 
     #[test]
@@ -1581,7 +1584,7 @@ mod tests {
         let bytes = encode_aarch64("st1", &ops).unwrap();
         assert_eq!(bytes.len(), 4);
         let insn = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        assert_eq!(insn, 0x4c0064a3);
+        assert_eq!(insn, 0x4c0070a3);
     }
 
     // ===== SVE tests =====

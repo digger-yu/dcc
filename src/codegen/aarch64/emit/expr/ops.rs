@@ -35,9 +35,10 @@ impl Aarch64Codegen {
         } else if let Some(&off) = self.global_rodata.get(name) {
             let rodata_start = self.entry + align_up_u64(self.code.len() as u64, 8);
             let target = rodata_start + off;
-            let pos = self.pos();
-            self.emit_adr_placeholder(0);
-            self.pending_adr_exec.push((pos, 0, target));
+            // 统一预留 8 字节 (ADRP + ADD): 无论最终是否越 ±1MiB 都能原地填,
+            // 避免越界时页内偏移丢失 (G11 A.13)。未越界时 patch_adr 会把 at 覆写
+            // 为 ADR, at+4 处的 add 占位覆写为 NOP。
+            self.emit_adr_large(0, target);
         }
     }
 

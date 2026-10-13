@@ -55,33 +55,38 @@ impl Aarch64Codegen {
     }
 
     pub(crate) fn patch_adr(&mut self, at: u64, rd: u8, target: u64) {
+        // 入队侧 (ops.rs::load_global_addr_w0) 统一通过 emit_adr_large 预留 8 字节:
+        //   [at+0]  ADRP 占位 (0x90000000 | rd)
+        //   [at+4]  ADD  rd, rd, #0 占位 (0x91000000 | rd<<5 | rd)
+        // drain 时按 diff 是否越 ±1MiB 分两种填法。
         let pc = at;
         let diff = target as i64 - pc as i64;
+        let off = at as usize;
+
         if !Self::adr_offset_in_range(diff) {
-            // 超出 ADR ±1MiB 范围: 退化为 ADRP + ADD
-            // ADRP: 页对齐 (pc & ~0xfff) + (immhi << 12)
+            // 越界: ADRP 页基址 + ADD 页内偏移。
             let page_off = (target as i64 & !0xfff) - (pc as i64 & !0xfff);
-            let _lo_off = (target as i64 & 0xfff) as u32;
+            let lo_off = (target as i64 & 0xfff) as u32;
             let immlo = ((page_off >> 12) & 0x3) as u32;
             let immhi = ((page_off >> 14) & 0x7ffff) as u32;
             // adrp rd, #page_off
             let insn_adrp = 0x9000_0000u32 | (immlo << 29) | (immhi << 5) | (rd as u32 & 0x1f);
-            let off = at as usize;
-            if off + 4 <= self.code.len() {
+            // add rd, rd, #lo_off  (sf=1 64-bit, op=ADD imm, shift=0, Rn=rd, Rd=rd)
+            let insn_add = 0x9100_0000u32 | (lo_off << 10) | ((rd as u32 & 0x1f) << 5) | (rd as u32 & 0x1f);
+            if off + 8 <= self.code.len() {
                 self.code[off..off + 4].copy_from_slice(&insn_adrp.to_le_bytes());
+                self.code[off + 4..off + 8].copy_from_slice(&insn_add.to_le_bytes());
             }
-            // add rd, rd, #lo_off (追加在 adrp 后, 需扩展 code)
-            // 但 patch 是原地修改, 无法插入; 改为在 emit 阶段用
-            // emit_adr_large 预先留 2 条指令空间
-            // 此处仅修补不超出的情况; 超出时截断到最大可表示偏移
             return;
         }
+        // 未越界: 直接 ADR, 同时把 at+4 的 add 占位清成 NOP (避免多一条死指令)。
         let immlo = (diff & 0x3) as u32;
         let immhi = ((diff >> 2) & 0x7ffff) as u32;
         let insn = 0x1000_0000u32 | (immlo << 29) | (immhi << 5) | (rd as u32 & 0x1f);
-        let off = at as usize;
-        if off + 4 <= self.code.len() {
+        if off + 8 <= self.code.len() {
             self.code[off..off + 4].copy_from_slice(&insn.to_le_bytes());
+            // NOP: 0xd503201f
+            self.code[off + 4..off + 8].copy_from_slice(&0xd503_201f_u32.to_le_bytes());
         }
     }
 
