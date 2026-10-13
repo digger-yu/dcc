@@ -360,9 +360,11 @@ fn mnemonic_in_table(isa: AsmIsa, mnemonic: &str) -> bool {
 pub fn known_mnemonics(isa: AsmIsa) -> &'static [&'static str] {
     match isa {
         // `msr`/`mrs` 曾以静默 NOP 冒充支持, 已移除 (见 known_mnemonics 一致性测试)。
+        // `ld`/`st` 曾被错列为已支持, 但表里没有这两条臂 (grep 命中的是 dmb/dsb
+        // 的 domain 选项值 0xd/0xe), 已移除, 见 behavior 护栏 test。
         AsmIsa::AArch64 => &[
-            "add", "blr", "br", "clrex", "dbg", "dmb", "dsb", "fadd", "fmul", "fsub", "isb", "ld",
-            "ld1", "ld1w", "mov", "movz", "mul", "nop", "ptrue", "ret", "sev", "sevl", "st", "st1",
+            "add", "blr", "br", "clrex", "dbg", "dmb", "dsb", "fadd", "fmul", "fsub", "isb",
+            "ld1", "ld1w", "mov", "movz", "mul", "nop", "ptrue", "ret", "sev", "sevl", "st1",
             "st1w", "sub", "svc", "wfe", "wfi", "whilelt", "yield",
         ],
         AsmIsa::RiscV64 | AsmIsa::RiscV32 => &[
@@ -782,12 +784,105 @@ mod tests {
         }
     }
 
-    /// 名单与编码表的一致性护栏: `known_mnemonics` 是诊断措辞与能力矩阵的数据源,
-    /// 一旦与 `mini_asm` 的 match 分支漂移, 用户会看到"助记符不认识"而实际是
-    /// 操作数形态问题 (或反之)。用 include_str! 直接对源码做集合校验。
+    /// 每条名单助记符的一条合法 GAS 操作数样本 (该样本下 analyze() 必须产字节)。
+    /// 样本形状覆盖该臂的实际判据 (寄存器对/三寄存器/向量/谓词 domain 选项),
+    /// 因此它本身就是可达性证明 —— 名单漂移、臂被删或静默退化都会立即失败。
+    ///
+    /// 返回 None 表示「该 ISA 上此条名单项连一条合法操作数都产不出字节」
+    /// (目前仅 MIPS32 的 daddu: 表臂要求 `is_64bit`, Mips32 上恒 None)。
+    /// 对这类项, analyze() 必须报 UnsupportedOperandForm 而非 UnknownMnemonic。
+    fn sample_operands(isa: AsmIsa, m: &str) -> Option<&'static str> {
+        match (isa, m) {
+            // aarch64 (29)
+            (AsmIsa::AArch64, "add") => Some("x0, x1, x2"),
+            (AsmIsa::AArch64, "blr") => Some("x9"),
+            (AsmIsa::AArch64, "br") => Some("x9"),
+            (AsmIsa::AArch64, "clrex") => Some(""),
+            (AsmIsa::AArch64, "dbg") => Some("#0"),
+            (AsmIsa::AArch64, "dmb") => Some("ish"),
+            (AsmIsa::AArch64, "dsb") => Some("ish"),
+            (AsmIsa::AArch64, "fadd") => Some("v0.2s, v1.2s, v2.2s"),
+            (AsmIsa::AArch64, "fmul") => Some("v0.2s, v1.2s, v2.2s"),
+            (AsmIsa::AArch64, "fsub") => Some("v0.2s, v1.2s, v2.2s"),
+            (AsmIsa::AArch64, "isb") => Some(""),
+            (AsmIsa::AArch64, "ld1") => Some("v0, x1"),
+            (AsmIsa::AArch64, "ld1w") => Some("z0.s, x3"),
+            (AsmIsa::AArch64, "mov") => Some("x0, x1"),
+            (AsmIsa::AArch64, "movz") => Some("x0, #0x1ff"),
+            (AsmIsa::AArch64, "mul") => Some("v0.16b, v1.16b, v2.16b"),
+            (AsmIsa::AArch64, "nop") => Some(""),
+            (AsmIsa::AArch64, "ptrue") => Some("p0"),
+            (AsmIsa::AArch64, "ret") => Some(""),
+            (AsmIsa::AArch64, "sev") => Some(""),
+            (AsmIsa::AArch64, "sevl") => Some(""),
+            (AsmIsa::AArch64, "st1") => Some("v3, x5"),
+            (AsmIsa::AArch64, "st1w") => Some("z0.s, x3"),
+            (AsmIsa::AArch64, "sub") => Some("x0, x1, x2"),
+            (AsmIsa::AArch64, "svc") => Some("#0"),
+            (AsmIsa::AArch64, "wfe") => Some(""),
+            (AsmIsa::AArch64, "wfi") => Some(""),
+            (AsmIsa::AArch64, "whilelt") => Some("p0.d, x0, x1"),
+            (AsmIsa::AArch64, "yield") => Some(""),
+            // riscv64 / riscv32 (12)
+            (AsmIsa::RiscV64 | AsmIsa::RiscV32, "add") => Some("x0, x1, x2"),
+            (AsmIsa::RiscV64 | AsmIsa::RiscV32, "addi") => Some("x0, x1, 8"),
+            (AsmIsa::RiscV64 | AsmIsa::RiscV32, "ebreak") => Some(""),
+            (AsmIsa::RiscV64 | AsmIsa::RiscV32, "ecall") => Some(""),
+            (AsmIsa::RiscV64 | AsmIsa::RiscV32, "fence") => Some(""),
+            (AsmIsa::RiscV64 | AsmIsa::RiscV32, "fence.i") => Some(""),
+            (AsmIsa::RiscV64 | AsmIsa::RiscV32, "nop") => Some(""),
+            (AsmIsa::RiscV64 | AsmIsa::RiscV32, "pause") => Some(""),
+            (AsmIsa::RiscV64 | AsmIsa::RiscV32, "ret") => Some(""),
+            (AsmIsa::RiscV64 | AsmIsa::RiscV32, "sfence.vma") => Some(""),
+            (AsmIsa::RiscV64 | AsmIsa::RiscV32, "sub") => Some("x0, x1, x2"),
+            (AsmIsa::RiscV64 | AsmIsa::RiscV32, "wfi") => Some(""),
+            // arm (16; svc|swi 同臂)
+            (AsmIsa::Arm, "add") => Some("r0, r1, r2"),
+            (AsmIsa::Arm, "bx") => Some("lr"),
+            (AsmIsa::Arm, "clrex") => Some(""),
+            (AsmIsa::Arm, "dmb") => Some("ish"),
+            (AsmIsa::Arm, "dsb") => Some("ish"),
+            (AsmIsa::Arm, "isb") => Some(""),
+            (AsmIsa::Arm, "mov") => Some("r0, r1"),
+            (AsmIsa::Arm, "nop") => Some(""),
+            (AsmIsa::Arm, "sev") => Some(""),
+            (AsmIsa::Arm, "sevl") => Some(""),
+            (AsmIsa::Arm, "sub") => Some("r0, r1, r2"),
+            (AsmIsa::Arm, "svc") => Some("#0"),
+            (AsmIsa::Arm, "swi") => Some("#0"),
+            (AsmIsa::Arm, "wfe") => Some(""),
+            (AsmIsa::Arm, "wfi") => Some(""),
+            (AsmIsa::Arm, "yield") => Some(""),
+            // mips (13; nop|ssnop 同臂)
+            (AsmIsa::Mips32 | AsmIsa::Mips64, "add") => Some("$0, $1, $2"),
+            (AsmIsa::Mips32 | AsmIsa::Mips64, "addu") => Some("$0, $1, $2"),
+            (AsmIsa::Mips32 | AsmIsa::Mips64, "break") => Some(""),
+            (AsmIsa::Mips32 | AsmIsa::Mips64, "daddu") if isa == AsmIsa::Mips64 => {
+                Some("$0, $1, $2")
+            }
+            (AsmIsa::Mips32 | AsmIsa::Mips64, "jalr") => Some("$t1"),
+            (AsmIsa::Mips32 | AsmIsa::Mips64, "jr") => Some("$ra"),
+            (AsmIsa::Mips32 | AsmIsa::Mips64, "move") => Some("$2, $3"),
+            (AsmIsa::Mips32 | AsmIsa::Mips64, "nop") => Some(""),
+            (AsmIsa::Mips32 | AsmIsa::Mips64, "ssnop") => Some(""),
+            (AsmIsa::Mips32 | AsmIsa::Mips64, "sub") => Some("$0, $1, $2"),
+            (AsmIsa::Mips32 | AsmIsa::Mips64, "subu") => Some("$0, $1, $2"),
+            (AsmIsa::Mips32 | AsmIsa::Mips64, "sync") => Some(""),
+            (AsmIsa::Mips32 | AsmIsa::Mips64, "syscall") => Some(""),
+            _ => None,
+        }
+    }
+
+    /// 名单与编码表的一致性护栏: `known_mnemonics` 是诊断措辞与能力矩阵的数据源。
+    ///
+    /// 旧实现对 mini_asm.rs 源码做 `body.contains("\"ld\"")` 子串匹配, 前一项对
+    /// `split_once("pub fn encode_aarch64(")` 直到文件尾的**整段 body** (含另三张表
+    /// 与测试模块) 做匹配, 于是 "ld"/"st" 靠 dmb/dsb 臂的 domain 选项值 (0xd/0xe)
+    /// 假绿通过, 且不验可达性。现改为行为判据: 对名单每条构造一条合法 GAS 操作数
+    /// 文本走 analyze(), 断言产出字节非空 (即该臂真能把操作数编出来); 不在名单者
+    /// 一律断言 UnknownMnemonic。
     #[test]
     fn mnemonic_table_matches_mini_asm_dispatch() {
-        let src = include_str!("mini_asm.rs");
         // 各 encode_* 函数体里被明确移除的静默 NOP 兜底, 不得回到名单里
         let removed_silent_nop = ["msr", "mrs", "cache", "pref"];
         for isa in [
@@ -795,31 +890,46 @@ mod tests {
             AsmIsa::RiscV64,
             AsmIsa::Arm,
             AsmIsa::Mips32,
+            AsmIsa::Mips64,
         ] {
-            let table = match isa {
-                AsmIsa::AArch64 => "encode_aarch64",
-                AsmIsa::RiscV64 => "encode_riscv64",
-                AsmIsa::Arm => "encode_arm",
-                _ => "encode_mips",
-            };
-            let body = src
-                .split_once(&format!("pub fn {table}("))
-                .unwrap_or_else(|| panic!("{table} not found in mini_asm.rs"))
-                .1;
+            // 1) 名单内每条: 合法样本必须产字节, 且不触发透传
             for m in known_mnemonics(isa) {
-                let arm = format!("\"{m}\"");
+                let Some(sample) = sample_operands(isa, m) else {
+                    // 该 ISA 上无合法样本 (MIPS32 daddu), 留待步骤 2 单独判定
+                    continue;
+                };
+                let src = if sample.is_empty() {
+                    m.to_string()
+                } else {
+                    format!("{m} {sample}")
+                };
+                let sn = analyze(isa, &src);
                 assert!(
-                    body.contains(&arm)
-                        || body
-                            .find("pub fn encode_")
-                            .map(|n| &body[..n])
-                            .unwrap_or("")
-                            .contains(&arm),
-                    "known_mnemonics({isa:?}) lists '{m}' but {table} has no such arm"
+                    !sn.needs_gas_text(),
+                    "known_mnemonics({isa:?}) lists '{m}' but '{src}' fails to encode: {:?}",
+                    sn.passthrough.first().map(|p| p.reason)
+                );
+                assert!(
+                    !sn.bytes.is_empty(),
+                    "'{src}' on {isa:?} must emit bytes, not silently succeed with none"
                 );
             }
+            // 2) 名单内但该 ISA 连合法样本都产不出 (MIPS32 daddu):
+            //    必须报 UnsupportedOperandForm, 而不是 UnknownMnemonic
+            if let Some(m) = known_mnemonics(isa)
+                .iter()
+                .find(|m| sample_operands(isa, m).is_none())
+            {
+                let sn = analyze(isa, &format!("{m} $0, $1, $2"));
+                assert!(sn.needs_gas_text());
+                assert_eq!(
+                    sn.passthrough[0].reason,
+                    AsmPassthroughReason::UnsupportedOperandForm,
+                    "'{m}' on {isa:?} is a known mnemonic with unsupported operand form, not unknown"
+                );
+            }
+            // 3) 不在名单者: 一律 UnknownMnemonic, 绝不默默产字节
             for m in removed_silent_nop {
-                // 已移除静默 NOP 的助记符: 任何 ISA 上都不得声称支持, 也不得默默产字节
                 assert!(
                     !known_mnemonics(isa).contains(&m),
                     "'{m}' must not be advertised: it used to be a silent NOP"
@@ -832,5 +942,40 @@ mod tests {
                 assert!(sn.bytes.is_empty(), "'{m}' on {isa:?} must emit no bytes");
             }
         }
+        // 4) 曾被假绿名单钉住、实际无臂的 aarch64 "ld"/"st" (domain 选项值):
+        //    现在必须归为 UnknownMnemonic 透传, 不得假称支持。
+        for m in ["ld", "st"] {
+            let sn = analyze(AsmIsa::AArch64, &format!("{m} x0, x1"));
+            assert_eq!(
+                sn.passthrough[0].reason,
+                AsmPassthroughReason::UnknownMnemonic,
+                "aarch64 '{m}' has no table arm; it must be passthrough"
+            );
+            assert!(sn.bytes.is_empty());
+        }
+    }
+
+    /// 交叉后端内联 asm 负向用例: 以下 GAS 语法都必须透传 (不产字节),
+    /// 因为 mini_asm 尚不解析内存操作数括号与符号/标签目标。
+    #[test]
+    fn gas_syntax_beyond_table_passthroughs() {
+        // aarch64: 花括号 + 方括号的 NEON 访存形式 (表里 ld1/st1 臂只认裸寄存器对,
+        // 而 GAS 文本是 `{v0.16b}, [x0]`)。这是全仓唯一正向断言可达性的用例:
+        // 裸 `["v0","x1"]` 走 ld1 能产字节 (见上一条护栏), 带括号的 GAS 文本必须透传。
+        let sn = analyze(AsmIsa::AArch64, "ld1 {v0.16b}, [x0]");
+        assert!(sn.needs_gas_text());
+        assert!(sn.bytes.is_empty());
+        // mips: 内存操作数 `4($t1)` 与分支标签 `.L`
+        let sn = analyze(AsmIsa::Mips32, "lw $t0, 4($t1)");
+        assert!(sn.needs_gas_text());
+        assert!(sn.bytes.is_empty());
+        let sn = analyze(AsmIsa::Mips32, "ble $t0, .L");
+        assert!(sn.needs_gas_text());
+        assert!(sn.bytes.is_empty());
+        // 任意 ISA 的 `bl foo`: 表无符号/重定位表达位, 必然 UnknownMnemonic 透传
+        let sn = analyze(AsmIsa::AArch64, "bl foo");
+        assert!(sn.needs_gas_text());
+        assert!(sn.bytes.is_empty());
+        assert_eq!(sn.passthrough[0].reason, AsmPassthroughReason::UnknownMnemonic);
     }
 }

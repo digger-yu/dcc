@@ -28,7 +28,7 @@
 
 | 特性 | 说明 |
 |------|------|
-| 线性扫描寄存器分配 (P12) | `-O3` 启用；SSA 层按活跃区间把局部变量绑定到物理寄存器家（callee-saved `POOL` 4 个：rbx/r12/r14/r15 + caller-saved 延伸池 r8/r9 默认开启），家经 `VarDecl::home` / `LocMap` 进入产物；候选号在 caller 边界走 persist/restore 窗口保护，寄存器耗尽时把活区间溢出到 `Location::Spill` 栈槽并在 def/use 点物化；asm clobber、嵌套函数、EH 已接入守护；DWARF 对有寄存器家的局部发 `DW_OP_regN`。设计文档见 `.qoder/specs/p12-physreg-spill-design.md` |
+| 线性扫描寄存器分配 (P12) | `-O3` 启用；SSA 层按活跃区间把局部变量绑定到物理寄存器家（callee-saved `POOL` 4 个：rbx/r12/r14/r15 + caller-saved 延伸池 r8/r9 默认开启），家经 `VarDecl::home` / `LocMap` 进入产物；候选号在 caller 边界走 persist/restore 窗口保护，寄存器耗尽时把活区间溢出到 `Location::Spill` 栈槽并在 def/use 点物化；asm clobber、嵌套函数、EH 已接入守护；DWARF 对有寄存器家的局部发 `DW_OP_regN`。设计文档见 `docs/p12-physreg-spill-design.md` |
 | UBSAN IR 层插桩 (P12b) | `-O3` 启用; 在优化后的 SSA IR 上扫描可能 UB 的指令 (除法/取余/移位/有符号加减乘/取反), 插入 `__dcc_ubsan_*` guard; 与 AST 层 sanitizer 互补: AST 层在 SSA 构造前插桩, 优化可能消除检查; IR 层在优化后插桩, 能捕获优化新建的操作; 编译期已知安全的操作 (如除以非零常量) 跳过插桩; guard 作为 pass hint 在 SSA→AST 重建时自动过滤 |
 
 ## Sanitizer 插桩

@@ -444,7 +444,7 @@ pub(super) fn is_lower_ir_temp_base(base: &str) -> bool {
 
 /// 判断某条 SSA 指令是否为优化 pass 插入的 hint/metadata (不对应真实计算).
 /// 这些指令以 Store 到 `__dcc_` 前缀符号的形式存在, 例如:
-///   - register_allocation: `__dcc_regalloc_done`
+///   - register_allocation: `__dcc_regalloc_done`（该 pass 已删，名单形状未变）
 ///   - auto_parallelization: `__dcc_parallel_hint`
 ///   - pgo: `__dcc_hot_hint` / `__dcc_cold_hint`
 ///
