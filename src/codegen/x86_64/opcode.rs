@@ -3013,34 +3013,482 @@ impl X86_64Opcode {
         }
     }
 
-    /// 渲染为 GAS AT&T 一行 (不含 \n).
-    /// 步骤 1: AluRm 的打样形态给真实输出, 其余变体给占位 (render 路径在步骤 6
-    /// 才切, 本步 -S 仍走 disasm.rs).
+    /// 渲染为 GAS AT&T 一行 (不含前导 tab / 换行).
+    ///
+    /// 真源语义: 类型化构造子发射时若没挂 gas_text, 渲染期会用本函数兜底.
+    /// 输出必须是**合法 AT&T 语法**, 且与 render_one.rs 的反推文本对齐 —— 这样
+    /// -S 输出才能被宿主 `as` 接受 (门禁 G4).
+    ///
+    /// 未知/占位形态返回 `/* unimplemented opcode variant */`, 不冒充合法指令.
     pub(crate) fn render(&self) -> String {
         use crate::codegen::shared::asm_operand::Width;
+        use crate::codegen::x86_64::emit::gas::{
+            dec_imm as gas_dec_imm, gp as gas_gp, mem_disp as gas_mem_disp, REG64 as G64,
+            XMM as GXMM,
+        };
+
+        // 寄存器宽度后缀 (AT&T): B8=b, B16=w, B32=l, B64=q.
+        // 与 render_one.rs REG* 表对齐.
+        fn width_suffix(w: Width) -> &'static str {
+            match w {
+                Width::B8 => "b",
+                Width::B16 => "w",
+                Width::B32 => "l",
+                Width::B64 => "q",
+                Width::B128 => "",
+                Width::B256 | Width::B512 | Width::Bare => "",
+            }
+        }
+
+        // AT&T 方向: source, dest. reg(idx, width) → "%rax" 等.
+        fn fmt_reg(idx: u8, w: Width) -> String {
+            match w {
+                Width::B128 => GXMM[(idx & 15) as usize].to_string(),
+                _ => gas_gp(idx, match w {
+                    Width::B8 => 1,
+                    Width::B16 => 2,
+                    Width::B32 => 4,
+                    Width::B64 => 8,
+                    Width::B128 => 8,
+                    Width::B256 | Width::B512 | Width::Bare => 8,
+                })
+                .to_string(),
+            }
+        }
+
+        fn fmt_operand(op: &Operand) -> String {
+            match op {
+                Operand::None => String::new(),
+                Operand::Reg(idx, w) => fmt_reg(*idx, *w),
+                Operand::Imm(v) => gas_dec_imm(*v),
+                Operand::Sym(s) => s.clone(),
+                Operand::SymDisp(s, d) => {
+                    if *d == 0 {
+                        s.clone()
+                    } else {
+                        format!("{s}{d:+}")
+                    }
+                },
+                Operand::Mem(m) => {
+                    let base_name = m.base.map(|b| G64[(b & 15) as usize]).unwrap_or("");
+                    let disp = m.disp;
+                    match (m.base, m.index) {
+                        (Some(_b), Some((ix, scale))) => {
+                            let ix_name = G64[(ix & 15) as usize];
+                            if disp == 0 {
+                                format!("({base_name},{ix_name},{scale})")
+                            } else {
+                                format!("{disp}({base_name},{ix_name},{scale})")
+                            }
+                        },
+                        (Some(b), None) => gas_mem_disp(b, disp as i64),
+                        (None, None) => format!("{disp}"),
+                        _ => String::from("/* mem unsupported */"),
+                    }
+                },
+            }
+        }
+
+        // AT&T 宽度后缀: 对 ALU 指令按 width 决定 add/addl/addq.
+        let alu_mnem = |op: &AluOp, w: Width| -> &'static str {
+            let s = width_suffix(w);
+            match op {
+                AluOp::Add => match s { "b"=>"addb","w"=>"addw","l"=>"addl",_=>"addq" },
+                AluOp::Sub => match s { "b"=>"subb","w"=>"subw","l"=>"subl",_=>"subq" },
+                AluOp::And => match s { "b"=>"andb","w"=>"andw","l"=>"andl",_=>"andq" },
+                AluOp::Or  => match s { "b"=>"orb", "w"=>"orw", "l"=>"orl", _=>"orq" },
+                AluOp::Xor => match s { "b"=>"xorb","w"=>"xorw","l"=>"xorl",_=>"xorq" },
+                AluOp::Cmp => match s { "b"=>"cmpb","w"=>"cmpw","l"=>"cmpl",_=>"cmpq" },
+                AluOp::Test=> match s { "b"=>"testb","w"=>"testw","l"=>"testl",_=>"testq" },
+                AluOp::Adc => match s { "b"=>"adcb","w"=>"adcw","l"=>"adcl",_=>"adcq" },
+                AluOp::Sbb => match s { "b"=>"sbbb","w"=>"sbbw","l"=>"sbbl",_=>"sbbq" },
+            }
+        };
+
         match self {
-            X86_64Opcode::AluRm {
-                op,
-                width,
-                dst,
-                src,
-            } => {
+            // ---- ALU reg/mem/imm ----
+            X86_64Opcode::AluRm { op, width, dst, src } => {
+                // 特殊打样: sub/add rsp, imm32 (与旧打样形态兼容, render 时走此路径).
                 if let (Operand::Reg(reg, Width::B64), Operand::Imm(imm)) = (dst, src) {
-                    let mnemonic = match op {
-                        AluOp::Add => "addq",
-                        AluOp::Sub => "subq",
-                        _ => return String::from("/* unhandled AluRm */"),
-                    };
                     if *reg == 4 {
-                        return format!("\t{}\t${}, %rsp", mnemonic, imm);
+                        let m = match op {
+                            AluOp::Add => "addq",
+                            AluOp::Sub => "subq",
+                            _ => return String::from("/* unhandled AluRm */"),
+                        };
+                        return format!("{m}\t${imm}, %rsp");
                     }
                 }
-                let _ = width;
-                String::from("/* unhandled AluRm */")
+                let m = alu_mnem(op, *width);
+                let d = fmt_operand(dst);
+                let s = fmt_operand(src);
+                if s.is_empty() {
+                    format!("{m}\t{d}")
+                } else {
+                    format!("{m}\t{s}, {d}")
+                }
             },
+
+            // ---- MOV family ----
+            X86_64Opcode::MovRm { width, dst, src, rip_relative } => {
+                let m = match width {
+                    Width::B8 => "movb",
+                    Width::B16 => "movw",
+                    Width::B32 => "movl",
+                    Width::B64 => "movq",
+                    Width::B128 => "movdqa",
+                    Width::B256 | Width::B512 | Width::Bare => "mov",
+                };
+                let d = fmt_operand(dst);
+                let s = if *rip_relative {
+                    if let Operand::Sym(sym) = src {
+                        format!("{sym}(%rip)")
+                    } else {
+                        fmt_operand(src)
+                    }
+                } else {
+                    fmt_operand(src)
+                };
+                format!("{m}\t{s}, {d}")
+            },
+
+            // ---- MOVSX/MOVZX ----
+            X86_64Opcode::MovExt { sign, from, to, dst, src, rip_relative } => {
+                // mnemonic: movsbl/movswl/movslq/movsbq / movzbl/movzwl/movzlq.
+                let m = match (sign, from, to) {
+                    (true, Width::B8, Width::B32) => "movsbl",
+                    (true, Width::B16, Width::B32) => "movswl",
+                    (true, Width::B8, Width::B64) => "movsbq",
+                    (true, Width::B16, Width::B64) => "movswq",
+                    (true, Width::B32, Width::B64) => "movsxd",
+                    (false, Width::B8, Width::B32) => "movzbl",
+                    (false, Width::B16, Width::B32) => "movzwl",
+                    (false, Width::B8, Width::B64) => "movzbq",
+                    (false, Width::B16, Width::B64) => "movzwq",
+                    _ => "/* movsz */",
+                };
+                let d = fmt_operand(dst);
+                let s = if *rip_relative {
+                    if let Operand::Sym(sym) = src {
+                        format!("{sym}(%rip)")
+                    } else {
+                        fmt_operand(src)
+                    }
+                } else {
+                    fmt_operand(src)
+                };
+                format!("{m}\t{s}, {d}")
+            },
+
+            // ---- IMUL r64, r/m64 ----
+            X86_64Opcode::ImulRm { width, dst, src } => {
+                let m = match width { Width::B16=>"imulw",Width::B32=>"imull",_=>"imulq" };
+                format!("{m}\t{}, {}", fmt_operand(src), fmt_operand(dst))
+            },
+
+            // ---- Unary (INC/DEC/NOT/NEG/MUL/IMUL/DIV/IDIV) ----
+            X86_64Opcode::UnaryRm { op, width, dst } => {
+                let s = width_suffix(*width);
+                let m = match op {
+                    UnaryOp::Inc => match s {"b"=>"incb","w"=>"incw","l"=>"incl",_=>"incq"},
+                    UnaryOp::Dec => match s {"b"=>"decb","w"=>"decw","l"=>"decl",_=>"decq"},
+                    UnaryOp::Not => match s {"b"=>"notb","w"=>"notw","l"=>"notl",_=>"notq"},
+                    UnaryOp::Neg => match s {"b"=>"negb","w"=>"negw","l"=>"negl",_=>"negq"},
+                    UnaryOp::Mul => "mul",
+                    UnaryOp::Imul => "imul",
+                    UnaryOp::Div => match s {"b"=>"divb","w"=>"divw","l"=>"divl",_=>"divq"},
+                    UnaryOp::Idiv=> match s {"b"=>"idivb","w"=>"idivw","l"=>"idivl",_=>"idivq"},
+                };
+                format!("{m}\t{}", fmt_operand(dst))
+            },
+
+            // ---- Shift (SHL/SHR/SAR/ROL/ROR) ----
+            X86_64Opcode::Shift { op, width, dst, amount } => {
+                let s = width_suffix(*width);
+                let base = match op {
+                    ShiftOp::Shl | ShiftOp::Sal => "shl",
+                    ShiftOp::Shr => "shr",
+                    ShiftOp::Sar => "sar",
+                    ShiftOp::Rol => "rol",
+                    ShiftOp::Ror => "ror",
+                    ShiftOp::Rcl => "rcl",
+                    ShiftOp::Rcr => "rcr",
+                };
+                let m = format!("{base}{s}");
+                let d = fmt_operand(dst);
+                match amount {
+                    ShiftAmount::Cl => format!("{m}\t%cl, {d}"),
+                    ShiftAmount::Imm8(v) => format!("{m}\t${v}, {d}"),
+                }
+            },
+
+            // ---- LEA ----
+            X86_64Opcode::Lea { dst, mem, rip_relative } => {
+                let d = fmt_operand(dst);
+                let s = if *rip_relative {
+                    if mem.disp != 0 {
+                        let sym = mem.disp;
+                        format!("{sym}(%rip)")
+                    } else {
+                        fmt_operand(&Operand::Mem(mem.clone()))
+                    }
+                } else {
+                    fmt_operand(&Operand::Mem(mem.clone()))
+                };
+                format!("leaq\t{s}, {d}")
+            },
+
+            // ---- CALL ----
+            X86_64Opcode::Call { target, pending_rel } => {
+                let t = fmt_operand(target);
+                // pending_rel=true 意味着发射时发的是 E8 rel32 (直接调用), 渲染为 `call target`.
+                // pending_rel=false (间接 call *reg / *mem) 渲染为 `call *target`.
+                if *pending_rel {
+                    format!("call\t{t}")
+                } else {
+                    format!("call\t*{t}")
+                }
+            },
+            X86_64Opcode::CallRel32 => String::from("call\t<target>"),
+
+            // ---- JMP ----
+            X86_64Opcode::Jmp { target, pending_rel } => {
+                let t = fmt_operand(target);
+                if *pending_rel {
+                    format!("jmp\t{t}")
+                } else {
+                    format!("jmp\t*{t}")
+                }
+            },
+            X86_64Opcode::JmpRel32 => String::from("jmp\t<target>"),
+            X86_64Opcode::JmpRmMem { base, disp } => {
+                format!("jmp\t*{}", gas_mem_disp(*base, *disp as i64))
+            },
+            X86_64Opcode::PushMemDisp8 { base, disp } => {
+                format!("push\t{}", gas_mem_disp(*base, *disp as i64))
+            },
+
+            // ---- JCC ----
+            X86_64Opcode::Jcc { cc, .. } => {
+                let m = match cc {
+                    CondCode::Eq=>"je", CondCode::Ne=>"jne",
+                    CondCode::Lt=>"jl", CondCode::Ge=>"jge",
+                    CondCode::Gt=>"jg", CondCode::Le=>"jle",
+                    CondCode::A=>"ja",  CondCode::Ae=>"jae",
+                    CondCode::B=>"jb",  CondCode::Be=>"jbe",
+                    CondCode::S=>"js",  CondCode::Ns=>"jns",
+                    CondCode::P=>"jp",  CondCode::Np=>"jnp",
+                    CondCode::O=>"jo",  CondCode::No=>"jno",
+                };
+                format!("{m}\t<target>")
+            },
+
+            // ---- RET ----
+            X86_64Opcode::Ret { add_imm } => {
+                match add_imm {
+                    None => String::from("ret"),
+                    Some(imm) => format!("ret\t${imm}"),
+                }
+            },
+
+            // ---- PUSH/POP ----
+            X86_64Opcode::Stack { op, width, dst } => {
+                let s = width_suffix(*width);
+                let m = match op {
+                    StackOp::Push => format!("push{s}"),
+                    StackOp::Pop  => format!("pop{s}"),
+                };
+                format!("{m}\t{}", fmt_operand(dst))
+            },
+
+            // ---- SSE/AVX arithmetic ----
+            X86_64Opcode::SimdArith { op, width, dst, src } => {
+                let w = match width {
+                    SimdWidth::SS => "ss", SimdWidth::SD => "sd",
+                    SimdWidth::PS => "ps", SimdWidth::PD => "pd",
+                    SimdWidth::DQ => "",
+                    SimdWidth::O => "",
+                    SimdWidth::B => "b", SimdWidth::W => "w",
+                    SimdWidth::D => "d", SimdWidth::Q => "q",
+                };
+                let base = match op {
+                    SimdArithOp::Add => "add", SimdArithOp::Sub => "sub",
+                    SimdArithOp::Mul => "mul", SimdArithOp::Div => "div",
+                    SimdArithOp::Max => "max", SimdArithOp::Min => "min",
+                    SimdArithOp::Sqrt => "sqrt",
+                    SimdArithOp::Ucomi => "ucomi", SimdArithOp::Comi => "comi",
+                    SimdArithOp::Xorps => "xorps", SimdArithOp::Xorpd => "xorpd",
+                    SimdArithOp::Pand => "pand", SimdArithOp::Por => "por", SimdArithOp::Pxor => "pxor",
+                    SimdArithOp::CvtSdSs => "cvt",
+                    SimdArithOp::Andps => "andps", SimdArithOp::Andpd => "andpd",
+                    SimdArithOp::Orps => "orps", SimdArithOp::Orpd => "orpd",
+                    SimdArithOp::PAdd => "padd", SimdArithOp::PSub => "psub",
+                    SimdArithOp::Addps => "addps", SimdArithOp::Subps => "subps",
+                    SimdArithOp::Mulps => "mulps", SimdArithOp::Divps => "divps",
+                    SimdArithOp::Addpd => "addpd", SimdArithOp::Subpd => "subpd",
+                    SimdArithOp::Mulpd => "mulpd", SimdArithOp::Divpd => "divpd",
+                    SimdArithOp::Unpcklps => "unpcklps",
+                    SimdArithOp::PShiftImm8 => "ps",
+                    SimdArithOp::PCmpEq => "pcmpeq",
+                    SimdArithOp::PMinMaxUb => "pminub",
+                    SimdArithOp::PMaddwd => "pmaddwd",
+                    SimdArithOp::PSadbw => "psadbw",
+                    SimdArithOp::PSatW => "ps",
+                };
+                // packed integer 族加元素宽度 (paddb/paddw/paddd/paddq).
+                let m = match op {
+                    SimdArithOp::PAdd | SimdArithOp::PSub
+                    | SimdArithOp::PCmpEq | SimdArithOp::PSatW => format!("{base}{w}"),
+                    _ => format!("{base}{w}"),
+                };
+                format!("{m}\t{}, {}", fmt_operand(src), fmt_operand(dst))
+            },
+
+            // ---- PSLLQ/PSRLQ/PSRAD (xmm, imm8) ----
+            X86_64Opcode::SimdShiftImm8 { op, width, dst, imm8 } => {
+                // 精确按 (op, width) 出助记符 (psllq / pslld 在 P11 Bucket G2 注释里).
+                let m = match (op, width) {
+                    (SimdArithOp::PShiftImm8, SimdWidth::Q) => "psllq",
+                    (SimdArithOp::PShiftImm8, SimdWidth::D) => "pslld",
+                    _ => "ps",
+                };
+                format!("{m}\t${imm8}, {}", fmt_operand(dst))
+            },
+
+            // ---- SETcc r8 ----
+            X86_64Opcode::Setcc { cc, dst } => {
+                let m = match cc {
+                    CondCode::Eq=>"sete", CondCode::Ne=>"setne",
+                    CondCode::Lt=>"setl", CondCode::Ge=>"setge",
+                    CondCode::Gt=>"setg", CondCode::Le=>"setle",
+                    CondCode::A=>"seta",  CondCode::Ae=>"setae",
+                    CondCode::B=>"setb",  CondCode::Be=>"setbe",
+                    CondCode::S=>"sets",  CondCode::Ns=>"setns",
+                    CondCode::P=>"setp",  CondCode::Np=>"setnp",
+                    CondCode::O=>"seto",  CondCode::No=>"setno",
+                };
+                format!("{m}\t{}", fmt_operand(dst))
+            },
+
+            // ---- SSE MOV (movss/movsd/movups/movupd/movaps/movapd) ----
+            X86_64Opcode::SimdMov { width, opcode10, dst, src } => {
+                let m = match width {
+                    SimdWidth::SS => "movss", SimdWidth::SD => "movsd",
+                    SimdWidth::PS => "movups", SimdWidth::PD => "movupd",
+                    SimdWidth::O => "movaps", SimdWidth::DQ => "movdqa",
+                    _ => "mov",
+                };
+                let d = fmt_operand(dst);
+                let s = fmt_operand(src);
+                let _ = opcode10; // 方向已由 dst/src 位置表达, 不需额外标注.
+                format!("{m}\t{s}, {d}")
+            },
+            X86_64Opcode::SimdMovRip { store, width, xmm } => {
+                let m = match width {
+                    SimdWidth::SS => "movss", SimdWidth::SD => "movsd",
+                    _ => "mov",
+                };
+                let xr = GXMM[(*xmm & 15) as usize];
+                if *store {
+                    format!("{m}\t{xr}, <sym>(%rip)")
+                } else {
+                    format!("{m}\t<sym>(%rip), {xr}")
+                }
+            },
+
+            // ---- SHLD/SHRD ----
+            X86_64Opcode::ShldShrd { is_shld, width, dst, src } => {
+                let s = width_suffix(*width);
+                let m = if *is_shld { format!("shld{s}") } else { format!("shrd{s}") };
+                format!("{m}\t{}, {}, %cl", fmt_operand(src), fmt_operand(dst))
+            },
+
+            // ---- CVT GPR<->XMM ----
+            X86_64Opcode::Cvt2Sd { to_xmm, width, gpr_64, dst, src } => {
+                let m = match (to_xmm, width) {
+                    (true, SimdWidth::SS) => "cvtsi2ss",
+                    (true, SimdWidth::SD) => "cvtsi2sd",
+                    (false, SimdWidth::SS) => "cvttss2si",
+                    (false, SimdWidth::SD) => "cvttsd2si",
+                    _ => "cvt",
+                };
+                let _ = gpr_64;
+                format!("{m}\t{}, {}", fmt_operand(src), fmt_operand(dst))
+            },
+
+            // ---- ROUNDSS/ROUNDSD ----
+            X86_64Opcode::SimdRound { width, imm8, dst, src } => {
+                let m = match width { SimdWidth::SS => "roundss", SimdWidth::SD => "roundsd", _ => "round" };
+                format!("{m}\t${imm8}, {}, {}", fmt_operand(src), fmt_operand(dst))
+            },
+
+            // ---- X87 ----
+            X86_64Opcode::X87 { op, mem } => {
+                match op {
+                    X87Op::Fixed { escap, modrm } => {
+                        // 常见固定 escap 表 (D9 / DD / DE / DF 编码空间).
+                        // 与 render_one.rs 内 x87 表对齐.
+                        let key = (*escap, *modrm);
+                        let name = match key {
+                            (0xD9, 0xE8) => "fld1", (0xD9, 0xEE) => "fldz",
+                            (0xD9, 0xEB) => "fldpi", (0xD9, 0xE0) => "fchs",
+                            (0xD9, 0xE2) => "fcos", (0xD9, 0xE3) => "fsin",
+                            (0xD9, 0xF8) => "fnop",
+                            (0xDD, 0xD9) => "fstp %st(0)",
+                            (0xDE, 0xC1) => "faddp", (0xDE, 0xE9) => "fsubrp",
+                            (0xDE, 0xC9) => "fmulp", (0xDE, 0xF9) => "fdivrp",
+                            (0xDF, 0xE9) => "fucomip",
+                            _ => return format!("/* x87 fixed {escap:02x} {modrm:02x} */"),
+                        };
+                        String::from(name)
+                    },
+                    X87Op::FldMem { width } | X87Op::FstpMem { width } | X87Op::FildMem { width } => {
+                        let m = match width {
+                            4 if matches!(op, X87Op::FldMem { .. }) => "flds",
+                            8 if matches!(op, X87Op::FldMem { .. }) => "fldl",
+                            10 if matches!(op, X87Op::FldMem { .. }) => "fldt",
+                            4 if matches!(op, X87Op::FstpMem { .. }) => "fstps",
+                            8 if matches!(op, X87Op::FstpMem { .. }) => "fstpl",
+                            10 if matches!(op, X87Op::FstpMem { .. }) => "fstpt",
+                            4 if matches!(op, X87Op::FildMem { .. }) => "fildl",
+                            8 if matches!(op, X87Op::FildMem { .. }) => "fildll",
+                            _ => "fld",
+                        };
+                        let mem_str = mem.as_ref()
+                            .map(|m| fmt_operand(&Operand::Mem(m.clone())))
+                            .unwrap_or_default();
+                        format!("{m}\t{mem_str}")
+                    },
+                    X87Op::MxcsrMem { store } => {
+                        let m = if *store { "stmxcsr" } else { "ldmxcsr" };
+                        let mem_str = mem.as_ref()
+                            .map(|m| fmt_operand(&Operand::Mem(m.clone())))
+                            .unwrap_or_default();
+                        format!("{m}\t{mem_str}")
+                    },
+                    X87Op::FcwMem { store } => {
+                        let m = if *store { "fnstcw" } else { "fldcw" };
+                        let mem_str = mem.as_ref()
+                            .map(|m| fmt_operand(&Operand::Mem(m.clone())))
+                            .unwrap_or_default();
+                        format!("{m}\t{mem_str}")
+                    },
+                    X87Op::EnvMem { store } => {
+                        let m = if *store { "fnstenv" } else { "fldenv" };
+                        let mem_str = mem.as_ref()
+                            .map(|m| fmt_operand(&Operand::Mem(m.clone())))
+                            .unwrap_or_default();
+                        format!("{m}\t{mem_str}")
+                    },
+                }
+            },
+
+            // ---- Raw (内嵌字节 + mnemonic) ----
             X86_64Opcode::Raw { mnemonic, .. } => {
                 mnemonic.clone().unwrap_or_else(|| "/* raw */".into())
             },
+
+            // ---- NoArg (固定无操作数) ----
             X86_64Opcode::NoArg { op } => {
                 let s: &str = match op {
                     NoArgOp::Cld => "cld",
@@ -3059,7 +3507,75 @@ impl X86_64Opcode {
                 };
                 String::from(s)
             },
-            _ => String::from("/* unimplemented opcode variant */"),
+
+            // ---- MOVD/MOVQ GPR<->XMM ----
+            X86_64Opcode::GprXmm { to_xmm, width, dst, src } => {
+                let m = match width {
+                    Width::B64 => "movq",
+                    Width::B32 => "movd",
+                    _ => "mov",
+                };
+                let _ = to_xmm;
+                format!("{m}\t{}, {}", fmt_operand(src), fmt_operand(dst))
+            },
+
+            // ---- BSF/BSR ----
+            X86_64Opcode::BitScan { is_bsr, width, dst, src } => {
+                let s = width_suffix(*width);
+                let m = if *is_bsr { format!("bsr{s}") } else { format!("bsf{s}") };
+                format!("{m}\t{}, {}", fmt_operand(src), fmt_operand(dst))
+            },
+
+            // ---- CMOVcc ----
+            X86_64Opcode::Cmovcc { cc, width, dst, src } => {
+                let s = width_suffix(*width);
+                let c = match cc {
+                    CondCode::Eq=>"e", CondCode::Ne=>"ne",
+                    CondCode::Lt=>"l", CondCode::Ge=>"ge",
+                    CondCode::Gt=>"g", CondCode::Le=>"le",
+                    CondCode::A=>"a",  CondCode::Ae=>"ae",
+                    CondCode::B=>"b",  CondCode::Be=>"be",
+                    CondCode::S=>"s",  CondCode::Ns=>"ns",
+                    CondCode::P=>"p",  CondCode::Np=>"np",
+                    CondCode::O=>"o",  CondCode::No=>"no",
+                };
+                format!("cmov{c}{s}\t{}, {}", fmt_operand(src), fmt_operand(dst))
+            },
+
+            // ---- LOCK CMPXCHG / XCHG / XADD ----
+            X86_64Opcode::LockCmpxchgRm { width, reg_idx, mem } => {
+                let s = width_suffix(*width);
+                let r = fmt_reg(*reg_idx, *width);
+                let m_str = fmt_operand(&Operand::Mem(mem.clone()));
+                format!("lock cmpxchg{s}\t{r}, {m_str}")
+            },
+            X86_64Opcode::LockXchgRm { width, reg_idx, mem } => {
+                let s = width_suffix(*width);
+                let r = fmt_reg(*reg_idx, *width);
+                let m_str = fmt_operand(&Operand::Mem(mem.clone()));
+                format!("lock xchg{s}\t{r}, {m_str}")
+            },
+            X86_64Opcode::LockXaddRm { width, reg_idx, mem } => {
+                let s = width_suffix(*width);
+                let r = fmt_reg(*reg_idx, *width);
+                let m_str = fmt_operand(&Operand::Mem(mem.clone()));
+                format!("lock xadd{s}\t{r}, {m_str}")
+            },
+            X86_64Opcode::XchgRm { width, dst, src, .. } => {
+                let s = width_suffix(*width);
+                format!("xchg{s}\t{}, {}", fmt_operand(src), fmt_operand(dst))
+            },
+
+            // ---- CMPSs/CMPSd (xmm, xmm, imm8) ----
+            X86_64Opcode::SimdCmpImm8 { width, imm8, dst, src } => {
+                let m = match width { SimdWidth::SS => "cmpss", SimdWidth::SD => "compsd", _ => "cmpss" };
+                format!("{m}\t${imm8}, {}, {}", fmt_operand(src), fmt_operand(dst))
+            },
+
+            // ---- PMULLD ----
+            X86_64Opcode::Pmulld { dst, src } => {
+                format!("pmulld\t{}, {}", fmt_operand(src), fmt_operand(dst))
+            },
         }
     }
 }
