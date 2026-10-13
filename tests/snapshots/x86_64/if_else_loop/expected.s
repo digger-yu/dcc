@@ -1,7 +1,7 @@
 classify:
 push %r13
 mov %rsp,%r13
-sub $0x3f0,%rsp
+sub $0x2f0,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 mov %rdi,-0x40(%r13)
@@ -50,7 +50,7 @@ ret
 sum_range:
 push %r13
 mov %rsp,%r13
-sub $0x420,%rsp
+sub $0x320,%rsp
 mov %rbx,-0x10(%r13)
 mov %r12,-0x18(%r13)
 mov %r14,-0x20(%r13)

@@ -665,6 +665,19 @@ impl Codegen {
             // tramp_reserve + stack_reserve`，再 16 对齐）。
             let var_bytes: i64 = self.var_map_total_slots.saturating_mul(8);
             let sc_slot: i64 = if f.is_nested { 8 } else { 0 }; // 嵌套函数需要静态链槽位
+            // P3 (honest reservation): 有多少直接嵌套函数就需要多少个 32B trampoline。
+            // 之前固定 256B 意味着无嵌套函数每帧白开 256B；现在从「全函数统一」
+            // 变成「按 body.items 里直接嵌套函数个数 × 32B」。
+            let mut p3_nested_count: i64 = 0;
+            if let Some(body) = &f.body {
+                let mut collected: Vec<crate::ast::FuncDecl> = Vec::new();
+                Self::collect_direct_nested_funcs(&body.items, &mut collected);
+                p3_nested_count = collected.len() as i64;
+            }
+            let tramp_reserve_honest: i64 = p3_nested_count.saturating_mul(32);
+            // bf_rmw: 无静态扫描时沿用固定 64B (P3 之后会接入位域深度扫描)。
+            let bf_rmw_reserve_honest: i64 = crate::codegen::x86_64::abi::layout::BF_RMW_RESERVE;
+            let vec_reserve_honest: i64 = crate::codegen::x86_64::abi::layout::VEC_RESERVE;
             let va_slots: i64 = if f.is_variadic {
                 if self.target.sse {
                     48 + 128
@@ -687,9 +700,9 @@ impl Codegen {
                     sret_need,
                     va_slots,
                     static_chain_slot: sc_slot,
-                    bf_rmw_reserve: crate::codegen::x86_64::abi::layout::BF_RMW_RESERVE,
-                    vec_reserve: crate::codegen::x86_64::abi::layout::VEC_RESERVE,
-                    tramp_reserve: crate::codegen::x86_64::abi::layout::TRAMP_RESERVE,
+                    bf_rmw_reserve: bf_rmw_reserve_honest,
+                    vec_reserve: vec_reserve_honest,
+                    tramp_reserve: tramp_reserve_honest,
                     stack_reserve: self.stack_reserve_bytes(),
                     spill_slots,
                 },
@@ -945,7 +958,7 @@ impl Codegen {
                     static_chain_slot: 0,
                     bf_rmw_reserve: 0,
                     vec_reserve: crate::codegen::x86_64::abi::layout::VEC_RESERVE,
-                    tramp_reserve: crate::codegen::x86_64::abi::layout::TRAMP_RESERVE,
+                    tramp_reserve: 0,
                     stack_reserve: self.stack_reserve_bytes(),
                     spill_slots,
                 },

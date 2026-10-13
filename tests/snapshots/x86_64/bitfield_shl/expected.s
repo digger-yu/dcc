@@ -1,7 +1,7 @@
 set_b:
 push %r13
 mov %rsp,%r13
-sub $0x410,%rsp
+sub $0x310,%rsp
 mov %rbx,-0x10(%r13)
 mov %r12,-0x18(%r13)
 <nop padding>
@@ -11,9 +11,9 @@ mov -0x58(%r13),%rax
 movslq (%rax),%rax
 mov %rax,-0x50(%r13)
 lea -0x50(%r13),%rax
-mov %rax,-0x1d8(%r13)
+mov %rax,-0xd8(%r13)
 mov (%rax),%eax
-mov %rax,-0x1e0(%r13)
+mov %rax,-0xe0(%r13)
 lea -0x50(%r13),%rax
 mov (%rax),%eax
 and $0x3,%rax
@@ -30,13 +30,13 @@ mov %r12,%r8
 or %r8,%rbx
 mov %rbx,%rax
 and $0x3,%rax
-mov -0x1d8(%r13),%rcx
+mov -0xd8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xfffffffffffffffc,%rcx
 or %rax,%rcx
-mov -0x1d8(%r13),%rdx
+mov -0xd8(%r13),%rdx
 mov %ecx,(%rdx)
-mov -0x1d8(%r13),%rdx
+mov -0xd8(%r13),%rdx
 mov (%rdx),%edx
 and $0x3,%rdx
 mov %rdx,%rax

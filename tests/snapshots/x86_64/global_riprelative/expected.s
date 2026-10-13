@@ -1,7 +1,7 @@
 set_i:
 push %r13
 mov %rsp,%r13
-sub $0x400,%rsp
+sub $0x300,%rsp
 <nop padding>
 mov %rdi,-0x48(%r13)
 lea 0x0(%rip),%rax
@@ -20,7 +20,7 @@ ret
 get_i:
 push %r13
 mov %rsp,%r13
-sub $0x3e0,%rsp
+sub $0x2e0,%rsp
 <nop padding>
 movslq 0x0(%rip),%rax
 movslq %eax,%rax
@@ -32,7 +32,7 @@ ret
 set_l:
 push %r13
 mov %rsp,%r13
-sub $0x400,%rsp
+sub $0x300,%rsp
 <nop padding>
 mov %rdi,-0x48(%r13)
 lea 0x0(%rip),%rax
@@ -50,7 +50,7 @@ ret
 get_l:
 push %r13
 mov %rsp,%r13
-sub $0x3e0,%rsp
+sub $0x2e0,%rsp
 <nop padding>
 mov 0x0(%rip),%rax
 <nop padding>
@@ -61,7 +61,7 @@ ret
 set_d:
 push %r13
 mov %rsp,%r13
-sub $0x400,%rsp
+sub $0x300,%rsp
 <nop padding>
 movsd %xmm0,-0x48(%r13)
 lea 0x0(%rip),%rax
@@ -80,7 +80,7 @@ ret
 get_d:
 push %r13
 mov %rsp,%r13
-sub $0x3e0,%rsp
+sub $0x2e0,%rsp
 <nop padding>
 movsd 0x0(%rip),%xmm0
 <nop padding>

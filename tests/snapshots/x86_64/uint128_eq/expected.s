@@ -1,7 +1,7 @@
 u128_eq:
 push %r13
 mov %rsp,%r13
-sub $0x400,%rsp
+sub $0x300,%rsp
 <nop padding>
 mov %rdi,-0x48(%r13)
 mov %rsi,-0x40(%r13)

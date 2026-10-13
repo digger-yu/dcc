@@ -1,7 +1,7 @@
 inc_b:
 push %r13
 mov %rsp,%r13
-sub $0x400,%rsp
+sub $0x300,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 mov %rdi,-0x50(%r13)

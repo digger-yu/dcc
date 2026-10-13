@@ -1,7 +1,7 @@
 sum_pair:
 push %r13
 mov %rsp,%r13
-sub $0x3f0,%rsp
+sub $0x2f0,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 mov %rdi,-0x48(%r13)
@@ -22,7 +22,7 @@ ret
 sum_ptf:
 push %r13
 mov %rsp,%r13
-sub $0x3f0,%rsp
+sub $0x2f0,%rsp
 <nop padding>
 movsd %xmm0,-0x40(%r13)
 lea -0x40(%r13),%rax
@@ -44,7 +44,7 @@ ret
 make_pair:
 push %r13
 mov %rsp,%r13
-sub $0x410,%rsp
+sub $0x310,%rsp
 <nop padding>
 mov %rdi,-0x50(%r13)
 mov %rsi,-0x58(%r13)

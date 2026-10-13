@@ -1,7 +1,7 @@
 negate_f:
 push %r13
 mov %rsp,%r13
-sub $0x3f0,%rsp
+sub $0x2f0,%rsp
 <nop padding>
 movss %xmm0,-0x40(%r13)
 movss -0x40(%r13),%xmm0
@@ -15,7 +15,7 @@ ret
 negate_d:
 push %r13
 mov %rsp,%r13
-sub $0x3f0,%rsp
+sub $0x2f0,%rsp
 <nop padding>
 movsd %xmm0,-0x40(%r13)
 movsd -0x40(%r13),%xmm0

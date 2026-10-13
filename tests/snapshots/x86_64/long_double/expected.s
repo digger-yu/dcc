@@ -1,7 +1,7 @@
 ld_identity:
 push %r13
 mov %rsp,%r13
-sub $0x3f0,%rsp
+sub $0x2f0,%rsp
 <nop padding>
 fldt 0x10(%r13)
 fstpt -0x48(%r13)
@@ -14,7 +14,7 @@ ret
 ld_add:
 push %r13
 mov %rsp,%r13
-sub $0x400,%rsp
+sub $0x300,%rsp
 <nop padding>
 fldt 0x10(%r13)
 fstpt -0x48(%r13)
@@ -35,7 +35,7 @@ ret
 ld_mul:
 push %r13
 mov %rsp,%r13
-sub $0x400,%rsp
+sub $0x300,%rsp
 <nop padding>
 fldt 0x10(%r13)
 fstpt -0x48(%r13)

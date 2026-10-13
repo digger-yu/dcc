@@ -1,7 +1,7 @@
 l_b:
 push %r13
 mov %rsp,%r13
-sub $0x3f0,%rsp
+sub $0x2f0,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
 mov -0x40(%r13),%rax
@@ -15,7 +15,7 @@ ret
 l_s:
 push %r13
 mov %rsp,%r13
-sub $0x3f0,%rsp
+sub $0x2f0,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
 mov -0x40(%r13),%rax
@@ -29,7 +29,7 @@ ret
 l_i:
 push %r13
 mov %rsp,%r13
-sub $0x3f0,%rsp
+sub $0x2f0,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
 mov -0x40(%r13),%rax
@@ -42,7 +42,7 @@ ret
 l_l:
 push %r13
 mov %rsp,%r13
-sub $0x3f0,%rsp
+sub $0x2f0,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
 mov -0x40(%r13),%rax
@@ -55,7 +55,7 @@ ret
 l_off:
 push %r13
 mov %rsp,%r13
-sub $0x3f0,%rsp
+sub $0x2f0,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
 mov -0x40(%r13),%rax
@@ -69,7 +69,7 @@ ret
 l_glob:
 push %r13
 mov %rsp,%r13
-sub $0x3e0,%rsp
+sub $0x2e0,%rsp
 <nop padding>
 mov 0x0(%rip),%rax
 <nop padding>
