@@ -132,12 +132,12 @@ impl Codegen {
             }
         }
         // P10 闭环: 对所有「insn_records 里存在但没有 gas_text」的记录, 在渲染前
-        // 一次性用 disassemble_one_at 反推出 GAS 文本回填. 这一步与发射期字节
-        // (self.code) 完全只读, 不改变 .text; 因此 G10 快照不受影响.
+        // 一次性补 gas_text. 两级 fallback:
+        //   1) 类型化变体 (Lea/AluRm/MovExt/...) → 直接调 op.render() 现场生成
+        //      (G6 已证明 render 无损).
+        //   2) Raw 变体 (发射点未带 mnemonic) → 走 disassemble_one_at 反推字节.
         //
-        // 目的: 让渲染主循环 100% 走 gas_text_by_pc 命中路径, 不再需要 fallback
-        // 分支. 若某条指令的字节解码失败 (越界 / 未知 opcode), 仍保留原样并在
-        // 主循环里走 .byte 兜底 (这种情况应在 -S hit rate 检查里暴露).
+        // 目的: 让渲染主循环 100% 走 gas_text_by_pc 命中路径, 逐步下线 disasm.
         for (pc, insn) in &self.insn_records {
             if insn.gas_text.is_some() {
                 continue;
@@ -146,11 +146,23 @@ impl Codegen {
                 Some(b) => b,
                 None => continue,
             };
-            // 用 self.code 从 pc 起反推单条指令; 长度 == bytes.len() 才接受 (
-            // 否则说明字节流与解码器不一致, 交由主循环 fallback 处理).
+            // 第一级: op.render() (类型化变体).
+            let render_text = insn.op.render();
+            if !render_text.is_empty() && render_text != "?" {
+                gas_text_map.insert(*pc, render_text);
+                gas_len_map.insert(*pc, bytes.len().max(1));
+                continue;
+            }
+            // 第二级: disassemble_one_at 反推 (Raw 兜底).
             if *pc as usize + bytes.len() > self.code.len() {
                 continue;
             }
+            // 注意: 这里 base_offset 必须用本函数的 text_start, 否则 disasm_calls /
+            // labels 用绝对地址, 而 disassemble_one_at 内部 `off = base + pos` 算出
+            // 的 off 与 disasm_calls 里存的键对不上 (差了函数 text_start 个字节).
+            // 在 build_asm_output 里没有统一 base; insn_records 的 pc 就是绝对地址,
+            // 所以这里传 base=0, pos=*pc as usize. 这样 off = *pc, 与 disasm_calls
+            // 里存的键 (at + 1, 也是绝对地址) 匹配.
             match tables::disassemble_one_at(
                 &self.code,
                 *pc as usize,
@@ -308,11 +320,6 @@ impl Codegen {
                         gas_text_by_pc.entry(*pc).or_insert(g.as_str());
                     }
                 }
-                let mut gas_hits: u64 = 0;
-                let mut total: u64 = 0;
-
-                // 把 disasm 解码单条指令封装成闭包; 对 gap 与无 gas_text 的指令都用它.
-                // 注意: labels/directives 已由外层 `dis` 循环统一输出, 这里只解码指令本身.
                 use crate::codegen::x86_64::render_one::disassemble_one_at;
                 let disasm_one = |pos: usize, out: &mut String| -> usize {
                     match disassemble_one_at(
@@ -344,11 +351,7 @@ impl Codegen {
                     }
                 };
 
-                let dis = |from: usize,
-                           to: usize,
-                           out: &mut String,
-                           gas_hits: &mut u64,
-                           total: &mut u64| {
+                let dis = |from: usize, to: usize, out: &mut String| {
                     let mut pos = from;
                     while pos < to && pos < layout.bytes.len() {
                         let off_abs = base + pos as u64;
@@ -386,17 +389,14 @@ impl Codegen {
                             // 已经给出了正确文本, 但我们这里直接用 gas_text 也一样).
                             let skip = first_byte_is_nop && !gas_is_nop;
                             if !skip {
-                                *total += 1;
                                 out.push('\t');
                                 out.push_str(g);
                                 out.push('\n');
-                                *gas_hits += 1;
                                 pos += len;
                                 continue;
                             }
                         }
                         // 3) fallback: 无 gas_text 或被 patch 成 nop, 走 disasm_one 输出.
-                        *total += 1;
                         let mut fb_out = String::new();
                         let len = disasm_one(pos, &mut fb_out);
                         out.push_str(&fb_out);
@@ -407,7 +407,7 @@ impl Codegen {
                 let mut cursor = 0usize;
                 for (off, lines) in &regions {
                     if *off > cursor {
-                        dis(cursor, *off, &mut out, &mut gas_hits, &mut total);
+                        dis(cursor, *off, &mut out);
                         cursor = *off;
                     }
                     for l in lines.iter() {
@@ -416,7 +416,7 @@ impl Codegen {
                     // passthrough 不占字节, cursor 不动。
                 }
                 if cursor < layout.bytes.len() {
-                    dis(cursor, layout.bytes.len(), &mut out, &mut gas_hits, &mut total);
+                    dis(cursor, layout.bytes.len(), &mut out);
                 }
                 if self.emit_cfi {
                     out.push_str("\t.cfi_endproc\n");

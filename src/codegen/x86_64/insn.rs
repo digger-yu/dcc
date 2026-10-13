@@ -85,7 +85,16 @@ impl Insn {
     /// P11 Bucket AK: 段覆盖前缀 (FS=0x64 / GS=0x65). 单字节, 仅作用于下一条
     /// 指令. 取代散落的 `Insn::raw_bytes(&[seg])` 调用点.
     pub fn seg_prefix(seg: u8) -> Self {
-        Insn::raw_bytes(&[seg])
+        let mnemonic = match seg {
+            0x64 => "%fs:",
+            0x65 => "%gs:",
+            0x2E => "%cs:",
+            0x36 => "%ss:",
+            0x3E => "%ds:",
+            0x26 => "%es:",
+            _ => "",
+        };
+        Insn::raw_with_mnemonic(&[seg], mnemonic)
     }
 
     /// P11 Bucket I: 无操作数/固定前缀指令 (cld/mfence/rep movsb/stosb/movsq).

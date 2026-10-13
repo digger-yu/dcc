@@ -689,8 +689,6 @@ impl X86_64Opcode {
                 dst,
                 src,
             } => {
-                // [约定] 见顶部 "B8 寄存器字段 4..7 的 REX 二义": B8 形态
-                //   src/dst ∈ {4,5,6,7} 一律当 spl/bpl/sil/dil 并强发 REX;
                 //   需要 ah/ch/dh/bh 的调用方必须走 Raw.
                 // 形态分支 A: (Add|Sub, B64, Rsp=Reg(4), Imm).
                 // 手写约定: 所有 emit_sub_rsp / emit_add_rsp 走 0x81 / id (imm32 LE),
@@ -3317,6 +3315,7 @@ impl X86_64Opcode {
                     SimdArithOp::Max => "max", SimdArithOp::Min => "min",
                     SimdArithOp::Sqrt => "sqrt",
                     SimdArithOp::Ucomi => "ucomi", SimdArithOp::Comi => "comi",
+                    // 已含宽度后缀的 (Xorps/Xorpd/Andps/Andpd/Orps/Orpd/..) 不再追加 w.
                     SimdArithOp::Xorps => "xorps", SimdArithOp::Xorpd => "xorpd",
                     SimdArithOp::Pand => "pand", SimdArithOp::Por => "por", SimdArithOp::Pxor => "pxor",
                     SimdArithOp::CvtSdSs => "cvt",
@@ -3335,10 +3334,21 @@ impl X86_64Opcode {
                     SimdArithOp::PSadbw => "psadbw",
                     SimdArithOp::PSatW => "ps",
                 };
-                // packed integer 族加元素宽度 (paddb/paddw/paddd/paddq).
+                // 已含宽度后缀的 (Xorps/Xorpd/Andps/Andpd/Orps/Orpd/Addps/Subps/Mulps/Divps/
+                // Addpd/Subpd/Mulpd/Divpd/Unpcklps/PMinMaxUb/PMaddwd/PSadbw) 不追加 w,
+                // 其余 (Add/Sub/Mul/Div/Max/Min/Sqrt/Ucomi/Comi/Pand/Por/Pxor/CvtSdSs/
+                // PAdd/PSub/PCmpEq/PSatW/PShiftImm8) 需要按宽度拼接.
                 let m = match op {
-                    SimdArithOp::PAdd | SimdArithOp::PSub
-                    | SimdArithOp::PCmpEq | SimdArithOp::PSatW => format!("{base}{w}"),
+                    SimdArithOp::Xorps | SimdArithOp::Xorpd
+                    | SimdArithOp::Andps | SimdArithOp::Andpd
+                    | SimdArithOp::Orps | SimdArithOp::Orpd
+                    | SimdArithOp::Addps | SimdArithOp::Subps
+                    | SimdArithOp::Mulps | SimdArithOp::Divps
+                    | SimdArithOp::Addpd | SimdArithOp::Subpd
+                    | SimdArithOp::Mulpd | SimdArithOp::Divpd
+                    | SimdArithOp::Unpcklps
+                    | SimdArithOp::PMinMaxUb | SimdArithOp::PMaddwd | SimdArithOp::PSadbw
+                        => format!("{base}"),
                     _ => format!("{base}{w}"),
                 };
                 format!("{m}\t{}, {}", fmt_operand(src), fmt_operand(dst))

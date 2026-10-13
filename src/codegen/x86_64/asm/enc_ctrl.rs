@@ -323,7 +323,10 @@ impl Codegen {
     }
     pub(crate) fn jmp_external(&mut self, l: &str) {
         let at = self.pos();
-        self.emit_insn(&Insn::raw(&[0xE9, 0, 0, 0, 0]));
+        self.emit_insn(&Insn::raw_with_mnemonic(
+            &[0xE9, 0, 0, 0, 0],
+            &format!("jmp {l}"),
+        ));
         self.disasm_calls.insert(at + 1, l.to_string());
         if self.relocatable {
             self.pending_func_rels.push((at + 1, l.to_string()));
