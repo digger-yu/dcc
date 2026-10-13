@@ -495,6 +495,54 @@ impl Codegen {
                     }
                 }
             } else if aggregate {
+                // ── 大块 force_mem 聚合: 一次性串拷贝, 不逐 chunk 展开 ───────────
+                // 当实参整体落在一段连续的 overflow 栈槽 (ArgLoc::Stack(base+i*8),
+                // 不混寄存器) 且对象大于阈值时, 源地址取到 rsi, lea rdi,[rsp+base],
+                // 用 cld; rep movsb 整块搬运。否则逐 chunk 路径会为 72MB 结构体
+                // 发射 ~3770 万条常驻 Insn, OOM (gcc.c-torture/compile/20050622-1.c).
+                let copy_base = arg_locs.first().and_then(|l| {
+                    if let ArgLoc::Stack(b) = l { Some(*b) } else { None }
+                }).filter(|b| {
+                    arg_locs.iter().enumerate().all(|(i, l)| {
+                        matches!(l, ArgLoc::Stack(off) if *off == b + i * 8)
+                    })
+                });
+                let copy_size = effective_ty.size();
+                if let (Some(base), true) = (copy_base, copy_size > 16) {
+                    // 源地址 → rsi (与 gen_sret_return 同样的取址优先级).
+                    let mut got_src = if let Expr::Ident { name, .. } = arg {
+                        if self.is_global_not_local(&name.name) {
+                            self.emit_global_addr(6, &name.name);
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if !got_src {
+                        got_src = self.gen_lvalue_addr(arg, 6);
+                    }
+                    if !got_src
+                        && (matches!(arg, Expr::CompoundLit { .. })
+                            || Self::rvalue_is_buffer_addr(arg))
+                    {
+                        self.gen_expr(arg, Self::EVAL_BASE);
+                        self.mov(6, 0);
+                        got_src = true;
+                    }
+                    if got_src {
+                        // rdi = outgoing 区目的地址; rcx = 字节数; cld; rep movsb
+                        self.emit_insn(&Insn::lea_reg_base_disp(7, 4, base as i32));
+                        self.mov_imm(1, copy_size as i128);
+                        self.emit_insn(&Insn::noarg(
+                            crate::codegen::x86_64::opcode::NoArgOp::Cld));
+                        self.emit_insn(&Insn::noarg(
+                            crate::codegen::x86_64::opcode::NoArgOp::RepMovsb));
+                        continue;
+                    }
+                    // 取址失败则回退到下方逐 chunk 路径。
+                }
                 // _Complex long double: 两个 16 字节 tbyte 栈槽, 必须走 x87
                 // fldt/fstpt, 不能进下方任何 GP movq / SSE movsd 子路径
                 // (movq 会破坏 10 字节 tbyte, 读侧只能拿到尾数低 8 字节,
