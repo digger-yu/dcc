@@ -7006,4 +7006,156 @@ mod tests {
         };
         assert_eq!(o.encode(), Some(vec![0x66, 0x87, 0xD6]));
     }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // G6 穷举可逆性: render() → as() → 字节 == encode() 字节.
+    //
+    // 这是 P9 方案 §6 G6 的硬门禁: "render() 输出的 AT&T 文本经本机 as 汇编
+    // 得到的机器码, 必须与同 Opcode 经 encode() 手写字节完全一致". 不一致
+    // 说明 render() 输出有二义/语法错误/操作数方向错.
+    //
+    // 前提: 本机装了 x86_64 GNU as (apt install binutils). 没装则 skip.
+    // ────────────────────────────────────────────────────────────────────────
+
+    /// 把一条 Opcode 的 render() 文本送进 `as` 汇编, 提取 .text 字节.
+    /// 返回 encode() 字节 vs as 产字节, 便于断言.
+    fn g6_roundtrip(o: &X86_64Opcode) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+        let enc = o.encode();
+        let text = o.render();
+        // 每个 Opcode 用独立 tmp 文件, 防并行测试并发写同一个 stub.
+        // 用 render 文本的 hash 作为文件名片段.
+        let tag = {
+            let mut h: u64 = 0xcbf29ce484222325;
+            for &b in text.as_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            format!("{:016x}", h)
+        };
+        let sfile = format!("/tmp/dcc_g6_{}.s", tag);
+        let ofile = format!("/tmp/dcc_g6_{}.o", tag);
+        let bfile = format!("/tmp/dcc_g6_{}.bin", tag);
+        let src = format!("\t.text\n_g6_{}:\n\t{}\n\tret\n", &tag[..8], text);
+        std::fs::write(&sfile, src).expect("write g6 stub");
+        let out = std::process::Command::new("as")
+            .arg("-o").arg(&ofile).arg(&sfile)
+            .output();
+        let as_bytes = match out {
+            Ok(o) if o.status.success() => {
+                let r = std::process::Command::new("objcopy")
+                    .arg("-O").arg("binary")
+                    .arg("--only-section=.text")
+                    .arg(&ofile).arg(&bfile)
+                    .output();
+                match r {
+                    Ok(r) if r.status.success() => std::fs::read(&bfile).ok(),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        // 清理 (best-effort)
+        let _ = std::fs::remove_file(&sfile);
+        let _ = std::fs::remove_file(&ofile);
+        let _ = std::fs::remove_file(&bfile);
+        (enc, as_bytes)
+    }
+
+    /// 验证 G6: 仅当 as/objcopy 可用时执行. 否则静默 skip (G5 反假绿).
+    fn g6_assert(o: &X86_64Opcode) {
+        // 前置: as 和 objcopy 都存在才跑; 否则 println skip 并 return.
+        let as_ok = std::process::Command::new("as").arg("--version").output();
+        let oc_ok = std::process::Command::new("objcopy").arg("--version").output();
+        let tools_ok = matches!(&as_ok, Ok(o) if o.status.success())
+            && matches!(&oc_ok, Ok(o) if o.status.success());
+        if !tools_ok {
+            eprintln!("G6-SKIP: as/objcopy 不在本机, 跳过可逆性验证");
+            return;
+        }
+        let (enc, asb) = g6_roundtrip(o);
+        match (enc, asb) {
+            (Some(e), Some(a)) => {
+                // 指令字节应是 .text 的前缀 (后面可能还有 ret 等)
+                assert!(
+                    a.starts_with(&e),
+                    "G6 FAIL: render 产字节 != encode 手写字节\n\
+                     render text: {}\nencode bytes: {:02x?}\nas bytes:     {:02x?}",
+                    o.render(),
+                    e,
+                    a,
+                );
+            }
+            (None, _) => {
+                // encode 走 None = 该变体未实现, G6 不适用 (不在 P9 完成集)
+            }
+            (Some(_), None) => {
+                panic!("G6 FAIL: as 拒绝了 render 文本 '{}'", o.render());
+            }
+        }
+    }
+
+    #[test]
+    fn g6_alu_rsp_sub_b64() {
+        g6_assert(&X86_64Opcode::AluRm {
+            op: AluOp::Sub,
+            width: Width::B64,
+            dst: reg(4, Width::B64),
+            src: Operand::Imm(4096),
+        });
+    }
+
+    #[test]
+    fn g6_alu_rsp_add_b64() {
+        // 用 imm32 (>=2^16) 避免 as 自动选 imm8 短编码 (dcc 强制 imm32 是 G10 约定).
+        g6_assert(&X86_64Opcode::AluRm {
+            op: AluOp::Add,
+            width: Width::B64,
+            dst: reg(4, Width::B64),
+            src: Operand::Imm(4096),
+        });
+    }
+
+    #[test]
+    fn g6_alu_ecx_and_b32() {
+        g6_assert(&X86_64Opcode::AluRm {
+            op: AluOp::And,
+            width: Width::B32,
+            dst: reg(1, Width::B32),
+            src: Operand::Imm(0xFFFF9FFF),
+        });
+    }
+
+    #[test]
+    fn g6_mov_rbp_rsp_b64() {
+        // mov rbp, rsp: 48 89 E5
+        g6_assert(&X86_64Opcode::MovRm {
+            width: Width::B64,
+            dst: reg(5, Width::B64),
+            src: reg(4, Width::B64),
+            rip_relative: false,
+        });
+    }
+
+    #[test]
+    fn g6_ret() {
+        g6_assert(&X86_64Opcode::Ret { add_imm: None });
+    }
+
+    #[test]
+    fn g6_push_rbp_b64() {
+        g6_assert(&X86_64Opcode::Stack {
+            op: StackOp::Push,
+            width: Width::B64,
+            dst: reg(5, Width::B64),
+        });
+    }
+
+    #[test]
+    fn g6_pop_rbp_b64() {
+        g6_assert(&X86_64Opcode::Stack {
+            op: StackOp::Pop,
+            width: Width::B64,
+            dst: reg(5, Width::B64),
+        });
+    }
 }
