@@ -42,7 +42,32 @@ impl Codegen {
         // mnemonic 的 Raw Insn, 追加进 asm_insn_log (供步骤 6 起的 -S 渲染消费)。
         // 分支体若走 asm_line_rejected 透传通道 (_, 不发字节), 则 __emitted
         // 为空, 不 push 日志 —— 这是预期行为。
+        // DCC_GAS_STATS: 统计被命中的助记符 (用于识别死分支, 验证后删除).
+        if std::env::var_os("DCC_GAS_STATS").is_some() {
+            let key = format!("ASM-HIT {mnemonic}");
+            self.emit_insn_stats
+                .entry(key)
+                .and_modify(|c| *c += 1)
+                .or_insert(1);
+        }
         let __step5_start = self.code.len() as u64;
+
+        // 方案 3: 高频助记符先尝试映射到类型化 X86_64Opcode, 复用统一 encode().
+        // 成功则直接发射并 return, 不进下面的手写 match 也不重复 push asm_insn_log
+        // (emit_insn 已经把 (pc, rec) 写进 insn_records, -S 渲染器从那里读 gas_text).
+        // encode() 返回 None (无法编码该形态) 时自动落回手写分支, 零风险渐进迁移.
+        // gas_text 用用户原文 gas_line_full, 保证 -S 输出逐字节不变 (G10 门禁).
+        let __mapped = if let Some(op) = crate::codegen::x86_64::asm::to_typed::try_map_typed(mnemonic, ops) {
+            let mut rec = Insn::new(op, &[]);
+            rec.gas_text = Some(gas_line_full.to_string());
+            self.emit_insn(&rec)
+        } else {
+            false
+        };
+        if __mapped {
+            return;
+        }
+
         match mnemonic {
             // 无操作数指令
             "nop" => {

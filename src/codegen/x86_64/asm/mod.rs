@@ -41,3 +41,4 @@ pub(crate) mod global;
 pub(crate) mod naked;
 pub(crate) mod opmap;
 pub(crate) mod template_resolve;
+pub(crate) mod to_typed; // AsmOperand→X86_64Opcode 转换层 (方案 3)
