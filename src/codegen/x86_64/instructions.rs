@@ -125,6 +125,23 @@ impl Codegen {
         }
     }
 
+    /// P12-A: 断言一条类型化指令必然编码成功的发射入口。
+    ///
+    /// 背景: `emit_insn` 返回 `false` (encode 返回 None) 曾被 160+ 处
+    /// `let _ = self.emit_insn(..)` 静默丢弃, 导致编码器不支持某形态时整条
+    /// 指令凭空消失, 直到 gcc-torture 才暴露。对「构造子已声明覆盖、且有单测
+    /// 锁死」的形态, 调用方应改用此入口: 编码失败在 debug build 立刻 panic,
+    /// 而不是等运行期崩溃。仍存在「合法但走 raw 兜底」的调用点请显式
+    /// match, 不要用本入口。
+    #[track_caller]
+    pub(crate) fn emit_insn_expect(&mut self, insn: &crate::codegen::x86_64::insn::Insn) {
+        assert!(
+            self.emit_insn(insn),
+            "emit_insn_expect: {:?} 未覆盖该形态 (encode 返回 None)",
+            insn
+        );
+    }
+
     /// 「刚求出来的值在哪个号里」的读接口（前置一·下）。`None` 就是「没有这个事实」，
     /// 而不是「猜一个」—— 调用方宁可自己再求值一次，也不得拿陈旧值往下算。
     pub fn eval_held(&self) -> Option<crate::location::RegId> {
