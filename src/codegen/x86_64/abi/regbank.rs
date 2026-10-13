@@ -30,7 +30,8 @@ use std::collections::HashSet;
 ///
 /// 为什么这里没有 MMX/段/控制寄存器：`Location` 表达的是「一个值能住在哪」，
 /// 而这三类在 dcc 里从来不是家（绑定类型今天只允许平台标准整型与指针，`bindable_ty`）。
-/// 它们属于指令操作数的寄存器类，留在 `codegen::asm_event::RegClass`，两边不混用。
+/// 它们属于指令操作数的寄存器类（MMX/x87/SIMD 在 asm 解析器的寄存器 kind 里），
+/// 两边不混用。
 pub type Bank = crate::location::RegBank;
 
 /// 自动分配可用的 callee-saved GP 池。**下标即位序**：`bit i` 归属 `POOL[i]`。
