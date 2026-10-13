@@ -1,0 +1,55 @@
+# Check asm text parity - G4/G5: `-c` 直产 vs. `-S --asm-fallback=gas` 经 <triple>-as 的 `.text` 一致门禁.
+#
+# 第一性原理: dcc 有两条产出真指令的路径 —— 二进制 renderer 直发 ELF,
+# 与 GAS 文本 renderer 渲染成 .s 再喂给真 GAS. 两条路径读同一个 CommonImage,
+# 但 emitter 独立; 单跑 `-c` 或单跑 `-S` 都抓不到各自的 bug. 只有把两条路径
+# 产出的 `.text` 归一化比对才能暴露.
+#
+# G5 反假绿: 缺少 `<triple>-as` 时, 脚本必须显式打印 ASM-PARITY-SKIP,
+# 而不是静默通过 —— 交叉后端的 parity 只有在工具链齐全时才能判定.
+
+name: check-asm-text-parity
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  parity:
+    name: "ASG text parity (-c vs --asm-fallback=gas)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # 交叉 as 与 host as 都装齐 —— G5 门禁在工具链齐全时才真参与判定,
+      # 否则脚本会打印 skip 并视为"不参与". 缺包 = 门禁空跑 = 假绿, 不可接受.
+      - name: Install binutils (host + cross)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            binutils \
+            binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabi \
+            binutils-mips-linux-gnu \
+            binutils-riscv64-linux-gnu
+
+      - name: Build dcc
+        run: cargo build --release
+
+      - name: Run asm text parity gate
+        # 空 corpus (默认): 门禁显式打印 skip, 不报错. 显式 CORPUS= 传入
+        # 时才真跑 parity. 这样门禁先以"结构上线"的形式接入 CI,
+        # 等后续下沉了完整 fixture 再逐步扩大 corpus.
+        run: |
+          bash scripts/check_asm_text_parity.sh
