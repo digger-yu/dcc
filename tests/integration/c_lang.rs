@@ -1923,6 +1923,45 @@ fn imaginary_ld_arith() {
     );
 }
 
+/// F7: named `_Imaginary long double` parameters must ABI-classify as X87
+/// (V4 fix in tyclass.rs). Two-TU cross-gcc link is pinned in
+/// c_abi_vararg::va_arg_mix_ild_param_cross_tu_gcc_interop; this test just
+/// smoke-compiles both sides so we catch regressions in the ABI classification
+/// early (compile-only, no link).
+#[test]
+#[cfg(unix)]
+fn ild_param_smoke_compile() {
+    let callee = include_str!("../fixtures/c/va_arg_mix/ild_param_callee.c");
+    let caller = include_str!("../fixtures/c/va_arg_mix/ild_param_caller.c");
+    let out_c = compile_only("ild-param-callee", callee);
+    assert!(
+        out_c.status.success(),
+        "ild_param_callee compile failed: {}",
+        String::from_utf8_lossy(&out_c.stderr)
+    );
+    let out_l = compile_only("ild-param-caller", caller);
+    assert!(
+        out_l.status.success(),
+        "ild_param_caller compile failed: {}",
+        String::from_utf8_lossy(&out_l.stderr)
+    );
+}
+
+/// F8: V5 anti-regression for `conjl` / `_Complex long double` negation.
+/// Four-opt-level gcc diff is pinned elsewhere; here we only smoke-compile so
+/// the E1128 sret watermark reconcile hook (P1) stays green on real cld sites.
+#[test]
+#[cfg(unix)]
+fn cld_va_arg_smoke_compile() {
+    let src = include_str!("../fixtures/c/cld_va_arg.c");
+    let out = compile_only("cld-va-arg", src);
+    assert!(
+        out.status.success(),
+        "cld_va_arg compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// M2.3: integer promotion and implicit conversion rules.
 #[test]
 #[cfg(unix)]

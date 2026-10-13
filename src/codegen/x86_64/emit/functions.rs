@@ -1066,16 +1066,18 @@ impl Codegen {
                 if let BlockItem::Decl(Decl::Var(v)) = item {
                     self.note_src_line(v.span.line);
                 }
-                // Stmt 边界 save/restore 物化槽水位；Decl 变量槽已加入 var_map，全程保留
-                // (va_arg 分配的聚合临时槽属于 Stmt，需回收，变量定义槽无需回收)。
+                // Stmt/Decl 边界 save/restore 物化槽水位; Decl 变量本身已加入 var_map,
+                // 全程保留; 但初始化表达式内部经 alloc_sret_slot / alloc_local
+                // 分配的 materialize 临时槽须在 item 结束后回收, 否则长 cld/ild
+                // 链会一路累加导致 sret_watermark 与静态扫描口径失配。
                 match item {
                     BlockItem::Stmt(s) => {
-                        // Stmt 单独处理：从当前水位开始，结束时回收槽位（Decl 变量槽全程保留）
                         let mark = self.save_sret_watermark();
                         self.gen_stmt(s);
                         self.restore_sret_watermark(mark);
                     },
                     BlockItem::Decl(Decl::Var(v)) => {
+                        let mark = self.save_sret_watermark();
                         if v.is_static
                             && self
                                 .static_local_map
@@ -1227,6 +1229,7 @@ impl Codegen {
                                 }
                             }
                         }
+                        self.restore_sret_watermark(mark);
                     },
                     // 函数体顶层的局部 struct/union 定义: 含 VLA 字段时
                     // 声明点绑定总大小槽 (与 gen_block_items 同处理)

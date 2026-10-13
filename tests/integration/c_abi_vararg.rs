@@ -704,6 +704,20 @@ fn va_arg_mix_ld80_namedparam_cross_tu_gcc_interop() {
     assert_eq!(rc, 0, "ld80_namedparam: caller 逐判据返回 1..4，0 表示形参与 st(0) 返回均对");
 }
 
+/// P4 F7 (V4): 具名 `_Imaginary long double` 形参 ABI 归类。与 long double 同一
+/// SysV X87 类 —— 每参 16B 栈槽、真 80-bit 编码、返回值 st(0)。dcc 旧实现
+/// `abi/tyclass.rs` 无 `Type::Imaginary` 臂, 把 ild 按 8B GP 传入。四方向
+/// （gcc|gcc / dcc|dcc / dcc callee+gcc caller / gcc callee+dcc caller）
+/// 全部为 0 才算 ABI 一致。
+#[test]
+#[cfg(unix)]
+fn va_arg_mix_ild_param_cross_tu_gcc_interop() {
+    let callee = include_str!("../fixtures/c/va_arg_mix/ild_param_callee.c");
+    let caller = include_str!("../fixtures/c/va_arg_mix/ild_param_caller.c");
+    let rc = run_gcc_two_tu_cross_check("va-mix-ild-param", callee, caller);
+    assert_eq!(rc, 0, "ild_param: caller 逐判据返回 1..4，0 表示 ild 形参与 st(0) 返回均对");
+}
+
 /// D8（**已修并全档转正**）：`va_arg` 取 VLA（运行时尺寸）聚合后，`d.data[i]` 的
 /// 基址必须从 VLA **元数据槽里加载**（`mov -0x78(%r13),%rax`），不能 `lea` 那个槽本身；
 /// 而调用侧把整块 VLA 聚合作为变参实参传出去时，也必须拿到同一个数据区。
