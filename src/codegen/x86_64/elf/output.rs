@@ -131,6 +131,46 @@ impl Codegen {
                 gas_len_map.insert(*pc, len.max(1));
             }
         }
+        // P11: 内联汇编块 (asm_insn_log) 独立于 insn_records.
+        // emit_asm_instr 在发射时用 raw_with_gas 存了用户原文, 但**没有**
+        // emit_insn, 所以没有进 insn_records. 必须在此单独补进 gas_text_map,
+        // 否则 -S 渲染这些位置时走到 disasm 反推 (输出 "/* raw */" 或不对应原文).
+        //
+        // 更微妙的是: emit_asm_mov 内部对一条 mov 用了多次 emit_insn (opcode / modrm /
+        // disp 各一次), 每次都单独 push 一条 (pc, Insn::raw) 到 insn_records.
+        // 所以 asm_insn_log 里那条 (pc_start, rec) 覆盖了 insn_records 里连续 N 条
+        // 单字节记录的**范围**. 我们把 asm_insn_log 反推成 [pc_start, pc_end) 区间,
+        // 区间内的 insn_records 全部用用户原文覆盖.
+        if std::env::var_os("DCC_DEBUG_GAS_FILL").is_some() {
+            eprintln!("[GAS-FILL] asm_insn_log entries: {}", self.asm_insn_log.len());
+        }
+        // 先收集 P11 覆盖的所有 [pc_start, pc_end) 区间, 后续 P10 要跳过这些 pc,
+        // 否则 P10 会把 insn_records 里 opcode 切片的 "/* raw */" 重新覆写掉正确的 gas_text.
+        let mut p11_ranges: Vec<(u64, u64)> = Vec::new();
+        for i in 0..self.asm_insn_log.len() {
+            let (pc, insn) = &self.asm_insn_log[i];
+            let Some(g) = &insn.gas_text else { continue };
+            if std::env::var_os("DCC_DEBUG_GAS_FILL").is_some() {
+                eprintln!("[GAS-FILL] log[{i}] pc={pc} gas={g:?}");
+            }
+            // 计算本条 asm 指令覆盖的字节区间 [pc, pc_end).
+            // bytes 即 Raw::bytes, 是本次 emit_asm_instr 发射的整段.
+            let Some(self_bytes) = insn.encode_bytes() else { continue };
+            let pc_end = pc + self_bytes.len() as u64;
+            // 区间起点直接登记.
+            gas_text_map.insert(*pc, g.clone());
+            gas_len_map.insert(*pc, self_bytes.len());
+            // 区间内的其它 pc (opcode/modrm/disp 被 emit_insn 切成的单字节 record)
+            // 全部标记为 "已被父指令覆盖", 避免渲染主循环对它们单独 disasm 出
+            //  "/* raw */". 具体做法: 在 [pc+1, pc_end) 每个 pc 写一条 "" 文本,
+            // 渲染主循环遇到 "" 时跳过 (见主循环代码).
+            for p in (*pc + 1)..pc_end {
+                gas_text_map.entry(p).or_insert_with(|| String::new());
+                gas_len_map.entry(p).or_insert(1);
+            }
+            p11_ranges.push((*pc, pc_end));
+        }
+        let in_p11_range = |pc: u64| p11_ranges.iter().any(|(s, e)| pc >= *s && pc < *e);
         // P10 闭环: 对所有「insn_records 里存在但没有 gas_text」的记录, 在渲染前
         // 一次性补 gas_text. 两级 fallback:
         //   1) 类型化变体 (Lea/AluRm/MovExt/...) → 直接调 op.render() 现场生成
@@ -142,6 +182,12 @@ impl Codegen {
             if insn.gas_text.is_some() {
                 continue;
             }
+            // P11 已用 asm_insn_log 覆盖了 [pc_start, pc_end) 区间. insn_records 里
+            // 那些被切成 opcode/modrm/disp 的单字节 Raw 记录不应该再被 P10 处理,
+            // 否则 "/* raw */" 会把用户原文覆写掉.
+            if in_p11_range(*pc) {
+                continue;
+            }
             let bytes = match insn.encode_bytes() {
                 Some(b) => b,
                 None => continue,
@@ -149,7 +195,7 @@ impl Codegen {
             // 第一级: op.render() (类型化变体).
             let render_text = insn.op.render();
             if !render_text.is_empty() && render_text != "?" {
-                gas_text_map.insert(*pc, render_text);
+                gas_text_map.insert(*pc, render_text.clone());
                 gas_len_map.insert(*pc, bytes.len().max(1));
                 continue;
             }
@@ -383,18 +429,24 @@ impl Codegen {
                             .map(|g| g.starts_with("nop"))
                             .unwrap_or(false);
                         if let Some(g) = gas_text_by_pc.get(&off_abs) {
-                            let len = gas_len_map.get(&off_abs).copied().unwrap_or(1).max(1);
                             // 若首字节是 nop 但 gas_text 不是 nop (说明被 patch 过), 跳过.
                             // 若首字节是 nop 且 gas_text 也是 nop, 用 gas_text (虽然 disasm
                             // 已经给出了正确文本, 但我们这里直接用 gas_text 也一样).
                             let skip = first_byte_is_nop && !gas_is_nop;
-                            if !skip {
+                            // P11: 空 gas_text 是 asm_insn_log 区间内的占位符
+                            // (opcode/modrm/disp 被切成的中间字节), 不输出用户原文,
+                            // 落到 fallback disasm_one 由反推结果接管 (通常就是 "nop" /
+                            // 续接字节), 长度由 disasm 自行解码.
+                            let empty = g.is_empty();
+                            if !skip && !empty {
+                                let len = gas_len_map.get(&off_abs).copied().unwrap_or(1).max(1);
                                 out.push('\t');
                                 out.push_str(g);
                                 out.push('\n');
                                 pos += len;
                                 continue;
                             }
+                            // skip / empty: 落到下面的 disasm_one 路径, 由反推负责输出和 pos 前进.
                         }
                         // 3) fallback: 无 gas_text 或被 patch 成 nop, 走 disasm_one 输出.
                         let mut fb_out = String::new();

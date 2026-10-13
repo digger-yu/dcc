@@ -805,8 +805,11 @@ impl Codegen {
         let seg = self.global_seg_prefix(global);
         // lea r11, [rip + disp32] (RIP-relative, 链接时修补 PC 相对位移)
         // P11: typed Lea RIP-relative (encoder 字节: 4C 8D 1D disp32).
+        // 参考 emit_global_addr (instructions.rs:1380) 的做法: 必须在此显式挂 gas_text,
+        // 否则 P10 后处理会用 op.render() 兜底, 而 render() 在 rip_relative=true && disp=0
+        // 时只输出 "leaq 0, %r11", 丢失用户原文里的 `idx(%rip)` 符号引用.
         let lea_pos = self.pos();
-        self.emit_insn(&Insn::new(
+        let mut lea_insn = Insn::new(
             crate::codegen::x86_64::opcode::X86_64Opcode::Lea {
                 dst: crate::codegen::x86_64::opcode::Operand::Reg(
                     11,
@@ -821,7 +824,9 @@ impl Codegen {
                 rip_relative: true,
             },
             &[],
-        ));
+        );
+        lea_insn.gas_text = Some(format!("lea {global}(%rip), %r11"));
+        self.emit_insn(&lea_insn);
         self.pending_data_rels
             .push((lea_pos + 3, global.to_string()));
         let is_float = matches!(elem_ty, Type::Float);

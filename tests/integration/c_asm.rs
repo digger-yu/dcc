@@ -511,13 +511,13 @@ fn asm_clobber_guards_the_register_that_holds_a_value() {
         );
     };
     let home = extract_function_body(&asm_text, "home_across_clobber");
-    assert_wraps("home_across_clobber", &home, "mov $12345, %rbx");
+    assert_wraps("home_across_clobber", &home, "movq $12345, %rbx");
     assert!(
         home.contains("mov %rax, %rbx"),
         "被守护的号仍然必须是变量的家（判据不得退化成「看见 clobber 就不绑」）:\n{home}"
     );
     let temp = extract_function_body(&asm_text, "temp_across_clobber");
-    assert_wraps("temp_across_clobber", &temp, "mov $7777, %rbx");
+    assert_wraps("temp_across_clobber", &temp, "movq $7777, %rbx");
     // Phase 5.1 起右操作数暂存号不再固定 %rcx：分配器在延伸池（r8/r9）里选号，
     // 所以乘积的两个操作数一个在溅出槽号（%rbx）一个在选出来的暂存号（实测 %r8）。
     // 判据保留原意——「守护后溅出槽的值还能被乘回」——但接受任意号组合。

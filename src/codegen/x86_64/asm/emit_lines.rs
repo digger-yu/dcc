@@ -3664,7 +3664,10 @@ impl Codegen {
             // inline_seg_prefix 是内存操作数里的 %fs:/%gs: 等, 不直接拼回行首.
             s.push_str(mnemonic);
             if !operands_str.is_empty() {
-                s.push('\t');
+                // 用空格而不是 tab: dcc 其它 raw_with_gas 发射点 (instructions.rs / mem/*.rs)
+                // 统一用空格分隔助记符与操作数, 集成测试也按 "call leaf" / "mov ..., %rax"
+                // 的空格形态做 starts_with 判据. tab 会让测试 starts_with("call ") 落空.
+                s.push(' ');
                 s.push_str(operands_str);
             }
             s
