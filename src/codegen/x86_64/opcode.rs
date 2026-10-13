@@ -1359,21 +1359,20 @@ impl X86_64Opcode {
                     }
                     let mut out = Vec::with_capacity(11);
                     if is_b64 {
-                        // P11: 若 imm 落在 32 位无符号范围 [0, 0xFFFFFFFF], 可以用
-                        // 48 B8 + imm32 (零扩展) 编码为 7 字节, 而不是 10 字节 imm64.
-                        let imm_u64 = *imm as i64 as u64;
-                        let fits_imm32_zero_ext = imm_u64 <= 0xFFFF_FFFF;
+                        // REX.W + B8+r = MOV r64, imm64: 固定吃 8 字节立即数.
+                        // 曾在此用「imm <= 0xFFFFFFFF 可零扩展成 4 字节」优化成
+                        // 7 字节编码, 但 B8+r 在 REX.W=1 语境下 CPU 永远按 10 字节
+                        // (操作码2 + imm64 8) 取指, 少发 4 字节会让下一条指令的
+                        // 前 3 字节被吞进 imm64, 整条 movq/xorps 边界错位 (float 取
+                        // 负 negate_f 曾因此把 movq 前缀 66 48 0f 吞进立即数).
+                        // 零扩展短编码只对无 REX.W 的 MOV r32,imm32 合法 (见下).
                         let mut rex = 0x48u8;
                         if *reg_idx >= 8 {
                             rex |= 0x01;
                         }
                         out.push(rex);
                         out.push(0xB8 + (reg_idx & 7));
-                        if fits_imm32_zero_ext {
-                            out.extend_from_slice(&(imm_u64 as u32).to_le_bytes());
-                        } else {
-                            out.extend_from_slice(&(*imm as i64).to_le_bytes());
-                        }
+                        out.extend_from_slice(&(*imm as i64).to_le_bytes());
                     } else {
                         // B32
                         if *reg_idx >= 8 {
@@ -3454,14 +3453,18 @@ mod tests {
 
     #[test]
     fn mov_rm_mov_rax_imm64() {
-        // mov rax, 0x80000000:  fits 32-bit zero-ext imm, encode as 48 B8 00 00 00 80 (7 bytes)
+        // mov rax, 0x80000000: REX.W + B8+r = MOV r64,imm64, always 10 bytes
+        // (opcode2 + imm64), even though the value fits in 32 bits.
         let o = X86_64Opcode::MovRm {
             rip_relative: false,
             width: Width::B64,
             dst: reg(0, Width::B64),
             src: Operand::Imm(0x80000000),
         };
-        assert_eq!(o.encode(), Some(vec![0x48, 0xB8, 0x00, 0x00, 0x00, 0x80]));
+        assert_eq!(
+            o.encode(),
+            Some(vec![0x48, 0xB8, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00])
+        );
     }
 
     #[test]
