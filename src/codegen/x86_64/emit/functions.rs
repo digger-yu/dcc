@@ -1374,5 +1374,39 @@ impl Codegen {
         // 跳转必须已全部可解析。并行 worker 里这一条把「标号在别的 chunk 被
         // 同名覆盖」从静默误编译变成发射期错误 (而不是等到合并/回填之后)。
         self.check_pending_labels_closed(&f.name.name);
+        // P1 对账：生成期 sret_watermark 峰值不得超过规划期 sret_need 预算。
+        // 漏算的站点 (F9 那类复数变宽 cast 链) 会在这里以 ICE 现形，而不是
+        // 在运行期压穿帧底 (C1 的"静默错值" → 编译期归因)。
+        self.reconcile_sret_watermark();
+    }
+
+    /// P1: `reconcile_frame_demand` 的第一个子对账——sret/物化带。
+    /// 对比生成期累积的实际水位 `sret_watermark` 与规划期静态扫描得出的
+    /// `frame_layout.sret_need`。溢出即 ICE (E1128)，同时给出行级提示指
+    /// 到 `func_setup.rs::sret_bytes_expr` 需要登记的站点。
+    fn reconcile_sret_watermark(&mut self) {
+        if self.frame_layout.frame_size <= 0 {
+            // unresolved() 占位帧 (规划尚未走)：裸函数 / naked / 内联 asm。
+            return;
+        }
+        let peak = self.sret_watermark;
+        let budget = self.frame_layout.sret_need;
+        if peak <= budget {
+            return;
+        }
+        self.report_internal_bug(
+            "E1128",
+            format!(
+                "sret watermark exceeded plan in `{}`: generated {}B peak vs planned {}B budget \
+                 (overshoot {}B). A new `alloc_sret_slot` call site was not reflected in \
+                 `max_sret_bytes` in func_setup.rs.",
+                self.current_func_name,
+                peak,
+                budget,
+                peak - budget,
+            ),
+            "Look for an unregistered alloc_sret_slot site and add its bytes to \
+             sret_bytes_expr / SretRule.  Silence until P3 rolls out honest scanning.",
+        );
     }
 }
