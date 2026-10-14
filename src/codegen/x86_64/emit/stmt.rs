@@ -729,9 +729,17 @@ impl Codegen {
                 // 如果死分支含有标签, 必须正常生成该分支代码.
                 if let Ok(cv) = const_eval::eval(cond) {
                     let has_labels_in_then = Self::stmt_contains_label(then_);
+                    let has_labels_in_else = else_.as_ref().map_or(false, |s| Self::stmt_contains_label(s));
                     if cv != 0 {
                         // condition is true
                         self.gen_stmt(then_);
+                        // else 分支里可能含被 then 分支 goto 跳转的标签（如 20030503-1.c:
+                        // `if (1) goto foo; else { foo: ... }`），必须也发射 else 分支。
+                        if has_labels_in_else {
+                            if let Some(el) = else_ {
+                                self.gen_stmt(el);
+                            }
+                        }
                     } else if has_labels_in_then {
                         // condition is false but then-body has labels that
                         // external gotos may target — must generate it
@@ -876,7 +884,19 @@ impl Codegen {
                         10,
                     ));
                 }
-                let lbl = self.c_label_to_asm(&target.name);
+                // non-local goto: label 定义在父函数里, 必须用父函数名作为命名空间,
+                // 否则 c_label_to_asm 生成 `.Ll_<child>_<label>` 而父函数发射
+                // `label:` 时生成 `.Ll_<parent>_<label>`, 两者不匹配 (E1102)。
+                let lbl = if is_nonlocal {
+                    let parent = self
+                        .nested_func_parent
+                        .get(&self.current_func_name)
+                        .cloned()
+                        .unwrap_or_else(|| self.current_func_name.clone());
+                    format!(".Ll_{}_{}", parent, target.name)
+                } else {
+                    self.c_label_to_asm(&target.name)
+                };
                 self.jmp_rel32(&lbl, JumpKind::Jmp);
             },
             Stmt::Label { name, stmt, .. } => {
@@ -942,7 +962,7 @@ impl Codegen {
                 let sel_off = self.var_offset(&s_name);
                 self.store_stack(2, sel_off);
             },
-            Stmt::Switch { expr, cases, .. } => {
+            Stmt::Switch { expr, cases, prelude, .. } => {
                 // switch: 计算表达式, 比较链跳转到对应 case 体.
                 // 布局: 所有比较集中在开头 (相等跳 l_case_i), 无匹配
                 // 跳 default / break 出口; case 体按源码顺序物理排列,
@@ -1106,6 +1126,14 @@ impl Codegen {
                     self.jmp_rel32(&l_default, JumpKind::Jmp);
                 } else {
                     self.jmp_rel32(&l_break, JumpKind::Jmp);
+                }
+                // 发射前驱段: `switch(x){ foo: case 1: ... }` 中 foo: 等出现在
+                // 第一个 case 之前的普通语句/标签。按 C 语义它们物理排在第一个
+                // case 体之前 (fall-through 到第一个 case), 同时也能被 goto 直接命中。
+                // 发射点在分派链之后、第一个 l_case 标签之前: 分派链永远不会落到
+                // 这里, 只有 goto 或 (理论上) 落入 switch 的执行才会走到。
+                if !prelude.is_empty() {
+                    self.gen_block_items(prelude);
                 }
                 // case 体按顺序生成, 无 break 时 fall-through 自然成立
                 for (case, l_case) in case_bodies {
@@ -1287,8 +1315,28 @@ impl Codegen {
                         .needs_runtime_init(&self.current_func_name, &v.name.name)
                 {
                     if let Some(init) = &v.init {
-                        self.gen_expr(init, Self::EVAL_BASE);
-                        self.emit_global_store(0, &v.name.name);
+                        // 数组型 static local (如 `static const void *l[] = {&&a, &&b};`):
+                        // InitList 中的每个元素都要逐元素写入对应偏移,
+                        // 不能用 gen_expr(EVAL_BASE) + 单次 store (只写第一个元素).
+                        if let Expr::InitList { inits, .. } = init {
+                            if let Type::Array(elem_ty, _) = &v.ty {
+                                let elem_size = elem_ty.size();
+                                let mut off: i32 = 0;
+                                for item in inits.iter() {
+                                    if let InitItem::Expr(e) = item {
+                                        self.gen_expr(e, Self::EVAL_BASE);
+                                        self.emit_global_store_offset(0, &v.name.name, off);
+                                        off += elem_size as i32;
+                                    }
+                                }
+                            } else {
+                                self.gen_expr(init, Self::EVAL_BASE);
+                                self.emit_global_store(0, &v.name.name);
+                            }
+                        } else {
+                            self.gen_expr(init, Self::EVAL_BASE);
+                            self.emit_global_store(0, &v.name.name);
+                        }
                     }
                     return;
                 }

@@ -1486,7 +1486,7 @@ impl Lowering {
             Stmt::Block { b, span } => {
                 (Vec::new(), b.items.iter().filter_map(|i| self.lower_item(i)).collect(), span)
             },
-            Stmt::Switch { expr, cases, span } => (
+            Stmt::Switch { expr, cases, span, .. } => (
                 vec![self.lower_expr(expr)],
                 cases
                     .iter()

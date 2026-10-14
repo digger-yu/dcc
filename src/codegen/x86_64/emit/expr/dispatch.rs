@@ -161,6 +161,7 @@ impl Codegen {
                     && Self::is_integer_type(&l.ty())
                     && Self::is_integer_type(&r.ty())
                     && Self::is_integer_type(binop_ty)
+                    && !Self::expr_has_side_effects(e)
                 {
                     if let Ok(val) = const_eval::eval(e) {
                         self.mov_imm(dst, val);
@@ -3098,8 +3099,25 @@ impl Codegen {
                                     .needs_runtime_init(&self.current_func_name, &v.name.name)
                             {
                                 if let Some(init) = &v.init {
-                                    self.gen_expr(init, Self::EVAL_BASE);
-                                    self.emit_global_store(0, &v.name.name);
+                                    if let Expr::InitList { inits, .. } = init {
+                                        if let Type::Array(elem_ty, _) = &v.ty {
+                                            let elem_size = elem_ty.size();
+                                            let mut off: i32 = 0;
+                                            for item in inits.iter() {
+                                                if let InitItem::Expr(e) = item {
+                                                    self.gen_expr(e, Self::EVAL_BASE);
+                                                    self.emit_global_store_offset(0, &v.name.name, off);
+                                                    off += elem_size as i32;
+                                                }
+                                            }
+                                        } else {
+                                            self.gen_expr(init, Self::EVAL_BASE);
+                                            self.emit_global_store(0, &v.name.name);
+                                        }
+                                    } else {
+                                        self.gen_expr(init, Self::EVAL_BASE);
+                                        self.emit_global_store(0, &v.name.name);
+                                    }
                                 }
                                 continue;
                             }

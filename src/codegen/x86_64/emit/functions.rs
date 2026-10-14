@@ -657,7 +657,7 @@ impl Codegen {
             // 与上面同一根因、同一条轴: 复合字面量 / VM 尺寸元信息等只在代码生成
             // 时才 `register_var` 的对象现在有自己的一条带（§11.23 步 3），它的尺寸就是
             // 本函数在这里定下的 `late_slot_budget`，没有再挤变量区。
-            self.plan_late_slot_budget(f.body.as_ref());
+            self.plan_late_slot_budget(f.body.as_ref(), &f.params);
             // 帧布局**解算**（P12 Phase 2）：以前这里是一段现场求和，现在只保留
             // 输入；所有带边界由 `abi::layout::LayoutMap::resolve` 一次算完。
             // 求和项与求和顺序与搬迁前字面一致（`var_bytes + hdr + sret_need +
@@ -942,7 +942,7 @@ impl Codegen {
                 );
             }
             // 包含 padding 条目, 每个占 8 字节. 使用累加器替代 O(n) 遍历.
-            self.plan_late_slot_budget(f.body.as_ref());
+            self.plan_late_slot_budget(f.body.as_ref(), &f.params);
             let var_bytes: i64 = self.var_map_total_slots.saturating_mul(8);
             // 同一份布局解算（无参/`main` 分支）。该分支今天不**参与**变参 save area /
             // 静态链 / 位域 RMW 三个预留（见 `abi/layout.rs` 文件头记的「不对称 1」），
@@ -1078,6 +1078,10 @@ impl Codegen {
                     },
                     BlockItem::Decl(Decl::Var(v)) => {
                         let mark = self.save_sret_watermark();
+                        // extern 声明不分配栈槽 (与 gen_block_items / collect_frame_var_decls 口径一致)
+                        if v.is_extern && v.init.is_none() {
+                            continue;
+                        }
                         if v.is_static
                             && self
                                 .static_local_map
@@ -1089,8 +1093,25 @@ impl Codegen {
                             {
                                 // static local 需要运行时初始化: 发射初始化代码到全局地址
                                 if let Some(init) = &v.init {
-                                    self.gen_expr(init, Self::EVAL_BASE);
-                                    self.emit_global_store(0, &v.name.name);
+                                    if let Expr::InitList { inits, .. } = init {
+                                        if let Type::Array(elem_ty, _) = &v.ty {
+                                            let elem_size = elem_ty.size();
+                                            let mut off: i32 = 0;
+                                            for item in inits.iter() {
+                                                if let InitItem::Expr(e) = item {
+                                                    self.gen_expr(e, Self::EVAL_BASE);
+                                                    self.emit_global_store_offset(0, &v.name.name, off);
+                                                    off += elem_size as i32;
+                                                }
+                                            }
+                                        } else {
+                                            self.gen_expr(init, Self::EVAL_BASE);
+                                            self.emit_global_store(0, &v.name.name);
+                                        }
+                                    } else {
+                                        self.gen_expr(init, Self::EVAL_BASE);
+                                        self.emit_global_store(0, &v.name.name);
+                                    }
                                 }
                                 continue;
                             }

@@ -9,7 +9,7 @@ use crate::ast::*;
 use crate::codegen::shared::asm_operand::Width;
 use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::x86_64::insn::Insn;
-use crate::codegen::x86_64::opcode::{AluOp, Operand as OpcodeOperand, X86_64Opcode};
+use crate::codegen::x86_64::opcode::{AluOp, Operand as OpcodeOperand, SimdArithOp, SimdWidth, X86_64Opcode};
 
 use crate::diagnostics::Span;
 
@@ -17,12 +17,12 @@ impl super::super::super::Codegen {
     /// 发射增量/减量表达式代码 (pre/post ++/-- for integer, float, pointer, member access)
     pub fn gen_inc_dec(&mut self, e: &Expr, dst: u8, is_pre: bool, is_inc: bool) {
         let inner_ty = e.ty();
-        // 浮点 (含 long double): 走 IEEE ±1.0 路径 - 暂不处理，待删除 Phase
+        // 浮点 (含 long double): 走 IEEE ±1.0 路径
         if matches!(inner_ty, Type::Float | Type::Double | Type::LongDouble | Type::Imaginary(_))
             && !inner_ty.is_ptr()
         {
-            // TODO: Call gen_float_inc_dec from here during deletion phase
-            unimplemented!("float inc/dec - see mod.rs gen_float_inc_dec");
+            self.gen_float_inc_dec(e, dst, is_pre, is_inc, &inner_ty);
+            return;
         }
         let step: i64 = if inner_ty.is_ptr() {
             if let Type::Ptr(ref inner) = inner_ty {
@@ -943,18 +943,176 @@ impl super::super::super::Codegen {
         self.emit_insn(&Insn::alu_rm_reg_imm32_b64_full_gas(op_ext, dst, step, &gas));
     }
 
-    /// 浮点增量/减量：暂不实现 - 走 gen_float_inc_dec 路径
+    /// 浮点增量/减量：x87 或 SSE 路径，把 lvalue 的值 ±1.0 写回
     fn gen_float_inc_dec(
         &mut self,
-        _lv: &Expr,
-        _dst: u8,
-        _is_pre: bool,
-        _is_inc: bool,
-        _ty: &Type,
+        lv: &Expr,
+        dst: u8,
+        is_pre: bool,
+        is_inc: bool,
+        ty: &Type,
     ) {
-        // Delegate to existing implementation in mod.rs
-        // TODO: Move full implementation here when deleting from mod.rs
-        unimplemented!("gen_float_inc_dec moved to increment.rs pending deletion phase");
+        // 展开 Imaginary 内型，与 gen_float_load / gen_float_store 保持口径。
+        let eff_ty = match ty {
+            Type::Imaginary(inner) => &inner.base,
+            _ => ty,
+        };
+        // 1. 取 lvalue 地址到 rax
+        if !self.gen_lvalue_addr(lv, 0) {
+            return;
+        }
+        // 2. 分配栈 scratch：地址 8B + (前缀用) 16B 浮点临时槽（对齐 long double tbyte）
+        self.emit_insn(&Insn::sub_rsp_imm(24)); // sub rsp, 24
+        // 3. 把地址存到 [rsp+16]
+        self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 4, 16)); // mov [rsp+16], rax
+        // 4. 从 [rax] 按类型加载当前值到 xmm0 / st(0)
+        if self.float_in_st0(eff_ty) {
+            // x87 路径：fld tbyte / qword / dword [rax]
+            self.emit_load_scalar_float_at(eff_ty, 0); // st(0) = old
+        } else {
+            // SSE 路径：movss / movsd [rax], xmm0
+            self.emit_load_scalar_float_at(eff_ty, 0); // xmm0 = old
+        }
+        // 5. 后自增/后自减：把旧值保存到 scratch 槽（[rsp..]，8 字节足够）
+        if !is_pre {
+            if self.float_in_st0(eff_ty) {
+                // fstp tbyte / qword / dword [rsp]
+                if matches!(eff_ty, Type::LongDouble) {
+                    self.emit_insn(&Insn::x87_mem(
+                        crate::codegen::x86_64::opcode::X87Op::FstpMem { width: 10 },
+                        4,
+                        0,
+                    )); // fstp tbyte [rsp]
+                } else if matches!(eff_ty, Type::Float) {
+                    self.emit_insn(&Insn::x87_mem(
+                        crate::codegen::x86_64::opcode::X87Op::FstpMem { width: 4 },
+                        4,
+                        0,
+                    )); // fstp dword [rsp]
+                } else {
+                    self.emit_insn(&Insn::x87_mem(
+                        crate::codegen::x86_64::opcode::X87Op::FstpMem { width: 8 },
+                        4,
+                        0,
+                    )); // fstp qword [rsp]
+                }
+                // 重新加载回 st(0)（因为 fstp 弹出栈）
+                if matches!(eff_ty, Type::LongDouble) {
+                    self.emit_insn(&Insn::x87_mem(
+                        crate::codegen::x86_64::opcode::X87Op::FldMem { width: 10 },
+                        4,
+                        0,
+                    )); // fld tbyte [rsp]
+                } else if matches!(eff_ty, Type::Float) {
+                    self.emit_insn(&Insn::x87_mem(
+                        crate::codegen::x86_64::opcode::X87Op::FldMem { width: 4 },
+                        4,
+                        0,
+                    )); // fld dword [rsp]
+                } else {
+                    self.emit_insn(&Insn::x87_mem(
+                        crate::codegen::x86_64::opcode::X87Op::FldMem { width: 8 },
+                        4,
+                        0,
+                    )); // fld qword [rsp]
+                }
+            } else if matches!(eff_ty, Type::Float) {
+                self.emit_insn(&Insn::simd_mov_mem(true, SimdWidth::SS, 0, 0)); // movss [rsp], xmm0
+            } else {
+                self.emit_insn(&Insn::simd_mov_mem(true, SimdWidth::SD, 0, 0)); // movsd [rsp], xmm0
+            }
+        }
+        // 6. 计算 new = old ± 1.0
+        // 先把 1.0 常数加载到 xmm1 / st(1)
+        if self.float_in_st0(eff_ty) {
+            // x87 路径：fld1 → st(0)=1.0, st(1)=old
+            self.emit_insn(&Insn::x87_fixed(0xD9, 0xE8)); // fld1
+            // 现在 st(0)=1.0, st(1)=old
+            if is_inc {
+                self.emit_insn(&Insn::x87_fixed(0xDE, 0xC1)); // faddp: st(1) += st(0), pop → st(0)=old+1
+            } else {
+                // fsubrp: st(1) = st(0) - st(1) = 1.0 - old, 不对。要 old - 1.0.
+                // 用 fsubp: st(1) = st(1) - st(0) = old - 1.0, pop
+                self.emit_insn(&Insn::x87_fixed(0xDE, 0xE9)); // fsubp: st(1) = st(1) - st(0), pop
+            }
+        } else {
+            // SSE 路径：先把 old 移到 xmm1，再加载 1.0 到 xmm0
+            self.emit_insn(&Insn::movapd_xmm(1, 0)); // movapd xmm1, xmm0 (old)
+            let c = crate::ast::FloatConst::from_int(eff_ty, 1);
+            self.gen_float_imm_load(c, eff_ty); // xmm0 = 1.0
+            // 现在 xmm0=1.0, xmm1=old
+            if is_inc {
+                // xmm1 = xmm1 + xmm0 = old + 1.0
+                if matches!(eff_ty, Type::Float) {
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Add, SimdWidth::SS, 1, 0));
+                    // addss xmm1, xmm0
+                } else {
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Add, SimdWidth::SD, 1, 0));
+                    // addsd xmm1, xmm0
+                }
+                // 把结果移回 xmm0
+                self.emit_insn(&Insn::movapd_xmm(0, 1)); // movapd xmm0, xmm1
+            } else {
+                // xmm1 = xmm1 - xmm0 = old - 1.0
+                if matches!(eff_ty, Type::Float) {
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Sub, SimdWidth::SS, 1, 0));
+                    // subss xmm1, xmm0
+                } else {
+                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Sub, SimdWidth::SD, 1, 0));
+                    // subsd xmm1, xmm0
+                }
+                self.emit_insn(&Insn::movapd_xmm(0, 1)); // movapd xmm0, xmm1
+            }
+        }
+        // 7. 写回 [rax] = new。地址在 [rsp+16]，先加载到 rax
+        self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 0, 4, 16)); // rax = [rsp+16]
+        // 8. 按类型存
+        self.emit_store_scalar_float_at(eff_ty, eff_ty, 0); // 把 xmm0/st(0) 写到 [rax]
+        // 9. 清理栈
+        self.emit_insn(&Insn::add_rsp_imm(24)); // add rsp, 24
+        // 10. 设置返回值
+        if is_pre {
+            // 前缀：返回新值（已在 xmm0 / st(0)）
+            // 若 dst != 0 且是 SSE 路径，值已在 xmm0，不需要 GP 搬运
+            // 但若调用方期望在 GP 寄存器？ 浮点 rvalue 约定就是 xmm0/st(0)，不动
+            let _ = dst;
+        } else {
+            // 后缀：返回旧值，需要重新加载到 xmm0 / st(0)
+            // 旧值存在 [rsp-24]... 我们已经 add rsp,24 了，所以从 [rsp] 重新读会越界
+            // 改为：在 add rsp 之前就把旧值搬到 xmm0 / st(0)
+            // 重排：
+            // 上面 step 9 提前到这里之前先处理后缀返回
+            // 为了简单：对后缀路径，我们刚才把旧值存到了 [rsp]，现在把它读出来
+            // 注意：上面已经 sub rsp,24 + add rsp,24 了，但 [rsp-24] 那块是红区（x86_64 上函数内部 [rsp-128] 是红区安全），
+            // 直接从 [rsp-24] 读
+            if self.float_in_st0(eff_ty) {
+                if matches!(eff_ty, Type::LongDouble) {
+                    self.emit_insn(&Insn::x87_mem(
+                        crate::codegen::x86_64::opcode::X87Op::FldMem { width: 10 },
+                        4,
+                        -24,
+                    )); // fld tbyte [rsp-24]
+                } else if matches!(eff_ty, Type::Float) {
+                    self.emit_insn(&Insn::x87_mem(
+                        crate::codegen::x86_64::opcode::X87Op::FldMem { width: 4 },
+                        4,
+                        -24,
+                    )); // fld dword [rsp-24]
+                } else {
+                    self.emit_insn(&Insn::x87_mem(
+                        crate::codegen::x86_64::opcode::X87Op::FldMem { width: 8 },
+                        4,
+                        -24,
+                    )); // fld qword [rsp-24]
+                }
+                // 此时 st(0) = old, st(1) 已被 pop（faddp/fsubp 后只剩结果，但结果已被写到内存
+                // 现在 st(0) 是旧值，正是我们要的
+            } else if matches!(eff_ty, Type::Float) {
+                self.emit_insn(&Insn::simd_mov_mem_base(false, SimdWidth::SS, 0, 4, -24)); // movss xmm0, [rsp-24]
+            } else {
+                self.emit_insn(&Insn::simd_mov_mem_base(false, SimdWidth::SD, 0, 4, -24)); // movsd xmm0, [rsp-24]
+            }
+        }
     }
 
     /// 长双精度增量/减量：x87 FPU 路径 - 占位符

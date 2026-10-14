@@ -110,8 +110,14 @@ impl Codegen {
                 if let Some(off) = field_off {
                     let off = off as i32;
                     if off != 0 {
-                        // add dst, off: 走 alu_rm_reg_imm32_b64 (恒 0x81 id)
-                        self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, dst, off as i64));
+                        // add dst, off: 手写字节 + GAS 文本 (与 lvalue.rs 一致),
+                        // 否则 -S 模式下 gas_text=None 会输出空 /* raw */ 注释.
+                        let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
+                        use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
+                        let gas = format!("add ${}, {}", off, GAS_REG64[(dst & 15) as usize]);
+                        let mut bytes = vec![rex, 0x81, 0xC0 | (dst & 7)];
+                        bytes.extend_from_slice(&off.to_le_bytes());
+                        self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
                     }
                 }
                 true

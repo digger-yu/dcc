@@ -1190,6 +1190,12 @@ impl Codegen {
         let Expr::Ident { name, ty, .. } = expr else {
             return;
         };
+        // 全局变量写回：使用 RIP-relative store，不得走 var_offset 栈槽路径
+        // (pr98096.c 里 "+r"(i) 全局触发 E1134/E1133)。
+        if self.is_global_not_local(&name.name) {
+            self.emit_global_store(reg, &name.name);
+            return;
+        }
         // 变量绑在寄存器里（用户的 `register asm`，或 P12 的自动分配）时，它的家
         // 不是栈槽。旧代码无条件按 `[r13+off]` 写回，于是 asm 的结果落进一个再没
         // 人读的槽里：实测 `register long v asm("rbx")` +

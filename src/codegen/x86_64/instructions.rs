@@ -1480,6 +1480,13 @@ impl Codegen {
     }
 
     pub fn emit_global_store(&mut self, reg: u8, name: &str) {
+        self.emit_global_store_offset(reg, name, 0);
+    }
+
+    /// 与 `emit_global_store` 相同, 但 disp32 字段先填 `elem_off`, 后续 patch
+    /// 会把它覆盖为 `sym_addr + elem_off - rip_addr`. 用于数组型 static local
+    /// 逐元素运行时初始化 (如 `static const void *l[] = {&&a, &&b};`).
+    pub fn emit_global_store_offset(&mut self, reg: u8, name: &str, elem_off: i32) {
         let resolved = self.resolve_global_key(name).to_string();
         // 同 load：段前缀只改指令字节，`is_tls` 只改重定位种类，两条轴不合并。
         self.emit_global_seg(&resolved);
@@ -1492,12 +1499,12 @@ impl Codegen {
         // 存回方向的**值**寄存器在 ModRM.reg 上，扩展它的是 REX.R(0x04)：
         // 旧代码 sz==1 对 reg>=8 只发全 0 的 0x40（存了 %al 而不是 %r8b），
         // sz==2/4 干脆不发前缀。8 位那支还要兼顾 %spl..%dil（4..7）只需「存在 REX」。
-        // P11 Bucket O8: 收敛到 typed Insn::mov_rm_rip. disp=0 占位.
+        // P11 Bucket O8: 收敛到 typed Insn::mov_rm_rip. disp=elem_off 占位.
         let ins: Insn = match sz {
-            1 => Insn::mov_rm_rip(false, Width::B8, reg, 0),
-            2 => Insn::mov_rm_rip(false, Width::B16, reg, 0),
-            4 => Insn::mov_rm_rip(false, Width::B32, reg, 0),
-            _ => Insn::mov_rm_rip(false, Width::B64, reg, 0),
+            1 => Insn::mov_rm_rip(false, Width::B8, reg, elem_off),
+            2 => Insn::mov_rm_rip(false, Width::B16, reg, elem_off),
+            4 => Insn::mov_rm_rip(false, Width::B32, reg, elem_off),
+            _ => Insn::mov_rm_rip(false, Width::B64, reg, elem_off),
         };
         let insn_len = ins.op.encode().map(|b| b.len()).unwrap_or(0);
         let disp32_pos = self.pos() + insn_len as u64 - 4;
@@ -1514,6 +1521,8 @@ impl Codegen {
         self.emit_insn(&insn);
         if tls_exec {
             self.pending_tls_rels.push((disp32_pos, resolved));
+        } else if elem_off != 0 {
+            self.pending_data_rels_with_off.push((disp32_pos, resolved, elem_off));
         } else {
             self.pending_data_rels.push((disp32_pos, resolved));
         }

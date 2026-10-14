@@ -184,6 +184,7 @@ pub struct Codegen {
     pub defined_funcs: HashSet<String>,                   // 本 TU 中有函数体的函数名
     pub error_attr_fns: HashSet<String>, // __attribute__((error)) 函数名 (调用时发射 ud2)
     pub pending_data_rels: Vec<(u64, String)>, // (disp32_pos, var_name) - 全局变量重定位
+    pub pending_data_rels_with_off: Vec<(u64, String, i32)>, // (disp32_pos, var_name, elem_off) - 带元素偏移的全局重定位(数组 static local 逐元素初始化)
     pub pending_sib_data_rels: Vec<(u64, String)>, // SIB base=101 (disp32 绝对寻址) - 需要 R_X86_64_32S
     pub data_section: Vec<u8>,                     // .data 节 (已初始化全局变量)
     pub bss_size: u64,                             // .bss 大小
@@ -836,6 +837,7 @@ impl Codegen {
             defined_funcs: HashSet::new(),
             error_attr_fns: HashSet::new(),
             pending_data_rels: vec![],
+            pending_data_rels_with_off: vec![],
             pending_sib_data_rels: vec![],
             data_section: vec![],
             bss_size: 0,

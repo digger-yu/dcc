@@ -161,6 +161,7 @@ fn lower_switch_stmt(s: &Stmt) -> Option<Stmt> {
     let Stmt::Switch {
         expr,
         cases,
+        prelude,
         span: _,
     } = s
     else {
@@ -263,27 +264,42 @@ fn lower_switch_stmt(s: &Stmt) -> Option<Stmt> {
         }));
     }
     let chain = current_else.map(|s| *s)?;
-    if !need_guard {
-        return Some(chain);
-    }
-    // 4. `do { 链 } while (0)`: 把绑定到 switch 的 `break` 留在「跳出整个 switch」
-    //    这个位置上。否则 `break` 在 if-chain 里会绑到外层循环 (上面根因 1)。
-    let zero = Expr::Int {
-        v: 0,
-        span: cases[0].span.clone(),
-        ty: Type::Int,
-    };
-    Some(Stmt::Do {
-        body: Box::new(Stmt::Block {
-            b: Block {
-                items: vec![BlockItem::Stmt(chain)],
-                span: cases[0].span.clone(),
-            },
+    // 前驱段 (`switch(x){ foo: case 1: ... }` 中 foo 等) 必须原样保留在链之前,
+    // 否则 if-chain 化后标签被吞掉 ⇒ goto 悬空 (E1102)。
+    let body_stmt = if !need_guard {
+        chain
+    } else {
+        // 4. `do { 链 } while (0)`: 把绑定到 switch 的 `break` 留在「跳出整个 switch」
+        //    这个位置上。否则 `break` 在 if-chain 里会绑到外层循环 (上面根因 1)。
+        let zero = Expr::Int {
+            v: 0,
             span: cases[0].span.clone(),
-        }),
-        cond: zero,
-        span: cases[0].span.clone(),
-    })
+            ty: Type::Int,
+        };
+        Stmt::Do {
+            body: Box::new(Stmt::Block {
+                b: Block {
+                    items: vec![BlockItem::Stmt(chain)],
+                    span: cases[0].span.clone(),
+                },
+                span: cases[0].span.clone(),
+            }),
+            cond: zero,
+            span: cases[0].span.clone(),
+        }
+    };
+    if prelude.is_empty() {
+        Some(body_stmt)
+    } else {
+        let span = cases[0].span.clone();
+        Some(Stmt::Block {
+            b: Block {
+                items: [prelude.clone(), vec![BlockItem::Stmt(body_stmt)]].concat(),
+                span: span.clone(),
+            },
+            span,
+        })
+    }
 }
 
 /// 分支体是否 自带「离开 switch」的语义 (fallthrough 判定)。

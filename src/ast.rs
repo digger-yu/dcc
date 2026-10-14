@@ -330,6 +330,11 @@ pub enum Stmt {
     Switch {
         expr: Expr,
         cases: Vec<Case>,
+        /// 出现在第一个 `case`/`default` 之前的普通声明/语句（含 goto 标签）。
+        /// C 允许 `switch (x) { foo: case 1: ... }`，这些前驱语句必须被真实发射
+        /// （标签才能被 `goto foo;` 解析到）。以前 parse_cases 把它们按 token 吞掉，
+        /// 导致标签从未发射 ⇒ E1102。
+        prelude: Vec<BlockItem>,
         span: Span,
     },
     AsmGoto {

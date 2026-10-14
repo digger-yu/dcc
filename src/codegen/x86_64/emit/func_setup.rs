@@ -1038,7 +1038,7 @@ impl Codegen {
     /// 再顺手把规划期看得见的自由 ident 登进变量区、把 `frame_planned` 置上作为发射期
     /// 晚分配的闸门。所有槽尺寸（`late_slots` / `spill_slots` / `temp_slots`）都在
     /// `LayoutMap::resolve` 的同一帧里定为输入，本函数只负责晚分配这一条带的输入。
-    pub fn plan_late_slot_budget(&mut self, body: Option<&Block>) {
+    pub fn plan_late_slot_budget(&mut self, body: Option<&Block>, params: &[crate::ast::Param]) {
         let Some(b) = body else { return };
         // §11.23 步 2：预算 = 发射期那四族的静态需求。每一笔都能对应到一个具体站点，
         // 所以这里不是「宁可多给」而是「算准」（少算了 `E1133` 会响）。
@@ -1102,6 +1102,15 @@ impl Codegen {
         // 顺序：按首次出现序分配，与 `register_var` 一贯的「首次出现」口径一致。
         let mut idents: Vec<(String, Type)> = Vec::new();
         Self::collect_free_idents(b, &mut idents);
+        // 形参类型里的 VLA 维度表达式 (K&R 风格 `int c[1][va_arg(a,int)]`)
+        // 也可能引用本帧/外层 upvar 名字; 这些表达式在序言求值, 规划期必须
+        // 登记进 var_map, 否则发射期 register_var 触发 E1134/E1133 (pr99324)。
+        for p in params {
+            Self::collect_free_idents_type(&p.ty, &mut idents);
+            if let Some(d) = &p.vla_dim {
+                Self::collect_free_idents_expr(d, &mut idents);
+            }
+        }
         for (name, ty) in idents {
             if self.var_map.contains_key(&name) {
                 continue;
@@ -1204,6 +1213,35 @@ impl Codegen {
                 BlockItem::Decl(_) => {},
                 BlockItem::Stmt(s) => Self::collect_free_idents_stmt(s, out),
             }
+        }
+    }
+
+    /// 类型树里携带的 VLA 维度表达式中的自由标识符。与 `late_need_type`
+    /// 同骨架, 但收集 Ident 元组而非 LateNeed 计数 (pr99324)。
+    fn collect_free_idents_type(ty: &Type, out: &mut Vec<(String, Type)>) {
+        match ty {
+            Type::Ptr(q)
+            | Type::Complex(q)
+            | Type::Imaginary(q)
+            | Type::Vector(q, _)
+            | Type::Atomic(q) => Self::collect_free_idents_type(&q.base, out),
+            Type::Array(elem, ArraySize::Var(se)) => {
+                Self::collect_free_idents_expr(se, out);
+                Self::collect_free_idents_type(&elem.base, out);
+            },
+            Type::Array(elem, _) => Self::collect_free_idents_type(&elem.base, out),
+            Type::Func(ret, params) => {
+                Self::collect_free_idents_type(&ret.base, out);
+                for p in params {
+                    Self::collect_free_idents_type(&p.base, out);
+                }
+            },
+            Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, _) => {
+                for f in fields.iter() {
+                    Self::collect_free_idents_type(&f.ty, out);
+                }
+            },
+            _ => {},
         }
     }
 

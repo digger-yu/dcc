@@ -194,6 +194,24 @@ impl Codegen {
                 self.code[p..p + 4].copy_from_slice(&(rel as i32).to_le_bytes());
             }
         }
+        // 修补带元素偏移的全局引用 (数组型 static local 逐元素运行时初始化)
+        for (disp32_pos, var_name, elem_off) in self.pending_data_rels_with_off.drain(..) {
+            if let Some(g) = self.globals_raw.get(&var_name) {
+                if g.is_tls {
+                    continue;
+                }
+                let base_vaddr = if g.in_data_section {
+                    data_start + g.offset
+                } else {
+                    rodata_start + g.offset
+                };
+                let var_vaddr = (base_vaddr as i64 + elem_off as i64) as u64;
+                let rip = self.entry + disp32_pos + 4;
+                let rel = (var_vaddr as i64) - (rip as i64);
+                let p = disp32_pos as usize;
+                self.code[p..p + 4].copy_from_slice(&(rel as i32).to_le_bytes());
+            }
+        }
         // 修补 SIB base=101 全局访问 (disp32 绝对寻址) - 直接写符号绝对地址
         for (disp32_pos, var_name) in self.pending_sib_data_rels.drain(..) {
             if let Some(g) = self.globals_raw.get(&var_name) {
@@ -511,6 +529,21 @@ impl Codegen {
                 sym_index: sym_idx,
                 rel_type: R_X86_64_PC32,
                 addend: -4,
+            });
+        }
+
+        // 带元素偏移的全局重定位 (数组型 static local 逐元素初始化)
+        // addend = elem_off - 4, 使 link-time 的 PC32 计算结果为
+        // (sym + elem_off) - rip 地址.
+        for (disp32_pos, var_name, elem_off) in std::mem::take(&mut self.pending_data_rels_with_off) {
+            let Some(sym_idx) = self.reloc_sym_index(&var_name, "global var PC32 (elem)") else {
+                continue;
+            };
+            self.relocations.push(ElfRela {
+                offset: disp32_pos,
+                sym_index: sym_idx,
+                rel_type: R_X86_64_PC32,
+                addend: elem_off as i64 - 4,
             });
         }
 

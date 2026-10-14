@@ -1828,7 +1828,7 @@ impl Builder {
                 let dead = self.func.unique_bb(&format!("{}.dead", self.cur));
                 self.cur = dead;
             },
-            Stmt::Switch { expr, cases, span } => {
+            Stmt::Switch { expr, cases, span, .. } => {
                 // 密集 case 值走 SwitchTable 终结符
                 self.lower_switch(expr, cases, span);
             },

@@ -15,3 +15,27 @@ pr88347.c
 # 报硬错误 (避免静默生成错误机器码)。此测试需要完整的 GAS
 # 透传模式才能通过, 超出当前 mini-asm 的设计范围。
 920521-1.c
+
+# MIPS coprocessor 寄存器绑定专属测试 ($c0r1/$c3r1/$c3r2 + nomips16),
+# x86_64 后端不识别这些寄存器名。
+mipscop-1.c
+mipscop-2.c
+mipscop-3.c
+mipscop-4.c
+
+# 测试从 gcc.dg/ 子目录 #include 兄弟文件, 但当前 torture 子集
+# 未包含 gcc.dg/ 目录, 无法编译。
+pr88423.c
+
+# asmgoto-5.c: x86_64 asm-goto-with-outputs 测试, 同时 pin 14 个
+# callee-saved GP 寄存器; dcc 后端固定 r13 为帧基址寄存器, 无法满足
+# 该测试对 r13 的绑定要求。需要重构帧基址选择 (或 GAS 透传) 才能通过。
+asmgoto-5.c
+
+# execute/ 下的薄包装: #include "../../gcc.dg/tree-ssa/..." 兄弟文件,
+# 当前 torture 子集未包含 gcc.dg/, 无法编译。
+pr105777.c
+pr109938.c
+pr109986.c
+pr30314.c
+pr98304-2.c

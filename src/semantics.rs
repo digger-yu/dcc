@@ -277,17 +277,29 @@ fn lvalue_address<R: ObjectResolver>(resolver: &R, expr: &Expr) -> AddressDescri
             ..
         } => {
             // 数组/向量对象下标: 基址就是对象地址。
-            // 指针成员下标 (如 s.p[i]): 先读取成员中保存的指针值。
-            let mut base_addr = lvalue_address(resolver, arr);
-            if matches!(arr.as_ref(), Expr::Member { .. }) && matches!(arr.ty(), Type::Ptr(_)) {
-                base_addr = AddressDescriptor {
+            // 指针下标分两种:
+            // - arr 是 Ident Ptr (如 p[0], ep->rx_ring[i]): lvalue_address 已
+            //   StackSlotLoad 出指针值本身, 直接加下标即可, 无需补 LOAD。
+            // - arr 是 Member (非 arrow, 如 s.p[i]): lvalue_address 给出的是
+            //   「该指针所在字段的地址」(即 &s.p), 需 LOAD 一次取到指针值。
+            // - arr 是 Member arrow Ptr (如 row->cells->data): Member arrow
+            //   arm 已包过 PointerValue, 此处 base_addr.base 即为 PointerValue,
+            //   guard 会跳过重复 LOAD。
+            let base_addr = lvalue_address(resolver, arr);
+            let base_addr = if matches!(arr.ty(), Type::Ptr(_))
+                && !matches!(arr.as_ref(), Expr::Ident { .. })
+                && !matches!(base_addr.base, AddressBase::PointerValue { .. })
+            {
+                AddressDescriptor {
                     base: AddressBase::PointerValue {
                         sub: Box::new(base_addr),
                     },
                     offset: ByteOffset::Constant(0),
                     element_info: element_info_from_type(elem_ty),
-                };
-            }
+                }
+            } else {
+                base_addr
+            };
             let idx_offset = compute_index_offset(idx, elem_ty);
             combine_address(base_addr, idx_offset, elem_ty)
         },

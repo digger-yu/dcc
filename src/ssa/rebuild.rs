@@ -1010,6 +1010,7 @@ fn rebuild_bb(
             out.push(BlockItem::Stmt(Stmt::Switch {
                 expr: idx_e,
                 cases,
+                prelude: vec![],
                 span: func.span.clone(),
             }));
         },

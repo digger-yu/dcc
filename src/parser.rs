@@ -9365,7 +9365,7 @@ impl<'a> Parser<'a> {
                 if self.cur.kind == TokKind::LBrace {
                     self.advance();
                     self.in_switch_depth += 1;
-                    let cases = self.parse_cases();
+                    let (cases, prelude) = self.parse_cases();
                     self.in_switch_depth -= 1;
                     if !self.expect(TokKind::RBrace, "'}'") {
                         return None;
@@ -9373,6 +9373,7 @@ impl<'a> Parser<'a> {
                     Some(Stmt::Switch {
                         expr,
                         cases,
+                        prelude,
                         span: sp,
                     })
                 } else {
@@ -9383,6 +9384,7 @@ impl<'a> Parser<'a> {
                     Some(Stmt::Switch {
                         expr,
                         cases,
+                        prelude: vec![],
                         span: sp,
                     })
                 }
@@ -9594,8 +9596,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_cases(&mut self) -> Vec<Case> {
+    fn parse_cases(&mut self) -> (Vec<Case>, Vec<BlockItem>) {
         let mut cases = vec![];
+        let mut prelude: Vec<BlockItem> = vec![];
         loop {
             // Duff's device: 如果当前 '}' 是内层块的 (因 case 标签中断而未消费),
             // 消费它并继续解析, 而不是终止 switch.
@@ -9626,25 +9629,20 @@ impl<'a> Parser<'a> {
                 let _ = self.expect(TokKind::Colon, "':'");
                 (None, None)
             } else {
-                // 跳过非 case/default 语句，跟踪花括号深度
-                // 避免 do {} while(0) 等复合语句的 } 误终止 switch 解析
-                let mut brace_depth = 0i32;
+                // 非 case/default 的起始位置: 这是 switch 体的「前驱段」
+                // (C 允许 `switch(x){ foo: case 1: ... }` / `do{}while(0); case 1:`)。
+                // 老代码按 token 裸跳过, 把 `foo:` 这样的 goto 标签直接吞掉,
+                // 导致后面的 `goto foo;` 解析到一个从未发射的内部标签 ⇒ E1102。
+                // 改为真实解析语句/声明, 并收集进 prelude; 解析器本身在遇到
+                // case/default 或 switch 体的 '}' 时会自然停住 (parse_block /
+                // parse_stmt 通过 `block_ended_with_case` / pending_close_brace
+                // 协议交还控制权)。
+                let mut items = vec![];
                 loop {
                     if self.cur.kind == TokKind::Eof {
                         break;
                     }
-                    if self.cur.kind == TokKind::LBrace {
-                        brace_depth += 1;
-                        self.advance();
-                        continue;
-                    }
                     if self.cur.kind == TokKind::RBrace {
-                        if brace_depth > 0 {
-                            brace_depth -= 1;
-                            self.advance();
-                            continue;
-                        }
-                        // Duff's device: pending close brace from nested block
                         if self.pending_close_brace > 0 {
                             self.pending_close_brace -= 1;
                             self.advance();
@@ -9652,17 +9650,30 @@ impl<'a> Parser<'a> {
                         }
                         break; // switch 体的 }
                     }
-                    // 在花括号内，继续跳过
-                    if brace_depth > 0 {
-                        self.advance();
-                        continue;
-                    }
-                    // 不在花括号内，检查是否到了 case/default
-                    if self.cur.kind == TokKind::KwCase || self.cur.kind == TokKind::KwDefault {
+                    if matches!(self.cur.kind, TokKind::KwCase | TokKind::KwDefault) {
                         break;
                     }
-                    self.advance();
+                    if self.is_decl_start() {
+                        match self.parse_decl() {
+                            Some(ds) => {
+                                for d in ds {
+                                    items.push(BlockItem::Decl(d));
+                                }
+                            },
+                            None => {
+                                self.advance();
+                            },
+                        }
+                    } else {
+                        match self.parse_stmt() {
+                            Some(s) => items.push(BlockItem::Stmt(s)),
+                            None => {
+                                self.advance();
+                            },
+                        }
+                    }
                 }
+                prelude = items;
                 continue;
             };
             let mut items = vec![];
@@ -9748,7 +9759,7 @@ impl<'a> Parser<'a> {
                 span: sp,
             });
         }
-        cases
+        (cases, prelude)
     }
 
     /// Parse case/default labels for switch without braces.
@@ -11156,8 +11167,15 @@ impl<'a> Parser<'a> {
                             } else {
                                 ty
                             };
+                            // __builtin_classify_type: GCC type classification codes.
+                            // Values match GCC's c-typeck.c:
+                            //   1=integer/enum, 2=pointer, 3=null,
+                            //   4=void, 5=struct/union, 6=array,
+                            //   7=function, 8=real_float, 9=complex,
+                            //   10=vector.
+                            // Tests like 20040709-*.c gate on
+                            // `classify_type(l) == 8` to detect long double.
                             let class = match ty {
-                                Type::Void => 1,
                                 Type::Bool
                                 | Type::Char
                                 | Type::SChar
@@ -11176,15 +11194,17 @@ impl<'a> Parser<'a> {
                                 | Type::Int128
                                 | Type::UInt128
                                 | Type::Fract
-                                | Type::Accum => 2,
-                                Type::Ptr(_) | Type::Func(_, _) => 3,
-                                Type::Float | Type::Double | Type::LongDouble => 4,
-                                Type::Complex(_) | Type::Imaginary(_) => 5,
-                                Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => 6,
-                                Type::Array(_, _) => 7,
-                                Type::Vector(_, _) => 9,
-                                Type::Enum(_, _, _) => 10,
-                                Type::Atomic(_) | Type::Named(_) => 1,
+                                | Type::Accum
+                                | Type::Enum(_, _, _) => 1,
+                                Type::Ptr(_) => 2,
+                                Type::Void => 4,
+                                Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => 5,
+                                Type::Array(_, _) => 6,
+                                Type::Func(_, _) => 7,
+                                Type::Float | Type::Double | Type::LongDouble => 8,
+                                Type::Complex(_) | Type::Imaginary(_) => 9,
+                                Type::Vector(_, _) => 10,
+                                Type::Atomic(_) | Type::Named(_) => 4,
                             };
                             e = Expr::Int {
                                 v: class,
@@ -12189,7 +12209,17 @@ impl<'a> Parser<'a> {
                     Self::collect_upvars_type(&p.base, local_vars, parent_locals, out);
                 }
             },
-            // 其余类型不携带运行时表达式（结构体字段是全局作用域的，不能吃静态链）
+            // VM struct/union: 字段类型可能是 VLA（GCC 扩展 variable-sized struct），
+            // 字段的 VLA 维度表达式在嵌套函数里可能引用外层作用域变量（upvar）。
+            // 普通 struct 的字段类型是全局作用域的（不能吃静态链），但 VM struct
+            // 是局部定义的，其字段类型在使用点（sizeof / 变量声明）会被运行时求值，
+            // 维度表达式里的标识符因此可能是 upvar。
+            Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, _) => {
+                for f in fields.iter() {
+                    Self::collect_upvars_type(&f.ty, local_vars, parent_locals, out);
+                }
+            },
+            // 其余类型不携带运行时表达式
             Type::Void
             | Type::Bool
             | Type::Char
@@ -12213,8 +12243,6 @@ impl<'a> Parser<'a> {
             | Type::LongDouble
             | Type::Fract
             | Type::Accum
-            | Type::Struct(_, _, _, _)
-            | Type::Union(_, _, _, _)
             | Type::Enum(_, _, _)
             | Type::Named(_) => {},
         }
