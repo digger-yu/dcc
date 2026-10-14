@@ -7,7 +7,7 @@
 //   只有从字节流反推出反汇编文本、与人工 review 过的快照 diff, 才能发现这类回归。
 //   本 target 与编码器实现零依赖, 只依赖外部 dcc 二进制 + 主机 objdump。
 //
-// 用例布局: tests/snapshots/x86_64/<case>/
+// 用例布局: tests/disasm_snapshots_x86_64/<case>/
 //   input.c     被测 C 源
 //   config.toml 编译参数 (目前只解析 flags 一行, 如 `flags = "-O2 -std=gnu11"`)
 //   expected.s  首次人工 review 后冻结的归一化反汇编文本
@@ -29,8 +29,7 @@ use std::process::Command;
 fn snapshots_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
-        .join("snapshots")
-        .join("x86_64")
+        .join("disasm_snapshots_x86_64")
 }
 
 /// 判断 token 是否是「原始字节列」的一段: 1-2 位 hex。
@@ -278,7 +277,7 @@ fn unified_diff(want: &str, got: &str) -> String {
     out
 }
 
-/// 用例清单: 与 tests/snapshots/x86_64/<name>/ 一一对应。
+/// 用例清单: 与 tests/disasm_snapshots_x86_64/<name>/ 一一对应。
 ///
 /// 新增用例时: (1) 建目录 + input.c + config.toml;
 ///             (2) 用当前 HEAD 的 dcc 编译, 归一化后写入 expected.s;

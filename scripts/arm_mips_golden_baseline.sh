@@ -17,13 +17,13 @@
 #   capture（默认）: 基线缺失则写入，存在则校验。
 #   verify: 基线缺失即失败（CI 用，禁止悄悄重写基线）。
 #
-# 基线存在 `tests/golden/` 而不是 `golden_baseline/`：后者整目录被 .gitignore 排除且
-# **一个文件也未入库**，所以任何存进去的基线都只是本机临时件，别人 clone 后拿不到。
-# 基线要成为门禁就必须是仓库内容。
+# 基线存在 `tests/arm_mips_golden/` 而不是 `golden_baseline/`：后者整目录被
+# .gitignore 排除且 **一个文件也未入库**，所以任何存进去的基线都只是本机临时件，
+# 别人 clone 后拿不到。基线要成为门禁就必须是仓库内容。
 set -o pipefail
 DCC=${DCC:-/root/dcc/target/release/dcc}
 REPO=${DCC_REPO:-/root/dcc}
-BASELINE_DIR=${BASELINE_DIR:-/root/dcc/tests/golden/arm_mips}
+BASELINE_DIR=${BASELINE_DIR:-/root/dcc/tests/arm_mips_golden}
 MODE=${1:-capture}
 mkdir -p "$BASELINE_DIR"
 
