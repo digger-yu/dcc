@@ -18,6 +18,16 @@ use crate::codegen::x86_64::Codegen;
 impl crate::semantics::ObjectResolver for Codegen {
     fn resolve_identity(&self, name: &str) -> crate::semantics::ObjectIdentity {
         use crate::semantics::ObjectIdentity;
+        // 嵌套函数 upvar 必须排在 vla_offsets 前面: 嵌套函数 g 读取外层
+        // VLA `a` 时, g 的 upvar_offsets 含 "a" (经父帧静态链访问), 而
+        // g 自己的 vla_offsets 已在 compile_func 开头 clear 为空 ——
+        // 但若 g 内又声明了同名局部 VLA (或父函数 vla_offsets 残留),
+        // 仍按本帧 [off] 寻址会把垃圾当基址 (921017-1.c: g 返回 a[1]
+        // 时 SIGSEGV, 因 rax 被解引用为父帧 -0x58 槽的 int 4 而非父帧
+        // VLA 数据区首址)。
+        if self.current_func_is_nested && self.upvar_offsets.contains_key(name) {
+            return ObjectIdentity::Upvar;
+        }
         // `vla_offsets` 必须排在 `var_map` 前面：一个 VLA/VM 聚合对象**同时**在
         // 两张表里（`register_var` 先登记名字，`gen_vla_alloc` 再登记描述符槽），
         // 而「这个槽的内容才是对象地址」是更强的那条事实。旧顺序把它报成 Local，
@@ -30,9 +40,6 @@ impl crate::semantics::ObjectResolver for Codegen {
         }
         if self.var_map.contains_key(name) {
             return ObjectIdentity::Local;
-        }
-        if self.current_func_is_nested && self.upvar_offsets.contains_key(name) {
-            return ObjectIdentity::Upvar;
         }
         let key = self.resolve_global_key(name);
         if self.globals_raw.contains_key(key) {

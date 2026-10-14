@@ -29,6 +29,14 @@ pub struct AsmOpBinding {
     ///   204 = 条件码 (reg 字段为 cc ASCII 字母)
     ///   205-208 = 显式子寄存器 (reg 字段为 GP 索引, 205=8b 206=16b 207=32b 208=64b)
     pub(crate) xmm_width: u8,
+    /// For inout (`+r`) operands whose lvalue is a non-Ident expression (e.g.
+    /// `*bar()`), `prepare_asm_binding` evaluates the expression once to load
+    /// the current value into the bound register.  On writeback, re-running
+    /// `gen_lvalue_addr` would re-evaluate side-effecting sub-expressions
+    /// (e.g. call `bar()` a second time).  When `Some`, writeback uses this
+    /// pre-computed address pointer (held in a callee-saved scratch register
+    /// across the asm) instead of recomputing it.
+    pub(crate) saved_inout_addr_reg: Option<u8>,
 }
 
 /// `parse_asm_data_expr` 的求值结果:

@@ -3041,7 +3041,8 @@ impl Codegen {
                 // &&label: 加载标签地址到 dst (GNU 扩展)
                 // 使用 LEA dst, [RIP + disp32] + label_addr_refs 延迟解析
                 // 前缀标签名以避免与函数符号名冲突
-                let label_name = self.c_label_to_asm(&label.name);
+                // 嵌套函数内 &&父标签: 走 resolve_nested, 与 Stmt::Goto 保持一致
+                let label_name = self.c_label_to_asm_resolve_nested(&label.name);
                 // P11: LEA dst, [rip+disp32] via typed Lea RIP-relative (encoder 字节等价).
                 self.emit_insn(&Insn::new(
                     crate::codegen::x86_64::opcode::X86_64Opcode::Lea {

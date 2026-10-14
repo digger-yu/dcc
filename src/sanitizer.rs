@@ -4711,6 +4711,7 @@ mod tests {
                     span: Span::point("t.c", 1, 1),
                     ty: Type::Int,
                 },
+                prelude: vec![],
                 cases: vec![crate::ast::Case {
                     val: Some(Expr::Int {
                         v: 1,

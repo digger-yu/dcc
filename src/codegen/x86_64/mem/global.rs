@@ -361,6 +361,10 @@ pub fn global_init_bytes(init: &Expr, sz: usize, is_float: bool, ty: &Type) -> O
                 }
             },
             const_eval::ConstValue::Int(v) => {
+                // 整型字面量初始化浮点字段: 按目标字段宽度正确编码.
+                // sz == 16 → long double (80-bit x87), 必须走 from_int 而非
+                // F64+zero-pad, 否则读侧 fld tbyte 会把 f64 位型当 80-bit
+                // 解析成 garbage long double (960215-1 / align-2 失败的根因).
                 if sz == 32 {
                     // _Complex long double 实部源为整型：精确 RNE 转换 +
                     // LongDouble 精度零虚部。
@@ -374,6 +378,12 @@ pub fn global_init_bytes(init: &Expr, sz: usize, is_float: bool, ty: &Type) -> O
                         16,
                     ));
                     Some(b)
+                } else if sz == 16 {
+                    // long double 字段
+                    Some(crate::codegen::x86_64::Codegen::float_data_bytes(
+                        FloatConst::from_int(&Type::LongDouble, v),
+                        16,
+                    ))
                 } else {
                     Some(crate::codegen::x86_64::Codegen::float_data_bytes(
                         crate::ast::FloatConst::F64(crate::float80::i128_to_f64(v)),

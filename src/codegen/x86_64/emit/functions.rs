@@ -1359,6 +1359,12 @@ impl Codegen {
                         // 直接父级 upvar: depth=1, intermediates=[]
                         *off = *parent_off;
                         new_upvars.push((name.clone(), *off, 1, vec![]));
+                    } else if let Some(&parent_off) = self.vla_offsets.get(name) {
+                        // VLA upvar: 元数据槽在 vla_offsets 里 (不在 var_map),
+                        // 父帧 [parent_off] 是元数据指针槽, 二次加载才是数据基址
+                        // (921017-1.c: 嵌套函数 g 读外层 VLA a)。
+                        *off = parent_off;
+                        new_upvars.push((name.clone(), *off, 1, vec![]));
                     } else if let Some((origin_off, parent_depth, parent_intermediates)) =
                         parent_upvar_info.get(name)
                     {

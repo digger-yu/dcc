@@ -580,8 +580,13 @@ impl Codegen {
             (Type::ULong | Type::ULongLong, Type::Float) => {
                 self.emit_ulong_to_float(dst, false);
             },
-            (Type::ULong | Type::ULongLong, Type::Double | Type::LongDouble) => {
+            (Type::ULong | Type::ULongLong, Type::Double) => {
                 self.emit_ulong_to_float(dst, true);
+            },
+            // u64 → long double: 直接走 emit_int_to_st0 的 u64 拆半路径 (x87 fild 64位)
+            // —— 这是唯一能精确表达整个 u64 范围的通道 (xmm0-f64 只有 53 位尾数).
+            (Type::ULong | Type::ULongLong, Type::LongDouble) => {
+                self.emit_int_to_st0(ty, dst);
             },
             // float/double → unsigned int (<=32bit):
             // 单一真源 `emit_float_to_unsigned` —— 用 64 位有符号截断转换再按

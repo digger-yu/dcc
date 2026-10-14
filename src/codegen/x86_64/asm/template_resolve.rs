@@ -54,6 +54,28 @@ impl Codegen {
             format!(".Ll_{}_{}", self.current_func_name, name)
         }
     }
+    /// Resolve a user-facing C label name to its asm symbol, taking nested
+    /// function scoping into account.
+    ///
+    /// If the current function is a nested function and `name` is NOT a label
+    /// defined in the current function's own body (`self.local_labels`),
+    /// then the label belongs to the enclosing parent function. Using the
+    /// current (child) function name as namespace would produce an asm symbol
+    /// that is never defined (the parent emits `.Ll_<parent>_<name>`). Walk
+    /// up one hop through `nested_func_parent` to find the right namespace.
+    ///
+    /// This is exactly the same rule as `Stmt::Goto` non-local resolution;
+    /// shared here so `&&label` (LabelAddr) and `goto *&&label` agree.
+    pub(crate) fn c_label_to_asm_resolve_nested(&self, name: &str) -> String {
+        let is_nonlocal = self.current_func_is_nested
+            && !self.local_labels.contains(name);
+        if is_nonlocal {
+            if let Some(parent) = self.nested_func_parent.get(&self.current_func_name) {
+                return format!(".Ll_{}_{}", parent, name);
+            }
+        }
+        self.c_label_to_asm(name)
+    }
     pub(crate) fn merge_standalone_prefixes(lines: Vec<String>) -> Vec<String> {
         let prefixes = ["lock", "rep", "repz", "repnz", "repe"];
         let mut result = Vec::with_capacity(lines.len());

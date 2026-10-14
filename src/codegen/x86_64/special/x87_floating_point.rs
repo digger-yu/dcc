@@ -72,14 +72,14 @@ impl Codegen {
             (0xD9, 3, false) => 4,     // fstp m32fp
             (0xDD, 3, false) => 8,     // fstp m64fp
             (0xDB, 7, false) => 10,    // fstp m80fp
-            (0xDB, 0, false) => 4,    // fild m32int
-            (0xDB, 0, true) => 8,     // fild m64int
+            (0xDB, 0, false) => 4,    // fild m32int (DB /0)
+            (0xDF, 5, true) => 8,     // fild m64int (DF /5 + REX.W)
             _ => unreachable!("emit_x87_mem_at: unknown opcode/reg_field/rexw tuple (op={opcode:#x}, reg={reg_field}, rexw={rexw})"),
         };
         let op = match (opcode, reg_field) {
             (0xD9, 0) | (0xDD, 0) | (0xDB, 5) => X87Op::FldMem { width },
             (0xD9, 3) | (0xDD, 3) | (0xDB, 7) => X87Op::FstpMem { width },
-            (0xDB, 0) => X87Op::FildMem { width },
+            (0xDB, 0) | (0xDF, 5) => X87Op::FildMem { width },
             _ => unreachable!(),
         };
         let mem = MemOperand {
@@ -196,7 +196,7 @@ impl Codegen {
                 4,
                 8,
             )); // mov [rsp+8], rax
-            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xD3, 0x6C, 0x24, 0x08])); // shr qword [rsp+8], 1  ; h = x>>1
+            self.emit_insn(&Insn::raw_bytes(&[0x48, 0xC1, 0x6C, 0x24, 0x08, 0x01])); // shr qword [rsp+8], 1  ; h = x>>1
             self.emit_insn(&Insn::alu_rm_reg_imm8(4, 0, 1)); // and eax, 1                  ; b = x&1
             self.emit_insn(&Insn::mov_rm_mem(
                 false,
@@ -205,9 +205,9 @@ impl Codegen {
                 4,
                 16,
             )); // mov [rsp+16], rax
-            self.emit_x87_mem_at(0xDB, 0, 4, 8, true); // fild qword [rsp+8]   st0 = h
-            self.emit_insn(&Insn::x87_fixed(0xD9, 0xC8)); // fadd st(0), st(0)            → 2h
-            self.emit_x87_mem_at(0xDB, 0, 4, 16, true); // fild qword [rsp+16]  st0 = b
+            self.emit_x87_mem_at(0xDF, 5, 4, 8, true); // fild qword [rsp+8]   st0 = h
+            self.emit_insn(&Insn::x87_fixed(0xD8, 0xC0)); // fadd st(0), st(0)            → 2h
+            self.emit_x87_mem_at(0xDF, 5, 4, 16, true); // fild qword [rsp+16]  st0 = b
             self.emit_insn(&Insn::x87_fixed(0xDE, 0xC1)); // faddp                          → 2h + b = x
         } else {
             if unsigned {
@@ -245,7 +245,7 @@ impl Codegen {
                     },
                     &[],
                 )); // mov [rsp], rax
-                self.emit_x87_mem_at(0xDB, 0, 4, 0, true); // fild qword [rsp]
+                self.emit_x87_mem_at(0xDF, 5, 4, 0, true); // fild qword [rsp]
             } else if sz >= 8 {
                 self.emit_insn(&Insn::new(
                     crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
@@ -266,7 +266,7 @@ impl Codegen {
                     },
                     &[],
                 )); // mov [rsp], rax
-                self.emit_x87_mem_at(0xDB, 0, 4, 0, true); // fild qword [rsp]
+                self.emit_x87_mem_at(0xDF, 5, 4, 0, true); // fild qword [rsp]
             } else {
                 // 窄有符号：只取内存里低 4 字节，fild 自行符号扩展，
                 // 不依赖 rax 高位是否已规范化。

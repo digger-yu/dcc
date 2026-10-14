@@ -569,6 +569,17 @@ impl Codegen {
                     let n = size.max(1);
                     return (f as f32).to_bits().to_le_bytes()[..n].to_vec();
                 }
+                // 目标是 long double (16 字节对象): 把 f64 提升为真 80-bit
+                // 编码. 否则写出去的 f64 位型会被读侧 `fld tbyte` 当 80-bit
+                // x87 解释成 garbage long double. 这是 960215-1 / align-2 中
+                // 形如 `long double C = 2;` / `{ 'e', 27.0 }` 这种 "字面量
+                // 被求值成 F64 字段却要落到 16 字节槽" 场景的兜底修复.
+                if size >= 16 {
+                    let ld = crate::float80::from_f64(f);
+                    let mut out = ld.to_vec();
+                    out.resize(size, 0);
+                    return out;
+                }
                 let bytes = f.to_bits().to_le_bytes();
                 let mut b = bytes[..size.min(8)].to_vec();
                 if b.len() < size {
@@ -689,7 +700,7 @@ impl Codegen {
             let size = width.max(8);
             if let Some((off, sec)) = rel {
                 let rel_type = if width <= 4 { R_X86_64_32 } else { R_X86_64_64 };
-                let prefixed = self.c_label_to_asm(&label.name);
+                let prefixed = self.c_label_to_asm_resolve_nested(&label.name);
                 self.pending_data64_rels
                     .push((off, prefixed, sec, rel_type, 0));
             }
@@ -707,8 +718,8 @@ impl Codegen {
         {
             let (la, lb) = (Self::extract_label_addr(l), Self::extract_label_addr(r));
             if let (Some(label_a), Some(label_b)) = (la, lb) {
-                let prefixed_a = self.c_label_to_asm(&label_a);
-                let prefixed_b = self.c_label_to_asm(&label_b);
+                let prefixed_a = self.c_label_to_asm_resolve_nested(&label_a);
+                let prefixed_b = self.c_label_to_asm_resolve_nested(&label_b);
                 if let Some((off, _sec)) = rel {
                     let size = width.max(4);
                     self.pending_label_diff_rels

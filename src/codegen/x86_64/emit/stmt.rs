@@ -549,6 +549,11 @@ impl Codegen {
                                     0,
                                     0,
                                 ));
+                            } else if matches!(&expr_ty, Type::LongDouble)
+                                && matches!(&func_ret_ty, Type::Double)
+                            {
+                                // long double 在 st(0), 函数返回 double 需 80→64 舍入.
+                                self.emit_x87_to_xmm0();
                             }
                             // Float/double -> integer return:
                             // convert xmm0 to integer in rax.
@@ -887,16 +892,9 @@ impl Codegen {
                 // non-local goto: label 定义在父函数里, 必须用父函数名作为命名空间,
                 // 否则 c_label_to_asm 生成 `.Ll_<child>_<label>` 而父函数发射
                 // `label:` 时生成 `.Ll_<parent>_<label>`, 两者不匹配 (E1102)。
-                let lbl = if is_nonlocal {
-                    let parent = self
-                        .nested_func_parent
-                        .get(&self.current_func_name)
-                        .cloned()
-                        .unwrap_or_else(|| self.current_func_name.clone());
-                    format!(".Ll_{}_{}", parent, target.name)
-                } else {
-                    self.c_label_to_asm(&target.name)
-                };
+                // 统一走 c_label_to_asm_resolve_nested: 对非嵌套/本函数内标签
+                // 走原 c_label_to_asm, 对嵌套且非本函数的标签走父函数命名空间。
+                let lbl = self.c_label_to_asm_resolve_nested(&target.name);
                 self.jmp_rel32(&lbl, JumpKind::Jmp);
             },
             Stmt::Label { name, stmt, .. } => {
@@ -1197,7 +1195,7 @@ impl Codegen {
                 let mut resolved_asm = asm_str.clone();
                 let label_base = outputs.len() + inputs.len();
                 for (i, label) in goto_labels.iter().enumerate().rev() {
-                    let prefixed = self.c_label_to_asm(&label.name);
+                    let prefixed = self.c_label_to_asm_resolve_nested(&label.name);
                     resolved_asm = Self::asm_replace_label_idx(&resolved_asm, i, &prefixed);
                     resolved_asm =
                         Self::asm_replace_label_idx(&resolved_asm, label_base + i, &prefixed);

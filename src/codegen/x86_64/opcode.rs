@@ -1891,8 +1891,8 @@ impl X86_64Opcode {
                             (X87Op::FstpMem { .. }, 4) => (0xD9, 3, false), // fstp m32fp
                             (X87Op::FstpMem { .. }, 8) => (0xDD, 3, false), // fstp m64fp
                             (X87Op::FstpMem { .. }, 10) => (0xDB, 7, false), // fstp m80fp
-                            (X87Op::FildMem { .. }, 4) => (0xDB, 0, false), // fild m32int
-                            (X87Op::FildMem { .. }, 8) => (0xDB, 0, true), // fild m64int
+                            (X87Op::FildMem { .. }, 4) => (0xDB, 0, false), // fild m32int (DB /0)
+                            (X87Op::FildMem { .. }, 8) => (0xDF, 5, true), // fild m64int (DF /5 + REX.W)
                             _ => return None,
                         };
                         // REX: base>=8 → REX.B; index>=8 → REX.X; rexw → REX.W.
@@ -5967,7 +5967,7 @@ mod tests {
 
     #[test]
     fn x87_fild_m64_rsp_disp8_rexw() {
-        // fild qword [rsp+8]: 48 DB 04 24 08 (REX.W, mod=01, SIB)
+        // fild qword [rsp+8]: 48 DF 6C 24 08 (REX.W, DF /5, mod=01, reg=101, SIB)
         let o = X86_64Opcode::X87 {
             op: X87Op::FildMem { width: 8 },
             mem: Some(MemOperand {
@@ -5977,7 +5977,7 @@ mod tests {
                 seg: None,
             }),
         };
-        assert_eq!(o.encode(), Some(vec![0x48, 0xDB, 0x44, 0x24, 0x08]));
+        assert_eq!(o.encode(), Some(vec![0x48, 0xDF, 0x6C, 0x24, 0x08]));
     }
 
     #[test]

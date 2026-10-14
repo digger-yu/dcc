@@ -118,6 +118,12 @@ impl Codegen {
         let mut slots: Vec<Slot> = Vec::new();
         let mut meta: Vec<(u8, u8, bool, bool, u8)> = Vec::new(); // (reg, xmm_width, is_output, is_mem, flags_raw)
                                                                   // flags_raw: bit 0 = early_clobber
+        // For non-Ident inout (`+r`) outputs, prepare_asm_binding evaluates the
+        // current value into the bound register (triggering side-effects like
+        // bar() in `*bar()`).  The lvalue address is computed once here and held
+        // in a callee-saved scratch across the asm, so writeback can reuse it
+        // instead of re-running gen_lvalue_addr (which would re-trigger bar()).
+        let mut saved_inout_addrs: Vec<Option<u8>> = Vec::new();
 
         // 解析 clobber 列表, 把被 clobber 的寄存器加入统一规划器的排除集合。
         let (clobber_gp, clobber_xmm, _x87_count) = Self::parse_clobber_registers(clobbers);
@@ -373,11 +379,56 @@ impl Codegen {
             // 默认: GP 寄存器
             let chosen = planner.alloc_gp(idx, AsmRegUse::Output);
             let name = self.asm_reg_name_or_report(chosen);
-            // +r (读写): 加载变量值; =r (只写): lea 地址 (将被 asm 覆写)
-            self.prepare_asm_binding(op, chosen, !is_inout);
+            // 对非 Ident inout (`+r`) 输出 (如 `"+r"(*bar())`): 先把 lvalue 地址
+            // 算到 callee-saved scratch (bar() 在此调用一次), 再从该地址 load
+            // 旧值到绑定寄存器 (无副作用). writeback 复用 scratch 里的地址, 不再
+            // 重新 gen_lvalue_addr —— 否则 bar() 会被调两次 (990130-1.c).
+            let saved = if is_inout && !matches!(op, Expr::Ident { .. }) {
+                match self.alloc_callee_saved() {
+                    Some(scratch) if self.gen_lvalue_addr(op, scratch) => {
+                        // mov chosen, [scratch]: 从已算好的地址 load 旧值.
+                        let sz = op.ty().size();
+                        let mut rex = 0x40u8;
+                        if chosen >= 8 { rex |= 0x04; }
+                        if scratch >= 8 { rex |= 0x01; }
+                        match sz {
+                            1 => {
+                                // movzx eax, byte [scratch]: 0F B6 /r
+                                if rex != 0x40 { self.emit_insn(&Insn::raw_bytes(&[rex])); }
+                                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6]));
+                            },
+                            2 => {
+                                // movzx eax, word [scratch]: 0F B7 /r
+                                self.emit_insn(&Insn::raw_bytes(&[0x66]));
+                                if rex != 0x40 { self.emit_insn(&Insn::raw_bytes(&[rex])); }
+                                self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7]));
+                            },
+                            4 => {
+                                if rex != 0x40 { self.emit_insn(&Insn::raw_bytes(&[rex])); }
+                                self.emit_insn(&Insn::raw_bytes(&[0x8B]));
+                            },
+                            _ => {
+                                self.emit_insn(&Insn::raw_bytes(&[rex | 0x08]));
+                                self.emit_insn(&Insn::raw_bytes(&[0x8B]));
+                            },
+                        }
+                        self.emit_reg_indirect_modrm(chosen, scratch);
+                        Some(scratch)
+                    },
+                    Some(scratch) => {
+                        self.free_callee_saved(scratch);
+                        None
+                    },
+                    None => None,
+                }
+            } else {
+                self.prepare_asm_binding(op, chosen, !is_inout);
+                None
+            };
             map.insert(format!("%{idx}"), name.to_string());
             slots.push(Slot::Reg(chosen, name));
             meta.push((chosen, 0, true, false, if early { 1 } else { 0 }));
+            saved_inout_addrs.push(saved);
             idx += 1;
         }
 
@@ -758,11 +809,12 @@ impl Codegen {
             }
         }
 
-        // x87 FPU 栈加载: 所有 operand 已登记到 slots/meta, 现在按
-        // st() 从高到低顺序统一 fld — 保证最后一次 fld 落在 st(0),
-        // 前一次落在 st(1), 以此类推.
+        // x87 FPU 栈加载: 每 fld 都会把栈顶 (st(0)) 压向 st(1), 因此
+        // **目标 st 号大的最后加载** 才能让 st(0) = st_idx=0 的操作数.
+        // 先加载 st_idx=N (N>=1), 最后加载 st_idx=0; 这样 st(0) 是最后一次
+        // fld 的结果 (对应 st_idx=0), st(1)/st(N) 是先前 fld 压下来的旧顶.
         if !pending_x87.is_empty() {
-            pending_x87.sort_by(|a, b| b.0.cmp(&a.0)); // st_idx 降序
+            pending_x87.sort_by(|a, b| b.0.cmp(&a.0)); // st_idx 降序: 大的先 fld
             for (st_idx, expr) in pending_x87 {
                 self.prepare_asm_x87_binding(expr, st_idx);
             }
@@ -784,13 +836,18 @@ impl Codegen {
             );
         }
         for (i, (reg, xmm_w, is_out, is_mem, flags)) in meta.iter().enumerate() {
-            let _ = i;
+            let saved = if i < saved_inout_addrs.len() {
+                saved_inout_addrs[i]
+            } else {
+                None
+            };
             bindings.push(AsmOpBinding {
                 reg: *reg,
                 is_output: *is_out,
                 is_mem: *is_mem,
                 early_clobber: (flags & 1) != 0,
                 xmm_width: *xmm_w,
+                saved_inout_addr_reg: saved,
             });
         }
         // name aliases
@@ -811,28 +868,41 @@ impl Codegen {
         }
         map
     }
-    fn prepare_asm_binding(&mut self, expr: &Expr, reg: u8, is_output: bool) {
+    /// Prepare an asm operand.  `is_pure_output` is true when the constraint is
+    /// `=r` (write-only — asm will completely overwrite, no need to pre-load
+    /// the current value).  It is false for `+r` (inout — must pre-load) and
+    /// for pure inputs.
+    ///
+    /// Returns `Some(addr_reg)` only when the operand is a non-Ident inout
+    /// lvalue and the caller should remember this callee-saved scratch across
+    /// the asm so writeback can reuse the address instead of re-evaluating
+    /// side-effecting sub-expressions (e.g. `"+r"(*bar())` calling `bar()`
+    /// twice — see 990130-1.c).
+    fn prepare_asm_binding(&mut self, expr: &Expr, reg: u8, is_pure_output: bool) -> Option<u8> {
         if let Expr::Ident { name, .. } = expr {
-            // 局部优先: 与全局同名的参数/局部变量不得误入 rip 全局路径
             if self.is_global_not_local(&name.name) {
-                if is_output {
-                    // 只写输出 (如 "=r"): asm 将完全覆盖, 只需要地址给 writeback
+                if is_pure_output {
                     self.emit_global_addr(reg, &name.name);
                 } else {
-                    // 输入或读写 (如 "+r"): 必须加载当前值到寄存器
                     self.gen_expr(expr, reg);
                 }
-            } else if is_output {
-                // 输出: lea 出变量地址, writeback 通过 [r13+off] 写回
+            } else if is_pure_output {
                 let off = self.var_offset(&name.name);
                 self.emit_lea_r13(reg, off);
             } else {
-                // 输入: 直接 load 变量值, asm 模板里使用该值
                 self.gen_expr(expr, reg);
             }
-        } else {
-            self.gen_expr(expr, reg);
+            return None;
         }
+        // 非 Ident 表达式
+        if is_pure_output {
+            // `=r`: asm 完全覆盖, 无需预加载, 也不需要保存地址 (writeback 时再算一次即可).
+            return None;
+        }
+        // inout (`+r`) 或纯输入: 求值当前值到绑定寄存器.
+        self.gen_expr(expr, reg);
+        // 对 inout (由输出侧调用) 我们再单独在 caller 里计算一次地址并溅到 scratch.
+        None
     }
     fn prepare_asm_mmx_binding(&mut self, expr: &Expr, mm: u8) {
         if let Expr::Ident { name, ty, .. } = expr {
@@ -971,7 +1041,7 @@ impl Codegen {
     /// caller-saved 号，所以这个 scratch 一定不是本句 asm 的任何操作数寄存器；
     /// `alloc_callee_saved` 同时置 `reg_allocated` 与 `callee_saved_used`，因此它也不会
     /// 与外层表达式的溅出槽相撞，并且序言会真的保存它。写回结束立刻归还。
-    fn writeback_asm_general_lvalue(&mut self, expr: &Expr, src: u8, xmm_width: u8) -> bool {
+    fn writeback_asm_general_lvalue(&mut self, expr: &Expr, src: u8, xmm_width: u8, saved_addr_reg: Option<u8>) -> bool {
         let ty = expr.ty();
         let effective_ty = match &ty {
             Type::Imaginary(inner) => inner.base.clone(),
@@ -1010,30 +1080,41 @@ impl Codegen {
             // 操作数在 xmm 里但类型不是 float/double：不知道该怎么存，保持旧行为。
             return false;
         }
-        let scratch = match self.alloc_callee_saved() {
+        // 调用方已在 prepare 阶段算好 lvalue 地址并溅到一个 callee-saved scratch；
+        // 直接用它，避免重跑 gen_lvalue_addr 触发副作用子表达式二次求值
+        // (如 `"+r"(*bar())` 里 bar() 被调两次 —— 见 990130-1.c)。
+        let scratch = match saved_addr_reg {
             Some(r) => r,
-            None => return false,
+            None => match self.alloc_callee_saved() {
+                Some(r) => r,
+                None => return false,
+            },
         };
-        if !self.gen_lvalue_addr(expr, scratch) {
-            self.free_callee_saved(scratch);
+        let addr_ready = saved_addr_reg.is_some() || self.gen_lvalue_addr(expr, scratch);
+        if !addr_ready {
+            if saved_addr_reg.is_none() {
+                self.free_callee_saved(scratch);
+            }
             return false;
         }
         match float_bits {
             Some(bits) => self.store_xmm_to_ptr(src, scratch, bits),
             None => self.store_reg_to_ptr(src, scratch, sz),
         }
-        self.free_callee_saved(scratch);
+        if saved_addr_reg.is_none() {
+            self.free_callee_saved(scratch);
+        }
         true
     }
 
-    pub(crate) fn writeback_asm_operand(&mut self, expr: &Expr, reg: u8, xmm_width: u8) {
+    pub(crate) fn writeback_asm_operand(&mut self, expr: &Expr, reg: u8, xmm_width: u8, saved_addr_reg: Option<u8>) {
         // 非 Ident 左值先走通用写回（原因与实测见 `writeback_asm_general_lvalue`）。
         // 必须放在最前面：下面每个分支都以 `Expr::Ident` 为前提，非 Ident 落进去就是
         // 静默丢值。x87 / MMX / 段寄存器 / 条件码（`xmm_width` 的 2xx 编码）仍走各自
         // 的分支 —— 它们的宽度语义与 GP/SSE 两条不同，混进来只会让诊断变模糊。
         if !matches!(expr, Expr::Ident { .. })
             && matches!(xmm_width, 0 | 32 | 64 | 128)
-            && self.writeback_asm_general_lvalue(expr, reg, xmm_width)
+            && self.writeback_asm_general_lvalue(expr, reg, xmm_width, saved_addr_reg)
         {
             return;
         }
