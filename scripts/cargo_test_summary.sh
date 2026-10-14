@@ -48,15 +48,12 @@ if [ -n "$FROM_LOG" ]; then
     RC=0                      # 复述模式不重跑, 退出码由解析结果决定
     RERAN=0
 else
-    KEEP_LOG=0
     if [ -z "${LOG:-}" ]; then
-        LOG=$(mktemp "${TMPDIR:-/tmp}/cargo_test_summary.XXXXXX")
-    else
-        KEEP_LOG=1            # 用户显式给了 LOG 就留着，便于事后 --from-log 复盘
-        : > "$LOG"
+        LOG="/tmp/cargo_test_summary.log"
     fi
+    KEEP_LOG=1                # 日志始终保留（默认 /tmp/cargo_test_summary.log，或用户指定的路径）
+    : > "$LOG"
     RERAN=1
-    [ $KEEP_LOG -eq 1 ] || trap 'rm -f "$LOG"' EXIT
     cd "$REPO" || exit 2
     # shellcheck disable=SC2086
     cargo test "${PROFILE_ARGS[@]}" -j"$JOBS" ${CARGO_ARGS[@]+"${CARGO_ARGS[@]}"} -- \
