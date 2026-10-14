@@ -1014,6 +1014,7 @@ fn instrument_expr(
             instrument_expr(ap, flags, ctx, guard_var, guard_base);
             ExprKind::Trivial
         },
+        Expr::VaArgPack { .. } => ExprKind::Trivial,
         Expr::PreInc { e, .. }
         | Expr::PreDec { e, .. }
         | Expr::PostInc { e, .. }
@@ -1271,6 +1272,7 @@ fn expr_span(e: &Expr) -> Span {
         | Expr::StmtExpr { span, .. }
         | Expr::Comma { span, .. }
         | Expr::VaArg { span, .. }
+        | Expr::VaArgPack { span, .. }
         | Expr::AsmExpr { span, .. }
         | Expr::LabelAddr { span, .. } => span.clone(),
         Expr::SizeofTy { span, .. }

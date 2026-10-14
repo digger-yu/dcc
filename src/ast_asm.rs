@@ -220,6 +220,7 @@ fn walk_expr(e: &Expr, out: &mut HashSet<String>) {
             }
         },
         Expr::VaArg { ap, .. } => walk_expr(ap, out),
+        Expr::VaArgPack { .. } => {},
         // 普通的 `asm`（含 `Expr::AsmExpr` 形态的语句）永远能被 fall-through 守护覆盖：
         // 它没有跳出目标，所以只进发射点的名单，不进本函数级判据。操作数里仍可能有 asm。
         Expr::AsmExpr {

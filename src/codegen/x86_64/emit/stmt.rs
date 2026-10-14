@@ -300,10 +300,22 @@ impl Codegen {
                                             // 必须按内容装载；不装载则调用方把地址字节当
                                             // 数据用（实测 `return va_arg(ap, struct Pair64)`
                                             // 的 `p.a` = 临时槽地址、`p.b` = 残留 rdx）。
+                                            //
+                                            // `gen_expr` 对 lvalue 表达式（Index/Member/
+                                            // Deref）返回的是**地址**（rax = &obj），
+                                            // 不是值本身。寄存器返回 [Int, Int] 类聚合
+                                            // 必须从该地址加载 8/16 字节值。pr82388:
+                                            // `return h[29];` 的 rax 是 `&h[29]`，
+                                            // callee 直接把地址字节当返回值交付给
+                                            // caller，main 解引用得到栈垃圾。
                                             let rax_is_agg_addr = match e {
                                                 Expr::VaArg { ref ty, .. } => {
                                                     Self::va_arg_result_in_memory(ty)
                                                 },
+                                                // lvalue 表达式: gen_expr 输出对象地址
+                                                Expr::Index { .. }
+                                                | Expr::Member { .. }
+                                                | Expr::Deref { .. } => true,
                                                 _ => false,
                                             };
                                             self.gen_expr(e, Self::EVAL_BASE);

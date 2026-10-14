@@ -11009,6 +11009,18 @@ impl<'a> Parser<'a> {
                             };
                             continue;
                         }
+                        // __builtin_va_arg_pack(): 空参数列表, 作为最后一个实参转发当前函数全部变参
+                        if name.name == "__builtin_va_arg_pack" {
+                            let span_pack = name.span.clone();
+                            if !self.expect(TokKind::RParen, "')'") {
+                                return None;
+                            }
+                            e = Expr::VaArgPack {
+                                span: span_pack,
+                                ty: int_t(),
+                            };
+                            continue;
+                        }
                         // __builtin_types_compatible_p(type1, type2): 编译期类型比较
                         if name.name == "__builtin_types_compatible_p" {
                             let ty1 = self.parse_type()?;
@@ -12457,6 +12469,7 @@ impl<'a> Parser<'a> {
             Expr::VaArg { ap, .. } => {
                 Self::collect_upvars_expr(ap, local_vars, parent_locals, out);
             },
+            Expr::VaArgPack { .. } => {},
             Expr::AsmExpr {
                 outputs, inputs, ..
             } => {

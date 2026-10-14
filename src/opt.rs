@@ -658,6 +658,7 @@ fn expr_has_unsafe_ssa_pattern(e: &Expr) -> bool {
         | E::AlignofTy { .. }
         | E::Offsetof { .. }
         | E::LabelAddr { .. }
+        | E::VaArgPack { .. }
         | E::Ident { .. } => false,
         E::Unary { e: x, .. }
         | E::Cast { e: x, .. }
@@ -1444,6 +1445,7 @@ fn expr_node_count(e: &Expr) -> usize {
         | Expr::Offsetof { .. }
         | Expr::ComplexLit { .. }
         | Expr::ComplexIntLit { .. }
+        | Expr::VaArgPack { .. }
         | Expr::LabelAddr { .. } => 1,
         Expr::Unary { e, .. }
         | Expr::Cast { e, .. }

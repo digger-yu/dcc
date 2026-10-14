@@ -893,7 +893,8 @@ impl Codegen {
             | E::Char { .. }
             | E::SizeofTy { .. }
             | E::AlignofTy { .. }
-            | E::LabelAddr { .. } => {},
+            | E::LabelAddr { .. }
+            | E::VaArgPack { .. } => {},
             E::Unary { e: x, .. }
             | E::Cast { e: x, .. }
             | E::AddrOf { e: x, .. }
@@ -1327,7 +1328,8 @@ impl Codegen {
             | E::Char { .. }
             | E::SizeofTy { .. }
             | E::AlignofTy { .. }
-            | E::LabelAddr { .. } => {},
+            | E::LabelAddr { .. }
+            | E::VaArgPack { .. } => {},
             E::Offsetof { indices, .. } => {
                 for x in indices {
                     Self::collect_free_idents_expr(x, out);
@@ -1582,7 +1584,8 @@ impl Codegen {
             | E::Ident { .. }
             | E::SizeofTy { .. }
             | E::AlignofTy { .. }
-            | E::LabelAddr { .. } => {},
+            | E::LabelAddr { .. }
+            | E::VaArgPack { .. } => {},
             E::Unary { e: x, .. }
             | E::Cast { e: x, .. }
             | E::AddrOf { e: x, .. }

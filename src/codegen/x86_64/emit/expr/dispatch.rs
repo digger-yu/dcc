@@ -132,6 +132,12 @@ impl Codegen {
                 // 0x00000000FFFFFFFF 而非 0xFFFFFFFFFFFFFFFF).
                 let masked = Self::mask_imm_to_type(*v, ty);
                 self.mov_imm(dst, masked);
+                // __int128 / unsigned __int128 常量: 高 64 位必须加载到 rdx,
+                // 否则上半部为垃圾寄存器值 (pr61375: mask = 0xffff<<56 折叠后
+                // hi=0xFFFF, 但 mov_imm 只写 rax, AND 时 hi 半部取错值)。
+                if matches!(ty, Type::Int128 | Type::UInt128) {
+                    self.mov_imm(2, (masked >> 64) as i128);
+                }
             },
             Expr::Char { v, ty, .. } => {
                 let masked = Self::mask_imm_to_type(*v, ty);
@@ -165,6 +171,11 @@ impl Codegen {
                 {
                     if let Ok(val) = const_eval::eval(e) {
                         self.mov_imm(dst, val);
+                        // __int128 / unsigned __int128 折叠常量: 高 64 位写入 rdx,
+                        // 与 Expr::Int 字面量路径一致 (pr61375: mask = 0xffff<<56)。
+                        if matches!(binop_ty, Type::Int128 | Type::UInt128) {
+                            self.mov_imm(2, (val >> 64) as i128);
+                        }
                         return;
                     }
                 }

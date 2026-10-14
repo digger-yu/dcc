@@ -469,12 +469,44 @@ impl Codegen {
                     &[],
                 )); // cmp rcx, 64
                 let l_small = self.fresh_label();
+                let l_eq64 = self.fresh_label();
                 self.jmp_rel32(&l_small, JumpKind::Jl);
-                // >= 64: rdx = rax << (cl-64), rax = 0
-                self.mov(8, 0); // r8 = rax = left_low (保存)
-                self.emit_alu_rm_reg64(AluOp::Xor, 0, 0); // xor rax, rax (low = 0)
-                self.mov(2, 8); // rdx = r8 = left_low
-                self.emit_shift64(ShiftOp::Shl, 2, ShiftAmount::Cl); // shl rdx, cl
+                // >= 64: n in [64,128). Result: lo=0, hi = (old_lo << (n-64)) | (old_hi >> (128-n)).
+                // Incoming: rax=old_lo, rdx=old_hi, rcx=n.
+                // If n == 64 (k=0): result_hi = old_lo, result_lo = 0.
+                // (shr by 64 on a 64-bit reg degenerates to shr-by-0 under CL&63, so
+                // we cannot rely on the generic formula when k==0.)
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                        op: crate::codegen::x86_64::opcode::AluOp::Cmp,
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            1,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
+                        src: crate::codegen::x86_64::opcode::Operand::Imm(64),
+                    },
+                    &[],
+                )); // cmp rcx, 64
+                self.jmp_rel32(&l_eq64, JumpKind::Je);
+                // n in (64,128): k = n-64 in (0,64).
+                self.mov(8, 0); // r8 = old_lo
+                self.mov(9, 2); // r9 = old_hi
+                self.emit_alu_rm_reg_imm8_b64(AluOp::Sub, 1, 64); // rcx = k = n-64
+                self.mov(2, 8); // rdx = old_lo
+                self.emit_shift64(ShiftOp::Shl, 2, ShiftAmount::Cl); // rdx = old_lo << k
+                // Compute rcx = 64-k for the shr of old_hi (in (0,64), safe for CL&63).
+                self.emit_unary64(UnaryOp::Neg, 1); // rcx = -k
+                self.emit_alu_rm_reg_imm8_b64(AluOp::Add, 1, 64); // rcx = 64-k
+                self.mov(0, 9); // rax = old_hi
+                self.emit_shift64(ShiftOp::Shr, 0, ShiftAmount::Cl); // rax = old_hi >> (64-k)
+                self.emit_alu_rm_reg64(AluOp::Or, 2, 0); // rdx |= rax
+                self.emit_alu_rm_reg64(AluOp::Xor, 0, 0); // rax = 0 (low half)
+                self.jmp_rel32(&l_end, JumpKind::Jmp);
+                // n == 64: swap halves: hi = old_lo, lo = 0.
+                self.label(&l_eq64);
+                self.mov(2, 0); // rdx = old_lo
+                self.emit_alu_rm_reg64(AluOp::Xor, 0, 0); // rax = 0
                 self.jmp_rel32(&l_end, JumpKind::Jmp);
                 // < 64: shld rdx, rax, cl; shl rax, cl
                 self.label(&l_small);

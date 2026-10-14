@@ -1052,6 +1052,7 @@ impl Codegen {
             | Expr::AsmExpr { span, .. }
             | Expr::LabelAddr { span, .. }
             | Expr::VaArg { span, .. }
+            | Expr::VaArgPack { span, .. }
             | Expr::Offsetof { span, .. } => span,
         }
     }

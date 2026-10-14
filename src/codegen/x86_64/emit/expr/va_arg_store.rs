@@ -795,63 +795,35 @@ impl Codegen {
                 ));
             },
         }
-        self.emit_insn(&Insn::new(
-            crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
-                op: crate::codegen::x86_64::opcode::AluOp::Add,
-                width: crate::codegen::shared::asm_operand::Width::B64,
-                dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                    0,
-                    crate::codegen::shared::asm_operand::Width::B64,
-                ),
-                src: crate::codegen::x86_64::opcode::Operand::Imm(15),
-            },
-            &[],
-        )); // add rax, 15
-        self.emit_insn(&Insn::new(
-            crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
-                op: crate::codegen::x86_64::opcode::AluOp::And,
-                width: crate::codegen::shared::asm_operand::Width::B64,
-                dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                    0,
-                    crate::codegen::shared::asm_operand::Width::B64,
-                ),
-                src: crate::codegen::x86_64::opcode::Operand::Imm(-16),
-            },
-            &[],
-        )); // and rax, -16
+        // SysV 3.5.7: 当 gp_offset > 39 时, 整个 __int128 从 overflow_arg_area 取.
+        // caller 在 call 前 push 目标地址后, rsp 落入 (8 mod 16). 即使 caller 侧
+        // 做了 +8 静态 padding (见 abi/call.rs), 这个 +8 是 frame_bytes 的一部分,
+        // 从 callee 视角看 overflow_arg_area = r13 + 16, 该地址本身已是 16 对齐
+        // (因为 call 指令 push ret addr 前 rsp 是 16 对齐, push 后 r13 = rsp - 8,
+        // r13 + 16 = 16 对齐地址 + 8 = 8 mod 16). 所以 va_arg 必须把 overflow
+        // 地址舍入到 16 对齐再读.
+        // 注意: 不能把 rax (刚 load 的 overflow_arg_area 指针) 再 store 回
+        // va_list 的 overflow_arg_area 字段 — 那是在原地覆写同一个槽,
+        // 等于把指针写回它自己刚 load 出来的值 (无意义), 且会破坏后续
+        // va_arg 的游标推进 (pr92904 f1 路径 segfault: 读到垃圾地址).
+        // 正确做法: rax = (overflow + 15) & ~15 (16 对齐), 然后推进游标 += 16.
+        // add rax, 15
+        self.emit_insn(&Insn::alu_rm_reg_imm8_b64(0, 0, 15));
+        // and rax, -16
+        self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 0, -16i64));
+        // 推进 overflow_arg_area 游标 += 16 (原地在 va_list 字段上加, 不覆写 rax)
         match loc {
             VaListLoc::Slot(off) => {
-                // mov [r13+disp32], rax
-                self.emit_insn(&Insn::mov_rm_mem(
-                    false,
-                    crate::codegen::shared::asm_operand::Width::B64,
-                    0,
-                    13,
-                    off + 8,
-                ));
-                self.emit_insn(&Insn::alu_mem_imm32_b64(0, 13, off + 8, 16)); // add qword [r13+disp32], 16
+                // add qword [r13+disp32], 16
+                self.emit_insn(&Insn::alu_mem_imm32_b64(0, 13, off + 8, 16));
             },
             VaListLoc::R10 => {
-                // mov [r10+8], rax
-                self.emit_insn(&Insn::mov_rm_mem(
-                    false,
-                    crate::codegen::shared::asm_operand::Width::B64,
-                    0,
-                    10,
-                    8,
-                ));
-                self.emit_insn(&Insn::alu_mem_imm32_b64(0, 10, 8, 16)); // add qword [r10+8], 16
+                // add qword [r10+8], 16
+                self.emit_insn(&Insn::alu_mem_imm32_b64(0, 10, 8, 16));
             },
             VaListLoc::Rcx => {
-                // mov [rcx+8], rax
-                self.emit_insn(&Insn::mov_rm_mem(
-                    false,
-                    crate::codegen::shared::asm_operand::Width::B64,
-                    0,
-                    1,
-                    8,
-                ));
-                self.emit_insn(&Insn::alu_mem_imm32_b64(0, 1, 8, 16)); // add qword [rcx+8], 16
+                // add qword [rcx+8], 16
+                self.emit_insn(&Insn::alu_mem_imm32_b64(0, 1, 8, 16));
             },
         }
 

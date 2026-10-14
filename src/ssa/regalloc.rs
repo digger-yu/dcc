@@ -1037,6 +1037,7 @@ fn scan_expr(e: &Expr, sc: &mut Scan) {
             }
         },
         Expr::VaArg { ap, .. } => scan_expr(ap, sc),
+        Expr::VaArgPack { .. } => {},
         Expr::AsmExpr {
             outputs, inputs, ..
         } => {

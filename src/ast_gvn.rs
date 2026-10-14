@@ -568,6 +568,7 @@ fn walk_expr_addr_of(e: &Expr, on_root: &mut dyn FnMut(&str)) {
             }
             walk_expr_addr_of(ap, on_root);
         },
+        Expr::VaArgPack { .. } => {},
         // 叶子：没有子表达式（`LabelAddr` 是 `&&label`，只涉及标号）。
         Expr::Int { .. }
         | Expr::Float { .. }

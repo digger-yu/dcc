@@ -252,7 +252,8 @@ fn check_expr(arch: Arch, e: &crate::ast::Expr, out: &mut Vec<Diagnostic>) {
         | E::Ident { .. }
         | E::SizeofTy { .. }
         | E::AlignofTy { .. }
-        | E::LabelAddr { .. } => {},
+        | E::LabelAddr { .. }
+        | E::VaArgPack { .. } => {},
         E::Offsetof { indices, .. } => {
             for idx in indices {
                 check_expr(arch, idx, out);

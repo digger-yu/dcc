@@ -1733,6 +1733,9 @@ impl Lowering {
                     vec![self.lower_expr(ap)],
                 )
             },
+            Expr::VaArgPack { .. } => {
+                (ExprKind::ControlFlow, Vec::new())
+            },
             Expr::SizeofTy { ty: ref sty, .. } => {
                 literal = Some(ExprLiteral::Int(sty.size() as i128));
                 (ExprKind::SizeAlignOffset, Vec::new())
@@ -1950,6 +1953,7 @@ fn expr_span(expr: &Expr) -> Span {
         | Expr::AsmExpr { span, .. }
         | Expr::LabelAddr { span, .. }
         | Expr::VaArg { span, .. }
+        | Expr::VaArgPack { span, .. }
         | Expr::Offsetof { span, .. } => span.clone(),
     }
 }

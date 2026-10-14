@@ -234,6 +234,7 @@ fn validate_inline_asm_expr(expr: &Expr, diags: &mut Vec<Diagnostic>) {
         | Expr::SizeofTy { .. }
         | Expr::AlignofTy { .. }
         | Expr::LabelAddr { .. }
+        | Expr::VaArgPack { .. }
         | Expr::Offsetof { .. } => {},
     }
 }

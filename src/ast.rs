@@ -704,6 +704,11 @@ pub enum Expr {
         ty: Type,
         span: Span,
     },
+    /// __builtin_va_arg_pack(): 将当前函数所有变参原样转发给被调方
+    VaArgPack {
+        span: Span,
+        ty: Type,
+    },
     /// __builtin_offsetof(type, member)
     Offsetof {
         ty: Type,
@@ -1850,6 +1855,7 @@ impl Expr {
             | Expr::CompoundLit { ty, .. } => ty.clone(),
             Expr::AsmExpr { ty, .. } => ty.clone(),
             Expr::VaArg { ty, .. } => ty.clone(),
+            Expr::VaArgPack { ty, .. } => ty.clone(),
             Expr::Cast { ty, .. } => ty.clone(),
             Expr::InitList { ty, .. } => ty.clone(),
             Expr::SizeofTy { .. }

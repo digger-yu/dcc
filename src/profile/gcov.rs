@@ -483,6 +483,7 @@ fn expr_span(e: &Expr) -> &Span {
         | AsmExpr { span, .. }
         | LabelAddr { span, .. }
         | VaArg { span, .. }
+        | VaArgPack { span, .. }
         | Offsetof { span, .. } => span,
     }
 }

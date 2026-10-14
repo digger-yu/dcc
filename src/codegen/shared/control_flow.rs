@@ -36,6 +36,7 @@ fn expr_span(expr: &Expr) -> crate::diagnostics::Span {
         | Expr::CompoundLit { span, .. }
         | Expr::AsmExpr { span, .. }
         | Expr::VaArg { span, .. }
+        | Expr::VaArgPack { span, .. }
         | Expr::Cast { span, .. }
         | Expr::InitList { span, .. }
         | Expr::StmtExpr { span, .. } => span.clone(),

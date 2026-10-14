@@ -1510,11 +1510,6 @@ impl Codegen {
                 self.emit_insn(&Insn::jmp_rm_mem(7, 0)); // jmp [rdi]
                 true
             },
-            // __builtin_va_arg_pack: 返回 0 (placeholder)
-            "__builtin_va_arg_pack" => {
-                self.mov_imm(dst, 0);
-                true
-            },
             // __builtin_clear_padding: no-op
             "__builtin_clear_padding" => true,
             // __builtin___clear_cache / __builtin_clear_cache: no-op (x86 不需要显式 cache flush)
@@ -5669,11 +5664,6 @@ impl Codegen {
                 if dst != 0 {
                     self.mov(dst, 0);
                 }
-                true
-            },
-            // __builtin_va_arg_pack: 返回 0 (简化实现)
-            "__builtin_va_arg_pack" => {
-                self.mov_imm(dst, 0);
                 true
             },
             // __builtin_malloc: 转发到 libc malloc()

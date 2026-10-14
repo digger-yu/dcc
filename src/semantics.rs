@@ -334,9 +334,22 @@ fn lvalue_address<R: ObjectResolver>(resolver: &R, expr: &Expr) -> AddressDescri
                 let ptr_addr = lvalue_address(resolver, base);
                 let field_offset = member_field_offset(base, field);
                 let combined = add_constant_offset(ptr_addr, field_offset);
-                let needs_pointer_value = matches!(member_ty, Type::Ptr(_))
-                    && !matches!(combined.base, AddressBase::PointerValue { .. });
-                if needs_pointer_value {
+                // 若字段本身是指针 (如 elt1 是 bitmap_element*), 后续还会
+                // 在它上面继续 ->field / [idx]。此时描述符指向的是 "指针字段
+                // 所在的地址" (&ptr->field), 必须再 load 一次才能拿到指针值,
+                // 否则内层偏移会被错误地叠加到基指针上 (如 bi->elt1->bits[0]
+                // 被错算成 *(bi + 0x18) 而非 *(bi->elt1 + 0x18))。
+                // 用 PointerValue 包一层: 后端物化时先算 &ptr->field, 再 load
+                // 8 字节得到字段值 (指针), 后续偏移继续叠加在该值上。
+                // 注意: 数组字段 (如 elt1->bits) 不包 — 数组退化为地址本身,
+                // 不需要额外 load。
+                // 链式箭头场景 (row->cells->data, 其中 cells 和 data 都是指针)
+                // 也必须无条件再包一层: 内层 PointerValue 已经 load 过 cells
+                // 指针值, 但 data 字段还需要从 cells 指向的 struct A 里再 load
+                // 一次。之前的 `!matches!(combined.base, PointerValue)` guard
+                // 在这里把第二层包装吞掉了, 导致 row->cells->data[col] 被编译
+                // 成 row->cells[col] (少了一次 ->data 解引用)。
+                if matches!(member_ty, Type::Ptr(_)) {
                     AddressDescriptor {
                         base: AddressBase::PointerValue {
                             sub: Box::new(combined),
@@ -355,6 +368,18 @@ fn lvalue_address<R: ObjectResolver>(resolver: &R, expr: &Expr) -> AddressDescri
                 let struct_addr = lvalue_address(resolver, base);
                 let field_offset = member_field_offset(base, field);
                 let combined = add_constant_offset(struct_addr, field_offset);
+                // VM struct (含 VLA 字段的 struct): 目标字段在首 VLA 字段之后时,
+                // 静态字段偏移是基于 sizeof(VLA)=8 退化值算出来的, 不是真实运行时
+                // 偏移 (真实偏移 = align_up(首 VLA 运行时大小 + 之前静态字段, 字段对齐)).
+                // 语义层无法表达运行时偏移, 返回 Unsupported 让后端退回旧路径,
+                // 由 gen_vm_member_offset 在运行时求值.
+                if is_vm_field_after_first_vla(&base_expr_ty(base), &field.name) {
+                    return AddressDescriptor {
+                        offset: ByteOffset::Unsupported,
+                        element_info: element_info_from_type(member_ty),
+                        ..combined
+                    };
+                }
                 AddressDescriptor {
                     element_info: element_info_from_type(member_ty),
                     ..combined
@@ -623,6 +648,38 @@ fn member_field_offset(base_expr: &Expr, field: &ast::Ident) -> i64 {
         },
         _ => 0,
     }
+}
+
+/// 判断该字段是否是 VM struct 中位于首 VLA 字段之后的字段。
+/// VM struct (含 VLA 字段的 struct) 的静态字段偏移是基于 sizeof(VLA)=8 退化值
+/// 算出来的, 不是真实运行时偏移. 这种字段必须由后端运行时求值 (gen_vm_member_offset),
+/// 不能在语义层用静态偏移.
+fn is_vm_field_after_first_vla(base_ty: &Type, field_name: &str) -> bool {
+    // 穿透指针
+    let struct_ty = match base_ty {
+        Type::Ptr(qt) => &qt.base,
+        other => other,
+    };
+    // 仅对 reverse_sso=false 的普通 struct 判定 (Union 字段偏移全为 0, 无运行时偏移)
+    let fields = match struct_ty {
+        Type::Struct(_, fields, _, false) => fields,
+        _ => return false,
+    };
+    // 首 VLA 字段位置
+    let Some(fv_idx) = fields.iter().position(|f| f.ty.has_vla()) else {
+        return false; // struct 不含 VLA, 无运行时偏移
+    };
+    // 目标字段位置
+    let Some(tf_idx) = fields.iter().position(|f| f.name == field_name) else {
+        return false;
+    };
+    // 目标在首 VLA 字段之后 (或本身就是 VLA 字段 — VLA 字段的 offset 也是基于退化值)
+    tf_idx >= fv_idx
+}
+
+/// 取 base 表达式的类型 (穿透必要的类型包装).
+fn base_expr_ty(base: &Expr) -> Type {
+    base.ty()
 }
 
 /// 根据元素类型和加载/存储上下文确定物化动作。
