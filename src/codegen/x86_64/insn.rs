@@ -579,7 +579,21 @@ impl Insn {
         out.push(0x81);
         out.push(modrm);
         out.extend_from_slice(&imm32);
-        Insn::raw_bytes(&out)
+        // 附 gas_text: op /0=add /1=or /4=and /5=sub /6=xor /7=cmp.
+        use crate::codegen::x86_64::emit::gas::REG64;
+        let mnemonic = match op & 0x7 {
+            0 => "add",
+            1 => "or",
+            4 => "and",
+            5 => "sub",
+            6 => "xor",
+            7 => "cmp",
+            _ => "/* alu */",
+        };
+        let gas = format!("{} ${}, {}", mnemonic, imm as i32, REG64[(reg_idx & 15) as usize]);
+        let mut insn = Self::raw_bytes(&out);
+        insn.gas_text = Some(gas);
+        insn
     }
 
     /// P11 Bucket X: cmp eax, imm32 (0x3D id, no ModRM). 用于 va_arg 中与
@@ -650,7 +664,16 @@ impl Insn {
         out.push(modrm);
         out.extend_from_slice(&disp_bytes[..disp_len]);
         out.push(v);
-        Insn::raw_bytes(&out)
+        use crate::codegen::x86_64::emit::gas::REG64;
+        let mnemonic = match op & 0x7 {
+            0 => "add", 1 => "or", 4 => "and", 5 => "sub", 6 => "xor", 7 => "cmp",
+            _ => "/* alu */",
+        };
+        let disp_str = if disp_len == 1 { format!("{:#x}", disp_bytes[0] as i8) } else { format!("{:#x}", i32::from_le_bytes(disp_bytes)) };
+        let gas = format!("{} {},{}({})", mnemonic, imm as i8, disp_str, REG64[(base & 15) as usize]);
+        let mut insn = Self::raw_bytes(&out);
+        insn.gas_text = Some(gas);
+        insn
     }
 
     /// P11 Bucket X: B64 `alu qword [base+disp], imm32` (0x81 / id, REX.W).
@@ -677,7 +700,16 @@ impl Insn {
         out.push(modrm);
         out.extend_from_slice(&disp_bytes[..disp_len]);
         out.extend_from_slice(&imm32);
-        Insn::raw_bytes(&out)
+        use crate::codegen::x86_64::emit::gas::REG64;
+        let mnemonic = match op & 0x7 {
+            0 => "add", 1 => "or", 4 => "and", 5 => "sub", 6 => "xor", 7 => "cmp",
+            _ => "/* alu */",
+        };
+        let disp_str = if disp_len == 1 { format!("{:#x}", disp_bytes[0] as i8) } else { format!("{:#x}", i32::from_le_bytes(disp_bytes)) };
+        let gas = format!("{} {},{}({})", mnemonic, imm, disp_str, REG64[(base & 15) as usize]);
+        let mut insn = Self::raw_bytes(&out);
+        insn.gas_text = Some(gas);
+        insn
     }
 
     /// P11 Bucket O2: `mov dword [base+disp], imm32` (C7 /0 id).
@@ -706,7 +738,12 @@ impl Insn {
         out.push(modrm);
         out.extend_from_slice(&disp_bytes[..disp_len]);
         out.extend_from_slice(&imm32);
-        Insn::raw_bytes(&out)
+        use crate::codegen::x86_64::emit::gas::REG64;
+        let disp_str = if disp_len == 1 { format!("{:#x}", disp_bytes[0] as i8) } else { format!("{:#x}", i32::from_le_bytes(disp_bytes)) };
+        let gas = format!("mov ${},{}({})", imm, disp_str, REG64[(base & 15) as usize]);
+        let mut insn = Self::raw_bytes(&out);
+        insn.gas_text = Some(gas);
+        insn
     }
 
     /// P11 Bucket N7: `mov [base+disp], imm` (C6 /0 ib / C7 /0 id).
@@ -789,7 +826,27 @@ impl Insn {
         } else if is_b32 || is_b64 {
             out.extend_from_slice(&(imm as i32).to_le_bytes());
         }
-        Insn::raw_bytes(&out)
+        use crate::codegen::x86_64::emit::gas::REG64;
+        let disp_str = if disp_len == 0 {
+            format!("({})", REG64[(base & 15) as usize])
+        } else if disp_len == 1 {
+            format!("{:#x}({})", disp_bytes[0] as i8, REG64[(base & 15) as usize])
+        } else {
+            format!("{:#x}({})", i32::from_le_bytes(disp_bytes), REG64[(base & 15) as usize])
+        };
+        let (size_name, imm_val) = if is_b8 {
+            ("b", imm & 0xFF)
+        } else if is_b16 {
+            ("w", imm as i16 as i64)
+        } else if is_b64 {
+            ("q", imm as i32 as i64)
+        } else {
+            ("l", imm as i32 as i64)
+        };
+        let gas = format!("mov{} ${},{}", size_name, imm_val, disp_str);
+        let mut insn = Self::raw_bytes(&out);
+        insn.gas_text = Some(gas);
+        insn
     }
 
     /// P11 Bucket T: 构造 B64 `shl/shr/sar reg, imm8` 强制 C1 形式 (总是带 imm8 字节).
@@ -873,7 +930,11 @@ impl Insn {
         out.push(rex);
         out.push(modrm_opc);
         out.extend_from_slice(&imm64);
-        Insn::raw_bytes(&out)
+        use crate::codegen::x86_64::emit::gas::REG64;
+        let gas = format!("mov ${}, {}", imm as i64, REG64[(reg_idx & 15) as usize]);
+        let mut insn = Self::raw_bytes(&out);
+        insn.gas_text = Some(gas);
+        insn
     }
 
     /// P11 Bucket AI: short conditional jump (jcc rel8, 2 bytes).
@@ -882,7 +943,18 @@ impl Insn {
     /// Used by fixed-offset loops/skips (mem/access.rs, builtins.rs, lvalue.rs,
     /// func_setup.rs canary). The displacement is a compile-time constant.
     pub fn short_jump_rel8(cc_byte: u8, rel8: i8) -> Self {
-        Insn::raw_bytes(&[cc_byte, rel8 as u8])
+        let bytes = [cc_byte, rel8 as u8];
+        let cc_name = match cc_byte & 0x0F {
+            0x0 => "jo", 0x1 => "jno", 0x2 => "jb", 0x3 => "jae",
+            0x4 => "je", 0x5 => "jne", 0x6 => "jbe", 0x7 => "ja",
+            0x8 => "js", 0x9 => "jns", 0xA => "jp", 0xB => "jnp",
+            0xC => "jl", 0xD => "jge", 0xE => "jle", 0xF => "jg",
+            _ => "jcc",
+        };
+        let gas = format!("{} {}", cc_name, rel8);
+        let mut insn = Self::raw_bytes(&bytes);
+        insn.gas_text = Some(gas);
+        insn
     }
 
     /// P11 Bucket P11R: direct call rel32 (E8 00 00 00 00).
@@ -1063,7 +1135,11 @@ impl Insn {
         out.push(0xC7);
         out.push(modrm);
         out.extend_from_slice(&imm.to_le_bytes());
-        Insn::raw_bytes(&out)
+        use crate::codegen::x86_64::emit::gas::REG64;
+        let gas = format!("mov ${}, {}", imm, REG64[(reg_idx & 15) as usize]);
+        let mut insn = Self::raw_bytes(&out);
+        insn.gas_text = Some(gas);
+        insn
     }
 
     /// P11 Bucket Z: B64 `add/and/or/sub/xor/cmp rax, imm32` accumulator-only
@@ -1711,7 +1787,13 @@ impl Insn {
         bytes.push(0x69);
         bytes.push(modrm);
         bytes.extend_from_slice(&imm.to_le_bytes());
-        Insn::raw_bytes(&bytes)
+        // 附 gas_text, 否则 -S 渲染时只看到 raw_bytes 而输出 "/* raw */" 空注释,
+        // 导致 -c 与 -S 的 .text 长度不同 (见 check_asm_text_parity.sh).
+        use crate::codegen::x86_64::emit::gas::REG64;
+        let gas = format!("imul ${}, {}", imm, REG64[(reg_idx & 15) as usize]);
+        let mut insn = Self::raw_bytes(&bytes);
+        insn.gas_text = Some(gas);
+        insn
     }
 
     /// P11: IDIV r/m64 (REX.W F7 /7). Only r/m field holds `reg_idx`; reg
@@ -1719,13 +1801,23 @@ impl Insn {
     /// (do NOT set REX.R -- it would shift /7 out of range).
     pub fn idiv_rm_reg_b64(reg_idx: u8) -> Self {
         let rex = 0x48u8 | if reg_idx >= 8 { 0x01 } else { 0 };
-        Insn::raw_bytes(&[rex, 0xF7, 0xF8 | (reg_idx & 7)])
+        let bytes = [rex, 0xF7, 0xF8 | (reg_idx & 7)];
+        use crate::codegen::x86_64::emit::gas::REG64;
+        let gas = format!("idiv {}", REG64[(reg_idx & 15) as usize]);
+        let mut insn = Self::raw_bytes(&bytes);
+        insn.gas_text = Some(gas);
+        insn
     }
 
     /// P11: DIV r/m64 (REX.W F7 /6). Same encoding shape as IDIV but /6.
     pub fn div_rm_reg_b64(reg_idx: u8) -> Self {
         let rex = 0x48u8 | if reg_idx >= 8 { 0x01 } else { 0 };
-        Insn::raw_bytes(&[rex, 0xF7, 0xF0 | (reg_idx & 7)])
+        let bytes = [rex, 0xF7, 0xF0 | (reg_idx & 7)];
+        use crate::codegen::x86_64::emit::gas::REG64;
+        let gas = format!("div {}", REG64[(reg_idx & 15) as usize]);
+        let mut insn = Self::raw_bytes(&bytes);
+        insn.gas_text = Some(gas);
+        insn
     }
 
     /// P11: IMUL reg, reg (0F AF /r) via ImulRm typed opcode.

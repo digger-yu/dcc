@@ -227,6 +227,15 @@ impl Codegen {
 
         let mut funcs = Vec::new();
         Self::collect_all_funcs(prog, &mut funcs);
+        // 嵌套函数的真源名字是 prescan 分配的唯一名 (如 `inner_parent.0`),
+        // 而 collect_all_funcs 只返回原始名 `inner` —— labels / func_asm_layout
+        // 都以唯一名为键, 不并入唯一名会导致嵌套函数体被静默跳过 (ELF 路径用
+        // nested_funcs.keys() 枚举, 不踩这个坑). 与 elf/symbols.rs:106 对齐.
+        for nested_name in self.nested_funcs.keys() {
+            if !funcs.iter().any(|n| n == nested_name) {
+                funcs.push(nested_name.clone());
+            }
+        }
         funcs.sort_by_key(|name| self.labels.get(name).copied().unwrap_or(u64::MAX));
 
         let mut sections: Vec<String> = vec![".text".to_string()];
@@ -1202,6 +1211,14 @@ impl Codegen {
         }
         let mut names = Vec::new();
         Self::collect_all_funcs(prog, &mut names);
+        // 嵌套函数的真源名字是 prescan 分配的唯一名; 见上面 build_asm_output
+        // 里同样的补丁说明. 不并入唯一名, labels.get(name) 用原始名查不到,
+        // 嵌套函数就永远进不了 func_asm_layout.
+        for nested_name in self.nested_funcs.keys() {
+            if !names.iter().any(|n| n == nested_name) {
+                names.push(nested_name.clone());
+            }
+        }
         // 合成体也要进 `func_asm_layout`：它们不在 `prog.decls` 里，但 `-S` 需要它们
         // 的字节（命名口径与 `elf/rel_symbols.rs` 完全同一：两边都读 `ifunc_synth`）。
         for sf in &self.ifunc_synth {

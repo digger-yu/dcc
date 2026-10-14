@@ -2,17 +2,24 @@
 # scripts/gcc_dg_test.sh — GCC dg Test Suite 测试驱动
 #
 # 用法:
-#   scripts/gcc_dg_test.sh [compile|run|all] [--dirs subdir1[,subdir2,...]]
+#   scripts/gcc_dg_test.sh [compile|run|all] [--dirs sub1[,sub2,...]] [--shard N/M]
 #
 # 环境变量:
 #   DCC          — dcc 编译器路径 (默认：target/release/dcc)
 #   DG_DIR       — gcc.dg suite 根目录 (默认：tests/gcc-dg)
-#   JOBS         — 并行度 (默认：nproc)
+#   JOBS         — 并行编译/执行度 (默认：nproc)
 #   VERBOSE      — 非空时输出每个测试的详细结果
-#   SUBDIRS      — 要测试的子目录 (可选，多个用逗号分隔；不指定则使用默认组合)
+#   SUBDIRS      — 要测试的子目录 (可选；不指定则使用默认组合)
+#
+# 分片:
+#   --shard N/M   将展开后的文件列表按文件号均匀分成 M 片, 只跑第 N 片 (1..M)。
+#                配合 --dirs 可实现"某子目录再拆 N 份"。CI 可用 M=4 并行 4 个 job。
+#   例:
+#     ./gcc_dg_test.sh run --shard 1/4     # run 集第 1/4 片
+#     ./gcc_dg_test.sh compile --dirs tree-ssa --shard 2/4
 #
 # 默认测试组合:
-#   compile: compat,charset,noncompile,format (语言语义 + 负向诊断；cpp 需用 --dirs 手动指定)
+#   compile: compat,charset,noncompile,format (语言语义 + 负向诊断)
 #   run:     torture,tree-ssa (可执行正确性)
 set -euo pipefail
 
@@ -30,38 +37,56 @@ fi
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 VERBOSE="${VERBOSE:-}"
 SKIP_FILE="$REPO_ROOT/tests/skip/gcc_dg_skip.txt"
-SUB="${1:-all}"
 
 # ── 解析命令行参数 ──
-case "$SUB" in
-    compile|run|all)
-        ;;
-    --*)
-        echo "用法：$0 [compile|run|all] [--dirs subdir1[,subdir2,...]]" >&2
-        exit 1
-        ;;
-    *)
-        echo "用法：$0 [compile|run|all] [--dirs subdir1[,subdir2,...]]" >&2
-        exit 1
-        ;;
-esac
+SUB="all"
+SUBDIRS=""
+SHARD_N=""
+SHARD_M=""
 
-# 检查是否有 --dirs 参数
-for arg in "$@"; do
-    if [[ "$arg" == --dirs* ]]; then
-        SUBDIRS="${arg#--dirs=}"
-        break
-    fi
-    if [[ "$arg" == "--dirs" && "$2" != "compile" && "$2" != "run" && "$2" != "all" ]]; then
-        SUBDIRS="$2"
-        break
-    fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        compile|run|all)
+            SUB="$1"; shift
+            ;;
+        --dirs=*)
+            SUBDIRS="${1#--dirs=}"; shift
+            ;;
+        --shard=*)
+            shard_val="${1#--shard=}"
+            SHARD_N="${shard_val%%/*}"
+            SHARD_M="${shard_val#*/}"
+            shift
+            ;;
+        --dirs)
+            SUBDIRS="${2:-}"; shift 2
+            ;;
+        --shard)
+            shard_val="${2:-}"
+            SHARD_N="${shard_val%%/*}"
+            SHARD_M="${shard_val#*/}"
+            shift 2
+            ;;
+        *)
+            echo "用法: $0 [compile|run|all] [--dirs sub1[,sub2,...]] [--shard N/M]" >&2
+            exit 1
+            ;;
+    esac
 done
+
+# 校验 shard 参数
+if [[ -n "$SHARD_N" || -n "$SHARD_M" ]]; then
+    if [[ -z "$SHARD_N" || -z "$SHARD_M" || \
+          ! "$SHARD_N" =~ ^[0-9]+$ || ! "$SHARD_M" =~ ^[0-9]+$ || \
+          "$SHARD_N" -lt 1 || "$SHARD_N" -gt "$SHARD_M" || "$SHARD_M" -lt 1 ]]; then
+        echo "错误: --shard 需要 N/M 格式且 1 <= N <= M" >&2
+        exit 1
+    fi
+fi
 
 # 默认测试子目录组合（如果未指定 --dirs）
 DEFAULT_COMPILE_SUBDIRS="compat,charset,noncompile,format"
 DEFAULT_RUN_SUBDIRS="torture,tree-ssa"
-SUBDIRS="${SUBDIRS:-}"
 
 # ── 前置检查 ──
 if [[ ! -x "$DCC" ]]; then
@@ -72,7 +97,6 @@ fi
 
 if [[ ! -d "$DG_DIR" ]]; then
     echo "错误: gcc.dg suite 未安装: $DG_DIR" >&2
-    echo "请先运行 torture workflow (会自动 sparse-checkout gcc.dg)" >&2
     exit 1
 fi
 
@@ -80,8 +104,8 @@ fi
 declare -a SKIP_PATTERNS=()
 if [[ -f "$SKIP_FILE" ]]; then
     while IFS= read -r line; do
-        line="${line%%#*}"           # 去注释
-        line="${line//[[:space:]]/}" # 去空白
+        line="${line%%#*}"
+        line="${line//[[:space:]]/}"
         [[ -n "$line" ]] && SKIP_PATTERNS+=("$line")
     done < "$SKIP_FILE"
 fi
@@ -91,7 +115,6 @@ should_skip() {
     local base_name
     base_name="$(basename "$rel_path")"
     for pat in "${SKIP_PATTERNS[@]+"${SKIP_PATTERNS[@]}"}"; do
-        # 支持 prefix* glob、精确匹配、以及路径匹配
         if [[ "$pat" == *"*" ]]; then
             [[ "$base_name" == ${pat} || "$rel_path" == ${pat} ]] && return 0
         else
@@ -100,65 +123,46 @@ should_skip() {
     done
     return 1
 }
+export -f should_skip
 
 # ── 临时目录 ──
 TMPDIR_DG=$(mktemp -d /tmp/dcc-gcc-dg.XXXXXX)
 trap 'rm -rf "$TMPDIR_DG"' EXIT
 
 # ── 提取 GCC dg 指令 ──
-# 返回: do_type extra_opts skip_reason
-# do_type: compile / run / link / preprocess / unknown / skip
+# 输出: "do_type extra_opts" 或 "skip <reason>"
 parse_dg_directives() {
     local src="$1"
-    local do_type=""
-    local raw_opts=""
-    local skip_reason=""
-
-    # ── dg-do ──
+    local do_type
     do_type=$(grep -oP '\{ dg-do \K[a-z]+' "$src" 2>/dev/null | head -1 || true)
     if [[ -z "$do_type" ]]; then
-        # 没有 dg-do 指令，默认当作 compile
         do_type="compile"
     fi
 
-    # ── dg-require-effective-target ──
     local req_target
     req_target=$(grep -oP '\{ dg-require-effective-target \K[^}]+' "$src" 2>/dev/null | head -1 || true)
     if [[ -n "$req_target" ]]; then
-        # 只支持 x86_64 / x86 / * / any 相关
         case "$req_target" in
             x86_64|x86|i?86|*|any|always) ;;
             *)
-                # 其他目标 (arm/powerpc/mips/riscv 等) 跳过
-                skip_reason="target:$req_target"
-                echo "skip $skip_reason"
+                echo "skip target:$req_target"
                 return
                 ;;
         esac
     fi
 
-    # ── dg-skip-if ── (简化处理: 跳过所有带 skip-if 的测试)
     if grep -qP '\{ dg-skip-if' "$src" 2>/dev/null; then
-        skip_reason="dg-skip-if"
-        echo "skip $skip_reason"
+        echo "skip dg-skip-if"
         return
     fi
 
-    # ── dg-options ──
-    local dg_opts
+    local raw_opts=""
+    local dg_opts add_opts
     dg_opts=$(grep -oP '\{ dg-options "\K[^"]+' "$src" 2>/dev/null | head -1 || true)
-    if [[ -n "$dg_opts" ]]; then
-        raw_opts="$dg_opts"
-    fi
-
-    # ── dg-additional-options ──
-    local add_opts
+    [[ -n "$dg_opts" ]] && raw_opts="$dg_opts"
     add_opts=$(grep -oP '\{ dg-additional-options "\K[^"]+' "$src" 2>/dev/null | head -1 || true)
-    if [[ -n "$add_opts" ]]; then
-        raw_opts="$raw_opts $add_opts"
-    fi
+    [[ -n "$add_opts" ]] && raw_opts="$raw_opts $add_opts"
 
-    # 只保留 dcc 支持的选项
     local filtered=""
     local opt
     for opt in $raw_opts; do
@@ -180,107 +184,76 @@ parse_dg_directives() {
                 ;;
         esac
     done
-
     echo "$do_type $filtered"
 }
+export -f parse_dg_directives
 
-# ── compile 测试函数 ──
-run_dg_compile_test() {
+# ── 并行 worker (由 xargs 调用): 收到一个 "src" 参数和一个 "rel" 参数 ──
+# 输出 "rel RESULT detail"
+dg_worker() {
     local src="$1"
-    local rel_path="$2"
-    local out="$TMPDIR_DG/$(echo "$rel_path" | tr '/' '_').o"
+    local rel="$2"
 
-    local parsed
+    local parsed do_type extra_opts
     parsed=$(parse_dg_directives "$src")
-    local do_type="${parsed%% *}"
-    local extra_opts="${parsed#* }"
+    do_type="${parsed%% *}"
+    extra_opts="${parsed#* }"
 
     if [[ "$do_type" == "skip" ]]; then
-        local reason="$extra_opts"
-        echo "SKIP $reason"
+        echo "$rel SKIP $extra_opts"
         return
     fi
-
     if [[ "$do_type" == "preprocess" || "$do_type" == "link" ]]; then
-        echo "SKIP dg-do:$do_type"
+        echo "$rel SKIP dg-do:$do_type"
         return
     fi
 
-    if [[ "$do_type" != "compile" && "$do_type" != "run" ]]; then
-        echo "SKIP dg-do:$do_type"
-        return
-    fi
-
-    local rc=0
-    { timeout 30 "$DCC" -c -std=gnu11 $extra_opts -o "$out" "$src" 2>/dev/null; } 2>/dev/null || rc=$?
-    if [[ $rc -eq 0 ]]; then
+    if [[ "$category" == "compile" ]]; then
+        if [[ "$do_type" != "compile" && "$do_type" != "run" ]]; then
+            echo "$rel SKIP dg-do:$do_type"
+            return
+        fi
+        local out="$TMPDIR_DG/$(echo "$rel" | tr '/' '_').o"
+        local rc=0
+        { timeout 30 "$DCC" -c -std=gnu11 $extra_opts -o "$out" "$src" 2>/dev/null; } 2>/dev/null || rc=$?
         rm -f "$out"
-        echo "PASS"
-    elif [[ $rc -eq 124 ]]; then
-        rm -f "$out"
-        echo "FAIL timeout"
-    else
-        rm -f "$out"
-        echo "FAIL compile"
+        if [[ $rc -eq 0 ]]; then
+            echo "$rel PASS"
+        elif [[ $rc -eq 124 ]]; then
+            echo "$rel FAIL timeout"
+        else
+            echo "$rel FAIL compile"
+        fi
+    else  # run
+        if [[ "$do_type" != "run" ]]; then
+            echo "$rel SKIP not-dg-do-run"
+            return
+        fi
+        local exe="$TMPDIR_DG/$(echo "$rel" | tr '/' '_').exe"
+        if ! "$DCC" -std=gnu11 -lm $extra_opts -o "$exe" "$src" 2>/dev/null; then
+            echo "$rel FAIL compile"
+            return
+        fi
+        local rc=0
+        { timeout 10 "$exe" >/dev/null 2>&1; } 2>/dev/null || rc=$?
+        rm -f "$exe"
+        if [[ $rc -eq 0 ]]; then
+            echo "$rel PASS"
+        elif [[ $rc -eq 124 ]]; then
+            echo "$rel FAIL timeout"
+        else
+            echo "$rel FAIL runtime"
+        fi
     fi
 }
-export -f run_dg_compile_test
-
-# ── run 测试函数 ──
-run_dg_run_test() {
-    local src="$1"
-    local rel_path="$2"
-    local exe="$TMPDIR_DG/$(echo "$rel_path" | tr '/' '_').exe"
-
-    local parsed
-    parsed=$(parse_dg_directives "$src")
-    local do_type="${parsed%% *}"
-    local extra_opts="${parsed#* }"
-
-    if [[ "$do_type" == "skip" ]]; then
-        local reason="$extra_opts"
-        echo "SKIP $reason"
-        return
-    fi
-
-    if [[ "$do_type" == "preprocess" || "$do_type" == "link" ]]; then
-        echo "SKIP dg-do:$do_type"
-        return
-    fi
-
-    if [[ "$do_type" != "run" ]]; then
-        echo "SKIP not-dg-do-run"
-        return
-    fi
-
-    if ! "$DCC" -std=gnu11 -lm $extra_opts -o "$exe" "$src" 2>/dev/null; then
-        echo "FAIL compile"
-        return
-    fi
-
-    # 运行，超时 10 秒
-    local rc=0
-    { timeout 10 "$exe" >/dev/null 2>&1; } 2>/dev/null || rc=$?
-    rm -f "$exe"
-
-    if [[ $rc -eq 0 ]]; then
-        echo "PASS"
-    elif [[ $rc -eq 124 ]]; then
-        echo "FAIL timeout"
-    else
-        echo "FAIL runtime"
-    fi
-}
-export -f run_dg_run_test
+export -f dg_worker
 
 # ── 运行一组测试 ──
 run_suite() {
-    local category="$1"   # compile / run
-    local runner="$2"
+    local category="$1"
 
-    # 导出给子进程使用
-    export DCC TMPDIR_DG
-    
+    export DCC TMPDIR_DG DG_DIR category
+
     # 根据测试类型决定默认的子目录（用户未通过 --dirs 指定时）
     local dirs="$SUBDIRS"
     if [[ -z "$dirs" ]]; then
@@ -297,33 +270,30 @@ run_suite() {
     local tmpfiles_list="$TMPDIR_DG/${category}_list.txt"
     local tmpfiles_results="$TMPDIR_DG/${category}_results.txt"
     local run_list="$TMPDIR_DG/${category}_run.txt"
+    : > "$tmpfiles_list"
+    : > "$run_list"
 
     # 递归收集 .c 文件
-    # 如果指定了 dirs，则只搜索这些子目录
     if [[ -n "$dirs" ]]; then
-        # 将逗号分隔的子目录转换为空格分隔的数组
         IFS=',' read -ra DIR_ARRAY <<< "$dirs"
-        find_args=()
-        for dir in "${DIR_ARRAY[@]}"; do
-            dir="$(echo "$dir" | xargs)"  # 去除首尾空格
-            [[ -d "$DG_DIR/$dir" ]] && find_args+=("$DG_DIR/$dir")
+        local find_args=()
+        local d
+        for d in "${DIR_ARRAY[@]}"; do
+            d="$(echo "$d" | xargs)"
+            [[ -d "$DG_DIR/$d" ]] && find_args+=("$DG_DIR/$d")
         done
-        
         if [[ ${#find_args[@]} -eq 0 ]]; then
-            echo "错误：指定的子目录不存在：$dirs"
+            echo "错误：指定的子目录不存在：$dirs" >&2
             exit 1
         fi
-        
-        # 在这些子目录中递归查找 .c 文件
-        : > "$tmpfiles_list"
-        for dir in "${find_args[@]}"; do
-            find "$dir" -name '*.c' -type f >> "$tmpfiles_list"
+        for d in "${find_args[@]}"; do
+            find "$d" -name '*.c' -type f >> "$tmpfiles_list"
         done
         sort -o "$tmpfiles_list" "$tmpfiles_list"
     else
-        # 默认：搜索整个 DG_DIR
         find "$DG_DIR" -name '*.c' -type f | sort > "$tmpfiles_list"
     fi
+    local total
     total=$(wc -l < "$tmpfiles_list")
 
     if [[ $total -eq 0 ]]; then
@@ -331,123 +301,80 @@ run_suite() {
         return
     fi
 
-    # 计算相对路径 + 过滤跳过列表
+    # 计算相对路径 + 过滤跳过列表 + 可选 shard 分片
+    local idx=0
+    local src rel base
     while IFS= read -r src; do
-        local rel="${src#$DG_DIR/}"
-        local base
+        idx=$((idx + 1))
+        rel="${src#$DG_DIR/}"
         base="$(basename "$src")"
         if should_skip "$rel" || should_skip "$base"; then
             skip=$((skip + 1))
             skipped+=("$rel")
-        else
-            echo "$src $rel" >> "$run_list"
+            continue
         fi
+        if [[ -n "$SHARD_M" && $(( ((idx - 1) % SHARD_M) + 1 )) -ne "$SHARD_N" ]]; then
+            continue
+        fi
+        printf '%s\t%s\n' "$src" "$rel" >> "$run_list"
     done < "$tmpfiles_list"
 
-    local run_count=0
-    [[ -f "$run_list" ]] && run_count=$(wc -l < "$run_list")
+    local run_count
+    run_count=$(wc -l < "$run_list")
+
+    local shard_note=""
+    if [[ -n "$SHARD_M" ]]; then
+        shard_note="  shard=$SHARD_N/$SHARD_M"
+    fi
 
     if [[ $run_count -eq 0 ]]; then
-        echo "  [$category] total=$total  skip=$skip  (全部跳过)"
+        echo "  [$category] total=$total  skip=$skip$shard_note  (本片无测试)"
         return
     fi
 
-    echo "  [$category] total=$total  run=$run_count  skip=$skip  jobs=$JOBS"
+    echo "  [$category] total=$total  run=$run_count  skip=$skip  jobs=$JOBS$shard_note"
 
-    # 并行执行 - 直接嵌入函数定义而不是使用 export -f
+    # 并行执行: 把 "src TAB rel" 行通过 stdin 喂给 xargs; 每个 worker 收到一行,
+    # 在 bash -c 里用 awk 切 tab。用 awk 避免内嵌 tab 字面量的引号问题。
     : > "$tmpfiles_results"
-    cat "$run_list" | while IFS= read -r line; do
-        src="${line% *}"
-        rel="${line#* }"
-        
-        # 编译测试
-        if [[ "$category" == "compile" ]]; then
-            out="$TMPDIR_DG/$(echo "$rel" | tr '/' '_').o"
-            parsed=$(parse_dg_directives "$src")
-            do_type="${parsed%% *}"
-            extra_opts="${parsed#* }"
-            
-            if [[ "$do_type" == "skip" ]]; then
-                echo "$rel SKIP $extra_opts"
-            elif [[ "$do_type" == "preprocess" || "$do_type" == "link" ]]; then
-                echo "$rel SKIP dg-do:$do_type"
-            elif [[ "$do_type" != "compile" && "$do_type" != "run" ]]; then
-                echo "$rel SKIP dg-do:$do_type"
-            else
-                rc=0
-                { timeout 30 "$DCC" -c -std=gnu11 $extra_opts -o "$out" "$src" 2>/dev/null; } 2>/dev/null || rc=$?
-                rm -f "$out"
-                if [[ $rc -eq 0 ]]; then
-                    echo "$rel PASS"
-                elif [[ $rc -eq 124 ]]; then
-                    echo "$rel FAIL timeout"
-                else
-                    echo "$rel FAIL compile"
-                fi
-            fi
-        # 运行测试
-        elif [[ "$category" == "run" ]]; then
-            exe="$TMPDIR_DG/$(echo "$rel" | tr '/' '_').exe"
-            parsed=$(parse_dg_directives "$src")
-            do_type="${parsed%% *}"
-            extra_opts="${parsed#* }"
-            
-            if [[ "$do_type" == "skip" ]]; then
-                echo "$rel SKIP $extra_opts"
-            elif [[ "$do_type" == "preprocess" || "$do_type" == "link" ]]; then
-                echo "$rel SKIP dg-do:$do_type"
-            elif [[ "$do_type" != "run" ]]; then
-                echo "$rel SKIP not-dg-do-run"
-            else
-                if ! "$DCC" -std=gnu11 -lm $extra_opts -o "$exe" "$src" 2>/dev/null; then
-                    echo "$rel FAIL compile"
-                    continue
-                fi
-                
-                rc=0
-                { timeout 10 "$exe" >/dev/null 2>&1; } 2>/dev/null || rc=$?
-                rm -f "$exe"
-                
-                if [[ $rc -eq 0 ]]; then
-                    echo "$rel PASS"
-                elif [[ $rc -eq 124 ]]; then
-                    echo "$rel FAIL timeout"
-                else
-                    echo "$rel FAIL runtime"
-                fi
-            fi
-        fi
-    done > "$tmpfiles_results"
-
-    # 如果启用了并行，可以用 GNU parallel 或其他工具替代
+    local worker_cmd="$TMPDIR_DG/${category}_parallel.sh"
+    cat > "$worker_cmd" <<'EOF'
+#!/usr/bin/env bash
+line="$1"
+src="${line%%	*}"
+rel="${line##*	}"
+dg_worker "$src" "$rel"
+EOF
+    chmod +x "$worker_cmd"
+    < "$run_list" xargs -d '\n' -L1 -P "$JOBS" "$worker_cmd" \
+        > "$tmpfiles_results" 2>/dev/null || true
 
     # 统计结果
-    local skip_reason_count=0
+    local line rel_str result detail
     while IFS= read -r line; do
-        local rel="${line%% *}"
+        rel_str="${line%% *}"
         local rest="${line#* }"
-        local result="${rest%% *}"
-        local detail="${rest#* }"
+        result="${rest%% *}"
+        detail="${rest#* }"
 
         case "$result" in
             PASS)
                 pass=$((pass + 1))
-                [[ -n "$VERBOSE" ]] && echo "  PASS  $rel"
+                [[ -n "$VERBOSE" ]] && echo "  PASS  $rel_str"
                 ;;
             FAIL)
                 fail=$((fail + 1))
-                failures+=("$rel ($detail)")
-                [[ -n "$VERBOSE" ]] && echo "  FAIL  $rel ($detail)"
+                failures+=("$rel_str ($detail)")
+                [[ -n "$VERBOSE" ]] && echo "  FAIL  $rel_str ($detail)"
                 ;;
             SKIP)
                 skip=$((skip + 1))
-                skipped+=("$rel ($detail)")
-                [[ -n "$VERBOSE" ]] && echo "  SKIP  $rel ($detail)"
+                skipped+=("$rel_str ($detail)")
+                [[ -n "$VERBOSE" ]] && echo "  SKIP  $rel_str ($detail)"
                 ;;
         esac
     done < "$tmpfiles_results"
 
-    # 汇总输出
     echo ""
     echo "  === gcc.dg [$category] ==="
     echo "  total=$total  pass=$pass  fail=$fail  skip=$skip"
@@ -459,11 +386,14 @@ run_suite() {
         done
     fi
 
-    if [[ ${#skipped[@]} -gt 0 ]]; then
-        echo "  Skipped:"
-        for s in "${skipped[@]}"; do
+    if [[ ${#skipped[@]} -gt 0 && -z "$VERBOSE" ]]; then
+        echo "  Skipped (${#skipped[@]}):"
+        for s in "${skipped[@]:0:20}"; do
             echo "    SKIP  $s"
         done
+        if [[ ${#skipped[@]} -gt 20 ]]; then
+            echo "    ... (还有 $(( ${#skipped[@]} - 20 )) 条)"
+        fi
     fi
 
     # 写入全局结果
@@ -478,23 +408,20 @@ echo "== GCC dg Test Suite =="
 echo "   dcc: $DCC"
 echo "   suite: $DG_DIR"
 echo "   jobs: $JOBS"
+[[ -n "$SHARD_M" ]] && echo "   shard: $SHARD_N/$SHARD_M"
 echo ""
 
 case "$SUB" in
     compile)
-        run_suite "compile" run_dg_compile_test
+        run_suite "compile"
         ;;
     run)
-        run_suite "run" run_dg_run_test
+        run_suite "run"
         ;;
     all)
-        run_suite "compile" run_dg_compile_test
+        run_suite "compile"
         echo ""
-        run_suite "run" run_dg_run_test
-        ;;
-    *)
-        echo "用法: $0 [compile|run|all]" >&2
-        exit 1
+        run_suite "run"
         ;;
 esac
 
@@ -512,7 +439,6 @@ if [[ -f "$TMPDIR_DG/summary.txt" ]]; then
     echo "=== Total: pass=$total_pass  fail=$total_fail  skip=$total_skip ==="
 fi
 
-# 有失败则退出非零
 if [[ -f "$TMPDIR_DG/has_failures" ]]; then
     exit 1
 fi
