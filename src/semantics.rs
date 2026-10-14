@@ -282,14 +282,23 @@ fn lvalue_address<R: ObjectResolver>(resolver: &R, expr: &Expr) -> AddressDescri
             //   StackSlotLoad 出指针值本身, 直接加下标即可, 无需补 LOAD。
             // - arr 是 Member (非 arrow, 如 s.p[i]): lvalue_address 给出的是
             //   「该指针所在字段的地址」(即 &s.p), 需 LOAD 一次取到指针值。
-            // - arr 是 Member arrow Ptr (如 row->cells->data): Member arrow
-            //   arm 已包过 PointerValue, 此处 base_addr.base 即为 PointerValue,
-            //   guard 会跳过重复 LOAD。
+            // - arr 是 Member arrow Ptr (如 row->cells[i]): Member arrow arm
+            //   对指针/数组字段已包过 PointerValue, 此处 base_addr.base 即为
+            //   PointerValue, guard 会跳过重复 LOAD。
             let base_addr = lvalue_address(resolver, arr);
-            let base_addr = if matches!(arr.ty(), Type::Ptr(_))
-                && !matches!(arr.as_ref(), Expr::Ident { .. })
-                && !matches!(base_addr.base, AddressBase::PointerValue { .. })
-            {
+            // 是否需要补一次 LOAD 才能拿到指针值?
+            // 适用场景: arr 是 Member(非 arrow, 如 s.p[i]) —— lvalue_address
+            // 返回的是「&s.p」(字段地址), 需再 load 一次取指针值.
+            // 不适用:
+            //   - arr 是 Ident Ptr (p[i]) —— StackSlotLoad 已 load 出指针值
+            //   - arr 是 Member arrow Ptr (row->cells[i]) —— arrow arm 已包过
+            //   - arr 是 String / Call / 其他 rvalue 指针 —— 其值本身就是地址,
+            //     套上 PointerValue 会多 load 一次 (把字符串首 8 字节当指针,
+            //     导致 L"..."[i] 解引用垃圾地址 segfault).
+            let needs_pointer_load = matches!(arr.ty(), Type::Ptr(_))
+                && matches!(arr.as_ref(), Expr::Member { is_arrow: false, .. })
+                && !matches!(base_addr.base, AddressBase::PointerValue { .. });
+            let base_addr = if needs_pointer_load {
                 AddressDescriptor {
                     base: AddressBase::PointerValue {
                         sub: Box::new(base_addr),
@@ -312,13 +321,34 @@ fn lvalue_address<R: ObjectResolver>(resolver: &R, expr: &Expr) -> AddressDescri
             ..
         } => {
             if *is_arrow {
-                // ptr->field: 先加载指针值, 再加字段偏移
+                // ptr->field: 基地址 = base 的 lvalue 地址, 再加字段偏移.
+                // 若字段本身是指针 (如 elt1 是 bitmap_element*), 后续还会
+                // 在它上面继续 ->field / [idx]。此时描述符指向的是 "指针字段
+                // 所在的地址" (&ptr->field), 必须再 load 一次才能拿到指针值,
+                // 否则内层偏移会被错误地叠加到基指针上 (如 bi->elt1->bits[0]
+                // 被错算成 *(bi + 0x18) 而非 *(bi->elt1 + 0x18))。
+                // 用 PointerValue 包一层: 后端物化时先算 &ptr->field, 再 load
+                // 8 字节得到字段值 (指针), 后续偏移继续叠加在该值上。
+                // 注意: 数组字段 (如 elt1->bits) 不包 — 数组退化为地址本身,
+                // 不需要额外 load。
                 let ptr_addr = lvalue_address(resolver, base);
                 let field_offset = member_field_offset(base, field);
                 let combined = add_constant_offset(ptr_addr, field_offset);
-                AddressDescriptor {
-                    element_info: element_info_from_type(member_ty),
-                    ..combined
+                let needs_pointer_value = matches!(member_ty, Type::Ptr(_))
+                    && !matches!(combined.base, AddressBase::PointerValue { .. });
+                if needs_pointer_value {
+                    AddressDescriptor {
+                        base: AddressBase::PointerValue {
+                            sub: Box::new(combined),
+                        },
+                        offset: ByteOffset::Constant(0),
+                        element_info: element_info_from_type(member_ty),
+                    }
+                } else {
+                    AddressDescriptor {
+                        element_info: element_info_from_type(member_ty),
+                        ..combined
+                    }
                 }
             } else {
                 // s.field: 在结构体地址上加字段偏移
@@ -387,6 +417,16 @@ fn lvalue_address<R: ObjectResolver>(resolver: &R, expr: &Expr) -> AddressDescri
 ///
 /// 尝试编译期求值; 若失败则产生运行时偏移描述。
 pub fn compute_index_offset(idx: &Expr, elem_ty: &Type) -> ByteOffset {
+    // VLA 元素 (多维 VLA 的外层行): stride 在运行时才知道, 即使 idx 是常量
+    // 下标也不能用 elem_ty.size() 的退化值 (VLA 维 size() 返回 8)。必须走
+    // VlaRuntime 让后端从 VLA 元数据槽加载实际行 stride。
+    if elem_ty.has_vla() {
+        return ByteOffset::VlaRuntime {
+            index: Box::new(idx.clone()),
+            addend: 0,
+        };
+    }
+
     let stride = element_stride(elem_ty);
 
     // 尝试编译期求值索引
@@ -395,20 +435,12 @@ pub fn compute_index_offset(idx: &Expr, elem_ty: &Type) -> ByteOffset {
         return ByteOffset::Constant(byte_off);
     }
 
-    // 运行时偏移: 每项记住自己的下标表达式 (见 [`ByteOffset::Runtime`] 的根因说明)
-    match elem_ty {
-        // VLA 元素: stride 在运行时才知道
-        _ if elem_ty.has_vla() => ByteOffset::VlaRuntime {
-            index: Box::new(idx.clone()),
-            addend: 0,
-        },
-        _ => ByteOffset::Runtime {
-            terms: vec![RuntimeIndexTerm {
-                stride,
-                index: idx.clone(),
-            }],
-            addend: 0,
-        },
+    ByteOffset::Runtime {
+        terms: vec![RuntimeIndexTerm {
+            stride,
+            index: idx.clone(),
+        }],
+        addend: 0,
     }
 }
 

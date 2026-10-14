@@ -1586,42 +1586,55 @@ impl Codegen {
                     }
                     let pfx = if matches!(inner, Type::Float) { 0xF3u8 } else { 0xF2u8 };
                     if self.gen_lvalue_addr(arg, Self::EVAL_BASE) {
+                        // eprintln!("conjf: lvalue path taken, arg_ty={:?} result_off={result_off} inner_sz={inner_sz}", arg.ty());
+                        // rcx = &arg (源 complex). 用 rdx 作 scratch base 做 xmm load,
+                        // 避免 SimdMov base=rcx 编码失败 (见 conjf lvalue 历史问题).
                         self.emit_insn(&Insn::new(
                             crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                                 rip_relative: false,
                                 width: crate::codegen::shared::asm_operand::Width::B64,
                                 dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                                    1,
+                                    2,
                                     crate::codegen::shared::asm_operand::Width::B64,
                                 ),
                                 src: crate::codegen::x86_64::opcode::Operand::Reg(
-                                    0,
+                                    1,
                                     crate::codegen::shared::asm_operand::Width::B64,
                                 ),
                             },
                             &[],
-                        )); // mov rcx, rax
+                        )); // mov rdx, rcx
                         let imag_off = inner_sz;
-                        // P11 Bucket N11: typed-encode xmm load from [rcx]/[rcx+disp32].
                         let simd_w = if matches!(inner, Type::Float) {
                             crate::codegen::x86_64::opcode::SimdWidth::SS
                         } else {
                             crate::codegen::x86_64::opcode::SimdWidth::SD
                         };
-                        // 实部: [rcx] → xmm0 → [result_off] (不变)
-                        self.emit_insn(&Insn::simd_mov_mem_base(false, simd_w, 0, 1, 0));
-                        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
-                        // 虚部: [rcx+off] → xmm0 → flip → [result_off+inner_sz]
-                        self.emit_insn(&Insn::simd_mov_mem_base(
-                            false,
-                            simd_w,
-                            0,
-                            1,
-                            imag_off as i32,
-                        ));
-                        self.flip_sign_xmm(0, &inner);
-                        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
+                        // 实部: [rdx] → xmm0 → [result_off] (不变)
+                    let ok1 = self.emit_insn(&Insn::simd_mov_mem_base(false, simd_w, 0, 2, 0));
+                    if !ok1 {
+                        // eprintln!("conjf lvalue encode ok1 (real load from rdx) failed result_off={result_off}");
+                    }
+                    self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
+                    // 虚部: [rdx+off] → xmm0 → flip → [result_off+inner_sz]
+                    let ok3 = self.emit_insn(&Insn::simd_mov_mem_base(
+                        false,
+                        simd_w,
+                        0,
+                        2,
+                        imag_off as i32,
+                    ));
+                    if !ok3 {
+                        // eprintln!("conjf lvalue encode ok3 (imag load from rdx+off) failed imag_off={imag_off}");
+                    }
+                    self.flip_sign_xmm(0, &inner);
+                    self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
+                    // 物化后必须把 rcx 从源地址改为 result_off 地址, 否则调用方
+                    // (store_complex_at_rcx 的 Complex RHS 分支) 会用 rcx 作为
+                    // dst 写分量, 覆写源 complex.
+                    self.emit_lea_r13(1, result_off);
                     } else {
+                        // eprintln!("conjf: rvalue path taken, arg_ty={:?} result_off={result_off} inner_sz={inner_sz}", arg.ty());
                         self.gen_expr(arg, Self::EVAL_BASE);
                         if matches!(arg, Expr::Call { .. }) {
                             // SSE 返回: 虚部在 xmm1, 物化到临时区
@@ -1645,6 +1658,9 @@ impl Codegen {
                         self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], result_off + inner_sz);
                         self.flip_sign_xmm(0, &inner);
                         self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
+                        // 同 lvalue 分支: rcx 必须指向 result_off, 否则调用方
+                        // 误把 dst 写到源地址或其他垃圾地址.
+                        self.emit_lea_r13(1, result_off);
                     }
                     // 重载实部到 xmm0 (complex rvalue 约定: xmm0=实部)
                     self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], result_off);
@@ -2738,16 +2754,19 @@ impl Codegen {
                 }
                 let arg_ty = args[0].ty();
                 let is_f = matches!(arg_ty, Type::Float);
-                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
-                                                          // movmskps eax, xmm0
-                self.emit_insn(&Insn::movmskps_gpr_xmm(0, 0));
-                if is_f {
-                    // float: 符号位是 bit 0
-                    self.emit_insn(&Insn::alu_rm_reg_imm8(4, 0, 1)); // and eax, 1
-                } else {
-                    // double/long double: 符号位是 bit 1
-                    self.emit_insn(&Insn::alu_rm_reg_imm8(4, 0, 2)); // and eax, 2
-                                                                     // 归一化为 0/1: shr 1
+                let is_ld = matches!(arg_ty, Type::LongDouble);
+                if is_ld {
+                    // long double: 80-bit x87, rvalue 交付在 st(0), 符号位在 80-bit
+                    // 最高字节 (第 9 字节) 的 bit 7. 把 st(0) 弹出到栈上 16 字节
+                    // scratch, 读 [rsp+9] 的符号位.
+                    self.gen_expr(&args[0], Self::EVAL_BASE); // st(0) = x
+                    self.emit_insn(&Insn::sub_rsp_imm(16));
+                    // fstp tbyte (%rsp): Df/7 = DB /7, modrm mod=00 reg=111 r/m=100 (rsp/SIB)
+                    // 紧跟 SIB 字节 0x24 (no scale/index/base=rsp)
+                    self.emit_insn(&Insn::raw_bytes(&[0xDB, 0x3C, 0x24]));
+                    // movzx eax, byte [rsp+9]: REX.W 不能加 (32-bit movzx), 用 0F B6 44 24 09
+                    self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x44, 0x24, 0x09]));
+                    // shr eax, 7
                     self.emit_insn(&Insn::new(
                         crate::codegen::x86_64::opcode::X86_64Opcode::Shift {
                             op: crate::codegen::x86_64::opcode::ShiftOp::Shr,
@@ -2756,10 +2775,34 @@ impl Codegen {
                                 0,
                                 crate::codegen::shared::asm_operand::Width::B32,
                             ),
-                            amount: crate::codegen::x86_64::opcode::ShiftAmount::Imm8(1),
+                            amount: crate::codegen::x86_64::opcode::ShiftAmount::Imm8(7),
                         },
                         &[],
-                    )); // shr eax, 1
+                    ));
+                    self.emit_insn(&Insn::add_rsp_imm(16));
+                } else {
+                    // float/double: SSE 通道, xmm0 = x
+                    self.gen_expr(&args[0], Self::EVAL_BASE);
+                    self.emit_insn(&Insn::movmskps_gpr_xmm(0, 0));
+                    if is_f {
+                        // float: 符号位是 bit 0
+                        self.emit_insn(&Insn::alu_rm_reg_imm8(4, 0, 1)); // and eax, 1
+                    } else {
+                        // double: 符号位是 bit 1
+                        self.emit_insn(&Insn::alu_rm_reg_imm8(4, 0, 2)); // and eax, 2
+                        self.emit_insn(&Insn::new(
+                            crate::codegen::x86_64::opcode::X86_64Opcode::Shift {
+                                op: crate::codegen::x86_64::opcode::ShiftOp::Shr,
+                                width: crate::codegen::shared::asm_operand::Width::B32,
+                                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                    0,
+                                    crate::codegen::shared::asm_operand::Width::B32,
+                                ),
+                                amount: crate::codegen::x86_64::opcode::ShiftAmount::Imm8(1),
+                            },
+                            &[],
+                        )); // shr eax, 1
+                    }
                 }
                 if dst != 0 {
                     self.mov(dst, 0);

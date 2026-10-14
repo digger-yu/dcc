@@ -2691,14 +2691,23 @@ impl Codegen {
                 // emit_scalar_to_xmm0_if_needed 单次求值）。此处不得再预
                 // gen_expr，否则带副作用 rvalue 被求值两次。
                 self.store_complex_at_rcx(r, &inner.base);
-                // 统一 rvalue 约定收尾: [rcx] → result_off,
-                // xmm0=实部, rax=地址 (赋值表达式值消费端依赖)
-                self.mov(6, 1);
-                self.emit_lea_r13(7, result_off);
-                self.mov_imm(1, (inner.size() * 2) as i128);
-                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld));
-                self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // cld; rep movsb
-                                                                                                 // LD rvalue 消费端用 fld tbyte, 不经 xmm0 (见上)。
+                // 注意: store_complex_at_rcx 对 Complex RHS 已物化到 result_off
+                // 再写到 [rcx] (dst). 此时 result_off 里是干净的 RHS 值,
+                // 下方 [rcx] → result_off 的 rep movsb 反而会把 (dst 旧内容)
+                // 写回 result_off, 污染后续消费端 (return/main complex 赋值).
+                // 仅标量 RHS (r.ty() 非 complex) 需要 rep movsb 把分量搬到
+                // result_off (因为标量 RHS 的分量只写到 dst 槽, 没物化).
+                let is_scalar_rhs = !matches!(r.ty(), Type::Complex(_) | Type::Imaginary(_));
+                if is_scalar_rhs {
+                    // 统一 rvalue 约定收尾: [rcx] → result_off,
+                    // xmm0=实部, rax=地址 (赋值表达式值消费端依赖)
+                    self.mov(6, 1);
+                    self.emit_lea_r13(7, result_off);
+                    self.mov_imm(1, (inner.size() * 2) as i128);
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld));
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // cld; rep movsb
+                }
+                // LD rvalue 消费端用 fld tbyte, 不经 xmm0 (见上)。
                 if matches!(inner.base, Type::Float | Type::Double) {
                     let pfx = if matches!(inner.base, Type::Float) {
                         0xF3u8
@@ -3497,7 +3506,26 @@ impl Codegen {
             self.emit_x87_fstp_at(1, isz as i32, inner);
             return;
         }
-        self.pop(1); // rcx = dst addr
+        // 对于标量 RHS (Int/Var/Cast/Binop/Call 等非 complex 表达式),
+        // emit_scalar_to_xmm0_if_needed 假设 rax 含 RHS 值, 但 pop(1) 之后
+        // rax 可能是 lvalue 地址 (调用方 push 前刚算好的). 必须先求值 RHS,
+        // 再 push dst/pop rcx, 同时保住 RHS 值.
+        let is_scalar_rhs = !matches!(r.ty(), Type::Complex(_) | Type::Imaginary(_));
+        if is_scalar_rhs {
+            // 调用方在栈顶 push 了 dst_addr. 直接求值 RHS (rax 含整数 rvalue,
+            // 或 xmm0 含浮点 rvalue), 然后 pop(1) 取 dst_addr 到 rcx.
+            // 不能用 r8 暂存 dst_addr: r8 是 caller-saved, 若 gen_expr 发起
+            // call (e.g. d[0] = foo()), r8 会被破坏, pop 回 rcx 就是垃圾地址.
+            // pop(1) 只写 rcx, 不动 rax, 所以 RHS 整数值保留.
+            self.gen_expr(r, Self::EVAL_BASE);
+            self.pop(1); // rcx = dst addr (rax/xmm0 RHS 值不受影响)
+        } else {
+            // Complex RHS: 同理, dst_addr 留在栈上不暂存到 r8.
+            // gen_expr 物化 complex rvalue 到 result_off 并保持栈平衡,
+            // 之后 pop(1) 直接取 dst_addr 到 rcx.
+            self.gen_expr(r, Self::EVAL_BASE);
+            self.pop(1); // rcx = dst addr
+        }
         self.emit_scalar_to_xmm0_if_needed(r, inner);
         // 源为不同内型 complex/imaginary 时实部需精度转换
         // (标量源的转换已由 emit_scalar_to_xmm0_if_needed 处理)

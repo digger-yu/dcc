@@ -2118,10 +2118,12 @@ impl Codegen {
                         self.gen_expr(r, Self::EVAL_BASE); // 值 (浮点: xmm0)
                         self.pop(1); // rcx = 目标地址
                         if matches!(inner, Type::LongDouble) {
-                            // LongDouble 分量: gen_expr 后值在 st0 (80-bit
-                            // tbyte), 必须 fstpt 直写 [rcx+part_off]。绝不
-                            // 能走下方 SSE movsd — 只写 8 字节且取 xmm0
-                            // (垃圾), 破坏 real/imag 的 10 字节 tbyte 槽。
+                            // LongDouble 分量: 把 RHS 统一搬到 st0 (80-bit
+                            // tbyte), 再 fstpt 直写 [rcx+part_off]。必须先
+                            // 调用 emit_operand_to_st0: RHS 可能是整数
+                            // (如 x+1, 值在 rax) 或 SSE float/double (值在
+                            // xmm0), 而不是已在 st0 的 long double 表达式。
+                            self.emit_operand_to_st0(&r.ty(), 0);
                             self.emit_x87_fstp_at(1, part_off as i32, &inner);
                         } else if is_float_inner {
                             self.emit_scalar_to_xmm0_if_needed(r, &inner);
