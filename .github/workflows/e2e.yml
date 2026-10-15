@@ -61,8 +61,8 @@ jobs:
       - name: Run cargo tests (unit + integration + error snapshots)
         run: cargo test --release
 
-      # Tier 0 硬门禁 (docs/tests_quality_system_plan.md §9): fixture 引用完整性
-      # 门禁本体 + 门禁自身的反向自测（元门禁, §8.3）。
+      # Tier 0 硬门禁 (tests/README.md §1.1): fixture 引用完整性
+      # 门禁本体 + 门禁自身的反向自测（元门禁, tests/README.md §7）。
       # 刻意放在 cargo test 之后: 两个脚本只读源码与 fixture 路径, 不依赖构建产物,
       # 但门禁一旦 exit 1 就立即终止 job —— 排在后面才能保证 cargo test 的结果先被
       # 记录, 避免「门禁红」掩盖「测试也红」的诊断信息。

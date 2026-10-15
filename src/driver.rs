@@ -679,7 +679,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     //
     // 不做这一步就只能回到旧形状：`.o` 里 IFUNC 与实现体**同址**、全 `.o` 无 CPUID，
     // 于是链接期只能由内置链接器现场拼 CPUID 字节流，产物静默从动态降级为静态
-    // （docs/missing_features.md 的 IFUNC 行、docs/ssa-pass-upgrade-plan.md §7.38）。
+    // （docs/missing_features.md 的 IFUNC 行）。
     // 展开后宿主 `cc`/`ld` 能原生处理该 `.o`，`driver.rs` 里那条改道分支因此不再需要。
     if matches!(cfg.target.arch, crate::cli::Arch::X86_64) {
         let mut expand_diags: Vec<Diagnostic> = Vec::new();
@@ -1966,7 +1966,8 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
     let native_out = match crate::cpp::native::lower_decls_native(&decls) {
         Ok(out) => out,
         Err(e) if cfg.cxx_native_mode == crate::cpp::feature_matrix::CxxNativeMode::On => {
-            // `On` 不得静默 fallback (方案 §5.1): native 覆盖率要能被测试
+            // `On` 不得静默 fallback（判据由 tests/integration/cpp_runtime.rs 的
+            // cpp_cxx_native_on_forces_native 钉住）: native 覆盖率要能被测试
             // 直接量化, 静默回落会把「没接住」伪装成「接住了」。
             stats.record_native();
             log_cpp_path_summary(cfg, stats);
@@ -1977,7 +1978,7 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
             )]);
         },
         // Auto: 静态能力矩阵说这份 TU 可以 native, 但真实 lowering 仍可能拒它
-        // (闭包、特殊初始化形式等矩阵尚未建模的写法)。方案 §5.1 要求 Auto
+        // (闭包、特殊初始化形式等矩阵尚未建模的写法)。Auto 必须
         // 保留兼容性, 且 fallback 在 verbose 里**可见** —— 记录原因后回落 legacy。
         Err(e) => {
             let reason = format!("native lowering rejected TU: {}", e);
@@ -2035,7 +2036,8 @@ fn run_cpp_driver(cfg: &Config, input: &std::path::Path) -> Result<(), Vec<Diagn
 
 /// Stage 0/10: verbose 下的 C++ 路径审计摘要。
 ///
-/// 方案 §5.1 要求 verbose 输出包含 path / fallback reason / unsupported feature,
+/// verbose 输出必须包含 path / fallback reason / unsupported feature（这一条由
+/// tests/integration/cpp_runtime.rs 的 help / native 用例钉住）,
 /// Stage 10 的验收判据「fallback 数量在 verbose summary 中为 0」读的就是这一行。
 /// 计数是**进程级**的 (一次调用编多个 TU 时累加), 因此这里印的是累计值。
 fn log_cpp_path_summary(cfg: &Config, stats: &crate::cpp::path_control::PathStats) {

@@ -1054,8 +1054,8 @@ fn gnu89_implicit_function_decl_warns_and_continues() {
 /// `-fstrict-aliasing` 必须**告知无效**，不得默默假装做了。
 ///
 /// 背景：P4/P13 那份别名分析因「结果从入口到管线都被丢弃」已删（见
-/// docs/ssa-pass-upgrade-plan.md §7.37），删完之后 `-fstrict-aliasing` 就是一个
-/// 「能接受但悄悄无效」的开关。§7.37 的要求是二选一（接真 TBAA 消费者，或给一
+/// docs/missing_features.md 的 `-fstrict-aliasing` 行），删完之后 `-fstrict-aliasing` 就是一个
+/// 「能接受但悄悄无效」的开关。当时的要求是二选一（接真 TBAA 消费者，或给一
 /// 条诊断），本用例钉住后者：
 ///   * `-fstrict-aliasing`：警告 + 仍成功编译（不改变行为，不能把它做成错误）；
 ///   * `-fno-strict-aliasing`：**不警告** —— 它要求的保守 aliasing 本来就是现状；
@@ -1179,6 +1179,21 @@ fn struct_abi_extended() {
     let rc = run_exe(&exe);
     assert_eq!(rc, 0);
     let _ = fs::remove_file(&exe);
+}
+
+/// a6 本体：80-bit `long double` 的对象表示 + 算术 + 比较。
+/// 夹具自己要求双层判据：stdout 的 `%Lf` 文本与 gcc 逐字符一致（防“退出码对了
+/// 但数字不同”的部分实现），退出码独立表达失败（拿 gcc 实测的 80-bit 位型做
+/// memcmp，而不是拿只有 f64 精度的十进制字面量当右操作数——那会假红）。
+/// 与 `ld80_arith_cmp.c` 不重叠：那件只跑关系比较的 bit0..bit3，本件跑对象位型
+/// 与 `volatile` 除法（避开前端常量折叠那条假绿路径）。
+/// 原先由一次性脚本 `scripts/tmp_ld80.sh` 驱动；该脚本已删，本用例是唯一入口。
+#[test]
+#[cfg(unix)]
+fn ld80_arith_object_bits_and_ops_match_gcc() {
+    let src = include_str!("../fixtures/c/ld80_arith.c");
+    let rc = run_gcc_cross_check("ld80-arith-a6", src);
+    assert_eq!(rc, 0, "ld80_arith: 80-bit 位型/算术/比较判据未全中（期望退出码 0）");
 }
 
 /// 80-bit `long double` 算术与比较回归。夹具里 bit0/1/2 三项判据**只有真
@@ -2027,8 +2042,7 @@ fn m3_3_statement_expressions() {
 fn m3_5_vla_zero_array() {
     let src = include_str!("../fixtures/c/vla.c");
     // 只跑 -O0/-O1：-O2/-O3 仍有一个已定位、未修的存量债（`check_opt_equivalence.sh`
-    // 报为 OPT-DIFF，跳档与 -O0 不一致）。定位结果与新证据见
-    // docs/ssa-pass-upgrade-plan.md §7.10：触发者是 SSA 层 GVN，而两种
+    // 报为 OPT-DIFF，跳档与 -O0 不一致）。定位结果与新证据：触发者是 SSA 层 GVN，而两种
     // 「看上去合理」的修法（把数组类型临时值衰减成指针 / 不让数组结果参与值编号）
     // 都被实测否定，所以这里不能先把它当成已绿。
     for flag in ["-O0", "-O1"] {

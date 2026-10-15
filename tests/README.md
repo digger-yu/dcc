@@ -1,10 +1,11 @@
 # DCC 测试体系
 
 > 本目录是 DCC 编译器全部集成与回归测试的根目录。
-> 本 README 是「**怎么跑、怎么加**」的权威；结构与规则契约见
-> [`docs/tests_quality_system_plan.md`](../docs/tests_quality_system_plan.md)（下称**方案**），
-> 本文对它**单向引用**，不复制清单，避免出现第二套真源。
-> fixture 目录细则见 [`tests/fixtures/README.md`](fixtures/README.md)。
+> 本 README 是「**怎么跑、怎么加**」的权威，Tier 分层与主题子文件规则以本文为准；
+> fixture 细则见 [`tests/fixtures/README.md`](fixtures/README.md)，
+> 「特性 → 夹具 → 用例」的机器生成索引见
+> [`docs/test_coverage.md`](../docs/test_coverage.md)（本文不复制那份索引，
+> 避免出现第二套真源）。
 
 ---
 
@@ -17,20 +18,20 @@ Tier 2  内核 / 性能（scripts/kernel_full_check.sh、QEMU 启动矩阵、ker
 Tier 3  可选深测（libiberty / GCC 源树 --features gcc_src、STRICT_FULL_BUILD=1）
 ```
 
-Tier 的**权威命令表**是方案 §9；CI 侧的分层导航见 [`docs/ci_guide.md`](../docs/ci_guide.md) §6。
+Tier 的**权威命令表**就是本文 §1.1；CI 侧的分层导航见 [`docs/ci_guide.md`](../docs/ci_guide.md) §6。
 
 ### 1.1 Tier 0 命令清单（提交前逐条跑）
 
 ```bash
 cargo build --tests
-cargo test --release                                  # 全部 6 个顶层 target
+cargo test --release                                  # 全部 8 个顶层 target
 bash scripts/check_fixtures.sh                        # fixture 引用完整性：硬失败，无过渡开关
 bash scripts/check_fixtures_selftest.sh               # 元门禁：证明上一条真的会红（5 类反向注入逐条 exit 1）
 ```
 
 Makefile 入口与 Tier 0 的对应关系（终态：`make test` 逐字跑完上面四条；`make test-all` = `make test`
-+ `scripts/test_all.sh`，后者只做 examples 端到端冒烟的薄编排，不复制断言逻辑）以方案 §9 的
-「入口职责」表为准。
++ `scripts/test_all.sh`，后者只做 smoke 端到端冒烟的薄编排，不复制断言逻辑）以本文 §1.1
+与 `Makefile` 里 `test:` 目标上方的注释为准。
 
 ### 1.2 单测过滤习惯
 
@@ -51,7 +52,7 @@ tests/
 ├── README.md                      # 本文件
 ├── common/
 │   ├── harness.rs                 # 公共 harness 总入口（条目全部 pub(crate)；以 #[path] 挂载
-│   │                              #  下列子模块并 pub(crate) use …::* 重导出，契约见方案 §6）
+│   │                              #  下列子模块并 pub(crate) use …::* 重导出，契约见本文 §5）
 │   └── harness/
 │       ├── elf.rs                 # ELF64 节/符号/动态段解析（elf64_*、readelf_relocations…）
 │       ├── driver_cli.rs          # 驱动 CLI 面（dcc_cmd、fixtures_dir、write_src、temp_dir）
@@ -102,11 +103,10 @@ tests/
     └── _archive/                  # 无引用的历史件：禁止被任何 include_str!/.join() 引用
 ```
 
-**顶层 `tests/*.rs` cargo target = 6 个**：`integration`、`errors`、`profile`、
-`perf_regression`、`reproducibility`、`cpp_abi_gcc_cross_check`。
+**顶层 `tests/*.rs` cargo target = 8 个**：`integration`、`errors`、`profile`、
+`perf_regression`、`reproducibility`、`cpp_abi_gcc_cross_check`、`disasm_snapshot`、
+`g10_snapshot_baseline`。
 新增顶层 target 不是默认动作：先把测试挂进合适的主题子文件。
-（`tests/backend_parity.rs` 由 [`docs/backend_refactor_plan.md`](../docs/backend_refactor_plan.md)
-引入为独立 target，不属于上述 6 个，接口规则见方案 §12。）
 
 `tests/gcc-dg/`、`tests/gcc-torture/` 是 GCC 官方套件的本地副本（`.gitignore` 排除，
 由 `scripts/setup_torture.sh` 与 `scripts/gcc_dg_test.sh` 等驱动），**不是** `fixtures/` 成员。
@@ -119,9 +119,10 @@ tests/
 4. 运行时路径继续用 `env!("CARGO_MANIFEST_DIR")`，**不得**改成相对路径。
 5. 单文件 ≤ 4000 行，超限按二级主题再切并同样走 `include!`。
 6. 跨主题复用的助手进 `tests/common/harness.rs`（体量自成一体时可落它的 `harness/` 子模块，
-   再由 harness.rs 重导出），不得在子文件里重复定义（分流表见方案 §6.2）。
+   再由 harness.rs 重导出），不得在子文件里重复定义（分流表见本文 §5）。
 
-主题归属规则与 test 总数守恒判据见方案 §5.3 / §2 / §14。
+主题归属规则见本文 §2.1；test 总数守恒与引用面的机器判据见
+[`docs/test_coverage.md`](../docs/test_coverage.md)「索引的维护契约」表（`STRUCT-*` / `COUNT-*` / `FIXTURE-MISSING`）。
 
 ---
 
@@ -133,7 +134,7 @@ tests/
            include_str!("../fixtures/<dir>/<file>") 引用夹具，复用 harness 入口
 3. 验门禁：cargo test --test integration <名字子串>
            bash scripts/check_fixtures.sh
-           （再按方案 §10.1 重新生成 docs/test_coverage.md 覆盖索引，使新行进入索引）
+           （再跑 bash scripts/gen_coverage_index.sh 重新生成 docs/test_coverage.md 覆盖索引，使新行进入索引）
 ```
 
 三步的判据是**同一条链**：夹具存在 → 被引用 → 被跑到 → 被索引到。
@@ -165,7 +166,7 @@ tests/
 ## 4. fixture 目录 = 语言 / 角色（速览）
 
 细则、白名单与零引用处置流程的权威在
-[`tests/fixtures/README.md`](fixtures/README.md)；此处只给速览表（与方案 §7.1 同源）。
+[`tests/fixtures/README.md`](fixtures/README.md)；此处只给速览表（与本文 §4 同源）。
 
 | 目录 | 放什么 | 禁止 |
 |------|--------|------|
@@ -207,7 +208,7 @@ tests/
 挂载，条目全部 `pub(crate)`；`harness/elf.rs`、`harness/driver_cli.rs`、`harness/cpp_frontend.rs`
 三个子模块由 harness.rs 自己以 `#[path]` 挂载并 `pub(crate) use …::*` 重导出，所以主题子文件
 看到的仍是 `harness::*` 单一入口（主题子文件内部不得出现 `mod` / `use`，见 §2.1 规则 2）。
-按用途分组（完整契约与分流表见方案 §6.1 / §6.2）：
+按用途分组（完整契约与分流表见本文 §5）：
 
 | 组 | 代表入口 |
 |----|----------|
@@ -226,7 +227,7 @@ tests/
 - `tests/skip/torture_skip.txt`：`scripts/torture_test.sh`、`scripts/torture_compile_test.sh`、
   `scripts/torture_execute_test.sh`、`scripts/torture_summary.sh` 读取
 
-它们属于外部套件（gcc-dg / torture）的裁剪面，对应方案 §9 Tier 1 的 `gcc-dg.yml` 与
+它们属于外部套件（gcc-dg / torture）的裁剪面，对应本文 §1 的 Tier 1 CI job `gcc-dg.yml` 与
 `torture.yml`；**Tier 0 门禁不读这两个文件**。用跳过列表掩盖回归是禁止的
 （判据见 `tests/skip/README.md`）。
 
@@ -239,4 +240,4 @@ tests/
 `scripts/check_fixtures_selftest.sh` 用 5 类**反向注入**证明它真的会红，并在结束时校验
 `git status --porcelain tests/fixtures` 为空（注入不留残留）。
 两者的关系是元门禁：**门禁脚本自身假绿 = 一次测试体系事故**，改 `check_fixtures.sh` 必须同时让 selftest 保持 5/5 PASS。
-注入用例与期望标签表见方案 §8.3。
+注入用例与期望标签表见本文 §7 与 `scripts/check_fixtures_selftest.sh` 头部。

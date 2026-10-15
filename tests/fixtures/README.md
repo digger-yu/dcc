@@ -1,9 +1,8 @@
 # DCC 测试夹具（fixtures）目录约定
 
-> 本文是 `tests/fixtures/` 下**目录 = 语言/角色**、命名与引用完整性规则的就近细则。
-> 上位契约：[`docs/tests_quality_system_plan.md`](../../docs/tests_quality_system_plan.md) §7（下称**方案 §7**）。
-> 如何跑、如何加测试见 [`tests/README.md`](../README.md)。本文与方案**单向从属**：
-> 规则语义以方案 §7 为准，本文负责落到"该放哪个目录、叫什么名、怎么算被引用"。
+> 本文是 `tests/fixtures/` 下**目录 = 语言/角色**、命名与引用完整性规则的**唯一真源**；
+> `scripts/check_fixtures.sh` 逐条实现的就是本文的判据。
+> 如何跑、如何加测试见 [`tests/README.md`](../README.md)。
 
 ---
 
@@ -20,7 +19,7 @@
 | `cpp_abi_{template,eh,rtti,virtual,overload,lifecycle}/` | C++ Itanium ABI 的 GCC 差分夹具，按**目录名**被 `tests/cpp_abi_gcc_cross_check.rs` 动态发现 | 在 `.rs` 里逐个硬编码**夹具文件**清单（主题组名仍需登记，见 §3） |
 | `gcc_tools/` | libiberty 探测组合（`config.h`/`gstdint.h`/`libdecnumber_combined.c`/`test_decbasic.c`） | 未登记进白名单 |
 | `corpus/` | 真实 `.o` 二进制样本（`io_delay.o`、`fair.o`、`clz_ctz.o`） | 源码 |
-| `probe/` | 后端能力探针（归 [`docs/backend_refactor_plan.md`](../../docs/backend_refactor_plan.md)） | 本体系的语言/行为面主题化改动 |
+| `probe/` | 后端能力探针（由 `scripts/probe_backend_features.sh` 消费，结果对应 [`docs/backend_feature_matrix.md`](../../docs/backend_feature_matrix.md)） | 本体系的语言/行为面主题化改动 |
 | `_archive/` | 无测试引用的历史件 | **任何 `include_str!` / `.join()` / `Path` 引用** |
 
 三条边界说明：
@@ -29,7 +28,7 @@
 - **`c/` 下的同族二级子目录**：仅用于"一族多 TU / 批量同题"夹具（实测：`c/va_arg/`、`c/va_arg_mix/`、
   `c/va_arg_xfail/`）。它不是新的角色目录，不享受白名单豁免，同样受 §3 引用完整性约束；
   预期失败角色的夹具终态应落 `c_xfail/`。
-- **新增角色目录 = 改契约**：先在方案 §7.1 增行，再建目录；未登记的目录既过不了 §2 的
+- **新增角色目录 = 改契约**：先在本文 §1 增行，再建目录；未登记的目录既过不了 §2 的
   目录-扩展名一致检查，也过不了 §4 的白名单规则。
 
 ---

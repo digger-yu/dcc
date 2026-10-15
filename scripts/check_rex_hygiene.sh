@@ -3,8 +3,7 @@
 # scripts/check_rex_hygiene.sh — x86_64 产物 REX 卫生不变式
 #
 # 两条判据都以 **objdump 为权威**（不是自家解码器 —— 自家解码器看不见「该发 REX 却没发」，
-# 详见 docs/ssa-pass-upgrade-plan.md §7.22：`Rex.present` 补上之前它把 `80 c7 10` 读成
-# `add $0x10,%dil`，正好假绿）：
+# `Rex.present` 补上之前它就把 `80 c7 10` 读成 `add $0x10,%dil`，正好假绿）：
 #
 #   A. 产物里出现 `rex` / `rex.WRB` 这类**标注** ⇒ 该指令带了不扩任何字段的 REX 位。
 #      标定过：GAS 对同样的助记符从不发这种前缀，所以这不是读数口径差异而是多发。

@@ -372,7 +372,8 @@ impl Codegen {
                 // 暂存号从写死的 %rcx 换成候选表首号（%r8）之后，「src 与 dst 同属高 8 号」
                 // 从死分支变成常走分支，漏掉的 REX.B 会让 `cmp %r8d,%r12d` 解码成
                 // `cmp %r8d,%esp`（mod=3 rm=100 是非法编码，objdump 直接点名 %esp）。
-                // 位序判据见 docs/ssa-pass-upgrade-plan.md §7.21，机器判据见 rex_matrix::binop_matrix。
+                // 位序判据由 `rex_matrix::binop_matrix` 穷举锁住，产物级判据见
+                // scripts/check_rex_hygiene.sh。
                 // P9 方案 C: cmp+setcc+movzbq 合并发射时挂 gas_text, 避免事后反推.
                 let (cmp_src_name, cmp_dst_name): (&str, &str) = if use_32bit {
                     (GAS_REG32[(src & 15) as usize], GAS_REG32[(dst & 15) as usize])

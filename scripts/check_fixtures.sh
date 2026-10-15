@@ -2,10 +2,10 @@
 # ===========================================================================
 # scripts/check_fixtures.sh — fixture 引用完整性 / 命名 / 目录一致性门禁
 #
-# 权威规格: docs/tests_quality_system_plan.md §7 (Fixture 规则) + §8.2 (重写规格)
+# 权威规格: tests/fixtures/README.md（目录/角色、命名、引用完整性、白名单、零引用件处置）
 # 依赖: 仅 bash + coreutils(grep/sed/awk/find/sort/comm/cut/tr) + git —— 无 python/perl/jq
 # v2.0: 旧版用于豁免未引用检查的环境变量开关已彻底删除 —— 本门禁不存在任何
-#       放宽规则的过渡开关，未引用即红；存量债由 §7.4 逐个判定清零。
+#       放宽规则的过渡开关，未引用即红；存量债由 tests/fixtures/README.md §5 逐个判定清零。
 #
 # 5 项检查（全部 exit 1 级；前缀标签纯 ASCII，便于 grep 断言）:
 #   ① MISSING:                被引用的 fixture 文件不存在

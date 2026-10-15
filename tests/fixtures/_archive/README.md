@@ -3,8 +3,9 @@
 > Historical fixture directory — files with **no test reference at all**, kept
 > only so blame history stays readable. **DO NOT** reference anything here from
 > any test or script: `scripts/check_fixtures.sh` treats every such reference as
-> a hard failure (`FORBIDDEN-ARCHIVE-REF`, see `docs/tests_quality_system_plan.md`
-> §7.1 / §8.2). There is no scheduled clean-up and no phase plan behind this
+> a hard failure (`FORBIDDEN-ARCHIVE-REF`; the rule lives in
+> [`../README.md`](../README.md) §3 引用完整性 and §5 零引用件的处置判定标准).
+> There is no scheduled clean-up and no phase plan behind this
 > directory — the rule set above is the end state.
 
 ## Rules

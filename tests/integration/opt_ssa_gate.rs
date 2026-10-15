@@ -141,7 +141,7 @@ fn ssa_mem_rmw_matches_gcc_at_all_levels() {
 /// 为什么不只靠语料级门：同一个夹具在 `c_cross.rs` 里只跑 `run_gcc_cross_check`
 /// （相等于 -O0），能接住它的只有 `check_opt_equivalence.sh` 那条全档位语料级测试；
 /// 而那是 611 夹具 × 3 档的十余分钟门，红一条时定位慢。这里按档逐个比，失败信息
-/// 直接给出函数名与档位。完整历史与修法见 `docs/ssa-pass-upgrade-plan.md` §7.40。
+/// 直接给出函数名与档位。
 #[test]
 fn c_array2d_global_stride_matches_gcc_at_all_levels() {
     harness::assert_all_levels_match_gcc(

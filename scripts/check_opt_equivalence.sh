@@ -98,11 +98,12 @@ classify_cf() {
   [ -f "$log" ] || { echo "CF-UNKNOWN"; return; }
   if grep -qE "undefined reference to .main|crt1\\.o.*_start" "$log"; then echo "CF-NOMAIN"; return; fi
   if grep -qE "^error\\[E0302\\]" "$log"; then
-    # E0302 不都是一种债。实测证明：源里有 IFUNC（target_clones / ifunc 属性）时，
+    # E0302 不都是一种债。历史上：源里有 IFUNC（target_clones / ifunc 属性）时，
     # dcc 会从「宿主 cc 链接」改道到内置链接器，而内置链接器产出的是**静态**
     # 可执行文件（无 PT_INTERP、无 .dynamic），所以任何 libc 引用都变成未定义符号。
-    # 把它记成「运行库覆盖缺口」会指错地方（补符号表永远补不完）；它的真问题是
-    # 「IFUNC 使链接静默从动态降级为静态」，见 docs/ssa-pass-upgrade-plan.md §7.38。
+    # 那条改道分支与 elf_has_ifunc_symbols 已删（现 resolver 由 codegen 发在 `.o`
+    # 里，宿主 ld 可原生处理，见 src/driver.rs 与 docs/missing_features.md 的 IFUNC 行）；
+    # 这个分类因此只是历史成因的标签，正常运行不应再命中——命中即说明改道又回来了。
     if grep -qE "target_clones|__attribute__\\(\\(ifunc|\bifunc\(" "$f"; then
       echo "CF-IFUNC-DYNLINK"; return
     fi
@@ -141,7 +142,7 @@ if [ -s "$OUT/cf_classified.txt" ]; then
       CF-CROSS-TU)   d="符号由另一 TU 提供，单文件链接必失败";;
       CF-SRC-REJECT) d="同样 flags 下 gcc 也拒绝（语料/flags 不匹配，非编译器债）";;
       CF-LIBC-SYM)   d="缺 libc 符号支持（运行库覆盖缺口）";;
-      CF-IFUNC-DYNLINK) d="IFUNC 使链接改道内置链接器，产物静默变静态 ⇒ 无法引 libc";;
+      CF-IFUNC-DYNLINK) d="IFUNC 使链接改道内置链接器、产物静默变静态 ⇒ 该改道已删，出现即回归";;
       *)             d="未定性，按新增缺陷处理";;
     esac
     printf '    %-17s %3d  %s\n' "$k" "$n" "$d"

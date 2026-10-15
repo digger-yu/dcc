@@ -214,8 +214,8 @@ pub struct Config {
     /// 严格别名假设（默认 true，与 gcc 一致）。
     ///
     /// 注意：**这个值当前没有消费者**。上一轮删掉了 P4/P13 别名分析（它们的
-    /// 结果从入口到管线都被丢弃，对机器码零影响，见 docs/ssa-pass-upgrade-plan.md
-    /// §7.37），而 dcc 的优化器至今**不做**类型标签假设（TBAA）—— 也就是说产物
+    /// 结果从入口到管线都被丢弃，对机器码零影响，见 docs/missing_features.md 的
+    /// `-fstrict-aliasing` 行），而 dcc 的优化器至今**不做**类型标签假设（TBAA）—— 也就是说产物
     /// 永远按「保守 aliasing」那一侧行为。因此：
     ///   * `-fno-strict-aliasing` 静默接受：它要求的保守行为本来就是现状；
     ///   * `-fstrict-aliasing` 发一条警告：用户要的优化不存在，不能默默假装做了。
@@ -3419,11 +3419,11 @@ fn print_help() {
     println!("    -o <file>           output file (default a.out)");
     println!("    -j<N>               multi-file parallel compilation jobs (default: auto)");
     println!("    --target <triple>   target triple (e.g. aarch64-linux-gnu)");
-    println!("    -std=c99|gnu11|...  C standard (default gnu23)");
+    println!("    -std=c99|gnu11|...  C standard (default gnu11)");
     println!("    -ffreestanding      freestanding (no libc)");
     println!("    -dump-ast           print AST and exit");
-    // C++ 原生后端开关 (方案 docs/cpp_native_backend_implementation_plan.md §5.1):
-    // 不在 help 里就等于没有落地 —— 用户与脚本需要能显式选路径并验证 native 覆盖率。
+    // C++ 原生后端开关（行为由 tests/integration/cpp_runtime.rs 的 cpp_cxx_native_*
+    // 用例钉住）: 不在 help 里就等于没有落地 —— 用户与脚本需要能显式选路径并验证 native 覆盖率。
     println!("    --cxx-native=<mode> C++ backend: auto (default, native C++ path; fallback to legacy if feature matrix says no) | off (legacy C-text) | on");
     println!("                        on never falls back silently (unsupported => E0500)");
     println!("                        -v prints the decision, fallback reason and path summary");

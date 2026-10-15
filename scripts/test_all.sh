@@ -1,7 +1,7 @@
 #!/bin/bash
 # DCC smoke 冒烟回归 — 在 Linux 上运行（逐个 tests/fixtures/smoke/*.c 编译并核对退出码）
 #
-# 权威分层清单: docs/tests_quality_system_plan.md §9「门禁与命令（权威 Tier 表）」。
+# 权威分层清单: tests/README.md §1.1「Tier 0 命令清单」。
 #   Tier 0（PR 必绿, 本地等价 `make test`）:
 #     cargo build --tests / cargo test --release
 #     bash scripts/check_fixtures.sh / bash scripts/check_fixtures_selftest.sh

@@ -14,7 +14,8 @@
 ## Fixture 与测试挂载检查清单
 
 以下 4 项是**硬要求**（任一项未勾选 = PR 不完整），规则原文见
-[`docs/tests_quality_system_plan.md`](../docs/tests_quality_system_plan.md) §7（fixture 规则）与 §9（门禁与命令权威 Tier 表）。
+[`tests/fixtures/README.md`](../tests/fixtures/README.md)（fixture 目录 / 命名 / 引用完整性）
+与 [`tests/README.md`](../tests/README.md) §1.1（Tier 0 命令清单）。
 
 - [ ] 新增 / 改名的 fixture 已挂载测试：它至少被某个 `.rs` 的 `include_str!("../fixtures/…")` / `.join("…")`、
       或某个 `scripts/*.sh`、或外部套件清单（白名单）引用一次，不属于 `_archive/`
@@ -34,7 +35,7 @@
 
 ## Tier 0 自查（本地等价：`make test`）
 
-权威清单以方案 §9 为准，此处仅为提醒，勿在其他文档复制第二套：
+权威清单以 [`tests/README.md`](../tests/README.md) §1.1 为准，此处仅为提醒，勿在其他文档复制第二套：
 
 ```bash
 cargo build --tests
@@ -47,11 +48,11 @@ bash scripts/check_fixtures_selftest.sh
 
 ## 结构与纪律
 
-- [ ] 未修改 `tests/integration.rs` 壳的 `include!` 列表以外的顶层 target 数量（终态 6 个）
+- [ ] 未修改 `tests/integration.rs` 壳的 `include!` 列表以外的顶层 target 数量（终态 8 个）
 - [ ] 未新增 `m\d+_` / `test_` 前缀 fixture，未把 `.cpp` 放进 `fixtures/c/`、`.c` 放进 `fixtures/cpp/`
-- [ ] 本 PR 不夹带与主题无关的功能 / bug 修复（freeze 纪律，方案 §12）
+- [ ] 本 PR 不夹带与主题无关的功能 / bug 修复（freeze 纪律，见 [`tests/README.md`](../tests/README.md) §2.1）
 - [ ] fixture 的移动 / 改名一律 `git mv`，与引用改写在同一提交
 
 ## 说明
 
-<!-- 为什么这么做、放弃了什么替代方案、与关联案的接口（方案 §12）；纯机械搬运可留空 -->
+<!-- 为什么这么做、放弃了什么替代方案、与关联案的接口；纯机械搬运可留空 -->

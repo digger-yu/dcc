@@ -1,11 +1,11 @@
 # tests/skip/
 
 > Skip lists consumed by the external GCC suites (gcc-dg / torture). Per the
-> authoritative Tier table in
-> [`docs/tests_quality_system_plan.md`](../../docs/tests_quality_system_plan.md)
-> **§9**, those two suites are **Tier 1** Linux CI jobs (`gcc-dg.yml`,
-> `torture.yml`). This file only navigates to §9 — it does not restate the
-> tiering. The skip lists are **not** referenced by `cargo test` directly.
+> tiering in [`../README.md`](../README.md) §1 (and the Tier distribution table
+> in [`docs/test_coverage.md`](../../docs/test_coverage.md)), those two suites
+> are **Tier 1** Linux CI jobs (`gcc-dg.yml`, `torture.yml`). This file only
+> navigates there — it does not restate the tiering. The skip lists are **not**
+> referenced by `cargo test` directly.
 
 | File | Consumed by |
 |------|-------------|

@@ -1,9 +1,9 @@
 # P12 — 物理寄存器家分配与帧偏移守门人 / 值通道统一
 
 > 本文档是 `src/ssa/regalloc.rs` 与 `src/codegen/x86_64/` 两侧设计的入口。
-> 代码注释里散落的「§7.x」指向 `docs/ssa-pass-upgrade-plan.md`；本文件把
-> 物理寄存器家（physreg home）分配的**现状**与帧偏移守门人 / 值通道统一
-> （`x86_64-frame-offset-gatekeeper-and-channel-unification.md`）的落地结果
+> 代码注释里旧版的「§7.x」编号来自已下线的 `docs/ssa-pass-upgrade-plan.md`，
+> 那些结论现在以本文与代码注释为准；本文件把
+> 物理寄存器家（physreg home）分配的**现状**与帧偏移守门人 / 值通道统一的落地结果
 > 合在一处，避免读代码时反复跳文件。
 
 ## 1. 物理寄存器家（physreg home）

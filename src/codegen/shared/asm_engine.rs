@@ -3,7 +3,8 @@
 // 共享指令引擎: 提供 `.s` 骨架 (段/符号/类型/尺寸/对齐/标签/注释符/字节序),
 // 供所有后端在 `-S` / GAS fallback 模式下渲染指令记录。
 //
-// 边界 (与方案 §4.2 一致):
+// 边界（与 `docs/dcc-dual-arch-asm-solution.md` §1 「Two renderers, one image」
+// 与 §4 「Degrade granularity」一致）:
 //   * 词法切分、注释符剥离、行分类一律复用 `asm_source`;
 //   * 本模块只做"已经是一行 asm 文本 -> 输出 .s 骨架"与"InsnRec -> 文本"。
 //   * 不引入第二套行解析器。

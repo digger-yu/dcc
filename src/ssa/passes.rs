@@ -61,7 +61,8 @@ pub fn run_with_opts(func: &mut Function, level: u8, _strict_aliasing: bool) {
     //
     // 默认已接入：之前的两条实测缺陷（IndexStore kernel 实例越界写、链尾多累加一
     // 轮）同源于「基名塌缩后的反依赖」，已由 `ssa::pipelining` 的发射序重排与
-    // `emitted_reads_match` 判定闭掉（详见 docs/ssa-pass-upgrade-plan.md §7.5）。
+    // `emitted_reads_match` 判定闭掉（接受/拒因可开 `DCC_PIPE_DUMP` 窗口看，
+    // 产物级判据见 scripts/check_pipe_structure.sh）。
     // 二分定位仍可用：`DCC_SSA_OFF=pipe` 关掉本 pass。
     if !ssa_dbg_off("pipe") {
         run_pipelining(func);
@@ -882,7 +883,7 @@ fn asm_constraints_touch_memory(constraints: &[String]) -> bool {
 // 于是几乎每个含循环的函数都被改一次 `block_order`。
 //
 // 真正的分块/交换必须同时重写 CFG、phi 与边界 (且需先修好下游对多层嵌套 +
-// 变量边界形态的误编译，见 `docs/ssa-pass-upgrade-plan.md` 的「未关闭缺陷」)，
+// 变量边界形态的误编译，缺口记录见 `docs/missing_features.md`)，
 // 保留“看起来在做”的伪实现只会把错值交给后端，故删。追踪项: P9/P10。
 
 // =====================================================================
@@ -3370,8 +3371,7 @@ fn refresh_cfg_caches(func: &mut Function) {
 //
 //   1. ~~`run_ssa_passes` 对含循环函数 `continue`~~ —— 已随 `func_has_loop`
 //      闸门删除而消失，含 while/for/do 的函数无条件进 SSA 管线。
-//   2. ~~4 层嵌套 + 变量边界 + `&&` 条件的 -O2 误编译~~ —— 已修（见
-//      `docs/ssa-pass-upgrade-plan.md` §6/§8-A）；而流水自己的准入也**不依赖**它：
+//   2. ~~4 层嵌套 + 变量边界 + `&&` 条件的 -O2 误编译~~ —— 已修；而流水自己的准入也**不依赖**它：
 //      嵌在任何循环里的循环一律不流水（`is_nested_in_other_loop`）。
 //   3. 本体已真写出来：依赖图 + RecMII/ResMII + epi-cyclic 模调度 + 三段切分 +
 //      peel/kernel/排空落地，在 `crate::ssa::pipelining`。两道可判定自检

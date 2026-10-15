@@ -1,8 +1,8 @@
 #!/bin/bash
 # ===========================================================================
-# scripts/check_fixtures_selftest.sh — §8.3 反向自测（元门禁：门禁本身有门禁）
+# scripts/check_fixtures_selftest.sh — 反向自测（元门禁：门禁本身有门禁）
 #
-# 权威规格: docs/tests_quality_system_plan.md §8.3 / §2 L-B / §9 Tier 0
+# 权威规格: tests/README.md §7（元门禁）与 §1.1（Tier 0）；被检对象的规则见 tests/fixtures/README.md
 # 目的: 用 5 类人为注入，逐条证明 scripts/check_fixtures.sh 的 5 条规则
 #       **真的会红**（逐个 exit 1 且首个命中标签正确），而不是像旧脚本那样
 #       一个文件都没扫仍打印 "✅ 所有 fixture 检查通过"。

@@ -407,7 +407,7 @@ impl Codegen {
                     // dst 在 ModRM.r/m 上（`81 /0 id`），扩展位是 REX.B；写 0x44(REX.R)
                     // 会把 /0 抬成 /8 = 未定义操作码。实测 `4c 81 c4` 被 objdump 读成
                     // `rex.WR add $0x1,%rsp`。
-                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 }; // 位序: REX.B: 该寄存器只在 ModRM.r/m 或 opcode 低 3 位, 判据见 docs/ssa-pass-upgrade-plan.md §7.21
+                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 }; // 位序: REX.B —— 该寄存器只在 ModRM.r/m 或 opcode 低 3 位; 机器判据见 rex_matrix, 产物级见 scripts/check_rex_hygiene.sh
                     use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
                     let gas = format!("add ${}, {}", field_off, GAS_REG64[(dst & 15) as usize]);
                     let mut bytes = vec![rex, 0x81, 0xC0 | (dst & 7)];

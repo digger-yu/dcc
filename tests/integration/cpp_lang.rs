@@ -675,9 +675,10 @@ fn cpp_sfinae_smoke() {
     );
 }
 
-/// §7.4-B 判定: `tests/fixtures/cpp/enhanced_sfinae.cpp` 此前**零引用**, 在此挂载。
+/// 零引用件处置判定（tests/fixtures/README.md §5）: `tests/fixtures/cpp/enhanced_sfinae.cpp` 此前**零引用**, 在此挂载。
 ///
-/// 为什么落 `cpp_lang.rs`: 方案 §7.4-B 明示夹具是模板语义, 不进 `cpp_abi_*`。具体地,
+/// 为什么落 `cpp_lang.rs`: 按 `docs/test_coverage.md`「C++ ABI 五主题」的口径，
+/// 本夹具是模板语义, 不进 `cpp_abi_*`。具体地,
 /// 夹具全是**模板元语义** —— `enable_if<B,T>::type` 作默认类型形参与返回类型、
 /// `enable_if_t` 别名模板、`is_pointer<T*>` 偏特化、`void_t` 检测惯用法、`||` 组合条件;
 /// 不涉及 mangled 名 / vtable / typeinfo 那些 ABI 差分面 (那由 `fixtures/cpp_abi_*` +
@@ -768,9 +769,10 @@ fn cpp_enhanced_sfinae_void_t_layer() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// §7.4-B 判定: `tests/fixtures/cpp/g11_template_templates.cpp` 此前**零引用**, 在此挂载。
+/// 零引用件处置判定（tests/fixtures/README.md §5）: `tests/fixtures/cpp/g11_template_templates.cpp` 此前**零引用**, 在此挂载。
 ///
-/// 为什么落 `cpp_lang.rs` (方案 §7.4-B 明示模板相关不进 `cpp_abi_*`): 夹具主体是**模板模板
+/// 为什么落 `cpp_lang.rs`（按 `docs/test_coverage.md`「C++ ABI 五主题」的口径，
+/// 模板相关不进 `cpp_abi_*`）: 夹具主体是**模板模板
 /// 形参** `template<typename T, template<typename> class Container>` 的语法识别与偏特化;
 /// 夹具自身从未实例化出可执行语义 (main 只声明两个 Adapter 并 `(void)` 掉), 所以 ABI 面
 /// (mangled 名/COMDAT) 与它无关。

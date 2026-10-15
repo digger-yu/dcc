@@ -2222,7 +2222,7 @@ impl Codegen {
     ///
     /// 绑到 caller-saved 或固定用途寄存器 (rax/rcx/rdx/rsi/rdi/r8/r9/rsp/rbp/r13)
     /// 不在本函数的保护能力之内: 表达式求值每时每刻都在用它们, GCC 为此建的是完整的
-    /// 干涉模型而不是一个位图。这条边界如实记在 docs/ssa-pass-upgrade-plan.md。
+    /// 干涉模型而不是一个位图。这条边界就记在这里：本仓不做完整干涉模型。
     ///
     /// Phase 1 起本方法只是 `RegBank::claim` 的薄封装：占用真相只有一份，
     /// 写路径也都只从 RegBank 走（见 `abi/regbank.rs` 头注释的 H4）。

@@ -39,7 +39,7 @@
 //! 识别层只认真实 IR 的形状，不猜：`for` 的头是带 phi 的 `for.body`、latch 是条件回边
 //! 所在的 `for.step`、`i++` 被拆成 `_tpost=i+0; _tupd=_tpost+1; i_2=_tupd+0` 的拷贝链；
 //! `while` 的头 `while.cond` 自己带分支。环内成员用自然循环体集合而不是支配关系
-//! （循环出口也受头支配）。详见 `docs/ssa-pass-upgrade-plan.md` §7.1。
+//! （循环出口也受头支配）。环内成员的定义与现状见 `docs/architecture.md` 的 P16 行。
 
 use std::collections::{HashMap, HashSet};
 
@@ -4031,8 +4031,8 @@ fn apply_into(
 
 /// 把一个候选循环的**识别 / 调度 / 三段切分**打成文本。
 ///
-/// 为什么必须有它：流水的错值只在「管线中途的 IR」上出现（接入点教训见
-/// `docs/ssa-pass-upgrade-plan.md` §7.5），而单测看的是未经其它 pass 的 SSA ——
+/// 为什么必须有它：流水的错值只在「管线中途的 IR」上出现（教训：旧 P16 的接入点
+/// 放在管线末尾时，开与关的 -O2 产物逐字节相同），而单测看的是未经其它 pass 的 SSA ——
 /// 两边都对不上时，没有这个窗口就只能靠猜形状。
 /// 由 `crate::ssa::passes::run_pipelining` 在 `DCC_PIPE_DUMP` 存在时调用，只写 stderr，
 /// 不参与产物字节。

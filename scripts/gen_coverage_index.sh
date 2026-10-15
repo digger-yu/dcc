@@ -2,9 +2,9 @@
 # ===========================================================================
 # scripts/gen_coverage_index.sh — 测试覆盖索引全量生成器（L-C 的核心）
 #
-# 权威规格: docs/tests_quality_system_plan.md §10.1（生成器规格）+ §10.2 与 §11
-#           （C++ ABI 主题小节 / 文档一致性）+ §5.2（主题子文件规则）
-#           + §7.3（fixture 引用面）+ §9（Tier 权威表）+ §14（L-C 机器判据）
+# 权威规格: docs/test_coverage.md（本文的结构 / 索引的维护契约 / 主题划分口径 /
+#           判据与 Tier 口径 / C++ ABI 五主题）+ tests/README.md §2.1（主题子文件规则）
+#           + tests/fixtures/README.md（fixture 引用面）
 # 依赖: 仅 bash + coreutils + awk/sed/grep/find —— 不使用 python/perl/ruby/jq
 #
 # 输入:

@@ -11,7 +11,7 @@ all: build test-all kernel-full-build
 build:
 	cargo build --release
 
-# Tier 0 权威清单见 docs/tests_quality_system_plan.md §9，四条缺一即 Tier 0 不成立：
+# Tier 0 权威清单见 tests/README.md §1.1，四条缺一即 Tier 0 不成立：
 #   1) cargo build --tests   —— 全部 test target 必须能构建
 #   2) cargo test --release  —— 全部 target 通过；由 cargo_test_summary.sh 跑，
 #      它额外给出**跨 target 总计**（测试项总数 / 失败 / 忽略）与失败、忽略列表 ——

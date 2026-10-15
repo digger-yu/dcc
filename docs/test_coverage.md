@@ -1,7 +1,9 @@
 # Test Coverage Index
 
 > DCC 的「特性 → 夹具 → 测试函数」索引。
-> 权威规格：`docs/tests_quality_system_plan.md` §9（Tier 表）、§10（覆盖索引）、§5（主题划分）。
+> 分层与命令清单：[`tests/README.md`](../tests/README.md) §1.1；fixture 规则：
+> [`tests/fixtures/README.md`](../tests/fixtures/README.md)。
+> 本文自身承载 Tier 分布、主题划分口径与 C++ ABI 主题映射。
 > 全量索引表由 `scripts/gen_coverage_index.sh` 生成，本文标记区之外为人工校订内容。
 
 ## 本文的结构

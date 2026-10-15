@@ -66,17 +66,17 @@ bash scripts/update_error_snapshots.sh
 
 DCC 的测试按**门禁强度**分四层。本节只做导航与概览；
 **每个 Tier 的权威命令清单只有一处**：
-[`docs/tests_quality_system_plan.md`](./tests_quality_system_plan.md) §9「门禁与命令（权威 Tier 表）」。
-本节**有意不复制完整清单**，避免出现第二套真源后与方案漂移。
+[`tests/README.md`](../tests/README.md) §1.1「Tier 0 命令清单」。
+本节**有意不复制完整清单**，避免出现第二套真源后漂移。
 
 ```text
 Tier 0  PR 必绿（本地等价：make test）
-        cargo build --tests / cargo test --release（全部 6 个顶层 target）
+        cargo build --tests / cargo test --release（全部 8 个顶层 target）
         + scripts/check_fixtures.sh（fixture 引用完整性，硬失败无开关）
         + scripts/check_fixtures_selftest.sh（对上述门禁本身做反向注入的元门禁）
 
 Tier 1  Linux CI（.github/workflows）
-        e2e.yml / gcc-dg.yml / torture.yml / check_feature_matrix.yml
+        e2e.yml / gcc-dg.yml / torture.yml / check_feature_matrix.yml / check_asm_text_parity.yml
         └─ check_fixtures 落在 e2e.yml 的 "Unit + integration tests" job（独立 step，不带 continue-on-error）
 
 Tier 2  内核 / 性能
@@ -95,6 +95,7 @@ Tier 3  可选深测
 
 两条补充规则：
 
-- **优先级**：Tier 2 的内核红灯（`docs/next_steps.md` 记为 P0）优先于测试体系自身的整改，不得被 Tier 0 的改造挤占。
+- **优先级**：Tier 2 的内核红灯优先于测试体系自身的整改，不得被 Tier 0 的改造挤占。
 - **元门禁**：Tier 0 里 `check_fixtures_selftest.sh` 的作用是证明 `check_fixtures.sh` **真的会红**（反向注入 5 类违规，逐条 exit 1）；
-  它自身失败同样视为主门禁失败。具体注入用例与期望标签见方案 §8.3。
+  它自身失败同样视为主门禁失败。具体注入用例与期望标签见
+  [`tests/README.md`](../tests/README.md) §7 与该脚本头部注释。

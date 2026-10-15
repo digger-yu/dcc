@@ -1556,7 +1556,7 @@ fn hir_dump_exposes_functions_and_stmts() {
 // Stage 3b 验收: `--cxx-native=auto|off|on` 的 **CLI 落地契约**
 //
 // 原 `tests/driver_cxx_native_cli_contract.rs` 独立 target 并入本主题文件。
-// 方案 §5.1 的三条硬要求都只能在真实命令行上验证:
+// 本文件就是这三条硬要求的机器判据，它们只能在真实命令行上验证:
 // - `off` 强制 legacy, 且 verbose 里能看到决策与原因;
 // - `on` **不得静默 fallback** (native 覆盖率要能被直接量化);
 // - `auto` 的 fallback **必须在 verbose 输出中可见** (含原因), 并进路径统计。
