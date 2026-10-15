@@ -292,9 +292,4 @@ responses may be slow.
 
 ## License
 
-Apache License 2.0 — see [`LICENSE`](./LICENSE). The front end, IR, optimizer, assemblers,
-object writers and linker are all in this repository. Only three crates are load-bearing at
-build time: `miniz_oxide` and `zstd` (debug-section compression) and `anyhow` (one legacy site
-in the MIPS back end) — plus a host C compiler, because `zstd-sys` builds C sources. See
-[`docs/adr.md`](./docs/adr.md) ADR-005 for the dependency policy and the declared-but-unused
-entries still to drop.
+Apache-2.0 — see [`LICENSE`](./LICENSE).
