@@ -28,6 +28,9 @@
 |------|------|
 | `setup_torture.sh` | 下载 GCC C Torture Suite 到 tests/gcc-torture/ |
 | `torture_test.sh` | 运行 torture 测试 (compile/execute/all) |
+| `torture_compile_test.sh` / `torture_execute_test.sh` | 分别跑 compile / execute 两档 |
+| `torture_summary.sh` | 解析两份日志输出 GitHub Actions Summary |
+| `torture_gate.sh` | 与 `tests/skip/torture_known_fail_*.txt` 基线对比，只允许失败集合收缩 |
 
 ## GCC libiberty
 
@@ -38,17 +41,24 @@ GCC libiberty 探测由本地 `cargo test --test integration` 驱动，详见
 |------|------|
 | `update_error_snapshots.sh` | 刷新 E1xxx snapshot |
 
-## GCC 构建验证
+## 手工工具（无自动调用方）
+
+不被 Makefile / CI / 测试用例调用，仅供人工复现与对照；改动相关子系统时按需运行。
 
 | 脚本 | 用途 |
 |------|------|
-| `test_tr2.sh` + `t_tr2.c` | TRANSLATE 宏展开回归测试 |
-| `test_v3_cache.sh` | V3 缓存键正确性验证 |
-| `rootcause_sim.py` | TRANSLATE(*d) 根因模拟 |
+| `asm_compare.sh` | 同一夹具下 dcc 与 gcc 的汇编逐条对照 |
+| `optimize_baseline.sh` | 各优化档位产物基线采集 |
+| `performance_benchmark.sh` | 快速编译耗时基准（完整基准见 `bench_phase_e.sh`） |
+| `validate_int128_float_args.sh` | `__int128` / 浮点形参 ABI 分类验证 |
+| `scan_all_fixtures.sh` | 全量扫描 `tests/fixtures/c/*.c` 与 gcc 逐字符差分 |
+| `gcc_tree_cpp_probe.sh` | 批量用 dcc 编译 GCC 源码树 C++ TU 的探针 |
+| `repro_cpp_run.sh` | 手工复现某个 C++ 夹具的编译 + g++ 链接 + 运行 |
+| `dcc_orphan_check.sh` | 检测从未参与编译的孤立源文件 |
 
-## 内核构建验证
+## 已删除的一次性脚本
 
-| 脚本 | 用途 |
-|------|------|
-| `test_asm_offsets.py` | 用 dcc 编译 asm-offsets.c 验证 parser |
-| `summarize_err.py` | 解析/语义错误分类汇总 |
+Path A / ARM-MIPS 模块化 / PR-A2 / phase1–4 那批迁移与阶段脚本已随工作完成而删除
+（`git log --diff-filter=D -- scripts/` 可取回）。删除判据是两条硬证据：在 Makefile /
+CI / docs / tests / 本 README 中零调用方，且脚本内部仍引用已不存在的源码路径或
+已不存在的 cargo feature（如 `arm-modular`）。
