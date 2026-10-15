@@ -16,7 +16,7 @@ bash scripts/check_fixtures_selftest.sh    # proves the check above can actually
 
 `make test` runs that Tier-0 set; `make test-all` adds the wider suite (option-equivalence,
 REX hygiene, pipe structure, disassembly coverage, cross golden files). CI jobs and the failure
-triage order are in [docs/ci_guide.md](docs/ci_guide.md).
+triage order are in [docs/ci_guide.md](../docs/ci_guide.md).
 
 ## 2. The rule that shapes everything else
 

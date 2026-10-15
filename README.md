@@ -280,14 +280,15 @@ libcpp, generator programs).
 
 ## Contributing
 
-Start with [`CONTRIBUTING.md`](./CONTRIBUTING.md): the Tier-0 gate list, where tests and
-fixtures go, the debugging switches, the commit-message convention, and the two rules that
-shape the code — a capability may only be claimed if a probe can see it in the build artifact,
-and nothing may fail silently.
+Start with [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md): the Tier-0 gate list, where
+tests and fixtures go, the debugging switches, the commit-message convention, and the two rules
+that shape the code — a capability may only be claimed if a probe can see it in the build
+artifact, and nothing may fail silently.
 
-See also [`SECURITY.md`](./SECURITY.md) — a compiler crash or a miscompile is filed as a normal
-bug, not reported privately — and [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md). Issues and
-patches are welcome; responses may be slow.
+See also [`.github/SECURITY.md`](.github/SECURITY.md) — a compiler crash or a miscompile is filed
+as a normal bug, not reported privately — and
+[`.github/CODE_OF_CONDUCT.md`](.github/CODE_OF_CONDUCT.md). Issues and patches are welcome;
+responses may be slow.
 
 ## License
 
