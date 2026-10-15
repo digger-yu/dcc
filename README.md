@@ -280,18 +280,14 @@ libcpp, generator programs).
 
 ## Contributing
 
-- Before pushing: `cargo build --release && cargo test --release && make test` — the Tier-0 list
-  in `tests/README.md` §1.1 is the bar, and `docs/ci_guide.md` explains the jobs.
-- Every behavior change needs a fixture plus an integration test; a capability may only be
-  claimed if a probe can see it in the artifact. The standing rule is that nothing fails
-  silently — an option that cannot be honored warns or errors, dead passes get deleted rather
-  than left in place, and the few remaining silent no-ops (`-specs=`, `--output-format=`) are
-  listed under Known limitations.
-- Commit messages: concise subject, English body that explains the root cause and the reasoning,
-  ≤72 columns, `git commit -s`.
-- Documentation updates go with the code: `support_features.md` / `missing_features.md` for
-  capability changes, `diagnostics.md` for new error codes, `roadmap.md` for milestones.
-- Issues and patches are welcome; responses may be slow.
+Start with [`CONTRIBUTING.md`](./CONTRIBUTING.md): the Tier-0 gate list, where tests and
+fixtures go, the debugging switches, the commit-message convention, and the two rules that
+shape the code — a capability may only be claimed if a probe can see it in the build artifact,
+and nothing may fail silently.
+
+See also [`SECURITY.md`](./SECURITY.md) — a compiler crash or a miscompile is filed as a normal
+bug, not reported privately — and [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md). Issues and
+patches are welcome; responses may be slow.
 
 ## License
 
