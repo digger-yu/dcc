@@ -44,7 +44,7 @@
 - **决策**: gnu11
 - **代价**: 纯 C23 代码需要显式 `-std=gnu23`
 
-## ADR-005: suckless 风格 - 零 crate 依赖
+## ADR-005: suckless 风格 - 零 crate 依赖 → **已修订: 最小且可举证的依赖**
 
 - **问题**: 是否用 anyhow/serde/clap?
 - **第一性原理**:
@@ -53,6 +53,26 @@
   - 每个 crate 都增加 5-30s 编译时间
 - **决策**: 零依赖
 - **代价**: 一些便利库用不到, 但代码可读性反而提高
+
+### 修订 (2026-10-15)
+
+「零依赖」已不再成立, 也不再是目标。现决策改为
+**最小且可举证的依赖**: 每个 crate 必须能指出具体在用它的文件, 指不出就删。
+
+| crate | 状态 | 举证 |
+|-------|------|------|
+| `zstd` | 在用 | `src/link/link_opts.rs::zstd::encode_all` (调试节 `ELFCOMPRESS_ZSTD`, level 3) — 2026-07-24 `997b5681` |
+| `miniz_oxide` | 在用 | `src/link/link_opts.rs::compress_to_vec_zlib` (zlib 档) — 0.7→0.8 于 `cd04ae4d` |
+| `anyhow` | 在用, 但只有 1 处 | `src/codegen/mips/codegen/expressions/mod.rs` 两个 `anyhow!` — 2026-09-23 `12bc4ffd`; 属遗留, 应换成本仓 `Diagnostic`/`CliError` 后移除 |
+| `elf` | **声明未用** | ELF 读写全在自写的 `src/codegen/shared/elf.rs`, 且该模块名遮蔽了同名 crate (`elf::STV_DEFAULT` 等均指内部模块); `Cargo.toml` 注释自己写着 "internal module" |
+| `serde` / `toml` | **声明未用** | 为 2026-09-22 `bbeff61d` 的 "TOML 指令规格系统" 引入, 该实验已回退: 树内无 `data/*.toml`, 只剩 `report/refactoring_20260923_083316/backup/data/`, 全仓零引用 |
+
+- **不变的边界**: 不引入 LLVM/Cranelift (ADR-002)、不引入 clap、不引入通用序列化/日志框架。
+  ELF/COFF/PE 容器、序列化、参数解析仍全部自写 —— 这部分「零依赖」的精神没有被推翻。
+- **代价**: 构建 dcc 需要宿主 C 编译器 —— `zstd` 经 `zstd-sys` 编 C 源码 (README Quick start 已述)。
+- **证据**: 「声明未用」是产物级结论而非 grep 推断 —— 2026-10-15 临时删去 `elf`/`serde`/`toml`
+  三行后 `cargo check --all-targets` 全绿 (5m50s, 仅 `src/parser.rs` 一条既有警告), 随后已还原。
+- **开放项**: 删除 `elf`/`serde`/`toml` 三个死依赖, 并把 `anyhow` 换成内部错误类型。
 
 ## ADR-006: 不用 mmap 也行 (M0) - 但 M3 后必须用
 
