@@ -76,8 +76,18 @@ Tier 0  PR 必绿（本地等价：make test）
         + scripts/check_fixtures_selftest.sh（对上述门禁本身做反向注入的元门禁）
 
 Tier 1  Linux CI（.github/workflows）
-        e2e.yml / gcc-dg.yml / torture.yml / check_feature_matrix.yml / check_asm_text_parity.yml
-        └─ check_fixtures 落在 e2e.yml 的 "Unit + integration tests" job（独立 step，不带 continue-on-error）
+        ci.yml / gcc-dg.yml / torture.yml
+        └─ ci.yml = build 一次 → test / reproducibility / e2e / parity / matrix 五个
+           job 并行 needs: build。原先 e2e.yml / check_asm_text_parity.yml /
+           check_feature_matrix.yml 各编一遍 release（同一 push 编 3 遍），已合并；
+           下游四个 job 下载 dcc-bin artifact，连 Rust 工具链都不装。
+        └─ check_fixtures 落在 ci.yml 的 "Unit + integration tests" job（独立 step，不带 continue-on-error）
+        └─ 故意**不加** paths-ignore：被 path filtering 跳过的 workflow，其 check 会
+           停在 Pending，而 required status check 因此会把 docs-only PR 永远挡死；
+           何况矩阵门禁的输入之一就是 docs/backend_feature_matrix.md，过滤 docs
+           等于让只改这个 .md 的 PR 跳过唯一能验证它的检查（假绿）。
+        └─ ⚠ 合并改了 check 名（三个 workflow → 一个 dcc-ci 的六个 job），
+           branch protection 的 required status checks 必须同步改指新 job 名。
 
 Tier 2  内核 / 性能
         scripts/kernel_full_check.sh、QEMU 启动矩阵、kernel-bench.yml（手动触发）
@@ -89,7 +99,7 @@ Tier 3  可选深测
 | Tier | 何时必须跑 | 是否挡合并 | 触发入口 |
 |------|------------|------------|----------|
 | Tier 0 | 每个 PR / 提交前 | **挡**（任一条红即不可合并） | `make test`（= §9 四条逐字对应：`cargo build --tests` → `cargo test --release` → `scripts/check_fixtures.sh` → 元门禁 `scripts/check_fixtures_selftest.sh`）；`make test-all` = Tier 0 全量 + `scripts/test_all.sh`（examples 端到端冒烟） |
-| Tier 1 | push / PR 自动跑（外部套件按需手动） | `e2e.yml`、`check_feature_matrix.yml` 挡；`gcc-dg.yml`、`torture.yml` 是 `workflow_dispatch` 手动作业（不挡单个 PR） | `.github/workflows/e2e.yml`、`check_feature_matrix.yml`（push/PR）＋ `gcc-dg.yml`、`torture.yml`（手动） |
+| Tier 1 | push / PR 自动跑（外部套件按需手动） | `ci.yml` 挡（build / test / reproducibility / e2e / parity / matrix 六个 job 全为 required）；`gcc-dg.yml`、`torture.yml` 是 `workflow_dispatch` 手动作业（不挡单个 PR） | `.github/workflows/ci.yml`（push/PR）＋ `gcc-dg.yml`、`torture.yml`（手动） |
 | Tier 2 | 需要内核级回归时（手动/定时） | 不挡单个 PR | `scripts/kernel_full_check.sh`、`kernel-bench.yml` |
 | Tier 3 | 深测/取证 | 不挡 | `--features gcc_src`、`STRICT_FULL_BUILD=1` |
 

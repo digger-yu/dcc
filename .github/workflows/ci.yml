@@ -1,0 +1,390 @@
+# 第一性原理: 主 CI 门禁——一次 release 编译, 五个检查并行复用同一个二进制.
+#
+# 结构: build → test / reproducibility / e2e / parity / matrix 五个 job 并行 needs: build.
+#   - 合并前 e2e.yml / check_asm_text_parity.yml / check_feature_matrix.yml 触发条件
+#     几乎相同、各自 `cargo build --release`, 同一个 release 每次 push 编 3 遍;
+#     现在只编一遍, 下游 job 下载 dcc-bin artifact, 连 Rust 工具链都不需要。
+#   - test 失败不阻塞 e2e, 反之亦然 (各自独立挡合并).
+#   - e2e 各 step **不设** continue-on-error: 任一 smoke 用例编译/运行/退出码不符即
+#     job 变红（方案 §9 Tier 1 把 "End-to-end compile and run" 列为门禁）; Summary step
+#     仍用 `if: always()` 保留全部 rc 明细, 但它不再充当掩盖失败的出口。
+#
+# 触发条件唯一的放宽: 原 check_asm_text_parity.yml / check_feature_matrix.yml 只跟
+# main + develop, 合并后它们随 dcc-ci 一起在 feat/** 与 perf/** 的 push 上也跑。
+#
+# 为什么**没有** paths-ignore: GitHub 在 workflow-syntax 文档里明确写着, 被 path
+# filtering 跳过的 workflow 其 check 会停在 Pending 状态, 而把这些 job 列为 required
+# status check 的 PR 就永远无法合并。本 workflow 的 job 全都要挡合并, 所以路径过滤与
+# required check 二者只能取其一。另一个原因: 矩阵门禁的输入之一就是
+# docs/backend_feature_matrix.md（探针生成的表格要与它逐格对账）, 过滤 docs 等于让
+# 「只改这个 .md」的 PR 跳过唯一能验证它的检查——假绿。
+# docs-only 改动的代价因此只是热缓存下一次 cargo no-op 的 build。
+#
+# 缓存: 只有真正调用 cargo 的 job（build / test）需要 Rust 工具链与 cargo 缓存;
+# 其余 job 下载 dcc-bin 产物, 不再重复编译。
+
+name: dcc-ci
+
+on:
+  push:
+    branches: [main, develop, "feat/**", "perf/**"]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+# 同一 ref 上的新 push 取消仍在跑的旧 run; 否则一次连推会把 runner 分钟堆成
+# 一串互相过剩的全量验证。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: "Build dcc"
+    runs-on: ubuntu-latest
+    # 冷缓存（首个 run / lockfile 变更）仍要编满 388 个源文件, 留够余量。
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build dcc (release)
+        run: |
+          cargo build --release
+          mkdir -p bin && cp target/release/dcc bin/dcc
+          ./bin/dcc --version
+
+      - name: Upload dcc binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: dcc-bin
+          path: bin/dcc
+          retention-days: 1
+
+  test:
+    name: "Unit + integration tests"
+    needs: build
+    runs-on: ubuntu-latest
+    # 单一 profile 下「编译全部 test target」+「跑测试」; release 的 6 个
+    # integration target 编译本身就很重, 与 build job 同量级。
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Tier 0 第 1 项 (§9): 先显式构建全部 test target（含 6 个 integration target
+      # 与 lib test）, 让测试代码的编译错误与断言失败分成两类信号。
+      # 用 --release --no-run 而不是旧的 `cargo build --tests`: 后者编的是 debug
+      # profile, 与下一步 `cargo test --release` 编的两遍产物完全重复, 分离信号的作用
+      # 一样保留, 但只编一遍。
+      - name: Build all test targets (release)
+        run: cargo test --release --no-run
+
+      - name: Run cargo tests (unit + integration + error snapshots)
+        run: cargo test --release
+
+      # Tier 0 硬门禁 (tests/README.md §1.1): fixture 引用完整性
+      # 门禁本体 + 门禁自身的反向自测（元门禁, tests/README.md §7）。
+      # 刻意放在 cargo test 之后: 两个脚本只读源码与 fixture 路径, 不依赖构建产物,
+      # 但门禁一旦 exit 1 就立即终止 job —— 排在后面才能保证 cargo test 的结果先被
+      # 记录, 避免「门禁红」掩盖「测试也红」的诊断信息。
+      # 本 step 不设任何容错/跳过标记（方案 §9: step 级硬失败）—— 任一脚本 exit 1
+      # 即整个 job 变红, 挡合并。
+      - name: Fixture gate + gate selftest
+        run: |
+          bash scripts/check_fixtures.sh
+          bash scripts/check_fixtures_selftest.sh
+
+  # 可重现构建门禁: 同一二进制、同一输入连跑多次, 产物字节必须全等。
+  # 与人工 golden diff 互补: golden 抓不到"顺序置换"(HashMap 迭代序泄漏会产生
+  # k! 种节序/符号序, 而内容本身合法), 本 job 能直接抓。跨版本回归由 drift
+  # 模式在重构 PR 里按需手动跑 (需两个二进制, CI 不上传基线二进制)。
+  reproducibility:
+    name: "Reproducible output (determinism)"
+    needs: build
+    runs-on: ubuntu-latest
+    # 预算: 默认 3 个模式(-c / -S / -O2 -c) × 6 后端 × 全量 fixture × 3 次连跑
+    # ≈ 6k 组合 (本地 ~2 分钟)。加入 -O2 后比旧的 -O0-only 贵 3 倍, 留 15 分余量。
+    # 二进制由 build job 产出, 本 job 不再编译。
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download dcc binary
+        uses: actions/download-artifact@v4
+        with:
+          name: dcc-bin
+          path: bin
+
+      - name: Prepare dcc
+        run: chmod +x bin/dcc
+
+      - name: Check 6 backends produce byte-identical output on re-run
+        env:
+          DCC: ./bin/dcc
+          # -O0 (-c / -S) 与 -O2 (-c) 必须分档覆盖: 只有 -O2 会走 run_ssa_passes
+          # 的 AST→SSA→AST 往返, 局部变量声明序之类的 HashMap 迭代序泄漏只在那里
+          # 发生 (历史上 98/331 fixture 抖动), 而 -O0 一直是确定的零回归基线。
+          # 只跑 -O0 会漏掉优化器泄漏, 所以这里把 -O2 -c 也常驻门禁。
+          MODES: -c|-S|-O2 -c
+        # --with-link: 额外覆盖链接模式（不带 -c）。它不在默认 MODES 里，因为
+        # 只适用于 x86_64、要真调宿主 cc/ld，全量乘上去会慢一个量级；脚本因此
+        # 用独立小 fixture 集（LINK_SOURCES 默认 6 个，共 12 格，本地实测 <10s）。
+        # 这一档守的是 host-link 把临时 .o 名（曾含 PID）泄进可执行文件的回归；
+        # 同一 job 里它还会打印“STT_FILE 通道命中数”，命中 0 就变红，防止
+        # 这条锁在没人注意时静默退化为“什么都没比但永远绿”。
+        run: ./scripts/check_reproducible_output.sh determinism --runs 3 --with-link
+
+  e2e:
+    name: "End-to-end compile and run"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download dcc binary
+        uses: actions/download-artifact@v4
+        with:
+          name: dcc-bin
+          path: bin
+
+      - name: Prepare dcc
+        run: |
+          chmod +x bin/dcc
+          ./bin/dcc --version
+
+      - name: Compile hello.c
+        id: hello
+        run: |
+          ./bin/dcc -std=gnu23 -o hello tests/fixtures/smoke/hello.c
+          chmod +x hello
+          rc=0; ./hello || rc=$?
+          echo "exit code: $rc"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          test $rc -eq 42
+
+      - name: Compile arith.c
+        id: arith
+        run: |
+          ./bin/dcc -std=gnu23 -o arith tests/fixtures/smoke/arith.c
+          chmod +x arith
+          rc=0; ./arith || rc=$?
+          echo "arith exit: $rc"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          test $rc -eq 23
+
+      - name: Compile control.c
+        id: control
+        run: |
+          ./bin/dcc -std=gnu23 -o control tests/fixtures/smoke/control_flow.c
+          chmod +x control
+          rc=0; ./control || rc=$?
+          echo "control exit: $rc"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          test $rc -eq 100
+
+      - name: Compile call.c
+        id: call
+        run: |
+          ./bin/dcc -std=gnu23 -o call tests/fixtures/smoke/call_by_assign.c
+          chmod +x call
+          rc=0; ./call || rc=$?
+          echo "call exit: $rc"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          test $rc -eq 20
+
+      - name: Test error diagnostics
+        id: errdiag
+        run: |
+          out=$(./bin/dcc -std=gnu23 -o /tmp/should_fail tests/fixtures/smoke/bad_syntax.c 2>&1 || true)
+          echo "$out" | head -20
+          echo "$out" | grep -q 'error\[E0006\]'
+          echo "$out" | grep -q 'hint:'
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## DCC e2e Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Example | Expected | Got | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|----------|-----|--------|" >> $GITHUB_STEP_SUMMARY
+
+          hello_rc="${{ steps.hello.outputs.rc }}"
+          arith_rc="${{ steps.arith.outputs.rc }}"
+          control_rc="${{ steps.control.outputs.rc }}"
+          call_rc="${{ steps.call.outputs.rc }}"
+
+          # 处理步骤完全失败 (未产生输出) 的情况
+          hello_rc="${hello_rc:-ERR}"
+          arith_rc="${arith_rc:-ERR}"
+          control_rc="${control_rc:-ERR}"
+          call_rc="${call_rc:-ERR}"
+
+          echo "| hello.c | 42 | $hello_rc | $([ "$hello_rc" = "42" ] && echo ✅ PASS || echo ❌ FAIL) |" >> $GITHUB_STEP_SUMMARY
+          echo "| arith.c | 23 | $arith_rc | $([ "$arith_rc" = "23" ] && echo ✅ PASS || echo ❌ FAIL) |" >> $GITHUB_STEP_SUMMARY
+          echo "| control.c | 100 | $control_rc | $([ "$control_rc" = "100" ] && echo ✅ PASS || echo ❌ FAIL) |" >> $GITHUB_STEP_SUMMARY
+          echo "| call.c | 20 | $call_rc | $([ "$call_rc" = "20" ] && echo ✅ PASS || echo ❌ FAIL) |" >> $GITHUB_STEP_SUMMARY
+
+          errdiag_status="${{ steps.errdiag.outcome }}"
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Error diagnostics | - | - | $([ "$errdiag_status" = "success" ] && echo ✅ PASS || echo ❌ FAIL) |" >> $GITHUB_STEP_SUMMARY
+
+  # G4/G5 asm text parity —— 原 check_asm_text_parity.yml, 合并进来只为复用二进制。
+  #
+  # 第一性原理: dcc 有两条产出真指令的路径 —— 二进制 renderer 直发 ELF,
+  # 与 GAS 文本 renderer 渲染成 .s 再喂给真 GAS. 两条路径读同一个 CommonImage,
+  # 但 emitter 独立; 单跑 `-c` 或单跑 `-S` 都抓不到各自的 bug. 只有把两条路径
+  # 产出的 `.text` 归一化比对才能暴露.
+  #
+  # G5 反假绿: 缺少 `<triple>-as` 时, 脚本必须显式打印 ASM-PARITY-SKIP,
+  # 而不是静默通过 —— 交叉后端的 parity 只有在工具链齐全时才能判定.
+  parity:
+    name: "ASM text parity (-c vs --asm-fallback=gas)"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # 交叉 as 与 host as 都装齐 —— G5 门禁在工具链齐全时才真参与判定,
+      # 否则脚本会打印 skip 并视为"不参与". 缺包 = 门禁空跑 = 假绿, 不可接受.
+      - name: Install binutils (host + cross)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            binutils \
+            binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabi \
+            binutils-mips-linux-gnu \
+            binutils-riscv64-linux-gnu
+
+      - name: Download dcc binary
+        uses: actions/download-artifact@v4
+        with:
+          name: dcc-bin
+          path: bin
+
+      - name: Run asm text parity gate
+        # 默认 corpus=tests/fixtures/asm/parity (10 个纯 C fixture, 5 后端都能跑).
+        # 脚本在缺 triple-as/objcopy 时显式 ASM-PARITY-SKIP (G5 反假绿).
+        # 默认 DCC=target/release/dcc, 这里显式指向 artifact, 避免本 job 出现 cargo。
+        env:
+          DCC: ./bin/dcc
+        run: |
+          chmod +x "$DCC"
+          bash scripts/check_asm_text_parity.sh
+
+  # 后端能力矩阵门禁 —— 原 check_feature_matrix.yml, 合并进来复用同一个二进制。
+  #
+  # 第一性原理：能力矩阵的 truth 是 dcc 的**产物指纹**，不是文档也不是 features.rs。
+  # 探针把三方钉在一起: dcc 实测产物 == docs/backend_feature_matrix.md == FeatureSet 声明。
+  # 三方一致性的推导全在 scripts/probe_backend_features.sh 里（从 cli.rs::Arch::ALL/
+  # has_backend 与 shared/registry.rs::backend_for() 的 Some() 分支同源推导，不写魔法
+  # 数字），所以这里不再抄第二份会腐烂的算法。
+  #
+  # 探针退出码语义（与脚本头部一致），CI 按它分两个步骤：
+  #   0 -> 全绿
+  #   1 -> 能力矩阵说谎（文档漂移 / artifact 级实测 NO 却仍声明）-> 必须当场修，不许留
+  #   3 -> 三方一致，但存在容器不可解析的后端产物（现状：mips64 .o 被 objdump 拒绝）
+  #        -> 用独立步骤保持为**有原因的红**，与 tests/integration.rs 里
+  #           non_x86_c_mode_produces_valid_elf 是同一个事实；解锁条件 = 修掉该端序矛盾
+  # 不把两者混成一个退出码，是为了让「矩阵一致性」这道门禁现在就能真正成立：
+  # 长期红而无差别按下的门禁，最终会被所有人忽略，那门禁就等于不存在。
+  matrix:
+    name: "Feature matrix vs reality"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # 探针只在**宿主** binutils 上跑 readelf/objdump（通用 elf64-little /
+      # elf32-big 等 BFD target 足以解析交叉产物），不需要任何交叉 gcc。
+      - name: Install binutils (probe dependency)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils
+
+      - name: Download dcc binary
+        uses: actions/download-artifact@v4
+        with:
+          name: dcc-bin
+          path: bin
+
+      - name: Assert matrix consistency (artifact == doc == declared)
+        # 一次探针跑三种用途: 退出码当门禁、stdout 的 TSV 落盘成证据、非 TSV 行
+        # 并进诊断。旧版为此跑了两遍（`-o none` 判门禁 + `-o tsv` 存证据），而探针
+        # 主体是 6 个后端 × 全量 fixture 的真编译，第二遍纯属重复。
+        # 只允许 0 / 3：3 代表「矩阵本身诚实，但有一个已知破损后端」，
+        # 由下一步骤单独判红。任何 1（矩阵说谎）在这一步就直接失败。
+        env:
+          DCC_BIN: ./bin/dcc
+        run: |
+          chmod +x "$DCC_BIN"
+          mkdir -p probe-artifacts
+          set +e
+          bash scripts/probe_backend_features.sh --dcc "$DCC_BIN" \
+            --check docs/backend_feature_matrix.md -o tsv \
+            > /tmp/probe_stdout.txt 2> /tmp/probe_stderr.txt
+          rc=$?
+          set -e
+          # `-o tsv` 的每行恰好 5 个 tab 分隔字段; --check 通过时探针还会往 stdout
+          # 打一行 "OK: 文档表格 == 探针实测"，必须和 TSV 分家，否则证据文件被污染。
+          awk -F'\t' 'NF>=5' /tmp/probe_stdout.txt > probe-artifacts/features_probe.tsv
+          awk -F'\t' 'NF<5'  /tmp/probe_stdout.txt >> /tmp/probe_stderr.txt
+          echo "=== diagnostics (stderr + 非 TSV 的 stdout) ==="
+          cat /tmp/probe_stderr.txt
+          echo "=== evidence: $(wc -l < probe-artifacts/features_probe.tsv) TSV 行 ==="
+          {
+            echo "## Feature matrix probe"
+            echo ""
+            echo 'probe exit code = '$rc
+            echo ''
+            grep -E '^(FAIL|警告|错误|OK|Probe)' /tmp/probe_stderr.txt || true
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" = 0 ] || [ "$rc" = 3 ]; then
+            echo "PROBE_RC=$rc" >> "$GITHUB_ENV"
+            echo "能力矩阵三方一致（实测 == 文档 == FeatureSet 声明），probe rc=$rc"
+          else
+            echo "::error::能力矩阵门禁未通过，probe rc=$rc（1=矩阵说谎: 文档漂移/言过其实; 2=环境/用法错误: 探针自检失败）"
+            exit 1
+          fi
+
+      - name: Assert every registered backend emits a parseable object
+        # rc=3 的真相在这里报。故意不用 continue-on-error：
+        # 「可以忽略的已知缺陷」与「假绿灯」只一纸之隔，按下比不修更贵。
+        run: |
+          if [ "${PROBE_RC:-0}" = 3 ]; then
+            echo "::error::存在容器不可解析的后端产物："
+            grep -A 4 '容器不可解析' /tmp/probe_stderr.txt || true
+            echo "解锁条件见 docs/backend_feature_matrix.md「当前唯一的红」一节。"
+            exit 1
+          fi
+          echo "全部已注册后端的 -c 产物均可被宿主 binutils 解析"
+
+      - name: Archive probe results
+        if: always()
+        # 只留一份机器可读快照供人查，不再往仓库里追加/提交任何东西。
+        # ignore 而非报错: 探针可以在 rc=2（环境/用法）时一行 TSV 都不产出，
+        # 那时 job 已经红了，不要让归档步骤再叠一条无关的第二失败。
+        uses: actions/upload-artifact@v4
+        with:
+          name: feature-probe-results
+          path: |
+            probe-artifacts/features_probe.tsv
+          if-no-files-found: ignore
+          retention-days: 30

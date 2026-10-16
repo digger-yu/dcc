@@ -242,8 +242,8 @@ allows that set to shrink.
 |---|---|
 | GCC `gcc.dg` subset | `scripts/gcc_dg_test.sh` · `gcc-dg.yml` |
 | Diagnostic snapshots | `cargo test --test errors` (`DCC_UPDATE_SNAPSHOTS=1` to refresh) |
-| Back-end capability probe | `scripts/probe_backend_features.sh` · `check_feature_matrix.yml` |
-| `-c` vs `-S` byte parity | `scripts/check_asm_text_parity.sh` · `check_asm_text_parity.yml` |
+| Back-end capability probe | `scripts/probe_backend_features.sh` · `ci.yml` (matrix job) |
+| `-c` vs `-S` byte parity | `scripts/check_asm_text_parity.sh` · `ci.yml` (parity job) |
 | Disassembly + reproducibility | `tests/disasm_snapshot.rs`, `tests/reproducibility.rs` |
 | Kernel build + QEMU boot | `scripts/kernel_full_check.sh`, `scripts/qemu_boot_matrix.sh` · `kernel-bench.yml` |
 | Self-hosting | `make bootstrap` |

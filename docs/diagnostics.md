@@ -306,7 +306,7 @@ dcc: error: <message>
 | 路径归一化 | 绝对路径 → `<file>`；`secret.h` → `<secret.h>` |
 | 更新命令 | `DCC_UPDATE_SNAPSHOTS=1 cargo test --test errors --release` |
 | 脚本 | `bash scripts/update_error_snapshots.sh`（Linux） |
-| CI | `.github/workflows/e2e.yml` 中 `cargo test --release` |
+| CI | `.github/workflows/ci.yml` 中 `cargo test --release` |
 
 **平台限制**：
 

@@ -31,9 +31,9 @@
 | `arm_mips_golden_baseline.sh` | ARM/MIPS 字节基线；`make golden-cross` 跑 `verify` 模式——基线缺失或产物漂移都置红，禁止 CI 里悄悄重写 |
 | `check_pipe_structure.sh` | P16 软件流水的两个独立读数交叉：`DCC_PIPE_DUMP` 的接受/拒因，与 objdump 比较默认产物和 `DCC_SSA_OFF=pipe` 产物 |
 | `check_disasm_coverage.sh` | 自家 `-S` 反汇编逐字命中率；`make disasm-cov` 传 `LEVELS="0 2" CEILING=0`，CEILING 必须是显式数字，否则上限=本次实测值、永不红 |
-| `check_reproducible_output.sh` | 编译产物可复现性（CI `e2e.yml`） |
-| `check_asm_text_parity.sh` | `-c` 直产 vs `-S --asm-fallback=gas` 经真 `<triple>-as` 汇编后的指令文本一致（CI 同名 job） |
-| `probe_backend_features.sh` | 后端能力行为探针，与 `docs/backend_feature_matrix.md` 逐格对账，不一致即 CI 红（`check_feature_matrix.yml`） |
+| `check_reproducible_output.sh` | 编译产物可复现性（CI `ci.yml` 的 reproducibility job） |
+| `check_asm_text_parity.sh` | `-c` 直产 vs `-S --asm-fallback=gas` 经真 `<triple>-as` 汇编后的指令文本一致（CI `ci.yml` 的 parity job） |
+| `probe_backend_features.sh` | 后端能力行为探针，与 `docs/backend_feature_matrix.md` 逐格对账，不一致即 CI 红（`ci.yml` 的 matrix job） |
 
 ## GCC torture（`make torture` / CI `torture.yml`）
 

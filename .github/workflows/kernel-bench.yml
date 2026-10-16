@@ -145,13 +145,18 @@ jobs:
           echo "Source size: $(du -sh /tmp/kernel | cut -f1)"
 
       - name: Configure kernel (defconfig)
+        # run 的默认 shell 是 `bash -e {0}`: 有 -e, **没有** pipefail。管道退出码取
+        # 最后一个命令 (这里是 tail), 所以 `make ... | tail` 失败会被读成成功。
+        # 门禁类 step 必须显式要 pipefail, 否则 make 挂了 step 照样绿。
         run: |
+          set -o pipefail
           cd /tmp/kernel
           make defconfig 2>&1 | tail -5
 
       - name: Build kernel with GCC (baseline)
         id: gcc-build
         run: |
+          set -o pipefail
           cd /tmp/kernel
           OPT=-${{ steps.params.outputs.opt }}
           JOBS=-j${{ steps.params.outputs.jobs }}
@@ -171,6 +176,12 @@ jobs:
       - name: Build kernel with DCC
         id: dcc-build
         continue-on-error: true
+        # 这里**不**加 pipefail: 本 step 的产出是「DCC 走到哪一步、退出码多少」这两个
+        # 数据点, 编译失败是预期内的测量结果而不是要中断的错误。加了 pipefail, -e 会
+        # 在管道处直接退出, RC 根本来不及写, 报告里就成了 N/A。
+        # 但 `RC=$?` 接在 `make ... | tail` 后面取到的是 tail 的退出码 —— 恒 0,
+        # 于是「DCC Exit Code」永远是 0, 下面 `Speedup` 的 rc=0 判据恒真, 编译全挂
+        # 也能算出一个假加速比。用 PIPESTATUS[0] 直接取管道最左端 make 的真实状态。
         run: |
           chmod +x $GITHUB_WORKSPACE/bin/dcc
           cd /tmp/kernel
@@ -180,7 +191,7 @@ jobs:
           START=$(date +%s)
           # 尝试用 DCC 作为 CC 编译内核
           make $JOBS CC=$GITHUB_WORKSPACE/bin/dcc KCFLAGS="$OPT -std=gnu11" 2>&1 | tail -30
-          RC=$?
+          RC=${PIPESTATUS[0]}
           END=$(date +%s)
           DCC_TIME=$((END-START))
           echo "time=$DCC_TIME" >> $GITHUB_OUTPUT
@@ -226,19 +237,6 @@ jobs:
             echo "| Speedup | ${SPEEDUP}x |" >> $GITHUB_STEP_SUMMARY
           fi
 
-  # ============================================
-  # 性能退化检测
-  # ============================================
-  perf-check:
-    name: "Performance Regression Check"
-    needs: e2e-test
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - name: Check e2e test results
-        run: |
-          echo "E2E tests passed. Performance metrics recorded."
-          echo "Check the Actions Performance Metrics page for trends:"
-          echo "  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+  # perf-check job 已删除: 它的 `if: github.event_name == 'push'` 与本 workflow 唯一的
+  # 触发器 workflow_dispatch 互斥, 从上线起一次都没跑过; 且 job 体只是 echo 一个
+  # 本页面的 URL, 没有任何检查。真正的退化门禁应当比对 vmlinux_size / time 与基线。

@@ -13,16 +13,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-release-
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
 
       - name: Build dcc
         run: cargo build --release
@@ -36,12 +28,39 @@ jobs:
             gcc/testsuite/gcc.c-torture/compile
 
       - name: Run compile tests
+        # 旧写法 `bash scripts/x.sh 2>&1 | tee log || true` 有两层掩盖:
+        #   1) 默认 shell 是 `bash -e {0}`, 没有 pipefail —— 管道退出码取 tee, 恒 0;
+        #   2) 末尾的 `|| true` 把剩下的一切非 0 也按掉, 于是「脚本不存在 / 语法错 /
+        #      跑出非 0 / 全绿」四种事实在 CI 里长得一模一样。
+        # 现在先显式证明脚本存在且可解析, 再把真实 rc 落到日志与 step 输出。
+        # 套件本身的失败不判红(新编译器上它会长期红, 长期红的门禁等于没有门禁),
+        # 但「压根没跑起来」必须红。
         run: |
-          bash scripts/torture_compile_test.sh 2>&1 | tee compile_test.log || true
+          s=scripts/torture_compile_test.sh
+          [ -f "$s" ] || { echo "::error::$s 不存在"; exit 1; }
+          bash -n "$s" || { echo "::error::$s 语法错误"; exit 1; }
+          rc=0
+          bash "$s" > compile_test.log 2>&1 || rc=$?
+          tail -30 compile_test.log
+          echo "torture_compile_test.sh rc=$rc"
+          if [ "$rc" -ge 126 ]; then
+            echo "::error::$s 无法执行 (rc=$rc)"
+            exit 1
+          fi
 
       - name: Run execute tests
         run: |
-          bash scripts/torture_execute_test.sh 2>&1 | tee execute_test.log || true
+          s=scripts/torture_execute_test.sh
+          [ -f "$s" ] || { echo "::error::$s 不存在"; exit 1; }
+          bash -n "$s" || { echo "::error::$s 语法错误"; exit 1; }
+          rc=0
+          bash "$s" > execute_test.log 2>&1 || rc=$?
+          tail -30 execute_test.log
+          echo "torture_execute_test.sh rc=$rc"
+          if [ "$rc" -ge 126 ]; then
+            echo "::error::$s 无法执行 (rc=$rc)"
+            exit 1
+          fi
 
       - name: Generate summary
         if: always()

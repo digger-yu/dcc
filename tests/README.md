@@ -13,7 +13,7 @@
 
 ```text
 Tier 0  PR 必绿（本地等价：make test）——本文 §1.1
-Tier 1  Linux CI（.github/workflows：e2e.yml / gcc-dg.yml / torture.yml / check_feature_matrix.yml）
+Tier 1  Linux CI（.github/workflows：ci.yml / gcc-dg.yml / torture.yml）
 Tier 2  内核 / 性能（scripts/kernel_full_check.sh、QEMU 启动矩阵、kernel-bench.yml）
 Tier 3  可选深测（libiberty / GCC 源树 --features gcc_src、STRICT_FULL_BUILD=1）
 ```

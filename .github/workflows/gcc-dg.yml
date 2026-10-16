@@ -13,16 +13,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-release-
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
 
       - name: Build dcc
         run: cargo build --release
@@ -35,12 +27,37 @@ jobs:
             gcc/testsuite/gcc.dg
 
       - name: Run gcc.dg compile tests
+        # 同 torture.yml: `... | tee log || true` 把退出码吞干净。注意
+        # scripts/gcc_dg_test.sh 是**真的**会 exit 1（套件有失败 / dcc 不可执行 /
+        # suite 未安装），旧写法让这些信号从未在 CI 上露过面。这里保留「手动 job
+        # 不因套件失败而红」的语义, 但把 rc 打进日志与 step 输出, 并且「没跑起来」
+        # 一律判红。
         run: |
-          bash scripts/gcc_dg_test.sh compile 2>&1 | tee dg_compile.log || true
+          s=scripts/gcc_dg_test.sh
+          [ -f "$s" ] || { echo "::error::$s 不存在"; exit 1; }
+          bash -n "$s" || { echo "::error::$s 语法错误"; exit 1; }
+          rc=0
+          bash "$s" compile > dg_compile.log 2>&1 || rc=$?
+          tail -30 dg_compile.log
+          echo "gcc_dg_test.sh compile rc=$rc"
+          if [ "$rc" -ge 126 ]; then
+            echo "::error::$s 无法执行 (rc=$rc)"
+            exit 1
+          fi
 
       - name: Run gcc.dg run tests
         run: |
-          bash scripts/gcc_dg_test.sh run 2>&1 | tee dg_run.log || true
+          s=scripts/gcc_dg_test.sh
+          [ -f "$s" ] || { echo "::error::$s 不存在"; exit 1; }
+          bash -n "$s" || { echo "::error::$s 语法错误"; exit 1; }
+          rc=0
+          bash "$s" run > dg_run.log 2>&1 || rc=$?
+          tail -30 dg_run.log
+          echo "gcc_dg_test.sh run rc=$rc"
+          if [ "$rc" -ge 126 ]; then
+            echo "::error::$s 无法执行 (rc=$rc)"
+            exit 1
+          fi
 
       - name: Generate summary
         if: always()

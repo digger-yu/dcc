@@ -1,7 +1,7 @@
 # DCC 冒烟回归语料（smoke）
 
 本目录是 DCC 的**端到端冒烟回归语料**：每个文件都是完整、可编译、可运行的 C/C++ 程序，
-由 `scripts/test_all.sh`、CI 的 `e2e.yml` / `kernel-bench.yml` 逐个「编译 + 运行 + 校验退出码」。
+由 `scripts/test_all.sh`、CI 的 `ci.yml` / `kernel-bench.yml` 逐个「编译 + 运行 + 校验退出码」。
 它们与 `tests/fixtures/c/`（单特性、喂进 harness 的夹具）不同——这里强调的是「跑通整程序、验退出码」。
 
 > 迁移说明：本目录前身是仓库顶层 `examples/`（按主题分目录的示例程序）。为收敛测试相关路径、

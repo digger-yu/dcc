@@ -136,9 +136,9 @@ ENABLED_COUNT=$(echo $ENABLED_LIST | wc -w)
 REG_SOME_COUNT=$(awk '
     /pub fn backend_for\(/ { inf = 1 }
     inf && /^}/ { exit }
-    inf && /=> Some\(/ { n++ }
+    inf && /Some\(/ { n++ }
     END { print n + 0 }
-' src/codegen/registry.rs)
+' src/codegen/shared/registry.rs)
 if [ "$ENABLED_COUNT" != "$REG_SOME_COUNT" ]; then
     die2 "cli.rs 推导的已注册架构数 ($ENABLED_COUNT) != registry.rs backend_for 的 Some() 分支数 ($REG_SOME_COUNT)"
 fi
@@ -148,7 +148,7 @@ fi
 # ---------------------------------------------------------------------------
 # token 规范化: Feature::X -> X ; InlineAsm(AsmLevel::Full) -> InlineAsm:Full ;
 #               Dwarf(4) -> Dwarf:4
-FEATURES_RS="src/codegen/features.rs"
+FEATURES_RS="src/codegen/shared/features.rs"
 parse_feature_tokens() {
     # 先剥掉 `Feature::` 之前的前缀（riscv64_cross 里是 `fs.features.push(Feature::…`）。
     sed -e 's/.*Feature::/Feature::/' \
@@ -210,12 +210,12 @@ done < <(cut -f1 "$CTOR_TABLE" | sort -u)
 ctor_of_variant() {
     local v="$1" src toks
     case "$v" in
-        X86_64)  src="src/codegen/x86_64/backend.rs src/codegen/x86_64.rs" ;;
-        AArch64) src="src/codegen/aarch64/backend.rs src/codegen/aarch64.rs" ;;
-        RiscV64) src="src/codegen/riscv64.rs" ;;
-        Arm)     src="src/codegen/arm.rs" ;;
-        Mips)    src="src/codegen/mips.rs" ;;
-        Mips64)  src="src/codegen/mips64.rs" ;;
+        X86_64)  src="src/codegen/x86_64/backend.rs" ;;
+        AArch64) src="src/codegen/aarch64/backend.rs" ;;
+        RiscV64) src="src/codegen/riscv64/backend.rs" ;;
+        Arm)     src="src/codegen/arm/backend.rs" ;;
+        Mips)    src="src/codegen/mips/baseline_mips.rs" ;;
+        Mips64)  src="src/codegen/mips/mips64.rs" ;;
         *)       src="" ;;
     esac
     for s in $src; do
