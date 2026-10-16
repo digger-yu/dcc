@@ -20,6 +20,7 @@ movslq %r8d,%r8
 mov -0x30(%r13),%rax
 add %r8,%rax
 movslq %eax,%rax
+movslq %eax,%rax
 mov %eax,%ebx
 movslq -0x70(%r13),%rax
 mov %rax,-0x30(%r13)
@@ -37,6 +38,7 @@ mov $0x1,%r8
 mov -0x30(%r13),%rax
 cqto
 idiv %r8
+movslq %eax,%rax
 mov %eax,%r12d
 movslq -0x70(%r13),%rax
 mov %rax,-0x30(%r13)
@@ -55,6 +57,7 @@ sar %cl,%r8
 mov -0x30(%r13),%rax
 add %r8,%rax
 movslq %eax,%rax
+movslq %eax,%rax
 mov %eax,%r14d
 movslq %ebx,%rax
 mov %rax,-0x30(%r13)
@@ -63,6 +66,7 @@ mov -0x30(%r13),%rax
 cqto
 idiv %r8
 mov %rdx,%rax
+movslq %eax,%rax
 mov %eax,%r15d
 movslq %ebx,%rax
 mov %rax,-0x30(%r13)

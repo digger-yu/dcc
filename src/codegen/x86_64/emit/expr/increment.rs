@@ -9,7 +9,9 @@ use crate::ast::*;
 use crate::codegen::shared::asm_operand::Width;
 use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::x86_64::insn::Insn;
-use crate::codegen::x86_64::opcode::{AluOp, Operand as OpcodeOperand, SimdArithOp, SimdWidth, X86_64Opcode};
+use crate::codegen::x86_64::opcode::{
+    AluOp, Operand as OpcodeOperand, SimdArithOp, SimdWidth, X86_64Opcode,
+};
 
 use crate::diagnostics::Span;
 
@@ -359,8 +361,15 @@ impl super::super::super::Codegen {
                 match &target_ty {
                     Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                         find_field(fields, &field.name).and_then(|(f, extra)| {
-                            f.bit_width
-                                .map(|bw| (bw, f.bit_offset, f.offset + extra, f.ty.size()))
+                            f.bit_width.map(|bw| {
+                                (
+                                    bw,
+                                    f.bit_offset,
+                                    f.offset + extra,
+                                    f.ty.size(),
+                                    Self::is_signed_int(&f.ty),
+                                )
+                            })
                         })
                     },
                     _ => None,
@@ -368,7 +377,7 @@ impl super::super::super::Codegen {
             } else {
                 None
             };
-            if let Some((bw, bit_off, field_off, container_size)) = bf_info {
+            if let Some((bw, bit_off, field_off, container_size, signed)) = bf_info {
                 // Bitfield inc/dec: read-modify-write on container
                 self.gen_bitfield_inc_dec(
                     lv,
@@ -376,6 +385,7 @@ impl super::super::super::Codegen {
                     bit_off,
                     field_off,
                     container_size,
+                    signed,
                     dst,
                     is_pre,
                     is_inc,
@@ -463,6 +473,20 @@ impl super::super::super::Codegen {
                 }, // mov qword [rcx], rax
             }
             if is_pre {
+                // 前缀 `++*p` / `a[i]++` / `s->f++`: 表达式的值必须是**存回内存的
+                // 截断值**, 不是寄存器里的 64 位和。窄类型存回后按原类型重新加载
+                // (上方标量分支对栈槽做的同一步, 内存在这里此前漏了):
+                // sqlite insertCell 的 `if( (++data[hdr+4])==0 ) data[hdr+3]++;`
+                // 因此在 255→256 时读到 256 而非 0, 页头 cell 计数的高字节永不
+                // 进位 —— 一页超过 255 个 cell 就被后续解析读成 25 个。
+                if mem_sz < 8 {
+                    self.mov(0, 1); // rax = 元素地址 (仍在 rcx)
+                    if let Some(seg) = seg_prefix {
+                        self.emit_load_mem_typed_seg(mem_sz, &inner_ty, seg);
+                    } else {
+                        self.emit_load_mem_typed(mem_sz, &inner_ty);
+                    }
+                }
                 if dst != 0 {
                     self.mov(dst, 0); // 前缀：dst = 新值
                 }
@@ -480,6 +504,7 @@ impl super::super::super::Codegen {
         bit_off: u32,
         field_off: usize,
         container_size: usize,
+        signed: bool,
         dst: u8,
         is_pre: bool,
         is_inc: bool,
@@ -765,7 +790,7 @@ impl super::super::super::Codegen {
         // 4. Write back: RMW on container
         // Reload address into rcx
         self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 1, 13, addr_slot)); // rcx = addr
-                                                                                      // Load container into rcx
+                                                                               // Load container into rcx
         match container_size {
             4 => {
                 self.emit_insn(&Insn::new(
@@ -929,6 +954,33 @@ impl super::super::super::Codegen {
                 self.mov(dst, 0);
             }
         }
+        // 结果值要按 C 的规定归约到**位域类型**：`int sb:4` 的新值 8 读回是 -8，
+        // 旧值 -8 参与运算时也是 -8。上面两步的 `and mask` 只是零截断（容器写回要的
+        // 就是那几位），有符号位域的表达值因此差一个符号扩展。写回内存的位模式不受
+        // 影响（那几位本来就一样），错的只是 `++v.sb` / `v.sb--` 这类**结果值** ——
+        // 实测 `v.sb=7; r=++v.sb;` 里 dcc 给 r=8 而 gcc 给 r=-8。与 `dispatch.rs`
+        // 位域读取路径的符号扩展同一口径：shl/sar 各 `64-bw`。
+        if signed && bw < 64 {
+            let shift = (64 - bw) as u8;
+            use crate::codegen::x86_64::opcode::{ShiftAmount, ShiftOp};
+            for (op, op_ext) in [
+                (ShiftOp::Shl, 4u8),
+                (ShiftOp::Sar, 7u8 /* sar r/m64, imm8 (C1 /7) */),
+            ] {
+                let insn = Insn::new(
+                    X86_64Opcode::Shift {
+                        op,
+                        width: Width::B64,
+                        dst: OpcodeOperand::Reg(dst, Width::B64),
+                        amount: ShiftAmount::Imm8(shift),
+                    },
+                    &[],
+                );
+                if !self.emit_insn(&insn) {
+                    self.emit_insn(&Insn::shift_reg_imm8_c1_b64(op_ext, dst, shift));
+                }
+            }
+        }
         self.bf_rmw_depth -= 1;
     }
 
@@ -944,14 +996,7 @@ impl super::super::super::Codegen {
     }
 
     /// 浮点增量/减量：x87 或 SSE 路径，把 lvalue 的值 ±1.0 写回
-    fn gen_float_inc_dec(
-        &mut self,
-        lv: &Expr,
-        dst: u8,
-        is_pre: bool,
-        is_inc: bool,
-        ty: &Type,
-    ) {
+    fn gen_float_inc_dec(&mut self, lv: &Expr, dst: u8, is_pre: bool, is_inc: bool, ty: &Type) {
         // 展开 Imaginary 内型，与 gen_float_load / gen_float_store 保持口径。
         let eff_ty = match ty {
             Type::Imaginary(inner) => &inner.base,
@@ -963,9 +1008,9 @@ impl super::super::super::Codegen {
         }
         // 2. 分配栈 scratch：地址 8B + (前缀用) 16B 浮点临时槽（对齐 long double tbyte）
         self.emit_insn(&Insn::sub_rsp_imm(24)); // sub rsp, 24
-        // 3. 把地址存到 [rsp+16]
+                                                // 3. 把地址存到 [rsp+16]
         self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 4, 16)); // mov [rsp+16], rax
-        // 4. 从 [rax] 按类型加载当前值到 xmm0 / st(0)
+                                                                        // 4. 从 [rax] 按类型加载当前值到 xmm0 / st(0)
         if self.float_in_st0(eff_ty) {
             // x87 路径：fld tbyte / qword / dword [rax]
             self.emit_load_scalar_float_at(eff_ty, 0); // st(0) = old
@@ -1027,7 +1072,7 @@ impl super::super::super::Codegen {
         if self.float_in_st0(eff_ty) {
             // x87 路径：fld1 → st(0)=1.0, st(1)=old
             self.emit_insn(&Insn::x87_fixed(0xD9, 0xE8)); // fld1
-            // 现在 st(0)=1.0, st(1)=old
+                                                          // 现在 st(0)=1.0, st(1)=old
             if is_inc {
                 self.emit_insn(&Insn::x87_fixed(0xDE, 0xC1)); // faddp: st(1) += st(0), pop → st(0)=old+1
             } else {
@@ -1040,7 +1085,7 @@ impl super::super::super::Codegen {
             self.emit_insn(&Insn::movapd_xmm(1, 0)); // movapd xmm1, xmm0 (old)
             let c = crate::ast::FloatConst::from_int(eff_ty, 1);
             self.gen_float_imm_load(c, eff_ty); // xmm0 = 1.0
-            // 现在 xmm0=1.0, xmm1=old
+                                                // 现在 xmm0=1.0, xmm1=old
             if is_inc {
                 // xmm1 = xmm1 + xmm0 = old + 1.0
                 if matches!(eff_ty, Type::Float) {
@@ -1066,11 +1111,11 @@ impl super::super::super::Codegen {
         }
         // 7. 写回 [rax] = new。地址在 [rsp+16]，先加载到 rax
         self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 0, 4, 16)); // rax = [rsp+16]
-        // 8. 按类型存
+                                                                       // 8. 按类型存
         self.emit_store_scalar_float_at(eff_ty, eff_ty, 0); // 把 xmm0/st(0) 写到 [rax]
-        // 9. 清理栈
+                                                            // 9. 清理栈
         self.emit_insn(&Insn::add_rsp_imm(24)); // add rsp, 24
-        // 10. 设置返回值
+                                                // 10. 设置返回值
         if is_pre {
             // 前缀：返回新值（已在 xmm0 / st(0)）
             // 若 dst != 0 且是 SSE 路径，值已在 xmm0，不需要 GP 搬运
@@ -1108,9 +1153,11 @@ impl super::super::super::Codegen {
                 // 此时 st(0) = old, st(1) 已被 pop（faddp/fsubp 后只剩结果，但结果已被写到内存
                 // 现在 st(0) 是旧值，正是我们要的
             } else if matches!(eff_ty, Type::Float) {
-                self.emit_insn(&Insn::simd_mov_mem_base(false, SimdWidth::SS, 0, 4, -24)); // movss xmm0, [rsp-24]
+                self.emit_insn(&Insn::simd_mov_mem_base(false, SimdWidth::SS, 0, 4, -24));
+            // movss xmm0, [rsp-24]
             } else {
-                self.emit_insn(&Insn::simd_mov_mem_base(false, SimdWidth::SD, 0, 4, -24)); // movsd xmm0, [rsp-24]
+                self.emit_insn(&Insn::simd_mov_mem_base(false, SimdWidth::SD, 0, 4, -24));
+                // movsd xmm0, [rsp-24]
             }
         }
     }

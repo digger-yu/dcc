@@ -53,7 +53,9 @@ impl Codegen {
                             let elem_data = if let Some(b) = complex_data {
                                 b
                             } else if matches!(&elem_ty.base, Type::Ptr(_)) {
-                                if let Expr::String { data, .. } = value {
+                                if let Expr::String { data, .. } =
+                                    const_eval::unwrap_string_cast(value)
+                                {
                                     self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
                                 } else {
                                     self.eval_const_expr(
@@ -131,7 +133,8 @@ impl Codegen {
                         let elem_data = if let Some(b) = complex_data {
                             b
                         } else if matches!(&elem_ty.base, Type::Ptr(_)) {
-                            if let Expr::String { data, .. } = value {
+                            if let Expr::String { data, .. } = const_eval::unwrap_string_cast(value)
+                            {
                                 self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
                             } else {
                                 self.eval_const_expr(
@@ -158,7 +161,7 @@ impl Codegen {
                     }
                 }
             },
-            Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
+            Type::Struct(_name, fields, _, _) | Type::Union(_name, fields, _, false) => {
                 let total_size = ty.size();
                 data.resize(total_size, 0);
                 let mut field_idx = 0;
@@ -309,7 +312,9 @@ impl Codegen {
                                 if let Some(b) = complex_data {
                                     b
                                 } else if matches!(&field_ty, Some(Type::Ptr(_))) {
-                                    if let Expr::String { data, .. } = value {
+                                    if let Expr::String { data, .. } =
+                                        const_eval::unwrap_string_cast(value)
+                                    {
                                         self.emit_string_ptr_slot(field_rel, data, rodata_slots)
                                     } else {
                                         self.eval_const_expr(
@@ -393,7 +398,7 @@ impl Codegen {
                     let elem_data = if let Some(b) = complex_data {
                         b
                     } else if matches!(&elem_ty.base, Type::Ptr(_)) {
-                        if let Expr::String { data, .. } = value {
+                        if let Expr::String { data, .. } = const_eval::unwrap_string_cast(value) {
                             self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
                         } else {
                             self.eval_const_expr(
@@ -492,7 +497,7 @@ impl Codegen {
                 if let Some(InitItem::Expr(e)) = inits.first() {
                     let is_float_ty = matches!(ty, Type::Float | Type::Double | Type::LongDouble);
                     if matches!(ty, Type::Ptr(_)) {
-                        if let Expr::String { data, .. } = e {
+                        if let Expr::String { data, .. } = const_eval::unwrap_string_cast(e) {
                             return Some(self.emit_string_ptr_slot(rel, data, rodata_slots));
                         }
                     }

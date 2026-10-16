@@ -327,10 +327,14 @@ impl Codegen {
             .unwrap_or_else(|| "%rax".to_string());
         let op_name = if matches!(ty, Type::Float) { "movss" } else { "movsd" };
         let mut bytes: Vec<u8> = Vec::new();
+        // 前缀顺序是硬性编码规则: legacy 前缀 (F2/F3/66) 必须**先于** REX。REX 之后
+        // 再出现任何 legacy 前缀会让那枚 REX 作废 (x86 只认「紧邻操作码的那一枚前缀」),
+        // 于是 `41 F2 0F 10 00` 发的是 `movsd (%rax),%xmm0` 而不是 `%r8` —— 基址落在
+        // r8..r15 时读的是完全不同的地址, 实测 `return r + (int)l.d;` 直接段错误。
+        bytes.push(pfx);
         if base >= 8 {
             bytes.push(0x41); // REX.B
         }
-        bytes.push(pfx);
         bytes.extend_from_slice(&[0x0F, 0x10]);
         // mod=00, reg=xmm0(0), r/m=base & 7
         let rm = base & 7;
@@ -380,10 +384,11 @@ impl Codegen {
             "movsd"
         };
         let mut bytes: Vec<u8> = Vec::new();
+        // 同 load: legacy 前缀必须先于 REX, 否则 REX 作废、基址从 %r8..%r15 退化成 %rax。
+        bytes.push(pfx);
         if base >= 8 {
             bytes.push(0x41); // REX.B
         }
-        bytes.push(pfx);
         bytes.extend_from_slice(&[0x0F, 0x11]);
         let rm = base & 7;
         if rm == 4 {

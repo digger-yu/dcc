@@ -8,7 +8,7 @@
 // 本文件仅包含 Layer 1+2 的类型定义和后端无关的计算逻辑。
 // Layer 3 的指令发射由各后端 (x86_64, aarch64, riscv64) 自行实现。
 
-use crate::ast::{self, ArraySize, Expr, Type};
+use crate::ast::{self, find_field, ArraySize, Expr, Type};
 
 // ============================================================================
 // Layer 1: 对象解析 (resolve)
@@ -232,6 +232,17 @@ pub trait ObjectResolver {
 
     /// 判断名称是否为局部名字 (栈变量/VLA/upvar)。
     fn is_local_name(&self, name: &str) -> bool;
+
+    /// 将不完整 (字段为空的前向声明) struct/union 类型补全为完整定义。
+    ///
+    /// 字段访问链中指针字段携带的类型可能来自结构体**定义之前**的指针
+    /// 声明 (SQLite: `typedef struct VdbeSorter VdbeSorter;` 远早于
+    /// `struct VdbeSorter {...}`), parser 无法回填已嵌入其它字段类型里的
+    /// 不完整实体, 导致语义层在该实体上取字段偏移得到 0。各后端用自己的
+    /// 完整类型表补全; 默认实现原样返回 (类型已完整或无补全能力时)。
+    fn resolve_complete_ty(&self, ty: &Type) -> Type {
+        ty.clone()
+    }
 }
 
 // ============================================================================
@@ -282,13 +293,23 @@ fn lvalue_address<R: ObjectResolver>(resolver: &R, expr: &Expr) -> AddressDescri
             //   StackSlotLoad 出指针值本身, 直接加下标即可, 无需补 LOAD。
             // - arr 是 Member (非 arrow, 如 s.p[i]): lvalue_address 给出的是
             //   「该指针所在字段的地址」(即 &s.p), 需 LOAD 一次取到指针值。
+            // - arr 是 Index (嵌套下标, 如 argv[n][0], 其中 argv: char**): 外层
+            //   Index 返回的是「&argv[n]」(指针槽地址), 不是 argv[n] 这个 char*
+            //   值; 需 LOAD 一次 8 字节才能拿到内层字符串地址.
             // - arr 是 Member arrow Ptr (如 row->cells[i]): Member arrow arm
             //   对指针/数组字段已包过 PointerValue, 此处 base_addr.base 即为
             //   PointerValue, guard 会跳过重复 LOAD。
             let base_addr = lvalue_address(resolver, arr);
             // 是否需要补一次 LOAD 才能拿到指针值?
-            // 适用场景: arr 是 Member(非 arrow, 如 s.p[i]) —— lvalue_address
-            // 返回的是「&s.p」(字段地址), 需再 load 一次取指针值.
+            // 适用场景:
+            //   - arr 是 Member(非 arrow, 如 s.p[i]) —— lvalue_address
+            //     返回的是「&s.p」(字段地址), 需再 load 一次取指针值.
+            //   - arr 是 Index (嵌套下标, 如 argv[n][0]) —— 外层 Index
+            //     给出「&argv[n]」(指针槽地址), 需再 load 8 字节取 char*.
+            //   - arr 是 Deref (如 (*f())[i], 其中 f(): T**) —— lvalue_address
+            //     给出的是「&(*f())」(即 f() 返回的 T* 指针所在槽的地址),
+            //     需再 load 8 字节取出真正的 T* 才能做下标算术.
+            //     glibc isspace 宏展开为 (*__ctype_b_loc())[c], 正属此形状.
             // 不适用:
             //   - arr 是 Ident Ptr (p[i]) —— StackSlotLoad 已 load 出指针值
             //   - arr 是 Member arrow Ptr (row->cells[i]) —— arrow arm 已包过
@@ -296,7 +317,14 @@ fn lvalue_address<R: ObjectResolver>(resolver: &R, expr: &Expr) -> AddressDescri
             //     套上 PointerValue 会多 load 一次 (把字符串首 8 字节当指针,
             //     导致 L"..."[i] 解引用垃圾地址 segfault).
             let needs_pointer_load = matches!(arr.ty(), Type::Ptr(_))
-                && matches!(arr.as_ref(), Expr::Member { is_arrow: false, .. })
+                && (matches!(
+                    arr.as_ref(),
+                    Expr::Member {
+                        is_arrow: false,
+                        ..
+                    }
+                ) || matches!(arr.as_ref(), Expr::Index { .. })
+                    || matches!(arr.as_ref(), Expr::Deref { .. }))
                 && !matches!(base_addr.base, AddressBase::PointerValue { .. });
             let base_addr = if needs_pointer_load {
                 AddressDescriptor {
@@ -332,7 +360,30 @@ fn lvalue_address<R: ObjectResolver>(resolver: &R, expr: &Expr) -> AddressDescri
                 // 注意: 数组字段 (如 elt1->bits) 不包 — 数组退化为地址本身,
                 // 不需要额外 load。
                 let ptr_addr = lvalue_address(resolver, base);
-                let field_offset = member_field_offset(base, field);
+                // 三种基址 (`StackFrame` / `GlobalSymbolAddr` / `ExprAddr`) 物化出来是
+                // 「指针槽的地址」而不是「指针值」: `apOld[0]->aData` 的基址描述符是
+                // &apOld[0], `(*pp)->f` 的是 pp 的值 (= &*pp)。字段偏移若直接叠在它们
+                // 上就少了一次解引用 —— 读的是 apOld[10] 而非 apOld[0]->aData。
+                // 包一层 PointerValue: 后端先物化槽地址、load 8 字节得到指针值,
+                // 之后本层的字段偏移才加在值上 (与下方 Index 臂的 needs_pointer_load 同构)。
+                let ptr_addr = if matches!(
+                    ptr_addr.base,
+                    AddressBase::StackFrame { .. }
+                        | AddressBase::GlobalSymbolAddr { .. }
+                        | AddressBase::ExprAddr { .. }
+                ) {
+                    let element_info = ptr_addr.element_info.clone();
+                    AddressDescriptor {
+                        base: AddressBase::PointerValue {
+                            sub: Box::new(ptr_addr),
+                        },
+                        offset: ByteOffset::Constant(0),
+                        element_info,
+                    }
+                } else {
+                    ptr_addr
+                };
+                let field_offset = member_field_offset(resolver, base, field);
                 let combined = add_constant_offset(ptr_addr, field_offset);
                 // 若字段本身是指针 (如 elt1 是 bitmap_element*), 后续还会
                 // 在它上面继续 ->field / [idx]。此时描述符指向的是 "指针字段
@@ -366,23 +417,43 @@ fn lvalue_address<R: ObjectResolver>(resolver: &R, expr: &Expr) -> AddressDescri
             } else {
                 // s.field: 在结构体地址上加字段偏移
                 let struct_addr = lvalue_address(resolver, base);
-                let field_offset = member_field_offset(base, field);
+                let field_offset = member_field_offset(resolver, base, field);
                 let combined = add_constant_offset(struct_addr, field_offset);
                 // VM struct (含 VLA 字段的 struct): 目标字段在首 VLA 字段之后时,
                 // 静态字段偏移是基于 sizeof(VLA)=8 退化值算出来的, 不是真实运行时
                 // 偏移 (真实偏移 = align_up(首 VLA 运行时大小 + 之前静态字段, 字段对齐)).
                 // 语义层无法表达运行时偏移, 返回 Unsupported 让后端退回旧路径,
                 // 由 gen_vm_member_offset 在运行时求值.
-                if is_vm_field_after_first_vla(&base_expr_ty(base), &field.name) {
+                let resolved_base_ty = resolver.resolve_complete_ty(&base_expr_ty(base));
+                if is_vm_field_after_first_vla(&resolved_base_ty, &field.name) {
                     return AddressDescriptor {
                         offset: ByteOffset::Unsupported,
                         element_info: element_info_from_type(member_ty),
                         ..combined
                     };
                 }
-                AddressDescriptor {
-                    element_info: element_info_from_type(member_ty),
-                    ..combined
+                // 与上方 is_arrow 臂同构: dot 指针成员的描述符同样指向
+                // 「指针槽地址」(&s.p), 在其之上继续 ->field / [idx] 前必须
+                // 先 load 出指针值。此前非 arrow 臂从不包 PointerValue, 只靠
+                // Index 臂的 needs_pointer_load 补偿; 但首字段 (offset 0) 指针
+                // 槽在描述符里没有可见边界, 且守卫会因外层链已含 PointerValue
+                // 而跳过补偿, 这次必需的 load 被静默吞掉 —— 如
+                // p->y.pTab->aCol[i] (aCol 是 Table 首字段) 被错算成
+                // *(pTab + i*es) 而非 *(pTab->aCol + i*es), 少一次 load
+                // (SQLite sqlite3ExprCanBeNull 段错误根因)。
+                if matches!(member_ty, Type::Ptr(_)) {
+                    AddressDescriptor {
+                        base: AddressBase::PointerValue {
+                            sub: Box::new(combined),
+                        },
+                        offset: ByteOffset::Constant(0),
+                        element_info: element_info_from_type(member_ty),
+                    }
+                } else {
+                    AddressDescriptor {
+                        element_info: element_info_from_type(member_ty),
+                        ..combined
+                    }
                 }
             }
         },
@@ -630,21 +701,42 @@ pub fn element_stride(elem_ty: &Type) -> usize {
 }
 
 /// 计算结构体/联合体成员字段的字节偏移。
-fn member_field_offset(base_expr: &Expr, field: &ast::Ident) -> i64 {
+///
+/// 与后端 `gen_expr_member_rvalue` 的口径严格一致: 先把不完整 (字段为空的
+/// 前向声明) struct/union 经 resolver 补全为完整定义, 再用 `find_field`
+/// 递归查找 (支持匿名 struct/union 穿透并累计 extra 偏移)。
+fn member_field_offset<R: ObjectResolver>(
+    resolver: &R,
+    base_expr: &Expr,
+    field: &ast::Ident,
+) -> i64 {
     let base_ty = base_expr.ty();
     // 穿透指针: ptr->field 的基类型是指针指向的类型
     let struct_ty = match &base_ty {
         Type::Ptr(qt) => &qt.base,
         other => other,
     };
-    match struct_ty {
-        Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, _) => {
-            for f in fields.iter() {
-                if f.name == field.name {
-                    return f.offset as i64;
-                }
+    // 前向声明导致的不完整类型: 字段嵌入的实体可能为空, 用完整定义补全。
+    let resolved;
+    let complete_ty = match struct_ty {
+        Type::Struct(name, fields, _, _) | Type::Union(name, fields, _, _) if fields.is_empty() => {
+            resolved = resolver.resolve_complete_ty(struct_ty);
+            // 补全失败时退回原类型, 保持旧行为 (偏移 0, 后端可再自行兜底)
+            if matches!(&resolved, Type::Struct(n, f, _, _) | Type::Union(n, f, _, _)
+                if n == name && !f.is_empty())
+            {
+                &resolved
+            } else {
+                struct_ty
             }
-            0
+        },
+        _ => struct_ty,
+    };
+    match complete_ty {
+        Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, _) => {
+            find_field(fields, &field.name)
+                .map(|(f, extra)| (f.offset + extra) as i64)
+                .unwrap_or(0)
         },
         _ => 0,
     }

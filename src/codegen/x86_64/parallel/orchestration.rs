@@ -69,6 +69,7 @@ impl Codegen {
             rodata: self.rodata.clone(),
             string_pool: self.string_pool.clone(),
             text_align: self.text_align,
+            complete_struct_types: self.complete_struct_types.clone(),
             // 默认直接继承主 Codegen 的游标; `emit_functions_parallel` 会按 slot
             // 下标把它换成互不重叠的分区基址。
             label_base: self.next_label,
@@ -149,6 +150,7 @@ impl Codegen {
         cg.rodata = ctx.rodata;
         cg.string_pool = ctx.string_pool;
         cg.text_align = ctx.text_align;
+        cg.complete_struct_types = ctx.complete_struct_types;
         // worker 的标号游标从分区基址起号。这是消除「每个 worker 都从 .L0 开始」
         // 那一路径同名覆盖的唯一插入点: `fresh_label` 本身不动, 保持单一真源。
         cg.next_label = ctx.label_base;

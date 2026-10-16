@@ -343,17 +343,10 @@ impl Codegen {
             // 预计算已注册局部变量的总大小, 用于参数偏移计算.
             // limits-fndefn.c 有 100,000 个参数, 每次重新遍历 var_map
             // 会导致 O(n²) 超时. 使用累加值避免重复扫描.
-            let var_contribution = |ty: &Type| -> i64 {
-                match ty {
-                    t if Self::type_has_vla(t) => t.size() as i64 + 16,
-                    Type::Ptr(q)
-                        if matches!(&q.base, Type::Array(_, crate::ast::ArraySize::Var(_))) =>
-                    {
-                        16
-                    },
-                    t => (t.size().div_ceil(8) * 8) as i64,
-                }
-            };
+            // 统一口径: 直接复用 var_alloc_slots (分配侧的真源),
+            // 避免两处对同类类型给出不同字节数 (如 Ptr-to-VLA
+            // 曾给出 16 vs 8, 导致参数偏移整体漂移 8B).
+            let var_contribution = |ty: &Type| -> i64 { Self::var_alloc_slots(ty) * 8 };
             let mut param_used_total: i64 = self
                 .var_map
                 .values()
@@ -665,9 +658,9 @@ impl Codegen {
             // tramp_reserve + stack_reserve`，再 16 对齐）。
             let var_bytes: i64 = self.var_map_total_slots.saturating_mul(8);
             let sc_slot: i64 = if f.is_nested { 8 } else { 0 }; // 嵌套函数需要静态链槽位
-            // P3 (honest reservation): 有多少直接嵌套函数就需要多少个 32B trampoline。
-            // 之前固定 256B 意味着无嵌套函数每帧白开 256B；现在从「全函数统一」
-            // 变成「按 body.items 里直接嵌套函数个数 × 32B」。
+                                                                // P3 (honest reservation): 有多少直接嵌套函数就需要多少个 32B trampoline。
+                                                                // 之前固定 256B 意味着无嵌套函数每帧白开 256B；现在从「全函数统一」
+                                                                // 变成「按 body.items 里直接嵌套函数个数 × 32B」。
             let mut p3_nested_count: i64 = 0;
             if let Some(body) = &f.body {
                 let mut collected: Vec<crate::ast::FuncDecl> = Vec::new();
@@ -1100,7 +1093,11 @@ impl Codegen {
                                             for item in inits.iter() {
                                                 if let InitItem::Expr(e) = item {
                                                     self.gen_expr(e, Self::EVAL_BASE);
-                                                    self.emit_global_store_offset(0, &v.name.name, off);
+                                                    self.emit_global_store_offset(
+                                                        0,
+                                                        &v.name.name,
+                                                        off,
+                                                    );
                                                     off += elem_size as i32;
                                                 }
                                             }

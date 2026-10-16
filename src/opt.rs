@@ -180,6 +180,29 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_i
         .collect();
     // file-scope 的 `register asm` 变量占住的号要让开（循环里不能再借 `prog`，所以先算）。
     let taken_regs = file_scope_bound_regs(&prog.decls);
+    // 诊断窗口：`DCC_MEMDBG=1` 逐函数打印 SSA 往返前后的本进程 RSS 与耗时。
+    // 为什么必须有：`-O2` 编 `sqlite3.c` 的 RSS 随函数数单调上涨（实测 >4 GB，而
+    // `-O0`/跳掉本 pass 只要 1.6 GB），没有逐函数读数就分不清「某个函数 IR 爆炸」和
+    // 「每个函数都留下一块不回收的内存」这两种完全不同的根因。只写 stderr，不进产物。
+    let memdbg = std::env::var("DCC_MEMDBG").is_ok();
+    let mut memdbg_idx = 0usize;
+    // 诊断窗口：`DCC_SSA_ONLY_FN=<name>` 只让同名函数进 SSA 管线，其余保持 AST 原形。
+    // 用途：把「单函数的病理」（实测 `updateAccumulator` 一次 SSA 往返吃 938 MB / 22.8 s）
+    // 与整文件的固定成本（AST pass + 后端）分开，一次实验从分钟级降到十秒级。
+    // 与 `DCC_OPT_SKIP` 同级：只在报障时设置，不参与任何判据，不进产物字节。
+    let ssa_only = std::env::var("DCC_SSA_ONLY_FN").ok();
+    // 同上，但名单来自文件（一行一个函数名）：整文件级别的分诊（ddmin 二分「哪几个函数
+    // 进 SSA 就复现错值」）只能靠名单，单名开关要跑几千轮。
+    let ssa_only_list: Option<std::collections::HashSet<String>> =
+        std::env::var("DCC_SSA_ONLY_LIST")
+            .ok()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|s| {
+                s.lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect()
+            });
     let mut modified = false;
     for decl in &mut prog.decls {
         if let Decl::Func(f) = decl {
@@ -200,27 +223,56 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_i
             if func_has_unsafe_ssa_pattern(f) {
                 continue;
             }
+            if let Some(only) = &ssa_only {
+                if &f.name.name != only {
+                    continue;
+                }
+            }
+            if let Some(set) = &ssa_only_list {
+                if !set.contains(&f.name.name) {
+                    continue;
+                }
+            }
             // Skip functions that access volatile globals
             if !volatile_globals.is_empty() && func_refs_volatile(f, &volatile_globals) {
                 continue;
             }
             // P0-4: 先将 switch 降级为 if-chain, 使含 switch 的函数也能 SSA 化
             crate::ssa::lower_switches_in_func(f);
+            let memdbg_t0 = memdbg.then(std::time::Instant::now);
+            let mut memdbg_ir = (0usize, 0usize);
+            let mut memdbg_marks: Vec<(&'static str, u64)> = Vec::new();
             if let Some(mut ssa) = crate::ssa::build_from_func(f) {
+                if memdbg {
+                    memdbg_ir = (
+                        ssa.blocks.len(),
+                        ssa.blocks
+                            .values()
+                            .map(|b| b.insts.len() + b.phis.len())
+                            .sum(),
+                    );
+                    memdbg_marks.push(("built", memdbg_rss_kb()));
+                }
                 // TU 级 FENV_ACCESS 事实随 IR 下去: GVN 等值编号 pass 靠它判定
                 // 「浮点运算不得复用」(舍入模式可在运行期被 fesetround 改掉)。
                 ssa.fenv_access = prog.fenv_access;
                 crate::ssa::passes::run_with_opts(&mut ssa, level, strict_aliasing);
+                if memdbg {
+                    memdbg_marks.push(("post-passes", memdbg_rss_kb()));
+                }
                 // 诊断窗口：`DCC_SSA_IR_DUMP=1` 打印过完 SSA 管线的 IR 与重建后的 AST。
                 // 为什么必须有：这两样之间发生的事（内联、类型还原、基名塌缩）在产物上
                 // 常常只剩一个错值或一个丢掉的限定符，没窗口就只能猜。只在报障时打开，
                 // 不进任何判据。
                 if std::env::var("DCC_SSA_IR_DUMP").is_ok() {
-                    eprintln!(
-                        "==== [SSA IR] {} ====\n{}",
-                        f.name.name,
-                        crate::ssa::dump_function(&ssa)
-                    );
+                    let want = std::env::var("DCC_SSA_IR_DUMP_FN").ok();
+                    if want.as_deref().map(|w| f.name.name == w).unwrap_or(true) {
+                        eprintln!(
+                            "==== [SSA IR] {} ====\n{}",
+                            f.name.name,
+                            crate::ssa::dump_function(&ssa)
+                        );
+                    }
                 }
                 // 注：这里曾有一个 `stabilize_addr_def_use` 事后把被落到后面的地址生产者
                 // 往前搬的补丁。它的根因（`ssa::passes::collect_uses` 对 `IndexAddr`/`MemberAddr`/`Invoke`
@@ -248,18 +300,90 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_i
                         .as_ref()
                         .map(|orig| crate::ssa::regalloc::plan_and_split(&mut ssa, orig, &ctx))
                 };
-                let rebuilt = crate::ssa::rebuild_block(&ssa);
-                f.body = Some(rebuilt);
-                if let (Some(mut plan), Some(body)) = (regalloc_plan, f.body.as_mut()) {
-                    // 交付（重建之后）：先校验后置事实（拿的就是重建后的体），再把位置表写进 AST。
-                    // 决策阶段已经用完重建前的体，这里不再需要它（Phase 5.0 的顺序证据）。
-                    crate::ssa::regalloc::deliver(&ssa, &mut plan, body);
+                if memdbg {
+                    memdbg_marks.push(("post-regalloc-plan", memdbg_rss_kb()));
                 }
-                modified = true;
+                // 原形是作废路径的退路：重建失败时把它原样放回，所以这里**借**而不是克隆
+                // （克隆会把整棵 AST 再抄一份，正是要避免的那种开销）。
+                let orig_body = f.body.take();
+                let rebuilt = crate::ssa::rebuild_block(&ssa);
+                if memdbg {
+                    memdbg_marks.push(("rebuilt", memdbg_rss_kb()));
+                }
+                if crate::ssa::rebuild_over_budget() {
+                    // 路径展开超预算 ⇒ 本次重建作废，函数保持 SSA 往返之前的 AST 原形
+                    // （correct-by-bail，与 `has_multi_exit_cycle` 的退路同一处置）。
+                    if std::env::var("DCC_SSA_BAIL").is_ok() {
+                        eprintln!(
+                            "dcc: SSA bail: 重建展开超预算 ({}, steps={}, 单头 peak={})",
+                            f.name.name,
+                            crate::ssa::rebuild_steps(),
+                            crate::ssa::rebuild_expansion_peak()
+                        );
+                    }
+                    f.body = orig_body;
+                } else if crate::ssa::rebuild_broke_lazy_guard() {
+                    // `&&` / `||` 的右操作数没能整体内联 ⇒ 那个值会作为一条独立语句发在
+                    // 带守卫的分支之前, 被守卫保护的那次求值因此提前发生 (读未初始化的值、
+                    // 或直接打空)。SSA 通道不为短路求值造块, 重建之后没有任何地方还能把它
+                    // 搬回去 ⇒ 整函数退出 SSA 往返 (correct-by-bail，判据真源见
+                    // `crate::ssa::inline_temps::lazy_operand_landed`)。
+                    if std::env::var("DCC_SSA_BAIL").is_ok() {
+                        eprintln!("dcc: SSA bail: 短路右操作数被落到守卫之外 ({})", f.name.name);
+                    }
+                    f.body = orig_body;
+                } else {
+                    f.body = Some(rebuilt);
+                    if let (Some(mut plan), Some(body)) = (regalloc_plan, f.body.as_mut()) {
+                        // 交付（重建之后）：先校验后置事实（拿的就是重建后的体），再把位置表写进 AST。
+                        // 决策阶段已经用完重建前的体，这里不再需要它（Phase 5.0 的顺序证据）。
+                        crate::ssa::regalloc::deliver(&ssa, &mut plan, body);
+                    }
+                    if memdbg {
+                        memdbg_marks.push(("post-deliver", memdbg_rss_kb()));
+                    }
+                    modified = true;
+                }
+            }
+            // 本函数的 SSA `Function` 已随上面的 `if let` 块结束而释放，此刻的 RSS 才是
+            // 「留给下一个函数的存量」——单调上涨就是留存，个别尖峰就是单函数 IR 爆炸。
+            if let Some(t0) = memdbg_t0 {
+                memdbg_idx += 1;
+                let marks = memdbg_marks
+                    .iter()
+                    .map(|(l, r)| format!("{l}={r}KB"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                eprintln!(
+                    "dcc: memdbg #{memdbg_idx} {} ir={}b/{}i steps={} exp={} {marks} kept={}KB dt={}ms",
+                    f.name.name,
+                    memdbg_ir.0,
+                    memdbg_ir.1,
+                    crate::ssa::rebuild_steps(),
+                    crate::ssa::rebuild_expansion_peak(),
+                    memdbg_rss_kb(),
+                    t0.elapsed().as_millis()
+                );
             }
         }
     }
     let _ = modified;
+}
+
+/// `DCC_MEMDBG` 的读数来源：本进程当前常驻集（KB）。
+///
+/// 读 `/proc/self/statm` 第二字段（常驻页数）。页大小按 4 KB 计（x86_64 默认，本机
+/// `getconf PAGESIZE` 实测就是这个值）—— 诊断窗口只看趋势，不值得为跨平台再引依赖。
+fn memdbg_rss_kb() -> u64 {
+    std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|s| {
+            s.split_whitespace()
+                .nth(1)
+                .and_then(|p| p.parse::<u64>().ok())
+                .map(|pages| pages * 4)
+        })
+        .unwrap_or(0)
 }
 
 /// file-scope 的 `register asm` 变量占住了哪些 callee-saved 号（自动分配要让开）。

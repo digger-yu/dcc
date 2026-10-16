@@ -31,7 +31,8 @@
 //   inline_temps.rs  合成临时值的内联窗口: plan_inlined_temps / inline_window_safe /
 //                    is_synthetic_temp_base / find_use_site。不放出口归属与表达式翻译。
 //   rebuild.rs       SSA → AST 的**控制流**重建: rebuild_block / RebuildCtx / rebuild_bb /
-//                    rebuild_cycle / walk_to_join / branch_join / emit_rebuild_inst。
+//                    rebuild_cycle / walk_to_join / arm_join / branch_join /
+//                    emit_rebuild_inst。
 //                    单条指令 → 表达式的翻译不在这里。
 //   expr_rebuild.rs  SSA → AST 的**表达式**重建与类型推导: inst_to_expr{,_resolved} /
 //                    operand_to_expr / infer_binop_type / store_pointee_ty / addr_of_ty /
@@ -97,7 +98,10 @@ pub use build::build_from_func;
 pub use dump::dump_function;
 pub use location::{LocMap, Location, RegBank, RegId, Splits};
 pub use loop_exit::has_multi_exit_cycle;
-pub use rebuild::rebuild_block;
+pub use rebuild::{
+    rebuild_block, rebuild_broke_lazy_guard, rebuild_expansion_peak, rebuild_over_budget,
+    rebuild_steps,
+};
 pub use structure::lower_switches_in_func;
 
 // 仅在 `ssa` 子系统内部共享的判据与工具 (收编 passes/pipelining/regalloc 后，

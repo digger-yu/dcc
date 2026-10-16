@@ -7,8 +7,8 @@ use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
 use crate::codegen::x86_64::asm::*;
-use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::insn::BoolExpect;
+use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::opcode::{MemOperand, Operand, SimdWidth, X86_64Opcode};
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::*;
@@ -857,7 +857,8 @@ impl Codegen {
                 }
             };
             self.emit_seg(seg);
-            self.emit_insn(&Insn::x87_mem_sib(x87_op, 11, idx_reg, sib_scale)).expect("typed-opcode: x87_mem_sib");
+            self.emit_insn(&Insn::x87_mem_sib(x87_op, 11, idx_reg, sib_scale))
+                .expect("typed-opcode: x87_mem_sib");
         } else if is_float {
             // P11 Bucket AE: movss xmm0, [r11 + idx*scale] via typed simd_mov_mem_base_sib.
             // elem_size_to_sib_scale: 2->2,4->4,8->8,else->1 (与上面 sib_scale 一致).
@@ -875,7 +876,8 @@ impl Codegen {
                 11,
                 idx_reg,
                 sib_scale,
-            )).expect("typed-opcode: simd_mov_mem_base_sib");
+            ))
+            .expect("typed-opcode: simd_mov_mem_base_sib");
         } else if is_double {
             // P11 Bucket AE: movsd xmm0, [r11 + idx*scale] via typed simd_mov_mem_base_sib.
             let sib_scale: u8 = match elem_size {
@@ -892,7 +894,8 @@ impl Codegen {
                 11,
                 idx_reg,
                 sib_scale,
-            )).expect("typed-opcode: simd_mov_mem_base_sib");
+            ))
+            .expect("typed-opcode: simd_mov_mem_base_sib");
         } else {
             // 按 elem_size 和符号性选加载指令:
             // signed: movsbq/movswq/movsxd (符号扩展)
@@ -913,42 +916,50 @@ impl Codegen {
                 (true, 1) => {
                     self.emit_insn(&Insn::mov_ext_mem_sib(
                         true, B8, B64, dst_gp, 11, idx_reg, sib_scale,
-                    )).expect("typed-opcode: mov_ext_mem_sib");
+                    ))
+                    .expect("typed-opcode: mov_ext_mem_sib");
                 },
                 (true, 2) => {
                     self.emit_insn(&Insn::mov_ext_mem_sib(
                         true, B16, B64, dst_gp, 11, idx_reg, sib_scale,
-                    )).expect("typed-opcode: mov_ext_mem_sib");
+                    ))
+                    .expect("typed-opcode: mov_ext_mem_sib");
                 },
                 (true, 4) => {
                     self.emit_insn(&Insn::mov_ext_mem_sib(
                         true, B32, B64, dst_gp, 11, idx_reg, sib_scale,
-                    )).expect("typed-opcode: mov_ext_mem_sib");
+                    ))
+                    .expect("typed-opcode: mov_ext_mem_sib");
                 },
                 (true, _) => {
                     self.emit_insn(&Insn::mov_rm_mem_sib(
                         true, B64, dst_gp, 11, idx_reg, sib_scale,
-                    )).expect("typed-opcode: mov_rm_mem_sib");
+                    ))
+                    .expect("typed-opcode: mov_rm_mem_sib");
                 },
                 (false, 1) => {
                     self.emit_insn(&Insn::mov_ext_mem_sib(
                         false, B8, B64, dst_gp, 11, idx_reg, sib_scale,
-                    )).expect("typed-opcode: mov_ext_mem_sib");
+                    ))
+                    .expect("typed-opcode: mov_ext_mem_sib");
                 },
                 (false, 2) => {
                     self.emit_insn(&Insn::mov_ext_mem_sib(
                         false, B16, B64, dst_gp, 11, idx_reg, sib_scale,
-                    )).expect("typed-opcode: mov_ext_mem_sib");
+                    ))
+                    .expect("typed-opcode: mov_ext_mem_sib");
                 },
                 (false, 8) => {
                     self.emit_insn(&Insn::mov_rm_mem_sib(
                         true, B64, dst_gp, 11, idx_reg, sib_scale,
-                    )).expect("typed-opcode: mov_rm_mem_sib");
+                    ))
+                    .expect("typed-opcode: mov_rm_mem_sib");
                 },
                 (false, _) => {
                     self.emit_insn(&Insn::mov_rm_mem_sib(
                         true, B32, dst_gp, 11, idx_reg, sib_scale,
-                    )).expect("typed-opcode: mov_rm_mem_sib");
+                    ))
+                    .expect("typed-opcode: mov_rm_mem_sib");
                 },
             }
         }
@@ -994,7 +1005,8 @@ impl Codegen {
                                 0,
                                 0,
                                 disp_i32,
-                            )).expect("typed-opcode: mov_ext_mem");
+                            ))
+                            .expect("typed-opcode: mov_ext_mem");
                         },
                         2 => {
                             self.emit_insn(&Insn::mov_ext_mem(
@@ -1004,7 +1016,8 @@ impl Codegen {
                                 0,
                                 0,
                                 disp_i32,
-                            )).expect("typed-opcode: mov_ext_mem");
+                            ))
+                            .expect("typed-opcode: mov_ext_mem");
                         },
                         _ => {
                             self.emit_insn(&Insn::mov_ext_mem(
@@ -1014,7 +1027,8 @@ impl Codegen {
                                 0,
                                 0,
                                 disp_i32,
-                            )).expect("typed-opcode: mov_ext_mem");
+                            ))
+                            .expect("typed-opcode: mov_ext_mem");
                         },
                     }
                 } else {
@@ -1027,7 +1041,8 @@ impl Codegen {
                                 0,
                                 0,
                                 disp_i32,
-                            )).expect("typed-opcode: mov_ext_mem");
+                            ))
+                            .expect("typed-opcode: mov_ext_mem");
                         },
                         2 => {
                             self.emit_insn(&Insn::mov_ext_mem(
@@ -1037,7 +1052,8 @@ impl Codegen {
                                 0,
                                 0,
                                 disp_i32,
-                            )).expect("typed-opcode: mov_ext_mem");
+                            ))
+                            .expect("typed-opcode: mov_ext_mem");
                         },
                         _ => {
                             // 4 字节: B32 load (无 REX.W); 8 字节: B64 load.
@@ -1092,7 +1108,8 @@ impl Codegen {
                             0,
                             6,
                             off_i32,
-                        )).expect("typed-opcode: mov_rm_mem");
+                        ))
+                        .expect("typed-opcode: mov_rm_mem");
                     },
                     4 => {
                         self.emit_insn(&Insn::mov_rm_mem(
@@ -1101,7 +1118,8 @@ impl Codegen {
                             0,
                             6,
                             off_i32,
-                        )).expect("typed-opcode: mov_rm_mem");
+                        ))
+                        .expect("typed-opcode: mov_rm_mem");
                     },
                     2 => {
                         self.emit_insn(&Insn::mov_rm_mem(
@@ -1110,7 +1128,8 @@ impl Codegen {
                             0,
                             6,
                             off_i32,
-                        )).expect("typed-opcode: mov_rm_mem");
+                        ))
+                        .expect("typed-opcode: mov_rm_mem");
                     },
                     _ => {
                         self.emit_insn(&Insn::mov_rm_mem(
@@ -1119,7 +1138,8 @@ impl Codegen {
                             0,
                             6,
                             off_i32,
-                        )).expect("typed-opcode: mov_rm_mem");
+                        ))
+                        .expect("typed-opcode: mov_rm_mem");
                     },
                 }
             }};
@@ -1137,7 +1157,8 @@ impl Codegen {
                             0,
                             7,
                             off_i32,
-                        )).expect("typed-opcode: mov_rm_mem");
+                        ))
+                        .expect("typed-opcode: mov_rm_mem");
                     },
                     4 => {
                         self.emit_insn(&Insn::mov_rm_mem(
@@ -1146,7 +1167,8 @@ impl Codegen {
                             0,
                             7,
                             off_i32,
-                        )).expect("typed-opcode: mov_rm_mem");
+                        ))
+                        .expect("typed-opcode: mov_rm_mem");
                     },
                     2 => {
                         self.emit_insn(&Insn::mov_rm_mem(
@@ -1155,7 +1177,8 @@ impl Codegen {
                             0,
                             7,
                             off_i32,
-                        )).expect("typed-opcode: mov_rm_mem");
+                        ))
+                        .expect("typed-opcode: mov_rm_mem");
                     },
                     _ => {
                         self.emit_insn(&Insn::mov_rm_mem(
@@ -1164,7 +1187,8 @@ impl Codegen {
                             0,
                             7,
                             off_i32,
-                        )).expect("typed-opcode: mov_rm_mem");
+                        ))
+                        .expect("typed-opcode: mov_rm_mem");
                     },
                 }
             }};
@@ -1266,7 +1290,8 @@ impl Codegen {
                         ),
                     },
                     &[],
-                )).expect("typed-opcode: new");
+                ))
+                .expect("typed-opcode: new");
             },
             4 => {
                 self.emit_insn(&Insn::new(
@@ -1287,7 +1312,8 @@ impl Codegen {
                         ),
                     },
                     &[],
-                )).expect("typed-opcode: new");
+                ))
+                .expect("typed-opcode: new");
             },
             2 => {
                 self.emit_insn(&Insn::mov_rm_mem(
@@ -1296,7 +1322,8 @@ impl Codegen {
                     0,
                     4,
                     0,
-                )).expect("typed-opcode: mov_rm_mem");
+                ))
+                .expect("typed-opcode: mov_rm_mem");
             },
             _ => {
                 self.emit_insn(&Insn::mov_rm_mem(
@@ -1305,7 +1332,8 @@ impl Codegen {
                     0,
                     4,
                     0,
-                )).expect("typed-opcode: mov_rm_mem");
+                ))
+                .expect("typed-opcode: mov_rm_mem");
             },
         }
     }
@@ -1318,7 +1346,8 @@ impl Codegen {
                     0,
                     4,
                     inner_sz as i32,
-                )).expect("typed-opcode: mov_rm_mem");
+                ))
+                .expect("typed-opcode: mov_rm_mem");
             },
             4 => {
                 self.emit_insn(&Insn::mov_rm_mem(
@@ -1327,7 +1356,8 @@ impl Codegen {
                     0,
                     4,
                     inner_sz as i32,
-                )).expect("typed-opcode: mov_rm_mem");
+                ))
+                .expect("typed-opcode: mov_rm_mem");
             },
             2 => {
                 self.emit_insn(&Insn::mov_rm_mem(
@@ -1336,7 +1366,8 @@ impl Codegen {
                     0,
                     4,
                     inner_sz as i32,
-                )).expect("typed-opcode: mov_rm_mem");
+                ))
+                .expect("typed-opcode: mov_rm_mem");
             },
             _ => {
                 self.emit_insn(&Insn::mov_rm_mem(
@@ -1345,7 +1376,8 @@ impl Codegen {
                     0,
                     4,
                     inner_sz as i32,
-                )).expect("typed-opcode: mov_rm_mem");
+                ))
+                .expect("typed-opcode: mov_rm_mem");
             },
         }
     }
@@ -1449,7 +1481,8 @@ impl Codegen {
                                 0,
                                 1,
                                 0,
-                            )).expect("typed-opcode: mov_rm_mem");
+                            ))
+                            .expect("typed-opcode: mov_rm_mem");
                         },
                         2 => {
                             self.emit_insn(&Insn::mov_rm_mem(
@@ -1458,7 +1491,8 @@ impl Codegen {
                                 0,
                                 1,
                                 0,
-                            )).expect("typed-opcode: mov_rm_mem");
+                            ))
+                            .expect("typed-opcode: mov_rm_mem");
                         },
                         4 => {
                             self.emit_insn(&Insn::mov_rm_mem(
@@ -1467,7 +1501,8 @@ impl Codegen {
                                 0,
                                 1,
                                 0,
-                            )).expect("typed-opcode: mov_rm_mem");
+                            ))
+                            .expect("typed-opcode: mov_rm_mem");
                         },
                         _ => {
                             self.emit_insn(&Insn::mov_rm_mem(
@@ -1476,7 +1511,8 @@ impl Codegen {
                                 0,
                                 1,
                                 0,
-                            )).expect("typed-opcode: mov_rm_mem");
+                            ))
+                            .expect("typed-opcode: mov_rm_mem");
                         },
                     }
                 }

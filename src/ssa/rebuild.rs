@@ -2,8 +2,8 @@
 //
 // 放什么: rebuild_block / RebuildCtx / rebuild_bb / rebuild_cycle / push_inst_stmt /
 //   rebuild_eh_blocks / emit_rebuild_inst / walk_to_join / fold_join / loop_entry_join /
-//   branch_join / phi_name / is_lower_ir_temp_base / is_pass_hint_inst /
-//   inst_has_side_effect / is_loop_exit_pure_return。
+//   branch_join / arm_join / side_only_exits / phi_name / is_lower_ir_temp_base /
+//   is_pass_hint_inst / inst_has_side_effect / is_loop_exit_pure_return。
 // 不放什么: 单条指令→表达式的翻译与类型推导在 expr_rebuild.rs, 不在本文件。
 //   出口边的归属判据在 loop_exit.rs, 本文件的发射点必须与它同源。
 
@@ -16,9 +16,114 @@ use crate::ssa::cfg::{
     predecessor_counts,
 };
 use crate::ssa::expr_rebuild::{inst_to_expr_resolved, resolve_operand};
-use crate::ssa::inline_temps::{is_synthetic_temp_base, plan_inlined_temps, InlinePlan};
+use crate::ssa::inline_temps::{
+    is_synthetic_temp_base, lazy_operand_landed, plan_inlined_temps, InlinePlan,
+};
 use crate::ssa::ir::{Function, Inst, InstKind, Operand, OrderedNameSet, SsaVar, Terminator};
 use crate::ssa::loop_exit::{loop_exit_owner, loop_exit_plan, loop_shape, LoopExitOwner};
+
+/// 一次重建允许的**总递归展开步数**（`rebuild_bb` + `rebuild_cycle` 的调用次数）。
+///
+/// 为什么按步数而不是只按「循环头被展开几次」：路径重入的代价不只发生在循环本身，
+/// 外层循环体的每条路径都会把它可达的块再展开一遍（`resolve_operand` 的表达式内联
+/// 随之复制整棵树）。实测 `updateAccumulator`：`DCC_SSA_CYCLE_BUDGET=8` 把循环头展开
+/// 截到 9 次，`rebuild_block` 仍分配 245 MB / 9.9 s —— 那笔内存是在**块级**路径展开里
+/// 花的，只有总步数才罩得住。
+///
+/// 超预算 ⇒ 置作废标志并逐层立即返回；调用方（`run_ssa_passes`）丢弃重建结果、保留
+/// SSA 往返之前的 AST 原形（correct-by-bail，与 `has_multi_exit_cycle` 同一退路）。
+///
+/// 预算怎么定的（实测）：1819 个 opt 夹具函数的 `steps=` 分布是 p99=22、最大 170，
+/// 而病理形状（`updateAccumulator`）一次走 185 305 步、产 823 MB AST —— 平均每步
+/// 4.4 KB。取 20 000 步：给正常代码 100 倍以上余量，同时把单个函数的重建压到
+/// ~90 MB 以内（`-O2` 编 `sqlite3.c` 的实测峰值由此从 >4 GB 降到可编译）。
+const DEFAULT_REBUILD_STEPS: usize = 20_000;
+
+thread_local! {
+    /// 本次重建里「循环头 → 已展开次数」。线程本地 = 每个 worker 一份，且
+    /// `rebuild_block` 开头清空，因此等价于「本函数一份」。
+    static CYCLE_EXPANSIONS: std::cell::RefCell<HashMap<String, usize>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// 本次重建里单个头的最大展开次数（`DCC_MEMDBG` 的 `exp=` 读数）。
+    static CYCLE_EXPANSION_PEAK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// 本次重建已走的展开步数（`DCC_MEMDBG` 的 `steps=` 读数）。
+    static REBUILD_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// 本次重建是否已经超预算（一旦置位，后续循环头一律不再展开）。
+    static CYCLE_OVER_BUDGET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// 本次重建是否因「短路右操作数被落到守卫之外」而作废（判据在
+    /// `inline_temps::lazy_operand_landed`，一旦置位整函数退出 SSA 往返）。
+    static LAZY_GUARD_LANDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn cycle_budget() -> usize {
+    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        std::env::var("DCC_SSA_CYCLE_BUDGET")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(usize::MAX)
+    })
+}
+
+fn rebuild_step_budget() -> usize {
+    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        std::env::var("DCC_SSA_REBUILD_STEPS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(DEFAULT_REBUILD_STEPS)
+    })
+}
+
+/// 本次 `rebuild_block` 的「单个循环头最大展开次数」读数（诊断窗口用）。
+pub fn rebuild_expansion_peak() -> usize {
+    CYCLE_EXPANSION_PEAK.with(|c| c.get())
+}
+
+/// 本次 `rebuild_block` 走过的总展开步数（诊断窗口用）。
+pub fn rebuild_steps() -> usize {
+    REBUILD_STEPS.with(|c| c.get())
+}
+
+/// 本次 `rebuild_block` 是否因超预算而作废 —— 调用方必须丢弃重建结果、保留 AST 原形。
+pub fn rebuild_over_budget() -> bool {
+    CYCLE_OVER_BUDGET.with(|c| c.get())
+}
+
+/// 本次 `rebuild_block` 是否因「短路右操作数会被落到守卫之外」而作废 —— 与
+/// [`rebuild_over_budget`] 同一处置: 调用方丢弃重建结果、保留 AST 原形。
+/// 判据真源在 [`crate::ssa::inline_temps::lazy_operand_landed`]。
+pub fn rebuild_broke_lazy_guard() -> bool {
+    LAZY_GUARD_LANDED.with(|c| c.get())
+}
+
+/// 记一步展开：超过总步数预算就置「本次重建作废」。返回是否已作废。
+fn account_rebuild_step() -> bool {
+    let steps = REBUILD_STEPS.with(|c| {
+        let s = c.get() + 1;
+        c.set(s);
+        s
+    });
+    if steps > rebuild_step_budget() {
+        CYCLE_OVER_BUDGET.with(|c| c.set(true));
+    }
+    CYCLE_OVER_BUDGET.with(|c| c.get())
+}
+
+/// 记一次「本循环头按路径展开」，返回累计次数；超预算就把作废标志置位。
+fn account_cycle_expansion(header: &str) -> usize {
+    let peak = CYCLE_EXPANSIONS.with(|m| {
+        let mut m = m.borrow_mut();
+        let c = m.entry(header.to_string()).or_insert(0);
+        *c += 1;
+        *c
+    });
+    CYCLE_EXPANSION_PEAK.with(|c| c.set(c.get().max(peak)));
+    if peak > cycle_budget() {
+        CYCLE_OVER_BUDGET.with(|c| c.set(true));
+    }
+    peak
+}
 
 /// 把 SSA Function 重建为 AST Block (codegen 仍走 AST 路径)。
 ///
@@ -27,6 +132,12 @@ use crate::ssa::loop_exit::{loop_exit_owner, loop_exit_plan, loop_shape, LoopExi
 ///   2. 单次使用且顺序安全的 SSA 临时变量在其使用处内联展开, 避免多余栈槽。
 ///   3. phi 节点在 merge BB 用对原变量赋值处理。
 pub fn rebuild_block(func: &Function) -> Block {
+    // 展开账本按「一次重建」计，进来先清空（见 `DEFAULT_REBUILD_STEPS`）。
+    CYCLE_EXPANSIONS.with(|m| m.borrow_mut().clear());
+    CYCLE_EXPANSION_PEAK.with(|c| c.set(0));
+    REBUILD_STEPS.with(|c| c.set(0));
+    CYCLE_OVER_BUDGET.with(|c| c.set(false));
+    LAZY_GUARD_LANDED.with(|c| c.set(false));
     let mut items: Vec<BlockItem> = Vec::new();
     let entry = func.entry.clone();
     let mut visited: HashSet<String> = HashSet::new();
@@ -38,6 +149,18 @@ pub fn rebuild_block(func: &Function) -> Block {
         kept_temp_bases,
     } = plan_inlined_temps(func);
     let _ = &kept_temp_bases;
+    // 短路 (`&&`/`||`) 的右操作数里只要有一个值没能内联进树, 它就会作为一条独立语句
+    // 发在带守卫的分支**之前** ⇒ 那次被守卫保护的求值提前发生。SSA 通道不为短路造块,
+    // 也没有别的地方能补救, 所以整函数退出 SSA 往返: 这里交出空体, 调用方按
+    // [`rebuild_broke_lazy_guard`] 丢弃并保留 AST 原形。判据与实测见
+    // `inline_temps::lazy_operand_landed`。
+    if lazy_operand_landed(func, &subst) {
+        LAZY_GUARD_LANDED.with(|c| c.set(true));
+        return Block {
+            items: Vec::new(),
+            span: func.span.clone(),
+        };
+    }
 
     // 1. 只声明原始局部变量 (不声明 SSA 临时变量)
     let param_names: HashSet<String> = func.params.iter().map(|p| p.base.clone()).collect();
@@ -548,6 +671,10 @@ fn rebuild_bb(
     let func = cx.func;
     let doms = cx.doms;
     let subst = cx.subst;
+    // 步数闸门（见 `DEFAULT_REBUILD_STEPS`）：一旦作废就逐层立即返回，重建结果由调用方丢弃。
+    if account_rebuild_step() {
+        return;
+    }
     // C++ 零成本异常：落地垫块**不得被结构化重建消费**。它只由 unwinder 按 `.text`
     // 地址区间、以及其他块的 `goto` 进入，正文与标签由 `rebuild_eh_blocks` 在主体之后
     // 统一发一次。这里沿正常控制流递归进来就会把本块记进 `visited`，于是尾巴跳过发射
@@ -591,7 +718,26 @@ fn rebuild_bb(
             }
         }
         if !cx.visited.insert(bb_name.to_string()) {
-            return;
+            // 「本块已被另一条臂展开」不等于「本臂不再需要它」。旧代码在这里一律返回空,
+            // 于是兄弟臂跳过本块的全部语句 —— `Ret` 终结块丢的就是**返回值本身**（实测
+            // else-if 阶梯 `if(c){if(..){..}else return 11;} else {if(..){*o=7;} else return 11;}`
+            // 的 else 臂在 -O2 下丢掉尾部 `return 0`，%rax 留着上一次给 `*o` 的赋值当返回值;
+            // SQLite `btreeInitPage` 因此对内部页返回 11 = 「database disk image is malformed」）。
+            // `join` 检测（`branch_join`）本该让两条臂都在汇聚块前停下、由外层发一次，但它对
+            // 「两臂自己都是分支」的阶梯给不出候选（`walk_to_join` 只沿 Jump 直链走，而早退的
+            // `Ret` 臂使 `from` 的真实后支配者只剩 EXIT 占位）⇒ 走到这里。
+            // `Ret` 块没有后继，重复展开的代价有界（每条路径至多一份），所以照常展开；
+            // 块里带原始局部声明时不展开（同一栈槽会被声明两次），留给上面的 `stop_at` 机制。
+            let re_expand = func.blocks.get(bb_name).is_some_and(|b| {
+                matches!(b.term, Terminator::Ret { .. })
+                    && !b
+                        .insts
+                        .iter()
+                        .any(|i| matches!(i.kind, InstKind::PreservedDecl { .. }))
+            });
+            if !re_expand {
+                return;
+            }
         }
     }
     let bb = match func.blocks.get(bb_name) {
@@ -1045,6 +1191,15 @@ fn rebuild_cycle(
         Some(b) => b,
         None => return,
     };
+    // 路径展开闸门：总步数预算 + 可选的单头预算（`DCC_SSA_CYCLE_BUDGET`，默认不限）。
+    // 超预算就停止展开并置「本次重建作废」，由 `run_ssa_passes` 丢弃结果并保留 AST 原形
+    // （见 `DEFAULT_REBUILD_STEPS` 的实测读数与理由）。
+    if account_rebuild_step() {
+        return;
+    }
+    if account_cycle_expansion(header) > cycle_budget() {
+        return;
+    }
     // Mark header as visited so we don't re-enter it via rebuild_bb
     cx.visited.insert(header.to_string());
 
@@ -1456,6 +1611,47 @@ fn loop_entry_join(
     None
 }
 
+/// CFG 上从 `start` 是否存在一条到达 `target` 的路径 (沿任意后继, 含分支两条边)。
+///
+/// 与 [`walk_to_join`] 的区别: 后者只沿**无条件 `Jump` 直链**走, 一旦某块以 `Ret`
+/// 或嵌套 `Branch` 终结就立刻返回 `None`; 这里把 `Ret`/`Unreachable` 当自然终止
+/// (无后继), 仍可经由嵌套分支的另一条边抵达目标。仅供 [`branch_join`] 的非对称
+/// 汇聚判据使用。
+fn can_reach_block(start: &str, target: &str, func: &Function) -> bool {
+    if start == target {
+        return true;
+    }
+    let mut stack = vec![start.to_string()];
+    let mut seen: HashSet<String> = HashSet::new();
+    seen.insert(start.to_string());
+    while let Some(name) = stack.pop() {
+        let Some(bb) = func.blocks.get(&name) else {
+            continue;
+        };
+        let mut push = |s: &str| {
+            if s == target {
+                return true;
+            }
+            if seen.insert(s.to_string()) {
+                stack.push(s.to_string());
+            }
+            false
+        };
+        let hit = match &bb.term {
+            Terminator::Jump(s) => push(s),
+            Terminator::Branch { t, f, .. } => push(t) || push(f),
+            Terminator::SwitchTable {
+                targets, default, ..
+            } => targets.iter().any(|s| push(s)) || push(default),
+            Terminator::Ret { .. } | Terminator::Unreachable => false,
+        };
+        if hit {
+            return true;
+        }
+    }
+    false
+}
+
 /// 二路分支的公共汇聚块: 先走「唯一前驱 + 无条件跳转」快路径, 不行再取
 /// 分支块的**直接后支配者** (见 [`compute_ipdoms`])。
 ///
@@ -1472,15 +1668,174 @@ pub(super) fn branch_join(from: &str, t: &str, f: &str, func: &Function) -> Opti
             return Some(a.clone());
         }
     }
+    // 非对称汇聚 (实测根因): 一条臂沿 Jump 直链走到了多入边汇聚块, 另一条臂的
+    // `walk_to_join` 却因「路径上有一块以 `Ret` 终结」而返回 `None` —— 例如
+    // `if(c){ if(c2) return; } tail;` 的 then 臂可经内层 return 出函数, else 臂
+    // 直达 tail 块。此时两臂并非真正「不汇聚」: 只要不 return 的那条路径仍能走到
+    // tail, tail 就是两臂的公共续体, 必须在 If 之后只发一次。
+    //
+    // 旧代码只在 jt/jf 都为 Some 时认汇聚, 这里漏判后回退到 `compute_ipdoms`;
+    // 而一条路径直接 `Ret` 出函数时, `from` 没有真实后支配者, ipdom 给出虚拟 EXIT
+    // 占位名 (非真实块) 又被上层过滤成 `None`。结果续体被内联进**第一个**到达它的
+    // 内层臂, 另一条臂 (这里是外层 else) 因 `visited` 去重拿到空 —— 假分支路径上
+    // If 之后的尾部语句整体丢失 (SQLite `mallocWithAlarm` 启动期 `je` 直奔尾声、
+    // 跳过 `p=xMalloc` 与 `*out=p` 的段错误即此)。
+    //
+    // 判据: 任一臂给出候选块 j, 只要另一臂在 CFG 上**可达** j (可达路径可包含嵌套
+    // 分支, `Ret`/`Unreachable` 自然终止), j 就是合法公共汇聚块。
+    for cand in jt.iter().chain(jf.iter()) {
+        let other_reaches = if cand == jt.as_ref().unwrap_or(&String::new()) {
+            can_reach_block(f, cand, func)
+        } else {
+            can_reach_block(t, cand, func)
+        };
+        // 候选还须能从给出它的那条臂自身可达 (walk_to_join 已保证), 且不能是分支块自己。
+        if other_reaches && cand != from {
+            return Some(cand.clone());
+        }
+    }
     // 快路径判不出凝聚点 (典型: 某一条路径自己又是一个分支 —— 嵌套三元
     // `a ? b : c ? d : e`, 或三元分支里的 `&&`/`||` 短路链), 用后支配者这个
     // 正确判据。它比启发式宽, 因此必须同时要求凝聚点不是分支块自己。
     let ipdom = compute_ipdoms(func);
-    let j = ipdom.get(from)?;
-    if j == from {
-        return None;
+    let j = ipdom.get(from).cloned();
+    if let Some(j) = j.as_ref() {
+        if j == from {
+            return None;
+        }
+        // 真实块: 后支配者就是答案, 保持原判据。
+        if func.blocks.contains_key(j.as_str()) {
+            return Some(j.clone());
+        }
     }
-    Some(j.clone())
+    // 走到这里说明三条判据 (Jump 直链、非对称可达、后支配者) 全部落空。剩下的形态是
+    // **两臂各自又是一层分支**: 后支配者只剩虚拟 EXIT 占位名 (体内有 `return`), 而
+    // `walk_to_join` 在臂的第一条 `Branch` 就返回 `None`。此时若判空, 重建会把公共
+    // 尾部内联进**第一条**展开它的臂, 兄弟臂因共享 `visited` 拿到空 —— 尾部语句连同
+    // `return` 的取值一起丢失, `%rax` 留着上一条指令的旧值 (实测 SQLite
+    // `sqlite3SrcListAppend`: `if(pList==0){…}else{if(!pNew)return 0;…}` 之后的
+    // `pItem=&pList->a[…]` 与 `return pList` 全被跳过, 任何两表 JOIN 段错误)。
+    // 这里用 [`arm_join`] 穿过嵌套分支再试一次, 只接受真实存在的汇聚块。
+    let arm_join_depth = 4;
+    let at = arm_join(t, func, &preds, &mut HashSet::new(), arm_join_depth);
+    let af = arm_join(f, func, &preds, &mut HashSet::new(), arm_join_depth);
+    if let (Some(a), Some(b)) = (&at, &af) {
+        if a == b && a != from && func.blocks.contains_key(a.as_str()) {
+            return Some(a.clone());
+        }
+    }
+    for cand in at.iter().chain(af.iter()) {
+        if !func.blocks.contains_key(cand.as_str()) || cand == from {
+            continue;
+        }
+        let other_reaches = if cand == at.as_ref().unwrap_or(&String::new()) {
+            can_reach_block(f, cand, func)
+        } else {
+            can_reach_block(t, cand, func)
+        };
+        if other_reaches {
+            return Some(cand.clone());
+        }
+    }
+    j
+}
+
+/// 一条臂能下沉到的汇聚块 —— [`walk_to_join`] 的推广。
+///
+/// 区别: `walk_to_join` 只沿**无条件 `Jump` 直链**走, 碰到 `Branch` 立刻 `None`;
+/// 这里允许穿过臂自己的嵌套分支, 但只在「内层另一侧确实不再需要别的东西」时接受候选:
+/// 两侧给出同一个块, 或一侧出候选、另一侧只会**出函数或直接落到该候选**
+/// (见 [`side_only_exits`])。真实分岔 (内层两侧各奔不同多入边块) 一律返回 `None`,
+/// 让调用方保持原有兜底。
+///
+/// `seen` 在整次搜索中共享 ⇒ 每个块至多入队一次, 代价只与块数成正比而与下钻深度无关
+/// (SQLite 的 `sqlite3Select` 一类上千块的函数不会因此爆炸)。
+fn arm_join(
+    start: &str,
+    func: &Function,
+    preds: &HashMap<String, usize>,
+    seen: &mut HashSet<String>,
+    depth: usize,
+) -> Option<String> {
+    let mut cur = start.to_string();
+    loop {
+        if !seen.insert(cur.clone()) {
+            return None;
+        }
+        if preds.get(&cur).copied().unwrap_or(0) > 1 {
+            return Some(cur);
+        }
+        let bb = func.blocks.get(&cur)?;
+        match &bb.term {
+            Terminator::Jump(s) => cur = s.clone(),
+            Terminator::Branch { t, f, .. } => {
+                if depth == 0 {
+                    return None;
+                }
+                let jt = arm_join(t, func, preds, &mut *seen, depth - 1);
+                let jf = arm_join(f, func, preds, &mut *seen, depth - 1);
+                return match (jt, jf) {
+                    (Some(a), Some(b)) if a == b => Some(a),
+                    (Some(a), None) if side_only_exits(f, func, preds, &a) => Some(a),
+                    (None, Some(b)) if side_only_exits(t, func, preds, &b) => Some(b),
+                    _ => None,
+                };
+            },
+            _ => return None,
+        }
+    }
+}
+
+/// `start` 一侧是否「只会出函数, 或者直接落进 `stop`」: 沿途不经过任何**其它**多入边块。
+///
+/// 用于 [`arm_join`] 判定嵌套分支的死侧: 它给出 `None` 可能是因为 `Ret` 出函数 (无害),
+/// 也可能是因为它另有一个属于自己的汇聚块 —— 后者意味着两臂真的分岔, 不能拿单侧候选当
+/// 公共汇聚点, 否则兄弟臂会被 `visited` 去重掏空。
+fn side_only_exits(
+    start: &str,
+    func: &Function,
+    preds: &HashMap<String, usize>,
+    stop: &str,
+) -> bool {
+    let mut stack = vec![start.to_string()];
+    let mut seen: HashSet<String> = HashSet::new();
+    seen.insert(start.to_string());
+    while let Some(name) = stack.pop() {
+        if name == stop {
+            continue;
+        }
+        if preds.get(&name).copied().unwrap_or(0) > 1 {
+            return false;
+        }
+        let Some(bb) = func.blocks.get(&name) else {
+            continue;
+        };
+        match &bb.term {
+            Terminator::Jump(s) => {
+                if seen.insert(s.clone()) {
+                    stack.push(s.clone());
+                }
+            },
+            Terminator::Branch { t, f, .. } => {
+                for s in [t, f] {
+                    if seen.insert(s.clone()) {
+                        stack.push(s.clone());
+                    }
+                }
+            },
+            Terminator::SwitchTable {
+                targets, default, ..
+            } => {
+                for s in targets.iter().chain(std::iter::once(default)) {
+                    if seen.insert(s.clone()) {
+                        stack.push(s.clone());
+                    }
+                }
+            },
+            Terminator::Ret { .. } | Terminator::Unreachable => {},
+        }
+    }
+    true
 }
 
 /// Emit a single SSA instruction as an AST statement during rebuild.

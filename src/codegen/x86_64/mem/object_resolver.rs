@@ -117,4 +117,10 @@ impl crate::semantics::ObjectResolver for Codegen {
             || self.vla_offsets.contains_key(name)
             || (self.current_func_is_nested && self.upvar_offsets.contains_key(name))
     }
+
+    fn resolve_complete_ty(&self, ty: &crate::ast::Type) -> crate::ast::Type {
+        // 语义层取字段偏移前, 把前向声明残留的不完整 struct/union
+        // (fields 为空) 补全为 compile_module 收集的完整定义。
+        self.resolve_complete_struct_ty(ty.clone())
+    }
 }

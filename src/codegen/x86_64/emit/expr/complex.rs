@@ -2705,7 +2705,8 @@ impl Codegen {
                     self.emit_lea_r13(7, result_off);
                     self.mov_imm(1, (inner.size() * 2) as i128);
                     self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld));
-                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // cld; rep movsb
+                    self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb));
+                    // cld; rep movsb
                 }
                 // LD rvalue 消费端用 fld tbyte, 不经 xmm0 (见上)。
                 if matches!(inner.base, Type::Float | Type::Double) {
@@ -3057,20 +3058,20 @@ impl Codegen {
             BinOp::Add => {
                 // faddp st(1),st(0): st(0)=l+r (imag)
                 self.emit_x87_binop(BinOp::Add, false);
-            }
+            },
             BinOp::Sub => {
                 // fsubrp st(1),st(0): st(0)=l-r (imag)
                 self.emit_x87_binop(BinOp::Sub, false);
-            }
+            },
             BinOp::Mul => {
                 // fmulp: st(0)=l*r; imag*imag=real 且符号为负 → fchs
                 self.emit_x87_binop(BinOp::Mul, false);
                 self.emit_x87_chs();
-            }
+            },
             BinOp::Div => {
                 // fdivrp st(1),st(0): st(0)=l/r (real, 正)
                 self.emit_x87_binop(BinOp::Div, false);
-            }
+            },
             BinOp::EqEq | BinOp::Ne => {
                 // fucomip st(0),st(1) 后弹出，比较两虚部幅值
                 self.emit_x87_cmp_and_pop();
@@ -3090,8 +3091,8 @@ impl Codegen {
                 self.mov_imm(dst, if matches!(op, BinOp::EqEq) { 0 } else { 1 });
                 self.label(&end_label);
                 return;
-            }
-            _ => {}
+            },
+            _ => {},
         }
         // 结果在 st(0)（x87 返回约定）。
         if dst != 0 {

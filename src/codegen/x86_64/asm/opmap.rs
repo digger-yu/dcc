@@ -118,11 +118,11 @@ impl Codegen {
         let mut slots: Vec<Slot> = Vec::new();
         let mut meta: Vec<(u8, u8, bool, bool, u8)> = Vec::new(); // (reg, xmm_width, is_output, is_mem, flags_raw)
                                                                   // flags_raw: bit 0 = early_clobber
-        // For non-Ident inout (`+r`) outputs, prepare_asm_binding evaluates the
-        // current value into the bound register (triggering side-effects like
-        // bar() in `*bar()`).  The lvalue address is computed once here and held
-        // in a callee-saved scratch across the asm, so writeback can reuse it
-        // instead of re-running gen_lvalue_addr (which would re-trigger bar()).
+                                                                  // For non-Ident inout (`+r`) outputs, prepare_asm_binding evaluates the
+                                                                  // current value into the bound register (triggering side-effects like
+                                                                  // bar() in `*bar()`).  The lvalue address is computed once here and held
+                                                                  // in a callee-saved scratch across the asm, so writeback can reuse it
+                                                                  // instead of re-running gen_lvalue_addr (which would re-trigger bar()).
         let mut saved_inout_addrs: Vec<Option<u8>> = Vec::new();
 
         // 解析 clobber 列表, 把被 clobber 的寄存器加入统一规划器的排除集合。
@@ -389,22 +389,32 @@ impl Codegen {
                         // mov chosen, [scratch]: 从已算好的地址 load 旧值.
                         let sz = op.ty().size();
                         let mut rex = 0x40u8;
-                        if chosen >= 8 { rex |= 0x04; }
-                        if scratch >= 8 { rex |= 0x01; }
+                        if chosen >= 8 {
+                            rex |= 0x04;
+                        }
+                        if scratch >= 8 {
+                            rex |= 0x01;
+                        }
                         match sz {
                             1 => {
                                 // movzx eax, byte [scratch]: 0F B6 /r
-                                if rex != 0x40 { self.emit_insn(&Insn::raw_bytes(&[rex])); }
+                                if rex != 0x40 {
+                                    self.emit_insn(&Insn::raw_bytes(&[rex]));
+                                }
                                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6]));
                             },
                             2 => {
                                 // movzx eax, word [scratch]: 0F B7 /r
                                 self.emit_insn(&Insn::raw_bytes(&[0x66]));
-                                if rex != 0x40 { self.emit_insn(&Insn::raw_bytes(&[rex])); }
+                                if rex != 0x40 {
+                                    self.emit_insn(&Insn::raw_bytes(&[rex]));
+                                }
                                 self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB7]));
                             },
                             4 => {
-                                if rex != 0x40 { self.emit_insn(&Insn::raw_bytes(&[rex])); }
+                                if rex != 0x40 {
+                                    self.emit_insn(&Insn::raw_bytes(&[rex]));
+                                }
                                 self.emit_insn(&Insn::raw_bytes(&[0x8B]));
                             },
                             _ => {
@@ -1041,7 +1051,13 @@ impl Codegen {
     /// caller-saved 号，所以这个 scratch 一定不是本句 asm 的任何操作数寄存器；
     /// `alloc_callee_saved` 同时置 `reg_allocated` 与 `callee_saved_used`，因此它也不会
     /// 与外层表达式的溅出槽相撞，并且序言会真的保存它。写回结束立刻归还。
-    fn writeback_asm_general_lvalue(&mut self, expr: &Expr, src: u8, xmm_width: u8, saved_addr_reg: Option<u8>) -> bool {
+    fn writeback_asm_general_lvalue(
+        &mut self,
+        expr: &Expr,
+        src: u8,
+        xmm_width: u8,
+        saved_addr_reg: Option<u8>,
+    ) -> bool {
         let ty = expr.ty();
         let effective_ty = match &ty {
             Type::Imaginary(inner) => inner.base.clone(),
@@ -1107,7 +1123,13 @@ impl Codegen {
         true
     }
 
-    pub(crate) fn writeback_asm_operand(&mut self, expr: &Expr, reg: u8, xmm_width: u8, saved_addr_reg: Option<u8>) {
+    pub(crate) fn writeback_asm_operand(
+        &mut self,
+        expr: &Expr,
+        reg: u8,
+        xmm_width: u8,
+        saved_addr_reg: Option<u8>,
+    ) {
         // 非 Ident 左值先走通用写回（原因与实测见 `writeback_asm_general_lvalue`）。
         // 必须放在最前面：下面每个分支都以 `Expr::Ident` 为前提，非 Ident 落进去就是
         // 静默丢值。x87 / MMX / 段寄存器 / 条件码（`xmm_width` 的 2xx 编码）仍走各自

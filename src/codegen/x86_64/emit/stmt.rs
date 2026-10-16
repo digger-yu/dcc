@@ -77,7 +77,8 @@ impl Codegen {
                         &self.current_func_ret_ty,
                         Type::Imaginary(i) if matches!(&i.base, Type::LongDouble)
                     );
-                    if (func_ret_is_ld || func_ret_is_imag_ld) && self.current_sret_offset.is_none() {
+                    if (func_ret_is_ld || func_ret_is_imag_ld) && self.current_sret_offset.is_none()
+                    {
                         // D10-3（已简化）：SysV 规定标量 `long double` 返回值在 **st(0)**。
                         // 本后端 `long double` 的 rvalue 值通道已经就是 st(0)，所以
                         // 返回表达式本身就是 `fldt`/x87 运算的终点，**不需要任何中转**。
@@ -746,7 +747,9 @@ impl Codegen {
                 // 如果死分支含有标签, 必须正常生成该分支代码.
                 if let Ok(cv) = const_eval::eval(cond) {
                     let has_labels_in_then = Self::stmt_contains_label(then_);
-                    let has_labels_in_else = else_.as_ref().map_or(false, |s| Self::stmt_contains_label(s));
+                    let has_labels_in_else = else_
+                        .as_ref()
+                        .map_or(false, |s| Self::stmt_contains_label(s));
                     if cv != 0 {
                         // condition is true
                         self.gen_stmt(then_);
@@ -841,14 +844,19 @@ impl Codegen {
             },
             Stmt::Do { body, cond, .. } => {
                 let ls = self.fresh_label();
+                let lc = self.fresh_label();
                 let le = self.fresh_label();
                 let (sc, sb) = (self.loop_continue.clone(), self.loop_break.clone());
-                self.loop_continue = Some(ls.clone());
+                // do { body; cond } while(cond); 里的 continue 语义上跳到
+                // 条件表达式求值处, 而不是循环体开头. 若跳到 body 开头,
+                // 循环体内 `continue; ++i;` 中的 ++i 会被跳过, 造成死循环.
+                self.loop_continue = Some(lc.clone());
                 self.loop_break = Some(le.clone());
                 self.break_targets.push((le.clone(), false));
                 self.maybe_align_loop();
                 self.label(&ls);
                 self.gen_stmt(body);
+                self.label(&lc);
                 self.gen_expr(cond, Self::EVAL_BASE);
                 self.emit_truth_flags(&cond.ty());
                 self.jmp_rel32(&ls, JumpKind::Jne);
@@ -972,7 +980,12 @@ impl Codegen {
                 let sel_off = self.var_offset(&s_name);
                 self.store_stack(2, sel_off);
             },
-            Stmt::Switch { expr, cases, prelude, .. } => {
+            Stmt::Switch {
+                expr,
+                cases,
+                prelude,
+                ..
+            } => {
                 // switch: 计算表达式, 比较链跳转到对应 case 体.
                 // 布局: 所有比较集中在开头 (相等跳 l_case_i), 无匹配
                 // 跳 default / break 出口; case 体按源码顺序物理排列,
@@ -1006,7 +1019,7 @@ impl Codegen {
                     Type::Enum(_, _, Some(inner)) => Self::is_signed_int(&inner.base),
                     ref ty => Self::is_signed_int(ty),
                 };
-                let mut case_bodies: Vec<(&crate::ast::Case, String)> = Vec::new();
+                let mut clause_bodies: Vec<(&crate::ast::Case, Option<String>)> = Vec::new();
                 for case in cases {
                     if let Some(ref val) = case.val {
                         let l_case = self.fresh_label();
@@ -1125,10 +1138,11 @@ impl Codegen {
                                 self.jmp_rel32(&l_case, JumpKind::Je);
                             }
                         }
-                        case_bodies.push((case, l_case));
+                        clause_bodies.push((case, Some(l_case)));
                     } else {
-                        // default: 记录标签
+                        // default: 记录标签, 体留在源码位置
                         has_default = true;
+                        clause_bodies.push((case, None));
                     }
                 }
                 // 没有 case 匹配: 跳 default 或 break 出口 (出口统一弹栈)
@@ -1145,20 +1159,18 @@ impl Codegen {
                 if !prelude.is_empty() {
                     self.gen_block_items(prelude);
                 }
-                // case 体按顺序生成, 无 break 时 fall-through 自然成立
-                for (case, l_case) in case_bodies {
-                    self.label(&l_case);
-                    // case 体完整生成 (含局部变量声明), 与普通块一致
-                    self.gen_block_items(&case.body.items);
-                }
-                // 生成default体
-                if has_default {
-                    self.label(&l_default);
-                    for case in cases {
-                        if case.val.is_none() {
-                            self.gen_block_items(&case.body.items);
-                        }
+                // 子句体按源码顺序物理排列, default 也留在它的源码位置上:
+                // 物理相邻 == C 的 fall-through 语义。把 default 排到全部
+                // case 之后会让末尾 case 误落入 default 体, 同时丢掉
+                // default 自身向下落入后继子句的边 (sqlite OP_MakeRecord
+                // 的 default-first switch 即因此只写入 8 字节中的 2 字节)。
+                for (case, l_case) in &clause_bodies {
+                    match l_case {
+                        Some(l) => self.label(l),
+                        None => self.label(&l_default),
                     }
+                    // 子句体完整生成 (含局部变量声明), 与普通块一致
+                    self.gen_block_items(&case.body.items);
                 }
                 // break 出口: switch 值保存在帧内槽, 无需弹栈
                 self.label(&l_break);

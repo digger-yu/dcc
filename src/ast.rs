@@ -1594,91 +1594,156 @@ impl Type {
                 f.offset = 0;
             }
         } else {
-            let mut off = 0usize; // 当前字节偏移
-            let mut bit_pos: u32 = 0; // 当前存储单元内已用位数
-            let mut container_bits: u32 = 0; // 当前存储单元总位数
+            // SysV AMD64 位域 "存储单元 (storage unit)" 模型 (与 gcc 一致):
+            //
+            // 单元大小 = 位域声明类型的大小 (int -> 4 字节)。单元起点必须对齐到
+            // 该类型的对齐, 但**不**要求紧接在前一个普通字段之后另开对齐单元 —
+            // 只要字段从结构体起点算起能落在某个自然对齐的单元内, 就允许从当前
+            // 字节开始打包。例如 `char c; int bf:1;` 中 bf 放在字节 1 位 0 (与 c
+            // 后面的尾字节共享 0..4 这个 int 单元), 而不是对齐到字节 4。
+            //
+            // 游标:
+            //   next_bit        下一个空闲位 (自结构体起点, 普通字段后按字节取整)
+            //   unit_start_bit  当前打开单元的起始位; u64::MAX 表示无打开单元
+            //   unit_bits       当前单元总位数; unit_used 单元内已占用位数
+            let mut next_bit: u64 = 0;
+            let mut unit_start_bit: u64 = u64::MAX;
+            let mut unit_bits: u32 = 0;
+            let mut unit_used: u32 = 0;
+
+            // 结束当前打开的位域单元: 把游标推进到单元末尾。
+            let close_unit = |next_bit: &mut u64,
+                              unit_start_bit: &mut u64,
+                              unit_used: &mut u32,
+                              unit_bits: &mut u32| {
+                if *unit_start_bit != u64::MAX {
+                    let end = *unit_start_bit + u64::from(*unit_bits);
+                    if end > *next_bit {
+                        *next_bit = end;
+                    }
+                    *unit_start_bit = u64::MAX;
+                    *unit_used = 0;
+                    *unit_bits = 0;
+                }
+            };
 
             for f in fields.iter_mut() {
                 if let Some(bw) = f.bit_width {
-                    // 位域字段
                     let field_bits = bw;
-                    let container_ty_bits = (f.ty.size() * 8) as u32;
+                    let want_bits = (f.ty.size() * 8) as u32;
 
-                    // 零宽度位域: 强制下一个位域从新存储单元开始
+                    // 零宽度位域: 结束当前单元, 再对齐到声明类型边界
                     if field_bits == 0 {
-                        if container_bits > 0 {
-                            off += (container_bits / 8) as usize;
-                        }
-                        let align = eff(f);
-                        off = (off + align - 1) & !(align - 1);
-                        container_bits = 0;
-                        bit_pos = 0;
-                        f.offset = off;
+                        close_unit(
+                            &mut next_bit,
+                            &mut unit_start_bit,
+                            &mut unit_used,
+                            &mut unit_bits,
+                        );
+                        let a = eff(f) as u64;
+                        let aligned = ((next_bit + a * 8 - 1) / (a * 8)) * (a * 8);
+                        next_bit = aligned;
+                        f.offset = (next_bit / 8) as usize;
                         f.bit_offset = 0;
                         continue;
                     }
 
-                    // 第一个位域或容器类型变化: 开始新存储单元
-                    // 但如果字段有 field_packed, 允许跨容器边界连续排列.
-                    // 同样, 如果新容器更小且当前容器能放下, 也继续当前排列 (GCC 行为).
-                    if container_bits == 0 || container_ty_bits != container_bits {
-                        if f.field_packed
-                            && container_bits > 0
-                            && bit_pos + field_bits <= container_ty_bits.max(container_bits)
-                        {
-                            // packed 位域: 继续当前排列, 不强制新存储单元
-                            if container_ty_bits > container_bits {
-                                container_bits = container_ty_bits;
+                    let start_bit: u64; // 字段位偏移 (自结构体起点)
+
+                    if unit_start_bit != u64::MAX {
+                        // 已有打开单元
+                        let same_fits =
+                            want_bits == unit_bits && unit_used + field_bits <= unit_bits;
+                        // gcc: 更小类型的位域可与当前大单元共享剩余空间;
+                        // 同类型仅在剩余位足够时复用 (如 int:31; int:2 必须另起单元)。
+                        let smaller_fits =
+                            want_bits < unit_bits && unit_used + field_bits <= unit_bits;
+                        let packed_fits =
+                            f.field_packed && unit_used + field_bits <= want_bits.max(unit_bits);
+                        if same_fits || smaller_fits || packed_fits {
+                            // 复用当前单元剩余位
+                            start_bit = unit_start_bit + u64::from(unit_used);
+                            if packed_fits && want_bits > unit_bits {
+                                unit_bits = want_bits;
                             }
-                        } else if container_bits > 0
-                            && container_ty_bits < container_bits
-                            && bit_pos + field_bits <= container_bits
-                        {
-                            // 更小类型的位域能放入当前容器的剩余空间: 继续当前排列
-                            // (GCC 行为: 位域可以共享存储单元, 即使类型不同)
                         } else {
-                            // 对齐到容器类型边界
-                            let align = eff(f);
-                            off = (off + align - 1) & !(align - 1);
-                            container_bits = container_ty_bits;
-                            bit_pos = 0;
+                            // 放不下或容器更大: 关闭当前单元, 另开新单元
+                            close_unit(
+                                &mut next_bit,
+                                &mut unit_start_bit,
+                                &mut unit_used,
+                                &mut unit_bits,
+                            );
+                            let unit_bytes = u64::from(want_bits / 8);
+                            // 新单元起点对齐到声明类型
+                            let aligned =
+                                ((next_bit / 8 + unit_bytes - 1) / unit_bytes) * unit_bytes;
+                            unit_start_bit = aligned * 8;
+                            start_bit = unit_start_bit;
+                            unit_bits = want_bits;
+                            unit_used = 0;
+                        }
+                    } else {
+                        // 无打开单元: 候选起点为当前字节 (向下取整到字节),
+                        // 再向下落到包含该位的、自然对齐的存储单元起点。
+                        let cur_byte = next_bit / 8;
+                        let unit_bytes = u64::from(want_bits / 8);
+                        let start_byte = cur_byte - (cur_byte % unit_bytes);
+                        let bit_in_unit = (cur_byte - start_byte) as u32 * 8;
+                        if bit_in_unit + field_bits <= want_bits {
+                            unit_start_bit = start_byte * 8;
+                            start_bit = next_bit;
+                            unit_bits = want_bits;
+                            unit_used = bit_in_unit;
+                        } else {
+                            // 该单元剩余位不足: 推进到下一对齐单元
+                            let next_start_byte =
+                                ((cur_byte + unit_bytes - 1) / unit_bytes) * unit_bytes;
+                            unit_start_bit = next_start_byte * 8;
+                            start_bit = unit_start_bit;
+                            unit_bits = want_bits;
+                            unit_used = 0;
                         }
                     }
 
-                    // 当前单元放不下: 推进到下一单元
-                    if bit_pos + field_bits > container_bits {
-                        off += (container_bits / 8) as usize;
-                        let align = eff(f);
-                        off = (off + align - 1) & !(align - 1);
-                        bit_pos = 0;
+                    f.offset = (start_bit / 8) as usize;
+                    f.bit_offset = (start_bit % 8) as u32;
+                    // 更新单元占用与全局游标
+                    let field_end = start_bit + u64::from(field_bits);
+                    let in_unit_end = (field_end - unit_start_bit) as u32;
+                    if in_unit_end > unit_used {
+                        unit_used = in_unit_end;
                     }
-
-                    f.offset = off;
-                    f.bit_offset = bit_pos;
-                    bit_pos += field_bits;
+                    if field_end > next_bit {
+                        next_bit = field_end;
+                    }
                 } else {
-                    // 非位域字段: 刷新未用完的位域存储单元
-                    if container_bits > 0 {
-                        off += (container_bits / 8) as usize;
-                        container_bits = 0;
-                        bit_pos = 0;
+                    // 非位域字段: 若前有未关闭的位域, gcc 只把已占用位向上取整到
+                    // 字节边界, 剩余字节仍可放本普通字段 (如 `char x; int:1..:5;
+                    // short s;` 的 s 落在字节 6, 而不是单元末尾字节 8)。
+                    if unit_start_bit != u64::MAX {
+                        let used_bytes = (unit_used + 7) / 8;
+                        let flush_bit = (unit_start_bit + u64::from(used_bytes * 8)).max(next_bit);
+                        next_bit = (flush_bit + 7) & !7;
+                        unit_start_bit = u64::MAX;
+                        unit_used = 0;
+                        unit_bits = 0;
                     }
+                    let mut byte = (next_bit / 8) as usize;
                     // 柔性数组 (零长数组): 不贡献大小
                     if let Type::Array(_, ArraySize::Const(0)) = &f.ty {
                         let align = eff(f);
-                        off = (off + align - 1) & !(align - 1);
-                        f.offset = off;
+                        byte = (byte + align - 1) & !(align - 1);
+                        f.offset = byte;
+                        next_bit = (byte as u64) * 8;
                         continue;
                     }
                     let a = eff(f);
-                    off = (off + a - 1) & !(a - 1);
-                    f.offset = off;
-                    off += f.ty.size();
+                    byte = (byte + a - 1) & !(a - 1);
+                    f.offset = byte;
+                    next_bit = ((byte + f.ty.size()) as u64) * 8;
                 }
             }
-            // 刷新末尾未用完的位域存储单元
-            // (size 由 size() 计算, 此处不需要额外处理)
-            let _ = (off, bit_pos, container_bits);
         }
     }
 
@@ -1726,6 +1791,49 @@ impl Type {
 
 pub fn int_t() -> Type {
     Type::Int
+}
+
+/// Compact one-line summary of a Type for debug prints (avoids noisy {:?} dumps).
+pub fn type_kind_summary(ty: &Type) -> String {
+    match ty {
+        Type::Void => "void".into(),
+        Type::Bool => "bool".into(),
+        Type::Char => "char".into(),
+        Type::SChar => "schar".into(),
+        Type::UChar => "uchar".into(),
+        Type::Char8 => "char8".into(),
+        Type::Char16 => "char16".into(),
+        Type::Char32 => "char32".into(),
+        Type::Short => "short".into(),
+        Type::UShort => "ushort".into(),
+        Type::Int => "int".into(),
+        Type::UInt => "uint".into(),
+        Type::Long => "long".into(),
+        Type::ULong => "ulong".into(),
+        Type::LongLong => "longlong".into(),
+        Type::ULongLong => "ulonglong".into(),
+        Type::Int128 => "int128".into(),
+        Type::UInt128 => "uint128".into(),
+        Type::Float => "float".into(),
+        Type::Double => "double".into(),
+        Type::LongDouble => "longdouble".into(),
+        Type::Fract => "fract".into(),
+        Type::Accum => "accum".into(),
+        Type::Complex(inner) => format!("complex({})", type_kind_summary(&inner.base)),
+        Type::Imaginary(inner) => format!("imag({})", type_kind_summary(&inner.base)),
+        Type::Ptr(inner) => format!("*({})", type_kind_summary(&inner.base)),
+        Type::Array(inner, n) => format!("[{:?}]({})", n, type_kind_summary(&inner.base)),
+        Type::Vector(inner, n) => format!("vec{}({})", n, type_kind_summary(&inner.base)),
+        Type::Func(ret, params) => {
+            let params: Vec<String> = params.iter().map(|p| type_kind_summary(&p.base)).collect();
+            format!("Func({})({})", type_kind_summary(&ret.base), params.join(","))
+        },
+        Type::Struct(name, _, _, _) => format!("struct {}", name),
+        Type::Union(name, _, _, _) => format!("union {}", name),
+        Type::Enum(name, _, _) => format!("enum {}", name),
+        Type::Named(name) => format!("named {}", name),
+        Type::Atomic(inner) => format!("atomic({})", type_kind_summary(&inner.base)),
+    }
 }
 pub fn long_t() -> Type {
     Type::Long

@@ -2269,8 +2269,7 @@ fn write_emit_output(
 ) -> Result<std::path::PathBuf, Vec<Diagnostic>> {
     use std::io::Write;
     // -c 且降级到文本: 尝试用目标 as 汇出 .o, 否则退化为写 .s (旧行为)。
-    if let (false, crate::codegen::shared::asm_source::Emitted::Text(text)) = (emit_asm, emitted)
-    {
+    if let (false, crate::codegen::shared::asm_source::Emitted::Text(text)) = (emit_asm, emitted) {
         let wants_object = requested
             .extension()
             .and_then(|e| e.to_str())
@@ -2334,7 +2333,11 @@ fn assemble_gas_text(
 ) -> Result<std::path::PathBuf, Vec<Diagnostic>> {
     let cmd_name = assembler_cmd_name(&cfg.target);
     // 写临时 .s
-    let tmp = std::env::temp_dir().join(format!("dcc-as-{}-{}.s", std::process::id(), out.file_name().unwrap_or_default().to_string_lossy()));
+    let tmp = std::env::temp_dir().join(format!(
+        "dcc-as-{}-{}.s",
+        std::process::id(),
+        out.file_name().unwrap_or_default().to_string_lossy()
+    ));
     fs::write(&tmp, text.as_bytes()).map_err(|e| {
         vec![Diagnostic::err(
             "E0101",

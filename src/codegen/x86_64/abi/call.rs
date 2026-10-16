@@ -345,8 +345,8 @@ impl Codegen {
         if dynamic_align {
             self.emit_insn(&Insn::mov_rm_reg(
                 crate::codegen::shared::asm_operand::Width::B64,
-                10,  // r10
-                4,   // rsp
+                10, // r10
+                4,  // rsp
             ));
             let mask: u64 = !(frame_align as u64 - 1);
             self.emit_insn(&Insn::movabs_reg_imm64(11, mask));
@@ -422,7 +422,8 @@ impl Codegen {
                 while let Some(loc) = loc_iter.next() {
                     match loc {
                         ArgLoc::Xmm(_) => {
-                            let src_off = self.variadic_reg_save_offset + 48 + src_fp_idx as i64 * 16;
+                            let src_off =
+                                self.variadic_reg_save_offset + 48 + src_fp_idx as i64 * 16;
                             self.load_xmm128_stack(0, src_off);
                             self.emit_xmm_store_rsp(0xF2, 0, stage);
                             staged.push((loc, stage, false));
@@ -610,13 +611,15 @@ impl Codegen {
                 // 不混寄存器) 且对象大于阈值时, 源地址取到 rsi, lea rdi,[rsp+base],
                 // 用 cld; rep movsb 整块搬运。否则逐 chunk 路径会为 72MB 结构体
                 // 发射 ~3770 万条常驻 Insn, OOM (gcc.c-torture/compile/20050622-1.c).
-                let copy_base = arg_locs.first().and_then(|l| {
-                    if let ArgLoc::Stack(b) = l { Some(*b) } else { None }
-                }).filter(|b| {
-                    arg_locs.iter().enumerate().all(|(i, l)| {
-                        matches!(l, ArgLoc::Stack(off) if *off == b + i * 8)
-                    })
-                });
+                let copy_base = arg_locs
+                    .first()
+                    .and_then(|l| if let ArgLoc::Stack(b) = l { Some(*b) } else { None })
+                    .filter(|b| {
+                        arg_locs
+                            .iter()
+                            .enumerate()
+                            .all(|(i, l)| matches!(l, ArgLoc::Stack(off) if *off == b + i * 8))
+                    });
                 let copy_size = effective_ty.size();
                 if let (Some(base), true) = (copy_base, copy_size > 16) {
                     // 源地址 → rsi (与 gen_sret_return 同样的取址优先级).
@@ -645,10 +648,10 @@ impl Codegen {
                         // rdi = outgoing 区目的地址; rcx = 字节数; cld; rep movsb
                         self.emit_insn(&Insn::lea_reg_base_disp(7, 4, base as i32));
                         self.mov_imm(1, copy_size as i128);
+                        self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld));
                         self.emit_insn(&Insn::noarg(
-                            crate::codegen::x86_64::opcode::NoArgOp::Cld));
-                        self.emit_insn(&Insn::noarg(
-                            crate::codegen::x86_64::opcode::NoArgOp::RepMovsb));
+                            crate::codegen::x86_64::opcode::NoArgOp::RepMovsb,
+                        ));
                         continue;
                     }
                     // 取址失败则回退到下方逐 chunk 路径。
@@ -920,7 +923,9 @@ impl Codegen {
                         }
                     }
                 }
-            } else if matches!(effective_ty, Type::LongDouble) || matches!(effective_ty, Type::Imaginary(_)) {
+            } else if matches!(effective_ty, Type::LongDouble)
+                || matches!(effective_ty, Type::Imaginary(_))
+            {
                 // SysV: x87 类实参永远走 16 字节栈槽（不是寄存器保存区），内容是
                 // `fstpt` 形式的真 80-bit 编码。具名形参与变参**同一规则**：早先本处
                 // 限定“仅变参”，是因为误信了 i386 cdecl 的“具名 x87 参数走 st(0)”。
@@ -1205,8 +1210,8 @@ impl Codegen {
             // mov rsp, r10 (恢复对齐前 rsp)
             self.emit_insn(&Insn::mov_rm_reg(
                 crate::codegen::shared::asm_operand::Width::B64,
-                4,   // rsp
-                10,  // r10
+                4,  // rsp
+                10, // r10
             ));
         } else {
             self.emit_add_rsp(frame_bytes as i64);

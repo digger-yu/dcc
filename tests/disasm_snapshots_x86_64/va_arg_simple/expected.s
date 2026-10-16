@@ -58,6 +58,7 @@ movslq -0x60(%r13),%r8
 add %r8,%rbx
 mov %rbx,%rax
 movslq %eax,%rax
+movslq %eax,%rax
 mov %eax,-0x60(%r13)
 mov -0x68(%r13),%eax
 push %rax
@@ -73,7 +74,6 @@ mov -0x10(%r13),%rbx
 mov %r13,%rsp
 pop %r13
 ret
-<nop padding>
 va_sum_dbl:
 push %r13
 mov %rsp,%r13

@@ -99,7 +99,7 @@ impl AsmIsa {
         match self {
             AsmIsa::AArch64 | AsmIsa::Arm | AsmIsa::Mips32 | AsmIsa::Mips64 => {
                 DegradeGranularity::PerStatement
-            }
+            },
             AsmIsa::RiscV64 | AsmIsa::RiscV32 | AsmIsa::X86_64 => DegradeGranularity::WholeTu,
         }
     }
@@ -388,9 +388,9 @@ pub fn known_mnemonics(isa: AsmIsa) -> &'static [&'static str] {
         // `ld`/`st` 曾被错列为已支持, 但表里没有这两条臂 (grep 命中的是 dmb/dsb
         // 的 domain 选项值 0xd/0xe), 已移除, 见 behavior 护栏 test。
         AsmIsa::AArch64 => &[
-            "add", "blr", "br", "clrex", "dbg", "dmb", "dsb", "fadd", "fmul", "fsub", "isb",
-            "ld1", "ld1w", "mov", "movz", "mul", "nop", "ptrue", "ret", "sev", "sevl", "st1",
-            "st1w", "sub", "svc", "wfe", "wfi", "whilelt", "yield",
+            "add", "blr", "br", "clrex", "dbg", "dmb", "dsb", "fadd", "fmul", "fsub", "isb", "ld1",
+            "ld1w", "mov", "movz", "mul", "nop", "ptrue", "ret", "sev", "sevl", "st1", "st1w",
+            "sub", "svc", "wfe", "wfi", "whilelt", "yield",
         ],
         AsmIsa::RiscV64 | AsmIsa::RiscV32 => &[
             "add",
@@ -899,7 +899,7 @@ mod tests {
             (AsmIsa::Mips32 | AsmIsa::Mips64, "break") => Some(""),
             (AsmIsa::Mips32 | AsmIsa::Mips64, "daddu") if isa == AsmIsa::Mips64 => {
                 Some("$0, $1, $2")
-            }
+            },
             (AsmIsa::Mips32 | AsmIsa::Mips64, "jalr") => Some("$t1"),
             (AsmIsa::Mips32 | AsmIsa::Mips64, "jr") => Some("$ra"),
             (AsmIsa::Mips32 | AsmIsa::Mips64, "move") => Some("$2, $3"),

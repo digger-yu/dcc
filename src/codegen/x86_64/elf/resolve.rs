@@ -535,7 +535,8 @@ impl Codegen {
         // 带元素偏移的全局重定位 (数组型 static local 逐元素初始化)
         // addend = elem_off - 4, 使 link-time 的 PC32 计算结果为
         // (sym + elem_off) - rip 地址.
-        for (disp32_pos, var_name, elem_off) in std::mem::take(&mut self.pending_data_rels_with_off) {
+        for (disp32_pos, var_name, elem_off) in std::mem::take(&mut self.pending_data_rels_with_off)
+        {
             let Some(sym_idx) = self.reloc_sym_index(&var_name, "global var PC32 (elem)") else {
                 continue;
             };

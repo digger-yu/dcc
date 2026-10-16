@@ -410,24 +410,11 @@ impl Codegen {
         let is_signed = Self::is_signed_int(&lv_ty);
         self.binop(binop_op, 0, 1, is_signed, &lv_ty, &rhs.ty());
         // rax = result
-        // 7. 截断到目标类型宽度 (32位以下)
-        if lv_sz == 4 && lv_ty.is_int() {
-            self.emit_insn(&Insn::new(
-                crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                    rip_relative: false,
-                    width: crate::codegen::shared::asm_operand::Width::B32,
-                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                        0,
-                        crate::codegen::shared::asm_operand::Width::B32,
-                    ),
-                    src: crate::codegen::x86_64::opcode::Operand::Reg(
-                        0,
-                        crate::codegen::shared::asm_operand::Width::B32,
-                    ),
-                },
-                &[],
-            )); // mov eax, eax (truncate to 32 bits)
-        }
+        // 7. 归约到左值类型：赋值表达式的值是左值转换后的左值 (C11 6.5.16p3)。
+        //    旧写法只在 `lv_sz == 4 && 有符号 int` 时发一枚 `mov eax, eax`，
+        //    1/2 字节左值完全不归约（`u8 *q; long v = (*q += 300)` 实测 gcc 44 /
+        //    dcc 300），且 4 字节无符号左值漏掉零扩展。
+        self.reduce_assign_value_to_lvalue(0, &lv_ty);
         // 8. 恢复地址并存储
         self.pop(1); // pop rcx (address)
         match lv_sz {
@@ -493,6 +480,14 @@ impl Codegen {
                     &[],
                 ));
             }, // mov [rcx], rax
+        }
+        // 8b. 窄类型 (1/2 字节) 的结果必须是**存回内存的截断值**: C11 6.5.16p3
+        // 让复合赋值的值等于左侧对象的新值, 而 rax 里此时还是 64 位运算和
+        // (250+10=260)。`if( (buf[4] += 6)==0 )` 一类的判断因此永远不成立。
+        // 与 ++/-- 的内存 lvalue 路径同构: 存回后按原类型重新加载。
+        if lv_sz < 4 {
+            self.mov(0, 1); // rax = 目标地址 (rcx 仍握着它)
+            self.emit_load_mem_typed(lv_sz, &lv_ty);
         }
         // 9. 结果到 dst
         if dst != 0 {
@@ -578,6 +573,56 @@ impl Codegen {
             _ => {},
         }
     }
+
+    /// 把留在 `reg` 里的赋值结果归约到**左值类型**的取值域。
+    ///
+    /// C11 6.5.16p3: 赋值表达式的值是「左值转换后的左值」，即已经带上了左值类型的
+    /// 宽度与符号性；而内存左值的 store 只写低 n 字节，寄存器里留着的仍是右值在
+    /// int/更宽精度下的位模式。具名变量路径早就补了这一步（`dispatch.rs` 赋值分支
+    /// 里的重扩展），下标 / 解引用 / 成员 / 单次求值复合赋值四条路径都没有，实测
+    /// （-O0 与 -O2 同）：
+    ///   `u8 a[8]; a[3]=0; long v = (a[3] = 300);`  gcc 44 / dcc 300
+    ///   `u8 a[8]; long v = (a[3] += 300);`         gcc 44 / dcc 300
+    ///   `unsigned int ui[8]; long v = (ui[0] = 0x100000005ULL);`  gcc 5 / dcc 4294967301
+    /// 与 `gen_int_narrow_cast` 的 `Type::Int` 分支不同，这里不能「什么都不做」：
+    /// 那一支假定后续按 4 字节重新读取，而本函数的结果会原样交给更宽的使用点。
+    pub(crate) fn reduce_assign_value_to_lvalue(&mut self, reg: u8, lty: &Type) {
+        if !Self::is_integer_type(lty) && !matches!(lty, Type::Enum(..)) {
+            // 浮点 / 复数 / 聚合 / 指针左值各有自己的值模型（值通道不同），不在此列
+            return;
+        }
+        let signed = match lty {
+            Type::Enum(_, _, Some(u)) => Self::is_signed_int(&u.base),
+            Type::Bool | Type::UChar | Type::UShort | Type::UInt => false,
+            _ => true,
+        };
+        use crate::codegen::shared::asm_operand::Width;
+        let insn = match (lty.size(), signed) {
+            (1, s) => Insn::mov_ext(s, Width::B8, Width::B64, reg, reg),
+            (2, s) => Insn::mov_ext(s, Width::B16, Width::B64, reg, reg),
+            (4, true) => Insn::mov_ext(true, Width::B32, Width::B64, reg, reg),
+            (4, false) => {
+                // mov reg32, reg32: 32 位自拷贝即零扩展到高 32 位
+                self.emit_insn_expect(&Insn::mov_rm_reg(Width::B32, reg, reg));
+                return;
+            },
+            _ => return,
+        };
+        self.emit_insn_expect(&insn);
+    }
+
+    /// 赋值右值进内存左值之前的完整归约：先把浮点右值按左值内型截断，再按左值宽度
+    /// 归约结果。内存左值路径原先两者都缺，于是 `u8 a[1]; a[0] = 300.5;` 把 double
+    /// 位模式的低字节当整数写进内存（实测 dcc 读出 0x18，gcc 读出 44）。
+    pub(crate) fn convert_assign_rhs_in_reg(&mut self, reg: u8, lty: &Type, rty: &Type) {
+        if matches!(rty, Type::Float | Type::Double | Type::LongDouble)
+            && (Self::is_integer_type(lty) || matches!(lty, Type::Enum(..)))
+        {
+            self.emit_implicit_float_to_int(reg, rty, lty);
+        }
+        self.reduce_assign_value_to_lvalue(reg, lty);
+    }
+
     pub(crate) fn gen_int_promote(&mut self, dst: u8, ty: &Type) {
         match ty {
             Type::Char | Type::SChar | Type::Bool => {

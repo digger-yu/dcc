@@ -40,8 +40,13 @@ pub(crate) fn asm_to_operand(op: &AsmOperand, mnemonic_width: Option<Width>) -> 
             // 覆盖位宽: 助记符后缀是权威; 无后缀时回退到 kind (64).
             let w = mnemonic_width.unwrap_or(Width::B64);
             Some(Operand::Reg(*reg, w))
-        }
-        AsmOperand::Mem { disp, base, index, scale } => Some(Operand::Mem(MemOperand {
+        },
+        AsmOperand::Mem {
+            disp,
+            base,
+            index,
+            scale,
+        } => Some(Operand::Mem(MemOperand {
             disp: *disp,
             base: Some(*base),
             index: index.map(|i| (i, *scale)),
@@ -82,32 +87,122 @@ pub(crate) fn try_map_typed(mnemonic: &str, ops: &[AsmOperand]) -> Option<X86_64
     // 直接映射成 Ret 会丢失该 thunk 语义 (测试 function_return_thunk 依赖).
     match mnemonic {
         "call" => {
-            if ops.len() != 1 { return None; }
+            if ops.len() != 1 {
+                return None;
+            }
             let target = asm_to_operand(&ops[0], None)?;
-            return Some(X86_64Opcode::Call { target, pending_rel: true });
-        }
+            return Some(X86_64Opcode::Call {
+                target,
+                pending_rel: true,
+            });
+        },
         "jmp" => {
-            if ops.len() != 1 { return None; }
+            if ops.len() != 1 {
+                return None;
+            }
             let target = asm_to_operand(&ops[0], None)?;
-            return Some(X86_64Opcode::Jmp { target, pending_rel: true });
-        }
-        "je" | "jz" => return Some(X86_64Opcode::Jcc { cc: CondCode::Eq, pending_rel: true }),
-        "jne" | "jnz" => return Some(X86_64Opcode::Jcc { cc: CondCode::Ne, pending_rel: true }),
-        "jl" | "jnge" => return Some(X86_64Opcode::Jcc { cc: CondCode::Lt, pending_rel: true }),
-        "jge" | "jnl" => return Some(X86_64Opcode::Jcc { cc: CondCode::Ge, pending_rel: true }),
-        "jg" | "jnle" => return Some(X86_64Opcode::Jcc { cc: CondCode::Gt, pending_rel: true }),
-        "jle" | "jng" => return Some(X86_64Opcode::Jcc { cc: CondCode::Le, pending_rel: true }),
-        "jb" | "jc" | "jnae" => return Some(X86_64Opcode::Jcc { cc: CondCode::B, pending_rel: true }),
-        "jae" | "jnb" | "jnc" => return Some(X86_64Opcode::Jcc { cc: CondCode::Ae, pending_rel: true }),
-        "ja" | "jnbe" => return Some(X86_64Opcode::Jcc { cc: CondCode::A, pending_rel: true }),
-        "jbe" | "jna" => return Some(X86_64Opcode::Jcc { cc: CondCode::Be, pending_rel: true }),
-        "js" => return Some(X86_64Opcode::Jcc { cc: CondCode::S, pending_rel: true }),
-        "jns" => return Some(X86_64Opcode::Jcc { cc: CondCode::Ns, pending_rel: true }),
-        "jp" | "jpe" => return Some(X86_64Opcode::Jcc { cc: CondCode::P, pending_rel: true }),
-        "jnp" | "jpo" => return Some(X86_64Opcode::Jcc { cc: CondCode::Np, pending_rel: true }),
-        "jo" => return Some(X86_64Opcode::Jcc { cc: CondCode::O, pending_rel: true }),
-        "jno" => return Some(X86_64Opcode::Jcc { cc: CondCode::No, pending_rel: true }),
-        _ => {}
+            return Some(X86_64Opcode::Jmp {
+                target,
+                pending_rel: true,
+            });
+        },
+        "je" | "jz" => {
+            return Some(X86_64Opcode::Jcc {
+                cc: CondCode::Eq,
+                pending_rel: true,
+            })
+        },
+        "jne" | "jnz" => {
+            return Some(X86_64Opcode::Jcc {
+                cc: CondCode::Ne,
+                pending_rel: true,
+            })
+        },
+        "jl" | "jnge" => {
+            return Some(X86_64Opcode::Jcc {
+                cc: CondCode::Lt,
+                pending_rel: true,
+            })
+        },
+        "jge" | "jnl" => {
+            return Some(X86_64Opcode::Jcc {
+                cc: CondCode::Ge,
+                pending_rel: true,
+            })
+        },
+        "jg" | "jnle" => {
+            return Some(X86_64Opcode::Jcc {
+                cc: CondCode::Gt,
+                pending_rel: true,
+            })
+        },
+        "jle" | "jng" => {
+            return Some(X86_64Opcode::Jcc {
+                cc: CondCode::Le,
+                pending_rel: true,
+            })
+        },
+        "jb" | "jc" | "jnae" => {
+            return Some(X86_64Opcode::Jcc {
+                cc: CondCode::B,
+                pending_rel: true,
+            })
+        },
+        "jae" | "jnb" | "jnc" => {
+            return Some(X86_64Opcode::Jcc {
+                cc: CondCode::Ae,
+                pending_rel: true,
+            })
+        },
+        "ja" | "jnbe" => {
+            return Some(X86_64Opcode::Jcc {
+                cc: CondCode::A,
+                pending_rel: true,
+            })
+        },
+        "jbe" | "jna" => {
+            return Some(X86_64Opcode::Jcc {
+                cc: CondCode::Be,
+                pending_rel: true,
+            })
+        },
+        "js" => {
+            return Some(X86_64Opcode::Jcc {
+                cc: CondCode::S,
+                pending_rel: true,
+            })
+        },
+        "jns" => {
+            return Some(X86_64Opcode::Jcc {
+                cc: CondCode::Ns,
+                pending_rel: true,
+            })
+        },
+        "jp" | "jpe" => {
+            return Some(X86_64Opcode::Jcc {
+                cc: CondCode::P,
+                pending_rel: true,
+            })
+        },
+        "jnp" | "jpo" => {
+            return Some(X86_64Opcode::Jcc {
+                cc: CondCode::Np,
+                pending_rel: true,
+            })
+        },
+        "jo" => {
+            return Some(X86_64Opcode::Jcc {
+                cc: CondCode::O,
+                pending_rel: true,
+            })
+        },
+        "jno" => {
+            return Some(X86_64Opcode::Jcc {
+                cc: CondCode::No,
+                pending_rel: true,
+            })
+        },
+        _ => {},
     }
 
     // ---- 以下只对带明确尺寸后缀的助记符生效 (movq/movl/addw/addb...) ----
@@ -116,7 +211,9 @@ pub(crate) fn try_map_typed(mnemonic: &str, ops: &[AsmOperand]) -> Option<X86_64
     let explicit_width = width_from_mnemonic(mnemonic)?;
 
     // 去掉尺寸后缀, 提取核心助记符 (addl → add).
-    let core = mnemonic.strip_suffix(['b', 'w', 'l', 'q']).unwrap_or(mnemonic);
+    let core = mnemonic
+        .strip_suffix(['b', 'w', 'l', 'q'])
+        .unwrap_or(mnemonic);
 
     match core {
         // ---- ALU 族: add/sub/and/or/xor/cmp/test/adc/sbb ----
@@ -131,8 +228,13 @@ pub(crate) fn try_map_typed(mnemonic: &str, ops: &[AsmOperand]) -> Option<X86_64
             let at_t_src = asm_to_operand(&ops[0], Some(explicit_width))?;
             let at_t_dst = asm_to_operand(&ops[1], Some(explicit_width))?;
             let width = explicit_width;
-            Some(X86_64Opcode::AluRm { op, width, dst: at_t_dst, src: at_t_src })
-        }
+            Some(X86_64Opcode::AluRm {
+                op,
+                width,
+                dst: at_t_dst,
+                src: at_t_src,
+            })
+        },
 
         // ---- inc/dec/not/neg ----
         "inc" | "dec" | "not" | "neg" => {
@@ -143,7 +245,7 @@ pub(crate) fn try_map_typed(mnemonic: &str, ops: &[AsmOperand]) -> Option<X86_64
             let dst = asm_to_operand(&ops[0], Some(explicit_width))?;
             let width = explicit_width;
             Some(X86_64Opcode::UnaryRm { op, width, dst })
-        }
+        },
 
         // ---- shl/shr/sar/rol/ror/sal ----
         // AT&T 语法: shl $imm, %reg  (src=imm 在前, dst=reg 在后).
@@ -165,8 +267,13 @@ pub(crate) fn try_map_typed(mnemonic: &str, ops: &[AsmOperand]) -> Option<X86_64
                 // 无操作数: shl %cl, %reg (单操作数形态).
                 (ShiftAmount::Cl, asm_to_operand(&ops[0], Some(width))?)
             };
-            Some(X86_64Opcode::Shift { op, width, dst, amount })
-        }
+            Some(X86_64Opcode::Shift {
+                op,
+                width,
+                dst,
+                amount,
+            })
+        },
 
         // ---- lea ----
         "lea" => {
@@ -176,7 +283,12 @@ pub(crate) fn try_map_typed(mnemonic: &str, ops: &[AsmOperand]) -> Option<X86_64
             // LEA 恒取 64 位目的寄存器 (AT&T 语法 lea 只写 64 位地址宽).
             let dst = asm_to_operand(&ops[0], Some(Width::B64))?;
             let mem = match &ops[1] {
-                AsmOperand::Mem { disp, base, index, scale } => MemOperand {
+                AsmOperand::Mem {
+                    disp,
+                    base,
+                    index,
+                    scale,
+                } => MemOperand {
                     disp: *disp,
                     base: Some(*base),
                     index: index.map(|i| (i, *scale)),
@@ -192,8 +304,12 @@ pub(crate) fn try_map_typed(mnemonic: &str, ops: &[AsmOperand]) -> Option<X86_64
             };
             let rip_relative = matches!(&ops[1], AsmOperand::SymDisp(..))
                 || matches!(&ops[1], AsmOperand::Mem { base, .. } if *base == 0xff);
-            Some(X86_64Opcode::Lea { dst, mem, rip_relative })
-        }
+            Some(X86_64Opcode::Lea {
+                dst,
+                mem,
+                rip_relative,
+            })
+        },
 
         // ---- push/pop ----
         "push" | "pop" => {
@@ -204,7 +320,7 @@ pub(crate) fn try_map_typed(mnemonic: &str, ops: &[AsmOperand]) -> Option<X86_64
             let dst = asm_to_operand(&ops[0], Some(explicit_width))?;
             let width = explicit_width;
             Some(X86_64Opcode::Stack { op, width, dst })
-        }
+        },
 
         // ---- mov (带尺寸后缀: movq/movl/movw/movb) ----
         // AT&T 语法: mov src, dst. MovRm { dst, src }: dst 是接收写入的那个.
@@ -215,8 +331,13 @@ pub(crate) fn try_map_typed(mnemonic: &str, ops: &[AsmOperand]) -> Option<X86_64
             let at_t_src = asm_to_operand(&ops[0], Some(explicit_width))?;
             let at_t_dst = asm_to_operand(&ops[1], Some(explicit_width))?;
             let width = explicit_width;
-            Some(X86_64Opcode::MovRm { width, dst: at_t_dst, src: at_t_src, rip_relative: false })
-        }
+            Some(X86_64Opcode::MovRm {
+                width,
+                dst: at_t_dst,
+                src: at_t_src,
+                rip_relative: false,
+            })
+        },
 
         _ => None,
     }

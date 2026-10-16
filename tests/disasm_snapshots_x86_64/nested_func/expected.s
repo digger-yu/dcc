@@ -27,6 +27,7 @@ movq $0xffffffff90909090,0x18(%rdi)
 mov $0x0,%rax
 mov %eax,-0x40(%r13)
 mov $0xa,%rax
+movslq %eax,%rax
 mov %eax,-0x40(%r13)
 sub $0x20,%rsp
 mov $0x5,%rax
@@ -41,7 +42,6 @@ movslq %eax,%rax
 mov %r13,%rsp
 pop %r13
 ret
-<nop padding>
 inner_outer.0:
 push %r13
 mov %rsp,%r13

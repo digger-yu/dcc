@@ -187,19 +187,19 @@ pub(super) fn infer_binop_type(op: &BinOp, l: &Expr, r: &Expr) -> Type {
             BinOp::Add | BinOp::Sub if is_ia && is_ib => {
                 // imag ± imag → imag
                 Type::Imaginary(Box::new(QualType::new(base)))
-            }
+            },
             BinOp::Mul | BinOp::Div if is_ia && is_ib => {
                 // imag * imag → real (负); imag / imag → real
                 base
-            }
+            },
             BinOp::Add | BinOp::Sub => {
                 // real ± imag → complex
                 Type::Complex(Box::new(QualType::new(base)))
-            }
+            },
             BinOp::Mul | BinOp::Div => {
                 // real * imag → imag; real / imag → imag
                 Type::Imaginary(Box::new(QualType::new(base)))
-            }
+            },
             _ => base,
         };
     }
@@ -251,7 +251,7 @@ pub(super) fn infer_binop_type(op: &BinOp, l: &Expr, r: &Expr) -> Type {
 
 /// `InstKind::Store` 重建 LHS `Expr::Deref` 时的 **pointee 类型** (store 宽度真源)。
 ///
-/// SSA 的 `Store` 不携带「被写对象类型」字段, 旧实现一律重建为
+/// SSA 的 `Store` 不携带「被写对象类型」, 旧实现一律重建为
 /// `Expr::Deref { ty: Type::Void }`; 后端按 `lvalue.ty().size()` 选 store 指令,
 /// `Void` 回退 8 字节 ⇒ 恒发 `mov %rax,(%rcx)`。对窄对象就是越界写: 实测 C++
 /// 析构里 `int` 全局 `g_b = g_b + 1` 会把紧邻的 `g_d` 高 4 字节清零
@@ -259,15 +259,18 @@ pub(super) fn infer_binop_type(op: &BinOp, l: &Expr, r: &Expr) -> Type {
 ///
 /// 宽度只能从**地址操作数自身的类型**还原: `lower_ir` 侧所有 `Store` 的地址
 /// 都是 `Ptr(对象类型)` —— 静态存储 (`AddrOf`/`lower_sym_addr`)、引用槽、
-/// `*p = v`、vptr 槽。聚合与 `void` pointee 保持 `Void` 原样: 整体拷贝不走
-/// `Store` (`lower_static_storage_store` 明确报 unsupported), 不在此猜宽度。
+/// `*p = v`、vptr 槽。
+///
+/// 聚合 pointee 必须**原样带出类型**, 不能压成 `Void`: 后端的整体拷贝分支
+/// (`emit/expr/dispatch.rs` 的 `value_is_whole_copy` + `gen_aggregate_assign_to`)
+/// 正是靠 LHS 的类型认出「这笔写装不进一个寄存器」。压成 `Void` 后它只看见一次
+/// 恒 8 字节的标量 store, 于是 `*pItem = zeroItem` 这类**聚合整体赋值**只搬走
+/// 第一字 —— 实测 -O2 下 sqlite 的 `sqlite3ExprListAppend` 因此留下未初始化
+/// `ExprList.a[i].zEName`, 名字解析读它而段错误。尺寸 ≤8 的聚合与非聚合走同
+/// 一条标量路径, 宽度由 `size()` 给, 与 -O0 的 AST 通道一致。
 fn store_pointee_ty(addr: &Expr) -> Type {
     match addr.ty() {
-        Type::Ptr(inner) => match inner.base {
-            Type::Void => Type::Void,
-            Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) | Type::Array(_, _) => Type::Void,
-            t => t,
-        },
+        Type::Ptr(inner) => inner.base.clone(),
         _ => Type::Void,
     }
 }
@@ -460,9 +463,7 @@ pub(super) fn inst_to_expr_resolved(
             // 子对象地址: 装回 `&obj->field` / `&(obj.field)`，偏移由 codegen 的
             // 地址形态给出（与 `MemberLoad` 同一个单一真源约定）。
             let mut base = resolve_operand(obj, &fake_env, subst, func);
-            if !*is_arrow {
-                set_expr_ty_if_compatible(&mut base, obj_ty);
-            }
+            set_expr_ty_if_compatible(&mut base, obj_ty);
             Expr::AddrOf {
                 e: Box::new(Expr::Member {
                     expr: Box::new(base),
@@ -487,12 +488,13 @@ pub(super) fn inst_to_expr_resolved(
             ..
         } => {
             let mut base = resolve_operand(obj, &fake_env, subst, func);
-            if *is_arrow {
-                // obj 本身就是结构体指针: 保留其指针类型, 重建为 ptr->field
-            } else {
-                // 重建时修正基址类型: SSA 变量可能丢失了原始结构体类型
-                set_expr_ty_if_compatible(&mut base, obj_ty);
-            }
+            // 箭头访问 `p->fld` 时, resolve_operand 返回的 Ident 类型可能因 SSA
+            // 简化而丢失原始指针类型 (例如 pDb 被简化成 Int/Ptr(Int)), 导致
+            // codegen 按错误的基类型查字段偏移 — 实测 `pX = pDb->pBt` 编译成
+            // movslq (%rax),%rax, 把 zDbSName 当 32 位 int 截断塞进 pX。
+            // 对 is_arrow 同样调用 set_expr_ty_if_compatible, 把 obj_ty (Ptr(Db))
+            // 写回 base 的 Ident/Deref.ty。
+            set_expr_ty_if_compatible(&mut base, obj_ty);
             Expr::Member {
                 expr: Box::new(base),
                 field: crate::ast::Ident {
@@ -514,11 +516,7 @@ pub(super) fn inst_to_expr_resolved(
             ..
         } => {
             let mut base = resolve_operand(obj, &fake_env, subst, func);
-            if *is_arrow {
-                // obj 本身就是结构体指针: 保留其指针类型
-            } else {
-                set_expr_ty_if_compatible(&mut base, obj_ty);
-            }
+            set_expr_ty_if_compatible(&mut base, obj_ty);
             Expr::Assign {
                 op: BinOp::Add,
                 l: Box::new(Expr::Member {
@@ -954,9 +952,7 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
             // 子对象地址: 装回 `&obj->field` / `&(obj.field)`, 偏移交给 codegen
             // 现有的地址形态（与 `MemberLoad` 单一真源同一约定）。
             let mut base = operand_to_expr(obj, env, func);
-            if !*is_arrow {
-                set_expr_ty_if_compatible(&mut base, obj_ty);
-            }
+            set_expr_ty_if_compatible(&mut base, obj_ty);
             Expr::AddrOf {
                 e: Box::new(Expr::Member {
                     expr: Box::new(base),
@@ -981,11 +977,7 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
             ..
         } => {
             let mut base = operand_to_expr(obj, env, func);
-            if *is_arrow {
-                // obj 本身就是结构体指针: 保留其指针类型, 重建为 ptr->field
-            } else {
-                set_expr_ty_if_compatible(&mut base, obj_ty);
-            }
+            set_expr_ty_if_compatible(&mut base, obj_ty);
             Expr::Member {
                 expr: Box::new(base),
                 field: crate::ast::Ident {
@@ -1007,11 +999,7 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
             ..
         } => {
             let mut base = operand_to_expr(obj, env, func);
-            if *is_arrow {
-                // obj 本身就是结构体指针: 保留其指针类型
-            } else {
-                set_expr_ty_if_compatible(&mut base, obj_ty);
-            }
+            set_expr_ty_if_compatible(&mut base, obj_ty);
             Expr::Assign {
                 op: BinOp::Add,
                 l: Box::new(Expr::Member {

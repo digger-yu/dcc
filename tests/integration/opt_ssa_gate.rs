@@ -42,6 +42,27 @@
 //      `int r = a[i] += 7;` 返回未初始化垃圾、`a[i++] += 5` 写错格子。
 //      判据与 codegen 共用 `crate::semantics`，修法是地址只求一次的读—改—写。
 //
+//   9. 第 8 条那台读—改—写机器不能用在**位域**左值上：位域没有自己的存储地址，
+//      `&obj.bf` 只能给出容器（`StorageUnit`）的地址，于是整容器被当成一个值加 1 ⇒
+//      进位溢出到相邻位域，且「结果归约到位域类型」整个丢失。实测 -O2/-O3 下
+//      `struct {unsigned b:3; unsigned pad:29;} v; v.b=7; v.pad=5; v.b+=1;` 得
+//      `b=0 pad=6`（gcc 是 `pad=5`），gcc-torture pr55750 的 `arr[i].n++` 在 -O2 abort。
+//      `bitfield_inc/expected.s` 那份快照当年是从这条误编译的输出冻结的，所以反汇编
+//      oracle 一直是绿的 —— 判据只能建在运行期与 gcc 的对拍上。
+//
+//   10. 写侧的「赋值表达式的值」必须有指令真的产出它。`lower_lvalue`（`src/ssa/lower.rs`）
+//       把 `*p = v` / `a[i] = v` / `p->f = v` 降成一条写指令（`dest` 为空），然后
+//       `b.fresh("store"|"idxstore"|"memstore", ty)` 造一个临时变量当**整个赋值表达式的值**
+//       返回 —— 而没有任何指令写过它。重建阶段为它分配栈槽、只读不写 ⇒ -O2/-O3 读回栈垃圾：
+//       实测 `long L(void){ ui[0]=0; vv=0x100000005ULL; return (ui[0] = vv); }` gcc 给 5、
+//       dcc 给 317169664；25 个形态（解引用/下标/多维/成员点与箭头/联合体/位域/窄类型/
+//       浮点转整数/链式赋值/作实参）在 -O2 与 -O3 全错，-O0/-O1（AST 通道）全对。
+//       C11 6.5.16p3 要的正是「左值转换后的左操作数」，所以修法是写完紧跟一条同址同类型的
+//       载入，用它的 `dest` 当结果值。
+//       同一条夹具还守住 codegen 侧的一处字节序：`movss/movsd` 的 REX.B 必须排在 legacy
+//       前缀（F2/F3）**之后**，前缀之后 REX 才紧邻操作码；反着发时 REX 作废、基址从 %r8
+//       退化回 %rax，实测 `return r + (int)l.d;` 逐档段错误。
+//
 // 全部通过 `run_gcc_cross_check_opt` 运行：带 `-O` 档位、带超时、与 gcc 逐字节对照。
 // 共用的逐档对照助手 `assert_all_levels_match_gcc`、汇编归一助手 `asm_body` 与
 // 开关对照助手 `dcc_asm_with_pipe` 都住在 `tests/common/harness.rs`。
@@ -126,6 +147,38 @@ fn ssa_mem_rmw_matches_gcc_at_all_levels() {
         "ssa-mem-rmw",
         include_str!("../fixtures/opt/ssa_mem_rmw.c"),
         "SSA 降级丢掉了内存左值的读—改—写（返回常量且不写内存）",
+    );
+}
+
+/// 位域左值的读—改—写逐档与 gcc 对照（见文件头第 9 条）。
+///
+/// 这条之所以独立成一条：`bitfield_inc/expected.s` 那份反汇编快照曾被从**误编译输出**
+/// 冻结下来（容器整宽度加 1），文本层 oracle 从此再也抓不到它。运行期与 gcc 对拍才
+/// 是唯一能立住判据的地方。
+#[test]
+fn ssa_bitfield_rmw_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "ssa-bitfield-rmw",
+        include_str!("../fixtures/opt/ssa_bitfield_rmw.c"),
+        "位域左值被按容器宽度做读—改—写（进位污染相邻位域、结果未归约到位域类型）",
+    );
+}
+
+/// 赋值表达式的**值**（C11 6.5.16p3：取左操作数左值转换后的值）逐档与 gcc 对照。
+///
+/// 守的是两个已观测的失效：
+///   1. `lower_lvalue` 的三个 store 分支只发 store、不发任何产值的指令，返回的
+///      `fresh()` 临时从未被 define ⇒ 重建后读**未初始化栈槽**。-O2/-O3 实测
+///      `return (ui[0]=vv)` 得到 317169664，gcc 给 5；25 个写侧形状全错。
+///   2. `movss/movsd` 的 REX.B 排在了 legacy 前缀（F2/F3）**之后**——前缀顺序是
+///      硬性编码规则，REX 必须紧邻操作码，否则 `41 F2 0F 10 00` 解码成
+///      `movsd (%rax),%xmm0`（REX 被丢弃），基址寄存器读错，各档位一律段错误。
+#[test]
+fn ssa_assign_value_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "ssa-assign-value",
+        include_str!("../fixtures/opt/ssa_assign_value.c"),
+        "写侧赋值表达式的值没有指令产出（-O2/-O3 读未初始化栈槽）；movss/movsd 的 REX.B 排在 legacy 前缀之后",
     );
 }
 
@@ -1011,4 +1064,161 @@ int main(void) { long r = f(7); return (int)(r % 251); }
         );
     }
     let _ = fs::remove_file(&sp);
+}
+
+/// 嵌套聚合成员赋值（`o.a.b = v` / `p->u.s = v` / `(*pq).o.in = v`）逐档与 gcc 对照。
+///
+/// 守的是同一条机器上的三个已观测失效（sqlite `yy_shift` 是第一例，实测把整条
+/// 解析器栈写坏后崩溃）：
+///   1. 字段是聚合时 `MemberStore` 的基址按**右值**降级 —— struct/union 基址于是变成
+///      整块拷贝进帧临时，写落在副本上（`yytos->minor.yy0 = yyMinor` 丢写）；
+///   2. 箭头分支前置的 `Load{e: p, ty: fld_ty}` 把字段按值读进临时再 dot 写，同样丢写；
+///   3. 解引用基址 `(*pq).o` 经 `lower_expr` 是聚合拷贝，被当成「地址」用之后，
+///      codegen 从对象头 8 字节取指针再写 ⇒ 段错误（夹具 `three_levels`）。
+/// 三处现在共用 `member_base_is_ptr_operand` + `lower_lvalue_base_addr` +
+/// `lower_member_addr` 这一套地址归一化（政策见各函数注释）。
+#[test]
+fn agg_member_store_base_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "agg-member-store-base",
+        include_str!("../fixtures/opt/agg_member_store_base.c"),
+        "聚合成员写的基址被按右值物化（写进帧临时）/ 解引用基址被当指针用（段错误）",
+    );
+}
+
+/// 指针字段的下标基址（`&p->zText[k]` / `p->zText[k] = c`）逐档与 gcc 对照。
+///
+/// `lower_lvalue_base_addr` 的 `Member` 分支一律委托 `lower_member_addr` 时，
+/// 把「字段地址」当成了「下标基址」：`&p->zText[k]` 变成结构体地址+偏移+k，
+/// `sqlite3_str_append` 的 `memcpy` 于是把整条字符串写进 `StrAccum` 自己身上，
+/// `zText` 被覆盖后 `sqlite3StrAccumFinish` 解引用垃圾 ⇒ `sqlite3_mprintf` 全崩。
+/// 字段是聚合/数组时字段地址才是对的（`agg-member-store-base` 那条），
+/// 所以这个分支必须按**字段类型**分流。
+#[test]
+fn member_ptr_subscript_base_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "member-ptr-subscript-base",
+        include_str!("../fixtures/opt/member_ptr_subscript_base.c"),
+        "指针字段的下标基址被按字段地址物化（memcpy 写进结构体自身）",
+    );
+}
+
+/// `&&` / `||` 的右操作数被落到守卫之外（SSA 通道）逐档与 gcc 对照。
+///
+/// SSA 通道不为短路求值造块：整个条件是一棵交给重建的表达式树，树里每个值都必须内联
+/// 进树。某个值被「落到」块里的独立赋值（`is_addr_producer` 的 `MemberAddr`/`IndexAddr`
+/// 永不内联，内联窗口判据又因它自己的定义点而放弃）时，它按块序发射在带守卫的分支
+/// **之前** ⇒ 被守卫保护的那次求值提前发生：`count(*)` 的
+/// `pList && pList->nExpr > db->aLimit[..]`（`pList` 恒为 0）直接段错误。
+/// 处置是 correct-by-bail：整函数退出 SSA 往返，保留 AST 原形。
+#[test]
+fn lazy_guard_and_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "lazy-guard-and",
+        include_str!("../fixtures/opt/lazy_guard_and.c"),
+        "短路右操作数被落到守卫之前求值（空指针段错误 / 走进错误分支）",
+    );
+}
+
+/// 汇聚块被一条臂吃掉后，兄弟臂丢掉尾部 `return`（`%eax` 留着旧值）逐档与 gcc 对照。
+///
+/// 重建的直线守卫用 `cx.visited` 保证「一个块只展开一次」。它的正确性前提是：块一旦
+/// 被某条臂展开，其支配者集合里的其它臂走到这里时可以直接跳过。`else if` 阶梯破坏这个
+/// 前提——`branch_join` 只沿 `Jump` 链找汇聚点，而提前 `Ret` 的臂只剩虚拟 EXIT 这个
+/// 后支配者 ⇒ 阶梯的 join 为 `None`，第一条臂把尾部共享块就地内联并标记 visited，
+/// 兄弟臂再走到它就直接返回，那条 `return <val>` 从函数里消失，`%rax` 留着上一次求值
+/// 的旧值。实测 `decodeFlags()`（sqlite3.c）对内部页返回 11 而非 5 ⇒
+/// `btreeInitPage` 失败 ⇒ 凡表 B-tree 有内部根页的库都报 "database disk image is
+/// malformed"。处置：`Ret` 终结块（无后继 ⇒ 重展开有界）允许再次展开。
+#[test]
+fn join_return_ladder_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "join-return-ladder",
+        include_str!("../fixtures/opt/join_return_ladder.c"),
+        "汇聚块被一条臂展开后，兄弟臂跳过它并丢掉尾部 return（%eax 留着旧值）",
+    );
+}
+
+/// 两条臂**各自又是一层分支**时，If 之后的公共尾部被第一条臂吃掉、兄弟臂整段丢失，
+/// 连 `return` 的取值都不再物化（`%rax` 留着上一条指令的旧值）—— 逐档与 gcc 对照。
+///
+/// 与上一条同族，但落空的是 `branch_join` 的全部三条判据：臂不是 `Jump` 直链
+/// （`walk_to_join` 在臂的第一条 `Branch` 就返回 `None`）、臂内有早退 `Ret`
+/// （`from` 没有真实后支配者，ipdom 只剩虚拟 EXIT 占位名，被上层过滤成 `None`）、
+/// 非对称可达那步也没有候选块可用 ⇒ `join=None`，两条臂自由展开，公共尾部只存在于
+/// 第一个到达它的那条臂里。实测 `sqlite3SrcListAppend()`（sqlite3.c）正是这个形状：
+/// else 臂丢掉 `pItem=&pList->a[…]` 与 `return pList`，把 `nSrc` 当指针返回，
+/// `selectExpander` 随后解引用空 SrcList ⇒ 任何两表 JOIN 段错误。
+/// 处置：`arm_join` / `side_only_exits` 允许穿过臂自己的嵌套分支找汇聚块。
+#[test]
+fn nested_arm_join_tail_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "nested-arm-join-tail",
+        include_str!("../fixtures/opt/nested_arm_join_tail.c"),
+        "两臂各自又是分支时找不到汇聚块，兄弟臂丢掉 If 之后的公共尾部与 return 取值",
+    );
+}
+
+/// `||` / `&&` 右操作数带副作用或可陷获时，SSA builder 必须整函数退回 AST 通道。
+///
+/// SSA 通道不为短路求值造块，右操作数会被急切求值。`Expr::Binop` lowering 因此对
+/// `&&`/`||` 检查右操作数降级出的指令纯度（`emitted_is_pure`，与三元 `Cond` 同判据）：
+/// store / load / 调用 / 除法 ⇒ `unsupported`。实测 sqlite `walIndexPage` 的
+/// `nWiData<=iPage || (*ppPage = apWiData[iPage])==0`：`apWiData==NULL` 时右操作数
+/// 照样求值，`mov (%rax),%rax` 打空 ⇒ WAL 模式必崩（-O0/-O1 与 gcc 正常）。
+#[test]
+fn short_circuit_rhs_impure_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "short-circuit-rhs-impure",
+        include_str!("../fixtures/opt/short_circuit_rhs_impure.c"),
+        "|| 右操作数带 store/load 被急切求值：左真时打空或写不该写的槽",
+    );
+}
+
+/// `&(ptr_array[0][k])` 的下标基址必须取指针**值**而不是槽地址。
+///
+/// `lower_lvalue_base_addr` 旧实现对任意内层 `Index` 都发 `IndexAddr`；那只对结果类型
+/// 是对象（数组行/结构体/联合体）成立。实测 sqlite `walCkptInfo` 的
+/// `&(pWal->apWiData[0][sizeof(WalIndexHdr)/2])` 少一次取指针值的加载，
+/// 返回 `apWiData+96` 而非 `apWiData[0]+96`，`WalCkptInfo` 的写踩坏堆 ⇒
+/// `malloc(): invalid next size` 中止。结构体元素（`&db->aDb[0].pBt`）仍走 IndexAddr，
+/// 否则元素被按值拷进帧临时、写落进副本（sqlite3BtreeOpen 段错误）—— 两侧都由本夹具钉住。
+#[test]
+fn index_ptr_base_double_index_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "index-ptr-base-double-index",
+        include_str!("../fixtures/opt/index_ptr_base_double_index.c"),
+        "指针数组元素的双重下标取址被算成槽地址+偏移：写落进指针数组旁边的堆内存",
+    );
+}
+
+/// 函数局部 `static` 指针变量的字符串初始化器必须发射 .rodata 重定位。
+///
+/// `register_static_global` 旧实现只 `resize` 出 sz 个零字节、不发重定位 ⇒ 局部 static
+/// 指针恒为 NULL（各级别均复现；文件作用域全局走的是另一条正确路径）。实测 sqlite
+/// `shell.c` 的 `zAutoColumn`：`zTabFill` 为 NULL，`.import` 自动列名路径上
+/// `sqlite3_prepare_v2(db, NULL, ...)` 返回 SQLITE_MISUSE，`rc_err_oom_die` 断言中止。
+#[test]
+fn static_local_ptr_init_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "static-local-ptr-init",
+        include_str!("../fixtures/opt/static_local_ptr_init.c"),
+        "函数局部 static 指针的初始化器只填零不发重定位：指针恒为 NULL",
+    );
+}
+
+/// 投机执行（P14 specex）的上提切片不得跨过「读写同一基名」的指令，判据按**基名**比。
+///
+/// `slice_is_movable` 旧实现拿 SSA 版本名比（只在 version==0 时等于基名）且只查一个
+/// 方向。重建按基名塌缩成可变量后，被跨过的读会看见另一个版本的值。实测 sqlite
+/// `sqlite3GetVarint`：`b = p[1]`（读 `p.0`）被切片中 `p += 2`（写 `p.1`）的上提跨过 ⇒
+/// 4 字节 varint 解码错，症状是 18000+ 行 bulk insert 到 INTEGER PRIMARY KEY 表报
+/// "UNIQUE constraint failed"（rowid ≥ 16384 走 3/4 字节 varint 路径）。
+#[test]
+fn specex_base_name_cross_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "specex-base-name-cross",
+        include_str!("../fixtures/opt/specex_base_name_cross.c"),
+        "投机上提跨过对同一基名的读写：塌缩后读到另一版本的值（varint 解码错）",
+    );
 }

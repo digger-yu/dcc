@@ -57,13 +57,14 @@ impl Codegen {
         // (emit_insn 已经把 (pc, rec) 写进 insn_records, -S 渲染器从那里读 gas_text).
         // encode() 返回 None (无法编码该形态) 时自动落回手写分支, 零风险渐进迁移.
         // gas_text 用用户原文 gas_line_full, 保证 -S 输出逐字节不变 (G10 门禁).
-        let __mapped = if let Some(op) = crate::codegen::x86_64::asm::to_typed::try_map_typed(mnemonic, ops) {
-            let mut rec = Insn::new(op, &[]);
-            rec.gas_text = Some(gas_line_full.to_string());
-            self.emit_insn(&rec)
-        } else {
-            false
-        };
+        let __mapped =
+            if let Some(op) = crate::codegen::x86_64::asm::to_typed::try_map_typed(mnemonic, ops) {
+                let mut rec = Insn::new(op, &[]);
+                rec.gas_text = Some(gas_line_full.to_string());
+                self.emit_insn(&rec)
+            } else {
+                false
+            };
         if __mapped {
             return;
         }

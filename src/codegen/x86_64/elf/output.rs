@@ -155,7 +155,9 @@ impl Codegen {
             }
             // 计算本条 asm 指令覆盖的字节区间 [pc, pc_end).
             // bytes 即 Raw::bytes, 是本次 emit_asm_instr 发射的整段.
-            let Some(self_bytes) = insn.encode_bytes() else { continue };
+            let Some(self_bytes) = insn.encode_bytes() else {
+                continue;
+            };
             let pc_end = pc + self_bytes.len() as u64;
             // 区间起点直接登记.
             gas_text_map.insert(*pc, g.clone());

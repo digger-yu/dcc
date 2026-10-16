@@ -13,8 +13,7 @@
 mod encode_matrix {
     use crate::codegen::shared::asm_operand::Width;
     use crate::codegen::x86_64::opcode::{
-        AluOp, MemOperand, Operand, ShiftAmount, ShiftOp, SimdWidth, StackOp, UnaryOp,
-        X86_64Opcode,
+        AluOp, MemOperand, Operand, ShiftAmount, ShiftOp, SimdWidth, StackOp, UnaryOp, X86_64Opcode,
     };
 
     // ---- helpers ----
@@ -56,7 +55,7 @@ mod encode_matrix {
                     b
                 );
                 b
-            }
+            },
             None => panic!("{}: encode() 返回 None (未登记盲区)", ctx),
         }
     }
@@ -123,8 +122,14 @@ mod encode_matrix {
                         // 关键回归点: scale=8 的所有组合都必须 Some.
                         if let Some((_, s)) = ix {
                             if s == 8 {
-                                assert_encode_some(&op_load, format!("{} [scale=8 回归]", ctx_load).as_str());
-                                assert_encode_some(&op_store, format!("{} [scale=8 回归]", ctx_store).as_str());
+                                assert_encode_some(
+                                    &op_load,
+                                    format!("{} [scale=8 回归]", ctx_load).as_str(),
+                                );
+                                assert_encode_some(
+                                    &op_store,
+                                    format!("{} [scale=8 回归]", ctx_store).as_str(),
+                                );
                             }
                         }
                         cases += 2;
@@ -288,10 +293,10 @@ mod encode_matrix {
         // r8b..r15b: src=8..15, dst=0..3. 必发 REX.B=0x01 扩展 r/m.
         for (dst, src, expect) in [
             (0u8, 8u8, vec![0x44, 0x00, 0xC0] /* add r8b, al */),
-            (1, 9, vec![0x44, 0x00, 0xC9]), // add r9b, cl
+            (1, 9, vec![0x44, 0x00, 0xC9]),  // add r9b, cl
             (2, 10, vec![0x44, 0x00, 0xD2]), // add r10b, dl
             (3, 11, vec![0x44, 0x00, 0xDB]), // add r11b, bl
-            (8, 0, vec![0x41, 0x00, 0xC0]), // add al, r8b (REX.B 扩展 dst=r/m)
+            (8, 0, vec![0x41, 0x00, 0xC0]),  // add al, r8b (REX.B 扩展 dst=r/m)
         ] {
             let o = X86_64Opcode::AluRm {
                 op: AluOp::Add,
@@ -504,7 +509,8 @@ mod encode_matrix {
     #[test]
     fn lea_b64_mem_all_shapes() {
         let bases = [3u8, 4, 5, 12, 13];
-        let indexes: &[Option<(u8, u8)>] = &[None, Some((1, 1)), Some((1, 2)), Some((1, 4)), Some((1, 8))];
+        let indexes: &[Option<(u8, u8)>] =
+            &[None, Some((1, 1)), Some((1, 2)), Some((1, 4)), Some((1, 8))];
         let disps = [0i32, 0x7F, 0x80, -4];
         for &b in &bases {
             for &ix in indexes {
@@ -543,9 +549,7 @@ mod encode_matrix {
                     width: Width::B64,
                     dst: reg(r, Width::B64),
                 };
-                let b = o.encode().unwrap_or_else(|| {
-                    panic!("{:?} r{} B64", op, r)
-                });
+                let b = o.encode().unwrap_or_else(|| panic!("{:?} r{} B64", op, r));
                 // push: 1 或 2 字节; pop 同.
                 assert!(b.len() == 1 || b.len() == 2);
             }
@@ -556,15 +560,21 @@ mod encode_matrix {
     fn unary_rm_reg_all_widths() {
         for r in 0u8..=15 {
             for w in [Width::B8, Width::B16, Width::B32, Width::B64] {
-                for op in [UnaryOp::Inc, UnaryOp::Dec, UnaryOp::Not, UnaryOp::Neg, UnaryOp::Mul] {
+                for op in [
+                    UnaryOp::Inc,
+                    UnaryOp::Dec,
+                    UnaryOp::Not,
+                    UnaryOp::Neg,
+                    UnaryOp::Mul,
+                ] {
                     let o = X86_64Opcode::UnaryRm {
                         op,
                         width: w,
                         dst: reg(r, w),
                     };
-                    let b = o.encode().unwrap_or_else(|| {
-                        panic!("unary {:?} w={:?} r{}", op, w, r)
-                    });
+                    let b = o
+                        .encode()
+                        .unwrap_or_else(|| panic!("unary {:?} w={:?} r{}", op, w, r));
                     assert!(b.len() >= 2 && b.len() <= 5);
                 }
             }
@@ -581,9 +591,9 @@ mod encode_matrix {
                         dst: reg(dst, w),
                         src: reg(src, w),
                     };
-                    let b = o.encode().unwrap_or_else(|| {
-                        panic!("imul w={:?} dst={} src={}", w, dst, src)
-                    });
+                    let b = o
+                        .encode()
+                        .unwrap_or_else(|| panic!("imul w={:?} dst={} src={}", w, dst, src));
                     assert!(b.len() >= 3 && b.len() <= 6);
                 }
             }
@@ -607,8 +617,11 @@ mod encode_matrix {
                         let _ = expect_first;
                         let _ = assert_encode_some(
                             &o,
-                            format!("gpr_xmm to_xmm={} w={:?} gpr={} xmm={}", to_xmm, w, gpr, xmm_reg)
-                                .as_str(),
+                            format!(
+                                "gpr_xmm to_xmm={} w={:?} gpr={} xmm={}",
+                                to_xmm, w, gpr, xmm_reg
+                            )
+                            .as_str(),
                         );
                     }
                 }

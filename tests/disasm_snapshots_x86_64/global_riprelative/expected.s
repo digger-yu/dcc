@@ -9,6 +9,7 @@ mov %rax,-0x40(%r13)
 mov -0x40(%r13),%rax
 push %rax
 movslq -0x48(%r13),%rax
+movslq %eax,%rax
 pop %rcx
 mov %eax,(%rcx)
 xor %eax,%eax

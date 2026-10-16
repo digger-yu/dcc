@@ -666,11 +666,21 @@ impl Insn {
         out.push(v);
         use crate::codegen::x86_64::emit::gas::REG64;
         let mnemonic = match op & 0x7 {
-            0 => "add", 1 => "or", 4 => "and", 5 => "sub", 6 => "xor", 7 => "cmp",
+            0 => "add",
+            1 => "or",
+            4 => "and",
+            5 => "sub",
+            6 => "xor",
+            7 => "cmp",
             _ => "/* alu */",
         };
-        let disp_str = if disp_len == 1 { format!("{:#x}", disp_bytes[0] as i8) } else { format!("{:#x}", i32::from_le_bytes(disp_bytes)) };
-        let gas = format!("{} {},{}({})", mnemonic, imm as i8, disp_str, REG64[(base & 15) as usize]);
+        let disp_str = if disp_len == 1 {
+            format!("{:#x}", disp_bytes[0] as i8)
+        } else {
+            format!("{:#x}", i32::from_le_bytes(disp_bytes))
+        };
+        let gas =
+            format!("{} {},{}({})", mnemonic, imm as i8, disp_str, REG64[(base & 15) as usize]);
         let mut insn = Self::raw_bytes(&out);
         insn.gas_text = Some(gas);
         insn
@@ -702,10 +712,19 @@ impl Insn {
         out.extend_from_slice(&imm32);
         use crate::codegen::x86_64::emit::gas::REG64;
         let mnemonic = match op & 0x7 {
-            0 => "add", 1 => "or", 4 => "and", 5 => "sub", 6 => "xor", 7 => "cmp",
+            0 => "add",
+            1 => "or",
+            4 => "and",
+            5 => "sub",
+            6 => "xor",
+            7 => "cmp",
             _ => "/* alu */",
         };
-        let disp_str = if disp_len == 1 { format!("{:#x}", disp_bytes[0] as i8) } else { format!("{:#x}", i32::from_le_bytes(disp_bytes)) };
+        let disp_str = if disp_len == 1 {
+            format!("{:#x}", disp_bytes[0] as i8)
+        } else {
+            format!("{:#x}", i32::from_le_bytes(disp_bytes))
+        };
         let gas = format!("{} {},{}({})", mnemonic, imm, disp_str, REG64[(base & 15) as usize]);
         let mut insn = Self::raw_bytes(&out);
         insn.gas_text = Some(gas);
@@ -739,7 +758,11 @@ impl Insn {
         out.extend_from_slice(&disp_bytes[..disp_len]);
         out.extend_from_slice(&imm32);
         use crate::codegen::x86_64::emit::gas::REG64;
-        let disp_str = if disp_len == 1 { format!("{:#x}", disp_bytes[0] as i8) } else { format!("{:#x}", i32::from_le_bytes(disp_bytes)) };
+        let disp_str = if disp_len == 1 {
+            format!("{:#x}", disp_bytes[0] as i8)
+        } else {
+            format!("{:#x}", i32::from_le_bytes(disp_bytes))
+        };
         let gas = format!("mov ${},{}({})", imm, disp_str, REG64[(base & 15) as usize]);
         let mut insn = Self::raw_bytes(&out);
         insn.gas_text = Some(gas);
@@ -945,10 +968,22 @@ impl Insn {
     pub fn short_jump_rel8(cc_byte: u8, rel8: i8) -> Self {
         let bytes = [cc_byte, rel8 as u8];
         let cc_name = match cc_byte & 0x0F {
-            0x0 => "jo", 0x1 => "jno", 0x2 => "jb", 0x3 => "jae",
-            0x4 => "je", 0x5 => "jne", 0x6 => "jbe", 0x7 => "ja",
-            0x8 => "js", 0x9 => "jns", 0xA => "jp", 0xB => "jnp",
-            0xC => "jl", 0xD => "jge", 0xE => "jle", 0xF => "jg",
+            0x0 => "jo",
+            0x1 => "jno",
+            0x2 => "jb",
+            0x3 => "jae",
+            0x4 => "je",
+            0x5 => "jne",
+            0x6 => "jbe",
+            0x7 => "ja",
+            0x8 => "js",
+            0x9 => "jns",
+            0xA => "jp",
+            0xB => "jnp",
+            0xC => "jl",
+            0xD => "jge",
+            0xE => "jle",
+            0xF => "jg",
             _ => "jcc",
         };
         let gas = format!("{} {}", cc_name, rel8);
@@ -1101,21 +1136,18 @@ impl Insn {
     /// P11 Bucket W: rol r16, imm8 (66 C1 /0 ib). Used for SSO 2-byte
     /// byte-swap: rol cx, 8 (or any other r16).
     pub fn rol_reg_imm8_b16(reg_idx: u8, imm8: u8) -> Self {
-        let mut rex: u8 = 0;
-        let mut body = Vec::with_capacity(5);
-        body.push(0x66);
+        let mut out = Vec::with_capacity(5);
+        // Mandatory prefix 0x66 must precede the REX prefix; placing REX
+        // before 0x66 makes the decoder treat 0x66 as part of the opcode
+        // stream (it then rotates %cx instead of the intended r8-r15).
+        out.push(0x66);
         if reg_idx >= 8 {
-            rex = 0x41;
+            out.push(0x41);
         }
-        body.push(0xC1);
+        out.push(0xC1);
         // modrm: mod=11, reg field=/0 (rol), r/m=reg_idx.
-        body.push(0xC0 | (reg_idx & 0x7));
-        body.push(imm8);
-        let mut out = Vec::with_capacity(body.len() + 1);
-        if rex != 0 {
-            out.push(rex);
-        }
-        out.extend_from_slice(&body);
+        out.push(0xC0 | (reg_idx & 0x7));
+        out.push(imm8);
         Insn::raw_bytes(&out)
     }
 
@@ -2066,6 +2098,11 @@ mod tests {
         assert_eq!(Insn::rol_reg_imm8_b16(1, 8).encode_bytes(), Some(vec![0x66, 0xC1, 0xC1, 0x08]));
         // rol ax, 8: 66 C1 C0 08
         assert_eq!(Insn::rol_reg_imm8_b16(0, 8).encode_bytes(), Some(vec![0x66, 0xC1, 0xC0, 0x08]));
+        // rol r9w, 8: 66 41 C1 C1 08 (0x66 must come before REX)
+        assert_eq!(
+            Insn::rol_reg_imm8_b16(9, 8).encode_bytes(),
+            Some(vec![0x66, 0x41, 0xC1, 0xC1, 0x08])
+        );
     }
 
     #[test]
@@ -2449,15 +2486,9 @@ mod tests {
     #[test]
     fn push_mem_disp8_basic() {
         // push [rsp+0]: FF 74 24 00 (mod=01, /6, r/m=4 SIB, sib=24, disp8=0)
-        assert_eq!(
-            Insn::push_mem_disp8(4, 0).encode_bytes(),
-            Some(vec![0xFF, 0x74, 0x24, 0x00]),
-        );
+        assert_eq!(Insn::push_mem_disp8(4, 0).encode_bytes(), Some(vec![0xFF, 0x74, 0x24, 0x00]),);
         // push [rsp+8]: FF 74 24 08
-        assert_eq!(
-            Insn::push_mem_disp8(4, 8).encode_bytes(),
-            Some(vec![0xFF, 0x74, 0x24, 0x08]),
-        );
+        assert_eq!(Insn::push_mem_disp8(4, 8).encode_bytes(), Some(vec![0xFF, 0x74, 0x24, 0x08]),);
     }
 
     /// P11 Bucket P11R: simd_mov_rip (movss/movsd xmm, [rip+disp32]).

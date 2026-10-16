@@ -335,7 +335,7 @@ impl Codegen {
                     )); // xchg rcx, src
                     let op_field = (sub >> 3) & 0x07;
                     self.emit_insn(&Insn::shift_reg_cl_b64(op_field, src)); // shl/shr src, cl
-                    // mov rcx, src: 手写用 0x8B (mov r/m64, r64 反向), 非 0x89 形式; 保留 raw.
+                                                                            // mov rcx, src: 手写用 0x8B (mov r/m64, r64 反向), 非 0x89 形式; 保留 raw.
                     let mut rex = 0x48u8;
                     if src >= 8 {
                         rex |= 0x41;
@@ -625,7 +625,7 @@ impl Codegen {
         // 下方 _ 分支会被 0 填充 (char buf[][8] = {"hello"} 元素全为 0)。
         // 指针类型由调用方在 Ptr 上下文特判 (emit_string_ptr_slot);
         // 此处 (char 数组元素等) 返回内容字节。
-        if let Expr::String { data, .. } = e {
+        if let Expr::String { data, .. } = const_eval::unwrap_string_cast(e) {
             // 截断到 width (如 char[3] = "1234" 只取前 3 字节 "123")
             let mut d = data.clone();
             if width > 0 && d.len() > width {

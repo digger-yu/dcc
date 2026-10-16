@@ -57,12 +57,9 @@ mov %r14,-0x20(%r13)
 mov %r15,-0x28(%r13)
 mov %rdi,-0x68(%r13)
 mov $0x0,%rax
+movslq %eax,%rax
 mov %eax,%r12d
-movslq %r12d,%rax
-mov %rax,%r14
-mov $0x0,%r8
-add %r8,%r14
-mov %r14,%rax
+mov $0x0,%rax
 movslq %eax,%rax
 mov %eax,%ebx
 movslq %ebx,%rax
@@ -84,6 +81,7 @@ movslq %r12d,%r8
 add %r8,%r14
 mov %r14,%rax
 movslq %eax,%rax
+movslq %eax,%rax
 mov %eax,%r12d
 movslq %ebx,%rax
 mov %rax,-0x30(%r13)
@@ -100,6 +98,7 @@ mov %rax,%r14
 mov $0x0,%r8
 add %r8,%r14
 mov %r14,%rax
+movslq %eax,%rax
 movslq %eax,%rax
 mov %eax,%ebx
 movslq %ebx,%rax

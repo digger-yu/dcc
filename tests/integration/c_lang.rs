@@ -1817,8 +1817,23 @@ fn m2_2_struct_layout() {
     assert_eq!(code, 0, "struct layout checks failed (exit={code})");
 }
 
-/// Bitfield runtime: read/write/sizeof for signed, unsigned,
-/// mixed, cross-container, and small container bitfields.
+/// 前向声明的 struct 在使用点回填完整定义 (运行期)。
+/// struct 成员 / 早于定义的指针数组里的 `Late *` 是冻结副本, 占位不回填
+/// 就让元素大小为 0, `p[i]` 全塌到 `p[0]` (SQLite 触发器 NEW./OLD.)。
+#[test]
+#[cfg(unix)]
+fn incomplete_fwd_decl_member_stride_runtime() {
+    let src = include_str!("../fixtures/c/incomplete_fwd_member_stride.c");
+    let (out, code) = run_host_link_and_run("incomplete-fwd-stride", src);
+    assert!(
+        out.status.success(),
+        "incomplete_fwd compile failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(code, 0, "forward-decl stride checks failed (exit=line {code})");
+}
+
+/// Bitfield runtime: read/write/sizeof for signed, unsigned,/// mixed, cross-container, and small container bitfields.
 #[test]
 #[cfg(unix)]
 fn bitfield_runtime() {
@@ -3755,4 +3770,32 @@ int main(void) {
             "{flag}: 聚合拷贝与 varargs/多参调用共存时必须与 gcc 同值（期望 216，实取自 gcc 实测）"
         );
     }
+}
+
+/// 数组基址上的 `->` 带字段真实类型（`gd.a->z` / `ga->z` / `dp->a->db`），逐档与 gcc 对照。
+///
+/// 守的是一个前端类型缺陷：`type_of_member`（`src/parser.rs`）在 `is_arrow` 时只展开
+/// `Type::Ptr`，基址是**数组**时落进 `_ => int_t()` ⇒ `Member` 与外层 `Assign` 的 `ty`
+/// 都是 `int`。字段偏移由另一份同构逻辑（codegen `member_target_ty`，它展开数组）算，
+/// 所以布局是对的、类型是错的：64 位指针右值被按 `int` 左值归约成低 32 位符号扩展
+/// （`reduce_assign_value_to_lvalue` 的 `(4, true) => movslq` 分支）。
+///
+/// 为什么判据建在运行期：这类错值在文本层没有任何特征（偏移、寄存器、指令条数都正常，
+/// 只是多一条合法形状的 `movslq`），反汇编快照抓不到；而它是**每个档位**都错（错在 AST
+/// 通道与 SSA 通道共用的类型字段上），所以四档逐个与 gcc 对拍是唯一站得住的 oracle。
+/// 触发场景是真实的：sqlite3 shell `main` 里 `p->pAuxDb` 形态的存储被写坏，
+/// `open_db` 随即 SIGSEGV（rax = 0xffffffffffffe999）。
+///
+/// 同一个夹具顺带守 SSA 通道里成员基址物化的两侧边界（`src/ssa/build.rs` 的
+/// `member_base_is_ptr_operand`、`src/ssa/lower.rs` 的 `lower_lvalue`）：聚合基址必须
+/// 地址化（否则成员写进 `rep movsq` 的帧副本），指针基址必须保持取值形态（否则字段偏移
+/// 落在指针槽自己身上）。
+#[test]
+fn arrow_on_array_member_keeps_field_type_matches_gcc() {
+    harness::assert_all_levels_match_gcc(
+        "arrow-on-array-member",
+        include_str!("../fixtures/c/arrow_on_array_member.c"),
+        "数组基址上的 -> 把字段类型抹成 int，64 位指针存储被截成低 32 位符号扩展；\
+         成员基址的箭头/取值形态判据同族（聚合基址丢写、指针基址读错地方）",
+    );
 }

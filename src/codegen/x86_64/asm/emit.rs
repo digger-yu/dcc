@@ -274,7 +274,12 @@ impl Codegen {
         }
         for (i, binding) in bindings.iter().enumerate() {
             if binding.is_output && !binding.is_mem && i < outputs.len() {
-                self.writeback_asm_operand(&outputs[i], binding.reg, binding.xmm_width, binding.saved_inout_addr_reg);
+                self.writeback_asm_operand(
+                    &outputs[i],
+                    binding.reg,
+                    binding.xmm_width,
+                    binding.saved_inout_addr_reg,
+                );
             }
         }
         if clobbers.iter().any(|c| c == "memory") || volatile {
@@ -365,7 +370,12 @@ impl Codegen {
         // 控制流跳过此处的写回代码，变量保持初值 (GCC 语义)。
         for (i, binding) in bindings.iter().enumerate() {
             if binding.is_output && !binding.is_mem && i < outputs.len() {
-                self.writeback_asm_operand(&outputs[i], binding.reg, binding.xmm_width, binding.saved_inout_addr_reg);
+                self.writeback_asm_operand(
+                    &outputs[i],
+                    binding.reg,
+                    binding.xmm_width,
+                    binding.saved_inout_addr_reg,
+                );
             }
         }
         if clobbers.iter().any(|c| c == "memory") {

@@ -1401,6 +1401,25 @@ impl<'a> std::fmt::Display for ExprDebug<'a> {
     }
 }
 
+/// 剥掉「末端是字符串字面量」的强制转换链：`(u8*)" "` 与 `" "` 在静态
+/// 初始化槽里指向同一地址。只有末端确实是 `Expr::String` 时才剥，
+/// 其余转换原样返回，以免影响整型截断等语义。
+/// 静态数据发射器只认 `Expr::String` 形态，缺了这一步 `(T*)"x"` 初始化
+/// 的指针槽会被 0 填充（sqlite3.c trimFunc 的 `azOne = {(u8*)" "}`）。
+pub fn unwrap_string_cast(e: &Expr) -> &Expr {
+    match e {
+        Expr::Cast { e: inner, .. } => {
+            let stripped = unwrap_string_cast(inner);
+            if matches!(stripped, Expr::String { .. }) {
+                stripped
+            } else {
+                e
+            }
+        },
+        _ => e,
+    }
+}
+
 /// 编译期 `__builtin_object_size(ptr, type)` 求值。
 /// 未知时返回 `None`，调用方应回退为 `(size_t)-1`。
 pub fn object_size(ptr: &Expr, type_arg: i128) -> Option<i128> {

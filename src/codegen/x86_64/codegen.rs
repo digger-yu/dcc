@@ -617,6 +617,11 @@ pub struct ParallelEmitCtx {
     pub rodata: Vec<u8>,
     pub string_pool: HashMap<Vec<u8>, u64>,
     pub text_align: u64,
+    /// 完整 struct/union 定义表（名字 → 字段内联的完整类型）。worker 用
+    /// `Codegen::new` 重建时不带这张表，遇到「先前向声明、后定义」产生的不透明
+    /// 命名 struct（字段为空）就无法补全成员偏移，`->field` 会静默退化为偏移 0。
+    /// 故与 global_seg / static_local_map 一样必须跟着快照下行。
+    pub complete_struct_types: HashMap<String, Type>,
     /// 本 worker 的 `.L` 内部标号命名空间基址。
     ///
     /// `Codegen::next_label` 是 `.L<n>` 唯一的号源 (见 `instructions::fresh_label`),
@@ -1528,7 +1533,7 @@ impl Codegen {
         ));
         self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Syscall));
         self.emit_insn(&Insn::short_jump_rel8(0xEB, -2)); // jmp self
-                                                         // 静态局部变量分析 pass + 预注册到 data/bss
+                                                          // 静态局部变量分析 pass + 预注册到 data/bss
         self.static_local_map = crate::static_locals::analyze_static_locals(prog);
         self.pre_register_static_locals();
         self.collect_static_local_segments(prog);
@@ -2022,7 +2027,7 @@ impl Codegen {
                 let has_init = if static_addr_handled {
                     true
                 } else if let Some(init) = &v.init {
-                    match init {
+                    match const_eval::unwrap_string_cast(init) {
                         Expr::String { data, .. } => {
                             // 指针类型 (char *s = "hello"): 字符串进 rodata 池,
                             // data 节指针槽通过 .rodata section 符号 + R_X86_64_64
@@ -2112,6 +2117,33 @@ impl Codegen {
                                 };
                                 self.pending_data64_rels
                                     .push((ref_off, anon_name, None, rel_type, 0));
+                                true
+                            } else {
+                                false
+                            }
+                        },
+                        // 函数指针 / 外部符号初始化: T *fp = other_fn; 或
+                        // static T (*fp)(...) = other_fn;
+                        // 这里 init 直接是 Expr::Ident (不是 &ident), 需要发出
+                        // R_X86_64_64 重定位, 在链接时填入符号地址。
+                        Expr::Ident { name: ref_name, .. } => {
+                            if matches!(&v.ty, Type::Ptr(_) | Type::Func(..)) {
+                                let ref_off = self.data_section.len() as u64;
+                                let width = if sz <= 4 { 4 } else { 8 };
+                                self.data_section
+                                    .resize(ref_off as usize + sz.max(width), 0);
+                                let rel_type = if width == 4 {
+                                    crate::codegen::shared::elf::R_X86_64_32
+                                } else {
+                                    crate::codegen::shared::elf::R_X86_64_64
+                                };
+                                self.pending_data64_rels.push((
+                                    ref_off,
+                                    ref_name.name.clone(),
+                                    None,
+                                    rel_type,
+                                    0,
+                                ));
                                 true
                             } else {
                                 false

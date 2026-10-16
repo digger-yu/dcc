@@ -68,7 +68,12 @@ impl Codegen {
         self.emit_resolved_asm_lines(&resolved_lines, true);
         for (i, binding) in bindings.iter().enumerate() {
             if binding.is_output && !binding.is_mem && i < outputs.len() {
-                self.writeback_asm_operand(&outputs[i], binding.reg, binding.xmm_width, binding.saved_inout_addr_reg);
+                self.writeback_asm_operand(
+                    &outputs[i],
+                    binding.reg,
+                    binding.xmm_width,
+                    binding.saved_inout_addr_reg,
+                );
             }
         }
         let _ = clobbers;

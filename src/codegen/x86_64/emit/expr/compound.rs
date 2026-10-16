@@ -9,7 +9,7 @@
 
 use crate::ast::{Expr, InitItem, Type};
 use crate::codegen::x86_64::insn::Insn;
-use crate::codegen::x86_64::{Codegen, JumpKind};
+use crate::codegen::x86_64::{AggDst, Codegen, JumpKind};
 
 impl Codegen {
     /// gen_expr Comma 分支 (batch F3 逐字搬迁: Expr::Comma arm)。
@@ -27,6 +27,34 @@ impl Codegen {
             cond, then_, else_, ..
         } = e
         {
+            let ty = e.ty();
+            // 聚合三元 (`c ? s1 : s2`) 的值是一整个对象, 装不进 rax(:rdx)。
+            // 交付形态与复合字面量 / 链式赋值 / 语句表达式同一条轴
+            // (`rvalue_is_buffer_addr`): 选中支整块拷进帧内临时槽, dst = 槽地址。
+            // 旧分发把两支按标量落进 dst, 只有首个 8 字节是真数据, 其余是残值:
+            // lemon parser 的
+            // `yymsp[-10].minor.yy0 = (…n==0 ? yymsp[-7].minor.yy0 : yymsp[-6].minor.yy0);`
+            // 于是把 `Token.n` 留成垃圾, sqlite3 的 CREATE TRIGGER 按 7.9MB
+            // 调 sqlite3DbStrNDup (段错误或假 OOM)。
+            if matches!(ty, Type::Struct(..) | Type::Union(..)) && Self::value_is_whole_copy(&ty) {
+                let slot = self.alloc_sret_slot(ty.size());
+                let agg = AggDst::Local {
+                    off: slot,
+                    vla: None,
+                };
+                self.gen_expr(cond, Self::EVAL_BASE);
+                self.emit_truth_flags(&cond.ty());
+                let le = self.fresh_label();
+                let lend = self.fresh_label();
+                self.jmp_rel32(&le, JumpKind::Je);
+                self.gen_aggregate_assign_to(&agg, &ty, then_);
+                self.jmp_rel32(&lend, JumpKind::Jmp);
+                self.label(&le);
+                self.gen_aggregate_assign_to(&agg, &ty, else_);
+                self.label(&lend);
+                self.emit_lea_r13(dst, slot);
+                return;
+            }
             self.gen_expr(cond, Self::EVAL_BASE);
             self.emit_truth_flags(&cond.ty());
             let le = self.fresh_label();

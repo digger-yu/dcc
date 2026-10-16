@@ -11,8 +11,8 @@ use crate::codegen::x86_64::emit::gas::{
     modrm_disp_bytes as gas_modrm_disp_bytes, REG16 as GAS_REG16, REG32 as GAS_REG32,
     REG64 as GAS_REG64, REG8 as GAS_REG8, XMM as GAS_XMM,
 };
-use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::insn::BoolExpect;
+use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::opcode::{
     AluOp, MemOperand, Operand as OpcodeOperand, SimdArithOp, SimdWidth, X86_64Opcode,
 };
@@ -1522,7 +1522,8 @@ impl Codegen {
         if tls_exec {
             self.pending_tls_rels.push((disp32_pos, resolved));
         } else if elem_off != 0 {
-            self.pending_data_rels_with_off.push((disp32_pos, resolved, elem_off));
+            self.pending_data_rels_with_off
+                .push((disp32_pos, resolved, elem_off));
         } else {
             self.pending_data_rels.push((disp32_pos, resolved));
         }
@@ -2343,7 +2344,8 @@ impl Codegen {
                     crate::codegen::shared::asm_operand::Width::B8,
                     2,
                     6,
-                )).expect("typed-opcode: alu_rm_reg_reg");
+                ))
+                .expect("typed-opcode: alu_rm_reg_reg");
             }, // and dl, sil
             2 => {
                 self.emit_insn(&Insn::alu_rm_reg_reg(
@@ -2351,7 +2353,8 @@ impl Codegen {
                     crate::codegen::shared::asm_operand::Width::B16,
                     2,
                     6,
-                )).expect("typed-opcode: alu_rm_reg_reg");
+                ))
+                .expect("typed-opcode: alu_rm_reg_reg");
             }, // and dx, si
             4 => {
                 self.emit_insn(&Insn::alu_rm_reg_reg(
@@ -2359,7 +2362,8 @@ impl Codegen {
                     crate::codegen::shared::asm_operand::Width::B32,
                     2,
                     6,
-                )).expect("typed-opcode: alu_rm_reg_reg");
+                ))
+                .expect("typed-opcode: alu_rm_reg_reg");
             }, // and edx, esi
             _ => {
                 // P11: and rdx, rsi via typed opcode.
@@ -2378,7 +2382,8 @@ impl Codegen {
                         crate::codegen::shared::asm_operand::Width::B64,
                         2,
                         6,
-                    )).expect("typed-opcode: alu_rm_reg_reg"); // and rdx, rsi
+                    ))
+                    .expect("typed-opcode: alu_rm_reg_reg"); // and rdx, rsi
                 }
             },
         }
@@ -3141,7 +3146,8 @@ impl Codegen {
                     crate::codegen::shared::asm_operand::Width::B8,
                     2,
                     6,
-                )).expect("typed-opcode: alu_rm_reg_reg");
+                ))
+                .expect("typed-opcode: alu_rm_reg_reg");
             }, // or dl, sil
             2 => {
                 self.emit_insn(&Insn::alu_rm_reg_reg(
@@ -3149,7 +3155,8 @@ impl Codegen {
                     crate::codegen::shared::asm_operand::Width::B16,
                     2,
                     6,
-                )).expect("typed-opcode: alu_rm_reg_reg");
+                ))
+                .expect("typed-opcode: alu_rm_reg_reg");
             }, // or dx, si
             4 => {
                 self.emit_insn(&Insn::alu_rm_reg_reg(
@@ -3157,7 +3164,8 @@ impl Codegen {
                     crate::codegen::shared::asm_operand::Width::B32,
                     2,
                     6,
-                )).expect("typed-opcode: alu_rm_reg_reg");
+                ))
+                .expect("typed-opcode: alu_rm_reg_reg");
             }, // or edx, esi
             _ => {
                 // P11: or rdx, rsi via typed opcode.
@@ -3176,7 +3184,8 @@ impl Codegen {
                         crate::codegen::shared::asm_operand::Width::B64,
                         2,
                         6,
-                    )).expect("typed-opcode: alu_rm_reg_reg"); // or rdx, rsi
+                    ))
+                    .expect("typed-opcode: alu_rm_reg_reg"); // or rdx, rsi
                 }
             },
         }

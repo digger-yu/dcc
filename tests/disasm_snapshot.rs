@@ -175,10 +175,7 @@ fn run_case(name: &str) -> Result<(), String> {
         return Err(format!("{name}: missing expected.s (run snapshot generator)"));
     }
 
-    let tmp = std::env::temp_dir().join(format!(
-        "dcc-snap-{name}-{}.o",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("dcc-snap-{name}-{}.o", std::process::id()));
     let flags = read_config(&case_dir);
 
     let compile = Command::new(env!("CARGO_BIN_EXE_dcc"))
@@ -203,13 +200,18 @@ fn run_case(name: &str) -> Result<(), String> {
         .map_err(|e| format!("{name}: spawn objdump failed: {e}"))?;
     let _ = fs::remove_file(&tmp);
     if !dump.status.success() {
-        return Err(format!(
-            "{name}: objdump failed: {}",
-            String::from_utf8_lossy(&dump.stderr)
-        ));
+        return Err(format!("{name}: objdump failed: {}", String::from_utf8_lossy(&dump.stderr)));
     }
 
     let got = normalize_objdump(&String::from_utf8_lossy(&dump.stdout));
+    if std::env::var_os("DCC_UPDATE_DISASM_SNAPSHOTS").is_some() {
+        // 冻结新快照: 与 `scripts/update_error_snapshots.sh` (DCC_UPDATE_SNAPSHOTS)
+        // 同一政策 —— 先人工 review `git diff` 里这段反汇编确实是对目标机语义,
+        // 再提交。快照是「独立 oracle」, 从误编译输出冻结下来就再也抓不到它。
+        fs::write(&expected, format!("{got}\n"))
+            .map_err(|e| format!("{name}: write expected.s failed: {e}"))?;
+        return Ok(());
+    }
     let want = fs::read_to_string(&expected)
         .map_err(|e| format!("{name}: read expected.s failed: {e}"))?;
     let want = want.trim_end();
@@ -341,10 +343,6 @@ fn snapshot_cases_all_pass() {
         CASES.len()
     );
     if !failures.is_empty() {
-        panic!(
-            "{} snapshot case(s) failed:\n{}",
-            failures.len(),
-            failures.join("\n")
-        );
+        panic!("{} snapshot case(s) failed:\n{}", failures.len(), failures.join("\n"));
     }
 }

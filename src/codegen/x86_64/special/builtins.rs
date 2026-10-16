@@ -1606,28 +1606,28 @@ impl Codegen {
                             crate::codegen::x86_64::opcode::SimdWidth::SD
                         };
                         // 实部: [rdx] → xmm0 → [result_off] (不变)
-                    let ok1 = self.emit_insn(&Insn::simd_mov_mem_base(false, simd_w, 0, 2, 0));
-                    if !ok1 {
-                        // eprintln!("conjf lvalue encode ok1 (real load from rdx) failed result_off={result_off}");
-                    }
-                    self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
-                    // 虚部: [rdx+off] → xmm0 → flip → [result_off+inner_sz]
-                    let ok3 = self.emit_insn(&Insn::simd_mov_mem_base(
-                        false,
-                        simd_w,
-                        0,
-                        2,
-                        imag_off as i32,
-                    ));
-                    if !ok3 {
-                        // eprintln!("conjf lvalue encode ok3 (imag load from rdx+off) failed imag_off={imag_off}");
-                    }
-                    self.flip_sign_xmm(0, &inner);
-                    self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
-                    // 物化后必须把 rcx 从源地址改为 result_off 地址, 否则调用方
-                    // (store_complex_at_rcx 的 Complex RHS 分支) 会用 rcx 作为
-                    // dst 写分量, 覆写源 complex.
-                    self.emit_lea_r13(1, result_off);
+                        let ok1 = self.emit_insn(&Insn::simd_mov_mem_base(false, simd_w, 0, 2, 0));
+                        if !ok1 {
+                            // eprintln!("conjf lvalue encode ok1 (real load from rdx) failed result_off={result_off}");
+                        }
+                        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off);
+                        // 虚部: [rdx+off] → xmm0 → flip → [result_off+inner_sz]
+                        let ok3 = self.emit_insn(&Insn::simd_mov_mem_base(
+                            false,
+                            simd_w,
+                            0,
+                            2,
+                            imag_off as i32,
+                        ));
+                        if !ok3 {
+                            // eprintln!("conjf lvalue encode ok3 (imag load from rdx+off) failed imag_off={imag_off}");
+                        }
+                        self.flip_sign_xmm(0, &inner);
+                        self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x11], result_off + inner_sz);
+                        // 物化后必须把 rcx 从源地址改为 result_off 地址, 否则调用方
+                        // (store_complex_at_rcx 的 Complex RHS 分支) 会用 rcx 作为
+                        // dst 写分量, 覆写源 complex.
+                        self.emit_lea_r13(1, result_off);
                     } else {
                         // eprintln!("conjf: rvalue path taken, arg_ty={:?} result_off={result_off} inner_sz={inner_sz}", arg.ty());
                         self.gen_expr(arg, Self::EVAL_BASE);

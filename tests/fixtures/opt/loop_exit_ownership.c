@@ -5,6 +5,12 @@
  * （节点头即分支点）/ 无限循环 / break 落到零语句桩块 / 循环内 switch 的 case 出边 /
  * 多前驱 return 块。
  *
+ * 20/21 两形钉的是**出口边的枚举口径**：`while(1)` 的 then 区走不到 latch，自然循环体
+ * 不收它，而发射器会把它在到达边就地展开（连同它自己的 break 落点）。出口边若只按自然
+ * 循环体枚举，就看不见 `then.0 -> while.end` 这类边 —— 落点既当不上续体也没被展开，
+ * 它身上的 `return` 随整个落点丢掉（实测 -O2 返回残留在 %rax 的布尔值，
+ * `shell.c` 的 stdin 读行因此首行即返回 0）。见 `loop_exit_region`。
+ *
  * 判定以 gcc 为唯一权威：本文件先只打印，四档 stdout 与退出码逐字节对照 gcc。
  */
 #include <stdio.h>
@@ -297,6 +303,66 @@ static int f_kdec_both(int n)
         printf("\n");                                                                          \
     } while (0)
 
+#define PS(tag, fn)                                                                            \
+    do {                                                                                       \
+        printf("%s", tag);                                                                     \
+        for (int k_ = 0; k_ <= 6; k_++) {                                                      \
+            printf(" %ld", (long)(fn(k_) - g_buf));                                            \
+        }                                                                                      \
+        printf("\n");                                                                          \
+    } while (0)
+
+/* 20 then 区被就地展开、break 落到**多前驱** Ret 块（整数值）：
+ * `while(1)` 的 then 区走不到 latch ⇒ 自然循环体不收它，但发射器把它连同它自己的
+ * 出口边一起打印在 `while` 之内。落点既没被数进共享出口（当不上续体）也没被就地展开时，
+ * 它身上那句 `return v` 就整个丢掉，函数返回残留在 %rax 的短路 `&&` 布尔值。 */
+static int f_then_break_ret(int n)
+{
+    int v = 1000 + n;
+    int k = 0;
+    while (1) {
+        if (k == n) {
+            if (k > 0 && v % 2 == 0) {
+                v += 3;
+            }
+            break;
+        }
+        k++;
+        if (k > 5) {
+            break;
+        }
+    }
+    return v;
+}
+
+/* 21 同一形的**指针**返回（`shell.c` 的 local_getline 形状：缓冲基址必须原样交回）。
+ * 返回指针被丢成残留值时，`p - g_buf` 打印出一个巨大的负偏移，一眼可见。 */
+static char g_buf[64];
+
+static char *f_line_loop(int n)
+{
+    char *p = g_buf;
+    int k = 0;
+    while (1) {
+        if (k == n) {
+            if (k > 0 && p[k - 1] == 'q') {
+                k--;
+                if (k > 0 && p[k - 1] == '\r') {
+                    k--;
+                }
+            }
+            p[k] = '\0';
+            break;
+        }
+        p[k] = 'q';
+        k++;
+        if (k > 5) {
+            break;
+        }
+    }
+    return p;
+}
+
 int main(void)
 {
     P("early_ret      ", f_early_ret);
@@ -318,6 +384,8 @@ int main(void)
     P("kdec_plain     ", f_kdec_plain);
     P("kdec_break     ", f_kdec_break);
     P("kdec_both      ", f_kdec_both);
+    P("then_break_ret ", f_then_break_ret);
+    PS("line_loop      ", f_line_loop);
     printf("done\n");
     return 0;
 }

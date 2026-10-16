@@ -320,15 +320,111 @@ impl Builder {
         self.lower_expr_inner(e, None)
     }
 
-    /// 求一个**左值表达式**的地址操作数，专供 `IndexAddr` 的基址（`arr`）槽使用。
+    /// 成员访问的**基址操作数**是不是「存放指针值的临时变量」（而不是对象本身）。
     ///
-    /// 与 `lower_expr` 的唯一区别：当基址本身是「计算出来的数组行」（内层下标，
-    /// 其类型仍是数组，如 `&m[i][j]` 里的 `m[i]`）时，`lower_expr` 会发 `IndexLoad`
-    /// 把该行**当值载入** —— 那是错的，我们要的是行的**地址**。这里对这种形状递归
-    /// 发一条 `IndexAddr`：元素类型取内层下标的结果类型（即那一行的数组类型），行步长
-    /// 交给 codegen 的 `AddrOf(Index)` 用 `sizeof(row)` 算，SSA 层不复制任何布局算术
-    /// （单一真源）。其余基址形态（具名数组/指针、数组成员、解引用基址）本就由各自的
-    /// 衰减分支给出地址，直接委托 `lower_expr`。
+    /// `MemberLoad`/`MemberStore`/`MemberAddr` 的 `is_arrow` 与 `obj_ty` 必须跟着操作数
+    /// 的**物化形态**走，而不是跟着源码写 `.` 还是 `->`：
+    ///   * 下标基址（`g[0]`）经 `lower_lvalue_base_addr` 发 `IndexAddr`，交回指向元素的
+    ///     指针；数组成员基址（`gd.a`）按 C 衰减交回首元素地址 —— 两者都是指针值。
+    ///   * 这两种形态若继续按 dot 重建，codegen 会去取「那个指针变量自己的栈槽地址」再
+    ///     加字段偏移 ⇒ 读与写都落在帧临时上，真对象一动不动（实测 -O2/-O3 下
+    ///     `g[0].z = p`、`gd.a->z = p` 丢写、读回 0）。
+    ///   * 具名数组对象（`ga`）是反例：它的操作数就是对象本身，codegen 直接取符号地址；
+    ///     按 `Ptr` 重建反而变成「先 load 数组头 8 字节再当指针」⇒ 野指针（实测
+    ///     `ga->z = p` 在 -O2/-O3 段错误）。
+    ///
+    /// 命中时 `obj_ty` 取 `Ptr(元素类型)`（数组基址的元素类型是数组的本体元素，下标基址
+    /// 的就是下标结果类型），与交回的那个临时变量自身的类型一致，重建时两处类型不再互相
+    /// 顶掉。
+    ///
+    /// 只有**聚合类型**的基址才需要这套改写：基址类型是标量（指针在内）时 `lower_expr`
+    /// 交回的就是那个标量**值**，与源码形态本来就吻合，按 `Ptr(...)` 再包一层等于把
+    /// 「指针槽的地址」当指针用。实测 `struct T *pa[3]; pa[i]->k = v` 在 -O2/-O3 下
+    /// 读写落在槽位偏移上（`k` 读回 4210698 而不是 32）。
+    ///
+    /// 聚合基址里 `Member`/`Deref` 两种形态与 `Index` 同一条理由，且更致命：成员访存在
+    /// SSA 层是 `MemberLoad`，基址类型是 struct/union 时它发的是**整块拷贝**（实测
+    /// sqlite `yy_shift` 的 `yytos->minor.yy0 = yyMinor` 编成 `rep movsq` 16 字节到
+    /// `-0x78(%r13)`），于是 `MemberStore` 写进的是帧临时里的副本、`yypParser->yystack`
+    /// 一动不动 —— 整条 `o.a.b = v` / `p->u.f = v`（嵌套聚合成员赋值）在 -O2/-O3 丢写，
+    /// 解析器随即拿垃圾 stateno/major 而崩。改走地址形态后由 `MemberAddr`/`IndexAddr`
+    /// 逐层给出**对象地址**，拷贝仍归 codegen 的聚合成员写。
+    pub(super) fn member_base_is_ptr_operand(base: &Expr, base_ty: &Type) -> bool {
+        if matches!(base, Expr::Ident { .. }) {
+            return false;
+        }
+        match base_ty {
+            Type::Array(..) => true,
+            Type::Struct(..) | Type::Union(..) => {
+                matches!(base, Expr::Index { .. } | Expr::Member { .. } | Expr::Deref { .. })
+            },
+            _ => false,
+        }
+    }
+
+    /// `&o.f` / `&p->f` 的**成员地址**降级 —— `InstKind::MemberAddr` 的唯一发射点。
+    ///
+    /// 基址的物化形态由 `member_base_is_ptr_operand` 决定（判据与实测见该函数）：交回
+    /// 指针形态（计算下标、数组成员、嵌套聚合成员、解引用）时成员寻址走箭头，交回对象
+    /// 形态（具名变量）时沿用源码写的 `.`/`->`。`Expr::Member` 的读分支与
+    /// `lower_lvalue` 的写分支共用本函数的同一套归一化，避免「读对写错」这种只改一侧的
+    /// 分歧（sqlite `yy_shift` 丢写即写侧另开一条按值降级所致）。
+    pub(super) fn lower_member_addr(
+        &mut self,
+        expr: &Expr,
+        field: &crate::ast::Ident,
+        m_sp: &Span,
+        f_ty: &Type,
+        is_arrow: bool,
+        target: Option<SsaVar>,
+    ) -> Operand {
+        let obj_ty = expr.ty();
+        let base_is_ptr = Self::member_base_is_ptr_operand(expr, &obj_ty);
+        let obj = if base_is_ptr {
+            self.lower_lvalue_base_addr(expr)
+        } else {
+            self.lower_expr(expr)
+        };
+        let pointee = match &obj_ty {
+            Type::Array(elem, _) => elem.base.clone(),
+            other => other.clone(),
+        };
+        let (addr_obj_ty, addr_is_arrow) = if base_is_ptr {
+            (Type::Ptr(Box::new(QualType::new(pointee))), true)
+        } else {
+            (obj_ty.clone(), is_arrow)
+        };
+        let ptr_ty = Type::Ptr(Box::new(QualType::new(f_ty.clone())));
+        let dest = target.unwrap_or_else(|| self.fresh("subaddr", ptr_ty, m_sp));
+        self.emit(Inst {
+            dest: Some(dest.clone()),
+            kind: InstKind::MemberAddr {
+                obj,
+                obj_ty: addr_obj_ty,
+                field: field.name.clone(),
+                ty: f_ty.clone(),
+                is_arrow: addr_is_arrow,
+            },
+            span: m_sp.clone(),
+        });
+        self.define(dest.clone());
+        Operand::Var(dest)
+    }
+
+    /// 求一个**左值表达式**的地址操作数，供 `IndexAddr` 的基址（`arr`）槽与
+    /// `MemberAddr` 的基址（`obj`）槽使用。
+    ///
+    /// 与 `lower_expr` 的区别：当基址本身是「计算出来的**对象**」（内层下标或成员，
+    /// 其结果类型是数组行 / 结构体 / 联合体，如 `&m[i][j]` 里的 `m[i]`、
+    /// `&db->aDb[0].pBt` 里的 `aDb[0]`）时，`lower_expr` 会把该对象**当值载入**
+    /// （数组行进帧临时、结构体整块拷贝）—— 那是错的，我们要的是对象的**地址**。
+    /// 这里对这种形状递归发一条 `IndexAddr`（或委托 `lower_member_addr`）：元素类型取
+    /// 内层表达式的结果类型，行步长交给 codegen 的 `AddrOf(Index)` 用 `sizeof(row)`
+    /// 算，SSA 层不复制任何布局算术（单一真源）。
+    /// **标量与指针元素是反例**（与 `Member` 分支同判据）：`u32 **apWiData` 的
+    /// `apWiData[0]` 是 `u32 *` **值**，`&(apWiData[0][k])` 的基址是那个指针值，
+    /// 必须走 `lower_expr` 的 `IndexLoad`。其余基址形态（具名数组/指针、解引用基址）
+    /// 本就由各自的衰减分支给出地址，直接委托 `lower_expr`。
     pub(super) fn lower_lvalue_base_addr(&mut self, e: &Expr) -> Operand {
         if let Expr::Index {
             arr,
@@ -337,21 +433,61 @@ impl Builder {
             ty: row_ty,
         } = e
         {
-            let base = self.lower_lvalue_base_addr(arr);
-            let i = self.lower_expr(idx);
-            let ptr_ty = Type::Ptr(Box::new(QualType::new(row_ty.clone())));
-            let dest = self.fresh("idxaddr", ptr_ty, span);
-            self.emit(Inst {
-                dest: Some(dest.clone()),
-                kind: InstKind::IndexAddr {
-                    arr: base,
-                    idx: i,
-                    ty: row_ty.clone(),
-                },
-                span: span.clone(),
-            });
-            self.define(dest.clone());
-            return Operand::Var(dest);
+            // 与下面 `Member` 分支同判据: 只有内层下标的**结果类型是对象**（数组行 /
+            // 结构体 / 联合体元素）时, 基址才是「行/元素的地址」。标量与指针元素必须
+            // 交出元素里的**值** —— `u32 **apWiData` 的 `apWiData[0]` 是 `u32 *` 值,
+            // `&(apWiData[0][k])` 的下标基址是那个指针值, 不是 `&apWiData[0]`。
+            // 实测 sqlite `walCkptInfo` (-O2): 旧实现对任意内层下标都发 `IndexAddr`,
+            // 少了一次取指针值的加载, 返回 `apWiData+96` 而非 `apWiData[0]+96`,
+            // `WalCkptInfo` 的写落进 `apWiData` 指针数组旁边的堆内存 ⇒
+            // `malloc(): invalid next size` 中止 (-O0/-O1 与 gcc 均正常)。
+            // 结构体元素（`&db->aDb[0].pBt`）仍必须走 `IndexAddr`: 按值降级会把元素
+            // 拷进帧临时, 写落进副本（sqlite3BtreeOpen 段错误, 见 `AddrOf` 分支注释）。
+            if matches!(row_ty, Type::Array(..) | Type::Struct(..) | Type::Union(..)) {
+                let base = self.lower_lvalue_base_addr(arr);
+                let i = self.lower_expr(idx);
+                let ptr_ty = Type::Ptr(Box::new(QualType::new(row_ty.clone())));
+                let dest = self.fresh("idxaddr", ptr_ty, span);
+                self.emit(Inst {
+                    dest: Some(dest.clone()),
+                    kind: InstKind::IndexAddr {
+                        arr: base,
+                        idx: i,
+                        ty: row_ty.clone(),
+                    },
+                    span: span.clone(),
+                });
+                self.define(dest.clone());
+                return Operand::Var(dest);
+            }
+        }
+        if let Expr::Member {
+            expr,
+            field,
+            span,
+            ty,
+            is_arrow,
+        } = e
+        {
+            // 只有字段**本身是对象**（聚合或数组）时，「基址」才等于字段的地址。
+            // 标量字段（含指针）必须交出字段里的**值**：`&p->zText[k]`
+            // （`sqlite3_str_append` 的 memcpy 目标）的下标基址是 `char *` 字段的内容，
+            // 按 `MemberAddr` 降级就变成「结构体地址 + 字段偏移 + k」⇒ 整块字符串被
+            // 写进 StrAccum 自己身上，实测 -O2 下 `sqlite3_mprintf` 必段错误。
+            // `lower_expr` 的 `Member` 读分支发的正是 `MemberLoad`，与源码形态一致。
+            if matches!(ty, Type::Struct(..) | Type::Union(..) | Type::Array(..)) {
+                return self.lower_member_addr(expr, field, span, ty, *is_arrow, None);
+            }
+        }
+        if let Expr::Deref { e: inner, ty, .. } = e {
+            // `(*pq).o` 这类**解引用基址**：对象的地址就是 `pq` 里的指针值。这里绝不能
+            // 委托 `lower_expr(e)` —— 标量解引用发的是 `Load`，聚合类型解引用发的是
+            // **整块拷贝**（帧临时），于是「地址」成了副本地址、写落进临时。实测夹具
+            // `(*pq).o.in.a = 8` 在 -O2 被编成「从 `gtop` 的头 8 字节取指针再写」⇒ 段错误。
+            // 数组类型的解引用不用管：`lower_expr` 的衰减分支本就交回指针值。
+            if matches!(ty, Type::Struct(..) | Type::Union(..)) {
+                return self.lower_expr(inner);
+            }
         }
         self.lower_expr(e)
     }
@@ -380,6 +516,33 @@ impl Builder {
                 | Type::Ptr(_)
                 | Type::Enum(..)
         )
+    }
+
+    /// 该左值是不是**位域**成员访问 (`s.bf` / `p->bf` / `a[i].bf`)。
+    ///
+    /// `Builder::lower_mem_rmw` 靠 `&lv` 求地址再做 Load—Bin—Store，而位域没有自己的
+    /// 存储地址：codegen 的 `&obj.bf` 给出的是**容器**（`StorageUnit`）的地址。于是
+    /// RMW 会读写整个容器而不是那几位 —— 进位溢出到相邻位域。实测 -O2/-O3 下
+    /// `struct {unsigned b:3; unsigned pad:29;} v; v.b=7; v.pad=5; v.b+=1;` 得到
+    /// `b=0 pad=6`（gcc 是 `pad=5`），`arr[i].n++` 同一条错（pr55750 在 -O2 abort）。
+    /// 判据与 codegen 侧 `expr_bitfield_width` 一致：字段 `bit_width` 非空即为位域。
+    /// 命中后由调用方按既有政策处理（`unsupported` ⇒ 整函数留在 AST 通道，正确但不优化），
+    /// 绝不允许「按容器宽度做 RMW」。
+    pub(super) fn is_bitfield_lvalue(lv: &Expr) -> bool {
+        let Expr::Member { expr, field, .. } = lv else {
+            return false;
+        };
+        let base_ty = expr.ty();
+        let struct_ty: &Type = match &base_ty {
+            Type::Ptr(p) => &p.base,
+            Type::Array(elem, _) => &elem.base,
+            other => other,
+        };
+        let fields = match struct_ty {
+            Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => fields,
+            _ => return false,
+        };
+        crate::ast::find_field(fields, &field.name).is_some_and(|(f, _)| f.bit_width.is_some())
     }
 
     /// 内存左值访问的 volatile 判据 —— 与 `Expr::Deref` / `Expr::Index` / `Expr::Member`
@@ -435,6 +598,10 @@ impl Builder {
         if matches!(ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) | Type::Array(_, _)) {
             // 聚合左值没有标量 RMW 语义（`(*ps)++` 不合法），落到这里说明形态意外，
             // 保守退 SSA而不是猜一个宽度。
+            return None;
+        }
+        if Self::is_bitfield_lvalue(lv) {
+            // 位域没有独立地址，`&lv` 只能给出容器 ⇒ RMW 会连相邻位域一起改。
             return None;
         }
         // `new` 的类型由调用方给（复合赋值时是原 `Binop` 自己的 `ty`）：这里造的是一
@@ -645,7 +812,23 @@ impl Builder {
             },
             Expr::Binop { op, l, r, span, ty } => {
                 let lo = self.lower_expr(l);
+                // `&&` / `||` 的右操作数只在左操作数短路时才该求值, 但 SSA 通道不为
+                // 短路求值造块: 整棵条件是一棵交给重建的表达式树, 于是右操作数会被
+                // **急切求值**成块里的独立指令 —— 与三元 `Cond` 降级出的 `Select`
+                // 同一病灶 (判据与理由见 `emitted_is_pure`)。
+                // 实测 sqlite `walIndexPage` 的
+                // `pWal->nWiData<=iPage || (*ppPage = pWal->apWiData[iPage])==0`:
+                // -O2 下即使 `nWiData<=iPage` 已短路, apWiData==NULL 的右操作数照样
+                // 求值, `mov (%rax),%rax` 打空段错误 (-O0/-O1 与 gcc 均正常)。
+                // 判据同样保守: 右操作数降级出「不纯或可陷获」的指令 (store / load /
+                // 调用 / 除法) ⇒ 整函数退出 SSA 往返, 留在有真短路的 AST 通道。
+                let short_circuit_rhs = matches!(op, BinOp::AndAnd | BinOp::OrOr);
+                let rhs_from = self.cur_inst_count();
                 let ro = self.lower_expr(r);
+                if short_circuit_rhs && !self.emitted_is_pure(rhs_from) {
+                    self.unsupported("&& / || 右操作数带副作用或可陷获（急切求值改变语义）");
+                    return Operand::Int(0);
+                }
                 let dest = target.unwrap_or_else(|| self.fresh("bin", ty.clone(), span));
                 self.emit(Inst {
                     dest: Some(dest.clone()),
@@ -984,6 +1167,24 @@ impl Builder {
                 is_arrow,
             } => {
                 let obj_ty = expr.ty();
+                // 成员寻址用 dot 还是箭头跟着**基址操作数怎么物化**走（判据与实测见
+                // `member_base_is_ptr_operand`：下标基址与数组成员基址交回的是指针值，
+                // 按 dot 重建就把读写搬进帧临时；具名数组对象交回的是对象本身）。
+                let base_is_ptr = Self::member_base_is_ptr_operand(expr.as_ref(), &obj_ty);
+                let obj = if base_is_ptr {
+                    self.lower_lvalue_base_addr(expr)
+                } else {
+                    self.lower_expr(expr)
+                };
+                let pointee = match &obj_ty {
+                    Type::Array(elem, _) => elem.base.clone(),
+                    other => other.clone(),
+                };
+                let (member_obj_ty, member_is_arrow) = if base_is_ptr {
+                    (Type::Ptr(Box::new(QualType::new(pointee))), true)
+                } else {
+                    (obj_ty.clone(), *is_arrow)
+                };
                 // 数组类型表达式的**值就是它的地址**（C 的衰减规则）。`z->data[i]`、
                 // `f->data[1] = 7`、`&z->data`、把 `z->data` 当指针传参 —— 四处要的都是
                 // 「对象地址 + 字段偏移」，因此这里必须发 `MemberAddr`，而不是走下面
@@ -993,25 +1194,30 @@ impl Builder {
                 // 只改数组类型成员：标量/结构体成员的既有路径不动，否则就是拿覆盖面
                 // 换一个不存在的洞。
                 if let Type::Array(elem_qt, _) = ty {
-                    let obj = self.lower_expr(expr);
                     let ptr_ty = Type::Ptr(elem_qt.clone());
                     let dest = target.unwrap_or_else(|| self.fresh("subaddr", ptr_ty, span));
                     self.emit(Inst {
                         dest: Some(dest.clone()),
                         kind: InstKind::MemberAddr {
                             obj,
-                            obj_ty: obj_ty.clone(),
+                            obj_ty: member_obj_ty,
                             field: field.name.clone(),
                             ty: ty.clone(),
-                            is_arrow: *is_arrow,
+                            is_arrow: member_is_arrow,
                         },
                         span: span.clone(),
                     });
                     self.define(dest.clone());
                     return Operand::Var(dest);
                 }
-                let obj = self.lower_expr(expr);
                 let dest = target.unwrap_or_else(|| self.fresh("mem", ty.clone(), span));
+                // 箭头访问 `p->fld`：`p` 本身就是结构体基址指针，直接把指针值作为
+                // `MemberLoad` 的 `obj` 并保留 `is_arrow`，让 codegen 在指针值上加字段偏移
+                // 并按字段宽度加载。以前这里前置一条 `Load { e: p, ty: fld_ty }`，把 `p`
+                // 指向的内存按**字段类型**读成了一个值再当基址用 —— 实际读的是
+                // `*(fld_ty*)p`（offset 0 的 zDbSName）而不是 `p->fld`，实测
+                // `pX = pDb->pBt` 被编成 `movslq (%pDb),%rax`，sqlite3BtreeCursor 收到
+                // 垃圾指针而段错误。
                 // 结构体字段访问: 若对象本身带 volatile, 则访问沿用.
                 let obj_is_volatile = match (&obj_ty, expr.as_ref()) {
                     (Type::Ptr(qt), _) if *is_arrow => qt.is_volatile(),
@@ -1023,49 +1229,18 @@ impl Builder {
                         .unwrap_or(false),
                     _ => false,
                 };
-                if *is_arrow {
-                    // *obj.field: 先解引用指针, 再访问成员
-                    let deref_ty = match &obj_ty {
-                        Type::Ptr(inner) => inner.base.clone(),
-                        other => other.clone(),
-                    };
-                    let inner =
-                        self.fresh("deref", Type::Ptr(Box::new(QualType::new(ty.clone()))), span);
-                    self.emit(Inst {
-                        dest: Some(inner.clone()),
-                        kind: InstKind::Load {
-                            e: obj,
-                            ty: ty.clone(),
-                            is_volatile: obj_is_volatile,
-                        },
-                        span: span.clone(),
-                    });
-                    self.emit(Inst {
-                        dest: Some(dest.clone()),
-                        kind: InstKind::MemberLoad {
-                            obj: Operand::Var(inner),
-                            obj_ty: deref_ty,
-                            field: field.name.clone(),
-                            ty: ty.clone(),
-                            is_volatile: obj_is_volatile,
-                            is_arrow: false,
-                        },
-                        span: span.clone(),
-                    });
-                } else {
-                    self.emit(Inst {
-                        dest: Some(dest.clone()),
-                        kind: InstKind::MemberLoad {
-                            obj,
-                            obj_ty: obj_ty.clone(),
-                            field: field.name.clone(),
-                            ty: ty.clone(),
-                            is_volatile: obj_is_volatile,
-                            is_arrow: false,
-                        },
-                        span: span.clone(),
-                    });
-                }
+                self.emit(Inst {
+                    dest: Some(dest.clone()),
+                    kind: InstKind::MemberLoad {
+                        obj,
+                        obj_ty: member_obj_ty,
+                        field: field.name.clone(),
+                        ty: ty.clone(),
+                        is_volatile: obj_is_volatile,
+                        is_arrow: member_is_arrow,
+                    },
+                    span: span.clone(),
+                });
                 self.define(dest.clone());
                 Operand::Var(dest)
             },
@@ -1127,23 +1302,17 @@ impl Builder {
                     is_arrow,
                 } = e.as_ref()
                 {
-                    let obj_ty = expr.ty();
-                    let obj = self.lower_expr(expr);
-                    let ptr_ty = Type::Ptr(Box::new(QualType::new(f_ty.clone())));
-                    let dest = target.unwrap_or_else(|| self.fresh("subaddr", ptr_ty, m_sp));
-                    self.emit(Inst {
-                        dest: Some(dest.clone()),
-                        kind: InstKind::MemberAddr {
-                            obj,
-                            obj_ty,
-                            field: field.name.clone(),
-                            ty: f_ty.clone(),
-                            is_arrow: *is_arrow,
-                        },
-                        span: m_sp.clone(),
-                    });
-                    self.define(dest.clone());
-                    return Operand::Var(dest);
+                    // `&expr.fld`：`expr` 必须是左值基址（对象地址），而不是右值。
+                    // 若 `expr` 是 `Index{aDb[i]}` 这类计算下标，走 `lower_expr` 会把
+                    // 元素结构体按值拷贝到栈临时，随后 `MemberAddr` 对栈副本取字段
+                    // 地址，写到栈槽而非堆上目标对象 —— 实测 sqlite3BtreeOpen 的
+                    // 第 4 参 `&db->aDb[0].pBt` 被写成栈临时，堆上 pBt 仍是垃圾值，
+                    // 后续 `sqlite3VdbeExec` 读 pBt 读到野指针而段错误。
+                    //
+                    // 归一化（dot/箭头、指针基址 vs 对象基址）与读侧共用 `lower_member_addr`，
+                    // 基址一律经 `lower_lvalue_base_addr` 取**地址**（`IndexAddr`/`MemberAddr`），
+                    // 判据见 `member_base_is_ptr_operand`。
+                    return self.lower_member_addr(expr, field, m_sp, f_ty, *is_arrow, target);
                 }
                 // `&a[i]` / `(*p)[i]` / `s.f[i]` / `&m[i][j]` / `&m[i][j][k]`：下标的
                 // **左值地址**，由 `InstKind::IndexAddr` 表达。基址走 `lower_lvalue_base_addr`：
@@ -1828,7 +1997,9 @@ impl Builder {
                 let dead = self.func.unique_bb(&format!("{}.dead", self.cur));
                 self.cur = dead;
             },
-            Stmt::Switch { expr, cases, span, .. } => {
+            Stmt::Switch {
+                expr, cases, span, ..
+            } => {
                 // 密集 case 值走 SwitchTable 终结符
                 self.lower_switch(expr, cases, span);
             },

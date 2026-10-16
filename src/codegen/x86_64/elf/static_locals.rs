@@ -34,22 +34,20 @@ impl Codegen {
     fn init_contains_label_addr(e: &Expr) -> bool {
         match e {
             Expr::LabelAddr { .. } => true,
-            Expr::InitList { inits, .. } => {
-                inits.iter().any(|it| match it {
-                    crate::ast::InitItem::Expr(x) => Self::init_contains_label_addr(x),
-                    crate::ast::InitItem::Designated { value, .. } => {
-                        Self::init_contains_label_addr(value)
-                    },
-                })
-            }
+            Expr::InitList { inits, .. } => inits.iter().any(|it| match it {
+                crate::ast::InitItem::Expr(x) => Self::init_contains_label_addr(x),
+                crate::ast::InitItem::Designated { value, .. } => {
+                    Self::init_contains_label_addr(value)
+                },
+            }),
             Expr::Cast { e: inner, .. } => Self::init_contains_label_addr(inner),
             Expr::Binop { l, r, .. } => {
                 Self::init_contains_label_addr(l) || Self::init_contains_label_addr(r)
-            }
+            },
             Expr::AddrOf { e: inner, .. } => Self::init_contains_label_addr(inner),
             Expr::Index { arr, idx, .. } => {
                 Self::init_contains_label_addr(arr) || Self::init_contains_label_addr(idx)
-            }
+            },
             Expr::CompoundLit { inits, .. } => Self::init_contains_label_addr_list(inits),
             _ => false,
         }
@@ -57,9 +55,7 @@ impl Codegen {
     fn init_contains_label_addr_list(items: &[crate::ast::InitItem]) -> bool {
         items.iter().any(|it| match it {
             crate::ast::InitItem::Expr(x) => Self::init_contains_label_addr(x),
-            crate::ast::InitItem::Designated { value, .. } => {
-                Self::init_contains_label_addr(value)
-            }
+            crate::ast::InitItem::Designated { value, .. } => Self::init_contains_label_addr(value),
         })
     }
 
@@ -108,7 +104,26 @@ impl Codegen {
                 match init {
                     Expr::String { data, .. } => {
                         if matches!(&info.ty, Type::Ptr(_)) {
-                            self.data_section.resize(self.data_section.len() + sz, 0);
+                            // 指针类型 (static char *s = "..."): 字符串进 rodata 池,
+                            // data 节指针槽通过 .rodata section 符号 + R_X86_64_64
+                            // 重定位指向字符串 (链接时写入 rodata 基址 + 偏移)。
+                            // 与文件作用域全局同一路径 (codegen.rs 的
+                            // `char *s = "hello"` 分支) —— 旧实现只 resize 出 sz 个
+                            // **零字节**且不发重定位, 于是函数局部 static 指针恒为
+                            // NULL (各级别均复现): 实测 sqlite shell.c zAutoColumn 的
+                            // zTabFill 在 `.import` 自动列名路径上传给
+                            // sqlite3_prepare_v2 的 zSql 是 NULL ⇒ SQLITE_MISUSE ⇒
+                            // rc_err_oom_die 断言中止。
+                            let data = data.clone();
+                            if !self.string_pool.contains_key(&data) {
+                                let o = self.rodata.len() as u64;
+                                self.rodata.extend_from_slice(&data);
+                                self.string_pool.insert(data.clone(), o);
+                            }
+                            let str_off = *self.string_pool.get(&data).unwrap();
+                            let ref_off = self.data_section.len() as u64;
+                            self.data_section.resize(ref_off as usize + sz, 0);
+                            self.pending_data_rodata_rels.push((ref_off, str_off, None));
                         } else if matches!(&info.ty, Type::Array(_, _)) {
                             let copy_len = data.len().min(sz);
                             self.data_section.extend_from_slice(&data[..copy_len]);

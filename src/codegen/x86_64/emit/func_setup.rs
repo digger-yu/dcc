@@ -685,10 +685,25 @@ impl Codegen {
             },
             Expr::Member { expr, .. } => Self::sret_bytes_expr(expr),
             Expr::Cond {
-                cond, then_, else_, ..
-            } => Self::sret_bytes_expr(cond)
-                .max(Self::sret_bytes_expr(then_))
-                .max(Self::sret_bytes_expr(else_)),
+                cond,
+                then_,
+                else_,
+                ty,
+                ..
+            } => {
+                // 聚合三元 (`c ? s1 : s2`) 在物化带里占一个类型宽度的临时槽:
+                // 两支各自整块拷进该槽, 交付的是槽地址 (`gen_expr_cond`)。
+                let own = if Self::value_is_whole_copy(ty)
+                    && matches!(ty, Type::Struct(..) | Type::Union(..))
+                {
+                    (ty.size() as i64 + 15) & !15
+                } else {
+                    0
+                };
+                own + Self::sret_bytes_expr(cond)
+                    .max(Self::sret_bytes_expr(then_))
+                    .max(Self::sret_bytes_expr(else_))
+            },
             _ => 0,
         };
         own

@@ -80,19 +80,20 @@ int test_func(int a) {
     if (compat2 != 0) return 34;
     if (compat3 != 1) return 35;
 
-    /* __builtin_classify_type */
+    /* __builtin_classify_type — 取值与本机 GCC 对同一类型的表达式形式实测一致:
+       1=整数/_Bool/enum, 4=void, 5=指针, 8=浮点, 12=struct, 13=union. */
     int c1 = __builtin_classify_type(int);
     int c2 = __builtin_classify_type(int *);
     int c3 = __builtin_classify_type(double);
     int c4 = __builtin_classify_type(struct packed_s);
     int c5 = __builtin_classify_type(void);
     int c6 = __builtin_classify_type(my_fn_ptr);
-    if (c1 != 2) return 41;
-    if (c2 != 3) return 42;
-    if (c3 != 4) return 43;
-    if (c4 != 6) return 44;
-    if (c5 != 1) return 45;
-    if (c6 != 3) return 46;
+    if (c1 != 1) return 41;
+    if (c2 != 5) return 42;
+    if (c3 != 8) return 43;
+    if (c4 != 12) return 44;
+    if (c5 != 4) return 45;
+    if (c6 != 5) return 46;
 
     /* __builtin_strcasecmp / __builtin_strncasecmp */
     int sc1 = __builtin_strcasecmp("Hello", "HELLO");

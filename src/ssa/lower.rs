@@ -96,13 +96,32 @@ pub(super) fn lower_lvalue(
         b.emit(Inst {
             dest: None,
             kind: InstKind::Store {
-                e: addr,
+                e: addr.clone(),
                 src,
                 is_volatile: store_volatile,
             },
             span: span.clone(),
         });
+        // C11 6.5.16p3: 赋值表达式的**值**是左值转换后的左操作数 —— 类型、宽度、
+        // 符号性都取左值那一侧。旧实现只发了写、然后把一个**没有任何指令写过**的
+        // 临时变量当结果返回, 重建后端给它的栈槽因此是栈垃圾: -O2/-O3 下
+        // `return (*p = 7);` 实测返回 0, `long L(void){ return (ui[0] = vv); }`
+        // 之类全部如此 (整类形态: 解引用 / 下标 / 成员, 含位域与联合体)。
+        // 补一条紧跟其后的载入正是那个「左值转换」: 载入宽度由 `ty` 决定, 窄类型
+        // 的截断与符号扩展由后端按 `ty` 发, 不需要在这里复制布局算术。
+        // `is_volatile: false` —— 这次读只为取回刚写进去的位, 不是源码里的一次
+        // volatile 访问; 标成 volatile 会让「值没被用到」的赋值也保留一次多余读。
         let dest = b.fresh("store", ty.clone(), span);
+        b.emit(Inst {
+            dest: Some(dest.clone()),
+            kind: InstKind::Load {
+                e: addr,
+                ty: ty.clone(),
+                is_volatile: false,
+            },
+            span: span.clone(),
+        });
+        b.define(dest.clone());
         return Some(dest);
     }
     if let Expr::Index { arr, idx, ty, .. } = l {
@@ -123,15 +142,29 @@ pub(super) fn lower_lvalue(
         b.emit(Inst {
             dest: None,
             kind: InstKind::IndexStore {
-                arr: a,
-                idx: i,
+                arr: a.clone(),
+                idx: i.clone(),
                 src,
                 ty: ty.clone(),
                 is_volatile: store_volatile,
             },
             span: span.clone(),
         });
+        // 赋值结果 = 左值转换后的左操作数 (C11 6.5.16p3)，与 `Expr::Deref` 分支同一条
+        // 补法: 紧跟元素地址读回一次。`ty` 是本条指令自己的**元素类型**，所以读回宽度
+        // 与写宽度一致；步长/偏移仍由 codegen 按 `ty` 算（见上面对基址取地址形态的注释）。
         let dest = b.fresh("idxstore", ty.clone(), span);
+        b.emit(Inst {
+            dest: Some(dest.clone()),
+            kind: InstKind::IndexLoad {
+                arr: a,
+                idx: i,
+                ty: ty.clone(),
+                is_volatile: false,
+            },
+            span: span.clone(),
+        });
+        b.define(dest.clone());
         return Some(dest);
     }
     if let Expr::Member {
@@ -142,7 +175,6 @@ pub(super) fn lower_lvalue(
     } = l
     {
         let obj_ty = expr.ty();
-        let obj = b.lower_expr(expr);
         let member_volatile = match (&obj_ty, expr.as_ref()) {
             (Type::Ptr(qt), _) if *is_arrow => qt.is_volatile(),
             (_, Expr::Ident { name, .. }) if !*is_arrow => b
@@ -153,50 +185,111 @@ pub(super) fn lower_lvalue(
                 .unwrap_or(false),
             _ => false,
         };
-        if *is_arrow {
-            let deref_ty = match &obj_ty {
-                Type::Ptr(inner) => inner.base.clone(),
-                other => other.clone(),
-            };
-            let inner = b.fresh("deref", Type::Ptr(Box::new(QualType::new(ty.clone()))), span);
+        // 成员写的**基址必须是对象地址**。`b.lower_expr(expr)` 给的是右值形态：基址是
+        // struct/union 时发一条聚合拷贝（实测 -O2 下 `g[0].z = p` 变成
+        // `rep movsq` 32 字节到 `-0x70(%r13)` 再写字段），于是写进的是帧临时里的副本、
+        // 真对象一动不动 —— 整类形态（全局/局部数组元素、多维、`gd.a->z`）全丢写。
+        // 旧实现里那份副本只被一个 `fresh` 临时变量读了一次，反汇编上仅多一条 mov 而没人
+        // 发现；补上「赋值表达式的值」那条读回之后副本变成显式使用，运行期才炸开。
+        //
+        // 改走「整条左值取址 + Store/Load」，与 `Builder::lower_mem_rmw` 同一台机器：
+        // 地址由 `Expr::AddrOf` 那条已验证的降级逐层给（具名对象→`AddrOf`、
+        // `&s.f`/`&p->f`→`MemberAddr`、`&a[i]`→`IndexAddr`），偏移全在 codegen 里算，
+        // SSA 层不复制布局算术。
+        //
+        // 两个例外留在原形态上：
+        //   * 位域没有自己的地址（`&o.bf` 只能给出容器 ⇒ 连坐相邻位域，门禁第 9 条）；
+        //   * 字段本身是聚合（`s.sub = other`）：`Store`/`Load` 按标量宽度建模，
+        //     整块拷贝仍归 MemberStore 那条路径。
+        let scalar_field = !matches!(ty, Type::Struct(..) | Type::Union(..) | Type::Array(..));
+        if scalar_field && !Builder::is_bitfield_lvalue(l) {
+            let addr = b.lower_expr(&Expr::AddrOf {
+                e: Box::new(l.clone()),
+                span: span.clone(),
+                ty: Type::Ptr(Box::new(QualType::new(ty.clone()))),
+            });
             b.emit(Inst {
-                dest: Some(inner.clone()),
+                dest: None,
+                kind: InstKind::Store {
+                    e: addr.clone(),
+                    src,
+                    is_volatile: member_volatile,
+                },
+                span: span.clone(),
+            });
+            // 赋值结果 = 左值转换后的左操作数（C11 6.5.16p3），与 `Expr::Deref` 分支
+            // 同一条补法：紧跟同址同类型读回一次，宽度/符号性由后端按 `ty` 发。
+            let dest = b.fresh("memstore", ty.clone(), span);
+            b.emit(Inst {
+                dest: Some(dest.clone()),
                 kind: InstKind::Load {
-                    e: obj,
+                    e: addr,
                     ty: ty.clone(),
-                    is_volatile: member_volatile,
+                    is_volatile: false,
                 },
                 span: span.clone(),
             });
-            b.emit(Inst {
-                dest: None,
-                kind: InstKind::MemberStore {
-                    obj: Operand::Var(inner),
-                    obj_ty: deref_ty,
-                    field: field.name.clone(),
-                    src,
-                    ty: ty.clone(),
-                    is_volatile: member_volatile,
-                    is_arrow: false,
-                },
-                span: span.clone(),
-            });
-        } else {
-            b.emit(Inst {
-                dest: None,
-                kind: InstKind::MemberStore {
-                    obj,
-                    obj_ty: obj_ty.clone(),
-                    field: field.name.clone(),
-                    src,
-                    ty: ty.clone(),
-                    is_volatile: member_volatile,
-                    is_arrow: false,
-                },
-                span: span.clone(),
-            });
+            b.define(dest.clone());
+            return Some(dest);
         }
+        // 位域 / 聚合字段：留在 MemberStore 形态上（`Store`/`Load` 按标量宽度建模，
+        // 整块拷贝归 codegen 的聚合成员写），但**基址仍须取地址形态**，判据与读侧共用
+        // `member_base_is_ptr_operand`：
+        //   * `b.lower_expr(expr)` 对 struct/union 基址发的是整块拷贝（实测 sqlite
+        //     `yy_shift` 的 `yytos->minor.yy0 = yyMinor` —— 基址 `yytos->minor` 是 union
+        //     —— 编成 `rep movsq` 16 字节到 `-0x78(%r13)` 再写字段），于是写进帧临时里的
+        //     副本、`yypParser->yystack` 一动不动：整类 `o.a.b = v` / `p->u.f = v`（嵌套
+        //     聚合成员赋值）丢写，解析器随即拿垃圾 stateno/major 而崩。改走
+        //     `lower_lvalue_base_addr` 后基址是 `MemberAddr` 给的**对象地址**，寻址按箭头。
+        //   * 箭头基址（`p->fld`，`p` 本身就是结构体基址指针）把指针值直接交给 codegen，
+        //     由它在指针值上加字段偏移并按字段宽度写。旧形态在这里前置一条
+        //     `Load{e: p, ty: fld_ty}` 把字段按值读进临时、再对临时做 dot 写 —— 写落在
+        //     临时上，与上面是同一条错误的另一个方向（读侧已因此出过事，见 `build.rs`
+        //     的 `Expr::Member` 读分支注释；本函数下面那条读回指令早就是 canonical 形态）。
+        let base_is_ptr = Builder::member_base_is_ptr_operand(expr.as_ref(), &obj_ty);
+        let obj = if base_is_ptr {
+            b.lower_lvalue_base_addr(expr)
+        } else {
+            b.lower_expr(expr)
+        };
+        let pointee = match &obj_ty {
+            Type::Array(elem, _) => elem.base.clone(),
+            other => other.clone(),
+        };
+        let (store_obj_ty, store_is_arrow) = if base_is_ptr {
+            (Type::Ptr(Box::new(QualType::new(pointee))), true)
+        } else {
+            (obj_ty.clone(), *is_arrow)
+        };
+        b.emit(Inst {
+            dest: None,
+            kind: InstKind::MemberStore {
+                obj: obj.clone(),
+                obj_ty: store_obj_ty.clone(),
+                field: field.name.clone(),
+                src,
+                ty: ty.clone(),
+                is_volatile: member_volatile,
+                is_arrow: store_is_arrow,
+            },
+            span: span.clone(),
+        });
+        // 赋值结果 = 左值转换后的左操作数（C11 6.5.16p3）：紧跟同址同字段读回一次，
+        // 寻址形态与上面那条写完全一致（同一套 `obj`/`obj_ty`/`is_arrow`）。
         let dest = b.fresh("memstore", ty.clone(), span);
+        b.emit(Inst {
+            dest: Some(dest.clone()),
+            kind: InstKind::MemberLoad {
+                obj,
+                obj_ty: store_obj_ty,
+                field: field.name.clone(),
+                ty: ty.clone(),
+                is_volatile: false,
+                is_arrow: store_is_arrow,
+            },
+            span: span.clone(),
+        });
+        b.define(dest.clone());
         return Some(dest);
     }
     None

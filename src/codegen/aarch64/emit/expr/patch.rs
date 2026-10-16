@@ -72,7 +72,8 @@ impl Aarch64Codegen {
             // adrp rd, #page_off
             let insn_adrp = 0x9000_0000u32 | (immlo << 29) | (immhi << 5) | (rd as u32 & 0x1f);
             // add rd, rd, #lo_off  (sf=1 64-bit, op=ADD imm, shift=0, Rn=rd, Rd=rd)
-            let insn_add = 0x9100_0000u32 | (lo_off << 10) | ((rd as u32 & 0x1f) << 5) | (rd as u32 & 0x1f);
+            let insn_add =
+                0x9100_0000u32 | (lo_off << 10) | ((rd as u32 & 0x1f) << 5) | (rd as u32 & 0x1f);
             if off + 8 <= self.code.len() {
                 self.code[off..off + 4].copy_from_slice(&insn_adrp.to_le_bytes());
                 self.code[off + 4..off + 8].copy_from_slice(&insn_add.to_le_bytes());

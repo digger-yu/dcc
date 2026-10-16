@@ -92,6 +92,16 @@ impl Codegen {
                 }
             }
 
+            if std::env::var("DCC_DBG_IDX").is_ok()
+                && self.current_func_name == "vdbeSorterCompareInt"
+            {
+                eprintln!("[IDX-ENTER] f={} e={} elem={} arr_ty={} desc.base={:?} desc.off={:?} action={:?}",
+                self.current_func_name, crate::ast::type_kind_summary(&e.ty()),
+                crate::ast::type_kind_summary(elem_ty),
+                crate::ast::type_kind_summary(&arr.ty()),
+                desc.base, desc.offset,
+                determine_action(elem_ty, true));
+            }
             // Step 4: 通用路径 - 通过语义层物化
             // 数组元素衰减: 元素是数组时返回地址 (ArrayDecay)
             if matches!(action, MaterializeAction::ArrayDecay) {
@@ -126,7 +136,17 @@ impl Codegen {
                     // TODO: 将 bounds check 集成到 materialize_address 中
                 } else {
                     if self.materialize_address(&desc, action, Some(idx), e, Some(arr), dst) {
+                        if std::env::var("DCC_DBG_IDX").is_ok()
+                            && self.current_func_name == "vdbeSorterCompareInt"
+                        {
+                            eprintln!("[IDX-MAT-OK] f={}", self.current_func_name);
+                        }
                         return;
+                    }
+                    if std::env::var("DCC_DBG_IDX").is_ok()
+                        && self.current_func_name == "vdbeSorterCompareInt"
+                    {
+                        eprintln!("[IDX-MAT-FAIL] f={} -> fallback", self.current_func_name);
                     }
                 }
             }
@@ -215,9 +235,9 @@ impl Codegen {
                                 span,
                             );
                             self.emit_insn(&Insn::call_rel32()); // call rel32
-                                                                                   // call 位移起始于当前 code.len() - 4 (0xe8 之后).
-                                                                                   // 与 trapv 处同号。- 4 错为 - 0 会让 R_X86_64_PLT32
-                                                                                   // 盖到下一条指令首字节, 运行时 SIGILL.
+                                                                 // call 位移起始于当前 code.len() - 4 (0xe8 之后).
+                                                                 // 与 trapv 处同号。- 4 错为 - 0 会让 R_X86_64_PLT32
+                                                                 // 盖到下一条指令首字节, 运行时 SIGILL.
                             let call_at = self.code.len() as u64 - 4;
                             self.pending_func_rels
                                 .push((call_at, "__ubsan_handle_out_of_bounds".to_string()));
@@ -385,7 +405,8 @@ impl Codegen {
         // 2. 查找字段信息 (支持匿名 struct/union), 加上字段偏移
         //    注意: `->` 时 expr.ty() 是指针类型, 须解引用后再查字段
         let expr_ty = expr.ty();
-        let target_ty = self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty.clone(), *is_arrow));
+        let target_ty =
+            self.resolve_complete_struct_ty(Self::member_target_ty(expr_ty.clone(), *is_arrow));
         let field_info = match &target_ty {
             Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
                 find_field(fields, &field.name).map(|(f, extra)| {
@@ -400,6 +421,54 @@ impl Codegen {
         // pr82210): 偏移已加到 dst, 跳过静态偏移加法
         let vm_off_done = matches!(&target_ty, Type::Struct(_, _, _, _))
             && self.gen_vm_member_offset(&target_ty, &field.name, dst);
+        // DEBUG: trace field resolution
+        if std::env::var("DCC_DEBUG_FIELD").is_ok() {
+            if field.name == "pBt"
+                || (matches!(&expr_ty, Type::Ptr(p) if matches!(&p.base, Type::Struct(s,_,_,_) if s.as_str() == "Db")))
+            {
+                eprintln!("[FIELD] name={} arrow={} expr_ty={:?} target_ty={:?} field_info={:?} ty={:?} vm_off_done={}",
+                    field.name, is_arrow, expr_ty, target_ty,
+                    field_info.as_ref().map(|f| (f.offset, format!("{:?}", f.ty))), ty, vm_off_done);
+            }
+        }
+        if std::env::var("DCC_DBG_NOFIELD").is_ok() && field_info.is_none() {
+            eprintln!(
+                "[NOFIELD] field={} arrow={} expr_ty={:?} target_ty={:?}",
+                field.name, is_arrow, expr_ty, target_ty
+            );
+        }
+        if std::env::var("DCC_DBG_CHAIN").is_ok()
+            && (field.name == "pKeyInfo" || field.name == "pSorter" || field.name == "aSortFlags")
+        {
+            let sname = |t: &Type| -> String {
+                match t {
+                    Type::Struct(n, _, _, _) | Type::Union(n, _, _, _) => n.clone(),
+                    _ => crate::ast::type_kind_summary(t),
+                }
+            };
+            let shape = |e: &Expr| -> &'static str {
+                match e {
+                    Expr::Member { is_arrow, .. } => {
+                        if *is_arrow {
+                            "M->"
+                        } else {
+                            "M."
+                        }
+                    },
+                    Expr::Ident { .. } => "id",
+                    Expr::Deref { .. } => "deref",
+                    Expr::Index { .. } => "idx",
+                    _ => "other",
+                }
+            };
+            eprintln!("[CHAIN] {} field={} arrow={} expr_ty={} target={} off={:?} fty={} obj_shape={} obj_ty={} vm={}",
+                self.current_func_name, field.name, is_arrow,
+                crate::ast::type_kind_summary(&expr_ty), sname(&target_ty),
+                field_info.as_ref().map(|f| f.offset),
+                field_info.as_ref().map(|f| crate::ast::type_kind_summary(&f.ty)).unwrap_or_default(),
+                shape(expr),
+                crate::ast::type_kind_summary(&expr.ty()), vm_off_done);
+        }
         if !vm_off_done {
             if let Some(ref f) = field_info {
                 let field_off = f.offset as i32;

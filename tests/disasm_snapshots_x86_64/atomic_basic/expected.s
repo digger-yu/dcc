@@ -9,6 +9,7 @@ mov %rdi,-0x50(%r13)
 mov %rsi,-0x58(%r13)
 mov -0x50(%r13),%rax
 movslq (%rax),%rax
+movslq %eax,%rax
 mov %eax,%ebx
 mov -0x50(%r13),%rax
 push %rax
@@ -17,6 +18,7 @@ mov %rax,%r12
 movslq -0x58(%r13),%r8
 add %r8,%r12
 mov %r12,%rax
+movslq %eax,%rax
 movslq %eax,%rax
 pop %rcx
 mov %eax,(%rcx)

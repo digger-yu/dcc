@@ -495,7 +495,7 @@ impl Codegen {
                 self.emit_alu_rm_reg_imm8_b64(AluOp::Sub, 1, 64); // rcx = k = n-64
                 self.mov(2, 8); // rdx = old_lo
                 self.emit_shift64(ShiftOp::Shl, 2, ShiftAmount::Cl); // rdx = old_lo << k
-                // Compute rcx = 64-k for the shr of old_hi (in (0,64), safe for CL&63).
+                                                                     // Compute rcx = 64-k for the shr of old_hi (in (0,64), safe for CL&63).
                 self.emit_unary64(UnaryOp::Neg, 1); // rcx = -k
                 self.emit_alu_rm_reg_imm8_b64(AluOp::Add, 1, 64); // rcx = 64-k
                 self.mov(0, 9); // rax = old_hi

@@ -68,14 +68,22 @@ pub fn run_with_opts(func: &mut Function, level: u8, _strict_aliasing: bool) {
         run_pipelining(func);
     }
     // 第一轮: 不依赖 GVN/SCCP 的 pass
-    strength_reduction(func);
-    ivop(func);
-    tail_call_optimization(func);
+    if !ssa_dbg_off("sr") {
+        strength_reduction(func);
+    }
+    if !ssa_dbg_off("ivop") {
+        ivop(func);
+    }
+    if !ssa_dbg_off("tco") {
+        tail_call_optimization(func);
+    }
     // P4 别名分析 / P13 别名集合 已删（Steensgaard 结果从入口到管线都被丢弃，
     // 对机器码零影响），P6 PGO / P7 自动并行化 已删（它们只往不存在的符号
     // `__dcc_hot_hint` / `__dcc_parallel_hint` 插 Store，而重建名单显式丢弃这些写）。
     // 与已删的 P11 同一类，理由与实测证据见下文「已删除的伪实现」说明。
-    speculative_execution(func);
+    if !ssa_dbg_off("specex") {
+        speculative_execution(func);
+    }
     // P18 DSE: 用自有位置模型（Named/Via/Opaque）判「再没人读」的写。
     if !ssa_dbg_off("dse") {
         dead_store_elim(func);
@@ -1223,28 +1231,46 @@ pub fn speculative_execution(func: &mut Function) -> bool {
 }
 
 /// 切片能否整体提到块首: 对每个被上提的 `i` 与它跨过每个留在原地的 `j (j<i)` 检查
-/// 三条不得跨越的关系。
+/// 不得跨越的关系。
+///
+/// 判据一律在**基名**上比, 不在 SSA 版本名上比: 重建按基名塌缩成可变量
+/// (`p.0`/`p.1` 重建后都是变量 `p`), 跨过一条读写同一基名的指令就会让那次读写
+/// 看见另一个版本的值。版本名只在 version==0 时恰好等于基名, 拿它比会漏掉非零
+/// 版本 —— 实测 sqlite3GetVarint: `b = p[1]` 读 `p.0`, 被 `p += 2` (写 `p.1`)
+/// 跨过, 两侧名字 ("p.0"/"p.1") 与基名 ("p") 都不相等, 旧判据放行, 塌缩后
+/// `p[1]` 读到已自增的 p ⇒ 4 字节 varint 解码错 (sqlite 大 bulk insert 报
+/// UNIQUE 冲突)。对称方向 (被跨过的指令读上提项写的基名) 同样必须拦。
 fn slice_is_movable(insts: &[Inst], picked: &HashSet<usize>) -> bool {
     let base_of = |k: usize| -> Option<String> { insts[k].dest.as_ref().map(|d| d.base.clone()) };
+    // 取一个 SSA 版本名的基名 ("p.1" -> "p"; version==0 时名字即基名)。
+    fn use_base(u: &str) -> &str {
+        u.split('.').next().unwrap_or(u)
+    }
     for &i in picked {
+        let i_uses = operand_uses(&insts[i].kind);
         for j in 0..i {
             if picked.contains(&j) {
                 continue;
             }
-            // 1. 两者写同一个基名 ⇒ 上提会颠倒对同一变量的两次赋值。
+            let j_uses = operand_uses(&insts[j].kind);
             if let (Some(bi), Some(bj)) = (base_of(i), base_of(j)) {
+                // 1. 两者写同一个基名 ⇒ 上提会颠倒对同一变量的两次赋值。
                 if bi == bj {
                     return false;
                 }
                 // 2. 上提项读了被跨过指令所写的基名 ⇒ 拿到的会是旧值。
-                if operand_uses(&insts[i].kind).iter().any(|u| u == &bj) {
+                if i_uses.iter().any(|u| use_base(u) == bj) {
+                    return false;
+                }
+                // 3. 被跨过的指令读了上提项所写的基名 ⇒ 塌缩后它读到的是**新值**。
+                if j_uses.iter().any(|u| use_base(u) == bi) {
                     return false;
                 }
             }
-            // 3. 上提项的 dest 被被跨过指令以**同名 SSA** 读写 (版本级冲突)。
+            // 4. 上提项的 dest 被被跨过指令以**同名 SSA** 读写 (版本级冲突)。
             if let Some(d) = &insts[i].dest {
                 let dn = d.name();
-                if operand_uses(&insts[j].kind).iter().any(|u| *u == dn) {
+                if j_uses.iter().any(|u| *u == dn) {
                     return false;
                 }
             }
@@ -2543,6 +2569,13 @@ pub fn gvn(func: &mut Function) -> bool {
     for _round in 0..16 {
         let defs = collect_defs(func);
         let var_table = collect_var_table(func);
+        // 基名 -> 版本数 = 这个 AST 变量在函数里被写了几次。重建按**基名塌缩**
+        // (`x_1/x_2/…` 重建后都是变量 `x`)，所以引用一个多版本基名等价于引用它
+        // 在运行期那一刻的值 —— 可能是后一次的写入。
+        let mut base_versions: HashMap<String, usize> = HashMap::new();
+        for v in var_table.values() {
+            *base_versions.entry(v.base.clone()).or_insert(0) += 1;
+        }
         let order = rpo_order(func);
         let preds = preds_from_terminators(func);
         let mut out_table: HashMap<String, HashMap<ValKey, String>> = HashMap::new();
@@ -2630,12 +2663,33 @@ pub fn gvn(func: &mut Function) -> bool {
                             } if v.name() == prev);
                             if !already_copy {
                                 if let Some(target) = var_table.get(&prev) {
-                                    bbm.insts[idx].kind = InstKind::Bin {
-                                        op: BinOp::Add,
-                                        l: Operand::Var(target.clone()),
-                                        r: Operand::Int(0),
-                                    };
-                                    rewrote_in_place = true;
+                                    // `target` 与 `dest` 同基名 (同一源变量的不同 SSA
+                                    // 版本) 时, `dest = target + 0` 在 SSA→AST 重建后
+                                    // 会塌缩成 `x = x + 0` 自引用, 本应写入的值被读回旧值
+                                    // 盖掉。典型:`rc = 0` 的常数与更早的 `rc = 0` 值编号
+                                    // 归一, 重写成 `rc = rc_early + 0`, 重建后 rc 不再被清零
+                                    // (实测 SQLite 打开空库时 SHORT_READ 没被转成 OK)。
+                                    // 同一变量前后两个版本恰好同值时绝不能改成跨版本拷贝,
+                                    // 保持原指令即是对正确值的赋值。
+                                    //
+                                    // 不同基名同样危险：`target` 的基名只要在函数里还有
+                                    // **别的版本**，塌缩后那条赋值语句就排在 `dest = …` 之前
+                                    // 的某处，读到的不是 `target` 这个版本而是它后来的重写。
+                                    // 实测 sqlite3.c：`main` 里 `List *r = 0` 被归一到更早的
+                                    // `p = 0`（`r.1 = p.1 + 0`），重建后成为 `r = p`，于是
+                                    // `sqlite3SrcListAppend` 拿到一个早已 free/realloc 过的
+                                    // 陈旧 SrcList，`selectExpander` 读到 0 并段错误 ——
+                                    // 任何两表 JOIN 都崩。判据：只有单版本基名才可作取值来源。
+                                    if target.base != dest.base
+                                        && base_versions.get(&target.base).is_some_and(|c| *c <= 1)
+                                    {
+                                        bbm.insts[idx].kind = InstKind::Bin {
+                                            op: BinOp::Add,
+                                            l: Operand::Var(target.clone()),
+                                            r: Operand::Int(0),
+                                        };
+                                        rewrote_in_place = true;
+                                    }
                                 }
                             }
                         } else {

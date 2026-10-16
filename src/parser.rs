@@ -387,7 +387,12 @@ pub struct Parser<'a> {
     in_switch_depth: u32,        // switch 嵌套深度 (>0 表示在 switch 体内)
     block_ended_with_case: bool, // parse_block 是否因 case/default 而终止
     pending_close_brace: u32,    // 未消费的内层 '}' 计数 (Duff's device)
-    pub token_count: u64,        // 已消费的 token 数量 (供 profile 使用)
+    // 仍打开的 Duff's device 内层块的遮蔽改名映射栈 (与 pending_close_brace
+    // 对应的 scope 配对)。parse_block 因 case/default 提前终止时把本块的
+    // shadow_map 移入此处, 使其对 parse_cases 随后收集的、词法上仍在同一块内
+    // 的 case 体及块内共享 label (如 next_tail) 继续生效, 直到匹配的 '}' 被消费。
+    duff_shadow_stack: Vec<Vec<(String, String)>>,
+    pub token_count: u64, // 已消费的 token 数量 (供 profile 使用)
 }
 
 pub fn parse(src: &[u8], file: &str) -> (Program, Vec<Diagnostic>) {
@@ -449,6 +454,7 @@ impl<'a> Parser<'a> {
             in_switch_depth: 0,
             block_ended_with_case: false,
             pending_close_brace: 0,
+            duff_shadow_stack: Vec::new(),
             token_count: 2, // cur + peek are pre-fetched
         };
         // C23 nullptr_t: 内置类型 (等价 nullptr 表达式所对应的 (void*)0)
@@ -671,6 +677,35 @@ impl<'a> Parser<'a> {
                 ty.clone()
             },
             _ => ty.clone(),
+        }
+    }
+    /// `resolve_type_latest` 的递归版: 下钻**包装层** (Ptr / Array / Vector /
+    /// Atomic / Complex / Imaginary / Func 的返回与参数), 把每一层里字段为空的
+    /// 前向声明 struct/union 换成 `struct_defs` 里的最新定义。
+    ///
+    /// 成员的 `Field.ty` 在**声明该成员时**就冻结了: `struct VdbeFrame { Mem
+    /// *aMem; }` 早于 `struct sqlite3_value {...}`, 于是该字段永远是
+    /// `Ptr(Struct(空字段))`。顶层版只认裸 struct/union, 指不到 `Ptr` 里面
+    /// 那一层, 于是 `pFrame->aMem[i]` 的元素步长取到 0 —— 下标不乘元素大小
+    /// (SQLite 触发器 NEW./OLD. 读错内存单元的根因)。包装层之外的 struct
+    /// 本体不必下钻: 它的字段各自再经本函数解析。
+    fn resolve_type_latest_deep(&self, ty: &Type) -> Type {
+        let deep_q = |q: &QualType| QualType {
+            base: Self::resolve_type_latest_deep(self, &q.base),
+            quals: q.quals,
+            addr_space: q.addr_space,
+        };
+        match ty {
+            Type::Ptr(q) => Type::Ptr(Box::new(deep_q(q))),
+            Type::Array(q, n) => Type::Array(Box::new(deep_q(q)), n.clone()),
+            Type::Vector(q, n) => Type::Vector(Box::new(deep_q(q)), *n),
+            Type::Atomic(q) => Type::Atomic(Box::new(deep_q(q))),
+            Type::Complex(q) => Type::Complex(Box::new(deep_q(q))),
+            Type::Imaginary(q) => Type::Imaginary(Box::new(deep_q(q))),
+            Type::Func(ret, params) => {
+                Type::Func(Box::new(deep_q(ret)), params.iter().map(deep_q).collect())
+            },
+            other => self.resolve_type_latest(other),
         }
     }
     /// 登记 typedef；GCC 允许兼容或整型别名的重复 typedef（宿主头文件常见）
@@ -2070,14 +2105,18 @@ impl<'a> Parser<'a> {
     }
 
     fn lookup_ident_type(&self, name: &str) -> Type {
+        // 变量/函数/typedef 的登记类型同样是声明时的冻结副本, 可能带着当时的
+        // 前向声明占位 (`struct S *tbl[4];` 早于 `struct S{...}`): 与
+        // `type_of_member` 同源, 取出时按 `struct_defs` 的最新定义回填, 否则
+        // `tbl[2]` 的元素步长取 0 (下标不乘元素大小)。
         if let Some(ty) = self.locals.get(name) {
-            return ty.clone();
+            return self.resolve_type_latest_deep(ty);
         }
         if let Some(ty) = self.globals.get(name) {
-            return ty.clone();
+            return self.resolve_type_latest_deep(ty);
         }
         if let Some(ty) = self.typedefs.get(name) {
-            return ty.clone();
+            return self.resolve_type_latest_deep(ty);
         }
         int_t()
     }
@@ -2186,20 +2225,26 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
         }
-        match callee.ty() {
+        let result = match callee.ty() {
             Type::Func(ret, _) => ret.base.clone(),
             Type::Ptr(inner) => match inner.base {
                 Type::Func(ret, _) => ret.base.clone(),
                 ref other => other.clone(),
             },
             other => other,
-        }
+        };
+        result
     }
 
     fn type_of_member(&self, base: &Expr, field: &Ident, is_arrow: bool) -> Type {
         let aggregate = if is_arrow {
             match base.ty() {
                 Type::Ptr(inner) => inner.base.clone(),
+                // `p->f` 的 p 也可以是**数组**成员（`struct S a[3]; a->f` ≡ `(*a).f`，
+                // 数组退化成首元素指针）。codegen 查字段用的 `member_target_ty` 同样展开
+                // 数组，这里不展开就落在 `_ => int_t()` 上 ⇒ 成员类型被抹成 `int`：
+                // `a->z = ptr` 的赋值右值会按 4 字节符号扩展截断（sqlite open_db 崩溃根因）。
+                Type::Array(elem, _) => elem.base.clone(),
                 other => other,
             }
         } else {
@@ -2220,7 +2265,10 @@ impl<'a> Parser<'a> {
                 };
                 find_field(resolved, &field.name)
                     .map(|(found, _)| {
-                        let ty = found.ty.clone();
+                        // 字段类型是声明时冻结进 `Field.ty` 的旧副本, 里面可能
+                        // 还带着该 struct 当时的前向声明占位 (`Mem *aMem` 早于
+                        // `struct sqlite3_value{...}`), 取出时按最新定义回填。
+                        let ty = self.resolve_type_latest_deep(&found.ty);
                         if let Some(bw) = found.bit_width {
                             // C11 6.3.1.1: bit-field integer promotion.
                             // If int can represent all values → int.
@@ -3246,15 +3294,79 @@ impl<'a> Parser<'a> {
                 }
             }
             // 函数指针 typedef: typedef ret_type (*name)(params)
+            // 嵌套函数指针 typedef: typedef ret_type (*(*name)(params1))(params2)
+            // 吃掉外层的 ( 与 * (此时 cur 从 ( / * 变为 name 或 内层 ( / * )
             if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
-                self.advance(); // (
-                self.advance(); // *
+                self.advance(); // 外层 (
+                self.advance(); // 外层 *
+                                // 跳过 const/volatile/restrict
                 while matches!(
                     self.cur.kind,
                     TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict
                 ) {
                     self.advance();
                 }
+                // 嵌套: cur 是内层 ( 且 peek 是内层 *
+                if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
+                    self.advance(); // 内层 (
+                    self.advance(); // 内层 *
+                    let inner_name = self.parse_typedef_name()?;
+                    if !self.expect(TokKind::RParen, "')'") {
+                        return None;
+                    }
+                    // 内层参数列表: 形如 (int)
+                    let inner_params = if self.cur.kind == TokKind::LParen {
+                        self.advance();
+                        let ps = self.parse_params()?;
+                        if !self.expect(TokKind::RParen, "')'") {
+                            return None;
+                        }
+                        ps
+                    } else {
+                        vec![]
+                    };
+                    // 内层函数返回类型是 ty (ret_type). 内层函数类型: Func(ty, inner_params).
+                    let inner_func_ty = Type::Func(
+                        Box::new(ty.clone().into()),
+                        inner_params.iter().map(|p| p.ty.clone().into()).collect(),
+                    );
+                    // 关闭外层 (* 的 )
+                    if !self.expect(TokKind::RParen, "')'") {
+                        return None;
+                    }
+                    // 外层参数列表: 形如 (void)
+                    let outer_params = if self.cur.kind == TokKind::LParen {
+                        self.advance();
+                        let ps = self.parse_params()?;
+                        if !self.expect(TokKind::RParen, "')'") {
+                            return None;
+                        }
+                        ps
+                    } else {
+                        vec![]
+                    };
+                    // 外层函数返回类型是内层函数指针 (Ptr(inner_func_ty)).
+                    let inner_ptr_ty = Type::Ptr(Box::new(inner_func_ty.into()));
+                    let outer_func_ty = Type::Func(
+                        Box::new(inner_ptr_ty.into()),
+                        outer_params.iter().map(|p| p.ty.clone().into()).collect(),
+                    );
+                    let final_ty = Type::Ptr(Box::new(outer_func_ty.into()));
+                    let sp = inner_name.span.clone();
+                    self.skip_post_decl_modifiers();
+                    if !self.expect(TokKind::Semi, "';'") {
+                        return None;
+                    }
+                    if !self.register_typedef(&inner_name, final_ty.clone()) {
+                        return None;
+                    }
+                    return Some(vec![Decl::Typedef {
+                        name: inner_name,
+                        ty: final_ty,
+                        span: sp,
+                    }]);
+                }
+                // 简单函数指针: typedef ret_type (*name)(params)
                 let name = self.parse_typedef_name()?;
                 if !self.expect(TokKind::RParen, "')'") {
                     return None;
@@ -4105,9 +4217,11 @@ impl<'a> Parser<'a> {
             if !self.expect(TokKind::RParen, "')'") {
                 return None;
             }
+            // Save the variadic flag: parse_block below may call parse_params()
+            // again for nested function pointer types in the body, which resets
+            // last_variadic. We need to preserve the function's own variadicity.
+            let saved_is_variadic = self.last_variadic;
             // K&R 风格函数: 参数后跟类型声明, 然后是函数体
-            // 注意: __attribute__ 虽然 is_type_start 返回 true,
-            // 但它不是 K&R 参数类型, 而是函数属性 (如 void f(void) __attribute__((noreturn)))
             let mut is_old_style = false;
             let params = if (params.is_empty() || params.iter().all(|p| p.ty == Type::Int))
                 && self.cur.kind != TokKind::LBrace
@@ -4275,6 +4389,10 @@ impl<'a> Parser<'a> {
             // 会误报 implicit declaration 并误判引用类型。
             if !is_nested_func {
                 self.locals.clear();
+                // var_quals 也需清空: 否则上一个函数内的 const 局部变量
+                // (如 static const unsigned char x[]) 的限定符会泄漏到
+                // 下一个函数同名参数 (如 u64 x), 导致误报 E0030.
+                self.var_quals.clear();
             } else {
                 // 形参入独立作用域, 与父帧隔离; 自身名入作用域支持递归调用
                 self.locals.push_scope();
@@ -4306,6 +4424,10 @@ impl<'a> Parser<'a> {
                 }
                 None
             };
+            // Restore the variadic flag that was saved before parse_block().
+            // parse_block may call parse_params() for nested function pointer
+            // types, which resets last_variadic to false.
+            self.last_variadic = saved_is_variadic;
             // 恢复外层函数的 in_function 状态
             if is_nested_func {
                 // 将嵌套函数体内的 locals 展平为单 HashMap (供 collect_upvars 使用)
@@ -5064,30 +5186,125 @@ impl<'a> Parser<'a> {
         // 栈元素: (ty, attrs) 元组, 表示该层 (* 的类型和属性
         let mut star_stack: Vec<(Type, ParsedAttrs)> = Vec::new();
         while self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
-            // 检查递归深度,每层 (* 都计入深度
-            // 临时禁用深度检查以调试
-            // if self.enter_recursion().is_err() {
-            //     self.err_here(
-            //         "E0001",
-            //         "maximum recursion depth exceeded (declaration too nested)",
-            //         Some("simplify the declaration or reduce parentheses nesting"),
-            //     );
-            //     // 平衡已增加的深度
-            //     for _ in 0..star_stack.len() {
-            //         self.leave_recursion();
-            //     }
-            //     return None;
-            // }
+            // 检查下一个 token 是否是 Ident: 若是, 这是最内层 (*name) 的开始,
+            // 停止继续收集栈, 把它交给下方 process_star_chain_iterative 或
+            // 直接标识符分支处理. 若是 LParen 或 Star, 这是嵌套的 (*(*name)(...)) 形式,
+            // 继续压栈.
+            // 即: peek (当前是 *) 之后的下一个 token (cur.peek 是 * 之后的下一个 token)
+            // 我们已经 advance 到 * 之后, 所以现在 self.cur 就是 * 后面的 token.
+            // 等等, 让我重新看:
+            // 进 while 前 cur=(, peek=*.
+            // 循环体: advance() -> cur=*, peek=*. 第二次 advance() -> cur=*, peek=<next>.
+            // skip_ptr_qualifiers 后 cur 还是 * 后的 token.
+            // 此时判断: 若 cur 是 Ident, 那这是 (*name) 最内层, 停止压栈.
+            // 若 cur 是 LParen && peek=Star, 那这是嵌套的 (*(* 结构, 继续压栈.
             star_stack.push((ty.clone(), attrs.clone()));
             self.advance(); // 内层 (
             self.advance(); // 内层 *
             self.skip_ptr_qualifiers();
             attrs = Self::merge_attrs(attrs, self.parse_attributes());
+            // 探测: 现在 cur 是 * 之后的 token. 若它是 Ident 或者不是 LParen-Star,
+            // 就停止继续收集外层嵌套 (避免把 (*name)(params) 中的 (*name) 误判为嵌套).
+            if self.cur.kind != TokKind::LParen || self.peek.kind != TokKind::Star {
+                break;
+            }
         }
 
         // 如果存在 (* 层,需要处理嵌套结构
         if !star_stack.is_empty() {
             return self.process_star_chain_iterative(ty, attrs, storage, star_stack);
+        }
+        // 嵌套函数指针: 形如 void (*(*fptype)(int))(void)
+        // 内层 (* 后跟另一个 (*name)(params) 而不是直接的标识符名字.
+        // star_stack 已经在上面的 while 循环里处理了连续的 (*(*(* 情况,
+        // 但对于 typedef 路径, parse_var_or_func 只消费了第一层 ( 与 *,
+        // 所以当前 token 是内层的 (*name)(params), 需要递归处理.
+        if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
+            self.advance(); // 内层 (
+            self.advance(); // 内层 *
+                            // 递归调用 parse_func_ptr_inner_inner 来处理内层 (*name)(params)
+                            // 它返回的是 vec![Decl::Var { ty, .. }], 我们需要取其类型.
+            let inner_decls =
+                self.parse_func_ptr_inner_inner(ty.clone(), attrs.clone(), storage.clone(), true)?;
+            let inner_ty = inner_decls
+                .iter()
+                .find_map(|d| match d {
+                    Decl::Var(vd) => Some(vd.ty.clone()),
+                    _ => None,
+                })
+                .unwrap_or(ty.clone());
+            // 此时 token 位置应该在内层 ) 之后 (内层的 (*name)(params) 已消费完)
+            // 跳过内层关闭的 )
+            if self.cur.kind == TokKind::RParen {
+                self.advance();
+            }
+            // 外层函数参数列表: 形如 )(void) 中的 (void)
+            let final_ty = if self.cur.kind == TokKind::LParen {
+                self.advance();
+                let params = self.parse_params()?;
+                if !self.expect(TokKind::RParen, "')'") {
+                    return None;
+                }
+                let func_ty = Type::Func(
+                    Box::new(inner_ty.into()),
+                    params.iter().map(|p| p.ty.clone().into()).collect(),
+                );
+                Type::Ptr(Box::new(func_ty.into()))
+            } else {
+                inner_ty
+            };
+            // 注册名字: 从内层 Decl 中取出 name
+            let sp = inner_decls
+                .iter()
+                .find_map(|d| match d {
+                    Decl::Var(vd) => Some(vd.name.clone()),
+                    _ => None,
+                })
+                .unwrap_or(Ident {
+                    name: String::new(),
+                    span: Span::point("", 0, 0),
+                });
+            self.locals.insert(sp.name.clone(), final_ty.clone());
+            if !self.in_function {
+                self.globals.insert(sp.name.clone(), final_ty.clone());
+            }
+            attrs.merge(self.parse_attributes());
+            self.skip_asm_label();
+            let init = if self.cur.kind == TokKind::Assign {
+                self.advance();
+                Some(self.parse_expr_bp(2)?)
+            } else {
+                None
+            };
+            if self.cur.kind != TokKind::Comma && !self.expect(TokKind::Semi, "';'") {
+                return None;
+            }
+            return Some(vec![Decl::Var(VarDecl {
+                ty: final_ty,
+                name: sp,
+                init,
+                span: Span::point("", 0, 0),
+                is_extern: storage.is_extern,
+                is_static: storage.is_static,
+                section: attrs.section,
+                alignment: attrs.alignment,
+                is_weak: attrs.is_weak,
+                visibility: attrs.visibility,
+                is_unused: attrs.is_unused,
+                register_name: attrs.register_name,
+                home: None,
+                cleanup_fn: attrs.cleanup_fn,
+                is_thread_local: storage.is_thread_local,
+                no_sanitize: attrs.no_sanitize.clone(),
+                alias_name: attrs.alias_name.clone(),
+                copy_fn: attrs.copy_fn.clone(),
+                is_retain: attrs.is_retain,
+                is_used_attr: attrs.is_used,
+                quals: self.spec_quals.iso_c(),
+                addr_space: self.spec_addr_space,
+                tls_model: attrs.tls_model.clone(),
+                asm_label: attrs.asm_label.clone(),
+            })]);
         }
         // 额外的 * 层: (**name), (***name) 等 — 多级指针函数声明
         // 如 void (**fn5)(int[]): fn5 是指向函数指针的指针
@@ -7475,6 +7692,55 @@ impl<'a> Parser<'a> {
             // (__seg_fs/__seg_gs 等): 与 parse_ptr_suffix / parse_func_ptr_inner
             // 同步, 避免函数指针字段声明符报 E0001.
             self.skip_ptr_qualifiers();
+            // 收集括号内的多级指针: (**name), (***name) 等
+            // 第一颗 * 已在上方 is_func_ptr 分支消费, 这里继续收集后续 *
+            let mut ptr_depth: usize = 1;
+            while self.cur.kind == TokKind::Star {
+                self.advance();
+                self.skip_ptr_qualifiers();
+                ptr_depth += 1;
+            }
+            // 嵌套函数指针字段: void (*(*xDlSym)(params))(void)
+            // 即括号内是 (* 后跟另一个 (*name)(params) 形式的声明符,
+            // 而非直接是标识符名字。
+            if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
+                // 递归处理内层 (*name)(params): 把它当作一个独立的函数指针字段
+                // 声明符来解析, 返回其类型 (应为 Ptr(Func(...))) 与名字。
+                let (inner_ty, inner_nm) = self.parse_field_declarator(spec.clone());
+                // 内层解析完之后, 关闭外层 (*name) 的右括号由调用方继续;
+                // 但因为我们已经消费了内层的 `(`, 需要额外消费外层关闭 `)`
+                if self.cur.kind == TokKind::RParen {
+                    self.advance();
+                }
+                // 用名字的返回值
+                let nm = inner_nm;
+                // 解析外层函数参数列表: 形如 )(void) 中的 (void)
+                let ty = if self.cur.kind == TokKind::LParen {
+                    self.advance();
+                    let params = self.parse_params().unwrap_or_default();
+                    if self.cur.kind == TokKind::RParen {
+                        self.advance();
+                    }
+                    // 内层返回类型就是 inner_ty (Ptr(Func(...)) 即函数指针)
+                    let func_ty = Type::Func(
+                        Box::new(inner_ty.clone().into()),
+                        params.iter().map(|p| p.ty.clone().into()).collect(),
+                    );
+                    // 按 ptr_depth 包裹指针
+                    let mut wrapped: Type = func_ty;
+                    for _ in 0..ptr_depth {
+                        wrapped = Type::Ptr(Box::new(wrapped.into()));
+                    }
+                    wrapped
+                } else {
+                    let mut wrapped: Type = inner_ty;
+                    for _ in 1..ptr_depth {
+                        wrapped = Type::Ptr(Box::new(wrapped.into()));
+                    }
+                    wrapped
+                };
+                return (ty, nm);
+            }
             let nm = if self.cur.kind == TokKind::Ident {
                 let n = self.cur.text.clone();
                 self.advance();
@@ -7545,7 +7811,11 @@ impl<'a> Parser<'a> {
                     Box::new(spec.into()),
                     params.iter().map(|p| p.ty.clone().into()).collect(),
                 );
-                let mut ty = Type::Ptr(Box::new(func_ty.into()));
+                // 按 ptr_depth 包裹指针: (**name)(params) -> Ptr(Ptr(Func(...)))
+                let mut ty: Type = func_ty;
+                for _ in 0..ptr_depth {
+                    ty = Type::Ptr(Box::new(ty.into()));
+                }
                 for sz in array_sizes.into_iter().rev() {
                     ty = Type::Array(Box::new(ty.into()), sz);
                 }
@@ -7585,6 +7855,33 @@ impl<'a> Parser<'a> {
                                 // (__seg_fs/__seg_gs 等): 与 parse_ptr_suffix / parse_func_ptr_inner
                                 // 同步, 避免函数指针字段声明符报 E0001.
                 self.skip_ptr_qualifiers();
+                // 嵌套函数指针: void *(*(*f)(inner_params))(outer_params)
+                // 在第一个 (* 之后又遇到 ( 和 *, 即内层 (*f)(...) 声明符.
+                if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
+                    // 递归解析内层 (*f)(inner_params), 返回内层函数指针类型和名字
+                    let (inner_ty, nm) = self.parse_field_declarator(ty.clone());
+                    // 消费内层声明符后的外层右括号 )
+                    if self.cur.kind == TokKind::RParen {
+                        self.advance();
+                    }
+                    // 解析外层函数参数列表 (outer_params)
+                    if self.cur.kind == TokKind::LParen {
+                        self.advance();
+                        let params = self.parse_params().unwrap_or_default();
+                        if self.cur.kind == TokKind::RParen {
+                            self.advance();
+                        }
+                        // 外层函数返回值就是内层函数指针 (inner_ty)
+                        let func_ty = Type::Func(
+                            Box::new(inner_ty.into()),
+                            params.iter().map(|p| p.ty.clone().into()).collect(),
+                        );
+                        ty = Type::Ptr(Box::new(func_ty.into()));
+                    } else {
+                        ty = Type::Ptr(Box::new(inner_ty.into()));
+                    }
+                    return (ty, nm);
+                }
                 let nm = if self.cur.kind == TokKind::Ident {
                     let n = self.cur.text.clone();
                     self.advance();
@@ -8499,6 +8796,10 @@ impl<'a> Parser<'a> {
                 && matches!(self.cur.kind, TokKind::KwCase | TokKind::KwDefault)
             {
                 self.block_ended_with_case = true;
+                // 块因 case/default 提前终止: 保存本块已建立的遮蔽改名映射,
+                // 使 parse_cases 后续收集的、词法上仍在同一块内的 case 体和
+                // 块内共享 label 继续按本块作用域解析, 直到匹配的 '}' 被消费。
+                self.duff_shadow_stack.push(std::mem::take(&mut shadow_map));
                 break;
             }
             // C23 [[attributes]]: 在块级作用域出现，静默跳过
@@ -8635,6 +8936,22 @@ impl<'a> Parser<'a> {
             }
         }
         (decl, None)
+    }
+
+    /// 汇总当前所有仍打开的 Duff 块的遮蔽改名映射。
+    /// 内层 (栈顶) 优先: 同名时内层块的映射覆盖外层, 与作用域遮蔽顺序一致。
+    fn active_duff_map(&self) -> Vec<(String, String)> {
+        let mut merged: Vec<(String, String)> = Vec::new();
+        for frame in &self.duff_shadow_stack {
+            for (old, new) in frame {
+                if let Some(slot) = merged.iter_mut().find(|(o, _)| o == old) {
+                    slot.1 = new.clone();
+                } else {
+                    merged.push((old.clone(), new.clone()));
+                }
+            }
+        }
+        merged
     }
 
     /// 应用遮蔽映射到声明 (重命名初始化表达式中的引用)
@@ -9230,14 +9547,17 @@ impl<'a> Parser<'a> {
                 // 使用 push/pop 代替 clone/restore, 消除 O(vars) 克隆
                 self.locals.push_scope();
                 let b = self.parse_block();
-                self.locals.pop_scope();
                 if self.block_ended_with_case {
                     // Duff's device: 块因 case/default 而提前终止.
                     // 不消费 '}' (留给 parse_cases 处理).
+                    // Scope 必须保留, 直到 parse_cases 消费此 '}' 时再 pop,
+                    // 否则 case body { VdbeCursor *pC; ... } 声明的局部变量
+                    // 会被过早销毁, 后续 pC->xxx 查找失败退化为 int.
                     self.block_ended_with_case = false;
                     self.pending_close_brace += 1;
                     Some(Stmt::Block { b, span: sp })
                 } else {
+                    self.locals.pop_scope();
                     if !self.expect(TokKind::RBrace, "'}'") {
                         return None;
                     }
@@ -9605,6 +9925,8 @@ impl<'a> Parser<'a> {
             if self.cur.kind == TokKind::RBrace {
                 if self.pending_close_brace > 0 {
                     self.pending_close_brace -= 1;
+                    self.locals.pop_scope(); // 与 LBrace push_scope 配对
+                    self.duff_shadow_stack.pop(); // 该 Duff 块作用域结束
                     self.advance(); // consume the nested block's '}'
                     continue;
                 }
@@ -9645,6 +9967,8 @@ impl<'a> Parser<'a> {
                     if self.cur.kind == TokKind::RBrace {
                         if self.pending_close_brace > 0 {
                             self.pending_close_brace -= 1;
+                            self.locals.pop_scope();
+                            self.duff_shadow_stack.pop();
                             self.advance();
                             continue;
                         }
@@ -9682,6 +10006,8 @@ impl<'a> Parser<'a> {
                 if self.cur.kind == TokKind::RBrace {
                     if self.pending_close_brace > 0 {
                         self.pending_close_brace -= 1;
+                        self.locals.pop_scope(); // 与 LBrace push_scope 配对
+                        self.duff_shadow_stack.pop(); // 该 Duff 块作用域结束
                         self.advance(); // consume the nested block's '}'
                         continue; // continue parsing case body
                     }
@@ -9730,7 +10056,13 @@ impl<'a> Parser<'a> {
                 if self.is_decl_start() {
                     match self.parse_decl() {
                         Some(ds) => {
-                            for d in ds {
+                            for mut d in ds {
+                                // 词法上仍位于某个打开的 Duff 块内: 其初始化表达式
+                                // 中的外层同名引用需改写为该块的 shadow 名。
+                                if !self.duff_shadow_stack.is_empty() {
+                                    let m = self.active_duff_map();
+                                    Self::apply_shadow_map_decl(&mut d, &m);
+                                }
                                 items.push(BlockItem::Decl(d));
                             }
                         },
@@ -9740,7 +10072,11 @@ impl<'a> Parser<'a> {
                     }
                 } else {
                     match self.parse_stmt() {
-                        Some(s) => {
+                        Some(mut s) => {
+                            if !self.duff_shadow_stack.is_empty() {
+                                let m = self.active_duff_map();
+                                Self::apply_shadow_map_stmt(&mut s, &m);
+                            }
                             items.push(BlockItem::Stmt(s));
                         },
                         None => {
@@ -10739,6 +11075,7 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 // 函数指针强制转换: (type (*)(params))expr
+                // 嵌套函数指针 cast: (type (*(*)(inner_params))(outer_params))expr
                 // 解析完类型后, 检查是否是 (* 模式
                 if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
                     self.advance(); // (
@@ -10749,6 +11086,86 @@ impl<'a> Parser<'a> {
                     ) {
                         self.advance();
                     }
+                    // 收集括号内的多级指针: (**), (***) 等
+                    // 第一颗 * 已消费, 这里继续收集后续 *
+                    let mut ptr_depth: usize = 1;
+                    while self.cur.kind == TokKind::Star {
+                        self.advance();
+                        while matches!(
+                            self.cur.kind,
+                            TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict
+                        ) {
+                            self.advance();
+                        }
+                        ptr_depth += 1;
+                    }
+                    // 嵌套函数指针 cast: 在 (* 之后又遇到 (*, 即 (*(*)(inner))(outer)
+                    if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
+                        self.advance(); // 内层 (
+                        self.advance(); // 内层 *
+                                        // 跳过限定符
+                        while matches!(
+                            self.cur.kind,
+                            TokKind::KwConst | TokKind::KwVolatile | TokKind::KwRestrict
+                        ) {
+                            self.advance();
+                        }
+                        // 跳过内层名字 (无名 cast 时无名字, 直接 )
+                        if self.cur.kind == TokKind::Ident {
+                            self.advance();
+                        }
+                        if !self.expect(TokKind::RParen, "')'") {
+                            return None;
+                        }
+                        // 内层参数列表: (inner_params)
+                        let inner_params = if self.cur.kind == TokKind::LParen {
+                            self.advance();
+                            let ps = self.parse_params()?;
+                            if !self.expect(TokKind::RParen, "')'") {
+                                return None;
+                            }
+                            ps
+                        } else {
+                            vec![]
+                        };
+                        // 内层函数类型: Func(ty, inner_params)
+                        let inner_func_ty = Type::Func(
+                            Box::new(ty.into()),
+                            inner_params.iter().map(|p| p.ty.clone().into()).collect(),
+                        );
+                        // 关闭外层 (* 的 )
+                        if !self.expect(TokKind::RParen, "')'") {
+                            return None;
+                        }
+                        // 外层参数列表: (outer_params)
+                        let outer_params = if self.cur.kind == TokKind::LParen {
+                            self.advance();
+                            let ps = self.parse_params()?;
+                            if !self.expect(TokKind::RParen, "')'") {
+                                return None;
+                            }
+                            ps
+                        } else {
+                            vec![]
+                        };
+                        // 最终类型: Ptr(Func(Ptr(inner_func_ty), outer_params))
+                        let inner_ptr_ty = Type::Ptr(Box::new(inner_func_ty.into()));
+                        let outer_func_ty = Type::Func(
+                            Box::new(inner_ptr_ty.into()),
+                            outer_params.iter().map(|p| p.ty.clone().into()).collect(),
+                        );
+                        let ty = Type::Ptr(Box::new(outer_func_ty.into()));
+                        if !self.expect(TokKind::RParen, "')'") {
+                            return None;
+                        }
+                        let e = self.parse_unary()?;
+                        return Some(Expr::Cast {
+                            ty,
+                            e: Box::new(e),
+                            span: sp,
+                        });
+                    }
+                    // 简单函数指针 cast: (type (*)(params))expr
                     if !self.expect(TokKind::RParen, "')'") {
                         return None;
                     }
@@ -10759,7 +11176,12 @@ impl<'a> Parser<'a> {
                             return None;
                         }
                     }
-                    let ty = Type::Ptr(Box::new(ty.into()));
+                    // 按 ptr_depth 包裹指针: (**)(params) -> Ptr(Ptr(Func(...)))
+                    let mut wrapped: Type = ty;
+                    for _ in 0..ptr_depth {
+                        wrapped = Type::Ptr(Box::new(wrapped.into()));
+                    }
+                    let ty = wrapped;
                     if !self.expect(TokKind::RParen, "')'") {
                         return None;
                     }
@@ -11157,9 +11579,16 @@ impl<'a> Parser<'a> {
                             continue;
                         }
                         // __builtin_classify_type(type-or-expr): GCC type classification.
-                        // 1=void, 2=integer, 3=pointer, 4=real_float,
-                        // 5=complex, 6=struct_union, 7=array, 8=function,
-                        // 9=vector, 10=enum, -1=lang_mask (unknown).
+                        // Values are the ones host GCC actually returns, measured with
+                        // `__builtin_classify_type(<expr of that type>)`:
+                        //   1=integer/_Bool/enum, 4=void, 5=pointer, 8=real float,
+                        //   9=complex, 12=struct, 13=union, 14=array, -1=vector.
+                        // The type-name argument form (`classify_type(int)`) is a dcc
+                        // extension: host GCC rejects it, so it returns the same code
+                        // the expression form returns for that type.
+                        // GCC's documented legacy table (2=real float, 6=record) is NOT
+                        // what current GCC emits; c-torture 20040709-{1,2}.c gate on
+                        // `classify_type(l) == 8` for long double, which confirms 8.
                         // GCC accepts both type names and expressions.
                         if name.name == "__builtin_classify_type" {
                             let ty = if self.is_type_start() {
@@ -11179,14 +11608,9 @@ impl<'a> Parser<'a> {
                             } else {
                                 ty
                             };
-                            // __builtin_classify_type: GCC type classification codes.
-                            // Values match GCC's c-typeck.c:
-                            //   1=integer/enum, 2=pointer, 3=null,
-                            //   4=void, 5=struct/union, 6=array,
-                            //   7=function, 8=real_float, 9=complex,
-                            //   10=vector.
-                            // Tests like 20040709-*.c gate on
-                            // `classify_type(l) == 8` to detect long double.
+                            // __builtin_classify_type: host GCC's classification codes,
+                            // measured against the local GCC (see the block comment at
+                            // the top of this arm for the table and its provenance).
                             let class = match ty {
                                 Type::Bool
                                 | Type::Char
@@ -11208,14 +11632,15 @@ impl<'a> Parser<'a> {
                                 | Type::Fract
                                 | Type::Accum
                                 | Type::Enum(_, _, _) => 1,
-                                Type::Ptr(_) => 2,
+                                Type::Ptr(_) => 5,
                                 Type::Void => 4,
-                                Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) => 5,
-                                Type::Array(_, _) => 6,
+                                Type::Struct(_, _, _, _) => 12,
+                                Type::Union(_, _, _, _) => 13,
+                                Type::Array(_, _) => 14,
                                 Type::Func(_, _) => 7,
                                 Type::Float | Type::Double | Type::LongDouble => 8,
                                 Type::Complex(_) | Type::Imaginary(_) => 9,
-                                Type::Vector(_, _) => 10,
+                                Type::Vector(_, _) => -1,
                                 Type::Atomic(_) | Type::Named(_) => 4,
                             };
                             e = Expr::Int {

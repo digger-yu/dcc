@@ -102,9 +102,12 @@ test_globals
 
 # Test fixtures (.c files under tests/fixtures/ are tracked, but inline
 # `.s` asm fixtures for snapshot tests should also be tracked).
-# 仅排除编译产物 .s；tests/fixtures 下的 .s 用 `!tests/fixtures/**/*.s` 重新纳入
+# 仅排除编译产物 .s；tests/fixtures 下的 .s 与反汇编快照的 expected.s 用下面的
+# `!` 规则重新纳入 —— expected.s 是 `tests/disasm_snapshot.rs` 唯一判据，缺它时
+# 新克隆直接报「missing expected.s (run snapshot generator)」，独立 oracle 等于不存在。
 *.s
 !tests/fixtures/**/*.s
+!tests/disasm_snapshots_x86_64/**/expected.s
 
 # Temp scripts / artifacts
 _*.py

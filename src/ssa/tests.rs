@@ -72,6 +72,158 @@ fn ipdom_and_branch_join_find_nested_joins() {
     assert_eq!(branch_join("B", "B1", "B2", &f).as_deref(), Some("M2"));
 }
 
+/// **非对称汇聚** (SQLite `mallocWithAlarm` 段错误根因): 一条臂沿 Jump 直链
+/// 走到多入边汇聚块, 另一条臂则是一个「可经内层 `Ret` 出函数」的嵌套分支 ——
+/// 它的 `walk_to_join` 因遇到非 Jump 终结符 (内层 Branch) 而返回 `None`, 但其
+/// 非返回路径仍直达同一个汇聚块。
+///
+/// CFG 对应:
+/// ```text
+/// entry --Branch(then, els)
+/// then  --Branch(ret, fall)
+/// ret   --Ret
+/// fall  --Jump tail
+/// els   --Jump tail
+/// tail  (preds=fall,els) --Ret
+/// ```
+/// 旧 `branch_join` 只在两臂都给出 Some 时认汇聚, 这里漏判后 ipdom 又只剩虚拟
+/// EXIT 占位名 (一条路径直接出函数), 于是返回错误的 `None`, 重建把 `tail` 内联进
+/// 第一个到达它的内层臂, 外层假分支路径上 If 之后的尾部语句整体丢失。
+#[test]
+fn branch_join_finds_asymmetric_join_when_one_arm_can_return() {
+    let span = Span::point("t.c", 1, 1);
+    let mut f = Function::new("f".into(), Type::Int, span);
+    for b in ["then", "els", "ret", "fall", "tail"] {
+        f.add_block(b.to_string());
+    }
+    let c = Operand::Int(1);
+    f.blocks.get_mut("entry").unwrap().term = Terminator::Branch {
+        cond: c.clone(),
+        t: "then".into(),
+        f: "els".into(),
+    };
+    f.blocks.get_mut("then").unwrap().term = Terminator::Branch {
+        cond: c,
+        t: "ret".into(),
+        f: "fall".into(),
+    };
+    f.blocks.get_mut("ret").unwrap().term = Terminator::Ret {
+        val: Some(Operand::Int(0)),
+    };
+    f.blocks.get_mut("fall").unwrap().term = Terminator::Jump("tail".into());
+    f.blocks.get_mut("els").unwrap().term = Terminator::Jump("tail".into());
+    f.blocks.get_mut("tail").unwrap().term = Terminator::Ret {
+        val: Some(Operand::Int(0)),
+    };
+
+    // 外层分支的公共汇聚块必须是 tail, 不能因 then 臂可 return 就判空。
+    assert_eq!(branch_join("entry", "then", "els", &f).as_deref(), Some("tail"));
+}
+
+/// **两臂各自又是一层分支** (SQLite `sqlite3SrcListAppend` 段错误根因): 快路径的
+/// `walk_to_join` 在臂自己的 `Branch` 上返回 `None`, 非对称可达那步没有候选块可验,
+/// 体内又有早退 `Ret` ⇒ ipdom 只剩虚拟 EXIT 占位名, 三条判据全落空。旧实现在这里给出
+/// `None`, 于是重建把公共尾部内联进第一条臂, 兄弟臂因 `visited` 去重拿到空 ——
+/// `pItem=&pList->a[…]` 与 `return pList` 一起消失, `%rax` 留着 `nSrc` 当指针返回,
+/// `selectExpander` 解引用空 SrcList ⇒ 任何两表 JOIN 段错误。
+///
+/// 修复后的判据: `arm_join` 穿过臂自己的嵌套分支 ——
+/// 死侧 (`Ret` 臂) 只会出函数时, 另一侧给出的多入边块就是汇聚块。
+#[test]
+fn branch_join_finds_join_when_both_arms_are_branches() {
+    let span = Span::point("t.c", 1, 1);
+    let mut f = Function::new("f".into(), Type::Int, span);
+    for b in [
+        "then", "t_alloc", "t_set", "t_mid", "els", "t_full", "e_set", "e_mid",
+    ] {
+        f.add_block(b.to_string());
+    }
+    f.add_block("tail".to_string());
+    let c = Operand::Int(1);
+    f.blocks.get_mut("entry").unwrap().term = Terminator::Branch {
+        cond: c.clone(),
+        t: "then".into(),
+        f: "els".into(),
+    };
+    // then 臂: `if(!pNew) return 0;` + `p->nSrc = 1;`
+    f.blocks.get_mut("then").unwrap().term = Terminator::Branch {
+        cond: c.clone(),
+        t: "t_alloc".into(),
+        f: "t_set".into(),
+    };
+    f.blocks.get_mut("t_alloc").unwrap().term = Terminator::Ret {
+        val: Some(Operand::Int(0)),
+    };
+    f.blocks.get_mut("t_set").unwrap().term = Terminator::Jump("t_mid".into());
+    f.blocks.get_mut("t_mid").unwrap().term = Terminator::Jump("tail".into());
+    // els 臂: `if(p->nSrc >= 4) return p;` + `p->nSrc += 1;`
+    f.blocks.get_mut("els").unwrap().term = Terminator::Branch {
+        cond: c.clone(),
+        t: "t_full".into(),
+        f: "e_set".into(),
+    };
+    f.blocks.get_mut("t_full").unwrap().term = Terminator::Ret {
+        val: Some(Operand::Int(0)),
+    };
+    f.blocks.get_mut("e_set").unwrap().term = Terminator::Jump("e_mid".into());
+    f.blocks.get_mut("e_mid").unwrap().term = Terminator::Jump("tail".into());
+    f.blocks.get_mut("tail").unwrap().term = Terminator::Ret {
+        val: Some(Operand::Int(0)),
+    };
+
+    assert_eq!(
+        branch_join("entry", "then", "els", &f).as_deref(),
+        Some("tail"),
+        "两臂各自是分支时也必须找到公共尾部, 否则尾部只活在第一条臂里"
+    );
+}
+
+/// 判据的**反向**约束: 两条臂真的分岔 (各自汇聚到不同的多入边块, 且互不可达) 时不得
+/// 给出真实汇聚块 —— 拿它当 `stop_at` 会把一条臂的续体搬到 If 之后, 语义照样错。
+/// 此时 `branch_join` 只允许回落到虚拟 EXIT 占位名 (调用方按「不是真实块」过滤成 `None`)。
+#[test]
+fn branch_join_keeps_divergent_arms_apart() {
+    let span = Span::point("t.c", 1, 1);
+    let mut f = Function::new("f".into(), Type::Int, span);
+    for b in ["A1", "A2", "MA", "B1", "B2", "MB"] {
+        f.add_block(b.to_string());
+    }
+    let c = Operand::Int(1);
+    f.blocks.get_mut("entry").unwrap().term = Terminator::Branch {
+        cond: c.clone(),
+        t: "A".into(),
+        f: "B".into(),
+    };
+    f.add_block("A".to_string());
+    f.add_block("B".to_string());
+    f.blocks.get_mut("A").unwrap().term = Terminator::Branch {
+        cond: c.clone(),
+        t: "A1".into(),
+        f: "A2".into(),
+    };
+    f.blocks.get_mut("A1").unwrap().term = Terminator::Jump("MA".into());
+    f.blocks.get_mut("A2").unwrap().term = Terminator::Jump("MA".into());
+    f.blocks.get_mut("MA").unwrap().term = Terminator::Ret {
+        val: Some(Operand::Int(0)),
+    };
+    f.blocks.get_mut("B").unwrap().term = Terminator::Branch {
+        cond: c.clone(),
+        t: "B1".into(),
+        f: "B2".into(),
+    };
+    f.blocks.get_mut("B1").unwrap().term = Terminator::Jump("MB".into());
+    f.blocks.get_mut("B2").unwrap().term = Terminator::Jump("MB".into());
+    f.blocks.get_mut("MB").unwrap().term = Terminator::Ret {
+        val: Some(Operand::Int(0)),
+    };
+
+    let j = branch_join("entry", "A", "B", &f);
+    assert!(
+        !j.as_deref().is_some_and(|n| f.blocks.contains_key(n)),
+        "分岔的两臂没有公共汇聚块, 实得 {j:?}"
+    );
+}
+
 /// `collect_all_preds` 给出的前驱表必须是**确定序**（本仓不变式：HashMap
 /// 迭代序一律不得外泄）。它是 `bb.preds` 缓存与 `DCC_SSA_IR_DUMP` 读数的唯一
 /// 来源：曾经这里直接 `for (name, bb) in &func.blocks` 迭代 HashMap，同一
@@ -1338,12 +1490,16 @@ fn unrecognised_assign_lvalue_bails_instead_of_dropping_the_store() {
     let ok =
         try_build("struct S{double a;}; double g(struct S *p){ p->a = 1; return p->a; }\n", "g")
             .expect("受支持的左值仍应进 SSA 管线");
+    // 本判据要的是「写确实进了 IR」，不是某个具体指令形态。标量成员写现在走
+    // `&p->a` 取址 + `Store`（聚合基址按右值降级会把写落进 `rep movsq` 的帧副本，
+    // 见 `lower_lvalue` 的注释），因此 `Store` 与 `MemberStore` 都算数；
+    // 一条都不发才是本测试要拦的回归。
     assert!(
         ok.blocks.values().any(|bb| bb
             .insts
             .iter()
-            .any(|i| matches!(i.kind, InstKind::MemberStore { .. }))),
-        "成员赋值必须真的发射成一条 MemberStore"
+            .any(|i| matches!(i.kind, InstKind::MemberStore { .. } | InstKind::Store { .. }))),
+        "成员赋值必须真的发射一条写指令（Store 或 MemberStore）"
     );
 }
 

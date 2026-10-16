@@ -9,14 +9,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::Expr;
+use crate::ast::{BinOp, Expr};
 
 use crate::ssa::expr_rebuild::{
     collect_op_uses, collect_op_uses_op, inst_to_expr_resolved, op_count_in_kind, op_count_in_op,
 };
 use crate::ssa::ir::{
     inst_clobbers_memory, inst_reads_memory, inst_unremovable, inst_written_bases,
-    kind_operand_ssa_vars, Function, Inst, InstKind, OrderedNameSet, Terminator,
+    kind_operand_ssa_vars, Function, Inst, InstKind, Operand, OrderedNameSet, Terminator,
 };
 use crate::ssa::rebuild::{inst_has_side_effect, is_lower_ir_temp_base, is_pass_hint_inst};
 
@@ -342,6 +342,76 @@ pub(super) fn plan_inlined_temps(func: &Function) -> InlinePlan {
         subst,
         kept_temp_bases,
     }
+}
+
+/// `&&` / `||` 的**右**操作数只在左操作数为真 (假) 时才该求值。SSA 通道不为短路求值造块:
+/// 整个条件是一棵交给重建的表达式树, 于是树里每一个值都必须**内联**进那棵树 —— 否则它就
+/// 退化成块里的一条独立赋值语句 (`plan_inlined_temps` 给的 `subst[name] == Some(None)`),
+/// 而独立语句按块序发射, 发在带守卫的那条分支**之前**, 那次被守卫保护的求值就提前发生了:
+/// 轻则读到未初始化/过期的值而走进错误分支, 重则直接打空段错误。
+///
+/// 实测 (`tests/fixtures/opt/lazy_guard_and.c::land_addr`, -O2/-O3 SIGSEGV, 而 -O0/-O1
+/// 与 gcc 四档都对): `if( pl && pl->nExpr > db->aLimit[5] && !nested )` 里 `db->aLimit`
+/// 的基址先落进 `-0x58(%r13)`、比较结果落进 `-0x60(%r13)`, 而 `test %rax,%rax / je`
+/// (pl 的非空判断) 直到它们**之后**才发, `pl==0` 时 `movslq (%rax)` 打空。同一条式子改成
+/// `> 5`、改成 `aLimit[5] < ...`(操作数互换)、改成嵌套 if 都不犯 —— 犯不犯取决于内联窗口
+/// 里是否恰好卡进一条 `MemberAddr` 的定义 (`is_addr_producer` 的政策让那种临时值永不内联),
+/// 那是排布巧合, 不是语义, 所以不能靠调窗口判据的松紧来解决。
+///
+/// 判据沿「被守卫的名字 → 其定义的操作数」传递: 定义已内联的继续往下查 (它此刻在同一棵
+/// 被守卫的树里), 定义被落地的就是本判据要拦的。名字不在 `subst` 里 (参数 / 具名局部 /
+/// phi 别名) 视为安全: 它们读的是真实槽, 块序保证写在前、读在后。
+///
+/// 三元 `?:` 不走这条路 —— 降级阶段就把含 `Expr::Cond` 的表达式判为不支持而整函数退出
+/// SSA (实测 `p ? p->x : 0` 的函数不进 SSA), 所以这里只认 `&&` / `||`。
+///
+/// 判据**保守**: 落地一次就整体退出, 不去判「提前的那次求值其实没有副作用」。少退出的
+/// 代价是丢优化 (与 SSA 关闭同一产物), 多退出的代价是错值 —— 两边不对称。
+pub(super) fn lazy_operand_landed(func: &Function, subst: &HashMap<String, Option<Expr>>) -> bool {
+    // 名字 → 该定义的操作数名字集。首个定义胜出, 与 `plan_inlined_temps` 的 `def_pos`
+    // 同一条规则: 内联计划看见的是哪一个定义, 这里就必须顺着同一个定义往下走。
+    let mut def_ops: HashMap<String, Vec<String>> = HashMap::new();
+    let mut guarded: Vec<String> = Vec::new();
+    for bb_name in &func.block_order {
+        let Some(bb) = func.blocks.get(bb_name) else {
+            continue;
+        };
+        for inst in &bb.insts {
+            if let Some(d) = &inst.dest {
+                def_ops.entry(d.name()).or_insert_with(|| {
+                    let mut names = HashSet::new();
+                    collect_op_uses(&inst.kind, &mut names);
+                    names.into_iter().collect()
+                });
+            }
+            if let InstKind::Bin { op, r, .. } = &inst.kind {
+                if matches!(op, BinOp::AndAnd | BinOp::OrOr) {
+                    if let Operand::Var(v) = r {
+                        guarded.push(v.name());
+                    }
+                }
+            }
+        }
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    while let Some(name) = guarded.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        match subst.get(&name) {
+            // 不是指令定义出来的名字: 读真实槽, 块序已保证先后。
+            None => {},
+            // 已内联 ⇒ 值仍在被守卫的树里, 继续查这棵树自己的操作数。
+            Some(Some(_)) => {
+                if let Some(ops) = def_ops.get(&name) {
+                    guarded.extend(ops.iter().cloned());
+                }
+            },
+            // 被落成守卫之外的一条独立语句 ⇒ 求值时机已经变了。
+            Some(None) => return true,
+        }
+    }
+    false
 }
 
 #[cfg(test)]

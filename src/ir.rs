@@ -1486,7 +1486,9 @@ impl Lowering {
             Stmt::Block { b, span } => {
                 (Vec::new(), b.items.iter().filter_map(|i| self.lower_item(i)).collect(), span)
             },
-            Stmt::Switch { expr, cases, span, .. } => (
+            Stmt::Switch {
+                expr, cases, span, ..
+            } => (
                 vec![self.lower_expr(expr)],
                 cases
                     .iter()
@@ -1733,9 +1735,7 @@ impl Lowering {
                     vec![self.lower_expr(ap)],
                 )
             },
-            Expr::VaArgPack { .. } => {
-                (ExprKind::ControlFlow, Vec::new())
-            },
+            Expr::VaArgPack { .. } => (ExprKind::ControlFlow, Vec::new()),
             Expr::SizeofTy { ty: ref sty, .. } => {
                 literal = Some(ExprLiteral::Int(sty.size() as i128));
                 (ExprKind::SizeAlignOffset, Vec::new())

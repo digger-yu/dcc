@@ -23,14 +23,14 @@ pub fn eval_global_lvalue_offset(
             // &x - peel off one level
             eval_global_lvalue_offset(inner, globals_raw)
         },
-        Expr::Cast { e: inner, ty, .. } => {
-            // Cast expressions like (T*)&expr
-            let base_off = eval_global_lvalue_offset(inner, globals_raw)?;
-            let offset_adjustment = match ty {
-                Type::Ptr(elem_ty) => elem_ty.size(),
-                _ => 1, // Pointer arithmetic by bytes
-            };
-            Some((base_off.0, base_off.1 + offset_adjustment as i64))
+        Expr::Cast { e: inner, .. } => {
+            // Cast expressions like (T*)&expr: a pointer cast does not change
+            // the address of the pointee. Do NOT add elem_ty.size() -- that was
+            // confusing pointer *type* with pointer *arithmetic* (`p + 1`).
+            // Adding elem_ty.size() here corrupted static initializers like
+            // `(void*)&posixIoFinder` by storing `&posixIoFinder + 8`, landing
+            // inside the next static object.
+            eval_global_lvalue_offset(inner, globals_raw)
         },
         Expr::Index { arr, idx, .. } => {
             // Array indexing: arr[i]

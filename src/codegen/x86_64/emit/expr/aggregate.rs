@@ -7,8 +7,8 @@ use crate::codegen::shared::elf as shared_elf;
 use crate::codegen::shared::elf::*;
 use crate::codegen::shared::*;
 use crate::codegen::x86_64::asm::*;
-use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::insn::BoolExpect;
+use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::opcode::{SimdArithOp, SimdWidth};
 use crate::codegen::x86_64::Codegen;
 use crate::codegen::x86_64::*;
@@ -140,6 +140,13 @@ impl Codegen {
             Expr::Call { .. } => Self::needs_memory_return(&ty),
             Expr::VaArg { .. } => Self::va_arg_result_in_memory(&ty),
             Expr::Assign { .. } | Expr::StmtExpr { .. } | Expr::CompoundLit { .. } => true,
+            // 聚合三元 `c ? s1 : s2`: 值是选中那一整个对象, `gen_expr_cond`
+            // 把两支都物化进一个帧内临时槽后交付其地址 (与上面同一条约定)。
+            // 报告成寄存器交付会让消费端把 rax 当数据存槽 —— sqlite3 lemon
+            // parser 的 `tok = (a.n==0 ? a : b);` 因此只写对 `Token.z`,
+            // `Token.n` 留残值, CREATE TRIGGER 算出 7.9MB 的拷贝长度。
+            Expr::Cond { ty, .. } => matches!(ty, Type::Struct(..) | Type::Union(..)),
+
             // 具名变量 / 成员 / 下标 / 解引用等 lvalue 形态由各自的源分支
             // (取地址后按块装载) 处理, 不走 rvalue 通道。
             _ => false,
@@ -454,6 +461,15 @@ impl Codegen {
                 Expr::Assign { .. } | Expr::StmtExpr { .. } => {
                     self.gen_expr(r, Self::EVAL_BASE);
                     self.mov(6, 0); // rsi = rax (聚合源地址)
+                    true
+                },
+                // 聚合三元 `c ? s1 : s2`: `gen_expr_cond` 已按同一条内存交付约定
+                // 把选中支整块物化进帧内临时槽, rax = 槽地址, 直接当源拷贝。
+                // 落到下面通用物化分支只会拷到 rax:rdx 的前 16 字节 (其中
+                // rdx 从未装载), sqlite3 的 `tok = (a.n==0 ? a : b);` 即此。
+                Expr::Cond { .. } if Self::rvalue_is_buffer_addr(r) => {
+                    self.gen_expr(r, Self::EVAL_BASE);
+                    self.mov(6, 0); // rsi = rax (临时槽地址)
                     true
                 },
                 _ => false,
@@ -795,7 +811,8 @@ impl Codegen {
                             let qwords = sz / 8;
                             let remainder = sz % 8;
                             if qwords > 0 {
-                                self.emit_insn(&Insn::mov_reg_imm32_b64(1, qwords as i32)).expect("typed-opcode: mov_reg_imm32_b64"); // mov rcx, imm32
+                                self.emit_insn(&Insn::mov_reg_imm32_b64(1, qwords as i32))
+                                    .expect("typed-opcode: mov_reg_imm32_b64"); // mov rcx, imm32
                                 self.emit_insn(&Insn::noarg(
                                     crate::codegen::x86_64::opcode::NoArgOp::RepMovsq,
                                 )); // rep movsq
@@ -835,7 +852,8 @@ impl Codegen {
                             let qwords = sz / 8;
                             let remainder = sz % 8;
                             if qwords > 0 {
-                                self.emit_insn(&Insn::mov_reg_imm32_b64(1, qwords as i32)).expect("typed-opcode: mov_reg_imm32_b64"); // mov rcx, imm32
+                                self.emit_insn(&Insn::mov_reg_imm32_b64(1, qwords as i32))
+                                    .expect("typed-opcode: mov_reg_imm32_b64"); // mov rcx, imm32
                                 self.emit_insn(&Insn::noarg(
                                     crate::codegen::x86_64::opcode::NoArgOp::RepMovsq,
                                 )); // rep movsq
@@ -932,12 +950,14 @@ impl Codegen {
         let qwords = sz / 8;
         let remainder = sz % 8;
         if qwords > 0 {
-            self.emit_insn(&Insn::mov_reg_imm32_b64(1, qwords as i32)).expect("typed-opcode: mov_reg_imm32_b64"); // mov rcx, imm32 (qwords)
+            self.emit_insn(&Insn::mov_reg_imm32_b64(1, qwords as i32))
+                .expect("typed-opcode: mov_reg_imm32_b64"); // mov rcx, imm32 (qwords)
             self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsq));
             // rep movsq
         }
         if remainder > 0 {
-            self.emit_insn(&Insn::mov_reg_imm32_b64(1, remainder as i32)).expect("typed-opcode: mov_reg_imm32_b64"); // mov rcx, imm32 (remainder)
+            self.emit_insn(&Insn::mov_reg_imm32_b64(1, remainder as i32))
+                .expect("typed-opcode: mov_reg_imm32_b64"); // mov rcx, imm32 (remainder)
             self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb));
             // rep movsb
         }
