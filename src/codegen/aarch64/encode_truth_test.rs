@@ -9,7 +9,8 @@
 //
 // 设计约束:
 //   * 只覆盖 `encode()` 已经实现、且语义正确 (不在 G11 缺陷清单) 的构造子;
-//   * 若 `as` 不可用 (非开发机), 测试跳过而不失败 (G5 反假绿: 至少一条真跑)。
+//   * 若 `aarch64-linux-gnu-as`/`-objdump` 不可用 (非开发机), 测试跳过而不失败;
+//     工具在位却一条都没真跑仍算失败 (G5 反假绿: 至少一条真跑)。
 //   * 缺陷清单 (docs/aarch64_encoding_defects.md) 中的字 NOT 在此验证 ——
 //     它们按 G11 允许为红, 由 bug-fix 阶段单独修。
 
@@ -106,14 +107,20 @@ fn truth_cases() -> Vec<Case> {
     ]
 }
 
+/// 交叉真值工具链 (`as` + `objdump`) 是否可用 —— 非开发机上没有, 测试跳过。
+fn truth_tools_available() -> bool {
+    ["aarch64-linux-gnu-as", "aarch64-linux-gnu-objdump"]
+        .iter()
+        .all(|bin| Command::new(bin).arg("--version").output().is_ok())
+}
+
 /// 用 `as`+`objdump` 取一条指令的 .text 首 4 字节 (小端 u32)。
+///
+/// 工具可用性由 [`truth_tools_available`] 在测试入口统一判定; 这里的 `None`
+/// 只表示「`as` 拒绝了这条文本」或输出解析失败, 由调用方按 skip 处理。
 fn assemble_truth(gas: &str) -> Option<u32> {
     let as_bin = "aarch64-linux-gnu-as";
     let objdump_bin = "aarch64-linux-gnu-objdump";
-    // 若工具不存在, 直接返回 None (测试调用方决定 skip)。
-    if Command::new(as_bin).arg("--version").output().is_err() {
-        return None;
-    }
     let dir = std::env::temp_dir();
     let pid = std::process::id();
     let src = dir.join(format!("dcc-g1-{pid}.s"));
@@ -154,6 +161,10 @@ fn assemble_truth(gas: &str) -> Option<u32> {
 
 #[test]
 fn g1_encode_matches_gas() {
+    if !truth_tools_available() {
+        eprintln!("[G1] SKIP: aarch64-linux-gnu-as/objdump unavailable (非开发机)");
+        return;
+    }
     let cases = truth_cases();
     let mut ran = 0;
     let mut mismatches = 0;
@@ -173,8 +184,12 @@ fn g1_encode_matches_gas() {
             );
         }
     }
-    // G5 反假绿: 必须至少真跑一条, 否则说明 as 不可用, 不算绿。
-    assert!(ran > 0, "G1 反假绿: aarch64-linux-gnu-as 不可用或全部被拒, 门禁空跑");
+    // G5 反假绿: 必须至少真跑一条。工具可用性已在入口判定, 走到这里 `ran == 0`
+    // 只可能是全部 `encode()` 未实现或被 `as` 拒绝 —— 门禁空跑, 不算绿。
+    assert!(
+        ran > 0,
+        "G1 反假绿: 交叉工具在位但没有任何用例真跑 (encode() 未实现或被 as 拒绝), 门禁空跑"
+    );
     assert_eq!(
         mismatches, 0,
         "G1: {}/{} 条指令编码与 GAS 真值不一致 (详见上方 eprintln)",

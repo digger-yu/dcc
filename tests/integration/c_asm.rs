@@ -3266,6 +3266,21 @@ fn cross_msr_mrs_is_hard_error_not_silent_nop() {
 #[test]
 #[cfg(unix)]
 fn cross_statement_position_inline_asm_lands_in_object() {
+    // 四个交叉 objdump 一个都没有 (非开发机): 按 G1 同款约定跳过而不失败。
+    // CI 的 test job 装齐了交叉 binutils, 门禁在那里真跑 (`ran > 0` 反假绿),
+    // 不存在「缺包却静默通过」; 开发机只要有一个交叉 objdump 就照常判定。
+    let any_cross_objdump = [
+        "aarch64-linux-gnu-objdump",
+        "riscv64-linux-gnu-objdump",
+        "arm-linux-gnueabi-objdump",
+        "mips-linux-gnu-objdump",
+    ]
+    .iter()
+    .any(|bin| Command::new(bin).arg("--version").output().is_ok());
+    if !any_cross_objdump {
+        eprintln!("ASM-LANDS-SKIP: no cross objdump available (非开发机)");
+        return;
+    }
     let dir = std::env::temp_dir();
     let stem = format!("dcc-asm-lands-{}", std::process::id());
     let src = dir.join(format!("{stem}.c"));
@@ -3315,6 +3330,17 @@ fn cross_statement_position_inline_asm_lands_in_object() {
 #[test]
 #[cfg(unix)]
 fn cross_register_output_asm_lands_in_object() {
+    // 判据工具 `aarch64-linux-gnu-objdump` 缺失 (非开发机) 时按 G1 同款约定
+    // 跳过而不失败; CI 的 test job 装齐了交叉 binutils, 门禁在那里真跑
+    // (`ran > 0` 反假绿), 不存在「缺包却静默通过」。
+    if Command::new("aarch64-linux-gnu-objdump")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("ASM-OUT-SKIP: no aarch64-linux-gnu-objdump available (非开发机)");
+        return;
+    }
     let dir = std::env::temp_dir();
     let stem = format!("dcc-asm-out-{}", std::process::id());
     let src = dir.join(format!("{stem}.c"));

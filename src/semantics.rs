@@ -3433,6 +3433,20 @@ pub mod cpu_isa {
             }
         }
 
+        /// 参考机判定：Intel、family 6、model 0xa7（i5-11400，rocketlake）。
+        ///
+        /// gcc 13.3 的实测答案只在这台机器上量过；其他宿主没有对应实测，
+        /// 相关断言改为跳过（合成用例不依赖宿主，照常全覆盖）。
+        #[cfg(all(target_arch = "x86_64", not(miri)))]
+        fn is_reference_host() -> bool {
+            use std::arch::x86_64::{__cpuid, __cpuid_count};
+            let c0 = __cpuid(0);
+            if vendor_kind(c0.ebx, c0.edx, c0.ecx) != VENDOR_INTEL {
+                return false;
+            }
+            decode_family_model(__cpuid_count(1, 0).eax, VENDOR_INTEL) == (6, 0xa7)
+        }
+
         /// 解码公式本身：与 gcc `cpu_indicator_init` 的四个掩码/移位逐一对账。
         ///
         /// 这一条不依赖宿主（用造出来的 EAX 值），因为「本机只有一个 family 6」不能
@@ -3466,20 +3480,34 @@ pub mod cpu_isa {
             assert_eq!(decode_family_model(raw7, VENDOR_ZHAOXIN).0, 0x07);
             // 未知厂商：两条调整都不适用。
             assert_eq!(decode_family_model(raw, VENDOR_UNKNOWN), (0x0f, 0x03));
-            // 本机（Intel，family 6 model 0xa7）必须落到 rocketlake：gcc 实测报 1。
+            // 宿主段：参考机（Intel family 6 model 0xa7）上 gcc 实测报
+            // `intel=1 corei7=1 rocketlake=1`，钉住这三条；其他宿主没有对应
+            // 实测答案，改为验证「真 CPUID → 解码 → 分类 → 名字层」链在本机
+            // 自洽：分类写回的名字必须能在名字层重现（发出去的比较的语义）。
             #[cfg(all(target_arch = "x86_64", not(miri)))]
             {
-                use std::arch::x86_64::__cpuid_count;
-                let eax = __cpuid_count(1, 0).eax;
-                let (f, m) = decode_family_model(eax, VENDOR_INTEL);
-                let c = classify(VENDOR_INTEL, f, m, |_| false);
-                assert_eq!(
-                    (f, m),
-                    (6, 0xa7),
-                    "本机 family/model 应为 6/0xa7（gcc 报 rocketlake=1）"
-                );
-                assert_eq!(c.cpu_type, "corei7");
-                assert_eq!(c.cpu_subtype, "rocketlake");
+                if is_reference_host() {
+                    use std::arch::x86_64::__cpuid_count;
+                    let eax = __cpuid_count(1, 0).eax;
+                    let (f, m) = decode_family_model(eax, VENDOR_INTEL);
+                    let c = classify(VENDOR_INTEL, f, m, |_| false);
+                    assert_eq!(c.cpu_type, "corei7");
+                    assert_eq!(c.cpu_subtype, "rocketlake");
+                } else {
+                    // 非参考宿主：不钉型号（没有 gcc 实测答案），只查参考求值器
+                    // 跑得通，且分类结果与名字层一致。
+                    let (kind, c) = host_processor_class();
+                    for name in [c.cpu_type, c.cpu_subtype] {
+                        if name.is_empty() {
+                            continue;
+                        }
+                        assert!(
+                            cpu_is_match(name).is_some(),
+                            "分类结果 '{name}' 不在 `__builtin_cpu_is` 名字表里"
+                        );
+                        assert!(cpu_is_holds(name, kind, &c), "本机 '{name}' 为真却与名字层对不上");
+                    }
+                }
             }
         }
 
@@ -3617,12 +3645,22 @@ pub mod cpu_isa {
 
         /// 宿主上分类结果与 gcc 13.3 实测答案一致（本机的三个正例 + 全部 AMD 名为 0）。
         ///
-        /// 这是「型号名不是恒假桩」的直接证据：gcc 在本机报 `intel=1 corei7=1
+        /// 这是「型号名不是恒假桩」的直接证据：gcc 在参考机报 `intel=1 corei7=1
         /// rocketlake=1`，其余 48 个全 0。写错解码/分类链/比较槽中任意一处，
         /// 这里就会与那三个正例对不上。
+        ///
+        /// 实测答案只对参考机（Intel family 6 model 0xa7）成立：其他宿主没有
+        /// 对应实测，本条跳过而不失败（型号矩阵的合成覆盖见
+        /// `classify_chain_semantics_on_synthetic_inputs`）。
         #[cfg(all(target_arch = "x86_64", not(miri)))]
         #[test]
         fn host_cpu_is_agrees_with_gcc13_measured_answers() {
+            if !is_reference_host() {
+                eprintln!(
+                    "SKIP: 本机不是参考机 (Intel family 6 model 0xa7), 无 gcc 13.3 实测答案可对"
+                );
+                return;
+            }
             for (name, want) in [
                 ("intel", true),
                 ("corei7", true),

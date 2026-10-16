@@ -565,7 +565,6 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_kernel.rs` | `gcc_cc1plus_bootstrap_gate` | (inline) | compile | T3 · cfg(unix) |
 | `tests/integration/c_kernel.rs` | `strict_full_build_exports_required_kernel_gates` | (inline) | compile | T0 · cfg(unix) |
 | `tests/integration/c_kernel.rs` | `strict_kernel_scripts_reject_missing_artifacts` | (inline) | compile | T0 · cfg(unix) |
-| `tests/integration/c_kernel.rs` | `strict_vmlinux_regress_requires_debug_tools` | (inline) | compile | T0 · cfg(unix) |
 | `tests/integration/c_kernel.rs` | `kasan_stack_redzone_poison_unpoison` | (inline) | compile | T0 |
 | `tests/integration/c_kernel.rs` | `kasan_global_redzone_padding` | (inline) | compile | T0 |
 | `tests/integration/c_kernel.rs` | `percpu_decl_compiles` | \`fixtures/c/percpu.c\` | compile | T0 |

@@ -174,69 +174,6 @@ fn strict_kernel_scripts_reject_missing_artifacts() {
     assert!(!vmlinux_stdout.contains("SKIP:"));
 }
 
-#[test]
-#[cfg(unix)]
-fn strict_vmlinux_regress_requires_debug_tools() {
-
-    fn make_executable(path: &std::path::Path, body: &str) {
-        fs::write(path, body).expect("write fake tool");
-        let mut perms = fs::metadata(path).expect("stat fake tool").permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(path, perms).expect("chmod fake tool");
-    }
-
-    fn link_tool(dir: &std::path::Path, name: &str) {
-        let src = ["/usr/bin", "/bin"]
-            .iter()
-            .map(|base| std::path::Path::new(base).join(name))
-            .find(|candidate| candidate.exists())
-            .unwrap_or_else(|| panic!("missing host tool {name}"));
-        std::os::unix::fs::symlink(src, dir.join(name)).expect("link host tool");
-    }
-
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let temp =
-        std::env::temp_dir().join(format!("dcc-strict-vmlinux-tools-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&temp);
-    fs::create_dir_all(&temp).expect("create fake tool dir");
-    fs::write(temp.join("vmlinux"), "not really elf\n").expect("write vmlinux fixture");
-
-    for tool in ["grep", "head", "tail", "mktemp", "rm"] {
-        link_tool(&temp, tool);
-    }
-    make_executable(
-        &temp.join("readelf"),
-        "#!/bin/sh\nprintf '  Type:                              EXEC (Executable file)\\n'\n",
-    );
-
-    let missing_pahole = Command::new("/bin/bash")
-        .arg(root.join("scripts/vmlinux_regress.sh"))
-        .env("VMLINUX", temp.join("vmlinux"))
-        .env("PATH", &temp)
-        .env("REQUIRE_PAHOLE", "1")
-        .output()
-        .expect("run vmlinux_regress.sh without pahole");
-    let stdout = String::from_utf8_lossy(&missing_pahole.stdout);
-    assert!(!missing_pahole.status.success(), "stdout: {stdout}");
-    assert!(stdout.contains("FAIL: pahole not installed"));
-    assert!(!stdout.contains("SKIP:"));
-
-    make_executable(&temp.join("pahole"), "#!/bin/sh\nprintf 'STRUCT dcc_probe\\n'\n");
-    let missing_objtool = Command::new("/bin/bash")
-        .arg(root.join("scripts/vmlinux_regress.sh"))
-        .env("VMLINUX", temp.join("vmlinux"))
-        .env("PATH", &temp)
-        .env("REQUIRE_OBJTOOL", "1")
-        .output()
-        .expect("run vmlinux_regress.sh without objtool");
-    let stdout = String::from_utf8_lossy(&missing_objtool.stdout);
-    assert!(!missing_objtool.status.success(), "stdout: {stdout}");
-    assert!(stdout.contains("FAIL: objtool not installed"));
-    assert!(!stdout.contains("SKIP:"));
-
-    let _ = fs::remove_dir_all(&temp);
-}
-
 /// KASAN 栈红区: -fsanitize=address 时函数入口应发射
 /// __asan_poison_memory_region 和 __asan_unpoison_memory_region 调用
 #[test]

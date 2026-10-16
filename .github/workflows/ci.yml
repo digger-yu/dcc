@@ -85,6 +85,20 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      # 交叉 binutils: integration 的 ASM-LANDS / ASM-OUT 门禁要用真
+      # `<triple>-objdump` 读回 .text 字节做判据 (覆盖四个交叉后端)。与 parity
+      # job 同一立场: 缺包 = 门禁空跑 = 假绿, 不可接受 —— 装齐才让门禁真正
+      # 参与判定。宿主 binutils 也显式装 (runner 镜像虽自带, 与 parity job 对齐)。
+      - name: Install binutils (host + cross)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            binutils \
+            binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabi \
+            binutils-mips-linux-gnu \
+            binutils-riscv64-linux-gnu
+
       # Tier 0 第 1 项 (§9): 先显式构建全部 test target（含 6 个 integration target
       # 与 lib test）, 让测试代码的编译错误与断言失败分成两类信号。
       # 用 --release --no-run 而不是旧的 `cargo build --tests`: 后者编的是 debug
