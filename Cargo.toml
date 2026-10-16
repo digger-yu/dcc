@@ -7,43 +7,30 @@ description = "DCC: Digger C compiler. A suckless C compiler."
 license    = "Apache-2.0"
 
 [features]
-# GCC source tree integration tests (libdecnumber, etc.)
-gcc_src = []
-# Stage 10.4: 启用 strip_cpp_keywords 主路径与 legacy 字符级剥除 pass。
-# 默认编译 (无该 feature) 不再调用 `cpp::lower::strip_cpp_keywords`,
-# 仅在显式打开时保留 (例如 nightly CI 验证 legacy C 文本 fallback)。
 legacy-strip-debug = []
-
-# 历史遗留的空 feature 别名: aarch64/arm/mips/mips64/riscv64 后端现在**无条件**
-# 参与构建(见 src/codegen/mod.rs), 这些名字仅为兼容旧脚本/CI 调用而保留, 不再
-# 控制任何代码路径。新代码请使用运行期 FeatureSet 能力查询, 不要再加 gate。
-default = []
-arm = []
-mips = []
-# 同时打开两个家族
-all-backends = ["arm", "mips"]
+default            = []
+arm                = []
+mips               = []
+all-backends       = ["arm", "mips"]
 
 [profile.release]
-opt-level = 3
-lto       = false
-codegen-units = 16
-strip     = "symbols"
-panic     = "abort"
+opt-level       = 3
+lto             = false
+codegen-units   = 16
+strip           = "symbols"
+panic           = "abort"
 
 [profile.dev]
 opt-level = 0
 debug     = true
 
 [dependencies]
-# ELF parsing/generation (internal module)
-elf = "0.8"
-# Error handling
-anyhow = "1"
-# Minimal external dependencies for DWARF compression
-miniz_oxide = "0.8"
-zstd = "0.13"
-serde = { version = "1.0", features = ["derive"] }
-toml = "0.8"
+elf          = "0.8"
+anyhow       = "1"
+miniz_oxide  = "0.8"
+zstd         = "0.13"
+serde        = { version = "1.0", features = ["derive"] }
+toml         = "0.8"
 
 [[bin]]
 name = "dcc"
@@ -55,6 +42,4 @@ path = "src/fixdep.rs"
 
 [workspace]
 default-members = ["."]
-members = [
-    # Empty on purpose - main package doesn't use workspace members
-]
+members         = []

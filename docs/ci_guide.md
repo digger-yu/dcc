@@ -93,7 +93,7 @@ Tier 2  内核 / 性能
         scripts/kernel_full_check.sh、QEMU 启动矩阵、kernel-bench.yml（手动触发）
 
 Tier 3  可选深测
-        libiberty / GCC 源树（`--features gcc_src`）、STRICT_FULL_BUILD=1
+        libiberty / GCC 源树（需设 `GCC_SRC` 环境变量）、STRICT_FULL_BUILD=1
 ```
 
 | Tier | 何时必须跑 | 是否挡合并 | 触发入口 |
@@ -101,7 +101,7 @@ Tier 3  可选深测
 | Tier 0 | 每个 PR / 提交前 | **挡**（任一条红即不可合并） | `make test`（= §9 四条逐字对应：`cargo build --tests` → `cargo test --release` → `scripts/check_fixtures.sh` → 元门禁 `scripts/check_fixtures_selftest.sh`）；`make test-all` = Tier 0 全量 + `scripts/test_all.sh`（examples 端到端冒烟） |
 | Tier 1 | push / PR 自动跑（外部套件按需手动） | `ci.yml` 挡（build / test / reproducibility / e2e / parity / matrix 六个 job 全为 required）；`gcc-dg.yml`、`torture.yml` 是 `workflow_dispatch` 手动作业（不挡单个 PR） | `.github/workflows/ci.yml`（push/PR）＋ `gcc-dg.yml`、`torture.yml`（手动） |
 | Tier 2 | 需要内核级回归时（手动/定时） | 不挡单个 PR | `scripts/kernel_full_check.sh`、`kernel-bench.yml` |
-| Tier 3 | 深测/取证 | 不挡 | `--features gcc_src`、`STRICT_FULL_BUILD=1` |
+| Tier 3 | 深测/取证 | 不挡 | `GCC_SRC=~/gcc-src cargo test`、`STRICT_FULL_BUILD=1` |
 
 两条补充规则：
 

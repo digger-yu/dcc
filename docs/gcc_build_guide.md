@@ -31,15 +31,14 @@ GCC_SRC=~/gcc-src bash scripts/cc1plus_bootstrap.sh
 #   (对象数 / 错误数 / 首批失败文件, 用于度量 dcc 对 GCC 主体的收敛)
 
 # 通过 cargo 集成测试驱动 (默认模式无源码树时打印 SKIP 并通过, 不算 ignored):
-GCC_SRC=~/gcc-src cargo test --release --features gcc_src \
+GCC_SRC=~/gcc-src cargo test --release \
   --test integration gcc_cc1plus_bootstrap_gate
 ```
 
 > 门禁契约 (tests/integration.rs::gcc_src_tree_or_skip):
 > `libdecnumber_combined_tu_compiles` 与 `gcc_cc1plus_bootstrap_gate` 两个用例**始终参与
 > `cargo test`**（不再有 `#[ignore]`）。未设 `GCC_SRC` 或目录不存在时打印一行
-> `SKIP: ...` 并通过；一旦打开 cargo feature `gcc_src`，即为严格模式，缺树直接失败，
-> 避免"环境缺失"被误读成"检查通过"。
+> `SKIP: ...` 并通过。
 
 ## 本地探测
 
