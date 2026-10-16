@@ -471,18 +471,12 @@ impl Codegen {
         }
         if !vm_off_done {
             if let Some(ref f) = field_info {
-                let field_off = f.offset as i32;
-                if field_off != 0 {
-                    // dst 在 ModRM.r/m 上（`81 /0 id`），扩展位是 REX.B；写 0x44(REX.R)
-                    // 会把 /0 抬成 /8 = 未定义操作码。实测 `4c 81 c4` 被 objdump 读成
-                    // `rex.WR add $0x1,%rsp`。
-                    let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 }; // 位序: REX.B —— 该寄存器只在 ModRM.r/m 或 opcode 低 3 位; 机器判据见 rex_matrix, 产物级见 scripts/check_rex_hygiene.sh
-                    use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
-                    let gas = format!("add ${}, {}", field_off, GAS_REG64[(dst & 15) as usize]);
-                    let mut bytes = vec![rex, 0x81, 0xC0 | (dst & 7)];
-                    bytes.extend_from_slice(&field_off.to_le_bytes());
-                    self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
-                }
+                // dst 在 ModRM.r/m 上（`81 /0 id`），扩展位是 REX.B；写 0x44(REX.R)
+                // 会把 /0 抬成 /8 = 未定义操作码。实测 `4c 81 c4` 被 objdump 读成
+                // `rex.WR add $0x1,%rsp`。
+                // 字段偏移超过 disp32 (超大结构体, 991014-1) 时 add_reg_byte_offset
+                // 自动改走 movabs+add；放得下时字节与旧手写路径一致。
+                self.add_reg_byte_offset(dst, f.offset as i64);
             }
         }
         // 3. 加载成员值 (位域 vs 普通)
@@ -634,6 +628,14 @@ impl Codegen {
                         // 且就是 f64 位型”的旧不变量）。
                         self.emit_seg(seg);
                         self.emit_load_scalar_float_at(&f.ty, dst);
+                    } else if matches!(f.ty, Type::Int128 | Type::UInt128) {
+                        // __int128 字段: 值模型 = (dst = 低 64, rdx = 高 64),
+                        // 与 Ident/全局路径 (`gen_int128_load`) 同构。旧的
+                        // "仅 1/2/4/8 发加载" 分支对 16 字节形状**不发任何
+                        // 字节** —— dst 里留着的是成员地址本身, 低半读成垃圾
+                        // (pr92904: 联合里读 `u.b` 得 404370 而非真值)。
+                        self.emit_seg(seg);
+                        self.gen_int128_load_at(dst, dst);
                     } else {
                         let is_signed = !matches!(
                             &f.ty,
@@ -663,6 +665,11 @@ impl Codegen {
                     // 同上：单一真源，long double 走 `fld tbyte`。
                     self.emit_seg(seg);
                     self.emit_load_scalar_float_at(ty, dst);
+                } else if matches!(ty, Type::Int128 | Type::UInt128) {
+                    // 同上：字段信息缺失时 __int128 也要按两半加载
+                    // (与上方 field_info 分支同构)。
+                    self.emit_seg(seg);
+                    self.gen_int128_load_at(dst, dst);
                 } else {
                     let is_signed = !matches!(
                         ty,

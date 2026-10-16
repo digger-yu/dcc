@@ -166,6 +166,14 @@ pub struct Codegen {
     ///     函数的残值（那是旧代码就有的行为，本阶段不顺手改），据它算出的守护集合不可信。
     pub cur_func_is_naked: bool,
     pub bf_rmw_depth: u32, // 位域 read-modify-write 嵌套深度 (动态帧槽分配)
+    /// 未配平的 `push`/`pop` 字节数 (push +8 / pop -8, 由 emit_insn 按
+    /// 类型化 Stack 指令累计)。SysV ABI 要求 **call 指令处** rsp 16 对齐;
+    /// 函数序章对齐后, 中途为"保存左值地址跨调用"而 push 的值会让 rsp
+    /// 偏离 8, 调用点的 sub frame_bytes 必须补回同样偏移, 否则被调方把
+    /// 第一个栈参按 16 对齐取 (va_arg 的 overflow 对齐、align>16 的
+    /// MEMORY 聚合), 整体错位 (pr92904: `v.b = f1(4,...)` 的 __int128
+    /// 高半读成栈上垃圾)。
+    pub stack_shift: i64,
     /// 向量 binop 操作数物化槽号。嵌套向量 binop 时每层结果槽 R 的
     /// 操作数物化到 R+1 (XMM 快速路径 R+1/R+2), 避免内层子表达式
     /// 结果覆盖外层已写入的结果槽 (pr23135: 链式 k0+k1+k3+...
@@ -829,6 +837,7 @@ impl Codegen {
             cur_func_has_vla: false,
             cur_func_is_naked: false,
             bf_rmw_depth: 0,
+            stack_shift: 0,
             vector_op_slot: 1,
             relocatable: false,
             function_sections: false,

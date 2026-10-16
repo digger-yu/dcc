@@ -129,6 +129,22 @@ impl Codegen {
                 // 不改变发射字节 —— 只是多写一份 (pc, insn) 到 Vec, 对 .text 段零影响.
                 let pc = self.code.len() as u64;
                 self.emit(&bytes);
+                // push/pop 配对追踪 (见 `stack_shift` 字段注释): 只认类型化
+                // Stack 指令 —— 那是本后端全部函数内 push/pop 的发射形态
+                // (`Codegen::push/pop` 与各原始站点都构造它)。裸 `cg.emit`
+                // 的 0x50-0x5F 站点 (序章/epilogue/零初始化) 都在调用发生前
+                // 配平, 不参与本计数。
+                match &insn.op {
+                    crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
+                        op: crate::codegen::x86_64::opcode::StackOp::Push,
+                        ..
+                    } => self.stack_shift += 8,
+                    crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
+                        op: crate::codegen::x86_64::opcode::StackOp::Pop,
+                        ..
+                    } => self.stack_shift -= 8,
+                    _ => {},
+                }
                 // P9 fallback 清零: gas_text 为 None 时, 现场用 op.render() 兜底填充.
                 // 这样 -S 渲染器 100% 走 record 直出, 不再需要 disasm_one 反推.
                 // 只补 /* raw */ 这种占位文本: 真正带 mnemonic 的 Raw (nop 等) 会出真实助记符.
@@ -429,6 +445,36 @@ impl Codegen {
             let gas = format!("mov {}, {}", gas_dec_imm(v as i64), reg_name);
             self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
         }
+    }
+
+    /// 把常量字节偏移累加到 `dst`：能放进 disp32 时用 `add $imm32, %reg`
+    /// (81 /0 id)，超出 32 位有符号范围时先 `movabs` 进临时寄存器再
+    /// `add %tmp, %dst`。
+    ///
+    /// x86-64 的 `add r/m64, imm32` 立即数只有 32 位 (符号扩展)，字段偏移
+    /// 超过 2^31-1 时 `as i32` 截断会把偏移算成一个无关的小数/负数：
+    /// 991014-1 的 `struct huge_struct { short buf[2^62-256]; int a; }` 里
+    /// `offsetof(a)` = 2^63-512，截断后成了 -512，取成员地址得到垃圾指针。
+    /// 这类"超大结构体"在 GCC torture 里是显式测试项 (991014-1/bf64-1 同族)。
+    pub fn add_reg_byte_offset(&mut self, dst: u8, off: i64) {
+        if off == 0 {
+            return;
+        }
+        if Self::fits_disp32(off) {
+            // add dst, imm32: 走 alu_rm_reg_imm32_b64 (恒 0x81 id, 自带 gas 文本)
+            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, dst, off));
+            return;
+        }
+        // >32 位偏移: movabs tmp, off; add dst, tmp (B64)。
+        // 临时寄存器避开 dst (rcx 优先, 冲突时用 rdx)。
+        let tmp = if dst != 1 { 1u8 } else { 2u8 };
+        self.mov_imm(tmp, off as i128);
+        self.emit_insn(&Insn::alu_rm_reg_reg(
+            crate::codegen::x86_64::opcode::AluOp::Add,
+            crate::codegen::shared::asm_operand::Width::B64,
+            dst,
+            tmp,
+        ));
     }
 
     // ========================================================================

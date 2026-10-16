@@ -2299,7 +2299,10 @@ fn expr_calls_name(expr: &Expr, name: &str) -> bool {
     }
 }
 
-fn substitute_params(expr: Expr, params: &[(String, Expr)]) -> Expr {
+/// 形参绑定替换 (内联展开的核心)。`pack_args` 非空时, 表达式里出现的
+/// `Expr::VaArgPack` 展开为这串实参 (原地 splicing 进所在 Call 的实参表)
+/// —— `__builtin_va_arg_pack ()` 的内联语义, 见 `try_inline_variadic_pack`。
+fn substitute_params(expr: Expr, params: &[(String, Expr)], pack_args: &[Expr]) -> Expr {
     match expr {
         Expr::Ident { name, span, ty } => {
             if let Some((_, arg)) = params.iter().find(|(n, _)| n == &name.name) {
@@ -2310,20 +2313,20 @@ fn substitute_params(expr: Expr, params: &[(String, Expr)]) -> Expr {
         },
         Expr::Binop { op, l, r, span, ty } => Expr::Binop {
             op,
-            l: Box::new(substitute_params(*l, params)),
-            r: Box::new(substitute_params(*r, params)),
+            l: Box::new(substitute_params(*l, params, pack_args)),
+            r: Box::new(substitute_params(*r, params, pack_args)),
             span,
             ty,
         },
         Expr::Unary { op, e, span, ty } => Expr::Unary {
             op,
-            e: Box::new(substitute_params(*e, params)),
+            e: Box::new(substitute_params(*e, params, pack_args)),
             span,
             ty,
         },
         Expr::Cast { ty, e, span } => Expr::Cast {
             ty,
-            e: Box::new(substitute_params(*e, params)),
+            e: Box::new(substitute_params(*e, params, pack_args)),
             span,
         },
         Expr::Cond {
@@ -2333,15 +2336,15 @@ fn substitute_params(expr: Expr, params: &[(String, Expr)]) -> Expr {
             span,
             ty,
         } => Expr::Cond {
-            cond: Box::new(substitute_params(*cond, params)),
-            then_: Box::new(substitute_params(*then_, params)),
-            else_: Box::new(substitute_params(*else_, params)),
+            cond: Box::new(substitute_params(*cond, params, pack_args)),
+            then_: Box::new(substitute_params(*then_, params, pack_args)),
+            else_: Box::new(substitute_params(*else_, params, pack_args)),
             span,
             ty,
         },
         Expr::Comma { l, r, span, ty } => Expr::Comma {
-            l: Box::new(substitute_params(*l, params)),
-            r: Box::new(substitute_params(*r, params)),
+            l: Box::new(substitute_params(*l, params, pack_args)),
+            r: Box::new(substitute_params(*r, params, pack_args)),
             span,
             ty,
         },
@@ -2351,10 +2354,18 @@ fn substitute_params(expr: Expr, params: &[(String, Expr)]) -> Expr {
             span,
             ty,
         } => Expr::Call {
-            callee: Box::new(substitute_params(*callee, params)),
+            callee: Box::new(substitute_params(*callee, params, pack_args)),
+            // `f(a, __builtin_va_arg_pack())` → `f(a, pack0, pack1, ...)`:
+            // pack 占一个实参位, 展开成调用方多余实参的**整串**。
             args: args
                 .into_iter()
-                .map(|a| substitute_params(a, params))
+                .flat_map(|a| match a {
+                    Expr::VaArgPack { .. } if !pack_args.is_empty() => {
+                        pack_args.iter().cloned().map(Some).collect::<Vec<_>>()
+                    },
+                    other => vec![Some(substitute_params(other, params, pack_args))],
+                })
+                .flatten()
                 .collect(),
             span,
             ty,
@@ -2388,6 +2399,19 @@ fn try_inline_call(
 ) -> Option<Expr> {
     let f = funcs.get(name)?;
     let body = f.body.as_ref()?;
+
+    // --- 变参 + `__builtin_va_arg_pack ()` 的强制内联 (先行判定) ---
+    // GCC 语义: 该内建只在函数被内联后有意义 —— 展开为「把调用方的多余
+    // 实参原地塞回 pack 出现处」。非内联时 GCC 直接报错, dcc 则落到
+    // codegen 的寄存器保存区镜像转发 (只能覆盖"全寄存器在前"的布局,
+    // va-arg-pack-1 的 long double 在前形状会错位)。这里只放行
+    // always_inline/flatten 且实参数 ≥ 形参数的调用, 其余变参形状仍走
+    // 下面的统一拒绝, 不改变既有行为。
+    if f.is_variadic && (f.is_always_inline || caller_flatten) && args.len() >= f.params.len() {
+        if let Some(inlined) = try_inline_variadic_pack(f, args, name) {
+            return Some(inlined);
+        }
+    }
     if f.is_variadic || args.len() != f.params.len() {
         trace_inline_decision(name, "SKIP", "variadic/arity mismatch");
         return None;
@@ -2489,7 +2513,109 @@ fn substitute_call(f: &FuncDecl, ret: &Expr, args: &[Expr]) -> Expr {
     if bindings.len() != f.params.len() {
         return ret.clone();
     }
-    substitute_params(ret.clone(), &bindings)
+    substitute_params(ret.clone(), &bindings, &[])
+}
+
+/// 变参 + `__builtin_va_arg_pack ()` 的强制内联 (va-arg-pack-1)。
+///
+/// 放行条件 (全部满足才展开, 否则返回 None 保留普通调用):
+///   1. 被调方是变参函数且带 `always_inline` (或调用方 flatten);
+///   2. 实参数 ≥ 形参数 (多出的就是要转发的变参);
+///   3. 函数体形状是 `[Return(v)]` 或
+///      `[If{c, then: Return(a), else: None}, Return(b)]`
+///      (后者等价 `return c ? a : b;`, GCC 的 va_arg_pack 转发函数正是它);
+///   4. 返回值表达式里确实出现 `Expr::VaArgPack` —— 否则多余实参会被
+///      静默丢弃, 必须拒绝。
+///
+/// 展开: 形参 ← 前 n 个实参; `VaArgPack` ← 剩余实参列表 (原地 splicing 进
+/// 所在 Call 的实参表, 与 GCC「pack 展开为调用方实参」同源)。
+fn try_inline_variadic_pack(f: &FuncDecl, args: &[Expr], name: &str) -> Option<Expr> {
+    let body = f.body.as_ref()?;
+    let ret = inline_body_return_expr(body)?;
+    if !expr_contains_va_arg_pack(&ret) {
+        trace_inline_decision(name, "REJECT", "variadic body without va_arg_pack");
+        return None;
+    }
+    if expr_calls_name(&ret, name) {
+        trace_inline_decision(name, "REJECT", "forced variadic but direct recursion");
+        return None;
+    }
+    let bindings: Vec<(String, Expr)> = f
+        .params
+        .iter()
+        .zip(args.iter())
+        .filter_map(|(p, a)| p.name.as_ref().map(|id| (id.name.clone(), a.clone())))
+        .collect();
+    if bindings.len() != f.params.len() {
+        return None; // 无形名实参 (如 `void f(int, ...)`): 无法绑定
+    }
+    let pack_args = &args[f.params.len()..];
+    trace_inline_decision(name, "INLINE", "always_inline variadic + va_arg_pack");
+    Some(substitute_params(ret, &bindings, pack_args))
+}
+
+/// 取 always_inline 函数体的返回值表达式。除单 `Return` 外, 还认
+/// `[If{c, then: Return(a), else: None}, Return(b)]` (≡ `return c ? a : b;`)
+/// —— 变参 va_arg_pack 转发函数的典型形状 (va-arg-pack-1 的 bar)。
+fn inline_body_return_expr(body: &Block) -> Option<Expr> {
+    if let [BlockItem::Stmt(Stmt::Return { val: Some(ret), .. })] = body.items.as_slice() {
+        return Some(ret.clone());
+    }
+    if let [
+        BlockItem::Stmt(Stmt::If {
+            cond,
+            then_,
+            else_: None,
+            span,
+        }),
+        BlockItem::Stmt(Stmt::Return { val: Some(ret2), .. }),
+    ] = body.items.as_slice()
+    {
+        let then_ret = match then_.as_ref() {
+            Stmt::Return { val: Some(v), .. } => v.clone(),
+            Stmt::Block { b, .. } => match b.items.as_slice() {
+                [BlockItem::Stmt(Stmt::Return { val: Some(v), .. })] => v.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        return Some(Expr::Cond {
+            cond: Box::new(cond.clone()),
+            then_: Box::new(then_ret),
+            else_: Box::new(ret2.clone()),
+            span: span.clone(),
+            ty: ret2.ty(),
+        });
+    }
+    None
+}
+
+/// 表达式里是否出现 `__builtin_va_arg_pack ()` (递归扫描, 含 Call 实参表)。
+fn expr_contains_va_arg_pack(e: &Expr) -> bool {
+    match e {
+        Expr::VaArgPack { .. } => true,
+        Expr::Call { callee, args, .. } => {
+            expr_contains_va_arg_pack(callee) || args.iter().any(expr_contains_va_arg_pack)
+        },
+        Expr::Binop { l, r, .. } => {
+            expr_contains_va_arg_pack(l) || expr_contains_va_arg_pack(r)
+        },
+        Expr::Unary { e, .. } | Expr::Cast { e, .. } => expr_contains_va_arg_pack(e),
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
+            expr_contains_va_arg_pack(cond)
+                || expr_contains_va_arg_pack(then_)
+                || expr_contains_va_arg_pack(else_)
+        },
+        Expr::Comma { l, r, .. } => {
+            expr_contains_va_arg_pack(l) || expr_contains_va_arg_pack(r)
+        },
+        Expr::Assign { l, r, .. } => {
+            expr_contains_va_arg_pack(l) || expr_contains_va_arg_pack(r)
+        },
+        _ => false,
+    }
 }
 
 fn inline_expr(

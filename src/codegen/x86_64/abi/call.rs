@@ -332,11 +332,14 @@ impl Codegen {
         let raw_bytes = stage_base + stage_slots * 8;
         // SysV ABI 要求 call 指令处 rsp 16 对齐. 在 emit_sub_rsp 之前,
         // caller 栈已处于 16 对齐 (函数 prologue sub frame_size 后 rsp 为
-        // 16 对齐, 且没有额外 push 扰乱). 因此 frame_bytes 只需向上对齐到
-        // frame_align, sub 后 rsp 仍保持 16 对齐, call 指令 push ret addr
-        // 后 rsp = 8 mod 16, 与 callee 的 r13 偏移约定 (overflow_arg_area =
-        // r13 + 16) 一致.
-        let frame_bytes = (raw_bytes + frame_align - 1) & !(frame_align - 1);
+        // 16 对齐), **但中途未配平的 push 会把它偏离 8** —— 旧代码的
+        // "没有额外 push 扰乱"假设不成立: `v.b = f1(...)` 这类"保存左值
+        // 地址跨调用"的形状就是 push 后立刻 sub+call。被调方按 ABI 假设
+        // 第一个栈参 16 对齐 (va_arg 的 overflow 对齐、align>16 的 MEMORY
+        // 聚合), rsp 差 8 就让它的变参整体错位 (pr92904 f1(4))。
+        // frame_bytes 补上同样的偏移, sub 后 rsp 恢复 16 对齐。
+        let misalign = self.stack_shift.rem_euclid(16) as usize;
+        let frame_bytes = ((raw_bytes + frame_align - 1) & !(frame_align - 1)) + misalign;
         // 当 frame_align > 16 (例如 vector_size(32) 的 32 字节对齐参数),
         // 静态 sub frame_bytes 只能保证 rsp 16 对齐. 必须动态对齐 rsp 到
         // frame_align, 否则 force_mem 槽位的 32 对齐保证被破坏.
@@ -396,9 +399,15 @@ impl Codegen {
                 // --- GP 槽位: 从 [r13+reg_save_off+i*8] 读到 gp 槽 ---
                 let gp_start = self.variadic_named_gp.max(0) as usize;
                 let mut src_idx = gp_start;
-                while let Some(loc) = loc_iter.next() {
+                // 用 peek 判定段边界: 旧写法 `next()` 后 match 到非本段类型就
+                // break, 会把**第一个不属于本段的 loc 消费掉**。GP 段因此吃掉
+                // 第一个 Stack loc, XMM 段再吃掉第二个 —— 这两个槽 (GP 变参
+                // 装不进新调用寄存器时的溢出槽) 永远不会被搬运, 新调用的栈参
+                // 整体前移 16 字节 (va-arg-pack-1: foo1 把 ++v1 当 struct A 读)。
+                while let Some(&loc) = loc_iter.peek() {
                     match loc {
                         ArgLoc::Gp(_) => {
+                            loc_iter.next();
                             // 源 = [r13 + reg_save_off + src_idx*8]
                             let src_off = self.variadic_reg_save_offset + src_idx as i64 * 8;
                             self.load_stack(0, src_off); // rax = saved gp
@@ -407,38 +416,40 @@ impl Codegen {
                             stage += 8;
                             src_idx += 1;
                         },
-                        ArgLoc::Xmm(_) => {
-                            // 回退这个 loc (属于 XMM 段)
-                            break;
+                        // GP 段尚有未搬完的已存寄存器 (新调用的 GP 槽位更少):
+                        // 这些变参住在 bar 的**寄存器保存区**里, 必须从那里
+                        // 搬进新调用的栈槽; 留给下面的 overflow 段会按栈传
+                        // 变参的布局取字节, 整体错位。
+                        ArgLoc::Stack(off) if src_idx < gp_regs.len() => {
+                            loc_iter.next();
+                            let src_off = self.variadic_reg_save_offset + src_idx as i64 * 8;
+                            self.load_stack(0, src_off);
+                            self.store_rsp_qword(0, off);
+                            src_idx += 1;
                         },
-                        ArgLoc::Stack(_) => {
-                            break; // 进入 Stack 段
-                        },
+                        _ => break,
                     }
                 }
                 // --- XMM 槽位: 从 [r13+reg_save_off+48+i*16] 读到 xmm 槽 ---
                 let fp_start = self.variadic_named_fp.max(0) as usize;
                 let mut src_fp_idx = fp_start;
-                while let Some(loc) = loc_iter.next() {
-                    match loc {
-                        ArgLoc::Xmm(_) => {
-                            let src_off =
-                                self.variadic_reg_save_offset + 48 + src_fp_idx as i64 * 16;
-                            self.load_xmm128_stack(0, src_off);
-                            self.emit_xmm_store_rsp(0xF2, 0, stage);
-                            staged.push((loc, stage, false));
-                            stage += 8;
-                            src_fp_idx += 1;
-                        },
-                        ArgLoc::Stack(_) => {
-                            break;
-                        },
-                        ArgLoc::Gp(_) => {
-                            break;
-                        },
+                while let Some(&loc) = loc_iter.peek() {
+                    if !matches!(loc, ArgLoc::Xmm(_)) {
+                        break;
                     }
+                    loc_iter.next();
+                    let src_off =
+                        self.variadic_reg_save_offset + 48 + src_fp_idx as i64 * 16;
+                    self.load_xmm128_stack(0, src_off);
+                    self.emit_xmm_store_rsp(0xF2, 0, stage);
+                    staged.push((loc, stage, false));
+                    stage += 8;
+                    src_fp_idx += 1;
                 }
                 // --- Stack 槽位: 从 [r13+overflow_off + k*8] 逐 8 字节搬运 ---
+                // 本段必须处理**所有**剩余 Stack loc (含上面两段 peek 出来、
+                // 未消费的 GP 溢出槽); 中间的 XMM loc 已由 XMM 段处理, 这里
+                // 跳过即可 (k 只数 Stack, 与 overflow 区布局逐槽对应)。
                 let mut k: i64 = 0;
                 while let Some(loc) = loc_iter.next() {
                     match loc {

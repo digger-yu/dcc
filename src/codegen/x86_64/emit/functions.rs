@@ -286,6 +286,11 @@ impl Codegen {
         self.max_expr_depth = 0;
         self.temp_slots = 0;
         self.bf_rmw_depth = 0;
+        // 序章结束时 rsp 已恢复 16 对齐 (push r13 [+ rbp] [+ 补推 8] 之后,
+        // 帧 sub 的字节数也是 16 的倍数)。`stack_shift` 从这一刻起计量
+        // 「相对 16 对齐基线的偏移」—— 序章里那些 push 不再计入, 否则
+        // 每个调用点都会凭空多算 8 (见 call.rs 的 misalign 补偿)。
+        self.stack_shift = 0;
         self.reset_reg_tracker();
         // 逃逸用的 `asm goto` clobber 掉的池号不得再当临时值发出（必须在任何发射**之前**
         // 定完，H1：第一个表达式就可能把值放进那个号）。与分配器读同一个判据。

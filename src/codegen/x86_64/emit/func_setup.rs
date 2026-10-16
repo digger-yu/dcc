@@ -2073,6 +2073,16 @@ impl Codegen {
         if self.current_is_noreturn {
             self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Ud2));
         }
+        // 尾声已 `mov %r13, %rsp` 复位栈指针到帧基 (16 对齐), 并弹回被调保存
+        // 寄存器。`stack_shift` 此刻必须清零: 早期返回 (Stmt::Return 直接调
+        // emit_func_epilogue) 是控制流分支, 它后面的落空代码块 (.L3 等) 在
+        // 运行期并不会执行这里的 `pop`, 但线性发射计数器已被 `pop` 减过 8,
+        // 若不清零, 后续调用点的 frame_bytes 会凭空多算 8 → rsp 在 call 处
+        // 8 字节错位 → 调用 libc (snprintf/printf 内部 SSE) 时 SIGSEGV。
+        // 序言末尾已 `stack_shift = 0`, 这里与之配平: 序言 push 与尾声 pop
+        // 是函数级成对, 都不计入 `stack_shift` (它只计量调用点仍存活的
+        // 跨调用 push, 见 codegen.rs 的字段注释)。
+        self.stack_shift = 0;
         self.emit_return_tail();
     }
 

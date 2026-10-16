@@ -528,8 +528,15 @@ impl super::super::super::Codegen {
             }
         }
         if field_off != 0 {
-            let gas = format!("add ${}, %rax", field_off);
-            self.emit_insn(&Insn::alu_acc_imm32_b64_acc_gas(0x05, field_off as i32, &gas));
+            // 与 dispatch.rs 位域写路径同构: disp32 放得下用累加器短形式,
+            // 放不下 (超大结构体字段偏移) 走 movabs+add。
+            let field_off = field_off as i64;
+            if Self::fits_disp32(field_off) {
+                let gas = format!("add ${}, %rax", field_off);
+                self.emit_insn(&Insn::alu_acc_imm32_b64_acc_gas(0x05, field_off as i32, &gas));
+            } else {
+                self.add_reg_byte_offset(0, field_off);
+            }
         }
         // rax = container address
         self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 0, 13, addr_slot)); // [r13+addr_slot] = addr
@@ -1113,7 +1120,14 @@ impl super::super::super::Codegen {
         self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 0, 4, 16)); // rax = [rsp+16]
                                                                        // 8. 按类型存
         self.emit_store_scalar_float_at(eff_ty, eff_ty, 0); // 把 xmm0/st(0) 写到 [rax]
-                                                            // 9. 清理栈
+        // x87 路径的 store 是 `fstp` (弹栈): 前缀表达式的值约定在 st(0),
+        // 弹空之后调用方 (如实参暂存 `fstpt (%rsp)`) 会从空 x87 栈弹出
+        // indefinite NaN —— `g (++v5)` 传 -nan (va-arg-pack-1 case 1)。
+        // 从刚写回的槽重新 fld, 让新值留在 st(0)。
+        if is_pre && self.float_in_st0(eff_ty) {
+            self.emit_x87_fld_at(0, 0, eff_ty); // fld tbyte [rax]
+        }
+        // 9. 清理栈
         self.emit_insn(&Insn::add_rsp_imm(24)); // add rsp, 24
                                                 // 10. 设置返回值
         if is_pre {

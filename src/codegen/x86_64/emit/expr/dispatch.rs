@@ -1398,12 +1398,21 @@ impl Codegen {
                         // 通用路径失败: 退回直接求值 (旧行为)
                         self.gen_expr(expr, Self::EVAL_BASE);
                     }
-                    // 3. 加上字段偏移
+                    // 3. 加上字段偏移 (超过 disp32 的超大结构体字段偏移走
+                    //    add_reg_byte_offset 的 movabs+add 路径, 见 instructions.rs)
                     if let Some(ref f) = field_info {
-                        let field_off = f.offset as i32;
+                        let field_off = f.offset as i64;
                         if field_off != 0 {
-                            let gas = format!("add ${}, %rax", field_off);
-                            self.emit_insn(&Insn::alu_acc_imm32_b64_acc_gas(0x05, field_off, &gas));
+                            if Self::fits_disp32(field_off) {
+                                let gas = format!("add ${}, %rax", field_off);
+                                self.emit_insn(&Insn::alu_acc_imm32_b64_acc_gas(
+                                    0x05,
+                                    field_off as i32,
+                                    &gas,
+                                ));
+                            } else {
+                                self.add_reg_byte_offset(0, field_off);
+                            }
                         }
                     }
                     if is_bitfield {

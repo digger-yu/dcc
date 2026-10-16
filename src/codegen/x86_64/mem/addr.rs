@@ -108,17 +108,10 @@ impl Codegen {
                     return true;
                 }
                 if let Some(off) = field_off {
-                    let off = off as i32;
-                    if off != 0 {
-                        // add dst, off: 手写字节 + GAS 文本 (与 lvalue.rs 一致),
-                        // 否则 -S 模式下 gas_text=None 会输出空 /* raw */ 注释.
-                        let rex = 0x48 | if dst >= 8 { 0x01 } else { 0 };
-                        use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
-                        let gas = format!("add ${}, {}", off, GAS_REG64[(dst & 15) as usize]);
-                        let mut bytes = vec![rex, 0x81, 0xC0 | (dst & 7)];
-                        bytes.extend_from_slice(&off.to_le_bytes());
-                        self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
-                    }
+                    // 字段偏移可能超过 disp32 (超大结构体, 991014-1):
+                    // 统一走 add_reg_byte_offset —— imm32 放得下时字节与旧
+                    // 手写路径一致 (81 /0 id), 放不下时 movabs+add。
+                    self.add_reg_byte_offset(dst, off as i64);
                 }
                 true
             },
@@ -324,11 +317,9 @@ impl Codegen {
                     _ => None,
                 };
                 if let Some(ref f) = field_info {
-                    let field_off = f.offset as i32;
-                    if field_off != 0 {
-                        // add dst, field_off: 走 alu_rm_reg_imm32_b64 (恒 0x81 id)
-                        self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, dst, field_off as i64));
-                    }
+                    // 同 gen_lvalue_addr 的 Member arm: 偏移 > disp32 时
+                    // 必须走 movabs+add, `as i32` 截断会算错成员地址。
+                    self.add_reg_byte_offset(dst, f.offset as i64);
                 }
             } else if let Expr::Deref { e: inner, .. } = e.as_ref() {
                 // *ptr: 地址就是指针值

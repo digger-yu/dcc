@@ -855,6 +855,25 @@ impl Codegen {
         }
     }
 
+    /// 从**地址寄存器** `addr_reg` 指向的 16 字节对象加载 __int128:
+    /// 低 64 位 → dst, 高 64 位 → rdx (与 [`Self::gen_int128_load`] 同值模型)。
+    ///
+    /// 成员/下标/解引用形态的 `__int128` 左值 (如 `u.b`、`p->v`) 地址算完后
+    /// 对象在内存里, 旧的成员读分支只认 1/2/4/8 字节形状, 对 16 字节不发
+    /// 任何加载 —— dst 留着地址本身, 低半读成垃圾 (pr92904 根因之一)。
+    /// `dst == rdx` 时借 rcx 周转, 防止高半覆盖刚取出的低半。
+    pub fn gen_int128_load_at(&mut self, addr_reg: u8, dst: u8) {
+        use crate::codegen::shared::asm_operand::Width;
+        if dst == 2 {
+            self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 1, addr_reg, 0)); // mov rcx, [addr]
+            self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 2, addr_reg, 8)); // mov rdx, [addr+8]
+            self.emit_insn(&Insn::mov_rm_reg(Width::B64, dst, 1)); // mov dst, rcx
+        } else {
+            self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 2, addr_reg, 8)); // mov rdx, [addr+8]
+            self.emit_load_self_typed(8, false, dst); // mov dst, [addr]
+        }
+    }
+
     // P1-4: __int128 从 rax:rdx 存储到变量
     pub fn gen_int128_store(&mut self, name: &str) {
         if self.is_global_var(name) {

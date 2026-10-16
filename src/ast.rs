@@ -1604,24 +1604,30 @@ impl Type {
             //
             // 游标:
             //   next_bit        下一个空闲位 (自结构体起点, 普通字段后按字节取整)
-            //   unit_start_bit  当前打开单元的起始位; u64::MAX 表示无打开单元
+            //   unit_start_bit  当前打开单元的起始位; u128::MAX 表示无打开单元
             //   unit_bits       当前单元总位数; unit_used 单元内已占用位数
-            let mut next_bit: u64 = 0;
-            let mut unit_start_bit: u64 = u64::MAX;
+            //
+            // 位游标用 u128 而不是 u64: 普通字段的 next_bit = (byte + size) * 8,
+            // 含超大数组字段的结构体 (991014-1: `short buf[2^62-256]`) 在 u64
+            // 下必然溢出 —— 旧写法静默回绕, 把后续字段排进数组内部 (offset/size
+            // 全错), saturating_mul 也只是把回绕换成"塌到 u64::MAX"另一种错法。
+            // u128 下 byte+size < 2^64, *8 < 2^67, 不溢出。
+            let mut next_bit: u128 = 0;
+            let mut unit_start_bit: u128 = u128::MAX;
             let mut unit_bits: u32 = 0;
             let mut unit_used: u32 = 0;
 
             // 结束当前打开的位域单元: 把游标推进到单元末尾。
-            let close_unit = |next_bit: &mut u64,
-                              unit_start_bit: &mut u64,
+            let close_unit = |next_bit: &mut u128,
+                              unit_start_bit: &mut u128,
                               unit_used: &mut u32,
                               unit_bits: &mut u32| {
-                if *unit_start_bit != u64::MAX {
-                    let end = *unit_start_bit + u64::from(*unit_bits);
+                if *unit_start_bit != u128::MAX {
+                    let end = *unit_start_bit + u128::from(*unit_bits);
                     if end > *next_bit {
                         *next_bit = end;
                     }
-                    *unit_start_bit = u64::MAX;
+                    *unit_start_bit = u128::MAX;
                     *unit_used = 0;
                     *unit_bits = 0;
                 }
@@ -1640,7 +1646,7 @@ impl Type {
                             &mut unit_used,
                             &mut unit_bits,
                         );
-                        let a = eff(f) as u64;
+                        let a = eff(f) as u128;
                         let aligned = ((next_bit + a * 8 - 1) / (a * 8)) * (a * 8);
                         next_bit = aligned;
                         f.offset = (next_bit / 8) as usize;
@@ -1648,9 +1654,9 @@ impl Type {
                         continue;
                     }
 
-                    let start_bit: u64; // 字段位偏移 (自结构体起点)
+                    let start_bit: u128; // 字段位偏移 (自结构体起点)
 
-                    if unit_start_bit != u64::MAX {
+                    if unit_start_bit != u128::MAX {
                         // 已有打开单元
                         let same_fits =
                             want_bits == unit_bits && unit_used + field_bits <= unit_bits;
@@ -1662,7 +1668,7 @@ impl Type {
                             f.field_packed && unit_used + field_bits <= want_bits.max(unit_bits);
                         if same_fits || smaller_fits || packed_fits {
                             // 复用当前单元剩余位
-                            start_bit = unit_start_bit + u64::from(unit_used);
+                            start_bit = unit_start_bit + u128::from(unit_used);
                             if packed_fits && want_bits > unit_bits {
                                 unit_bits = want_bits;
                             }
@@ -1674,7 +1680,7 @@ impl Type {
                                 &mut unit_used,
                                 &mut unit_bits,
                             );
-                            let unit_bytes = u64::from(want_bits / 8);
+                            let unit_bytes = u128::from(want_bits / 8);
                             // 新单元起点对齐到声明类型
                             let aligned =
                                 ((next_bit / 8 + unit_bytes - 1) / unit_bytes) * unit_bytes;
@@ -1687,9 +1693,9 @@ impl Type {
                         // 无打开单元: 候选起点为当前字节 (向下取整到字节),
                         // 再向下落到包含该位的、自然对齐的存储单元起点。
                         let cur_byte = next_bit / 8;
-                        let unit_bytes = u64::from(want_bits / 8);
+                        let unit_bytes = u128::from(want_bits / 8);
                         let start_byte = cur_byte - (cur_byte % unit_bytes);
-                        let bit_in_unit = (cur_byte - start_byte) as u32 * 8;
+                        let bit_in_unit = ((cur_byte - start_byte) * 8) as u32;
                         if bit_in_unit + field_bits <= want_bits {
                             unit_start_bit = start_byte * 8;
                             start_bit = next_bit;
@@ -1706,10 +1712,18 @@ impl Type {
                         }
                     }
 
-                    f.offset = (start_bit / 8) as usize;
-                    f.bit_offset = (start_bit % 8) as u32;
+                    // (f.offset, f.bit_offset) = (容器字节偏移, 容器内位偏移):
+                    // 各后端把这一对当作「容器地址 + 容器内移位」用, 因此容器
+                    // 必须落在**单元起点** (按声明类型大小对齐), 不能落在字段
+                    // 自己的字节偏移上。`long long pad:12; long long field:52`
+                    // 的 field 位偏移是 12: 旧布局给出 offset=1/bit_offset=4,
+                    // 后端于是从 base+1 起读 8 字节 —— 既越过 8 字节结构体末尾
+                    // (踩坏相邻字段/结构体, bf64-1/bitfld-5 abort), 又让两个位域
+                    // 看起来分居不同容器 (静态/运行期打包互相覆盖, pr98366)。
+                    f.offset = (unit_start_bit / 8) as usize;
+                    f.bit_offset = (start_bit - unit_start_bit) as u32;
                     // 更新单元占用与全局游标
-                    let field_end = start_bit + u64::from(field_bits);
+                    let field_end = start_bit + u128::from(field_bits);
                     let in_unit_end = (field_end - unit_start_bit) as u32;
                     if in_unit_end > unit_used {
                         unit_used = in_unit_end;
@@ -1721,11 +1735,12 @@ impl Type {
                     // 非位域字段: 若前有未关闭的位域, gcc 只把已占用位向上取整到
                     // 字节边界, 剩余字节仍可放本普通字段 (如 `char x; int:1..:5;
                     // short s;` 的 s 落在字节 6, 而不是单元末尾字节 8)。
-                    if unit_start_bit != u64::MAX {
+                    if unit_start_bit != u128::MAX {
                         let used_bytes = (unit_used + 7) / 8;
-                        let flush_bit = (unit_start_bit + u64::from(used_bytes * 8)).max(next_bit);
+                        let flush_bit =
+                            (unit_start_bit + u128::from(used_bytes * 8)).max(next_bit);
                         next_bit = (flush_bit + 7) & !7;
-                        unit_start_bit = u64::MAX;
+                        unit_start_bit = u128::MAX;
                         unit_used = 0;
                         unit_bits = 0;
                     }
@@ -1735,13 +1750,13 @@ impl Type {
                         let align = eff(f);
                         byte = (byte + align - 1) & !(align - 1);
                         f.offset = byte;
-                        next_bit = (byte as u64) * 8;
+                        next_bit = (byte as u128) * 8;
                         continue;
                     }
                     let a = eff(f);
                     byte = (byte + a - 1) & !(a - 1);
                     f.offset = byte;
-                    next_bit = ((byte + f.ty.size()) as u64) * 8;
+                    next_bit = (byte as u128 + f.ty.size() as u128) * 8;
                 }
             }
         }

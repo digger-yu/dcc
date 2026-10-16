@@ -272,6 +272,30 @@ pub fn compute_lvalue_address<R: ObjectResolver>(
     lvalue_address(resolver, expr)
 }
 
+/// 下标基座是否是「内存里的指针左值」—— 其 lvalue 地址描述符指向
+/// 「指针槽地址」(`&s.p` / `&a[i]` / `&*pp`), 取指针值必须补一次 LOAD。
+///
+/// 覆盖 `Member`(非 arrow) / `Index` / `Deref`; `Cast` 透明穿透 ——
+/// `((char*)foo[0])[0]` 的基座就是 `Cast(Index)`, 而 Cast arm 原样
+/// 返回内层描述符 (槽地址)。Cast 递归时要求内层操作数也是指针类型:
+/// `((char(*)[4])a[0])[0]` 这种「槽里存的是数组对象」的形状穿后不是
+/// 指针, 其值即地址, 再补 LOAD 会把数组内容当前针解引用。
+/// Ident 指针不在此列: 它的描述符本就是 StackSlotLoad/GlobalSlotLoad
+/// (求值即加载); Call / String 等 rvalue 指针同理 (ComputedAddr)。
+fn is_memory_ptr_lvalue_base(e: &Expr) -> bool {
+    match e {
+        Expr::Member {
+            is_arrow: false, ..
+        }
+        | Expr::Index { .. }
+        | Expr::Deref { .. } => true,
+        Expr::Cast { e, .. } => {
+            matches!(e.ty(), Type::Ptr(_)) && is_memory_ptr_lvalue_base(e.as_ref())
+        },
+        _ => false,
+    }
+}
+
 /// `compute_lvalue_address` 的递归实现: 只携带真正参与地址计算的参数。
 fn lvalue_address<R: ObjectResolver>(resolver: &R, expr: &Expr) -> AddressDescriptor {
     match expr {
@@ -310,6 +334,9 @@ fn lvalue_address<R: ObjectResolver>(resolver: &R, expr: &Expr) -> AddressDescri
             //     给出的是「&(*f())」(即 f() 返回的 T* 指针所在槽的地址),
             //     需再 load 8 字节取出真正的 T* 才能做下标算术.
             //     glibc isspace 宏展开为 (*__ctype_b_loc())[c], 正属此形状.
+            //   - arr 是 Cast (如 ((char*)foo[0])[0]) —— Cast arm 透明穿透到
+            //     内层, 描述符仍是「指针槽地址」; 漏判时下标基址被当成槽地址
+            //     本身, 少一次解引用 (921019-1.c 段错误/abort 的根因).
             // 不适用:
             //   - arr 是 Ident Ptr (p[i]) —— StackSlotLoad 已 load 出指针值
             //   - arr 是 Member arrow Ptr (row->cells[i]) —— arrow arm 已包过
@@ -317,14 +344,7 @@ fn lvalue_address<R: ObjectResolver>(resolver: &R, expr: &Expr) -> AddressDescri
             //     套上 PointerValue 会多 load 一次 (把字符串首 8 字节当指针,
             //     导致 L"..."[i] 解引用垃圾地址 segfault).
             let needs_pointer_load = matches!(arr.ty(), Type::Ptr(_))
-                && (matches!(
-                    arr.as_ref(),
-                    Expr::Member {
-                        is_arrow: false,
-                        ..
-                    }
-                ) || matches!(arr.as_ref(), Expr::Index { .. })
-                    || matches!(arr.as_ref(), Expr::Deref { .. }))
+                && is_memory_ptr_lvalue_base(arr.as_ref())
                 && !matches!(base_addr.base, AddressBase::PointerValue { .. });
             let base_addr = if needs_pointer_load {
                 AddressDescriptor {
@@ -366,12 +386,20 @@ fn lvalue_address<R: ObjectResolver>(resolver: &R, expr: &Expr) -> AddressDescri
                 // 上就少了一次解引用 —— 读的是 apOld[10] 而非 apOld[0]->aData。
                 // 包一层 PointerValue: 后端先物化槽地址、load 8 字节得到指针值,
                 // 之后本层的字段偏移才加在值上 (与下方 Index 臂的 needs_pointer_load 同构)。
-                let ptr_addr = if matches!(
-                    ptr_addr.base,
-                    AddressBase::StackFrame { .. }
-                        | AddressBase::GlobalSymbolAddr { .. }
-                        | AddressBase::ExprAddr { .. }
-                ) {
+                //
+                // **仅当基座本身是指针类型**才包: 数组/结构体基座的描述符虽然
+                // 也是这三种形态之一, 但它物化出来就是对象地址 (C11 6.3.2.1p3
+                // 数组衰减后的指针值)。再包一层 PointerValue 会把对象首 8 字节
+                // 错当指针解引用 —— 20010409-1 的 `d->a[d->b]` (d: `B d[1]`)
+                // 因此多 load 一次, 拿到 `a` (NULL) 而非 `&a`, 段错误。
+                let needs_ptr_load = matches!(base_expr_ty(base), Type::Ptr(_))
+                    && matches!(
+                        ptr_addr.base,
+                        AddressBase::StackFrame { .. }
+                            | AddressBase::GlobalSymbolAddr { .. }
+                            | AddressBase::ExprAddr { .. }
+                    );
+                let ptr_addr = if needs_ptr_load {
                     let element_info = ptr_addr.element_info.clone();
                     AddressDescriptor {
                         base: AddressBase::PointerValue {
