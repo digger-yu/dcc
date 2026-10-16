@@ -58,6 +58,20 @@ should_skip() {
     return 1
 }
 
+# 若测试通过 #include 引用了 gcc.dg/ 下的兄弟文件, 而该文件当前解析
+# 不到 (torture 子集未提供 gcc.dg/), 则自动跳过, 避免 "include not
+# found" 让门禁变红。gcc.dg 可用时返回 1 (不跳过), 测试正常参与编译。
+gcc_dg_include_missing() {
+    local src="$1" dir resolved inc
+    dir="$(dirname "$src")"
+    while IFS= read -r inc; do
+        [[ "$inc" == *gcc.dg* ]] || continue
+        resolved="$dir/$inc"
+        [[ -f "$resolved" ]] || return 0
+    done < <(grep -oP '#\s*include\s+"\K[^"]+' "$src" 2>/dev/null)
+    return 1
+}
+
 # ── 临时目录 ──
 TMPDIR_TORTURE=$(mktemp -d /tmp/dcc-torture-compile.XXXXXX)
 trap 'rm -rf "$TMPDIR_TORTURE"' EXIT
@@ -146,7 +160,7 @@ fi
 declare -a skipped_names=()
 while IFS= read -r src; do
     name="$(basename "$src")"
-    if should_skip "$name"; then
+    if should_skip "$name" || gcc_dg_include_missing "$src"; then
         skip=$((skip + 1))
         skipped_names+=("$name")
     else

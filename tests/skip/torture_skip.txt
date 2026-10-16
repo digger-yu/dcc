@@ -7,9 +7,6 @@
 #
 # 随着 dcc 功能完善，逐步删除对应条目以扩大测试覆盖。
 
-# PowerPC 专属测试，不应在 x86 架构运行
-pr88347.c
-
 # 920521-1.c: 使用非 x86 助记符 "f"/"g" 测试 asm 解析框架。
 # dcc 的 mini-asm 设计为仅支持已知 x86 指令子集, 对未知助记符
 # 报硬错误 (避免静默生成错误机器码)。此测试需要完整的 GAS
@@ -23,19 +20,13 @@ mipscop-2.c
 mipscop-3.c
 mipscop-4.c
 
-# 测试从 gcc.dg/ 子目录 #include 兄弟文件, 但当前 torture 子集
-# 未包含 gcc.dg/ 目录, 无法编译。
-pr88423.c
-
 # asmgoto-5.c: x86_64 asm-goto-with-outputs 测试, 同时 pin 14 个
 # callee-saved GP 寄存器; dcc 后端固定 r13 为帧基址寄存器, 无法满足
 # 该测试对 r13 的绑定要求。需要重构帧基址选择 (或 GAS 透传) 才能通过。
 asmgoto-5.c
 
-# execute/ 下的薄包装: #include "../../gcc.dg/tree-ssa/..." 兄弟文件,
-# 当前 torture 子集未包含 gcc.dg/, 无法编译。
-pr105777.c
-pr109938.c
-pr109986.c
-pr30314.c
-pr98304-2.c
+# 注: 原来因 `#include "../../gcc.dg/..."` 兄弟文件缺失而跳过的测试
+# (pr88423.c 及 execute/ 下的 pr105777/pr109938/pr109986/pr30314/
+# pr98304-2.c) 已从本列表移除。当 torture 子集提供了 gcc.dg/ 时它们能
+# 在 dcc 上正常编译/运行; 当 gcc.dg/ 不可用时, harness 会自动跳过
+# (见 scripts 中的 gcc_dg_include_missing 判定), 不会让门禁变红。

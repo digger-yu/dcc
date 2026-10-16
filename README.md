@@ -226,16 +226,24 @@ make test-all                         # Tier-0 plus test_all.sh, -O equivalence,
                                       # pipe structure, disasm coverage, cross golden files
 ```
 
-GCC `gcc.c-torture`, measured 2026-10-15 at `0d9e692c`:
+GCC `gcc.c-torture`, measured 2026-10-16 at `efd8e894`:
 
 | Suite | Total | Pass | Fail | Skip | Rate |
 |---|---|---|---|---|---|
-| compile | 2016 | 2008 | 0 | 8 | 100 % |
-| execute | 1697 | 1689 | 3 | 5 | 99.82 % |
-| **all** | **3713** | **3697** | **3** | **13** | **99.92 %** |
+| compile | 2016 | 2010 | 0 | 6 | 99.70 % |
+| execute | 1697 | 1697 | 0 | 0 | 100 % |
+| **all** | **3713** | **3707** | **0** | **6** | **99.84 %** |
 
-The three runtime failures are `921019-1.c`, `pr92904.c`, `va-arg-pack-1.c`.
-`scripts/torture_gate.sh` compares against `tests/skip/torture_known_fail_*.txt` and only
+The six remaining compile skips (`920521-1`, `mipscop-1..4`,
+`asmgoto-5`) are tests that genuinely cannot run on x86_64.
+Tests that `#include` siblings from `gcc.dg/` are skipped only
+when that directory is unavailable: `scripts/setup_torture.sh`
+auto-links `tests/gcc-dg` into the suite when present, so they
+run and pass (which is why the execute skip count is now 0).
+
+No tests fail at runtime on x86_64; the remaining compile skips cover
+tests that cannot run on this backend. `scripts/torture_gate.sh`
+compares against `tests/skip/torture_known_fail_*.txt` and only
 allows that set to shrink.
 
 | Gate | Command / CI job |

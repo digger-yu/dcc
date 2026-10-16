@@ -15,6 +15,18 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TORTURE_DIR="$REPO_ROOT/tests/gcc-torture"
 GCC_URL="https://github.com/gcc-mirror/gcc.git"
 
+# 若仓库根目录的 tests/gcc-dg 存在, 将其软链进 suite 的
+# gcc/testsuite/gcc.dg, 使 #include "../../gcc.dg/..." 的包装测试
+# (pr88423 及 execute/ 下若干) 能被 dcc 编译/运行, 从而减少 skip。
+link_gcc_dg() {
+    local src="$REPO_ROOT/tests/gcc-dg"
+    local link="$TORTURE_DIR/gcc/testsuite/gcc.dg"
+    [[ -d "$src" ]] || return 0
+    [[ -e "$link" || -L "$link" ]] && return 0
+    ln -s "$src" "$link"
+    echo "   已链接 gcc.dg -> $src (减少 gcc.dg 相关 skip)"
+}
+
 # ── 参数处理 ──
 force=false
 update=false
@@ -44,6 +56,7 @@ if [[ -d "$SUITE_DIR/execute" && -n "$(ls -A "$SUITE_DIR/execute" 2>/dev/null)" 
         echo "✅ GCC C Torture Suite 已存在 ($count 个 .c 文件)"
         echo "   路径: $TORTURE_DIR"
         echo "   使用 --force 重新拉取，--update 拉取最新"
+        link_gcc_dg
         exit 0
     fi
 fi
@@ -73,3 +86,4 @@ echo "✅ GCC C Torture Suite 下载完成"
 echo "   execute: $execute 个测试"
 echo "   compile: $compile 个测试"
 echo "   路径: $TORTURE_DIR"
+link_gcc_dg
