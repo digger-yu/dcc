@@ -2641,6 +2641,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             | "-Wno-long-long"
             | "-Wc++-compat"
             | "-Wcast-qual" => {}
+            // -w: 抑制所有警告 (GCC 语义). dcc 默认不因警告而失败, 故接受为无操作.
+            "-w" => {}
             // GCC -U 取消宏定义 - 接受但忽略（预处理阶段已处理）
             a if a.starts_with("-U") => {}
             // -fcf-protection: 控制流保护 - 接受但忽略

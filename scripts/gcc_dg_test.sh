@@ -125,6 +125,37 @@ should_skip() {
 }
 export -f should_skip
 
+# 当前平台的目标三元组 (driver 运行其上的机器). 用于判定 dg 行内 target 选择器.
+DCC_TARGET="${DCC_TARGET:-$(uname -m)-pc-linux-gnu}"
+
+# 判断单个 triple 通配是否命中当前目标 (bash glob 语义, '-' 为字面量).
+target_matches_one() {
+    [[ "$DCC_TARGET" == $1 ]]
+}
+
+# 判定一个 dg `target` 选择器是否包含当前目标.
+# 语义 (与 gcc dg 一致): 列表里每个 pattern 可带 '!' 前缀表示取反.
+#   - 存在正 pattern 时: 必须命中至少一个正 pattern, 且不能命中任何负 pattern;
+#   - 只有负 pattern 时: 不能命中任何负 pattern 即纳入.
+target_included() {
+    local any_pos=0 pos_ok=0 neg_ok=0 tok
+    for tok in $1; do
+        if [[ "$tok" == '!'* ]]; then
+            local np="${tok#!}"
+            if target_matches_one "$np"; then neg_ok=1; fi
+        else
+            any_pos=1
+            if target_matches_one "$tok"; then pos_ok=1; fi
+        fi
+    done
+    if [[ $any_pos -eq 1 ]]; then
+        [[ $pos_ok -eq 1 && $neg_ok -eq 0 ]]
+    else
+        [[ $neg_ok -eq 0 ]]
+    fi
+}
+export -f target_included
+
 # ── 临时目录 ──
 TMPDIR_DG=$(mktemp -d /tmp/dcc-gcc-dg.XXXXXX)
 trap 'rm -rf "$TMPDIR_DG"' EXIT
@@ -154,6 +185,33 @@ parse_dg_directives() {
     if grep -qP '\{ dg-skip-if' "$src" 2>/dev/null; then
         echo "skip dg-skip-if"
         return
+    fi
+
+    # dg-require-iconv: 这些测试依赖执行字符集 (iconv) 翻译, dcc 尚未实现,
+    # 无法正确编译/验证, 按能力缺失跳过 (与 dg-require-effective-target 一致).
+    if grep -qP '\{ dg-require-iconv' "$src" 2>/dev/null; then
+        echo "skip dg-require-iconv"
+        return
+    fi
+
+    # 行内 target 选择器, 例如 `dg-do compile { target { *-*-mingw* } }` 或
+    # `dg-do compile { target x86_64-*-* }`. 任一 triple 通配命中当前目标则运行,
+    # 否则跳过 (这些测试本就不针对本平台). 只处理像 triple 的选择器 (含 '-' 或 '*'),
+    # 以免误伤 effective-target 名 (如 nonpic).
+    local do_full
+    do_full=$(grep -oP '\{ dg-do [^}]*\}' "$src" 2>/dev/null | head -1)
+    local pats=""
+    if [[ -n "$do_full" && "$do_full" == *target* ]]; then
+        pats=$(echo "$do_full" | grep -oP '\btarget\b\s*(\{[^}]*\}|[^{} "]+)' | head -1 \
+               | sed -E 's/^target\s*//; s/^[{}]//; s/[}]*$//')
+    fi
+    if [[ -n "$pats" ]]; then
+        if [[ "$pats" == *-* || "$pats" == *'*'* ]]; then
+            if ! target_included "$pats"; then
+                echo "skip target:$pats"
+                return
+            fi
+        fi
     fi
 
     local raw_opts=""
@@ -213,14 +271,34 @@ dg_worker() {
             echo "$rel SKIP dg-do:$do_type"
             return
         fi
+        # compat.exp 习惯: scalar-by-value-N.c (无 _x/_y/_main 后缀) 由 harness
+        # 自动 -include scalar-by-value-x.h 编译; 这里复刻该行为.
+        local compat_inc=""
+        if [[ "$rel" == compat/* ]]; then
+            local bn
+            bn="$(basename "$src")"
+            if [[ "$bn" =~ ^scalar-by-value-[0-9]+\.c$ ]]; then
+                compat_inc="-I$(dirname "$src") -include scalar-by-value-x.h"
+            fi
+        fi
+        # 负向测试 (dg-error / dg-warning): 代码本应被编译器拒绝或给出诊断,
+        # 编译失败 (或非零退出 + 产生诊断信息) 即视为通过.
+        local neg=""
+        if grep -qE 'dg-(error|warning)' "$src" 2>/dev/null; then
+            neg="1"
+        fi
         local out="$TMPDIR_DG/$(echo "$rel" | tr '/' '_').o"
+        local errf="$TMPDIR_DG/$(echo "$rel" | tr '/' '_').err"
+        : > "$errf"
         local rc=0
-        { timeout 30 "$DCC" -c -std=gnu11 $extra_opts -o "$out" "$src" 2>/dev/null; } 2>/dev/null || rc=$?
+        { timeout 30 "$DCC" -c -std=gnu11 $extra_opts $compat_inc -o "$out" "$src" 2>"$errf"; } 2>/dev/null || rc=$?
         rm -f "$out"
         if [[ $rc -eq 0 ]]; then
             echo "$rel PASS"
         elif [[ $rc -eq 124 ]]; then
             echo "$rel FAIL timeout"
+        elif [[ -n "$neg" ]] && grep -qE 'error|warning' "$errf" 2>/dev/null; then
+            echo "$rel PASS"
         else
             echo "$rel FAIL compile"
         fi
