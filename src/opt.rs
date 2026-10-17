@@ -333,6 +333,9 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_i
                 // （克隆会把整棵 AST 再抄一份，正是要避免的那种开销）。
                 let orig_body = f.body.take();
                 let rebuilt = crate::ssa::rebuild_block(&ssa);
+                if std::env::var("DCC_DUPARG_DUMP").is_ok() {
+                    dbg_dup_call_args(&f.name.name, &rebuilt);
+                }
                 if memdbg {
                     memdbg_marks.push(("rebuilt", memdbg_rss_kb()));
                 }
@@ -398,6 +401,182 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_i
 
 /// `DCC_MEMDBG` 的读数来源：本进程当前常驻集（KB）。
 ///
+/// 临时诊断：扫描重建后的 AST，报告参数里出现「结构相同实参」的 Call。
+/// 仅 `DCC_DUPARG_DUMP` 开启时由 SSA 往返后调用，不进产物字节。
+fn dbg_dup_call_args(func_name: &str, b: &crate::ast::Block) {
+    use crate::ast::{BlockItem, Expr, Stmt};
+    fn walk_block<'a>(b: &'a crate::ast::Block, out: &mut Vec<&'a Expr>) {
+        for bi in &b.items {
+            walk_item(bi, out);
+        }
+    }
+    fn walk_item<'a>(bi: &'a BlockItem, out: &mut Vec<&'a Expr>) {
+        match bi {
+            BlockItem::Stmt(s) => walk_stmt(s, out),
+            BlockItem::Decl(_) => {}
+        }
+    }
+    fn walk_stmt<'a>(s: &'a Stmt, out: &mut Vec<&'a Expr>) {
+        match s {
+            Stmt::Return { val, .. } => {
+                if let Some(v) = val {
+                    walk_expr(v, out);
+                }
+            }
+            Stmt::Expr { e, .. } => walk_expr(e, out),
+            Stmt::If { cond, then_, else_, .. } => {
+                walk_expr(cond, out);
+                walk_stmt(then_, out);
+                if let Some(x) = else_ {
+                    walk_stmt(x, out);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                walk_expr(cond, out);
+                walk_stmt(body, out);
+            }
+            Stmt::Do { body, cond, .. } => {
+                walk_stmt(body, out);
+                walk_expr(cond, out);
+            }
+            Stmt::For { init, cond, step, body, .. } => {
+                if let Some(x) = init {
+                    walk_stmt(x, out);
+                }
+                if let Some(x) = cond {
+                    walk_expr(x, out);
+                }
+                if let Some(x) = step {
+                    walk_expr(x, out);
+                }
+                walk_stmt(body, out);
+            }
+            Stmt::Block { b, .. } => walk_block(b, out),
+            Stmt::Label { stmt, .. } => walk_stmt(stmt, out),
+            Stmt::Switch { expr, cases, prelude, .. } => {
+                walk_expr(expr, out);
+                for p in prelude {
+                    walk_item(p, out);
+                }
+                for c in cases {
+                    if let Some(v) = &c.val {
+                        walk_expr(v, out);
+                    }
+                    if let Some(v) = &c.range_end {
+                        walk_expr(v, out);
+                    }
+                    walk_block(&c.body, out);
+                }
+            }
+            Stmt::Invoke { call, .. } => walk_stmt(call, out),
+            Stmt::AsmGoto { outputs, inputs, .. } => {
+                for o in outputs {
+                    walk_expr(o, out);
+                }
+                for i in inputs {
+                    walk_expr(i, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn walk_expr<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+        match e {
+            Expr::Call { callee, args, .. } => {
+                out.push(e);
+                walk_expr(callee, out);
+                for a in args {
+                    walk_expr(a, out);
+                }
+            }
+            Expr::Binop { l, r, .. } => {
+                walk_expr(l, out);
+                walk_expr(r, out);
+            }
+            Expr::Unary { e: x, .. } => walk_expr(x, out),
+            Expr::Cast { e: x, .. } => walk_expr(x, out),
+            Expr::AddrOf { e: x, .. } => walk_expr(x, out),
+            Expr::Deref { e: x, .. } => walk_expr(x, out),
+            Expr::Index { arr, idx, .. } => {
+                walk_expr(arr, out);
+                walk_expr(idx, out);
+            }
+            Expr::Member { expr, .. } => walk_expr(expr, out),
+            Expr::Assign { l, r, .. } => {
+                walk_expr(l, out);
+                walk_expr(r, out);
+            }
+            Expr::Cond { cond, then_, else_, .. } => {
+                walk_expr(cond, out);
+                walk_expr(then_, out);
+                walk_expr(else_, out);
+            }
+            Expr::Comma { l, r, .. } => {
+                walk_expr(l, out);
+                walk_expr(r, out);
+            }
+            Expr::StmtExpr { block, .. } => walk_block(block, out),
+            Expr::PostInc { e: x, .. }
+            | Expr::PostDec { e: x, .. }
+            | Expr::PreInc { e: x, .. }
+            | Expr::PreDec { e: x, .. } => walk_expr(x, out),
+            _ => {}
+        }
+    }
+    let mut all = Vec::new();
+    walk_block(b, &mut all);
+    for e in &all {
+        if let Expr::Call { callee, args, .. } = e {
+            if args.len() >= 2 {
+                let dbgs: Vec<String> = args.iter().map(|a| format!("{:?}", a)).collect();
+                let mut dup = false;
+                for i in 0..dbgs.len() {
+                    for j in (i + 1)..dbgs.len() {
+                        // 只在「涉及变量/地址」的实参上判定：常量重复（如两个字面量 0）
+                        // 通常是源码本意，不是塌缩 bug。塌缩 bug 的标志是多个本应不同的
+                        // 变量/取址实参变成同一个 Ident。
+                        if dbgs[i] == dbgs[j]
+                            && (dbgs[i].contains("Ident")
+                                || dbgs[i].contains("AddrOf")
+                                || dbgs[i].contains("Deref"))
+                        {
+                            dup = true;
+                        }
+                    }
+                }
+                if dup {
+                    let callee_name = match callee.as_ref() {
+                        Expr::Ident { name, .. } => name.name.clone(),
+                        _ => "<?>".to_string(),
+                    };
+                    let sigs: Vec<String> =
+                        args.iter().map(|a| dbg_short_arg(a)).collect();
+                    eprintln!(
+                        "[DUPARGS] {}: callee={} args=[{}]",
+                        func_name,
+                        callee_name,
+                        sigs.join(", ")
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn dbg_short_arg(e: &crate::ast::Expr) -> String {
+    match e {
+        crate::ast::Expr::Ident { name, .. } => format!("Id:{}", name.name),
+        crate::ast::Expr::AddrOf { e: x, .. } => match x.as_ref() {
+            crate::ast::Expr::Ident { name, .. } => format!("&{}", name.name),
+            _ => "AddrOf".to_string(),
+        },
+        crate::ast::Expr::Deref { e: x, .. } => format!("*{:?}", x),
+        crate::ast::Expr::Int { v, .. } => format!("I:{}", v),
+        crate::ast::Expr::Float { c, .. } => format!("F:{:?}", c),
+        _ => "Other".to_string(),
+    }
+}
+
 /// 读 `/proc/self/statm` 第二字段（常驻页数）。页大小按 4 KB 计（x86_64 默认，本机
 /// `getconf PAGESIZE` 实测就是这个值）—— 诊断窗口只看趋势，不值得为跨平台再引依赖。
 fn memdbg_rss_kb() -> u64 {
