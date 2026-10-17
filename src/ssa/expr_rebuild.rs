@@ -242,8 +242,14 @@ pub(super) fn infer_binop_type(op: &BinOp, l: &Expr, r: &Expr) -> Type {
         } else {
             lt.usual_arith_type(&rt)
         }
+    } else if lt.is_ptr() && rt.is_ptr() {
+        // 指针差: 结果为 ptrdiff_t (有符号 64 位)。若回退成 32 位 `Int`,
+        // SSA→AST 重建后存回 ptrdiff_t 对象会再插入 sext(i32→i64), 高 32 位
+        // 静默截掉 —— 与 Select 结果钉死 `Int` 是同一类 32 位截断 bug
+        // (lua 的 `savestack`/`cast` 大量依赖指针差, 截断后得坏指针并踩栈)。
+        Type::Long
     } else {
-        // 指针差、`_Complex`/`_Imaginary`、枚举等非纯整数情形沿用旧口径
+        // `_Complex`/`_Imaginary`、枚举等非纯整数情形沿用旧口径
         // (调用方或下游 codegen 自己处理结果表示)。
         Type::Int
     }
@@ -535,12 +541,19 @@ pub(super) fn inst_to_expr_resolved(
                 ty: ty.clone(),
             }
         },
-        InstKind::Select { cond, then_, else_ } => Expr::Cond {
-            cond: Box::new(resolve_operand(cond, &fake_env, subst, func)),
-            then_: Box::new(resolve_operand(then_, &fake_env, subst, func)),
-            else_: Box::new(resolve_operand(else_, &fake_env, subst, func)),
-            span: sp.clone(),
-            ty: Type::Int,
+        InstKind::Select { cond, then_, else_ } => {
+            // 三元 (Select) 的结果类型必须等于其两个分支的真实类型, 不能钉死成
+            // `Int`(32 位)。否则 `m = cond ? p : q` 这类指针/64 位结果会被重建为
+            // `Expr::Cond{ ty: Int }`, 下游当作 `Int→指针` 转换插入 `movsxd`(sext
+            // i32→i64), 把 64 位指针高 32 位静默截断 (`lua -v` 因此段错误)。
+            let then_expr = resolve_operand(then_, &fake_env, subst, func);
+            Expr::Cond {
+                cond: Box::new(resolve_operand(cond, &fake_env, subst, func)),
+                then_: Box::new(then_expr.clone()),
+                else_: Box::new(resolve_operand(else_, &fake_env, subst, func)),
+                span: sp.clone(),
+                ty: then_expr.ty().clone(),
+            }
         },
         InstKind::InlineAsm {
             asm_str,
@@ -1018,12 +1031,18 @@ fn inst_to_expr(kind: &InstKind, env: &HashMap<String, SsaVar>, func: &Function)
                 ty: ty.clone(),
             }
         },
-        InstKind::Select { cond, then_, else_ } => Expr::Cond {
-            cond: Box::new(operand_to_expr(cond, env, func)),
-            then_: Box::new(operand_to_expr(then_, env, func)),
-            else_: Box::new(operand_to_expr(else_, env, func)),
-            span: sp.clone(),
-            ty: Type::Int,
+        InstKind::Select { cond, then_, else_ } => {
+            // 三元 (Select) 的结果类型必须等于其两个分支的真实类型, 不能钉死成
+            // `Int`(32 位), 否则指针/64 位结果被重建为 `Expr::Cond{ ty: Int }` 后,
+            // 下游当作 `Int→指针` 转换插入 `movsxd`(sext i32→i64), 截断高 32 位。
+            let then_expr = operand_to_expr(then_, env, func);
+            Expr::Cond {
+                cond: Box::new(operand_to_expr(cond, env, func)),
+                then_: Box::new(then_expr.clone()),
+                else_: Box::new(operand_to_expr(else_, env, func)),
+                span: sp.clone(),
+                ty: then_expr.ty().clone(),
+            }
         },
         InstKind::InlineAsm {
             asm_str,

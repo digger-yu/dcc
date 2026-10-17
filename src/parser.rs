@@ -1700,8 +1700,11 @@ impl<'a> Parser<'a> {
                         attrs.is_const_attr = true;
                         self.advance();
                     },
-                    // __attribute__((returns_twice)): 可多次返回 (setjmp 等)
-                    "returns_twice" => {
+                    // __attribute__((returns_twice)) / __returns_twice__:
+                    // 可多次返回 (setjmp/vfork/getcontext 等)。两种拼写都要认:
+                    // glibc 头在 __GNUC__>=11 时给 _setjmp 打的是 __returns_twice__
+                    // (带双下划线), 只认裸名会让该属性静默失效。
+                    "returns_twice" | "__returns_twice__" => {
                         attrs.returns_twice = true;
                         self.advance();
                     },

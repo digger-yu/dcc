@@ -203,6 +203,23 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_i
                     .filter(|l| !l.is_empty())
                     .collect()
             });
+    // returns_twice 函数名全集: 已知 libc 名字 ∪ 声明上带 returns_twice 属性的函数。
+    let rt_names: std::collections::HashSet<String> = {
+        let mut s: std::collections::HashSet<String> =
+            KNOWN_RETURNS_TWICE.iter().map(|n| (*n).to_string()).collect();
+        for d in &prog.decls {
+            if let Decl::Func(f) = d {
+                if f.returns_twice {
+                    s.insert(f.name.name.clone());
+                }
+            }
+        }
+        s
+    };
+    // returns_twice 影响域 (cone): 直接含 returns_twice 调用的函数 + 传递调用它们的函数。
+    // 这条链上的函数要么自身有「二次返回」控制流汇合点, 要么身处其调用链中参与非局部
+    // 控制流, 整条链退出 SSA 管线走保守的 AST 路径最稳妥 (见下方退避)。
+    let rt_cone = compute_rt_cone(prog, &rt_names);
     let mut modified = false;
     for decl in &mut prog.decls {
         if let Decl::Func(f) = decl {
@@ -221,6 +238,15 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_i
             // 扫描在解锁下与不解锁持平, 零额外失效。
             // Skip functions with unsafe SSA patterns
             if func_has_unsafe_ssa_pattern(f) {
+                continue;
+            }
+            // returns_twice 影响域 (含 setjmp 的函数及其调用链): 二次返回会让 SSA 在
+            // 调用点两侧做的移动/寄存器提升 / 实参槽位重叠破坏栈态 —— 整函数退出 SSA
+            // 往返, 退回与 -O1 同口径的 AST 路径 (经验证 -O0/-O1 完全正确)。
+            if rt_cone.contains(&f.name.name) {
+                if std::env::var("DCC_SSA_BAIL").is_ok() {
+                    eprintln!("dcc: SSA bail: returns_twice cone ({})", f.name.name);
+                }
                 continue;
             }
             if let Some(only) = &ssa_only {
@@ -517,6 +543,331 @@ fn expr_refs_volatile(e: &Expr, vol: &std::collections::HashSet<String>) -> bool
         },
         _ => false,
     }
+}
+
+/// 已知会「返回两次」(returns_twice) 的 libc 函数名。这些函数 (setjmp 族、
+/// vfork、getcontext 等) 在第一次返回后, 可能经 longjmp/longjmp 再次从调用点
+/// 返回; 编译器必须把它们当作控制流汇合点, 不能在调用点两侧做会让「二次返回」
+/// 后寄存器 / 栈态不一致的优化 (否则踩栈崩溃, 见 Lua 的 `luaD_rawrunprotected`)。
+///
+/// glibc 头在 `__GNUC__ >= 11` 时会给它们打 `__attribute__((__returns_twice__))`,
+/// 但这是最后的兜底: 任何头都不保证标记 (dcc 也刚补齐 `__returns_twice__` 拼写),
+/// 且自举 / 其它 libc / 交叉头都不会。因此这里按名字全局识别, 与声明上的
+/// `returns_twice` 属性取并集, 保证无论头怎么说, SSA 管线都能正确识别。
+const KNOWN_RETURNS_TWICE: &[&str] = &[
+    "setjmp", "_setjmp", "__setjmp", "__sigsetjmp", "sigsetjmp", "savectx", "savectx_rt",
+    "vfork", "getcontext", "setcontext",
+];
+
+/// 函数体是否调用了任一 returns_twice 函数。
+fn func_contains_rt_call(f: &FuncDecl, rt_names: &std::collections::HashSet<String>) -> bool {
+    f.body
+        .as_ref()
+        .is_some_and(|b| block_contains_rt_call(b, rt_names))
+}
+
+fn block_contains_rt_call(b: &Block, rt_names: &std::collections::HashSet<String>) -> bool {
+    b.items
+        .iter()
+        .any(|i| block_item_contains_rt_call(i, rt_names))
+}
+
+fn block_item_contains_rt_call(
+    item: &BlockItem,
+    rt_names: &std::collections::HashSet<String>,
+) -> bool {
+    match item {
+        BlockItem::Stmt(s) => stmt_contains_rt_call(s, rt_names),
+        BlockItem::Decl(Decl::Var(v)) => {
+            v.init.as_ref().is_some_and(|e| expr_contains_rt_call(e, rt_names))
+        },
+        _ => false,
+    }
+}
+
+fn stmt_contains_rt_call(s: &Stmt, rt_names: &std::collections::HashSet<String>) -> bool {
+    match s {
+        Stmt::Return { val: Some(e), .. } | Stmt::Expr { e, .. } => {
+            expr_contains_rt_call(e, rt_names)
+        },
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
+            expr_contains_rt_call(cond, rt_names)
+                || stmt_contains_rt_call(then_, rt_names)
+                || else_.as_ref().is_some_and(|e| stmt_contains_rt_call(e, rt_names))
+        },
+        Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
+            expr_contains_rt_call(cond, rt_names) || stmt_contains_rt_call(body, rt_names)
+        },
+        Stmt::For {
+            init, cond, step, body, ..
+        } => {
+            init.as_ref().is_some_and(|i| stmt_contains_rt_call(i, rt_names))
+                || cond.as_ref().is_some_and(|c| expr_contains_rt_call(c, rt_names))
+                || step.as_ref().is_some_and(|s| expr_contains_rt_call(s, rt_names))
+                || stmt_contains_rt_call(body, rt_names)
+        },
+        Stmt::Block { b, .. } => block_contains_rt_call(b, rt_names),
+        Stmt::Switch { expr, cases, .. } => {
+            expr_contains_rt_call(expr, rt_names)
+                || cases.iter().any(|c| {
+                    c.body
+                        .items
+                        .iter()
+                        .any(|i| block_item_contains_rt_call(i, rt_names))
+                })
+        },
+        // C++ 零成本异常: returns_twice 调用可藏在受保护调用里, 同样要下降。
+        Stmt::Invoke { call, .. } => stmt_contains_rt_call(call, rt_names),
+        Stmt::EhLandingPad {
+            object, selector, ..
+        } => expr_contains_rt_call(object, rt_names) || expr_contains_rt_call(selector, rt_names),
+        _ => false,
+    }
+}
+
+fn expr_contains_rt_call(e: &Expr, rt_names: &std::collections::HashSet<String>) -> bool {
+    match e {
+        Expr::Call { callee, args, .. } => {
+            callee_rt_name(callee).map_or(false, |n| rt_names.contains(&n))
+                || args.iter().any(|a| expr_contains_rt_call(a, rt_names))
+        },
+        Expr::Binop { l, r, .. }
+        | Expr::Assign { l, r, .. }
+        | Expr::Comma { l, r, .. } => {
+            expr_contains_rt_call(l, rt_names) || expr_contains_rt_call(r, rt_names)
+        },
+        Expr::Unary { e: x, .. }
+        | Expr::Cast { e: x, .. }
+        | Expr::AddrOf { e: x, .. }
+        | Expr::Deref { e: x, .. }
+        | Expr::Real { e: x, .. }
+        | Expr::Imag { e: x, .. } => expr_contains_rt_call(x, rt_names),
+        Expr::Index { arr, idx, .. } => {
+            expr_contains_rt_call(arr, rt_names) || expr_contains_rt_call(idx, rt_names)
+        },
+        Expr::Member { expr, .. } => expr_contains_rt_call(expr, rt_names),
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
+            expr_contains_rt_call(cond, rt_names)
+                || expr_contains_rt_call(then_, rt_names)
+                || expr_contains_rt_call(else_, rt_names)
+        },
+        Expr::PostInc { e: x, .. }
+        | Expr::PostDec { e: x, .. }
+        | Expr::PreInc { e: x, .. }
+        | Expr::PreDec { e: x, .. } => expr_contains_rt_call(x, rt_names),
+        Expr::StmtExpr { block, .. } => block_contains_rt_call(block, rt_names),
+        Expr::InitList { inits, .. } | Expr::CompoundLit { inits, .. } => {
+            inits.iter().any(|init| match init {
+                crate::ast::InitItem::Expr(x) => expr_contains_rt_call(x, rt_names),
+                crate::ast::InitItem::Designated { value, .. } => {
+                    expr_contains_rt_call(value, rt_names)
+                },
+            })
+        },
+        _ => false,
+    }
+}
+
+/// 从调用表达式的 callee 中取出被调函数名 (剥掉 `Cast` 包裹), 用于 returns_twice 判定。
+/// 直接调用 `foo(...)` 的 callee 是 `Expr::Ident`; 经过函数指针转换的 `((T)fp)(...)`
+/// 仍是 `Ident` 经 `Cast` 包裹, 一并处理。函数指针间接调用 (`(*fp)(...)`) 取不到名字,
+/// 保守地不触发退避 —— 这类调用在 Lua/SQLite 等真实项目里不出现于 setjmp 路径。
+fn callee_rt_name(callee: &Expr) -> Option<String> {
+    match callee {
+        Expr::Ident { name, .. } => Some(name.name.clone()),
+        Expr::Cast { e, .. } => callee_rt_name(e),
+        _ => None,
+    }
+}
+
+/// 收集函数体内所有「直接调用」的被调函数名 (构建调用图用)。
+fn func_direct_callees(f: &FuncDecl) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    if let Some(b) = &f.body {
+        collect_callees_block(b, &mut out);
+    }
+    out
+}
+
+fn collect_callees_block(b: &Block, out: &mut std::collections::HashSet<String>) {
+    for i in &b.items {
+        match i {
+            BlockItem::Stmt(s) => collect_callees_stmt(s, out),
+            BlockItem::Decl(Decl::Var(v)) => {
+                if let Some(e) = &v.init {
+                    collect_callees_expr(e, out);
+                }
+            },
+            _ => {}
+        }
+    }
+}
+
+fn collect_callees_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
+    match s {
+        Stmt::Return { val: Some(e), .. } | Stmt::Expr { e, .. } => collect_callees_expr(e, out),
+        Stmt::If { cond, then_, else_, .. } => {
+            collect_callees_expr(cond, out);
+            collect_callees_stmt(then_, out);
+            if let Some(e) = else_ {
+                collect_callees_stmt(e, out);
+            }
+        },
+        Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
+            collect_callees_expr(cond, out);
+            collect_callees_stmt(body, out);
+        },
+        Stmt::For { init, cond, step, body, .. } => {
+            if let Some(i) = init {
+                collect_callees_stmt(i, out);
+            }
+            if let Some(c) = cond {
+                collect_callees_expr(c, out);
+            }
+            if let Some(s) = step {
+                collect_callees_expr(s, out);
+            }
+            collect_callees_stmt(body, out);
+        },
+        Stmt::Block { b, .. } => collect_callees_block(b, out),
+        Stmt::Switch { expr, cases, .. } => {
+            collect_callees_expr(expr, out);
+            for c in cases {
+                for i in &c.body.items {
+                    collect_callees_block_item(i, out);
+                }
+            }
+        },
+        Stmt::Invoke { call, .. } => collect_callees_stmt(call, out),
+        Stmt::EhLandingPad { object, selector, .. } => {
+            collect_callees_expr(object, out);
+            collect_callees_expr(selector, out);
+        },
+        _ => {}
+    }
+}
+
+fn collect_callees_block_item(i: &BlockItem, out: &mut std::collections::HashSet<String>) {
+    match i {
+        BlockItem::Stmt(s) => collect_callees_stmt(s, out),
+        BlockItem::Decl(Decl::Var(v)) => {
+            if let Some(e) = &v.init {
+                collect_callees_expr(e, out);
+            }
+        },
+        _ => {}
+    }
+}
+
+fn collect_callees_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
+    match e {
+        Expr::Call { callee, args, .. } => {
+            if let Some(n) = callee_rt_name(callee) {
+                out.insert(n);
+            }
+            for a in args {
+                collect_callees_expr(a, out);
+            }
+        },
+        Expr::Binop { l, r, .. }
+        | Expr::Assign { l, r, .. }
+        | Expr::Comma { l, r, .. } => {
+            collect_callees_expr(l, out);
+            collect_callees_expr(r, out);
+        },
+        Expr::Unary { e: x, .. }
+        | Expr::Cast { e: x, .. }
+        | Expr::AddrOf { e: x, .. }
+        | Expr::Deref { e: x, .. }
+        | Expr::Real { e: x, .. }
+        | Expr::Imag { e: x, .. } => collect_callees_expr(x, out),
+        Expr::Index { arr, idx, .. } => {
+            collect_callees_expr(arr, out);
+            collect_callees_expr(idx, out);
+        },
+        Expr::Member { expr, .. } => collect_callees_expr(expr, out),
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
+            collect_callees_expr(cond, out);
+            collect_callees_expr(then_, out);
+            collect_callees_expr(else_, out);
+        },
+        Expr::PostInc { e: x, .. }
+        | Expr::PostDec { e: x, .. }
+        | Expr::PreInc { e: x, .. }
+        | Expr::PreDec { e: x, .. } => collect_callees_expr(x, out),
+        Expr::StmtExpr { block, .. } => collect_callees_block(block, out),
+        Expr::InitList { inits, .. } | Expr::CompoundLit { inits, .. } => {
+            for init in inits {
+                match init {
+                    crate::ast::InitItem::Expr(x) => collect_callees_expr(x, out),
+                    crate::ast::InitItem::Designated { value, .. } => {
+                        collect_callees_expr(value, out)
+                    },
+                }
+            }
+        },
+        _ => {}
+    }
+}
+
+/// 计算 `returns_twice` 影响域 (cone): 直接含 returns_twice 调用的函数, 以及 (传递地)
+/// 调用这类函数的所有函数。这些函数要么自身有「二次返回」控制流汇合点, 要么身处其
+/// 调用链中参与非局部控制流, 整条链都退出 SSA 管线走保守的 AST 路径最稳妥。
+fn compute_rt_cone(
+    prog: &Program,
+    rt_names: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    // seed: 直接含 returns_twice 调用的函数
+    let mut cone: std::collections::HashSet<String> = prog
+        .decls
+        .iter()
+        .filter_map(|d| {
+            if let Decl::Func(f) = d {
+                if func_contains_rt_call(f, rt_names) {
+                    Some(f.name.name.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // 调用图: caller -> 直接被调函数名集合
+    let mut graph: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    for d in &prog.decls {
+        if let Decl::Func(f) = d {
+            graph.insert(f.name.name.clone(), func_direct_callees(f));
+        }
+    }
+
+    // 反向传播: 若 g ∈ cone 且 f 直接调用 g, 则 f ∈ cone (直到不动点)
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for d in &prog.decls {
+            if let Decl::Func(f) = d {
+                if cone.contains(&f.name.name) {
+                    continue;
+                }
+                if let Some(callees) = graph.get(&f.name.name) {
+                    if callees.iter().any(|c| cone.contains(c)) {
+                        cone.insert(f.name.name.clone());
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    cone
 }
 
 /// Qualifier-aware optimization: const/volatile/restrict utilization.
@@ -2130,6 +2481,13 @@ fn try_stmt_inline_call(
         Some(f) => f,
         None => return false,
     };
+    // returns_twice 函数 (setjmp 族/vfork/getcontext) 绝不能内联: 内联会把
+    // 「二次返回」点复制进调用方, 破坏调用方的栈/寄存器恢复语义。即使
+    // always_inline/flatten 也拒绝 (与 GCC 行为一致)。
+    if f.returns_twice {
+        trace_inline_decision(&callee_name, "REJECT", "returns_twice");
+        return false;
+    }
     if !(f.is_always_inline || caller_flatten) {
         return false;
     }
@@ -2398,6 +2756,13 @@ fn try_inline_call(
     depth: u32,
 ) -> Option<Expr> {
     let f = funcs.get(name)?;
+    // returns_twice 函数 (setjmp 族/vfork/getcontext) 绝不能内联: 内联会把
+    // 「二次返回」点复制进调用方, 破坏调用方的栈/寄存器恢复语义。即使
+    // always_inline/flatten 也拒绝 (与 GCC 行为一致)。
+    if f.returns_twice {
+        trace_inline_decision(name, "REJECT", "returns_twice");
+        return None;
+    }
     let body = f.body.as_ref()?;
 
     // --- 变参 + `__builtin_va_arg_pack ()` 的强制内联 (先行判定) ---

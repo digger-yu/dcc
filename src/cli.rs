@@ -2893,7 +2893,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             }
             "--version" => {
                 println!("dcc {}", env!("CARGO_PKG_VERSION"));
-                println!("A suckless C compiler.");
+                println!("Digger C compiler. A suckless C compiler.");
                 println!("Target: {}", target.as_str());
                 println!("Default std: {}", std.as_str());
                 std::process::exit(0);
