@@ -207,6 +207,7 @@ impl Codegen {
             pending_func_addr_rels: cg.pending_func_addr_rels,
             pending_data_rels: cg.pending_data_rels,
             pending_sib_data_rels: cg.pending_sib_data_rels,
+            pending_data_rels_with_off: cg.pending_data_rels_with_off,
             label_addr_refs: cg.label_addr_refs,
             pending_custom_sec_rels: cg.pending_custom_sec_rels,
             pushsection_code_ranges: cg.pushsection_code_ranges,
@@ -414,6 +415,10 @@ impl Codegen {
         }
         for (pos, sym) in chunk.pending_data_rels {
             self.pending_data_rels.push((base + pos, sym));
+        }
+        for (pos, sym, elem_off) in chunk.pending_data_rels_with_off {
+            self.pending_data_rels_with_off
+                .push((base + pos, sym, elem_off));
         }
         for (pos, lbl) in chunk.label_addr_refs {
             self.label_addr_refs.push((base + pos, lbl));
@@ -803,6 +808,7 @@ mod tests {
             pending_func_addr_rels: vec![],
             pending_data_rels: vec![],
             pending_sib_data_rels: vec![],
+            pending_data_rels_with_off: vec![],
             label_addr_refs: vec![],
             pending_custom_sec_rels: vec![],
             pushsection_code_ranges: vec![],

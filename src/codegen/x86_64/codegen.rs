@@ -690,6 +690,14 @@ pub struct FuncEmitChunk {
     pub pending_func_addr_rels: Vec<(u64, String, bool)>,
     pub pending_data_rels: Vec<(u64, String)>,
     pub pending_sib_data_rels: Vec<(u64, String)>,
+    /// 带元素偏移的全局重定位 (数组型 static local 逐元素运行时初始化,
+    /// 如 Lua 的 `static const void *disptab[] = {&&L_OP_*, ...}` 计算跳转表)。
+    ///
+    /// **必须随 chunk 合并**: 漏了它, 并行发射 (-O2 起) 里 worker 为跳转表各元素发的
+    /// store 的重定位就永远回不到主 Codegen, disp32 停留在 `elem_off` 占位值上, 于是一条
+    /// `mov %rax, disp32(%rip)` 落到 `rip + elem_off` —— 函数自己的 .text 里, 写只读文本
+    /// 直接段错误 (Lua `luaV_execute` 的 disptab 初始化即此形状)。
+    pub pending_data_rels_with_off: Vec<(u64, String, i32)>,
     pub label_addr_refs: Vec<(u64, String)>,
     pub pending_custom_sec_rels: Vec<CustomSecRel>,
     pub pushsection_code_ranges: Vec<(u64, u64, usize, u64)>,
