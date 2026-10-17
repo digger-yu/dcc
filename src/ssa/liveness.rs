@@ -227,8 +227,21 @@ pub fn compute(func: &Function) -> Interference {
 }
 
 /// 某个基名的全部 SSA 名（用于基名之间的干涉判定）。
+///
+/// **必须包含参数版本**：参数在入口处定义（`func.params`），它不出现在任何 phi 或
+/// `inst.dest` 里，只扫 phi/inst 会漏掉 `L.0` 这类入参版本。一旦漏掉，持有者是参数时
+/// `versions_of_base` 返回空集，而 `ranges_disjoint(&[cv], &[])` 对空集 `.all()` 恒为
+/// true（空真）—— 于是「与参数不相交」被空集冒充成立，候选变量就能复用参数正占着的号，
+/// 即便两者生命周期重叠，最终参数被覆盖、调用实参拿到错值（Lua `luaD_closeprotected`
+/// 的 `luaD_rawrunprotected(L, _, _)` 三实参塌缩即此形状）。参数自入口起就活，必须参与
+/// ∀ 不干涉判定。
 pub fn versions_of_base(func: &Function, base: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    for p in &func.params {
+        if p.base == base {
+            out.push(p.name());
+        }
+    }
     for bb in func.blocks.values() {
         for phi in &bb.phis {
             if phi.dest.base == base {
