@@ -1277,11 +1277,23 @@ impl Builder {
                 self.define(dest.clone());
                 Operand::Var(dest)
             },
-            Expr::AddrOf { e, span, ty: _ } => {
+            Expr::AddrOf { e, span, ty } => {
                 if let Expr::Ident { name, .. } = e.as_ref() {
-                    let dest = target.unwrap_or_else(|| {
-                        self.fresh("addr", Type::Ptr(Box::new(QualType::new(Type::Void))), span)
-                    });
+                    // `&ident` 的 dest 类型必须带出**函数指针**的指真类型。旧实现恒
+                    // `Ptr(void)` (上面的 `ty: _` 把 AddrOf 节点自己的类型丢了), 把
+                    // `&func` 的类型抹掉: 重建端 `inst_to_expr_resolved` 的内层 Ident
+                    // 因此拿到 `Void` 而非 `Func`, 而 `collect_free_idents` 只对
+                    // `Type::Func` 跳过注册 —— 函数名被 `register_var` 收进 `var_map`
+                    // 当普通局部, codegen 于是把 `&func` 发成 `lea 局部槽(%r13)`, 即
+                    // 一个从未赋值的槽的**地址**, 而不是函数符号地址。实测形状: Lua
+                    // liolib 的 `p->closef = &io_noclose` 把栈地址存进函数指针字段,
+                    // GC 终结器 `aux_close` 的 `(*cf)(L)` 跳栈段错误。AddrOf 节点自己的
+                    // ty 就是 `Ptr(pointee)`, 函数情形原样带出; 其余维持既有行为。
+                    let addr_ty = match ty {
+                        Type::Ptr(inner) if matches!(inner.base, Type::Func(_, _)) => ty.clone(),
+                        _ => Type::Ptr(Box::new(QualType::new(Type::Void))),
+                    };
+                    let dest = target.unwrap_or_else(|| self.fresh("addr", addr_ty, span));
                     self.emit(Inst {
                         dest: Some(dest.clone()),
                         kind: InstKind::AddrOf {

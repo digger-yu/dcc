@@ -295,6 +295,23 @@ fn addr_of_ty(dest_ty: Option<&Type>) -> Type {
     }
 }
 
+/// `&base` 重建时**内层** `Ident` 的类型: 取 dest 的 `Ptr<T>` 的 `T`。
+///
+/// 旧实现恒写 `Void`, 丢了指真类型, 而下游两处都按这个类型决定「这是函数名还是普通
+/// 局部」: `collect_free_idents` 只对 `Type::Func(..)` 跳过注册, codegen 也只对不在
+/// `var_map` 里的名字发符号地址。写成 `Void` 时 `&io_noclose` 里的函数名过不了那道
+/// 跳过、被 `register_var` 收进 `var_map` 当局部, 于是 `&函数` 被发成
+/// `lea 局部槽(%r13)` —— 一个从未赋值的槽的地址。实测形状: Lua liolib 的
+/// `p->closef = &io_noclose` 因此把栈地址存进函数指针字段, GC 终结器调用时跳栈
+/// 段错误 (`aux_close` → `(*cf)(L)`)。指真类型就在 dest 的 `Ptr(对象类型)` 上,
+/// 与 `addr_of_ty` 同一来源。
+fn addr_of_pointee_ty(dest_ty: Option<&Type>) -> Type {
+    match dest_ty {
+        Some(Type::Ptr(inner)) => inner.base.clone(),
+        _ => Type::Void,
+    }
+}
+
 /// 一元指令重建时的**结果类型**。
 ///
 /// 第一真源是指令 `dest` 的类型：构建器在 `lower_expr` 里就是用原始
@@ -365,7 +382,7 @@ pub(super) fn inst_to_expr_resolved(
                     span: sp.clone(),
                 },
                 span: sp.clone(),
-                ty: Type::Void,
+                ty: addr_of_pointee_ty(dest_ty),
             }),
             span: sp.clone(),
             ty: addr_of_ty(dest_ty),
@@ -663,6 +680,7 @@ pub(super) fn collect_op_uses(kind: &InstKind, out: &mut HashSet<String>) {
             collect_op_uses_op(obj, out);
             collect_op_uses_op(src, out);
         },
+        InstKind::MemberAddr { obj, .. } => collect_op_uses_op(obj, out),
         InstKind::Select { cond, then_, else_ } => {
             collect_op_uses_op(cond, out);
             collect_op_uses_op(then_, out);
@@ -730,6 +748,7 @@ pub(super) fn op_count_in_kind(kind: &InstKind, name: &str) -> usize {
             count += op_count_in_op(obj, name);
             count += op_count_in_op(src, name);
         },
+        InstKind::MemberAddr { obj, .. } => count += op_count_in_op(obj, name),
         InstKind::Select { cond, then_, else_ } => {
             count += op_count_in_op(cond, name);
             count += op_count_in_op(then_, name);
