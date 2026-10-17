@@ -883,6 +883,15 @@ pub(super) fn inst_clobbers_memory(kind: &InstKind) -> bool {
         return true;
     }
     match kind {
+        // 写内存的指令 (含非 volatile 的普通 Store/IndexStore/MemberStore): 它们会改掉
+        // 某个被 Load 读过的对象, 因此把一次「读内存」内联 / 推迟到这些写之后, 读到的是
+        // 写后的值而非 SSA 定义点的值 —— 必须算 clobber。漏掉普通 Store 曾让重建把
+        // `p = *q; *q = v; use(p)` 里的 `p` 内联成使用点重载 `*q`, 拿到 `v` (Lua
+        // `luaD_anchorobj` 的 `L->top.p++` 即此形状, -O2 启动期 "table index is nil")。
+        InstKind::Store { .. }
+        | InstKind::IndexStore { .. }
+        | InstKind::MemberStore { .. } => true,
+        // volatile 读会与相邻的 volatile 访问定序, 同样算 clobber。
         InstKind::Load { is_volatile, .. }
         | InstKind::IndexLoad { is_volatile, .. }
         | InstKind::MemberLoad { is_volatile, .. } => *is_volatile,
