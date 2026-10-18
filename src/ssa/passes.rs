@@ -1212,6 +1212,33 @@ pub fn speculative_execution(func: &mut Function) -> bool {
         if picked.iter().max().copied().unwrap_or(0) < picked.len() {
             continue;
         }
+        // 不把「直接产出终结符分支/开关条件的指令」上提。根因: 该比较被上提后,
+        // 其操作数的最后一次使用随之提前, 寄存器分配便提前释放该操作数 (复用给
+        // 后续指令); 而 SSA→AST 重建又会把这次比较**内联回块尾的条件处**求值,
+        // 于是读到已被复用的寄存器 → 误编译 (实测 long-mul-boundary.c 的进位
+        // `+1` 丢失: `low_result < cross_shifted` 误成 `low_result < hihi`)。
+        // 让条件指令留在原 (块尾) 位置即与非投机路径一致, 其操作数仍照常上提。
+        let mut picked = picked;
+        let cond_names: Option<Vec<String>> = match &b.term {
+            Terminator::Branch { cond, .. } => {
+                let n = operand_uses_op(cond);
+                if n.is_empty() { None } else { Some(n) }
+            },
+            Terminator::SwitchTable { idx, .. } => {
+                let n = operand_uses_op(idx);
+                if n.is_empty() { None } else { Some(n) }
+            },
+            _ => None,
+        };
+        if let Some(names) = cond_names {
+            picked.retain(|&idx| {
+                b.insts[idx]
+                    .dest
+                    .as_ref()
+                    .map(|d| !names.contains(&d.name()))
+                    .unwrap_or(true)
+            });
+        }
         let orig = std::mem::take(&mut b.insts);
         let mut next: Vec<Inst> = Vec::with_capacity(orig.len());
         for (idx, inst) in orig.iter().enumerate() {
