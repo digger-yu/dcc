@@ -240,9 +240,12 @@ parse_dg_directives() {
 
     local raw_opts=""
     local dg_opts add_opts
-    dg_opts=$(grep -oP '\{ dg-options "\K[^"]+' "$src" 2>/dev/null | head -1 || true)
+    # dg-options 既可能带引号 (`{ dg-options "-O2" }`) 也可能不带
+    # (`{ dg-options -O2 }`, vrp13.c 等 55 个测试用此形式). 旧正则要求引号,
+    # 漏掉无引号形式 ⇒ 该测试被按默认档编译 (如 vrp13 需 -O2 触发 VRP 才不链接失败).
+    dg_opts=$(grep -oP '\{ dg-options\s+"?\K[^"}]+' "$src" 2>/dev/null | head -1 | sed -E 's/[[:space:]]+$//' || true)
     [[ -n "$dg_opts" ]] && raw_opts="$dg_opts"
-    add_opts=$(grep -oP '\{ dg-additional-options "\K[^"]+' "$src" 2>/dev/null | head -1 || true)
+    add_opts=$(grep -oP '\{ dg-additional-options\s+"?\K[^"}]+' "$src" 2>/dev/null | head -1 | sed -E 's/[[:space:]]+$//' || true)
     [[ -n "$add_opts" ]] && raw_opts="$raw_opts $add_opts"
 
     local filtered=""
