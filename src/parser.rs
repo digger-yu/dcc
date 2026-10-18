@@ -10665,7 +10665,16 @@ impl<'a> Parser<'a> {
             TokKind::Plus => {
                 self.advance();
                 let e = self.parse_unary()?;
-                let ty = e.ty();
+                // C11 6.3.1.1p2: 一元 +、-、~ 的操作数先整数提升, 结果类型
+                // 取提升后的类型 (char/short → int, float → double). 否则 char
+                // 取负会在窄类型上计算, 丢失符号 (如 -(signed char)-128 误算成 +128).
+                let ty = match e.ty().clone() {
+                    Type::Char | Type::SChar | Type::UChar | Type::Short | Type::UShort => {
+                        Type::Int
+                    },
+                    Type::Float => Type::Double,
+                    t => t,
+                };
                 Some(Expr::Unary {
                     op: UnOp::Plus,
                     e: Box::new(e),
@@ -10676,7 +10685,15 @@ impl<'a> Parser<'a> {
             TokKind::Minus => {
                 self.advance();
                 let e = self.parse_unary()?;
-                let ty = e.ty();
+                // 同上: 整数提升 (见 Plus 注释). 关键修正: 否则
+                // (signed char)(-x) 在窄类型取负后外层 (signed char) 被当恒等丢弃.
+                let ty = match e.ty().clone() {
+                    Type::Char | Type::SChar | Type::UChar | Type::Short | Type::UShort => {
+                        Type::Int
+                    },
+                    Type::Float => Type::Double,
+                    t => t,
+                };
                 Some(Expr::Unary {
                     op: UnOp::Neg,
                     e: Box::new(e),
@@ -10697,13 +10714,19 @@ impl<'a> Parser<'a> {
             TokKind::Tilde => {
                 self.advance();
                 let e = self.parse_unary()?;
-                // C 标准: ~ 的结果类型与提升后的操作数类型相同
-                let result_ty = e.ty();
+                // C 标准: ~ 的结果类型与提升后的操作数类型相同 (整数提升)
+                let ty = match e.ty().clone() {
+                    Type::Char | Type::SChar | Type::UChar | Type::Short | Type::UShort => {
+                        Type::Int
+                    },
+                    Type::Float => Type::Double,
+                    t => t,
+                };
                 Some(Expr::Unary {
                     op: UnOp::BitNot,
                     e: Box::new(e),
                     span: sp,
-                    ty: result_ty,
+                    ty,
                 })
             },
             TokKind::Star => {
