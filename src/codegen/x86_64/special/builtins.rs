@@ -2189,6 +2189,54 @@ impl Codegen {
                 }
                 true
             },
+            // __builtin_isnormal / isnormalf / isnormall: 规格化浮点检测.
+            // normal = 指数域既非全 0 (零/次规格化) 也非全 1 (inf/nan)。
+            // 位检查: exp = (bits >> shift) & mask; normal iff exp ∈ [1, max-1],
+            // 用无符号 (exp-1) <= (max-2) (setbe) 一次判定. 类型按实参 (mirror isnan):
+            // float 用 movd/shr23/mask0xFF, 其余 (double/long double) 用 movq/shr52/mask0x7FF.
+            "__builtin_isnormal" | "__builtin_isnormalf" | "__builtin_isnormall" => {
+                if args.is_empty() {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                let arg_ty = args[0].ty();
+                let is_f = matches!(arg_ty, Type::Float);
+                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
+                use crate::codegen::shared::asm_operand::Width as W;
+                if is_f {
+                    self.emit_insn(&Insn::gpr_xmm(false, W::B32, 0, 0)); // movd eax, xmm0
+                    self.emit_insn(&Insn::shift_reg_imm8_c1_b32(0b101, 0, 23)); // shr eax, 23
+                    self.emit_insn(&Insn::and_eax_imm32(0xFF)); // and eax, 0xFF (8-bit exp)
+                    self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0b101, 0, 1)); // sub eax, 1
+                    self.emit_insn(&Insn::cmp_eax_imm32(0xFD)); // cmp eax, 0xFD (max-2)
+                } else {
+                    self.emit_insn(&Insn::gpr_xmm(false, W::B64, 0, 0)); // movq rax, xmm0
+                    self.emit_insn(&Insn::shift_reg_imm8_c1_b64(0b101, 0, 52)); // shr rax, 52
+                    self.emit_insn(&Insn::and_eax_imm32(0x7FF)); // and eax, 0x7FF (11-bit exp)
+                    self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0b101, 0, 1)); // sub rax, 1
+                    self.emit_insn(&Insn::cmp_eax_imm32(0x7FD)); // cmp eax, 0x7FD (max-2)
+                }
+                // setbe al: (exp-1) <= (max-2) ⇒ exp ∈ [1, max-1] ⇒ normal
+                self.emit_insn(&Insn::setcc_reg(
+                    crate::codegen::x86_64::opcode::CondCode::Be,
+                    0,
+                ));
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                        rip_relative: false,
+                        sign: false,
+                        from: W::B8,
+                        to: W::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(0, W::B64),
+                        src: crate::codegen::x86_64::opcode::Operand::Reg(0, W::B8),
+                    },
+                    &[],
+                )); // movzx eax, al
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            },
             // __builtin_isinf / isinff / isinfl: ±Inf 检测.
             // 返回: +Inf→1, -Inf→-1, 其他 (含 NaN) →0.
             // 算法: 用 |x| vs +Inf 比较 (sete); 符号位取 sign.
@@ -2479,7 +2527,7 @@ impl Codegen {
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
-                // 如果 a 是 float, 升为 double
+                // float 实参升为 double (与旧实现一致, 保持 float 可用).
                 if matches!(args[0].ty(), Type::Float) {
                     self.emit_insn(&Insn::simd_arith_reg(
                         SimdArithOp::CvtSdSs,
@@ -2488,17 +2536,22 @@ impl Codegen {
                         0,
                     ));
                 }
-                self.gen_expr(&args[1], 1);
-                // 如果 b 是 float, 升为 double
+                // 备份 a 到 xmm2, 避免载入 b 时 clobber xmm0 (旧实现直接 gen 到 xmm1,
+                // 但 volatile 载入等会借道 xmm0, 致参数顺序敏感: isunordered(one,zero)
+                // 误判为无序 —— float64-tg line 105)。
+                self.emit_insn(&Insn::movsd_xmm(2, 0)); // movsd xmm2, xmm0
+                self.gen_expr(&args[1], Self::EVAL_BASE);
                 if matches!(args[1].ty(), Type::Float) {
                     self.emit_insn(&Insn::simd_arith_reg(
                         SimdArithOp::CvtSdSs,
                         SimdWidth::SS,
-                        1,
-                        1,
+                        0,
+                        0,
                     ));
                 }
-                // ucomisd xmm0, xmm1
+                self.emit_insn(&Insn::movsd_xmm(1, 0)); // movsd xmm1, xmm0 (b)
+                self.emit_insn(&Insn::movsd_xmm(0, 2)); // movsd xmm0, xmm2 (a)
+                                                        // ucomisd xmm0, xmm1
                 // P11 Bucket N11: typed simd_arith_reg(Ucomi, SD).
                 self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SD, 0, 1)); // ucomisd xmm0, xmm1
                                                                                                 // setp al
@@ -5972,18 +6025,39 @@ impl Codegen {
                         )); // setae al
                     },
                     "__builtin_isless" => {
-                        // a < b: CF=1 → setb al
+                        // a < b: CF=1 → setb al; 且任一为 NaN 时须返回 0 (PF=1),
+                        // 故再 setnp bl 后 and (与 islessgreater 同样排除无序).
                         self.emit_insn(&Insn::setcc_reg(
                             crate::codegen::x86_64::opcode::CondCode::B,
                             0,
                         )); // setb al
+                        self.emit_insn(&Insn::setcc_reg(
+                            crate::codegen::x86_64::opcode::CondCode::Np,
+                            3,
+                        )); // setnp bl (PF=0 ⇒ 非 NaN)
+                        self.emit_insn(&Insn::alu_rm_reg_reg(
+                            crate::codegen::x86_64::opcode::AluOp::And,
+                            crate::codegen::shared::asm_operand::Width::B8,
+                            0,
+                            3,
+                        )); // and al, bl
                     },
                     "__builtin_islessequal" => {
-                        // a <= b: CF=1 or ZF=1 → setbe al
+                        // a <= b: CF=1 or ZF=1 → setbe al; 同样排除 NaN (setnp).
                         self.emit_insn(&Insn::setcc_reg(
                             crate::codegen::x86_64::opcode::CondCode::Be,
                             0,
                         )); // setbe al
+                        self.emit_insn(&Insn::setcc_reg(
+                            crate::codegen::x86_64::opcode::CondCode::Np,
+                            3,
+                        )); // setnp bl (PF=0 ⇒ 非 NaN)
+                        self.emit_insn(&Insn::alu_rm_reg_reg(
+                            crate::codegen::x86_64::opcode::AluOp::And,
+                            crate::codegen::shared::asm_operand::Width::B8,
+                            0,
+                            3,
+                        )); // and al, bl
                     },
                     "__builtin_islessgreater" => {
                         // a != b and not unordered: ZF=0 and PF=0
