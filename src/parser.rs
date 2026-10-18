@@ -11544,11 +11544,23 @@ impl<'a> Parser<'a> {
                             if !self.expect(TokKind::RParen, "')'") {
                                 return None;
                             }
-                            e = Expr::Int {
-                                v: const_eval::is_constant(&arg) as i128,
-                                span: sp.clone(),
-                                ty: int_t(),
-                            };
+                            if const_eval::is_constant(&arg) {
+                                e = Expr::Int {
+                                    v: 1,
+                                    span: sp.clone(),
+                                    ty: int_t(),
+                                };
+                            } else {
+                                // 不急切折 0: 保留调用, 交给 IPA modref (若实参被证明
+                                // 不会改写则折 1) / SCCP / 后端兜底 (折 0)。与
+                                // __builtin_expect 的"parser 不折"政策一致。
+                                e = Expr::Call {
+                                    callee: Box::new(callee_expr.clone()),
+                                    args: vec![arg],
+                                    span: sp.clone(),
+                                    ty: int_t(),
+                                };
+                            }
                             continue;
                         }
                         // __builtin_object_size(ptr, type): 编译期对象大小

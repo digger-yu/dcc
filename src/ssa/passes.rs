@@ -1412,25 +1412,11 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
                         operand_int(e, &consts).and_then(|v| eval_unop(*op, v))
                     },
                     InstKind::Cast { e, .. } => operand_int(e, &consts),
-                    // __builtin_constant_p(arg): 参数若在常量表中 (被 SCCP 传播为常量)
-                    // 则结果为 1, 否则为 0. 这修复 -O2 下 "变量被常量传播后
-                    // __builtin_constant_p 仍停在急切折叠的 0" (modref-2: z 传播成 125
-                    // 后应折 1). 其余内建调用不在此做常量折叠.
-                    InstKind::Call { callee, args, .. } if args.len() == 1 => {
-                        let name = match callee {
-                            Operand::SymAddr(n, _) | Operand::FnAddr(n, _) => n.as_str(),
-                            _ => "",
-                        };
-                        if name == "__builtin_constant_p" {
-                            Some(if operand_int(&args[0], &consts).is_some() {
-                                1
-                            } else {
-                                0
-                            })
-                        } else {
-                            None
-                        }
-                    },
+                    // 注意: 不在此折 `__builtin_constant_p`. 实参"已证明未被改写"的
+                    // 情形由 IPA modref (src/ipa_modref.rs) 在 AST 层折成 Int(1); 其余
+                    // 由后端兜底折 0。这里若按"参数在 SCCP 常量表"折 1, 会把
+                    // `int x=1; __builtin_constant_p(x)` (x 非地址取用、 SCCP 入表) 误折
+                    // 成 1, 破坏 tests/fixtures/c/constp.c 的断言 (必须返回 0).
                     _ => None,
                 };
                 if let Some(d) = &inst.dest {

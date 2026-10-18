@@ -108,6 +108,12 @@ pub fn optimize_with_full_target(
     if level == 0 {
         return;
     }
+    // IPA modref: 跨过程 "哪些指针形参被写穿" 摘要 + 只对「地址逃逸点全部是已证明
+    // 不写的调用实参」的局部折叠 __builtin_constant_p。必须排在 fold_constants 之前:
+    // 折出的 Int(1) 之后的 fold_expr / SCCP 才能把 `!1` 折成 0、删掉 `if(!1) abort();`。
+    if level >= 2 && !opt_skipped("ipa_modref") {
+        crate::ipa_modref::run(module, level);
+    }
     if !opt_skipped("fold_constants") {
         fold_constants(module);
     }
