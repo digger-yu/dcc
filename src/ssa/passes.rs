@@ -3151,7 +3151,7 @@ fn operand_identity(o: &Operand) -> String {
         Operand::Var(v) => v.name(),
         Operand::Int(i) => format!("#i{i}"),
         Operand::Float(f, ty) => format!("#f{:?}{}", f, type_tag_of(ty)),
-        Operand::Str(s) => format!("#s{}", s.len()),
+        Operand::Str(s) => format!("#s{:?}", s),
         Operand::SymAddr(n, _) => format!("#sym{n}"),
         Operand::FnAddr(n, _) => format!("#fn{n}"),
         Operand::Void => "#void".to_string(),
