@@ -180,7 +180,32 @@ impl super::super::super::Codegen {
                         self.mov(dst, 1);
                     } // dst = rcx
                 } else {
-                    // 前缀：返回新值 (已在 rax)
+                    // 前缀：返回新值 (已在 rax)。窄整数 (char/short) 必须把表达式值
+                    // 按声明宽度归约回操作数类型, 否则 `while(++c)` (c 为 unsigned
+                    // char) 在 255->256 时拿到 256 而非 0, 循环永不退出 (pr98117)。
+                    // 内存写回已截断 (只写 al/ax), 这里只修正返回的 rvalue。
+                    if inner_ty.size() < 4 {
+                        let signed = Self::is_signed_int(&inner_ty);
+                        match (inner_ty.size(), signed) {
+                            (1, false) => {
+                                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 0, 0xFF));
+                            },
+                            (2, false) => {
+                                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 0, 0xFFFF));
+                            },
+                            (1, true) => {
+                                // shl rax,56; sar rax,56 — 符号扩展低字节
+                                self.emit_insn(&Insn::shift_reg_imm8_c1_b64(4, 0, 56));
+                                self.emit_insn(&Insn::shift_reg_imm8_c1_b64(7, 0, 56));
+                            },
+                            (2, true) => {
+                                // shl rax,48; sar rax,48 — 符号扩展低字
+                                self.emit_insn(&Insn::shift_reg_imm8_c1_b64(4, 0, 48));
+                                self.emit_insn(&Insn::shift_reg_imm8_c1_b64(7, 0, 48));
+                            },
+                            _ => {},
+                        }
+                    }
                     if dst != 0 {
                         self.mov(dst, 0);
                     }

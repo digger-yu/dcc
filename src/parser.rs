@@ -792,6 +792,11 @@ impl<'a> Parser<'a> {
     /// typeof 括号内是类型形式还是表达式形式
     fn typeof_operand_is_type_form(&self) -> bool {
         if self.cur.kind == TokKind::Ident {
+            // __builtin_* 是内建函数 (表达式), 永远按表达式形式解析 typeof,
+            // 否则会被误判为类型形式而尝试把 `(__builtin_x())` 当类型解析失败.
+            if self.cur.text.starts_with("__builtin_") {
+                return false;
+            }
             match self.cur.text.as_str() {
                 "_Generic"
                 | "nullptr"
@@ -2127,6 +2132,18 @@ impl<'a> Parser<'a> {
     fn call_result_type(&self, callee: &Expr) -> Type {
         // __builtin_fma returns double, __builtin_fmaf returns float, __builtin_fmal returns long double
         if let Expr::Ident { name, .. } = callee {
+            // 扩展浮点 (_FloatN/_FloatNx) 内建: 按 fN/fNx 宽度后缀决定返回类型.
+            // 分类谓词 (isnan/isinf/...) 与整数返回数学函数 (ilogb/llrint/...)
+            // 返回 int, 其余返回降级后的基础浮点类型 (float/double/long double).
+            if let Some((stem, base)) = Self::float_builtin_suffix(name.name.as_str()) {
+                if Self::is_float_predicate_stem(stem.as_str()) {
+                    return int_t();
+                }
+                if let Some(t) = Self::int_math_result_type(stem.as_str()) {
+                    return t;
+                }
+                return base;
+            }
             match name.name.as_str() {
                 "__builtin_fma" => return Type::Double,
                 "__builtin_fmaf" => return Type::Float,
@@ -2237,6 +2254,66 @@ impl<'a> Parser<'a> {
             other => other,
         };
         result
+    }
+
+    /// 扩展浮点 (_FloatN/_FloatNx) 内建的 fN/fNx 宽度后缀 → (stem, 降级基础浮点类型).
+    /// 仅识别宽度后缀 (f16/f32/f32x/f64/f64x/f128/f128x), 不含传统 f/l 后缀
+    /// (后者已由 `call_result_type` 的显式分支覆盖). 用于程序化解析 `__builtin_*`
+    /// 的返回类型与 libm 转发名, 避免为每个 fN 变体逐一枚举.
+    fn float_builtin_suffix(name: &str) -> Option<(String, Type)> {
+        let n = name.strip_prefix("__builtin_")?;
+        // 顺序敏感: 长后缀 (f32x/f64x/f128x) 必须先于其短前缀 (f32/f64/f128).
+        let pairs: &[(&str, Type)] = &[
+            ("f16", Type::Float),
+            ("f32x", Type::LongDouble),
+            ("f128x", Type::LongDouble),
+            ("f32", Type::Float),
+            ("f64x", Type::LongDouble),
+            ("f128", Type::LongDouble),
+            ("f64", Type::Double),
+        ];
+        for (s, t) in pairs {
+            if let Some(stem) = n.strip_suffix(s) {
+                return Some((stem.to_string(), t.clone()));
+            }
+        }
+        None
+    }
+
+    /// 分类谓词: 返回 int (无论精度后缀).
+    fn is_float_predicate_stem(stem: &str) -> bool {
+        matches!(
+            stem,
+            "isnan"
+                | "isnormal"
+                | "isinf"
+                | "isinf_sign"
+                | "isfinite"
+                | "isunordered"
+                | "fpclassify"
+                | "isgreater"
+                | "isgreaterequal"
+                | "isless"
+                | "islessequal"
+                | "islessgreater"
+                | "iseqsig"
+                | "signbit"
+                | "issignaling"
+                | "issubnormal"
+                | "iscanonical"
+                | "iszero"
+        )
+    }
+
+    /// 整数返回的数学内建 → 正确的整数类型 (结果在 rax, 非浮点寄存器).
+    /// ilogb→int, lrint/lround→long, llrint/llround→long long.
+    fn int_math_result_type(stem: &str) -> Option<Type> {
+        match stem {
+            "ilogb" => Some(Type::Int),
+            "lrint" | "lround" => Some(Type::Long),
+            "llrint" | "llround" => Some(Type::LongLong),
+            _ => None,
+        }
     }
 
     fn type_of_member(&self, base: &Expr, field: &Ident, is_arrow: bool) -> Type {
@@ -12053,6 +12130,7 @@ impl<'a> Parser<'a> {
                                     | "__builtin_cpu_supports"
                                     | "__builtin_cpu_is"
                                     | "__builtin_cpu_init"
+                                    | _ if Self::float_builtin_suffix(name.name.as_str()).is_some()
                             )
                         {
                             self.warn_here(

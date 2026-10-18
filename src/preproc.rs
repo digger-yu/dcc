@@ -7713,6 +7713,17 @@ impl Preprocessor {
                 // shift overflow builtins
                 | "__builtin_shl_overflow"
                 | "__builtin_shr_overflow"
+                | _ if {
+                    let n = name.trim();
+                    n.starts_with("__builtin_")
+                        && (n.ends_with("f16")
+                            || n.ends_with("f32x")
+                            || n.ends_with("f128x")
+                            || n.ends_with("f32")
+                            || n.ends_with("f64x")
+                            || n.ends_with("f128")
+                            || n.ends_with("f64"))
+                }
         )
     }
 

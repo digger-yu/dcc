@@ -547,16 +547,73 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
 /// 整数内建或走 NotConstant。
 fn eval_float_builtin(name: &str, _args: &[Expr]) -> Result<Option<ConstValue>, ConstEvalError> {
     use crate::float80;
+    // 传统 f/l 后缀: 与 GCC 一致.
     let v = match name {
-        "__builtin_nan" => FloatConst::F64(f64::NAN),
-        "__builtin_nanf" => FloatConst::F32(f32::NAN),
-        "__builtin_nanl" => FloatConst::LongDouble(float80::from_f64(f64::NAN)),
-        "__builtin_inf" | "__builtin_huge_val" => FloatConst::F64(f64::INFINITY),
-        "__builtin_inff" | "__builtin_huge_valf" => FloatConst::F32(f32::INFINITY),
+        "__builtin_nan" => Some(FloatConst::F64(f64::NAN)),
+        "__builtin_nanf" => Some(FloatConst::F32(f32::NAN)),
+        "__builtin_nanl" => Some(FloatConst::LongDouble(float80::from_f64(f64::NAN))),
+        "__builtin_inf" | "__builtin_huge_val" => Some(FloatConst::F64(f64::INFINITY)),
+        "__builtin_inff" | "__builtin_huge_valf" => Some(FloatConst::F32(f32::INFINITY)),
         "__builtin_infl" | "__builtin_huge_vall" => {
-            FloatConst::LongDouble(float80::from_f64(f64::INFINITY))
+            Some(FloatConst::LongDouble(float80::from_f64(f64::INFINITY)))
         },
-        _ => return Ok(None),
+        _ => None,
+    };
+    if let Some(v) = v {
+        return Ok(Some(ConstValue::Float(v)));
+    }
+    // 扩展浮点 (_FloatN/_FloatNx) 宽度后缀: inf/huge_val → +Infinity,
+    // nan/nans → NaN; 后缀决定精度 (f16/f32 → f32, f32x/f64 → f64,
+    // f64x/f128/f128x → long double). 顺序敏感: 长后缀须先于短前缀匹配.
+    let n = match name.strip_prefix("__builtin_") {
+        Some(n) => n,
+        None => return Ok(None),
+    };
+    let (stem, suff) = if let Some(r) = n.strip_suffix("f16") {
+        (r, "f16")
+    } else if let Some(r) = n.strip_suffix("f32x") {
+        (r, "f32x")
+    } else if let Some(r) = n.strip_suffix("f128x") {
+        (r, "f128x")
+    } else if let Some(r) = n.strip_suffix("f32") {
+        (r, "f32")
+    } else if let Some(r) = n.strip_suffix("f64x") {
+        (r, "f64x")
+    } else if let Some(r) = n.strip_suffix("f128") {
+        (r, "f128")
+    } else if let Some(r) = n.strip_suffix("f64") {
+        (r, "f64")
+    } else {
+        return Ok(None);
+    };
+    if stem != "inf" && stem != "huge_val" && stem != "nan" && stem != "nans" {
+        return Ok(None);
+    }
+    let v = match suff {
+        "f16" | "f32" => {
+            let x = if stem == "inf" || stem == "huge_val" {
+                f32::INFINITY
+            } else {
+                f32::NAN
+            };
+            FloatConst::F32(x)
+        }
+        "f32x" | "f64" => {
+            let x = if stem == "inf" || stem == "huge_val" {
+                f64::INFINITY
+            } else {
+                f64::NAN
+            };
+            FloatConst::F64(x)
+        }
+        _ => {
+            let x = if stem == "inf" || stem == "huge_val" {
+                f64::INFINITY
+            } else {
+                f64::NAN
+            };
+            FloatConst::LongDouble(float80::from_f64(x))
+        }
     };
     Ok(Some(ConstValue::Float(v)))
 }

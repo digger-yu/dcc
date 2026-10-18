@@ -1036,6 +1036,52 @@ impl Codegen {
             _ => false, // 未识别的 __atomic_ 函数, 走普通调用路径
         }
     }
+    /// 扩展浮点 (_FloatN/_FloatNx) 数学内建 → libm 函数名.
+    /// 宽度后缀决定 libm 精度后缀与返回类型:
+    ///   f16/f32            → `<stem>f`   (float,  4B)
+    ///   f32x/f64           → `<stem>`    (double, 8B)
+    ///   f64x/f128/f128x    → `<stem>l`   (long double, 80-bit)
+    /// 比较谓词 (isgreater/isless/.../iseqsig/signbit) 不是真实 libm 符号,
+    /// 返回 None 让调用方走内建/报错路径, 不在此转发.
+    ///
+    /// 仅识别宽度后缀 (f16/f32/f32x/f64/f64x/f128/f128x); 传统 f/l 后缀已由
+    /// gen_builtin 的显式分支覆盖. 顺序敏感: 长后缀须先于其短前缀匹配.
+    fn float_builtin_libm(name: &str) -> Option<(String, bool)> {
+        let n = name.strip_prefix("__builtin_")?;
+        // 比较/谓词类: 不是真实 libm 函数, 不转发 (避免链接期找不到符号).
+        let is_cmp = matches!(
+            n,
+            "isgreater"
+                | "isgreaterequal"
+                | "isless"
+                | "islessequal"
+                | "islessgreater"
+                | "iseqsig"
+                | "signbit"
+        );
+        let (stem, libm_suffix, is_ld) = if let Some(s) = n.strip_suffix("f16") {
+            (s, "f", false)
+        } else if let Some(s) = n.strip_suffix("f32x") {
+            (s, "", false)
+        } else if let Some(s) = n.strip_suffix("f128x") {
+            (s, "l", true)
+        } else if let Some(s) = n.strip_suffix("f32") {
+            (s, "f", false)
+        } else if let Some(s) = n.strip_suffix("f64x") {
+            (s, "l", true)
+        } else if let Some(s) = n.strip_suffix("f128") {
+            (s, "l", true)
+        } else if let Some(s) = n.strip_suffix("f64") {
+            (s, "", false)
+        } else {
+            return None;
+        };
+        if is_cmp {
+            return None;
+        }
+        let libm = format!("{}{}", stem, libm_suffix);
+        Some((libm, is_ld))
+    }
     pub(crate) fn gen_builtin(&mut self, name: &str, args: &[Expr], dst: u8) -> bool {
         match name {
             // __builtin_expect(cond, hint): 返回 cond 的值 (第二参数是分支预测
@@ -2074,14 +2120,24 @@ impl Codegen {
             "__builtin_huge_val"
             | "__builtin_huge_valf"
             | "__builtin_huge_vall"
+            | "__builtin_huge_valf16" | "__builtin_huge_valf32" | "__builtin_huge_valf32x"
+            | "__builtin_huge_valf64" | "__builtin_huge_valf64x" | "__builtin_huge_valf128" | "__builtin_huge_valf128x"
             | "__builtin_inf"
             | "__builtin_inff"
-            | "__builtin_infl" => {
+            | "__builtin_infl"
+            | "__builtin_inff16" | "__builtin_inff32" | "__builtin_inff32x"
+            | "__builtin_inff64" | "__builtin_inff64x" | "__builtin_inff128" | "__builtin_inff128x" => {
                 let (is_float, bytes) = match name {
-                    "__builtin_huge_valf" | "__builtin_inff" => {
+                    "__builtin_huge_valf" | "__builtin_inff"
+                    | "__builtin_huge_valf16" | "__builtin_huge_valf32"
+                    | "__builtin_inff16" | "__builtin_inff32" => {
                         (true, 0x7F800000u32.to_le_bytes().to_vec())
                     },
-                    "__builtin_huge_vall" | "__builtin_infl" => {
+                    "__builtin_huge_vall" | "__builtin_infl"
+                    | "__builtin_huge_valf32x" | "__builtin_huge_valf64" | "__builtin_huge_valf64x"
+                    | "__builtin_huge_valf128" | "__builtin_huge_valf128x"
+                    | "__builtin_inff32x" | "__builtin_inff64" | "__builtin_inff64x"
+                    | "__builtin_inff128" | "__builtin_inff128x" => {
                         // long double: dcc 用 8 字节近似, 加载 0 进入 xmm0 (近似 +Inf)
                         (false, 0x7FF0000000000000u64.to_le_bytes().to_vec())
                     },
@@ -2118,10 +2174,15 @@ impl Codegen {
             //   float:   0x7FC0_0000
             //   long double: 0x7FFF_C000_0000_0000_0000 (dcc 8 字节近似)
             // emit 8 字节 movsd/movss xmm0, [rip+disp32], disp32 在 code_pos+4.
-            "__builtin_nan" | "__builtin_nanf" | "__builtin_nanl" => {
+            "__builtin_nan" | "__builtin_nanf" | "__builtin_nanl"
+            | "__builtin_nanf16" | "__builtin_nanf32" | "__builtin_nanf32x"
+            | "__builtin_nanf64" | "__builtin_nanf64x" | "__builtin_nanf128" | "__builtin_nanf128x" => {
                 let (is_float, bytes) = match name {
-                    "__builtin_nanf" => (true, 0x7FC00000u32.to_le_bytes().to_vec()),
-                    "__builtin_nanl" => (false, 0x7FF8000000000000u64.to_le_bytes().to_vec()),
+                    "__builtin_nanf"
+                    | "__builtin_nanf16" | "__builtin_nanf32" => (true, 0x7FC00000u32.to_le_bytes().to_vec()),
+                    "__builtin_nanl"
+                    | "__builtin_nanf32x" | "__builtin_nanf64" | "__builtin_nanf64x"
+                    | "__builtin_nanf128" | "__builtin_nanf128x" => (false, 0x7FF8000000000000u64.to_le_bytes().to_vec()),
                     _ => (false, 0x7FF8000000000000u64.to_le_bytes().to_vec()),
                 };
                 let off = self.rodata.len() as u64;
@@ -2147,7 +2208,9 @@ impl Codegen {
             // 统一用 setp 检测 PF=1 → NaN.
             // 类型由实参决定, 而非函数名后缀: __builtin_isnan(float) 也应
             // 使用 ucomiss; 否则 movss 后高位 0 会使 ucomisd 行为不一致.
-            "__builtin_isnan" | "__builtin_isnanf" | "__builtin_isnanl" => {
+            "__builtin_isnan" | "__builtin_isnanf" | "__builtin_isnanl"
+            | "__builtin_isnanf16" | "__builtin_isnanf32" | "__builtin_isnanf32x"
+            | "__builtin_isnanf64" | "__builtin_isnanf64x" | "__builtin_isnanf128" | "__builtin_isnanf128x" => {
                 if args.is_empty() {
                     self.mov_imm(dst, 0);
                     return true;
@@ -2194,7 +2257,9 @@ impl Codegen {
             // 位检查: exp = (bits >> shift) & mask; normal iff exp ∈ [1, max-1],
             // 用无符号 (exp-1) <= (max-2) (setbe) 一次判定. 类型按实参 (mirror isnan):
             // float 用 movd/shr23/mask0xFF, 其余 (double/long double) 用 movq/shr52/mask0x7FF.
-            "__builtin_isnormal" | "__builtin_isnormalf" | "__builtin_isnormall" => {
+            "__builtin_isnormal" | "__builtin_isnormalf" | "__builtin_isnormall"
+            | "__builtin_isnormalf16" | "__builtin_isnormalf32" | "__builtin_isnormalf32x"
+            | "__builtin_isnormalf64" | "__builtin_isnormalf64x" | "__builtin_isnormalf128" | "__builtin_isnormalf128x" => {
                 if args.is_empty() {
                     self.mov_imm(dst, 0);
                     return true;
@@ -2245,7 +2310,12 @@ impl Codegen {
             //   sign=1: result = -isinf
             // 排除 NaN: setnp (NOT PF). NaN 时 PF=1, setnp=0 → 整体被清零.
             // 类型按实参, 不用函数名后缀.
-            "__builtin_isinf" | "__builtin_isinff" | "__builtin_isinfl" => {
+            "__builtin_isinf" | "__builtin_isinff" | "__builtin_isinfl"
+            | "__builtin_isinff16" | "__builtin_isinff32" | "__builtin_isinff32x"
+            | "__builtin_isinff64" | "__builtin_isinff64x" | "__builtin_isinff128" | "__builtin_isinff128x"
+            | "__builtin_isinf_sign" | "__builtin_isinf_signf" | "__builtin_isinf_signl"
+            | "__builtin_isinf_signf16" | "__builtin_isinf_signf32" | "__builtin_isinf_signf32x"
+            | "__builtin_isinf_signf64" | "__builtin_isinf_signf64x" | "__builtin_isinf_signf128" | "__builtin_isinf_signf128x" => {
                 if args.is_empty() {
                     self.mov_imm(dst, 0);
                     return true;
@@ -2521,7 +2591,9 @@ impl Codegen {
             // __builtin_isunordered(a, b): 任一为 NaN 则 1.
             // 优先把两个实参对齐到 double (用 cvtps2pd/cvtss2sd).
             // 较新 Intel CPU 在 NaN 时 ZF=1, PF=1, CF=1 → setp 仍可识别.
-            "__builtin_isunordered" => {
+            "__builtin_isunordered"
+            | "__builtin_isunorderedf16" | "__builtin_isunorderedf32" | "__builtin_isunorderedf32x"
+            | "__builtin_isunorderedf64" | "__builtin_isunorderedf64x" | "__builtin_isunorderedf128" | "__builtin_isunorderedf128x" => {
                 if args.len() < 2 {
                     self.mov_imm(dst, 0);
                     return true;
@@ -2585,7 +2657,9 @@ impl Codegen {
             //   Inf → args[1]
             //   Zero → args[2]
             //   其他 (含 Subnormal) → args[4]  (跳过 Subnormal args[3])
-            "__builtin_fpclassify" => {
+            "__builtin_fpclassify"
+            | "__builtin_fpclassifyf16" | "__builtin_fpclassifyf32" | "__builtin_fpclassifyf32x"
+            | "__builtin_fpclassifyf64" | "__builtin_fpclassifyf64x" | "__builtin_fpclassifyf128" | "__builtin_fpclassifyf128x" => {
                 if args.len() < 6 {
                     self.mov_imm(dst, 0);
                     return true;
@@ -5738,6 +5812,21 @@ impl Codegen {
                 self.call_label("free");
                 true
             },
+            // __builtin_realloc: 转发到 libc realloc()
+            // SysV ABI: rdi = ptr, rsi = size
+            "__builtin_realloc" => {
+                if args.len() >= 2 {
+                    self.gen_expr(&args[0], 7); // rdi = ptr
+                    self.gen_expr(&args[1], 6); // rsi = size
+                } else if !args.is_empty() {
+                    self.gen_expr(&args[0], 7); // rdi = ptr (无 size)
+                }
+                self.call_label("realloc");
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            },
             // __builtin_fabs / fabsf / fabsl: 浮点绝对值
             // 清除符号位: AND with abs_mask
             "__builtin_fabs" | "__builtin_fabsf" | "__builtin_fabsl" => {
@@ -5906,7 +5995,9 @@ impl Codegen {
                 true
             },
             // __builtin_isfinite / isfinitef / isfinitel: 等价于 __builtin_finite
-            "__builtin_isfinite" | "__builtin_isfinitef" | "__builtin_isfinitel" => {
+            "__builtin_isfinite" | "__builtin_isfinitef" | "__builtin_isfinitel"
+            | "__builtin_isfinitef16" | "__builtin_isfinitef32" | "__builtin_isfinitef32x"
+            | "__builtin_isfinitef64" | "__builtin_isfinitef64x" | "__builtin_isfinitef128" | "__builtin_isfinitef128x" => {
                 if args.is_empty() {
                     self.mov_imm(dst, 0);
                     return true;
@@ -6967,7 +7058,25 @@ impl Codegen {
                 }
                 true
             },
-            _ => false,
+            // 扩展浮点 (_FloatN/_FloatNx) 数学内建: 转发到 libm 同名函数.
+            // 宽度后缀决定 libm 精度后缀 (见 float_builtin_libm); 参数由
+            // emit_sysv_call 按 SysV ABI 自动装载, 结果落在 ABI 返回寄存器
+            // (rax/xmm0/st0). long double 走 st0 通道, 不搬移到 GP 寄存器,
+            // 以免破坏 80-bit 值.
+            _ => {
+                if let Some((libm, is_ld)) = Self::float_builtin_libm(name) {
+                    if !args.is_empty() {
+                        // 参数装载交给 emit_sysv_call
+                    }
+                    self.emit_sysv_call(Some(&libm), None, args, None);
+                    if dst != 0 && !is_ld {
+                        self.mov(dst, 0);
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
         }
     }
     fn gen_builtin_fn_ptr(&mut self, e: &Expr, dst: u8) {
