@@ -29,6 +29,14 @@
 compat/struct-by-value-18_x.c
 compat/struct-by-value-18a_x.c
 
+# charset/asm4-6 — 这几个测试用虚构的汇编助记符 `foo` ("foo %0") 作为占位
+# 文本来检验执行字符集 (iconv IBM1047) 翻译. GCC 把 asm 串原样透传给汇编器,
+# 而 dcc 的 mini-asm 需要真正编码指令, `foo` 无可编码形式 —— 连 gas 也
+# 会拒绝. 属于 dcc 设计上不支持的场景 (非代码缺陷), 逐个跳过.
+charset/asm4.c
+charset/asm5.c
+charset/asm6.c
+
 # ── 示例格式 (按需取消注释) ──
 # c/pr12345.c
 # vla-*.c

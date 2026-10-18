@@ -134,24 +134,44 @@ target_matches_one() {
 }
 
 # 判定一个 dg `target` 选择器是否包含当前目标.
-# 语义 (与 gcc dg 一致): 列表里每个 pattern 可带 '!' 前缀表示取反.
+# 语义 (与 gcc dg 一致): 列表里的 pattern 可带 '!' 表示取反.'!' 既可能
+# 紧贴 pattern (`!x86_64-*-*`), 也可能是独立词法单元、作用于紧随其后的
+# pattern (`{ ! *-*-mingw* }`).因此必须两种写法都认, 否则会把「除 mingw 外
+# 都跑」的测试误判成「只在 mingw 跑」而错误跳过.
 #   - 存在正 pattern 时: 必须命中至少一个正 pattern, 且不能命中任何负 pattern;
 #   - 只有负 pattern 时: 不能命中任何负 pattern 即纳入.
 target_included() {
-    local any_pos=0 pos_ok=0 neg_ok=0 tok
+    local any_pos=0 pos_ok=0 neg_ok=0 pending=0
+    local tok pat neg
     for tok in $1; do
+        if [[ "$tok" == "!" ]]; then
+            pending=1
+            continue
+        fi
+        neg=0
+        pat="$tok"
         if [[ "$tok" == '!'* ]]; then
-            local np="${tok#!}"
-            if target_matches_one "$np"; then neg_ok=1; fi
+            neg=1
+            pat="${tok#!}"
+        elif (( pending )); then
+            neg=1
+        fi
+        pending=0
+        if target_matches_one "$pat"; then
+            if (( neg )); then
+                neg_ok=1
+            else
+                any_pos=1
+                pos_ok=1
+            fi
         else
-            any_pos=1
-            if target_matches_one "$tok"; then pos_ok=1; fi
+            (( neg )) || any_pos=1
         fi
     done
-    if [[ $any_pos -eq 1 ]]; then
-        [[ $pos_ok -eq 1 && $neg_ok -eq 0 ]]
+    if (( any_pos )); then
+        (( pos_ok && ! neg_ok ))
     else
-        [[ $neg_ok -eq 0 ]]
+        (( ! neg_ok ))
     fi
 }
 export -f target_included
@@ -187,12 +207,9 @@ parse_dg_directives() {
         return
     fi
 
-    # dg-require-iconv: 这些测试依赖执行字符集 (iconv) 翻译, dcc 尚未实现,
-    # 无法正确编译/验证, 按能力缺失跳过 (与 dg-require-effective-target 一致).
-    if grep -qP '\{ dg-require-iconv' "$src" 2>/dev/null; then
-        echo "skip dg-require-iconv"
-        return
-    fi
+    # 注意: dg-require-iconv 不在此处一刀切跳过. 多数 iconv 测试只是依赖
+    # 执行字符集翻译, dcc 仍能正常编译它们 (只有少数使用了虚构汇编助记符
+    # 的才编译不了), 那些应逐个列入本文件末尾的手动跳过清单, 避免误伤.
 
     # 行内 target 选择器, 例如 `dg-do compile { target { *-*-mingw* } }` 或
     # `dg-do compile { target x86_64-*-* }`. 任一 triple 通配命中当前目标则运行,

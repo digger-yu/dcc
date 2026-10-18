@@ -3464,6 +3464,12 @@ impl Preprocessor {
             return;
         }
 
+        // dcc 内置 <stdfloat.h>: C23 扩展浮点类型 typedefs. 宿主系统不一定
+        // 提供该头 (glibc < 2.38 没有), 故由 dcc 直接注入.
+        if self.try_include_builtin_stdfloat(path) {
+            return;
+        }
+
         // 搜索文件
         let found = self.find_include(path, is_system);
         match found {
@@ -3502,6 +3508,31 @@ impl Preprocessor {
         self.include_count += 1;
         self.push_out(&format!("/* #include <{}> (dcc builtin) */\n", name));
         self.process_text(text, &key);
+        true
+    }
+
+    /// 拦截 C23 `<stdfloat.h>`, 注入 dcc 内置的扩展浮点类型 typedefs.
+    /// 命中返回 true (已处理), 未命中返回 false (继续正常搜索).
+    fn try_include_builtin_stdfloat(&mut self, path: &str) -> bool {
+        const STDFLOAT_H: &str = include_str!("headers/stdfloat.h");
+        let name = Path::new(path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(path);
+        if name != "stdfloat.h" {
+            return false;
+        }
+        let key = "<builtin:stdfloat.h>".to_string();
+        if self.pragma_once.contains(&key) {
+            return true;
+        }
+        self.pragma_once.insert(key.clone());
+        // 内置头也计入依赖闭包 (缓存校验用; 伪路径, cache_deps_fresh 跳过实读)
+        self.dep_hashes
+            .push((key.clone(), Self::hash_content(STDFLOAT_H)));
+        self.include_count += 1;
+        self.push_out(&format!("/* #include <{}> (dcc builtin) */\n", name));
+        self.process_text(STDFLOAT_H, &key);
         true
     }
 

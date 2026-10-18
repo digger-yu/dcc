@@ -6542,18 +6542,29 @@ impl<'a> Parser<'a> {
                     self.spec_quals |= QualifierFlags::CONST;
                     self.advance();
                 },
-                // ISO/IEC TS 18661 / GCC：_FloatN 二进制浮点类型
-                TokKind::Ident
-                    if matches!(self.cur.text.as_str(), "_Float32" | "_Float32x" | "_Float16") =>
-                {
+                // ISO/IEC TS 18661 / C23 扩展浮点类型 _FloatN / _FloatNx.
+                // x86-64 上的格式等价 (glibc <bits/floatn-common.h>):
+                //   _Float16 = binary16  → float 退化表示 (sizeof 4, 已知限制)
+                //   _Float32 = binary32  → float
+                //   _Float32x = binary64 → double
+                //   _Float64 = binary64  → double
+                //   _Float64x = binary80 → long double (16B)
+                //   _Float128 / _Float128x = binary128 → long double (16B)
+                TokKind::Ident if matches!(self.cur.text.as_str(), "_Float16" | "_Float32") => {
                     base = Some(Type::Float);
                     self.advance();
                 },
-                TokKind::Ident if matches!(self.cur.text.as_str(), "_Float64" | "_Float64x") => {
+                TokKind::Ident if self.cur.text == "_Float32x" => {
                     base = Some(Type::Double);
                     self.advance();
                 },
-                TokKind::Ident if matches!(self.cur.text.as_str(), "_Float128" | "_Float128x") => {
+                TokKind::Ident if self.cur.text == "_Float64" => {
+                    base = Some(Type::Double);
+                    self.advance();
+                },
+                TokKind::Ident
+                    if matches!(self.cur.text.as_str(), "_Float64x" | "_Float128" | "_Float128x") =>
+                {
                     base = Some(Type::LongDouble);
                     self.advance();
                 },
@@ -12206,14 +12217,12 @@ impl<'a> Parser<'a> {
                     stripped = &stripped[..stripped.len() - 1];
                 }
                 // 提取类型后缀 (在去掉虚数后缀之后)
-                let ty = if stripped.ends_with('f') || stripped.ends_with('F') {
-                    stripped = &stripped[..stripped.len() - 1];
-                    Type::Float
-                } else if stripped.ends_with('l') || stripped.ends_with('L') {
-                    stripped = &stripped[..stripped.len() - 1];
-                    Type::LongDouble
-                } else {
-                    Type::Double
+                let ty = match strip_float_suffix(stripped) {
+                    Some((rest, t)) => {
+                        stripped = rest;
+                        t
+                    },
+                    None => Type::Double,
                 };
                 // 如果之前没找到虚数后缀, 再检查原始字符串开头是否有
                 // 类型后缀后跟虚数后缀的情况 (如 "2.0if")
@@ -13109,6 +13118,43 @@ fn parse_int_lit(s: &str) -> i128 {
     }
 }
 
+/// 解析浮点字面量后缀, 返回 (剥离后缀后的文本, 类型).
+///
+/// 覆盖 C 标准的 f/F (float) 与 l/L (long double), 以及 C23 扩展浮点字面量
+/// 后缀 f16/f32/f64/f128/f32x/f64x/f128x (大小写不敏感). 多字符后缀必须先于
+/// 单字符匹配: `1.5f128` 若按单字符先剥 `f`, 会留下 `1.5` 却把 `128` 当尾数
+/// 误解析 → 必须整串识别. 虚数后缀 i/I/j/J 由调用方先行剥除.
+pub fn strip_float_suffix<'a>(s: &'a str) -> Option<(&'a str, Type)> {
+    let n = s.len();
+    // code: 0 = float, 1 = double, 2 = long double
+    const SUFS: &[(&str, u8)] = &[
+        ("f16", 0),
+        ("f32", 0),
+        ("f64", 1),
+        ("f128", 2),
+        ("f32x", 1),
+        ("f64x", 2),
+        ("f128x", 2),
+    ];
+    for (suf, code) in SUFS {
+        if n >= suf.len() && s[n - suf.len()..].eq_ignore_ascii_case(suf) {
+            let ty = match code {
+                0 => Type::Float,
+                1 => Type::Double,
+                _ => Type::LongDouble,
+            };
+            return Some((&s[..n - suf.len()], ty));
+        }
+    }
+    if s.ends_with('f') || s.ends_with('F') {
+        return Some((&s[..n - 1], Type::Float));
+    }
+    if s.ends_with('l') || s.ends_with('L') {
+        return Some((&s[..n - 1], Type::LongDouble));
+    }
+    None
+}
+
 /// 解析字符串字面量内容（不含末尾 NUL 终止符）。
 /// 相邻字符串拼接时由调用方负责在最终数据后补 NUL，
 /// 避免中间字符串的 NUL 嵌入结果（如 "a" "b" → "a\0b"）。
@@ -13729,7 +13775,8 @@ fn parse_hex_float(s: &str) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_wide_str;
+    use super::{parse_wide_str, strip_float_suffix};
+    use crate::ast::Type;
 
     #[test]
     fn wide_str_ascii() {
@@ -13737,6 +13784,32 @@ mod tests {
         let bytes = parse_wide_str(r#"L"a""#, false);
         assert_eq!(bytes, vec![0x61, 0, 0, 0]);
     }
+
+    #[test]
+    fn float_literal_suffix_maps_to_type() {
+        let cases = [
+            ("1.5f", Type::Float),
+            ("1.5F", Type::Float),
+            ("1.5f16", Type::Float),
+            ("1.5f32", Type::Float),
+            ("1.5f64", Type::Double),
+            ("1.5f128", Type::LongDouble),
+            ("1.5f32x", Type::Double),
+            ("1.5f64x", Type::LongDouble),
+            ("1.5f128x", Type::LongDouble),
+            ("1.5L", Type::LongDouble),
+        ];
+        for (input, want) in cases {
+            let (rest, ty) = strip_float_suffix(input).expect(input);
+            assert_eq!(ty, want, "{input}");
+            assert_eq!(rest, "1.5", "{input}: 后缀未正确剥离");
+        }
+        // 多字符后缀不可被单字符误剥: 1.5f128 不能当作 1.5f + 128
+        assert_eq!(strip_float_suffix("1.5f128").unwrap().0, "1.5");
+        // 无后缀返回 None (调用方据此回落为 double)
+        assert!(strip_float_suffix("1.5").is_none());
+    }
+
 
     #[test]
     fn wide_str_escape() {

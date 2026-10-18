@@ -2115,3 +2115,61 @@ int main(void) { return 0; }
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// C23 扩展浮点类型 `_FloatN` / `_FloatNx` 与字面量后缀 f16/f32/f64/f128/
+/// f32x/f64x/f128x：类型宽度须遵循 x86-64 的 TS 18661 格式等价，且字面量
+/// 后缀必须被正确剥离并求得正确值（此前 `1.5f16` 因后缀未被识别而被算成 0）。
+#[test]
+fn c23_extended_float_types_and_suffixes() {
+    let src = "\
+#include <stdio.h>
+int s32x = sizeof(_Float32x);
+int s64x = sizeof(_Float64x);
+int s128 = sizeof(_Float128);
+int s128x = sizeof(_Float128x);
+int main(void) {
+    _Float16 h = 1.5f16;
+    _Float32 f32 = 2.5f32;
+    _Float64 f64 = 3.5f64;
+    _Float128 f128 = 4.5f128;
+    _Float32x f32x = 5.5f32x;
+    _Float64x f64x = 6.5f64x;
+    _Float128x f128x = 7.5f128x;
+    int ok = (s32x == 8 && s64x == 16 && s128 == 16 && s128x == 16
+              && (int)(h * 2) == 3 && (int)f32 == 2 && (int)f64 == 3
+              && (int)f128 == 4 && (int)f32x == 5 && (int)f64x == 6
+              && (int)f128x == 7);
+    return ok ? 0 : 1;
+}
+";
+    let (output, exe) = run_compile_and_run_flags("c23-ext-float", src, &[]);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "扩展浮点类型宽度/字面量后缀应求得预期值");
+    let _ = std::fs::remove_file(&exe);
+}
+
+/// C23 `<stdfloat.h>` 由 dcc 内置提供（宿主 glibc 不一定带）：其 typedef
+/// float16_t..float128x_t 与 bfloat16_t 必须能被识别并正确参与运算。
+#[test]
+fn c23_stdfloat_h_typedefs_compile_and_run() {
+    let src = "\
+#include <stdfloat.h>
+float16_t a = 1.25f16;
+float32_t b = 2.5f32;
+float64_t c = 3.5f64;
+float128_t d = 4.5f128;
+float32x_t e = 5.5f32x;
+float64x_t f = 6.5f64x;
+float128x_t g = 7.5f128x;
+bfloat16_t h = 0;
+int main(void) {
+    return (int)(a + b + c + d + e + f + g) == 31 ? 0 : 1;
+}
+";
+    let (output, exe) = run_compile_and_run_flags("c23-stdfloat-h", src, &[]);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "<stdfloat.h> typedefs 应正确参与运算");
+    let _ = std::fs::remove_file(&exe);
+}

@@ -61,6 +61,14 @@ DCC 默认 `-std=gnu11`（与 Linux 7.1 内核一致，见 Documentation/process
 - `__has_c_attribute` — ✅ 已实装 (预处理特性检测)
 - `__STDC_ENDIAN_*` — ✅ 已实装 (预定义宏: `__STDC_ENDIAN_BIG__`/`__STDC_ENDIAN_LITTLE__`/`__STDC_ENDIAN_NATIVE__`)
 - `#elifdef` / `#elifndef` — ✅ 已实装 (预处理器条件编译)
+- 扩展浮点类型 `_FloatN` / `_FloatNx` (`_Float16`/`_Float32`/`_Float32x`/
+  `_Float64`/`_Float64x`/`_Float128`/`_Float128x`) — ✅ 已实装 (x86-64 上按
+  TS 18661 格式等价退化映射到 float/double/long double: `_Float32x`=8B、
+  `_Float64x`/`_Float128`/`_Float128x`=16B; 字面量后缀 f16/f32/f64/f128/
+  f32x/f64x/f128x 正确识别并求值; `_Float16` 暂按 float 退化表示, sizeof 为
+  4, 为已知限制)
+- `<stdfloat.h>` — ✅ 已实装 (dcc 内置头, 提供 `float16_t`..`float128x_t` 与
+  `bfloat16_t` typedefs; 宿主 glibc < 2.38 缺该头时由 dcc 直接注入)
 - `%b` / `%B` printf 二进制格式 — ✅ 已实装 (格式检查与运行时行为)
 - `-std=gnu23` / `-std=c23` — ✅ 已实装 (Driver 选项, 默认 `gnu11`)
 
