@@ -1372,6 +1372,25 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
                         operand_int(e, &consts).and_then(|v| eval_unop(*op, v))
                     },
                     InstKind::Cast { e, .. } => operand_int(e, &consts),
+                    // __builtin_constant_p(arg): 参数若在常量表中 (被 SCCP 传播为常量)
+                    // 则结果为 1, 否则为 0. 这修复 -O2 下 "变量被常量传播后
+                    // __builtin_constant_p 仍停在急切折叠的 0" (modref-2: z 传播成 125
+                    // 后应折 1). 其余内建调用不在此做常量折叠.
+                    InstKind::Call { callee, args, .. } if args.len() == 1 => {
+                        let name = match callee {
+                            Operand::SymAddr(n, _) | Operand::FnAddr(n, _) => n.as_str(),
+                            _ => "",
+                        };
+                        if name == "__builtin_constant_p" {
+                            Some(if operand_int(&args[0], &consts).is_some() {
+                                1
+                            } else {
+                                0
+                            })
+                        } else {
+                            None
+                        }
+                    },
                     _ => None,
                 };
                 if let Some(d) = &inst.dest {

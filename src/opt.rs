@@ -1611,11 +1611,15 @@ fn fold_expr(e: Expr, fenv_access: bool) -> Expr {
         } => {
             if let Expr::Ident { name, .. } = callee.as_ref() {
                 if name.name == "__builtin_constant_p" && args.len() == 1 {
-                    return Expr::Int {
-                        v: const_eval::is_constant(&args[0]) as i128,
-                        span,
-                        ty,
-                    };
+                    // 参数本身是编译期常量 (字面量或可完全折叠的表达式) 时直接折 1,
+                    // 与 GCC 及后端兜底一致 (`constp.c`/`builtins.c` 等夹具)。
+                    // 但变量参数**不在此急切折 0**: 留给后续 -O2 的 SCCP —— 参数被
+                    // 常量传播成常量后这里应折 1 (修复 modref-2); 若没有 SCCP
+                    // (如 -O0) 则保留调用, 由后端兜底 (变量参数 → 0)。
+                    if const_eval::is_constant(&args[0]) {
+                        return Expr::Int { v: 1, span, ty };
+                    }
+                    // 非常量参数: 保留调用, 不折 0.
                 }
             }
             Expr::Call {
