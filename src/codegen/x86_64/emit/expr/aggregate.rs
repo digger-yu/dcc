@@ -2117,7 +2117,7 @@ impl Codegen {
             _ => self.mov_imm(dst, ty.size() as i128),
         }
     }
-    fn group_for_brace_elision(elem_ty: &Type, inits: &[InitItem]) -> Vec<InitItem> {
+    pub(crate) fn group_for_brace_elision(elem_ty: &Type, inits: &[InitItem]) -> Vec<InitItem> {
         let sub_count = match elem_ty {
             Type::Array(_, ArraySize::Const(n)) => *n,
             Type::Struct(_, fields, _, false) => {

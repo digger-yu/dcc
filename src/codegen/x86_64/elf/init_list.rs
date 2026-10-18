@@ -19,6 +19,28 @@ impl Codegen {
         match ty {
             Type::Array(elem_ty, _) => {
                 let elem_size = elem_ty.size();
+                // C11 6.7.9p14 brace elision: 元素类型本身是聚合体 (嵌套数组/结构/
+                // 联合) 但初始值未用花括号包裹时, 把扁平标量分组到子聚合中, 例如
+                // int a[8][6] = {14 个标量} → 每行 6 个分一组。否则每个标量会被
+                // 当成一整行 (elem_size 字节) 错铺 (pr58626.c 全局数组全零)。
+                // 与局部初始化路径 gen_init_list_at 的 group_for_brace_elision 保持一致。
+                let effective_inits;
+                if matches!(
+                    &elem_ty.base,
+                    Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)
+                ) {
+                    let needs_elision = inits.iter().any(|item| {
+                        matches!(item, InitItem::Expr(e) if !matches!(e, Expr::InitList { .. }))
+                    });
+                    effective_inits = if needs_elision {
+                        Self::group_for_brace_elision(&elem_ty.base, inits)
+                    } else {
+                        inits.to_vec()
+                    };
+                } else {
+                    effective_inits = inits.to_vec();
+                }
+                let inits = &effective_inits;
                 for (i, item) in inits.iter().enumerate() {
                     // GNU 范围设计符 [first ... last]: 范围内每个元素写同一值
                     if let InitItem::Designated {
