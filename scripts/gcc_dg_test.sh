@@ -290,6 +290,21 @@ dg_worker() {
         return
     fi
 
+    # dg-additional-sources: 附加源与主源同目录, gcc 会把它们一起编译/链接。
+    # harness 之前只编主源, 导致依赖附加源符号的 run/link 测试虚假 FAIL
+    # (如 undefined reference to main / 其它符号)。这里解析出来供两个分支使用。
+    local extra_srcs=""
+    local as_line
+    as_line=$(grep -oP 'dg-additional-sources "\K[^"]+' "$src" 2>/dev/null | head -1 || true)
+    if [[ -n "$as_line" ]]; then
+        local d_dir
+        d_dir="$(dirname "$src")"
+        local s
+        for s in $as_line; do
+            extra_srcs="$extra_srcs $d_dir/$s"
+        done
+    fi
+
     if [[ "$category" == "compile" ]]; then
         if [[ "$do_type" != "compile" && "$do_type" != "run" ]]; then
             echo "$rel SKIP dg-do:$do_type"
@@ -317,6 +332,20 @@ dg_worker() {
         local rc=0
         { timeout 30 "$DCC" -c -std=gnu11 $extra_opts $compat_inc -o "$out" "$src" 2>"$errf"; } 2>/dev/null || rc=$?
         rm -f "$out"
+        # 附加源也要能编译 (gcc 会一起编), 否则应判 FAIL
+        if [[ $rc -eq 0 && -n "$extra_srcs" ]]; then
+            local es eo erc
+            for es in $extra_srcs; do
+                eo="$TMPDIR_DG/$(echo "$es" | tr '/' '_').o"
+                erc=0
+                { timeout 30 "$DCC" -c -std=gnu11 $extra_opts $compat_inc -o "$eo" "$es" 2>/dev/null; } 2>/dev/null || erc=$?
+                rm -f "$eo"
+                if [[ $erc -ne 0 ]]; then
+                    rc=$erc
+                    break
+                fi
+            done
+        fi
         if [[ $rc -eq 0 ]]; then
             echo "$rel PASS"
         elif [[ $rc -eq 124 ]]; then
@@ -332,9 +361,34 @@ dg_worker() {
             return
         fi
         local exe="$TMPDIR_DG/$(echo "$rel" | tr '/' '_').exe"
-        if ! "$DCC" -std=gnu11 -lm $extra_opts -o "$exe" "$src" 2>/dev/null; then
-            echo "$rel FAIL compile"
-            return
+        if [[ -z "$extra_srcs" ]]; then
+            if ! "$DCC" -std=gnu11 -lm $extra_opts -o "$exe" "$src" 2>/dev/null; then
+                echo "$rel FAIL compile"
+                return
+            fi
+        else
+            # 多文件测试: dcc 不支持一次把多个 .c 编链成单个可执行,
+            # 因此先各自 -c, 再用 .o 链接 (见上方 A 类失败的修复说明)。
+            local oo objs=() ok=1 ss
+            for ss in "$src" $extra_srcs; do
+                oo="$TMPDIR_DG/$(echo "$ss" | tr '/' '_').o"
+                if ! "$DCC" -c -std=gnu11 $extra_opts -o "$oo" "$ss" 2>/dev/null; then
+                    ok=0
+                    break
+                fi
+                objs+=("$oo")
+            done
+            if [[ $ok -eq 0 ]]; then
+                echo "$rel FAIL compile"
+                rm -f ${objs[@]+"${objs[@]}"}
+                return
+            fi
+            if ! "$DCC" ${objs[@]+"${objs[@]}"} -lm -o "$exe" 2>/dev/null; then
+                echo "$rel FAIL compile"
+                rm -f ${objs[@]+"${objs[@]}"} "$exe"
+                return
+            fi
+            rm -f ${objs[@]+"${objs[@]}"}
         fi
         local rc=0
         { timeout 10 "$exe" >/dev/null 2>&1; } 2>/dev/null || rc=$?
