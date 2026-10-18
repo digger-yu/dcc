@@ -92,6 +92,19 @@ pub fn run_with_opts(func: &mut Function, level: u8, _strict_aliasing: bool) {
     if !ssa_dbg_off("sccp") {
         sparse_conditional_constant_propagation(func);
     }
+    // P15a member_store_forward: 跨块把「全路径最后都写同一 SSA 名」的结构体标量
+    // 字段的 MemberLoad 折叠成该名 (拷贝传播), 让 `if(c) a.x=i; else a.x=i; if(a.x!=i)`
+    // 里的 a.x 变 i。必须排在 VRP 之前: 折叠出的 `i != i` 由 VRP 折恒假、jt/dbe 删除死调用。
+    if !ssa_dbg_off("msf") {
+        member_store_forward(func);
+    }
+    // P15b VRP: SCCP 已把能折的常量落到位 (且 eval_binop 不折比较, 正是 vrp13.c
+    // 一类"区间可证但非常量"的条件缺的那一环)。VRP 在此把区间事实沿边传播,
+    // 只把可证恒定的 Branch cond 写成 Operand::Int; 死块/死调用由随后的
+    // P19 穿线 + P18/P20 die/dbe 收尾。只改条件操作数, 不改 CFG, 形状与 SCCP 同构。
+    if !ssa_dbg_off("vrp") {
+        value_range_propagation(func);
+    }
     // P17 GVN: SCCP 已把能折的常量落到位, 值编号因此能多归一一批同形计算。
     if !ssa_dbg_off("gvn") {
         gvn(func);
@@ -1542,6 +1555,737 @@ pub fn sparse_conditional_constant_propagation(func: &mut Function) -> bool {
         }
     }
     modified
+}
+
+// =====================================================================
+// P15b. VRP (Value Range Propagation)
+// =====================================================================
+
+/// 闭整数区间 `[lo, hi]`（恒有 `lo <= hi`；永不用"空区间"表达不可达）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct VrpRange {
+    lo: i128,
+    hi: i128,
+}
+
+impl VrpRange {
+    fn point(v: i128) -> Self {
+        VrpRange { lo: v, hi: v }
+    }
+    fn meet(self, o: VrpRange) -> VrpRange {
+        VrpRange {
+            lo: self.lo.max(o.lo),
+            hi: self.hi.min(o.hi),
+        }
+    }
+    fn is_empty(self) -> bool {
+        self.lo > self.hi
+    }
+}
+
+/// 某整数类型的完整值域；`None` = 不跟踪（非整数 / >64 位 / 未知类型）。
+fn vrp_full_range(ty: &Type) -> Option<VrpRange> {
+    let bits = type_bits(ty)?;
+    if bits > 64 {
+        return None;
+    }
+    Some(if is_unsigned_ty(ty) {
+        VrpRange { lo: 0, hi: (1i128 << bits) - 1 }
+    } else {
+        VrpRange { lo: -(1i128 << (bits - 1)), hi: (1i128 << (bits - 1)) - 1 }
+    })
+}
+
+type VrpMap = HashMap<String, VrpRange>;
+
+/// 两个范围表的并（hull）：只在任一边出现的键上保留（缺省 = 全区间）。
+fn vrp_hull(a: VrpRange, b: VrpRange) -> VrpRange {
+    VrpRange {
+        lo: a.lo.min(b.lo),
+        hi: a.hi.max(b.hi),
+    }
+}
+
+/// P15b. VRP: 对每个 SSA 名维护闭整数区间，沿 CFG 做**边敏感**前向数据流，
+/// 在 Branch 的真/假出边对比较操作数做反向精化；不动点后把可证恒为 0 / 恒非 0
+/// 的 `Branch{cond}` 写成 `Operand::Int`。死块与死调用的删除交给既有的
+/// P19 jump_threading + P18/P20 die/dbe —— 本 pass **只改分支条件操作数**，
+/// 不替换任何普通操作数、不改 CFG 拓扑（与 SCCP 制造过的形状同构）。
+///
+/// 为什么在 SCCP 之后、GVN/jt 之前：SCCP 已把可证常量的操作数换成字面量，且
+/// `eval_binop` 不折比较（正是 vrp13.c 一类"区间可证但非常量"的条件缺的一环）；
+/// 折出的常量条件紧接着被 jt → die → dbe 消费，链路无需新代码。
+pub fn value_range_propagation(func: &mut Function) -> bool {
+    let defs = collect_defs(func);
+    let ty_map = build_ssa_type_map(func);
+
+    // phi dest 一律不跟踪（保守）：汇合值不在本 pass 的射程内。
+    let mut phi_dests: HashSet<String> = HashSet::new();
+    for bb in func.blocks.values() {
+        for phi in &bb.phis {
+            phi_dests.insert(phi.dest.name());
+        }
+    }
+
+    // Step 1: 只跟踪"分支条件相关"的名字子图（限界内存），且限 ≤64 位整数。
+    let mut tracked: HashSet<String> = HashSet::new();
+    let mut work: Vec<String> = Vec::new();
+    for bb in func.blocks.values() {
+        if let Terminator::Branch { cond, .. } = &bb.term {
+            for n in operand_uses_op(cond) {
+                if tracked.insert(n.clone()) {
+                    work.push(n);
+                }
+            }
+        }
+    }
+    while let Some(n) = work.pop() {
+        if let Some(kind) = defs.get(&n) {
+            for u in operand_uses(kind) {
+                if tracked.insert(u.clone()) {
+                    work.push(u);
+                }
+            }
+        }
+    }
+    tracked.retain(|n| !phi_dests.contains(n) && ty_map.get(n).and_then(vrp_full_range).is_some());
+    if tracked.is_empty() {
+        return false;
+    }
+
+    let preds = preds_from_terminators(func);
+    let order = rpo_order(func);
+
+    // edge[(pred,succ)] = pred 的 out 沿该边精化后的范围表；out_map 供折叠用。
+    let mut edge: HashMap<(String, String), VrpMap> = HashMap::new();
+    let mut out_map: HashMap<String, VrpMap> = HashMap::new();
+
+    let mut changed = true;
+    let mut iter = 0;
+    while changed && iter < 16 {
+        changed = false;
+        iter += 1;
+        for bb_name in &order {
+            let Some(bb) = func.blocks.get(bb_name) else {
+                continue;
+            };
+            // in = 各前驱出边的**并**（区间传播是 may 分析: 值可来自任一路径，
+            // 故用 hull 而非交集）。某前驱缺该名 ⇒ 该路径可取任意值 ⇒ 记全区间。
+            let ps = preds.get(bb_name).cloned().unwrap_or_default();
+            let mut cur: VrpMap = HashMap::new();
+            for p in &ps {
+                let ep = edge.get(&(p.clone(), bb_name.clone()));
+                for x in &tracked {
+                    let Some(full) = ty_map.get(x).and_then(vrp_full_range) else {
+                        continue;
+                    };
+                    let r = ep.and_then(|e| e.get(x).copied()).unwrap_or(full);
+                    let slot = cur.entry(x.clone()).or_insert(r);
+                    *slot = vrp_hull(*slot, r);
+                }
+            }
+            let out = vrp_transfer(&cur, &bb.insts, &tracked);
+            out_map.insert(bb_name.clone(), out.clone());
+            match &bb.term {
+                Terminator::Branch { cond, t, f } => {
+                    let et = vrp_refine(&out, cond, true, &tracked, &defs);
+                    let ef = vrp_refine(&out, cond, false, &tracked, &defs);
+                    vrp_set_edge(&mut edge, &mut changed, bb_name, t, et);
+                    vrp_set_edge(&mut edge, &mut changed, bb_name, f, ef);
+                },
+                Terminator::Jump(s) => {
+                    vrp_set_edge(&mut edge, &mut changed, bb_name, s, out.clone());
+                },
+                Terminator::SwitchTable { .. } => {
+                    for s in succs_of(&bb.term) {
+                        vrp_set_edge(&mut edge, &mut changed, bb_name, &s, out.clone());
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+
+    // Step: 折叠可证恒定的分支条件（只写 Operand::Int，交给 jt/die/dbe 收尾）。
+    let mut folded = false;
+    for bb_name in ordered_block_names(func) {
+        let out = match out_map.get(&bb_name) {
+            Some(o) => o,
+            None => continue,
+        };
+        if let Terminator::Branch { cond, .. } = &mut func.blocks.get_mut(&bb_name).unwrap().term {
+            if let Some(v) = vrp_provable_branch_value(cond, out, &defs, &ty_map) {
+                *cond = Operand::Int(v);
+                folded = true;
+            }
+        }
+    }
+    folded
+}
+
+fn vrp_set_edge(
+    edge: &mut HashMap<(String, String), VrpMap>,
+    changed: &mut bool,
+    pred: &str,
+    succ: &str,
+    val: VrpMap,
+) {
+    let key = (pred.to_string(), succ.to_string());
+    let differs = edge.get(&key).map(|o| *o != val).unwrap_or(true);
+    if differs {
+        edge.insert(key, val);
+        *changed = true;
+    }
+}
+
+/// 块内逐指令 kill/gen：dest 一律先 kill，仅 tracked 的整数 dest 才算区间。
+fn vrp_transfer(in_: &VrpMap, insts: &[Inst], tracked: &HashSet<String>) -> VrpMap {
+    let mut m = in_.clone();
+    for inst in insts {
+        if let Some(d) = &inst.dest {
+            m.remove(&d.name());
+            if !tracked.contains(&d.name()) {
+                continue;
+            }
+            if let Some(r) = vrp_eval_inst_range(&inst.kind, &m, &d.ty) {
+                m.insert(d.name(), r);
+            }
+        }
+    }
+    m
+}
+
+fn vrp_eval_inst_range(kind: &InstKind, m: &VrpMap, dest_ty: &Type) -> Option<VrpRange> {
+    match kind {
+        InstKind::Bin { op, l, r } => vrp_bin_range(*op, l, r, m, dest_ty),
+        InstKind::Un { op, e } => vrp_un_range(*op, e, m, dest_ty),
+        _ => None,
+    }
+}
+
+/// 取 Bin 两个操作数的区间，带类型一致性守卫（混合符号 ⇒ 放弃；Int 字面量按对侧类型解释）。
+fn vrp_bin_operands(l: &Operand, r: &Operand, m: &VrpMap, dest_ty: &Type) -> Option<(VrpRange, VrpRange)> {
+    match (l, r) {
+        (Operand::Var(lv), Operand::Var(rv)) => {
+            if is_unsigned_ty(&lv.ty) != is_unsigned_ty(&rv.ty) {
+                return None;
+            }
+            let lr = m.get(&lv.name()).copied().or_else(|| vrp_full_range(&lv.ty))?;
+            let rr = m.get(&rv.name()).copied().or_else(|| vrp_full_range(&rv.ty))?;
+            Some((lr, rr))
+        },
+        (Operand::Int(c), Operand::Var(rv)) => {
+            let rr = m.get(&rv.name()).copied().or_else(|| vrp_full_range(&rv.ty))?;
+            Some((VrpRange::point(mask_to_type(*c, &rv.ty)), rr))
+        },
+        (Operand::Var(lv), Operand::Int(c)) => {
+            let lr = m.get(&lv.name()).copied().or_else(|| vrp_full_range(&lv.ty))?;
+            Some((lr, VrpRange::point(mask_to_type(*c, &lv.ty))))
+        },
+        (Operand::Int(a), Operand::Int(b)) => Some((
+            VrpRange::point(mask_to_type(*a, dest_ty)),
+            VrpRange::point(mask_to_type(*b, dest_ty)),
+        )),
+        _ => None,
+    }
+}
+
+/// 单调比较在盒上的取值区间：四角点全真 ⇒ [1,1]，全假 ⇒ [0,0]，否则 [0,1]。
+fn vrp_cmp_range<F: Fn(i128, i128) -> bool>(pred: F, a: VrpRange, b: VrpRange) -> VrpRange {
+    let corners = [(a.lo, b.lo), (a.lo, b.hi), (a.hi, b.lo), (a.hi, b.hi)];
+    let all_true = corners.iter().all(|&(x, y)| pred(x, y));
+    let all_false = corners.iter().all(|&(x, y)| !pred(x, y));
+    if all_true {
+        VrpRange::point(1)
+    } else if all_false {
+        VrpRange::point(0)
+    } else {
+        VrpRange { lo: 0, hi: 1 }
+    }
+}
+
+fn vrp_bin_range(op: BinOp, l: &Operand, r: &Operand, m: &VrpMap, dest_ty: &Type) -> Option<VrpRange> {
+    // 同一 SSA 名的自比较（x==x / x!=x / x<=x ...）：整数恒可判定。
+    if let (Operand::Var(lv), Operand::Var(rv)) = (l, r) {
+        if lv.name() == rv.name() && type_bits(&lv.ty).is_some() {
+            match op {
+                BinOp::Le | BinOp::Ge | BinOp::EqEq => return Some(VrpRange::point(1)),
+                BinOp::Lt | BinOp::Gt | BinOp::Ne => return Some(VrpRange::point(0)),
+                _ => {},
+            }
+        }
+    }
+    let (a, b) = vrp_bin_operands(l, r, m, dest_ty)?;
+    let res = match op {
+        BinOp::Add => VrpRange {
+            lo: a.lo.checked_add(b.lo)?,
+            hi: a.hi.checked_add(b.hi)?,
+        },
+        BinOp::Sub => VrpRange {
+            lo: a.lo.checked_sub(b.hi)?,
+            hi: a.hi.checked_sub(b.lo)?,
+        },
+        BinOp::Mul => {
+            let c1 = a.lo.checked_mul(b.lo)?;
+            let c2 = a.lo.checked_mul(b.hi)?;
+            let c3 = a.hi.checked_mul(b.lo)?;
+            let c4 = a.hi.checked_mul(b.hi)?;
+            VrpRange {
+                lo: c1.min(c2).min(c3).min(c4),
+                hi: c1.max(c2).max(c3).max(c4),
+            }
+        },
+        BinOp::Div => {
+            // 除数区间含 0 ⇒ 放弃（也顺带避开 INT_MIN/-1 溢出）。
+            if b.lo <= 0 && b.hi >= 0 {
+                return None;
+            }
+            let c1 = a.lo.checked_div(b.lo)?;
+            let c2 = a.lo.checked_div(b.hi)?;
+            let c3 = a.hi.checked_div(b.lo)?;
+            let c4 = a.hi.checked_div(b.hi)?;
+            VrpRange {
+                lo: c1.min(c2).min(c3).min(c4),
+                hi: c1.max(c2).max(c3).max(c4),
+            }
+        },
+        BinOp::Lt => vrp_cmp_range(|x, y| x < y, a, b),
+        BinOp::Le => vrp_cmp_range(|x, y| x <= y, a, b),
+        BinOp::Gt => vrp_cmp_range(|x, y| x > y, a, b),
+        BinOp::Ge => vrp_cmp_range(|x, y| x >= y, a, b),
+        BinOp::EqEq => {
+            if a.lo == a.hi && b.lo == b.hi && a.lo == b.lo {
+                VrpRange::point(1)
+            } else if a.hi < b.lo || b.hi < a.lo {
+                VrpRange::point(0)
+            } else {
+                VrpRange { lo: 0, hi: 1 }
+            }
+        },
+        BinOp::Ne => {
+            if a.lo == a.hi && b.lo == b.hi && a.lo == b.lo {
+                VrpRange::point(0)
+            } else if a.hi < b.lo || b.hi < a.lo {
+                VrpRange::point(1)
+            } else {
+                VrpRange { lo: 0, hi: 1 }
+            }
+        },
+        // Mod/Shl/Shr/And/Or/Xor/AndAnd/OrOr：不算区间（保守）。
+        _ => return None,
+    };
+    // 结果必须落在目标类型值域内，否则说明回绕/溢出，放弃（退回全区间）。
+    let full = vrp_full_range(dest_ty)?;
+    if res.lo < full.lo || res.hi > full.hi {
+        return None;
+    }
+    Some(res.meet(full))
+}
+
+fn vrp_un_range(op: UnOp, e: &Operand, m: &VrpMap, dest_ty: &Type) -> Option<VrpRange> {
+    let er = match e {
+        Operand::Var(v) => m.get(&v.name()).copied().or_else(|| vrp_full_range(&v.ty))?,
+        Operand::Int(c) => VrpRange::point(*c),
+        _ => return None,
+    };
+    let res = match op {
+        UnOp::Neg => VrpRange {
+            lo: er.hi.checked_neg()?,
+            hi: er.lo.checked_neg()?,
+        },
+        UnOp::Not => {
+            // !x = 1 iff x==0。操作数区间不含 0 ⇒ [0,0]；恰为 {0} ⇒ [1,1]；否则 [0,1]。
+            if er.lo > 0 || er.hi < 0 {
+                VrpRange::point(0)
+            } else if er.lo == 0 && er.hi == 0 {
+                VrpRange::point(1)
+            } else {
+                VrpRange { lo: 0, hi: 1 }
+            }
+        },
+        // BitNot / Plus：不算。
+        _ => return None,
+    };
+    let full = vrp_full_range(dest_ty)?;
+    if res.lo < full.lo || res.hi > full.hi {
+        return None;
+    }
+    Some(res.meet(full))
+}
+
+/// 沿一条出边精化 out：写入条件值本身 + 对比较操作数做反向窄化。
+fn vrp_refine(
+    out: &VrpMap,
+    cond: &Operand,
+    taken: bool,
+    tracked: &HashSet<String>,
+    defs: &HashMap<String, InstKind>,
+) -> VrpMap {
+    let mut m = out.clone();
+    let Operand::Var(cv) = cond else {
+        return m;
+    };
+    let cname = cv.name();
+    if tracked.contains(&cname) {
+        let cr = if taken { VrpRange::point(1) } else { VrpRange::point(0) };
+        if let Some(base) = m.get(&cname).copied().or_else(|| vrp_full_range(&cv.ty)) {
+            let nr = base.meet(cr);
+            // 空区间 = 该边不可达; 不据此下结论, 退回未精化值 (保守)。
+            if !nr.is_empty() {
+                m.insert(cname.clone(), nr);
+            }
+        }
+    }
+    if let Some(InstKind::Bin { op, l, r }) = defs.get(&cname) {
+        vrp_refine_cmp(&mut m, *op, l, r, taken, tracked);
+    }
+    m
+}
+
+fn vrp_operand_range(o: &Operand, m: &VrpMap) -> Option<VrpRange> {
+    match o {
+        Operand::Var(v) => m.get(&v.name()).copied().or_else(|| vrp_full_range(&v.ty)),
+        Operand::Int(c) => Some(VrpRange::point(*c)),
+        _ => None,
+    }
+}
+
+/// 反向精化判据表。`taken` = 该边是 cond 为真/为假。任一精化产出空区间 ⇒ 放弃该次
+/// （不宣布不可达，只损失优化）。
+fn vrp_refine_cmp(
+    m: &mut VrpMap,
+    op: BinOp,
+    l: &Operand,
+    r: &Operand,
+    taken: bool,
+    tracked: &HashSet<String>,
+) {
+    let lr = match vrp_operand_range(l, m) {
+        Some(x) => x,
+        None => return,
+    };
+    let rr = match vrp_operand_range(r, m) {
+        Some(x) => x,
+        None => return,
+    };
+    if let (Operand::Var(lv), Operand::Var(rv)) = (l, r) {
+        if is_unsigned_ty(&lv.ty) != is_unsigned_ty(&rv.ty) {
+            return;
+        }
+    }
+    let (mut a1, mut a2) = (lr.lo, lr.hi);
+    let (mut b1, mut b2) = (rr.lo, rr.hi);
+    match (op, taken) {
+        (BinOp::Lt, true) => {
+            a2 = a2.min(b2.saturating_sub(1));
+            b1 = b1.max(a1.saturating_add(1));
+        },
+        (BinOp::Lt, false) => {
+            a1 = a1.max(b1);
+            b2 = b2.min(a2);
+        },
+        (BinOp::Gt, true) => {
+            a1 = a1.max(b1.saturating_add(1));
+            b2 = b2.min(a2.saturating_sub(1));
+        },
+        (BinOp::Gt, false) => {
+            a2 = a2.min(b2);
+            b1 = b1.max(a1);
+        },
+        (BinOp::Le, true) => {
+            a2 = a2.min(b2);
+            b1 = b1.max(a1);
+        },
+        (BinOp::Le, false) => {
+            a1 = a1.max(b1.saturating_add(1));
+            b2 = b2.min(a2.saturating_sub(1));
+        },
+        (BinOp::Ge, true) => {
+            a1 = a1.max(b1);
+            b2 = b2.min(a2);
+        },
+        (BinOp::Ge, false) => {
+            a2 = a2.min(b2.saturating_sub(1));
+            b1 = b1.max(a1.saturating_add(1));
+        },
+        (BinOp::EqEq, true) | (BinOp::Ne, false) => {
+            let lo = a1.max(b1);
+            let hi = a2.min(b2);
+            a1 = lo;
+            a2 = hi;
+            b1 = lo;
+            b2 = hi;
+        },
+        // EqEq false / Ne true / 其它：无可用精化。
+        _ => return,
+    }
+    vrp_apply_narrow(m, l, a1, a2, tracked);
+    vrp_apply_narrow(m, r, b1, b2, tracked);
+}
+
+/// 把窄化后的区间写回 tracked 的 Var 操作数（空区间或越界 ⇒ 不写）。
+fn vrp_apply_narrow(m: &mut VrpMap, o: &Operand, lo: i128, hi: i128, tracked: &HashSet<String>) {
+    let Operand::Var(v) = o else {
+        return;
+    };
+    let name = v.name();
+    if !tracked.contains(&name) {
+        return;
+    }
+    let nr = VrpRange { lo, hi };
+    if nr.is_empty() {
+        return;
+    }
+    if let Some(full) = vrp_full_range(&v.ty) {
+        if nr.lo < full.lo || nr.hi > full.hi {
+            return;
+        }
+        m.insert(name, nr.meet(full));
+    }
+}
+
+/// 判定一个分支条件是否可证恒定：区间为 {0} ⇒ 0；不含 0 ⇒ 1（C: 非零即真）；否则不折。
+fn vrp_provable_branch_value(
+    cond: &Operand,
+    out: &VrpMap,
+    defs: &HashMap<String, InstKind>,
+    ty_map: &HashMap<String, Type>,
+) -> Option<i128> {
+    match cond {
+        Operand::Int(v) => Some(if *v != 0 { 1 } else { 0 }),
+        Operand::Var(v) => {
+            let name = v.name();
+            let r = out
+                .get(&name)
+                .copied()
+                .or_else(|| {
+                    defs.get(&name)
+                        .and_then(|k| vrp_eval_inst_range(k, out, ty_map.get(&name).unwrap_or(&v.ty)))
+                })?;
+            if r.lo == 0 && r.hi == 0 {
+                Some(0)
+            } else if r.lo > 0 || r.hi < 0 {
+                Some(1)
+            } else {
+                None
+            }
+        },
+        _ => None,
+    }
+}
+
+// =====================================================================
+// P15a. member_store_forward: 跨块 MemberStore -> MemberLoad 拷贝传播
+// =====================================================================
+
+/// 「直接结构体字段」是否值得跟踪: 非 `->`、非位域、标量整数字段, 且所属为 Struct
+/// (Union 字段互相重叠, 不跟踪; 位域共享存储单元, 不跟踪)。
+fn msf_trackable_field(obj_ty: &Type, field: &str, is_arrow: bool) -> bool {
+    if is_arrow {
+        return false;
+    }
+    let fields = match obj_ty {
+        Type::Struct(_, fs, _, _) => fs,
+        _ => return false,
+    };
+    match crate::ast::find_field(fields, field) {
+        Some((f, _)) => f.bit_width.is_none() && type_bits(&f.ty).is_some(),
+        None => false,
+    }
+}
+
+fn msf_obj_base(o: &Operand) -> Option<String> {
+    match o {
+        Operand::Var(v) => Some(v.base.clone()),
+        _ => None,
+    }
+}
+
+/// 一条 Store 的地址操作数解析: 干净的结构体字段 ⇒ Field((基,字段), Some(src));
+/// 字段对但 src 非 Var ⇒ Field(loc, None) (记 kill); 其余 (整个对象/指针/数组/
+/// 无法解析) ⇒ Opaque (可能别名 ⇒ 调用方清空全部)。
+enum MsfStore {
+    Field((String, String), Option<SsaVar>),
+    Opaque,
+}
+
+fn msf_store_loc(e: &Operand, src: &Operand, defs: &HashMap<String, InstKind>) -> MsfStore {
+    if let Operand::Var(ev) = e {
+        if let Some(InstKind::MemberAddr {
+            obj,
+            obj_ty,
+            field,
+            is_arrow,
+            ..
+        }) = defs.get(&ev.name())
+        {
+            if msf_trackable_field(obj_ty, field, *is_arrow) {
+                let base = msf_obj_base(obj);
+                if let (Some(base), Operand::Var(s)) = (base, src) {
+                    return MsfStore::Field((base, field.clone()), Some(s.clone()));
+                }
+                if let Some(base) = msf_obj_base(obj) {
+                    return MsfStore::Field((base, field.clone()), None);
+                }
+            }
+        }
+    }
+    MsfStore::Opaque
+}
+
+/// 内存状态: (对象基名, 字段名) -> 最后一次写入该位置的 SSA 名 (全路径成立)。
+type MsfMap = HashMap<(String, String), SsaVar>;
+
+/// 单条指令对内存状态的影响 (MemberLoad 是读, 不进此函数)。
+fn msf_apply_inst(kind: &InstKind, m: &mut MsfMap, defs: &HashMap<String, InstKind>) {
+    match kind {
+        InstKind::MemberStore {
+            obj,
+            obj_ty,
+            field,
+            src,
+            is_arrow,
+            ..
+        } => {
+            if msf_trackable_field(obj_ty, field, *is_arrow) {
+                match (msf_obj_base(obj), src) {
+                    (Some(base), Operand::Var(s)) => {
+                        m.insert((base, field.clone()), s.clone());
+                    },
+                    (Some(base), _) => {
+                        m.remove(&(base, field.clone()));
+                    },
+                    _ => m.clear(),
+                }
+            } else {
+                m.clear();
+            }
+        },
+        InstKind::Store { e, src, .. } => match msf_store_loc(e, src, defs) {
+            MsfStore::Field(loc, Some(s)) => {
+                m.insert(loc, s);
+            },
+            MsfStore::Field(loc, None) => {
+                m.remove(&loc);
+            },
+            MsfStore::Opaque => m.clear(),
+        },
+        // 数组元素写 / 调用 (opaque) /  volatile 之外的未知写一律清空 (保守)。
+        InstKind::IndexStore { .. }
+        | InstKind::Call { .. }
+        | InstKind::Invoke { .. }
+        | InstKind::EhLandingPad { .. } => m.clear(),
+        _ => {},
+    }
+}
+
+/// P15a. member_store_forward: 跨基本块把「全路径最后都写入同一 SSA 名」的结构体
+/// 标量字段的 MemberLoad 替换成那个 SSA 名 (拷贝传播)。这样 `if (c) a.x=i; else
+/// a.x=i; if (a.x != i) link_error();` 里的 `a.x` 折叠成 `i`, `i != i` 再由 VRP
+/// 折成恒假, 死调用被 jt/dbe 删除 (修复 20041008-1.c)。
+///
+/// 保守性: 只跟踪**直接**结构体标量字段 (非 `->`/非位域/非 union); 任何调用、
+/// 指针解引用、数组/不透明写都清空全部状态 (可能别名); 汇合处取交集 (要求所有
+/// 前驱写入**同一个 SSA 名**); 转发要求 src 与 load 目标同类型; 只移除非 volatile
+/// 的 MemberLoad。宁漏勿错。
+pub fn member_store_forward(func: &mut Function) -> bool {
+    let defs = collect_defs(func);
+    let preds = preds_from_terminators(func);
+    let order = rpo_order(func);
+
+    let mut out_map: HashMap<String, MsfMap> = HashMap::new();
+    let mut in_map: HashMap<String, MsfMap> = HashMap::new();
+    let mut changed = true;
+    let mut iter = 0;
+    while changed && iter < 16 {
+        changed = false;
+        iter += 1;
+        for bb_name in &order {
+            let Some(bb) = func.blocks.get(bb_name) else {
+                continue;
+            };
+            // in = 各前驱 out 的交 (同名才留); 任一前驱无信息 ⇒ 无位置全路径成立 ⇒ 空。
+            let ps = preds.get(bb_name).cloned().unwrap_or_default();
+            let mut cur: MsfMap = HashMap::new();
+            let mut init = false;
+            for p in &ps {
+                match out_map.get(p) {
+                    Some(t) => {
+                        if !init {
+                            cur = t.clone();
+                            init = true;
+                        } else {
+                            cur.retain(|k, v| {
+                                t.get(k).map(|x| x.name() == v.name()).unwrap_or(false)
+                            });
+                        }
+                    },
+                    None => {
+                        cur.clear();
+                        init = true;
+                    },
+                }
+            }
+            in_map.insert(bb_name.clone(), cur.clone());
+            let mut m = cur;
+            for inst in &bb.insts {
+                msf_apply_inst(&inst.kind, &mut m, &defs);
+            }
+            if out_map.get(bb_name).map(|o| *o != m).unwrap_or(true) {
+                out_map.insert(bb_name.clone(), m);
+                changed = true;
+            }
+        }
+    }
+
+    // 转发: 逐块从 in 状态重放, 在每个 (非 volatile) MemberLoad 处查当前状态。
+    let mut rename: HashMap<String, SsaVar> = HashMap::new();
+    for bb_name in &order {
+        let Some(bb) = func.blocks.get(bb_name) else {
+            continue;
+        };
+        let mut m = in_map.get(bb_name).cloned().unwrap_or_default();
+        for inst in &bb.insts {
+            if let InstKind::MemberLoad {
+                obj,
+                obj_ty,
+                field,
+                is_volatile: false,
+                is_arrow,
+                ..
+            } = &inst.kind
+            {
+                if let Some(d) = &inst.dest {
+                    if msf_trackable_field(obj_ty, field, *is_arrow) {
+                        if let Some(base) = msf_obj_base(obj) {
+                            if let Some(s) = m.get(&(base, field.clone())) {
+                                if s.ty == d.ty {
+                                    rename.insert(d.name(), s.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            msf_apply_inst(&inst.kind, &mut m, &defs);
+        }
+    }
+    if rename.is_empty() {
+        return false;
+    }
+    rename_uses(func, &rename);
+    // 被转发的 MemberLoad 现已无引用, 移除以免留死读。
+    for bb in func.blocks.values_mut() {
+        bb.insts.retain(|inst| {
+            if let InstKind::MemberLoad { .. } = &inst.kind {
+                if let Some(d) = &inst.dest {
+                    return !rename.contains_key(&d.name());
+                }
+            }
+            true
+        });
+    }
+    true
 }
 
 /// 不允许进常量表的名字集合 (根因见 `sparse_conditional_constant_propagation` 内的注释)。
