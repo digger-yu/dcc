@@ -918,15 +918,12 @@ impl Codegen {
             &Insn::simd_arith_reg(crate::codegen::x86_64::opcode::SimdArithOp::Ucomi, width, 0, 1)
                 .with_gas(format!("{ucomi_mnem} %xmm1, %xmm0")),
         );
-        // 设置条件码.
-        // ucomiss/ucomisd 后: CF/ZF/PF 按 IEEE 无序比较设置. 与
-        // signed ordered compare 后 jb/jbe/ja/jae/je/jne 一一对应:
-        //   Lt => CF=1        => setb (jb)
-        //   Le => CF=1 or ZF=1 => setbe (jbe)
-        //   Gt => CF=0 and ZF=0 => seta (ja)
-        //   Ge => CF=0        => setae (jae)
-        //   EqEq => ZF=1      => sete (je)
-        //   Ne  => ZF=0       => setne (jne)
+        // ucomiss/ucomisd 后 CF/ZF/PF 按 IEEE 无序比较设置, 其中 PF=1 表示
+        // 无序 (任一操作数为 NaN). 有序条件码 (B/Be/A/Ae/Eq/Ne) 忽略 PF, 直接
+        // 按它们 setcc 会让 NaN 的比较结果全错 (NaN==NaN 判真、NaN<x 判真等)。
+        // IEEE 规定: 任意 NaN 时 <,<=,>,>=,== 全为假, != 为真。修正办法:
+        //   ==,<,<=,>,>= : 有序结果 AND NOT PF
+        //   !=           : 有序结果 OR PF
         let cc = match op {
             BinOp::Lt => (crate::codegen::x86_64::opcode::CondCode::B, "setb"),
             BinOp::Le => (crate::codegen::x86_64::opcode::CondCode::Be, "setbe"),
@@ -936,8 +933,18 @@ impl Codegen {
             BinOp::Ne => (crate::codegen::x86_64::opcode::CondCode::Ne, "setne"),
             _ => (crate::codegen::x86_64::opcode::CondCode::Eq, "sete"),
         };
-        // setcc al
+        // 有序结果 -> al
         self.emit_insn(&Insn::setcc_reg(cc.0, 0).with_gas(format!("{al} %al", al = cc.1)));
+        // PF -> bl, 再按 op 把 PF 并入结果 (al = 有序结果 AND NOT PF / OR PF)
+        if matches!(op, BinOp::Ne) {
+            // != : al = (~ZF) | PF  → bl = PF
+            self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x9A, 0xC3], &format!("setp %bl")));
+            self.emit_insn(&Insn::raw_with_gas(&[0x08, 0xD8], &format!("or %bl, %al")));
+        } else {
+            // 其余: al = 有序结果 AND NOT PF  → bl = ~PF (setnp)
+            self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x9B, 0xC3], &format!("setnp %bl")));
+            self.emit_insn(&Insn::raw_with_gas(&[0x20, 0xD8], &format!("and %bl, %al")));
+        }
         // movzbq rax, al: movzx r64, r/m8 (from B8 to B64, REX.W=1).
         self.emit_insn(
             &Insn::mov_ext(

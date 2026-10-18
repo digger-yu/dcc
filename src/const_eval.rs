@@ -511,6 +511,11 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
         // 这些函数通常用 __builtin_constant_p 包裹, dcc 直接展开即可。
         Expr::Call { callee, args, .. } => {
             if let Expr::Ident { name, .. } = callee.as_ref() {
+                // 浮点常量内建 (__builtin_nan/inf/huge_val 及其 f/l 变体):
+                // 结果是编译期浮点常量, 任何参数 (含字符串 tag) 都折叠为同一常量。
+                if let Some(v) = eval_float_builtin(name.name.as_str(), args)? {
+                    return Ok(v);
+                }
                 if let Some(v) = eval_intrinsic(name.name.as_str(), args)? {
                     return Ok(ConstValue::Int(v));
                 }
@@ -533,6 +538,27 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
         },
         _ => Err(ConstEvalError::NotConstant),
     }
+}
+
+/// 编译期浮点常量内建求值: __builtin_nan/nanf/nanl、__builtin_inf/inff/infl、
+/// __builtin_huge_val/huge_valf/huge_vall。这些在 GCC 里是编译期浮点常量
+/// (结果不依赖参数, 字符串 tag 仅用于诊断), 折叠为对应的 NaN / +Infinity
+/// 位模式。返回 `ConstValue::Float`; 不匹配时返回 Ok(None) 让外层继续尝试
+/// 整数内建或走 NotConstant。
+fn eval_float_builtin(name: &str, _args: &[Expr]) -> Result<Option<ConstValue>, ConstEvalError> {
+    use crate::float80;
+    let v = match name {
+        "__builtin_nan" => FloatConst::F64(f64::NAN),
+        "__builtin_nanf" => FloatConst::F32(f32::NAN),
+        "__builtin_nanl" => FloatConst::LongDouble(float80::from_f64(f64::NAN)),
+        "__builtin_inf" | "__builtin_huge_val" => FloatConst::F64(f64::INFINITY),
+        "__builtin_inff" | "__builtin_huge_valf" => FloatConst::F32(f32::INFINITY),
+        "__builtin_infl" | "__builtin_huge_vall" => {
+            FloatConst::LongDouble(float80::from_f64(f64::INFINITY))
+        },
+        _ => return Ok(None),
+    };
+    Ok(Some(ConstValue::Float(v)))
 }
 
 /// 编译期内建函数求值 (如 __builtin_clzll/__builtin_ctzll/__builtin_popcountll)。

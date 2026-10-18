@@ -1805,6 +1805,14 @@ fn is_static_initializer(expr: &Expr) -> bool {
     if const_eval::eval(expr).is_ok() {
         return true;
     }
+    // 浮点常量表达式 (如 __builtin_nan("") / __builtin_inf()) 折叠为
+    // ConstValue::Float, 也是合法的静态初始化器。
+    if matches!(
+        const_eval::eval_full(expr, false),
+        Ok(const_eval::ConstValue::Float(_))
+    ) {
+        return true;
+    }
     // 地址常量 (ConstValue::Addr): 指针算术/成员偏移折叠成功即为
     // 链接期可重定位常量 (C11 6.6p9), 如 &((arr + 1)->field)
     if matches!(const_eval::eval_full(expr, false), Ok(const_eval::ConstValue::Addr { .. })) {
