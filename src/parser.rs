@@ -13247,11 +13247,12 @@ fn parse_str(raw: &str) -> Vec<u8> {
                     i += 1;
                 },
                 b'x' => {
-                    // 十六进制转义: \xNN (1+ 位十六进制数字)
+                    // 十六进制转义: \x 后跟**尽可能多**的十六进制数字 (C11 6.4.4.4),
+                    // 值按无符号 char 截断 (窄字符串). 旧实现限制成 2 位, 会把
+                    // `\x0002` 错拆成 `\x00` + 字面 "02" (pr49079).
                     i += 1;
                     let mut val: u8 = 0;
-                    let mut count = 0;
-                    while i < bytes.len() && bytes[i].is_ascii_hexdigit() && count < 2 {
+                    while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
                         let digit = if bytes[i] <= b'9' {
                             bytes[i] - b'0'
                         } else {
@@ -13259,7 +13260,6 @@ fn parse_str(raw: &str) -> Vec<u8> {
                         };
                         val = val.wrapping_mul(16).wrapping_add(digit);
                         i += 1;
-                        count += 1;
                     }
                     d.push(val);
                 },

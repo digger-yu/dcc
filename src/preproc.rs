@@ -4362,13 +4362,11 @@ impl Preprocessor {
                         continue;
                     },
                     b'x' => {
-                        // 十六进制
+                        // 十六进制: \x 后跟尽可能多的十六进制数字 (C11 6.4.4.4),
+                        // 值按 u8 截断。勿限制成 2 位 (会把 \x0002 错拆).
                         let mut n = 0u32;
                         let mut k = 0;
-                        while k < 2
-                            && i + 2 + k < bytes.len()
-                            && (bytes[i + 2 + k].is_ascii_hexdigit())
-                        {
+                        while i + 2 + k < bytes.len() && (bytes[i + 2 + k].is_ascii_hexdigit()) {
                             let d = (bytes[i + 2 + k] as char).to_digit(16).unwrap_or(0);
                             n = n * 16 + d;
                             k += 1;
@@ -6874,18 +6872,11 @@ impl Preprocessor {
                     b'f' => 12, // form feed
                     b'v' => 11, // vertical tab
                     b'x' => {
-                        // \xNN
+                        // \x 后跟尽可能多的十六进制数字 (C11 6.4.4.4); 勿限制成 2 位.
                         let mut val: i64 = 0;
-                        for _ in 0..2 {
-                            if *pos < bytes.len() {
-                                let d = bytes[*pos];
-                                if d.is_ascii_hexdigit() {
-                                    val = val * 16 + (d as char).to_digit(16).unwrap() as i64;
-                                    *pos += 1;
-                                } else {
-                                    break;
-                                }
-                            }
+                        while *pos < bytes.len() && bytes[*pos].is_ascii_hexdigit() {
+                            val = val * 16 + (bytes[*pos] as char).to_digit(16).unwrap() as i64;
+                            *pos += 1;
                         }
                         val
                     },
