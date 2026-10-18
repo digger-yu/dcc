@@ -52,6 +52,9 @@ DCC 默认 `-std=gnu11`（与 Linux 7.1 内核一致，见 Documentation/process
 - 省略 `=` 的大括号初始化 `int x{5}` — ✅ 已实装 (标量/数组/结构体/嵌套)
 - `[[attributes]]` — ✅ 已实装 (解析器静默跳过 `[[deprecated]]`, `[[maybe_unused]]`, `[[nodiscard]]`; 语义处理 `[[unsequenced]]`, `[[reproducible]]` 映射到 always_inline)
 - `_BitInt(N)` — ✅ 已实装 (按宽度映射到标准整数类型 8/16/32/64)
+- `_BitInt` 字面量后缀 `wb` / `uwb` — ✅ 已实装 (C23 位精确整型常量后缀,
+  词法层整串识别, `parse_int_lit` / 预处理器 `#if` 取值均剥离该后缀; 当前
+  不区分标准版本, 与 GCC 14 行为一致, GCC 13 及更早不支持)
 - 数字分隔符 `1'000'000` — ✅ 已实装 (词法分析器跳过 `'`)
 - `#embed` — ✅ 已实装 (预处理器嵌入文件内容为字节数组, 支持 `limit`/`prefix`/`suffix`/`if_empty` 参数)
 - `__has_embed` — ✅ 已实装 (预处理特性检测)

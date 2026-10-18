@@ -4,6 +4,7 @@
 
 use crate::cli::{Arch, Os, StdMode, TargetTriple};
 use crate::diagnostics::{Diagnostic, Span};
+use crate::tokens::strip_int_suffix;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -6516,6 +6517,14 @@ impl Preprocessor {
                 {
                     i += 1;
                 }
+                // C23 位精确整型常量后缀 wb / uwb (`123wb`, `123uwb`)
+                if i < chars.len()
+                    && (chars[i] == 'w' || chars[i] == 'W')
+                    && i + 1 < chars.len()
+                    && (chars[i + 1] == 'b' || chars[i + 1] == 'B')
+                {
+                    i += 2;
+                }
                 result.extend(chars[start..i].iter().copied());
                 continue;
             }
@@ -6902,8 +6911,8 @@ impl Preprocessor {
                 *pos += 1;
             }
             let s = std::str::from_utf8(&bytes[start..*pos]).unwrap_or("0");
-            // 去掉后缀 (L, U, LL 等)
-            let s = s.trim_end_matches(['L', 'l', 'U', 'u']);
+            // 去掉后缀 (L, U, LL, wb/uwb 等)
+            let s = strip_int_suffix(s);
             if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
                 i64::from_str_radix(hex, 16).unwrap_or(0)
             } else if let Some(bin) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {

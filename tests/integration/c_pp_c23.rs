@@ -2071,3 +2071,47 @@ fn forced_include_comment_header_matches_gcc() {
     // 夹具自身的两个宏必须真的被展开（而不是原样输出名字）
     assert_eq!(dcc_lines, vec!["int value = 7;".to_string(), "int w = 99;".to_string()]);
 }
+
+/// C23 `_BitInt` 字面量后缀 `wb` / `uwb`：必须作为整型常量的合法后缀被接受，
+/// 且在数值上等价于去掉后缀后的值（dcc 把位精确整型按宽度降级到标准整型）。
+/// 宿主 gcc 13 还不支持该后缀（GCC 14 才落地），因此这里是 dcc 自洽的运行期校验，
+/// 不依赖 gcc 对照。
+#[test]
+fn bitint_literal_suffix_wb_uwb_compiles_and_runs() {
+    let src = "\
+int a = 5wb;
+int b = 5uwb;
+int c = 0x1'fuwb;
+int d = 0xffuwb;
+_BitInt(12) f = 300wb;
+int main(void) {
+    int r = a + (int)b + c + (int)d + (int)f;
+    return r == (5 + 5 + 31 + 255 + 300) ? 0 : 1;
+}
+";
+    let (output, exe) = run_compile_and_run_flags("bitint-lit-suffix", src, &[]);
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "wb/uwb 字面量应求得 5+5+31+255+300 == 596");
+    let _ = std::fs::remove_file(&exe);
+}
+
+/// C23 `wb` / `uwb` 后缀在 `#if` 条件表达式里也必须被正确求值（不能把 `uwb`
+/// 的 `wb` 当成未知标识符），否则预处理器会静默给出错误结果。
+#[test]
+fn bitint_literal_suffix_evaluated_in_if_conditional() {
+    let src = "\
+#if 5uwb == 5 && 0x1fuwb == 31
+int ok = 1;
+#else
+#error \"wb/uwb 未在 #if 中被正确求值\"
+#endif
+int main(void) { return 0; }
+";
+    let output = run_syntax_test("bitint-lit-suffix-if", src);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

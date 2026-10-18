@@ -731,9 +731,9 @@ fn parse_int_lit_simple(s: &str) -> i128 {
     }
 }
 
-/// 移除整数后缀 U/L/LL/i/j (C99 虚数后缀也忽略).
+/// 移除整数后缀 U/L/LL/i/j 以及 C23 位精确整型后缀 wb/uwb.
 fn strip_int_suffix(s: &str) -> &str {
-    s.trim_end_matches(|c: char| "uUlLiIjJ".contains(c))
+    crate::tokens::strip_int_suffix(s)
 }
 
 /// 移除浮点虚数后缀 (末尾 i/I/j/J), 用于 nud_float.

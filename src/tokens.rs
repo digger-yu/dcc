@@ -940,6 +940,15 @@ impl<'a> Lexer<'a> {
                 while matches!(self.peek(), Some(b'u' | b'U' | b'l' | b'L')) {
                     self.bump();
                 }
+                // C23 位精确整型常量后缀 wb / uwb (`123wb`, `123uwb`).
+                // 必须整串识别: 单独的 'w' 不是后缀, 否则 `x = 1 w` 里的
+                // 标识符会被吃掉.
+                if matches!(self.peek(), Some(b'w') | Some(b'W'))
+                    && matches!(self.peek_at(1), Some(b'b') | Some(b'B'))
+                {
+                    self.bump();
+                    self.bump();
+                }
                 if matches!(self.peek(), Some(b'i' | b'I' | b'j' | b'J')) {
                     self.bump();
                 }
@@ -1295,6 +1304,36 @@ pub enum IntSuffix {
     Z,
 }
 
+/// 剥掉整型字面量文本的 C 后缀, 返回纯数字部分.
+///
+/// 覆盖三类: u/U/l/L 的任意组合、C99 虚数后缀 i/I/j/J, 以及 C23 位精确整型
+/// 常量后缀 `wb` / `uwb` (`123wb`, `123uwb`, `0xffuwb`).
+///
+/// `wb`/`uwb` 必须**整串**识别而不能按字符剥离: `b`/`B` 本身是十六进制数字,
+/// 逐字符剥 `0xb` 会得到 `0x`, 值从 11 变成 0。反过来, `w`/`W` 不是任何进制的
+/// 数字, 所以"末尾两字符是 wb"这个判据不会误伤任何一个合法数字字面量.
+pub fn strip_int_suffix(s: &str) -> &str {
+    let mut t = s;
+    loop {
+        let n = t.len();
+        if n >= 3 && t[n - 3..].eq_ignore_ascii_case("uwb") {
+            t = &t[..n - 3];
+            continue;
+        }
+        if n >= 2 && t[n - 2..].eq_ignore_ascii_case("wb") {
+            t = &t[..n - 2];
+            continue;
+        }
+        match t.strip_suffix(|c: char| {
+            matches!(c, 'u' | 'U' | 'l' | 'L' | 'i' | 'I' | 'j' | 'J')
+        }) {
+            Some(rest) => t = rest,
+            None => break,
+        }
+    }
+    t
+}
+
 /// 紧凑词法单元: 不持有 String/Span, 仅携带必要 payload.
 ///
 /// 内存布局 (`size_of` 在大多数平台上 ≤ 16 字节):
@@ -1532,6 +1571,52 @@ mod tests {
             let mut lexer = Lexer::new(source.as_bytes(), "integer-suffix.c");
             assert_eq!(lexer.next_tok().kind, TokKind::Number, "{source}");
             assert_eq!(lexer.next_tok().kind, TokKind::Eof, "{source}");
+        }
+    }
+
+    #[test]
+    fn c23_bitint_suffixes_are_part_of_the_number_token() {
+        // C23 位精确整型常量后缀 wb / uwb: 整体作为 Number 的一个 token,
+        // 且大小写均可 (与 GCC 的整数后缀大小写不敏感一致).
+        for source in [
+            "1wb",
+            "1uwb",
+            "0xffuwb",
+            "0x1'fuwb",
+            "1WB",
+            "1UWB",
+            "0b1010uwb",
+        ] {
+            let mut lexer = Lexer::new(source.as_bytes(), "bitint-suffix.c");
+            assert_eq!(lexer.next_tok().kind, TokKind::Number, "{source}");
+            assert_eq!(lexer.next_tok().kind, TokKind::Eof, "{source}");
+        }
+        // 反例: 单独的 w 不是后缀, 必须保留给随后的标识符/运算符
+        for source in ["1 w", "1u w"] {
+            let mut lexer = Lexer::new(source.as_bytes(), "bitint-suffix-neg.c");
+            assert_eq!(lexer.next_tok().kind, TokKind::Number, "{source}");
+            assert_eq!(lexer.next_tok().kind, TokKind::Ident, "{source}");
+        }
+    }
+
+    #[test]
+    fn strip_int_suffix_removes_c23_bitint_suffix() {
+        // wb/uwb 必须整串剥离, 且不能误伤十六进制数字里的 b/B.
+        let cases = [
+            ("1wb", "1"),
+            ("1uwb", "1"),
+            ("0xffuwb", "0xff"),
+            ("0x1'fuwb", "0x1'f"),
+            ("5WB", "5"),
+            ("123uwb", "123"),
+            ("0xb", "0xb"),  // b 是十六进制数字, 不可剥
+            ("0xB", "0xB"),
+            ("0xff", "0xff"),
+            ("42uLL", "42"),
+            ("3i", "3"), // 虚数后缀也剥
+        ];
+        for (input, want) in cases {
+            assert_eq!(super::strip_int_suffix(input), want, "{input}");
         }
     }
 

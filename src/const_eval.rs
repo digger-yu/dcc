@@ -6,6 +6,7 @@
 use crate::ast::{
     find_field, ArraySize, BinOp, Block, BlockItem, Decl, Expr, FloatConst, Stmt, Type, UnOp,
 };
+use crate::tokens::strip_int_suffix;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1208,12 +1209,7 @@ pub fn eval_int_lit(s: &str) -> Option<i128> {
         u128::from_str_radix(&s[1..], 8).ok().map(|v| v as i128)
     } else {
         // 截去 u/l/L/ll/LL 后缀后转十进制
-        let mut t = s;
-        while let Some(rest) =
-            t.strip_suffix(|c: char| c == 'u' || c == 'U' || c == 'l' || c == 'L')
-        {
-            t = rest;
-        }
+        let t = strip_int_suffix(s);
         t.parse::<i128>().ok()
     }
 }

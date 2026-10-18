@@ -5,7 +5,7 @@
 use crate::ast::*;
 use crate::const_eval::{self, ConstEvalError};
 use crate::diagnostics::{Diagnostic, Span};
-use crate::tokens::{Lexer, Tok, TokKind};
+use crate::tokens::{strip_int_suffix, Lexer, Tok, TokKind};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -13094,7 +13094,7 @@ impl<'a> Parser<'a> {
 }
 
 fn parse_int_lit(s: &str) -> i128 {
-    let s = s.trim_end_matches(|c: char| "lLuUiIjJ".contains(c));
+    let s = strip_int_suffix(s);
     if let Some(r) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         i128::from_str_radix(r, 16).unwrap_or(0)
     } else if let Some(r) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
