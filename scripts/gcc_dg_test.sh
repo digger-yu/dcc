@@ -43,6 +43,7 @@ SUB="all"
 SUBDIRS=""
 SHARD_N=""
 SHARD_M=""
+TOPICS=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -67,8 +68,14 @@ while [[ $# -gt 0 ]]; do
             SHARD_M="${shard_val#*/}"
             shift 2
             ;;
+        --topics=*)
+            TOPICS="${1#--topics=}"; shift
+            ;;
+        --topics)
+            TOPICS="${2:-}"; shift 2
+            ;;
         *)
-            echo "用法: $0 [compile|run|all] [--dirs sub1[,sub2,...]] [--shard N/M]" >&2
+            echo "用法: $0 [compile|run|all] [--dirs sub1[,sub2,...]] [--shard N/M] [--topics a,b,c]" >&2
             exit 1
             ;;
     esac
@@ -407,6 +414,25 @@ run_suite() {
             skip=$((skip + 1))
             skipped+=("$rel")
             continue
+        fi
+        # 主题过滤: --topics 给一组文件名子串 (逗号分隔, 大小写不敏感),
+        # 仅保留 basename 命中任一子串的用例。用于把扁平的根目录大杂烩
+        # (7549 个 .c) 拆成可独立跑/分析的小块, 例如只跑 C23 特性子集:
+        #   --topics bitint,floatn,stdfloat,Float,imaginary,c23,c2y
+        if [[ -n "$TOPICS" ]]; then
+            local matched=0 tp
+            IFS=',' read -ra TOPIC_ARRAY <<< "$TOPICS"
+            for tp in "${TOPIC_ARRAY[@]}"; do
+                tp="$(echo "$tp" | xargs)"
+                [[ -z "$tp" ]] && continue
+                if [[ "$base" == *"$tp"* ]]; then
+                    matched=1
+                    break
+                fi
+            done
+            if [[ $matched -eq 0 ]]; then
+                continue
+            fi
         fi
         if [[ -n "$SHARD_M" && $(( ((idx - 1) % SHARD_M) + 1 )) -ne "$SHARD_N" ]]; then
             continue
