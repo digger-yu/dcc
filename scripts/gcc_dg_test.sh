@@ -457,6 +457,8 @@ run_suite() {
 
     # 并行执行: 把 "src TAB rel" 行通过 stdin 喂给 xargs; 每个 worker 收到一行,
     # 在 bash -c 里用 awk 切 tab。用 awk 避免内嵌 tab 字面量的引号问题。
+    # 实时透传: 通过 tee 同时落盘到结果文件, 并实时打印 FAIL 行 + 进度计数,
+    # 避免「整批几万个用例跑完前一直静默」(单片调试时看不到中间状态)。
     : > "$tmpfiles_results"
     local worker_cmd="$TMPDIR_DG/${category}_parallel.sh"
     cat > "$worker_cmd" <<'EOF'
@@ -467,8 +469,22 @@ rel="${line##*	}"
 dg_worker "$src" "$rel"
 EOF
     chmod +x "$worker_cmd"
-    < "$run_list" xargs -d '\n' -L1 -P "$JOBS" "$worker_cmd" \
-        > "$tmpfiles_results" 2>/dev/null || true
+    local done=0
+    < "$run_list" xargs -d '\n' -L1 -P "$JOBS" "$worker_cmd" 2>/dev/null \
+        | tee "$tmpfiles_results" \
+        | while IFS= read -r line; do
+              # 失败实时可见, 方便单片调试时第一时间定位
+              case "$line" in
+                  *" FAIL "*) printf '  %s\n' "$line" >&2 ;;
+              esac
+              # 周期性进度计数 (无条件打印, 即便经 tee 管道到日志也可见),
+              # 解决「整批几万个用例跑完前一直静默」的问题。
+              done=$((done + 1))
+              if (( done % 100 == 0 )); then
+                  printf '[%s] 进度 %d/%d\n' "$category" "$done" "$run_count" >&2
+              fi
+          done
+    printf '[%s] 完成 %d/%d\n' "$category" "$run_count" "$run_count" >&2
 
     # 统计结果
     local line rel_str result detail

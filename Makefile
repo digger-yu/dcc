@@ -1,4 +1,6 @@
-.PHONY: all build test test-all opt-eq golden-cross bootstrap kernel-full-build kernel-full-check clean-cache torture-setup torture
+.PHONY: all build test test-all opt-eq golden-cross bootstrap kernel-full-build \
+         kernel-full-check clean-cache torture-setup torture \
+         gcc-dg gcc-dg-1 gcc-dg-2 gcc-dg-3 gcc-dg-4 gcc-dg-5 gcc-dg-6 gcc-dg-7 gcc-dg-8
 
 DCC_REPO ?= $(CURDIR)
 KERNEL_DIR ?= /root/linux-7.1
@@ -100,6 +102,43 @@ kernel-full-check: build
 
 clean-cache:
 	bash scripts/cleanup_disk.sh --all
+
+# ── gcc.dg 套件拆分 (解决单跑太久、中间无输出) ──
+# 把 gcc.dg 套件按文件号均匀切成 8 片, 每片是一个可独立运行/调试的
+# 测试单元 (compile + run 各取该片)。用法:
+#   make gcc-dg-3          # 只跑第 3/8 片
+#   make gcc-dg            # 顺序跑全部 8 片, 各落 dg-<N>.log
+# 单片落盘日志: dg-<N>.log (compile 段 + run 段)。
+# 注: 用显式目标而非模式规则, 避免 GNU Make 把 gcc-dg-<N> 误匹配到内置隐含规则。
+gcc-dg-1: build
+	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" JOBS="$(JOBS)" \
+	  bash scripts/gcc_dg_test.sh all --shard 1/8 2>&1 | tee dg-1.log
+gcc-dg-2: build
+	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" JOBS="$(JOBS)" \
+	  bash scripts/gcc_dg_test.sh all --shard 2/8 2>&1 | tee dg-2.log
+gcc-dg-3: build
+	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" JOBS="$(JOBS)" \
+	  bash scripts/gcc_dg_test.sh all --shard 3/8 2>&1 | tee dg-3.log
+gcc-dg-4: build
+	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" JOBS="$(JOBS)" \
+	  bash scripts/gcc_dg_test.sh all --shard 4/8 2>&1 | tee dg-4.log
+gcc-dg-5: build
+	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" JOBS="$(JOBS)" \
+	  bash scripts/gcc_dg_test.sh all --shard 5/8 2>&1 | tee dg-5.log
+gcc-dg-6: build
+	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" JOBS="$(JOBS)" \
+	  bash scripts/gcc_dg_test.sh all --shard 6/8 2>&1 | tee dg-6.log
+gcc-dg-7: build
+	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" JOBS="$(JOBS)" \
+	  bash scripts/gcc_dg_test.sh all --shard 7/8 2>&1 | tee dg-7.log
+gcc-dg-8: build
+	DCC="$(DCC)" DCC_REPO="$(DCC_REPO)" JOBS="$(JOBS)" \
+	  bash scripts/gcc_dg_test.sh all --shard 8/8 2>&1 | tee dg-8.log
+
+gcc-dg: build
+	@for n in 1 2 3 4 5 6 7 8; do \
+	  $(MAKE) gcc-dg-$$n || true; \
+	done
 
 bootstrap: build
 	DCC="$(DCC)" bash scripts/bootstrap.sh
