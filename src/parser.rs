@@ -8058,6 +8058,10 @@ impl<'a> Parser<'a> {
             // 同一声明说明符后可用逗号分隔多个声明符: *next, *prev / a, b
             loop {
                 let (mut ty, nm) = self.parse_field_declarator(spec.clone());
+                // 字段名后的 vector_size 属性 (如 `double s __attribute__((vector_size(N)))`):
+                // 必须在此包装成 Vector 类型, 否则会被随后的 skip_attributes_extract_aligned
+                // 当作无关注释丢弃, 使联合/结构体成员退化为标量 (pr67609)。
+                ty = self.try_parse_vector_attr(ty);
                 // 字段级属性: 提取 aligned 值
                 let (field_aligned, field_packed) = self.skip_attributes_extract_aligned();
                 // C23 alignas(N) 在 parse_decl_specifiers 中已解析并

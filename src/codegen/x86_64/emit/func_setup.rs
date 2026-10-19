@@ -738,6 +738,31 @@ impl Codegen {
         ((alloc_sz.saturating_add(7) / 8).max(1)) as i64
     }
 
+    /// 本函数所有帧内局部变量的最大有效对齐 (`__attribute__((aligned(N)))` /
+    /// `alignas` 与类型自然对齐取大)。仅 N>16 才需要序言动态对齐 %r13 (pr16660)。
+    /// 复用 `collect_frame_var_decls` 的同一套收集口径, 保证与 pre_register_vars
+    /// 看到的是同一批变量。
+    pub fn max_local_over_align(
+        items: &[BlockItem],
+        static_local_map: &crate::static_locals::StaticLocalMap,
+        func_name: &str,
+    ) -> usize {
+        let mut decls: Vec<&VarDecl> = Vec::new();
+        Self::collect_frame_var_decls(items, static_local_map, func_name, &mut decls);
+        let mut max_align: usize = 0;
+        for v in &decls {
+            let eff = v
+                .alignment
+                .unwrap_or(0)
+                .max(v.ty.align())
+                .max(1);
+            if eff > max_align {
+                max_align = eff;
+            }
+        }
+        max_align
+    }
+
     /// 扫一个函数体，得到「发射期才会冒出来的帧内对象」的需求清单（`LateNeed`）。
     /// 不下降进嵌套函数体（那是它自己一帧的事，与 `collect_frame_var_decls` 同口径）。
     pub fn late_need(items: &[BlockItem]) -> LateNeed {
@@ -1714,6 +1739,7 @@ impl Codegen {
         func_name: &str,
         total_slots: &mut i64,
         spill_slots: &mut i64,
+        over_align: usize,
     ) {
         let mut decls: Vec<&VarDecl> = Vec::new();
         Self::collect_frame_var_decls(items, static_local_map, func_name, &mut decls);
@@ -1736,11 +1762,28 @@ impl Codegen {
             // 同名变量在不同作用域出现多次时, or_insert 不插入但 total_slots
             // 仍递增会导致偏移计算错误 —— 所以先查再推。
             if !var_map.contains_key(&v.name.name) {
-                let used = total_slots.saturating_mul(8);
+                let mut used = total_slots.saturating_mul(8);
                 let hdr = LayoutMap::hdr_of(temp_slots as i64);
+                // 过对齐局部 (aligned(N>16)): 把游标上圆整, 使其基址
+                // -(used+hdr)-(slots-1)*8 成为该变量有效对齐的整数倍.
+                // 前提是序言已把 %r13 动态对齐到 over_align (>= 所有 va 的 2 的幂).
+                if over_align > 16 {
+                    let va = v.alignment.unwrap_or(0).max(v.ty.align()).max(8) as i64;
+                    if va > 16 {
+                        let target = hdr + (slots.saturating_sub(1) * 8);
+                        let rem = (used + target).rem_euclid(va);
+                        if rem != 0 {
+                            used += va - rem;
+                        }
+                    }
+                }
                 let off = -(used + hdr) - (slots.saturating_sub(1) * 8);
                 var_map.insert(v.name.name.clone(), (off, alloc_ty));
-                *total_slots = total_slots.saturating_add(slots);
+                // 反映对齐补齐带来的额外槽数, 使后续变量/参数落在本轮下方.
+                let advanced = used.saturating_sub(total_slots.saturating_mul(8));
+                *total_slots = total_slots
+                    .saturating_add(advanced / 8)
+                    .saturating_add(slots);
                 let rz_slots = kasan_rz_slots as i64;
                 *total_slots = total_slots.saturating_add(rz_slots);
                 for j in 0..kasan_rz_slots {
@@ -2056,7 +2099,27 @@ impl Codegen {
         // P11: 必须保留 0x49 0x8b 0xe5 形式 (mov r/m64,r64 中 rsp 是 r/m, 需
         // REX.B=1 扩展 r13/r/m). mov_rm_reg 走 0x89 形式导致 REX 字节不同, 破坏
         // G10 快照字节一致性. 这里保留 hand-written 形态以维持 byte-identical.
-        self.emit_insn(&Insn::raw_with_gas(&[0x49, 0x8b, 0xe5], "mov %r13, %rsp"));
+        if self.cur_func_do_align {
+            // 过对齐帧: %r13 已被序言下调, 不能直接 mov r13,rsp (那会漏掉对齐
+            // 吃掉的那段)。改从锚点槽读回「对齐前的帧顶」。
+            // mov %rsp, anchor_off(%r13) : REX.WB 8B /r (load), reg=rsp(100),
+            // r/m=[r13+disp32] → modrm=0xA5, REX=0x49.
+            let anchor_off = self.cur_func_anchor_off;
+            let d = anchor_off as i32;
+            let mut insn = Insn::raw_bytes(&[
+                0x49,
+                0x8b,
+                0xa5,
+                (d & 0xff) as u8,
+                ((d >> 8) & 0xff) as u8,
+                ((d >> 16) & 0xff) as u8,
+                ((d >> 24) & 0xff) as u8,
+            ]);
+            insn.gas_text = Some(format!("mov {}(%r13), %rsp", anchor_off));
+            self.emit_insn(&insn);
+        } else {
+            self.emit_insn(&Insn::raw_with_gas(&[0x49, 0x8b, 0xe5], "mov %r13, %rsp"));
+        }
         self.emit_insn(
             &Insn::stack_op_reg(crate::codegen::x86_64::opcode::StackOp::Pop, 13)
                 .with_gas("pop %r13".to_string()),

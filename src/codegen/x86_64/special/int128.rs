@@ -19,7 +19,7 @@ use crate::codegen::x86_64::{Codegen, JumpKind};
 
 impl Codegen {
     /// P11 helper: emit reg-reg ALU (B64) via typed opcode.
-    fn emit_alu_rm_reg64(&mut self, op: AluOp, dst: u8, src: u8) {
+    pub(crate) fn emit_alu_rm_reg64(&mut self, op: AluOp, dst: u8, src: u8) {
         let insn = Insn::new(
             X86_64Opcode::AluRm {
                 op,
@@ -33,7 +33,7 @@ impl Codegen {
     }
 
     /// P11 Bucket M: emit unary op (B64) via typed UnaryRm.
-    fn emit_unary64(&mut self, op: UnaryOp, dst: u8) {
+    pub(crate) fn emit_unary64(&mut self, op: UnaryOp, dst: u8) {
         let insn = Insn::new(
             X86_64Opcode::UnaryRm {
                 op,
@@ -490,18 +490,14 @@ impl Codegen {
                 )); // cmp rcx, 64
                 self.jmp_rel32(&l_eq64, JumpKind::Je);
                 // n in (64,128): k = n-64 in (0,64).
+                // 128 位结果 = (old_lo << (64+k)) mod 2^128: 低 64 位必为 0,
+                // 高 64 位 = (old_lo << k) mod 2^64; old_hi 整体已左移 >=128 位,
+                // 对低 128 位贡献为 0, 不可再并入 (旧实现错误地 OR 了 old_hi>>(64-k))。
                 self.mov(8, 0); // r8 = old_lo
-                self.mov(9, 2); // r9 = old_hi
                 self.emit_alu_rm_reg_imm8_b64(AluOp::Sub, 1, 64); // rcx = k = n-64
                 self.mov(2, 8); // rdx = old_lo
-                self.emit_shift64(ShiftOp::Shl, 2, ShiftAmount::Cl); // rdx = old_lo << k
-                                                                     // Compute rcx = 64-k for the shr of old_hi (in (0,64), safe for CL&63).
-                self.emit_unary64(UnaryOp::Neg, 1); // rcx = -k
-                self.emit_alu_rm_reg_imm8_b64(AluOp::Add, 1, 64); // rcx = 64-k
-                self.mov(0, 9); // rax = old_hi
-                self.emit_shift64(ShiftOp::Shr, 0, ShiftAmount::Cl); // rax = old_hi >> (64-k)
-                self.emit_alu_rm_reg64(AluOp::Or, 2, 0); // rdx |= rax
-                self.emit_alu_rm_reg64(AluOp::Xor, 0, 0); // rax = 0 (low half)
+                self.emit_shift64(ShiftOp::Shl, 2, ShiftAmount::Cl); // rdx = old_lo << k (高 64 位结果)
+                self.emit_alu_rm_reg64(AluOp::Xor, 0, 0); // rax = 0 (低 64 位结果)
                 self.jmp_rel32(&l_end, JumpKind::Jmp);
                 // n == 64: swap halves: hi = old_lo, lo = 0.
                 self.label(&l_eq64);
@@ -964,13 +960,15 @@ impl Codegen {
             t_off
         };
 
-        for _i in 0..count {
+        for i in 0..count {
+            // 逐元素 stride: 每个 __int128 元素占 elem_size 字节
+            let eo = (i as i64) * (elem_size as i64);
             // 加载操作数到 GP 寄存器对:
             // rax:rdx = left (low:high), rcx:r8 = right (low:high)
-            self.load_stack(0, l_off); // rax = left low 64-bit
-            self.load_stack(2, l_off + 8); // rdx = left high 64-bit
-            self.load_stack(1, r_off); // rcx = right low 64-bit
-            self.load_stack(8, r_off + 8); // r8 = right high 64-bit
+            self.load_stack(0, l_off + eo); // rax = left low 64-bit
+            self.load_stack(2, l_off + eo + 8); // rdx = left high 64-bit
+            self.load_stack(1, r_off + eo); // rcx = right low 64-bit
+            self.load_stack(8, r_off + eo + 8); // r8 = right high 64-bit
 
             match op {
                 // === 比较操作 (EqEq/Ne): 顺序 setcc + AND, 无需跳转 ===
@@ -1056,8 +1054,8 @@ impl Codegen {
                         &[],
                     )); // mov rdx, rax
                         // 结果在 rax:rdx → 存回
-                    self.store_stack(0, result_off);
-                    self.store_stack(2, result_off + 8);
+                    self.store_stack(0, result_off + eo);
+                    self.store_stack(2, result_off + eo + 8);
                 },
                 // === 按位运算: 逐 chunk GP 运算, 结果在 rcx (low), r8 (high) ===
                 BinOp::And => {
@@ -1084,8 +1082,8 @@ impl Codegen {
                         2,
                         8,
                     ));
-                    self.store_stack(0, result_off);
-                    self.store_stack(2, result_off + 8);
+                    self.store_stack(0, result_off + eo);
+                    self.store_stack(2, result_off + eo + 8);
                 },
                 BinOp::Or => {
                     self.emit_alu_rm_reg64(AluOp::Or, 1, 0); // or rcx, rax
@@ -1110,8 +1108,8 @@ impl Codegen {
                         2,
                         8,
                     ));
-                    self.store_stack(0, result_off);
-                    self.store_stack(2, result_off + 8);
+                    self.store_stack(0, result_off + eo);
+                    self.store_stack(2, result_off + eo + 8);
                 },
                 BinOp::Xor => {
                     self.emit_alu_rm_reg64(AluOp::Xor, 1, 0); // xor rcx, rax
@@ -1136,8 +1134,8 @@ impl Codegen {
                         2,
                         8,
                     ));
-                    self.store_stack(0, result_off);
-                    self.store_stack(2, result_off + 8);
+                    self.store_stack(0, result_off + eo);
+                    self.store_stack(2, result_off + eo + 8);
                 },
                 _ => {
                     // 暂不支持, 结果槽保持未定义

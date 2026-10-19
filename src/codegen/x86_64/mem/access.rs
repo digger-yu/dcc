@@ -1504,6 +1504,25 @@ impl Codegen {
                             ))
                             .expect("typed-opcode: mov_rm_mem");
                         },
+                        16 => {
+                            // __int128: rax = 低 64 位, rdx = 高 64 位
+                            self.emit_insn(&Insn::mov_rm_mem(
+                                false,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                0,
+                                1,
+                                0,
+                            ))
+                            .expect("typed-opcode: mov_rm_mem"); // mov %rax, (%rcx)
+                            self.emit_insn(&Insn::mov_rm_mem(
+                                false,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                2,
+                                1,
+                                8,
+                            ))
+                            .expect("typed-opcode: mov_rm_mem"); // mov %rdx, 8(%rcx)
+                        },
                         _ => {
                             self.emit_insn(&Insn::mov_rm_mem(
                                 false,

@@ -104,6 +104,19 @@ impl Codegen {
         // 下一个函数的同名槽位（误发前缀 = 访存到错误的段）。
         self.local_addr_seg.clear();
         self.var_map_total_slots = 0;
+        // 过对齐局部 (__attribute__((aligned(N>16))) / alignas): 需要序言把
+        // %r13 动态对齐到该值 (pr16660)。变参函数暂不参与 (va_start 机构依赖
+        // 固定帧顶)。栈传参函数在参数规划后再决定是否真对齐。
+        let over_align = f.body.as_ref().map_or(0, |b| {
+            Self::max_local_over_align(&b.items, &self.static_local_map, &f.name.name)
+        });
+        self.cur_func_over_align = if over_align > 16 && !f.is_variadic {
+            over_align
+        } else {
+            0
+        };
+        self.cur_func_do_align = false;
+        self.cur_func_anchor_off = 0;
         self.vla_offsets.clear();
         // VM 类型尺寸绑定槽是每函数帧内状态 (槽偏移在各函数独立
         // 分配), 跨函数残留会导致 sizeof 读到别的函数帧的槽
@@ -334,6 +347,11 @@ impl Codegen {
             // 先预注册函数体中的局部变量 (使参数偏移自然在局部变量下方).
             // 使用 var_map_total_slots 累加器替代 O(n) 遍历.
             if let Some(body) = &f.body {
+                // 过对齐帧: 先占掉变量区最高那一格作为「对齐前帧顶」锚点槽,
+                // 变量整体下移 8 字节, 锚点落在 -(hdr) 处 (pre_register_vars 之上).
+                if self.cur_func_over_align > 0 {
+                    self.var_map_total_slots = 1;
+                }
                 Self::pre_register_vars(
                     &mut self.var_map,
                     &body.items,
@@ -343,6 +361,7 @@ impl Codegen {
                     &f.name.name,
                     &mut self.var_map_total_slots,
                     &mut spill_slots,
+                    self.cur_func_over_align,
                 );
             }
             // 预计算已注册局部变量的总大小, 用于参数偏移计算.
@@ -358,6 +377,11 @@ impl Codegen {
                 .filter(|(_, ty)| !matches!(ty, Type::Void))
                 .map(|(_, ty)| var_contribution(ty))
                 .sum();
+            // 过对齐帧的锚点槽不进 var_map (无名字), 但参数必须落在它下方,
+            // 所以把这 8 字节补进 param_used_total, 否则首个参数会盖住最低变量槽.
+            if self.cur_func_over_align > 0 {
+                param_used_total += 8;
+            }
             // 注册参数到 var_map (偏移公式自动避开已注册的局部变量)
             // 记录命名参数数量 (va_start 需要)
             self.variadic_named_params =
@@ -688,6 +712,18 @@ impl Codegen {
             // spill band：尺寸来自上面那个逐声明循环（`spill_slots`）。Phase 5.1 今天
             // 分配器不产出 Spill 家 ⇒ 它仍是 0，但band 已经是布局解算的**输入**，所以
             // 打开溢出时不会再长出第七个推算者。
+            // 过对齐帧: 仅当「非变参 + 无栈传参」才真把 %r13 动态对齐下来.
+            // 栈传参走 [r13+16] 寻址 (帧顶之上), r13 一下移就会错位, 故这类
+            // 函数退回不对齐 (过对齐局部退化为现状, 不引入新错误).
+            if self.cur_func_over_align > 0
+                && stack_param_stores.is_empty()
+                && ld_param_stores.is_empty()
+                && cld_param_stores.is_empty()
+            {
+                self.cur_func_do_align = true;
+                self.cur_func_anchor_off =
+                    -crate::codegen::x86_64::abi::layout::LayoutMap::hdr_of(temp_slots as i64);
+            }
             let layout = crate::codegen::x86_64::abi::layout::LayoutMap::resolve(
                 &crate::codegen::x86_64::abi::layout::FramePlan {
                     temp_slots: temp_slots as i64,
@@ -711,6 +747,9 @@ impl Codegen {
             // 所以它留在 Codegen 当游标；而 `frame_size` / `vec_temp_off` 解算后不再变，
             // 镜像字段已删，花费者一律直读 `LayoutMap`（帧的坐标从此只有一份）。
             self.sret_region_base = layout.sret_region_base;
+            // 过对齐帧: 先把 %r13/%rsp 对齐到局部最大对齐值. 必须在 sub_rsp
+            // 之前, 这样 sub 出来的帧底落在对齐基线之下, 被调帧不会盖到本帧.
+            self.emit_over_align_base();
             if self.frame_layout.frame_size > 0 {
                 if self.target.stack_clash_protection && self.frame_layout.frame_size > 4096 {
                     self.emit_stack_clash_probes(self.frame_layout.frame_size);
@@ -718,6 +757,8 @@ impl Codegen {
                     self.emit_sub_rsp(self.frame_layout.frame_size);
                 }
             }
+            // 过对齐帧: 把对齐前的帧顶写进锚点槽 (供尾声恢复 rsp). 须在 sub 之后.
+            self.emit_over_align_anchor();
             // -ftrivial-auto-var-init=zero: 零初始化整个栈帧. 对超大帧跳过.
             if self.target.auto_var_init_zero
                 && self.frame_layout.frame_size > 0
@@ -928,6 +969,10 @@ impl Codegen {
             }
         } else {
             if let Some(body) = &f.body {
+                // 过对齐帧: 预留锚点槽 (变量区最高格), 变量整体下移 8 字节.
+                if self.cur_func_over_align > 0 {
+                    self.var_map_total_slots = 1;
+                }
                 Self::pre_register_vars(
                     &mut self.var_map,
                     &body.items,
@@ -937,7 +982,14 @@ impl Codegen {
                     &f.name.name,
                     &mut self.var_map_total_slots,
                     &mut spill_slots,
+                    self.cur_func_over_align,
                 );
+            }
+            // `main`/无参分支无栈传参, 过对齐局部一旦存在就对齐帧基.
+            if self.cur_func_over_align > 0 {
+                self.cur_func_do_align = true;
+                self.cur_func_anchor_off =
+                    -crate::codegen::x86_64::abi::layout::LayoutMap::hdr_of(temp_slots as i64);
             }
             // 包含 padding 条目, 每个占 8 字节. 使用累加器替代 O(n) 遍历.
             self.plan_late_slot_budget(f.body.as_ref(), &f.params);
@@ -964,6 +1016,9 @@ impl Codegen {
             self.frame_layout = layout;
             // sret/物化槽区顶界: 紧邻变量区底 (变量区占 -(hdr+var_bytes))。
             self.sret_region_base = layout.sret_region_base;
+            // 过对齐帧: 先把 %r13/%rsp 对齐到局部最大对齐值. 必须在 sub_rsp
+            // 之前, 这样 sub 出来的帧底落在对齐基线之下, 被调帧不会盖到本帧.
+            self.emit_over_align_base();
             if self.frame_layout.frame_size > 0 {
                 if self.target.stack_clash_protection && self.frame_layout.frame_size > 4096 {
                     self.emit_stack_clash_probes(self.frame_layout.frame_size);
@@ -971,6 +1026,8 @@ impl Codegen {
                     self.emit_sub_rsp(self.frame_layout.frame_size);
                 }
             }
+            // 过对齐帧: 把对齐前的帧顶写进锚点槽 (供尾声恢复 rsp). 须在 sub 之后.
+            self.emit_over_align_anchor();
             // -ftrivial-auto-var-init=zero: 零初始化整个栈帧. 对超大帧跳过.
             if self.target.auto_var_init_zero
                 && self.frame_layout.frame_size > 0

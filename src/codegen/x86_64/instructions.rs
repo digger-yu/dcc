@@ -812,6 +812,13 @@ impl Codegen {
     }
 
     pub fn load_stack_sized(&mut self, reg: u8, off: i64, size: usize) {
+        if size == 16 {
+            // __int128 元素: 低 64 位 → reg (rax), 高 64 位 → reg+2 (rdx).
+            // 所有 16 字节调用方均传 reg=0 (__int128 约定 rax:rdx).
+            self.load_stack_sized(reg, off, 8);
+            self.load_stack_sized(reg.wrapping_add(2), off + 8, 8);
+            return;
+        }
         if Self::fits_disp32(off) {
             // P11 O6: 收敛到 MovExt / MovRm typed opcode. 与原手写逐字节对齐:
             //   size=1: MovExt{ rip_relative: false,sign=false, from=B8, to=B32, reg, [r13+off]}  (0F B6)
@@ -1237,6 +1244,63 @@ impl Codegen {
                 &[],
             ));
         }
+    }
+
+    /// 过对齐帧 (pr16660) 第一步: 在 `sub rsp, frame_size` **之前**把 %r13
+    /// (帧基) 动态对齐到 `cur_func_over_align` (2 的幂, >16), 同时把 %rsp 也
+    /// 对齐到同一基线。此时 %r13 仍等于帧顶 (push r13 后的 rsp)。序列:
+    ///   mov %rax, %r13          ; rax = 帧顶 (对齐前, 留给第二步写锚点)
+    ///   and $(−align), %r13     ; r13 = round_down(帧顶, align)
+    ///   mov %rsp, %r13          ; rsp = 对齐基线 (随后 sub frame_size 得到帧底)
+    /// 调用方保证紧随其后的 `sub rsp, frame_size` 使用这个已对齐的 r13。
+    pub fn emit_over_align_base(&mut self) {
+        if !self.cur_func_do_align || self.cur_func_over_align <= 16 {
+            return;
+        }
+        let over_align = self.cur_func_over_align;
+        // mov %rax, %r13  (dst=rax(0), src=r13(13))
+        self.emit_insn(
+            &Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 0, 13)
+                .with_gas("mov %r13, %rax".to_string()),
+        );
+        // and $(−align), %r13 : REX.WB 81 /4 imm32 (rm=r13 → REX.B)
+        let mask = (-(over_align as i32)) as u32;
+        let mut insn = Insn::raw_bytes(&[
+            0x49,
+            0x81,
+            0xE5,
+            (mask & 0xff) as u8,
+            ((mask >> 8) & 0xff) as u8,
+            ((mask >> 16) & 0xff) as u8,
+            ((mask >> 24) & 0xff) as u8,
+        ]);
+        insn.gas_text = Some(format!("and ${}, %r13", -(over_align as i64)));
+        self.emit_insn(&insn);
+        // mov %rsp, %r13  (dst=rsp(4), src=r13(13)) — rsp 取对齐后的 r13
+        self.emit_insn(
+            &Insn::mov_rm_reg(crate::codegen::shared::asm_operand::Width::B64, 4, 13)
+                .with_gas("mov %r13, %rsp".to_string()),
+        );
+    }
+
+    /// 过对齐帧 (pr16660) 第二步: 在 `sub rsp, frame_size` **之后**把「对齐前的
+    /// 帧顶」(rax, 由 `emit_over_align_base` 保存) 写进锚点槽, 供尾声恢复 rsp。
+    pub fn emit_over_align_anchor(&mut self) {
+        if !self.cur_func_do_align || self.cur_func_over_align <= 16 {
+            return;
+        }
+        let anchor_off = self.cur_func_anchor_off;
+        // mov %rax, anchor_off(%r13)  (src=rax(0), base=r13(13))
+        self.emit_insn(
+            &Insn::mov_rm_mem(
+                false,
+                crate::codegen::shared::asm_operand::Width::B64,
+                0,
+                13,
+                anchor_off as i32,
+            )
+            .with_gas(format!("mov %rax, {}(%r13)", anchor_off)),
+        );
     }
 
     pub fn emit_add_rsp(&mut self, bytes: i64) {
@@ -2823,6 +2887,48 @@ impl Codegen {
                 },
                 &[],
             )), // mov (%rax), %eax (零扩展到64位)
+            16 => {
+                // __int128: 先取高 64 位到 rdx (rax 此时仍是地址), 再取低 64 位到
+                // rax (覆盖地址). 否则先覆盖 rax 再 8(%rax) 会读错位置.
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        rip_relative: false,
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            2,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
+                        src: crate::codegen::x86_64::opcode::Operand::Mem(
+                            crate::codegen::x86_64::opcode::MemOperand {
+                                disp: 8,
+                                base: Some(0),
+                                index: None,
+                                seg: None,
+                            },
+                        ),
+                    },
+                    &[],
+                )); // mov 8(%rax), %rdx  (high 64)
+                self.emit_insn(&Insn::new(
+                    crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                        rip_relative: false,
+                        width: crate::codegen::shared::asm_operand::Width::B64,
+                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                            0,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                        ),
+                        src: crate::codegen::x86_64::opcode::Operand::Mem(
+                            crate::codegen::x86_64::opcode::MemOperand {
+                                disp: 0,
+                                base: Some(0),
+                                index: None,
+                                seg: None,
+                            },
+                        ),
+                    },
+                    &[],
+                )) // mov (%rax), %rax  (low 64)
+            },
             _ => self.emit_insn(&Insn::new(
                 crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                     rip_relative: false,

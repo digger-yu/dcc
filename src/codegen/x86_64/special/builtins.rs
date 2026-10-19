@@ -3331,10 +3331,6 @@ impl Codegen {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                self.gen_expr(&args[0], Self::EVAL_BASE);
-                self.push(0);
-                self.gen_expr(&args[1], Self::EVAL_BASE);
-                self.pop(1); // rcx = lhs, rax = rhs
                 let result_ty = args.get(2).map(|e| e.ty()).unwrap_or_else(|| args[0].ty());
                 let size = result_ty.size();
                 let unsigned = matches!(
@@ -3354,6 +3350,356 @@ impl Codegen {
                 } else {
                     0
                 };
+                // __int128 (size >= 16): 操作数是 128 位 (rax=低64, rdx=高64)。原路径的
+                // (2,_) 用 `mul rcx`/add/sub rcx,rax 只算 64 位并丢弃高 64 位, 溢出判定
+                // 错误 (pr123864)。此处按完整 128 位运算并判溢出。
+                if size >= 16 {
+                    // 加载两个 128 位操作数: rax:rdx = (low, high)
+                    self.gen_expr(&args[0], Self::EVAL_BASE);
+                    self.push(0);
+                    self.push(2);
+                    self.gen_expr(&args[1], Self::EVAL_BASE);
+                    self.push(0);
+                    self.push(2);
+                    // 还原: rcx=a0, r8=a1 (左); r9=b0, r11=b1 (右)
+                    self.pop(11);
+                    self.pop(9);
+                    self.pop(8);
+                    self.pop(1);
+                    match op {
+                        0 | 1 => {
+                            // 128 位加/减: 末条 adc/sbb 的 CF/OF 即整个 128 位的
+                            // 无符号/有符号溢出标志。
+                            self.emit_alu_rm_reg64(
+                                if op == 0 {
+                                    crate::codegen::x86_64::opcode::AluOp::Add
+                                } else {
+                                    crate::codegen::x86_64::opcode::AluOp::Sub
+                                },
+                                1,
+                                9,
+                            ); // add/sub rcx, r9 (low)
+                            self.emit_alu_rm_reg64(
+                                if op == 0 {
+                                    crate::codegen::x86_64::opcode::AluOp::Adc
+                                } else {
+                                    crate::codegen::x86_64::opcode::AluOp::Sbb
+                                },
+                                8,
+                                11,
+                            ); // adc/sbb r8, r11 (high)
+                            let cc = if unsigned {
+                                crate::codegen::x86_64::opcode::CondCode::B
+                            } else {
+                                crate::codegen::x86_64::opcode::CondCode::O
+                            };
+                            self.emit_insn(&Insn::setcc_reg(cc, 0)); // setb/seto al
+                        }
+                        2 => {
+                            // 128 位乘: 计算完整 256 位积的高 128 位, 据符号判溢出。
+                            // 约定: rcx=a0, r8=a1 (左); r9=b0, r11=b1 (右)
+                            self.push(14);
+                            self.push(15); // 保护被调用者保存寄存器
+                            // 保存 a0,a1,b0,b1: H 计算途中这些值会被覆盖,
+                            // 而有符号高位校正 H_signed = H - (a<0?b:0) - (b<0?a:0)
+                            // 需要原始操作数, 故提前压栈, 校正前再 pop 还原。
+                            self.push(1); // a0
+                            self.push(8); // a1
+                            self.push(9); // b0
+                            self.push(11); // b1
+                            self.mov(0, 1); // rax = a0
+                            self.emit_insn(&Insn::unary_rm_reg(
+                                crate::codegen::x86_64::opcode::UnaryOp::Mul,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                9,
+                            )); // mul r9
+                            self.mov(14, 2); // r14 = h0 (a0*b0 高)
+                            self.mov(0, 1); // rax = a0
+                            self.emit_insn(&Insn::unary_rm_reg(
+                                crate::codegen::x86_64::opcode::UnaryOp::Mul,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                11,
+                            )); // mul r11
+                            self.mov(10, 0); // r10 = l1 (a0*b1 低)
+                            self.mov(15, 2); // r15 = h1 (a0*b1 高)
+                            self.mov(0, 8); // rax = a1
+                            self.emit_insn(&Insn::unary_rm_reg(
+                                crate::codegen::x86_64::opcode::UnaryOp::Mul,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                9,
+                            )); // mul r9
+                            self.mov(1, 0); // rcx = l2 (a1*b0 低)
+                            self.mov(9, 2); // r9 = h2 (a1*b0 高)
+                            self.mov(0, 8); // rax = a1
+                            self.emit_insn(&Insn::unary_rm_reg(
+                                crate::codegen::x86_64::opcode::UnaryOp::Mul,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                11,
+                            )); // mul r11
+                            self.mov(8, 0); // r8 = l3 (a1*b1 低)
+                            self.mov(11, 2); // r11 = h3 (a1*b1 高)
+                            // mid = h0 + l1 + l2; 捕获进位 carry_mid ∈ {0,1,2}
+                            self.mov(0, 14); // rax = h0
+                            self.emit_alu_rm_reg64(
+                                crate::codegen::x86_64::opcode::AluOp::Add,
+                                0,
+                                10,
+                            ); // add rax, r10 (l1) ; CF
+                            self.mov(14, 0); // r14 = mid_low
+                            self.emit_insn(&Insn::setcc_reg(
+                                crate::codegen::x86_64::opcode::CondCode::B,
+                                2,
+                            )); // setb dl = c0
+                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 2, 0xFF)); // rdx = c0
+                            self.mov(10, 2); // r10 = c0
+                            self.mov(0, 14); // rax = mid_low
+                            self.emit_alu_rm_reg64(
+                                crate::codegen::x86_64::opcode::AluOp::Add,
+                                0,
+                                1,
+                            ); // add rax, rcx (l2) ; CF
+                            self.mov(14, 0); // r14 = mid_low (最终)
+                            self.emit_insn(&Insn::setcc_reg(
+                                crate::codegen::x86_64::opcode::CondCode::B,
+                                2,
+                            )); // setb dl = c1
+                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 2, 0xFF)); // rdx = c1
+                            self.emit_alu_rm_reg64(
+                                crate::codegen::x86_64::opcode::AluOp::Add,
+                                10,
+                                2,
+                            ); // r10 = c0 + c1 = carry_mid
+                            // s = 低 128 位符号位 (bit127) = mid_low 的 bit63
+                            self.mov(0, 14); // rax = mid_low
+                            self.emit_insn(&Insn::shift_reg_imm8_c1_b64(5, 0, 63)); // shr rax, 63
+                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 0, 1)); // rax = s (0/1)
+                            self.mov(14, 0); // r14 = s
+                            // carry_mid 转入 rcx, 释放 r10 供 H 计算
+                            self.mov(1, 10); // rcx = carry_mid
+                            // H = h1 + h2 + l3 + carry_mid; 捕获进位 carry_H ∈ {0,1,2,3}
+                            self.mov(0, 15); // rax = h1
+                            self.emit_alu_rm_reg64(
+                                crate::codegen::x86_64::opcode::AluOp::Add,
+                                0,
+                                9,
+                            ); // add rax, r9 (h2) ; CF
+                            self.mov(15, 0); // r15 = (h1+h2) low
+                            self.emit_insn(&Insn::setcc_reg(
+                                crate::codegen::x86_64::opcode::CondCode::B,
+                                2,
+                            )); // setb dl = d0
+                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 2, 0xFF)); // rdx = d0
+                            self.mov(10, 2); // r10 = d0
+                            self.mov(0, 15); // rax = (h1+h2) low
+                            self.emit_alu_rm_reg64(
+                                crate::codegen::x86_64::opcode::AluOp::Add,
+                                0,
+                                8,
+                            ); // add rax, r8 (l3) ; CF
+                            self.mov(15, 0); // r15 = (h1+h2+l3) low
+                            self.emit_insn(&Insn::setcc_reg(
+                                crate::codegen::x86_64::opcode::CondCode::B,
+                                2,
+                            )); // setb dl = d1
+                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 2, 0xFF)); // rdx = d1
+                            self.emit_alu_rm_reg64(
+                                crate::codegen::x86_64::opcode::AluOp::Add,
+                                10,
+                                2,
+                            ); // r10 = d0 + d1
+                            self.mov(0, 15); // rax = (h1+h2+l3) low
+                            self.emit_alu_rm_reg64(
+                                crate::codegen::x86_64::opcode::AluOp::Add,
+                                0,
+                                1,
+                            ); // add rax, rcx (carry_mid) ; CF → rax = Hlo
+                            self.mov(10, 0); // r10 = Hlo
+                            self.emit_insn(&Insn::setcc_reg(
+                                crate::codegen::x86_64::opcode::CondCode::B,
+                                2,
+                            )); // setb dl = carry_H
+                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 2, 0xFF)); // rdx = carry_H
+                            self.emit_alu_rm_reg64(
+                                crate::codegen::x86_64::opcode::AluOp::Add,
+                                2,
+                                11,
+                            ); // rdx = carry_H + h3 = Hhi
+                            // 有符号校正: H_signed = H - (a<0?b:0) - (b<0?a:0)
+                            // 无符号 256 位积的高 128 位 H, 与有符号积高 128 位相差
+                            // (a<0 ? b : 0) + (b<0 ? a : 0) (模 2^128); 下方溢出判定
+                            // 公式要求输入为有符号积的高 128 位, 故此处先校正。
+                            // 还原原始操作数 a=(a0,a1), b=(b0,b1) (H 计算途中已被覆盖)。
+                            self.pop(11); // b1
+                            self.pop(9); // b0
+                            self.pop(8); // a1
+                            self.pop(1); // a0
+                            // mask_a (0 或全 1) ← a 的符号位 (bit127 = a1=r8 的 bit63)
+                            self.mov(0, 8);
+                            self.emit_insn(&Insn::shift_reg_imm8_c1_b64(5, 0, 63)); // shr rax, 63
+                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 0, 1)); // eax = a_neg (0/1)
+                            self.emit_insn(&Insn::unary_rm_reg(
+                                crate::codegen::x86_64::opcode::UnaryOp::Neg,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                0,
+                            )); // neg rax
+                            self.emit_alu_rm_reg64(
+                                crate::codegen::x86_64::opcode::AluOp::Sbb,
+                                0,
+                                0,
+                            ); // rax = mask_a (0 或全 1)
+                            self.mov(15, 0); // r15 = mask_a
+                            // mask_b (0 或全 1) ← b 的符号位 (bit127 = b1=r11 的 bit63), 暂存栈
+                            self.mov(0, 11);
+                            self.emit_insn(&Insn::shift_reg_imm8_c1_b64(5, 0, 63)); // shr rax, 63
+                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 0, 1)); // eax = b_neg (0/1)
+                            self.emit_insn(&Insn::unary_rm_reg(
+                                crate::codegen::x86_64::opcode::UnaryOp::Neg,
+                                crate::codegen::shared::asm_operand::Width::B64,
+                                0,
+                            )); // neg rax
+                            self.emit_alu_rm_reg64(
+                                crate::codegen::x86_64::opcode::AluOp::Sbb,
+                                0,
+                                0,
+                            ); // rax = mask_b (0 或全 1)
+                            self.push(0); // 保存 mask_b
+                            // term_a = mask_a ? b : 0, 再从 H 减去
+                            self.mov(0, 9); // rax = b0
+                            self.emit_alu_rm_reg64(
+                                crate::codegen::x86_64::opcode::AluOp::And,
+                                0,
+                                15,
+                            ); // rax = term_a_lo = b0 & mask_a
+                            self.mov(9, 0); // r9 = term_a_lo
+                            self.mov(0, 11); // rax = b1
+                            self.emit_alu_rm_reg64(
+                                crate::codegen::x86_64::opcode::AluOp::And,
+                                0,
+                                15,
+                            ); // rax = term_a_hi = b1 & mask_a
+                            self.mov(11, 0); // r11 = term_a_hi
+                            self.emit_alu_rm_reg64(
+                                crate::codegen::x86_64::opcode::AluOp::Sub,
+                                10,
+                                9,
+                            ); // r10 = Hlo - term_a_lo (置 CF)
+                            self.emit_alu_rm_reg64(
+                                crate::codegen::x86_64::opcode::AluOp::Sbb,
+                                2,
+                                11,
+                            ); // rdx = Hhi - term_a_hi - CF
+                            // term_b = mask_b ? a : 0, 再从 H 减去
+                            self.pop(0); // rax = mask_b
+                            self.mov(15, 0); // r15 = mask_b
+                            self.mov(0, 1); // rax = a0
+                            self.emit_alu_rm_reg64(
+                                crate::codegen::x86_64::opcode::AluOp::And,
+                                0,
+                                15,
+                            ); // rax = term_b_lo = a0 & mask_b
+                            self.mov(1, 0); // rcx = term_b_lo
+                            self.mov(0, 8); // rax = a1
+                            self.emit_alu_rm_reg64(
+                                crate::codegen::x86_64::opcode::AluOp::And,
+                                0,
+                                15,
+                            ); // rax = term_b_hi = a1 & mask_b
+                            self.mov(8, 0); // r8 = term_b_hi
+                            self.emit_alu_rm_reg64(
+                                crate::codegen::x86_64::opcode::AluOp::Sub,
+                                10,
+                                1,
+                            ); // r10 = Hlo - term_b_lo (置 CF)
+                            self.emit_alu_rm_reg64(
+                                crate::codegen::x86_64::opcode::AluOp::Sbb,
+                                2,
+                                8,
+                            ); // rdx = Hhi - term_b_hi - CF
+                            // a = (Hlo | Hhi != 0) → 无符号溢出标志 (已对 H 做符号校正)
+                            self.mov(0, 10); // rax = Hlo
+                            self.emit_alu_rm_reg64(
+                                crate::codegen::x86_64::opcode::AluOp::Or,
+                                0,
+                                2,
+                            ); // or rax, rdx (Hhi)
+                            self.emit_insn(&Insn::setcc_reg(
+                                crate::codegen::x86_64::opcode::CondCode::Ne,
+                                0,
+                            )); // setnz al = a
+                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 0, 0xFF)); // eax = a
+                            self.mov(15, 0); // r15 = a
+                            if unsigned {
+                                // 无符号: 溢出当且仅当高 128 位非 0
+                                self.mov(0, 15); // rax = a
+                            } else {
+                                // 有符号: of = a ^ (s & (a^b))
+                                //   b = (Hlo^all1 | Hhi^all1 != 0)
+                                self.mov(8, 10); // r8 = Hlo
+                                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(6, 8, -1)); // r8 = Hlo ^ all1
+                                self.mov(9, 2); // r9 = Hhi
+                                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(6, 9, -1)); // r9 = Hhi ^ all1
+                                self.emit_alu_rm_reg64(
+                                    crate::codegen::x86_64::opcode::AluOp::Or,
+                                    8,
+                                    9,
+                                ); // r8 = (Hlo^all1)|(Hhi^all1)
+                                self.emit_insn(&Insn::setcc_reg(
+                                    crate::codegen::x86_64::opcode::CondCode::Ne,
+                                    1,
+                                )); // setnz cl = b
+                                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 1, 0xFF)); // ecx = b
+                                self.mov(0, 15); // rax = a
+                                self.emit_alu_rm_reg64(
+                                    crate::codegen::x86_64::opcode::AluOp::Xor,
+                                    0,
+                                    1,
+                                ); // rax = a ^ b
+                                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 0, 0xFF)); // eax = a^b
+                                self.mov(1, 14); // rcx = s
+                                self.emit_alu_rm_reg64(
+                                    crate::codegen::x86_64::opcode::AluOp::And,
+                                    1,
+                                    0,
+                                ); // rcx = s & (a^b)
+                                self.mov(0, 15); // rax = a
+                                self.emit_alu_rm_reg64(
+                                    crate::codegen::x86_64::opcode::AluOp::Xor,
+                                    0,
+                                    1,
+                                ); // rax = a ^ (s & (a^b)) = of
+                            }
+                            self.pop(15);
+                            self.pop(14); // 恢复
+                        }
+                        _ => unreachable!(),
+                    }
+                    self.emit_insn(&Insn::new(
+                        crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
+                            rip_relative: false,
+                            sign: false,
+                            from: crate::codegen::shared::asm_operand::Width::B8,
+                            to: crate::codegen::shared::asm_operand::Width::B32,
+                            dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                0,
+                                crate::codegen::shared::asm_operand::Width::B32,
+                            ),
+                            src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                0,
+                                crate::codegen::shared::asm_operand::Width::B8,
+                            ),
+                        },
+                        &[],
+                    ));
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
+                    return true;
+                }
+                // === size < 16: 原有路径 (不变) ===
+                self.gen_expr(&args[0], Self::EVAL_BASE);
+                self.push(0);
+                self.gen_expr(&args[1], Self::EVAL_BASE);
+                self.pop(1); // rcx = lhs, rax = rhs
                 // P11 helper: AluRm{Add|Sub, rcx, rax} 按 sz 选择宽度.
                 let mk_addsub =
                     |op: u8, sz: usize| -> crate::codegen::x86_64::opcode::X86_64Opcode {

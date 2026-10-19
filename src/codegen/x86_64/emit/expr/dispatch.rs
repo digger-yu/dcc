@@ -1066,10 +1066,16 @@ impl Codegen {
                                     1 => Width::B8,
                                     2 => Width::B16,
                                     4 => Width::B32,
+                                    16 => Width::B64,
                                     _ => Width::B64,
                                 };
                                 self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0))
-                                    .expect("typed-opcode: mov_rm_mem");
+                                    .expect("typed-opcode: mov_rm_mem"); // 低 64 位 → [rcx]
+                                if es == 16 {
+                                    // __int128 元素: 补写高 64 位 rdx → [rcx+8]
+                                    self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 2, 1, 8))
+                                        .expect("typed-opcode: mov_rm_mem");
+                                }
                                 return;
                             }
                         }
@@ -1132,10 +1138,16 @@ impl Codegen {
                                     1 => Width::B8,
                                     2 => Width::B16,
                                     4 => Width::B32,
+                                    16 => Width::B64,
                                     _ => Width::B64,
                                 };
                                 self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0))
-                                    .expect("typed-opcode: mov_rm_mem");
+                                    .expect("typed-opcode: mov_rm_mem"); // 低 64 位 → [rcx]
+                                if es == 16 {
+                                    // __int128 元素: 补写高 64 位 rdx → [rcx+8]
+                                    self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 2, 1, 8))
+                                        .expect("typed-opcode: mov_rm_mem");
+                                }
                             }
                         }
                     } else {
@@ -1196,10 +1208,16 @@ impl Codegen {
                                     1 => Width::B8,
                                     2 => Width::B16,
                                     4 => Width::B32,
+                                    16 => Width::B64,
                                     _ => Width::B64,
                                 };
                                 self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0))
-                                    .expect("typed-opcode: mov_rm_mem");
+                                    .expect("typed-opcode: mov_rm_mem"); // 低 64 位 → [rcx]
+                                if es == 16 {
+                                    // __int128 元素: 补写高 64 位 rdx → [rcx+8]
+                                    self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 2, 1, 8))
+                                        .expect("typed-opcode: mov_rm_mem");
+                                }
                             }
                         }
                     }

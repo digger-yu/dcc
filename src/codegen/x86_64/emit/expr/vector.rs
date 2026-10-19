@@ -920,6 +920,7 @@ impl Codegen {
                 _ => None,
             });
             let off = temp_off + (i * elem_size) as i64;
+            let v_ty_opt = value.as_ref().map(|v| v.ty());
             if let Some(v) = value {
                 self.gen_expr(v, Self::EVAL_BASE);
                 self.emit_scalar_to_xmm0_if_needed(v, elem_ty);
@@ -929,6 +930,25 @@ impl Codegen {
                 // xorps xmm0, xmm0
                 } else {
                     self.mov_imm(0, 0);
+                    if elem_size == 16 {
+                        // __int128 元素零初始化: rax 已置 0, 但 rdx (高 64) 是垃圾,
+                        // 必须一并清零, 否则未指定元素的高半部会残留未定义寄存器值.
+                        self.emit_insn(&Insn::new(
+                            crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                                op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                                width: crate::codegen::shared::asm_operand::Width::B64,
+                                dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                    2,
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                ),
+                                src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                    2,
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                ),
+                            },
+                            &[],
+                        )); // xor rdx, rdx
+                    }
                 }
             }
             if matches!(elem_ty, Type::Float) {
@@ -936,23 +956,45 @@ impl Codegen {
             } else if matches!(elem_ty, Type::Double) {
                 self.store_xmm64_stack(0, off);
             } else if elem_size == 16 {
-                // 128-bit 元素 (__int128/__uint128): rax=低64, rdx=高64
-                // 若来自 InitList 的标量 (如 0), 需确保 rdx=0
-                self.emit_insn(&Insn::new(
-                    crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
-                        op: crate::codegen::x86_64::opcode::AluOp::Xor,
-                        width: crate::codegen::shared::asm_operand::Width::B64,
-                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                            2,
-                            crate::codegen::shared::asm_operand::Width::B64,
-                        ),
-                        src: crate::codegen::x86_64::opcode::Operand::Reg(
-                            2,
-                            crate::codegen::shared::asm_operand::Width::B64,
-                        ),
-                    },
-                    &[],
-                )); // xor rdx, rdx (安全覆盖垃圾高字节)
+                // 128-bit 元素 (__int128/__uint128): rax=低64, rdx=高64.
+                // 初始化表达式若不是 128 位类型 (如向量初值里的 `-1` 仍是 int),
+                // gen_expr 只填了 rax, 高 64 位 rdx 是垃圾. 此时按源类型把 rax
+                // 零扩展/符号扩展进 rdx (与 cast.rs 的 src→Int128 分支口径一致),
+                // 否则 -1 这类值的高半部会是未定义寄存器值.
+                if let Some(ref vt) = v_ty_opt {
+                    if !matches!(vt, Type::Int128 | Type::UInt128) {
+                        let src_unsigned = matches!(
+                            vt,
+                            Type::Bool
+                                | Type::UChar
+                                | Type::UShort
+                                | Type::UInt
+                                | Type::ULong
+                                | Type::ULongLong
+                        );
+                        if src_unsigned {
+                            self.emit_insn(&Insn::new(
+                                crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                                    op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                                    width: crate::codegen::shared::asm_operand::Width::B64,
+                                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                        2,
+                                        crate::codegen::shared::asm_operand::Width::B64,
+                                    ),
+                                    src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                        2,
+                                        crate::codegen::shared::asm_operand::Width::B64,
+                                    ),
+                                },
+                                &[],
+                            )); // xor rdx, rdx (零扩展)
+                        } else {
+                            self.emit_insn(&Insn::sign_extend_rax_to_rdx(
+                                crate::codegen::shared::asm_operand::Width::B64,
+                            )); // cqo (符号扩展)
+                        }
+                    }
+                }
                 self.store_stack(0, off);
                 self.store_stack(2, off + 8);
             } else {
@@ -992,9 +1034,16 @@ impl Codegen {
                 }
                 let var_off = self.var_offset(&name.name);
                 if is_int128_elem {
-                    // 从栈上 movdqu 到临时槽
-                    self.emit_movdqu_r13_to_xmm(0, var_off);
-                    self.emit_movdqu_xmm_to_r13(0, temp_off);
+                    // __int128 元素向量: 逐元素拷贝完整 128 位 (rax=低64, rdx=高64).
+                    // 之前用单条 movdqu 只搬了 16 字节, 对 256-bit 向量 (2 个元素)
+                    // 元素 1 根本没进临时槽, 导致整向量运算读到的元素 1 是陈旧的 0.
+                    for i in 0..count {
+                        let src_off = var_off + (i * elem_size) as i64;
+                        let dst_off = temp_off + (i * elem_size) as i64;
+                        self.load_stack_sized(0, src_off, 16); // rax=低64, rdx=高64
+                        self.emit_store(0, dst_off, 8); // 低 64
+                        self.emit_store(2, dst_off + 8, 8); // 高 64
+                    }
                     return;
                 }
                 let is_float_elem = matches!(elem_ty, Type::Float);

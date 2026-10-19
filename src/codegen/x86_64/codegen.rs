@@ -179,6 +179,15 @@ pub struct Codegen {
     /// 结果覆盖外层已写入的结果槽 (pr23135: 链式 k0+k1+k3+...
     /// 低层元素被内层重物化覆盖)。非 binop 上下文默认槽 1。
     pub vector_op_slot: usize,
+    /// 本函数局部变量的最大过对齐值 (`__attribute__((aligned(N)))` 或 alignas,
+    /// N>16)。0 表示无过对齐局部。仅用于栈帧动态对齐 (pr16660)。
+    pub cur_func_over_align: usize,
+    /// 过对齐帧里保存「对齐前帧顶 rsp」的 r13 相对槽偏移 (`-hdr`)。
+    /// 仅 `cur_func_do_align` 为真时有效。
+    pub cur_func_anchor_off: i64,
+    /// 本函数是否真的在序言里把 %r13 动态对齐到 `cur_func_over_align`。
+    /// 仅当「有过对齐局部 + 非变参 + 无栈传参」时为真。
+    pub cur_func_do_align: bool,
     // 可重定位模式 (.o)
     pub relocatable: bool,
     pub function_sections: bool, // -ffunction-sections：每函数独立 .text.<name> 节
@@ -847,6 +856,9 @@ impl Codegen {
             bf_rmw_depth: 0,
             stack_shift: 0,
             vector_op_slot: 1,
+            cur_func_over_align: 0,
+            cur_func_anchor_off: 0,
+            cur_func_do_align: false,
             relocatable: false,
             function_sections: false,
             patchable_function_entry,
