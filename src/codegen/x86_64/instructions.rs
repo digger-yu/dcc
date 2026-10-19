@@ -2078,6 +2078,32 @@ impl Codegen {
         }
     }
 
+    /// `__int128` / `unsigned __int128` → float / double / long double。
+    ///
+    /// x86 只有 64 位整数→浮点的转换指令，128 位无法单条完成；把高/低 64 位
+    /// 分别转换再组合会双重舍入，在 `fesetround` 设置的非默认舍入模式下得到
+    /// 的结果也不同（fp-int-convert-timode-{2,3,4} 正是测 FE_DOWNWARD /
+    /// FE_UPWARD / FE_TOWARDZERO）。因此调用 libgcc 的 soft-fp helper
+    ///（__floattisf 等），它们对全部舍入模式都做正确舍入。
+    ///
+    /// 前置：值在 rax（低 64 位）/ rdx（高 64 位）—— dcc 的 int128 值约定。
+    /// 后置：float / double 结果在 xmm0，long double 在 st(0)。
+    pub fn emit_int128_to_float(&mut self, src_ty: &Type, dst_ty: &Type) {
+        let name = match (src_ty, dst_ty) {
+            (Type::Int128, Type::Float) => "__floattisf",
+            (Type::Int128, Type::Double) => "__floattidf",
+            (Type::Int128, Type::LongDouble) => "__floattixf",
+            (Type::UInt128, Type::Float) => "__floatuntisf",
+            (Type::UInt128, Type::Double) => "__floatuntidf",
+            (Type::UInt128, Type::LongDouble) => "__floatuntixf",
+            _ => return,
+        };
+        // SysV ABI：128 位整数实参按 rdi=低 64 位、rsi=高 64 位传递。
+        self.mov(7, 0); // mov rdi, rax
+        self.mov(6, 2); // mov rsi, rdx
+        self.emit_call_extern(name);
+    }
+
     pub fn emit_scalar_to_xmm0_if_needed(&mut self, expr: &Expr, elem_ty: &Type) {
         let src = expr.ty();
         self.emit_scalar_to_xmm0_if_needed_ty(&src, elem_ty);
@@ -2091,6 +2117,13 @@ impl Codegen {
             Type::Float | Type::Double | Type::LongDouble | Type::Complex(_) | Type::Imaginary(_)
         );
         if !matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
+            return;
+        }
+        // __int128 / unsigned __int128 → 浮点：走 libgcc soft-fp helper。
+        // 128 位无法用单条 cvtsi2sd，且拆分高低 64 位会双重舍入，
+        // 在非默认舍入模式下结果错误。
+        if matches!(src_ty, Type::Int128 | Type::UInt128) {
+            self.emit_int128_to_float(src_ty, elem_ty);
             return;
         }
         // long double 的值通道是 st(0) 而非 xmm0。旧实现只认 xmm0 通道, 对

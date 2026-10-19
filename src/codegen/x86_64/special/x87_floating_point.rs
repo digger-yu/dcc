@@ -310,6 +310,12 @@ impl Codegen {
         if self.float_in_st0(ty) {
             return; // 已在 st(0)
         }
+        // __int128 → long double：x87 只有 64 位整数的 `fild`，无法直接装载
+        // 128 位；走 libgcc soft-fp helper，结果按 ABI 交付在 st(0)。
+        if matches!(ty, Type::Int128 | Type::UInt128) {
+            self.emit_int128_to_float(ty, &Type::LongDouble);
+            return;
+        }
         match ty {
             Type::Float | Type::Double => self.emit_xmm0_to_st0(ty),
             _ => self.emit_int_to_st0(ty, src),

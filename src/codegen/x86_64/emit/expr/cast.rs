@@ -248,6 +248,11 @@ impl Codegen {
         }
         // 类型转换
         match (&src_ty, ty) {
+            // __int128 → 浮点（显式转换）：128 位无法单条 cvtsi2sd，拆分高低
+            // 64 位会双重舍入，交 libgcc soft-fp helper 保证全舍入模式正确。
+            (src @ (Type::Int128 | Type::UInt128), Type::Float | Type::Double | Type::LongDouble) => {
+                self.emit_int128_to_float(src, ty);
+            },
             (src, Type::Int128 | Type::UInt128) if !matches!(src, Type::Int128 | Type::UInt128) => {
                 if dst != 0 {
                     self.mov(0, dst);
