@@ -265,8 +265,12 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_i
                     continue;
                 }
             }
-            // Skip functions that access volatile globals
-            if !volatile_globals.is_empty() && func_refs_volatile(f, &volatile_globals) {
+            // Skip functions that access volatile objects. 除了 volatile 全局,
+            // **volatile 局部/参数**同样要跳过: SSA pass 会在它们上面做常量传播与
+            // 值复用, 把第二次读换成前一次的求值结果 (volatile 要求每次读都真的访存),
+            // 且 int128 一类的宽值在 SSA 往返后会被拼错 (`s128 = u128` 这条
+            // 128 位搬运实测在 -O2 变成 high+high, 结果整个量级错掉)。
+            if func_refs_volatile(f, &volatile_globals) {
                 continue;
             }
             // P0-4: 先将 switch 降级为 if-chain, 使含 switch 的函数也能 SSA 化
@@ -617,6 +621,10 @@ fn file_scope_bound_regs(decls: &[crate::ast::Decl]) -> std::collections::HashSe
 
 /// Returns true if the function references any volatile global variable.
 fn func_refs_volatile(f: &FuncDecl, volatile_globals: &std::collections::HashSet<String>) -> bool {
+    // volatile 形参: 读它同样必须真的访存, 不能被 SSA 复用。
+    if f.params.iter().any(|p| p.quals.is_volatile()) {
+        return true;
+    }
     if let Some(body) = &f.body {
         for item in &body.items {
             if block_item_refs_volatile(item, volatile_globals) {
@@ -631,6 +639,11 @@ fn block_item_refs_volatile(item: &BlockItem, vol: &std::collections::HashSet<St
     match item {
         BlockItem::Stmt(s) => stmt_refs_volatile(s, vol),
         BlockItem::Decl(Decl::Var(v)) => {
+            // 声明的对象本身就是 volatile: 即便初值里没出现 volatile 名字,
+            // 后续对它的读也不许被 SSA 复用。
+            if v.quals.is_volatile() {
+                return true;
+            }
             if let Some(init) = &v.init {
                 expr_refs_volatile(init, vol)
             } else {

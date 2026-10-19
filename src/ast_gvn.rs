@@ -25,6 +25,25 @@ pub fn run(module: &mut Module, level: u8) {
 }
 
 fn gvn_program(prog: &mut Program, fenv_access: bool) {
+    // 文件作用域 volatile 对象：读它们的表达式不得被 CSE/拷贝传播掉。
+    // 先按不可变借用收一遍，再进下面的可变借用循环（否则撞 borrowck）。
+    let volatile_globals: HashSet<String> = prog
+        .decls
+        .iter()
+        .filter_map(|d| match d {
+            Decl::Var(v) if v.quals.is_volatile() => Some(v.name.name.clone()),
+            _ => None,
+        })
+        .collect();
+    // 文件作用域对象的声明类型（判断赋值是否带隐式转换要用）。
+    let global_types: HashMap<String, Type> = prog
+        .decls
+        .iter()
+        .filter_map(|d| match d {
+            Decl::Var(v) => Some((v.name.name.clone(), v.ty.clone())),
+            _ => None,
+        })
+        .collect();
     for decl in &mut prog.decls {
         if let Decl::Func(f) = decl {
             // Skip GVN for functions with static locals: coalesce_block
@@ -36,7 +55,7 @@ fn gvn_program(prog: &mut Program, fenv_access: bool) {
             }
             // 函数级名字事实先算一次再下传: 「这个名字后来有没有被改」只看当前块判不出。
             // 必须在 `&mut f.body` 之前算 —— 两者同时借同一对象会撞borrowck。
-            let scope = FnScope::of(f);
+            let scope = FnScope::of(f, &volatile_globals, global_types.clone());
             if let Some(body) = &mut f.body {
                 gvn_block(body, fenv_access, &scope);
             }
@@ -258,20 +277,39 @@ struct FnScope {
     /// `__seg_gs` 连同 `%gs:` 前缀一起消失（实测 -O2 发成普通地址读写）。
     /// 差别的不是“少一次优化”：那是发往错误内存的一次读写。
     types: HashMap<String, Type>,
+    /// 本函数可见的 **volatile 对象名**（文件作用域 + 参数 + 局部）。
+    ///
+    /// 读这些名字的表达式不得参与 GVN/CSE 与拷贝传播：volatile 语义要求每次读
+    /// 都真的访存。注意不能用 `type_has_volatile(&e.ty())` 判断 —— C 的左值转换
+    /// 会剥掉顶层限定符，`volatile long long s64;` 的读取表达式 `s64` 其 `ty()`
+    /// 就是无修饰的 `LongLong`（volatile 存在 `VarDecl.quals` 里），那个判据恒假。
+    volatile: HashSet<String>,
+    /// 文件作用域对象的声明类型。赋值目标的声明类型可能不在这函数的
+    /// `types` 里（那是参数 + 局部），但判断「赋值是否带隐式转换」需要它。
+    global_types: HashMap<String, Type>,
 }
 
 impl FnScope {
-    fn of(f: &crate::ast::FuncDecl) -> Self {
+    fn of(
+        f: &crate::ast::FuncDecl,
+        volatile_globals: &HashSet<String>,
+        global_types: HashMap<String, Type>,
+    ) -> Self {
         let mut s = FnScope {
             locals: HashSet::new(),
             escaped: HashSet::new(),
             assigned: HashSet::new(),
             types: HashMap::new(),
+            volatile: volatile_globals.clone(),
+            global_types,
         };
         for p in &f.params {
             if let Some(n) = &p.name {
                 s.locals.insert(n.name.clone());
                 s.types.insert(n.name.clone(), p.ty.clone());
+                if p.quals.is_volatile() {
+                    s.volatile.insert(n.name.clone());
+                }
             }
         }
         if let Some(body) = &f.body {
@@ -290,6 +328,9 @@ fn collect_scope(b: &Block, s: &mut FnScope) {
             BlockItem::Decl(Decl::Var(v)) => {
                 s.locals.insert(v.name.name.clone());
                 s.types.insert(v.name.name.clone(), v.ty.clone());
+                if v.quals.is_volatile() {
+                    s.volatile.insert(v.name.name.clone());
+                }
                 // 数组名在表达式里等价于 `&a[0]`, 元素可经该指针被写。
                 if matches!(v.ty, Type::Array(_, _)) || is_addr_taken(&v.name.name, b) {
                     s.escaped.insert(v.name.name.clone());
@@ -613,15 +654,30 @@ fn gvn_block(block: &mut Block, fenv_access: bool, scope: &FnScope) {
                     let opaque = is_opaque_expr(init);
                     let mut deps = HashSet::new();
                     names_in(init, &mut deps);
-                    if let Some(key) = gvn_key_string(init, fenv_access) {
-                        if let Some((prev, _)) = tr.avail.get(&key) {
-                            let prev = prev.clone();
-                            *init = ident_expr(&prev, init.ty());
-                            tr.copies.insert(name, prev);
-                        } else if !opaque && !deps.contains(&name) && !key_is_bare_constant(&key) {
-                            // `x = x + 1` 形态不得入表: 平名字下「旧 x + 1」与「新 x」
-                            // 无法区分, 入表就等于给后面一条错误的替换。
-                            tr.avail.insert(key, (name, deps));
+                    // volatile 对象的读既不能复用先前求值, 也不能登记为可用副本:
+                    // 每次读都必须真的访存。（`Expr::ty()` 已剥掉顶层限定符,
+                    // 所以只能按名字查 `scope.volatile`。）
+                    let touches_volatile = deps.iter().any(|n| scope.volatile.contains(n));
+                    // 初值赋给变量时若发生隐式转换（`float fs = s64;`、`long b = x+y;`）,
+                    // 变量里装的已不是初值表达式的值, 不能拿它代表那个表达式 ——
+                    // 否则后面 `double ds = s64;` 会被换成 `ds = fs`, 拿 float 槽
+                    // 当 long long 读, 得到垃圾。
+                    let no_conversion = v.ty == init.ty();
+                    if !touches_volatile {
+                        if let Some(key) = gvn_key_string(init, fenv_access) {
+                            if let Some((prev, _)) = tr.avail.get(&key) {
+                                let prev = prev.clone();
+                                *init = ident_expr(&prev, init.ty());
+                                tr.copies.insert(name, prev);
+                            } else if !opaque
+                                && !deps.contains(&name)
+                                && !key_is_bare_constant(&key)
+                                && no_conversion
+                            {
+                                // `x = x + 1` 形态不得入表: 平名字下「旧 x + 1」与「新 x」
+                                // 无法区分, 入表就等于给后面一条错误的替换。
+                                tr.avail.insert(key, (name, deps));
+                            }
                         }
                     }
                     if opaque {
@@ -656,14 +712,28 @@ fn gvn_stmt(s: &mut Stmt, tr: &mut ValTrack, fenv_access: bool, scope: &FnScope)
                     let mut rhs_writes = HashSet::new();
                     collect_expr_writes(&**r, &mut rhs_writes);
                     let opaque = is_opaque_expr(&**r) || has_indirect(&rhs_writes);
-                    if let Some(key) = gvn_key_string(&**r, fenv_access) {
-                        if let Some((prev, _)) = tr.avail.get(&key) {
-                            let prev = prev.clone();
-                            **r = ident_expr(&prev, r.ty());
-                            tr.copies.insert(target.clone(), prev);
-                        } else if !opaque && !deps.contains(&target) && !key_is_bare_constant(&key)
-                        {
-                            tr.avail.insert(key, (target.clone(), deps.clone()));
+                    // 同上: 读到 volatile 对象的赋值不得被 CSE/拷贝传播替换。
+                    let touches_volatile = deps.iter().any(|n| scope.volatile.contains(n));
+                    // 赋值同样可能带隐式转换（`fs = s64;`），变量的值不等于右值表达式的值。
+                    // 声明类型查不到（例如匿名/未登记的名字）时保守地不登记。
+                    let no_conversion = scope
+                        .types
+                        .get(&target)
+                        .or_else(|| scope.global_types.get(&target))
+                        .map_or(false, |t| *t == r.ty());
+                    if !touches_volatile {
+                        if let Some(key) = gvn_key_string(&**r, fenv_access) {
+                            if let Some((prev, _)) = tr.avail.get(&key) {
+                                let prev = prev.clone();
+                                **r = ident_expr(&prev, r.ty());
+                                tr.copies.insert(target.clone(), prev);
+                            } else if !opaque
+                                && !deps.contains(&target)
+                                && !key_is_bare_constant(&key)
+                                && no_conversion
+                            {
+                                tr.avail.insert(key, (target.clone(), deps.clone()));
+                            }
                         }
                     }
                     // 写入目标后, 任何读过它的条目立刻作废 (顺序: 先入表再杀目标旧值,
