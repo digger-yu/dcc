@@ -57,3 +57,16 @@ LICENSE text eol=lf
 *.jpeg binary
 *.gif binary
 *.svg text eol=lf
+
+# 语言统计归类
+#
+# x86_64 反汇编快照 tests/disasm_snapshots_x86_64/<case>/expected.s 是 objdump -d
+# 输出经 normalize_objdump() 归一化后的**期望数据**，不是汇编源：含 `<nop padding>`
+# 这类折叠标记，`as` 直接拒收（invalid char '<'）。它沿用 .s 扩展名只为编辑器高亮，
+# 于是 linguist 按扩展名把 2.2 MB 快照全计成 Assembly（仓库语言条 ~12%），掩盖了
+# 真实的手写汇编只有 tests/fixtures 下那 2 个驱动分派用的 .s 输入（602 字节）。
+# 标 generated 让统计只反映源码组成；文件本身必须留在 git 里（它是 P12-F 独立
+# oracle，缺失即测试失败），故用标注而非改名。
+# 附带收益：再生成快照时 GB 级 diff 会被 GitHub 折叠，人工 review 政策在真实
+# 体积下仍可行。
+tests/disasm_snapshots_x86_64/**/expected.s linguist-generated=true
