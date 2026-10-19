@@ -6656,8 +6656,18 @@ impl<'a> Parser<'a> {
                     self.advance();
                 },
                 TokKind::Ident
-                    if matches!(self.cur.text.as_str(), "_Float64x" | "_Float128" | "_Float128x") =>
+                    if matches!(
+                        self.cur.text.as_str(),
+                        "_Float64x" | "_Float128" | "_Float128x" | "__float80" | "__float128"
+                    ) =>
                 {
+                    // `__float80` 在 x86-64 上就是 x87 80-bit 扩展格式，与
+                    // long double 是同一个类型（size/align 均 16B），映射是准确的。
+                    // `__float128` 是 binary128（113 位尾数、指数范围更大），
+                    // 此处与既有的 `_Float128` / `_Float128x` 一样退化为 long
+                    // double：x86-64 无 binary128 硬件，完整软实现需整套
+                    // libquadmath 软浮点（算术/比较/转换/printf），尚未支持。
+                    // size/align 与真 __float128 一致（均 16B），故 ABI 布局不破。
                     base = Some(Type::LongDouble);
                     self.advance();
                 },
@@ -11518,6 +11528,9 @@ impl<'a> Parser<'a> {
                     | "__builtin_va_list"
                     | "_Float16" | "_Float32" | "_Float32x" | "_Float64" | "_Float64x"
                     | "_Float128" | "_Float128x"
+                    // GNU 扩展浮点关键字: __float80 (x86 的 80-bit 扩展格式,
+                    // 等同 long double) 与 __float128 (binary128)。
+                    | "__float80" | "__float128" | "__float128x"
                     | "_ms_restrict" | "__declspec" | "__pragma" | "_Pragma"
             )
     }
