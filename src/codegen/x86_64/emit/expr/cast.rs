@@ -231,8 +231,15 @@ impl Codegen {
                 },
                 // ld → 整型：先落 f64 到 xmm0，再走下面按 xmm0 取值的既有分支。
                 // （80→64→int 存在罕见双舍入边界差，见迁移文档“仍未解决”清单）
+                // 例外：64 位 (有/无符号) 直接走 x87 精确整数转换，必须保持
+                // st(0) 不动——经 f64 会丢掉 >= 2^52 的精度。
                 _ => {
-                    self.emit_x87_to_xmm0();
+                    if !matches!(
+                        ty,
+                        Type::ULong | Type::ULongLong | Type::Long | Type::LongLong
+                    ) {
+                        self.emit_x87_to_xmm0();
+                    }
                 },
             }
         }
@@ -472,9 +479,15 @@ impl Codegen {
                 Type::LongDouble,
                 Type::Int | Type::Long | Type::LongLong | Type::Char | Type::Short,
             ) => {
-                // long double 内部为 double, 值已在 xmm0
-                // cvttsd2si dst, xmm0
                 let wide = matches!(ty, Type::Long | Type::LongLong);
+                // 64 位有符号走精确 x87 整数转换：值仍在 st(0)（上面已跳过
+                // emit_x87_to_xmm0），经 f64 会丢掉 >= 2^52 的精度。
+                if wide {
+                    self.emit_x87_long_double_to_int64(dst);
+                    return;
+                }
+                // long double → 窄整型：值已由上面落成 f64 到 xmm0
+                // cvttsd2si dst, xmm0
                 // cvt 的 REX 只在真的扩了字段时才发：`0x40 | 0 | 0` 是什么也不扩的裸前缀，
                 // 多占一字节并被 objdump 标成 `rex cvttsd2si`（多余位的唯一读数）。
                 let rex = (if wide { 0x08 } else { 0 }) | (if dst >= 8 { 0x04 } else { 0 });

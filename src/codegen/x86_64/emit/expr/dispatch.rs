@@ -954,6 +954,15 @@ impl Codegen {
                         } else if matches!(l_ty, Type::Float | Type::Double | Type::LongDouble)
                             || matches!(l_ty, Type::Imaginary(_))
                         {
+                            // 局部 float/double 标量落槽前，需把 RHS 送达对应信道：
+                            //  * Float/Double → xmm0 (SSE)，由 gen_float_store 内部负责；
+                            //  * LongDouble  → x87 st(0)（float_in_st0）。整数/浮点 RHS
+                            //    必须在此转换，否则 gen_float_store 的 `fstp tbyte` 会把
+                            //    st(0) 上的栈上残留写进变量，导致 `F a; a=(signed char)0;`
+                            //    得到 -nan。
+                            if self.float_in_st0(l_ty) {
+                                self.emit_operand_to_st0(&r_ty, 0);
+                            }
                             self.gen_float_store(&name.name, l_ty);
                         } else {
                             self.mov_to_stack(dst, &name.name);

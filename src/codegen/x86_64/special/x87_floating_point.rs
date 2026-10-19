@@ -16,6 +16,8 @@
 
 use crate::ast::*;
 use crate::codegen::shared::asm_operand::Width;
+use crate::codegen::x86_64::codegen::JumpKind;
+use crate::float80;
 use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::opcode::{MemOperand, Operand, SimdWidth, X86_64Opcode, X87Op};
 use crate::codegen::x86_64::Codegen;
@@ -74,12 +76,15 @@ impl Codegen {
             (0xDB, 7, false) => 10,    // fstp m80fp
             (0xDB, 0, false) => 4,    // fild m32int (DB /0)
             (0xDF, 5, true) => 8,     // fild m64int (DF /5 + REX.W)
+            (0xDB, 7, false) => 4,    // fistp m32int (DB /7)
+            (0xDF, 7, true) => 8,     // fistp m64int (DF /7 + REX.W)
             _ => unreachable!("emit_x87_mem_at: unknown opcode/reg_field/rexw tuple (op={opcode:#x}, reg={reg_field}, rexw={rexw})"),
         };
         let op = match (opcode, reg_field) {
             (0xD9, 0) | (0xDD, 0) | (0xDB, 5) => X87Op::FldMem { width },
             (0xD9, 3) | (0xDD, 3) | (0xDB, 7) => X87Op::FstpMem { width },
             (0xDB, 0) | (0xDF, 5) => X87Op::FildMem { width },
+            (0xDB, 7) | (0xDF, 7) => X87Op::FistpMem { width },
             _ => unreachable!(),
         };
         let mem = MemOperand {
@@ -653,6 +658,136 @@ impl Codegen {
     /// 时 ZF=PF=CF=1，所以 `<`/`<=`/`==`/`!=` 必须额外用 PF 排除 unordered，
     /// 否则 NaN 会判成“小于/小于等于/相等”（旧的裸 `setb/setbe/sete` 就是错的）。
     /// `>`/`>=` 用 `seta`/`setae`：unordered 有 CF=1，天然为假。
+    /// `long double` (x87 st(0)) → 无符号 64 位 `dst`，**精确**不丢精度。
+    ///
+    /// 全程在 x87 内完成：先把 FPU 置为截断舍入 (`fldcw`)，用 `fistp` 截断到内存；
+    /// 对 [2^63, 2^64) 区间按 2^63 拆分 (该区间 `fistp` 给出带符号负结果，需补偿)。
+    /// 不经 f64 通道，因此 `0xFFFFFFFFFFFFFFFF` 这类 80-bit 可精确表示、但 f64 舍入
+    /// 会丢精度的值也能正确转换 (对比 `emit_float_to_ulong` 的 xmm0 路径)。
+    ///
+    /// 前置：st(0) = 待转换的 long double；后置：st(0) 已弹空，结果在 `dst` 寄存器。
+    pub fn emit_x87_long_double_to_uint64(&mut self, dst: u8) {
+        // 每个调用点必须生成唯一的标签：本函数在同一函数体内可能被多次调用，
+        // 若用固定名字，重复标签会让 jmp 跳到别的调用点，导致后续语句被跳过。
+        let l_hi = self.fresh_label();
+        let l_lo = self.fresh_label();
+        let l_done = self.fresh_label();
+        // scratch:
+        //   [rsp]    = 保存的原 FPU 控制字 (2B)
+        //   [rsp+8]  = fistp 结果 (8B)
+        //   [rsp+16] = 截断模式控制字 0x0F3F (2B)
+        //   [rsp+24] = long double x 的 tbyte 暂存 (10B)
+        self.emit_insn(&Insn::sub_rsp_imm(48));
+        // 先把 x 落盘，避免 fild/fistp 的栈式操作丢失它。
+        self.emit_x87_fstp_at(4, 24, &Type::LongDouble); // fstp tbyte [rsp+24]; st0 弹空
+        // 写截断 CW 0x0F3F 到 [rsp+16]
+        self.mov_imm(0, 0x0F3F);
+        self.emit_insn(&Insn::new(
+            X86_64Opcode::MovRm {
+                rip_relative: false,
+                width: Width::B16,
+                dst: Operand::Mem(MemOperand { disp: 16, base: Some(4), index: None, seg: None }),
+                src: Operand::Reg(0, Width::B16),
+            },
+            &[],
+        )); // mov [rsp+16], ax
+        // 保存原 CW，并切到截断模式
+        self.emit_insn(&Insn::fcw_mem(true, 4, 0)); // fnstcw [rsp]
+        self.emit_insn(&Insn::fcw_mem(false, 4, 16)); // fldcw [rsp+16]
+        // 第一次 fistp：x 截断到 [rsp+8]，并据符号位区分区间。
+        self.emit_x87_fld_at(4, 24, &Type::LongDouble); // fld tbyte [rsp+24]  → st0=x
+        self.emit_x87_mem_at(0xDF, 7, 4, 8, true); // fistp qword [rsp+8]       → st0 弹空
+        self.emit_insn(&Insn::new(
+            X86_64Opcode::MovRm {
+                rip_relative: false,
+                width: Width::B64,
+                dst: Operand::Reg(dst, Width::B64),
+                src: Operand::Mem(MemOperand { disp: 8, base: Some(4), index: None, seg: None }),
+            },
+            &[],
+        )); // mov dst, [rsp+8]
+        self.emit_insn(&Insn::test_rm_reg(Width::B64, dst, dst)); // test dst, dst
+        // 非非负 (SF=1，即 x >= 2^63) 时落入 .hi 做 2^63 补偿；
+        // 否则直接落到 .lo（dst 已是正确结果）。
+        self.jmp_rel32(&l_lo, JumpKind::Jns);
+        // .hi: x >= 2^63
+        self.label(&l_hi);
+        self.emit_x87_fld_at(4, 24, &Type::LongDouble); // fld tbyte [rsp+24] → st0=x
+        self.emit_x87_float_imm(
+            FloatConst::LongDouble(crate::float80::from_i128(1i128 << 63)),
+            &Type::LongDouble,
+        ); // fld tbyte [rip] → st0=2^63, st1=x
+        self.emit_insn(&Insn::x87_fixed(0xDE, 0xE9)); // fsubp st(1),st(0) → st0 = x-2^63
+        self.emit_x87_mem_at(0xDF, 7, 4, 8, true); // fistp qword [rsp+8] → st0 弹空
+        self.emit_insn(&Insn::new(
+            X86_64Opcode::MovRm {
+                rip_relative: false,
+                width: Width::B64,
+                dst: Operand::Reg(dst, Width::B64),
+                src: Operand::Mem(MemOperand { disp: 8, base: Some(4), index: None, seg: None }),
+            },
+            &[],
+        )); // mov dst, [rsp+8]
+        // 补偿 2^63：置 bit 63。
+        let bts_modrm = 0xE8 | (dst & 7);
+        let mut bts = vec![0x48u8]; // REX.W
+        if dst >= 8 {
+            bts[0] |= 0x01; // REX.B
+        }
+        bts.extend_from_slice(&[0x0F, 0xBA, bts_modrm, 0x3F]); // bts dst, 63
+        self.emit_insn(&Insn::raw_bytes(&bts));
+        self.jmp_rel32(&l_done, JumpKind::Jmp);
+        // .lo: x < 2^63，dst 已是正确结果，无需补偿。
+        self.label(&l_lo);
+        // .done
+        self.label(&l_done);
+        self.emit_insn(&Insn::fcw_mem(false, 4, 0)); // fldcw [rsp]  (恢复原 CW)
+        self.emit_insn(&Insn::add_rsp_imm(48));
+    }
+
+    /// `long double` (x87 st(0)) → 有符号 64 位 `dst`，**精确**不丢精度。
+    ///
+    /// 与无符号版同源：`long double → int64` 若经 f64 通道 (`emit_x87_to_xmm0`
+    /// + `cvttsd2si`) 会把 >= 2^52 的值舍入掉，例如 2^63-2 被舍入成 2^63 后
+    /// 被饱和成 2^63-1、-(2^63-1) 直接变成 -2^63。这里直接在 x87 内用
+    /// `fistp` (置截断舍入) 转换，保持全 80-bit 精度。
+    ///
+    /// 前置：st(0) = 待转换的 long double；后置：st(0) 已弹空，结果在 `dst`。
+    pub fn emit_x87_long_double_to_int64(&mut self, dst: u8) {
+        // scratch:
+        //   [rsp]    = 保存的原 FPU 控制字 (2B)
+        //   [rsp+8]  = fistp 结果 (8B)
+        //   [rsp+16] = 截断模式控制字 0x0F3F (2B)
+        //   [rsp+24] = long double x 的 tbyte 暂存 (10B)
+        self.emit_insn(&Insn::sub_rsp_imm(48));
+        self.emit_x87_fstp_at(4, 24, &Type::LongDouble); // fstp tbyte [rsp+24]; st0 弹空
+        self.mov_imm(0, 0x0F3F);
+        self.emit_insn(&Insn::new(
+            X86_64Opcode::MovRm {
+                rip_relative: false,
+                width: Width::B16,
+                dst: Operand::Mem(MemOperand { disp: 16, base: Some(4), index: None, seg: None }),
+                src: Operand::Reg(0, Width::B16),
+            },
+            &[],
+        )); // mov [rsp+16], ax
+        self.emit_insn(&Insn::fcw_mem(true, 4, 0)); // fnstcw [rsp]
+        self.emit_insn(&Insn::fcw_mem(false, 4, 16)); // fldcw [rsp+16]
+        self.emit_x87_fld_at(4, 24, &Type::LongDouble); // fld tbyte [rsp+24] → st0=x
+        self.emit_x87_mem_at(0xDF, 7, 4, 8, true); // fistp qword [rsp+8]      → st0 弹空
+        self.emit_insn(&Insn::fcw_mem(false, 4, 0)); // fldcw [rsp] (恢复原 CW)
+        self.emit_insn(&Insn::new(
+            X86_64Opcode::MovRm {
+                rip_relative: false,
+                width: Width::B64,
+                dst: Operand::Reg(dst, Width::B64),
+                src: Operand::Mem(MemOperand { disp: 8, base: Some(4), index: None, seg: None }),
+            },
+            &[],
+        )); // mov dst, [rsp+8]
+        self.emit_insn(&Insn::add_rsp_imm(48));
+    }
+
     pub fn emit_x87_setcc_flags(&mut self, op: BinOp) {
         match op {
             BinOp::Gt => {

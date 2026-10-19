@@ -301,6 +301,10 @@ pub(crate) enum X87Op {
     FstpMem { width: u8 },
     /// fild m32int / m64int. width: 4=m32int, 8=m64int (带 REX.W).
     FildMem { width: u8 },
+    /// fistp m32int / m64int. width: 4=m32int (DB /7), 8=m64int (DF /7 + REX.W).
+    /// 用于将 x87 st(0) 按当前舍入模式截断存入整数内存 (long double → 无符号 64 位
+    /// 精确转换时配合 fldcw 置截断模式使用).
+    FistpMem { width: u8 },
     /// P11 Bucket E: stmxcsr/ldmxcsr m32 — 0F AE /3 (store) or /2 (load).
     /// Encoding: 0F AE modrm(mod=00, reg=2|3, r/m=base) + SIB(disp8|disp32).
     MxcsrMem { store: bool },
@@ -1863,7 +1867,8 @@ impl X86_64Opcode {
                     },
                     X87Op::FldMem { width }
                     | X87Op::FstpMem { width }
-                    | X87Op::FildMem { width } => {
+                    | X87Op::FildMem { width }
+                    | X87Op::FistpMem { width } => {
                         // mem 是 &Option<MemOperand>, 不能用 ? 运算符解引用.
                         #[allow(clippy::question_mark)]
                         let mem = match mem {
@@ -1893,6 +1898,8 @@ impl X86_64Opcode {
                             (X87Op::FstpMem { .. }, 10) => (0xDB, 7, false), // fstp m80fp
                             (X87Op::FildMem { .. }, 4) => (0xDB, 0, false), // fild m32int (DB /0)
                             (X87Op::FildMem { .. }, 8) => (0xDF, 5, true), // fild m64int (DF /5 + REX.W)
+                            (X87Op::FistpMem { .. }, 4) => (0xDB, 7, false), // fistp m32int (DB /7)
+                            (X87Op::FistpMem { .. }, 8) => (0xDF, 7, true), // fistp m64int (DF /7 + REX.W)
                             _ => return None,
                         };
                         // REX: base>=8 → REX.B; index>=8 → REX.X; rexw → REX.W.
@@ -3655,7 +3662,8 @@ impl X86_64Opcode {
                     },
                     X87Op::FldMem { width }
                     | X87Op::FstpMem { width }
-                    | X87Op::FildMem { width } => {
+                    | X87Op::FildMem { width }
+                    | X87Op::FistpMem { width } => {
                         let m = match width {
                             4 if matches!(op, X87Op::FldMem { .. }) => "flds",
                             8 if matches!(op, X87Op::FldMem { .. }) => "fldl",
@@ -3665,6 +3673,8 @@ impl X86_64Opcode {
                             10 if matches!(op, X87Op::FstpMem { .. }) => "fstpt",
                             4 if matches!(op, X87Op::FildMem { .. }) => "fildl",
                             8 if matches!(op, X87Op::FildMem { .. }) => "fildll",
+                            4 if matches!(op, X87Op::FistpMem { .. }) => "fistps",
+                            8 if matches!(op, X87Op::FistpMem { .. }) => "fistpl",
                             _ => "fld",
                         };
                         let mem_str = mem

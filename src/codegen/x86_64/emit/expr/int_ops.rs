@@ -111,7 +111,11 @@ impl Codegen {
             int_ty,
             Type::Bool | Type::UChar | Type::UShort | Type::UInt | Type::ULong | Type::ULongLong
         ) {
-            if matches!(float_ty, Type::LongDouble) {
+            if matches!(float_ty, Type::LongDouble)
+                && !matches!(int_ty, Type::ULong | Type::ULongLong)
+            {
+                // 无符号 64 位走 emit_x87_long_double_to_uint64，需保持 st(0) 不变；
+                // 其余无符号型值可先落到 f64 (xmm0) 再走 xmm 通道。
                 self.emit_x87_to_xmm0();
             }
             self.emit_float_to_unsigned(dst, float_ty, int_ty);
@@ -174,6 +178,12 @@ impl Codegen {
                 // `gen_expr_cast` 的 st(0) 分流倒是正确。
                 // 现在与显式转换共用同一个 Layer0 原语: 先把 st(0) 硬件舍入
                 // 落成 f64 到 xmm0, 再走按 xmm0 取值的 cvttsd2si。
+                // 例外：64 位有符号同样受 80→64 舍入影响 (2^63-2 会被舍入成
+                // 2^63 再饱和成 2^63-1)，改走精确的 x87 整数转换。
+                if wide {
+                    self.emit_x87_long_double_to_int64(dst);
+                    return;
+                }
                 self.emit_x87_to_xmm0();
                 let dst_name = crate::codegen::x86_64::abi::regnames::att_name_of_num(
                     dst,
@@ -216,6 +226,15 @@ impl Codegen {
     /// 一致地钳到 0。
     pub(crate) fn emit_float_to_unsigned(&mut self, dst: u8, float_ty: &Type, int_ty: &Type) {
         let is_single = matches!(float_ty, Type::Float);
+        // long double 交付在 x87 st(0)：经 f64 通道 (emit_float_to_ulong) 会因
+        // 80→64 舍入丢失 >= 2^52 的精度 (例如 0xFFFFFFFFFFFFFFFF 四舍五入成 2^64)，
+        // 故无符号 64 位走精确的 x87 整数转换 (st(0) 信道).
+        if matches!(float_ty, Type::LongDouble)
+            && matches!(int_ty, Type::ULong | Type::ULongLong)
+        {
+            self.emit_x87_long_double_to_uint64(dst);
+            return;
+        }
         if matches!(int_ty, Type::ULong | Type::ULongLong) {
             self.emit_float_to_ulong(dst, !is_single);
             return;
