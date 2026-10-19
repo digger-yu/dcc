@@ -1082,6 +1082,7 @@ impl Codegen {
         let libm = format!("{}{}", stem, libm_suffix);
         Some((libm, is_ld))
     }
+
     pub(crate) fn gen_builtin(&mut self, name: &str, args: &[Expr], dst: u8) -> bool {
         match name {
             // __builtin_expect(cond, hint): 返回 cond 的值 (第二参数是分支预测
@@ -1760,9 +1761,82 @@ impl Codegen {
                 self.mov_imm(dst, 0);
                 true
             },
-            // __builtin_ilogb / __builtin_iseqsig: 转发到 libc
-            "__builtin_ilogb" | "__builtin_ilogbf" | "__builtin_ilogbl" | "__builtin_iseqsig"
-            | "__builtin_iseqsigf" | "__builtin_iseqsigl" => {
+            // __builtin_iseqsig/iseqsigf/iseqsigl: IEEE **信令相等** (signaling
+            // ordered equality) —— 语义同 `==` 且**保留异常**: 仅当两操作数均非
+            // NaN 且相等时为 1 (0==-0 → 1, +Inf==+Inf → 1, 任一操作数为 NaN
+            // (含 quiet NaN) → 0), 且任一操作数为 NaN 时**必须**置 MXCSR IE
+            // (gcc-dg torture/builtin-iseqsig-2.c 断言 fetestexcept(FE_INVALID)
+            // 在 NaN 用例被置位、非 NaN 用例不置位)。
+            // 因此必须用**信令**比较 comisd/comiss (0F 2F / 66 0F 2F), 不能用
+            // ucomisd —— 后者对 quiet NaN 不置 IE, 该测试的 8 处 NaN 断言会失败。
+            // glibc 无 iseqsig 符号, 故必须内联 (旧代码转发 libc 导致链接失败)。
+            "__builtin_iseqsig" | "__builtin_iseqsigf" | "__builtin_iseqsigl" => {
+                if args.len() < 2 {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                let arg_ty = args[0].ty();
+                if matches!(arg_ty, Type::LongDouble) {
+                    self.gen_iseqsig_x87(&args[0], &args[1]);
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
+                    return true;
+                }
+                // 非实浮点实参: GCC 亦未定义, 退化为 0 (绝不转发不存在的 libc 符号)。
+                if !matches!(arg_ty, Type::Float | Type::Double) {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                let is_f = matches!(arg_ty, Type::Float);
+                let width = if is_f {
+                    SimdWidth::SS
+                } else {
+                    SimdWidth::SD
+                };
+                let mov_xmm = |s: &mut Self, d: u8, r: u8| {
+                    if is_f {
+                        s.emit_insn(&Insn::movss_xmm(d, r));
+                    } else {
+                        s.emit_insn(&Insn::movsd_xmm(d, r));
+                    }
+                };
+                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = a
+                mov_xmm(self, 2, 0); // xmm2 = a (备份)
+                self.gen_expr(&args[1], Self::EVAL_BASE); // xmm0 = b
+                mov_xmm(self, 1, 0); // xmm1 = b
+                mov_xmm(self, 0, 2); // xmm0 = a
+                self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Comi, width, 0, 1));
+                // comisd xmm0, xmm1 (信令): ZF=1 ∧ PF=0 ⇒ 有序且相等。
+                // 任一为 NaN 时 ZF=PF=CF=1, setnp 掩掉 → 0。
+                self.emit_insn(&Insn::setcc_reg(
+                    crate::codegen::x86_64::opcode::CondCode::Eq,
+                    0,
+                )); // sete al (ZF=1)
+                self.emit_insn(&Insn::setcc_reg(
+                    crate::codegen::x86_64::opcode::CondCode::Np,
+                    3,
+                )); // setnp bl (PF=0 ⇒ 非 NaN)
+                self.emit_insn(&Insn::alu_rm_reg_reg(
+                    crate::codegen::x86_64::opcode::AluOp::And,
+                    crate::codegen::shared::asm_operand::Width::B8,
+                    0,
+                    3,
+                )); // and al, bl
+                self.emit_insn(&Insn::mov_ext(
+                    false,
+                    crate::codegen::shared::asm_operand::Width::B8,
+                    crate::codegen::shared::asm_operand::Width::B32,
+                    0,
+                    0,
+                )); // movzx eax, al
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            },
+            // __builtin_ilogb: 转发到 libc
+            "__builtin_ilogb" | "__builtin_ilogbf" | "__builtin_ilogbl" => {
                 let libc_name = name.strip_prefix("__builtin_").unwrap();
                 let ar = [7u8, 6, 2, 1, 8, 9];
                 for (i, a) in args.iter().enumerate() {
@@ -2216,6 +2290,23 @@ impl Codegen {
                     return true;
                 }
                 let arg_ty = args[0].ty();
+
+                // long double: 值在 st(0), 走 x87 80-bit 位型判据。
+                if matches!(arg_ty, Type::LongDouble) {
+                    self.gen_ld_arg_bits(&args[0]);
+                    self.gen_ld_bit_predicate(0); // isnan
+                    self.emit_insn(&Insn::mov_ext(
+                        false,
+                        crate::codegen::shared::asm_operand::Width::B8,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        0,
+                        0,
+                    )); // movzx rax, al
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
+                    return true;
+                }
                 let is_f = matches!(arg_ty, Type::Float);
                 self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
                                                           // ucomis{s,d} xmm0, xmm0
@@ -2265,6 +2356,23 @@ impl Codegen {
                     return true;
                 }
                 let arg_ty = args[0].ty();
+                // long double: 走 x87 80-bit 位型判据 (见 __builtin_isnan 的同名分支)。
+                if matches!(arg_ty, Type::LongDouble) {
+                    self.gen_ld_arg_bits(&args[0]);
+                    self.gen_ld_bit_predicate(3); // isnormal
+                    self.emit_insn(&Insn::mov_ext(
+                        false,
+                        crate::codegen::shared::asm_operand::Width::B8,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        0,
+                        0,
+                    )); // movzx rax, al
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
+                    return true;
+                }
+
                 let is_f = matches!(arg_ty, Type::Float);
                 self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
                 use crate::codegen::shared::asm_operand::Width as W;
@@ -2321,6 +2429,16 @@ impl Codegen {
                     return true;
                 }
                 let arg_ty = args[0].ty();
+
+                // long double: 走 x87 80-bit 位型判据 (返回 ±1)。
+                if matches!(arg_ty, Type::LongDouble) {
+                    self.gen_ld_arg_bits(&args[0]);
+                    self.gen_ld_bit_predicate(1); // isinf (±1)
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
+                    return true;
+                }
                 let is_f = matches!(arg_ty, Type::Float);
                 // 1. isinf: |x| == +Inf 且非 NaN
                 self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
@@ -2596,6 +2714,39 @@ impl Codegen {
             | "__builtin_isunorderedf64" | "__builtin_isunorderedf64x" | "__builtin_isunorderedf128" | "__builtin_isunorderedf128x" => {
                 if args.len() < 2 {
                     self.mov_imm(dst, 0);
+                    return true;
+                }
+                // long double: 两操作数进 st(0)/st(1), fcomip 后 PF=1 ⇔ 无序。
+                // SSE 侧那套 (cvtss2sd + ucomisd) 对 st(0) 里的 long double 无效。
+                if matches!(args[0].ty(), Type::LongDouble)
+                    || matches!(args[1].ty(), Type::LongDouble)
+                {
+                    self.gen_expr(&args[0], Self::EVAL_BASE);
+                    self.emit_operand_to_st0(&args[0].ty(), 0);
+                    self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp, 16
+                    self.emit_x87_fstp_at(4, 0, &Type::LongDouble); // fstp tbyte [rsp]
+                    self.expr_depth += 1;
+                    self.gen_expr(&args[1], Self::EVAL_BASE);
+                    self.emit_operand_to_st0(&args[1].ty(), 0);
+                    self.expr_depth -= 1;
+                    self.emit_x87_fld_at(4, 0, &Type::LongDouble); // fld tbyte [rsp] → st(0)=a
+                    self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp, 16
+                    self.emit_insn(&Insn::x87_fixed(0xDF, 0xF1)); // fcomip st(0), st(1)
+                    self.emit_x87_fstp_st0(); // 弹掉残留的右操作数 (不改 EFLAGS)
+                    self.emit_insn(&Insn::setcc_reg(
+                        crate::codegen::x86_64::opcode::CondCode::P,
+                        0,
+                    )); // setp al (PF=1 ⇒ 无序)
+                    self.emit_insn(&Insn::mov_ext(
+                        false,
+                        crate::codegen::shared::asm_operand::Width::B8,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        0,
+                        0,
+                    )); // movzx rax, al
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
                     return true;
                 }
                 self.gen_expr(&args[0], Self::EVAL_BASE);
@@ -2882,11 +3033,12 @@ impl Codegen {
                     // 最高字节 (第 9 字节) 的 bit 7. 把 st(0) 弹出到栈上 16 字节
                     // scratch, 读 [rsp+9] 的符号位.
                     self.gen_expr(&args[0], Self::EVAL_BASE); // st(0) = x
+                    self.emit_operand_to_st0(&args[0].ty(), 0);
                     self.emit_insn(&Insn::sub_rsp_imm(16));
-                    // fstp tbyte (%rsp): Df/7 = DB /7, modrm mod=00 reg=111 r/m=100 (rsp/SIB)
+                    // fstp tbyte (%rsp): DB /7, modrm mod=00 reg=111 r/m=100 (rsp/SIB)
                     // 紧跟 SIB 字节 0x24 (no scale/index/base=rsp)
                     self.emit_insn(&Insn::raw_bytes(&[0xDB, 0x3C, 0x24]));
-                    // movzx eax, byte [rsp+9]: REX.W 不能加 (32-bit movzx), 用 0F B6 44 24 09
+                    // movzx eax, byte [rsp+9]: 32-bit movzx (0F B6 44 24 09)
                     self.emit_insn(&Insn::raw_bytes(&[0x0F, 0xB6, 0x44, 0x24, 0x09]));
                     // shr eax, 7
                     self.emit_insn(&Insn::new(
@@ -3054,6 +3206,26 @@ impl Codegen {
                     "__builtin_clz" => 32,
                     _ => args[0].ty().size() as i32 * 8,
                 };
+                // 位宽 < 64 时, gen_expr 可能把值符号扩展进高 32 位 (负 int),
+                // 64 位 bsr 会把这些高位算成最高置位 → clz 变负 (pr94802-1).
+                // 用 32 位自移动把高位清零 (bsr 之后只看低 bits 位).
+                if bits < 64 {
+                    self.emit_insn(&Insn::new(
+                        crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                            rip_relative: false,
+                            width: crate::codegen::shared::asm_operand::Width::B32,
+                            dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                dst,
+                                crate::codegen::shared::asm_operand::Width::B32,
+                            ),
+                            src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                dst,
+                                crate::codegen::shared::asm_operand::Width::B32,
+                            ),
+                        },
+                        &[],
+                    )); // mov dst(32), dst(32) — 零扩展高位
+                }
                 // bsr dst, dst → dst = 最高位位置
                 self.emit_insn(&Insn::bit_scan_reg_reg(
                     true,
@@ -3085,6 +3257,55 @@ impl Codegen {
                     dst,
                     dst,
                 )); // bsf dst, dst
+                true
+            },
+            // __builtin_clzg/ctzg(x, fb): x==0 时返回 fb, 否则返回 clz/ctz(x).
+            // bsr/bsf 对 0 源结果未定义但会置 ZF; 据此 cmov 选 fb (pr112639).
+            "__builtin_clzg" | "__builtin_ctzg" => {
+                if args.len() < 2 {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                let is_clz = name == "__builtin_clzg";
+                // GCC 语义: int → 32 位, 其余按操作数类型宽度.
+                let bits = if args[0].ty() == Type::Int {
+                    32
+                } else {
+                    args[0].ty().size() as i32 * 8
+                };
+                // 左到右求值: 先 x (rax) 并存栈 (连推两次保持 16 对齐, fb 若含调用也安全),
+                // 再 fb → rdx.
+                self.gen_expr(&args[0], Self::EVAL_BASE); // rax = x
+                self.push(0);
+                self.push(0);
+                self.gen_expr(&args[1], Self::EVAL_BASE); // rax = fb
+                self.mov(2, 0); // rdx = fb
+                self.pop(0); // rax = x
+                self.pop(1); // 丢弃重复副本 (rcx 为临时)
+                self.mov(1, 0); // rcx = x
+                self.emit_insn(&Insn::bit_scan_reg_reg(
+                    is_clz,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    1,
+                    1,
+                )); // bsr/bsf rcx, rcx ; ZF=(x==0)
+                if is_clz {
+                    // clz = (bits-1) - rcx
+                    self.emit_insn(&Insn::unary_rm_reg(
+                        crate::codegen::x86_64::opcode::UnaryOp::Neg,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        1,
+                    ));
+                    self.emit_insn(&Insn::alu_rm_reg_imm8_b64(0, 1, (bits - 1) as i64));
+                }
+                // x==0 ? fb : rcx  —— test 置 ZF 后 cmovz 选 fb.
+                self.emit_insn(&Insn::test_rm_reg(
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    0,
+                    0,
+                ));
+                self.emit_insn(&Insn::cmovcc_reg_reg_b64(0x44, 1, 2)); // cmovz rcx, rdx
+                self.mov(dst, 1); // dst = rcx
                 true
             },
             // __builtin_popcount/popcountl/popcountll: 位计数
@@ -6349,6 +6570,23 @@ impl Codegen {
                     return true;
                 }
                 let arg_ty = args[0].ty();
+                // long double: 走 x87 80-bit 位型判据 (见 __builtin_isnan 的同名分支)。
+                if matches!(arg_ty, Type::LongDouble) {
+                    self.gen_ld_arg_bits(&args[0]);
+                    self.gen_ld_bit_predicate(2); // isfinite
+                    self.emit_insn(&Insn::mov_ext(
+                        false,
+                        crate::codegen::shared::asm_operand::Width::B8,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        0,
+                        0,
+                    )); // movzx rax, al
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
+                    return true;
+                }
+
                 let is_f = matches!(arg_ty, Type::Float);
                 self.gen_expr(&args[0], Self::EVAL_BASE);
                 self.emit_insn(&Insn::new(
@@ -6435,6 +6673,45 @@ impl Codegen {
             | "__builtin_islessgreater" => {
                 if args.len() < 2 {
                     self.mov_imm(dst, 0);
+                    return true;
+                }
+                // long double 在 st(0), 走 x87 fucomip + 标志翻译 (emit_x87_setcc_flags 已按无序
+                // 语义排除 NaN)。islessgreater = (a<b) || (a>b): 两次比较后 or。
+                if matches!(args[0].ty(), Type::LongDouble)
+                    || matches!(args[1].ty(), Type::LongDouble)
+                {
+                    let is_llg = name == "__builtin_islessgreater";
+                    let op = match name {
+                        "__builtin_isgreater" => crate::ast::BinOp::Gt,
+                        "__builtin_isgreaterequal" => crate::ast::BinOp::Ge,
+                        "__builtin_isless" => crate::ast::BinOp::Lt,
+                        // islessgreater = (a<b) || (a>b): 第一次比较取 a<b, 不能用
+                        // a<=b, 否则 0.0 与 -0.0(相等) 会被误判为 lessgreater。
+                        "__builtin_islessgreater" => crate::ast::BinOp::Lt,
+                        _ => crate::ast::BinOp::Le,
+                    };
+                    self.gen_float_cmp_x87(op, &args[0].ty(), &args[0], &args[1]);
+                    if is_llg {
+                        // a<b
+                        self.push(0);
+                        self.gen_float_cmp_x87(
+                            crate::ast::BinOp::Gt,
+                            &args[0].ty(),
+                            &args[0],
+                            &args[1],
+                        ); // a>b
+                        self.mov(2, 0); // rdx = (a>b)
+                        self.pop(0); // rax = (a<b)
+                        self.emit_insn(&Insn::alu_rm_reg_reg(
+                            crate::codegen::x86_64::opcode::AluOp::Or,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                            0,
+                            2,
+                        )); // or rax, rdx
+                    }
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
                     return true;
                 }
                 // 转发到 libc 比较
@@ -6556,108 +6833,43 @@ impl Codegen {
                 }
                 true
             },
-            // __builtin_nans / nansf / nansl: signaling NaN
-            // 转发到 libc nan/nanf/nanl
-            "__builtin_nans" => {
-                if !args.is_empty() {
-                    self.gen_expr(&args[0], 7);
+            // __builtin_nans / nansf / nansl (+ fN 变体): **信令** NaN。
+            // 旧实现转发 libc `nan`/`nanf`/`nanl` —— 这些符号在多数 libc 上并不
+            // 存在 (gcc-dg torture/builtin-iseqsig-2.c 因此链接失败), 且 glibc 的
+            // nan() 返回的是 **quiet** NaN, 不具信令语义 (floatn-nan*.c 断言
+            // `nans_cst + nans_cst` 置 FE_INVALID, quiet NaN 相加不会)。
+            // 改为直接装载 sNaN 位模式, 与上方 __builtin_nan* 同一机制:
+            //   binary32 sNaN : 0x7F80_0001
+            //   binary64 sNaN : 0x7FF0_0000_0000_0001
+            //   long double   : 8 字节近似 (与 __builtin_nanl 同一表示)
+            "__builtin_nans" | "__builtin_nansf" | "__builtin_nansl"
+            | "__builtin_nansf16" | "__builtin_nansf32" | "__builtin_nansf32x"
+            | "__builtin_nansf64" | "__builtin_nansf64x" | "__builtin_nansf128"
+            | "__builtin_nansf128x" => {
+                let (is_float, bytes) = match name {
+                    "__builtin_nansf" | "__builtin_nansf16" | "__builtin_nansf32" => {
+                        (true, 0x7F80_0001u32.to_le_bytes().to_vec())
+                    },
+                    _ => (false, 0x7FF0_0000_0000_0001u64.to_le_bytes().to_vec()),
+                };
+                let off = self.rodata.len() as u64;
+                self.rodata.extend_from_slice(&bytes);
+                let width = if is_float {
+                    SimdWidth::SS
                 } else {
-                    self.mov_imm(7, 0);
-                }
-                self.emit_insn(&Insn::new(
-                    crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
-                        op: crate::codegen::x86_64::opcode::StackOp::Push,
-                        width: crate::codegen::shared::asm_operand::Width::B64,
-                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                            4,
-                            crate::codegen::shared::asm_operand::Width::B64,
-                        ),
-                    },
-                    &[],
-                ));
-                self.call_label("nan");
-                self.emit_insn(&Insn::new(
-                    crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
-                        op: crate::codegen::x86_64::opcode::StackOp::Pop,
-                        width: crate::codegen::shared::asm_operand::Width::B64,
-                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                            4,
-                            crate::codegen::shared::asm_operand::Width::B64,
-                        ),
-                    },
-                    &[],
-                ));
+                    SimdWidth::SD
+                };
+                let code_pos = self.pos();
+                self.emit_insn(&Insn::simd_mov_rip(false, width, 0));
                 if dst != 0 {
-                    self.mov(dst, 0);
+                    if is_float {
+                        self.emit_insn(&Insn::movss_xmm_store(dst, 0));
+                    } else {
+                        self.emit_insn(&Insn::movsd_xmm_store(dst, 0));
+                    }
                 }
-                true
-            },
-            "__builtin_nansf" => {
-                if !args.is_empty() {
-                    self.gen_expr(&args[0], 7);
-                } else {
-                    self.mov_imm(7, 0);
-                }
-                self.emit_insn(&Insn::new(
-                    crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
-                        op: crate::codegen::x86_64::opcode::StackOp::Push,
-                        width: crate::codegen::shared::asm_operand::Width::B64,
-                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                            4,
-                            crate::codegen::shared::asm_operand::Width::B64,
-                        ),
-                    },
-                    &[],
-                ));
-                self.call_label("nanf");
-                self.emit_insn(&Insn::new(
-                    crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
-                        op: crate::codegen::x86_64::opcode::StackOp::Pop,
-                        width: crate::codegen::shared::asm_operand::Width::B64,
-                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                            4,
-                            crate::codegen::shared::asm_operand::Width::B64,
-                        ),
-                    },
-                    &[],
-                ));
-                if dst != 0 {
-                    self.mov(dst, 0);
-                }
-                true
-            },
-            "__builtin_nansl" => {
-                if !args.is_empty() {
-                    self.gen_expr(&args[0], 7);
-                } else {
-                    self.mov_imm(7, 0);
-                }
-                self.emit_insn(&Insn::new(
-                    crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
-                        op: crate::codegen::x86_64::opcode::StackOp::Push,
-                        width: crate::codegen::shared::asm_operand::Width::B64,
-                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                            4,
-                            crate::codegen::shared::asm_operand::Width::B64,
-                        ),
-                    },
-                    &[],
-                ));
-                self.call_label("nanl");
-                self.emit_insn(&Insn::new(
-                    crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
-                        op: crate::codegen::x86_64::opcode::StackOp::Pop,
-                        width: crate::codegen::shared::asm_operand::Width::B64,
-                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                            4,
-                            crate::codegen::shared::asm_operand::Width::B64,
-                        ),
-                    },
-                    &[],
-                ));
-                if dst != 0 {
-                    self.mov(dst, 0);
-                }
+                // 走 float_refs 通道 (同 __builtin_nan* 实现)
+                self.float_refs.push((code_pos, off));
                 true
             },
             // __builtin_fmin: inline SSE minsd (double)
@@ -6964,36 +7176,21 @@ impl Codegen {
                         self.mov(dst, 0);
                     }
                 } else {
-                    // Generic: forward all args
-                    for (i, arg) in args.iter().take(4).enumerate() {
-                        let reg = [7, 6, 2, 1][i]; // rdi, rsi, rdx, rcx
-                        self.gen_expr(arg, reg);
-                    }
-                    self.emit_insn(&Insn::new(
-                        crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
-                            op: crate::codegen::x86_64::opcode::StackOp::Push,
-                            width: crate::codegen::shared::asm_operand::Width::B64,
-                            dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                                4,
-                                crate::codegen::shared::asm_operand::Width::B64,
-                            ),
-                        },
-                        &[],
-                    ));
-                    self.call_label(lib_name);
-                    self.emit_insn(&Insn::new(
-                        crate::codegen::x86_64::opcode::X86_64Opcode::Stack {
-                            op: crate::codegen::x86_64::opcode::StackOp::Pop,
-                            width: crate::codegen::shared::asm_operand::Width::B64,
-                            dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                                4,
-                                crate::codegen::shared::asm_operand::Width::B64,
-                            ),
-                        },
-                        &[],
-                    ));
-                    if dst != 0 {
-                        self.mov(dst, 0);
+                    // 通用数学内建 (pow/atan2/hypot/fmod/fdim/nextafter/...):
+                    // 经 float_builtin_libm 取**带精度后缀**的 libm 名
+                    // (f16/f32→f, f32x/f64→"", f64x/f128/f128x→l), 交给
+                    // emit_sysv_call 按 SysV ABI 分阶段装载 (每个实参先落栈暂存
+                    // 再进 xmm/st(0), 不受“求值后续实参 clobber 已装入的 xmm”
+                    // 影响 —— 手写“arg0 最后装 xmm0”在 arg0 是 Neg(inf) 等复合
+                    // 表达式时会踩到)。旧实现把实参往 GP (rdi/rsi/…) 塞 + 用无
+                    // 后缀 libm 名: double 实参经 gen_expr 忽略 GP 目标仍落 xmm0,
+                    // 多浮点参数互相 clobber、xmm1 永不设置且精度错 (powf64(2,10)
+                    // 算成 pow(10,10))。
+                    if let Some((libm, is_ld)) = Self::float_builtin_libm(name) {
+                        self.emit_sysv_call(Some(&libm), None, args, None);
+                        if dst != 0 && !is_ld {
+                            self.mov(dst, 0);
+                        }
                     }
                 }
                 true
@@ -7405,16 +7602,28 @@ impl Codegen {
                 true
             },
             // 扩展浮点 (_FloatN/_FloatNx) 数学内建: 转发到 libm 同名函数.
-            // 宽度后缀决定 libm 精度后缀 (见 float_builtin_libm); 参数由
-            // emit_sysv_call 按 SysV ABI 自动装载, 结果落在 ABI 返回寄存器
-            // (rax/xmm0/st0). long double 走 st0 通道, 不搬移到 GP 寄存器,
-            // 以免破坏 80-bit 值.
+            // 宽度后缀决定 libm 精度后缀 (见 float_builtin_libm)。
+            // f32/f64 走 SSE 通道: **手动**从后往前把每个实参装入目标 xmm
+            // (arg[i]→xmm[i]), arg0 最后装入 xmm0。emit_sysv_call 的多 SSE
+            // 实参第三阶段会把第 2+ 个 xmm 参数错载到 xmm0 (volatile 载入借道
+            // xmm0 作 scratch, clobber 前一参数), 致 powf64(2,10) 变成
+            // pow(10,10) 这类参数错乱 (floatN-builtin.c 的 copysign/pow 断言)。
+            // long double 走 st(0) 通道, 仍交给 emit_sysv_call。
             _ => {
                 if let Some((libm, is_ld)) = Self::float_builtin_libm(name) {
-                    if !args.is_empty() {
-                        // 参数装载交给 emit_sysv_call
+                    if is_ld {
+                        self.emit_sysv_call(Some(&libm), None, args, None);
+                    } else {
+                        let n = args.len().min(8);
+                        for i in (1..n).rev() {
+                            self.gen_expr(&args[i], Self::EVAL_BASE); // xmm0 = arg[i]
+                            self.emit_insn(&Insn::movsd_xmm(i as u8, 0)); // xmm[i] = xmm0
+                        }
+                        if n > 0 {
+                            self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = arg0
+                        }
+                        self.call_label(&libm);
                     }
-                    self.emit_sysv_call(Some(&libm), None, args, None);
                     if dst != 0 && !is_ld {
                         self.mov(dst, 0);
                     }

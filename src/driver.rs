@@ -232,6 +232,27 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
         return compile_multiple_files(&cfg);
     }
 
+    // 多个输入 (至少一个源文件) 且要产出可执行文件 (无 -c/-S/-E/-M/-fsyntax-only):
+    // 把每个 .c/.s 编成临时 .o, 与直接给定的 .o/.a 一起链接成可执行文件
+    // (gcc `dcc a.c b.c -o prog` 行为)。必须放在 needs_host_cc_link 之前, 否则
+    // 多源场景会被 needs_host_cc_link 的 inputs.len()!=1 分支漏成"只编第一个"。
+    let is_object_like = |p: &std::path::PathBuf| {
+        matches!(
+            p.extension().and_then(|e| e.to_str()),
+            Some("o") | Some("a") | Some("obj")
+        )
+    };
+    if cfg.inputs.len() > 1
+        && !cfg.relocatable
+        && !cfg.emit_asm
+        && !cfg.preprocess_only
+        && !cfg.dep_no_compile
+        && !cfg.syntax_only
+        && cfg.inputs.iter().any(|p| !is_object_like(p))
+    {
+        return compile_and_link_multiple(&cfg);
+    }
+
     let input = cfg.inputs.first().ok_or_else(|| {
         vec![Diagnostic::err(
             "E0100",
@@ -2123,19 +2144,12 @@ fn run_cpp_legacy_backend(
         )]
     })?;
 
-    // 选取 host cc
-    let cc = match std::env::var("CC") {
-        Ok(v)
-            if v != std::env::current_exe()
-                .ok()
-                .and_then(|p| p.to_str().map(String::from))
-                .unwrap_or_default() =>
-        {
-            v
-        },
-        _ => "cc".to_string(),
-    };
+    // 选取 host cc: 按 shell 语义解析 $CC (可能含参数) 并防递归 (见 host_cc_command)。
+    let (cc, cc_args) = host_cc_command();
     let mut cmd = std::process::Command::new(&cc);
+    for a in &cc_args {
+        cmd.arg(a);
+    }
     cmd.arg("-c").arg(&tmp_c).arg("-o").arg(out_path);
     // C++ legacy 后端: 注入目标, 沿用 dcc 的 target triple.
     if let Some(triple) = target_triple_arg(&cfg.target) {
@@ -3431,6 +3445,113 @@ fn host_sanitizer_flags(cfg: &Config) -> Vec<String> {
 ///     dcc 的 .tdata 位于 .data LOAD 段首, 与 RELRO 重叠).
 ///   - -Wl,-z,noexecstack : dcc 当前不输出 .note.GNU-stack, 避免 ld 警告
 ///     "missing .note.GNU-stack section implies executable stack".
+///
+/// 解析 host cc 驱动程序: 返回 (program, extra_args)。
+///
+/// `$CC` 在 make 语境里常是「程序 + 参数」的整串 (如 `CC="dcc -std=gnu99"`、
+/// `CC="gcc -m32"`)。Rust 的 `Command::new` 不做 shell 切词, 把整串当单个可执行
+/// 路径会 ENOENT (见 docs/dcc-lua-sqlite-build-verify-report.md §3.1:
+/// `make CC="dcc -std=gnu99"` → cannot invoke "dcc -std=gnu99": No such file)。
+/// 这里按空白切分成 program + 参数; 若整串本身是一个真实存在的文件路径 (例如
+/// `/opt/my tools/cc`), 按单个程序处理。无 `$CC` / 空串 → ("cc", [])。
+fn host_cc_driver() -> (String, Vec<String>) {
+    let raw = match std::env::var("CC") {
+        Ok(v) => v,
+        Err(_) => return ("cc".to_string(), Vec::new()),
+    };
+    let t = raw.trim();
+    if t.is_empty() {
+        return ("cc".to_string(), Vec::new());
+    }
+    if t.chars().any(char::is_whitespace) && std::path::Path::new(t).is_file() {
+        return (t.to_string(), Vec::new());
+    }
+    let mut it = t.split_whitespace();
+    let prog = it.next().unwrap_or("cc").to_string();
+    (prog, it.map(str::to_string).collect())
+}
+
+/// program 是否指向本进程 (自身 dcc)? 用 canonicalize 兜住 symlink / 相对 /
+/// 绝对路径; 再用 **basename** 兜底 —— `std::fs::canonicalize` 不做 PATH 搜索,
+/// `CC=dcc` / `CC="dcc -std=gnu99"` 切词后的裸名 `dcc` 在 PATH 里, 只能靠
+/// basename 判自身。旧实现拿 `current_exe()` 的绝对路径与 `$CC` 原值做字符串
+/// 比较, 对 `CC=dcc` / `CC=./dcc` / `CC="dcc -std=gnu99"` 一律失配, 防递归
+/// 守卫被绕过 (dcc 递归链接 → 把 .o 当 C 源预处理 → E0208)。
+fn cc_is_self(prog: &str) -> bool {
+    let me = match std::env::current_exe().ok() {
+        Some(p) => p,
+        None => return false,
+    };
+    if let (Ok(a), Ok(b)) = (std::fs::canonicalize(prog), std::fs::canonicalize(&me)) {
+        if a == b {
+            return true;
+        }
+    }
+    match (std::path::Path::new(prog).file_name(), me.file_name()) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// 选取 host cc 驱动: 综合 `host_cc_driver` 的切词与 `cc_is_self` 的防递归。
+/// 返回 (program, extra_args); program 保证不是自身 dcc (否则回退 "cc"),
+/// 保留旧实现的防递归语义。
+fn host_cc_command() -> (String, Vec<String>) {
+    let (prog, args) = host_cc_driver();
+    if cc_is_self(&prog) {
+        ("cc".to_string(), Vec::new())
+    } else {
+        (prog, args)
+    }
+}
+
+/// 多个源文件 (+ 可能的 .o/.a) 编译并链接成单个可执行文件
+/// (gcc `dcc a.c b.c -o prog` 行为)。
+///
+/// 每个源文件编成临时 .o (复用 `run()` 单文件 + `relocatable=true`), 再与直接
+/// 给定的 .o/.a 一起委托 host cc 链接 —— 与手动 workaround (`dcc -c` 逐个 +
+/// `dcc *.o -o`) 完全等价。临时 .o 由 `TmpObjCleanup` RAII 清理 (编译失败也删净)。
+fn compile_and_link_multiple(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
+    let mut tmp_guard = TmpObjCleanup(Vec::new());
+    let mut objs: Vec<std::path::PathBuf> = Vec::with_capacity(cfg.inputs.len());
+    for inp in &cfg.inputs {
+        let is_obj = matches!(
+            inp.extension().and_then(|e| e.to_str()),
+            Some("o") | Some("a") | Some("obj")
+        );
+        if is_obj {
+            objs.push(inp.clone());
+            continue;
+        }
+        let tmp_o = std::env::temp_dir().join(format!(
+            "dcc-multilink-{}-{}.o",
+            std::process::id(),
+            objs.len()
+        ));
+        let mut c = cfg.clone();
+        c.inputs = vec![inp.clone()];
+        c.output = tmp_o.clone();
+        c.relocatable = true;
+        c.built_link = false;
+        c.output_explicit = true;
+        tmp_guard.0.push(tmp_o.clone());
+        run(c)?;
+        objs.push(tmp_o);
+    }
+    link_objects_with_host_cc(
+        &objs,
+        &cfg.output,
+        &cfg.link_libs,
+        &cfg.whole_archive_libs,
+        cfg.sysroot.as_deref(),
+        cfg.verbose,
+    )?;
+    if cfg.verbose {
+        eprintln!("dcc: {} (via host cc)", cfg.output.display());
+    }
+    Ok(())
+}
+
 fn link_with_host_cc(
     obj_path: &Path,
     output: &Path,
@@ -3440,24 +3561,13 @@ fn link_with_host_cc(
     verbose: bool,
     sanitizer_flags: &[String],
 ) -> Result<(), Vec<Diagnostic>> {
-    // CC 环境变量优先, 与 GNU make 一致; 缺省为 cc.
-    // 防递归: GCC 构建中 `CC=dcc` 是常见写法, 如果这里读 CC=dcc,
-    // 会导致 dcc 递归调用 dcc, 最终试图把 .o 当 C 源预处,
-    // 触发 E0208 ("source is not valid UTF-8"). 遇 CC 指向自己时回退
-    // 到默认 "cc" (host 系统上 99% 是 gcc), 与 gcc 手工调用 dcc 时
-    // 设 `CC=gcc` 一致.
-    let cc = match std::env::var("CC") {
-        Ok(v)
-            if v != std::env::current_exe()
-                .ok()
-                .and_then(|p| p.to_str().map(String::from))
-                .unwrap_or_default() =>
-        {
-            v
-        },
-        _ => "cc".to_string(),
-    };
+    // host cc 驱动: 按 shell 语义解析 $CC (可能含参数, 如 CC="dcc -std=gnu99"),
+    // 并防递归 (CC 指向自身 dcc 时回退 "cc")。详见 host_cc_command。
+    let (cc, cc_args) = host_cc_command();
     let mut cmd = Command::new(&cc);
+    for a in &cc_args {
+        cmd.arg(a);
+    }
     cmd.arg(obj_path).arg("-o").arg(output);
     cmd.arg("-no-pie");
     cmd.arg("-z").arg("norelro");
@@ -3517,18 +3627,11 @@ fn link_objects_with_host_cc(
     sysroot: Option<&Path>,
     verbose: bool,
 ) -> Result<(), Vec<Diagnostic>> {
-    let cc = match std::env::var("CC") {
-        Ok(v)
-            if v != std::env::current_exe()
-                .ok()
-                .and_then(|p| p.to_str().map(String::from))
-                .unwrap_or_default() =>
-        {
-            v
-        },
-        _ => "cc".to_string(),
-    };
+    let (cc, cc_args) = host_cc_command();
     let mut cmd = Command::new(&cc);
+    for a in &cc_args {
+        cmd.arg(a);
+    }
     for obj in objects {
         cmd.arg(obj);
     }

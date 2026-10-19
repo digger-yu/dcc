@@ -855,21 +855,22 @@ impl Codegen {
                     // struct in rax:rdx): gen_expr leaves value in
                     // rax (and rdx for >8 bytes).
                     self.gen_expr(arg, Self::EVAL_BASE);
-                    // __int128 参数: 若 RHS 非 __int128, rdx 未设置, 需扩展
+                    // __int128 参数: 若 RHS 非 __int128, rdx 未设置, 需扩展.
+                    // 扩展方向只取决于**源类型**有无符号: 有符号源必须符号扩展
+                    // (否则 -1/0x8000... 这类负值截成高 64 位 0, pr78546-1),
+                    // 无符号源才零扩展。与目标 UInt128/Int128 无关。
                     if matches!(effective_ty, Type::Int128 | Type::UInt128)
                         && !matches!(arg.ty(), Type::Int128 | Type::UInt128)
                     {
-                        if matches!(effective_ty, Type::UInt128)
-                            || matches!(
-                                arg.ty(),
-                                Type::Bool
-                                    | Type::UChar
-                                    | Type::UShort
-                                    | Type::UInt
-                                    | Type::ULong
-                                    | Type::ULongLong
-                            )
-                        {
+                        if matches!(
+                            arg.ty(),
+                            Type::Bool
+                                | Type::UChar
+                                | Type::UShort
+                                | Type::UInt
+                                | Type::ULong
+                                | Type::ULongLong
+                        ) {
                             // P11: xor rdx, rdx via typed opcode.
                             {
                                 let insn = Insn::new(
@@ -1023,17 +1024,16 @@ impl Codegen {
                 // SysV：16 字节整数占两个 GP 槽（低 rax / 高 rdx）
                 self.gen_expr(arg, Self::EVAL_BASE);
                 if !matches!(arg.ty(), Type::Int128 | Type::UInt128) {
-                    if matches!(effective_ty, Type::UInt128)
-                        || matches!(
-                            arg.ty(),
-                            Type::Bool
-                                | Type::UChar
-                                | Type::UShort
-                                | Type::UInt
-                                | Type::ULong
-                                | Type::ULongLong
-                        )
-                    {
+                    // 扩展方向只取决于源类型有无符号 (见上: 有符号源符号扩展).
+                    if matches!(
+                        arg.ty(),
+                        Type::Bool
+                            | Type::UChar
+                            | Type::UShort
+                            | Type::UInt
+                            | Type::ULong
+                            | Type::ULongLong
+                    ) {
                         // P11: xor rdx, rdx via typed opcode.
                         let insn = Insn::new(
                             crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {

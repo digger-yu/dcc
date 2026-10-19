@@ -1738,6 +1738,95 @@ pub fn preprocess(
     pp.define_builtin("__LDBL_MIN__", "3.36210314311209350626e-4932L");
     pp.define_builtin("__LDBL_EPSILON__", "1.08420217248550443401e-19L");
     pp.define_builtin("__LDBL_HAS_DENORM__", "1");
+    // ===== ISO/IEC TS 18661-3 <float.h> macros for _FloatN / _FloatNx =====
+    // 宿主 GCC 的 <float.h> 在 `__STDC_WANT_IEC_60559_TYPES_EXT__` 下用
+    // `#ifdef __FLT<W>_MANT_DIG__` 门控生成 FLT<W>_* 公开宏; 一个都不预定义时
+    // 那些宏全部缺失, gcc-dg torture/float32-floath.c 等直接 `#error`
+    // "FLT32_MANT_DIG undefined"。
+    // 取值描述 **dcc 实际实现的类型**: parse_type_mode 把 _FloatN 退化成基础
+    // 浮点 (f16/f32→float, f32x/f64→double, f64x/f128/f128x→long double),
+    // 所以宏必须与退化后的位宽一致, 否则 floatn-floath.h 的运行时比较会错。
+    // 后缀 fN/fNx 字面量已由 strip_float_suffix 支持。
+    // _Float16 / _Float32: binary32 (与 float 同)
+    pp.define_builtin("__FLT16_MANT_DIG__", "24");
+    pp.define_builtin("__FLT16_DIG__", "6");
+    pp.define_builtin("__FLT16_MIN_EXP__", "(-125)");
+    pp.define_builtin("__FLT16_MIN_10_EXP__", "(-37)");
+    pp.define_builtin("__FLT16_MAX_EXP__", "128");
+    pp.define_builtin("__FLT16_MAX_10_EXP__", "38");
+    pp.define_builtin("__FLT16_MAX__", "3.40282347e+38F");
+    pp.define_builtin("__FLT16_MIN__", "1.17549435e-38F");
+    pp.define_builtin("__FLT16_EPSILON__", "1.19209290e-7F");
+    pp.define_builtin("__FLT16_DECIMAL_DIG__", "9");
+    pp.define_builtin("__FLT16_DENORM_MIN__", "1.40129846e-45F");
+    pp.define_builtin("__FLT32_MANT_DIG__", "24");
+    pp.define_builtin("__FLT32_DIG__", "6");
+    pp.define_builtin("__FLT32_MIN_EXP__", "(-125)");
+    pp.define_builtin("__FLT32_MIN_10_EXP__", "(-37)");
+    pp.define_builtin("__FLT32_MAX_EXP__", "128");
+    pp.define_builtin("__FLT32_MAX_10_EXP__", "38");
+    pp.define_builtin("__FLT32_MAX__", "3.40282347e+38F");
+    pp.define_builtin("__FLT32_MIN__", "1.17549435e-38F");
+    pp.define_builtin("__FLT32_EPSILON__", "1.19209290e-7F");
+    pp.define_builtin("__FLT32_DECIMAL_DIG__", "9");
+    pp.define_builtin("__FLT32_DENORM_MIN__", "1.40129846e-45F");
+    // _Float32x / _Float64: binary64 (与 double 同)
+    pp.define_builtin("__FLT32X_MANT_DIG__", "53");
+    pp.define_builtin("__FLT32X_DIG__", "15");
+    pp.define_builtin("__FLT32X_MIN_EXP__", "(-1021)");
+    pp.define_builtin("__FLT32X_MIN_10_EXP__", "(-307)");
+    pp.define_builtin("__FLT32X_MAX_EXP__", "1024");
+    pp.define_builtin("__FLT32X_MAX_10_EXP__", "308");
+    pp.define_builtin("__FLT32X_MAX__", "1.7976931348623157e+308");
+    pp.define_builtin("__FLT32X_MIN__", "2.2250738585072014e-308");
+    pp.define_builtin("__FLT32X_EPSILON__", "2.2204460492503131e-16");
+    pp.define_builtin("__FLT32X_DECIMAL_DIG__", "17");
+    pp.define_builtin("__FLT32X_DENORM_MIN__", "4.9406564584124654e-324");
+    pp.define_builtin("__FLT64_MANT_DIG__", "53");
+    pp.define_builtin("__FLT64_DIG__", "15");
+    pp.define_builtin("__FLT64_MIN_EXP__", "(-1021)");
+    pp.define_builtin("__FLT64_MIN_10_EXP__", "(-307)");
+    pp.define_builtin("__FLT64_MAX_EXP__", "1024");
+    pp.define_builtin("__FLT64_MAX_10_EXP__", "308");
+    pp.define_builtin("__FLT64_MAX__", "1.7976931348623157e+308");
+    pp.define_builtin("__FLT64_MIN__", "2.2250738585072014e-308");
+    pp.define_builtin("__FLT64_EPSILON__", "2.2204460492503131e-16");
+    pp.define_builtin("__FLT64_DECIMAL_DIG__", "17");
+    pp.define_builtin("__FLT64_DENORM_MIN__", "4.9406564584124654e-324");
+    // _Float64x / _Float128 / _Float128x: x87 80-bit (与 long double 同)
+    pp.define_builtin("__FLT64X_MANT_DIG__", "64");
+    pp.define_builtin("__FLT64X_DIG__", "18");
+    pp.define_builtin("__FLT64X_MIN_EXP__", "(-16381)");
+    pp.define_builtin("__FLT64X_MIN_10_EXP__", "(-4931)");
+    pp.define_builtin("__FLT64X_MAX_EXP__", "16384");
+    pp.define_builtin("__FLT64X_MAX_10_EXP__", "4932");
+    pp.define_builtin("__FLT64X_MAX__", "1.18973149535723176502e+4932L");
+    pp.define_builtin("__FLT64X_MIN__", "3.36210314311209350626e-4932L");
+    pp.define_builtin("__FLT64X_EPSILON__", "1.08420217248550443401e-19L");
+    pp.define_builtin("__FLT64X_DECIMAL_DIG__", "21");
+    pp.define_builtin("__FLT64X_DENORM_MIN__", "3.64519953188248529979e-4951L");
+    pp.define_builtin("__FLT128_MANT_DIG__", "64");
+    pp.define_builtin("__FLT128_DIG__", "18");
+    pp.define_builtin("__FLT128_MIN_EXP__", "(-16381)");
+    pp.define_builtin("__FLT128_MIN_10_EXP__", "(-4931)");
+    pp.define_builtin("__FLT128_MAX_EXP__", "16384");
+    pp.define_builtin("__FLT128_MAX_10_EXP__", "4932");
+    pp.define_builtin("__FLT128_MAX__", "1.18973149535723176502e+4932L");
+    pp.define_builtin("__FLT128_MIN__", "3.36210314311209350626e-4932L");
+    pp.define_builtin("__FLT128_EPSILON__", "1.08420217248550443401e-19L");
+    pp.define_builtin("__FLT128_DECIMAL_DIG__", "21");
+    pp.define_builtin("__FLT128_DENORM_MIN__", "3.64519953188248529979e-4951L");
+    pp.define_builtin("__FLT128X_MANT_DIG__", "64");
+    pp.define_builtin("__FLT128X_DIG__", "18");
+    pp.define_builtin("__FLT128X_MIN_EXP__", "(-16381)");
+    pp.define_builtin("__FLT128X_MIN_10_EXP__", "(-4931)");
+    pp.define_builtin("__FLT128X_MAX_EXP__", "16384");
+    pp.define_builtin("__FLT128X_MAX_10_EXP__", "4932");
+    pp.define_builtin("__FLT128X_MAX__", "1.18973149535723176502e+4932L");
+    pp.define_builtin("__FLT128X_MIN__", "3.36210314311209350626e-4932L");
+    pp.define_builtin("__FLT128X_EPSILON__", "1.08420217248550443401e-19L");
+    pp.define_builtin("__FLT128X_DECIMAL_DIG__", "21");
+    pp.define_builtin("__FLT128X_DENORM_MIN__", "3.64519953188248529979e-4951L");
     pp.define_builtin("__DECIMAL_DIG__", "21");
     // ===== C99 <limits.h> completeness =====
     // CHAR_BIT already defined as __CHAR_BIT__
@@ -7422,6 +7511,7 @@ impl Preprocessor {
 
     fn is_known_builtin(name: &str) -> bool {
         let name = name.trim();
+        // 注意: 原实现把末尾的 `_ if { guard }` 作为 matches! 的 OR 模式臂, 而 `_`\n        // 是通配, 会覆盖前面所有字符串臂 (字符串臂与 `_` 都匹配, 但需守卫为真才\n        // 成功), 导致整张显式 builtin 名单变死代码 —— `__has_builtin(__builtin_expect)`\n        // 等恒返回 0。这里把“以 _FloatN 后缀结尾的 __builtin_*”守卫拆成独立的\n        // `|| (guard)`, 与显式名单用短路或组合。
         matches!(
             name,
             "__builtin_expect"
@@ -7713,17 +7803,17 @@ impl Preprocessor {
                 // shift overflow builtins
                 | "__builtin_shl_overflow"
                 | "__builtin_shr_overflow"
-                | _ if {
-                    let n = name.trim();
-                    n.starts_with("__builtin_")
-                        && (n.ends_with("f16")
-                            || n.ends_with("f32x")
-                            || n.ends_with("f128x")
-                            || n.ends_with("f32")
-                            || n.ends_with("f64x")
-                            || n.ends_with("f128")
-                            || n.ends_with("f64"))
-                }
+                | "__builtin_fwrite"
+        ) || (
+            // 兜底: 以 _FloatN / _FloatNx 后缀结尾的 __builtin_* 亦视为已知\n            // (如 __builtin_sqrtf128 / __builtin_isnanf64x)。须与上面的显式名单\n            // 用短路或组合, 不能写成 matches! 的 `_ if { guard }` 臂 (会令\n            // `_` 覆盖显式名单, 见上方函数注释)。
+            name.starts_with("__builtin_")
+                && (name.ends_with("f16")
+                    || name.ends_with("f32x")
+                    || name.ends_with("f128x")
+                    || name.ends_with("f32")
+                    || name.ends_with("f64x")
+                    || name.ends_with("f128")
+                    || name.ends_with("f64"))
         )
     }
 

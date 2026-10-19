@@ -882,12 +882,16 @@ fn cli_multiple_sources_error() {
         ])
         .output()
         .expect("运行 dcc");
+    // 多源文件现按 gcc 行为允许编译+链接; 但编译阶段的错误仍会传播。e0004.c 有
+    // 语法错误 (int 123;), 多源编译应在编译它时报 E0004 (exit 1), 而不再是 CLI
+    // 层 "multiple source files" 拒绝 (exit 2)。
     assert!(!output.status.success());
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(1));
     let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
+    assert!(stderr.contains("E0004"), "stderr:\n{stderr}");
     assert!(
-        stderr.contains("dcc: error: multiple source files cannot produce a single executable"),
-        "stderr:\n{stderr}"
+        !stderr.contains("multiple source files cannot produce"),
+        "多源不应再被 CLI 拒绝; stderr:\n{stderr}"
     );
 }
 

@@ -12,7 +12,8 @@
 #   SUBDIRS      — 要测试的子目录 (可选；不指定则使用默认组合)
 #
 # 分片:
-#   --shard N/M   将展开后的文件列表按文件号均匀分成 M 片, 只跑第 N 片 (1..M)。
+#   --shard N/M   将展开后的文件列表按文件序号**连续**切成 M 片, 只跑第 N 片 (1..M)。
+#                 连续切分使字母序相邻的相关用例 (同一特性区域) 落在同一片。
 #                配合 --dirs 可实现"某子目录再拆 N 份"。CI 可用 M=4 并行 4 个 job。
 #   例:
 #     ./gcc_dg_test.sh run --shard 1/4     # run 集第 1/4 片
@@ -247,6 +248,14 @@ parse_dg_directives() {
     [[ -n "$dg_opts" ]] && raw_opts="$dg_opts"
     add_opts=$(grep -oP '\{ dg-additional-options\s+"?\K[^"}]+' "$src" 2>/dev/null | head -1 | sed -E 's/[[:space:]]+$//' || true)
     [[ -n "$add_opts" ]] && raw_opts="$raw_opts $add_opts"
+
+    # dcc 不支持 -fgimple: 这些测试用 __GIMPLE(...) 书写 GCC 内部 IR,
+    # C 前端无法解析, 只会在链接期报 undefined reference. GCC 自身也仅在
+    # 支持 gimple 的目标上运行它们, 故这里一律跳过 (pr89595/pr93586/pr123175-2 等).
+    if [[ "$raw_opts" == *-fgimple* ]]; then
+        echo "skip fgimple"
+        return
+    fi
 
     local filtered=""
     local opt
@@ -491,7 +500,12 @@ run_suite() {
                 continue
             fi
         fi
-        if [[ -n "$SHARD_M" && $(( ((idx - 1) % SHARD_M) + 1 )) -ne "$SHARD_N" ]]; then
+        # 分片: 按**连续块**切分 (而非轮询取模)。轮询 `((idx-1)%M)+1` 会把字母序
+        # 相邻的相关用例 (如 float16/32/64/128-builtin、各 pr* 系列) 打散到不同片,
+        # 修一个特性要跨多片验证, 与 "debuggable shards" 初衷相悖。连续块让同一
+        # 特性区域的用例落在同一片, 单片即可覆盖一类特性的全部用例。
+        # block(idx) = ((idx-1)*M)/total + 1, 把 1..total 连续映射到 1..M。
+        if [[ -n "$SHARD_M" && $(( ((idx - 1) * SHARD_M) / total + 1 )) -ne "$SHARD_N" ]]; then
             continue
         fi
         printf '%s\t%s\n' "$src" "$rel" >> "$run_list"

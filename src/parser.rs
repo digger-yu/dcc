@@ -2148,6 +2148,19 @@ impl<'a> Parser<'a> {
                 "__builtin_fma" => return Type::Double,
                 "__builtin_fmaf" => return Type::Float,
                 "__builtin_fmal" => return Type::LongDouble,
+                // NaN / 无穷常量内建: 返回对应宽度的实浮点。
+                // 缺这些臂时 `callee.ty()` 对未声明内置退化成 int, 赋值处会多插
+                // 一条 cvtsi2sd, 把内建已装进 xmm0 的位模式覆写成 (double)垃圾
+                // —— `__builtin_inf()` / `__builtin_nan("")` 因此都产有限值
+                // (n==n 为 1、i>1e308 为 0), iseqsig/nan 类测试随之 abort。
+                // fN 后缀变体 (nanf32/inff64x/...) 已由上面的
+                // `float_builtin_suffix` 程序化覆盖, 这里只补无后缀与传统 f/l。
+                "__builtin_nan" | "__builtin_nans" | "__builtin_inf"
+                | "__builtin_huge_val" => return Type::Double,
+                "__builtin_nanf" | "__builtin_nansf" | "__builtin_inff"
+                | "__builtin_huge_valf" => return Type::Float,
+                "__builtin_nanl" | "__builtin_nansl" | "__builtin_infl"
+                | "__builtin_huge_vall" => return Type::LongDouble,
                 // 数学函数
                 "__builtin_sqrtf" | "__builtin_ceilf" | "__builtin_floorf" |
                 "__builtin_roundf" | "__builtin_truncf" |
@@ -2265,7 +2278,10 @@ impl<'a> Parser<'a> {
         // 顺序敏感: 长后缀 (f32x/f64x/f128x) 必须先于其短前缀 (f32/f64/f128).
         let pairs: &[(&str, Type)] = &[
             ("f16", Type::Float),
-            ("f32x", Type::LongDouble),
+            // _Float32x 在 x86-64 上是 binary64, 与 parse_type_mode 的
+            // `_Float32x → Type::Double` 退化映射保持一致 (旧值 LongDouble
+            // 会让 _Float32x 内建的返回类型/转发宽度全部错一档)。
+            ("f32x", Type::Double),
             ("f128x", Type::LongDouble),
             ("f32", Type::Float),
             ("f64x", Type::LongDouble),
@@ -7180,6 +7196,34 @@ impl<'a> Parser<'a> {
                     is_imaginary = true;
                     self.advance();
                 },
+                // ISO/IEC TS 18661 / C23 扩展浮点类型 (`_FloatN` / `_FloatNx`)。
+                // 第一个 loop 只覆盖 `_FloatN` 出现在**最前**的写法 (`_Float32x x`);
+                // 当源码写成 `_Complex _Float32x` (`_Complex` 在前) 时, 第一个 loop
+                // 已 break, 这里必须再认一遍 —— 否则基类型停在 None 且 `_Float32x`
+                // 未被消费, declarator 解析会把它当成变量名而报
+                // `expected ';', '=', '(', got Ident` (gcc-dg torture/float32x-complex.c)。
+                // 退化映射与第一个 loop 逐字一致 (x86-64: f16/f32→float,
+                // f32x/f64→double, f64x/f128/f128x→long double)。
+                // 不 break: 之后可能还有 `_Complex`/指针/declarator。
+                TokKind::Ident
+                    if matches!(
+                        self.cur.text.as_str(),
+                        "_Float16"
+                            | "_Float32"
+                            | "_Float32x"
+                            | "_Float64"
+                            | "_Float64x"
+                            | "_Float128"
+                            | "_Float128x"
+                    ) =>
+                {
+                    base = Some(match self.cur.text.as_str() {
+                        "_Float16" | "_Float32" => Type::Float,
+                        "_Float32x" | "_Float64" => Type::Double,
+                        _ => Type::LongDouble,
+                    });
+                    self.advance();
+                },
                 TokKind::KwInt => {
                     base = Some(Type::Int);
                     self.advance();
@@ -10746,14 +10790,17 @@ impl<'a> Parser<'a> {
             TokKind::Plus => {
                 self.advance();
                 let e = self.parse_unary()?;
-                // C11 6.3.1.1p2: 一元 +、-、~ 的操作数先整数提升, 结果类型
-                // 取提升后的类型 (char/short → int, float → double). 否则 char
-                // 取负会在窄类型上计算, 丢失符号 (如 -(signed char)-128 误算成 +128).
+                // C11 6.3.1.1p2: 一元 +、-、~ 的操作数做**整数**提升
+                // (char/short → int), 结果取提升后类型。注意 integer promotions
+                // **不含 float**: `-float` 结果仍是 float (C11 6.5.3.3p1 的
+                // "promoted operand" 只对整型生效)。旧实现把 Float 提升成 Double,
+                // 令 `-floatvar` 被 typing 为 double, 赋值/传参时插入 cvtsd2ss,
+                // 把取负处理器已翻好符号位的 float 位型再当 double(次正规)转回 0.0
+                // (float32-builtin 的 -inf 即因此变 0)。故 float 保持 float。
                 let ty = match e.ty().clone() {
                     Type::Char | Type::SChar | Type::UChar | Type::Short | Type::UShort => {
                         Type::Int
                     },
-                    Type::Float => Type::Double,
                     t => t,
                 };
                 Some(Expr::Unary {
@@ -10766,13 +10813,12 @@ impl<'a> Parser<'a> {
             TokKind::Minus => {
                 self.advance();
                 let e = self.parse_unary()?;
-                // 同上: 整数提升 (见 Plus 注释). 关键修正: 否则
-                // (signed char)(-x) 在窄类型取负后外层 (signed char) 被当恒等丢弃.
+                // 同上: 仅整数提升 (char/short → int); float 不提升 (见 Plus 注释),
+                // 否则 `-floatvar` 被 typing 为 double, 取负后多余 cvtsd2ss 得 0。
                 let ty = match e.ty().clone() {
                     Type::Char | Type::SChar | Type::UChar | Type::Short | Type::UShort => {
                         Type::Int
                     },
-                    Type::Float => Type::Double,
                     t => t,
                 };
                 Some(Expr::Unary {
@@ -10795,12 +10841,12 @@ impl<'a> Parser<'a> {
             TokKind::Tilde => {
                 self.advance();
                 let e = self.parse_unary()?;
-                // C 标准: ~ 的结果类型与提升后的操作数类型相同 (整数提升)
+                // C 标准: ~ 的结果类型与提升后的操作数类型相同 (仅整数提升 char/short
+                // → int); float 不提升 (见 Plus 注释)。
                 let ty = match e.ty().clone() {
                     Type::Char | Type::SChar | Type::UChar | Type::Short | Type::UShort => {
                         Type::Int
                     },
-                    Type::Float => Type::Double,
                     t => t,
                 };
                 Some(Expr::Unary {
@@ -11969,6 +12015,45 @@ impl<'a> Parser<'a> {
                         self.note_implicit_function_call(name);
                     }
                     let call_ty = self.call_result_type(&callee_expr);
+                    // __builtin_complex(re, im): 复数构造器 (GCC)。
+                    // dcc 没有这个内建的 codegen / ConstValue 通道, 但它本质是
+                    // 「两个标量 → 一个复数」的纯构造: 两实参都是浮点常量时直接
+                    // 脱糖成 ComplexLit, 静态初值与运行期都走既有的 ComplexLit
+                    // 通道 (gcc-dg torture/floatn-complex.h 的
+                    // `volatile _Complex _Float32x d = __builtin_complex(2.0f32x, 3.0f32x)`)。
+                    // 非常量实参保留 Call 形态, 但结果类型必须是 _Complex<实参类型>
+                    // —— 否则右值按 int 转换, 复数分量全错。
+                    if let Expr::Ident { name, .. } = &callee_expr {
+                        if name.name == "__builtin_complex" && args.len() == 2 {
+                            let inner = match args[0].ty() {
+                                t @ (Type::Float | Type::Double | Type::LongDouble) => t,
+                                _ => Type::Double,
+                            };
+                            let cty = Type::Complex(Box::new(inner.into()));
+                            let as_fc = |e: &Expr| match const_eval::eval_full(e, false) {
+                                Ok(crate::const_eval::ConstValue::Float(f)) => Some(f),
+                                _ => None,
+                            };
+                            if let (Some(real), Some(imag)) =
+                                (as_fc(&args[0]), as_fc(&args[1]))
+                            {
+                                e = Expr::ComplexLit {
+                                    real,
+                                    imag,
+                                    span: sp.clone(),
+                                    ty: cty,
+                                };
+                                continue;
+                            }
+                            e = Expr::Call {
+                                callee: Box::new(callee_expr),
+                                args,
+                                span: sp.clone(),
+                                ty: cty,
+                            };
+                            continue;
+                        }
+                    }
                     // Warn for unknown __builtin_* return types
                     if let Expr::Ident { name, .. } = &callee_expr {
                         if name.name.starts_with("__builtin_")

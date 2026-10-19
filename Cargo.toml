@@ -31,6 +31,9 @@ miniz_oxide  = "0.8"
 zstd         = "0.13"
 serde        = { version = "1.0", features = ["derive"] }
 toml         = "0.8"
+# libm: 编译期常量折叠 __builtin_<math>* 用 (const_eval)。宿主 libm 在
+# 编译期不可调用, 这里用 Rust 纯实现提供 erf/tgamma/nextafter 等 std 缺失项。
+libm         = "0.2"
 
 [[bin]]
 name = "dcc"

@@ -405,6 +405,15 @@ impl Codegen {
                         dst,
                     ));
                 }
+                // long double 的值通道是 st(0), 不是 xmm0。cvtsi2sd 只把 (double)int
+                // 放进 xmm0; 若不搬到 st(0), 消费端 emit_store_scalar_float_at 见
+                // src_ty==LongDouble 会以为值已在 st(0) 而跳过搬运, 随后 fstp tbyte
+                // 从**空** x87 栈弹寄存器 → indefinite QNaN (局部 `ld = (ld)int`
+                // 静默变 NaN, 实测 fp-int-convert 的 (signed char)0→_Float64x=-nan)。
+                // 补一步 xmm0→st(0) (double 精度, 与 dcc 的 long double 运算精度一致)。
+                if matches!(ty, Type::LongDouble) {
+                    self.emit_xmm0_to_st0(&Type::Double);
+                }
             },
             // float/double → int
             // 浮点值按约定在 xmm0, 转换结果必须写入 dst 寄存器,

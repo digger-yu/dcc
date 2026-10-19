@@ -2249,6 +2249,7 @@ mod tests {
             fname,
             &mut total,
             &mut spill,
+            0, // over_align: 测试无过量对齐变量
         );
         // 第三个读数就是「遍历真的跑了」的证据：没有它，spill == 0 可能只是根本没进入循环。
         (spill, var_map.len(), total)

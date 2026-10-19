@@ -15,16 +15,44 @@ use crate::codegen::shared::elf::global_symbol_names;
 use crate::diagnostics::{Diagnostic, Span};
 use crate::link::lto_bitcode;
 
-fn tool_path(default: &str, env_var: &str) -> PathBuf {
-    std::env::var(env_var)
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(default))
+/// 解析外部工具的程序名 + 附加参数: 返回 (program, extra_args)。
+///
+/// `$LD` / `$OBJCOPY` 在 make 语境里可能是「程序 + 参数」的整串 (如 `LD="ld -r"`)。
+/// `Command::new` 不做 shell 切词, 把整串当单个可执行路径会 ENOENT —— 与
+/// `driver.rs::host_cc_driver` 修的 `$CC` 污染同源。这里按空白切分; 若整串本身
+/// 是一个真实存在的文件路径 (例如 `/opt/my tools/ld`), 按单程序处理。
+/// 无环境变量 / 空串 → (default, [])。
+fn tool_driver(default: &str, env_var: &str) -> (PathBuf, Vec<String>) {
+    let raw = match std::env::var(env_var).ok().filter(|s| !s.is_empty()) {
+        Some(v) => v,
+        None => return (PathBuf::from(default), Vec::new()),
+    };
+    let t = raw.trim();
+    if t.is_empty() {
+        return (PathBuf::from(default), Vec::new());
+    }
+    if t.chars().any(char::is_whitespace) && Path::new(t).is_file() {
+        return (PathBuf::from(t), Vec::new());
+    }
+    let mut it = t.split_whitespace();
+    let prog = it.next().unwrap_or(default);
+    (PathBuf::from(prog), it.map(str::to_string).collect())
 }
 
+/// 工具程序名 (仅用于诊断显示): 取切词后的 program, 不带参数。
+fn tool_path(default: &str, env_var: &str) -> PathBuf {
+    tool_driver(default, env_var).0
+}
+
+/// 构造工具命令: program + 先把 `$ENV` 里的附加参数前置于 dcc 自己的参数之前
+/// (调用方随后 `.arg(...)` 追加的 `-r`/`-o`/`--update-section` 等排在之后)。
 fn tool_command(default: &str, env_var: &str) -> Command {
-    Command::new(tool_path(default, env_var))
+    let (prog, args) = tool_driver(default, env_var);
+    let mut cmd = Command::new(prog);
+    for a in &args {
+        cmd.arg(a);
+    }
+    cmd
 }
 
 /// 收集所有输入对象的 STB_GLOBAL / STB_WEAK 符号, 供 `ld -r --gc-sections`

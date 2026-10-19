@@ -2974,18 +2974,16 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                 return Err(CliError::new("cannot specify -o with multiple input files"));
             }
         } else if all_sources {
-            return Err(CliError::new(
-                "multiple source files cannot produce a single executable; \
-                 compile each with -c, then link with gcc(1) or dcc -r",
-            ));
+            // 多个源文件 → 编译+链接成单个可执行文件 (gcc 行为)。
+            // driver 的 compile_and_link_multiple 会把每个 .c 编成临时 .o 再
+            // 统一链接; -o 作为最终可执行名 (此处允许, 与 -c/-S 分支不同)。
         } else if all_objects {
             // 所有输入是 .o/.a 文件: 不设置 built_link,
             // 让 driver 的 needs_host_cc_link 决定是否委托 host cc
             // (包含 .a 文件时必须走 host cc)
         } else {
-            return Err(CliError::new(
-                "mixed input types; compile sources with -c first, then link .o files",
-            ));
+            // 混合 .c 与 .o/.a (gcc 允许): driver 的 compile_and_link_multiple
+            // 把 .c 编成临时 .o 后与给定的 .o/.a 一起链接成可执行文件。
         }
     } else if !link_mode && inputs.len() == 1 {
         // 单个 .o 文件输入: 不设置 built_link, 让 driver 的
@@ -3718,15 +3716,20 @@ mod tests {
     }
 
     #[test]
-    fn multiple_c_sources_cannot_link_to_exe() {
+    fn multiple_c_sources_link_to_exe_allowed() {
+        // gcc 行为: 多个 .c 源文件可在单次调用里编译+链接成可执行文件 (driver 的
+        // compile_and_link_multiple)。CLI 解析层不再拒绝。
         let args = vec![
             "-o".to_string(),
             "prog".to_string(),
             "a.c".to_string(),
             "b.c".to_string(),
         ];
-        let err = parse(&args).expect_err("multi .c must be rejected");
-        assert!(err.msg.contains("compile each with -c"));
+        let cfg = parse(&args).expect("multi .c should parse (compile+link to exe)");
+        assert_eq!(cfg.inputs.len(), 2);
+        assert_eq!(cfg.output.to_str(), Some("prog"));
+        assert!(!cfg.relocatable);
+        assert!(!cfg.emit_asm);
     }
 
     #[test]

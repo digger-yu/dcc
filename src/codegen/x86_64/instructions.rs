@@ -2093,6 +2093,15 @@ impl Codegen {
         if !matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
             return;
         }
+        // long double 的值通道是 st(0) 而非 xmm0。旧实现只认 xmm0 通道, 对
+        // elem_ty==LongDouble 是空操作, 于是后续 `fstp tbyte` 从**空** x87 栈弹
+        // 寄存器, 硬件写入 indefinite QNaN —— 表现为 `long double x = <double 或
+        // 整数表达式>` 静默变成 NaN/垃圾。整数源也一并在此转成 st(0)。
+        // 通道约定见 emit_operand_to_st0 的文档。
+        if matches!(elem_ty, Type::LongDouble) {
+            self.emit_operand_to_st0(src_ty, 0);
+            return;
+        }
         if expr_is_float {
             // 浮点表达式结果已在 xmm0
             // 但如果表达式类型与目标类型不匹配，需要转换

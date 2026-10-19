@@ -1823,7 +1823,12 @@ fn is_static_initializer(expr: &Expr) -> bool {
         | Expr::Float { .. }
         | Expr::Char { .. }
         | Expr::String { .. }
-        | Expr::LabelAddr { .. } => true,
+        | Expr::LabelAddr { .. }
+        // 复数常量字面量 (`1.0 + 2.0i` / `__builtin_complex` 的脱糖产物):
+        // 两个分量都是编译期 FloatConst, `gen_global_init_list` 会按目标
+        // 内型走 `complex_init_bytes` 逐分量编码 (gcc-dg torture/floatn-complex.h)。
+        | Expr::ComplexLit { .. }
+        | Expr::ComplexIntLit { .. } => true,
         Expr::Ident { .. } => true,
         Expr::SizeofTy { .. }
         | Expr::SizeofExpr { .. }

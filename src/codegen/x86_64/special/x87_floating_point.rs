@@ -494,6 +494,159 @@ impl Codegen {
         self.emit_x87_setcc_flags(op);
     }
 
+    /// `__builtin_iseqsigl(l, r)`: x87 信令相等 (ordered equality)。
+    ///
+    /// 与 [`Self::gen_float_cmp_x87`] 的操作数装载序列完全相同, 唯一区别是
+    /// 用 **`fcomip` (DF F1, 信令)** 而非 `fucomip` (DF E9, 非信令): 任一
+    /// 操作数为 NaN (含 quiet NaN) 时 fcomip 置 x87 状态字 IE,
+    /// `fetestexcept(FE_INVALID)` 因此非零 —— 与 SSE 侧的 `comisd` 口径一致
+    /// (见 `builtins.rs` 的 `__builtin_iseqsig*` 臂)。
+    /// 结果 = ZF=1 ∧ PF=0 (有序且相等); NaN 时 ZF=PF=1 → 被 setnp 掩掉 → 0。
+    pub fn gen_iseqsig_x87(&mut self, l: &Expr, r: &Expr) {
+        // 固定 16 字节: 够装 tbyte, 且保证嵌套求值里 call 时 rsp 仍 16 字节对齐。
+        let save_bytes: u8 = 16;
+        self.gen_expr(l, Self::EVAL_BASE); // st(0) = l
+        self.emit_operand_to_st0(&l.ty(), 0);
+        self.emit_insn(&Insn::sub_rsp_imm(save_bytes as i64)); // sub rsp, 16
+        self.emit_x87_fstp_at(4, 0, &Type::LongDouble); // fstp tbyte [rsp]
+        self.expr_depth += 1;
+        self.gen_expr(r, Self::EVAL_BASE); // st(0) = r
+        self.emit_operand_to_st0(&r.ty(), 0);
+        self.expr_depth -= 1;
+        self.emit_x87_fld_at(4, 0, &Type::LongDouble); // fld tbyte [rsp] → st(0)=l
+        self.emit_insn(&Insn::add_rsp_imm(save_bytes as i64)); // add rsp, 16
+                                                               // 现在 st(0) = l, st(1) = r
+        self.emit_insn(&Insn::x87_fixed(0xDF, 0xF1)); // fcomip st(0), st(1) — 信令
+        self.emit_x87_fstp_st0(); // 弹掉残留的右操作数 (不改 EFLAGS)
+        self.emit_insn(&Insn::setcc_reg(
+            crate::codegen::x86_64::opcode::CondCode::Eq,
+            0,
+        )); // sete al (ZF=1)
+        self.emit_insn(&Insn::setcc_reg(
+            crate::codegen::x86_64::opcode::CondCode::Np,
+            3,
+        )); // setnp bl (PF=0 ⇒ 非 NaN)
+        self.emit_insn(&Insn::alu_rm_reg_reg(
+            crate::codegen::x86_64::opcode::AluOp::And,
+            crate::codegen::shared::asm_operand::Width::B8,
+            0,
+            3,
+        )); // and al, bl
+        self.emit_insn(&Insn::mov_ext(
+            false,
+            crate::codegen::shared::asm_operand::Width::B8,
+            crate::codegen::shared::asm_operand::Width::B32,
+            0,
+            0,
+        )); // movzx eax, al
+    }
+
+    /// long double 谓词内建 (isnan/isinf/isfinite/isnormal): 把实参的 **80-bit
+    /// 位型**取到 rax (低 64: 整数位+小数) 与 rdx (低 16: bit15 符号 + 15 位指数)。
+    ///
+    /// long double 的值在 st(0)/内存而非 xmm, SSE 侧那套「读 xmm 位型」的判据
+    /// 在这里全部失效 (旧代码对 long double 实参仍走 movq rax,xmm0, 读到的是
+    /// 未定义寄存器内容, 于是 isnan(ld)/isinf(ld)/isnormal(ld) 全错,
+    /// gcc-dg torture/float128-tg.c 等因此 abort)。必须先落栈再按 80-bit
+    /// 扩展精度判 (与 x86 psABI 的 80-bit 格式一致)。
+    #[allow(dead_code)]
+    pub fn gen_ld_arg_bits(&mut self, e: &Expr) {
+        use crate::codegen::shared::asm_operand::Width as W;
+        self.gen_expr(e, Self::EVAL_BASE); // st(0) = x
+        self.emit_operand_to_st0(&e.ty(), 0);
+        // 固定 16 字节: 够装 tbyte, 且嵌套求值里 call 时 rsp 仍 16 字节对齐。
+        self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp, 16
+        self.emit_x87_fstp_at(4, 0, &Type::LongDouble); // fstp tbyte [rsp]
+        // mov rax, [rsp] —— MovRm 的 dst=Reg / src=Mem 形态才是**载入**
+        // (mov_rm_mem 助手是 reg→mem 的存储, 用错会把 rax 写进槽里)。
+        self.emit_insn(&Insn::new(
+            crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
+                rip_relative: false,
+                width: W::B64,
+                dst: crate::codegen::x86_64::opcode::Operand::Reg(0, W::B64),
+                src: crate::codegen::x86_64::opcode::Operand::Mem(
+                    crate::codegen::x86_64::opcode::MemOperand {
+                        disp: 0,
+                        base: Some(4),
+                        index: None,
+                        seg: None,
+                    },
+                ),
+            },
+            &[],
+        )); // mov rax, [rsp]
+        self.emit_insn(&Insn::mov_ext_mem(false, W::B16, W::B32, 2, 4, 8)); // movzx edx, word [rsp+8]
+        self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp, 16
+    }
+
+    /// 由 [`Self::gen_ld_arg_bits`] 取到的 80-bit 位型 (rax/rdx) 合成谓词结果。
+    /// `kind`: 0 = isnan, 1 = isinf (返回 ±1), 2 = isfinite, 3 = isnormal。
+    ///
+    /// 80-bit 扩展精度布局: 位 63 = 整数位 (inf/NaN 时置位), 位 0..62 = 小数;
+    /// 指数 15 位 (全 1 ⇒ inf/NaN), 符号 1 位 (bit 15)。
+    ///   isnan    = exp==0x7FFF ∧ 小数非全 0
+    ///   isinf    = exp==0x7FFF ∧ 小数全 0      (按符号返回 ±1)
+    ///   isfinite = exp != 0x7FFF
+    ///   isnormal = exp ∈ [1, 0x7FFE]
+    pub fn gen_ld_bit_predicate(&mut self, kind: u8) {
+        use crate::codegen::shared::asm_operand::Width as W;
+        use crate::codegen::x86_64::opcode::CondCode as CC;
+        // r8 = 指数字段 (gen_ld_arg_bits 的 movzx 已保证高位为 0)。
+        self.emit_insn(&Insn::mov_rm_reg(W::B64, 8, 2)); // mov r8, rdx
+        self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 8, 0x7FFF)); // and r8, 0x7FFF
+        match kind {
+            2 => {
+                // isfinite: exp != 0x7FFF
+                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(7, 8, 0x7FFF)); // cmp r8, 0x7FFF
+                self.emit_insn(&Insn::setcc_reg(CC::Ne, 0)); // setne al
+            },
+            3 => {
+                // isnormal: (exp-1) <= 0x7FFD ⇔ exp ∈ [1, 0x7FFE]
+                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(5, 8, 1)); // sub r8, 1
+                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(7, 8, 0x7FFD)); // cmp r8, 0x7FFD
+                self.emit_insn(&Insn::setcc_reg(CC::Be, 0)); // setbe al
+            },
+            // isnan (0) / isinf (1): 都要求 exp == 0x7FFF, 再用小数区分。
+            _ => {
+                // 先取小数判定值再动标志: `sete al` 只写 al, rax 高 56 位是残值,
+                // 若在它之后 `mov r9, rax` 会把残值当有效位一起搬走 (实测
+                // isinf(+Inf) 因此恒 0)。
+                self.emit_insn(&Insn::mov_rm_reg(W::B64, 9, 0)); // mov r9, rax
+                self.emit_insn(&Insn::shift_reg_imm8_c1_b64(0b100, 9, 1)); // shl r9, 1
+                self.emit_insn(&Insn::alu_rm_reg_imm32_b64(7, 8, 0x7FFF)); // cmp r8, 0x7FFF
+                self.emit_insn(&Insn::setcc_reg(CC::Eq, 0)); // sete al (指数全 1)
+                // 小数非全 0 ⇔ (rax << 1) != 0 (左移一位丢掉整数位)
+                self.emit_insn(&Insn::test_rm_reg(W::B64, 9, 9)); // test r9, r9
+                if kind == 0 {
+                    self.emit_insn(&Insn::setcc_reg(CC::Ne, 3)); // setne bl (有小数 ⇒ NaN)
+                } else {
+                    self.emit_insn(&Insn::setcc_reg(CC::Eq, 3)); // sete  bl (无小数 ⇒ Inf)
+                }
+                self.emit_insn(&Insn::alu_rm_reg_reg(
+                    crate::codegen::x86_64::opcode::AluOp::And,
+                    W::B8,
+                    0,
+                    3,
+                )); // and al, bl
+                if kind == 1 {
+                    // isinf 返回 ±1: result = isinf * (1 - 2*sign)。
+                    // !isinf 时 eax 已是 0, 条件取负对 0 无影响, 故可直接按符号选。
+                    self.emit_insn(&Insn::mov_ext(false, W::B8, W::B32, 0, 0)); // movzx eax, al
+                    self.emit_insn(&Insn::mov_rm_reg(W::B64, 9, 0)); // mov r9, rax
+                    self.emit_insn(&Insn::unary_rm_reg(
+                        crate::codegen::x86_64::opcode::UnaryOp::Neg,
+                        W::B64,
+                        9,
+                    )); // neg r9        (r9 = -isinf)
+                    self.emit_insn(&Insn::mov_rm_reg(W::B64, 10, 2)); // mov r10, rdx
+                    self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 10, 0x8000)); // and r10, 0x8000
+                    self.emit_insn(&Insn::test_rm_reg(W::B64, 10, 10)); // test r10, r10
+                    self.emit_insn(&Insn::cmovcc_reg_reg_b64(0x45, 0, 9)); // cmovne rax, r9
+                }
+            },
+        }
+    }
+
     /// 把 `fucomip` 留下的 CF/ZF/PF 翻译成 rax = 0/1。
     ///
     /// x87 比较**没有 SF**，因此 `setl/setg` 一类有符号 cc 不可用；而 unordered

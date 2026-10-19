@@ -516,6 +516,9 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                 if let Some(v) = eval_float_builtin(name.name.as_str(), args)? {
                     return Ok(v);
                 }
+                if let Some(v) = eval_math_builtin(name.name.as_str(), args)? {
+                    return Ok(v);
+                }
                 if let Some(v) = eval_intrinsic(name.name.as_str(), args)? {
                     return Ok(ConstValue::Int(v));
                 }
@@ -548,10 +551,21 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
 fn eval_float_builtin(name: &str, _args: &[Expr]) -> Result<Option<ConstValue>, ConstEvalError> {
     use crate::float80;
     // 传统 f/l 后缀: 与 GCC 一致.
+    // `nans` 系返回**信令** NaN (最低有效尾数位为 1、quiet 位为 0):
+    //   f32 sNaN = 0x7F80_0001, f64 sNaN = 0x7FF0_0000_0000_0001。
+    // gcc-dg torture/floatn-nan.h 断言 `nans_cst + nans_cst` 置 FE_INVALID,
+    // 而 quiet NaN 相加不会 —— 所以这里绝不能与 `nan` 同值。
+    // long double 走 float80::from_f64: 它保留 NaN 负载并置整数位,
+    // 80-bit quiet 位 (bit 62) 仍为 0, 信令语义不丢。
     let v = match name {
         "__builtin_nan" => Some(FloatConst::F64(f64::NAN)),
         "__builtin_nanf" => Some(FloatConst::F32(f32::NAN)),
         "__builtin_nanl" => Some(FloatConst::LongDouble(float80::from_f64(f64::NAN))),
+        "__builtin_nans" => Some(FloatConst::F64(f64::from_bits(0x7FF0_0000_0000_0001))),
+        "__builtin_nansf" => Some(FloatConst::F32(f32::from_bits(0x7F80_0001))),
+        "__builtin_nansl" => Some(FloatConst::LongDouble(float80::from_f64(
+            f64::from_bits(0x7FF0_0000_0000_0001),
+        ))),
         "__builtin_inf" | "__builtin_huge_val" => Some(FloatConst::F64(f64::INFINITY)),
         "__builtin_inff" | "__builtin_huge_valf" => Some(FloatConst::F32(f32::INFINITY)),
         "__builtin_infl" | "__builtin_huge_vall" => {
@@ -563,8 +577,9 @@ fn eval_float_builtin(name: &str, _args: &[Expr]) -> Result<Option<ConstValue>, 
         return Ok(Some(ConstValue::Float(v)));
     }
     // 扩展浮点 (_FloatN/_FloatNx) 宽度后缀: inf/huge_val → +Infinity,
-    // nan/nans → NaN; 后缀决定精度 (f16/f32 → f32, f32x/f64 → f64,
-    // f64x/f128/f128x → long double). 顺序敏感: 长后缀须先于短前缀匹配.
+    // nan → quiet NaN, nans → signaling NaN; 后缀决定精度
+    // (f16/f32 → f32, f32x/f64 → f64, f64x/f128/f128x → long double).
+    // 顺序敏感: 长后缀须先于短前缀匹配。
     let n = match name.strip_prefix("__builtin_") {
         Some(n) => n,
         None => return Ok(None),
@@ -589,26 +604,34 @@ fn eval_float_builtin(name: &str, _args: &[Expr]) -> Result<Option<ConstValue>, 
     if stem != "inf" && stem != "huge_val" && stem != "nan" && stem != "nans" {
         return Ok(None);
     }
+    let is_inf = stem == "inf" || stem == "huge_val";
+    let is_snan = stem == "nans";
     let v = match suff {
         "f16" | "f32" => {
-            let x = if stem == "inf" || stem == "huge_val" {
+            let x = if is_inf {
                 f32::INFINITY
+            } else if is_snan {
+                f32::from_bits(0x7F80_0001)
             } else {
                 f32::NAN
             };
             FloatConst::F32(x)
         }
         "f32x" | "f64" => {
-            let x = if stem == "inf" || stem == "huge_val" {
+            let x = if is_inf {
                 f64::INFINITY
+            } else if is_snan {
+                f64::from_bits(0x7FF0_0000_0000_0001)
             } else {
                 f64::NAN
             };
             FloatConst::F64(x)
         }
         _ => {
-            let x = if stem == "inf" || stem == "huge_val" {
+            let x = if is_inf {
                 f64::INFINITY
+            } else if is_snan {
+                f64::from_bits(0x7FF0_0000_0000_0001)
             } else {
                 f64::NAN
             };
@@ -616,6 +639,176 @@ fn eval_float_builtin(name: &str, _args: &[Expr]) -> Result<Option<ConstValue>, 
         }
     };
     Ok(Some(ConstValue::Float(v)))
+}
+
+/// 编译期折叠 `__builtin_<math>` (acosh/exp2/erfc/pow/hypot/tgamma/… 及其
+/// _FloatN 宽度后缀 f16/f32/f32x/f64/f64x/f128/f128x, 以及无后缀的传统 double 版)。
+/// 参数均为常量时用 `libm` 求值, 返回对应精度的浮点常量。
+///
+/// 修复 gcc-dg torture/floatN-builtin.c: 那些测试把一长串 `__builtin_*` 用在
+/// **全局** 初始化器 (`volatile TYPE t = FN(__builtin_acosh)(CST(1.0))`)。GCC 在
+/// 编译期把常量参数折叠掉; dcc 既无全局动态初始化器、运行期又转发 libm, 常量场景
+/// 会报 "global initializer ... not a supported constant expression" (E1006)。
+/// 非常量参数仍走运行期 libm 转发, 不受影响。不匹配返回 Ok(None) 交回外层。
+fn eval_math_builtin(name: &str, args: &[Expr]) -> Result<Option<ConstValue>, ConstEvalError> {
+    use crate::float80;
+    let n = match name.strip_prefix("__builtin_") {
+        Some(n) => n,
+        None => return Ok(None),
+    };
+    // 精度: 0 = f32, 1 = f64, 2 = long double。长后缀优先。
+    let (stem, prec): (&str, u8) = if let Some(r) = n.strip_suffix("f128x") {
+        (r, 2)
+    } else if let Some(r) = n.strip_suffix("f128") {
+        (r, 2)
+    } else if let Some(r) = n.strip_suffix("f64x") {
+        (r, 2)
+    } else if let Some(r) = n.strip_suffix("f32x") {
+        (r, 1)
+    } else if let Some(r) = n.strip_suffix("f16") {
+        (r, 0)
+    } else if let Some(r) = n.strip_suffix("f32") {
+        (r, 0)
+    } else if let Some(r) = n.strip_suffix("f64") {
+        (r, 1)
+    } else {
+        (n, 1)
+    };
+    // 第 i 个参数求值为 f64 (浮点常量; 整型常量允许提升)。
+    let fa = |i: usize| -> Result<f64, ConstEvalError> {
+        match eval_full(&args[i], false)? {
+            ConstValue::Float(fc) => Ok(fc.as_f64()),
+            ConstValue::Int(v) => Ok(v as f64),
+            _ => Err(ConstEvalError::NotConstant),
+        }
+    };
+    // 第 i 个参数求值为 i32 (ldexp/scalbn 的整型指数参数)。
+    let ia = |i: usize| -> Result<i32, ConstEvalError> {
+        match eval_full(&args[i], false)? {
+            ConstValue::Int(v) => Ok(v as i32),
+            _ => Err(ConstEvalError::NotConstant),
+        }
+    };
+    let argc = args.len();
+    let wrap = |x: f64| -> ConstValue {
+        match prec {
+            0 => ConstValue::Float(FloatConst::F32(x as f32)),
+            2 => ConstValue::Float(FloatConst::LongDouble(float80::from_f64(x))),
+            _ => ConstValue::Float(FloatConst::F64(x)),
+        }
+    };
+    // 返回整型的内建 (int / long 语义)。
+    match stem {
+        "ilogb" if argc == 1 => return Ok(Some(ConstValue::Int(libm::ilogb(fa(0)?) as i128))),
+        // llround/lround: 半值**远离零**取整 (== f64::round 的语义)。
+        "llround" | "lround" if argc == 1 => {
+            return Ok(Some(ConstValue::Int(fa(0)?.round() as i64 as i128)))
+        },
+        // llrint/lrint: 半值**到偶**取整 (当前舍入模式为 nearest-even)。
+        "llrint" | "lrint" if argc == 1 => {
+            return Ok(Some(ConstValue::Int(const_rint_i64(fa(0)?) as i128)))
+        },
+        _ => {}
+    }
+    let r: Option<f64> = match stem {
+        "sqrt" if argc == 1 => Some(libm::sqrt(fa(0)?)),
+        "fabs" if argc == 1 => Some(libm::fabs(fa(0)?)),
+        "copysign" if argc == 2 => Some(libm::copysign(fa(0)?, fa(1)?)),
+        "ceil" if argc == 1 => Some(libm::ceil(fa(0)?)),
+        "floor" if argc == 1 => Some(libm::floor(fa(0)?)),
+        "trunc" if argc == 1 => Some(libm::trunc(fa(0)?)),
+        "round" if argc == 1 => Some(libm::round(fa(0)?)),
+        "rint" if argc == 1 => Some(libm::rint(fa(0)?)),
+        // nearbyint 与 rint 仅差在不置 inexact, 取整值相同 (默认舍入模式)。
+        "nearbyint" if argc == 1 => Some(libm::rint(fa(0)?)),
+        "exp" if argc == 1 => Some(libm::exp(fa(0)?)),
+        "exp2" if argc == 1 => Some(libm::exp2(fa(0)?)),
+        "expm1" if argc == 1 => Some(libm::expm1(fa(0)?)),
+        "log" if argc == 1 => Some(libm::log(fa(0)?)),
+        "log2" if argc == 1 => Some(libm::log2(fa(0)?)),
+        "log10" if argc == 1 => Some(libm::log10(fa(0)?)),
+        "log1p" if argc == 1 => Some(libm::log1p(fa(0)?)),
+        "logb" if argc == 1 => Some(const_logb(fa(0)?)),
+        "sin" if argc == 1 => Some(libm::sin(fa(0)?)),
+        "cos" if argc == 1 => Some(libm::cos(fa(0)?)),
+        "tan" if argc == 1 => Some(libm::tan(fa(0)?)),
+        "asin" if argc == 1 => Some(libm::asin(fa(0)?)),
+        "acos" if argc == 1 => Some(libm::acos(fa(0)?)),
+        "atan" if argc == 1 => Some(libm::atan(fa(0)?)),
+        "sinh" if argc == 1 => Some(libm::sinh(fa(0)?)),
+        "cosh" if argc == 1 => Some(libm::cosh(fa(0)?)),
+        "tanh" if argc == 1 => Some(libm::tanh(fa(0)?)),
+        "asinh" if argc == 1 => Some(libm::asinh(fa(0)?)),
+        "acosh" if argc == 1 => Some(libm::acosh(fa(0)?)),
+        "atanh" if argc == 1 => Some(libm::atanh(fa(0)?)),
+        "cbrt" if argc == 1 => Some(libm::cbrt(fa(0)?)),
+        "erf" if argc == 1 => Some(libm::erf(fa(0)?)),
+        "erfc" if argc == 1 => Some(libm::erfc(fa(0)?)),
+        "tgamma" if argc == 1 => Some(libm::tgamma(fa(0)?)),
+        "lgamma" if argc == 1 => Some(libm::lgamma(fa(0)?)),
+        "pow" if argc == 2 => Some(libm::pow(fa(0)?, fa(1)?)),
+        "atan2" if argc == 2 => Some(libm::atan2(fa(0)?, fa(1)?)),
+        "fdim" if argc == 2 => Some(libm::fdim(fa(0)?, fa(1)?)),
+        "fmax" if argc == 2 => Some(libm::fmax(fa(0)?, fa(1)?)),
+        "fmin" if argc == 2 => Some(libm::fmin(fa(0)?, fa(1)?)),
+        "fmod" if argc == 2 => Some(libm::fmod(fa(0)?, fa(1)?)),
+        "hypot" if argc == 2 => Some(libm::hypot(fa(0)?, fa(1)?)),
+        "nextafter" if argc == 2 => Some(libm::nextafter(fa(0)?, fa(1)?)),
+        "remainder" if argc == 2 => Some(libm::remainder(fa(0)?, fa(1)?)),
+        "ldexp" if argc == 2 => Some(libm::ldexp(fa(0)?, ia(1)?)),
+        "scalbn" if argc == 2 => Some(libm::scalbn(fa(0)?, ia(1)?)),
+        // scalbln 与 scalbn 仅指数参数宽度不同 (long vs int), 取整值相同。
+        "scalbln" if argc == 2 => Some(libm::scalbn(fa(0)?, ia(1)?)),
+        "fma" if argc == 3 => Some(libm::fma(fa(0)?, fa(1)?, fa(2)?)),
+        _ => None,
+    };
+    match r {
+        Some(x) => Ok(Some(wrap(x))),
+        None => Ok(None),
+    }
+}
+
+/// `logb` 常量折叠: 返回参数的 (无偏) 二进制指数, 以浮点表示。
+/// libm 0.2 未导出顶层 `logb`, 这里按 IEEE-754 位型直接算。
+fn const_logb(x: f64) -> f64 {
+    if x.is_nan() {
+        return f64::NAN;
+    }
+    if x.is_infinite() {
+        return f64::INFINITY;
+    }
+    if x == 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let bits = x.to_bits();
+    let biased = ((bits >> 52) & 0x7FF) as i32;
+    if biased != 0 {
+        (biased - 1023) as f64
+    } else {
+        // 次正规数: 值 = 尾数 * 2^-1074, logb = MSB 位号 - 1074。
+        let mant = bits & 0xF_FFFF_FFFF_FFFF;
+        let msb = 63 - (mant | 1).leading_zeros() as i32;
+        (msb - 1074) as f64
+    }
+}
+
+/// 半值**到偶**取整为 i64 (llrint/lrint 语义; libm 0.2 未导出)。
+fn const_rint_i64(x: f64) -> i64 {
+    if x.is_nan() || x.is_infinite() {
+        return x as i64;
+    }
+    let f = x.floor();
+    let diff = x - f;
+    let r = if diff < 0.5 {
+        f
+    } else if diff > 0.5 {
+        f + 1.0
+    } else if (f as i64) % 2 == 0 {
+        f
+    } else {
+        f + 1.0
+    };
+    r as i64
 }
 
 /// 编译期内建函数求值 (如 __builtin_clzll/__builtin_ctzll/__builtin_popcountll)。

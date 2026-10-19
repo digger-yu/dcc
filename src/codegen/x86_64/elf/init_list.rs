@@ -102,23 +102,26 @@ impl Codegen {
                         }
                         continue;
                     }
+                    // 目标字节偏移: 仅 designated 项有; 元素字节按它写 (而非无脑
+                    // append), 以支持乱序/前跳后又回退的设计符 (pr69714:
+                    // ...[2],[12],[3],[4],[5] —— 旧代码遇 off<data.len() 时会把
+                    // 值追加到末尾, 指定槽位停留在 0)。
+                    let mut target_off: Option<usize> = None;
                     let value = match item {
                         InitItem::Expr(e) => e,
                         InitItem::Designated { designator, value } => {
                             // 链式 designator: resolve_designator 累积偏移
                             match resolve_designator(ty, designator) {
-                                Some((off, _, _)) if off == i * elem_size => value,
                                 Some((off, _, _)) => {
-                                    while data.len() < off {
-                                        data.push(0);
-                                    }
+                                    target_off = Some(off);
                                     value
                                 },
                                 None => continue,
                             }
                         },
                     };
-                    if let Expr::InitList {
+                    let write_base = target_off.unwrap_or(data.len());
+                    let elem_data_opt: Option<Vec<u8>> = if let Expr::InitList {
                         inits: nested,
                         ty: nested_ty,
                         ..
@@ -134,16 +137,12 @@ impl Codegen {
                         } else {
                             nested_ty
                         };
-                        let elem_rel = rel.map(|(base, sec)| (base + data.len() as u64, sec));
-                        if let Some(elem_data) =
-                            self.gen_global_init_list(nested_ty, nested, elem_rel, rodata_slots)
-                        {
-                            data.extend_from_slice(&elem_data);
-                        }
+                        let elem_rel = rel.map(|(base, sec)| (base + write_base as u64, sec));
+                        self.gen_global_init_list(nested_ty, nested, elem_rel, rodata_slots)
                     } else {
                         let is_float_elem =
                             matches!(&elem_ty.base, Type::Float | Type::Double | Type::LongDouble);
-                        let elem_rel = rel.map(|(base, sec)| (base + data.len() as u64, sec));
+                        let elem_rel = rel.map(|(base, sec)| (base + write_base as u64, sec));
                         // 复数元素收到复数常量表达式: 按目标分量编码
                         // (eval_const_expr 通用路径对复数只取虚部)
                         let complex_data = match &elem_ty.base {
@@ -152,10 +151,11 @@ impl Codegen {
                         };
                         // 字符串指针元素 (char *arr[] = {"a", "b"}): 不能走
                         // eval_const_expr (字符串会按内容或 0 填充), 单独生成指针槽
-                        let elem_data = if let Some(b) = complex_data {
+                        Some(if let Some(b) = complex_data {
                             b
                         } else if matches!(&elem_ty.base, Type::Ptr(_)) {
-                            if let Expr::String { data, .. } = const_eval::unwrap_string_cast(value)
+                            if let Expr::String { data, .. } =
+                                const_eval::unwrap_string_cast(value)
                             {
                                 self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
                             } else {
@@ -175,8 +175,19 @@ impl Codegen {
                                 is_float_elem,
                                 rodata_slots,
                             )
-                        };
-                        data.extend_from_slice(&elem_data);
+                        })
+                    };
+                    if let Some(elem_data) = elem_data_opt {
+                        match target_off.take() {
+                            Some(off) => {
+                                // 乱序/回退设计符: 按偏移覆写 (越界则先补零).
+                                if data.len() < off + elem_data.len() {
+                                    data.resize(off + elem_data.len(), 0);
+                                }
+                                data[off..off + elem_data.len()].copy_from_slice(&elem_data);
+                            },
+                            None => data.extend_from_slice(&elem_data),
+                        }
                     }
                     while data.len() < (i + 1) * elem_size {
                         data.push(0);

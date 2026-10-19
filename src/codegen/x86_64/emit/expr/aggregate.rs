@@ -1904,6 +1904,32 @@ impl Codegen {
                                 continue;
                             }
                         }
+                        // 向量字段 (pr94482: `union U z = { .j = <vector> }`):
+                        // Struct/Union 字段已由上方 val_is_agg 块处理并 continue,
+                        // 剩下 size>8 的聚合形态就只有 Vector (is_aggregate_shape
+                        // 含 Vector)。旧路径落到 emit_store, 而它对 >8 字节尺寸
+                        // 不发任何指令 —— 整个 store 静默丢失, 字段保留栈残值,
+                        // pr94482 因此 abort。改走聚合赋值的单一实现, 源侧物化
+                        // 契约 (Ident/Call/CompoundLit) 由 gen_aggregate_assign_to
+                        // 统一承担, 不在此重写任何判据。
+                        if sz > 8
+                            && matches!(
+                                &field_ty_opt,
+                                Some(ft) if Self::is_aggregate_shape(ft)
+                            )
+                        {
+                            let addr_slot = self.alloc_sret_slot(8);
+                            self.emit_lea_r13(0, store_off);
+                            self.store_stack(0, addr_slot); // [addr_slot] = &field
+                            let fty = field_ty_opt.clone().unwrap();
+                            self.gen_aggregate_assign_to(
+                                &AggDst::Indirect { addr_slot },
+                                &fty,
+                                value,
+                            );
+                            init_idx += 1;
+                            continue;
+                        }
                         self.gen_expr(value, Self::EVAL_BASE);
                         if let Some(ft) = &field_ty_opt {
                             if matches!(ft, Type::Float | Type::Double | Type::LongDouble) {
