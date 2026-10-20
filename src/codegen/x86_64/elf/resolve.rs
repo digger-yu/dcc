@@ -278,6 +278,26 @@ impl Codegen {
                 self.code[p..p + 4].copy_from_slice(&(rel as i32).to_le_bytes());
             }
         }
+        // 修补 data 节里指向本 TU 文本标号的 64 位槽（static local 跳转表，
+        // 如 Lua `luaV_execute` 的 `disptab`）。槽里现在是 0 占位；标号偏移在
+        // `self.labels`（相对代码段起点），加段基址即运行期绝对地址 —— 与
+        // `label_addr_refs` 同一个换算，只是写在 data 而不是 code。
+        for (data_off, label_name, addend) in
+            std::mem::take(&mut self.pending_data_textlabel_rels)
+        {
+            let Some(&label_off) = self.labels.get(&label_name) else {
+                continue;
+            };
+            let code_off = self.exec_text_size
+                + self.rodata.len() as u64
+                + self.tdata_section.len() as u64
+                + data_off;
+            let p = code_off as usize;
+            if p + 8 <= self.code.len() {
+                let vaddr = self.entry + label_off + addend as u64;
+                self.code[p..p + 8].copy_from_slice(&vaddr.to_le_bytes());
+            }
+        }
     }
 
     /// ET_REL Phase 3 (自 monolith compile_rel 尾部恢复): 符号表定稿后
@@ -636,6 +656,26 @@ impl Codegen {
             } else {
                 self.data_relocations.push(relocation);
             }
+        }
+        // P1-7: data 节里指向本 TU **文本标号**（static local 跳转表 `&&label`）的
+        // 64 位槽。`.Ll_*` 按 GAS 约定不进 symtab（`referenced_reloc_symbols` 排除
+        // `.L` 前缀），所以符号取 `.text` **节符号**（st_value=0），addend 填标号在
+        // 代码段内的偏移 —— 与 `pending_data_rodata_rels` 对字符串字面量同一手法。
+        for (data_off, label_name, extra_addend) in
+            std::mem::take(&mut self.pending_data_textlabel_rels)
+        {
+            let Some(sym_idx) = self.reloc_sym_index(".text", "data->text label R_64") else {
+                continue;
+            };
+            let Some(&label_off) = self.labels.get(&label_name) else {
+                continue;
+            };
+            self.data_relocations.push(ElfRela {
+                offset: data_off,
+                sym_index: sym_idx,
+                rel_type: R_X86_64_64,
+                addend: label_off as i64 + extra_addend,
+            });
         }
         for (sec_idx, relocations) in custom_data_relas {
             self.extra_rela_sections.push(ExtraRelaSection {

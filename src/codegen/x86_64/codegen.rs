@@ -275,6 +275,9 @@ pub struct Codegen {
     pub nested_chain_offsets: HashMap<String, i64>,
     pub nested_func_rename_counter: u32,
     pub current_func_name: String,   // 当前正在编译的函数名
+    /// 预注册 static local 期间该变量的**属主函数名**：`&&label` 初始化式的标签
+    /// 命名空间（见 `c_label_to_asm`）。只在 `register_static_global` 调用期间非空。
+    pub static_local_label_owner: Option<String>,
     pub current_func_ret_ty: Type,   // 当前函数的返回类型
     pub current_no_instrument: bool, // 当前函数标了 __attribute__((no_instrument_function))
     /// 静态局部变量分析 pass 的结果 (由 compile() 预计算，后端消费)
@@ -314,6 +317,20 @@ pub struct Codegen {
     // data 节 64 位符号引用重定位：(data_section_offset, symbol_name)
     /// (data_off, symbol, custom_sec, rel_type, addend) — addend 用于 &arr[i] 等
     pub pending_data64_rels: Vec<(u64, String, Option<usize>, u32, i64)>,
+    /// data 节里指向**本 TU 文本标号**（`&&label`）的 64 位槽：
+    /// `(data_off, label_asm_name, addend)`。
+    ///
+    /// 为什么不走 `pending_data64_rels`：那些名字要进 symtab，而 `.Ll_*` 按 GAS/ELF
+    /// 约定**不进** symtab（`referenced_reloc_symbols` 显式排除 `.L` 前缀）。文本标号
+    /// 的正确形状是「`.text` **节符号** + 节内偏移 addend」——与
+    /// `pending_data_rodata_rels` 对字符串字面量用的手法同源。ET_EXEC 下由
+    /// `resolve()` 用 `self.labels` 就地回填；ET_REL 下由 `emit_rel_relocations`
+    /// 发 `R_X86_64_64`（符号 = `.text`）。
+    ///
+    /// 存在理由：computed-goto 解释器（Lua `luaV_execute` 的 `disptab`）此前走
+    /// 「static local + 运行时初始化」，每次函数调用都重发 ~120 条 `lea+mov` 把表填
+    /// 一遍（fib(32) ~7M 次调用 ≈ 8.4 亿条指令，实测占 dcc/gcc 差距的 ~1/4）。
+    pub pending_data_textlabel_rels: Vec<(u64, String, i64)>,
     // rodata 节内部重定位：rodata 里的 CompoundLit 结构体指针字段
     // 引用另一个 rodata 里的匿名 CompoundLit。(offset_in_rodata, symbol_name, rel_type, addend)
     pub pending_rodata_rels: Vec<(u64, String, u32, i64)>,
@@ -922,6 +939,7 @@ impl Codegen {
             nested_chain_offsets: HashMap::new(),
             nested_func_rename_counter: 0,
             current_func_name: String::new(),
+            static_local_label_owner: None,
             current_func_ret_ty: Type::Int,
             static_local_map: crate::static_locals::StaticLocalMap::default(),
             real_global_names: std::collections::HashSet::new(),
@@ -941,6 +959,7 @@ impl Codegen {
             addr_escaped_done: false,
             global_homes: HashMap::new(),
             pending_data64_rels: vec![],
+            pending_data_textlabel_rels: vec![],
             pending_rodata_rels: vec![],
             pending_label_diff_rels: vec![],
             data_relocations: vec![],

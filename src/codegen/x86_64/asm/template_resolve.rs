@@ -49,7 +49,15 @@ impl Codegen {
     /// call-site landing pad 指到另一个函数的落地垫上。
     pub(crate) fn c_label_to_asm(&self, name: &str) -> String {
         if self.current_func_name.is_empty() {
-            format!(".Ll_{}", name)
+            // 预注册期（`pre_register_static_locals`）没有"当前函数"，但 static local
+            // 的初始化式可能含 `&&label`（computed-goto 跳转表）。此时命名空间由
+            // `static_local_label_owner`（该 static local 的属主函数）给出 —— 缺了它，
+            // 算出的 `.Ll_<label>` 与函数体发射时的 `.Ll_<func>_<label>` 不是同一个
+            // 符号（旧代码正是因此把跳转表降级成运行时初始化）。
+            match &self.static_local_label_owner {
+                Some(owner) => format!(".Ll_{}_{}", owner, name),
+                None => format!(".Ll_{}", name),
+            }
         } else {
             format!(".Ll_{}_{}", self.current_func_name, name)
         }

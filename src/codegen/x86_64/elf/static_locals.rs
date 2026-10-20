@@ -18,7 +18,6 @@ impl Codegen {
             }
         }
     }
-
     /// 注册单个 static local 到 data/bss 段.
     /// 返回 true 表示需要运行时初始化.
     /// 递归检测初始化表达式是否含 `&&label` (label address)。
@@ -63,14 +62,27 @@ impl Codegen {
         let sz = info.size;
         let align = info.alignment;
         let initialized = info.init.is_some();
-        // 含 `&&label` 的初始化式不能走编译期静态初始化: label 地址在函数体发射前
-        // 未知; 强制走运行时初始化路径, 由函数体发射 label 后再写回 static 槽。
+        // 含 `&&label` 的初始化式：**属主函数不是嵌套函数**时走编译期静态初始化
+        // （data 节 + `pending_data_textlabel_rels`），否则旧行为（运行时初始化）。
+        //
+        // 为什么值得分这条岔路：computed-goto 解释器（Lua `luaV_execute` 的
+        // `disptab`）此前只能运行时初始化 —— 函数**每次被调用**都把整张表重填一遍
+        // （60 个 opcode = ~120 条 `lea+mov`）。fib(32) 约 7M 次调用 ≈ 8.4 亿条
+        // 指令，实测占 dcc/gcc 性能差距的约四分之一。数据节 + 链接期重定位是 GCC
+        // 的做法（`.data.rel.ro`），零运行时代价。
+        //
+        // 嵌套函数属主一律退回旧路：它的初始化式可能引用**父函数**的标签，而预注册期
+        // 没有 `local_labels` 事实，算不准命名空间（算错就是指向别的函数的跳转表）。
         let has_label_ref = info
             .init
             .as_ref()
             .map_or(false, |e| Self::init_contains_label_addr(e));
-        // 检查初始化式是否可在编译时求值
-        let can_static_init = if initialized && !has_label_ref {
+        let label_owner_ok = has_label_ref
+            && !self.nested_func_parent.contains_key(&info.owner_func)
+            && !info.owner_func.is_empty();
+        let use_data = if label_owner_ok {
+            true // 由下面的初始化发射成败决定（失败则回退 BSS + 运行时初始化）
+        } else if initialized && !has_label_ref {
             match info.init.as_ref().unwrap() {
                 Expr::String { .. } => true,
                 Expr::InitList { .. } => true, // 尝试, 可能失败
@@ -80,9 +92,8 @@ impl Codegen {
                 },
             }
         } else {
-            false // 无初始化式, 或含 &&label → 不进静态初始化
+            false // 无初始化式, 或含 &&label 但不能静态化 → 不进静态初始化
         };
-        let use_data = can_static_init && initialized;
         if use_data {
             self.data_align = self.data_align.max(align as u64);
         } else {
@@ -98,6 +109,12 @@ impl Codegen {
             self.bss_size = self.bss_size.div_ceil(align as u64) * align as u64;
             self.bss_size
         };
+        // 标签命名空间：含 &&label 的静态初始化在预注册期求值，属主函数名必须可见
+        // （`c_label_to_asm` 在 `current_func_name` 为空时读它）。
+        let prev_owner = self.static_local_label_owner.take();
+        if label_owner_ok {
+            self.static_local_label_owner = Some(info.owner_func.clone());
+        }
         // 尝试写入初始值
         let has_init = if use_data {
             if let Some(init) = &info.init {
@@ -153,10 +170,25 @@ impl Codegen {
                         }
                     },
                     _ => {
-                        let is_float =
-                            info.ty.is_real_float();
+                        let is_float = info.ty.is_real_float();
                         if let Some(bytes) = global_init_bytes(init, sz, is_float, &info.ty) {
                             self.data_section.extend_from_slice(&bytes);
+                            true
+                        } else if let Expr::LabelAddr { .. } = init {
+                            // 标量 `static void *p = &&lab;`：走 eval_const_expr 的
+                            // LabelAddr 分支（登记 pending_data_textlabel_rels）。
+                            let base = self.data_section.len() as u64;
+                            let bytes = self.eval_const_expr(
+                                init,
+                                Some((base, None)),
+                                sz,
+                                &info.ty,
+                                false,
+                            );
+                            self.data_section.extend_from_slice(&bytes);
+                            for _ in bytes.len()..sz {
+                                self.data_section.push(0);
+                            }
                             true
                         } else {
                             false
@@ -169,6 +201,7 @@ impl Codegen {
         } else {
             false
         };
+        self.static_local_label_owner = prev_owner;
         if !has_init {
             if use_data {
                 self.data_section.resize(self.data_section.len() + sz, 0);

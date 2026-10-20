@@ -742,14 +742,20 @@ impl Codegen {
             return data;
         }
         // 优先用 eval_full: 浮点字面量直接走 .to_bits(), 不被截断为整数
-        // &&label: 提前处理, 前缀标签名以避免与函数符号名冲突
-        if let Expr::LabelAddr { label, .. } = e {
+        // &&label: 提前处理, 前缀标签名以避免与函数符号名冲突。
+        // Cast 包装（`(void*)&&lab` / `(int)&&lab`）先剥掉再判：跳转表的元素常带
+        // 显式转换，漏剥就会掉到下面的通用路径把整项当 0。
+        let peeled = Self::peel_value_casts(e);
+        if let Expr::LabelAddr { label, .. } = peeled {
             let size = width.max(8);
             if let Some((off, sec)) = rel {
-                let rel_type = if width <= 4 { R_X86_64_32 } else { R_X86_64_64 };
                 let prefixed = self.c_label_to_asm_resolve_nested(&label.name);
-                self.pending_data64_rels
-                    .push((off, prefixed, sec, rel_type, 0));
+                // 文本标号不进 symtab（`.L` 约定）⇒ 走「.text 节符号 + addend」：
+                // ET_EXEC 由 resolve() 就地回填，ET_REL 由 emit_rel_relocations 发
+                // R_X86_64_64。旧实现推 `pending_data64_rels`（按符号名进 symtab），
+                // 对 `.Ll_*` 永远解析不到符号，那条路实际是死的。
+                self.pending_data_textlabel_rels.push((off, prefixed, 0));
+                let _ = sec;
             }
             return vec![0u8; size];
         }
@@ -1166,6 +1172,15 @@ impl Codegen {
                 _ => return None,
             }
         }
+    }
+    /// 剥掉**值转换**属性的 Cast（`(void*)&&lab` / `(int)&&lab`），露出被包表达式。
+    /// 与 `extract_label_addr` 同一个循环形状：只剥 Cast，别的一律停在原地。
+    pub(crate) fn peel_value_casts(e: &Expr) -> &Expr {
+        let mut cur = e;
+        while let Expr::Cast { e: inner, .. } = cur {
+            cur = inner.as_ref();
+        }
+        cur
     }
     pub(crate) fn find_expr_operator(expr: &str) -> (&str, Option<char>, &str) {
         let bytes = expr.as_bytes();
