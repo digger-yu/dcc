@@ -291,20 +291,18 @@ impl Codegen {
                 // 而 gcc 得 8.5)。落到下方分量物化路径 (只求值一次)。
             } else if let Expr::Ident { name, .. } = callee.as_ref() {
                 if name.name.starts_with("__builtin_") && !Self::is_fortify_builtin(&name.name) {
-                    // 复数 builtin (conj 系列) 放行到下方 _Complex rvalue
-                    // 分量路径: gen_expr 内部走 gen_builtin 成功物化
-                    // (xmm0=实部, 虚部在临时槽), 再逐分量写入目标。
-                    // 其余未在 gen_builtin 注册的 builtin 仍走 fallback。
-                    let is_complex_builtin = matches!(
-                        name.name.as_str(),
-                        "__builtin_conj" | "__builtin_conjf" | "__builtin_conjl"
-                    );
-                    if !is_complex_builtin {
-                        self.gen_unknown_builtin_fallback(&name.name, call_ty, 0, Some(dst_off));
-                        return;
-                    }
-                    // complex builtin: 跳过下方 SysV 调用段 (gen_builtin
-                    // 已在 gen_expr 内完成物化), 落到 _Complex 分量路径
+                    // 编译器内建不能当外部符号 `call`：一律跳过下方 SysV 调用段，
+                    // 落到函数尾部的通用物化路径 —— 那条路径用 `gen_expr` 求 RHS，
+                    // 会走 `gen_builtin` 的内建实现（向量 rvalue 交付在
+                    // `vector_temp_base(0, size)`，复数在 result_off + xmm0）。
+                    //
+                    // 旧写法在这里硬列了 conj 三个名字作为唯一例外，其余 `__builtin_*`
+                    // 一律当「未实现」直接 `gen_unknown_builtin_fallback` 报错。那份名单
+                    // 与 `gen_builtin` 的 `match name` 是同一个事实的两处副本，内建加进了
+                    // `gen_builtin` 而这里没同步就会把已实现的内建误判成不支持：实测
+                    // `c = __builtin_shuffle(x, y, m)`（返回 16 字节向量 ⇒ 走聚合赋值）报
+                    // E0018，而同一内建在标量交付路径上工作正常。真正未实现的内建仍会在
+                    // `gen_expr` → `emit_call` 里得到 E0018，不损失任何诊断。
                 } else if Self::needs_memory_return(call_ty) {
                     // sret 返回: 分配隐藏指针槽, 调用后从槽拷贝到目标变量
                     let sret_off = self.alloc_sret_slot(call_ty.size());

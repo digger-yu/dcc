@@ -11451,11 +11451,7 @@ impl<'a> Parser<'a> {
                 if let Some(diag) = self.check_strict_conversion(&src_ty, &ty, sp.clone()) {
                     self.diags.push(diag);
                 }
-                Some(Expr::Cast {
-                    ty,
-                    e: Box::new(e),
-                    span: sp,
-                })
+                Some(self.desugar_cast_to_union(ty, e, sp))
             },
             // 函数指针强制转换: 当 is_cast() 未检测到时, 尝试解析 (type (*...))expr
             TokKind::LParen
@@ -12045,7 +12041,7 @@ impl<'a> Parser<'a> {
                     if let Expr::Ident { name, .. } = &callee_expr {
                         self.note_implicit_function_call(name);
                     }
-                    let call_ty = self.call_result_type(&callee_expr);
+                    let mut call_ty = self.call_result_type(&callee_expr);
                     // __builtin_complex(re, im): 复数构造器 (GCC)。
                     // dcc 没有这个内建的 codegen / ConstValue 通道, 但它本质是
                     // 「两个标量 → 一个复数」的纯构造: 两实参都是浮点常量时直接
@@ -12085,6 +12081,33 @@ impl<'a> Parser<'a> {
                             continue;
                         }
                     }
+                    // __builtin_shufflevector(a, b, i0..iN-1) / __builtin_shuffle(v[, v2], mask):
+                    // 结果类型完全由实参形状决定，而 `call_result_type` 拿不到 args，
+                    // 只能先回 int。int 让赋值/初始化按 4 字节标量搬运，向量其余
+                    // 字节保留栈上残值（torture/builtin-shufflevector-pr123156.c 的
+                    // 256 字节结果实测读出 0x7bf90be08ab0 而非 0x200）。按 clang/GCC
+                    // 的判据补回真实向量类型：
+                    //   shufflevector: 元素型 = a 的元素型，元素数 = 下标实参个数
+                    //   shuffle:       元素型 = a 的元素型，元素数 = mask 的元素数
+                    if let Expr::Ident { name, .. } = &callee_expr {
+                        let is_sv = name.name == "__builtin_shufflevector";
+                        let is_sh = name.name == "__builtin_shuffle";
+                        if (is_sv || is_sh) && args.len() >= 2 {
+                            if let Type::Vector(elem, _) = args[0].ty() {
+                                let n = if is_sv {
+                                    args.len() - 2
+                                } else {
+                                    match args[args.len() - 1].ty() {
+                                        Type::Vector(_, mn) => mn,
+                                        _ => args.len() - 2,
+                                    }
+                                };
+                                if n > 0 {
+                                    call_ty = Type::Vector(elem, n);
+                                }
+                            }
+                        }
+                    }
                     // Warn for unknown __builtin_* return types
                     if let Expr::Ident { name, .. } = &callee_expr {
                         if name.name.starts_with("__builtin_")
@@ -12095,6 +12118,7 @@ impl<'a> Parser<'a> {
                                     | "__builtin_fmaf"
                                     | "__builtin_fmal"
                                     | "__builtin_shufflevector"
+                                    | "__builtin_shuffle"
                                     | "__builtin_convertvector"
                                     | "__builtin_ceilf"
                                     | "__builtin_floorf"
@@ -13309,6 +13333,53 @@ impl<'a> Parser<'a> {
             }
         }
         false
+    }
+
+    /// GCC 扩展「cast to union type」：`(union {…})x` 把 `x` 装进与它同类型的那个
+    /// 成员（C 6.5.4 Casting to a union type / GCC 文档：取第一个同类型成员）。
+    ///
+    /// 以前这里直接产出 `Expr::Cast { Union, x }`，codegen 没有「目标为聚合的 cast」
+    /// 这条发射路径，语义层把它拒成 `E1007: unsupported cast involving vector type`
+    /// —— 实测 `(union { V(uint8_t,16) src; uint64_t dst[2]; }a).dst[0]` 直接编译失败，
+    /// 而这是 `torture/builtin-shufflevector-pr123156.c` 的 bitcast 写法。
+    /// 现在脱糖成**已经在跑**的复合字面量通道：`(union {…}){ .src = x }`，后缀
+    /// `.dst` 由调用方的 postfix 继续挂上，不新增任何发射路径。
+    ///
+    /// 成员匹配用严格相等而不是 `types_compatible`：那条判据是给 `_Generic` 用的，
+    /// 它把 `int`/`unsigned` 视为兼容，用于选成员会把 `(union {int i; unsigned u;}uval)`
+    /// 错归到 `i`。无同类型成员时保留 Cast 形态：GCC 报「cast to union type from type
+    /// not present in union」，这里不静默挑一个成员。
+    fn desugar_cast_to_union(&self, ty: Type, e: Expr, sp: Span) -> Expr {
+        let resolved = self.resolve_type_latest(&ty);
+        let fields = match &resolved {
+            Type::Union(_, fields, _, _) => fields.clone(),
+            _ => {
+                return Expr::Cast {
+                    ty,
+                    e: Box::new(e),
+                    span: sp,
+                };
+            },
+        };
+        let src_ty = e.ty();
+        let Some(member) = fields.iter().find(|f| f.ty == src_ty) else {
+            return Expr::Cast {
+                ty,
+                e: Box::new(e),
+                span: sp,
+            };
+        };
+        Expr::CompoundLit {
+            ty: resolved,
+            inits: vec![InitItem::Designated {
+                designator: Designator::Field(Ident {
+                    name: member.name.clone(),
+                    span: sp.clone(),
+                }),
+                value: e,
+            }],
+            span: sp,
+        }
     }
 
     /// _Generic 类型兼容性检查 (C11 6.2.7): 指针按 pointee 匹配，void* 与任意对象指针兼容

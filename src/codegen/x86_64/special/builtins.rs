@@ -7411,114 +7411,241 @@ impl Codegen {
                 }
                 true
             },
-            // __builtin_shuffle(vec, mask): GCC SIMD shuffle — 标量逐元素回退
-            // __builtin_shufflevector(vec1, vec2, idx...) = clang 风格, 复用同逻辑
+            // __builtin_shufflevector(a, [b, …], i0..iN-1)（clang 风格，GCC 14+ 采纳）：
+            //   下标是变长**常量**实参，结果元素数 = 下标个数
+            // __builtin_shuffle(v, mask) / __builtin_shuffle(a, b, mask)（GCC 风格）：
+            //   下标来自**掩码向量**，结果元素数 = 掩码元素数，越界按元素数回绕
+            //
+            // 两条形态共用同一个骨架：结果元素型取第一个源向量的，按下标从「源向量首尾
+            // 相接」的镜像里逐元素搬。旧实现只认 shuffle 的两参形状：元素数取 `args[0]` 的
+            // 元素数、把 `args[1]` 当掩码，于是 256 个下标的 shufflevector 只搬了 2 个元素；
+            // 结果又落在「与源同尺寸」的槽里（`vector_temp_base` 的步长按本次尺寸算，
+            // 混尺寸时高槽直接盖住源镜像）；交付端只在 `vec_size == 16` 时才把结果从帧槽
+            // 搬进寄存器，宽向量的结果字节留在无人读的槽里。
+            //
+            // 搬的是字节，不区分浮点/整型：shuffle 不做任何转换，按位搬就对了（旧写法
+            // 对 float/double 走 xmm、其余走 GP，而 16 字节元素在 `emit_store` 里会静默
+            // 不发一个字节）。
             "__builtin_shuffle" | "__builtin_shufflevector" => {
                 if args.len() < 2 {
                     self.mov_imm(dst, 0);
                     return true;
                 }
-                let src_ty = args[0].ty();
-                let (elem_ty, count) = match src_ty {
-                    Type::Vector(ref elem, n) => (elem.base.clone(), n),
+                let is_vec_form = name == "__builtin_shufflevector";
+                let elem_ty = match args[0].ty() {
+                    Type::Vector(ref e, _) => e.base.clone(),
                     _ => {
                         self.gen_expr(&args[0], dst);
                         return true;
                     },
                 };
                 let elem_size = elem_ty.size();
-                let vec_size = elem_size * count;
-                self.gen_vector_load_into_slot(&args[0], 0);
-                self.gen_vector_load_into_slot(&args[1], 1);
-                let src_off = self.vector_temp_base(0, vec_size);
-                let mask_off = self.vector_temp_base(1, vec_size);
-                let result_slot = 2usize;
-                let dst_off = self.vector_temp_base(result_slot, vec_size);
-                let count_mask = count - 1;
-                let is_float = matches!(elem_ty, Type::Float);
-                let is_double = matches!(elem_ty, Type::Double);
-                // rsi = &src[0] (caller-saved, vec/mask 已物化完毕)
-                self.emit_lea_r13(6, src_off);
-                for i in 0..count {
-                    // 1. 读 mask[i] → rax (mask 为整型向量, 用 GP load)
-                    let mi_off = mask_off + (i * elem_size) as i64;
-                    self.emit_lea_r13(0, mi_off);
-                    self.emit_load_mem(elem_size);
-                    // 2. rax = (rax & count_mask) * elem_size → byte offset
-                    // and rax, imm32 (48 25 + imm32): accumulator-only form.
-                    self.emit_insn(&Insn::alu_acc_imm32_b64_acc(0x25, count_mask as i32));
-                    if elem_size == 1 {
-                    } else if elem_size.is_power_of_two() {
-                        let shift = elem_size.trailing_zeros();
-                        self.emit_insn(&Insn::shift_reg_imm8_c1_b64(0b100, 0, shift as u8));
+                // 源向量与下标/掩码的分界：shufflevector 由前导的向量实参决定（语言允许
+                // 一个或多个源向量，下标永远是标量）；shuffle 的最后一条实参恒为掩码。
+                let nsrc = if is_vec_form {
+                    args.iter()
+                        .take_while(|a| matches!(a.ty(), Type::Vector(_, _)))
+                        .count()
+                        .max(1)
+                } else {
+                    (args.len() - 1).clamp(1, 2)
+                };
+                let mask_elsz = if is_vec_form {
+                    0
+                } else {
+                    match args[nsrc].ty() {
+                        Type::Vector(me, _) => me.base.size(),
+                        _ => 0,
+                    }
+                };
+                let src_counts: Vec<usize> = (0..nsrc)
+                    .map(|si| match args[si].ty() {
+                        Type::Vector(_, n) => n,
+                        _ => 0,
+                    })
+                    .collect();
+                let src_total: usize = src_counts.iter().sum();
+                let out_count = if is_vec_form {
+                    args.len() - nsrc
+                } else {
+                    match args[nsrc].ty() {
+                        Type::Vector(_, n) => n,
+                        _ => 0,
+                    }
+                };
+                if elem_size == 0 || src_total == 0 || out_count == 0 || mask_elsz > 8 {
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                // shufflevector 的下标必须是常量表达式（clang/GCC 都在前端拒绝非常量）。
+                // 非常量时报错而不是静默按 0 搬 —— 静默错值比报错危险得多。
+                let mut idx: Vec<usize> = Vec::new();
+                if is_vec_form {
+                    for k in 0..out_count {
+                        match const_eval::eval(&args[nsrc + k]) {
+                            Ok(v) if v >= 0 => idx.push((v as usize) % src_total),
+                            _ => {
+                                let span = Span::point(&self.source_name, 0, 1);
+                                let mut diag = Diagnostic::err(
+                                    "E0018",
+                                    format!(
+                                        "__builtin_shufflevector index {} is not a non-negative constant",
+                                        k
+                                    ),
+                                    span,
+                                );
+                                diag.hint = Some(
+                                    "every shufflevector index must be a constant expression"
+                                        .to_string(),
+                                );
+                                self.diagnostics.push(diag);
+                                idx.push(0);
+                            },
+                        }
+                    }
+                }
+                let out_size = elem_size * out_count;
+                let concat_bytes = elem_size * src_total;
+                let mask_bytes = mask_elsz * out_count;
+                // 本表达式里全部槽用同一个步长，保证互不覆盖（`vector_temp_base` 取
+                // 「本次请求尺寸」与「本函数最大向量」的较大值，判据单源于 `abi::layout`）。
+                let stride_hint = out_size.max(concat_bytes).max(mask_bytes).max(16);
+                // 向量 rvalue 的交付约定是「字节在 `vector_temp_base(0, size)`」，所以结果
+                // 最后整体搬回槽 0；工作区（拼接镜像 / 掩码 / 未搬回的结果）放在**向量带
+                // 尾部**，按站点层号往下排：
+                //  · 实参自己的向量 binop 嵌套从带顶（槽 0、1、2…）往下长，与从带尾往下
+                //    排的工作区不相遇。旧版把拼接镜像放在槽 1，于是第二个实参物化时的
+                //    内部操作数槽直接盖掉了第一个实参已存好的镜像（实测
+                //    `__builtin_shufflevector(c+d, c-d, 0,4,1,5)` 得 5,-4,6,-4 而 gcc 得
+                //    6,-4,8,-4）。
+                //  · 物化实参前抬升 `vec_perm_level`，所以嵌套的 shuffle 站点拿到的是再
+                //    往下三格，两层的工作区不互相盖。
+                const VEC_PERM_SITE_SLOTS: usize = 3;
+                const VEC_PERM_MAX_LEVEL: usize = 3;
+                let band_slots = self.frame_layout.vec_band_slots(stride_hint);
+                let lvl = self.vec_perm_level;
+                let work_top = band_slots.saturating_sub(VEC_PERM_SITE_SLOTS * (lvl + 1));
+                if lvl >= VEC_PERM_MAX_LEVEL || work_top < VEC_PERM_SITE_SLOTS + 2 {
+                    // 带装不下本层工作区（向量过宽或嵌套过深）：宁报错，不静默错值。
+                    let span = Span::point(&self.source_name, 0, 1);
+                    let mut diag = Diagnostic::err(
+                        "E0018",
+                        format!(
+                            "vector perm scratch does not fit the frame (level {}, {}-byte slots, {} slots in band)",
+                            lvl, stride_hint, band_slots
+                        ),
+                        span,
+                    );
+                    diag.hint =
+                        Some("use a narrower vector or a shallower shuffle nest".to_string());
+                    self.diagnostics.push(diag);
+                    self.mov_imm(dst, 0);
+                    return true;
+                }
+                // 槽 0：物化中转 + 最终交付（槽 0 的偏移与步长无关）。
+                let scratch_off = self.vector_temp_base(0, stride_hint);
+                let concat_off = self.vector_temp_base(work_top, stride_hint);
+                let mask_off = self.vector_temp_base(work_top + 1, stride_hint);
+                let res_off = self.vector_temp_base(work_top + 2, stride_hint);
+                // 1. 把各源向量物化后接成一块连续镜像，于是下标 j 的元素恒在
+                //    `concat_off + j * elem_size`，运行期下标不必在两个源之间分支。
+                self.vec_perm_level = lvl + 1;
+                let mut acc = 0usize;
+                for si in 0..nsrc {
+                    self.gen_vector_load_into_slot(&args[si], 0);
+                    let bytes = elem_size * src_counts[si];
+                    if bytes > 0 {
+                        self.copy_r13_bytes(scratch_off, concat_off + acc as i64, bytes);
+                    }
+                    acc += bytes;
+                }
+                // 2. 掩码向量同样接过去（只有 shuffle 形态有）。
+                if !is_vec_form && mask_bytes > 0 {
+                    self.gen_vector_load_into_slot(&args[nsrc], 0);
+                    self.copy_r13_bytes(scratch_off, mask_off, mask_bytes);
+                }
+                self.vec_perm_level = lvl;
+                // 3. 逐元素把 `src[j]` 的字节写进 `res[i]`。
+                for i in 0..out_count {
+                    let ri_off = res_off + (i * elem_size) as i64;
+                    if is_vec_form {
+                        // 常量下标：两端地址都是静态的，直接搬。
+                        let sj = concat_off + (idx[i] * elem_size) as i64;
+                        self.emit_lea_r13(0, sj);
+                        self.emit_load_mem(elem_size);
                     } else {
-                        self.mov_imm(10, elem_size as i128);
-                        self.emit_insn(&Insn::imul_rm_reg(
+                        // 运行期下标：从镜像读 mask[i]，回绕/夹取后算出源地址。
+                        // rsi = 镜像基址（循环外一次性算好，循环内不覆写）。
+                        self.emit_lea_r13(6, concat_off);
+                        self.emit_lea_r13(0, mask_off + (i * mask_elsz) as i64);
+                        self.emit_load_mem(mask_elsz.max(1));
+                        // GCC 语义：选择器按下标元素数取模。元素数是 2 幂时 `and`，
+                        // 否则夹到 `src_total-1`（越界本就是未定义行为，只需保证不越读）。
+                        if src_total.is_power_of_two() {
+                            self.emit_insn(&Insn::alu_acc_imm32_b64_acc(
+                                0x25,
+                                (src_total - 1) as i32,
+                            )); // and rax, src_total-1
+                        } else {
+                            let l_in = self.fresh_label();
+                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(7, 0, src_total as i64)); // cmp rax, src_total
+                            self.jmp_rel32(&l_in, JumpKind::Jb);
+                            self.mov_imm(0, (src_total - 1) as i128);
+                            self.label(&l_in);
+                        }
+                        // j * elem_size → 字节偏移，再加回基址
+                        if elem_size != 1 {
+                            if elem_size.is_power_of_two() {
+                                let shift = elem_size.trailing_zeros();
+                                self.emit_insn(&Insn::shift_reg_imm8_c1_b64(0b100, 0, shift as u8));
+                            } else {
+                                self.mov_imm(10, elem_size as i128);
+                                self.emit_insn(&Insn::imul_rm_reg(
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                    0,
+                                    10, // rax, r10
+                                ));
+                            }
+                        }
+                        self.emit_insn(&Insn::alu_rm_reg_reg(
+                            crate::codegen::x86_64::opcode::AluOp::Add,
                             crate::codegen::shared::asm_operand::Width::B64,
                             0,
-                            10, // rax, r10
-                        ));
+                            6,
+                        )); // add rax, rsi → &src[j]
+                        self.emit_load_mem(elem_size);
                     }
-                    // 3. rax = rsi + rax → &src[j]
-                    self.emit_insn(&Insn::alu_rm_reg_reg(
-                        crate::codegen::x86_64::opcode::AluOp::Add,
-                        crate::codegen::shared::asm_operand::Width::B64,
-                        0,
-                        6,
-                    )); // add rax, rsi
-                        // 4. 读 *rax → xmm0 (标量, 只加载 elem_size 字节)
-                    if is_double {
-                        self.emit_insn(&Insn::simd_mov_mem_base(
-                            false,
-                            crate::codegen::x86_64::opcode::SimdWidth::SD,
-                            0,
-                            0,
-                            0,
-                        )); // movsd xmm0, [rax] (8B)
-                    } else if is_float {
-                        self.emit_insn(&Insn::simd_mov_mem_base(
-                            false,
-                            crate::codegen::x86_64::opcode::SimdWidth::SS,
-                            0,
-                            0,
-                            0,
-                        )); // movss xmm0, [rax] (4B)
-                    } else {
-                        self.emit_insn(&Insn::new(
-                            crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
-                                rip_relative: false,
-                                width: crate::codegen::shared::asm_operand::Width::B64,
-                                dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                                    0,
-                                    crate::codegen::shared::asm_operand::Width::B64,
-                                ),
-                                src: crate::codegen::x86_64::opcode::Operand::Mem(
-                                    crate::codegen::x86_64::opcode::MemOperand {
-                                        disp: 0,
-                                        base: Some(0),
-                                        index: None,
-                                        seg: None,
-                                    },
-                                ),
-                            },
-                            &[],
-                        )); // mov rax, [rax]
-                    }
-                    // 5. 写 dst[i]
-                    let ri_off = dst_off + (i * elem_size) as i64;
-                    if is_double {
-                        self.store_xmm64_stack(0, ri_off);
-                    } else if is_float {
-                        self.store_xmm32_stack(0, ri_off);
+                    // 16 字节元素（`__int128` / `_Float128`）装不进一个 GP 寄存器：
+                    // `emit_load_mem(16)` 把高半放在 rdx，而 `emit_store` 对 16 静默不发
+                    // 字节（旧实现因此把 128 位元素整丢），必须拆成两笔 quad 写。
+                    if elem_size == 16 {
+                        self.emit_store(0, ri_off, 8);
+                        self.emit_store(2, ri_off + 8, 8);
                     } else {
                         self.emit_store(0, ri_off, elem_size);
                     }
                 }
-                // 6. 把结果从 slot 2 复制回 slot 0, 然后 load 到 xmm0
-                self.copy_r13_bytes(dst_off, src_off, vec_size);
-                if vec_size == 16 {
-                    self.emit_movdqu_r13_to_xmm(0, src_off);
-                }
+                // 4. 把结果从带尾搬回槽 0（向量 rvalue 的交付位置）。上一步的逐元素写
+                //    只碰了带尾那一格，而消费端（`gen_vector_load_into_slot` 的 Call 分支、
+                //    聚合赋值、`gen_call` 尾部的 ABI 物化段）一律从槽 0 读。
+                self.copy_r13_bytes(res_off, scratch_off, out_size);
+                // 5. 交付：向量 rvalue 的约定是「字节在 `vector_temp_base(0, size)`**且**
+                //    `rax` = 该地址」—— `gen_vector_binop` 的每条出口都以
+                //    `lea rax, [r13 + result_off]` 收尾，`gen_vector_load_into_slot` 的
+                //    `Expr::Call` 分支则从槽 0 整块搬走。旧写法只填字节不给 rax，8 字节
+                //    结果（不满一个聚合拷贝门槛）的消费端拿到的是寄存器残值。向量交付
+                //    不看 `dst`（与 `gen_vector_binop` 一致：dispatch 的向量臂就是硬传 0）。
+                //
+                //    xmm0 必须同步成结果的前 16 字节：`gen_call` 尾部有一段「vector 返回值
+                //    从 xmm0 存回槽 0」的 ABI 物化（真函数调用确实在 xmm0 返回），它对内建
+                //    不知情、无条件跑。旧写法只在 `vec_size == 16` 时装 xmm0，于是 8 字节
+                //    结果被 xmm0 的残值整体盖掉（实测 `V(uint8_t,8)` 得 0xff0000），宽向量
+                //    更被 `store_xmm128` 盖掉前 16 字节（正是 256 字节用例 abort 的原因）。
+                //    槽 0 的步长永远 ≥ 16（`stride_hint.max(16)`），读满 16 字节不越界；
+                //    存回来写的就是刚读的那 16 字节 ⇒ 对 ABI 物化段**幂等**，不必在 `gen_call`
+                //    里再认一份内建名单（那条路的 `__builtin_ia32_*` 确实靠 xmm0 交付）。
+                self.emit_movdqu_r13_to_xmm(0, scratch_off);
+                self.emit_insn(&Insn::lea_reg_base_disp(0, 13, scratch_off as i32));
                 true
             },
             // __builtin_convertvector: vector type conversion (stub: return first arg)
