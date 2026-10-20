@@ -29,8 +29,16 @@ impl Codegen {
                     &elem_ty.base,
                     Type::Array(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)
                 ) {
+                    // 判断是否需要 brace elision: 存在「扁平标量」时才分组。但一个
+                    // `Expr::String` 直接初始化 char 数组元素时是**整行**初始化
+                    // (C11 6.7.9p14: "abc" 等价 {'a','b','c','\0'}), 不是标量——若把它
+                    // 计入触发条件, `char w[][6] = {"hello","world"}` 会被按 sub_count=6
+                    // 把两个字符串挤进第 0 行, 再各按标量只写首字节 (得 "hw")。
                     let needs_elision = inits.iter().any(|item| {
-                        matches!(item, InitItem::Expr(e) if !matches!(e, Expr::InitList { .. }))
+                        matches!(item, InitItem::Expr(e)
+                            if !matches!(e, Expr::InitList { .. })
+                                && !(Self::is_char_array(&elem_ty.base)
+                                    && matches!(e, Expr::String { .. })))
                     });
                     effective_inits = if needs_elision {
                         Self::group_for_brace_elision(&elem_ty.base, inits)
@@ -137,6 +145,18 @@ impl Codegen {
                         };
                         let elem_rel = rel.map(|(base, sec)| (base + write_base as u64, sec));
                         self.gen_global_init_list(nested_ty, nested, elem_rel, rodata_slots)
+                    } else if Self::is_char_array(&elem_ty.base)
+                        && matches!(value, Expr::String { .. })
+                    {
+                        // C11 6.7.9p14: 字符串字面量初始化 char 数组元素（二维数组的一行，
+                        // 如 char w[][6] = {"hello","world"}）——整个字符串填入该元素，
+                        // 尾部补零到 elem_size。不能走 eval_const_expr，否则字符串会被
+                        // 当标量只取首字节（实测将两行错写为 "hw"）。
+                        let Expr::String { data, .. } = value else { unreachable!() };
+                        let mut row = vec![0u8; elem_size];
+                        let n = data.len().min(elem_size);
+                        row[..n].copy_from_slice(&data[..n]);
+                        Some(row)
                     } else {
                         let elem_rel = rel.map(|(base, sec)| (base + write_base as u64, sec));
                         // 复数元素收到复数常量表达式: 按目标分量编码
