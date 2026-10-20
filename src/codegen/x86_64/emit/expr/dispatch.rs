@@ -1096,22 +1096,12 @@ impl Codegen {
                                 self.gen_expr(r, Self::EVAL_BASE); // rax = val
                                 self.convert_assign_rhs_in_reg(0, elem_ty, &r.ty());
                                 self.pop(1); // rcx = addr
-                                self.emit_seg_for(lv);
-                                // mov [rcx], rax/eax/ax/al (size from es)
-                                let w = match es {
-                                    1 => Width::B8,
-                                    2 => Width::B16,
-                                    4 => Width::B32,
-                                    16 => Width::B64,
-                                    _ => Width::B64,
-                                };
-                                self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0))
-                                    .expect("typed-opcode: mov_rm_mem"); // 低 64 位 → [rcx]
-                                if es == 16 {
-                                    // __int128 元素: 补写高 64 位 rdx → [rcx+8]
-                                    self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 2, 1, 8))
-                                        .expect("typed-opcode: mov_rm_mem");
-                                }
+                                self.emit_store_scalar_int_at(
+                                    es as usize,
+                                    1,
+                                    0,
+                                    self.lvalue_seg_prefix(lv),
+                                );
                                 return;
                             }
                         }
@@ -1166,27 +1156,19 @@ impl Codegen {
                                 self.gen_agg_elem_store(r, elem_ty, es, dst);
                                 return;
                             }
-                            self.emit_seg_for(lv);
                             if matches!(
                                 elem_ty,
                                 Type::Float | Type::Double | Type::LongDouble | Type::Float128
                             ) {
+                                self.emit_seg_for(lv);
                                 self.emit_store_scalar_float_at(&r.ty(), elem_ty, 1);
                             } else {
-                                let w = match es {
-                                    1 => Width::B8,
-                                    2 => Width::B16,
-                                    4 => Width::B32,
-                                    16 => Width::B64,
-                                    _ => Width::B64,
-                                };
-                                self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0))
-                                    .expect("typed-opcode: mov_rm_mem"); // 低 64 位 → [rcx]
-                                if es == 16 {
-                                    // __int128 元素: 补写高 64 位 rdx → [rcx+8]
-                                    self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 2, 1, 8))
-                                        .expect("typed-opcode: mov_rm_mem");
-                                }
+                                self.emit_store_scalar_int_at(
+                                    es as usize,
+                                    1,
+                                    0,
+                                    self.lvalue_seg_prefix(lv),
+                                );
                             }
                         }
                     } else {
@@ -1239,27 +1221,19 @@ impl Codegen {
                                 self.gen_agg_elem_store(r, elem_ty, es, dst);
                                 return;
                             }
-                            self.emit_seg_for(lv);
                             if matches!(
                                 elem_ty,
                                 Type::Float | Type::Double | Type::LongDouble | Type::Float128
                             ) {
+                                self.emit_seg_for(lv);
                                 self.emit_store_scalar_float_at(&r.ty(), elem_ty, 1);
                             } else {
-                                let w = match es {
-                                    1 => Width::B8,
-                                    2 => Width::B16,
-                                    4 => Width::B32,
-                                    16 => Width::B64,
-                                    _ => Width::B64,
-                                };
-                                self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0))
-                                    .expect("typed-opcode: mov_rm_mem"); // 低 64 位 → [rcx]
-                                if es == 16 {
-                                    // __int128 元素: 补写高 64 位 rdx → [rcx+8]
-                                    self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 2, 1, 8))
-                                        .expect("typed-opcode: mov_rm_mem");
-                                }
+                                self.emit_store_scalar_int_at(
+                                    es as usize,
+                                    1,
+                                    0,
+                                    self.lvalue_seg_prefix(lv),
+                                );
                             }
                         }
                     }
@@ -1368,29 +1342,35 @@ impl Codegen {
                         } else {
                             self.gen_expr(r, Self::EVAL_BASE); // rax = val
                             self.convert_assign_rhs_in_reg(0, &assign_l_ty, &r.ty());
-                            self.pop(1); // rcx = addr                            // __seg_gs/__seg_fs 指针存储: 发射段前缀 (%gs:/%fs:)
-                            if let Some(seg) = seg_prefix {
-                                self.emit_insn(&Insn::seg_prefix(seg));
-                            }
-                            if matches!(&assign_l_ty, Type::Float | Type::Double | Type::LongDouble)
-                            {
+                            self.pop(1); // rcx = addr
+                            if matches!(
+                                &assign_l_ty,
+                                Type::Float
+                                    | Type::Double
+                                    | Type::LongDouble
+                                    | Type::Float128
+                            ) {
+                                // __seg_gs/__seg_fs 指针存储: 发射段前缀 (%gs:/%fs:)
+                                if let Some(seg) = seg_prefix {
+                                    self.emit_insn(&Insn::seg_prefix(seg));
+                                }
                                 self.emit_store_scalar_float_at(&r.ty(), &assign_l_ty, 1);
                             } else {
-                                // 按 *ptr 类型宽度选择 store 指令 (截断语义:
-                                // 只写低 n 字节). 旧实现恒用 8 字节 movq,
-                                // 会越界覆盖相邻内存 (如 decNumber
-                                // *up=(Unit)out 破坏后续单元 → 系数全 0).
-                                {
-                                    // mov [rcx], al/ax/eax/rax sized by assign_l_ty.
-                                    let w = match assign_l_ty.size() {
-                                        1 => Width::B8,
-                                        2 => Width::B16,
-                                        4 => Width::B32,
-                                        _ => Width::B64,
-                                    };
-                                    self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0))
-                                        .expect("typed-opcode: mov_rm_mem");
-                                }
+                                // 按 *ptr 类型宽度 store (窄类型只写低 n 字节 = 截断
+                                // 语义)。旧实现两处皆错: 恒用 8 字节 movq 会越界覆盖
+                                // 相邻内存 (decNumber *up=(Unit)out 破坏后续单元 →
+                                // 系数全 0); 而 16 字节又只发低半那一笔 —— `__int128`
+                                // 丢高半 (long-mul-128.c 的 `*first = h1` 实测存成
+                                // `0xC << 64`), `_Float128` 掉进本分支被当 `__int128`
+                                // 从 rax:rdx 存 (rax/rdx 是残值, 实测 `*p = v` 得 0)。
+                                // 判据与字节发射单源于 `emit_store_scalar_int_at` /
+                                // `emit_store_scalar_float_at`, 这里只做分发。
+                                self.emit_store_scalar_int_at(
+                                    assign_l_ty.size(),
+                                    1,
+                                    0,
+                                    seg_prefix,
+                                );
                             }
                         }
                         // pop(1) 把 rcx 覆盖成目标地址, store 后结果值仍在 rax.
@@ -2075,70 +2055,20 @@ impl Codegen {
                                         self.emit_store_scalar_float_at(&r.ty(), fty, 1);
                                     // 单一真源：收浮影子副本
                                     } else {
-                                        self.emit_seg(self.lvalue_seg_prefix(lv));
-                                        // mov [rcx], rax/eax/ax/al sized by `size`
-                                        let w = match size {
-                                            1 => Width::B8,
-                                            2 => Width::B16,
-                                            4 => Width::B32,
-                                            8 => Width::B64,
-                                            _ => Width::B64,
-                                        };
-                                        if size <= 8 {
-                                            let _ = self
-                                                .emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
-                                        } else if size == 16 {
-                                            // __int128: rax:rdx → [rcx]:[rcx+8]
-                                            self.emit_insn(&Insn::mov_rm_mem(
-                                                false,
-                                                Width::B64,
-                                                0,
-                                                1,
-                                                0,
-                                            ))
-                                            .expect("typed-opcode: mov_rm_mem");
-                                            self.emit_seg(self.lvalue_seg_prefix(lv));
-                                            self.emit_insn(&Insn::mov_rm_mem(
-                                                false,
-                                                Width::B64,
-                                                2,
-                                                1,
-                                                8,
-                                            ))
-                                            .expect("typed-opcode: mov_rm_mem");
-                                        }
+                                        self.emit_store_scalar_int_at(
+                                            size,
+                                            1,
+                                            0,
+                                            self.lvalue_seg_prefix(lv),
+                                        );
                                     }
                                 } else {
-                                    self.emit_seg(self.lvalue_seg_prefix(lv));
-                                    let w = match size {
-                                        1 => Width::B8,
-                                        2 => Width::B16,
-                                        4 => Width::B32,
-                                        8 => Width::B64,
-                                        _ => Width::B64,
-                                    };
-                                    if size <= 8 {
-                                        let _ =
-                                            self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0));
-                                    } else if size == 16 {
-                                        self.emit_insn(&Insn::mov_rm_mem(
-                                            false,
-                                            Width::B64,
-                                            0,
-                                            1,
-                                            0,
-                                        ))
-                                        .expect("typed-opcode: mov_rm_mem");
-                                        self.emit_seg(self.lvalue_seg_prefix(lv));
-                                        self.emit_insn(&Insn::mov_rm_mem(
-                                            false,
-                                            Width::B64,
-                                            2,
-                                            1,
-                                            8,
-                                        ))
-                                        .expect("typed-opcode: mov_rm_mem");
-                                    }
+                                    self.emit_store_scalar_int_at(
+                                        size,
+                                        1,
+                                        0,
+                                        self.lvalue_seg_prefix(lv),
+                                    );
                                 }
                             }
                         }
@@ -2191,20 +2121,12 @@ impl Codegen {
                                 part_off as i32,
                             )); // movss/movsd [rcx+disp], xmm0
                         } else {
-                            // 整数分量: 值在 rax, 按内型宽度存储
+                            // 整数分量: 值在 rax(:rdx), 按内型宽度存储
                             if part_off != 0 {
                                 self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 1, part_off as i64));
                                 // add rcx, imm32
                             }
-                            // mov [rcx], al/ax/eax/rax sized by inner.size()
-                            let w = match inner.size() {
-                                1 => Width::B8,
-                                2 => Width::B16,
-                                4 => Width::B32,
-                                _ => Width::B64,
-                            };
-                            self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0))
-                                .expect("typed-opcode: mov_rm_mem");
+                            self.emit_store_scalar_int_at(inner.size(), 1, 0, None);
                         }
                     } else {
                         // 非 lvalue (如 __imag__ (a+b)): 不可赋值, 仅求值右操作数
@@ -2217,8 +2139,10 @@ impl Codegen {
                     // 宽度发射 store 指令. 避免未匹配任何分支时
                     // 赋值静默变成 no-op.
                     let assign_sz = assign_l_ty.size();
-                    let is_float_ty =
-                        matches!(assign_l_ty, Type::Float | Type::Double | Type::LongDouble);
+                    let is_float_ty = matches!(
+                        assign_l_ty,
+                        Type::Float | Type::Double | Type::LongDouble | Type::Float128
+                    );
                     let is_aggregate = matches!(
                         assign_l_ty,
                         Type::Struct(_, _, _, _)
@@ -2294,15 +2218,7 @@ impl Codegen {
                             self.emit_store_scalar_float_at(&r.ty(), &assign_l_ty, 1);
                         // 单一真源：收浮影子副本
                         } else {
-                            // mov [rcx], al/ax/eax/rax sized by assign_sz
-                            let w = match assign_sz {
-                                1 => Width::B8,
-                                2 => Width::B16,
-                                4 => Width::B32,
-                                _ => Width::B64,
-                            };
-                            self.emit_insn(&Insn::mov_rm_mem(false, w, 0, 1, 0))
-                                .expect("typed-opcode: mov_rm_mem");
+                            self.emit_store_scalar_int_at(assign_sz, 1, 0, None);
                         }
                     } else {
                         // gen_lvalue_addr 失败: 无法取地址, 仅求值 RHS

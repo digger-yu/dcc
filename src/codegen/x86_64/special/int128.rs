@@ -10,7 +10,7 @@
 
 use crate::ast::*;
 use crate::codegen::shared::asm_operand::Width;
-use crate::codegen::x86_64::insn::Insn;
+use crate::codegen::x86_64::insn::{BoolExpect, Insn};
 use crate::codegen::x86_64::opcode::{
     AluOp, MemOperand, NoArgOp, Operand as OpcodeOperand, ShiftAmount, ShiftOp, UnaryOp,
     X86_64Opcode,
@@ -880,6 +880,36 @@ impl Codegen {
             let off = self.var_offset(name);
             self.store_stack(0, off); // low → [r13+off]
             self.store_stack(2, off + 8); // high → [r13+off+8]
+        }
+    }
+
+    /// 标量整数 store 的**唯一**发射口：把值模型 `(rax = 低 64 位, rdx = 高 64 位)`
+    /// 按 `size` 字节宽度写入 `[base + disp]`（可选段前缀紧贴每一笔访问）。
+    ///
+    /// 16 字节整型（`__int128` / `_BitInt(65..=128)`）装不进一个 GP 寄存器，必须发
+    /// 两条 quad store。此前这套「按宽度选 store」的判据在赋值分发里被抄了七份，
+    /// 其中解引用与通用左值回退两份只按 `_ => Width::B64` 发低半那一笔、高半留在
+    /// rdx 里没人写 —— `u128 first = 0; *p = h1;` 之后调用方读到的 `first` 高 8
+    /// 字节是栈上残值（long-mul-128.c 实测得到 `0xC << 64`）。成员/下标那几份各自
+    /// 补了高半，但写法又不尽相同。这里收成单一真源，调用方不再自己拼字节。
+    ///
+    /// 浮点类型不走这里：它们的值通道是 xmm0 / st(0)，由
+    /// [`Self::emit_store_scalar_float_at`] 负责。
+    pub fn emit_store_scalar_int_at(&mut self, size: usize, base: u8, disp: i32, seg: Option<u8>) {
+        let w = match size {
+            1 => Width::B8,
+            2 => Width::B16,
+            4 => Width::B32,
+            _ => Width::B64,
+        };
+        self.emit_seg(seg);
+        self.emit_insn(&Insn::mov_rm_mem(false, w, 0, base, disp))
+            .expect("typed-opcode: mov_rm_mem"); // 低半 → [base+disp]
+        if size == 16 {
+            // 高 64 位 → [base+disp+8]：段前缀只作用于紧随的一条指令，第二笔要重发。
+            self.emit_seg(seg);
+            self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 2, base, disp + 8))
+                .expect("typed-opcode: mov_rm_mem");
         }
     }
 
