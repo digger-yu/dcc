@@ -3499,6 +3499,21 @@ impl Codegen {
                 ty,
                 ..
             } => {
+                // 向量成员：rvalue 的值模型是「字节在 `vector_temp_base(0, size)`」，而
+                // `gen_expr_member_rvalue` 的字段装载只认标量 / 浮点 / `__int128` 三档：
+                // 对 16 字节向量它「匹配不上任何宽度」而不发一个字节（实测
+                // `V0 = ((union { V src; W dst; }){…}).dst` 恒得 0），对 ≤8 字节向量则按
+                // 标量 GP 装载，位模式进了 dst 而消费端仍按槽 0 读 ⇒ 拿到残值。
+                // `gen_vector_load_into_slot` 的成员分支已经会把整个成员按地址整块
+                // 拷进槽 0，直接复用它，不在此重写取址与拷贝判据。
+                if matches!(ty, Type::Vector(_, _)) {
+                    self.gen_vector_load_into_slot(e, 0);
+                    let temp_off = self.vector_temp_base(0, ty.size());
+                    // 与 `gen_vector_binop` 各出口同形：交付 `rax = &槽 0`，供聚合赋值端
+                    // 与 `gen_call` 尾部的 ABI 物化段使用。
+                    self.emit_lea_r13(0, temp_off);
+                    return;
+                }
                 // 单一入口：本 arm 曾是 `gen_expr_member_rvalue` 的逐字副本
                 // (两份同源代码, 只有这一份在跑), 任何只改 lvalue.rs 的修复
                 // 都会静默失效。现只委派。

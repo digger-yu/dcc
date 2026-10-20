@@ -11,7 +11,7 @@ use crate::codegen::x86_64::Codegen;
 
 impl Codegen {
     /// 计算任意 lvalue 表达式的地址到 rax (dst != 0 时再 mov).
-    /// 支持 Ident / Member / Index / Deref / Cast 递归组合, 例如
+    /// 支持 Ident / Member / Index / Deref / Cast / CompoundLit 递归组合，例如
     /// `s.i[k]`, `p->arr[i].f`, `(*q).buf[n]`. 返回 false 表示无法处理.
     pub fn gen_lvalue_addr(&mut self, e: &Expr, dst: u8) -> bool {
         match e {
@@ -184,6 +184,16 @@ impl Codegen {
                 true
             },
             Expr::Cast { e: inner, .. } => self.gen_lvalue_addr(inner, dst),
+            // 复合字面量的 rvalue 按约定就是「它在栈上那个槽的地址」（
+            // `gen_expr_compound_lit` 以 `lea dst, [r13 + base]` 收尾），所以取址直接
+            // 走 `gen_expr`。以前本函数没有这一臂，`gen_lvalue_addr(Member{CompoundLit})`
+            // 返回 false ⇒ 聚合赋值只能退回「先物化到向量槽 0 再 rep movsb」那条臂，
+            // 而那条臂对复合字面量成员什么都没发射，于是把未填充的槽 0 整体拷进目标
+            //（实测 `V0 = ((union { V src; W dst; }){ .src = s }).dst` 恒得 0）。
+            Expr::CompoundLit { .. } => {
+                self.gen_expr(e, dst);
+                true
+            },
             _ => false,
         }
     }

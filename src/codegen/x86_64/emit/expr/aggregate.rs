@@ -1915,17 +1915,24 @@ impl Codegen {
                         }
                         // 向量字段 (pr94482: `union U z = { .j = <vector> }`):
                         // Struct/Union 字段已由上方 val_is_agg 块处理并 continue,
-                        // 剩下 size>8 的聚合形态就只有 Vector (is_aggregate_shape
-                        // 含 Vector)。旧路径落到 emit_store, 而它对 >8 字节尺寸
-                        // 不发任何指令 —— 整个 store 静默丢失, 字段保留栈残值,
-                        // pr94482 因此 abort。改走聚合赋值的单一实现, 源侧物化
-                        // 契约 (Ident/Call/CompoundLit) 由 gen_aggregate_assign_to
-                        // 统一承担, 不在此重写任何判据。
-                        if sz > 8
-                            && matches!(
-                                &field_ty_opt,
-                                Some(ft) if Self::is_aggregate_shape(ft)
-                            )
+                        // 旧路径落到 emit_store, 而它对 >8 字节尺寸不发任何指令
+                        // —— 整个 store 静默丢失, 字段保留栈残值, pr94482 因此
+                        // abort。改走聚合赋值的单一实现, 源侧物化契约
+                        // (Ident/Call/CompoundLit) 由 gen_aggregate_assign_to 统一承担。
+                        //
+                        // 门槛只看类型不看尺寸：向量无论多宽都是同一套值模型（字节在
+                        // 向量临时槽），落到下面 `gen_expr + emit_store` 存的是
+                        // `gen_vector_load` 逐元素装载后留在 rax 的**最后一个元素**：
+                        // 实测 `union { V(uint8_t,8) v; uint64_t x; } b = { .v = s }` 读
+                        // `b.x` 得 8 而非 0x0807060504030201（`struct SV a = { .v = s }`
+                        // 同样只写对首字节）。那条 `sz > 8` 是 pr94482 当时只遇到宽向量
+                        // 面留的口子，不是语义判据。
+                        if matches!(&field_ty_opt, Some(Type::Vector(_, _)))
+                            || (sz > 8
+                                && matches!(
+                                    &field_ty_opt,
+                                    Some(ft) if Self::is_aggregate_shape(ft)
+                                ))
                         {
                             let addr_slot = self.alloc_sret_slot(8);
                             self.emit_lea_r13(0, store_off);
