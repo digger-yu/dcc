@@ -10,13 +10,22 @@ All commands were executed on the environment described in §0; substitute your
 own working directory for `~/` if needed.
 
 **Current status:** dcc compiles and runs both Lua 5.5.1 and SQLite 3.53.4
-**correctly at every optimization level `-O0`/`-O1`/`-O2`/`-O3`**.
+**correctly at every optimization level `-O0`/`-O1`/`-O2`/`-O3`**, with output
+byte-identical to a gcc build of the same sources.
 
 **Reference commit:** `99dabbc1`
 (driver / cli / link / preproc) — the driver-side behaviors this guide relies
 on: `$CC`/`$LD`/`$OBJCOPY` are shell-word-split when dcc delegates to the host
 toolchain, and dcc accepts multiple translation units (`.c` plus `.o`/`.a`) in a
 single invocation.
+
+> **2026-10 re-verification.** This guide was re-run end to end after a
+> correctness and performance pass on the -O2 pipeline. Four defects that
+> affected these two projects were found and fixed (§6.4); one of them made
+> `-O2`/`-O3` Lua print wrong numbers (`print(12.0)` emitted `.0`), so the
+> `-O2`/`-O3` rows below were **not** correct at the time this guide was first
+> written even though they built and ran. All four levels now match gcc
+> byte-for-byte, which is what §4.2 asserts and what §6 measures.
 
 ---
 
@@ -103,7 +112,7 @@ cargo build --release
   can take a few minutes. Subsequent builds are incremental and fast.
 - A debug build (`cargo build`, without `--release`) also works; this report
   uses the release binary.
-- All 2474 dcc library unit tests pass (`cargo test --lib`).
+- All 2483 dcc library unit tests pass (`cargo test --lib`).
 - On success the binary appears at:
 
 ```bash
@@ -476,19 +485,19 @@ across all four binaries; only timing differs.
 
 | Compiler / level | wall (ms) | vs gcc same level |
 |---|---|---|
-| gcc -O2  | 115 | — (baseline) |
-| gcc -O3  | 122 | — |
-| dcc -O2  | 506 | ~4.4x slower |
-| dcc -O3  | 509 | ~4.2x slower |
+| gcc -O2  | 114 | — (baseline) |
+| gcc -O3  | 121 | — |
+| dcc -O2  | 502 | ~4.4x slower |
+| dcc -O3  | 482 | ~4.0x slower |
 
 ### 6.2 SQLite — 200k insert + range aggregate + `ORDER BY` scan
 
 | Compiler / level | wall (ms) | vs gcc same level |
 |---|---|---|
-| gcc -O2  | 90  | — (baseline) |
-| gcc -O3  | 98  | — |
-| dcc -O2  | 639 | ~7.1x slower |
-| dcc -O3  | 638 | ~6.5x slower |
+| gcc -O2  | 88  | — (baseline) |
+| gcc -O3  | 97  | — |
+| dcc -O2  | 622 | ~7.1x slower |
+| dcc -O3  | 624 | ~6.4x slower |
 
 ### 6.3 Reading the numbers
 
@@ -506,14 +515,75 @@ across all four binaries; only timing differs.
 These timings are the benchmark baseline: future optimizer work should be judged
 by shrinking these ratios while keeping §4/§5 correctness.
 
+### 6.4 What the 2026-10 re-verification changed
+
+Four defects were found and fixed. Three of them blocked or miscompiled these
+two projects at `-O2`/`-O3`; the fourth accounts for most of the runtime
+movement in the tables above.
+
+1. **Serial `-O2` compile of `lvm.c` failed outright** (`E1135: no
+   callee-saved register left`). `gen_binop_into` borrowed a scratch register
+   for the right-hand side and never returned it, so four levels of nested
+   Binop exhausted the four-slot callee-saved pool. The parallel codegen path
+   hid it — every worker got a fresh register bank, so no single worker saw the
+   exhaustion. Fix: release the borrowed register after its last read, and add a
+   third sourcing tier (borrow `%rcx`) before the diagnostic.
+2. **`-O2` folded wide literal comparisons wrong.** VRP classified two literal
+   operands by masking them with the *destination* type, which is always `int`
+   for comparisons, so `long long a = 1LL << 40; if (a <= 0)` folded to
+   `0 <= 0` — true. Fix: bail out when a literal does not survive the
+   destination mask.
+3. **`-O2`/`-O3` Lua printed wrong numbers.** `print(12.0)` emitted `.0` and
+   `print(1.5)` reported length 0. The float compare emitted `setp %bl`,
+   clobbering the low byte of `%rbx` — which the register allocator had pinned
+   as the home of `len` in `luaO_tostringbuff`. Fix: pick the 8-bit scratch by
+   register-bank occupancy (`rbx`/`rcx`/`rdx`) instead of hard-coding `%bl`,
+   saving/restoring when all three are busy. This is the one that made the
+   `-O2`/`-O3` rows above incorrect, not merely slow.
+4. **Computed-goto jump tables were rebuilt on every call.** A `static` array
+   initialised from `&&label` (Lua's `disptab`) was emitted as runtime
+   initialisation: ~120 `lea`+`mov` per `luaV_execute` call, ~7M calls in
+   fib(32). It now goes into `.data` with relocations, like gcc. Worth ~3% on
+   fib(32) — the largest single item here, and a reminder that the remaining
+   gap is spread across code quality rather than concentrated in one place.
+
+Measured effect vs the previous numbers: Lua `-O2` 506→502 ms, `-O3` 509→482 ms;
+SQLite `-O2` 639→622 ms, `-O3` 638→624 ms. The gap is dominated by two things
+that are **not** fixed: `luaV_execute` emits ~9.1k register-to-register `mov`
+(gcc: none at that scale), 1.8k of them collapsible `mov A,B; mov B,C` chains;
+and the interpreter's hottest variables (`base`/`pc`/`cl`/`k`) are pointers,
+which the register-home allocator cannot bind — see §6.5.
+
+### 6.5 Why the register-residency lever is not available yet
+
+The obvious remaining lever for an interpreter loop is keeping `base`/`pc`/
+`cl`/`k` in callee-saved registers. It is **not** currently safe:
+
+- `ssa::regalloc::bindable_ty` excludes `Type::Ptr`. Enabling pointer binding
+  makes the 364-fixture four-level equivalence gate fail immediately with ~10
+  new OPT-DIFFs, all SEGV (`c_vec_run`, `c_address_const`, `c_base_file`,
+  `c_builtin_dbg`, `c_builtin_lowlevel`, `c_ld80_arith`). Hand-binding
+  `register asm` locals in `luaV_execute` fails the same way for `cl` while `k`
+  works, and it is not the parallel path (`DCC_NO_PARALLEL=1` crashes
+  identically). The exclusion is load-bearing, not an oversight — the home
+  channel has an inconsistency where a write reaches the register while some
+  read path still reads the stack slot, and pointer locals hit it reliably.
+- `luaV_execute` uses computed `goto`, so `reject_all` refuses to build
+  CFG-SSA for it: it never reaches the SSA passes at all, which is why it gets
+  neither LICM nor automatic homes.
+
+Both need the register-home channel fixed first (a back-end rewrite tracked
+separately), not a wider type predicate. Defect 3 above is one instance of the
+same class.
+
 ---
 
 ## 7. Summary
 
 | Project | dcc compile | dcc link | functional run (-O0..-O3) | output consistency | perf vs gcc (-O2 / -O3) |
 |---|---|---|---|---|---|
-| Lua 5.5.1 | OK | OK | OK (all levels) | byte-identical across -O0..-O3 | ~4.4x / ~4.2x slower |
-| SQLite (amalgamation) | OK | OK | OK (all levels) | identical across -O0..-O3 | ~7.1x / ~6.5x slower |
+| Lua 5.5.1 | OK | OK | OK (all levels) | byte-identical to gcc, all levels | ~4.4x / ~4.0x slower |
+| SQLite (amalgamation) | OK | OK | OK (all levels) | identical across -O0..-O3 | ~7.1x / ~6.4x slower |
 
 **Takeaways**
 
@@ -538,6 +608,11 @@ by shrinking these ratios while keeping §4/§5 correctness.
    SQLite insert+query workload. `-O3 ≈ -O2` for dcc. These are the optimizer-
    pipeline baseline; further back-end work should shrink these ratios while
    keeping correctness.
+6. **Re-verification pays for itself.** The 2026-10 pass (§6.4) found that the
+   `-O2`/`-O3` builds, while producing a running interpreter, printed wrong
+   numbers for floats. The §4.2 sweep is what caught it — a build/rc-only
+   check would have passed. Re-run §4.2 and §5.2 after optimizer changes, not
+   just "does it build".
 
 ---
 
@@ -673,6 +748,16 @@ done
 Representative output (same host, single-threaded):
 
 ```
-lua   gcc-O2  115ms | gcc-O3 122ms | dcc-O2 506ms | dcc-O3 509ms
-sqlite gcc-O2  90ms | gcc-O3  98ms | dcc-O2 639ms | dcc-O3 638ms
+lua   gcc-O2  114ms | gcc-O3 121ms | dcc-O2 502ms | dcc-O3 482ms
+sqlite gcc-O2  88ms | gcc-O3  97ms | dcc-O2 622ms | dcc-O3 624ms
+```
+
+Add a float-printing assertion to any re-run: it is the check that distinguishes
+"built and ran" from "produced the right answers" (§6.4 defect 3). The §4.2
+script already covers it via `sin/sqrt`; the standalone form is:
+
+```bash
+./lua -e 'print(math.sqrt(144), math.sin(0), 1.5, 0.0, 12.0)'
+# expect: 12.0  0.0  1.5  0.0  12.0
+#         (a -O2 build that prints ".0" / empty values is miscompiling)
 ```

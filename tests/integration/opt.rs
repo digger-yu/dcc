@@ -415,6 +415,22 @@ fn vrp_wide_literal_cmp_not_masked_to_dest() {
     }
 }
 
+/// 浮点比较的 PF 修正不得踩碎住在 %rbx 里的寄存器家。
+/// 回归：`setp %bl` 清掉了 `len` 的低 8 位 —— dcc -O2 编出的 lua `print(12.0)`
+/// 打印 ".0"（真实形态：`luaO_tostringbuff`）。
+#[test]
+#[cfg(unix)]
+fn float_cmp_does_not_clobber_register_home() {
+    let src = include_str!("../fixtures/opt/float_cmp_home_clobber.c");
+    for level in ["-O0", "-O1", "-O2", "-O3"] {
+        let (out, exe) = run_compile_and_run_flags("float-cmp-home", src, &[level]);
+        assert!(out.status.success(), "compile {level}: {}", String::from_utf8_lossy(&out.stderr));
+        let rc = run_exe(&exe);
+        assert_eq!(rc, 0, "{level}: float compare clobbered a register home (rc={rc})");
+        let _ = fs::remove_file(&exe);
+    }
+}
+
 /// 循环优化 (Tiling / IVOP / Interchange)
 #[test]
 #[cfg(unix)]

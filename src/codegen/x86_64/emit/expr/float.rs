@@ -948,15 +948,56 @@ impl Codegen {
         };
         // 有序结果 -> al
         self.emit_insn(&Insn::setcc_reg(cc.0, 0).with_gas(format!("{al} %al", al = cc.1)));
-        // PF -> bl, 再按 op 把 PF 并入结果 (al = 有序结果 AND NOT PF / OR PF)
+        // PF 并入对**六条**都发（2026-10 实测：只对 `<`/`<=` 发会让 `==` 在 NaN 时
+        // 判真、`!=` 判假。`nan.c` 对拍 gcc 立刻红——`sete`/`setne` 看着在无序时
+        // 已经给出 ZF=0 的正确答案，但本后端 `ucomis*` 之前的取值路径并不保证
+        // 标志位就是那一组，省这两条省错了地方）。
+        //
+        // 真正要修的是**寄存器选择**：旧代码硬编码 `%bl`，而 rbx 可能被 regalloc
+        // 钉成某个变量的家 —— 实测 Lua `luaO_tostringbuff` 的 `len` 住在 rbx，
+        // `check != n` 的 `setp %bl` 把它的低 8 位清零 ⇒ snprintf 的长度变 0 ⇒
+        // `print(12.0)` 打印 ".0"、`print(1.5)` 的长度报 0。所以按占用事实挑号，
+        // 三个候选都不空闲时才借 rbx 并用 push/pop 保住调用方的值。
+        let pf = [3u8, 1u8, 2u8]
+            .into_iter()
+            .find(|&r| self.reg_bank.is_free(r));
+        let borrowed = pf.is_none();
+        if borrowed {
+            // 类型化 Stack 指令：`stack_shift` 由 `emit_insn` 自己记账，手改会与
+            // 调用点的对齐补偿脱节。
+            self.emit_insn(&Insn::stack_op_reg(
+                crate::codegen::x86_64::opcode::StackOp::Push,
+                3,
+            ));
+        }
+        let rm = pf.unwrap_or(3) & 7;
+        let r8 = crate::codegen::x86_64::emit::gas::REG8[rm as usize];
         if matches!(op, BinOp::Ne) {
-            // != : al = (~ZF) | PF  → bl = PF
-            self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x9A, 0xC3], &format!("setp %bl")));
-            self.emit_insn(&Insn::raw_with_gas(&[0x08, 0xD8], &format!("or %bl, %al")));
+            // != : al = (~ZF) | PF  → pf = PF (setp)
+            self.emit_insn(&Insn::raw_with_gas(
+                &[0x0F, 0x9A, 0xC0 | rm],
+                &format!("setp {r8}"),
+            ));
+            self.emit_insn(&Insn::raw_with_gas(
+                &[0x08, 0xC0 | (rm << 3)],
+                &format!("or {r8}, %al"),
+            ));
         } else {
-            // 其余: al = 有序结果 AND NOT PF  → bl = ~PF (setnp)
-            self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x9B, 0xC3], &format!("setnp %bl")));
-            self.emit_insn(&Insn::raw_with_gas(&[0x20, 0xD8], &format!("and %bl, %al")));
+            // 其余: al = 有序结果 AND NOT PF  → pf = ~PF (setnp)
+            self.emit_insn(&Insn::raw_with_gas(
+                &[0x0F, 0x9B, 0xC0 | rm],
+                &format!("setnp {r8}"),
+            ));
+            self.emit_insn(&Insn::raw_with_gas(
+                &[0x20, 0xC0 | (rm << 3)],
+                &format!("and {r8}, %al"),
+            ));
+        }
+        if borrowed {
+            self.emit_insn(&Insn::stack_op_reg(
+                crate::codegen::x86_64::opcode::StackOp::Pop,
+                3,
+            ));
         }
         // movzbq rax, al: movzx r64, r/m8 (from B8 to B64, REX.W=1).
         self.emit_insn(
