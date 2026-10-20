@@ -1,5 +1,5 @@
 .PHONY: all build test test-all opt-eq golden-cross bootstrap kernel-full-build \
-         kernel-full-check clean-cache torture-setup torture \
+         kernel-full-check clean-cache torture-setup torture hooks \
          gcc-dg gcc-dg-1 gcc-dg-2 gcc-dg-3 gcc-dg-4 gcc-dg-5 gcc-dg-6 gcc-dg-7 gcc-dg-8
 
 DCC_REPO ?= $(CURDIR)
@@ -90,6 +90,11 @@ test-all: test
 
 torture-setup:
 	bash scripts/setup_torture.sh
+
+# 安装本地 git 钩子（当前只有 pre-commit：gcc.c-torture fail 必须为 0）。
+# 判据看 scripts/git-hooks/pre-commit 的头注释，这里不重述；它不代替 `make test`。
+hooks:
+	bash scripts/install_git_hooks.sh
 
 torture: build torture-setup
 	bash scripts/torture_test.sh all

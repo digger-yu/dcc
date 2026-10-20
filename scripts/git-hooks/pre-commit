@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# scripts/git-hooks/pre-commit — 提交前 gcc.c-torture 零失败闸门
+#
+# 安装：bash scripts/install_git_hooks.sh        （复制到 .git/hooks/pre-commit）
+#
+# 规则：`scripts/torture_test.sh all` 的 fail 必须为 0，否则拒绝提交。
+# 这条比 `scripts/torture_gate.sh` 严：gate 只要求「失败集合不扩大」（对照
+# `tests/skip/torture_known_fail_*.txt` 基线），本钩子要求「一个都不许失败」。
+#
+# 判据全部 fail-closed：套件缺失、编译不过、测量到的用例数为 0、脚本退出码非 0、
+# 或汇总行里 fail != 0，任意一条成立即拒绝。特别是「测了 0 个用例」必须置红 ——
+# 否则套件目录一改名字，闸门就会以“零失败”的名义静默空转（假绿）。
+#
+# 仓库根从 `git rev-parse` 取，不依赖本文件自身位置：安装是**复制**而非符号链接，
+# 复制后脚本位于 .git/hooks/ 下，dirname 推出来的路径是无效的。
+set -uo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -z "$REPO_ROOT" || ! -d "$REPO_ROOT/scripts" ]]; then
+    echo "pre-commit: 无法定位仓库根，拒绝提交" >&2
+    exit 1
+fi
+cd "$REPO_ROOT"
+
+DCC="${DCC:-$REPO_ROOT/target/release/dcc}"
+SUITE="$REPO_ROOT/tests/gcc-torture/gcc/testsuite/gcc.c-torture"
+LOG_DIR="$REPO_ROOT/.git"          # 钩子日志放这里：git status 看不见，不会误提交
+LOG="$LOG_DIR/torture-pre-commit.log"
+JOBS="${JOBS:-4}"                  # 按限流约定，绝不用 nproc 顶满机器
+BUILD_JOBS="${BUILD_JOBS:-2}"
+
+fail() {
+    echo "" >&2
+    echo "pre-commit: 拒绝提交 —— $*" >&2
+    exit 1
+}
+
+echo "pre-commit: gcc.c-torture 零失败闸门（JOBS=$JOBS）"
+
+# 1) 套件必须在位
+[[ -d "$SUITE" ]] || fail "缺少 gcc.c-torture 套件：$SUITE
+   先跑：bash scripts/setup_torture.sh   （或 make torture-setup）"
+
+# 2) 待测二进制必须在位且不能是过期的
+if [[ ! -x "$DCC" ]]; then
+    echo "  构建 release 二进制（缺失）…"
+    cargo build --release -j"$BUILD_JOBS" >"$LOG".build 2>&1 \
+        || fail "cargo build --release 失败，见 $LOG.build"
+elif [[ -n "$(find src Cargo.toml Cargo.lock -newer "$DCC" -print -quit 2>/dev/null)" ]]; then
+    echo "  构建 release 二进制（源码比 $DCC 新）…"
+    cargo build --release -j"$BUILD_JOBS" >"$LOG".build 2>&1 \
+        || fail "cargo build --release 失败，见 $LOG.build"
+fi
+[[ -x "$DCC" ]] || fail "构建后仍没有可执行的 $DCC"
+
+# 3) 跑套件。脚本自身的退出码是第一判据，汇总行是第二判据：
+#    两者任一不对都拒绝（将来谁改了 torture_test.sh 的退出逻辑也拦得住）。
+DCC="$DCC" JOBS="$JOBS" bash scripts/torture_test.sh all >"$LOG" 2>&1
+rc=$?
+
+total_line=$(grep -E '^=== Total:' "$LOG" | tail -1)
+if [[ -z "$total_line" ]]; then
+    echo "--- torture_test.sh 输出末尾 ---" >&2
+    tail -15 "$LOG" >&2
+    fail "没有读到 '=== Total:' 汇总行（脚本异常？退出码 $rc），见 $LOG"
+fi
+
+# 汇总行形如：=== Total: pass=3707  fail=0  skip=6 ===
+read -r total_pass total_fail total_skip <<<"$(
+    sed -E 's/.*pass=([0-9]+)[[:space:]]+fail=([0-9]+)[[:space:]]+skip=([0-9]+).*/\1 \2 \3/' <<<"$total_line")"
+[[ "$total_pass" =~ ^[0-9]+$ && "$total_fail" =~ ^[0-9]+$ && "$total_skip" =~ ^[0-9]+$ ]] \
+    || fail "解析不了汇总行：$total_line"
+
+measured=$(( total_pass + total_fail + total_skip ))
+echo "  $total_line   （实测参与计数 $measured 例）"
+
+(( rc != 0 )) && { grep -E '^    FAIL|^  FAIL' "$LOG" | sed -n '1,20p' >&2
+                   fail "torture_test.sh 退出码 $rc，见 $LOG"; }
+
+(( measured == 0 )) && fail "一个用例都没测到（$total_line）—— 空跑的闸门等于没有闸门，见 $LOG"
+
+if (( total_fail != 0 )); then
+    grep -E '^    FAIL|^  FAIL' "$LOG" | sed -n '1,20p' >&2
+    (( measured < 1000 )) && echo "  注意：本次只测到 $measured 例，套件目录可能被改动过" >&2
+    fail "gcc.c-torture 有 $total_fail 个失败，见 $LOG"
+fi
+
+echo "pre-commit: gcc.c-torture fail=0（$total_pass 通过 / $total_skip 跳过），放行提交"
+exit 0

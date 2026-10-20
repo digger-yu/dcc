@@ -33,6 +33,13 @@ Makefile 入口与 Tier 0 的对应关系（终态：`make test` 逐字跑完上
 + `scripts/test_all.sh`，后者只做 smoke 端到端冒烟的薄编排，不复制断言逻辑）以本文 §1.1
 与 `Makefile` 里 `test:` 目标上方的注释为准。
 
+上面四条是“该跑什么”的清单，不是“提交前会自动跑什么”：本地装一个钩子可以把
+gcc.c-torture 零失败变成硬约束（`make hooks`，装的是
+[`scripts/git-hooks/pre-commit`](../scripts/git-hooks/pre-commit)）。钩子比 §1.1 更窄
+（只守 torture 一项，不代替上面四条），判据与代价以该脚本头注释为准，本节不重述。
+钩子装在 `.git/hooks/` 下，不入库，所以它是个人级便利而非 CI 保证；PR 侧的权威仍是
+Tier 1 的 `.github/workflows/torture.yml`。
+
 ### 1.2 单测过滤习惯
 
 `tests/integration/` 下的主题子文件被壳 `include!` 进同一个 target，**函数名过滤照常有效**：

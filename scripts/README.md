@@ -1,6 +1,7 @@
 # DCC 脚本索引
 
-`scripts/` 下 55 个脚本的分工与调用方。判据只有一个——谁在调用它：Makefile 目标、
+`scripts/` 下 56 个脚本（另有子目录 `git-hooks/` 里的钩子本体，不算独立脚本）的分工与
+调用方。判据只有一个——谁在调用它：Makefile 目标、
 `.github/workflows/*.yml`、`tests/`、`docs/`，或另一个脚本。
 
 ## 共通约定
@@ -21,6 +22,13 @@
 | `check_fixtures.sh` | fixture 引用完整性 / 命名 / 目录规则，硬失败无过渡开关 |
 | `check_fixtures_selftest.sh` | 元测试用例：5 类反向注入逐条 `exit 1`，证明上一条真的会红 |
 | `test_all.sh` | `tests/fixtures/smoke` 端到端冒烟的薄编排，不复制断言逻辑；由 `make test-all` 接入 |
+
+## 本地 git 钩子（调用方是 git 自己）
+
+| 脚本 | 用途 |
+|------|------|
+| `git-hooks/pre-commit` | 提交前闸门：`torture_test.sh all` 的 fail 必须为 0，否则拒绝提交。具体判据（五条 fail-closed 条件、限流默认值、日志位置）以脚本头注释为唯一真源，本表不重述 |
+| `install_git_hooks.sh` | 把上面那个钩子复制到 `.git/hooks/`（`make hooks`）；只复制不改任何 git 配置，内容不同时默认不覆盖，`--force` 才先备份再覆盖 |
 
 ## 产物级不变量（`make opt-eq` / `rex-hygiene` / `golden-cross` / `pipe-structure` / `disasm-cov`，及 CI）
 
