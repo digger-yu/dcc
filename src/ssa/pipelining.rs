@@ -1935,6 +1935,17 @@ pub const MAX_ROT_DEPTH: usize = 8;
 /// 每轮行尾的拷贝链上限（跳迭代读的对数）。
 pub const MAX_ROT_CELLS: usize = 16;
 
+/// 单次流水允许的实例总数上限（= 循环体节点数 × 静态 trip）。
+///
+/// 本层把三段切成 `节点数 × trip` 个实例（`instance_plan` 里的
+/// `for k in 0..trip` 逐趟枚举），编译时间/内存随 trip 线性增长。对
+/// trip 极大的静态计数循环（如 `for (i = 0; i < 50000000; i++)`）会把
+/// 编译器拖入分钟级乃至挂起，而软件流水本就只对 trip 适中的循环划算。
+/// 超上限在建依赖图之前直接放弃（退回普通循环，语义不变）。上限取得足够
+/// 高：任何能成功过闸的循环（否则早已挂起/膨胀）实例数都远低于它，因此
+/// 不改变既有产物。
+pub const MAX_PIPE_INSTANCES: usize = 1 << 20;
+
 /// 轮转路径的收益判据：前两条与塌缩模型完全一致（这样「depth=0 / trip 太短」的拒因
 /// 文案在两模型下相同），只把 `depth > 1` 换成上限判据。
 pub fn benefit_verdict_rot(
@@ -2545,6 +2556,17 @@ pub fn plan_for_header_with(
     res: &Resources,
 ) -> Result<PipelinePlan, &'static str> {
     let lp = classify_loop(func, header)?;
+    // 编译代价闸门：实例总数 = 节点数 × trip 线性于 trip，trip 极大时
+    // （静态计数的大循环）`instance_plan` 会逐趟枚举上亿个实例，把
+    // 编译器拖到分钟级/挂起（实测 trip=5e7 时 -O2 卡死）。超上限在建依赖图
+    // 之前直接放弃流水。checked_mul 溢出也视为超限拒绝。
+    if lp
+        .trip
+        .checked_mul(lp.nodes.len().max(1))
+        .map_or(true, |n| n > MAX_PIPE_INSTANCES)
+    {
+        return Err("trip×节点数过大：放弃流水以限制编译代价");
+    }
     let g = build_dep_graph(&lp.nodes, func, &func.blocks[header], &lp.phi_sources);
     let mii = rec_mii(&g).max(res_mii(&g, res));
     // 从 MII 起逐步增大；再大到节点数就没有重叠可言了。
