@@ -2920,6 +2920,33 @@ impl Codegen {
                         } else if result_sz < 8 {
                             unreachable!()
                         }
+                        // GCC 位域算术语义: ~ 的操作数若是位域, 结果需掩码到字段
+                        // 宽度 (而非声明类型宽度). 例: unsigned long i:33, ~i 在
+                        // 33 位精度内取反 → 0, 而非 64 位全反. 仅对 33..63 位宽
+                        // 生效 (≤32 位由上方整数提升路径处理, ==64 无需掩码),
+                        // 与二元运算的位域精度处理保持一致.
+                        if let Some(bf_width) = Self::expr_bitfield_width(e) {
+                            if bf_width < 64 && bf_width > 32 {
+                                let mask: u64 = (1u64 << bf_width) - 1;
+                                if mask <= 0x7FFFFFFF {
+                                    self.emit_insn(&Insn::alu_rm_reg_imm32_b64(
+                                        0b100, dst, mask as i64,
+                                    ))
+                                    .expect("typed-opcode: alu_rm_reg_imm32_b64");
+                                } else {
+                                    let tmp = if dst != 1 { 1u8 } else { 2u8 };
+                                    self.emit_insn(&Insn::movabs_reg_imm64(tmp, mask))
+                                        .expect("typed-opcode: movabs_reg_imm64");
+                                    self.emit_insn(&Insn::alu_rm_reg_reg(
+                                        AluOp::And,
+                                        Width::B64,
+                                        dst,
+                                        tmp,
+                                    ))
+                                    .expect("typed-opcode: alu_rm_reg_reg");
+                                }
+                            }
+                        }
                     },
                     UnOp::Plus => {},
                 }
