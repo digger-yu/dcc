@@ -12,6 +12,12 @@ own working directory for `~/` if needed.
 **Current status:** dcc compiles and runs both Lua 5.5.1 and SQLite 3.53.4
 **correctly at every optimization level `-O0`/`-O1`/`-O2`/`-O3`**.
 
+**Reference commit:** `99dabbc1`
+(driver / cli / link / preproc) — the driver-side behaviors this guide relies
+on: `$CC`/`$LD`/`$OBJCOPY` are shell-word-split when dcc delegates to the host
+toolchain, and dcc accepts multiple translation units (`.c` plus `.o`/`.a`) in a
+single invocation.
+
 ---
 
 ## 0. Prerequisites (check on a fresh machine)
@@ -149,37 +155,34 @@ dcc now works. The rest of this guide uses `DCC=~/dcc/target/release/dcc`.
 ### 3.1 dcc delegates linking to the host linker
 
 For an executable dcc does **not** link by itself — it delegates to the host
-linker (`cc`/`ld`). To find that linker dcc inspects the `CC` **environment
-variable**. This interacts badly with `make`:
-
-- `make` exports any variable given on its command line into the environment of
-  the recipe shell. If you pass `CC="dcc -std=gnu99"`, the recipe inherits
-  `CC="dcc -std=gnu99"` and dcc — when it tries to delegate linking — tries to
-  execute the *whole string* (path + space + flags) as a program:
-
-  ```
-  error[E0202]: cannot invoke /root/dcc/target/release/dcc -std=gnu99: \
-                No such file or directory (os error 2)
-  ```
-
-**Fix:** keep compiler flags out of `CC` (pass them via `MYCFLAGS`) and clear
-`CC` from the environment so dcc falls back to its default host toolchain:
+linker. To find that linker dcc reads the `CC` environment variable (and, for
+`ld`/`objcopy`, the `LD`/`OBJCOPY` variables). dcc **shell-word-splits** the
+value, so a `CC` that carries flags works as-is — including the form `make`
+exports straight from its command line, e.g. `CC="dcc -std=gnu99"`: the program
+is executed with its trailing flags as separate arguments, and a `CC` naming dcc
+itself falls back to the default host toolchain. No environment manipulation
+around `make` is required.
 
 ```bash
-env -u CC make posix CC=~/dcc/target/release/dcc MYCFLAGS="-std=gnu99" ...
+make posix CC=~/dcc/target/release/dcc MYCFLAGS="-std=gnu99 -O2" ...
+# also fine — flags carried inside CC (note $HOME, since `~` is not expanded
+# inside double quotes):
+make posix CC="$HOME/dcc/target/release/dcc -std=gnu99" MYCFLAGS="-O2" ...
 ```
 
-### 3.2 dcc compiles one translation unit per invocation
+### 3.2 dcc accepts multiple translation units per invocation
 
-dcc refuses to compile several `.c` files into one executable in a single call:
+dcc compiles and links several sources in one call: give `-o exe` together with
+any combination of `.c` files and pre-built `.o`/`.a` objects, and dcc compiles
+each `.c` to a temporary object, then links them:
 
+```bash
+~/dcc/target/release/dcc -O2 -o sqlite3_dcc shell.c sqlite3.c -lpthread -ldl -lm
 ```
-dcc: error: multiple source files cannot produce a single executable; \
-      compile each with -c, then link with gcc(1) or dcc -r
-```
 
-So for multi-file projects, compile each file with `dcc -c` and link the
-resulting `.o` files (see the SQLite section).
+Per-file `dcc -c` followed by a separate link still works; it is simply no
+longer required. (`-c`/`-S` each take a single output and are rejected when
+combined with `-o` plus multiple inputs.)
 
 ### 3.3 Diagnostics
 
@@ -209,7 +212,7 @@ of the compiler and does not change the semantics of the generated code.
 ```bash
 cd ~/lua-5.5.1/src
 make clean
-env -u CC make posix CC=~/dcc/target/release/dcc \
+make posix CC=~/dcc/target/release/dcc \
      MYCFLAGS="-std=gnu99 -O2" AR="ar rcu" RANLIB=ranlib
 ```
 
@@ -234,11 +237,11 @@ correct, identical interpreter:
 
 ```bash
 # alternate levels are equally valid and bit-for-bit equivalent at runtime:
-env -u CC make posix CC=~/dcc/target/release/dcc \
+make posix CC=~/dcc/target/release/dcc \
      MYCFLAGS="-std=gnu99 -O0" AR="ar rcu" RANLIB=ranlib     # -O0
-env -u CC make posix CC=~/dcc/target/release/dcc \
+make posix CC=~/dcc/target/release/dcc \
      MYCFLAGS="-std=gnu99 -O1" AR="ar rcu" RANLIB=ranlib     # -O1
-env -u CC make posix CC=~/dcc/target/release/dcc \
+make posix CC=~/dcc/target/release/dcc \
      MYCFLAGS="-std=gnu99 -O3" AR="ar rcu" RANLIB=ranlib     # -O3
 ```
 
@@ -312,7 +315,7 @@ A full sweep with a clean rebuild at each level:
 cd ~/lua-5.5.1/src
 for o in 0 1 2 3; do
   make clean
-  env -u CC make posix CC=~/dcc/target/release/dcc \
+  make posix CC=~/dcc/target/release/dcc \
        MYCFLAGS="-std=gnu99 -O$o" AR="ar rcu" RANLIB=ranlib >/dev/null 2>&1
   ./lua -v >/dev/null 2>&1; v=$?
   ./lua luafull.lua >/dev/null 2>&1; s=$?
@@ -335,20 +338,18 @@ All four levels are now correct and produce identical script output.
 
 ### 5.1 Build
 
-dcc needs one `-c` compile per source file (see §3.2):
+Both sources compile and link in a single invocation (see §3.2):
 
 ```bash
 cd ~/sqlite
-env -u CC ~/dcc/target/release/dcc -O2 -c -o shell.o  shell.c
-env -u CC ~/dcc/target/release/dcc -O2 -c -o sqlite3.o sqlite3.c
-env -u CC ~/dcc/target/release/dcc -O2 -o sqlite3_dcc \
-     shell.o sqlite3.o -lpthread -ldl -lm
+~/dcc/target/release/dcc -O2 -o sqlite3_dcc \
+     shell.c sqlite3.c -lpthread -ldl -lm
 ```
 
-Both compiles succeed (only W0501 warnings); the link prints
+The compile emits only benign W0501 warnings; the link prints
 `dcc: sqlite3_dcc` and produces the `sqlite3_dcc` shell.
 
-### 5.2 Verification — at -O2 and -O3
+### 5.2 Verification — at every optimization level (-O0 .. -O3)
 
 ```bash
 ./sqlite3_dcc :memory: "SELECT 'sqlite '||sqlite_version(); \
@@ -398,27 +399,50 @@ File-backed database (persistence across connections) and a transaction:
 The persisted row survives a reconnect, and the `BEGIN/COMMIT` transaction is
 durable.
 
-Unlike Lua, the SQLite amalgamation **runs correctly at `-O2`** under dcc (and
-the same queries return identical results at `-O3`): DDL/DML, `ORDER BY`,
-aggregates, `JOIN`/`GROUP BY`, file persistence, and transactions all behave as
-expected (version 3.53.4).
+### 5.3 Optimization sweep — -O0 .. -O3
+
+A full sweep with a clean rebuild at each level (single invocation, see §3.2):
+
+```bash
+cd ~/sqlite
+for o in 0 1 2 3; do
+  ~/dcc/target/release/dcc -O$o -o sq_$o shell.c sqlite3.c -lpthread -ldl -lm \
+      >/dev/null 2>&1
+  ./sq_$o :memory: "CREATE TABLE t(a); INSERT INTO t VALUES(1),(2),(3); \
+      SELECT 'ok '||sum(a)||'/'||count(*) FROM t;"
+done
+```
+
+| Level | build + link | query output |
+|-------|--------------|--------------|
+| -O0   | OK (0) | `ok 6/3` |
+| -O1   | OK (0) | `ok 6/3` |
+| -O2   | OK (0) | `ok 6/3` |
+| -O3   | OK (0) | `ok 6/3` |
+
+SQLite runs correctly at **every** optimization level under dcc, and the same
+queries return identical results across `-O0`/`-O1`/`-O2`/`-O3`: DDL/DML,
+`ORDER BY`, aggregates, `JOIN`/`GROUP BY`, file persistence, and transactions
+all behave as expected (version 3.53.4).
 
 ---
 
 ## 6. Summary
 
-| Project | dcc compile | dcc link | `lua -v` (-O0..-O3) | run `luafull.lua` (-O0..-O3) | output consistency |
-|---|---|---|---|---|---|
-| Lua 5.5.1 | OK | OK | OK (all levels) | OK (all levels) | byte-identical across -O0..-O3 |
-| SQLite (amalgamation) | OK | OK | n/a | OK (-O2 and -O3 verified) | identical -O2 vs -O3 |
+| Project | dcc compile | dcc link | functional run (-O0..-O3) | output consistency |
+|---|---|---|---|---|
+| Lua 5.5.1 | OK | OK | OK (all levels) | byte-identical across -O0..-O3 |
+| SQLite (amalgamation) | OK | OK | OK (all levels) | identical across -O0..-O3 |
 
 **Takeaways**
 
-1. dcc compiles and links both projects. Two build-system adaptations are
-   required: clear `CC` for the link-delegation step (`env -u CC`) and compile
-   multi-file sources with `dcc -c` before linking.
-2. SQLite is usable end-to-end with dcc at `-O2`/`-O3` (version 3.53.4: DDL/DML,
-   aggregates, `JOIN`/`GROUP BY`, file persistence, transactions).
+1. dcc compiles and links both projects. `$CC` (and `$LD`/`$OBJCOPY`) are
+   shell-word-split during link delegation, and multiple translation units are
+   accepted in a single invocation — no build-system workaround is needed.
+2. SQLite is usable end-to-end with dcc at **every** optimization level
+   `-O0`/`-O1`/`-O2`/`-O3` (version 3.53.4: DDL/DML, aggregates, `JOIN`/`GROUP
+   BY`, file persistence, transactions), with query results identical across
+   the levels.
 3. Lua 5.5.1 now compiles and runs **correctly at every optimization level**
    (`-O0`/`-O1`/`-O2`/`-O3`), with `luafull.lua` output byte-identical to a
    reference `gcc` build. There is no longer any need to restrict Lua to
@@ -442,7 +466,7 @@ DCC=~/dcc/target/release/dcc
 # --- Lua 5.5.1 (correct at every optimization level; use -O2) ---
 cd ~/lua-5.5.1/src
 make clean
-env -u CC make posix CC="$DCC" MYCFLAGS="-std=gnu99 -O2" AR="ar rcu" RANLIB=ranlib
+make posix CC="$DCC" MYCFLAGS="-std=gnu99 -O2" AR="ar rcu" RANLIB=ranlib
 ./lua -v
 ./lua luafull.lua
 ./luac -o /tmp/luafull.luac luafull.lua && ./lua /tmp/luafull.luac
@@ -450,19 +474,17 @@ env -u CC make posix CC="$DCC" MYCFLAGS="-std=gnu99 -O2" AR="ar rcu" RANLIB=ranl
 # O0..O3 sweep — all four must be OK and produce identical script output
 for o in 0 1 2 3; do
   make clean
-  env -u CC make posix CC="$DCC" MYCFLAGS="-std=gnu99 -O$o" \
+  make posix CC="$DCC" MYCFLAGS="-std=gnu99 -O$o" \
        AR="ar rcu" RANLIB=ranlib >/dev/null 2>&1
   v=$(./lua -v >/dev/null 2>&1; echo $?)
   s=$(./lua luafull.lua >/dev/null 2>&1; echo $?)
   echo "O$o: lua -v rc=$v | run script rc=$s"
 done
 
-# --- SQLite amalgamation (verified at -O2 and -O3) ---
+# --- SQLite amalgamation (verified at -O0 .. -O3) ---
 cd ~/sqlite
-for o in 2 3; do
-  env -u CC "$DCC" -O$o -c -o shell.o  shell.c
-  env -u CC "$DCC" -O$o -c -o sqlite3.o sqlite3.c
-  env -u CC "$DCC" -O$o -o sqlite3_dcc shell.o sqlite3.o -lpthread -ldl -lm
+for o in 0 1 2 3; do
+  "$DCC" -O$o -o sqlite3_dcc shell.c sqlite3.c -lpthread -ldl -lm
   ./sqlite3_dcc :memory: "SELECT sqlite_version();"
 done
 ```
