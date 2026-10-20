@@ -400,6 +400,21 @@ fn m16_sccp() {
     let _ = fs::remove_file(&exe);
 }
 
+/// VRP: 宽字面量（64 位）与 int dest 的比较不得被按 dest 宽度掩码折错。
+/// 回归：`long long a = 1LL << 40; if (a <= 0)` 在 -O2 曾被折成恒真。
+#[test]
+#[cfg(unix)]
+fn vrp_wide_literal_cmp_not_masked_to_dest() {
+    let src = include_str!("../fixtures/opt/vrp_wide_literal_cmp.c");
+    for level in ["-O0", "-O1", "-O2", "-O3"] {
+        let (out, exe) = run_compile_and_run_flags("vrp-wide-lit", src, &[level]);
+        assert!(out.status.success(), "compile {level}: {}", String::from_utf8_lossy(&out.stderr));
+        let rc = run_exe(&exe);
+        assert_eq!(rc, 0, "{level}: wide-literal comparison folded wrong");
+        let _ = fs::remove_file(&exe);
+    }
+}
+
 /// 循环优化 (Tiling / IVOP / Interchange)
 #[test]
 #[cfg(unix)]

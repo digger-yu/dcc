@@ -1768,10 +1768,23 @@ fn vrp_bin_operands(l: &Operand, r: &Operand, m: &VrpMap, dest_ty: &Type) -> Opt
             let lr = m.get(&lv.name()).copied().or_else(|| vrp_full_range(&lv.ty))?;
             Some((lr, VrpRange::point(mask_to_type(*c, &lv.ty))))
         },
-        (Operand::Int(a), Operand::Int(b)) => Some((
-            VrpRange::point(mask_to_type(*a, dest_ty)),
-            VrpRange::point(mask_to_type(*b, dest_ty)),
-        )),
+        (Operand::Int(a), Operand::Int(b)) => {
+            // 两个字面量都没有自带类型（SCCP 的 `replace_op` 把带类型的 Var 换成
+            // 无类型的 Int 时丢了宽度），只能借 dest 的类型解释。但 dest 对**比较**
+            // 恒为 `int`，而操作数可以是有理据的 64 位：`long long a = 1LL << 40;
+            // if (a <= 0)` 在 SCCP 把 a 换成 `Int(1099511627776)` 后落到这里，
+            // 按 32 位 dest 掩码直接把操作数掩成 0 ⇒ `0 <= 0` 恒真 ⇒ -O2 折错分支
+            // （实测 `bootstrap_selftest.c` 的 longlong 组 rc=-2）。
+            // 判据：字面量装得下 dest 才按 dest 解释（有符号字面量进无符号运算的
+            // 经典形状靠它）；装不下说明它来自更宽的操作数 ⇒ 本条放弃（少折一条
+            // 比较只是少一条优化，折错一条是错值）。
+            let ma = mask_to_type(*a, dest_ty);
+            let mb = mask_to_type(*b, dest_ty);
+            if ma != *a || mb != *b {
+                return None;
+            }
+            Some((VrpRange::point(ma), VrpRange::point(mb)))
+        },
         _ => None,
     }
 }
