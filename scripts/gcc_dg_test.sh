@@ -209,8 +209,26 @@ parse_dg_directives() {
         # 平台, 自动跳过.
         # 注意: 原先列表含一个裸 '*' glob, 会匹配任意 effective-target 名,
         # 导致本该跳过的用例被当成"支持"而运行并虚假 FAIL. 这里移除该 '*'.
+        #
+        # 白名单里另外两个不是"平台三元组"而是"能力名", 它们对本目标恒真。
+        # 放回的依据：把这两个名单门住的 71 个用例（另 4 个走 -fgimple）连
+        # 同所在目录的兄弟头文件按原目录结构复制成夹具，走 harness 本身跑：
+        #   compile 类 pass=33 fail=0；run 类 pass=8 fail=0（其余由别的
+        #   名单 / dg-skip-if / 非本类别正常排除）。夹具必须保留目录结构，
+        #   拍平会让 analyzer/ 的 `#include "analyzer-decls.h"` 找不到文件，
+        #   制造出 4 个假 FAIL。
+        # 其余同样看似"本平台应恒真"的名字暂不放回: 每个名单底下还门着一个
+        # 真实缺陷, 放回要么让测试用例集变红, 要么得把缺陷写进 skip 清单变成假绿。
+        #   size32plus     vec-cvt-1.c 运行错值
+        #   stdint_types   未实现 __builtin_bswap128
+        #   label_values   缺 analyzer 兄弟头文件; malloc-1.c
+        #   nonlocal_goto  pr97986-1.c 要嵌套函数跳 `__label__`
+        #   int32plus      多个 crc-builtin-* 与 C23 位域用例
+        #   vect_* / lto / analyzer / tls / fpic 等本就与 dcc 无关或明确不支持
+        # 注：多个 dg-require-effective-target 共存时本函数只看第一个（head -1），
+        # 所以如 pr127166-2.c (int32 && vect_int) 仍靠 vect_int 这一条被排除。
         case "$req_target" in
-            x86_64|x86|i?86|any|always) ;;
+            x86_64|x86|i?86|any|always|indirect_jumps|int32) ;;
             *)
                 echo "skip target:$req_target"
                 return
