@@ -78,6 +78,21 @@ torture/hardbool-ul-5a.c
 torture/hardbool-ul.c
 torture/hardbool-us-5a.c
 torture/hardbool.c
+# 其余 __hardbool 变体 (dcc 未实现该类型, 设计不支持, 同属 __hardbool):
+torture/hardbool-5a.c
+torture/hardbool-i.c
+torture/hardbool-ll-5a.c
+torture/hardbool-ll.c
+torture/hardbool-s-5a.c
+torture/hardbool-s.c
+torture/hardbool-us.c
+torture/hardbool-vi.c
+
+# inline-mem-move-1 — 依赖另一个套件 gcc.c-torture 的文件
+# (../../gcc.c-torture/execute/builtins/memmove.c, lib/main.c), 该套件文件
+# 在 gcc.dg 布局下不存在, 且 -finline-stringops=memmove 亦非 dcc 支持的 flag;
+# 属测试依赖/布局限制, 非 dcc 代码缺陷, 暂跳过。
+torture/inline-mem-move-1.c
 
 # __GIMPLE — GCC 内部 GIMPLE IR 测试语法 (`-fgimple` 下 `__GIMPLE()` 函数体
 # 直接用 GIMPLE 伪指令书写), dcc 解析器不支持, 非标准 C, 设计不支持。
