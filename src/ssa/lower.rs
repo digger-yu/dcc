@@ -455,17 +455,27 @@ pub(super) fn insert_loop_phis(func: &mut Function) {
                 .entry(p.base.clone())
                 .or_insert_with(|| p.clone());
         }
-        for bb_name in ordered_block_names(func) {
-            let Some(bb) = func.blocks.get(&bb_name) else {
+        let order = ordered_block_names(func);
+        // 本循环 header 在 RPO 序中的位置。进入循环携带变量的值必来自 header 的
+        // 前驱路径（RPO 里排在 header 之前）；排在 header 之后的块 —— 例如同一
+        // 函数里后一个并列作用域对同名变量的重新定义 —— 与本循环的入值无关。
+        // 旧实现按全序 last-wins 收集 outside_defs，会让后一个同名定义盖掉本循环
+        // 真正的进入值，导致 phi 的 preheader incoming 与 rename key 指错版本，
+        // 循环体读回进循环前的常量（实测两个并列 `int k` 的 while ⇒ VRP 把守卫
+        // `k<N` 折成常量 ⇒ while(1) 死循环）。因此 outside_defs 只采纳 header 之前的块。
+        let header_pos = order.iter().position(|b| *b == header);
+        for (pos, bb_name) in order.iter().enumerate() {
+            let Some(bb) = func.blocks.get(bb_name) else {
                 continue;
             };
-            let inside = in_body.contains(&bb_name);
+            let inside = in_body.contains(bb_name);
+            let counts_for_outside = !inside && header_pos.map_or(true, |hp| pos < hp);
             for inst in &bb.insts {
                 if let Some(d) = &inst.dest {
                     bump_version(&mut max_version, &d.base, d.version);
                     if inside {
                         body_defs.insert(d.base.clone(), d.clone());
-                    } else {
+                    } else if counts_for_outside {
                         outside_defs.insert(d.base.clone(), d.clone());
                     }
                 }
