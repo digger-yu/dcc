@@ -42,6 +42,30 @@ pub const CX_FRAME_BAND: i64 = 48;
 /// 向量临时槽区：512 字节（32 个 16B 槽）。嵌套向量 binop 每层要更深的操作数槽，
 /// 128 字节只够 3 层，深链式表达式会溢出到变量区（pr23135）。
 pub const VEC_RESERVE: i64 = 512;
+/// 向量临时槽带的**格数**（与单槽字节无关）。
+///
+/// 取 32 是为了保住历史容量：`VEC_RESERVE` = 512 = 32 x 16，即旧固定带宽隐含「32 个 16B
+/// 槽」。带按本函数最宽向量的步长拉长时，格数必须**不变**，否则宽向量函数可用的槽会从 32
+/// 降到 `512 / 步长`，超出那部分直接跑出带区盖到 bf_rmw / trampoline 区（实测把步长统一
+/// 成 64B 后 `torture/pr93170.c` 只剩 8 格，第 9 格起越界 abort）。
+/// 所以带宽 = 格数 x 步长：单槽 ≤ 16B 的函数仍得 512，帧布局逐字节不变；只有真出现宽
+/// 向量的函数才会把帧拉大。带尾要放 `__builtin_shuffle*` 站点的工作区（每层 3 格，见
+/// `special/builtins.rs`），消费端用 `LayoutMap::vec_band_slots` 反推可用格数。
+pub const VEC_BAND_SLOTS: i64 = 32;
+/// 向量临时槽带的尺寸判据（单源）：给定本函数出现过的最大向量字节数，返回带宽。
+///
+/// 为什么带宽要跟着最宽向量长：固定 `VEC_RESERVE` 隐含「单槽 16B x 32 格」，一个宽向量
+/// 站点（源拼接镜像 + 掩码 + 结果）就要吃掉 3 格 x 步长，256B 向量下三格已是 768B，旧
+/// 的 512B 带必然溢出到带下的 `bf_rmw` / trampoline 区（实测
+/// `torture/builtin-shufflevector-pr123156.c`）。
+///
+/// 这里只决定**带宽**，不改 `vec_temp` 的槽步长：把步长按函数统一会暂探到既有「同一个
+/// 临时槽两侧传不同尺寸」的不一致（实测 `torture/pr93170.c` 从 RUNOK 变错值），那属另一
+/// 条轴上的专项修复，不在本轮范围内。
+pub fn vec_band_reserve(max_vec_bytes: usize) -> i64 {
+    let slot_bytes = (max_vec_bytes.div_ceil(8) as i64).saturating_mul(8);
+    VEC_RESERVE.max(VEC_BAND_SLOTS.saturating_mul(slot_bytes.max(16)))
+}
 /// 嵌套函数 trampoline 空间：256 字节（最多 8 个，每个 32 字节）。实际代码在生成期按需写入。
 pub const TRAMP_RESERVE: i64 = 256;
 /// 位域 RMW 临时槽带。每层嵌套占 3 个 8B 槽（24B），对齐 16 ⇒ 每层 32B。
@@ -83,7 +107,7 @@ pub struct FramePlan {
     pub static_chain_slot: i64,
     /// 位域 RMW 带；无参/`main` 分支今天传 0（见文件头「不对称 1」）
     pub bf_rmw_reserve: i64,
-    /// 向量临时带
+    /// 向量临时带（尺寸单源于 [`vec_band_reserve`]）
     pub vec_reserve: i64,
     /// trampoline 带
     pub tramp_reserve: i64,
@@ -337,8 +361,18 @@ impl LayoutMap {
     /// 向量临时槽 `slot`（尺寸 `vec_size`）的偏移。与 `Codegen::vector_temp_base`
     /// 同一条算式，收在这里是为了「帧的坐标只有一个出处」。
     pub fn vec_temp(&self, slot: i64, vec_size: usize) -> i64 {
-        let slot_bytes = vec_size.div_ceil(8) as i64 * 8;
-        self.vec_temp_off + slot * slot_bytes
+        let own = (vec_size.div_ceil(8) as i64).saturating_mul(8);
+        self.vec_temp_off + slot * own
+    }
+
+    /// 向量临时槽带在步长 `vec_size` 下能容纳的槽数。
+    ///
+    /// 与 [`Self::vec_temp`] **同一把尺子**（都是 `round8(本次尺寸)`），消费端不得自己
+    /// 再除一遍 `reserve / size` —— 那就是同一个事实的两个出处。
+    pub fn vec_band_slots(&self, vec_size: usize) -> usize {
+        let own = (vec_size.div_ceil(8) as i64).saturating_mul(8);
+        let step = own.max(1);
+        (self.vec_reserve / step).max(0) as usize
     }
 
     /// Bitfield RMW slot offset: depth selects the layer, slot_idx the slot in that layer.
@@ -436,6 +470,44 @@ mod tests {
         assert_eq!(l.spill_band_bytes, 0, "Phase 2 不得凭空长出 spill 带");
         // 额度：帧大小 - 帧头 - 帧底那摞带 = 变量区 + sret 区 + 取整富余
         assert_eq!(l.arena_room, 80 + 64 + (frame_size - raw));
+    }
+
+    /// 向量临时带的尺寸判据：单槽步长与带宽同源，且**格数恒为 `VEC_BAND_SLOTS`**。
+    #[test]
+    fn vec_band_reserve_keeps_slot_count_and_grows_only_for_wide_vectors() {
+        // 单槽 ≤ 16B：带宽恰好还是历史的 512（= 32 x 16），帧布局逐字节不变
+        for max in [0usize, 8, 16] {
+            assert_eq!(vec_band_reserve(max), VEC_RESERVE, "max_vec_bytes={max} 不得改变带宽");
+        }
+        // 更宽的向量：带按步长线性拉长，使格数不掉（容量不变是硬要求：格数一掉，
+        // 旧固定带下能跑的表达式的槽就会跑出带区，实测 pr93170 abort）
+        for max in [32usize, 64, 256] {
+            let reserve = vec_band_reserve(max);
+            let mut l = LayoutMap::unresolved();
+            l.vec_reserve = reserve;
+            assert_eq!(
+                l.vec_band_slots(max) as i64,
+                VEC_BAND_SLOTS,
+                "max_vec_bytes={max} 下格数必须保持 VEC_BAND_SLOTS"
+            );
+            assert!(reserve > VEC_RESERVE, "max_vec_bytes={max} 下旧 512B 带不够用");
+        }
+    }
+
+    /// `vec_temp` 的槽定位仍按调用方尺寸走：锁定历史算式，防止谁把「按函数统一
+    /// 步长」悄悄装回来（那会改变现有宽向量函数的帧布局）。
+    #[test]
+    fn vec_temp_steps_by_the_requested_size() {
+        let mut l = LayoutMap::unresolved();
+        l.vec_temp_off = -1000;
+        assert_eq!(l.vec_temp(1, 2), -1000 + 8, "2B 步长按 round8 占一格");
+        assert_eq!(l.vec_temp(2, 16), -1000 + 32);
+        assert_eq!(l.vec_temp(1, 300), -1000 + 304, "尺寸向上 8 对齐后乘槽号");
+        assert_eq!(l.vec_temp(3, 256), -1000 + 768);
+        // 格数反推与 `vec_temp` 同一把尺子
+        l.vec_reserve = 2048;
+        assert_eq!(l.vec_band_slots(256), 8);
+        assert_eq!(l.vec_band_slots(16), 128);
     }
 
     /// spill band 为 0 时**一切坐标都不动** —— 这是 Phase 2「零行为 diff」的代数形式。

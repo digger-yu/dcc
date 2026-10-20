@@ -34,6 +34,17 @@ pub struct LateNeed {
     ap_names: Vec<String>,
     /// 聚合成员赋值的一般 RHS 暂存（固定名，全函数共用一槽）。
     agg_tmp: bool,
+    /// 本函数里出现过的**最大向量字节数**（不是晚分配带的输入，是向量临时槽带的）。
+    ///
+    /// `vector_temp_base(slot, vec_size)` 把槽按 `slot * round8(vec_size)` 摆放，所以
+    /// 整条带必须容得下「若干个最大向量」；固定 512B 只够 32 个 16B 槽或 4 个 128B 槽，
+    /// 256B 向量的第二个槽就溢出到 bf_rmw/trampoline 带了。尺寸判据单源于
+    /// `abi::layout::vec_band_reserve`。
+    ///
+    /// 它搭本结构那次穷举遍历的车而不是另起一个扫树器：`late_need_type` 已经逐节点看到
+    /// 每个表达式与声明的类型（连 VLA 维度里的子类型都进去），新增一个遍历器只会多一处
+    /// 「静默少扫一棵子树」的机会。
+    max_vec_bytes: usize,
 }
 
 impl LateNeed {
@@ -815,11 +826,18 @@ impl Codegen {
     /// 它们是序言/声明点用 `gen_expr` 求值的，里面可以有复合字面量与聚合成员赋值。
     fn late_need_type(ty: &Type, need: &mut LateNeed) {
         match ty {
-            Type::Ptr(q)
-            | Type::Complex(q)
-            | Type::Imaginary(q)
-            | Type::Vector(q, _)
-            | Type::Atomic(q) => Self::late_need_type(&q.base, need),
+            Type::Ptr(q) | Type::Complex(q) | Type::Imaginary(q) | Type::Atomic(q) => {
+                Self::late_need_type(&q.base, need)
+            },
+            Type::Vector(q, n) => {
+                // 向量元素数可以是 0（`vector_size(0)` 非法但解析器不拦），尺寸按
+                // `Type::size()` 的口径算，本函数不另建一套乘法。
+                let bytes = Type::Vector(q.clone(), *n).size();
+                if bytes > need.max_vec_bytes {
+                    need.max_vec_bytes = bytes;
+                }
+                Self::late_need_type(&q.base, need)
+            },
             Type::Array(elem, ArraySize::Var(se)) => {
                 Self::late_need_expr(se, need);
                 Self::late_need_type(&elem.base, need);
@@ -1080,10 +1098,13 @@ impl Codegen {
     /// 晚分配的闸门。所有槽尺寸（`late_slots` / `spill_slots` / `temp_slots`）都在
     /// `LayoutMap::resolve` 的同一帧里定为输入，本函数只负责晚分配这一条带的输入。
     pub fn plan_late_slot_budget(&mut self, body: Option<&Block>, params: &[crate::ast::Param]) {
+        // 向量槽带需求逐函数复位（与 `late_slot_budget` 同口径）：无体声明直接 early
+        // return，不能留下上个函数的尺寸。
+        self.max_vec_bytes = 0;
         let Some(b) = body else { return };
         // §11.23 步 2：预算 = 发射期那四族的静态需求。每一笔都能对应到一个具体站点，
         // 所以这里不是「宁可多给」而是「算准」（少算了 `E1133` 会响）。
-        let need = Self::late_need(&b.items);
+        let mut need = Self::late_need(&b.items);
         let mut slots = need.compound_slots;
         // 每个 VM 尺寸键一份 `Type::Long`（发射点是 `register_var(_, &Type::Long)`）
         slots += (need.vmsize_keys.len() as i64).max(0);
@@ -1104,6 +1125,12 @@ impl Codegen {
         if need.agg_tmp {
             slots += Self::var_alloc_slots(&Type::Int128);
         }
+        // 形参类型树也喂给同一个扫面：向量形参的尺寸同样是向量带的需求。放在 `slots`
+        // 算完之后，所以这里只会多填 `max_vec_bytes`，不会改变晚分配带口径。
+        for p in params {
+            Self::late_need_type(&p.ty, &mut need);
+        }
+        self.max_vec_bytes = need.max_vec_bytes;
         // §11.23 步 3：这份预算不再**预扣进变量区水位**，而是作为晚分配带的尺寸交给
         // 布局解算（`FramePlan::late_slots`）。带里的对象不再挤在局部变量底下，于是
         // `register_var` 里那两段只在生成期推帧坐标的代码（`min_used` 夹逼 +

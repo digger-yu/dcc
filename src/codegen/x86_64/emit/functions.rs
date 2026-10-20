@@ -738,7 +738,8 @@ impl Codegen {
             let tramp_reserve_honest: i64 = p3_nested_count.saturating_mul(32);
             // bf_rmw: 无静态扫描时沿用固定 64B (P3 之后会接入位域深度扫描)。
             let bf_rmw_reserve_honest: i64 = crate::codegen::x86_64::abi::layout::BF_RMW_RESERVE;
-            let vec_reserve_honest: i64 = crate::codegen::x86_64::abi::layout::VEC_RESERVE;
+            let vec_reserve_honest: i64 =
+                crate::codegen::x86_64::abi::layout::vec_band_reserve(self.max_vec_bytes);
             let va_slots: i64 = if f.is_variadic {
                 if self.target.sse {
                     48 + 128
@@ -1037,6 +1038,9 @@ impl Codegen {
             // 静态链 / 位域 RMW 三个预留（见 `abi/layout.rs` 文件头记的「不对称 1」），
             // 于是这三个带在这里传 0：不对称从「两份公式」变成「可见的输入」，
             // Phase 2 不改它（改了就是改产物）。
+            // 同一尺寸判据只算一次（与上面变参分支同口径）。
+            let main_vec_reserve =
+                crate::codegen::x86_64::abi::layout::vec_band_reserve(self.max_vec_bytes);
             let layout = crate::codegen::x86_64::abi::layout::LayoutMap::resolve(
                 &crate::codegen::x86_64::abi::layout::FramePlan {
                     temp_slots: temp_slots as i64,
@@ -1046,7 +1050,7 @@ impl Codegen {
                     va_slots: 0,
                     static_chain_slot: 0,
                     bf_rmw_reserve: 0,
-                    vec_reserve: crate::codegen::x86_64::abi::layout::VEC_RESERVE,
+                    vec_reserve: main_vec_reserve,
                     tramp_reserve: 0,
                     stack_reserve: self.stack_reserve_bytes(),
                     spill_slots,

@@ -110,6 +110,15 @@ pub struct Codegen {
     /// §11.23 步 2：规划期为「发射期才会冒出来的帧内对象」预扣的槽数上界。
     /// 由 `plan_late_slot_budget()` 一次写下，逐函数复位。
     pub late_slot_budget: i64,
+    /// 本函数出现过的最大向量字节数（向量临时槽带的尺寸输入，单源于
+    /// `abi::layout::vec_band_reserve`）。与 `late_slot_budget` 同一趟规划写下，逐函数复位。
+    pub max_vec_bytes: usize,
+    /// `__builtin_shuffle` / `__builtin_shufflevector` 的**站点嵌套层号**（0 起）。
+    /// 内层站点在外层实参物化期间跑，两边的拼接镜像/掩码/结果必须各用自己的
+    /// 槽；层号乘上每站槽数从向量带尾部往下定位（实参表达式自己的 binop 嵌套从带
+    /// 顶往下长，两个方向不相遇，除非带整体溢出——那是本后端已有的限度）。
+    /// 与 `late_site_seq` 同口径逐函数复位。
+    pub vec_perm_level: usize,
     /// 发射期**实际**新增的槽数（只统计 `frame_planned` 之后的新名字 `register_var`）。
     /// 它与 `late_slot_budget` 的差就是静态扫描的余量；超出即 `E1133`。
     pub late_slot_used: i64,
@@ -839,6 +848,8 @@ impl Codegen {
             expr_depth: 0,
             late_site_seq: 0,
             late_slot_budget: 0,
+            max_vec_bytes: 0,
+            vec_perm_level: 0,
             late_slot_used: 0,
             late_var_cursor: 0,
             frame_planned: false,
