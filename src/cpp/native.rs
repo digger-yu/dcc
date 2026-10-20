@@ -3420,6 +3420,11 @@ fn cpp_static_initializer(e: &CppExpr, ty: &ast::Type, symbols: &[CxxSymbol]) ->
                 ast::FloatConst::LongDouble(b) => {
                     ast::FloatConst::LongDouble(crate::float80::negate(b))
                 },
+                ast::FloatConst::Float128(mut bits) => {
+                    // 小端内存镜像：符号位在 bits[15] 的最高位。
+                    bits[15] ^= 0x80;
+                    ast::FloatConst::Float128(bits)
+                },
             };
             Some(ast::Expr::Float {
                 c: negated,

@@ -616,6 +616,45 @@ impl Codegen {
                         // 不走逐字 8+8 搬运：改由 ld_param_stores 在入口降级。
                         ld_param_stores.push((aligned, off));
                     }
+                } else if matches!(&p.ty, Type::Float128) && self.target.sse {
+                    // binary128 标量：占 16 字节栈槽但只消耗**一个** XMM 寄存器
+                    // （`[Sse, SseUp]`，SseUp 是前一 SSE 的高半）。gcc -O0 实测
+                    // `f(__float128 a, __float128 b)` 装 a→xmm0、b→xmm1。
+                    //
+                    // 帧槽必须**下移 8 字节**：标量槽公式 `off = -(used_before+hdr)`
+                    // 让槽从 `off` 往上长 `size` 字节，而 16 字节的槽若不额外下移，
+                    // 就会与前一个参数的 8 字节槽重叠 —— 前者的 `mov %rdi,off` 会
+                    // 盖掉 binary128 的高 8 字节，callee 读回的是半截值
+                    // （实测 `void d(const char*, __float128)` 直接段错误：
+                    //  `n` 的槽尾被 v 的高半覆盖，`printf("%s", n)` 拿到垃圾指针）。
+                    // 16 字节聚合体走的是同一个约定（见上面的
+                    // `base_off = -(used_before+hdr) - (chunks-1)*8`）。
+                    let used_before = param_used_total;
+                    param_used_total += 16;
+                    if fp_idx < 8 {
+                        let saved_fp = fp_idx;
+                        fp_idx += 1;
+                        if let Some(nm) = nm_opt {
+                            let hdr = LayoutMap::hdr_of(temp_slots as i64);
+                            let off = -(used_before + hdr) - 8;
+                            self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
+                            // wide128=true ⇒ 入口用 movups 保存完整 16 字节。
+                            xmm_param_stores.push((saved_fp as u8, off, p.ty.clone(), true));
+                            self.variadic_named_fp += 1;
+                        }
+                    } else {
+                        // XMM 耗尽：按 16 字节对齐走栈，分两个 8 字节搬运。
+                        let aligned = (stack_arg_off + 15) & !15;
+                        stack_arg_off = aligned + 16;
+                        if let Some(nm) = nm_opt {
+                            let hdr = LayoutMap::hdr_of(temp_slots as i64);
+                            let off = -(used_before + hdr) - 8;
+                            self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
+                            stack_param_stores.push((aligned, off));
+                            stack_param_stores.push((aligned + 8, off + 8));
+                            self.variadic_named_fp += 1;
+                        }
+                    }
                 } else if matches!(&p.ty, Type::Float | Type::Double) && self.target.sse {
                     let used_before = param_used_total;
                     param_used_total += 8;
@@ -1246,11 +1285,16 @@ impl Codegen {
                                     self.gen_imaginary_init(&v.name.name, &inner.base, init);
                                 } else if matches!(
                                     &v.ty,
-                                    Type::Float | Type::Double | Type::LongDouble
+                                    Type::Float | Type::Double | Type::LongDouble | Type::Float128
                                 ) {
                                     self.gen_expr(init, Self::EVAL_BASE);
-                                    // int 常量初始化浮点变量: 先转换到 xmm0 (double x = 1;)
-                                    self.emit_scalar_to_xmm0_if_needed(init, &v.ty);
+                                    if matches!(&v.ty, Type::Float128) {
+                                        // binary128: 归一到 xmm0 的 16 字节通道
+                                        self.emit_to_float128(&init.ty());
+                                    } else {
+                                        // int 常量初始化浮点变量: 先转换到 xmm0 (double x = 1;)
+                                        self.emit_scalar_to_xmm0_if_needed(init, &v.ty);
+                                    }
                                     self.gen_float_store(&v.name.name, &v.ty);
                                 } else if matches!(&v.ty, Type::Int128 | Type::UInt128) {
                                     // P1-4 fix: __int128 变量初始化 (rax=low, rdx=high)
@@ -1300,7 +1344,7 @@ impl Codegen {
                                     let init_ty = init.ty();
                                     if matches!(
                                         &init_ty,
-                                        Type::Float | Type::Double | Type::LongDouble
+                                        Type::Float | Type::Double | Type::LongDouble | Type::Float128
                                     ) && Self::is_integer_type(&v.ty)
                                     {
                                         self.emit_implicit_float_to_int(0, &init_ty, &v.ty);

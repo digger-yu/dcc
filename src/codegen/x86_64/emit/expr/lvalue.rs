@@ -32,7 +32,7 @@ impl Codegen {
         } else {
             self.emit_load_mem_typed(load_size, &load_ty);
         }
-        if dst != 0 && !matches!(load_ty, Type::Float | Type::Double) {
+        if dst != 0 && !self.is_scalar_float_channel_ty(&load_ty) {
             self.mov(dst, 0);
         }
     }
@@ -495,7 +495,9 @@ impl Codegen {
             if let Some(ref f) = field_info {
                 if let Some(bw) = f.bit_width {
                     // 位域读取: 加载容器 → 右移 → 掩码
-                    let container_size = f.ty.size();
+                    // 容器宽度取真实存储单元（可能大于声明类型: 小类型位域被打包进
+                    // 大单元的 高半时），否则只加载低字节再右移会把字段抹成 0。
+                    let container_size = f.bitfield_unit_size();
                     // 加载容器值：自反 ModRM（同一个号既在 reg 又在 r/m）+ rm==4/5
                     // 的 SIB/ disp8 规则，全部收收在 `emit_load_self_typed` 里（单一真源，
                     // 理由见那个入口的注释）。
@@ -622,10 +624,11 @@ impl Codegen {
                     // 不能同时做 GP 加载，否则会把浮点位模式当整数写入 dst，
                     // 后续 mixed-type 比较（如 float > int）会错误地把该
                     // 位模式当作整数值用 cvtsi2ss 转换成浮点数。
-                    if matches!(f.ty, Type::Float | Type::Double | Type::LongDouble) {
+                    if matches!(f.ty, Type::Float | Type::Double | Type::LongDouble | Type::Float128) {
                         // 单一真源：long double 必须 `fld tbyte [dst]`（旧写法
                         // movsd 只读 16 字节槽的低 8 字节，依赖“高 8 字节为 0
                         // 且就是 f64 位型”的旧不变量）。
+                        // binary128 同理：movups 整 16 字节，只读低 8 字节会丢高半。
                         self.emit_seg(seg);
                         self.emit_load_scalar_float_at(&f.ty, dst);
                     } else if matches!(f.ty, Type::Int128 | Type::UInt128) {
@@ -661,8 +664,8 @@ impl Codegen {
                 // 不能同时做 GP 加载，否则会把浮点位模式当整数写入 dst，
                 // 后续 mixed-type 比较（如 float > int）会错误地把该
                 // 位模式当作整数值用 cvtsi2ss 转换成浮点数。
-                if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
-                    // 同上：单一真源，long double 走 `fld tbyte`。
+                if matches!(ty, Type::Float | Type::Double | Type::LongDouble | Type::Float128) {
+                    // 同上：单一真源，long double 走 `fld tbyte`，binary128 走 movups。
                     self.emit_seg(seg);
                     self.emit_load_scalar_float_at(ty, dst);
                 } else if matches!(ty, Type::Int128 | Type::UInt128) {
@@ -728,8 +731,10 @@ impl Codegen {
             // 浮点全局变量加载到 xmm0 (浮点值约定, 同局部变量);
             // 整数路径 emit_global_load 会把 double 装进 GP 寄存器,
             // 与 gen_float_binop 期望的 xmm0 不符 (TLS/普通全局都受影响)
-            if matches!(ty, Type::Float | Type::Double | Type::LongDouble)
-                || matches!(ty, Type::Imaginary(_))
+            if matches!(
+                ty,
+                Type::Float | Type::Double | Type::LongDouble | Type::Float128
+            ) || matches!(ty, Type::Imaginary(_))
             {
                 self.emit_global_float_load(&name.name, ty);
             } else if matches!(ty, Type::Complex(_)) {
@@ -836,7 +841,7 @@ impl Codegen {
             };
             self.emit_xmm0_r13_disp(&[pfx, 0x41, 0x0F, 0x10], result_off);
             self.emit_lea_r13(0, result_off);
-        } else if matches!(ty, Type::Float | Type::Double | Type::LongDouble)
+        } else if matches!(ty, Type::Float | Type::Double | Type::LongDouble | Type::Float128)
             || matches!(ty, Type::Imaginary(_))
         {
             self.gen_float_load(&name.name, ty);

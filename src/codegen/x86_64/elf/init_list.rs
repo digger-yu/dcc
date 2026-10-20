@@ -56,8 +56,6 @@ impl Codegen {
                         if l < f {
                             continue;
                         }
-                        let is_float_elem =
-                            matches!(&elem_ty.base, Type::Float | Type::Double | Type::LongDouble);
                         let mut k = f;
                         while k <= l {
                             while data.len() < k * elem_size {
@@ -84,7 +82,7 @@ impl Codegen {
                                         value,
                                         elem_rel,
                                         elem_size,
-                                        is_float_elem,
+                                        &elem_ty.base,
                                         rodata_slots,
                                     )
                                 }
@@ -93,7 +91,7 @@ impl Codegen {
                                     value,
                                     elem_rel,
                                     elem_size,
-                                    is_float_elem,
+                                    &elem_ty.base,
                                     rodata_slots,
                                 )
                             };
@@ -140,8 +138,6 @@ impl Codegen {
                         let elem_rel = rel.map(|(base, sec)| (base + write_base as u64, sec));
                         self.gen_global_init_list(nested_ty, nested, elem_rel, rodata_slots)
                     } else {
-                        let is_float_elem =
-                            matches!(&elem_ty.base, Type::Float | Type::Double | Type::LongDouble);
                         let elem_rel = rel.map(|(base, sec)| (base + write_base as u64, sec));
                         // 复数元素收到复数常量表达式: 按目标分量编码
                         // (eval_const_expr 通用路径对复数只取虚部)
@@ -163,7 +159,7 @@ impl Codegen {
                                     value,
                                     elem_rel,
                                     elem_size,
-                                    is_float_elem,
+                                    &elem_ty.base,
                                     rodata_slots,
                                 )
                             }
@@ -172,7 +168,7 @@ impl Codegen {
                                 value,
                                 elem_rel,
                                 elem_size,
-                                is_float_elem,
+                                &elem_ty.base,
                                 rodata_slots,
                             )
                         })
@@ -250,8 +246,6 @@ impl Codegen {
                         },
                     };
                     let field_rel = rel.map(|(base, sec)| (base + off as u64, sec));
-                    let is_float_field =
-                        matches!(&field_ty, Some(Type::Float | Type::Double | Type::LongDouble));
                     // 本字段消费的 init item 数 (默认 1)
                     let consumed;
                     // 嵌套初始化列表 ({ { [0 ... N] = v } }): 递归生成字段数据,
@@ -354,7 +348,7 @@ impl Codegen {
                                             value,
                                             field_rel,
                                             sz,
-                                            is_float_field,
+                                            field_ty.as_ref().unwrap_or(&Type::Int),
                                             rodata_slots,
                                         )
                                     }
@@ -363,7 +357,7 @@ impl Codegen {
                                         value,
                                         field_rel,
                                         sz,
-                                        is_float_field,
+                                        field_ty.as_ref().unwrap_or(&Type::Int),
                                         rodata_slots,
                                     )
                                 }
@@ -418,8 +412,6 @@ impl Codegen {
                         InitItem::Expr(e) => e,
                         _ => continue,
                     };
-                    let is_float_elem =
-                        matches!(&elem_ty.base, Type::Float | Type::Double | Type::LongDouble);
                     let elem_rel = rel.map(|(base, sec)| (base + (i * elem_size) as u64, sec));
                     // 复数元素收到复数常量表达式: 按目标分量编码
                     // (eval_const_expr 通用路径对复数只取虚部)
@@ -438,7 +430,7 @@ impl Codegen {
                                 value,
                                 elem_rel,
                                 elem_size,
-                                is_float_elem,
+                                &elem_ty.base,
                                 rodata_slots,
                             )
                         }
@@ -447,7 +439,7 @@ impl Codegen {
                             value,
                             elem_rel,
                             elem_size,
-                            is_float_elem,
+                            &elem_ty.base,
                             rodata_slots,
                         )
                     };
@@ -464,8 +456,8 @@ impl Codegen {
                 let inner_size = inner.size();
                 let total_size = inner_size * 2;
                 data.resize(total_size, 0);
-                let is_float_inner =
-                    matches!(inner.base, Type::Float | Type::Double | Type::LongDouble);
+                // 分量目标类型 = 复数的内型（eval_const_expr 按它选字节编码）
+                let complex_inner_ty: &Type = &inner.base;
 
                 // 收集实部和虚部的初始化表达式
                 let mut real_expr = None;
@@ -500,8 +492,13 @@ impl Codegen {
 
                 // 处理实部
                 if let Some(real_e) = real_expr {
-                    let real_data =
-                        self.eval_const_expr(real_e, rel, inner_size, is_float_inner, rodata_slots);
+                    let real_data = self.eval_const_expr(
+                        real_e,
+                        rel,
+                        inner_size,
+                        complex_inner_ty,
+                        rodata_slots,
+                    );
                     for (j, &b) in real_data.iter().enumerate() {
                         if j < inner_size {
                             data[j] = b;
@@ -516,7 +513,7 @@ impl Codegen {
                         imag_e,
                         imag_rel,
                         inner_size,
-                        is_float_inner,
+                        complex_inner_ty,
                         rodata_slots,
                     );
                     for (j, &b) in imag_data.iter().enumerate() {
@@ -528,13 +525,12 @@ impl Codegen {
             },
             _ => {
                 if let Some(InitItem::Expr(e)) = inits.first() {
-                    let is_float_ty = matches!(ty, Type::Float | Type::Double | Type::LongDouble);
                     if matches!(ty, Type::Ptr(_)) {
                         if let Expr::String { data, .. } = const_eval::unwrap_string_cast(e) {
                             return Some(self.emit_string_ptr_slot(rel, data, rodata_slots));
                         }
                     }
-                    data = self.eval_const_expr(e, rel, ty.size(), is_float_ty, rodata_slots);
+                    data = self.eval_const_expr(e, rel, ty.size(), ty, rodata_slots);
                 }
             },
         }
@@ -560,7 +556,7 @@ impl Codegen {
                 return Some(vaddr.to_le_bytes().to_vec());
             }
         }
-        let is_float = matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
+        let is_float = v.ty.is_real_float();
         match init {
             Expr::String { data, .. } => {
                 // 指针类型 (char *s = "hello"): 字符串字面量应存字符串地址,

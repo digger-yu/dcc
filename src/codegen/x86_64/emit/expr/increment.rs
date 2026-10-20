@@ -391,7 +391,7 @@ impl super::super::super::Codegen {
                                     bw,
                                     f.bit_offset,
                                     f.offset + extra,
-                                    f.ty.size(),
+                                    f.bitfield_unit_size(),
                                     Self::is_signed_int(&f.ty),
                                 )
                             })

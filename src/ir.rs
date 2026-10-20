@@ -21,6 +21,13 @@ pub enum ValueType {
     Float {
         bits: u16,
     },
+    /// IEEE binary128 (`__float128` / `_Float128`)：113 位尾数 + 15 位指数。
+    ///
+    /// 为什么不复用 `Float { bits: 128 }`：x86-64 上 `long double` 是 x87
+    /// 扩展精度（80 位有效数，16 字节槽里只有前 10 字节有效），而 binary128 是
+    /// 严格的 IEEE 128 位格式、走 xmm0 16 字节通道。两者位型与调用约定都不同，
+    /// 塌缩成同一个 `bits: 128` 会让后端无法区分值通道，故单独成变体。
+    Float128,
     Pointer(Box<ValueType>),
     Array(Box<ValueType>, Option<usize>),
     Aggregate {
@@ -440,6 +447,7 @@ fn best_effort_lower_type(ty: &ast::Type) -> ValueType {
         ast::Type::Float => ValueType::Float { bits: 32 },
         ast::Type::Double => ValueType::Float { bits: 64 },
         ast::Type::LongDouble => ValueType::Float { bits: 128 },
+        ast::Type::Float128 => ValueType::Float128,
         ast::Type::Fract => ValueType::Integer {
             bits: 32,
             signed: true,
@@ -789,7 +797,7 @@ const COMPLEX_BINOPS: &[BinOp] = &[
 const COMPLEX_UNOPS: &[UnOp] = &[UnOp::Neg, UnOp::Plus, UnOp::BitNot, UnOp::Not];
 
 fn is_float_ty(ty: &ValueType) -> bool {
-    matches!(ty, ValueType::Float { .. })
+    matches!(ty, ValueType::Float { .. } | ValueType::Float128)
 }
 
 fn is_vector_ty(ty: &ValueType) -> bool {
@@ -821,18 +829,21 @@ fn is_supported_float_cast(from: &ValueType, to: &ValueType) -> bool {
         return true;
     }
     // 浮点到复数的隐式转换
-    if matches!(from, ValueType::Float { .. }) && is_complex_ty(to) {
+    if is_float_ty(from) && is_complex_ty(to) {
         return true;
     }
     // 复数到浮点的转换 (取实部)
-    if is_complex_ty(from) && matches!(to, ValueType::Float { .. }) {
+    if is_complex_ty(from) && is_float_ty(to) {
         return true;
     }
+    // binary128 与 float/double/整数之间的转换全部由 libgcc TFmode 承担，
+    // 与 float/double 的那一族同权（`is_float_ty` 已含 `Float128`）。
     matches!(
         (from, to),
-        (ValueType::Float { .. }, ValueType::Float { .. })
-            | (ValueType::Float { .. }, ValueType::Integer { .. })
-            | (ValueType::Integer { .. }, ValueType::Float { .. })
+        (ValueType::Float { .. } | ValueType::Float128,
+         ValueType::Float { .. } | ValueType::Float128)
+            | (ValueType::Float { .. } | ValueType::Float128, ValueType::Integer { .. })
+            | (ValueType::Integer { .. }, ValueType::Float { .. } | ValueType::Float128)
     )
 }
 
@@ -840,6 +851,7 @@ pub fn value_type_size(ty: &ValueType) -> usize {
     match ty {
         ValueType::Void => 0,
         ValueType::Integer { bits, .. } | ValueType::Float { bits } => (*bits as usize) / 8,
+        ValueType::Float128 => 16,
         ValueType::Pointer(_) | ValueType::Function { .. } => 8,
         ValueType::Array(inner, Some(n)) | ValueType::Vector(inner, n) => {
             value_type_size(inner) * *n
@@ -1124,6 +1136,7 @@ impl ValueType {
             Self::Void => 0,
             Self::Integer { bits, .. } => (*bits as usize).div_ceil(8),
             Self::Float { bits } => (*bits as usize).div_ceil(8),
+            Self::Float128 => 16,
             Self::Pointer(_pointee) => {
                 // On all supported targets, pointers are 8 bytes (64-bit)
                 std::mem::size_of::<usize>()
@@ -1145,6 +1158,7 @@ impl ValueType {
                 let bytes = (*bits as usize).div_ceil(8);
                 bytes.min(8)
             },
+            Self::Float128 => 16,
             Self::Pointer(_) => 8,
             Self::Array(elem, _) => elem.align(),
             Self::Aggregate { .. } => 1,
@@ -1345,6 +1359,7 @@ impl Lowering {
             Type::Float => ValueType::Float { bits: 32 },
             Type::Double => ValueType::Float { bits: 64 },
             Type::LongDouble => ValueType::Float { bits: 128 },
+            Type::Float128 => ValueType::Float128,
             Type::Ptr(inner) => ValueType::Pointer(Box::new(self.lower_type(&inner.base, span))),
             Type::Array(inner, size) => ValueType::Array(
                 Box::new(self.lower_type(&inner.base, span)),

@@ -160,6 +160,10 @@ fn serialize_expr(out: &mut Vec<u8>, e: &TypedExpr) {
                     out.push(2u8);
                     out.extend_from_slice(&b);
                 },
+                crate::ast::FloatConst::Float128(bits) => {
+                    out.push(3u8);
+                    out.extend_from_slice(&bits);
+                },
             }
         },
         None => {
@@ -255,6 +259,9 @@ fn encode_type(out: &mut Vec<u8>, t: &ValueType) {
         ValueType::Float { bits } => {
             out.push(2);
             out.extend_from_slice(&bits.to_le_bytes());
+        },
+        ValueType::Float128 => {
+            out.push(9);
         },
         ValueType::Pointer(inner) => {
             out.push(3);
@@ -494,6 +501,11 @@ fn deserialize_expr(data: &[u8], cur: &mut usize) -> Result<TypedExpr, String> {
                     *cur += 10;
                     crate::ast::FloatConst::LongDouble(b)
                 },
+                3 => {
+                    let b: [u8; 16] = data[*cur..*cur + 16].try_into().unwrap();
+                    *cur += 16;
+                    crate::ast::FloatConst::Float128(b)
+                },
                 _ => return Err("invalid FloatConst variant tag".to_string()),
             };
             Some(ExprLiteral::Float(v))
@@ -535,6 +547,7 @@ fn decode_type(data: &[u8], cur: &mut usize) -> Result<ValueType, String> {
             *cur += 2;
             Ok(ValueType::Float { bits })
         },
+        9 => Ok(ValueType::Float128),
         3 => {
             let inner = decode_type(data, cur)?;
             Ok(ValueType::Pointer(Box::new(inner)))

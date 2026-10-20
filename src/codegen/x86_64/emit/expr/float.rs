@@ -610,6 +610,19 @@ impl Codegen {
         // conversions: the wider float type wins.  For mixed int/float
         // expressions like `a - step`, the float operand's type is used.
         let float_ty = Self::widest_float_type(&l.ty(), &r.ty());
+        // binary128：x87 与 SSE 两条通路都装不下 113 位尾数，整条二元运算
+        // 委托 libgcc TFmode 软浮点（算术与比较都在那里分流）。
+        if matches!(float_ty, Type::Float128) {
+            if matches!(
+                op,
+                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne
+            ) {
+                self.gen_float128_cmp(op, l, r);
+            } else {
+                self.gen_float128_binop(op, l, r);
+            }
+            return;
+        }
         let is_float = matches!(float_ty, Type::Float);
         let is_long_double = matches!(float_ty, Type::LongDouble);
         // x87 通路唯一入口：`long double` 恒走 st(0)，`-mno-sse` 目标下
@@ -958,6 +971,16 @@ impl Codegen {
         );
     }
     pub(crate) fn gen_float_imm_load(&mut self, c: FloatConst, ty: &Type) {
+        // binary128: 16 字节整块落 .rodata。
+        // 必须**先于** x87 判定：x87 只有 80-bit 扩展精度，装不下 113 位尾数，
+        // binary128 在 x87 通道里根本没有表示。
+        //
+        // 也不能走下面的 double 通路 —— `as_f64()` 会把 113 位尾数舍入成 53 位
+        // (丢精度), 且 `movsd` 只搬 8 字节并清零高半 ⇒ 值被截断。
+        if matches!(ty, Type::Float128) {
+            self.gen_float128_imm_load(c);
+            return;
+        }
         // x87 通路（long double 恒真 / -mno-sse）：真 80-bit 常量落 .rodata,
         // 用 `fld tbyte [rip+disp32]` 直接交付在 st(0)。
         if self.float_in_st0(ty) {
@@ -997,6 +1020,55 @@ impl Codegen {
         ));
         self.float_refs.push((at, off));
     }
+
+    /// binary128 字面量 → xmm0（**16 字节整块**）。
+    ///
+    /// 用单条 `movupd xmm0, [rip+disp32]`（`66 0F 10 05 disp32`）一次搬完：
+    /// - 它是 **8 字节**指令且 **disp32 在字节 4** —— 与 `float_refs` 通道
+    ///   硬编码的形状一致（ET_EXEC 的 `resolve()` 与 ET_REL 的 `compile_rel()`
+    ///   都按「8 字节指令、disp32 @ byte 4」修补），无需新增重定位通道。
+    /// - 只改写 xmm0，不碰 xmm1 —— `increment.rs` 的 SSE 路径把「旧值」
+    ///   放在 xmm1 里跨过这次载入。
+    /// - `movupd` 是**非对齐**版本（`movapd` 才要求 16 字节对齐），.rodata
+    ///   里的常量不必对齐。
+    ///
+    /// 不能用 `movups`（`0F 10 05 disp32`，7 字节、disp32 在字节 3），也不
+    /// 能用 `movsd`（只搬 8 字节并清零高半，113 位尾数会被截断）。
+    fn gen_float128_imm_load(&mut self, c: FloatConst) {
+        // 位数组是**小端内存镜像**（见 `crate::float128`），与 x86-64 上
+        // `__float128` 的对象表示一致，可直接落 .rodata。
+        let bytes: Vec<u8> = match c {
+            FloatConst::Float128(bits) => bits.to_vec(),
+            // 非 binary128 的来源：拓宽后落。long double 必须经 `from_f80`
+            // （真 80-bit → binary128 精确拓宽，保留 64 位尾数），不能先 `as_f64`
+            // 降级再 `from_f64` 拓宽 —— 那条路把 80-bit 的 53..63 位尾数抹平。
+            FloatConst::LongDouble(ref b) => crate::float128::from_f80(b).to_vec(),
+            other => crate::float128::from_f64(other.as_f64()).to_vec(),
+        };
+        // 内容键沿用 `"f_" + hex(bytes)` 形态：16 字节 → 32 个十六进制字符，
+        // `rodata_entry_bytes` 的十六进制反推对任意偶数长度都成立，无需改动。
+        let key = format!(
+            "f_{}",
+            bytes
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>()
+        );
+        let key_bytes = key.into_bytes();
+        if !self.string_pool.contains_key(&key_bytes) {
+            let o = self.rodata.len() as u64;
+            self.rodata.extend_from_slice(&bytes);
+            self.string_pool.insert(key_bytes.clone(), o);
+        }
+        let off = self.string_pool[&key_bytes];
+        let at = self.pos();
+        // movupd xmm0, [RIP + disp32]  (66 0F 10 05 disp32)
+        self.emit_insn(&Insn::raw_with_gas(
+            &[0x66, 0x0F, 0x10, 0x05, 0, 0, 0, 0],
+            "movupd 0(%rip), %xmm0",
+        ));
+        self.float_refs.push((at, off));
+    }
     pub(crate) fn gen_float_load(&mut self, name: &str, ty: &Type) {
         // _Imaginary: 按内型取通道，与 gen_float_store 保持一致
         let effective_ty = if let Type::Imaginary(ref inner) = ty {
@@ -1026,6 +1098,11 @@ impl Codegen {
             self.emit_x87_fstp_mem_typed(off, effective_ty);
             return;
         }
+        // binary128: 写完整 16 字节, 不能只写低 8 字节。
+        if matches!(effective_ty, Type::Float128) {
+            self.store_xmm128_stack(0, off);
+            return;
+        }
         let is_float = matches!(effective_ty, Type::Float);
         if is_float {
             // float: movss [r13+off], xmm0 → F3 49 0F 11 45 off
@@ -1037,6 +1114,10 @@ impl Codegen {
         }
     }
     pub(crate) fn gen_float_store_at(&mut self, off: i64, ty: &Type) {
+        if matches!(ty, Type::Float128) {
+            self.store_xmm128_stack(0, off);
+            return;
+        }
         let is_float = matches!(ty, Type::Float);
         let is_ld = matches!(ty, Type::LongDouble);
         if is_ld {
@@ -1088,6 +1169,12 @@ impl Codegen {
             ty.clone()
         };
         let is_float = matches!(effective_ty, Type::Float);
+        // binary128: 整个 16 字节都是有效载荷, movss/movsd 只读 4/8 字节会**静默
+        // 丢掉高半** (高 8 字节的指数/尾数高位)。必须 movups 整槽读回。
+        if matches!(effective_ty, Type::Float128) {
+            self.load_xmm128_stack(xmm, off);
+            return;
+        }
         // `movss/movsd xmm, off(%r13)`：xmm 在 ModRM.reg ⇒ 扩它的是 REX.R，基址 %r13 要
         // REX.B，两个位必须在**同一枚**前缀里。以前这里先 `if xmm>=8 {emit 0x44}` 再
         // 固定发 `0x41`：x86 只认最后一条 REX，于是 0x44 被后面的 0x41 直接覆盖掉，
@@ -1249,12 +1336,29 @@ impl Codegen {
         };
         self.gen_builtin(builtin, &args, dst)
     }
+    /// 二元运算是否该走**浮点**通路（而不是整数通路）。
+    ///
+    /// 单一判据：`float`/`double`/`long double`/`__float128` 任一操作数出现即真。
+    /// 与 `float_in_st0` 分工：那个决定**值通道**（st(0) 还是 xmm0），这个决定
+    /// **是否进入浮点通路**。binary128 虽然走 xmm0，但通路判定必须包含它，
+    /// 否则 `a + b` 会被当成整数加法（实测：`(__float128)2 + (__float128)3.5`
+    /// 按整数算出 5 而不是 5.5）。
+    pub(crate) fn is_scalar_float_binop_ty(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::Float | Type::Double | Type::LongDouble | Type::Float128
+        )
+    }
+
     fn widest_float_type(a: &Type, b: &Type) -> Type {
         let rank = |t: &Type| -> u8 {
             match t {
                 Type::Float => 1,
                 Type::Double => 2,
                 Type::LongDouble => 3,
+                // binary128 比 x87 80-bit 扩展更宽 (尾数 113 vs 64, 指数 15 vs
+                // 15 位但偏置不同), 故秩最高: `ld + f128` 的结果是 f128。
+                Type::Float128 => 4,
                 _ => 0,
             }
         };

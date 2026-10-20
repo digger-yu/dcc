@@ -1669,7 +1669,7 @@ impl Codegen {
                         // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;),
                         // 避免 eval 截断为 int
                         let is_float =
-                            matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
+                            v.ty.is_real_float();
                         if let Some(bytes) = global::global_init_bytes(init, sz, is_float, &v.ty) {
                             self.tdata_section.extend_from_slice(&bytes);
                         }
@@ -1818,7 +1818,7 @@ impl Codegen {
                             _ => {
                                 // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;)
                                 let is_float =
-                                    matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
+                                    v.ty.is_real_float();
                                 if let Some(bytes) =
                                     global::global_init_bytes(init, sz, is_float, &v.ty)
                                 {
@@ -1985,7 +1985,7 @@ impl Codegen {
                             _ => {
                                 // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;)
                                 let is_float =
-                                    matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
+                                    v.ty.is_real_float();
                                 if let Some(bytes) =
                                     global::global_init_bytes(init, sz, is_float, &v.ty)
                                 {
@@ -2181,7 +2181,7 @@ impl Codegen {
                         _ => {
                             // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;)
                             let is_float =
-                                matches!(v.ty, Type::Float | Type::Double | Type::LongDouble);
+                                v.ty.is_real_float();
                             if let Some(bytes) =
                                 global::global_init_bytes(init, sz, is_float, &v.ty)
                             {

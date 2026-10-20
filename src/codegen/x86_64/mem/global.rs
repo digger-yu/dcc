@@ -340,6 +340,19 @@ pub fn global_init_bytes(init: &Expr, sz: usize, is_float: bool, ty: &Type) -> O
     if is_float {
         match const_eval::eval_full(init, false).ok()? {
             const_eval::ConstValue::Float(f) => {
+                // binary128 目标: 16 字节 IEEE quad 位型（113 位尾数）。
+                // 必须与 long double 分开 —— `float_data_bytes` 的 size>=16
+                // 分支给出的是**真 80-bit x87** 编码, 那是 long double 的
+                // 对象表示, 与 binary128 的字节布局完全不同。
+                if matches!(ty, Type::Float128) {
+                    return Some(
+                        crate::codegen::x86_64::Codegen::float128_data_bytes(f, sz),
+                    );
+                }
+                // 目标不是 binary128: 常量先转换到目标精度 —— binary128 的
+                // 16 字节位型写进 long double 槽（x87 80-bit）会被读成垃圾
+                // （`long double g = 1.0q;` 曾因此读回 0.0）。
+                let f = f.coerce_to(ty);
                 // 字节编码交给单一真源 `Codegen::float_data_bytes`。
                 // 旧写法在这里内联发“f64 位型 + 高 8 零”（注释还写着
                 // xmm0-double convention），而读侧在对象表示迁移后已统一
@@ -365,6 +378,14 @@ pub fn global_init_bytes(init: &Expr, sz: usize, is_float: bool, ty: &Type) -> O
                 // sz == 16 → long double (80-bit x87), 必须走 from_int 而非
                 // F64+zero-pad, 否则读侧 fld tbyte 会把 f64 位型当 80-bit
                 // 解析成 garbage long double (960215-1 / align-2 失败的根因).
+                if matches!(ty, Type::Float128) {
+                    // binary128 目标: 与 long double 同为 16 字节, 但对象表示
+                    // 不同, 只能靠**类型**区分（size 无法区分）。
+                    return Some(crate::codegen::x86_64::Codegen::float128_data_bytes(
+                        FloatConst::from_int(&Type::Float128, v),
+                        sz,
+                    ));
+                }
                 if sz == 32 {
                     // _Complex long double 实部源为整型：精确 RNE 转换 +
                     // LongDouble 精度零虚部。

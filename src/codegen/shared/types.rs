@@ -119,7 +119,9 @@ impl TypePromotionEngine {
             | Type::Int128
             | Type::UInt128
             | Type::Bool => TypeClass::Integer,
-            Type::Float | Type::Double | Type::LongDouble => TypeClass::FloatingPoint,
+            Type::Float | Type::Double | Type::LongDouble | Type::Float128 => {
+                TypeClass::FloatingPoint
+            },
             Type::Vector(..) => TypeClass::Vector,
             Type::Ptr(..) => TypeClass::Pointer,
             Type::Struct(..) => TypeClass::Struct,

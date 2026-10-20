@@ -189,6 +189,29 @@ impl Codegen {
                 }
             }
         }
+        // ── binary128 转换（单一真源）───────────────────────────────────────
+        // `__float128` 的值通道是 xmm0 的 16 字节，与任何其它浮点类型都不共
+        // 通道：x87 只有 80 位、SSE 只有 64 位，都装不下 113 位尾数。因此只要
+        // 源或目标之一是 Float128，整条转换就在这里一次完成 —— 由
+        // `emit_to_float128` 归一到 xmm0、再由 `emit_from_float128` 落到目标
+        // 通道，中间不经过任何中间格式（避免双重舍入）。
+        //
+        // 必须排在 `gen_same_size_bitcast` **之前**：Float128 与 LongDouble
+        // 同为 16 字节，否则会被当成同宽位重铸直接memcpy，把 x87 80-bit 的
+        // 位型当成 binary128 读出（静默垃圾）。
+        if matches!(src_ty, Type::Float128) || matches!(ty, Type::Float128) {
+            self.gen_expr(e, dst);
+            self.emit_to_float128(&src_ty);
+            self.emit_from_float128(ty);
+            // 整数结果落在 rax；若调用方要的是别的 GP 寄存器，搬过去。
+            // 浮点结果恒在 xmm0 / st(0)，与 `dst` 无关。
+            if dst != 0
+                && !matches!(ty, Type::Float128 | Type::Float | Type::Double | Type::LongDouble)
+            {
+                self.mov(dst, 0);
+            }
+            return;
+        }
         if self.gen_same_size_bitcast(e, ty, dst) {
             return;
         }

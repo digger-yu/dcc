@@ -51,7 +51,7 @@ impl Codegen {
     /// 单一判据：帧访问出口用它决定“要不要把 rax 里的整数值搬回 dst”。
     pub fn is_scalar_float_channel_ty(&self, ty: &Type) -> bool {
         match ty {
-            Type::Float | Type::Double | Type::LongDouble => true,
+            Type::Float | Type::Double | Type::LongDouble | Type::Float128 => true,
             // P4 V4: imaginary 内型按内型判。
             Type::Imaginary(inner) => self.is_scalar_float_channel_ty(&inner.base),
             _ => false,
@@ -331,6 +331,13 @@ impl Codegen {
             self.emit_x87_fld_at(base, 0, ty); // fld tbyte / qword / dword [base]
             return;
         }
+        // binary128: 16 字节都是有效载荷, movss/movsd 只读 4/8 字节会**静默丢高半**
+        // (指数/尾数高位)。间接 lvalue(成员/数组元素)读取须整槽 movups 回 xmm0,
+        // 与直接变量路径 `load_xmm128_stack` 同构。
+        if matches!(ty, Type::Float128) {
+            self.emit_insn(&Insn::simd_mov_mem_base(false, SimdWidth::PS, 0, base, 0)); // movups xmm0, [base]
+            return;
+        }
         let pfx: u8 = if matches!(ty, Type::Float) { 0xF3 } else { 0xF2 };
         // 把整条指令拼成**一条** raw_with_gas 发射（否则 REX/操作码/ModRM 各自落 record,
         // gas_len_map 只给到首段长度, 后续 pos 漂移 → 后续指令全部 fallback/错位).
@@ -372,6 +379,17 @@ impl Codegen {
         if self.float_in_st0(dst_ty) {
             self.emit_operand_to_st0(src_ty, 0); // 整数 / f32 / f64 → st(0)（精确拓宽）
             self.emit_x87_fstp_at(base, 0, dst_ty);
+            return;
+        }
+        // binary128 目标: 完整 16 字节落 [base]。值通道是 xmm0 的整 16 字节, 若源是
+        // 别的通道(整数在 rax / f32/f64 在 xmm0 低半 / long double 在 st0)须先归一到
+        // xmm0 的 binary128, 再 movups 整体存。漏这条时 f128 成员/元素会被当 __int128
+        // 从 rax:rdx 存(rax/rdx 是垃圾), 或只 movsd 存低 8 字节丢高半。
+        if matches!(dst_ty, Type::Float128) {
+            if !matches!(src_ty, Type::Float128) {
+                self.emit_to_float128(src_ty);
+            }
+            self.emit_insn(&Insn::simd_mov_mem_base(true, SimdWidth::PS, 0, base, 0)); // movups [base], xmm0
             return;
         }
         // 目标在 xmm 通道：源若落在 st(0)（long double 表达式，或 -mno-sse 目标），
@@ -989,6 +1007,9 @@ impl Codegen {
                     f.to_le_bytes().to_vec()
                 }
             },
+            // binary128 不会走 x87 通道（值通道是 xmm0），到达这里只能是被当作
+            // 80-bit 解释的错误用法；退回 80-bit 零，避免编译崩溃。
+            crate::ast::FloatConst::Float128(_) => vec![0; if is_ld { 10 } else { 8 }],
         };
         let key = format!(
             "x87f_{}",

@@ -19,6 +19,22 @@ use crate::semantics::{self, *};
 use crate::target::Target;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+
+/// libm 转发的**通道**: 决定实参/返回值落在哪个寄存器、占多宽。
+///
+/// `__builtin_<stem><后缀>` 按精度后缀转发到 glibc 的同名函数；不同精度的
+/// 通道不同，不能只换一个符号名了事。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LibmChan {
+    /// double: 实参/返回值在 xmm（**8 字节**，movsd）。
+    Sse,
+    /// long double (x87 80-bit): 实参/返回值在 st(0)。
+    X87,
+    /// binary128: 实参/返回值在 xmm（**16 字节**，movups，一个 xmm 寄存器
+    /// 装下整个 binary128 —— SysV 分类 `[Sse, SseUp]`）。
+    Sse128,
+}
+
 impl Codegen {
     fn emit_atomic_xadd(&mut self, sz: usize) {
         match sz {
@@ -1046,7 +1062,7 @@ impl Codegen {
     ///
     /// 仅识别宽度后缀 (f16/f32/f32x/f64/f64x/f128/f128x); 传统 f/l 后缀已由
     /// gen_builtin 的显式分支覆盖. 顺序敏感: 长后缀须先于其短前缀匹配.
-    fn float_builtin_libm(name: &str) -> Option<(String, bool)> {
+    fn float_builtin_libm(name: &str) -> Option<(String, LibmChan)> {
         let n = name.strip_prefix("__builtin_")?;
         // 比较/谓词类: 不是真实 libm 函数, 不转发 (避免链接期找不到符号).
         let is_cmp = matches!(
@@ -1059,20 +1075,25 @@ impl Codegen {
                 | "iseqsig"
                 | "signbit"
         );
-        let (stem, libm_suffix, is_ld) = if let Some(s) = n.strip_suffix("f16") {
-            (s, "f", false)
+        // binary128 (`f128`/`f128x`) 转发到 glibc 的 `<stem>f128` 族
+        // (如 `__builtin_acosf128` → `acosf128`)，通道是 **16 字节 xmm**。
+        // 旧值是 "l"（long double）：glibc 没有 `acosl128` 这种符号，且
+        // long double 是 x87 st(0) 通道，与 binary128 的 xmm 16 字节通道
+        // 完全不同 —— 符号名和通道必须一起改。
+        let (stem, libm_suffix, chan) = if let Some(s) = n.strip_suffix("f16") {
+            (s, "f", LibmChan::Sse)
         } else if let Some(s) = n.strip_suffix("f32x") {
-            (s, "", false)
+            (s, "", LibmChan::Sse)
         } else if let Some(s) = n.strip_suffix("f128x") {
-            (s, "l", true)
+            (s, "f128", LibmChan::Sse128)
         } else if let Some(s) = n.strip_suffix("f32") {
-            (s, "f", false)
+            (s, "f", LibmChan::Sse)
         } else if let Some(s) = n.strip_suffix("f64x") {
-            (s, "l", true)
+            (s, "l", LibmChan::X87)
         } else if let Some(s) = n.strip_suffix("f128") {
-            (s, "l", true)
+            (s, "f128", LibmChan::Sse128)
         } else if let Some(s) = n.strip_suffix("f64") {
-            (s, "", false)
+            (s, "", LibmChan::Sse)
         } else {
             return None;
         };
@@ -1080,7 +1101,7 @@ impl Codegen {
             return None;
         }
         let libm = format!("{}{}", stem, libm_suffix);
-        Some((libm, is_ld))
+        Some((libm, chan))
     }
 
     pub(crate) fn gen_builtin(&mut self, name: &str, args: &[Expr], dst: u8) -> bool {
@@ -2200,45 +2221,54 @@ impl Codegen {
             | "__builtin_inff"
             | "__builtin_infl"
             | "__builtin_inff16" | "__builtin_inff32" | "__builtin_inff32x"
-            | "__builtin_inff64" | "__builtin_inff64x" | "__builtin_inff128" | "__builtin_inff128x" => {
-                let (is_float, bytes) = match name {
+            | "__builtin_inff64" | "__builtin_inff64x" | "__builtin_inff128" | "__builtin_inff128x"
+            | "__builtin_infq" | "__builtin_huge_valq" => {
+                // 宽度: 4=单精度, 8=双精度/long double 近似, 16=binary128。
+                let (width, bytes) = match name {
                     "__builtin_huge_valf" | "__builtin_inff"
                     | "__builtin_huge_valf16" | "__builtin_huge_valf32"
                     | "__builtin_inff16" | "__builtin_inff32" => {
-                        (true, 0x7F800000u32.to_le_bytes().to_vec())
+                        (4u8, 0x7F800000u32.to_le_bytes().to_vec())
                     },
-                    "__builtin_huge_vall" | "__builtin_infl"
-                    | "__builtin_huge_valf32x" | "__builtin_huge_valf64" | "__builtin_huge_valf64x"
-                    | "__builtin_huge_valf128" | "__builtin_huge_valf128x"
-                    | "__builtin_inff32x" | "__builtin_inff64" | "__builtin_inff64x"
-                    | "__builtin_inff128" | "__builtin_inff128x" => {
-                        // long double: dcc 用 8 字节近似, 加载 0 进入 xmm0 (近似 +Inf)
-                        (false, 0x7FF0000000000000u64.to_le_bytes().to_vec())
+                    // binary128 +Inf: 0x7FFF_0000_0000_0000_0000_0000_0000_0000
+                    "__builtin_huge_valf128" | "__builtin_huge_valf128x"
+                    | "__builtin_inff128" | "__builtin_inff128x"
+                    | "__builtin_infq" | "__builtin_huge_valq" => {
+                        let mut b = [0u8; 16];
+                        b[8..16].copy_from_slice(&0x7FFF_0000_0000_0000u64.to_le_bytes());
+                        (16u8, b.to_vec())
                     },
-                    _ => (false, 0x7FF0000000000000u64.to_le_bytes().to_vec()),
+                    _ => (8u8, 0x7FF0000000000000u64.to_le_bytes().to_vec()),
                 };
-                let off = self.rodata.len() as u64;
-                self.rodata.extend_from_slice(&bytes);
-                // movss/movsd xmm0, [rip+disp32]: 8 字节指令
-                //   F3 0F 10 05 disp32 (movss, 4 字节) 或
-                //   F2 0F 10 05 disp32 (movsd, 8 字节)
-                // disp32 在 code_pos+4, 加 REX 不需要 (xmm0 < 8).
-                let width = if is_float { SimdWidth::SS } else { SimdWidth::SD };
-                let code_pos = self.pos();
-                self.emit_insn(&Insn::simd_mov_rip(false, width, 0));
-                // 结果在 xmm0. 若调用方 dst 不是 0, 移动到 dst.
-                if dst != 0 {
-                    // dst 应当是 x86 通用寄存器. 使用 movsd/movss 拷贝.
-                    if is_float {
-                        self.emit_insn(&Insn::movss_xmm_store(dst, 0));
-                    } else {
-                        self.emit_insn(&Insn::movsd_xmm_store(dst, 0));
+                if width == 16 {
+                    // binary128: 完整 16 字节常量装进 xmm0 (值通道就是 xmm0 的
+                    // 16 字节, GP 寄存器装不下, 也不需要再拷一份)。
+                    let mut b = [0u8; 16];
+                    b.copy_from_slice(&bytes);
+                    self.emit_f128_const_rip(&b);
+                } else {
+                    let off = self.rodata.len() as u64;
+                    self.rodata.extend_from_slice(&bytes);
+                    // movss/movsd xmm0, [rip+disp32]: 8 字节指令
+                    //   F3 0F 10 05 disp32 (movss, 4 字节) 或
+                    //   F2 0F 10 05 disp32 (movsd, 8 字节)
+                    // disp32 在 code_pos+4, 加 REX 不需要 (xmm0 < 8).
+                    let w = if width == 4 { SimdWidth::SS } else { SimdWidth::SD };
+                    let code_pos = self.pos();
+                    self.emit_insn(&Insn::simd_mov_rip(false, w, 0));
+                    // 结果在 xmm0. 若调用方 dst 不是 0, 移动到 dst.
+                    if dst != 0 {
+                        if width == 4 {
+                            self.emit_insn(&Insn::movss_xmm_store(dst, 0));
+                        } else {
+                            self.emit_insn(&Insn::movsd_xmm_store(dst, 0));
+                        }
                     }
+                    // 走 float_refs 通道: ET_EXEC resolve() 直接按下一条 RIP
+                    // 回填 disp32; ET_REL 则由 compile_rel 使用 PC32 addend
+                    // off - 4, 因为重定位位置 P 是 disp32 字段而非下一条 RIP。
+                    self.float_refs.push((code_pos, off));
                 }
-                // 走 float_refs 通道: ET_EXEC resolve() 直接按下一条 RIP
-                // 回填 disp32; ET_REL 则由 compile_rel 使用 PC32 addend
-                // off - 4, 因为重定位位置 P 是 disp32 字段而非下一条 RIP。
-                self.float_refs.push((code_pos, off));
                 true
             },
             // __builtin_nan / nanf / nanl: 静默 NaN (quiet NaN).
@@ -2249,30 +2279,44 @@ impl Codegen {
             //   long double: 0x7FFF_C000_0000_0000_0000 (dcc 8 字节近似)
             // emit 8 字节 movsd/movss xmm0, [rip+disp32], disp32 在 code_pos+4.
             "__builtin_nan" | "__builtin_nanf" | "__builtin_nanl"
+            | "__builtin_nanq"
             | "__builtin_nanf16" | "__builtin_nanf32" | "__builtin_nanf32x"
             | "__builtin_nanf64" | "__builtin_nanf64x" | "__builtin_nanf128" | "__builtin_nanf128x" => {
-                let (is_float, bytes) = match name {
+                // 宽度: 4=单精度, 8=双精度/long double 近似, 16=binary128。
+                let (width, bytes) = match name {
                     "__builtin_nanf"
-                    | "__builtin_nanf16" | "__builtin_nanf32" => (true, 0x7FC00000u32.to_le_bytes().to_vec()),
-                    "__builtin_nanl"
-                    | "__builtin_nanf32x" | "__builtin_nanf64" | "__builtin_nanf64x"
-                    | "__builtin_nanf128" | "__builtin_nanf128x" => (false, 0x7FF8000000000000u64.to_le_bytes().to_vec()),
-                    _ => (false, 0x7FF8000000000000u64.to_le_bytes().to_vec()),
+                    | "__builtin_nanf16" | "__builtin_nanf32" => {
+                        (4u8, 0x7FC00000u32.to_le_bytes().to_vec())
+                    },
+                    // binary128 qNaN: 0x7FFF_8000_0000_0000_0000_0000_0000_0000
+                    // (尾数最高位为 1 ⇒ 安静 NaN)
+                    "__builtin_nanq" | "__builtin_nanf128" | "__builtin_nanf128x" => {
+                        let mut b = [0u8; 16];
+                        b[8..16].copy_from_slice(&0x7FFF_8000_0000_0000u64.to_le_bytes());
+                        (16u8, b.to_vec())
+                    },
+                    _ => (8u8, 0x7FF8000000000000u64.to_le_bytes().to_vec()),
                 };
-                let off = self.rodata.len() as u64;
-                self.rodata.extend_from_slice(&bytes);
-                let width = if is_float { SimdWidth::SS } else { SimdWidth::SD };
-                let code_pos = self.pos();
-                self.emit_insn(&Insn::simd_mov_rip(false, width, 0));
-                if dst != 0 {
-                    if is_float {
-                        self.emit_insn(&Insn::movss_xmm_store(dst, 0));
-                    } else {
-                        self.emit_insn(&Insn::movsd_xmm_store(dst, 0));
+                if width == 16 {
+                    let mut b = [0u8; 16];
+                    b.copy_from_slice(&bytes);
+                    self.emit_f128_const_rip(&b);
+                } else {
+                    let off = self.rodata.len() as u64;
+                    self.rodata.extend_from_slice(&bytes);
+                    let w = if width == 4 { SimdWidth::SS } else { SimdWidth::SD };
+                    let code_pos = self.pos();
+                    self.emit_insn(&Insn::simd_mov_rip(false, w, 0));
+                    if dst != 0 {
+                        if width == 4 {
+                            self.emit_insn(&Insn::movss_xmm_store(dst, 0));
+                        } else {
+                            self.emit_insn(&Insn::movsd_xmm_store(dst, 0));
+                        }
                     }
+                    // 走 float_refs 通道 (同 __builtin_huge_val 实现)
+                    self.float_refs.push((code_pos, off));
                 }
-                // 走 float_refs 通道 (同 __builtin_huge_val 实现)
-                self.float_refs.push((code_pos, off));
                 true
             },
             // __builtin_isnan / isnanf / isnanl: NaN 检测.
@@ -2302,6 +2346,18 @@ impl Codegen {
                         0,
                         0,
                     )); // movzx rax, al
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
+                    return true;
+                }
+                // binary128: 值在 xmm0 的**完整 16 字节**里, 走 binary128 位型判据
+                // (SSE 侧那套 movq rax,xmm0 只读到低 64 位, 判据全错)。
+                if matches!(arg_ty, Type::Float128) {
+                    self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x (16 字节)
+                    self.emit_to_float128(&arg_ty);
+                    self.emit_f128_split();
+                    self.gen_f128_bit_predicate(0); // isnan
                     if dst != 0 {
                         self.mov(dst, 0);
                     }
@@ -2372,6 +2428,17 @@ impl Codegen {
                     }
                     return true;
                 }
+                // binary128: 指数 15 位 (bias 16383), 判据见 gen_f128_bit_predicate。
+                if matches!(arg_ty, Type::Float128) {
+                    self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x (16 字节)
+                    self.emit_to_float128(&arg_ty);
+                    self.emit_f128_split();
+                    self.gen_f128_bit_predicate(3); // isnormal
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
+                    return true;
+                }
 
                 let is_f = matches!(arg_ty, Type::Float);
                 self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x
@@ -2434,6 +2501,17 @@ impl Codegen {
                 if matches!(arg_ty, Type::LongDouble) {
                     self.gen_ld_arg_bits(&args[0]);
                     self.gen_ld_bit_predicate(1); // isinf (±1)
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
+                    return true;
+                }
+                // binary128: 指数全 1 ∧ 尾数全零 ⇒ ±Inf (按符号返回 ±1)。
+                if matches!(arg_ty, Type::Float128) {
+                    self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x (16 字节)
+                    self.emit_to_float128(&arg_ty);
+                    self.emit_f128_split();
+                    self.gen_f128_bit_predicate(1); // isinf (±1)
                     if dst != 0 {
                         self.mov(dst, 0);
                     }
@@ -2714,6 +2792,29 @@ impl Codegen {
             | "__builtin_isunorderedf64" | "__builtin_isunorderedf64x" | "__builtin_isunorderedf128" | "__builtin_isunorderedf128x" => {
                 if args.len() < 2 {
                     self.mov_imm(dst, 0);
+                    return true;
+                }
+                // binary128: 走 libgcc 的 __lttf2 —— 实测**无序时返回 2**
+                // (有序时 a<b→-1, a==b→0, a>b→1), 2 是无序的唯一取值。
+                if matches!(args[0].ty(), Type::Float128)
+                    || matches!(args[1].ty(), Type::Float128)
+                {
+                    self.gen_float128_cmp2("__lttf2", &args[0], &args[1]);
+                    self.emit_insn(&Insn::alu_rm_reg_imm32_b64(7, 0, 2)); // cmp rax, 2
+                    self.emit_insn(&Insn::setcc_reg(
+                        crate::codegen::x86_64::opcode::CondCode::Eq,
+                        0,
+                    )); // sete al
+                    self.emit_insn(&Insn::mov_ext(
+                        false,
+                        crate::codegen::shared::asm_operand::Width::B8,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        0,
+                        0,
+                    )); // movzx rax, al
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
                     return true;
                 }
                 // long double: 两操作数进 st(0)/st(1), fcomip 后 PF=1 ⇔ 无序。
@@ -3028,6 +3129,18 @@ impl Codegen {
                 let arg_ty = args[0].ty();
                 let is_f = matches!(arg_ty, Type::Float);
                 let is_ld = matches!(arg_ty, Type::LongDouble);
+                // binary128: 符号位在**高** 64 位的最高位 (位 127), movmskps 只看
+                // 低 64 位, 对 binary128 完全无效 ⇒ 走 binary128 位型判据。
+                if matches!(arg_ty, Type::Float128) {
+                    self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x (16 字节)
+                    self.emit_to_float128(&arg_ty);
+                    self.emit_f128_split();
+                    self.gen_f128_bit_predicate(4); // signbit
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
+                    return true;
+                }
                 if is_ld {
                     // long double: 80-bit x87, rvalue 交付在 st(0), 符号位在 80-bit
                     // 最高字节 (第 9 字节) 的 bit 7. 把 st(0) 弹出到栈上 16 字节
@@ -6586,6 +6699,17 @@ impl Codegen {
                     }
                     return true;
                 }
+                // binary128: 指数全 1 ⇒ inf/nan, 否则有限。
+                if matches!(arg_ty, Type::Float128) {
+                    self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = x (16 字节)
+                    self.emit_to_float128(&arg_ty);
+                    self.emit_f128_split();
+                    self.gen_f128_bit_predicate(2); // isfinite
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
+                    return true;
+                }
 
                 let is_f = matches!(arg_ty, Type::Float);
                 self.gen_expr(&args[0], Self::EVAL_BASE);
@@ -6673,6 +6797,87 @@ impl Codegen {
             | "__builtin_islessgreater" => {
                 if args.len() < 2 {
                     self.mov_imm(dst, 0);
+                    return true;
+                }
+                // binary128: 走 libgcc 的 TFmode 比较例程。返回码约定 (实测):
+                //   __lttf2/__letf2: a<b→-1, a==b→0, a>b→1, **无序→2**
+                //   __gttf2/__getf2: a<b→-1, a==b→0, a>b→1, **无序→-2**
+                // C 的 is* 谓词在任一为 NaN 时必须为 0, 所以用返回码的符号/取值
+                // 把无序那一档筛掉 (无序的返回值在 lt 侧是 2、gt 侧是 -2)。
+                if matches!(args[0].ty(), Type::Float128)
+                    || matches!(args[1].ty(), Type::Float128)
+                {
+                    let is_llg = name == "__builtin_islessgreater";
+                    let (rname, cc, imm) = match name {
+                        // a > b ⇔ __gttf2 == 1 (无序为 -2) ⇒ ret > 0
+                        "__builtin_isgreater" => (
+                            "__gttf2",
+                            crate::codegen::x86_64::opcode::CondCode::Gt,
+                            0i64,
+                        ),
+                        // a >= b ⇔ __getf2 ∈ {0,1} (无序为 -2) ⇒ ret >= 0
+                        "__builtin_isgreaterequal" => (
+                            "__getf2",
+                            crate::codegen::x86_64::opcode::CondCode::Ge,
+                            0i64,
+                        ),
+                        // a < b ⇔ __lttf2 == -1 (无序为 2) ⇒ ret < 0
+                        "__builtin_isless" => (
+                            "__lttf2",
+                            crate::codegen::x86_64::opcode::CondCode::Lt,
+                            0i64,
+                        ),
+                        // a <= b ⇔ __letf2 ∈ {-1,0} (无序为 2) ⇒ ret < 1
+                        "__builtin_islessequal" => (
+                            "__letf2",
+                            crate::codegen::x86_64::opcode::CondCode::Lt,
+                            1i64,
+                        ),
+                        _ => (
+                            "__lttf2",
+                            crate::codegen::x86_64::opcode::CondCode::Ne,
+                            0i64,
+                        ),
+                    };
+                    self.gen_float128_cmp2(rname, &args[0], &args[1]);
+                    if is_llg {
+                        // islessgreater = (a<b)||(a>b) ⇒ ret ∈ {-1,1}:
+                        // 排除 0 (相等) 与 2 (无序)。
+                        //
+                        // 两次 setcc 必须都写**低字节寄存器** (bl / al), 不能让
+                        // 第一步碰 rax 本身 —— `setne al` 会把 rax 的低字节改成 1,
+                        // 随后的 `cmp rax, 2` 拿到的就不再是 libgcc 的返回码 2,
+                        // 无序会被误判成「有大小关系」(实测 islessgreater(0,nan)=1)。
+                        self.emit_insn(&Insn::alu_rm_reg_imm32_b64(7, 0, 0)); // cmp rax, 0
+                        self.emit_insn(&Insn::setcc_reg(
+                            crate::codegen::x86_64::opcode::CondCode::Ne,
+                            3,
+                        )); // setne bl
+                        self.emit_insn(&Insn::alu_rm_reg_imm32_b64(7, 0, 2)); // cmp rax, 2
+                        self.emit_insn(&Insn::setcc_reg(
+                            crate::codegen::x86_64::opcode::CondCode::Ne,
+                            0,
+                        )); // setne al
+                        self.emit_insn(&Insn::alu_rm_reg_reg(
+                            crate::codegen::x86_64::opcode::AluOp::And,
+                            crate::codegen::shared::asm_operand::Width::B8,
+                            0,
+                            3,
+                        )); // and al, bl
+                    } else {
+                        self.emit_insn(&Insn::alu_rm_reg_imm32_b64(7, 0, imm)); // cmp rax, imm
+                        self.emit_insn(&Insn::setcc_reg(cc, 0)); // setcc al
+                    }
+                    self.emit_insn(&Insn::mov_ext(
+                        false,
+                        crate::codegen::shared::asm_operand::Width::B8,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                        0,
+                        0,
+                    )); // movzx rax, al
+                    if dst != 0 {
+                        self.mov(dst, 0);
+                    }
                     return true;
                 }
                 // long double 在 st(0), 走 x87 fucomip + 标志翻译 (emit_x87_setcc_flags 已按无序
@@ -6843,33 +7048,44 @@ impl Codegen {
             //   binary64 sNaN : 0x7FF0_0000_0000_0001
             //   long double   : 8 字节近似 (与 __builtin_nanl 同一表示)
             "__builtin_nans" | "__builtin_nansf" | "__builtin_nansl"
+            | "__builtin_nansq"
             | "__builtin_nansf16" | "__builtin_nansf32" | "__builtin_nansf32x"
             | "__builtin_nansf64" | "__builtin_nansf64x" | "__builtin_nansf128"
             | "__builtin_nansf128x" => {
-                let (is_float, bytes) = match name {
+                // 宽度: 4=单精度, 8=双精度/long double 近似, 16=binary128。
+                let (width, bytes) = match name {
                     "__builtin_nansf" | "__builtin_nansf16" | "__builtin_nansf32" => {
-                        (true, 0x7F80_0001u32.to_le_bytes().to_vec())
+                        (4u8, 0x7F80_0001u32.to_le_bytes().to_vec())
                     },
-                    _ => (false, 0x7FF0_0000_0000_0001u64.to_le_bytes().to_vec()),
+                    // binary128 sNaN: 0x7FFF_4000_0000_0000_0000_0000_0000_0000
+                    // (尾数最高位为 0 ⇒ 信令 NaN)
+                    "__builtin_nansq" | "__builtin_nansf128" | "__builtin_nansf128x" => {
+                        let mut b = [0u8; 16];
+                        b[8..16].copy_from_slice(&0x7FFF_4000_0000_0000u64.to_le_bytes());
+                        (16u8, b.to_vec())
+                    },
+                    _ => (8u8, 0x7FF0_0000_0000_0001u64.to_le_bytes().to_vec()),
                 };
-                let off = self.rodata.len() as u64;
-                self.rodata.extend_from_slice(&bytes);
-                let width = if is_float {
-                    SimdWidth::SS
+                if width == 16 {
+                    let mut b = [0u8; 16];
+                    b.copy_from_slice(&bytes);
+                    self.emit_f128_const_rip(&b);
                 } else {
-                    SimdWidth::SD
-                };
-                let code_pos = self.pos();
-                self.emit_insn(&Insn::simd_mov_rip(false, width, 0));
-                if dst != 0 {
-                    if is_float {
-                        self.emit_insn(&Insn::movss_xmm_store(dst, 0));
-                    } else {
-                        self.emit_insn(&Insn::movsd_xmm_store(dst, 0));
+                    let off = self.rodata.len() as u64;
+                    self.rodata.extend_from_slice(&bytes);
+                    let w = if width == 4 { SimdWidth::SS } else { SimdWidth::SD };
+                    let code_pos = self.pos();
+                    self.emit_insn(&Insn::simd_mov_rip(false, w, 0));
+                    if dst != 0 {
+                        if width == 4 {
+                            self.emit_insn(&Insn::movss_xmm_store(dst, 0));
+                        } else {
+                            self.emit_insn(&Insn::movsd_xmm_store(dst, 0));
+                        }
                     }
+                    // 走 float_refs 通道 (同 __builtin_nan* 实现)
+                    self.float_refs.push((code_pos, off));
                 }
-                // 走 float_refs 通道 (同 __builtin_nan* 实现)
-                self.float_refs.push((code_pos, off));
                 true
             },
             // __builtin_fmin: inline SSE minsd (double)
@@ -7186,9 +7402,9 @@ impl Codegen {
                     // 后缀 libm 名: double 实参经 gen_expr 忽略 GP 目标仍落 xmm0,
                     // 多浮点参数互相 clobber、xmm1 永不设置且精度错 (powf64(2,10)
                     // 算成 pow(10,10))。
-                    if let Some((libm, is_ld)) = Self::float_builtin_libm(name) {
+                    if let Some((libm, chan)) = Self::float_builtin_libm(name) {
                         self.emit_sysv_call(Some(&libm), None, args, None);
-                        if dst != 0 && !is_ld {
+                        if dst != 0 && chan == LibmChan::Sse {
                             self.mov(dst, 0);
                         }
                     }
@@ -7610,21 +7826,41 @@ impl Codegen {
             // pow(10,10) 这类参数错乱 (floatN-builtin.c 的 copysign/pow 断言)。
             // long double 走 st(0) 通道, 仍交给 emit_sysv_call。
             _ => {
-                if let Some((libm, is_ld)) = Self::float_builtin_libm(name) {
-                    if is_ld {
-                        self.emit_sysv_call(Some(&libm), None, args, None);
-                    } else {
-                        let n = args.len().min(8);
-                        for i in (1..n).rev() {
-                            self.gen_expr(&args[i], Self::EVAL_BASE); // xmm0 = arg[i]
-                            self.emit_insn(&Insn::movsd_xmm(i as u8, 0)); // xmm[i] = xmm0
-                        }
-                        if n > 0 {
-                            self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = arg0
-                        }
-                        self.call_label(&libm);
+                if let Some((libm, chan)) = Self::float_builtin_libm(name) {
+                    match chan {
+                        LibmChan::X87 => {
+                            self.emit_sysv_call(Some(&libm), None, args, None);
+                        },
+                        LibmChan::Sse128 => {
+                            // binary128: 每个实参占**一个** xmm 寄存器的全部
+                            // 16 字节 (SysV 分类 [Sse, SseUp])。实参先归一到
+                            // binary128 —— 窄类型要经 `__extend*tf2` 拓宽,
+                            // 否则 xmm 的高 8 字节是垃圾。
+                            let n = args.len().min(8);
+                            for i in (1..n).rev() {
+                                self.gen_expr(&args[i], Self::EVAL_BASE); // xmm0 = arg[i]
+                                self.emit_to_float128(&args[i].ty());
+                                self.emit_insn(&Insn::movaps_xmm(i as u8, 0)); // xmm[i] = xmm0
+                            }
+                            if n > 0 {
+                                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = arg0
+                                self.emit_to_float128(&args[0].ty());
+                            }
+                            self.call_label(&libm);
+                        },
+                        LibmChan::Sse => {
+                            let n = args.len().min(8);
+                            for i in (1..n).rev() {
+                                self.gen_expr(&args[i], Self::EVAL_BASE); // xmm0 = arg[i]
+                                self.emit_insn(&Insn::movsd_xmm(i as u8, 0)); // xmm[i] = xmm0
+                            }
+                            if n > 0 {
+                                self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = arg0
+                            }
+                            self.call_label(&libm);
+                        },
                     }
-                    if dst != 0 && !is_ld {
+                    if dst != 0 && chan == LibmChan::Sse {
                         self.mov(dst, 0);
                     }
                     true

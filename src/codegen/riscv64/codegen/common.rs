@@ -86,7 +86,7 @@ pub(crate) fn trunc_i32(v: i128) -> u32 {
 }
 
 pub(crate) fn is_float_ty(ty: &ValueType) -> bool {
-    matches!(ty, ValueType::Float { .. })
+    matches!(ty, ValueType::Float { .. } | ValueType::Float128)
 }
 
 pub(crate) fn is_vector_ty(ty: &ValueType) -> bool {
@@ -120,6 +120,7 @@ pub(crate) fn value_type_size(ty: &ValueType) -> usize {
         ValueType::Void => 0,
         ValueType::Integer { bits, .. } => (*bits as usize).div_ceil(8),
         ValueType::Float { bits } => (*bits as usize).div_ceil(8),
+        ValueType::Float128 => 16,
         ValueType::Pointer(_) => 8,
         ValueType::Array(inner, Some(n)) => value_type_size(inner) * n,
         ValueType::Array(inner, None) => value_type_size(inner),

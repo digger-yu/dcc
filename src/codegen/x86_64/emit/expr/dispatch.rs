@@ -278,8 +278,8 @@ impl Codegen {
                     && !matches!(r.ty(), Type::Complex(_) | Type::Imaginary(_))
                     && !matches!(l.ty(), Type::Vector(_, _))
                     && !matches!(r.ty(), Type::Vector(_, _))
-                    && (matches!(l.ty(), Type::Float | Type::Double | Type::LongDouble)
-                        || matches!(r.ty(), Type::Float | Type::Double | Type::LongDouble))
+                    && (Self::is_scalar_float_binop_ty(&l.ty())
+                        || Self::is_scalar_float_binop_ty(&r.ty()))
                 {
                     if self.fp_contract && self.try_gen_fp_contract(*op, l, r, dst) {
                         return;
@@ -305,7 +305,11 @@ impl Codegen {
                         // dst 中的陈旧值 (mix.c: a+=d 得 1 而非 20)。
                         // 普通表达式 `a + d` 的 ty 是通常算术转换类型
                         // (浮点), 不受影响。
-                        let fl_ty = if matches!(l.ty(), Type::LongDouble)
+                        let fl_ty = if matches!(l.ty(), Type::Float128)
+                            || matches!(r.ty(), Type::Float128)
+                        {
+                            Type::Float128
+                        } else if matches!(l.ty(), Type::LongDouble)
                             || matches!(r.ty(), Type::LongDouble)
                         {
                             Type::LongDouble
@@ -833,7 +837,7 @@ impl Codegen {
                                                      // Implicit float→int conversion when RHS is
                                                      // float but LHS is integer (e.g. `a = 0.0;`).
                         let r_ty = r.ty();
-                        if matches!(&r_ty, Type::Float | Type::Double | Type::LongDouble)
+                        if matches!(&r_ty, Type::Float | Type::Double | Type::LongDouble | Type::Float128)
                             && Self::is_integer_type(l_ty)
                         {
                             self.emit_implicit_float_to_int(dst, &r_ty, l_ty);
@@ -853,7 +857,7 @@ impl Codegen {
                         // integer but LHS is float (e.g. `ping = 0;`).
                         // The integer result sits in eax; convert it to
                         // xmm0 before gen_float_store.
-                        if matches!(l_ty, Type::Float | Type::Double)
+                        if matches!(l_ty, Type::Float | Type::Double | Type::Float128)
                             && Self::is_integer_type(&r_ty)
                         {
                             self.emit_scalar_to_xmm0_if_needed(r, l_ty);
@@ -935,10 +939,22 @@ impl Codegen {
                         } else if self.is_global_not_local(&name.name) {
                             if matches!(l_ty, Type::Vector(_, _)) {
                                 self.gen_vector_store(&name.name);
-                            } else if matches!(l_ty, Type::Float | Type::Double | Type::LongDouble)
-                                || matches!(l_ty, Type::Imaginary(_))
+                            } else if matches!(
+                                l_ty,
+                                Type::Float | Type::Double | Type::LongDouble | Type::Float128
+                            ) || matches!(l_ty, Type::Imaginary(_))
                             {
                                 // 浮点全局: 值在通道 (xmm0 / st0), 按目标宽度存储
+                                // binary128: 整数 RHS 已由下方 856 行的隐式转换统一归一到
+                                // xmm0；这里只补「浮点 RHS」（double/float/long double 直接
+                                // 赋给 binary128）的情形——整数走 dispatch 层，避免双重
+                                // `__floatditf`（实测 `fv2 = ivin` 被转换两次，第二次把
+                                // 第一次结果的低 64 位当 long long 再转，得到垃圾 binary128）。
+                                if matches!(l_ty, Type::Float128)
+                                    && matches!(r_ty, Type::Float | Type::Double | Type::LongDouble)
+                                {
+                                    self.emit_to_float128(&r_ty);
+                                }
                                 self.emit_global_float_store(&name.name, l_ty, &r_ty);
                             } else {
                                 self.emit_global_store(dst, &name.name);
@@ -951,8 +967,10 @@ impl Codegen {
                             self.store_upvar(dst, parent_off, l_ty.size(), &name.name);
                         } else if matches!(l_ty, Type::Vector(_, _)) {
                             self.gen_vector_store(&name.name);
-                        } else if matches!(l_ty, Type::Float | Type::Double | Type::LongDouble)
-                            || matches!(l_ty, Type::Imaginary(_))
+                        } else if matches!(
+                            l_ty,
+                            Type::Float | Type::Double | Type::LongDouble | Type::Float128
+                        ) || matches!(l_ty, Type::Imaginary(_))
                         {
                             // 局部 float/double 标量落槽前，需把 RHS 送达对应信道：
                             //  * Float/Double → xmm0 (SSE)，由 gen_float_store 内部负责；
@@ -962,6 +980,12 @@ impl Codegen {
                             //    得到 -nan。
                             if self.float_in_st0(l_ty) {
                                 self.emit_operand_to_st0(&r_ty, 0);
+                            } else if matches!(l_ty, Type::Float128)
+                                && matches!(r_ty, Type::Float | Type::Double | Type::LongDouble)
+                            {
+                                // 整数 RHS 已由 dispatch 856 行统一归一；这里只补浮点
+                                // RHS（避免双重 __floatditf，同全局路径）。
+                                self.emit_to_float128(&r_ty);
                             }
                             self.gen_float_store(&name.name, l_ty);
                         } else {
@@ -1038,7 +1062,10 @@ impl Codegen {
                                 }
                                 return;
                             }
-                        } else if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
+                        } else if matches!(
+                            elem_ty,
+                            Type::Float | Type::Double | Type::LongDouble | Type::Float128
+                        ) {
                             // 浮点元素: 用语义层计算地址, 然后存储
                             if self.materialize_address(
                                 desc,
@@ -1140,7 +1167,10 @@ impl Codegen {
                                 return;
                             }
                             self.emit_seg_for(lv);
-                            if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
+                            if matches!(
+                                elem_ty,
+                                Type::Float | Type::Double | Type::LongDouble | Type::Float128
+                            ) {
                                 self.emit_store_scalar_float_at(&r.ty(), elem_ty, 1);
                             } else {
                                 let w = match es {
@@ -1210,7 +1240,10 @@ impl Codegen {
                                 return;
                             }
                             self.emit_seg_for(lv);
-                            if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
+                            if matches!(
+                                elem_ty,
+                                Type::Float | Type::Double | Type::LongDouble | Type::Float128
+                            ) {
                                 self.emit_store_scalar_float_at(&r.ty(), elem_ty, 1);
                             } else {
                                 let w = match es {
@@ -1446,7 +1479,9 @@ impl Codegen {
                         // 位域写入: 读-改-写 (使用帧内临时槽, 按嵌套深度动态分配)
                         let f = field_info.as_ref().unwrap();
                         let bw = f.bit_width.unwrap();
-                        let container_size = f.ty.size();
+                        // 容器宽度取真实存储单元（与读取路径 `bitfield_unit_size` 同
+                        // 一真源），写回才能不抹掉同单元邻位域。
+                        let container_size = f.bitfield_unit_size();
                         let bit_off = f.bit_offset;
                         // 按嵌套深度计算帧槽偏移 (避免嵌套位域 RMW 互相覆盖).
                         // 走 LayoutMap::bf_rmw_slot 取 BF_RMW 专用带, 不再从 -8/-16
@@ -2034,7 +2069,7 @@ impl Codegen {
                                         )); // cld; rep movsb
                                     } else if matches!(
                                         fty,
-                                        Type::Float | Type::Double | Type::LongDouble
+                                        Type::Float | Type::Double | Type::LongDouble | Type::Float128
                                     ) {
                                         self.emit_seg(self.lvalue_seg_prefix(lv));
                                         self.emit_store_scalar_float_at(&r.ty(), fty, 1);
@@ -2403,8 +2438,10 @@ impl Codegen {
                 // 浮点取负: 翻转符号位 (XOR with sign mask)
                 // 否则在 gen_expr 之后 emit neg r64 会错把 rax 取反, 而浮点结果在 xmm0.
                 if matches!(op, UnOp::Neg)
-                    && (matches!(e.ty(), Type::Double | Type::Float | Type::LongDouble)
-                        || matches!(e.ty(), Type::Imaginary(_)))
+                    && (matches!(
+                        e.ty(),
+                        Type::Double | Type::Float | Type::LongDouble | Type::Float128
+                    ) || matches!(e.ty(), Type::Imaginary(_)))
                 {
                     self.gen_expr(e, Self::EVAL_BASE); // 值按类型落在 st(0) 或 xmm0
                     let e_ty = e.ty();
@@ -2423,6 +2460,10 @@ impl Codegen {
                     // 泄漏。删除该例外: imaginary 的内型判词与实浮点完全同口径。
                     if self.float_in_st0(neg_ty) {
                         self.emit_x87_chs();
+                    } else if matches!(neg_ty, Type::Float128) {
+                        // binary128: 符号位在**高** 64 位的最高位 (位 127)，
+                        // 与 double 不同 ⇒ 走专门的 xorpd 掩码路径。
+                        self.emit_float128_neg();
                     } else {
                         match neg_ty {
                             Type::Float => {
@@ -3176,9 +3217,16 @@ impl Codegen {
                             }
                             if let Some(init) = &v.init {
                                 // 浮点: 结果在 xmm0, 必须用 movsd/movss 存回栈 (同 Stmt::Decl 路径)
-                                if matches!(&v.ty, Type::Float | Type::Double | Type::LongDouble) {
+                                if matches!(
+                                    &v.ty,
+                                    Type::Float | Type::Double | Type::LongDouble | Type::Float128
+                                ) {
                                     self.gen_expr(init, Self::EVAL_BASE);
-                                    self.emit_scalar_to_xmm0_if_needed(init, &v.ty);
+                                    if matches!(&v.ty, Type::Float128) {
+                                        self.emit_to_float128(&init.ty());
+                                    } else {
+                                        self.emit_scalar_to_xmm0_if_needed(init, &v.ty);
+                                    }
                                     self.gen_float_store(&v.name.name, &v.ty);
                                 } else {
                                     self.gen_expr(init, Self::EVAL_BASE);
@@ -3188,7 +3236,7 @@ impl Codegen {
                                     let init_ty = init.ty();
                                     if matches!(
                                         &init_ty,
-                                        Type::Float | Type::Double | Type::LongDouble
+                                        Type::Float | Type::Double | Type::LongDouble | Type::Float128
                                     ) && Self::is_integer_type(&v.ty)
                                     {
                                         self.emit_implicit_float_to_int(0, &init_ty, &v.ty);

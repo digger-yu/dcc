@@ -933,6 +933,11 @@ impl<'a> Lexer<'a> {
                         Some(b'i' | b'I' | b'j' | b'J') => {
                             self.bump();
                         },
+                        // GCC 扩展 binary128 字面量后缀 q/Q (如 `1.0q`、
+                        // `0x1.0p112q`)。与 f/F/l/L 互斥, 位置任意。
+                        Some(b'q' | b'Q') => {
+                            self.bump();
+                        },
                         _ => break,
                     }
                 }

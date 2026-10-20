@@ -576,6 +576,20 @@ fn eval_float_builtin(name: &str, _args: &[Expr]) -> Result<Option<ConstValue>, 
     if let Some(v) = v {
         return Ok(Some(ConstValue::Float(v)));
     }
+    // 'q' 后缀 = binary128（GCC 的 __builtin_nanq / __builtin_nansq /
+    // __builtin_infq / __builtin_huge_valq），与 f128 变体同义。
+    if let Some(stem) = name
+        .strip_prefix("__builtin_")
+        .and_then(|n| n.strip_suffix('q'))
+    {
+        let bits = match stem {
+            "inf" | "huge_val" => crate::float128::INF_BITS,
+            "nans" => crate::float128::SNAN_BITS,
+            "nan" => crate::float128::QNAN_BITS,
+            _ => return Ok(None),
+        };
+        return Ok(Some(ConstValue::Float(FloatConst::Float128(bits))));
+    }
     // 扩展浮点 (_FloatN/_FloatNx) 宽度后缀: inf/huge_val → +Infinity,
     // nan → quiet NaN, nans → signaling NaN; 后缀决定精度
     // (f16/f32 → f32, f32x/f64 → f64, f64x/f128/f128x → long double).
@@ -627,7 +641,25 @@ fn eval_float_builtin(name: &str, _args: &[Expr]) -> Result<Option<ConstValue>, 
             };
             FloatConst::F64(x)
         }
+        "f128" | "f128x" => {
+            // binary128：位模式必须**直接给出**。
+            // 旧实现落到下面的 long double 分支（f64 → 80-bit 中转），再由
+            // codegen 拓宽回 binary128 —— 中转把信令 NaN 静默成了 quiet NaN
+            //（IEEE 的格式转换会 quieting），于是
+            // `volatile _Float128 s = __builtin_nansf128("")` 读回的是
+            // 0x7fff8000...（qNaN），`s + s` 不再置 FE_INVALID。
+            // GCC 的 `__builtin_nansf128("")` = 0x7fff4000...（sNaN）。
+            let bits = if is_inf {
+                crate::float128::INF_BITS
+            } else if is_snan {
+                crate::float128::SNAN_BITS
+            } else {
+                crate::float128::QNAN_BITS
+            };
+            FloatConst::Float128(bits)
+        },
         _ => {
+            // f64x：x86-64 上 _Float64x 是 80-bit long double。
             let x = if is_inf {
                 f64::INFINITY
             } else if is_snan {
@@ -1315,10 +1347,10 @@ fn pointee_byte_scale(ty: &Type) -> Option<i128> {
     }
 }
 
-/// 在 f64 域折叠两个浮点常量。任一操作数为 long double 时拒绝折叠：
-/// 宿主无 80-bit 运算，f64 折叠会静默改变 `0.1L` 等的值，必须留给
-/// 后端在运行时用 x87 求值。float 在 C 常规转换中本就提升为 double，
-/// 故折叠结果统一为 F64。
+/// 在 f64 域折叠两个浮点常量。任一操作数为 long double 或 binary128 时拒绝折叠：
+/// 宿主无 80-bit / 128-bit 运算，f64 折叠会静默改变 `0.1L` / `0.1q` 等的值并
+/// 把 113 位尾数截到 53 位，必须留给后端在运行时用 x87 / libgcc TF 例程求值。
+/// float 在 C 常规转换中本就提升为 double，故折叠结果统一为 F64。
 fn fold_float<F>(
     a: FloatConst,
     b: FloatConst,
@@ -1328,7 +1360,12 @@ fn fold_float<F>(
 where
     F: FnOnce(f64, f64) -> f64,
 {
-    if fenv_access || a.is_long_double() || b.is_long_double() {
+    if fenv_access
+        || a.is_long_double()
+        || b.is_long_double()
+        || a.is_float128()
+        || b.is_float128()
+    {
         return Err(ConstEvalError::NotConstant);
     }
     Ok(ConstValue::Float(FloatConst::F64(f(a.as_f64(), b.as_f64()))))
@@ -1434,7 +1471,12 @@ fn mod_values(
             .map(ConstValue::Int)
             .ok_or(ConstEvalError::Overflow),
         (ConstValue::Float(a), ConstValue::Float(b)) => {
-            if fenv_access || a.is_long_double() || b.is_long_double() {
+            if fenv_access
+                || a.is_long_double()
+                || b.is_long_double()
+                || a.is_float128()
+                || b.is_float128()
+            {
                 return Err(ConstEvalError::NotConstant);
             }
             // C fmod semantics: a - trunc(a/b) * b

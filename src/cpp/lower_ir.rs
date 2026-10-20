@@ -1349,7 +1349,7 @@ fn type_size(ty: &Type) -> u64 {
         Type::Int128 | Type::UInt128 => 16,
         Type::Float => 4,
         Type::Double => 8,
-        Type::LongDouble => 16,
+        Type::LongDouble | Type::Float128 => 16,
         Type::Fract | Type::Accum => 4, // 简化
         Type::Ptr(_) => POINTER_SIZE,
         Type::Array(inner, crate::ast::ArraySize::Const(n)) => type_size(&inner.base) * (*n as u64),

@@ -377,7 +377,7 @@ impl Codegen {
         // `gen_va_arg_struct` / `gen_va_arg_ptr_struct` 的按分类逐块装载路径
         // （消费侧则 destination-direct 写入目标，见 `gen_aggregate_assign`）。
         if self.target.sse
-            && arg_ty.size() <= 8
+            && (arg_ty.size() <= 8 || matches!(arg_ty, Type::Float128))
             && Self::classes_all_sse_family(&Self::abi_classes(arg_ty))
         {
             self.gen_va_arg_fp(ap_name, arg_ty, dst);

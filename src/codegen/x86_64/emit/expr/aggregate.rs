@@ -976,10 +976,12 @@ impl Codegen {
         } else if let Some(InitItem::Expr(e)) = inits.first() {
             // 标量类型的单元素初始化 (C23 大括号初始化: double x = {1})
             self.gen_expr(e, Self::EVAL_BASE);
-            if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
+            if matches!(ty, Type::Float | Type::Double | Type::LongDouble | Type::Float128) {
                 self.emit_scalar_to_xmm0_if_needed(e, ty);
                 if matches!(ty, Type::Float) {
                     self.store_xmm32_stack(0, var_off);
+                } else if matches!(ty, Type::Float128) {
+                    self.store_xmm128_stack(0, var_off);
                 } else {
                     self.store_xmm64_stack(0, var_off);
                 }
@@ -1038,7 +1040,7 @@ impl Codegen {
                             self.gen_expr(value, Self::EVAL_BASE);
                             if matches!(
                                 &elem_ty.base,
-                                Type::Float | Type::Double | Type::LongDouble
+                                Type::Float | Type::Double | Type::LongDouble | Type::Float128
                             ) {
                                 self.emit_scalar_to_xmm0_if_needed(value, &elem_ty.base);
                             }
@@ -1047,6 +1049,8 @@ impl Codegen {
                                 self.store_xmm32_stack(0, off);
                             } else if matches!(&elem_ty.base, Type::Double | Type::LongDouble) {
                                 self.store_xmm64_stack(0, off);
+                            } else if matches!(&elem_ty.base, Type::Float128) {
+                                self.store_xmm128_stack(0, off);
                             } else {
                                 self.emit_store(0, off, elem_size);
                             }
@@ -1133,7 +1137,10 @@ impl Codegen {
                     }
                     self.gen_expr(value, Self::EVAL_BASE);
                     // 浮点数组元素: int 常量需要转换到 xmm0 (double a[] = {1, 2})
-                    if matches!(&elem_ty.base, Type::Float | Type::Double | Type::LongDouble) {
+                    if matches!(
+                        &elem_ty.base,
+                        Type::Float | Type::Double | Type::LongDouble | Type::Float128
+                    ) {
                         self.emit_scalar_to_xmm0_if_needed(value, &elem_ty.base);
                     }
                     let off = base + (i * elem_size) as i64;
@@ -1141,6 +1148,8 @@ impl Codegen {
                         self.store_xmm32_stack(0, off);
                     } else if matches!(&elem_ty.base, Type::Double | Type::LongDouble) {
                         self.store_xmm64_stack(0, off);
+                    } else if matches!(&elem_ty.base, Type::Float128) {
+                        self.store_xmm128_stack(0, off);
                     } else {
                         self.emit_store(0, off, elem_size);
                     }
@@ -1932,10 +1941,15 @@ impl Codegen {
                         }
                         self.gen_expr(value, Self::EVAL_BASE);
                         if let Some(ft) = &field_ty_opt {
-                            if matches!(ft, Type::Float | Type::Double | Type::LongDouble) {
+                            if matches!(
+                                ft,
+                                Type::Float | Type::Double | Type::LongDouble | Type::Float128
+                            ) {
                                 self.emit_scalar_to_xmm0_if_needed(value, ft);
                                 if matches!(ft, Type::Float) {
                                     self.store_xmm32_stack(0, store_off);
+                                } else if matches!(ft, Type::Float128) {
+                                    self.store_xmm128_stack(0, store_off);
                                 } else {
                                     self.store_xmm64_stack(0, store_off);
                                 }
@@ -1975,10 +1989,12 @@ impl Codegen {
                 // InitList); 保险: 按标量单元素取首值写内存
                 if let Some(InitItem::Expr(e)) = inits.first() {
                     self.gen_expr(e, Self::EVAL_BASE);
-                    if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
+                    if matches!(ty, Type::Float | Type::Double | Type::LongDouble | Type::Float128) {
                         self.emit_scalar_to_xmm0_if_needed(e, ty);
                         if matches!(ty, Type::Float) {
                             self.store_xmm32_stack(0, base);
+                        } else if matches!(ty, Type::Float128) {
+                            self.store_xmm128_stack(0, base);
                         } else {
                             self.store_xmm64_stack(0, base);
                         }

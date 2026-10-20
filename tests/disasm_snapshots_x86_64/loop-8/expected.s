@@ -18,6 +18,8 @@ movsd (%rsp),%xmm0
 add $0x8,%rsp
 ucomisd %xmm1,%xmm0
 setne %al
+setp %bl
+or %bl,%al
 movzbq %al,%rax
 test %rax,%rax
 setne %al
@@ -35,6 +37,7 @@ jmp <bar>
 mov %r13,%rsp
 pop %r13
 ret
+<nop padding>
 main:
 push %r13
 mov %rsp,%r13
@@ -67,6 +70,8 @@ movsd (%rsp),%xmm0
 add $0x8,%rsp
 ucomisd %xmm1,%xmm0
 seta %al
+setnp %bl
+and %bl,%al
 movzbq %al,%rax
 test %eax,%eax
 je <main>

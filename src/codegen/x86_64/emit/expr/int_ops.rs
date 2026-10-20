@@ -104,6 +104,15 @@ impl Codegen {
         self.label(&l_done);
     }
     pub(crate) fn emit_implicit_float_to_int(&mut self, dst: u8, float_ty: &Type, int_ty: &Type) {
+        // binary128 → 整数: 值通道是 xmm0 的 16 字节, 没有 cvttss2si 这类硬件指令
+        // 可用, 整条转换交给 libgcc 的 `__fixtf*` / `__fixunstf*`。`emit_from_float128`
+        // 已按有符号/无符号、32/64/128 位正确路由 (含 rdx 处理), 这里统一委托,
+        // 不必再区分 signed/unsigned 两条分支。`dst` 的 rax→dst 收尾由
+        // `emit_from_float128` 内部完成。
+        if matches!(float_ty, Type::Float128) {
+            self.emit_from_float128(int_ty);
+            return;
+        }
         // 无符号目标: 不能沿用「有符号截断转换 + INT_MAX 饱和」—— 见
         // `emit_float_to_unsigned` 的根因说明。值通道与有符号路径同一条
         // (long double 从 x87 st(0) 落 f64 到 xmm0), 因此先跳一次再分流。

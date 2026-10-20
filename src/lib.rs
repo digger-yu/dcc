@@ -20,6 +20,7 @@ pub mod debug;
 pub mod diagnostics;
 pub mod driver;
 pub mod fixdep;
+pub mod float128;
 pub mod float80;
 pub mod format_check;
 pub mod incremental;

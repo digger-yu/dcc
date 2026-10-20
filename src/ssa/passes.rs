@@ -3697,7 +3697,7 @@ fn is_fp_flavored(k: &InstKind, dest_ty: &Type) -> bool {
 
 fn is_float_ty(ty: &Type) -> bool {
     match ty {
-        Type::Float | Type::Double | Type::LongDouble => true,
+        Type::Float | Type::Double | Type::LongDouble | Type::Float128 => true,
         Type::Complex(inner) | Type::Imaginary(inner) => is_float_ty(&inner.base),
         Type::Vector(inner, _) => is_float_ty(&inner.base),
         _ => false,

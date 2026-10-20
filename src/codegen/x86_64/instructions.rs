@@ -1141,9 +1141,11 @@ impl Codegen {
     }
 
     pub fn emit_load_mem_typed(&mut self, size: usize, ty: &Type) {
-        if matches!(ty, Type::Float | Type::Double | Type::LongDouble) {
+        if matches!(ty, Type::Float | Type::Double | Type::LongDouble | Type::Float128) {
             // 单一真源：long double 必须 `fld tbyte [rax]`，
             // 不能再 `movsd` 读低 8 字节（真 80-bit 落槽后低 8 字节只是尾数）。
+            // binary128 必须 `movups` 读整 16 字节，落到 GP 寄存器（emit_load_mem）
+            // 只会把地址/低半当值 —— 数组元素/解引用读 f128 因此拿到栈地址。
             self.emit_load_scalar_float_at(ty, 0);
             return;
         }
@@ -2116,6 +2118,14 @@ impl Codegen {
             src_ty,
             Type::Float | Type::Double | Type::LongDouble | Type::Complex(_) | Type::Imaginary(_)
         );
+        // binary128: 值通道是 xmm0 的 16 字节, 由 `emit_to_float128` 归一到它
+        // (覆盖 int/float/double/long double → binary128; 已是 binary128 的源是
+        // no-op)。与上面其它浮点分支互斥, 必须单独判, 否则会被下面的 early-return
+        // 直接跳过 —— 表现为 `static __float128 f = (long long)5;` 静默写垃圾。
+        if matches!(elem_ty, Type::Float128) {
+            self.emit_to_float128(src_ty);
+            return;
+        }
         if !matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble) {
             return;
         }

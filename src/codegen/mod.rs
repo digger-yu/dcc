@@ -718,6 +718,11 @@ fn value_type_to_dwarf(vt: &crate::ir::ValueType) -> debug::DwarfType {
                 kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Float),
             }
         },
+        ValueType::Float128 => debug::DwarfType {
+            name: "__float128".to_string(),
+            byte_size: 16,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Float),
+        },
         ValueType::Pointer(inner) => debug::DwarfType {
             name: format!("{}*", value_type_to_dwarf(inner).name),
             byte_size: 8,
@@ -925,6 +930,11 @@ pub(crate) fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
         },
         Type::LongDouble => debug::DwarfType {
             name: "long double".to_string(),
+            byte_size: 16,
+            kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Float),
+        },
+        Type::Float128 => debug::DwarfType {
+            name: "__float128".to_string(),
             byte_size: 16,
             kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Float),
         },

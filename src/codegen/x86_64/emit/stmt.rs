@@ -1384,18 +1384,33 @@ impl Codegen {
                             self.gen_complex_init(&v.name.name, &inner.base, init);
                         } else if let Type::Imaginary(ref inner) = &v.ty {
                             self.gen_imaginary_init(&v.name.name, &inner.base, init);
-                        } else if matches!(&v.ty, Type::Float | Type::Double | Type::LongDouble) {
+                        } else if matches!(
+                            &v.ty,
+                            Type::Float | Type::Double | Type::LongDouble | Type::Float128
+                        ) {
                             // 浮点: xmm0 结果必须用 movsd/movss 存回栈, 不能用整数 mov rax
                             self.gen_expr(init, Self::EVAL_BASE);
-                            // int 常量初始化浮点变量: 先转换到 xmm0 (double x = 1;)
-                            self.emit_scalar_to_xmm0_if_needed(init, &v.ty);
+                            if matches!(&v.ty, Type::Float128) {
+                                // binary128: 值通道是 xmm0 的 **16 字节**。
+                                // 整数 RHS 要先归一到 binary128 (libgcc TFmode 例程),
+                                // 浮点 RHS 则由 emit_to_float128 拓宽; 归一后必须
+                                // 整块 16 字节存回槽 (gen_float_store 走 movups)。
+                                // 走下面的整数分支会退化成 `movq %xmm0` 只存低 8 字节
+                                // ⇒ 高半是栈上垃圾, 值直接损坏。
+                                self.emit_to_float128(&init.ty());
+                            } else {
+                                // int 常量初始化浮点变量: 先转换到 xmm0 (double x = 1;)
+                                self.emit_scalar_to_xmm0_if_needed(init, &v.ty);
+                            }
                             self.gen_float_store(&v.name.name, &v.ty);
                         } else {
                             self.gen_expr(init, Self::EVAL_BASE);
                             // Implicit float→int conversion
                             let init_ty = init.ty();
-                            if matches!(&init_ty, Type::Float | Type::Double | Type::LongDouble)
-                                && Self::is_integer_type(&v.ty)
+                            if matches!(
+                                &init_ty,
+                                Type::Float | Type::Double | Type::LongDouble | Type::Float128
+                            ) && Self::is_integer_type(&v.ty)
                             {
                                 self.emit_implicit_float_to_int(0, &init_ty, &v.ty);
                             }

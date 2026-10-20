@@ -14,3 +14,5 @@ pub mod sanitizer;
 pub mod tls;
 #[allow(unused_imports)]
 pub mod x87_floating_point;
+#[allow(unused_imports)]
+pub mod float128;

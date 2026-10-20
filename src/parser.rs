@@ -2275,6 +2275,16 @@ impl<'a> Parser<'a> {
     /// 的返回类型与 libm 转发名, 避免为每个 fN 变体逐一枚举.
     fn float_builtin_suffix(name: &str) -> Option<(String, Type)> {
         let n = name.strip_prefix("__builtin_")?;
+        // 'q' 后缀 = binary128（GCC 的 __builtin_nanq / __builtin_nansq /
+        // __builtin_infq / __builtin_huge_valq，与 f128 变体同义）。
+        // 只认 NaN/Inf 家族：其余 'q' 结尾的名字（如 __builtin_sqrtq）
+        // 不是 GCC 内建，不能被当成 binary128 内建。
+        if let Some(stem) = n.strip_suffix('q') {
+            if matches!(stem, "nan" | "nans" | "inf" | "huge_val") {
+                return Some((stem.to_string(), Type::Float128));
+            }
+            return None;
+        }
         // 顺序敏感: 长后缀 (f32x/f64x/f128x) 必须先于其短前缀 (f32/f64/f128).
         let pairs: &[(&str, Type)] = &[
             ("f16", Type::Float),
@@ -2282,10 +2292,14 @@ impl<'a> Parser<'a> {
             // `_Float32x → Type::Double` 退化映射保持一致 (旧值 LongDouble
             // 会让 _Float32x 内建的返回类型/转发宽度全部错一档)。
             ("f32x", Type::Double),
-            ("f128x", Type::LongDouble),
+            // f128/f128x = binary128 → 与 parse_type_mode 的
+            // `_Float128/_Float128x/__float128 → Type::Float128` 保持一致。
+            // 旧值 LongDouble 会让 `__builtin_nanf128` 只产出 8 字节 double
+            // 位型 (高半是垃圾), 且 libm 转发落到 long double 通道。
+            ("f128x", Type::Float128),
             ("f32", Type::Float),
             ("f64x", Type::LongDouble),
-            ("f128", Type::LongDouble),
+            ("f128", Type::Float128),
             ("f64", Type::Double),
         ];
         for (s, t) in pairs {
@@ -6655,20 +6669,23 @@ impl<'a> Parser<'a> {
                     base = Some(Type::Double);
                     self.advance();
                 },
+                // `__float80` 在 x86-64 上就是 x87 80-bit 扩展格式，与
+                // long double 是同一个类型（size/align 均 16B），映射是准确的。
+                // `_Float64x` 同理（x86-64 上即 long double）。
+                TokKind::Ident if matches!(self.cur.text.as_str(), "_Float64x" | "__float80") => {
+                    base = Some(Type::LongDouble);
+                    self.advance();
+                },
+                // binary128 (IEEE quad)：独立的 `Type::Float128`。
+                // 与 long double 的区别不只是位型：值通道是 xmm0 的 16 字节
+                // 而非 x87 st(0)，算术/比较/转换全部走 libgcc TFmode 软浮点。
                 TokKind::Ident
                     if matches!(
                         self.cur.text.as_str(),
-                        "_Float64x" | "_Float128" | "_Float128x" | "__float80" | "__float128"
+                        "_Float128" | "_Float128x" | "__float128" | "__float128x"
                     ) =>
                 {
-                    // `__float80` 在 x86-64 上就是 x87 80-bit 扩展格式，与
-                    // long double 是同一个类型（size/align 均 16B），映射是准确的。
-                    // `__float128` 是 binary128（113 位尾数、指数范围更大），
-                    // 此处与既有的 `_Float128` / `_Float128x` 一样退化为 long
-                    // double：x86-64 无 binary128 硬件，完整软实现需整套
-                    // libquadmath 软浮点（算术/比较/转换/printf），尚未支持。
-                    // size/align 与真 __float128 一致（均 16B），故 ABI 布局不破。
-                    base = Some(Type::LongDouble);
+                    base = Some(Type::Float128);
                     self.advance();
                 },
                 // _BitInt(N): C23 定宽整数类型
@@ -7544,6 +7561,7 @@ impl<'a> Parser<'a> {
             (Some(Type::Double), _, 0, _) => Type::Double,
             (Some(Type::Double), _, _, _) => Type::LongDouble,
             (Some(Type::LongDouble), ..) => Type::LongDouble, // _Decimal128 直接映射
+            (Some(Type::Float128), ..) => Type::Float128,
             (Some(Type::Fract), ..) => Type::Fract,
             (Some(Type::Accum), ..) => Type::Accum,
             (Some(Type::Char), false, ..) => Type::SChar,
@@ -10618,8 +10636,8 @@ impl<'a> Parser<'a> {
                     let is_ib = matches!(&rt, Type::Imaginary(_));
                     let is_va = matches!(&lt, Type::Vector(_, _));
                     let is_vb = matches!(&rt, Type::Vector(_, _));
-                    let is_fa = matches!(&lt, Type::Float | Type::Double | Type::LongDouble);
-                    let is_fb = matches!(&rt, Type::Float | Type::Double | Type::LongDouble);
+                    let is_fa = matches!(&lt, Type::Float | Type::Double | Type::LongDouble | Type::Float128);
+                    let is_fb = matches!(&rt, Type::Float | Type::Double | Type::LongDouble | Type::Float128);
                     if is_va || is_vb {
                         if is_va {
                             lt
@@ -11827,7 +11845,7 @@ impl<'a> Parser<'a> {
                                 Type::Union(_, _, _, _) => 13,
                                 Type::Array(_, _) => 14,
                                 Type::Func(_, _) => 7,
-                                Type::Float | Type::Double | Type::LongDouble => 8,
+                                Type::Float | Type::Double | Type::LongDouble | Type::Float128 => 8,
                                 Type::Complex(_) | Type::Imaginary(_) => 9,
                                 Type::Vector(_, _) => -1,
                                 Type::Atomic(_) | Type::Named(_) => 4,
@@ -12071,7 +12089,7 @@ impl<'a> Parser<'a> {
                     if let Expr::Ident { name, .. } = &callee_expr {
                         if name.name.starts_with("__builtin_")
                             && !matches!(callee_expr.ty(), Type::Func(_, _) | Type::Ptr(_))
-                            && !matches!(
+                            && !(matches!(
                                 name.name.as_str(),
                                 "__builtin_fma"
                                     | "__builtin_fmaf"
@@ -12224,6 +12242,8 @@ impl<'a> Parser<'a> {
                                     | "__builtin_nan"
                                     | "__builtin_nanf"
                                     | "__builtin_nanl"
+                                    | "__builtin_nanq"
+                                    | "__builtin_nansq"
                                     // x86 CPU 检测三件套：真实现在
                                     // `codegen::x86_64::ifunc`（resolver 体复用同一条
                                     // `__dcc_cpu_indicator_init`），返回值都是 int 语义，
@@ -12232,7 +12252,15 @@ impl<'a> Parser<'a> {
                                     | "__builtin_cpu_supports"
                                     | "__builtin_cpu_is"
                                     | "__builtin_cpu_init"
-                                    | _ if Self::float_builtin_suffix(name.name.as_str()).is_some()
+                            )
+                                // 把「带后缀的 float 内建」判据从 or-pattern 里拆出来：
+                                // Rust 的 guard 作用于**整个** or-pattern 臂，`_ if g` 会
+                                // 把上面所有字面量也纳入 guard 管辖——g 为假时整条匹配
+                                // 失败，于是名单里的每个内建都误报 W1015（曾实测
+                                // `__builtin_memcpy` 报「返回类型未知」）。拆成独立 `||`
+                                // 后，字面量名单只看自身命中，后缀判据只兜住 `q/f/l` 等
+                                // 变体，名单内建不再误报。
+                                || Self::float_builtin_suffix(name.name.as_str()).is_some()
                             )
                         {
                             self.warn_here(
@@ -12467,6 +12495,20 @@ impl<'a> Parser<'a> {
                         None => FloatConst::F64(v_s.parse().unwrap_or(0.0)),
                     },
                     Type::Float => FloatConst::F32(v_s.parse::<f32>().unwrap_or(0.0)),
+                    Type::Float128 => {
+                        // binary128 必须按位精确求值 (113 位尾数 f64 装不下)。
+                        // 十六进制字面量走 `from_hex`, 十进制走 `from_decimal`
+                        // (对可精确 f64 表示的子集完全精确)。
+                        if v_s.starts_with("0x") || v_s.starts_with("0X") {
+                            FloatConst::Float128(
+                                crate::float128::from_hex(v_s).unwrap_or([0u8; 16]),
+                            )
+                        } else {
+                            FloatConst::Float128(
+                                crate::float128::from_decimal(v_s).unwrap_or([0u8; 16]),
+                            )
+                        }
+                    },
                     _ => {
                         if v_s.starts_with("0x") || v_s.starts_with("0X") {
                             FloatConst::F64(parse_hex_float(v_s))
@@ -12917,6 +12959,7 @@ impl<'a> Parser<'a> {
             | Type::Float
             | Type::Double
             | Type::LongDouble
+            | Type::Float128
             | Type::Fract
             | Type::Accum
             | Type::Enum(_, _, _)
@@ -13358,17 +13401,18 @@ pub fn strip_float_suffix<'a>(s: &'a str) -> Option<(&'a str, Type)> {
         ("f16", 0),
         ("f32", 0),
         ("f64", 1),
-        ("f128", 2),
+        ("f128", 3),
         ("f32x", 1),
         ("f64x", 2),
-        ("f128x", 2),
+        ("f128x", 3),
     ];
     for (suf, code) in SUFS {
         if n >= suf.len() && s[n - suf.len()..].eq_ignore_ascii_case(suf) {
             let ty = match code {
                 0 => Type::Float,
                 1 => Type::Double,
-                _ => Type::LongDouble,
+                2 => Type::LongDouble,
+                _ => Type::Float128,
             };
             return Some((&s[..n - suf.len()], ty));
         }
@@ -13378,6 +13422,10 @@ pub fn strip_float_suffix<'a>(s: &'a str) -> Option<(&'a str, Type)> {
     }
     if s.ends_with('l') || s.ends_with('L') {
         return Some((&s[..n - 1], Type::LongDouble));
+    }
+    // GCC 扩展 binary128 字面量后缀 q/Q (如 `1.0q`、`0x1.0p112q`)。
+    if s.ends_with('q') || s.ends_with('Q') {
+        return Some((&s[..n - 1], Type::Float128));
     }
     None
 }
@@ -14020,11 +14068,17 @@ mod tests {
             ("1.5f16", Type::Float),
             ("1.5f32", Type::Float),
             ("1.5f64", Type::Double),
-            ("1.5f128", Type::LongDouble),
+            // `_Float128` / `_Float128x` 是 binary128（113 位尾数），不是 x87
+            // 80-bit 扩展精度 ⇒ 后缀必须与关键字 `_Float128` 的类型一致
+            // （parser.rs 的类型映射同样是 Type::Float128）。
+            ("1.5f128", Type::Float128),
             ("1.5f32x", Type::Double),
             ("1.5f64x", Type::LongDouble),
-            ("1.5f128x", Type::LongDouble),
+            ("1.5f128x", Type::Float128),
             ("1.5L", Type::LongDouble),
+            // GCC 扩展 binary128 字面量后缀 q/Q
+            ("1.5q", Type::Float128),
+            ("1.5Q", Type::Float128),
         ];
         for (input, want) in cases {
             let (rest, ty) = strip_float_suffix(input).expect(input);

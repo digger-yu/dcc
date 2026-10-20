@@ -377,6 +377,9 @@ impl Codegen {
         } else {
             ty
         };
+        // binary128：整 16 字节有效载荷，mandatory prefix (F3/F2) 会让 movs[sd]
+        // 只读 4/8 字节并清零高半 → 静默丢尾数高位。必须无前缀的 movups 整块读。
+        let is_float128 = matches!(effective_ty, Type::Float128);
         let is_float = matches!(effective_ty, Type::Float);
         let mut rex = 0u8;
         if xmm >= 8 {
@@ -384,11 +387,13 @@ impl Codegen {
         }
         let modrm = 0x05 | ((xmm & 7) << 3);
         let mut ins = Vec::new();
-        // mandatory prefix 必须在 REX 之前
-        if is_float {
-            ins.push(0xF3);
-        } else {
-            ins.push(0xF2);
+        // mandatory prefix 必须在 REX 之前；Float128 不加（→ movups 16B）
+        if !is_float128 {
+            if is_float {
+                ins.push(0xF3);
+            } else {
+                ins.push(0xF2);
+            }
         }
         if rex != 0 {
             ins.push(0x40 | rex);
@@ -500,6 +505,23 @@ impl Codegen {
             .unwrap_or((8, false, 0));
         let tls_exec = is_tls && !self.relocatable;
         let is_float = matches!(effective_ty, Type::Float);
+        // binary128: 整 16 字节写回，必须无前缀的 movups（simd_mov_rip 仅
+        // 支持 SS/SD，对其它 width 返回 None → 不能走那条路）。
+        if matches!(effective_ty, Type::Float128) {
+            self.emit_global_seg(&resolved);
+            // movups [rip+disp32], xmm0：两字节 opcode `0F 11` 后紧跟 modrm
+            // `05`（rip-rel），disp32 落在索引 3..6。disp_pos 必须在 emit_global_seg
+            // **之后**测量，否则段前缀会把整条指令右移一字节、错位到 modrm 上。
+            let before = self.pos();
+            self.emit_insn(&Insn::raw_bytes(&[0x0F, 0x11, 0x05, 0, 0, 0, 0]));
+            let disp_pos = before + 3;
+            if tls_exec {
+                self.pending_tls_rels.push((disp_pos, resolved.clone()));
+            } else {
+                self.pending_data_rels.push((disp_pos, resolved.clone()));
+            }
+            return;
+        }
         let width = if is_float { SimdWidth::SS } else { SimdWidth::SD };
         self.emit_global_seg(&resolved);
         let pos = self.pos() + 4;

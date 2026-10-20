@@ -504,7 +504,11 @@ impl Codegen {
                 }
             },
             Type::Atomic(inner) => Self::classify_field(&inner.base, base, classes),
-            Type::Vector(_, _) => {
+            // binary128 与 SIMD 向量同形: 首 eightbyte Sse, 后续 SseUp。
+            // 不能走叶类型分支 (它会把两个 eightbyte 都标成 Sse, 变成**两个**
+            // 独立 XMM 寄存器); SseUp 表示"前一 SSE 寄存器的高 8 字节",
+            // 合计只占一个 16 字节 XMM 槽 —— 与 gcc 实测的 a→xmm0/b→xmm1 一致。
+            Type::Vector(_, _) | Type::Float128 => {
                 // SIMD 向量: 首 eightbyte Sse, 后续 SseUp (向量延续)
                 let start = base / 8;
                 let end = (base + size.saturating_sub(1)) / 8;
@@ -588,7 +592,44 @@ impl Codegen {
                 }
                 b
             },
+            FloatConst::Float128(bits) => {
+                // binary128 常量落到**非** binary128 目标（float/double/long
+                // double）：必须按目标宽度转换后编码 —— 直接把 16 字节
+                // binary128 位型写进 long double 槽（x87 80-bit）会被读侧
+                // 解析成垃圾。binary128 目标走 float128_data_bytes，不经这里。
+                if size >= 16 {
+                    let mut out = crate::float128::to_f80(&bits).to_vec();
+                    out.resize(size, 0);
+                    out
+                } else if size <= 4 {
+                    let n = size.clamp(1, 4);
+                    crate::float128::to_f32(&bits).to_bits().to_le_bytes()[..n].to_vec()
+                } else {
+                    crate::float128::to_f64(&bits).to_bits().to_le_bytes()[..size.min(8)].to_vec()
+                }
+            },
         }
+    }
+
+    /// binary128 目标类型的浮点初始化器 → 数据字节。
+    ///
+    /// 与 [`Self::float_data_bytes`] 分家的原因: 后者的 `size >= 16` 分支把
+    /// f64 拓宽成 **真 80-bit x87** 编码（那是 `long double` 的对象表示）；
+    /// binary128 必须是 16 字节 IEEE quad 位型（113 位尾数），两者字节布局
+    /// 完全不同。目标类型同为 16 字节时无法靠 `size` 区分，必须显式走这里。
+    pub(crate) fn float128_data_bytes(c: FloatConst, size: usize) -> Vec<u8> {
+        let bits: [u8; 16] = match c {
+            FloatConst::Float128(b) => b,
+            // 非 binary128 的来源: 先拓宽到 binary128（f64 ⊂ binary128, 无损）。
+            other => crate::float128::from_f64(other.as_f64()),
+        };
+        let mut out = bits.to_vec();
+        if out.len() > size {
+            out.truncate(size);
+        } else {
+            out.resize(size, 0);
+        }
+        out
     }
     fn encode_complex_parts_f(re: FloatConst, im: FloatConst, inner: &Type) -> Vec<u8> {
         crate::codegen::x86_64::mem::global::encode_complex_parts_f(re, im, inner)
@@ -618,9 +659,14 @@ impl Codegen {
         e: &Expr,
         rel: Option<(u64, Option<usize>)>,
         width: usize,
-        is_float: bool,
+        target_ty: &Type,
         rodata_slots: bool,
     ) -> Vec<u8> {
+        // 目标类型决定浮点字节编码: float/double/long double/binary128 的
+        // 对象表示各不相同 (binary128 是 16B IEEE quad, 不是 80-bit x87),
+        // 只靠 `width == 16` 无法区分 long double 与 binary128 ⇒ 必须带类型。
+        let is_float = target_ty.is_real_float();
+        let is_f128 = matches!(target_ty, Type::Float128);
         // 字符串字面量: 不能走 eval_full —— 它返回 ConstValue::Str, 落到
         // 下方 _ 分支会被 0 填充 (char buf[][8] = {"hello"} 元素全为 0)。
         // 指针类型由调用方在 Ptr 上下文特判 (emit_string_ptr_slot);
@@ -781,11 +827,24 @@ impl Codegen {
                     // 按目标宽度截断: 窄元素 (char/short) 数组不能用表达式
                     // 类型宽度 (int=4) 写数据, 否则元素会错位/越界。
                     // LongDouble 经单一真源直出**真 80-bit 编码**。
-                    Self::float_data_bytes(f, width.max(1))
+                    if is_f128 {
+                        // binary128 目标: 16 字节 binary128 位型（不是 80-bit x87!）
+                        Self::float128_data_bytes(f, width.max(1))
+                    } else {
+                        // 目标不是 binary128: 常量先转换到目标精度 —— binary128
+                        // 的 16 字节位型不能直接写进 long double 槽。
+                        Self::float_data_bytes(f.coerce_to(target_ty), width.max(1))
+                    }
                 },
                 const_eval::ConstValue::Int(v) => {
                     let size = width.max(1);
-                    if is_float {
+                    if is_f128 {
+                        // binary128 目标: 整型常量在 113 位尾数上精确 RNE 转换。
+                        Self::float128_data_bytes(
+                            FloatConst::from_int(&Type::Float128, v),
+                            size,
+                        )
+                    } else if is_float {
                         // 浮点目标：整型常量在目标精度上精确 RNE 转换
                         // （旧写法经 `v as f64` 中转，|v| >= 2^53 会丢精度）。
                         let target_ty = if size >= 10 {
@@ -836,7 +895,7 @@ impl Codegen {
                 },
                 Expr::AddrOf { e: inner, .. } => match inner.as_ref() {
                     Expr::Ident { .. } => {
-                        self.eval_const_expr(inner, rel, width, is_float, rodata_slots)
+                        self.eval_const_expr(inner, rel, width, target_ty, rodata_slots)
                     },
                     Expr::Index {
                         arr,
@@ -878,7 +937,7 @@ impl Codegen {
                 // Strip casts to handle (void *)&"str"[0],
                 // (char *)&"hello"[1], etc.
                 Expr::Cast { e: inner, .. } => {
-                    self.eval_const_expr(inner, rel, width, is_float, rodata_slots)
+                    self.eval_const_expr(inner, rel, width, target_ty, rodata_slots)
                 },
                 // String pointer arithmetic: "str" + n, n + "str",
                 // with optional Cast wrappers.
@@ -1276,6 +1335,10 @@ impl Codegen {
         match ty {
             Type::Float | Type::Double => AbiClass::Sse,
             Type::LongDouble => AbiClass::Memory,
+            // binary128: SysV ABI 分类 [Sse, SseUp] —— 占**一个** XMM 寄存器
+            // 的 16 字节 (SseUp 是前一 SSE 的高半, 不再额外消耗槽位)。
+            // gcc -O0 实测: `f(__float128 a, __float128 b)` 装 a→xmm0, b→xmm1。
+            Type::Float128 => AbiClass::Sse,
             // _Complex 分类跟随实数内型 (SysV ABI 3.2.3: 由分量决定):
             // float/double → SSE, long double → Memory,
             // 整数 (_Complex int/long) → INTEGER。此前整数 _Complex

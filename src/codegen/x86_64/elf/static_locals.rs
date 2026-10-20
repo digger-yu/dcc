@@ -75,7 +75,7 @@ impl Codegen {
                 Expr::String { .. } => true,
                 Expr::InitList { .. } => true, // 尝试, 可能失败
                 _ => {
-                    let is_float = matches!(info.ty, Type::Float | Type::Double | Type::LongDouble);
+                    let is_float = info.ty.is_real_float();
                     global_init_bytes(info.init.as_ref().unwrap(), sz, is_float, &info.ty).is_some()
                 },
             }
@@ -154,7 +154,7 @@ impl Codegen {
                     },
                     _ => {
                         let is_float =
-                            matches!(info.ty, Type::Float | Type::Double | Type::LongDouble);
+                            info.ty.is_real_float();
                         if let Some(bytes) = global_init_bytes(init, sz, is_float, &info.ty) {
                             self.data_section.extend_from_slice(&bytes);
                             true

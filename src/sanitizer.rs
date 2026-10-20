@@ -1523,7 +1523,10 @@ fn int_range(ty: &Type) -> (i128, i128) {
 
 /// 判断类型是否为 float/double/long double。
 fn is_float_ty(ty: &Type) -> bool {
-    matches!(ty, Type::Float | Type::Double | Type::LongDouble)
+    matches!(
+        ty,
+        Type::Float | Type::Double | Type::LongDouble | Type::Float128
+    )
 }
 
 /// 判断 cast 是否为 float→int (UBSAN float-cast 触发条件)。

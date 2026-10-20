@@ -436,16 +436,22 @@ pub enum FloatConst {
     F32(f32),
     F64(f64),
     LongDouble(crate::float80::Bits),
+    /// IEEE binary128（`__float128` / `_Float128`）的 16 字节位模式。
+    /// 必须按位保存——binary128 的 113 位尾数 f64（53 位）装不下，经 f64 中转
+    /// 会丢精度（见 `crate::float128`）。
+    Float128([u8; 16]),
 }
 
 impl FloatConst {
     /// 以 f64 读取值。F32 先提升；LongDouble 经真 80-bit → f64
     /// 正确舍入（仅供非 x86 后端与常量折叠等显式降级场景使用）。
+    /// Float128 经精确拓宽后再舍入到 f64（对“可精确 f64 表示”的子集完全精确）。
     pub fn as_f64(self) -> f64 {
         match self {
             FloatConst::F32(f) => f as f64,
             FloatConst::F64(f) => f,
             FloatConst::LongDouble(ref b) => crate::float80::to_f64(b),
+            FloatConst::Float128(ref bits) => crate::float128::to_f64(bits),
         }
     }
 
@@ -454,12 +460,18 @@ impl FloatConst {
         matches!(self, FloatConst::LongDouble(_))
     }
 
+    /// 是否为 binary128 字面量。
+    pub fn is_float128(self) -> bool {
+        matches!(self, FloatConst::Float128(_))
+    }
+
     /// 是否为各精度的（正或负）零。
     pub fn is_zero(self) -> bool {
         match self {
             FloatConst::F32(f) => f == 0.0,
             FloatConst::F64(f) => f == 0.0,
             FloatConst::LongDouble(ref b) => crate::float80::is_zero(b),
+            FloatConst::Float128(ref b) => b.iter().all(|&x| x == 0),
         }
     }
 
@@ -469,6 +481,12 @@ impl FloatConst {
             FloatConst::F32(f) => FloatConst::F32(-f),
             FloatConst::F64(f) => FloatConst::F64(-f),
             FloatConst::LongDouble(b) => FloatConst::LongDouble(crate::float80::negate(b)),
+            FloatConst::Float128(mut bits) => {
+                // 仅翻转最高符号位（位 127）。位数组是小端内存镜像，
+                // 故符号位在 bits[15] 的最高位。
+                bits[15] ^= 0x80;
+                FloatConst::Float128(bits)
+            }
         }
     }
 
@@ -478,6 +496,7 @@ impl FloatConst {
         match ty {
             Type::Float => FloatConst::F32(0.0),
             Type::LongDouble => FloatConst::LongDouble(crate::float80::from_f64(0.0)),
+            Type::Float128 => FloatConst::Float128([0u8; 16]),
             _ => FloatConst::F64(0.0),
         }
     }
@@ -491,7 +510,45 @@ impl FloatConst {
         match ty {
             Type::Float => FloatConst::F32(crate::float80::i128_to_f32(i)),
             Type::LongDouble => FloatConst::LongDouble(crate::float80::from_i128(i)),
+            Type::Float128 => FloatConst::Float128(crate::float128::from_int(i)),
             _ => FloatConst::F64(crate::float80::i128_to_f64(i)),
+        }
+    }
+
+    /// 把常量转换到目标浮点类型（IEEE 舍入）。
+    ///
+    /// 跨精度转换必须**显式**做：binary128（113 位尾数）与 x87 80-bit
+    /// （64 位）的对象表示完全不同，把 binary128 的 16 字节位型直接写进
+    /// `long double` 槽会被读侧当 80-bit 解析成垃圾（`long double g = 1.0q;`
+    /// 曾因此读回 0.0）。NaN 跨类型转换按 IEEE 规则 quieting（信令 NaN 变
+    /// 安静 NaN）；**同类型**转换不走这里，故信令语义得以保留。
+    pub fn coerce_to(self, ty: &Type) -> FloatConst {
+        match ty {
+            Type::Float => FloatConst::F32(match self {
+                FloatConst::F32(f) => f,
+                FloatConst::F64(f) => f as f32,
+                FloatConst::LongDouble(b) => crate::float80::to_f64(&b) as f32,
+                FloatConst::Float128(b) => crate::float128::to_f32(&b),
+            }),
+            Type::Double => FloatConst::F64(match self {
+                FloatConst::F32(f) => f as f64,
+                FloatConst::F64(f) => f,
+                FloatConst::LongDouble(b) => crate::float80::to_f64(&b),
+                FloatConst::Float128(b) => crate::float128::to_f64(&b),
+            }),
+            Type::LongDouble => FloatConst::LongDouble(match self {
+                FloatConst::F32(f) => crate::float80::from_f64(f as f64),
+                FloatConst::F64(f) => crate::float80::from_f64(f),
+                FloatConst::LongDouble(b) => b,
+                FloatConst::Float128(b) => crate::float128::to_f80(&b),
+            }),
+            Type::Float128 => FloatConst::Float128(match self {
+                FloatConst::F32(f) => crate::float128::from_f64(f as f64),
+                FloatConst::F64(f) => crate::float128::from_f64(f),
+                FloatConst::LongDouble(b) => crate::float128::from_f80(&b),
+                FloatConst::Float128(b) => b,
+            }),
+            _ => self,
         }
     }
 }
@@ -1200,6 +1257,11 @@ pub enum Type {
     Float,
     Double,
     LongDouble,
+    /// IEEE binary128 (quadruple precision): 128 位 (113 位尾数 + 15 位指数)。
+    /// `__float128` / `_Float128`。x86-64 无硬件支持, 算术/比较/转换全部
+    /// 委托 libgcc 的 TFmode soft-fp (`__addtf3` / `__netf2` / `__floattitf` ...)。
+    /// 值通道是 **xmm0 的 16 字节**（不是 x87 st(0)），见 `float_in_st0`。
+    Float128,
     Fract,
     Accum,                    // 定点数: _Fract (1.31格式), _Accum (16.16格式)
     Complex(Box<QualType>),   // _Complex float/double: (real, imag) 两部分
@@ -1236,6 +1298,27 @@ pub struct Field {
     /// 对位域: 允许跨容器类型边界连续排列.
     /// 对非位域: 对齐降为 1 字节.
     pub field_packed: bool,
+}
+
+impl Field {
+    /// 位域读/写时应加载与回写的**存储单元字节宽度**（单一真源）。
+    ///
+    /// `offset` 落在存储单元起点、`bit_offset` 是单元内位偏移（见字段注释），
+    /// 因此容器必须覆盖到 `bit_offset + bit_width` 位，而不是字段声明类型自身
+    /// 的宽度。混装声明类型时二者会不一致：
+    ///   `uint64_t mant_high:47; unsigned exponent:15;`
+    /// gcc 把小类型的 `exponent` 继续打包进那个 8 字节单元的 48..62 位
+    /// （`offset=8, bit_offset=48`）。若仍按 `unsigned` 取 4 字节容器，读时
+    /// `mov eax,[+8]` 只拿到低 32 位再 `shr 48` 得到 0，写时也只回写低 4 字节
+    /// 抹掉同单元的 `mant_high` 高位 —— float128-nan.c 的 `u.nan.exponent`
+    /// 正卡在这里。取「覆盖到最高位所需、且不小于声明类型、向上对齐到 1/2/4/8」
+    /// 的宽度即可命中真实单元；普通位域（字段在自身类型单元内）结果不变。
+    pub fn bitfield_unit_size(&self) -> usize {
+        let bw = self.bit_width.unwrap_or(0);
+        let end_bits = self.bit_offset + bw;
+        let needed = (end_bits as usize + 7) / 8;
+        needed.max(self.ty.size()).next_power_of_two().min(8)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1325,7 +1408,7 @@ impl Type {
             },
             Type::Array(_, ArraySize::Var(_)) => 8, // VLA 退化为指针
             Type::Vector(elem, n) => elem.size() * n,
-            Type::LongDouble => 16,
+            Type::LongDouble | Type::Float128 => 16,
             Type::Complex(inner) => inner.size() * 2,
             Type::Imaginary(inner) => inner.size(),
             Type::Atomic(inner) => inner.size(),
@@ -1401,7 +1484,7 @@ impl Type {
             // 逃过 "对齐 > 16 字节 ⇒ 整体走内存" 规则 (SysV ABI 3.2.3 与 GCC
             // `classify_argument` 的 `if (align > 128) return CLASS_MEMORY`)。
             Type::Vector(elem, n) => (elem.size() * n).max(1),
-            Type::LongDouble => 16,
+            Type::LongDouble | Type::Float128 => 16,
             Type::Complex(inner) => inner.align(),
             Type::Imaginary(inner) => inner.align(),
             Type::Atomic(inner) => inner.align(),
@@ -1461,11 +1544,26 @@ impl Type {
                 Type::Float
                     | Type::Double
                     | Type::LongDouble
+                    | Type::Float128
                     | Type::Fract
                     | Type::Accum
                     | Type::Complex(_)
                     | Type::Imaginary(_)
             )
+    }
+
+    /// 是否为**实数浮点**标量类型（不含复数/虚数）。
+    ///
+    /// binary128（`__float128` / `_Float128`）与 float/double/long double 同属
+    /// 实数浮点：常量求值必须走 `eval_full` 取**位模式**，走 `eval`（截断成
+    /// i128）会把 `4.5` 变成 `4`，全局/静态初始化就会写错值。
+    ///
+    /// 复数/虚数另走 `Type::Complex` / `Type::Imaginary` 的分量路径，不在此列。
+    pub fn is_real_float(&self) -> bool {
+        matches!(
+            self,
+            Type::Float | Type::Double | Type::LongDouble | Type::Float128
+        )
     }
 
     /// 整数提升 (C11 6.3.1.1p2): 比 `int` 秩低的整数类型一律转为 `int`
@@ -1553,6 +1651,8 @@ impl Type {
         let frank = |t: &Type| -> i32 {
             match t {
                 Type::LongDouble => 3,
+                // binary128 的秩高于 x87 80-bit 扩展精度。
+                Type::Float128 => 4,
                 Type::Double => 2,
                 Type::Float => 1,
                 _ => 0,
@@ -1832,6 +1932,7 @@ pub fn type_kind_summary(ty: &Type) -> String {
         Type::Float => "float".into(),
         Type::Double => "double".into(),
         Type::LongDouble => "longdouble".into(),
+        Type::Float128 => "float128".into(),
         Type::Fract => "fract".into(),
         Type::Accum => "accum".into(),
         Type::Complex(inner) => format!("complex({})", type_kind_summary(&inner.base)),
@@ -1885,6 +1986,7 @@ impl std::fmt::Display for Type {
             Type::Float => write!(f, "float"),
             Type::Double => write!(f, "double"),
             Type::LongDouble => write!(f, "long double"),
+            Type::Float128 => write!(f, "__float128"),
             Type::Fract => write!(f, "_Fract"),
             Type::Accum => write!(f, "_Accum"),
             Type::Complex(inner) => write!(f, "_Complex {}", inner),

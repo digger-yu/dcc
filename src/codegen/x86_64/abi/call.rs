@@ -386,7 +386,7 @@ impl Codegen {
             None
         };
 
-        let mut staged: Vec<(ArgLoc, usize, bool)> = Vec::new();
+        let mut staged: Vec<(ArgLoc, usize, bool, bool)> = Vec::new();
         let mut stack_staged: Vec<(usize, usize, usize)> = Vec::new();
         for (arg_idx, (arg, arg_locs)) in args.iter().zip(locs.iter()).enumerate() {
             // __builtin_va_arg_pack: 第一阶段已分配好 GP/XMM/Stack 槽位。
@@ -412,7 +412,7 @@ impl Codegen {
                             let src_off = self.variadic_reg_save_offset + src_idx as i64 * 8;
                             self.load_stack(0, src_off); // rax = saved gp
                             self.store_rsp_qword(0, stage);
-                            staged.push((loc, stage, false));
+                            staged.push((loc, stage, false, false));
                             stage += 8;
                             src_idx += 1;
                         },
@@ -442,7 +442,7 @@ impl Codegen {
                         self.variadic_reg_save_offset + 48 + src_fp_idx as i64 * 16;
                     self.load_xmm128_stack(0, src_off);
                     self.emit_xmm_store_rsp(0xF2, 0, stage);
-                    staged.push((loc, stage, false));
+                    staged.push((loc, stage, false, false));
                     stage += 8;
                     src_fp_idx += 1;
                 }
@@ -611,7 +611,7 @@ impl Codegen {
                         },
                         _ => {
                             self.store_rsp_qword(1, stage);
-                            staged.push((*loc, stage, false));
+                            staged.push((*loc, stage, false, false));
                             stage += 8;
                         },
                     }
@@ -766,7 +766,7 @@ impl Codegen {
                             },
                             _ => {
                                 self.emit_xmm_store_rsp(pfx, 0, stage);
-                                staged.push((*loc, stage, false));
+                                staged.push((*loc, stage, false, false));
                                 stage += 8;
                             },
                         }
@@ -823,7 +823,7 @@ impl Codegen {
                             _ => {
                                 // 暂存到 staging area 以便后续传参
                                 self.store_rsp_qword(11, stage);
-                                staged.push((*loc, stage, false));
+                                staged.push((*loc, stage, false, false));
                                 stage += 8;
                             },
                         }
@@ -929,7 +929,7 @@ impl Codegen {
                             ArgLoc::Stack(off) => self.store_rsp_qword(store_reg, off),
                             _ => {
                                 self.store_rsp_qword(store_reg, stage);
-                                staged.push((*loc, stage, false));
+                                staged.push((*loc, stage, false, false));
                                 stage += 8;
                             },
                         }
@@ -962,6 +962,25 @@ impl Codegen {
                     self.emit_x87_fstp_st0();
                 }
                 continue;
+            } else if matches!(effective_ty, Type::Float128) {
+                // binary128 实参：占**一个** xmm 的 16 字节（`[Sse, SseUp]`）。
+                // 走栈时按 16 字节对齐并整块搬运，不走逐 8 字节的 movsd。
+                self.gen_expr(arg, Self::EVAL_BASE);
+                let arg_ty = arg.ty();
+                if !matches!(arg_ty, Type::Float128) {
+                    self.emit_to_float128(&arg_ty);
+                }
+                match arg_locs[0] {
+                    ArgLoc::Stack(off) => {
+                        // 16 字节整块写到 outgoing 栈区
+                        self.emit_xmm_store_rsp(0x00, 0, off);
+                    },
+                    loc => {
+                        self.emit_xmm_store_rsp(0x00, 0, stage);
+                        staged.push((loc, stage, false, true));
+                        stage += 16;
+                    },
+                }
             } else if matches!(effective_ty, Type::Float | Type::Double) {
                 self.gen_expr(arg, Self::EVAL_BASE);
                 // 隐式整数→浮点转换: 实参是整数但形参是浮点类型
@@ -1016,7 +1035,7 @@ impl Codegen {
                     ArgLoc::Stack(off) => self.emit_xmm_store_rsp(pfx, 0, off),
                     loc => {
                         self.emit_xmm_store_rsp(pfx, 0, stage);
-                        staged.push((loc, stage, is_float));
+                        staged.push((loc, stage, is_float, false));
                         stage += 8;
                     },
                 }
@@ -1079,7 +1098,7 @@ impl Codegen {
                         ArgLoc::Stack(off) => self.store_rsp_qword(reg, off),
                         loc => {
                             self.store_rsp_qword(reg, stage);
-                            staged.push((loc, stage, false));
+                            staged.push((loc, stage, false, false));
                             stage += 8;
                         },
                     }
@@ -1104,7 +1123,7 @@ impl Codegen {
                     ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
                     loc => {
                         self.store_rsp_qword(0, stage);
-                        staged.push((loc, stage, false));
+                        staged.push((loc, stage, false, false));
                         stage += 8;
                     },
                 }
@@ -1126,20 +1145,27 @@ impl Codegen {
         // 用 while 循环以便在合并时跳过下一个 entry (手动递增 i)
         let mut i = 0;
         while i < staged.len() {
-            let (loc, slot, is_float) = staged[i];
+            let (loc, slot, is_float, wide128) = staged[i];
             match loc {
                 ArgLoc::Gp(reg) => {
                     self.load_rsp_qword(reg, slot);
                     i += 1;
                 },
                 ArgLoc::Xmm(reg) => {
+                    // binary128: 整个 16 字节都在同一个 xmm 里, 不能用
+                    // movss/movsd 搬运 (会清零/丢弃高半)。一次 movups 读回。
+                    if wide128 {
+                        self.emit_xmm_load_rsp(0x00, reg, slot);
+                        i += 1;
+                        continue;
+                    }
                     // 检查下一个 staged 是否也是同一个 xmm 寄存器 (SseUp 延续,
                     // 如 16 字节 vector 参数). 如果是, 合并为一条 movups 加载
                     // 避免 movsd 清零高 8 字节导致数据丢失 (pr105613).
                     // 注意: _Complex double 有两个独立 SSE (xmm0, xmm1),
                     // 不会误合并因为寄存器编号不同.
                     if i + 1 < staged.len() {
-                        let (next_loc, next_slot, _) = staged[i + 1];
+                        let (next_loc, next_slot, _, _) = staged[i + 1];
                         match next_loc {
                             ArgLoc::Xmm(nr) if nr == reg && next_slot == slot + 8 => {
                                 // 合并: movups xmm_reg, [rsp+slot]
@@ -1235,7 +1261,7 @@ impl Codegen {
     fn stage_agg_chunks_from_mem(
         &mut self,
         arg_locs: &[ArgLoc],
-        staged: &mut Vec<(ArgLoc, usize, bool)>,
+        staged: &mut Vec<(ArgLoc, usize, bool, bool)>,
         stage: &mut usize,
     ) {
         for (chunk, loc) in arg_locs.iter().enumerate() {
@@ -1252,7 +1278,7 @@ impl Codegen {
                 ArgLoc::Stack(off) => self.store_rsp_qword(0, off),
                 _ => {
                     self.store_rsp_qword(0, *stage);
-                    staged.push((*loc, *stage, false));
+                    staged.push((*loc, *stage, false, false));
                     *stage += 8;
                 },
             }

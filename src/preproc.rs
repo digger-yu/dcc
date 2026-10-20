@@ -1805,28 +1805,35 @@ pub fn preprocess(
     pp.define_builtin("__FLT64X_EPSILON__", "1.08420217248550443401e-19L");
     pp.define_builtin("__FLT64X_DECIMAL_DIG__", "21");
     pp.define_builtin("__FLT64X_DENORM_MIN__", "3.64519953188248529979e-4951L");
-    pp.define_builtin("__FLT128_MANT_DIG__", "64");
-    pp.define_builtin("__FLT128_DIG__", "18");
+    // __float128 / _Float128 = IEEE binary128 (113 位尾数, 15 位指数,
+    // 偏置 16383)。这些值**必须**是 binary128 自己的极值，不能沿用
+    // long double (binary80) 的那一套 —— 沿用会让 FLT128_TRUE_MIN 取到
+    // binary80 的次正规数，转成 binary128 后既不是 binary128 的真最小值，
+    // 也不满足 isnormal()==0 之类的判据。
+    // 一律用十六进制字面量 + F128 后缀：十进制字面量要经 f64 中转，
+    // 1e-4932 这类会直接下溢成 0。
+    pp.define_builtin("__FLT128_MANT_DIG__", "113");
+    pp.define_builtin("__FLT128_DIG__", "33");
     pp.define_builtin("__FLT128_MIN_EXP__", "(-16381)");
     pp.define_builtin("__FLT128_MIN_10_EXP__", "(-4931)");
     pp.define_builtin("__FLT128_MAX_EXP__", "16384");
     pp.define_builtin("__FLT128_MAX_10_EXP__", "4932");
-    pp.define_builtin("__FLT128_MAX__", "1.18973149535723176502e+4932L");
-    pp.define_builtin("__FLT128_MIN__", "3.36210314311209350626e-4932L");
-    pp.define_builtin("__FLT128_EPSILON__", "1.08420217248550443401e-19L");
-    pp.define_builtin("__FLT128_DECIMAL_DIG__", "21");
-    pp.define_builtin("__FLT128_DENORM_MIN__", "3.64519953188248529979e-4951L");
-    pp.define_builtin("__FLT128X_MANT_DIG__", "64");
-    pp.define_builtin("__FLT128X_DIG__", "18");
+    pp.define_builtin("__FLT128_MAX__", "0x1.ffffffffffffffffffffffffffffp+16383F128");
+    pp.define_builtin("__FLT128_MIN__", "0x1p-16382F128");
+    pp.define_builtin("__FLT128_EPSILON__", "0x1p-112F128");
+    pp.define_builtin("__FLT128_DECIMAL_DIG__", "36");
+    pp.define_builtin("__FLT128_DENORM_MIN__", "0x1p-16494F128");
+    pp.define_builtin("__FLT128X_MANT_DIG__", "113");
+    pp.define_builtin("__FLT128X_DIG__", "33");
     pp.define_builtin("__FLT128X_MIN_EXP__", "(-16381)");
     pp.define_builtin("__FLT128X_MIN_10_EXP__", "(-4931)");
     pp.define_builtin("__FLT128X_MAX_EXP__", "16384");
     pp.define_builtin("__FLT128X_MAX_10_EXP__", "4932");
-    pp.define_builtin("__FLT128X_MAX__", "1.18973149535723176502e+4932L");
-    pp.define_builtin("__FLT128X_MIN__", "3.36210314311209350626e-4932L");
-    pp.define_builtin("__FLT128X_EPSILON__", "1.08420217248550443401e-19L");
-    pp.define_builtin("__FLT128X_DECIMAL_DIG__", "21");
-    pp.define_builtin("__FLT128X_DENORM_MIN__", "3.64519953188248529979e-4951L");
+    pp.define_builtin("__FLT128X_MAX__", "0x1.ffffffffffffffffffffffffffffp+16383F128");
+    pp.define_builtin("__FLT128X_MIN__", "0x1p-16382F128");
+    pp.define_builtin("__FLT128X_EPSILON__", "0x1p-112F128");
+    pp.define_builtin("__FLT128X_DECIMAL_DIG__", "36");
+    pp.define_builtin("__FLT128X_DENORM_MIN__", "0x1p-16494F128");
     pp.define_builtin("__DECIMAL_DIG__", "21");
     // ===== C99 <limits.h> completeness =====
     // CHAR_BIT already defined as __CHAR_BIT__
@@ -7773,6 +7780,11 @@ impl Preprocessor {
                 | "__builtin_nansf64x"
                 | "__builtin_nansf32x"
                 | "__builtin_nansf128x"
+                // 'q' 后缀 = binary128（与 f128 变体同义）
+                | "__builtin_nanq"
+                | "__builtin_nansq"
+                | "__builtin_infq"
+                | "__builtin_huge_valq"
                 | "__builtin_nanf128"
                 | "__builtin_nanf64"
                 | "__builtin_nanf32"
