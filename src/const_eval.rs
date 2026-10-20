@@ -511,6 +511,31 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
         // 这些函数通常用 __builtin_constant_p 包裹, dcc 直接展开即可。
         Expr::Call { callee, args, .. } => {
             if let Expr::Ident { name, .. } = callee.as_ref() {
+                // `__builtin_constant_p(x)` 本身就是个编译期谓词：它问的就是
+                // 「x 在常量表达式里能不能求值」，而本函数正是回答这个同题的地方。
+                // 以前这里不认它，于是 parser 按「不急切折 0」政策保留下来的那个调用
+                // （见 `parser.rs` 与 `__builtin_expect` 同一口径）在常量折叠里变成
+                // 「不可求值」，连锁使两条依赖常量条件折叠的路径失效：
+                //   - `if (__builtin_constant_p(p)) link_error();` 在 -O0/-O1 仍发出
+                //     永不可达的分支，链接期报 undefined reference to `link_error`
+                //     （gcc-torture 的链接型用例 20030330-1.c；gcc -O0 反汇编里
+                //     `link_error` 出现 0 次）；
+                //   - `__builtin_choose_expr (!__builtin_constant_p (y), 3, 4)` 被拒成
+                //     E0013「condition is not constant」（pr19449.c，全局初值与函数体
+                //     两处）。
+                // 只把**标量**常量算作 1：地址常量在 GCC 里也给 1，但把判据放大到地址
+                // 会改变 `__builtin_choose_expr` 的选边，而这条路径上没有任何 IPA 上下文
+                // （全局/形参在常量表达式里永远不会是常量），所以 `is 常量` 就是它的答案。
+                if name.name == "__builtin_constant_p" {
+                    let known = match args.first() {
+                        Some(a) => matches!(
+                            eval_full(a, fenv_access),
+                            Ok(ConstValue::Int(_)) | Ok(ConstValue::Float(_))
+                        ),
+                        None => false,
+                    };
+                    return Ok(ConstValue::Int(known as i128));
+                }
                 // 浮点常量内建 (__builtin_nan/inf/huge_val 及其 f/l 变体):
                 // 结果是编译期浮点常量, 任何参数 (含字符串 tag) 都折叠为同一常量。
                 if let Some(v) = eval_float_builtin(name.name.as_str(), args)? {
