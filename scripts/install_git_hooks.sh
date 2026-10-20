@@ -41,4 +41,7 @@ done
 shopt -u nullglob
 
 (( installed > 0 )) || { echo "$SRC_DIR 下没有钩子文件" >&2; exit 1; }
-echo "完成。卸载：删除 $HOOKS_DIR/pre-commit 即可（git 的 --no-verify 也能单次绕过，但会留在记录里）。"
+echo "完成。卸载：删除 $HOOKS_DIR/pre-commit 即可。"
+echo '注意：`git commit --no-verify` 可以绕过本地钩子且**不会在提交里留下任何痕迹**，'
+echo "     所以本钩子只是默认路径上的快手反馈，不是不可回避的强制；真正兜底的是"
+echo "     Tier 1 的 .github/workflows/torture.yml（它在 PR 上跑同一套套件）。"
