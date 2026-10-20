@@ -364,24 +364,16 @@ impl Codegen {
                     self.cur_func_over_align,
                 );
             }
-            // 预计算已注册局部变量的总大小, 用于参数偏移计算.
-            // limits-fndefn.c 有 100,000 个参数, 每次重新遍历 var_map
-            // 会导致 O(n²) 超时. 使用累加值避免重复扫描.
-            // 统一口径: 直接复用 var_alloc_slots (分配侧的真源),
-            // 避免两处对同类类型给出不同字节数 (如 Ptr-to-VLA
-            // 曾给出 16 vs 8, 导致参数偏移整体漂移 8B).
-            let var_contribution = |ty: &Type| -> i64 { Self::var_alloc_slots(ty) * 8 };
-            let mut param_used_total: i64 = self
-                .var_map
-                .values()
-                .filter(|(_, ty)| !matches!(ty, Type::Void))
-                .map(|(_, ty)| var_contribution(ty))
-                .sum();
-            // 过对齐帧的锚点槽不进 var_map (无名字), 但参数必须落在它下方,
-            // 所以把这 8 字节补进 param_used_total, 否则首个参数会盖住最低变量槽.
-            if self.cur_func_over_align > 0 {
-                param_used_total += 8;
-            }
+            // 参数必须落在已占用的变量区下方。占用量只准问分配器自己维护的游标
+            // `var_map_total_slots`：它在 `pre_register_vars` 的同一循环里递增，已经含
+            // 过对齐锚点格、逐变量对齐补齐与 KASAN 红区。以前这里是把 var_map 里的类型
+            // 用 `var_alloc_slots` 重加一遍，那份「按类型重算」看不见对齐圆整吃掉的字节：
+            // 一个 128 字节对齐的局部向量会让游标多走 56B，而重算值不知道，于是第一个
+            // 参数落到该变量的中间，两者共用同一段栈。实测
+            // gcc-torture `pr126405-3.c`（128 字节向量形参 + `v16di old = p; p = g0;`）
+            // 因此把 `old` 一起清成 100，读回 0/200 而 gcc 读回 1..16。
+            // limits-fndefn.c 的 100,000 参数场景仍是 O(1)，不会退回遍历。
+            let mut param_used_total: i64 = self.var_map_total_slots.saturating_mul(8);
             // 注册参数到 var_map (偏移公式自动避开已注册的局部变量)
             // 记录命名参数数量 (va_start 需要)
             self.variadic_named_params =
