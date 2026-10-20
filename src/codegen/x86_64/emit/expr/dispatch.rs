@@ -452,18 +452,37 @@ impl Codegen {
                 // 取号器 `RegBank::pick_rhs_stage` 读的就是占用事实；无人握着时仍返首位 `1`，
                 // 所以今天的产物逐字节不变（三档哈希是裁判）。`dst == 1` 那条 push/pop 特殊路
                 // 原样保留（那是已有形状，不顺手改）。
+                //
+                // 三级取号 + 一个必修的泄漏（2026-10，实测 `lvm.c` 串行编译 E1135）：
+                //   1. `pick_rhs_stage`：候选表 {r8,r9} 里无人握着的号，不占 callee-saved 池；
+                //   2. `alloc_temp`：池里第一个空位（表达式溅出槽）——**旧实现借了不还**，
+                //      于是每层嵌套 Binop 永久消耗一个池号，四个之后池枯竭，与家号钉住
+                //      （`stage_free_after` 只数了候选表、没数池）合谋触发 E1135；
+                //   3. 借用 `%rcx`：家只可能来自 POOL 与延伸池（均不含 rcx），用户显式
+                //      `register asm("rcx")` 钉住的号在 `pinned` 里，一并排除。rcx 是本
+                //      后端历史上的固定暂存号，Binop 各分支（含 Div 的 cqto/idiv、移位
+                //      的 %cl）都建立在「rcx 可当暂存」上，所以借它不需要新路径；
+                //      借 `%rdx` 不行：Div 的 `src == 2` 分支是死代码且除的是 rcx 而非
+                //      存好的除数，激活它就是激活一条错值路径。
+                // `dst == 1` 走第 454 行的 push/pop 特例，永远不进这里。
+                let mut stage_from_pool: Option<u8> = None;
                 let stage = if dst == 1 {
                     1
                 } else {
                     let rhs_names = crate::codegen::x86_64::abi::regbank::rhs_stage_candidates();
-                    match self
-                        .reg_bank
-                        .pick_rhs_stage(dst)
-                        .or_else(|| self.reg_bank.alloc_temp())
-                    {
+                    let mut picked: Option<u8> = None;
+                    if let Some(n) = self.reg_bank.pick_rhs_stage(dst) {
+                        picked = Some(n);
+                    } else if let Some(n) = self.reg_bank.alloc_temp() {
+                        picked = Some(n);
+                        stage_from_pool = Some(n);
+                    } else if !self.reg_bank.is_pinned(1) {
+                        picked = Some(1);
+                    }
+                    match picked {
                         Some(n) => n,
                         None => {
-                            // 候选表与临时号池全满：不得退到一个正握着家的号上。
+                            // 候选表、临时号池与借用号全不可用：不得退到一个正握着家的号上。
                             // 诊断里点名「谁握着这些号」：不写就只能靠猜，而本仓已经因为
                             // 猜错过两次（§11.45/§11.46）。
                             let holders: Vec<String> = rhs_names
@@ -551,6 +570,12 @@ impl Codegen {
                     if dst != 0 {
                         self.mov(dst, 0); // dst = 商
                     }
+                }
+                // 池里借的暂存号用完即还（旧实现漏了这一步：每层嵌套 Binop 永久占一个
+                // 池号，四个之后池枯竭，后续 Binop 只能走帧槽路径甚至触发 E1135）。
+                // 释放放在 ptr-sub 的 idiv 之后 —— 那是 stage 最后一次被读。
+                if let Some(r) = stage_from_pool {
+                    self.free_callee_saved(r);
                 }
                 // C 语义: 32 位整数运算结果需截断回 32 位 (溢出 wrap),
                 // 否则 64 位寄存器高位垃圾会泄漏给后续移位/除法等运算.
