@@ -16,7 +16,7 @@
 #                 连续切分使字母序相邻的相关用例 (同一特性区域) 落在同一片。
 #                配合 --dirs 可实现"某子目录再拆 N 份"。CI 可用 M=4 并行 4 个 job。
 #   例:
-#     ./gcc_dg_test.sh run --shard 1/4     # run 集第 1/4 片
+#     ./gcc_dg_test.sh run --shard 1/8     # run 集第 1/8 片
 #     ./gcc_dg_test.sh compile --dirs tree-ssa --shard 2/4
 #
 # 默认测试组合:
@@ -201,8 +201,16 @@ parse_dg_directives() {
     local req_target
     req_target=$(grep -oP '\{ dg-require-effective-target \K[^}]+' "$src" 2>/dev/null | head -1 || true)
     if [[ -n "$req_target" ]]; then
+        # 修剪 (grep 可能带出尾随空白)
+        req_target="${req_target//[[:space:]]/}"
+        # 仅 x86 家族 / 显式 "any"/"always" 视为本平台可用;
+        # 其余 effective-target (float16_runtime / bfloat16_runtime / dfp /
+        # fenv_exceptions / trapping / int128 / __float128 等) 一律视为非本
+        # 平台, 自动跳过.
+        # 注意: 原先列表含一个裸 '*' glob, 会匹配任意 effective-target 名,
+        # 导致本该跳过的用例被当成"支持"而运行并虚假 FAIL. 这里移除该 '*'.
         case "$req_target" in
-            x86_64|x86|i?86|*|any|always) ;;
+            x86_64|x86|i?86|any|always) ;;
             *)
                 echo "skip target:$req_target"
                 return
@@ -236,6 +244,15 @@ parse_dg_directives() {
                 echo "skip target:$pats"
                 return
             fi
+        else
+            # 选择器不含 '-'/'*' (如 aarch64_sve_hw / arm / powerpc), 属
+            # effective-target 风格的非 triple 选择器; 本 harness 无法验证,
+            # 凡命中已知非 x86 架构名即视为非本平台跳过 (避免误在 x86 上运行
+            # 这些用例而虚假 FAIL). 含 x86 家族名则放行, 交由运行期定夺.
+            if [[ "$pats" =~ (^|[^a-z0-9])(arm|aarch64|powerpc|ppc|pwr|mips|sparc|s390x?|riscv|alpha|ia64|sh|hppa|m68k|m32r|mn10300|frv|vax|cr16|epiphany|lm32|moxie|microblaze|nds32|arc|tile|visium|ft32|mcore|stormy16|iq2000|xstormy|msp430|rl78|avr|rx|pdp11)([^a-z0-9]|$) ]]; then
+                echo "skip target:$pats"
+                return
+            fi
         fi
     fi
 
@@ -262,8 +279,10 @@ parse_dg_directives() {
     for opt in $raw_opts; do
         case "$opt" in
             -finstrument-functions|-fno-instrument-functions|-std=gnu89|-std=c89|\
-            -std=c99|-std=gnu99|-std=c11|-std=gnu11|-O0|-O1|-O2|-O3|-Os|\
-            -Wall|-Wextra|-w|-pedantic|-include\ *|\
+            -std=c99|-std=gnu99|-std=c11|-std=gnu11|-std=c17|-std=gnu17|\
+            -std=c23|-std=gnu23|-std=c2x|-std=gnu2x|-std=c2y|-std=gnu2y|\
+            -O0|-O1|-O2|-O3|-Os|\
+            -Wall|-Wextra|-w|-pedantic|-pedantic-errors|-include\ *|\
             -mavx|-mavx2|-msse|-msse2|-msse3|-msse4.1|-msse4.2|\
             -no-pie|-fno-pie|-pie|\
             -fno-strict-aliasing|-fno-builtin|\
