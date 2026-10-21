@@ -326,12 +326,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 探针只在**宿主** binutils 上跑 readelf/objdump（通用 elf64-little /
-      # elf32-big 等 BFD target 足以解析交叉产物），不需要任何交叉 gcc。
-      - name: Install binutils (probe dependency)
+      # 探针在宿主 binutils 上跑 readelf/objdump（通用 BFD target 足以解析交叉
+      # 产物）；但 GasTextOutput 判据走 `--asm-fallback=gas`，对交叉后端要真调
+      # `<triple>-as` 把 GAS 文本汇成 .o —— 缺交叉 as = 门禁空跑 = 假绿，不可接受
+      # （与 parity job 同一立场），故把四个声明了 GasTextOutput 的交叉后端
+      # binutils 一并装齐。mips64 不声明 GasTextOutput、也无 mips64-as，跳过。
+      - name: Install binutils (host + cross for gas-fallback probe)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends binutils
+          sudo apt-get install -y --no-install-recommends \
+            binutils \
+            binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabi \
+            binutils-mips-linux-gnu \
+            binutils-riscv64-linux-gnu
 
       - name: Download dcc binary
         uses: actions/download-artifact@v4

@@ -234,6 +234,12 @@ ctor_of_variant() {
 # ---------------------------------------------------------------------------
 # 每条: 特性 token | fixture | 额外 flags | 判据种类 | 判据参数 | 证据级别
 # 证据级别: artifact / accept / none
+# 注意: 本 heredoc 只能是**纯数据**, 不得写 `#` 注释行 —— SPEC_ROWS /
+# FEATURE_ORDER / LEVEL_OF 都用 `awk 'NF'` 统计, 会把注释行算进去, 而跑探针
+# 的循环用 `grep -v '^#'` 排除注释, 两者不一致会让格数断言失败、生成表被污染。
+# GasTextOutput 判据走 `--asm-fallback=gas`: 后端把整 TU 渲染成真 GAS 文本再喂
+# `<triple>-as` 汇出 .o; 缺该能力时 dcc 直接 E0312, 有该能力且交叉 as 就位才得
+# YES. 因此 matrix job 必须装齐对应交叉 binutils, 否则缺 as = 门禁空跑 = 假绿。
 SPEC="$WORK/spec.tsv"
 cat >"$SPEC" <<'SPECEOF'
 CoreArith|core_arith.c|-c|text_nonempty|-|accept
@@ -258,6 +264,7 @@ BoundsCheck|bounds_basic.c|-fbounds-check|text_nonempty|-|accept
 Trapv|trapv_basic.c|-ftrapv|und_sym|__dcc_trapv_overflow|artifact
 ObjectFormat:Elf|core_arith.c|-c|elf_rel|-|artifact
 ObjectFormat:Coff|core_arith.c|-c|coff|-|artifact
+GasTextOutput|core_arith.c|--asm-fallback=gas|text_nonempty|-|artifact
 Dwarf:4|core_call.c|-g|all_sections|.debug_info,.debug_line,.debug_abbrev|artifact
 ParallelCodegen||-|abstain|-|none
 RiscVBorrowedRegs||-|abstain|-|none
