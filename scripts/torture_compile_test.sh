@@ -108,7 +108,7 @@ export -f extract_dg_options
 run_compile_test() {
     local src="$1"
     local name
-    name="$(basename "$src")"
+    name="${src##*/}"
     local out="$TMPDIR_TORTURE/${name}.o"
 
     local extra_opts
@@ -158,10 +158,18 @@ if [[ $total -eq 0 ]]; then
 fi
 
 # 过滤跳过列表
+# 只有极少数用例 #include 了 gcc.c-torture 之外的兄弟文件。先一次性
+# 挑出来, 逐例过滤时不再为每个 .c 启动一次 grep。
+declare -A ext_include_tests=()
+while IFS= read -r src; do
+    ext_include_tests["$src"]=1
+done < <(grep -rlP '#\s*include\s+"\.\./' "$dir" --include='*.c' 2>/dev/null)
+
 declare -a skipped_names=()
 while IFS= read -r src; do
-    name="$(basename "$src")"
-    if should_skip "$name" || sibling_include_missing "$src"; then
+    name="${src##*/}"
+    if should_skip "$name" \
+        || { [[ -n "${ext_include_tests[$src]:-}" ]] && sibling_include_missing "$src"; }; then
         skip=$((skip + 1))
         skipped_names+=("$name")
     else
@@ -181,7 +189,7 @@ fi
 : > "$TMPDIR_TORTURE/results.txt"
 cat "$TMPDIR_TORTURE/run_list.txt" | xargs -P "$JOBS" -I{} bash -c '
     src="$1"
-    name="$(basename "$src")"
+    name="${src##*/}"
     result=$(run_compile_test "$src")
     echo "$name $result"
 ' _ {} > "$TMPDIR_TORTURE/results.txt"

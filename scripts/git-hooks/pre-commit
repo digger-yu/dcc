@@ -11,6 +11,10 @@
 # 或汇总行里 fail != 0，任意一条成立即拒绝。特别是「测了 0 个用例」必须置红 ——
 # 否则套件目录一改名字，闸门就会以“零失败”的名义静默空转（假绿）。
 #
+# 性能：全量跑一遍约 1 分钟。若「dcc 二进制 + 套件工作树 + 跳过清单 +
+# harness + 外部工具链」的指纹与上次全绿时完全一致，说明输入没变，直接沿用
+# 上次结果（见 stamp_key）；临时强制重跑用 TORTURE_GATE_NO_CACHE=1。
+#
 # 仓库根从 `git rev-parse` 取，不依赖本文件自身位置：安装是**复制**而非符号链接，
 # 复制后脚本位于 .git/hooks/ 下，dirname 推出来的路径是无效的。
 set -uo pipefail
@@ -26,6 +30,7 @@ DCC="${DCC:-$REPO_ROOT/target/release/dcc}"
 SUITE="$REPO_ROOT/tests/gcc-torture/gcc/testsuite/gcc.c-torture"
 LOG_DIR="$REPO_ROOT/.git"          # 钩子日志放这里：git status 看不见，不会误提交
 LOG="$LOG_DIR/torture-pre-commit.log"
+STAMP="$LOG_DIR/torture-pre-commit.stamp"   # 上次全绿时的输入指纹 + 结果
 JOBS="${JOBS:-4}"                  # 按限流约定，绝不用 nproc 顶满机器
 BUILD_JOBS="${BUILD_JOBS:-2}"
 
@@ -33,6 +38,28 @@ fail() {
     echo "" >&2
     echo "pre-commit: 拒绝提交 —— $*" >&2
     exit 1
+}
+
+# ── 全绿结果缓存 ──
+# 指纹覆盖所有会影响结果的输入：dcc 二进制内容、套件 HEAD 与工作树状态
+# （含未跟踪文件）、跳过清单、harness 脚本、外部 as/gcc 版本。任一项变化
+# 都会失配并重新全量跑，不存在「改了东西却复用旧绿灯」的路径。套件不是
+# git 仓库时返回空指纹，调用方会退回为每次都全量跑。
+CACHE_VERSION=1
+
+stamp_key() {
+    local dcc_hash suite_head suite_dirty harness_hash skip_hash tool_hash
+    dcc_hash=$(sha256sum "$DCC" | awk '{print $1}') || return 0
+    suite_head=$(git -C "$REPO_ROOT/tests/gcc-torture" rev-parse HEAD 2>/dev/null) || return 0
+    suite_dirty=$(git -C "$REPO_ROOT/tests/gcc-torture" status --porcelain 2>/dev/null \
+        | sha256sum | awk '{print $1}')
+    harness_hash=$(sha256sum "$REPO_ROOT/scripts/torture_test.sh" | awk '{print $1}') || return 0
+    skip_hash=$(sha256sum "$REPO_ROOT/tests/skip/torture_skip.txt" 2>/dev/null | awk '{print $1}')
+    tool_hash=$( { as --version 2>/dev/null | head -1
+                   gcc --version 2>/dev/null | head -1; } | sha256sum | awk '{print $1}')
+    printf '%s|%s|%s|%s|%s|%s|%s\n' \
+        "$CACHE_VERSION" "$dcc_hash" "$suite_head" "$suite_dirty" \
+        "$harness_hash" "$skip_hash" "$tool_hash" | sha256sum | awk '{print $1}'
 }
 
 echo "pre-commit: gcc.c-torture 零失败闸门（JOBS=$JOBS）"
@@ -53,7 +80,19 @@ elif [[ -n "$(find src Cargo.toml Cargo.lock -newer "$DCC" -print -quit 2>/dev/n
 fi
 [[ -x "$DCC" ]] || fail "构建后仍没有可执行的 $DCC"
 
-# 3) 跑套件。脚本自身的退出码是第一判据，汇总行是第二判据：
+# 3) 输入指纹与上次全绿一致 → 直接放行
+STAMP_KEY=""
+if [[ -z "${TORTURE_GATE_NO_CACHE:-}" ]]; then
+    STAMP_KEY=$(stamp_key)
+fi
+if [[ -n "$STAMP_KEY" && -f "$STAMP" ]] \
+    && [[ "$(sed -n '1p' "$STAMP" 2>/dev/null)" == "$STAMP_KEY" ]]; then
+    cached_line=$(sed -n '2p' "$STAMP" 2>/dev/null)
+    echo "pre-commit: 输入未变，沿用上次全绿结果（$cached_line）"
+    exit 0
+fi
+
+# 4) 跑套件。脚本自身的退出码是第一判据，汇总行是第二判据：
 #    两者任一不对都拒绝（将来谁改了 torture_test.sh 的退出逻辑也拦得住）。
 DCC="$DCC" JOBS="$JOBS" bash scripts/torture_test.sh all >"$LOG" 2>&1
 rc=$?
@@ -86,4 +125,12 @@ if (( total_fail != 0 )); then
 fi
 
 echo "pre-commit: gcc.c-torture fail=0（$total_pass 通过 / $total_skip 跳过），放行提交"
+if [[ -n "$STAMP_KEY" ]]; then
+    {
+        printf '%s\n' "$STAMP_KEY"
+        printf 'pass=%s fail=%s skip=%s\n' "$total_pass" "$total_fail" "$total_skip"
+        printf '%s\n' "$(date -Is)"
+    } > "$STAMP.tmp" && mv "$STAMP.tmp" "$STAMP"
+    echo "pre-commit: 结果已缓存（$STAMP）"
+fi
 exit 0
