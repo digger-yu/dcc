@@ -80,6 +80,296 @@ fn encode_rex_full(w: bool, r: u8, x: u8, b: u8) -> Option<u8> {
     }
 }
 
+/// 发射层窥孔看到的「上一条已发指令」。
+///
+/// 只保留**相邻两条即可证明等价**所需的分类与字节，不做活性分析：
+/// 窥孔的结论不得依赖「之后还会不会读这个号」这类未来事实。
+/// 「上一条」一旦跨过标签定义 / 裸字节发射 / 函数边界就必须失效（否则
+/// 被删的那条可能正是某个跳转的落点）。
+pub(crate) struct PeepLast {
+    kind: PeepKind,
+    bytes: Vec<u8>,
+    /// 这条指令在 `code` 里的起始偏移。只给「回删死指令」用：
+    /// `peep_last` 永远是最后一条已发指令，它之后没有别的字节，
+    /// 而 `label()` / `emit()`（裸字节）都会把它清空 —— 所以被删的
+    /// 那条不可能是任何跳转的落点。
+    pc: u64,
+    /// 这条指令是「幂等搬运」（mov/movzx/movsx/lea，不读标志、无副作用）。
+    /// 两条完全相同的幂等搬运连着发，第二条可以直接不发。
+    idempotent: bool,
+    /// 重复一条**自己**也恒等：目的号不出现在源操作数的寻址里。
+    ///
+    /// `idempotent` 不够用，因为它只说「指令本身不改标志」，而「重复两条后状态不变」
+    /// 还要求第一次没改掉第二次读的东西。反例（实测 llex.c 一共 5 处，直接导致
+    /// `print("hello")` 报 `malformed number`）：`mov (%rax), %rax` —— 第一次已经把
+    /// `%rax` 换成了指针对应的内容，第二次读的是**新地址**，少读一级。
+    repeat_safe: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PeepKind {
+    /// `mov %src, %dst`（64 位，寄存器到寄存器）
+    MovRr { dst: u8, src: u8 },
+    /// `mov %src32, %dst32`（32 位形态；写目的同时零扩展高 32 位）
+    MovRr32 { dst: u8, src: u8 },
+    /// `movzx/movsx %src, %dst`（64 位目的，寄存器到寄存器）
+    MovExtRr { dst: u8, src: u8 },
+    /// `mov %src, disp(%r13)`（64 位，写帧槽）
+    StoreSlot { off: i64, src: u8 },
+    /// `mov disp(%r13), %dst`（64 位，读帧槽）
+    LoadSlot { off: i64, dst: u8 },
+    /// `mov $imm, %dst`（`mov_imm` 的两条形态：C7 /0 与 B8+r movabs）
+    MovImm { dst: u8 },
+    /// 32 位 mov 的**内存源**形态（`mov dst32, [mem]`）：目的被整字写入，
+    /// 高 32 位自动零扩展。
+    LoadR32 { dst: u8 },
+    /// 其它一切（不参与窥孔）
+    Other,
+}
+
+impl PeepKind {
+    fn is_mov(self) -> bool {
+        !matches!(self, PeepKind::Other)
+    }
+}
+
+impl Codegen {
+    /// 是不是「幂等搬运」：重复一次不改变任何状态的指令。
+    ///
+    /// 只认 mov/movzx/movsx/lea 助记符，**并且要求显式写了两个操作数（含逗号）**。
+    /// 逗号这一条不是格式洁衡：`movsb` / `movsq` / `movsd` / `movsl` 既是 SSE/整数
+    /// 搬运的名字，也是**字符串指令**的名字，而字符串指令隐式读写 rsi/rdi/rcx，
+    /// 连发两条就是搬两个单元 —— 删掉第二条就少搬一字节。实测（llex.c，字符串
+    /// 常量规整）：只看助记符前缀时 `print("hello")` 都跑不起来，报 `malformed
+    /// number near 'p\x..\x..'`，因为词法器读到的缓冲区少拷了一截。
+    /// 字符串指令的 GAS 文本没有操作数（`rep` 前缀形式首 token 是 `rep`），
+    /// 所以「含逗号」正好把两类同名指令分开。
+    fn is_idempotent_move(gas: Option<&str>) -> bool {
+        let Some(g) = gas else { return false };
+        let mut it = g.split_whitespace();
+        let mn = it.next().unwrap_or("");
+        if !(mn.starts_with("mov") || mn == "lea") {
+            return false;
+        }
+        // 操作数部分必须存在且是两个（`a, b`）。`%fs:0x28, %rax` 这类也含逗号。
+        let ops = g.split_once(' ').map(|(_, rest)| rest).unwrap_or("");
+        ops.contains(',')
+    }
+
+    /// 窥孔分级开关：`DCC_PEEP=0` 全关，`1` 只开「相邻同字节」一条，`2` 再加
+    /// 寄存器往返，`3`（默认）再加帧槽往返。分级是为了**能二分定位**：
+    /// 窥孔一旦削错，症状是目标程序在别处读垃圾，靠读汇编反推代价极高。
+    fn peep_level() -> u8 {
+        static LEVEL: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+        *LEVEL.get_or_init(|| {
+            std::env::var("DCC_PEEP")
+                .ok()
+                .and_then(|v| v.trim().parse::<u8>().ok())
+                .unwrap_or(3)
+                .min(3)
+        })
+    }
+
+    /// 重复一条自己是否恒等：目的寄存器不得出现在源操作数的寻址里。
+    ///
+    /// 两个名字撞车：`movsb`/`movsq`/`movsd`/`movsl` 既是搬运又是字符串指令，而后者
+    /// 隐式读写 rsi/rdi/rcx，连发两条就搬两个单元（删一条 = 少搬一字节，实测 llex.c
+    /// 词法器读到少拷一截的缓冲区）。字符串指令是 `Raw` 单字节（0xA4 / 0xA5），
+    /// 下面的 `bytes.len() == 3` 已把它们排除；`is_idempotent_move` 的「含逗号」
+    /// 是同一件事的第二道保险。
+    fn peep_repeat_safe(insn: &crate::codegen::x86_64::insn::Insn) -> bool {
+        use crate::codegen::x86_64::opcode::{Operand as O, X86_64Opcode};
+        match &insn.op {
+            // reg ← mem：目的号参与寻址时不是自反（`mov (%rax), %rax`）
+            X86_64Opcode::MovRm { dst, src, .. } | X86_64Opcode::MovExt { dst, src, .. } => {
+                match (dst, src) {
+                    (O::Reg(d, _), O::Mem(m)) => {
+                        Some(*d) != m.base && m.index.map_or(true, |(i, _)| i != *d)
+                    },
+                    // mem ← reg：目的不碰寄存器；reg ← reg：自反形态
+                    (O::Mem(_), O::Reg(_, _)) | (O::Reg(_, _), O::Reg(_, _)) => true,
+                    _ => false,
+                }
+            },
+            // 只认 `Codegen::mov` 的 ModRM.mod=11（寄存器到寄存器）形态。
+            // 其余 Raw（内联 asm、字符串指令、序言裸字节）一律不认。
+            X86_64Opcode::Raw { bytes, .. } => bytes.len() == 3 && (bytes[2] & 0xC0) == 0xC0,
+            _ => false,
+        }
+    }
+
+    /// 把一条待发指令归类成窥孔用得上的形态。
+    ///
+    /// 只认**本后端两种确定形态**：`Codegen::mov` 写出的 REX.W 0x8B /r（ModRM.mod=11），
+    /// 以及 `load_stack`/`store_stack` 的 `MovRm{B64, [r13+disp]}`。其余一律 `Other` ——
+    /// 少认一种只是少削一条，认错一种就是静默错值。
+    fn classify_peep(insn: &crate::codegen::x86_64::insn::Insn) -> PeepKind {
+        use crate::codegen::shared::asm_operand::Width;
+        use crate::codegen::x86_64::opcode::{Operand as O, X86_64Opcode};
+        if let X86_64Opcode::MovRm {
+            width: Width::B64,
+            dst,
+            src,
+            rip_relative: false,
+        } = &insn.op
+        {
+            match (dst, src) {
+                (O::Reg(d, _), O::Mem(m))
+                    if m.base == Some(13) && m.index.is_none() && m.seg.is_none() =>
+                {
+                    return PeepKind::LoadSlot { off: m.disp as i64, dst: *d };
+                },
+                (O::Mem(m), O::Reg(s, _))
+                    if m.base == Some(13) && m.index.is_none() && m.seg.is_none() =>
+                {
+                    return PeepKind::StoreSlot { off: m.disp as i64, src: *s };
+                },
+                _ => {},
+            }
+        }
+        if let X86_64Opcode::Raw { bytes, .. } = &insn.op {
+            // `Codegen::mov(dst, src)` 的唯一形态：REX.W 0x8B /r，ModRM.mod=11。
+            // REX.R 给 dst、REX.B 给 src（两个 >=8 时必须各自独立取位）。
+            if bytes.len() == 3
+                && bytes[1] == 0x8B
+                && (bytes[0] & 0xF8) == 0x48
+                && (bytes[2] & 0xC0) == 0xC0
+            {
+                let src = ((bytes[0] & 1) << 3) | (bytes[2] & 7);
+                let dst = (((bytes[0] >> 2) & 1) << 3) | ((bytes[2] >> 3) & 7);
+                return PeepKind::MovRr { dst, src };
+            }
+            // `mov_imm` 的两条形态（`instructions.rs::mov_imm`）：
+            //   i32 内: REX.W C7 /0 id → [rex, 0xC7, 0xC0|reg, imm32]（7 字节）
+            //   超出:   REX.W B8+r id   → [rex, 0xB8+reg, imm64]（10 字节）
+            if bytes.len() == 7
+                && (bytes[0] & 0xF8) == 0x48
+                && bytes[1] == 0xC7
+                && (bytes[2] & 0xF8) == 0xC0
+            {
+                let dst = ((bytes[0] & 1) << 3) | (bytes[2] & 7);
+                return PeepKind::MovImm { dst };
+            }
+            if bytes.len() == 10
+                && (bytes[0] & 0xF8) == 0x48
+                && (0xB8..=0xBF).contains(&bytes[1])
+            {
+                let dst = ((bytes[0] & 1) << 3) | (bytes[1] - 0xB8);
+                return PeepKind::MovImm { dst };
+            }
+            // 32 位 reg←reg：0x89 /r（r/m ← reg）与 0x8B /r（reg ← r/m），
+            // 无 REX.W。两者的 REX.R/REX.B 各自对应 ModRM.reg / ModRM.r/m。
+            // 只认 ModRM.mod=11；带 0x66/0x0F 前缀的形态（16 位 / 双字节）落空。
+            let (opc, rex, mi): (u8, u8, usize) = match bytes.len() {
+                2 => (bytes[0], 0, 1),
+                3 if (bytes[0] & 0xF0) == 0x40 && (bytes[0] & 0x08) == 0 => {
+                    (bytes[1], bytes[0], 2)
+                },
+                _ => (0, 0, 0),
+            };
+            if (opc == 0x8B || opc == 0x89) && mi != 0 {
+                let reg = ((rex & 4) << 1) | ((bytes[mi] >> 3) & 7);
+                let rm = ((rex & 1) << 3) | (bytes[mi] & 7);
+                if (bytes[mi] & 0xC0) == 0xC0 {
+                    let (dst, src) = if opc == 0x8B { (reg, rm) } else { (rm, reg) };
+                    return PeepKind::MovRr32 { dst, src };
+                }
+                if opc == 0x8B {
+                    // `mov reg32, [mem]`：目的被整字写入，高 32 位自动零扩展。
+                    return PeepKind::LoadR32 { dst: reg };
+                }
+            }
+        }
+        // 32 位寄存器目的：写目的时高 32 位自动清零。
+        //    MovRm B32 + Reg 源 → 自反/reg-reg 搬运
+        //    MovRm B32 + Mem 源 → 加载
+        //    MovExt 到 B32     → movzx/movsx 到 32 位目的
+        if let X86_64Opcode::MovRm {
+            width: Width::B32,
+            dst: O::Reg(d, _),
+            src,
+            ..
+        } = &insn.op
+        {
+            return match src {
+                O::Reg(s, _) => PeepKind::MovRr32 { dst: *d, src: *s },
+                _ => PeepKind::LoadR32 { dst: *d },
+            };
+        }
+        // 扩展搬运（movzx/movsx）：「整条写」只对 **32 位或 64 位目的**成立
+        // （32 位写自动零扩展高 32 位）。**`to: B8/B16` 只写低 8/16 位**，
+        // 高位保留旧值 —— 把它当完整覆盖会删掉一条仍然可见的上一条写
+        // （实测：Lua 用 debug 构建后 `print`/`io` 全成 nil）。所以必须看 `to`。
+        //
+        // 源为内存时是内存读（可能是 volatile），只能当「本条覆盖」，不能当
+        // 「上一条可删」—— 分类里用 `LoadR32` 与 `MovRr32` 把两者分开。
+        if let X86_64Opcode::MovExt {
+            to,
+            dst: O::Reg(d, _),
+            src,
+            ..
+        } = &insn.op
+        {
+            return match (to, src) {
+                (Width::B32, O::Reg(s, _)) => PeepKind::MovRr32 { dst: *d, src: *s },
+                (Width::B32, _) => PeepKind::LoadR32 { dst: *d },
+                (Width::B64, O::Reg(s, _)) => PeepKind::MovExtRr { dst: *d, src: *s },
+                (Width::B64, _) => PeepKind::LoadR32 { dst: *d },
+                _ => PeepKind::Other,
+            };
+        }
+        PeepKind::Other
+    }
+
+    /// 当前指令是否被上一条完全控制（可以整条不发）。
+    fn peep_is_redundant(
+        last: &PeepLast,
+        cur: PeepKind,
+        cur_bytes: &[u8],
+        cur_idem: bool,
+        cur_repeat_safe: bool,
+        level: u8,
+    ) -> bool {
+        // 相邻两条字节完全相同的幂等搬运：mov 不读标志、不产生副作用，第二条不改变
+        // 任何状态（包括 `eval_holding` —— 它描述的那个号里的值一模一样）。
+        // `repeat_safe` 是必须的：`mov (%rax), %rax` 也「幂等」，但第一次就换了 %rax。
+        if level >= 1
+            && last.bytes == cur_bytes
+            && last.idempotent
+            && cur_idem
+            && last.repeat_safe
+            && cur_repeat_safe
+        {
+            return true;
+        }
+        if level < 2 {
+            return false;
+        }
+        match (last.kind, cur) {
+            // `mov x→y` 后 `mov y→x`：第二条把 x 写回它本来的值（恒等），
+            // 第一条写入 y 的效果必须保留 —— 所以删的是第二条，不是第一条。
+            (PeepKind::MovRr { dst: y, src: x }, PeepKind::MovRr { dst: x2, src: y2 })
+                if x2 == x && y2 == y =>
+            {
+                true
+            },
+            // 写槽后立刻读同一槽：load 的结果就是刚写进去的那个号。
+            (PeepKind::StoreSlot { off: o1, src: s }, PeepKind::LoadSlot { off: o2, dst: d })
+                if level >= 3 && o1 == o2 && s == d =>
+            {
+                true
+            },
+            // 读槽后立刻写回同一槽：槽里仍是读出来的那个值，写回是恒等。
+            (PeepKind::LoadSlot { off: o1, dst: d }, PeepKind::StoreSlot { off: o2, src: s })
+                if level >= 3 && o1 == o2 && d == s =>
+            {
+                true
+            },
+            _ => false,
+        }
+    }
+}
+
 impl Codegen {
     // ========================================================================
     // Core byte emission
@@ -95,6 +385,9 @@ impl Codegen {
     pub(crate) fn emit(&mut self, b: &[u8]) {
         self.code.extend_from_slice(b);
         self.eval_holding = None;
+        // 裸字节（序言/epilogue/内联 asm/nop 填充）不是「上一条逻辑指令」，
+        // 跨过它的相邻关系不再成立。
+        self.peep_last = None;
     }
 
     /// 指令记录统一发射入口 (x86_64 变长, 字节原样直写).
@@ -124,6 +417,107 @@ impl Codegen {
         }
         match insn.encode_bytes() {
             Some(bytes) => {
+                // 发射层窥孔：只看「和上一条已发指令」的相邻关系。三条规则都保持
+                // 「每个寄存器与帧槽的最终值」不变（包括 `eval_holding` 指向的号），
+                // 所以不回避求值落点 —— 回避会把绝大多数机会让掉。
+                let kind = Self::classify_peep(insn);
+                let idem = Self::is_idempotent_move(insn.gas_text.as_deref());
+                let repeat_safe = Self::peep_repeat_safe(insn);
+                let level = Self::peep_level();
+                // 死写回删：上一条**整条写**了某个号 d，而这一条又**整条重写** d（且不读它），
+                // 那条写就在任何路径上都到不了读点。
+                //
+                // 这不是「相邻两条」的窥孔延伸——lvm.c 里 812 条 `mov $0` 是它的主要归宿
+                // （`lua_assert` / 宏展开的 0 常量），它跨越了「中间那些不碰这个号的指令」，
+                // 属于指令流级的 DCE；`mov A,B; mov A,C`（A 被覆盖）是同一形状的寄存器版。
+                //
+                // 上一条为什么可以不止 `MovImm`：判据只用到「它完整写了 d」这一个事实。
+                // `MovRr`/`MovExtRr` 是完整 64 位写；`MovRr32`/`LoadR32` 写低 32 位时
+                // 自动零扩展高 32 位，也是完整写；`MovImm` 同理。
+                //
+                // 上一条**不允许**是任意内存读（`LoadR32` 的 `[mem]` 源）：那可能是
+                // volatile/MMIO 读，删掉一次读就是改变可观测行为。帧槽读（`LoadSlot`，
+                // base 固定为 r13）没有这个问题。
+                //
+                // 回删安全前提（三条都不依赖未来信息）：
+                //   1. `peep_last` 永远是最后一条已发指令，它之后没有别的字节；
+                //   2. `label()` / `emit()`（裸字节）/ 函数边界都清空 `peep_last`，
+                //      所以被删的那条不可能是任何跳转的落点；
+                //   3. `eval_holding` 随之作废（否则后续求值会拿被删掉的那个值）。
+                let overwritten: Option<u8> = match self.peep_last.as_ref().map(|l| l.kind) {
+                    Some(PeepKind::MovImm { dst })
+                    | Some(PeepKind::MovRr { dst, .. })
+                    | Some(PeepKind::MovRr32 { dst, .. })
+                    | Some(PeepKind::MovExtRr { dst, .. })
+                    | Some(PeepKind::LoadSlot { dst, .. }) => Some(dst),
+                    _ => None,
+                };
+                let dead_pc: Option<u64> = match (overwritten, self.peep_last.as_ref().map(|l| l.pc))
+                {
+                    (Some(d), Some(pc)) => match kind {
+                        PeepKind::MovRr { dst, src }
+                        | PeepKind::MovExtRr { dst, src }
+                        | PeepKind::MovRr32 { dst, src }
+                            if dst == d && src != d =>
+                        {
+                            Some(pc)
+                        },
+                        PeepKind::LoadSlot { dst, .. } | PeepKind::MovImm { dst }
+                            if dst == d =>
+                        {
+                            Some(pc)
+                        },
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(pc) = dead_pc {
+                    self.code.truncate(pc as usize);
+                    self.insn_records.pop();
+                    self.eval_holding = None;
+                    self.peep_last = None;
+                    if std::env::var_os("DCC_PEEP_TRACE").is_some() {
+                        eprintln!("[peep] drop dead mov-imm @{pc:x}");
+                    }
+                }
+                // 32 位自反搬运（`mov a32, a32`）是「结果零扩展回 64 位」的收尾。
+                // 若上一条已经是 32 位写同一号（32 位写自动零扩展），这条是纯冗余：
+                // `mov eax, DWORD PTR [rax]`（vmfetch 的 `i = *(pc++)`）每条
+                // dispatch 都走一遍这个形状，而它已经零扩展了。
+                if let PeepKind::MovRr32 { dst: a, src } = kind {
+                    if a == src {
+                        if let Some(PeepKind::LoadR32 { dst }) =
+                            self.peep_last.as_ref().map(|l| l.kind)
+                        {
+                            if dst == a {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                if level > 0 {
+                    if let Some(last) = self.peep_last.take() {
+                        if Self::peep_is_redundant(
+                            &last,
+                            kind,
+                            &bytes,
+                            idem,
+                            repeat_safe,
+                            level,
+                        ) {
+                            // 当前指令整条不发；上一条仍是「最后一条已发指令」。
+                            if std::env::var_os("DCC_PEEP_TRACE").is_some() {
+                                eprintln!(
+                                    "[peep] drop @{:x}: {}",
+                                    self.code.len(),
+                                    insn.gas_text.as_deref().unwrap_or("<no gas>")
+                                );
+                            }
+                            self.peep_last = Some(last);
+                            return true;
+                        }
+                    }
+                }
                 // P9 方案 C: 在发射前记下 pc, 发射后把 (pc, insn) 追加进 insn_records.
                 // 这张表是 -S 渲染器 (build_asm_output_v2) 的唯一真源, 不再走 disasm.
                 // 不改变发射字节 —— 只是多写一份 (pc, insn) 到 Vec, 对 .text 段零影响.
@@ -156,9 +550,19 @@ impl Codegen {
                     }
                 }
                 self.insn_records.push((pc, rec));
+                self.peep_last = Some(PeepLast {
+                    kind,
+                    bytes,
+                    pc,
+                    idempotent: idem,
+                    repeat_safe,
+                });
                 true
             },
-            None => false,
+            None => {
+                self.peep_last = None;
+                false
+            },
         }
     }
 
@@ -208,6 +612,9 @@ impl Codegen {
 
     pub fn label(&mut self, name: &str) {
         self.labels.insert(name.to_string(), self.pos());
+        // 标签是控制流的汇合点：它之前的「上一条指令」可能从别处跳进来，
+        // 也可能就是某个前向跳转的落点，不能再当作窥孔的左邻。
+        self.peep_last = None;
     }
 
     /// 一个函数 (含其嵌套函数) 发射结束时的 pending 闭合性断言。

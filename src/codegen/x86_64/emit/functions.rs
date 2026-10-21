@@ -97,6 +97,169 @@ impl Codegen {
         !self.addr_escaped.contains(name)
     }
 
+    /// 递归收集块内（含嵌套语句）的全部局部变量声明。
+    ///
+    /// 只取声明、不取表达式：本函数只用来统计「这个名字在函数里被声明了几次」。
+    /// `Switch` 的两块（`prelude` 与各 `case.body`）都要走 —— 漏了一处，
+    /// 同一名字在两处声明就会被误判成「唯一」。
+    fn collect_local_decls<'a>(items: &'a [crate::ast::BlockItem], out: &mut Vec<&'a crate::ast::VarDecl>) {
+        use crate::ast::{BlockItem, Decl};
+        for it in items {
+            match it {
+                BlockItem::Decl(Decl::Var(v)) => out.push(v),
+                BlockItem::Decl(_) => {},
+                BlockItem::Stmt(s) => Self::collect_stmt_decls(s, out),
+            }
+        }
+    }
+
+    fn collect_stmt_decls<'a>(s: &'a crate::ast::Stmt, out: &mut Vec<&'a crate::ast::VarDecl>) {
+        use crate::ast::Stmt;
+        match s {
+            Stmt::If { then_, else_, .. } => {
+                Self::collect_stmt_decls(then_, out);
+                if let Some(e) = else_ {
+                    Self::collect_stmt_decls(e, out);
+                }
+            },
+            Stmt::While { body, .. }
+            | Stmt::Do { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::Label { stmt: body, .. } => Self::collect_stmt_decls(body, out),
+            Stmt::Block { b, .. } => Self::collect_local_decls(&b.items, out),
+            Stmt::Switch { cases, prelude, .. } => {
+                Self::collect_local_decls(prelude, out);
+                for c in cases {
+                    Self::collect_local_decls(&c.body.items, out);
+                }
+            },
+            Stmt::Invoke { call, .. } => Self::collect_stmt_decls(call, out),
+            _ => {},
+        }
+    }
+
+    /// 给**没走 SSA**的函数挑一批热局部变量，让它们住进 callee-saved 号。
+    ///
+    /// 为什么需要：`VarDecl::home` 只有 SSA 分配器会写（`ssa::regalloc`），而
+    /// 含 `goto`/computed-goto/`switch` 的函数整函数退出 SSA（`is_structured`）。
+    /// `luaV_execute` 正是这种：于是它的 `base`/`pc`/`cl`/`k` 每次都从栈上取，
+    /// 静态栈引用是 gcc 的 10 倍。而 fib(32) 的耗时比 ≈ 静态指令数比（实测两边
+    /// 都是 4.3x），说明每个 opcode 多发的指令就是全部代价 —— 不存在「指令多但
+    /// 被乱序执行掩盖」这回事。
+    ///
+    /// 为什么是 callee-saved 而不是 caller-saved：`register asm` 那种**用户显式**
+    /// 绑定的语义是「调用后可能被破坏」，每次 call 前后都要存/取；实测手绑
+    /// `base`/`pc`/`cl`/`k` 后 mov-rr 少了 1815 条，栈引用反而**多了 1518 条**。
+    /// 后端自选的家是优化，必须跨 call 正确 ⇒ 只能落在 callee-saved 上，那样
+    /// 不需要任何存取，两端都减。
+    ///
+    /// 判据全部是保守的，任何一条不满足就退回栈槽（不绑是不会错的，绑错是静默错值）：
+    /// - 名字在**整个函数**里只声明一次（同名遮蔽时 `homes` 只有一张表，两个对象
+    ///   会共用一个号）；
+    /// - 类型可绑（`ssa::regalloc::bindable_ty`）、宽度 1..=8、非静态存储、非 volatile、
+    ///   非段地址空间、非 VLA；
+    /// - 地址未被取走（`register_binding_allowed`：绑定后那个栈槽再没人写，
+    ///   `&v` 的读者会拿到旧值）；
+    /// - 该名字还没有家（用户 `register asm` 优先，file-scope 绑定也不覆盖）。
+    fn plan_auto_homes(&mut self, f: &FuncDecl) {
+        let Some(body) = &f.body else { return };
+        // 本后端能当变量之家的 callee-saved 号：%r13 是帧基址、%rbp 在
+        // -fno-omit-frame-pointer 下是帧指针、%rsp 是栈顶，三者都不行。
+        // 顺序进产物，所以按既有分配器的习惯从小到大。
+        //
+        // 号数可调（`DCC_AUTO_HOME=0..4`，**默认 0 即关闭**）。
+        //
+        // 实测（`luaV_execute`，-O2）：打开 1/2/3/4 个号时指令数
+        // 16810/16810/16809/16662，栈引用 3616/4030/4282/4708 —— mov-rr 减多少，
+        // 栈引用就增多少，两边精确互补。原因很硬：这些号与 Binop 的临时值
+        // **同一个池**，变量占一个，暂存就只能落帧槽。没有 CFG 活性就分不清
+        // 「这个变量在这个区间真的值一个号」，在 emit 层分只能做成零和。
+        // 开关留着是为了不靠记忆重复这个实验；它不是第二套行为。
+        const POOL: [u8; 4] = [3, 12, 14, 15];
+        let budget: usize = std::env::var("DCC_AUTO_HOME")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0)
+            .min(POOL.len());
+        if budget == 0 {
+            return;
+        }
+        let pool = &POOL[..budget];
+        let mut decls: Vec<&crate::ast::VarDecl> = Vec::new();
+        Self::collect_local_decls(&body.items, &mut decls);
+        if decls.is_empty() {
+            return;
+        }
+        // 名字 → 声明次数。只绑「唯一一次」的名字。
+        let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for v in &decls {
+            *seen.entry(v.name.name.as_str()).or_insert(0) += 1;
+        }
+        let mut used: std::collections::HashSet<u8> = self
+            .homes
+            .values()
+            .filter_map(|(l, _)| l.reg())
+            .map(|r| r.n)
+            .collect();
+        let mut pool_idx = 0usize;
+        for v in decls {
+            if pool_idx >= pool.len() {
+                break;
+            }
+            let name = &v.name.name;
+            if seen.get(name.as_str()).copied() != Some(1) {
+                continue;
+            }
+            if self.auto_homes.contains_key(name) || self.homes.contains_key(name) {
+                continue;
+            }
+            if v.is_static || v.is_extern || v.is_thread_local {
+                continue;
+            }
+            if v.register_name.is_some() || v.home.is_some() {
+                continue;
+            }
+            if v.quals.is_volatile() || !matches!(v.addr_space, crate::ast::AddrSpace::None) {
+                continue;
+            }
+            let sz = v.ty.size();
+            if sz == 0 || sz > 8 {
+                continue;
+            }
+            if !crate::ssa::regalloc::bindable_ty(&v.ty) {
+                continue;
+            }
+            if !self.register_binding_allowed(name) {
+                continue;
+            }
+            // 取一个还没被占的号；被占就跳过它（不挤掉用户/全局的绑定）。
+            let mut reg = None;
+            while pool_idx < pool.len() {
+                let cand = pool[pool_idx];
+                pool_idx += 1;
+                if used.insert(cand) {
+                    reg = Some(cand);
+                    break;
+                }
+            }
+            let Some(reg) = reg else { break };
+            let Some(loc) = Self::reg_home_location(reg) else {
+                continue;
+            };
+            self.auto_homes.insert(name.clone(), loc);
+            self.homes.insert(name.clone(), (loc, v.ty.clone()));
+        }
+    }
+
+    /// 号 → 家。复用 `parse_reg_home` 的名字表，避免在这里再编一份「几号对应谁」。
+    fn reg_home_location(reg: u8) -> Option<crate::location::Location> {
+        const NAMES: [&str; 16] = [
+            "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10",
+            "r11", "r12", "r13", "r14", "r15",
+        ];
+        Self::parse_reg_home(NAMES.get(reg as usize)?)
+    }
+
     pub fn compile_func(&mut self, f: &FuncDecl, prog: &Program) {
         let arg_regs: [u8; 6] = [7, 6, 2, 1, 8, 9];
         self.var_map.clear();
@@ -131,6 +294,11 @@ impl Codegen {
             }
             self.homes.insert(n, b);
         }
+        // 后端自选的家必须在 `resync_pins` / `reset_reg_tracker` **之前**注入：
+        // 那两个函数从 `homes` 里取号去 claim 与 patch 序言保存，晚一步就会把
+        // 刚分出去的 callee-saved 号当空闲临时号发掉（覆盖变量家 = 静默错值）。
+        self.auto_homes.clear();
+        self.plan_auto_homes(f);
         // 绑定表定稿了，把钉住集合重投影一遍。**为什么现在就要做**：`naked` 分支在
         // 下面的 `reset_reg_tracker()` 之前就 `return`，而旧代码的 `owned_gp` 是当时现查
         // `reg_bindings` 算的；如果 `pinned` 等到 reset 才清，naked 函数里的内联 asm
@@ -159,6 +327,9 @@ impl Codegen {
         // 持有记录不得活过一个函数：不准则本函数开头的任何一次 `eval_held()` 会拿到
         // 上一个函数留下的号（那时代码里那个寄存器早已不是那个值）。
         self.eval_holding = None;
+        // 窥孔的「上一条」同样不得跨函数：上一个函数的尾指令和本函数首指令
+        // 之间隔着序言/栈帧建立，不存在任何相邻关系。
+        self.peep_last = None;
         // 前置二/三的两个函数级事实同样不得活过一个函数：覆盖表泄漏会把下一个函数的
         // 变量钉在错误的内存位置上；保存槽表则是本帧坐标，跳帧用它们是直接错值。
         self.home_overrides.clear();

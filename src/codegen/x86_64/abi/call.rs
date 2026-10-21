@@ -1336,6 +1336,10 @@ mod tests {
         assert_eq!(c.persist_ext_homes(), 0, "外层已存下时不得再存一遍");
         assert_eq!(c.code.len(), at, "重复 persist 不该发指令");
 
+        // 真实用法里 persist 与 restore 之间必有一条 `call`，而 `emit` 的裸字节出口
+        // 会重置窥孔窗口；本用例只测通道，先显式重置，否则发射层窥孔规则 3
+        // （写槽后立刻读同一槽 ⇒ 读可省，且值确在同一个号里）会把取回那条删掉。
+        c.peep_last = None;
         c.restore_ext_homes(1);
         assert_eq!(
             c.home_for("v"),

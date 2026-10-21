@@ -24,10 +24,12 @@
 //
 // # 准入条件（每一条都对应一个实测过的失败形态）
 //
-// 1. 只处理局部 `Decl::Var`，且类型是 1/2/4/8 字节的**标量整数**。
-//    （2026-10 订正：旧稿这里写「整数或指针」，实测指针绑定在 364 语料上炸出约十个
-//    OPT-DIFF/SEGV —— 家通道有「写寄存器、某条读路径仍读栈槽」的不一致，指针局部会
-//    稳定踩中。判据以 `bindable_ty` 的实现与那里的注释为准。）
+// 1. 只处理局部 `Decl::Var`，且类型是 1/2/4/8 字节的**标量整数或指针**。
+//    （2026-10 订正两轮：旧稿写「整数或指针」时实现并不支持指针；随后实测指针绑定在
+//    364 语料上炸出约十个 OPT-DIFF/SEGV，根因是家通道「写进寄存器、某条读路径仍读
+//    栈槽」的不一致 —— 四处读出点漏了 `home_for`。家通道补齐后指针重新纳入，
+//    364 夹具四档对拍 0 OPT-DIFF，`luaV_execute` 的 `base`/`pc`/`cl`/`k` 也因此
+//    有了自动驻留的资格。判据以 `bindable_ty` 的实现与那里的注释为准。）
 //    浮点要换 xmm 通道（后端没有为它准备的宽度口径），聚合/数组/向量本质是内存对象，
 //    `long double` 是 10 字节对象，`_Atomic` 与位域另有语义。
 // 2. 地址被取走过 ⇒ 不绑。判据复用 `ast_gvn::addr_escaped_names`（§7.8），绝不自己
@@ -298,6 +300,10 @@ pub struct Ctx {
     pub debug_info: bool,
     /// file-scope `register asm` 变量占住的号
     pub taken_regs: HashSet<u8>,
+    /// 本函数含 goto / label / computed-goto（→ `ssa::structure::has_unstructured_flow`）。
+    /// 置位时走 analysis-only 两件事：准入判据换成 [`definitely_assigned`]，
+    /// 并**关闭号共用**（解释见 `plan_for` 里的 `shared_slots`）。
+    pub unstructured: bool,
 }
 
 /// 算出该绑哪些变量，并把结果写进**重建后的** AST。
@@ -490,6 +496,8 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
     let mut plan = Plan::empty();
     // D5 的守卫不再在这里早返（见 `register_homes_allowed`）：判据照跑，只是不产出 Reg 家。
     let homes_allowed = register_homes_allowed(ctx);
+    // 号共用（逐点干涉驱动的号槽复用）只在结构化通道开启，理由见 `pick` 里那段。
+    let shared_slots = !ctx.unstructured;
     let mut sc = Scan::default();
     // 决策阶段只看**重建前**的体（Phase 5.0）。重建后那份事实由 `validate_against_rebuilt`
     // 负责，它不再参与决定谁绑、绑到哪个号。
@@ -502,6 +510,17 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
     taken.extend(sc.user_bound_regs.iter().copied());
     let infos = &sc.infos;
     let spans = base_spans(func);
+    // 非结构化函数（goto/label/computed-goto）的「已赋值」事实。空集 = 不走这条判据。
+    //
+    // 为什么要换口径：`Span::entry_def` 要求「第一次出现是 entry 块里的定义」，
+    // 而解释器主循环的 `base/pc/cl/k` 在 `newframe:` 标签之后才赋值（那段代码支配
+    // 全部使用点）。不换口径，这四个最热的指针连候选都进不了。
+    // 只在非结构化通道启用：结构化函数继续用 entry_def，产物逐字节不变。
+    let assigned: HashSet<String> = if ctx.unstructured {
+        crate::ssa::defassign::definitely_assigned(func)
+    } else {
+        HashSet::new()
+    };
 
     // 候选者必须按**完全确定**的顺序处理：候选集来自 HashMap，排序键取
     // 「访问次数降序 → 区间起点升序 → 名字升序」，寄存器按 POOL 顺序取第一个不冲突的。
@@ -544,13 +563,35 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
                 // IR 里没有这个基名的任何读写：没有生命期可言，也就无从判断
                 // 「定义是否在 entry 块」，一律不绑。
                 None => Some("no-ir-presence"),
-                Some(sp) if !sp.entry_def => Some("not-defined-in-entry-block"),
-                Some(_) => None,
+                Some(sp) => {
+                    let defined = if ctx.unstructured {
+                        assigned.contains(name)
+                    } else {
+                        sp.entry_def
+                    };
+                    if !defined {
+                        Some("not-defined-in-entry-block")
+                    } else {
+                        None
+                    }
+                },
             }
         };
         match why {
             Some(w) => plan.rejected.push((name.clone(), w)),
             None => {
+                // 诊断窗口：`DCC_REGALLOC_ONLY=base,pc` 只让名单里的基名参与分配。
+                // 目的不是产品行为，而是把「哪个变量进家」从分配器的一次性决定变成
+                // 可逐项测量的实验（本轮就是靠它定价 base/pc/cl/k 各自的收益与代价）。
+                // 只在 analysis-only 通道生效，默认不设 ⇒ 零行为变化。
+                if ctx.unstructured {
+                    if let Ok(list) = std::env::var("DCC_REGALLOC_ONLY") {
+                        if !list.split(',').any(|s| s.trim() == name.as_str()) {
+                            plan.rejected.push((name.clone(), "not-in-DCC_REGALLOC_ONLY"));
+                            continue;
+                        }
+                    }
+                }
                 let sp = &spans[name];
                 cands.push(Cand {
                     name: name.clone(),
@@ -603,7 +644,11 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
     // 结论：自动池保持 `{r8, r9}`。若将来要再开号，判据不是「通道能不能存」
     // （能）而是「这个号在后端所有发射路径上有没有非 call 的硬写入」—— 必须逐号
     // 在四档执行对拍里验过，不靠推测。
-    let iv = crate::ssa::liveness::compute(func);
+    let iv = if shared_slots {
+        Some(crate::ssa::liveness::compute(func))
+    } else {
+        None
+    };
     // 「号槽 → 持有该号的基名列表」。同一个号可以有多个人，只要它们两两不干涉。
     let mut slot_holders: Vec<Vec<String>> = Vec::new();
     // 已分配的 spill 槽序号（per-value Spill 家）。分配顺序由候选排序（accesses 降序）
@@ -658,6 +703,17 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
                     Some(v) if v.is_empty() => true,
                     // 号槽已有人：必须与**所有**持有者两两不干涉（∀ 判据）才能复用。
                     Some(holders) => {
+                        // analysis-only 通道（goto/label/computed-goto）关闭号共用。
+                        // 理由不是「懒得算」而是判据的**输入不可信**：共用靠逐点干涉，
+                        // 而干涉的可信度以「每个使用都被某个定义支配」为前提；
+                        // label phi 不重写使用点（`insert_label_phis` 只挂 phi 不改名），
+                        // 跨 label 的版本链在 IR 里并不闭合。关掉共用的代价是池子从
+                        // 「可复用」降成「一变量一号」，而这四个 callee-saved 号本来
+                        // 就只够给最热的四个指针——收益不在复用上。
+                        if !shared_slots {
+                            return false;
+                        }
+                        let iv = iv.as_ref().expect("shared_slots ⇒ 干涉表已算");
                         let ok = cv.iter().all(|cv_name| {
                             holders.iter().all(|h| {
                                 let hv = crate::ssa::liveness::versions_of_base(func, h);
@@ -700,10 +756,18 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
             // §11.54 闭环后延伸池已默认开，仍然池满时把这个候选 spill 到 band ——
             // 这就是 5.1.e 的生产者本体。它仍进 bindings 表（带 Spill 家），
             // 让 to_loc_map / apply_bindings 能把家一路交付到 AST 声明上。
+            //
+            // analysis-only 通道不产 Spill 家：分配结果直接落到**原封不动的 AST**
+            // 声明上，而那条路径上没有人给溢出槽编号（`Spill(slot)` 的槽位是重建期的
+            // 帧布局算的）。让它们保持普通栈局部 —— 那本来就是它们今天的家。
             None => {
-                let slot = spill_slot_next;
-                spill_slot_next += 1;
-                plan.spilled.push((c.name.clone(), slot));
+                if shared_slots {
+                    let slot = spill_slot_next;
+                    spill_slot_next += 1;
+                    plan.spilled.push((c.name.clone(), slot));
+                } else {
+                    plan.rejected.push((c.name.clone(), "pool-full"));
+                }
             },
         }
     }
@@ -809,19 +873,20 @@ fn max_overlap(spans: Vec<(i32, i32)>) -> usize {
 ///   * 数组、结构体、联合体：它们本身就是内存对象；
 ///   * `_Atomic`：原子访问必须留在内存对象上。
 /// 收窄的代价是少绑几个变量，放宽的代价是静默错值 —— 这个方向上不能含糊。
-fn bindable_ty(t: &Type) -> bool {
+pub(crate) fn bindable_ty(t: &Type) -> bool {
     match t {
-        // 指针**不**绑（2026-10 实测订正）：本文件头注释旧稿写「1/2/4/8 字节标量整数
-        // 或指针」，与这里的实现不一致，而实现是对的。打开指针绑定后 364 语料四档对拍
-        // 立刻多出 ~10 个 OPT-DIFF（c_vec_run / c_address_const / c_base_file /
-        // c_builtin_dbg / c_builtin_lowlevel / c_ld80_arith 全是 SEGV）：家通道存在
-        // 「写进寄存器、某条读路径仍读栈槽」的不一致（P12 字面形态立项文档说的后端
-        // 重写），指针局部会稳定踩中。排除的代价：解释器类程序最热的变量（Lua
-        // `luaV_execute` 的 base/pc/cl/k 全是指针）驻留不了寄存器 —— 那正是 Lua
-        // 与 gcc 差距的主要来源，但要先修家通道，不是先放宽类型。
+        // 指针**可以**绑（2026-10 第二轮订正）。第一轮把指针排除是对的：当时家通道存在
+        // 「写进寄存器、某条读路径仍读栈槽」的不一致，指针局部会稳定踩中（364 语料
+        // 上 ~10 个 OPT-DIFF/SEGV：c_vec_run / c_address_const / c_base_file /
+        // c_builtin_dbg / c_builtin_lowlevel / c_ld80_arith）。那四处读出点补齐后
+        // （语义层 `AddressBase::HomeLoad`、`emit_ident_base_addr` 的局部标量/指针、
+        // `&arr[i]` 的局部指针基址、`StorageInfo.home`），同一个 364 夹具集四档对拍
+        // 0 OPT-DIFF。排除指针的代价曾是解释器类程序最热的变量（Lua `luaV_execute`
+        // 的 base/pc/cl/k 全是指针）驻留不了寄存器。
         // `Func` 类型与 `_Atomic` 同样不绑：前者是函数设计算器语义的载体，后者的
         // 读写必须留在内存对象上。
-        Type::Func(..) | Type::Atomic(_) | Type::Ptr(_) => false,
+        Type::Ptr(_) => true,
+        Type::Func(..) | Type::Atomic(_) => false,
         other => {
             let ok = matches!(
                 other,
@@ -1369,6 +1434,7 @@ mod tests {
         Ctx {
             debug_info: false,
             taken_regs: HashSet::new(),
+            unstructured: false,
         }
     }
 
@@ -1401,6 +1467,7 @@ mod tests {
         let gctx = Ctx {
             debug_info: true,
             taken_regs: HashSet::new(),
+            unstructured: false,
         };
         let (_ssa, _orig, _body, plan) = run_pipeline(src, "s", 2, &gctx);
         assert!(
@@ -1549,6 +1616,8 @@ mod tests {
                 let ctx = Ctx {
                     debug_info: false,
                     taken_regs: HashSet::new(),
+                    // 上面已用 has_multi_exit_cycle 跳过非结构化的函数，这里只校结构化通道。
+                    unstructured: false,
                 };
                 let mut plan = plan_for(&ssa, f.body.as_ref().unwrap(), &ctx);
                 plan.loc = to_loc_map(&plan, &ssa);

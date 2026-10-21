@@ -3105,6 +3105,7 @@ fn succs_of(term: &Terminator) -> Vec<String> {
             }
             s
         },
+        Terminator::Dispatch { targets } => targets.clone(),
         Terminator::Ret { .. } | Terminator::Unreachable => vec![],
     }
 }
@@ -3278,7 +3279,7 @@ fn rename_in_term(t: &mut Terminator, map: &HashMap<String, SsaVar>) {
         Terminator::Ret { val: None } => {},
         Terminator::Branch { cond, .. } => rename_op(cond, map),
         Terminator::SwitchTable { idx, .. } => rename_op(idx, map),
-        Terminator::Jump(..) | Terminator::Unreachable => {},
+        Terminator::Jump(..) | Terminator::Unreachable | Terminator::Dispatch { .. } => {},
     }
 }
 

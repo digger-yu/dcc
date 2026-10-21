@@ -1,16 +1,16 @@
 #!/bin/bash
 # ===========================================================================
-# scripts/check_opt_equivalence.sh — 优化档位执行等价不变式门禁
+# scripts/check_opt_equivalence.sh — 优化档位执行等价不变式检查
 #
-# 判据: 同一份源码用 dcc 自己编 -O0 / -O2 / -O3, 三档的 **stdout 与退出码必须完全
-# 一致**。为什么以 -O0 为基准而不是 gcc: 部分夹具的绝对期望值本就与 gcc 不同
+# 判据: 同一份源码用 dcc 自己编 -O0 / -O1 / -O2 / -O3, 四档的 **stdout 与退出码必须
+# 完全一致**。为什么以 -O0 为基准而不是 gcc: 部分夹具的绝对期望值本就与 gcc 不同
 # (需要特定运行时支持 / 故意 abort / 多 TU 链接), 那些是"运行库覆盖缺口"而不是
 # 优化器缺陷; 而优化器的正确性定义恰好就是「不改行为」。
 #
 # 为什么必须有这一条: `make test` 的 Tier 0 不跑 -O 档位 (`tests/integration/opt.rs`
 # 里的 m16_* 「优化测试」全部零参数 = -O0), 因此一批静默误编译 (LICM 把 while 体
-# 掏空成死循环、GVN 无 kill 机制、并行发射标号撞名、假 hint 造成 SEGV) 能在门禁
-# 全绿的情况下长期存在。本轮就是靠这个扫描发现并修完了它们。
+# 掏空成死循环、GVN 无 kill 机制、并行发射标号撞名、假 hint 造成 SEGV) 能在测试
+# 用例脚本全绿的情况下长期存在。本轮就是靠这个扫描发现并修完了它们。
 #
 # 输出: 只报 OPT-DIFF / COMPILE-FAIL; COMPILE-FAIL 先作为存量债报告不置红
 # (根因是夹具自身的运行时依赖, 需逐个定性), OPT-DIFF 非空即 exit 1。
@@ -27,14 +27,27 @@ mkdir -p "$OUT"
 # 抹掉 ASLR 决定的地址：夹具里打印指针值的输出每次运行都不同，直接比 stdout 会把
 # 「本来就不可比」报成 OPT-DIFF（同一手法已用在 gcc 差分 harness 上）。只抹带 0x 前缀
 # 的长十六进制串与裸的 8+ 位 hex，不抹普通数值，以免掩盖真的算错的值。
-# 归一化后相等而原文不等时仍会记一行 ADDR-NORM，让「被抹掉的部分」在报告里可见。
-norm() { sed -E 's/0x[0-9a-fA-F]{4,}/0xADDR/g; s/\b[0-9a-fA-F]{8,}\b/HEX/g' "$1"; }
+# `attr_target_clones_selected.c` 把「两个符号的相对地址差」打进 stdout（delta=/delta3=）。
+# 那是**布局量**：变体函数的代码大小随档位变（实测 `compute.sse4_2` 在 -O0 是 88B、
+# -O2 是 96B，故 delta 差 16），不是行为差异。「解析后落在哪个变体」的强判据由
+# `tests/integration/c_attr_builtin.rs` 按 -O0 与 -O2 两档核对 ELF 符号表承担；这里
+# 把布局量抹平，同一行的 has_*/call* 仍逐字比。
+#
+# 归一化按夹具名限定，不做全局规则：其他夹具里的 `delta=` 若真是算错的值，必须报。
+norm() {
+  local tag=$1 f=$2
+  case "$tag" in
+    *attr_target_clones_selected.c*)
+      sed -E 's/0x[0-9a-fA-F]{4,}/0xADDR/g; s/\b[0-9a-fA-F]{8,}\b/HEX/g; s/\bdelta(3?)=-?[0-9]+/delta\1=LAYOUT/g' "$f" ;;
+    *) sed -E 's/0x[0-9a-fA-F]{4,}/0xADDR/g; s/\b[0-9a-fA-F]{8,}\b/HEX/g' "$f" ;;
+  esac
+}
 probe() {
   local f=$1
   local tag
   tag=$(echo "$f" | sed "s|$REPO/tests/fixtures/||; s|/|_|g")
   local base_rc="" 
-  for L in 0 2 3; do
+  for L in 0 1 2 3; do
     if ! "$DCC" -O$L -std=gnu2x -I "$REPO/tests/fixtures/c" -I "$REPO" "$f" \
          -o "$OUT/${tag}_d$L" >"$OUT/${tag}_d$L.build" 2>&1; then
       echo "COMPILE-FAIL $tag -O$L" >> "$OUT/summary.txt"
@@ -50,10 +63,10 @@ probe() {
       base_rc=$rc
       mv "$OUT/${tag}_d0.out" "$OUT/${tag}_base.out" 2>/dev/null
     else
-      if [ "$rc" -ne "$base_rc" ] || ! cmp -s <(norm "$OUT/${tag}_base.out") <(norm "$OUT/${tag}_d$L.out"); then
+      if [ "$rc" -ne "$base_rc" ] || ! cmp -s <(norm "$tag" "$OUT/${tag}_base.out") <(norm "$tag" "$OUT/${tag}_d$L.out"); then
         echo "OPT-DIFF $tag -O$L base_rc=$base_rc opt_rc=$rc" >> "$OUT/summary.txt"
       elif ! cmp -s "$OUT/${tag}_base.out" "$OUT/${tag}_d$L.out"; then
-        echo "ADDR-NORM $tag -O$L (仅地址不同，已归一化)" >> "$OUT/summary.txt"
+        echo "ADDR-NORM $tag -O$L (仅地址/布局量不同，已归一化)" >> "$OUT/summary.txt"
       fi
     fi
   done
@@ -71,7 +84,7 @@ export -f probe norm; export DCC REPO OUT timeout_s
 : > "$OUT/summary.txt"
 : > "$OUT/progress.txt"
 
-# `ONLY=<子串>` 只跑匹配的夹具：全量要 611 个 × 3 档的「编译+链接+跑」，实测单夹具
+# `ONLY=<子串>` 只跑匹配的夹具：全量要 611 个 × 4 档的「编译+链接+跑」，实测单夹具
 # 就要十几秒，整体十几分钟；日常改一处时不需要等全量，全量是 `make test-all` 的活。
 # 不开 ONLY 时行为与以前完全一致。
 only=${ONLY:-}

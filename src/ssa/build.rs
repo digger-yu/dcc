@@ -35,6 +35,10 @@ pub(super) struct Builder {
     label_bbs: HashMap<String, String>,
     /// P0-4 Phase 2: 待解析的 goto (源 BB, 目标 label 名)
     pending_gotos: Vec<(String, String)>,
+    /// `goto *expr` 的源 BB。目标集合是**全部 label BB**，但 label 可能在 dispatch
+    /// 之后才出现（典型就是解释器主循环：`goto *disptab[...]` 写在一堆 `L_OP_*:`
+    /// 之前）。所以先记下源块，等整个函数降级完再一次性接边。
+    pending_dispatch: Vec<String>,
     /// P0-4 Phase 2: 每个 label BB 入口处的变量版本快照 (label -> current 副本)
     label_var_snapshots: HashMap<String, HashMap<String, SsaVar>>,
     /// 本函数内**被取址**的对象根名 (由 `build_from_func` 的第一遍构建收集)。
@@ -42,10 +46,16 @@ pub(super) struct Builder {
     /// 记下「该表达式无法在 SSA 里忠实表达」。非空 ⇒ `build_ssa` 放弃整个函数的
     /// SSA 化，该函数留在 AST 通道上。原因文本只在放弃这条冷路上构造。
     bail: Option<String>,
+    /// analysis-only（`opt::run_ssa_passes` 的非结构化通道）：IR **不会被重建**，
+    /// 只用来算活性/家。于是两类「急切求值」退避失效：它们的危害是重建把
+    /// `Select`/右操作数发成无条件指令，而这条通道根本不重建，AST 仍是真分支。
+    /// 反过来，真正会丢掉 def/use 的退避（聚合赋值、认不出的左值、无法降级的
+    /// 表达式）在两条通道上都保留 —— 那些会让分析本身失真。
+    analysis_only: bool,
 }
 
 impl Builder {
-    fn new(func: Function, addr_taken: std::collections::HashSet<String>) -> Self {
+    fn new(func: Function, addr_taken: std::collections::HashSet<String>, analysis_only: bool) -> Self {
         let cur = func.entry.clone();
         let mut b = Builder {
             func,
@@ -57,9 +67,11 @@ impl Builder {
             tmp_count: 0,
             label_bbs: HashMap::new(),
             pending_gotos: Vec::new(),
+            pending_dispatch: Vec::new(),
             label_var_snapshots: HashMap::new(),
             addr_taken,
             bail: None,
+            analysis_only,
         };
         b.func.blocks.get_mut(&b.cur).unwrap().term = Terminator::Unreachable;
         b
@@ -825,7 +837,7 @@ impl Builder {
                 let short_circuit_rhs = matches!(op, BinOp::AndAnd | BinOp::OrOr);
                 let rhs_from = self.cur_inst_count();
                 let ro = self.lower_expr(r);
-                if short_circuit_rhs && !self.emitted_is_pure(rhs_from) {
+                if short_circuit_rhs && !self.emitted_is_pure(rhs_from) && !self.analysis_only {
                     self.unsupported("&& / || 右操作数带副作用或可陷获（急切求值改变语义）");
                     return Operand::Int(0);
                 }
@@ -1070,7 +1082,7 @@ impl Builder {
                 let before = self.cur_inst_count();
                 let f = self.lower_expr(else_);
                 let else_ok = self.emitted_is_pure(before);
-                if !(then_ok && else_ok) {
+                if !(then_ok && else_ok) && !self.analysis_only {
                     // 不静默错下去：整个函数放弃 SSA 化，留在 AST 通道（那里是真分支）。
                     self.unsupported("三元分支带副作用或可陷获（Select 会两侧都执行）");
                     return Operand::Int(0);
@@ -1993,18 +2005,11 @@ impl Builder {
                 self.cur = dead;
             },
             Stmt::GotoIndirect { expr, .. } => {
-                // computed goto: 保守处理，跳转到所有已知 label BB
+                // computed goto: 表达式是目标地址（`*(pc++)`、`disptab[i]` 之类）。
+                // 目标集合是函数里**全部** label BB —— 这里只记源块，接边放在
+                // `build_ssa` 末尾（label 可能全部出现在这条语句之后）。
                 let _ = self.lower_expr(expr);
-                // 保守: 添加边到所有已知 label BB
-                for target_bb in self.label_bbs.values() {
-                    if let Some(tbb) = self.func.blocks.get_mut(target_bb) {
-                        tbb.preds.push(self.cur.clone());
-                        tbb.preds.dedup();
-                    }
-                    if let Some(b) = self.func.blocks.get_mut(&self.cur) {
-                        b.succs.push(target_bb.clone());
-                    }
-                }
+                self.pending_dispatch.push(self.cur.clone());
                 self.set_term(Terminator::Unreachable);
                 let dead = self.func.unique_bb(&format!("{}.dead", self.cur));
                 self.cur = dead;
@@ -2193,7 +2198,23 @@ impl Builder {
 /// lowering, 因此不可能漏掉某种 AST 形态 (手写 AST 扫描则必须对 `Expr` 穷举)。
 /// 没出现任何取址 (绝大多数函数) 时直接用第一遍结果, 不付出额外构建代价。
 pub fn build_from_func(f: &FuncDecl) -> Option<Function> {
-    let probe = build_ssa(f, HashSet::new())?;
+    build_from_func_mode(f, false)
+}
+
+/// 非结构化函数的构建入口（`ssa::regalloc` 的 analysis-only 通道）。
+///
+/// 与 [`build_from_func`] 唯一的差别：不因「急切求值」退避。那些退避的
+/// 危害在重建后的产物上（`Select` 两分支都执行 / `&&` 右操作数无条件求值），
+/// 而这条通道不重建、不产代码 —— 见 `Builder::analysis_only`。
+///
+/// 两遍构建（探针 + 取址副作用）照旧：`addr_taken` 决定哪些局部走内存，
+/// 这条事实在 analysis-only 上同样是活性与家的输入。
+pub fn build_from_func_analysis(f: &FuncDecl) -> Option<Function> {
+    build_from_func_mode(f, true)
+}
+
+fn build_from_func_mode(f: &FuncDecl, analysis_only: bool) -> Option<Function> {
+    let probe = build_ssa(f, HashSet::new(), analysis_only)?;
     let addr_taken: HashSet<String> = probe
         .blocks
         .values()
@@ -2206,7 +2227,7 @@ pub fn build_from_func(f: &FuncDecl) -> Option<Function> {
     if addr_taken.is_empty() {
         return Some(probe);
     }
-    build_ssa(f, addr_taken)
+    build_ssa(f, addr_taken, analysis_only)
 }
 
 /// 给「没能降级的表达式」一个可读的形态名（只用于诊断文本，不参与判据）。
@@ -2224,9 +2245,14 @@ fn expr_shape(e: &Expr) -> &'static str {
     }
 }
 
-fn build_ssa(f: &FuncDecl, addr_taken: HashSet<String>) -> Option<Function> {
+fn build_ssa(f: &FuncDecl, addr_taken: HashSet<String>, analysis_only: bool) -> Option<Function> {
     let body = f.body.as_ref()?;
     if !is_structured(body) {
+        if std::env::var("DCC_SSA_BAIL").is_ok() {
+            let why = crate::ssa::structure::structured_reject(body)
+                .unwrap_or_else(|| "未列举形态".to_string());
+            eprintln!("[SSA] {} 不进管线：{why}", f.name.name);
+        }
         return None;
     }
     let mut func = Function::new(f.name.name.clone(), f.ret_ty.clone(), f.span.clone());
@@ -2240,7 +2266,7 @@ fn build_ssa(f: &FuncDecl, addr_taken: HashSet<String>) -> Option<Function> {
         &mut func.local_types,
         &mut func.local_quals,
     );
-    let mut builder = Builder::new(func, addr_taken);
+    let mut builder = Builder::new(func, addr_taken, analysis_only);
     for p in &f.params {
         if let Some(n) = &p.name {
             let v = SsaVar {
@@ -2279,6 +2305,26 @@ fn build_ssa(f: &FuncDecl, addr_taken: HashSet<String>) -> Option<Function> {
     insert_loop_phis(&mut func);
     // P0-4 Phase 2: Insert phi nodes at label BBs for goto targets
     insert_label_phis(&mut func, &builder.label_bbs, &builder.label_var_snapshots);
+    // `goto *expr` 的边放在 phi 插入**之后**接：目标集合是全部 label BB，
+    // 若在 phi 插入前接上，解释器主循环会得到 85×85 条两两互达的边，`is_back_edge`
+    // 会把其中绝大多数判成回边，`insert_loop_phis` 于是对每条回边跑一遍
+    // `find_loop_body` + `rename_uses_in`（实测 O(边数×函数体)，不可接受）。
+    //
+    // 晚接的代价只是 phi 少了「dispatch 前驱」那个入值 —— analysis-only 路径不重建，
+    // 也不据此共用寄存器（见 `regalloc::plan_for` 的 `shared_slots`），而活性的
+    // 保守性由 `Dispatch` 本身的后继集合保证。
+    if !builder.pending_dispatch.is_empty() {
+        let mut targets: Vec<String> = builder.label_bbs.values().cloned().collect();
+        targets.sort();
+        targets.dedup();
+        for bb in &builder.pending_dispatch {
+            if let Some(b) = func.blocks.get_mut(bb) {
+                b.term = Terminator::Dispatch {
+                    targets: targets.clone(),
+                };
+            }
+        }
+    }
     // 上面的 phi 插入与构建期的循环旋转都改过 terminator, 此处统一刷新 CFG 缓存:
     // `find_loop_body_multi` 等分析沿 `preds` 反向走, 看到旧边就会把循环体算错。
     refresh_cfg(&mut func);

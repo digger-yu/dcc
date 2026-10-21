@@ -29,6 +29,8 @@ pub(super) fn term_succs(term: &Terminator) -> Vec<&str> {
             }
             s
         },
+        // computed goto: 目标集合就是全部 label BB（构造期已定）。
+        Terminator::Dispatch { targets } => targets.iter().map(|t| t.as_str()).collect(),
         _ => vec![],
     }
 }
@@ -346,6 +348,7 @@ pub(super) fn is_cycle_entry(
                 }
                 s
             },
+            Terminator::Dispatch { targets } => targets.iter().map(|t| t.as_str()).collect(),
             _ => vec![],
         };
         if succs.contains(&bb_name) {
@@ -373,6 +376,11 @@ pub(super) fn predecessor_counts(func: &Function) -> HashMap<String, usize> {
                     succs.push(tg.as_str());
                 }
                 succs.push(default.as_str());
+            },
+            Terminator::Dispatch { targets } => {
+                for tg in targets {
+                    succs.push(tg.as_str());
+                }
             },
             Terminator::Ret { .. } | Terminator::Unreachable => {},
         }

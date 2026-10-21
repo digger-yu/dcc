@@ -234,7 +234,30 @@ impl super::super::super::Codegen {
                 // 寄存器的变量在这里会只改内存：实测 `for (register long i asm("rbx") = 0;
                 // i < n; i++)` 无限循环（-O0/-O1）—— 循环条件读 %rbx 而 `i++` 写 -96(%r13)，
                 // 同一个变量两个家（违反设计 §3 的 H4）。走 `mov_from_stack`/`mov_to_stack`
-                // 是为了不再长出第三条读家的路，也顺带复用同一个宽度口径（§7.16）。
+                //   是为了不再长出第三条读家的路，也顺带复用同一个宽度口径（§7.16）。
+                //
+                // 8 字节标量/指针的「读-改-写」直接落在家里：旧形状是
+                // `mov dst,home; push dst; add dst,step; mov home,dst; pop dst` 五条，
+                // 而 push/pop 唯一的作用是保住 dst 里的旧值 —— dst 从读出来到写回
+                // 中间根本没被改过，在家上做一次 add 就够了（两条）。这是 `*pc++`
+                // 的取指路径，每条 VM 指令都走一遍。
+                //
+                // 只认 8 字节：4 字节及以下的值在家里的规范形态要求写回时按声明宽度
+                // 截断（`mov_to_stack` 的那一步），直接 add 会让家里的高位溢出。
+                if inner_ty.size() == 8 {
+                    let hr = match self.home_for(&name.name) {
+                        crate::location::Location::Reg(r) => r.n,
+                        _ => unreachable!("分支已限定家是 GP 寄存器"),
+                    };
+                    if is_pre {
+                        self.emit_inc_dec_reg(hr, is_inc, step as i32);
+                        self.mov_from_stack(dst, &name.name);
+                    } else {
+                        self.mov_from_stack(dst, &name.name);
+                        self.emit_inc_dec_reg(hr, is_inc, step as i32);
+                    }
+                    return;
+                }
                 self.mov_from_stack(dst, &name.name);
                 if !is_pre {
                     self.push(dst); // 后缀：保存旧值

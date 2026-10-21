@@ -88,7 +88,10 @@ fn term_point(t: &Terminator) -> Point {
                 uses.insert(v);
             }
         },
-        Terminator::Ret { val: None } | Terminator::Jump(_) | Terminator::Unreachable => {},
+        Terminator::Ret { val: None }
+        | Terminator::Jump(_)
+        | Terminator::Unreachable
+        | Terminator::Dispatch { .. } => {},
     }
     Point { uses, def: None }
 }

@@ -40,6 +40,12 @@ pub struct StorageInfo {
     pub stack_offset: Option<i64>,
     /// 是否为 TLS (线程局部存储) 对象。
     pub is_tls: bool,
+    /// 该名字当下的家（后端分配器或用户 `register asm` 登记）。`None` 表示后端
+    /// 没有为它登记家，按栈槽处理。语义层不解释 `Location` 的内容，只用它回答
+    /// 一个事实：**值还在不在 `stack_offset` 那张帧槽里**。非栈家（物理寄存器 /
+    /// spill 槽）必须让描述符记住「按名字经家的单一读入口取值」，不能在偏移上
+    /// 直接 load —— 否则同一个变量出现了两个家（写寄存器、读栈槽）。
+    pub home: Option<crate::location::Location>,
 }
 
 /// 存储类别。
@@ -119,6 +125,12 @@ pub enum AddressBase {
     /// `StackFrame { offset: 0 }` 占位描述符, 后端把它当成真帧基址物化,
     /// 于是静默读到栈底垃圾。
     ComputedAddr { expr: Box<Expr> },
+    /// 局部标量/指针的名字有**非栈家**（物理寄存器或 spill 槽）：值不在
+    /// `stack_offset` 那张槽里，后端必须按名字走 `home_for` 的单一读入口。
+    /// 旧实现无条件给 `StackSlotLoad`，于是绑了寄存器的指针（如 Lua 的
+    /// `base`/`pc`）在下标/箭头基址处仍读栈槽，读到从未写入的垃圾 —— 这正是
+    /// 指针绑定在 364 语料上炸出十个 SEGV 的根因（见 v2 验证报告 §6.5）。
+    HomeLoad { name: String },
     /// 语义层无法给出基址 (既不是 lvalue 也不是指针 rvalue)。后端遇到它
     /// 必须整体退回自己的旧路径, 不允许用占位地址静默发指令。
     Unknown,
@@ -302,7 +314,7 @@ fn lvalue_address<R: ObjectResolver>(resolver: &R, expr: &Expr) -> AddressDescri
         Expr::Ident { name, ty, .. } => {
             let id = resolver.resolve_identity(&name.name);
             let storage = resolver.resolve_storage(&id, &name.name);
-            address_from_storage(storage, ty)
+            address_from_storage(storage, ty, &name.name)
         },
 
         Expr::Index {
@@ -573,8 +585,23 @@ pub fn compute_index_offset(idx: &Expr, elem_ty: &Type) -> ByteOffset {
 // ============================================================================
 
 /// 根据存储信息确定基址 (Layer 1 -> Layer 2 的桥梁)。
-fn address_from_storage(storage: StorageInfo, ty: &Type) -> AddressDescriptor {
-    let base = match (&storage.class, ty) {
+fn address_from_storage(storage: StorageInfo, ty: &Type, name: &str) -> AddressDescriptor {
+    // 非栈家优先：描述符只记录「按名字取」，坐标的翻译留给后端 `home_for`。
+    // 聚合/数组/向量不在分配器的可绑类型里（`ssa::regalloc::bindable_ty`），
+    // 它们即便出现非栈家也仍是内存对象，按原分类走。
+    let non_stack_home = storage
+        .home
+        .is_some_and(|l| !matches!(l, crate::location::Location::Stack(_)));
+    let home_is_object_address = matches!(
+        ty,
+        Type::Array(_, _) | Type::Vector(_, _) | Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)
+    );
+    let base = if non_stack_home && !home_is_object_address {
+        AddressBase::HomeLoad {
+            name: name.to_string(),
+        }
+    } else {
+        match (&storage.class, ty) {
         // VLA / VM 聚合: 帧里的那个槽是**元数据槽**，它的内容才是动态数据区
         // 基址（`gen_vla_alloc` 发 `mov %rsp,[off]`）。它与下面「槽位即对象
         // 地址」的普通栈上聚合形状相反：这里走 StackFrame 会 `lea` 出描述符本身，
@@ -625,6 +652,7 @@ fn address_from_storage(storage: StorageInfo, ty: &Type) -> AddressDescriptor {
         (StorageClass::Upvar, _) => AddressBase::UpvarLoad {
             offset: storage.stack_offset.unwrap_or(0),
         },
+        }
     };
 
     AddressDescriptor {

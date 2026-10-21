@@ -1057,6 +1057,58 @@ fn target_clones_runtime_resolves_to_non_default_variant() {
             );
         }
     }
+
+    // -O2 再核一遍。`delta`/`delta3` 是**布局量**：变体函数大小随档位变（实测
+    // `compute.sse4_2` 在 -O0 是 88B、-O2 是 96B，故 delta 差 16），所以
+    // `scripts/check_opt_equivalence.sh` 把这两个键归一化成 `LAYOUT`；但「解析后落在
+    // 哪个变体」与档位无关，必须在每档都核对，否则 -O2 选错变体就没人抓了。
+    let (ok2, stderr2, exe2) = harness::dcc_link_exe("tc-selected-o2", src, &["-O2"]);
+    assert!(ok2, "-O2: 夹具应能经宿主 cc 链上；stderr:\n{stderr2}");
+    let syms2 = elf64_syms(&fs::read(&exe2).unwrap_or_default());
+    let value_of2 = |n: &str| -> i64 {
+        syms2
+            .iter()
+            .find(|s| s.name == n)
+            .unwrap_or_else(|| panic!("-O2 exe 符号表里没有 {n}"))
+            .value as i64
+    };
+    let marker2 = value_of2("marker");
+    let (rc2, stdout2, run_stderr2) = run_exe_bounded(&exe2);
+    let _ = fs::remove_file(&exe2);
+    assert_eq!(
+        rc2, 0,
+        "-O2 运行失败；stderr:\n{}",
+        String::from_utf8_lossy(&run_stderr2)
+    );
+    let text2 = String::from_utf8_lossy(&stdout2).to_string();
+    let field2 = |key: &str| -> Option<i64> {
+        text2
+            .split_whitespace()
+            .find_map(|w| w.strip_prefix(&format!("{key}=")))
+            .and_then(|v| v.parse::<i64>().ok())
+    };
+    let get2 = |key: &str| -> i64 {
+        field2(key).unwrap_or_else(|| panic!("-O2 输出里没有 {key}=：{text2}"))
+    };
+    let (delta2, delta3_v2, has2, has_avx2) =
+        (get2("delta"), get2("delta3"), get2("has_sse42"), get2("has_avx"));
+    let expect2 = if has2 != 0 {
+        value_of2("compute.sse4_2")
+    } else {
+        value_of2("compute.default")
+    } - marker2;
+    assert_eq!(
+        delta2, expect2,
+        "-O2 解析结果不在 builtin 读数要求的变体上；输出：{text2}"
+    );
+    let expect3_v2 = if has_avx2 != 0 {
+        value_of2("dispatch3.avx")
+    } else if has2 != 0 {
+        value_of2("dispatch3.sse4_2")
+    } else {
+        value_of2("dispatch3.default")
+    } - marker2;
+    assert_eq!(delta3_v2, expect3_v2, "-O2 dispatch3 选型不对；输出：{text2}");
 }
 
 /// 「CPUID 真被跑过、真选中的不是 default」的**行为级**可证伪判据。

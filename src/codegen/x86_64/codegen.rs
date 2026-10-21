@@ -136,6 +136,12 @@ pub struct Codegen {
     /// 内联 asm 的 `push_code`），所以「发了新指令但记录仍声称有效」这个形状在结构上不成立。
     /// 写入点在 `gen_expr_value` 里、发生在它内部所有发射**之后**，顺序不能反。
     pub eval_holding: Option<crate::location::RegId>,
+    /// 发射层窥孔的「上一条已发指令」（见 `instructions.rs::PeepLast`）。
+    ///
+    /// 只用来削**相邻两条即可证明等价**的 mov（重复 / 64 位往返 / 同槽转发），
+    /// 不做活性分析。任何 `emit`（裸字节）、标签定义或函数边界都必须把它清空 ——
+    /// 「上一条」一旦跨过控制流汇合点，结论就不再成立。
+    pub(crate) peep_last: Option<crate::codegen::x86_64::instructions::PeepLast>,
     /// **程序点级家覆盖**（Phase 5.1 前置二）：名字 → 「在这一段里它其实住在哪里」。
     ///
     /// 声明级的家（`homes`）只能回答「这个变量的家是哪个号」，而前置三需要的恰好是它的
@@ -310,6 +316,14 @@ pub struct Codegen {
     pub homes: HashMap<String, (crate::location::Location, Type)>,
     // file-scope 绑定的家：每个函数入口恢复
     pub global_homes: HashMap<String, (crate::location::Location, Type)>,
+    /// 本函数「后端自己挑的」家：名字 → 号。
+    ///
+    /// 只给**没走 SSA**的函数用（`VarDecl::home` 全空）。这类函数拿不到分配器的
+    /// 结果，于是每个局部变量的每次读写都过栈 —— 实测 `luaV_execute` 的静态栈引用
+    /// 是 gcc 的 10 倍，而 fib(32) 的耗时比恰好等于静态指令数比。这张表与
+    /// `homes` 分开存，是因为 `bind_decl_home` 只在「本表命中」时才把声明绑上；
+    /// 直接查 `homes` 会把同名全局绑定的号误当成局部变量的家。
+    pub auto_homes: HashMap<String, crate::location::Location>,
     /// 全程序里「地址被取走」的对象根名；只有 `addr_escaped_done` 为真时才参与判定
     /// （区分「扫过且为空」与「还没扫」）。判据本身在 `ast_gvn::addr_escaped_names`。
     pub addr_escaped: std::collections::HashSet<String>,
@@ -871,6 +885,8 @@ impl Codegen {
             late_var_cursor: 0,
             frame_planned: false,
             eval_holding: None,
+            peep_last: None,
+            auto_homes: HashMap::new(),
             home_overrides: HashMap::new(),
             ext_home_saves: Vec::new(),
             max_expr_depth: 0,
@@ -2742,10 +2758,15 @@ mod tests {
             .insert("v".to_string(), (Location::Spill(1), Type::Long));
         assert_eq!(cg.stack_home_off("v"), want, "取地址必须走 spill_off");
 
+        // `code.clear()` 只是测试的隔离手法；窥孔窗口记在 `peep_last` 里，不跟着
+        // 字节一起清。不清就会把「上一次清空前同地址的 load」当成相邻重复而删掉
+        // （规则 1），下面两条等式就变成空跑的相等。
         cg.code.clear();
+        cg.peep_last = None;
         cg.mov_from_stack(0, "v");
         let read_spill = cg.code.clone();
         cg.code.clear();
+        cg.peep_last = None;
         cg.mov_to_stack(0, "v");
         let write_spill = cg.code.clone();
 
@@ -2753,9 +2774,11 @@ mod tests {
         cg.homes
             .insert("v".to_string(), (Location::Stack(want), Type::Long));
         cg.code.clear();
+        cg.peep_last = None;
         cg.mov_from_stack(0, "v");
         let read_stack = cg.code.clone();
         cg.code.clear();
+        cg.peep_last = None;
         cg.mov_to_stack(0, "v");
         let write_stack = cg.code.clone();
         assert_eq!(read_spill, read_stack, "读路的 spill_off 与 Stack 家发的字节不一样");

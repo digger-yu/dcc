@@ -366,6 +366,35 @@ impl Codegen {
                     1
                 };
                 let elem_size = if is_ptr_sub { l_inner.unwrap_or(1) } else { 1 };
+                // 指针 ± **整数常量**：把缩放后的字节偏移并进一条 `add $imm, dst`。
+                //
+                // 不做这一步时 `p + 1` 会展开成「mov 常量 / movsxd / imul / add」四条，
+                // 再叠上「左值先算到 dst、再搬到 callee-saved」的固定开销 —— 实测
+                // luaV_execute 里每条 `base = ci->func.p + 1` 都是 8-9 条指令。
+                // 常量已在编译期知道缩放结果，不需要那条 imul，也不需要为右操作数
+                // 占一个暂存号。
+                //
+                // 只认「左操作数是指针/数组」：`1 + p` 要把两边对调才能用同一算式，
+                // 那是另一条路径，不在本优化里顺手做。`r` 必须是无副作用的整型，
+                // 否则 `const_eval` 对浮点会截断、对带副作用的式子可能求错值。
+                if needs_scale
+                    && scale > 0
+                    && l_inner.is_some()
+                    && Self::is_integer_type(&r.ty())
+                    && !Self::expr_has_side_effects(r)
+                {
+                    if let Ok(v) = const_eval::eval(r) {
+                        let bytes_off = (v as i64).wrapping_mul(scale as i64);
+                        let delta = if matches!(op, BinOp::Sub) {
+                            bytes_off.wrapping_neg()
+                        } else {
+                            bytes_off
+                        };
+                        self.gen_expr_decay(l, dst);
+                        self.add_reg_byte_offset(dst, delta);
+                        return;
+                    }
+                }
                 // C11 6.3.1.8 通常算术转换: 确定运算的有符号性.
                 // C11 6.3.1.1: 整数提升 (char/short → int) 必须在
                 // 有符号性判定之前执行. 例如 signed char vs unsigned char
@@ -412,6 +441,185 @@ impl Codegen {
                         rs && rr > lr
                     }
                 };
+                // 移位量是**整型常量**：直接 imm8 形式（`sar r64, 7`）。
+                //
+                // 不这样做时 `i >> 7` 要经过「求值到暂存号 → mov %cl, r → shr →
+                // 搬回 dst」，外面还套一层 push/pop 与两条 `mov $0`，实测 10 条；
+                // imm 形式是 1 条。而 GET_OPCODE 是**每条 VM 指令都要走**的路径
+                // （`luaV_execute` 里 333 处常量移位）。
+                //
+                // 限制条件全部是为了与通用路径**逐位相同**：
+                //   - 左操作数不是位域（位域在通用路径尾部还要按宽度掩码）；
+                //   - 计数 0..=63（更大的计数是 UB，xl/imm8 只取低 5/6 位；
+                //     保持原样比在这里复述那条规则安全）。`v == 0` 时连移位都不发：
+                //     x86 的移位在计数为 0 时**不改标志位**，与通用路径（`shr r,cl`
+                //     且 cl==0）逐位等价。这是 `GET_OPCODE` 之前那一段的来源。
+                //   - 两边都是整型（浮点/向量/__int128 已在上面分流）。
+                if matches!(*op, BinOp::Shl | BinOp::Shr)
+                    && Self::is_integer_type(&l.ty())
+                    && Self::expr_bitfield_width(l).is_none()
+                    && !Self::expr_has_side_effects(r)
+                {
+                    if let Ok(v) = const_eval::eval(r) {
+                        if v >= 0 && v <= 63 {
+                            use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
+                            self.gen_expr_decay(l, dst);
+                            if v != 0 {
+                                let op_field: u8 = match *op {
+                                    BinOp::Shl => 4,
+                                    BinOp::Shr => {
+                                        if is_signed {
+                                            7
+                                        } else {
+                                            5
+                                        }
+                                    },
+                                    _ => unreachable!(),
+                                };
+                                let mnem = match op_field {
+                                    4 => "shl",
+                                    5 => "shr",
+                                    _ => "sar",
+                                };
+                                let gas =
+                                    format!("{mnem} {}, {v}", GAS_REG64[(dst & 15) as usize]);
+                                self.emit_insn(
+                                    &Insn::shift_reg_imm8_c1_b64(op_field, dst, v as u8)
+                                        .with_gas(gas),
+                                );
+                            }
+                            // 与通用路径尾部一致：32 位有符号 Shl 要符号扩展回 64 位。
+                            let res_ty = e.ty();
+                            if res_ty.size() == 4
+                                && res_ty.is_int()
+                                && matches!(*op, BinOp::Shl)
+                                && Self::is_signed_int(&res_ty)
+                            {
+                                use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
+                                let gas = format!(
+                                    "movsxd {}, {}",
+                                    GAS_REG32[(dst & 15) as usize],
+                                    GAS_REG64[(dst & 15) as usize]
+                                );
+                                self.emit_insn(
+                                    &Insn::mov_ext(true, Width::B32, Width::B64, dst, dst)
+                                        .with_gas(gas),
+                                )
+                                .expect("typed-opcode: mov_ext");
+                            }
+                            return;
+                        }
+                    }
+                }
+                // 右操作数是**整型常量**：直接 imm32 形式（`and r12, 0x7f`）。
+                //
+                // 不这样做时 `i & 0x7f` 要经过「左值搬到暂存号 → 把常量搬进另一个
+                // 暂存号 → push/pop → and」共 7 条，而 GETARG_A/B/C 每个都要做一次。
+                //
+                // 等价性（与 `binop` 的位宽选择逐条对齐）：
+                //   - 常量落在 i32 内（imm32 编码）；
+                //   - And/Or/Xor 再要求常量非负：32 位无符号路径的通用代码发的是
+                //     32 位运算（结果零扩展），而 imm32 在 64 位形式里会被符号扩展 ——
+                //     非负常量下高位保持 0，两边逐位相同；
+                //   - Add/Sub 不受此限：32 位结果由尾部截断拉回原语义；
+                //   - 左操作数不是位域（位域在通用路径尾部还要按宽度再掩码）。
+                if matches!(*op, BinOp::Add | BinOp::Sub | BinOp::And | BinOp::Or | BinOp::Xor)
+                    && Self::is_integer_type(&l.ty())
+                    && Self::expr_bitfield_width(l).is_none()
+                    && !Self::expr_has_side_effects(r)
+                {
+                    if let Ok(v) = const_eval::eval(r) {
+                        let op_ext: u8 = match *op {
+                            BinOp::Add => 0,
+                            BinOp::Or => 1,
+                            BinOp::And => 4,
+                            BinOp::Sub => 5,
+                            BinOp::Xor => 6,
+                            _ => unreachable!(),
+                        };
+                        let bitwise = matches!(*op, BinOp::And | BinOp::Or | BinOp::Xor);
+                        if v >= i32::MIN as i128 && v <= i32::MAX as i128 && (!bitwise || v >= 0) {
+                            self.gen_expr_decay(l, dst);
+                            self.emit_insn(&Insn::alu_rm_reg_imm32_b64(op_ext, dst, v as i64));
+                            // 32 位结果的截断，与通用路径尾部一致。
+                            let res_ty = e.ty();
+                            if res_ty.size() == 4
+                                && res_ty.is_int()
+                                && matches!(*op, BinOp::Add | BinOp::Sub)
+                            {
+                                use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
+                                use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
+                                if Self::is_signed_int(&res_ty) {
+                                    let gas = format!(
+                                        "movsxd {}, {}",
+                                        GAS_REG32[(dst & 15) as usize],
+                                        GAS_REG64[(dst & 15) as usize]
+                                    );
+                                    self.emit_insn(
+                                        &Insn::mov_ext(true, Width::B32, Width::B64, dst, dst)
+                                            .with_gas(gas),
+                                    )
+                                    .expect("typed-opcode: mov_ext");
+                                } else {
+                                    let gas = format!(
+                                        "mov {}, {}",
+                                        GAS_REG32[(dst & 15) as usize],
+                                        GAS_REG32[(dst & 15) as usize]
+                                    );
+                                    let _ = self.emit_insn(
+                                        &Insn::mov_rm_reg(Width::B32, dst, dst).with_gas(gas),
+                                    );
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
+                // 比较的右操作数是**整型常量**：直接 `cmp dst, imm`（0 用 `test`）。
+                //
+                // 不这样做时右操作数要先 `mov $imm, %stage` —— `x != 0` 就是一条
+                // `mov $0` 加一条 `cmp %dst, %stage`，而 0 是所有宏展开（`lua_assert`、
+                // 指针空判、状态码比较）里最常见的比较对象（lvm.c 实测 812 条）。
+                //
+                // 等价性（与 `binop` 的 cmp 分支逐条对齐）：
+                //   - 位宽判定同一条：两边都 ≤ 4 字节 → 32 位比较；
+                //   - 常量已由 `gen_expr` 的 Int/Char 路径按 rt 做过 mask（符号/零扩展），
+                //     所以通用路径的 `zero_extend_for_cmp(stage, rt)` 对它是恒等；
+                //   - 32 位比较取常量低 32 位（`cmp r/m32, imm32` 本就只比 32 位）；
+                //     64 位比较要求 mask 落在 i32 内（imm32 在 64 位形式里符号扩展），
+                //     超出则退回通用路径；
+                //   - 右操作数必须无副作用（白名单外一律不放行，避免跳过求值）；
+                //   - 左操作数仍需按通用路径做 `zero_extend_for_cmp`（无符号宽比较）。
+                if matches!(
+                    *op,
+                    BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne
+                ) && Self::is_integer_type(&l.ty())
+                    && Self::is_integer_type(&r.ty())
+                    && !Self::expr_has_side_effects(r)
+                {
+                    if let Ok(v) = const_eval::eval(r) {
+                        let use_32bit = l.ty().size() <= 4 && r.ty().size() <= 4;
+                        let masked = Self::mask_imm_to_type(v, &r.ty());
+                        let imm: i64 = if use_32bit {
+                            (masked as u32 as i32) as i64
+                        } else {
+                            masked as i64
+                        };
+                        // B64 + dst==rsp 的 AluRm imm 分支在编码器里只认 Add/Sub，
+                        // 其余返回 None（静默丢 cmp）；非零立即数遇 rsp 直接放弃。
+                        let encodable = imm == 0 || use_32bit || dst != 4;
+                        if (use_32bit || (masked >= i32::MIN as i128 && masked <= i32::MAX as i128))
+                            && encodable
+                        {
+                            self.gen_expr_decay(l, dst);
+                            if !is_signed && !use_32bit {
+                                self.zero_extend_for_cmp(dst, &l.ty());
+                            }
+                            self.emit_cmp_imm(*op, dst, is_signed, use_32bit, imm);
+                            return;
+                        }
+                    }
+                }
                 // 统一路径: 被调用者保存寄存器优先, 帧临时槽后备.
                 // 使用 gen_expr_decay: 数组标识符在运算中衰减为指针
                 // binop 临时槽: 放在 callee-saved 区域下方
@@ -430,7 +638,24 @@ impl Codegen {
                 // 递归 binop 通过 `RegBank::alloc_temp` 分配，不冲突.
                 // dst==1 (rcx) 时左值可能是 shift 计数, 保守退回帧槽.
                 let use_callee_saved = dst != 1;
-                let callee_reg = if use_callee_saved {
+                // 右操作数是「只会写自己那个暂存号」的形态（字面量 / 名字）时，
+                // 求值过程不可能碰到 `dst`，左操作数就**不必搬走**。
+                //
+                // 这一步同时是寄存器池的节流阀：每次 Binop 都占一个 callee-saved 号，
+                // 四个池号被函数级变量家占满时就只能退到帧槽（实测给 4 个变量绑家后
+                // 栈引用反增 1518 条，净收益只剩 -297 条）。名字与字面量占了
+                // `luaV_execute` 里交互的大多数（`ra + 1` / `pc + n` / `k + i`），
+                // 把它们从池里摘出去，池才能留给真的需要跨求值保活的那些。
+                //
+                // 白名单而不是「无副作用」：`expr_has_side_effects` 对 `StmtExpr`
+                // 与内置函数返回 false（它的 `_ => false` 是默认臂），而那两类里
+                // 完全可能有 call。喊错一条就是静默错值。
+                let rhs_isolated = matches!(
+                    r.as_ref(),
+                    Expr::Int { .. } | Expr::Char { .. } | Expr::Ident { .. }
+                );
+                let need_save_lhs = !rhs_isolated || dst == 1;
+                let callee_reg = if use_callee_saved && need_save_lhs {
                     self.alloc_callee_saved()
                 } else {
                     None
@@ -439,7 +664,7 @@ impl Codegen {
                 // 保存左操作数: 优先到被调用者保存寄存器, 否则到帧槽
                 if let Some(reg) = callee_reg {
                     self.mov(reg, dst);
-                } else {
+                } else if need_save_lhs {
                     // mov [r13+slot_off], dst (r13=13)
                     self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, dst, 13, slot_off));
                 }
@@ -473,7 +698,7 @@ impl Codegen {
                     let mut picked: Option<u8> = None;
                     if let Some(n) = self.reg_bank.pick_rhs_stage(dst) {
                         picked = Some(n);
-                    } else if let Some(n) = self.reg_bank.alloc_temp() {
+                    } else if let Some(n) = self.reg_bank.alloc_temp_except(Some(dst)) {
                         picked = Some(n);
                         stage_from_pool = Some(n);
                     } else if !self.reg_bank.is_pinned(1) {
@@ -534,12 +759,15 @@ impl Codegen {
                         .expect("typed-opcode: imul_rm_reg_imm32_b64");
                 }
                 if let Some(reg) = callee_reg {
-                    // 被调用者保存寄存器路径: 左操作数在 reg, 右操作数在 rcx(1).
+                    // 被调用者保存寄存器路径: 左操作数在 reg, 右操作数在 stage。
                     self.binop(*op, reg, stage, is_signed, &l.ty(), &r.ty());
                     if reg != dst {
                         self.mov(dst, reg);
                     }
                     self.free_callee_saved(reg);
+                } else if !need_save_lhs {
+                    // 左操作数一直在 dst（右操作数的求值不会写它）。
+                    self.binop(*op, dst, stage, is_signed, &l.ty(), &r.ty());
                 } else if dst == 1 {
                     // 帧槽路径, dst == rcx: push/pop 避免恢复覆盖右操作数
                     self.push(1); // push rcx (右操作数)
@@ -579,11 +807,16 @@ impl Codegen {
                 }
                 // C 语义: 32 位整数运算结果需截断回 32 位 (溢出 wrap),
                 // 否则 64 位寄存器高位垃圾会泄漏给后续移位/除法等运算.
+                //
+                // `Mul`/`Shl` 是 64 位运算（`imul r64` / `shl r64`），结果必须截断；
+                // `Add`/`Sub` 的 32 位无符号形态由 `binop` 的 `use_32bit` 发的是
+                // **32 位 ALU**，写目的时已经零扩展 —— 再补一条 `mov dst32,dst32`
+                // 是纯冗余（lvm.c 的 `pc += 4` 类每处都白发一条）。
                 {
                     let res_ty = e.ty();
                     if res_ty.size() == 4
                         && res_ty.is_int()
-                        && matches!(*op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Shl)
+                        && matches!(*op, BinOp::Mul | BinOp::Shl)
                     {
                         if Self::is_signed_int(&res_ty) {
                             // movsxd dst, dst32 (符号扩展, 自反 ModRM)
@@ -3445,9 +3678,9 @@ impl Codegen {
                             let off = self.var_offset(&arr_name.name);
                             self.emit_lea_r13(0, off);
                         } else {
-                            // 局部指针: 加载指针值
-                            let off = self.var_offset(&arr_name.name);
-                            self.load_stack(0, off);
+                            // 局部指针: 加载指针值。走家的单一读入口 —— `var_offset` 只
+                            // 认识栈槽，绑了寄存器的指针在这里会读到从未写过的帧槽。
+                            self.mov_from_stack(0, &arr_name.name);
                         }
                     } else {
                         // 通用路径: 基址来自任意 lvalue/指针表达式 (如 &s.i[k])

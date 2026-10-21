@@ -11,6 +11,23 @@ use crate::codegen::x86_64::{AggDst, Codegen};
 impl Codegen {
     /// gen_expr 中 Expr::Cast arm 的搬迁体, 逐字复制, 未改逻辑。
     pub fn gen_expr_cast(&mut self, ty: &Type, e: &Expr, dst: u8) {
+        // 转型到 `void`：值被丢弃，只需为副作用求值。
+        //
+        // 以前没有这条分支，`((void)0)`（`lua_assert` 在 NDEBUG 下的展开、
+        // `cast_void(x)` 里那个常量尾巴）会一路走到通用路径，发一条 `mov rax, 0`
+        // 然后丢掉 —— lvm.c 的 `luaV_execute` 里这种死 `mov` 有 1300+ 条，
+        // 每条 VM 指令的取指路径上都挂着三条。
+        //
+        // 内层是常量时整条不发（常量求值没有副作用）；其余照旧求值，
+        // 因为 `(void)f()` 必须真的调用 f。**不用** `expr_has_side_effects`
+        // 做这个判断：它把 `StmtExpr` 与内置函数当无副作用，而那两类里
+        // 完全可能有 call。
+        if matches!(*ty, Type::Void) {
+            if !matches!(e, Expr::Int { .. } | Expr::Char { .. } | Expr::Float { .. }) {
+                self.gen_expr(e, dst);
+            }
+            return;
+        }
         // (v4si){...} 复合字面量：parser 降级为 Cast + InitList
         if let (Type::Vector(elem_ty, n), Expr::InitList { inits, .. }) = (ty, e) {
             self.gen_vector_init_rvalue(inits, &elem_ty.base, *n, 0);

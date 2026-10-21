@@ -20,6 +20,82 @@ use crate::target::Target;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 impl Codegen {
+    /// 比较运算 → `setcc` 助记符 + 条件码。
+    ///
+    /// 单一真源：`binop` 的「寄存器 ← 寄存器」比较与 `gen_expr` 的「寄存器 ←
+    /// 立即数」比较（右操作数是整型常量）必须落到同一张表上，否则同一个 C
+    /// 表达式会因为右操作数是不是常量而给出不同的布尔值。
+    pub(crate) fn cmp_cc(
+        op: BinOp,
+        is_signed: bool,
+    ) -> (&'static str, crate::codegen::x86_64::opcode::CondCode) {
+        use crate::codegen::x86_64::opcode::CondCode;
+        match op {
+            BinOp::Lt if is_signed => ("setl", CondCode::Lt),
+            BinOp::Lt => ("setb", CondCode::B),
+            BinOp::Le if is_signed => ("setle", CondCode::Le),
+            BinOp::Le => ("setbe", CondCode::Be),
+            BinOp::Gt if is_signed => ("setg", CondCode::Gt),
+            BinOp::Gt => ("seta", CondCode::A),
+            BinOp::Ge if is_signed => ("setge", CondCode::Ge),
+            BinOp::Ge => ("setae", CondCode::Ae),
+            BinOp::EqEq => ("sete", CondCode::Eq),
+            BinOp::Ne => ("setne", CondCode::Ne),
+            _ => unreachable!("cmp_cc: 非比较运算"),
+        }
+    }
+
+    /// `cmp/test dst, imm` + `setcc al` + `movzbq` + 结果落到 `dst`。
+    ///
+    /// 进这里时 `dst` 里已经是左操作数的值。`use_32bit` 必须与 `binop` 的位宽
+    /// 判定同源（`lt.size() <= 4 && rt.size() <= 4`）；`imm` 必须是「按该宽度
+    /// 符号扩展后正好等于常量 mask」的 i64（调用方负责取低 32 位 / 范围检查）。
+    ///
+    /// `imm == 0` 用 `test dst, dst`：x86 上 `test` 与 `cmp 0` 的 ZF/SF/OF/CF
+    /// 完全一致，但短 2~4 字节，且不占用立即数槽。
+    pub(crate) fn emit_cmp_imm(
+        &mut self,
+        op: BinOp,
+        dst: u8,
+        is_signed: bool,
+        use_32bit: bool,
+        imm: i64,
+    ) {
+        use crate::codegen::shared::asm_operand::Width;
+        use crate::codegen::x86_64::opcode::{AluOp, Operand as OpcodeOperand, X86_64Opcode};
+        let w = if use_32bit { Width::B32 } else { Width::B64 };
+        let (mnem, dst_name): (&str, &str) = if use_32bit {
+            ("cmp", GAS_REG32[(dst & 15) as usize])
+        } else {
+            ("cmp", GAS_REG64[(dst & 15) as usize])
+        };
+        if imm == 0 {
+            // test r/m, r: dst 同时在 reg 与 r/m 字段，高 8 号必须两个 REX 位都置。
+            let gas = format!("test {dst_name}, {dst_name}");
+            self.emit_insn(&Insn::test_rm_reg(w, dst, dst).with_gas(gas));
+        } else {
+            // `AluRm` 的 imm 分支：i8 内收敛到 `83 /7 ib`，否则 `81 /7 id`。
+            // Reg(4)=rsp 的 B64 特例只认 Add/Sub（返回 None），故 B64 不走 rsp。
+            let insn = Insn::new(
+                X86_64Opcode::AluRm {
+                    op: AluOp::Cmp,
+                    width: w,
+                    dst: OpcodeOperand::Reg(dst, w),
+                    src: OpcodeOperand::Imm(imm),
+                },
+                &[],
+            );
+            let gas = format!("{mnem} ${imm}, {dst_name}");
+            self.emit_insn_expect(&insn.with_gas(gas));
+        }
+        let (cc_letter, cond) = Self::cmp_cc(op, is_signed);
+        self.emit_insn(&Insn::setcc_reg(cond, 0).with_gas(format!("{cc_letter} %al")));
+        self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xB6, 0xC0], "movzbq %al, %rax"));
+        if dst != 0 {
+            self.mov(dst, 0);
+        }
+    }
+
     pub(crate) fn binop(
         &mut self,
         op: BinOp,
@@ -410,28 +486,7 @@ impl Codegen {
                 );
                 self.emit_insn(&cmp_insn.with_gas(format!("cmp {cmp_src_name}, {cmp_dst_name}")));
                 // setcc al + movzbq %al, %rax 拆开各自挂 gas.
-                let (cc_letter, cond_code): (&str, crate::codegen::x86_64::opcode::CondCode) =
-                    match op {
-                        BinOp::Lt if is_signed => {
-                            ("setl", crate::codegen::x86_64::opcode::CondCode::Lt)
-                        },
-                        BinOp::Lt => ("setb", crate::codegen::x86_64::opcode::CondCode::B),
-                        BinOp::Le if is_signed => {
-                            ("setle", crate::codegen::x86_64::opcode::CondCode::Le)
-                        },
-                        BinOp::Le => ("setbe", crate::codegen::x86_64::opcode::CondCode::Be),
-                        BinOp::Gt if is_signed => {
-                            ("setg", crate::codegen::x86_64::opcode::CondCode::Gt)
-                        },
-                        BinOp::Gt => ("seta", crate::codegen::x86_64::opcode::CondCode::A),
-                        BinOp::Ge if is_signed => {
-                            ("setge", crate::codegen::x86_64::opcode::CondCode::Ge)
-                        },
-                        BinOp::Ge => ("setae", crate::codegen::x86_64::opcode::CondCode::Ae),
-                        BinOp::EqEq => ("sete", crate::codegen::x86_64::opcode::CondCode::Eq),
-                        BinOp::Ne => ("setne", crate::codegen::x86_64::opcode::CondCode::Ne),
-                        _ => unreachable!(),
-                    };
+                let (cc_letter, cond_code) = Self::cmp_cc(op, is_signed);
                 self.emit_insn(&Insn::setcc_reg(cond_code, 0).with_gas(format!("{cc_letter} %al")));
                 self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xB6, 0xC0], "movzbq %al, %rax"));
                 if dst != 0 {

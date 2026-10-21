@@ -57,6 +57,10 @@ impl crate::semantics::ObjectResolver for Codegen {
         name: &str,
     ) -> crate::semantics::StorageInfo {
         use crate::semantics::{ObjectIdentity, StorageClass, StorageInfo, StorageType};
+        // 家的单一真源就是这张表（`Codegen::homes`）。语义层只把它带进描述符，
+        // 不解释坐标：寄存器家的值不在 `stack_offset` 里，读法必须由后端按名字
+        // 走 `home_for`（见 `AddressBase::HomeLoad`）。
+        let home = self.homes.get(name).map(|(loc, _)| *loc);
         match id {
             ObjectIdentity::Local => {
                 let (offset, ty) = self
@@ -70,6 +74,7 @@ impl crate::semantics::ObjectResolver for Codegen {
                     symbol_key: None,
                     stack_offset: Some(offset),
                     is_tls: false,
+                    home,
                 }
             },
             ObjectIdentity::Vla => {
@@ -80,6 +85,7 @@ impl crate::semantics::ObjectResolver for Codegen {
                     symbol_key: None,
                     stack_offset: Some(offset),
                     is_tls: false,
+                    home,
                 }
             },
             ObjectIdentity::Global { resolved_key } => {
@@ -97,6 +103,7 @@ impl crate::semantics::ObjectResolver for Codegen {
                     symbol_key: Some(resolved_key.clone()),
                     stack_offset: None,
                     is_tls,
+                    home,
                 }
             },
             ObjectIdentity::Upvar => {
@@ -107,6 +114,7 @@ impl crate::semantics::ObjectResolver for Codegen {
                     symbol_key: None,
                     stack_offset: Some(offset),
                     is_tls: false,
+                    home,
                 }
             },
         }

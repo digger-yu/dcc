@@ -214,8 +214,24 @@ impl RegBank {
     /// 临时值发号：取池里第一个还没被占用、也没被禁止的号，并登记「本函数用了它」。
     /// 顺序必须是 `pool` 下标升序 —— 表达式溅出槽的实际选择会进产物。
     pub fn alloc_temp(&mut self) -> Option<u8> {
+        self.alloc_temp_except(None)
+    }
+
+    /// 同上，但跳过 `except`。
+    ///
+    /// 需要它的场景只有一个：Binop 的「右操作数不会写 dst，所以左值不必搬走」
+    /// 分支（`dispatch.rs` 的 `!need_save_lhs`）。此时左操作数**就活在 `dst` 里**，
+    /// 而 `dst` 未必登记在 `allocated` 上（它是调用方指定的目标号，不是本发行者
+    /// 发出的），于是本函数可能把这个号再当临时值发出去，`gen_expr_decay(r, stage)`
+    /// 一写就把左值盖掉。实测 `-O2` 下 `va_arg` 读聚合体（`ap += 16` 的左值 `ap`
+    /// 被右值求值踩掉）读到栈垃圾，rc=1；只在「不保存左值」后才会出现，所以是
+    /// 这条捷径引入的，不是既有缺陷。
+    pub fn alloc_temp_except(&mut self, except: Option<u8>) -> Option<u8> {
         for i in 0..self.pool.len() {
             let bit = 1u8 << i;
+            if Some(self.pool[i]) == except {
+                continue;
+            }
             if self.allocated & bit == 0 && self.banned & bit == 0 {
                 self.allocated |= bit;
                 self.used_by_self |= bit;

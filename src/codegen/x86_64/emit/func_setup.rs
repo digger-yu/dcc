@@ -328,14 +328,24 @@ impl Codegen {
             // 用户文本名：非法就报错（见 `resolve_asm_reg`），不静默降级成内存变量。
             Some(_) => self.resolve_asm_reg(v),
             // 自动分配的结果：已是 `Location`，不再走名字这一圈。
-            None => v.home,
+            // 第三来源是后端自己挑的家（`auto_homes`）：没走 SSA 的函数拿不到
+            // `v.home`，只能由 `plan_auto_homes` 在函数入口定好。查本表而不是
+            // `homes`，是因为 `homes` 里还有同名的 **file-scope** 绑定 ——
+            // 局部声明同名时那不是它的家。
+            None => v
+                .home
+                .or_else(|| self.auto_homes.get(&v.name.name).copied()),
         };
         // 「家从哪来」才是保存通道的判据，而不是「有没有寄存器名」：`apply_bindings` 为了
         // 与旧代码同源，会给自动绑定也补写一个 `register_name` 文本（只在原本为 None 时写），
         // 所以名字那一位区分不出两者。而 `home` 只有一个写入点（分配器），用户显式绑定的
         // `home` 恒为 None —— 于是 `home.is_some()` 就是「这是分配器选的」。把这条记到
         // `explicit` 里，而不是在下一次改动时重新推一遍。
-        let explicit = v.home.is_none();
+        //
+        // 后端自选的家（`auto_homes`）同样不是 `explicit`：它是优化，必须对程序正确，
+        // 也就是跨 call 保活（落在 callee-saved 上）；而 `explicit` 的语义是 GNU C
+        // 明文的「调用后会毁掉」，两者在跳 call 时的处理完全不同。
+        let explicit = v.home.is_none() && v.register_name.is_some();
         match home {
             Some(loc) => {
                 self.insert_home(&v.name.name, loc, v.ty.clone(), explicit);

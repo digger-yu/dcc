@@ -20,6 +20,8 @@
 //   structure.rs     进 SSA **之前**的 AST 侧政策: is_structured* 准入判据 +
 //                    lower_switches* (switch → if-chain)。降级政策只在这里, 不要在
 //                    rebuild.rs 复制判据。不放 SSA → AST 的重建。
+//                    `has_unstructured_flow` 是「准入之后怎么落地」的唯一判据：
+//                    goto/label/computed-goto 函数只借 SSA 算家，不重建。
 //   build.rs         AST → SSA 的唯一入口: `Builder` 与其降级政策本体 +
 //                    build_from_func / build_ssa / expr_shape。不放左值降级细节与 phi 插入。
 //   lower.rs         被 Builder 调用的降级辅助: lower_lvalue / collect_local_decls{,_stmt} /
@@ -45,11 +47,15 @@
 //                    物理寄存器的解释（那是 abi/regbank.rs 的事）。
 //   liveness.rs      逐点活性与**干涉表**（Phase 5.1 的数据地基）。只回答「这两个值会
 //                    同时活着吗」，不放「该给哪个号」的决策（那在 regalloc.rs）。
+//   defassign.rs     「必定已赋值」前向数据流。只回答「这个基名在每次使用前是否
+//                    必然已经被定义过」—— 非结构化函数（goto/label）的家准入用它，
+//                    结构化函数仍用 `Span::entry_def`（两者口径差别见该文件头）。
 //   tests.rs / unary_rebuild_ty_tests.rs
 //                    跨切用例 (构造 → 跑 pass → 重建检查产物形态) 集中放这里, 不为了
 //                    「文件对齐」把一条回归场景切成两半 —— 那会同时毁掉它的可读性与判据价值。
 pub mod build;
 pub mod cfg;
+pub mod defassign;
 pub mod dump;
 pub mod expr_rebuild;
 pub mod inline_temps;
@@ -94,7 +100,7 @@ pub use ir::{
 };
 // `LocMap` 是 `pub struct Function` 的 `pub` 字段类型，与 `OrderedNameSet` 同理必须保 `pub`；
 // 其余三个是 `Location` 的组成件，后端消费时要按名字读，所以也对外。
-pub use build::build_from_func;
+pub use build::{build_from_func, build_from_func_analysis};
 pub use dump::dump_function;
 pub use location::{LocMap, Location, RegBank, RegId, Splits};
 pub use loop_exit::has_multi_exit_cycle;

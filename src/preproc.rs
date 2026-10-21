@@ -6882,15 +6882,19 @@ impl Preprocessor {
             if *pos < bytes.len() {
                 if bytes[*pos] == b'*' {
                     *pos += 1;
-                    val *= Self::parse_unary(bytes, pos);
+                    // `#if` 的整数运算按平台语义回绕（gcc 同样是 wrap）。debug 构建
+                    // 开着溢出检查，裸 `*=` 会让 lmathlib.c 这类含大常量乘法的
+                    // 头在预处理阶段直接 panic，而 release 构建静默通过 —— 同一个
+                    // 输入在两种构建下「一个报错一个不报」，判据就失去意义。
+                    val = val.wrapping_mul(Self::parse_unary(bytes, pos));
                 } else if bytes[*pos] == b'/' {
                     *pos += 1;
                     let d = Self::parse_unary(bytes, pos);
-                    val = if d != 0 { val / d } else { 0 };
+                    val = if d != 0 { val.wrapping_div(d) } else { 0 };
                 } else if bytes[*pos] == b'%' {
                     *pos += 1;
                     let d = Self::parse_unary(bytes, pos);
-                    val = if d != 0 { val % d } else { 0 };
+                    val = if d != 0 { val.wrapping_rem(d) } else { 0 };
                 } else {
                     break;
                 }

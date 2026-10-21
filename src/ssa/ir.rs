@@ -276,6 +276,14 @@ pub enum Terminator {
         targets: Vec<String>,
         default: String,
     },
+    /// `goto *expr` (computed goto): 间接跳转，但目标集合是**已知**的 ——
+    /// `targets` 就是函数里全部 label BB。为什么不写成 `Unreachable` + 手工
+    /// 塞 `succs`：后继集合是活性/支配/支配边界的输入，`term_succs` 只认终结符，
+    /// 手塞的缓存会在下一次 `refresh_cfg` 被抹掉，而「没有后继」会让每个 label
+    /// 的入值被当成「来自入口」—— 分析结论会静默偏保守或偏乐观。
+    /// 与 `SwitchTable` 的区别：没有 idx 操作数、没有值域，目标不可静态挑选，
+    /// 所以任何 pass 都不能把它折成单边。
+    Dispatch { targets: Vec<String> },
     /// 不可达
     Unreachable,
 }
@@ -606,7 +614,7 @@ pub(crate) fn rename_term_uses(t: &mut Terminator, map: &HashMap<String, SsaVar>
         Terminator::Ret { val: None } => {},
         Terminator::Branch { cond, .. } => rename_operand(cond, map),
         Terminator::SwitchTable { idx, .. } => rename_operand(idx, map),
-        Terminator::Jump(..) | Terminator::Unreachable => {},
+        Terminator::Jump(..) | Terminator::Unreachable | Terminator::Dispatch { .. } => {},
     }
 }
 
@@ -828,7 +836,10 @@ pub(crate) fn term_operand_ssa_vars(t: &Terminator) -> Vec<SsaVar> {
     };
     match t {
         Terminator::Ret { val: Some(o) } => take(o),
-        Terminator::Ret { val: None } | Terminator::Jump(_) | Terminator::Unreachable => {},
+        Terminator::Ret { val: None }
+        | Terminator::Jump(_)
+        | Terminator::Unreachable
+        | Terminator::Dispatch { .. } => {},
         Terminator::Branch { cond, .. } => take(cond),
         Terminator::SwitchTable { idx, .. } => take(idx),
     }

@@ -523,7 +523,9 @@ fn rebuild_eh_blocks(func: &Function, cx: &mut RebuildCtx<'_>, out: &mut Vec<Blo
             // 落地垫区内的 `Unreachable` = 正常永远走不到 (如 `_Unwind_Resume`
             // 后的填充); 不发任何跳转, 自然落入下一段。
             // `SwitchTable` 不出现在落地垫区 (分派只按 selector 比较)。
-            Terminator::Unreachable | Terminator::SwitchTable { .. } => {},
+            // `Dispatch` 同样不会到重建：含 computed goto 的函数在
+            // `opt::run_ssa_passes` 里走 analysis-only 路径（只取分配决策，体不重建）。
+            Terminator::Unreachable | Terminator::SwitchTable { .. } | Terminator::Dispatch { .. } => {},
         }
         out.push(BlockItem::Stmt(Stmt::Label {
             name: crate::ast::Ident {
@@ -1050,6 +1052,13 @@ fn rebuild_bb(
             }
         },
         Terminator::Unreachable => {},
+        // 构造上到不了这里：`Dispatch` 只由 `goto *expr` 产生，而含 computed goto 的
+        // 函数在 `opt::run_ssa_passes` 里走 analysis-only 路径（只取分配决策，体不重建）。
+        // 不发语句而不是 `unreachable!()`：万一闸门以后被放开，产物会明显地落空（顺着
+        // 下一条语句继续），而 debug 构建里的断言会立即指出真因。
+        Terminator::Dispatch { .. } => {
+            debug_assert!(false, "Dispatch 不应进入 SSA→AST 重建（analysis-only 闸门失效）");
+        },
         Terminator::SwitchTable {
             idx,
             values,
@@ -1643,6 +1652,7 @@ fn can_reach_block(start: &str, target: &str, func: &Function) -> bool {
             Terminator::SwitchTable {
                 targets, default, ..
             } => targets.iter().any(|s| push(s)) || push(default),
+            Terminator::Dispatch { targets } => targets.iter().any(|s| push(s)),
             Terminator::Ret { .. } | Terminator::Unreachable => false,
         };
         if hit {
@@ -1827,6 +1837,13 @@ fn side_only_exits(
                 targets, default, ..
             } => {
                 for s in targets.iter().chain(std::iter::once(default)) {
+                    if seen.insert(s.clone()) {
+                        stack.push(s.clone());
+                    }
+                }
+            },
+            Terminator::Dispatch { targets } => {
+                for s in targets {
                     if seen.insert(s.clone()) {
                         stack.push(s.clone());
                     }

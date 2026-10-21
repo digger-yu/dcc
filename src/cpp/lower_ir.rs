@@ -1708,6 +1708,7 @@ impl<'a, 'b> FuncLowerer<'a, 'b> {
                     v.push(default.clone());
                     v
                 },
+                Terminator::Dispatch { targets } => targets.clone(),
             };
 
             let bb_clone = bb.clone();

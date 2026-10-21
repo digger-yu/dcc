@@ -1,7 +1,9 @@
 // src/ssa/structure.rs - 进 SSA 之前的 AST 侧政策与降级
 //
-//   - 结构化控制流判据 is_structured*: 含 goto/label/computed-goto/asm-goto/switch
-//     的函数不进 SSA, 降级回 AST pass。
+//   - 结构化控制流判据 is_structured*: 含 asm-goto/switch 的函数不进 SSA, 降级回 AST pass。
+//     goto/label/computed-goto **从 2026-10 第三轮起放行**：它们不再被拒，而是由
+//     `has_unstructured_flow` 标记为「非结构化」，在 `opt::run_ssa_passes` 里走
+//     analysis-only 路径（借 SSA 算活性/家，函数体本身不重建）。
 //   - switch -> if-chain 降级: lower_switches_in_func{,_block,_stmt}/lower_switch_stmt/
 //     SwitchArm/arm_ends_with_exit/has_switch_bound_*/bound_flow/expr_has_loop_control/
 //     is_dense_switch/expr_ty。
@@ -10,44 +12,85 @@
 use crate::ast::{BinOp, Block, BlockItem, Case, Decl, Expr, FuncDecl, Stmt, Type};
 use crate::diagnostics::Span;
 
-/// 探测 `FuncDecl::body` 是否含 goto/label/computed-goto/asm-goto/switch。
-/// 任何含这些的函数都降级到 AST pass。
+/// 探测 `FuncDecl::body` 是否含 asm-goto/switch（结构化重建表达不了这两类）。
+///
+/// goto/label/computed-goto 不在判据里：`build.rs` 已经能把它们建成 CFG
+/// （label BB + `Terminator::Dispatch`），限制已经从「进不了 SSA」改成「不重建」
+/// —— 后者由 [`has_unstructured_flow`] 单独回答。
 pub(super) fn is_structured(body: &Block) -> bool {
-    for item in &body.items {
-        if !is_structured_item(item) {
-            return false;
-        }
-    }
-    true
+    structured_reject(body).is_none()
 }
 
-fn is_structured_item(item: &BlockItem) -> bool {
-    match item {
-        BlockItem::Stmt(s) => is_structured_stmt(s),
-        BlockItem::Decl(d) => match d {
-            Decl::Func(f) => f.body.as_ref().is_none_or(is_structured),
-            _ => true,
+/// `is_structured` 的「为什么」版本：返回第一处无法在 IR 里忠实例化的形态。
+///
+/// 只服务于 `DCC_SSA_BAIL=1` 的诊断：`is_structured` 返回 false 时函数会**默默**
+/// 留在 AST 通道上（没有 bail 文本），而「没进 SSA」与「进了但没优化到」在产物上
+/// 长得一模一样。两者只靠读代码区分不是办法。
+pub fn structured_reject(body: &Block) -> Option<String> {
+    body.items.iter().find_map(|item| match item {
+        BlockItem::Stmt(s) => stmt_reject(s),
+        BlockItem::Decl(Decl::Func(f)) => {
+            f.body.as_ref().and_then(structured_reject)
         },
-    }
+        _ => None,
+    })
 }
 
-fn is_structured_stmt(s: &Stmt) -> bool {
+fn stmt_reject(s: &Stmt) -> Option<String> {
     match s {
-        // Goto, labels, computed goto, asm-goto, and switch still use
-        // AST-level passes because SSA -> AST rebuild cannot preserve these
-        // control-flow forms reliably yet.
-        Stmt::Goto { .. }
-        | Stmt::GotoIndirect { .. }
-        | Stmt::Label { .. }
-        | Stmt::AsmGoto { .. }
-        | Stmt::Switch { .. } => false,
+        // asm-goto 与（没能降级的）switch 仍用 AST 层 pass：前者是无法在 IR 里
+        // 表达的标签集合，后者是真正的 fallthrough/continue 语义。
+        // goto/label/computed-goto 见文件头：已从准入判据里移出。
+        Stmt::AsmGoto { .. } => Some("asm goto".to_string()),
+        Stmt::Switch { .. } => Some("switch（含 fallthrough / 区间 case / 绑定 continue，未能降级）".to_string()),
         Stmt::If { then_, else_, .. } => {
-            is_structured_stmt(then_) && else_.as_ref().is_none_or(|e| is_structured_stmt(e))
+            stmt_reject(then_).or_else(|| else_.as_ref().and_then(|e| stmt_reject(e)))
         },
-        Stmt::While { body, .. } | Stmt::Do { body, .. } => is_structured_stmt(body),
-        Stmt::For { body, .. } => is_structured_stmt(body),
-        Stmt::Block { b, .. } => is_structured(b),
-        _ => true,
+        Stmt::While { body, .. } | Stmt::Do { body, .. } => stmt_reject(body),
+        Stmt::For { body, .. } => stmt_reject(body),
+        Stmt::Block { b, .. } => structured_reject(b),
+        _ => None,
+    }
+}
+
+/// 函数体里有没有 goto / label / computed-goto —— 也就是「SSA→AST 结构化重建
+/// 无法忠实表达」的控制流。
+///
+/// 这条判据决定 SSA 通道的**落地方式**，不再决定准入：
+///   * 有 ⇒ analysis-only：建 IR、算活性与家，把家写回**原封不动的 AST**，不重建；
+///   * 无 ⇒ 照旧：跑 pass、重建、交付。
+///
+/// 为什么不直接把非结构化 CFG 重建出来：重建器的 `while`/`if` 恢复算法以结构化
+/// CFG 为前提（`rebuild_cycle` 按循环头展开路径）。把不可约 CFG 塞进去会得到一条
+/// 「能编译、跑得动、但语义已经变了」的产物 —— 比 `luaV_execute` 拿不到寄存器更糟。
+pub fn has_unstructured_flow(body: &Block) -> bool {
+    body.items.iter().any(|item| match item {
+        BlockItem::Stmt(s) => stmt_has_unstructured_flow(s),
+        BlockItem::Decl(Decl::Func(f)) => {
+            f.body.as_ref().is_some_and(|b| has_unstructured_flow(b))
+        },
+        _ => false,
+    })
+}
+
+fn stmt_has_unstructured_flow(s: &Stmt) -> bool {
+    match s {
+        Stmt::Goto { .. } | Stmt::GotoIndirect { .. } | Stmt::Label { .. } => true,
+        Stmt::If { then_, else_, .. } => {
+            stmt_has_unstructured_flow(then_)
+                || else_.as_ref().is_some_and(|e| stmt_has_unstructured_flow(e))
+        },
+        Stmt::While { body, .. } | Stmt::Do { body, .. } => stmt_has_unstructured_flow(body),
+        Stmt::For { init, body, .. } => {
+            init.as_ref().is_some_and(|i| stmt_has_unstructured_flow(i))
+                || stmt_has_unstructured_flow(body)
+        },
+        Stmt::Block { b, .. } => has_unstructured_flow(b),
+        Stmt::Switch { cases, .. } => cases
+            .iter()
+            .any(|c| has_unstructured_flow(&c.body)),
+        Stmt::Invoke { call, .. } => stmt_has_unstructured_flow(call),
+        _ => false,
     }
 }
 

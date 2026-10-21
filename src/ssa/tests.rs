@@ -521,7 +521,7 @@ fn if_else_structured() {
 }
 
 #[test]
-fn goto_bails_out() {
+fn goto_is_admitted_but_lands_analysis_only() {
     let span = Span::point("t.c", 1, 1);
     let f = FuncDecl {
         ret_ty: Type::Int,
@@ -596,7 +596,17 @@ fn goto_bails_out() {
         is_nodiscard: false,
         asm_label: None,
     };
-    assert!(build_from_func(&f).is_none());
+    // 准入判据与落地方式已分离（见 `ssa::structure` 文件头）：goto/label/computed-goto
+    // 不再被拒，照常建 CFG-SSA；但重建无法忠实表达它们，所以落地方式必须被标成
+    // analysis-only（否则重建会静默改变控制流）。这两个事实必须同时成立。
+    assert!(
+        build_from_func(&f).is_some(),
+        "goto 不应再阻止建 SSA（这一判定决定了 `luaV_execute` 能否进家分配）"
+    );
+    assert!(
+        crate::ssa::structure::has_unstructured_flow(f.body.as_ref().unwrap()),
+        "goto 必须仍被标记为非结构化，否则会被重建而不是 analysis-only"
+    );
 }
 
 /// SSA→AST 重建的「单次使用即内联」命名契约。

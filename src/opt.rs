@@ -242,8 +242,17 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_i
             //     同基名的读写序就是语义。
             // 证据: `tests/fixtures/opt/ssa_loop_shapes.c` 与 326 个夹具的 -O0≡-O2≡-O3
             // 扫描在解锁下与不解锁持平, 零额外失效。
+            // 非结构化控制流（goto / label / computed goto）的判据：决定 SSA 通道
+            // **怎么落地**，不再决定准入（见 `ssa::structure::has_unstructured_flow`）。
+            // 它在准入判据之前算：`func_has_unsafe_ssa_pattern` 里「static const 局部」
+            // 那一条只对**会重建**的通道成立（重建会丢掉 `is_static`），analysis-only
+            // 不重建、不产代码，所以那里要放行（见该函数内的注释）。
+            let unstructured = f
+                .body
+                .as_ref()
+                .is_some_and(|b| crate::ssa::structure::has_unstructured_flow(b));
             // Skip functions with unsafe SSA patterns
-            if func_has_unsafe_ssa_pattern(f) {
+            if func_has_unsafe_ssa_pattern(f, unstructured) {
                 continue;
             }
             // returns_twice 影响域 (含 setjmp 的函数及其调用链): 二次返回会让 SSA 在
@@ -278,7 +287,13 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_i
             let memdbg_t0 = memdbg.then(std::time::Instant::now);
             let mut memdbg_ir = (0usize, 0usize);
             let mut memdbg_marks: Vec<(&'static str, u64)> = Vec::new();
-            if let Some(mut ssa) = crate::ssa::build_from_func(f) {
+            let built = if unstructured {
+                // 非结构化通道：不因「急切求值」退避（那条危害只存在于重建后的产物上）。
+                crate::ssa::build_from_func_analysis(f)
+            } else {
+                crate::ssa::build_from_func(f)
+            };
+            if let Some(mut ssa) = built {
                 if memdbg {
                     memdbg_ir = (
                         ssa.blocks.len(),
@@ -292,6 +307,48 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_i
                 // TU 级 FENV_ACCESS 事实随 IR 下去: GVN 等值编号 pass 靠它判定
                 // 「浮点运算不得复用」(舍入模式可在运行期被 fesetround 改掉)。
                 ssa.fenv_access = prog.fenv_access;
+                // analysis-only 通道：含 goto/label/computed goto 的函数**不重建**。
+                //
+                // 它要的只是两件事实：哪些局部其实一直活在一个号上（活性/干涉），
+                // 以及它们的家该是哪个号。这两件事在 IR 上算得准，而「把不可约 CFG
+                // 重新结构化成一棵 while/if 树」是重建器做不到的（`rebuild_cycle` 按
+                // 循环头展开路径，要求 CFG 可约）。旧口径是整函数连准入都拒掉，于是
+                // 解释器主循环里的 `base/pc/cl/k` 连候选都不是。
+                //
+                // 分配结果直接写回**原封不动的 AST** 声明（`VarDecl::home`），所以这条
+                // 路径上没有 phi 物化、没有表达式内联、没有块序重排 —— 产物只在
+                // 「某个局部从栈槽变成了 callee-saved 号」这一件事上变化。
+                if unstructured {
+                    if !opt_skipped("ssa_regalloc") {
+                        let ctx = crate::ssa::regalloc::Ctx {
+                            debug_info,
+                            taken_regs: taken_regs.clone(),
+                            unstructured: true,
+                        };
+                        let plan = f
+                            .body
+                            .as_ref()
+                            .map(|orig| crate::ssa::regalloc::plan_and_split(&mut ssa, orig, &ctx));
+                        if let (Some(mut plan), Some(body)) = (plan, f.body.as_mut()) {
+                            crate::ssa::regalloc::deliver(&ssa, &mut plan, body);
+                            modified = true;
+                        }
+                    }
+                    if let Some(t0) = memdbg_t0 {
+                        memdbg_idx += 1;
+                        eprintln!(
+                            "dcc: memdbg #{memdbg_idx} {} ir={}b/{}i analysis-only dt={}ms",
+                            f.name.name,
+                            ssa.blocks.len(),
+                            ssa.blocks
+                                .values()
+                                .map(|b| b.insts.len() + b.phis.len())
+                                .sum::<usize>(),
+                            t0.elapsed().as_millis()
+                        );
+                    }
+                    continue;
+                }
                 crate::ssa::passes::run_with_opts(&mut ssa, level, strict_aliasing);
                 if memdbg {
                     memdbg_marks.push(("post-passes", memdbg_rss_kb()));
@@ -331,6 +388,7 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_i
                     let ctx = crate::ssa::regalloc::Ctx {
                         debug_info,
                         taken_regs: taken_regs.clone(),
+                        unstructured: false,
                     };
                     f.body
                         .as_ref()
@@ -1239,12 +1297,24 @@ fn check_expr_for_const_stores(expr: &Expr, const_globals: &std::collections::Ha
 ///
 /// 取址/解引用/索引已由 SSA 指令集 (AddrOf/Load/Store/IndexLoad/IndexStore)
 /// 完整支持, 不再跳过。
-fn func_has_unsafe_ssa_pattern(f: &FuncDecl) -> bool {
-    f.body.as_ref().is_some_and(block_has_unsafe_ssa_pattern)
+fn func_has_unsafe_ssa_pattern(f: &FuncDecl, allow_static_locals: bool) -> bool {
+    f.body
+        .as_ref()
+        .is_some_and(|b| block_has_unsafe_ssa_pattern(b, allow_static_locals))
 }
 
-fn block_has_unsafe_ssa_pattern(b: &Block) -> bool {
+fn block_has_unsafe_ssa_pattern(b: &Block, allow_static_locals: bool) -> bool {
     b.items.iter().any(|item| match item {
+        // analysis-only 通道（含 goto / computed goto 的函数，不重建、不产代码）上，
+        // `static` 局部不构成风险：分配器的候选判据把 `is_static` 一向排除在
+        // `plain_local` 之外（`regalloc::scan_block`），它既拿不到家也不会改变帧布局，
+        // 而整棵 AST 原封不动。下面那条 `static` 判据的真正理由是**重建**会丢掉
+        // `is_static`（重建后的声明变成普通栈局部）—— 这条通道不重建。
+        // 典型样本就是解释器主循环里的
+        // `static const void *const disptab[NUM_OPCODES] = { &&L_OP_MOVE, ... };`
+        // —— 它是 `luaV_execute` 进不了 SSA 的唯一原因（同时命中下面两条：static、
+        // 数组带初始化式）。
+        BlockItem::Decl(Decl::Var(v)) if allow_static_locals && v.is_static => false,
         BlockItem::Decl(Decl::Var(v)) => {
             // 数组类型带初始化式 (复合字面量 SSA 无法表示)
             (matches!(v.ty, crate::ast::Type::Array(_, _))
@@ -1281,35 +1351,39 @@ fn block_has_unsafe_ssa_pattern(b: &Block) -> bool {
         // -O0 链得过、-O2 `undefined reference to 'id'`。§7.20 为寄存器分配记过同一事实
         // （那边是「不能把被嵌套函数访达的变量绑进寄存器」），这边把整函数退出 SSA。
         BlockItem::Decl(Decl::Func(_)) => true,
-        BlockItem::Stmt(s) => stmt_has_unsafe_ssa_pattern(s),
+        BlockItem::Stmt(s) => stmt_has_unsafe_ssa_pattern(s, allow_static_locals),
         _ => false,
     })
 }
 
-fn stmt_has_unsafe_ssa_pattern(s: &Stmt) -> bool {
+fn stmt_has_unsafe_ssa_pattern(s: &Stmt, allow_static_locals: bool) -> bool {
     match s {
         // asm goto 包含无法 SSA 化的非结构化控制流
         Stmt::AsmGoto { .. } => true,
         Stmt::If { then_, else_, .. } => {
-            stmt_has_unsafe_ssa_pattern(then_)
+            stmt_has_unsafe_ssa_pattern(then_, allow_static_locals)
                 || else_
                     .as_ref()
-                    .is_some_and(|e| stmt_has_unsafe_ssa_pattern(e))
+                    .is_some_and(|e| stmt_has_unsafe_ssa_pattern(e, allow_static_locals))
         },
-        Stmt::Block { b, .. } => block_has_unsafe_ssa_pattern(b),
-        Stmt::While { body, .. } | Stmt::Do { body, .. } => stmt_has_unsafe_ssa_pattern(body),
+        Stmt::Block { b, .. } => block_has_unsafe_ssa_pattern(b, allow_static_locals),
+        Stmt::While { body, .. } | Stmt::Do { body, .. } => {
+            stmt_has_unsafe_ssa_pattern(body, allow_static_locals)
+        },
         Stmt::For { init, body, .. } => {
             init.as_ref()
-                .is_some_and(|i| stmt_has_unsafe_ssa_pattern(i))
-                || stmt_has_unsafe_ssa_pattern(body)
+                .is_some_and(|i| stmt_has_unsafe_ssa_pattern(i, allow_static_locals))
+                || stmt_has_unsafe_ssa_pattern(body, allow_static_locals)
         },
-        Stmt::Switch { cases, .. } => cases.iter().any(|c| block_has_unsafe_ssa_pattern(&c.body)),
+        Stmt::Switch { cases, .. } => cases
+            .iter()
+            .any(|c| block_has_unsafe_ssa_pattern(&c.body, allow_static_locals)),
         // 标号语句的体里也能带声明（`out: struct {int d[n];} b;`）：不递归就与
         // 上面那条注释里「只看顶层 item 会漏掉语句表达式里的声明」同一病灶。
-        Stmt::Label { stmt, .. } => stmt_has_unsafe_ssa_pattern(stmt),
+        Stmt::Label { stmt, .. } => stmt_has_unsafe_ssa_pattern(stmt, allow_static_locals),
         // 语句表达式 `({...})` 里的声明也是声明：只看顶层 item 会漏掉它（实测：
         // `({ __attribute__((cleanup(cb))) long c = 4; ... })` 的清理在 -O2 静默消失）。
-        Stmt::Expr { e, .. } => expr_has_unsafe_ssa_pattern(e),
+        Stmt::Expr { e, .. } => expr_has_unsafe_ssa_pattern(e, allow_static_locals),
         _ => false,
     }
 }
@@ -1318,7 +1392,7 @@ fn stmt_has_unsafe_ssa_pattern(s: &Stmt) -> bool {
 ///
 /// 与 `ast_asm::walk_expr` 同构地穷举写：新增 `Expr` 变体会直接编不过，而不是静默
 /// 漏掉一个子树（漏一个就是上面那条注释里那个静默错值的又一个版本）。
-fn expr_has_unsafe_ssa_pattern(e: &Expr) -> bool {
+fn expr_has_unsafe_ssa_pattern(e: &Expr, allow_static_locals: bool) -> bool {
     use crate::ast::Expr as E;
     match e {
         E::Int { .. }
@@ -1344,39 +1418,49 @@ fn expr_has_unsafe_ssa_pattern(e: &Expr) -> bool {
         | E::PostInc { e: x, .. }
         | E::PostDec { e: x, .. }
         | E::PreInc { e: x, .. }
-        | E::PreDec { e: x, .. } => expr_has_unsafe_ssa_pattern(x),
-        E::Member { expr: x, .. } => expr_has_unsafe_ssa_pattern(x),
+        | E::PreDec { e: x, .. } => expr_has_unsafe_ssa_pattern(x, allow_static_locals),
+        E::Member { expr: x, .. } => expr_has_unsafe_ssa_pattern(x, allow_static_locals),
         E::Binop { l, r, .. }
         | E::Assign { l, r, .. }
         | E::Comma { l, r, .. }
         | E::Index { arr: l, idx: r, .. } => {
-            expr_has_unsafe_ssa_pattern(l) || expr_has_unsafe_ssa_pattern(r)
+            expr_has_unsafe_ssa_pattern(l, allow_static_locals)
+                || expr_has_unsafe_ssa_pattern(r, allow_static_locals)
         },
         E::Cond {
             cond, then_, else_, ..
         } => {
-            expr_has_unsafe_ssa_pattern(cond)
-                || expr_has_unsafe_ssa_pattern(then_)
-                || expr_has_unsafe_ssa_pattern(else_)
+            expr_has_unsafe_ssa_pattern(cond, allow_static_locals)
+                || expr_has_unsafe_ssa_pattern(then_, allow_static_locals)
+                || expr_has_unsafe_ssa_pattern(else_, allow_static_locals)
         },
         E::Call { callee, args, .. } => {
-            expr_has_unsafe_ssa_pattern(callee) || args.iter().any(expr_has_unsafe_ssa_pattern)
+            expr_has_unsafe_ssa_pattern(callee, allow_static_locals)
+                || args
+                    .iter()
+                    .any(|a| expr_has_unsafe_ssa_pattern(a, allow_static_locals))
         },
-        E::StmtExpr { block, .. } => block_has_unsafe_ssa_pattern(block),
+        E::StmtExpr { block, .. } => block_has_unsafe_ssa_pattern(block, allow_static_locals),
         E::CompoundLit { inits, .. } | E::InitList { inits, .. } => {
             inits.iter().any(|it| match it {
-                crate::ast::InitItem::Expr(x) => expr_has_unsafe_ssa_pattern(x),
+                crate::ast::InitItem::Expr(x) => {
+                    expr_has_unsafe_ssa_pattern(x, allow_static_locals)
+                },
                 crate::ast::InitItem::Designated { value, .. } => {
-                    expr_has_unsafe_ssa_pattern(value)
+                    expr_has_unsafe_ssa_pattern(value, allow_static_locals)
                 },
             })
         },
-        E::VaArg { ap, .. } => expr_has_unsafe_ssa_pattern(ap),
+        E::VaArg { ap, .. } => expr_has_unsafe_ssa_pattern(ap, allow_static_locals),
         E::AsmExpr {
             outputs, inputs, ..
         } => {
-            outputs.iter().any(expr_has_unsafe_ssa_pattern)
-                || inputs.iter().any(expr_has_unsafe_ssa_pattern)
+            outputs
+                .iter()
+                .any(|o| expr_has_unsafe_ssa_pattern(o, allow_static_locals))
+                || inputs
+                    .iter()
+                    .any(|i| expr_has_unsafe_ssa_pattern(i, allow_static_locals))
         },
     }
 }

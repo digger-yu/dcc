@@ -60,6 +60,11 @@ impl Codegen {
             AddressBase::StackSlotLoad { offset } => {
                 self.load_stack(dst, *offset);
             },
+            // 非栈家（物理寄存器 / spill 槽）：按名字走家的单一读入口。
+            // 直接按 offset load 就是「写寄存器、读栈槽」的第二个家。
+            AddressBase::HomeLoad { name } => {
+                self.mov_from_stack(dst, name);
+            },
             AddressBase::GlobalSymbolAddr { symbol_key } => {
                 self.emit_global_addr(dst, symbol_key);
             },
@@ -145,6 +150,9 @@ impl Codegen {
             },
             AddressBase::StackSlotLoad { offset } => {
                 self.load_stack(BASE, *offset);
+            },
+            AddressBase::HomeLoad { name } => {
+                self.mov_from_stack(BASE, name);
             },
             AddressBase::GlobalSymbolAddr { symbol_key } => {
                 self.emit_global_addr(BASE, symbol_key);
@@ -767,9 +775,10 @@ impl Codegen {
                 // 全局指针/标量: 加载值
                 self.emit_global_load(dst, &resolved_key);
             } else {
-                // 局部变量: 从栈加载
-                let off = self.var_offset(name);
-                self.load_stack(dst, off);
+                // 局部变量: 从家读取（物理寄存器家 / spill 槽 / 栈槽三态统一由
+                // `mov_from_stack` 按名字翻译；裸 `load_stack(var_offset)` 只认识栈槽，
+                // 绑了寄存器的指针会在下标基址处读到从未写入的帧槽）。
+                self.mov_from_stack(dst, name);
             }
         }
     }

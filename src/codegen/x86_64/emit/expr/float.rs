@@ -962,6 +962,18 @@ impl Codegen {
             .into_iter()
             .find(|&r| self.reg_bank.is_free(r));
         let borrowed = pf.is_none();
+        // `is_free(3)` 只说明**本函数还没占用** rbx，不说明写它安全：rbx 是
+        // callee-saved，写它就得在序言保存、尾声恢复。`is_free(1)`/`is_free(2)`
+        // 的 rcx/rdx 是 caller-saved，才可以不登记直接用。
+        //
+        // 这里曾漏了这一条：nosave 捷径把 binop 对 rbx 的占用去掉后，`is_free(3)`
+        // 经常为真，`setnp %bl` 直接踩掉调用方的 rbx。实测 `va_arg` 聚合夹具在
+        // -O2 下 `main` 的 `r`（住在 rbx）被 `helper_mixed` 的浮点比较改成 1，
+        // 打印 `total=1`（-O0 为 0）。claim 会把 3 记进 `callee_saved_used`，
+        // 序言/尾声自动补保存。
+        if pf == Some(3) {
+            self.reg_bank.claim(3);
+        }
         if borrowed {
             // 类型化 Stack 指令：`stack_shift` 由 `emit_insn` 自己记账，手改会与
             // 调用点的对齐补偿脱节。
