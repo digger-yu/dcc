@@ -104,6 +104,7 @@
 | `bench_phase_e.sh` | 阶段 E 性能冒烟：mmap + 分块 codegen + `-O2`（`docs/support_features.md` 登记） |
 | `optimize_baseline.sh` | 各优化档位产物基线采集（手工） |
 | `performance_benchmark.sh` | 快速编译耗时基准（手工，完整基准见 `bench_phase_e.sh`） |
+| `bench_lua_sqlite.sh` | Lua 5.5.1 / SQLite 3.53.4 **运行时**性能对比基准（手工）：四档 dcc vs gcc，含功能正确性判据（`docs/dcc-lua-sqlite-build-verify-report.md` 的数据来源） |
 
 ## 生成类
 

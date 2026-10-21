@@ -13,11 +13,13 @@ own working directory for `~/` if needed.
 **correctly at every optimization level `-O0`/`-O1`/`-O2`/`-O3`**, with output
 byte-identical to a gcc build of the same sources.
 
-**Reference commit:** `99dabbc1`
+**Reference commit:** `c2432159`
 (driver / cli / link / preproc) — the driver-side behaviors this guide relies
 on: `$CC`/`$LD`/`$OBJCOPY` are shell-word-split when dcc delegates to the host
 toolchain, and dcc accepts multiple translation units (`.c` plus `.o`/`.a`) in a
-single invocation.
+single invocation. The runtime-correctness and -O2/-O3 performance numbers in
+§4.2/§6 reflect the code at this commit, including the four fixes recorded in
+§6.4 (the previous `-O2`/`-O3` builds printed wrong floating-point values).
 
 > **2026-10 re-verification.** This guide was re-run end to end after a
 > correctness and performance pass on the -O2 pipeline. Four defects that
@@ -347,6 +349,14 @@ correct, **and the output is byte-for-byte identical across `-O0`/`-O1`/`-O2`/
 `-O3`** — confirming dcc compiled Lua's own compiler and runtime correctly at
 every optimization level.
 
+> The same invariant — all four levels equal to each other **and** to a gcc
+> `-O2` build — is what
+> [`scripts/bench_lua_sqlite.sh`](../scripts/bench_lua_sqlite.sh) pins down
+> automatically (it exits non-zero on the first `*-REF-DIFF` / `*-LEVEL-DIFF`).
+> That sweep is also what caught the §6.4 defect 3: a `-O2` build that merely
+> "built and ran" printed `print(12.0)` as `.0` until the comparison was made
+> against gcc, not just against itself.
+
 ### 4.3 Optimization sweep — -O0 .. -O3
 
 A full sweep with a clean rebuild at each level:
@@ -480,6 +490,19 @@ Lua runs a CPU-bound recursive `fib(32)` (interpreter dispatch loop, compiled by
 the chosen compiler); SQLite builds a 200k-row in-memory table and runs a range
 aggregate + an `ORDER BY ... LIMIT` scan. Results are byte-identical in output
 across all four binaries; only timing differs.
+
+The numbers below are produced by a single script —
+[`scripts/bench_lua_sqlite.sh`](../scripts/bench_lua_sqlite.sh) — which builds
+both projects at `-O0/-O1/-O2/-O3`, runs the §4.2 functional checks against a
+gcc `-O2` reference (it fails the run with `LUA-REF-DIFF` / `SQLITE-REF-DIFF` /
+`*-LEVEL-DIFF` if any level disagrees), and then measures timing. Re-running it
+on a fresh checkout reproduces the tables here:
+
+```bash
+DCC=/root/dcc/target/release/dcc bash scripts/bench_lua_sqlite.sh
+# -> /tmp/bench_lua_sqlite.txt (+ /tmp/bench_lua_sqlite.txt.artifacts/)
+#    exits 0 when all four levels match gcc byte-for-byte, 1 on any build-fail/diff
+```
 
 ### 6.1 Lua — recursive `fib(32)`
 
