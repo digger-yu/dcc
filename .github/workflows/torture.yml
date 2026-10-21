@@ -20,12 +20,10 @@ jobs:
         run: cargo build --release
 
       - name: Download GCC torture suite
-        run: |
-          git clone --depth 1 --filter=blob:none --sparse \
-            https://github.com/gcc-mirror/gcc.git tests/gcc-torture
-          cd tests/gcc-torture && git sparse-checkout set \
-            gcc/testsuite/gcc.c-torture/execute \
-            gcc/testsuite/gcc.c-torture/compile
+        # 套件拉取只走一个入口: 本地与 CI 用同一个脚本, 否则 CI 的稀疏
+        # 检出子集会与本地不一致 —— 缺 gcc.dg/gcc.target 兄弟文件时包装
+        # 测试被整例跳过, 甚至把 include not found 算成编译失败。
+        run: bash scripts/setup_torture.sh
 
       - name: Run compile tests
         # 旧写法 `bash scripts/x.sh 2>&1 | tee log || true` 有两层掩盖:

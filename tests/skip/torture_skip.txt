@@ -27,6 +27,7 @@ asmgoto-5.c
 
 # 注: 原来因 `#include "../../gcc.dg/..."` 兄弟文件缺失而跳过的测试
 # (pr88423.c 及 execute/ 下的 pr105777/pr109938/pr109986/pr30314/
-# pr98304-2.c) 已从本列表移除。当 torture 子集提供了 gcc.dg/ 时它们能
-# 在 dcc 上正常编译/运行; 当 gcc.dg/ 不可用时, harness 会自动跳过
-# (见 scripts 中的 gcc_dg_include_missing 判定), 不会让门禁变红。
+# pr98304-2.c) 已从本列表移除。setup_torture.sh 会按源码里的相对
+# include 补齐 gcc.dg / gcc.target 下的兄弟文件; 若套件子集确实缺
+# 文件, harness 会自动跳过 (见 scripts 中的 sibling_include_missing
+# 判定), 不会把「套件缺文件」算成编译失败。

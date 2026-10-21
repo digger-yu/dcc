@@ -47,7 +47,7 @@
 
 | 脚本 | 用途 |
 |------|------|
-| `setup_torture.sh` | 稀疏下载 gcc.c-torture 到 `tests/gcc-torture/` |
+| `setup_torture.sh` | 稀疏下载 gcc.c-torture 到 `tests/gcc-torture/`，并按源码 `#include` 补齐 `gcc.dg` / `gcc.target` 兄弟文件 |
 | `torture_test.sh` | 总驱动（`compile` / `execute` / `all`） |
 | `torture_compile_test.sh` | compile 档 |
 | `torture_execute_test.sh` | execute 档 |
