@@ -67,6 +67,19 @@ calc_rate() {
     awk "BEGIN { printf \"%.2f%%\", ($pass / $total) * 100 }"
 }
 
+# ── 仓库内文件的可点击链接 ──
+# Job Summary 里的相对链接按仓库根页面解析, `tests/skip/x.txt` 会被拼成
+# https://github.com/<owner>/<repo>/tests/skip/x.txt (缺 /blob/<sha>/),
+# 因此用 Actions 注入的环境变量拼绝对地址; 本地运行退回相对路径。
+repo_blob_url() {
+    local path="$1"
+    if [[ -n "${GITHUB_REPOSITORY:-}" ]]; then
+        echo "${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA:-main}/${path}"
+    else
+        echo "$path"
+    fi
+}
+
 # ── 解析日志 ──
 read -r c_total c_pass c_fail c_skip <<< "$(parse_stats "$COMPILE_LOG")"
 if [[ -n "$RUN_LOG" && -f "$RUN_LOG" ]]; then
@@ -167,7 +180,7 @@ all_skips=$(echo "$all_skips" | sed '/^$/d')
 if [[ -n "$all_skips" ]]; then
     echo "## Skipped Tests"
     echo ""
-    echo "See [gcc_dg_skip.txt](tests/skip/gcc_dg_skip.txt) for manually skipped items."
+    echo "See [gcc_dg_skip.txt]($(repo_blob_url tests/skip/gcc_dg_skip.txt)) for manually skipped items."
     echo ""
 
     # 按 skip 原因分类统计
