@@ -35,11 +35,15 @@ jobs:
   build-dcc:
     name: "Build DCC Compiler"
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 冷缓存（首个 run / lockfile 变更）要编满 388 个源文件, 留够余量。
+    # 与主 CI 一致用 rust-cache, 避免手动 benchmark 也每次冷全量编译。
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
       - name: Build dcc (release)
         run: |
           cargo build --release
