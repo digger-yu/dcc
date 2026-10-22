@@ -1578,3 +1578,174 @@ fn infer_binop_type_keeps_complex_results() {
         "复数相等运算结果必须是 int"
     );
 }
+
+/// `Operand::Int(i128)` 是**无类型**的：字面量的类型（含后缀带来的无符号性）只有前端知道。
+/// 这条记录侧的判据必须存在，因为「常量进 IR 时顺手记一下类型」是本仓唯一能让
+/// `0xffffffffUL` 与 `4294967295LL` 分开的地方 —— 两者的 i128 值完全相同，任何只看值的
+/// 阶梯都只能给一个答案，而无符号性恰恰是它们唯一有语义差别的部分。
+#[test]
+fn const_int_ty_table_records_literal_signedness() {
+    let sp = Span::point("t.c", 1, 1);
+    // —— 记账 API 本身：同值同型幂等，同值异型标歧义，歧义不能被后续记录覆盖掉 ——
+    let mut f = Function::new("t".into(), Type::Int, sp.clone());
+    f.note_const_int_ty(7, &Type::ULong);
+    assert_eq!(f.const_int_ty(7), Some(Type::ULong), "首次记录必须原样可读回");
+    f.note_const_int_ty(7, &Type::ULong);
+    assert_eq!(f.const_int_ty(7), Some(Type::ULong), "同值同型重复记录仍是该类型 (幂等)");
+    f.note_const_int_ty(7, &Type::LongLong);
+    assert_eq!(
+        f.const_int_ty(7),
+        None,
+        "同值异型 ⇒ 判为歧义, 不得任挑一个 (挑错就是挑错有符号性)"
+    );
+    f.note_const_int_ty(8, &Type::LongLong);
+    assert_eq!(f.const_int_ty(8), Some(Type::LongLong), "一个值的歧义不得传染给别的值");
+    assert_eq!(f.const_int_ty(9), None, "没记过的值不得凭空给出类型");
+
+    // —— 真前端：`0xffffffffUL` 走完整条降级后, 函数里应带着 ULong ——
+    let src = "int f(long x){ unsigned long u = 0xffffffffUL; return (unsigned long)x > u; }\n";
+    let func = try_build(src, "f").expect("整型比较应能进 SSA");
+    assert_eq!(
+        func.const_int_ty(0xffff_ffff),
+        Some(Type::ULong),
+        "UL 后缀的无符号性必须在 build 期记进 const_int_tys"
+    );
+}
+
+/// 消费侧：重建出来的 `Expr::Int` 必须带上原字面量类型，而不是阶梯猜出来的那个。
+///
+/// 根因形态（实测 -O2 起错，gcc 给 32 / dcc 给 0）：`(unsigned long)x > 0xffffffffUL` 里
+/// 两侧都成了常量后，`Operand::Int(4294967295)` 的类型由 [`int_const_ty`] 的量级阶梯猜成
+/// `long long`；于是 `unsigned long` × `long long` 混合符号，公共类型若按「只看秩」推会停在
+/// 有符号侧，比较被编成 `setg`（有符号）而非 `seta`。本例钉住前半段（类型还原），后半段
+/// （转换规则）由 `ast.rs` 的 6.3.1.8 矩阵用例与常驻夹具钉。
+#[test]
+fn rebuilt_int_constant_restores_literal_type_instead_of_the_ladder_guess() {
+    use crate::ssa::expr_rebuild::{int_const_ty, int_const_ty_for};
+    let sp = Span::point("t.c", 1, 1);
+
+    // 阶梯是「只能猜时」的兜底：它给不出 ULong（值相同 ⇒ 无从区分），只能给量级类型。
+    assert_eq!(int_const_ty(0xffff_ffff), Type::LongLong, "阶梯按量级猜 64 位整型");
+    assert_eq!(int_const_ty(1), Type::Int, "装得进 int 的值仍按 int 猜");
+    // 兜底也不得谎报：装不进 `long long` 的正值不能挂一个表示不了自己值的有符号类型。
+    let big = i128::from(u64::MAX) - 8;
+    assert_eq!(int_const_ty(big), Type::ULongLong, "≥2^63 的正值不能挂 long long");
+    assert_eq!(
+        int_const_ty(i128::from(u64::MAX) + 1),
+        Type::Int128,
+        "超出 u64 的值必须升到 128 位"
+    );
+
+    // 表命中时表赢；歧义时安全回落到阶梯（宁可按量级猜，也不得拿一个错的确切类型）。
+    let mut f = Function::new("g".into(), Type::Int, sp.clone());
+    f.note_const_int_ty(0xffff_ffff, &Type::ULong);
+    assert_eq!(
+        int_const_ty_for(&f, 0xffff_ffff),
+        Type::ULong,
+        "字面量的真实类型必须压过量级阶梯"
+    );
+    f.note_const_int_ty(0xffff_ffff, &Type::LongLong);
+    assert_eq!(
+        int_const_ty_for(&f, 0xffff_ffff),
+        Type::LongLong,
+        "歧义时回落阶梯 (阶梯对 0xffffffff 给 long long), 不得凭空造出 ULong"
+    );
+    assert_eq!(int_const_ty_for(&f, 12345), Type::Int, "没记过的值走阶梯");
+
+    // 端到端：build → (跑 pass) → rebuild_block 之后, 重建出的 AST 里那个常量仍带 ULong。
+    // 走完整条 pass 而不是只看 build, 是因为实测的错值正出在「SCCP 把变量也折成常量」之后
+    // —— 那时比较两侧都是 `Operand::Int`, 类型只能从字面量表里查。
+    let src = "int f(long x){ unsigned long u = 0xffffffffUL; if ((unsigned long)x > u) return 32; return 0; }\n";
+    let base = try_build(src, "f").expect("该形态应能进 SSA");
+    for level in [2u8, 3] {
+        let mut ssa = base.fork();
+        crate::ssa::passes::run_with_opts(&mut ssa, level, false);
+        let dump = format!("{:?}", crate::ssa::rebuild_block(&ssa));
+        let at = dump
+            .find("v: 4294967295")
+            .unwrap_or_else(|| panic!("-O{level} 重建产物里应仍有该常量, 实得: {dump}"));
+        let win: String = dump[at..].chars().take(160).collect();
+        assert!(
+            win.contains("ty: ULong")
+                && !win.contains("ty: ULongLong")
+                && !win.contains("ty: LongLong"),
+            "-O{level}: 重建出的 4294967295 必须带 ULong (UL 后缀), 实得窗口: {win}"
+        );
+    }
+}
+
+/// 站点④：比较指令的**操作数类型**必须按指令 `dest` 名记账，而不是按常量值记账。
+///
+/// 为什么值键表（[`Function::const_int_tys`]）结构上修不了这一类：`1` 既是 `int` 也是
+/// `unsigned int`，同一 TU 里两种写法同值 ⇒ 判为歧义 ⇒ 回落量级阶梯 ⇒ `int`。而 SCCP
+/// 恰恰会把**带类型的** `Operand::Var(y.1: UInt)` 换成**无类型的** `Operand::Int(1)`，
+/// 无符号性就在那一步被销毁（实测 `int x=-1; unsigned int y=1; return x>y;` 在 -O2 得 0,
+/// 应 1；`DCC_SSA_OFF=sccp` 时 IR 仍是 `Var(x.1: Int) > Var(y.1: UInt)`，结果正确）。
+#[test]
+fn cmp_operand_ty_is_keyed_by_inst_dest_not_by_value() {
+    use crate::ssa::ir::InstKind;
+    let sp = Span::point("t.c", 1, 1);
+
+    // —— 记账 API：键是 dest 名，两条比较互不干扰（按值记就撞在同一个 `1` 上）——
+    let mut f = Function::new("t".into(), Type::Int, sp.clone());
+    f.note_cmp_operand_tys("_bin_1".into(), &Type::Int, &Type::UInt);
+    assert_eq!(
+        f.cmp_operand_ty("_bin_1"),
+        Some((Type::Int, Type::UInt)),
+        "首次记录必须原样可读回"
+    );
+    assert_eq!(f.cmp_operand_ty("_bin_2"), None, "没记过的 dest 不得凭空给出类型");
+    f.note_cmp_operand_tys("_bin_2".into(), &Type::Long, &Type::ULong);
+    assert_eq!(
+        f.cmp_operand_ty("_bin_1"),
+        Some((Type::Int, Type::UInt)),
+        "另一条同值比较不得覆盖本条 (两条的操作数值都是 1, 按值记账必丢一边)"
+    );
+
+    // —— 传递：`fork()` 必须带走这张表，否则跑 pass 后就查不到了 ——
+    let g = f.fork();
+    assert_eq!(
+        g.cmp_operand_ty("_bin_1"),
+        Some((Type::Int, Type::UInt)),
+        "fork 后记录必须仍在 (重建读的是 pass 之后那份 Function)"
+    );
+
+    // —— 真前端：build 期为比较指令记上 AST 里的操作数类型 ——
+    let src = "int f(void){ int x=-1; unsigned int y=1; return x>y; }\n";
+    let func = try_build(src, "f").expect("该形态应能进 SSA");
+    let mut cmps = 0usize;
+    for b in &func.block_order {
+        for inst in &func.blocks[b].insts {
+            if let InstKind::Bin { op: BinOp::Gt, .. } = &inst.kind {
+                let d = inst.dest.as_ref().expect("比较必有 dest");
+                assert_eq!(
+                    func.cmp_operand_ty(&d.name()),
+                    Some((Type::Int, Type::UInt)),
+                    "{} 的两个操作数在 AST 里是 int 与 unsigned int, 必须在 build 期记账",
+                    d.name()
+                );
+                cmps += 1;
+            }
+        }
+    }
+    assert!(cmps > 0, "该形态应至少下降出一条 Gt 指令");
+
+    // —— 消费：走完 SSA 通道后重建出的 AST 里，那个 `1` 必须重新带上 `UInt` ——
+    // 只看 build 之后不够：销毁发生在 SCCP，恢复发生在重建，两头都得钉。
+    let base = try_build(src, "f").expect("该形态应能进 SSA");
+    for level in [2u8, 3] {
+        let mut ssa = base.fork();
+        crate::ssa::passes::run_with_opts(&mut ssa, level, false);
+        let dump = format!("{:?}", crate::ssa::rebuild_block(&ssa));
+        let ones: Vec<String> = dump
+            .match_indices("v: 1,")
+            .map(|(at, _)| dump[at..].chars().take(120).collect())
+            .collect();
+        assert!(!ones.is_empty(), "-O{level}: 重建产物里应仍有常量 1, 实得: {dump}");
+        assert!(
+            ones.iter().any(|w| w.contains("ty: UInt")),
+            "-O{level}: 传播后的 `1` 必须按比较操作数的原始类型还原为 unsigned int, \
+             否则公共类型退化成 int ⇒ 无符号比较拿到有符号条件码。所有 `v: 1` 窗口: {ones:?}"
+        );
+    }
+}

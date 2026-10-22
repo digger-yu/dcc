@@ -168,6 +168,76 @@ pub(super) fn is_synthetic_temp_base(func: &Function, base: &str) -> bool {
     base.starts_with('_') || is_lower_ir_temp_base(base)
 }
 
+/// 本窗口的分级开关（`DCC_ADDR_FOLD`，默认开）：与 `DCC_BLOCKOPT` 同一条纪律 ——
+/// 折叠类改动一旦削错，症状是「别处读到垃圾」，必须能用一个环境变量把它整体关掉
+/// 复现，否则无法与同阶段的其他改动二分。
+fn addr_fold_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("DCC_ADDR_FOLD")
+            .map(|v| v.trim() != "0")
+            .unwrap_or(true)
+    })
+}
+
+/// 阶段2 尾项：地址临时值就地内联的**唯一豁免窗口**（真正的折叠动作在
+/// `expr_rebuild::fold_direct_named_access`，这里只决定「敢不敢把 `AddrOf` 交出去」）。
+///
+/// `is_addr_producer` 的禁令对它成立的那些父级（按指针**值**做算术、再套一层取址、当
+/// 下标基址）一概不变；这里只放开一种父子形态：`*(&sym) = v` / `x = *(&sym)` —— 地址
+/// 就是对象自己的位置，中间没有任何指针值参与运算，摘掉这层 deref 后语义逐位相同。
+///
+/// 每个条件都必要：
+///   * 生产者必须是最纯的 `AddrOf{base}`：`MemberAddr`/`IndexAddr` 带字段偏移与下标
+///     步长，折叠后要重算落点，不属本窗口；
+///   * `base` 不得是合成临时名 —— 它可能已被别的内联决策消掉声明，折进去会引用一个
+///     从未声明的名字（后端按隐式 int 处理，指针/double 直接截断，见下方 kept_temp_bases
+///     那段注释的同一条案底）；
+///   * 不得被 phi 读（见 `read_by_phi`：那时它是槽的初始化，不是「无人读」）；
+///   * 有使用点时必须是**紧邻的下一条**指令、且位置是那条 `Store`/`Load` 的地址操作数：
+///     中间隔着任何指令，重建出的 AST 就把「取地址」与「访问」拆成两次，时机不再等价；
+///   * 那条访存不得是 volatile（volatile 局部走的正是「`*(&v)` 保住访问次数」那条通路）。
+fn addr_temp_folds_at_sole_memop(
+    func: &Function,
+    ssa_name: &str,
+    def_bb: &str,
+    def_idx: usize,
+    kind: &InstKind,
+) -> bool {
+    if !addr_fold_enabled() {
+        return false;
+    }
+    let InstKind::AddrOf { base } = kind else {
+        return false;
+    };
+    if is_synthetic_temp_base(func, base) || read_by_phi(func, ssa_name) {
+        return false;
+    }
+    let (u_bb, u_pos) = match find_use_site(func, ssa_name) {
+        Some(p) => p,
+        // 一次都没人读：`AddrOf` 不碰内存、无副作用（`inst_unremovable` 也不认它），
+        // 放开等于扔掉那条 `lea` 和它的落槽写。
+        None => return true,
+    };
+    if u_bb != def_bb || u_pos != def_idx + 1 {
+        return false;
+    }
+    let Some(bb) = func.blocks.get(def_bb) else {
+        return false;
+    };
+    // `u_pos == insts.len()`（用在 terminator 上）在这里自然取不到，一并拒掉。
+    let Some(next) = bb.insts.get(u_pos) else {
+        return false;
+    };
+    match &next.kind {
+        InstKind::Store { e, is_volatile, .. } | InstKind::Load { e, is_volatile, .. } => {
+            !*is_volatile && matches!(e, Operand::Var(v) if v.name() == ssa_name)
+        },
+        _ => false,
+    }
+}
+
 /// SSA→AST 重建的内联计划。
 pub(super) struct InlinePlan {
     /// SSA 名 -> 内联表达式 (`Some(None)` = 不可内联, 保留为独立赋值语句)
@@ -284,7 +354,11 @@ pub(super) fn plan_inlined_temps(func: &Function) -> InlinePlan {
             // `Expr::AddrOf{ .. }`，把它就地塞进任一父表达式都会让地址语义漂移（父级按
             // 指针值重算步长 / 再包一层取址）。保留成真实临时变量后，消费方走 codegen 的
             // 「载入指针值再按其类型偏移」分支，语义无歧义。代价只是多一个栈槽，不改变值。
-            let addr_operand_pinned = is_addr_producer(&inst.kind);
+            // 唯一豁免见 `addr_temp_folds_at_sole_memop`（P13 阶段2 尾项）：紧邻的
+            // `*(&sym)=v` / `x=*(&sym)` 还原成对 `sym` 的直接访问，地址临时值连同它的
+            // 栈槽与那条落槽写一起消失。
+            let addr_operand_pinned = is_addr_producer(&inst.kind)
+                && !addr_temp_folds_at_sole_memop(func, &ssa_name, bb_name, idx, &inst.kind);
             let mut chain: Option<ExpandedTemp> = None;
             let inlineable = is_temp
                 && use_count <= 1
@@ -311,13 +385,8 @@ pub(super) fn plan_inlined_temps(func: &Function) -> InlinePlan {
                     }
                 };
             if inlineable {
-                let resolved = inst_to_expr_resolved(
-                    &inst.kind,
-                    &subst,
-                    &inst.span,
-                    func,
-                    inst.dest.as_ref().map(|v| &v.ty),
-                );
+                let resolved =
+                    inst_to_expr_resolved(&inst.kind, &subst, &inst.span, func, inst.dest.as_ref());
                 // （这里曾加过一道「展开表达式的类型必须等于 dest 类型才内联」的守卫；
                 // 实测它不是必需的：-O2 丢 `__seg_gs` 的真因在 `ast_gvn::coalesce_block`
                 // 的类型判据（见那里的说明），修完之后它只会把 C++ 降级里大量合法的

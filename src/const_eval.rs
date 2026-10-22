@@ -356,8 +356,8 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
             let lv = eval_full(l, fenv_access)?;
             let rv = eval_full(r, fenv_access)?;
             // 整数算术/比较统一走类型感知路径 (arith_binop_values):
-            // 按 binop_ty 做无符号重解释/规范化, 比较按操作数自身
-            // 类型宽度与符号性 (C99 6.3.1.8)。
+            // 按 binop_ty 做无符号重解释/规范化; 比较另按操作数类型推出的
+            // 公共类型 (C99 6.3.1.8) 定符号性 —— 比较结果类型恒为 int, 不是 binop_ty。
             match op {
                 BinOp::AndAnd | BinOp::OrOr => unreachable!(),
                 _ => arith_binop_values(*op, binop_ty, l, r, lv, rv, fenv_access),
@@ -588,9 +588,9 @@ fn eval_float_builtin(name: &str, _args: &[Expr]) -> Result<Option<ConstValue>, 
         "__builtin_nanl" => Some(FloatConst::LongDouble(float80::from_f64(f64::NAN))),
         "__builtin_nans" => Some(FloatConst::F64(f64::from_bits(0x7FF0_0000_0000_0001))),
         "__builtin_nansf" => Some(FloatConst::F32(f32::from_bits(0x7F80_0001))),
-        "__builtin_nansl" => Some(FloatConst::LongDouble(float80::from_f64(
-            f64::from_bits(0x7FF0_0000_0000_0001),
-        ))),
+        "__builtin_nansl" => {
+            Some(FloatConst::LongDouble(float80::from_f64(f64::from_bits(0x7FF0_0000_0000_0001))))
+        },
         "__builtin_inf" | "__builtin_huge_val" => Some(FloatConst::F64(f64::INFINITY)),
         "__builtin_inff" | "__builtin_huge_valf" => Some(FloatConst::F32(f32::INFINITY)),
         "__builtin_infl" | "__builtin_huge_vall" => {
@@ -655,7 +655,7 @@ fn eval_float_builtin(name: &str, _args: &[Expr]) -> Result<Option<ConstValue>, 
                 f32::NAN
             };
             FloatConst::F32(x)
-        }
+        },
         "f32x" | "f64" => {
             let x = if is_inf {
                 f64::INFINITY
@@ -665,7 +665,7 @@ fn eval_float_builtin(name: &str, _args: &[Expr]) -> Result<Option<ConstValue>, 
                 f64::NAN
             };
             FloatConst::F64(x)
-        }
+        },
         "f128" | "f128x" => {
             // binary128：位模式必须**直接给出**。
             // 旧实现落到下面的 long double 分支（f64 → 80-bit 中转），再由
@@ -693,7 +693,7 @@ fn eval_float_builtin(name: &str, _args: &[Expr]) -> Result<Option<ConstValue>, 
                 f64::NAN
             };
             FloatConst::LongDouble(float80::from_f64(x))
-        }
+        },
     };
     Ok(Some(ConstValue::Float(v)))
 }
@@ -765,7 +765,7 @@ fn eval_math_builtin(name: &str, args: &[Expr]) -> Result<Option<ConstValue>, Co
         "llrint" | "lrint" if argc == 1 => {
             return Ok(Some(ConstValue::Int(const_rint_i64(fa(0)?) as i128)))
         },
-        _ => {}
+        _ => {},
     }
     let r: Option<f64> = match stem {
         "sqrt" if argc == 1 => Some(libm::sqrt(fa(0)?)),
@@ -1334,11 +1334,12 @@ fn arith_binop_values(
     }
 }
 
-/// 类型感知的整数比较: 按各操作数自身类型规范化 (掩码/符号扩展)
-/// 后比较。任一操作数整型提升后为无符号 (无符号且宽度 >= int,
-/// C99 6.3.1.1/6.3.1.8) 时, 位模式重解释为无符号再比较:
-/// (0U-1) > 0 应为真。UChar/UShort 等提升为 int, 不触发无符号
-/// 比较。非整数对回退到 f64 比较。
+/// 类型感知的整数比较: 在【公共类型】里求值 (C11 6.3.1.8)。
+///
+/// 公共类型由 `ast::Type::usual_arith_type` 给出 —— 与前端类型推导、SSA→AST
+/// 重建、codegen 共用同一真源, 其中已含整数提升 (6.3.1.1p2): `UChar`/`UShort` 提升
+/// 为 `int` 后自然留在有符号侧, 不需要另列例外。比较结果本身是 `int`, 与公共类型
+/// 无关, 故不能像算术臂那样直接取 `binop_ty`。非整数对回退到 f64 比较。
 fn cmp_binop_values<F: Fn(i128, i128) -> i128>(
     l: &Expr,
     r: &Expr,
@@ -1347,19 +1348,34 @@ fn cmp_binop_values<F: Fn(i128, i128) -> i128>(
     f: F,
 ) -> Result<ConstValue, ConstEvalError> {
     if let (&ConstValue::Int(a), &ConstValue::Int(b)) = (&lv, &rv) {
-        let unsigned_cmp =
-            matches!(&l.ty(), Type::UInt | Type::ULong | Type::ULongLong | Type::UInt128)
-                || matches!(&r.ty(), Type::UInt | Type::ULong | Type::ULongLong | Type::UInt128);
-        let a = normalize_int_value(a, &l.ty());
-        let b = normalize_int_value(b, &r.ty());
+        let common = l.ty().usual_arith_type(&r.ty());
+        // 先按各自类型取回常量真值 (`0U - 1` 的 sub_values 结果是未截断的 -1,
+        // 规范化到 UInt 才回到 4294967295), 再截断到公共类型宽度: `-1`(Int)
+        // 在 ULong 上下文里是 0xFFFFFFFFFFFFFFFF, 而不是 -1。
+        let a = normalize_int_value(normalize_int_value(a, &l.ty()), &common);
+        let b = normalize_int_value(normalize_int_value(b, &r.ty()), &common);
+        let unsigned_cmp = is_unsigned_int_ty(&common);
         let res = if unsigned_cmp {
-            f(a as u128 as i128, b as u128 as i128)
+            f(unsigned_order(a), unsigned_order(b))
         } else {
             f(a, b)
         };
         return Ok(ConstValue::Int(res));
     }
     cmp_values(lv, rv, |x, y| f(x as i128, y as i128))
+}
+
+/// 把「按无符号解释的 i128 位模式」单调嵌入到 i128 的全体序, 使调用方可以复用
+/// 同一个 `Fn(i128, i128)` 比较器。
+///
+/// 旧写法 `f(a as u128 as i128, b as u128 as i128)` 是**往返恒等** —— Rust 的
+/// `i128 as u128` 保留位模式、`u128 as i128` 再原样取回, 负数还是那个负数,
+/// 于是「重解释为无符号」完全没生效, `-1 > 0xffffffffUL` 被折成 0 (gcc 给 1)。
+/// 公共类型宽度 < 128 时上一步截断已保证两值非负, 直接比也对; 但 `UInt128`
+/// 的常量在 i128 里本就以补码负数承载, 只有异或最高位这一种映射同时对两类
+/// 宽度都保序。
+fn unsigned_order(v: i128) -> i128 {
+    ((v as u128) ^ (1u128 << 127)) as i128
 }
 
 /// 指针算术的字节缩放: ptr±n 中 n 乘 pointee 大小。
@@ -1385,11 +1401,7 @@ fn fold_float<F>(
 where
     F: FnOnce(f64, f64) -> f64,
 {
-    if fenv_access
-        || a.is_long_double()
-        || b.is_long_double()
-        || a.is_float128()
-        || b.is_float128()
+    if fenv_access || a.is_long_double() || b.is_long_double() || a.is_float128() || b.is_float128()
     {
         return Err(ConstEvalError::NotConstant);
     }
@@ -2186,5 +2198,118 @@ mod tests {
             ty: Type::Void,
         };
         assert_eq!(eval_full(&se, false), Ok(ConstValue::Int(0)));
+    }
+
+    /// 带类型的整型字面量（比较的符号性由**两个操作数**的公共类型决定，
+    /// 所以构造测例必须能分别指定左右类型，不能共用 `int()` 助手）。
+    fn typed(v: i128, ty: Type) -> Expr {
+        Expr::Int {
+            v,
+            span: Span::point("t.c", 1, 1),
+            ty,
+        }
+    }
+
+    /// 折叠一条比较：外层 `Expr::Binop.ty` 故意给 `Int`（C 的比较结果恒为 `int`），
+    /// 以此钉住「折叠器不能拿结果类型当符号性依据」这一点。
+    fn fold_cmp(op: BinOp, l: (i128, Type), r: (i128, Type)) -> ConstValue {
+        let e = Expr::Binop {
+            op,
+            l: Box::new(typed(l.0, l.1)),
+            r: Box::new(typed(r.0, r.1)),
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Int,
+        };
+        eval_full(&e, false).expect("比较应可折叠")
+    }
+
+    #[test]
+    fn cmp_folds_in_usual_arith_type_of_operands() {
+        // 同宽混合符号（LP64: `unsigned long` 秩 4 / `long long` 秩 5 但同为 64 位）
+        // ⇒ `long long` 表示不了 [2^63, 2^64) ⇒ 公共类型 `unsigned long long` ⇒ -1 变最大值。
+        // 旧判据「任一操作数自身无符号」也会选到无符号，但 `a as u128 as i128` 是
+        // 往返恒等（负数原样带回），两者任修其一都仍是 0。
+        assert_eq!(fold_cmp(BinOp::Gt, (-1, Type::LongLong), (1, Type::ULong)), ConstValue::Int(1));
+        assert_eq!(fold_cmp(BinOp::Lt, (-1, Type::Int), (1, Type::ULong)), ConstValue::Int(0));
+        assert_eq!(
+            fold_cmp(BinOp::Ge, (-1, Type::Int), (0xffffffff, Type::ULong)),
+            ConstValue::Int(1)
+        );
+        assert_eq!(
+            fold_cmp(BinOp::Le, (-1, Type::Int), (0xffffffff, Type::ULong)),
+            ConstValue::Int(0)
+        );
+
+        // 反向探针：有符号侧**确实更宽**时必须停在有符号类型 —— 旧判据在这里翻车
+        // （`1U` 自身无符号 ⇒ 走无符号域），当时没暴走纯属往返恒等把两个负数都原样
+        // 退回有符号比较。`-1L > 1U` 的公共类型是 `long` ⇒ 0。
+        assert_eq!(fold_cmp(BinOp::Gt, (-1, Type::Long), (1, Type::UInt)), ConstValue::Int(0));
+        assert_eq!(fold_cmp(BinOp::Gt, (-1, Type::LongLong), (1, Type::UInt)), ConstValue::Int(0));
+        assert_eq!(fold_cmp(BinOp::Gt, (1, Type::UInt), (-1, Type::LongLong)), ConstValue::Int(1));
+
+        // 整数提升 (6.3.1.1p2)：`unsigned char`/`unsigned short` 提升为 `int` 后
+        // 自然留在有符号侧，不需要另列例外 —— 正如 gcc: `(unsigned char)200 < -1` 为假。
+        assert_eq!(fold_cmp(BinOp::Lt, (200, Type::UChar), (-1, Type::Int)), ConstValue::Int(0));
+        assert_eq!(fold_cmp(BinOp::Gt, (200, Type::UShort), (-1, Type::Int)), ConstValue::Int(1));
+
+        // 同类型无符号：按值比（顺带钉住「非负值不受映射影响」）。
+        assert_eq!(
+            fold_cmp(BinOp::Gt, (0xffffffff, Type::UInt), (1, Type::UInt)),
+            ConstValue::Int(1)
+        );
+    }
+
+    #[test]
+    fn cmp_folds_left_operand_in_its_own_width_first() {
+        // `0U - 1` 的子表达式结果是**未截断的** -1，只有按 `unsigned int` 规范化才回到
+        // 4294967295；因此比较要先把两侧各自规范化到自身类型，再截断到公共类型。
+        let sub = Expr::Binop {
+            op: BinOp::Sub,
+            l: Box::new(typed(0, Type::UInt)),
+            r: Box::new(typed(1, Type::UInt)),
+            span: Span::point("t.c", 1, 1),
+            ty: Type::UInt,
+        };
+        let e = Expr::Binop {
+            op: BinOp::Gt,
+            l: Box::new(sub),
+            r: Box::new(typed(0, Type::Int)),
+            span: Span::point("t.c", 1, 1),
+            ty: Type::Int,
+        };
+        assert_eq!(eval_full(&e, false), Ok(ConstValue::Int(1)));
+    }
+
+    #[test]
+    fn unsigned_order_preserves_full_u128_ordering() {
+        // `unsigned_order` 必须是对「按无符号解释的位模式」的单调嵌入：
+        // 窄宽度（上一步已截断 ⇒ 非负）与 `UInt128`（在 i128 里以补码负数承载）
+        // 共用同一个比较器，只有异或最高位这一种映射对两类宽度同时保序。
+        let samples: [i128; 9] = [
+            0,
+            1,
+            -1,
+            i128::MIN,
+            i128::MIN + 1,
+            i128::MAX,
+            i128::MAX - 1,
+            1i128 << 126,
+            -(1i128 << 126),
+        ];
+        for a in samples {
+            for b in samples {
+                let u = |v: i128| v as u128;
+                assert_eq!(
+                    u(a) < u(b),
+                    unsigned_order(a) < unsigned_order(b),
+                    "保序破坏于 {a} vs {b}"
+                );
+                assert_eq!(
+                    u(a) == u(b),
+                    unsigned_order(a) == unsigned_order(b),
+                    "相等性破坏于 {a} vs {b}"
+                );
+            }
+        }
     }
 }

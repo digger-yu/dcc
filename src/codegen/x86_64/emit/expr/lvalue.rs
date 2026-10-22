@@ -190,10 +190,21 @@ impl Codegen {
                 self.emit_load_global_indexed(dst, 1, &resolved_key, es as u8, elem_ty);
             } else {
                 // 统一基址计算 (修复 BUG-B: 使用 resolve_global_key 解析 static local)
-                self.emit_ident_base_addr(&arr_name.name, arr_ty, 0);
-                self.push(0); // 保存基址 (gen_expr(idx) 可能破坏 rax)
-                self.gen_expr(idx, 1); // rcx = index
-                self.pop(0); // 恢复基址到 rax
+                //
+                // 阶段2：不开 -fbounds-check 时先算下标、后算基址。基址这一路
+                // `emit_ident_base_addr` 只会写 `rax`，不再需要把基址押到栈上去躲
+                // `gen_expr(idx, 1)`（C11 里 `a` 与 `i` 本就 unsequenced，交换顺序不改
+                // 变可观察行为）。开 bounds-check 时保留今天的押栈顺序：那一段里有
+                // `mov rsi, rcx` 与可能的 handler 调用，顺序动了要重新证一遍。
+                if !self.bounds_check {
+                    self.gen_expr(idx, 1); // rcx = index
+                    self.emit_ident_base_addr(&arr_name.name, arr_ty, 0); // rax = 基址
+                } else {
+                    self.emit_ident_base_addr(&arr_name.name, arr_ty, 0);
+                    self.push(0); // 保存基址 (gen_expr(idx) 可能破坏 rax)
+                    self.gen_expr(idx, 1); // rcx = index
+                    self.pop(0); // 恢复基址到 rax
+                }
                 if self.bounds_check {
                     // 保存元素索引 (imul 会覆盖 rcx): libubsan handler 第二参数
                     self.emit_insn(&Insn::new(

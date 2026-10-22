@@ -4,6 +4,7 @@
 use crate::ast::*;
 use crate::codegen::shared::asm_operand::Width;
 use crate::codegen::shared::elf as shared_elf;
+use crate::codegen::x86_64::emit::expr::utils::AddrKeep;
 use crate::codegen::x86_64::insn::BoolExpect;
 use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::opcode::{
@@ -12,6 +13,12 @@ use crate::codegen::x86_64::opcode::{
 use crate::codegen::x86_64::opcode::{CondCode, SimdArithOp, SimdWidth};
 use crate::codegen::x86_64::{AggDst, Codegen, JumpKind, VaListAddress};
 use crate::const_eval;
+
+/// 帧临时槽回读（`mov <disp>(%r13), %<reg>`）的 gas 文本，上面两处回读共用一份。
+fn gas_load_from_temp_slot(dst: u8, slot_off: i32) -> String {
+    use crate::codegen::x86_64::emit::gas::{mem_disp as gas_mem_disp, REG64 as GAS_REG64};
+    format!("mov %{}, {}", GAS_REG64[(dst & 15) as usize], gas_mem_disp(13, slot_off as i64))
+}
 
 impl Codegen {
     /// 剥掉并**发射**一条语句外面的标签外壳，返回最里面那条语句。
@@ -104,6 +111,17 @@ impl Codegen {
     }
 
     pub fn gen_expr(&mut self, e: &Expr, dst: u8) {
+        // 「条件只用来决定分支」的令牌在本分发函数的**第一行**被消费。
+        //
+        // 必须是第一次行而不是 Binop 臂里：分支发射点发令牌后，条件本体可能是
+        // `f(a<b)`、`arr[k<2] + 1`、向量/复数取读……这些路径自己不再回到 Binop 臂的入口，
+        // 如果只在整型比较臂里才拿走令牌，它就会泄到那些**嵌套**比较上：嵌套比较只留
+        // flags、不材料化 0/1，而它的值在其父表达式里是要用的 —— 那是静默错值而不只是
+        // 少优化一条。拿走后只有「本次求值正好就是那个比较」的 Binop 臂能用它。
+        let token_here = std::mem::take(&mut self.cmp_flags_token);
+        // 「值没人要」的上上下文（阶段1）：入口消费，嵌套求值一律看不到。本臂只有在
+        // **直接调用**它前重新置回才能看到它（中间已经做过操作数的 gen_expr，那边拿走了）。
+        let dead_here = std::mem::take(&mut self.value_is_dead);
         // vector 类型的 lvalue 表达式 (Member/Index/Deref): 物化到向量临时槽 0
         // (dcc vector 值约定: vector rvalue 结果放在临时槽 0)
         if matches!(e, Expr::Member { .. } | Expr::Index { .. } | Expr::Deref { .. })
@@ -155,6 +173,24 @@ impl Codegen {
                 ty: binop_ty,
                 ..
             } => {
+                // 条件直生分支的放行判据（令牌已由 `gen_expr` 入口消费）。
+                //
+                // 只放行「比较 + 整数/指针操作数 + 非位域」：浮点（`ucomisd` 的无序分支是
+                // PF 与目标条件的复合）、复数、向量、`__int128` 在下方各自分流；位域在
+                // 通用路径尾部还要按宽度发一条掩码，那条 emit 会把 flags 清掉。
+                //
+                // 为什么放在臂的**第一位**而不是比较臂里：常量折叠/`&&`/`||`/指针缩放
+                // 都会在此之前 `return`，它们不交回条件码，但必须把令牌吐掉，否则
+                // 它们自己的操作数求值会拿到一个不属于它们的令牌。
+                let hand_off = token_here
+                    && matches!(
+                        *op,
+                        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne
+                    )
+                    && Self::cmp_flags_types_ok(&l.ty())
+                    && Self::cmp_flags_types_ok(&r.ty())
+                    && Self::expr_bitfield_width(l).is_none()
+                    && Self::expr_bitfield_width(r).is_none();
                 // 常量折叠: 若两个操作数都是整数常量, 直接在编译期求值,
                 // 避免为 `1 << 6` 等常量表达式生成运行时计算代码.
                 // 这也能规避嵌套 BinOp 在特定寄存器分配下的 codegen bug.
@@ -399,47 +435,22 @@ impl Codegen {
                 // C11 6.3.1.1: 整数提升 (char/short → int) 必须在
                 // 有符号性判定之前执行. 例如 signed char vs unsigned char
                 // 提升后均为 int (有符号), 比较应使用有符号指令.
-                let int_promote = |ty: &Type| -> Type {
-                    match ty {
-                        Type::Bool
-                        | Type::Char
-                        | Type::SChar
-                        | Type::UChar
-                        | Type::Short
-                        | Type::UShort => Type::Int,
-                        _ => ty.clone(),
-                    }
-                };
-                let lt_promo = int_promote(&l.ty());
-                let rt_promo = int_promote(&r.ty());
-                let type_rank = |ty: &Type| -> i32 {
-                    match ty {
-                        Type::Bool | Type::Char | Type::SChar | Type::UChar => 1,
-                        Type::Short | Type::UShort => 2,
-                        Type::Int | Type::UInt => 3,
-                        Type::Long | Type::ULong => 4,
-                        Type::LongLong | Type::ULongLong => 5,
-                        Type::Int128 | Type::UInt128 => 6,
-                        _ => 0,
-                    }
-                };
-                let ls = Self::is_signed_int(&lt_promo);
-                let rs = Self::is_signed_int(&rt_promo);
+                //
+                // 提升与转换都只调 [`Type`] 上的真源 (`int_promotion` / `usual_arith_type`),
+                // 不在这里重复一份秩表: 曾有的本地 `type_rank` + 「只看秩」混合规则把
+                // `unsigned long`(秩 4) vs `long long`(秩 5) 判成有符号, 于是无符号比较拿到
+                // `setg`/`jle` —— 与 `ast.rs::usual_arith_type` 里缺少的「有符号侧能否表示
+                // 无符号侧全部值」是同一根因的两处症状。两份规则各写一遍时, 修一处会留下
+                // 另一处, 故这里只留一个调用点。
+                let lt_promo = l.ty().int_promotion();
+                let rt_promo = r.ty().int_promotion();
                 // C11 6.5.7: 移位运算的有符号性仅由左操作数决定,
                 // 右操作数仅为移位计数, 不参与符号判定.
                 let is_signed = if matches!(op, BinOp::Shl | BinOp::Shr) {
                     Self::is_signed_int(&l.ty())
-                } else if ls == rs {
-                    ls // 两操作数同符号
                 } else {
-                    // 混合符号: 有符号类型秩严格大于无符号类型秩 → 有符号
-                    let lr = type_rank(&lt_promo);
-                    let rr = type_rank(&rt_promo);
-                    if ls && lr > rr {
-                        true
-                    } else {
-                        rs && rr > lr
-                    }
+                    // 公共类型由单一真源给出, 它的有符号性就是本条运算的有符号性。
+                    Self::is_signed_int(&lt_promo.usual_arith_type(&rt_promo))
                 };
                 // 移位量是**整型常量**：直接 imm8 形式（`sar r64, 7`）。
                 //
@@ -481,8 +492,7 @@ impl Codegen {
                                     5 => "shr",
                                     _ => "sar",
                                 };
-                                let gas =
-                                    format!("{mnem} {}, {v}", GAS_REG64[(dst & 15) as usize]);
+                                let gas = format!("{mnem} {}, {v}", GAS_REG64[(dst & 15) as usize]);
                                 self.emit_insn(
                                     &Insn::shift_reg_imm8_c1_b64(op_field, dst, v as u8)
                                         .with_gas(gas),
@@ -615,7 +625,9 @@ impl Codegen {
                             if !is_signed && !use_32bit {
                                 self.zero_extend_for_cmp(dst, &l.ty());
                             }
+                            self.cmp_flags_granted = hand_off;
                             self.emit_cmp_imm(*op, dst, is_signed, use_32bit, imm);
+                            self.cmp_flags_granted = false;
                             return;
                         }
                     }
@@ -650,10 +662,8 @@ impl Codegen {
                 // 白名单而不是「无副作用」：`expr_has_side_effects` 对 `StmtExpr`
                 // 与内置函数返回 false（它的 `_ => false` 是默认臂），而那两类里
                 // 完全可能有 call。喊错一条就是静默错值。
-                let rhs_isolated = matches!(
-                    r.as_ref(),
-                    Expr::Int { .. } | Expr::Char { .. } | Expr::Ident { .. }
-                );
+                let rhs_isolated =
+                    matches!(r.as_ref(), Expr::Int { .. } | Expr::Char { .. } | Expr::Ident { .. });
                 let need_save_lhs = !rhs_isolated || dst == 1;
                 let callee_reg = if use_callee_saved && need_save_lhs {
                     self.alloc_callee_saved()
@@ -666,7 +676,19 @@ impl Codegen {
                     self.mov(reg, dst);
                 } else if need_save_lhs {
                     // mov [r13+slot_off], dst (r13=13)
-                    self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, dst, 13, slot_off));
+                    //
+                    // 挂 gas 与本文件其他地方同口径：`-S` 文本与字节必须同源，否则
+                    // P12 的文本平价检查（scripts/check_asm_text_parity.sh）对这一类
+                    // 高频发射点只能靠默认反推。
+                    use crate::codegen::x86_64::emit::gas::{mem_disp as gas_mem_disp, REG64 as GAS_REG64};
+                    let gas = format!(
+                        "mov {}, %{}",
+                        GAS_REG64[(dst & 15) as usize],
+                        gas_mem_disp(13, slot_off as i64)
+                    );
+                    self.emit_insn(
+                        &Insn::mov_rm_mem(false, Width::B64, dst, 13, slot_off).with_gas(gas),
+                    );
                 }
                 self.expr_depth += 1;
                 // 右操作数的暂存号。以前这里与下面三处字节都写死 `1`（`%rcx`），意思就是
@@ -758,10 +780,15 @@ impl Codegen {
                     self.emit_insn(&Insn::imul_rm_reg_imm32_b64(stage, scale as i32))
                         .expect("typed-opcode: imul_rm_reg_imm32_b64");
                 }
+                // 比较臂可以只发 cmp 并把条件码留给 `last_cmp`：紧靠调用点置位/复位，
+                // 中间不插入任何其它表达式求值，所以不会溢出到别的表达式。
+                self.cmp_flags_granted = hand_off;
                 if let Some(reg) = callee_reg {
                     // 被调用者保存寄存器路径: 左操作数在 reg, 右操作数在 stage。
                     self.binop(*op, reg, stage, is_signed, &l.ty(), &r.ty());
-                    if reg != dst {
+                    // 条件直生成功时不搬结果：dst 里不需要值（flags 就是值），而那条
+                    // `mov` 会把刚比较出来的 flags 清掉（`last_cmp` 只可能由比较臂写入）。
+                    if reg != dst && self.last_cmp.is_none() {
                         self.mov(dst, reg);
                     }
                     self.free_callee_saved(reg);
@@ -772,14 +799,21 @@ impl Codegen {
                     // 帧槽路径, dst == rcx: push/pop 避免恢复覆盖右操作数
                     self.push(1); // push rcx (右操作数)
                                   // 恢复左操作数到 dst: mov dst, [r13+slot_off] (r13=13)
-                    self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, dst, 13, slot_off));
+                    self.emit_insn(
+                        &Insn::mov_rm_mem(true, Width::B64, dst, 13, slot_off)
+                            .with_gas(gas_load_from_temp_slot(dst, slot_off)),
+                    );
                     self.pop(2); // pop rdx (右操作数)
                     self.binop(*op, dst, 2, is_signed, &l.ty(), &r.ty());
                 } else {
                     // 帧槽路径: 恢复左操作数 (mov dst, [r13+slot_off])
-                    self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, dst, 13, slot_off));
+                    self.emit_insn(
+                        &Insn::mov_rm_mem(true, Width::B64, dst, 13, slot_off)
+                            .with_gas(gas_load_from_temp_slot(dst, slot_off)),
+                    );
                     self.binop(*op, dst, stage, is_signed, &l.ty(), &r.ty());
                 }
+                self.cmp_flags_granted = false;
                 // ptr - ptr: 字节差 ÷ 元素大小 = 元素数.
                 // idiv 固定以 rax 为被除数, 而 binop 结果在 dst:
                 // dst != 0 时须先搬 rax, 除完再把商搬回 dst.
@@ -804,6 +838,12 @@ impl Codegen {
                 // 释放放在 ptr-sub 的 idiv 之后 —— 那是 stage 最后一次被读。
                 if let Some(r) = stage_from_pool {
                     self.free_callee_saved(r);
+                }
+                // 条件直生分支：flags 已经交给分支发射点，值不必材料化。
+                // 下面的 32 位截断与位域掩码都会 emit —— 那会把 flags 清掉而 dst 里
+                // 又没有可用的值，所以本臂到这里必须是终点。
+                if hand_off && self.last_cmp.is_some() {
+                    return;
                 }
                 // C 语义: 32 位整数运算结果需截断回 32 位 (溢出 wrap),
                 // 否则 64 位寄存器高位垃圾会泄漏给后续移位/除法等运算.
@@ -1095,8 +1135,10 @@ impl Codegen {
                                                      // Implicit float→int conversion when RHS is
                                                      // float but LHS is integer (e.g. `a = 0.0;`).
                         let r_ty = r.ty();
-                        if matches!(&r_ty, Type::Float | Type::Double | Type::LongDouble | Type::Float128)
-                            && Self::is_integer_type(l_ty)
+                        if matches!(
+                            &r_ty,
+                            Type::Float | Type::Double | Type::LongDouble | Type::Float128
+                        ) && Self::is_integer_type(l_ty)
                         {
                             self.emit_implicit_float_to_int(dst, &r_ty, l_ty);
                         }
@@ -1350,10 +1392,11 @@ impl Codegen {
                                 Some(arr),
                                 0,
                             ) {
-                                self.push(0); // save addr
+                                // 阶段2：右值只会写 rax 时不必押栈（同一个判据、同一个配对）。
+                                let addr_kept = self.save_addr_for_rhs(lv, r, elem_ty);
                                 self.gen_expr(r, Self::EVAL_BASE); // rax = val
                                 self.convert_assign_rhs_in_reg(0, elem_ty, &r.ty());
-                                self.pop(1); // rcx = addr
+                                self.restore_addr_after_rhs(addr_kept); // rcx = addr
                                 self.emit_store_scalar_int_at(
                                     es as usize,
                                     1,
@@ -1373,10 +1416,15 @@ impl Codegen {
                     } = arr.as_ref()
                     {
                         // 统一基址计算 (修复 BUG-C: 使用 resolve_global_key 解析 static local)
-                        self.emit_ident_base_addr(&arr_name.name, arr_ty, 0);
-                        self.push(0); // 保存基址 (gen_expr(idx) 可能破坏 rax)
+                        //
+                        // 先算下标、后算基址（阶段2）：基址这一路 `emit_ident_base_addr`
+                        // 只会写 `rax`（局部是 `lea [r13+off]`、全局是 RIP-relative LEA、
+                        // VLA 是 `load_stack(dst, off)`），所以不必再把基址押到栈上去躲
+                        // `gen_expr(idx, 1)`。C11 里 `a` 与 `i` 的求值顺序本就是 unsequenced，
+                        // 交换两者不改变可观察行为；基址不是 Ident 数组/指针的情况走下面
+                        // 那条通用路径（基址计算可能自己就要用 rcx，保留押栈形态）。
                         self.gen_expr(idx, 1); // rcx = index
-                        self.pop(0); // 恢复基址到 rax
+                        self.emit_ident_base_addr(&arr_name.name, arr_ty, 0); // rax = 基址
                         self.emit_index_scale(es, arr, elem_ty);
                         // P11: add rax, rcx via typed opcode (addr in rax).
                         {
@@ -1398,7 +1446,9 @@ impl Codegen {
                                 )); // add rax, rcx (addr in rax)
                             }
                         }
-                        self.push(0); // save addr
+                        // 阶段2：同一个 `save_addr_for_rhs` 判据（复杂元素/聚合子路不命中，
+                        // 依旧走 push/pop）。
+                        let addr_kept = self.save_addr_for_rhs(lv, r, elem_ty);
                         let is_cx_float = matches!(elem_ty, Type::Complex(ref c)
                             if matches!(&c.base,
                                 Type::Float | Type::Double | Type::LongDouble));
@@ -1409,7 +1459,7 @@ impl Codegen {
                         } else {
                             self.gen_expr(r, Self::EVAL_BASE); // rax = val
                             self.convert_assign_rhs_in_reg(0, elem_ty, &r.ty());
-                            self.pop(1); // rcx = addr
+                            self.restore_addr_after_rhs(addr_kept); // rcx = addr
                             if is_agg_elem {
                                 self.gen_agg_elem_store(r, elem_ty, es, dst);
                                 return;
@@ -1463,7 +1513,8 @@ impl Codegen {
                                 )); // add rax, rcx (addr in rax)
                             }
                         }
-                        self.push(0);
+                        // 阶段2：上面同一对助手（通用下标回退路径）。
+                        let addr_kept2 = self.save_addr_for_rhs(lv, r, elem_ty);
                         let is_cx_float2 = matches!(elem_ty, Type::Complex(ref c)
                             if matches!(&c.base,
                                 Type::Float | Type::Double | Type::LongDouble));
@@ -1474,7 +1525,7 @@ impl Codegen {
                         } else {
                             self.gen_expr(r, Self::EVAL_BASE);
                             self.convert_assign_rhs_in_reg(0, elem_ty, &r.ty());
-                            self.pop(1);
+                            self.restore_addr_after_rhs(addr_kept2);
                             if is_agg_elem {
                                 self.gen_agg_elem_store(r, elem_ty, es, dst);
                                 return;
@@ -1586,7 +1637,9 @@ impl Codegen {
                         }
                     } else {
                         self.gen_expr(ptr_e, Self::EVAL_BASE); // rax = address
-                        self.push(0); // save addr
+                                                               // 阶段2：右值是只会写 rax 的形态（字面量/标量名字）时，地址一条
+                                                               // `mov rcx, rax` 就到位，不必再押栈；否则保持今天的 push/pop 形态。
+                        let addr_kept = self.save_addr_for_rhs(lv, r, &assign_l_ty);
                         let is_cx_ptr = matches!(assign_l_ty, Type::Complex(ref c)
                             if matches!(&c.base,
                                 Type::Float | Type::Double | Type::LongDouble));
@@ -1600,13 +1653,10 @@ impl Codegen {
                         } else {
                             self.gen_expr(r, Self::EVAL_BASE); // rax = val
                             self.convert_assign_rhs_in_reg(0, &assign_l_ty, &r.ty());
-                            self.pop(1); // rcx = addr
+                            self.restore_addr_after_rhs(addr_kept); // rcx = addr
                             if matches!(
                                 &assign_l_ty,
-                                Type::Float
-                                    | Type::Double
-                                    | Type::LongDouble
-                                    | Type::Float128
+                                Type::Float | Type::Double | Type::LongDouble | Type::Float128
                             ) {
                                 // __seg_gs/__seg_fs 指针存储: 发射段前缀 (%gs:/%fs:)
                                 if let Some(seg) = seg_prefix {
@@ -1623,12 +1673,7 @@ impl Codegen {
                                 // 从 rax:rdx 存 (rax/rdx 是残值, 实测 `*p = v` 得 0)。
                                 // 判据与字节发射单源于 `emit_store_scalar_int_at` /
                                 // `emit_store_scalar_float_at`, 这里只做分发。
-                                self.emit_store_scalar_int_at(
-                                    assign_l_ty.size(),
-                                    1,
-                                    0,
-                                    seg_prefix,
-                                );
+                                self.emit_store_scalar_int_at(assign_l_ty.size(), 1, 0, seg_prefix);
                             }
                         }
                         // pop(1) 把 rcx 覆盖成目标地址, store 后结果值仍在 rax.
@@ -2258,7 +2303,8 @@ impl Codegen {
                                 crate::codegen::x86_64::opcode::NoArgOp::RepMovsb,
                             )); // rep movsb
                         } else {
-                            self.push(0); // 保存目标地址
+                            // 阶段2：同上，同一个 `save_addr_for_rhs` 判据。
+                            let addr_kept = self.save_addr_for_rhs(lv, r, &assign_l_ty);
                             let size = field_info.as_ref().map_or(4, |f| f.ty.size());
                             // 浮点字段: 值在 xmm0, 用 movss/movsd 存储
                             let fty = field_info.as_ref().map(|f| f.ty.clone());
@@ -2273,7 +2319,7 @@ impl Codegen {
                             } else {
                                 self.gen_expr(r, Self::EVAL_BASE); // rax = 值 (浮点: xmm0)
                                 self.convert_assign_rhs_in_reg(0, &assign_l_ty, &r.ty());
-                                self.pop(1); // rcx = 目标地址
+                                self.restore_addr_after_rhs(addr_kept); // rcx = 目标地址
                                 if let Some(fty) = &fty {
                                     if let Type::Complex(ref cinner) = fty {
                                         // 整数 complex 字段: rvalue 已由外层
@@ -2307,7 +2353,10 @@ impl Codegen {
                                         )); // cld; rep movsb
                                     } else if matches!(
                                         fty,
-                                        Type::Float | Type::Double | Type::LongDouble | Type::Float128
+                                        Type::Float
+                                            | Type::Double
+                                            | Type::LongDouble
+                                            | Type::Float128
                                     ) {
                                         self.emit_seg(self.lvalue_seg_prefix(lv));
                                         self.emit_store_scalar_float_at(&r.ty(), fty, 1);
@@ -2353,9 +2402,11 @@ impl Codegen {
                         inner_sz
                     };
                     if self.gen_lvalue_addr(ce, Self::EVAL_BASE) {
-                        self.push(0); // 保存目标地址
+                        // 阶段2：分量类型是整数/指针且右值只会写 rax 时不必押栈；
+                        // 浮点/long double 分量的值通道是 xmm0/st(0)，白名单本来不接它们。
+                        let addr_kept = self.save_addr_for_rhs(lv, r, &inner);
                         self.gen_expr(r, Self::EVAL_BASE); // 值 (浮点: xmm0)
-                        self.pop(1); // rcx = 目标地址
+                        self.restore_addr_after_rhs(addr_kept); // rcx = 目标地址
                         if matches!(inner, Type::LongDouble) {
                             // LongDouble 分量: 把 RHS 统一搬到 st0 (80-bit
                             // tbyte), 再 fstpt 直写 [rcx+part_off]。必须先
@@ -2467,20 +2518,51 @@ impl Codegen {
                         } else {
                             self.gen_expr(r, Self::EVAL_BASE);
                         }
-                    } else if self.gen_lvalue_addr(lv, Self::EVAL_BASE) {
-                        self.push(0); // 保存目标地址
-                        self.gen_expr(r, Self::EVAL_BASE); // rax = val (浮点: xmm0)
-                        self.convert_assign_rhs_in_reg(0, &assign_l_ty, &r.ty());
-                        self.pop(1); // rcx = 目标地址
-                        if is_float_ty {
-                            self.emit_store_scalar_float_at(&r.ty(), &assign_l_ty, 1);
-                        // 单一真源：收浮影子副本
-                        } else {
-                            self.emit_store_scalar_int_at(assign_sz, 1, 0, None);
-                        }
                     } else {
-                        // gen_lvalue_addr 失败: 无法取地址, 仅求值 RHS
-                        self.gen_expr(r, Self::EVAL_BASE);
+                        // 标量写：地址与右值挤在同一个号上，三条路按代价从低到高
+                        //（判据单源 `plan_addr_keep`）：
+                        //   * `InRcx`：地址直接进 store 要的 `rcx`，右值只写 `rax`；
+                        //   * `Late`：右值不改地址链上的名字，算完右值再一条 `lea` 重算
+                        //     （C11 6.5.16 两个操作数求值无序）——push/pop 整对消失；
+                        //   * `OnStack`：其余形态照旧押栈。
+                        //
+                        // 地址只算一次：`keep` 决定落哪个号，三条臂共用同一个
+                        // `gen_lvalue_addr` 入口 —— 写成两个 `else if` 串联会在「白名单命中但
+                        // 取址失败」时把同一段地址计算发两遍。
+                        let keep = self.plan_addr_keep(lv, r, &assign_l_ty);
+                        let addr_dst = if matches!(keep, AddrKeep::InRcx) {
+                            1
+                        } else {
+                            Self::EVAL_BASE
+                        };
+                        if self.gen_lvalue_addr(lv, addr_dst) {
+                            match keep {
+                                // 地址已经在 rcx，什么都不用发。
+                                AddrKeep::InRcx => {},
+                                // 地址之后重算，这一份就着右值一起作废。
+                                AddrKeep::Late(_) => {},
+                                AddrKeep::OnStack => self.push(0), // 保存目标地址
+                            }
+                            self.gen_expr(r, Self::EVAL_BASE); // rax = val (浮点: xmm0)
+                            // 值没人要 ⇒ 只做到存之前必要的那一段转换，不再把 rax 归约到
+                            // 左值类型（store 自己就按左值宽度截断）。寄存器家里的赋值走另外
+                            // 那条臂，那里寄存器内容就是变量的表示，必须保持规范形态。
+                            if dead_here {
+                                self.convert_assign_rhs_in_reg_for_store(0, &assign_l_ty, &r.ty());
+                            } else {
+                                self.convert_assign_rhs_in_reg(0, &assign_l_ty, &r.ty());
+                            }
+                            self.restore_addr_after_rhs(keep); // rcx = 目标地址
+                            if is_float_ty {
+                                self.emit_store_scalar_float_at(&r.ty(), &assign_l_ty, 1);
+                            // 单一真源：收浮影子副本
+                            } else {
+                                self.emit_store_scalar_int_at(assign_sz, 1, 0, None);
+                            }
+                        } else {
+                            // gen_lvalue_addr 失败: 无法取地址, 仅求值 RHS
+                            self.gen_expr(r, Self::EVAL_BASE);
+                        }
                     }
                 }
             },
@@ -3104,7 +3186,9 @@ impl Codegen {
                                 let mask: u64 = (1u64 << bf_width) - 1;
                                 if mask <= 0x7FFFFFFF {
                                     self.emit_insn(&Insn::alu_rm_reg_imm32_b64(
-                                        0b100, dst, mask as i64,
+                                        0b100,
+                                        dst,
+                                        mask as i64,
                                     ))
                                     .expect("typed-opcode: alu_rm_reg_imm32_b64");
                                 } else {
@@ -3437,7 +3521,10 @@ impl Codegen {
                                     let init_ty = init.ty();
                                     if matches!(
                                         &init_ty,
-                                        Type::Float | Type::Double | Type::LongDouble | Type::Float128
+                                        Type::Float
+                                            | Type::Double
+                                            | Type::LongDouble
+                                            | Type::Float128
                                     ) && Self::is_integer_type(&v.ty)
                                     {
                                         self.emit_implicit_float_to_int(0, &init_ty, &v.ty);

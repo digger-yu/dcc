@@ -23,6 +23,13 @@ use crate::semantics::ObjectResolver;
 /// 它是后端不变量破坏，不是用户代码错误；详见 `check_frame_budget`。
 const DIAG_FRAME_BUDGET: &str = "E1128";
 
+/// 单个 volatile / 段限定局部最多枚举多少个 8 字节槽（P13 阶段6）。
+///
+/// 上限只与**枚举成本**有关：路径上被跟踪的槽事实本来就只有 16 个，大对象的访问又都是
+/// `[r13+base+index]` 形态（带 index 一律不算帧槽）。超过上限就整体关闭本函数的槽事实，
+/// 宁可少削几条，也不把编译时间变成槽数的线性函数。
+const VOLATILE_SLOT_CAP: i64 = 128;
+
 // REX prefix encoding helpers
 #[inline]
 fn rex_w() -> u8 {
@@ -104,6 +111,16 @@ pub(crate) struct PeepLast {
     /// `print("hello")` 报 `malformed number`）：`mov (%rax), %rax` —— 第一次已经把
     /// `%rax` 换成了指针对应的内容，第二次读的是**新地址**，少读一级。
     repeat_safe: bool,
+    /// 这条指令在编码时**登记了符号补丁**（.text 里的待修正位置）。
+    ///
+    /// 这是「字节相同」之外必须额外问的一道：RIP 相对搬运的 disp32 在字节里就是
+    /// `00 00 00 00` 占位，真实偏移靠补丁填 —— 于是 `mov %eax,d(%rip)` 与
+    /// `mov %eax,b(%rip)` 字节全同，却写进两个不同的对象。
+    /// 而 `encode_bytes()` 在编码当时就把补丁按 disp32 位置记进台账，窥孔却是在编码
+    /// **之后**才决定「这条不发」：指令没了、台账还在，链接器会在那个位置写 4 字节，
+    /// 覆盖的是**下一条指令的 ModRM 字节**（实测链式全局赋值 `d = b = 1;` 间歇 SEGV，
+    /// 且 exe 字节确定、跑不跑得起取决于运行环境继承的寄存器值）。
+    carries_reloc: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -154,6 +171,32 @@ impl Codegen {
         // 操作数部分必须存在且是两个（`a, b`）。`%fs:0x28, %rax` 这类也含逗号。
         let ops = g.split_once(' ').map(|(_, rest)| rest).unwrap_or("");
         ops.contains(',')
+    }
+
+    /// .text 符号补丁台账的**总长度**。只用于「这条指令有没有登记补丁」的差分比较，
+    /// 不关心具体是哪一张表。
+    ///
+    /// 为什么用「台账长度变化」而不是「看 opcode 是不是 RIP 相对」：登记点分散在
+    /// 多条编码路径里（`asm/enc_mov.rs`、`asm/enc_ctrl.rs` 等），形态上认漏一种就是
+    /// 静默错值；而台账是这些路径的**汇聚点**，长度变了就是它登了记。宁保守：
+    /// 多认一张表只会少削一条。
+    ///
+    /// 维护约束：新增面对 .text 的补丁登记表必须并进这里，漏一张等于把这道防线
+    /// 关掉一半。
+    fn text_patch_ledger_len(&self) -> usize {
+        self.pending_data_rels.len()
+            + self.pending_data_rels_with_off.len()
+            + self.pending_sib_data_rels.len()
+            + self.pending_func_rels.len()
+            + self.pending_func_addr_rels.len()
+            + self.pending_code_rels.len()
+            + self.pending_tls_rels.len()
+            + self.pending_data64_rels.len()
+            + self.pending_data_textlabel_rels.len()
+            + self.pending_data_rodata_rels.len()
+            + self.pending_rodata_rels.len()
+            + self.pending_label_diff_rels.len()
+            + self.pending_custom_sec_rels.len()
     }
 
     /// 窥孔分级开关：`DCC_PEEP=0` 全关，`1` 只开「相邻同字节」一条，`2` 再加
@@ -217,12 +260,18 @@ impl Codegen {
                 (O::Reg(d, _), O::Mem(m))
                     if m.base == Some(13) && m.index.is_none() && m.seg.is_none() =>
                 {
-                    return PeepKind::LoadSlot { off: m.disp as i64, dst: *d };
+                    return PeepKind::LoadSlot {
+                        off: m.disp as i64,
+                        dst: *d,
+                    };
                 },
                 (O::Mem(m), O::Reg(s, _))
                     if m.base == Some(13) && m.index.is_none() && m.seg.is_none() =>
                 {
-                    return PeepKind::StoreSlot { off: m.disp as i64, src: *s };
+                    return PeepKind::StoreSlot {
+                        off: m.disp as i64,
+                        src: *s,
+                    };
                 },
                 _ => {},
             }
@@ -250,10 +299,7 @@ impl Codegen {
                 let dst = ((bytes[0] & 1) << 3) | (bytes[2] & 7);
                 return PeepKind::MovImm { dst };
             }
-            if bytes.len() == 10
-                && (bytes[0] & 0xF8) == 0x48
-                && (0xB8..=0xBF).contains(&bytes[1])
-            {
+            if bytes.len() == 10 && (bytes[0] & 0xF8) == 0x48 && (0xB8..=0xBF).contains(&bytes[1]) {
                 let dst = ((bytes[0] & 1) << 3) | (bytes[1] - 0xB8);
                 return PeepKind::MovImm { dst };
             }
@@ -262,9 +308,7 @@ impl Codegen {
             // 只认 ModRM.mod=11；带 0x66/0x0F 前缀的形态（16 位 / 双字节）落空。
             let (opc, rex, mi): (u8, u8, usize) = match bytes.len() {
                 2 => (bytes[0], 0, 1),
-                3 if (bytes[0] & 0xF0) == 0x40 && (bytes[0] & 0x08) == 0 => {
-                    (bytes[1], bytes[0], 2)
-                },
+                3 if (bytes[0] & 0xF0) == 0x40 && (bytes[0] & 0x08) == 0 => (bytes[1], bytes[0], 2),
                 _ => (0, 0, 0),
             };
             if (opc == 0x8B || opc == 0x89) && mi != 0 {
@@ -328,8 +372,16 @@ impl Codegen {
         cur_bytes: &[u8],
         cur_idem: bool,
         cur_repeat_safe: bool,
+        cur_carries_reloc: bool,
         level: u8,
     ) -> bool {
+        // 带符号补丁的指令一律不参与窥孔：它的字节里有一个**待修正的占位**，
+        // 「字节相同」推不出「语义相同」（`mov %eax,d(%rip)` 与 `mov %eax,b(%rip)`
+        // 字节全同）。而补丁已在编码时进台账，删掉指令无法撤回那条记录，
+        // 链接期就会把 4 字节写进下一条指令 —— 见 `PeepLast::carries_reloc`。
+        if last.carries_reloc || cur_carries_reloc {
+            return false;
+        }
         // 相邻两条字节完全相同的幂等搬运：mov 不读标志、不产生副作用，第二条不改变
         // 任何状态（包括 `eval_holding` —— 它描述的那个号里的值一模一样）。
         // `repeat_safe` 是必须的：`mov (%rax), %rax` 也「幂等」，但第一次就换了 %rax。
@@ -383,16 +435,74 @@ impl Codegen {
     /// P9 Stage E: 私有到 crate —— 外部模块 (mem/abi 子模块) 仍可访问,
     /// 但不再跨 crate 暴露 (dcc 目前是单 crate, 语义等价于 `pub`).
     pub(crate) fn emit(&mut self, b: &[u8]) {
+        self.emit_bytes(b);
+        // 裸字节（序言/epilogue/内联 asm/nop 填充）不是「上一条逻辑指令」，也不是
+        // 块内优化的可跟踪形态：跨过它的相邻关系与等价事实一概不再成立。
+        self.block_state.reset();
+    }
+
+    /// 字节追写的**唯一**落点（`emit` 与 `emit_insn` 共用）。
+    ///
+    /// 与 `emit` 的差别只有一个：它不清块内状态 —— 类型化指令的块内事实由
+    /// `emit_insn` 在发射后用 `blockopt::BlockState::observe` 主动更新。
+    fn emit_bytes(&mut self, b: &[u8]) {
         self.code.extend_from_slice(b);
         self.eval_holding = None;
         // 裸字节（序言/epilogue/内联 asm/nop 填充）不是「上一条逻辑指令」，
         // 跨过它的相邻关系不再成立。
         self.peep_last = None;
+        // flags 同理：又发一条指令，刚比较出来的条件码就不再成立（例外只有一种：
+        // 写入方在 emit **之后**才把条件码交出来，那就是本次要交给分支的那条 cmp）。
+        self.last_cmp = None;
+    }
+
+    /// 记下一条已发指令对块内事实的影响。
+    ///
+    /// `volatile_slots_overflow` 为真时整条事实链都不建：本函数的 volatile 屏障没有
+    /// 枚举完整，任何槽事实都可能跨过一条可观察访问。
+    fn observe_block(&mut self, insn: &crate::codegen::x86_64::insn::Insn) {
+        if self.volatile_slots_overflow {
+            return;
+        }
+        self.block_state.observe(insn, &self.volatile_frames);
     }
 
     /// 指令记录统一发射入口 (x86_64 变长, 字节原样直写).
     #[track_caller]
     pub(crate) fn emit_insn(&mut self, insn: &crate::codegen::x86_64::insn::Insn) -> bool {
+        // P13 阶段6：块内优化的处置（不发 / 换形态 / 照原样）。
+        // `volatile_slots_overflow`（见 `note_volatile_var_slots`）为真时本函数的槽事实
+        // 不可靠，整体退回窥孔：事实建不起来，转发与去重就都无从谈起。
+        let bo_level = if self.volatile_slots_overflow {
+            0
+        } else {
+            crate::codegen::x86_64::blockopt::level()
+        };
+        let verdict = if bo_level > 0 {
+            self.block_state
+                .decide(insn, &self.volatile_frames, bo_level)
+        } else {
+            crate::codegen::x86_64::blockopt::Verdict::Keep
+        };
+        let rewritten: Option<crate::codegen::x86_64::insn::Insn> = match verdict {
+            crate::codegen::x86_64::blockopt::Verdict::Drop => {
+                // 五条 Drop 判据说的都是同一件事：本条**不改变任何被跟踪的值**
+                // （恒等扩展 / 自反搬运 / 已经相等的搬运 / 槽里就是这个号 / 槽里已经是这个值）。
+                // 所以这里故意**不**调用 `observe`：`observe` 会把目的号的事实清掉，
+                // 而事实恰好仍然成立；清掉只会让紧随其后的同形状指令重新变成看不到。
+                if std::env::var_os("DCC_BLOCKOPT_TRACE").is_some() {
+                    eprintln!(
+                        "[blockopt] drop @{:x}: {}",
+                        self.code.len(),
+                        insn.gas_text.as_deref().unwrap_or("<no gas>")
+                    );
+                }
+                return true;
+            },
+            crate::codegen::x86_64::blockopt::Verdict::Replace(n) => Some(*n),
+            crate::codegen::x86_64::blockopt::Verdict::Keep => None,
+        };
+        let insn = rewritten.as_ref().unwrap_or(insn);
         // 临时统计: DCC_GAS_STATS=1 时按 caller 统计发射频率 + gas_text 覆盖率.
         if std::env::var_os("DCC_GAS_STATS").is_some() {
             let loc = std::panic::Location::caller();
@@ -415,8 +525,30 @@ impl Codegen {
                 .and_modify(|c| *c += 1)
                 .or_insert(1);
         }
+        // 补丁台账的**编码前长度**：`encode_bytes()` 会把符号补丁当场记进台账，
+        // 所以「本条是否携带补丁」只能由编码前后的长度差看出来。这个事实一旦成立，
+        // 本条与上一条都不许被削（见 `PeepLast::carries_reloc`）。
+        let ledger_before = self.text_patch_ledger_len();
         match insn.encode_bytes() {
             Some(bytes) => {
+                let carries_reloc = {
+                    // 两道判据，缺一条都会漏：
+                    //   1. 台账长度差：抓 `encode_bytes()` **内部**登记的补丁；
+                    //   2. 文本里的 `%rip`：RIP 相对的符号补丁是由**调用点在 `emit_insn`
+                    //      返回之后**自行登记的（典型：`mem/access.rs` 的
+                    //      `lea r11, sym(%rip)` 紧接 `pending_data_rels.push`），
+                    //      单靠下面那个差分根本看不到它。本后端每条 RIP 相对发射点
+                    //      都显式挂了 gas_text（不挂就会在 -S 里丢符号引用），所以
+                    //      文本里的 `%rip` 在本仓里是可靠的占位标志。
+                    //
+                    // 这里绝不得提前 `return`：本函数的 `true` 含义是「编码器覆盖
+                    // 了该形态」，而调用方把它当作「指令已落地」去登记补丁。
+                    self.text_patch_ledger_len() > ledger_before
+                        || match insn.gas_text.as_deref() {
+                            Some(g) => g.contains("%rip"),
+                            None => insn.op.render().contains("%rip"),
+                        }
+                };
                 // 发射层窥孔：只看「和上一条已发指令」的相邻关系。三条规则都保持
                 // 「每个寄存器与帧槽的最终值」不变（包括 `eval_holding` 指向的号），
                 // 所以不回避求值落点 —— 回避会把绝大多数机会让掉。
@@ -452,9 +584,15 @@ impl Codegen {
                     | Some(PeepKind::LoadSlot { dst, .. }) => Some(dst),
                     _ => None,
                 };
-                let dead_pc: Option<u64> = match (overwritten, self.peep_last.as_ref().map(|l| l.pc))
-                {
-                    (Some(d), Some(pc)) => match kind {
+                let dead_pc: Option<u64> = match (
+                    overwritten,
+                    self.peep_last.as_ref().map(|l| l.pc),
+                    self.peep_last.as_ref().map_or(false, |l| l.carries_reloc),
+                ) {
+                    // 上一条带符号补丁 ⇒ 绝不回删：truncate 只能退字节，退不了已
+                    // 记进台账的那条补丁位置，链接期那个位置会被当成 disp32 写出去。
+                    (_, _, true) => None,
+                    (Some(d), Some(pc), false) => match kind {
                         PeepKind::MovRr { dst, src }
                         | PeepKind::MovExtRr { dst, src }
                         | PeepKind::MovRr32 { dst, src }
@@ -490,6 +628,7 @@ impl Codegen {
                             self.peep_last.as_ref().map(|l| l.kind)
                         {
                             if dst == a {
+                                self.observe_block(insn);
                                 return true;
                             }
                         }
@@ -503,6 +642,7 @@ impl Codegen {
                             &bytes,
                             idem,
                             repeat_safe,
+                            carries_reloc,
                             level,
                         ) {
                             // 当前指令整条不发；上一条仍是「最后一条已发指令」。
@@ -514,6 +654,7 @@ impl Codegen {
                                 );
                             }
                             self.peep_last = Some(last);
+                            self.observe_block(insn);
                             return true;
                         }
                     }
@@ -522,7 +663,9 @@ impl Codegen {
                 // 这张表是 -S 渲染器 (build_asm_output_v2) 的唯一真源, 不再走 disasm.
                 // 不改变发射字节 —— 只是多写一份 (pc, insn) 到 Vec, 对 .text 段零影响.
                 let pc = self.code.len() as u64;
-                self.emit(&bytes);
+                self.emit_bytes(&bytes);
+                // 块内事实：本条（可能是替换后的形态）对寄存器与帧槽的影响。
+                self.observe_block(insn);
                 // push/pop 配对追踪 (见 `stack_shift` 字段注释): 只认类型化
                 // Stack 指令 —— 那是本后端全部函数内 push/pop 的发射形态
                 // (`Codegen::push/pop` 与各原始站点都构造它)。裸 `cg.emit`
@@ -556,6 +699,7 @@ impl Codegen {
                     pc,
                     idempotent: idem,
                     repeat_safe,
+                    carries_reloc,
                 });
                 true
             },
@@ -615,6 +759,10 @@ impl Codegen {
         // 标签是控制流的汇合点：它之前的「上一条指令」可能从别处跳进来，
         // 也可能就是某个前向跳转的落点，不能再当作窥孔的左邻。
         self.peep_last = None;
+        // 块内等价事实同理：从别处跳进这个标签时，号与帧槽的取值是另一条边上的。
+        self.block_state.reset();
+        // 「刚比较出来」也不能跨标签存活：从别处跳进这个标签时 flags 是另一条边上的。
+        self.last_cmp = None;
     }
 
     /// 一个函数 (含其嵌套函数) 发射结束时的 pending 闭合性断言。
@@ -676,14 +824,16 @@ impl Codegen {
                 JumpKind::Jg => 0x8F,
                 JumpKind::Jge => 0x8D,
                 JumpKind::Jb => 0x82,
+                JumpKind::Jae => 0x83,
                 JumpKind::Ja => 0x87,
+                JumpKind::Jbe => 0x86,
                 JumpKind::Jns => 0x89,
                 JumpKind::Jo => 0x80,
                 _ => unreachable!(),
             };
             // 与 render_one.rs 内助记符表逐条对齐:
             //   0x84=je 0x85=jne 0x8C=jl 0x8E=jle 0x8F=jg 0x8D=jge
-            //   0x82=jb 0x87=ja  0x89=jns 0x80=jo
+            //   0x82=jb 0x83=jae 0x87=ja 0x86=jbe 0x89=jns 0x80=jo
             let mnem = match kind {
                 JumpKind::Je => "je",
                 JumpKind::Jne => "jne",
@@ -692,7 +842,9 @@ impl Codegen {
                 JumpKind::Jg => "jg",
                 JumpKind::Jge => "jge",
                 JumpKind::Jb => "jb",
+                JumpKind::Jae => "jae",
                 JumpKind::Ja => "ja",
+                JumpKind::Jbe => "jbe",
                 JumpKind::Jns => "jns",
                 JumpKind::Jo => "jo",
                 _ => unreachable!(),
@@ -709,6 +861,33 @@ impl Codegen {
             next_ip: if kind == JumpKind::Jmp { at + 5 } else { at + 6 },
             is_push_imm: false,
         });
+    }
+
+    /// 条件码 → `jcc` 的跳转类别。放在 `jmp_rel32` 的码字节表旁边：
+    /// 两张表一起漂才能被发现（条件直生分支只从本函数拿 `JumpKind`）。
+    ///
+    /// 返回 `None` 的意思是「本后端还没有这个条件的 jcc 形态」（S/P/NO 等今天用不到），
+    /// 调用方必须把它当成「不能直生」而不是默默退到另一个条件。
+    pub(crate) fn jump_kind_for_cc(
+        cc: crate::codegen::x86_64::opcode::CondCode,
+    ) -> Option<JumpKind> {
+        use crate::codegen::x86_64::opcode::CondCode;
+        let k = match cc {
+            CondCode::Eq => JumpKind::Je,
+            CondCode::Ne => JumpKind::Jne,
+            CondCode::Lt => JumpKind::Jl,
+            CondCode::Le => JumpKind::Jle,
+            CondCode::Gt => JumpKind::Jg,
+            CondCode::Ge => JumpKind::Jge,
+            CondCode::B => JumpKind::Jb,
+            CondCode::Ae => JumpKind::Jae,
+            CondCode::A => JumpKind::Ja,
+            CondCode::Be => JumpKind::Jbe,
+            CondCode::Ns => JumpKind::Jns,
+            CondCode::O => JumpKind::Jo,
+            CondCode::S | CondCode::No | CondCode::P | CondCode::Np => return None,
+        };
+        Some(k)
     }
 
     // ========================================================================
@@ -2081,6 +2260,30 @@ impl Codegen {
         self.late_site_seq
     }
 
+    /// 名字刚被定下帧偏移：若它是 volatile / 段限定局部，把它占的每个 8 字节槽登记为
+    /// 「不可被块内等价事实穿过」（P13 阶段6）。
+    ///
+    /// 登记粒度是槽而不是对象：块内优化看到的是 `[r13+disp]` 这种字节偏移，
+    /// 它不知道那条访存落在哪个对象的第几个成员上。多登记邻槽只会少削一条，
+    /// 少登记就是静默错值。
+    pub(crate) fn note_volatile_var_slots(&mut self, name: &str, off: i64) {
+        let Some(&slots) = self.volatile_locals.get(name) else {
+            return;
+        };
+        // 一个对象就能吃掉整张表时不要枚举：`volatile char big[0x100000000UL]` 这种
+        // VLA 的 `var_alloc_slots` 是 5.4 亿，按槽插入会把编译时间拖到分钟级。
+        // 枚举不完就整体关掉本函数的槽事实（保守方向：不转发、不去重）。
+        if slots > VOLATILE_SLOT_CAP {
+            self.volatile_slots_overflow = true;
+            self.volatile_frames.clear();
+            return;
+        }
+        for i in 0..slots.max(0) {
+            self.volatile_frames
+                .insert(off.saturating_add(i.saturating_mul(8)));
+        }
+    }
+
     pub fn register_var(&mut self, name: &str, ty: &Type) -> i64 {
         if let Some(entry) = self.var_map.get(name) {
             // 变量已存在 (外层作用域同名变量或 pre_register_vars 预分配).
@@ -2118,6 +2321,7 @@ impl Codegen {
             let off = layout.late_band_top - self.late_var_cursor - slots.saturating_mul(8);
             self.late_var_cursor = self.late_var_cursor.saturating_add(slots.saturating_mul(8));
             self.var_map.insert(name.to_string(), (off, ty.clone()));
+            self.note_volatile_var_slots(name, off);
             self.late_slot_used = self.late_slot_used.saturating_add(slots);
             if std::env::var_os("DCC_LATE_ALLOC").is_some() {
                 eprintln!(
@@ -2166,6 +2370,7 @@ impl Codegen {
         let used = self.var_map_total_slots.saturating_mul(8);
         let off = -(used + hdr) - (slots.saturating_sub(1) * 8);
         self.var_map.insert(name.to_string(), (off, ty.clone()));
+        self.note_volatile_var_slots(name, off);
         self.var_map_total_slots = (used + slots * 8) / 8;
         // **Phase 2.2（H1 的硬边界）**：生成期的晚增长不得越过帧底。规划期这条在帧未解算
         // 时是空转（`frame_size == 0`），留着是为了「即使有人把登记推后到解算之后」也不会

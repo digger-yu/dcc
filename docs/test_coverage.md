@@ -447,7 +447,7 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_asm.rs` | `mini_asm_unknown_mnemonic_is_hard_error` | (inline) | compile | T0 |
 | `tests/integration/c_asm.rs` | `mini_asm_invalid_operands_is_hard_error` | (inline) | compile | T0 |
 | `tests/integration/c_asm.rs` | `o2_dce_preserves_outputless_inline_asm` | (inline) | compile | T0 |
-| `tests/integration/c_asm.rs` | `asm_constraints_compile` | \`examples/assembly/constraints.c\` | compile | T0 |
+| `tests/integration/c_asm.rs` | `asm_constraints_compile` | \`fixtures/smoke/constraints.c\` | compile | T0 |
 | `tests/integration/c_asm.rs` | `o2_goto_label_after_return` | (inline) | compile | T0 |
 | `tests/integration/c_asm.rs` | `asm_inline_qualifier_compiles` | \`fixtures/asm/asm_inline.c\` | compile | T0 |
 | `tests/integration/c_asm.rs` | `asm_register_binding_yields_to_address_escape` | \`fixtures/asm/asm_register_binding_escape.c\` | run | T0 |
@@ -847,7 +847,7 @@ sanitizer 运行或断言运行时失败 / `report-only` = `#[ignore]`，默认�
 | `tests/integration/c_abi_vararg.rs` | `va_copy_advanced_forms` | \`fixtures/c/va_arg/va_copy_advanced.c\` | run | T0 |
 | `tests/integration/c_abi_vararg.rs` | `va_arg_double_precision` | (inline) | run | T0 |
 | `tests/integration/c_abi_vararg.rs` | `non_x86_qemu_runtime_va_arg` | (inline) | run | T0 |
-| `tests/integration/c_abi_vararg.rs` | `va_list_sse_compiles` | \`examples/advanced/va_list.c\` | compile | T0 |
+| `tests/integration/c_abi_vararg.rs` | `va_list_sse_compiles` | \`fixtures/smoke/va_list.c\` | compile | T0 |
 | `tests/integration/c_abi_vararg.rs` | `va_arg_sseup_shares_one_slot` | \`fixtures/c/va_arg/sseup_shares_one_slot.c\` | run | T0 |
 | `tests/integration/c_abi_vararg.rs` | `va_arg_sse_vs_sseup_slot_layout` | \`fixtures/c/va_arg/sse_vs_sseup_slot_layout.c\` | cross-check | T0 |
 | `tests/integration/c_abi_vararg.rs` | `va_arg_mixed_sse_pipeline_named` | \`fixtures/c/va_arg/mixed_sse_pipeline_named.c\` | cross-check | T0 |

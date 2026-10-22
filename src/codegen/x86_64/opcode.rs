@@ -349,6 +349,35 @@ pub(crate) enum CondCode {
     No,
 }
 
+impl CondCode {
+    /// 条件码取反 —— 「不满足这个条件」对应的那一个。
+    ///
+    /// 分支发射点只关心一件事：比较成立时**继续往下走**，所以要跳的是反面条件。
+    /// 这张表是 `cmp_cc` 的补集那一半，条件码本身仍然只从 `cmp_cc` 来（那里是
+    /// setcc/jcc 助记符的唯一真源），这里绝不重复一份「运算 → 条件码」的映射。
+    /// 穷举匹配（不留 `_`）是故意的：新增条件码变体时必须在这里被迫表态。
+    pub(crate) fn inverse(self) -> CondCode {
+        match self {
+            CondCode::Eq => CondCode::Ne,
+            CondCode::Ne => CondCode::Eq,
+            CondCode::Lt => CondCode::Ge,
+            CondCode::Ge => CondCode::Lt,
+            CondCode::Le => CondCode::Gt,
+            CondCode::Gt => CondCode::Le,
+            CondCode::A => CondCode::Be,
+            CondCode::Be => CondCode::A,
+            CondCode::B => CondCode::Ae,
+            CondCode::Ae => CondCode::B,
+            CondCode::S => CondCode::Ns,
+            CondCode::Ns => CondCode::S,
+            CondCode::P => CondCode::Np,
+            CondCode::Np => CondCode::P,
+            CondCode::O => CondCode::No,
+            CondCode::No => CondCode::O,
+        }
+    }
+}
+
 /// 内存操作数 ({disp, base, index, seg}).
 /// base/index 都是 Intel 寄存器号 (0=rax .. 15=r15).
 #[derive(Clone, Debug)]
@@ -3860,6 +3889,74 @@ mod tests {
 
     fn reg(r: u8, w: Width) -> Operand {
         Operand::Reg(r, w)
+    }
+
+    /// `CondCode::inverse()` 必须是对合（逆的逆回到自己）且不得把任何条件映到自身。
+    ///
+    /// 为什么单独锁：分支发射点的极性全靠它（「假则跳出」发的是逆条件）。写错一行
+    /// 不会编译失败，只会把一个常见形状编成反条件分支 —— 产物能跑、能链、结果错。
+    #[test]
+    fn condcode_inverse_is_a_fixed_point_free_involution() {
+        let all = [
+            CondCode::Eq,
+            CondCode::Ne,
+            CondCode::Lt,
+            CondCode::Ge,
+            CondCode::Gt,
+            CondCode::Le,
+            CondCode::A,
+            CondCode::Ae,
+            CondCode::B,
+            CondCode::Be,
+            CondCode::S,
+            CondCode::Ns,
+            CondCode::P,
+            CondCode::Np,
+            CondCode::O,
+            CondCode::No,
+        ];
+        for &c in &all {
+            assert_eq!(c.inverse().inverse(), c, "{c:?} 的逆的逆必须回到自己");
+            assert_ne!(c.inverse(), c, "{c:?} 的逆不得是自身");
+        }
+        // 无符号一侧的配对也得单独锁住：有符号/无符号写反是这一族错里最常见的一种
+        assert_eq!(CondCode::B.inverse(), CondCode::Ae);
+        assert_eq!(CondCode::A.inverse(), CondCode::Be);
+        assert_eq!(CondCode::Lt.inverse(), CondCode::Ge);
+        assert_eq!(CondCode::Le.inverse(), CondCode::Gt);
+    }
+
+    /// 条件直生分支的表对应：`cmp_cc` 给出的条件码 → `jump_kind_for_cc` 的跳转类别。
+    ///
+    /// 右边的期望值是按 x86 ISA 手册**手写**的一份独立表：两个实现（setcc 表与 jcc 表）
+    /// 一旦漂移（把无符号 `seta` 配成 `jl`），这条用例是唯一能在单测阶段抓住它的地方。
+    /// 同时要求「正条件与逆条件都有 jcc 形态」——这正是 Binop 臂放行判据的前提。
+    #[test]
+    fn jumpkind_inverse_table_matches_render_one_mnemonics() {
+        use crate::ast::BinOp;
+        use crate::codegen::x86_64::Codegen;
+        use crate::codegen::x86_64::JumpKind;
+        let expect = [
+            (BinOp::Lt, true, JumpKind::Jl),
+            (BinOp::Lt, false, JumpKind::Jb),
+            (BinOp::Le, true, JumpKind::Jle),
+            (BinOp::Le, false, JumpKind::Jbe),
+            (BinOp::Gt, true, JumpKind::Jg),
+            (BinOp::Gt, false, JumpKind::Ja),
+            (BinOp::Ge, true, JumpKind::Jge),
+            (BinOp::Ge, false, JumpKind::Jae),
+            (BinOp::EqEq, true, JumpKind::Je),
+            (BinOp::EqEq, false, JumpKind::Je),
+            (BinOp::Ne, true, JumpKind::Jne),
+            (BinOp::Ne, false, JumpKind::Jne),
+        ];
+        for (op, signed, want) in expect {
+            let cc = Codegen::cmp_cc(op, signed).1;
+            let got = Codegen::jump_kind_for_cc(cc);
+            assert_eq!(got, Some(want), "{op:?} signed={signed} 的直生跳转类别不对");
+            let inv = Codegen::jump_kind_for_cc(cc.inverse());
+            assert!(inv.is_some(), "{op:?} signed={signed} 的逆条件没有 jcc 形态");
+        }
     }
 
     #[test]

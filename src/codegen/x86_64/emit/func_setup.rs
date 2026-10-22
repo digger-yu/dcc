@@ -207,6 +207,26 @@ impl Codegen {
         });
     }
 
+    /// 发一条 callee-saved 保存/恢复，并按「**真的发了**」登记补丁点。
+    ///
+    /// `patch_callee_saves` 的回填口径是「从记录的起点往后写 4 个 0x90」，而
+    /// `emit_insn` 可能整条不发（P13 阶段6 的块内等价事实会把「槽里已经是这个号」的
+    /// 恢复当恒等删掉）。一条没发的指令如果照样登记补丁点，那 4 个 0x90 就落在
+    /// **下一条指令**上，把 `mov %r13,%rsp` 涂成 nop —— 实测症状是尾声只剩
+    /// `pop %rbp; ret`、程序 SIGSEGV。所以补丁点只能与「字节真的在了」同生同灭。
+    pub(crate) fn emit_callee_save_site(&mut self, bit: u8, insn: Insn) -> bool {
+        let pos = self.pos();
+        let handled = self.emit_insn(&insn);
+        // `emit_insn` 对「被块内等价事实整条删掉」也返回 true（那是「已处理」而不是
+        // 「发了字节」），所以判据只能是 `code` 真的长长了。
+        if handled && self.pos() > pos {
+            self.callee_save_patch_sites.push((pos, bit));
+            true
+        } else {
+            false
+        }
+    }
+
     /// 回填本函数序言/尾声的 callee-saved 保存/恢复指令.
     /// 单遍编译下序言先于函数体发射, 无法预知函数体是否使用这些寄存器;
     /// 函数体生成完毕后 `RegBank::used_mask` 已完整, 将未使用寄存器的
@@ -1832,6 +1852,48 @@ impl Codegen {
         }
     }
 
+    /// P13 阶段6：本函数里「帧槽读写不得被块内等价事实穿过」的局部变量名 → 槽数。
+    ///
+    /// 判据与「能不能给它分寄存器家」共用同一条（`functions.rs` 的 `assign_auto_homes`）：
+    /// `volatile` / 段限定 / `_Atomic` 的局部，其每一次读写都是可观察事件，既不能把读
+    /// 转发成「上次写进去的那个号」，也不能把同值重写当死写削掉。
+    ///
+    /// 为什么在声明处建表而不是查 `var_map` 的类型：`var_map` 只存 `Type`，限定符住在
+    /// `VarDecl::quals` 上，`volatile int x` 的 `Type` 与 `int x` 逐位相同。为什么记名字
+    /// 而不记偏移：晚分配（`for` 的 init、`({...})` 块、标号语句里的声明）的偏移要到
+    /// 发射期才定，本函数在规划期跑，只能先把「哪些名字要防」定下来。
+    pub fn collect_volatile_locals(
+        items: &[BlockItem],
+        static_local_map: &crate::static_locals::StaticLocalMap,
+        func_name: &str,
+        out: &mut HashMap<String, i64>,
+    ) {
+        let mut decls: Vec<&VarDecl> = Vec::new();
+        Self::collect_frame_var_decls(items, static_local_map, func_name, &mut decls);
+        for v in &decls {
+            if !Self::frame_access_is_volatile(v) {
+                continue;
+            }
+            let slots = Self::var_alloc_slots(&v.ty);
+            let slot = out.entry(v.name.name.clone()).or_insert(0);
+            if slots > *slot {
+                *slot = slots;
+            }
+        }
+    }
+
+    /// 一个局部的帧槽读写是否「每一次都是可观察事件」。
+    ///
+    /// 段限定的局部在本后端不会有段前缀（`[r13+disp]` 是无段的普通帧槽），但它与
+    /// volatile 在语义上同类：值可能被外部（per-cpu 基址、信号）改动，所以一并排除，
+    /// 宁可少削一条。
+    fn frame_access_is_volatile(v: &VarDecl) -> bool {
+        v.quals.is_volatile()
+            || v.quals.is_atomic()
+            || !matches!(v.addr_space, AddrSpace::None)
+            || matches!(v.ty, Type::Atomic(_))
+    }
+
     pub fn collect_direct_nested_funcs(items: &[BlockItem], out: &mut Vec<FuncDecl>) {
         for item in items {
             match item {
@@ -2107,29 +2169,33 @@ impl Codegen {
         // 恢复被调用者保存寄存器: rbx, r12, r14, r15
         // 同序言: 无条件发射, 未使用的寄存器由 patch_callee_saves 改为 nop
         // mov rbx, [r13 - 16]  (REX.WB: r13 needs REX.B)
-        self.callee_save_patch_sites.push((self.pos(), 0x01));
-        self.emit_insn(
-            &Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 3, 13, -16)
+        Self::emit_callee_save_site(
+            self,
+            0x01,
+            Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 3, 13, -16)
                 .with_gas("mov -16(%r13), %rbx".to_string()),
         );
         // mov r12, [r13 - 24]  (REX.WRB: r12 needs REX.R, r13 needs REX.B)
-        self.callee_save_patch_sites.push((self.pos(), 0x02));
-        self.emit_insn(
-            &Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 12, 13, -24)
+        Self::emit_callee_save_site(
+            self,
+            0x02,
+            Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 12, 13, -24)
                 .with_gas("mov -24(%r13), %r12".to_string()),
         );
         // mov r14, [r13 - 32]  (REX.WRB: r14 needs REX.R, r13 needs REX.B)
-        self.callee_save_patch_sites.push((self.pos(), 0x04));
-        self.emit_insn(
-            &Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 14, 13, -32)
+        Self::emit_callee_save_site(
+            self,
+            0x04,
+            Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 14, 13, -32)
                 .with_gas("mov -32(%r13), %r14".to_string()),
         );
         // mov r15, [r13 - 40]  (REX.WRB: r15 在 reg 字段需要 REX.R, r13 在 r/m 需要 REX.B)
         // 这里没有 SIB，REX.X 是多余的：旧代码发 0x4F = W|R|X|B，产物里被 objdump 标成
         // `rex.WRXB mov -0x28(%r13),%r15`（与序言侧同一个复制源）。
-        self.callee_save_patch_sites.push((self.pos(), 0x08));
-        self.emit_insn(
-            &Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 15, 13, -40)
+        Self::emit_callee_save_site(
+            self,
+            0x08,
+            Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 15, 13, -40)
                 .with_gas("mov -40(%r13), %r15".to_string()),
         );
         // mov rsp, r13: 恢复栈指针

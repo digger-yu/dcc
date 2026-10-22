@@ -4,10 +4,9 @@ mov %rsp,%r13
 sub $0x2f0,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
-mov -0x40(%r13),%rax
+mov %rdi,%rax
 movsbq (%rax),%rax
 movsbq %al,%rax
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret
@@ -18,10 +17,9 @@ mov %rsp,%r13
 sub $0x2f0,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
-mov -0x40(%r13),%rax
+mov %rdi,%rax
 movswq (%rax),%rax
 movswq %ax,%rax
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret
@@ -32,22 +30,20 @@ mov %rsp,%r13
 sub $0x2f0,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
-mov -0x40(%r13),%rax
+mov %rdi,%rax
 movslq (%rax),%rax
-movslq %eax,%rax
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret
+<nop padding>
 l_l:
 push %r13
 mov %rsp,%r13
 sub $0x2f0,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
-mov -0x40(%r13),%rax
+mov %rdi,%rax
 mov (%rax),%rax
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret
@@ -58,7 +54,7 @@ mov %rsp,%r13
 sub $0x2f0,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
-mov -0x40(%r13),%rax
+mov %rdi,%rax
 add $0x18,%rax
 mov (%rax),%rax
 <nop padding>
@@ -72,7 +68,6 @@ mov %rsp,%r13
 sub $0x2e0,%rsp
 <nop padding>
 mov 0x0(%rip),%rax
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret

@@ -427,6 +427,37 @@ pub struct Function {
     /// 各自的 AST 局部）。由 `regalloc::assign` 算一次；重建与交付都读它，
     /// 所以「哪个版本叫什么」只有一份答案。今天总是空（⇒ 产物不变）。
     pub local_splits: crate::ssa::location::Splits,
+    /// 整型字面量在**原始 AST** 里的类型：值 -> 类型（歧义则记 `None`）。
+    ///
+    /// 为什么需要这张表：`Operand::Int(i128)` 是**无类型**的，而重建回 AST 时必须给
+    /// `Expr::Int` 造一个类型。「按值的量级猜类型」把 `0xffffffffUL`（`unsigned long`）
+    /// 猜成 `long long` ⇒ 字面量的**无符号性**就在这一步丢失，串上公共类型判定后无符号
+    /// 比较拿到有符号条件码（实测 `if (u > 0xffffffffUL)` 在 -O2 得 0，应 1）。后缀是只有
+    /// 前端知道的事实，因此在 lowering 时就把它记下来，重建优先读它。
+    ///
+    /// 为什么用「值」而不是「变量」做键：常量在本 IR 里就是以值存在的，同一个值在同一
+    /// 函数内被写成不同类型时无法分辨归属 ⇒ 标成 `None`（歧义）回落到量级阶梯，即
+    /// 今天的行为 —— 命中不了时不会比今天更坏。
+    ///
+    /// **但「按值」本身就盖不住最常见的一类歧义**：`1` 既是 `int` 也是 `unsigned`，
+    /// 于是 `int x=-1; unsigned y=1; x>y` 被 SCCP 折成两个 `Operand::Int` 后，重建只能
+    /// 把 `1` 认成 `int` ⇒ 公共类型 `int` ⇒ 有符号条件码。那类形状由下面
+    /// [`Function::cmp_operand_tys`]（按指令槽位记账）兜住，本表退为「无指令归属的常量」
+    /// 的第二档。
+    pub const_int_tys: HashMap<i128, Option<Type>>,
+    /// 比较指令**在原始 AST 里两个操作数的类型**：`dest` 名 -> `(l.ty(), r.ty())`。
+    ///
+    /// 为什么需要按键到**指令**而不是按值：`Operand::Int` 无类型，而 SCCP/拷贝传播会把
+    /// **带类型的** `Operand::Var`（`y.1: UInt`）换成**无类型的** `Operand::Int(1)` ——
+    /// 字面量的无符号性就在这一步被销毁（实测 `int x=-1; unsigned y=1; return x>y;` 在
+    /// -O2 得 0，应 1；`DCC_SSA_OFF=sccp` 时 IR 仍是 `Var(x.1: Int) > Var(y.1: UInt)`，
+    /// 结果正确）。被销毁的事实只有构建器知道，所以在 `Expr::Binop` 下降时按本指令的
+    /// `dest` 名记一笔；重建回 AST 时用它给「裸 `Expr::Int` 操作数」补类型，于是
+    /// 比较的符号性重新由 `usual_arith_type` 从**真类型**推出，而不是从量级猜。
+    ///
+    /// 只记 `Lt/Gt/Le/Ge` 四条（条件码唯符号性是从的运算），且只在操作数重建为
+    /// **裸整常量**时生效 —— 其余形状原本就带着类型，不该被改写。
+    pub cmp_operand_tys: HashMap<String, (Type, Type)>,
 }
 
 impl Function {
@@ -452,6 +483,8 @@ impl Function {
             eh_reentry_labels: Vec::new(),
             value_loc: crate::ssa::location::LocMap::empty(),
             local_splits: crate::ssa::location::Splits::default(),
+            const_int_tys: HashMap::new(),
+            cmp_operand_tys: HashMap::new(),
         };
         s.add_block("entry".to_string());
         s
@@ -491,7 +524,40 @@ impl Function {
             // 把位置表一起带走」的声明，而不是 derive 的默认行为。
             value_loc: self.value_loc.fork(),
             local_splits: self.local_splits.clone(),
+            const_int_tys: self.const_int_tys.clone(),
+            cmp_operand_tys: self.cmp_operand_tys.clone(),
         }
+    }
+
+    /// 记下一条比较指令在原始 AST 里的操作数类型（仅 SSA 构建器调用）。
+    pub fn note_cmp_operand_tys(&mut self, dest: String, l: &Type, r: &Type) {
+        self.cmp_operand_tys.insert(dest, (l.clone(), r.clone()));
+    }
+
+    /// 取回比较指令两个操作数在 AST 里的类型；没记过（非比较、或指令由 pass 克隆而出
+    /// 的新 `dest`）则 `None` ⇒ 重建保持今天的「读字面量表 / 量级阶梯」行为。
+    pub fn cmp_operand_ty(&self, dest: &str) -> Option<(Type, Type)> {
+        self.cmp_operand_tys.get(dest).cloned()
+    }
+
+    /// 记录一个整型字面量的**原始**类型；同值异型 ⇒ 标为歧义（`None`），不据此推类型。
+    pub fn note_const_int_ty(&mut self, v: i128, ty: &Type) {
+        use std::collections::hash_map::Entry;
+        match self.const_int_tys.entry(v) {
+            Entry::Vacant(e) => {
+                e.insert(Some(ty.clone()));
+            },
+            Entry::Occupied(mut e) => {
+                if e.get().as_ref() != Some(ty) {
+                    e.insert(None);
+                }
+            },
+        }
+    }
+
+    /// 该整型常量是否有**无歧义**的原始字面量类型。
+    pub fn const_int_ty(&self, v: i128) -> Option<Type> {
+        self.const_int_tys.get(&v).cloned().flatten()
     }
 
     pub fn add_block(&mut self, name: String) -> String {
@@ -899,9 +965,7 @@ pub(super) fn inst_clobbers_memory(kind: &InstKind) -> bool {
         // 写后的值而非 SSA 定义点的值 —— 必须算 clobber。漏掉普通 Store 曾让重建把
         // `p = *q; *q = v; use(p)` 里的 `p` 内联成使用点重载 `*q`, 拿到 `v` (Lua
         // `luaD_anchorobj` 的 `L->top.p++` 即此形状, -O2 启动期 "table index is nil")。
-        InstKind::Store { .. }
-        | InstKind::IndexStore { .. }
-        | InstKind::MemberStore { .. } => true,
+        InstKind::Store { .. } | InstKind::IndexStore { .. } | InstKind::MemberStore { .. } => true,
         // volatile 读会与相邻的 volatile 访问定序, 同样算 clobber。
         InstKind::Load { is_volatile, .. }
         | InstKind::IndexLoad { is_volatile, .. }

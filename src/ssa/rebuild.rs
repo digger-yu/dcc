@@ -387,7 +387,7 @@ fn push_inst_stmt(inst: &Inst, bb_name: &str, cx: &mut RebuildCtx<'_>, out: &mut
         if let Some(Some(_)) = subst.get(&ssa_name) {
             return;
         }
-        let rhs = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func, Some(&d.ty));
+        let rhs = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func, Some(d));
         let assign = Expr::Assign {
             op: crate::ast::BinOp::Add,
             l: Box::new(Expr::Ident {
@@ -525,7 +525,9 @@ fn rebuild_eh_blocks(func: &Function, cx: &mut RebuildCtx<'_>, out: &mut Vec<Blo
             // `SwitchTable` 不出现在落地垫区 (分派只按 selector 比较)。
             // `Dispatch` 同样不会到重建：含 computed goto 的函数在
             // `opt::run_ssa_passes` 里走 analysis-only 路径（只取分配决策，体不重建）。
-            Terminator::Unreachable | Terminator::SwitchTable { .. } | Terminator::Dispatch { .. } => {},
+            Terminator::Unreachable
+            | Terminator::SwitchTable { .. }
+            | Terminator::Dispatch { .. } => {},
         }
         out.push(BlockItem::Stmt(Stmt::Label {
             name: crate::ast::Ident {
@@ -1874,7 +1876,7 @@ fn emit_rebuild_inst(
         if let Some(Some(_)) = subst.get(&ssa_name) {
             return;
         }
-        let rhs = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func, Some(&d.ty));
+        let rhs = inst_to_expr_resolved(&inst.kind, subst, &inst.span, func, Some(d));
         let assign = Expr::Assign {
             op: crate::ast::BinOp::Add,
             l: Box::new(Expr::Ident {

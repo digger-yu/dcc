@@ -55,7 +55,11 @@ pub(super) struct Builder {
 }
 
 impl Builder {
-    fn new(func: Function, addr_taken: std::collections::HashSet<String>, analysis_only: bool) -> Self {
+    fn new(
+        func: Function,
+        addr_taken: std::collections::HashSet<String>,
+        analysis_only: bool,
+    ) -> Self {
         let cur = func.entry.clone();
         let mut b = Builder {
             func,
@@ -715,7 +719,10 @@ impl Builder {
 
     fn lower_expr_inner(&mut self, e: &Expr, target: Option<SsaVar>) -> Operand {
         match e {
-            Expr::Int { v, .. } => {
+            Expr::Int { v, ty, .. } => {
+                // `Operand::Int` 不带类型, 而重建 (`expr_rebuild::int_const_ty_for`) 必须给
+                // `Expr::Int` 造回一个类型 —— 字面量的类型只有前端从后缀知道, 故在此记账。
+                self.func.note_const_int_ty(*v, ty);
                 if let Some(t) = target {
                     self.emit(Inst {
                         dest: Some(t.clone()),
@@ -748,7 +755,12 @@ impl Builder {
                 Operand::Float(*c, ty.clone())
             },
             Expr::String { data, .. } => Operand::Str(data.clone()),
-            Expr::Char { v, .. } => Operand::Int(*v),
+            Expr::Char { v, ty, .. } => {
+                // 字符常量同样落进无类型的 `Operand::Int`: `'a'` 在 C 里是 `int`, 但
+                // L'…' / u8'…' 的原始类型不同, 一并记账。
+                self.func.note_const_int_ty(*v, ty);
+                Operand::Int(*v)
+            },
             Expr::Ident { name, span, ty } => {
                 // 必须用内存表示的本函数局部 (被取址的标量): 一律从内存读, 不看
                 // SSA 版本 —— 版本可能被指针间接改写过, 也可能根本不存在
@@ -842,6 +854,15 @@ impl Builder {
                     return Operand::Int(0);
                 }
                 let dest = target.unwrap_or_else(|| self.fresh("bin", ty.clone(), span));
+                // 比较的符号性由两个操作数的**公共类型**决定（C11 6.3.1.8），而公共类型
+                // 只能从操作数类型推。`Operand::Int` 不带类型，SCCP 把 `Var(y.1: UInt)`
+                // 换成 `Int(1)` 后这份事实就消失了（重建只能按量级把 `1` 猜成 `int` ⇒
+                // 无符号比较编成有符号条件码），所以在还看得见 AST 类型的此刻按 `dest`
+                // 名记一笔，交给 `expr_rebuild` 消费。
+                if matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) {
+                    let (lt, rt) = (l.ty(), r.ty());
+                    self.func.note_cmp_operand_tys(dest.name(), &lt, &rt);
+                }
                 self.emit(Inst {
                     dest: Some(dest.clone()),
                     kind: InstKind::Bin {

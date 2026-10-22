@@ -142,6 +142,57 @@ pub struct Codegen {
     /// 不做活性分析。任何 `emit`（裸字节）、标签定义或函数边界都必须把它清空 ——
     /// 「上一条」一旦跨过控制流汇合点，结论就不再成立。
     pub(crate) peep_last: Option<crate::codegen::x86_64::instructions::PeepLast>,
+    /// 「这条比较的结果只用来决定分支」的**令牌**（分支发射点发出，Binop 臂消费）。
+    ///
+    /// 是拿走而不是读取：`if (x + (a<b))` 里外层 Add 一进臂就把令牌拿走，内层 `a<b`
+    /// 再也看不到它 —— 只有真正直接流向分支的那一次比较才被允许「只留 flags、
+    /// 不材料化 0/1」。带返回值的语境（赋值、`!!x`、函数实参）不会发令牌。
+    pub(crate) cmp_flags_token: bool,
+    /// 「这条表达式的值根本没人要」（P13 阶段1 的 `ValueUse::Discarded`）。
+    ///
+    /// 今天赋值臂末尾总要把结果归约到左值类型（`reduce_assign_value_to_lvalue`），因为
+    /// 那条归约同时是「赋值表达式的值」的语义（C11 6.5.16p3）。但归约后的寄存器只有在
+    /// 值**真被人读**时才必需：内存左值的 store 本身就按左值宽度截断。语句级表达式
+    /// （`i = i + 1;`、`for` 的 step、逗号运算数的左侧）上这一条恒等的
+    /// `movslq %eax,%eax` 就是白发的（实测 luaV_execute 里 `movsxd rax,eax` 有 243 条）。
+    ///
+    /// 与 `cmp_flags_token` 同一条纪律：在 `gen_expr` 入口被**消费**，所以 `f(a = 1)` 里
+    /// `a = 1` 的值要交给实参，看到的是 `false`。
+    pub(crate) value_is_dead: bool,
+    /// 本次 `binop` / `emit_cmp_imm` 调用**可以**把条件码交给 `last_cmp`（由 Binop 臂
+    /// 紧贴调用点置位/复位，中间不发射任何指令，所以不会溢出到别的表达式）。
+    pub(crate) cmp_flags_granted: bool,
+    /// 「上一条指令就是 cmp/test，且没人动过 flags」的条件码。
+    ///
+    /// 生命周期与 `peep_last` 同一条纪律：任何一次 `emit`（含 push/pop、裸字节）与任何
+    /// 标签定义都把它清空 —— 标签是控制流汇合点，从别处跳进来时 flags 是另一条边上的。
+    /// 写入只发生在比较臂发完 cmp 之后（顺序不能反，否则自己把自己清掉）。
+    pub(crate) last_cmp: Option<crate::codegen::x86_64::opcode::CondCode>,
+    /// **块内**机器级等价的当前状态（P13 阶段6 地基，见 `blockopt`）。
+    ///
+    /// 与 `peep_last` 同一条纪律：`label()` / 裸字节 `emit()` / 函数边界都整体清空。
+    /// 它只记录「本块内可证明的等价」，任何认不得的形态一律全杀。
+    pub(crate) block_state: crate::codegen::x86_64::blockopt::BlockState,
+    /// 本函数里 **volatile / 段限定** 局部对象的帧偏移（8 字节槽粒度）。
+    ///
+    /// `var_map` 只存 `Type`（限定符在 `QualType` 上），所以「这个槽能不能被转发」
+    /// 这条事实必须在声明处单独记一笔。逐函数清空；块内优化对它只读。
+    pub(crate) volatile_frames: HashSet<i64>,
+    /// 本函数里「帧槽读写不得被等价事实穿过」的局部变量名 → 占用的槽数（P13 阶段6）。
+    ///
+    /// 与 `volatile_frames` 的分工：这张表在**声明处**建成，此时晚分配变量的偏移还
+    /// 不存在；`register_var` 定下偏移时据它把具体偏移登记进 `volatile_frames`。名字
+    /// 口径与 `collect_frame_var_decls` 同源，`for` 的 init、`({...})` 块、标号语句里
+    /// 的 volatile 局部都不会漏。
+    pub(crate) volatile_locals: HashMap<String, i64>,
+    /// 本函数是否有「槽数大到不值得枚举」的 volatile / 段限定局部（P13 阶段6）。
+    ///
+    /// `volatile_frames` 是**枚举**出来的屏障：一个字节数组局部占多少槽就要插多少条。
+    /// 大对象（实测 `volatile char big[0x100000000UL]` 的 VLA，`var_alloc_slots` 给出
+    /// 5.4 亿槽）按槽枚举会把编译器拖死（实测 6 分钟、5.9 GB RSS，`perf_regression`
+    /// 的 30 秒上限直接超时）。槽枚举不完时唯一安全的方向是**整体关掉本函数的槽事实**：
+    /// 少削几条只是丢优化，漏登记一条 volatile 槽就是静默错值。
+    pub(crate) volatile_slots_overflow: bool,
     /// **程序点级家覆盖**（Phase 5.1 前置二）：名字 → 「在这一段里它其实住在哪里」。
     ///
     /// 声明级的家（`homes`）只能回答「这个变量的家是哪个号」，而前置三需要的恰好是它的
@@ -280,7 +331,7 @@ pub struct Codegen {
     // 唯一名 → 定义父帧中 trampoline 槽偏移 (后代引用经静态链定位)
     pub nested_chain_offsets: HashMap<String, i64>,
     pub nested_func_rename_counter: u32,
-    pub current_func_name: String,   // 当前正在编译的函数名
+    pub current_func_name: String, // 当前正在编译的函数名
     /// 预注册 static local 期间该变量的**属主函数名**：`&&label` 初始化式的标签
     /// 命名空间（见 `c_label_to_asm`）。只在 `register_static_global` 调用期间非空。
     pub static_local_label_owner: Option<String>,
@@ -508,7 +559,7 @@ pub struct PendingJump {
     pub is_push_imm: bool,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum JumpKind {
     Jmp,
     Je,
@@ -518,7 +569,9 @@ pub enum JumpKind {
     Jg,
     Jge,
     Jb,
+    Jae,
     Ja,
+    Jbe,
     Jns,
     Jo,
 }
@@ -886,6 +939,14 @@ impl Codegen {
             frame_planned: false,
             eval_holding: None,
             peep_last: None,
+            cmp_flags_token: false,
+            value_is_dead: false,
+            cmp_flags_granted: false,
+            last_cmp: None,
+            block_state: Default::default(),
+            volatile_frames: HashSet::new(),
+            volatile_locals: HashMap::new(),
+            volatile_slots_overflow: false,
             auto_homes: HashMap::new(),
             home_overrides: HashMap::new(),
             ext_home_saves: Vec::new(),
@@ -1714,8 +1775,7 @@ impl Codegen {
                     if let Some(init) = &v.init {
                         // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;),
                         // 避免 eval 截断为 int
-                        let is_float =
-                            v.ty.is_real_float();
+                        let is_float = v.ty.is_real_float();
                         if let Some(bytes) = global::global_init_bytes(init, sz, is_float, &v.ty) {
                             self.tdata_section.extend_from_slice(&bytes);
                         }
@@ -1863,8 +1923,7 @@ impl Codegen {
                             },
                             _ => {
                                 // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;)
-                                let is_float =
-                                    v.ty.is_real_float();
+                                let is_float = v.ty.is_real_float();
                                 if let Some(bytes) =
                                     global::global_init_bytes(init, sz, is_float, &v.ty)
                                 {
@@ -2030,8 +2089,7 @@ impl Codegen {
                             },
                             _ => {
                                 // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;)
-                                let is_float =
-                                    v.ty.is_real_float();
+                                let is_float = v.ty.is_real_float();
                                 if let Some(bytes) =
                                     global::global_init_bytes(init, sz, is_float, &v.ty)
                                 {
@@ -2226,8 +2284,7 @@ impl Codegen {
                         },
                         _ => {
                             // 浮点目标: eval_full 取位模式 (double x = 1 / 1.5;)
-                            let is_float =
-                                v.ty.is_real_float();
+                            let is_float = v.ty.is_real_float();
                             if let Some(bytes) =
                                 global::global_init_bytes(init, sz, is_float, &v.ty)
                             {
@@ -2679,6 +2736,33 @@ mod tests {
             .collect()
     }
 
+    /// P13 阶段6：槽数超过上限的 volatile 局部不得按槽枚举。
+    ///
+    /// `volatile char big[0x100000000UL]` 的 VLA 在 `var_alloc_slots` 里是 5.4 亿槽，
+    /// 逐槽插入实测把编译拖到 6 分钟 / 5.9 GB RSS（`perf_regression` 的 30 秒上限
+    /// 直接超时）。溢出时唯一的正确方向是整体关闭本函数的槽事实：少削几条只丢优化，
+    /// 漏登记一条 volatile 槽就是静默错值。
+    #[test]
+    fn huge_volatile_object_disables_slot_facts_instead_of_enumerating_them() {
+        let mut cg = x86();
+        cg.volatile_locals.insert("big".into(), 536_870_912);
+        cg.note_volatile_var_slots("big", -64);
+        assert!(cg.volatile_slots_overflow, "超大 volatile 必须触发整体关闭");
+        assert!(cg.volatile_frames.is_empty(), "溢出时不得留下一半屏障");
+    }
+
+    /// 反向守卫：普通大小的 volatile 局部仍要逐槽登记（否则块内优化会把它的槽
+    /// 当成普通槽转发，那次访问就凭空少了一次）。
+    #[test]
+    fn ordinary_volatile_object_still_enumerates_every_slot() {
+        let mut cg = x86();
+        cg.volatile_locals.insert("v".into(), 2);
+        cg.note_volatile_var_slots("v", -64);
+        assert!(!cg.volatile_slots_overflow);
+        assert!(cg.volatile_frames.contains(&-64));
+        assert!(cg.volatile_frames.contains(&-56));
+    }
+
     /// 缺陷 D: `patch_local_jumps` 只能把「合法外部符号」降级成一条 PC32 重定位。
     /// 编译器自己造的 `.L` 标号不进 symtab, 降级后链接期只能解析成空符号,
     /// 而 `jmp_rel32` 留下的 `0,0,0,0` 占位若不回填语义等于「跳下一条」。
@@ -2763,10 +2847,12 @@ mod tests {
         // （规则 1），下面两条等式就变成空跑的相等。
         cg.code.clear();
         cg.peep_last = None;
+        cg.block_state.reset();
         cg.mov_from_stack(0, "v");
         let read_spill = cg.code.clone();
         cg.code.clear();
         cg.peep_last = None;
+        cg.block_state.reset();
         cg.mov_to_stack(0, "v");
         let write_spill = cg.code.clone();
 
@@ -2775,10 +2861,12 @@ mod tests {
             .insert("v".to_string(), (Location::Stack(want), Type::Long));
         cg.code.clear();
         cg.peep_last = None;
+        cg.block_state.reset();
         cg.mov_from_stack(0, "v");
         let read_stack = cg.code.clone();
         cg.code.clear();
         cg.peep_last = None;
+        cg.block_state.reset();
         cg.mov_to_stack(0, "v");
         let write_stack = cg.code.clone();
         assert_eq!(read_spill, read_stack, "读路的 spill_off 与 Stack 家发的字节不一样");

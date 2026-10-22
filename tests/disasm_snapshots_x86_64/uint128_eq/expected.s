@@ -7,12 +7,12 @@ mov %rdi,-0x48(%r13)
 mov %rsi,-0x40(%r13)
 mov %rdx,-0x58(%r13)
 mov %rcx,-0x50(%r13)
-mov -0x48(%r13),%rax
-mov -0x40(%r13),%rdx
+mov %rdi,%rax
+mov %rsi,%rdx
 push %rax
 push %rdx
 mov -0x58(%r13),%rax
-mov -0x50(%r13),%rdx
+mov %rcx,%rdx
 push %rax
 push %rdx
 pop %r11

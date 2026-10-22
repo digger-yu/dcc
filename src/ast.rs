@@ -486,7 +486,7 @@ impl FloatConst {
                 // 故符号位在 bits[15] 的最高位。
                 bits[15] ^= 0x80;
                 FloatConst::Float128(bits)
-            }
+            },
         }
     }
 
@@ -1560,10 +1560,7 @@ impl Type {
     ///
     /// 复数/虚数另走 `Type::Complex` / `Type::Imaginary` 的分量路径，不在此列。
     pub fn is_real_float(&self) -> bool {
-        matches!(
-            self,
-            Type::Float | Type::Double | Type::LongDouble | Type::Float128
-        )
+        matches!(self, Type::Float | Type::Double | Type::LongDouble | Type::Float128)
     }
 
     /// 整数提升 (C11 6.3.1.1p2): 比 `int` 秩低的整数类型一律转为 `int`
@@ -1623,7 +1620,21 @@ impl Type {
         if !is_uns(lower) {
             return higher.clone();
         }
-        if rank(higher) > rank(lower) {
+        // C11 6.3.1.8p1 末两条: 无符号侧秩不低于有符号侧 ⇒ 有符号侧升到无符号侧类型
+        // (上面 `is_uns(higher)` 与同秩分支已覆盖); 有符号侧秩**严格更高**时, 只有当它
+        // 能表示无符号侧的**全部值**才停在有符号类型, 否则两侧一起升到「有符号侧对应的
+        // 无符号类型」。
+        //
+        // 旧写法只看秩 (`rank(higher) > rank(lower)`), 把「秩更高」当成了「更宽」—— LP64
+        // 上 `long long`(秩 5) 与 `unsigned long`(秩 4) 同为 64 位, `long long` 表示不了
+        // `unsigned long` 的 [2^63, 2^64) 那些值, 结果类型却留在有符号侧 ⇒ 比较编成有符号
+        // 条件码, `if ((unsigned long)x > 0xffffffffUL)` 对 x<0 静默判假 (实测 -O0/-O2 都错,
+        // gcc 给 32 dcc 给 0)。秩相同那一档本来就走「升到对应无符号类型」, 与本判据一致。
+        //
+        // 可表示性用宽度比较即足够: 标准整型里秩严格更高者的宽度只会 ≥ 秩低者, 故
+        // `size()` 严格更大 ⇔ 「能表示无符号侧全部值」; `__int128`(16) vs `unsigned long
+        // long`(8) 这类跨档因此仍停在有符号侧, 与 gcc 一致。
+        if rank(higher) > rank(lower) && higher.size() > lower.size() {
             return higher.clone();
         }
         // 同秩时: 有符号无法表示无符号的全部值, 转为对应无符号类型
@@ -1837,8 +1848,7 @@ impl Type {
                     // short s;` 的 s 落在字节 6, 而不是单元末尾字节 8)。
                     if unit_start_bit != u128::MAX {
                         let used_bytes = (unit_used + 7) / 8;
-                        let flush_bit =
-                            (unit_start_bit + u128::from(used_bytes * 8)).max(next_bit);
+                        let flush_bit = (unit_start_bit + u128::from(used_bytes * 8)).max(next_bit);
                         next_bit = (flush_bit + 7) & !7;
                         unit_start_bit = u128::MAX;
                         unit_used = 0;
@@ -2114,5 +2124,97 @@ pub fn type_has_volatile(ty: &Type) -> bool {
             inner.quals.is_volatile() || type_has_volatile(&inner.base)
         },
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Type;
+
+    /// C11 6.3.1.8「通常算术转换」的整数部分矩阵。
+    ///
+    /// 期望值**不是手推的**：每条都来自本机 gcc 13 (x86_64 LP64) 的
+    /// `_Generic((__typeof__(a OP b)){0}, …)` 实测（把 a、b 声明成各自的类型后取
+    /// `a + b` 的类型），故这张表同时是「本函数与 gcc 口径一致」的证据，而不只是
+    /// 「本函数自洽」。
+    ///
+    /// 为什么必须有这张表：[`Type::usual_arith_type`] 曾被写成「有符号侧秩严格更高就
+    /// 停在有符号类型」，把「秩更高」当成了「更宽」。LP64 上 `long long`(秩 5) 与
+    /// `unsigned long`(秩 4) 同宽，`long long` 表示不了 `unsigned long` 的高半轴 ⇒
+    /// 公共类型必须升到 `unsigned long long`；留在有符号侧意味着无符号比较拿到有符号
+    /// 条件码（`if ((unsigned long)x > 0xffffffffUL)` 对负数静默判假，实测 gcc 给 32、
+    /// dcc 给 0）。判据是「秩严格更高 **且** 更宽」，两个条件缺一不可 —— 下面既有
+    /// 「同宽必须升无符号」的样本，也有「更宽才允许停在有符号」的样本（`long` ×
+    /// `unsigned int`、`__int128` × `unsigned long long`），所以把判据改成「只看看宽度」
+    /// 或「混合符号一律无符号」都会红。
+    #[test]
+    fn usual_arith_type_matches_c11_conversion_rank_and_range() {
+        use Type::*;
+        let cases: &[(&Type, &Type, &Type)] = &[
+            // —— 同宽混合符号: 有符号侧表示不了无符号侧全部值 ⇒ 升到对应无符号类型 ——
+            (&ULong, &LongLong, &ULongLong),
+            (&LongLong, &ULong, &ULongLong),
+            (&LongLong, &ULongLong, &ULongLong),
+            (&ULongLong, &LongLong, &ULongLong),
+            (&Long, &ULong, &ULong),
+            (&ULong, &Long, &ULong),
+            (&Int, &UInt, &UInt),
+            (&UInt, &Int, &UInt),
+            // —— 有符号侧确实更宽: 能表示无符号侧全部值 ⇒ 停在有符号类型 ——
+            (&Long, &UInt, &Long),
+            (&UInt, &Long, &Long),
+            (&LongLong, &UInt, &LongLong),
+            (&Int128, &ULongLong, &Int128),
+            (&Int128, &Int, &Int128),
+            // —— 无符号侧秩不低于对方 ⇒ 无符号胜 ——
+            (&UInt128, &Int128, &UInt128),
+            (&Int128, &UInt128, &UInt128),
+            // —— 两侧同符号 ⇒ 取秩高者 (与「宽度」无关, 不得被上面的分支误伤) ——
+            (&Long, &Int, &Long),
+            (&ULongLong, &ULong, &ULongLong),
+            // —— 整数提升先行 (6.3.1.1p2): 比 int 秩低的都先变成 int ——
+            (&Short, &UShort, &Int),
+            (&UShort, &Int, &Int),
+            (&UShort, &Long, &Long),
+            (&SChar, &UChar, &Int),
+        ];
+        for (a, b, want) in cases {
+            let got = a.usual_arith_type(b);
+            assert!(
+                std::mem::discriminant(&got) == std::mem::discriminant(want),
+                "usual_arith_type({:?}, {:?}) = {:?}, gcc 实测为 {:?}",
+                a,
+                b,
+                got,
+                want
+            );
+            // 转换是对称运算: 交换实参不得改变结果。
+            let flipped = b.usual_arith_type(a);
+            assert!(
+                std::mem::discriminant(&flipped) == std::mem::discriminant(want),
+                "usual_arith_type({:?}, {:?}) 与正向不一致: {:?}",
+                b,
+                a,
+                flipped
+            );
+        }
+    }
+
+    /// 关系/相等运算的**结果类型**永远是 `int`（6.5.8），公共类型只决定比较的有符号性。
+    ///
+    /// 这条与上一条分开钉：`dispatch.rs` 的 Binop 臂要的正是「公共类型的有符号性」，
+    /// 而前端给节点标注的是「结果的类型」—— 两者被混为一谈时，`a < b` 会带着
+    /// `unsigned long long` 的类型往下走，后续赋值/截断口径跟着错。
+    #[test]
+    fn comparison_result_type_is_int_and_does_not_leak_the_common_type() {
+        use Type::*;
+        // 公共类型是无符号 (决定条件码), 但表达式类型仍是 int。
+        let common = ULong.usual_arith_type(&LongLong);
+        assert!(std::mem::discriminant(&common) == std::mem::discriminant(&ULongLong));
+        assert!(matches!(common, ULongLong));
+        // 整数提升入口本身也必须是类型, 不是「结果 int」的捷径。
+        assert!(matches!(UChar.int_promotion(), Int));
+        assert!(matches!(UShort.int_promotion(), Int));
+        assert!(matches!(ULong.int_promotion(), ULong));
     }
 }

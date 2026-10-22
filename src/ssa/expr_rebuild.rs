@@ -58,10 +58,38 @@ pub(super) fn resolve_operand(
 
 /// 整数常量的 AST 类型: 与 C++ 字面量类型推导共用 [`crate::cpp::const_text::int_literal_rank_bits`]
 /// 这一份真源 (秩 32 → `Int`, 秩 64 → 64 位整型)。
+///
+/// 这是**只能猜时的兜底** (无后缀十进制常量的量级规则): 字面量真实类型存
+/// 在 [`crate::ssa::ir::Function::const_int_tys`] 里, 优先走 [`int_const_ty_for`]。
+/// 此处额外修掉一处「谎报类型」: 旧写法对所有 ≥2^32 的值一律写 `long long`,
+/// 而 ≥2^63 的值 **根本装不下** `long long` —— 节点携带一个表示不了自己值的有符号
+/// 类型, 下游就把它当负数参与有符号比较。超出 64 位有符号范围时给能装下它的类型。
 pub(super) fn int_const_ty(v: i128) -> Type {
     match crate::cpp::const_text::int_literal_rank_bits(v) {
         32 => Type::Int,
-        _ => Type::LongLong,
+        _ if v >= i64::MIN as i128 && v <= i64::MAX as i128 => Type::LongLong,
+        _ if v > i64::MAX as i128 && v <= u64::MAX as i128 => Type::ULongLong,
+        _ => Type::Int128,
+    }
+}
+
+/// SSA 整数常量的重建类型唯一入口: 先读前端写下的**字面量类型**, 命中不了
+/// (常量由求值产生、或同值异型有歧义) 才回落到 [`int_const_ty`] 的量级阶梯。
+///
+/// 为何不能只靠阶梯: `0xffffffffUL` 与 `4294967295LL` 是同一个值, 阶梯只能给出一个
+/// 答案, 而无符号性恰恰是两者唯一有语义差别的部分 (丢它 ⇒ 无符号比较编成有符号条件码)。
+pub(super) fn int_const_ty_for(func: &Function, v: i128) -> Type {
+    func.const_int_ty(v).unwrap_or_else(|| int_const_ty(v))
+}
+
+/// 把重建出的**裸整常量**操作数的类型换成前端记下的原始类型。
+///
+/// 只对 `Expr::Int` 生效：其它形状（`Ident` / `Cast` / 嵌套 `Binop`）本身就带着
+/// 类型，它们不是被 `Operand::Int` 抹掉的那一类，不应被重写。也不改值 ——
+/// 这里修的是「这个常量在 C 里是什么类型」，而不是「它等于多少」。
+fn restore_int_operand_ty(e: &mut Expr, ty: &Type) {
+    if let Expr::Int { ty: got, .. } = e {
+        *got = ty.clone();
     }
 }
 
@@ -281,6 +309,29 @@ fn store_pointee_ty(addr: &Expr) -> Type {
     }
 }
 
+/// `*(&sym)` 的摘除（P13 阶段2 尾项，与 `inline_temps::addr_temp_folds_at_sole_memop`
+/// 配对）：地址临时值被就地内联后，`Store`/`Load` 的地址操作数正好重建为
+/// `Expr::AddrOf { e: Ident{sym} }`。这种形状下「按地址访问」与「直接访问 `sym`」
+/// 逐位等价 —— `&sym` 就是 `sym` 自己的存储位置，中间没有任何指针值参与运算，也没有
+/// 第二次访问。
+///
+/// 三道门：volatile 不折（那条通路要靠 `*(&v)` 保住访问次数）；类型不一致不折（宽度与
+/// 符号性是 store/load 指令的真源，类型双关时两者本就不是同一个对象）；形状不完全是
+/// `AddrOf{Ident}` 不折。其它一切父级（指针值算术、再套一层取址、下标基址）拿不到这次
+/// 内联，`is_addr_producer` 的原有禁令在那些方向上仍然生效。
+fn fold_direct_named_access(addr: &Expr, want_ty: &Type, volatile: bool) -> Option<Expr> {
+    if volatile {
+        return None;
+    }
+    let Expr::AddrOf { e, .. } = addr else {
+        return None;
+    };
+    match **e {
+        Expr::Ident { ty: ref idty, .. } if *idty == *want_ty => Some((**e).clone()),
+        _ => None,
+    }
+}
+
 /// `InstKind::AddrOf` 重建 `&base` 的指针类型。
 ///
 /// 旧实现恒写 `Ptr(void)`, 丢掉了「`base` 到底是什么类型」这一件信息:
@@ -335,22 +386,35 @@ fn unary_result_ty(dest_ty: Option<&Type>, op: &UnOp, inner_ty: &Type) -> Type {
 }
 
 /// 将 SSA 指令转换为 AST 表达式, 同时应用内联替换。
-/// `inst_span` 是原始 SSA 指令的 span, 用于保留源码位置信息。
-/// `dest_ty` 是该指令 `dest` 变器的 SSA 类型 —— 它是 `AddrOf` 重建 `&base` 与
-/// `Un` 重建一元结果（`-d` 必须仍是 double）这两个分支的类型**唯一真源**。
+/// `inst_dest` 是该指令的 `dest` 变器：它的**类型**是 `AddrOf` 重建 `&base` 与
+/// `Un` 重建一元结果（`-d` 必须仍是 double）这两个分支的类型**唯一真源**；它的
+/// **名字**则是 [`crate::ssa::ir::Function::cmp_operand_tys`] 的索引 —— 比较操作数被
+/// 常量传播抹成无类型 `Operand::Int` 后，只有按指令还能找回它们在 AST 里的类型。
 pub(super) fn inst_to_expr_resolved(
     kind: &InstKind,
     subst: &HashMap<String, Option<Expr>>,
     inst_span: &Span,
     func: &Function,
-    dest_ty: Option<&Type>,
+    inst_dest: Option<&SsaVar>,
 ) -> Expr {
     let sp = inst_span.clone();
+    let dest_ty: Option<&Type> = inst_dest.map(|d| &d.ty);
     let fake_env: HashMap<String, SsaVar> = HashMap::new();
     match kind {
         InstKind::Bin { op, l, r } => {
-            let l_expr = resolve_operand(l, &fake_env, subst, func);
-            let r_expr = resolve_operand(r, &fake_env, subst, func);
+            let mut l_expr = resolve_operand(l, &fake_env, subst, func);
+            let mut r_expr = resolve_operand(r, &fake_env, subst, func);
+            // 把被 SCCP/拷贝传播抹掉的字面量类型补回去（只在两个操作数都重建为
+            // 裸 `Expr::Int` 时改它的 `ty`），否则下面 `infer_binop_type` 与 codegen
+            // 只能拿量级阶梯猜出的类型去定比较的符号性。
+            if matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) {
+                if let Some(d) = inst_dest {
+                    if let Some((lt, rt)) = func.cmp_operand_ty(&d.name()) {
+                        restore_int_operand_ty(&mut l_expr, &lt);
+                        restore_int_operand_ty(&mut r_expr, &rt);
+                    }
+                }
+            }
             let binop_ty = infer_binop_type(op, &l_expr, &r_expr);
             Expr::Binop {
                 op: *op,
@@ -387,22 +451,35 @@ pub(super) fn inst_to_expr_resolved(
             span: sp.clone(),
             ty: addr_of_ty(dest_ty),
         },
-        InstKind::Load { e, ty, .. } => Expr::Deref {
-            e: Box::new(resolve_operand(e, &fake_env, subst, func)),
-            span: sp.clone(),
-            ty: ty.clone(),
-        },
-        InstKind::Store { e, src, .. } => {
+        InstKind::Load { e, ty, is_volatile } => {
             let addr = resolve_operand(e, &fake_env, subst, func);
+            match fold_direct_named_access(&addr, ty, *is_volatile) {
+                Some(v) => v,
+                None => Expr::Deref {
+                    e: Box::new(addr),
+                    span: sp.clone(),
+                    ty: ty.clone(),
+                },
+            }
+        },
+        InstKind::Store { e, src, is_volatile } => {
+            let addr = resolve_operand(e, &fake_env, subst, func);
+            let val = resolve_operand(src, &fake_env, subst, func);
             let dty = store_pointee_ty(&addr);
-            Expr::Assign {
-                op: BinOp::Add,
-                l: Box::new(Expr::Deref {
+            // 折叠后的 `l` 自带类型（与 `store_pointee_ty` 同源：两者都取自本条
+            // 指令 `dest` 声明的 `Ptr(对象类型)`），宽度不会倒退。
+            let lhs = match fold_direct_named_access(&addr, &dty, *is_volatile) {
+                Some(v) => Box::new(v),
+                None => Box::new(Expr::Deref {
                     e: Box::new(addr),
                     span: sp.clone(),
                     ty: dty,
                 }),
-                r: Box::new(resolve_operand(src, &fake_env, subst, func)),
+            };
+            Expr::Assign {
+                op: BinOp::Add,
+                l: lhs,
+                r: Box::new(val),
                 span: sp.clone(),
                 ty: Type::Void,
             }
@@ -790,10 +867,9 @@ fn operand_to_expr(o: &Operand, env: &HashMap<String, SsaVar>, func: &Function) 
             // ① 立即数按 32 位物化, `10306098990L / 100L` 的高位被截成 1716164398;
             // ② `infer_binop_type` 从操作数类型推常见算术转换, 整个运算也跟着降格
             //    成 32 位记账 (与下面 `infer_binop_type` 的根因说明同一轴)。
-            // 类型取「能表示该值的最小秩」(= C++ [lex.icon] 无符号后缀十进制字面量
-            // 的量级规则): 32 位可表示时仍是 `Int`, 现有代码路径零变化; 只有原本就
-            // 被截断的宽常量才升秩。
-            ty: int_const_ty(*v),
+            // 类型先读 [`crate::ssa::ir::Function::const_int_tys`] (前端写下的字面量
+            // 类型, 含后缀带来的无符号性), 读不到才按「能表示该值的最小秩」估。
+            ty: int_const_ty_for(func, *v),
         },
         Operand::Float(c, ty) => Expr::Float {
             c: *c,

@@ -63,6 +63,40 @@
 //       前缀（F2/F3）**之后**，前缀之后 REX 才紧邻操作码；反着发时 REX 作废、基址从 %r8
 //       退化回 %rax，实测 `return r + (int)l.d;` 逐档段错误。
 //
+//   11. -O3 的循环分段（P10 strip mining, `src/loop_opt.rs`）不得重排循环体内**可观察
+//       副作用的执行顺序**。旧形态是 ts×ts 的 blocking（`ti/tj/i/j` 四层）：它与原循环
+//       「逐点同集合同重数」但按块重排，而本仓没有依赖分析（PDO）⇒ 体内有 printf 时就是
+//       静默误编译（实测 -O3 与 gcc 打印的数字集合相同、顺序不同）。同一 pass 还有一条
+//       `break` 闸门：分段把内层拆成「块计数器 + 子循环」两层，体内未被屏蔽的 `break`
+//       因此多跑迭代（实测去掉闸门后 12 变 18）。
+//
+//   12. 混合符号整型比较的**公共类型**必须按 C11 6.3.1.8 判「有符号侧能否表示无符号侧
+//      全部值」。`Type::usual_arith_type` 曾只看秩，于是 LP64 上同为 64 位的
+//      `unsigned long` × `long long` 停在有符号侧；而 `dispatch.rs` 的 Binop 臂当时**另抄
+//      了一份**只看秩的秩表，所以两处得一起改回单一真源。这条与档位无关（-O0 就错），
+//      拿 -O0 当基准的跨档对拍看不见它，只有与 gcc 对拍能看见 —— 见夹具。
+//
+//   13. SSA 的整型常量是**无类型**的（`Operand::Int(i128)`），重建时按量级阶梯猜类型 ⇒
+//      `0xffffffffUL` 被猜成 `long long`，字面量后缀的无符号性在半路丢失。实测形态是
+//      把值先存进变量再比较（SCCP 把两侧都折成常量后只剩 `Operand::Int`），只有跑完
+//      SSA 通道的档位会错。现在 build 期把前端写下的字面量类型记进
+//      `Function::const_int_tys`，重建优先读它（歧义才回落阶梯）。
+//
+//   14. 常量折叠器 `const_eval::cmp_binop_values` 曾自拍一套符号性判据：「任一操作数自身
+//      无符号 ⇒ 按无符号比较」（应是**公共类型**），且它写的 `f(a as u128 as i128, ...)`
+//      在 Rust 里是**往返恒等**（负数原样带回），「重解释为无符号」完全没生效 ⇒
+//      `-1 > 0xffffffffUL` 被折成 0（gcc 给 1）。折叠在 **-O0 也会跑**（`function_inline`
+//      排在 `level == 0` 提前返回之前，`inline_expr` 末尾无条件调 `fold_expr`），
+//      故这条四档全错。两个错向必须同修：只看「任一侧无符号」会把 `-1L > 1U`
+//      （公共类型 `long`，应 0）判成无符号，旧写法只是被往返恒等恰好抵消。
+//
+//   15. 「按值」记账盖不住小常量：`1` 既是 `int` 也是 `unsigned int` ⇒ 歧义 ⇒ 回落阶梯
+//      ⇒ `int`。于是 `int x=-1; unsigned int y=1; return x>y;` 被 SCCP 把**带类型的**
+//      `Var(y.1: UInt)` 换成**无类型的** `Int(1)` 后，重建只能猜回 `int` ⇒ 有符号条件码
+//      （实测 -O2/-O3 得 0，应 1；`DCC_SSA_OFF=sccp` 时 IR 仍保留两个带类型 Var，就正确）。
+//      现在比较指令的两个操作数类型在 build 期按 `dest` 名记进 `Function::cmp_operand_tys`，
+//      重建时用它给「裸 `Expr::Int` 操作数」补回类型。
+//
 // 全部通过 `run_gcc_cross_check_opt` 运行：带 `-O` 档位、带超时、与 gcc 逐字节对照。
 // 共用的逐档对照助手 `assert_all_levels_match_gcc`、汇编归一助手 `asm_body` 与
 // 开关对照助手 `dcc_asm_with_pipe` 都住在 `tests/common/harness.rs`。
@@ -1220,5 +1254,504 @@ fn specex_base_name_cross_matches_gcc_at_all_levels() {
         "specex-base-name-cross",
         include_str!("../fixtures/opt/specex_base_name_cross.c"),
         "投机上提跨过对同一基名的读写：塌缩后读到另一版本的值（varint 解码错）",
+    );
+}
+
+/// -O3 循环分段不得重排体内可观察副作用的顺序，也不得让未被屏蔽的 `break` 多跑迭代。
+///
+/// 见文件头第 11 条。两条顺序敏感探针都在夹具里：逐条 printf（输出字节序就是 (i,k) 序列）
+/// 与十进制进位累加（把整段顺序压进一个整数，打进 stdout）。
+#[test]
+fn tile_strip_order_break_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "tile-strip-order-break",
+        include_str!("../fixtures/opt/tile_strip_order_break.c"),
+        "-O3 分块按块重排迭代顺序 / 未被屏蔽的 break 在分段后多跑迭代",
+    );
+}
+
+/// 混合符号整型比较的公共类型（C11 6.3.1.8 的可表示性判据）、常量折叠器的符号性判据、
+/// SSA 常量类型还原（宽字面量与传播后的小常量）。
+///
+/// 见文件头第 12—15 条，四个站点：① `usual_arith_type` 缺可表示性判据（**-O0 就错**，
+/// 拿 -O0 当基准的跨档对拍看不见它）；② SSA 常量无类型、重建按量级阶梯猜（只在 -O2/-O3
+/// 错）；③ `cmp_binop_values` 自拍判据 + `as u128 as i128` 往返恒等（四档全错）；
+/// ④ 小常量歧义 ⇒ 必须按指令 `dest` 名记操作数类型（-O2/-O3 错）。四个方向都由本夹具
+/// 钉住，所以它必须同时与 gcc 对拍且逐档跑。
+#[test]
+fn mixed_signedness_usual_arith_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "mixed-signedness-usual-arith",
+        include_str!("../fixtures/opt/mixed_signedness_usual_arith.c"),
+        "usual_arith_type 缺可表示性判据 / SSA 常量重建丢字面量无符号性 / 折叠器符号性判据 / 传播后小常量歧义",
+    );
+}
+
+/// P13 阶段3（条件直生分支）的产物级对拍。快照用例只能钉「发了哪条 `jcc`」的形状，
+/// 钉不了极性：条件码取反写错（`inverse()` 漂移）或令牌泄到「值还要用」的嵌套比较上
+/// 时，形状仍然是合法的，只有运行结果会错。本夹具逐条 `chk`，退出码 = 判错条数，
+/// 四档都得与 gcc 一致。
+#[test]
+fn direct_cond_branch_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "direct-cond-branch",
+        include_str!("../fixtures/opt/direct_cond_branch.c"),
+        "条件直生分支的条件码/极性/消费式令牌不得泄给嵌套比较/白名单外仍材料化",
+    );
+}
+
+/// 浮点条件必须测**浮点值本身**（`xmm0`），而不是上上次求值留在 `rax` 的残留。
+/// HEAD 与 gcc 一致纯属巧合（整数比较恰好把 0/1 留在了 rax）；条件直生分支拿掉
+/// `setcc+movzx` 后那个残留不再是 0，`gcc.dg/tree-ssa/scev-2.c` 当场 abort。本夹具
+/// 把五种条件语境（if/while/for/do-while/三元）× 零/非零/负值/运行时 NaN 全部钉住，
+/// 并且要求逐档与 gcc 一致（NaN 必须判真 ⇒ 必须复用带 PF 项的浮点比较）。
+#[test]
+fn float_truth_condition_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "float-truth-condition",
+        include_str!("../fixtures/opt/float_truth_condition.c"),
+        "emit_truth_flags 的 SSE 浮点臂缺失（浮点条件读陈旧 rax）",
+    );
+}
+
+/// 标量写直生（P13 阶段2）的行为对拍：白名单那条臂把地址直接算进 `rcx`、
+/// 右值算进 `rax`，取消了「押栈到帧里再 pop 回来」；名单外（Binop/Unary/Call/下标取址
+/// 右值、复合赋值、浮点与 16 字节值通道、聚合拷贝、位域 RMW）必须照原样。
+#[test]
+fn scalar_store_direct_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "scalar-store-direct",
+        include_str!("../fixtures/opt/scalar_store_direct.c"),
+        "赋值白名单误收/误排就会在某一档上错值或错宽度",
+    );
+}
+
+/// P13 阶段2 尾项：地址临时值的**唯一**豁免窗口（`inline_temps::addr_temp_folds_at_sole_memop`
+/// + `expr_rebuild::fold_direct_named_access`）。折叠把 `*(&sym) = v` 还原成对 `sym` 的直接写，
+/// 于是那条 `lea` 与它的落槽写一起消失；夹具的每一段都在钉一条判据的**反面**：
+/// volatile、指针算术、再套一层取址、地址进 call、同一地址用两次、定义与使用不紧邻、
+/// 取址逃逸后「直接写/经指针写」交替、循环里每轮重新取址。
+#[test]
+fn addr_temp_fold_direct_access_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "addr-temp-fold-direct-access",
+        include_str!("../fixtures/opt/addr_temp_fold_direct_access.c"),
+        "豁免窗口放宽成「通用地址内联」就会在指针算术/volatile/逃逸段静默错值",
+    );
+}
+
+/// P13 阶段5：-O2 的成本模型必须能把**带控制流**的单点 `static` 助手展开到调用点。
+///
+/// 判据取产物级面：展开后不应再存在向该函数的 `call`（展开前必然有一个）。
+/// 为什么盯「单点」：多调用点的函数复制多份会把 I-cache 代价换成 call 收益（实测
+/// Lua fib 统一阈值时反而慢 2.5%），单点展开不复制代码，是纯收益的那一半。
+#[test]
+fn o2_static_inline_cost_model_inlines_small_helper() {
+    use std::fs;
+    use std::process::Command;
+    let src = "\nstruct S { int a; int b; };\n\
+               static int helper(struct S *p, int x) {\n\
+                   int n = 0;\n\
+                   if (x > 0) { p->a = x; n = 1; } else { p->b = -x; n = 2; }\n\
+                   while (n > 0) { n--; }\n\
+                   return p->a + p->b;\n\
+               }\n\
+               int entry(int x) { struct S s; s.a = 0; s.b = 0; return helper(&s, x); }\n";
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let src_path = dir.join(format!("dcc-static-inline-{pid}.c"));
+    let asm_path = dir.join(format!("dcc-static-inline-{pid}.s"));
+    fs::write(&src_path, src).expect("write");
+    for level in ["-O2", "-O3"] {
+        let _ = fs::remove_file(&asm_path);
+        let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args([level, "-S", "-o"])
+            .arg(&asm_path)
+            .arg(&src_path)
+            .output()
+            .expect("run dcc");
+        assert!(out.status.success(), "{level} stderr: {}", String::from_utf8_lossy(&out.stderr));
+        let text = fs::read_to_string(&asm_path).expect("read asm");
+        let calls = text
+            .lines()
+            .filter(|l| l.trim_start().starts_with("call"))
+            .filter(|l| l.contains("helper"))
+            .count();
+        assert_eq!(
+            calls, 0,
+            "{level}: 单点 static 助手应当被展开，但仍留下了对 helper 的 call：\n{text}"
+        );
+    }
+    let _ = fs::remove_file(src_path);
+    let _ = fs::remove_file(asm_path);
+}
+
+// ============================================================================
+// P13 发射形态判据（§7 清单的落地，逐条对照见方案 §13.9）
+//
+// 这一组问的不是「算对没有」（那是上面那些 `_matches_gcc_at_all_levels` 的事），而是
+// 「发射层最后发的到底是哪条指令」—— 形状退化了运行结果依然是草的对的，所以只能看产物。
+// 判据一律取两头：要么定一个必须出现的形态，要么定一个必须不出现的形态；
+// 只定「出现」的话，「多发了一条死指令」这整类回归都看不见。
+// ============================================================================
+
+/// P13 阶段1/2（§3.1/§3.2）：标量常量写不得再走「押栈躲 rax 复用」那条路。
+///
+/// 旧形态是 7 条：`lea` 取址 + 落槽写 + `push %rax` + 右值 + `movsxd` + `pop %rcx` +
+/// `mov %eax,(%rcx)`（gcc 是 1 条 `movl $1,g(%rip)`）。修完应当是「右值进 rax，
+/// 直接 RIP 相对直写」。判据取两头：① 存储确实是 RIP 相对直写；② 除帧指针外零 push/pop。
+#[test]
+fn o2_scalar_store_of_constant_emits_no_frame_round_trip() {
+    let body = harness::dcc_fn_body_at(
+        "p13-store-const",
+        "int g;\nvoid store_const(void) { g = 1; }\n",
+        "-O2",
+        "store_const",
+    );
+    assert!(
+        body.contains("g(%rip)"),
+        "-O2: 常量写没有落到 RIP 相对直写上（§3.1 的地址临时值形态又回来了）：\n{body}"
+    );
+    // 非空性：帧指针本身仍然发 `push %r13`/`pop %r13`，所以下面那个 0 是「除了帧指针
+    // 没有别的 push/pop」，不是「解析器一条 push 都没看到」。
+    assert!(
+        harness::count_mnemonic(&body, "push") >= 1,
+        "-O2: 函数体里连帧指针的 push 都没看到，判据失效：\n{body}"
+    );
+    assert_eq!(
+        harness::non_frame_push_pop(&body),
+        0,
+        "-O2: 常量写又回到「押栈躲 rax 复用」的老形态：\n{body}"
+    );
+}
+
+/// P13 阶段2：右值已经落在寄存器里、且不会被后续求值覆盖时，赋值臂不得再 push/pop。
+///
+/// 与上一条的区别是右值是**变量**而不是常量：旧的 push/pop 是为了把「地址」藏到帧里
+/// 躲 ax 复用；`store_rhs_isolated` 的判据是「右值只读一个已在寄存器/帧槽的值」
+/// ⇒ 地址直接进 rcx，不必押栈。
+#[test]
+fn o2_assign_with_isolated_rhs_skips_push_pop() {
+    let body = harness::dcc_fn_body_at(
+        "p13-store-val",
+        "int g;\nvoid store_val(int v) { g = v; }\n",
+        "-O2",
+        "store_val",
+    );
+    assert!(body.contains("g(%rip)"), "-O2: 存储不是 RIP 相对直写：\n{body}");
+    assert_eq!(
+        harness::non_frame_push_pop(&body),
+        0,
+        "-O2: 隔离右值的赋值仍在押栈：\n{body}"
+    );
+}
+
+/// P13 阶段3：整型比较作为 `if` 的条件时必须直生 `cmp; jcc`，不得先材料化 `setcc`。
+///
+/// 旧形态 5 条（`cmp; setcc; movzx; test; jcc`，依赖深度 5），gcc 是 2 条。
+/// 判据取两头：有且至少一条条件跳转，且整函数零 `setcc`。
+#[test]
+fn o2_int_compare_in_if_emits_jcc_without_setcc() {
+    let body = harness::dcc_fn_body_at(
+        "p13-cmp-int",
+        "int f(int a, int b) { if (a < b) return 1; return 0; }\n",
+        "-O2",
+        "f",
+    );
+    assert!(
+        harness::count_cond_jump(&body) >= 1,
+        "-O2: 整型条件没有直生条件跳转：\n{body}"
+    );
+    assert_eq!(
+        harness::count_mnemonic_prefix(&body, "set"),
+        0,
+        "-O2: 条件被消费的语境仍发了 setcc（回到 5 条形态）：\n{body}"
+    );
+}
+
+/// P13 阶段3：无符号比较必须选无符号条件码（`jae`/`jb`），而不是先 `setae` 再测。
+///
+/// 极性写错时形状依旧合法，只有运行结果会错（`mixed_signedness_usual_arith` 与
+/// `direct_cond_branch` 两个夹具从执行侧钉这件事）；本条只钉「发射层选的是哪一侧」。
+#[test]
+fn o2_unsigned_compare_in_if_uses_jae_not_setae() {
+    let body = harness::dcc_fn_body_at(
+        "p13-cmp-uns",
+        "int f(unsigned a, unsigned b) { if (a < b) return 1; return 0; }\n",
+        "-O2",
+        "f",
+    );
+    assert!(
+        body.lines()
+            .any(|l| l.trim_start().starts_with("jae ") || l.trim_start().starts_with("jnb ")),
+        "-O2: 无符号 `<` 的直生分支没有用 jae/jnb（无符号侧条件码选错了）：\n{body}"
+    );
+    assert!(!body.contains("setae"), "-O2: 仍先 setae 再测：\n{body}");
+}
+
+/// 窄类型（`signed char`）比较：条件被消费时直生，值要用时仍必须材料化。
+///
+/// 计划里这条原名 `o2_narrow_char_compare_still_materializes_bool`，假设窄类型比较会
+/// 落在直生白名单之外；实测（本用例首跑）它属于白名单内（操作数先 `movsbq` 提升到
+/// 32 位再比），所以断言改成正反两面：
+/// ① `if (a == b)` —— 零 `setcc`、有 `jcc`；② `return a == b;` —— 必须有 `setcc`。
+/// 「材料化」这个要求本身没变，只是它只对「值要用」那一侧成立。
+#[test]
+fn o2_narrow_char_compare_branches_directly_but_materializes_when_value_used() {
+    let src = "int narrow_if(signed char a, signed char b) { if (a == b) return 1; return 0; }\n\
+               int narrow_bool(signed char a, signed char b) { return a == b; }\n";
+    let branch = harness::dcc_fn_body_at("p13-narrow-if", src, "-O2", "narrow_if");
+    assert_eq!(
+        harness::count_mnemonic_prefix(&branch, "set"),
+        0,
+        "-O2: 窄类型比较作为条件时仍发了 setcc：\n{branch}"
+    );
+    assert!(harness::count_cond_jump(&branch) >= 1, "-O2: 窄类型条件没有直生分支：\n{branch}");
+
+    let value = harness::dcc_fn_body_at("p13-narrow-bool", src, "-O2", "narrow_bool");
+    assert!(
+        harness::count_mnemonic_prefix(&value, "set") >= 1,
+        "-O2: 比较结果被当作值返回时没有材料化成 0/1：\n{value}"
+    );
+}
+
+/// P13 阶段3（三元）：`c ? a : b` 的条件也不得出落点材料化，只改「条件码怎么被消费」。
+#[test]
+fn o2_ternary_condition_emits_jcc_for_int_compare() {
+    let body = harness::dcc_fn_body_at(
+        "p13-ternary",
+        "int f(int a, int b) { return a < b ? 10 : 20; }\n",
+        "-O2",
+        "f",
+    );
+    assert!(
+        harness::count_cond_jump(&body) >= 1,
+        "-O2: 三元条件没有直生条件跳转：\n{body}"
+    );
+    assert_eq!(
+        harness::count_mnemonic_prefix(&body, "set"),
+        0,
+        "-O2: 三元条件仍先材料化：\n{body}"
+    );
+}
+
+/// 浮点比较的白名单反面：必须**继续材料化**，且必须保住带 PF 项的双条件。
+///
+/// 浮点条件不能直生的理由与整数不同：`a < b` 在 NaN 下为假，单看 CF（`setb`）会把
+/// 「无序」误判成真，所以形态只能是 `ucomisd; setb; setnp; and`（或等价的双跳转）。
+/// 这里钉的是 HEAD 的形态仍然在，避免「为了减一条 setcc 而把 PF 页丢了」这类回归
+/// —— `gcc.dg/tree-ssa/scev-2.c` 当年就是被这条读陈旧 rax 打红的。
+#[test]
+fn float_compare_in_if_still_materializes_bool() {
+    let body = harness::dcc_fn_body_at(
+        "p13-cmp-double",
+        "int f(double a, double b) { if (a < b) return 1; return 0; }\n",
+        "-O2",
+        "f",
+    );
+    assert!(
+        body.contains("ucomisd") || body.contains("comisd"),
+        "-O2: 浮点比较没有走 SSE 比较：\n{body}"
+    );
+    assert!(
+        harness::count_mnemonic(&body, "setb") >= 1,
+        "-O2: 浮点 `<` 不再材料化 CF：\n{body}"
+    );
+    assert!(
+        harness::count_mnemonic(&body, "setnp") >= 1,
+        "-O2: 浮点比较丢了 PF（setnp）—— NaN 会被判成 `a < b` 为真：\n{body}"
+    );
+    assert!(
+        body.contains("testl"),
+        "-O2: 材料化后的 0/1 不再被 test 消费：\n{body}"
+    );
+}
+
+/// 位域比较的白名单反面：位域没有自己的地址，先把容器取出再 `and` 掩码，所以它的
+/// 「条件」在发射层看起来与普通整型比较同形 —— 但它必须**继续**走材料化。
+///
+/// 为什么不能直生：位域读取有额外的掩码/符号扩展步骤与「容器宽度」语义，直生分支
+/// 要复用的中间值比整数比较多一个；§9.2 那条位域 RMW 错值就出在同一层。
+#[test]
+fn bitfield_compare_in_if_still_materializes_bool() {
+    let body = harness::dcc_fn_body_at(
+        "p13-cmp-bitfield",
+        "struct B { unsigned f : 3; unsigned pad : 29; };\n\
+         int f(struct B *p) { if (p->f == 5) return 1; return 0; }\n",
+        "-O2",
+        "f",
+    );
+    assert!(
+        harness::count_mnemonic_prefix(&body, "set") >= 1,
+        "-O2: 位域比较不再材料化（形状变了就要重跑 §9.2 的夹具）：\n{body}"
+    );
+    assert!(
+        body.contains("testl"),
+        "-O2: 位域比较的材料化值没被 test 消费：\n{body}"
+    );
+}
+
+/// §2.2 的负结果防线：「落点是下一条指令」的 `jmp` 目前**必须保留**。
+///
+/// 那次按原判据删掉 135 条恒定跳转（静态 −675 字节），同机交替 best-of-9 实测
+/// min 310.9→322.6ms、p50 319.3→326.4ms（慢 3.8%）：5 字节×135 的位置移动把热循环体
+/// 推离了原有对齐，布局代价盖过省下一条跳转。计划里那条 `jmp_to_next_is_elided_at_emit_time`
+/// 因此按「前提已不存在」换成这条反向防线 —— 要翻它，必须先把对齐作为控制变量的 A/B 补上。
+#[test]
+fn jmp_to_next_is_still_emitted_after_layout_negative_result() {
+    let body = harness::dcc_fn_body_at(
+        "p13-jmp-to-next",
+        "int f(int x) { int r = 0; if (x) r = 1; return r; }\n",
+        "-O2",
+        "f",
+    );
+    assert!(
+        harness::count_jmp_to_next(&body) >= 1,
+        "-O2: 恒定跳转被删了 —— §2.2 已实测同形改动慢 3.8%，翻这条必须先补对齐 A/B：\n{body}"
+    );
+}
+
+/// 链式赋值的**每一个**全局标量写都必须落地（发射层窥孔的占位寻址判据）。
+///
+/// `d = b = 1;` 脱糖成两条相邻的 `mov %eax,<符号>(%rip)`。RIP 相对的 disp32 在指令字节里
+/// 就是 `00 00 00 00` 占位，真实偏移靠链接器按符号补丁填 ⇒ 这两条**字节完全相同**，
+/// 「相邻两条同字节幂等搬运 ⇒ 第二条不发」把外层那次写整条削掉。
+///
+/// 为什么只靠产物看不住：符号补丁是调用点在 `emit_insn` **返回之后**按 disp32 位置
+/// 自行登记的（`mem/access.rs` 里 `lea r11, sym(%rip)` 紧接 `pending_data_rels.push` 那一
+/// 型），而 `emit_insn` 的 `true` 说的是「编码器覆盖了该形态」，不是「字节已落地」。
+/// 于是补丁记录留在台账上，链接器把那 4 字节写进**下一条指令的 ModRM 字段**
+/// （实测 `movslq 0x0(%rip),%rax` 被改成 `movslq 0x2095(%rdx),%rsi`，基寄存器从未初始化）。
+/// 症状是间歇的：.text 字节完全确定（连编三次哈希一致），跑不跑得起取决于进程启动时
+/// `%rdx` 的残值（同一 exe 跑 30 次：12 通过 / 18 段错误）—— 所以只有逐档执行对照能
+/// 稳定接住它，反汇编快照那类「只看文本」的用例反而会把它当正常形态录进去。
+#[test]
+fn chain_assign_global_store_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "chain-assign-global-store",
+        include_str!("../fixtures/opt/chain_assign_global_store.c"),
+        "窥孔把带 %rip 占位的第二条同字节搬运当冗余削掉，链接期补丁写进下一条指令的 ModRM 字节",
+    );
+}
+
+/// 分支语境的 `A || B` 必须保持短路顺序（`jump_if_true == false` 那条分解臂）。
+///
+/// 原注释断言「`!(l && r)` 与 `!(l || r)` 都等价于任一侧为假就跳」，这是错的：
+/// `!(l || r)` 是「两侧都假才跳」，左真时**不能**跳，必须落到右操作数。照 `&&` 的拆法
+/// 编 `if (a || f())` 会把短路整条反向（左假提前跳出、左真反而求值右值）。
+///
+/// `short-circuit-rhs-impure` 从 SSA 闸门侧接住了它（那里的右值带 load，急切求值会打空），
+/// 本夹具从**分支语境**直接接住：左真时右值的 store 不许发生、左假时右值必须发生，
+/// 并顺带钉住 `a || (b && c)` 的递归分解与 `while (a || b)` 的反向臂。
+/// main 里的判断一律只用单侧比较与 `&&` —— 被测的正是 `||`，再拿 `||` 判结果会连
+/// 「报错」这一步一起错掉（自举盲区）。
+#[test]
+fn lor_branch_order_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "lor-branch-order",
+        include_str!("../fixtures/opt/lor_branch_order.c"),
+        "`||` 在假则跳出语境被按 `&&` 拆，短路整条反向",
+    );
+}
+
+/// `__int128` 在真值语境必须按两半判（`emit_truth_flags` 的兜底形态）。
+///
+/// 本后端 16 字节整型的 rvalue 是 `(rax, rdx)` 一对，而那条兜底过去只按 `ty.size() > 4`
+/// 选 `test %rax,%rax` ⇒ 「低 64 位为 0、高 64 位非 0」被判成假。漏点只在条件被分解成
+/// 「测值」的三条入口上（`x != 0` / `!x` / `x || y`），比较运算本身走 `gen_int128_binop`
+/// 两半都比，所以错值不会在大多数语料里现形。
+///
+/// 为什么必须单独建夹具：反汇编快照 `pr105613` 早就现过形（`r[0] != 0` 被编成一条
+/// `test %rax,%rax`），可那个语料只取 lo!=0 与全 0 两种数据，**恰好不含 hi-only**，
+/// 于是它长期只在快照文本里可见、执行侧永远绿。快照与语料数据的组合盲区不是运气，
+/// 要靠专门取 hi-only 数据的执行级用例补上。
+#[test]
+fn int128_truth_condition_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "int128-truth-condition",
+        include_str!("../fixtures/opt/int128_truth_condition.c"),
+        "128 位真值判据只测低半：hi!=0 且 lo==0 被误判为 0",
+    );
+}
+
+/// 阶段2 白名单的第一条正面：右值是**整型常量表达式**时，标量写不得押栈。
+///
+/// 这条判据与 `dispatch.rs` 里 `Expr::Binop` 臂的常量折叠**逐字同源**（见
+/// `binop_const_foldable`）：折成功就只剩一条 `mov imm`，只写 `rax`，地址一条
+/// `mov rcx, rax` 就到位。lvm.c 里 `settt_()` 展开的 `(3|(0<<4))` 这一类就是这个形状，
+/// 它们本来在发射层就会折，只是 AST 层的形态判据把它们挡在名单外、白白押栈。
+///
+/// 左值特意取 `*q`（q 是**全局指针**）：这条地址链描述不成 `LateAddr`（重算就要重新读
+/// 全局里那个指针值，而右值可能改写它），所以「零押栈」只能由 `InRcx` 给出 —— 摘掉
+/// `binop_const_foldable` 就会退到下面那条反向对照的形态，本用例立即变红。
+#[test]
+fn o2_const_expr_rhs_store_skips_push_pop() {
+    let body = harness::dcc_fn_body_at(
+        "p13-const-expr-rhs",
+        "int *q;\nvoid store(void) { *q = (3 | (0 << 4)); }\n",
+        "-O2",
+        "store",
+    );
+    assert!(
+        body.contains("%rip"),
+        "-O2: 全局指针取址没有走 RIP 相对（判据源换了形）：\n{body}"
+    );
+    // 非空性：帧指针本身仍发 `push %r13`，所以下面那个 0 是「除了帧指针没有别的
+    // 押栈」，不是「解析器一条 push 都没看到」（同 §7 那条常量写用例的同一道锚）。
+    assert!(
+        harness::count_mnemonic(&body, "push") >= 1,
+        "-O2: 函数体里连帧指针的 push 都没看到，判据失效：\n{body}"
+    );
+    assert_eq!(
+        harness::non_frame_push_pop(&body),
+        0,
+        "-O2: 常量表达式右值的标量写又回到「押地址躲 rax 复用」：\n{body}"
+    );
+}
+
+/// 阶段2 追加（Late）：地址链可重算、右值只踩 rcx/rdx 而不会改地址时，标量写不得押栈。
+///
+/// 依的是 C11 6.5.16「赋值两个操作数求值无序」：先算右值，随后一条 `lea`/`mov` 重算
+/// 同一个地址。这里 `p->n = p->n + 1` 的右值**不会**进 `InRcx` 名单（`scalar_load_shape`
+/// 对 `Binop` 只收 `binop_const_foldable`，而含 `p->n` 的加法折不动），也不该押栈 ——
+/// luaV_execute 的主力形态 `L->top = L->top + 1` 正好在这一条上。`Index` 与带 VLA 的
+/// 成员偏移仍在名单外（下标要算进 rcx，重算等于重复求值下标）。
+#[test]
+fn o2_late_addr_recompute_skips_push_pop() {
+    let body = harness::dcc_fn_body_at(
+        "p13-late-addr",
+        "struct S { int n; int m; };\nvoid bump(struct S *p) { p->n = p->n + 1; }\n",
+        "-O2",
+        "bump",
+    );
+    // 非空性：同上，没有这道锚则「zero」本身可能就是解析没看到的产物。
+    assert!(
+        harness::count_mnemonic(&body, "push") >= 1,
+        "-O2: 函数体里连帧指针的 push 都没看到，判据失效：\n{body}"
+    );
+    assert_eq!(
+        harness::non_frame_push_pop(&body),
+        0,
+        "-O2: 可重算地址的标量写仍在押栈（Late 那条路没接上）：\n{body}"
+    );
+}
+
+/// 两条白名单的反面：地址链不可重算 **且** 右值可能改写它时，必须**保留**押栈。
+///
+/// 判据类用例只钉一面：只写「命中时不押栈」的话，有人把保守门拆掉（比如允许 `Index`
+/// 重算、或对 call 右值也放行 Late）会静默做错值，而产物上反而更「优」。本条把
+/// `*q = f()` 钉在押栈形态上：基址是全局指针的**值**（重算要再读一次），右值是 call
+/// （认不得的形态一律当会改写那个名字）—— 两道门任意一道失守，本条立即变红。
+#[test]
+fn o2_unrecompute_addr_with_call_rhs_still_pushes() {
+    let body = harness::dcc_fn_body_at(
+        "p13-push-keep",
+        "int *q;\nextern int f(void);\nvoid store(void) { *q = f(); }\n",
+        "-O2",
+        "store",
+    );
+    assert!(
+        harness::non_frame_push_pop(&body) >= 2,
+        "-O2: 不可重算地址 + call 右值的标量写被当成可以省押栈（两道保守门失守）：\n{body}"
     );
 }

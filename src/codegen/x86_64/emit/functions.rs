@@ -330,6 +330,13 @@ impl Codegen {
         // 窥孔的「上一条」同样不得跨函数：上一个函数的尾指令和本函数首指令
         // 之间隔着序言/栈帧建立，不存在任何相邻关系。
         self.peep_last = None;
+        // 块内等价事实同理：上一函数末的基本块与函数边界隔开了。volatile 登记表是
+        // 本帧坐标/本帧声明，泄漏到下一个函数会把别人的槽当成屏障（少削一条）或把
+        // 真 volatile 槽漏掉（静默错值）—— 后者才是必须逐函数清空的原因。
+        self.block_state.reset();
+        self.volatile_frames.clear();
+        self.volatile_locals.clear();
+        self.volatile_slots_overflow = false;
         // 前置二/三的两个函数级事实同样不得活过一个函数：覆盖表泄漏会把下一个函数的
         // 变量钉在错误的内存位置上；保存槽表则是本帧坐标，跳帧用它们是直接错值。
         self.home_overrides.clear();
@@ -1001,9 +1008,14 @@ impl Codegen {
             // callee_saved_used 未知), 记录补丁点; 函数体生成完毕后,
             // 未使用的寄存器指令由 patch_callee_saves 改写为 nop.
             // mov [r13 - 16], rbx  (REX.WB: r13 needs REX.B)
-            self.callee_save_patch_sites.push((self.pos(), 0x01));
-            self.emit_insn(
-                &Insn::mov_rm_mem(
+            // 补丁点只在**真发了字节**时登记：`emit_insn` 可能因块内等价事实而整条
+            // 不发（P13 阶段6），而 `patch_callee_saves` 是按「起点 + 4 字节」写 nop 的，
+            // 一条没发的指令留下一个陈旧起点就会把后面 4 字节（可能是 `mov %r13,%rsp`
+            // 的前半）涂成 nop —— 实测症状是尾声只剩 `pop %rbp; ret`，SIGSEGV。
+            Self::emit_callee_save_site(
+                self,
+                0x01,
+                Insn::mov_rm_mem(
                     false,
                     crate::codegen::shared::asm_operand::Width::B64,
                     3,
@@ -1013,9 +1025,10 @@ impl Codegen {
                 .with_gas("mov %rbx, -16(%r13)".to_string()),
             );
             // mov [r13 - 24], r12  (REX.WRB: r12 needs REX.R, r13 needs REX.B)
-            self.callee_save_patch_sites.push((self.pos(), 0x02));
-            self.emit_insn(
-                &Insn::mov_rm_mem(
+            Self::emit_callee_save_site(
+                self,
+                0x02,
+                Insn::mov_rm_mem(
                     false,
                     crate::codegen::shared::asm_operand::Width::B64,
                     12,
@@ -1025,9 +1038,10 @@ impl Codegen {
                 .with_gas("mov %r12, -24(%r13)".to_string()),
             );
             // mov [r13 - 32], r14  (REX.WRB: r14 needs REX.R, r13 needs REX.B)
-            self.callee_save_patch_sites.push((self.pos(), 0x04));
-            self.emit_insn(
-                &Insn::mov_rm_mem(
+            Self::emit_callee_save_site(
+                self,
+                0x04,
+                Insn::mov_rm_mem(
                     false,
                     crate::codegen::shared::asm_operand::Width::B64,
                     14,
@@ -1040,9 +1054,10 @@ impl Codegen {
             // 这里的 modrm 是 `mod=01 rm=101`（r13+disp8），**没有 SIB**，所以 REX.X
             // 是多余的：旧代码发 0x4F = W|R|X|B，产物里被 objdump 老实标成
             // `rex.WRXB mov %r15,-0x28(%r13)`。X 只在有 SIB 时表达 index 扩展。
-            self.callee_save_patch_sites.push((self.pos(), 0x08));
-            self.emit_insn(
-                &Insn::mov_rm_mem(
+            Self::emit_callee_save_site(
+                self,
+                0x08,
+                Insn::mov_rm_mem(
                     false,
                     crate::codegen::shared::asm_operand::Width::B64,
                     15,
@@ -1265,6 +1280,27 @@ impl Codegen {
             if self.kasan && self.frame_layout.frame_size > 0 {
                 self.emit_kasan_stack_poison_all();
                 self.emit_kasan_stack_unpoison_vars();
+            }
+        }
+        // P13 阶段6：帧规划到此结束 —— 「哪些局部的帧槽读写每一次都是可观察事件」
+        // 可以定了。先记名字→槽数（预注册与晚分配共用同一张表），再把偏移已定的那批
+        // 直接登记成帧槽屏障；晚分配的会在 `register_var` 定下偏移时自己补登记。
+        // 必须在任何函数体指令发射**之前**完成：块内事实一旦建立就不能事后撤销。
+        if let Some(body) = &f.body {
+            Self::collect_volatile_locals(
+                &body.items,
+                &self.static_local_map,
+                &f.name.name,
+                &mut self.volatile_locals,
+            );
+            let planned: Vec<(String, i64)> = self
+                .var_map
+                .iter()
+                .filter(|(n, _)| self.volatile_locals.contains_key(n.as_str()))
+                .map(|(n, &(off, _))| (n.clone(), off))
+                .collect();
+            for (n, off) in planned {
+                self.note_volatile_var_slots(&n, off);
             }
         }
         // VLA 形参维度求值: 序言尾 (非 main 路径两分支汇合点) 执行,

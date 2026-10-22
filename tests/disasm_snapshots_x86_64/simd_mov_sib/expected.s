@@ -4,10 +4,9 @@ mov %rsp,%r13
 sub $0x2f0,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
-movslq -0x40(%r13),%rcx
+movslq %edi,%rcx
 lea 0x0(%rip),%r11
 movsd (%r11,%rcx,8),%xmm0
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret
@@ -41,10 +40,9 @@ mov %rsp,%r13
 sub $0x2f0,%rsp
 <nop padding>
 mov %rdi,-0x40(%r13)
-movslq -0x40(%r13),%rcx
+movslq %edi,%rcx
 lea 0x0(%rip),%r11
 movss (%r11,%rcx,4),%xmm0
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret

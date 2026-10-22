@@ -6,7 +6,7 @@ sub $0x2f0,%rsp
 mov %rdi,-0x40(%r13)
 mov %rsi,-0x48(%r13)
 sub $0x20,%rsp
-mov -0x40(%r13),%rax
+mov %rdi,%rax
 mov %rax,0x18(%rsp)
 movslq -0x48(%r13),%rax
 mov %rax,0x10(%rsp)
@@ -30,7 +30,6 @@ mov %rdi,-0x48(%r13)
 mov 0x0(%rip),%rax
 mov %rax,-0x40(%r13)
 sub $0x20,%rsp
-mov -0x40(%r13),%rax
 mov %rax,0x18(%rsp)
 movslq -0x48(%r13),%rax
 mov %rax,0x10(%rsp)

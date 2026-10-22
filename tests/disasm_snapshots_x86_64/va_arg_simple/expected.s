@@ -2,7 +2,6 @@ va_sum_int:
 push %r13
 mov %rsp,%r13
 sub $0x3f0,%rsp
-mov %rbx,-0x10(%r13)
 <nop padding>
 mov %rdi,-0x3c0(%r13)
 mov %rsi,-0x3b8(%r13)
@@ -30,15 +29,9 @@ mov %eax,-0x60(%r13)
 mov $0x0,%rax
 mov %eax,-0x68(%r13)
 movslq -0x68(%r13),%rax
-mov %rax,%rbx
 movslq -0x70(%r13),%r8
-cmp %r8d,%ebx
-setl %al
-movzbq %al,%rax
-mov %rax,%rbx
-mov %rbx,%rax
-test %eax,%eax
-je <va_sum_int>
+cmp %r8d,%eax
+jge <va_sum_int>
 mov -0x58(%r13),%eax
 cmp $0x30,%eax
 jge <va_sum_int>
@@ -53,11 +46,8 @@ mov -0x50(%r13),%rcx
 add $0x8,%rcx
 mov %rcx,-0x50(%r13)
 pop %rax
-mov %rax,%rbx
 movslq -0x60(%r13),%r8
-add %r8,%rbx
-mov %rbx,%rax
-movslq %eax,%rax
+add %r8,%rax
 movslq %eax,%rax
 mov %eax,-0x60(%r13)
 mov -0x68(%r13),%eax
@@ -68,17 +58,15 @@ pop %rax
 jmp <va_sum_int>
 lea -0x58(%r13),%rax
 movslq -0x60(%r13),%rax
-movslq %eax,%rax
-mov -0x10(%r13),%rbx
 <nop padding>
 mov %r13,%rsp
 pop %r13
 ret
+<nop padding>
 va_sum_dbl:
 push %r13
 mov %rsp,%r13
 sub $0x3f0,%rsp
-mov %rbx,-0x10(%r13)
 <nop padding>
 mov %rdi,-0x3c0(%r13)
 mov %rsi,-0x3b8(%r13)
@@ -106,15 +94,9 @@ movsd %xmm0,-0x60(%r13)
 mov $0x0,%rax
 mov %eax,-0x68(%r13)
 movslq -0x68(%r13),%rax
-mov %rax,%rbx
 movslq -0x70(%r13),%r8
-cmp %r8d,%ebx
-setl %al
-movzbq %al,%rax
-mov %rax,%rbx
-mov %rbx,%rax
-test %eax,%eax
-je <va_sum_dbl>
+cmp %r8d,%eax
+jge <va_sum_dbl>
 movsd -0x60(%r13),%xmm0
 sub $0x8,%rsp
 movsd %xmm0,(%rsp)
@@ -145,7 +127,6 @@ pop %rax
 jmp <va_sum_dbl>
 lea -0x58(%r13),%rax
 movsd -0x60(%r13),%xmm0
-mov -0x10(%r13),%rbx
 <nop padding>
 mov %r13,%rsp
 pop %r13

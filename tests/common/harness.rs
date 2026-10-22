@@ -1452,6 +1452,89 @@ pub(crate) fn dcc_asm_with_pipe(name: &str, src: &str, ssa_off: Option<&str>) ->
 }
 
 // ============================================================================
+// P13 发射形态断言：问「发射层到底发了哪条指令」时的公共入口
+//
+// 为什么用 `-S` 文本而不是 objdump：这是**同一个编码器**的记录，`check_asm_text_parity.sh`
+// 已保证它与 `.text` 字节逐条对应；另写一份反汇编解析只多一处会漂移的口径。
+// 为什么只按助记符判、不按整行文本判：寄存器家与槽偏移会随 regalloc 调整，
+// 钉整行等于把「哪条指令」这个判据绑到跑分无关的分配结果上。
+// ============================================================================
+
+/// 某档位下某个函数的发射文本（`-S` 输出里 `f:` 到 `.size f, .-f` 之间，含标签与 nop 填充）。
+pub(crate) fn dcc_fn_body_at(tag: &str, src: &str, opt: &str, func: &str) -> String {
+    let (asm, _err) = compile_asm_text_with_env(tag, src, &["-std=gnu23", opt], &[]);
+    let body = extract_function_body(&asm, func);
+    assert!(!body.is_empty(), "{opt}: 汇编文本里找不到函数 {func}:\n{asm}");
+    body
+}
+
+/// 逐条摘出助记符。标签（`.L0:`）与指示符（`.size`/`.p2align`）不是指令，略过。
+fn mnemonics(body: &str) -> impl Iterator<Item = &str> {
+    body.lines().filter_map(|l| {
+        let t = l.trim_start();
+        if t.is_empty() || t.starts_with('.') {
+            return None;
+        }
+        t.split_whitespace().next()
+    })
+}
+
+/// 助记符**恰好等于** `mn` 的条数（`mov` 不会把 `movsxd`/`movzbq` 算进来）。
+pub(crate) fn count_mnemonic(body: &str, mn: &str) -> usize {
+    mnemonics(body).filter(|m| *m == mn).count()
+}
+
+/// 助记符以 `prefix` 开头的条数（`set` 取全部 `setcc`）。
+pub(crate) fn count_mnemonic_prefix(body: &str, prefix: &str) -> usize {
+    mnemonics(body).filter(|m| m.starts_with(prefix)).count()
+}
+
+/// 条件跳转条数（`jmp` 是无条件跳转，不算）。
+pub(crate) fn count_cond_jump(body: &str) -> usize {
+    mnemonics(body).filter(|m| m.starts_with('j') && *m != "jmp").count()
+}
+
+/// 除帧指针 `%r13` 之外的押栈/出栈条数。
+///
+/// P13 阶段1/2 的「无帧往返」判据：叶子函数里凡是非 `%r13` 的 push/pop，都是
+/// 「先押栈躲 rax 复用、再 pop 回来」那条老形态（§3.1/§3.2）。callee-saved 走的是
+/// `mov %rbx, -16(%r13)` 这类帧槽，不经 push/pop。
+pub(crate) fn non_frame_push_pop(body: &str) -> usize {
+    body.lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            (t.starts_with("push ") || t.starts_with("pop ")) && !t.contains("%r13")
+        })
+        .count()
+}
+
+/// 「落点就是下一条指令」的 `jmp` 条数（中间隔着的一串标签都指向同一地址，算到下一条）。
+///
+/// 判据给 §2.2 的负结果用：那次删掉 135 条恒定跳转实测反而慢 3.8%（位置移动把热循环
+/// 体推离了原有对齐），所以这条形态目前**必须保留**；本函数是它的回归防线。
+pub(crate) fn count_jmp_to_next(body: &str) -> usize {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut n = 0;
+    for (i, l) in lines.iter().enumerate() {
+        let t = l.trim_start();
+        let Some(target) = t.strip_prefix("jmp ") else {
+            continue;
+        };
+        let target = target.trim();
+        // 往后跳过标签，直到第一条真指令；这之前出现的标签都是同一下一条指令的别名。
+        let aliases = lines[i + 1..]
+            .iter()
+            .map(|l2| l2.trim_start())
+            .take_while(|t2| t2.starts_with('.') && t2.ends_with(':'))
+            .map(|t2| t2.trim_end_matches(':'));
+        if aliases.into_iter().any(|a| a == target) {
+            n += 1;
+        }
+    }
+    n
+}
+
+// ============================================================================
 // Phase 6.2 收尾：gdb 实读 dcc `-g` 产物的共享助手（自 tests/integration/dwarf_gdb.rs 搬入）
 //
 // 搬进来的理由不是「凑过 STRUCT-HELPER」，而是 §14 的意图：主题子文件应当是一条

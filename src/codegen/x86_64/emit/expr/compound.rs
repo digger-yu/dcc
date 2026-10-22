@@ -42,11 +42,9 @@ impl Codegen {
                     off: slot,
                     vla: None,
                 };
-                self.gen_expr(cond, Self::EVAL_BASE);
-                self.emit_truth_flags(&cond.ty());
                 let le = self.fresh_label();
                 let lend = self.fresh_label();
-                self.jmp_rel32(&le, JumpKind::Je);
+                self.gen_cond_jump_to(cond, &le, false);
                 self.gen_aggregate_assign_to(&agg, &ty, then_);
                 self.jmp_rel32(&lend, JumpKind::Jmp);
                 self.label(&le);
@@ -55,11 +53,9 @@ impl Codegen {
                 self.emit_lea_r13(dst, slot);
                 return;
             }
-            self.gen_expr(cond, Self::EVAL_BASE);
-            self.emit_truth_flags(&cond.ty());
             let le = self.fresh_label();
             let lend = self.fresh_label();
-            self.jmp_rel32(&le, JumpKind::Je);
+            self.gen_cond_jump_to(cond, &le, false);
             self.gen_expr(then_, dst);
             self.jmp_rel32(&lend, JumpKind::Jmp);
             self.label(&le);

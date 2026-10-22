@@ -896,6 +896,30 @@ impl Codegen {
     /// 浮点类型不走这里：它们的值通道是 xmm0 / st(0)，由
     /// [`Self::emit_store_scalar_float_at`] 负责。
     pub fn emit_store_scalar_int_at(&mut self, size: usize, base: u8, disp: i32, seg: Option<u8>) {
+        self.emit_store_scalar_int_val_at(size, base, disp, seg, 0);
+    }
+
+    /// 同一个唯一发射口，但**低半值的寄存器**由调用方给出。
+    ///
+    /// 为什么需要它：赋值那条臂今天把地址先算进 `rax`、`push` 保往、再把右值求值进
+    /// `rax`、`pop` 到 `rcx`——那对 `push/pop` 存在的唯一理由就是「两个值挤同一个号」。当
+    /// 右值是只会写自己目标寄存器的形态（字面量/标量名字）时，地址本就可以直接落进 store
+    /// 要的 `rcx`，整个搬走环节消失。单源不能因为要换寄存器就再划一份宽度判据（同一个
+    /// 判据被抄七份导致 `long-mul-128.c` 丢高半的案底就在上面那段注释里），所以宽度逻辑
+    /// 仍然只有这一处。
+    ///
+    /// 16 字节（`__int128` / 宽 `_BitInt`）的值模型是 `(rax, rdx)` 这一对，没有「只换低半」
+    /// 的形态：换低半的调用方必须同时换高半。今天没有这种调用方（赋值白名单排除
+    /// Int128/UInt128 与位域），所以遇到就报内部错误而不是静默发「低半来自 `val`、高半来自
+    /// rdx」这种一半换一半不换的形状。
+    pub fn emit_store_scalar_int_val_at(
+        &mut self,
+        size: usize,
+        base: u8,
+        disp: i32,
+        seg: Option<u8>,
+        val: u8,
+    ) {
         let w = match size {
             1 => Width::B8,
             2 => Width::B16,
@@ -903,9 +927,16 @@ impl Codegen {
             _ => Width::B64,
         };
         self.emit_seg(seg);
-        self.emit_insn(&Insn::mov_rm_mem(false, w, 0, base, disp))
+        self.emit_insn(&Insn::mov_rm_mem(false, w, val, base, disp))
             .expect("typed-opcode: mov_rm_mem"); // 低半 → [base+disp]
         if size == 16 {
+            if val != 0 {
+                self.report_internal_bug(
+                    "E1138",
+                    format!("16 字节标量 store 拿到了非 rax 的低半寄存器 {val}，但高半仍写死 rdx"),
+                    "要么让调用方同时交高半寄存器（需先扩值模型），要么把它改走 (rax, rdx) 臂；不得静默发半换半不换的 store",
+                );
+            }
             // 高 64 位 → [base+disp+8]：段前缀只作用于紧随的一条指令，第二笔要重发。
             self.emit_seg(seg);
             self.emit_insn(&Insn::mov_rm_mem(false, Width::B64, 2, base, disp + 8))

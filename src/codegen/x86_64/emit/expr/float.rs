@@ -230,6 +230,28 @@ impl Codegen {
         }
     }
     pub(crate) fn emit_truth_flags(&mut self, ty: &Type) {
+        // 浮点条件（SSE 通道）：真值判据是「值 != 0，且 NaN 也算真」，而值此刻在
+        // **xmm0**（本后端的浮点 rvalue 约定）。旧实现直接落到函数尾部的
+        // `test rax,rax`，读的是**上上次求值的残留** —— 只要那个残留恰好为 0 就碰巧对。
+        // 条件直生分支把 `i < 10` 后面的 `setcc + movzx` 拿掉之后，残留不再是 0，这个
+        // 潜伏缺陷就暴露成误编译（复现：gcc-dg `tree-ssa/scev-2.c`，以及
+        // `.work_tmp/p13_flt_truth.c` 探针）。这里不是为新优化铺路，而是补上本来就没发的
+        // 那一步判据。
+        //
+        // 复用 `gen_float_cmp(Ne)` 而不是自己拼 `ucomisd + setne`：那一支已经处理了无序
+        // （PF）——NaN 与 0 比较时 ZF=1，只看 ZF 会把 `if (nan)` 判成假。
+        if matches!(ty, Type::Float | Type::Double) && !self.float_in_st0(ty) {
+            // xmm1 = +0.0（`xorps r,r` 与 `gen_float_binop` 造常量 0 同一手法；
+            // 零一个寄存器与宽窄无关，所以 float/double 共用一条）。
+            self.emit_insn(&Insn::simd_arith_reg(
+                crate::codegen::x86_64::opcode::SimdArithOp::Xorps,
+                crate::codegen::x86_64::opcode::SimdWidth::PS,
+                1,
+                1,
+            ));
+            self.gen_float_cmp(BinOp::Ne, ty);
+            return;
+        }
         if let Type::Complex(inner) = ty {
             let isz = inner.base.size();
             let total = isz * 2;
@@ -508,6 +530,24 @@ impl Codegen {
             }
             return;
         }
+        // __int128 / unsigned __int128 的值在本后端是 (rax, rdx) 一对：只测 rax 会把
+        // 「低 64 位为 0、高 64 位非 0」判成假（pr105613 的 `r[0] != 0`，r 是
+        // `unsigned __int128` 向量 ⇒ 分发到这条兜底）。先 `or rax, rdx` 再 `test`，
+        // 与 Binop 臂里 `&&`/`||` 对 128 位操作数的合并判据同一条理由。
+        if matches!(ty, Type::Int128 | Type::UInt128) {
+            self.emit_insn(&Insn::alu_rm_reg_reg(
+                crate::codegen::x86_64::opcode::AluOp::Or,
+                crate::codegen::shared::asm_operand::Width::B64,
+                0,
+                2,
+            )); // or rax, rdx
+            self.emit_insn(&Insn::test_rm_reg(
+                crate::codegen::shared::asm_operand::Width::B64,
+                0,
+                0,
+            )); // test rax, rax
+            return;
+        }
         // 根据条件类型宽度选择 test 指令: 64 位类型必须用
         // test %rax,%rax (48 85 C0), 否则高 32 位非零值会被
         // test %eax,%eax (85 C0) 误判为零.
@@ -613,10 +653,8 @@ impl Codegen {
         // binary128：x87 与 SSE 两条通路都装不下 113 位尾数，整条二元运算
         // 委托 libgcc TFmode 软浮点（算术与比较都在那里分流）。
         if matches!(float_ty, Type::Float128) {
-            if matches!(
-                op,
-                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne
-            ) {
+            if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::EqEq | BinOp::Ne)
+            {
                 self.gen_float128_cmp(op, l, r);
             } else {
                 self.gen_float128_binop(op, l, r);
@@ -977,39 +1015,27 @@ impl Codegen {
         if borrowed {
             // 类型化 Stack 指令：`stack_shift` 由 `emit_insn` 自己记账，手改会与
             // 调用点的对齐补偿脱节。
-            self.emit_insn(&Insn::stack_op_reg(
-                crate::codegen::x86_64::opcode::StackOp::Push,
-                3,
-            ));
+            self.emit_insn(&Insn::stack_op_reg(crate::codegen::x86_64::opcode::StackOp::Push, 3));
         }
         let rm = pf.unwrap_or(3) & 7;
         let r8 = crate::codegen::x86_64::emit::gas::REG8[rm as usize];
         if matches!(op, BinOp::Ne) {
             // != : al = (~ZF) | PF  → pf = PF (setp)
-            self.emit_insn(&Insn::raw_with_gas(
-                &[0x0F, 0x9A, 0xC0 | rm],
-                &format!("setp {r8}"),
-            ));
+            self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x9A, 0xC0 | rm], &format!("setp {r8}")));
             self.emit_insn(&Insn::raw_with_gas(
                 &[0x08, 0xC0 | (rm << 3)],
                 &format!("or {r8}, %al"),
             ));
         } else {
             // 其余: al = 有序结果 AND NOT PF  → pf = ~PF (setnp)
-            self.emit_insn(&Insn::raw_with_gas(
-                &[0x0F, 0x9B, 0xC0 | rm],
-                &format!("setnp {r8}"),
-            ));
+            self.emit_insn(&Insn::raw_with_gas(&[0x0F, 0x9B, 0xC0 | rm], &format!("setnp {r8}")));
             self.emit_insn(&Insn::raw_with_gas(
                 &[0x20, 0xC0 | (rm << 3)],
                 &format!("and {r8}, %al"),
             ));
         }
         if borrowed {
-            self.emit_insn(&Insn::stack_op_reg(
-                crate::codegen::x86_64::opcode::StackOp::Pop,
-                3,
-            ));
+            self.emit_insn(&Insn::stack_op_reg(crate::codegen::x86_64::opcode::StackOp::Pop, 3));
         }
         // movzbq rax, al: movzx r64, r/m8 (from B8 to B64, REX.W=1).
         self.emit_insn(
@@ -1397,10 +1423,7 @@ impl Codegen {
     /// 否则 `a + b` 会被当成整数加法（实测：`(__float128)2 + (__float128)3.5`
     /// 按整数算出 5 而不是 5.5）。
     pub(crate) fn is_scalar_float_binop_ty(ty: &Type) -> bool {
-        matches!(
-            ty,
-            Type::Float | Type::Double | Type::LongDouble | Type::Float128
-        )
+        matches!(ty, Type::Float | Type::Double | Type::LongDouble | Type::Float128)
     }
 
     fn widest_float_type(a: &Type, b: &Type) -> Type {

@@ -625,13 +625,36 @@ impl Codegen {
             _ => true,
         };
         use crate::codegen::shared::asm_operand::Width;
+        // 三条自反扩展都得挂 gas（理由同下面 `mov %e<reg>,%e<reg>` 那一段）：
+        // luaV_execute 里 `movsxd r9,r9d` 有 403 条、`movsxd rax,r15d` 84 条，全部来
+        // 自本函数，而窥孔的幂等移动判据只认带文本的指令。
+        use crate::codegen::x86_64::emit::gas::{REG16 as GAS_REG16, REG32 as GAS_REG32, REG64 as GAS_REG64, REG8 as GAS_REG8};
+        let r8 = GAS_REG8[(reg & 15) as usize];
+        let r16 = GAS_REG16[(reg & 15) as usize];
+        let r32 = GAS_REG32[(reg & 15) as usize];
+        let r64 = GAS_REG64[(reg & 15) as usize];
         let insn = match (lty.size(), signed) {
-            (1, s) => Insn::mov_ext(s, Width::B8, Width::B64, reg, reg),
-            (2, s) => Insn::mov_ext(s, Width::B16, Width::B64, reg, reg),
-            (4, true) => Insn::mov_ext(true, Width::B32, Width::B64, reg, reg),
+            (1, s) => {
+                let m = if s { "movsbq" } else { "movzbq" };
+                Insn::mov_ext(s, Width::B8, Width::B64, reg, reg).with_gas(format!("{m} {r8}, {r64}"))
+            },
+            (2, s) => {
+                let m = if s { "movswq" } else { "movzwq" };
+                Insn::mov_ext(s, Width::B16, Width::B64, reg, reg)
+                    .with_gas(format!("{m} {r16}, {r64}"))
+            },
+            (4, true) => Insn::mov_ext(true, Width::B32, Width::B64, reg, reg)
+                .with_gas(format!("movsxd {r32}, {r64}")),
             (4, false) => {
                 // mov reg32, reg32: 32 位自拷贝即零扩展到高 32 位
-                self.emit_insn_expect(&Insn::mov_rm_reg(Width::B32, reg, reg));
+                //
+                // gas 文本不能省：发射层窥孔的「幂等移动」判据是以 gas 文本为凭的
+                // （`instructions.rs::is_idempotent_move`），这里不挂文本，相邻同字节的
+                // 自反 `mov %eax,%eax` 就永远看不见（上一轮 luaV_execute 里那 2 条尾巴
+                // 就是这么漏下的）。文本与字节同源于 `cast.rs` 的同形窄化写法。
+                use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
+                let gas = format!("mov {}, {}", GAS_REG32[(reg & 15) as usize], GAS_REG32[(reg & 15) as usize]);
+                self.emit_insn_expect(&Insn::mov_rm_reg(Width::B32, reg, reg).with_gas(gas));
                 return;
             },
             _ => return,
@@ -643,12 +666,27 @@ impl Codegen {
     /// 归约结果。内存左值路径原先两者都缺，于是 `u8 a[1]; a[0] = 300.5;` 把 double
     /// 位模式的低字节当整数写进内存（实测 dcc 读出 0x18，gcc 读出 44）。
     pub(crate) fn convert_assign_rhs_in_reg(&mut self, reg: u8, lty: &Type, rty: &Type) {
+        self.convert_assign_rhs_float_to_int(reg, lty, rty);
+        self.reduce_assign_value_to_lvalue(reg, lty);
+    }
+
+    /// 只为**存进内存**而做的右值转换（阶段1：值没人要时省掉宽度归约）。
+    ///
+    /// 能省的只有按左值宽度归约那一段：store 自己就按左值字节数截断。浮点→整数那一
+    /// 段不能省：那是**值语义**的一部分（`int i = 2.7;` 存的必须是 2 而不是 2.7 的位模式
+    /// 低 4 字节），与后面有没有人读这个值无关。两个判据仍只有 `convert_assign_rhs_float_to_int`
+    /// 一份，不在这里重写。
+    pub(crate) fn convert_assign_rhs_in_reg_for_store(&mut self, reg: u8, lty: &Type, rty: &Type) {
+        self.convert_assign_rhs_float_to_int(reg, lty, rty);
+    }
+
+    /// 浮点右值 → 整数左值的那一段转换（上面两个入口共用）。
+    fn convert_assign_rhs_float_to_int(&mut self, reg: u8, lty: &Type, rty: &Type) {
         if matches!(rty, Type::Float | Type::Double | Type::LongDouble)
             && (Self::is_integer_type(lty) || matches!(lty, Type::Enum(..)))
         {
             self.emit_implicit_float_to_int(reg, rty, lty);
         }
-        self.reduce_assign_value_to_lvalue(reg, lty);
     }
 
     pub(crate) fn gen_int_promote(&mut self, dst: u8, ty: &Type) {

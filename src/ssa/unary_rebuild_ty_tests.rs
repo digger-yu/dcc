@@ -21,7 +21,15 @@ fn un(op: crate::ast::UnOp, inner_ty: Type) -> InstKind {
 fn rebuilt(kind: &InstKind, dest_ty: Option<&Type>) -> Expr {
     let sp = Span::point("t.c", 1, 1);
     let f = Function::new("f".into(), Type::Int, sp.clone());
-    inst_to_expr_resolved(kind, &HashMap::new(), &sp, &f, dest_ty)
+    // `inst_to_expr_resolved` 现在收 `dest` 变器本身（类型与名字都从它取）；
+    // 本测试只关心类型，因此造一个固定基名的临时变器即可。
+    let dest = dest_ty.map(|ty| SsaVar {
+        base: "_d".to_string(),
+        version: 0,
+        ty: ty.clone(),
+        span: sp.clone(),
+    });
+    inst_to_expr_resolved(kind, &HashMap::new(), &sp, &f, dest.as_ref())
 }
 
 #[test]

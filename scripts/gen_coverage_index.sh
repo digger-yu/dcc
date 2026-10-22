@@ -49,7 +49,9 @@
 #               seg_asm_body, seg_has_prefix, asm_fallback_compile,
 #               elf64_rela, elf64_section_names, elf64_syms_by_type, elf64_all_rela,
 #               dcc_link_exe, dcc_obj_bytes, assert_dynamically_linked,
-#               dcc_link_capture_flags, dcc_asm_with_pipe
+#               dcc_link_capture_flags, dcc_asm_with_pipe,
+#               dcc_fn_body_at, count_mnemonic, count_mnemonic_prefix,
+#               count_cond_jump, non_frame_push_pop, count_jmp_to_next
 #   cross-check 与外部真值逐字节/逐槽对照（g++ / gcc / 宿主链接器），或与另一条
 #               lowering 路径对照（HIR vs legacy）
 #               run_gcc_cross_check, run_gcc_cross_check_opt,
@@ -91,6 +93,13 @@
 #              交给 gcc 与 dcc 各自编+跑，退出码逐条对照 ⇒ 真正的 gcc 对拍。
 #   aux        asm_body：只做汇编文本归一（摘掉 `.file` 行），不取产物、不断言，
 #              与 normalize_stderr / strip_ansi 同类，不贡献判据。
+#   compile    P13 的发射形态助手（dcc_fn_body_at / count_mnemonic /
+#              count_mnemonic_prefix / count_cond_jump / non_frame_push_pop /
+#              count_jmp_to_next）：只从已发出的 `.s` 文本里取函数体、按助记符
+#              计数，不跑产物、不与外部真值对照 ⇒ 与 extract_function_body /
+#              seg_asm_body 同类。它们钉的是「发射层发了哪条指令」，而这条问题的
+#              真值只有产物本身；算对没有仍由调用方的 `_matches_gcc_at_all_levels`
+#              那一族负责，不会被这些标签抬高或掩盖。
 #
 # Tier 推断（§9 权威表；本脚本只区分 0/3 两档 —— Tier 1/2 是 CI job 的划分，
 # 不是用例本身的属性）:
@@ -323,6 +332,12 @@ legacy_defines aux
 line_mentions aux
 legacy_plain_definition_names aux
 asm_body aux
+dcc_fn_body_at compile
+count_mnemonic compile
+count_mnemonic_prefix compile
+count_cond_jump compile
+non_frame_push_pop compile
+count_jmp_to_next compile
 dwarf_gdb_unavailable aux
 dwarf_gdb_build compile
 dwarf_gdb_build_env compile

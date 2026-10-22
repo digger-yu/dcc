@@ -27,6 +27,9 @@ pub(crate) use self::abi::regnames::{att_name_of_num, bare_name_of_num, is_user_
 /// x86_64 代码生成器 - 所有子模块声明
 mod asm;
 mod backend;
+/// P13 阶段6 地基：发射流的**块内**状态（寄存器相等 / 帧槽等价 / 符号扩展规范形态）。
+/// 解释器函数走 analysis-only 通道、一条 SSA pass 都不跑，跨指令的事实只能在这一层补。
+mod blockopt;
 mod codegen;
 /// C++ 零成本异常: Itanium LSDA (.gcc_except_table) 字节编码器
 pub mod eh_tables;

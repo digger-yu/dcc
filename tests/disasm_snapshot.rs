@@ -171,7 +171,10 @@ fn run_case(name: &str) -> Result<(), String> {
     if !src.exists() {
         return Err(format!("{name}: missing input.c"));
     }
-    if !expected.exists() {
+    // 重录模式（`DCC_UPDATE_DISASM_SNAPSHOTS`）就是「快照生成器」本身：新增用例在
+    // 第一次生成时还没有 expected.s，这条存在性检查不能挡在生成器前面。
+    let updating = std::env::var_os("DCC_UPDATE_DISASM_SNAPSHOTS").is_some();
+    if !updating && !expected.exists() {
         return Err(format!("{name}: missing expected.s (run snapshot generator)"));
     }
 
@@ -204,7 +207,7 @@ fn run_case(name: &str) -> Result<(), String> {
     }
 
     let got = normalize_objdump(&String::from_utf8_lossy(&dump.stdout));
-    if std::env::var_os("DCC_UPDATE_DISASM_SNAPSHOTS").is_some() {
+    if updating {
         // 冻结新快照: 与 `scripts/update_error_snapshots.sh` (DCC_UPDATE_SNAPSHOTS)
         // 同一政策 —— 先人工 review `git diff` 里这段反汇编确实是对目标机语义,
         // 再提交。快照是「独立 oracle」, 从误编译输出冻结下来就再也抓不到它。
@@ -318,6 +321,10 @@ const CASES: &[&str] = &[
     "pr28982a",
     "pr28982b",
     "pr70460",
+    // --- P13 阶段3: 条件直生分支的形状锁 ---
+    // 白名单内一条 cmp/test + 一条 jcc；白名单外（浮点/位域/值语境）必须仍是
+    // setcc + movzbq + test 材料化。本用例是那条放行判据的唯一产物级证据。
+    "direct_cond_branch",
 ];
 
 #[test]

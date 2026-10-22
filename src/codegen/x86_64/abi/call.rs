@@ -1340,6 +1340,7 @@ mod tests {
         // 会重置窥孔窗口；本用例只测通道，先显式重置，否则发射层窥孔规则 3
         // （写槽后立刻读同一槽 ⇒ 读可省，且值确在同一个号里）会把取回那条删掉。
         c.peep_last = None;
+        c.block_state.reset();
         c.restore_ext_homes(1);
         assert_eq!(
             c.home_for("v"),

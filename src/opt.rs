@@ -2155,6 +2155,8 @@ fn function_inline(module: &mut Module, level: u8) {
     if funcs.is_empty() {
         return;
     }
+    // 调用点数、asm 文本引用的名字与函数表一起打包（见 `InlineTable::build` 的理由）。
+    let table = InlineTable::build(funcs, prog);
     for decl in &mut prog.decls {
         if let Decl::Func(f) = decl {
             let caller_flatten = f.is_flatten;
@@ -2162,7 +2164,7 @@ fn function_inline(module: &mut Module, level: u8) {
             if let Some(body) = &mut f.body {
                 inline_calls_in_block(
                     body,
-                    &funcs,
+                    &table,
                     level,
                     caller_flatten,
                     caller_is_hot,
@@ -2324,7 +2326,7 @@ fn estimate_inline_cost(_f: &FuncDecl, body: &Block, args: &[Expr]) -> usize {
 
 fn inline_calls_in_block(
     body: &mut Block,
-    funcs: &HashMap<String, FuncDecl>,
+    funcs: &InlineTable,
     level: u8,
     caller_flatten: bool,
     caller_is_hot: bool,
@@ -2362,7 +2364,7 @@ fn inline_calls_in_block(
 
 fn inline_calls_in_stmt(
     s: &mut Stmt,
-    funcs: &HashMap<String, FuncDecl>,
+    funcs: &InlineTable,
     level: u8,
     caller_flatten: bool,
     caller_is_hot: bool,
@@ -2372,6 +2374,20 @@ fn inline_calls_in_stmt(
     // always_inline / flatten 且函数体含局部声明: 语句级展开.
     // 成功后调用点已被替换为展开后的块, 无需再做表达式级内联.
     if try_stmt_inline_call(s, funcs, caller_flatten, depth) {
+        return;
+    }
+    // P13 阶段5：-O2 起的小 `static` 函数体（带控制流）成本模型内联。展开后立刻
+    // 递归走进新块（实参里可能还有可调用的直接调用），深度 +1 兜底。
+    if try_static_inline_general(s, funcs, level, depth) {
+        inline_calls_in_stmt(
+            s,
+            funcs,
+            level,
+            caller_flatten,
+            caller_is_hot,
+            fenv_access,
+            depth + 1,
+        );
         return;
     }
     match s {
@@ -2666,6 +2682,25 @@ fn rename_idents_in_stmt(s: &mut Stmt, map: &HashMap<String, String>) {
             rename_idents_in_stmt(body, map);
         },
         Stmt::Block { b, .. } => rename_idents_in_items(&mut b.items, map),
+        // 标签语句与 switch 必须跟着改名：P13 阶段5 的函数体内联会把带控制流的
+        // body 整体搬进 caller，漏一个分支就是「callee 的 `L` 读到 caller 的 `L`」
+        //（实测 Lua `ldo.c` 内联后直接段错误）。以前的调用者（always_inline 那条臂）
+        // 只接直线性 body，这两臂从未被走到。
+        Stmt::Label { stmt, .. } => rename_idents_in_stmt(stmt, map),
+        Stmt::Switch { expr, cases, prelude, .. } => {
+            rename_idents_in_expr(expr, map);
+            for it in prelude {
+                if let BlockItem::Stmt(st) = it {
+                    rename_idents_in_stmt(st, map);
+                }
+            }
+            for c in cases {
+                if let Some(v) = &mut c.val {
+                    rename_idents_in_expr(v, map);
+                }
+                rename_idents_in_items(&mut c.body.items, map);
+            }
+        },
         // C++ 零成本异常: 强制内联的改名必须看到受保护调用内部的语句与落地垫槽位,
         // 否则被内联函数里的同名变量会与该区域内的调用者变量混淆。
         Stmt::Invoke { call, .. } => rename_idents_in_stmt(call, map),
@@ -2739,9 +2774,780 @@ fn plain_var_decl(ty: crate::ast::Type, name: String, init: Option<Expr>, span: 
 ///
 /// 展开为块后, 形参以临时变量传值 (实参只求值一次, 与 GCC 语义一致).
 /// 返回 true 表示调用点已被替换.
+/// 阶段5（成本模型驱动的 `static` 函数体内联）的节点数上限。
+///
+/// 与 -O3 那条启发式（零参 + cost ≤ 20）不是一条路：收益最大的形态（Lua
+/// `prepCallInfo`、SQLite btree 的 `fillInCell`/`dropCell`/`allocateSpace`）全是
+/// 「多形参 + 体内有 if/goto」的小 static 助手，零参限制把它们全隔在外面。
+/// 阈值只能由产物说话：本轮的 Lua/SQLite 运行时、产物尺寸与编译时间就是它的裁判
+///（取值过程记在报告 §6.9 与 .trae/documents/x86_64-p13-…-plan.md）。定在 200 是
+/// 按实测分布选的：`ldo.c`/`lstate.c` 里那批小助手（`checkmode` 26、`unroll` 43、
+/// `resetCI` 68、`resume_error` 75、`stack_init` 84、`preinit_thread` 100、
+/// `finishCcall` 125、`correctstack` 127）全在 200 以内，而 `moveresults` 210、
+/// `init_registry` 162 这类已经不值得整块搬进 caller。
+const STATIC_INLINE_COST_THRESHOLD: usize = 200;
+
+/// 只有**一个调用点**的 `static` 函数放宽到的上限。
+///
+/// 为什么单独放宽：单点内联不复制代码（原本就要为这一次调用发一份体），所以
+/// 不存在「膨胀换性能」的取舍，只剩「少一层调用 + caller 能看见 callee 的常量」的
+/// 纯收益。实测反证了这一点：按统一阈值 200 内联时 Lua fib 反而慢 2.5%（多调用点
+/// 的小函数被复制了好几份，I-cache 代价盖过省下的 call）。
+const STATIC_INLINE_SINGLE_SITE_COST_THRESHOLD: usize = 100_000;
+
+/// 内联 pass 的只读上下文：本 TU 的函数表 + 每个函数名作为**直接调用 callee** 出现的次数。
+///
+/// 为什么打成一张表而不是再加一个参数：`funcs` 已经穿过整条递归（十几个调用点），
+/// 多一个参数就是十几处要同步改的地方，漏一处就是一个静默的阈值错位；把「调用点数」
+/// 放进同一张表里随 `funcs` 一起流，单点内联判据与函数表永远同步。
+pub(crate) struct InlineTable {
+    funcs: HashMap<String, FuncDecl>,
+    sites: HashMap<String, usize>,
+    /// 出现在任一内联汇编文本里的标识符。被 asm 文本点名的 `static` 函数**不能**被展开掉：
+    /// 展开后 C 侧再无引用，定义会被丢掉，而 asm 文本里那句 `call leaf` 还在——链接期
+    /// 直接 `undefined reference`（实测夹具 `tests/fixtures/opt/asm_text_static_func_symbol.c`）。
+    /// asm 文本不参与符号引用分析，所以这里只能按「文本里出现过这个名字」保守处理。
+    asm_names: std::collections::HashSet<String>,
+}
+
+impl InlineTable {
+    /// 字段的**唯一**组装点：结构体以后再加判据时，不会像刚才那样在某个调用点
+    /// 漏掉一个字段（漏掉的后果是「该内联的不内联」或反之，都是静默的）。
+    fn build(funcs: HashMap<String, FuncDecl>, prog: &Program) -> Self {
+        let sites = count_direct_call_sites(&funcs);
+        let asm_names = collect_asm_names(prog);
+        InlineTable { sites, asm_names, funcs }
+    }
+
+    fn get(&self, name: &str) -> Option<&FuncDecl> {
+        self.funcs.get(name)
+    }
+
+    /// 该函数名在本 TU 里被直接调用的次数（0 表示没有调用点，例如只在初始化列表里出现）。
+    fn call_sites(&self, name: &str) -> usize {
+        self.sites.get(name).copied().unwrap_or(0)
+    }
+
+    fn named_by_asm(&self, name: &str) -> bool {
+        self.asm_names.contains(name)
+    }
+}
+
+/// 抓出所有内联汇编文本里的标识符（只要 `call foo` / `jmp bar` 写得下，名字就算被引用）。
+fn collect_asm_names(prog: &Program) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for d in &prog.decls {
+        if let Decl::Func(f) = d {
+            if let Some(b) = &f.body {
+                asm_names_in_block(b, &mut out);
+            }
+        }
+    }
+    out
+}
+
+fn push_asm_idents(text: &str, out: &mut std::collections::HashSet<String>) {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            while i < bytes.len() {
+                let d = bytes[i] as char;
+                if d.is_ascii_alphanumeric() || d == '_' {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            out.insert(text[start..i].to_string());
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn asm_names_in_block(b: &Block, out: &mut std::collections::HashSet<String>) {
+    for item in &b.items {
+        asm_names_in_item(item, out);
+    }
+}
+
+fn asm_names_in_item(item: &BlockItem, out: &mut std::collections::HashSet<String>) {
+    match item {
+        BlockItem::Stmt(s) => asm_names_in_stmt(s, out),
+        BlockItem::Decl(Decl::Func(f)) => {
+            if let Some(bb) = &f.body {
+                asm_names_in_block(bb, out);
+            }
+        },
+        _ => {},
+    }
+}
+
+fn asm_names_in_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
+    match s {
+        Stmt::AsmGoto { asm_str, .. } => push_asm_idents(asm_str, out),
+        Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => asm_names_in_expr(e, out),
+        Stmt::If { cond, then_, else_, .. } => {
+            asm_names_in_expr(cond, out);
+            asm_names_in_stmt(then_, out);
+            if let Some(x) = else_ {
+                asm_names_in_stmt(x, out);
+            }
+        },
+        Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
+            asm_names_in_expr(cond, out);
+            asm_names_in_stmt(body, out);
+        },
+        Stmt::For { init, cond, step, body, .. } => {
+            if let Some(i) = init {
+                asm_names_in_stmt(i, out);
+            }
+            if let Some(c) = cond {
+                asm_names_in_expr(c, out);
+            }
+            if let Some(st) = step {
+                asm_names_in_expr(st, out);
+            }
+            asm_names_in_stmt(body, out);
+        },
+        Stmt::Block { b, .. } => asm_names_in_block(b, out),
+        Stmt::Label { stmt, .. } => asm_names_in_stmt(stmt, out),
+        Stmt::Switch { expr, cases, prelude, .. } => {
+            asm_names_in_expr(expr, out);
+            for it in prelude {
+                asm_names_in_item(it, out);
+            }
+            for c in cases {
+                asm_names_in_block(&c.body, out);
+            }
+        },
+        _ => {},
+    }
+}
+
+fn asm_names_in_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
+    if let Expr::AsmExpr {
+        asm_str,
+        outputs,
+        inputs,
+        ..
+    } = e
+    {
+        push_asm_idents(asm_str, out);
+        for x in outputs.iter().chain(inputs.iter()) {
+            asm_names_in_expr(x, out);
+        }
+    }
+}
+
+/// 本 TU 里每个函数名作为**直接调用 callee** 出现的次数（单点内联判据用）。
+fn count_direct_call_sites(funcs: &HashMap<String, FuncDecl>) -> HashMap<String, usize> {
+    let mut n: HashMap<String, usize> = HashMap::new();
+    for (_, f) in funcs {
+        let Some(b) = &f.body else { continue };
+        for callee in collect_direct_calls(b) {
+            *n.entry(callee).or_insert(0) += 1;
+        }
+    }
+    n
+}
+
+/// 一次遍历同时拿到两件事：体里调了谁（递归/环判定用），以及有没有「根本不能搬」
+/// 的形状。拿不准的变体一律**失败关闭**（`blocked = true`）：宁可少一个优化，
+/// 也不要让今后新加的 AST 变体默认被当作「可以内联」。子节点走法照
+/// `rename_idents_in_expr` 那套，不另开一份「谁是子表达式」的定义。
+#[derive(Default)]
+struct InlineScan {
+    calls: Vec<String>,
+    blocked: bool,
+}
+
+impl InlineScan {
+    fn note_blocked(&mut self) {
+        self.blocked = true;
+    }
+}
+
+fn scan_items(items: &[BlockItem], acc: &mut InlineScan) {
+    for item in items {
+        match item {
+            BlockItem::Stmt(s) => scan_stmt(s, acc),
+            BlockItem::Decl(Decl::Func(_)) => {
+                // 嵌套函数定义：闭包链绑在外层帧上，搬不动。
+                acc.note_blocked();
+            },
+            BlockItem::Decl(Decl::Var(v)) => {
+                if v.is_static
+                    || v.is_extern
+                    || v.is_thread_local
+                    || v.cleanup_fn.is_some()
+                    || v.register_name.is_some()
+                    || v.alias_name.is_some()
+                    || v.asm_label.is_some()
+                    || type_has_vla_dim(&v.ty)
+                {
+                    acc.note_blocked();
+                }
+                if let Some(e) = &v.init {
+                    scan_expr(e, acc);
+                }
+            },
+            // 类型声明无运行时语义，留在展开块里不影响正确性（callee 局部可能用它）。
+            BlockItem::Decl(Decl::Typedef { .. })
+            | BlockItem::Decl(Decl::StructDef(_))
+            | BlockItem::Decl(Decl::UnionDef(_))
+            | BlockItem::Decl(Decl::EnumDef(_)) => {},
+            _ => acc.note_blocked(),
+        }
+    }
+}
+
+fn scan_block(b: &Block, acc: &mut InlineScan) {
+    scan_items(&b.items, acc);
+}
+
+fn scan_stmt(s: &Stmt, acc: &mut InlineScan) {
+    match s {
+        // computed goto / asm goto：标签地址与指令流跟当前函数绑死，不能搬。
+        Stmt::GotoIndirect { .. } | Stmt::AsmGoto { .. } => acc.note_blocked(),
+        Stmt::Expr { e, .. } => scan_expr(e, acc),
+        Stmt::Return { val: Some(e), .. } => scan_expr(e, acc),
+        Stmt::Return { val: None, .. } | Stmt::Goto { .. } | Stmt::Break { .. }
+        | Stmt::Continue { .. } => {},
+        Stmt::If { cond, then_, else_, .. } => {
+            scan_expr(cond, acc);
+            scan_stmt(then_, acc);
+            if let Some(e) = else_ {
+                scan_stmt(e, acc);
+            }
+        },
+        Stmt::While { cond, body, .. } => {
+            scan_expr(cond, acc);
+            scan_stmt(body, acc);
+        },
+        Stmt::Do { cond, body, .. } => {
+            scan_expr(cond, acc);
+            scan_stmt(body, acc);
+        },
+        Stmt::For { init, cond, step, body, .. } => {
+            if let Some(i) = init {
+                scan_stmt(i, acc);
+            }
+            if let Some(c) = cond {
+                scan_expr(c, acc);
+            }
+            if let Some(st) = step {
+                scan_expr(st, acc);
+            }
+            scan_stmt(body, acc);
+        },
+        Stmt::Block { b, .. } => scan_block(b, acc),
+        Stmt::Label { stmt, .. } => scan_stmt(stmt, acc),
+        Stmt::Switch { expr, cases, prelude, .. } => {
+            scan_expr(expr, acc);
+            scan_items(prelude, acc);
+            for c in cases {
+                if let Some(v) = &c.val {
+                    scan_expr(v, acc);
+                }
+                scan_block(&c.body, acc);
+            }
+        },
+        _ => acc.note_blocked(),
+    }
+}
+
+fn scan_expr(e: &Expr, acc: &mut InlineScan) {
+    match e {
+        // 这些形态都隐含「帧/标签就在本函数里」，搬进调用方就错。
+        Expr::StmtExpr { .. }
+        | Expr::LabelAddr { .. }
+        | Expr::VaArg { .. }
+        | Expr::VaArgPack { .. }
+        | Expr::AsmExpr { .. } => acc.note_blocked(),
+        Expr::Call { callee, args, .. } => {
+            if let Expr::Ident { name, .. } = callee.as_ref() {
+                acc.calls.push(name.name.clone());
+            } else {
+                // 函数指针与被计算的 callee：本身也要扫（里面可能有调用）。
+                scan_expr(callee, acc);
+            }
+            for a in args {
+                scan_expr(a, acc);
+            }
+        },
+        Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } | Expr::Comma { l, r, .. } => {
+            scan_expr(l, acc);
+            scan_expr(r, acc);
+        },
+        Expr::Unary { e: x, .. }
+        | Expr::Real { e: x, .. }
+        | Expr::Imag { e: x, .. }
+        | Expr::Cast { e: x, .. }
+        | Expr::AddrOf { e: x, .. }
+        | Expr::Deref { e: x, .. }
+        | Expr::PostInc { e: x, .. }
+        | Expr::PostDec { e: x, .. }
+        | Expr::PreInc { e: x, .. }
+        | Expr::PreDec { e: x, .. }
+        | Expr::SizeofExpr { e: x, .. }
+        | Expr::AlignofExpr { e: x, .. } => scan_expr(x, acc),
+        Expr::Cond { cond, then_, else_, .. } => {
+            scan_expr(cond, acc);
+            scan_expr(then_, acc);
+            scan_expr(else_, acc);
+        },
+        Expr::Index { arr, idx, .. } => {
+            scan_expr(arr, acc);
+            scan_expr(idx, acc);
+        },
+        Expr::Member { expr, .. } => scan_expr(expr, acc),
+        // 初始化列表/复合字面量：带 designator 的整块初始化今天不搬（失败关闭）。
+        Expr::CompoundLit { .. } | Expr::InitList { .. } => acc.note_blocked(),
+        // `offsetof(T, a[i])` 的下标表达式在编译期不参与求值，但可能有副作用，
+        // 而 designator 里的表达式也不影响「调了谁」的结论，扫一下不算漏。
+        Expr::Offsetof { indices, .. } => {
+            for i in indices {
+                scan_expr(i, acc);
+            }
+        },
+        // 叶子：字面量/名字/`sizeof(T)`/`_Alignof(T)`。
+        Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::ComplexLit { .. }
+        | Expr::ComplexIntLit { .. }
+        | Expr::String { .. }
+        | Expr::Char { .. }
+        | Expr::Ident { .. }
+        | Expr::SizeofTy { .. }
+        | Expr::AlignofTy { .. } => {},
+        _ => acc.note_blocked(),
+    }
+}
+
+/// 收集一个函数体里出现的**直接调用**名字（用于递归/环判定）。
+fn collect_direct_calls(body: &Block) -> Vec<String> {
+    let mut acc = InlineScan::default();
+    scan_block(body, &mut acc);
+    acc.calls
+}
+
+/// `funcs[from]` 的调用闭包能否回到 `target`（间接递归也算）。
+fn calls_graph_reaches(
+    funcs: &InlineTable,
+    from: &str,
+    target: &str,
+) -> bool {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut work: Vec<String> = vec![from.to_string()];
+    while let Some(name) = work.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let f = match funcs.get(&name) {
+            Some(f) => f,
+            None => continue,
+        };
+        let body = match &f.body {
+            Some(b) => b,
+            None => continue,
+        };
+        for callee in collect_direct_calls(body) {
+            if callee == target {
+                return true;
+            }
+            if !seen.contains(&callee) {
+                work.push(callee);
+            }
+        }
+    }
+    false
+}
+
+/// 可以被**整体搬进调用方**的函数体判据：控制流可以，但不能出现任何
+/// 「跨帧/跨指令流」形状。每一条都是硬拒绝，不做「看起来安全就试一下」：
+///   * `goto *ptr` / `Stmt::AsmGoto` / `Expr::LabelAddr`：标签地址进了 callee 就
+///     与 caller 的标签集混在一起，而且 computed goto 本身也不允许搬；
+///   * `Expr::StmtExpr`：语句表达式里可以藏 `return`，那个 `return` 属于 callee，
+///     改写器不递进表达式 → 会变成从 caller 里 return；
+///   * `Expr::VaArg` / `VaArgPack` / `AsmExpr` / 任何 `__builtin_*` 调用：变参寄存器
+///     保存区、`__builtin_return_address` 这类都隐含「帧就在脚下」；
+///   * 嵌套函数定义、`static`/`_Thread_local`/`extern`/cleanup/register/asm 标签变量、VLA：
+///     存储期或帧布局不搬得动；
+///   * 调用 KNOWN_RETURNS_TWICE 名字族（setjmp 那些）：callee 内部有二次返回点，
+///     展开后汇合点会跳到 caller 里。
+fn body_is_splicable(body: &Block) -> bool {
+    let mut acc = InlineScan::default();
+    scan_block(body, &mut acc);
+    if acc.blocked {
+        return false;
+    }
+    for name in &acc.calls {
+        let n = name.as_str();
+        if n.starts_with("__builtin") || KNOWN_RETURNS_TWICE.contains(&n) {
+            return false;
+        }
+    }
+    true
+}
+
+/// 把 callee 体里的标签与 `goto` 目标统一改名（一次展开一份，避免与 caller 同名的
+/// 标签相撞；C 的标签作用域在函数内，所以不重命名会直接编译成错的跳转）。
+fn prefix_labels_in_stmt(s: &mut Stmt, prefix: &str) {
+    match s {
+        Stmt::Label { name, stmt, .. } => {
+            name.name = format!("{}{}", prefix, name.name);
+            prefix_labels_in_stmt(stmt, prefix);
+        },
+        Stmt::Goto { target, .. } => {
+            target.name = format!("{}{}", prefix, target.name);
+        },
+        Stmt::If { then_, else_, .. } => {
+            prefix_labels_in_stmt(then_, prefix);
+            if let Some(e) = else_ {
+                prefix_labels_in_stmt(e, prefix);
+            }
+        },
+        Stmt::While { body, .. } => prefix_labels_in_stmt(body, prefix),
+        Stmt::Do { body, .. } => prefix_labels_in_stmt(body, prefix),
+        Stmt::Block { b, .. } => {
+            for it in &mut b.items {
+                if let BlockItem::Stmt(st) = it {
+                    prefix_labels_in_stmt(st, prefix);
+                }
+            }
+        },
+        Stmt::For { init, body, .. } => {
+            if let Some(i) = init {
+                prefix_labels_in_stmt(i, prefix);
+            }
+            prefix_labels_in_stmt(body, prefix);
+        },
+        Stmt::Switch { cases, prelude, .. } => {
+            for it in prelude {
+                if let BlockItem::Stmt(st) = it {
+                    prefix_labels_in_stmt(st, prefix);
+                }
+            }
+            for c in cases {
+                for bit in &mut c.body.items {
+                    if let BlockItem::Stmt(st) = bit {
+                        prefix_labels_in_stmt(st, prefix);
+                    }
+                }
+            }
+        },
+        _ => {},
+    }
+}
+
+/// 把 callee 体里的 `Stmt::Block` 展开一遍标签（`prefix_labels_in_stmt` 对 Block 的
+/// 专用分支）。
+fn prefix_labels_in_items(items: &mut Vec<BlockItem>, prefix: &str) {
+    for it in items {
+        if let BlockItem::Stmt(st) = it {
+            prefix_labels_in_stmt(st, prefix);
+        }
+    }
+}
+
+/// 调用点值被丢弃时改写 `return`：`return e;` → `{ e; goto end; }`，`return;` → `goto end;`。
+/// 递归进所有控制流子树（callee 的 `return` 可以在任意嵌套层级上）。
+fn rewrite_returns_discarded(s: &mut Stmt, end_label: &str, span: &Span) {
+    match s {
+        Stmt::Return { val, .. } => {
+            let val = val.take();
+            let goto = Stmt::Goto {
+                target: Ident {
+                    name: end_label.to_string(),
+                    span: span.clone(),
+                },
+                span: span.clone(),
+            };
+            *s = match val {
+                Some(e) => Stmt::Block {
+                    b: Block {
+                        items: vec![
+                            BlockItem::Stmt(Stmt::Expr { e, span: span.clone() }),
+                            BlockItem::Stmt(goto),
+                        ],
+                        span: span.clone(),
+                    },
+                    span: span.clone(),
+                },
+                None => goto,
+            };
+        },
+        Stmt::If { then_, else_, .. } => {
+            rewrite_returns_discarded(then_, end_label, span);
+            if let Some(e) = else_ {
+                rewrite_returns_discarded(e, end_label, span);
+            }
+        },
+        Stmt::While { body, .. } => rewrite_returns_discarded(body, end_label, span),
+        Stmt::Do { body, .. } => rewrite_returns_discarded(body, end_label, span),
+        Stmt::Block { b, .. } => {
+            for it in &mut b.items {
+                if let BlockItem::Stmt(st) = it {
+                    rewrite_returns_discarded(st, end_label, span);
+                }
+            }
+        },
+        Stmt::For { init, body, .. } => {
+            if let Some(i) = init {
+                rewrite_returns_discarded(i, end_label, span);
+            }
+            rewrite_returns_discarded(body, end_label, span);
+        },
+        Stmt::Label { stmt, .. } => rewrite_returns_discarded(stmt, end_label, span),
+        Stmt::Switch { cases, prelude, .. } => {
+            for it in prelude {
+                if let BlockItem::Stmt(st) = it {
+                    rewrite_returns_discarded(st, end_label, span);
+                }
+            }
+            for c in cases {
+                for bit in &mut c.body.items {
+                    if let BlockItem::Stmt(st) = bit {
+                        rewrite_returns_discarded(st, end_label, span);
+                    }
+                }
+            }
+        },
+        _ => {},
+    }
+}
+
+/// 把 callee 体里**所有层**的局部声明改成展开后的唯一名字，并把 old→new 记进 `map`。
+///
+/// 必须递归到嵌套块/switch case/if 体内：`rename_idents_in_items` 只改表达式不改声明名，
+/// 而本 pass 跑在语义分析之后，漏改的引用会到 codegen 才被懒注册成另一个栈槽（静默错值）。
+/// 只改 `Decl::Var`：callee 的 `static`/`extern` 变量已在 `InlineScan` 里被拒绝，
+/// 类型声明与函数声明不改名。
+fn rename_decl_names_in_item(item: &mut BlockItem, uid: u32, map: &mut HashMap<String, String>) {
+    match item {
+        BlockItem::Decl(Decl::Var(v)) => {
+            let new = format!("__inl{}_l{}", uid, v.name.name);
+            map.insert(v.name.name.clone(), new.clone());
+            v.name.name = new;
+            if let Some(e) = &mut v.init {
+                rename_decl_names_in_expr(e, uid, map);
+            }
+        },
+        BlockItem::Stmt(s) => rename_decl_names_in_stmt(s, uid, map),
+        _ => {},
+    }
+}
+
+fn rename_decl_names_in_stmt(s: &mut Stmt, uid: u32, map: &mut HashMap<String, String>) {
+    match s {
+        Stmt::Block { b, .. } => {
+            for it in &mut b.items {
+                rename_decl_names_in_item(it, uid, map);
+            }
+        },
+        Stmt::If { then_, else_, .. } => {
+            rename_decl_names_in_stmt(then_, uid, map);
+            if let Some(e) = else_ {
+                rename_decl_names_in_stmt(e, uid, map);
+            }
+        },
+        Stmt::While { body, .. } | Stmt::Do { body, .. } | Stmt::Label { stmt: body, .. } => {
+            rename_decl_names_in_stmt(body, uid, map);
+        },
+        Stmt::For { init, body, .. } => {
+            if let Some(i) = init {
+                rename_decl_names_in_stmt(i, uid, map);
+            }
+            rename_decl_names_in_stmt(body, uid, map);
+        },
+        Stmt::Switch { cases, prelude, .. } => {
+            for it in prelude {
+                rename_decl_names_in_item(it, uid, map);
+            }
+            for c in cases {
+                for it in &mut c.body.items {
+                    rename_decl_names_in_item(it, uid, map);
+                }
+            }
+        },
+        _ => {},
+    }
+}
+
+/// 声明初始化器里可能嵌着语句表达式/复合字面量；它们的子作用域今天都被
+/// `InlineScan` 拒了（复合字面量/语句表达式在名单外），所以这里只递回表达式自身。
+fn rename_decl_names_in_expr(_e: &mut Expr, _uid: u32, _map: &mut HashMap<String, String>) {}
+
+/// P13 阶段5：-O2 起对**小 `static` 函数**做函数体级内联（允许控制流）。
+///
+/// 为什么单独一条臂而不是改 `always_inline` 那条：那条的准入是「程序员明说」，
+/// 本条是「成本模型推断」，两者错了的代价完全不同（前者是用户表达错了，后者是
+/// 编译器猜错了），判据不能合在一起改。也只接两个调用点形状：值被丢弃的表达式
+/// 语句与尾位置 `return f(...)`；值还要参与更大表达式的情形需要语句表达式包装，
+/// 而包装后的 `return`/`goto` 语义还要另讲，不在这里探一下。
+fn try_static_inline_general(
+    s: &mut Stmt,
+    funcs: &InlineTable,
+    level: u8,
+    depth: u32,
+) -> bool {
+    if level < 2 || depth >= INLINE_MAX_DEPTH {
+        return false;
+    }
+    let (callee_name, args, in_return) = match s {
+        Stmt::Expr { e: Expr::Call { callee, args, .. }, span: _ } => match callee.as_ref() {
+            Expr::Ident { name, .. } => (name.name.clone(), args.clone(), false),
+            _ => return false,
+        },
+        Stmt::Return { val: Some(Expr::Call { callee, args, .. }), span: _ } => {
+            match callee.as_ref() {
+                Expr::Ident { name, .. } => (name.name.clone(), args.clone(), true),
+                _ => return false,
+            }
+        },
+        _ => return false,
+    };
+    let f = match funcs.get(&callee_name) {
+        Some(f) => f,
+        None => return false,
+    };
+    // 准入：内部链接、没被明说禁止、不是那些已有专属路径的形状。
+    if !f.is_static
+        || f.is_noinline
+        || f.is_always_inline
+        || f.is_variadic
+        || f.returns_twice
+        || f.is_nested
+        || f.is_old_style
+        || f.alias_name.is_some()
+        // 被内联汇编文本点名的 `static`：展开掉就没有人再引用它，定义会消失，
+        // 而 asm 文本里的 `call leaf` 还在 ⇒ 链接期 undefined reference。
+        || funcs.named_by_asm(&callee_name)
+    {
+        return false;
+    }
+    if f.params.len() != args.len() {
+        return false;
+    }
+    for p in &f.params {
+        if p.name.is_none() || p.vla_dim.is_some() || type_has_vla_dim(&p.ty) {
+            return false;
+        }
+    }
+    let body = match &f.body {
+        Some(b) => b,
+        None => return false,
+    };
+    if !body_is_splicable(body) {
+        return false;
+    }
+    // 递归（包括间接递归）一律不展开：不展开不会错，展开会爆栈。
+    if calls_graph_reaches(funcs, &callee_name, &callee_name) {
+        return false;
+    }
+    let cost = estimate_inline_cost(f, body, &args);
+    // 多调用点的函数按 200 卡住；只有一个调用点的放宽（不复制代码）。
+    let sites = funcs.call_sites(&callee_name);
+    let limit = if sites <= 1 {
+        STATIC_INLINE_SINGLE_SITE_COST_THRESHOLD
+    } else {
+        STATIC_INLINE_COST_THRESHOLD
+    };
+    if cost > limit {
+        trace_inline_decision(
+            &callee_name,
+            "REJECT",
+            &format!("static-inline cost {} > {} ({} 个调用点)", cost, limit, sites),
+        );
+        return false;
+    }
+    let rspan: Span = match s {
+        Stmt::Expr { span, .. } | Stmt::Return { span, .. } => span.clone(),
+        _ => return false,
+    };
+
+    let uid = STMT_INLINE_UID.fetch_add(1, Ordering::Relaxed);
+    let label_prefix = format!("__inl{}__l", uid);
+    let end_label = format!("__inl{}__end", uid);
+    let mut map: HashMap<String, String> = HashMap::new();
+    let mut bind: Vec<BlockItem> = Vec::new();
+    // 形参 → 临时量。不用「把实参表达式直接代入引用处」是因为参数可写（形参是
+    // 局部变量），代入会改变求值次数与写入目标；先存后改与 callee 语义逐字一致。
+    //
+    // **实参表达式属于 caller 作用域，绝不能跟着改名**：否则 `f_luaopen(L)` 里
+    // `stack_init(L)` 的实参 `L` 会被改成 `__inlN$_L`（那是刚要新建的形参临时量本身）。
+    // 旧代码里 `bind` 与 callee 自己的声明混在同一个 `items` 里一起改名，同一个坑。
+    for (p, a) in f.params.iter().zip(args.iter()) {
+        let pname = match p.name.as_ref() {
+            Some(id) => id.name.clone(),
+            None => return false,
+        };
+        let tmp = format!("__inl{}$_{}", uid, pname);
+        map.insert(pname, tmp.clone());
+        bind.push(BlockItem::Decl(Decl::Var(plain_var_decl(
+            p.ty.clone(),
+            tmp,
+            Some(a.clone()),
+            &p.span,
+        ))));
+    }
+    // callee 自己的声明与语句整体搬进来（这些才在 callee 作用域里，需要改名）。
+    let mut moved: Vec<BlockItem> = body.items.clone();
+    // **先把 callee 局部声明本身改完名**再改引用：`rename_idents_in_items` 只改表达式，
+    // 不改 `Decl::Var` 的名字字段。漏了这一步就是「声明叫 `L`、引用叫 `__inlN_lL`」，
+    // 而本 pass 跑在语义分析之后，未解析的名字不会被报错，而是到了 codegen 才
+    // 懒注册成一个新栈帧槽——实测 Lua 内联后直接段错误。
+    for it in moved.iter_mut() {
+        rename_decl_names_in_item(it, uid, &mut map);
+    }
+    if !in_return {
+        // 值被丢弃：每个 `return` 先求值再跳到展开块的出口。
+        let mut rewritten: Vec<BlockItem> = Vec::new();
+        for it in moved.drain(..) {
+            match it {
+                BlockItem::Stmt(mut st) => {
+                    rewrite_returns_discarded(&mut st, &end_label, &rspan);
+                    rewritten.push(BlockItem::Stmt(st));
+                },
+                other => rewritten.push(other),
+            }
+        }
+        moved = rewritten;
+        moved.push(BlockItem::Stmt(Stmt::Label {
+            name: Ident {
+                name: end_label.clone(),
+                span: rspan.clone(),
+            },
+            stmt: Box::new(Stmt::Block {
+                b: Block { items: vec![], span: rspan.clone() },
+                span: rspan.clone(),
+            }),
+            span: rspan.clone(),
+        }));
+    }
+    prefix_labels_in_items(&mut moved, &label_prefix);
+    rename_idents_in_items(&mut moved, &map);
+    let mut items: Vec<BlockItem> = bind;
+    items.extend(moved);
+    *s = Stmt::Block {
+        b: Block { items, span: rspan.clone() },
+        span: rspan.clone(),
+    };
+    trace_inline_decision(
+        &callee_name,
+        "INLINE",
+        &format!("static body inline (cost {}, depth {})", cost, depth),
+    );
+    true
+}
+
 fn try_stmt_inline_call(
     s: &mut Stmt,
-    funcs: &HashMap<String, FuncDecl>,
+    funcs: &InlineTable,
     caller_flatten: bool,
     depth: u32,
 ) -> bool {
@@ -2850,6 +3656,12 @@ fn try_stmt_inline_call(
     // 调用方同名变量及多次展开互相冲突)
     let uid = STMT_INLINE_UID.fetch_add(1, Ordering::Relaxed);
     let mut map: HashMap<String, String> = HashMap::new();
+    // `bind` 与 `items` 必须分开：前者是「把 caller 的实参存进形参临时量」，表达式属于
+    // **caller 作用域**，不能跟着 callee 的名字重映射走；后者才是 callee 自己的声明与语句。
+    // 旧写法把两者塞进同一个 `items` 再整体改名（实参会被改成刚建的形参名），而且
+    // `mid`（callee 的中间语句）是在改名**之后**才 push 的，等于从来没被改过名——
+    // 两个错正好叠在一起，只在「caller 有同名变量」时露出来。
+    let mut bind: Vec<BlockItem> = Vec::new();
     let mut items: Vec<BlockItem> = Vec::new();
     for (p, a) in f.params.iter().zip(args.iter()) {
         let pname = match p.name.as_ref() {
@@ -2858,7 +3670,7 @@ fn try_stmt_inline_call(
         };
         let tmp = format!("__inl{}_${}", uid, pname);
         map.insert(pname.clone(), tmp.clone());
-        items.push(BlockItem::Decl(Decl::Var(plain_var_decl(
+        bind.push(BlockItem::Decl(Decl::Var(plain_var_decl(
             p.ty.clone(),
             tmp,
             Some(a.clone()),
@@ -2874,11 +3686,11 @@ fn try_stmt_inline_call(
         v.name.name = new;
         items.push(BlockItem::Decl(Decl::Var(v)));
     }
-    // 展开块内的 callee 名字重命名 (含声明初始化器与中间语句)
-    rename_idents_in_items(&mut items, &map);
     for st in mid {
         items.push(BlockItem::Stmt(st));
     }
+    // 展开块内的 callee 名字重命名（声明初始化器与中间语句一起）
+    rename_idents_in_items(&mut items, &map);
     // 返回语句 (ret_val 的表达式已随 items 之前的 rename 处理? 不:
     // ret_val 尚未插入 items, 单独重命名)
     match ret_val {
@@ -2908,6 +3720,9 @@ fn try_stmt_inline_call(
         },
     }
     trace_inline_decision(&callee_name, "INLINE", "always_inline (statement expansion)");
+    // 形参绑定必须排在最前（callee 的声明/语句会读它们），而它们又不参与改名，
+    // 所以只能到最后一步才拼回去。
+    items.splice(0..0, bind);
     *s = Stmt::Block {
         b: Block {
             items,
@@ -3035,7 +3850,7 @@ fn substitute_params(expr: Expr, params: &[(String, Expr)], pack_args: &[Expr]) 
 fn try_inline_call(
     name: &str,
     args: &[Expr],
-    funcs: &HashMap<String, FuncDecl>,
+    funcs: &InlineTable,
     level: u8,
     caller_flatten: bool,
     caller_is_hot: bool,
@@ -3271,7 +4086,7 @@ fn expr_contains_va_arg_pack(e: &Expr) -> bool {
 
 fn inline_expr(
     e: Expr,
-    funcs: &HashMap<String, FuncDecl>,
+    funcs: &InlineTable,
     level: u8,
     caller_flatten: bool,
     caller_is_hot: bool,
@@ -4496,15 +5311,24 @@ mod tests {
             },
         ];
 
+        // 内联决策读的是 `InlineTable`（函数表 + 调用点数 + asm 引用名），测试侧同样
+        // 打包一份，不让测试走另一条「只有函数表」的路径；本程序没有内联汇编，
+        // 所以 asm 名单为空。
+        let table = InlineTable {
+            sites: count_direct_call_sites(&funcs),
+            asm_names: std::collections::HashSet::new(),
+            funcs,
+        };
+
         // O2 + caller_is_hot=false: non-static with params should REJECT
-        let result_cold = try_inline_call("add", &args, &funcs, 2, false, false, 0);
+        let result_cold = try_inline_call("add", &args, &table, 2, false, false, 0);
         assert!(
             result_cold.is_none(),
             "O2 cold caller should reject non-static callee with params"
         );
 
         // O2 + caller_is_hot=true: profile-relaxed should ACCEPT
-        let result_hot = try_inline_call("add", &args, &funcs, 2, false, true, 0);
+        let result_hot = try_inline_call("add", &args, &table, 2, false, true, 0);
         assert!(
             result_hot.is_some(),
             "O2 hot caller should inline non-static callee (profile-relaxed)"

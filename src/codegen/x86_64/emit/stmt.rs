@@ -733,7 +733,12 @@ impl Codegen {
             },
             Stmt::Expr { e, .. } => {
                 if !self.gen_unknown_builtin_stmt(e) {
+                    // 表达式语句的值没人要（P13 阶段1 的 Discarded 语境）：带上这个上下文
+                    // 去求值，赋值臂末尾的宽度归约就能省掉。`gen_expr` 入口会把它消费掉，
+                    // 所以只有本节点看得到，嵌套子表达式一律当「值要用」。
+                    self.value_is_dead = true;
                     self.gen_expr(e, Self::EVAL_BASE);
+                    self.value_is_dead = false;
                 }
             },
             Stmt::If {
@@ -770,14 +775,19 @@ impl Codegen {
                     }
                     // else: condition is false, no labels, no else → skip
                 } else {
-                    self.gen_expr(cond, Self::EVAL_BASE);
-                    self.emit_truth_flags(&cond.ty());
                     let le = self.fresh_label();
                     let lend = self.fresh_label();
-                    self.jmp_rel32(&le, JumpKind::Je);
+                    // 条件进分支语境：`&&`/`||`/`!`/`!= 0` 在 [gen_cond_jump_to] 里
+                    // 按短路拆成直生 jcc，不再把每个比较材料化成 0/1 再 test。
+                    self.gen_cond_jump_to(cond, &le, false);
                     self.gen_stmt(then_);
                     // Skip dead jmp when then-body ends with return
                     let then_ends_ret = Self::stmt_ends_with_return(then_);
+                    // **不要**在这里追加「无 else 就不发这条 jmp」的 to-next 抑制：
+                    // 实测 luaV_execute 里能删掉 135 条（静态 −675 字节），但 fib(32) 反而
+                    // 慢 3.8%（同机交替 best-of-9：min 310.9→322.6ms）—— 那 5 字节×135 的
+                    // 位置移动把热循环体推离了原有对齐，布局代价远大于省下一条恒定 Taken 跳。
+                    // 数据与结论见 .trae/documents/x86_64-p13-hot-path-emission-optimization-plan.md §2。
                     if !then_ends_ret {
                         self.jmp_rel32(&lend, JumpKind::Jmp);
                     }
@@ -797,9 +807,7 @@ impl Codegen {
                 self.break_targets.push((le.clone(), false));
                 self.maybe_align_loop();
                 self.label(&ls);
-                self.gen_expr(cond, Self::EVAL_BASE);
-                self.emit_truth_flags(&cond.ty());
-                self.jmp_rel32(&le, JumpKind::Je);
+                self.gen_cond_jump_to(cond, &le, false);
                 self.gen_stmt(body);
                 self.jmp_rel32(&ls, JumpKind::Jmp);
                 self.label(&le);
@@ -827,14 +835,15 @@ impl Codegen {
                 self.maybe_align_loop();
                 self.label(&ls);
                 if let Some(c) = cond {
-                    self.gen_expr(c, Self::EVAL_BASE);
-                    self.emit_truth_flags(&c.ty());
-                    self.jmp_rel32(&le, JumpKind::Je);
+                    self.gen_cond_jump_to(c, &le, false);
                 }
                 self.gen_stmt(body);
                 self.label(&lst);
                 if let Some(s) = step {
+                    // for 的 step 也是表达式语句：值同样没人读。
+                    self.value_is_dead = true;
                     self.gen_expr(s, Self::EVAL_BASE);
+                    self.value_is_dead = false;
                 }
                 self.jmp_rel32(&ls, JumpKind::Jmp);
                 self.label(&le);
@@ -857,9 +866,7 @@ impl Codegen {
                 self.label(&ls);
                 self.gen_stmt(body);
                 self.label(&lc);
-                self.gen_expr(cond, Self::EVAL_BASE);
-                self.emit_truth_flags(&cond.ty());
-                self.jmp_rel32(&ls, JumpKind::Jne);
+                self.gen_cond_jump_to(cond, &ls, true);
                 self.label(&le);
                 self.loop_continue = sc;
                 self.loop_break = sb;
@@ -1173,6 +1180,8 @@ impl Codegen {
                     self.gen_block_items(&case.body.items);
                 }
                 // break 出口: switch 值保存在帧内槽, 无需弹栈
+                // `l_end` 紧贴 `l_break`，这条 jmp 看起来是 to-next 冗余，但和上面 If 那一支
+                // 同属已实测**删了会变慢**的一类（布局/对齐代价），保留原形状。
                 self.label(&l_break);
                 self.jmp_rel32(&l_end, JumpKind::Jmp);
                 self.label(&l_end);

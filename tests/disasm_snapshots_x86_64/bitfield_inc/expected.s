@@ -5,7 +5,7 @@ sub $0x2f0,%rsp
 mov %rbx,-0x10(%r13)
 <nop padding>
 mov %rdi,-0x48(%r13)
-mov -0x48(%r13),%rax
+mov %rdi,%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
@@ -16,7 +16,6 @@ mov (%r8),%r8d
 and $0x7,%r8
 add %r8,%rbx
 mov %rbx,%rax
-movslq %eax,%rax
 and $0x7,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx

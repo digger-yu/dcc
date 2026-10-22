@@ -19,6 +19,51 @@ use crate::semantics::{self, *};
 use crate::target::Target;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+
+/// 标量写时目标地址的持有方式（P13 阶段2）。
+///
+/// 三条路按「右值会不会踩到地址」分层，优先级从上到下：
+///   * [`AddrKeep::InRcx`]：地址搬进 `rcx`。右值只会写 `rax`（白名单
+///     [`Codegen::store_rhs_isolated`]），算完直接 store——一条 `mov`，不碰栈。
+///   * [`AddrKeep::Late`]：地址**不保存、也不算两遍**。右值不可能改地址链上的
+///     名字（[`Codegen::store_addr_after_rhs`]），所以 C11 6.5.16 的「左右操作数
+///     求值无序」允许先算右值、随后一条 `lea`/`mov` 重算出同一个地址——push/pop
+///     整对消失，还省掉「押栈 + 弹栈」的 store→load 前递。
+///   * [`AddrKeep::OnStack`]：其余形态照旧 `push rax` / `pop rcx`。
+#[derive(Clone, Copy)]
+pub(crate) enum AddrKeep {
+    InRcx,
+    Late(LateAddr),
+    OnStack,
+}
+
+/// [`AddrKeep::Late`] 重算地址所需的全部常量信息。
+///
+/// 判据与发射单源：`late_addr_shape` 能完整描述出一个形态才允许 Late，发射时就按
+/// 同一个描述发码，不会出现「判定放过、发射时已不知道怎么算」的分歧。这也是不把
+/// 地址暂存进 `Codegen` 字段的理由——字段会被提前 return 的臂泄漏，局部的
+/// `AddrKeep` 会被编译器逼着配上对。
+#[derive(Clone, Copy)]
+pub(crate) enum LateAddr {
+    /// 地址 = `r13 + off`：栈槽本身，或全是常量字段偏移的成员链（`a` / `a.b.c`）。
+    Frame(i64),
+    /// 地址 = `[r13 + slot] + more`：`*p` 的 `more == 0`，`p->f` 的 `more == 字段偏移`。
+    /// 指针值被**重新读一次**，所以右值不得改写它（见 `late_addr_shape`）。
+    Loaded { slot: i64, more: i64 },
+}
+
+impl LateAddr {
+    fn plus(self, off: i64) -> Self {
+        match self {
+            LateAddr::Frame(o) => LateAddr::Frame(o + off),
+            LateAddr::Loaded { slot, more } => LateAddr::Loaded {
+                slot,
+                more: more + off,
+            },
+        }
+    }
+}
+
 impl Codegen {
     /// 比较运算 → `setcc` 助记符 + 条件码。
     ///
@@ -43,6 +88,562 @@ impl Codegen {
             BinOp::Ne => ("setne", CondCode::Ne),
             _ => unreachable!("cmp_cc: 非比较运算"),
         }
+    }
+
+    /// 条件直生分支允许的操作数类型：整型（含字符/`_Bool`/枚举）与指针/数组。
+    ///
+    /// 本判据只负责把「不是走整数 cmp 臂」的形态挡在外面（浮点/复数/向量/`__int128`/
+    /// 结构体），位宽选择仍由比较臂自己按 `size()` 定——不在这里重写。
+    pub(crate) fn cmp_flags_types_ok(ty: &Type) -> bool {
+        Self::is_integer_type(ty) || matches!(ty, Type::Ptr(_) | Type::Array(_, _))
+    }
+    /// 标量赋值的「右值不会碰地址寄存器」白名单（P13 阶段2）。
+    ///
+    /// 判据形态与 Binop 臂的 `rhs_isolated` 同源：用**形态枚举**而不是
+    /// `expr_has_side_effects`（它对 `StmtExpr`/内置函数返回 false 是既有案底，而那两类里
+    /// 完全可能有 call；喊错一条就是静默错值）。命中后地址先进 `rcx`、右值再进 `rax`，
+    /// 于是赋值臂不再需要「押地址到栈上再 `pop` 回来」。额外三道门：
+    ///   * 两侧都必须是**纯整型或指针**且宽度 ≤ 8：浮点的值通道是 xmm0/st(0)，16 字节的值模型是
+    ///     `(rax, rdx)` 一对；聚合类型（struct/union/array/vector/complex）虽然也能 ≤ 8 字节，
+    ///     但它们的赋值走的是「整块 `rep movsb`」那条子路，不是单条 store，一并排除。
+    ///     三者都沿用原有那条臂，不在这里复制第二份顺序；
+    ///   * 左值不是位域：位域写要按宽度做 RMW 掩码，是另一条臂；
+    ///   * 右值只能是「只会写 `rax`」的标量读形态：字面量、名字，以及由 `Cast`/`Member`/
+    ///     `Deref` 套出来的标量读链（见 [`Self::scalar_load_shape`]）。移位计数、除法的
+    ///     `rax/rdx`、call 返回值、`Index` 取址等形态全在名单外。
+
+    /// 右值的「只会写 `rax`」形态判据：除了字面量与名字，还允许**纯标量读链**
+    /// （`Cast`/`Member`/`Deref` 套在名字或链上）——本后端这几条取址路径一律把中间地址
+    /// 算在 `rax` 上（`gen_lvalue_addr` 的 Member/Deref 臂、emit_lea_r13 + `add rax, off`），
+    /// 不会踩 `rcx`。
+    ///
+    /// **`Index` 故意不进名单**：下标取址要把索引算进 `rcx`（`gen_lvalue_addr` 的 Index 臂
+    /// 与 `mem/addr.rs` 的基址累加都如此），那正好是地址寄存器的位置；位域读也要跳
+    /// RMW 掩码那一套，一并排除。这一判据不靠「应该是安全的」推断：`store_direct_*.c`
+    /// 夹具与四档等价、gcc-dg 对拍都在直接试它。
+    fn scalar_load_shape(e: &Expr) -> bool {
+        match e {
+            Expr::Int { .. } | Expr::Char { .. } | Expr::Ident { .. } => true,
+            // 整型常量表达式在 `Expr::Binop` 臂里会被 `const_eval` 折成一条
+            // `mov imm`，折叠后只写 `rax`。判据与那条折叠逐字同源
+            //（[`Self::binop_const_foldable`]），而不是「大概是安全的」。
+            Expr::Binop { .. } => Self::binop_const_foldable(e),
+            Expr::Cast { e: inner, .. } => Self::scalar_load_shape(inner),
+            Expr::Member { expr, .. } => {
+                !matches!(expr.ty(), Type::Struct(_, _, _, _) | Type::Union(_, _, _, _))
+                    && Self::scalar_load_shape(expr)
+                    && Self::expr_bitfield_width(e).is_none()
+            },
+            Expr::Deref { e: inner, .. } => Self::scalar_load_shape(inner),
+            _ => false,
+        }
+    }
+
+    /// `Expr::Binop` 臂会不会把整条表达式折成一条 `mov imm`。
+    ///
+    /// 与 `dispatch.rs` 的 `Expr::Binop` 臂逐字同源：两侧与结果都是整型、不是
+    /// `&&`/`||`、无副作用、`const_eval::eval` 成功。任何一条不满足就不折叠，
+    /// 那时右值可能写 `rcx`，不能进 [`Self::scalar_load_shape`]。
+    fn binop_const_foldable(e: &Expr) -> bool {
+        let Expr::Binop { op, l, r, .. } = e else {
+            return false;
+        };
+        !matches!(op, BinOp::AndAnd | BinOp::OrOr)
+            && Self::is_integer_type(&l.ty())
+            && Self::is_integer_type(&r.ty())
+            && Self::is_integer_type(&e.ty())
+            && !Self::expr_has_side_effects(e)
+            && const_eval::eval(e).is_ok()
+    }
+
+    /// 「单条 GP store 就能写完的标量」——阶段2 两条白名单共用的类型门。
+    ///
+    /// 聚合类型（含 ≤ 8 字节的 struct/array/vector/complex）即使尺寸放得下也不接：
+    /// 它们走整块拷贝子路，那里的 `rcx` 后面还要当 `rep movsb` 的计数器用。
+    fn store_scalar_ty_ok(t: &Type) -> bool {
+        t.size() <= 8
+            && match t {
+                Type::Struct(_, _, _, _)
+                | Type::Union(_, _, _, _)
+                | Type::Array(_, _)
+                | Type::Vector(_, _)
+                | Type::Complex(_)
+                | Type::Imaginary(_) => false,
+                Type::Ptr(_) => true,
+                other => Self::is_integer_type(other),
+            }
+    }
+
+    pub(crate) fn store_rhs_isolated(lv: &Expr, r: &Expr, l_ty: &Type) -> bool {
+        let r_ty = r.ty();
+        Self::scalar_load_shape(r)
+            && Self::store_scalar_ty_ok(l_ty)
+            && Self::store_scalar_ty_ok(&r_ty)
+            && Self::expr_bitfield_width(lv).is_none()
+    }
+
+    /// 标量写：把已算在 `rax` 的目标地址保到右值求值之后（阶段2 的统一入口）。
+    ///
+    /// 今天 Deref / Member / `__real__` / Index / 通用这五条赋值臂各自都写了一遍
+    /// 「`push rax` → 算右值 → `pop rcx` → store」，押栈的唯一理由是「地址与右值挤
+    /// 同一个号」。判据只存这一份（[`Self::plan_addr_keep`]），调用方只需把返回值
+    /// 交给 [`Self::restore_addr_after_rhs`]。
+    ///
+    /// 为什么用**显式返回值**而不是藏在 `Codegen` 字段里：字段会被「save 与 restore 之间
+    /// 提前 return」的臂泄漏，而下一个 `pop(1)` 一旦被静默跳过，store 写的就是陈旧的 rcx
+    //（静默错值）。局部变量不会骗人：编译器会报未使用，人也看得到配对。
+    pub(crate) fn save_addr_for_rhs(&mut self, lv: &Expr, r: &Expr, l_ty: &Type) -> AddrKeep {
+        let keep = self.plan_addr_keep(lv, r, l_ty);
+        match keep {
+            // 地址之后重算，这里一条也不发（已经算在 rax 的那份就此作废）。
+            AddrKeep::Late(_) => {},
+            AddrKeep::InRcx => self.mov(1, 0), // rcx = 目标地址（净栈变化为零）
+            AddrKeep::OnStack => self.push(0), // 保存目标地址（右值会踩 rax）
+        }
+        keep
+    }
+
+    /// 三条路的判据，按代价从低到高：先把地址搬进 `rcx`（一条 `mov`），否则拖到右值
+    /// 之后重算（一条 `lea`/`mov`+`add`），都不行才押栈（两条 + 内存往返）。
+    pub(crate) fn plan_addr_keep(&mut self, lv: &Expr, r: &Expr, l_ty: &Type) -> AddrKeep {
+        if Self::store_rhs_isolated(lv, r, l_ty) {
+            return AddrKeep::InRcx;
+        }
+        if let Some(shape) = self.store_addr_after_rhs(lv, r, l_ty) {
+            return AddrKeep::Late(shape);
+        }
+        AddrKeep::OnStack
+    }
+
+    /// [`AddrKeep::Late`] 的类型门：单条 store 能写完的标量。
+    ///
+    /// 与 [`Self::store_scalar_ty_ok`] 的差别只在浮点：`InRcx` 要求右值「只会写
+    /// `rax`」，而浮点的值通道是 xmm0；Late 只要求「重算地址不碰值通道」，
+    /// xmm0/st(0) 与 rcx 互不干扰，所以 `float`/`double` 也能走。
+    /// `long double` / `__float128` 是 16 字节且值在 x87 栈上，不接。
+    fn late_store_ty_ok(t: &Type) -> bool {
+        match t {
+            Type::Struct(_, _, _, _)
+            | Type::Union(_, _, _, _)
+            | Type::Array(_, _)
+            | Type::Vector(_, _)
+            | Type::Complex(_)
+            | Type::Imaginary(_)
+            | Type::LongDouble
+            | Type::Float128 => false,
+            Type::Float | Type::Double | Type::Ptr(_) => true,
+            other => Self::is_integer_type(other),
+        }
+    }
+
+    /// 判据：这条标量写的地址能不能**在右值之后重算**。
+    ///
+    /// 与 [`Self::store_rhs_isolated`] 的区别在右值形态：那里只收「只会写 `rax`」的
+    /// 读链，而这里收「会踩 `rcx`/`rdx` 但不会改地址」的任意形态——`a.b = x + 1` 与
+    /// `L->top = L->top + 1` 这两类主力恰好都在前一条的名单外。两道门：
+    ///   * 地址链能描述成 [`LateAddr`]（`Ident` / 全常量字段偏移的 `Member` 链 /
+    ///     `*p`、`p->f` 且 `p` 住栈槽）；
+    ///   * 只写单条 store 的标量，且不是位域（位域写是 RMW 掩码，另一条臂）。
+    ///
+    /// 「右值不得改写地址链上的名字」的约束内聚在 `late_addr_shape` 里：只有 `Loaded`
+    /// 形态的指针值会被重新读，`Frame` 的 `r13+off` 与右值无关。
+    fn store_addr_after_rhs(&mut self, lv: &Expr, r: &Expr, l_ty: &Type) -> Option<LateAddr> {
+        if !Self::late_store_ty_ok(l_ty) || Self::expr_bitfield_width(lv).is_some() {
+            return None;
+        }
+        self.late_addr_shape(lv, r)
+    }
+
+    /// 把 lvalue 的地址形态描述出来；描述不出来就不许 Late。
+    ///
+    /// `Index` 故意不在名单里：下标取址要算进 `rcx`（`gen_lvalue_addr` 的 Index 臂
+    /// 与 `mem/addr.rs` 的基址累加都如此），重算时正好撞上 store 要的地址寄存器；
+    /// 而且下标表达式本身可能有 side effect，重算就是重复求值。
+    fn late_addr_shape(&mut self, lv: &Expr, rhs: &Expr) -> Option<LateAddr> {
+        match lv {
+            Expr::Ident { name, ty, .. } => {
+                // VLA 的「地址」存在元数据槽里，不在这里重算。
+                if ty.has_vla() || !self.name_is_plain_slot(&name.name) {
+                    return None;
+                }
+                Some(LateAddr::Frame(self.stack_home_off(&name.name)))
+            },
+            Expr::Member {
+                expr,
+                field,
+                is_arrow,
+                ..
+            } => {
+                let field_off = self.late_member_off(expr, field, *is_arrow)?;
+                if *is_arrow {
+                    // `(&x)->f` 就是 `x.f`：SSA 把变址/取址临时值实体化成 `AddrOf`
+                    // 之后，这正是绝大多数「隐式解引用」在 AST 里的样子。
+                    // 字段偏移必须按**基址**（结构体本体）算：`expr` 自己的类型是
+                    // 指针，`member_target_ty(_, false)` 不解包，拿它查会得到 `None`，
+                    // 整条分支就恒不成立（写成这样时实测 m6 的 `s.a = f()` 仍在押栈）。
+                    if let Expr::AddrOf { e: base, .. } = &**expr {
+                        let dot_off = self.late_member_off(base, field, false)?;
+                        return Some(self.late_addr_shape(base, rhs)?.plus(dot_off));
+                    }
+                    // 基址是指针的**值**：必须住在栈槽上，且右值不得改写它。
+                    let Expr::Ident { name, ty, .. } = &**expr else {
+                        return None;
+                    };
+                    if ty.has_vla()
+                        || !self.name_is_plain_slot(&name.name)
+                        || Self::expr_may_write_name(rhs, &name.name)
+                    {
+                        return None;
+                    }
+                    Some(LateAddr::Loaded {
+                        slot: self.stack_home_off(&name.name),
+                        more: field_off,
+                    })
+                } else {
+                    // `a.b`：基址是对象本身，地址恒定，与右值无关。
+                    Some(self.late_addr_shape(expr, rhs)?.plus(field_off))
+                }
+            },
+            Expr::Deref { e: inner, .. } => {
+                // `*(&x)` 就是 `x` 本身：SSA 的地址临时值常以这对形态出现。
+                if let Expr::AddrOf { e: base, .. } = &**inner {
+                    return self.late_addr_shape(base, rhs);
+                }
+                let Expr::Ident { name, ty, .. } = &**inner else {
+                    return None;
+                };
+                if ty.has_vla()
+                    || !self.name_is_plain_slot(&name.name)
+                    || Self::expr_may_write_name(rhs, &name.name)
+                {
+                    return None;
+                }
+                Some(LateAddr::Loaded {
+                    slot: self.stack_home_off(&name.name),
+                    more: 0,
+                })
+            },
+            Expr::Cast { e: inner, .. } => self.late_addr_shape(inner, rhs),
+            _ => None,
+        }
+    }
+
+    /// `Member` 的静态字段偏移；带 VLA 成员的结构要运行时算偏移
+    ///（`gen_vm_member_offset` 会分配临时槽并写 r10/r11），不在「一条 `lea` 重算」的包络内。
+    fn late_member_off(&mut self, base: &Expr, field: &Ident, is_arrow: bool) -> Option<i64> {
+        let base_ty = base.ty();
+        let target_ty = self.resolve_complete_struct_ty(Self::member_target_ty(base_ty, is_arrow));
+        if target_ty.has_vla() {
+            return None;
+        }
+        match &target_ty {
+            Type::Struct(_, fields, _, _) | Type::Union(_, fields, _, false) => {
+                let (f, extra) = find_field(fields, &field.name)?;
+                Some((f.offset + extra) as i64)
+            },
+            _ => None,
+        }
+    }
+
+    /// 名字是否是「平平无奇的帧槽」：全局、volatile、upvar、VLA 都不算。
+    ///
+    /// `home_for` 返回 `Reg` 时值住在寄存器里，`r13+off` 那条地址可能是从没写过的槽——
+    /// 地址类消费点对此有专门判据（`stack_home_off` 报内部错误），这里提前挡掉。
+    fn name_is_plain_slot(&mut self, name: &str) -> bool {
+        if self.is_global_not_local(name)
+            || self.volatile_locals.contains_key(name)
+            || self.upvar_offsets.contains_key(name)
+            || self.vla_offsets.contains_key(name)
+        {
+            return false;
+        }
+        matches!(
+            self.home_for(name),
+            crate::location::Location::Stack(_) | crate::location::Location::Spill(_)
+        )
+    }
+
+    /// 右值 `e` 是否会写名字 `name`（只问栈槽局部）。
+    ///
+    /// 为什么问「写」不问「读」：Late 重算要读到**同一个地址**，只有写才会改它。
+    /// 读完全安全，而 `L->top = L->top + 1` 正是 luaV_execute 的主力形态。
+    ///
+    /// 认不得的形态一律 true：`Call`/`StmtExpr`/`AsmExpr` 可能通过指针写任意对象，
+    /// `&name` 一出现就说明地址逸出。这两条与后端白名单「宁宽宁窄」的纪律一致
+    ///（见 §6：不得用 `expr_has_side_effects` 冒充形态枚举）。
+    fn expr_may_write_name(e: &Expr, name: &str) -> bool {
+        match e {
+            Expr::Int { .. }
+            | Expr::Float { .. }
+            | Expr::ComplexLit { .. }
+            | Expr::ComplexIntLit { .. }
+            | Expr::String { .. }
+            | Expr::Char { .. }
+            | Expr::SizeofTy { .. }
+            | Expr::SizeofExpr { .. }
+            | Expr::AlignofTy { .. }
+            | Expr::AlignofExpr { .. }
+            | Expr::LabelAddr { .. }
+            | Expr::VaArgPack { .. }
+            | Expr::Ident { .. } => false,
+            Expr::Binop { l, r, .. } => {
+                Self::expr_may_write_name(l, name) || Self::expr_may_write_name(r, name)
+            },
+            Expr::Unary { e, .. } | Expr::Cast { e, .. } => Self::expr_may_write_name(e, name),
+            Expr::Member { expr, .. } => Self::expr_may_write_name(expr, name),
+            Expr::Index { arr, idx, .. } => {
+                Self::expr_may_write_name(arr, name) || Self::expr_may_write_name(idx, name)
+            },
+            Expr::Deref { e, .. } | Expr::Real { e, .. } | Expr::Imag { e, .. } => {
+                Self::expr_may_write_name(e, name)
+            },
+            Expr::Cond {
+                cond,
+                then_,
+                else_,
+                ..
+            } => {
+                Self::expr_may_write_name(cond, name)
+                    || Self::expr_may_write_name(then_, name)
+                    || Self::expr_may_write_name(else_, name)
+            },
+            Expr::Comma { l, r, .. } => {
+                Self::expr_may_write_name(l, name) || Self::expr_may_write_name(r, name)
+            },
+            Expr::Assign { l, r, .. } => {
+                Self::lvalue_is_name(l, name)
+                    || Self::expr_may_write_name(l, name)
+                    || Self::expr_may_write_name(r, name)
+            },
+            Expr::PostInc { e, .. }
+            | Expr::PostDec { e, .. }
+            | Expr::PreInc { e, .. }
+            | Expr::PreDec { e, .. } => {
+                Self::lvalue_is_name(e, name) || Self::expr_may_write_name(e, name)
+            },
+            // AddrOf / Call / StmtExpr / AsmExpr / VaArg / Offsetof / CompoundLit /
+            // InitList：地址逸出、任意指针写、认不得，一律当作会写。
+            _ => true,
+        }
+    }
+
+    /// 赋值目标 `l` 是否就是 `name` 本身（而不是它指向的东西）。
+    ///
+    /// `*p = v` 写的是指针指向的对象、`p->f = v` 写的是字段，两者都不改 `p` 的值，
+    /// 所以 arrow 与 Deref 都返回 false；`a.f = v` 只可能写 `a` 自己的内存，继续递归。
+    fn lvalue_is_name(l: &Expr, name: &str) -> bool {
+        match l {
+            Expr::Ident { name: n, .. } => n.name == name,
+            Expr::Member {
+                expr,
+                is_arrow: false,
+                ..
+            } => Self::lvalue_is_name(expr, name),
+            Expr::Cast { e, .. } => Self::lvalue_is_name(e, name),
+            _ => false,
+        }
+    }
+
+    /// 按 [`LateAddr`] 把地址重算进 `dst`。
+    ///
+    /// 只允许写 `dst`：调用时右值结果已经在 `rax`/`xmm0` 里，碰一下就读到残值。
+    /// `emit_lea_r13` 只写 dst，`load_stack` 只写 dst，`add_reg_byte_offset`
+    /// 在 `dst==1` 时把临时号避开到 rdx——三条臂都满足这条纪律。
+    pub(crate) fn emit_late_addr(&mut self, shape: LateAddr, dst: u8) {
+        match shape {
+            LateAddr::Frame(off) => self.emit_lea_r13(dst, off),
+            LateAddr::Loaded { slot, more } => {
+                self.load_stack(dst, slot);
+                if more != 0 {
+                    self.add_reg_byte_offset(dst, more);
+                }
+            },
+        }
+    }
+
+    /// [`Self::save_addr_for_rhs`] 的另一半：按 `keep` 把地址放回 `rcx`。
+    pub(crate) fn restore_addr_after_rhs(&mut self, keep: AddrKeep) {
+        match keep {
+            AddrKeep::InRcx => {},
+            AddrKeep::OnStack => self.pop(1), // rcx = 目标地址
+            AddrKeep::Late(shape) => self.emit_late_addr(shape, 1),
+        }
+    }
+
+    /// 条件求值（分支语境）：发条件本身，并告诉调用方「flags 已经是结果」。
+    ///
+    /// 返回 `Some(条件码)` 时，比较只发了 `cmp`/`test`，**没有**材料化 0/1；调用方必须
+    /// 立刻用 [`Self::emit_cond_jump`] 把它变成一条 jcc，中间不得发任何指令（任何 `emit`
+    /// 都会清掉 [`Codegen::last_cmp`]，那条纪律在 `instructions.rs::emit` 里）。
+    ///
+    /// 令牌在这里发出、在 Binop 臂被**消费**（不是读取），所以下面这些形态都自然退回
+    /// 材料化路径：`if (x + (a<b))`（外层 Add 把令牌拿走）、`if (f() < 0)` 之外的浮点/复数
+    /// /向量/`__int128` 比较（各有分流路径）、含赋值/调用的条件。标签号分配顺序保持
+    /// 不变：本函数只做「求值条件」这一件事，与原 `gen_expr(cond, EVAL_BASE)` 同位。
+    pub(crate) fn gen_cond_flags(
+        &mut self,
+        cond: &Expr,
+    ) -> Option<crate::codegen::x86_64::opcode::CondCode> {
+        self.cmp_flags_token = true;
+        self.gen_expr(cond, Self::EVAL_BASE);
+        self.cmp_flags_token = false;
+        self.last_cmp.take()
+    }
+
+    /// 条件分支语境的总入口：先做**形状分解**（`&&`/`||`/`!`/`x != 0`），
+    /// 再落到 [`Self::gen_cond_flags`] + [`Self::emit_cond_jump`]。
+    ///
+    /// 为什么需要这一层：`gen_cond_flags` 只把**最外层那一个比较**的 flags 交给
+    /// 调用方。`if (a < b && c < d)` 里两个比较各自都被当成「值要用」材料化成 0/1
+    /// 再 `test`——实测 `luaV_execute` 的 263 个 `setcc` 里有 186 个只是被 `test`
+    /// 消费。分解后每个比较只发 `cmp` + `jcc`，短路顺序逐字保持（左侧先求值）。
+    ///
+    /// 分解只在「不新增中间落点」的方向上做：
+    ///   * `if (l && r)` / `if (l || r)`（假则跳出）都拆成两条同向跳到目标的边——
+    ///     `!(l && r)` 与 `!(l || r)` 都等价于「任一侧为假」；
+    ///   * `do ... while (l || r)`（真则回头）同理；
+    ///   * `do ... while (l && r)` 需要一条「l 真才继续测 r」的边，多开一个标签。
+    ///
+    /// `!e` 直接把极性翻给 `e`；`x != 0` / `x == 0` 与「x 的真值」等价，也直接消掉。
+    /// x87 `long double` 与 `__float128` 没有 `emit_truth_flags` 的真值判据
+    /// （float.rs 里那条旁路只覆盖 Float/Double 与 _Complex），一律不分解。
+    pub(crate) fn gen_cond_jump_to(&mut self, cond: &Expr, target: &str, jump_if_true: bool) {
+        if let Expr::Unary {
+            op: UnOp::Not, e, ..
+        } = cond
+        {
+            if Self::truth_test_emittable(&e.ty()) {
+                self.gen_cond_jump_to(e, target, !jump_if_true);
+                return;
+            }
+        }
+        if let Expr::Binop {
+            op: op @ (BinOp::AndAnd | BinOp::OrOr),
+            l,
+            r,
+            ..
+        } = cond
+        {
+            if Self::truth_test_emittable(&l.ty()) && Self::truth_test_emittable(&r.ty()) {
+                if !jump_if_true {
+                    if matches!(op, BinOp::OrOr) {
+                        // `!(l || r)` = 「两侧都假才跳」：l 真就跳过 r，不能像
+                        // `&&` 那样「任一侧为假就跳」—— 那是 `!(l && r)` 的形态。
+                        // 弄反的后果是短路整条失效：`if (a || f() == 0)` 会先按 a
+                        // 的假值跳到 else，右值一次都不求值。
+                        let skip = self.fresh_label();
+                        self.gen_cond_jump_to(l, &skip, true);
+                        self.gen_cond_jump_to(r, target, false);
+                        self.label(&skip);
+                        return;
+                    }
+                    // `!(l && r)` = 「任一侧为假就跳」。
+                    self.gen_cond_jump_to(l, target, false);
+                    self.gen_cond_jump_to(r, target, false);
+                    return;
+                }
+                if matches!(op, BinOp::OrOr) {
+                    self.gen_cond_jump_to(l, target, true);
+                    self.gen_cond_jump_to(r, target, true);
+                    return;
+                }
+                // `l && r` 为真才回头：l 假就直接落到标签之后。
+                let skip = self.fresh_label();
+                self.gen_cond_jump_to(l, &skip, false);
+                self.gen_cond_jump_to(r, target, true);
+                self.label(&skip);
+                return;
+            }
+        }
+        if let Expr::Binop {
+            op: op @ (BinOp::Ne | BinOp::EqEq),
+            l,
+            r,
+            ..
+        } = cond
+        {
+            let is_zero = |e: &Expr| matches!(e, Expr::Int { v: 0, .. });
+            let probe = if is_zero(r) {
+                Some(&**l)
+            } else if is_zero(l) {
+                Some(&**r)
+            } else {
+                None
+            };
+            if let Some(p) = probe {
+                if Self::truth_test_emittable(&p.ty()) {
+                    let pol = if matches!(op, BinOp::Ne) {
+                        jump_if_true
+                    } else {
+                        !jump_if_true
+                    };
+                    self.gen_cond_jump_to(p, target, pol);
+                    return;
+                }
+            }
+        }
+        // `l_unlikely(x)` 展开成 `__builtin_expect((x) != 0, 0)`：这一步只是分支
+        // 提示，真值完全是第一个实参的。不把它拆掉的话，lvm.c 里每一处
+        // `if (l_unlikely(...))` 都会把条件先材料化成 0/1 再 test —— 实测
+        // `luaV_execute` 上 150 个 `setcc` 里这类占了大头。
+        if let Expr::Call { callee, args, .. } = cond {
+            if let Expr::Ident { name, .. } = &**callee {
+                if matches!(
+                    name.name.as_str(),
+                    "__builtin_expect" | "__builtin_expect_with_probability"
+                ) && !args.is_empty()
+                {
+                    // 第二个实参是提示值；字面量/名字无副作用，值本来就没人要，整条丢。
+                    // 其它形态（`++x`、call）可能带副作用，退回材料化路径。
+                    let hint_dead = args.len() < 2
+                        || matches!(&args[1], Expr::Int { .. } | Expr::Char { .. } | Expr::Ident { .. });
+                    if hint_dead && Self::truth_test_emittable(&args[0].ty()) {
+                        self.gen_cond_jump_to(&args[0], target, jump_if_true);
+                        return;
+                    }
+                }
+            }
+        }
+        let cc = self.gen_cond_flags(cond);
+        self.emit_cond_jump(target, cc, &cond.ty(), jump_if_true);
+    }
+
+    /// [`Self::emit_truth_flags`] 能对哪些类型给出真值判据（标志位）。
+    /// x87 `long double` / `__float128` 的值在 st(0) / 内存里，两条通道都没写
+    /// 「测值」那一步（§9.3b 的未修同族），所以不能被 [`Self::gen_cond_jump_to`]
+    /// 分解到 `emit_truth_flags` 上，只能继续走材料化路径。
+    fn truth_test_emittable(ty: &Type) -> bool {
+        !matches!(ty, Type::LongDouble | Type::Float128 | Type::Vector(_, _))
+    }
+
+    /// 把条件跳转发出去：拿到条件码就一条 jcc，拿不到就照旧 `test` + `je`/`jne`。
+    ///
+    /// `jump_if_true == false` 是 If/While/For 的「假则跳出」形态（取反条件码）；
+    /// `true` 是 do-while 的「真则回头」。两条路的落点与极性互逆，其余逐字节不变。
+    pub(crate) fn emit_cond_jump(
+        &mut self,
+        target: &str,
+        cc: Option<crate::codegen::x86_64::opcode::CondCode>,
+        cond_ty: &Type,
+        jump_if_true: bool,
+    ) {
+        if let Some(c) = cc {
+            let c = if jump_if_true { c } else { c.inverse() };
+            if let Some(kind) = Self::jump_kind_for_cc(c) {
+                self.jmp_rel32(target, kind);
+                return;
+            }
+            // 走到这里说明 `gen_expr` 的放行判据与这张表漂移了：条件码不可直生，
+            // 而 0/1 又已按判据没有材料化 —— 此时静默退回 `test rax,rax` 就是拿
+            // 一个从未写入的号当真值。报内部错误，让漂移在产物与诊断里都看得见。
+            self.report_internal_bug(
+                "E1137",
+                format!("条件直生分支拿到不可映射的条件码 {c:?}（目标 '{target}'）"),
+                "要么在 Binop 臂的 hand_off 判据里排除该条件码，要么在 jump_kind_for_cc 补形态；不得退回材料化（值没材料化）",
+            );
+        }
+        self.emit_truth_flags(cond_ty);
+        self.jmp_rel32(target, if jump_if_true { JumpKind::Jne } else { JumpKind::Je });
     }
 
     /// `cmp/test dst, imm` + `setcc al` + `movzbq` + 结果落到 `dst`。
@@ -89,6 +690,12 @@ impl Codegen {
             self.emit_insn_expect(&insn.with_gas(gas));
         }
         let (cc_letter, cond) = Self::cmp_cc(op, is_signed);
+        // 条件直生分支：`test` 与 `cmp 0` 的 ZF/SF/OF/CF 完全一致（上面那段注释就是
+        // 这条判据），所以 flags 可以直接交给 jcc，不必再走 setcc/movzbq/搬回 dst。
+        if self.cmp_flags_granted {
+            self.last_cmp = Some(cond);
+            return;
+        }
         self.emit_insn(&Insn::setcc_reg(cond, 0).with_gas(format!("{cc_letter} %al")));
         self.emit_insn(&Insn::raw_with_gas(&[0x48, 0x0F, 0xB6, 0xC0], "movzbq %al, %rax"));
         if dst != 0 {
@@ -485,6 +1092,13 @@ impl Codegen {
                     &[],
                 );
                 self.emit_insn(&cmp_insn.with_gas(format!("cmp {cmp_src_name}, {cmp_dst_name}")));
+                // 条件直生分支（`gen_cond_flags` 语境）：flags 就是结果，不材料化 0/1。
+                // 本函数到此就必须是终点（调用方紧接着发 jcc，中间任何发射都会清掉
+                // `last_cmp`），所以这里的 `return` 与上面的 `cmp_flags_granted` 是同一条约定。
+                if self.cmp_flags_granted {
+                    self.last_cmp = Some(Self::cmp_cc(op, is_signed).1);
+                    return;
+                }
                 // setcc al + movzbq %al, %rax 拆开各自挂 gas.
                 let (cc_letter, cond_code) = Self::cmp_cc(op, is_signed);
                 self.emit_insn(&Insn::setcc_reg(cond_code, 0).with_gas(format!("{cc_letter} %al")));
@@ -901,10 +1515,7 @@ impl Codegen {
                     let size = width.max(1);
                     if is_f128 {
                         // binary128 目标: 整型常量在 113 位尾数上精确 RNE 转换。
-                        Self::float128_data_bytes(
-                            FloatConst::from_int(&Type::Float128, v),
-                            size,
-                        )
+                        Self::float128_data_bytes(FloatConst::from_int(&Type::Float128, v), size)
                     } else if is_float {
                         // 浮点目标：整型常量在目标精度上精确 RNE 转换
                         // （旧写法经 `v as f64` 中转，|v| >= 2^53 会丢精度）。

@@ -97,8 +97,9 @@ impl Codegen {
                 if dst == 0 {
                     self.emit_load_mem(8);
                 } else {
-                    self.push(dst);
-                    self.pop(0);
+                    // `push r; pop r2` 就是 `mov r2, r`（净栈变化为零）；用栈做纯寄存器
+                    // 搬运既多两条指令，又让栈与写入顺序假扮成依赖。
+                    self.mov(0, dst);
                     self.emit_load_mem(8);
                     self.mov(dst, 0);
                 }
@@ -1448,9 +1449,8 @@ impl Codegen {
             MA::LoadScalar => {
                 // 从地址加载标量值
                 if dst != 0 {
-                    // 地址在 dst, 需要移到 rax 再加载
-                    self.push(dst);
-                    self.pop(0); // rax = addr
+                    // 地址在 dst, 需要移到 rax 再加载（纯寄存器搬运，不走栈）
+                    self.mov(0, dst);
                 }
                 let elem_ty = original_expr.ty();
                 // 基址是 `__seg_gs`/`__seg_fs` 指针时（`p[i]`、`q->a`、`a[i].f`）必须
@@ -1485,8 +1485,8 @@ impl Codegen {
                             &[],
                         )); // mov rcx, rax
                     } else {
-                        self.push(dst);
-                        self.pop(1); // rcx = addr
+                        // 上面 `dst == 0` 那支已经老老实实发 `mov rcx, rax`：这里同形。
+                        self.mov(1, dst); // rcx = addr
                     }
                 }
                 let elem_ty = original_expr.ty();
@@ -1570,9 +1570,8 @@ impl Codegen {
             MA::ComplexLoad => {
                 // 复数加载: 地址在 dst, 加载到临时槽并返回地址
                 if dst != 0 {
-                    // 地址在 dst, 需要移到 rax
-                    self.push(dst);
-                    self.pop(0); // rax = addr
+                    // 地址在 dst, 需要移到 rax（纯寄存器搬运，不走栈）
+                    self.mov(0, dst);
                 }
                 let elem_ty = original_expr.ty();
                 let result_off = self.complex_result_off();
@@ -1696,8 +1695,7 @@ impl Codegen {
                             &[],
                         )); // mov rcx, rax
                     } else {
-                        self.push(dst);
-                        self.pop(1); // rcx = addr
+                        self.mov(1, dst); // rcx = addr
                     }
                 }
                 let elem_ty = original_expr.ty();

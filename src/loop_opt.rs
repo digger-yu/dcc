@@ -1691,20 +1691,37 @@ fn detect_simple_for(
 //      `i` 根本没被替换; 未列举的 `Stmt`/`Expr` 形态同样静默漏替换。
 //   3. 单循环分块本身没有访存局部性收益 (内层仍连续扫同一段), 只是白付边界比较。
 //
-// 现形态: 只对**完美两层嵌套**做块 interchange, 并且**逐字保留循环体** (不做任何
-// 名字替换) —— 子循环用同名 `int i = ti;` 重新声明原归纳变量, 体内所有引用天然落在
+// 现形态: 只对**完美两层嵌套**的最内层维度做保序分段, 并且**逐字保留循环体** (不做
+// 任何名字替换) —— 子循环用同名 `int j = tj;` 重新声明原归纳变量, 体内所有引用天然落在
 // 正确的最近绑定上, 捕获在结构上被排除:
+//
+//   for (int i = 0; i < N; i++)                       ← 外层逐字保留
+//     for (int tj = 0; tj < M; tj = tj + ts)
+//       for (int j = tj; j < M && j < tj + ts; j++)
+//         BODY            ← 原样
+//
+// 曾形态 (ts×ts 块 interchange) 与现形态的差别只在**执行顺序**:
 //
 //   for (int ti = 0; ti < N; ti = ti + ts)
 //     for (int tj = 0; tj < M; tj = tj + ts)
 //       for (int i = ti; i < N && i < ti + ts; i++)
 //         for (int j = tj; j < M && j < tj + ts; j++)
-//           BODY            ← 原样
+//           BODY
 //
-// 覆盖的迭代空间与原两层循环逐点一致 (每个 (i,j) 恰好执行一次), 只是执行顺序按
-// ts×ts 块重排 ⇒ 局部性收益真实存在, 而正确性不依赖任何名字分析。安全前提见
-// `try_tile_nest`: 两维都必须是 `for (int iv = 0; iv < 常量; iv++)`、体内不写
-// 归纳变量、不取它们的地址、无 goto/label/switch/asm 形态。
+// 那个版本覆盖的迭代空间与原循环**逐点同集合同重数**, 但**顺序按块重排**, 而 C 的
+// 可观察行为恰恰包含体内副作用的顺序 ⇒ 它是一台静默误编译器: 实测
+// `for(i<7)for(k<7)printf("%d", f(xs[i],xs[k]));` 在 -O3 打印的数字集合与 -O0 完全
+// 相同、顺序不同 (逐行做多重集比对相等、按序比对不等, 是这条根因的判决性证据)。
+// 分块要合法必须有依赖分析 (GCC 的 -ftree-block-iterate 走 dependence/PDO, Clang
+// 只在显式 `#pragma clang loop block` 下做), 本仓没有依赖分析, 所以这里改成
+// **不重排**的等价形态: 只对最内层维度做保序分段 (strip mining), 外层循环一个字节
+// 都不动 ⇒ (i,j) 序列与原循环逐个相同, 正确性不再依赖任何「体内无副作用」假设。
+// 代价是没有跨 i 的块内复用 (那才是 blocking 的局部性收益来源), 这是**用正确性换
+// 收益**的唯一诚实取向; 想要真正的 blocking, 前置条件是补依赖分析, 不是放宽这里的判据。
+//
+// 安全前提见 `try_tile_nest`: 两维都必须是 `for (int iv = 0; iv < 常量; iv++)`、体内不写
+// 归纳变量、不取它们的地址、无 goto/label/switch/asm 形态, 且体内没有**绑定到被分段
+// 那层循环**的 `break` (见 `tile_body_is_safe` 的说明)。
 //
 // 接入前的两个前置都已消除 (本轮实测): 分块产物进 SSA 管线后曾把块索引 `__dcc_tile_i0` 的推进
 // 赋值当成「合成临时值」内联掉 ⇒ `while(1)` 永不推进 (实测 -O3 忙等)。根因不是
@@ -1716,7 +1733,8 @@ fn detect_simple_for(
 // 曾一度不能接入的另一半原因 (已修): 它产出的四层嵌套形态在 -O2 就得 0 (应 50)。
 // 那条在 AST 层 GVN 的 coalesce —— 它用**块内**写入集合判「一次性拷贝」, 把 for-init
 // 里的 `int i = ti;` 声明删掉了 (写 `i` 的 `i++` 属于外层节点) —— 已修,
-// 回归夹具 `tests/fixtures/opt/gvn_loop_copied_iv.c`。
+// 回归夹具 `tests/fixtures/opt/gvn_loop_copied_iv.c` (现形态里同一条 init 是
+// `int j = tj;`, 该夹具继续覆盖它)。
 
 /// 分块驱动: 只在「本项就是一个完美两层嵌套且可安全分块」时改写它; 其余形态
 /// 只递归 Block / If 两个容器 (与旧实现一致: 不下钻到循环体内, 因为分块一次就已
@@ -1852,7 +1870,7 @@ fn single_for_stmt(body: &Stmt) -> Option<&Stmt> {
     }
 }
 
-/// 体内是否存在让「重新声明归纳变量」失去等价性的形态。
+/// 体内是否存在让「重新声明归纳变量」或「分段后接取得不上的控制流」失去等价性的形态。
 ///
 /// 直接复用 LICM 的穷举名字扫描器 [`scan_stmt`]: 它对 `goto` / `label` / `switch`
 /// / 内联汇编 / 无法判定写入目标的左值一律置 `reject_all` (fail-safe), 并给出
@@ -1861,10 +1879,21 @@ fn single_for_stmt(body: &Stmt) -> Option<&Stmt> {
 ///     内循环里写 `i` 会影响后续所有轮次, 而块形式下它只作当前子循环);
 ///   * 归纳变量没被取址 (别名可能指向被换掉的那份存储);
 ///   * 没有出现名字栅栏表达不了的构造。
+///   * 体内**绑定到最内层循环**的 `break` 全部被更内层的循环/switch 屏蔽。
+///     本 pass 把原来只有一个循环体的 `for (j…)` 拆成「块计数器 `tj` + 子循环 `j`」
+///     两层, 未屏蔽的 `break` 原来退出 `j` 循环后直接进下一轮 `i`, 现在却退出子
+///     循环后还要把 `tj` 再往上推一段 ⇒ 多跑若干部本不该跑的迭代 (与
+///     `unroll_stmt_is_safe` 拦住的那条是同一类静默改变控制流)。`continue` 无需
+///     拦住: 它绑定的仍是最内层子循环, 下一轮 `j` 与原序列逐个相同。
 fn tile_body_is_safe(body: &Stmt, ivars: &[&str]) -> bool {
     let mut scan = NameScan::default();
     scan_stmt(&mut scan, body, Site::Body);
     if scan.reject_all || scan.poison || scan.gives_up {
+        return false;
+    }
+    // break/continue 的屏蔽关系沿用展开那套同一个行走器 (单一定义处):
+    // `break_shielded = false` 意为「目前没有任何循环/switch 能接住 break」。
+    if !unroll_stmt_is_safe(body, false, true) {
         return false;
     }
     ivars.iter().all(|v| {
@@ -1889,6 +1918,10 @@ fn try_tile_nest(
     if tile_size < 2 {
         return None;
     }
+    // 外层条件节点原样透传给 `build_blocked_nest`: 「外层逐字保留」是本 pass 的正确性
+    // 地基, 重新拼装条件等于再引入一处类型/形态漂移的站点 (实测把 `obound` 单独当条件
+    // 用会得到 `while (7)` —— 外层永不退出)。
+    let outer_cond = cond.as_ref().cloned()?;
     let outer = tile_detect_counted(init, cond, step)?;
     let inner_stmt = single_for_stmt(body)?;
     let inner = match inner_stmt {
@@ -1920,28 +1953,34 @@ fn try_tile_nest(
         return None;
     }
     Some(BlockItem::Stmt(build_blocked_nest(
-        &outer, &inner, inner_body, tile_size, ctr, span,
+        &outer,
+        &inner,
+        &outer_cond,
+        inner_body,
+        tile_size,
+        ctr,
+        span,
     )))
 }
 
-/// 生成 ts×ts 分块的四层循环 (外层两个块循环 + 内层两个子循环, 体逐字保留)。
+/// 生成保序分段的三层循环 (外层逐字保留 + 一个块计数器 + 一个子循环, 体逐字保留)。
 ///
 /// 所有新建节点的类型/字面量都从**原循环节点** clone 而来 (见
-/// [`tile_detect_counted`] 的理由): 块索引 `ti`/`tj` 复用对应声明的类型与
-/// 「初始化为 0」的常量节点。
+/// [`tile_detect_counted`] 的理由): 块索引 `tj` 复用内层声明的类型与「初始化为 0」
+/// 的常量节点。
 fn build_blocked_nest(
     outer: &(crate::ast::VarDecl, Expr, Expr),
     inner: &(crate::ast::VarDecl, Expr, Expr),
+    outer_cond: &Expr,
     inner_body: &Stmt,
     tile_size: usize,
     ctr: &mut u32,
     span: &Span,
 ) -> Stmt {
-    let (odecl, obound, ostep) = outer;
+    let (odecl, _obound, ostep) = outer;
     let (idecl, ibound, istep) = inner;
     let id = *ctr;
     *ctr += 1;
-    let ti_name = format!("__dcc_tile_i{}", id);
     let tj_name = format!("__dcc_tile_j{}", id);
 
     let ident = |name: &str, ty: &Type| Expr::Ident {
@@ -2039,30 +2078,23 @@ fn build_blocked_nest(
         )
     };
 
+    // `j_loop`: 被分段的内层维。它仍是最内层循环, 体内语句逐字不动。
     let j_loop = stmt_for(
         re_decl(idecl, &idecl.name.name, ident(&tj_name, &idecl.ty)),
         sub_cond(&idecl.name.name, &idecl.ty, ibound, &tj_name, &idecl.ty),
         istep.clone(),
         inner_body.clone(),
     );
-    let i_loop = stmt_for(
-        re_decl(odecl, &odecl.name.name, ident(&ti_name, &odecl.ty)),
-        sub_cond(&odecl.name.name, &odecl.ty, obound, &ti_name, &odecl.ty),
-        ostep.clone(),
-        j_loop,
-    );
+    // `tj_loop`: 内层维的块计数器 `for (int tj = 0; tj < M; tj = tj + ts)`。
     let tj_loop = stmt_for(
         re_decl(idecl, &tj_name, lit(idecl, 0)),
         bin(BinOp::Lt, ident(&tj_name, &idecl.ty), ibound.clone(), &idecl.ty),
         stride_step(&tj_name, idecl),
-        i_loop,
+        j_loop,
     );
-    stmt_for(
-        re_decl(odecl, &ti_name, lit(odecl, 0)),
-        bin(BinOp::Lt, ident(&ti_name, &odecl.ty), obound.clone(), &odecl.ty),
-        stride_step(&ti_name, odecl),
-        tj_loop,
-    )
+    // 外层**逐字保留** (同一个声明、同一个条件节点、同一个推进表达式)。这条不重排的
+    // 保证就是本 pass 的正确性地基: 外层不动 ⇒ (i, j) 序列与原嵌套逐个相同。
+    stmt_for(odecl.clone(), outer_cond.clone(), ostep.clone(), tj_loop)
 }
 
 // ===== P7. 自动并行化标注 =====
@@ -2651,8 +2683,13 @@ mod tile_equiv_tests {
             .expect("函数体")
     }
 
-    /// 分块必须保持**逐点相同的迭代序列** (顺序可以变, 集合与重数不可以)。
+    /// 分块必须保持**逐个相同的迭代序列** (顺序、集合与重数都不可以变)。
     /// 同时断言分块真的发生了 —— 否则「一致」是空判。
+    ///
+    /// 这里为什么判「按序相等」而不是旧断言的「多重集相等」: 旧形态只保证同集合,
+    /// 而「同集合 + 不同顺序」在体内有可观察副作用时就是错值 (实测 -O3 的
+    /// `for(i<7)for(k<7)printf(...)` 与 gcc 集合相同、顺序不同) —— 那条断言恰恰
+    /// 把缺陷写成了「预期行为」。现在产物不重排, 所以能上更强的判据。
     #[test]
     fn tile_nest_preserves_iteration_space() {
         let before = nest_body();
@@ -2662,23 +2699,16 @@ mod tile_equiv_tests {
         let mut after = nest_body();
         let mut ctr = 0u32;
         tile_block(&mut after, 4, &mut ctr);
-        assert_eq!(ctr, 1, "6×5 完美两层嵌套必须被分块 (否则本测试是空判)");
+        assert_eq!(ctr, 1, "6×5 完美两层嵌套必须被分段 (否则本测试是空判)");
         let seq_after = trace_of(&after);
-        let mut sorted_before = seq_before.clone();
-        let mut sorted_after = seq_after.clone();
-        sorted_before.sort();
-        sorted_after.sort();
         assert_eq!(
-            sorted_before,
-            sorted_after,
-            "分块改变了迭代空间 (执行次数 {} vs {}, 且多重集不同)",
-            seq_before.len(),
-            seq_after.len()
+            seq_before, seq_after,
+            "分段不得重排迭代空间 (逐位对比的 (i,j) 序列必须完全一致)"
         );
-        assert_eq!(seq_after.len(), seq_before.len(), "分块不得改变体内写入次数");
+        assert_eq!(seq_after.len(), seq_before.len(), "分段不得改变体内写入次数");
     }
 
-    /// 分块必须**逐字保留循环体** (不做任何名字替换) —— 这是它不依赖名字分析、
+    /// 分段必须**逐字保留循环体** (不做任何名字替换) —— 这是它不依赖名字分析、
     /// 结构上排除捕获的依据。旧实现把体内 `i` 换成 `ii + j` 正是错值来源。
     #[test]
     fn tile_keeps_body_verbatim() {
@@ -2701,25 +2731,25 @@ mod tile_equiv_tests {
         let mut after = nest_body();
         let mut ctr = 0u32;
         tile_block(&mut after, 4, &mut ctr);
-        assert_eq!(ctr, 1, "6×5 嵌套应被分块");
-        // 钻到最内层: ti → tj → i → j 四层 For 的体。
+        assert_eq!(ctr, 1, "6×5 嵌套应被分段");
+        // 钻到最内层: i → tj → j 三层 For 的体。
         let mut inner: Option<&Stmt> = None;
         for item in &after.items {
             if let BlockItem::Stmt(s @ Stmt::For { .. }) = item {
                 inner = Some(s);
             }
         }
-        let mut cur = inner.expect("分块后应仍有最外层 For");
+        let mut cur = inner.expect("分段后应仍有最外层 For");
         let mut depth = 0;
         while let Stmt::For { body, .. } = cur {
             depth += 1;
             cur = body.as_ref();
         }
-        assert_eq!(depth, 4, "分块应产出 ti/tj/i/j 四层 For, 实际 {depth} 层");
+        assert_eq!(depth, 3, "分段应产出 i/tj/j 三层 For, 实际 {depth} 层");
         let dumped = format!("{:?}", cur);
         assert_eq!(
             dumped, orig_body_dump,
-            "最内层体必须与原体逐字相同 (分块不得改名字或 replacer 表达式)"
+            "最内层体必须与原体逐字相同 (分段不得改名字或 replacer 表达式)"
         );
         assert!(
             dumped.contains("\"i\"") && dumped.contains("\"j\""),
@@ -2733,26 +2763,66 @@ mod tile_equiv_tests {
         );
     }
 
-    /// 体内写归纳变量 / 有 goto 的形态必须**放弃分块** (否则推进语义被搬进子循环)。
+    /// 体内有**未被更内层循环屏蔽的 `break`** 时不得分段: 那个 `break` 原绑到内层
+    /// 循环并直接进下一轮外层, 分段后它只跳出子循环, 块计数器还要再往上推一段
+    /// ⇒ 静默多跑迭代 (`tile_refuses_unsafe_break_in_body`)。
     #[test]
     fn tile_refuses_unsafe_nests() {
         // 体内写 i (与分块后的子循环推进冲突)
-        let src = "int f(void){int acc=0;for(int i=0;i<6;i++)for(int j=0;j<5;j++){i=i+1;acc=acc+i*j;}return acc;}\n";
+        let body = body_of_src(
+            "int f(void){int acc=0;for(int i=0;i<6;i++)for(int j=0;j<5;j++){i=i+1;acc=acc+i*j;}return acc;}\n",
+        );
+        let before = format!("{:?}", body);
+        let mut ctr = 0u32;
+        let mut body = body;
+        tile_block(&mut body, 4, &mut ctr);
+        assert_eq!(ctr, 0, "体内写归纳变量的嵌套不得分块");
+        assert_eq!(format!("{:?}", body), before, "放弃分块时不得留下任何改动");
+    }
+
+    /// `break` 闸门 (与 [`unroll_stmt_is_safe`] 拦的是同一类静默改变控制流):
+    /// 分段把原本只有一层的 `for (j…)` 拆成「块计数器 `tj` + 子循环 `j`」两层,
+    /// 未被屏蔽的 `break` 原本跳出内层循环后**直接进下一轮外层**, 现在却还要把
+    /// `tj` 往上推剩下的块 ⇒ 多跑本不该跑的迭代。判决性实测 (本轮在 worktree 里把
+    /// 本闸门改写成 `if false && …` 后重编译): `for(i<6)for(j<5){if(j==2)break;acc++;}`
+    /// 的 `acc` 在 gcc -O0 与 dcc -O0 都是 **12**, 而在 dcc -O3 得 **18**
+    /// (每轮外层多跑了一个 `tj=4` 块里的 1 次) —— 闸门接回后三档均为 12。
+    ///
+    /// 同时必须证明这不是一刀切拒分: 被更内层循环接住的 `break` 仍然可以分段
+    /// (对照探针里 `g()` = 30 在四档与 gcc 一致)。
+    #[test]
+    fn tile_refuses_unshielded_break() {
+        // (a) 体内未屏蔽的 `break` ⇒ 拒绝分块, 且不留痕迹
+        let src_a = "int f(void){int acc=0;for(int i=0;i<6;i++)for(int j=0;j<5;j++){\
+                     if(j==2)break;acc=acc+i*j;}return acc;}\n";
+        let body = body_of_src(src_a);
+        let before = format!("{:?}", body);
+        let mut body = body;
+        let mut ctr = 0u32;
+        tile_block(&mut body, 4, &mut ctr);
+        assert_eq!(ctr, 0, "体内有绑定到被分段那层循环的 `break` 时不得分段");
+        assert_eq!(format!("{:?}", body), before, "放弃分块时不得留下任何改动");
+
+        // (b) 同一个 `break` 但被更内层循环接住 ⇒ 屏蔽成立, 仍应分段
+        let src_b = "int f(void){int acc=0;for(int i=0;i<6;i++)for(int j=0;j<5;j++){\
+                     for(int t=0;t<2;t++)break;acc=acc+i*j;}return acc;}\n";
+        let mut body = body_of_src(src_b);
+        let mut ctr = 0u32;
+        tile_block(&mut body, 4, &mut ctr);
+        assert_eq!(ctr, 1, "被更内层循环屏蔽的 `break` 不构成拒绝理由 (否则闸门一刀切)");
+    }
+
+    /// 从源码取函数体 (与 [`nest_body`] 同一路线, 但参数化以便逐形态验证)。
+    fn body_of_src(src: &str) -> Block {
         let (prog, _d) = crate::parser::parse(src.as_bytes(), "t.c");
         let (m, _w) = crate::ir::lower(prog).unwrap();
-        let mut body = m
-            .source()
+        m.source()
             .decls
             .iter()
             .find_map(|d| match d {
                 Decl::Func(f) => f.body.clone(),
                 _ => None,
             })
-            .expect("函数体");
-        let before = format!("{:?}", body);
-        let mut ctr = 0u32;
-        tile_block(&mut body, 4, &mut ctr);
-        assert_eq!(ctr, 0, "体内写归纳变量的嵌套不得分块");
-        assert_eq!(format!("{:?}", body), before, "放弃分块时不得留下任何改动");
+            .expect("函数体")
     }
 }
