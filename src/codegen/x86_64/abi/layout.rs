@@ -79,8 +79,12 @@ pub const BF_RMW_SLOT_BYTES: i64 = 32;
 pub const BF_RMW_PER_DEPTH: i64 = 3;
 /// 帧头里固定不动的部分：saved r13(8) + ret addr(8) + callee-saved 保存区(32)。
 pub const FIXED_HDR: i64 = 48;
-/// 栈顶金丝雀槽（`%r13 - 8`）。发射点手写字节 `mov [r13-8], rax` 与序言/尾声
-/// 两处 `frame_size >= 8` 的守卫必须共用这个数：前者定位置，后者定「帧里放得下吗」。
+/// 帧顶那一格（`%r13 - 8`）。它有两个主人，同一格、**永不同时使用**：
+///  - 栈金丝雀（`-fstack-protector*`）；
+///  - 跳表基址 `%rbp` 的存槽（阶段 6 批 4）。互斥由判据端保证：`stack_protector`
+///    开着时 `decide_disptab_base_reg` 整体不进，所以不存在两者抢一格的可能。
+/// 发射点手写字节 `mov [r13-8], rax` 与序言/尾声两处 `frame_size >= 8` 的守卫必须
+/// 共用这个数：前者定位置，后者定「帧里放得下吗」。
 pub const CANARY_OFF: i64 = -8;
 /// 每个 spill 槽的字节数（GP 槽位，与变量区同口径）。
 pub const SPILL_SLOT_BYTES: i64 = 8;

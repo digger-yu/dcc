@@ -224,6 +224,19 @@ pub struct Codegen {
     // 当前函数体含 VLA 声明：goto/break/continue 跳转前需恢复动态栈基，
     // 否则循环内重复进入 VLA 作用域会累积泄漏直至栈耗尽 (vla-dealloc-1)
     pub cur_func_has_vla: bool,
+    /// 阶段 6 批 4：本函数把**哪张**跳表的基址常驻 `%rbp`（None = 不常驻）。
+    ///
+    /// 存在理由：computed goto 解释器的分派尾部今天是三条 `lea 表基址,%r11` +
+    /// `mov (%r11,%rcx,8),%rax` + `jmp *%rax`，而表是一个**静态局部**（地址是符号，
+    /// 函数范围内不变）。基址进寄存器后塌成一条 `jmp *(%rbp,%rcx,8)`。
+    /// 实测 gcc -O2 在同一个位置用的就是这条（它的基址号是 `%r12`）。
+    ///
+    /// 为什么是 `%rbp` 而不是池里的第五个号：`POOL=[rbx,r12,r14,r15]` 是分配器可发的
+    /// 家号（luaV_execute 四个全被变量家占了），而 `%rbp` 本后端从不发号（帧基址是
+    /// `%r13`），默认档（`-fomit-frame-pointer`）下也不参与任何寻址，是一个真正闲置的
+    /// callee-saved 号。代价是三条互斥（见 `decide_disptab_base_reg`）与序言/尾声要
+    /// 多存复一次，存槽用帧里已经预留但只有金丝雀会用的 `%r13-8`。
+    pub disptab_base_reg_sym: Option<String>,
     /// 当前函数是 `__attribute__((naked))`：没有序言/尾声，也没有帧，函数体就是用户的汇编。
     ///
     /// 两个读取方靠它区分形态（P12 Phase 5.2a）：
@@ -957,6 +970,7 @@ impl Codegen {
             vla_total_size: 0,
             vm_struct_size_slots: HashMap::new(),
             cur_func_has_vla: false,
+            disptab_base_reg_sym: None,
             cur_func_is_naked: false,
             bf_rmw_depth: 0,
             stack_shift: 0,

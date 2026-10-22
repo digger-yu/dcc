@@ -694,8 +694,14 @@ pub(crate) enum X86_64Opcode {
 
     /// P11 Bucket P11R: jmp r/m64 (FF /4). Used for indirect jumps through
     /// memory [base+disp] (reg form already covered by Jmp).
-    /// modrm_mod chosen by disp size (00/01/10); SIB emitted when base=rsp/r12.
-    JmpRmMem { base: u8, disp: i32 },
+    /// modrm_mod chosen by disp size (00/01/10); SIB emitted when base=rsp/r12
+    /// 或带了 `index`（阶段 6 批 4：跳表分派的一条 `jmp *tbl(,idx,8)`，基址常驻寄存器）。
+    /// `index` 的第二元是**真实乘数**（1/2/4/8），与 `MemOperand::index` 同口径。
+    JmpRmMem {
+        base: u8,
+        disp: i32,
+        index: Option<(u8, u8)>,
+    },
 
     /// P11 Bucket P11R: push m64 [rsp+disp8] (FF /6). Only base=rsp(4) SIB
     /// form is encoded here (used by complex.rs spill pushes).
@@ -2579,11 +2585,23 @@ impl X86_64Opcode {
             // P11 Bucket P11R: jmp r/m64 (FF /4).
             // Used for indirect jump through memory [base+disp].
             // modrm_mod chosen by disp size; SIB emitted when base=rsp(4)/r12(12).
-            X86_64Opcode::JmpRmMem { base, disp } => {
+            X86_64Opcode::JmpRmMem { base, disp, index } => {
                 let rm_field = base & 7;
-                let need_sib = rm_field == 4;
+                // 有 index 就必须走 SIB；base=rsp(4)/r12(12) 的 rm 字段本来就是 100（SIB 标记）。
+                let need_sib = rm_field == 4 || index.is_some();
+                // SIB 的 index 字段 100 意思是「无 index」：%rsp 永远当不了变址寄存器。
+                // r12（100 + REX.X）是合法例外，所以只在「号是 rsp 且扩不到 r12」时拒。
+                if let Some((ireg, iscale)) = *index {
+                    if ireg & 7 == 4 && ireg < 8 {
+                        return None;
+                    }
+                    if !matches!(iscale, 1 | 2 | 4 | 8) {
+                        return None;
+                    }
+                }
                 // mod=00 if disp=0 and base!=rbp(5); base=rbp(5) at mod=00 is
                 // rip-relative, so force mod=01 disp8=0 to keep [rbp+disp].
+                // 有 SIB 时同理：base 字段 101 在 mod=00 下意思是「无基址 + disp32」。
                 let (modrm_mod, disp_bytes): (u8, Vec<u8>) = if *disp == 0 && rm_field != 5 {
                     (0u8, Vec::new())
                 } else if *disp == 0 && rm_field == 5 {
@@ -2594,8 +2612,21 @@ impl X86_64Opcode {
                     (2u8, disp.to_le_bytes().to_vec())
                 };
                 let mut out = Vec::with_capacity(8);
+                // REX: index>=8 要 REX.X(0x02)、base>=8 要 REX.B(0x01)，两者独立取位。
+                let mut rex = 0x40u8;
+                let mut has_rex = false;
+                if let Some((ireg, _)) = *index {
+                    if ireg >= 8 {
+                        rex |= 0x02;
+                        has_rex = true;
+                    }
+                }
                 if *base >= 8 {
-                    out.push(0x41); // REX.B
+                    rex |= 0x01;
+                    has_rex = true;
+                }
+                if has_rex {
+                    out.push(rex);
                 }
                 out.push(0xFF);
                 let modrm_rm = if need_sib { 4 } else { rm_field };
@@ -2603,7 +2634,19 @@ impl X86_64Opcode {
                 out.push((modrm_mod << 6) | (0b100 << 3) | modrm_rm);
                 if need_sib {
                     // SIB: scale=0, index=4(no index), base=rm_field.
-                    out.push(0x20 | rm_field);
+                    let (scale_log2, idx_field): (u8, u8) = match *index {
+                        Some((ireg, iscale)) => {
+                            let lg: u8 = match iscale {
+                                1 => 0,
+                                2 => 1,
+                                4 => 2,
+                                _ => 3, // 8
+                            };
+                            (lg, ireg & 7)
+                        },
+                        None => (0, 4),
+                    };
+                    out.push((scale_log2 << 6) | (idx_field << 3) | rm_field);
                 }
                 out.extend_from_slice(&disp_bytes);
                 Some(out)
@@ -3408,8 +3451,17 @@ impl X86_64Opcode {
                 }
             },
             X86_64Opcode::JmpRel32 => String::from("jmp\t<target>"),
-            X86_64Opcode::JmpRmMem { base, disp } => {
-                format!("jmp\t*{}", gas_mem_disp(*base, *disp as i64))
+            X86_64Opcode::JmpRmMem { base, disp, index } => match index {
+                Some((ireg, iscale)) => {
+                    let b = G64[(*base & 15) as usize];
+                    let i = G64[(*ireg & 15) as usize];
+                    if *disp == 0 {
+                        format!("jmp\t*({b},{i},{iscale})")
+                    } else {
+                        format!("jmp\t*{disp}({b},{i},{iscale})")
+                    }
+                },
+                None => format!("jmp\t*{}", gas_mem_disp(*base, *disp as i64)),
             },
             X86_64Opcode::PushMemDisp8 { base, disp } => {
                 format!("push\t{}", gas_mem_disp(*base, *disp as i64))

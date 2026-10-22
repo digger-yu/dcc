@@ -2589,8 +2589,23 @@ fn walk_block_refs(
     calls: &mut Vec<String>,
     address_taken: &mut HashSet<String>,
 ) {
+    walk_items_refs(&b.items, func_names, calls, address_taken)
+}
+
+/// 一个「项列表」层面的引用采集。拆出来是因为 `Stmt::Switch` 除了 `cases` 还有一份
+/// `prelude`（`switch (x) { a = f(); case 1: … }` 里第一个 case 之前的那些语句），而调用图
+/// 以前只看 `expr` + `cases` ⇒ **只被 prelude 调用的 `static` 函数会被 M16 跨函数 DCE 当作
+/// 不可达删掉，而 `call` 照样发射**（实测 `-O2` 链接报 `undefined reference to 'addone'`，
+/// `-O0/-O1` 正常）。同一个不穷尽在 `structure.rs`（发射）与 `ast_dispatch.rs`（事实收集）里
+/// 都已经走 `prelude`，只有这里没走。
+fn walk_items_refs(
+    items: &[crate::ast::BlockItem],
+    func_names: &HashSet<String>,
+    calls: &mut Vec<String>,
+    address_taken: &mut HashSet<String>,
+) {
     use crate::ast::{BlockItem, Decl};
-    for item in &b.items {
+    for item in items {
         match item {
             BlockItem::Stmt(s) => walk_stmt_refs(s, func_names, calls, address_taken),
             BlockItem::Decl(Decl::Func(f)) => {
@@ -2609,7 +2624,11 @@ fn walk_block_refs(
                     calls.push(cf.clone());
                 }
             },
-            _ => {},
+            BlockItem::Decl(Decl::StructDef(_)
+            | Decl::UnionDef(_)
+            | Decl::EnumDef(_)
+            | Decl::Typedef { .. }
+            | Decl::GlobalAsm { .. }) => {},
         }
     }
 }
@@ -2656,8 +2675,12 @@ fn walk_stmt_refs(
             walk_stmt_refs(body, func_names, calls, address_taken);
         },
         Stmt::Block { b, .. } => walk_block_refs(b, func_names, calls, address_taken),
-        Stmt::Switch { expr, cases, .. } => {
+        Stmt::Switch {
+            expr, cases, prelude, ..
+        } => {
             walk_expr_refs(expr, func_names, calls, address_taken);
+            // prelude 里可能有全仓唯一的某个 callee 的调用点，漏了它 DCE 就会删掉被调者。
+            walk_items_refs(prelude, func_names, calls, address_taken);
             for c in cases {
                 walk_block_refs(&c.body, func_names, calls, address_taken);
             }

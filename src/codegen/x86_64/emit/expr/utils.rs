@@ -128,7 +128,22 @@ impl Codegen {
             // `mov imm`，折叠后只写 `rax`。判据与那条折叠逐字同源
             //（[`Self::binop_const_foldable`]），而不是「大概是安全的」。
             Expr::Binop { .. } => Self::binop_const_foldable(e),
-            Expr::Cast { e: inner, .. } => Self::scalar_load_shape(inner),
+            // `Cast` 一般只是取址/取值链上的一层包装，**但同宽而换符号性的那层必须挡住**：
+            // 这条快道后面按**内层对象自己的类型**决定符号/零扩展
+            // （`emit_load_self_typed(size, is_signed)`），于是 `(unsigned)v` 被当成 `int` 读，
+            // 少一次零扩展。实测：`100000000000UL + (unsigned)v` 在 v=-1 时得 99999999999
+            //（gcc 104294967295），`t = (unsigned)v`（t 是 `unsigned long`）同样错；
+            // 而 `return (unsigned)v;` 走通用路径是对的。退出快道后由 `gen_expr_cast`
+            // 补上那一次归一，代价只是这一种形状少一个暂存号复用。
+            Expr::Cast { ty, e: inner, .. } => {
+                if ty.size() == inner.ty().size()
+                    && Self::is_signed_int(ty) != Self::is_signed_int(&inner.ty())
+                {
+                    false
+                } else {
+                    Self::scalar_load_shape(inner)
+                }
+            }
             Expr::Member { expr, .. } => {
                 !matches!(expr.ty(), Type::Struct(_, _, _, _) | Type::Union(_, _, _, _))
                     && Self::scalar_load_shape(expr)

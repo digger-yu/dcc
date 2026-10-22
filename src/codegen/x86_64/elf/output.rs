@@ -1080,6 +1080,12 @@ impl Codegen {
             // rbp 存在 [r13+8] = CFA-16 -> 因子 2
             ops.push(DW_CFA_OFFSET | 6);
             enc_uleb(&mut ops, 2);
+        } else if cfi.rbp_saved {
+            // 阶段 6 批 4：本函数把跳表基址常驻 `%rbp`，调用者的值存在帧顶那一格
+            // `%r13-8`——默认档 CFA = r13+16，所以是 CFA-24 → 因子 3。两个方向不可能同时为真
+            // （`decide_disptab_base_reg` 在 frame_pointer 档整体不进），这里仍按优先级写。
+            ops.push(DW_CFA_OFFSET | 6);
+            enc_uleb(&mut ops, (cfa_off + 8) / 8);
         }
         // 被调用者保存寄存器: 序言把 rbx/r12/r14/r15 存到 [r13-16/-24/-32/-40],
         // 相对 CFA 即 -(cfa_off + 该偏移)。异常展开必须能恢复它们, 否则调用者

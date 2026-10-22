@@ -380,7 +380,6 @@ impl Codegen {
                 // mov dst32, dst32 (零扩展 32→64) 或 mov dst64, dst64
                 let sz = ty.size();
                 if sz <= 4 {
-                    // P11: mov dst32, dst32 via MovRm B32 typed (self-MODRM, REX.R+B=0x05 when dst>=8).
                     self.emit_insn(&Insn::mov_rm_reg(
                         crate::codegen::shared::asm_operand::Width::B32,
                         dst,

@@ -284,22 +284,82 @@ impl Codegen {
     /// （`asm/emit.rs` 的 clobber 侧引用同一个常量）。
     pub(crate) const DIAG_RESERVED_REG: &'static str = "E0318";
 
+    /// 批 4 开关：`DCC_DISPTAB_RBP=0` 关掉「跳表基址常驻 `%rbp`」。
+    ///
+    /// 它是**归因用的闸门**，不是「要不要开」的悬案：默认开，关掉后产物与本轮之前逐字节
+    /// 相同（`scripts/ab_pair.sh` 靠它做同轮配对）。env 只读一次，理由与 `blockopt::level()`
+    /// 同一条：发射途中换规则会造出没人能复现的产物。
+    fn disptab_rbp_on() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| match std::env::var("DCC_DISPTAB_RBP") {
+            Ok(v) => matches!(v.trim(), "1" | "true" | "yes" | "on"),
+            Err(_) => true,
+        })
+    }
+
+    /// 本函数要不要把一张跳表的基址常驻 `%rbp`，要的话是哪张（mangled 符号名）。
+    ///
+    /// 四条互斥全部是「`%rbp` 的所有权冲突」，一条不满足就整体不进（宁少削一条）：
+    ///   1. `-fno-omit-frame-pointer`：`%rbp` 已是帧指针（序言 `push`、尾声 `pop`）。
+    ///   2. `-fstack-protector*`：基址的存槽 `%r13-8` 就是金丝雀槽。
+    ///   3. 函数体里有任何内联汇编：模板文本里怎么写 `%rbp` 不可追溯（名单守不住它）。
+    ///   4. 嵌套函数：内层体的发射横跨外层文本，外层的 `%rbp` 约定穿不过去。
+    /// 另外 `naked` 函数没有序言/尾声可插，`register asm("rbp")` 已在
+    /// [`Self::reserved_reg_reason`] 处无条件拒掉（不然家与基址会同读一个号）。
+    ///
+    /// **第五条（不变式，不是保守）**：`disptab_base_reg_sym` 为 `Some` 必须与「序言真的
+    /// 发了那对存/取」同生同灭。`compile_func` 里 callee-saved 那一段只走
+    /// `f.name.name != "main" || self.relocatable` 那条分支，而 `main` 由内置链接器直链
+    /// （`!relocatable`）时整个帧建立走另一条分支，那里没有存/取可插。不拒这一格就是：
+    /// 分派拿一个从未赋值的 `%rbp` 当表基址，而 CFI 还声称调用者的值存在那个槽里
+    /// （实测：`main` 里写 computed goto，`dcc -O2 m3.c -o x.o` 产出的 ET_EXEC 直接 SIGSEGV，
+    /// `DCC_DISPTAB_RBP=0` 同输入正确）。
+    pub(crate) fn decide_disptab_base_reg(&mut self, f: &FuncDecl) -> Option<String> {
+        if !Self::disptab_rbp_on() {
+            return None;
+        }
+        if self.target.frame_pointer || self.target.stack_protector {
+            return None;
+        }
+        if f.is_naked || f.is_nested {
+            return None;
+        }
+        if f.name.name == "main" && !self.relocatable {
+            return None;
+        }
+        let body = f.body.as_ref()?;
+        let facts = crate::ast_dispatch::collect(body);
+        if facts.any_asm || facts.any_nested_func {
+            return None;
+        }
+        let table = facts.primary_table()?;
+        // 必须是本函数的**静态局部**：只有它的地址是 data 段里的一个符号。
+        // 栈上的数组（自动存储期）地址每次调用都不同，常驻一个寄存器就是错值。
+        let mangled = self.static_local_map.resolve(&f.name.name, table)?.to_string();
+        Some(mangled)
+    }
+
     /// 这个家落在的号是不是本端保留号（帧基址 / 帧指针）。
     ///
     /// **只拒这两个，不拒 `%rsp`**：内核与 libm 依赖的
     /// `register unsigned long current_stack_pointer asm("rsp")` 是一个合法且常见的
     /// 「只读别名」（本轮实测：把它拒了直接弄坏 `parallel_codegen_keeps_file_scope_register_asm_binding`）。
     /// 家为 `Reg(4)` 时读侧发的就是 `mov %rsp,%rax`，正是用户要的东西；写侧也是用户自己要求的。
-    /// 而 `%r13`/`%rbp` 不一样：它们是本端自己用来定位帧的，被当家用会让所有
-    /// `%r13+disp` 寻址一起失效（或在另一个档位被静默降级）。
+    /// 而 `%r13`/`%rbp` 不一样：前者是本端定位帧的基址，后者要么是帧指针要么已
+    /// 归跳表基址（阶段 6 批 4），被当家用都会让那一族的寻址整体失效。
     /// clobber 侧的 `%rsp` 仍被拒（它守无可守），见 `asm/emit.rs::asm_reject_reserved_clobber`。
     fn reserved_reg_reason(&self, loc: &crate::location::Location) -> Option<&'static str> {
         let n = loc.reg()?.n;
         match n {
             13 => Some("%r13 是本后端的帧基址：所有局部量都按 `%r13+disp` 寻址"),
-            5 if self.target.frame_pointer => {
-                Some("%rbp 在 -fno-omit-frame-pointer 下是帧指针（序言 push、尾声 pop）")
-            },
+            // 无条件拒 `%rbp`（阶段 6 批 4）：以前只在 `-fno-omit-frame-pointer` 档拒，
+            // 而默认档下 `%rbp` 现在是跳表基址的常驻号 —— 它是否在某个函数里被占，
+            // 要到发射本函数时才决定，而声明可能在任何地方。留一个「看运气」的窗口
+            // 就是静默错值，所以这里不判档位。
+            5 => Some(
+                "%rbp 要么是帧指针（-fno-omit-frame-pointer），要么是本端跳表基址的常驻号\
+                 （阶段 6 批 4）：两者都不许当变量之家",
+            ),
             _ => None,
         }
     }
@@ -319,7 +379,7 @@ impl Codegen {
             span: span.clone(),
             hint: Some(
                 "本后端可当变量之家的 callee-saved 号只有 rbx/r12/r14/r15（%r13 是帧基址、\n\
-                 %rbp 在 -fno-omit-frame-pointer 下是帧指针，都不行；%rsp 当只读别名是可以的）"
+                 %rbp 要么当帧指针要么当跳表基址的常驻号，都不行；%rsp 当只读别名是可以的）"
                     .to_string(),
             ),
             source_line: None,
@@ -490,7 +550,16 @@ impl Codegen {
                 Self::collect_local_labels_stmt(body, out);
             },
             Stmt::For { body, .. } => Self::collect_local_labels_stmt(body, out),
-            Stmt::Switch { cases, .. } => {
+            Stmt::Switch {
+                cases, prelude, ..
+            } => {
+                // `prelude` 里也能带标签（`switch (x) { out: case 1: … }`）：漏了它 E1102
+                // 那一族就会以另一种形式回来（标签没被登记 ⇒ 发射期解析不到）。
+                for item in prelude {
+                    if let BlockItem::Stmt(s) = item {
+                        Self::collect_local_labels_stmt(s, out);
+                    }
+                }
                 for c in cases {
                     for item in &c.body.items {
                         if let BlockItem::Stmt(s) = item {
@@ -647,12 +716,15 @@ impl Codegen {
                 .unwrap_or(0)
                 .max(Self::sret_bytes_stmt(body)),
             Stmt::Block { b, .. } => Self::max_sret_bytes(&b.items),
-            Stmt::Switch { expr, cases, .. } => {
+            Stmt::Switch {
+                expr, cases, prelude, ..
+            } => {
                 // expr 槽 (16+8) 存活至所有 case 体结束
                 let base = Self::sret_bytes_expr(expr) + 24;
-                cases
+                // `prelude` 也在同一帧里，它那次结构体返回同样要占槽。
+                prelude
                     .iter()
-                    .flat_map(|c| c.body.items.iter())
+                    .chain(cases.iter().flat_map(|c| c.body.items.iter()))
                     .map(Self::sret_bytes_block_item)
                     .max()
                     .unwrap_or(0)
@@ -931,8 +1003,13 @@ impl Codegen {
                 }
                 Self::late_need_stmt(body, need);
             },
-            Stmt::Switch { expr, cases, .. } => {
+            Stmt::Switch {
+                expr, cases, prelude, ..
+            } => {
                 Self::late_need_expr(expr, need);
+                // `switch (x) { int y = 1; case 0: … }` 里那个 `y` 也是本帧的晚期分配对象：
+                // 扫描不数它，发射期就会报 `E1133`（实测：静态预算 0 reserved、用了 1 slot）。
+                Self::late_need_block(prelude, need);
                 for c in cases {
                     Self::late_need_block(&c.body.items, need);
                 }
@@ -1300,7 +1377,13 @@ impl Codegen {
     /// 只走 `Expr::Ident`，并跳过调用位置；标号不是 Ident，不会混进来。
     /// 不下降进嵌套函数体（那是它自己一帧的事，与 `collect_frame_var_decls` 同口径）。
     fn collect_free_idents(b: &Block, out: &mut Vec<(String, Type)>) {
-        for item in &b.items {
+        Self::collect_free_idents_items(&b.items, out)
+    }
+
+    /// 项列表层面（`switch` 的 `prelude` 不是 `Block`，但它的初始化式同样能带自由引用，
+    /// 例如 `switch (x) { int v = arr[n]; case 0: … }` 里的 VLA 长度）。
+    fn collect_free_idents_items(items: &[BlockItem], out: &mut Vec<(String, Type)>) {
+        for item in items {
             match item {
                 BlockItem::Decl(Decl::Var(v)) => {
                     if let Some(init) = &v.init {
@@ -1380,8 +1463,11 @@ impl Codegen {
                 }
                 Self::collect_free_idents_stmt(body, out);
             },
-            Stmt::Switch { expr, cases, .. } => {
+            Stmt::Switch {
+                expr, cases, prelude, ..
+            } => {
                 Self::collect_free_idents_expr(expr, out);
+                Self::collect_free_idents_items(prelude, out);
                 for c in cases {
                     Self::collect_free_idents(&c.body, out);
                 }
@@ -1620,8 +1706,13 @@ impl Codegen {
                 }
                 Self::collect_frame_var_decls_stmt(body, static_local_map, func_name, out);
             },
-            Stmt::Switch { expr, cases, .. } => {
+            Stmt::Switch {
+                expr, cases, prelude, ..
+            } => {
                 Self::collect_frame_var_decls_expr(expr, static_local_map, func_name, out);
+                // 同上：prelude 里的声明也必须拿到自己的帧槽，不然发射期会懒注册成另一个槽
+                // （或直接撞 `E1133`）。
+                Self::collect_frame_var_decls(prelude, static_local_map, func_name, out);
                 for case in cases {
                     Self::collect_frame_var_decls(
                         &case.body.items,
@@ -2198,6 +2289,21 @@ impl Codegen {
             Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 15, 13, -40)
                 .with_gas("mov -40(%r13), %r15".to_string()),
         );
+        // 跳表基址常驻 `%rbp` 时把号还给调用者（阶段 6 批 4）。位置必须在四条
+        // callee-saved 恢复之后、`mov %r13,%rsp` 之前：前者仍是本帧坐标寻址唯一还能用
+        // 的时刻，而多个 return 站点内联展开尾声时每一条都要带上这一步。
+        if self.disptab_base_reg_sym.is_some() {
+            self.emit_insn(
+                &Insn::mov_rm_mem(
+                    true,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    5,
+                    13,
+                    -8,
+                )
+                .with_gas("mov -8(%r13), %rbp".to_string()),
+            );
+        }
         // mov rsp, r13: 恢复栈指针
         // P11: 必须保留 0x49 0x8b 0xe5 形式 (mov r/m64,r64 中 rsp 是 r/m, 需
         // REX.B=1 扩展 r13/r/m). mov_rm_reg 走 0x89 形式导致 REX 字节不同, 破坏
@@ -2330,7 +2436,11 @@ mod tests {
             Stmt::While { body, .. } | Stmt::Do { body, .. } | Stmt::For { body, .. } => {
                 set_home_stmt(body, name, slot, hit)
             },
-            Stmt::Switch { cases, .. } => {
+            Stmt::Switch {
+                cases, prelude, ..
+            } => {
+                // prelude 里的声明也是同一个变量的宿主，漏了它家绑定只改了 case 体那份。
+                set_home(prelude, name, slot, hit);
                 for c in cases {
                     set_home(&mut c.body.items, name, slot, hit);
                 }

@@ -835,32 +835,39 @@ impl Codegen {
         // 内存访问**的那一笔上（上面的 LEA 不算访问，贴了是空操作）。本函数是「全局数组
         // 下标」这一族的单一入口，所以在此处统一处理，而不是回到各个调用点分支。
         let seg = self.global_seg_prefix(global);
+        // 基址号（阶段 6 批 4）：这张表要是已经被本函数常驻进 `%rbp`，那条 lea 就不必再发，
+        // 下面每一笔变址访问的基座跟着换成 5。其余情形（没常驻、或常驻的是另一张表）逐字节
+        // 维持原形状：`lea` 进 `%r11`（帧寻址 scratch）+ 以 11 为基的变址访问。
+        let hoisted_base = self.disptab_base_reg_sym.as_deref() == Some(global);
+        let base: u8 = if hoisted_base { 5 } else { 11 };
         // lea r11, [rip + disp32] (RIP-relative, 链接时修补 PC 相对位移)
         // P11: typed Lea RIP-relative (encoder 字节: 4C 8D 1D disp32).
         // 参考 emit_global_addr (instructions.rs:1380) 的做法: 必须在此显式挂 gas_text,
         // 否则 P10 后处理会用 op.render() 兜底, 而 render() 在 rip_relative=true && disp=0
         // 时只输出 "leaq 0, %r11", 丢失用户原文里的 `idx(%rip)` 符号引用.
-        let lea_pos = self.pos();
-        let mut lea_insn = Insn::new(
-            crate::codegen::x86_64::opcode::X86_64Opcode::Lea {
-                dst: crate::codegen::x86_64::opcode::Operand::Reg(
-                    11,
-                    crate::codegen::shared::asm_operand::Width::B64,
-                ),
-                mem: crate::codegen::x86_64::opcode::MemOperand {
-                    disp: 0,
-                    base: None,
-                    index: None,
-                    seg: None,
+        if !hoisted_base {
+            let lea_pos = self.pos();
+            let mut lea_insn = Insn::new(
+                crate::codegen::x86_64::opcode::X86_64Opcode::Lea {
+                    dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                        11,
+                        crate::codegen::shared::asm_operand::Width::B64,
+                    ),
+                    mem: crate::codegen::x86_64::opcode::MemOperand {
+                        disp: 0,
+                        base: None,
+                        index: None,
+                        seg: None,
+                    },
+                    rip_relative: true,
                 },
-                rip_relative: true,
-            },
-            &[],
-        );
-        lea_insn.gas_text = Some(format!("lea {global}(%rip), %r11"));
-        self.emit_insn(&lea_insn);
-        self.pending_data_rels
-            .push((lea_pos + 3, global.to_string()));
+                &[],
+            );
+            lea_insn.gas_text = Some(format!("lea {global}(%rip), %r11"));
+            self.emit_insn(&lea_insn);
+            self.pending_data_rels
+                .push((lea_pos + 3, global.to_string()));
+        }
         let is_float = matches!(elem_ty, Type::Float);
         let is_double = matches!(elem_ty, Type::Double | Type::LongDouble);
         if matches!(elem_ty, Type::Float | Type::Double | Type::LongDouble)
@@ -889,7 +896,7 @@ impl Codegen {
                 }
             };
             self.emit_seg(seg);
-            self.emit_insn(&Insn::x87_mem_sib(x87_op, 11, idx_reg, sib_scale))
+            self.emit_insn(&Insn::x87_mem_sib(x87_op, base, idx_reg, sib_scale))
                 .expect("typed-opcode: x87_mem_sib");
         } else if is_float {
             // P11 Bucket AE: movss xmm0, [r11 + idx*scale] via typed simd_mov_mem_base_sib.
@@ -905,7 +912,7 @@ impl Codegen {
                 false,
                 crate::codegen::x86_64::opcode::SimdWidth::SS,
                 0,
-                11,
+                base,
                 idx_reg,
                 sib_scale,
             ))
@@ -923,7 +930,7 @@ impl Codegen {
                 false,
                 crate::codegen::x86_64::opcode::SimdWidth::SD,
                 0,
-                11,
+                base,
                 idx_reg,
                 sib_scale,
             ))
@@ -947,49 +954,49 @@ impl Codegen {
             match (is_signed, elem_size) {
                 (true, 1) => {
                     self.emit_insn(&Insn::mov_ext_mem_sib(
-                        true, B8, B64, dst_gp, 11, idx_reg, sib_scale,
+                        true, B8, B64, dst_gp, base, idx_reg, sib_scale,
                     ))
                     .expect("typed-opcode: mov_ext_mem_sib");
                 },
                 (true, 2) => {
                     self.emit_insn(&Insn::mov_ext_mem_sib(
-                        true, B16, B64, dst_gp, 11, idx_reg, sib_scale,
+                        true, B16, B64, dst_gp, base, idx_reg, sib_scale,
                     ))
                     .expect("typed-opcode: mov_ext_mem_sib");
                 },
                 (true, 4) => {
                     self.emit_insn(&Insn::mov_ext_mem_sib(
-                        true, B32, B64, dst_gp, 11, idx_reg, sib_scale,
+                        true, B32, B64, dst_gp, base, idx_reg, sib_scale,
                     ))
                     .expect("typed-opcode: mov_ext_mem_sib");
                 },
                 (true, _) => {
                     self.emit_insn(&Insn::mov_rm_mem_sib(
-                        true, B64, dst_gp, 11, idx_reg, sib_scale,
+                        true, B64, dst_gp, base, idx_reg, sib_scale,
                     ))
                     .expect("typed-opcode: mov_rm_mem_sib");
                 },
                 (false, 1) => {
                     self.emit_insn(&Insn::mov_ext_mem_sib(
-                        false, B8, B64, dst_gp, 11, idx_reg, sib_scale,
+                        false, B8, B64, dst_gp, base, idx_reg, sib_scale,
                     ))
                     .expect("typed-opcode: mov_ext_mem_sib");
                 },
                 (false, 2) => {
                     self.emit_insn(&Insn::mov_ext_mem_sib(
-                        false, B16, B64, dst_gp, 11, idx_reg, sib_scale,
+                        false, B16, B64, dst_gp, base, idx_reg, sib_scale,
                     ))
                     .expect("typed-opcode: mov_ext_mem_sib");
                 },
                 (false, 8) => {
                     self.emit_insn(&Insn::mov_rm_mem_sib(
-                        true, B64, dst_gp, 11, idx_reg, sib_scale,
+                        true, B64, dst_gp, base, idx_reg, sib_scale,
                     ))
                     .expect("typed-opcode: mov_rm_mem_sib");
                 },
                 (false, _) => {
                     self.emit_insn(&Insn::mov_rm_mem_sib(
-                        true, B32, dst_gp, 11, idx_reg, sib_scale,
+                        true, B32, dst_gp, base, idx_reg, sib_scale,
                     ))
                     .expect("typed-opcode: mov_rm_mem_sib");
                 },

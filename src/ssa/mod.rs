@@ -109,6 +109,7 @@ pub use rebuild::{
     rebuild_steps,
 };
 pub use structure::lower_switches_in_func;
+pub use structure::lower_switches_to_jumptable_in_func;
 
 // 仅在 `ssa` 子系统内部共享的判据与工具 (收编 passes/pipelining/regalloc 后，
 // 它们的消费者已都是兄弟模块)。下面只保留「兄弟模块确实按 `crate::ssa::X`

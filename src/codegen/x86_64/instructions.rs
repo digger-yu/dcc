@@ -140,6 +140,12 @@ pub(crate) enum PeepKind {
     /// 32 位 mov 的**内存源**形态（`mov dst32, [mem]`）：目的被整字写入，
     /// 高 32 位自动零扩展。
     LoadR32 { dst: u8 },
+    /// **符号扩展**到 64 位的内存读（`movsxd r64, DWORD PTR [mem]`）：目的整字被写，
+    /// 但高 32 位是符号位而不是零。它不能归到 `LoadR32`：那条自反搬运去重规
+    /// 则的前提是「上一条已经把高 32 位清掉了」，把符号扩展装载当成它就会把紧随
+    /// 其后的零扩展当冗余删掉（实测：`(unsigned)gv` 参与 64 位运算时四个优化档位
+    /// 都与 gcc 不一致，而同一表达式落在 `%rax` 时是对的）。
+    LoadS32 { dst: u8 },
     /// 其它一切（不参与窥孔）
     Other,
 }
@@ -349,6 +355,7 @@ impl Codegen {
         // 「上一条可删」—— 分类里用 `LoadR32` 与 `MovRr32` 把两者分开。
         if let X86_64Opcode::MovExt {
             to,
+            sign,
             dst: O::Reg(d, _),
             src,
             ..
@@ -356,8 +363,11 @@ impl Codegen {
         {
             return match (to, src) {
                 (Width::B32, O::Reg(s, _)) => PeepKind::MovRr32 { dst: *d, src: *s },
+                // 目的只写 32 位 ⇒ 高 32 位自动为零，与符号性无关。
                 (Width::B32, _) => PeepKind::LoadR32 { dst: *d },
                 (Width::B64, O::Reg(s, _)) => PeepKind::MovExtRr { dst: *d, src: *s },
+                // 64 位目的 + 内存源：零扩展与符号扩展必须分开（见 `LoadS32`）。
+                (Width::B64, _) if *sign => PeepKind::LoadS32 { dst: *d },
                 (Width::B64, _) => PeepKind::LoadR32 { dst: *d },
                 _ => PeepKind::Other,
             };
@@ -473,14 +483,16 @@ impl Codegen {
         // P13 阶段6：块内优化的处置（不发 / 换形态 / 照原样）。
         // `volatile_slots_overflow`（见 `note_volatile_var_slots`）为真时本函数的槽事实
         // 不可靠，整体退回窥孔：事实建不起来，转发与去重就都无从谈起。
-        let bo_level = if self.volatile_slots_overflow {
+        // 这里取的是**规则位图**而不是旧的单调档位（批0c）：位图默认由
+        // `DCC_BLOCKOPT` 的档位推得，所以上面这条归零与旧行为逐字一致。
+        let bo_rules = if self.volatile_slots_overflow {
             0
         } else {
-            crate::codegen::x86_64::blockopt::level()
+            crate::codegen::x86_64::blockopt::rules()
         };
-        let verdict = if bo_level > 0 {
+        let verdict = if bo_rules != 0 {
             self.block_state
-                .decide(insn, &self.volatile_frames, bo_level)
+                .decide(insn, &self.volatile_frames, bo_rules)
         } else {
             crate::codegen::x86_64::blockopt::Verdict::Keep
         };
@@ -4288,5 +4300,87 @@ mod tests {
         cg.pending.push(jump_to("asm_defined_tag"));
         cg.check_pending_labels_closed("f");
         assert!(cg.diagnostics.is_empty(), "unexpected: {:?}", error_codes(&cg));
+    }
+
+    /// `movsx r64, DWORD PTR [mem]` 与 32 位零扩展装载必须分属两类。
+    ///
+    /// 归成一类的后果是紧随其后的 `mov dst32, dst32`（同宽变符号那次零扩展归一）
+    /// 被当自反冗余删掉 —— 「上一条已把高 32 位清零」这个前提对符号扩展装载不成
+    /// 立（实测 `100000000000UL + (unsigned)v` 四档错值）。
+    fn movsxd_from_r13_slot(sign: bool, dst: u8) -> Insn {
+        use crate::codegen::shared::asm_operand::Width;
+        use crate::codegen::x86_64::opcode::{
+            MemOperand, Operand as O, X86_64Opcode as Op,
+        };
+        Insn::new(
+            Op::MovExt {
+                rip_relative: false,
+                sign,
+                from: Width::B32,
+                to: Width::B64,
+                dst: O::Reg(dst, Width::B64),
+                src: O::Mem(MemOperand { disp: -64, base: Some(13), index: None, seg: None }),
+            },
+            &[],
+        )
+    }
+
+    /// `mov dst32, [r13-64]`：目的整字被写、高 32 位自动为零的那条装载。
+    fn mov32_from_r13_slot(dst: u8) -> Insn {
+        use crate::codegen::shared::asm_operand::Width;
+        use crate::codegen::x86_64::opcode::{
+            MemOperand, Operand as O, X86_64Opcode as Op,
+        };
+        Insn::new(
+            Op::MovRm {
+                rip_relative: false,
+                width: Width::B32,
+                dst: O::Reg(dst, Width::B32),
+                src: O::Mem(MemOperand { disp: -64, base: Some(13), index: None, seg: None }),
+            },
+            &[],
+        )
+    }
+
+    #[test]
+    fn sign_extending_load_is_not_classified_as_zero_extending() {
+        assert_eq!(
+            Codegen::classify_peep(&movsxd_from_r13_slot(true, 1)),
+            PeepKind::LoadS32 { dst: 1 },
+            "movsxd 必须单独成类"
+        );
+        assert_eq!(
+            Codegen::classify_peep(&mov32_from_r13_slot(1)),
+            PeepKind::LoadR32 { dst: 1 },
+            "32 位装载仍是零扩展装载"
+        );
+    }
+
+    /// 接上一条的发射后果: 符号扩展装载后的零扩展必须落地, 零扩展装载后的仍被削掉。
+    /// 两半一起写是因为它们互为反例 —— 只测前者会把窥孔整个关掉也算通过。
+    #[test]
+    fn zero_extend_after_load_depends_on_the_load_sign_extension() {
+        use crate::codegen::shared::asm_operand::Width;
+        // 正例: movsxd 之后不得削
+        let mut cg = x86();
+        cg.emit_insn(&movsxd_from_r13_slot(true, 1));
+        let after_load = cg.code.len();
+        assert!(after_load > 0, "movsxd 本身必须发出");
+        cg.emit_insn(&Insn::mov_rm_reg(Width::B32, 1, 1));
+        assert!(
+            cg.code.len() > after_load,
+            "movsxd 之后的 mov ecx,ecx 被当自反冗余删掉了（同宽 cast 归一丢失）"
+        );
+        // 反例: 零扩展装载之后就该削（高 32 位已为零）
+        let mut cg = x86();
+        cg.emit_insn(&mov32_from_r13_slot(1));
+        let after_load = cg.code.len();
+        assert!(after_load > 0, "mov dst32,[mem] 本身必须发出");
+        cg.emit_insn(&Insn::mov_rm_reg(Width::B32, 1, 1));
+        assert_eq!(
+            cg.code.len(),
+            after_load,
+            "零扩展装载后的自反 mov 仍应被削 —— 这条窥孔本身不能关"
+        );
     }
 }

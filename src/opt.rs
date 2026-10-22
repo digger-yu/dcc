@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 
 use crate::ast::{
     AddrSpace, ArraySize, BinOp, Block, BlockItem, Decl, Expr, FuncDecl, Ident, InitItem, Program,
-    QualifierFlags, Stmt, VarDecl,
+    QualifierFlags, Stmt, Type, VarDecl,
 };
 use crate::const_eval;
 use crate::diagnostics::Span;
@@ -281,6 +281,21 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_i
             // 128 位搬运实测在 -O2 变成 high+high, 结果整个量级错掉)。
             if func_refs_volatile(f, &volatile_globals) {
                 continue;
+            }
+            // P13 阶段6 批1：稠密 switch 换跳表分派，**只对非结构化函数做**。
+            // 理由在 `ssa::structure` 本批的头注释里：结构化函数的 switch 要走
+            // `lower_switches_in_func` 降级成 if 链交给 SSA 重建，那个通道重建不了
+            // 合成的 label/goto/静态局部表；非结构化函数不重建，AST 改成什么样就
+            // 发什么样，用的就是 Lua 解释器每天在走的 `&&label` + `goto *` 通路。
+            // 开关 `DCC_SWITCHTABLE` **默认开**（与 `ssa::structure::jumptable_enabled()` 同一
+            // 事实，以前这里写着「默认关」是过时的：默认值已由 15 轮同轮配对实测定为开，
+            // median(r)=0.7245、95%CI [0.713,0.755]、15/15 轮同向）；`DCC_SWITCHTABLE=0` 仍是
+            // 那条归因用的反向闸：批0c 实测单是布局就能让 SQLite 动 10%，链/表两臂必须
+            // 能在同一二进制里交替配对。
+            if unstructured && crate::ssa::lower_switches_to_jumptable_in_func(f) {
+                if std::env::var("DCC_SWITCHTABLE_DUMP").is_ok() {
+                    eprintln!("dcc: switch 跳表已降级：{}", f.name.name);
+                }
             }
             // P0-4: 先将 switch 降级为 if-chain, 使含 switch 的函数也能 SSA 化
             crate::ssa::lower_switches_in_func(f);
@@ -738,8 +753,15 @@ fn stmt_refs_volatile(s: &Stmt, vol: &std::collections::HashSet<String>) -> bool
                 || stmt_refs_volatile(body, vol)
         },
         Stmt::Block { b, .. } => b.items.iter().any(|i| block_item_refs_volatile(i, vol)),
-        Stmt::Switch { expr, cases, .. } => {
+        // `prelude` 也是体的一部分：`switch (x) { v = *vp; case 1: … }` 里那次 volatile 读
+        // 漏了就等于允许这一条语句被当成可移动/可删的参与其他变换。
+        Stmt::Switch {
+            expr, cases, prelude, ..
+        } => {
             expr_refs_volatile(expr, vol)
+                || prelude
+                    .iter()
+                    .any(|i| block_item_refs_volatile(i, vol))
                 || cases.iter().any(|c| {
                     c.body
                         .items
@@ -865,8 +887,13 @@ fn stmt_contains_rt_call(s: &Stmt, rt_names: &std::collections::HashSet<String>)
                 || stmt_contains_rt_call(body, rt_names)
         },
         Stmt::Block { b, .. } => block_contains_rt_call(b, rt_names),
-        Stmt::Switch { expr, cases, .. } => {
+        Stmt::Switch {
+            expr, cases, prelude, ..
+        } => {
             expr_contains_rt_call(expr, rt_names)
+                || prelude
+                    .iter()
+                    .any(|i| block_item_contains_rt_call(i, rt_names))
                 || cases.iter().any(|c| {
                     c.body
                         .items
@@ -990,8 +1017,15 @@ fn collect_callees_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
             collect_callees_stmt(body, out);
         },
         Stmt::Block { b, .. } => collect_callees_block(b, out),
-        Stmt::Switch { expr, cases, .. } => {
+        Stmt::Switch {
+            expr, cases, prelude, ..
+        } => {
             collect_callees_expr(expr, out);
+            // prelude 里的调用点也是调用点：漏了就与 `ssa::passes::walk_items_refs` 那次
+            // 同一病灶（只被 prelude 调用的 static 函数被当作不可达，而 `call` 照样发射）。
+            for i in prelude {
+                collect_callees_block_item(i, out);
+            }
             for c in cases {
                 for i in &c.body.items {
                     collect_callees_block_item(i, out);
@@ -1162,7 +1196,16 @@ fn qualifier_aware_optimization(module: &mut Module) {
 
 /// Check for stores to const global variables and emit warnings.
 fn check_stores_to_const_globals(block: &Block, const_globals: &std::collections::HashSet<String>) {
-    for item in &block.items {
+    check_items_for_const_stores(&block.items, const_globals)
+}
+
+/// 项列表层面。`switch` 除了 `cases` 还有一份 `prelude`（第一个 `case` 之前的语句），
+/// 它们不是 `Block`，所以这一层要能单独收。漏它等于「写进 `const` 全局但不报」。
+fn check_items_for_const_stores(
+    items: &[BlockItem],
+    const_globals: &std::collections::HashSet<String>,
+) {
+    for item in items {
         match item {
             BlockItem::Stmt(s) => check_stmt_for_const_stores(s, const_globals),
             BlockItem::Decl(Decl::Var(v)) => {
@@ -1211,8 +1254,11 @@ fn check_stmt_for_const_stores(stmt: &Stmt, const_globals: &std::collections::Ha
             check_stmt_for_const_stores(body, const_globals);
         },
         Stmt::Block { b, .. } => check_stores_to_const_globals(b, const_globals),
-        Stmt::Switch { expr, cases, .. } => {
+        Stmt::Switch {
+            expr, cases, prelude, ..
+        } => {
             check_expr_for_const_stores(expr, const_globals);
+            check_items_for_const_stores(prelude, const_globals);
             for case in cases {
                 check_stores_to_const_globals(&case.body, const_globals);
             }
@@ -1304,7 +1350,12 @@ fn func_has_unsafe_ssa_pattern(f: &FuncDecl, allow_static_locals: bool) -> bool 
 }
 
 fn block_has_unsafe_ssa_pattern(b: &Block, allow_static_locals: bool) -> bool {
-    b.items.iter().any(|item| match item {
+    items_have_unsafe_ssa_pattern(&b.items, allow_static_locals)
+}
+
+/// 项列表层面（`switch` 的 `prelude` 不是 `Block`，但同样可能带 unsafe 形态）。
+fn items_have_unsafe_ssa_pattern(items: &[BlockItem], allow_static_locals: bool) -> bool {
+    items.iter().any(|item| match item {
         // analysis-only 通道（含 goto / computed goto 的函数，不重建、不产代码）上，
         // `static` 局部不构成风险：分配器的候选判据把 `is_static` 一向排除在
         // `plain_local` 之外（`regalloc::scan_block`），它既拿不到家也不会改变帧布局，
@@ -1375,9 +1426,16 @@ fn stmt_has_unsafe_ssa_pattern(s: &Stmt, allow_static_locals: bool) -> bool {
                 .is_some_and(|i| stmt_has_unsafe_ssa_pattern(i, allow_static_locals))
                 || stmt_has_unsafe_ssa_pattern(body, allow_static_locals)
         },
-        Stmt::Switch { cases, .. } => cases
-            .iter()
-            .any(|c| block_has_unsafe_ssa_pattern(&c.body, allow_static_locals)),
+        Stmt::Switch {
+            cases, prelude, ..
+        } => {
+            // prelude 里也能带「 unsafe 形态」（位域 RMW、可取址局部、VLA……），漏了它
+            // 这个函数就会进到 SSA 并在重建时错值。
+            items_have_unsafe_ssa_pattern(prelude, allow_static_locals)
+                || cases
+                    .iter()
+                    .any(|c| block_has_unsafe_ssa_pattern(&c.body, allow_static_locals))
+        },
         // 标号语句的体里也能带声明（`out: struct {int d[n];} b;`）：不递归就与
         // 上面那条注释里「只看顶层 item 会漏掉语句表达式里的声明」同一病灶。
         Stmt::Label { stmt, .. } => stmt_has_unsafe_ssa_pattern(stmt, allow_static_locals),
@@ -1890,9 +1948,20 @@ fn stmt_has_label(s: &Stmt) -> bool {
         Stmt::While { body, .. } | Stmt::Do { body, .. } | Stmt::For { body, .. } => {
             stmt_has_label(body)
         },
-        Stmt::Switch { cases, .. } => cases.iter().any(|c| block_has_label(&c.body)),
+        Stmt::Switch { cases, prelude, .. } => {
+            items_have_label(prelude) || cases.iter().any(|c| block_has_label(&c.body))
+        },
         _ => false,
     }
+}
+
+/// 项列表层面（`switch` 的 `prelude` 里也能有标号：`switch (x) { out: case 1: … }`）。
+fn items_have_label(items: &[BlockItem]) -> bool {
+    items.iter().any(|item| match item {
+        BlockItem::Stmt(s) => stmt_has_label(s),
+        BlockItem::Decl(Decl::Func(f)) => f.body.as_ref().map(block_has_label).unwrap_or(false),
+        _ => false,
+    })
 }
 
 fn block_has_label(b: &Block) -> bool {
@@ -2162,6 +2231,22 @@ fn function_inline(module: &mut Module, level: u8) {
             let caller_flatten = f.is_flatten;
             let caller_is_hot = f.is_hot;
             if let Some(body) = &mut f.body {
+                // 闸门关着时这一条通道什么都不管，不必再付一次全树量尺与站点收集。
+                let walk_arms = inline_walk_enabled() && arms_walkable(body);
+                if inline_trace_enabled() && inline_walk_enabled() {
+                    // 预算的归因行：调格阵时要知道「哪个 caller 被哪条线挡住」，而不只是
+                    // 产物变了。`walk_arms` 直接打真实判决，**不在这里重算公式**：上一版
+                    // 就是在这重算少了一个 `threaded_channel_enabled()`，默认档恒报
+                    // 「walk_arms=true」，会把「通道没开」读成「开了但没收益」。
+                    let nodes = arm_body_nodes(body);
+                    eprintln!(
+                        "BUDGET| func={} nodes={nodes} limit={} threaded={} walk_arms={}",
+                        f.name.name,
+                        arm_budget_limit(),
+                        has_threaded_dispatch(body),
+                        walk_arms
+                    );
+                }
                 inline_calls_in_block(
                     body,
                     &table,
@@ -2170,6 +2255,7 @@ fn function_inline(module: &mut Module, level: u8) {
                     caller_is_hot,
                     fenv_access,
                     0,
+                    walk_arms,
                 );
             }
         }
@@ -2258,10 +2344,19 @@ fn item_node_count(item: &BlockItem) -> usize {
                 .as_ref()
                 .map_or(0, |b| b.items.iter().map(item_node_count).sum::<usize>())
         },
-        _ => 1,
+        // 类型定义与 `asm` 块不含可展开的调用点（`GlobalAsm` 的文本里可能的调用今天
+        // 就不在内联器视野里），按叶子计 1。列全而不是 `_ => 1`：`Decl` 新加变体时必须
+        // 在这里显式表态（与 `src/ast_dispatch.rs` 的 walker 同一条纪律）。
+        BlockItem::Decl(Decl::StructDef(_) | Decl::UnionDef(_) | Decl::EnumDef(_)) => 1,
+        BlockItem::Decl(Decl::Typedef { .. } | Decl::GlobalAsm { .. }) => 1,
     }
 }
 
+/// 语句体的节点数。**必须穷尽且递归到所有子节点**：它同时是成本模型的输入与
+/// 「臂体展开预算」（[`arm_budget_ok_for`]）的量尺。评审实测过教训：以前这里带一个
+/// `_ => 1`，于是 `Stmt::Label`（Lua 的 `vmcase(l)` 展开就是一个标签）、`GotoIndirect`、
+/// `Invoke`、`EhLandingPad`、`AsmGoto` 全部被当成 1 个节点，`luaV_execute` 量出来只有
+/// ~250 节点（真实上万）⇒ 预算在标签形语料上完全失效（fail-open）。
 fn stmt_node_count(s: &Stmt) -> usize {
     match s {
         Stmt::Return { val, .. } => 1 + val.as_ref().map_or(0, expr_node_count),
@@ -2289,14 +2384,41 @@ fn stmt_node_count(s: &Stmt) -> usize {
                 + stmt_node_count(body)
         },
         Stmt::Block { b, .. } => 1 + b.items.iter().map(item_node_count).sum::<usize>(),
-        Stmt::Switch { expr, cases, .. } => {
+        // `prelude` 也是体的一部分：`switch (x) { int y = f(); case 0: ... }` 里那段不在
+        // `cases` 下，漏计它等于给预算开一个绕过口。
+        Stmt::Switch {
+            expr, cases, prelude, ..
+        } => {
             1 + expr_node_count(expr)
+                + prelude.iter().map(item_node_count).sum::<usize>()
                 + cases
                     .iter()
-                    .map(|c| c.body.items.iter().map(item_node_count).sum::<usize>())
+                    .map(|c| {
+                        // `case` 的值与 GNU 区间上界也算节点（与 `ast_dispatch.rs::walk_case`
+                        // 同一口径）：它们必须是常量表达式，不计不会让预算错开，但会让
+                        // 「穷尽且递归」这句自述与实际不符。
+                        1 + c.val.as_ref().map_or(0, expr_node_count)
+                            + c.range_end.as_ref().map_or(0, expr_node_count)
+                            + c.body.items.iter().map(item_node_count).sum::<usize>()
+                    })
                     .sum::<usize>()
         },
-        _ => 1,
+        // 标签把整段体括在 `stmt` 里（Lua 的 `vmcase` 就是这个形状），必须递归；以前
+        // 它只计 1，预算对标签形完全失效。
+        Stmt::Label { stmt, .. } => 1 + stmt_node_count(stmt),
+        Stmt::GotoIndirect { expr, .. } => 1 + expr_node_count(expr),
+        Stmt::Invoke { call, .. } => 1 + stmt_node_count(call),
+        Stmt::EhLandingPad {
+            object, selector, ..
+        } => 1 + expr_node_count(object) + expr_node_count(selector),
+        Stmt::AsmGoto { outputs, inputs, .. } => {
+            1 + outputs
+                .iter()
+                .chain(inputs.iter())
+                .map(expr_node_count)
+                .sum::<usize>()
+        },
+        Stmt::Goto { .. } | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Fallthrough { .. } => 1,
     }
 }
 
@@ -2332,8 +2454,38 @@ fn inline_calls_in_block(
     caller_is_hot: bool,
     fenv_access: bool,
     depth: u32,
+    walk_arms: bool,
 ) {
-    for item in &mut body.items {
+    inline_calls_in_items(
+        &mut body.items,
+        funcs,
+        level,
+        caller_flatten,
+        caller_is_hot,
+        fenv_access,
+        depth,
+        walk_arms,
+    );
+}
+
+/// 一个「项列表」层面的内联遍历。拆出来是为了让 `switch` 的 `prelude` 与块体走**同一套**
+/// 分派：评审实测到 prelude 自己重写了一份 match（只认 `Stmt` 与嵌套 `Decl::Func`），
+/// 于是 `switch (x) { int y = f(); case 0: … }` 里那个初值调用点不会被处理，而同一个形状
+/// 在普通块里会（那一支受 `DCC_INLINE_SHAPE` 管，今天不可见，但两份规则已经开始漂）。
+fn inline_calls_in_items(
+    items: &mut Vec<BlockItem>,
+    funcs: &InlineTable,
+    level: u8,
+    caller_flatten: bool,
+    caller_is_hot: bool,
+    fenv_access: bool,
+    depth: u32,
+    walk_arms: bool,
+) {
+    // 「声明初值」展开后的语句暂存在这里（下标, 待插入项），逆序插回：边遍历边
+    // Vec::insert 与 iter_mut() 不能共存。
+    let mut expanded_inits: Vec<(usize, BlockItem)> = Vec::new();
+    for (i, item) in items.iter_mut().enumerate() {
         match item {
             BlockItem::Stmt(s) => inline_calls_in_stmt(
                 s,
@@ -2343,9 +2495,13 @@ fn inline_calls_in_block(
                 caller_is_hot,
                 fenv_access,
                 depth,
+                walk_arms,
             ),
             BlockItem::Decl(Decl::Func(f)) => {
                 if let Some(b) = &mut f.body {
+                    // 嵌在词法里的函数是一个**独立的 caller**：预算按它自己的体量算（沿外层
+                    // caller 的判决会连坐一个只有十几个节点的嵌套函数，反过来也会让超上限的
+                    // 外层替它「预先批准」）。
                     inline_calls_in_block(
                         b,
                         funcs,
@@ -2354,12 +2510,259 @@ fn inline_calls_in_block(
                         caller_is_hot,
                         fenv_access,
                         depth,
+                        arms_walkable(b),
                     );
                 }
             },
-            _ => {},
+            BlockItem::Decl(Decl::Var(v)) => {
+                // 第 4 类形状（方案 §4 批 3）：`T x = f(...)` 的声明初值，受
+                // DCC_INLINE_SHAPE 管。展开机器只认语句形状，所以把它等价改写成
+                // 「原位置留一个无初值声明 + 紧跟一条 x = f(...)」再交给同一条通道：
+                // 变量还在自己的作域与位置上（生命周期、同名遮蔽、帧槽登记都不变），
+                // 变的那一条赋值与 `x = f(...)` 逐字同路。不能把展开块包进嵌套块作用域
+                // —— 那会把声明关进子里层，后面的使用点成了未解析名字，而本 pass 跑在
+                // 语义分析之后：codegen 会把它懒注册成另一个栈槽（静默错值那一族）。
+                if inline_shape_enabled() && level >= 2 {
+                    // 只动自动存储期的普通局部：static/extern/TLS 的初值是**加载期**的事实
+                    // （搬进作用域内的语句就变成每次执行），带 VLA/清理函数/寄存器绑定/
+                    // 别名/asm label 的声明也不是「存个值」那么简单。
+                    let plain_local = !v.is_static
+                        && !v.is_extern
+                        && !v.is_thread_local
+                        && v.cleanup_fn.is_none()
+                        && v.register_name.is_none()
+                        && v.alias_name.is_none()
+                        && v.asm_label.is_none()
+                        && !type_has_vla_dim(&v.ty);
+                    if plain_local && matches!(v.init, Some(Expr::Call { .. })) {
+                        let init = v.init.take().expect("上面判过 Some");
+                        let mut synth = Stmt::Expr {
+                            e: Expr::Assign {
+                                op: BinOp::Add,
+                                l: Box::new(Expr::Ident {
+                                    name: v.name.clone(),
+                                    span: v.span.clone(),
+                                    ty: v.ty.clone(),
+                                }),
+                                r: Box::new(init.clone()),
+                                span: v.span.clone(),
+                                ty: v.ty.clone(),
+                            },
+                            span: v.span.clone(),
+                        };
+                        // 走完整的语句通道（专属两条与通用成本路都可能在这条语句上接住），
+                        // 所以「有没有展开」要比对语句本身，不能只看某一个返回值。
+                        let before = format!("{:?}", synth);
+                        inline_calls_in_stmt(
+                            &mut synth,
+                            funcs,
+                            level,
+                            caller_flatten,
+                            caller_is_hot,
+                            fenv_access,
+                            depth,
+                            walk_arms,
+                        );
+                        if format!("{:?}", synth) == before {
+                            // 什么也没接住：初值原样放回去，这一条与改动前逐字节相同。
+                            v.init = Some(init);
+                        } else {
+                            expanded_inits.push((i + 1, BlockItem::Stmt(synth)));
+                        }
+                    }
+                }
+            },
+            // 类型定义与 `asm` 声明里没有可展开的调用点（`GlobalAsm` 的文本本来就不在
+            // 内联器视野里）。列全而不是 `_ => {}`：`Decl` 新加变体时必须在这里显式表态
+            // （与上面的 [`item_node_count`] 、`src/ast_dispatch.rs` 同一条纪律）。
+            BlockItem::Decl(Decl::StructDef(_) | Decl::UnionDef(_) | Decl::EnumDef(_)) => {},
+            BlockItem::Decl(Decl::Typedef { .. } | Decl::GlobalAsm { .. }) => {},
         }
     }
+    // 逆序插回：先插靠后的，前面那些待插下标才不会被撑位。
+    for (at, it) in expanded_inits.into_iter().rev() {
+        items.insert(at, it);
+    }
+}
+
+/// 布尔闸门共用的一个解析（三个 `DCC_INLINE_*` 闸门都走它）。
+///
+/// 为什么不能只认那四个词、其余一律当「关」：`DCC_INLINE_WALK=TRUE` 会静默变成关侧，
+/// 而关侧正是配对 A/B 的**基准臂** —— 一个拼错的大小写就能把「开」的样本混进「关」的
+/// 里去定结论。现在：明确的是/否都认，认不了就**警一行 + 按该闸门的默认值**（警不进产物，
+/// 不坏可复现：同一 env 同一产物）。
+fn parse_gate(name: &str, default: bool) -> bool {
+    let raw = match std::env::var(name) {
+        Ok(v) => v,
+        Err(_) => return default,
+    };
+    let t = raw.trim().to_ascii_lowercase();
+    match t.as_str() {
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" => false,
+        "" => default,
+        other => {
+            eprintln!(
+                "dcc: 警告: {name}={other} 不是 1/0/true/false/on/off，已按默认值 {default} 处理"
+            );
+            default
+        },
+    }
+}
+
+/// 内联「调用点形状」这一族的归因闸门（方案 §4 批 3 点名的 `DCC_INLINE_SHAPE`）。
+/// 它只管本轮新接的两类：`x op= f(...)`（脱糖形态）与**声明初值** `int x = f(...)`。
+/// 已实测过的三类（`x = f()` / `y = x = f()` / `if (f())`）不在它名下 —— 那三类的默认值
+/// 已经由上一轮 15 轮配测定为开（median(r)=0.9514，SQLite 边际 −4.9%），把它们一起关掉
+/// 会把那个已经记账的结论抹掉。与 `blockopt::level()` 同一纪律：`OnceLock` 只读一次 env。
+///
+/// **默认关**（本轮实测，与批 2 那三条同处置）：机制与判据都在，但同轮配对量出来是
+/// 负的 —— Lua `fib(32)` `median(r)=1.0188`（CI [0.9987,1.0351]，4/15 轮更快），
+/// SQLite 20 万行负载 `median(r)=1.0135`（CI [0.9965,1.0240]）；而 SQLite 那个与开臂
+/// **同一二进制**的 dup 臂自己报 1.0212 ⇒ 两个同二进制臂方向一致地慢，这不是位置效应。
+/// 代价的另一面是体量：Lua 二进制 +53KB（1.14MB→1.19MB）、sqlite3.o +346KB（7.69MB→8.03MB）。
+/// 结构原因也说得清：这两类的展开比 `x = f()` 多一个「结果临时量 + 再存回」的固定开销，
+/// 而 `estimate_inline_cost` 只看 callee 体与实参，看不到这份 per-site 开销 —— 把它计入
+/// 成本模型（或按调用点数量限制这两类）才能重开。注意这与 `DCC_INLINE_WALK` 的展开预算
+/// **不是同一条待办**：预算已经做完并把 WALK 翻成默认开，而这两类的回退与 caller 体量无关
+/// （体量代价只有 +53KB/+346KB，远碰不到预算那一档的内存墙）。
+fn inline_shape_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| parse_gate("DCC_INLINE_SHAPE", false))
+}
+
+/// 内联覆盖面补漏的归因闸门（阶段 6 批 3 补漏）。它管的两件事：
+///   * 遍历下探 `Stmt::Label` / `Stmt::Switch` 臂体 / `Stmt::GotoIndirect`（受
+///     [`arms_walkable`] 的「体量上限 或 线程化派发形状」约束，这是它能默认开的唯一原因）；
+///   * `always_inline` 带控制流时在通用路上被接住。
+///
+/// **默认开**，由 15 轮同轮配对定下来（数字在方案 §15.10.8，四臂格阵）：
+///
+/// * 最终默认（只开体量通道，上限 800 节点）：Lua `fib(32)` **`median(r)=0.9462`**
+///   （CI [0.9385,0.9639]，15/15 轮更快，基准臂 p50 292.6ms ⇒ 默认档 p50 278.3ms）；
+///   同一轮 dup 臂（与基准同一二进制）自己报 0.9959 ⇒ 那 5% 远在仪器地板外；
+///   SQLite `median(r)=0.9988`（CI [0.9698,1.0043]）而 dup 臂自己 0.9817 ⇒ **中性**。
+/// * 再叠上「线程形 caller 不管多大都走」那一通道：Lua 反而略差（0.9529）且 `luaV_execute`
+///   多 460 条 ⇒ 那条单独做成 `DCC_INLINE_WALK_THREADED`，**默认关**。
+/// * 不设预算（旧记）：`-O2` 编 `sqlite3.c` 峰值 RSS 6.77~6.83GB 被 OOM 杀死（基线 5.71~6.39GB）。
+///
+/// 为什么要有这个闸门：它让产物**变大**（臂体展开就是把体复制进调用点：默认档上
+/// sqlite3.o +459KB），而静态条数在本仓从来不能单独证明收益（§2.3 的案底：删 135 条
+/// `jmp` 反而慢 3.8%）。与 `blockopt::level()`/`jumptable_enabled()` 同一条纪律：
+/// `OnceLock` 只读一次 env。
+fn inline_walk_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| parse_gate("DCC_INLINE_WALK", true))
+}
+
+/// 「臂体展开」预算的默认节点上限（caller 体的 AST 节点数）。`usize::MAX` = 不设预算。
+///
+/// 定值靠格阵扫描（方案 §15.10.8 的四臂格阵）：上限只影响「哪些 caller 能走进臂体」，而预算量尺本身
+/// 必须是完整的 AST 节点数（见 [`stmt_node_count`] 的教训注：标签形只计 1 时预算对 Lua
+/// 完全失效，那一档扫出来的「中性」不是预算的功劳）。
+const INLINE_ARM_BODY_NODES_DEFAULT: usize = 800;
+
+/// caller 体的 AST 节点数（预算的量尺）。饱和加法：预算只需要「有没有超上限」这一个比特，
+/// 巨大的 TU 里让计数器顶到 `usize::MAX` 也不会变出一个「不超」的假象。
+fn arm_body_nodes(body: &Block) -> usize {
+    let mut nodes = 0usize;
+    for it in &body.items {
+        nodes = nodes.saturating_add(item_node_count(it));
+    }
+    nodes
+}
+
+/// 本函数的臂体展开预算（方案 §15.9-1 的第一块）：caller 体不超过 `INLINE_ARM_BODY_NODES`
+/// 个 AST 节点才走进 `Label`/`Switch` 臂体。
+///
+/// 为什么按 caller 体量而不是按展开次数：实测 WALK 全开时 `-O2` 编 `sqlite3.c` 的峰值 RSS
+/// 从 6.39GB 推到 6.77GB 并被 OOM 杀死（本机 7GB），而 `lvm.c` 只多 86MB —— 代价集中在
+/// 「巨大的函数 × 几十个臂各复制一份体」那一族。先按 caller 体量挡掉那一族，小函数臂体的
+/// 收益才留得下来。
+///
+/// 注意它**只**管「走进臂体」这一件事：顶层调用点的展开从来不受预算约束（那是批 3 之前的
+/// 行为），所以不要把这一条读成「按 caller 体量限制展开」。
+///
+/// 上限只读一次 env（`DCC_INLINE_WALK_MAX`）：与 `blockopt::level()`/`jumptable_enabled()`
+/// 同一条纪律，发射途中换规则会造出没人能复现的产物。解析失败不默默回到默认值：那会让
+/// 门限扫描得到「预算不影响这一族」的假阴性，所以下一行警到 stderr（不进产物，不影响可复现）。
+fn arm_budget_ok_for(body: &Block) -> bool {
+    let limit = arm_budget_limit();
+    if limit == usize::MAX {
+        return true;
+    }
+    arm_body_nodes(body) <= limit
+}
+
+/// 本函数的控制流是不是**线程化派发**（threaded code）：体内有 `goto *表[..]` 站点。
+///
+/// 事实直接从 [`crate::ast_dispatch::collect`] 取（发射端决定「跳表基址能不能常驻
+/// `%rbp`」用的是同一个判据，两边不得各自写一份）。
+fn has_threaded_dispatch(body: &Block) -> bool {
+    crate::ast_dispatch::collect(body)
+        .tables
+        .iter()
+        .any(|(_, sites)| *sites > 0)
+}
+
+/// 线程形通道的开关（`DCC_INLINE_WALK_THREADED`）。**默认关**，理由是实测而非新形状看起来该赚：
+/// 四臂同轮配对（方案 §15.10.8，Lua `fib(32)`，25 轮，基准=两通道全关）——
+/// 只开体量通道（上限 300）`median(r)=0.9604`（CI [0.9464,0.9731]，22/25）、上限 800 **0.9704**
+/// （CI [0.9437,0.9832]，22/25），而只开线程形通道 `0.9974`（不可判，与 dup 地板同带）。
+/// ⇒ 那笔收益全在体量通道里，线程形那一半（`luaV_execute` 自己 +460 条）**买不到时间**，
+/// 反而多付 I-cache 与编译内存 ⇒ 按 §5.5 只留机制与判据，默认关。
+/// 与同族闸门同一纪律：`OnceLock` 只读一次 env。
+fn threaded_channel_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| parse_gate("DCC_INLINE_WALK_THREADED", false))
+}
+
+/// 「能不能走进 `Label`/`Switch` 臂体」的总准入。
+///
+/// 两个通道，满一即过（各自可关）：
+///   * 体量：caller ≤ `DCC_INLINE_WALK_MAX` 节点（[`arm_budget_ok_for`]）—— 小函数里臂体的
+///     展开总量天然有限；
+///   * 形状：函数是线程化派发（[`has_threaded_dispatch`]）—— 不管多大都走
+///     （[`threaded_channel_enabled`]）。
+///
+/// 为什么要两个通道而不是只按体量（本轮实测）：Lua 的那笔收益**恰好住在最大的那个 caller
+/// 附近** —— `luaV_execute` 是 18713 个节点，而 SQLite 的 `sqlite3VdbeExec` 是 16847 个，
+/// 两者只差 10%，**没有任何一个体量阈值能既放进前者又拦下后者**（上一轮扫出的 MAX=800 能
+/// 分开它们，靠的是 `stmt_node_count` 把 `Stmt::Label` 只计成 1 这个 bug，不是预算本身）。
+/// 形状能分开它们（`luaV_execute` 有 80 个 `goto *disptab[..]` 站点，SQLite 在内联时点上
+/// 一个也没有：它的稠密 `switch` 要到 `run_ssa_passes` 里的 `lower_switches_in_func` 才
+/// 改写成线程形，而 `function_inline` 跑在它前面），但**分开它们不划算**：四臂配实测到
+/// 只开线程通道对运行时没有可证效应（[`threaded_channel_enabled`] 里那四个数），所以它
+/// 默认关，只留机制与本文件的判据。
+///
+/// 机制上为什么该这样分：线程化派发里每个 handler 尾部都是一条**间接跳转边**，把调用点展开
+/// 在 handler 体内能把「跳完就碰到的那个 call」直接消掉；普通 `switch` 的 case 体之间是
+/// 汇聚到同一个 join 的直跳，展开只是把体复制进去换 I-cache。
+///
+/// 适用边界（不得读成「线程形 unlimited」）：本版只在两个载体上量过 —— `lvm.c`（开线程通道
+/// 后峰值 RSS +86MB，产物 +460 条）与 `sqlite3.c`。一个巨大的线程形 TU 仍需要重新量内存，
+/// 那条列在方案 §15.9。
+fn arms_walkable(body: &Block) -> bool {
+    arm_budget_ok_for(body) || (threaded_channel_enabled() && has_threaded_dispatch(body))
+}
+
+/// 预算上限（env `DCC_INLINE_WALK_MAX`，只读一次）。拆成单独一个函数是为了让
+/// `DCC_INLINE_TRACE` 能打出「哪个 caller 被哪条线挡住」（函数名在调用点才有）。
+fn arm_budget_limit() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| match std::env::var("DCC_INLINE_WALK_MAX") {
+        Ok(v) => match v.trim().parse::<usize>() {
+            Ok(n) => n,
+            Err(_) => {
+                eprintln!(
+                    "dcc: 警告: DCC_INLINE_WALK_MAX={v:?} 不是非负整数，已改用默认值 {}",
+                    INLINE_ARM_BODY_NODES_DEFAULT
+                );
+                INLINE_ARM_BODY_NODES_DEFAULT
+            },
+        },
+        Err(_) => INLINE_ARM_BODY_NODES_DEFAULT,
+    })
 }
 
 fn inline_calls_in_stmt(
@@ -2370,10 +2773,11 @@ fn inline_calls_in_stmt(
     caller_is_hot: bool,
     fenv_access: bool,
     depth: u32,
+    walk_arms: bool,
 ) {
     // always_inline / flatten 且函数体含局部声明: 语句级展开.
     // 成功后调用点已被替换为展开后的块, 无需再做表达式级内联.
-    if try_stmt_inline_call(s, funcs, caller_flatten, depth) {
+    if try_stmt_inline_call(s, funcs, caller_flatten, depth, walk_arms) {
         return;
     }
     // P13 阶段5：-O2 起的小 `static` 函数体（带控制流）成本模型内联。展开后立刻
@@ -2387,6 +2791,7 @@ fn inline_calls_in_stmt(
             caller_is_hot,
             fenv_access,
             depth + 1,
+            walk_arms,
         );
         return;
     }
@@ -2433,6 +2838,7 @@ fn inline_calls_in_stmt(
                 caller_is_hot,
                 fenv_access,
                 depth,
+                walk_arms,
             );
             if let Some(e) = else_ {
                 inline_calls_in_stmt(
@@ -2443,6 +2849,7 @@ fn inline_calls_in_stmt(
                     caller_is_hot,
                     fenv_access,
                     depth,
+                    walk_arms,
                 );
             }
         },
@@ -2454,6 +2861,7 @@ fn inline_calls_in_stmt(
             caller_is_hot,
             fenv_access,
             depth,
+            walk_arms,
         ),
         Stmt::While { body, .. } | Stmt::Do { body, .. } => inline_calls_in_stmt(
             body,
@@ -2463,6 +2871,7 @@ fn inline_calls_in_stmt(
             caller_is_hot,
             fenv_access,
             depth,
+            walk_arms,
         ),
         Stmt::For {
             init,
@@ -2502,6 +2911,7 @@ fn inline_calls_in_stmt(
                     caller_is_hot,
                     fenv_access,
                     depth,
+                    walk_arms,
                 );
             }
             inline_calls_in_stmt(
@@ -2512,7 +2922,82 @@ fn inline_calls_in_stmt(
                 caller_is_hot,
                 fenv_access,
                 depth,
+                walk_arms,
             );
+        },
+        // 阶段 6 批 3 的补漏：臂体里的调用点要能进内联决策。两种臂体：
+        //   * 源码级 computed goto（Lua）：`vmcase(l)` 展开就是 `L_OP_x: {…}`，臂体挂在
+        //     `Stmt::Label` 下面（批 4 让这种函数能把跳表基址常驻 `%rbp`）；
+        //   * 普通 `Stmt::Switch`（sqlite3VdbeExec 那 185 个 case 体）。
+        // 时序上要记住：稠密 switch 改写成「界检 + `goto *表[idx]` + 一串标签」的
+        // `lower_switches_in_func` 在 `run_ssa_passes` 里，而 `function_inline` 跑在它**前面**
+        // ⇒ 内联时点上 VdbeExec 还是 `Stmt::Switch`（走下面那条臂），Label 臂接的是 Lua 那种
+        // 源码级标签。两条以前都落进 `_ => {}`，所以除了最上面那一条分派，整个 VdbeExec
+        // 没有任何调用点进过内联决策。
+        Stmt::Label { stmt, .. } if inline_walk_enabled() && walk_arms => inline_calls_in_stmt(
+            stmt,
+            funcs,
+            level,
+            caller_flatten,
+            caller_is_hot,
+            fenv_access,
+            depth,
+            walk_arms,
+        ),
+        Stmt::Switch {
+            expr,
+            cases,
+            prelude,
+            ..
+        } if inline_walk_enabled() && walk_arms => {
+            *expr = inline_expr(
+                expr.clone(),
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
+            );
+            // `case` 的值必须是常量表达式，不对它做内联。prelude **与块体走同一套分派**
+            // （`inline_calls_in_items`）：这里以前自己写了一份 match（只认 `Stmt` 与嵌套
+            // `Decl::Func`），于是 `switch (x) { int y = f(); case 0: … }` 的初值调用点
+            // 被默默跳过，而同样的形状在普通块里会被处理 —— 两份规则开始漂。
+            inline_calls_in_items(
+                prelude,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
+                walk_arms,
+            );
+            for c in cases.iter_mut() {
+                inline_calls_in_block(
+                    &mut c.body,
+                    funcs,
+                    level,
+                    caller_flatten,
+                    caller_is_hot,
+                    fenv_access,
+                    depth,
+                    walk_arms,
+                );
+            }
+        },
+        // `goto *expr` 的下标/基址里可能藏着调用（`goto *tab[f()]`）。只处理表达式，
+        // 不在这一条上做任何结构改写。
+        Stmt::GotoIndirect { expr, .. } if inline_walk_enabled() && walk_arms => {
+            *expr = Box::new(inline_expr(
+                *expr.clone(),
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
+            ));
         },
         _ => {},
     }
@@ -2734,7 +3219,12 @@ fn rename_idents_in_items(items: &mut Vec<BlockItem>, map: &HashMap<String, Stri
 }
 
 /// 构造一个空的局部变量声明 (所有属性字段为默认值)
-fn plain_var_decl(ty: crate::ast::Type, name: String, init: Option<Expr>, span: &Span) -> VarDecl {
+pub(crate) fn plain_var_decl(
+    ty: crate::ast::Type,
+    name: String,
+    init: Option<Expr>,
+    span: &Span,
+) -> VarDecl {
     VarDecl {
         ty,
         name: Ident {
@@ -2794,6 +3284,15 @@ const STATIC_INLINE_COST_THRESHOLD: usize = 200;
 /// 纯收益。实测反证了这一点：按统一阈值 200 内联时 Lua fib 反而慢 2.5%（多调用点
 /// 的小函数被复制了好几份，I-cache 代价盖过省下的 call）。
 const STATIC_INLINE_SINGLE_SITE_COST_THRESHOLD: usize = 100_000;
+
+/// `always_inline` 被通用路径接住时的上限（阶段 6 批 3 补三条路互斥的漏）。
+///
+/// 为什么用户明说了还要留一道闸：通用路径会插标签与 goto，把一个巨大的体复制到
+/// 多个调用点是纯粹的 I-cache 代价。取值给到多调用点阈值的 20 倍 —— 语料里真在用的
+/// `always_inline` 助手（SQLite btree 的 `allocateSpace`、Lua 的 `prepCallInfo`）成本都在
+/// 几十到几百，量不到这条线；线上只可能是失控的手工标注，那种情况宁可留调用并
+/// 打一行 REJECT（`DCC_INLINE_TRACE` 看得见）。
+const STATIC_INLINE_ALWAYS_COST_THRESHOLD: usize = 20 * STATIC_INLINE_COST_THRESHOLD;
 
 /// 内联 pass 的只读上下文：本 TU 的函数表 + 每个函数名作为**直接调用 callee** 出现的次数。
 ///
@@ -3382,13 +3881,273 @@ fn rename_decl_names_in_stmt(s: &mut Stmt, uid: u32, map: &mut HashMap<String, S
 /// `InlineScan` 拒了（复合字面量/语句表达式在名单外），所以这里只递回表达式自身。
 fn rename_decl_names_in_expr(_e: &mut Expr, _uid: u32, _map: &mut HashMap<String, String>) {}
 
+/// 展开后的 callee 返回值要送去哪里。阶段5 只接了前两种，于是
+/// `rc = fillInCell(...)`（btree 四个热函数）与 `L->ci = ci = prepCallInfo(...)`
+/// （Lua 的 prepCallInfo，在 fib(32) 里占 6.8%）**从未进入过任何内联决策点**：
+/// 形状匹配不上就直接 `return false`，连 `DCC_INLINE_TRACE` 的 REJECT 行都不打，
+/// 只看日志的人会以为剩下的只有成本问题。
+#[derive(Clone)]
+enum Dest {
+    /// 值被丢弃：`f(...);`
+    Discard,
+    /// 尾位置：`return f(...);`（callee 的 `return` 就是本层的 `return`）
+    ReturnValue,
+    /// 单层赋值：`x = f(...);`
+    Assign(Expr),
+    /// 链式赋值：`y = x = f(...);`（先写内层左值再写外层，两者得到同一个值）
+    AssignChain { inner: Expr, outer: Expr },
+    /// 整个条件就是调用：`if (f(...)) … else …`（cond 换成结果临时量）
+    Cond { then_: Stmt, else_: Option<Stmt> },
+    /// 复合赋值 `x op= f(...)` 的脱糖形态（`x = f(...) op x` 或 `x = x op f(...)`）。
+    ///
+    /// 展开只动一处：把那一侧的 **Call 换成结果临时量的读**，另一侧的左值读表达式
+    /// 原样搬回来。所以读-改-写的次序与未展开时逐字相同 —— 上一版注释说「要重讲次序」，
+    /// 其实不需要：这里不是重新决定次序，而是同一棵树上少一个调用。
+    CompoundAssign {
+        target: Expr,
+        op: BinOp,
+        /// 调用在 Binop 的哪一侧。parser 对**可交换整型**运算会把两侧对调（让 RHS 先求值，
+        /// 与 gcc 一致），所以两种顺序都得认。
+        call_on_left: bool,
+        /// 与 `target` 结构相等的那一侧（原样搬回，不动它）
+        lvalue_read: Expr,
+        /// 内层 Binop 与外层 Assign 各自的类型（窄类型的 `binop_ty` 是 `int`，不能重算）
+        binop_ty: Type,
+        assign_ty: Type,
+    },
+}
+
+/// 把一条语句认成「可展开的调用点」，返回 (callee 名, 实参, 结果去向)。
+///
+/// 只认整条语句就是那个形状的情形；嵌在更大表达式里的（`a = f() + g()`、
+/// `c ? f() : g()`）仍不接 —— 那需要语句表达式包装，把整棵式子拖进临时量会多出
+/// 「求值次数/次序」的账。两条已经接进来但要看 `DCC_INLINE_SHAPE`：`x op= f(...)`
+/// （见 `Dest::CompoundAssign`，它只替换子表达式，不改次序）与声明初值（在
+/// `inline_calls_in_block` 那侧处：它把 `T x = f(...)` 当 `x = f(...)` 展，先留个空声明）。
+fn call_site_shape(s: &Stmt) -> Option<(String, Vec<Expr>, Dest)> {
+    let call_of = |e: &Expr| -> Option<(String, Vec<Expr>)> {
+        match e {
+            Expr::Call {
+                callee,
+                args,
+                span: _,
+                ty: _,
+            } => match callee.as_ref() {
+                // 只接直接调用（`Expr::Ident`  callee）：函数指针调用的 callee 本身可能是
+                // 一个要求值的表达式，搬进临时量会改变求值次数。
+                Expr::Ident { name, .. } => Some((name.name.clone(), args.clone())),
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    // 普通赋值在本 AST 里就是 `Assign{op: BinOp::Add}`（复合赋值早已被 parser 脱糖成
+    // `r` 里的一棵 Binop），所以「r 恰好是一个 Call」这一条判据就把 `x op= f()` 天然排除
+    // 了——不需要另开一份「读-改-写次序」的讨论。
+    let plain_assign = |e: &Expr| -> Option<(Box<Expr>, Box<Expr>)> {
+        match e {
+            Expr::Assign {
+                op: BinOp::Add,
+                l,
+                r,
+                ..
+            } => Some((l.clone(), r.clone())),
+            _ => None,
+        }
+    };
+    match s {
+        // 一条表达式语句：可能是「值被丢弃的调用」，也可能是「赋值」。两个形状要在
+        // 同一个臂里分（写两个 `Stmt::Expr` 臂会让后面那个永远不可达）。
+        Stmt::Expr { e, .. } => {
+            if let Some((n, a)) = call_of(e) {
+                return Some((n, a, Dest::Discard));
+            }
+            // `x = f(...)`。
+            let (l, r) = plain_assign(e)?;
+            if let Some((n, a)) = call_of(&r) {
+                return Some((n, a, Dest::Assign(*l)));
+            }
+            // `y = x = f(...)`（Lua 的 prepCallInfo 就是这一形）。
+            if let Some((inner_l, inner_r)) = plain_assign(&r) {
+                if let Some((n, a)) = call_of(&inner_r) {
+                    return Some((
+                        n,
+                        a,
+                        Dest::AssignChain {
+                            inner: *inner_l,
+                            outer: *l,
+                        },
+                    ));
+                }
+            }
+            // `x op= f(...)`：parser 把它脱糖成 `Assign{Add, target, Binop{op, …, …}}`，
+            // 其中一侧就是那个调用、另一侧与 target 结构相等。两种侧序都要认（可交换
+            // 整型运算被 parser 对调过）。上一行不能再用 `plain_assign(&r)?` 的 `?` 提前退出：
+            // 这一形的 `r` 是一棵 Binop，不是 Assign，那会在判据之前就 bail。
+            // 闸门关着时不接这一形（回到原样：调用仍是调用）。
+            if inline_shape_enabled() {
+                if let Expr::Binop {
+                    op,
+                    l: bl,
+                    r: br,
+                    ty: binop_ty,
+                    ..
+                } = r.as_ref()
+                {
+                    // 恰一侧是 Call（另一侧必是那个左值读）；两侧都是 Call 时不是 `op=` 的脱糖。
+                    let (n, a, call_on_left, lvalue_read) = match (call_of(bl), call_of(br)) {
+                        (Some((n, a)), None) => (n, a, true, br.as_ref().clone()),
+                        (None, Some((n, a))) => (n, a, false, bl.as_ref().clone()),
+                        _ => return None,
+                    };
+                    // 「另一侧与 target 结构相等」是这条判据的全部：不相等就不是 `op=`。
+                    if crate::semantics::exprs_structurally_equal(&lvalue_read, l.as_ref()) {
+                        let assign_ty = l.ty();
+                        return Some((
+                            n,
+                            a,
+                            Dest::CompoundAssign {
+                                target: *l,
+                                op: *op,
+                                call_on_left,
+                                lvalue_read,
+                                binop_ty: binop_ty.clone(),
+                                assign_ty,
+                            },
+                        ));
+                    }
+                }
+            }
+            None
+        }
+        Stmt::Return { val: Some(v), .. } => match call_of(v) {
+            Some((n, a)) => Some((n, a, Dest::ReturnValue)),
+            None => None,
+        },
+        // `if (f(...)) …`：条件整体就是一个调用，因此把求值提到 `if` 之前不改变
+        // 任何可观察顺序（短路组合里嵌的调用不属于这一条，那里 cond 不是 Call）。
+        Stmt::If { cond, then_, else_, .. } => {
+            let (n, a) = call_of(cond)?;
+            Some((
+                n,
+                a,
+                Dest::Cond {
+                    then_: (**then_).clone(),
+                    else_: else_.as_ref().map(|e| (**e).clone()),
+                },
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// callee 的 `return` 改写。`rv = Some(name)` 时先把值存进那个临时量再跳出；
+/// `None` 就是旧的「值丢弃」形态（只求值不存）。
+fn rewrite_returns_to_dest(s: &mut Stmt, end_label: &str, rv: Option<&str>, span: &Span) {
+    match s {
+        Stmt::Return { val, .. } => {
+            let val = val.take();
+            let goto = Stmt::Goto {
+                target: Ident {
+                    name: end_label.to_string(),
+                    span: span.clone(),
+                },
+                span: span.clone(),
+            };
+            let step: Option<Stmt> = match (val, rv) {
+                (Some(e), Some(name)) => {
+                    let ety = e.ty();
+                    Some(Stmt::Expr {
+                        e: Expr::Assign {
+                            op: BinOp::Add,
+                            l: Box::new(Expr::Ident {
+                                name: Ident {
+                                    name: name.to_string(),
+                                    span: span.clone(),
+                                },
+                                span: span.clone(),
+                                ty: ety.clone(),
+                            }),
+                            r: Box::new(e),
+                            span: span.clone(),
+                            ty: ety,
+                        },
+                        span: span.clone(),
+                    })
+                }
+                (Some(e), None) => Some(Stmt::Expr {
+                    e,
+                    span: span.clone(),
+                }),
+                (None, _) => None,
+            };
+            let mut items: Vec<BlockItem> = step
+                .into_iter()
+                .map(BlockItem::Stmt)
+                .collect::<Vec<_>>();
+            items.push(BlockItem::Stmt(goto));
+            *s = Stmt::Block {
+                b: Block {
+                    items,
+                    span: span.clone(),
+                },
+                span: span.clone(),
+            };
+        },
+        Stmt::If { then_, else_, .. } => {
+            rewrite_returns_to_dest(then_, end_label, rv, span);
+            if let Some(e) = else_ {
+                rewrite_returns_to_dest(e, end_label, rv, span);
+            }
+        },
+        Stmt::While { body, .. } | Stmt::Do { body, .. } | Stmt::For { body, .. } => {
+            rewrite_returns_to_dest(body, end_label, rv, span);
+        },
+        Stmt::Block { b, .. } => {
+            for it in b.items.iter_mut() {
+                if let BlockItem::Stmt(st) = it {
+                    rewrite_returns_to_dest(st, end_label, rv, span);
+                }
+            }
+        },
+        Stmt::Switch {
+            cases,
+            prelude,
+            ..
+        } => {
+            // prelude 也是 callee 体的一部分（`switch (x) { return 5; case 1: … }` 里那个
+            // return 虽然今天不可达，但同一文件里另四个遍历器都走 prelude）—— 不递归进去
+            // 就会把 callee 的 `return` 原样带进 caller，变成 caller 的 return。
+            for it in prelude.iter_mut() {
+                if let BlockItem::Stmt(st) = it {
+                    rewrite_returns_to_dest(st, end_label, rv, span);
+                }
+            }
+            for c in cases.iter_mut() {
+                for it in c.body.items.iter_mut() {
+                    if let BlockItem::Stmt(st) = it {
+                        rewrite_returns_to_dest(st, end_label, rv, span);
+                    }
+                }
+            }
+        },
+        Stmt::Label { stmt, .. } => rewrite_returns_to_dest(stmt, end_label, rv, span),
+        _ => {},
+    }
+}
+
 /// P13 阶段5：-O2 起对**小 `static` 函数**做函数体级内联（允许控制流）。
 ///
 /// 为什么单独一条臂而不是改 `always_inline` 那条：那条的准入是「程序员明说」，
 /// 本条是「成本模型推断」，两者错了的代价完全不同（前者是用户表达错了，后者是
-/// 编译器猜错了），判据不能合在一起改。也只接两个调用点形状：值被丢弃的表达式
-/// 语句与尾位置 `return f(...)`；值还要参与更大表达式的情形需要语句表达式包装，
-/// 而包装后的 `return`/`goto` 语义还要另讲，不在这里探一下。
+/// 编译器猜错了），判据不能合在一起改。
+///
+/// 阶段6 批3 接住了原来漏掉的调用点形状（见 `call_site_shape`）：除了「值被丢弃的
+/// 表达式语句」与「尾位置 `return f(...)`」，现在还能展开 `x = f(...)`、
+/// `y = x = f(...)` 与 `if (f(...))`；后三类需要一个结果临时量，它的声明与「出口标签
+/// 之后才写目的地」的次序就是本函数下半部分的内容。仍然不接：嵌在更大表达式里的
+/// 调用（需要语句表达式包装）、`x op= f(...)`（callee 可能改掉 `x`，读-改-写次序要
+/// 重讲）、实参里带调用的点，以及返回 void 却被赋值的情形。
 fn try_static_inline_general(
     s: &mut Stmt,
     funcs: &InlineTable,
@@ -3398,27 +4157,28 @@ fn try_static_inline_general(
     if level < 2 || depth >= INLINE_MAX_DEPTH {
         return false;
     }
-    let (callee_name, args, in_return) = match s {
-        Stmt::Expr { e: Expr::Call { callee, args, .. }, span: _ } => match callee.as_ref() {
-            Expr::Ident { name, .. } => (name.name.clone(), args.clone(), false),
-            _ => return false,
-        },
-        Stmt::Return { val: Some(Expr::Call { callee, args, .. }), span: _ } => {
-            match callee.as_ref() {
-                Expr::Ident { name, .. } => (name.name.clone(), args.clone(), true),
-                _ => return false,
-            }
-        },
-        _ => return false,
+    let (callee_name, args, dest) = match call_site_shape(s) {
+        Some(x) => x,
+        None => return false,
     };
     let f = match funcs.get(&callee_name) {
         Some(f) => f,
         None => return false,
     };
     // 准入：内部链接、没被明说禁止、不是那些已有专属路径的形状。
+    // `is_always_inline` 以前也在这一列（「那是专属两条路的事」），而专属两条
+    // 一个要「体恰好是一条 `return 表达式;`」（`try_inline_call`），一个要「体是
+    // [声明]* [表达式语句]* [return?] 且调用点是表达式语句/尾位置」（`try_stmt_inline_call`）。
+    // 带控制流的 `always_inline`（SQLite btree 的 `allocateSpace`，`SQLITE_INLINE` 展开就是
+    // `__attribute__((always_inline)) inline`）与 `rc = allocateSpace(...)` 这种赋值调用点
+    // 两边都不接 ⇒ 用户的明说反而把机会彻底关门（阶段 6 §15.8-4 的三条路互斥）。
+    // 现在只拒 `noinline`，always_inline 走到下面再按「专属路能不能接」让位。
+    // 闸门关着时退回本轮之前的形状（`always_inline` 整体不进通用路）。
+    if f.is_always_inline && !inline_walk_enabled() {
+        return false;
+    }
     if !f.is_static
         || f.is_noinline
-        || f.is_always_inline
         || f.is_variadic
         || f.returns_twice
         || f.is_nested
@@ -3442,6 +4202,21 @@ fn try_static_inline_general(
         Some(b) => b,
         None => return false,
     };
+    // 让位给专属路径：调用点是「整条表达式语句」或「尾位置」且体是一条 `return 表达式;`
+    // 时，`try_inline_call` 的逐表达式替换能把形状做得更贴源码（那是既有 -O0 产物与
+    // 反汇编快照的口径），本条插进去只会多出标签与 goto。
+    if f.is_always_inline
+        && matches!(s, Stmt::Expr { .. } | Stmt::Return { .. })
+        && matches!(
+            body.items.as_slice(),
+            [BlockItem::Stmt(Stmt::Return {
+                val: Some(_),
+                ..
+            })]
+        )
+    {
+        return false;
+    }
     if !body_is_splicable(body) {
         return false;
     }
@@ -3451,9 +4226,14 @@ fn try_static_inline_general(
     }
     let cost = estimate_inline_cost(f, body, &args);
     // 多调用点的函数按 200 卡住；只有一个调用点的放宽（不复制代码）。
+    // `always_inline` 另走一档：那条上限保护的是 I-cache，它否决的是「编译器猜值不
+    // 值得」，而这里否决的是「把一个 500 行的体复制 50 遍」那种病态标注 —— 上限给到
+    // 多调用点阈值的 20 倍，语料里真在用的助手成本都在几十到几百，量不到这条线。
     let sites = funcs.call_sites(&callee_name);
     let limit = if sites <= 1 {
         STATIC_INLINE_SINGLE_SITE_COST_THRESHOLD
+    } else if f.is_always_inline {
+        STATIC_INLINE_ALWAYS_COST_THRESHOLD
     } else {
         STATIC_INLINE_COST_THRESHOLD
     };
@@ -3466,9 +4246,26 @@ fn try_static_inline_general(
         return false;
     }
     let rspan: Span = match s {
-        Stmt::Expr { span, .. } | Stmt::Return { span, .. } => span.clone(),
+        Stmt::Expr { span, .. }
+        | Stmt::Return { span, .. }
+        | Stmt::If { span, .. } => span.clone(),
         _ => return false,
     };
+    // 需要结果的形状要先声明一个结果临时量；callee 返回 void 时这形状本身就不合法，直接不接。
+    let needs_rv = matches!(
+        dest,
+        Dest::Assign(_) | Dest::AssignChain { .. } | Dest::Cond { .. } | Dest::CompoundAssign { .. }
+    );
+    if needs_rv && matches!(f.ret_ty, Type::Void) {
+        return false;
+    }
+    // 实参里有副作用（调用/自增/赋值）就跳过：实参在 caller 作用域求值，展开后它会被
+    // 摆进形参临时量的声明里；而嵌套的展开（实参里又是一个可内联的调用）要递归多一层
+    // 同步，本轮不开这个口子。用 `semantics::expr_has_side_effects` 而不是自己写的
+    // 版本：调用/赋值/自增一并挡掉，宁可少内联不引入新的求值次数问题。
+    if needs_rv && args.iter().any(crate::semantics::expr_has_side_effects) {
+        return false;
+    }
 
     let uid = STMT_INLINE_UID.fetch_add(1, Ordering::Relaxed);
     let label_prefix = format!("__inl{}__l", uid);
@@ -3504,13 +4301,34 @@ fn try_static_inline_general(
     for it in moved.iter_mut() {
         rename_decl_names_in_item(it, uid, &mut map);
     }
-    if !in_return {
-        // 值被丢弃：每个 `return` 先求值再跳到展开块的出口。
+    // 结果临时量：只在需要把 callee 的返回值送去某地时才建。名字带 uid 且进 `map`，
+    // 所以 callee 体内不可能有一个同名局部被误改（形参/局部都已按 map 改名）。
+    let rv_name = if needs_rv {
+        format!("__inl{}$rv", uid)
+    } else {
+        String::new()
+    };
+    if needs_rv {
+        bind.push(BlockItem::Decl(Decl::Var(plain_var_decl(
+            f.ret_ty.clone(),
+            rv_name.clone(),
+            None,
+            &rspan,
+        ))));
+    }
+    if !matches!(dest, Dest::ReturnValue) {
+        // 值要么丢弃、要么存进结果临时量；两种都要把 `return` 改成「先做完这一步
+        // 再跳到展开块出口」。
+        let rv: Option<&str> = if needs_rv {
+            Some(rv_name.as_str())
+        } else {
+            None
+        };
         let mut rewritten: Vec<BlockItem> = Vec::new();
         for it in moved.drain(..) {
             match it {
                 BlockItem::Stmt(mut st) => {
-                    rewrite_returns_discarded(&mut st, &end_label, &rspan);
+                    rewrite_returns_to_dest(&mut st, &end_label, rv, &rspan);
                     rewritten.push(BlockItem::Stmt(st));
                 },
                 other => rewritten.push(other),
@@ -3533,6 +4351,140 @@ fn try_static_inline_general(
     rename_idents_in_items(&mut moved, &map);
     let mut items: Vec<BlockItem> = bind;
     items.extend(moved);
+    // 目的地语句在出口标签**之后**：它们必须走所有路径都执行一次，而 callee 体内的
+    // `goto`（展开时已加前缀）不能被它们跳过。
+    // 结果临时量的**唯一个性**：它的声明类型就是 `f.ret_ty`（上面 `plain_var_decl` 用的就是
+    // 它），所以读它必须按 `f.ret_ty` 读。以前 `Dest::Cond` 硬贴 `Type::Int`、`Dest::Assign`
+    // 贴左值的类型，于是
+    //   * `static double dsel(long);` + `if (dsel(k))` 在 -O2 按 32 位整数判真，而槽里躺的是
+    //     `1.0` 的位模式（低 32 位为 0）⇒ 真被判成假（实测 gcc/dcc -O0 都返 1，-O2 返 2）；
+    //   * `int i; i = dsel(k);` 按 `int` 读 ⇒ 发射层那次 `cvttsd2si` 根本没地方发生，
+    //     double 的位模式被当 int 存（实测 -O2 得 0，-O0 与 gcc 得 3）。
+    let rv_ty = f.ret_ty.clone();
+    let ident_of = |name: String, ty: Type| Expr::Ident {
+        name: Ident {
+            name,
+            span: rspan.clone(),
+        },
+        span: rspan.clone(),
+        ty,
+    };
+    let rv_expr = || ident_of(rv_name.clone(), rv_ty.clone());
+    // 把「已算好的值」写进一个左值：目的地按左值类型隐式转换。未展开前那是
+    // `l = f(...)`，赋值臂会自己补那次转换；现在右值是一个带自己类型的名字，
+    // 而本 pass 跑在语义分析之后没人再补，所以上面的转换必须留在 AST 上
+    // （类型相同时不包，免得多一层无意义的节点）。
+    let assign_from = |l: Expr, src: Expr| -> Expr {
+        let lty = l.ty();
+        let sty = src.ty();
+        let r = if lty == sty {
+            Box::new(src)
+        } else {
+            Box::new(Expr::Cast {
+                ty: lty.clone(),
+                e: Box::new(src),
+                span: rspan.clone(),
+            })
+        };
+        Expr::Assign {
+            op: BinOp::Add,
+            l: Box::new(l),
+            r,
+            span: rspan.clone(),
+            ty: lty,
+        }
+    };
+    let assign_rv = |l: Expr| -> Expr { assign_from(l, rv_expr()) };
+    match dest {
+        Dest::Assign(l) => {
+            items.push(BlockItem::Stmt(Stmt::Expr {
+                e: assign_rv(l),
+                span: rspan.clone(),
+            }));
+        },
+        Dest::AssignChain { inner, outer } => {
+            // C 语义：`y = x = f()` 里内层先写，而**外层拿到的是内层转换后的值**：
+            // `double y; int x; y = x = f();` 且 `f()` 返 3.5 时 `x` 是 3、`y` 也是 3.0
+            // 而不是 3.5。所以两边同型（Lua 的 `L->ci = ci = prepCallInfo(...)`：三个
+            // 类型同一个指针）时直读结果临时量就行；不同型时必须先落一个内层类型的
+            // 中间量，外层从它读。不能「重读一次内层左值」：`a[i++] = f()` 那种下标
+            // 带副作用，读两次就是推进两次。
+            let ity = inner.ty();
+            if ity == rv_ty {
+                items.push(BlockItem::Stmt(Stmt::Expr {
+                    e: assign_rv(inner),
+                    span: rspan.clone(),
+                }));
+                items.push(BlockItem::Stmt(Stmt::Expr {
+                    e: assign_rv(outer),
+                    span: rspan.clone(),
+                }));
+            } else {
+                let mid_name = format!("__inl{}$rv2", uid);
+                items.push(BlockItem::Decl(Decl::Var(plain_var_decl(
+                    ity.clone(),
+                    mid_name.clone(),
+                    None,
+                    &rspan,
+                ))));
+                items.push(BlockItem::Stmt(Stmt::Expr {
+                    e: assign_from(ident_of(mid_name.clone(), ity.clone()), rv_expr()),
+                    span: rspan.clone(),
+                }));
+                let mid = || ident_of(mid_name.clone(), ity.clone());
+                items.push(BlockItem::Stmt(Stmt::Expr {
+                    e: assign_from(inner, mid()),
+                    span: rspan.clone(),
+                }));
+                items.push(BlockItem::Stmt(Stmt::Expr {
+                    e: assign_from(outer, mid()),
+                    span: rspan.clone(),
+                }));
+            }
+        },
+        Dest::Cond { then_, else_ } => {
+            items.push(BlockItem::Stmt(Stmt::If {
+                cond: rv_expr(),
+                then_: Box::new(then_),
+                else_: else_.map(Box::new),
+                span: rspan.clone(),
+            }));
+        },
+        Dest::CompoundAssign {
+            target,
+            op,
+            call_on_left,
+            lvalue_read,
+            binop_ty,
+            assign_ty,
+        } => {
+            // 只把那一侧的 Call 换成结果临时量的读；左值读与两层的类型都由匹配时抄回来，
+            // 所以这棵子树与未展开时除「少一个调用」外逐字相同。
+            let mk_binop = |l: Expr, r: Expr| Expr::Binop {
+                op,
+                l: Box::new(l),
+                r: Box::new(r),
+                span: rspan.clone(),
+                ty: binop_ty.clone(),
+            };
+            let rhs = if call_on_left {
+                mk_binop(rv_expr(), lvalue_read)
+            } else {
+                mk_binop(lvalue_read, rv_expr())
+            };
+            items.push(BlockItem::Stmt(Stmt::Expr {
+                e: Expr::Assign {
+                    op: BinOp::Add,
+                    l: Box::new(target),
+                    r: Box::new(rhs),
+                    span: rspan.clone(),
+                    ty: assign_ty,
+                },
+                span: rspan.clone(),
+            }));
+        },
+        Dest::Discard | Dest::ReturnValue => {},
+    }
     *s = Stmt::Block {
         b: Block { items, span: rspan.clone() },
         span: rspan.clone(),
@@ -3550,6 +4502,7 @@ fn try_stmt_inline_call(
     funcs: &InlineTable,
     caller_flatten: bool,
     depth: u32,
+    walk_arms: bool,
 ) -> bool {
     // 提取调用点 (return f(...) 或表达式语句 f(...))
     let (callee_name, args, in_return) = match s {
@@ -3732,7 +4685,20 @@ fn try_stmt_inline_call(
     };
     // 展开块内仍可能有嵌套调用 (如 callee 调用另一个 always_inline)
     if let Stmt::Block { b, .. } = s {
-        inline_calls_in_block(b, funcs, 0, caller_flatten, false, false, depth + 1);
+        // 预算沿用外层 caller 的判决，不能在这里重算：展开块只包含 callee 的体（它必然比
+        // 原 caller 小），每次展开都重新拿一份预算等于给超上限的 caller 开了一个绕过口。
+        // 今天这条路径只接平坦体（结构检查在上面），臂体走不到，但下一步放宽平坦限制时
+        // 它就会成立，所以现在就把不变式钉住。
+        inline_calls_in_block(
+            b,
+            funcs,
+            0,
+            caller_flatten,
+            false,
+            false,
+            depth + 1,
+            walk_arms,
+        );
     }
     true
 }
@@ -5152,6 +6118,126 @@ mod tests {
             ty: int_ty(),
         };
         assert_eq!(expr_node_count(&e), 1);
+    }
+
+    /// 臂体展开预算：小函数放行、巨大函数挡住。
+    ///
+    /// 这一条盯的是本轮实测到的那件事：WALK 全开让 `sqlite3.c` 的峰值 RSS 推到 6.77GB
+    /// 并被 OOM 杀死。预算不看展开次数（那要隐式全局状态，并行分块下不可复现），只看
+    /// caller 体量 —— 一个纯函数，所以可单测、也不依赖 `OnceLock` 里那个上限的具体值。
+    #[test]
+    fn arm_budget_allows_small_callers_and_blocks_giant_ones() {
+        // 取第一个 FuncDecl（文件作变量不在 `decls` 里，按名字找比按下标稳）。
+        fn first_func(prog: &crate::ast::Program) -> &crate::ast::FuncDecl {
+            prog.decls
+                .iter()
+                .find_map(|d| match d {
+                    Decl::Func(f) if f.body.is_some() => Some(f),
+                    _ => None,
+                })
+                .expect("夹具里应有一个带体的函数")
+        }
+        let (prog, _) =
+            crate::parser::parse(b"int g; int f(int x){ if (x) g = 1; else g = 2; return g; }\n", "budget-small.c");
+        assert!(
+            arm_budget_ok_for(first_func(&prog).body.as_ref().unwrap()),
+            "几行的小函数必须能走臂体展开"
+        );
+        // 造一个巨大的 caller：6000 条独立赋值，节点数远超默认上限
+        let mut src = String::from("int big(int x){ int a = 0;");
+        for i in 0..6000 {
+            src.push_str(&format!("a = a + {};", i % 7 + 1));
+        }
+        src.push_str("return a;}");
+        let (prog, _) = crate::parser::parse(src.as_bytes(), "budget-big.c");
+        let body = first_func(&prog).body.as_ref().unwrap();
+        let nodes: usize = body.items.iter().map(item_node_count).sum();
+        assert!(
+            nodes > INLINE_ARM_BODY_NODES_DEFAULT,
+            "夹具得真的超过上限才能测出拒绝（实得 {nodes}）"
+        );
+        assert!(!arm_budget_ok_for(body), "巨大 caller 必须被预算挡住（那是 OOM 的来源）");
+    }
+
+    /// 预算的量尺必须递归进**标签包住的体**。
+    ///
+    /// 这是评审直测出来的那个 fail-open：`stmt_node_count` 以前带 `_ => 1`，于是一个
+    /// 把整段体括在 `L:{...}` 里的 caller 只被计成几个节点。Lua 的 `vmcase(l)` 展开就是
+    /// `L_OP_MOVE: {…}`，所以「按 caller 体量限住才敢默认开」这句话在标签形语料上
+    /// 完全不成立。本例就是钉这一条的回归判据。
+    #[test]
+    fn arm_budget_counts_statements_wrapped_in_a_label() {
+        fn first_func(prog: &crate::ast::Program) -> &crate::ast::FuncDecl {
+            prog.decls
+                .iter()
+                .find_map(|d| match d {
+                    Decl::Func(f) if f.body.is_some() => Some(f),
+                    _ => None,
+                })
+                .expect("夹具里应有一个带体的函数")
+        }
+        // 同样的体，一种直接平铺、一种括在标签下：两者节点数必须同一量级。
+        let mut flat = String::from("int f(int x){ int a = 0;");
+        let mut labeled = String::from("int f(int x){ int a = 0; L0: {");
+        for i in 0..1200 {
+            let s = format!("a = a + {};", i % 7 + 1);
+            flat.push_str(&s);
+            labeled.push_str(&s);
+        }
+        flat.push_str("return a;}");
+        labeled.push_str("} return a;}");
+        let (pf, _) = crate::parser::parse(flat.as_bytes(), "budget-flat.c");
+        let (pl, _) = crate::parser::parse(labeled.as_bytes(), "budget-label.c");
+        let n_flat = arm_body_nodes(pf.decls.iter().find_map(|d| match d {
+            Decl::Func(f) => f.body.as_ref(),
+            _ => None,
+        }).unwrap());
+        let body_l = first_func(&pl).body.as_ref().unwrap();
+        let n_label = arm_body_nodes(body_l);
+        assert!(
+            n_label.saturating_mul(2) >= n_flat,
+            "标签形不得只量出平铺形的一半以下（实得 标签={n_label} 平铺={n_flat}）"
+        );
+        assert!(
+            n_label > INLINE_ARM_BODY_NODES_DEFAULT,
+            "夹具得真的超上限（实得 {n_label}）"
+        );
+        assert!(!arm_budget_ok_for(body_l), "括在标签里的巨大体同样必须被预算挡住");
+    }
+
+    /// `switch` 的 `prelude` 也是 caller 体的一部分，不得从预算量尺里漏掉。
+    #[test]
+    fn arm_budget_counts_switch_prelude() {
+        fn body_of(prog: &crate::ast::Program) -> &Block {
+            prog.decls
+                .iter()
+                .find_map(|d| match d {
+                    Decl::Func(f) => f.body.as_ref(),
+                    _ => None,
+                })
+                .expect("夹具里应有一个带体的函数")
+        }
+        let pad: String = (0..1200)
+            .map(|i| format!("a = a + {};\n", i % 7 + 1))
+            .collect();
+        // 两份同体积的体：一份平铺在 switch 之前，一份真的放进 `prelude`。漏计 `prelude`
+        // 时两者的节点数会差出一整个 pad（而不是像旧版本那样只测平铺那一份 —— 它对
+        // 「prelude 进不进账」零约束）。
+        let flat = format!("int f(int x){{ int a = 0; {pad} switch (a) {{ case 1: return 2; }} return a;}}");
+        let pre = format!("int f(int x){{ int a = 0; switch (a) {{ {pad} case 1: return 2; }} return a;}}");
+        let (pf, _) = crate::parser::parse(flat.as_bytes(), "budget-flat2.c");
+        let (pp, _) = crate::parser::parse(pre.as_bytes(), "budget-prelude.c");
+        let n_flat = arm_body_nodes(body_of(&pf));
+        let n_pre = arm_body_nodes(body_of(&pp));
+        assert!(
+            n_pre.saturating_mul(2) >= n_flat,
+            "prelude 里那 1200 条必须与平铺同量级（实得 prelude={n_pre} 平铺={n_flat} ⇒ prelude 被漏计）"
+        );
+        assert!(
+            n_pre > INLINE_ARM_BODY_NODES_DEFAULT,
+            "夹具得真的超上限（实得 {n_pre}）"
+        );
+        assert!(!arm_budget_ok_for(body_of(&pp)), "prelude 巨大的 caller 必须被预算挡住");
     }
 
     #[test]

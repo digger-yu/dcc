@@ -45,7 +45,13 @@ pub fn normalize_clobber_name(raw: &str) -> String {
 }
 
 fn walk_block(b: &Block, out: &mut HashSet<String>) {
-    for item in &b.items {
+    walk_items(&b.items, out)
+}
+
+/// 项列表层面：`Stmt::Switch` 除了 `cases` 还有一份 `prelude`，它不是一个 `Block`，
+/// 所以这一层必须能单独走（漏了它就是静默少扫一棵子树）。
+fn walk_items(items: &[BlockItem], out: &mut HashSet<String>) {
+    for item in items {
         match item {
             BlockItem::Stmt(st) => walk_stmt(st, out),
             BlockItem::Decl(d) => walk_decl(d, out),
@@ -114,8 +120,11 @@ fn walk_stmt(st: &Stmt, out: &mut HashSet<String>) {
             }
             walk_stmt(body, out);
         },
-        Stmt::Switch { expr, cases, .. } => {
+        Stmt::Switch {
+            expr, cases, prelude, ..
+        } => {
             walk_expr(expr, out);
+            walk_items(prelude, out);
             for c in cases {
                 walk_case(c, out);
             }

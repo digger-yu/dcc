@@ -347,6 +347,9 @@ impl Codegen {
             .body
             .as_ref()
             .is_some_and(|b| Self::block_contains_vla(&b.items));
+        // 跳表基址要不要常驻 %rbp（阶段 6 批 4）：与上面同一批「发射开始之前定完」的
+        // 函数级事实。必须在序言之前定，因为序言要插那对存/取，而站点与尾声都读它。
+        self.disptab_base_reg_sym = self.decide_disptab_base_reg(f);
         // naked 形态必须在下面那个早返**之前**就定下来：内联 asm 的保存/恢复守护
         // （P12 Phase 5.2a）不得往用户的裸汇编里插 push/pop。
         self.cur_func_is_naked = f.is_naked;
@@ -1066,6 +1069,33 @@ impl Codegen {
                 )
                 .with_gas("mov %r15, -40(%r13)".to_string()),
             );
+            // 跳表基址常驻 `%rbp`（阶段 6 批 4）：先把调用者的 `%rbp` 存进帧顶那一格，
+            // 再把表地址取一次。存槽与金丝雀共用 `%r13-8`，两者由
+            // `decide_disptab_base_reg` 的互斥判据分开，所以下面必须先问「帧里放得下吗」
+            // ——放不下就整体退出（把字段清成 None），发射站点与尾声都跟着回到原形状。
+            //
+            // 不在 `patch_callee_saves` 的位图里：那四条是「可能本函数根本不用」的号，
+            // 而这一条用不用在序言这一刻已经确定（AST 扫描完），不需要回填。
+            if self.disptab_base_reg_sym.is_some() {
+                if !self.frame_layout.canary_fits() {
+                    self.disptab_base_reg_sym = None;
+                } else {
+                    let sym = self.disptab_base_reg_sym.clone().unwrap();
+                    self.emit_insn(
+                        &Insn::mov_rm_mem(
+                            false,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                            5,
+                            13,
+                            -8,
+                        )
+                        .with_gas("mov %rbp, -8(%r13)".to_string()),
+                    );
+                    // lea <表>(%rip), %rbp：与 `emit_global_addr` 同一条重定位通道
+                    //（传入的已是 mangled 名，它内部的 `resolve_global_key` 对原名字是恒等）。
+                    self.emit_global_addr(5, &sym);
+                }
+            }
             // 变参 reg save area 放在 frame 底部 (紧贴 rsp 之后).
             // 帧布局 (自下而上):
             //   r13+0 saved r13 / r13+8 ret addr
@@ -1617,6 +1647,9 @@ impl Codegen {
                 prologue_end: self.cur_prologue_end,
                 callee_saved_used: self.reg_bank.used_mask(),
                 frame_pointer: self.target.frame_pointer,
+                // 基址常驻在序言那一刻才最终定下（帧顶放得下吗），而这一行在函数体之后，
+                // 读到的就是最终值：序言里清成 None 的那些函数不会多带这条规则。
+                rbp_saved: self.disptab_base_reg_sym.is_some(),
             },
         );
         // 函数体+尾声已生成, callee_saved_used 完整: 回填序言/尾声中

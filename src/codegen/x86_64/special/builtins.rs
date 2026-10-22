@@ -1410,12 +1410,17 @@ impl Codegen {
             // __builtin_setjmp(buf): GCC 语义实现.
             // buf 布局 (前 3 个 slot, 兼容 GCC 5-word buffer 约定):
             //   buf[0] = receiver label 地址 (__builtin_longjmp 的落点)
-            //   buf[1] = 捕获时刻 rsp (含本 builtin 内部分配的 40 字节临时区)
+            //   buf[1] = 捕获时刻 rsp (含本 builtin 内部分配的 48 字节临时区)
             //   buf[2] = r13 (dcc 帧基址)
             // 直接调用返回 0; 经 __builtin_longjmp 返回时 receiver 处写 1.
-            // 栈上临时区布局: [rsp]=setjmp 结果, [rsp+8..40]=callee-saved
-            // pool 寄存器 (rbx,r12,r14,r15) 备份 — longjmp 返回时恢复,
-            // 避免陈旧寄存器值 (对应 GCC returns_twice 语义).
+            // 栈上临时区布局: [rsp]=setjmp 结果, [rsp+8..48]=callee-saved
+            // GP 寄存器 (rbx,r12,r14,r15,rbp) 备份 — longjmp 返回时恢复,
+            // 避免陈旧寄存器值 (对应 GCC returns_twice 语义)。
+            //
+            // 为什么 `rbp` 也进快照（阶段 6 批 4）：SysV 的 callee-saved 集就是
+            // rbx/rbp/r12-r15，而 glibc 的 `sigsetjmp` 存的正是这五个。本端以前只存四个
+            // 是因为没人用 `%rbp`；现在跳表基址可以常驻它（一个跳表函数可以 longjmp
+            // 穿过另一个跳表函数），不存就是落点拿到别人的表地址。
             "__builtin_setjmp" => {
                 if args.is_empty() {
                     return false;
@@ -1425,7 +1430,7 @@ impl Codegen {
                 // rdi = buf
                 self.gen_expr(&args[0], 7);
                 // 栈上临时区
-                self.emit_insn(&Insn::sub_rsp_imm(0x28)); // sub rsp, 40
+                self.emit_insn(&Insn::sub_rsp_imm(0x30)); // sub rsp, 48
                 self.emit_insn(&Insn::mov_rm_mem(
                     false,
                     crate::codegen::shared::asm_operand::Width::B64,
@@ -1462,6 +1467,13 @@ impl Codegen {
                     4,
                     0x20,
                 )); // mov [rsp+32], r15
+                self.emit_insn(&Insn::mov_rm_mem(
+                    false,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    5,
+                    4,
+                    0x28,
+                )); // mov [rsp+40], rbp
                     // buf[1] = rsp (含临时区)
                 self.emit_insn(&Insn::mov_rm_mem(
                     false,
@@ -1533,6 +1545,13 @@ impl Codegen {
                     4,
                     0x20,
                 )); // mov r15, [rsp+32]
+                self.emit_insn(&Insn::mov_rm_mem(
+                    true,
+                    crate::codegen::shared::asm_operand::Width::B64,
+                    5,
+                    4,
+                    0x28,
+                )); // mov rbp, [rsp+40]
                 self.emit_insn(&Insn::store_imm_mem(
                     crate::codegen::shared::asm_operand::Width::B64,
                     4,
@@ -1548,7 +1567,7 @@ impl Codegen {
                     4,
                     0,
                 )); // mov dst, [rsp]
-                self.emit_insn(&Insn::add_rsp_imm(0x28)); // add rsp, 40
+                self.emit_insn(&Insn::add_rsp_imm(0x30)); // add rsp, 48
                 true
             },
             // __builtin_longjmp(buf, val): 恢复 rsp/r13 后跳转到 receiver.

@@ -18,6 +18,26 @@ use crate::ssa::ir::{Function, Inst, InstKind, Operand, Phi, SsaVar, Terminator}
 use crate::ssa::lower::{collect_local_decls, insert_label_phis, insert_loop_phis, lower_lvalue};
 use crate::ssa::structure::is_structured;
 
+/// label BB 名的前缀。**定义只有一份**：生产点是 [`label_bb_name`]，消费点是
+/// [`source_label_of`]。
+pub const LABEL_BB_PREFIX: &str = "label.";
+
+/// 源标签名 -> label BB 名。`Stmt::Label`、`Stmt::Goto` 与 `GotoIndirect` 三处都要
+/// 同一个名字，所以不能各自 `format!` 一遍。
+pub fn label_bb_name(source_label: &str) -> String {
+    format!("{}{}", LABEL_BB_PREFIX, source_label)
+}
+
+/// label BB 名 -> 源标签名（反向）。
+///
+/// 为什么要有它（阶段 6 §6 的小事①）：以前 `label.` 这个前缀只有生产点、零个消费点，
+/// 于是「从这个 BB 名读回源标签」一旦有人要做（bail 诊断、IR dump、落点归属）就得
+/// 再手拼一次前缀 —— 手拼错了不是崩溃，是「静默没命中」。两侧收在同一处之后，
+/// 前缀只有一个定义，而反向映射可单测。
+pub fn source_label_of(bb_name: &str) -> Option<&str> {
+    bb_name.strip_prefix(LABEL_BB_PREFIX).filter(|s| !s.is_empty())
+}
+
 pub(super) struct Builder {
     pub(super) func: Function,
     /// 当前 BB 名称
@@ -1982,7 +2002,7 @@ impl Builder {
                 let label_bb = self
                     .label_bbs
                     .entry(label_name.clone())
-                    .or_insert_with(|| self.func.unique_bb(&format!("label.{}", label_name)))
+                    .or_insert_with(|| self.func.unique_bb(&label_bb_name(&label_name)))
                     .clone();
                 // 保存当前变量版本快照 (用于 phi 插入)
                 self.label_var_snapshots
@@ -2008,7 +2028,7 @@ impl Builder {
                 let target_bb = self
                     .label_bbs
                     .entry(label_name.clone())
-                    .or_insert_with(|| self.func.unique_bb(&format!("label.{}", label_name)))
+                    .or_insert_with(|| self.func.unique_bb(&label_bb_name(&label_name)))
                     .clone();
                 // 记录待解析的 goto
                 self.pending_gotos.push((self.cur.clone(), label_name));
@@ -2350,4 +2370,32 @@ fn build_ssa(f: &FuncDecl, addr_taken: HashSet<String>, analysis_only: bool) -> 
     // `find_loop_body_multi` 等分析沿 `preds` 反向走, 看到旧边就会把循环体算错。
     refresh_cfg(&mut func);
     Some(func)
+}
+
+#[cfg(test)]
+mod label_name_tests {
+    use super::{LABEL_BB_PREFIX, label_bb_name, source_label_of};
+
+    /// 正反向必须严格互逆：`unique_bb` 直接拿这个名字当 BB 键，而反向映射是给
+    /// 诊断/dump 用的，两边差一个字符就是「静默没命中」。
+    #[test]
+    fn label_bb_name_and_source_label_of_are_inverses() {
+        for src in ["retry", "L_OP_MOVE", "out", "0", "__swc_n3_7"] {
+            let bb = label_bb_name(src);
+            assert_eq!(bb, format!("{}{}", LABEL_BB_PREFIX, src));
+            assert_eq!(source_label_of(&bb), Some(src), "{src} 往返回来不是自己");
+        }
+    }
+
+    /// 反向映射只认自己生产的那种名字：普通 BB 名（`bb3`/循环名）、空标签段、
+    /// 以及前缀本身都得返 None，不能把「碰巧含点」的名字当成标签。
+    #[test]
+    fn source_label_of_rejects_non_label_block_names() {
+        assert_eq!(source_label_of("bb3"), None);
+        assert_eq!(source_label_of("loop.2.header"), None);
+        assert_eq!(source_label_of(LABEL_BB_PREFIX), None, "空前缀不算标签");
+        assert_eq!(source_label_of(""), None);
+        // `label.label.x` 是合法源标签名（编译器不禁止这种名字），必须能剥回一层
+        assert_eq!(source_label_of("label.label.x"), Some("label.x"));
+    }
 }

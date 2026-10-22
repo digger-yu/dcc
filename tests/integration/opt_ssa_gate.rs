@@ -1755,3 +1755,733 @@ fn o2_unrecompute_addr_with_call_rhs_still_pushes() {
         "-O2: 不可重算地址 + call 右值的标量写被当成可以省押栈（两道保守门失守）：\n{body}"
     );
 }
+
+/// switch 分派的十个形态逐档与 gcc 一致（稠密 / 稀疏含洞 / GNU 区间 case /
+/// default 在首位 / 末臂落入 default / goto 跳进臂体 / 无符号极值 / 负 case 值 /
+/// `__int128` 与指针 selector）。
+///
+/// 这条是阶段6 批1「x86_64 switch 跳表」的**前置**判据：先把分派选臂的正确性钉住，
+/// 再换分派机制。跳表最容易静默错值的恰好就是负下标、洞、区间 case 和 default 位次，
+/// 而这些形态今天全部走比较链且都是对的 —— 所以本条必须先绿，改动才有基线可比。
+#[test]
+fn switch_dispatch_shapes_match_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "switch-dispatch-shapes",
+        include_str!("../fixtures/opt/switch_dispatch_shapes.c"),
+        "switch 分派选错臂（表基址/界检/洞/default 位次任一失守就会在某一档上错臂）",
+    );
+}
+
+/// switch selector 的副作用只求值一次：`switch (i++)` / `switch (f())` /
+/// `switch (*p++)` / `switch (counter += 4)`。
+///
+/// 本条从红转绿是阶段6 批0.5 的修复：`lower_switch_stmt` 把 selector 逐臂 `clone()`
+/// 进 if-else 链，于是副作用做了「臂位 + 1」次、而且每臂比较的是不同的值。实测
+/// 修复前 -O2 得 `pick=-1 i=5`（gcc `pick=300 i=3`）、`calls=2`（gcc 1），而 -O0 是对的
+/// —— AST 的 `Stmt::Switch` 臂只求值一次。现在把有副作用的 selector 先存进一个
+/// 临时局部，链里只 clone 那个名字。值落在链首时短路会掩盖重复求值，所以夹具里
+/// 特意放了一条例在末环的 `sw_lastarm`。
+#[test]
+fn switch_selector_effects_match_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "switch-selector-effects",
+        include_str!("../fixtures/opt/switch_selector_effects.c"),
+        "switch selector 被逐臂 clone，副作用按臂位重复求值（选错臂 + 多余副作用）",
+    );
+}
+
+/// 同宽 `signed ↔ unsigned` cast 在使用点必须归一 —— 四档全绿。
+///
+/// 阶段6 批0a 写夹具时撞上的缺陷：`unsigned long f(int v){ return 100000000000UL +
+/// (unsigned)v; }` 在 v=-1 时 gcc 得 104294967295、dcc 得 99999999999。三个失守点各自由
+/// 不同层造成，本用例同时盯住它们（修复分两处：标量写白名单 + 发射层窥孔分类）：
+///   1. 标量写/赋值快道 `scalar_load_shape` 原本无条件剥掉 `Cast` 再按**内层对象**的
+///      类型决定扩展方向 —— 现在「同宽但换符号性」的那层退出快道，交回 `gen_expr_cast`。
+///   2. 帧槽窄装载快道按 lvalue 自己的类型扩展，整层跳过同宽 cast 臂（同一表达式从
+///      `%edi` 取是对的，从 `-64(%r13)` 取就错）。
+///   3. 发射层窥孔把 `movsxd r64, DWORD PTR [mem]`（符号扩展装载）与 32 位零扩展装载
+///      归成同一类 `LoadR32`，于是紧随其后的 `mov dst32, dst32`（那次零扩展归一）被当
+///      自反冗余删掉。现在符号扩展装载单独立类 `LoadS32`，不再充当「高 32 位已为零」
+///      的前提。（这条最难查：`DCC_BLOCKOPT=0` 照样错，因为它不是块内优化。）
+/// 夹具含正反两面：有符号源加宽必须仍做符号扩展，`unsigned short/char` 必须零扩展。
+#[test]
+fn int_widen_signedness_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "int-widen-signedness",
+        include_str!("../fixtures/opt/int_widen_signedness.c"),
+        "同宽 signed↔unsigned cast 在使用点不做零扩展，加宽后高位错掉",
+    );
+}
+
+// ============================================================================
+// 阶段 6 批 4：computed goto 的跳表基址常驻 `%rbp`
+// ============================================================================
+
+/// 执行级：八种 computed goto 形态四档与 gcc 一致。
+///
+/// 这批动的是一个 callee-saved 号，所以失败形态全是「跳错地方」那一类：基址取成别的
+/// 表、尾声漏恢复、被调者自己也常驻而没配平、第二张表被误当成第一张。每一段夹具各钉
+/// 一条反面（见夹具头注释）。
+#[test]
+fn computed_goto_dispatch_matches_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "computed-goto-dispatch",
+        include_str!("../fixtures/opt/computed_goto_dispatch.c"),
+        "跳表基址常驻寄存器后取错表/漏恢复/嵌套占用未配平，分派会跳进别的函数",
+    );
+}
+
+/// 发射形态（判据取两头，四件一起成立才算这批落地）：
+///   ① 主表的分派是**一条** `jmp *(%rbp,%rcx,8)`，序言里基址只取一次；
+///   ② 同一函数里没被选中的第二张表**不受影响**（仍是 lea+mov+jmp 三条）；
+///   ③ 每个 return 站点都有一条 `mov -8(%r13), %rbp`；
+///   ④ 关掉闸门（`DCC_DISPTAB_RBP=0`）后主表回到原来的三条，且 `%rbp` 一个都不碰。
+///
+/// 被测函数写成**非 static**：没人调用的 static 函数会被删掉，那时「汇编里找不到该函数」
+/// 会让整条判据空跑。
+#[test]
+fn o2_computed_goto_dispatch_fuses_indexed_jump_and_gates_clean() {
+    let src = "int run(int n) {\n\
+               static const void *const mtab[3] = {&&M0, &&M1, &&M2};\n\
+               static const void *const other[2] = {&&O0, &&O1};\n\
+               int acc = 0;\n\
+               while (n > 0) {\n\
+                   goto *mtab[n % 3];\n\
+                 M0: acc += 1; n -= 1; continue;\n\
+                 M1: acc += 2; n -= 1; continue;\n\
+                 M2: acc += 3; n -= 1; continue;\n\
+               }\n\
+               goto *other[n & 1];\n\
+             O0: return acc + 1;\n\
+             O1: return acc + 2;\n\
+             }\n";
+    let on = harness::dcc_fn_body_at("b4-jumptab", src, "-O2", "run");
+    // ① 基址只在序言取一次，分派塌成一条
+    assert_eq!(
+        on.matches("mtab(%rip), %rbp").count(),
+        1,
+        "-O2: 主表基址应当在序言里只取一次：\n{on}"
+    );
+    assert_eq!(
+        on.matches("(%rbp,%rcx,8)").count(),
+        1,
+        "-O2: 主表分派应当是一条 `jmp *(%rbp,%rcx,8)`：\n{on}"
+    );
+    assert_eq!(
+        on.matches("mov %rbp, -8(%r13)").count(),
+        1,
+        "-O2: 序言必须存一次调用者的 %rbp：\n{on}"
+    );
+    // ② 没被选中的那张表不受影响（还走 lea+mov+jmp 原形）
+    assert_eq!(
+        on.matches("other(%rip), %r11").count(),
+        1,
+        "-O2: 第二张表必须仍走原来的 lea 形态（一个号只够常驻一张表）：\n{on}"
+    );
+    // ③ 每个 return 站点各有一条恢复（源码两条 return，加上函数末尾那条兜底尾声 ⇒ ≥ 2；
+    // 写死等号会把「尾声多了一份」这种无害差异报成失败，写死 1 又会漏掉「只恢复了一份」）
+    let restores = on.matches("mov -8(%r13), %rbp").count();
+    assert!(
+        restores >= 2,
+        "-O2: 每个 return 站点都要把 %rbp 还回去（实得 {restores} 条）：\n{on}"
+    );
+    // ④ 反向对照：关闸后回到原三条，且不碰 %rbp
+    let (off_asm, _err) = harness::compile_asm_text_with_env(
+        "b4-jumptab-off",
+        src,
+        &["-std=gnu23", "-O2"],
+        &[("DCC_DISPTAB_RBP", "0")],
+    );
+    let off = harness::extract_function_body(&off_asm, "run");
+    assert!(!off.is_empty(), "门关那臂的汇编里找不到 run：\n{off_asm}");
+    assert!(
+        off.contains("mtab(%rip), %r11"),
+        "门关时主表基址仍应 lea 进 %r11（门关必须与本轮之前逐字节相同）：\n{off}"
+    );
+    assert!(
+        !off.contains("(%rbp,%rcx,8)") && !off.contains("%rbp"),
+        "门关时不该出现任何 %rbp 的使用：\n{off}"
+    );
+}
+
+// ============================================================================
+// 阶段 6 批 3 的两处补漏：调用点遍历的覆盖面 / always_inline 三条路互斥
+// ============================================================================
+
+/// 内联遍历必须走进 `switch` 的 case 体与源码级 `Label` 的体（`DCC_INLINE_WALK=1` 那臂）。
+///
+/// 判据取产物面：臂体里那次 `acc = add3(...)` 展开后不该再有 call。为什么这一条值得单独
+/// 钉：遍历以前在 `Label`/`Switch`/`GotoIndirect` 三处全落进 `_ => {}` —— 那等于
+/// sqlite3VdbeExec 的 185 个 case 体与 Lua `luaV_execute` 的 80 个 `vmcase` 标签体都不在
+/// 内联器的视野里，而症状是「什么都没发生」，不看产物发现不了。
+///
+/// 一条时序上的纠正（第八轮评审指出）：稠密 `switch` 改写成「界检 + `goto *表[idx]` +
+/// 一串标签」的 `lower_switches_in_func` 跑在 `run_ssa_passes` 里，而 `function_inline`
+/// 在它**前面** ⇒ 内联时点上 VdbeExec 还是 `Stmt::Switch`（靠那条臂），标签那条臂接的是
+/// Lua 那种**源码级** computed goto。本用例下面的防伪检查查的是产物形态，不是内联时点的形状。
+///
+/// 两条判据一起写：`DCC_INLINE_WALK=0` 那臂必须仍留着 call（否则这个闸门是空的），
+/// `=1` 那臂必须展开。默认档现在也是开的（预算 800 节点以下），但默认值由
+/// `arm_budget_allows_small_callers_and_blocks_giant_ones`（预算的纯函数判据）与两臂配对
+/// 实测钉住，不在本用例里重复锁 —— 那个数字会随预算调参变，测试不该绑在上面。
+#[test]
+fn o2_inlines_call_sites_behind_switch_and_jump_table_labels() {
+    let src = "static int add3(int a, int b, int c) { return a + b + c; }\n\
+               int pick(int sel, int a, int b, int c) {\n\
+                   int acc = 0;\n\
+                   switch (sel) {\n\
+                   case 0: acc = add3(a, b, c); break;\n\
+                   case 1: acc = add3(b, c, a); break;\n\
+                   case 2: acc = add3(c, b, a); break;\n\
+                   case 3: acc = add3(a, c, b); break;\n\
+                   case 4: acc = add3(b, a, c); break;\n\
+                   case 5: acc = add3(c, a, b); break;\n\
+                   case 6: acc = add3(a, b, c); break;\n\
+                   case 7: acc = add3(b, c, a); break;\n\
+                   default: acc = -1; break;\n\
+                   }\n\
+                   return acc;\n\
+               }\n";
+    // 八个臂全是「整条语句就是一次赋值」的形状：嵌在更大表达式里的调用（`add3(...) + 1`）
+    // 是另一条边界（需要语句表达式包装），不该混进这条判据里。
+    let on_asm = harness::compile_asm_text_with_env(
+        "b3-label-walk-on",
+        src,
+        &["-std=gnu23", "-O2"],
+        &[("DCC_INLINE_WALK", "1")],
+    )
+    .0;
+    let body = harness::extract_function_body(&on_asm, "pick");
+    assert!(!body.is_empty(), "开臂的汇编里找不到 pick：\n{on_asm}");
+    let calls = body
+        .lines()
+        .filter(|l| l.trim_start().starts_with("call"))
+        .filter(|l| l.contains("add3"))
+        .count();
+    assert_eq!(calls, 0, "-O2 + DCC_INLINE_WALK=1: switch/标签臂体里的调用点没进内联视野：\n{body}");
+    // 防伪结构：臂体确实挂在分派标签下面（批 1 的跳表形态），否则这条测试永远绿。
+    assert!(
+        body.contains("(%rip)") && body.contains("jmp"),
+        "-O2: 这个 switch 没被降级成跳表分派，臂体不在 Label 下，判据失效：\n{body}"
+    );
+    // 反面（闸门本身）：`DCC_INLINE_WALK=0` 那臂必须**还留着**臂体里的 call。默认值翻成开
+    // 之后，`=1` 那臂与默认档同值、不再有区分力；没有这一臂的话，把三条臂的守卫删掉（让
+    // 遍历无条件走进臂体）本用例仍会全绿 —— 那正是上面注释里自己定义的「闸门是空的」。
+    let off_asm = harness::compile_asm_text_with_env(
+        "b3-label-walk-off",
+        src,
+        &["-std=gnu23", "-O2"],
+        &[("DCC_INLINE_WALK", "0")],
+    )
+    .0;
+    let off_body = harness::extract_function_body(&off_asm, "pick");
+    let off_calls = off_body
+        .lines()
+        .filter(|l| l.trim_start().starts_with("call"))
+        .filter(|l| l.contains("add3"))
+        .count();
+    assert_eq!(
+        off_calls, 8,
+        "DCC_INLINE_WALK=0 必须把臂体里的 8 个调用点全部留着（它们一个也进不了内联视野）；\
+         实得 {off_calls} ⇒ 这一臂与开臂同值，闸门是空的：\n{off_body}"
+    );
+    // 默认档：WALK 现在默认开（预算 800 节点），但这个函数很小、不靠默认值定结论 ——
+    // 上面两臂已经把「开/关各自的形状」分别钉住了，这里只确认默认与开臂一致。
+    let def_body = harness::dcc_fn_body_at("b3-label-walk-default", src, "-O2", "pick");
+    let def_calls = def_body
+        .lines()
+        .filter(|l| l.trim_start().starts_with("call"))
+        .filter(|l| l.contains("add3"))
+        .count();
+    assert_eq!(
+        def_calls, 0,
+        "默认档（WALK 开 + 预算 800）下小函数的臂体调用点应已展开：\n{def_body}"
+    );
+    // 预算的反面：同一个形状但 caller 巨大（超 800 节点）时不得展开 —— 那才是 OOM
+    // 与 SQLite 回退的来源。构造：600 个臂体各一次赋值，函数体远超预算。
+    let mut big = String::from("static int add3(int a, int b, int c) { return a + b + c; }\n\
+                                int bigpick(int sel, int a, int b, int c) { int acc = 0; switch (sel) { case 0: acc = add3(a,b,c); break;");
+    for i in 1..600 {
+        big.push_str(&format!(" case {}: acc = add3(c,b,a); break;", i));
+    }
+    big.push_str(" default: acc = -1; break; } return acc; }");
+    let big_body = harness::dcc_fn_body_at("b3-label-walk-nobudget", &big, "-O2", "bigpick");
+    let big_calls = big_body
+        .lines()
+        .filter(|l| l.trim_start().starts_with("call"))
+        .filter(|l| l.contains("add3"))
+        .count();
+    // 600 个臂各一次调用，超预算时必须**一个都不展开**：判据取精确值，不取 `>= 8` 那种
+    // 「放走 592 个也算绿」的弱下界（评审指出这一条原本几乎不设防）。
+    assert_eq!(
+        big_calls, 600,
+        "超预算的巨大 caller 不得走臂体展开（那才是 OOM/回退的来源）：实得 {big_calls} 次 call"
+    );
+}
+
+/// 预算的第二条通道：**线程化派发的 caller 可以不管体量走臂体**，但它**默认关**。
+///
+/// 两臂各钉一面：`DCC_INLINE_WALK_THREADED=1` 时那个巨大但带 `goto *表[..]` 站点的 caller
+/// 必须展开（否则「按形状放行」只是一个没人测过的开关）；默认档必须**不**展开（否则默认值
+/// 没人管，而这个默认值正是本轮实测要锁的东西）。
+///
+/// 为什么默认关（四臂同轮配对，方案 §15.10.5）：`luaV_execute`（18713 节点）与 SQLite 的
+/// `sqlite3VdbeExec`（16847）只差 10%，体量阈值分不开它们；按形状虽然分得开，但量出来
+/// 只开线程通道 `median(r)=0.9974`（不可判）、只开体量通道 0.9462、两都开 0.9529
+/// ⇒ 收益全在体量通道里，线程形那一半多付 460 条指令而买不到时间。
+#[test]
+fn oversized_threaded_callers_walk_arms_only_when_the_shape_channel_is_on() {
+    // 垫到远超 800 节点：300 条独立赋值，与臂体形状无关。
+    let mut pad = String::new();
+    for i in 0..300 {
+        pad.push_str(&format!("acc = acc + {};\n", i % 7 + 1));
+    }
+    let mut src = String::from(
+        "static int add3(int a, int b, int c) { return a + b + c; }\n\
+         int tdisp(int sel, int a, int b, int c) {\n\
+             static const void *const tbl[] = {&&L0, &&L1, &&L2, &&L3};\n\
+             int acc = 0;\n",
+    );
+    src.push_str(&pad);
+    src.push_str("    goto *tbl[sel & 3];\n");
+    for i in 0..4 {
+        src.push_str(&format!("L{i}: acc = add3(a, b, c); goto end;\n"));
+    }
+    src.push_str("end: return acc;\n}\n");
+
+    let count_calls = |body: &str| {
+        body.lines()
+            .filter(|l| l.trim_start().starts_with("call"))
+            .filter(|l| l.contains("add3"))
+            .count()
+    };
+
+    // 开臂：形状通道打开 ⇒ 超预算的线程形 caller 照样走臂体，四个站点一个 call 都不留。
+    let on_asm = harness::compile_asm_text_with_env(
+        "b3-threaded-on",
+        &src,
+        &["-std=gnu23", "-O2"],
+        &[("DCC_INLINE_WALK_THREADED", "1")],
+    )
+    .0;
+    let on_body = harness::extract_function_body(&on_asm, "tdisp");
+    assert!(!on_body.is_empty(), "开臂的汇编里找不到 tdisp：\n{on_asm}");
+    // 防伪结构：这得真的是一个「超预算的巨大 caller」，而不是本来就被体量放行的小函数。
+    assert!(
+        on_asm.len() > 4000,
+        "夹具没垫够体量（汇编只有 {} 字节），两臂的差别可能来自体量而不是通道",
+        on_asm.len()
+    );
+    assert_eq!(
+        count_calls(&on_body),
+        0,
+        "DCC_INLINE_WALK_THREADED=1：线程形 caller 不受体量上限约束：\n{on_body}"
+    );
+
+    // 默认档：同一个 caller 必须因为超预算而不展开 ⇒ 锁住「这条通道默认关」。
+    let def_body = harness::dcc_fn_body_at("b3-threaded-default", &src, "-O2", "tdisp");
+    let def_calls = count_calls(&def_body);
+    assert!(
+        def_calls >= 4,
+        "默认档下超预算的线程形 caller 必须不走臂体（四个站点都留着 call）；实得 {def_calls}：\n{def_body}"
+    );
+}
+
+/// `switch` 的 `prelude`（第一个 `case` 之前那些语句）里的调用点必须进**调用图**。
+///
+/// 缺陷（第八轮评审抓到，根因在 HEAD）：`ssa::passes::walk_stmt_refs` 的 `Stmt::Switch` 臂只走
+/// `expr` + `cases`，没走 `prelude`，而那份 walker 是 M16 跨函数 DCE 的调用图来源 ⇒
+/// 「只被 prelude 调用」的 `static` 函数被判成不可达并删除，而 `call` 照样发射：实测
+/// `-O2` 链接报 `undefined reference to 'addone'`，而 `-O0/-O1` 正常。发射端
+/// （`ssa::structure.rs`）与事实收集端（`ast_dispatch.rs`）都走 `prelude`，只有调用图没走。
+///
+/// 判据取两面：① 四档与 gcc 一致（这条必须能链接、能跑）；② 汇编自洽 —— 只要还有
+/// `call addone`，同一个汇编里就必须有 `addone:` 的定义。②单独用 `DCC_INLINE_WALK=0` 那臂跑，
+/// 因为默认档会把这次调用内联掉（内联了就不留 call，也就测不到 DCE），而关臂恰好是
+/// 归因与门禁都常用的那一侧。
+#[test]
+fn switch_prelude_only_callee_survives_cross_function_dce() {
+    // prelude 里那次 `a = addone(x)` 是全文件对 addone 的唯一引用。
+    let src = "static int addone(int v) { return v + 1; }\n\
+               int fs(int x) {\n\
+                   int a = 0;\n\
+                   switch (x) {\n\
+                       a = addone(x);\n\
+                           case 1: return a - 2;\n\
+                       default: return 1;\n\
+                   }\n\
+               }\n\
+               int main(void) { return fs(1) + 2; }\n";
+    // ① 能链接、能跑，且四档与 gcc 同结果。注意 C 的语义：`switch` 会直接跳到匹配的 `case`，
+    // 所以 prelude 里那句 `a = addone(x)` **不执行**（gcc 为此报 `-Wswitch-unreachable`），
+    // `a` 保持 0 ⇒ `fs(1)` 返回 -2 ⇒ main 归一到 0。两边都必须是这个结果。
+    harness::assert_all_levels_match_gcc("prelude-dce", src, "prelude 里唯一的调用点被 DCE 删掉被调者");
+
+    // ② 汇编自洽：两臂都查；关臂还必须先证明「那次 call 真的留着」，否则这条判据是空跑的。
+    for envs in [&[] as &[(&str, &str)], &[("DCC_INLINE_WALK", "0")][..]] {
+        let (asm, _) =
+            harness::compile_asm_text_with_env("prelude-dce-asm", src, &["-std=gnu23", "-O2"], envs);
+        let called = asm
+            .lines()
+            .any(|l| l.trim_start().starts_with("call") && l.contains("addone"));
+        let defined = asm.lines().any(|l| l.trim() == "addone:");
+        if !envs.is_empty() {
+            assert!(
+                called,
+                "DCC_INLINE_WALK=0 必须留着 prelude 里那次调用（不然本判据什么都没测到）：\n{asm}"
+            );
+        }
+        assert!(
+            !called || defined,
+            "汇编里有 `call addone` 却没有 `addone:` 的定义 ⇒ 这个 .o 不可链接（调用图漏了 switch prelude）：\n{asm}"
+        );
+    }
+}
+
+/// `switch` 的 `prelude` 与块体必须走**同一套**内联分派（本轮把 prelude 接到
+/// `inline_calls_in_items` 上，以前它自己写了一份只认 `Stmt`/嵌套 `Decl::Func` 的 match）。
+///
+/// 判据用「同一个形状在 prelude 里与在普通块里结果必须一致」这一对来做，而不是只数 prelude
+/// 那一侧 —— 只数一侧的话，把整支声明初值通道删掉也能绿。`DCC_INLINE_SHAPE` 默认关，所以
+/// 还要一条「默认档两处都不展开」的反面，锁住这个默认值。
+#[test]
+fn switch_prelude_decl_init_site_is_walked_like_a_block_statement() {
+    let in_prelude = concat!(
+        "static int add3(int a, int b, int c) { return a + b + c; }\n",
+        "int pk(int s, int a, int b, int c) {\n",
+        "    int acc = 0;\n",
+        "    switch (s) {\n",
+        "        int y = add3(a, b, c);\n",
+        "        acc = y;\n",
+        "        case 0: return acc;\n",
+        "        default: return -1;\n",
+        "    }\n",
+        "}\n",
+        "int main(void) { return pk(0, 1, 2, 3); }\n",
+    );
+    let in_block = concat!(
+        "static int add3(int a, int b, int c) { return a + b + c; }\n",
+        "int bk(int s, int a, int b, int c) {\n",
+        "    int acc = 0;\n",
+        "    { int y = add3(a, b, c); acc = y; }\n",
+        "    switch (s) { case 0: return acc; default: return -1; }\n",
+        "}\n",
+        "int main(void) { return bk(0, 1, 2, 3) - 6; }\n",
+    );
+    // 执行面：prelude 里的声明是**死代码**（跳表不执行它），`pk` 必须返回 0 而不是 6；
+    // 把两半放在一起跑，任何一侧把 prelude 真的执行了都会被 gcc 对照抓出来。
+    harness::assert_all_levels_match_gcc("prelude-init", in_prelude, "switch prelude 里的声明初值");
+    harness::assert_all_levels_match_gcc("block-init", in_block, "普通块里的声明初值（对照面）");
+
+    let calls_in = |asm: &str, fn_name: &str| -> usize {
+        harness::extract_function_body(asm, fn_name)
+            .lines()
+            .filter(|l| l.trim_start().starts_with("call"))
+            .filter(|l| l.contains("add3"))
+            .count()
+    };
+    let gate = &[("DCC_INLINE_SHAPE", "1"), ("DCC_INLINE_WALK", "1")][..];
+    let (on_asm, _) =
+        harness::compile_asm_text_with_env("prelude-init-on", in_prelude, &["-std=gnu23", "-O2"], gate);
+    let (blk_asm, _) =
+        harness::compile_asm_text_with_env("block-init-on", in_block, &["-std=gnu23", "-O2"], gate);
+    assert_eq!(
+        calls_in(&blk_asm, "bk"),
+        0,
+        "对照面：普通块里的声明初值在闸门开时必须展开（否则这条判据的另一半是空的）：\n{blk_asm}"
+    );
+    assert_eq!(
+        calls_in(&on_asm, "pk"),
+        0,
+        "prelude 里的声明初值必须与普通块走同一条通道，闸门开时同样展开：\n{on_asm}"
+    );
+
+    // 默认档：SHAPE 关 ⇒ 两处都不得展开（锁住默认值，也锁住「prelude 没有偷偷多一条通路」）。
+    let (def_pre, _) = harness::compile_asm_text_with_env(
+        "prelude-init-def",
+        in_prelude,
+        &["-std=gnu23", "-O2"],
+        &[],
+    );
+    let (def_blk, _) = harness::compile_asm_text_with_env(
+        "block-init-def",
+        in_block,
+        &["-std=gnu23", "-O2"],
+        &[],
+    );
+    assert_eq!(
+        calls_in(&def_pre, "pk"),
+        calls_in(&def_blk, "bk"),
+        "默认档下 prelude 与普通块必须同进同退（SHAPE 默认关 ⇒ 两处都留着调用）：\n{def_pre}"
+    );
+}
+
+/// 执行级：带控制流的 `always_inline` 在赋值/条件/链式赋值调用点上都要展开且算对。
+///
+/// 缺陷（§15.8-4）：专属两条路一条要「体是单条 `return 表达式;`」、一条要「平坦体 +
+/// 语句/尾位置调用点」，而成本模型那条通用路把 `always_inline` 整体拒掉 —— 三条互斥把
+/// 「用户明说要展开」的那些点全关住。夹具同时盯展开重写最容易丢的东西：多调用点的改名、
+/// callee 的 goto/标签与 caller 同名、always_inline 链，以及**递归的 always_inline 不得
+/// 展开**这一条反向对照。
+#[test]
+fn always_inline_control_flow_sites_match_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "always-inline-cf-site",
+        include_str!("../fixtures/opt/always_inline_cf_site.c"),
+        "always_inline 的三条路互斥：带控制流的体在赋值调用点上三条全关",
+    );
+}
+
+/// 形态面（`always_inline` + 控制流 + 赋值调用点，`DCC_INLINE_WALK=1` 那臂）：不该留 call，
+/// 而**递归**那一版必须留（展开了就是爆栈）。两条写在一起是因为它们互为反例 —— 只测前者的话，
+/// 「无条件展开一切 always_inline」这种更错的实现也能过。
+#[test]
+fn o2_always_inline_control_flow_expands_but_recursion_stays_a_call() {
+    let src = "static __attribute__((always_inline)) int helper(int x) {\n\
+                   int n;\n\
+                   if (x > 0) { n = x + 1; } else { if (x == -7) { return 99; } n = x - 1; }\n\
+                   while (n > 100) { n -= 100; }\n\
+                   return n;\n\
+               }\n\
+               int entry(int x) { int r; r = helper(x); return r * 2; }\n";
+    let on_asm = harness::compile_asm_text_with_env(
+        "ai-cf-on",
+        src,
+        &["-std=gnu23", "-O2"],
+        &[("DCC_INLINE_WALK", "1")],
+    )
+    .0;
+    let body = harness::extract_function_body(&on_asm, "entry");
+    assert!(!body.is_empty(), "开臂的汇编里找不到 entry：\n{on_asm}");
+    let calls = body
+        .lines()
+        .filter(|l| l.trim_start().starts_with("call"))
+        .filter(|l| l.contains("helper"))
+        .count();
+    assert_eq!(calls, 0, "-O2 + DCC_INLINE_WALK=1: 带控制流的 always_inline 在赋值点必须展开：\n{body}");
+
+    let rec = "static __attribute__((always_inline)) int rec_sum(int x) {\n\
+                   if (x <= 0) { return 0; }\n\
+                   return x + rec_sum(x - 1);\n\
+               }\n\
+               int use_rec(int x) { int r; r = rec_sum(x); return r; }\n";
+    let rbody = harness::dcc_fn_body_at("ai-rec", rec, "-O2", "use_rec");
+    let rcalls = rbody
+        .lines()
+        .filter(|l| l.trim_start().starts_with("call"))
+        .filter(|l| l.contains("rec_sum"))
+        .count();
+    assert!(
+        rcalls >= 1,
+        "-O2: 递归的 always_inline 不得展开（那条 call 就是它没被复制的证据）：\n{rbody}"
+    );
+}
+
+/// `%rbp` 现在无条件是保留号（默认档下它归跳表基址）。
+///
+/// 与 gcc 对拍过：`register long v asm("rbp");` 在 gcc 是 `error: frame pointer required,
+/// but reserved`。以前本端只在 `-fno-omit-frame-pointer` 档拒它，而基址常驻默认档就发生，
+/// 「看这个函数有没有被占」的窗口就是静默错值。
+#[test]
+fn register_asm_rbp_is_rejected_at_every_level() {
+    let src = "register long v asm(\"rbp\");\nint main(void){ v = 3; return (int)v - 3; }\n";
+    for flag in ["-O0", "-O2"] {
+        let (output, obj) = harness::run_object_test_flags("rbp-reserved", src, &[flag]);
+        assert!(!output.status.success(), "{flag}: 把变量绑在 %rbp 上不得静默通过");
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert!(
+            stderr.contains("E0318") && stderr.contains("v") && stderr.contains("rbp"),
+            "{flag}: 期望 E0318 并点名变量与寄存器，实得：{stderr}"
+        );
+        let _ = std::fs::remove_file(obj);
+    }
+}
+
+/// `main` 里写 computed goto，且产物由**内置链接器**直链（ET_EXEC，`relocatable == false`）
+/// 时必须整体不进基址常驻 —— 那一格的帧建立走的是另一条序言分支，没有 `%rbp` 的存/取可插，
+/// 而分派站点与尾声都只看 `disptab_base_reg_sym` 是不是 `Some`。
+///
+/// 为什么这条必须单独存在：四档与 gcc 对照（`assert_all_levels_match_gcc`）与 `-S` 形态用例
+/// 走的都是可重定位那条路，**看不见**这一格。实测漏掉时 `dcc -O2 m3.c -o x.o` 产出的
+/// ET_EXEC 直接 SIGSEGV(139)，而 `DCC_DISPTAB_RBP=0` 同输入正确。
+#[test]
+#[cfg(unix)]
+fn computed_goto_in_main_survives_the_builtin_linker_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let src = "int main(void) {\n\
+               static const void *tbl[] = {&&L0, &&L1, &&L2};\n\
+               int acc = 0;\n\
+               for (int i = 0; i < 4; i++) { goto *tbl[i % 3];\n\
+                 L0: acc += 1; continue;\n\
+                 L1: acc += 10; continue;\n\
+                 L2: acc += 100; continue; }\n\
+               return acc;\n\
+               }\n";
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-b4-main-{pid}.c"));
+    // 输出名以 `.o` 结尾是 dcc 驱动「不做 host cc 委托」的那一格（见
+    // `driver.rs::should_delegate_to_host_cc`），于是内置链接器直接把 ET_EXEC 写到这个
+    // 路径上 —— 也就是 `relocatable == false` 且函数名是 `main` 的唯一可达入口。
+    let xp = dir.join(format!("dcc-b4-main-{pid}-etexec.o"));
+    std::fs::write(&sp, src).expect("写夹具");
+    for level in ["-O0", "-O2"] {
+        let _ = std::fs::remove_file(&xp);
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args([level, "-o"])
+            .arg(&xp)
+            .arg(&sp)
+            .output()
+            .expect("跑 dcc");
+        assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
+        let mut perms = std::fs::metadata(&xp).expect("产物在吗").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&xp, perms).expect("chmod");
+        let (rc, stdout, stderr) = harness::run_exe_bounded(&xp);
+        let _ = std::fs::remove_file(&xp);
+        assert_eq!(
+            rc, 112,
+            "{level}: 内置链接器直链的 main 里 computed goto 必须算对（139=SIGSEGV 就是基址没被赋值）\n\
+             stdout={} stderr={}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+    }
+    let _ = std::fs::remove_file(sp);
+}
+
+/// switch 的第一个 `case` 之前的语句不得被顺序执行（四档与 gcc 一致）。
+///
+/// 实测旧 HEAD：`int s(int x){ switch (x) { side = 99; case 1: return 10; default: return 20; } }`
+/// 在 -O2/-O3 把 `side` 写成 99，而 -O0 与 gcc 都是 0 —— if-chain 降级把 prelude 拼成了
+/// 「链之前的顺序语句」。C 语义里那些语句只能被 fall-through 或标签命中。
+/// 反向对照同一条夹具里也有：prelude 里的标签被臂体 `goto` 命中时它**必须**执行，
+/// 所以修法不是「prelude 一律不发」而是「带 prelude 就不降级」。
+#[test]
+fn switch_prelude_is_not_executed_at_any_level() {
+    harness::assert_all_levels_match_gcc(
+        "switch-prelude",
+        include_str!("../fixtures/opt/switch_prelude_exec.c"),
+        "switch prelude 被 if-chain 降级拼成顺序语句 ⇒ -O2/-O3 多执行一次赋值",
+    );
+}
+
+/// `__builtin_longjmp` 从「自己也常驻一张跳表基址」的被调函数落回外层跳表函数时，外层
+/// 那一跳必须还用**外层**的表 —— 这要求 `__builtin_setjmp` 的 callee-saved 快照含 `%rbp`
+/// （SysV 的 callee-saved 是 rbx/rbp/r12-r15；本轮把临时区从 40 字节扩到 48 就是为了这个）。
+///
+/// 只比 dcc 自己：同一份源在 gcc `-O2` 下自己就 SIGSEGV（`-O0` 与 dcc 都对），所以它进不了
+/// `assert_all_levels_match_gcc`；比 gcc 反而会把这条真实缺陷遮住。
+#[test]
+#[cfg(unix)]
+fn setjmp_longjmp_across_hoisted_dispatch_keeps_the_captured_table_base() {
+    let src = "static void *buf[20];\n\
+               static volatile int mark;\n\
+               __attribute__((noinline)) static int inner(int code) {\n\
+                   static const void *const itab[3] = {&&K0, &&K1, &&K2};\n\
+                   goto *itab[code % 3];\n\
+                 K0: mark = 1; goto Kk;\n\
+                 K1: mark = 7; goto Kk;\n\
+                 K2: mark = 3;\n\
+                 Kk: (void)__builtin_longjmp(buf, 1); return -9;\n\
+               }\n\
+               __attribute__((noinline)) static int outer(int code) {\n\
+                   static const void *const otab[3] = {&&J0, &&J1, &&J2};\n\
+                   int acc = 0;\n\
+                   mark = 0;\n\
+                   if (__builtin_setjmp(buf) == 0) { acc = inner(code); acc += 1000; }\n\
+                   goto *otab[acc % 3];\n\
+                 J0: acc += 11; goto Je;\n\
+                 J1: acc += 22; goto Je;\n\
+                 J2: acc += 33;\n\
+                 Je: return acc + mark * 100;\n\
+               }\n\
+               int main(void) {\n\
+                   if (outer(1) != 711) return 1;\n\
+                   if (outer(2) != 311) return 2;\n\
+                   if (outer(0) != 111) return 3;\n\
+                   return 0;\n\
+               }\n";
+    for level in ["-O0", "-O2"] {
+        let (build, exe) = harness::run_compile_and_run_flags("sj-hoisted", src, &[level]);
+        assert!(
+            build.status.success(),
+            "{level}: 编译失败 {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let (rc, stdout, stderr) = harness::run_exe_bounded(&exe);
+        let _ = std::fs::remove_file(&exe);
+        assert_eq!(
+            rc, 0,
+            "{level}: longjmp 落回外层后那一跳用了别人的表（退出码 {rc}；1/2/3 分别是三次分派错，\
+             139=SIGSEGV）\nstdout={} stderr={}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+    }
+}
+
+/// 执行级：复合赋值 `x op= f(...)` 与声明初值 `T x = f(...)` 两类调用点展开后，
+/// 四档与 gcc 一致（方案 §4 批 3 的第 3、4 类形状）。
+#[test]
+fn inline_call_site_shapes_match_gcc_at_all_levels() {
+    harness::assert_all_levels_match_gcc(
+        "inline-call-site-shapes",
+        include_str!("../fixtures/opt/inline_call_site_shapes.c"),
+        "op= / 声明初值 两类调用点展开后读-改-写次序或类型错掉（窄类型、指针左值、中段 return）",
+    );
+}
+
+/// 形态面（`DCC_INLINE_SHAPE` 两臂对照）：两类形状确实进了决策点，而**嵌在更大表达式里**
+/// 的那一形仍不得被接（它是唯一还留着 call 的地方）。
+///
+/// 为什么必须双臂：只断言「开臂没 call」的话，「把一切都展成内联」那种实现也满足；
+/// 反过来只断言关臂又证明不了什么。两条一起才把「接了哪些形状」钉住。
+#[test]
+fn o2_compound_assign_and_decl_init_shapes_expand_under_gate() {
+    let src = include_str!("../fixtures/opt/inline_call_site_shapes.c");
+    let on = harness::compile_asm_text_with_env(
+        "shape-on",
+        src,
+        &["-std=gnu23", "-O2"],
+        &[("DCC_INLINE_SHAPE", "1")],
+    )
+    .0;
+    let off = harness::compile_asm_text_with_env(
+        "shape-off",
+        src,
+        &["-std=gnu23", "-O2"],
+        &[("DCC_INLINE_SHAPE", "0")],
+    )
+    .0;
+    let calls_in = |text: &str, func: &str| -> usize {
+        harness::extract_function_body(text, func)
+            .lines()
+            .filter(|l| l.trim_start().starts_with("call"))
+            .filter(|l| l.contains("help_add") || l.contains("help_mul"))
+            .count()
+    };
+    // 5 个复合赋值站点：开臂全展开 ⇒ 一次 call 都不留
+    assert_eq!(calls_in(&on, "commutative_ops"), 0, "开臂：+= / |= / ^= / *= 站点没展开");
+    assert_eq!(calls_in(&on, "non_commutative_ops"), 0, "开臂：-= / /= / %= / >>= 站点没展开");
+    assert_eq!(calls_in(&on, "narrow_target"), 0, "开臂：窄类型左值的 op= 没展开");
+    assert_eq!(calls_in(&on, "pointer_and_array"), 0, "开臂：*p += / a[1] -= 没展开");
+    // 声明初值：开臂展开、关臂留着调用（这一形只有开臂才有）
+    assert_eq!(calls_in(&on, "decl_init"), 0, "开臂：声明初值 `int v = f(...)` 没展开");
+    assert!(calls_in(&off, "decl_init") >= 1, "门关时声明初值必须仍是调用（否则这个门是空的）");
+    // 反向对照：调用嵌在 Binop 里（`int v = f(...) + 1;`）两臂都不接
+    assert!(calls_in(&on, "decl_init_nested") >= 1, "嵌在更大表达式里的调用被误接了");
+    // 默认档：这两类**默认关**（同轮配对量出来 Lua +1.9% / SQLite +1.4%，而同一二进制的
+    // dup 臂也报 +2.1% ⇒ 不是位置效应；见 `opt.rs::inline_shape_enabled` 的头注释）。
+    // 锁定默认值：否则这个结论会被下一个人当“旧开关”顺手打开。
+    let def_body = harness::dcc_fn_body_at("shape-default", src, "-O2", "commutative_ops");
+    let def_calls = def_body
+        .lines()
+        .filter(|l| l.trim_start().starts_with("call"))
+        .filter(|l| l.contains("help_add") || l.contains("help_mul"))
+        .count();
+    assert!(
+        def_calls >= 4,
+        "op= / 声明初值 两类默认必须关着（实测是负的）：实得 {def_calls} 次 call\n{def_body}"
+    );
+}

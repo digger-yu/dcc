@@ -1022,7 +1022,30 @@ impl Insn {
     /// P11 Bucket P11R: jmp r/m64 mem form (FF /4 [base+disp]).
     /// jmp [rdi] = FF 27. modrm_mod auto-selected by disp size.
     pub fn jmp_rm_mem(base: u8, disp: i32) -> Self {
-        Insn::new(X86_64Opcode::JmpRmMem { base, disp }, &[])
+        Insn::new(
+            X86_64Opcode::JmpRmMem {
+                base,
+                disp,
+                index: None,
+            },
+            &[],
+        )
+    }
+
+    /// FF /4 `[base + index*scale]`：跳表分派的那一条 `jmp *tbl(,idx,8)`。
+    ///
+    /// 存在理由（阶段 6 批 4）：computed goto 原本发三条 `lea 表基址` + `mov (基,变,8)` +
+    /// `jmp *rax`，而基址在一个函数里是不变量。基址常驻一个寄存器后，三条塌成这一条。
+    /// `scale` 传**真实乘数**（1/2/4/8），与 `mov_rm_mem_sib` 同口径。
+    pub fn jmp_rm_mem_sib(base: u8, index: u8, scale: u8) -> Self {
+        Insn::new(
+            X86_64Opcode::JmpRmMem {
+                base,
+                disp: 0,
+                index: Some((index, scale)),
+            },
+            &[],
+        )
     }
 
     /// P11 Bucket P11R: ud2 (0F 0B).
@@ -1955,6 +1978,19 @@ mod tests {
         assert_eq!(Insn::nop().encode_bytes(), Some(vec![0x90]));
     }
 
+    /// 32 位自反搬运（`mov dst32, dst32`，即「把值零扩展回 64 位」那一步）在
+    /// dst ≥ 8 时也必须能编码。同宽 `signed ↔ unsigned` cast 的归一发的就是它：
+    /// 编码器一返回 None 那次零扩展就静默消失（实测 `(unsigned)gv` 参与 64 位运算
+    /// 时得错值，而同一表达式落点在 `%rax` 时是对的 —— 差别只有号）。
+    #[test]
+    fn mov_rm_reg_b32_self_move_encodes_for_high_regs() {
+        use crate::codegen::shared::asm_operand::Width;
+        for r in [0u8, 1, 3, 7, 8, 9, 12, 15] {
+            let b = Insn::mov_rm_reg(Width::B32, r, r).encode_bytes();
+            assert!(b.is_some(), "mov r{r}32, r{r}32 编码返回 None（零扩展会静默丢失）");
+        }
+    }
+
     #[test]
     fn raw_bytes_empty() {
         assert_eq!(Insn::raw_bytes(&[]).encode_bytes(), Some(Vec::new()));
@@ -2416,6 +2452,37 @@ mod tests {
             Insn::jmp_rm_mem(0, 0x1000).encode_bytes(),
             Some(vec![0xFF, 0xA0, 0x00, 0x10, 0x00, 0x00]),
         );
+    }
+
+    /// 批 4：带变址的间接跳转。字节全部按 `as` 的实际输出对拍
+    /// （`.work_tmp` 里那份 intel 语法源 → `FF 64 CD 00` 等四条）。
+    #[test]
+    fn jmp_rm_mem_sib_matches_as() {
+        // jmp *0x0(%rbp,%rcx,8): FF 64 CD 00 —— base=rbp(5) 在 mod=00 下是 rip-relative，
+        // 所以强制 mod=01 + disp8=0，这是 4 字节而不是 3 字节。
+        assert_eq!(
+            Insn::jmp_rm_mem_sib(5, 1, 8).encode_bytes(),
+            Some(vec![0xFF, 0x64, 0xCD, 0x00]),
+        );
+        // jmp *0x0(%rbp,%r12,8): 42 FF 64 E5 00 —— index>=8 只动 REX.X。
+        assert_eq!(
+            Insn::jmp_rm_mem_sib(5, 12, 8).encode_bytes(),
+            Some(vec![0x42, 0xFF, 0x64, 0xE5, 0x00]),
+        );
+        // jmp *(%r12,%rax,8): 41 FF 24 C4 —— base=100(SIB) + REX.B，mod=00 无 disp。
+        assert_eq!(
+            Insn::jmp_rm_mem_sib(12, 0, 8).encode_bytes(),
+            Some(vec![0x41, 0xFF, 0x24, 0xC4]),
+        );
+        // scale=4 与 scale=8 只差 SIB 的高两位。
+        assert_eq!(
+            Insn::jmp_rm_mem_sib(5, 0, 4).encode_bytes(),
+            Some(vec![0xFF, 0x64, 0x85, 0x00]),
+        );
+        // %rsp 当不了变址寄存器；非 1/2/4/8 的乘数编不出来。两条都是拒（返 None），
+        // 不得退化成「换个形态发出」——那会跳向错误的地址。
+        assert_eq!(Insn::jmp_rm_mem_sib(5, 4, 8).encode_bytes(), None);
+        assert_eq!(Insn::jmp_rm_mem_sib(5, 1, 3).encode_bytes(), None);
     }
 
     /// P11 Bucket P11R: ud2 (0F 0B).

@@ -362,7 +362,31 @@ fn collect_scope_stmt(st: &Stmt, s: &mut FnScope) {
             collect_scope_stmt(body, s);
         },
         Stmt::Label { stmt, .. } => collect_scope_stmt(stmt, s),
-        Stmt::Switch { cases, .. } => {
+        Stmt::Switch {
+            cases, prelude, ..
+        } => {
+            // `prelude`（第一个 `case` 之前的那些语句/声明）也是本函数的事实：漏了它，
+            // GVN 会把「prelude 里被写过的名字」当成没被写过（错值那一族）。
+            //
+            // prelude 里的声明无法用「所在块」判是否被取址（它不属于任何 `Block`），
+            // 这里一律按**已逃逸**处理：多保守只会少优化，少保守会出错值。而
+            // 「switch prelude 里放一个声明」本身在 C 里就是死代码（跳表不执行它），
+            // 少那一点优化机会没有代价。
+            for item in prelude {
+                collect_assignments(item, &mut s.assigned, &mut HashMap::new());
+                match item {
+                    BlockItem::Decl(Decl::Var(v)) => {
+                        s.locals.insert(v.name.name.clone());
+                        s.types.insert(v.name.name.clone(), v.ty.clone());
+                        if v.quals.is_volatile() {
+                            s.volatile.insert(v.name.name.clone());
+                        }
+                        s.escaped.insert(v.name.name.clone());
+                    },
+                    BlockItem::Stmt(st) => collect_scope_stmt(st, s),
+                    BlockItem::Decl(_) => {},
+                }
+            }
             for c in cases {
                 collect_scope(&c.body, s);
             }

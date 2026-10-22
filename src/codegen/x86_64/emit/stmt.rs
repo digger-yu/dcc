@@ -10,7 +10,112 @@ use crate::codegen::x86_64::{AbiClass, AggDst, Codegen, JumpKind};
 
 use crate::const_eval;
 
+// ---------------------------------------------------------------------------
+// 布局扰动旋钮（P13 阶段6 批0c；它们**不是**优化开关）
+// ---------------------------------------------------------------------------
+//
+// 为什么需要它们：本仓已经有一次「删 135 条 to-next `jmp`，静态变小、实测慢 3.8%」的
+// 负结果，而本机 PMU 全部不可用（`perf_event_paranoid=4`，`cycles`/`instructions`/
+// `branch-misses` 均 `<not supported>`，也没有 valgrind）。「只减取指体量」那一类改动
+// （冷路径外置、tail merging）因此在本机没有直接判据。唯一的出路是先量出本机
+// `d(runtime)/d(footprint)` 的斜率：用一组「语义逐字节相同、只有布局不同」的产物做
+// 滴定，再用斜率去折算某个改动的体量收益值多少 ms。这两个旋钮就是滴定用的砝码。
+//
+// 只用单字节 `nop`（`0x90`）：多字节 `nopw`/`cs` 形态会把
+// `scripts/check_asm_text_parity.sh`（它只跳精确 `nop`）直接打成 PARITY-FAIL，
+// 也会让主代理量 `E` 的 nop 过滤漏网。两个旋钮默认 0 ⇒ 一条指令都不发，
+// 产物与本改动之前逐字相同（`scripts/aa_layout.sh` 会断言这一点）。
+
+// std::sync::OnceLock 各自只读一次 env：布局规则在发射途中变化会让同一 TU 的
+// 两段按不同规则发射，那种产物没人能复现（与 `blockopt::level()` 同一条纪律）。
+fn fn_shift() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| read_layout_knob("DCC_FN_SHIFT"))
+}
+
+fn handler_pad() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| read_layout_knob("DCC_HANDLER_PAD"))
+}
+
+fn read_layout_knob(name: &str) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 impl Codegen {
+    /// `goto *表[下标]` 且那张表的基址已常驻 `%rbp` ⇒ 只发一条
+    /// `jmp *(%rbp,%rcx,stride)`（阶段 6 批 4）。
+    ///
+    /// 返 `false` = 不合形状，调用方走原来的三步链。每一条拒接都必须是「退回原路」而不是
+    /// 「换个形态发出」：这一跳的落点错了就是跳进别的函数（实测同款症状是 SIGSEGV）。
+    ///
+    /// 与 [`crate::codegen::x86_64::emit::expr::Codegen::gen_expr_index_rvalue`] 的 SIB 快车道
+    /// 用**同一份**语义层描述符与同一个暂存号（`%rcx`），所以两条路算出的地址逐位相同；
+    /// 下标也只求值一次（`Expr::Index` 的下标可以有副作用，如 `disptab[*(pc++)]`）。
+    fn emit_hoisted_jumptable_jump(&mut self, expr: &Expr) -> bool {
+        let Some(sym) = self.disptab_base_reg_sym.clone() else {
+            return false;
+        };
+        let Some(site) = crate::ast_dispatch::indirect_table_site(expr) else {
+            return false;
+        };
+        // 站点读的那张表必须就是被常驻的那一张（源码名 → mangled 同一入口）。
+        if self.static_local_map.resolve(&self.current_func_name, site.table) != Some(sym.as_str())
+        {
+            return false;
+        }
+        // 段限定前缀只由原路那侧处理（`emit_load_global_indexed`），这里不抢。
+        // 静态局部不可能带 `__seg_*`，但判据不能靠「不可能」。
+        if self.global_seg_prefix(&sym).is_some() {
+            return false;
+        }
+        use crate::semantics::{
+            compute_lvalue_address, determine_action, AddressBase, AddressContext, ByteOffset,
+            MaterializeAction,
+        };
+        let ctx = AddressContext {
+            is_nested: self.current_func_is_nested,
+        };
+        let desc = compute_lvalue_address(self, expr, &ctx);
+        if !matches!(determine_action(site.elem, true), MaterializeAction::LoadScalar) {
+            return false;
+        }
+        // 基址是这张表的符号、偏移是**单个**运行时下标项且无补数：与 SIB 快车道逐字同判据。
+        let (stride, idx) = match (desc.base, desc.offset) {
+            (
+                AddressBase::GlobalSymbolAddr { symbol_key },
+                ByteOffset::Runtime { mut terms, addend: 0 },
+            ) => {
+                if symbol_key != sym || terms.len() != 1 {
+                    return false;
+                }
+                let term = terms.pop().expect("terms.len()==1 已在上面判过");
+                if !matches!(term.stride, 1 | 2 | 4 | 8) {
+                    return false;
+                }
+                (term.stride as u8, term.index)
+            },
+            _ => return false,
+        };
+        // 下标求值与原路逐字相同：同一个表达式（由描述符递出来，不是自己再拆一遍 AST）、
+        // 同一个暂存号 `%rcx`。原路紧接着把项读进 rax 再 `jmp *rax`，而这一条把「读」
+        // 并进了跳转：rax 不再承载目标地址，也没有任何后续指令读它。
+        let idx_reg: u8 = 1;
+        self.gen_expr(&idx, idx_reg);
+        // 不挂 gas：文本由 `opcode.rs` 里 `JmpRmMem` 的 render 分支给（与字节同源）。
+        if !self.emit_insn(&Insn::jmp_rm_mem_sib(5, idx_reg, stride)) {
+            // 到这里意味着编码器拒了这个形态（号与乘数都已在上面筛过，理论上不可达）。
+            // 兜底只有一条规矩：**必须仍然发出一条跳转**。只报错不跳会把这条分派落到
+            // 下一条指令上，那比错值更难查。原路那两条本来就编得出（mov 那侧带 disp8）。
+            self.emit_load_global_indexed(0, idx_reg, &sym, stride, site.elem);
+            self.emit_insn(&Insn::jmp_rm_reg(0)); // jmp *%rax
+        }
+        true
+    }
+
     /// 记录「本条语句的起始 PC ↔ 源码行」，供 `.debug_line` 用（Phase 6.2 收尾）。
     ///
     /// 为什么以前没有：x86_64 后端只在内联 asm 的发射路径里记过行号（`asm/emit.rs` 那两张
@@ -1158,6 +1263,12 @@ impl Codegen {
                 } else {
                     self.jmp_rel32(&l_break, JumpKind::Jmp);
                 }
+                // 滴定砝码一：全体子句体位移 n 字节。位置在分派链末尾那条**无条件 jmp**
+                // 之后 ⇒ 这段 nop 只能被跳过、不会被落入（唯一例外是有 prelude 的
+                // switch，见 `fn_shift` 头注释，测量脚本会把那种 TU 排除）。
+                for _ in 0..fn_shift() {
+                    self.nop();
+                }
                 // 发射前驱段: `switch(x){ foo: case 1: ... }` 中 foo: 等出现在
                 // 第一个 case 之前的普通语句/标签。按 C 语义它们物理排在第一个
                 // case 体之前 (fall-through 到第一个 case), 同时也能被 goto 直接命中。
@@ -1172,6 +1283,13 @@ impl Codegen {
                 // default 自身向下落入后继子句的边 (sqlite OP_MakeRecord
                 // 的 default-first switch 即因此只写入 8 字节中的 2 字节)。
                 for (case, l_case) in &clause_bodies {
+                    // 滴定砝码二：每个子句标签前插 k 字节。上一个子句以无条件跳转或
+                    // return 收尾时这段 nop 不执行；**fall-through 进来的子句会真的执行
+                    // 它们**，所以这是「footprint + 少量 nop」的混合扰动，斜率口径以
+                    // `DCC_FN_SHIFT` 为准，本旋钮用来区分「对齐」与「体量」两种效应。
+                    for _ in 0..handler_pad() {
+                        self.nop();
+                    }
                     match l_case {
                         Some(l) => self.label(l),
                         None => self.label(&l_default),
@@ -1188,6 +1306,11 @@ impl Codegen {
                 self.break_targets.pop();
             },
             Stmt::GotoIndirect { expr, .. } => {
+                // 批 4：表基址常驻 `%rbp` 时，整条分派塌成一条 `jmp *(%rbp,%rcx,8)`。
+                // 不合形状则原样往下走（原路自己也会因为基址已常驻而少一条 lea）。
+                if self.emit_hoisted_jumptable_jump(expr) {
+                    return;
+                }
                 // goto *expr: 计算目标地址并跳转
                 self.gen_expr(expr, Self::EVAL_BASE); // rax = 目标地址
                                                       // 步骤 3: 走类型化 Jmp{target: Reg(0=rax), pending_rel: false} → FF /4 rax.

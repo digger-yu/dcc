@@ -600,8 +600,9 @@ the same binary pair.
 ### 6.3 Reading the numbers
 
 - dcc-generated code is **correct but materially slower** than gcc: roughly
-  **2.5x** on the Lua interpreter loop (was 4.4x five revisions ago) and
-  **5.0-5.4x** on SQLite (was 6.4-7.1x). This is an honest result, not a
+  **2.6x** on the Lua interpreter loop (was 4.4x five revisions ago) and
+  **~3.6x** on SQLite (was 6.4-7.1x, and 5.0-5.4x before the jump-table
+  round in §6.12). This is an honest result, not a
   pass/fail gate — it quantifies where the dcc back-end (register allocation,
   inlining, instruction selection, and the -O2/-O3 passes) still trails a
   production compiler.
@@ -1346,14 +1347,323 @@ insn 11438 / `setcc` 28，与 §6.10 记的 12381 / 263 之间隔着不属于本
 方案 §2.3 要的「两构建交替」本轮没有单独再构建一个 HEAD 二进制（工作树全量构建约 3.5 分钟），
 漂移已由 gcc 参考臂在 2% 以内测出；若后续需要更强的证据，补一次 paired HEAD 构建即可，判据不变。
 
+### 6.12 阶段 6 修订轮：稠密 switch 走跳表分派（SQLite −27.5%）与三条口径修正
+
+本轮先做了 10 轮专家评审，结论是原「解释器进 SSA」主线**判死**（非结构化 CFG 上 IR 不在
+SSA 形式，且重建要求可约 CFG；`luaD_precall` 跑满整条 SSA 管线仍只有 gcc 的 1/2.6），
+取而代的是按「能否被本机证明」排序的批次。已落地：
+
+**跳表分派（默认开，`DCC_SWITCHTABLE=0` 可回退到链）。** `sqlite3VdbeExec` 的主分派不是
+computed goto（sqlite3.c 全文无 `goto *`），而是 185 路 switch；此前它每臂发
+`mov imm / load slot / cmp / je` 四条，**每次分派平均扫 60.6 臂**（加权臂位由
+`scripts/hot_weights.sh` 用只由 gcc 编的插桩臂实测得到，不是均匀假设的 92），
+而 gcc 是 O(1) 跳表。现在稠密整型 switch 在**不重建 AST 的非结构化函数**里被改写成
+「`static const void *const tbl[] = {&&L,...}` + selector 只求值一次 + 无符号减 min 后一条
+`jbe` 界检 + `goto *tbl[idx]`」，用的就是 Lua 解释器每天在走的 `&&label` + `goto *` 通路。
+
+同轮交替 15 轮的配对结果（`scripts/ab_pair.sh`，含一个与表臂同一二进制的 dup 臂作为仪器噪声）：
+
+| 臂 | min / p50 / max（ms） | 相对链的 median(r) |
+|---|---|---|
+| chain（`DCC_SWITCHTABLE=0`） | 463.5 / 498.8 / 548.7 | 1.000 |
+| **table（新默认）** | **348.3 / 366.3 / 391.1** | **0.7245**，95%CI [0.713, 0.755]，15/15 轮同向 |
+| dup（与 table 同一二进制） | 343.7 / 365.2 / 383.1 | 0.7261 ⇒ 仪器自身只差 0.3% |
+| gcc -O2 参考 | 88.5 / 91.4 / 109.7 | 0.1864 |
+
+静态侧：`sqlite3VdbeExec` 的分派槽读取 185 → 18、`cmp` 435 → 251、`je` 595 → 410、
+间接跳转 0 → 1，函数体量 +154 条（+0.8%）。SQLite 与 gcc 的比从 5.46x 降到 **4.01x**。
+
+批 3（内联按调用点形状放宽）在同一口径下另给一段收益：新接 `x = f(...)` /
+`y = x = f(...)` / `if (f(...))` 三种形状后，终态 `sqlite3.o` 里 `fillInCell`/`insertCellFast`
+**符号消失**（基线对象里还在），`ldo.c` 打出 `INLINE prepCallInfo (cost 51)`。批1+批3+cast
+白名单修正叠起来是 `median(r)=0.6893`（95%CI [0.672, 0.693]，15/15 轮同向），即相对链基线共
+**−31.1%**（444.6 → 304.8ms 中位数），对 gcc 到 **3.57x**（基线是 5.2x）；扣掉批1 单独的
+0.7245，批3 的边际是再 −4.9%。
+Lua 侧同一对比给出 `median(r)=1.0023`，而同一二进制的 dup 臂是 `1.0051` ⇒ 完全在噪声带内，
+**不记收益**（`prepCallInfo` 三个调用点里只有一个就是「整条语句的赋值」形状）。
+
+批 2（`DCC_BLOCKOPT_RULES` 的 `R_RAW`/`R_ZBITS` 两条新臂）是**负结果**：`luaV_execute` 在
+`7`/`0x27`/`0x2f` 三个位图下班数都是 11366、`[blockopt] drop` 都是 415，而只开新臂
+（`0x8`/`0x20`）会退回 11397——位图本身是通的，但「Raw 过度杀挡住了 247 对 store→reload」
+个离线模型的结论与发射器真实指令流不符（反汇编里 `and` 后窗口≤2 内出现同号 `movsxd`
+的处数是 0）；而“死写 Drop”的相邻形态早已在 `instructions.rs` 的 `dead_pc` 回删里，剩下的
+非相邻情形要的是真 DCE。三条全部默认关，只留机制与单测。
+
+新默认下的全量测试用例：lib 2508/0；integration 1132/4（4 条与 HEAD 逐条相同）；
+`check_opt_equivalence.sh` **0 OPT-DIFF**；`check_reproducible_output.sh` 5454 组合全绿；
+反汇编快照与 G10 基线**零重录**；`check_asm_text_parity.sh` 无 PARITY-FAIL；
+`scripts/torture_test.sh all` 3707 pass / 0 fail；`scripts/bench_lua_sqlite.sh` OK（0 build-fail /
+0 output-diff）；`check_fixtures.sh` 60 项、`check_rex_hygiene.sh` 32 条均为存量债同数。
+
+两个实现坑（写下来免得后人重踩）：表与标签的名字**不能按 `Span` 取**——sqlite3.c 里 111 个
+不同 switch 共享同一个 `Span`，`sqlite3Select` 一个函数里就出现 8 张同名表，标签后写覆盖前写，
+表项直接跳到别的函数（SIGSEGV）；静态局部表必须 hoist 到**函数体顶层**，嵌在循环里时
+`pre_register_static_locals` 得不着登记，发出来就是一句位移永不回填的 `lea`。
+
+**三条被实测订正的口径。**（1）本轮把测量方法从「各臂自取 best-of-N 的 min」换成**同轮
+交替配对比值**，并实测了两个带：同一二进制两臂的真噪声带 **2.1~3.7ms**，而“语义全同、
+只在热区前插单字节 nop”的布局敏感带高达 **43~46ms（≈10%）**——这就是 P13 §2.2
+「删 135 条 to-next jmp 反而慢 3.8%」的量级证明，也是为什么本轮所有结论只用配对中位数。
+新增 `scripts/aa_layout.sh` 会硬断言“滤掉 nop 后指令流与标签集合全同”，防止扰动旋钮偷改语义。
+（2）热区体量斜率实测 **1.5~3.3 ms/KB**，说明 SQLite 的前端确实是瓶颈，冷路径外置一类
+「只减体量」的改动从此有了换算率（不再只能搁置）。（3）新发现一条已登记待修的静默错值：
+同宽 `signed↔unsigned` cast 在使用点不归一（`100000000000UL + (unsigned)(int)-1` gcc
+104294967295、dcc 99999999999，四档都错）。本轮推进一步：标量写/赋值白名单
+`scalar_load_shape` 本来把 `Cast` 剥掉再判形状，使得快道按**内层对象的类型**决定符号/零扩展；
+现在「同宽但换符号性」的 cast 退出快道，`tests/fixtures/opt/int_widen_signedness.c` 的 12 个
+形态从多形错变成只剩 `K64 + (unsigned)v` 一形错（反例 `int i=-1; long l=i;` 仍正确保留符号扩展）。
+剩下那一形已排除「块内优化删的」与「`gen_expr_cast` 没被调到」两假设，仍按
+「正确性修复不搭性能批次」以 `#[ignore]`（report-only）形式入库。
+同时修掉了另一条真误编译：`lower_switch_stmt` 把 selector 逐臂 `clone()`，导致 `switch(i++)`
+在 -O2 下重复求值并选错臂（实测 `pick=-1 i=5` vs gcc `300/3`）；修法是把有副作用的 selector
+先存进一个临时局部，无副作用者保持原形态（实测 16 个 TU 里只有该改的那一个产物变了）。
+
+### 6.13 阶段 6 第六轮：cast 专项收口、跳表基址常驻 `%rbp`、内联视野两处补漏
+
+本轮把 §15.8 列的四条遗留全部推到底，并按「先改完再 review」的方式做一次评审（六处问题
+在实测之前被抓住并修掉，全部补了判据）。三组改动：
+
+**一、cast 最后一形的真因在发射层窥孔，不在 `gen_expr_cast`。**
+`100000000000UL + (unsigned)v` 那一形里，那次零扩展 `mov dst32, dst32` **发出来了**，被
+`instructions.rs::emit_insn` 的自反搬运去重削掉：它的前提「上一条已经把目的的高 32 位清掉」
+对 32 位写与零扩展装载成立，而 `classify_peep` 把 `movsxd r64, DWORD PTR [mem]`（高位是**符号位**）
+也归进了同一个类 `LoadR32`。现在符号扩展装载单独立类 `LoadS32`，不再充当那个前提。它之所以难查：
+`DCC_BLOCKOPT=0` 照样错（发射层窥孔不是块内优化）、`gen_expr_cast` 确实被调到、而 `emit_insn`
+对「被削掉」也返回 true。正反两面各一条单测（零扩展装载后的自反 `mov` **仍该被削**，否则等于
+把这条窥孔整体关掉）。⇒ `int_widen_signedness_matches_gcc_at_all_levels` 去掉 `#[ignore]`，
+12 个形态四档全绿。
+
+**二、批 4：跳表基址常驻 `%rbp`，分派尾部三条塌成一条。**
+实测 gcc -O2 在 Lua 同一个位置就是**一条** `jmp *(%r12,%rax,8)`（基址在序言取一次），而 dcc
+是 `lea 表(%rip),%r11` + `mov (%r11,%rcx,8),%rax` + `jmp *%rax` 三条。批 1 之后 SQLite 的稠密
+switch 也走同一条 `goto *表[idx]`，所以这是两个解释器共用的尾部。落地三件事：`JmpRmMem` 加变址
+（新编码按 GNU as 的实际字节对拍，`jmp *0x0(%rbp,%rcx,8)` = `FF 64 CD 00`，`%rbp` 当基址时 SIB 的
+base=101 在 mod=00 下意思是「无基址」⇒ 必须强制 disp8=0）、新模块 `src/ast_dispatch.rs` 在发射前
+一次遍历收集「表名与站点数 / 有没有 asm / 有没有嵌套函数」（不留 `_ => {}`，收集端与发射端共用
+同一个形态判据）、`%rbp` 的所有权（存槽 `%r13-8` 与金丝雀同格由判据互斥、尾声恢复、`.eh_frame`
+补 `rbp @ CFA-24`，五条互斥加一条不变式「字段为 `Some` ⇔ 序言真的发了那对存取」）。
+`register asm("rbp")` 改为**无条件** E0318（gcc 同一处是 `error: frame pointer required, but reserved`）。
+
+静态口径（`scripts/count_fn_insns.sh`）：`luaV_execute` 11366 → **11210（−156）**，
+`lea …,%r11` 从 80 处到 **0 处**，80 处分派各剩一条 `jmp *0x0(%rbp,%rcx,8)`；`sqlite3VdbeExec`
+主分派同样塌成一条，函数里其余 7 张表保持原形（一个号只够常驻一张表）。两臂的关侧与本轮之前
+在 `luaV_execute` 上静态口径逐条相同（`DCC_DISPTAB_RBP=0 DCC_INLINE_WALK=0` 给出 insn=11366 /
+movrr=2697 / r13=2654 / imul=216 / movsxd=685 / cmp=366）。
+
+**三、批 3 的两处覆盖补漏：内联遍历走进臂体，`always_inline` 三条路不再互斥。**
+查「没接的形状」时撞上更大的真因：`inline_calls_in_stmt` 以前对 `Stmt::Label`/`Stmt::Switch`/
+`Stmt::GotoIndirect` 全部落进 `_ => {}`，而两种臂体都走不到：`Stmt::Switch` 的 case 体（稠密
+switch 改写成线程形那一步在 `run_ssa_passes::lower_switches_in_func`，而 `function_inline` 跑在它
+**前面** ⇒ 内联时点上 VdbeExec 仍是 `Stmt::Switch`）与**源码级** computed goto 的
+`Stmt::Label` 体（Lua 的 `vmcase(l)` 展开就是一个标签）⇒ **`sqlite3VdbeExec` 的 185 个 handler 体
+一个都不在内联器视野里**。补上三条臂后 `ldo.c` 的 INLINE
+行 16 → 23（`prepCallInfo` 两个调用点全展开）、`lparser.c` 271 → 307。同时 `always_inline` 不再被
+通用路整体拒掉（带控制流的助手 + `rc = f(...)` 这种赋值调用点，SQLite btree 的 `allocateSpace`
+正是这一族），只在「专属两条确定能接」的形状上让位，并给一档 20× 硬上限防病态标注；
+递归的 `always_inline` 仍不展开（有反向用例）。两者合起来让产物变大（`luaV_execute` +616 条），
+因此共用一个归因闸门 `DCC_INLINE_WALK`。
+
+**闸门当时默认关，理由不是收益而是编译内存**（这一条已被下一轮 §6.14-5 推翻：预算把中等
+函数的亏账隔掉后默认已翻成开）：`-O2` 编 `sqlite3.c` 的单 TU 峰值 RSS 实测
+**6.77GB 并被 OOM killer 杀掉**（`/usr/bin/time -v`，本机共 7GB；两个开关都关那一臂
+复测为 6.39GB —— 存量基线已经贴着机器上沿；`lvm.c` 那一档只多 86MB）。
+而 §6.11 那段引用的门禁（`bench_lua_sqlite.sh` 必须 `OK (0 build-fail)`）不允许把一个编不动的
+默认值带出门，所以列入待办：先给展开加体量预算（按函数大小限定展开点数/总增量）、把峰值 RSS
+做成常规度量项，再翻默认。收益本身是量到的（`median(r)=0.9472`，与 `all` 同一二进制的 `dup` 臂
+复测 0.9306），只是在 SQLite 上付不出那个内存价。
+
+运行时（`scripts/ab_pair.sh`：15 轮同轮交替 + 臂序旋转 + 绑核 3；`off`=两闸门全关，`rbp`=只开基址
+常驻，`all`=两都开，`dup`=与同一列对比臂**同一二进制**的仪器对照）：
+
+| 对比（Lua `fib(32)`） | median(r) | 95%CI | 同号 | 判定 |
+|---|---|---|---|---|
+| rbp / off（只算基址常驻） | 0.9939 | [0.9717, 1.0414] | 9/15 | 不可判 ⇒ 走窄通道保留，**不记收益** |
+| all / rbp（只算内联覆盖面） | 0.9472 | 同二进制 dup 臂复测为 0.9306 | 12/15（dup 15/15） | 实测有效，但默认关 |
+| all / off（两都开） | 0.9308 | [0.9015, 0.9887] | 13/15 | 同上 |
+| dup / off（与 `all` 同一二进制） | 0.9407 | [0.9120, 0.9599] | 15/15 | 噪声与位置效应的上界 |
+
+| 对比（SQLite 20 万行负载） | median(r) | 95%CI | 同号 | 判定 |
+|---|---|---|---|---|
+| rbp / off | 1.0056 | [1.0017, 1.0106] | 3/15 | 不可判（与 `rbp` 同一二进制的 `dup` 臂地板就 +0.38%） |
+| all / off | — | — | — | 量不了：开侧 `sqlite3.c` 被 OOM 杀死 |
+
+批 4 在窄通道上保留默认开，但 **SQLite 的 `median(r)=1.0056` 比要求的 ≤1.005 高出 0.0006**（而
+同一二进制的对照臂已是 +0.0038，差在仪器地板之内），Lua 单独效应 CI 跨 1 ⇒ 两条都不算收益；
+默认档的静态口径同时达标：`luaV_execute` 11366 → **11210**（§6.11 那条「≤ 11800」仍成立）。
+
+评审抽出的六处（全部已修并各带判据，详见方案 §15.8.4）：`main` 走内置链接器直链那格里
+序言没发存取而站点照用 `%rbp`（**实测 SIGSEGV**）；内联结果临时量被按错的类型读（`Dest::Cond`
+硬贴 `int`、`Dest::Assign` 贴左值类型、`AssignChain` 外层拿到未转换的值）—— 三条都是静默错值，
+新的 `always_inline_cf_site` 夹具用 double/long/指针返回的三个目的地形状钉住；`switch` 的 prelude
+被 if-chain 降级拼成「链之前的顺序语句」（-O2/-O3 多执行一次赋值，gcc 与 -O0 都不）；`blockopt`
+把 `movswl` 当成「已是符号扩展规范形态」从而削掉必需的 `movsxd`。另采纳一条 ABI 补漏：
+`__builtin_setjmp` 的 callee-saved 快照补上 `%rbp`（临时区 40→48 字节，与 glibc 的
+`sigsetjmp` 存 rbx/rbp/r12-r15 对齐），因为现在一个跳表函数可以 longjmp 穿过另一个；
+判据 `setjmp_longjmp_across_hoisted_dispatch_keeps_the_captured_table_base` 只比 dcc 自己 ——
+同一份源在 gcc `-O2` 下自己就 SIGSEGV（`-O0` 与 dcc 都对），拿 gcc 当参照反而会把这类缺陷遮住。
+
+本轮全量测试用例（**本轮当时的默认**：批 4 开、`DCC_INLINE_WALK` 关；下一轮已翻默认并重跑，
+见 §6.14 末的质量门）：lib **2525/0**；integration
+**1142 passed / 4 failed**（4 条与 HEAD 逐条相同，零新增）；disasm 快照与 G10 基线**零重录**；
+`check_opt_equivalence.sh` **0 OPT-DIFF**（COMPILE-FAIL 60 = 基线同数）；
+`check_reproducible_output.sh` 5454 组合全绿；`check_asm_text_parity.sh` 无 PARITY-FAIL；
+`check_fixtures.sh` 60 项、`check_rex_hygiene.sh` 32 条均为存量债同数；
+`scripts/torture_gate.sh`（C-Torture 全量）**PASS** —— compile `pass=2010 / fail=0`、
+execute `pass=1697 / fail=0`，而基线名单里本来有 27 条 compile / 49 条 execute 已知失败，
+本轮全部转绿；`bash scripts/bench_lua_sqlite.sh ITERATIONS=2` → **OK (0 build-fail, 0 output-diff)**，
+其中墙钟 best-of-2（该脚本自己的口径，不绑核、不作判定依据）：Lua `-O2` 290ms vs gcc 115ms
+（**2.52x**），SQLite `-O2` 312ms vs gcc 87ms（**3.59x**）；同一夹具的 `computed_goto_dispatch`/
+`switch_prelude`/`always_inline_cf_site`/`int_widen` 四条在**两臂开关下**都全绿（开关差分 0-diff）。
+
+本节的 Lua/SQLite 百分比数字全部来自 `scripts/ab_pair.sh` 的同轮配对（median(r) + 自助法
+95%CI + 符号检验 + 同二进制 dup 对照），不是「各臂自己取 min」那种已被 §6.12 证伪的口径；
+`bench_lua_sqlite.sh` 那组墙钟只用于「能不能跑通、输出对不对」的门禁。
+
+### 6.14 阶段 6 spec 对齐轮（第七轮）+ 第八轮评审修正：四类形状全部实现、预算量尺从 fail-open 修到两条通道
+
+本轮把 spec（`阶段6_解释器SSA_task-5dd.md`）逐条对到底，完整的逐条落位表在方案
+§15.10（含没达成的那一条：Lua ≤275ms 的承诺）。报告只记四个新数字：
+
+1. **批 3 的第 3、4 类形状已实现但默认关**。`x op= f(...)`（只把那一侧的 Call 换成结果
+   临时量的读，**不改读-改-写次序**）与 `int x = f(...)` 声明初值（原地拆成「空声明 +
+   赋值」，变量不离开原作域）都进了决策点，夹具 `inline_call_site_shapes.c` 四档与 gcc
+   一致；但 15 轮同轮配对是负的：Lua `median(r)=1.0188`（CI [0.9987,1.0351]）、
+   SQLite `1.0135`（CI [0.9965,1.0240]），而与开臂**同一二进制**的 dup 臂自己报 1.0212
+   ⇒ 两个同二进制臂方向一致地慢，不是位置效应。体量代价 Lua +53KB、sqlite3.o +346KB。
+   按 §5.5 三态统一处理：机制与判据保留，闸门 `DCC_INLINE_SHAPE` **默认关**，登记负结果。
+   结构原因也写了：这两类比 `x = f()` 多一份 per-site 的「临时量 + 存回」开销，而成本模型
+   看不到它。（同轮的 `DCC_INLINE_WALK` 已经靠展开预算翻成了默认开，见下面第 5 条；这两类
+   没有跟着翻 —— 它们的回退与体量无关，是 per-site 开销本身。）
+2. **批 2 的旧结论需要修正**。在新基线（批 4 开、两条内联闸门关）上重跑
+   `DCC_BLOCKOPT_RULES`：开 `R_RAW|R_CPY32`（`0x67`）时 `luaV_execute` 从 11210 降到
+   **11188**（r13 引用 2657→2635）——上轮登记的「R_RAW 零机会」只对当时的基线成立；默认档
+   翻成开之后同一列在新基线上直接复验：`7` → 11670、`0x67` → **11648**（同一个 −22 条）。
+   本轮同时实现 C-lite 的第二条 `R_CPY32`（`mov r64,r64` → 同长 32 位形态，**严格同长**
+   才换；单测钉住三个反面：没事实不换、低 8 号会缩短不换、默认位图不换），但它只换字节
+   不减条数，没体量收益 ⇒ 同样默认关，等运行时测量。
+3. **测量协议补了两块**。`aa_layout.sh` 加了方案 §5.1 要的**静态可达性断言**（只对旋钮
+   插入的 nop 段要求前驱是 jmp/ret/jcc；FN_SHIFT 臂不成立即 die，PAD 臂则报告并从斜率拟合
+   里排除 —— 实测载体上 13 段里有 1 段真会被落入）；`hot_weights.sh` 头里那句「对 nop/位移
+   不敏感」被删掉并改成交叉引用。新脚本 `scripts/gprofng_attr.sh` 补上按函数的归因通道
+   （本机不依赖 PMU）：实测 `luaV_execute` 占 exclusive CPU 74%~83%，但 10ms 粒度下
+   0.29s 的单次跑只能命中 ~7 个样本 ⇒ 它能定位函数，不能判 6% 的差值。
+4. **§6 的两件小事与阶段 7 立项书**。`ssa/build.rs` 补 `LABEL_BB_PREFIX`/`label_bb_name`/
+   `source_label_of`（生产点全改走它，两条单测，零产物影响）；`structure.rs` 文件头写明
+   「谁决定准入 / 谁决定落地」；`shared/control_flow.rs` 的两个跳表桩加了 `#[deprecated]`。
+   阶段 7 另立项成文：`.trae/documents/x86_64-p14-trace-regalloc-charter.md`，带实测准入表
+   （第八轮重算的最终默认档：帧内存引用密度 dcc **232** vs gcc **72** 条/千指令，差 3.2×；
+   分派尾部 80 vs 6，且开/关 `DCC_INLINE_WALK` 都是 80）与开工前要还的三条硬账。
+
+5. **展开了预算（`arm_budget_ok_for`），把 `DCC_INLINE_WALK` 翻成默认开；随后评审发现预算的
+   量尺是坏的，重测后准入改成两条通道**（完整过程在方案 §15.10.8）。预算本身是「caller 体的
+   AST 节点数 ≤ `DCC_INLINE_WALK_MAX`（默认 **800**）才下探 `Label`/`Switch` 臂体」，但
+   `stmt_node_count` 带一个 `_ => 1`，于是 `Stmt::Label`（Lua 的 `vmcase(l)` 展开就是一个标签）
+   与 `GotoIndirect`/`Invoke`/`EhLandingPad`/`AsmGoto` 全部只计 1 个节点、`switch` 的 `prelude`
+   完全不进账 ⇒ `luaV_execute`（真实 **18713** 节点）被量成 ~250，预算在它身上 **fail-open**。
+   修全之后重测（同一台机器，四臂同轮交替 **25 轮**，绑核 3）：
+
+   | Lua 四臂（25 轮） | 配置 | min / p50（ms） | median(r) | 同号 |
+   |---|---|---|---|---|
+   | base | `DCC_INLINE_WALK=0` | 300.2 / 308.7 | 1.000 | — |
+   | m300 | 只开体量通道，上限 300 | 281.8 / 297.0 | **0.9604**（CI [0.9464,0.9731]） | 22/25 |
+   | **m800（默认）** | 只开体量通道，上限 800 | 284.1 / 294.8 | **0.9704**（CI [0.9437,0.9832]） | 22/25 |
+   | tonly | 只开线程形通道 | 289.5 / 294.8 | **0.9974** | 8/15 |
+   | dup | 与 base 同一二进制 | 297.0 / 311.4 | 1.0007 | 12/25 |
+
+   两个上限谁强得直接对拍（跨会话读数不可比：同一个 m800 在两个会话里分别量到 0.9462 与
+   0.9704）：`m300/m800 = 0.9968`（CI [0.9780,1.0166]，14/25，dup 地板 0.9990）⇒ **不可判**
+   ⇒ 默认值继续用 800。（表里 `tonly` 那一行来自上一个 **15 轮**会话，其余四行才是本次 25 轮
+   同一轮交替的产物；它只用来支持「线程形单独打开量不到时间」这一句方向，不用来算量级。）
+
+   量尺修全后得到的关键事实：`luaV_execute` 18713 节点与 SQLite 的 `sqlite3VdbeExec` 16847
+   只差 10%，**没有任何体量阈值能既放进前者又拦下后者**；能分开它们的是形状（前者有 80 个
+   `goto *disptab[..]` 站点，SQLite 在内联时点上一个也没有），但形状通道单独并不得到时间
+   （0.9974）⇒ 准入做成两条可分别开关的通道后：**体量通道默认开（800），线程形通道默认关**
+   （机制与判据保留，`DCC_INLINE_WALK_THREADED`）。
+   SQLite 在同一会话同一组臂下不可判（25 轮：默认档 `median(r)=0.9943`，CI [0.9773,1.0136]，
+   而 dup 自己 1.0028）。完整的读数串得一并记账：同一个默认档在四次会话里量到
+   **0.9943 / 0.9988 / 1.0132 / 1.0288** ⇒ 方向一致地偏正 ⇒ **SQLite 不记任何收益**。
+   §5.5 的「E 不上升」在本批是结构上成立的：两个分派循环在两臂下**逐字节同形**
+   （`sqlite3VdbeExec` 都是 insn 20299 / movrr 3763 / r13 4197 / imul 279 / movsxd 1188 / cmp 800；
+   `luaV_execute` 都是 11210 / 2697 / 2657 / 216 / 685 / 366）——展开全部落在非分派函数里。
+   体量代价：sqlite3.o 7,373,360 → **7,818,200 字节**（+444.8KB），Lua 二进制 +112.8KB。
+   静态口径（最终默认档）：`luaV_execute` = **11210 条**（它 18713 节点，被体量通道拦住，仍在
+   §6.11 的 ≤11800 以下），帧内存引用 2597 条 = 232/千条，`jmp *0x0(%rbp,%rcx,8)` 仍 80 处。
+   编译内存（同一会话三臂）：关门臂 6.01GB / 默认档 **6.20GB**（都能过；上限 300 是 6.19GB，
+   与 800 分不开；无预算旧档 6.77~6.83GB 被 OOM 杀死）。
+   与上面那条差别说清：**本节先前的那一稿**记的是 0.9530 / `luaV_execute` 11670，它
+   **依赖那个 fail-open bug**（线程形默认进）；本轮的 0.9704（25 轮）/ 11210 不依赖，且实现与
+   文档里写的「按 caller 体量限住」现在一致。
+   §2 的 Lua 承诺：比值口径成立（两个会话分别 −2.96% 与 −5.38%，各自的 dup 地板 1.0007 / 0.9959
+   ⇒ 都在带外），**绝对 p50 得看当日基准臂**（基准臂 308.7ms 那轮默认档 294.8ms；基准臂
+   292.6ms 那轮 278.3ms）⇒ 本节不再拿绝对 ms 定承诺。
+6. **第八轮评审抽出的发现全部修完，并顺带抖出一族 HEAD 既有的 `switch prelude` 缺陷**
+   （详表在方案 §15.10.8）。除上面那条 blocker（预算量尺）外，评审还抽到：集成用例丢了
+   自己承诺的 `DCC_INLINE_WALK=0` 反向臂（已补，现在删守卫就会红）、`DCC_INLINE_TRACE` 的
+   归因行自己重算了一条错的判决式（恒报 `walk_arms=true`，会把「通道没开」读成「开了没收益」，
+   已改为直接打真实判决）、嵌套函数沿用外层判决、`try_stmt_inline_call` 重算预算、
+   `DCC_INLINE_WALK_MAX` 非法值静默回落（现在往 stderr 打警）、三个 `DCC_INLINE_*` 布尔门
+   解析不一致（`DCC_INLINE_WALK=TRUE` 会静默当「关」，而关侧正是配对基准臂；现在三个门共用
+   一个解析，认不了就警 + 按默认值）。
+
+   **更严重要的一族是 HEAD 就有的**：`Stmt::Switch.prelude`（第一个 `case` 之前的那些项）是
+   本项目为 E1102 加的字段，但写它之前的 walker 一律只匹配 `{ expr, cases, .. }` ⇒ 静默少扫
+   一棵子树。本轮因「prelude 要接进内联遍历」逐个抖出并修完 10 处，每处都有可复现的错：
+   调用图（`ssa/passes.rs`）漏 prelude ⇒ **只被 prelude 调用的 `static` 函数被跨函数 DCE 删掉
+   而 `call` 照样发射，`-O2` 链接报 `undefined reference`**（-O0/-O1 正常）；帧预算
+   （`late_need_stmt`）漏 prelude ⇒ `switch (x) { int y = 1; … }` 直接编不过
+   （`E1133: late frame allocation … 1 slots used, 0 reserved`）；`collect_frame_var_decls_stmt`（
+   帧槽分配）、`collect_local_labels_stmt`（标签登记）、`sret_bytes_stmt`、`collect_free_idents_stmt`、
+   `set_home_stmt`、`ast_gvn.rs::collect_scope_stmt`（GVN 会把 prelude 里被写的名字当成没被写过）、
+   `ast_asm.rs::walk_stmt`、以及 `opt.rs` 里六处同一类判据。三条带判据：
+   `switch_prelude_only_callee_survives_cross_function_dce`（四档与 gcc 同结果 + 汇编自洽）、
+   `switch_prelude_decl_init_site_is_walked_like_a_block_statement`（同一形状在 prelude 与普通块
+   里同进同退）、`arm_budget_counts_switch_prelude`（平铺与 prelude 两份同量体必须同量级）。
+   没修但已登记：`sanitizer.rs` 三处（只在 `-fsanitize` 下参与插桩覆盖面）与 `cpp/modules.rs`。
+   另记一条：三条臂不看 `level`，而 `function_inline` 在 -O0/-O1 也跑（它的既有设计就是 O0 只接
+   `always_inline`/`flatten`）⇒ 默认翻开会连带动 -O0/-O1 产物，本轮只以四档输出一致 + C-Torture
+   全量覆盖，未单独配对。
+
+7. **可证下界（spec §2 要求这条必得写死在报告里，按负载分列）**。本仓实际用的是
+   **同轮配对 + 与基准同一二进制的 dup 臂**给出的仪器地板，不是旧的「各臂取 min」：
+
+   | 负载 | 同二进制 dup 臂的读数（本轮四次会话） | 换算成时间 | 绝对 ms 能不能证 |
+   |---|---|---|---|
+   | Lua `fib(32)` | median(r) 0.9959 / 1.0007 / 1.0018 / 0.9934，p50 差 2.1~3.7ms | **≈±0.5%（≾1.5ms）** | 不能：纯 `nop` 位移就能移动 43~46ms（§15.2），同一配置的配对比值会话之间漂 2.4% |
+   | SQLite 20 万行 | median(r) 0.9817 / 1.0025 / 1.0028 / 1.0013，p50 差 4~6ms | **≈±1%（≾6ms）** | 不能：基准臂 p50 在 305~332ms 之间跳（会话漂） |
+
+   ⇒ 因此本报告里：**任何 |median(r)−1| 小于上表地板的结论一律记「不可判」**（不得写进承诺，
+   §5.5）；比值超过地板的才能计盈亏；**绝对 ms 不得单独作判据**（§1 纠错表已经因混用两套口径
+   自打过一次）。spec §2 当时引的「11% / ±3.8%」是旧口径（各臂独立 best-of-N + 跳轮 min）
+   的标定值，已被批 0a 的同轮配对口径取代（那个口径下噪声只占 0.5~1%，但布局敏感度依旧存在，
+   所以两条一起记：比值可证到 ≅1%，绝对值不可证）。
+
+本轮全部质量门（最终默认：批 4 开、`DCC_INLINE_WALK` **开**（体量通道 800）、
+`DCC_INLINE_WALK_THREADED`/`DCC_INLINE_SHAPE` 关）：
+lib **2531 passed / 0 failed / 2 ignored**（两条新判据钉的是预算量尺的标签形与 `prelude`）；
+integration **1147 passed / 4 failed**（四条与 HEAD
+逐条相同：`cpp_flat_map`、`cpp_multi_declarator_member`、`eh_landing_pad_functions_are_never_auto_bound`、
+`register_home_and_cleanup_survive_every_declaration_path`）；disasm 快照与 G10 零重录；
+`check_opt_equivalence.sh` **0 OPT-DIFF**（COMPILE-FAIL 60 = 基线）；`check_reproducible_output.sh`
+**5454 组合全绿**；`check_asm_text_parity.sh` 无 PARITY-FAIL；`scripts/torture_gate.sh`（C-Torture
+全量）**PASS**：compile `pass=2010 / fail=0`、execute `pass=1697 / fail=0`（基线名单 27/49 全转绿）；
+`scripts/bench_lua_sqlite.sh` → **OK (0 build-fail, 0 output-diff)**，其中墙钟 best-of-5（该脚本
+自己的口径，不绑核、不作判定依据）：Lua `-O2` **290ms vs gcc 119ms = 2.44x**（-O3 295ms）、
+SQLite `-O2` **331ms vs gcc 92ms = 3.60x**（-O3 321ms）。上一会话同组量到 279/112 = 2.49x 与
+311/88 = 3.53x（gcc 参考臂自己也在漂）⇒ 可引的是比值而不是绝对 ms（方案 §15.10.8）。
+默认档翻转会改产物，而预算量尺修正又改了一次（`luaV_execute` 11670 → **11210**），所以
+§6.13 里那些「默认关」口径的静态数字在本节一律以新默认档为准重测；§6.13 的配对 A/B 表是
+**当时的默认**下量出来的历史记录，其中内联覆盖面那一步的收益（`all/rbp` 0.9472）与最终默认的
+0.9704（25 轮；15 轮那次 0.9462）同源 —— 区别是后者不再依赖一个「标签不进预算」的 bug。
+
 ---
 
 ## 7. Summary
 
 | Project | dcc compile | dcc link | functional run (-O0..-O3) | output consistency | perf vs gcc (-O2 / -O3) |
 |---|---|---|---|---|---|
-| Lua 5.5.1 | OK | OK | OK (all levels) | byte-identical to gcc, all levels | ~2.5x / ~2.6x slower |
-| SQLite (amalgamation) | OK | OK | OK (all levels) | identical across -O0..-O3 | ~5.4x / ~5.0x slower |
+| Lua 5.5.1 | OK | OK | OK (all levels) | byte-identical to gcc, all levels | ~2.4x / ~2.5x slower (290 / 295 ms vs gcc 119 ms; was ~2.6x before §6.13/§6.14) |
+| SQLite (amalgamation) | OK | OK | OK (all levels) | identical across -O0..-O3 | ~3.6x / ~3.5x slower (331 / 321 ms vs gcc 92 ms; was ~5.4x before §6.12) |
 
 **Takeaways**
 
@@ -1375,7 +1685,9 @@ insn 11438 / `setcc` 28，与 §6.10 记的 12381 / 263 之间隔着不属于本
    use it as `CC` out of the box".
 5. **Performance.** dcc's -O2/-O3 output is correct but measurably slower than
    gcc (§6): roughly **2.5x** on the Lua interpreter loop (was 4.4x) and
-   **5.0-5.4x** on a SQLite insert+query workload (was 6.4-7.1x). `-O3 ≈ -O2`
+   **~3.5x** on a SQLite insert+query workload (was 6.4-7.1x, and 5.0-5.4x
+   before the dense-switch jump-table round in §6.12, which with the new inline
+   shapes took SQLite from 444.6 → 304.8 ms paired-median, −31.1%). `-O3 ≈ -O2`
    for dcc. The 2026-10 emitter round (§6.6) is what moved these ratios most: over
    its two stages it cut `luaV_execute`'s instruction count by 31.3% and its register
    moves by 55.8%, and Lua `-O2` went 497→432→324 ms in like-for-like reruns. The
@@ -1390,7 +1702,27 @@ insn 11438 / `setcc` 28，与 §6.10 记的 12381 / 263 之间隔着不属于本
    alternating, best-of-9 `task-clock` gives Lua `-O2` min 291.6 / p50 302.5 ms and SQLite `-O2`
    min 472.7 / p50 475.9 ms, i.e. ~10% inside the §5 thresholds (324 / 527 ms) and ~9% better
    than the §1 baseline after subtracting the gcc reference arm's 2% drift. The ratios quoted
-   at the top of this item are the ones measured on that build. That is the current state of the plan in
+   at the top of this item are the ones measured on that build. The two stage-6 rounds on top of
+   it are what brought SQLite down to ~3.6x: the dense-`switch` jump-table dispatch (§6.12,
+   −27.5% paired) plus call-site-shaped inlining (a further −4.9%), and §6.13's jump-table base
+   hoisting into `%rbp`, whose own paired effect is Lua 0.9939 / SQLite 1.0056 — inside the
+   instrument's floor, so it is kept on through the narrow channel **without claiming a gain**.
+   The last two numbers on top of that are §6.14's arm-body inlining walk (call sites inside
+   `Label`/`Switch` arms, gated by a caller-size budget): **Lua `median(r)=0.9704` over 25 paired
+   rounds** (CI [0.9437, 0.9832], 22/25 faster; a previous 15-round session read 0.9462 for the
+   same configuration, and the same-session dup control was 1.0007, so the honest statement is
+   "-3%…-5%") with SQLite indistinguishable (0.9943 against a 1.0028 same-binary floor, readings
+   across four sessions: 0.9943/0.9988/1.0132/1.0288 — no SQLite gain claimed). The default is on
+   for the size channel while the shape channel (threaded dispatch) and the two extra call-site
+   shapes stay measured-but-off. Caveat recorded in §6.14-5: the budget's measurement scale had a
+   `_ => 1` hole that made it fail open on label-shaped callers; the numbers above are the
+   re-measurement after that was fixed, and the earlier 0.9530/11670 pair in this section's draft
+   depended on the bug. §6.14-6 records a separate, pre-existing defect family: walkers written
+   before `Stmt::Switch.prelude` existed (the cross-function DCE call graph, the frame-allocation
+   budget, GVN scope collection, …) silently skipped that subtree, which could make `-O2`
+   objects unlinkable (`undefined reference`) or reject a valid program with `E1133`; ten sites
+   were fixed this round with three new regression tests.
+   That is the current state of the plan in
    `.trae/documents/x86_64-p13-hot-path-emission-optimization-plan.md`.
    §6.7 also records a rejection: an optimisation that removes 135 instructions but
    moves the hot code off its alignment measured 3.8% **slower** and was reverted —

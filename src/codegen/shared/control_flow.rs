@@ -602,6 +602,14 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
     }
 
     /// Determine optimal switch lowering strategy
+    ///
+    /// **死脚手架，不要照抄**（阶段 6 批 1 登记）：全仓零个 `impl ControlFlowBackend`，
+    /// 所以本函数与下面的 `lower_switch_with_jump_table` 从未被调用过。x86_64 真实的
+    /// switch 降级在 `src/ssa/structure.rs`（if 链）与同处的稠密跳表改写（`goto *表[idx]`）
+    /// 里，两边都按**源码物理次序**发臂体（`default` 排到末尾会让上一个臂误落入它）。
+    /// 本函数的「density > 50% 且 ≥ 3 臂」看着合理，但与真实降级共享的那套拒接判据
+    /// （区间 case、非整型 selector、非空 prelude、`__int128`）都没算 —— 照抄它就静默误编译。
+    #[deprecated(note = "未接线的脚手架：真实降级在 src/ssa/structure.rs；不要在这里扩")]
     fn should_use_jump_table(&self, cases: &[crate::ast::Case]) -> bool {
         // Count dense case values
         let mut min_val = u64::MAX;
@@ -629,6 +637,12 @@ impl<'a, CF: ControlFlowBackend> ControlFlowLoweringEngine<'a, CF> {
     }
 
     /// Lower switch using jump table
+    ///
+    /// **未接线，且形态本身就是错的**（阶段 6 批 1 登记）：它收下 `_cases` 却根本不读，
+    /// 只发一个空标号表 + default 臂 ⇒ 任何按它扩的实现都会把命中的 `case` 静默丢掉。
+    /// 真实的跳表降级（静态局部表 + 界检 + `goto *表[idx]`，以及为什么必须只
+    /// 对非结构化函数做）在 `src/ssa/structure.rs::lower_switch_to_jumptable`。
+    #[deprecated(note = "未接线且丢弃 cases：真实降级在 src/ssa/structure.rs")]
     fn lower_switch_with_jump_table(
         &mut self,
         scrutinee: &Expr,

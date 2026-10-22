@@ -95,6 +95,12 @@ pub struct FuncCfi {
     pub callee_saved_used: u8,
     /// 是否额外维护 rbp 帧指针 (影响 CFA 偏移量与 rbp 的保存位置)
     pub frame_pointer: bool,
+    /// 本函数把跳表基址常驻在 `%rbp`，并在帧顶那一格存了调用者的值（阶段 6 批 4）。
+    ///
+    /// 必须进 CFI：那一格是 `CFA-24`（`CFA = %r13+16`，存槽在 `%r13-8`），与帧指针档里
+    /// rbp 那条规则同位置同因子。漏了它，展开穿过本帧时 rbp 不会被恢复 —— 调用者的值
+    /// 就丢了（症状是异常抛过 computed-goto 函数后上层函数的帧指针是跳表地址）。
+    pub rbp_saved: bool,
 }
 
 /// LSDA 类型表编码: `DW_EH_PE_pcrel | DW_EH_PE_indirect | DW_EH_PE_sdata4`。
