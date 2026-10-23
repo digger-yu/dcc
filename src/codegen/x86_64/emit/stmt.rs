@@ -854,7 +854,15 @@ impl Codegen {
                 // 条件为真时不应生成对 __compiletime_assert_N 的调用
                 //
                 // 注意: 不能简单跳过死分支, 因为其中可能包含 goto 目标标签.
-                // 如果死分支含有标签, 必须正常生成该分支代码.
+                // 如果死分支含有标签, 必须正常生成该分支代码. 但死分支只允许
+                // 经 goto 进入: 必须用一条 jmp 越过整段, 否则落空路径会顺进来
+                // (实测 `if (0) { L: g = 1; }` 把 g 置 1; pr110176.c 因此死循环).
+                let emit_dead_branch = |this: &mut Self, s: &Stmt| {
+                    let skip = this.fresh_label();
+                    this.jmp_rel32(&skip, JumpKind::Jmp);
+                    this.gen_stmt(s);
+                    this.label(&skip);
+                };
                 if let Ok(cv) = const_eval::eval(cond) {
                     let has_labels_in_then = Self::stmt_contains_label(then_);
                     let has_labels_in_else = else_
@@ -867,18 +875,36 @@ impl Codegen {
                         // `if (1) goto foo; else { foo: ... }`），必须也发射 else 分支。
                         if has_labels_in_else {
                             if let Some(el) = else_ {
-                                self.gen_stmt(el);
+                                emit_dead_branch(self, el);
                             }
                         }
-                    } else if has_labels_in_then {
-                        // condition is false but then-body has labels that
-                        // external gotos may target — must generate it
-                        self.gen_stmt(then_);
-                    } else if let Some(el) = else_ {
-                        // condition is false, no labels in then-body
-                        self.gen_stmt(el);
+                    } else {
+                        // condition is false: else 是活路径, then 是死分支
+                        // (只作 goto 目标存在, 不得顶替 else)。
+                        if has_labels_in_then {
+                            if else_.is_some() {
+                                // 死 then 后紧跟活 else: 落空路径跳到 else, 但经
+                                // goto 进入死 then 后必须**越过 else** (jmp end),
+                                // 否则会顺落进 else (pr17078-1.c: goto 进
+                                // `if(0){L:i=0;}else i=1;` 曾顺落得 i=1 → abort)。
+                                let to_else = self.fresh_label();
+                                let end = self.fresh_label();
+                                self.jmp_rel32(&to_else, JumpKind::Jmp);
+                                self.gen_stmt(then_);
+                                self.jmp_rel32(&end, JumpKind::Jmp);
+                                self.label(&to_else);
+                                if let Some(el) = else_ {
+                                    self.gen_stmt(el);
+                                }
+                                self.label(&end);
+                            } else {
+                                // 无 else: 死分支只需被一条 jmp 越过, 顺落即跳过。
+                                emit_dead_branch(self, then_);
+                            }
+                        } else if let Some(el) = else_ {
+                            self.gen_stmt(el);
+                        }
                     }
-                    // else: condition is false, no labels, no else → skip
                 } else {
                     let le = self.fresh_label();
                     let lend = self.fresh_label();

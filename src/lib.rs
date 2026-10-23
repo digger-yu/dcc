@@ -7,6 +7,7 @@
 
 pub mod ast;
 pub mod ast_asm;
+pub mod ast_cmp_fold;
 pub mod ast_dispatch;
 pub mod ast_gvn;
 #[cfg(test)]

@@ -14,9 +14,12 @@
 # 分片:
 #   --shard N/M   将展开后的文件列表按文件序号**连续**切成 M 片, 只跑第 N 片 (1..M)。
 #                 连续切分使字母序相邻的相关用例 (同一特性区域) 落在同一片。
-#                配合 --dirs 可实现"某子目录再拆 N 份"。CI 可用 M=4 并行 4 个 job。
+#                配合 --dirs 可实现"某子目录再拆 N 份"。
+#   本仓库约定切 **8 片** (M=8): 本地分批/调试用 `--shard N/8`, N=1..8;
+#   例如 shard 3 = `--shard 3/8` (第 3/8 片)。CI 若要并行可自行改 M。
 #   例:
-#     ./gcc_dg_test.sh run --shard 1/8     # run 集第 1/8 片
+#     ./gcc_dg_test.sh all --shard 3/8          # all 集第 3/8 片 (8 片约定)
+#     ./gcc_dg_test.sh run --shard 1/8          # run 集第 1/8 片
 #     ./gcc_dg_test.sh compile --dirs tree-ssa --shard 2/4
 #
 # 默认测试组合:

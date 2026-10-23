@@ -1198,6 +1198,21 @@ impl Codegen {
                     self.store_stack(0, result_off + eo);
                     self.store_stack(2, result_off + eo + 8);
                 },
+                BinOp::Add => {
+                    // 128 位加法: 低半 add 产生进位, 高半 adc 吃进位。
+                    // 操作数布局 rax=左低 rdx=左高 rcx=右低 r8=右高。
+                    self.emit_alu_rm_reg64(AluOp::Add, 0, 1); // add rax, rcx (low)
+                    self.emit_alu_rm_reg64(AluOp::Adc, 2, 8); // adc rdx, r8 (high + CF)
+                    self.store_stack(0, result_off + eo);
+                    self.store_stack(2, result_off + eo + 8);
+                },
+                BinOp::Sub => {
+                    // 128 位减法: 低半 sub 产生借位, 高半 sbb 吃借位。
+                    self.emit_alu_rm_reg64(AluOp::Sub, 0, 1); // sub rax, rcx (low)
+                    self.emit_alu_rm_reg64(AluOp::Sbb, 2, 8); // sbb rdx, r8 (high - borrow)
+                    self.store_stack(0, result_off + eo);
+                    self.store_stack(2, result_off + eo + 8);
+                },
                 _ => {
                     // 暂不支持, 结果槽保持未定义
                 },

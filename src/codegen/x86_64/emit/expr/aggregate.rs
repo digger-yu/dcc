@@ -1148,6 +1148,46 @@ impl Codegen {
                         self.store_xmm64_stack(0, off);
                     } else if matches!(&elem_ty.base, Type::Float128) {
                         self.store_xmm128_stack(0, off);
+                    } else if matches!(&elem_ty.base, Type::Int128 | Type::UInt128) {
+                        // __int128 元素 (16B): 值在 rax(低):rdx(高)。源非 128 位时
+                        // gen_expr 只填 rax, 高半需按源有无符号扩展补齐, 否则残留垃圾
+                        // (q8: `__int128 a[2]={3,5}` 读 a[0] 得垃圾; pr69909 的
+                        // `U f={3,5}` 同根)。旧写法 `emit_store(_, _, 16)` 既漏存
+                        // 高半、对 16B 也不正确。
+                        if !matches!(value.ty(), Type::Int128 | Type::UInt128) {
+                            let src_unsigned = matches!(
+                                value.ty(),
+                                Type::Bool
+                                    | Type::UChar
+                                    | Type::UShort
+                                    | Type::UInt
+                                    | Type::ULong
+                                    | Type::ULongLong
+                            );
+                            if src_unsigned {
+                                self.emit_insn(&Insn::new(
+                                    crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                                        op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                                        width: crate::codegen::shared::asm_operand::Width::B64,
+                                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            2,
+                                            crate::codegen::shared::asm_operand::Width::B64,
+                                        ),
+                                        src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            2,
+                                            crate::codegen::shared::asm_operand::Width::B64,
+                                        ),
+                                    },
+                                    &[],
+                                )); // xor rdx, rdx (零扩展)
+                            } else {
+                                self.emit_insn(&Insn::sign_extend_rax_to_rdx(
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                )); // cqo (符号扩展)
+                            }
+                        }
+                        self.emit_store(0, off, 8);
+                        self.emit_store(2, off + 8, 8);
                     } else {
                         self.emit_store(0, off, elem_size);
                     }
@@ -1176,6 +1216,43 @@ impl Codegen {
                         self.store_xmm32_stack(0, off);
                     } else if matches!(elem_ty.base, Type::Double) {
                         self.store_xmm64_stack(0, off);
+                    } else if matches!(elem_ty.base, Type::Int128 | Type::UInt128) {
+                        // __int128 向量元素 (16B): 同数组分支, 高半按源符号/零扩展
+                        // 补齐后分两半存 (pr69909: `U f={3,5}` 同根)。
+                        if !matches!(value.ty(), Type::Int128 | Type::UInt128) {
+                            let src_unsigned = matches!(
+                                value.ty(),
+                                Type::Bool
+                                    | Type::UChar
+                                    | Type::UShort
+                                    | Type::UInt
+                                    | Type::ULong
+                                    | Type::ULongLong
+                            );
+                            if src_unsigned {
+                                self.emit_insn(&Insn::new(
+                                    crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
+                                        op: crate::codegen::x86_64::opcode::AluOp::Xor,
+                                        width: crate::codegen::shared::asm_operand::Width::B64,
+                                        dst: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            2,
+                                            crate::codegen::shared::asm_operand::Width::B64,
+                                        ),
+                                        src: crate::codegen::x86_64::opcode::Operand::Reg(
+                                            2,
+                                            crate::codegen::shared::asm_operand::Width::B64,
+                                        ),
+                                    },
+                                    &[],
+                                )); // xor rdx, rdx (零扩展)
+                            } else {
+                                self.emit_insn(&Insn::sign_extend_rax_to_rdx(
+                                    crate::codegen::shared::asm_operand::Width::B64,
+                                )); // cqo (符号扩展)
+                            }
+                        }
+                        self.emit_store(0, off, 8);
+                        self.emit_store(2, off + 8, 8);
                     } else {
                         self.emit_store(0, off, elem_size);
                     }

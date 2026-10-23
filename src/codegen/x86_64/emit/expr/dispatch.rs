@@ -1062,8 +1062,17 @@ impl Codegen {
                 // 目标地址先存进一个帧槽, 由 `AggDst::Indirect` 解释; 源侧的
                 // 全部物化契约 (Call/sret/va_arg/CompoundLit/整体拷贝) 仍由
                 // `gen_aggregate_assign_to` 单一实现承担, 这里不重写任何判据。
+                //
+                // 复合字面量右值即使目标聚合 <=8B 也必须进本路:
+                // `gen_expr(CompoundLit)` 对小结构同样按约定把**临时结构地址**
+                // 交付进 rax (而非打包值), 落到下方 Index/成员/解引用的标量
+                // int-store 会把这个地址当 8 字节写进目标 (pr79351:
+                // `states[j] = (struct state){0}` 后 states[].k 变地址字节)。
+                // 该兜底与 Ident 左值路径 (下方 `|| CompoundLit`) 同源同判据。
                 if !matches!(lv, Expr::Ident { .. })
-                    && Self::value_is_whole_copy(&assign_l_ty)
+                    && (Self::value_is_whole_copy(&assign_l_ty)
+                        || (Self::is_aggregate_shape(&assign_l_ty)
+                            && matches!(r.as_ref(), Expr::CompoundLit { .. })))
                     && self.gen_lvalue_addr(lv, Self::EVAL_BASE)
                 {
                     let addr_slot = self.alloc_sret_slot(8);
@@ -1177,17 +1186,21 @@ impl Codegen {
                             // RHS 非 __int128 时, rdx 未设置, 需零扩展/符号扩展
                             let r_ty_for_128 = r.ty();
                             if !matches!(r_ty_for_128, Type::Int128 | Type::UInt128) {
-                                if matches!(l_ty, Type::UInt128)
-                                    || matches!(
-                                        r_ty_for_128,
-                                        Type::Bool
-                                            | Type::UChar
-                                            | Type::UShort
-                                            | Type::UInt
-                                            | Type::ULong
-                                            | Type::ULongLong
-                                    )
-                                {
+                                // 扩展方向**只看源类型有无符号** (C 转换规则):
+                                // 有符号源 (含负常量) 转成更宽的 __int128 必须符号
+                                // 扩展; 无符号源才零扩展。旧写法把
+                                // `l_ty == UInt128` 也并进零扩展条件, 于是
+                                // `unsigned __int128 x = <负 long long>` 被零扩展
+                                // (高位丢成 0), pr78416 即此。
+                                if matches!(
+                                    r_ty_for_128,
+                                    Type::Bool
+                                        | Type::UChar
+                                        | Type::UShort
+                                        | Type::UInt
+                                        | Type::ULong
+                                        | Type::ULongLong
+                                ) {
                                     // P11: xor rdx, rdx via typed opcode.
                                     let insn = Insn::new(
                                         X86_64Opcode::AluRm {

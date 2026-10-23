@@ -422,13 +422,33 @@ impl Codegen {
             self.emit_insn(&Insn::lea_reg_base_disp(0, 13, result_off as i32));
             return;
         }
+        // 向量操作数**一次性物化**进专用槽, 循环内只做纯槽加载: 带副作用的
+        // 向量 rvalue (`*v++` 等) 若逐 lane 求值会被重复执行 (指针多次前移,
+        // 每 lane 从不同内存取值), pr52407 的 `*u++ = *v++ * w` 即此根因。
+        // 先 l 后 r: l 若是嵌套 binop 会暂用 result_slot+2/+3, 其结果落定在
+        // result_slot+1, 之后 r 物化进 +2 不会破坏它。标量 (广播) 操作数不
+        // 预物化, 仍按 lane gen_expr (广播语义不变)。
+        let l_vec_off = if l_is_vec {
+            let s = result_slot + 1;
+            self.gen_vector_load_into_slot(l, s);
+            Some(self.vector_temp_base(s, vec_size))
+        } else {
+            None
+        };
+        let r_vec_off = if r_is_vec {
+            let s = result_slot + 2;
+            self.gen_vector_load_into_slot(r, s);
+            Some(self.vector_temp_base(s, vec_size))
+        } else {
+            None
+        };
         for i in 0..count {
-            // 加载左操作数: 向量按元素取, 标量直接求值 (广播)
+            // 加载左操作数: 向量从预物化槽按元素取, 标量直接求值 (广播)
             // l 值经栈暂存 (push/pop): r 求值 (嵌套 binop/调用) 会
             // 破坏 rcx, 旧 mov rcx,rax 暂存在 r 为复杂表达式时踩 l 值
             // (pr109040: 6 > ((V){...} & m) 外层比较读到内层中间值)
-            if l_is_vec {
-                self.gen_scalar_vector_load(l, i, elem_size);
+            if let Some(off) = l_vec_off {
+                self.load_stack_sized(0, off + (i * elem_size) as i64, elem_size);
             } else {
                 self.gen_expr(l, Self::EVAL_BASE);
             }
@@ -443,9 +463,9 @@ impl Codegen {
                 },
                 &[],
             )); // push rax (暂存 l 值)
-                // 加载右操作数: 向量按元素取, 标量直接求值 (广播)
-            if r_is_vec {
-                self.gen_scalar_vector_load(r, i, elem_size);
+                // 加载右操作数: 向量从预物化槽按元素取, 标量直接求值 (广播)
+            if let Some(off) = r_vec_off {
+                self.load_stack_sized(0, off + (i * elem_size) as i64, elem_size);
             } else {
                 self.gen_expr(r, Self::EVAL_BASE);
             }
@@ -1006,6 +1026,20 @@ impl Codegen {
         self.gen_vector_load_into_slot(e, 0);
     }
     pub(crate) fn gen_vector_load_into_slot(&mut self, e: &Expr, temp_slot: usize) {
+        // 同尺寸向量重解释 cast (`(U)d`: V→U 等) 不改变字节布局: 先剥掉, 之后
+        // 一律按内层向量的元素布局加载进同一槽 (总字节数相同)。否则 Cast 落入
+        // 下方 `_ =>` 通用臂, gen_expr 的交付被当成缓冲区地址 rep movsb, 拷错/
+        // 拷 0 (pr69909: `f -= (U)d` 整项变 0, 而单独读 `(U)d[1]` 却正确)。
+        let e: &Expr = match e {
+            Expr::Cast { ty, e: inner, .. }
+                if matches!(ty, Type::Vector(..))
+                    && matches!(inner.ty(), Type::Vector(..))
+                    && ty.size() == inner.ty().size() =>
+            {
+                inner.as_ref()
+            },
+            _ => e,
+        };
         let (elem_ty, count) = match e.ty() {
             Type::Vector(ref elem, n) => {
                 let et = elem.base.clone();
@@ -1312,9 +1346,54 @@ impl Codegen {
         is_double: bool,
     ) -> bool {
         let vec_size = elem_size * count;
-        // 先把左右操作数存入临时槽 (结果槽+1 / 结果槽+2):
-        // 嵌套 binop 时操作数自身的计算结果写入更深槽,
-        // 不会覆盖本层已物化的另一个操作数或结果槽
+        // 先**判定**走哪条 SSE 打包指令 (纯判定, 无副作用); 不支持就在物化
+        // 操作数之前返回 false。绝不可先物化再判定: 物化会求值带副作用的向量
+        // rvalue (`*v++`), 先物化后知 unsupported 已让副作用发生, 回退标量路径
+        // 会再次物化 ⇒ 指针多移 / 取值错位 (pr52407: (8,Mul) 无 pmullq, SSE2
+        // 不支持 64 位打包乘, 必须整路回退标量, 且一次副作用都不该发生)。
+        enum Plan {
+            Arith(SimdArithOp, SimdWidth),
+            Pmulld,
+        }
+        let plan: Plan = if is_float {
+            // packed single: addps/subps/mulps/divps (P11 Bucket B typed).
+            match op {
+                BinOp::Add => Plan::Arith(SimdArithOp::Addps, SimdWidth::PS),
+                BinOp::Sub => Plan::Arith(SimdArithOp::Subps, SimdWidth::PS),
+                BinOp::Mul => Plan::Arith(SimdArithOp::Mulps, SimdWidth::PS),
+                BinOp::Div => Plan::Arith(SimdArithOp::Divps, SimdWidth::PS),
+                _ => return false,
+            }
+        } else if is_double {
+            // packed double: addpd/subpd/mulpd/divpd (P11 Bucket B typed).
+            match op {
+                BinOp::Add => Plan::Arith(SimdArithOp::Addpd, SimdWidth::PD),
+                BinOp::Sub => Plan::Arith(SimdArithOp::Subpd, SimdWidth::PD),
+                BinOp::Mul => Plan::Arith(SimdArithOp::Mulpd, SimdWidth::PD),
+                BinOp::Div => Plan::Arith(SimdArithOp::Divpd, SimdWidth::PD),
+                _ => return false,
+            }
+        } else {
+            // 整数向量: SSE2 packed integer
+            match (elem_size, op) {
+                (4, BinOp::Add) => Plan::Arith(SimdArithOp::PAdd, SimdWidth::D), // paddd
+                (4, BinOp::Sub) => Plan::Arith(SimdArithOp::PSub, SimdWidth::D), // psubd
+                (4, BinOp::Mul) => Plan::Pmulld,                                // pmulld
+                (8, BinOp::Add) => Plan::Arith(SimdArithOp::PAdd, SimdWidth::Q), // paddq
+                (8, BinOp::Sub) => Plan::Arith(SimdArithOp::PSub, SimdWidth::Q), // psubq
+                (2, BinOp::Add) => Plan::Arith(SimdArithOp::PAdd, SimdWidth::W), // paddw
+                (2, BinOp::Sub) => Plan::Arith(SimdArithOp::PSub, SimdWidth::W), // psubw
+                (1, BinOp::Add) => Plan::Arith(SimdArithOp::PAdd, SimdWidth::B), // paddb
+                (1, BinOp::Sub) => Plan::Arith(SimdArithOp::PSub, SimdWidth::B), // psubb
+                (_, BinOp::And) => Plan::Arith(SimdArithOp::Pand, SimdWidth::O), // pand
+                (_, BinOp::Or) => Plan::Arith(SimdArithOp::Por, SimdWidth::O),  // por
+                (_, BinOp::Xor) => Plan::Arith(SimdArithOp::Pxor, SimdWidth::O), // pxor
+                _ => return false, // 不支持的组合回退标量路径
+            }
+        };
+        // 支持: 这才物化左右操作数 (副作用在此发生, 且整路只此一次)。
+        // 临时槽 = 结果槽+1 / 结果槽+2: 嵌套 binop 时操作数自身结果写入更深
+        // 槽, 不会覆盖本层已物化的另一个操作数或结果槽。
         let l_slot = result_slot + 1;
         let r_slot = result_slot + 2;
         self.gen_vector_load_into_slot(l, l_slot);
@@ -1327,78 +1406,13 @@ impl Codegen {
         // movdqu xmm1, [r13 + right_off]
         self.emit_movdqu_r13_to_xmm(1, right_off);
 
-        if is_float {
-            // packed single: addps/subps/mulps/divps (P11 Bucket B typed).
-            let sop = match op {
-                BinOp::Add => SimdArithOp::Addps,
-                BinOp::Sub => SimdArithOp::Subps,
-                BinOp::Mul => SimdArithOp::Mulps,
-                BinOp::Div => SimdArithOp::Divps,
-                _ => return false,
-            };
-            self.emit_insn(&Insn::simd_arith_reg(sop, SimdWidth::PS, 0, 1));
-        } else if is_double {
-            // packed double: addpd/subpd/mulpd/divpd (P11 Bucket B typed).
-            let dop = match op {
-                BinOp::Add => SimdArithOp::Addpd,
-                BinOp::Sub => SimdArithOp::Subpd,
-                BinOp::Mul => SimdArithOp::Mulpd,
-                BinOp::Div => SimdArithOp::Divpd,
-                _ => return false,
-            };
-            self.emit_insn(&Insn::simd_arith_reg(dop, SimdWidth::PD, 0, 1));
-        } else {
-            // 整数向量: SSE2 packed integer
-            match (elem_size, op) {
-                (4, BinOp::Add) => {
-                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::PAdd, SimdWidth::D, 0, 1));
-                    // paddd xmm0, xmm1
-                },
-                (4, BinOp::Sub) => {
-                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::PSub, SimdWidth::D, 0, 1));
-                    // psubd xmm0, xmm1
-                },
-                (4, BinOp::Mul) => {
-                    self.emit_insn(&Insn::pmulld_xmm(0, 1)); // pmulld xmm0, xmm1
-                },
-                (8, BinOp::Add) => {
-                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::PAdd, SimdWidth::Q, 0, 1));
-                    // paddq xmm0, xmm1
-                },
-                (8, BinOp::Sub) => {
-                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::PSub, SimdWidth::Q, 0, 1));
-                    // psubq xmm0, xmm1
-                },
-                (2, BinOp::Add) => {
-                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::PAdd, SimdWidth::W, 0, 1));
-                    // paddw xmm0, xmm1
-                },
-                (2, BinOp::Sub) => {
-                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::PSub, SimdWidth::W, 0, 1));
-                    // psubw xmm0, xmm1
-                },
-                (1, BinOp::Add) => {
-                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::PAdd, SimdWidth::B, 0, 1));
-                    // paddb xmm0, xmm1
-                },
-                (1, BinOp::Sub) => {
-                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::PSub, SimdWidth::B, 0, 1));
-                    // psubb xmm0, xmm1
-                },
-                (_, BinOp::And) => {
-                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Pand, SimdWidth::O, 0, 1));
-                    // pand xmm0, xmm1
-                },
-                (_, BinOp::Or) => {
-                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Por, SimdWidth::O, 0, 1));
-                    // por xmm0, xmm1
-                },
-                (_, BinOp::Xor) => {
-                    self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Pxor, SimdWidth::O, 0, 1));
-                    // pxor xmm0, xmm1
-                },
-                _ => return false, // 不支持的组合回退标量路径
-            }
+        match plan {
+            Plan::Arith(sop, w) => {
+                self.emit_insn(&Insn::simd_arith_reg(sop, w, 0, 1));
+            },
+            Plan::Pmulld => {
+                self.emit_insn(&Insn::pmulld_xmm(0, 1)); // pmulld xmm0, xmm1
+            },
         }
 
         // movdqu [r13 + result_off], xmm0

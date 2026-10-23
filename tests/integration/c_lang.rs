@@ -3799,3 +3799,95 @@ fn arrow_on_array_member_keeps_field_type_matches_gcc() {
          成员基址的箭头/取值形态判据同族（聚合基址丢写、指针基址读错地方）",
     );
 }
+
+/// 死分支里的 label 只能经 goto 进入：常量条件的落空路径不得顺进死分支。
+///
+/// 回归 gcc.dg pr110176.c：`if (0) { L: ... }` 曾被整段内联发射，落空路径直接
+/// 执行标签体（`g` 被置 1），外层循环因此死转。修复判据两条：死分支仍要发射
+/// （外部 goto 可能命中），但必须用一条 jmp 越过；同时 `if (0) … else …` 的
+/// 活路径是 else，不能被死 then 顶替。
+#[test]
+#[cfg(unix)]
+fn const_branch_labels_are_goto_only() {
+    let src = r#"
+int g;
+int probe(void) {
+    if (0) { L: g = 1; }
+    if (0) { M: g = 2; } else { g = 3; }
+    return g;
+}
+int jump(int c) {
+    if (c) goto T;
+    if (1) { g = 4; } else { T: g = 5; }
+    return g;
+}
+int main(void) {
+    if (probe() != 3) return 1;
+    if (jump(1) != 5) return 2;
+    if (jump(0) != 4) return 3;
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run("const-branch-labels", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "compile failed: {stderr}");
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "const-branch label fallthrough (rc={rc})");
+}
+
+/// 比较恒等式必须在**默认档位**折掉，否则 provably-false 分支里的
+/// `link_error()` 会留在产物中，链接期报 undefined reference。
+///
+/// 回归 gcc.dg pr27302 / pr27302-2（`(a < b) != (b > a)`、`(a - 1 < b) != (a <= b)`
+/// 等 16 条关系恒等式）。
+#[test]
+#[cfg(unix)]
+fn comparison_identities_fold_away_dead_link_error() {
+    let src = r#"
+extern void link_error(void);
+int test(int a, int b) {
+    if ((a < b) != (b > a)) link_error();
+    if ((a - 1 < b) != (a <= b)) link_error();
+    if ((a - 2 < b) != (a - 1 <= b)) link_error();
+    if ((a + -1 < b) != (a <= b)) link_error();
+    if ((a + 1 > b) != (a >= b)) link_error();
+    if ((a + 2 > b) != (a + 1 >= b)) link_error();
+    if ((a + 1 <= b) != (a < b)) link_error();
+    if ((a - 1 >= b) != (a > b)) link_error();
+    return 0;
+}
+int main(void) { return test(1, 2); }
+"#;
+    let (out, exe) = run_compile_and_run("cmp-identity-link", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "比较恒等式未折掉, link_error 残留导致链接失败: {stderr}");
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "cmp identity runtime (rc={rc})");
+}
+
+/// C23 `<stdckdint.h>`：这是**编译器**提供的头（宿主 gcc < 14 没有），
+/// dcc 内置一份并包到 `__builtin_{add,sub,mul}_overflow` 上。
+#[test]
+#[cfg(unix)]
+fn builtin_stdckdint_header_works() {
+    let src = r#"
+#include <stdckdint.h>
+int main(void) {
+    int r;
+    if (ckd_add(&r, 1, 2) || r != 3) return 1;
+    if (ckd_add(&r, 0x7fffffff, 1) == 0) return 2;
+    if (ckd_sub(&r, -5, -3) || r != -2) return 3;
+    if (ckd_mul(&r, 1000, 1000) || r != 1000000) return 4;
+    if (ckd_mul(&r, 0x7fffffff, 2) == 0) return 5;
+    return 0;
+}
+"#;
+    let (out, exe) = run_compile_and_run("stdckdint", src);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stdckdint compile failed: {stderr}");
+    let rc = run_exe(&exe);
+    let _ = fs::remove_file(&exe);
+    assert_eq!(rc, 0, "stdckdint semantics (rc={rc})");
+}

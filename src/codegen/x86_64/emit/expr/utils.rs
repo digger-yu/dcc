@@ -2298,6 +2298,20 @@ impl Codegen {
             },
             Stmt::While { body, .. } | Stmt::Do { body, .. } => Self::stmt_contains_label(body),
             Stmt::For { body, .. } => Self::stmt_contains_label(body),
+            // 标签是函数作用域的: goto 可以跳进 switch 的 case 体或 case 前的
+            // prelude. 漏掉这两处会让死分支被整段跳过 ⇒ E1102 (标签未定义).
+            Stmt::Switch { cases, prelude, .. } => {
+                prelude.iter().any(|item| match item {
+                    BlockItem::Stmt(s) => Self::stmt_contains_label(s),
+                    BlockItem::Decl(_) => false,
+                }) || cases
+                    .iter()
+                    .any(|c| c.body.items.iter().any(|item| match item {
+                        BlockItem::Stmt(s) => Self::stmt_contains_label(s),
+                        BlockItem::Decl(_) => false,
+                    }))
+            },
+            Stmt::Invoke { call, .. } => Self::stmt_contains_label(call),
             _ => false,
         }
     }

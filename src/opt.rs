@@ -87,12 +87,13 @@ pub fn optimize_with_target(module: &mut Module, level: u8, has_vnni: bool, vec_
     // Default: strict_aliasing=true (C standard semantics), debug_info=false
     // (`optimize_with_target` 的既有调用方都不带 -g 信息; 需要时走
     // `optimize_with_full_target`)。
-    optimize_with_full_target(module, level, has_vnni, vec_bits, true, false);
+    optimize_with_full_target(module, level, has_vnni, vec_bits, true, false, true);
 }
 
 /// 带完整目标信息的优化入口。
 ///
 /// `strict_aliasing`: -fno-strict-aliasing 时为 false, 别名分析合并所有指针
+/// `strict_overflow`: -fno-strict-overflow 时为 false, 禁止依赖有符号不溢出的推理
 pub fn optimize_with_full_target(
     module: &mut Module,
     level: u8,
@@ -100,7 +101,14 @@ pub fn optimize_with_full_target(
     vec_bits: u32,
     strict_aliasing: bool,
     debug_info: bool,
+    strict_overflow: bool,
 ) {
+    // 比较恒等式折叠: `(a < b) != (b > a)` 这类关系恒等式在**任何** -O 档都要折掉,
+    // 与 GCC 前端 fold-const 一致; 否则 `link_error()` 之类的死调用会留在产物里
+    // (gcc.dg pr27302 / pr27302-2 在默认档位链接失败)。必须排在 level==0 提前返回之前。
+    if !opt_skipped("fold_compare_identities") {
+        crate::ast_cmp_fold::run(module, strict_overflow);
+    }
     // 内联: O0-O2 仅 always_inline/flatten; O3 额外启发式
     if !opt_skipped("function_inline") {
         function_inline(module, level);
