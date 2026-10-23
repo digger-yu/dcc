@@ -787,6 +787,84 @@ pub enum InitItem {
     Designated { designator: Designator, value: Expr },
 }
 
+/// 填满一个该类型的对象需要多少个**标量**初始值 (C11 6.7.9 brace elision 的
+/// 「每个元素吞多少标量」口径)。
+///
+/// 为什么需要: `struct S b[][1] = {3,0,3,4,...}` 里最外层元素类型是
+/// `struct S[1]` (一个结构体的数组), 按 C11 6.7.9p14 花括号省略规则, 扁平
+/// 标量要继续往**里层结构体**灌, 每 4 个标量填满一个元素 —— 不是 1 个标量
+/// 就换行 (pr80622: 那样会把 68 个标量铺成 68 行, 每行只写首字段)。
+/// 匿名位域不可初始化, 不计入; 联合只占 1 个标量槽。
+pub fn init_scalar_capacity(ty: &Type) -> usize {
+    match ty {
+        Type::Array(elem, ArraySize::Const(n)) => {
+            (*n).max(0) as usize * init_scalar_capacity(&elem.base)
+        },
+        // VLA / 未知维度: 保守按 1 (调用方遇到 0/1 都不做分组)
+        Type::Array(_, _) => 1,
+        Type::Struct(_, fields, _, _) => fields
+            .iter()
+            .filter(|f| !(f.name.is_empty() && f.bit_width.is_some()))
+            .map(|f| init_scalar_capacity(&f.ty))
+            .sum::<usize>()
+            .max(1),
+        Type::Union(_, _, _, _) => 1,
+        _ => 1,
+    }
+}
+
+/// 由初始化列表推断最外层数组维度 (C11 6.7.9p22): 按「光标」模型数元素个数 ——
+/// 花括号/字符串/指定项各自完结一个元素, 扁平标量按 `init_scalar_capacity`
+/// 个一组填满一个元素。
+///
+/// 例: `struct S b[][1] = {68 个标量}` (每元素 4 标量) → 17;
+/// `int a[][2] = {{1,2}, 3}` → 2 (前者 1 个元素, 后者开启新元素)。
+pub fn count_init_elements(elem_ty: &Type, inits: &[InitItem]) -> usize {
+    let sub = init_scalar_capacity(elem_ty);
+    if sub <= 1 {
+        // 元素是标量 (或容量未知): 一项一个元素
+        return inits.len();
+    }
+    let mut count = 0usize;
+    let mut cursor = 0usize; // 当前元素内已吞的标量数
+    // 字符串字面量只有在**整个元素就是字符数组**时才是自完结项 (一行一个);
+    // 否则它只填字符数组字段那一个叶槽, 按 1 个标量计 (与
+    // group_for_brace_elision 的分组口径一致)。
+    let elem_is_char_array = match elem_ty {
+        Type::Array(inner, _) => matches!(
+            inner.base,
+            Type::Char | Type::SChar | Type::UChar | Type::Char8
+        ),
+        _ => false,
+    };
+    for item in inits {
+        // 自完结项: 显式花括号 / 指定初始化器 / (字符数组元素的) 字符串
+        let self_contained = match item {
+            InitItem::Designated { .. } => true,
+            InitItem::Expr(Expr::String { .. }) if elem_is_char_array => true,
+            InitItem::Expr(e) => matches!(e, Expr::InitList { .. } | Expr::CompoundLit { .. }),
+        };
+        if self_contained {
+            if cursor > 0 {
+                // 之前攒的扁平标量先完结一个元素
+                count += 1;
+                cursor = 0;
+            }
+            count += 1;
+        } else {
+            cursor += 1;
+            if cursor >= sub {
+                count += 1;
+                cursor = 0;
+            }
+        }
+    }
+    if cursor > 0 {
+        count += 1;
+    }
+    count
+}
+
 /// 指定符
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]

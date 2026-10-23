@@ -3698,7 +3698,23 @@ impl X86_64Opcode {
                     _ => "cvt",
                 };
                 let _ = gpr_64;
-                format!("{m}\t{}, {}", fmt_operand(src), fmt_operand(dst))
+                // reg 字段是 xmm, r/m 字段是 GPR: 打印时按各自宽度取寄存器名.
+                // 直接 fmt_operand 会把 GPR 侧按 B128 渲染成 %xmmN, 产出
+                // 不可汇编的 `cvtsi2sd %xmm0, %xmm0`.
+                let gw = if *gpr_64 {
+                    crate::codegen::shared::asm_operand::Width::B64
+                } else {
+                    crate::codegen::shared::asm_operand::Width::B32
+                };
+                match (dst, src) {
+                    (Operand::Reg(d, _), Operand::Reg(s, _)) if *to_xmm => {
+                        format!("{m}\t{}, {}", fmt_reg(*s, gw), fmt_reg(*d, crate::codegen::shared::asm_operand::Width::B128))
+                    },
+                    (Operand::Reg(d, _), Operand::Reg(s, _)) => {
+                        format!("{m}\t{}, {}", fmt_reg(*s, crate::codegen::shared::asm_operand::Width::B128), fmt_reg(*d, gw))
+                    },
+                    _ => format!("{m}\t{}, {}", fmt_operand(src), fmt_operand(dst)),
+                }
             },
 
             // ---- ROUNDSS/ROUNDSD ----

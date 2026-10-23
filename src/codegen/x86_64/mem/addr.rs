@@ -194,6 +194,37 @@ impl Codegen {
                 self.gen_expr(e, dst);
                 true
             },
+            // 结构体/联合返回的调用作成员访问基址 (`f().a`, `f().a.b.c`):
+            // 被调方按 SysV 把 <=16B 的聚合放在 rax[:rdx], >16B 放 sret
+            // 缓冲 (rax 已指向它)。这里一次性物化到帧临时区并交出地址。
+            //
+            // 为什么必须有这一臂: 少了它, `gen_lvalue_addr(Call)` 返回 false,
+            // 成员链每一层都落到 `gen_expr_member_rvalue` 的回退分支 ——
+            // 回退先 `gen_expr(expr)` 求值 (聚合 rvalue 约定: 地址已在
+            // dst), 却仍按"值在寄存器"再 spill 一次, 把**临时区地址本身**
+            // 写回结果槽 (pr117423: `f3(x).DATA.var_0._0._0` 读回垃圾)。
+            // 非聚合返回 (标量/浮点/复数/向量) 一律返回 false, 走原路径。
+            Expr::Call { .. } => {
+                let ty = e.ty();
+                if matches!(ty, Type::Struct(_, _, _, _) | Type::Union(_, _, _, _)) {
+                    self.gen_expr(e, dst);
+                    let struct_size = ty.size();
+                    if struct_size > 16 {
+                        // MEMORY 类: rax 已是被调方写入的 sret 缓冲地址
+                        return true;
+                    }
+                    // <=8B 全值在 rax; >8B 且 <=16B 在 rax:rdx
+                    let result_off = self.complex_result_off();
+                    self.emit_store(0, result_off, 8);
+                    if struct_size > 8 {
+                        self.emit_store(2, result_off + 8, 8);
+                    }
+                    // dst = 指向物化后的 struct 值
+                    self.emit_lea_r13(dst, result_off);
+                    return true;
+                }
+                false
+            },
             _ => false,
         }
     }

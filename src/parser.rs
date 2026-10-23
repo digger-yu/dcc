@@ -2174,9 +2174,13 @@ impl<'a> Parser<'a> {
                 "__builtin_powl" | "__builtin_logl" | "__builtin_expl" |
                 "__builtin_sinl" => return Type::LongDouble,
                 "__builtin_pow" | "__builtin_powf" |
+                "__builtin_powi" |
                 "__builtin_log" | "__builtin_logf" |
                 "__builtin_exp" | "__builtin_expf" |
                 "__builtin_sin" | "__builtin_sinf" => return Type::Double,
+                // __builtin_powif/powil: 整数指数幂的 float/long double 变体
+                "__builtin_powif" => return Type::Float,
+                "__builtin_powil" => return Type::LongDouble,
                 // 复数函数
                 "__builtin_cpow" | "__builtin_cpowf" | "__builtin_cpowl" |
                 "__builtin_cexpi" | "__builtin_cexpif" | "__builtin_cexpil" |
@@ -2247,6 +2251,7 @@ impl<'a> Parser<'a> {
                 // 返回 void 的 builtin (无返回值, 不需要警告)
                 "__builtin_va_end" | "__builtin_clear_padding" |
                 "__builtin___clear_cache" | "__builtin_abort" |
+                "__builtin_exit" |
                 "__builtin_va_start" => return Type::Void,
                 // 返回 long 的 builtin
                 "__builtin_expect" => return Type::Long,
@@ -4805,10 +4810,14 @@ impl<'a> Parser<'a> {
                 None
             };
             // 从 InitList 推断最外层数组大小: data[] = {1,2,3} → data[3]
+            // 元素类型是聚合体时按 brace elision 数元素: 扁平标量每
+            // `init_scalar_capacity` 个填满一个元素 (pr80622:
+            // `struct S b[][1] = {68 标量}` → 17 行, 不是 68 行)。
             if let (Type::Array(elem, ArraySize::Const(0)), Some(Expr::InitList { inits, .. })) =
                 (&arr_ty, &init)
             {
-                arr_ty = Type::Array(elem.clone(), ArraySize::Const(inits.len()));
+                let count = crate::ast::count_init_elements(&elem.base, inits);
+                arr_ty = Type::Array(elem.clone(), ArraySize::Const(count));
             }
             // 从 String 推断字符数组大小: data[] = "string" → data[7]
             // 宽字符串 L"..." 的 data 是原始字节 (4 bytes/wchar_t),
@@ -8551,6 +8560,9 @@ impl<'a> Parser<'a> {
             // 也处理: ret (__attribute__((...)) *name)(params)
             let mut is_nested_fptr = false;
             let mut is_paren_param_decl = false;
+            // 函数指针数组参数 `(*name [sizes])` 收集到的名字维度,
+            // 在指针链构造完成后应用 (见下方 is_nested_fptr 分支尾部)。
+            let mut name_arr_dims: Vec<ArraySize> = Vec::new();
             if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
                 is_nested_fptr = true;
             } else if self.cur.kind == TokKind::LParen
@@ -8615,6 +8627,36 @@ impl<'a> Parser<'a> {
                     None
                 };
                 self.skip_attributes();
+                // 函数指针数组参数: `void (*p1 []) (int, int)` — 数组后缀
+                // **先**作用于名字 (p1 是"函数指针的数组"), 之后外层
+                // `(params)` 才作用于被指向类型 (C 声明符从内向外结合)。
+                // 此前这里只认 `(`/`)`, 遇到 `[` 直接 E0001 拒解析 (pr90553)。
+                let mut name_is_array = false;
+                if self.cur.kind == TokKind::LBracket {
+                    name_is_array = true;
+                    // 先按原名收集维度; 真正的类型包裹推迟到指针链构造
+                    // 完成后进行 (数组后缀不属于被指向类型)。
+                    let mut dims = Vec::new();
+                    while self.cur.kind == TokKind::LBracket {
+                        self.advance();
+                        let sz = if self.cur.kind != TokKind::RBracket {
+                            let e = self.parse_expr()?;
+                            if let Ok(v) = crate::const_eval::eval(&e) {
+                                ArraySize::Const(v.max(0) as usize)
+                            } else {
+                                match &e {
+                                    Expr::Int { v, .. } => ArraySize::Const(*v as usize),
+                                    _ => ArraySize::Var(Box::new(e)),
+                                }
+                            }
+                        } else {
+                            ArraySize::Const(0)
+                        };
+                        self.expect(TokKind::RBracket, "']'");
+                        dims.push(sz);
+                    }
+                    name_arr_dims = dims;
+                }
                 // 括号包名字后可能有函数参数列表 (在关闭外层 ) 之前)
                 // 如 (* const (funcp)(time_t)) 中的 (time_t)
                 if self.cur.kind == TokKind::LParen && nm.is_some() {
@@ -8678,6 +8720,19 @@ impl<'a> Parser<'a> {
                         wrapped = Type::Ptr(Box::new(wrapped.into()));
                     }
                     ty = wrapped;
+                }
+                // 应用名字上的数组维度 (函数指针数组参数):
+                // `void (*p1 [])(int, int)` → Array(Ptr(Func(void,int,int)), 0)。
+                // 参数按 C11 6.7.6.3p7 调整: 数组退化为指针, 即
+                // Ptr(Ptr(Func(...))) —— 与 `void (**p1)(int, int)` 等价。
+                if !name_arr_dims.is_empty() {
+                    for sz in name_arr_dims.into_iter().rev() {
+                        ty = Type::Array(Box::new(ty.into()), sz);
+                    }
+                    ty = match ty {
+                        Type::Array(e, _) => Type::Ptr(e),
+                        o => o,
+                    };
                 }
                 // 函数指针参数后的属性: 如 `int (*cb)(params) ATTRIBUTE_UNUSED`
                 self.skip_attributes();
@@ -12129,6 +12184,9 @@ impl<'a> Parser<'a> {
                                     | "__builtin_powl"
                                     | "__builtin_pow"
                                     | "__builtin_powf"
+                                    | "__builtin_powi"
+                                    | "__builtin_powif"
+                                    | "__builtin_powil"
                                     | "__builtin_cpow"
                                     | "__builtin_cpowf"
                                     | "__builtin_cpowl"
@@ -12214,6 +12272,7 @@ impl<'a> Parser<'a> {
                                     | "__builtin_strcpy"
                                     | "__builtin_stpcpy"
                                     | "__builtin_abort"
+                                    | "__builtin_exit"
                                     | "__builtin_va_start"
                                     | "__builtin_va_copy"
                                     | "__builtin_expect"

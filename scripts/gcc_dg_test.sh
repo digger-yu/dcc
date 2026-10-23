@@ -270,7 +270,10 @@ parse_dg_directives() {
             # effective-target 风格的非 triple 选择器; 本 harness 无法验证,
             # 凡命中已知非 x86 架构名即视为非本平台跳过 (避免误在 x86 上运行
             # 这些用例而虚假 FAIL). 含 x86 家族名则放行, 交由运行期定夺.
-            if [[ "$pats" =~ (^|[^a-z0-9])(arm|aarch64|powerpc|ppc|pwr|mips|sparc|s390x?|riscv|alpha|ia64|sh|hppa|m68k|m32r|mn10300|frv|vax|cr16|epiphany|lm32|moxie|microblaze|nds32|arc|tile|visium|ft32|mcore|stormy16|iq2000|xstormy|msp430|rl78|avr|rx|pdp11)([^a-z0-9]|$) ]]; then
+            # int16/int8 是「sizeof(int)==2/1」类能力名, 在 x86_64 (int=32b)
+            # 上恒假: vrp66-int16-sw.c 这类用例连本机 gcc 都过不了, 放行只会
+            # 制造虚假 FAIL (gcc 自己的 dejagnu 也因 target int16 跳过它).
+            if [[ "$pats" =~ (^|[^a-z0-9])(arm|aarch64|powerpc|ppc|pwr|mips|sparc|s390x?|riscv|alpha|ia64|sh|hppa|m68k|m32r|mn10300|frv|vax|cr16|epiphany|lm32|moxie|microblaze|nds32|arc|tile|visium|ft32|mcore|stormy16|iq2000|xstormy|msp430|rl78|avr|rx|pdp11|int16|int8)([^a-z0-9]|$) ]]; then
                 echo "skip target:$pats"
                 return
             fi

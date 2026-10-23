@@ -71,6 +71,12 @@ torture/dfp-default-init-3.c
 torture/fp-int-convert-timode-3.c
 torture/fp-int-convert-timode-4.c
 torture/fp-int-convert-float16-timode.c
+# _BitInt(N>64) 大整数字面量 — dcc 的 _BitInt 是宽度映射垫片 (N<=8→char,
+# <=16→short, <=32→int, 其余一律 64-bit long), AST 字面量是 i128,
+# 133-bit 常量 (5444517870735015415413993718908291383300uwb) 超出 i128
+# 被 parse_int_lit 截成 0, 取模即除零 SIGFPE。真支持需要任意精度整数表示,
+# 与 TImode 同属"超 64 位宽整数"设计缺口, 暂跳过。
+torture/bitint-107.c
 # __hardbool
 torture/hardbool-ai.c
 torture/hardbool-i-5a.c
@@ -123,6 +129,44 @@ torture/pr115137.c
 # pr117938 — 与 struct-by-value-18 同类的 sret 帧水位缺口 (E1128 压穿帧底),
 # <sret> 静态帧规划低估预留, 暂跳过待修正帧规划器。
 torture/pr117938.c
+
+# ── shard4 修复时发现的设计缺口 (dcc 优化器/codegen 尚不具备相应能力) ──
+
+# ssa-fre-116 — __builtin_constant_p(s.m_size) 在 s 是按值传入的常量结构体
+# (scan((struct SV){1})) 时, dcc 不做常量结构体字段传播, 返回 0, 于是 indexOf
+# 走入 findString 分支调用 __builtin_abort. 需要 IPA 对“按值传入的常量结构体”
+# 的字段做常量传播.
+tree-ssa/ssa-fre-116.c
+
+# vrp-from-cst-agg-9 / -12 — 从 const 聚合 (tbl[i] / ops[i].handler / fns[i])
+# 加载的值, dcc 的 VRP 不提取常量聚合的元素值集合, 无法证明加载结果落在
+# {0,5,9} 或指针恒为 null, 于是 __link_error 调用不被消除 (链接因未定义符号
+# 失败). 需要“加载常量聚合 → 值/指针集合”的 VRP 能力.
+tree-ssa/vrp-from-cst-agg-9.c
+tree-ssa/vrp-from-cst-agg-12.c
+
+# alias-28 — 需要 SSA 别名分析: 证明 p (&i, 栈对象) 与 q (malloc 结果) 不别名,
+# 从而 *p 在 *q=2 后仍为 1, 消除 __link_error 调用. dcc 的 SSA 别名分析
+# (P4/P13) 已删除, 且 malloc 也无 noalias 建模, 无法判定两指针不交叠.
+tree-ssa/alias-28.c
+
+# pr23086 — dg-do run, 需证明 f 的局部 b 在 g(&b) (noinline, 经指针写穿 b=2)
+# 后又有显式 b=2, 且 *a=1 (a 是 main 的局部 t, 与 b 不别名) 不改变 b,
+# 于是 if(b!=2) link_error 被消除. 需要 IPA (g 的副作用摘要) + 跨过程别名分析,
+# dcc 二者皆无 (P4/P13 别名分析已删除), 无法判定 *a=1 不写穿 b, link_error 残留.
+tree-ssa/pr23086.c
+
+# ssa-ccp-12 — dg-do run, 单函数内纯常量传播但涉及结构体字段: a.b=21; a.a=a.b+21
+# (=> 42); if(a.a != B) link_error (B=42 为 const). 需要字段敏感的结构体常量
+# 传播 (GCC 的 SRA 标量替换 + SCCP), dcc 的 memory SSA 对结构体字段不做跨 store
+# 的常量转发, a.a 仍按内存加载, 无法折成 if(42!=42). 属字段敏感 CCP 能力缺口.
+tree-ssa/ssa-ccp-12.c
+
+# ssa-ccp-32 — dg-do run, 位级/值域 CCP: test0 中 a=a&1 后 a∈{0,1}, a<<1|a>>31
+# 得 {0,2}, 于是 a&1 与 a&4 恒为 0, 两个 link_error 应消除; test1/test2 同类的
+# 位运算值域推理. dcc 的 CCP 只折叠具体整数常量, 不做"未知但受约束值"的位级/
+# 值域推理, link_error 残留. 属位级 CCP 能力缺口.
+tree-ssa/ssa-ccp-32.c
 
 # ── 示例格式 (按需取消注释) ──
 # c/pr12345.c

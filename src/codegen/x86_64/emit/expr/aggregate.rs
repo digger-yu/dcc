@@ -2242,8 +2242,17 @@ impl Codegen {
         }
     }
     pub(crate) fn group_for_brace_elision(elem_ty: &Type, inits: &[InitItem]) -> Vec<InitItem> {
+        // 每组吞多少标量 = 填满一个**元素**所需的标量数。
+        // 元素本身是数组时要下钻到叶容量: `struct S b[][1]` 的元素类型是
+        // `struct S[1]`, 容量是结构体的字段数 4 —— 旧写法对 Array 只取外层
+        // 维度 (1), 于是一个标量就被当成一整行 (pr80622)。
+        // 但结构体/联合元素不能下钻: `struct S { char w[8]; }` 作为元素时,
+        // 一个字符串字面量或聚合初始化项就已填满整个 `w` 字段 (即一个元素),
+        // 必须按**字段数** (此处 1) 分组, 不能按叶标量数 (8) —— 否则
+        // `struct S p[4] = {"a","b","c","d"}` 会被错误切分 (gcc.c-torture
+        // execute/20070919-1.c 运行时 memcmp 失配触发 abort)。
         let sub_count = match elem_ty {
-            Type::Array(_, ArraySize::Const(n)) => *n,
+            Type::Array(_, _) => crate::ast::init_scalar_capacity(elem_ty),
             Type::Struct(_, fields, _, false) => {
                 // 注意: 首元素是结构体名 (String), 第二个才是字段列表;
                 // 匿名位域不可初始化, 不计入字段数

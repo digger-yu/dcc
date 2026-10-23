@@ -1620,6 +1620,35 @@ impl Codegen {
                 }
                 true
             },
+            // __builtin_powi/powif/powil: 语义是 x 的整数次幂.
+            // libc 没有 powi, 但 pow(x, (double)n) 对整数指数是精确的,
+            // 因此把整数指数转成浮点后复用 pow 族 (GCC 对非常量指数也走 libm).
+            "__builtin_powi" | "__builtin_powif" | "__builtin_powil" => {
+                let (libc_name, width) = match name {
+                    "__builtin_powif" => ("powf", SimdWidth::SS),
+                    "__builtin_powil" => ("powl", SimdWidth::SD),
+                    _ => ("pow", SimdWidth::SD),
+                };
+                if !args.is_empty() {
+                    self.gen_expr(&args[0], Self::EVAL_BASE); // xmm0 = 底数
+                }
+                if args.len() >= 2 {
+                    self.emit_insn(&Insn::movsd_xmm(2, 0)); // 暂存底数
+                    self.gen_expr(&args[1], Self::EVAL_BASE); // rax = 整数指数
+                    if args[1].ty().size() >= 8 {
+                        self.emit_insn(&Insn::cvt2sd_reg(true, width, 0, Self::EVAL_BASE));
+                    } else {
+                        self.emit_insn(&Insn::cvt2sd_reg_b32(true, width, 0, Self::EVAL_BASE));
+                    }
+                    self.emit_insn(&Insn::movsd_xmm(1, 0)); // xmm1 = 指数
+                    self.emit_insn(&Insn::movsd_xmm(0, 2)); // xmm0 = 底数
+                }
+                self.call_label(libc_name);
+                if dst != 0 {
+                    self.mov(dst, 0);
+                }
+                true
+            },
             // 复数函数: 转发到 libc
             "__builtin_cpow" | "__builtin_cpowf" | "__builtin_cpowl" | "__builtin_cexpi"
             | "__builtin_cexpif" | "__builtin_cexpil" => {
@@ -4444,7 +4473,12 @@ impl Codegen {
                     Type::Ptr(p) => p.base.clone(),
                     _ => args[2].ty(),
                 };
-                let result_size = result_ty.size().max(4);
+                // 结果类型宽度 (用于截断与溢出检测). 必须用真实结果宽度:
+                // 早期用 result_ty.size().max(4) 把 char/short 也按 32 位截断判定,
+                // 导致窄结果类型的溢出检测错误 (如 unsigned char 结果: a+b=300
+                // 按 32 位截断仍是 300, 误判无溢出). 截断分支 (4/2/1 字节) 与
+                // 存储分支均已支持窄宽度.
+                let result_size = result_ty.size();
                 let is_unsigned = !Self::is_signed_int(&result_ty);
                 // 1. 求值 ptr → r10
                 self.gen_expr(&args[2], Self::EVAL_BASE);

@@ -109,12 +109,16 @@ impl Codegen {
             self.bss_size = self.bss_size.div_ceil(align as u64) * align as u64;
             self.bss_size
         };
-        // 标签命名空间：含 &&label 的静态初始化在预注册期求值，属主函数名必须可见
-        // （`c_label_to_asm` 在 `current_func_name` 为空时读它）。
+        // 标签命名空间 + 静态局部跨引用解析：预注册期没有"当前函数"，
+        // 但 static local 的初始化式可能引用同函数的其它静态局部
+        // (如 `static struct B f3 = { b, ... };` 引用 `static char b[..]`)。
+        // 属主函数名必须可见：`c_label_to_asm` 在 `current_func_name` 为空时读它，
+        // `eval_const_expr` 也用它把引用的源名解析到 mangled 名
+        // `.Lsl<N>.<func>.<name>` —— 否则引用裸名会在链接期 undefined。
+        // 注意：只要当前在处理某 static local 的初始化，就设 owner，不限于含
+        // &&label 的情况 (label_owner_ok 仅为 &&label 的编译期静态化判断服务)。
         let prev_owner = self.static_local_label_owner.take();
-        if label_owner_ok {
-            self.static_local_label_owner = Some(info.owner_func.clone());
-        }
+        self.static_local_label_owner = Some(info.owner_func.clone());
         // 尝试写入初始值
         let has_init = if use_data {
             if let Some(init) = &info.init {

@@ -449,6 +449,34 @@ impl Codegen {
             // (pr109040: 6 > ((V){...} & m) 外层比较读到内层中间值)
             if let Some(off) = l_vec_off {
                 self.load_stack_sized(0, off + (i * elem_size) as i64, elem_size);
+                // 向量移位 (Shl/Shr): 左操作数必须先做**符号扩展**再移位。
+                // load_stack_sized 一律零扩展 (movzx), 有符号元素被当成正数:
+                // (schar)-1 读出 0xFF, `sar` 得 127 而正确结果是 -1
+                // (vector-shift2.c: `vchar1 >> vuchar` 逐元素错值)。
+                // 语义对齐 C 整数提升: 元素先提升为 (至少) int, 移位,
+                // 存回时按元素宽度截断 (emit_store 已做)。
+                if matches!(op, BinOp::Shl | BinOp::Shr)
+                    && matches!(
+                        elem_ty,
+                        Type::SChar | Type::Short | Type::Int | Type::Long | Type::LongLong
+                    )
+                {
+                    let from = match elem_size {
+                        1 => crate::codegen::shared::asm_operand::Width::B8,
+                        2 => crate::codegen::shared::asm_operand::Width::B16,
+                        4 => crate::codegen::shared::asm_operand::Width::B32,
+                        _ => crate::codegen::shared::asm_operand::Width::B64,
+                    };
+                    if from != crate::codegen::shared::asm_operand::Width::B64 {
+                        self.emit_insn(&Insn::mov_ext(
+                            true,
+                            from,
+                            crate::codegen::shared::asm_operand::Width::B64,
+                            0,
+                            0,
+                        )); // movsxq rax, eax/ax/al
+                    }
+                }
             } else {
                 self.gen_expr(l, Self::EVAL_BASE);
             }

@@ -102,18 +102,37 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                 offset: 0,
             }),
             Expr::Index { arr, idx, .. } => {
-                let arr_name = match arr.as_ref() {
-                    Expr::Ident { name, .. } => name.name.clone(),
-                    _ => return Err(ConstEvalError::NotConstant),
-                };
                 let off = eval(idx)?; // 索引必须是编译期整数
                                       // addend 按元素大小缩放 (与 codegen 的 R_X86_64_64
                                       // addend 计算一致, 否则 &arr[2] 指向 arr[0] 偏移 2 字节)
                 let scale = pointee_byte_scale(&arr.ty()).ok_or(ConstEvalError::NotConstant)?;
-                Ok(ConstValue::Addr {
-                    name: arr_name,
-                    offset: off * scale,
-                })
+                // 基址递归求值: 多维下标 `&d[0][3][0]` 的 arr 仍是 Index
+                // 而非 Ident。旧写法只认 Ident 基址, 对二维以上取址直接
+                // NotConstant, 全局初始化于是落到后端兜底 —— 兜底把
+                // `&d[0][3]` 的偏移当结果, 丢最内维 (pr94125: 全局
+                // `short *g = &d[0][3][0]` 偏移 48 而非 6, 写全局数组
+                // 静默写错位置)。与下方 Member 臂同一递归口径。
+                let base = match arr.as_ref() {
+                    Expr::Ident { name, .. } => ConstValue::Addr {
+                        name: name.name.clone(),
+                        offset: 0,
+                    },
+                    _ => eval_full(
+                        &Expr::AddrOf {
+                            e: arr.clone(),
+                            ty: Type::Ptr(Box::new(crate::ast::QualType::new(arr.ty()))),
+                            span: crate::diagnostics::Span::point("", 0, 0),
+                        },
+                        fenv_access,
+                    )?,
+                };
+                match base {
+                    ConstValue::Addr { name, offset } => Ok(ConstValue::Addr {
+                        name,
+                        offset: offset + off * scale,
+                    }),
+                    _ => Err(ConstEvalError::NotConstant),
+                }
             },
             // &global_struct.member: 地址常量表达式 (C 标准 6.6.9)
             // 用于全局/静态初始化器，如 `const T *p = &global.field;`

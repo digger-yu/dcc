@@ -1463,6 +1463,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
         let a = &args[i];
         match a.as_str() {
             "-O0" => opt = 0,
+            "-O" => opt = 1, // 裸 -O 等价 -O1 (与 GCC 一致)
             "-O1" => opt = 1,
             "-O2" => opt = 2,
             "-O3" => opt = 3,

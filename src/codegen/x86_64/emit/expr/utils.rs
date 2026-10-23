@@ -1553,10 +1553,23 @@ impl Codegen {
                     // &&label names are prefixed with .Ll_ to avoid collision
                     // with function symbol names
                     let size = width.max(8);
+                    // 静态局部初始化式里引用同函数的其它静态局部时 (数组类型会衰变为
+                    // 其地址, 经 const_eval 得到 ConstValue::Addr{name=源名}), 必须把
+                    // 源名解析到 mangled 名 `.Lsl<N>.<func>.<name>`, 否则裸名在链接期
+                    // undefined reference (如 `static struct B f3 = { b, ... };` 引用
+                    // `static char b[..]`)。
+                    let sym = if let Some(owner) = &self.static_local_label_owner {
+                        self.static_local_map
+                            .resolve(owner, &name)
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| name.clone())
+                    } else {
+                        name.clone()
+                    };
                     if let Some((off, sec)) = rel {
                         let rel_type = if width <= 4 { R_X86_64_32 } else { R_X86_64_64 };
                         self.pending_data64_rels
-                            .push((off, name, sec, rel_type, offset as i64));
+                            .push((off, sym, sec, rel_type, offset as i64));
                     }
                     vec![0u8; size]
                 },
@@ -1573,10 +1586,23 @@ impl Codegen {
             match e {
                 Expr::String { data, .. } => data.clone(),
                 Expr::Ident { name, .. } => {
+                    // 静态局部初始化式里引用同函数的其它静态局部时 (如
+                    // `static struct B f3 = { b, ... };` 引用 `static char b[..]`)，
+                    // 必须把源名解析到 mangled 名 `.Lsl<N>.<func>.<name>`，否则引用裸名
+                    // 会在链接期 undefined reference。仅当处于 static local 初始化上下文
+                    // (static_local_label_owner 有值且确为该函数的静态局部) 才替换。
+                    let sym = if let Some(owner) = &self.static_local_label_owner {
+                        self.static_local_map
+                            .resolve(owner, &name.name)
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| name.name.clone())
+                    } else {
+                        name.name.clone()
+                    };
                     if let Some((off, sec)) = rel {
                         let rel_type = if width <= 4 { R_X86_64_32 } else { R_X86_64_64 };
                         self.pending_data64_rels
-                            .push((off, name.name.clone(), sec, rel_type, 0));
+                            .push((off, sym, sec, rel_type, 0));
                     }
                     vec![0u8; width.max(8)]
                 },
@@ -1593,12 +1619,20 @@ impl Codegen {
                         if let (Expr::Ident { name, .. }, Ok(i)) =
                             (arr.as_ref(), const_eval::eval(idx))
                         {
+                            let sym = if let Some(owner) = &self.static_local_label_owner {
+                                self.static_local_map
+                                    .resolve(owner, &name.name)
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| name.name.clone())
+                            } else {
+                                name.name.clone()
+                            };
                             if let Some((off, sec)) = rel {
                                 let rel_type = if width <= 4 { R_X86_64_32 } else { R_X86_64_64 };
                                 let addend = (i as i64) * elem_ty.size().max(1) as i64;
                                 self.pending_data64_rels.push((
                                     off,
-                                    name.name.clone(),
+                                    sym,
                                     sec,
                                     rel_type,
                                     addend,

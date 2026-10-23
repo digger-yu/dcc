@@ -3074,8 +3074,17 @@ impl Codegen {
                         // (检测 32 位溢出); 32 位有符号无 trapv 用 REX.W
                         // (寄存器保存符号扩展值, 64 位 neg 保持上 32 位一致);
                         // 32 位无符号用 REX (无 .W) 保持零扩展。
-                        let ty_size = e.ty().size();
-                        let is_signed = Self::is_signed_int(&e.ty());
+                        //
+                        // 类型判据必须取**整数提升后**的操作数类型: 操作数是
+                        // char/short (含 unsigned) 时 C11 6.3.1.1 先提升为 int,
+                        // 结果是**有符号** int。直接用操作数类型会把 `unsigned char`
+                        // 的取负判成无符号 ⇒ 发 32 位 neg 且只零扩展, 高 32 位留 0
+                        // (pr107541: `-a / 8` 读到 536870880 而非 -31; `long l = -a`
+                        // 得 4294967042 而非 -254)。__int128 (16B) 提升后仍是自身,
+                        // 判据与旧行为一致。
+                        let promo_ty = e.ty().int_promotion();
+                        let ty_size = promo_ty.size();
+                        let is_signed = Self::is_signed_int(&promo_ty);
                         let use_32bit_neg = ty_size == 4 && is_signed && self.trapv;
                         if ty_size >= 8 || (ty_size >= 4 && is_signed && !use_32bit_neg) {
                             // 64-bit neg: REX.W neg
@@ -3092,7 +3101,9 @@ impl Codegen {
                         }
                         // -ftrapv: 有符号取负溢出检查 (e.g. -INT_MIN)
                         // neg 在操作数为类型最小值时置 OF=1
-                        if self.trapv && Self::is_signed_int(&e.ty()) {
+                        // 有符号性同样按提升后的类型判: `unsigned char` 取负在 C 里
+                        // 是 int 运算, 溢出检查不该被跳过 (见上方 promo_ty 注释)。
+                        if self.trapv && Self::is_signed_int(&promo_ty) {
                             let trap_label = self.fresh_label();
                             let ok = self.fresh_label();
                             self.jmp_rel32(&trap_label, JumpKind::Jo);
@@ -3105,7 +3116,7 @@ impl Codegen {
                             self.label(&ok);
                             // 32 位 trapv neg 后符号扩展: 32 位 neg 结果在 eax,
                             // 需要 movslq 到 rax 保持 dcc 的 64 位寄存器约定
-                            if e.ty().size() == 4 {
+                            if promo_ty.size() == 4 {
                                 use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
                                 use crate::codegen::x86_64::emit::gas::REG64 as GAS_REG64;
                                 let gas = format!(
@@ -3151,14 +3162,20 @@ impl Codegen {
                         // re-extended. For types < int, C integer
                         // promotion means the NOT result is at least
                         // 32 bits wide.
-                        let result_ty = e.ty();
+                        //
+                        // 判据取**整数提升后**的操作数类型 (单一真源 int_promotion):
+                        // `~a` (a 为 unsigned char) 的结果类型是**有符号** int,
+                        // 必须 movsxd 回 64 位。旧写法直接读操作数类型, 把无符号
+                        // 小类型判成无符号 ⇒ 只零扩展, 高 32 位留 0 (pr107541:
+                        // `~a / 8` 得 536870880 而非 -31; `long l = ~a` 得
+                        // 4294967041 而非 -255)。
+                        let result_ty = e.ty().int_promotion();
                         let result_sz = result_ty.size();
                         let effective_sz = result_sz.max(4); // int promotion
                         if effective_sz <= 4 {
                             // Result fits in 32 bits: truncate to 32
                             // bits then zero/sign-extend to 64.
-                            let is_signed =
-                                Self::is_signed_int(&result_ty) || matches!(result_ty, Type::Char);
+                            let is_signed = Self::is_signed_int(&result_ty);
                             if is_signed {
                                 // movsxd dst, dst (sign-extend 32→64)
                                 use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
