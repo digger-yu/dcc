@@ -18,16 +18,16 @@ movslq %r8d,%r8
 add %r8,%rax
 movslq %eax,%rax
 mov %eax,%ebx
-movslq -0x70(%r13),%rax
-movslq -0x78(%r13),%r8
+movslq %edi,%rax
+movslq %esi,%r8
 sub %r8,%rax
 mov %rax,-0x30(%r13)
-movslq -0x80(%r13),%rax
+movslq %edx,%rax
 test %eax,%eax
 je <arith_basic>
-movslq -0x80(%r13),%r8
+movslq %edx,%r8
 jmp <arith_basic>
-mov $0x1,%r8
+mov $0x1,%r8d
 mov -0x30(%r13),%rax
 cqto
 idiv %r8
@@ -39,12 +39,11 @@ movslq %eax,%rax
 mov %rax,-0x30(%r13)
 movslq -0x78(%r13),%r8
 sar $0x1,%r8
-mov -0x30(%r13),%rax
 add %r8,%rax
 movslq %eax,%rax
 mov %eax,%r14d
 movslq %ebx,%rax
-mov $0x7,%r8
+mov $0x7,%r8d
 cqto
 idiv %r8
 mov %rdx,%rax
@@ -65,6 +64,7 @@ mov -0x28(%r13),%r15
 mov %r13,%rsp
 pop %r13
 ret
+<nop padding>
 arith_unsigned:
 push %r13
 mov %rsp,%r13
@@ -76,13 +76,12 @@ mov %rsi,-0x50(%r13)
 mov %edi,%eax
 shl $0x4,%rax
 mov %rax,%rbx
-mov -0x50(%r13),%r8d
+mov %esi,%r8d
 shr $0x4,%r8
 or %r8d,%ebx
 mov %rbx,%rax
 mov %eax,%eax
 mov -0x10(%r13),%rbx
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret

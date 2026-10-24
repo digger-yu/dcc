@@ -174,6 +174,36 @@ fn opt_skipped(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// `DCC_HOME_PARAMS=1` 的判据：哪些形参可以当家。
+///
+/// 为什么需要形参当家：解释器类函数（`luaV_execute(lua_State *L, CallInfo *ci)`）每步要读
+/// 的热值就是那两个形参。实测本函数帧存 10.4/载 21.3 次每步（gcc 各 2.2），其中
+/// `L`/`ci` 的槽就占 6.8 次载入/步；而候选真源 `original_locals` 不含形参，它们连候选
+/// 都不是。按本机标定（一次载入/步 ≈ 5 ms），这项值约 34 ms。
+///
+/// 排除项（都是“拿了就错值”，不是保守好看）：
+///  * 变参函数：`va_start` 要把入站寄存器区存下来，家在号上时这套机制还没跟它对调；
+///  * volatile 限定：读写次数本身就是语义；
+///  * VLA 形参与不可绑定的类型（聚合/宽值）：它们本来就走内存/成对通道；
+///  * 重名或被取址：`escaped` 那一侧的判据在分配器里已经逐名跑过，这里不抢它的活。
+fn home_param_names(f: &crate::ast::FuncDecl, enabled: bool) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    if !enabled || f.is_variadic {
+        return out;
+    }
+    for p in f.params.iter() {
+        let Some(nm) = p.name.as_ref() else { continue };
+        if p.quals.is_volatile() || p.vla_dim.is_some() {
+            continue;
+        }
+        if !crate::ssa::regalloc::bindable_ty(&p.ty) {
+            continue;
+        }
+        out.insert(nm.name.clone());
+    }
+    out
+}
+
 /// M16: 把 AST -> SSA, 跑 ssa::passes::run, 再 SSA -> AST 重建。
 /// 含 goto / label / switch 的函数自动跳过 (走 is_structured 检测)。
 /// SSA builder 通过 insert_loop_phis 为循环回边插入 phi 节点,
@@ -181,17 +211,23 @@ fn opt_skipped(name: &str) -> bool {
 /// 注意: rebuild_cycle 对含循环函数的重建尚不完全正确,
 /// 因此含循环的函数仍走 AST pass 路径。
 fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_info: bool) {
+    // `DCC_HOME_PARAMS`：形参能不能进家的候选表（默认关 ⇒ 空集 ⇒ 今天的行为）。
+    // 进程内只读一次：同一个 TU 里两个函数按不同规则发号，产物就没人能复现。
+    static HP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let home_params_on = *HP.get_or_init(|| {
+        std::env::var("DCC_HOME_PARAMS")
+            .map(|s| s != "0")
+            .unwrap_or(false)
+    });
     let prog = module.source_mut();
     // Collect volatile global variable names - SSA passes must not
     // propagate constants through volatile accesses.
-    let volatile_globals: std::collections::HashSet<String> = prog
-        .decls
-        .iter()
-        .filter_map(|d| match d {
-            Decl::Var(v) if v.quals.is_volatile() => Some(v.name.name.clone()),
-            _ => None,
-        })
-        .collect();
+    //
+    // 表本身挪到 `frame_guard::volatile_global_names`：发射侧（`compile_func` 里算的
+    // `FrameGuard`）与这里必须是同一个答案，否则同一个形状在 -O0 与 -O2 下会得到
+    // 不同的保守决定，而「volatile 每次访问都是可观察事件」这条语义就不成立了。
+    let volatile_globals: std::collections::HashSet<String> =
+        crate::frame_guard::volatile_global_names(&*prog);
     // file-scope 的 `register asm` 变量占住的号要让开（循环里不能再借 `prog`，所以先算）。
     let taken_regs = file_scope_bound_regs(&prog.decls);
     // 诊断窗口：`DCC_MEMDBG=1` 逐函数打印 SSA 往返前后的本进程 RSS 与耗时。
@@ -347,13 +383,15 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_i
                             debug_info,
                             taken_regs: taken_regs.clone(),
                             unstructured: true,
+                            home_params: home_param_names(f, home_params_on),
                         };
                         let plan = f
                             .body
                             .as_ref()
                             .map(|orig| crate::ssa::regalloc::plan_and_split(&mut ssa, orig, &ctx));
                         if let (Some(mut plan), Some(body)) = (plan, f.body.as_mut()) {
-                            crate::ssa::regalloc::deliver(&ssa, &mut plan, body);
+                            let ps = f.params.as_mut_slice();
+                            crate::ssa::regalloc::deliver(&ssa, &mut plan, body, ps);
                             modified = true;
                         }
                     }
@@ -412,6 +450,7 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_i
                         debug_info,
                         taken_regs: taken_regs.clone(),
                         unstructured: false,
+                        home_params: home_param_names(f, home_params_on),
                     };
                     f.body
                         .as_ref()
@@ -457,7 +496,7 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_i
                     if let (Some(mut plan), Some(body)) = (regalloc_plan, f.body.as_mut()) {
                         // 交付（重建之后）：先校验后置事实（拿的就是重建后的体），再把位置表写进 AST。
                         // 决策阶段已经用完重建前的体，这里不再需要它（Phase 5.0 的顺序证据）。
-                        crate::ssa::regalloc::deliver(&ssa, &mut plan, body);
+                        crate::ssa::regalloc::deliver(&ssa, &mut plan, body, f.params.as_mut_slice());
                     }
                     if memdbg {
                         memdbg_marks.push(("post-deliver", memdbg_rss_kb()));
@@ -701,7 +740,10 @@ fn file_scope_bound_regs(decls: &[crate::ast::Decl]) -> std::collections::HashSe
 }
 
 /// Returns true if the function references any volatile global variable.
-fn func_refs_volatile(f: &FuncDecl, volatile_globals: &std::collections::HashSet<String>) -> bool {
+pub(crate) fn func_refs_volatile(
+    f: &FuncDecl,
+    volatile_globals: &std::collections::HashSet<String>,
+) -> bool {
     // volatile 形参: 读它同样必须真的访存, 不能被 SSA 复用。
     if f.params.iter().any(|p| p.quals.is_volatile()) {
         return true;
@@ -831,22 +873,26 @@ fn expr_refs_volatile(e: &Expr, vol: &std::collections::HashSet<String>) -> bool
     }
 }
 
-/// 已知会「返回两次」(returns_twice) 的 libc 函数名。这些函数 (setjmp 族、
-/// vfork、getcontext 等) 在第一次返回后, 可能经 longjmp/longjmp 再次从调用点
-/// 返回; 编译器必须把它们当作控制流汇合点, 不能在调用点两侧做会让「二次返回」
-/// 后寄存器 / 栈态不一致的优化 (否则踩栈崩溃, 见 Lua 的 `luaD_rawrunprotected`)。
+/// 已知会「返回两次」(returns_twice) 的函数名。
+///
+/// **真源不在这里**：本文件的影响域、内联闸门与 `frame_guard` 的护栏必须读同一张表
+/// （方案 §4.7「不许另写一份」），所以这里是 `frame_guard::RETURNS_TWICE_NAMES` 的
+/// 局部别名。那张表的注释里写清了为什么 libc 的 `longjmp` 一族**不能**进来。
 ///
 /// glibc 头在 `__GNUC__ >= 11` 时会给它们打 `__attribute__((__returns_twice__))`,
 /// 但这是最后的兜底: 任何头都不保证标记 (dcc 也刚补齐 `__returns_twice__` 拼写),
 /// 且自举 / 其它 libc / 交叉头都不会。因此这里按名字全局识别, 与声明上的
 /// `returns_twice` 属性取并集, 保证无论头怎么说, SSA 管线都能正确识别。
-const KNOWN_RETURNS_TWICE: &[&str] = &[
-    "setjmp", "_setjmp", "__setjmp", "__sigsetjmp", "sigsetjmp", "savectx", "savectx_rt",
-    "vfork", "getcontext", "setcontext",
-];
+const KNOWN_RETURNS_TWICE: &[&str] = crate::frame_guard::RETURNS_TWICE_NAMES;
 
 /// 函数体是否调用了任一 returns_twice 函数。
-fn func_contains_rt_call(f: &FuncDecl, rt_names: &std::collections::HashSet<String>) -> bool {
+///
+/// `pub(crate)` 的理由：`frame_guard` 的「本函数自己有没有二次返回点」必须与影响域
+/// 用同一个遍历器，否则两边对「什么叫调用到 setjmp」会给出不同答案。
+pub(crate) fn func_contains_rt_call(
+    f: &FuncDecl,
+    rt_names: &std::collections::HashSet<String>,
+) -> bool {
     f.body
         .as_ref()
         .is_some_and(|b| block_contains_rt_call(b, rt_names))
@@ -5675,6 +5721,7 @@ mod tests {
                 }),
                 span: span.clone(),
                 vla_dim: None,
+                home: None,
             }],
             body: Some(Block {
                 items: vec![BlockItem::Stmt(Stmt::Return {
@@ -6294,6 +6341,7 @@ mod tests {
                     ty: int_ty(),
                     span: sp.clone(),
                     vla_dim: None,
+                    home: None,
                 },
                 crate::ast::Param {
                     quals: crate::ast::QualifierFlags::NONE,
@@ -6304,6 +6352,7 @@ mod tests {
                     ty: int_ty(),
                     span: sp.clone(),
                     vla_dim: None,
+                    home: None,
                 },
             ],
             body: Some(Block {

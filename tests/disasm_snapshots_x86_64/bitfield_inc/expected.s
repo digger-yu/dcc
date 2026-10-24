@@ -9,9 +9,9 @@ mov %rdi,%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,%rbx
-mov -0x48(%r13),%r8
+mov %rdi,%r8
 mov (%r8),%r8d
 and $0x7,%r8
 add %r8,%rbx

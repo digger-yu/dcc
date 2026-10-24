@@ -165,6 +165,9 @@ fn apply_emit_options(cg: &mut Codegen, input: &CompileInput<'_>) {
     cg.source_name = opts.source_name.clone();
     cg.line_map = opts.line_map.to_vec();
     cg.debug_level = opts.debug_level;
+    // 优化档同样下行：区内家与 A2 的护栏读的是 `Codegen::opt_level`，而 -O0 与 -O2
+    // 对同一个形状给出不同的保守决定就是「四档结果必须一致」这条口径的违反。
+    cg.opt_level = opts.opt_level;
     cg.emit_cfi = opts.debug_level > 0 || input.target.frame_pointer;
     cg.bounds_check = opts.bounds_check;
     cg.trapv = opts.trapv;
@@ -373,6 +376,29 @@ fn fill_dwarf_local_vars(
                 name: v.name.clone(),
                 ty: crate::codegen::ast_type_to_dwarf(&v.ty),
                 location: loc,
+                // 分段位置（loclist）：同一个号只在一段 PC 里成立时，剩下的区间要回
+                // 到栈槽上。没分段位置时这一张表为空 ⇒ DWARF 侧照旧发单 exprloc。
+                ranges: v
+                    .ranges
+                    .iter()
+                    .filter_map(|r| {
+                        let l = match r.loc {
+                            crate::location::Location::Stack(off) => {
+                                crate::debug::DwarfParamLocation::fbreg(off - cfa)
+                            },
+                            crate::location::Location::Reg(rr) => match arch.dwarf_reg_of_gp_hw(rr.n) {
+                                Some(dr) => crate::debug::DwarfParamLocation::reg(dr),
+                                None => return None,
+                            },
+                            _ => return None,
+                        };
+                        Some(crate::debug::DwarfLocRange {
+                            begin_pc: r.begin_pc,
+                            end_pc: r.end_pc,
+                            loc: l,
+                        })
+                    })
+                    .collect(),
                 decl_line: v.decl_line,
             });
         }
@@ -473,6 +499,11 @@ fn build_debug_sections(
         (&dbg.debug_line_relocs, ".debug_line", 10_u32),
         (&dbg.debug_aranges_relocs, ".debug_aranges", 9_u32),
     ];
+    // 目标节索引与 ElfRela 的构造走同一个口子：loclist 那一组只是多一个加数，
+    // 不允许另写一份解析（否则两处对「.debug_loc 在第几个额外节」的答案会飘）。
+    let sec_index_of = |name: &str| -> u32 {
+        cg.extra_sections.iter().position(|s| s.name == name).map(|i| 7 + i as u32).unwrap_or(8)
+    };
     for (src, sec_name, fallback_idx) in relocs.iter() {
         if src.is_empty() {
             continue;
@@ -503,6 +534,31 @@ fn build_debug_sections(
             relocations: debug_relocs,
             target_sec_index,
         });
+    }
+    // `.debug_loc`（方案 §4.4 的 loclist）：每一对 begin/end 都是函数**中间**的 pc，
+    // 所以必须带加数（S(f) + 函数内偏移）。与上面同一套符号解析与节索引口径。
+    if !dbg.loc_relocs.is_empty() {
+        let target_sec_index = sec_index_of(".debug_loc");
+        let loc_relocs: Vec<ElfRela> = dbg
+            .loc_relocs
+            .iter()
+            .filter_map(|(off, sym_name, addend)| {
+                let sym_idx = cg.sym_index.get(sym_name).copied()?;
+                Some(ElfRela {
+                    offset: *off,
+                    sym_index: sym_idx,
+                    rel_type: debug_abs_reloc_type(target.arch),
+                    addend: *addend,
+                })
+            })
+            .collect();
+        if !loc_relocs.is_empty() {
+            cg.extra_rela_sections.push(elf::ExtraRelaSection {
+                name: ".rela.debug_loc".to_string(),
+                relocations: loc_relocs,
+                target_sec_index,
+            });
+        }
     }
 
     // BTF 已在 build_dwarf_full 中生成，使用 dbg.btf

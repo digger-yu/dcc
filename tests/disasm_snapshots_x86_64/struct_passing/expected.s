@@ -15,10 +15,10 @@ mov (%r8),%r8
 add %r8,%rbx
 mov %rbx,%rax
 mov -0x10(%r13),%rbx
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret
+<nop padding>
 sum_ptf:
 push %r13
 mov %rsp,%r13
@@ -51,7 +51,7 @@ mov %rsi,-0x68(%r13)
 lea -0x48(%r13),%rax
 mov %rax,-0x50(%r13)
 mov %rax,%rcx
-mov -0x60(%r13),%rax
+mov %rdi,%rax
 mov %rax,(%rcx)
 lea -0x48(%r13),%rax
 add $0x8,%rax

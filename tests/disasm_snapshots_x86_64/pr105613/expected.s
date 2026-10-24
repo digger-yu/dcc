@@ -9,7 +9,7 @@ mov -0x50(%r13),%rax
 mov -0x48(%r13),%rdx
 mov %rax,-0x2b8(%r13)
 mov %rdx,-0x2b0(%r13)
-mov $0x0,%rax
+mov $0x0,%eax
 mov %rax,-0x2a8(%r13)
 xor %rdx,%rdx
 mov %rdx,-0x2a0(%r13)
@@ -29,10 +29,10 @@ mov %rax,%rdx
 mov %rax,-0x2c8(%r13)
 mov %rdx,-0x2c0(%r13)
 lea -0x2c8(%r13),%rax
-mov -0x58(%r13),%rax
+mov %rdi,%rax
 mov %rax,%rdi
 lea -0x2c8(%r13),%rsi
-mov $0x10,%rcx
+mov $0x10,%ecx
 cld
 rep movsb %ds:(%rsi),%es:(%rdi)
 xor %eax,%eax
@@ -40,13 +40,14 @@ xor %eax,%eax
 mov %r13,%rsp
 pop %r13
 ret
+<nop padding>
 main:
 push %r13
 mov %rsp,%r13
 sub $0x300,%rsp
 <nop padding>
 sub $0x30,%rsp
-mov $0x5,%rax
+mov $0x5,%eax
 cqto
 mov %rax,-0x2c8(%r13)
 mov %rdx,-0x2c0(%r13)
@@ -69,7 +70,7 @@ mov 0x8(%rax),%rdx
 mov (%rax),%rax
 push %rax
 push %rdx
-mov $0x0,%rax
+mov $0x0,%eax
 cqto
 not %rax
 not %rdx
@@ -82,12 +83,12 @@ pop %rcx
 push %r14
 push %r15
 xor %rax,%rax
-mov $0x1,%rax
+mov $0x1,%eax
 cmp %r9,%rcx
 jne <main>
 cmp %r11,%r8
 jne <main>
-mov $0x0,%rax
+mov $0x0,%eax
 xor %rdx,%rdx
 pop %r15
 pop %r14
@@ -119,7 +120,7 @@ mov 0x8(%rax),%rdx
 mov (%rax),%rax
 push %rax
 push %rdx
-mov $0x0,%rax
+mov $0x0,%eax
 cqto
 not %rax
 not %rdx
@@ -132,12 +133,12 @@ pop %rcx
 push %r14
 push %r15
 xor %rax,%rax
-mov $0x1,%rax
+mov $0x1,%eax
 cmp %r9,%rcx
 jne <main>
 cmp %r11,%r8
 jne <main>
-mov $0x0,%rax
+mov $0x0,%eax
 xor %rdx,%rdx
 pop %r15
 pop %r14
@@ -146,7 +147,7 @@ je <main>
 call <main>
 jmp <main>
 sub $0x30,%rsp
-mov $0x0,%rax
+mov $0x0,%eax
 cqto
 mov %rax,-0x2c8(%r13)
 mov %rdx,-0x2c0(%r13)
@@ -172,8 +173,7 @@ test %rax,%rax
 je <main>
 call <main>
 jmp <main>
-mov $0x0,%rax
-movslq %eax,%rax
+mov $0x0,%eax
 <nop padding>
 mov %r13,%rsp
 pop %r13

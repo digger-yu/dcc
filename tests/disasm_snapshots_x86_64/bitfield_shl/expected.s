@@ -16,7 +16,7 @@ and $0x3,%rax
 movabs $0xfffffffc,%r8
 and %r8,%rax
 mov %rax,%rbx
-mov -0x58(%r13),%r8d
+mov %esi,%r8d
 and $0x3,%r8
 or %r8,%rbx
 mov %rbx,%rax

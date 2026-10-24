@@ -47,6 +47,8 @@ mod opcode;
 #[cfg(test)]
 mod opcode_encode_matrix;
 mod parallel;
+/// 区内家（L2 家模型，方案 §3 S4）。
+pub(crate) mod region;
 /// P10: x86-64 指令解码器 → GAS AT&T 文本.
 /// 原生发射路径在 -S 渲染时用它把字节反推为文本 (等价于之前的
 /// `render_one`, P10 起从 asm/ 移出, 不再是内联汇编专属).

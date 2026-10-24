@@ -657,6 +657,7 @@ mod tests {
                     }),
                     span: Span::point("t.c", 1, 1),
                     vla_dim: None,
+                    home: None,
                 }],
                 body: Some(Block {
                     items: vec![BlockItem::Stmt(Stmt::Expr {
@@ -771,6 +772,7 @@ mod tests {
                     }),
                     span: Span::point("t.c", 1, 1),
                     vla_dim: None,
+                    home: None,
                 }],
                 body: Some(Block {
                     items: vec![BlockItem::Stmt(Stmt::Expr {

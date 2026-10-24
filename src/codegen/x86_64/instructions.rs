@@ -28,7 +28,7 @@ const DIAG_FRAME_BUDGET: &str = "E1128";
 /// 上限只与**枚举成本**有关：路径上被跟踪的槽事实本来就只有 16 个，大对象的访问又都是
 /// `[r13+base+index]` 形态（带 index 一律不算帧槽）。超过上限就整体关闭本函数的槽事实，
 /// 宁可少削几条，也不把编译时间变成槽数的线性函数。
-const VOLATILE_SLOT_CAP: i64 = 128;
+pub(crate) const VOLATILE_SLOT_CAP: i64 = 128;
 
 // REX prefix encoding helpers
 #[inline]
@@ -309,6 +309,16 @@ impl Codegen {
                 let dst = ((bytes[0] & 1) << 3) | (bytes[1] - 0xB8);
                 return PeepKind::MovImm { dst };
             }
+            // `mov_imm` 自 S3c 体量交换起的**第三条**短形：`mov r32, imm32`（B8+r id，5 字节）
+            // 与它的 REX.B 形 `41 B8+r id`（6 字节）。32 位写自动零扩展高 32 位 ⇒ 目的整字
+            // 被写，满足死写回删对 `MovImm` 的唯一要求（「完整写了 dst」）。不补这一臂
+            // 就是方案 §10 点名的那个坑：回删对这一形变瞎，体量省下来的又长回去。
+            if bytes.len() == 5 && (0xB8..=0xBF).contains(&bytes[0]) {
+                return PeepKind::MovImm { dst: bytes[0] - 0xB8 };
+            }
+            if bytes.len() == 6 && bytes[0] == 0x41 && (0xB8..=0xBF).contains(&bytes[1]) {
+                return PeepKind::MovImm { dst: 8 + (bytes[1] - 0xB8) };
+            }
             // 32 位 reg←reg：0x89 /r（r/m ← reg）与 0x8B /r（reg ← r/m），
             // 无 REX.W。两者的 REX.R/REX.B 各自对应 ModRM.reg / ModRM.r/m。
             // 只认 ModRM.mod=11；带 0x66/0x0F 前缀的形态（16 位 / 双字节）落空。
@@ -448,7 +458,7 @@ impl Codegen {
         self.emit_bytes(b);
         // 裸字节（序言/epilogue/内联 asm/nop 填充）不是「上一条逻辑指令」，也不是
         // 块内优化的可跟踪形态：跨过它的相邻关系与等价事实一概不再成立。
-        self.block_state.reset();
+        self.block_state.reset_at(crate::codegen::x86_64::blockopt::stat::site("reset_bare_emit"));
     }
 
     /// 字节追写的**唯一**落点（`emit` 与 `emit_insn` 共用）。
@@ -474,7 +484,34 @@ impl Codegen {
         if self.volatile_slots_overflow {
             return;
         }
-        self.block_state.observe(insn, &self.volatile_frames);
+        // A1 的输入：护栏说「callee 写不到本帧的槽」时，槽事实才能活过一次调用。
+        // 护栏本身在 `crate::frame_guard`（四个清槽条件的唯一真源），这里只把它转成
+        // 本模块需要的最小结论。
+        let cp = crate::codegen::x86_64::blockopt::CallPolicy {
+            slots_survive: self.frame_guard.slots_may_survive_call(),
+            must_clear: &self.escaped_frames,
+        };
+        // 位图必须和 `emit_insn` 那侧取的是同一个：两条臂（处置 / 记账）按不同位图
+        // 走就是「削了一条又拿旧写集记账」，产物与仪表会同时对不上。
+        let bo_rules = crate::codegen::x86_64::blockopt::rules();
+        self.block_state.observe_at_call(insn, &self.volatile_frames, cp, bo_rules);
+    }
+
+    /// 发射一条指令并返回它**实际**的起始 pc；整条被削掉（没发字节）时返回 `None`。
+    ///
+    /// 为什么需要它而不是发射前拿 `self.pos()`：发射入口可能在本条字节之前插入存出
+    /// （区内家 S4 的区尾回写），于是发射前算出的绝对位置会被整条推前，拿它去登记
+    /// 补丁就落到上一条指令中间（实测是 percpu/seg 两个夹具的 SIGILL）。
+    /// 本后端所有「RIP 相对 disp32 事后修补」的登记点都必须走这里，否则“能插入”这个
+    /// 前提会让那些位置全都变假。
+    pub(crate) fn emit_insn_head(&mut self, insn: &crate::codegen::x86_64::insn::Insn) -> Option<u64> {
+        let before = self.code.len();
+        let handled = self.emit_insn(insn);
+        if !handled || self.code.len() == before {
+            // 整条未落地：调用方必须按「没发字节」处理，不能拿一个不存在的 pc 去登记补丁。
+            return None;
+        }
+        Some(self.pos() - (self.code.len() - before) as u64)
     }
 
     /// 指令记录统一发射入口 (x86_64 变长, 字节原样直写).
@@ -498,6 +535,11 @@ impl Codegen {
         };
         let rewritten: Option<crate::codegen::x86_64::insn::Insn> = match verdict {
             crate::codegen::x86_64::blockopt::Verdict::Drop => {
+                crate::codegen::x86_64::blockopt::stat::hit(
+                    crate::codegen::x86_64::blockopt::stat::site("veto_drop"),
+                    0,
+                    0,
+                );
                 // 五条 Drop 判据说的都是同一件事：本条**不改变任何被跟踪的值**
                 // （恒等扩展 / 自反搬运 / 已经相等的搬运 / 槽里就是这个号 / 槽里已经是这个值）。
                 // 所以这里故意**不**调用 `observe`：`observe` 会把目的号的事实清掉，
@@ -511,10 +553,53 @@ impl Codegen {
                 }
                 return true;
             },
-            crate::codegen::x86_64::blockopt::Verdict::Replace(n) => Some(*n),
+            crate::codegen::x86_64::blockopt::Verdict::Replace(n) => {
+                crate::codegen::x86_64::blockopt::stat::hit(
+                    crate::codegen::x86_64::blockopt::stat::site("veto_replace"),
+                    0,
+                    0,
+                );
+                Some(*n)
+            },
             crate::codegen::x86_64::blockopt::Verdict::Keep => None,
         };
         let insn = rewritten.as_ref().unwrap_or(insn);
+        // 区内家（S4）的见证点。放在块内优化之后、窥孔与 `emit_bytes` 之前，因为
+        // 这一层能否决发射（推迟存出 = 整条不发），也能改形态（帧读 → 寄存器读）；
+        // 而它自己发的字节靠 `in_witness` 防重入。
+        //
+        // 两层重写（块内优化 + 家）共用一个 holder：`insn` 在下文要活得比一个 match
+        // 分支更久，在分支里新建 Box 再取引用会直接borrow-check 不过。
+        let mut region_insn: Option<crate::codegen::x86_64::insn::Insn> = None;
+        let mut insn: &crate::codegen::x86_64::insn::Insn = insn;
+        match self.region_witness(insn) {
+            crate::codegen::x86_64::region::RegionVerdict::Keep => {},
+            crate::codegen::x86_64::region::RegionVerdict::Drop(slot) => {
+                crate::codegen::x86_64::blockopt::stat::hit(
+                    crate::codegen::x86_64::blockopt::stat::site("region_drop"),
+                    0,
+                    0,
+                );
+                // 目的号本身就是家 ⇒ 这次读只是把值抄给自己，不发任何字节。
+                //
+                // 本版**不**需要 `invalidate_slot`：那一招是为「存出被推迟、内存落后于家」
+                // 那版准备的（事实层会拿着那条旧事实绕过家层读到陈值）。本层从不推迟存出，
+                // 内存一直是权威，所以丢掉这条读不动任何事实。
+                let _ = slot;
+                if std::env::var_os("DCC_REGION_TRACE").is_some() {
+                    eprintln!("[region] drop self-load @{:x}", self.code.len());
+                }
+                return true;
+            },
+            crate::codegen::x86_64::region::RegionVerdict::Replace(n) => {
+                crate::codegen::x86_64::blockopt::stat::hit(
+                    crate::codegen::x86_64::blockopt::stat::site("region_replace"),
+                    0,
+                    0,
+                );
+                insn = region_insn.insert(n);
+            },
+        }
         // 临时统计: DCC_GAS_STATS=1 时按 caller 统计发射频率 + gas_text 覆盖率.
         if std::env::var_os("DCC_GAS_STATS").is_some() {
             let loc = std::panic::Location::caller();
@@ -675,6 +760,9 @@ impl Codegen {
                 // 这张表是 -S 渲染器 (build_asm_output_v2) 的唯一真源, 不再走 disasm.
                 // 不改变发射字节 —— 只是多写一份 (pc, insn) 到 Vec, 对 .text 段零影响.
                 let pc = self.code.len() as u64;
+                // 这里不得在本条字节之前插任何东西：段前缀（`Insn::seg_prefix` 那一族）是
+                // 单独一条 1 字节指令，在它与其那条访问之间插字节，前缀就会去修饰插入的那条，
+                // 而真正的访问失去段重叠。区内家（S4）因此做成零插入（见 `region.rs` 头部）。
                 self.emit_bytes(&bytes);
                 // 块内事实：本条（可能是替换后的形态）对寄存器与帧槽的影响。
                 self.observe_block(insn);
@@ -766,15 +854,91 @@ impl Codegen {
         name.starts_with(".L")
     }
 
+    /// 本函数的用户标签在 AST 里被多少条跳转指着；不是本函数发射空间里的名字时返
+    /// `None`（= 不参与 A2 的任何放宽）。
+    ///
+    /// 为什么必须拿发射名去问 AST 名：用户标签的发射形是 `.Ll_<函数名>_<标签>`
+    /// （`c_label_to_asm`），它仍以 `.L` 开头，所以上面那条「`.L` 就是后端自造」的
+    /// 谓词在这里**不能用**（用了会把每一个用户标签都当成看不见 CFG 的内部标签，
+    /// 实测就是 A2 两个读数一直为零的原因）。反过来，`fresh_label()` 造的 `.L<数字>`
+    /// 才是真正的后端自造名：它们的 CFG 在 AST 里不存在 ⇒ `None` ⇒ 必须整体清。
+    fn a2_required_edges(&self, asm_name: &str) -> Option<u32> {
+        let mine = format!(".Ll_{}_", self.current_func_name);
+        let tail = asm_name.strip_prefix(&mine)?;
+        Some(self.a2_incoming.get(tail).copied().unwrap_or(0))
+    }
+
+    /// 一条跳转边的出口快照：把当前块内事实并进目标标签的「已知前驱交集」。
+    ///
+    /// 只收**前向**边（目标还没定义）：反向边到达时目标早就定过了，那份状态没有读者。
+    /// 后端自造名（`.L*`）与「本函数有间接跳转」两种形状都不参与放宽，理由与 `label()`
+    /// 里那三条完全一样（那边是消费点，这里是生产点，两处必须同一个口径）。
+    fn a2_contribute(&mut self, target: &str) {
+        use crate::codegen::x86_64::blockopt as bo;
+        if bo::rules() & bo::R_LABELJOIN == 0
+            || self.a2_no_inherit
+            || self.a2_required_edges(target).is_none()
+            || self.labels.contains_key(target)
+        {
+            return;
+        }
+        let st = self.block_state;
+        *self.a2_seen.entry(target.to_string()).or_insert(0) += 1;
+        match self.a2_snap.get_mut(target) {
+            Some(prev) => prev.intersect_with(&st, false),
+            None => {
+                self.a2_snap.insert(target.to_string(), st);
+            },
+        }
+    }
+
     pub fn label(&mut self, name: &str) {
+        // 区的边界（方案 §3 S4 四个插入点里的「区划分」）：先 flush 再登记标号，
+        // 那几条存出才属于上一个区。必须在 `labels.insert` 之前，否则存出会被算进新区。
+        self.region_at_label(name);
         self.labels.insert(name.to_string(), self.pos());
         // 标签是控制流的汇合点：它之前的「上一条指令」可能从别处跳进来，
         // 也可能就是某个前向跳转的落点，不能再当作窥孔的左邻。
         self.peep_last = None;
-        // 块内等价事实同理：从别处跳进这个标签时，号与帧槽的取值是另一条边上的。
-        self.block_state.reset();
-        // 「刚比较出来」也不能跨标签存活：从别处跳进这个标签时 flags 是另一条边上的。
-        self.last_cmp = None;
+        // A2（`R_LABELJOIN`）的判据：「L 有几条入边」在本函数**发射之前**就能定完
+        // （`frame_guard::jump_edges`），所以「L 的前驱集是否已经看全」不是事后推而是先验
+        // 结论。已看全的标签上，事实按取交保留；完全没人跳的标签上，事实照旧全留。
+        //
+        // 三条不得放宽的形状，缺一即错值：
+        //   * 不是本函数的用户标签（`fresh_label()` 造的 `.L<数字>`）：循环/分支标签的
+        //     CFG 在 AST 里看不见，入边数根本无从算起；
+        //   * 本函数有任何间接跳转（`goto *p` / `asm goto`）或内联 asm：目标集运行时才
+        //     知道，而 `%l0` 与 asm 文本里的 `jmp` 都是本层数不到的边；
+        //   * 名字出现在任一跳转的目标位置上而那条边还没发出（回边、死代码里的边）——
+        //     这一条由 `req != seen` 自动挡住（`&&label` 取址与 EH 落地垫也算入边）。
+        use crate::codegen::x86_64::blockopt as bo;
+        // 两类可以保留事实的形状，分开判：
+        //   * 没有任何跳转指着它（`req == 0`）⇒ 唯一前驱就是落空，照旧全留；
+        //   * 有跳转指着它，而**每一条都已经在手上**（`req == seen`）⇒ 前驱集看全了，
+        //     把已知前驱的交集并进当前状态（只留每条边上都成立的事实）。
+        // 其余（`seen < req`：有回边、或有边还没发出；`seen > req`：发射器拆了条）一律
+        // 整体清 —— 循环头就是这一类，也是反面用例钉住的那一条。
+        // `None` = 不是本函数的用户标签（后端自造的 `.L<数字>`、别的命名空间）⇒ 也清。
+        let req = self.a2_required_edges(name);
+        let seen = self.a2_seen.get(name).copied().unwrap_or(0);
+        let join = matches!(req, Some(r) if r != 0 && r == seen);
+        let inherit = bo::rules() & bo::R_LABELJOIN != 0
+            && !self.a2_no_inherit
+            && (matches!(req, Some(0)) || join);
+        if inherit {
+            bo::stat::hit(bo::stat::site("a2_inherit"), 0, 0);
+            if join {
+                // 多前驱取交：`a2_snap` 已经是各前驱的交集，再与落空边交一次。
+                if let Some(snap) = self.a2_snap.get(name).copied() {
+                    self.block_state.intersect_with(&snap, true);
+                }
+            }
+        } else {
+            // 块内等价事实同理：从别处跳进这个标签时，号与帧槽的取值是另一条边上的。
+            self.block_state.reset();
+            // 「刚比较出来」也不能跨标签存活：从别处跳进这个标签时 flags 是另一条边上的。
+            self.last_cmp = None;
+        }
     }
 
     /// 一个函数 (含其嵌套函数) 发射结束时的 pending 闭合性断言。
@@ -824,6 +988,18 @@ impl Codegen {
     // ========================================================================
 
     pub fn jmp_rel32(&mut self, target: &str, kind: JumpKind) {
+        // 区的出口（方案 §3 S4）：**任何**跳转都结束本区，条件跳转也算。
+        //
+        // 为什么不能只算 `Jmp`：`jcc` 的落空边确实还在同一个区里，但**已取边**不是。
+        // 只在 `Jmp` 上 flush 会让一条件分支带走一个未写回的家：实测
+        // `vrp_wide_literal_cmp.c` 在 -O1 下错在这里 —— `a` 的存出被推迟进 %rbx，
+        // `jg .L0` 取边进了 `.L1` 的 `mov -72(%r13),%rax`，而那个内存位置从未被写过。
+        // 代价是每个分支前多若干次存出；区域家天然只在长直线上有意义，
+        // 这也是它默认不开的一部分原因（零插入版的默认关读数见报告 §6.16.1，
+        // 定位与推导见方案 §12.6）。
+        self.region_flush();
+        // A2 取交那一臂的边出口：把「本条跳转带走的事实」按目标标签累积成交集。
+        self.a2_contribute(target);
         let at = self.pos();
         let (bytes, mnem): (Vec<u8>, &str) = if kind == JumpKind::Jmp {
             (vec![0xE9, 0, 0, 0, 0], "jmp")
@@ -1023,26 +1199,26 @@ impl Codegen {
         self.emit_insn(&Insn::new(op, &[]).with_gas(gas));
     }
 
+    /// 非负 imm32 走 5 字节 `mov r32,imm32` 短形（`DCC_IMM32_SHORT_MOV`，**默认开**）。
+    ///
+    /// 判据本体不在这里 —— 它在 `Insn::mov_reg_imm_compact`，与手写构造子批共用同一个
+    /// 形状选择（两个发射点各自写一份就会漂移，本仓的「解码器与构造子形状不一致」两次
+    /// 教训都是这个形状）。钉的是默认档；`cargo test` 时不要带 `DCC_IMM32_SHORT_MOV=0`。
     pub fn mov_imm(&mut self, reg: u8, v: i128) {
-        let reg_name = GAS_REG64[(reg & 15) as usize];
         if v >= i32::MIN as i128 && v <= i32::MAX as i128 {
-            // 使用 MOV r/m64, imm32 (REX.W + 0xC7 /0) 符号扩展 32 位立即数到 64 位
-            // 避免 MOV r32, imm32 的零扩展导致负数比较错误
-            let rex = 0x48 + if reg >= 8 { 0x01 } else { 0 };
-            let mut bytes: Vec<u8> = Vec::with_capacity(8);
-            bytes.extend_from_slice(&[rex, 0xC7, 0xC0 + (reg & 7)]);
-            bytes.extend_from_slice(&(v as i32).to_le_bytes());
-            // AT&T: `mov $<imm>, %reg` (与 render_one.rs 输出对拍).
-            let gas = format!("mov {}, {}", gas_dec_imm(v as i64), reg_name);
-            self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
-        } else {
-            let mut bytes: Vec<u8> = Vec::with_capacity(10);
-            bytes.push(0x48 + if reg >= 8 { 0x01 } else { 0 });
-            bytes.push(0xb8 + (reg & 7));
-            bytes.extend_from_slice(&(v as i64).to_le_bytes());
-            let gas = format!("mov {}, {}", gas_dec_imm(v as i64), reg_name);
-            self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
+            // i32 范围内交给同一个判据点：非负 ⇒ 5/6 字节 `B8+r id`；负 ⇒ 7 字节
+            // `REX.W C7 /0 id`（符号扩展）。两条旧分支现在共享一个形状选择。
+            self.emit_insn(&Insn::mov_reg_imm_compact(reg, v as i32));
+            return;
         }
+        // 超出 i32：只能 movabs（REX.W B8+r imm64，10 字节）。
+        let reg_name = GAS_REG64[(reg & 15) as usize];
+        let mut bytes: Vec<u8> = Vec::with_capacity(10);
+        bytes.push(0x48 + if reg >= 8 { 0x01 } else { 0 });
+        bytes.push(0xb8 + (reg & 7));
+        bytes.extend_from_slice(&(v as i64).to_le_bytes());
+        let gas = format!("mov {}, {}", gas_dec_imm(v as i64), reg_name);
+        self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
     }
 
     /// 把常量字节偏移累加到 `dst`：能放进 disp32 时用 `add $imm32, %reg`
@@ -1738,6 +1914,56 @@ impl Codegen {
         self.emit_insn(&Insn::raw_with_gas(&bytes, &gas));
     }
 
+    /// 目标导向的标量载入：地址在 `base` 号里、结果落 `dst`、`disp` 是常量偏移。
+    ///
+    /// 与 [`Self::emit_load_mem_typed`] 的分工（方案 §3 P1 的第一条管道）：后者是「地址恒在
+    /// `%rax`、结果恒在 `%rax`」的老约定，保留给没改写的调用点；本函数只服务能直接给出
+    /// base/dst 的调用点。两类形状不合并是为了不把 14 个调用点一次摊成语义面。
+    ///
+    /// 返回 `false` = 这个类型/宽度本函数不支持（浮点走 xmm/st(0) 通道、`__int128` 走
+    /// rdx:rax 成对，都不接受任意 dst），调用方必须退回原路径——宁可少优化，不能错值。
+    pub fn emit_load_mem_typed_at(&mut self, size: usize, ty: &Type, base: u8, dst: u8) -> bool {
+        use crate::codegen::shared::asm_operand::Width;
+        if matches!(ty, Type::Float | Type::Double | Type::LongDouble | Type::Float128) {
+            return false;
+        }
+        match size {
+            8 => {
+                self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, dst, base, 0));
+            },
+            4 => {
+                if Self::is_signed_int(ty) {
+                    self.emit_insn(&Insn::mov_ext_mem(true, Width::B32, Width::B64, dst, base, 0));
+                } else {
+                    // 32 位写自动零扩展高 32 位：与 `size<8 && !signed` 的老路径同一形状。
+                    self.emit_insn(&Insn::mov_rm_mem(true, Width::B32, dst, base, 0));
+                }
+            },
+            2 => {
+                self.emit_insn(&Insn::mov_ext_mem(
+                    Self::is_signed_int(ty),
+                    Width::B16,
+                    Width::B64,
+                    dst,
+                    base,
+                    0,
+                ));
+            },
+            1 => {
+                self.emit_insn(&Insn::mov_ext_mem(
+                    Self::is_signed_int(ty),
+                    Width::B8,
+                    Width::B64,
+                    dst,
+                    base,
+                    0,
+                ));
+            },
+            _ => return false,
+        }
+        true
+    }
+
     pub fn emit_load_mem_typed(&mut self, size: usize, ty: &Type) {
         if matches!(ty, Type::Float | Type::Double | Type::LongDouble | Type::Float128) {
             // 单一真源：long double 必须 `fld tbyte [rax]`，
@@ -2102,7 +2328,9 @@ impl Codegen {
         // 落在**访问**那一笔上，单一真源是 `abi::tyclass::lvalue_seg_prefix`（它现在既认
         // pointee 的段，也认符号本体的段）；本函数只负责把裸地址算出来，与 gcc 同形
         // （gcc: `leaq arr(%rip),%rax` + `movl %gs:(%rax,%rdi,4),%eax`）。
-        let disp32_pos = self.pos() + 3;
+        // disp32 的位量必须在**发射之后**取：发射入口可能在本条字节之前插入存出
+        // （区内家 S4 的回写），在发射前算出的绝对位置会被整条推前，补丁就落到
+        // 上一条指令中间。所有 RIP 发射点统一走「先发射、再按 `pos()-4` 定位」。
         // P11 Bucket O7: 收敛到 typed Lea (rip_relative=true). 输出 [REX.W|REX.R,
         // 0x8D, modrm=0x05|((reg&7)<<3), disp32×4] — 与 raw_with_gas 手写逐字节一致.
         let gas = format!("lea {}(%rip), {}", resolved, GAS_REG64[(reg & 15) as usize]);
@@ -2121,7 +2349,7 @@ impl Codegen {
         );
         insn.gas_text = Some(gas);
         self.emit_insn(&insn);
-        self.pending_data_rels.push((disp32_pos, resolved));
+        self.pending_data_rels.push((self.pos() - 4, resolved));
     }
 
     pub fn emit_global_load(&mut self, reg: u8, name: &str) {
@@ -2166,10 +2394,8 @@ impl Codegen {
             },
             _ => Insn::mov_rm_rip(true, width_b64, reg, 0),
         };
-        // 计算 disp32 字段在指令流中的偏移 = 当前 pos + (指令总长 - 4).
-        // encoder 输出的字节数组决定总长. 我们直接复用 encoder 得到长度.
-        let insn_len = insn.op.encode().map(|b| b.len()).unwrap_or(0);
-        let disp32_pos = self.pos() + insn_len as u64 - 4;
+        // disp32 总在 RIP 相对形态的最后 4 字节 ⇒ 发射后的 `pos()-4` 就是它。
+        // （不在发射前拿 `pos()+insn_len-4`：理由见 `emit_global_addr_lea` 那条注释。）
         // 附加 gas 文本 (与旧手写对齐, 用于调试输出).
         let mut insn = insn;
         let dst_name = match sz {
@@ -2182,6 +2408,7 @@ impl Codegen {
         };
         insn.gas_text = Some(format!("mov {}(%rip), {}", name, dst_name));
         self.emit_insn(&insn);
+        let disp32_pos = self.pos() - 4;
         if tls_exec {
             self.pending_tls_rels.push((disp32_pos, resolved));
         } else {
@@ -2216,8 +2443,7 @@ impl Codegen {
             4 => Insn::mov_rm_rip(false, Width::B32, reg, elem_off),
             _ => Insn::mov_rm_rip(false, Width::B64, reg, elem_off),
         };
-        let insn_len = ins.op.encode().map(|b| b.len()).unwrap_or(0);
-        let disp32_pos = self.pos() + insn_len as u64 - 4;
+        // disp32 在发射后取（同 `emit_global_load`：发射入口可能先插存出）。
         let mut insn = ins;
         let dst_name = match sz {
             1 | 2 => crate::codegen::x86_64::abi::regnames::att_name_of_num(reg, 8)
@@ -2229,6 +2455,7 @@ impl Codegen {
         };
         insn.gas_text = Some(format!("mov {}, {}(%rip)", dst_name, name));
         self.emit_insn(&insn);
+        let disp32_pos = self.pos() - 4;
         if tls_exec {
             self.pending_tls_rels.push((disp32_pos, resolved));
         } else if elem_off != 0 {
@@ -2293,6 +2520,34 @@ impl Codegen {
         for i in 0..slots.max(0) {
             self.volatile_frames
                 .insert(off.saturating_add(i.saturating_mul(8)));
+        }
+    }
+
+    /// 名字刚被定下帧偏移：若它的地址被取走过，把它占的每个 8 字节槽登记为
+    /// 「不可推迟存出 / 不可跨 call 存活」（S4 与 A1 的槽级屏障）。
+    ///
+    /// 为什么必须和 `note_volatile_var_slots` 一样挂在**登记点**而不是只在规划期扫一遗
+    /// `var_map`：晚分配的变量（复合字面量、`__vmsize_` 那一族）在规划期还不在表里，
+    /// 扫一遗永远看不到它。实测就是这条漏：`taken_underscore()` 的 `_acc` 被这么漏掉，
+    /// 它的存出被推迟进家，而 `*p` 的写看不见地盖在陈槽上（-O1 返回错值）。
+    pub(crate) fn note_escaped_var_slots(&mut self, name: &str, off: i64) {
+        if !self.frame_guard.escaped_names.contains(name) {
+            return;
+        }
+        // 不知道具体类型时按一个槽登记是**不够**的：这里拿 `var_map` 刚存进去的类型算槽数。
+        let slots = self
+            .var_map
+            .get(name)
+            .map(|(_, ty)| Self::var_alloc_slots(ty))
+            .unwrap_or(1);
+        if slots > crate::codegen::x86_64::instructions::VOLATILE_SLOT_CAP {
+            // 枚举不完一个巨大逃逸对象 ⇒ 整个函数的家必须关掉（保守方向）。
+            // 走 `region_disable` 而不是重开状态：已有家必须先回写，不然那一次存出就丢了。
+            self.region_disable();
+            return;
+        }
+        for i in 0..slots.max(1) {
+            self.escaped_frames.insert(off.saturating_add(i.saturating_mul(8)));
         }
     }
 
@@ -2383,6 +2638,7 @@ impl Codegen {
         let off = -(used + hdr) - (slots.saturating_sub(1) * 8);
         self.var_map.insert(name.to_string(), (off, ty.clone()));
         self.note_volatile_var_slots(name, off);
+        self.note_escaped_var_slots(name, off);
         self.var_map_total_slots = (used + slots * 8) / 8;
         // **Phase 2.2（H1 的硬边界）**：生成期的晚增长不得越过帧底。规划期这条在帧未解算
         // 时是空转（`frame_size == 0`），留着是为了「即使有人把登记推后到解算之后」也不会
@@ -4381,6 +4637,66 @@ mod tests {
             cg.code.len(),
             after_load,
             "零扩展装载后的自反 mov 仍应被削 —— 这条窥孔本身不能关"
+        );
+    }
+
+    // ===== S3c 体量交换：非负 imm32 走 5 字节短形 =====
+
+    /// 短形只能换**非负**立即数。三条必须同时成立：只测正例会漏掉「负数也被
+    /// 零扩展」这种真错 —— 那是改值而不是改体量。钉的是默认档（`cargo test`
+    /// 时不要带 `DCC_IMM32_SHORT_MOV=0`，带了就该看到正例变红，那正是旋钮的量尺）。
+    #[test]
+    fn imm32_short_mov_only_replaces_non_negative_immediates() {
+        // 每条形起一个新发射器：不拿 `code.clear()` 绕开偏移记账（同族用例同一写法）。
+        let one = |reg: u8, v: i128| {
+            let mut cg = x86();
+            cg.mov_imm(reg, v);
+            cg.code
+        };
+        assert_eq!(one(0, 5), vec![0xB8, 0x05, 0x00, 0x00, 0x00], "rax: 5 字节 B8 id");
+        assert_eq!(
+            one(8, 1),
+            vec![0x41, 0xB8, 0x01, 0x00, 0x00, 0x00],
+            "r8: 带 REX.B 的 6 字节"
+        );
+        assert_eq!(one(0, i32::MAX as i128).len(), 5, "i32::MAX 仍是短形（非负边界）");
+        assert_eq!(
+            one(0, -1),
+            vec![0x48, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF],
+            "负立即数必须仍走 REX.W C7 /0 符号扩展：换成 32 位形会把高 32 位写成零"
+        );
+        assert_eq!(one(0, i32::MAX as i128 + 1).len(), 10, "超出 i32 范围仍是 movabs");
+    }
+
+    /// 反瞎守卫：死写回删的形态识别必须认得新短形。不补这一臂就是方案 §10 点名的
+    /// 那个坑：体量省下来的会因回删变瞎而长回去。
+    #[test]
+    fn peep_recognizes_the_short_imm32_mov_forms() {
+        for (bytes, want) in [
+            (vec![0xB8u8, 0x05, 0x00, 0x00, 0x00], 0u8),
+            (vec![0xBBu8, 0x05, 0x00, 0x00, 0x00], 3),
+            (vec![0x41u8, 0xB8, 0x05, 0x00, 0x00, 0x00], 8),
+            (vec![0x41u8, 0xBB, 0x05, 0x00, 0x00, 0x00], 11),
+        ] {
+            assert_eq!(
+                Codegen::classify_peep(&Insn::raw(&bytes)),
+                PeepKind::MovImm { dst: want },
+                "字节形 {bytes:02x?} 应读成 MovImm{{dst:{want}}}"
+            );
+        }
+    }
+
+    /// 接上两条的发射后果：两条连续写同一个号的短形，前一条是死写，必须仍被削掉。
+    #[test]
+    fn dead_short_imm_write_before_a_full_overwrite_is_still_eliminated() {
+        let mut cg = x86();
+        cg.mov_imm(3, 5);
+        cg.mov_imm(3, 7);
+        assert_eq!(
+            cg.code.len(),
+            5,
+            "死写回删对新短形失效了（两条都留着 = 回删变瞎）: {:02x?}",
+            cg.code
         );
     }
 }

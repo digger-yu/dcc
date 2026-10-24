@@ -1140,13 +1140,16 @@ impl Codegen {
             self.string_pool.insert(key_bytes.clone(), o);
         }
         let off = self.string_pool[&key_bytes];
-        let at = self.pos();
         // movupd xmm0, [RIP + disp32]  (66 0F 10 05 disp32)
-        self.emit_insn(&Insn::raw_with_gas(
+        //
+        // 起始 pc 在发射后取：发射入口可能在本条之前插入存出（区内家 S4），
+        // 发射前拿的 `pos()` 会被推前，补丁落到上一条中间。
+        if let Some(at) = self.emit_insn_head(&Insn::raw_with_gas(
             &[0x66, 0x0F, 0x10, 0x05, 0, 0, 0, 0],
             "movupd 0(%rip), %xmm0",
-        ));
-        self.float_refs.push((at, off));
+        )) {
+            self.float_refs.push((at, off));
+        }
     }
     pub(crate) fn gen_float_load(&mut self, name: &str, ty: &Type) {
         // _Imaginary: 按内型取通道，与 gen_float_store 保持一致

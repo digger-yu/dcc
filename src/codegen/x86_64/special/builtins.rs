@@ -984,7 +984,7 @@ impl Codegen {
                 }
                 let sz = self.atomic_elem_size(args, 0);
                 self.gen_expr(&args[0], 7); // rdi = ptr
-                self.emit_insn(&Insn::mov_reg_imm32_b64(6, 1)); // mov rsi, 1
+                self.emit_insn(&Insn::mov_reg_imm_compact(6, 1)); // mov rsi, 1
                 self.emit_lock_xchg_rdi_rsi(sz);
                 let ord = self.eval_mem_order(&args[1]);
                 if ord == 5 {
@@ -2201,7 +2201,7 @@ impl Codegen {
                             self.emit_insn(&Insn::noarg(
                                 crate::codegen::x86_64::opcode::NoArgOp::Cld,
                             )); // cld
-                            self.emit_insn(&Insn::mov_reg_imm32_b64(1, 3));
+                            self.emit_insn(&Insn::mov_reg_imm_compact(1, 3));
                             self.emit_insn(&Insn::noarg(
                                 crate::codegen::x86_64::opcode::NoArgOp::RepMovsq,
                             )); // rep movsq
@@ -4314,7 +4314,7 @@ impl Codegen {
                 )); // mov rdi, rsp
                     // 栈参数区在缓冲区 GP+XMM 保存区 (176 字节) 之后
                 self.emit_insn(&Insn::alu_rm_reg_imm32_b64(0, 6, 176)); // add rsi, 176
-                self.emit_insn(&Insn::mov_reg_imm32_b64(1, size)); // mov rcx, size
+                self.emit_insn(&Insn::mov_reg_imm_compact(1, size)); // mov rcx, size
                 self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Cld));
                 self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // cld; rep movsb
                                                                                                  // 从缓冲区恢复 GP 寄存器实参 (rdi..r9)
@@ -5716,7 +5716,7 @@ impl Codegen {
                         0,
                         0,
                     )); // bsr rax, rax
-                    self.emit_insn(&Insn::mov_reg_imm32_b64(2, -1)); // mov rdx, -1
+                    self.emit_insn(&Insn::mov_reg_imm_compact(2, -1)); // mov rdx, -1
                     self.emit_insn(&Insn::test_rm_reg(
                         crate::codegen::shared::asm_operand::Width::B64,
                         1,
@@ -5728,7 +5728,7 @@ impl Codegen {
                         0,
                         2,
                     )); // cmove rax, rdx
-                    self.emit_insn(&Insn::mov_reg_imm32_b64(2, 62)); // mov rdx, 62
+                    self.emit_insn(&Insn::mov_reg_imm_compact(2, 62)); // mov rdx, 62
                                                                      // P11: 收敛到 AluRm{Sub, B64, rdx, rax}.
                     {
                         let insn = Insn::new(

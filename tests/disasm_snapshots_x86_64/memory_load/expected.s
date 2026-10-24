@@ -57,7 +57,6 @@ mov %rdi,-0x40(%r13)
 mov %rdi,%rax
 add $0x18,%rax
 mov (%rax),%rax
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret

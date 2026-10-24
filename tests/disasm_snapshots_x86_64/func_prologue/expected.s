@@ -13,7 +13,7 @@ mov %r8,-0xa8(%r13)
 mov %r9,-0xb0(%r13)
 lea -0x80(%r13),%rax
 mov %rax,%rcx
-mov -0x88(%r13),%rax
+mov %rdi,%rax
 mov %rax,(%rcx)
 lea -0x80(%r13),%rax
 add $0x8,%rax

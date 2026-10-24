@@ -256,6 +256,18 @@ pub struct Param {
     /// (副作用生效), 如 `int f(int i, int a[i++])` 的 i++。
     /// 多维时仅最外层被丢弃 (内层维度保留在 Ptr(Array(...)) 中)。
     pub vla_dim: Option<Box<Expr>>,
+    /// 形参的「家」：与 [`VarDecl::home`] 同源同含义，只是形参不是 `VarDecl`。
+    ///
+    /// 为什么需要一个平行字段：解释器类函数（`luaV_execute(lua_State *L, CallInfo *ci)`）
+    /// 每步要读的热值往往就是那两个形参，而候选表以 `Function::original_locals` 为「局部」
+    /// 真源（`ssa/build.rs` 写明完整集是 `original_locals ∪ params`），只看前者时形参连候选
+    /// 都不是，序言只能把入站寄存器存进栈槽、此后每次读都是一次访存。
+    ///
+    /// 由 `ssa::regalloc::deliver` 在 `DCC_HOME_PARAMS=1` 时写入（第一版只发 callee-saved
+    /// 的 POOL 号，与 SysV 入站号 `rdi,rsi,rdx,rcx,r8,r9` 不相交，所以序言里「先存 callee-saved
+    /// 再搬形参」不会互相踩）；后端读它把形参直接落在号上，`home_for`/`mov_to_stack` 那套
+    /// 现有机制自动跟着走，不需要为形参再造一套寻址。
+    pub home: Option<crate::location::Location>,
 }
 
 #[derive(Debug, Clone)]

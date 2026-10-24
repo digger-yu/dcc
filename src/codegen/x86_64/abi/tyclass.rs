@@ -394,12 +394,12 @@ impl Codegen {
         let qwords = sz / 8;
         let remainder = sz % 8;
         if qwords > 0 {
-            self.emit_insn(&Insn::mov_reg_imm32_b64(1, qwords as i32));
+            self.emit_insn(&Insn::mov_reg_imm_compact(1, qwords as i32));
             self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsq));
             // rep movsq
         }
         if remainder > 0 {
-            self.emit_insn(&Insn::mov_reg_imm32_b64(1, remainder as i32));
+            self.emit_insn(&Insn::mov_reg_imm_compact(1, remainder as i32));
             self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb));
             // rep movsb
         }

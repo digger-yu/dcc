@@ -1550,8 +1550,11 @@ impl Codegen {
     /// [`Self::emit_model_rip`] 的底层形式：符号名与「符号内字节偏移」显式给出。
     fn emit_model_rip_sym(&mut self, form: &RipForm, sym: &str, off_in_sym: i64, imm: Option<u32>) {
         self.emit_insn(&Insn::raw_bytes(form.prefix));
-        let disp_pos = self.pos();
-        self.emit_insn(&Insn::raw_bytes(&[0, 0, 0, 0]));
+        // disp32 的 pc 在发射后取：发射入口可能在本条之前插入存出（区内家 S4），
+        // 发射前拿的 pos 会被推前，补丁落到上一条中间。
+        let Some(disp_pos) = self.emit_insn_head(&Insn::raw_bytes(&[0, 0, 0, 0])) else {
+            return;
+        };
         let addend = off_in_sym - form.delta;
         self.pending_code_rels.push(PendingCodeRel {
             offset: disp_pos,
@@ -1570,8 +1573,10 @@ impl Codegen {
     /// 引用一个**已定义标号**（变体实现体）：`lea rax, [rip + <sym>]`。
     fn emit_lea_sym(&mut self, sym: &str) {
         self.emit_insn(&Insn::raw_bytes(RIP_LEA_RAX.prefix));
-        let disp_pos = self.pos();
-        self.emit_insn(&Insn::raw_bytes(&[0, 0, 0, 0]));
+        // 同上：先发射再取 disp32 的位置。
+        let Some(disp_pos) = self.emit_insn_head(&Insn::raw_bytes(&[0, 0, 0, 0])) else {
+            return;
+        };
         self.pending_code_rels.push(PendingCodeRel {
             offset: disp_pos,
             symbol: sym.to_string(),

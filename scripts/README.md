@@ -105,6 +105,13 @@
 | `optimize_baseline.sh` | 各优化档位产物基线采集（手工） |
 | `performance_benchmark.sh` | 快速编译耗时基准（手工，完整基准见 `bench_phase_e.sh`） |
 | `bench_lua_sqlite.sh` | Lua 5.5.1 / SQLite 3.53.4 **运行时**性能对比基准（手工）：四档 dcc vs gcc，含功能正确性判据（`docs/dcc-lua-sqlite-build-verify-report.md` 的数据来源） |
+| `ab_pair.sh` | 同轮交替配对计时（median(r) + 95%CI + 符号检验 + 同二进制 dup 臂）：所有墙钟判据的唯一口径 |
+| `gate0_probe.sh` | 产物性能根治方案的 **Gate 0 三探针**：0a 影子槽表（`DCC_SLOT_SHADOW=1`）/ 0b raw 归因两列 / 0c 按方案 §0 口径的 dcc-vs-gcc 分桶 |
+| `check_facts_vs_objdump.sh` | S1 指令事实层的**外部 oracle**：拿 objdump 对同一串 raw 字节反解目的号，与 `raw_writes` 的答对账（`DCC_FACTS_DUMP=1`）；只对账强主张那一侧。`sext` 形除了查目的号还查**助记符必须属于 `movsxd`/`movsx*`/`mov r64,imm32` 那三族**（只查号抽不出「号对但扩展错」这一类错） |
+| `region_home_sweep.sh` | 区内家（S4）开着时的**值等价全语料扇扫**：每份源在 -O1/-O2/-O3 各编两遍（门关 vs `DCC_REGION_HOME=1`），比的是方案 §5 的**四元组**：退出码、stdout sha256、stderr sha256、**执行目录落盘文件树** sha256（指针打印归一化手法与 `check_opt_equivalence.sh` 一致），并先跑一次「门关 vs 门关」自比对证明判据本身稳定（不稳报 `REGION-UNSTABLE` 而不是拿它判机制）。为什么不复用 `check_opt_equivalence.sh`：它比的是「同一产物四档互等」，而本机制的判据是「**开与关**两档互等」——推迟/缓存类前提被破坏时症状是别处读垃圾，只有拿门关当参照才看得见。`DEFER=0` 可只扇读侧服务那一半 |
+| `hot_cold_census.sh` | computed-goto 函数的「三账 + 落脚」普查（entry/hot/out 拆开且同列），冷尾类改动的机制判据源 |
+| `e_per_step.sh` | 按 opcode 执行权重折算的「每 VM 步机器指令数」E/步（静态条数不当墙钟代理时的中间量） |
+| `meta_gate.sh` | 元判据：静态代理（体量 / 条每步 / taken 分支每步）能不能预测墙钟（滴定砝码 + Spearman 秩相关） |
 
 ## 生成类
 

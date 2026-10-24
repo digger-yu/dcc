@@ -630,6 +630,16 @@ impl DwarfParamLocation {
     }
 }
 
+/// 一段 PC 区间上的位置描述（loclist 的一条）。`begin_pc`/`end_pc` 用与
+/// `DW_AT_low_pc` 同一套的**代码 buffer 绝对偏移**，换算成可重定位的形态在发射时做
+/// （见 `emit_local_var_die`：DWARF4 逐条挂函数符号 reloc，DWARF5 按 CU 基址取相对量）。
+#[derive(Debug, Clone, Copy)]
+pub struct DwarfLocRange {
+    pub begin_pc: u64,
+    pub end_pc: u64,
+    pub loc: DwarfParamLocation,
+}
+
 /// 局部变量描述 (函数或词法块内的变量)
 #[derive(Debug, Clone)]
 pub struct DwarfLocalVar {
@@ -637,6 +647,12 @@ pub struct DwarfLocalVar {
     pub ty: DwarfType,
     /// DWARF 位置表达式 (DW_OP_fbreg offset 等)
     pub location: DwarfParamLocation,
+    /// **分段位置**（loclist）。空或单条 ⇒ 仍按 `location` 发 `DW_FORM_exprloc`，与今天
+    /// 逐字节相同；多于一 ⇒ 发 `DW_FORM_sec_offset` 指向 `.debug_loc`(v4)/`.debug_loclists`(v5)。
+    ///
+    /// 为什么需要它：`location` 只能对一个函数说一个位置，而家搬过家（区内家推迟存出那段
+    /// 区间里内存在家里而不是在栈槽上）时，单 `loc` 就是让调试器读一个它从未写过的地方。
+    pub ranges: Vec<DwarfLocRange>,
     pub decl_line: u32,
 }
 
@@ -732,6 +748,8 @@ pub struct DebugSections {
     pub aranges: Vec<u8>,
     pub frame: Vec<u8>,
     pub ranges: Vec<u8>,
+    /// `.debug_loc`（DWARF4 分段位置表）。只有真有「一个变量多段位置」时才非空 ⇒
+    /// 不开 loclist 时不会多发明一个节（不动 -g 产物的节表形状）。
     pub loc: Vec<u8>,
     // 索引类
     pub pubnames: Vec<u8>,
@@ -755,6 +773,8 @@ pub struct DebugSections {
     pub loclists_dwo: Vec<u8>,
     pub skeleton: Vec<u8>,
     pub skeleton_type: Vec<u8>,
+    /// `.debug_loc` 里 begin/end 的重定位：`(节内偏移, 函数符号, 函数内偏移加数)`。
+    pub loc_relocs: Vec<(u64, String, i64)>,
     // BTF
     pub btf: Vec<u8>,
     // .BTF.ext (func_info + line_info for BPF verifier)
@@ -799,6 +819,8 @@ impl DebugSections {
         push(&mut v, ".debug_names", &self.names, false);
         push(&mut v, ".debug_macro", &self.macro_, false);
         push(&mut v, ".debug_loclists", &self.loclists, false);
+        // DWARF4 的分段位置表。`push` 对空数据直接跳过 ⇒ 没有分段位置时一节也不发明。
+        push(&mut v, ".debug_loc", &self.loc, false);
         push(&mut v, ".debug_rnglists", &self.rnglists, false);
         // DWARF v5 新增节
         push(&mut v, ".debug_str_offsets", &self.str_offsets, false);
@@ -1349,7 +1371,9 @@ pub fn build_dwarf_full(cu: &CompileUnit, opts: &DebugOptions) -> DebugSections 
     sec.str = strl_section(&mut strs, cu, opts);
 
     // 2) .debug_abbrev + .debug_info
-    let (abbrev, info, relocs) = build_abbrev_and_info(cu, opts, &mut strs, &mut abb);
+    let (abbrev, info, relocs, loc, loc_relocs) = build_abbrev_and_info(cu, opts, &mut strs, &mut abb);
+    sec.loc = loc;
+    sec.loc_relocs = loc_relocs;
     // 节内容必须在这一步**之后**重新取。`StringTable::intern` 是「去重 + 往后追加」，
     // 所以重取只会多出新串、不改动已有串的偏移（逐字节前缀相同）。
     //
@@ -1580,9 +1604,12 @@ fn build_abbrev_and_info(
     opts: &DebugOptions,
     strs: &mut StringTable,
     abb: &mut AbbrevBuilder,
-) -> (Vec<u8>, Vec<u8>, Vec<(u64, String)>) {
+) -> (Vec<u8>, Vec<u8>, Vec<(u64, String)>, Vec<u8>, Vec<(u64, String, i64)>) {
     let mut type_offsets: std::collections::HashMap<String, u32> = Default::default();
     let mut relocs: Vec<(u64, String)> = Vec::new();
+    // 分段位置（loclist）的累加器与它的重定位表（DWARF4 逐条挂函数符号）。
+    let mut loc = Vec::new();
+    let mut loc_relocs: Vec<(u64, String, i64)> = Vec::new();
     let dwarf_ver = opts.dwarf_version;
 
     // info header
@@ -1759,7 +1786,18 @@ fn build_abbrev_and_info(
 
         // local variables in function scope (DW_TAG_variable)
         for (var, ty_off) in f.local_vars.iter().zip(&local_var_type_offs) {
-            emit_local_var_die(&mut info, abb, strs, cu, var, *ty_off);
+            let mut sk = LocSink {
+                bytes: &mut loc,
+                relocs: &mut loc_relocs,
+                fn_name: &f.name,
+                fn_base: f.low_pc,
+                addr_size: opts.arch.address_size(),
+            };
+            // DWARF5 不带 loclist（见 `LocSink` 的注释）：那时传 `None`，变量退回单 exprloc。
+            emit_local_var_die(
+                &mut info, abb, strs, cu, var, *ty_off,
+                if dwarf_ver >= 5 { None } else { Some(&mut sk) }
+            );
         }
 
         // lexical blocks (DW_TAG_lexical_block) with nested variables
@@ -1781,7 +1819,17 @@ fn build_abbrev_and_info(
             info.extend_from_slice(&(block.high_pc - block.low_pc).to_le_bytes());
             // 类型 DIE 已在 subprogram 之前全部发完（否则它们会变成这个 block 的子 DIE）
             for (var, ty_off) in block.variables.iter().zip(&block_var_type_offs[bi]) {
-                emit_local_var_die(&mut info, abb, strs, cu, var, *ty_off);
+                let mut sk = LocSink {
+                    bytes: &mut loc,
+                    relocs: &mut loc_relocs,
+                    fn_name: &f.name,
+                    fn_base: f.low_pc,
+                    addr_size: opts.arch.address_size(),
+                };
+                emit_local_var_die(
+                    &mut info, abb, strs, cu, var, *ty_off,
+                    if dwarf_ver >= 5 { None } else { Some(&mut sk) }
+                );
             }
             if block_has_vars {
                 info.push(0); // terminate lexical_block children
@@ -1822,7 +1870,74 @@ fn build_abbrev_and_info(
     let unit_len = (info.len() - 4) as u32;
     info[0..4].copy_from_slice(&unit_len.to_le_bytes());
 
-    (abb.clone().into_bytes(), info, relocs)
+    (abb.clone().into_bytes(), info, relocs, loc, loc_relocs)
+}
+
+/// 一个函数的 loclist 发射现场（DWARF4 `.debug_loc`）。
+///
+/// 地址口径：字段里写「相对本函数起点的偏移」，同时挂一条 `(偏移位置, 函数符号, 加数)`
+/// 的重定位。为什么不像 `DW_AT_low_pc` 那样只靠字段内容当加数：那些位置只问函数**起点**
+/// 一个地址，而 loclist 的 begin/end 是函数**中间**的任意 pc，拿「符号值 + 字段」这种
+/// 隐式加数会被链接器按 `S(f) + 0` 算回函数起点（实测每个区间都塌到同一个地址）。
+///
+/// **不做 DWARF5**：`.debug_loclists` 还要一段节头（unit_length / version / address_size /
+/// segment_selector_size / offset_entry_count）才能被读，那是另一件事。`dwarf_version>=5`
+/// 时调用方传 `None`，变量退回单 `exprloc`（位置仍正确，只是不描述分段区间）。
+pub(crate) struct LocSink<'a> {
+    pub bytes: &'a mut Vec<u8>,
+    pub relocs: &'a mut Vec<(u64, String, i64)>,
+    pub fn_name: &'a str,
+    pub fn_base: u64,
+    pub addr_size: u8,
+}
+
+impl<'a> LocSink<'a> {
+    /// 把一批区间追写成一段 loclist，返回它在本节里的起始偏移（写进 `DW_AT_location`）。
+    /// 一条也没写进去（区间为空或全不可编码）时返 `None`，调用方退回单 `exprloc`。
+    fn emit(&mut self, ranges: &[DwarfLocRange]) -> Option<u32> {
+        let start = self.bytes.len() as u32;
+        let mut wrote = 0usize;
+        for r in ranges {
+            let mut expr = Vec::new();
+            if r.loc.encode_into(&mut expr).is_err() {
+                // 编不出表达式的位置不能入表（入了就是给一段 PC 发一个错表达式）：
+                // 宁缺勿错，该区间仍由单 `location` 那条路描述。
+                continue;
+            }
+            wrote += 1;
+            // begin/end 都是函数内偏移；加数同值，链接后的真值是 S(f) + 偏移。
+            let (bo, eo) = (
+                r.begin_pc.wrapping_sub(self.fn_base) as i64,
+                r.end_pc.wrapping_sub(self.fn_base) as i64,
+            );
+            let off = self.bytes.len() as u64;
+            self.push_addr(bo as u64);
+            self.relocs.push((off, self.fn_name.to_string(), bo));
+            let off2 = self.bytes.len() as u64;
+            self.push_addr(eo as u64);
+            self.relocs.push((off2, self.fn_name.to_string(), eo));
+            self.bytes.extend_from_slice(&(expr.len() as u16).to_le_bytes());
+            self.bytes.extend_from_slice(&expr);
+        }
+        if wrote == 0 {
+            return None;
+        }
+        // 表尾：begin 与 end 都是 0 的一对地址，**不带**后面的 2 字节长度（与 gcc 的
+        // `.debug_loc` 逐字节对齐：多发那 2 字节会让 readelf 报
+        // "There are 2 unused bytes at the end of section .debug_loc"）。
+        self.push_addr(0);
+        self.push_addr(0);
+        Some(start)
+    }
+
+    fn push_addr(&mut self, v: u64) {
+        match self.addr_size {
+            8 => self.bytes.extend_from_slice(&v.to_le_bytes()),
+            4 => self.bytes.extend_from_slice(&(v as u32).to_le_bytes()),
+            // 其它地址宽度本 target 不发；写零长度会让整段表错位，所以直接跳过本条。
+            _ => {}
+        }
+    }
 }
 
 fn write_attr_strp(info: &mut Vec<u8>, off: u32) {
@@ -1830,6 +1945,10 @@ fn write_attr_strp(info: &mut Vec<u8>, off: u32) {
 }
 
 /// Emit a DW_TAG_variable DIE for a local variable with location
+///
+/// `loc` 为 `Some` 时，本变量的 `DW_AT_location` 走 loclist（多段位置）；为 `None` 时
+/// 照旧发一条 `DW_FORM_exprloc`。两种形状各自一个缩写码（属性 form 不同，不能共用），
+/// 所以没分段位置的产物与今天逐字节相同。
 fn emit_local_var_die(
     info: &mut Vec<u8>,
     abb: &mut AbbrevBuilder,
@@ -1837,17 +1956,46 @@ fn emit_local_var_die(
     _cu: &CompileUnit,
     var: &DwarfLocalVar,
     ty_off_prepared: u32,
+    sink: Option<&mut LocSink<'_>>,
 ) {
-    let var_attrs: Vec<(u16, u16)> = vec![
-        (DW_AT_name, DW_FORM_strp),
-        (DW_AT_type, DW_FORM_ref4),
-        (DW_AT_location, DW_FORM_exprloc),
-    ];
+    // 只有「确实多于一区间」才开表；空表与单区间仍走 exprloc（不多发明一个节、不改字节）。
+    let list_off: Option<u32> = match sink {
+        Some(s) if var.ranges.len() > 1 => s.emit(&var.ranges),
+        _ => None,
+    };
+    // 三种形状各自一个缩写码：sec_offset / exprloc / 无 location 属性。
+    let mut var_attrs: Vec<(u16, u16)> =
+        vec![(DW_AT_name, DW_FORM_strp), (DW_AT_type, DW_FORM_ref4)];
+    if let Some(off) = list_off {
+        var_attrs.push((DW_AT_location, DW_FORM_sec_offset));
+        let vcode = abb.get_or_create(DW_TAG_variable, DW_CHILDREN_no, &var_attrs);
+        write_uleb128(info, vcode as u64);
+        write_attr_strp(info, strs.intern(&var.name));
+        info.extend_from_slice(&ty_off_prepared.to_le_bytes());
+        info.extend_from_slice(&off.to_le_bytes());
+        return;
+    }
+    if var.location.encode_usable() {
+        var_attrs.push((DW_AT_location, DW_FORM_exprloc));
+    }
     let vcode = abb.get_or_create(DW_TAG_variable, DW_CHILDREN_no, &var_attrs);
     write_uleb128(info, vcode as u64);
     write_attr_strp(info, strs.intern(&var.name));
     info.extend_from_slice(&ty_off_prepared.to_le_bytes());
-    write_location_expr(info, &var.location);
+    if var.location.encode_usable() {
+        write_location_expr(info, &var.location);
+    }
+}
+
+impl DwarfParamLocation {
+    /// 本位置能不能被编码成一段合法表达式（`encode_into` 的谓词形式）。
+    ///
+    /// 为什么要有：`DW_AT_location` 一旦声明就必须带内容，而未知操作码只能发一个孤立
+    /// 字节（那是给调试器一个错表达式）。发之先问一句，不能就整条属性不发。
+    pub(crate) fn encode_usable(&self) -> bool {
+        let mut tmp = Vec::new();
+        self.encode_into(&mut tmp).is_ok()
+    }
 }
 
 /// 把一条位置描述编成 `DW_FORM_exprloc` 形式的属性值。
@@ -5499,6 +5647,7 @@ mod tests {
                         },
                     },
                     location: DwarfParamLocation::fbreg(-32),
+                    ranges: Vec::new(),
                     decl_line: 2,
                 }],
                 lexical_blocks: vec![],
@@ -5572,6 +5721,7 @@ mod tests {
                             name: "zz_local_name".to_string(),
                             ty: int_ty.clone(),
                             location: DwarfParamLocation::fbreg(-80),
+                            ranges: Vec::new(),
                             decl_line: 2,
                         }]
                     } else {
@@ -5828,6 +5978,7 @@ mod tests {
             name: "only_on_one_side".to_string(),
             ty: declared.return_type.clone(),
             location: DwarfParamLocation::fbreg(-16),
+            ranges: Vec::new(),
             decl_line: 2,
         });
         let cu = cu_with(vec![declared, defined], vec![]);
@@ -5851,7 +6002,7 @@ mod tests {
         // 也同时证明下面那几个「1」不是仪器数不出「2」。
         let mut strs = StringTable::new();
         let mut abb = AbbrevBuilder::default();
-        let (_, _, raw_relocs) = build_abbrev_and_info(&cu, &opts, &mut strs, &mut abb);
+        let (_, _, raw_relocs, _, _) = build_abbrev_and_info(&cu, &opts, &mut strs, &mut abb);
         let (raw_line, _) = build_line_program(&cu, &opts);
         let (raw_aranges, _) = build_aranges(&cu, &opts);
         assert_eq!(
@@ -5921,5 +6072,133 @@ mod tests {
             expect.len(),
             rows.len()
         );
+    }
+
+    /// 方案 §4.4 的另一半：loclist 发射器本身。三条判各自能红：
+    ///
+    ///   1. **只有多段位置才开表** ⇒ 一个区间也没有时 `.debug_loc` 必须是空的（否则
+    ///      今天所有 -g 产物都会多出一个节，而那意味着新机制动了旧字节）；
+    ///   2. **begin/end 是函数内偏移 + 同名同值的加数** ⇒ 写错任一边的后果是链接后所有
+    ///      区间塌到函数起点（本轮实测就是这个形状）；
+    ///   3. **表尾是 16 个零字节，不带那 2 字节长度** ⇒ 多发会让 readelf 报
+    ///      "There are 2 unused bytes at the end of section .debug_loc"。
+    #[test]
+    fn loclist_only_for_multi_range_vars_with_relocatable_offsets() {
+        let opts = DebugOptions { level: 2, dwarf_version: 4, source_name: "x.c".to_string(), ..Default::default() };
+        let int_ty = DwarfType {
+            name: "int".to_string(),
+            byte_size: 4,
+            kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+        };
+        let mut f = fn_info("goo", 0x400, 0x500, 3);
+        // 一个只有单一位置的变量（今天的全部形状）与一个分段的变量。
+        f.local_vars.push(DwarfLocalVar {
+            name: "plain".to_string(),
+            ty: int_ty.clone(),
+            location: DwarfParamLocation::fbreg(-16),
+            ranges: Vec::new(),
+            decl_line: 4,
+        });
+        f.local_vars.push(DwarfLocalVar {
+            name: "movd".to_string(),
+            ty: int_ty.clone(),
+            location: DwarfParamLocation::reg(8),
+            ranges: vec![
+                DwarfLocRange { begin_pc: 0x400, end_pc: 0x440, loc: DwarfParamLocation::reg(8) },
+                DwarfLocRange {
+                    begin_pc: 0x440,
+                    end_pc: 0x480,
+                    loc: DwarfParamLocation::fbreg(-896),
+                },
+            ],
+            decl_line: 5,
+        });
+        let sec = build_dwarf_full(&cu_with(vec![f], vec![]), &opts);
+
+        // 两条区间各 8+8 地址 + 2 长度 + 表达式（reg8 是 1 字节，fbreg(-896) 是 1+2 字节），
+        // 再加 16 字节表尾。
+        assert_eq!(sec.loc.len(), (18 + 1) + (18 + 3) + 16, "`.debug_loc` 长度不对：{:?}", sec.loc);
+        assert!(
+            sec.loc.iter().rev().take(16).all(|b| *b == 0),
+            "表尾必须是 16 个零字节（多一个长度字段 readelf 就报 unused bytes）"
+        );
+        // 重定位：begin/end 各一条，都挂本函数符号，加数是函数内偏移。
+        let got: Vec<(u64, String, i64)> = sec.loc_relocs.clone();
+        assert_eq!(
+            got,
+            vec![
+                (0, "goo".to_string(), 0x00),
+                (8, "goo".to_string(), 0x40),
+                (19, "goo".to_string(), 0x40),
+                (27, "goo".to_string(), 0x80),
+            ],
+            "loclist 的地址必须带加数（否则链接后所有区间塔到函数起点）"
+        );
+        // 没分段位置的变量仍走 exprloc：`DW_OP_fbreg` 后跟 sleb128(-16) = 单字节 0x70。
+        // （负偏移不会退化成两字节：-16 在 7 位带符号范围内。）
+        assert!(
+            sec.info.windows(2).any(|w| w == [DW_OP_fbreg, 0x70]),
+            "单位置变量必须仍发 exprloc（fbreg -16）"
+        );
+    }
+
+    /// 反向对照：单区间（只有一段位置）不得开表——那等于用新机制改旧字节。
+    #[test]
+    fn single_range_variable_stays_byte_identical() {
+        let opts = DebugOptions { level: 2, dwarf_version: 4, source_name: "x.c".to_string(), ..Default::default() };
+        let int_ty = DwarfType {
+            name: "int".to_string(),
+            byte_size: 4,
+            kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+        };
+        let build = |ranges: Vec<DwarfLocRange>| {
+            let mut f = fn_info("one", 0x400, 0x500, 3);
+            f.local_vars.push(DwarfLocalVar {
+                name: "v".to_string(),
+                ty: int_ty.clone(),
+                location: DwarfParamLocation::fbreg(-24),
+                ranges,
+                decl_line: 4,
+            });
+            build_dwarf_full(&cu_with(vec![f], vec![]), &opts)
+        };
+        let none = build(Vec::new());
+        let one = build(vec![DwarfLocRange {
+            begin_pc: 0x400,
+            end_pc: 0x500,
+            loc: DwarfParamLocation::fbreg(-24),
+        }]);
+        assert!(none.loc.is_empty() && one.loc.is_empty(), "单区间不得开 loclist");
+        assert_eq!(none.info, one.info, "单区间与无区间的 `.debug_info` 必须逐字节相同");
+    }
+
+    /// DWARF5 不开 loclist（`.debug_loclists` 还需要节头，那是另一件事）：必须退回
+    /// 单 `exprloc` 而不是发一个读不了的节。
+    #[test]
+    fn dwarf5_falls_back_to_exprloc_instead_of_unreadable_loclists() {
+        let opts = DebugOptions { level: 2, dwarf_version: 5, source_name: "x.c".to_string(), ..Default::default() };
+        let int_ty = DwarfType {
+            name: "int".to_string(),
+            byte_size: 4,
+            kind: DwarfTypeKind::Base(TypeEncoding::Signed),
+        };
+        let mut f = fn_info("v5", 0x400, 0x500, 3);
+        f.local_vars.push(DwarfLocalVar {
+            name: "v".to_string(),
+            ty: int_ty,
+            location: DwarfParamLocation::reg(3),
+            ranges: vec![
+                DwarfLocRange { begin_pc: 0x400, end_pc: 0x440, loc: DwarfParamLocation::reg(3) },
+                DwarfLocRange {
+                    begin_pc: 0x440,
+                    end_pc: 0x480,
+                    loc: DwarfParamLocation::fbreg(-896),
+                },
+            ],
+            decl_line: 4,
+        });
+        let sec = build_dwarf_full(&cu_with(vec![f], vec![]), &opts);
+        assert!(sec.loc.is_empty() && sec.loc_relocs.is_empty(), "DWARF5 不发 .debug_loc");
+        assert!(sec.info.iter().any(|b| *b == DW_OP_reg0 + 3), "退回单 exprloc：号必须仍发出去");
     }
 }

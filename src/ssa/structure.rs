@@ -39,9 +39,7 @@ pub(super) fn is_structured(body: &Block) -> bool {
 pub fn structured_reject(body: &Block) -> Option<String> {
     body.items.iter().find_map(|item| match item {
         BlockItem::Stmt(s) => stmt_reject(s),
-        BlockItem::Decl(Decl::Func(f)) => {
-            f.body.as_ref().and_then(structured_reject)
-        },
+        BlockItem::Decl(Decl::Func(f)) => f.body.as_ref().and_then(structured_reject),
         _ => None,
     })
 }
@@ -52,7 +50,9 @@ fn stmt_reject(s: &Stmt) -> Option<String> {
         // 表达的标签集合，后者是真正的 fallthrough/continue 语义。
         // goto/label/computed-goto 见文件头：已从准入判据里移出。
         Stmt::AsmGoto { .. } => Some("asm goto".to_string()),
-        Stmt::Switch { .. } => Some("switch（含 fallthrough / 区间 case / 绑定 continue，未能降级）".to_string()),
+        Stmt::Switch { .. } => {
+            Some("switch（含 fallthrough / 区间 case / 绑定 continue，未能降级）".to_string())
+        },
         Stmt::If { then_, else_, .. } => {
             stmt_reject(then_).or_else(|| else_.as_ref().and_then(|e| stmt_reject(e)))
         },
@@ -83,32 +83,146 @@ fn item_has_unstructured_flow(item: &BlockItem) -> bool {
     match item {
         BlockItem::Stmt(s) => stmt_has_unstructured_flow(s),
         BlockItem::Decl(Decl::Func(f)) => f.body.as_ref().is_some_and(has_unstructured_flow),
+        // 声明的初值里也能藏 `&&label`：`static const void *t[] = {&&a, &&b};` 这一族
+        // 是跳转表的本体，标签地址进了 IR 就不再是结构化流，而重建通道看不见它。
+        // 以前本函数对 `Decl(Var)` 一律 `false`，于是「唯一的非结构化证据恰好在
+        // 局部 static 的初值里」的函数会被误判成结构化并进重建。
+        BlockItem::Decl(Decl::Var(v)) => v.init.as_ref().is_some_and(expr_has_unstructured),
         _ => false,
+    }
+}
+
+/// 表达式子树里有没有非结构化流。两类：
+///   * `Expr::LabelAddr`（`&&label`）：标签地址一旦被取走，跳它的边就不在 CFG 里；
+///   * `Expr::StmtExpr`（`({...})`）：语句表达式的块里可以写 `goto` / 标签，而那
+///     个块以前没有任何控制流判据下探过（`stmt_has_unstructured_flow` 从不停在表达式上）。
+///
+/// 写成对 `Expr` 的**穷尽** `match`（无 `_` 臂）是故意的编译钉子：以后加变体不填
+/// 本函数就编不过，而不是静默少扫一类子树（`Stmt::Switch.prelude` 那一族漏扫就是同一
+/// 种错，已在方案 §4.5 记账）。
+fn expr_has_unstructured(e: &Expr) -> bool {
+    use Expr as E;
+    match e {
+        // —— 直接命中 ——
+        E::LabelAddr { .. } => true,
+        // 语句表达式：块里递归回语句判据。
+        E::StmtExpr { block, .. } => has_unstructured_flow(block),
+        // —— 叶子：不携带子表达式 ——
+        E::Int { .. }
+        | E::Float { .. }
+        | E::ComplexLit { .. }
+        | E::ComplexIntLit { .. }
+        | E::String { .. }
+        | E::Char { .. }
+        | E::Ident { .. }
+        | E::SizeofTy { .. }
+        | E::AlignofTy { .. }
+        | E::VaArgPack { .. } => false,
+        // —— 单子 ——
+        E::Real { e, .. }
+        | E::Imag { e, .. }
+        | E::Unary { e, .. }
+        | E::Cast { e, .. }
+        | E::SizeofExpr { e, .. }
+        | E::AlignofExpr { e, .. }
+        | E::AddrOf { e, .. }
+        | E::Deref { e, .. }
+        | E::PostInc { e, .. }
+        | E::PostDec { e, .. }
+        | E::PreInc { e, .. }
+        | E::PreDec { e, .. } => expr_has_unstructured(e),
+        // —— 多目 ——
+        E::Binop { l, r, .. } | E::Assign { l, r, .. } | E::Comma { l, r, .. } => {
+            expr_has_unstructured(l) || expr_has_unstructured(r)
+        },
+        E::Index { arr, idx, .. } => expr_has_unstructured(arr) || expr_has_unstructured(idx),
+        E::Member { expr, .. } => expr_has_unstructured(expr),
+        E::Cond {
+            cond, then_, else_, ..
+        } => {
+            expr_has_unstructured(cond)
+                || expr_has_unstructured(then_)
+                || expr_has_unstructured(else_)
+        },
+        E::Call { callee, args, .. } => {
+            expr_has_unstructured(callee) || args.iter().any(expr_has_unstructured)
+        },
+        E::CompoundLit { inits, .. } | E::InitList { inits, .. } => {
+            inits.iter().any(init_item_has_unstructured)
+        },
+        E::AsmExpr {
+            outputs, inputs, ..
+        } => {
+            // asm 的输入/输出操作数里同样能藏 `&&label`。asm **goto** 的目标不在这里
+            // （那是 `Stmt::AsmGoto.goto_labels`，由语句臂判）。
+            outputs.iter().any(expr_has_unstructured) || inputs.iter().any(expr_has_unstructured)
+        },
+        E::VaArg { ap, .. } => expr_has_unstructured(ap),
+        E::Offsetof { indices, .. } => indices.iter().any(|i| expr_has_unstructured(i)),
+    }
+}
+
+fn init_item_has_unstructured(it: &InitItem) -> bool {
+    match it {
+        InitItem::Expr(e) => expr_has_unstructured(e),
+        InitItem::Designated { value, .. } => expr_has_unstructured(value),
     }
 }
 
 fn stmt_has_unstructured_flow(s: &Stmt) -> bool {
     match s {
         Stmt::Goto { .. } | Stmt::GotoIndirect { .. } | Stmt::Label { .. } => true,
-        Stmt::If { then_, else_, .. } => {
-            stmt_has_unstructured_flow(then_)
-                || else_.as_ref().is_some_and(|e| stmt_has_unstructured_flow(e))
+        // 语句的**表达式槽**也要看：`return &&foo;` / `p = &&foo;` / `if (x) goto *p;`
+        // 都不以控制流语句的形状出现，而下面每一项都自带一个表达式槽。
+        Stmt::Expr { e, .. } => expr_has_unstructured(e),
+        Stmt::Return { val, .. } => val.as_ref().is_some_and(expr_has_unstructured),
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
+            expr_has_unstructured(cond)
+                || stmt_has_unstructured_flow(then_)
+                || else_
+                    .as_ref()
+                    .is_some_and(|e| stmt_has_unstructured_flow(e))
         },
-        Stmt::While { body, .. } | Stmt::Do { body, .. } => stmt_has_unstructured_flow(body),
-        Stmt::For { init, body, .. } => {
+        Stmt::While { cond, body, .. } => {
+            expr_has_unstructured(cond) || stmt_has_unstructured_flow(body)
+        },
+        Stmt::Do { body, cond, .. } => {
+            expr_has_unstructured(cond) || stmt_has_unstructured_flow(body)
+        },
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             init.as_ref().is_some_and(|i| stmt_has_unstructured_flow(i))
+                || cond.as_ref().is_some_and(expr_has_unstructured)
+                || step.as_ref().is_some_and(expr_has_unstructured)
                 || stmt_has_unstructured_flow(body)
         },
         Stmt::Block { b, .. } => has_unstructured_flow(b),
         Stmt::Switch {
-            cases, prelude, ..
+            expr,
+            cases,
+            prelude,
+            ..
         } => {
             // prelude（第一个 `case` 之前的语句与标签）也是 switch 体的一部分：那里出现的
             // `foo:` / `goto foo` 同样让本函数不是结构化的。以前只看 cases，「唯一的标签
             // 恰好在 prelude 里」的函数会被误判成结构化并进重建通道。
-            cases.iter().any(|c| has_unstructured_flow(&c.body))
+            expr_has_unstructured(expr)
+                || cases.iter().any(|c| {
+                    has_unstructured_flow(&c.body)
+                        || c.val.as_ref().is_some_and(expr_has_unstructured)
+                })
                 || prelude.iter().any(item_has_unstructured_flow)
         },
+        // 本函数的职责是「有没有看不见边的控制流」，而 `Stmt::Invoke` 的落地垫、
+        // `Stmt::EhLandingPad`、`Stmt::AsmGoto` 的目标边都是**既有判定已经处理**的（它们
+        // 以 `Stmt::Label` 的形式出现在体里，上面那条臂已经拦下），本文件不再另开一份。
         Stmt::Invoke { call, .. } => stmt_has_unstructured_flow(call),
         _ => false,
     }
@@ -306,30 +420,29 @@ fn lower_switch_stmt(s: &Stmt) -> Option<Stmt> {
     //     **无副作用的 selector 保持原形态**，因而绝大多数 switch 零产物漂移。
     //     残留：`switch (volatile 对象)` 仍会逐臂重读一次。含 volatile 的函数本来就被
     //     `opt::func_refs_volatile` 整函数挡在 SSA 外，这条不在本判据的射程内。
-    let (sel, sel_decl): (Expr, Option<BlockItem>) = if crate::semantics::expr_has_side_effects(
-        expr
-    ) {
-        let name = format!("__sw_sel_{}_{}_{}", span.line, span.col, span.len);
-        let decl = BlockItem::Decl(Decl::Var(crate::opt::plain_var_decl(
-            expr_ty(expr),
-            name.clone(),
-            Some(expr.clone()),
-            span,
-        )));
-        (
-            Expr::Ident {
-                name: Ident {
-                    name,
+    let (sel, sel_decl): (Expr, Option<BlockItem>) =
+        if crate::semantics::expr_has_side_effects(expr) {
+            let name = format!("__sw_sel_{}_{}_{}", span.line, span.col, span.len);
+            let decl = BlockItem::Decl(Decl::Var(crate::opt::plain_var_decl(
+                expr_ty(expr),
+                name.clone(),
+                Some(expr.clone()),
+                span,
+            )));
+            (
+                Expr::Ident {
+                    name: Ident {
+                        name,
+                        span: span.clone(),
+                    },
                     span: span.clone(),
+                    ty: expr_ty(expr),
                 },
-                span: span.clone(),
-                ty: expr_ty(expr),
-            },
-            Some(decl),
-        )
-    } else {
-        (expr.clone(), None)
-    };
+                Some(decl),
+            )
+        } else {
+            (expr.clone(), None)
+        };
     // 4. 从后往前拼 if-else 链。
     let mut current_else: Option<Box<Stmt>> = None;
     for arm in arms.iter().rev() {
@@ -675,7 +788,12 @@ fn switch_jt_plan(expr: &Expr, cases: &[Case], prelude: &[BlockItem]) -> Option<
     for (k, i) in &vals {
         slots[(*k - min) as usize] = *i;
     }
-    Some(JtPlan { min, count, slots, has_default })
+    Some(JtPlan {
+        min,
+        count,
+        slots,
+        has_default,
+    })
 }
 
 /// 把单个 `Stmt::Switch` 改写成「静态局部表 + 界检 + goto *表[下标]」。
@@ -692,7 +810,13 @@ fn lower_switch_to_jumptable(
     hoisted_table: &mut Option<BlockItem>,
     seq: &mut u32,
 ) -> Option<Stmt> {
-    let Stmt::Switch { expr, cases, prelude, span } = s else {
+    let Stmt::Switch {
+        expr,
+        cases,
+        prelude,
+        span,
+    } = s
+    else {
         return None;
     };
     let plan = switch_jt_plan(expr, cases, prelude)?;
@@ -804,7 +928,11 @@ fn lower_switch_to_jumptable(
         span: sp.clone(),
         ty: Type::Int,
     };
-    let out_target = if plan.has_default { deflab.clone() } else { endlab.clone() };
+    let out_target = if plan.has_default {
+        deflab.clone()
+    } else {
+        endlab.clone()
+    };
     let check = Stmt::If {
         cond: bound,
         then_: Box::new(Stmt::Goto {

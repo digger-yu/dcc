@@ -11,7 +11,6 @@ test $0x8,%rax
 je <read_b>
 or $0xfffffffffffffff0,%rax
 movslq %eax,%rax
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret

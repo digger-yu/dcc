@@ -17,6 +17,20 @@ use crate::target::Target;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+/// 待外置的冷分支（方案 §3 的 P2）。发射器是单遍直写，所以下沉一条冷边只能「先记下，
+/// 到函数尾再发」——但 `break`/`continue` 要靠发射现场的目标栈才能解对，所以必须连同
+/// 三个栈一起快照，而不是到 flush 时再用当前值。
+///
+/// `join` = 冷块跑完要回到的汇合标签；`None` = 体 自己以 return 结束（此时不再发 jmp）。
+pub(crate) struct ColdArm {
+    pub entry: String,
+    pub body: crate::ast::Stmt,
+    pub join: Option<String>,
+    pub loop_continue: Option<String>,
+    pub loop_break: Option<String>,
+    pub break_targets: Vec<(String, bool)>,
+}
+
 /// x86_64 代码生成器主结构体
 ///
 /// 包含代码生成过程中的所有状态信息，包括：
@@ -43,6 +57,15 @@ pub struct Codegen {
     /// switch 压入 (l_break, true), 循环压入 (le, false); break 语句
     /// 总是跳到栈顶目标 (最近封闭的 switch / 循环).
     pub break_targets: Vec<(String, bool)>,
+    /// 冷格外置队列（`DCC_COLD_OUTLINE=1` 才写入；默认空 ⇒ 产物逐字节不变）。
+    /// `pub(crate)`：`ColdArm` 是 crate 内类型，挂在 `pub` 字段上会触发
+    /// private_interfaces（向外暴露一个外部拿不到的类型）。
+    pub(crate) cold_arms: Vec<ColdArm>,
+    /// 本函数被指纹合并掉的外置块数（S6 的机制检查值，不进产物字节）。
+    ///
+    /// 为什么单独计数而不从「函数变小了」倒推：一个变小的函数可能同时吃了外置与合并，
+    /// 也可能只是nop 填充重排；合并次数是唯一能回答「到底有多少对冷尾真的全等」的读数。
+    pub(crate) cold_merged: u64,
     // .rodata: 字符串池 + 待修补引用
     pub rodata: Vec<u8>,
     pub string_pool: HashMap<Vec<u8>, u64>, // data -> offset in rodata
@@ -178,6 +201,60 @@ pub struct Codegen {
     /// `var_map` 只存 `Type`（限定符在 `QualType` 上），所以「这个槽能不能被转发」
     /// 这条事实必须在声明处单独记一笔。逐函数清空；块内优化对它只读。
     pub(crate) volatile_frames: HashSet<i64>,
+    /// **本函数的控制流护栏**（方案 §4.7：S2 的清槽四条件与家绑定的护栏必须同源）。
+    ///
+    /// 与 `volatile_frames` 的分工：那张表是**偏移粒度**的屏障（哪些槽永不被事实穿过），
+    /// 本字段是**函数粒度**的结论（帧槽事实能不能活过一次 `call`、区域家能不能开工）。
+    /// 两者都必须逐函数重算；泄漏到下一个函数就是拿别人的控制流形状给本帧开绿灯。
+    /// 算式在 `crate::frame_guard`，本模块不写第二份判据。
+    pub(crate) frame_guard: crate::frame_guard::FrameGuard,
+    /// 本函数有自标（`goto *p` / `asm goto`）或有内联 asm ⇒ 整个函数的 A2 放宽都关掉：
+    /// 间接跳转的落点在运行时才知道，而 `%l0` 形式与 asm 文本里的 `jmp` 都是本模块
+    /// 数不到的边；单遍发射无法证明「L 只有一个前驱」。
+    pub(crate) a2_no_inherit: bool,
+    /// 每个标签在 AST 里被多少条跳转指着（先验真源：`frame_guard::jump_edges`）。
+    ///
+    /// 多前驱取交（S2 A2 另一臂）拿它答「到 `label(L)` 为止，本 pass 是否已经把 L 的
+    /// 前驱**看全**」：只数到已经发出的跳转，所以要与 AST 给的应发条数比。两者相等才
+    /// 说明剩下的都是落空边；不等（少 = 有回边或死代码里的边、多 = 发射器拆了条）一律
+    /// 退回整体清。
+    pub(crate) a2_incoming: HashMap<String, u32>,
+    /// 每个标签已经收了多少条前驱边（`jmp_rel32` 发射时累加）。
+    pub(crate) a2_seen: HashMap<String, u32>,
+    /// 某个标签的已知前驱出口事实**交集**。逐边在 `a2_contribute` 里取交，
+    /// `label()` 只把它并进当前状态。
+    pub(crate) a2_snap: HashMap<String, crate::codegen::x86_64::blockopt::BlockState>,
+    /// **区内家状态**（方案 §3 S4 的 L2 家模型）。
+    ///
+    /// 逐函数重建：`RegionState` 里每一张表都是本帧坐标（槽位移）或本函数集合
+    /// （heat/blacklisted），泄漏到下一个函数就是拿别人的槽号当自己的家——那是直接错值。
+    pub(crate) region: crate::codegen::x86_64::region::RegionState,
+    /// 一段 PC 区间上的位置（方案 §4.4 的 loclist 生产点）。
+    ///
+    /// 今天只有一种生产者：延伸池（caller-saved）家在 call 序列里被存进保存槽、回来时
+    /// 再装载 —— 那段区间里真值在槽里而不在号里，而单 `DW_AT_location` 只能说一个位置
+    /// （说号就是让调试器在函数调用期间读一个callee 己破坏的寄存器）。
+    /// `(变量名, begin_pc, end_pc, 位置)`，按名交给 `collect_debug_var_facts`。
+    pub debug_loc_windows: Vec<(String, u64, u64, crate::location::Location)>,
+    /// 本函数里「地址被取走过的」局部/形参占的帧偏移（8 字节槽粒度，S2 A1 与 S4 的槽级屏障）。
+    ///
+    /// 与 `volatile_frames` 同一形态、不同含义：那张表上的槽「永不可被事实穿过」（volatile
+    /// 的每一次访问都是可观察事件）；本表上的槽「不可活过一次 call、不可把存出推迟到区尾」
+    /// （callee 拿着逃逸出去的指针可以写它，而那份写不在事实表的视野里）。
+    /// 同一个偏移可能在两张表上，取并集就是对的。
+    pub(crate) escaped_frames: HashSet<i64>,
+    /// 尾部悬空的 legacy 前缀字节数（段前缀 0x64/0x65/… 与 0x66/0x67 那一族）。
+    ///
+    /// 为什么要记它：段前缀是以「单独一笔 `emit_insn`」发的（`emit_global_seg` 与
+    /// `lvalue_seg_prefix` 那几处都是这个形状），字节流里因此会出现一段「前缀已落、
+    /// 被它修饰的那条还没落」的间隙。任何在本条之前插入字节的变换插进这个间隙，前缀就
+    /// 贴到了插入的那条上：实测就是 `percpu_offset.c` / `seg_object_body.c` 的 SIGILL ——
+    /// 插入的存出吃了 `%gs:`，真正的访问丢了前缀，指令流从中间错位。
+    ///
+    /// 区内家（S4）已经改成零插入，不再需要绕这段间隙；本字段留下来是因为它是
+    /// 「不得在发射入口插字节」那条约束的**证据**（用例：`region_home_is_gated_off_and_live_when_on`）。
+    #[allow(dead_code)]
+    pub(crate) dangling_prefix: usize,
     /// 本函数里「帧槽读写不得被等价事实穿过」的局部变量名 → 占用的槽数（P13 阶段6）。
     ///
     /// 与 `volatile_frames` 的分工：这张表在**声明处**建成，此时晚分配变量的偏移还
@@ -456,6 +533,10 @@ pub struct Codegen {
     // -S 汇编文本输出
     pub emit_asm_text: bool,
     pub debug_level: u8,
+    /// `-O0..-O3`。发射侧读它不是为了「要不要优化」，而是护栏：区内家（S4）与
+    /// A2 标签汇合在 -O0 下必须整体关——那一档不跑活性分析，「本区内这个槽会不会
+    /// 再被写」没有依据（方案 §3 S4 硬互斥清单里的 `-O0`，并要求补本字段）。
+    pub opt_level: u8,
     pub emit_cfi: bool,
     // 编译选项：运行时检查 (-fbounds-check / -ftrapv / -fsanitize=address)
     pub bounds_check: bool,
@@ -710,6 +791,9 @@ pub struct ParallelEmitCtx {
     pub function_sections: bool,
     pub emit_asm_text: bool,
     pub debug_level: u8,
+    /// 优化档。并行发射下**必须**跟着快照下行：护栏（S4/A2）读它，worker 里丢了它
+    /// 就是「同一个源文件在并行/不并行两条路上产出不同字节」。
+    pub opt_level: u8,
     pub emit_cfi: bool,
     pub source_name: String,
     pub line_map: Vec<LineSpan>,
@@ -785,8 +869,23 @@ pub struct DebugVarLoc {
     /// 与 DWARF 的偏移基准无关：这里就是 `%r13 + off`（`Stack`）、物理寄存器（`Reg`）
     /// 或溢出槽序号（`Spill`）；换算（CFA 关系、DWARF 寄存器号）只发生在 `debug.rs` 那一侧。
     pub loc: crate::location::Location,
+    /// 分段位置（loclist）：`[begin_pc, end_pc)` 这段 PC 上对象其实在 `loc` 里说的地方。
+    ///
+    /// 为什么必须能分段：区内家（S4）推迟一次存出时，那段区间里**真值在号里而不是在
+    /// 栈槽上**；单 `loc` 会让调试器读一个从未写过的槽（方案 §4.4 点名的就是这件事）。
+    /// 空表 ⇒ 本函数只有一个位置，与木结构存在前的产物逐字节相同。
+    pub ranges: Vec<DebugVarRange>,
     pub ty: crate::ast::Type,
     pub decl_line: u32,
+}
+
+/// 一段 PC 区间上的位置（与 `debug::DwarfLocRange` 同形状，但不拿 DWARF 的注册号：
+/// 发射侧只知道硬件号，换算只在 `debug.rs` 那一侧发生）。
+#[derive(Debug, Clone, Copy)]
+pub struct DebugVarRange {
+    pub begin_pc: u64,
+    pub end_pc: u64,
+    pub loc: crate::location::Location,
 }
 
 #[derive(Clone)]
@@ -958,6 +1057,14 @@ impl Codegen {
             last_cmp: None,
             block_state: Default::default(),
             volatile_frames: HashSet::new(),
+            frame_guard: crate::frame_guard::FrameGuard::default(),
+            a2_no_inherit: false,
+            a2_incoming: HashMap::new(),
+            a2_seen: HashMap::new(),
+            a2_snap: HashMap::new(),
+            region: Default::default(),
+            escaped_frames: HashSet::new(),
+            dangling_prefix: 0,
             volatile_locals: HashMap::new(),
             volatile_slots_overflow: false,
             auto_homes: HashMap::new(),
@@ -1055,10 +1162,13 @@ impl Codegen {
             pending_label_diff_rels: vec![],
             data_relocations: vec![],
             cleanup_vars: vec![],
+            cold_arms: vec![],
+            cold_merged: 0,
             extra_rela_sections: vec![],
             comdat_groups: vec![],
             pending_debug_info_relocs: vec![],
             debug_var_facts: Vec::new(),
+            debug_loc_windows: Vec::new(),
             pushsection_stack: vec![],
             section_stack: vec![],
             section_active: false,
@@ -1069,6 +1179,7 @@ impl Codegen {
             deferred_pushsection_fixups: vec![],
             emit_asm_text: false,
             debug_level: 0,
+            opt_level: 0,
             emit_cfi: false,
             bounds_check: false,
             trapv: false,
@@ -1213,12 +1324,25 @@ impl Codegen {
                     .insert(f.name.name.clone(), f.alignment.unwrap_or(8).max(1));
             }
         }
-        // 预扫描: 记录哪些函数是可变参数的
+        // 预扫描: 记录每个函数的变参性。
+        //
+        // 为什么现在也要记 `false`：调用序列里那句 `mov $N, %al` 是 SysV 给**变参**被调方
+        // 用的（告诉它几个 xmm 寄存器装了参数）。只知道「查不到」时不能省，而本表以前只存
+        // `true` 条目，等于「所有已知非变参函数也被当成可能读 %al」。实测 `luaV_execute`
+        // 因此多了 250 条两字节指令，全在分派热路径上。
+        //
+        // 但「记 `false`」的门槛必须是**看过原型**：
+        //   * 有体（定义）⇒ 参数表就是真的；
+        //   * 无体但 params 非空 ⇒ 带原型的声明；
+        //   * 无体且 params 为空 ⇒ 可能是 K&R 风格的 `int foo();`（参数 unspecified，
+        //     旧代码里这种被调方可以读 %al）⇒ **不记**，退回照旧发那条 mov。
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
                 Self::register_func_sig(f, &mut self.func_param_types);
                 if f.is_variadic {
                     self.variadic_funcs.insert(f.name.name.clone(), true);
+                } else if !f.is_old_style && (f.body.is_some() || !f.params.is_empty()) {
+                    self.variadic_funcs.insert(f.name.name.clone(), false);
                 }
                 if f.is_old_style {
                     self.old_style_funcs.insert(f.name.name.clone());
@@ -1367,6 +1491,7 @@ impl Codegen {
         // 逐 TU 采集的调试信息表也逐 TU 清空：不准则上一次的局部会被当成这一次的名字
         // （同一进程里跑两次编译、或串行/串行对比时都会露）。
         self.debug_var_facts.clear();
+        self.debug_loc_windows.clear();
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
                 if f.body.is_some() {
@@ -1723,6 +1848,7 @@ impl Codegen {
         // 逐 TU 采集的调试信息表也逐 TU 清空：不准则上一次的局部会被当成这一次的名字
         // （同一进程里跑两次编译、或串行/串行对比时都会露）。
         self.debug_var_facts.clear();
+        self.debug_loc_windows.clear();
         for decl in &prog.decls {
             if let Decl::Func(f) = decl {
                 if f.body.is_some() {

@@ -304,6 +304,12 @@ pub struct Ctx {
     /// 置位时走 analysis-only 两件事：准入判据换成 [`definitely_assigned`]，
     /// 并**关闭号共用**（解释见 `plan_for` 里的 `shared_slots`）。
     pub unstructured: bool,
+    /// 允许形参也当候选（`DCC_HOME_PARAMS=1`）。
+    ///
+    /// 集合里的名字就是「可以当家的形参」：判据在 `opt.rs` 算（那里看得见 AST 的 quals /
+    /// VLA / 是否变参），本模块不重新发明这些判断，以免两边不一致。
+    /// 为空 ⇒ 今天的行为（形参不是候选，序言把它们存进栈槽）。
+    pub home_params: HashSet<String>,
 }
 
 /// 算出该绑哪些变量，并把结果写进**重建后的** AST。
@@ -341,10 +347,10 @@ pub fn plan_and_split(func: &mut Function, original: &Block, ctx: &Ctx) -> Plan 
 ///
 /// 不回滚决策：一旦“后置发现→取消已算出的家”，分裂表与实际发射就会不一致（多一个
 /// 声明却没家的局部会改变帧内布局）。校验只负责把这类事说出来，让判据能往前修。
-pub fn deliver(func: &Function, plan: &mut Plan, body: &mut Block) {
+pub fn deliver(func: &Function, plan: &mut Plan, body: &mut Block, params: &mut [crate::ast::Param]) {
     validate_against_rebuilt(func, plan, body);
     if !plan.loc.is_empty() {
-        apply_bindings(body, plan, &func.local_splits);
+        apply_bindings(body, plan, &func.local_splits, params);
     }
     if dump_on() {
         eprint!("[regalloc] {}\n", func.name);
@@ -444,9 +450,11 @@ fn validate_against_rebuilt(func: &Function, plan: &Plan, rebuilt: &Block) {
 }
 
 /// 旧的单一入口（保留给测试：决策 + 交付一次做完，`body` 就是重建后的体）。
+/// 形参的家需要 AST 的 `Param` 做载体，而这个入口只有 IR `Function`：给空的形参表，
+/// 也就是从不绑形参（`home_params` 集合在测试里也不会非空）。
 pub fn assign(func: &mut Function, original: &Block, body: &mut Block, ctx: &Ctx) -> Plan {
     let mut plan = plan_and_split(func, original, ctx);
-    deliver(func, &mut plan, body);
+    deliver(func, &mut plan, body, &mut []);
     plan
 }
 
@@ -508,8 +516,35 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
     // 就是静默错值 —— 这条是 `tests::user_bound_local_reserves_its_register` 逼出来的。
     let mut taken = ctx.taken_regs.clone();
     taken.extend(sc.user_bound_regs.iter().copied());
-    let infos = &sc.infos;
     let spans = base_spans(func);
+    // 形参入候选（`Ctx::home_params` 非空时）。需要两件配套事，缺一即错值：
+    //  1. `infos` 里得有它（否则下面的循环根本看不到这个名字）；类型取 IR 的形参表；
+    //  2. 「已赋值」判据得把它算作 entry 定义（形参没有定义点，`definitely_assigned`
+    //     不认识它，不补这一条就会全部以 not-defined-in-entry-block 被拒）。
+    // 写在 `infos` 被不可变借用之前：那边一旦借了，这里就改不动。
+    if !ctx.home_params.is_empty() {
+        let vol = volatile_touched_names(func);
+        for p in func.params.iter() {
+            if !ctx.home_params.contains(&p.base) {
+                continue;
+            }
+            // volatile 访问过的名字一律不当形参的家。为什么不能只靠 `Param::quals`：
+            // 那个字段在多条解析路径上恒为 `NONE`（实测 `void f(volatile int n)` 的
+            // quals 就是空的），拿它排 volatile 是一条空判据 —— 只能问 IR：volatile
+            // 读写在 `InstKind::Load/Store/IndexLoad/IndexStore{is_volatile}` 上带位。
+            if vol.contains(&p.base) {
+                continue;
+            }
+            sc.infos.entry(p.base.clone()).or_insert(VarInfo {
+                ty: p.ty.clone(),
+                bindable_ty: bindable_ty(&p.ty),
+                // 形参不存在 static/tls/cleanup/asm_label 这些形态（volatile 上面已经排掉）。
+                plain_local: true,
+                user_bound: false,
+            });
+        }
+    }
+    let infos = &sc.infos;
     // 非结构化函数（goto/label/computed-goto）的「已赋值」事实。空集 = 不走这条判据。
     //
     // 为什么要换口径：`Span::entry_def` 要求「第一次出现是 entry 块里的定义」，
@@ -517,7 +552,15 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
     // 全部使用点）。不换口径，这四个最热的指针连候选都进不了。
     // 只在非结构化通道启用：结构化函数继续用 entry_def，产物逐字节不变。
     let assigned: HashSet<String> = if ctx.unstructured {
-        crate::ssa::defassign::definitely_assigned(func)
+        let mut a = crate::ssa::defassign::definitely_assigned(func);
+        // 形参在入口处就是定义（入站寄存器/栈槽），`definitely_assigned` 看不到它：
+        // 不补这一条，上面刚加进 `infos` 的形参会全部死在 not-defined-in-entry-block 上。
+        for p in func.params.iter() {
+            if ctx.home_params.contains(&p.base) {
+                a.insert(p.base.clone());
+            }
+        }
+        a
     } else {
         HashSet::new()
     };
@@ -538,7 +581,9 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
         // 实测 `seg_qualifier.c` 的 main 一度把四个临时值全绑走了：既挤掉了真正的热
         // 变量，又把「合成临时值」这条后端专门有约定（`is_synthetic_temp_base`，见
         // §7 的第 5 轮补记）的名字推进了绑定表。
-        let why: Option<&'static str> = if !func.original_locals.contains(name) {
+        let why: Option<&'static str> = if !func.original_locals.contains(name)
+            && !ctx.home_params.contains(name)
+        {
             Some("not-a-user-local")
         } else if sc.has_nested_fn {
             // Phase 5.2 嵌套函数干涉：upvar 经 r13 静态链逐层访问（emit/nested.rs
@@ -567,7 +612,11 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
                     let defined = if ctx.unstructured {
                         assigned.contains(name)
                     } else {
-                        sp.entry_def
+                        // 结构化通道走 `entry_def`（「第一次出现就是 entry 块里的定义」），
+                        // 但形参在 IR 里**没有定义点**（它的定义就是调用约定本身），所以
+                        // 这一条永远拒掉形参。`home_params` 名单里的名字自己就是定义，
+                        // 不需要 `entry_def` 再背书。
+                        sp.entry_def || ctx.home_params.contains(name)
                     };
                     if !defined {
                         Some("not-defined-in-entry-block")
@@ -668,7 +717,20 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
         // 「必须给右操作数暂存留至少一个空闲候选」是**发号判据的一部分**，不是发射期的兑底：
         // 延伸池与暂存候选是同一批号（§11.47 实测：候选表全被家占满时 `emit` 会
         // 报 `E1135`），而只有分配器能看见所有候选的最终归属 —— 到了发射期已经无从选择。
-        let pool = auto_pool();
+        //
+        // 形参候选只许在 callee-saved 的 `POOL` 里取号，理由有两层，缺一即错：
+        //  1. 交付侧（`apply_bindings`）本来就不把延伸池号交给形参（序言里形参是从 SysV
+        //     入站号 `rdi,rsi,rdx,rcx,r8,r9` 搬出来的，家在 r8/r9 会出现「前一个形参已
+        //     搬进 r8、后一个形参再从 r8 读自己那份」）。分配器先绑上、交付时再丢，那个
+        //     号就白占了一个暂存候选：实测 `luaV_execute` 的 `ci -> %r8` 被交付侧拒掉后，
+        //     右操作数取号器仍看不见 r8，存/步从 10.36 涨到 11.09。
+        //  2. `POOL` 恰好是 `auto_pool()` 的前缀，所以下面 `slot_holders` 的下标含义不变
+        //     （若哪天改成非前缀的筛法，必须同时把号槽索引换成寄存器号）。
+        let pool: Vec<(&'static str, u8)> = if ctx.home_params.contains(&c.name) {
+            POOL.iter().map(|&(n, r)| (n, r)).collect()
+        } else {
+            auto_pool()
+        };
         let held_by_pool: Vec<u8> = pool
             .iter()
             .enumerate()
@@ -1151,7 +1213,12 @@ fn ident_root_name(e: &Expr) -> Option<String> {
 /// 双真源：`register_name` 是用户文本名的载体（本函数不写用户声明，只填自动分配的缺口），
 /// `home` 是分配结果；两者在 `the_ast_landing_comes_from_the_table` 里被要成一致。
 /// Phase 4.1c/d 会让后端改读 `home` 并拆掉 `register_name` 这条中间通道。
-fn apply_bindings(b: &mut Block, plan: &mut Plan, splits: &Splits) {
+fn apply_bindings(
+    b: &mut Block,
+    plan: &mut Plan,
+    splits: &Splits,
+    params: &mut [crate::ast::Param],
+) {
     // 表 → 「AST 局部名 → 家」。不可表示的家（非 GP 通道、池外号，以及分裂也没能
     // 消除的同基名冲突）走下面的拒因点名，不默默绑。
     //
@@ -1247,6 +1314,24 @@ fn apply_bindings(b: &mut Block, plan: &mut Plan, splits: &Splits) {
         }
     }
     walk(b, &map);
+    // 形参的家落在同一个 `map` 里，但它的载体不是 `VarDecl` 而是 `Param::home`。
+    //
+    // 只接 callee-saved 的 POOL 号，延伸池（r8/r9）剔掉：序言里形参是从 SysV 入站号
+    // `rdi,rsi,rdx,rcx,r8,r9` 搬出来的，若允许把某个形参的家定在 r8/r9，则「先把前一个
+    // 形参搬进 r8、后一个形参再从 r8 读」会拿着已被覆写的值。callee-saved 与入站号
+    // 不相交，所以下面 `functions.rs` 形参入库那一步无需考虑搬移顺序。
+    for p in params.iter_mut() {
+        let Some(nm) = p.name.as_ref() else { continue };
+        let Some((_rn, loc)) = map.get(nm.name.as_str()) else { continue };
+        let Location::Reg(r) = loc else { continue };
+        if !POOL.iter().any(|(_, v)| *v == r.n) {
+            continue;
+        }
+        // 只写 `home`，不写 `register_name`：后者是「用户手写 register asm」的载体
+        // （`Param` 也没这个字段）。后端识别「这个号要序言保存」的真源是 `homes` 表，
+        // 而它在 `compile_func` 开头就从 `p.home` 播种（在 resync_pins 之前）。
+        p.home = Some(*loc);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1307,6 +1392,75 @@ fn each_occurrence(func: &Function, mut visit: impl FnMut(&SsaVar, i32, bool, bo
         }
         pos += 1;
     }
+}
+
+/// 被 volatile 读写碰到的基名集合。
+///
+/// 保守到「把那条指令所有操作数里出现的基名都算进去」：多排除一个名字只会少省一个家，
+/// 漏排除则是把可观察的访存次数偷改掉。今天只有形参当家这一条路用它；局部那一侧
+/// 已经有自己的 `plain_local` 判据，不在本改动里顺手改（那是行为变更，要单独量）。
+fn volatile_touched_names(func: &Function) -> HashSet<String> {
+    fn push_op(out: &mut HashSet<String>, op: &crate::ssa::ir::Operand) {
+        match op {
+            crate::ssa::ir::Operand::Var(v) => {
+                out.insert(v.base.clone());
+            },
+            crate::ssa::ir::Operand::Phi(vs) => {
+                for (v, _) in vs {
+                    out.insert(v.base.clone());
+                }
+            },
+            _ => {},
+        }
+    }
+    let mut out = HashSet::new();
+    for b in func.blocks.values() {
+        for ins in &b.insts {
+            match &ins.kind {
+                crate::ssa::ir::InstKind::Load { e, is_volatile, .. }
+                | crate::ssa::ir::InstKind::Store { e, is_volatile, .. } => {
+                    if *is_volatile {
+                        push_op(&mut out, e);
+                        if let crate::ssa::ir::InstKind::Store { src, .. } = &ins.kind {
+                            push_op(&mut out, src);
+                        }
+                    }
+                },
+                crate::ssa::ir::InstKind::IndexLoad {
+                    arr, idx, is_volatile, ..
+                } => {
+                    if *is_volatile {
+                        push_op(&mut out, arr);
+                        push_op(&mut out, idx);
+                    }
+                },
+                crate::ssa::ir::InstKind::IndexStore {
+                    arr, idx, src, is_volatile, ..
+                } => {
+                    if *is_volatile {
+                        push_op(&mut out, arr);
+                        push_op(&mut out, idx);
+                        push_op(&mut out, src);
+                    }
+                },
+                // 成员访问同样带 `is_volatile`（`struct { volatile int f; }` 的形参、
+                // 以及 `volatile` 聚合整体）。基名在 `obj` 上，保守连 `src` 一起排除。
+                crate::ssa::ir::InstKind::MemberLoad { obj, is_volatile, .. } => {
+                    if *is_volatile {
+                        push_op(&mut out, obj);
+                    }
+                },
+                crate::ssa::ir::InstKind::MemberStore { obj, src, is_volatile, .. } => {
+                    if *is_volatile {
+                        push_op(&mut out, obj);
+                        push_op(&mut out, src);
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+    out
 }
 
 /// 每个基名在 IR 里的 `[最早, 最晚]` 出现位置与定义/使用计数。
@@ -1435,6 +1589,7 @@ mod tests {
             debug_info: false,
             taken_regs: HashSet::new(),
             unstructured: false,
+            home_params: HashSet::new(),
         }
     }
 
@@ -1468,6 +1623,7 @@ mod tests {
             debug_info: true,
             taken_regs: HashSet::new(),
             unstructured: false,
+            home_params: HashSet::new(),
         };
         let (_ssa, _orig, _body, plan) = run_pipeline(src, "s", 2, &gctx);
         assert!(
@@ -1618,6 +1774,7 @@ mod tests {
                     taken_regs: HashSet::new(),
                     // 上面已用 has_multi_exit_cycle 跳过非结构化的函数，这里只校结构化通道。
                     unstructured: false,
+                    home_params: HashSet::new(),
                 };
                 let mut plan = plan_for(&ssa, f.body.as_ref().unwrap(), &ctx);
                 plan.loc = to_loc_map(&plan, &ssa);
@@ -2150,6 +2307,50 @@ mod tests {
         assert_eq!(gplan.rejected, nplan.rejected, "-g 与非 -g 的拒因表也必须逐项相等");
     }
 
+    /// 形参的家的**号码范围**：只允许 callee-saved 的 `POOL`，延伸池（r8/r9）必须拒。
+    ///
+    /// 为什么这条不是过度保守：序言里形参的值是从 SysV 入站号 `rdi,rsi,rdx,rcx,r8,r9`
+    /// 搬出来的。若把一个形参的家定在 r8，那么「先把前一个形参搬进 r8、后面的形参再从 r8
+    /// 读自己那份」会拿着已被覆写的值——而这种错只在参数个数 ≥5 的函数上出现，抖不出来。
+    /// callee-saved 与入站号集不相交，所以 `functions.rs` 的入库那一圈不依赖顺序。
+    #[test]
+    fn param_home_only_callee_saved() {
+        let src = "long s(long n, long m){long acc=0;for(long i=0;i<n;i++)acc+=n+m;return acc;}\n";
+        let (_ssa, orig, _rebuilt, mut plan) = run_pipeline(src, "s", 2, &ctx_default());
+        let mut body = orig.clone();
+        let mk = |base: &str, version: u32| crate::ssa::ir::SsaVar {
+            base: base.to_string(),
+            version,
+            ty: Type::Long,
+            span: crate::diagnostics::Span::point("t.c", 1, 1),
+        };
+        let gp = |n: u8| Location::Reg(crate::location::RegId {
+            bank: crate::location::RegBank::Gp,
+            n,
+        });
+        let mut m = LocMap::empty();
+        m.bind(&mk("n", 1), gp(3)); // rbx：POOL 内，应当交到 Param::home
+        m.bind(&mk("m", 1), gp(8)); // r8：延伸池，必须被拒
+        plan.loc = m;
+        let sp = crate::diagnostics::Span::point("t.c", 1, 1);
+        let param = |nm: &str| crate::ast::Param {
+            ty: Type::Long,
+            name: Some(crate::ast::Ident { name: nm.to_string(), span: sp.clone() }),
+            span: sp.clone(),
+            quals: crate::ast::QualifierFlags::NONE,
+            vla_dim: None,
+            home: None,
+        };
+        let mut params = vec![param("n"), param("m")];
+        apply_bindings(&mut body, &mut plan, &Splits::default(), params.as_mut_slice());
+        assert_eq!(
+            params[0].home,
+            Some(gp(3)),
+            "POOL 内的号应当交给形参当载体"
+        );
+        assert_eq!(params[1].home, None, "r8 属于延伸池，不得当形参的家（与入站号相撞）");
+    }
+
     /// `DCC_OPT_SKIP=ssa_regalloc` 关掉的是调用点，这里验证 pass 自己也能整体退回：
     /// 不含可绑变量的函数必须一条都不报（防止把「没得绑」实现成「绑了但后端忽略」）。
     #[test]
@@ -2184,7 +2385,9 @@ mod tests {
             Location::Spill(2),
         );
         plan.loc = m;
-        apply_bindings(&mut body, &mut plan, &Splits::default());
+        // 本例只校局部：形参的家需要 AST 的 `Param` 做载体，这里没形参参与 ⇒ 空表。
+        // 「哪些号能当形参的家」由 `param_home_only_callee_saved` 那条用例把守。
+        apply_bindings(&mut body, &mut plan, &Splits::default(), &mut []);
 
         let mut found = 0;
         fn walk(b: &Block, found: &mut usize) {

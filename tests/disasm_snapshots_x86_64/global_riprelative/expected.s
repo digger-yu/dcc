@@ -65,7 +65,6 @@ mov %rsp,%r13
 sub $0x2e0,%rsp
 <nop padding>
 movsd 0x0(%rip),%xmm0
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret

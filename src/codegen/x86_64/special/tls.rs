@@ -19,14 +19,16 @@ impl Codegen {
     /// ET_EXEC：设置 FS 基址指向 TLS 模板（可写 PT_LOAD 段内）
     pub fn emit_tls_fs_setup(&mut self) {
         // lea rsi, [rip+disp32]  → TLS 模板地址
-        let lea_pos = self.pos() + 3;
+        //
+        // 先发射再按 `pos()-4` 取 disp32：发射入口可能在条前插入字节（区内家回写），
+        // 发射前算出的绝对位置会整条失效（与 `emit_global_*` 那几条同一个口径）。
         self.emit_insn(&Insn::lea_rip(6));
         self.pending_tls_rels
-            .push((lea_pos, "__dcc_tls_base".to_string()));
+            .push((self.pos() - 4, "__dcc_tls_base".to_string()));
         // mov rdi, 0x1002 (ARCH_SET_FS)
-        self.emit_insn(&Insn::mov_reg_imm32_b64(7, 0x1002));
+        self.emit_insn(&Insn::mov_reg_imm_compact(7, 0x1002));
         // mov rax, 158; syscall
-        self.emit_insn(&Insn::mov_reg_imm32_b64(0, 158));
+        self.emit_insn(&Insn::mov_reg_imm_compact(0, 158));
         self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::Syscall));
     }
 }

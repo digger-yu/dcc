@@ -21,7 +21,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffffffff01,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 shl $1,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
@@ -43,7 +43,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xc8(%r13)
 mov (%rax),%eax
 mov %rax,-0xd0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 neg %rax
 and $0x1,%rax
 mov -0xc8(%r13),%rcx
@@ -62,7 +62,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xc8(%r13)
 mov (%rax),%eax
 mov %rax,-0xd0(%r13)
-mov $0x3f,%rax
+mov $0x3f,%eax
 and $0x7f,%rax
 shl $1,%rax
 mov -0xc8(%r13),%rcx
@@ -83,7 +83,7 @@ add $0x4,%rax
 mov %rax,-0xc8(%r13)
 mov (%rax),%eax
 mov %rax,-0xd0(%r13)
-mov $0x0,%rax
+mov $0x0,%eax
 and $0x1,%rax
 mov -0xc8(%r13),%rcx
 mov (%rcx),%ecx
@@ -102,7 +102,7 @@ add $0x4,%rax
 mov %rax,-0xc8(%r13)
 mov (%rax),%eax
 mov %rax,-0xd0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 neg %rax
 and $0x7f,%rax
 shl $1,%rax
@@ -120,17 +120,15 @@ shl $0x39,%rdx
 sar $0x39,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x0,%rax
+mov $0x0,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 lea 0x0(%rip),%rax
@@ -180,8 +178,7 @@ mov $0x0,%al
 call <main>
 add $0x10,%rsp
 jmp <main>
-mov $0x0,%rax
-movslq %eax,%rax
+mov $0x0,%eax
 <nop padding>
 mov %r13,%rsp
 pop %r13

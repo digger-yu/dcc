@@ -7,14 +7,14 @@ mov %rbx,-0x10(%r13)
 mov %rdi,-0x48(%r13)
 lea 0x0(%rip),%rax
 mov %rax,%rbx
-movslq -0x48(%r13),%rcx
+movslq %edi,%rcx
 lea 0x0(%rip),%r11
 movslq (%r11,%rcx,4),%r8
 add %r8,%rbx
 mov %rbx,%rax
 mov %rax,-0x40(%r13)
 jmp *%rax
-mov $0x2,%rax
+mov $0x2,%eax
 movslq 0x0(%rip),%r8
 add %r8,%rax
 movslq %eax,%rax
@@ -32,7 +32,7 @@ mov %eax,(%rdx)
 pop %rdx
 mov %rcx,%rax
 .Ll_foo_lab0:
-mov $0x0,%rax
+mov $0x0,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
 mov %r13,%rsp
@@ -45,10 +45,9 @@ mov %rsp,%r13
 sub $0x2e0,%rsp
 <nop padding>
 sub $0x20,%rsp
-mov $0x0,%rax
+mov $0x0,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 movslq 0x0(%rip),%rax
@@ -57,10 +56,9 @@ je <main>
 call <main>
 jmp <main>
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 movslq 0x0(%rip),%rax
@@ -68,8 +66,7 @@ cmp $0x4,%eax
 je <main>
 call <main>
 jmp <main>
-mov $0x0,%rax
-movslq %eax,%rax
+mov $0x0,%eax
 <nop padding>
 mov %r13,%rsp
 pop %r13

@@ -981,9 +981,10 @@ impl Codegen {
                     Type::LongDouble => (0xDBu8, 0x2Du8),
                     _ => (0xDDu8, 0x05u8),
                 };
-                let disp_pos = self.pos() + 2;
+                // 先发射再按 `pos()-4` 取 disp32（发射入口可能在本条之前插字节，
+                // 发射前算的绝对位置会整条失效）。与 `mem/access.rs` 同一口径。
                 self.emit_insn(&Insn::raw(&[opcode, modrm, 0, 0, 0, 0]));
-                self.push_global_float_rel(disp_pos, &name.name);
+                self.push_global_float_rel(self.pos() - 4, &name.name);
             } else {
                 let off = self.var_offset(&name.name);
                 self.emit_x87_fld_at(13, off as i32, &effective_ty);
@@ -1158,9 +1159,9 @@ impl Codegen {
                     Type::LongDouble => (0xDBu8, 0x3Du8),
                     _ => (0xDDu8, 0x1Du8),
                 };
-                let disp_pos = self.pos() + 2;
+                // 同上：先发射再取 disp32。
                 self.emit_insn(&Insn::raw(&[opcode, modrm, 0, 0, 0, 0]));
-                self.push_global_float_rel(disp_pos, &name.name);
+                self.push_global_float_rel(self.pos() - 4, &name.name);
             } else {
                 let off = self.var_offset(&name.name);
                 self.emit_x87_fstp_at(13, off as i32, &effective_ty);

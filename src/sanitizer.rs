@@ -401,15 +401,22 @@ fn collect_func_calls(func: &FuncDecl, callees: &mut HashSet<String>) {
 
 fn collect_calls_in_block(block: &Block, callees: &mut HashSet<String>) {
     for item in &block.items {
-        match item {
-            BlockItem::Stmt(s) => collect_calls_in_stmt(s, callees),
-            BlockItem::Decl(Decl::Func(f)) => {
-                if let Some(body) = &f.body {
-                    collect_calls_in_block(body, callees);
-                }
-            },
-            _ => {},
-        }
+        collect_calls_in_item(item, callees);
+    }
+}
+
+/// 单个 `BlockItem` 的调用收集。存在的理由与 `ssa::structure::item_has_unstructured_flow`
+/// 同一条：`Stmt::Switch.prelude` 是 `Vec<BlockItem>` 而不是 `Block`，没有这个入口就得为
+/// prelude 造一个临时 `Block`，而那样一来「prelude 与普通块同进同退」这条判据没有着力点。
+fn collect_calls_in_item(item: &BlockItem, callees: &mut HashSet<String>) {
+    match item {
+        BlockItem::Stmt(s) => collect_calls_in_stmt(s, callees),
+        BlockItem::Decl(Decl::Func(f)) => {
+            if let Some(body) = &f.body {
+                collect_calls_in_block(body, callees);
+            }
+        },
+        _ => {},
     }
 }
 
@@ -450,8 +457,18 @@ fn collect_calls_in_stmt(stmt: &Stmt, callees: &mut HashSet<String>) {
             collect_calls_in_stmt(body, callees);
         },
         Stmt::Block { b, .. } => collect_calls_in_block(b, callees),
-        Stmt::Switch { expr, cases, .. } => {
+        Stmt::Switch {
+            expr,
+            cases,
+            prelude,
+            ..
+        } => {
             collect_calls_in_expr(expr, callees);
+            // prelude（第一个 `case` 之前的语句与声明）里同样可能有调用：只看 cases 会
+            // 把「只在 prelude 里出现的被调函数」漏出调用图。
+            for it in prelude {
+                collect_calls_in_item(it, callees);
+            }
             for c in cases {
                 collect_calls_in_block(&c.body, callees);
             }
@@ -799,7 +816,12 @@ fn instrument_stmt(
         Stmt::Block { b, .. } => {
             instrument_block(&mut b.items, flags, ctx, guard_var, guard_base);
         },
-        Stmt::Switch { expr, cases, .. } => {
+        Stmt::Switch {
+            expr,
+            cases,
+            prelude,
+            ..
+        } => {
             // switch dispatch trace:fuzzer 模式下,把 expr 与 cases[].val
             // 收集后 emit `__sanitizer_cov_trace_switch`.
             if flags.needs_switch_trace() {
@@ -815,6 +837,10 @@ fn instrument_stmt(
                 }
             }
             instrument_expr(expr, flags, ctx, guard_var, guard_base);
+            // prelude 是「第一个 case 之前那些会真的执行」的语句：漏掉它等于那一段
+            // 代码永久不出现在插桩覆盖面里（实测同一个 walker 族在调用图上已经
+            // 因为漏 prelude 删过只被 prelude 调用的 static 函数）。
+            instrument_block(prelude, flags, ctx, guard_var, guard_base);
             for case in cases.iter_mut() {
                 if let Some(gv) = guard_var {
                     let g = ctx.next_guard();
@@ -3029,8 +3055,17 @@ mod tests {
                     collect_call_names_stmt(e, out);
                 }
             },
-            Stmt::Switch { expr, cases, .. } => {
+            Stmt::Switch {
+                expr,
+                cases,
+                prelude,
+                ..
+            } => {
                 collect_call_names_expr(expr, out);
+                // 同族的「漏扫一棵子树」：prelude 里的调用也是本函数的调用面。
+                for it in prelude {
+                    collect_call_names(it, out);
+                }
                 for case in cases {
                     for it in &case.body.items {
                         collect_call_names(it, out);
@@ -3223,6 +3258,7 @@ mod tests {
                     name: None,
                     span: Span::point("t.c", 1, 1),
                     vla_dim: None,
+                    home: None,
                 }],
                 body: None,
                 span: Span::point("t.c", 1, 1),

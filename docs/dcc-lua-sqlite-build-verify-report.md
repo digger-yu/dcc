@@ -1658,12 +1658,222 @@ SQLite `-O2` **331ms vs gcc 92ms = 3.60x**（-O3 321ms）。上一会话同组�
 
 ---
 
+## 6.15 产物性能根治轮（第十三轮）：S1 翻默认 −485 条、冷尾外置让热区 −14.4%
+
+实施 `.qoder/specs/产物性能根治方案_task-5dd.md`（含第十一轮评审修订）。**本节只记验证读数**：
+探针如何改写了方案自己的假设、每条臂的机制与护栏口径、外部 oracle 抖出的两条真错、S4 两次
+结构错与「零插入下推迟存出省不到」的推导、以及各臂「为什么默认关」的算账，全部在方案 §12
+（第十三~十五轮定位与过程记录）；数字目标逐条终账在方案 §11.2。
+
+### 6.15.1 默认档位图与不变量
+
+`DCC_BLOCKOPT` 档 3 = `R_SEXT | R_COPY | R_SLOT | R_RAW | R_ZBITS`（本轮翻入 `R_RAW`/`R_ZBITS`，
+第十四轮再加 `R_IMMSEXT`）。仍默认关：`R_CALLSLOT`(A1)、`R_LABELJOIN`(A2)、`R_LRU`(A3)、
+`R_TYPED`、`R_CPY32`、`R_CPYBASE`、`DCC_COLD_OUTLINE`、`DCC_COLD_MERGE`、`DCC_REGION_HOME`。
+
+「`DCC_BLOCKOPT=0..3` 产物逐字节不变」这条旧不变量自本轮起不再成立（它成立在一批永不生效的
+代码上）；`0..2` 三档继续逐字不变，判据改为 `rules_for_maps_levels_without_drift` 那两条。
+
+### 6.15.2 Gate 0 三探针（`scripts/gate0_probe.sh`，0a/0b 同一次构建出）
+
+| 档 | total | hit_call | hit_label | hit_pressure | 其中 hit_raw | hit_capacity |
+|---|---|---|---|---|---|---|
+| 默认位图（不含 R_RAW） | 603 | 0 | 47 | 556 | 531（88%） | 0 |
+| 含 R_RAW | 383 | 0 | 95 | 288 | 0 | 0 |
+
+影子层只读 ⇒ 产物逐字节不变（`SHADOW=0/1` 的 .o `cmp` 全等）。0c：`sqlite3VdbeExec` 两侧同一
+awk 口径，gcc 侧帧基址是 `rsp`（279 条，与方案 §8.2 的 271 对得上）；帧访存口径统一为 r13
+引用 2657。
+
+### 6.15.3 S1 指令事实层（`RawWrite` 4 → 9 种，默认档已翻）
+
+| 量 | 开工前 | 翻默认后 | S3c 再减后 | Δ 合计 |
+|---|---|---|---|---|
+| `luaV_execute` 条数 | 11210 | 10725 | **10551** | **−659（−5.9%）** |
+| r13 引用 | 2657 | 2438 | 2438 | −219 |
+| `movsxd` | 685 | 424 | 424 | −261 |
+| `mov r64,r64` | 2697 | 2431 | 2257 | −440 |
+| 立即数 `mov` | 637 | 637 | 463 | −174 |
+
+单翻 `R_RAW` 实测 −224 条（方案 §8.2 标的 −22 是十倍低估）。构造子穷举用例
+`raw_writes_decodes_every_raw_constructor` 列 46 个形状，任何一项解成 `Unknown` 即红。
+外部 oracle `scripts/check_facts_vs_objdump.sh`：410 条对账、0 不一致，并抖出两条静默错值级
+真错（8 位形 `ah/ch/dh/bh` 的目的号、16 位累加器形不能推值域）。
+
+### 6.15.4 S6 冷尾外置（`DCC_COLD_OUTLINE=1`，`hot_cold_census.sh`）
+
+| 量 | 关 | 开 |
+|---|---|---|
+| full | 10725 | 10731 |
+| **hot（被跳表指向的臂区间）** | **10612** | **9089（−14.4%）** |
+| out（冷尾） | 40 | 1596 |
+| arm_mean | 130.6 | 106.9 |
+
+墙钟 `ab_pair.sh` 15 轮：median(r)=0.9923、CI [0.9838,1.0039]、10/15 同向 ⇒ CI 含 1 ⇒
+按 §5.5 三态：**不可判 ⇒ 默认关、不计收益**。冷尾指纹合并（`DCC_COLD_MERGE=1`）在
+`luaV_execute` 上合 **0 对**（机会集构造为空，理由见方案 §12.3）；§8.4 的「站点 80→≤10」
+已于第十五轮按用户裁定删除。
+
+### 6.15.5 S2 三条臂的读数
+
+| 臂 | 位 | Lua 读数 | 判定 |
+|---|---|---|---|
+| A1 调用分流 | `R_CALLSLOT` | `hit_call = 0` | 买 0 条 ⇒ 默认关 |
+| A2 标签汇合 | `R_LABELJOIN` | `a2_inherit = 0`（每个标签都是跳表落点） | 命名错修正后的两臂读数见 §6.16.2 |
+| A3 容量 LRU | `R_LRU` | `hit_capacity = 0` | 上限为零 ⇒ 默认关 |
+
+三条臂在第二个负载上的复测读数见 §6.16.6，归因见方案 §12.4。
+
+### 6.15.6 S3c 立即数 `mov`：组成读数与 637 → 463
+
+637 条里 455 条是 `mov *,0x0`，其中 250 条是每次调用都写的 `mov $0,%al`（SysV vector 寄存器
+个数，只被变参被调方读）。`abi/call.rs` 改为只对「原型看过且明确非变参」的被调方省 ⇒
+637 → **463**，总条数 10725 → 10551。剩下的 463 条是活的常量定义，组成拆解与「≤300 定在
+错桶」的定性见方案 §12.5。
+
+### 6.15.7 S4 区域家（该版：插入式 flush）
+
+`DCC_REGION_HOME=1` 下 `region_drop` 117、`region_replace` 33（机制确实跑），但
+`luaV_execute` 总条数 10551 → **10556（+5）**、r13 引用 2438 不变；全语料扫描仍有两处
+SIGSEGV。该版的两次结构错、修法与后续零插入改写见方案 §12.6，零插入版读数见 §6.16.1。
+
+### 6.15.8 §4 正确性先修七项落点
+
+| 项 | 落点 |
+|---|---|
+| 4.1 `__builtin_setjmp/longjmp` | `frame_guard::RETURNS_TWICE_NAMES`（libc `longjmp` 故意不入，单测钉住） |
+| 4.2 volatile | `FrameGuard.volatile_obj` 有消费者；`volatile_global_names` 两侧共用 |
+| 4.3 内联 asm | 口径改为「出现即命中」（`FrameGuard.inline_asm`） |
+| 4.4 `-g` | 本轮做成函数级硬互斥；loclist 本体在第十四轮实现（§6.16.4） |
+| 4.5 prelude walker 3+1 | `sanitizer.rs` 三处 + `cpp/modules.rs` 一处 |
+| 4.6 `Expr::LabelAddr` | `has_unstructured_flow` 补表达式槽（穷尽 match） |
+| 4.7 四条件同源 | 单一落点 `src/frame_guard.rs`，blockopt 经 `CallPolicy` 只读结论 |
+
+### 6.15.9 本轮质量门与 bench
+
+lib 2556 / 0 failed / 2 ignored（+12）；integration 1173 / 0 / 5 ignored（+7）；disasm 快照
+20 例重录（净 −36 行）；`check_opt_equivalence` 0 OPT-DIFF；`check_reproducible_output` 5454
+全绿；`torture_gate` PASS；`check_facts_vs_objdump` 410 条 0 不一致；`bench_lua_sqlite` OK。
+
+| 负载 | 本轮 best-of-5 | 上一轮 |
+|---|---|---|
+| Lua `fib(32)` -O2 | 267ms vs gcc 111ms（2.40x） | 290 vs 119（2.44x） |
+| SQLite 20 万行 -O2 | 291ms vs gcc 86ms（3.38x） | 331 vs 92（3.60x） |
+
+静态 −5.9% 只换到墙钟 −1.6%，与方案 §0 结论 2「差距是全局均匀膨胀」同向；绝对 ms 不作承诺
+（§6.14 立的口径）。SQLite 侧那 −12% 来路不是分派循环，不当作本轮机制的成果。
+
+---
+
+## 6.16 收尾轮（第十四轮）与体量档（第十五轮）：S4 零插入、A2 取交、loclist、非负 imm32 短形
+
+同上：过程与推导在方案 §12.6–§12.12，数字目标终账在方案 §11.2。
+
+### 6.16.1 S4 区域家（零插入版）读数
+
+`scripts/region_home_sweep.sh` 对全语料 311 份源 × 三档做「开 vs 关」四元组值等价 ⇒ **0 DIFF /
+0 UNSTABLE**。机制服务读数（`DCC_REGION_STAT=1`，`luaV_execute`）：
+
+| 臂 | promoted | loads_saved | writebacks | 拒因 |
+|---|---|---|---|---|
+| 默认门（家号须 callee-saved） | 0 | 0 | 0 | caller_saved=2156、no_owner=5 |
+| 关掉该门（`DCC_REGION_CALLEE=0`） | 606 | **0** | 0 | addr_export=418、no_owner=90、escaped=32 |
+
+三臂（门关 / 全开 / 只关 defer）**产物逐字相同**：insn 10551、r13 2438 ⇒ §5 止损② 成立，默认关。
+
+### 6.16.2 A2 两臂读数（修正命名错后）
+
+| 语料 | `a2_inherit`（落空继承） | `a2_intersect`（多前驱取交） |
+|---|---|---|
+| `lvm.c` 全部函数 | 8 | 7 |
+| `tests/fixtures/c` 全 311 份 | 68 | 16 |
+
+仍默认关（量级跳不出噪声）。命名错的定位过程见方案 §12.7。
+
+### 6.16.3 `sext32` 事实三形态读数
+
+`mov r64,imm32` / `movsx*` / `movzx*` 三族的扩展事实（单开一位 `R_IMMSEXT`）：`movsxd`
+424 → **361**（lvm.o 全部 571 → 464），`luaV_execute` 10551 → **10488**。同轮配对：
+SQLite median=0.9482、CI [0.9334,0.9588]、25/25 同向 ⇒ 进默认档；Lua median=0.9847、
+CI [0.9812,0.9947]、31/41 ⇒ 不记收益。外部 oracle 加 `sext`/`zext` 臂（除目的号还查助记符
+族），120 条唯一 sext 序列入账、0 不一致。
+
+### 6.16.4 §4.4 `-g` loclist 读数
+
+`.debug_loc`（DWARF4）有真实生产者：延伸池（caller-saved）家在 `persist_ext_homes` /
+`restore_ext_homes` 那段窗口里真值在帧内保存槽而不在号里。仓库内 4 份夹具因此多出
+`.debug_loc`；DWARF5 显式退回单 `exprloc`。3 条单测 + 1 条端到端用例（节存在、能解、同时有
+`DW_OP_reg`/`DW_OP_fbreg`、不开 `-g` 不得多节）。loclist 只动 `.debug_*` 节 ⇒ `.text` 与
+执行结果类判据不受影响；S4 的 `-g` 硬互斥随之删除。两个地址口径错的经过见方案 §12.9。
+
+### 6.16.5 S3a / S3c 数字目标的组成分解
+
+| 目标 | 现值 | 剩余构成 |
+|---|---|---|
+| `movsxd` ≤100 | 361 | 128 内存形（gcc 也发）+ 149「bit31 未知的首次扩展」+ 84 跨号转换 |
+| 立即数 `mov` ≤300（条数） | 463 | 433 条目的就是 `%rax`、0 条目的是内存 ⇒ 全是活定义 |
+
+两条都属于方案 §8.1 划出的 L4 射程（求值约定 + 分配层），发射层不可达；终账见方案 §11.2。
+
+### 6.16.6 第十四轮质量门（同一份最终二进制）
+
+lib 2563 / 0；integration 1177 / 0；OPT-EQ 0 OPT-DIFF；REPRO 5454 全绿；FACTS 410 条 0 不一致；
+`region_home_sweep` 0 DIFF / 0 UNSTABLE；disasm 快照 24 例重录；G10 基线 2/5 漂移重录；
+`-g` 放开后同批夹具带 `-g` 再跑开/关值等价 132 次 0 异常。S2 三条臂的双负载复测：A1/A2 在
+`sqlite3VdbeExec` 一字不变（insn 19634 / movrr 3162 / r13 4134 / movsxd 1020 两臂全同），
+A3 在 `lvm.o` 上产出**逐字节相同**的对象（119936 = 119936）。
+
+### 6.16.7 S3c 体量档：非负 imm32 走 5 字节短形（第十五轮，已进默认档）
+
+`DCC_IMM32_SHORT_MOV`（默认开；`=0` 退回 7 字节形，仅作量尺与回退证明）。同一份二进制两臂：
+
+| 读数 | 门关 | 门开 | 差 |
+|---|---|---|---|
+| `luaV_execute` 字节 | 52505 | 51599 | −906（−1.73%） |
+| `luaV_execute` 条数 / hot / out | 10488 / 10379 / 39 | 完全相同 | 0 |
+| `lvm.o` `.text` | 74080 | 72812 | −1268 |
+| `sqlite3.o` `.text` | 6350921 | 6267998 | −82923（−1.31%） |
+| SQLite shell 链接后 `.text` | 7372560 | 7277760 | −94800（−1.29%） |
+| 非负 7 字节 `mov r64,imm32` 条数 | 48412 | **0** | 全部转掉 |
+| 负立即数 7 字节形 | 850 | 850 | 正确保持不变 |
+| Lua 解释器产物 | 1172024 | 1155640 | −16 KB |
+
+读侧配套两处（`classify_peep` 认 5/6 字节形；`raw_writes` 非负报 `ImmSExt`）的必要性推导见
+方案 §12.10。墙钟配对（三腿 = median ≤0.985 且 CI 上界 <1 且符号检验 ≥7/8）：
+
+| 负载 / 布局 | 会话 | median(r) | 95%CI | 同向 |
+|---|---|---|---|---|
+| SQLite 布局 L1 | R=15 | 0.9718 | [0.9518, 0.9815] | 13/15 |
+| SQLite 布局 L1 | R=31 | 0.9734 | [0.9644, 0.9864] | 25/31 |
+| SQLite 布局 L1（换臂序） | R=31 | 0.9642 | [0.9532, 0.9724] | 28/31 |
+| SQLite 布局 L2 | R=31 | 0.9924 | [0.9771, 1.0044] | 20/31 |
+| SQLite 布局 L2（换臂序） | R=31 | 0.9828 | [0.9722, 1.0032] | 21/31 |
+| Lua `fib(32)` 布局 L1 | R=25 | 0.9953 | [0.9812, 1.0084] | 15/25 |
+| Lua `fib(32)` 布局 L2 | R=25 | 1.0061 | [0.9917, 1.0307] | 10/25 |
+
+同轮 dup 地板读数 0.9875~1.0068。⇒ **墙钟不可判，本轮不记任何墙钟收益**；默认开这个决定
+依据的是三条静态事实（体量下降、条数一字不变、值与 gcc 同）。布局抽签主导判定的经过见
+方案 §12.10。
+
+### 6.16.8 第十五轮质量门
+
+门关臂 `.text` sha256 与改动前已提交的 5 个 G10 基线**逐字节相同**（门关 = 改前）。
+lib 2571 / 0；integration 1179 / 0；OPT-EQ 0 OPT-DIFF（COMPILE-FAIL 60 未增长）；REPRO 5454
+全绿；FACTS 0 不一致（410 条）；`check_asm_text_parity` 无 PARITY-FAIL；`check_disasm_coverage`
+OK（未命中率 0.0478%，上限 81）；`region_home_sweep` 0 / 0；`torture_gate` compile 2010/0/skip6、
+execute 1697/0；`make test`（Tier 0，全测试目标）exit=0：3867 passed / 0 failed，
+`check_fixtures.sh` 全绿、元门禁 5/5 PASS。disasm 快照 26 例重录（净 −740 行）；G10 基线
+5 个全部重录。同轮另修两处基础设施问题（lib 用例的进程环境污染源、Tier 0 的 60 条继承假红），
+经过见方案 §12.11 / §12.12。
+
+---
+
 ## 7. Summary
 
 | Project | dcc compile | dcc link | functional run (-O0..-O3) | output consistency | perf vs gcc (-O2 / -O3) |
 |---|---|---|---|---|---|
-| Lua 5.5.1 | OK | OK | OK (all levels) | byte-identical to gcc, all levels | ~2.4x / ~2.5x slower (290 / 295 ms vs gcc 119 ms; was ~2.6x before §6.13/§6.14) |
-| SQLite (amalgamation) | OK | OK | OK (all levels) | identical across -O0..-O3 | ~3.6x / ~3.5x slower (331 / 321 ms vs gcc 92 ms; was ~5.4x before §6.12) |
+| Lua 5.5.1 | OK | OK | OK (all levels) | byte-identical to gcc, all levels | ~2.40x / ~2.4x slower (267 / 266 ms vs gcc 111 ms; best-of-5 读数于 §6.15.9，§6.16 两轮未重跑该 bench) |
+| SQLite (amalgamation) | OK | OK | OK (all levels) | identical across -O0..-O3 | ~3.38x / ~3.4x slower (291 / 296 ms vs gcc 86 ms; 同上口径) |
 
 **Takeaways**
 
@@ -1684,10 +1894,13 @@ SQLite `-O2` **331ms vs gcc 92ms = 3.60x**（-O3 321ms）。上一会话同组�
    This is what moves dcc from "can compile Lua/SQLite" to "a real project can
    use it as `CC` out of the box".
 5. **Performance.** dcc's -O2/-O3 output is correct but measurably slower than
-   gcc (§6): roughly **2.5x** on the Lua interpreter loop (was 4.4x) and
-   **~3.5x** on a SQLite insert+query workload (was 6.4-7.1x, and 5.0-5.4x
+   gcc (§6): roughly **2.40x** on the Lua interpreter loop (was 4.4x) and
+   **~3.38x** on a SQLite insert+query workload (was 6.4-7.1x, and 5.0-5.4x
    before the dense-switch jump-table round in §6.12, which with the new inline
-   shapes took SQLite from 444.6 → 304.8 ms paired-median, −31.1%). `-O3 ≈ -O2`
+   shapes took SQLite from 444.6 → 304.8 ms paired-median, −31.1%). 第十三~十五轮
+   的累计变化在静态侧：`luaV_execute` 11210 → **10488 条**（−6.4%）与 52505 → **51599
+   字节**（−1.73%，§6.16.7）；已测的墙钟读数仍是 §6.15.9 那一组（2.40x / 3.38x）。
+   `-O3 ≈ -O2`
    for dcc. The 2026-10 emitter round (§6.6) is what moved these ratios most: over
    its two stages it cut `luaV_execute`'s instruction count by 31.3% and its register
    moves by 55.8%, and Lua `-O2` went 497→432→324 ms in like-for-like reruns. The

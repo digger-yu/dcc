@@ -367,13 +367,18 @@ impl Codegen {
                 Type::LongDouble => (0xDBu8, 0x2Du8),
                 _ => (0xDDu8, 0x05u8),
             };
-            // fld m32/m64/m80 [rip+disp32]：disp32 位于字节 2（指令长 6）。
+            // fld m32/m64/m80 [rip+disp32]：disp32 是指令末尾的 4 字节。
             // 段限定全局走同一个口：前缀在 opcode 之前，pos 在其后取。
+            //
+            // 为什么不在 `emit_insn` 之前算 `pos()+2`：发射入口现在可能在**本次发射的
+            // 字节之前**插入若干事（区内家 S4 的存出回写），那会把预算的绝对位置整条
+            // 推前，disp32 补丁就落到上一条指令中间（实测表现为 RIP 相对 store 被写成
+            // 一 SIB 存出 + 一串零）。改为「先发射，再按 `pos()-4` 定位」，与同文件
+            // 其他几个 RIP 发射点同一个口径。
             let resolved = self.resolve_global_key(name).to_string();
             self.emit_global_seg(&resolved);
-            let disp_pos = self.pos() + 2;
             self.emit_insn(&Insn::raw_bytes(&[opcode, modrm, 0, 0, 0, 0]));
-            self.push_global_float_rel(disp_pos, name);
+            self.push_global_float_rel(self.pos() - 4, name);
             return;
         }
         self.emit_global_float_load_to_xmm(0, name, ty);
@@ -410,9 +415,9 @@ impl Codegen {
         ins.extend_from_slice(&[0x0F, 0x10, modrm, 0, 0, 0, 0]);
         let resolved = self.resolve_global_key(name).to_string();
         self.emit_global_seg(&resolved);
-        let disp_pos = self.pos() + ins.len() as u64 - 4;
         self.emit_insn(&Insn::raw_bytes(&ins));
-        self.push_global_float_rel(disp_pos, name);
+        // disp32 总在 RIP 相对形态的最后 4 字节，所发射后的 `pos()-4` 就是它。
+        self.push_global_float_rel(self.pos() - 4, name);
     }
     pub(crate) fn emit_global_float_load_to_xmm_offset(
         &mut self,
@@ -501,9 +506,9 @@ impl Codegen {
             };
             let resolved = self.resolve_global_key(name).to_string();
             self.emit_global_seg(&resolved);
-            let disp_pos = self.pos() + 2;
+            // 同上：先发射再按 `pos()-4` 取 disp32，不在发射前算绝对位置。
             self.emit_insn(&Insn::raw_bytes(&[opcode, modrm, 0, 0, 0, 0]));
-            self.push_global_float_rel(disp_pos, name);
+            self.push_global_float_rel(self.pos() - 4, name);
             return;
         }
         let resolved = self.resolve_global_key(name).to_string();
@@ -533,8 +538,9 @@ impl Codegen {
         }
         let width = if is_float { SimdWidth::SS } else { SimdWidth::SD };
         self.emit_global_seg(&resolved);
-        let pos = self.pos() + 4;
         self.emit_insn(&Insn::simd_mov_rip(true, width, 0));
+        // 先发射再定位（理由见上面那几条）。
+        let pos = self.pos() - 4;
         if tls_exec {
             self.pending_tls_rels.push((pos, resolved.clone()));
         } else {
@@ -561,9 +567,9 @@ impl Codegen {
         }
         ins.extend_from_slice(&[0x0F, 0x11, modrm, 0, 0, 0, 0]);
         self.emit_global_seg(&resolved);
-        let disp_pos = self.pos() + ins.len() as u64 - 4;
+        // 先发射再取 disp32：发射入口可能在本条之前插入存出（S4），预算位置会被推前。
         self.emit_insn(&Insn::raw_bytes(&ins));
-        self.pending_data_rels.push((disp_pos, resolved));
+        self.pending_data_rels.push((self.pos() - 4, resolved));
     }
 
     /// 全局标量浮点 lvalue → 指定 xmm（inline asm xmm 约束输入）。
@@ -586,9 +592,9 @@ impl Codegen {
             };
             let resolved = self.resolve_global_key(name).to_string();
             self.emit_global_seg(&resolved);
-            let dp1 = self.pos() + 2;
+            // 先发射再取 disp32（发射入口可能在本条之前插存出，预算位置会被推前）。
             self.emit_insn(&Insn::raw_bytes(&[opcode, modrm, 0, 0, 0, 0]));
-            self.push_global_float_rel(dp1, name);
+            self.push_global_float_rel(self.pos() - 4, name);
             self.emit_x87_fstp_at(4, 0, effective_ty); // fstp tbyte [rsp]
             let is_float = matches!(effective_ty, Type::Float);
             let swidth = if is_float {
@@ -641,9 +647,9 @@ impl Codegen {
         };
         let resolved = self.resolve_global_key(name).to_string();
         self.emit_global_seg(&resolved);
-        let dp = self.pos() + 2;
+        // 同上：先发射再按 `pos()-4` 取 disp32。
         self.emit_insn(&Insn::raw_bytes(&[opcode, modrm, 0, 0, 0, 0])); // fstp [rip+x]
-        self.push_global_float_rel(dp, name);
+        self.push_global_float_rel(self.pos() - 4, name);
         self.emit_insn(&Insn::add_rsp_imm(16)); // add rsp,16
     }
 

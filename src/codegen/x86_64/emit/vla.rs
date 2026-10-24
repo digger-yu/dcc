@@ -61,7 +61,7 @@ impl Codegen {
             _ => {
                 let sz = ty.size().max(1) as i32;
                 // mov rax, imm32 (sign-ext): 48 C7 C0 id
-                self.emit_insn(&Insn::mov_reg_imm32_b64(0, sz));
+                self.emit_insn(&Insn::mov_reg_imm_compact(0, sz));
             },
         }
     }

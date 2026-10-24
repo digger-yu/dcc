@@ -7,7 +7,6 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0x3f,%rax
 mov %eax,%eax
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret
@@ -22,7 +21,6 @@ mov (%rax),%eax
 shr $0x6,%rax
 and $0x7ff,%rax
 mov %eax,%eax
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret
@@ -36,7 +34,6 @@ mov (%rax),%eax
 shr $0x11,%rax
 and $0x7fff,%rax
 mov %eax,%eax
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret
@@ -49,7 +46,6 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0x1f,%rax
 mov %eax,%eax
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret
@@ -64,7 +60,6 @@ mov (%rax),%eax
 shr $0x5,%rax
 and $0x1,%rax
 mov %eax,%eax
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret
@@ -78,7 +73,6 @@ mov (%rax),%eax
 shr $0x6,%rax
 and $0x3ffffff,%rax
 mov %eax,%eax
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret
@@ -91,7 +85,6 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0xffff,%rax
 mov %eax,%eax
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret
@@ -106,7 +99,6 @@ mov (%rax),%eax
 shr $0x10,%rax
 and $0xff,%rax
 mov %eax,%eax
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret
@@ -120,7 +112,6 @@ mov (%rax),%eax
 shr $0x18,%rax
 and $0xff,%rax
 mov %eax,%eax
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret
@@ -477,7 +468,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffffffffc0,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
 mov %ecx,(%rax)
@@ -505,7 +496,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xfffffffffffe003f,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 shl $0x6,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
@@ -563,7 +554,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffffffffe0,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
 mov %ecx,(%rax)
@@ -591,7 +582,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffffffffdf,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 shl $0x5,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
@@ -649,7 +640,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffffff0000,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
 mov %ecx,(%rax)
@@ -677,7 +668,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffff00ffff,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 shl $0x10,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
@@ -735,7 +726,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffffffffc0,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
 mov %ecx,(%rax)
@@ -763,7 +754,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xfffffffffffe003f,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 shl $0x6,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
@@ -821,7 +812,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffffffffe0,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
 mov %ecx,(%rax)
@@ -849,7 +840,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffffffffdf,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 shl $0x5,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
@@ -907,7 +898,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffffff0000,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
 mov %ecx,(%rax)
@@ -935,7 +926,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffff00ffff,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 shl $0x10,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
@@ -989,7 +980,7 @@ mov %rax,-0xc0(%r13)
 lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0x3f,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 sub %r8d,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
@@ -1021,7 +1012,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x6,%rax
 and $0x7ff,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 sub %r8d,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
@@ -1055,7 +1046,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x11,%rax
 and $0x7fff,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 sub %r8d,%eax
 and $0x7fff,%rax
 shl $0x11,%rax
@@ -1089,7 +1080,7 @@ mov %rax,-0xc0(%r13)
 lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0x1f,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 sub %r8d,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
@@ -1121,7 +1112,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x5,%rax
 and $0x1,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 sub %r8d,%eax
 and $0x1,%rax
 shl $0x5,%rax
@@ -1155,7 +1146,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x6,%rax
 and $0x3ffffff,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 sub %r8d,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
@@ -1189,7 +1180,7 @@ mov %rax,-0xc0(%r13)
 lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0xffff,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 sub %r8d,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
@@ -1221,7 +1212,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x10,%rax
 and $0xff,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 sub %r8d,%eax
 and $0xff,%rax
 shl $0x10,%rax
@@ -1255,7 +1246,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x18,%rax
 and $0xff,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 sub %r8d,%eax
 and $0xff,%rax
 shl $0x18,%rax
@@ -1293,7 +1284,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffffffffc0,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
 mov %ecx,(%rax)
@@ -1321,7 +1312,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xfffffffffffe003f,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 shl $0x6,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
@@ -1379,7 +1370,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffffffffe0,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
 mov %ecx,(%rax)
@@ -1407,7 +1398,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffffffffdf,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 shl $0x5,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
@@ -1465,7 +1456,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffffff0000,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
 mov %ecx,(%rax)
@@ -1493,7 +1484,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffff00ffff,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 shl $0x10,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
@@ -1551,7 +1542,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffffffffc0,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
 mov %ecx,(%rax)
@@ -1579,7 +1570,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xfffffffffffe003f,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 shl $0x6,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
@@ -1637,7 +1628,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffffffffe0,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
 mov %ecx,(%rax)
@@ -1665,7 +1656,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffffffffdf,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 shl $0x5,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
@@ -1723,7 +1714,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffffff0000,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
 mov %ecx,(%rax)
@@ -1751,7 +1742,7 @@ mov %rax,-0xc8(%r13)
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
 and $0xffffffffff00ffff,%rcx
-mov -0xc8(%r13),%rdx
+mov %rax,%rdx
 shl $0x10,%rdx
 or %rdx,%rcx
 mov -0xb8(%r13),%rax
@@ -2813,7 +2804,7 @@ mov %rax,-0xc0(%r13)
 lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0x3f,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 mov %eax,%eax
 xor %rdx,%rdx
 div %r8
@@ -2847,7 +2838,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x6,%rax
 and $0x7ff,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 mov %eax,%eax
 xor %rdx,%rdx
 div %r8
@@ -2883,7 +2874,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x11,%rax
 and $0x7fff,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 mov %eax,%eax
 xor %rdx,%rdx
 div %r8
@@ -2905,7 +2896,6 @@ mov %rdx,%rax
 mov %r13,%rsp
 pop %r13
 ret
-<nop padding>
 fn4_a:
 push %r13
 mov %rsp,%r13
@@ -2919,7 +2909,7 @@ mov %rax,-0xc0(%r13)
 lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0x1f,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 mov %eax,%eax
 xor %rdx,%rdx
 div %r8
@@ -2953,7 +2943,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x5,%rax
 and $0x1,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 mov %eax,%eax
 xor %rdx,%rdx
 div %r8
@@ -2989,7 +2979,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x6,%rax
 and $0x3ffffff,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 mov %eax,%eax
 xor %rdx,%rdx
 div %r8
@@ -3011,7 +3001,6 @@ mov %rdx,%rax
 mov %r13,%rsp
 pop %r13
 ret
-<nop padding>
 fn7_a:
 push %r13
 mov %rsp,%r13
@@ -3025,7 +3014,7 @@ mov %rax,-0xc0(%r13)
 lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0xffff,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 mov %eax,%eax
 xor %rdx,%rdx
 div %r8
@@ -3059,7 +3048,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x10,%rax
 and $0xff,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 mov %eax,%eax
 xor %rdx,%rdx
 div %r8
@@ -3095,7 +3084,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x18,%rax
 and $0xff,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 mov %eax,%eax
 xor %rdx,%rdx
 div %r8
@@ -3117,7 +3106,6 @@ mov %rdx,%rax
 mov %r13,%rsp
 pop %r13
 ret
-<nop padding>
 fn1_b:
 push %r13
 mov %rsp,%r13
@@ -3131,7 +3119,7 @@ mov %rax,-0xc0(%r13)
 lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0x3f,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 mov %eax,%eax
 xor %rdx,%rdx
 div %r8
@@ -3166,7 +3154,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x6,%rax
 and $0x7ff,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 mov %eax,%eax
 xor %rdx,%rdx
 div %r8
@@ -3203,7 +3191,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x11,%rax
 and $0x7fff,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 mov %eax,%eax
 xor %rdx,%rdx
 div %r8
@@ -3240,7 +3228,7 @@ mov %rax,-0xc0(%r13)
 lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0x1f,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 mov %eax,%eax
 xor %rdx,%rdx
 div %r8
@@ -3275,7 +3263,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x5,%rax
 and $0x1,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 mov %eax,%eax
 xor %rdx,%rdx
 div %r8
@@ -3312,7 +3300,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x6,%rax
 and $0x3ffffff,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 mov %eax,%eax
 xor %rdx,%rdx
 div %r8
@@ -3349,7 +3337,7 @@ mov %rax,-0xc0(%r13)
 lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0xffff,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 mov %eax,%eax
 xor %rdx,%rdx
 div %r8
@@ -3384,7 +3372,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x10,%rax
 and $0xff,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 mov %eax,%eax
 xor %rdx,%rdx
 div %r8
@@ -3421,7 +3409,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x18,%rax
 and $0xff,%rax
-mov -0x48(%r13),%r8d
+mov %edi,%r8d
 mov %eax,%eax
 xor %rdx,%rdx
 div %r8
@@ -3456,7 +3444,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -3491,7 +3479,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -3517,6 +3505,7 @@ mov -0x10(%r13),%rbx
 mov %r13,%rsp
 pop %r13
 ret
+<nop padding>
 fn3_c:
 push %r13
 mov %rsp,%r13
@@ -3528,7 +3517,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -3567,7 +3556,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -3602,7 +3591,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -3628,6 +3617,7 @@ mov -0x10(%r13),%rbx
 mov %r13,%rsp
 pop %r13
 ret
+<nop padding>
 fn6_c:
 push %r13
 mov %rsp,%r13
@@ -3639,7 +3629,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -3678,7 +3668,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -3713,7 +3703,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -3739,6 +3729,7 @@ mov -0x10(%r13),%rbx
 mov %r13,%rsp
 pop %r13
 ret
+<nop padding>
 fn9_c:
 push %r13
 mov %rsp,%r13
@@ -3750,7 +3741,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -3791,7 +3782,7 @@ mov %rax,-0xc0(%r13)
 lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0x3f,%rax
-mov $0x7,%r8
+mov $0x7,%r8d
 sub %r8,%rax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
@@ -3823,7 +3814,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x6,%rax
 and $0x7ff,%rax
-mov $0x7,%r8
+mov $0x7,%r8d
 sub %r8,%rax
 and $0x7ff,%rax
 shl $0x6,%rax
@@ -3842,7 +3833,6 @@ mov %rdx,%rax
 mov %r13,%rsp
 pop %r13
 ret
-<nop padding>
 fn3_d:
 push %r13
 mov %rsp,%r13
@@ -3857,7 +3847,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x11,%rax
 and $0x7fff,%rax
-mov $0x7,%r8
+mov $0x7,%r8d
 sub %r8,%rax
 and $0x7fff,%rax
 shl $0x11,%rax
@@ -3891,7 +3881,7 @@ mov %rax,-0xc0(%r13)
 lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0x1f,%rax
-mov $0x7,%r8
+mov $0x7,%r8d
 sub %r8,%rax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
@@ -3923,7 +3913,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x5,%rax
 and $0x1,%rax
-mov $0x7,%r8
+mov $0x7,%r8d
 sub %r8,%rax
 and $0x1,%rax
 shl $0x5,%rax
@@ -3942,7 +3932,6 @@ mov %rdx,%rax
 mov %r13,%rsp
 pop %r13
 ret
-<nop padding>
 fn6_d:
 push %r13
 mov %rsp,%r13
@@ -3957,7 +3946,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x6,%rax
 and $0x3ffffff,%rax
-mov $0x7,%r8
+mov $0x7,%r8d
 sub %r8,%rax
 and $0x3ffffff,%rax
 shl $0x6,%rax
@@ -3991,7 +3980,7 @@ mov %rax,-0xc0(%r13)
 lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0xffff,%rax
-mov $0x7,%r8
+mov $0x7,%r8d
 sub %r8,%rax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
@@ -4023,7 +4012,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x10,%rax
 and $0xff,%rax
-mov $0x7,%r8
+mov $0x7,%r8d
 sub %r8,%rax
 and $0xff,%rax
 shl $0x10,%rax
@@ -4042,7 +4031,6 @@ mov %rdx,%rax
 mov %r13,%rsp
 pop %r13
 ret
-<nop padding>
 fn9_d:
 push %r13
 mov %rsp,%r13
@@ -4057,7 +4045,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x18,%rax
 and $0xff,%rax
-mov $0x7,%r8
+mov $0x7,%r8d
 sub %r8,%rax
 and $0xff,%rax
 shl $0x18,%rax
@@ -4089,7 +4077,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4124,7 +4112,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4150,6 +4138,7 @@ mov -0x10(%r13),%rbx
 mov %r13,%rsp
 pop %r13
 ret
+<nop padding>
 fn3_e:
 push %r13
 mov %rsp,%r13
@@ -4161,7 +4150,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4200,7 +4189,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4235,7 +4224,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4261,6 +4250,7 @@ mov -0x10(%r13),%rbx
 mov %r13,%rsp
 pop %r13
 ret
+<nop padding>
 fn6_e:
 push %r13
 mov %rsp,%r13
@@ -4272,7 +4262,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4311,7 +4301,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4346,7 +4336,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4372,6 +4362,7 @@ mov -0x10(%r13),%rbx
 mov %r13,%rsp
 pop %r13
 ret
+<nop padding>
 fn9_e:
 push %r13
 mov %rsp,%r13
@@ -4383,7 +4374,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4422,7 +4413,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x13,%rax
+mov $0x13,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4457,7 +4448,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x13,%rax
+mov $0x13,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4483,6 +4474,7 @@ mov -0x10(%r13),%rbx
 mov %r13,%rsp
 pop %r13
 ret
+<nop padding>
 fn3_f:
 push %r13
 mov %rsp,%r13
@@ -4494,7 +4486,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x13,%rax
+mov $0x13,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4533,7 +4525,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x13,%rax
+mov $0x13,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4568,7 +4560,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x13,%rax
+mov $0x13,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4594,6 +4586,7 @@ mov -0x10(%r13),%rbx
 mov %r13,%rsp
 pop %r13
 ret
+<nop padding>
 fn6_f:
 push %r13
 mov %rsp,%r13
@@ -4605,7 +4598,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x13,%rax
+mov $0x13,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4644,7 +4637,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x13,%rax
+mov $0x13,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4679,7 +4672,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x13,%rax
+mov $0x13,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4705,6 +4698,7 @@ mov -0x10(%r13),%rbx
 mov %r13,%rsp
 pop %r13
 ret
+<nop padding>
 fn9_f:
 push %r13
 mov %rsp,%r13
@@ -4716,7 +4710,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x13,%rax
+mov $0x13,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4755,7 +4749,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x25,%rax
+mov $0x25,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4790,7 +4784,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x25,%rax
+mov $0x25,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4816,6 +4810,7 @@ mov -0x10(%r13),%rbx
 mov %r13,%rsp
 pop %r13
 ret
+<nop padding>
 fn3_g:
 push %r13
 mov %rsp,%r13
@@ -4827,7 +4822,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x25,%rax
+mov $0x25,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4866,7 +4861,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x25,%rax
+mov $0x25,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4901,7 +4896,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x25,%rax
+mov $0x25,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4927,6 +4922,7 @@ mov -0x10(%r13),%rbx
 mov %r13,%rsp
 pop %r13
 ret
+<nop padding>
 fn6_g:
 push %r13
 mov %rsp,%r13
@@ -4938,7 +4934,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x25,%rax
+mov $0x25,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -4977,7 +4973,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x25,%rax
+mov $0x25,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -5012,7 +5008,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x25,%rax
+mov $0x25,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -5038,6 +5034,7 @@ mov -0x10(%r13),%rbx
 mov %r13,%rsp
 pop %r13
 ret
+<nop padding>
 fn9_g:
 push %r13
 mov %rsp,%r13
@@ -5049,7 +5046,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x25,%rax
+mov $0x25,%eax
 mov %rax,%rbx
 lea 0x0(%rip),%r8
 mov (%r8),%r8d
@@ -5090,7 +5087,7 @@ mov %rax,-0xc0(%r13)
 lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0x3f,%rax
-mov $0x11,%r8
+mov $0x11,%r8d
 cqto
 idiv %r8
 and $0x3f,%rax
@@ -5123,7 +5120,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x6,%rax
 and $0x7ff,%rax
-mov $0x11,%r8
+mov $0x11,%r8d
 cqto
 idiv %r8
 and $0x7ff,%rax
@@ -5158,7 +5155,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x11,%rax
 and $0x7fff,%rax
-mov $0x11,%r8
+mov $0x11,%r8d
 cqto
 idiv %r8
 and $0x7fff,%rax
@@ -5179,7 +5176,6 @@ mov %rdx,%rax
 mov %r13,%rsp
 pop %r13
 ret
-<nop padding>
 fn4_h:
 push %r13
 mov %rsp,%r13
@@ -5193,7 +5189,7 @@ mov %rax,-0xc0(%r13)
 lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0x1f,%rax
-mov $0x11,%r8
+mov $0x11,%r8d
 cqto
 idiv %r8
 and $0x1f,%rax
@@ -5226,7 +5222,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x5,%rax
 and $0x1,%rax
-mov $0x11,%r8
+mov $0x11,%r8d
 cqto
 idiv %r8
 and $0x1,%rax
@@ -5261,7 +5257,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x6,%rax
 and $0x3ffffff,%rax
-mov $0x11,%r8
+mov $0x11,%r8d
 cqto
 idiv %r8
 and $0x3ffffff,%rax
@@ -5282,7 +5278,6 @@ mov %rdx,%rax
 mov %r13,%rsp
 pop %r13
 ret
-<nop padding>
 fn7_h:
 push %r13
 mov %rsp,%r13
@@ -5296,7 +5291,7 @@ mov %rax,-0xc0(%r13)
 lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0xffff,%rax
-mov $0x11,%r8
+mov $0x11,%r8d
 cqto
 idiv %r8
 and $0xffff,%rax
@@ -5329,7 +5324,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x10,%rax
 and $0xff,%rax
-mov $0x11,%r8
+mov $0x11,%r8d
 cqto
 idiv %r8
 and $0xff,%rax
@@ -5364,7 +5359,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x18,%rax
 and $0xff,%rax
-mov $0x11,%r8
+mov $0x11,%r8d
 cqto
 idiv %r8
 and $0xff,%rax
@@ -5385,7 +5380,6 @@ mov %rdx,%rax
 mov %r13,%rsp
 pop %r13
 ret
-<nop padding>
 fn1_i:
 push %r13
 mov %rsp,%r13
@@ -5399,7 +5393,7 @@ mov %rax,-0xc0(%r13)
 lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0x3f,%rax
-mov $0x13,%r8
+mov $0x13,%r8d
 cqto
 idiv %r8
 mov %rdx,%rax
@@ -5433,7 +5427,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x6,%rax
 and $0x7ff,%rax
-mov $0x13,%r8
+mov $0x13,%r8d
 cqto
 idiv %r8
 mov %rdx,%rax
@@ -5469,7 +5463,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x11,%rax
 and $0x7fff,%rax
-mov $0x13,%r8
+mov $0x13,%r8d
 cqto
 idiv %r8
 mov %rdx,%rax
@@ -5505,7 +5499,7 @@ mov %rax,-0xc0(%r13)
 lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0x1f,%rax
-mov $0x13,%r8
+mov $0x13,%r8d
 cqto
 idiv %r8
 mov %rdx,%rax
@@ -5539,7 +5533,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x5,%rax
 and $0x1,%rax
-mov $0x13,%r8
+mov $0x13,%r8d
 cqto
 idiv %r8
 mov %rdx,%rax
@@ -5575,7 +5569,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x6,%rax
 and $0x3ffffff,%rax
-mov $0x13,%r8
+mov $0x13,%r8d
 cqto
 idiv %r8
 mov %rdx,%rax
@@ -5611,7 +5605,7 @@ mov %rax,-0xc0(%r13)
 lea 0x0(%rip),%rax
 mov (%rax),%eax
 and $0xffff,%rax
-mov $0x13,%r8
+mov $0x13,%r8d
 cqto
 idiv %r8
 mov %rdx,%rax
@@ -5645,7 +5639,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x10,%rax
 and $0xff,%rax
-mov $0x13,%r8
+mov $0x13,%r8d
 cqto
 idiv %r8
 mov %rdx,%rax
@@ -5681,7 +5675,7 @@ lea 0x0(%rip),%rax
 mov (%rax),%eax
 shr $0x18,%rax
 and $0xff,%rax
-mov $0x13,%r8
+mov $0x13,%r8d
 cqto
 idiv %r8
 mov %rdx,%rax
@@ -5713,7 +5707,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -5729,7 +5723,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -5747,7 +5741,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7fff,%rax
 shl $0x11,%rax
 mov -0xb8(%r13),%rcx
@@ -5766,7 +5760,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -5782,7 +5776,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -5800,7 +5794,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -5819,7 +5813,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -5835,7 +5829,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -5853,7 +5847,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -5869,14 +5863,12 @@ shr $0x18,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x36,%eax
@@ -5890,7 +5882,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -5903,14 +5895,12 @@ mov (%rdx),%edx
 and $0x3f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xfb,%rax
+mov $0xfb,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x377,%eax
@@ -5924,7 +5914,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -5939,14 +5929,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x33df,%rax
+mov $0x33df,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x2e0d,%eax
@@ -5960,7 +5948,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -5975,14 +5963,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x18,%rax
+mov $0x18,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0xd,%eax
@@ -5996,7 +5982,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -6009,14 +5995,12 @@ mov (%rdx),%edx
 and $0x1f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 test %eax,%eax
@@ -6030,7 +6014,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -6045,14 +6029,12 @@ shr $0x5,%rdx
 and $0x1,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x407d7,%rax
+mov $0x407d7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x20407d7,%eax
@@ -6066,7 +6048,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -6082,14 +6064,12 @@ shr $0x6,%rdx
 and $0x3ffffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x2c9,%rax
+mov $0x2c9,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x6b85,%eax
@@ -6103,7 +6083,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -6116,14 +6096,12 @@ mov (%rdx),%edx
 and $0xffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x11,%rax
+mov $0x11,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0xad,%eax
@@ -6137,7 +6115,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -6152,14 +6130,12 @@ shr $0x10,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xc7,%rax
+mov $0xc7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x82,%eax
@@ -6173,7 +6149,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -6192,7 +6168,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -6208,7 +6184,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -6226,7 +6202,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7fff,%rax
 shl $0x11,%rax
 mov -0xb8(%r13),%rcx
@@ -6245,7 +6221,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -6261,7 +6237,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -6279,7 +6255,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -6298,7 +6274,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -6314,7 +6290,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -6332,7 +6308,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -6348,14 +6324,12 @@ shr $0x18,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x34,%eax
@@ -6369,7 +6343,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -6382,14 +6356,12 @@ mov (%rdx),%edx
 and $0x3f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xfb,%rax
+mov $0xfb,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x27d,%eax
@@ -6403,7 +6375,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -6418,14 +6390,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x33df,%rax
+mov $0x33df,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x7a2f,%eax
@@ -6439,7 +6409,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -6454,14 +6424,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x18,%rax
+mov $0x18,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x16,%eax
@@ -6475,7 +6443,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -6488,14 +6456,12 @@ mov (%rdx),%edx
 and $0x1f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 test %eax,%eax
@@ -6509,7 +6475,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -6524,14 +6490,12 @@ shr $0x5,%rdx
 and $0x1,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x407d7,%rax
+mov $0x407d7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x2000001,%eax
@@ -6545,7 +6509,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -6561,14 +6525,12 @@ shr $0x6,%rdx
 and $0x3ffffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x2c9,%rax
+mov $0x2c9,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x68bd,%eax
@@ -6582,7 +6544,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -6595,14 +6557,12 @@ mov (%rdx),%edx
 and $0xffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x11,%rax
+mov $0x11,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x9d,%eax
@@ -6616,7 +6576,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -6631,14 +6591,12 @@ shr $0x10,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xc7,%rax
+mov $0xc7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0xbc,%eax
@@ -6652,7 +6610,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -6671,7 +6629,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -6687,7 +6645,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -6705,7 +6663,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7fff,%rax
 shl $0x11,%rax
 mov -0xb8(%r13),%rcx
@@ -6724,7 +6682,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -6740,7 +6698,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -6758,7 +6716,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -6777,7 +6735,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -6793,7 +6751,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -6811,7 +6769,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -6827,14 +6785,12 @@ shr $0x18,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x34,%eax
@@ -6848,7 +6804,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -6861,14 +6817,12 @@ mov (%rdx),%edx
 and $0x3f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xfb,%rax
+mov $0xfb,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x27d,%eax
@@ -6882,7 +6836,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -6897,14 +6851,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x33df,%rax
+mov $0x33df,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x7a2f,%eax
@@ -6918,7 +6870,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -6933,14 +6885,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x18,%rax
+mov $0x18,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x16,%eax
@@ -6954,7 +6904,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -6967,14 +6917,12 @@ mov (%rdx),%edx
 and $0x1f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 test %eax,%eax
@@ -6988,7 +6936,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -7003,14 +6951,12 @@ shr $0x5,%rdx
 and $0x1,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x407d7,%rax
+mov $0x407d7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x2000001,%eax
@@ -7024,7 +6970,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -7040,14 +6986,12 @@ shr $0x6,%rdx
 and $0x3ffffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x2c9,%rax
+mov $0x2c9,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x68bd,%eax
@@ -7061,7 +7005,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -7074,14 +7018,12 @@ mov (%rdx),%edx
 and $0xffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x11,%rax
+mov $0x11,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x9d,%eax
@@ -7095,7 +7037,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -7110,14 +7052,12 @@ shr $0x10,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xc7,%rax
+mov $0xc7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0xbc,%eax
@@ -7131,7 +7071,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -7150,7 +7090,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -7166,7 +7106,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -7184,7 +7124,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7fff,%rax
 shl $0x11,%rax
 mov -0xb8(%r13),%rcx
@@ -7203,7 +7143,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -7219,7 +7159,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -7237,7 +7177,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -7256,7 +7196,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -7272,7 +7212,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -7290,7 +7230,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -7306,14 +7246,12 @@ shr $0x18,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x30,%eax
@@ -7327,7 +7265,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -7340,14 +7278,12 @@ mov (%rdx),%edx
 and $0x3f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xfb,%rax
+mov $0xfb,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x181,%eax
@@ -7361,7 +7297,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -7376,14 +7312,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x33df,%rax
+mov $0x33df,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x464f,%eax
@@ -7397,7 +7331,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -7412,14 +7346,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x18,%rax
+mov $0x18,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x1d,%eax
@@ -7433,7 +7365,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -7446,14 +7378,12 @@ mov (%rdx),%edx
 and $0x1f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 test %eax,%eax
@@ -7467,7 +7397,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -7482,14 +7412,12 @@ shr $0x5,%rdx
 and $0x1,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x407d7,%rax
+mov $0x407d7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x1fbf829,%eax
@@ -7503,7 +7431,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -7519,14 +7447,12 @@ shr $0x6,%rdx
 and $0x3ffffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x2c9,%rax
+mov $0x2c9,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x65f3,%eax
@@ -7540,7 +7466,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -7553,14 +7479,12 @@ mov (%rdx),%edx
 and $0xffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x11,%rax
+mov $0x11,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x8b,%eax
@@ -7574,7 +7498,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -7589,14 +7513,12 @@ shr $0x10,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xc7,%rax
+mov $0xc7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0xf4,%eax
@@ -7610,7 +7532,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -7629,7 +7551,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -7645,7 +7567,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -7663,7 +7585,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7fff,%rax
 shl $0x11,%rax
 mov -0xb8(%r13),%rcx
@@ -7682,7 +7604,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -7698,7 +7620,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -7716,7 +7638,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -7735,7 +7657,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -7751,7 +7673,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -7769,7 +7691,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -7785,14 +7707,12 @@ shr $0x18,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x32,%eax
@@ -7806,7 +7726,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -7819,14 +7739,12 @@ mov (%rdx),%edx
 and $0x3f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xfb,%rax
+mov $0xfb,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x27b,%eax
@@ -7840,7 +7758,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -7855,14 +7773,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x33df,%rax
+mov $0x33df,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x7a2d,%eax
@@ -7876,7 +7792,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -7891,14 +7807,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x18,%rax
+mov $0x18,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x14,%eax
@@ -7912,7 +7826,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -7925,14 +7839,12 @@ mov (%rdx),%edx
 and $0x1f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 test %eax,%eax
@@ -7946,7 +7858,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -7961,14 +7873,12 @@ shr $0x5,%rdx
 and $0x1,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x407d7,%rax
+mov $0x407d7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x1ffffff,%eax
@@ -7982,7 +7892,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -7998,14 +7908,12 @@ shr $0x6,%rdx
 and $0x3ffffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x2c9,%rax
+mov $0x2c9,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x68bb,%eax
@@ -8019,7 +7927,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -8032,14 +7940,12 @@ mov (%rdx),%edx
 and $0xffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x11,%rax
+mov $0x11,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x9b,%eax
@@ -8053,7 +7959,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -8068,14 +7974,12 @@ shr $0x10,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xc7,%rax
+mov $0xc7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0xba,%eax
@@ -8089,7 +7993,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -8108,7 +8012,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -8124,7 +8028,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -8142,7 +8046,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7fff,%rax
 shl $0x11,%rax
 mov -0xb8(%r13),%rcx
@@ -8161,7 +8065,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -8177,7 +8081,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -8195,7 +8099,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -8214,7 +8118,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -8230,7 +8134,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -8248,7 +8152,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -8264,14 +8168,12 @@ shr $0x18,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x32,%eax
@@ -8285,7 +8187,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -8298,14 +8200,12 @@ mov (%rdx),%edx
 and $0x3f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xfb,%rax
+mov $0xfb,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x27b,%eax
@@ -8319,7 +8219,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -8334,14 +8234,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x33df,%rax
+mov $0x33df,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x7a2d,%eax
@@ -8355,7 +8253,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -8370,14 +8268,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x18,%rax
+mov $0x18,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x14,%eax
@@ -8391,7 +8287,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -8404,14 +8300,12 @@ mov (%rdx),%edx
 and $0x1f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 test %eax,%eax
@@ -8425,7 +8319,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -8440,14 +8334,12 @@ shr $0x5,%rdx
 and $0x1,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x407d7,%rax
+mov $0x407d7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x1ffffff,%eax
@@ -8461,7 +8353,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -8477,14 +8369,12 @@ shr $0x6,%rdx
 and $0x3ffffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x2c9,%rax
+mov $0x2c9,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x68bb,%eax
@@ -8498,7 +8388,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -8511,14 +8401,12 @@ mov (%rdx),%edx
 and $0xffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x11,%rax
+mov $0x11,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x9b,%eax
@@ -8532,7 +8420,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -8547,14 +8435,12 @@ shr $0x10,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xc7,%rax
+mov $0xc7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0xba,%eax
@@ -8568,7 +8454,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -8587,7 +8473,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -8603,7 +8489,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -8621,7 +8507,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7fff,%rax
 shl $0x11,%rax
 mov -0xb8(%r13),%rcx
@@ -8640,7 +8526,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -8656,7 +8542,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -8674,7 +8560,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -8693,7 +8579,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -8709,7 +8595,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -8727,7 +8613,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -8743,14 +8629,12 @@ shr $0x18,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x3,%eax
@@ -8764,7 +8648,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -8777,14 +8661,12 @@ mov (%rdx),%edx
 and $0x3f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xfb,%rax
+mov $0xfb,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x78,%eax
@@ -8798,7 +8680,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -8813,14 +8695,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x33df,%rax
+mov $0x33df,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x320e,%eax
@@ -8834,7 +8714,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -8849,14 +8729,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x18,%rax
+mov $0x18,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x10,%eax
@@ -8870,7 +8748,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -8883,14 +8761,12 @@ mov (%rdx),%edx
 and $0x1f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x1,%eax
@@ -8904,7 +8780,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -8919,14 +8795,12 @@ shr $0x5,%rdx
 and $0x1,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x407d7,%rax
+mov $0x407d7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 test %eax,%eax
@@ -8940,7 +8814,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -8956,14 +8830,12 @@ shr $0x6,%rdx
 and $0x3ffffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x2c9,%rax
+mov $0x2c9,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x88,%eax
@@ -8977,7 +8849,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -8990,14 +8862,12 @@ mov (%rdx),%edx
 and $0xffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x11,%rax
+mov $0x11,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x10,%eax
@@ -9011,7 +8881,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -9026,14 +8896,12 @@ shr $0x10,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xc7,%rax
+mov $0xc7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x83,%eax
@@ -9047,7 +8915,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -9066,7 +8934,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -9082,7 +8950,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -9100,7 +8968,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7fff,%rax
 shl $0x11,%rax
 mov -0xb8(%r13),%rcx
@@ -9119,7 +8987,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -9135,7 +9003,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -9153,7 +9021,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -9172,7 +9040,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -9188,7 +9056,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -9206,7 +9074,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -9222,14 +9090,12 @@ shr $0x18,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x33,%eax
@@ -9243,7 +9109,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -9256,14 +9122,12 @@ mov (%rdx),%edx
 and $0x3f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xfb,%rax
+mov $0xfb,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x2ff,%eax
@@ -9277,7 +9141,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -9292,14 +9156,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x33df,%rax
+mov $0x33df,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x7bff,%eax
@@ -9313,7 +9175,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -9328,14 +9190,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x18,%rax
+mov $0x18,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x1d,%eax
@@ -9349,7 +9209,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -9362,14 +9222,12 @@ mov (%rdx),%edx
 and $0x1f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x1,%eax
@@ -9383,7 +9241,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -9398,14 +9256,12 @@ shr $0x5,%rdx
 and $0x1,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x407d7,%rax
+mov $0x407d7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x20407d7,%eax
@@ -9419,7 +9275,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -9435,14 +9291,12 @@ shr $0x6,%rdx
 and $0x3ffffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x2c9,%rax
+mov $0x2c9,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x6afd,%eax
@@ -9456,7 +9310,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -9469,14 +9323,12 @@ mov (%rdx),%edx
 and $0xffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x11,%rax
+mov $0x11,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x9d,%eax
@@ -9490,7 +9342,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -9505,14 +9357,12 @@ shr $0x10,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xc7,%rax
+mov $0xc7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0xff,%eax
@@ -9526,7 +9376,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -9545,7 +9395,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -9561,7 +9411,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -9579,7 +9429,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7fff,%rax
 shl $0x11,%rax
 mov -0xb8(%r13),%rcx
@@ -9598,7 +9448,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -9614,7 +9464,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -9632,7 +9482,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -9651,7 +9501,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -9667,7 +9517,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -9685,7 +9535,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -9701,14 +9551,12 @@ shr $0x18,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x30,%eax
@@ -9722,7 +9570,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -9735,14 +9583,12 @@ mov (%rdx),%edx
 and $0x3f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xfb,%rax
+mov $0xfb,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x287,%eax
@@ -9756,7 +9602,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -9771,14 +9617,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x33df,%rax
+mov $0x33df,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x49f1,%eax
@@ -9792,7 +9636,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -9807,14 +9651,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x18,%rax
+mov $0x18,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0xd,%eax
@@ -9828,7 +9670,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -9841,14 +9683,12 @@ mov (%rdx),%edx
 and $0x1f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 test %eax,%eax
@@ -9862,7 +9702,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -9877,14 +9717,12 @@ shr $0x5,%rdx
 and $0x1,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x407d7,%rax
+mov $0x407d7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x20407d7,%eax
@@ -9898,7 +9736,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -9914,14 +9752,12 @@ shr $0x6,%rdx
 and $0x3ffffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x2c9,%rax
+mov $0x2c9,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x6a75,%eax
@@ -9935,7 +9771,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -9948,14 +9784,12 @@ mov (%rdx),%edx
 and $0xffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x11,%rax
+mov $0x11,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x8d,%eax
@@ -9969,7 +9803,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -9984,14 +9818,12 @@ shr $0x10,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xc7,%rax
+mov $0xc7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x7c,%eax
@@ -10005,7 +9837,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -10024,7 +9856,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -10040,7 +9872,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -10058,7 +9890,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7fff,%rax
 shl $0x11,%rax
 mov -0xb8(%r13),%rcx
@@ -10077,7 +9909,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -10093,7 +9925,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -10111,7 +9943,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -10130,7 +9962,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -10146,7 +9978,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -10164,7 +9996,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -10180,14 +10012,12 @@ shr $0x18,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x11,%eax
@@ -10201,7 +10031,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -10214,14 +10044,12 @@ mov (%rdx),%edx
 and $0x3f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xfb,%rax
+mov $0xfb,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x2,%eax
@@ -10235,7 +10063,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -10250,14 +10078,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x33df,%rax
+mov $0x33df,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x2,%eax
@@ -10271,7 +10097,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -10286,14 +10112,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x18,%rax
+mov $0x18,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 test %eax,%eax
@@ -10307,7 +10131,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -10320,14 +10144,12 @@ mov (%rdx),%edx
 and $0x1f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x1,%eax
@@ -10341,7 +10163,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -10356,14 +10178,12 @@ shr $0x5,%rdx
 and $0x1,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x407d7,%rax
+mov $0x407d7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x7f,%eax
@@ -10377,7 +10197,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -10393,14 +10213,12 @@ shr $0x6,%rdx
 and $0x3ffffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x2c9,%rax
+mov $0x2c9,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x25,%eax
@@ -10414,7 +10232,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -10427,14 +10245,12 @@ mov (%rdx),%edx
 and $0xffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x11,%rax
+mov $0x11,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x9,%eax
@@ -10448,7 +10264,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -10463,14 +10279,12 @@ shr $0x10,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xc7,%rax
+mov $0xc7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 test %eax,%eax
@@ -10484,7 +10298,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -10503,7 +10317,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -10519,7 +10333,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -10537,7 +10351,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7fff,%rax
 shl $0x11,%rax
 mov -0xb8(%r13),%rcx
@@ -10556,7 +10370,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -10572,7 +10386,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -10590,7 +10404,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -10609,7 +10423,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -10625,7 +10439,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -10643,7 +10457,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -10659,14 +10473,12 @@ shr $0x18,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 test %eax,%eax
@@ -10680,7 +10492,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -10693,14 +10505,12 @@ mov (%rdx),%edx
 and $0x3f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xfb,%rax
+mov $0xfb,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x86,%eax
@@ -10714,7 +10524,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -10729,14 +10539,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x33df,%rax
+mov $0x33df,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x1270,%eax
@@ -10750,7 +10558,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -10765,14 +10573,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x18,%rax
+mov $0x18,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x15,%eax
@@ -10786,7 +10592,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -10799,14 +10605,12 @@ mov (%rdx),%edx
 and $0x1f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 test %eax,%eax
@@ -10820,7 +10624,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -10835,14 +10639,12 @@ shr $0x5,%rdx
 and $0x1,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x407d7,%rax
+mov $0x407d7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x1c57,%eax
@@ -10856,7 +10658,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -10872,14 +10674,12 @@ shr $0x6,%rdx
 and $0x3ffffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x2c9,%rax
+mov $0x2c9,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x1af,%eax
@@ -10893,7 +10693,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -10906,14 +10706,12 @@ mov (%rdx),%edx
 and $0xffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x11,%rax
+mov $0x11,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x3,%eax
@@ -10927,7 +10725,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -10942,14 +10740,12 @@ shr $0x10,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xc7,%rax
+mov $0xc7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0xbb,%eax
@@ -10963,7 +10759,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -10982,7 +10778,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -10998,7 +10794,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -11016,7 +10812,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7fff,%rax
 shl $0x11,%rax
 mov -0xb8(%r13),%rcx
@@ -11035,7 +10831,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -11051,7 +10847,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -11069,7 +10865,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -11088,7 +10884,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -11104,7 +10900,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -11122,7 +10918,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -11138,14 +10934,12 @@ shr $0x18,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x36,%eax
@@ -11159,7 +10953,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -11172,14 +10966,12 @@ mov (%rdx),%edx
 and $0x3f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xfb,%rax
+mov $0xfb,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x27f,%eax
@@ -11193,7 +10985,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -11208,14 +11000,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x33df,%rax
+mov $0x33df,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x7a31,%eax
@@ -11229,7 +11019,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -11244,14 +11034,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x18,%rax
+mov $0x18,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x18,%eax
@@ -11265,7 +11053,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -11278,14 +11066,12 @@ mov (%rdx),%edx
 and $0x1f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 test %eax,%eax
@@ -11299,7 +11085,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -11314,14 +11100,12 @@ shr $0x5,%rdx
 and $0x1,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x407d7,%rax
+mov $0x407d7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x2000003,%eax
@@ -11335,7 +11119,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -11351,14 +11135,12 @@ shr $0x6,%rdx
 and $0x3ffffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x2c9,%rax
+mov $0x2c9,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x68bf,%eax
@@ -11372,7 +11154,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -11385,14 +11167,12 @@ mov (%rdx),%edx
 and $0xffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x11,%rax
+mov $0x11,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x9f,%eax
@@ -11406,7 +11186,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -11421,14 +11201,12 @@ shr $0x10,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xc7,%rax
+mov $0xc7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0xbe,%eax
@@ -11442,7 +11220,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -11461,7 +11239,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -11477,7 +11255,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -11495,7 +11273,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7fff,%rax
 shl $0x11,%rax
 mov -0xb8(%r13),%rcx
@@ -11514,7 +11292,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -11530,7 +11308,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -11548,7 +11326,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -11567,7 +11345,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -11583,7 +11361,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -11601,7 +11379,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -11617,14 +11395,12 @@ shr $0x18,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x2c,%eax
@@ -11638,7 +11414,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -11651,14 +11427,12 @@ mov (%rdx),%edx
 and $0x3f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xfb,%rax
+mov $0xfb,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x275,%eax
@@ -11672,7 +11446,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -11687,14 +11461,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x33df,%rax
+mov $0x33df,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x7a27,%eax
@@ -11708,7 +11480,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -11723,14 +11495,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x18,%rax
+mov $0x18,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0xe,%eax
@@ -11744,7 +11514,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -11757,14 +11527,12 @@ mov (%rdx),%edx
 and $0x1f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 test %eax,%eax
@@ -11778,7 +11546,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -11793,14 +11561,12 @@ shr $0x5,%rdx
 and $0x1,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x407d7,%rax
+mov $0x407d7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x1fffff9,%eax
@@ -11814,7 +11580,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -11830,14 +11596,12 @@ shr $0x6,%rdx
 and $0x3ffffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x2c9,%rax
+mov $0x2c9,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x68b5,%eax
@@ -11851,7 +11615,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -11864,14 +11628,12 @@ mov (%rdx),%edx
 and $0xffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x11,%rax
+mov $0x11,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x95,%eax
@@ -11885,7 +11647,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -11900,14 +11662,12 @@ shr $0x10,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xc7,%rax
+mov $0xc7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0xb4,%eax
@@ -11921,7 +11681,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -11940,7 +11700,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -11956,7 +11716,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -11974,7 +11734,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7fff,%rax
 shl $0x11,%rax
 mov -0xb8(%r13),%rcx
@@ -11993,7 +11753,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -12009,7 +11769,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -12027,7 +11787,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -12046,7 +11806,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -12062,7 +11822,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -12080,7 +11840,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -12096,14 +11856,12 @@ shr $0x18,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x11,%eax
@@ -12117,7 +11875,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -12130,14 +11888,12 @@ mov (%rdx),%edx
 and $0x3f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xfb,%rax
+mov $0xfb,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x14,%eax
@@ -12151,7 +11907,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -12166,14 +11922,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x33df,%rax
+mov $0x33df,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x4,%eax
@@ -12187,7 +11941,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -12202,14 +11956,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x18,%rax
+mov $0x18,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x15,%eax
@@ -12223,7 +11975,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -12236,14 +11988,12 @@ mov (%rdx),%edx
 and $0x1f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x1,%eax
@@ -12257,7 +12007,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -12272,14 +12022,12 @@ shr $0x5,%rdx
 and $0x1,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x407d7,%rax
+mov $0x407d7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 test %eax,%eax
@@ -12293,7 +12041,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -12309,14 +12057,12 @@ shr $0x6,%rdx
 and $0x3ffffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x2c9,%rax
+mov $0x2c9,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x14,%eax
@@ -12330,7 +12076,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -12343,14 +12089,12 @@ mov (%rdx),%edx
 and $0xffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x11,%rax
+mov $0x11,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x14,%eax
@@ -12364,7 +12108,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -12379,14 +12123,12 @@ shr $0x10,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xc7,%rax
+mov $0xc7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x11,%eax
@@ -12400,7 +12142,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -12419,7 +12161,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -12435,7 +12177,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -12453,7 +12195,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7fff,%rax
 shl $0x11,%rax
 mov -0xb8(%r13),%rcx
@@ -12472,7 +12214,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -12488,7 +12230,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -12506,7 +12248,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -12525,7 +12267,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -12541,7 +12283,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -12559,7 +12301,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -12575,14 +12317,12 @@ shr $0x18,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x33,%eax
@@ -12596,7 +12336,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -12609,14 +12349,12 @@ mov (%rdx),%edx
 and $0x3f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xfb,%rax
+mov $0xfb,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x27f,%eax
@@ -12630,7 +12368,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -12645,14 +12383,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x33df,%rax
+mov $0x33df,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x7a3f,%eax
@@ -12666,7 +12402,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -12681,14 +12417,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x18,%rax
+mov $0x18,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x17,%eax
@@ -12702,7 +12436,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -12715,14 +12449,12 @@ mov (%rdx),%edx
 and $0x1f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x1,%eax
@@ -12736,7 +12468,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -12751,14 +12483,12 @@ shr $0x5,%rdx
 and $0x1,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x407d7,%rax
+mov $0x407d7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x2000013,%eax
@@ -12772,7 +12502,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -12788,14 +12518,12 @@ shr $0x6,%rdx
 and $0x3ffffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x2c9,%rax
+mov $0x2c9,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x68bf,%eax
@@ -12809,7 +12537,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -12822,14 +12550,12 @@ mov (%rdx),%edx
 and $0xffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x11,%rax
+mov $0x11,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x9f,%eax
@@ -12843,7 +12569,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -12858,14 +12584,12 @@ shr $0x10,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xc7,%rax
+mov $0xc7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0xbb,%eax
@@ -12879,7 +12603,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -12898,7 +12622,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -12914,7 +12638,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -12932,7 +12656,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7fff,%rax
 shl $0x11,%rax
 mov -0xb8(%r13),%rcx
@@ -12951,7 +12675,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -12967,7 +12691,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -12985,7 +12709,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -13004,7 +12728,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -13020,7 +12744,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -13038,7 +12762,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -13054,14 +12778,12 @@ shr $0x18,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x16,%eax
@@ -13075,7 +12797,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -13088,14 +12810,12 @@ mov (%rdx),%edx
 and $0x3f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xfb,%rax
+mov $0xfb,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x259,%eax
@@ -13109,7 +12829,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -13124,14 +12844,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x33df,%rax
+mov $0x33df,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x7a0b,%eax
@@ -13145,7 +12863,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -13160,14 +12878,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x18,%rax
+mov $0x18,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x10,%eax
@@ -13181,7 +12897,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -13194,14 +12910,12 @@ mov (%rdx),%edx
 and $0x1f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 test %eax,%eax
@@ -13215,7 +12929,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -13230,14 +12944,12 @@ shr $0x5,%rdx
 and $0x1,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x407d7,%rax
+mov $0x407d7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x2000025,%eax
@@ -13251,7 +12963,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -13267,14 +12979,12 @@ shr $0x6,%rdx
 and $0x3ffffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x2c9,%rax
+mov $0x2c9,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x6899,%eax
@@ -13288,7 +12998,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -13301,14 +13011,12 @@ mov (%rdx),%edx
 and $0xffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x11,%rax
+mov $0x11,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0xb9,%eax
@@ -13322,7 +13030,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -13337,14 +13045,12 @@ shr $0x10,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xc7,%rax
+mov $0xc7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x9e,%eax
@@ -13358,7 +13064,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -13377,7 +13083,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -13393,7 +13099,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -13411,7 +13117,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7fff,%rax
 shl $0x11,%rax
 mov -0xb8(%r13),%rcx
@@ -13430,7 +13136,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -13446,7 +13152,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -13464,7 +13170,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -13483,7 +13189,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -13499,7 +13205,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -13517,7 +13223,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -13533,14 +13239,12 @@ shr $0x18,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x3,%eax
@@ -13554,7 +13258,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -13567,14 +13271,12 @@ mov (%rdx),%edx
 and $0x3f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xfb,%rax
+mov $0xfb,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x25,%eax
@@ -13588,7 +13290,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -13603,14 +13305,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x33df,%rax
+mov $0x33df,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x72f,%eax
@@ -13624,7 +13324,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -13639,14 +13339,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x18,%rax
+mov $0x18,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x1,%eax
@@ -13660,7 +13358,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -13673,14 +13371,12 @@ mov (%rdx),%edx
 and $0x1f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 test %eax,%eax
@@ -13694,7 +13390,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -13709,14 +13405,12 @@ shr $0x5,%rdx
 and $0x1,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x407d7,%rax
+mov $0x407d7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x1e1e1e,%eax
@@ -13730,7 +13424,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -13746,14 +13440,12 @@ shr $0x6,%rdx
 and $0x3ffffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x2c9,%rax
+mov $0x2c9,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x629,%eax
@@ -13767,7 +13459,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -13780,14 +13472,12 @@ mov (%rdx),%edx
 and $0xffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x11,%rax
+mov $0x11,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x9,%eax
@@ -13801,7 +13491,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -13816,14 +13506,12 @@ shr $0x10,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xc7,%rax
+mov $0xc7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0xb,%eax
@@ -13837,7 +13525,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -13856,7 +13544,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -13872,7 +13560,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -13890,7 +13578,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7fff,%rax
 shl $0x11,%rax
 mov -0xb8(%r13),%rcx
@@ -13909,7 +13597,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -13925,7 +13613,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -13943,7 +13631,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -13962,7 +13650,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -13978,7 +13666,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -13996,7 +13684,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -14012,14 +13700,12 @@ shr $0x18,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x3,%rax
+mov $0x3,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0xd,%eax
@@ -14033,7 +13719,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x33,%rax
+mov $0x33,%eax
 and $0x3f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -14046,14 +13732,12 @@ mov (%rdx),%edx
 and $0x3f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xfb,%rax
+mov $0xfb,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x9,%eax
@@ -14067,7 +13751,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x27c,%rax
+mov $0x27c,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -14082,14 +13766,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x33df,%rax
+mov $0x33df,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x4,%eax
@@ -14103,7 +13785,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x7a2e,%rax
+mov $0x7a2e,%eax
 and $0x7ff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -14118,14 +13800,12 @@ shr $0x6,%rdx
 and $0x7ff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x18,%rax
+mov $0x18,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x2,%eax
@@ -14139,7 +13819,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x15,%rax
+mov $0x15,%eax
 and $0x1f,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -14152,14 +13832,12 @@ mov (%rdx),%edx
 and $0x1f,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x1,%rax
+mov $0x1,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x1,%eax
@@ -14173,7 +13851,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 and $0x1,%rax
 shl $0x5,%rax
 mov -0xb8(%r13),%rcx
@@ -14188,14 +13866,12 @@ shr $0x5,%rdx
 and $0x1,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x407d7,%rax
+mov $0x407d7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0xe,%eax
@@ -14209,7 +13885,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x2000000,%rax
+mov $0x2000000,%eax
 and $0x3ffffff,%rax
 shl $0x6,%rax
 mov -0xb8(%r13),%rcx
@@ -14225,14 +13901,12 @@ shr $0x6,%rdx
 and $0x3ffffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x2c9,%rax
+mov $0x2c9,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x3,%eax
@@ -14246,7 +13920,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x68bc,%rax
+mov $0x68bc,%eax
 and $0xffff,%rax
 mov -0xb8(%r13),%rcx
 mov (%rcx),%ecx
@@ -14259,14 +13933,12 @@ mov (%rdx),%edx
 and $0xffff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0x11,%rax
+mov $0x11,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x4,%eax
@@ -14280,7 +13952,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0x9c,%rax
+mov $0x9c,%eax
 and $0xff,%rax
 shl $0x10,%rax
 mov -0xb8(%r13),%rcx
@@ -14295,14 +13967,12 @@ shr $0x10,%rdx
 and $0xff,%rdx
 mov %rdx,%rax
 sub $0x20,%rsp
-mov $0xc7,%rax
+mov $0xc7,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 sub $0x10,%rsp
-mov $0x0,%al
 call <main>
 add $0x10,%rsp
 cmp $0x10,%eax
@@ -14316,7 +13986,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xb8(%r13)
 mov (%rax),%eax
 mov %rax,-0xc0(%r13)
-mov $0xbb,%rax
+mov $0xbb,%eax
 and $0xff,%rax
 shl $0x18,%rax
 mov -0xb8(%r13),%rcx
@@ -14330,8 +14000,7 @@ mov -0xb8(%r13),%rdx
 mov (%rdx),%edx
 shr $0x18,%rdx
 and $0xff,%rdx
-mov $0x0,%rax
-movslq %eax,%rax
+mov $0x0,%eax
 <nop padding>
 mov %r13,%rsp
 pop %r13

@@ -640,6 +640,9 @@ fn rewrite_function_params(
                         }),
                         span: param.span.clone(),
                         vla_dim: None,
+                        // 标量化后的新形参不沿用聚合原形的家：签名已经变了，原家的
+                        // 寄存器号与新参数的大小/位置无关。
+                        home: None,
                     });
                 }
             }
@@ -1129,6 +1132,7 @@ mod tests {
                 }),
                 span: span_zero(),
                 vla_dim: None,
+                home: None,
             }],
             body: Some(Block {
                 items: vec![BlockItem::Stmt(Stmt::Return {
@@ -1237,6 +1241,7 @@ mod tests {
                 }),
                 span: span_zero(),
                 vla_dim: None,
+                home: None,
             }],
             body: Some(Block {
                 items: vec![BlockItem::Stmt(Stmt::Expr {
@@ -1345,6 +1350,7 @@ mod tests {
                 }),
                 span: span_zero(),
                 vla_dim: None,
+                home: None,
             }],
             body: Some(Block {
                 items: vec![BlockItem::Stmt(Stmt::Return {
@@ -1482,6 +1488,7 @@ mod tests {
                 }),
                 span: span_zero(),
                 vla_dim: None,
+                home: None,
             }],
             body: Some(Block {
                 items: vec![BlockItem::Stmt(Stmt::Return {

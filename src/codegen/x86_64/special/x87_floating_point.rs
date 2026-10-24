@@ -1036,11 +1036,14 @@ impl Codegen {
         } else {
             (0xDDu8, 0x05u8)
         };
-        let at = self.pos();
-        self.emit_insn(&Insn::raw_bytes(&[opcode, modrm, 0, 0, 0, 0]));
         // x87 fld [rip+disp32] 是 6 字节指令 (disp32 @ byte 2),
-        // 不同于 SSE movsd/movss 的 8 字节 (disp32 @ byte 4).
-        self.x87_float_refs.push((at, off as u64));
+        // 不同于 SSE movsd/movss 的 8 字节 (disp32 @ byte 4)。
+        //
+        // 起始 pc 在发射后取：发射入口可能在本条之前插入存出（区内家 S4），
+        // 发射前拿的 `pos()` 会被推前，补丁就落到上一条中间。
+        if let Some(at) = self.emit_insn_head(&Insn::raw_bytes(&[opcode, modrm, 0, 0, 0, 0])) {
+            self.x87_float_refs.push((at, off as u64));
+        }
     }
 
     /// x87 浮點二元運算: st(0) = st(0) op st(1), 然後彈出 st(0)

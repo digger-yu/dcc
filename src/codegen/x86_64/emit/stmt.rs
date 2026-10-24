@@ -38,6 +38,90 @@ fn handler_pad() -> u64 {
     *V.get_or_init(|| read_layout_knob("DCC_HANDLER_PAD"))
 }
 
+// 滴定砝码三：只加「一定会被执行」的 taken 分支，用来量 `d(runtime)/d(taken)`。
+//
+// 为什么必须单独有一个：`DCC_HANDLER_PAD` 加的是 nop 且放在标签**之前**，在
+// 计算转移的函数里（Lua 的每个 `L_OP_*` 都是跳表目标）永远不会被执行，它只能量
+// 体量敏感度；而本机没有 PMU，「每条 taken 分支值多少 ms」拿不到直接读数。
+// 没有这根砝码，方案 §7 第一条假绿（外置冷块只动字节不动分支）就无法识破。
+// 形状：在标签之后发 `jmp <fresh>; <fresh>:`，任何进入该标签的路径（fall-through
+// 或跳表）都会执行一次 taken 跳转，然后原样继续——不改任何寄存器、内存、标志。
+fn taken_pad() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| read_layout_knob("DCC_TAKEN_PAD"))
+}
+
+// 滴定砝码四：只加「会被执行但不分支」的指令（nop）。
+//
+// 为什么还要这一根：`DCC_TAKEN_PAD` 同时动了「每步执行条数」与「每步 taken 分支」两个轴，
+// 单靠它分不开两个斜率；`DCC_HANDLER_PAD` 只动体量（nop 在标签前，从不执行）。三根正交
+// 砝码联立才能解出 a·ΔKB + b·Δ(条/步) + c·Δ(taken/步) 的三个系数（`scripts/meta_gate.sh`）。
+fn exec_pad() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| read_layout_knob("DCC_EXEC_PAD"))
+}
+
+// 滴定砝码五：每步多 k 次**内存读改写**，用来单独给「内存操作」定价。
+//
+// 为什么不能共用 `DCC_EXEC_PAD`：那根砝码发的是 nop，在乱序核上几乎不花钱，它量出的是
+// 「每步一条廉价指令」的价格；而本仓真正要做的事（临时值零帧落脚）省的是
+// `mov [slot],r` + `mov r,[slot]` 这种带存储转发依赖的内存操作，两者差一个量级。没有
+// 这根砝码就只能拿条数斜率去推断，而条数斜率已经被两次实测（R_RAW、冷格外置）证伪。
+//
+// 发的形态是 `add QWORD PTR [r13-8], 0`（5 字节）：写回的值与读出的逐位相同，所以它对
+// 任何存在那个格子里的东西（整数/指针/浮点位模式）都是恒等变换，不会改变程序结果。
+// 选 -8 是因为帧基址以下的第一个槽必定在已分配帧内（`sub rsp, frame_size` 之后 r13 是帧基）。
+fn memop_pad() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| read_layout_knob("DCC_MEMOP_PAD"))
+}
+
+// 滴定砝码六：每步多 k 次**纯载入**（不写存、不改标志）。
+//
+// 为什么还要单独一根：`DCC_MEMOP_PAD` 发的是读改写（它写脏一个格子并造出存转发的依赖），
+// 而 P1 那一类改动消掉的是「无人等待的载入」（L1 命中，可并行）。两者差几倍：实测
+// RMW 每步一次值 30–75 ms，但拿 RMW 价格去给消载入定价，会把 P1 高估一个量级（已经
+// 因此判错过一次：按 RMW 价预期 45–110 ms，实测量只有 2 ms，还在噪声里）。没有这根
+// 砝码，「消一次载入值多少」就是一个没量过就拿来用的假设。
+//
+// 安全性：发到 `%rax`（求值累加器）。臂**入口**处 rax 是死的（现产物里每条臂尾都有一条
+// 恒死的 `mov rax,0` 就是同一事实），而 rax 不可能握着变量家（家只来自 POOL 与延伸池），
+// 也不参与跳表下标（那个走 rcx）⇒ 写了也没人读。位移选 -8：帧基址以下第一个槽必在已分配帧内。
+fn load_pad() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| read_layout_knob("DCC_LOAD_PAD"))
+}
+
+// 冷格外置开关（方案 §3 的 P2）。默认 0 ⇒ 一条都不外置，产物与改动前逐字节相同。
+// 用布尔而不是数量旋钮：这一项要判的是「搬走热区里的冷体到底值多少 ms」，旋钮开度
+// 会同时改变候选数量与布局，分不开。
+fn cold_outline() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| read_layout_knob("DCC_COLD_OUTLINE") != 0)
+}
+
+/// 冷尾合并的钳。抽成一个无状态函数不是为了复用，是为了能让用例钉住它真正的行为：
+/// 「体相同且汇合目标相同 ⇒ 合并」与「体相同但汇合目标不同 ⇒ 不合并」。
+///
+/// 后者在 `DCC_COLD_OUTLINE` 现在的 scheme 下是**构造上恒成立**的：每条外置臂的 `join`
+/// 就是它自己那个 `if` 后面的 `fresh_label()`（见 `Stmt::If` 臂的 `lend`），所以不同站点
+/// 的两条臂永远有不同的汇合标签。实测：`luaV_execute` 的 80 条臂体抽掉汇合 jmp 后只有
+/// **1 种**，而（体, 汇合目标）有 **80 类** ⇒ 合并对数为 0，不是量尺写错，是这个 scheme
+/// 下机会集为空。要拿到方案 §8.4 的「站点 80→≤10」只能走「尾合并（多一跳动态跳转）」
+/// 那条路，而 §6 已按实测（删 to-next jmp 慢 3.8%）把它列为明确不做。
+pub(crate) fn cold_arm_key(bytes: &[u8], rels: &[(u32, String)]) -> (Vec<u8>, Vec<(u32, String)>) {
+    (bytes.to_vec(), rels.to_vec())
+}
+
+/// 冷尾指纹合并旋钮（`DCC_COLD_MERGE`）。默认关：合并只在「字节 + 块内跳转目标」全等
+/// 时才动刀，它本身是安的，但它是**布局敏感**的一档（删一个体会移动后面所有块的
+/// 地址），而本仓量到过「静态变好、墙钟变差」两次（删 135 条 to-next jmp 慢 3.8%、
+/// `R_RAW` 11397 比 11366 慢）。默认值只由 `ab_pair.sh` 的同轮配对决定。
+pub(crate) fn cold_merge_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| read_layout_knob("DCC_COLD_MERGE") != 0)
+}
+
 fn read_layout_knob(name: &str) -> u64 {
     std::env::var(name)
         .ok()
@@ -45,7 +129,33 @@ fn read_layout_knob(name: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// 「纯常量表达式语句不发字节」是否启用（`DCC_DEAD_CONST_STMT`，默认关）。
+fn dead_const_stmt_ok() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| read_layout_knob("DCC_DEAD_CONST_STMT") != 0)
+}
+
 impl Codegen {
+    /// 这条表达式语句是不是「算完也没人看、算的过程也不碰世界」的常量？
+    ///
+    /// 白名单只放结构上不可能有副作用的形状，而不是「问 `expr_has_side_effects`」：
+    /// 那个谓词的默认臂是 `_ => false`（`StmtExpr`/内置函数因此被判为无副作用，而
+    /// 它们完全可能有 call），拿它当「不发字节」的判据就是一条静默错值的邀请。
+    ///
+    /// 故意不进名单的三条：
+    ///   * `SizeofTy`/`SizeofExpr`/`Alignof*` —— `sizeof(VLA)` 会真的**求值**维度表达式
+    ///     （C11 6.7.6.3p9，副作用计入），而表达式形态的维度在这里看不出来；
+    ///   * `Ident` —— 读 volatile 全局本身就是可观察的，而本函数只拿到表达式拿不到家表；
+    ///   * `Cond`/`Binop` —— 整数溢出是 UB，「不发」虽然合法但已超出本旋钮的射程
+    ///     （那属于常量折叠的活，不该在发射器里重做一遗）。
+    fn expr_is_dead_constant(e: &Expr) -> bool {
+        match e {
+            Expr::Int { .. } | Expr::Char { .. } | Expr::Float { .. } | Expr::String { .. } => true,
+            // 转换不能引入副作用（操作数已在上面递归筛过）。
+            Expr::Cast { e, .. } => Self::expr_is_dead_constant(e),
+            _ => false,
+        }
+    }
     /// `goto *表[下标]` 且那张表的基址已常驻 `%rbp` ⇒ 只发一条
     /// `jmp *(%rbp,%rcx,stride)`（阶段 6 批 4）。
     ///
@@ -837,7 +947,15 @@ impl Codegen {
                 self.emit_func_epilogue();
             },
             Stmt::Expr { e, .. } => {
-                if !self.gen_unknown_builtin_stmt(e) {
+                // 纯常量表达式语句一个字节都不发。存在于这里的理由不是「省字节」而是
+                // 这类语句本来就没有可观察效果：`lua_assert(c)` 在非调试构建下展开成
+                // `((void)0)`（llimits.h:111），而 Lua 主循环每条臂都带它一份 ⇒ 实测
+                // `luaV_execute` 里有 79 条 `mov rax,0x0`（每条 7B，共 553B）排在「刚算完
+                // 地址就跳走」的位置上，而 %rax 在下一次求值前没有任何读者。SQLite 的同型
+                // 宏更多。按方案 §5 的纪律先走旋钮（默认关），墙钟判过再谈默认位。
+                if dead_const_stmt_ok() && Self::expr_is_dead_constant(e) {
+                    // 什么都不发。不开旋钮时走下面原路，逐字节与今天相同。
+                } else if !self.gen_unknown_builtin_stmt(e) {
                     // 表达式语句的值没人要（P13 阶段1 的 Discarded 语境）：带上这个上下文
                     // 去求值，赋值臂末尾的宽度归约就能省掉。`gen_expr` 入口会把它消费掉，
                     // 所以只有本节点看得到，嵌套子表达式一律当「值要用」。
@@ -910,23 +1028,48 @@ impl Codegen {
                     let lend = self.fresh_label();
                     // 条件进分支语境：`&&`/`||`/`!`/`!= 0` 在 [gen_cond_jump_to] 里
                     // 按短路拆成直生 jcc，不再把每个比较材料化成 0/1 再 test。
-                    self.gen_cond_jump_to(cond, &le, false);
-                    self.gen_stmt(then_);
-                    // Skip dead jmp when then-body ends with return
-                    let then_ends_ret = Self::stmt_ends_with_return(then_);
-                    // **不要**在这里追加「无 else 就不发这条 jmp」的 to-next 抑制：
-                    // 实测 luaV_execute 里能删掉 135 条（静态 −675 字节），但 fib(32) 反而
-                    // 慢 3.8%（同机交替 best-of-9：min 310.9→322.6ms）—— 那 5 字节×135 的
-                    // 位置移动把热循环体推离了原有对齐，布局代价远大于省下一条恒定 Taken 跳。
-                    // 数据与结论见 .trae/documents/x86_64-p13-hot-path-emission-optimization-plan.md §2。
-                    if !then_ends_ret {
-                        self.jmp_rel32(&lend, JumpKind::Jmp);
+                    //
+                    // 冷侧下沉（`DCC_COLD_OUTLINE=1`，默认关）：条件最外层写着「这条边
+                    // unlikely」且无 else、体 又不含 cleanup/VLA/asm/受保护调用时，把 then 体
+                    // 搬到函数尾，热路径改成 fall-through。两条收益分开算：
+                    //   * 热区字节下降（本机标定斜率 a≈11 ms/KB，且冷体本来就在两条热臂之间）；
+                    //   * 原本「跳过冷体的那条 taken jcc」变成不跳的 fall-through。
+                    // 极性反转后只在条件为真时去冷块，冷块末尾跳回 `lend`，与原地发射逐路径等价。
+                    let outline_cold = cold_outline()
+                        && else_.is_none()
+                        && Self::cond_marked_cold(cond)
+                        && !Self::cold_outline_blocked(then_);
+                    if outline_cold {
+                        self.gen_cond_jump_to(cond, &le, true);
+                        // `lend` 就在原地：热路 fall-through 到它，冷块从函数尾跳回它。
+                        self.label(&lend);
+                        self.cold_arms.push(crate::codegen::x86_64::codegen::ColdArm {
+                            entry: le,
+                            body: (**then_).clone(),
+                            join: Some(lend),
+                            loop_continue: self.loop_continue.clone(),
+                            loop_break: self.loop_break.clone(),
+                            break_targets: self.break_targets.clone(),
+                        });
+                    } else {
+                        self.gen_cond_jump_to(cond, &le, false);
+                        self.gen_stmt(then_);
+                        // Skip dead jmp when then-body ends with return
+                        let then_ends_ret = Self::stmt_ends_with_return(then_);
+                        // **不要**在这里追加「无 else 就不发这条 jmp」的 to-next 抑制：
+                        // 实测 luaV_execute 里能删掉 135 条（静态 −675 字节），但 fib(32) 反而
+                        // 慢 3.8%（同机交替 best-of-9：min 310.9→322.6ms）—— 那 5 字节×135 的
+                        // 位置移动把热循环体推离了原有对齐，布局代价远大于省下一条恒定 Taken 跳。
+                        // 数据与结论见 .trae/documents/x86_64-p13-hot-path-emission-optimization-plan.md §2。
+                        if !then_ends_ret {
+                            self.jmp_rel32(&lend, JumpKind::Jmp);
+                        }
+                        self.label(&le);
+                        if let Some(el) = else_ {
+                            self.gen_stmt(el);
+                        }
+                        self.label(&lend);
                     }
-                    self.label(&le);
-                    if let Some(el) = else_ {
-                        self.gen_stmt(el);
-                    }
-                    self.label(&lend);
                 }
             },
             Stmt::While { cond, body, .. } => {
@@ -1057,7 +1200,38 @@ impl Codegen {
             },
             Stmt::Label { name, stmt, .. } => {
                 let lbl = self.c_label_to_asm(&name.name);
+                // 滴定砝码二在计算转移函数上的对应位：插在标签**之前**，任何从跳表
+                // 进来的路径都跳过它们 ⇒ 只长体量、不动态执行（与 `aa_layout.sh` 2b)
+                // 的可达断言一致）。默认 0 ⇒ 一条不发，产物与本改动前逐字相同。
+                for _ in 0..handler_pad() {
+                    self.nop();
+                }
                 self.label(&lbl);
+                // 滴定砝码六：纯载入（只写 rax，不写存不改标志）。
+                for _ in 0..load_pad() {
+                    self.emit_insn(&crate::codegen::x86_64::insn::Insn::raw(&[
+                        0x49, 0x8B, 0x45, 0xF8,
+                    ]));
+                }
+                // 滴定砝码五：恒等内存读改写（只改内存不改任何寄存器/标志的语义值）。
+                // REX 必须是 0x49 = W|B：rm=5 + mod=01 在无 REX.B 时解成 `[rbp-8]`（跳表基址，
+                // 会越界），有 REX.B 才是 `[r13-8]`。本行写错过一次，靠 objdump 回查才拦下。
+                for _ in 0..memop_pad() {
+                    self.emit_insn(&crate::codegen::x86_64::insn::Insn::raw(&[
+                        0x49, 0x83, 0x45, 0xF8, 0x00,
+                    ]));
+                }
+                // 滴定砝码四：标签后、taken 砝码前，发 k 条会执行但不分支的 nop。
+                for _ in 0..exec_pad() {
+                    self.nop();
+                }
+                // 滴定砝码三：插在标签**之后**，所以无论 fall-through 还是跳表进入都会
+                // 执行这一次 taken 分支。默认 0 ⇒ 不发。
+                for _ in 0..taken_pad() {
+                    let p = self.fresh_label();
+                    self.jmp_rel32(&p, JumpKind::Jmp);
+                    self.label(&p);
+                }
                 self.gen_stmt(stmt);
             },
             // C++ 零成本异常: 受保护调用。LSDA call-site 区间就是被包装调用语句
@@ -1332,6 +1506,10 @@ impl Codegen {
                 self.break_targets.pop();
             },
             Stmt::GotoIndirect { expr, .. } => {
+                // 区的出口之三（方案 §3 S4）：`goto *表[…]` 的落点不在本区的线性序里，
+                // 区内推迟的存出必须先发。分派尾部在解释器热路径上每步都走，
+                // 少插这一句就是「上一个区的值被下一个 opcode 读到」。
+                self.region_flush();
                 // 批 4：表基址常驻 `%rbp` 时，整条分派塌成一条 `jmp *(%rbp,%rcx,8)`。
                 // 不合形状则原样往下走（原路自己也会因为基址已常驻而少一条 lea）。
                 if self.emit_hoisted_jumptable_jump(expr) {
@@ -1425,6 +1603,79 @@ impl Codegen {
             let mark = self.save_sret_watermark();
             self.gen_block_item(it);
             self.restore_sret_watermark(mark);
+        }
+    }
+
+    /// 把记下的冷块发到当前位置。调用点必须是**函数尾声之后、`func_end` 之前**：
+    /// 尾声以 `ret` 收尾 ⇒ 控制流不可能顺落到冷块区；而 `func_end` 之后的字节会被
+    /// `func_sizes` 切片（`codegen.rs` 的 `.text` 分段与 st_size）裁掉，所以晚一步就丢代码。
+    ///
+    /// 逆序弹出是可以的：每条冷臂自带入口/汇合标签，彼此之间没有顺序关系。
+    pub(crate) fn flush_cold_arms(&mut self) {
+        // 冷尾指纹合并（方案 §3 S6 的第二半）：两条外置块只有在包**它自己的汇合跳转**
+        // 都逐字相同时才能共用一个副本。判据必须是「字节 + 本块内发出的跳转目标名」
+        // 两件事一起：只看字节会把「跳到不同汇合点、但码列凑巧相同」的两块合并，
+        // 那直接是错控制流。
+        //
+        // 合并的落点不是重写发射：`jmp_rel32` 的目标名在 `pending` 里，直到函数结束
+        // 才解成偏移。所以丢掉一个重复体时，只需把它的入口标签定到规范体的偏移上，
+        // 早就发出的那些跳转会自动指过去。
+        let merge = crate::codegen::x86_64::emit::stmt::cold_merge_on();
+        let mut seen: std::collections::HashMap<(Vec<u8>, Vec<(u32, String)>), u64> =
+            std::collections::HashMap::new();
+        while let Some(arm) = self.cold_arms.pop() {
+            let start = self.pos() as usize;
+            let pend_start = self.pending.len();
+            // 恢复发射现场：体里的 break/continue 必须解到「它在 AST 里的那个循环/switch」，
+            // 而不是函数尾当时留下的栈。
+            let sc = std::mem::replace(&mut self.loop_continue, arm.loop_continue.clone());
+            let sb = std::mem::replace(&mut self.loop_break, arm.loop_break.clone());
+            let bt = std::mem::replace(&mut self.break_targets, arm.break_targets.clone());
+            self.label(&arm.entry);
+            self.gen_stmt(&arm.body);
+            if let Some(j) = &arm.join {
+                if !Self::stmt_ends_with_return(&arm.body) {
+                    self.jmp_rel32(j, JumpKind::Jmp);
+                }
+            }
+            self.break_targets = bt;
+            self.loop_continue = sc;
+            self.loop_break = sb;
+            if !merge {
+                continue;
+            }
+            let end = self.pos() as usize;
+            if end <= start {
+                continue;
+            }
+            // 本块内发出的跳转（包含块尾那个汇合 `jmp`）逐条入钳：偏移按**块内**算，
+            // 否则两个内容相同但位置不同的块永远对不上。
+            let mut rels: Vec<(u32, String)> = self.pending[pend_start..]
+                .iter()
+                .map(|p| ((p.at as usize - start) as u32, p.target.clone()))
+                .collect();
+            rels.sort();
+            let key = cold_arm_key(&self.code[start..end], &rels);
+            if let Some(&canon) = seen.get(&key) {
+                // 重复：回退刚发的字节、本块的 pending 项与块内标签，把入口标签
+                // 定到规范体上。回退范围严格从 `start` 起，所以上方已发代码的偏移
+                // 一个都不会漂。
+                self.code.truncate(start);
+                self.pending.truncate(pend_start);
+                let drop: Vec<String> = self
+                    .labels
+                    .iter()
+                    .filter(|(_, &v)| v >= start as u64 && v != canon)
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for k in drop {
+                    self.labels.remove(&k);
+                }
+                self.labels.insert(arm.entry.clone(), canon);
+                self.cold_merged += 1;
+                continue;
+            }
+            seen.insert(key, start as u64);
         }
     }
 
@@ -1634,4 +1885,36 @@ fn stmt_src_line(s: &Stmt) -> u32 {
         | Stmt::Fallthrough { span } => span,
     };
     span.line
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cold_arm_key;
+
+    /// 冷尾合并的钳必须是「体 + 汇合目标」一起判，而且两半各自都能决定结果。
+    ///
+    /// 为什么在单位层钉它：真实语料上这一臂合并对数为 0（`luaV_execute` 80 条臂体只有
+    /// 1 种、但汇合目标 80 个各不相同，且 scheme 让每条臂的汇合点是它自己那个
+    /// `fresh_label()` ⇒ 机会集构造上为空）。于是「机制坏了吗」这个问题只能靠
+    /// 一个手造的同汇合场景回答 —— 拿真函数当判据永远碰不到这一臂，就成了不可证伪的话。
+    #[test]
+    fn cold_arm_key_merges_same_body_same_join_only() {
+        let body_a = vec![0xe8u8, 0, 0, 0, 0, 0xe9, 1, 2, 3, 4];
+        let body_b = vec![0xe8u8, 0, 0, 0, 0, 0xe9, 9, 9, 9, 9];
+        let join1 = vec![(6u32, ".Lh1".to_string())];
+        let join2 = vec![(6u32, ".Lh2".to_string())];
+
+        // 同体同汇合点 ⇒ 同一个钳（可合并）。
+        assert_eq!(cold_arm_key(&body_a, &join1), cold_arm_key(&body_a, &join1));
+        // 同体不同汇合点 ⇒ 不同钳（合并了就是错控制流）。
+        assert_ne!(cold_arm_key(&body_a, &join1), cold_arm_key(&body_a, &join2));
+        // 同汇合点不同体 ⇒ 也不同钳。
+        assert_ne!(cold_arm_key(&body_a, &join1), cold_arm_key(&body_b, &join1));
+        // 钳只算块内偏移：把整条跳转的绝对位置差留在 `at` 里会让两个内容相同、位置
+        // 不同的块永远对不上（所以上层传进来的是 `p.at - start`）。
+        assert_eq!(
+            cold_arm_key(&body_a, &[(0u32, ".Lx".to_string())]),
+            cold_arm_key(&body_a, &[(0u32, ".Lx".to_string())])
+        );
+    }
 }

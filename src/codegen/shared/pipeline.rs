@@ -325,6 +325,7 @@ mod tests {
 
             source_name: "test.c".to_string(),
             debug_level: 0,
+            opt_level: 0,
             dwarf_version: 4,
             sanitizers: Default::default(),
             lto_enabled: false,

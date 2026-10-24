@@ -24,9 +24,9 @@ lea 0x10(%r13),%rax
 mov %rax,-0x50(%r13)
 lea -0x3c0(%r13),%rax
 mov %rax,-0x48(%r13)
-mov $0x0,%rax
+mov $0x0,%eax
 mov %eax,-0x60(%r13)
-mov $0x0,%rax
+mov $0x0,%eax
 mov %eax,-0x68(%r13)
 movslq -0x68(%r13),%rax
 movslq -0x70(%r13),%r8
@@ -91,7 +91,7 @@ lea -0x3c0(%r13),%rax
 mov %rax,-0x48(%r13)
 movsd 0x0(%rip),%xmm0
 movsd %xmm0,-0x60(%r13)
-mov $0x0,%rax
+mov $0x0,%eax
 mov %eax,-0x68(%r13)
 movslq -0x68(%r13),%rax
 movslq -0x70(%r13),%r8

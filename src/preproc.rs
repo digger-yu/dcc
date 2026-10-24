@@ -7918,6 +7918,12 @@ impl Preprocessor {
     // 缓存值: 预处理输出 + 宏定义
 
     fn init_cache_dir() -> Option<PathBuf> {
+        // 单测注入的临时缓存根 (见 `CacheRootGuard`): 生产构建里这段恒不存在。
+        #[cfg(test)]
+        if let Some(root) = CACHE_ROOT_OVERRIDE.with(|c| c.borrow().clone()) {
+            let cache = root.join(".dcc").join("cache");
+            return fs::create_dir_all(&cache).ok().map(|_| cache);
+        }
         // 尝试创建 ~/.dcc/cache/
         if let Ok(home) = std::env::var("HOME") {
             let cache = PathBuf::from(home).join(".dcc").join("cache");
@@ -8264,10 +8270,41 @@ impl Preprocessor {
     }
 }
 
+// include 缓存根的单测注入点。下面两条缓存回归用例要把缓存写到临时目录, 但**不能**
+// 用 `std::env::set_var("HOME", ..)` 去做这个隔离:
+//   1. libtest 在同一进程里多线程跑用例, `set_var` 与并发 `var` 在 glibc 层就是数据
+//      竞争 —— `setenv` 重写 environ 那一格时, 另一线程刚 `getenv` 拿到的指针可能正被
+//      覆盖。症状是"偶发一条用例红, 重跑又绿", 且线程数一改一改。
+//   2. `HOME` 设了不还: 用例结尾 `remove_dir_all` 之后, 进程里剩下所有用例的缓存根都
+//      指向一个不存在的目录, 缓存静默失效 —— 用例之间因此互相可见, 结果取决于交错顺序。
+// 与 `tests/common/harness.rs` 里"旋钮一律随子进程下发"是同一条纪律: 进程环境一个字都
+// 不改。`preprocess` 不起线程, 所以只对本线程可见的 thread-local 注入足够。
+#[cfg(test)]
+thread_local! {
+    static CACHE_ROOT_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// 守卫存活期间, 本线程 `init_cache_dir` 用指定根当缓存根; 离开作用域自动复原。
+#[cfg(test)]
+struct CacheRootGuard;
+
+#[cfg(test)]
+fn set_cache_root(root: &Path) -> CacheRootGuard {
+    CACHE_ROOT_OVERRIDE.with(|c| *c.borrow_mut() = Some(root.to_path_buf()));
+    CacheRootGuard
+}
+
+#[cfg(test)]
+impl Drop for CacheRootGuard {
+    fn drop(&mut self) {
+        CACHE_ROOT_OVERRIDE.with(|c| *c.borrow_mut() = None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::preprocess;
-    use super::{MacroDef, PchBundle, PchOptions};
+    use super::{MacroDef, PchBundle, PchOptions, set_cache_root};
     use crate::cli::{Abi, Arch, Os, StdMode, TargetTriple};
     use std::path::PathBuf;
 
@@ -10091,8 +10128,8 @@ n\
         let hdr = dir.join("bad.h");
         fs::write(&hdr, "#error broken header\n").unwrap();
         let src = "#include \"bad.h\"\nint x;\n";
-        // 隔离 HOME: 缓存写入临时目录, 不污染 ~/.dcc/cache
-        std::env::set_var("HOME", dir.join("home"));
+        // 隔离缓存根: 写进临时目录, 既不碰 ~/.dcc/cache, 也不动进程环境
+        let _cache_root = set_cache_root(&dir.join("home"));
         for i in 0..2 {
             let out = preprocess(
                 src.as_bytes(),
@@ -10121,6 +10158,10 @@ n\
                 out.diags
             );
         }
+        // 注入必须真的生效: 回不到任何缓存根时, 本用例只是重跑两遍源码, 上面两条
+        // 断言空过。缓存目录由 `init_cache_dir` 惰性创建, 所以只能在事后查。
+        let cache_dir = dir.join("home").join(".dcc").join("cache");
+        assert!(cache_dir.is_dir(), "缓存根注入失效: {} 不存在", cache_dir.display());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -10140,7 +10181,7 @@ n\
         .unwrap();
         fs::write(&b, "#ifndef B_H\n#define B_H\n#define B_VAL 42\n#endif\n").unwrap();
         let src = "#include \"A.h\"\nint v = A_VAL;\n";
-        std::env::set_var("HOME", dir.join("home"));
+        let _cache_root = set_cache_root(&dir.join("home"));
         let out1 = preprocess(
             src.as_bytes(),
             "nested-dep.c",
@@ -10163,6 +10204,16 @@ n\
             0,     // opt_level
         );
         assert!(out1.text.contains("(42 + 10)"), "run 1: {}", out1.text);
+        // 缓存必须确实落了盘: 注入失效时下面那条失效断言会退化成"本就没缓存,
+        // 重跑一遍源码", 永远成立 —— 宁可红在这里, 也不让它空过。
+        let cache_dir = dir.join("home").join(".dcc").join("cache");
+        assert!(
+            fs::read_dir(&cache_dir)
+                .map(|mut rd| rd.next().is_some())
+                .unwrap_or(false),
+            "{} 里无缓存条目 —— 缓存未启用, 本用例的失效断言将空过",
+            cache_dir.display()
+        );
         // 修改嵌套头文件 B.h, 父条目 A.h 的 DEPS 校验必须使其失效
         fs::write(&b, "#ifndef B_H\n#define B_H\n#define B_VAL 52\n#endif\n").unwrap();
         let out2 = preprocess(

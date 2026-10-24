@@ -161,6 +161,42 @@ pub fn compute(func: &Function) -> Interference {
         }
     }
 
+    // 活入名 = 被读过、却在本函数里没有任何定义点的名字。这个 IR 里它的唯一来源是
+    // 形参（`func.params` 的版本：SSA 构建不给入参发定义，定义就是调用约定本身）。
+    //
+    // 为什么必须由这里补：冲突集是在**定义点**上登记的（下面的逆序遍历只对 `pt.def`
+    // 记冲突），没有定义点的名字因此与谁都「不干涉」⇒ `ranges_disjoint` 对两个形参恒为
+    // 真 ⇒ 它们能共用同一个号槽。实测形状：`int f(int a,…,int h)` 七个形参全部被绑到
+    // %rbx，序言只剩一条 `mov rbx,r9`，-O2 返回错值而 -O0 对。
+    //
+    // 补法：给每个活入名在 entry 块最前面插一个合成定义点 —— 形参的值从入口起就活着，
+    // 于是它与「入口之后仍然活着的任何名字」（含其他形参）两两干涉。同时把它从
+    // `gens[entry]` 挪进 `kills[entry]`：反向不动点不再把它当成要往前驱传的名字，它的
+    // 活性起点就是入口。保守方向与全模块一致（多算冲突只少共用）。
+    {
+        let mut defs: BTreeSet<&str> = BTreeSet::new();
+        let mut uses: BTreeSet<&str> = BTreeSet::new();
+        for pts in &points {
+            for p in pts {
+                if let Some(d) = &p.def {
+                    defs.insert(d.as_str());
+                }
+                for u in &p.uses {
+                    uses.insert(u.as_str());
+                }
+            }
+        }
+        let live_ins: Vec<String> =
+            uses.iter().filter(|u| !defs.contains(*u)).map(|u| (*u).to_string()).collect();
+        if let Some(&ebi) = idx.get(func.entry.as_str()) {
+            for li in &live_ins {
+                kills[ebi].insert(li.clone());
+                gens[ebi].remove(li);
+                points[ebi].insert(0, Point { uses: BTreeSet::new(), def: Some(li.clone()) });
+            }
+        }
+    }
+
     let succs: Vec<Vec<usize>> = order
         .iter()
         .map(|bname| match func.blocks.get(bname) {

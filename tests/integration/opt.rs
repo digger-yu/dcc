@@ -41,12 +41,146 @@ fn o1_constant_folding_emits_immediate() {
     let _ = fs::remove_file(source_path);
     let _ = fs::remove_file(out_path);
     assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
-    // 新编码: REX.W + MOV r/m64, imm32 = [0x48, 0xC7, 0xC0, 0x05, 0x00, 0x00, 0x00]
+    // S3c 体量交换：非负 imm32 走 `mov r32, imm32` = [0xB8, imm32]（5 字节），
+    // 与旧的 7 字节 REX.W C7 /0 同值。两半一起钉：只认短形则「负数也被零扩展」
+    // 那类错看不出来，只认旧形则体量交换丢了也没人报。
     assert!(
-        obj.windows(7)
-            .any(|w| w == [0x48, 0xC7, 0xC0, 0x05, 0x00, 0x00, 0x00]),
-        "expected mov $5, %rax after constant fold"
+        obj.windows(5).any(|w| w == [0xB8, 0x05, 0x00, 0x00, 0x00]),
+        "常量折叠后应发 5 字节 `mov $5, %eax`"
     );
+    assert!(
+        !obj.windows(7).any(|w| w == [0x48, 0xC7, 0xC0, 0x05, 0x00, 0x00, 0x00]),
+        "非负常量不该再发 7 字节符号扩展形"
+    );
+}
+
+/// 量尺那一臂：`DCC_IMM32_SHORT_MOV=0` 必须退回改前的 7 字节形，而且两条臂的
+/// **执行结果完全一致**（体量交换只改编码，不改值）。旋钮存在的唯一理由就是这个。
+#[test]
+fn imm32_short_mov_knob_arms_encode_differently_and_agree_in_value() {
+    let source = "int main(void) { long a = 2 + 3; long b = 40; return (int)(a + b); }\n";
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let source_path = dir.join(format!("dcc-immshort-{pid}.c"));
+    fs::write(&source_path, source).expect("write C fixture");
+
+    let compile = |extra: &[(&str, &str)], tag: &str| -> (Vec<u8>, i32) {
+        let obj = dir.join(format!("dcc-immshort-{pid}-{tag}.o"));
+        let exe = dir.join(format!("dcc-immshort-{pid}-{tag}"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+        cmd.args(["-std=gnu23", "-O2", "-o"]).arg(&exe).arg(&source_path);
+        for (k, v) in extra {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().expect("run dcc");
+        assert!(out.status.success(), "compile {tag}: {}", String::from_utf8_lossy(&out.stderr));
+        let bytes = fs::read(&obj).unwrap_or_else(|_| {
+            // 没带 -c 时产物是可执行文件本身，拿它当字节源也行，两边同口径。
+            fs::read(&exe).expect("read product")
+        });
+        // 有界运行：静默误编译最坏的形态是死循环，拿 `Command::output()` 会把门禁吊死。
+        let code = crate::harness::run_exe_bounded(&exe).0;
+        let _ = fs::remove_file(&obj);
+        let _ = fs::remove_file(&exe);
+        (bytes, code)
+    };
+
+    let (on, rc_on) = compile(&[], "on");
+    let (off, rc_off) = compile(&[("DCC_IMM32_SHORT_MOV", "0")], "off");
+    let _ = fs::remove_file(&source_path);
+
+    // 两条臂都是 `return 45`（2+3+40）。
+    assert_eq!(rc_on, 45, "门开臂值错");
+    assert_eq!(rc_off, 45, "门关臂值错 —— 体量交换不得改语义");
+    assert_ne!(on, off, "两条臂产物逐字节相同 ⇒ 旋钮根本没接上");
+    assert!(
+        on.windows(5).any(|w| w == [0xB8, 0x05, 0x00, 0x00, 0x00])
+            || on.windows(5).any(|w| w == [0xB8, 0x2d, 0x00, 0x00, 0x00]),
+        "门开臂应能看到 5 字节短形"
+    );
+    assert!(
+        off.windows(7).any(|w| w == [0x48, 0xC7, 0xC0, 0x05, 0x00, 0x00, 0x00])
+            || off.windows(7).any(|w| w == [0x48, 0xC7, 0xC0, 0x2d, 0x00, 0x00, 0x00]),
+        "门关臂应退回 7 字节 REX.W C7 /0"
+    );
+}
+
+/// 体量档必须覆盖**手写的构造子批**，不只是热路径发射器：聚合返回的 rep 计数
+/// (`tyclass.rs`/`aggregate.rs`)、va_arg 溢出区计数 (`va_arg_store.rs`)、`builtins.rs`
+/// 的 memcpy/idiv 预备、`vla.rs`、`tls.rs`、`nested.rs` 都走同一个选形判据。只改
+/// `mov_imm` 而把手写批留在 7 字节，就是「分阶段缺口」的形状 —— 下面那对断言把
+/// 同一个立即数在两臂里的目的号宽度差当判据，接不上就会红。
+#[test]
+fn imm_compact_covers_the_hand_written_constructor_sites_too() {
+    const SRC: &str = r#"
+#include <stdarg.h>
+#include <string.h>
+struct P { long a[4]; };
+static struct P mk(long x){ struct P p; for (int i = 0; i < 4; i++) p.a[i] = x + i; return p; }
+static int sumv(int n, ...){ va_list ap; va_start(ap, n); long s = 0;
+  for (int i = 0; i < n; i++) s += va_arg(ap, long); va_end(ap); return (int)s; }
+int main(void){ struct P p = mk(10); char b[16]; memset(b, 0, sizeof b);
+  memcpy(b, "abcdefgh", 8);
+  long t = sumv(3, 1L, 2L, 3L) + p.a[3] + (long)b[1];
+  return (int)(t % 251); }
+"#;
+    let off = crate::harness::compile_asm_text_with_env(
+        "immx-off",
+        SRC,
+        &["-std=gnu23", "-O2"],
+        &[("DCC_IMM32_SHORT_MOV", "0")],
+    )
+    .0;
+    let on =
+        crate::harness::compile_asm_text_with_env("immx-on", SRC, &["-std=gnu23", "-O2"], &[]).0;
+
+    // 同一个立即数搬运：门关臂写 `%rcx`（64 位形），门开臂写 `%ecx`（32 位零扩展形）。
+    // 这一对就是聚合返回的 rep 计数（`long a[4]` ⇒ 4 个 qword）—— 只改热路径发射器
+    // 不会动到它。判据拿「去空格后的前缀/后缀」而不是整行，避开 GAS 文本里
+    // `mov $4, %rcx` 那种逗号后带空格、且十进制/16 进制共存的排版。
+    let dest_moves = |t: &str, dst: &str| {
+        t.lines()
+            .map(|l| l.trim().replace(' ', ""))
+            .filter(|s| s.starts_with("mov$") && s.ends_with(dst))
+            .count()
+    };
+    assert!(
+        dest_moves(&off, ",%rcx") > dest_moves(&on, ",%rcx"),
+        "门开臂里写 `%rcx` 的立即数搬运没有变少 ⇒ 手写构造子批没接上选形判据（门关 {} 条 vs 门开 {} 条）",
+        dest_moves(&off, ",%rcx"),
+        dest_moves(&on, ",%rcx")
+    );
+    assert!(
+        dest_moves(&on, ",%ecx") > dest_moves(&off, ",%ecx"),
+        "门开臂里写 `%ecx` 的立即数搬运没有变多 ⇒ 上面的减少不是来自这一形",
+    );
+
+    // 两臂指令条数必须一字不变（体量档只改编码）。
+    let n_lines = |t: &str| {
+        t.lines()
+            .map(str::trim)
+            .filter(|l| {
+                !l.is_empty()
+                    && !l.starts_with('.')
+                    && !l.starts_with('#')
+                    && !l.ends_with(':')
+            })
+            .count()
+    };
+    assert_eq!(
+        n_lines(&off),
+        n_lines(&on),
+        "两臂指令条数不同 ⇒ 这一档不再是纯体量交换"
+    );
+
+    // 值必须与 gcc 一致（迁移过的站点如果错改符号，这里就红）。注意
+    // `run_compile_and_run` 返回的是**编译**那一步的 Output，退出码得从真跑一遍拿；
+    // 而 `run_exe_bounded` 必须带超时 —— 静默误编译最常见的形态就是死循环。
+    let (compile, exe) = crate::harness::run_compile_and_run("immx-value", SRC);
+    assert!(compile.status.success(), "编译失败：{}", String::from_utf8_lossy(&compile.stderr));
+    let (code, _stdout, _stderr) = crate::harness::run_exe_bounded(&exe);
+    let _ = std::fs::remove_file(&exe);
+    assert_eq!(code, 117, "门开臂执行值错（gcc -O0 也是 117）");
 }
 
 /// -O2 常量分支折叠后 main 直接返回常量。

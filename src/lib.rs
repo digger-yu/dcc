@@ -20,11 +20,16 @@ pub mod cpp;
 pub mod cpuid;
 pub mod debug;
 pub mod diagnostics;
+// 进程环境不变式的闸门 (只看得到测试, 不进产物)
+#[cfg(test)]
+mod env_hygiene_tests;
 pub mod driver;
 pub mod fixdep;
 pub mod float128;
 pub mod float80;
 pub mod format_check;
+/// 帧事实与寄存器家的控制流护栏（方案 §4.7 要求的唯一判据点）。
+pub mod frame_guard;
 pub mod incremental;
 pub mod ipa_modref;
 pub mod ipa_sra;

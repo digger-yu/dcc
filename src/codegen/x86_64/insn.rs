@@ -13,6 +13,16 @@
 use crate::codegen::shared::asm_operand::{InsnRec, Operand};
 use crate::codegen::x86_64::opcode::X86_64Opcode;
 
+/// 体量档旋钮（方案 §3 S3c / §11）：非负 imm32 是否可以走 5 字节零扩展短形。
+///
+/// 放在 `insn.rs` 而不是发射器里：两个发射点（`Codegen::mov_imm` 与构造子批）都要问同
+/// 一个答案，写两份就会有一份漏掉旋钮。与同族闸门同一纪律：`OnceLock` 只读一次 env，
+/// 因此中途改环境不会改变已在跑的编译器的产物（可复现性判据 5454 组合依赖这一条）。
+pub(crate) fn imm32_short_mov_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("DCC_IMM32_SHORT_MOV").map(|s| s != "0").unwrap_or(true))
+}
+
 /// P12-A: explicit expect on `emit_insn() -> bool`.
 ///
 /// `emit_insn` returns `false` when `encode()` returns `None` (an uncovered
@@ -1178,6 +1188,9 @@ impl Insn {
     /// immediate). Used for small immediates (rep counters, small ints)
     /// where the imm64 form would waste bytes. Self-absorbs REX.B for
     /// reg_idx >= 8.
+    ///
+    /// 这一条是**形状契约**：恒发 7 字节 `REX.W C7 /0 id`。「按立即数选最窄编码」在
+    /// [`Insn::mov_reg_imm_compact`]，新代码要的是那一条。
     pub fn mov_reg_imm32_b64(reg_idx: u8, imm: i32) -> Self {
         let mut rex: u8 = 0x48;
         if reg_idx >= 8 {
@@ -1195,6 +1208,38 @@ impl Insn {
         let mut insn = Self::raw_bytes(&out);
         insn.gas_text = Some(gas);
         insn
+    }
+
+    /// 体量档（方案 §3 S3c / §11）：写「dst = (i64)imm32」这件事的**最窄**编码。
+    ///
+    /// * `imm >= 0` ⇒ `B8+r id`（5 字节；r8-r15 加 REX.B = 6 字节）。32 位写自动把高 32 位
+    ///   清零，而非负 imm32 的零扩展与符号扩展**同值** —— 两者同值就是这一条规则的全部
+    ///   成立条件，所以判据只有一句 `imm >= 0`。
+    /// * `imm < 0` ⇒ 退回 [`Insn::mov_reg_imm32_b64`] 的 7 字节符号扩展形：那里换成 32 位形
+    ///   会把高 32 位写成零，是**改值**不是改体量。
+    ///
+    /// 为什么只能有一处这样的判据：发射器（`Codegen::mov_imm`）与这批手写构造子共用
+    /// 同一个条件，写两份就会有一份漏掉旋钮或与读侧对不上 —— 本仓已有两次「解码器与
+    /// 构造子形状不一致」的记录。读侧配套有两处，改动本条时必须同时在场：
+    /// `Codegen::classify_peep`（否则死写回删对新形变瞎）与 `blockopt::raw_writes` 的
+    /// `B8+r` 臂（否则 `sext32` 拿不到，紧随其后的 `movsxd dst,dst` 从可削变成必发）。
+    ///
+    /// 旋钮 `DCC_IMM32_SHORT_MOV=0` 退回一律 7 字节，只为量尺（两臂值等价由集成用例钉）。
+    pub fn mov_reg_imm_compact(reg_idx: u8, imm: i32) -> Self {
+        if imm >= 0 && imm32_short_mov_on() {
+            let mut out: Vec<u8> = Vec::with_capacity(6);
+            if reg_idx >= 8 {
+                out.push(0x41);
+            }
+            out.push(0xB8 + (reg_idx & 7));
+            out.extend_from_slice(&imm.to_le_bytes());
+            use crate::codegen::x86_64::emit::gas::REG32;
+            let gas = format!("mov ${}, {}", imm, REG32[(reg_idx & 15) as usize]);
+            let mut insn = Self::raw_bytes(&out);
+            insn.gas_text = Some(gas);
+            return insn;
+        }
+        Self::mov_reg_imm32_b64(reg_idx, imm)
     }
 
     /// P11 Bucket Z: B64 `add/and/or/sub/xor/cmp rax, imm32` accumulator-only

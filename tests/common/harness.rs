@@ -101,6 +101,40 @@ pub(crate) fn run_asm_output_test_flags(
     (output, asm_text)
 }
 
+/// 给一组环境变量算一个**确定的**文件名标记。
+///
+/// 为什么必须由它管输出文件名：`run_compile_and_run_env` 返回的是**路径**，调用方常常
+/// 先编译两臂、之后才分别运行。早先路径里只编了 `envs.len()`，于是「关」臂与「开」臂
+/// （各带一个变量、长度都是 1）**写到同一个文件**：第二臂把第一臂的可执行文件覆盖掉，
+/// `assert_eq!(r_off, r_on)` 恒真，判据当场空跑（实测就是这样把一次真误编译藏成了绿）。
+/// 标记取自键值本身，重复同配置仍是覆盖（行为不变），只有真两臂才分文件。
+fn env_tag(envs: &[(&str, &str)]) -> String {
+    if envs.is_empty() {
+        return "noenv".to_string();
+    }
+    let raw = envs
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    // 文件名只留 [A-Za-z0-9_]，长度封顶；超长时把完整内容压成 FNV-1a（同一套 32 位口径，
+    // 与 rodata label 用的 FNV 一致），保证不同配置不会撞到同一个名字。
+    let mut safe: String = raw
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    if safe.len() > 40 {
+        let mut h: u32 = 2166136261;
+        for b in raw.as_bytes() {
+            h = (h ^ (*b as u32)).wrapping_mul(16777619);
+        }
+        safe.truncate(24);
+        safe.push('_');
+        safe.push_str(&h.to_le_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>());
+    }
+    safe
+}
+
 /// 编译为可执行文件并返回路径（Linux 远程测试用）
 pub(crate) fn run_compile_and_run(
     name: &str,
@@ -115,14 +149,31 @@ pub(crate) fn run_compile_and_run_flags(
     source: &str,
     extra_flags: &[&str],
 ) -> (std::process::Output, std::path::PathBuf) {
+    run_compile_and_run_env(name, source, extra_flags, &[])
+}
+
+/// 同上，但可以给子进程加环境变量（布局旋钮类判据的唯一入口）。
+///
+/// 为什么需要单独一个：`DCC_COLD_OUTLINE` / `DCC_BLOCKOPT_RULES` 这类旋钮是 dcc 进程
+/// 读 env 生效的，而本套件跑在同一个 `cargo test` 进程里 —— 用 `std::env::set_var`
+/// 会污染并发跑的其他用例。旋钮一律随子进程下发，测什么就是什么。
+pub(crate) fn run_compile_and_run_env(
+    name: &str,
+    source: &str,
+    extra_flags: &[&str],
+    envs: &[(&str, &str)],
+) -> (std::process::Output, std::path::PathBuf) {
     let dir = std::env::temp_dir();
     let source_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
-    let exe_path = dir.join(format!("dcc-{name}-{}", std::process::id()));
+    let exe_path = dir.join(format!("dcc-{name}-{}-{}.exe", std::process::id(), env_tag(envs)));
     fs::write(&source_path, source).expect("write C fixture");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
     cmd.args(["-std=gnu23"]);
     for flag in extra_flags {
         cmd.arg(flag);
+    }
+    for (k, v) in envs {
+        cmd.env(k, v);
     }
     cmd.args(["-o"]).arg(&exe_path).arg(&source_path);
     let output = cmd.output().expect("run dcc");
@@ -782,6 +833,34 @@ pub(crate) fn run_compile_o(
         let _ = fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755));
     }
     (output, exe_path)
+}
+
+/// 编到**可重定位对象**并可以带 env 旋钮（布局类改动的结构判据用）。
+///
+/// 为什么用对象而不是可执行文件：旋钮只改一个函数内部的排布时，链接后的总大小很可能
+/// 一字不变（外置一条冷边是一个 jcc + 一个 jmp 换了位置），拿尺寸当判据会漏；而
+/// `.text` 的**字节序列**一定变。于是「旋钮真的动了」与「旋钮不该动的地方没动」
+/// 两类判据都能用同一条命令表达。
+pub(crate) fn run_compile_object_env(
+    name: &str,
+    source: &str,
+    opt: &str,
+    envs: &[(&str, &str)],
+) -> (std::process::Output, Vec<u8>) {
+    let dir = std::env::temp_dir();
+    let source_path = dir.join(format!("dcc-{name}-{}.c", std::process::id()));
+    let obj_path = dir.join(format!("dcc-{name}-{}-{}.o", std::process::id(), env_tag(envs)));
+    fs::write(&source_path, source).expect("write C fixture");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
+    cmd.args(["-std=gnu23", opt, "-c"]);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let output = cmd.args(["-o"]).arg(&obj_path).arg(&source_path).output().expect("run dcc");
+    let _ = fs::remove_file(source_path);
+    let bytes = fs::read(&obj_path).unwrap_or_default();
+    let _ = fs::remove_file(obj_path);
+    (output, bytes)
 }
 
 // ---------- kernel object corpus ----------

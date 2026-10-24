@@ -1040,7 +1040,9 @@ impl super::super::super::Codegen {
     }
 
     /// 增量/减量单个寄存器 (ADD/SUB reg, immediate)
-    fn emit_inc_dec_reg(&mut self, dst: u8, is_inc: bool, step: i32) {
+    /// `pub(crate)`：`lvalue.rs` 的「自增与解引用合成」那条快路径（`DCC_POSTINC_FOLD`）要
+    /// 发的是**同一个** `add/sub 家号, 步进`，不能两边各写一份字节。语义未变。
+    pub(crate) fn emit_inc_dec_reg(&mut self, dst: u8, is_inc: bool, step: i32) {
         let op_ext = if is_inc { 0u8 } else { 5u8 };
         use crate::codegen::x86_64::emit::gas::{dec_imm as gas_dec_imm, REG64 as GAS_REG64};
         let mnem = if is_inc { "add" } else { "sub" };

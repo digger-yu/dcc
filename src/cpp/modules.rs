@@ -2219,42 +2219,53 @@ impl ModuleLinkagePlan {
     }
 
     fn ren_block(&self, b: &mut crate::ast::Block, blocked: &std::collections::HashSet<String>) {
-        use crate::ast::{BlockItem, Decl};
         for it in &mut b.items {
-            match it {
-                BlockItem::Stmt(s) => self.ren_stmt(s, blocked),
-                BlockItem::Decl(Decl::Var(v)) => {
-                    if self.internal.contains(&v.name.name) {
-                        v.is_static = true;
-                        v.is_weak = false;
+            self.ren_item(it, blocked);
+        }
+    }
+
+    /// 单个 `BlockItem` 的改名。抽出来而不只在 `ren_block` 里内联，是为了
+    /// `Stmt::Switch.prelude`（一个 `Vec<BlockItem>`）能用同一个入口：以前只有
+    /// `ren_block` 能看到项，prelude 里的声明与引用就静默不参与改名。
+    fn ren_item(
+        &self,
+        it: &mut crate::ast::BlockItem,
+        blocked: &std::collections::HashSet<String>,
+    ) {
+        use crate::ast::{BlockItem, Decl};
+        match it {
+            BlockItem::Stmt(s) => self.ren_stmt(s, blocked),
+            BlockItem::Decl(Decl::Var(v)) => {
+                if self.internal.contains(&v.name.name) {
+                    v.is_static = true;
+                    v.is_weak = false;
+                }
+                // 局部/参数声明与它们的引用一起改名, 保证作图一致
+                if let Some(m) = self.rename.get(&v.name.name) {
+                    v.name.name = m.clone();
+                }
+                if let Some(e) = &mut v.init {
+                    self.ren_expr(e, blocked);
+                }
+            },
+            BlockItem::Decl(Decl::Func(f)) => {
+                if self.internal.contains(&f.name.name) {
+                    f.is_static = true;
+                    f.is_weak = false;
+                }
+                for p in &mut f.params {
+                    if let Some(id) = &mut p.name {
+                        self.ren_ident(id, blocked);
                     }
-                    // 局部/参数声明与它们的引用一起改名, 保证作图一致
-                    if let Some(m) = self.rename.get(&v.name.name) {
-                        v.name.name = m.clone();
-                    }
-                    if let Some(e) = &mut v.init {
-                        self.ren_expr(e, blocked);
-                    }
-                },
-                BlockItem::Decl(Decl::Func(f)) => {
-                    if self.internal.contains(&f.name.name) {
-                        f.is_static = true;
-                        f.is_weak = false;
-                    }
-                    for p in &mut f.params {
-                        if let Some(id) = &mut p.name {
-                            self.ren_ident(id, blocked);
-                        }
-                    }
-                    if let Some(body) = &mut f.body {
-                        self.ren_block(body, blocked);
-                    }
-                    if let Some(m) = self.rename.get(&f.name.name) {
-                        f.name.name = m.clone();
-                    }
-                },
-                BlockItem::Decl(_) => {},
-            }
+                }
+                if let Some(body) = &mut f.body {
+                    self.ren_block(body, blocked);
+                }
+                if let Some(m) = self.rename.get(&f.name.name) {
+                    f.name.name = m.clone();
+                }
+            },
+            BlockItem::Decl(_) => {},
         }
     }
 
@@ -2295,8 +2306,16 @@ impl ModuleLinkagePlan {
                 self.ren_stmt(body, blocked);
             },
             Stmt::Block { b, .. } => self.ren_block(b, blocked),
-            Stmt::Switch { expr, cases, .. } => {
+            Stmt::Switch {
+                expr,
+                cases,
+                prelude,
+                ..
+            } => {
                 self.ren_expr(expr, blocked);
+                for it in prelude {
+                    self.ren_item(it, blocked);
+                }
                 for c in cases {
                     self.ren_opt(&mut c.val, blocked);
                     self.ren_opt(&mut c.range_end, blocked);

@@ -3196,6 +3196,7 @@ fn build_func_decl(
             span: dummy_span(),
             quals: ast::QualifierFlags::NONE,
             vla_dim: None,
+            home: None,
         });
     }
 
@@ -3743,6 +3744,7 @@ fn build_extern_func_decl(name: &str, symbols: &[CxxSymbol]) -> ast::Decl {
             span: dummy_span(),
             quals: ast::QualifierFlags::NONE,
             vla_dim: None,
+            home: None,
         })
         .collect();
     let func_decl = ast::FuncDecl {

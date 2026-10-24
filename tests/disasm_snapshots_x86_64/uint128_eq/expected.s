@@ -26,7 +26,7 @@ cmp %r9,%rcx
 jne <u128_eq>
 cmp %r11,%r8
 jne <u128_eq>
-mov $0x1,%rax
+mov $0x1,%eax
 xor %rdx,%rdx
 pop %r15
 pop %r14

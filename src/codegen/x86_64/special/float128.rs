@@ -363,14 +363,16 @@ impl Codegen {
             self.string_pool.insert(key_bytes.clone(), o);
         }
         let off = self.string_pool[&key_bytes];
-        let at = self.pos();
         // xorpd xmm0, [RIP + disp32]  (66 0F 57 05 disp32)
         // 8 字节指令、disp32 在字节 4 ⇒ 复用 `float_refs` 的 RIP 相对修补通道。
-        self.emit_insn(&Insn::raw_with_gas(
+        //
+        // 起始 pc 在发射后取（发射入口可能在本条之前插入存出，发射前拿的 pos 会偏）。
+        if let Some(at) = self.emit_insn_head(&Insn::raw_with_gas(
             &[0x66, 0x0F, 0x57, 0x05, 0, 0, 0, 0],
             "xorpd 0x0(%rip), %xmm0",
-        ));
-        self.float_refs.push((at, off));
+        )) {
+            self.float_refs.push((at, off));
+        }
     }
 
     /// binary128 的二元算术：求值两侧 → xmm0/xmm1 → 调 libgcc。

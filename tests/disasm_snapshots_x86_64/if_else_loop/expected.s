@@ -8,22 +8,18 @@ movslq %edi,%rax
 test %eax,%eax
 jge <classify>
 mov $0xffffffffffffffff,%rax
-movslq %eax,%rax
-<nop padding>
 mov %r13,%rsp
 pop %r13
 ret
 movslq -0x40(%r13),%rax
 test %eax,%eax
 jne <classify>
-mov $0x0,%rax
-movslq %eax,%rax
+mov $0x0,%eax
 <nop padding>
 mov %r13,%rsp
 pop %r13
 ret
-mov $0x1,%rax
-movslq %eax,%rax
+mov $0x1,%eax
 <nop padding>
 mov %r13,%rsp
 pop %r13
@@ -37,17 +33,15 @@ mov %rbx,-0x10(%r13)
 mov %r12,-0x18(%r13)
 <nop padding>
 mov %rdi,-0x68(%r13)
-mov $0x0,%rax
-movslq %eax,%rax
+mov $0x0,%eax
 mov %eax,%r12d
-mov $0x0,%rax
-movslq %eax,%rax
+mov $0x0,%eax
 mov %eax,%ebx
 movslq %ebx,%rax
-movslq -0x68(%r13),%r8
+movslq %edi,%r8
 cmp %r8d,%eax
 jge <sum_range>
-mov $0x1,%rax
+mov $0x1,%eax
 test %eax,%eax
 je <sum_range>
 movslq %ebx,%rax

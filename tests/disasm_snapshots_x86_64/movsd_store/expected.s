@@ -7,7 +7,7 @@ mov %rdi,-0x48(%r13)
 movsd %xmm0,-0x40(%r13)
 lea 0x0(%rip),%rax
 push %rax
-movslq -0x48(%r13),%rcx
+movslq %edi,%rcx
 imul $0x8,%rcx,%rcx
 pop %rax
 add %rcx,%rax
@@ -20,7 +20,6 @@ xor %eax,%eax
 mov %r13,%rsp
 pop %r13
 ret
-<nop padding>
 load_d:
 push %r13
 mov %rsp,%r13

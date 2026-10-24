@@ -37,10 +37,13 @@ impl Codegen {
                     self.rodata.extend_from_slice(&data);
                     self.string_pool.insert(data.clone(), o);
                 }
-                let at = self.pos();
                 // LEA dst, [RIP + disp32]  (7 bytes, disp32 = placeholder 0)
-                self.emit_insn(&Insn::lea_rip(dst));
-                self.string_refs.push((at, data));
+                //
+                // 起始 pc 在发射后取：发射入口可能在本条之前插入存出（区内家 S4），
+                // 发射前拿的 `pos()` 会被推前，补丁就落到上一条中间。
+                if let Some(at) = self.emit_insn_head(&Insn::lea_rip(dst)) {
+                    self.string_refs.push((at, data));
+                }
             },
             _ => {
                 // gen_expr 只在上述四种字面量 arm 调用本方法, 其他 arm 不可达。

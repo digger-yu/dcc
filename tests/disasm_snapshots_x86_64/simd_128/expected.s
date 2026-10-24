@@ -28,7 +28,7 @@ movdqu %xmm0,-0x2c8(%r13)
 lea -0x2c8(%r13),%rax
 lea -0x2c8(%r13),%rsi
 lea -0x70(%r13),%rdi
-mov $0x2,%rcx
+mov $0x2,%ecx
 rep movsq %ds:(%rsi),%es:(%rdi)
 movups -0x70(%r13),%xmm0
 <nop padding>
@@ -66,7 +66,7 @@ movdqu %xmm0,-0x2c8(%r13)
 lea -0x2c8(%r13),%rax
 lea -0x2c8(%r13),%rsi
 lea -0x70(%r13),%rdi
-mov $0x2,%rcx
+mov $0x2,%ecx
 rep movsq %ds:(%rsi),%es:(%rdi)
 movups -0x70(%r13),%xmm0
 <nop padding>
@@ -104,7 +104,7 @@ movdqu %xmm0,-0x2f8(%r13)
 lea -0x2f8(%r13),%rax
 lea -0x2f8(%r13),%rsi
 lea -0x58(%r13),%rdi
-mov $0x2,%rcx
+mov $0x2,%ecx
 rep movsq %ds:(%rsi),%es:(%rdi)
 lea -0x58(%r13),%rax
 lea -0x58(%r13),%rax

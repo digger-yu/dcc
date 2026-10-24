@@ -564,10 +564,9 @@ call <main>
 add $0x10,%rsp
 jmp <main>
 sub $0x20,%rsp
-mov $0x0,%rax
+mov $0x0,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
-mov $0x0,%al
 call <main>
 add $0x20,%rsp
 mov $0x0,%eax

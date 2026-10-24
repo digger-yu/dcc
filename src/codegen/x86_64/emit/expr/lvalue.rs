@@ -23,6 +23,117 @@ impl Codegen {
             self.gen_expr(e, dst);
             return;
         }
+        // 目标导向的标量载入（`DCC_DEST_DEREF=1`）：指针已经在某个号里时，直接发
+        // `mov dst, [base]`。这一条专治每步必经的 `i = *(pc++)`：旧路径先 `mov rax,rbx`
+        // 再 `mov eax,[rax]`（地址与结果都挤 %rax），而 pc 的家就在 %rbx。
+        // 与下面 dst!=EVAL_BASE 那条的区别：这里 **dst 可以是 %rax**（只要基址号不
+        // 是同一个号），因为需要的已经只是一个内存操作数而不是一个暂存号。
+        if Self::dest_deref_enabled()
+            && matches!(load_size, 1 | 2 | 4 | 8)
+            // 只接「一个 GP 装载就能装完」的标量：尺寸在 1/2/4/8 里但类型是 struct 的
+            // 很多（一个 quad 正好 8 字节），而聚合的 rvalue 约定是**地址**，把内容装进
+            // 寄存器就是错值。同一个扇门用 `stage_scalar_ty`，不另写名单。
+            && Self::stage_scalar_ty(&load_ty)
+        {
+            if let Expr::Ident { name, .. } = e {
+                // `Location::Reg` 携的是 (bank, n)：只有 Gp 通道能当内存基址，
+                // Simd/FloatStack 的同号是另一个物理寄存器，不得拿 `n` 直接当号用。
+                if let crate::location::Location::Reg(rid) = self.home_for(&name.name) {
+                    if rid.bank == crate::location::RegBank::Gp {
+                        let base = rid.n;
+                        if base != dst && self.emit_load_mem_typed_at(load_size, &load_ty, base, dst) {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        // 后缀自增与解引用合成「一次访存 + 一次加法」（`DCC_POSTINC_FOLD=1`，默认关）。
+        //
+        // 为什么单独立一条而不是指望窥孔：`i = *(pc++)` 今天的形状是
+        // `mov rax,rbx` + `add rbx,4` + `mov eax,[rax]` 三条 —— 上面那个「8 字节家的
+        // 读-改-写」快路径（`increment.rs`）先把旧指针复制进 `%rax`，接着 `add` 就毁了
+        // 「rax == rbx」这条相等事实，而地址恰恰是**旧值**（这是应当的）。所以
+        // `R_CPYBASE` 那类后向窥孔在本形状上结构吃不到（实测 `luaV_execute` 命中 0 次），
+        // 只有发射时知道「这是一次 post-inc 载入」才能塌成 `mov eax,[rbx]; add rbx,4`。
+        // 而这条是每步必经的取指路径（85 个臂每份自带一份 vmbreak）。
+        //
+        // 只接后缀（`*p++` / `*p--`），不接前缀：前缀要先发 `add` 再发载入，而载入
+        // 能否编出来只有发完才知道 —— 已经发出去的 `add` 收不回来，退路会变成「自增两次」。
+        // 后缀那一支先载入（失败就一事不发，直接退回原路）再发 `add`，因此不需要
+        // 「试探式编码」这个新能力。前缀要接，得先给编码器补一条 can-encode 进路。
+        if Self::postinc_fold_enabled()
+            && matches!(load_size, 1 | 2 | 4 | 8)
+            && Self::stage_scalar_ty(&load_ty)
+        {
+            if let Expr::PostInc { e: lv, .. } | Expr::PostDec { e: lv, .. } = e {
+                let is_inc = matches!(e, Expr::PostInc { .. });
+                if let Expr::Ident { name, .. } = &**lv {
+                    // 全局不接：全局的地址是 RIP 相对，不是「某个号里的值」。
+                    if !self.is_global_not_local(&name.name) {
+                        // 步进量与 `gen_inc_dec` 同一口径：指针所指类型的大小。
+                        // 所指对象带 volatile ⇒ 不合成（可观察的读写次数/顺序本身就是语义）。
+                        let pt = lv.ty();
+                        let (step, vol) = match &pt {
+                            crate::ast::Type::Ptr(q) => (q.size() as i32, q.quals.is_volatile()),
+                            _ => (1, false),
+                        };
+                        if !vol {
+                            if let crate::location::Location::Reg(rid) = self.home_for(&name.name) {
+                                if rid.bank == crate::location::RegBank::Gp {
+                                    let base = rid.n;
+                                    // `dst == base` 时不能合成：`mov d,[d]` 先把旧地址毁掉，
+                                    // 紧接着的 `add d,step` 加的就是载入值而不是地址。
+                                    if base != dst
+                                        && self.emit_load_mem_typed_at(load_size, &load_ty, base, dst)
+                                    {
+                                        self.emit_inc_dec_reg(base, is_inc, step);
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 目标导向的解引用（`DCC_DEST_DEREF=1`，默认关）：把指针值直接算进 `dst`，
+        // 再就地 `mov d,[d]` 装载（`emit_load_self_typed` 本来就是寄存器无关的）。
+        //
+        // 为什么要这一条：下面那条后备路径把指针值固定算进 `%rax`（EVAL_BASE），于是任何一层
+        // 解引用都要占用 `%rax`。而 Binop 臂的左值就放在 `%rax` 里 —— 两边挤同一个号，就是
+        // 「先把左值溅到帧槽、算完右值再取回」的根因（实测 `luaV_execute` 里 248 条这种链）。
+        // 按本机标定，一次每步内存操作值 30–75 ms，一条每步指令只值 3.2 ms，所省的不是
+        // 那一条 `mov`，而是那两次存/取。
+        //
+        // 只收安全形状：整数/字符/布尔且宽度 1/2/4/8（浮点走 xmm/st(0) 通道、int128 走
+        // rdx:rax 成对、带段前缀的另有 `%gs:` 发射路径，三者都不进这里）。
+        if dst != Self::EVAL_BASE
+            && Self::dest_deref_enabled()
+            && self.seg_prefix_of_base(e).is_none()
+            && matches!(load_size, 1 | 2 | 4 | 8)
+            && matches!(
+                load_ty,
+                Type::Bool
+                    | Type::Char
+                    | Type::SChar
+                    | Type::UChar
+                    | Type::Short
+                    | Type::UShort
+                    | Type::Int
+                    | Type::UInt
+                    | Type::Long
+                    | Type::ULong
+                    | Type::LongLong
+                    | Type::ULongLong
+                    | Type::Ptr(_)
+            )
+        {
+            self.gen_expr(e, dst);
+            let signed = Self::is_signed_int(&load_ty);
+            self.emit_load_self_typed(load_size, signed, dst);
+            return;
+        }
         self.gen_expr(e, Self::EVAL_BASE);
         // __seg_gs/__seg_fs 指针解引用: 发射段前缀 (%gs:/%fs:)。`e` 就是**基址表达式**，
         // 所以走 `seg_prefix_of_base`（先看本层 pointee，再沿链下潜 —— `*pp` /

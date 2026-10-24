@@ -28,6 +28,7 @@ impl Codegen {
             function_sections: self.function_sections,
             emit_asm_text: self.emit_asm_text,
             debug_level: self.debug_level,
+            opt_level: self.opt_level,
             emit_cfi: self.emit_cfi,
             source_name: self.source_name.clone(),
             line_map: self.line_map.clone(),
@@ -112,6 +113,10 @@ impl Codegen {
         cg.function_sections = ctx.function_sections;
         cg.emit_asm_text = ctx.emit_asm_text;
         cg.debug_level = ctx.debug_level;
+        // 优化档必须跟着快照下行：区内家（S4）与 A2 的护栏读 `opt_level`，worker 里丢了它
+        // 就等于「同一个源文件在并行/不并行两条路上产出不同字节」—— 与 global_seg /
+        // complete_struct_types 那几条同一个理由，也与「四档结果一致」同一条口径。
+        cg.opt_level = ctx.opt_level;
         cg.emit_cfi = ctx.emit_cfi;
         cg.source_name = ctx.source_name;
         cg.line_map = ctx.line_map;

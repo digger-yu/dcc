@@ -14,6 +14,24 @@ use crate::codegen::x86_64::opcode::{CondCode, SimdArithOp, SimdWidth};
 use crate::codegen::x86_64::{AggDst, Codegen, JumpKind, VaListAddress};
 use crate::const_eval;
 
+/// `DCC_DEST_ASSIGN`：赋值目标是有 GP 家的局部且赋值值无人要时，把右值直接算进那个家。
+/// 默认 0 ⇒ 产物逐字节不变（由 `lvm.o`/`sqlite3.c` 的零漂移对照与全量用例把守）。
+fn dest_assign_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("DCC_DEST_ASSIGN").map(|s| s != "0").unwrap_or(false))
+}
+
+/// `DCC_RHS_PURE`：把 Binop 左值暂存的「右值不会写 dst」判据从叶子形态扩到整棵纯算术树。
+/// 默认 0（保持今天的产物），由 `scripts/meta_gate.sh` 同场配判定它值多少。
+fn rhs_pure_stage() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("DCC_RHS_PURE")
+            .map(|s| s != "0")
+            .unwrap_or(false)
+    })
+}
+
 /// 帧临时槽回读（`mov <disp>(%r13), %<reg>`）的 gas 文本，上面两处回读共用一份。
 fn gas_load_from_temp_slot(dst: u8, slot_off: i32) -> String {
     use crate::codegen::x86_64::emit::gas::{mem_disp as gas_mem_disp, REG64 as GAS_REG64};
@@ -664,7 +682,17 @@ impl Codegen {
                 // 完全可能有 call。喊错一条就是静默错值。
                 let rhs_isolated =
                     matches!(r.as_ref(), Expr::Int { .. } | Expr::Char { .. } | Expr::Ident { .. });
-                let need_save_lhs = !rhs_isolated || dst == 1;
+                // `dst == 1`（rcx）那一支原本就强制存（左值可能是 shift 计数），旋钮开不开
+                // 都不变；`rhs_only_writes_stage` 也已经自己排掉了需 `%cl` 的变量移位。
+                let rhs_pure = rhs_pure_stage() && dst != 1 && Self::rhs_only_writes_stage(r);
+                let need_save_lhs = !(rhs_isolated || rhs_pure) || dst == 1;
+                // 诊断（与 `DCC_STAGE_PROBE` 同风格）：左值要溅帧槽时，把右值树的形状前两级
+                // 打出来聚合。不写这个就只能猜「为什么 248 条链里只消掉了 13 条」。
+                if need_save_lhs && std::env::var_os("DCC_RHS_PROBE").is_some() {
+                    let s = format!("{r:?}");
+                    let cut = s.find(", ty:").unwrap_or_else(|| s.find("span:").unwrap_or(s.len()));
+                    eprintln!("RHSPROBE dst={dst} iso={rhs_isolated} pure={rhs_pure} {}", &s[..cut]);
+                }
                 let callee_reg = if use_callee_saved && need_save_lhs {
                     self.alloc_callee_saved()
                 } else {
@@ -1140,7 +1168,38 @@ impl Codegen {
                         // 无法表达浮点 complex rvalue (值在 xmm0, rax 是地址/垃圾)
                         self.gen_aggregate_assign(&name.name, l_ty, r);
                     } else {
-                        self.gen_expr_decay(r, dst); // 数组衰减: int *p = arr
+                        // 直写家（`DCC_DEST_ASSIGN=1`，默认关）：目标是有 GP 家的局部、且
+                        // 本赋值表达式的值没人要（`dead_here`，由 `Stmt::Expr` 语境置位）时，
+                        // 把右值直接算进那个家。今天的路径是「算进 %rax → `mov 家,%eax`」，
+                        // 后者每条赋值多一条指令；实测 `luaV_execute` 每步必经的
+                        // `i = *(pc++)` 就是这一形状（`mov eax,[rax]` 之后再一条 `mov r12d,eax`）。
+                        //
+                        // 条件收到最窄，三条都是必需的：
+                        //  * 两侧都得是 ≤8B 整型/指针：浮点走 xmm0/st(0)、int128 走 rdx:rax
+                        //    成对，那些通道不接受任意 dst；
+                        //  * `dead_here`：值还要用时，调用方等的仍是 `dst`，不能只往家里写；
+                        //  * volatile 局部不进：它的读/写次数本身就是语义。
+                        let r_ty0 = r.ty();
+                        let direct_home: Option<u8> = if dest_assign_enabled()
+                            && dead_here
+                            && Self::stage_scalar_ty(l_ty)
+                            && Self::stage_scalar_ty(&r_ty0)
+                            && !self.volatile_locals.contains_key(&name.name)
+                        {
+                            match self.home_for(&name.name) {
+                                crate::location::Location::Reg(rid)
+                                    if rid.bank == crate::location::RegBank::Gp
+                                        && rid.n != dst =>
+                                {
+                                    Some(rid.n)
+                                },
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        let wdst = direct_home.unwrap_or(dst);
+                        self.gen_expr_decay(r, wdst); // 数组衰减: int *p = arr
                                                      // Implicit float→int conversion when RHS is
                                                      // float but LHS is integer (e.g. `a = 0.0;`).
                         let r_ty = r.ty();
@@ -1181,7 +1240,7 @@ impl Codegen {
                         // 判据，那些路径原先连归约都没有：`long v = (ui[0] =
                         // 0x100000005ULL)` 实测 gcc 5 / dcc 4294967301）。
                         let r_ty = r.ty();
-                        self.reduce_assign_value_to_lvalue(dst, l_ty);
+                        self.reduce_assign_value_to_lvalue(wdst, l_ty);
                         if matches!(l_ty, Type::Int128 | Type::UInt128) {
                             // RHS 非 __int128 时, rdx 未设置, 需零扩展/符号扩展
                             let r_ty_for_128 = r.ty();
@@ -1302,7 +1361,7 @@ impl Codegen {
                             }
                             self.gen_float_store(&name.name, l_ty);
                         } else {
-                            self.mov_to_stack(dst, &name.name);
+                            self.mov_to_stack(wdst, &name.name);
                         }
                     }
                 } else if let Expr::Index {

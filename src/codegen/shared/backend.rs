@@ -22,6 +22,11 @@ pub struct EmitOptions<'a> {
 
     // Debug and diagnostics
     pub debug_level: u8,
+    /// `-O0..-O3` 的档位。发射侧需要它的理由不是「要不要优化」，而是几条
+    /// **只在有优化时才成立**的形状护栏：区内家（S4）与 A2 标签汇合在 -O0 下
+    /// 必须整体关——那一档连累活分析都不跑，「这个槽在本区内会不会再被写」根本没有
+    /// 依据（方案 §3 S4 的硬互斥清单明写 `-O0`，并要求「`Codegen` 需补 `opt_level`」）。
+    pub opt_level: u8,
     pub dwarf_version: u8,
     pub sanitizers: SanitizerFlags,
 

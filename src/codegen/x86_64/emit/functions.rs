@@ -294,6 +294,19 @@ impl Codegen {
             }
             self.homes.insert(n, b);
         }
+        // 形参的家（`DCC_HOME_PARAMS=1` 时由 `ssa::regalloc::deliver` 写在 `Param::home`）。
+        // 同样必须在 `resync_pins` / `reset_reg_tracker` **之前**注入：那两个函数从
+        // `homes` 取号去 claim 与补序言保存，晚一步就会把刚分给形参的 callee-saved 当
+        // 空闲临时号发掉（踩掉另一个变量家 = 静默错值）。
+        for p in f.params.iter() {
+            let (Some(nm), Some(loc)) = (p.name.as_ref(), p.home) else {
+                continue;
+            };
+            if !self.register_binding_allowed(&nm.name) {
+                continue;
+            }
+            self.homes.insert(nm.name.clone(), (loc, p.ty.clone()));
+        }
         // 后端自选的家必须在 `resync_pins` / `reset_reg_tracker` **之前**注入：
         // 那两个函数从 `homes` 里取号去 claim 与 patch 序言保存，晚一步就会把
         // 刚分出去的 callee-saved 号当空闲临时号发掉（覆盖变量家 = 静默错值）。
@@ -333,14 +346,60 @@ impl Codegen {
         // 块内等价事实同理：上一函数末的基本块与函数边界隔开了。volatile 登记表是
         // 本帧坐标/本帧声明，泄漏到下一个函数会把别人的槽当成屏障（少削一条）或把
         // 真 volatile 槽漏掉（静默错值）—— 后者才是必须逐函数清空的原因。
-        self.block_state.reset();
+        self.block_state.reset_at(crate::codegen::x86_64::blockopt::stat::site("reset_fn_boundary"));
+        // `DCC_KILL_ALL_STAT=1`：逐函数归因，计数器在本函数开头清零。
+        if crate::codegen::x86_64::blockopt::stat::enabled() {
+            crate::codegen::x86_64::blockopt::stat::zero();
+            crate::codegen::x86_64::blockopt::stat::zero_variants();
+        }
+        // Gate 0a 影子表（`DCC_SLOT_SHADOW=1`）同样逐函数配对：不清零就会把上一个函数
+        // 的存槽事实当成下一个函数可转发的来源，那种读数能把 S2 的上限高估一个量级。
+        if crate::codegen::x86_64::blockopt::shadow::enabled() {
+            crate::codegen::x86_64::blockopt::shadow::zero();
+        }
+        // 上一个函数残留的冷块（嵌套函数报错等异常路径）不得混进本函数体。
+        self.cold_arms.clear();
+        self.cold_merged = 0;
         self.volatile_frames.clear();
         self.volatile_locals.clear();
         self.volatile_slots_overflow = false;
+        self.escaped_frames.clear();
+        // 本帧的控制流护栏必须在**第一条指令之前**定好：A1（「帧槽事实跨 call 存活」）在
+        // 第一条 call 处就要读它。volatile 全局名集与 SSA 准入读同一个真源（§4.7）。
+        self.frame_guard = crate::frame_guard::FrameGuard::for_func(
+            f,
+            &crate::frame_guard::volatile_global_names(prog),
+        );
+        // A2 的先验事实同样逐函数重算：每条标签的**入边计数**与「有没有间接跳转/内联
+        // asm」都必须在本函数第一条 `label()` 之前就绪，否则那个位只能在下一个函数上生效。
+        // 取交那一臂另外需要两个本函数现场累加器（seen / snap），与计数同一真源。
+        let edges = crate::frame_guard::jump_edges(f);
+        self.a2_incoming = edges.counts;
+        self.a2_seen.clear();
+        self.a2_snap.clear();
+        self.a2_no_inherit = crate::frame_guard::has_unnamed_jump(f)
+            // 内联 asm 单独叠一层：`%l0` 形式的标号操作数就是一条本模块数不到的边，
+            // 而 `Stmt::Asm` 的文本里还可能直接 `jmp` 到一个标签上。宁关一档也不拿
+            // 「看不见的边」当落空前驱用。
+            || self.frame_guard.inline_asm;
+        // 区域家（S4）的函数级开工判定：旋钮 + 函数级硬互斥 + `-O0`。
+        //
+        // `-g` 不在互斥列里，因为本层**从不推迟存出**（见 `region.rs` 头部那段推导）：
+        // 内存一直是权威，单 `DW_AT_location` 就是正确答案，不需要 loclist 描述任何区间。
+        // 将来谁要往本层加「内存落后于家」的形状，必须同时把区间记进
+        // `Codegen::debug_loc_windows`（loclist 的生产点），并把下面这一行加回来。
+        {
+            let rg = &self.frame_guard;
+            let body_shape_ok = !rg.blocks_region_home();
+            self.region_begin_func(body_shape_ok && self.opt_level >= 1, &f.name.name);
+        }
         // 前置二/三的两个函数级事实同样不得活过一个函数：覆盖表泄漏会把下一个函数的
         // 变量钉在错误的内存位置上；保存槽表则是本帧坐标，跳帧用它们是直接错值。
         self.home_overrides.clear();
         self.ext_home_saves.clear();
+        // 分段位置窗口同属本帧：它们拿的是本函数的 pc 与保存槽位移，活到下一个函数
+        // 就是拿别人的区间给别人发 loclist。
+        self.debug_loc_windows.clear();
         self.vla_total_size = 0;
         // 静态扫描函数体是否含 VLA 声明 (决定跳转前是否恢复动态栈基)
         self.cur_func_has_vla = f
@@ -569,6 +628,9 @@ impl Codegen {
                 self.variadic_named_gp = 1;
             }
             let mut param_stores: Vec<(u8, i64)> = Vec::new(); // (gp reg, offset)
+            // 形参有 callee-saved 家时，入站值直接搬进那个号而不是存槽。
+            // 只出现在 `DCC_HOME_PARAMS=1` 且该形参确实拿到家时；默认表为空。
+            let mut param_home_moves: Vec<(u8, u8)> = Vec::new(); // (入站号, 家号)
                                                                // (xmm reg, offset, ty, wide128): wide128=true 表示该 Sse chunk
                                                                // 与紧随的 SseUp 共用同一 xmm, 一次性保存完整 16 字节。
             let mut xmm_param_stores: Vec<(u8, i64, Type, bool)> = Vec::new();
@@ -861,7 +923,20 @@ impl Codegen {
                         let hdr = LayoutMap::hdr_of(temp_slots as i64);
                         let off = -(used_before + hdr);
                         self.var_map.insert(nm.name.clone(), (off, p.ty.clone()));
-                        param_stores.push((reg, off));
+                        // 家有号 ⇒ 入站值直接搬到家号，不写帧槽。两边都是 GP 号且
+                        // 家限定在 callee-saved（与入站号不相交），所以这里不可能出现
+                        // 「后面的形参从已被覆写的入站号里读」那种顺移错误。
+                        match self.homes.get(&nm.name).map(|(l, _)| *l) {
+                            Some(crate::location::Location::Reg(rid))
+                                if rid.bank == crate::location::RegBank::Gp && rid.n != reg =>
+                            {
+                                param_home_moves.push((reg, rid.n));
+                            },
+                            // 家恰好就是入站号（参数位置与家重合）：什么都不用发。
+                            Some(crate::location::Location::Reg(rid))
+                                if rid.bank == crate::location::RegBank::Gp => {},
+                            _ => param_stores.push((reg, off)),
+                        }
                         self.variadic_named_gp += 1;
                     }
                 } else {
@@ -1143,6 +1218,11 @@ impl Codegen {
             for (reg, off) in param_stores {
                 self.store_stack(reg, off);
             }
+            // 入站值 → 家号。上面的 callee-saved 保存已经完成（序言开头），现在写
+            // 它们不会丢任何东西；与存栏同一批次，不依赖顺序（号集不相交）。
+            for (incoming, home) in param_home_moves {
+                self.mov(home, incoming);
+            }
             for (xmm, off, ty, wide128) in xmm_param_stores {
                 if matches!(ty, Type::Float) {
                     // K&R / 无原型函数: float 参数经默认提升后以 double 传入.
@@ -1331,6 +1411,30 @@ impl Codegen {
                 .collect();
             for (n, off) in planned {
                 self.note_volatile_var_slots(&n, off);
+            }
+            // 逃逸地址的槽同样要按**槽**登记（而不是按函数）：判据与 volatile 同源，
+            // 但拦住的是「推迟存出」与「跨 call 存活」两件事。
+            // 一个名字可能多次声明（遮蔽），每一个偏移都要登记。
+            if !self.frame_guard.escaped_names.is_empty() {
+                let hits: Vec<(i64, crate::ast::Type)> = self
+                    .var_map
+                    .iter()
+                    .filter(|(n, _)| self.frame_guard.escaped_names.contains(n.as_str()))
+                    .map(|(_, &(off, ref ty))| (off, ty.clone()))
+                    .collect();
+                for (off, ty) in hits {
+                    let slots = Self::var_alloc_slots(&ty);
+                    // 与 `note_volatile_var_slots` 同一条上限：枚举不完一个大对象时
+                    // 不能慢慢插入（那是分钟级的编译时间），也不能只插一半（那就是
+                    // 漏登记的逃逸槽 = 静默错值）。整体关掉本函数的家与 A1 才是保守方向。
+                    if slots > crate::codegen::x86_64::instructions::VOLATILE_SLOT_CAP {
+                        self.region_disable();
+                        break;
+                    }
+                    for i in 0..slots.max(1) {
+                        self.escaped_frames.insert(off.saturating_add(i * 8));
+                    }
+                }
             }
         }
         // VLA 形参维度求值: 序言尾 (非 main 路径两分支汇合点) 执行,
@@ -1627,10 +1731,59 @@ impl Codegen {
             }
             self.emit_func_epilogue();
         }
+        // 冷格外置（`DCC_COLD_OUTLINE`）：必须在尾声之后、`func_end` 之前发。尾声以 `ret`
+        // 收尾，控制流不会顺落进冷区；而 `func_end` 之后的字节会被 `func_sizes` 切片裁掉。
+        // 默认旋钮下 `cold_arms` 为空，这一句不发任何字节。
+        self.flush_cold_arms();
+        // 区域家必须在函数结束前全部写回：字节要排在尾声之前，而 `cold_arms` 已发完。
+        // 忘一步就是「变量在寄存器里死了」——函数返回后那个号被调用方拿走，帧里留旧值。
+        self.region_flush();
+        // 逐函数机制读数（只在旋钮开着时打，产物不受影响）。
+        self.region_dump_stats(&f.name.name);
+        // 合并读数（只在旋钮开着时打）：S6 的判据要能回答「到底合了几对」。
+        if crate::codegen::x86_64::emit::stmt::cold_merge_on() && self.cold_merged != 0 {
+            eprintln!("coldmerge fn={} merged={}", f.name.name, self.cold_merged);
+        }
         // 记录函数大小
         let func_end = self.pos();
         self.func_sizes
             .insert(f.name.name.clone(), func_end - func_start);
+        // Gate 0a 读数（方案 §2 0a / §8.2 修订后的判据）：`total` 是影子表本可转发而真实表
+        // 没转发的总次数（= S2 的总上限），四个 `hit_*` 按「存槽之后发生得最晚的那一种
+        // 屏障」归桶。判据读的是 `hit_call+hit_label+hit_pressure+hit_capacity`，不是 total。
+        if crate::codegen::x86_64::blockopt::shadow::enabled() {
+            let s = crate::codegen::x86_64::blockopt::shadow::dump();
+            eprintln!(
+                "slotshadow fn={} total={} hit_call={} hit_label={} hit_pressure={} hit_capacity={} hit_raw={} never={}",
+                f.name.name,
+                s.total,
+                s.hit_call,
+                s.hit_label,
+                s.hit_pressure,
+                s.hit_capacity,
+                s.hit_raw,
+                s.miss_never
+            );
+            crate::codegen::x86_64::blockopt::shadow::zero();
+        }
+        if crate::codegen::x86_64::blockopt::stat::enabled() {
+            for (site, hits, slots_lost, copies_lost) in crate::codegen::x86_64::blockopt::stat::dump() {
+                eprintln!(
+                    "killstat fn={} site={} hits={} slots_lost={} copies_lost={}",
+                    f.name.name, site, hits, slots_lost, copies_lost
+                );
+            }
+            let mut vs: Vec<(String, u64, u64, u64)> = crate::codegen::x86_64::blockopt::stat::dump_variants();
+            vs.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
+            for (variant, hits, slots_lost, copies_lost) in vs {
+                eprintln!(
+                    "killvar fn={} variant={} hits={} slots_lost={} copies_lost={}",
+                    f.name.name, variant, hits, slots_lost, copies_lost
+                );
+            }
+            crate::codegen::x86_64::blockopt::stat::zero();
+            crate::codegen::x86_64::blockopt::stat::zero_variants();
+        }
         // C++ 零成本异常: 归档本函数的受保护调用点与 CFI 事实。必须在嵌套函数
         // 生成之前完成 (嵌套函数会重新 clear `eh_sites`)。
         if !self.eh_sites.is_empty() {
@@ -1659,7 +1812,7 @@ impl Codegen {
         // Phase 6.2：本帧的位置表在此刻是完整的（`homes` 与 `var_map` 都是最终值），
         // 而下一个函数一开始就把两者复位 —— 所以采集必须卡在这里，嵌套函数之前
         // （见 `collect_debug_var_facts` 的注释）。
-        self.collect_debug_var_facts(f);
+        self.collect_debug_var_facts(f, func_start, self.pos());
         // 父函数布局确定后再生成嵌套函数，把捕获变量的真实 r13 偏移传入。
         // 使用预收集的 nested_decls 和预注册的重命名
         if !nested_decls.is_empty() {

@@ -1,5 +1,5 @@
 // tests/integration.rs — 唯一 cargo integration target 壳。
-// 全部测试按主题位于 tests/integration/*.rs，由本壳以下方 15 条包含指令文本级粘贴聚合，
+// 全部测试按主题位于 tests/integration/*.rs，由本壳以下方的 include 指令文本级粘贴聚合，
 // 公共助手位于 tests/common/harness.rs。子文件内不得再写 use/mod/fn main，
 // 导入权归本壳（§5.2 规则 2）。
 use dcc::codegen::shared::elf;
@@ -51,6 +51,12 @@ include!("integration/opt_licm.rs");
 include!("integration/opt_ssa_gate.rs");
 
 include!("integration/p16_rotation.rs");
+
+include!("integration/codegen_cold_layout.rs");
+
+include!("integration/codegen_param_home.rs");
+
+include!("integration/codegen_frame_facts.rs");
 
 include!("integration/xfail.rs");
 

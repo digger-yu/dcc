@@ -8542,6 +8542,7 @@ impl<'a> Parser<'a> {
                     span: Span::point("", 0, 0),
                     vla_dim: None,
                     quals: QualifierFlags::NONE,
+                    home: None,
                 });
             }
             // 设置 is_kr 标志 (通过返回特殊 Param, 后续在 parse_var_or_func 中处理)
@@ -8556,6 +8557,18 @@ impl<'a> Parser<'a> {
             let mut ty = self.parse_type()?;
             // 普通路径可能漏掉指针: parse_type 已含 *, 这里再吞一层 qual
             self.skip_ptr_qualifiers();
+            // 形参声明说明符上的限定符，必须在下面任何递归 parse_type()/parse_params() 之前
+            // 取走：`spec_quals`/`decl_quals` 是 parser 的**滚动状态**，函数指针参数的内层
+            // 声明会把它们覆盖成内层的那些。
+            //
+            // 为什么以前不需要它：那六个 `Param { ... }` 构造点全部硬写 `quals:
+            // QualifierFlags::NONE`，于是 `void f(volatile int n)` 的 volatile 在离开语法
+            // 分析时就丢了 —— 而四个消费者（`opt.rs::func_refs_volatile`、`ast_gvn.rs:310`、
+            // `loop_opt.rs:234`、`ssa/build.rs` 的 `param_quals`）一直在读这个恒为空的字段，
+            // 是一条**空判据**。产物今天没错过，只是因为「没有家 ⇒ 每次都从栈槽读」恰好
+            // 挡住了复用；一旦把形参交给寄存器（`DCC_HOME_PARAMS`）它就会真的违反语义。
+            let param_spec_quals = self.spec_quals;
+            let param_decl_quals = self.decl_quals;
             // 嵌套函数指针参数: char *(*pfn)(const char *)
             // 也处理: ret (__attribute__((...)) *name)(params)
             let mut is_nested_fptr = false;
@@ -8742,6 +8755,7 @@ impl<'a> Parser<'a> {
                     span: param_span,
                     vla_dim: None,
                     quals: QualifierFlags::NONE,
+                    home: None,
                 });
                 if self.cur.kind == TokKind::Comma {
                     self.advance();
@@ -8789,6 +8803,7 @@ impl<'a> Parser<'a> {
                     span: param_span,
                     vla_dim: None,
                     quals: QualifierFlags::NONE,
+                    home: None,
                 });
                 if self.cur.kind == TokKind::Comma {
                     self.advance();
@@ -8840,6 +8855,7 @@ impl<'a> Parser<'a> {
                     span: param_span,
                     vla_dim: None,
                     quals: QualifierFlags::NONE,
+                    home: None,
                 });
                 if self.cur.kind == TokKind::Comma {
                     self.advance();
@@ -8868,6 +8884,7 @@ impl<'a> Parser<'a> {
                         span: param_span,
                         vla_dim: None,
                         quals: QualifierFlags::NONE,
+                        home: None,
                     });
                     if self.cur.kind == TokKind::Comma {
                         self.advance();
@@ -8978,12 +8995,22 @@ impl<'a> Parser<'a> {
                 Type::Array(e, _) => Type::Ptr(e),
                 o => o,
             };
+            // 与局部变量同一口径（见 4925 行那段）：指针型的 `spec_quals` 属于**所指
+            // 对象**而不是指针本身，只取 `*` 之后的 `decl_quals`。数组参数已在上面
+            // 退化成 `Ptr`，所以 `volatile int a[]` 在这里正确地得到 NONE（volatile
+            // 属于元素，不属于退化后的指针）。
+            let param_quals = if matches!(ty, Type::Ptr(_)) {
+                param_decl_quals
+            } else {
+                param_spec_quals | param_decl_quals
+            };
             ps.push(Param {
                 ty,
                 name: nm,
                 span: self.cur.span.clone(),
-                quals: QualifierFlags::NONE,
+                quals: param_quals,
                 vla_dim: outermost_vla_dim.take(),
+                home: None,
             });
             if self.cur.kind == TokKind::Comma {
                 self.advance();
@@ -14244,5 +14271,35 @@ mod tests {
         assert_eq!(&bytes[0..4], &[0x61, 0, 0, 0]);
         assert_eq!(&bytes[4..8], &[0x62, 0, 0, 0]);
         assert_eq!(&bytes[8..12], &[0x63, 0, 0, 0]);
+    }
+
+    /// 形参的 `quals` 必须真的被填上。
+    ///
+    /// 为什么单独钉这一条：六个 `Param { ... }` 构造点曾经全部硬写
+    /// `quals: QualifierFlags::NONE`，于是四个消费者（`opt.rs::func_refs_volatile`、
+    /// `ast_gvn.rs` 的 volatile 门、`loop_opt.rs`、`ssa/build.rs` 的 `param_quals`）
+    /// 读的是一个**恒空**字段 —— 判据存在但永不成立，比没有判据更难发现。
+    /// 口径与局部变量一致：属于指针本身的才算（`*` 之后的 `decl_quals`），
+    /// 属于所指对象的走 `Type::Ptr(QualType{quals})` 那条道。
+    #[test]
+    fn param_quals_records_the_pointer_distinction() {
+        let src = "void f(volatile int n, volatile int *p, int *volatile q, volatile int a[]) {}\n";
+        let (prog, diags) = super::parse(src.as_bytes(), "t.c");
+        assert!(diags.is_empty(), "不该有诊断: {:?}", diags);
+        let fd = prog
+            .decls
+            .iter()
+            .find_map(|d| match d {
+                crate::ast::Decl::Func(f) => Some(f),
+                _ => None,
+            })
+            .expect("函数声明");
+        let got: Vec<bool> = fd.params.iter().map(|p| p.quals.is_volatile()).collect();
+        assert_eq!(
+            got,
+            vec![true, false, true, false],
+            "n=对象 volatile ⇒ 算；*p=所指 volatile ⇒ 不算；*volatile q=指针 volatile ⇒ 算；\
+             a[] 退化成指针 ⇒ 不算"
+        );
     }
 }

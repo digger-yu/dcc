@@ -47,6 +47,15 @@ impl Codegen {
                 continue; // 已被外层 call 序列存下，值在槽里、不需要再存
             }
             self.store_stack(reg, off);
+            // 从这一条存出起到 `restore_ext_homes` 的装载为止，真值在槽里而不是在号里。
+            // 不记下这段区间，`-g` 下的 `DW_AT_location` 就会在每次调用期间说一个被 callee
+            // 破坏的寄存器（方案 §4.4 要 loclist 的那个理由）。
+            self.debug_loc_windows.push((
+                name.clone(),
+                self.pos(),
+                0,
+                crate::location::Location::Stack(off),
+            ));
             self.home_overrides
                 .insert(name, crate::location::Location::Stack(off));
             opened += 1;
@@ -75,6 +84,17 @@ impl Codegen {
                 continue;
             }
             self.load_stack(reg, off);
+            // 把上面那条窗口的终点合在本条装载之后：装载执行完，号里又是真值。
+            // `store_stack` 那侧只能拿 0 占位（那时还不知道终点），这里按变量名合上。
+            let window_end = self.pos();
+            if let Some(w) = self
+                .debug_loc_windows
+                .iter_mut()
+                .rev()
+                .find(|(n, _, e, _)| *n == name && *e == 0)
+            {
+                w.2 = window_end;
+            }
             self.home_overrides.remove(&name);
             done += 1;
         }
@@ -1203,8 +1223,19 @@ impl Codegen {
             }
         }
         // SysV uses AL to communicate the number of vector registers to a
-        // variadic callee. Setting it for all calls is benign.
-        self.emit_insn(&Insn::raw_with_gas(&[0xB0, fp as u8], &format!("mov ${}, %al", fp as u8)));
+        // variadic callee. Setting it for all calls is benign —— but not free:
+        // `luaV_execute` 里有 250 条 `mov $0, %al`，每一条两字节，全部在分派热路径上。
+        //
+        // 能省的条件必须是「被调方**确实不是**变参」：`variadic_funcs` 里有明确 `false`
+        // 条目（看过原型且非变参）才省；查不到（外部符号、间接调用、K&R 无原型）
+        // 一律照旧发 —— 那侧的 callee 可能真的在读 `%al`，少发一条就是静默错值。
+        let callee_known_not_variadic = direct
+            .and_then(|name| self.variadic_funcs.get(name))
+            .copied()
+            == Some(false);
+        if fp != 0 || !callee_known_not_variadic {
+            self.emit_insn(&Insn::raw_with_gas(&[0xB0, fp as u8], &format!("mov ${}, %al", fp as u8)));
+        }
         if let Some(name) = direct {
             // 解析嵌套函数引用 (沿作用域链上溯: 支持从后代嵌套函数
             // 内直接调用兄弟/祖先定义的嵌套函数)

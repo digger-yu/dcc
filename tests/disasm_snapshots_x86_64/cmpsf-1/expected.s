@@ -20,15 +20,13 @@ and %bl,%al
 movzbq %al,%rax
 test %eax,%eax
 je <feq>
-mov $0xd,%rax
-movslq %eax,%rax
+mov $0xd,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
 mov %r13,%rsp
 pop %r13
 ret
-mov $0x8c,%rax
-movslq %eax,%rax
+mov $0x8c,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
 mov %r13,%rsp
@@ -57,15 +55,13 @@ or %bl,%al
 movzbq %al,%rax
 test %eax,%eax
 je <fne>
-mov $0xd,%rax
-movslq %eax,%rax
+mov $0xd,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
 mov %r13,%rsp
 pop %r13
 ret
-mov $0x8c,%rax
-movslq %eax,%rax
+mov $0x8c,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
 mov %r13,%rsp
@@ -94,15 +90,13 @@ and %bl,%al
 movzbq %al,%rax
 test %eax,%eax
 je <flt>
-mov $0xd,%rax
-movslq %eax,%rax
+mov $0xd,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
 mov %r13,%rsp
 pop %r13
 ret
-mov $0x8c,%rax
-movslq %eax,%rax
+mov $0x8c,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
 mov %r13,%rsp
@@ -131,15 +125,13 @@ and %bl,%al
 movzbq %al,%rax
 test %eax,%eax
 je <fge>
-mov $0xd,%rax
-movslq %eax,%rax
+mov $0xd,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
 mov %r13,%rsp
 pop %r13
 ret
-mov $0x8c,%rax
-movslq %eax,%rax
+mov $0x8c,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
 mov %r13,%rsp
@@ -168,15 +160,13 @@ and %bl,%al
 movzbq %al,%rax
 test %eax,%eax
 je <fgt>
-mov $0xd,%rax
-movslq %eax,%rax
+mov $0xd,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
 mov %r13,%rsp
 pop %r13
 ret
-mov $0x8c,%rax
-movslq %eax,%rax
+mov $0x8c,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
 mov %r13,%rsp
@@ -205,15 +195,13 @@ and %bl,%al
 movzbq %al,%rax
 test %eax,%eax
 je <fle>
-mov $0xd,%rax
-movslq %eax,%rax
+mov $0xd,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
 mov %r13,%rsp
 pop %r13
 ret
-mov $0x8c,%rax
-movslq %eax,%rax
+mov $0x8c,%eax
 mov -0x10(%r13),%rbx
 <nop padding>
 mov %r13,%rsp
@@ -230,20 +218,18 @@ mov %r14,-0x20(%r13)
 <nop padding>
 lea 0x0(%rip),%rax
 mov %rax,%rbx
-mov $0x0,%rax
-movslq %eax,%rax
+mov $0x0,%eax
 mov %eax,%r12d
-mov $0x1,%rax
+mov $0x1,%eax
 test %eax,%eax
 je <main>
 movslq %r12d,%rcx
 lea 0x0(%rip),%r11
 movss (%r11,%rcx,4),%xmm0
 movss %xmm0,-0x70(%r13)
-mov $0x0,%rax
-movslq %eax,%rax
+mov $0x0,%eax
 mov %eax,-0x60(%r13)
-mov $0x1,%rax
+mov $0x1,%eax
 test %eax,%eax
 je <main>
 movslq -0x60(%r13),%rcx
@@ -3050,7 +3036,7 @@ jmp <main>
 jmp <main>
 jmp <main>
 sub $0x20,%rsp
-mov $0x0,%rax
+mov $0x0,%eax
 mov %rax,0x10(%rsp)
 mov 0x10(%rsp),%rdi
 mov $0x0,%al

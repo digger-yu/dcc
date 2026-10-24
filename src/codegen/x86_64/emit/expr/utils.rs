@@ -189,6 +189,134 @@ impl Codegen {
             }
     }
 
+    /// `DCC_DEST_DEREF`：解引用是否把指针值直接算到调用方要求的号（而不是固定 `%rax`）。
+    /// 默认 0，产物与改动前逐字节相同。它同时是下面 [`Self::rhs_only_writes_stage`] 对
+    /// `Deref` 放行的前置条件：发射路径没改之前，判据不得先按「计划中的行为」放行。
+    pub(crate) fn dest_deref_enabled() -> bool {
+        static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *V.get_or_init(|| std::env::var("DCC_DEST_DEREF").map(|s| s != "0").unwrap_or(false))
+    }
+
+    /// 「后缀自增与解引用合成一次访存 + 一次加法」是否启用（`DCC_POSTINC_FOLD`，默认关）。
+    ///
+    /// 单独一个旋钮而不是附在 `DCC_DEST_DEREF` 上：那一条改的是「基址从哪个号读」，
+    /// 本条改的是「自增与载入的**先后」**，两者错开的形状不同，量验时必须能单独关。
+    pub(crate) fn postinc_fold_enabled() -> bool {
+        static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *V.get_or_init(|| std::env::var("DCC_POSTINC_FOLD").map(|s| s != "0").unwrap_or(false))
+    }
+
+    /// 「这个类型的值能否用一条 GP 装载/存完」——与下面几个臂共用的标量门。
+    /// 浮点走 xmm/st(0) 通道、int128 走 rdx:rax 成对、聚合走整块拷贝（那些路径会占
+    /// `rcx`/`rdx`/`xmm0`），三者一律不进「只写自己那个号」的判定。
+    /// `pub(crate)`：除本模块的判据外，赋值臂的「直写家」(`dispatch.rs` 的 `wdst`) 也要同一
+    /// 扇门，不能两边各写一份名单。
+    pub(crate) fn stage_scalar_ty(t: &Type) -> bool {
+        match t {
+            Type::Bool
+            | Type::Char
+            | Type::SChar
+            | Type::UChar
+            | Type::Char8
+            | Type::Char16
+            | Type::Char32
+            | Type::Short
+            | Type::UShort
+            | Type::Int
+            | Type::UInt
+            | Type::Long
+            | Type::ULong
+            | Type::LongLong
+            | Type::ULongLong
+            | Type::Ptr(_) => true,
+            _ => false,
+        }
+    }
+
+    /// 右值整棵求值树是否**只会写自己那个暂存号**（`gen_expr_decay(r, stage)` 的 dst）。
+    ///
+    /// 为什么需要它：Binop 臂原本只认「右值是字面量/名字」（`rhs_isolated`）才敢不存左值，
+    /// 否则就把左值溅到暂存区。而那个暂存区只有两个实现：callee-saved 池
+    /// `POOL=[rbx,r12,r14,r15]`（`regbank.rs:39`）与帧槽 —— 池同时也就是变量家的池，
+    /// `luaV_execute` 里四个号全是家，于是 `alloc_callee_saved()`/`alloc_temp` 双双返回
+    /// `None`，**每一条 Binop 都退到帧槽**：实测该函数里 258 处「存基址→算右值→取回基址」，
+    /// 每处 2 次多余内存操作。按本机标定，一次每步内存操作值 30–75 ms，一条每步指令只值
+    /// 3.2 ms —— 这两次存取的价钱是形状问题的十倍以上。
+    ///
+    /// 判据安全性的支点（两条，缺一即不得放行）：
+    ///  1. 发射期的暂存取号器**永不选 `rax`**（`rhs_stage_candidates` = `AUTO_EXT_POOL`，
+    ///     `regbank.rs` 底部单测把 rax/rdx/rsi/rdi/r10/r11/r13 钉在候选表之外），所以嵌套树
+    ///     自己的 stage 碰不到外面那个号；
+    ///  2. 当前这一层节点的发射路径必须只写 dst：成员/解引用止于 `emit_load_self_typed`
+    ///     那一族（寄存器无关），但**解引用只有在 `DCC_DEST_DEREF` 开了之后**才不落 `rax`，
+    ///     所以那条判据把旋钮状态当输入（没开就必须拒，否则就是拿计划中的行为骗今天的产物）。
+    ///
+    /// 不收的形态：下标（地址链还要用基址号）、调用/赋值/短路/条件/自增、`__builtin_*`、
+    /// 需 `%cl` 的变量移位、需 `rdx:rax` 的乘除、聚合与浮点。不认识就当会写：
+    /// 保守方向就是今天的行为，最多是少省两次存取，不会错值。
+    pub(crate) fn rhs_only_writes_stage(r: &Expr) -> bool {
+        match r {
+            // 编译期常量：求值不写任何号（或被折成一条 `mov imm` 只写 dst）。
+            Expr::Int { .. } | Expr::Char { .. } | Expr::SizeofTy { .. } | Expr::AlignofTy { .. } => {
+                Self::stage_scalar_ty(&r.ty())
+            },
+            Expr::Ident { .. } => Self::stage_scalar_ty(&r.ty()),
+            Expr::Cast { ty, e, .. } => {
+                Self::stage_scalar_ty(ty) && Self::rhs_only_writes_stage(e)
+            },
+            Expr::Unary { op, e, .. } => {
+                matches!(op, UnOp::Neg | UnOp::Not | UnOp::BitNot | UnOp::Plus)
+                    && Self::stage_scalar_ty(&r.ty())
+                    && Self::rhs_only_writes_stage(e)
+            },
+            // 成员访问：地址链与装载都是 dst-directed（`emit_load_self_typed` 那一族），
+            // 字段本身必须是标量（聚合字段走整块拷贝，那条路要占 rcx）。
+            Expr::Member { expr, .. } => {
+                Self::stage_scalar_ty(&r.ty()) && Self::rhs_only_writes_stage(expr)
+            },
+            // 解引用：只有 `DCC_DEST_DEREF` 开着时才不碰 rax（见 `lvalue.rs` 那条快道）。
+            Expr::Deref { e, ty, .. } => {
+                Self::dest_deref_enabled() && Self::stage_scalar_ty(ty)
+                    && Self::rhs_only_writes_stage(e)
+            },
+            Expr::Binop {
+                op: op @ (BinOp::Add
+                | BinOp::Sub
+                | BinOp::And
+                | BinOp::Or
+                | BinOp::Xor
+                | BinOp::Shl
+                | BinOp::Shr
+                | BinOp::Mul),
+                l,
+                r: rr,
+                ..
+            } => {
+                if !(Self::stage_scalar_ty(&r.ty()) || matches!(r.ty(), Type::Ptr(_))) {
+                    return false;
+                }
+                // 指针加减的标量那一侧也必须是标量。
+                if matches!(r.ty(), Type::Ptr(_))
+                    && !matches!(op, BinOp::Add | BinOp::Sub)
+                {
+                    return false;
+                }
+                // 移位计数必须是常量：变量计数要走 `%cl`，那是另一个号。
+                let count_ok = !matches!(op, BinOp::Shl | BinOp::Shr)
+                    || matches!(rr.as_ref(), Expr::Int { .. } | Expr::Char { .. });
+                // 乘法则要求有一边是常量：本后端除 `imul r,r,imm` 外还走 `rax` 累加器路径。
+                let mul_ok = *op != BinOp::Mul
+                    || matches!(l.as_ref(), Expr::Int { .. })
+                    || matches!(rr.as_ref(), Expr::Int { .. });
+                // 指针算术的一侧必须是指针、另一侧是标量。
+                let ptr_ok = !matches!(r.ty(), Type::Ptr(_))
+                    || (Self::stage_scalar_ty(&rr.ty()) || Self::stage_scalar_ty(&l.ty()));
+                count_ok && mul_ok && ptr_ok && Self::rhs_only_writes_stage(l) && Self::rhs_only_writes_stage(rr)
+            },
+            _ => false,
+        }
+    }
+
     pub(crate) fn store_rhs_isolated(lv: &Expr, r: &Expr, l_ty: &Type) -> bool {
         let r_ty = r.ty();
         Self::scalar_load_shape(r)
@@ -2362,6 +2490,135 @@ impl Codegen {
                         .is_some_and(|e| Self::stmt_ends_with_return(e))
             },
             _ => false,
+        }
+    }
+
+    /// 条件最外层是不是 `__builtin_expect(x, 0)`（Lua 的 `l_unlikely`、SQLite/内核的
+    /// `unlikely`）——即「then 侧是冷侧」的唯一可靠信号。
+    ///
+    /// 只认**最外层**：嵌在 `&&`/`||` 里的提示描述的是那个子条件，拿它决定整条边的
+    /// 冷热会把真正热的一侧也搬走。`!unlikely(x)` 的 then 侧反而是热路 ⇒ 否定次数为
+    /// 奇数时不算冷。`__builtin_expect_with_probability` 的第二参是概率不是 0/1 标志，
+    /// 本判据不认。
+    pub(crate) fn cond_marked_cold(cond: &Expr) -> bool {
+        let mut neg = false;
+        let mut cur = cond;
+        loop {
+            match cur {
+                Expr::Unary {
+                    op: UnOp::Not, e, ..
+                } => {
+                    neg = !neg;
+                    cur = e;
+                },
+                Expr::Call { callee, args, .. } => {
+                    if !matches!(&**callee, Expr::Ident { name, .. } if name.name == "__builtin_expect")
+                    {
+                        return false;
+                    }
+                    return !neg && matches!(args.get(1), Some(Expr::Int { v, .. }) if *v == 0);
+                },
+                _ => return false,
+            }
+        }
+    }
+
+    /// 表达式里是否可能藏着内联 asm。默认「不认识就当有」：漏外置只是少省字节，
+    /// 错外置会改变 asm 数字标签与 LSDA call-site 区间的结算位置 ⇒ 错值。
+    fn expr_may_hold_asm(e: &Expr) -> bool {
+        match e {
+            Expr::AsmExpr { .. } => true,
+            // 叶节点（不展开子表达式的那些）。
+            Expr::Int { .. }
+            | Expr::Float { .. }
+            | Expr::String { .. }
+            | Expr::Char { .. }
+            | Expr::Ident { .. }
+            | Expr::ComplexLit { .. }
+            | Expr::ComplexIntLit { .. }
+            | Expr::SizeofTy { .. }
+            | Expr::AlignofTy { .. } => false,
+            // `&&label` 取的是标签地址：本后端的跳表常驻化与它同一条通道，不跟着搬。
+            Expr::LabelAddr { .. } => true,
+            Expr::Unary { e, .. }
+            | Expr::Real { e, .. }
+            | Expr::Imag { e, .. }
+            | Expr::Cast { e, .. }
+            | Expr::SizeofExpr { e, .. }
+            | Expr::AlignofExpr { e, .. }
+            | Expr::AddrOf { e, .. }
+            | Expr::Deref { e, .. }
+            | Expr::PostInc { e, .. }
+            | Expr::PostDec { e, .. }
+            | Expr::PreInc { e, .. }
+            | Expr::PreDec { e, .. } => Self::expr_may_hold_asm(e),
+            Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } => {
+                Self::expr_may_hold_asm(l) || Self::expr_may_hold_asm(r)
+            },
+            Expr::Index { arr, idx, .. } => {
+                Self::expr_may_hold_asm(arr) || Self::expr_may_hold_asm(idx)
+            },
+            Expr::Member { expr, .. } => Self::expr_may_hold_asm(expr),
+            Expr::Cond {
+                cond, then_, else_, ..
+            } => {
+                Self::expr_may_hold_asm(cond)
+                    || Self::expr_may_hold_asm(then_)
+                    || Self::expr_may_hold_asm(else_)
+            },
+            Expr::Call { callee, args, .. } => {
+                Self::expr_may_hold_asm(callee) || args.iter().any(Self::expr_may_hold_asm)
+            },
+            // CompoundLit / InitList / StmtExpr / Comma / VaArg / VaArgPack / Offsetof 不展开：
+            // 保守当「可能有」。
+            _ => true,
+        }
+    }
+
+    /// 这个语句体能不能被搬到函数尾（`true` = 不能）。三条硬约束都有实测根据：
+    ///  * `cleanup_fn`：`end_cleanup_scope` 在**当前位置**发 `lea rdi/call`，清理栈是按发射
+    ///    顺序的；把体挪到函数尾会让外层块的清理先发 ⇒ 析构顺序反。
+    ///  * `vla_dim` / VLA 类型：`emit_vla_restore` 依赖「块结束时 rsp 已复原」这一发射顺序事实。
+    ///  * 内联 asm 与受保护调用（`Invoke`）：数字标签按模板内行号解析，LSDA 以 PC 区间为键。
+    /// 不认识的结构（`Switch`/`GotoIndirect`/`AsmGoto`）一律不动，新变体默认落进 `_ => true`。
+    pub(crate) fn cold_outline_blocked(stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Expr { e, .. } => Self::expr_may_hold_asm(e),
+            Stmt::Return { val, .. } => val.as_ref().is_some_and(Self::expr_may_hold_asm),
+            Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Goto { .. } | Stmt::Fallthrough { .. } => {
+                false
+            },
+            Stmt::Label { stmt, .. } => Self::cold_outline_blocked(stmt),
+            Stmt::If { cond, then_, else_, .. } => {
+                Self::expr_may_hold_asm(cond)
+                    || Self::cold_outline_blocked(then_)
+                    || else_
+                        .as_ref()
+                        .is_some_and(|e| Self::cold_outline_blocked(e))
+            },
+            Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
+                Self::expr_may_hold_asm(cond) || Self::cold_outline_blocked(body)
+            },
+            Stmt::For {
+                init, cond, step, body, ..
+            } => {
+                init.as_ref().is_some_and(|s| Self::cold_outline_blocked(s))
+                    || cond.as_ref().is_some_and(Self::expr_may_hold_asm)
+                    || step.as_ref().is_some_and(Self::expr_may_hold_asm)
+                    || Self::cold_outline_blocked(body)
+            },
+            Stmt::Block { b, .. } => b.items.iter().any(|it| match it {
+                BlockItem::Stmt(s) => Self::cold_outline_blocked(s),
+                BlockItem::Decl(Decl::Var(v)) => {
+                    // 本地 VLA 的判据与发射侧同一个入口（`gen_vla_alloc` 就挂在
+                    // `type_has_vla(&v.ty)` 上），不留两份拷贝。
+                    v.cleanup_fn.is_some()
+                        || Self::type_has_vla(&v.ty)
+                        || v.init.as_ref().is_some_and(Self::expr_may_hold_asm)
+                },
+                BlockItem::Decl(_) => false,
+            }),
+            _ => true,
         }
     }
     pub(crate) fn strip_asm_seg_prefix(s: &str) -> (&str, Option<u8>) {

@@ -1559,7 +1559,7 @@ impl Codegen {
                 )); // mov rcx, rax (计数 = 对齐后尺寸)
             },
             None => {
-                self.emit_insn(&Insn::mov_reg_imm32_b64(1, sz as i32)); // mov rcx, imm32 (= sz)
+                self.emit_insn(&Insn::mov_reg_imm_compact(1, sz as i32)); // mov rcx, imm32 (= sz)
             },
         }
         self.emit_insn(&Insn::noarg(crate::codegen::x86_64::opcode::NoArgOp::RepMovsb)); // rep movsb

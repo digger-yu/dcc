@@ -9,11 +9,12 @@ mov %rsi,-0x58(%r13)
 mov %rdi,%rax
 movslq (%rax),%rax
 mov %eax,%ebx
+mov %rdi,%rax
 movslq %ebx,%rax
-movslq -0x58(%r13),%r8
+movslq %esi,%r8
 add %r8,%rax
 movslq %eax,%rax
-mov -0x50(%r13),%rcx
+mov %rdi,%rcx
 mov %eax,(%rcx)
 movslq %ebx,%rax
 mov -0x10(%r13),%rbx
@@ -21,6 +22,7 @@ mov -0x10(%r13),%rbx
 mov %r13,%rsp
 pop %r13
 ret
+<nop padding>
 atomic_swap:
 push %r13
 mov %rsp,%r13
@@ -32,9 +34,9 @@ mov %rsi,-0x50(%r13)
 mov %rdi,%rax
 mov (%rax),%rax
 mov %rax,%rbx
-mov -0x48(%r13),%rax
+mov %rdi,%rax
 mov %rax,%rcx
-mov -0x50(%r13),%rax
+mov %rsi,%rax
 mov %rax,(%rcx)
 mov %rbx,%rax
 mov -0x10(%r13),%rbx

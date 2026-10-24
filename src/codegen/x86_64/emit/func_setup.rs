@@ -1317,10 +1317,18 @@ impl Codegen {
     ///
     /// 调用时机必须在函数体生成完之后、嵌套函数之前：那时 `homes` 与 `var_map` 才是本帧
     /// 的最终值，而嵌套函数会 `compile_func` 递归把两者复位。
-    pub fn collect_debug_var_facts(&mut self, f: &FuncDecl) {
+    ///
+    /// `fn_base`/`fn_end` 是本函数在代码 buffer 里的区间。分段位置（loclist）必须发成
+    /// **全覆盖**的区间列（`DW_AT_location` 一旦是 loclist，单表达式那个答案就不作数了），
+    /// 所以「号里就是真值」的那几段也得写进去。
+    pub fn collect_debug_var_facts(&mut self, f: &FuncDecl, fn_base: u64, fn_end: u64) {
         if self.debug_level == 0 {
             return;
         }
+        // 区间基准必须与 DWARF 侧 `DW_AT_low_pc` 拿的是同一个读数（`elf/output.rs` 也从
+        // `cg.labels` 取）。拿发射侧的 `func_start` 就会差上一段函数前缀（实测差 48 字节，
+        // 表现为 loclist 第一条「begin < end」不成立，而调试器对整个区间列表的判断就错了。
+        let fn_base = self.labels.get(&f.name.name).copied().unwrap_or(fn_base);
         let Some(b) = &f.body else { return };
         let mut decls: Vec<&VarDecl> = Vec::new();
         Self::collect_frame_var_decls(&b.items, &self.static_local_map, &f.name.name, &mut decls);
@@ -1332,15 +1340,71 @@ impl Codegen {
         let mut out: Vec<crate::codegen::x86_64::DebugVarLoc> = Vec::with_capacity(declared.len());
         for (name, ty, line) in declared {
             if let Some(loc) = self.var_location(&name) {
+                let ranges = self.compose_debug_ranges(&name, loc, fn_base, fn_end);
                 out.push(crate::codegen::x86_64::DebugVarLoc {
                     name,
                     loc,
+                    ranges,
                     ty,
                     decl_line: line,
                 });
             }
         }
         self.debug_var_facts.push((f.name.name.clone(), out));
+    }
+
+    /// 把某个变量的「区间窗口」与它的默认位置合成全覆盖的区间列。
+    ///
+    /// 没有窗口、或所有窗口都等于默认位置时返空表 ⇒ DWARF 侧照旧发单 `exprloc`，产物与
+    /// 本改动前逐字节相同（5454 组合门关全绿靠的就是这一条）。
+    fn compose_debug_ranges(
+        &self,
+        name: &str,
+        base: crate::location::Location,
+        fn_base: u64,
+        fn_end: u64,
+    ) -> Vec<crate::codegen::x86_64::codegen::DebugVarRange> {
+        let mut wins: Vec<(u64, u64, crate::location::Location)> = self
+            .debug_loc_windows
+            .iter()
+            .filter(|(n, _, _, _)| n == name)
+            .filter_map(|(_, b, e, l)| {
+                // 终点没合上的窗口（只有存出没有装载）直接丢：宁发一个单位置，
+                // 也不发一段错的开区间。
+                if *e == 0 || e <= b {
+                    None
+                } else {
+                    Some((*b, *e, *l))
+                }
+            })
+            .collect();
+        if wins.is_empty() {
+            return Vec::new();
+        }
+        wins.sort_by_key(|(b, _, _)| *b);
+        let mut out: Vec<crate::codegen::x86_64::codegen::DebugVarRange> = Vec::with_capacity(wins.len() * 2);
+        let mut cur = fn_base;
+        for (b, e, l) in &wins {
+            // 重叠窗口（嵌套 call 共用一个号）：跳过去，内层那一轮的终点才是真值边界。
+            if b < &cur {
+                if e > &cur {
+                    cur = *e;
+                }
+                continue;
+            }
+            if *b > cur {
+                out.push(crate::codegen::x86_64::codegen::DebugVarRange { begin_pc: cur, end_pc: *b, loc: base });
+            }
+            out.push(crate::codegen::x86_64::codegen::DebugVarRange { begin_pc: *b, end_pc: *e, loc: *l });
+            cur = *e;
+        }
+        if cur < fn_end {
+            out.push(crate::codegen::x86_64::codegen::DebugVarRange { begin_pc: cur, end_pc: fn_end, loc: base });
+        }
+        if out.iter().all(|r| r.loc == base) {
+            return Vec::new();
+        }
+        out
     }
 
     /// 一个名字在本帧里的位置：有家就是家，没家就是它的变量区栈槽。
@@ -2231,6 +2295,10 @@ impl Codegen {
     }
 
     pub fn emit_func_epilogue(&mut self) {
+        // 每一条 `return` 都是一次区出口：区内推迟的存出必须在恢复 callee-saved 号**之前**
+        // 写回内存，否则那个值随号一同消失，而帧里留的是旧值（调用方或嵌套路径
+        // 再从内存读它就是错值）。函数尾的那一次 flush 只管「顺落下来结束」的路径。
+        self.region_flush();
         // Stack canary 检查: 在恢复 rsp 前验证金丝雀值
         if self.target.stack_protector && self.frame_layout.canary_fits() {
             // mov r11, [r13 - 8]  → 加载存储的 canary 到临时寄存器（槽位 = `abi::layout::CANARY_OFF`）
