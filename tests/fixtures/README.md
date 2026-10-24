@@ -11,7 +11,7 @@
 | 目录 | 放什么 | 禁止 |
 |------|--------|------|
 | `c/` | 通用 C 正例 | `.cpp`、asm 专用件、零引用死件、`m\d+_` 前缀 |
-| `asm/` | `asm_*.c/h` 与 asm 专用头（asm 夹具**只**住这里） | 非 asm 的语言测试 |
+| `asm/` | `asm_*.c/h` 与 asm 专用头（asm 夹具**只**住这里；`asm_*` 前缀只管 **`asm/` 顶层散件**，带名字的子目录算工具级语料，如 `asm/parity/`） | 非 asm 的语言测试 |
 | `cpp/` | `.cpp` C++ 正例 | `.c` |
 | `errors/` | `eNNNN.c` + `eNNNN.stderr.snap`（含 `wNNNN` 警告码）；实测还存在变体形态：带限定后缀的 `eNNNN_<feature>.c`、汇编件 `e0102.s`、C++ 件 `w0501_cpp.cpp`，以及按用例名配对的无编号件 `bad.c` / `diagnostic_format.stderr.snap`（快照与源文件同名配对） | 正例功能测试 |
 | `opt/` | 优化 pass 样例 | 散落进 `c/` |
@@ -79,6 +79,7 @@
 |------|----------|
 | `corpus/` | 二进制样本，按 §3 规则 4 整目录豁免 |
 | `gcc_tools/` | libiberty 探测组合，由 `scripts/*.sh` 与 GCC 源树用例消费 |
+| `asm/parity/` | G4 语料：`scripts/check_asm_text_parity.sh` **整目录枚举**它（`CORPUS` 默认值），磁盘上逐个 `.c` 不出现在任何字面量里 —— 与 `gcc_tools/` 同一条理由。此前未登记，代价是 Tier 0（`make test`）长期挂着 30 条 `UNREFERENCED` + 30 条 `DIR-MISMATCH` 的假红（exit=1），把下一个真问题埋进噪声里；第十五轮登记并记录于此 |
 | `probe/` | 后端探针，归 backend 案，不由本体系索引 |
 | `errors/` | `eNNNN.c`/`wNNNN.c` + `*.stderr.snap` 的路径由 `tests/errors.rs` 的 `ErrorCase{name, fixture_ext}` **动态拼接**，逐个文件不出现在字面量中；动态名匹配（Pattern-D）已把它们标进 REFERENCED，白名单只是双保险，避免快照件与负向件被误报 |
 | `cpp_abi_{template,eh,rtti,virtual,overload,lifecycle}/` | GCC 差分 ABI 夹具族，由 `tests/cpp_abi_gcc_cross_check.rs` 按**目录名**动态发现（`cpp_abi_groups_are_all_covered`），等价于「整目录被 `check_group()` 引用」（见 §3）；豁免途径是 `is_whitelisted()` 的 `cpp_abi_*` 前缀匹配 |

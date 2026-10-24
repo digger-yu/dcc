@@ -12,7 +12,7 @@
 #   ② UNREFERENCED:           非白名单目录下 .c/.s/.cpp/.h 未被任何引用命中
 #   ③ FORBIDDEN-ARCHIVE-REF:  任何 .rs/.sh/.yml 引用 tests/fixtures/_archive/ 下文件
 #   ④ FORBIDDEN-NAME:         相对 git ls-tree -r HEAD 新增的 m<N>_ 前缀 fixture
-#   ⑤ DIR-MISMATCH:           目录-扩展名一致性（c/ cpp/ cpp_abi_*/ asm/）
+#   ⑤ DIR-MISMATCH:           目录-扩展名一致性（c/ cpp/ cpp_abi_*/ asm/ 顶层）
 #
 # 输出顺序固定为 ③ → ① → ④ → ⑤ → ②：注入件常同时命中多条规则，把 ② 放最后
 # 可保证 §8.3 反向自测的「首个命中标签」断言具有确定性。
@@ -47,6 +47,10 @@ trap 'rm -rf "$WORK"' EXIT
 # 白名单（整目录豁免 ②）。理由逐条注明；变更须同步 tests/fixtures/README.md。
 #   corpus     : 真实 .o/二进制样本 + 外部语料（§7.1 明示「整目录豁免」），非夹具源码
 #   gcc_tools  : libiberty 探测组合，由 scripts/ 探测脚本按目录枚举，不逐个引用
+#   asm/parity : G4 `-c` vs `-S --asm-fallback=gas` 的默认语料（与 gcc_tools 同一条理由：
+#                `check_asm_text_parity.sh` 整目录枚举它，不逐个引用）。不列进来的代价是
+#                Tier 0 常年挂着 30 条 UNREFERENCED + 30 条 DIR-MISMATCH 的**假红** ——
+#                而假红比假绿更贵：它让下一个真问题混进噪声里没人看。
 #   probe      : 后端能力探针（归 backend 案），由 backend 矩阵按目录发现，不主题化
 #   cpp_abi_*  : GCC 差分 ABI 夹具族，由 tests/cpp_abi_gcc_cross_check.rs 按 *目录名*
 #                动态发现（cpp_abi_groups_are_all_covered），磁盘上逐个 .cpp 不出现在
@@ -59,6 +63,7 @@ trap 'rm -rf "$WORK"' EXIT
 WHITELIST_DIRS=(
     tests/fixtures/corpus
     tests/fixtures/gcc_tools
+    tests/fixtures/asm/parity
     tests/fixtures/probe
     tests/fixtures/errors
 )
@@ -360,7 +365,14 @@ while IFS= read -r p; do
         c) [[ "$ext" == "cpp" ]] && bad=".cpp must not live in tests/fixtures/c/" ;;
         cpp) [[ "$ext" == "c" ]] && bad=".c must not live in tests/fixtures/cpp/" ;;
         cpp_abi_*) [[ "$ext" == "c" ]] && bad=".c must not live in tests/fixtures/cpp_abi_*/" ;;
-        asm) [[ "$base" != asm_* ]] && bad="only asm_* prefixed files allowed in tests/fixtures/asm/" ;;
+        asm)
+            # `asm_*` 前缀只约束**散在 asm/ 顶层**的夹具；带名字的子目录是工具级语料
+            # （`asm/parity/` 由 `check_asm_text_parity.sh` 整目录枚举），不是「asm 语言夹具」。
+            # 与 `c/va_arg_xfail/`、`cpp_abi_*/` 同一种形状：按目录名谈角色，不按文件名。
+            rest="${rel#asm/}"
+            if [[ "$rest" != */* && "$base" != asm_* ]]; then
+                bad="only asm_* prefixed files allowed directly in tests/fixtures/asm/"
+            fi ;;
     esac
     if [[ -n "$bad" ]]; then
         printf 'DIR-MISMATCH: %s (%s)\n' "$p" "$bad"
