@@ -14,7 +14,6 @@
 set -uo pipefail
 
 KDIR="${KDIR:-/root/linux-7.1-dcc}"
-WRAPPER="${WRAPPER:-/root/dcc/scripts/dcc-kernel-cc.sh}"
 DCC_BIN="${DCC_BIN:-/root/dcc/target/release/dcc}"
 
 list="${1:?用法: kernel_replay_targets.sh <目标清单文件> [并发数]}"
@@ -24,7 +23,7 @@ tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
 replay_one() {
-    local tgt="$1" kdir="$2" wrapper="$3" dccbin="$4" out="$5"
+    local tgt="$1" kdir="$2" dccbin="$3" out="$4"
     local d b cmdfile line
     d="$kdir/$(dirname "$tgt")"
     b="$(basename "$tgt")"
@@ -34,11 +33,17 @@ replay_one() {
         return
     fi
     line="$(grep -m1 '^savedcmd_.* := ' "$cmdfile" | sed 's/^savedcmd_.* := //')"
+    # cmd 行末尾可能带 `; objtool ...`（Kbuild 把 record 命令与 objtool 拼在一行），
+    # 重放只重放编译那一段，否则会在不相关的宿主工具上报 127。
+    line="${line%%;*}"
     (
         cd "$kdir" || exit 3
         # shellcheck disable=SC2086  # cmd 文件里已用引号分词，需交给 shell 解析
         eval "set -- $line"
-        DCC_BIN="$dccbin" DCC_KERNEL_ALLOW_GCC_FALLBACK=0 "$wrapper" "$@"
+        # 行首就是编译器（包装器）本身，它已在 `$@` 里 ⇒ 直接执行 `$@`，不能再把
+        # 包装器路径当前第一个参数传一遗：那样包装器会把「自己」当成源文件交给
+        # dcc，报一个与内核无关的 unterminated block comment。
+        env DCC_BIN="$dccbin" DCC_KERNEL_ALLOW_GCC_FALLBACK=0 "$@"
     ) >"$out" 2>&1
     local rc=$?
     if [ "$rc" -eq 0 ]; then
@@ -52,23 +57,11 @@ replay_one() {
 mapfile -t targets < <(grep -vE '^\s*(#|$)' "$list" | sed 's/\s*$//' | sort -u)
 echo "== 回放 ${#targets[@]} 个目标（并发 $jobs，树=$KDIR）=="
 
-for tgt in "${targets[@]}"; do
-    printf '%s\n' "$tgt" >"$tmpdir/$(echo "$tgt" | tr '/' '_').list"
-done
-
-# 并发跑：每个目标一个日志文件 + 一个 tag 文件
-find "$tmpdir" -name '*.list' -print0 |
-    xargs -0 -P "$jobs" -I{} bash -c '
-        tgt=$(cat "{}")
-        replay_one() { :; }
-      ' 2>/dev/null || true
-
-# 上面的 xargs 无法带函数，改为显式循环 + 作业控制（保持并发上限）
-rm -f "$tmpdir"/*.tag
+# 并发跑：每个目标一个日志文件与一个 `.tag` 判据行（OK/FAIL）
 running=0
 for tgt in "${targets[@]}"; do
     key="$(echo "$tgt" | tr '/' '_')"
-    replay_one "$tgt" "$KDIR" "$WRAPPER" "$DCC_BIN" "$tmpdir/$key.log" &
+    replay_one "$tgt" "$KDIR" "$DCC_BIN" "$tmpdir/$key.log" &
     running=$((running + 1))
     if [ "$running" -ge "$jobs" ]; then
         wait -n
@@ -82,12 +75,13 @@ fail=0
 nocmd=0
 for tgt in "${targets[@]}"; do
     key="$(echo "$tgt" | tr '/' '_')"
-    if [ ! -f "$tmpdir/$key.tag" ]; then
+    # 写方落的是 `<key>.log.tag`（replay_one 在日志路径后加 .tag），这里必须同口径。
+    if [ ! -f "$tmpdir/$key.log.tag" ]; then
         nocmd=$((nocmd + 1))
         echo "NOCMD $tgt"
         continue
     fi
-    tag="$(cat "$tmpdir/$key.tag")"
+    tag="$(cat "$tmpdir/$key.log.tag")"
     if [ "${tag%% *}" = "OK" ]; then
         ok=$((ok + 1))
     else

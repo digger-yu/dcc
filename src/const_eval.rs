@@ -87,6 +87,15 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
             name: name.name.clone(),
             offset: 0,
         }),
+        // 函数设计符退化为其符号地址（C11 6.3.2.1p4），与上面「数组名退化为首元素
+        // 地址」同一口径。内核 `arch/x86/include/asm/irq_stack.h` 的
+        // `[__func] "i" (func)`（`call_on_stack` 递进来的函数名）依赖这一步：拿不到
+        // 常量时，只立即数约束只能落回寄存器，`call %c[__func]` 就发不出调用目标。
+        Expr::Ident {
+            name,
+            ty: Type::Func(..),
+            ..
+        } => Ok(ConstValue::Addr { name: name.name.clone(), offset: 0 }),
         Expr::String { data, .. } => {
             // 字符串字面量: 编译器生成的 label 与 codegen 中的 rodata 标签对齐
             // 调用方需要确保同源字符串复用同一 label
@@ -1637,6 +1646,13 @@ pub fn eval_offsetof(ty: &Type, member: &str) -> usize {
 }
 
 pub fn is_constant(expr: &Expr) -> bool {
+    // 函数设计符（`func` 不带 `&`）在 C 里就是一个链接期地址常量：内核
+    // `arch/x86/include/asm/irq_stack.h` 的 `call_on_stack(func, ...)` 传的是
+    // `[__func] "i" (func)`，GCC 在这里折成符号名后发 `call handle_stack_overflow`。
+    // 只看 `eval`（返回 i128）会把它当成非常量，于是只立即数约束硬失败。
+    if matches!(expr, Expr::Ident { ty: crate::ast::Type::Func(..), .. }) {
+        return true;
+    }
     eval(expr).is_ok()
 }
 
