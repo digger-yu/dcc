@@ -221,25 +221,30 @@ impl Codegen {
             .collect();
         // 合并独立成行的前缀 (lock/rep/repz/repnz/repe) 与下一条指令
         let raw_lines = Self::merge_standalone_prefixes(raw_lines);
+        // 顺序：先解析操作数占位符，再展开 `.macro/.irp/.ifc` 这类高级指令。
+        //
+        // 为什么不能反过来：GAS 拿到的是「已代入操作数」的文本。内核的
+        // `extable_type_reg reg= "%k0"` 靠 `%k0` 先被代成 `%eax`，宏体里的
+        // `.ifc \reg, %%\rs` 才能和 `rax` 比上；先展开时比的是字面量 `%k0`，永不命中
+        // ⇒ `__ex_table` 的第三个字（type）不发，条目从 12 字节缩成 8 字节。
+        let resolved_lines: Vec<String> = raw_lines
+            .iter()
+            .map(|line| {
+                self.resolve_asm_template(
+                    line.trim(),
+                    outputs,
+                    output_names,
+                    inputs,
+                    input_names,
+                    &op_map,
+                )
+            })
+            .filter(|l| !l.trim().is_empty())
+            .collect();
         let mut expander = AsmDirectiveExpander::new();
-        let expanded_lines = expander.expand(&raw_lines);
-        // 再解析操作数占位符
-        let resolved_lines = AsmLocalLabels::expand_label_insn_lines(
-            expanded_lines
-                .iter()
-                .map(|line| {
-                    self.resolve_asm_template(
-                        line.trim(),
-                        outputs,
-                        output_names,
-                        inputs,
-                        input_names,
-                        &op_map,
-                    )
-                })
-                .filter(|l| !l.trim().is_empty())
-                .collect::<Vec<_>>(),
-        );
+        let expanded_lines = expander.expand(&resolved_lines);
+        // 最后拆数字局部标签（`N:` 与 body 同行时分成两条）
+        let resolved_lines = AsmLocalLabels::expand_label_insn_lines(expanded_lines);
         // volatile asm: 完整屏障，防止优化器重排
         // 若代码尾部已是 mfence (前一 volatile asm 的后屏障), 跳过冗余前屏障
         if volatile {
@@ -327,25 +332,30 @@ impl Codegen {
             .collect();
         // 合并独立成行的前缀 (lock/rep/repz/repnz/repe) 与下一条指令
         let raw_lines = Self::merge_standalone_prefixes(raw_lines);
+        // 顺序：先解析操作数占位符，再展开 `.macro/.irp/.ifc` 这类高级指令。
+        //
+        // 为什么不能反过来：GAS 拿到的是「已代入操作数」的文本。内核的
+        // `extable_type_reg reg= "%k0"` 靠 `%k0` 先被代成 `%eax`，宏体里的
+        // `.ifc \reg, %%\rs` 才能和 `rax` 比上；先展开时比的是字面量 `%k0`，永不命中
+        // ⇒ `__ex_table` 的第三个字（type）不发，条目从 12 字节缩成 8 字节。
+        let resolved_lines: Vec<String> = raw_lines
+            .iter()
+            .map(|line| {
+                self.resolve_asm_template(
+                    line.trim(),
+                    outputs,
+                    output_names,
+                    inputs,
+                    input_names,
+                    &op_map,
+                )
+            })
+            .filter(|l| !l.trim().is_empty())
+            .collect();
         let mut expander = AsmDirectiveExpander::new();
-        let expanded_lines = expander.expand(&raw_lines);
-        // 再解析操作数占位符
-        let resolved_lines = AsmLocalLabels::expand_label_insn_lines(
-            expanded_lines
-                .iter()
-                .map(|line| {
-                    self.resolve_asm_template(
-                        line.trim(),
-                        outputs,
-                        output_names,
-                        inputs,
-                        input_names,
-                        &op_map,
-                    )
-                })
-                .filter(|l| !l.trim().is_empty())
-                .collect::<Vec<_>>(),
-        );
+        let expanded_lines = expander.expand(&resolved_lines);
+        // 最后拆数字局部标签（`N:` 与 body 同行时分成两条）
+        let resolved_lines = AsmLocalLabels::expand_label_insn_lines(expanded_lines);
         // 记录 asm goto 块起始 PC (用于 DWARF 行号表)
         // 这里**不**插守护：跳出去的那条路不经过恢复，那个 `pop` 可能永远不执行（%rsp 就此
         // 永久下推）。溅出槽已在函数入口被移出池，所以名单里剩下的只能是用户自己绑定的家，

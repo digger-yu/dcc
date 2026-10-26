@@ -74,6 +74,22 @@ impl Codegen {
         out
     }
 
+    /// 把一个 `.text` 发射位置翻译成它最终所在的 ELF 节与节内偏移。
+    ///
+    /// 可执行 pushsection（`.fixup` / `.altinstr_replacement`）的代码会整段搬到自己的
+    /// 节里，所以落在已搬走区间内的标号必须指向那个节，不能继续指 `.text`。
+    /// 区间边界取左闭右开：`pos == start + size` 是「区间后的下一个 `.text` 字节」，
+    /// 归 `.text`。区间**内部**的标号应当已经进了 `pushsection_label_offsets`（在
+    /// `close_exec_pushsection` / `emit_pushsection_data` 登记），调用方会先查那张表，
+    /// 不会走到这里。
+    pub(crate) fn pushsection_sym_loc(&self, pos: u64) -> (u16, u64) {
+        self.pushsection_code_ranges
+            .iter()
+            .find(|(start, size, _, _)| pos >= *start && pos < *start + *size)
+            .map(|(start, _size, sec_idx, sec_off)| ((*sec_idx + 7) as u16, *sec_off + (pos - start)))
+            .unwrap_or((1u16, pos))
+    }
+
     /// Phase 2: 收集所有符号 (正确顺序: STN_UNDEF → LOCAL → GLOBAL)
     /// 先收集到临时 vec, 然后排序构建最终 symtab
     pub(crate) fn collect_rel_symbols(
@@ -137,13 +153,23 @@ impl Codegen {
                         },
                     )
                 };
+                // 函数类型的无初值声明（`typedef int ft(int); ft f1;`）是**声明**而不是
+                // 对象：gcc 发 NOTYPE / size 0 的未定义引用。按对象发会让链接器把
+                // 它当数据符号处理（旧实现还给它分过 .bss，见 parser 同名修复）。
+                let is_func_decl = matches!(v.ty, crate::ast::Type::Func(..));
                 let sym = ElfSym {
                     name: self.resolve_asm_label(&v.name.name).to_string(),
                     section,
-                    value: g.offset,
-                    size: g.size as u64,
+                    value: if is_func_decl { 0 } else { g.offset },
+                    size: if is_func_decl { 0 } else { g.size as u64 },
                     bind,
-                    ty: if g.is_tls { STT_TLS } else { STT_OBJECT },
+                    ty: if is_func_decl {
+                        STT_NOTYPE
+                    } else if g.is_tls {
+                        STT_TLS
+                    } else {
+                        STT_OBJECT
+                    },
                     visibility: Self::parse_visibility(&v.visibility),
                 };
                 if v.is_static {
@@ -346,14 +372,7 @@ impl Codegen {
                     .get(&name)
                     .copied()
                     .unwrap_or_else(|| self.compute_func_size_fallback(&name, off));
-                let (section, value) = self
-                    .pushsection_code_ranges
-                    .iter()
-                    .find(|(start, range_size, _, _)| off >= *start && off < *start + *range_size)
-                    .map(|(start, _range_size, sec_idx, sec_off)| {
-                        ((*sec_idx + 7) as u16, *sec_off + (off - *start))
-                    })
-                    .unwrap_or((1u16, off));
+                let (section, value) = self.pushsection_sym_loc(off);
                 let sym = ElfSym {
                     name: name.clone(),
                     section,
@@ -505,7 +524,11 @@ impl Codegen {
                             section: target_sym.section,
                             value: target_sym.value,
                             size: target_sym.size,
-                            bind: STB_GLOBAL,
+                            // 别名必须继承声明自己的绑定：内核大量写
+                            // `ssize_t __weak cpu_show_gds(...) __attribute__((alias(...)))`
+                            // 当「可被架构覆盖的弱桩」。这里写死 STB_GLOBAL 会让
+                            // `ld -r vmlinux.o` 把弱桩与强定义报成 multiple definition。
+                            bind: if f.is_weak { STB_WEAK } else { STB_GLOBAL },
                             ty: STT_FUNC,
                             visibility: STV_DEFAULT,
                         };
@@ -677,7 +700,9 @@ impl Codegen {
                             section: target_sym.section,
                             value: target_sym.value,
                             size: target_sym.size,
-                            bind: STB_GLOBAL,
+                            // 同上：变量别名也得分到声明的弱绑定（`__weak`
+                            // `struct foo bar __attribute__((alias("baz")))`）。
+                            bind: if v.is_weak { STB_WEAK } else { STB_GLOBAL },
                             ty: STT_OBJECT,
                             visibility: STV_DEFAULT,
                         };
@@ -710,14 +735,7 @@ impl Codegen {
         for rel in &self.pending_code_rels {
             if let Some(&pos) = self.labels.get(&rel.symbol) {
                 if !known_syms.contains(&rel.symbol) {
-                    let (section, value) = self
-                        .pushsection_code_ranges
-                        .iter()
-                        .find(|(start, size, _, _)| pos >= *start && pos < *start + *size)
-                        .map(|(start, _size, sec_idx, sec_off)| {
-                            ((*sec_idx + 7) as u16, *sec_off + (pos - *start))
-                        })
-                        .unwrap_or((1u16, pos));
+                    let (section, value) = self.pushsection_sym_loc(pos);
                     local_syms.push(ElfSym {
                         name: rel.symbol.clone(),
                         section,
@@ -736,14 +754,7 @@ impl Codegen {
         for (_, var_name, _, _, _) in &self.pending_data64_rels {
             if let Some(&pos) = self.labels.get(var_name) {
                 if !known_syms.contains(var_name) {
-                    let (section, value) = self
-                        .pushsection_code_ranges
-                        .iter()
-                        .find(|(start, size, _, _)| pos >= *start && pos < *start + *size)
-                        .map(|(start, _size, sec_idx, sec_off)| {
-                            ((*sec_idx + 7) as u16, *sec_off + (pos - *start))
-                        })
-                        .unwrap_or((1u16, pos));
+                    let (section, value) = self.pushsection_sym_loc(pos);
                     local_syms.push(ElfSym {
                         name: var_name.clone(),
                         section,
@@ -882,9 +893,10 @@ impl Codegen {
         // .pushsection 非文本节: 为数字标签引用创建本地符号
         for rel in &self.pending_custom_sec_rels {
             if !self.sym_index.contains_key(&rel.symbol) {
-                // 优先从 pushsection_label_offsets 查 (sec_idx, sec_off) —— 这张表
-                // 在 emit_pushsection_data 的 label 分支显式登记非执行 pushsection 内
-                // 的 label 位置 (那些 label 位置不在 self.code, 不能走 pushsection_code_ranges).
+                // 优先从 pushsection_label_offsets 查 (sec_idx, sec_off) —— 这张表在标号
+                // 被登记那一刻就记下「它最终所在节的偏移」：非执行 pushsection 的内容从来不
+                // 进 self.code，可执行 pushsection 的区间首尾相接（内层 `775:` 与外层 `774:`
+                // 是同一个发射位置），拿 .text 位置反查 `pushsection_code_ranges` 必然二义。
                 if let Some(&(sec_idx, sec_off)) = self.pushsection_label_offsets.get(&rel.symbol) {
                     local_syms.push(ElfSym {
                         name: rel.symbol.clone(),
@@ -900,14 +912,7 @@ impl Codegen {
                 if let Some(&pos) = self.labels.get(&rel.symbol) {
                     // 若标签位于可执行 pushsection (.fixup/.altinstr_replacement)
                     // 代码区间内, 符号需指向自定义节而非 .text (代码已搬迁).
-                    let (section, value) = self
-                        .pushsection_code_ranges
-                        .iter()
-                        .find(|(start, size, _, _)| pos >= *start && pos < *start + *size)
-                        .map(|(start, _size, sec_idx, sec_off)| {
-                            ((*sec_idx + 7) as u16, *sec_off + (pos - *start))
-                        })
-                        .unwrap_or((1u16, pos));
+                    let (section, value) = self.pushsection_sym_loc(pos);
                     local_syms.push(ElfSym {
                         name: rel.symbol.clone(),
                         section,

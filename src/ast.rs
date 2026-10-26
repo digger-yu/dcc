@@ -3,6 +3,7 @@
 // suckless 准则: 节点种类尽量少;一个节点表示"一个语义概念"。
 
 use crate::diagnostics::Span;
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -1324,7 +1325,7 @@ impl std::fmt::Display for QualType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Type {
     Void,
     Bool,
@@ -1366,6 +1367,132 @@ pub enum Type {
     Named(String),
     Atomic(Box<QualType>), // _Atomic(T): 原子类型, 大小/对齐同 T
 }
+
+/// 匿名聚合（无 tag 名）只能按结构比；展开层数上限。
+/// 具名聚合的环由 `assuming` 栈切断（共归纳相等），此上限只挡住无名字的嵌套。
+const ANON_RECORD_CMP_DEPTH: u32 = 16;
+
+/// 一次 `Type` 相等比较中「已经假定相等」的具名聚合对。
+///
+/// 具名 struct/union 的字段可以回到自身（内核里很常见：`struct irq_desc` 的
+/// `handle` 字段是 `irq_flow_handler_t`，而它又是一个接 `struct irq_desc *` 的函数指针），
+/// 于是类型图是一张带环的图。按结构无限递归会爆栈，按名字提前返回又会把
+/// 「同名的不同作域声明 / 同一个类模板的不同实例」误判为同一类型。所以：
+/// 名字相同且该对已在栈上 ⇒ 当场假定相等（共归纳），否则压栈后继续比字段。
+type AssumingRecords = Vec<(u8, String, String)>;
+
+/// 类型相等：C 的类型同一律 + 带环类型图的共归纳比较。
+///
+/// 为什么不能继续用派生 `PartialEq`：派生版对 `Struct(String, Arc<Vec<Field>>, ..)`
+/// 按字段**深度结构**比较，而内核的常见写法是「先前向声明、后补全」。同一个 tag
+/// 在补全前被复制走的那份字段表是空的，补全后那份是满的 ⇒ 两份额为不相等，于是
+/// `extern typeof(sym) sym;`（`EXPORT_SYMBOL_GPL` 的展开形态）误报 E0007
+/// “conflicting types for redeclaration”，整个 `kernel/irq/chip.c` 编译失败。
+/// 同时，补全后的字段又能指回自身，深度比较还会无限递归。
+///
+/// 规则：
+/// 1. 名字不同的具名聚合一定不同；
+/// 2. 名字相同且任一侧字段为空 ⇒ 同一类型（前向声明的占位副本在补全后就是它）；
+/// 3. 名字相同且两侧都完整 ⇒ 比字段，但同一对已在本轮比较的栈上时直接假定相等（断环）；
+/// 4. 匿名聚合按字段结构比，受 `ANON_RECORD_CMP_DEPTH` 约束（超出则视为不等，保守方向）。
+pub fn type_equal(a: &Type, b: &Type) -> bool {
+    let mut assuming = AssumingRecords::new();
+    type_eq(a, b, &mut assuming, 0)
+}
+
+fn record_kind(t: &Type) -> Option<(u8, &str, &Arc<Vec<Field>>)> {
+    match t {
+        Type::Struct(n, f, _, _) => Some((0, n, f)),
+        Type::Union(n, f, _, _) => Some((1, n, f)),
+        _ => None,
+    }
+}
+
+fn type_eq(a: &Type, b: &Type, assuming: &mut AssumingRecords, depth: u32) -> bool {
+    if let (Some((ka, na, fa)), Some((kb, nb, fb))) = (record_kind(a), record_kind(b)) {
+        if ka != kb || na != nb {
+            return false;
+        }
+        if !na.is_empty() && (fa.is_empty() || fb.is_empty()) {
+            return true;
+        }
+        if Arc::ptr_eq(fa, fb) {
+            return true;
+        }
+        if na.is_empty() && depth >= ANON_RECORD_CMP_DEPTH {
+            return false;
+        }
+        let key = (ka, na.to_string(), nb.to_string());
+        if assuming.contains(&key) {
+            return true;
+        }
+        assuming.push(key.clone());
+        let eq = fields_eq(fa, fb, assuming, depth + 1);
+        assuming.pop();
+        return eq;
+    }
+    if let (Type::Enum(n1, v1, u1), Type::Enum(n2, v2, u2)) = (a, b) {
+        if n1 != n2 {
+            return false;
+        }
+        if !n1.is_empty() && (v1.is_empty() || v2.is_empty()) {
+            return true;
+        }
+        return v1 == v2 && match (u1, u2) {
+            (Some(x), Some(y)) => qual_eq(x, y, assuming, depth),
+            (None, None) => true,
+            _ => false,
+        };
+    }
+    match (a, b) {
+        (Type::Ptr(x), Type::Ptr(y))
+        | (Type::Complex(x), Type::Complex(y))
+        | (Type::Imaginary(x), Type::Imaginary(y))
+        | (Type::Atomic(x), Type::Atomic(y)) => qual_eq(x, y, assuming, depth),
+        (Type::Array(x, s1), Type::Array(y, s2)) => s1 == s2 && qual_eq(x, y, assuming, depth),
+        (Type::Vector(x, n1), Type::Vector(y, n2)) => {
+            n1 == n2 && qual_eq(x, y, assuming, depth)
+        },
+        (Type::Func(r1, p1), Type::Func(r2, p2)) => {
+            p1.len() == p2.len()
+                && qual_eq(r1, r2, assuming, depth)
+                && p1
+                    .iter()
+                    .zip(p2.iter())
+                    .all(|(x, y)| qual_eq(x, y, assuming, depth))
+        },
+        (Type::Named(n1), Type::Named(n2)) => n1 == n2,
+        // 其余都是无载荷的叶子标量：变体不同即不同类型。
+        _ => core::mem::discriminant(a) == core::mem::discriminant(b),
+    }
+}
+
+fn qual_eq(a: &QualType, b: &QualType, assuming: &mut AssumingRecords, depth: u32) -> bool {
+    a.quals == b.quals && a.addr_space == b.addr_space && type_eq(&a.base, &b.base, assuming, depth)
+}
+
+fn fields_eq(a: &[Field], b: &[Field], assuming: &mut AssumingRecords, depth: u32) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b.iter()).all(|(x, y)| {
+            x.name == y.name
+                && x.offset == y.offset
+                && x.bit_width == y.bit_width
+                && x.bit_offset == y.bit_offset
+                && x.quals == y.quals
+                && x.ptr_quals == y.ptr_quals
+                && x.field_align == y.field_align
+                && x.field_packed == y.field_packed
+                && type_eq(&x.ty, &y.ty, assuming, depth)
+        })
+}
+
+impl PartialEq for Type {
+    fn eq(&self, other: &Self) -> bool {
+        type_equal(self, other)
+    }
+}
+
+impl Eq for Type {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Field {
@@ -1426,6 +1553,13 @@ pub struct EnumDef {
     pub span: Span,
 }
 
+/// `QualType` 的身份串：限定符与地址空间必须入串，否则 `const int *` 与 `int *`
+/// 会撞名 —— 值编号按串复用副本，撞名就是错值。
+fn qual_identity(q: &QualType, out: &mut String) -> Option<()> {
+    let _ = write!(out, "q{:02x}a{:?}:", q.quals.0, q.addr_space);
+    q.base.identity_tag_into(out)
+}
+
 impl Type {
     pub fn aggregate_align_from_offsets(fields: &[Field]) -> usize {
         // Packed union 哨兵: 零宽度位域字段名 "\0__packed__" 表示该
@@ -1469,6 +1603,123 @@ impl Type {
         match pack {
             Some(n) if n < max_field => n,
             _ => max_field,
+        }
+    }
+
+    /// 身份串的长度上限。匿名聚合只能按字段展开，宽度×深度会成倍增长，这里给**串本身**
+    /// 定一个上限：超限就放弃（返回 `None`），绝不返回一个可能撞名的截断串。
+    /// 上限按字节计，因此无论类型图多大，单次调用的成本都被这一条挡住。
+    const TYPE_TAG_MAX_BYTES: usize = 4096;
+
+    /// 类型「身份串」：给值编号、CFI 哈希这类「同类型同串、异类型异串」的场合。
+    ///
+    /// 为什么不用派生 `Debug`：`Struct`/`Union` 里带着 `Arc<Vec<Field>>`，派生
+    /// `Debug` 会把字段树整棵展开，而内核里的 `struct page` 一类类型是一张**共享
+    /// DAG**（匿名 union 套匿名 struct，成员又指回同一个 tag），把 DAG 当树展开每层
+    /// 翻倍 —— 实测单个类型串要 3.4 GB，`format!` 当场分配失败，整个 TU 表现为被 OOM
+    /// 杀掉。`Display`（见本文件 `impl std::fmt::Display for Type`）对匿名聚合又只输出
+    /// `struct `（无名），两个不同的匿名类型会撞名 —— 所以两者都不能直接用。
+    ///
+    /// 本函数按 C 自己的类型同一律走：具名聚合以 **tag 名 + 尺寸 + 对齐 + 字段数**
+    /// 为身份（一次命中即返回，不展开字段，成本与聚合大小无关）；匿名聚合才按字段
+    /// 展开，长度超过 `TYPE_TAG_MAX_BYTES` ⇒ `None`，由调用方放弃那一次编号。
+    pub fn identity_tag(&self) -> Option<String> {
+        let mut out = String::new();
+        self.identity_tag_into(&mut out)?;
+        Some(out)
+    }
+
+    fn identity_tag_into(&self, out: &mut String) -> Option<()> {
+        if out.len() > Self::TYPE_TAG_MAX_BYTES {
+            return None;
+        }
+        match self {
+            Type::Struct(name, fields, align, rev_sso)
+            | Type::Union(name, fields, align, rev_sso) => {
+                let is_struct = matches!(self, Type::Struct(..));
+                if !name.is_empty() {
+                    // 名义同一律：具名聚合以名字 + 布局摘要为身份，不展开字段。
+                    out.push_str(if is_struct { "struct " } else { "union " });
+                    out.push_str(name);
+                    let _ = write!(
+                        out,
+                        "#sz{}#al{}#nf{}#r{}",
+                        self.size(),
+                        align,
+                        fields.len(),
+                        rev_sso
+                    );
+                    return Some(());
+                }
+                // 匿名聚合：名字为空，只能按字段（名/偏移/位域/限定符/类型）展开。
+                out.push_str(if is_struct { "anon struct{" } else { "anon union{" });
+                for f in fields.iter() {
+                    let _ = write!(out, "{}@{}", f.name, f.offset);
+                    if let Some(w) = f.bit_width {
+                        let _ = write!(out, ":b{}/{}", f.bit_offset, w);
+                    }
+                    let _ = write!(out, "q{:02x}fa{}:", f.quals.0, f.field_align.unwrap_or(0));
+                    f.ty.identity_tag_into(out)?;
+                    out.push(';');
+                }
+                out.push('}');
+                Some(())
+            },
+            Type::Enum(name, _, under) => {
+                let _ = write!(out, "enum {}", name);
+                if let Some(t) = under {
+                    out.push('<');
+                    qual_identity(t, out)?;
+                    out.push('>');
+                }
+                Some(())
+            },
+            Type::Complex(q) | Type::Imaginary(q) | Type::Ptr(q) | Type::Atomic(q) => {
+                out.push_str(match self {
+                    Type::Complex(_) => "complex ",
+                    Type::Imaginary(_) => "imaginary ",
+                    Type::Ptr(_) => "ptr ",
+                    _ => "atomic ",
+                });
+                qual_identity(q, out)
+            },
+            Type::Array(elem, sz) => {
+                match sz {
+                    ArraySize::Const(n) => {
+                        let _ = write!(out, "array {}<", n);
+                    },
+                    ArraySize::Var(_) => out.push_str("vla <"),
+                }
+                qual_identity(elem, out)?;
+                out.push('>');
+                Some(())
+            },
+            Type::Vector(elem, n) => {
+                let _ = write!(out, "vector {}<", n);
+                qual_identity(elem, out)?;
+                out.push('>');
+                Some(())
+            },
+            Type::Func(ret, params) => {
+                out.push_str("func ");
+                qual_identity(ret, out)?;
+                out.push('(');
+                for p in params.iter() {
+                    qual_identity(p, out)?;
+                    out.push(',');
+                }
+                out.push(')');
+                Some(())
+            },
+            Type::Named(name) => {
+                let _ = write!(out, "named {}", name);
+                Some(())
+            },
+            // 叶子标量：变体名就是身份，`Debug` 在此是 O(1)。
+            scalar => {
+                let _ = write!(out, "{:?}", scalar);
+                Some(())
+            },
         }
     }
 

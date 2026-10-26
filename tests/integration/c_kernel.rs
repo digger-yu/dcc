@@ -1331,3 +1331,254 @@ fn kernel_code_model_data_symbols_bypass_got() {
         "external function address should appear in relocations: {relocs}"
     );
 }
+
+/// 内核 `EXPORT_SYMBOL_GPL(f)` 展开出的 `extern typeof(f) f;` 不得被判成类型冲突。
+///
+/// 缺陷形状（`kernel/irq/chip.c` 整文件失败）：`struct irq_desc` 先前向声明、后补全，
+/// 补全前被复制走的那份类型字段表是空的，`typeof(f)` 那一份是满的；派生的结构相等把
+/// 两者判成不同类型 ⇒ E0007「conflicting types for redeclaration」。而补全后的字段又能
+/// 指回自身（`irq_flow_handler_t` 是接 `struct irq_desc *` 的函数指针），深度比较还会
+/// 沿环无限递归。具名聚合改按 C 的名义同一律比较，带环类型图按共归纳断环。
+#[test]
+#[cfg(unix)]
+fn export_symbol_typeof_redeclaration_matches_cyclic_struct_function() {
+    let source = "\
+struct box;                                 /* 前向声明：字段表为空 */
+typedef void (*cb_t)(struct box *b);        /* 参数指回 struct box ⇒ 类型图带环 */
+struct box { int x; cb_t f; };              /* 补全 */
+
+void handler(unsigned int i, cb_t c) { (void)c; }
+extern typeof(handler) handler;             /* EXPORT_SYMBOL_GPL 的展开形态 */
+";
+    let bytes = dcc_obj_bytes("export-typeof", source, &["-O2"]);
+    assert!(
+        bytes.len() > 64,
+        "typeof 重声明的 TU 应产出目标文件，实际 {} 字节",
+        bytes.len()
+    );
+}
+
+/// `__bug_table` pushsection 区里的数字标签必须在函数级并行合并下保持命名空间唯一。
+///
+/// 缺陷形状（`init/main.c`、`arch/x86/entry/vdso/vma.c` 等整 TU 失败）：内核 WARN/BUG
+/// 展开的 asm 文本里，`__bug_table` 区中既有「数字标签 + 同行 body」
+/// （`912: .pushsection .discard.annotate_data …`），又有纯数字标签行（`2:`）。发射时
+/// 除唯一内部名（`.Lasm_local_<scope>_912_<n>`）外，还把**原文数字名**也登记进标号表，
+/// 于是第二个函数带着同名 `912`/`2` 合并时撞车 ⇒ E1101 内部不变量错误。
+#[test]
+#[cfg(unix)]
+fn bug_table_pushsection_numeric_labels_survive_parallel_merge() {
+    let source = r#"
+extern void bar(void);
+
+#define BUG_BLOCK                                                              \
+	"1:\n"                                                                   \
+	".pushsection __bug_table,\"aw\"\n\t"                                    \
+	"912: .pushsection .discard.annotate_data, \"M\", @progbits, 8; "        \
+	".long 912b - ., 1; .popsection" "\n\t"                                  \
+	"2:\n\t"                                                                 \
+	"\t.long 1b - .\n"                                                       \
+	".popsection\n"
+
+static inline void bug_a(void) { asm volatile(BUG_BLOCK ::: "memory"); }
+static inline void bug_b(void) { asm volatile(BUG_BLOCK ::: "memory"); }
+
+void f1(void) { bug_a(); bar(); }
+void f2(void) { bug_b(); bar(); }
+void f3(void) { bug_a(); bug_b(); bar(); }
+void f4(void) { bug_b(); bug_a(); bar(); }
+"#;
+    // -O2 且多函数 ⇒ 走 `emit_functions_parallel`；撞名正是在合并阶段暴露的。
+    let bytes = dcc_obj_bytes("bug-annot-merge", source, &["-O2"]);
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        text.contains("__bug_table"),
+        "并行合并后 __bug_table 区应仍然存在"
+    );
+}
+
+/// `-fstack-protector-strong` 的金丝雀失败路径（`call __stack_chk_fail`）不得被
+/// 「caller-saved 家保存窗口」守卫（E1136）拦下。
+///
+/// 为什么这条 call 本来就不需要窗口，两条理由缺一不可：被调方 noreturn ⇒ 它之后本路径
+/// 再无「回头读家里的值」的一面；成功路径是 `je` **跳过**这条 call（落在 call 之后），
+/// 寄存器内容在成功路径上从未被它触碰。反过来套窗口是有害的：`je` 的位移按 call 恰
+/// 5 字节硬编码，窗口的存/取会多发指令，把跳过目标算歪。
+///
+/// 缺陷形状：内核开 `-fstack-protector-strong` 后 `lib/list_sort.c` 整 TU 失败
+/// （`error[E1136]: call 到 '__stack_chk_fail' 不经过 caller-saved 家的保存窗口`）。
+/// 夹具把「局部数组（触发金丝雀）+ 一串跨 call 存活并被回读的值（住进延伸池号）」压到
+/// 同一条路径上；把 `call_label_noreturn` 换回 `call_label` 后本用例当场变红（实测）。
+#[test]
+#[cfg(unix)]
+fn stack_protector_canary_fail_call_needs_no_home_window() {
+    let source = "\
+#include <stdio.h>
+
+static int sink_calls;
+
+static int sink(int v)
+{
+	sink_calls += v & 3;
+	return sink_calls;
+}
+
+/* 多个跨 call 存活、call 之后仍要回读的值 —— 它们会被分到延伸池的 caller-saved 号里。 */
+static int strong_fn(int a)
+{
+	char buf[24];
+	int v0 = a, v1 = a + 1, v2 = a + 2, v3 = a + 3, v4 = a + 4, v5 = a + 5, v6 = a + 6;
+	int i;
+
+	for (i = 0; i < 24; i++)
+		buf[i] = (char)(a + i);
+	int s = buf[0];
+	s += v0 * (buf[0] + 0); sink(s);
+	s += v1 * (buf[1] + 1); sink(s);
+	s += v2 * (buf[2] + 2); sink(s);
+	s += v3 * (buf[3] + 3); sink(s);
+	s += v4 * (buf[4] + 4); sink(s);
+	s += v5 * (buf[5] + 5); sink(s);
+	s += v6 * (buf[6] + 6); sink(s);
+	return s + buf[1] + sink_calls;
+}
+
+int main(void)
+{
+	/* 两次调用都要改 `sink_calls`：必须按「求值顺序已定」的语句排，不能写进同一个
+	 * printf 的参数表（实参求值顺序由实现决定，gcc 与 dcc 本来就可以不同）。 */
+	int a = strong_fn(3);
+	int b = strong_fn(-5);
+	printf(\"%d %d\\n\", a, b);
+	return 0;
+}
+";
+    // 判据一：编得过去（E1136 是硬错误，rc≠0 时 dcc_obj_bytes 当场变红）。
+    let bytes = dcc_obj_bytes(
+        "canary-noreturn-obj",
+        source,
+        &["-O2", "-fstack-protector-strong"],
+    );
+    // 判据二：这个夹具**确实**走到了金丝雀路径，否则用例只是空跑。
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        text.contains("__stack_chk_fail"),
+        "夹具没产生金丝雀检查（产物里没有 __stack_chk_fail 引用），用例就成了空跑"
+    );
+    // 判据三：行为与 gcc 一致（成功路径上的家确实没被这次调用毁掉）。
+    for opt in ["-O0", "-O2", "-O3"] {
+        run_gcc_cross_check_opt(
+            "canary-noreturn-exec",
+            source,
+            &[opt, "-fstack-protector-strong"],
+        );
+    }
+}
+
+/// `asm goto` 形体的 `__always_inline` 必须被展开，展开后标签与 `%l[...]` 一起改名。
+///
+/// 缺陷现场：`body_is_splicable` 把 `Stmt::AsmGoto` 与 computed goto 归为同一类「跟当前
+/// 函数绑死」的形状一并拒绝搬移，于是内核
+/// `arch/x86/include/asm/jump_label.h` 的 `arch_static_branch`（体是「asm goto + 一个标签
+/// + 两个 return」）永远不内联。不内联时它的 `"i" (key)` 只能拿到寄存器，模板里的
+/// `.quad %c0 + %c1 - .` 就变成一条指向寄存器名的野重定位（实测 `vmlinux.o` 的
+/// `__jump_table`/`.altinstructions` 上各有一片，objtool 到链接后才报
+/// `special: can't find orig instruction`）。
+#[test]
+#[cfg(unix)]
+fn asm_goto_always_inline_body_inlines_and_folds_link_time_address() {
+    let source = r#"
+struct static_key {
+	int enabled;
+};
+
+extern struct static_key my_key;
+
+#define JUMP_TABLE_ENTRY(key, label)							\
+	".pushsection __jump_table, \"aw\" \n\t"						\
+	".balign 8 \n\t"										\
+	".long 1b - . \n\t"										\
+	".long " label " - . \n\t"									\
+	".quad " key " - . \n\t"									\
+	".popsection \n\t"
+
+static __attribute__((always_inline)) inline int
+arch_static_branch(struct static_key *key, int branch)
+{
+	__asm__ goto("1: .byte 0xe9\n\t" JUMP_TABLE_ENTRY("%c0 + %c1", "%l[l_yes]")
+		: : "i"(key), "i"(branch) : : l_yes);
+	return 0;
+l_yes:
+	return 1;
+}
+
+int probe_expr(void)
+{
+	return arch_static_branch(&my_key, 0);
+}
+
+void probe_cond(void)
+{
+	if (arch_static_branch(&my_key, 1))
+		probe_expr();
+}
+"#;
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-jumplabel-{pid}.c"));
+    let op = dir.join(format!("dcc-jumplabel-{pid}.o"));
+    fs::write(&sp, source).expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-fno-PIE", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "编译失败: {stderr}");
+
+    // 判据一：callee 已被逐点展开，产物里不该再有一份 out-of-line 定义。
+    let nm = Command::new("nm").arg(&op).output().expect("nm");
+    let syms = String::from_utf8_lossy(&nm.stdout).to_string();
+    assert!(
+        !syms.contains("arch_static_branch"),
+        "asm goto 体没被内联，仍留了一份 out-of-line 副本:\n{syms}"
+    );
+    // 判据二：`__jump_table` 的 key 字段是一条对 `my_key` 的重定位，而不是指向寄存器名。
+    // readelf 的每条重定位行本身不带节名（节名只在「重定位节 '.rela__jump_table'」那一行），
+    // 所以按节分组收行；标题行里的引号名与 locale 无关。
+    let rel = Command::new("readelf")
+        .args(["-r", "--wide"])
+        .arg(&op)
+        .output()
+        .expect("readelf");
+    let rels = String::from_utf8_lossy(&rel.stdout).to_string();
+    let mut cur_section = String::new();
+    let mut jump_rows: Vec<String> = Vec::new();
+    for l in rels.lines() {
+        if let Some(at) = l.find("'.rela") {
+            cur_section = l[at + 1..].split('\'').next().unwrap_or("").to_string();
+            continue;
+        }
+        if cur_section == ".rela__jump_table" && l.split_whitespace().count() >= 4 {
+            jump_rows.push(l.to_string());
+        }
+    }
+    assert!(
+        jump_rows.len() >= 4,
+        "__jump_table 该有两条入口、每条至少 2 个重定位字段，实际行：{jump_rows:?}\n{rels}"
+    );
+    let key_rows = jump_rows.iter().filter(|l| l.contains("my_key")).count();
+    assert!(
+        key_rows >= 2,
+        "每个 `__jump_table` 条目的 key 字段都应是→ my_key 的重定位，实际 {key_rows} 条：{jump_rows:?}"
+    );
+    for reg in ["rax", "rbx", "rcx", "rdx", "rsi", "rdi"] {
+        assert!(
+            !rels.lines().any(|l| l.split_whitespace().any(|t| t == reg)),
+            "重定位符号里出现了寄存器名 {reg}（说明 `%c` 没拿到链接期常量）:\n{rels}"
+        );
+    }
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+}

@@ -113,6 +113,13 @@ pub fn optimize_with_full_target(
     if !opt_skipped("function_inline") {
         function_inline(module, level);
     }
+    // asm 只立即数操作数的常量代回：必须紧跟内联（内联产生的形参临时量就是它的主客户），
+    // 而且必须在 `level == 0` 提前返回**之前** —— `-O0` 下 `always_inline` 照样会被展开，
+    // 不代回就只能拿到寄存器（产物里的 `.altinstructions`/`__bug_table` 条目会坏掉，
+    // 而编译本身不报错）。
+    if !opt_skipped("fold_asm_immediate_consts") {
+        fold_asm_immediate_consts(module);
+    }
     if level == 0 {
         return;
     }
@@ -1829,8 +1836,8 @@ fn fold_expr(e: Expr, fenv_access: bool) -> Expr {
                     // 参数本身是编译期常量 (字面量或可完全折叠的表达式) 时直接折 1,
                     // 与 GCC 及后端兜底一致 (`constp.c`/`builtins.c` 等夹具)。
                     // 但变量参数**不在此急切折 0**: 留给后续 -O2 的 SCCP —— 参数被
-                    // 常量传播成常量后这里应折 1 (修复 modref-2); 若没有 SCCP
-                    // (如 -O0) 则保留调用, 由后端兜底 (变量参数 → 0)。
+                    // 常量传播成常量后这里应折 1 (修复 modref-2)；若没有 SCCP
+                    // (如 -O0) 则保留调用，由后端兜底 (变量参数 → 0)。
                     if const_eval::is_constant(&args[0]) {
                         return Expr::Int { v: 1, span, ty };
                     }
@@ -1843,6 +1850,49 @@ fn fold_expr(e: Expr, fenv_access: bool) -> Expr {
                     .into_iter()
                     .map(|a| fold_expr(a, fenv_access))
                     .collect(),
+                span,
+                ty,
+            }
+        },
+        // 三元 `?:`：先把三个子表达式各自折叠，**再**判条件常量。
+        // 缺这一步就不是「少一个优化」而是「语义留住运行时」：内核
+        // `static_cpu_has(bit)`/`cpu_feature_enabled(bit)` 展开就是
+        // `(__builtin_constant_p(...) && REQUIRED_MASK_BIT_SET(...)) ? 1 : _static_cpu_has(bit)`，
+        // 条件原本不是 `Int`，只有子表达式折完才变成 `Int`。条件不折，整个三元留在
+        // 运行时，里面的 `__always_inline` 调用点就永远嵌在表达式里不被展开
+        // ⇒ `try_static_inline_general` 的 `call_site_shape` 不接这一形，callee 另发一份
+        // 独立副本，而它自己的 `"i"` 操作数只能是寄存器（硬失败）。
+        Expr::Cond {
+            cond,
+            then_,
+            else_,
+            span,
+            ty,
+        } => {
+            let cond = Box::new(fold_expr(*cond, fenv_access));
+            let then_ = Box::new(fold_expr(*then_, fenv_access));
+            let else_ = Box::new(fold_expr(*else_, fenv_access));
+            if let Expr::Int { v, .. } = cond.as_ref() {
+                let taken = if *v != 0 { then_ } else { else_ };
+                // 结果类型还是原三元的 `ty`：C 的 `?:` 已做过通常算术转换，直接搬
+                // 分支会把那次转换弄丢（`c ? 5 : 7.5` 这类的 `ty` 是 double，
+                // 取 `5` 那一支时必须按 `ty` 转，不能留成 int 的 5）。
+                let taken_ty = taken.ty();
+                let e = if taken_ty == ty {
+                    taken
+                } else {
+                    Box::new(Expr::Cast {
+                        ty: ty.clone(),
+                        e: taken,
+                        span: span.clone(),
+                    })
+                };
+                return fold_expr(*e, fenv_access);
+            }
+            Expr::Cond {
+                cond,
+                then_,
+                else_,
                 span,
                 ty,
             }
@@ -2819,6 +2869,204 @@ fn arm_budget_limit() -> usize {
     })
 }
 
+/// 把嵌在表达式里的 `__always_inline`/`flatten` 调用在**原本求值位置**展开成语句表达式。
+///
+/// 为什么需要它（而不是「多一个优化」）：内核 `arch/x86/include/asm/cpufeature.h` 的
+/// `static_cpu_has(bit)` 展开后是
+/// `(__builtin_constant_p(...) && REQUIRED_MASK_BIT_SET(...)) ? 1 : _static_cpu_has(bit)`，
+/// 三元条件折成常量之前（以及 `if (cpu_feature_enabled(X) && other)` 这种 `&&` 里），
+/// 调用点都不在 `call_site_shape` 已接的四形（表达式语句/赋值/尾位置/整条条件）里。
+/// 不展开就不是「少内联」而是**产物错**：`_static_cpu_has` 自己那份副本的
+/// `[feature] "i" (bit)` 只能拿到寄存器，`.altinstr_aux`/`.altinstructions` 里就留下
+/// 一条指向寄存器名的野重定位（以前 objtool 报的 `special: can't find orig instruction`
+/// 与 `vmlinux.o` 里 98 条 `→ rax` 就是它）。
+///
+/// 不另开一份展开机器：把这条调用暂时摆成一个临时的 `rv = callee(实参);` 语句交给
+/// `try_static_inline_general`（形参绑定、标签改名、`return` 改写、出口标签那一整套
+/// 都在它里），然后把它生成的块搬进 `({ ...; rv; })`。于是展开发生在调用原本的
+/// 求值位置（而不是提到语句开头），短路/三元里「不该跑的那一支」不会被跑。
+///
+/// 只接「程序员明说必须内联」的 callee：非强制的嵌套调用点保持原样，那是
+/// 成本模型的既有决策（改了会动 Lua/SQLite 的产物）。
+fn inline_forced_call_as_stmt_expr(
+    callee: &str,
+    args: &[Expr],
+    funcs: &InlineTable,
+    level: u8,
+    caller_flatten: bool,
+    caller_is_hot: bool,
+    fenv_access: bool,
+    depth: u32,
+    call_ty: Type,
+    span: Span,
+) -> Option<Expr> {
+    // 与语句位置那条臂同口径：-O2 起才走通用展开机器。
+    if level < 2 || depth >= INLINE_MAX_DEPTH {
+        trace_inline_decision(callee, "REJECT", "expr-inline: 档位或深度闸门");
+        return None;
+    }
+    let f = match funcs.get(callee) {
+        Some(f) => f,
+        None => return None,
+    };
+    if !(f.is_always_inline || caller_flatten) {
+        trace_inline_decision(callee, "REJECT", "expr-inline: 非强制内联（留给成本模型）");
+        return None;
+    }
+    let body = match f.body.as_ref() {
+        Some(b) => b,
+        None => {
+            trace_inline_decision(callee, "REJECT", "expr-inline: 无函数体");
+            return None;
+        },
+    };
+    // 单 `return 表达式;` 的体已由 `try_inline_call` 逐表达式替换做过（更贴源码，
+    // 也不多开一个块），这里不抢。
+    if matches!(body.items.as_slice(), [BlockItem::Stmt(Stmt::Return {
+        val: Some(_),
+        ..
+    })]) {
+        return None;
+    }
+    //  callee 自己的准入与那条臂一致（全部失败关闭）。
+    if !f.is_static
+        || f.is_noinline
+        || f.is_variadic
+        || f.returns_twice
+        || f.is_nested
+        || f.is_old_style
+        || f.alias_name.is_some()
+        || funcs.named_by_asm(callee)
+        || f.params.len() != args.len()
+    {
+        trace_inline_decision(
+            callee,
+            "REJECT",
+            "expr-inline: 准入 (非 static/noinline/变参/returns_twice/嵌套/别名/被 asm 点名/形参个数)",
+        );
+        return None;
+    }
+    if f.params.iter().any(|p| p.name.is_none() || p.vla_dim.is_some() || type_has_vla_dim(&p.ty)) {
+        trace_inline_decision(callee, "REJECT", "expr-inline: 形参无名或带 VLA");
+        return None;
+    }
+    // 返回值要送去表达式里，callee 返 void 本身就是非法 C。
+    if matches!(f.ret_ty, Type::Void) {
+        trace_inline_decision(callee, "REJECT", "expr-inline: 返 void 却用在值位置");
+        return None;
+    }
+    // 体不可整体搬移（computed goto、`&&label`、嵌套函数、`static` 局部等）。
+    if !body_is_splicable(body) {
+        trace_inline_decision(callee, "REJECT", "expr-inline: 体不可整体搬移");
+        return None;
+    }
+    // 实参有副作用（调用/赋值/自增）不展开：与 `Dest::Assign` 那条同判据。
+    if args.iter().any(crate::semantics::expr_has_side_effects) {
+        trace_inline_decision(callee, "REJECT", "expr-inline: 实参有副作用");
+        return None;
+    }
+    // 直接/间接递归：展开会爆栈。
+    if calls_graph_reaches(funcs, callee, callee) {
+        trace_inline_decision(callee, "REJECT", "expr-inline: 递归调用闭包");
+        return None;
+    }
+    // 臂体预算： callee 体就是展开后的新 caller，上限按它自己算（同 `arm_budget_ok_for` 口径）。
+    if !arm_budget_ok_for(body) {
+        trace_inline_decision(callee, "REJECT", "expr-inline: 超出臂体展开预算");
+        return None;
+    }
+
+    // 借道一条语句形状的调用点：`__inlexpN$rv = callee(实参);`
+    let uid = STMT_INLINE_UID.fetch_add(1, Ordering::Relaxed);
+    let rv_name = format!("__inlexp{}$rv", uid);
+    let ret_ty = f.ret_ty.clone();
+    let callee_expr = Expr::Ident {
+        name: Ident {
+            name: callee.to_string(),
+            span: span.clone(),
+        },
+        span: span.clone(),
+        ty: Type::Void,
+    };
+    let mut s = Stmt::Expr {
+        e: Expr::Assign {
+            op: BinOp::Add,
+            l: Box::new(Expr::Ident {
+                name: Ident {
+                    name: rv_name.clone(),
+                    span: span.clone(),
+                },
+                span: span.clone(),
+                ty: ret_ty.clone(),
+            }),
+            r: Box::new(Expr::Call {
+                callee: Box::new(callee_expr),
+                args: args.to_vec(),
+                span: span.clone(),
+                ty: ret_ty.clone(),
+            }),
+            span: span.clone(),
+            ty: ret_ty.clone(),
+        },
+        span: span.clone(),
+    };
+    // 先声明结果临时量（与展开块同地），展开机器只往它写入。
+    let mut items: Vec<BlockItem> = vec![BlockItem::Decl(Decl::Var(plain_var_decl(
+        ret_ty.clone(),
+        rv_name.clone(),
+        None,
+        &span,
+    )))];
+    if !try_static_inline_general(&mut s, funcs, level, depth) {
+        trace_inline_decision(
+            callee,
+            "REJECT",
+            "expr-inline: 借道语句被通用臂拒了",
+        );
+        return None;
+    }
+    let expanded = match s {
+        Stmt::Block { b, .. } => b.items,
+        _ => {
+            trace_inline_decision(callee, "REJECT", "expr-inline: 展开结果不是块");
+            return None;
+        },
+    };
+    items.extend(expanded);
+    // 展开体内可能还有嵌在表达式里的强制内联调用：同一个机制递归进去（深度 +1 兜底）。
+    let walk_arms = arms_walkable(body);
+    inline_calls_in_items(
+        &mut items,
+        funcs,
+        level,
+        caller_flatten,
+        caller_is_hot,
+        fenv_access,
+        depth + 1,
+        walk_arms,
+    );
+    // `({ ...; __rv; })`：语句表达式的值就是最后一个表达式。
+    items.push(BlockItem::Stmt(Stmt::Expr {
+        e: Expr::Ident {
+            name: Ident {
+                name: rv_name,
+                span: span.clone(),
+            },
+            span: span.clone(),
+            ty: ret_ty.clone(),
+        },
+        span: span.clone(),
+    }));
+    Some(Expr::StmtExpr {
+        block: Box::new(Block {
+            items,
+            span: span.clone(),
+        }),
+        span,
+        ty: call_ty,
+    })
+}
+
 fn inline_calls_in_stmt(
     s: &mut Stmt,
     funcs: &InlineTable,
@@ -3221,6 +3469,14 @@ fn rename_idents_in_stmt(s: &mut Stmt, map: &HashMap<String, String>) {
             rename_idents_in_stmt(body, map);
         },
         Stmt::Block { b, .. } => rename_idents_in_items(&mut b.items, map),
+        // 内联汇编语句的操作数表达式必须跟着改名：`asm` 的输入/输出都是普通 C 表达式，
+        // callee 形参被重命名成 `__inlN_...` 后，操作数还读旧名字就会读到 caller 的
+        // 同名变量（或一个不存在的名字）。
+        Stmt::AsmGoto { outputs, inputs, .. } => {
+            for e in outputs.iter_mut().chain(inputs.iter_mut()) {
+                rename_idents_in_expr(e, map);
+            }
+        },
         // 标签语句与 switch 必须跟着改名：P13 阶段5 的函数体内联会把带控制流的
         // body 整体搬进 caller，漏一个分支就是「callee 的 `L` 读到 caller 的 `L`」
         //（实测 Lua `ldo.c` 内联后直接段错误）。以前的调用者（always_inline 那条臂）
@@ -3564,8 +3820,21 @@ fn scan_block(b: &Block, acc: &mut InlineScan) {
 
 fn scan_stmt(s: &Stmt, acc: &mut InlineScan) {
     match s {
-        // computed goto / asm goto：标签地址与指令流跟当前函数绑死，不能搬。
-        Stmt::GotoIndirect { .. } | Stmt::AsmGoto { .. } => acc.note_blocked(),
+        // computed goto：标签地址进了 callee 就与 caller 的标签集混在一起，不能搬。
+        Stmt::GotoIndirect { .. } => acc.note_blocked(),
+        // `asm goto` **可以**搬：它的跳转目标是函数局部的 C 标签，`prefix_labels_in_stmt`
+        // 会给标签定义、`goto` 与模板里的 `%l[name]`/`%c[name]` 文本一起改名（一次展开一份
+        // 前缀，与 caller 的同名标签不相撞）。原来把它和 computed goto 一并拒绝，代价是
+        // 内核 `arch_static_branch`（`arch/x86/include/asm/jump_label.h`）那种「asm goto +
+        // 标签 + 两个 return」的 `__always_inline` 体永远不内联：它的 `"i" (key)` 只在
+        // 内联后才退化成 `&全局变量` 这种链接期常量，不内联就落成寄存器，模板里的
+        // `.long %c0 + %c1 - .` 变成指向寄存器名的野重定位（`__jump_table`/`.altinstructions`
+        // 条目整片坏掉，要到 objtool 才暴露）。操作数仍是普通 C 表达式，照常扫调用。
+        Stmt::AsmGoto { outputs, inputs, .. } => {
+            for e in outputs.iter().chain(inputs.iter()) {
+                scan_expr(e, acc);
+            }
+        },
         Stmt::Expr { e, .. } => scan_expr(e, acc),
         Stmt::Return { val: Some(e), .. } => scan_expr(e, acc),
         Stmt::Return { val: None, .. } | Stmt::Goto { .. } | Stmt::Break { .. }
@@ -3619,8 +3888,22 @@ fn scan_expr(e: &Expr, acc: &mut InlineScan) {
         Expr::StmtExpr { .. }
         | Expr::LabelAddr { .. }
         | Expr::VaArg { .. }
-        | Expr::VaArgPack { .. }
-        | Expr::AsmExpr { .. } => acc.note_blocked(),
+        | Expr::VaArgPack { .. } => acc.note_blocked(),
+        // 表达式位置的 `asm`（`x = asm(...)` 与把 asm 写成语句时 parser 给的形态）
+        // **可以搬**：它与不带 goto 标签的 `Stmt::AsmGoto` 是同一个东西，操作数都是普通
+        // C 表达式（改名由 `rename_idents_in_expr` 的 AsmExpr 臂负责），不引用本函数的标签。
+        // 以前它与上面几类一并拒掉，代价是内核 `arch/x86/include/asm/asm.h` 的
+        // `rip_rel_ptr`（体就是「`asm("leaq %c1(%%rip), %0" : "=r"(p) : "i"(p)); return p;`」）
+        // 永远不内联：它的 `"i" (p)` 只有展开后才是 `&全局变量` 这种链接期常量，不展开就
+        // 只能拿到寄存器，`%c1` 被换成空串 ⇒ 编出语义错且不报错的 `leaq (%rip), %rax`。
+        // 仍不接 `asm goto` 标签引用：那条由 `Stmt::AsmGoto` 自己那一臂管，标签改名在那里做。
+        Expr::AsmExpr {
+            outputs, inputs, ..
+        } => {
+            for e in outputs.iter().chain(inputs.iter()) {
+                scan_expr(e, acc);
+            }
+        },
         Expr::Call { callee, args, .. } => {
             if let Expr::Ident { name, .. } = callee.as_ref() {
                 acc.calls.push(name.name.clone());
@@ -3722,8 +4005,9 @@ fn calls_graph_reaches(
 
 /// 可以被**整体搬进调用方**的函数体判据：控制流可以，但不能出现任何
 /// 「跨帧/跨指令流」形状。每一条都是硬拒绝，不做「看起来安全就试一下」：
-///   * `goto *ptr` / `Stmt::AsmGoto` / `Expr::LabelAddr`：标签地址进了 callee 就
-///     与 caller 的标签集混在一起，而且 computed goto 本身也不允许搬；
+///   * `goto *ptr` / `Expr::LabelAddr`：标签地址进了 callee 就
+///     与 caller 的标签集混在一起，而且 computed goto 本身也不允许搬
+///     （`Stmt::AsmGoto` 不在此列：它的标签是函数局部的，改名后可搬）；
 ///   * `Expr::StmtExpr`：语句表达式里可以藏 `return`，那个 `return` 属于 callee，
 ///     改写器不递进表达式 → 会变成从 caller 里 return；
 ///   * `Expr::VaArg` / `VaArgPack` / `AsmExpr` / 任何 `__builtin_*` 调用：变参寄存器
@@ -3793,6 +4077,20 @@ fn prefix_labels_in_stmt(s: &mut Stmt, prefix: &str) {
                 }
             }
         },
+        // `asm goto` 的标签引用有两个身份：AST 里的 `goto_labels`（codegen 据此解析
+        // `%l[...]`）和模板字符串里的字面 `%l[name]`/`%c[name]`。只改前者会让 codegen 的
+        // 替换按新名去找旧名文本，模板里剩下没人认领的 `%l[l_yes]` —— 展开出来的
+        // 汇编直接引用一个不存在的标签。文本匹配带完整 `]` 收尾，不会误伤同名前缀
+        // （`l_yes` 与 `l_yes_all` 各自只匹配自己那一种写法）。
+        Stmt::AsmGoto { asm_str, goto_labels, .. } => {
+            for label in goto_labels.iter_mut() {
+                let old = label.name.clone();
+                label.name = format!("{}{}", prefix, old);
+                *asm_str = asm_str
+                    .replace(&format!("%l[{}]", old), &format!("%l[{}]", label.name))
+                    .replace(&format!("%c[{}]", old), &format!("%c[{}]", label.name));
+            }
+        },
         _ => {},
     }
 }
@@ -3803,6 +4101,573 @@ fn prefix_labels_in_items(items: &mut Vec<BlockItem>, prefix: &str) {
     for it in items {
         if let BlockItem::Stmt(st) = it {
             prefix_labels_in_stmt(st, prefix);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// asm「只能接立即数」操作数的常量代回（内联形参临时量与写一次的常量局部同一机制）
+// ---------------------------------------------------------------------------
+
+/// 一条 `VarDecl` 的初值能不能作为代回值。
+///
+/// 判据是「这个初值是编译期常量」（`const_eval::eval_full` 能算出来），而不是
+/// 「它无副作用」：无副作用的表达式仍可能读到一个会变的量（`int t = g;` 里的 `g` 在
+/// 两次读之间可能被人改），代过去就不是原来的值。常量初值不依赖任何可变状态，
+/// 搬到哪里都是同一个值。带特殊存储期/属性的声明不接（`static` 局部可被别的调用改）。
+fn const_foldable_init(v: &VarDecl) -> Option<Expr> {
+    if v.is_static
+        || v.is_extern
+        || v.is_thread_local
+        || v.cleanup_fn.is_some()
+        || v.register_name.is_some()
+        || v.asm_label.is_some()
+    {
+        return None;
+    }
+    let e = v.init.as_ref()?;
+    match const_eval::eval_full(e, false) {
+        Ok(crate::const_eval::ConstValue::Int(_))
+        | Ok(crate::const_eval::ConstValue::Addr { .. })
+        | Ok(crate::const_eval::ConstValue::Str { .. })
+        | Ok(crate::const_eval::ConstValue::Bytes { .. }) => Some(e.clone()),
+        _ => None,
+    }
+}
+
+/// 表达式 `e` 的**根**是否就是一个名字（`p = ...`、`++p`、`&p` 这类整体写/取址）。
+///
+/// 只认根：`p->x = ...`、`p[0] = ...`、`*p = ...` 改的是 `p` 指向的内存，`p` 这个
+/// 指针值本身没变，读 `p` 仍然可以代回实参。
+fn ident_root_name(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Ident { name, .. } => Some(name.name.clone()),
+        _ => None,
+    }
+}
+
+/// 收集一棵表达式子树里被写入或被取地址的候选名（写入 = 值不再等于实参）。
+///
+/// 与 [`rename_idents_in_expr`] 走同一批变体臂：漏一条只是少一次代回（失败关闭），
+/// 不会把已经脏了的候选代回去。
+fn collect_cand_writes_expr(e: &Expr, cands: &HashMap<String, Expr>, out: &mut std::collections::HashSet<String>) {
+    let mark = |x: &Expr, out: &mut std::collections::HashSet<String>| {
+        if let Some(n) = ident_root_name(x) {
+            if cands.contains_key(&n) {
+                out.insert(n);
+            }
+        }
+    };
+    match e {
+        Expr::Assign { l, r, .. } => {
+            mark(l, out);
+            collect_cand_writes_expr(l, cands, out);
+            collect_cand_writes_expr(r, cands, out);
+        },
+        Expr::PreInc { e: x, .. }
+        | Expr::PreDec { e: x, .. }
+        | Expr::PostInc { e: x, .. }
+        | Expr::PostDec { e: x, .. } => {
+            mark(x, out);
+            collect_cand_writes_expr(x, cands, out);
+        },
+        // `&p`：地址逃出去了，被调方可以透过它改 `p` 本身 ⇒ 这个候选之后不可代回。
+        // `&p->x` / `&p[i]` 的根不是 `p`，只是从 `p` 算出的地址，不动 `p` 的值。
+        Expr::AddrOf { e: x, .. } => {
+            mark(x, out);
+            collect_cand_writes_expr(x, cands, out);
+        },
+        Expr::Binop { l, r, .. } | Expr::Comma { l, r, .. } => {
+            collect_cand_writes_expr(l, cands, out);
+            collect_cand_writes_expr(r, cands, out);
+        },
+        Expr::Call { callee, args, .. } => {
+            collect_cand_writes_expr(callee, cands, out);
+            for a in args {
+                collect_cand_writes_expr(a, cands, out);
+            }
+        },
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
+            collect_cand_writes_expr(cond, cands, out);
+            collect_cand_writes_expr(then_, cands, out);
+            collect_cand_writes_expr(else_, cands, out);
+        },
+        Expr::Index { arr, idx, .. } => {
+            collect_cand_writes_expr(arr, cands, out);
+            collect_cand_writes_expr(idx, cands, out);
+        },
+        Expr::Unary { e: x, .. }
+        | Expr::Real { e: x, .. }
+        | Expr::Imag { e: x, .. }
+        | Expr::Cast { e: x, .. }
+        | Expr::Deref { e: x, .. }
+        | Expr::SizeofExpr { e: x, .. }
+        | Expr::AlignofExpr { e: x, .. } => collect_cand_writes_expr(x, cands, out),
+        Expr::Member { expr, .. } => collect_cand_writes_expr(expr, cands, out),
+        Expr::VaArg { ap, .. } => collect_cand_writes_expr(ap, cands, out),
+        Expr::Offsetof { indices, .. } => {
+            for i in indices {
+                collect_cand_writes_expr(i, cands, out);
+            }
+        },
+        Expr::CompoundLit { inits, .. } | Expr::InitList { inits, .. } => {
+            for it in inits {
+                match it {
+                    InitItem::Expr(x) => collect_cand_writes_expr(x, cands, out),
+                    InitItem::Designated { value, designator } => {
+                        if let crate::ast::Designator::Index(idx) = designator {
+                            collect_cand_writes_expr(idx, cands, out);
+                        }
+                        collect_cand_writes_expr(value, cands, out);
+                    },
+                }
+            }
+        },
+        Expr::AsmExpr {
+            outputs,
+            output_constraints,
+            inputs,
+            ..
+        } => {
+            // 表达式位置的 asm 同样要回写输出操作数（与语句版同口径）。
+            for (o, c) in outputs.iter().zip(output_constraints.iter()) {
+                if !c.is_empty() {
+                    mark(o, out);
+                }
+                collect_cand_writes_expr(o, cands, out);
+            }
+            for i in inputs {
+                collect_cand_writes_expr(i, cands, out);
+            }
+        },
+        Expr::StmtExpr { block, .. } => collect_cand_writes_items(&block.items, cands, out),
+        // 叶子：字面量与名字读。
+        _ => {},
+    }
+}
+
+fn collect_cand_writes_items(
+    items: &[BlockItem],
+    cands: &HashMap<String, Expr>,
+    out: &mut std::collections::HashSet<String>,
+) {
+    for it in items {
+        match it {
+            BlockItem::Stmt(s) => collect_cand_writes_stmt(s, cands, out),
+            BlockItem::Decl(Decl::Var(v)) => {
+                if let Some(e) = &v.init {
+                    collect_cand_writes_expr(e, cands, out);
+                }
+            },
+            _ => {},
+        }
+    }
+}
+
+fn collect_cand_writes_stmt(s: &Stmt, cands: &HashMap<String, Expr>, out: &mut std::collections::HashSet<String>) {
+    match s {
+        Stmt::AsmGoto {
+            outputs,
+            inputs,
+            output_constraints,
+            ..
+        } => {
+            // asm 的输出操作数一律是写（`=`/`+`/匹配约束都要回写）。
+            for (o, c) in outputs.iter().zip(output_constraints.iter()) {
+                if !c.is_empty() {
+                    if let Some(n) = ident_root_name(o) {
+                        if cands.contains_key(&n) {
+                            out.insert(n);
+                        }
+                    }
+                }
+                collect_cand_writes_expr(o, cands, out);
+            }
+            for i in inputs {
+                collect_cand_writes_expr(i, cands, out);
+            }
+        },
+        Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => {
+            collect_cand_writes_expr(e, cands, out)
+        },
+        Stmt::Return { val: None, .. } | Stmt::Goto { .. } | Stmt::Break { .. }
+        | Stmt::Continue { .. } | Stmt::Fallthrough { .. } => {},
+        Stmt::If { then_, else_, .. } => {
+            collect_cand_writes_stmt(then_, cands, out);
+            if let Some(e) = else_ {
+                collect_cand_writes_stmt(e, cands, out);
+            }
+        },
+        Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
+            collect_cand_writes_expr(cond, cands, out);
+            collect_cand_writes_stmt(body, cands, out);
+        },
+        Stmt::For { init, cond, step, body, .. } => {
+            if let Some(i) = init {
+                collect_cand_writes_stmt(i, cands, out);
+            }
+            if let Some(c) = cond {
+                collect_cand_writes_expr(c, cands, out);
+            }
+            if let Some(st) = step {
+                collect_cand_writes_expr(st, cands, out);
+            }
+            collect_cand_writes_stmt(body, cands, out);
+        },
+        Stmt::Block { b, .. } => collect_cand_writes_items(&b.items, cands, out),
+        Stmt::Label { stmt, .. } => collect_cand_writes_stmt(stmt, cands, out),
+        Stmt::Switch { expr, cases, prelude, .. } => {
+            collect_cand_writes_expr(expr, cands, out);
+            for it in prelude {
+                if let BlockItem::Stmt(st) = it {
+                    collect_cand_writes_stmt(st, cands, out);
+                }
+            }
+            for c in cases {
+                collect_cand_writes_items(&c.body.items, cands, out);
+            }
+        },
+        Stmt::Invoke { call, .. } => collect_cand_writes_stmt(call, cands, out),
+        Stmt::GotoIndirect { .. } => {},
+        _ => {},
+    }
+}
+
+/// 把一棵表达式子树里「读候选临时量」的 `Ident` 换成 caller 的实参。
+///
+/// 只动还没被标脏的候选；实参属 caller 作用域，替换后不再参与 callee 改名。
+fn subst_cand_reads_expr(
+    e: &mut Expr,
+    cands: &HashMap<String, Expr>,
+    dirty: &std::collections::HashSet<String>,
+) {
+    match e {
+        Expr::Ident { name, .. } => {
+            if let (Some(arg), false) = (cands.get(&name.name), dirty.contains(&name.name)) {
+                *e = arg.clone();
+            }
+        },
+        Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } | Expr::Comma { l, r, .. } => {
+            subst_cand_reads_expr(l, cands, dirty);
+            subst_cand_reads_expr(r, cands, dirty);
+        },
+        Expr::Unary { e: x, .. }
+        | Expr::Real { e: x, .. }
+        | Expr::Imag { e: x, .. }
+        | Expr::Cast { e: x, .. }
+        | Expr::AddrOf { e: x, .. }
+        | Expr::Deref { e: x, .. }
+        | Expr::PostInc { e: x, .. }
+        | Expr::PostDec { e: x, .. }
+        | Expr::PreInc { e: x, .. }
+        | Expr::PreDec { e: x, .. }
+        | Expr::SizeofExpr { e: x, .. }
+        | Expr::AlignofExpr { e: x, .. } => subst_cand_reads_expr(x, cands, dirty),
+        Expr::Call { callee, args, .. } => {
+            subst_cand_reads_expr(callee, cands, dirty);
+            for a in args {
+                subst_cand_reads_expr(a, cands, dirty);
+            }
+        },
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
+            subst_cand_reads_expr(cond, cands, dirty);
+            subst_cand_reads_expr(then_, cands, dirty);
+            subst_cand_reads_expr(else_, cands, dirty);
+        },
+        Expr::Index { arr, idx, .. } => {
+            subst_cand_reads_expr(arr, cands, dirty);
+            subst_cand_reads_expr(idx, cands, dirty);
+        },
+        Expr::Member { expr, .. } => subst_cand_reads_expr(expr, cands, dirty),
+        _ => {},
+    }
+}
+
+/// 走一棵 **C 表达式**，只在 `Expr::AsmExpr`（表达式位置的内联汇编）的
+/// 「只能接立即数」输入操作数上做代回。
+///
+/// 普通 C 读**不代回**：那是等值改写，但会把产物从「读临时量」变成「读实参」，
+/// 与本轮之前的产物无谓漂移；只有非要常量不可的操作数才有必要。
+fn subst_asm_immediate_ops_in_expr(
+    e: &mut Expr,
+    cands: &mut HashMap<String, Expr>,
+    dirty: &mut std::collections::HashSet<String>,
+) {
+    match e {
+        Expr::AsmExpr {
+            inputs, input_constraints, outputs, ..
+        } => {
+            for (op, c) in inputs.iter_mut().zip(input_constraints.iter()) {
+                if crate::codegen::shared::asm_constraints::constraint_is_immediate_only(c) {
+                    subst_cand_reads_expr(op, cands, dirty);
+                }
+            }
+            // 操作数子树里可能嵌着普通表达式（甚另一条 asm），继续下探
+            for op in inputs.iter_mut().chain(outputs.iter_mut()) {
+                subst_asm_immediate_ops_in_expr(op, cands, dirty);
+            }
+        },
+        Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } | Expr::Comma { l, r, .. } => {
+            subst_asm_immediate_ops_in_expr(l, cands, dirty);
+            subst_asm_immediate_ops_in_expr(r, cands, dirty);
+        },
+        Expr::Unary { e: x, .. }
+        | Expr::Real { e: x, .. }
+        | Expr::Imag { e: x, .. }
+        | Expr::Cast { e: x, .. }
+        | Expr::AddrOf { e: x, .. }
+        | Expr::Deref { e: x, .. }
+        | Expr::SizeofExpr { e: x, .. }
+        | Expr::AlignofExpr { e: x, .. } => subst_asm_immediate_ops_in_expr(x, cands, dirty),
+        Expr::Call { callee, args, .. } => {
+            subst_asm_immediate_ops_in_expr(callee, cands, dirty);
+            for a in args {
+                subst_asm_immediate_ops_in_expr(a, cands, dirty);
+            }
+        },
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
+            subst_asm_immediate_ops_in_expr(cond, cands, dirty);
+            subst_asm_immediate_ops_in_expr(then_, cands, dirty);
+            subst_asm_immediate_ops_in_expr(else_, cands, dirty);
+        },
+        Expr::Index { arr, idx, .. } => {
+            subst_asm_immediate_ops_in_expr(arr, cands, dirty);
+            subst_asm_immediate_ops_in_expr(idx, cands, dirty);
+        },
+        Expr::Member { expr, .. } => subst_asm_immediate_ops_in_expr(expr, cands, dirty),
+        // 语句表达式：内核 `__WARN_bug_entry(...)` 就是 `({ struct bug_entry *bug; asm ...; bug; })`，
+        // 那条 asm 与它的常量局部（`int __flags = ...`）都在这个块里；不进来就根本不会
+        // 访问到这条 asm，`[fl] "i" (__flags)` 于是始终落在寄存器上。按项走一遍还能让
+        // 块内的声明正常压栈/弹栈（作用域与外层一致）。
+        Expr::StmtExpr { block, .. } => subst_cand_reads_items(&mut block.items, cands, dirty),
+        Expr::Offsetof { indices, .. } => {
+            for idx in indices {
+                subst_asm_immediate_ops_in_expr(idx, cands, dirty);
+            }
+        },
+        _ => {},
+    }
+}
+
+/// 按语句顺序走一遍搬进来的 callee 体：在「非要常量不可」的 asm 输入操作数上代回
+/// 实参，并把本条语句的写标脏。
+///
+/// asm 输出的写只影响**之后**的语句，所以同一条语句里「`"=r"(p)` 写 + `"i"(p)` 读」
+/// 的形状（内核 `rip_rel_ptr`）仍能代回：输入操作数在 asm 执行前求值，此刻 `p` 还没
+/// 被写过。输出操作数**不代回**：`"=r"(p)` 要写的是 callee 的形参（按值传递，写完就丢），
+/// 代回实参会把值写进 caller 的变量，语义直接变。
+fn subst_cand_reads_stmt(
+    s: &mut Stmt,
+    cands: &mut HashMap<String, Expr>,
+    dirty: &mut std::collections::HashSet<String>,
+) {
+    match s {
+        Stmt::AsmGoto {
+            outputs,
+            output_constraints,
+            inputs,
+            input_constraints,
+            ..
+        } => {
+            for (op, c) in inputs.iter_mut().zip(input_constraints.iter()) {
+                if crate::codegen::shared::asm_constraints::constraint_is_immediate_only(c) {
+                    subst_cand_reads_expr(op, cands, dirty);
+                }
+            }
+            // 本条语句的写：asm 输出操作数（非空约束即回写）+ 操作数子树里的 C 写。
+            let mut w = std::collections::HashSet::new();
+            for (o, c) in outputs.iter().zip(output_constraints.iter()) {
+                if !c.is_empty() {
+                    if let Some(n) = ident_root_name(o) {
+                        if cands.contains_key(&n) {
+                            w.insert(n);
+                        }
+                    }
+                }
+                collect_cand_writes_expr(o, cands, &mut w);
+            }
+            for i in inputs.iter() {
+                collect_cand_writes_expr(i, cands, &mut w);
+            }
+            dirty.extend(w);
+        },
+        Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => {
+            subst_asm_immediate_ops_in_expr(e, cands, dirty);
+            let mut w = std::collections::HashSet::new();
+            collect_cand_writes_expr(e, cands, &mut w);
+            dirty.extend(w);
+            // 常量重赋值：`v = <常量>` 之后 v 的「当前值」是 RHS，而不是「从此作废」。
+            // 收集器不区分 RHS 是不是常量，所以在这里把这一种写重新抬回来：
+            // 内核 `__flags` 一类写法有「先声明再赋常量」的形状，只作废会让这些点
+            // 重新落回寄存器（GCC 会跟着传播那个常量）。
+            if let Expr::Assign {
+                op: BinOp::Add, l, r, ..
+            } = &*e
+            {
+                if let Some(n) = ident_root_name(l) {
+                    if cands.contains_key(&n) && const_eval::eval_full(r, false).is_ok() {
+                        dirty.remove(&n);
+                        cands.insert(n, (**r).clone());
+                    }
+                }
+            }
+        },
+        Stmt::If { cond, then_, else_, .. } => {
+            subst_asm_immediate_ops_in_expr(cond, cands, dirty);
+            let mut w = std::collections::HashSet::new();
+            collect_cand_writes_expr(cond, cands, &mut w);
+            dirty.extend(w);
+            // 两支各拿一份状态，汇合点取并集：任一支写过该候选，之后都不能再代回。
+            let mut d_then = dirty.clone();
+            subst_cand_reads_stmt(then_, cands, &mut d_then);
+            let mut d_else = dirty.clone();
+            if let Some(el) = else_ {
+                subst_cand_reads_stmt(el, cands, &mut d_else);
+            }
+            dirty.extend(d_then);
+            dirty.extend(d_else);
+        },
+        // 循环体可能跑多趟，switch 各臂还可能贯穿：先一把收集整棵子树里的写，
+        // 下探之前就把这些候选判脏，否则「第二趟读到被改过的值却代回成实参」。
+        Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
+            let mut w = std::collections::HashSet::new();
+            collect_cand_writes_expr(cond, cands, &mut w);
+            collect_cand_writes_stmt(body, cands, &mut w);
+            dirty.extend(w);
+            subst_asm_immediate_ops_in_expr(cond, cands, dirty);
+            subst_cand_reads_stmt(body, cands, dirty);
+        },
+        Stmt::For { init, cond, step, body, .. } => {
+            let mut w = std::collections::HashSet::new();
+            if let Some(i) = init {
+                collect_cand_writes_stmt(i, cands, &mut w);
+            }
+            if let Some(c) = cond {
+                collect_cand_writes_expr(c, cands, &mut w);
+            }
+            if let Some(st) = step {
+                collect_cand_writes_expr(st, cands, &mut w);
+            }
+            collect_cand_writes_stmt(body, cands, &mut w);
+            dirty.extend(w);
+            if let Some(i) = init {
+                subst_cand_reads_stmt(i, cands, dirty);
+            }
+            if let Some(c) = cond {
+                subst_asm_immediate_ops_in_expr(c, cands, dirty);
+            }
+            if let Some(st) = step {
+                subst_asm_immediate_ops_in_expr(st, cands, dirty);
+            }
+            subst_cand_reads_stmt(body, cands, dirty);
+        },
+        Stmt::Switch { expr, cases, prelude, .. } => {
+            let mut w = std::collections::HashSet::new();
+            collect_cand_writes_expr(expr, cands, &mut w);
+            for it in prelude.iter() {
+                if let BlockItem::Stmt(st) = it {
+                    collect_cand_writes_stmt(st, cands, &mut w);
+                }
+            }
+            for c in cases.iter() {
+                collect_cand_writes_items(&c.body.items, cands, &mut w);
+            }
+            dirty.extend(w);
+            subst_asm_immediate_ops_in_expr(expr, cands, dirty);
+            for it in prelude {
+                if let BlockItem::Stmt(st) = it {
+                    subst_cand_reads_stmt(st, cands, dirty);
+                }
+            }
+            for c in cases {
+                for bit in &mut c.body.items {
+                    if let BlockItem::Stmt(st) = bit {
+                        subst_cand_reads_stmt(st, cands, dirty);
+                    }
+                }
+            }
+        },
+        Stmt::Block { b, .. } => subst_cand_reads_items(&mut b.items, cands, dirty),
+        Stmt::Label { stmt, .. } => subst_cand_reads_stmt(stmt, cands, dirty),
+        Stmt::Invoke { call, .. } => subst_cand_reads_stmt(call, cands, dirty),
+        _ => {},
+    }
+}
+
+fn subst_cand_reads_items(
+    items: &mut [BlockItem],
+    cands: &mut HashMap<String, Expr>,
+    dirty: &mut std::collections::HashSet<String>,
+) {
+    // 本块新压入的候选名，离开本块时弹出：代回只在声明所在的作用域内成立。
+    // 不这么做就会漏掉「内层同名局部遮蔽外层对象」与「声明之前的读属于另一个
+    // 对象（同名的全局）」两种情形 —— 它们都会拿到错值而不是报错。
+    let mut pushed: Vec<String> = Vec::new();
+    for it in items {
+        match it {
+            BlockItem::Stmt(s) => subst_cand_reads_stmt(s, cands, dirty),
+            BlockItem::Decl(Decl::Var(v)) => {
+                // 声明本身先处理（初值在声明之后才有效），再看初值里嵌的 asm。
+                if let Some(init) = const_foldable_init(v) {
+                    let name = v.name.name.clone();
+                    if cands.contains_key(&name) {
+                        // 遮蔽：两个不同对象共用一个名字，按名字替换分不开 ⇒ 失败关闭。
+                        cands.remove(&name);
+                        dirty.insert(name);
+                    } else if !dirty.contains(&name) {
+                        cands.insert(name.clone(), init);
+                        pushed.push(name);
+                    }
+                }
+                if let Some(e) = &mut v.init {
+                    subst_asm_immediate_ops_in_expr(e, cands, dirty);
+                    let mut w = std::collections::HashSet::new();
+                    collect_cand_writes_expr(e, cands, &mut w);
+                    dirty.extend(w);
+                }
+            },
+            _ => {},
+        }
+    }
+    for n in pushed {
+        cands.remove(&n);
+    }
+}
+
+/// 把「此刻必然是常量」的变量读代进 asm 的只立即数操作数。
+///
+/// 为什么必须有这一步：`"i"`/`"I"`/`%c[...]` 这类约束在 GCC 里是链接期常量，而两处
+/// 形状都拿不到它：
+///   * 函数体内联把实参先存进 `__inlN$_x` 临时量（形参可写，不能直接代入），
+///     内核 `alternative_msr_write`/`_static_cpu_has`/`arch_static_branch` 的
+///     `[feature] "i" (bit)` 于是落在寄存器上，`.altinstructions`/`__jump_table` 条目
+///     里就留下指向寄存器名的野重定位（objtool 报 `can't find orig instruction`）；
+///   * caller 自己的「写一次的常量局部」，如 `__WARN_bug_entry` 的
+///     `int __flags = ...; [fl] "i" (__flags)`。
+/// GCC 靠内联后的常量传播把那次「存进临时量/局部再读回」消掉；dcc 的折叠走不到
+/// asm 操作数，所以在这里按位置做等价代回。候选必须是常量初值（见
+/// [`const_foldable_init`]），被写过就标脏（只有写之前的读享受代回，与 GCC 的
+/// 逐点常量同口径）。
+///
+/// 必须跑在 `function_inline` **之后**、`resync`/codegen 之前；跑在任何 -O 档都算的
+/// 位置上（`-O0` 下 `always_inline` 依然会被展开，那些临时量一样需要常量）。
+fn fold_asm_immediate_consts(module: &mut Module) {
+    let prog = module.source_mut();
+    for decl in &mut prog.decls {
+        if let Decl::Func(f) = decl {
+            if let Some(body) = &mut f.body {
+                let mut cands: HashMap<String, Expr> = HashMap::new();
+                let mut dirty = std::collections::HashSet::new();
+                // 形参不进候选表：它们的值是运行时的。内联产生的形参临时量是普通的
+                // `VarDecl`（初值 = caller 实参），走下面那条按作用域压栈的路。
+                subst_cand_reads_items(&mut body.items, &mut cands, &mut dirty);
+            }
         }
     }
 }
@@ -4229,6 +5094,7 @@ fn try_static_inline_general(
     // 现在只拒 `noinline`，always_inline 走到下面再按「专属路能不能接」让位。
     // 闸门关着时退回本轮之前的形状（`always_inline` 整体不进通用路）。
     if f.is_always_inline && !inline_walk_enabled() {
+        trace_inline_decision(&callee_name, "REJECT", "static-inline: DCC_INLINE_WALK 闸门关着");
         return false;
     }
     if !f.is_static
@@ -4242,19 +5108,33 @@ fn try_static_inline_general(
         // 而 asm 文本里的 `call leaf` 还在 ⇒ 链接期 undefined reference。
         || funcs.named_by_asm(&callee_name)
     {
+        trace_inline_decision(
+            &callee_name,
+            "REJECT",
+            "static-inline: 准入 (非 static/noinline/变参/returns_twice/嵌套/别名/被 asm 点名)",
+        );
         return false;
     }
     if f.params.len() != args.len() {
+        trace_inline_decision(&callee_name, "REJECT", "static-inline: 实参个数与形参不等");
         return false;
     }
     for p in &f.params {
         if p.name.is_none() || p.vla_dim.is_some() || type_has_vla_dim(&p.ty) {
+            trace_inline_decision(
+                &callee_name,
+                "REJECT",
+                "static-inline: 形参无名或带 VLA 维度",
+            );
             return false;
         }
     }
     let body = match &f.body {
         Some(b) => b,
-        None => return false,
+        None => {
+            trace_inline_decision(&callee_name, "REJECT", "static-inline: 无函数体（声明）");
+            return false;
+        },
     };
     // 让位给专属路径：调用点是「整条表达式语句」或「尾位置」且体是一条 `return 表达式;`
     // 时，`try_inline_call` 的逐表达式替换能把形状做得更贴源码（那是既有 -O0 产物与
@@ -4272,10 +5152,16 @@ fn try_static_inline_general(
         return false;
     }
     if !body_is_splicable(body) {
+        trace_inline_decision(
+            &callee_name,
+            "REJECT",
+            "static-inline: 体不可整体搬移 (computed goto/&&label/嵌套函数/static 局部等)",
+        );
         return false;
     }
     // 递归（包括间接递归）一律不展开：不展开不会错，展开会爆栈。
     if calls_graph_reaches(funcs, &callee_name, &callee_name) {
+        trace_inline_decision(&callee_name, "REJECT", "static-inline: 递归调用闭包");
         return false;
     }
     let cost = estimate_inline_cost(f, body, &args);
@@ -4403,6 +5289,8 @@ fn try_static_inline_general(
     }
     prefix_labels_in_items(&mut moved, &label_prefix);
     rename_idents_in_items(&mut moved, &map);
+    // asm 只立即数操作数的实参代回统一由 `fold_asm_immediate_consts` 在本轮内联全部
+    // 做完后跑一遍（形参临时量就是这里生成的 `VarDecl`），不开两处口径。
     let mut items: Vec<BlockItem> = bind;
     items.extend(moved);
     // 目的地语句在出口标签**之后**：它们必须走所有路径都执行一次，而 callee 体内的
@@ -4609,6 +5497,10 @@ fn try_stmt_inline_call(
     if matches!(body.items.as_slice(), [BlockItem::Stmt(Stmt::Return { .. })]) {
         return false;
     }
+    // 空体不能走语句展开：它既不是表达式体也没东西可搬。
+    if body.items.is_empty() {
+        return false;
+    }
 
     // 结构检查: 只支持 [VarDecl]* [ExprStmt]* [Return?] 形式的函数体.
     // 控制流 (if/loop/goto/嵌套块/switch) 与特殊存储类别 (static/extern/
@@ -4638,6 +5530,21 @@ fn try_stmt_inline_call(
             | BlockItem::Decl(Decl::UnionDef(_))
             | BlockItem::Decl(Decl::EnumDef(_)) => {},
             BlockItem::Stmt(st @ Stmt::Expr { .. }) => mid.push(st.clone()),
+            // 不带 goto 标签的内联汇编语句：它就是一条完整、无控制流的语句，展开
+            // 只是原样搬进 caller 的块里（操作数改名由 `rename_idents_in_stmt` 负责）。
+            // 不接它就没有内联：内核 `__always_inline` 的 `alternative_msr_write`（
+            // arch/x86/include/asm/nospec-branch.h）与 `_static_cpu_has`（cpufeature.h）
+            // 体就是「asm 语句 + return」，它们的 `[feature] "i" (bit)` 只在内联后才能
+            // 退化成立即数；不内联时只能拿到寄存器，`.4byte %c[feature]` 就变成
+            // 一条指向寄存器名的重定位。
+            // `asm goto` 不接：它的控制流目标在 callee 的作用域里，搬进 caller 需要
+            // 一起搬标签，超出「只接直线性体」的不变式。
+            BlockItem::Stmt(st @ Stmt::AsmGoto { goto_labels, .. }) => {
+                if !goto_labels.is_empty() {
+                    return false;
+                }
+                mid.push(st.clone());
+            },
             BlockItem::Stmt(Stmt::Return { val, .. }) if i + 1 == body.items.len() => {
                 ret_val = Some(val.clone());
             },
@@ -4645,12 +5552,21 @@ fn try_stmt_inline_call(
             _ => return false,
         }
     }
-    // void 返回且调用点是表达式语句: 保留普通调用即可 (无副作用丢失风险)
+    // 结尾 return 可省：无返回值（`void`）的 `__always_inline` 内核分派在今天的写法
+    // 就是「只有 asm 语句」的体（`arch/x86/include/asm/nospec-branch.h` 的
+    // `alternative_msr_write`）。旧规则在这里直接 `return false`，于是不内联，它那个
+    // `[feature] "i" (feature)` 只能拿到寄存器，`.4byte %c[feature]` 就变成一条指向
+    // 寄存器名的野重定位。只有「调用点是表达式语句」时才能省 return（结果被丢），
+    // `return f(...)` 的调用点仍然要求 callee 自己给出返回值。
     let ret_val = match ret_val {
         Some(v) => v,
         None => {
-            trace_inline_decision(&callee_name, "REJECT", "stmt-inline: no trailing return");
-            return false;
+            // `Type::Void` 就是无返回值的判据（`ast::Type` 没提供 `is_void`）。
+            if in_return || !matches!(f.ret_ty, crate::ast::Type::Void) {
+                trace_inline_decision(&callee_name, "REJECT", "stmt-inline: no trailing return");
+                return false;
+            }
+            None
         },
     };
     let rspan = match s {
@@ -5141,6 +6057,23 @@ fn inline_expr(
                         depth + 1,
                     );
                 }
+                // 表达式级替换不接这一形（体不是「一条 `return 表达式;`」），而
+                // `always_inline` 是语义要求而不是优化建议：GCC 无条件展开，调用点
+                // 嵌在 `?:`/`&&`/实参里也一样。这里在调用**原本的求值位置**展开。
+                if let Some(wrapped) = inline_forced_call_as_stmt_expr(
+                    &name.name,
+                    &args,
+                    funcs,
+                    level,
+                    caller_flatten,
+                    caller_is_hot,
+                    fenv_access,
+                    depth,
+                    ty.clone(),
+                    span.clone(),
+                ) {
+                    return wrapped;
+                }
             }
             Expr::Call {
                 callee: Box::new(inline_expr(
@@ -5243,6 +6176,179 @@ fn inline_expr(
             )),
             span,
             ty,
+        },
+        // 「只包一层子表达式」的节点也要下探。`Expr::Cast` 这批以前落进下面的
+        // `other => other`，于是嵌在转型里的 `__always_inline` 调用永远不会被展开：
+        // 而内核恰好处处是这个写法（`arch/x86/include/asm/asm.h` 的
+        // `return (unsigned long)rip_rel_ptr(&v)`、`(typeof(x))f(...)`、
+        // `if ((long)static_key_false(&k))`）。不展开的代价不是「少一个优化」而是
+        // **产物错**：callee 另发一份独立副本，它自己的 `"i" (形参)` 只能拿到寄存器
+        // （实测报 `impossible constraint in 'asm'` 于 `arch/x86/include/asm/asm.h:121`）。
+        //
+        // 但 `SizeofExpr`/`AlignofExpr`/`Offsetof` **不下探**：C 里它们的操作数根本不
+        // 求值，把带 asm 的体展开进去等于凭空多一次副作用（与 `is_side_effect_free`
+        // 把它们归为常量同一理由）。
+        Expr::Cast {
+            ty,
+            e: inner,
+            span,
+        } => Expr::Cast {
+            ty,
+            e: Box::new(inline_expr(
+                *inner,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
+            )),
+            span,
+        },
+        Expr::AddrOf { e: inner, ty, span } => Expr::AddrOf {
+            e: Box::new(inline_expr(
+                *inner,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
+            )),
+            ty,
+            span,
+        },
+        Expr::Deref { e: inner, ty, span } => Expr::Deref {
+            e: Box::new(inline_expr(
+                *inner,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
+            )),
+            ty,
+            span,
+        },
+        Expr::Real { e: inner, ty, span } => Expr::Real {
+            e: Box::new(inline_expr(
+                *inner,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
+            )),
+            ty,
+            span,
+        },
+        Expr::Imag { e: inner, ty, span } => Expr::Imag {
+            e: Box::new(inline_expr(
+                *inner,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
+            )),
+            ty,
+            span,
+        },
+        Expr::Index {
+            arr,
+            idx,
+            ty,
+            span,
+        } => Expr::Index {
+            arr: Box::new(inline_expr(
+                *arr,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
+            )),
+            idx: Box::new(inline_expr(
+                *idx,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
+            )),
+            ty,
+            span,
+        },
+        Expr::Member {
+            expr: base,
+            field,
+            ty,
+            is_arrow,
+            span,
+        } => Expr::Member {
+            expr: Box::new(inline_expr(
+                *base,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
+            )),
+            field,
+            ty,
+            is_arrow,
+            span,
+        },
+        Expr::Assign { op, l, r, ty, span } => Expr::Assign {
+            op,
+            l: Box::new(inline_expr(
+                *l,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
+            )),
+            r: Box::new(inline_expr(
+                *r,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
+            )),
+            ty,
+            span,
+        },
+        Expr::Comma { l, r, ty, span } => Expr::Comma {
+            l: Box::new(inline_expr(
+                *l,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
+            )),
+            r: Box::new(inline_expr(
+                *r,
+                funcs,
+                level,
+                caller_flatten,
+                caller_is_hot,
+                fenv_access,
+                depth,
+            )),
+            ty,
+            span,
         },
         other => other,
     };

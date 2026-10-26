@@ -3554,3 +3554,886 @@ fn global_register_binding_on_call_clobbered_reg_warns_like_gcc() {
     // 同一档连编两次字节相同（警告不引入任何不确定性）
     assert_eq!(o0, emit("-O0"), "同一档两次编译的 .s 必须逐字节相同");
 }
+
+/// 函数级并行合并必须原样带回自定义节的 flags（SHF_MERGE / SHF_STRINGS）与对齐语义。
+///
+/// 缺陷形状：`merge_func_chunk` 用三参 `ensure_custom_section` 重建 chunk 的节，
+/// 只恢复 ALLOC/WRITE/EXEC ⇒ `.pushsection .altinstructions, "aM", @progbits, 14`
+/// 到了主 Codegen 不再是 merge 节，按非 merge 规则取到 8/16 字节对齐；`ld -r vmlinux.o`
+/// 于是把每个对象的贡献垫到 16 字节边界，总长脱离 14 的整倍数，objtool 报
+/// 「.altinstructions size not a multiple of 14」，内核 vmlinux.o 链接失败。
+#[test]
+#[cfg(unix)]
+fn parallel_merge_keeps_merge_section_flags_and_alignment() {
+    let source = r#"
+extern void bar(void);
+
+/* 每个条目恰 14 字节：4+4+4+1+1，与内核 .altinstructions 的 ALT_INSTR 布局一致。 */
+#define ALT_BLOCK                                                        \
+	"1:\n\t"                                                            \
+	"nop\n\t"                                                           \
+	".pushsection .altinstructions, \"aM\", @progbits, 14\n\t"          \
+	" .long 1b - .\n\t"                                                 \
+	" .long 1b - .\n\t"                                                 \
+	" .4byte 3\n\t"                                                     \
+	" .byte 1b - .\n\t"                                                 \
+	" .byte 1b - .\n\t"                                                 \
+	".popsection\n"
+
+static inline void alt_one(void) { asm volatile(ALT_BLOCK ::: "memory"); }
+
+void m1(void) { alt_one(); bar(); }
+void m2(void) { alt_one(); bar(); }
+void m3(void) { alt_one(); alt_one(); bar(); }
+"#;
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-altmerge-{pid}.c"));
+    let op = dir.join(format!("dcc-altmerge-{pid}.o"));
+    fs::write(&sp, source).expect("write fixture");
+    // -O2 且多函数 ⇒ 走 emit_functions_parallel，flags 压平缺陷正是在合并阶段发生的。
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("run dcc");
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let readelf = Command::new("readelf").args(["-SW"]).arg(&op).output().expect("readelf");
+    let text = String::from_utf8_lossy(&readelf.stdout).to_string();
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+    let line = text
+        .lines()
+        .find(|l| l.split_whitespace().any(|t| t == ".altinstructions"))
+        .unwrap_or_else(|| panic!("产物里没有 .altinstructions 节: {text}"));
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    // readelf -SW 的列序：`[` `Nr` `name` `type` `addr` `off` `size` `ES` `flags` `Lk` `Inf` `Al`；
+    // 按节名定基准再取列，不数到行尾（名字长短会让「倒数第几列」变成错的）。
+    let at = cols.iter().position(|t| *t == ".altinstructions").expect("节名列");
+    let flags = cols[at + 6];
+    let align = cols[at + 9];
+    let size = usize::from_str_radix(cols[at + 4], 16).expect("节大小");
+    assert!(flags.contains('M'), "SHF_MERGE 必须保留（merge 节才能被 ld 安全拼接）: {line}");
+    assert_eq!(align, "1", "merge 节的 sh_addralign 必须是 1，不能按 entsize 取幂: {line}");
+    assert_eq!(size % 14, 0, "条目总长必须是 14 的整倍数，objtool 才放行: {line}");
+}
+
+/// 自定义节的默认对齐必须按 GAS 语义取 1，而 C 侧属性建的定长记录节仍保 8。
+///
+/// 缺陷形状：`ensure_custom_section_with_flags` 对非执行、非 merge 的自定义节默认给
+/// `align = 8`。`__ex_table` 的条目是 12 字节（`_ASM_EXTABLE_TYPE`），条目数为奇数时
+/// 节长不是 8 的整倍数，于是 `ld -r vmlinux.o` 在每个对象之间垫一次 ⇒ 总长脱离 12 的
+/// 整倍数，objtool 报「__ex_table size not a multiple of 12」，vmlinux.o 链接失败。
+/// GAS 对 `.section <name>,"a"` 不抬对齐（要抬由内容里的 `.align` 自己声明），照此改掉；
+/// 同时 C 侧 `__attribute__((section))` 那一族（`.init_array` / `.data..percpu` 等 8 字节
+/// 定长记录）必须仍是 8 —— 内核按 8 步进遍历 `__init_array_start..end`。
+#[test]
+#[cfg(unix)]
+fn asm_custom_section_defaults_to_align_one() {
+    let ex_table = "\
+extern void bar(void);
+static inline int probe(int *p)
+{
+	int v;
+	asm volatile(\"1:\\n\\t\"
+		     \"movl (%[p]), %[v]\\n\"
+		     \".section __ex_table,\\\"a\\\"\\n\\t\"
+		     \".long 1b - ., 2f - .\\n\\t\"
+		     \".long 5\\n\\t\"
+		     \".previous\\n\"
+		     \"2:\\n\"
+		     : [v] \"=r\" (v) : [p] \"r\" (p) : \"memory\");
+	return v;
+}
+int user_read(const int *p) { bar(); return probe((int *)p) + probe((int *)p); }
+";
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-asmsect-{pid}.c"));
+    let op = dir.join(format!("dcc-asmsect-{pid}.o"));
+    fs::write(&sp, ex_table).expect("write ex_table fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("run dcc");
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let readelf = Command::new("readelf").args(["-SW"]).arg(&op).output().expect("readelf");
+    let text = String::from_utf8_lossy(&readelf.stdout).to_string();
+    let line = text
+        .lines()
+        .find(|l| l.split_whitespace().any(|t| t == "__ex_table"))
+        .unwrap_or_else(|| panic!("产物里没有 __ex_table 节: {text}"));
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    let at = cols.iter().position(|t| *t == "__ex_table").expect("节名列");
+    let size = usize::from_str_radix(cols[at + 4], 16).expect("节大小");
+    assert_eq!(cols[at + 9], "1", "__ex_table 的 sh_addralign 必须是 1: {line}");
+    assert_eq!(size % 12, 0, "__ex_table 条目总长必须是 12 的整倍数: {line}");
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+
+    // 反向判据：C 属性建的 8 字节定长记录节不得被降到 1。
+    fs::write(
+        &sp,
+        "__attribute__((section(\".data..percpu\"), used)) int pcvar = 3;\n\
+         __attribute__((section(\".my_records\"), used)) long rec[2] = {1, 2};\n\
+         int use(void) { return pcvar + (int)rec[0]; }\n",
+    )
+    .expect("write c-section fixture");
+    let out2 = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("run dcc 2");
+    assert!(out2.status.success(), "compile2: {}", String::from_utf8_lossy(&out2.stderr));
+    let re2 = Command::new("readelf").args(["-SW"]).arg(&op).output().expect("readelf");
+    let t2 = String::from_utf8_lossy(&re2.stdout).to_string();
+    for want in [".data..percpu", ".my_records"] {
+        let l = t2
+            .lines()
+            .find(|line| line.split_whitespace().any(|tok| tok == want))
+            .unwrap_or_else(|| panic!("C 属性节 {want} 应存在: {t2}"));
+        let c: Vec<&str> = l.split_whitespace().collect();
+        let al: u64 = c[c.len() - 1].parse().unwrap_or(0);
+        assert!(al >= 8, "{want} 是 8 字节定长记录节，对齐不得降到 1: {l}");
+    }
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+}
+
+/// 内核 `_ASM_EXTABLE_TYPE_REG` 的 GAS 宏必须真展开，`__ex_table` 条目才是 12 字节。
+///
+/// 这条链上有三个各自的坑，缺一个都表现为「第三个字（type）不发」：
+///   1. `collect_block` 的嵌套计数只认自己那一种收尾 ⇒ `.macro` 套 `.irp` 套 `.ifc`
+///      时 `.endm` 配不上，宏根本没注册；
+///   2. `.set .Lregnr, .Lregnr+1` 没有符号表 ⇒ `.long \type + (.Lregnr << 8)` 算不出；
+///   3. 展开跑在操作数解析之前 ⇒ `.ifc \reg, %\rs` 比的是字面量 `%k0`，永不命中。
+/// objtool 侧的判据是 `tools/objtool/special.c` 的「size 必须是条目长的整倍数」，
+/// 缺字节的 `__ex_table` 在 `ld -r vmlinux.o` 后直接终止链接。
+#[test]
+#[cfg(unix)]
+fn kernel_ex_table_type_reg_macro_emits_full_entry() {
+    let source = r#"
+#define DEFINE_EXTABLE_TYPE_REG                                                  \
+	".macro extable_type_reg type:req reg:req\n"                                 \
+	".set .Lfound, 0\n"                                                          \
+	".set .Lregnr, 0\n"                                                          \
+	".irp rs,rax,rcx,rdx,rbx,rsp,rbp,rsi,rdi,r8,r9,r10,r11,r12,r13,r14,r15\n"    \
+	".ifc \\reg, %%\\rs\n"                                                        \
+	".set .Lfound, .Lfound+1\n"                                                  \
+	".long \\type + (.Lregnr << 8)\n"                                            \
+	".endif\n"                                                                   \
+	".set .Lregnr, .Lregnr+1\n"                                                  \
+	".endr\n"                                                                    \
+	".set .Lregnr, 0\n"                                                          \
+	".irp rs,eax,ecx,edx,ebx,esp,ebp,esi,edi,r8d,r9d,r10d,r11d,r12d,r13d,r14d,r15d\n" \
+	".ifc \\reg, %%\\rs\n"                                                        \
+	".set .Lfound, .Lfound+1\n"                                                  \
+	".long \\type + (.Lregnr << 8)\n"                                            \
+	".endif\n"                                                                   \
+	".set .Lregnr, .Lregnr+1\n"                                                  \
+	".endr\n"                                                                    \
+	".if (.Lfound != 1)\n"                                                       \
+	".error \"extable_type_reg: bad register argument\"\n"                       \
+	".endif\n"                                                                   \
+	".endm\n"
+
+#define _ASM_EXTABLE_TYPE_REG(from, to, type, reg)                        \
+	" .pushsection \"__ex_table\", \"aM\", @progbits, 12\n\t"             \
+	" .balign 4\n"                                                        \
+	" .long (" from ") - .\n"                                              \
+	" .long (" to ") - .\n"                                                \
+	DEFINE_EXTABLE_TYPE_REG                                               \
+	" extable_type_reg reg= " reg ", type= " type " \n"                    \
+	" .purgem extable_type_reg\n"                                         \
+	" .popsection\n"
+
+extern void bar(void);
+
+int load_seg(unsigned short value)
+{
+	int v = value;
+	asm volatile("1:\t" "movl %k0,%%" "ss" "\n"
+		     _ASM_EXTABLE_TYPE_REG("1b", "1b", "(17 | ((0) << 16))", "\"%k0\"")
+		     : "+r"(v) : : "memory");
+	bar();
+	return v;
+}
+int other(int x) { bar(); return x; }
+"#;
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-extype-{pid}.c"));
+    let op = dir.join(format!("dcc-extype-{pid}.o"));
+    fs::write(&sp, source).expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "compile: {stderr}");
+    let re = Command::new("readelf").args(["-SW"]).arg(&op).output().expect("readelf");
+    let text = String::from_utf8_lossy(&re.stdout).to_string();
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+    let line = text
+        .lines()
+        .find(|l| l.split_whitespace().any(|t| t == "__ex_table"))
+        .unwrap_or_else(|| panic!("产物里没有 __ex_table 节: {text}"));
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    let at = cols.iter().position(|t| *t == "__ex_table").expect("节名列");
+    let size = usize::from_str_radix(cols[at + 4], 16).expect("节大小");
+    assert_eq!(
+        size % 12,
+        0,
+        "__ex_table 必须是 12 字节条目的整倍数（少发 type 字就会破）: {line}\n{stderr}"
+    );
+    assert!(size >= 12, "至少要有 12 字节的 type 字段: {line}");
+    assert_eq!(cols[at + 9], "1", "merge 节的 sh_addralign 必须是 1: {line}");
+}
+
+/// 内核 `ALTERNATIVE` 的三层嵌套（`ALTERNATIVE_3` / `ALTERNATIVE_2` 的真实形状）：
+/// 每一层都用同一组数字标号 `771`..`775`，内层的替换代码会被外层的 `old` 包住。
+///
+/// 这个形状同时压三个不变量：
+///   * `.byte 773b-771b`（原文长度）两端都在 `.text`，必须扣掉可执行 pushsection
+///     在 `.text` 留下的洞，否则中层会算成 6、外层算成 9（gcc 三者都是 3）；
+///   * `.byte 775f-774f`（替换长度）两端都在 `.altinstr_replacement`，必须按标号
+///     自己的节内坐标算。按 `.text` 位置反查搬迁区间会在「内层区间终点 == 外层区间
+///     起点」时选错区间（实测中层算成 16 = 0x10）；
+///   * 替换节只能按节自己的对齐（GAS 对它不认识的节名默认 1）紧排，不能按 16 垫，
+///     否则节长从 9 吹到 35，`.long 774f - .` 的加数全偏。
+#[test]
+fn nested_alternative_entries_match_gas_byte_for_byte() {
+    let source = r#"
+extern void bar(void);
+
+/* 与 arch/x86/include/asm/alternative.h 的 OLDINSTR / ALTINSTR_ENTRY /
+   ALTINSTR_REPLACEMENT 同形：原文长度取 773b-771b，替换长度取 775f-774f，
+   补齐用 .skip。 */
+#define ALT1(old, new, ft)                                                       \
+	"771:\n\t" old "\n772:\n"                                                \
+	".skip -(((775f-774f)-(772b-771b)) > 0) * ((775f-774f)-(772b-771b)),0x90\n" \
+	"773:\n"                                                                  \
+	".pushsection .altinstructions, \"aM\", @progbits, 14\n\t"                 \
+	" .long 771b - .\n"                                                       \
+	" .long 774f - .\n"                                                       \
+	" .4byte " ft "\n"                                                        \
+	" .byte 773b-771b\n"                                                      \
+	" .byte 775f-774f\n"                                                      \
+	".popsection\n"                                                          \
+	".pushsection .altinstr_replacement, \"ax\"\n"                            \
+	"774:\n\t" new "\n775:\n"                                                \
+	".popsection\n"
+
+#define N3 "nop\n\tnop\n\tnop\n\t"
+
+int tri(int x)
+{
+	asm volatile(ALT1(ALT1(ALT1(N3, N3, "(10*32+ 0)"), N3, "(10*32+ 1)"), N3, "(10*32+ 3)")
+		     : "+r"(x) : : "memory");
+	bar();
+	return x;
+}
+"#;
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-nestedalt-{pid}.c"));
+    let op = dir.join(format!("dcc-nestedalt-{pid}.o"));
+    let gp = dir.join(format!("dcc-nestedalt-{pid}-gcc.o"));
+    fs::write(&sp, source).expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("run dcc");
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    // gcc 自己会把同一块 `.skip`/嵌套 pushsection 编成 GAS 认可的字节流，拿它当参照。
+    let gc = Command::new("gcc")
+        .args(["-O2", "-c", "-o"])
+        .arg(&gp)
+        .arg(&sp)
+        .output()
+        .expect("run gcc");
+    assert!(gc.status.success(), "gcc: {}", String::from_utf8_lossy(&gc.stderr));
+
+    let dump = |obj: &std::path::Path, sec: &str| -> Vec<u8> {
+        let tmp = dir.join(format!("dcc-nestedalt-{pid}-{}", sec.replace('.', "_")));
+        let ok = Command::new("objcopy")
+            .args(["-O", "binary", "-j", sec])
+            .arg(obj)
+            .arg(&tmp)
+            .output()
+            .expect("objcopy");
+        assert!(ok.status.success(), "objcopy {sec}: {obj:?}");
+        let bytes = fs::read(&tmp).unwrap_or_default();
+        let _ = fs::remove_file(&tmp);
+        bytes
+    };
+    let alt_gcc = dump(&gp, ".altinstructions");
+    let alt_dcc = dump(&op, ".altinstructions");
+    assert_eq!(
+        alt_gcc.len(), alt_dcc.len(),
+        ".altinstructions 总长必须与 gcc 一致（条目长 14 的整倍数）"
+    );
+    assert!(!alt_dcc.is_empty() && alt_dcc.len() % 14 == 0, "条目数: {alt_dcc:?}");
+    // 每层的 origlen(字节 12)/replacementlen(字节 13) 都必须是 3：N3 是三条 nop，
+    // 而三个嵌套层的原文都是同一段 3 字节。
+    for (i, unit) in alt_dcc.chunks_exact(14).enumerate() {
+        assert_eq!(
+            (unit[12], unit[13]),
+            (3, 3),
+            "第 {i} 条 ALTERNATIVE 的原文长/替换长错（gcc 同为 3/3）：{:02x?}",
+            alt_gcc.get(i * 14..(i + 1) * 14).unwrap_or(&[])
+        );
+    }
+    let rep_gcc = dump(&gp, ".altinstr_replacement");
+    let rep_dcc = dump(&op, ".altinstr_replacement");
+    assert_eq!(
+        rep_gcc, rep_dcc,
+        ".altinstr_replacement 必须与 gcc 逐字节一致（三层各 3 条 nop，紧排无填充）"
+    );
+    assert_eq!(rep_dcc.len(), 9, "替换节应是 3×3 字节: {rep_dcc:?}");
+
+    // 反向判据：可执行节的 sh_addralign 必须是 1（旧规则给 16 会把本节吹到 35 字节）。
+    let re = Command::new("readelf").args(["-SW"]).arg(&op).output().expect("readelf");
+    let text = String::from_utf8_lossy(&re.stdout).to_string();
+    let line = text
+        .lines()
+        .find(|l| l.split_whitespace().any(|t| t == ".altinstr_replacement"))
+        .unwrap_or_else(|| panic!("产物里没有 .altinstr_replacement 节: {text}"));
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    let at = cols.iter().position(|t| *t == ".altinstr_replacement").expect("节名列");
+    assert_eq!(cols[at + 9], "1", "可执行自定义节默认对齐必须是 1: {line}");
+
+    for f in [&sp, &op, &gp] {
+        let _ = fs::remove_file(f);
+    }
+}
+
+/// XSAVE/XRSTOR 家族的字节编码。
+///
+/// 内核 `arch/x86/kernel/fpu/xstate.h` 把原文与替代码写成
+/// `"xsave" REX_SUFFIX " %[xa]"`，而 `REX_SUFFIX` 在 x86-64 展开成 `"64"`，所以送进后端的是
+/// `xsave64`/`xsaveopt64`/`xsavec64`/`xsaves64`/`xrstor64`/`xrstors64`。后端不认这些写法时，
+/// 整行会被当成 0 字节，于是 ALTERNATIVE 条目的原文长/替换长算成 0（实测
+/// `arch/x86/kernel/fpu/core.o`），`vmlinux.o` 在 objtool 那关报 `empty alternative entry`。
+///
+/// 期望字节形态全部以 GAS 为准（`as` 实测）：
+///   xsave 0F AE /4 · xsaveopt 0F AE /6 · xrstor 0F AE /5
+///   xsavec 0F C7 /4 · xsaves 0F C7 /5 · xrstors 0F C7 /7
+///   `mnemonic64` = 多一个 REX.W(0x48)，其他完全相同。
+#[test]
+fn xsave_family_inline_asm_matches_gas_encoding() {
+    let source = r#"
+struct s { char a[512]; };
+unsigned long t(struct s *p, void *q)
+{
+	unsigned long e = 0;
+	asm volatile(
+		"xsave (%[x])\n"
+		"xsave64 (%[x])\n"
+		"xsaveopt (%[x])\n"
+		"xsaveopt64 (%[x])\n"
+		"xsavec (%[x])\n"
+		"xsavec64 (%[x])\n"
+		"xsaves (%[x])\n"
+		"xsaves64 (%[x])\n"
+		"xrstor (%[x])\n"
+		"xrstor64 (%[x])\n"
+		"xrstors (%[x])\n"
+		"xrstors64 (%[x])\n"
+		: [e] "+r"(e)
+		: [x] "r"(q));
+	return e;
+}
+"#;
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-xsaveenc-{pid}.c"));
+    let op = dir.join(format!("dcc-xsaveenc-{pid}.o"));
+    fs::write(&sp, source).expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        // -O0 且不用 "memory" clobber：避开 mfence（`0f ae f0`），以免与 `0f ae /6` 混淡。
+        .args(["-O0", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "compile: {stderr}");
+    let bin = dir.join(format!("dcc-xsaveenc-{pid}.text"));
+    let oc = Command::new("objcopy")
+        .args(["-O", "binary", "-j", ".text"])
+        .arg(&op)
+        .arg(&bin)
+        .output()
+        .expect("objcopy");
+    assert!(oc.status.success(), "objcopy: {stderr}");
+    let code = fs::read(&bin).expect("read .text");
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+    let _ = fs::remove_file(&bin);
+
+    // 抽出所有 `0F AE|C7` 两字节操作码，连同「前一个字节是不是 REX.W」与 modrm 的 reg 域。
+    // 只取 mod=00 的内存形式：`mfence`/`sfence`/`lfence` 也是 `0F AE`（modrm 0xF0/0xF8/0xF9，
+    // mod=11 寄存器形式），它们与本族编码无关，不能混进比较。
+    let mut got: Vec<(bool, u8, u8)> = Vec::new();
+    let mut i = 1usize;
+    while i + 2 < code.len() {
+        if code[i] == 0x0F && (code[i + 1] == 0xAE || code[i + 1] == 0xC7) {
+            let modrm = code[i + 2];
+            if modrm & 0xC0 == 0 {
+                let rexw = code[i - 1] == 0x48;
+                got.push((rexw, code[i + 1], (modrm >> 3) & 7));
+            }
+            i += 3;
+            continue;
+        }
+        i += 1;
+    }
+    let want: Vec<(bool, u8, u8)> = vec![
+        (false, 0xAE, 4),
+        (true, 0xAE, 4),
+        (false, 0xAE, 6),
+        (true, 0xAE, 6),
+        (false, 0xC7, 4),
+        (true, 0xC7, 4),
+        (false, 0xC7, 5),
+        (true, 0xC7, 5),
+        (false, 0xAE, 5),
+        (true, 0xAE, 5),
+        (false, 0xC7, 7),
+        (true, 0xC7, 7),
+    ];
+    assert_eq!(
+        want, got,
+        "XSAVE/XRSTOR 家族 12 条编码与 GAS 不一致（(REX.W, opcode, /ext)）"
+    );
+}
+
+/// 内核 x87 与描述符表的三个形状：`frstor`/`fnclex`/`fsubp %st,%st(1)`/`verw <符号内存>`。
+///
+/// 都是拿 `as` 实测的字节为准：
+///   frstor m = `DD /4`·fnclex = `DB E2`·fsubp %st,%st(1) = `DE E1`·
+///   verw m16 = `0F 00 /5`，符号内存形式带一条 disp32 重定位。
+/// 后端不认时这一行当 0 字节，而并行发射下连「编不出」这个事实都会被丢（见
+/// `parallel_emit_still_reports_unencodable_asm`），产物照发。
+#[test]
+fn x87_and_descriptor_inline_asm_match_gas_encoding() {
+    let source = r#"
+struct fpstate { char a[512]; };
+static struct { unsigned short sel; unsigned long base; } gdtr = { 0, 0 };
+void use_fp(struct fpstate *fp)
+{
+	asm volatile("frstor %[fp]" : : [fp] "m" (*fp) : "memory");
+	asm volatile("fnclex");
+	asm volatile("fsubp %st,%st(1)");
+	asm volatile("verw %[g]" : : [g] "m" (gdtr) : "cc");
+}
+"#;
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-x87desc-{pid}.c"));
+    let op = dir.join(format!("dcc-x87desc-{pid}.o"));
+    let gp = dir.join(format!("dcc-x87desc-{pid}-gcc.o"));
+    fs::write(&sp, source).expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "compile: {stderr}");
+    let gc = Command::new("gcc")
+        .args(["-O2", "-c", "-o"])
+        .arg(&gp)
+        .arg(&sp)
+        .output()
+        .expect("run gcc");
+    assert!(gc.status.success(), "gcc: {}", String::from_utf8_lossy(&gc.stderr));
+
+    let text = |obj: &std::path::Path| -> Vec<u8> {
+        let tmp = dir.join(format!("dcc-x87desc-{pid}-t"));
+        let ok = Command::new("objcopy")
+            .args(["-O", "binary", "-j", ".text"])
+            .arg(obj)
+            .arg(&tmp)
+            .output()
+            .expect("objcopy");
+        assert!(ok.status.success(), "objcopy {obj:?}");
+        let b = fs::read(&tmp).unwrap_or_default();
+        let _ = fs::remove_file(&tmp);
+        b
+    };
+    let dcc = text(&op);
+    let gcc = text(&gp);
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+    let _ = fs::remove_file(&gp);
+
+    // `None` = 通配节（modrm 里的基址号由寄存器分配决定）。
+    let globs: &[&[Option<u8>]] = &[
+        &[Some(0xDB), Some(0xE2)],                              // fnclex
+        &[Some(0xDE), Some(0xE1)],                              // fsubp %st,%st(1)
+        &[Some(0x0F), Some(0x00), Some(0x2D)],                  // verw rip 相对
+    ];
+    let find = |hay: &[u8], pat: &[Option<u8>]| -> bool {
+        hay.windows(pat.len()).any(|w| {
+            w.iter()
+                .zip(pat)
+                .all(|(b, p)| p.is_none_or(|p| *b == p))
+        })
+    };
+    for g in globs {
+        assert!(find(&gcc, g), "gcc 产物里都找不到该编码: {g:?}");
+        assert!(find(&dcc, g), "dcc 产物里缺该编码: {g:?}");
+    }
+    // frstor = DD /4 ⇒ modrm 高 5 位固定为 0b00_100（mod=00、reg=4），只有 rm 随基址变。
+    let frstor = |hay: &[u8]| -> bool {
+        hay.windows(2).any(|w| w[0] == 0xDD && (w[1] >> 3) & 7 == 4 && w[1] & 0xC0 == 0)
+    };
+    assert!(frstor(&gcc), "gcc 的 frstor 基准形状未命中");
+    assert!(frstor(&dcc), "dcc 没编出 frstor (DD /4, 内存形式)");
+}
+
+/// `$<常量表达式>` 形式的立即数：内核 `arch/x86/include/asm/ibt.h` 的
+/// `mov $~0xfa1e0ff3, %[endbr]`（故意把 ENDBR64 的编码拆成「取反一个常量」，以免编译器
+/// 直接把这个字节串当立即数扫到）。旧解析器只放行「紧跟 0 的 x/X/b/B」，十六进制数字本身
+/// （`f`/`a`/`e`）被当成符号引用 ⇒ 整条式子折不出来 ⇒ 整条 `mov` 报不可编码。
+#[test]
+fn asm_immediate_accepts_hex_constant_expression() {
+    let source = r#"
+unsigned gen(void)
+{
+	unsigned e;
+	asm("mov $~0xfa1e0ff3, %[e]\n\tnot %[e]" : [e] "=&r"(e));
+	return e;
+}
+"#;
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-immexpr-{pid}.c"));
+    let op = dir.join(format!("dcc-immexpr-{pid}.o"));
+    fs::write(&sp, source).expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        out.status.success() && !stderr.contains("E0311"),
+        "`$~0xfa1e0ff3` 必须能折成常量立即数：{stderr}"
+    );
+    // 反向判据：带标识符的式子仍不得被当成纯数（否则错值静默进产物）。
+    let bad = dir.join(format!("dcc-immexpr-{pid}-bad.c"));
+    fs::write(
+        &bad,
+        "extern long foo;\nunsigned g(void){unsigned e;\n\tasm(\"mov $foo+1, %[e]\" : [e] \"=&r\"(e));\n\treturn e;}\n",
+    )
+    .expect("write negative fixture");
+    let op2 = dir.join(format!("dcc-immexpr-{pid}-bad.o"));
+    let r2 = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&op2)
+        .arg(&bad)
+        .output()
+        .expect("run dcc negative");
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+    let _ = fs::remove_file(&bad);
+    // 反向判据：带标识符的式子不得被当成纯数（否则错值会静默进产物）。今天
+    // `$foo+1` 这条路还没接重定位通道，但要么走符号引用，要么当场点名
+    // （E0311 硬失败或 W1016 警告）；唯一不可接受的是默默填一个常量。
+    let stderr2 = String::from_utf8_lossy(&r2.stderr).to_string();
+    if r2.status.success() {
+        let ok_sym = Command::new("readelf")
+            .args(["-rW"])
+            .arg(&op2)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("foo"))
+            .unwrap_or(false);
+        assert!(
+            ok_sym || stderr2.contains("W1016"),
+            "`$foo+1` 既没走符号引用通道也没点名，就是静默填了常量：{stderr2}"
+        );
+    } else {
+        assert!(
+            stderr2.contains("E0311") || stderr2.contains("W1016"),
+            "`$foo+1` 折不出常量时必须点名（E0311/W1016）：{stderr2}"
+        );
+    }
+    let _ = fs::remove_file(&op2);
+}
+
+/// `__always_inline` 体里带内联汇编时必须真的内联，否则「只能接立即数」的约束会拿到
+/// 寄存器值，`%c[op]` 就塌成一个指向寄存器名的野重定位。
+///
+/// 内核靠这条链子生存：`arch/x86/include/asm/nospec-branch.h` 的
+/// `alternative_msr_write(msr, val, feature)` 与 `arch/x86/include/asm/cpufeature.h` 的
+/// `_static_cpu_has(bit)` 体都是「asm 语句 + return」，里面的
+/// `.4byte %c[feature]` 对应的操作数是 `[feature] "i" (bit)`。只有内联后 `bit` 才是
+/// 立即数；不内联时旧实现默默给那个 `"i"` 约束分配一个寄存器，`%c[feature]` 被换成裸名
+/// `rax`，于是 `.altinstructions` 的特性字段上出现 98 条 `R_X86_64_PC32 → rax`（未定义
+/// 符号），objtool 报 `special: can't find orig instruction`。
+#[test]
+fn always_inline_asm_body_folds_immediate_operand() {
+    let source = r#"
+int direct(void)
+{
+	__asm__ volatile("1:\n\t"
+			 " .pushsection .altft1, \"aM\", @progbits, 14\n\t"
+			 " .4byte %c[feature]\n"
+			 " .popsection\n"
+			 : : [feature] "i" (22) : "memory");
+	return 0;
+}
+static __attribute__((always_inline)) inline int ip(unsigned bit);
+static __attribute__((always_inline)) inline int ip(unsigned bit)
+{
+	__asm__ volatile("2:\n\t"
+			 " .pushsection .altft2, \"aM\", @progbits, 14\n\t"
+			 " .4byte %c[feature]\n"
+			 " .popsection\n"
+			 : : [feature] "i" (bit) : "memory");
+	return 0;
+}
+int call_it(void)
+{
+	direct();
+	return ip(99);
+}
+"#;
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-alwaysinlinasm-{pid}.c"));
+    let op = dir.join(format!("dcc-alwaysinlinasm-{pid}.o"));
+    fs::write(&sp, source).expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("run dcc");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "compile: {stderr}");
+    let dump = |sec: &str| -> Vec<u8> {
+        let tmp = dir.join(format!("dcc-alwaysinlinasm-{pid}-{sec}"));
+        let ok = Command::new("objcopy")
+            .args(["-O", "binary", "-j", sec])
+            .arg(&op)
+            .arg(&tmp)
+            .output()
+            .expect("objcopy");
+        assert!(ok.status.success(), "objcopy {sec}: {stderr}");
+        let b = fs::read(&tmp).unwrap_or_default();
+        let _ = fs::remove_file(&tmp);
+        b
+    };
+    let one = dump(".altft1");
+    let two = dump(".altft2");
+    let re = Command::new("readelf")
+        .args(["-sW"])
+        .arg(&op)
+        .output()
+        .expect("readelf");
+    let syms = String::from_utf8_lossy(&re.stdout).to_string();
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+    // 字面量操作数：本来就是常量。
+    assert_eq!(one[..4], [22, 0, 0, 0], "直传字面量时 `.4byte %c[feature]` 应是 22: {one:?}");
+    // 形参操作数：必须因为内联而折叠成实参 99（旧行为是 0 + 一条指向 `rax` 的重定位）。
+    assert_eq!(
+        two[..4],
+        [99, 0, 0, 0],
+        "always_inline 的 asm 体必须被内联，`%c[feature]` 才能折叠成立即数: {two:?}"
+    );
+    assert!(
+        !syms.contains(" rax"),
+        "不得再把寄存器名当成符号发出去（野重定位）:\n{syms}"
+    );
+}
+
+/// 函数级并行发射下，后端编不出的 asm 行必须仍然报 E0311，不能静默产一个缺指令的 .o。
+///
+/// `--asm-fallback=error`（默认）的判据是 TU 级的 `asm_passthrough` 记录表。并行发射里
+/// 每条函数跑在一份额 `Codegen` 的 worker 上，worker 那张表不回主 Codegen 时，
+/// 「这一行我编不出来」这个事实连同那行指令一起被丢弃：退出码 0，.o 照写。
+/// 实测内核 `arch/x86/kernel/fpu/core.c` 的 `xsave64` 就是这样被静默吞掉，
+/// 要到 `ld -r vmlinux.o` 后的 objtool 才暴光。
+#[test]
+fn parallel_emit_still_reports_unencodable_asm() {
+    let source = r#"
+struct s { char a[64]; };
+int f1(struct s *p, void *q)
+{
+	int e; asm volatile("nosuchop64 (%[x])" : [e] "=r"(e) : [x] "r"(q)); return e;
+}
+int f2(struct s *p, void *q)
+{
+	int e; asm volatile("nosuchop64 (%[x])" : [e] "=r"(e) : [x] "r"(q)); return e;
+}
+int f3(struct s *p, void *q)
+{
+	int e; asm volatile("nosuchop64 (%[x])" : [e] "=r"(e) : [x] "r"(q)); return e;
+}
+"#;
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-parallelreject-{pid}.c"));
+    let op = dir.join(format!("dcc-parallelreject-{pid}.o"));
+    fs::write(&sp, source).expect("write fixture");
+    // 三个函数 + -O2 ⇒ 走 emit_functions_parallel（不透传回程时正是这一档会静默丢）。
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("run dcc");
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !out.status.success(),
+        "并行发射里编不出的 asm 行必须硬失败，不得静默产出缺指令的 .o（stderr: {stderr}）"
+    );
+    assert!(
+        stderr.contains("E0311"),
+        "不得静默降级，要报 E0311（stderr: {stderr}）"
+    );
+}
+
+/// `test` 的「立即数/寄存器 + 符号内存」形：字节编码以 GAS 为唯一真值。
+///
+/// 内核 `arch/x86/include/asm/cpufeature.h` 的 `_static_cpu_has` 写的是
+/// `testb %[bitnum], %a[cap_byte]`：`%a[...]` 把「只能接立即数」的地址常量渲染成
+/// **裸符号**（不带 `$`，也不带 `(%rip)` 后缀）。后端当时只认 `(Imm, Mem)`/`(Reg, Mem)`，
+/// 符号形式落到兜底分支，报 `unsupported test operand pattern`，这条指令在产物里就成了
+/// 0 字节，ALTERNATIVE 条目的原文长算成 0，要到 `ld -r` 之后的 objtool 才暴露成
+/// `empty alternative entry`。
+///
+/// 判据用「与 GAS 逐字节一致」而不是「字节里出现某个操作码」：把同样四条 `test` 写成
+/// 汇编文本交给 `as`，`.text` 的前 21 字节（四条指令）必须能在 dcc 产物里原样找到
+/// （`disp32` 是链接期填的占位 0，两边都是 0），重定位表也必须同为 4 条
+/// `R_X86_64_PC32` → `boot_cpu_data`。夹具走的就是内核那条路：`"i"(地址常量)` +
+/// `%a[...]`，不是 `"m"`（后者在 -O0 会先进基址寄存器，与这一形无关）。
+#[test]
+fn test_against_symbol_memory_matches_gas_encoding() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let csrc = dir.join(format!("dcc-testsym-{pid}.c"));
+    let cobj = dir.join(format!("dcc-testsym-{pid}.o"));
+    let gs = dir.join(format!("dcc-testsym-{pid}.s"));
+    let gobj = dir.join(format!("dcc-testsym-{pid}-gas.o"));
+    let source = r#"
+extern char boot_cpu_data[];
+
+void probe(void)
+{
+	asm volatile("testb $4, %a[c1]" :: [c1] "i"(boot_cpu_data + 5) : "cc");
+	asm volatile("testl $0x1234, %a[c2]" :: [c2] "i"(boot_cpu_data + 8) : "cc");
+	asm volatile("testb %%al, %a[c3]" :: [c3] "i"(boot_cpu_data) : "cc");
+	asm volatile("testl %%eax, %a[c4]" :: [c4] "i"(boot_cpu_data + 4) : "cc");
+}
+"#;
+    fs::write(&csrc, source).expect("write C fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O0", "-c", "-o"])
+        .arg(&cobj)
+        .arg(&csrc)
+        .output()
+        .expect("run dcc");
+    assert!(
+        out.status.success(),
+        "test + 符号内存必须能编码（dcc: {}）",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if Command::new("as").arg("--version").output().is_err() {
+        eprintln!("skip: 宿主无 GNU as");
+        let _ = fs::remove_file(&csrc);
+        let _ = fs::remove_file(&cobj);
+        return;
+    }
+    // GAS 侧：把同一四条 `test` 直接写成汇编文本，拿它的字节流当唯一真值。
+    let gas = "\t.text\n\t.globl probe\nprobe:\n\ttestb $4, boot_cpu_data+5(%rip)\n\ttestl $0x1234, boot_cpu_data+8(%rip)\n\ttestb %al, boot_cpu_data(%rip)\n\ttestl %eax, boot_cpu_data+4(%rip)\n\tret\n";
+    fs::write(&gs, gas).expect("write gas fixture");
+    let assembled = Command::new("as")
+        .args(["--64", "-o"])
+        .arg(&gobj)
+        .arg(&gs)
+        .output()
+        .expect("run as");
+    assert!(
+        assembled.status.success(),
+        "as: {}",
+        String::from_utf8_lossy(&assembled.stderr)
+    );
+    let rels_of = |obj: &std::path::Path| -> (Vec<u8>, usize) {
+        let bin = dir.join(format!("dcc-testsym-{pid}-{}.text", obj.file_name().unwrap().to_string_lossy()));
+        let ok = Command::new("objcopy")
+            .args(["-O", "binary", "-j", ".text"])
+            .arg(obj)
+            .arg(&bin)
+            .output()
+            .expect("objcopy");
+        assert!(ok.status.success(), "objcopy {obj:?}");
+        let bytes = fs::read(&bin).unwrap_or_default();
+        let _ = fs::remove_file(&bin);
+        let dump = Command::new("readelf")
+            .args(["-r", "--wide"])
+            .arg(obj)
+            .output()
+            .expect("readelf");
+        let n = String::from_utf8_lossy(&dump.stdout)
+            .lines()
+            .filter(|l| l.contains("R_X86_64_PC32") && l.contains("boot_cpu_data"))
+            .count();
+        (bytes, n)
+    };
+    let (gas_bytes, gas_rels) = rels_of(&gobj);
+    let (dcc_bytes, dcc_rels) = rels_of(&cobj);
+    for f in [&csrc, &cobj, &gs, &gobj] {
+        let _ = fs::remove_file(f);
+    }
+    // 逐条比对编码：从 GAS 的 `.text` 里按已知长度切出四条指令
+    // （F6 05 disp32 imm8 = 7、F7 05 disp32 imm32 = 10、84 05 disp32 = 6、85 05 disp32 = 6），
+    // 要求每一条都原样出现在 dcc 产物里且**次序一致**（中间允许 dcc 自己的填充/mfence）。
+    // 多发一个本不该发的 REX、把符号形式当立即数、或把 /0 与 /7 搞混，都会在这里红。
+    let lens = [7usize, 10, 6, 6];
+    assert!(
+        gas_bytes.len() >= lens.iter().sum::<usize>(),
+        "GAS 夹具太短（期待四条 test + ret）: {gas_bytes:02x?}"
+    );
+    let mut off = 0usize;
+    let mut last_hit = 0usize;
+    for (i, &n) in lens.iter().enumerate() {
+        let want = &gas_bytes[off..off + n];
+        off += n;
+        let at = dcc_bytes
+            .windows(n)
+            .position(|w| w == want)
+            .unwrap_or_else(|| {
+                panic!(
+                    "第 {i} 条 test 的编码与 GAS 不一致（want={want:02x?}）\ngas={gas_bytes:02x?}\ndcc={dcc_bytes:02x?}"
+                )
+            });
+        assert!(
+            at >= last_hit,
+            "四条 test 的次序应与 GAS 一致（第 {i} 条出现在 {at}，上一条在 {last_hit}）:\ndcc={dcc_bytes:02x?}"
+        );
+        last_hit = at;
+    }
+    assert_eq!(
+        dcc_rels, gas_rels,
+        "每条 RIP 相对 test 都要有一条 R_X86_64_PC32 → boot_cpu_data 重定位"
+    );
+}

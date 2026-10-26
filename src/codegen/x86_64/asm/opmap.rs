@@ -587,6 +587,32 @@ impl Codegen {
                     idx += 1;
                     continue;
                 }
+                // 走到这里：约束只能接立即数，操作数却不是编译期常量（内联没能把实参传进来）。
+                // GCC 对这一形状直接报 `impossible constraint in 'asm'`；往下掉去分配寄存器
+                // 则把 `%c[feature]` 换成裸寄存器名，数据伪指令 `.4byte rax` 就当符号引用发
+                // 一条解不开的重定位（实测 `vmlinux.o` 的 `.altinstructions` 特性字段上 98 条
+                // `→ rax`，objtool 报 `special: can't find orig instruction`）。
+                //
+                // 硬失败而不只报警：当前要求内核全树由 dcc 编出，不允许拿 gcc 兼掉，所以这里
+                // 必须把「dcc 还缺什么」当场钉在编译步骤上（也让全树一轮就能把待补站点列齐），
+                // 而不是交出一个能编过但值错的产物。先决条件是 `try_stmt_inline_call` 能
+                // 展开带 asm 的 `__always_inline` 体（包含 void 体与表达式位置）。
+                if Self::asm_constraint_is_immediate_only(raw) {
+                    self.warn_asm_immediate_only_operand_runtime(raw, idx);
+                    // 把「到底是哪棵表达式没能折成常量」直接写在诊断里：全树跑一轮就能
+                    // 把待补的常量求值形态列齐，不必一个个 TU 去回放猜。
+                    self.asm_reject(&format!(
+                        "impossible constraint in 'asm': operand {idx} with immediate-only \
+                         constraint \"{raw}\" has no compile-time constant value \
+                         (expression: {})",
+                        crate::const_eval::ExprDebug(op)
+                    ));
+                    map.insert(format!("%{idx}"), String::new());
+                    slots.push(Slot::Imm(String::new()));
+                    meta.push((0, 0, false, false, 0));
+                    idx += 1;
+                    continue;
+                }
             }
 
             // 内存操作数
@@ -1030,6 +1056,36 @@ impl Codegen {
             self.mov_xmm_to_xmm(xmm, 0);
         }
     }
+    /// 「只能接立即数」的约束拿到了运行时值：当场点名，不静默。
+    ///
+    /// GCC 对这一形状直接报 `impossible constraint in 'asm'`。dcc 先把内联的
+    /// `__always_inline` 展开试一遍（`opt.rs::try_stmt_inline_call`），只有它也没能
+    /// 把实参传进来时才会走到这里，此时操作数会落成寄存器，模板里 `%c[op]`/`%P[op]`
+    /// 会被换成裸寄存器名，数据伪指令就会发一条指向不存在符号的重定位（实测
+    /// `vmlinux.o` 的 `.altinstructions` 特性字段上有 98 条 `→ rax`，objtool 报
+    /// `special: can't find orig instruction`）。报而不拒是因为那些体带 `asm goto` 的
+    /// 内核分派当前还不能在表达式位置展开，退给宿主编译器会让大半棵树不再由 dcc 编；
+    /// 但风险必须在日志里看得见，不能只到链接后才露出来。
+    pub(crate) fn warn_asm_immediate_only_operand_runtime(&mut self, constraint: &str, idx: usize) {
+        use crate::diagnostics::{Diagnostic, Span};
+        let (file, line) = self.asm_src_pos();
+        let ordinal = self.current_asm_line;
+        let mut diag = Diagnostic::warn(
+            "W1016",
+            format!(
+                "inline asm operand {idx} has an immediate-only constraint \"{constraint}\" but no \
+                 compile-time constant value (not inlined); `%c`/`%P` references to it will emit an \
+                 unresolved reference"
+            ),
+            Span::point(if file.is_empty() { "<asm>" } else { &file }, line, 1),
+        );
+        diag.hint = Some(format!(
+            "asm 语句第 {ordinal} 行：把被调函数改成能在表达式位置内联，或给该操作数加上 \
+             \"r\" 备选约束"
+        ));
+        self.diagnostics.push(diag);
+    }
+
     pub(crate) fn warn_unresolved_asm_operand(&mut self, line: &str, asm_line: usize) {
         self.asm_reject(&format!(
             "unsupported inline asm operand pattern '{}' (asm line {})",

@@ -373,6 +373,12 @@ pub struct Codegen {
     pub extra_sections: Vec<ElfSection>, // 自定义节 (section 属性)
     pub custom_sec_indices: HashMap<String, usize>, // section name → index in extra_sections
     pub func_sizes: HashMap<String, u64>, // 函数名 → 代码大小 (用于符号 size)
+    /// `.skip <表达式>` 的「测距遍」标志：为真的那一份 Codegen 只为量标签距离，
+    /// 自己不再递归开测（见 `asm/emit_lines.rs::emit_resolved_asm_lines`）。
+    pub asm_measuring: bool,
+    /// 本次 inline asm 块里「数字标签内部名 → 字节位置」的测距表（由测距遍填），
+    /// 只在做 `.skip` 前向引用求值时有内容。
+    pub asm_skip_measure: HashMap<String, u64>,
     /// C++ 零成本异常: 当前函数已生成的**受保护调用点** (`Stmt::Invoke` 时追加)。
     /// 函数结束时整体搬进 `eh_funcs`。
     pub eh_sites: Vec<crate::codegen::x86_64::eh_tables::EhSite>,
@@ -514,19 +520,25 @@ pub struct Codegen {
     /// 标记当前节上下文是否由 .section 创建 (用于 .previous 正确区分 .pushsection)
     pub section_active: bool,
     pub pending_custom_sec_rels: Vec<CustomSecRel>,
-    /// 可执行 pushsection (.fixup / .altinstr_replacement) 栈：(sec_idx, self.code 起始偏移)
-    pub pushsection_exec_stack: Vec<(usize, u64)>,
+    /// 可执行 pushsection (.fixup / .altinstr_replacement) 栈：
+    /// (sec_idx, self.code 起始偏移, 该区间内定义的标号 `(标号名, self.code 位置)`)
+    ///
+    /// 第三项是必需的：区间关闭时才知道它搬到了目标节的哪个偏移，标号的节内坐标
+    /// 只能在那一刻结算。区间边界的 `self.code` 位置是共享的（内层的 `775:` 与外层的
+    /// `774:` 常常是同一个发射位置），事后按位置反查搬迁表必然二义。
+    pub pushsection_exec_stack: Vec<(usize, u64, Vec<(String, u64)>)>,
     /// 可执行 pushsection 代码区间：(text 起始偏移，size, extra_sections 索引，节内偏移)
     pub pushsection_code_ranges: Vec<(u64, u64, usize, u64)>,
-    /// 非执行 pushsection 内命名 label 在自定义节数据中的位置：
-    /// label 名 → (extra_sections 索引, 节内偏移).
+    /// pushsection 内标号在它**最终所在节**里的坐标：标号名 → (extra_sections 索引, 节内偏移).
     ///
     /// 为什么需要独立一张表: `self.labels` 一律用 `self.code.len()` (text 坐标) 登记,
-    /// 对可执行 pushsection 后续由 `pushsection_code_ranges` 反查搬迁映射; 但非执行
-    /// pushsection (`.discard.call_table` / `.discard.retpoline_sites` 等) 内的 label
-    /// 位置不在 `self.code` 而在 `extra_sections[sec_idx].data`, 无法反推. 这张表
-    /// 在 `emit_pushsection_data` 的 label 分支显式记录 (sec_idx, data.len()), 供
-    /// symtab 构建阶段把 label 编码为 STT_SECTION + offset 本地符号.
+    /// 而 pushsection 里的标号最终不在 `.text`: 非执行 pushsection
+    /// (`.discard.call_table` / `.altinstructions` 等) 的内容从来不在 `self.code`;
+    /// 可执行 pushsection (`.altinstr_replacement` / `.fixup`) 是先发进 `self.code` 再整段
+    /// 搬走的. 两种情况都只能在登记那一刻直接记下节内偏移, 事后拿 `.text` 位置去反查
+    /// 搬迁区间会在「区间首尾相接」时选错区间 (实测嵌套 ALTERNATIVE 的
+    /// `.byte 775f-774f` 因此从 3 变成 16). 这张表同时供 symtab 构建把标号编码成
+    /// STT_SECTION + offset 本地符号.
     pub pushsection_label_offsets: HashMap<String, (usize, u64)>,
     /// 延迟解析：pushsection 数据中标签差值表达式 (前向引用)
     pub deferred_pushsection_fixups: Vec<DeferredPushsectionFixup>,
@@ -915,6 +927,12 @@ pub struct FuncEmitChunk {
     pub label_addr_refs: Vec<(u64, String)>,
     pub pending_custom_sec_rels: Vec<CustomSecRel>,
     pub pushsection_code_ranges: Vec<(u64, u64, usize, u64)>,
+    /// pushsection 标号的节内坐标，必须在合并 chunk 时按 `sec_map` + 数据尾偏移重映射。
+    ///
+    /// 不带回主 Codegen 的话，并行发射（`-O2` 起）里 `.altinstr_replacement` 的 `774:`/`775:`
+    /// 就查不到节内坐标，`.long 774f - .` 的重定位加数只能退回 `.text` 反查，ALTERNATIVE
+    /// 条目会指到替换代码以外的字节上。
+    pub pushsection_label_offsets: HashMap<String, (usize, u64)>,
     pub extra_sections: Vec<elf::ElfSection>,
     pub custom_sec_indices: HashMap<String, usize>,
     /// C++ 零成本异常: 本 chunk 函数的 **CFI 事实**。
@@ -943,6 +961,16 @@ pub struct FuncEmitChunk {
     pub asm_insn_debug_entries: Vec<(u64, u32, u16)>,
     /// P9 步骤 5: worker 采集的内联汇编指令日志 (chunk 相对 pc), 回主 Codegen 合并。
     pub(crate) asm_insn_log: Vec<(u64, Insn)>,
+    /// worker 发射的内联汇编「编不出」透传记录 (文件/行级事实, 无需坐标换算)。
+    ///
+    /// 不带回就是静默误编译：`--asm-fallback=error`（默认）靠 `asm_passthrough`
+    /// 非空才报 E0311，worker 里丢掉的记录不会上行，于是一整行汇编被默默当作
+    /// 0 字节，产物照发、退出码照 0。实测内核 `arch/x86/kernel/fpu/core.c`：
+    /// `xsave64`/`xsaveopt64` 未被后端认识时，ALTERNATIVE 条目的原文长/替换长
+    /// 都算成 0，要到 `ld -r vmlinux.o` 之后的 objtool 才暴光。
+    pub asm_passthrough: Vec<crate::codegen::shared::asm_source::AsmPassthroughRecord>,
+    /// 透传文本区 (chunk 相对 pc)，合并时按 `base` 平移。
+    pub asm_passthrough_regions: Vec<(u64, Vec<String>)>,
     /// P9 方案 C: worker 采集的原生 C 指令记录 (chunk 相对 pc), 合并时加 base。
     pub(crate) insn_records: Vec<(u64, Insn)>,
     /// P9 方案 C 临时统计 (worker 副本).
@@ -1113,6 +1141,8 @@ impl Codegen {
             extra_sections: vec![],
             custom_sec_indices: HashMap::new(),
             func_sizes: HashMap::new(),
+            asm_measuring: false,
+            asm_skip_measure: HashMap::new(),
             eh_sites: Vec::new(),
             eh_funcs: Vec::new(),
             func_cfi: HashMap::new(),
@@ -1936,10 +1966,21 @@ impl Codegen {
                 }
                 // attribute((used)): 路由到独立节并标记 SHF_GNU_RETAIN
                 if v.is_used_attr && !v.is_thread_local {
-                    let sec_name = if v.init.is_some() {
-                        format!(".data.{}", v.name.name)
-                    } else {
-                        format!(".bss.{}", v.name.name)
+                    // `__used__` 只说「别丢掉这个对象」，节名仍由 `section` 属性定；
+                    // 只有没写 section 时才用 `.data.<var>`/`.bss.<var>` 的独立节命名。
+                    // 旧路无条件自己造名，于是 `__attribute__((section(".init.data"), used))`
+                    // 这类写法把发往 `.init.data` 的对象塞进了 `.data.<var>`：内核启动后
+                    // 释放 `.init.*` 时它不会被回收，而 `.data..percpu` 那种写法会直接
+                    // 把 per-CPU 变量放到普通 `.data` 里，%gs 偏移全错。
+                    let sec_name = match &v.section {
+                        Some(s) => s.clone(),
+                        None => {
+                            if v.init.is_some() {
+                                format!(".data.{}", v.name.name)
+                            } else {
+                                format!(".bss.{}", v.name.name)
+                            }
+                        },
                     };
                     let is_writable = true;
                     let sec_idx = self.ensure_custom_section(&sec_name, false, is_writable);
@@ -2540,7 +2581,15 @@ impl Codegen {
                         let emitted_start = self.function_emitted_start(func_start);
                         let emitted_size = func_size + (func_start - emitted_start);
                         let sec_idx = self.ensure_custom_section(sec_name, true, false);
-                        let func_align = f.alignment.unwrap_or(16).max(1);
+                        // 与 `emit/functions.rs` 里「函数入口对齐」同一口径：节对齐是
+                        // 对内容的声明，拿一个代码里没做到的更大对齐去写 sh_addralign，
+                        // 链接期只会多垫一段没用的 nop。`-falign-functions=N`（内核 16）
+                        // 把两者一起抬到 N，于是 `.noinstr.text`/`.init.text` 与 gcc 一致。
+                        let func_align = f
+                            .alignment
+                            .unwrap_or(1)
+                            .max(self.target.align_functions.max(1) as usize)
+                            .max(1);
                         self.extra_sections[sec_idx].align =
                             self.extra_sections[sec_idx].align.max(func_align as u64);
                         let aligned = (self.extra_sections[sec_idx].data.len() + func_align - 1)
@@ -2611,7 +2660,11 @@ impl Codegen {
                         self.extra_sections[sec_idx].flags |=
                             crate::codegen::shared::elf::SHF_GNU_RETAIN;
                     }
-                    let func_align = f.alignment.unwrap_or(16).max(1);
+                    let func_align = f
+                        .alignment
+                        .unwrap_or(1)
+                        .max(self.target.align_functions.max(1) as usize)
+                        .max(1);
                     self.extra_sections[sec_idx].align =
                         self.extra_sections[sec_idx].align.max(func_align as u64);
                     let aligned = (self.extra_sections[sec_idx].data.len() + func_align - 1)

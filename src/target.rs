@@ -143,6 +143,8 @@ pub struct Target {
     pub align_loops: u32,
     /// -falign-jumps=N: 跳转目标对齐边界 (2 的幂, 0=不对齐)
     pub align_jumps: u32,
+    /// -falign-functions=N: 函数入口对齐边界 (2 的幂, 0=后端默认 1)
+    pub align_functions: u32,
 }
 
 impl Target {
@@ -257,6 +259,7 @@ impl Target {
             mips_has_dsp: non_x86.mips_dsp,
             align_loops: 0,
             align_jumps: 0,
+            align_functions: 0,
         }
     }
 

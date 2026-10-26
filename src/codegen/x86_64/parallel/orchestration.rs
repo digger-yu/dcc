@@ -216,6 +216,7 @@ impl Codegen {
             label_addr_refs: cg.label_addr_refs,
             pending_custom_sec_rels: cg.pending_custom_sec_rels,
             pushsection_code_ranges: cg.pushsection_code_ranges,
+            pushsection_label_offsets: cg.pushsection_label_offsets,
             extra_sections: cg.extra_sections,
             custom_sec_indices: cg.custom_sec_indices,
             // C++ 零成本异常: CFI 事实与受保护调用点必须随 chunk 带回主 Codegen,
@@ -235,6 +236,8 @@ impl Codegen {
             asm_line_entries: std::mem::take(&mut cg.asm_line_entries),
             asm_insn_debug_entries: std::mem::take(&mut cg.asm_insn_debug_entries),
             asm_insn_log: std::mem::take(&mut cg.asm_insn_log),
+            asm_passthrough: std::mem::take(&mut cg.asm_passthrough),
+            asm_passthrough_regions: std::mem::take(&mut cg.asm_passthrough_regions),
             insn_records: std::mem::take(&mut cg.insn_records),
             emit_insn_stats: std::mem::take(&mut cg.emit_insn_stats),
             emit_insn_gas_hits: std::mem::take(&mut cg.emit_insn_gas_hits),
@@ -320,6 +323,12 @@ impl Codegen {
         }
         for (pc, rec) in chunk.asm_insn_log {
             self.asm_insn_log.push((base + pc, rec));
+        }
+        // 透传记录必须回程：「这一行我编不出来」是 TU 级事实，决定了 E0311 仍然
+        // GAS 降级。留在 worker 里就是静默丢指令。
+        self.asm_passthrough.extend(chunk.asm_passthrough);
+        for (pc, lines) in chunk.asm_passthrough_regions {
+            self.asm_passthrough_regions.push((base + pc, lines));
         }
         for (pc, rec) in chunk.insn_records {
             self.insn_records.push((base + pc, rec));
@@ -433,13 +442,27 @@ impl Codegen {
         let mut sec_data_delta: Vec<(usize, u64)> = Vec::new();
         for extra in chunk.extra_sections {
             let old_idx = sec_map.len();
-            let sec_idx = self.ensure_custom_section(
+            // 自定义节的 flags 必须原样带上行：旧的三参入口只重建 ALLOC/WRITE/EXEC，
+            // SHF_MERGE / SHF_STRINGS 在这里被丢干。于是 `.altinstructions`
+            //（`.pushsection .altinstructions, "aM", @progbits, 14`）到了主 Codegen 就
+            // 不是 merge 节，按非 merge 规则取对齐 ⇒ `ld -r vmlinux.o` 把每个对象的
+            // 贡献垫到 16 字节边界，总长不再是 14 的整倍数，objtool 报
+            // 「.altinstructions size not a multiple of 14」（下面那句注释要的正是这个不变量）。
+            let sec_idx = self.ensure_custom_section_with_flags(
                 &extra.name,
                 extra.flags & elf::SHF_EXECINSTR != 0,
                 extra.flags & elf::SHF_WRITE != 0,
+                extra.flags & elf::SHF_MERGE != 0,
+                extra.flags & elf::SHF_STRINGS != 0,
+                0,
             );
-            self.extra_sections[sec_idx].align =
-                self.extra_sections[sec_idx].align.max(extra.align);
+            // 对齐只「抬」非 merge 节：merge 节的条目按 entsize 紧排，任何额外对齐
+            // 都会把总长推离 entsize 的整倍数（与 emit_asm_directive 里
+            // `.align`/`.balign`/`.p2align` 的处理同一口径）。
+            if self.extra_sections[sec_idx].flags & elf::SHF_MERGE == 0 {
+                self.extra_sections[sec_idx].align =
+                    self.extra_sections[sec_idx].align.max(extra.align);
+            }
             // Append chunk section data directly (no alignment padding)
             // SHF_MERGE sections require exact entry size multiples.
             let delta = self.extra_sections[sec_idx].data.len() as u64;
@@ -470,6 +493,19 @@ impl Codegen {
                     .unwrap_or(0);
                 self.pushsection_code_ranges
                     .push((base + start, size, sec_idx, sec_off + delta));
+            }
+        }
+        // pushsection 标号的节内坐标同理必须重映射：chunk 里那段自定义节数据是
+        // 追加到主 Codegen 同名节尾部的，不加上 `delta` 就指到别的条目上。
+        for (name, (old_sec_idx, sec_off)) in chunk.pushsection_label_offsets {
+            if let Some(&sec_idx) = sec_map.get(&old_sec_idx) {
+                let delta = sec_data_delta
+                    .iter()
+                    .find(|(old, _)| *old == old_sec_idx)
+                    .map(|(_, d)| *d)
+                    .unwrap_or(0);
+                self.pushsection_label_offsets
+                    .insert(name, (sec_idx, sec_off + delta));
             }
         }
         for (pos, name) in chunk.disasm_calls {
@@ -817,6 +853,7 @@ mod tests {
             label_addr_refs: vec![],
             pending_custom_sec_rels: vec![],
             pushsection_code_ranges: vec![],
+            pushsection_label_offsets: HashMap::new(),
             extra_sections: vec![],
             custom_sec_indices: HashMap::new(),
             func_cfi: None,
@@ -827,6 +864,8 @@ mod tests {
             asm_line_entries: vec![],
             asm_insn_debug_entries: vec![],
             asm_insn_log: vec![],
+            asm_passthrough: vec![],
+            asm_passthrough_regions: vec![],
             insn_records: vec![],
             emit_insn_stats: std::collections::HashMap::new(),
             emit_insn_gas_hits: std::collections::HashMap::new(),

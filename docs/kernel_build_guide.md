@@ -2,7 +2,35 @@
 
 > 目标版本：**Linux 7.1 / x86_64**。本地验收目录：`./`。
 
-## 当前进度（2026-08-27）
+## 当前进度（2026-10-25）
+
+全树重跑与缺陷修复的一轮。结论：**内核 C 语料已 100% 由 dcc 编出（零 gcc 回退），但 `vmlinux.o` 仍未打通**。
+
+| 阶段 | 状态 |
+|------|------|
+| 全树 `make CC=dcc`：1093 个内核 `.o` | ✅ 全部由 dcc 编出，日志内 error 行 0、`falling back` 0 |
+| `built-in.a` 归档 458 个 | ✅ |
+| `vmlinux.o`（`ld -r` + objtool） | ❌ objtool 报 120 条 `empty alternative entry` + 1 条 `can't find orig instruction`（ALTERNATIVE 表条目的 `orig_len` 字节为 0）。注意：这份清单是从中间版本二进制编出的 .o 采集的，purge 重跑后需重采 |
+| `vmlinux` / `bzImage` / QEMU | ⏸ 被上一项挡住，未到达 |
+| `cargo test --release --lib` / `--test integration` | ✅ 2576 / 1187+5 ignored 全通过（本轮新增 12 条用例，逐条做过「撤掉修复即变红」反向验证） |
+
+本轮修掉的 9 类缺陷（症状 → 根因 → 落点）见 `report/linux71-dcc-fulltree-build-2026-10-25.md`；
+其中三项影响所有架构的通用正确性，值得单独记住：
+
+1. **类型身份与类型相等不能用派生 `Debug`/派生结构相等**：内核类型是「先前向声明、后补全」
+   且带环的共享 DAG，派生实现一边把类型串算成 GB 级（编译被 OOM 杀），一边把同一个 tag
+   判成两个类型（`EXPORT_SYMBOL_GPL` 的 `extern typeof(sym) sym;` 误报 E0007）。
+2. **弱符号与节属性是链接期契约**：`__weak` 在「属性写在 `*` 之后」「只写在原型上」两种写法下
+   丢失、函数类型的无体声明被当 tentative definition 发进 `.bss`，都会在 `ld -r vmlinux.o`
+   变成 360 条 multiple definition。
+3. **自定义节的 flags/对齐必须按 GAS 语义**：`SHF_MERGE` 不得在函数级并行合并时被压平，
+   非 merge 节默认对齐是 1 不是 8——否则 `ld` 逐对象垫边界，objtool 的
+   「节长必须是条目长整倍数」立刻破（`.altinstructions` 14、`__ex_table` 12）。
+
+## 历史进度（2026-08-27）
+
+> 下表是 2026-08-27 那一次基于当时 HEAD 的记录；其中「全树 vmlinux + QEMU 通过」一行
+> 在 2026-10-25 用当前 HEAD 复现不出来（上表是本次实测结论），保留仅作历史基线。
 
 | 阶段 | 状态 |
 |------|------|
@@ -58,6 +86,7 @@ STRICT_FULL_BUILD=1 bash scripts/kernel_full_check.sh  # strict: 禁止核心门
 | `dcc-host-wrapper.sh` | HOSTCC 包装：dcc -c + gcc 链接；fixdep 走 Rust |
 | `gen_elfconfig_h.sh` | 从 empty.o 生成 elfconfig.h |
 | `prepare0_full.sh` | prepare0 全链路（等价窄目标 + modpost） |
+| `kernel_purge_stale_objects.sh` | 清掉「早于当前 dcc 二进制」与「gcc 回退」两类 .o，使全树产物同一版编出（见 §5.0） |
 | `pahole_regress.sh` / `objtool_regress.sh` | 单 TU BTF / eh_frame 回归 |
 | `qemu_boot_matrix.sh` | QEMU 加载 bzImage；无镜像默认 SKIP，镜像存在后要求 QEMU 与 boot log 关键字符串通过 |
 | `vmlinux_regress.sh` | pahole -J / objtool check vmlinux |
@@ -383,6 +412,31 @@ done
 
 ## 5. 使用 make 集成编译
 
+### 5.0 修完缺陷后如何清缓存再跑（全树重编标准流程）
+
+Kbuild 的 `if_changed` 只比对**记录的命令行串**，而内核 TU 的命令行里写的是包装脚本路径
+（`scripts/dcc-kernel-cc.sh`）。dcc 二进制换了一版，Kbuild 并不认账，于是旧二进制编出的
+`.o` 会混进 `vmlinux.o` —— 产物既说不清是哪一版编的，也不可复现。包装脚本在 dcc 失败时
+还会回退 gcc，回退产物同样不会被 make 察觉。所以每修一个缺陷都要按「二进制级判据」清一次：
+
+```bash
+# 1) 建当前源码的二进制
+ cargo build --release -j2
+
+# 2) 清掉「早于该二进制」+「gcc 回退」两类 .o（宿主工具 scripts/、tools/ 与有意
+#    交给 gcc 的 arch/x86/realmode 一律不碰）
+bash scripts/kernel_purge_stale_objects.sh /path/to/linux-7.1 target/release/dcc
+
+# 3) 只清 gcc 回退产物（本轮改动不改变其它产物时用它，省一次全树重编）
+bash scripts/kernel_purge_stale_objects.sh --gcc-fallback-only /path/to/linux-7.1 target/release/dcc
+
+# 4) 再跑
+ make CC=/path/to/scripts/dcc-kernel-cc.sh HOSTCC=gcc -k -j3
+```
+
+磁盘余量也要盯：dcc 的头文件缓存落在 `~/.dcc/cache`（内容寻址、可安全删），编全树时
+每轮都能长到几十 GB，按时间清旧条目即可：`find ~/.dcc/cache -type f -mmin +30 -delete`。
+
 ### 5.1 基本用法
 
 ```bash
@@ -425,9 +479,14 @@ DCC 已成功编译完整 Linux 7.1 内核并生成 vmlinux，且 QEMU 启动验
 | **initramfs 启动到 init** | 内核执行 "Run /init as init process" | ✅ **已验证**（2026-08-27，busybox init 脚本成功执行） |
 | DEFINE() .ascii 输出 | -S 模式下发射 `.ascii "->..."` 行 | ✅ **已完成**（2026-08-28，与 GCC 输出一致） |
 | .S 文件预处理 | 续接行处理与 GCC 行为一致 | ✅ **已验证**（entry_64.S 预处理后可通过 GAS 汇编） |
-| const_eval offsetof | 复杂内核结构体偏移量求值 | ⚠️ 部分结构体返回 0，需用 gcc 编译 asm-offsets.c |
+| const_eval offsetof | 复杂内核结构体偏移量求值 | ✅ 当前 HEAD 下 `arch/x86/kernel/asm-offsets.c` 由 dcc 编出 `asm-offsets.s` 并重生 `include/generated/asm-offsets.h`（2026-10-25 实测） |
 | .S 文件全链路编译 | dcc 预处理 + gcc fallback | ✅ **已完成**（2026-08-28，dcc-kernel-cc.sh 用 dcc 编译 .S，失败自动回退 gcc；51 个 .S 文件全部处理，QEMU 启动验证通过） |
 | 字符字面量跨行扫描 | 注释中 `'` 吞掉后续行宏展开 | ✅ **已修复**（2026-08-28，三处扫描循环增加 `\n` 终止条件） |
+| inline asm 的 GAS 宏（`.macro`/`.irp`/`.ifc`/`.set`） | 内核 `_ASM_EXTABLE_TYPE_REG` 的 type 字段靠它 | ✅ **已实现**（2026-10-25：嵌套块尾计数、形参/实参与 `\@`、`.set` 符号表、整数表达式补移位与按位运算、先解析操作数再展开宏） |
+| 自定义节的 flags / 对齐（`SHF_MERGE`、`sh_addralign`） | objtool 校「节长 = 条目长整倍数」 | ✅ **已修复**（2026-10-25：并行合并不再压平 flags；非 merge 节默认对齐 1） |
+| ALTERNATIVE 表条目长与替换节布局 | `.byte 773b-771b` / `.byte 775f-774f` 算错 ⇒ objtool 报 `empty alternative entry`；`.skip` 根本没实现；可执行 pushsection 的目标节按 16 垫 ⇒ `.altinstr_replacement` 节长被吹大三倍 | ✅ **已修**（2026-10-25：实现 `.skip`/`.space` 与测距遍、GAS 关系运算为真给 -1、标号按「真身所在节」结算（`pushsection_label_offsets` 覆盖可执行区间）、可执行节追加只按节自己的对齐）。三层嵌套 `ALTERNATIVE` 的 `.altinstructions` 与 `.altinstr_replacement` 已做到与 gcc 逐字节一致（用例 `nested_alternative_entries_match_gas_byte_for_byte`） |
+| 函数对齐（`-falign-functions=N` / `-fmin-function-alignment=N`） | 内核 `CONFIG_FUNCTION_ALIGNMENT=16` 靠它把每条函数摆到 16 字节边界，并顺带把 `.noinstr.text`/`.init.text`/`.entry.text` 的 `sh_addralign` 抬到 16 | ✅ **已实现**（2026-10-25：两个写法都解析并送进 `Target::align_functions`，发射与自定义节取同一口径）。包装器不再吞掉 `-fmin-function-alignment=*`，而是在交给 gcc 时重写成 `-falign-functions=*`——本机 gcc 13 认不得新写法，而内核的 `cc-option` 探测问的是包装器，吞掉会让探测谎报「支持」 |
+| `~/.dcc/cache` 无限增长 | 全树单轮可涨到 38 GB / 44 万条目，且无目录环境变量与淘汰策略 | ⚠️ **未修**（本轮靠外部 `find ~/.dcc/cache -type f -mmin +30 -delete` 控住，已写进 §5.0；缓存是内容寻址，删任何条目只会多算不会错值，适合加容量上限淘汰） |
 
 ## 6. 调试技巧
 

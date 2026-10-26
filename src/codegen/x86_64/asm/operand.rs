@@ -72,6 +72,10 @@ pub fn parse_asm_operand_str(s: &str) -> AsmOperand {
         } else if let Ok(v) = rest.parse::<i64>() {
             return AsmOperand::Imm(v);
         }
+        // 常量表达式形式的立即数（`$~0xfa1e0ff3`）：与 `constraint.rs` 里那份解析器同一口径。
+        if let Some(v) = crate::codegen::x86_64::codegen::Codegen::eval_pure_numeric_arith(rest) {
+            return AsmOperand::Imm(v);
+        }
         // $label (e.g., $1f, $1b) - local label reference
         return AsmOperand::Sym(rest.to_string());
     }

@@ -14,11 +14,11 @@ mov %rdi,%rax
 mov (%rax),%eax
 and $0x3,%rax
 movabs $0xfffffffc,%r8
-and %r8,%rax
+and %r8d,%eax
 mov %rax,%rbx
 mov %esi,%r8d
 and $0x3,%r8
-or %r8,%rbx
+or %r8d,%ebx
 mov %rbx,%rax
 and $0x3,%rax
 mov -0xc8(%r13),%rcx

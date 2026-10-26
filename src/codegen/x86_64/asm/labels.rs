@@ -210,6 +210,14 @@ impl AsmLocalLabels {
             .map(|(_, _, n)| n.as_str())
     }
 
+    /// 本块里所有数字标签的内部名（每一条 `N:` 定义一个）。
+    ///
+    /// 给 `.skip` 的「测距遍」用：那一遍只为了拿到这些标签在块内的字节位置，
+    /// 而名字由 `scope` 与序号决定，两边取同一个 `scope` 就能逐字对上。
+    pub fn def_names(&self) -> impl Iterator<Item = &str> {
+        self.defs.iter().map(|(_, _, n)| n.as_str())
+    }
+
     /// Resolve forward ('f') or backward ('b') label reference
     ///
     /// # Arguments

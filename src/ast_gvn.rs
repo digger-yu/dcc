@@ -1248,7 +1248,7 @@ fn propagate_copies_expr(e: &mut Expr, copies: &HashMap<String, String>) {
 
 /// 值编号的键。**必须携带结果类型**: 旧键只记运算与操作数, 于是
 /// `long b = x + y;` 与 `int a = x + y;` 得到同一个键, `b` 被替换成 `a` 后按 `int`
-/// 记账, 高于 32 位的结果直接截断。类型串由 `Debug` 输出 (对同一 `Type` 确定),
+/// 记账, 高于 32 位的结果直接截断。类型串由 `Type::identity_tag` 给出（确定、有界）,
 /// 不引入新的哈希轴。
 fn gvn_key_string(e: &Expr, fenv_access: bool) -> Option<String> {
     // Volatile expressions must not be CSE'd
@@ -1256,12 +1256,17 @@ fn gvn_key_string(e: &Expr, fenv_access: bool) -> Option<String> {
         return None;
     }
     let inner = gvn_key_inner(e, fenv_access)?;
-    Some(format!("{}#{}", inner, type_tag(&e.ty())))
+    Some(format!("{}#{}", inner, type_tag(&e.ty())?))
 }
 
 /// 类型标签: 只需「同类型同标签、不同类型不同标签」。
-fn type_tag(ty: &Type) -> String {
-    format!("{:?}", ty)
+///
+/// 这里走 `Type::identity_tag` 而不是派生 `Debug`：`Debug` 会把聚合类型的字段树整棵
+/// 展开，而内核里 `struct page` 这类类型是一张共享 DAG，展开后每层翻倍 —— 实测单个
+/// 类型串申请 3.4 GB，`format!` 当场分配失败（表现为整个 TU 被 OOM 杀掉）。
+/// 身份串给不出时（匿名聚合过大/成环）返回 `None`，本次值编号作废。
+fn type_tag(ty: &Type) -> Option<String> {
+    ty.identity_tag()
 }
 
 /// 纯常量键 (`i:<值>`) 不能作为「已算出它的变量」入表: 常量本身已经是

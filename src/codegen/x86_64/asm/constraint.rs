@@ -37,6 +37,13 @@ impl Codegen {
             .chars()
             .any(|c| matches!(c, 'i' | 'n' | 'I' | 'N' | 'M' | 'X' | 'E'))
     }
+    /// 约束里**只有**立即数类字母（没有任何寄存器/内存类备选）。
+    ///
+    /// 判据本体在 `codegen::shared::asm_constraints`，与 `opt.rs` 内联时的操作数
+    /// 代回共用同一口径（那里必须知道哪个操作数「非要常量不可」）。
+    pub(crate) fn asm_constraint_is_immediate_only(constraint: &str) -> bool {
+        crate::codegen::shared::asm_constraints::constraint_is_immediate_only(constraint)
+    }
     pub(crate) fn asm_constraint_prefers_memory(constraint: &str, is_inout: bool) -> bool {
         if constraint.is_empty() {
             return false;
@@ -495,29 +502,164 @@ impl Codegen {
         if s.is_empty() {
             return None;
         }
-        // 快速前置过滤: 不允许出现字母或下划线 (那一定是 symbol 引用).
-        if s.chars().any(|c| c.is_ascii_alphabetic() || c == '_') {
-            return None;
-        }
-        // 再过滤: 只允许数字、空白、括号、+ - * . ('.' 用作 PC, 但在纯数字上下文
-        // 出现说明不是纯数字, 直接 None).
-        if s.chars().any(|c| {
-            !c.is_ascii_digit()
-                && !c.is_ascii_whitespace()
-                && c != '('
-                && c != ')'
-                && c != '+'
-                && c != '-'
-                && c != '*'
-        }) {
-            return None;
+        // 前置过滤：允许「纯数 + 运算符」，不允许符号引用。
+        // 字母只能属于一个数字字面量：`0x`/`0X` 后的十六进制数字、`0b`/`0B` 后的二进制
+        // 数字。旧实现只放行「紧跟在 0 后面的 x/X/b/B」，于是 `0xfa1e0ff3` 里的 `f`/`a`/`e`
+        // 被当成符号引用 ⇒ 整条表达式折不出来（内核 `asm/ibt.h` 的
+        // `mov $~0xfa1e0ff3, %[endbr]` 就是这一形状，当时整条 mov 被当成不可编码）。
+        // 带标识符的式子（`foo+1`）仍必须拒，否则错值会静默进产物。
+        {
+            let bytes = s.as_bytes();
+            let mut i = 0usize;
+            while i < bytes.len() {
+                let c = bytes[i];
+                if c.is_ascii_digit() || c.is_ascii_whitespace() || b"()-+*/%&|^~!<>".contains(&c) {
+                    i += 1;
+                    continue;
+                }
+                // `0x` / `0X` / `0b` / `0B`：把整个字面量跳过去
+                if (c == b'x' || c == b'X' || c == b'b' || c == b'B')
+                    && i > 0
+                    && bytes[i - 1] == b'0'
+                {
+                    let radix = if c == b'b' || c == b'B' { 2u32 } else { 16u32 };
+                    let mut j = i + 1;
+                    while j < bytes.len()
+                        && (bytes[j] as char).to_digit(radix).is_some()
+                    {
+                        j += 1;
+                    }
+                    if j == i + 1 {
+                        // `0x` 后面一个有效数字都没有 ⇒ 不是数字字面量
+                        return None;
+                    }
+                    i = j;
+                    continue;
+                }
+                return None;
+            }
         }
         let bytes = s.as_bytes();
         let mut pos: usize = 0;
         Self::parse_arith_expr(bytes, &mut pos)
     }
 
+    /// 整数表达式入口：按 C 的优先级从低到高逐层拆。
+    /// `|` → `^` → `&` → `==/!=` → 比较 → 移位 → 加减 → 乘除模 → 原子。
+    ///
+    /// 为什么要整条链：内核 `__ex_table` 的 type 字段就是
+    /// `(17 | ((0) << 16)) + (.Lregnr << 8)`（见 `asm/directive.rs` 里宏展开后的样子），
+    /// 只认 `+ - *` 的旧版算不出来 ⇒ 第三个字不发 ⇒ `ld -r vmlinux.o` 后 objtool 报
+    /// 「__ex_table size not a multiple of 12」。
     fn parse_arith_expr(b: &[u8], pos: &mut usize) -> Option<i64> {
+        Self::parse_bitor(b, pos)
+    }
+
+    fn parse_bitor(b: &[u8], pos: &mut usize) -> Option<i64> {
+        let mut lhs = Self::parse_bitxor(b, pos)?;
+        loop {
+            Self::skip_ws(b, pos);
+            if *pos >= b.len() || b[*pos] != b'|' || b[*pos..].starts_with(b"||") {
+                return Some(lhs);
+            }
+            *pos += 1;
+            lhs |= Self::parse_bitxor(b, pos)?;
+        }
+    }
+
+    fn parse_bitxor(b: &[u8], pos: &mut usize) -> Option<i64> {
+        let mut lhs = Self::parse_bitand(b, pos)?;
+        loop {
+            Self::skip_ws(b, pos);
+            if *pos >= b.len() || b[*pos] != b'^' {
+                return Some(lhs);
+            }
+            *pos += 1;
+            lhs ^= Self::parse_bitand(b, pos)?;
+        }
+    }
+
+    fn parse_bitand(b: &[u8], pos: &mut usize) -> Option<i64> {
+        let mut lhs = Self::parse_equality(b, pos)?;
+        loop {
+            Self::skip_ws(b, pos);
+            if *pos >= b.len() || b[*pos] != b'&' || b[*pos..].starts_with(b"&&") {
+                return Some(lhs);
+            }
+            *pos += 1;
+            lhs &= Self::parse_equality(b, pos)?;
+        }
+    }
+
+    fn parse_equality(b: &[u8], pos: &mut usize) -> Option<i64> {
+        let mut lhs = Self::parse_relational(b, pos)?;
+        loop {
+            Self::skip_ws(b, pos);
+            let eq = if b[*pos..].starts_with(b"==") {
+                true
+            } else if b[*pos..].starts_with(b"!=") {
+                false
+            } else {
+                return Some(lhs);
+            };
+            *pos += 2;
+            let rhs = Self::parse_relational(b, pos)?;
+            // GAS 的关系/相等运算为真时给 **-1**（全 1），为假时给 0——不是 C 的 1。
+            // 内核 ALTERNATIVE 的补齐公式 `.skip -(((新长)-(旧长)) > 0) * (...)` 正好依赖
+            // 这一点：拿 -1 时 `-(-1)*(X)` = X（该补多少补多少）；按 C 的 1 算就成了 -X，
+            // 负数又会被 GAS 当「负重复数」忽略 ⇒ 该补的一个不补（`.byte 773b-771b`
+            // 算成 0，objtool 报 empty alternative entry）。实测对比 GAS 与 gcc 产物定下。
+            lhs = if (lhs == rhs) == eq { -1 } else { 0 };
+        }
+    }
+
+    fn parse_relational(b: &[u8], pos: &mut usize) -> Option<i64> {
+        let mut lhs = Self::parse_shift(b, pos)?;
+        loop {
+            Self::skip_ws(b, pos);
+            let rest = &b[*pos..];
+            let (op, take) = if rest.starts_with(b"<=") {
+                (1u8, 2usize)
+            } else if rest.starts_with(b">=") {
+                (2u8, 2usize)
+            } else if rest.first() == Some(&b'<') {
+                (3u8, 1usize)
+            } else if rest.first() == Some(&b'>') {
+                (4u8, 1usize)
+            } else {
+                return Some(lhs);
+            };
+            *pos += take;
+            let rhs = Self::parse_shift(b, pos)?;
+            // 真值同 GAS：成立给 -1，不成立给 0。
+            lhs = match op {
+                1 => i64::from(lhs <= rhs) * -1,
+                2 => i64::from(lhs >= rhs) * -1,
+                3 => i64::from(lhs < rhs) * -1,
+                _ => i64::from(lhs > rhs) * -1,
+            };
+        }
+    }
+
+    fn parse_shift(b: &[u8], pos: &mut usize) -> Option<i64> {
+        let mut lhs = Self::parse_addsub(b, pos)?;
+        loop {
+            Self::skip_ws(b, pos);
+            let rest = &b[*pos..];
+            let left = rest.starts_with(b"<<");
+            let right = rest.starts_with(b">>");
+            if !left && !right {
+                return Some(lhs);
+            }
+            *pos += 2;
+            let n = Self::parse_addsub(b, pos)?;
+            let n = u32::try_from(n).unwrap_or(64).min(64);
+            lhs = if left { lhs << n } else { lhs >> n };
+        }
+    }
+
+    /// 加 / 减层（在移位之下、乘除模之上）。
+    fn parse_addsub(b: &[u8], pos: &mut usize) -> Option<i64> {
         let mut lhs = Self::parse_arith_term(b, pos)?;
         loop {
             Self::skip_ws(b, pos);
@@ -542,12 +684,27 @@ impl Codegen {
         let mut lhs = Self::parse_arith_atom(b, pos)?;
         loop {
             Self::skip_ws(b, pos);
-            if *pos >= b.len() || b[*pos] != b'*' {
+            if *pos >= b.len() || (b[*pos] != b'*' && b[*pos] != b'%' && b[*pos] != b'/') {
                 return Some(lhs);
             }
+            let op = b[*pos];
             *pos += 1;
             let rhs = Self::parse_arith_atom(b, pos)?;
-            lhs = lhs.checked_mul(rhs)?;
+            lhs = match op {
+                b'*' => lhs.checked_mul(rhs)?,
+                b'%' => {
+                    if rhs == 0 {
+                        return None;
+                    }
+                    lhs % rhs
+                },
+                _ => {
+                    if rhs == 0 {
+                        return None;
+                    }
+                    lhs / rhs
+                },
+            };
         }
     }
 
@@ -576,7 +733,43 @@ impl Codegen {
                 *pos += 1;
                 Self::parse_arith_atom(b, pos)
             },
+            b'~' => {
+                *pos += 1;
+                let v = Self::parse_arith_atom(b, pos)?;
+                Some(!v)
+            },
             c if c.is_ascii_digit() => {
+                // 0x / 0b 前缀（内核宏里的 type 常数就是十六进制为主）
+                if c == b'0' && *pos + 1 < b.len() && matches!(b[*pos + 1], b'x' | b'X') {
+                    *pos += 2;
+                    let start = *pos;
+                    while *pos < b.len() && (b[*pos] as char).is_ascii_hexdigit() {
+                        *pos += 1;
+                    }
+                    if start == *pos {
+                        return None;
+                    }
+                    return i64::from_str_radix(
+                        std::str::from_utf8(&b[start..*pos]).ok()?,
+                        16,
+                    )
+                    .ok();
+                }
+                if c == b'0' && *pos + 1 < b.len() && matches!(b[*pos + 1], b'b' | b'B') {
+                    *pos += 2;
+                    let start = *pos;
+                    while *pos < b.len() && (b[*pos] == b'0' || b[*pos] == b'1') {
+                        *pos += 1;
+                    }
+                    if start == *pos {
+                        return None;
+                    }
+                    return i64::from_str_radix(
+                        std::str::from_utf8(&b[start..*pos]).ok()?,
+                        2,
+                    )
+                    .ok();
+                }
                 let start = *pos;
                 while *pos < b.len() && b[*pos].is_ascii_digit() {
                     *pos += 1;
@@ -714,6 +907,12 @@ impl Codegen {
                     return AsmOperand::Imm(v);
                 }
             } else if let Ok(v) = rest.parse::<i64>() {
+                return AsmOperand::Imm(v);
+            }
+            // 常量表达式形式的立即数：内核 `arch/x86/include/asm/ibt.h` 的
+            // `mov $~0xfa1e0ff3, %[endbr]`（先把取反折成常量再取补）就是这一形状。
+            // 折不出再当成符号引用。
+            if let Some(v) = Self::eval_pure_numeric_arith(rest) {
                 return AsmOperand::Imm(v);
             }
             // $label (e.g. $1f, $1b) — local label reference

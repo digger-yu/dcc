@@ -776,7 +776,104 @@ fn comdat_weak_functions() {
     let _ = std::fs::remove_file(&exe);
 }
 
+/// `__attribute__((weak))` 的三种写法都必须把函数符号发成 STB_WEAK。
+///
+/// 缺陷形状（内核 `ld -r vmlinux.o` 报 360 条 multiple definition）：
+///   * `int *__weak f(void) {...}` —— 属性写在 `*` 与名字之间，`skip_ptr_qualifiers`
+///     直接 `skip_attributes()` 丢弃 ⇒ FuncDecl 不带 weak ⇒ 发成 GLOBAL；
+///   * `int f(void) __weak;` + 不带属性的定义 —— 定义的 attrs 不从声明继承 ⇒ GLOBAL。
+/// 内核用大量这种弱桩（`execmem_arch_setup`、`cpu_show_*` 等）与架构侧强定义同名，
+/// 弱桩发成强定义就撞车。本用例把六种写法一次过钉住绑定。
+#[test]
+#[cfg(unix)]
+fn weak_attribute_spellings_all_emit_stb_weak() {
+    let src = "\
+#define __weak		__attribute__((weak))
+__weak int w_pre_type(void) { return 1; }
+int __weak w_after_type(void) { return 2; }
+int *__weak w_after_star(void) { static int x; return &x; }
+int w_decl_only(void) __weak;
+int w_decl_only(void) { return 4; }
+int w_post_decl(void) __attribute__((weak)) { return 6; }
+int use(void) { return w_pre_type() + w_after_type() + *w_after_star() + w_decl_only() + w_post_decl(); }
+";
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-weak-spell-{pid}.c"));
+    let op = dir.join(format!("dcc-weak-spell-{pid}.o"));
+    fs::write(&sp, src).expect("write weak fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("run dcc -c");
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let readelf = Command::new("readelf").args(["-sW"]).arg(&op).output().expect("readelf");
+    let syms = String::from_utf8_lossy(&readelf.stdout).to_string();
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+    for name in [
+        "w_pre_type",
+        "w_after_type",
+        "w_after_star",
+        "w_decl_only",
+        "w_post_decl",
+    ] {
+        let line = syms
+            .lines()
+            .find(|l| l.split_whitespace().last() == Some(name))
+            .unwrap_or_else(|| panic!("{name} 应在符号表里: {syms}"));
+        assert!(line.contains("WEAK"), "{name} 必须是 WEAK（gcc 同形），实际: {line}");
+        assert!(!line.contains("UND"), "{name} 是定义而不是引用: {line}");
+    }
+}
+
 // =================== CET/IBT 安全 PLT ===================
+
+/// 函数类型的无初值声明符列表（`typedef int ft(int); ft f1, f2;`）不得占用存储。
+///
+/// 缺陷形状：这种声明被当成 tentative definition，于是**每个包含该头的 TU** 都在
+/// .bss 里发一份 GLOBAL 定义；`ld -r vmlinux.o` 报 multiple definition。内核
+/// `include/linux/fs_parser.h` 的 `fs_param_type fs_param_is_bool, …;` 正是此形。
+/// gcc 的读法是「函数声明（隐式 extern）」：只留未定义引用，不分配存储。
+#[test]
+#[cfg(unix)]
+fn function_typed_declaration_list_defines_no_storage() {
+    let src = "\
+typedef int ft(int);
+ft f1, f2;
+int use(int x) { return f1(x) + f2(x); }
+";
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-funclist-{pid}.c"));
+    let op = dir.join(format!("dcc-funclist-{pid}.o"));
+    fs::write(&sp, src).expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("run dcc -c");
+    assert!(out.status.success(), "compile: {}", String::from_utf8_lossy(&out.stderr));
+    let bytes = fs::read(&op).expect("read .o");
+    let secs = elf64_sections(&bytes);
+    let bss_size = secs.get(".bss").map(|s| s.2).unwrap_or(0);
+    let readelf = Command::new("readelf").args(["-sW"]).arg(&op).output().expect("readelf");
+    let syms = String::from_utf8_lossy(&readelf.stdout).to_string();
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+    for name in ["f1", "f2"] {
+        let line = syms
+            .lines()
+            .find(|l| l.split_whitespace().last() == Some(name))
+            .unwrap_or_else(|| panic!("{name} 应作为未定义引用出现在符号表: {syms}"));
+        assert!(line.contains("UND"), "{name} 只能是引用而不是定义: {line}");
+        assert!(!line.contains("OBJECT"), "{name} 是函数声明，不应被发成对象: {line}");
+    }
+    assert_eq!(bss_size, 0, "函数声明不得占用 .bss，实际 {bss_size} 字节: {syms}");
+}
 
 /// CET/IBT: -z ibt 编译 PIE 应生成 .plt.sec 节和 .gnu.property 节
 #[test]

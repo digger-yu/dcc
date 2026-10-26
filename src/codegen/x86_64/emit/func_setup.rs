@@ -2323,7 +2323,12 @@ impl Codegen {
             // __stack_chk_fail is emitted as an undefined global
             // symbol (provided by libc / kernel runtime).
             self.emit_insn(&Insn::short_jump_rel8(0x74, 0x05)); // je .+5 (canary OK → skip)
-            self.call_label("__stack_chk_fail");
+            // noreturn 调用：上面那条 `je` 跳过的就是本条 call，成功路径不会执行它，
+            // 失败路径再不会回到本函数 —— 所以这里不需要（也不能）caller-saved 家的
+            // 存/取窗口：窗口会多发指令，而 `je` 的位移是按 call 恰 5 字节硬编码的。
+            // 实测证据：内核开 `-fstack-protector-strong` + 延伸池后，`lib/list_sort.c`
+            // 在旧路上直接命中 E1136 而整 TU 失败。
+            self.call_label_noreturn("__stack_chk_fail");
         }
         // 恢复被调用者保存寄存器: rbx, r12, r14, r15
         // 同序言: 无条件发射, 未使用的寄存器由 patch_callee_saves 改为 nop

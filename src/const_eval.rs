@@ -134,7 +134,24 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
                     _ => Err(ConstEvalError::NotConstant),
                 }
             },
-            // &global_struct.member: 地址常量表达式 (C 标准 6.6.9)
+            // `&((T *)expr)[i]` 与 `(T *)&x.m`：`Expr::Cast` 不改变对象地址，
+            // 剥掉那一层转型后按内层递归求同一条地址常量链。
+            // 内核 `_static_cpu_has` 的 `[cap_byte] "i" (&((const char *)
+            // boot_cpu_data.x86_capability)[bit >> 3])` 就是这个形状：不认它，
+            // 只能接立即数的约束就落在寄存器上，`.altinstr_aux`/`__jump_table` 条目里
+            // 留下一条指向寄存器名的野重定位（objtool 到链接后才报）。
+            // 递归时 `e` 必须是 `inner` 而不是原来的 `e`，否则同一个 `Cast` 臂会自旋。
+            Expr::Cast { e: inner, .. } => eval_full(
+                &Expr::AddrOf {
+                    e: inner.clone(),
+                    // 只需子层的类型参一下地址链（结果只取符号名+偏移），
+                    // 与下面 `Member` 臂递归时同一个构造口径。
+                    ty: Type::Ptr(Box::new(crate::ast::QualType::new(inner.ty()))),
+                    span: crate::diagnostics::Span::point("", 0, 0),
+                },
+                fenv_access,
+            ),
+            // `&global_struct.member`: 地址常量表达式 (C 标准 6.6.9)
             // 用于全局/静态初始化器，如 `const T *p = &global.field;`
             Expr::Member {
                 expr,

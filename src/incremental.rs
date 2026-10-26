@@ -216,6 +216,11 @@ impl IncrementalCache {
         cfg.short_wchar.hash(&mut hasher);
         // No common
         cfg.no_common.hash(&mut hasher);
+        // 对齐类标志: 直接改每条函数入口/循环头/跳转目标前的 nop 填充，
+        // 不进指纹就会把「改了 -falign-* 之前」的代码当缓存命中端出去。
+        cfg.align_loops.hash(&mut hasher);
+        cfg.align_jumps.hash(&mut hasher);
+        cfg.align_functions.hash(&mut hasher);
         // Ftrace mode
         (cfg.ftrace_mode as u8).hash(&mut hasher);
         // Stack clash protection
@@ -414,6 +419,7 @@ mod tests {
             fp_contract_mode: crate::cli::FpContractMode::Default,
             align_loops: 0,
             align_jumps: 0,
+            align_functions: 0,
             profile_parse: false,
             ipa_sra: crate::ipa_sra::IpaSraConfig::default(),
             profile: crate::profile::ProfileConfig::default(),

@@ -2221,6 +2221,23 @@ impl Codegen {
     // ========================================================================
 
     pub fn call_label(&mut self, l: &str) {
+        self.call_label_with(l, true);
+    }
+
+    /// 调用一个**确定不返回**的被调方（金丝雀失败的 `__stack_chk_fail` 一族）。
+    ///
+    /// 这类调用点不需要 caller-saved 家的保存窗口，两条理由缺一不可：
+    ///   * 被调方 noreturn ⇒ 这条 call 之后本路径再无「继续执行并回头读家里的值」的一面；
+    ///   * 成功路径是条件跳转**跳过**这条 call（落在 call 之后），寄存器内容在成功路径上
+    ///     从未被这次调用触碰。
+    ///
+    /// 反过来，给这种调用点套窗口是有害的：epilogue 里那条跳过用的 `je` 位移按 call 的
+    /// 5 字节硬编码，窗口的存/取会多发指令，把跳过目标算歪。
+    pub fn call_label_noreturn(&mut self, l: &str) {
+        self.call_label_with(l, false);
+    }
+
+    fn call_label_with(&mut self, l: &str, guard_ext_homes: bool) {
         // 前置三的覆盖缺口检查：call 序列的存/取窗口开在 `abi/call.rs::emit_sysv_call` 两端，
         // 而 `call_label` 是本后端** primitive**，在 `abi/call.rs` 之外还有二十多个调用点
         // （内置函数降级成 `memcmp`/`memchr`/`libc_name`、`__fentry__`/`mcount`、
@@ -2233,7 +2250,11 @@ impl Codegen {
         //
         // 本检查把那个**静默错值**变成可见、可归因的失败（同一函数里已有窗口开着时不会误报）。
         // 延伸池默认关着 ⇒ `ext_home_saves` 为空 ⇒ 不进这条分支，今天的产物一字不变。
-        if !self.ext_home_saves.is_empty() && self.home_overrides.is_empty() {
+        // noreturn 调用点由 `call_label_noreturn` 走 `guard_ext_homes = false`（理由见彼处）。
+        if guard_ext_homes
+            && !self.ext_home_saves.is_empty()
+            && self.home_overrides.is_empty()
+        {
             self.report_internal_bug(
                 "E1136",
                 format!(

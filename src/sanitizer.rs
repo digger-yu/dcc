@@ -2563,8 +2563,12 @@ fn wrap_with_cfi_check(callee: &Expr, type_hash: u64, span: &Span) -> Expr {
 /// 根据函数类型计算 CFI type hash (FNV-1a 64-bit)。
 /// 用于运行时比较 callee 签名是否匹配。
 fn cfi_type_hash(ty: &Type) -> u64 {
-    // 简化: 使用类型的字符串表示的 FNV-1a hash
-    let s = format!("{:?}", ty);
+    // 串用 `Type::identity_tag`（确定且有界）, 不用派生 `Debug`：`Debug` 按树展开
+    // 聚合类型的字段, 内核那种共享 DAG 类型（`struct page` 等）会按层翻倍到 GB 级
+    // 分配失败。身份串给不出（过大/成环）时退化到尺寸+对齐, 仍是确定的。
+    let s = ty.identity_tag().unwrap_or_else(|| {
+        format!("#sz{}#al{}", ty.size(), ty.align())
+    });
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in s.as_bytes() {
         hash ^= *b as u64;

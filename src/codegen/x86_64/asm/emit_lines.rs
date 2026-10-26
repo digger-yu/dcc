@@ -247,6 +247,23 @@ impl Codegen {
             "fninit" => {
                 self.emit_insn_expect(&Insn::raw(&[0xDB, 0xE3]));
             },
+            // fnclex: DB E2（与 fnop 的 D9 D0 不同一条，也与 fninit 的 DB E3 只差一位）。
+            // 内核 arch/x86/kernel/fpu/core.c 的 init_fpu 清异常就用它。
+            "fnclex" => {
+                self.emit_insn_expect(&Insn::raw(&[0xDB, 0xE2]));
+            },
+            // frstor: DD /4，从内存镜像恢复整个 x87 状态（内核 legacy.h 的
+            // restore_fpregs_from_fpstate 走的是 `frstor %[fpstate]`）。
+            "frstor" if ops.len() == 1 => self.emit_asm_x87_mem(&ops[0], 0xDD, 4, false),
+            // x87 弹出式算术 `<op>p`：DE /0 /1 /4 /5 /6 /7（GAS 实测
+            // `faddp %st,%st(1)`=DE C1、`fmulp`=DE C8、`fsubp`=DE E1、
+            // `fsubrp`=DE E9、`fdivp`=DE F1、`fdivrp`=DE F9）。
+            "faddp" if ops.len() <= 2 => self.emit_asm_x87_p(ops, 0),
+            "fmulp" if ops.len() <= 2 => self.emit_asm_x87_p(ops, 1),
+            "fsubp" if ops.len() <= 2 => self.emit_asm_x87_p(ops, 4),
+            "fsubrp" if ops.len() <= 2 => self.emit_asm_x87_p(ops, 5),
+            "fdivp" if ops.len() <= 2 => self.emit_asm_x87_p(ops, 6),
+            "fdivrp" if ops.len() <= 2 => self.emit_asm_x87_p(ops, 7),
             // x87 加载/存储 (单操作数: 内存或 st(i))
             "fld" | "flds" | "fldl" | "fldt" if ops.len() == 1 => {
                 self.emit_asm_x87_mem(&ops[0], 0xD9, 0, false)
@@ -599,6 +616,28 @@ impl Codegen {
             "clflush" if ops.len() == 1 => self.emit_asm_clflush(&ops[0], false, 7),
             "clflushopt" if ops.len() == 1 => self.emit_asm_clflush(&ops[0], true, 7),
             "clwb" if ops.len() == 1 => self.emit_asm_clflush(&ops[0], true, 6),
+            // XSAVE/XRSTOR 家族（内核 fpu 的 ALTERNATIVE 就靠这几条）：
+            //   xsave    0F AE /4      xrstor   0F AE /5      xsaveopt 0F AE /6
+            //   xsavec   0F C7 /4      xsaves   0F C7 /5      xrstors  0F C7 /7
+            // `mnemonic64` 只是多一个 REX.W。
+            "xsave" | "xsave64" if ops.len() == 1 => {
+                self.emit_asm_xsave(&ops[0], 0xAE, 4, mnemonic == "xsave64")
+            },
+            "xsaveopt" | "xsaveopt64" if ops.len() == 1 => {
+                self.emit_asm_xsave(&ops[0], 0xAE, 6, mnemonic == "xsaveopt64")
+            },
+            "xrstor" | "xrstor64" if ops.len() == 1 => {
+                self.emit_asm_xsave(&ops[0], 0xAE, 5, mnemonic == "xrstor64")
+            },
+            "xsavec" | "xsavec64" if ops.len() == 1 => {
+                self.emit_asm_xsave(&ops[0], 0xC7, 4, mnemonic == "xsavec64")
+            },
+            "xsaves" | "xsaves64" if ops.len() == 1 => {
+                self.emit_asm_xsave(&ops[0], 0xC7, 5, mnemonic == "xsaves64")
+            },
+            "xrstors" | "xrstors64" if ops.len() == 1 => {
+                self.emit_asm_xsave(&ops[0], 0xC7, 7, mnemonic == "xrstors64")
+            },
             // FSGSBASE: F3 0F AE /0-/3 (rdfsbase, rdgsbase, wrfsbase, wrgsbase)
             "rdfsbase" if ops.len() == 1 => self.emit_asm_fsgsbase(&ops[0], 0),
             "rdgsbase" if ops.len() == 1 => self.emit_asm_fsgsbase(&ops[0], 1),
@@ -3802,10 +3841,144 @@ impl Codegen {
             self.emit_asm_line(line);
         }
     }
+    /// 进入可执行 pushsection：代码继续发在 `self.code` 里（节内跳转与重定位仍按 `.text`
+    /// 坐标解析），`.popsection`/`.previous` 时由 `close_exec_pushsection` 整段搬走。
+    pub(in crate::codegen::x86_64) fn open_exec_pushsection(&mut self, sec_idx: usize) {
+        self.pushsection_exec_stack
+            .push((sec_idx, self.code.len() as u64, Vec::new()));
+    }
+
+    /// 把刚定义的标号归到「最内层可执行 pushsection」名下。
+    ///
+    /// 必须确认当前活动节就是这个可执行节：可执行节里再嵌一个非执行 pushsection
+    /// （内核 `ANNOTATE_DATA_SPECIAL` 就是 `ax` 节套 `.discard.*` 数据节）时，标号属于
+    /// 那个数据节，归到外层可执行区间会把数据节里的标号算成替换代码的偏移。
+    pub(in crate::codegen::x86_64) fn note_exec_pushsection_label(&mut self, name: &str) {
+        let Some(&(sec_idx, start, _)) = self.pushsection_exec_stack.last() else {
+            return;
+        };
+        if self.pushsection_stack.last().copied() != Some(sec_idx) {
+            return;
+        }
+        let pos = self.code.len() as u64;
+        if pos < start {
+            return;
+        }
+        if let Some(top) = self.pushsection_exec_stack.last_mut() {
+            top.2.push((name.to_string(), pos));
+        }
+    }
+
+    /// 关闭最内层可执行 pushsection：把这段代码追加到目标自定义节，并把区间内定义的
+    /// 标号按「搬迁后的节内坐标」登记进 `pushsection_label_offsets`。
+    ///
+    /// 追加只能按**目标节自己的对齐**垫，不能按 16 对齐：GAS 对 `.pushsection
+    /// .altinstr_replacement, "ax"` 这类它不认识的节名默认 `sh_addralign = 1`，节里真需要
+    /// 对齐时由内容自己的 `.align` 抬。按 16 垫会在每条 ALTERNATIVE 的替换代码之间留下
+    /// 空洞，`.long 774f - .` 的重定位加数随之偏掉（实测 `kernel/signal.o`：gcc 的四个
+    /// 替换点偏移是 0/3/8/0xb，dcc 是 0/4/0x14/0x16/0x19/0x1c，节长 15 字节被吹到 33）。
+    pub(in crate::codegen::x86_64) fn close_exec_pushsection(&mut self) {
+        let Some((sec_idx, start, labels)) = self.pushsection_exec_stack.pop() else {
+            return;
+        };
+        let size = self.code.len() as u64 - start;
+        if size == 0 {
+            // 空区间不往目标节追加字节，但节里已有的标号仍要登记坐标：
+            // `.popsection` 紧贴标号定义时（`775:` 后直接退出），标号就在节尾。
+            let sec_off = self.extra_sections[sec_idx].data.len() as u64;
+            for (name, pos) in labels {
+                self.pushsection_label_offsets
+                    .insert(name, (sec_idx, sec_off + (pos - start)));
+            }
+            return;
+        }
+        let align = self.extra_sections[sec_idx].align.max(1);
+        let len = self.extra_sections[sec_idx].data.len();
+        let aligned = (len + align as usize - 1) & !(align as usize - 1);
+        self.pad_custom_section_to(sec_idx, aligned);
+        let sec_off = self.extra_sections[sec_idx].data.len() as u64;
+        self.pad_custom_section_to(sec_idx, (sec_off + size) as usize);
+        for (name, pos) in labels {
+            self.pushsection_label_offsets
+                .insert(name, (sec_idx, sec_off + (pos - start)));
+        }
+        self.pushsection_code_ranges
+            .push((start, size, sec_idx, sec_off));
+    }
+
+    /// 本块 asm 里是否有 `.skip`/`.space` 的计数引用了数字标签（`NNNb` / `NNNf`）。
+    ///
+    /// 只要有引用就开测距遍： backward 的标签位置在测距遍里也能拿到，而「全用同一
+    /// 坐标空间」比「前向用测距表、后向用发射时坐标」少一类错差。
+    fn block_has_forward_ref_skip(lines: &[String]) -> bool {
+        lines.iter().any(|l| {
+            let t = l.trim();
+            if !(t.starts_with(".skip") || t.starts_with(".space")) {
+                return false;
+            }
+            let rest = &t[t.find(char::is_whitespace).map(|i| i + 1).unwrap_or(t.len())..];
+            let b = rest.as_bytes();
+            let mut i = 0usize;
+            while i < b.len() {
+                if !b[i].is_ascii_digit() {
+                    i += 1;
+                    continue;
+                }
+                let s = i;
+                while i < b.len() && b[i].is_ascii_digit() {
+                    i += 1;
+                }
+                // `0x…` / `0b…` 是进位前缀（填充字节就写成 0x90），不是标签引用
+                let is_radix_prefix = i == s + 1
+                    && b[s] == b'0'
+                    && i < b.len()
+                    && matches!(b[i] | 0x20, b'x' | b'b');
+                if is_radix_prefix {
+                    i += 1;
+                    while i < b.len() && (b[i] as char).is_ascii_alphanumeric() {
+                        i += 1;
+                    }
+                    continue;
+                }
+                // 数字后面紧跟 f/b 才是 GAS 的局部标签引用
+                if i < b.len() && (b[i] == b'f' || b[i] == b'b') {
+                    return true;
+                }
+            }
+            false
+        })
+    }
+
     pub(crate) fn emit_resolved_asm_lines(&mut self, resolved_lines: &[String], is_global: bool) {
         let scope = self.next_label;
         self.next_label += 1;
         let locals = AsmLocalLabels::scan(resolved_lines, scope);
+        // `.skip <表达式>, <填充>` 的计数可能引用**本块后面**的数字标签——内核 ALTERNATIVE
+        // 的补齐就是这个形状：`.skip -(((775f-774f)-(772b-771b)) > 0) * (...)`。
+        // 单遍发射拿不到前向距离，所以先用一份独立的 Codegen 把同一块原样发一遍，
+        // 只取「标签内部名 → 块内字节位置」这张表；`.skip` 自己插进的填充不会改变它
+        // 公式里引用的那些差值，所以一遍就收敛。没有前向引用的块不开这一遍。
+        //
+        // 这一遍不能省：空 oldinstr 的 ALTERNATIVE（如 `ALTERNATIVE("", "clac", ft)`）全靠
+        // 这段补齐把 .text 撑到与 replacement 同长；不补则 apply_alternatives 会把后面的
+        // 指令盖掉，同时 `.byte 773b-771b` 算成 0 ⇒ objtool 报 `empty alternative entry`。
+        if !self.asm_measuring {
+            self.asm_skip_measure.clear();
+            if Self::block_has_forward_ref_skip(resolved_lines) {
+                let mut m = Self::codegen_from_parallel(self.parallel_emit_ctx());
+                m.next_label = scope;
+                m.asm_measuring = true;
+                m.emit_resolved_asm_lines(resolved_lines, is_global);
+                for name in locals.def_names() {
+                    // 测距表必须存与发射遍同一口径的「标号所在节坐标」：
+                    // `.altinstr_replacement` 里的 `774:`/`775:` 存节内偏移，存 `.text`
+                    // 发射位置会让 real 遍把它们和 `.text` 标号混减。
+                    if let Some(coord) = m.asm_label_coord(name) {
+                        self.asm_skip_measure.insert(name.to_string(), coord);
+                    }
+                }
+            }
+        }
         if is_global {
             self.asm_last_text_label = None;
         }
@@ -3847,8 +4020,7 @@ impl Codegen {
                     // 可执行节 (.fixup/.altinstr_replacement): 代码先发射到
                     // self.code, .popsection 时记录区间, 最终整体搬迁到自定义节.
                     if is_exec {
-                        self.pushsection_exec_stack
-                            .push((sec_idx, self.code.len() as u64));
+                        self.open_exec_pushsection(sec_idx);
                     }
                     self.pushsection_stack.push(sec_idx);
                     self.section_active = false;
@@ -3877,8 +4049,7 @@ impl Codegen {
                         entsize,
                     );
                     if is_exec {
-                        self.pushsection_exec_stack
-                            .push((sec_idx, self.code.len() as u64));
+                        self.open_exec_pushsection(sec_idx);
                     }
                     self.section_stack.push(sec_idx);
                     self.pushsection_stack.push(sec_idx);
@@ -3894,20 +4065,7 @@ impl Codegen {
                         let top_is_exec =
                             self.extra_sections[top_sec].flags & shared_elf::SHF_EXECINSTR != 0;
                         if top_is_exec {
-                            if let Some((sec_idx, start)) = self.pushsection_exec_stack.pop() {
-                                let size = self.code.len() as u64 - start;
-                                if size > 0 {
-                                    let align = self.extra_sections[sec_idx].align.max(16);
-                                    let len = self.extra_sections[sec_idx].data.len();
-                                    let aligned =
-                                        (len + align as usize - 1) & !(align as usize - 1);
-                                    self.pad_custom_section_to(sec_idx, aligned);
-                                    let sec_off = self.extra_sections[sec_idx].data.len() as u64;
-                                    self.pad_custom_section_to(sec_idx, (sec_off + size) as usize);
-                                    self.pushsection_code_ranges
-                                        .push((start, size, sec_idx, sec_off));
-                                }
-                            }
+                            self.close_exec_pushsection();
                         }
                         self.pushsection_stack.pop();
                     }
@@ -3916,8 +4074,7 @@ impl Codegen {
                         let prev_is_exec =
                             self.extra_sections[prev_sec].flags & shared_elf::SHF_EXECINSTR != 0;
                         if prev_is_exec {
-                            self.pushsection_exec_stack
-                                .push((prev_sec, self.code.len() as u64));
+                            self.open_exec_pushsection(prev_sec);
                         }
                         self.pushsection_stack.push(prev_sec);
                         self.section_active = true;
@@ -3939,20 +4096,7 @@ impl Codegen {
                     .map(|&idx| self.extra_sections[idx].flags & shared_elf::SHF_EXECINSTR != 0)
                     .unwrap_or(false);
                 if top_is_exec {
-                    if let Some((sec_idx, start)) = self.pushsection_exec_stack.pop() {
-                        // 记录可执行节的代码区间, 供最终搬迁到自定义节
-                        let size = self.code.len() as u64 - start;
-                        if size > 0 {
-                            let align = self.extra_sections[sec_idx].align.max(16);
-                            let len = self.extra_sections[sec_idx].data.len();
-                            let aligned = (len + align as usize - 1) & !(align as usize - 1);
-                            self.pad_custom_section_to(sec_idx, aligned);
-                            let sec_off = self.extra_sections[sec_idx].data.len() as u64;
-                            self.pad_custom_section_to(sec_idx, (sec_off + size) as usize);
-                            self.pushsection_code_ranges
-                                .push((start, size, sec_idx, sec_off));
-                        }
-                    }
+                    self.close_exec_pushsection();
                     self.pushsection_stack.pop();
                 } else if !self.pushsection_stack.is_empty() {
                     // Non-exec pushsection closing: just pop the regular stack
@@ -3978,8 +4122,7 @@ impl Codegen {
                                 sec_name, is_e, is_w, is_m, is_s, ent,
                             );
                             if is_e {
-                                self.pushsection_exec_stack
-                                    .push((nested_idx, self.code.len() as u64));
+                                self.open_exec_pushsection(nested_idx);
                             }
                             self.pushsection_stack.push(nested_idx);
                             self.section_active = false;
@@ -3997,8 +4140,7 @@ impl Codegen {
                                 sec_name, is_e, is_w, is_m, is_s, ent,
                             );
                             if is_e {
-                                self.pushsection_exec_stack
-                                    .push((nested_idx, self.code.len() as u64));
+                                self.open_exec_pushsection(nested_idx);
                             }
                             self.section_stack.push(nested_idx);
                             self.pushsection_stack.push(nested_idx);
@@ -4007,6 +4149,9 @@ impl Codegen {
                         }
                     }
                     // Handle nested .previous inside exec pushsection
+                    // （上面的顶层 `.previous` 分支已经过滤所有以 `.` 开头的行，这一整块
+                    // 实际进不来；保留同形态只为两处规则不再分叉，不会再出现
+                    // 「一处按 16 垫、另一处按节对齐」）
                     if trimmed.starts_with(".previous") {
                         if self.section_active {
                             if let Some(&top_sec) = self.pushsection_stack.last() {
@@ -4014,26 +4159,7 @@ impl Codegen {
                                     & shared_elf::SHF_EXECINSTR
                                     != 0;
                                 if top_is_exec {
-                                    if let Some((sec_idx, start)) =
-                                        self.pushsection_exec_stack.pop()
-                                    {
-                                        let size = self.code.len() as u64 - start;
-                                        if size > 0 {
-                                            let align = self.extra_sections[sec_idx].align.max(16);
-                                            let len = self.extra_sections[sec_idx].data.len();
-                                            let aligned =
-                                                (len + align as usize - 1) & !(align as usize - 1);
-                                            self.pad_custom_section_to(sec_idx, aligned);
-                                            let sec_off =
-                                                self.extra_sections[sec_idx].data.len() as u64;
-                                            self.pad_custom_section_to(
-                                                sec_idx,
-                                                (sec_off + size) as usize,
-                                            );
-                                            self.pushsection_code_ranges
-                                                .push((start, size, sec_idx, sec_off));
-                                        }
-                                    }
+                                    self.close_exec_pushsection();
                                 }
                                 self.pushsection_stack.pop();
                             }
@@ -4042,8 +4168,7 @@ impl Codegen {
                                     & shared_elf::SHF_EXECINSTR
                                     != 0;
                                 if prev_is_exec {
-                                    self.pushsection_exec_stack
-                                        .push((prev_sec, self.code.len() as u64));
+                                    self.open_exec_pushsection(prev_sec);
                                 }
                                 self.pushsection_stack.push(prev_sec);
                                 self.section_active = true;
@@ -4062,20 +4187,7 @@ impl Codegen {
                             })
                             .unwrap_or(false);
                         if top_is_exec {
-                            if let Some((sec_idx, start)) = self.pushsection_exec_stack.pop() {
-                                let size = self.code.len() as u64 - start;
-                                if size > 0 {
-                                    let align = self.extra_sections[sec_idx].align.max(16);
-                                    let len = self.extra_sections[sec_idx].data.len();
-                                    let aligned =
-                                        (len + align as usize - 1) & !(align as usize - 1);
-                                    self.pad_custom_section_to(sec_idx, aligned);
-                                    let sec_off = self.extra_sections[sec_idx].data.len() as u64;
-                                    self.pad_custom_section_to(sec_idx, (sec_off + size) as usize);
-                                    self.pushsection_code_ranges
-                                        .push((start, size, sec_idx, sec_off));
-                                }
-                            }
+                            self.close_exec_pushsection();
                             self.pushsection_stack.pop();
                         } else if !self.pushsection_stack.is_empty() {
                             self.pushsection_stack.pop();
@@ -4102,10 +4214,14 @@ impl Codegen {
                     }
                     if let Some(name) = locals.name_at(i) {
                         self.label(name);
+                        // 区间内标号（ALTERNATIVE 的 `774:`/`775:`）只在这里能归对：
+                        // 它们最终的坐标在 `.altinstr_replacement`，不是 `.text`。
+                        self.note_exec_pushsection_label(name);
                         continue;
                     }
                     if let Some(label) = Self::parse_asm_named_label(trimmed) {
                         self.label(label);
+                        self.note_exec_pushsection_label(label);
                         if is_global {
                             self.record_asm_text_label(label);
                         }

@@ -1086,6 +1086,18 @@ impl Codegen {
     }
     pub(crate) fn emit_asm_test(&mut self, src: &AsmOperand, dst: &AsmOperand, bits: u8) {
         let w = bits == 64;
+        // `sym`（无偏移）与 `sym+N` 是同一个内存操作数，只是偏移不同：先归一成
+        // `SymDisp(_, 0)`，下面的符号臂就不必每个都写两遍。
+        let norm = |op: &AsmOperand| -> AsmOperand {
+            match op {
+                AsmOperand::Sym(sym) => AsmOperand::SymDisp(sym.clone(), 0),
+                other => other.clone(),
+            }
+        };
+        let src = norm(src);
+        let dst = norm(dst);
+        let src = &src;
+        let dst = &dst;
         // 段前缀 mem: 段前缀 + 普通 mem test
         if let AsmOperand::SegMem {
             seg,
@@ -1241,6 +1253,63 @@ impl Codegen {
                     self.asm_reject(&format!("32/64-bit test mem immediate out of range ({})", v));
                     self.emit_insn(&Insn::raw(&[0x90]));
                 }
+            },
+            // `testb $imm, sym(%rip)` / `testl $imm, sym+8(%rip)`：内核
+            // `_static_cpu_has` 的 `testb %[bitnum], %a[cap_byte]` 就是这个形。
+            // `%a[...]` 把「只能接立即数」的地址常量渲染成裸符号（不带 `$`），
+            // 于是操作数对是 `(Imm, Sym|SymDisp)` 而不是 `(Imm, Mem)`；不接它就是
+            // `unsupported test operand pattern`。接了才与 GAS 一致：
+            // F6/F7 /0 + RIP 相对 ModRM + `R_X86_64_PC32`（`-mcmodel=kernel` 下数据符号
+            // 超出 32 位绝对地址，只能 PC 相对）。
+            (AsmOperand::Imm(v), AsmOperand::SymDisp(sym, disp)) => {
+                if bits == 16 {
+                    self.emit_insn(&Insn::raw(&[0x66]));
+                }
+                // 立即数形式没有寄存器操作数，ModRM 的 reg 域是 `/0` 扩展：GAS 在这里
+                // 不发 REX（`testb $4, foo(%rip)` = `F6 05 rel32 04`），所以上下两个
+                // `0` 也不能因为「8 位上下文」而强垫一个 `0x40`。
+                self.emit_rex_if_used(w, 0, 0, 0, false);
+                self.emit_insn(&Insn::raw(&[if bits == 8 { 0xF6 } else { 0xF7 }]));
+                self.emit_asm_modrm_mem_only(0, *disp, ASM_BASE_RIP, None, 1);
+                // disp32 就压在刚写的 ModRM 后面：重定位位置要在立即数之前算。
+                let pos = self.pos() - 4;
+                self.pending_code_rels.push(PendingCodeRel {
+                    offset: pos,
+                    symbol: sym.clone(),
+                    rel_type: R_X86_64_PC32,
+                    addend: -4,
+                });
+                if bits == 8 {
+                    self.emit_insn(&Insn::raw(&[*v as u8]));
+                } else if *v >= i32::MIN as i64 && *v <= i32::MAX as i64 {
+                    self.emit_insn(&Insn::raw(&(*v as i32).to_le_bytes()));
+                } else {
+                    self.asm_reject(&format!(
+                        "32/64-bit test symbol immediate out of range ({})",
+                        v
+                    ));
+                    self.emit_insn(&Insn::raw(&[0x90]));
+                }
+            },
+            // `test %reg, sym(%rip)` 与它的 AT&T 逆序写法（`test` 两侧可交换）。
+            (AsmOperand::Reg(s, _), AsmOperand::SymDisp(sym, disp))
+            | (AsmOperand::SymDisp(sym, disp), AsmOperand::Reg(s, _)) => {
+                if bits == 16 {
+                    self.emit_insn(&Insn::raw(&[0x66]));
+                }
+                // 8 位只有在 reg 是 4..7（%spl/%bpl/%sil/%dil）时才必须要 REX：没它
+                // 那四个编码会被读成 %ah/%ch/%dh/%bh。%al..%dl 与 GAS 一样不发前缀。
+                let need_byte_rex = bits == 8 && (4..8).contains(&(*s & 15));
+                self.emit_rex_if_used(w, *s, 0, 0, need_byte_rex);
+                self.emit_insn(&Insn::raw(&[if bits == 8 { 0x84 } else { 0x85 }]));
+                self.emit_asm_modrm_mem_only(*s, *disp, ASM_BASE_RIP, None, 1);
+                let pos = self.pos() - 4;
+                self.pending_code_rels.push(PendingCodeRel {
+                    offset: pos,
+                    symbol: sym.clone(),
+                    rel_type: R_X86_64_PC32,
+                    addend: -4,
+                });
             },
             _ => {
                 self.asm_reject("unsupported test operand pattern");

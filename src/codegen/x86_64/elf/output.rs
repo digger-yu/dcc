@@ -687,7 +687,13 @@ impl Codegen {
         // 标签定义 (N: 或 name:)
         if let Some(rest) = trimmed.strip_suffix(':') {
             let label = rest.trim();
-            if !label.is_empty() && !Self::is_asm_directive(label) {
+            // 数字局部标签（`912:`）不在这里按原文登记：调用方已经用
+            // `locals.name_at(i)` 给出唯一内部名（`.Lasm_local_<scope>_912_<n>`），
+            // 而 `.long 912b - .` 这类引用也只查 `locals` / `numeric_label_map`，
+            // 从不查裸数字键。多出来的 `labels["912"]` 是一份无引用的别名，
+            // 并且会在函数级并行合并时与另一个函数的同名数字标签撞车（E1101）。
+            let is_numeric_local = !label.is_empty() && label.chars().all(|c| c.is_ascii_digit());
+            if !label.is_empty() && !Self::is_asm_directive(label) && !is_numeric_local {
                 self.label(label);
                 // 非执行 pushsection: label 位置不在 self.code 而在自定义节数据内.
                 // 显式记录 (sec_idx, sec 内偏移) 供 symtab 构建阶段把 label 编码为
@@ -708,12 +714,17 @@ impl Codegen {
         let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
         let directive = parts[0];
         let args_str = if parts.len() > 1 { parts[1].trim() } else { "" };
+        // 「两个标号之间到底多少字节」这类差值必须按标号的**真身所在节**结算：
+        // `.byte 773b-771b` 两个端点都在 `.text`（扣掉可执行 pushsection 留在 `.text` 的
+        // 洞），`.byte 775f-774f` 两个端点都在 `.altinstr_replacement`（用搬迁后的节内
+        // 偏移）。`asm_label_coords` 一次把两种坐标折成同一张表。
+        let labels_adj: HashMap<String, u64> = self.asm_label_coords();
         match directive {
             ".byte" => {
                 for expr in Self::split_asm_args(args_str) {
                     let (val, sym, deferred) = Self::parse_asm_data_expr(
                         expr.trim(),
-                        &self.labels,
+                        &labels_adj,
                         locals,
                         line_idx,
                         numeric_label_map,
@@ -745,7 +756,7 @@ impl Codegen {
                 for expr in Self::split_asm_args(args_str) {
                     let (val, sym, deferred) = Self::parse_asm_data_expr(
                         expr.trim(),
-                        &self.labels,
+                        &labels_adj,
                         locals,
                         line_idx,
                         numeric_label_map,
@@ -779,7 +790,7 @@ impl Codegen {
                 for expr in Self::split_asm_args(args_str) {
                     let (val, sym, deferred) = Self::parse_asm_data_expr(
                         expr.trim(),
-                        &self.labels,
+                        &labels_adj,
                         locals,
                         line_idx,
                         numeric_label_map,
@@ -813,7 +824,7 @@ impl Codegen {
                 for expr in Self::split_asm_args(args_str) {
                     let (val, sym, _deferred) = Self::parse_asm_data_expr(
                         expr.trim(),
-                        &self.labels,
+                        &labels_adj,
                         locals,
                         line_idx,
                         numeric_label_map,
@@ -933,14 +944,24 @@ impl Codegen {
             || name.contains(".merge")
             || name.starts_with(".gnu.debuglto");
         let is_strings = name.contains(".rodata.str") || name.contains(".str");
-        self.ensure_custom_section_with_flags(
+        let idx = self.ensure_custom_section_with_flags(
             name,
             is_exec,
             is_writable,
             is_merge,
             is_strings,
             if is_strings { 1 } else { 0 },
-        )
+        );
+        // 本入口只给 **C 侧** `__attribute__((section))` 与 `.init_array` 那一族用：它们的
+        // 内容是编译器自己写的定长记录（8 字节函数指针数组），gcc 靠内容里的 `.align 8`
+        // 抬对齐，dcc 没有那条伪指令，所以在这里保住「至少 8」——内核遍历
+        // `__init_array_start..__init_array_end` 按 8 步进，对齐降到 1 会读坏。
+        // inline asm 的 `.pushsection/.section` 不走本入口，因此上面「默认对齐 1」对
+        // `.altinstructions` / `__ex_table` 这类记录节生效。
+        if !is_merge && self.extra_sections[idx].align < 8 {
+            self.extra_sections[idx].align = 8;
+        }
+        idx
     }
     pub(crate) fn ensure_custom_section_with_flags(
         &mut self,
@@ -949,7 +970,9 @@ impl Codegen {
         is_writable: bool,
         is_merge: bool,
         is_strings: bool,
-        entsize: u64,
+        // sh_entsize 本身还没写进 `ElfSection`（内核 objtool 只按 `sh_size % 条目长`
+        // 校验），故此处不参入对齐计算；保留入参是为了后续把它送到 sh_entsize。
+        _entsize: u64,
     ) -> usize {
         if let Some(&idx) = self.custom_sec_indices.get(name) {
             return idx;
@@ -968,19 +991,21 @@ impl Codegen {
         if is_strings {
             flags |= shared_elf::SHF_STRINGS;
         }
-        // SHF_MERGE sections with SHF_STRINGS have entsize=1 (char)
-        // SHF_MERGE sections without SHF_STRINGS have entsize=entry_size
-        // ELF requires sh_addralign to be 0 or a power of 2, so round up
-        // entsize (e.g. EXTABLE_SIZE=12) to the next power of 2.
-        let align = if is_exec {
-            16
-        } else if is_merge && is_strings {
-            1
-        } else if is_merge && entsize > 0 {
-            entsize.next_power_of_two()
-        } else {
-            8
-        };
+        // 自定义节的默认对齐必须是 1：GAS 对 `.section/.pushsection <name>,"a..."`
+        // 不抬对齐，节里真的需要对齐时由内容自己的 `.align`/`.balign`/`.p2align`
+        // 声明（上面 `emit_asm_directive` 的三条分支就是干这个的）。旧规则先给
+        // 8（merge 节还按 entsize 取 2 的幂，14 → 16），于是 `__ex_table`（条目 12 字
+        // 节，条目数为奇数时总长不是 8 的整倍数）在 `ld -r vmlinux.o` 拼接时每个对象
+        // 都被垫一次 ⇒ 总长脱离 12 的整倍数，objtool 报「__ex_table size not a
+        // multiple of 12」；同一规则在 `.altinstructions` 上报的是「not a multiple of 14」。
+        //
+        // 可执行节也一律 1（旧规则给 16）：GAS 只对 `.text` 这种它认识的节名给默认对齐，
+        // `.altinstr_replacement`/`.fixup`/`.altinstr_aux` 都是 1（拿参考树
+        // `kernel/signal.o`、`mm/slub.o`、`arch/x86/kernel/alternative.o` 量过）。
+        // `.noinstr.text`/`.init.text`/`.entry.text` 在 gcc 产物里是 16，但那 16 来自
+        // 函数自己的 `.p2align`（`CONFIG_FUNCTION_ALIGNMENT`），由 `codegen.rs` 里
+        // 「按 `f.alignment` 抬自定义节对齐」那两条分支带上来，不是节名的属性。
+        let align = 1;
         self.extra_sections.push(ElfSection {
             name: name.to_string(),
             data: Vec::new(),
@@ -1177,8 +1202,11 @@ impl Codegen {
     pub(crate) fn resolve_deferred_pushsection_fixups(&mut self) {
         let fixups = std::mem::take(&mut self.deferred_pushsection_fixups);
         for fixup in fixups {
-            let lv = self.labels.get(&fixup.left_label).copied();
-            let rv = self.labels.get(&fixup.right_label).copied();
+            // 同一套按标号真身所在节结算的规则：发射时算不出的前向引用到这里才结算，
+            // 坐标必须与 `emit_pushsection_data` 里那份标号表同一口径，否则同一类条目长
+            // 会一个扣洞一个不扣。
+            let lv = self.asm_label_coord(&fixup.left_label);
+            let rv = self.asm_label_coord(&fixup.right_label);
             if let (Some(lv), Some(rv)) = (lv, rv) {
                 let diff = (lv as i64) - (rv as i64);
                 let data = &mut self.extra_sections[fixup.sec_idx].data;

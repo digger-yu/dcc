@@ -9,12 +9,15 @@ filter_clang_flags() {
     local -n _out=$1
     shift
     for a in "$@"; do
+        # 注意：函数对齐的两个写法 (`-falign-functions=N` / `-fmin-function-alignment=N`)
+        # 必须原样透传。内核 `Makefile` 先拿 `cc-option` 问过本包装器才决定用哪个，包装器
+        # 把它吐掉会让探测报「支持」而真编译时被丢弃 ⇒ 所有函数都不对齐，`vmlinux` 的
+        # 函数边界与 gcc 产物完全不同（而 `CONFIG_FUNCTION_ALIGNMENT=16` 本该是 16）。
         case "$a" in
             -fms-anonymous-structs|\
             -fzero-init-padding-bits=*|\
             -fdiagnostics-show-context=*|\
             -fdiagnostics-show-inlining-chain|\
-            -fmin-function-alignment=*|\
             -fstack-clash-protection|\
             -fpatchable-function-entry=*|\
             -fharden-sls=*|\
@@ -100,6 +103,11 @@ base="$(basename "$src" 2>/dev/null || true)"
 
 # gcc 不支持 -fms-anonymous-structs, 但 -fplan9-extensions 提供等价功能
 # (匿名结构体/联合体成员). 在委托给 gcc 时进行替换.
+#
+# `-fmin-function-alignment=N` 是自 GCC 14 才有的写法，本机 gcc 13 认不得；它完全等价于
+# 旧的 `-falign-functions=N`，所以委托给 gcc 时重写而不是丢掉。丢掉会令那些 gcc 接手的
+# 步骤（`.s` 汇编、链接、-m16 realmode、OOM 回退）编出不对齐的函数，与 dcc 部分
+# 拼进 `vmlinux.o` 时函数边界不一致。
 replace_dcc_only_flags() {
     local -n _rout=$1
     shift
@@ -108,11 +116,22 @@ replace_dcc_only_flags() {
             -fms-anonymous-structs)
                 _rout+=("-fplan9-extensions")
                 ;;
+            -fmin-function-alignment=*)
+                _rout+=("-falign-functions=${a#*=}")
+                ;;
             *)
                 _rout+=("$a")
                 ;;
         esac
     done
+}
+
+# 把一次编译显式交给 gcc：每条都必须留一行可被日志 grep 的判据。
+# 「全程用 dcc 编内核」是当前目标，所以剩下这些 gcc 通路必须点名，不能再藏在
+# 包装器里：靠 `.comment=GCC` 只能知道「有代工件」，说不出是哪一条路为什么走的。
+delegate_gcc() {
+    echo "GCC-DELEGATE reason=$1 src=${src:-<none>}" >&2
+    exec gcc "${@:2}"
 }
 
 # realmode / 16-bit 代码: 需要 -m32 或 -m16, dcc 只支持 x86_64,
@@ -124,7 +143,7 @@ for a in "$@"; do
             replace_dcc_only_flags rout "${args[@]}"
             out=()
             filter_clang_flags out "${rout[@]}"
-            exec gcc "${out[@]}"
+            delegate_gcc "m16/m32-no-dcc-backend" "${out[@]}"
             ;;
     esac
 done
@@ -135,7 +154,7 @@ case "$src" in
             replace_dcc_only_flags rout "${args[@]}"
             out=()
             filter_clang_flags out "${rout[@]}"
-            exec gcc "${out[@]}"
+            delegate_gcc "realmode-dir" "${out[@]}"
             ;;
 esac
 
@@ -145,7 +164,9 @@ if is_link_step "$@"; then
     replace_dcc_only_flags rout "${args[@]}"
     out=()
     filter_clang_flags out "${rout[@]}"
-    exec gcc "${out[@]}"
+    # 链接步骤：dcc 没有自己的链接器（vmlinux 的脚本链接语义只能交 GNU ld 驱动），
+    # 这不是「用 gcc 代编 C 代码」，但依然留痕。
+    delegate_gcc "link-step" "${out[@]}"
 fi
 
 # 无源文件 (可能是其他非编译调用): 直接委托 gcc
@@ -154,7 +175,7 @@ if [ -z "$src" ]; then
     replace_dcc_only_flags rout "${args[@]}"
     out=()
     filter_clang_flags out "${rout[@]}"
-    exec gcc "${out[@]}"
+    delegate_gcc "no-source-file" "${out[@]}"
 fi
 
 # 以下是 dcc 编译路径
@@ -187,17 +208,25 @@ if [ -z "$out_file" ]; then
     out_file="${src%.c}.o"
 fi
 
-# 运行 dcc; 如果 dcc 被 OOM killer 杀掉 (exit!=0) 或 .o 未生成,
-# 回退到 gcc 重新编译 (内核构建允许少量文件由 gcc 编译).
-# 用 || true 防止 set -e 在 dcc 非零退出时直接退出脚本.
+# 运行 dcc。默认**不允许**回退 gcc：目标要求内核全树由 dcc 编出来，dcc 编不出就是
+# 要补的 dcc 缺陷，交 gcc 代工只会把缺陷藏进产物里（实测：`xsave64` 被静默丢弃时，
+# gcc 接手前编出的 `.o` 已经在 `.altinstructions` 里留下 0 长条目，要到 `ld -r` 后的
+# objtool 才暴露）。需要旧行为（OOM 时让 gcc 兼一下）时显式导出
+# DCC_KERNEL_ALLOW_GCC_FALLBACK=1。
 dcc_rc=0
 "$DCC_BIN" "${out[@]}" -Wno-implicit-declaration -fpermissive -fno-builtin-linker || dcc_rc=$?
 
 if [ $dcc_rc -ne 0 ] || [ ! -f "$out_file" ]; then
-    echo "dcc failed (rc=$dcc_rc) for $src, falling back to gcc" >&2
-    rout=()
-    replace_dcc_only_flags rout "${out[@]}"
-    gout=()
-    filter_clang_flags gout "${rout[@]}"
-    exec gcc "${gout[@]}"
+    if [ "${DCC_KERNEL_ALLOW_GCC_FALLBACK:-0}" = "1" ]; then
+        echo "dcc failed (rc=$dcc_rc) for $src, falling back to gcc (opt-in)" >&2
+        rout=()
+        replace_dcc_only_flags rout "${out[@]}"
+        gout=()
+        filter_clang_flags gout "${rout[@]}"
+        exec gcc "${gout[@]}"
+    fi
+    echo "dcc failed (rc=$dcc_rc) for $src: 不再回退 gcc，这是要修的 dcc 缺陷" >&2
+    # 删掉半截产物，让 Kbuild 下一轮能重跑这一步而不是把残缺文件当成已编好。
+    rm -f "$out_file"
+    exit "$dcc_rc"
 fi

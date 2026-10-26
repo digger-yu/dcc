@@ -258,6 +258,14 @@ pub struct Config {
     pub align_loops: u32,
     /// -falign-jumps=N: 跳转目标对齐边界 (2 的幂, 0=不对齐)
     pub align_jumps: u32,
+    /// -falign-functions=N: 函数入口对齐边界 (2 的幂, 0=由后端自己定)
+    ///
+    /// 内核 `Makefile` 在 `CONFIG_FUNCTION_ALIGNMENT=y` 时传 `-falign-functions=16`，
+    /// gcc 会为每个函数发一条 `.p2align 4`：函数入口按 16 对齐，而且**自定义代码节**
+    /// (`.noinstr.text` / `.init.text` / `.entry.text`) 的 `sh_addralign` 就是由这条
+    /// `.p2align` 抬到 16 的 (GAS 对不认识的节名默认给 1)。不支持本选项时那些节只会
+    /// 拿到默认对齐，与 gcc 产物不同。
+    pub align_functions: u32,
     /// --profile-parse / -fprofile-parse: 输出预处理/词法/解析阶段的 JSON 性能数据
     pub profile_parse: bool,
 }
@@ -1384,6 +1392,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut data_sections = false;
     let mut align_loops: u32 = 0;
     let mut align_jumps: u32 = 0;
+    let mut align_functions: u32 = 0;
     let mut gc_sections = false;
     let mut specs: Option<String> = None;
     let mut output_format = crate::output_format::OutputFormat::default();
@@ -2722,6 +2731,23 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
                     align_loops = if n <= 1 { 0 } else { n.min(32).next_power_of_two() };
                 }
             }
+            // -falign-functions=N: 函数入口对齐 (内核靠它得到 16 字节函数对齐)
+            a if a.starts_with("-falign-functions=") => {
+                let val = &a["-falign-functions=".len()..];
+                if let Ok(n) = val.parse::<u32>() {
+                    align_functions = if n <= 1 { 0 } else { n.min(4096).next_power_of_two() };
+                }
+            }
+            // -fmin-function-alignment=N: GCC 14+ 为内核 `CONFIG_FUNCTION_ALIGNMENT` 引入的
+            // 写法，与 `-falign-functions=N` 同义。内核 `Makefile` 先用 `cc-option` 探这个
+            // 选项，探到了就只传它、不再传 `-falign-functions`；这里不认它的话，探测会把
+            // 内核引到一条「看起来支持、实际被吐掉」的路子上，函数就完全不对齐了。
+            a if a.starts_with("-fmin-function-alignment=") => {
+                let val = &a["-fmin-function-alignment=".len()..];
+                if let Ok(n) = val.parse::<u32>() {
+                    align_functions = if n <= 1 { 0 } else { n.min(4096).next_power_of_two() };
+                }
+            }
             // -f* 其他选项 - 已知 GCC/Clang 选项安全忽略，未知选项警告
             a if a.starts_with("-f") => {
                 if warn_ignored_option && !is_known_f_option(a) {
@@ -3203,6 +3229,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             fp_contract_mode,
             align_loops,
             align_jumps,
+            align_functions,
             profile_parse,
             ipa_sra: {
                 let mut c = ipa_sra;
@@ -3333,6 +3360,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             fp_contract_mode,
             align_loops,
             align_jumps,
+            align_functions,
             profile_parse,
             ipa_sra: {
                 let mut c = ipa_sra;

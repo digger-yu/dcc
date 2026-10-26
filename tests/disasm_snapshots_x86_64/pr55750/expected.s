@@ -43,8 +43,7 @@ lea 0x0(%rip),%rax
 mov %rax,-0xc8(%r13)
 mov (%rax),%eax
 mov %rax,-0xd0(%r13)
-mov $0x1,%eax
-neg %rax
+mov $0xffffffffffffffff,%rax
 and $0x1,%rax
 mov -0xc8(%r13),%rcx
 mov (%rcx),%ecx
@@ -102,8 +101,7 @@ add $0x4,%rax
 mov %rax,-0xc8(%r13)
 mov (%rax),%eax
 mov %rax,-0xd0(%r13)
-mov $0x1,%eax
-neg %rax
+mov $0xffffffffffffffff,%rax
 and $0x7f,%rax
 shl $1,%rax
 mov -0xc8(%r13),%rcx

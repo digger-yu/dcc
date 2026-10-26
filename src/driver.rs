@@ -1071,6 +1071,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // -falign-loops/-falign-jumps: 代码段对齐
     target.align_loops = cfg.align_loops;
     target.align_jumps = cfg.align_jumps;
+    target.align_functions = cfg.align_functions;
     target.short_wchar = cfg.short_wchar;
     // -fno-common: codegen 已将未初始化全局变量直接放入 .bss (而非
     // COMMON 段). 链接器 resolve.rs 处理跨 TU tentative definition 合并.
@@ -2560,6 +2561,7 @@ fn emit_native_program(
     target.fp_contract_mode = cfg.fp_contract_mode;
     target.align_loops = cfg.align_loops;
     target.align_jumps = cfg.align_jumps;
+    target.align_functions = cfg.align_functions;
     target.short_wchar = cfg.short_wchar;
     target.no_common = cfg.no_common;
 

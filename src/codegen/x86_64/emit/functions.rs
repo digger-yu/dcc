@@ -455,7 +455,16 @@ impl Codegen {
             .patchable_function_entry
             .map(|(n, _)| n.max(1))
             .unwrap_or(1);
-        let func_align = f.alignment.unwrap_or(1).max(min_align).max(1);
+        let func_align = f
+            .alignment
+            .unwrap_or(1)
+            .max(min_align)
+            // `-falign-functions=N`（内核 `CONFIG_FUNCTION_ALIGNMENT=y` 传 16）：gcc 靠它为
+            // 每个函数发一条 `.p2align 4`，所以函数入口和包含它的自定义代码节
+            // (`.noinstr.text`/`.init.text`/`.entry.text`) 的 `sh_addralign` 一起抬到 N。
+            // 没传时保持 1（不影响普通构建的任何 fixture）。
+            .max(self.target.align_functions.max(1) as usize)
+            .max(1);
         self.text_align = self.text_align.max(func_align as u64);
         while !self.code.len().is_multiple_of(func_align) {
             self.emit_insn(&Insn::nop());

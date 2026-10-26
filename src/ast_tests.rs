@@ -287,3 +287,98 @@ fn qualtype_partialeq_ignores_quals_when_bases_differ() {
     let e = QualType::new(Type::Int);
     assert_eq!(c, e);
 }
+
+fn tfield(name: &str, ty: Type, offset: usize) -> Field {
+    Field {
+        name: name.into(),
+        ty,
+        offset,
+        bit_width: None,
+        bit_offset: 0,
+        quals: QualifierFlags::NONE,
+        ptr_quals: vec![],
+        field_align: None,
+        field_packed: false,
+    }
+}
+
+fn tstruct(name: &str, fields: Vec<Field>) -> Type {
+    Type::Struct(name.into(), Arc::new(fields), 8, false)
+}
+
+/// 具名聚合相等 = 名义同一律：同一个 tag「先前向声明、后补全」的两份副本必须是同一
+/// 类型。内核 `EXPORT_SYMBOL_GPL` 的 `extern typeof(f) f;` 正是拿补全后的那一份去和
+/// 补全前记下的那一份比较，按字段深度比较会判成不同类型（E0007 误报）。
+#[test]
+fn named_struct_equality_is_nominal_across_completion() {
+    let incomplete = tstruct("irq_desc", vec![]);
+    let complete = tstruct(
+        "irq_desc",
+        vec![tfield("x", Type::Int, 0), tfield("lock", Type::Long, 8)],
+    );
+    assert_eq!(incomplete, complete, "同一个 tag 就是同一个类型");
+    assert_eq!(complete, incomplete, "比较必须对称");
+
+    let other = tstruct("irq_data", vec![]);
+    assert_ne!(incomplete, other, "不同 tag 名不得相等");
+    let union_of_same_name = Type::Union("irq_desc".into(), Arc::new(vec![]), 8, false);
+    assert_ne!(incomplete, union_of_same_name, "struct 与 union 是不同类型");
+}
+
+/// 匿名聚合没有名字可依，必须继续按结构比较（同构才等）。
+#[test]
+fn anonymous_struct_equality_is_structural() {
+    let a = tstruct("", vec![tfield("x", Type::Int, 0)]);
+    let b = tstruct("", vec![tfield("x", Type::Int, 0)]);
+    let c = tstruct("", vec![tfield("x", Type::Long, 0)]);
+    let d = tstruct("", vec![tfield("y", Type::Int, 0)]);
+    assert_eq!(a, b, "字段逐项相同的匿名 struct 是同一类型");
+    assert_ne!(a, c, "字段类型不同 ⇒ 匿名 struct 不同");
+    assert_ne!(a, d, "字段名不同 ⇒ 匿名 struct 不同");
+}
+
+/// 类型标签必须**有界**：派生 `Debug` 会把聚合字段树整棵展开，内核里 `struct page`
+/// 这类共享 DAG 类型按树展开每层翻倍，实测单个串申请 3.4 GB 直接把编译打死。
+#[test]
+fn identity_tag_is_bounded_for_aggregate_types() {
+    // 一个「大」聚合：512 个字段（字段本身又是同名的深类型），串仍应短小。
+    let fields: Vec<Field> = (0..512)
+        .map(|i| tfield(&format!("f{i}"), Type::Ptr(Box::new(Type::Int.into())), i * 8))
+        .collect();
+    let big = tstruct("page_like", fields);
+    let tag = big.identity_tag().expect("具名聚合的身份串必须存在");
+    assert!(
+        tag.len() < 96,
+        "具名聚合按名义编码，身份串不该随字段数增长，实际 {tag:?}"
+    );
+    assert!(tag.contains("struct page_like"), "身份串要带 tag 名: {tag:?}");
+
+    // 指针/数组/函数包装只按其自身结构展开，具名聚合命中即返回。
+    let wrapped = Type::Func(
+        Box::new(Type::Ptr(Box::new(big.clone().into())).into()),
+        vec![Type::Array(Box::new(big.into()), crate::ast::ArraySize::Const(4)).into()],
+    );
+    let tag2 = wrapped.identity_tag().expect("包装类型的身份串必须存在");
+    assert!(tag2.len() < 160, "包装类型身份串应有界, 实际 {tag2:?}");
+    assert_eq!(wrapped.identity_tag(), tag2.into(), "同一类型必须给出同一串");
+}
+
+/// 匿名聚合的展开受**串长度上限**约束：超出 `TYPE_TAG_MAX_BYTES` 的匿名嵌套返回
+/// `None`（= 放弃这次值编号），而不是给出一个可能撞名的截断串，也不许把内存吃穿。
+#[test]
+fn identity_tag_bails_out_on_oversized_anonymous_nesting() {
+    // 宽 6 × 深 6 ⇒ 6^6 ≈ 4.6 万个节点，远超 4 KiB 上限；浅的同样例必须仍给串。
+    fn nest(depth: u32) -> Type {
+        if depth == 0 {
+            return Type::Int;
+        }
+        tstruct("", (0..6).map(|i| tfield(&format!("f{i}"), nest(depth - 1), i * 8)).collect())
+    }
+    let shallow = nest(2).identity_tag();
+    assert!(shallow.is_some(), "浅的匿名聚合应照常给串: {shallow:?}");
+    assert_eq!(
+        nest(6).identity_tag(),
+        None,
+        "超过长度上限的匿名聚合必须放弃，而不是硬给一个截断串"
+    );
+}

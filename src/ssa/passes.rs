@@ -3187,7 +3187,11 @@ fn operand_identity(o: &Operand) -> String {
     match o {
         Operand::Var(v) => v.name(),
         Operand::Int(i) => format!("#i{i}"),
-        Operand::Float(f, ty) => format!("#f{:?}{}", f, type_tag_of(ty)),
+        Operand::Float(f, ty) => {
+            // 浮点字面量的类型必是叶子标量, 身份串不会失败; `unwrap_or_default`
+            // 只是把「理论上不到」的分支收敛成「不参与值编号」, 不引入 panic。
+            format!("#f{:?}{}", f, type_tag_of(ty).unwrap_or_default())
+        }
         Operand::Str(s) => format!("#s{:?}", s),
         Operand::SymAddr(n, _) => format!("#sym{n}"),
         Operand::FnAddr(n, _) => format!("#fn{n}"),
@@ -3198,8 +3202,12 @@ fn operand_identity(o: &Operand) -> String {
 }
 
 /// 类型标签: 参与值号时必须能区分不同类型 (`Cast` 的目标准类型与 `Bin` 的宽度)。
-fn type_tag_of(ty: &Type) -> String {
-    format!("{:?}", ty)
+///
+/// 走 `Type::identity_tag`（确定且有界）而不是派生 `Debug`：`Debug` 按树展开聚合类型
+/// 的字段, 内核里的共享 DAG 类型（`struct page` 等）会按层翻倍, 实测单次申请 3.4 GB
+/// 直接分配失败。`None` = 本次不参与值编号, 由调用方的 `Option` 链自然吞掉。
+fn type_tag_of(ty: &Type) -> Option<String> {
+    ty.identity_tag()
 }
 
 /// 把一处引用从一个 SSA 名改写到另一个 SSA 名 (递归作用于指令、phi 与终结符)。
@@ -3642,7 +3650,7 @@ fn val_key(k: &InstKind, _defs: &HashMap<String, InstKind>) -> Option<ValKey> {
             Some(ValKey::Bin(format!("{op:?}"), operand_identity(l), operand_identity(r)))
         },
         InstKind::Un { op, e } => Some(ValKey::Un(format!("{op:?}"), operand_identity(e))),
-        InstKind::Cast { ty, e } => Some(ValKey::Cast(type_tag_of(ty), operand_identity(e))),
+        InstKind::Cast { ty, e } => Some(ValKey::Cast(type_tag_of(ty)?, operand_identity(e))),
         InstKind::Select {
             cond, then_, else_, ..
         } => Some(ValKey::Select(
@@ -3651,13 +3659,13 @@ fn val_key(k: &InstKind, _defs: &HashMap<String, InstKind>) -> Option<ValKey> {
             operand_identity(else_),
         )),
         InstKind::Load { e, ty, is_volatile } if !is_volatile => {
-            Some(ValKey::Load(format!("{}:{}", operand_identity(e), type_tag_of(ty))))
+            Some(ValKey::Load(format!("{}:{}", operand_identity(e), type_tag_of(ty)?)))
         },
         InstKind::MemberLoad { obj, field, ty, .. } => {
-            Some(ValKey::Member(operand_identity(obj), field.clone(), type_tag_of(ty)))
+            Some(ValKey::Member(operand_identity(obj), field.clone(), type_tag_of(ty)?))
         },
         InstKind::IndexLoad { arr, idx, ty, .. } => {
-            Some(ValKey::Index(operand_identity(arr), operand_identity(idx), type_tag_of(ty)))
+            Some(ValKey::Index(operand_identity(arr), operand_identity(idx), type_tag_of(ty)?))
         },
         _ => None,
     }

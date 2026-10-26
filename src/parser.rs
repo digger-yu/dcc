@@ -369,6 +369,13 @@ pub struct Parser<'a> {
     globals: HashMap<String, Type>,            // 全局变量名 → 类型 (永不清除)
     func_alignments: HashMap<String, usize>,   // 函数名 → 对齐值 (from forward decl or def)
     func_decl_attrs: HashMap<String, ParsedAttrs>, // 函数名 → 声明时的属性 (用于继承到定义)
+    /// 当前声明符累积到的「在指针链里撞到的属性」。
+    ///
+    /// `skip_ptr_qualifiers` 早期直接 `skip_attributes()` 丢弃它们，于是
+    /// `int *__weak f(void)` 里的 weak 永远到不了 FuncDecl：符号发成 GLOBAL
+    /// 而不是 WEAK（gcc 是 WEAK）。内核用大量这种写法的弱桩，与架构侧的强定义
+    /// 同名，`ld -r vmlinux.o` 因此报 multiple definition。声明符入口清零、出口合并。
+    declarator_attrs: ParsedAttrs,
     nodiscard_fns: HashSet<String>,            // C23 [[nodiscard]] 函数名集合
     in_function: bool,                         // 是否在函数体内
     current_function: Option<String>,          // 当前函数名 (供 __func__/__builtin_FUNCTION 等使用)
@@ -436,6 +443,7 @@ impl<'a> Parser<'a> {
             globals: HashMap::new(),
             func_alignments: HashMap::new(),
             func_decl_attrs: HashMap::new(),
+            declarator_attrs: ParsedAttrs::default(),
             nodiscard_fns: HashSet::new(),
             in_function: false,
             current_function: None,
@@ -4116,6 +4124,9 @@ impl<'a> Parser<'a> {
         // (如语句表达式中的局部变量) 误消费该标志
         let auto_owned = self.decl_auto_type;
         self.decl_auto_type = false;
+        // 本声明符的属性暂存从零开始：上一层声明符（多声明符列表里的前一个名字）
+        // 累积的属性不得传染给下一个。
+        self.declarator_attrs = ParsedAttrs::default();
         // 函数指针声明/定义: type (*name)(params)
         // 第一性原理: (* 表示这不是普通变量名, 而是函数指针声明
         if self.cur.kind == TokKind::LParen && self.peek.kind == TokKind::Star {
@@ -4183,8 +4194,14 @@ impl<'a> Parser<'a> {
             return self.parse_func_ptr_inner(ty, merged, storage);
         }
         // 解析变量/函数名前的 __attribute__: 如 int __attribute__((unused)) x;
-        let mut pre_attrs =
-            Self::merge_attrs(Self::merge_attrs(leading_attrs, mid_attrs), self.parse_attributes());
+        // 并把指针链里撞到的属性（`int *__weak f(void)`）一并合进来。
+        let mut pre_attrs = Self::merge_attrs(
+            Self::merge_attrs(
+                Self::merge_attrs(leading_attrs, mid_attrs),
+                self.parse_attributes(),
+            ),
+            std::mem::take(&mut self.declarator_attrs),
+        );
         self.skip_asm_label();
         // __asm__ 后的 __attribute__: 如 var __asm__("name") __attribute__((visibility("hidden")))
         pre_attrs = Self::merge_attrs(pre_attrs, self.parse_attributes());
@@ -4464,6 +4481,11 @@ impl<'a> Parser<'a> {
                 // 从声明继承关键属性（如果定义时没有显式设置）
                 if !attrs.no_instrument && prev_attrs.no_instrument {
                     attrs.no_instrument = true;
+                }
+                // `int w(void) __weak;` + 不带属性的定义：gcc 把该符号当弱定义发，
+                // 不继承就会发成 GLOBAL，与别的 TU 里的强定义撞成 multiple definition。
+                if !attrs.is_weak && prev_attrs.is_weak {
+                    attrs.is_weak = true;
                 }
                 // 可以继承其他关键属性...
             }
@@ -4984,6 +5006,14 @@ impl<'a> Parser<'a> {
                     asm_label: attrs.asm_label.clone(),
                 })])
             } else if self.cur.kind == TokKind::Semi {
+                // 函数类型的无初值声明符（`typedef int ft(int); ft f1;`）按 C 是
+                // **函数声明**（隐式 extern），不是 tentative definition：既不分配
+                // 存储，也不该发成有定义的符号。写在这里而不是每个后端站点各判一次：
+                // `is_extern` 就是「声明而非定义」的单一表达（codegen 的存储收集与
+                // SHN_UNDEF 引用登记都读它）。实测内核 `include/linux/fs_parser.h` 的
+                // `fs_param_type fs_param_is_bool, …;` 被当成定义时，每个包含该头的 TU
+                // 都在 .bss 里发一份 GLOBAL，`ld -r vmlinux.o` 报 multiple definition。
+                let func_decl_extern = matches!(ty, Type::Func(..));
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
                 let var_q = if matches!(ty, Type::Ptr(_)) {
                     self.decl_quals
@@ -5001,7 +5031,7 @@ impl<'a> Parser<'a> {
                     name: name_for_decl,
                     init: None,
                     span: sp,
-                    is_extern: storage.is_extern,
+                    is_extern: storage.is_extern || func_decl_extern,
                     is_static: storage.is_static,
                     section: attrs.section,
                     alignment: attrs.alignment,
@@ -5023,6 +5053,8 @@ impl<'a> Parser<'a> {
                     asm_label: attrs.asm_label.clone(),
                 })])
             } else if self.cur.kind == TokKind::Comma {
+                // 同上：多声明符列表（`ft f1, f2;`）里每一个无初值的函数类型名字都是声明。
+                let func_decl_extern = matches!(ty, Type::Func(..));
                 self.locals.insert(name_for_decl.name.clone(), ty.clone());
                 let var_q = if matches!(ty, Type::Ptr(_)) {
                     self.decl_quals
@@ -5039,7 +5071,7 @@ impl<'a> Parser<'a> {
                     name: name_for_decl,
                     init: None,
                     span: sp,
-                    is_extern: storage.is_extern,
+                    is_extern: storage.is_extern || func_decl_extern,
                     is_static: storage.is_static,
                     section: attrs.section,
                     alignment: attrs.alignment,
@@ -7643,7 +7675,10 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if self.cur.text == "__attribute__" {
-                self.skip_attributes();
+                // 属性不能丢：它属于本声明符（见 `declarator_attrs` 的理由说明）。
+                let seen = self.parse_attributes();
+                self.declarator_attrs =
+                    Self::merge_attrs(self.declarator_attrs.clone(), seen);
             } else {
                 // Capture const/volatile/atomic/restrict qualifiers
                 // that appear after * in the declarator

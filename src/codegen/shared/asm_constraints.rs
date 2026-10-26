@@ -339,6 +339,27 @@ pub struct ResolvedOperand {
 // 约束解析
 // ---------------------------------------------------------------------------
 
+/// 约束里**只有**立即数类字母（没有任何寄存器/内存类备选）。
+///
+/// GCC 对这种约束的要求是「操作数必须是编译期常量」，给不出常量就直接报
+/// `impossible constraint in 'asm'`；而带 `r`/`m`/`g` 备选的（`"Nm"`、`"irm"`）
+/// 才有落成寄存器/内存的余地，不能算「只立即数」。分开这两类才能既守住常量约定，
+/// 又不把本来合法的约束误报。
+///
+/// 单一真源：x86_64 发射层用它决定是否硬失败，`opt.rs` 的函数体内联用它挑出
+/// 「必须把实参代回操作数」的位置 —— 两处口径必须一致，否则一边当常量、
+/// 另一边当寄存器，内联就只能修好一半。
+pub fn constraint_is_immediate_only(constraint: &str) -> bool {
+    const IMM: &[char] = &[
+        'i', 'n', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'X', 'E', 'F', 'G', 'H',
+    ];
+    let letters: Vec<char> = constraint
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic() && !matches!(c, '=' | '+'))
+        .collect();
+    !letters.is_empty() && letters.iter().all(|c| IMM.contains(c))
+}
+
 /// 解析单个约束字符串
 pub fn parse_single_constraint(c: &str) -> ConstraintKind {
     let c = c.trim();
