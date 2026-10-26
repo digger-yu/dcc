@@ -3891,3 +3891,14 @@ int main(void) {
     let _ = fs::remove_file(&exe);
     assert_eq!(rc, 0, "stdckdint semantics (rc={rc})");
 }
+
+/// 整数字面量按「后缀定起点、大小定落点」定型（C11 6.4.4.1）：
+/// `0xffffffffffffffffu` 是 8 字节而不是 4 字节，`trim64(x) & x` 不能丢高位。
+/// 修复前它被定成 `unsigned int`，`x >> 57` 因此得 0，`rotl` 结果错。
+#[test]
+#[cfg(unix)]
+fn int_const_width_suffix() {
+    let source = include_str!("../fixtures/c/int_const_width_suffix.c");
+    let rc = run_gcc_cross_check_opt("int-const-width-suffix", source, &["-O2"]);
+    assert_eq!(rc, 0, "0xffffffffffffffffu 应为 64 位，got rc={rc}");
+}

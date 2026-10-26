@@ -3170,6 +3170,7 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
             &whole_archive_libs,
             sysroot.as_deref(),
             verbose,
+            &cfg.host_link_args,
         );
         if link_result.is_ok() {
             eprintln!("dcc: {}", final_output.display());
@@ -3224,6 +3225,8 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
     cfg.output = tmp_o.clone();
     cfg.relocatable = true;
     let sanitizer_flags = host_sanitizer_flags(&cfg);
+    // cfg 随后被 move 进 run()，链接透传参数先取出来。
+    let host_link_args = cfg.host_link_args.clone();
     // 强制走内置链接器 ≠ 1 路径是上面"递归后"需走的；现在 cfg.built_link
     // 仍是 false，所以 .o 由 run() 末端 codegen 直接输出。
     // 临时 .o / 目录由 _tmp_cleanup 在离开作用域时回收, 因此错误直接上抛即可.
@@ -3245,6 +3248,7 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
         sysroot.as_deref(),
         verbose,
         &sanitizer_flags,
+        &host_link_args,
     );
     if link_result.is_ok() {
         eprintln!("dcc: {} (via host cc)", final_output.display());
@@ -3551,6 +3555,7 @@ fn compile_and_link_multiple(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         &cfg.whole_archive_libs,
         cfg.sysroot.as_deref(),
         cfg.verbose,
+        &cfg.host_link_args,
     )?;
     if cfg.verbose {
         eprintln!("dcc: {} (via host cc)", cfg.output.display());
@@ -3566,6 +3571,7 @@ fn link_with_host_cc(
     sysroot: Option<&Path>,
     verbose: bool,
     sanitizer_flags: &[String],
+    host_link_args: &[String],
 ) -> Result<(), Vec<Diagnostic>> {
     // host cc 驱动: 按 shell 语义解析 $CC (可能含参数, 如 CC="dcc -std=gnu99"),
     // 并防递归 (CC 指向自身 dcc 时回退 "cc")。详见 host_cc_command。
@@ -3578,6 +3584,12 @@ fn link_with_host_cc(
     cmd.arg("-no-pie");
     cmd.arg("-z").arg("norelro");
     cmd.arg("-Wl,-z,noexecstack");
+    // 未被内置链接器建模的 -Wl,... 选项原样交给 host cc。`-Wl,-E`
+    // (--export-dynamic) 必须在：Lua 的 ltests 套件要靠主程序导出
+    // lua_* 符号，动态模块 ./libs/*.so 才能解析。
+    for a in host_link_args {
+        cmd.arg(a);
+    }
     if let Some(sr) = sysroot {
         cmd.arg(format!("--sysroot={}", sr.display()));
     }
@@ -3632,6 +3644,7 @@ fn link_objects_with_host_cc(
     whole_archive_libs: &[String],
     sysroot: Option<&Path>,
     verbose: bool,
+    host_link_args: &[String],
 ) -> Result<(), Vec<Diagnostic>> {
     let (cc, cc_args) = host_cc_command();
     let mut cmd = Command::new(&cc);
@@ -3652,6 +3665,9 @@ fn link_objects_with_host_cc(
     cmd.arg("-o").arg(output);
     if let Some(sr) = sysroot {
         cmd.arg(format!("--sysroot={}", sr.display()));
+    }
+    for a in host_link_args {
+        cmd.arg(a);
     }
     for lib in link_libs {
         if whole_archive_libs.contains(lib) {

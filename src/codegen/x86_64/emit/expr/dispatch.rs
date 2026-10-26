@@ -400,6 +400,21 @@ impl Codegen {
                 }
                 // 指针/数组运算缩放: ptr ± n 步进 sizeof(*ptr), ptr - ptr 返回元素数
                 // 数组衰减为指针: Array(T,_) 视为 Ptr(T)
+                //
+                // `i + p` 必须先对调成 `p + i`：下面的 `imul` 只作用在**右**
+                // 操作数上，而 `scale` 取的是指针那一侧的元素大小。指针在右时
+                // 乘的就是指针本身 —— `(top - old) + newstack` 曾生成
+                // `sub/idiv 16/imul newstack,16/add`，把 `L->top.p` 写成野指针
+                // （lua 的 `correctstack` 因此踩栈上界断言）。Add 可交换，
+                // 对调不改变语义；`i - p` 不是合法 C，无需处理。
+                let (l, r) = if matches!(op, BinOp::Add)
+                    && !matches!(l.ty(), Type::Ptr(_) | Type::Array(_, _))
+                    && matches!(r.ty(), Type::Ptr(_) | Type::Array(_, _))
+                {
+                    (r, l)
+                } else {
+                    (l, r)
+                };
                 let l_inner = match l.ty() {
                     Type::Ptr(ref t) | Type::Array(ref t, _) => Some(t.size()),
                     _ => None,

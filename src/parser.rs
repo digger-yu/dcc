@@ -10818,7 +10818,15 @@ impl<'a> Parser<'a> {
                         lt.common_real_type(&rt)
                     } else if matches!(op, BinOp::Add | BinOp::Sub) {
                         if matches!(&lt, Type::Ptr(_)) {
-                            lt
+                            if matches!(op, BinOp::Sub) && matches!(&rt, Type::Ptr(_)) {
+                                // C11 6.5.6p9: 指针相减的结果是 `ptrdiff_t`，不是指针。
+                                // 记成 `Ptr` 会让 codegen 把它当基址、把右侧真指针
+                                // 乘上元素大小 —— `L->top.p - old + new` 因此生成
+                                // `imul new,16`，`correctstack` 写出野指针。
+                                Type::Long
+                            } else {
+                                lt
+                            }
                         } else if matches!(op, BinOp::Add) && matches!(&rt, Type::Ptr(_)) {
                             rt
                         } else if matches!(&lt, Type::Int128 | Type::UInt128)
@@ -12552,12 +12560,38 @@ impl<'a> Parser<'a> {
                     match long_count {
                         2.. => Type::ULongLong,
                         1 => Type::ULong,
-                        _ => Type::UInt,
+                        // 后缀只决定起点, 大小仍要参与: `0xffffffffffffffffu` 的类型是
+                        // `unsigned long`, 不是 `unsigned int`。按后缀直接定成 UInt 会把它
+                        // 截断成 0xffffffff —— `#define trim64(x) ((x) & 0xffffffffffffffffu)`
+                        // 于是只剩低 32 位, lmathlib 的 xoshiro 高位被清零。
+                        _ => {
+                            if v <= 0xFFFF_FFFF {
+                                Type::UInt
+                            } else if v <= u64::MAX as i128 {
+                                Type::ULong
+                            } else {
+                                Type::ULongLong
+                            }
+                        },
                     }
                 } else if long_count > 0 {
+                    // 无 u 后缀: 十进制只在有符号类型里挑(l/long long), 十六/八进制
+                    // 超出 i64 时按 C11 6.4.4.1 落到对应的无符号类型。
                     match long_count {
-                        2.. => Type::LongLong,
-                        _ => Type::Long,
+                        2.. => {
+                            if is_hex_or_oct && v > i64::MAX as i128 {
+                                Type::ULongLong
+                            } else {
+                                Type::LongLong
+                            }
+                        },
+                        _ => {
+                            if is_hex_or_oct && v > i64::MAX as i128 {
+                                Type::ULong
+                            } else {
+                                Type::Long
+                            }
+                        },
                     }
                 } else {
                     // 无后缀: 按值大小选择第一个能容纳的类型

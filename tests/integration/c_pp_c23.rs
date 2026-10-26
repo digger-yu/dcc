@@ -2149,6 +2149,17 @@ int main(void) {
     let _ = std::fs::remove_file(&exe);
 }
 
+/// `#if` 内的无符号运算按 `uintmax_t` 求值（C11 6.10.1p4）：`ULONG_MAX` 连续
+/// 右移不能在 `i64` 里溢出成 0，`0xffffffffffffffffu > 0` 也必须为真。
+/// 这条曾让 `lmathlib.c` 选中 32 位 PRN 分支，`math.random` 与 gcc 不同。
+#[test]
+#[cfg(unix)]
+fn pp_if_uintmax_arithmetic() {
+    let source = include_str!("../fixtures/c/pp_if_uintmax.c");
+    let rc = run_gcc_cross_check_opt("pp-if-uintmax", source, &["-O2"]);
+    assert_eq!(rc, 0, "`#if` 的 64 位分支选择应与 gcc 一致，got rc={rc}");
+}
+
 /// C23 `<stdfloat.h>` 由 dcc 内置提供（宿主 glibc 不一定带）：其 typedef
 /// float16_t..float128x_t 与 bfloat16_t 必须能被识别并正确参与运算。
 #[test]

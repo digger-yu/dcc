@@ -155,6 +155,12 @@ pub struct Config {
     pub whole_archive_libs: Vec<String>,
     /// 库搜索路径 (-L)
     pub lib_search_paths: Vec<PathBuf>,
+    /// 未被内置链接器建模的 `-Wl,...` 原始选项，host-cc 链接时原样透传。
+    ///
+    /// 典型是 `-Wl,-E` / `-Wl,--export-dynamic`：Lua 的 `ltests` 套件要求主程序
+    /// 导出 `lua_*` 符号供 `libs/*.so` 解析，否则 `require` 时报
+    /// `undefined symbol: lua_gettop`。旧实现把这类参数静默丢弃。
+    pub host_link_args: Vec<String>,
     /// gc-sections 显式根符号 (-u)
     pub gc_sections_root: Vec<String>,
     /// -fno-semantic-interposition
@@ -1425,6 +1431,8 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
     let mut whole_archive_libs: Vec<String> = Vec::new();
     let mut in_whole_archive = false;
     let mut lib_search_paths: Vec<PathBuf> = Vec::new();
+    // 未被建模的 -Wl,... 原样保留，host-cc 链接时透传（-Wl,-E 等）。
+    let mut host_link_args: Vec<String> = Vec::new();
     let mut trapv = false;
     let mut bounds_check = false;
     let mut warn_int_conversion = false;
@@ -1769,7 +1777,9 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             "-Wl,--no-whole-archive" => { in_whole_archive = false; }
             "-Wl,--gc-sections" => { gc_sections = true; }
             "-Wl,--no-gc-sections" => { gc_sections = false; }
-            a if a.starts_with("-Wl,") => {} // 忽略其他 -Wl 选项
+            // 其余 -Wl,... 内置链接器尚未建模：原样留存，host-cc 链接路径透传，
+            // 避免 `-Wl,-E`（导出动态符号）这类参数被静默吞掉。
+            a if a.starts_with("-Wl,") => host_link_args.push(a.to_string()),
             // -Wp,* : 仅白名单预处理器子选项；未知项报错，避免静默丢参
             "-Wp" => return Err(CliError::new("empty -Wp option")),
             a if a.starts_with("-Wp,") => {
@@ -3184,6 +3194,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             link_libs: link_libs.clone(),
             whole_archive_libs: whole_archive_libs.clone(),
             lib_search_paths: lib_search_paths.clone(),
+            host_link_args: host_link_args.clone(),
             gc_sections_root: gc_sections_root.clone(),
             no_semantic_interposition,
             semantic_interposition,
@@ -3313,6 +3324,7 @@ pub fn parse(args: &[String]) -> Result<Config, CliError> {
             no_undefined_version: false,
             link_opts: crate::link::link_opts::LinkOpts::from_env(),
             link_libs: Vec::new(),
+            host_link_args: Vec::new(),
             whole_archive_libs: Vec::new(),
             lib_search_paths: Vec::new(),
             gc_sections_root: Vec::new(),

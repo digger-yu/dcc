@@ -356,12 +356,17 @@ pub fn deliver(func: &Function, plan: &mut Plan, body: &mut Block, params: &mut 
         eprint!("[regalloc] {}\n", func.name);
         // §5.3 结构化一行计数（全语料聚合的入口）：分 callee-saved 池 / caller-saved
         // 延伸池，spill = Location::Spill 数，reuse* 来自 ranges_disjoint ∀ 判据。
+        //
+        // 名字→号必须用 `auto_reg_of`（整张自动池，含延伸池），不能用
+        // `pooled_reg_of`（只认四个 callee-saved）：后者对 `%r8`/`%r9` 返回
+        // None，计数会把这些绑定算进 `callee`，于是 dump 出现
+        // `bound=5(callee=5,ext=0)` 却同时 `bind io -> %r8` 的自相矛盾读数。
         let mut callee_bound = 0usize;
         let mut ext_bound = 0usize;
         for (_n, r) in &plan.bindings {
             let is_ext = AUTO_EXT_POOL
                 .iter()
-                .any(|(_, rr)| *rr == pooled_reg_of(r).unwrap_or(255));
+                .any(|(_, rr)| *rr == auto_reg_of(r).unwrap_or(255));
             if is_ext {
                 ext_bound += 1;
             } else {

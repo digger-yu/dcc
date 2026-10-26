@@ -1500,6 +1500,36 @@ fn opt_loop_vectorize_o3_run_returns_zero() {
     let _ = fs::remove_file(exe);
 }
 
+/// `ptr - ptr` 的结果必须是整数（C11 6.5.6p9）：`(top - old) + nw` 里只有
+/// `+ nw` 该按元素缩放。修复前 dcc 把减法也记成 `Ptr`，`r` 落到 buf + 5。
+#[test]
+#[cfg(unix)]
+fn opt_ptr_sub_result_type() {
+    let source = include_str!("../fixtures/opt/ptr_sub_result.c");
+    let rc = run_gcc_cross_check_opt("opt-ptr-sub-result", source, &["-O2"]);
+    assert_eq!(rc, 0, "`top - old + nw` 应得到 buf + 3，got rc={rc}");
+}
+
+/// `i + p` 的缩放必须落在索引上：修复前 `imul` 恒作用于右操作数，
+/// `i + buf` 会把指针本身乘 16。
+#[test]
+#[cfg(unix)]
+fn opt_ptr_add_reversed_operands() {
+    let source = include_str!("../fixtures/opt/ptr_add_reversed.c");
+    let rc = run_gcc_cross_check_opt("opt-ptr-add-reversed", source, &["-O2"]);
+    assert_eq!(rc, 0, "`i + buf` 应等于 `buf + i`，got rc={rc}");
+}
+
+/// AST GVN 的别名链必须一次压平：`dt -> vt -> target` 只替换一层会留下悬空
+/// 引用，`-O2` 下 `p2` 的 `out[1]` 读到未初始化栈槽。
+#[test]
+#[cfg(unix)]
+fn opt_gvn_alias_chain_dup() {
+    let source = include_str!("../fixtures/opt/gvn_alias_chain_dup.c");
+    let rc = run_gcc_cross_check_opt("opt-gvn-alias-chain", source, &["-O2"]);
+    assert_eq!(rc, 0, "同参数别名链应保持 out[1] == 18，got rc={rc}");
+}
+
 #[test]
 fn ffast_math_cli() {
     let args = vec![

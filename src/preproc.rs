@@ -2171,6 +2171,49 @@ thread_local! {
     static EXPAND_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
+/// `#if` 表达式求值用的整型值。
+///
+/// C11 6.10.1p4：条件表达式里的有符号整型一律按 `intmax_t`、无符号按
+/// `uintmax_t` 行事。本机两者都是 64 位，所以「64 位位模式 + 一个 unsigned
+/// 标志」就足以表达全部语义；`int`/`long`/`long long` 的宽度差异在这一层
+/// 不再出现，只影响字面量的**符号性**（见 `parse_number`）。
+///
+/// 为什么不能继续用 `i64`：`ULONG_MAX` 展开成 `0xffffffffffffffff`，
+/// 旧实现 `i64::from_str_radix(...).unwrap_or(0)` 解析溢出后静默变成 **0**，
+/// 于是 `#if ((ULONG_MAX >> 31) >> 31) >= 3` 判假，`lmathlib.c` 落到
+/// `Rand64 = unsigned long long` 分支；同时 `#if 0xffffffffffffffffu > 0`
+/// 也判假。x86-64 上两条分支恰好等宽，所以只有 `math.random` 的序列对不上。
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PPInt {
+    /// 位模式。无符号时按 `u64` 解释，有符号时按 `i64` 补码解释。
+    v: u64,
+    /// 是否无符号。混合运算时任一侧为真则按无符号进行。
+    uns: bool,
+}
+
+impl PPInt {
+    const fn signed(v: i64) -> Self {
+        Self { v: v as u64, uns: false }
+    }
+
+    fn unsigned(v: u64) -> Self {
+        Self { v, uns: true }
+    }
+
+    /// 与 C 的「通常算术转换」一致：任一侧无符号就都按无符号处理。
+    fn promote(self, other: Self) -> (u64, u64, bool) {
+        (self.v, other.v, self.uns || other.uns)
+    }
+
+    fn truthy(self) -> Self {
+        Self::signed((self.v != 0) as i64)
+    }
+
+    fn to_i64(self) -> i64 {
+        self.v as i64
+    }
+}
+
 impl Preprocessor {
     /// 强制包含文件 (GCC -include 语义)
     fn force_include(&mut self, file_path: &str) {
@@ -6583,7 +6626,8 @@ impl Preprocessor {
         let mut pos = 0;
         let bytes = expr.as_bytes();
 
-        Self::parse_ternary(bytes, &mut pos)
+        // 调用方只做 `!= 0` 判定，所以这里把位模式截回 i64 无影响。
+        Self::parse_ternary(bytes, &mut pos).to_i64()
     }
 
     fn replace_unknown_idents(&mut self, expr: &str) -> String {
@@ -6699,7 +6743,7 @@ impl Preprocessor {
     }
 
     // 三元: cond ? then : else
-    fn parse_ternary(bytes: &[u8], pos: &mut usize) -> i64 {
+    fn parse_ternary(bytes: &[u8], pos: &mut usize) -> PPInt {
         let cond = Self::parse_or_expr(bytes, pos);
         Self::skip_ws(bytes, pos);
         if *pos < bytes.len() && bytes[*pos] == b'?' {
@@ -6710,41 +6754,40 @@ impl Preprocessor {
                 *pos += 1;
             }
             let else_val = Self::parse_ternary(bytes, pos);
-            if cond != 0 {
-                then_val
-            } else {
-                else_val
-            }
+            // 两个分支按通常算术转换合并类型，再取值。
+            let (t, e, uns) = then_val.promote(else_val);
+            let v = if cond.v != 0 { t } else { e };
+            PPInt { v, uns }
         } else {
             cond
         }
     }
 
-    fn parse_or_expr(bytes: &[u8], pos: &mut usize) -> i64 {
+    fn parse_or_expr(bytes: &[u8], pos: &mut usize) -> PPInt {
         let mut val = Self::parse_and_expr(bytes, pos);
         Self::skip_ws(bytes, pos);
         while *pos + 1 < bytes.len() && bytes[*pos] == b'|' && bytes[*pos + 1] == b'|' {
             *pos += 2;
             let rhs = Self::parse_and_expr(bytes, pos);
-            val = if val != 0 || rhs != 0 { 1 } else { 0 };
+            val = PPInt::signed((val.v != 0 || rhs.v != 0) as i64);
             Self::skip_ws(bytes, pos);
         }
         val
     }
 
-    fn parse_and_expr(bytes: &[u8], pos: &mut usize) -> i64 {
+    fn parse_and_expr(bytes: &[u8], pos: &mut usize) -> PPInt {
         let mut val = Self::parse_bit_or(bytes, pos);
         Self::skip_ws(bytes, pos);
         while *pos + 1 < bytes.len() && bytes[*pos] == b'&' && bytes[*pos + 1] == b'&' {
             *pos += 2;
             let rhs = Self::parse_bit_or(bytes, pos);
-            val = if val != 0 && rhs != 0 { 1 } else { 0 };
+            val = PPInt::signed((val.v != 0 && rhs.v != 0) as i64);
             Self::skip_ws(bytes, pos);
         }
         val
     }
 
-    fn parse_bit_or(bytes: &[u8], pos: &mut usize) -> i64 {
+    fn parse_bit_or(bytes: &[u8], pos: &mut usize) -> PPInt {
         let mut val = Self::parse_bit_xor(bytes, pos);
         loop {
             Self::skip_ws(bytes, pos);
@@ -6754,7 +6797,9 @@ impl Preprocessor {
                 && (*pos + 1 >= bytes.len() || bytes[*pos + 1] != b'|')
             {
                 *pos += 1;
-                val |= Self::parse_bit_xor(bytes, pos);
+                let rhs = Self::parse_bit_xor(bytes, pos);
+                let (a, b, uns) = val.promote(rhs);
+                val = PPInt { v: a | b, uns };
             } else {
                 break;
             }
@@ -6762,13 +6807,15 @@ impl Preprocessor {
         val
     }
 
-    fn parse_bit_xor(bytes: &[u8], pos: &mut usize) -> i64 {
+    fn parse_bit_xor(bytes: &[u8], pos: &mut usize) -> PPInt {
         let mut val = Self::parse_bit_and(bytes, pos);
         loop {
             Self::skip_ws(bytes, pos);
             if *pos < bytes.len() && bytes[*pos] == b'^' {
                 *pos += 1;
-                val ^= Self::parse_bit_and(bytes, pos);
+                let rhs = Self::parse_bit_and(bytes, pos);
+                let (a, b, uns) = val.promote(rhs);
+                val = PPInt { v: a ^ b, uns };
             } else {
                 break;
             }
@@ -6776,7 +6823,7 @@ impl Preprocessor {
         val
     }
 
-    fn parse_bit_and(bytes: &[u8], pos: &mut usize) -> i64 {
+    fn parse_bit_and(bytes: &[u8], pos: &mut usize) -> PPInt {
         let mut val = Self::parse_eq_expr(bytes, pos);
         loop {
             Self::skip_ws(bytes, pos);
@@ -6786,7 +6833,9 @@ impl Preprocessor {
                 && (*pos + 1 >= bytes.len() || bytes[*pos + 1] != b'&')
             {
                 *pos += 1;
-                val &= Self::parse_eq_expr(bytes, pos);
+                let rhs = Self::parse_eq_expr(bytes, pos);
+                let (a, b, uns) = val.promote(rhs);
+                val = PPInt { v: a & b, uns };
             } else {
                 break;
             }
@@ -6794,17 +6843,37 @@ impl Preprocessor {
         val
     }
 
-    fn parse_eq_expr(bytes: &[u8], pos: &mut usize) -> i64 {
+    /// 相等比较：任一侧无符号则按 `u64` 比，否则按 `i64` 比。
+    fn eq_vals(a: PPInt, b: PPInt) -> PPInt {
+        let (x, y, uns) = a.promote(b);
+        let eq = if uns { x == y } else { (x as i64) == (y as i64) };
+        PPInt::signed(eq as i64)
+    }
+
+    /// 有序比较，语义同 `eq_vals`。
+    fn cmp_vals(a: PPInt, b: PPInt) -> std::cmp::Ordering {
+        let (x, y, uns) = a.promote(b);
+        if uns {
+            x.cmp(&y)
+        } else {
+            (x as i64).cmp(&(y as i64))
+        }
+    }
+
+    fn parse_eq_expr(bytes: &[u8], pos: &mut usize) -> PPInt {
         let mut val = Self::parse_cmp_expr(bytes, pos);
         loop {
             Self::skip_ws(bytes, pos);
             if *pos + 1 < bytes.len() {
                 if bytes[*pos] == b'=' && bytes[*pos + 1] == b'=' {
                     *pos += 2;
-                    val = (val == Self::parse_cmp_expr(bytes, pos)) as i64;
+                    let rhs = Self::parse_cmp_expr(bytes, pos);
+                    val = Self::eq_vals(val, rhs);
                 } else if bytes[*pos] == b'!' && bytes[*pos + 1] == b'=' {
                     *pos += 2;
-                    val = (val != Self::parse_cmp_expr(bytes, pos)) as i64;
+                    let rhs = Self::parse_cmp_expr(bytes, pos);
+                    let eq = Self::eq_vals(val, rhs);
+                    val = PPInt::signed((eq.v == 0) as i64);
                 } else {
                     break;
                 }
@@ -6815,7 +6884,7 @@ impl Preprocessor {
         val
     }
 
-    fn parse_cmp_expr(bytes: &[u8], pos: &mut usize) -> i64 {
+    fn parse_cmp_expr(bytes: &[u8], pos: &mut usize) -> PPInt {
         let mut val = Self::parse_shift_expr(bytes, pos);
         loop {
             Self::skip_ws(bytes, pos);
@@ -6830,13 +6899,15 @@ impl Preprocessor {
                 if op != "none" {
                     *pos += len;
                     let rhs = Self::parse_shift_expr(bytes, pos);
-                    val = match op {
-                        "lt" => (val < rhs) as i64,
-                        "gt" => (val > rhs) as i64,
-                        "le" => (val <= rhs) as i64,
-                        "ge" => (val >= rhs) as i64,
+                    let ord = Self::cmp_vals(val, rhs);
+                    let r = match op {
+                        "lt" => ord == std::cmp::Ordering::Less,
+                        "gt" => ord == std::cmp::Ordering::Greater,
+                        "le" => ord != std::cmp::Ordering::Greater,
+                        "ge" => ord != std::cmp::Ordering::Less,
                         _ => unreachable!(),
                     };
+                    val = PPInt::signed(r as i64);
                 } else {
                     break;
                 }
@@ -6847,20 +6918,25 @@ impl Preprocessor {
         val
     }
 
-    fn parse_shift_expr(bytes: &[u8], pos: &mut usize) -> i64 {
+    fn parse_shift_expr(bytes: &[u8], pos: &mut usize) -> PPInt {
         let mut val = Self::parse_add_expr(bytes, pos);
         loop {
             Self::skip_ws(bytes, pos);
-            if *pos + 1 < bytes.len() {
-                if bytes[*pos] == b'<' && bytes[*pos + 1] == b'<' {
-                    *pos += 2;
-                    val <<= Self::parse_add_expr(bytes, pos);
-                } else if bytes[*pos] == b'>' && bytes[*pos + 1] == b'>' {
-                    *pos += 2;
-                    val >>= Self::parse_add_expr(bytes, pos);
+            let is_shl = *pos + 1 < bytes.len() && bytes[*pos] == b'<' && bytes[*pos + 1] == b'<';
+            let is_shr = *pos + 1 < bytes.len() && bytes[*pos] == b'>' && bytes[*pos + 1] == b'>';
+            if is_shl || is_shr {
+                *pos += 2;
+                // 移位结果的类型只跟左操作数走；x86 的移位指令取 cl 的低 6 位，
+                // gcc 在 `#if` 里同样如此（`1 << 64` 得 1）。
+                let n = (Self::parse_add_expr(bytes, pos).v as u32) & 63;
+                let v = if is_shl {
+                    val.v.wrapping_shl(n)
+                } else if val.uns {
+                    val.v >> n
                 } else {
-                    break;
-                }
+                    ((val.v as i64) >> n) as u64
+                };
+                val = PPInt { v, uns: val.uns };
             } else {
                 break;
             }
@@ -6868,17 +6944,28 @@ impl Preprocessor {
         val
     }
 
-    fn parse_add_expr(bytes: &[u8], pos: &mut usize) -> i64 {
+    fn parse_add_expr(bytes: &[u8], pos: &mut usize) -> PPInt {
         let mut val = Self::parse_mul_expr(bytes, pos);
         loop {
             Self::skip_ws(bytes, pos);
             if *pos < bytes.len() {
-                if bytes[*pos] == b'+' {
+                if bytes[*pos] == b'+' || bytes[*pos] == b'-' {
+                    let sub = bytes[*pos] == b'-';
                     *pos += 1;
-                    val += Self::parse_mul_expr(bytes, pos);
-                } else if bytes[*pos] == b'-' {
-                    *pos += 1;
-                    val -= Self::parse_mul_expr(bytes, pos);
+                    let rhs = Self::parse_mul_expr(bytes, pos);
+                    let (a, b, uns) = val.promote(rhs);
+                    let v = if uns {
+                        if sub {
+                            a.wrapping_sub(b)
+                        } else {
+                            a.wrapping_add(b)
+                        }
+                    } else if sub {
+                        (a as i64).wrapping_sub(b as i64) as u64
+                    } else {
+                        (a as i64).wrapping_add(b as i64) as u64
+                    };
+                    val = PPInt { v, uns };
                 } else {
                     break;
                 }
@@ -6889,26 +6976,29 @@ impl Preprocessor {
         val
     }
 
-    fn parse_mul_expr(bytes: &[u8], pos: &mut usize) -> i64 {
+    fn parse_mul_expr(bytes: &[u8], pos: &mut usize) -> PPInt {
         let mut val = Self::parse_unary(bytes, pos);
         loop {
             Self::skip_ws(bytes, pos);
             if *pos < bytes.len() {
-                if bytes[*pos] == b'*' {
+                let op = bytes[*pos];
+                if op == b'*' || op == b'/' || op == b'%' {
                     *pos += 1;
+                    let rhs = Self::parse_unary(bytes, pos);
+                    let (a, b, uns) = val.promote(rhs);
                     // `#if` 的整数运算按平台语义回绕（gcc 同样是 wrap）。debug 构建
                     // 开着溢出检查，裸 `*=` 会让 lmathlib.c 这类含大常量乘法的
                     // 头在预处理阶段直接 panic，而 release 构建静默通过 —— 同一个
                     // 输入在两种构建下「一个报错一个不报」，判据就失去意义。
-                    val = val.wrapping_mul(Self::parse_unary(bytes, pos));
-                } else if bytes[*pos] == b'/' {
-                    *pos += 1;
-                    let d = Self::parse_unary(bytes, pos);
-                    val = if d != 0 { val.wrapping_div(d) } else { 0 };
-                } else if bytes[*pos] == b'%' {
-                    *pos += 1;
-                    let d = Self::parse_unary(bytes, pos);
-                    val = if d != 0 { val.wrapping_rem(d) } else { 0 };
+                    let v = match (op, uns) {
+                        (b'*', true) => a.wrapping_mul(b),
+                        (b'*', false) => (a as i64).wrapping_mul(b as i64) as u64,
+                        (b'/', true) => a.checked_div(b).unwrap_or(0),
+                        (b'/', false) => (a as i64).checked_div(b as i64).unwrap_or(0) as u64,
+                        (b'%', true) => a.checked_rem(b).unwrap_or(0),
+                        _ => (a as i64).checked_rem(b as i64).unwrap_or(0) as u64,
+                    };
+                    val = PPInt { v, uns };
                 } else {
                     break;
                 }
@@ -6919,16 +7009,19 @@ impl Preprocessor {
         val
     }
 
-    fn parse_unary(bytes: &[u8], pos: &mut usize) -> i64 {
+    fn parse_unary(bytes: &[u8], pos: &mut usize) -> PPInt {
         Self::skip_ws(bytes, pos);
         if *pos < bytes.len() {
             if bytes[*pos] == b'!' {
                 *pos += 1;
-                return if Self::parse_unary(bytes, pos) == 0 { 1 } else { 0 };
+                let v = Self::parse_unary(bytes, pos);
+                return PPInt::signed((v.v == 0) as i64);
             }
             if bytes[*pos] == b'-' {
                 *pos += 1;
-                return -Self::parse_unary(bytes, pos);
+                let v = Self::parse_unary(bytes, pos);
+                // 一元负号保持操作数的符号性（C11 6.5.3.3）。
+                return PPInt { v: v.v.wrapping_neg(), uns: v.uns };
             }
             if bytes[*pos] == b'+' {
                 *pos += 1;
@@ -6936,7 +7029,8 @@ impl Preprocessor {
             }
             if bytes[*pos] == b'~' {
                 *pos += 1;
-                return !Self::parse_unary(bytes, pos);
+                let v = Self::parse_unary(bytes, pos);
+                return PPInt { v: !v.v, uns: v.uns };
             }
             if bytes[*pos] == b'(' {
                 *pos += 1;
@@ -6951,15 +7045,15 @@ impl Preprocessor {
         Self::parse_primary(bytes, pos)
     }
 
-    fn parse_primary(bytes: &[u8], pos: &mut usize) -> i64 {
+    fn parse_primary(bytes: &[u8], pos: &mut usize) -> PPInt {
         Self::skip_ws(bytes, pos);
         // 宽字符常量 L'...'
         if *pos + 1 < bytes.len() && bytes[*pos] == b'L' && bytes[*pos + 1] == b'\'' {
             *pos += 1; // skip L
-            return Self::parse_char_const(bytes, pos);
+            return PPInt::signed(Self::parse_char_const(bytes, pos));
         }
         if *pos < bytes.len() && bytes[*pos] == b'\'' {
-            return Self::parse_char_const(bytes, pos);
+            return PPInt::signed(Self::parse_char_const(bytes, pos));
         }
         Self::parse_number(bytes, pos)
     }
@@ -7037,7 +7131,7 @@ impl Preprocessor {
         ch
     }
 
-    fn parse_number(bytes: &[u8], pos: &mut usize) -> i64 {
+    fn parse_number(bytes: &[u8], pos: &mut usize) -> PPInt {
         Self::skip_ws(bytes, pos);
         let start = *pos;
         if *pos < bytes.len() && bytes[*pos].is_ascii_digit() {
@@ -7046,20 +7140,40 @@ impl Preprocessor {
             {
                 *pos += 1;
             }
-            let s = std::str::from_utf8(&bytes[start..*pos]).unwrap_or("0");
-            // 去掉后缀 (L, U, LL, wb/uwb 等)
-            let s = strip_int_suffix(s);
-            if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-                i64::from_str_radix(hex, 16).unwrap_or(0)
-            } else if let Some(bin) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
-                i64::from_str_radix(bin, 2).unwrap_or(0)
-            } else if s.starts_with('0') && s.len() > 1 && s.chars().all(|c| c.is_ascii_digit()) {
-                i64::from_str_radix(s, 8).unwrap_or(0)
+            let raw = std::str::from_utf8(&bytes[start..*pos]).unwrap_or("0");
+            // 去掉后缀 (L, U, LL, wb/uwb 等)，剩下的部分才是数值
+            let body = strip_int_suffix(raw);
+            let sfx = &raw[body.len()..];
+            let has_unsigned = sfx.chars().any(|c| c == 'u' || c == 'U');
+
+            // 数值本身必须按 64 位无符号解析：旧实现用 `i64::from_str_radix(..)
+            // .unwrap_or(0)`，`0xffffffffffffffff` 解析失败后静默变成 0，
+            // 于是 `#if ((ULONG_MAX >> 31) >> 31) >= 3` 判假。
+            let radix = if body.len() > 2 && (body.starts_with("0x") || body.starts_with("0X")) {
+                16
+            } else if body.len() > 2 && (body.starts_with("0b") || body.starts_with("0B")) {
+                2
+            } else if body.len() > 1 && body.starts_with('0') {
+                8
             } else {
-                s.parse::<i64>().unwrap_or(0)
-            }
+                10
+            };
+            let digits = match radix {
+                16 => &body[2..],
+                2 => &body[2..],
+                8 => &body[1..],
+                _ => body,
+            };
+            let (v, overflow) = match u64::from_str_radix(digits, radix) {
+                Ok(v) => (v, false),
+                Err(_) => (u64::MAX, true),
+            };
+            // 符号性：显式 u 后缀，或数值在 intmax_t 里放不下（十进制溢出时
+            // gcc 也是给 warning 后当 unsigned long long 用）。
+            let uns = has_unsigned || overflow || v > i64::MAX as u64;
+            PPInt { v, uns }
         } else {
-            0
+            PPInt::signed(0)
         }
     }
 

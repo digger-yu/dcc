@@ -930,6 +930,35 @@ fn coalesce_block(block: &mut Block, scope: &FnScope) {
     if alias.is_empty() {
         return;
     }
+    // 压平别名链。`gvn_block` 的副本表会把「同一个实参喂给两个形参」的第二份
+    // 直接折到第一份的临时名上, 于是这里拿到 `__inl$dt -> __inl$vt -> target`。
+    // 只做一层替换就删声明的话, `__inl$vt` 会留在使用点上、而它的声明已被
+    // retain 删掉 —— 后端为它新开一个栈槽, 读到的就是未初始化值
+    // (`aux(l, t, 255, t, o)` 内联后 `o[1]` 取到垃圾; lua 的
+    // `luaK_patchlist` 因此把 `dtarget` 传成野指针, `fixjump` 报
+    // "control structure too long")。
+    // 环（自引用）无法压平, 直接放弃该条, 交给 retain 保留它的声明。
+    let mut flat: HashMap<String, String> = HashMap::with_capacity(alias.len());
+    for k in alias.keys() {
+        let mut cur = k.clone();
+        let mut guard = 0usize;
+        let mut ok = true;
+        while let Some(next) = alias.get(&cur) {
+            if next == &cur || guard > alias.len() {
+                ok = false;
+                break;
+            }
+            cur = next.clone();
+            guard += 1;
+        }
+        if ok && cur != *k {
+            flat.insert(k.clone(), cur);
+        }
+    }
+    if flat.is_empty() {
+        return;
+    }
+    let alias = flat;
     // 原子性: 先在副本上改写, 一旦遇到本重写器覆盖不到的形态就整批丢弃。
     // 「半途改名 + 删声明」就是本函数过去的失效形态: 名字留在原地而它的声明被删,
     // 后端只能把它当外部符号 (`h(3,4)` 编成 `call h` → `undefined reference to 'h'`)。

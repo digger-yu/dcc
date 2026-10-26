@@ -1,0 +1,71 @@
+name: SQLite Test Suite
+
+# 手工执行，不挂 push/pull_request 触发器 —— 和 torture.yml 一样，只有
+# workflow_dispatch。SQLite 套件单档构建要 1-3 分钟、四档近 10 分钟，且
+# 官方 quick.test 依赖 tcl8.6-dev，不适合每次提交都跑。
+on:
+  workflow_dispatch:
+    inputs:
+      levels:
+        description: "dcc 优化档位（空格分隔）"
+        required: false
+        default: "2"
+      suite:
+        description: "要跑的测试文件（可多个，空格分隔）"
+        required: false
+        default: "test/quick.test"
+
+jobs:
+  sqlite-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build dcc
+        run: cargo build --release
+
+      - name: Install TCL development files
+        # testfixture 链接 libtcl 并 include tcl.h；unzip 用于解压套件
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tcl-dev unzip
+
+      - name: Download SQLite suite
+        # runner.temp 可写；放在工作区外，不进 git status
+        env:
+          SQLITE_SRC: ${{ runner.temp }}/sqlite-src-3540000
+          SQLITE_ZIP: ${{ runner.temp }}/sqlite-src-3540000.zip
+        run: bash scripts/setup_sqlite_suite.sh
+
+      - name: Run suite
+        # 与 torture.yml 同一条纪律：先证明脚本存在且能解析，再抓真实 rc。
+        # 套件本身的失败不在这里吞掉，交给脚本的退出码表达；但「压根没跑
+        # 起来」（缺文件、语法错、不可执行）必须显式判红。
+        env:
+          LEVELS: ${{ inputs.levels }}
+          SUITE: ${{ inputs.suite }}
+          DCC: ${{ github.workspace }}/target/release/dcc
+          SQLITE_SRC: ${{ runner.temp }}/sqlite-src-3540000
+        run: |
+          s=scripts/check_sqlite_suite.sh
+          [ -f "$s" ] || { echo "::error::$s 不存在"; exit 1; }
+          bash -n "$s" || { echo "::error::$s 语法错误"; exit 1; }
+          rc=0
+          bash "$s" > suite.log 2>&1 || rc=$?
+          tail -40 suite.log
+          echo "check_sqlite_suite.sh rc=$rc"
+          if [ "$rc" -ge 126 ]; then
+            echo "::error::$s 无法执行 (rc=$rc)"
+            exit 1
+          fi
+          echo "rc=$rc" >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/=== summary ===/,$p' suite.log >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
