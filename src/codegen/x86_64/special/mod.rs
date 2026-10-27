@@ -9,10 +9,10 @@ pub mod int128;
 // batch C/D/E 已全部接线投产：x87 / sanitizer / tls 子模块均为 mod.rs 逐字搬迁的
 // 生产实现（非影子），`#[allow(unused_imports)]` 仅为兼容后续逐模块引用。
 #[allow(unused_imports)]
+pub mod float128;
+#[allow(unused_imports)]
 pub mod sanitizer;
 #[allow(unused_imports)]
 pub mod tls;
 #[allow(unused_imports)]
 pub mod x87_floating_point;
-#[allow(unused_imports)]
-pub mod float128;

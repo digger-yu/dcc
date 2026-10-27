@@ -21,9 +21,9 @@ pub mod cpuid;
 pub mod debug;
 pub mod diagnostics;
 // 进程环境不变式的闸门 (只看得到测试, 不进产物)
+pub mod driver;
 #[cfg(test)]
 mod env_hygiene_tests;
-pub mod driver;
 pub mod fixdep;
 pub mod float128;
 pub mod float80;
