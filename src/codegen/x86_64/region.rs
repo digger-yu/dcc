@@ -127,7 +127,9 @@ pub struct RegionStats {
 
 /// 见证层对一条指令的处置。
 #[derive(Debug)]
-pub enum RegionVerdict {
+// `pub(crate)`：本模块已是 `pub(crate) mod region;`，而这个变体直接包 `Insn`（后者也只到
+// crate 内）。声明成 `pub` 只会构成「公开项的类型更私有」（private_interfaces）。
+pub(crate) enum RegionVerdict {
     /// 照原样发。
     Keep,
     /// 整条不发（目的号本身就是家 ⇒ 这次读只是把值抄给自己）。
@@ -477,7 +479,7 @@ impl crate::codegen::x86_64::codegen::Codegen {
     ///
     /// 顺序：先把「本条会踩到某个家号」与「本条是一次证明不了不相交的帧访问」处理掉
     /// （丢家，不发任何字节），再处理本条自身对某个槽的访问。
-    pub fn region_witness(&mut self, insn: &Insn) -> RegionVerdict {
+    pub(crate) fn region_witness(&mut self, insn: &Insn) -> RegionVerdict {
         if !self.region.allowed {
             return RegionVerdict::Keep;
         }

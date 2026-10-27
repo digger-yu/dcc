@@ -44,7 +44,11 @@ impl BoolExpect for bool {
 }
 
 #[derive(Clone, Debug)]
-pub struct Insn {
+// `pub(crate)` 而非 `pub`：本模块（`mod insn;`）自己就是私有的，`Insn` 从来不会出现在
+// crate 外可见的 API 上；但它的字段与构造子会吃 `opcode` 里那些 `pub(crate)` 枚举，
+// 声明成 `pub` 就构成「公开项的类型更私有」（private_interfaces，实测 22 条）。
+// 降到 crate 内可见既消掉警告，也不反过来把后端内部类型暴露成公共 API。
+pub(crate) struct Insn {
     pub op: X86_64Opcode,
     pub ops: [Operand; 4],
     /// 兼容字段: 迁移期内 Raw 变体的字节序.
