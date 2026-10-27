@@ -7,8 +7,9 @@
 #
 #   * Lua:   `make posix` 四档构建 → 跑 luafull.lua（浮点/协程/模式匹配/递归）
 #            → fib(32) best-of-N 计时
-#   * SQLite: 单 TU（shell.c + sqlite3.c）四档直编 → :memory: 功能查询 +
-#             20 万行 insert+聚合+ORDER BY best-of-N 计时
+#   * SQLite: 单 TU（shell.c + sqlite3.c）四档直编 → :memory: 功能查询
+#             → **上游 speedtest1** 负载（`--verify --testset …`）best-of-N 计时，
+#             同时比 dcc 与参考编译器的 Verification Hash（查询结果内容哈希）
 #
 #   功能与一致性判据跑四档；性能线只测 -O2/-O3（对应文档引用的两个档位）。
 #
@@ -127,17 +128,25 @@ LUA
 FIB_PROG="$ART/fib.lua"
 FIB_EXPECT=2178309
 
-# ---- SQLite 20 万行负载 ----
-cat > "$ART/q.sql" <<'SQL'
-CREATE TABLE t(id INTEGER PRIMARY KEY, a INT, b TEXT);
-BEGIN;
-WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<200000)
-INSERT INTO t(id,a,b) SELECT i, (i*2654435761)%1000, 'row'||(i%997) FROM n;
-COMMIT;
-SELECT 'sum', sum(a), count(*) FROM t WHERE a > 500;
-SELECT 'order', count(*) FROM (SELECT a FROM t ORDER BY a DESC LIMIT 1000);
-SQL
-SQL_LOAD="$ART/q.sql"
+# ---- SQLite 负载：上游 speedtest1（取代自写的 20 万行 SQL）----
+# 为什么换掉自写负载：自写 q.sql 只走 `INSERT/SELECT … WHERE a>500/ORDER BY LIMIT`
+# 三条形态，而 speedtest1 是 SQLite 官方自己的性能工具，带 `--verify`（除计时外还做
+# 额外校验步骤）并输出 **Verification Hash** —— 对全部查询结果的内容哈希，于是同一个
+# 二进制既能计时又能回答「dcc 算出的结果与 gcc 是不是逐字节同一回事」。自写负载只能
+# 计时，不能当正确性判据。
+#
+# ST1_SRC 必须来自**预合并源码树**（`test/speedtest1.c`），而 ST1_AMALG 是被测的库；
+# 两者版本不一致时哈希仍然可比（两边编译器用的是同一对），但报告里必须写明这个配对。
+ST1_SRC=${ST1_SRC:-/root/sqlite-src-3540000/test/speedtest1.c}
+ST1_AMALG=${ST1_AMALG:-$SQLITE_SRC/sqlite3.c}
+# 默认 testset 的剔除理由与 check_sqlite_verify.sh 同一份实测：
+#   * `rtree` 配 `--verify` 的第 111 步（复查 20000 次 intersect）连 gcc 参照也跑不完
+#     （两个二进制同过 150 s 未返回，rc=124）⇒ 留在默认集里会让 benchmark 无界挂起；
+#   * `json` / `star` 只出空哈希 ⇒ 没有内容判据。
+# 需要 rtree 时显式 `ST1_TESTSETS=main,cte,orm,fp,rtree ST1_TIMEOUT=1800` 拉开。
+ST1_TESTSETS=${ST1_TESTSETS:-main,cte,orm,fp}
+# 单次上限：超时就当失败样本丢掉，不能让脚本卡在一个跑不完的负载上。
+ST1_TIMEOUT=${ST1_TIMEOUT:-300}
 
 # ---- 计时助手：best-of-N 墙钟（ms）----
 # 非 0 退出的样本跳过且不计入 best（崩溃往往是最快的一次）；失败记录写文件，
@@ -174,12 +183,60 @@ bench() { # $1=exe $2=arg-or-sql-file $3=is_sql(1/0)
   fi
 }
 
+# ---- speedtest1 专用：构建 + best-of-N 计时 + 内容哈希抽取 ----
+# 与 `bench()` 分开写：speedtest1 要带多个选项，而 `bench()` 的非 SQL 分支只递一个参数。
+build_st1() { # $1=cc $2=level $3=name
+  local cc=$1 L=$2 name=$3 odir="$ART/st1_obj_$3"
+  [ -x "$ART/$name" ] && return 0
+  mkdir -p "$odir"
+  "$cc" -O$L -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_RTREE -DSQLITE_THREADSAFE=1 \
+    -I"$(dirname "$ST1_AMALG")" -c "$ST1_AMALG" -o "$odir/sqlite3.o" &&
+  "$cc" -O$L -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_RTREE -DSQLITE_THREADSAFE=1 \
+    -I"$(dirname "$ST1_AMALG")" -c "$ST1_SRC" -o "$odir/speedtest1.o" &&
+  "$REFCC" -no-pie -o "$ART/$name" "$odir"/*.o -lm -lpthread -ldl
+}
+
+st1_hash() { grep -oE 'Verification Hash: [0-9]+ [0-9a-f]+' "$1" | tail -1 | awk '{print $3, $4}'; }
+
+bench_st1() { # $1=exe ⇒ "<ms>ms hash=<内容哈希>"（哈希为空时写 nohash，不假装成功）
+  local best=-1 i s e ms out h
+  for ((i = 1; i <= ITERATIONS; i++)); do
+    now_us; s=$NOW_US
+    out=$(timeout "$ST1_TIMEOUT" "$1" --verify --testset "$ST1_TESTSETS" --memdb :memory: 2>"$ART/bench.err")
+    local rc=$?
+    now_us; e=$NOW_US
+    if [ "$rc" -ne 0 ]; then
+      echo "$(basename "$1") rc=$rc $(head -1 "$ART/bench.err" 2>/dev/null)" >>"$ART/bench.fail"
+      continue
+    fi
+    ms=$(((e - s) / 1000))
+    ((best < 0 || ms < best)) && best=$ms
+    printf '%s\n' "$out" >"$ART/$(basename "$1").last.out"
+  done
+  h=$(st1_hash "$ART/$(basename "$1").last.out")
+  if [ "$best" -lt 0 ]; then
+    echo "FAILED (no successful run)"
+  else
+    echo "${best}ms  hash=${h:-nohash}"
+  fi
+}
+
 # =========================== Lua ===========================
 say "=== Lua functional output (dcc, each level) ==="
 declare -A lua_out=([0]="" [1]="" [2]="" [3]="")
 declare -A LUA_RC=([0]=0 [1]=0 [2]=0 [3]=0)
 for o in 0 1 2 3; do
-  if (cd "$LUA_SRC/src" && rm -f lua &&
+  # 必须 make clean: make 只比时间戳, 不跟踪 CFLAGS, 只 `rm -f lua` 会复用上一档
+  # 的 .o, 于是四档测到的其实是同一份目标代码 (实测 dcc -O0..-O3 计时全部相同).
+  #
+  # 为什么这里用 `make posix`，而验证线 (§3.1) 用 `make linux`：两者只差 SYSCFLAGS
+  # (`-DLUA_USE_POSIX` vs `-DLUA_USE_LINUX`，`luaconf.h:70` 里 LINUX 本身就内含那一套
+  # POSIX 开关) 与 SYSLIBS (`-Wl,-E -ldl`，供动态模块与 `-Wl,-E` 导表)。被计时的热点
+  # TU 在两组宏下是**同一份代码**（实测：`dcc -O2` 单编 lvm.c / ldo.c / lgc.c，两种
+  # 宏下 .o 逐字节相同），而 fib(32) 与 luafull.lua 不碰 dlopen/命令行编辑；本机没有
+  # `libreadline.so` 这个 dev 软链，走 linux 会把无关的链接依赖带进计时链路（§3.4）。
+  # 所以：本脚本走 posix，套件对拍走 linux；两者不矛盾，也不能互换。
+  if (cd "$LUA_SRC/src" && make clean >/dev/null 2>&1 &&
     make posix CC="$DCC" MYCFLAGS="-std=gnu99 -O$o" AR="ar rcu" \
       RANLIB=ranlib) >"$ART/lua_build_O$o.log" 2>&1 &&
     [ -x "$LUA_SRC/src/lua" ]; then
@@ -197,7 +254,7 @@ done
 
 # 参考（功能 + 计时基准）
 lua_ref=""
-if (cd "$LUA_SRC/src" && rm -f lua &&
+if (cd "$LUA_SRC/src" && make clean >/dev/null 2>&1 &&
   make posix CC="$REFCC" MYCFLAGS="-std=gnu99 -O2" AR="ar rcu" \
     RANLIB=ranlib) >"$ART/lua_build_ref.log" 2>&1 &&
   [ -x "$LUA_SRC/src/lua" ]; then
@@ -309,13 +366,35 @@ else
 fi
 
 say ""
-say "=== SQLite 200k benchmark best-of-$ITERATIONS wall (clock: $CLOCK) ==="
-for b in sq_ref_O2 sq_ref_O3 sq_dcc_O2 sq_dcc_O3; do
-  if [ ! -x "$ART/$b" ]; then
-    say "$b: SKIP (binary missing)"
-    continue
+say "=== SQLite speedtest1 best-of-$ITERATIONS wall (clock: $CLOCK, testset=$ST1_TESTSETS) ==="
+# 参照（-O2）先建：没参照就没哈希判据，只读计时不算验证。
+ref_h=""
+if build_st1 "$REFCC" 2 st1_ref_O2; then
+  say "st1_ref_O2: $(bench_st1 "$ART/st1_ref_O2")"
+  ref_h=$(st1_hash "$ART/st1_ref_O2.last.out" 2>/dev/null)
+else
+  say "ST1-REF-BUILD-FAIL $REFCC -O2"
+  failures=$((failures + 1))
+fi
+if [ -z "$ref_h" ]; then
+  say "ST1-NOHASH: 参照没出 Verification Hash ⇒ 哈希一致性无从判据"
+  failures=$((failures + 1))
+fi
+for spec in "$REFCC|3|st1_ref_O3" "$DCC|2|st1_dcc_O2" "$DCC|3|st1_dcc_O3"; do
+  IFS='|' read -r cc lv nm <<<"$spec"
+  if build_st1 "$cc" "$lv" "$nm"; then
+    say "$nm: $(bench_st1 "$ART/$nm")"
+    # 内容哈希必须与参照同号：这不仅是 dcc vs gcc 的判据，也是**跨优化档**的判据
+    # （-O3 只该改速度，改了结果就是误编译）；nohash 同样计失败。
+    got=$(st1_hash "$ART/$nm.last.out" 2>/dev/null)
+    if [ -n "$ref_h" ] && [ "$got" != "$ref_h" ]; then
+      say "ST1-HASH-DIFF $nm: ${got:-nohash} ≠ $ref_h"
+      failures=$((failures + 1))
+    fi
+  else
+    say "$nm: BUILD FAIL"
+    failures=$((failures + 1))
   fi
-  say "$b: $(bench "$ART/$b" "$SQL_LOAD" 1)"
 done
 
 # 计时样本失败发生在 bench 的子 shell 里，这里汇总

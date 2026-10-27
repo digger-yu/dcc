@@ -23,7 +23,7 @@
 #
 # 口径纪律（三件事都必须写进任何引用这些数字的结论）：
 #   * 插桩只加在 **gcc 编的那一副**上：dcc 侧产物一律不插桩，否则权重与被测对象耦合；
-#   * 插桩会改变 gcc 的优化决策，但**不改变执行到的 opcode 序列**（fib / 20 万行负载
+#   * 插桩会改变 gcc 的优化决策，但**不改变执行到的 opcode 序列**（fib / speedtest1 的
 #     都是确定性的），所以计数本身可用；
 #   * 臂位 P 用的是「源码顺序的第几个具名 case」，与 dcc 实际发的比较链同序
 #     （`emit/stmt.rs` 按源码序发链），但 dcc 会合并空体子句 ⇒ 真实臂数略少。
@@ -33,7 +33,8 @@
 #   CAND=<dcc 产物 .o/.bin> SYM=luaV_execute \
 #     bash scripts/hot_weights.sh                  # 额外算 E（需要 objdump）
 #   LUA_SRC=/p/lua SQLITE_SRC=/p/sqlite HW=<前缀> WORKLOAD_LUA=/tmp/fib.lua \
-#   WORKLOAD_SQLITE=/tmp/q.sql bash scripts/hot_weights.sh
+#   S1_ARGS="--verify --testset main,cte,orm,fp --memdb :memory:" bash scripts/hot_weights.sh
+#   （S1_ARGS 就是上游 speedtest1 的参数；换 testset 就是换被测负载。）
 # 判据: 退出码 0 = 两份权重都拿到且总步数 > 0；缺依赖显式报错（不做静默 SKIP）。
 #       本脚本不判绿任何性能结论 —— 它只产权重与 P。
 # ===========================================================================
@@ -47,7 +48,9 @@ SQLITE_SRC="${SQLITE_SRC:-/root/sqlite}"
 HW="${HW:-/tmp/hw}"
 CPU="${CPU:-3}"
 WORKLOAD_LUA="${WORKLOAD_LUA:-/tmp/fib.lua}"
-WORKLOAD_SQLITE="${WORKLOAD_SQLITE:-/tmp/q.sql}"
+# SQLite 侧负载 = 上游 speedtest1 的参数（与 §4.5/§5 同一串 testset）
+S1_ARGS="${S1_ARGS:---verify --testset main,cte,orm,fp --memdb :memory:}"
+S1_TIMEOUT="${S1_TIMEOUT:-600}"
 
 say() { echo "$@"; }
 die() { echo "hot_weights: $*" >&2; exit 1; }
@@ -60,25 +63,16 @@ command -v objdump >/dev/null || die "objdump 不在 PATH"
 
 mkdir -p "$HW" || die "无法创建 $HW"
 
-# ---- 工作负载：与 scripts/bench_lua_sqlite.sh 逐字相同，否则权重不对应被计时的那段 ----
+# ---- 工作负载：与 scripts/bench_lua_sqlite.sh / check_sqlite_verify.sh 同一口径 ----
+# SQLite 侧用上游 speedtest1（`--verify --testset …`），不再用自写的 20 万行 SQL：
+# 自写负载只能量到「插入+排序」那几条链，而权重必须对应被计时的那段程序（阶段 6
+# 的 E/P 两个量都是按这份频率算的）。可用 S1_ARGS 改 testset。
 if [ ! -f "$WORKLOAD_LUA" ]; then
   cat > "$WORKLOAD_LUA" <<'LUA'
 local function fib(n) if n<2 then return n end return fib(n-1)+fib(n-2) end
 print(fib(32))
 LUA
   say "已生成 Lua 负载 $WORKLOAD_LUA"
-fi
-if [ ! -f "$WORKLOAD_SQLITE" ]; then
-  cat > "$WORKLOAD_SQLITE" <<'SQL'
-CREATE TABLE t(id INTEGER PRIMARY KEY, a INT, b TEXT);
-BEGIN;
-WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<200000)
-INSERT INTO t(id,a,b) SELECT i, (i*2654435761)%1000, 'row'||(i%997) FROM n;
-COMMIT;
-SELECT 'sum', sum(a), count(*) FROM t WHERE a > 500;
-SELECT 'order', count(*) FROM (SELECT a FROM t ORDER BY a DESC LIMIT 1000);
-SQL
-  say "已生成 SQLite 负载 $WORKLOAD_SQLITE"
 fi
 
 # ---------------------------------------------------------------------------
@@ -143,7 +137,11 @@ say ""
 say "=== SQLite：按 pOp->opcode 计权 + 源码序臂位 ==="
 SHW="$HW/sq_hw"
 rm -rf "$SHW"; mkdir -p "$SHW" || die "mkdir $SHW"
-cp "$SQLITE_SRC/sqlite3.c" "$SQLITE_SRC/shell.c" "$SQLITE_SRC"/*.h "$SHW/" >/dev/null 2>&1
+cp "$SQLITE_SRC/sqlite3.c" "$SQLITE_SRC"/*.h "$SHW/" >/dev/null 2>&1
+# 负载程序用上游 test/speedtest1.c（与 bench/verify 两处同一个），不再用 shell.c + 自写 SQL。
+S1_SRC="${S1_SRC:-$SQLITE_SRC/test/speedtest1.c}"
+[ -f "$S1_SRC" ] || die "找不到 speedtest1 源：$S1_SRC（设 S1_SRC=… 或把 SQLITE_SRC 指向解包源码树）"
+cp "$S1_SRC" "$SHW/speedtest1.c" || die "拷 speedtest1.c 失败"
 SQ="$SHW/sqlite3.c"
 # 主分派锚点：全文里只有 VdbeExec 的 case 标号是**顶格**的（生成器约定），所以
 # 「第一个顶格 case 之前的最后一个 `switch( pOp->opcode )`」才是主分派点 —— 不能拿
@@ -161,11 +159,15 @@ sed -i "${SSEL}i\\    hw_sq[pOp->opcode] += 1;" "$SQ"
 INC=$(awk -v s="$SSEL" 'NR<s && $0=="#include <stdio.h>" {n=NR} END{print n}' "$SQ")
 [ -n "$INC" ] || die "在主分派点之前找不到 `#include <stdio.h>`，插桩块无处安放"
 sed -i "${INC}r $HW/sq_probe.txt" "$SQ"
-gcc -O2 -o "$SHW/sq_hw" "$SHW/shell.c" "$SHW/sqlite3.c" -I"$SHW" -lpthread -ldl -lm \
-    > "$HW/sq_build.log" 2>&1 || die "gcc 构建插桩 SQLite 失败，见 $HW/sq_build.log"
-rm -f "$HW/sq_op_freq.txt"
-taskset -c "$CPU" "$SHW/sq_hw" :memory: < "$WORKLOAD_SQLITE" > "$HW/sq_run.out" 2>&1 \
-  || die "插桩 SQLite 运行失败"
+gcc -O2 -o "$SHW/st_hw" "$SHW/speedtest1.c" "$SHW/sqlite3.c" -I"$SHW" \
+    -DSQLITE_ENABLE_RTREE -DSQLITE_ENABLE_JSON1 -lpthread -ldl -lm -lz \
+    > "$HW/sq_build.log" 2>&1 || die "gcc 构建插桩 SQLite+speedtest1 失败，见 $HW/sq_build.log"
+rm -f "$HW/sq_op_freq.txt" "$SHW"/speedtest1.db*
+# speedtest1 会在 cwd 落库文件，所以进到 $SHW 里跑；权重与结果哈希都走它自己的输出。
+(
+  cd "$SHW" || exit 1
+  taskset -c "$CPU" timeout "$S1_TIMEOUT" ./st_hw $S1_ARGS
+) > "$HW/sq_run.out" 2>&1 || die "插桩 speedtest1 运行失败/超时，见 $HW/sq_run.out"
 [ -s "$HW/sq_op_freq.txt" ] || die "没拿到 SQLite 权重（$HW/sq_op_freq.txt 空）"
 SQ_STEPS=$(awk '{s+=$2}END{print s+0}' "$HW/sq_op_freq.txt")
 say "SQLite VM 步数（=Σfreq，与编译器无关）= $SQ_STEPS，被执行到的 opcode 种类 = $(wc -l < "$HW/sq_op_freq.txt")"

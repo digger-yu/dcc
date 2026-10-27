@@ -18,7 +18,7 @@
 
 | 脚本 | 用途 |
 |------|------|
-| `cargo_test_summary.sh` | 跑 `cargo test --release` 并给出跨 target 总计 + 失败/忽略清单；退出码透传 cargo，自身不判绿 |
+| `cargo_test_summary.sh` | 跑 `cargo test --release` 并给出跨 target 总计 + 失败/忽略清单；退出码透传 cargo，自身不判绿。原始日志最上面带元信息头（开始/结束时间按北京时间、命令行、git 版本、耗时、cargo 退出码）—— cargo 原话开头必然是编译 `warning:`，没这个头看着像日志被截断 |
 | `check_fixtures.sh` | fixture 引用完整性 / 命名 / 目录规则，硬失败无过渡开关 |
 | `check_fixtures_selftest.sh` | 元测试用例：5 类反向注入逐条 `exit 1`，证明上一条真的会红 |
 | `test_all.sh` | `tests/fixtures/smoke` 端到端冒烟的薄编排，不复制断言逻辑；由 `make test-all` 接入 |
@@ -60,6 +60,21 @@
 |------|------|
 | `gcc_dg_test.sh` | `tests/gcc-dg` 语料驱动，跳过清单在 `tests/skip/gcc_dg_skip.txt` |
 | `gcc_dg_summary.sh` | 解析日志输出 Actions Summary |
+
+## 上游官方测试套（手工，gcc 基线对拍）
+
+跑的是上游自带的测试套（不是 `tests/fixtures/` 语料），调用方是人或 `.github/workflows`
+里的手动作业（`sqlite-suite.yml`，只有 `workflow_dispatch`）；两者共享同一把
+机器级独占锁 `/tmp/dcc-suite-gate.lock`（套件里的时序类用例对负载敏感，并发互跑会把
+基线污染成假红）。结果数据落 `docs/dcc-lua-sqlite-build-verify-report.md`。
+
+| 脚本 | 用途 |
+|------|------|
+| `setup_sqlite_suite.sh` | 拉取/解压 SQLite **完整源码树**（含 `test/*.test` 与 `configure`，不是 amalgamation）到 `$SQLITE_SRC`；本地与 CI 同一入口 |
+| `check_sqlite_suite.sh` | SQLite 官方 TCL 套（默认 `test/quick.test`）gcc 基线 vs dcc 各档。判据取**失败测试名集合**的差（`comm -13`），gcc 自己也失败的项不判 dcc 红；判红两类：`DCC-BUILD-FAIL` / `SUITE-DIFF`，另有一类只点名不直接判红：`SUITE-INCOMPLETE`（没跑到汇总行）。退出码：0 PASS / 1 判红 / 2 前置不满足（含基线自己跑不完——参照集残缺时不再比 dcc）/ 3 抢不到锁 / 4 只有 `SUITE-INCOMPLETE` 且无新增失败名（历史上这一档容的是「dcc 跑 quick.test 中途 SIGSEGV」那族缺陷，最后一个已在 2026-10-27 修完，四档都能跑到汇总行；再出 rc=4 就是新问题，得看日志。把这类也算 1 的话，超时/机器抖动也会判红，红/黄由调用方定）。`SUITE`/`LEVELS` 的分隔符空格、逗号、分号均可（`LEVELS="0,1,2,3"` 与 `"0 1 2 3"` 等价，非 0-9 的档位当场报错）—— workflow_dispatch 输入框里人手很容易写逗号版，旧写法会把整串当成一个档拼成 `-O0,1,2,3` 交给编译器。以 root 跑会自动降权到 `$SUITE_USER`（`attach-6.2` 靠权限断言，root 下整套提前退出，故 root 而缺 `runuser` 时直接报错而不是默默当 root 跑）；非 root（CI 的 `runner`）直接用当前身份跑，因此提前叫一次 `$DCC --version` 把权限/缺库问题与编译器本身坏了分开。testfixture 用 capture 桩拿 `main.mk` 的真实 argv 后**逐 TU 独立进程编译**（单进程扫 88 个 TU 不回收内存，会在 `sqlite3.c` 前被 OOM 杀掉）。`SUITE-INCOMPLETE` 的档也会在崩溃前的输出里算一次新增失败名：否则「没跑到汇总行」会把「跑到的部分里有新失败」一起吞掉，`INCOMPLETE` 就成了另一种假绿 |
+| `check_lua_suite_diff.sh` | Lua 5.5 官方 `all.lua` 三条路径（路径 A = `ltests` 内部断言构建，路径 B-full = stock `make linux` 产物跑全量，路径 B = 同一 stock 产物加 `-e "_U=true"` 用户模式）× dcc `-O0`…`-O3` vs gcc `-O$REF_LEVEL` 基线。除结构判据（rc、`final OK !!!`、`***** FILE` 个数硬相等、进度点宽带）外，还跑两条自证：**同一棵 gcc 树跑两遍归一化后必须相同**（证明噪声分类表完整），以及往基线里注入语义差异**必须逐个判红**（证明本脚本不恒绿） |
+| `check_sqlite_verify.sh` | SQLite 的「逐字同果」验证，给的是 `check_sqlite_suite.sh` 给不出的那两类证据（后者的判据是**失败名集合**，不看单文件端到端的结果行内容，也不看整负载哈希）。A 段：`select1~5.test` 逐文件跑完，与 gcc 参照比**用例结果行逐字相同** + `0 errors out of N tests` + rc=0；B 段：上游 `speedtest1 --verify` 的 **Verification Hash** 逐档 vs gcc 参照同号，并出 best-of-N 墙钟。前置依赖 `check_sqlite_suite.sh` 留下的源码树/argv/对象集（缺档就地 `BUILD_ONLY` 补齐，绝不跳档）；沿用同一把机器级锁。注意：`sqllogictest` 不在 SQLite 发布包里（独立项目），`select*.test` 是 TCL 格式只有 testfixture 认；3.54.0 树里没有 `test/evidence/`；`main.mk` 的 `src-verify`/`verify-source` 是源码完整性检查，与查询结果无关 |
+| `lua_suite_norm.sh` | 上一条用的**噪声归一化对拍器**（纯 bash + 系统 ERE，不用 python；本机 awk 是 mawk，没有 gawk 的捕获数组）。20 类噪声（种子、pid、临时路径、耗时、GC 计数/内存、进度点、`done (with N kills)`…）按类别改写为占位符，每类带**取值校验**（短路边号 ∈{0,1}、随机区间 0≤lo≤hi≤1、日期成形、ppm 与 SIGINT 次数的下限），越界就退出码 2 而不是静默吞掉。`--selftest` 共 45 条：一半是“真差异必须判红”；`--audit` 逐类给出命中数与样例。退出码 0=归一化后相同 / 1=有差异 / 2=用法或越界 |
 
 ## 内核 / Linux 7.1（详见 `docs/kernel_build_guide.md`）
 
@@ -104,7 +119,7 @@
 | `bench_phase_e.sh` | 阶段 E 性能冒烟：mmap + 分块 codegen + `-O2`（`docs/support_features.md` 登记） |
 | `optimize_baseline.sh` | 各优化档位产物基线采集（手工） |
 | `performance_benchmark.sh` | 快速编译耗时基准（手工，完整基准见 `bench_phase_e.sh`） |
-| `bench_lua_sqlite.sh` | Lua 5.5.1 / SQLite 3.53.4 **运行时**性能对比基准（手工）：四档 dcc vs gcc，含功能正确性判据（`docs/dcc-lua-sqlite-build-verify-report.md` 的数据来源） |
+| `bench_lua_sqlite.sh` | Lua 5.5.1 / SQLite **运行时**性能对比基准（手工）：四档 dcc vs gcc，含功能正确性判据（`docs/dcc-lua-sqlite-build-verify-report.md` 的数据来源）。SQLite 负载已改为**上游 speedtest1**（`--verify --testset main,cte,orm,fp`）——除计时外还比 `Verification Hash`（全部查询结果的内容哈希），跨档也必须同号；以前的自写 20 万行 SQL 只能计时、不能当正确性判据。默认 testset 不含 `rtree`：`--verify` 下第 111 步连 gcc 参照也跑不完（实测两个二进制同过 150 s 未返回）；`json`/`star` 只出空哈希，同样不进默认集 |
 | `ab_pair.sh` | 同轮交替配对计时（median(r) + 95%CI + 符号检验 + 同二进制 dup 臂）：所有墙钟判据的唯一口径 |
 | `gate0_probe.sh` | 产物性能根治方案的 **Gate 0 三探针**：0a 影子槽表（`DCC_SLOT_SHADOW=1`）/ 0b raw 归因两列 / 0c 按方案 §0 口径的 dcc-vs-gcc 分桶 |
 | `check_facts_vs_objdump.sh` | S1 指令事实层的**外部 oracle**：拿 objdump 对同一串 raw 字节反解目的号，与 `raw_writes` 的答对账（`DCC_FACTS_DUMP=1`）；只对账强主张那一侧。`sext` 形除了查目的号还查**助记符必须属于 `movsxd`/`movsx*`/`mov r64,imm32` 那三族**（只查号抽不出「号对但扩展错」这一类错） |
