@@ -41,7 +41,9 @@ impl Codegen {
                 if let crate::location::Location::Reg(rid) = self.home_for(&name.name) {
                     if rid.bank == crate::location::RegBank::Gp {
                         let base = rid.n;
-                        if base != dst && self.emit_load_mem_typed_at(load_size, &load_ty, base, dst) {
+                        if base != dst
+                            && self.emit_load_mem_typed_at(load_size, &load_ty, base, dst)
+                        {
                             return;
                         }
                     }
@@ -85,7 +87,8 @@ impl Codegen {
                                     // `dst == base` 时不能合成：`mov d,[d]` 先把旧地址毁掉，
                                     // 紧接着的 `add d,step` 加的就是载入值而不是地址。
                                     if base != dst
-                                        && self.emit_load_mem_typed_at(load_size, &load_ty, base, dst)
+                                        && self
+                                            .emit_load_mem_typed_at(load_size, &load_ty, base, dst)
                                     {
                                         self.emit_inc_dec_reg(base, is_inc, step);
                                         return;
@@ -746,7 +749,10 @@ impl Codegen {
                     // 不能同时做 GP 加载，否则会把浮点位模式当整数写入 dst，
                     // 后续 mixed-type 比较（如 float > int）会错误地把该
                     // 位模式当作整数值用 cvtsi2ss 转换成浮点数。
-                    if matches!(f.ty, Type::Float | Type::Double | Type::LongDouble | Type::Float128) {
+                    if matches!(
+                        f.ty,
+                        Type::Float | Type::Double | Type::LongDouble | Type::Float128
+                    ) {
                         // 单一真源：long double 必须 `fld tbyte [dst]`（旧写法
                         // movsd 只读 16 字节槽的低 8 字节，依赖“高 8 字节为 0
                         // 且就是 f64 位型”的旧不变量）。
@@ -853,10 +859,8 @@ impl Codegen {
             // 浮点全局变量加载到 xmm0 (浮点值约定, 同局部变量);
             // 整数路径 emit_global_load 会把 double 装进 GP 寄存器,
             // 与 gen_float_binop 期望的 xmm0 不符 (TLS/普通全局都受影响)
-            if matches!(
-                ty,
-                Type::Float | Type::Double | Type::LongDouble | Type::Float128
-            ) || matches!(ty, Type::Imaginary(_))
+            if matches!(ty, Type::Float | Type::Double | Type::LongDouble | Type::Float128)
+                || matches!(ty, Type::Imaginary(_))
             {
                 self.emit_global_float_load(&name.name, ty);
             } else if matches!(ty, Type::Complex(_)) {

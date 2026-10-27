@@ -211,7 +211,7 @@ mod backend {
                 ..crate::debug::DebugOptions::default()
             };
             let cu = crate::codegen::build_dwarf_cu(module, &opts.source_name, &func_pcs, vec![]);
-            let dbg = crate::debug::build_dwarf_full(&cu, &dbg_opts);
+            let dbg = crate::debug::build_dwarf_full(cu, &dbg_opts);
             let extra_secs = crate::debug::dwarf_elf_sections(&dbg);
             // 不再在这里手工 push `.debug_info`：它与 `extra_secs`（来自
             // `DebugSections::to_elf_sections`）里的那份逐字节相同，双发只会得到

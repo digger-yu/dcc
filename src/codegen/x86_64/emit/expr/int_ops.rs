@@ -238,9 +238,7 @@ impl Codegen {
         // long double 交付在 x87 st(0)：经 f64 通道 (emit_float_to_ulong) 会因
         // 80→64 舍入丢失 >= 2^52 的精度 (例如 0xFFFFFFFFFFFFFFFF 四舍五入成 2^64)，
         // 故无符号 64 位走精确的 x87 整数转换 (st(0) 信道).
-        if matches!(float_ty, Type::LongDouble)
-            && matches!(int_ty, Type::ULong | Type::ULongLong)
-        {
+        if matches!(float_ty, Type::LongDouble) && matches!(int_ty, Type::ULong | Type::ULongLong) {
             self.emit_x87_long_double_to_uint64(dst);
             return;
         }
@@ -628,7 +626,9 @@ impl Codegen {
         // 三条自反扩展都得挂 gas（理由同下面 `mov %e<reg>,%e<reg>` 那一段）：
         // luaV_execute 里 `movsxd r9,r9d` 有 403 条、`movsxd rax,r15d` 84 条，全部来
         // 自本函数，而窥孔的幂等移动判据只认带文本的指令。
-        use crate::codegen::x86_64::emit::gas::{REG16 as GAS_REG16, REG32 as GAS_REG32, REG64 as GAS_REG64, REG8 as GAS_REG8};
+        use crate::codegen::x86_64::emit::gas::{
+            REG16 as GAS_REG16, REG32 as GAS_REG32, REG64 as GAS_REG64, REG8 as GAS_REG8,
+        };
         let r8 = GAS_REG8[(reg & 15) as usize];
         let r16 = GAS_REG16[(reg & 15) as usize];
         let r32 = GAS_REG32[(reg & 15) as usize];
@@ -636,7 +636,8 @@ impl Codegen {
         let insn = match (lty.size(), signed) {
             (1, s) => {
                 let m = if s { "movsbq" } else { "movzbq" };
-                Insn::mov_ext(s, Width::B8, Width::B64, reg, reg).with_gas(format!("{m} {r8}, {r64}"))
+                Insn::mov_ext(s, Width::B8, Width::B64, reg, reg)
+                    .with_gas(format!("{m} {r8}, {r64}"))
             },
             (2, s) => {
                 let m = if s { "movswq" } else { "movzwq" };
@@ -653,7 +654,11 @@ impl Codegen {
                 // 自反 `mov %eax,%eax` 就永远看不见（上一轮 luaV_execute 里那 2 条尾巴
                 // 就是这么漏下的）。文本与字节同源于 `cast.rs` 的同形窄化写法。
                 use crate::codegen::x86_64::emit::gas::REG32 as GAS_REG32;
-                let gas = format!("mov {}, {}", GAS_REG32[(reg & 15) as usize], GAS_REG32[(reg & 15) as usize]);
+                let gas = format!(
+                    "mov {}, {}",
+                    GAS_REG32[(reg & 15) as usize],
+                    GAS_REG32[(reg & 15) as usize]
+                );
                 self.emit_insn_expect(&Insn::mov_rm_reg(Width::B32, reg, reg).with_gas(gas));
                 return;
             },

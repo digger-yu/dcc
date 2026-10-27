@@ -312,10 +312,8 @@ fn tstruct(name: &str, fields: Vec<Field>) -> Type {
 #[test]
 fn named_struct_equality_is_nominal_across_completion() {
     let incomplete = tstruct("irq_desc", vec![]);
-    let complete = tstruct(
-        "irq_desc",
-        vec![tfield("x", Type::Int, 0), tfield("lock", Type::Long, 8)],
-    );
+    let complete =
+        tstruct("irq_desc", vec![tfield("x", Type::Int, 0), tfield("lock", Type::Long, 8)]);
     assert_eq!(incomplete, complete, "同一个 tag 就是同一个类型");
     assert_eq!(complete, incomplete, "比较必须对称");
 
@@ -347,10 +345,7 @@ fn identity_tag_is_bounded_for_aggregate_types() {
         .collect();
     let big = tstruct("page_like", fields);
     let tag = big.identity_tag().expect("具名聚合的身份串必须存在");
-    assert!(
-        tag.len() < 96,
-        "具名聚合按名义编码，身份串不该随字段数增长，实际 {tag:?}"
-    );
+    assert!(tag.len() < 96, "具名聚合按名义编码，身份串不该随字段数增长，实际 {tag:?}");
     assert!(tag.contains("struct page_like"), "身份串要带 tag 名: {tag:?}");
 
     // 指针/数组/函数包装只按其自身结构展开，具名聚合命中即返回。
@@ -372,7 +367,12 @@ fn identity_tag_bails_out_on_oversized_anonymous_nesting() {
         if depth == 0 {
             return Type::Int;
         }
-        tstruct("", (0..6).map(|i| tfield(&format!("f{i}"), nest(depth - 1), i * 8)).collect())
+        tstruct(
+            "",
+            (0..6)
+                .map(|i| tfield(&format!("f{i}"), nest(depth - 1), i * 8))
+                .collect(),
+        )
     }
     let shallow = nest(2).identity_tag();
     assert!(shallow.is_some(), "浅的匿名聚合应照常给串: {shallow:?}");

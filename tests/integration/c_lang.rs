@@ -1068,17 +1068,23 @@ fn fstrict_aliasing_is_reported_as_inert_but_fno_is_silent() {
     let path = std::env::temp_dir().join(format!("dcc-strict-alias-{}.c", std::process::id()));
     fs::write(&path, src).unwrap();
     let run = |flag: &str| {
-        // 用 `-S -o /dev/null` 而不是 `-fsyntax-only`：后者不走 `cli_warnings` 的输出通道
+        // 用 `-S -o <临时文件>` 而不是 `-fsyntax-only`：后者不走 `cli_warnings` 的输出通道
         //（实测同一条警告在 `-c`/`-S` 下会打印、`-fsyntax-only` 不打印），拿它测警告会是假绿。
-        let mut args = vec!["-S", "-o", "/dev/null"];
+        // 输出路径也不能是 `/dev/null`：编译器写产物是先 unlink 再新建，那会把设备节点
+        // 按 umask 重建（参 harness::discard_out）。
+        let asm_out = discard_out("strict-alias");
+        let mut extra: Vec<&str> = Vec::new();
         if !flag.is_empty() {
-            args.push(flag);
+            extra.push(flag);
         }
         let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
-            .args(&args)
+            .args(["-S", "-o"])
+            .arg(&asm_out)
+            .args(&extra)
             .arg(&path)
             .output()
             .expect("run dcc");
+        let _ = fs::remove_file(&asm_out);
         (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
     };
 
@@ -2820,6 +2826,467 @@ int main(void) {
     let _ = fs::remove_file(exe);
 }
 
+/// 同名 static 分处两个块作用域: 每处引用必须解析到**自己那一份**。
+///
+/// 红法(旧编译器 rc=2): `static_local_map` 是全函数预扫描的「同名取最后一份」
+/// 表, 位置无关 ⇒ 两处引用都落到后声明的那张表, 前一张成了无人引用的死数据。
+/// 实测形态是 sqlite 的 `tclsqlite.c`(`trace3.test`): `DbObjCmd` 里 trace_v2 的
+/// `TTYPE_strs` 被解析成 transaction 那张, `bad trace type "bad"` 的候选表全错,
+/// 后续 `Tcl_GetIndexFromObj` 越界, 整套 fixture abort。
+#[test]
+fn static_local_same_name_in_sibling_blocks() {
+    let source = r#"
+int streq(const char *a, const char *b) {
+    while (*a && *a == *b) { ++a; ++b; }
+    return *a == *b;
+}
+const char *pick(int w, int i) {
+    switch (w) {
+    case 0: {
+        static const char *TTYPE[] = { "statement", "profile", "row", "close", 0 };
+        return TTYPE[i];
+    }
+    default: {
+        static const char *TTYPE[] = { "deferred", "exclusive", "immediate", 0 };
+        return TTYPE[i];
+    }
+    }
+}
+int counter(int w) {
+    static int n = 100;
+    switch (w) {
+    case 0: { static int n = 1;  return ++n; }
+    case 1: { static int n = 10; return ++n; }
+    }
+    return n;
+}
+int main(void) {
+    if (!streq(pick(0, 1), "profile"))   return 1;
+    if (!streq(pick(1, 1), "exclusive")) return 2;
+    if (!streq(pick(0, 0), "statement")) return 3;
+    if (!streq(pick(1, 2), "immediate")) return 4;
+    if (counter(0) != 2)   return 5;
+    if (counter(1) != 11)  return 6;
+    if (counter(0) != 3)   return 7;
+    if (counter(1) != 12)  return 8;
+    if (counter(2) != 100) return 9;
+    return 0;
+}
+"#;
+    let (output, exe) = run_compile_and_run("static-local-same-name", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "static_local_same_name should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// 字符数组用字符串字面量初始化: 每一处**声明点**都必须复制字符**内容**。
+///
+/// 红法(旧编译器 rc=2): 块内声明走 `gen_aggregate_assign`, 那条路把 `Expr::String`
+/// 求值成一个地址(.rodata 里的指针值)再按聚合体搬运 ⇒ 数组里装的是**指针的字节**。
+/// 实测形态是 sqlite 的 `zipfile.c`(`zipfile.test`): `zipfileGetMode` 里
+/// `char zTemplate[11]` 拿到 `'@'`(0x40) 而不是 `'-'`, 使 `-rw-r--r--` 解析失败。
+#[test]
+fn char_array_string_init_in_nested_blocks() {
+    let source = r#"
+int slen(const char *s) {
+    int n = 0;
+    while (s[n]) ++n;
+    return n;
+}
+int main(void) {
+    char top[11] = "-rwxrwxrwx"; /* 函数顶层 */
+    if (top[0] != '-' || top[1] != 'r' || slen(top) != 10) return 1;
+    {
+        char blk[11] = "-rwxrwxrwx"; /* 嵌套块 */
+        if (blk[1] != 'r' || slen(blk) != 10) return 2;
+    }
+    if (1) {
+        char cond[5] = "abcd"; /* if 体 */
+        if (cond[3] != 'd' || cond[4] != '\0') return 3;
+    }
+    for (int i = 0; i < 1; i++) {
+        char loop[6] = "hello"; /* for 体 */
+        if (loop[1] != 'e' || slen(loop) != 5) return 4;
+    }
+    {
+        char exact[3] = "xyz"; /* 恰好放满, 不带 NUL */
+        if (exact[0] != 'x' || exact[2] != 'z') return 5;
+    }
+    {
+        char small[4] = "ab"; /* 小于 8 字节 */
+        if (small[1] != 'b' || small[2] != 0 || small[3] != 0) return 6;
+    }
+    {
+        const char *p = "ptr"; /* 指针初始化不受影响 */
+        if (p[1] != 't' || p[3] != '\0') return 7;
+    }
+    {
+        int v = ({ char se[4] = "sec"; se[2]; }); /* 语句表达式内 */
+        if (v != 'c') return 8;
+    }
+    return 0;
+}
+"#;
+    let (output, exe) = run_compile_and_run("char-array-string-init", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "char_array_string_init should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// 移位结果的宽度：`((unsigned long long)1) << i` 必须按 64 位记账。
+///
+/// SSA 的 `Operand::Int` 只记值不记类型，常量折叠把 `(Bitmask)1` 存成裸 `Int(1)` 之后，
+/// 重建只按操作数量级推类型 ⇒ 结果被记成 `int` ⇒ codegen 发 32 位移位再符号扩展。
+/// 实测旧实现在 `-O2`/`-O3` 下 i=31 得 0xffffffff80000000（该是 0x80000000）、
+/// i>=32 得 0（该是 0x100000000 起），而 `-O0`/`-O1`/gcc 全对。
+///
+/// 真实受害者是上游 `sqlite3WhereGetMask()` 的 `return MASKBIT(i);`：游标号 >=33 时
+/// maskSelf 记成 0，查询规划器因此把同一个游标开两遍、最后一个游标从未打开，生成的
+/// 字节码在 OP_Column 读 [NULL+0x50] 段错误。所以这里把「循环里按位置返回 1<<i」
+/// 与「移位结果再参与运算」两种形状都钉住，四个档位都跑。
+#[test]
+fn shift_of_cast_literal_keeps_64bit_width() {
+    let source = r#"
+typedef unsigned long long u64;
+static int ix[40];
+
+/* 与 sqlite3WhereGetMask() 同形状：循环里按位置返回 ((u64)1) << i */
+static u64 get_mask(int iCursor) {
+    int i;
+    for( i = 1; i < 40; i++ ) {
+        if( ix[i] == iCursor ) return ((u64)1) << i;
+    }
+    return 0;
+}
+
+/* 移位结果再参与运算（旧缺陷里同一族的第二个受害者） */
+static u64 two_or(int n) { return (((u64)1) << n) | (((u64)1) << (n + 1)); }
+
+int main(void) {
+    int i;
+    for( i = 0; i < 40; i++ ) ix[i] = i;
+    for( i = 24; i < 40; i++ ) {
+        u64 want = ((u64)1) << i;
+        if( get_mask(i) != want ) return 1 + i;
+        if( (((u64)1) << i) != want ) return 100 + i;
+        if( two_or(i) != (want | (want << 1)) ) return 200 + i;
+    }
+    return 0;
+}
+"#;
+    for lvl in 0..=3u8 {
+        let flag = format!("-O{lvl}");
+        let (output, exe) =
+            run_compile_and_run_flags("shift-cast-literal-width", source, &[flag.as_str()]);
+        assert!(
+            output.status.success(),
+            "-O{lvl} compile stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rc = run_exe(&exe);
+        assert_eq!(rc, 0, "-O{lvl}: 移位结果必须保持左操作数的宽度, got {rc}");
+        let _ = fs::remove_file(exe);
+    }
+}
+
+/// LICM 不得把「下标是循环体内每轮重算的局部量」的成员读外提出循环。
+///
+/// `stable_object_read` 只回答「根对象稳不稳定」，沿 `Index`/`Member` 往下走时不看
+/// 下标。旧实现里 `aQ[iMid].iFirst` 这种「数组元素再取成员」在 `Expr::Member` 分支
+/// 只查到「aQ 是文件级 const」就放行，于是 `int cMid = aQ[iMid].iFirst;` 被搬到
+/// 循环之前 —— 那里 `iMid` 还没被赋过值，读的是未初始化栈槽。上游受害者是
+/// `shell.c` 的 `sqlite3_qrf_wcwidth()`（151 项宽字符表的二分查找）：`-O2` 下拿野
+/// 下标算地址，`qrf01-1.10` 的 `db format` 直接段错误。这里用同形状的小表逐值对比
+/// 线性参照实现，四个档位都跑。
+#[test]
+fn licm_does_not_hoist_over_loop_variant_subscript() {
+    let source = r#"
+static const struct {
+    unsigned char w;
+    int iFirst;
+} aQ[] = {
+    {1, 0x0300}, {2, 0x034c}, {1, 0x0400}, {2, 0x1100},
+    {1, 0x2000}, {2, 0x2e80}, {1, 0x303f}, {2, 0xff00},
+};
+
+/* 二分查这张表：循环体里每轮重算 iMid，再读 aQ[iMid].iFirst */
+static int wcw(int c){
+    int iFirst, iLast;
+    if( c<0x300 ) return 1;
+    iFirst = 0;
+    iLast = (int)(sizeof(aQ)/sizeof(aQ[0])) - 1;
+    while( iFirst<iLast-1 ){
+        int iMid = (iFirst+iLast)/2;
+        int cMid = aQ[iMid].iFirst;
+        if( cMid<c ){
+            iFirst = iMid;
+        }else if( cMid>c ){
+            iLast = iMid - 1;
+        }else{
+            return aQ[iMid].w;
+        }
+    }
+    if( aQ[iLast].iFirst>c ) return aQ[iFirst].w;
+    return aQ[iLast].w;
+}
+
+int main(void){
+    int c;
+    long sum = 0;
+    int nbad = 0;
+    for( c = 0x2ff; c < 0x10000; c++ ){
+        int got = wcw(c);
+        int want = 1, k;
+        for( k = 0; k < (int)(sizeof(aQ)/sizeof(aQ[0])); k++ ){
+            if( aQ[k].iFirst<=c ) want = aQ[k].w; else break;
+        }
+        sum += got;
+        if( got != want ) nbad++;
+    }
+    if( nbad ) return 1;
+    if( sum != 69492 ) return 2;   /* 与 gcc -O0/-O2 实测同值 */
+    return 0;
+}
+"#;
+    for lvl in 0..=3u8 {
+        let flag = format!("-O{lvl}");
+        let (output, exe) = run_compile_and_run_flags(
+            "licm-loop-variant-subscript",
+            source,
+            &[flag.as_str()],
+        );
+        assert!(
+            output.status.success(),
+            "-O{lvl} compile stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rc = run_exe(&exe);
+        assert_eq!(rc, 0, "-O{lvl}: 循环变下标的成员读不得被外提, got {rc}");
+        let _ = fs::remove_file(exe);
+    }
+}
+
+/// 同一个函数里被内联出**两张跳表**时，每张必须用自己的基址派发。
+///
+/// 旧缺陷：`function_inline` 复制函数体时保留 callee 的 `Span`，而 switch 跳表的合成
+/// 标识符（`__swt_n*`）用的是该 switch 的 span ⇒ 同一个函数里出现「不同名、同位置」
+/// 的两份 static 声明；`bind_static_local` 只按 `(line,col)` 定位声明，于是第二张表被
+/// 绑到第一张的 mangled 名上 ⇒ 第二个 switch 拿表 0 的表项跳表 1 的臂体 —— 实测一个
+/// `while(1)` 永不退出（SQLite `sqlite3VdbeDelete` 里倒着走 `Op` 数组的那个循环，
+/// `-O2`/`-O3` 的 `walfault.test` 因此跑不完）。这里给循环加上限，错了就是值错而不是挂死。
+#[test]
+fn two_inlined_jump_tables_use_own_base() {
+    let source = r#"
+typedef struct Op { signed char t; void *p; } Op;
+typedef struct Sub { struct Sub *next; Op *aOp; int nOp; } Sub;
+typedef struct Vdbe { Sub *sub; Op *top; int nTop; } Vdbe;
+
+static int hits, freed;
+
+/* 体内 10 路 switch ⇒ dcc 会降成跳表（每张表一份） */
+static void freeOne(int t, void *p) {
+    switch (t) {
+        case -16: hits += 101; break;
+        case -15: hits += 102; break;
+        case -14: hits += 103; break;
+        case -13: hits += 104; break;
+        case -12: hits += 105; break;
+        case -11: hits += 106; break;
+        case -10: hits += 107; break;
+        case -9:  hits += 108; break;
+        case -8:  hits += 109; break;
+        case -7:  hits += 110; break;
+        default:  hits += 1 + (p != 0); break;
+    }
+}
+
+static void freeArr(void *db, Op *aOp, int nOp) {
+    int guard = 64;
+    if (aOp) {
+        Op *pOp = &aOp[nOp - 1];
+        while (1) {
+            if (pOp->t <= -7 || pOp->t >= 0) freeOne(pOp->t, pOp->p);
+            if (pOp == aOp) break;
+            if (--guard < 0) break;   /* 错派发到另一张表时会跑飞，这里封顶成「值错」 */
+            pOp--;
+        }
+        freed += 1000;
+    }
+    (void)db;
+}
+
+static void clearObj(void *db, Vdbe *p) {
+    Sub *pSub;
+    Sub *pNext;
+    for (pSub = p->sub; pSub; pSub = pNext) {
+        pNext = pSub->next;
+        freeArr(db, pSub->aOp, pSub->nOp);
+    }
+    freeArr(db, p->top, p->nTop);
+}
+
+static void delObj(Vdbe *p) {
+    void *db = p->top;
+    clearObj(db, p);
+    freed += 5;
+}
+
+int main(void) {
+    static Op arr[3] = { { -16, 0 }, { 5, 0 }, { 2, (void *)1 } };
+    static Sub sub1 = { 0, arr, 3 };
+    static Sub sub0 = { &sub1, 0, 0 };
+    static Vdbe obj = { &sub0, arr, 2 };
+    delObj(&obj);
+    /* sub1 倒着走：arr[2] t=2 → default +1+1=2；arr[1] t=5 → default +1+0=1；
+       arr[0] t=-16 → 101 ⇒ hits=104, freed=1000
+       再跑 top=arr,nTop=2：arr[1] t=5 → +1；arr[0] t=-16 → 101 ⇒ hits=206, freed=2000
+       delObj 末尾 +5 ⇒ freed=2005 */
+    if (hits != 206) return 1;
+    if (freed != 2005) return 2;
+    return 0;
+}
+"#;
+    let (output, exe) = run_compile_and_run("two-inlined-jumptables", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "两张被内联的跳表必须各自用自己的基址派发, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
+/// 指针数组的二级/三级下标：`ap[i][j]` 必须先 load 出 `ap[i]` 这个指针，
+/// 再按 j 解引用。
+///
+/// 旧实现里，当基座是**指针字段**（`p->pp[i][j]` / `s.pp[i][j]`）时，外层
+/// 那一层解引用被「基址已是 PointerValue 就跳过」的守卫吞掉，发射成
+/// `*(u32*)(pp + i*8 + j*4)` —— 读到的是指针数组自己的字节（堆指针的
+/// 高低半）。SQLite `walFramePgno` 的 `apWiData[iHash][idx]` 正属此形状。
+#[test]
+fn nested_subscript_over_pointer_field() {
+    let source = r#"
+typedef unsigned int u32;
+
+struct holder {
+    u32 *rows[4];
+    u32 **pp;
+    u32 ***ppp;
+    u32 plain[4][6];
+    volatile u32 **vap;
+};
+
+static u32 store[4][6];
+static u32 deep[2][3][4];
+
+static u32 get_arrow(struct holder *h, int i, u32 j) { return h->pp[i][j]; }
+static u32 get_arrow_const(struct holder *h, u32 j) { return h->pp[1][j]; }
+static u32 get_arrow_inner_const(struct holder *h, int i) { return h->pp[i][2]; }
+static u32 get_dot(struct holder *h, int i, u32 j) { return h->rows[i][j]; }
+static u32 get_three(struct holder *h, int i, int j, u32 k) { return h->ppp[i][j][k]; }
+static u32 get_plain(struct holder *h, int i, u32 j) { return h->plain[i][j]; }
+/* volatile 指针的指针: SQLite walFramePgno 的原样形状 */
+static u32 get_volatile(struct holder *h, int i, u32 j) { return h->vap[i][j]; }
+static void set_arrow(struct holder *h, int i, u32 j, u32 v) { h->pp[i][j] = v; }
+static u32 get_argv(char *const *argv, int n) { return (u32)argv[n][0]; }
+
+/* sqlite3_auto_extension 的形状: 全局 struct 的点成员是「函数指针数组的指针」。
+ * member 臂已经把指针字段包进 PointerValue, Index 臂不得再补一次 LOAD。 */
+struct autoext {
+    u32 nExt;
+    void (**aExt)(void);
+};
+static struct autoext gAutoext;
+static void (*gBuf[4])(void);
+static int gHits;
+static void bump(void) { gHits += 3; }
+static void reg_ext(void (*fn)(void)) {
+    gAutoext.aExt[gAutoext.nExt] = fn;
+    gAutoext.nExt++;
+}
+static void fire_ext(void) {
+    for (u32 i = 0; i < gAutoext.nExt; i++) gAutoext.aExt[i]();
+}
+
+int main(void) {
+    struct holder h;
+    static u32 *rowptrs[4];
+    static u32 *midptrs[2][3];
+    static u32 **topptrs[2];
+    static volatile u32 *vrowptrs[4];
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 6; j++) store[i][j] = (u32)(100 * (i + 1) + j);
+    for (int i = 0; i < 4; i++) { rowptrs[i] = store[i]; vrowptrs[i] = store[i]; }
+    for (int i = 0; i < 2; i++)
+        for (int j = 0; j < 3; j++) midptrs[i][j] = &deep[i][j][0];
+    for (int i = 0; i < 2; i++) topptrs[i] = midptrs[i];
+    h.pp = (u32 **)rowptrs;
+    h.vap = (volatile u32 **)vrowptrs;
+    h.ppp = (u32 ***)topptrs;
+    for (int i = 0; i < 4; i++) h.rows[i] = store[i];
+
+    for (int i = 0; i < 4; i++)
+        for (u32 j = 0; j < 6; j++) {
+            if (get_arrow(&h, i, j) != (u32)(100 * (i + 1) + j)) return 1;
+            if (get_dot(&h, i, j) != (u32)(100 * (i + 1) + j)) return 2;
+            if (get_volatile(&h, i, j) != (u32)(100 * (i + 1) + j)) return 3;
+        }
+    for (u32 j = 0; j < 6; j++)
+        if (get_arrow_const(&h, j) != 200 + j) return 4;
+    if (get_arrow_inner_const(&h, 3) != 402) return 5;
+    for (int i = 0; i < 2; i++)
+        for (int j = 0; j < 3; j++)
+            for (u32 k = 0; k < 4; k++) {
+                deep[i][j][k] = (u32)(1000 * (i + 1) + 100 * j + k);
+                if (get_three(&h, i, j, k) != deep[i][j][k]) return 6;
+            }
+    for (int i = 0; i < 4; i++)
+        for (u32 j = 0; j < 6; j++) {
+            h.plain[i][j] = (u32)(7 * i + j); /* 纯二维数组: 不得多一次 load */
+            if (get_plain(&h, i, j) != (u32)(7 * i + j)) return 7;
+        }
+    set_arrow(&h, 2, 3, 98765);
+    if (store[2][3] != 98765) return 8;
+    {
+        static char words[3][4] = {{'a', 'b', 'c', 0}, {'d', 'e', 'f', 0}, {'g', 'h', 'i', 0}};
+        char *av[3];
+        for (int i = 0; i < 3; i++) av[i] = words[i];
+        for (int i = 0; i < 3; i++)
+            if (get_argv(av, i) != (u32)('a' + 3 * i)) return 9;
+    }
+    /* 点成员函数指针数组: 存 / 读 / 调用都只能解引用一次 */
+    gAutoext.aExt = gBuf;
+    gAutoext.nExt = 0;
+    reg_ext(bump);
+    reg_ext(bump);
+    if (gAutoext.nExt != 2 || gBuf[0] != bump || gBuf[1] != bump) return 10;
+    fire_ext();
+    if (gHits != 6) return 11;
+    return 0;
+}
+"#;
+    let (output, exe) = run_compile_and_run("nested-subscript-ptr-field", source);
+    assert!(
+        output.status.success(),
+        "compile stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rc = run_exe(&exe);
+    assert_eq!(rc, 0, "nested pointer subscript should return 0, got {rc}");
+    let _ = fs::remove_file(exe);
+}
+
 /// static local 部分初始化数组 (尾部补零)
 #[test]
 fn static_local_partial_init_array() {
@@ -3901,4 +4368,61 @@ fn int_const_width_suffix() {
     let source = include_str!("../fixtures/c/int_const_width_suffix.c");
     let rc = run_gcc_cross_check_opt("int-const-width-suffix", source, &["-O2"]);
     assert_eq!(rc, 0, "0xffffffffffffffffu 应为 64 位，got rc={rc}");
+}
+
+/// 不完整数组的维度由初始化器决定，且对**经括号声明符构造的数组**也必须推导。
+///
+/// 缺陷形状：推导只写在「数组声明符」分支里，`static int (*ext[])(void) = {fa, fb, fc}`
+/// 走的是函数指针声明符分支，维度停在 `Const(0)` —— 对象尺寸算成 0，
+/// `sizeof(ext)/sizeof(ext[0])` 也得 0。SQLite 的
+/// `static int (*const sqlite3BuiltinExtensions[])(sqlite3*) = {…}` 正是这一形，
+/// 长度为 0 意味着内置扩展一个都不注册，产物里 `sqlite_dbpage` 一类虚表不存在。
+#[test]
+#[cfg(unix)]
+fn array_dim_from_init() {
+    let source = include_str!("../fixtures/c/array_dim_from_init.c");
+    let rc = run_gcc_cross_check_opt("array-dim-from-init", source, &["-O2"]);
+    assert_eq!(rc, 0, "函数指针数组的维度应由初始化器推出（ext_n=3 acc=7 local_n=2），got rc={rc}");
+}
+
+/// 块作用域的 `extern` 声明必须指向**外层全局对象**，不得另建一个对象。
+///
+/// 缺陷形状：规划期把「既不在本帧规划表、也不在本 TU 文件作用域全局表」的名字一律
+/// `register_var` 分一个帧内槽，于是 `{ extern int shared; p = &shared; }` 交出的是
+/// 栈槽地址。SQLite 测试套的 `Sqlitetest2_Init` 正好用这种声明把六个 io-error 变量
+/// `Tcl_LinkVar` 给 Tcl：链到不代表那个全局的地址后，io-error 故障注入整体失效。
+#[test]
+#[cfg(unix)]
+fn block_extern_refers_to_outer_global() {
+    let source = include_str!("../fixtures/c/block_extern_ref.c");
+    let rc = run_gcc_cross_check_opt("block-extern-ref", source, &["-O2"]);
+    assert_eq!(rc, 0, "块内 extern 声明应绑定外层全局（same=1 arr_same=1 val=114），got rc={rc}");
+}
+
+/// 一元 `*` 作用在数组上必须给出**元素类型**（C11 6.5.3.2p2 + 6.3.2.1p3）。
+///
+/// 旧实现只对 `Type::Ptr` 算这条类型，其余一律退到 `int`：`sizeof(*arr)` 对函数指针数组
+/// 得 4而不是 8，对字符数组也得 4。gcc-torture 的 `bcp-1.c` 用
+/// `N(arr) = sizeof(arr)/sizeof(*arr)` 数元素，比例一错就调到数组外 → `abort()`。
+#[test]
+#[cfg(unix)]
+fn deref_of_array_yields_element_type() {
+    let source = include_str!("../fixtures/c/deref_array_elem_ty.c");
+    for opt in ["-O0", "-O1", "-O2", "-O3"] {
+        let rc = run_gcc_cross_check_opt(&format!("deref-array-elem-{}", opt), source, &[opt]);
+        assert_eq!(rc, 0, "{opt} 下 `sizeof(*数组)` 仍按 int 算或遍历越界，got rc={rc}");
+    }
+}
+
+/// `__builtin_constant_p("字面量")` 必须是 1（字面量是链接期地址常量），而可写局部
+/// 数组与 `&全局` 仍必须是 0。旧写法复用「能不能算出一个 i128」那条判据（它还喂内联
+/// 汇编的立即数约束与 `_Static_assert`），字符串过不去 ⇒ `good1` 错。
+#[test]
+#[cfg(unix)]
+fn constant_p_accepts_string_literals() {
+    let source = include_str!("../fixtures/c/constant_p_string.c");
+    for opt in ["-O0", "-O1", "-O2", "-O3"] {
+        let rc = run_gcc_cross_check_opt(&format!("constant-p-string-{}", opt), source, &[opt]);
+        assert_eq!(rc, 0, "{opt} 下 __builtin_constant_p 的判定与 gcc 不一致，got rc={rc}");
+    }
 }

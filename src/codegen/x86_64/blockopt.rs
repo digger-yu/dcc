@@ -48,15 +48,15 @@ pub(crate) mod stat {
 
     /// 站点表。编号是产物对账用的契约：**只能追加在末尾，不得重排或删除**。
     pub const SITES: &[&str] = &[
-        "reset_label",          // 控制流汇合点（label 入口）
-        "reset_bare_emit",      // 任何裸字节发射
-        "reset_fn_boundary",    // 函数/调用边界
-        "mov_rm_other",         // observe: MovRm 的未建模形态
-        "movext_other",         // observe: MovExt 的未建模形态
-        "alu_dst_other",        // observe: AluRm 目的非寄存器/内存
+        "reset_label",       // 控制流汇合点（label 入口）
+        "reset_bare_emit",   // 任何裸字节发射
+        "reset_fn_boundary", // 函数/调用边界
+        "mov_rm_other",      // observe: MovRm 的未建模形态
+        "movext_other",      // observe: MovExt 的未建模形态
+        "alu_dst_other",     // observe: AluRm 目的非寄存器/内存
         "imul_dst_other",
         "shift_dst_other",
-        "unary_muldiv",         // mul/imul/div/idiv 的隐式 rax/rdx
+        "unary_muldiv", // mul/imul/div/idiv 的隐式 rax/rdx
         "unary_dst_other",
         "lea_dst_other",
         "setcc_dst_other",
@@ -64,38 +64,48 @@ pub(crate) mod stat {
         "cvt2sd_other",
         "noarg",
         "jmp_ret_call",
-        "raw_unknown",          // Raw 字节解不出写集
-        "catchall",             // 整个 opcode 变体没列进 observe
-        "slots_capacity",       // note_slot 满 16 条 ⇒ 全弃
-        "slots_alias",          // 未知基址的写 ⇒ 当作可别名
-        "slots_width0",         // 宽度未知的写
+        "raw_unknown",    // Raw 字节解不出写集
+        "catchall",       // 整个 opcode 变体没列进 observe
+        "slots_capacity", // note_slot 满 16 条 ⇒ 全弃
+        "slots_alias",    // 未知基址的写 ⇒ 当作可别名
+        "slots_width0",   // 宽度未知的写
         // 以下不是「杀」而是「计数」站点（hit 的两个 lost 传 0）：用来区分
         // 「事实被杀了」与「事实根本没建起来」——两者的修法完全不同。
-        "cnt_slot_created",     // note_slot 成功登记一条帧槽事实
-        "cnt_store_no_src",     // 写槽的源不是寄存器（算出来的值）⇒ 建不了事实
-        "cnt_store_volatile",   // volatile 槽：故意不建事实
-        "cnt_load_fact_hit",    // 帧槽读在 decide 里查到了事实
-        "cnt_load_fact_miss",   // 帧槽读查不到事实（被杀 or 从未建立）
-        "cnt_slot_by_kill_reg", // 因 `kill_reg` 连带丢弃的帧槽事实（该号不再等于那个槽）
+        "cnt_slot_created",       // note_slot 成功登记一条帧槽事实
+        "cnt_store_no_src",       // 写槽的源不是寄存器（算出来的值）⇒ 建不了事实
+        "cnt_store_volatile",     // volatile 槽：故意不建事实
+        "cnt_load_fact_hit",      // 帧槽读在 decide 里查到了事实
+        "cnt_load_fact_miss",     // 帧槽读查不到事实（被杀 or 从未建立）
+        "cnt_slot_by_kill_reg",   // 因 `kill_reg` 连带丢弃的帧槽事实（该号不再等于那个槽）
         "cnt_slot_by_invalidate", // 因另一条写到重叠位移的写而丢弃的帧槽事实
-        "cnt_copy_by_kill_reg", // 因 `kill_reg` 丢掉的「两号相等」事实
+        "cnt_copy_by_kill_reg",   // 因 `kill_reg` 丢掉的「两号相等」事实
         // `raw_writes` 的四类结果。它们才能定 P0 的真实工作量：如果 Raw 大多解成
         // Unknown，那么开关 R_RAW 本身不会带来任何变化（实测确实如此），要做的是
         // 把解码器补全到能认出那些形态。
-        "raw_nothing", "raw_reg", "raw_masked", "raw_unknown_decoded",
+        "raw_nothing",
+        "raw_reg",
+        "raw_masked",
+        "raw_unknown_decoded",
         // 处置点的权威计数：前面的 hit/miss 只说明「看到了事实」，这两行才说明
         // 「事实真的换成了不发 / 换了形态」。实测证明两者可以差很多。
-        "veto_drop", "veto_replace",
+        "veto_drop",
+        "veto_replace",
         // R_CPYBASE（地址中转改写）真的换成了新基址的次数。
         "cnt_cpybase_hit",
         // S1 补全后的六个新写集形态（方案 §8.2：「S1 的价值取决于补全后有多少热路径
         // raw 真解码出写集」—— 没这几个计数器那句话无法回答）。
-        "raw_regs", "raw_call", "raw_terminate", "raw_memory", "raw_slotstore", "raw_strs",
+        "raw_regs",
+        "raw_call",
+        "raw_terminate",
+        "raw_memory",
+        "raw_slotstore",
+        "raw_strs",
         // A2（标签汇合）真的「不整体清」了几次：不计数就无法把「A2 实现了」与
         // 「A2 在任何函数上都碰不到」分开。
         "a2_inherit",
         // S4 区域家的两个处置计数（同样只读，不进默认路径的判定）。
-        "region_drop", "region_replace",
+        "region_drop",
+        "region_replace",
         // A2（多前驱取交）真的「按交汇保留」了几次。与 `a2_inherit`（单前驱落空继承）
         // 分开计：两者是两个不同的判据，合在一起就读不出「取交」那一臂到底有没有跑。
         "a2_intersect",
@@ -116,7 +126,9 @@ pub(crate) mod stat {
     fn on() -> bool {
         let v = ON.load(Ordering::Relaxed);
         if v == u64::MAX {
-            let e = std::env::var("DCC_KILL_ALL_STAT").map(|s| s != "0").unwrap_or(false);
+            let e = std::env::var("DCC_KILL_ALL_STAT")
+                .map(|s| s != "0")
+                .unwrap_or(false);
             ON.store(e as u64, Ordering::Relaxed);
             return e;
         }
@@ -156,7 +168,14 @@ pub(crate) mod stat {
     /// 返回 (站点名, 次数, 丢掉的帧槽事实, 丢掉的寄存器相等事实)，只留非零项。
     pub fn dump() -> Vec<(&'static str, u64, u64, u64)> {
         (0..N)
-            .map(|i| (SITES[i], CNT[i].load(Ordering::Relaxed), SLOT_LOST[i].load(Ordering::Relaxed), COPY_LOST[i].load(Ordering::Relaxed)))
+            .map(|i| {
+                (
+                    SITES[i],
+                    CNT[i].load(Ordering::Relaxed),
+                    SLOT_LOST[i].load(Ordering::Relaxed),
+                    COPY_LOST[i].load(Ordering::Relaxed),
+                )
+            })
             .filter(|r| r.1 != 0)
             .collect()
     }
@@ -207,7 +226,11 @@ mod facts_dump {
 
     fn enabled() -> bool {
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ON.get_or_init(|| std::env::var("DCC_FACTS_DUMP").map(|s| s != "0").unwrap_or(false))
+        *ON.get_or_init(|| {
+            std::env::var("DCC_FACTS_DUMP")
+                .map(|s| s != "0")
+                .unwrap_or(false)
+        })
     }
 
     pub fn note(bytes: &[u8]) {
@@ -276,7 +299,13 @@ pub(crate) mod shadow {
         used: u64,
     }
 
-    const EMPTY: Entry = Entry { disp: 0, len: 0, reg: FREE, seq: 0, used: 0 };
+    const EMPTY: Entry = Entry {
+        disp: 0,
+        len: 0,
+        reg: FREE,
+        seq: 0,
+        used: 0,
+    };
 
     #[derive(Default, Debug, Clone, Copy)]
     pub struct Count {
@@ -323,7 +352,11 @@ pub(crate) mod shadow {
 
     pub fn enabled() -> bool {
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ON.get_or_init(|| std::env::var("DCC_SLOT_SHADOW").map(|s| s != "0").unwrap_or(false))
+        *ON.get_or_init(|| {
+            std::env::var("DCC_SLOT_SHADOW")
+                .map(|s| s != "0")
+                .unwrap_or(false)
+        })
     }
 
     /// 真实存槽写：影子表与真实表一样按字节区间失效，然后记下新事实。
@@ -350,7 +383,13 @@ pub(crate) mod shadow {
                 return;
             }
             if let Some(slot) = s.entries.iter_mut().find(|e| e.reg == FREE) {
-                *slot = Entry { disp, len, reg: r, seq: s.seq, used: s.seq };
+                *slot = Entry {
+                    disp,
+                    len,
+                    reg: r,
+                    seq: s.seq,
+                    used: s.seq,
+                };
                 return;
             }
             // 溢出：淘汰最久未用的一条（= A3 要做的事），并记下容量屏障。
@@ -362,7 +401,13 @@ pub(crate) mod shadow {
                     victim = i;
                 }
             }
-            s.entries[victim] = Entry { disp, len, reg: r, seq: s.seq, used: s.seq };
+            s.entries[victim] = Entry {
+                disp,
+                len,
+                reg: r,
+                seq: s.seq,
+                used: s.seq,
+            };
             s.last_capacity = s.seq;
         });
     }
@@ -499,8 +544,12 @@ pub(crate) fn written_gp(insn: &Insn) -> RegWrites {
     use X86_64Opcode as Op;
     match &insn.op {
         // 目的在寄存器：只写那一个号。目的在内存：只写内存。
-        Op::MovRm { dst, .. } | Op::MovExt { dst, .. } | Op::Lea { dst, .. } | Op::ImulRm { dst, .. }
-        | Op::Shift { dst, .. } | Op::Setcc { dst, .. } => match dst {
+        Op::MovRm { dst, .. }
+        | Op::MovExt { dst, .. }
+        | Op::Lea { dst, .. }
+        | Op::ImulRm { dst, .. }
+        | Op::Shift { dst, .. }
+        | Op::Setcc { dst, .. } => match dst {
             O::Reg(r, _) => RegWrites::Regs(regbit(*r)),
             O::Mem(_) => RegWrites::Mem,
             _ => RegWrites::All,
@@ -564,7 +613,10 @@ pub(crate) fn written_gp(insn: &Insn) -> RegWrites {
         },
         // lock 前缀的 cmpxchg/xadd 同时写 `rax` 与目的（可能还是内存），xchg 写两个号：
         // 与 `observe` 里那几个变体同样保守，不拆细。
-        Op::LockCmpxchgRm { .. } | Op::LockXchgRm { .. } | Op::LockXaddRm { .. } | Op::XchgRm { .. }
+        Op::LockCmpxchgRm { .. }
+        | Op::LockXchgRm { .. }
+        | Op::LockXaddRm { .. }
+        | Op::XchgRm { .. }
         | Op::Pmulld { .. } => RegWrites::All,
         // x87：状态栈与 ST(0) 不在 GP 号体系里，而带 mem 的形还会读写那块内存。
         Op::X87 { mem, .. } => {
@@ -708,7 +760,12 @@ pub(crate) fn raw_frame(bytes: &[u8]) -> RawFrame {
     let Some(h) = raw_head(bytes) else {
         return RawFrame::Opaque;
     };
-    let Head { prefix, rex, op_at, op0 } = h;
+    let Head {
+        prefix,
+        rex,
+        op_at,
+        op0,
+    } = h;
     if op_at == usize::MAX {
         // 只剩前缀字节：它自己不访问内存。
         return RawFrame::NoMem;
@@ -724,24 +781,83 @@ pub(crate) fn raw_frame(bytes: &[u8]) -> RawFrame {
         // 相对跳转/调用/返回、`mov r,imm`、累加器立即数形、`pushf/popf`、`leave`、
         // 串指令（rsi/rdi/rcx 的地址）、in/out、`int3`、`nop` 等：都不是 `[r13+disp]`。
         // 串指令写的是 `(%rdi)`，基址确定不是 r13 ⇒ Foreign。
-        0x04 | 0x05 | 0x0C | 0x0D | 0x14 | 0x15 | 0x1C | 0x1D | 0x24 | 0x25 | 0x2C | 0x2D
-        | 0x34 | 0x35 | 0x3C | 0x3D | 0x50..=0x5F | 0x68 | 0x6A | 0x70..=0x7F | 0x90..=0x99
-        | 0x9B | 0x9C | 0x9D | 0xA4 | 0xA5 | 0xA6 | 0xA7 | 0xAA | 0xAB | 0xAC | 0xAD | 0xAE
-        | 0xAF | 0xB0..=0xBF | 0xC2 | 0xC3 | 0xC9 | 0xCC | 0xCD | 0xE0..=0xEF
-        | 0xF4 | 0xF5 | 0xF8..=0xFD => {
+        0x04
+        | 0x05
+        | 0x0C
+        | 0x0D
+        | 0x14
+        | 0x15
+        | 0x1C
+        | 0x1D
+        | 0x24
+        | 0x25
+        | 0x2C
+        | 0x2D
+        | 0x34
+        | 0x35
+        | 0x3C
+        | 0x3D
+        | 0x50..=0x5F
+        | 0x68
+        | 0x6A
+        | 0x70..=0x7F
+        | 0x90..=0x99
+        | 0x9B
+        | 0x9C
+        | 0x9D
+        | 0xA4
+        | 0xA5
+        | 0xA6
+        | 0xA7
+        | 0xAA
+        | 0xAB
+        | 0xAC
+        | 0xAD
+        | 0xAE
+        | 0xAF
+        | 0xB0..=0xBF
+        | 0xC2
+        | 0xC3
+        | 0xC9
+        | 0xCC
+        | 0xCD
+        | 0xE0..=0xEF
+        | 0xF4
+        | 0xF5
+        | 0xF8..=0xFD => {
             // `0xFE/0xFF`（inc/dec/push/jmp 那一族）带 modrm，必须往下走；它们不在
             // 这一段里，不是遗漏而是有意为之。
             return RawFrame::NoMem;
-        }
-        _ => {}
+        },
+        _ => {},
     }
     let Some(md) = raw_modrm(bytes, op_at + 1, rex) else {
         return RawFrame::Opaque;
     };
     let byte_form = matches!(
         op0,
-        0x00 | 0x02 | 0x08 | 0x0A | 0x10 | 0x12 | 0x18 | 0x1A | 0x20 | 0x22 | 0x28 | 0x2A
-            | 0x30 | 0x32 | 0x38 | 0x3A | 0x80 | 0x88 | 0x8A | 0xC0 | 0xC6 | 0xD0 | 0xD2
+        0x00 | 0x02
+            | 0x08
+            | 0x0A
+            | 0x10
+            | 0x12
+            | 0x18
+            | 0x1A
+            | 0x20
+            | 0x22
+            | 0x28
+            | 0x2A
+            | 0x30
+            | 0x32
+            | 0x38
+            | 0x3A
+            | 0x80
+            | 0x88
+            | 0x8A
+            | 0xC0
+            | 0xC6
+            | 0xD0
+            | 0xD2
             | 0xF6
     );
     let len = raw_op_len(prefix, rex, byte_form);
@@ -769,7 +885,11 @@ pub(crate) fn raw_frame(bytes: &[u8]) -> RawFrame {
     let dir = mem_dir(op0, md.reg);
     if op0 == 0x8D {
         return match md.frame_slot {
-            Some(disp) => RawFrame::Slot { disp, len, dir: MemDir::ReadWrite },
+            Some(disp) => RawFrame::Slot {
+                disp,
+                len,
+                dir: MemDir::ReadWrite,
+            },
             None => RawFrame::Foreign,
         };
     }
@@ -1115,7 +1235,10 @@ pub(crate) fn empty_marks() -> &'static HashSet<i64> {
 impl BlockState {
     /// 当前活着的帧槽事实数（= 一次整体清空会丢掉的转发机会上界）。
     fn live_slots(&self) -> u64 {
-        self.slots.iter().filter(|s| s.reg != NO_REG && s.len != 0).count() as u64
+        self.slots
+            .iter()
+            .filter(|s| s.reg != NO_REG && s.len != 0)
+            .count() as u64
     }
 
     /// 当前活着的「寄存器相等」事实数。
@@ -1213,7 +1336,12 @@ impl BlockState {
         self.clock = self.clock.wrapping_add(1);
         for s in self.slots.iter_mut() {
             if s.reg == NO_REG || s.len == 0 {
-                *s = SlotFact { disp, len, reg, stamp: self.clock };
+                *s = SlotFact {
+                    disp,
+                    len,
+                    reg,
+                    stamp: self.clock,
+                };
                 stat::hit(Self::site("cnt_slot_created"), 0, 0);
                 return;
             }
@@ -1231,7 +1359,12 @@ impl BlockState {
                 }
             }
             stat::hit(Self::site("slots_capacity"), 1, 0);
-            self.slots[victim] = SlotFact { disp, len, reg, stamp: self.clock };
+            self.slots[victim] = SlotFact {
+                disp,
+                len,
+                reg,
+                stamp: self.clock,
+            };
             return;
         }
         // 容量满：整体放弃帧槽跟踪（已建的事实也一并清掉，避免「只记得一半」）。
@@ -1428,15 +1561,23 @@ impl BlockState {
     /// 它们的内存侧都是 `MemOperand`）。返 `None` = 本条没有可改写的内存基址。
     fn cpybase_rewrite(&self, insn: &Insn) -> Option<Insn> {
         let m = match &insn.op {
-            X86_64Opcode::MovRm { dst: O::Mem(m), .. } | X86_64Opcode::MovRm { src: O::Mem(m), .. }
+            X86_64Opcode::MovRm { dst: O::Mem(m), .. }
+            | X86_64Opcode::MovRm { src: O::Mem(m), .. }
             | X86_64Opcode::MovExt { src: O::Mem(m), .. } => m,
             _ => return None,
         };
         let nb = self.cpybase_base(m)?;
         let mut n = insn.clone();
         match &mut n.op {
-            X86_64Opcode::MovRm { dst: O::Mem(mm), .. } | X86_64Opcode::MovRm { src: O::Mem(mm), .. }
-            | X86_64Opcode::MovExt { src: O::Mem(mm), .. } => {
+            X86_64Opcode::MovRm {
+                dst: O::Mem(mm), ..
+            }
+            | X86_64Opcode::MovRm {
+                src: O::Mem(mm), ..
+            }
+            | X86_64Opcode::MovExt {
+                src: O::Mem(mm), ..
+            } => {
                 mm.base = Some(nb);
             },
             _ => unreachable!(),
@@ -1559,7 +1700,7 @@ impl BlockState {
                 } else {
                     Verdict::Keep
                 }
-            }
+            },
             X86_64Opcode::Raw { bytes, .. } if rules & (R_DEADW | R_CPY32) != 0 => {
                 // 上面那个 typed 臂接不到实际产物：本后端的立即数搬运走的是 raw 字节
                 // （`mov_reg_imm32_b64`），所以同样的判据得在字节侧再走一遍。只认
@@ -1585,19 +1726,16 @@ impl BlockState {
                                 crate::codegen::x86_64::emit::gas::REG32[(d & 15) as usize],
                             );
                             Verdict::Replace(Box::new(
-                                insn.with_gas(format!("mov {src_name}, {dst_name}"))
+                                insn.with_gas(format!("mov {src_name}, {dst_name}")),
                             ))
                         },
                         _ => Verdict::Keep,
                     },
                     _ => Verdict::Keep,
                 }
-            }
+            },
             X86_64Opcode::MovRm {
-                width,
-                dst,
-                src,
-                ..
+                width, dst, src, ..
             } => {
                 let (Some(d), Some(s)) = (is_reg(dst), is_reg(src)) else {
                     return Verdict::Keep;
@@ -1796,9 +1934,7 @@ impl BlockState {
                 (O::Mem(m), _) => self.note_store(m, width_bytes(*to), None, volatiles),
                 _ => self.kill_all(Self::site("movext_other")),
             },
-            X86_64Opcode::AluRm {
-                op, width, dst, ..
-            } => {
+            X86_64Opcode::AluRm { op, width, dst, .. } => {
                 // cmp/test 只读不写。
                 if matches!(op, AluOp::Cmp | AluOp::Test) {
                     return;
@@ -2037,9 +2173,7 @@ impl BlockState {
                     }
                 },
                 // 控制流终结（jmp/ret）：与类型化那两条臂同一个站点。
-                RawWrite::Terminate => {
-                    self.kill_all(Self::site("jmp_ret_call"))
-                },
+                RawWrite::Terminate => self.kill_all(Self::site("jmp_ret_call")),
                 // 串指令：写 rsi/rdi/rcx 并且碰内存。
                 RawWrite::Strs => {
                     stat::hit(Self::site("raw_strs"), 0, 0);
@@ -2066,7 +2200,11 @@ impl BlockState {
                     }
                 },
                 RawWrite::Unknown => {
-                    stat::hit(Self::site("raw_unknown_decoded"), self.live_slots(), self.live_copies());
+                    stat::hit(
+                        Self::site("raw_unknown_decoded"),
+                        self.live_slots(),
+                        self.live_copies(),
+                    );
                     // 把认不得的形态按「首字节+modrm」归类记账：光知道数量不能下手，
                     // 必须知道是哪些 opcode 组没进到解码器。
                     stat::hit_variant(&raw_tag(bytes), self.live_slots(), self.live_copies());
@@ -2114,8 +2252,24 @@ fn raw_tag(bytes: &[u8]) -> String {
         }
         return format!("raw:0f{op1:02x}");
     }
-    let group = matches!(op, 0x80 | 0x81 | 0x82 | 0x83 | 0xC0 | 0xC1 | 0xC6 | 0xC7 | 0xD0 | 0xD1
-        | 0xD2 | 0xD3 | 0xF6 | 0xF7 | 0xFE | 0xFF);
+    let group = matches!(
+        op,
+        0x80 | 0x81
+            | 0x82
+            | 0x83
+            | 0xC0
+            | 0xC1
+            | 0xC6
+            | 0xC7
+            | 0xD0
+            | 0xD1
+            | 0xD2
+            | 0xD3
+            | 0xF6
+            | 0xF7
+            | 0xFE
+            | 0xFF
+    );
     if group {
         let modrm = *bytes.get(i + 1).unwrap_or(&0);
         format!("raw:{op:02x}/{}", (modrm >> 3) & 7)
@@ -2128,9 +2282,7 @@ fn raw_tag(bytes: &[u8]) -> String {
 /// `SimdAlu { op: AddPacked, .. }` → `SimdAlu`。仅给归因仪表用，不在热路径跑。
 fn variant_name(op: &X86_64Opcode) -> String {
     let s = format!("{op:?}");
-    let end = s
-        .find([' ', '{', '('])
-        .unwrap_or(s.len());
+    let end = s.find([' ', '{', '(']).unwrap_or(s.len());
     s[..end].to_string()
 }
 
@@ -2223,7 +2375,12 @@ pub(crate) fn raw_writes(bytes: &[u8]) -> RawWrite {
     let Some(h) = raw_head(bytes) else {
         return RawWrite::Unknown;
     };
-    let Head { prefix, rex, op_at, op0 } = h;
+    let Head {
+        prefix,
+        rex,
+        op_at,
+        op0,
+    } = h;
     if op_at == usize::MAX {
         // 只剩段/操作尺寸前缀（见 `raw_head`）。
         return RawWrite::Nothing;
@@ -2242,10 +2399,7 @@ pub(crate) fn raw_writes(bytes: &[u8]) -> RawWrite {
         // `mov r, imm8`（B0+r）/`mov r, imm32`（B8+r）/`mov r64, imm32`（REX.W B8+r）。
         // `mov r, imm8`（B0+r）：无 REX 时 4..7 是 ah/ch/dh/bh（见 `byte_reg`）。
         0xB0..=0xB7 => {
-            return RawWrite::Reg(byte_reg(
-                (op0 & 7) | if rex & 0x01 != 0 { 8 } else { 0 },
-                rex,
-            ))
+            return RawWrite::Reg(byte_reg((op0 & 7) | if rex & 0x01 != 0 { 8 } else { 0 }, rex))
         },
         0xB8..=0xBF => {
             let dst = (op0 & 7) | if rex & 0x01 != 0 { 8 } else { 0 };
@@ -2274,7 +2428,7 @@ pub(crate) fn raw_writes(bytes: &[u8]) -> RawWrite {
                 RawWrite::Reg(0)
             } else {
                 RawWrite::Masked { dst: 0, bits: 32 }
-            }
+            };
         },
         // `cmp al/eax, imm`：只读不写。
         0x3C | 0x3D => return RawWrite::Nothing,
@@ -2315,8 +2469,28 @@ pub(crate) fn raw_writes(bytes: &[u8]) -> RawWrite {
     // 「带着已被改过的号继续用」，那是静默错值而不是丢优化。
     let byte_form = matches!(
         op0,
-        0x00 | 0x02 | 0x08 | 0x0A | 0x10 | 0x12 | 0x18 | 0x1A | 0x20 | 0x22 | 0x28 | 0x2A
-            | 0x30 | 0x32 | 0x38 | 0x3A | 0x80 | 0x88 | 0x8A | 0xC0 | 0xC6 | 0xD0 | 0xD2
+        0x00 | 0x02
+            | 0x08
+            | 0x0A
+            | 0x10
+            | 0x12
+            | 0x18
+            | 0x1A
+            | 0x20
+            | 0x22
+            | 0x28
+            | 0x2A
+            | 0x30
+            | 0x32
+            | 0x38
+            | 0x3A
+            | 0x80
+            | 0x88
+            | 0x8A
+            | 0xC0
+            | 0xC6
+            | 0xD0
+            | 0xD2
             | 0xF6
     );
     let (reg, rm) = if byte_form {
@@ -2329,8 +2503,8 @@ pub(crate) fn raw_writes(bytes: &[u8]) -> RawWrite {
         // mov r8/r16/r32/r64, r/m（0x8A/0x8B）与偶数形 ALU 的 reg-目的形（02/0A/12/1A/22/2A/32
         // 是 8 位、03/0B/13/1B/23/2B/33 是宽形），lea（0x8D，mod=11 是非法编码）、
         // movsxd（0x63，本后端只发 REX.W 形）。
-        0x02 | 0x03 | 0x0A | 0x0B | 0x12 | 0x13 | 0x1A | 0x1B | 0x22 | 0x23 | 0x2A | 0x2B | 0x32
-        | 0x33 | 0x8A | 0x8B | 0x8D => RawWrite::Reg(reg),
+        0x02 | 0x03 | 0x0A | 0x0B | 0x12 | 0x13 | 0x1A | 0x1B | 0x22 | 0x23 | 0x2A | 0x2B
+        | 0x32 | 0x33 | 0x8A | 0x8B | 0x8D => RawWrite::Reg(reg),
         // movsxd 只在 REX.W 下存在（无 REX.W 的 0x63 是未定义别名），宁可 Unknown。
         // 报 `SExt` 而不是 `Reg`：`movsxd rax,[mem]` 之后紧接的 `movsxd rax,eax` 是恒等
         // （实测 lvm.o 里 48 次）—— 写进去的本来就已经是低 32 位的符号扩展。
@@ -2342,8 +2516,8 @@ pub(crate) fn raw_writes(bytes: &[u8]) -> RawWrite {
         // `short_jump_rel8` 构造子就走这里（旧版全杀）。
         0x70..=0x7F => RawWrite::Nothing,
         // ---- 目的是 modrm.rm：寄存器目的 / 内存目的分开处置 ----
-        0x00 | 0x01 | 0x08 | 0x09 | 0x10 | 0x11 | 0x18 | 0x19 | 0x20 | 0x21 | 0x28 | 0x29 | 0x30
-        | 0x31 | 0x88 | 0x89 => {
+        0x00 | 0x01 | 0x08 | 0x09 | 0x10 | 0x11 | 0x18 | 0x19 | 0x20 | 0x21 | 0x28 | 0x29
+        | 0x30 | 0x31 | 0x88 | 0x89 => {
             if rm_is_reg {
                 RawWrite::Reg(rm)
             } else if op0 == 0x88 || op0 == 0x89 {
@@ -2352,7 +2526,11 @@ pub(crate) fn raw_writes(bytes: &[u8]) -> RawWrite {
                 // TValue 存回 `[r13+disp]` 走的正是它。
                 let len = if op0 == 0x88 { 1 } else { raw_op_len(prefix, rex, false) };
                 match md.frame_slot {
-                    Some(disp) => RawWrite::SlotStore { disp, len, src: Some(reg) },
+                    Some(disp) => RawWrite::SlotStore {
+                        disp,
+                        len,
+                        src: Some(reg),
+                    },
                     None => RawWrite::Memory,
                 }
             } else {
@@ -2379,7 +2557,10 @@ pub(crate) fn raw_writes(bytes: &[u8]) -> RawWrite {
                     Some(imm) if imm >= 0 && imm < (1i64 << 31) => {
                         let bits = 64 - (imm as u64).leading_zeros();
                         if bits <= 31 {
-                            RawWrite::Masked { dst: rm, bits: bits as u8 }
+                            RawWrite::Masked {
+                                dst: rm,
+                                bits: bits as u8,
+                            }
                         } else {
                             RawWrite::Reg(rm)
                         }
@@ -2478,14 +2659,10 @@ fn raw_writes_0f(bytes: &[u8], prefix: u8, rex: u8, op_at: usize) -> RawWrite {
         // `rdtsc`：写 eax/edx。
         0x31 => return RawWrite::Regs(regbit(0) | regbit(2)),
         // `cpuid`：写 eax/ebx/ecx/edx 四个号（方案 §3 S1 点名的一条）。
-        0xA2 => {
-            return RawWrite::Regs(regbit(0) | regbit(1) | regbit(2) | regbit(3))
-        },
+        0xA2 => return RawWrite::Regs(regbit(0) | regbit(1) | regbit(2) | regbit(3)),
         // `bswap r{16,32,64}`：号编在 opcode 低 3 位 + REX.B，**没有 modrm**。
         // 这一条必须在拿 modrm 之前返回，否则会把后面的字节当成号来读。
-        0xC8..=0xCF => {
-            return RawWrite::Reg((op1 & 7) | if rex & 0x01 != 0 { 8 } else { 0 })
-        },
+        0xC8..=0xCF => return RawWrite::Reg((op1 & 7) | if rex & 0x01 != 0 { 8 } else { 0 }),
         // 系统指令族（rdmsr/wrmsr/hlt/lgdt/sgdt/sidt/invalidate 等）：权限级别与写集都不
         // 在本模块的知识里，一律 Unknown。
         0x06 | 0x07 | 0x08 | 0x09 | 0x0B | 0x20 | 0x21 | 0x22 | 0x30 | 0x32 | 0x34 | 0x37
@@ -2500,7 +2677,10 @@ fn raw_writes_0f(bytes: &[u8], prefix: u8, rex: u8, op_at: usize) -> RawWrite {
         // movzx：目的恒在 reg 字段，而且结果是非负的小值 ⇒ 上界已知（`Masked`）。
         // 报 `Reg` 只说“写了这个号”，丢的是后半句：`movzx rax,al` 之后 `movsxd rax,eax`
         // 是恒等（值连 bit31 都是 0），实测 lvm.o 里这一对出现 49 次。
-        0xB6 | 0xB7 => RawWrite::ZExt { dst: reg, bits: if op1 == 0xB6 { 8 } else { 16 } },
+        0xB6 | 0xB7 => RawWrite::ZExt {
+            dst: reg,
+            bits: if op1 == 0xB6 { 8 } else { 16 },
+        },
         // movsx（字节/字/双字 → 64 位）：整字写，而且结果就是低 32 位的符号扩展形态。
         0xBE | 0xBF => RawWrite::SExt { dst: reg },
         // imul/popcnt/bsf/bsr/cmovcc：目的恒在 reg 字段，但推不出扩展形态。
@@ -2515,7 +2695,11 @@ fn raw_writes_0f(bytes: &[u8], prefix: u8, rex: u8, op_at: usize) -> RawWrite {
                 RawWrite::Reg(rm)
             } else {
                 match md.frame_slot {
-                    Some(disp) => RawWrite::SlotStore { disp, len: 1, src: None },
+                    Some(disp) => RawWrite::SlotStore {
+                        disp,
+                        len: 1,
+                        src: None,
+                    },
                     None => RawWrite::Memory,
                 }
             }
@@ -2552,8 +2736,22 @@ fn raw_writes_0f(bytes: &[u8], prefix: u8, rex: u8, op_at: usize) -> RawWrite {
         // `luaV_execute` 里 251 次全杀，而那批就是 `movsd/addsd/subsd/mulsd/divsd/
         // sqrtsd/comisd/cmpsd/xorps/movaps` 这一族。
         // 例外：`2C`/`2D`（cvttsd2si/si2sd 到 GP）与 `50`（movmskps 到 GP）目的在 GP。
-        0x10 | 0x12 | 0x14 | 0x16 | 0x28 | 0x2E | 0x2F | 0x51..=0x59 | 0x5B..=0x5F | 0xC2
-        | 0xC4 | 0xC5 | 0xC6 | 0xD0..=0xDF | 0xE0..=0xEF | 0xF0..=0xFE => RawWrite::Nothing,
+        0x10
+        | 0x12
+        | 0x14
+        | 0x16
+        | 0x28
+        | 0x2E
+        | 0x2F
+        | 0x51..=0x59
+        | 0x5B..=0x5F
+        | 0xC2
+        | 0xC4
+        | 0xC5
+        | 0xC6
+        | 0xD0..=0xDF
+        | 0xE0..=0xEF
+        | 0xF0..=0xFE => RawWrite::Nothing,
         0x2C | 0x2D | 0x50 => RawWrite::Reg(reg),
         // `0F 5A`/`0F 2A`/`0F 2B`：cvtsi2sd（目的 xmm，rm 只读）、cvtsi2ss（同）、
         // movntps（**写内存**，非临时性，但仍是写）。
@@ -2575,7 +2773,11 @@ fn raw_writes_0f(bytes: &[u8], prefix: u8, rex: u8, op_at: usize) -> RawWrite {
                 RawWrite::Reg(rm)
             } else {
                 match md.frame_slot {
-                    Some(disp) => RawWrite::SlotStore { disp, len: 4, src: None },
+                    Some(disp) => RawWrite::SlotStore {
+                        disp,
+                        len: 4,
+                        src: None,
+                    },
                     None => RawWrite::Memory,
                 }
             }
@@ -2589,7 +2791,11 @@ fn raw_writes_0f(bytes: &[u8], prefix: u8, rex: u8, op_at: usize) -> RawWrite {
             } else {
                 let len = if matches!(prefix, 0xF2 | 0xF3) { 8 } else { 16 };
                 match md.frame_slot {
-                    Some(disp) => RawWrite::SlotStore { disp, len, src: None },
+                    Some(disp) => RawWrite::SlotStore {
+                        disp,
+                        len,
+                        src: None,
+                    },
                     None => RawWrite::Memory,
                 }
             }
@@ -2655,10 +2861,20 @@ fn raw_head(bytes: &[u8]) -> Option<Head> {
     // **空字节流不是前缀**，它是「什么都没有」：必须 `None` ⇒ `Unknown`（否则
     // `Insn::raw_bytes(&[])` 这种上游错误会被当成不写号而默默放过）。
     if i > 0 && i >= bytes.len() {
-        return Some(Head { prefix, rex, op_at: usize::MAX, op0: 0 });
+        return Some(Head {
+            prefix,
+            rex,
+            op_at: usize::MAX,
+            op0: 0,
+        });
     }
     let op0 = *bytes.get(i)?;
-    Some(Head { prefix, rex, op_at: i, op0 })
+    Some(Head {
+        prefix,
+        rex,
+        op_at: i,
+        op0,
+    })
 }
 
 /// 解 modrm 的结果。
@@ -2680,13 +2896,28 @@ fn raw_modrm(bytes: &[u8], at: usize, rex: u8) -> Option<Md> {
     let rm3 = m & 7;
     let rm = rm3 | if rex & 0x01 != 0 { 8 } else { 0 };
     if md == 3 {
-        return Some(Md { reg, rm, is_reg: true, frame_slot: None });
+        return Some(Md {
+            reg,
+            rm,
+            is_reg: true,
+            frame_slot: None,
+        });
     }
     if rm3 == 4 {
-        return Some(Md { reg, rm, is_reg: false, frame_slot: None });
+        return Some(Md {
+            reg,
+            rm,
+            is_reg: false,
+            frame_slot: None,
+        });
     }
     if rm3 == 5 && md == 0 {
-        return Some(Md { reg, rm, is_reg: false, frame_slot: None });
+        return Some(Md {
+            reg,
+            rm,
+            is_reg: false,
+            frame_slot: None,
+        });
     }
     let disp = match md {
         0 => 0i32,
@@ -2698,7 +2929,12 @@ fn raw_modrm(bytes: &[u8], at: usize, rex: u8) -> Option<Md> {
     };
     // 只有基址是帧寄存器 r13 才算帧槽（与 `frame_disp` 同一个口径）。
     let frame_slot = if rm == 13 { Some(disp) } else { None };
-    Some(Md { reg, rm, is_reg: false, frame_slot })
+    Some(Md {
+        reg,
+        rm,
+        is_reg: false,
+        frame_slot,
+    })
 }
 
 /// 从 `0xC7 /0`（`mov r/m64, imm32`）且 mod=11 的字节流里取 modrm 后面那个 imm32。
@@ -2868,31 +3104,28 @@ mod tests {
         assert!(matches!(st.decide(&copy, &nv(), rules_for(3) | R_CPY32), Verdict::Keep));
         // 2) 源号高 32 位已知为零 ⇒ 换，且长度仍是 3 字节
         let mut st = BlockState::default();
-        st.observe(
-            &insn_mov(O::Reg(12, Width::B32), O::Imm(0i64), Width::B32),
-            &nv(),
-        );
+        st.observe(&insn_mov(O::Reg(12, Width::B32), O::Imm(0i64), Width::B32), &nv());
         match st.decide(&copy, &nv(), rules_for(3) | R_CPY32) {
             Verdict::Replace(n) => {
                 let bytes = n.encode_bytes().expect("32 位形态要能编码");
                 assert_eq!(bytes.len(), 3, "替换必须严格同长，实得 {bytes:02x?}");
                 assert_eq!(n.gas_text.as_deref(), Some("mov %r12d, %ecx"));
             },
-            other => panic!("zext32[r12] 已知时应换 32 位形态，实得 {:?}", match other {
-                Verdict::Keep => "keep",
-                Verdict::Drop => "drop",
-                Verdict::Replace(_) => "replace",
-            }),
+            other => panic!(
+                "zext32[r12] 已知时应换 32 位形态，实得 {:?}",
+                match other {
+                    Verdict::Keep => "keep",
+                    Verdict::Drop => "drop",
+                    Verdict::Replace(_) => "replace",
+                }
+            ),
         }
         // 默认位图（不带 R_CPY32）必须完全不换 —— 「门关零漂移」的根据
         assert!(matches!(st.decide(&copy, &nv(), rules_for(3)), Verdict::Keep));
         // 3) 低 8 号对（`mov %rcx, %rax`）：32 位形态不带 REX，会缩到 2 字节 ⇒ 不得换
         let low = Insn::raw_bytes(&[0x48u8, 0x8B, 0xC1]);
         let mut st2 = BlockState::default();
-        st2.observe(
-            &insn_mov(O::Reg(1, Width::B32), O::Imm(0i64), Width::B32),
-            &nv(),
-        );
+        st2.observe(&insn_mov(O::Reg(1, Width::B32), O::Imm(0i64), Width::B32), &nv());
         assert!(
             matches!(st2.decide(&low, &nv(), rules_for(3) | R_CPY32), Verdict::Keep),
             "低 8 号对的 32 位形态会缩短整块，不得换"
@@ -3064,7 +3297,10 @@ mod tests {
         assert_eq!(written_gp(&cmp), RegWrites::None);
         // 3) 一次调用：caller-saved 全集，而 callee-saved 不在里面。
         let call = Insn::new(
-            X86_64Opcode::Call { target: O::Imm(0), pending_rel: false },
+            X86_64Opcode::Call {
+                target: O::Imm(0),
+                pending_rel: false,
+            },
             &[],
         );
         assert_eq!(written_gp(&call), RegWrites::RegsMem(SYSV_CALLER_SAVED));
@@ -3104,7 +3340,12 @@ mod tests {
         let fill = |st: &mut BlockState, rules: u16| {
             for i in 0..MAX_SLOTS {
                 let d = -256 + (i as i32) * 8;
-                st.observe_at_call(&insn_mov(mem(d), O::Reg(3, W::B64), W::B64), &nv(), CallPolicy::no_relax(), rules);
+                st.observe_at_call(
+                    &insn_mov(mem(d), O::Reg(3, W::B64), W::B64),
+                    &nv(),
+                    CallPolicy::no_relax(),
+                    rules,
+                );
             }
         };
         // 关（默认位图不含 R_LRU）：第 17 条把全部 16 条一起丢掉。
@@ -3149,26 +3390,14 @@ mod tests {
         st.observe(&insn_mov(mem(-64), O::Reg(0, Width::B64), Width::B64), &nv());
         let load_from_slot = insn_mov(O::Reg(1, Width::B64), mem(-64), Width::B64);
         // 只关 COPY（SLOT 开着）：帧槽读仍转发成寄存器搬运。
-        assert!(matches!(
-            st.decide(&load_from_slot, &nv(), R_SLOT),
-            Verdict::Replace(_)
-        ));
+        assert!(matches!(st.decide(&load_from_slot, &nv(), R_SLOT), Verdict::Replace(_)));
         // 只开 COPY（SLOT 关着）：不得再碰帧槽事实。
-        assert!(matches!(
-            st.decide(&load_from_slot, &nv(), R_COPY),
-            Verdict::Keep
-        ));
+        assert!(matches!(st.decide(&load_from_slot, &nv(), R_COPY), Verdict::Keep));
         // 寄存器相等那一条只看 COPY：同号自反 mov 在 COPY 位上恒等可删。
         st.observe(&insn_mov(O::Reg(1, Width::B64), O::Reg(0, Width::B64), Width::B64), &nv());
         let again = insn_mov(O::Reg(1, Width::B64), O::Reg(1, Width::B64), Width::B64);
-        assert!(matches!(
-            st.decide(&again, &nv(), R_COPY),
-            Verdict::Drop
-        ));
-        assert!(matches!(
-            st.decide(&again, &nv(), R_SLOT),
-            Verdict::Keep
-        ));
+        assert!(matches!(st.decide(&again, &nv(), R_COPY), Verdict::Drop));
+        assert!(matches!(st.decide(&again, &nv(), R_SLOT), Verdict::Keep));
     }
 
     /// `DCC_BLOCKOPT_RULES` 的解析面：十进制/十六进制可用，越界与非数一律当作
@@ -3278,7 +3507,11 @@ mod tests {
         // REX.B 那一位是帧基址 r13 的一部分，不带它就是 rbp。
         assert!(matches!(
             raw_writes(&[0x49, 0x89, 0x55, 0xC0]),
-            RawWrite::SlotStore { disp: -64, len: 8, src: Some(2) }
+            RawWrite::SlotStore {
+                disp: -64,
+                len: 8,
+                src: Some(2)
+            }
         ));
         // 同一字节序列不带 REX.B 时基址是 rbp，不是帧槽。
         assert!(matches!(raw_writes(&[0x48, 0x89, 0x55, 0xC0]), RawWrite::Memory));
@@ -3358,15 +3591,15 @@ mod tests {
             RawWrite::ImmSExt { dst: 8, imm: 5 }
         ));
         // 负立即数不能报符号扩展：32 位形写进去的是零扩展值，两者不同。
-        assert!(matches!(
-            raw_writes(&[0xB8, 0xFF, 0xFF, 0xFF, 0xFF]),
-            RawWrite::Masked { dst: 0, bits: 32 }
-        ), "bit31 置高的 `mov r32,imm32` 只能推零扩展上界");
+        assert!(
+            matches!(
+                raw_writes(&[0xB8, 0xFF, 0xFF, 0xFF, 0xFF]),
+                RawWrite::Masked { dst: 0, bits: 32 }
+            ),
+            "bit31 置高的 `mov r32,imm32` 只能推零扩展上界"
+        );
         // 截断的字节流退化为保守答话，不能猜一个立即数。
-        assert!(matches!(
-            raw_writes(&[0xB8, 0x05, 0x00]),
-            RawWrite::Masked { dst: 0, bits: 32 }
-        ));
+        assert!(matches!(raw_writes(&[0xB8, 0x05, 0x00]), RawWrite::Masked { dst: 0, bits: 32 }));
         assert_eq!(dst(&[0x49, 0xB8, 0x05, 0x00, 0x00, 0x00]), Some(8), "REX.W 形写满 64 位");
         // `cmp`/`test` 两种 mod 都不写号。
         assert!(matches!(raw_writes(&[0x48, 0x3B, 0x03]), RawWrite::Nothing));
@@ -3435,10 +3668,7 @@ mod tests {
         ));
         // 负立即数（`and r, -1`）与超过 2^31 的不算上界。
         let c = Insn::alu_rm_reg_imm32_b64(4, 9, -1);
-        assert!(matches!(
-            raw_writes(&c.encode_bytes().unwrap_or_default()),
-            RawWrite::Reg(9)
-        ));
+        assert!(matches!(raw_writes(&c.encode_bytes().unwrap_or_default()), RawWrite::Reg(9)));
     }
 
     /// 值域事实的消费：开了 `R_ZBITS` 时「掩码后的 sext」可删；没开不得删；
@@ -3494,7 +3724,10 @@ mod tests {
     }
 
     fn hex(b: &[u8]) -> String {
-        b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" ")
+        b.iter()
+            .map(|x| format!("{x:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// 每一个产 `Raw` 的公开构造子都必须被解码器认识。
@@ -3570,7 +3803,12 @@ mod tests {
                 bad.push(format!("{name} [{bytes}]"));
             }
         }
-        assert!(bad.is_empty(), "有 {} 个 raw 构造子的写集解不出来：\n{}", bad.len(), bad.join("\n"));
+        assert!(
+            bad.is_empty(),
+            "有 {} 个 raw 构造子的写集解不出来：\n{}",
+            bad.len(),
+            bad.join("\n")
+        );
     }
 
     /// 两个必须维持 `Unknown` 的形状，写成断言而不是靠注释：它们一旦变成「认得」，
@@ -3583,14 +3821,16 @@ mod tests {
         let b = frag.encode_bytes().expect("前缀碎片要能编出来");
         assert!(
             matches!(raw_writes(&b), RawWrite::Unknown),
-            "modrm 在下一条字节里的前缀碎片不能报成认得：[{}]", hex(&b)
+            "modrm 在下一条字节里的前缀碎片不能报成认得：[{}]",
+            hex(&b)
         );
         // 单独的段前缀不写任何号（真正那条指令自己会被 observe）⇒ 是 `Nothing` 不是 `Unknown`。
         let seg = Insn::seg_prefix(0x65);
         let sb = seg.encode_bytes().expect("段前缀要能编出来");
         assert!(
             matches!(raw_writes(&sb), RawWrite::Nothing),
-            "段前缀不是「认不得的写集」：[{}]", hex(&sb)
+            "段前缀不是「认不得的写集」：[{}]",
+            hex(&sb)
         );
     }
 
@@ -3602,7 +3842,8 @@ mod tests {
         let b = mov_ax.encode_bytes().unwrap();
         assert!(
             matches!(raw_writes(&b), RawWrite::Reg(0)),
-            "16 位累加器形只能报「写 rax」，不能报值域：[{}]", hex(&b)
+            "16 位累加器形只能报「写 rax」，不能报值域：[{}]",
+            hex(&b)
         );
         // `48 B8+r id`（movabs 的 imm32 形）写满 64 位，同样没有值域可claim。
         let movabs = Insn::movabs_reg_imm64(1, 0x7FFF_FFFF);
@@ -3614,7 +3855,13 @@ mod tests {
         let eax = Insn::mov_eax_imm32(0x1234);
         let eb = eax.encode_bytes().unwrap();
         assert!(
-            matches!(raw_writes(&eb), RawWrite::ImmSExt { dst: 0, imm: 0x1234 }),
+            matches!(
+                raw_writes(&eb),
+                RawWrite::ImmSExt {
+                    dst: 0,
+                    imm: 0x1234
+                }
+            ),
             "非负 imm32 的 32 位形应报 ImmSExt：[{}]",
             hex(&eb)
         );
@@ -3651,14 +3898,22 @@ mod tests {
         // REX.B 那一位不能省：rm=5 带 REX.B 才是 r13，不带就是 rbp。
         assert!(matches!(
             raw_writes(&[0x49, 0x89, 0x55, 0xC0]),
-            RawWrite::SlotStore { disp: -64, len: 8, src: Some(2) }
+            RawWrite::SlotStore {
+                disp: -64,
+                len: 8,
+                src: Some(2)
+            }
         ));
         // `movsd xmm0, [rbp-64]`（F2 0F 10 45 C0）：不写任何 GP 号。
         assert!(matches!(raw_writes(&[0xF2, 0x0F, 0x10, 0x45, 0xC0]), RawWrite::Nothing));
         // `movsd [r13-64], xmm0`（F2 41 0F 11 45 C0）：只失效那一个槽（宽 8）。
         assert!(matches!(
             raw_writes(&[0xF2, 0x41, 0x0F, 0x11, 0x45, 0xC0]),
-            RawWrite::SlotStore { disp: -64, len: 8, src: None }
+            RawWrite::SlotStore {
+                disp: -64,
+                len: 8,
+                src: None
+            }
         ));
         // `jmp rel32`（E9）/ `ret`（C3）：终结而不是 Unknown。
         assert!(matches!(raw_writes(&[0xE9, 0x00, 0x00, 0x00, 0x00]), RawWrite::Terminate));
@@ -3669,7 +3924,10 @@ mod tests {
         assert!(matches!(raw_writes(&[0x74, 0x08]), RawWrite::Nothing));
         assert!(matches!(raw_writes(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]), RawWrite::Nothing));
         // `add eax, imm32`（05 id）：只写 rax。
-        assert!(matches!(raw_writes(&[0x05, 0x01, 0x00, 0x00, 0x00]), RawWrite::Masked { dst: 0, bits: 32 }));
+        assert!(matches!(
+            raw_writes(&[0x05, 0x01, 0x00, 0x00, 0x00]),
+            RawWrite::Masked { dst: 0, bits: 32 }
+        ));
         assert!(matches!(raw_writes(&[0x48, 0x05, 0x01, 0x00, 0x00, 0x00]), RawWrite::Reg(0)));
     }
 
@@ -3695,12 +3953,28 @@ mod tests {
         // 门开（但护栏说不允许跳 call 保留）：槽仍要弃，callee-saved 的搬运事实可以留。
         let a1 = R_SEXT | R_COPY | R_SLOT | R_RAW | R_CALLSLOT;
         let mut on = st;
-        on.observe_at_call(&call, &nv(), CallPolicy { slots_survive: false, must_clear: empty_marks() }, a1);
+        on.observe_at_call(
+            &call,
+            &nv(),
+            CallPolicy {
+                slots_survive: false,
+                must_clear: empty_marks(),
+            },
+            a1,
+        );
         assert_eq!(on.copy[3], 12, "rbx/r12 都是 callee-saved，call 不改它们的值");
         assert_eq!(on.slot_of(-64, 8), None, "护栏不允许时槽事实必须弃");
         // 门开 + 护栏允许：两边都留。
         let mut ok = st;
-        ok.observe_at_call(&call, &nv(), CallPolicy { slots_survive: true, must_clear: empty_marks() }, a1);
+        ok.observe_at_call(
+            &call,
+            &nv(),
+            CallPolicy {
+                slots_survive: true,
+                must_clear: empty_marks(),
+            },
+            a1,
+        );
         assert_eq!(ok.slot_of(-64, 8), Some(3), "护栏允许时槽事实可以活过 call");
     }
 
@@ -3719,7 +3993,15 @@ mod tests {
         let mut st = BlockState::default();
         st.note_slot(-64, 8, 0); // [r13-64] == rax
         st.copy[3] = 0; // rbx == rax
-        st.observe_at_call(&call, &nv(), CallPolicy { slots_survive: true, must_clear: empty_marks() }, a1);
+        st.observe_at_call(
+            &call,
+            &nv(),
+            CallPolicy {
+                slots_survive: true,
+                must_clear: empty_marks(),
+            },
+            a1,
+        );
         assert_eq!(st.slot_of(-64, 8), None, "rax 是 caller-saved，它代表的槽事实必须死");
         assert_eq!(st.copy[3], NO_REG, "「rbx == rax」在 call 后不再成立");
         assert_eq!(st.copy[0], NO_REG, "rax 自己的相等事实也必须死");
@@ -3735,12 +4017,32 @@ mod tests {
         let rules = R_SEXT | R_COPY | R_SLOT | R_RAW;
         // 边 1：-64 槽 == r12，且 rbx == r12。
         let mut e1 = BlockState::default();
-        e1.observe_at_call(&insn_mov(mem(-64), O::Reg(12, W::B64), W::B64), &nv(), CallPolicy::no_relax(), rules);
-        e1.observe_at_call(&insn_mov(O::Reg(3, W::B64), O::Reg(12, W::B64), W::B64), &nv(), CallPolicy::no_relax(), rules);
+        e1.observe_at_call(
+            &insn_mov(mem(-64), O::Reg(12, W::B64), W::B64),
+            &nv(),
+            CallPolicy::no_relax(),
+            rules,
+        );
+        e1.observe_at_call(
+            &insn_mov(O::Reg(3, W::B64), O::Reg(12, W::B64), W::B64),
+            &nv(),
+            CallPolicy::no_relax(),
+            rules,
+        );
         // 边 2：-64 槽 == r12（同一条），-72 槽 == r14（只在边 2 上），没有 rbx 的相等事实。
         let mut e2 = BlockState::default();
-        e2.observe_at_call(&insn_mov(mem(-64), O::Reg(12, W::B64), W::B64), &nv(), CallPolicy::no_relax(), rules);
-        e2.observe_at_call(&insn_mov(mem(-72), O::Reg(14, W::B64), W::B64), &nv(), CallPolicy::no_relax(), rules);
+        e2.observe_at_call(
+            &insn_mov(mem(-64), O::Reg(12, W::B64), W::B64),
+            &nv(),
+            CallPolicy::no_relax(),
+            rules,
+        );
+        e2.observe_at_call(
+            &insn_mov(mem(-72), O::Reg(14, W::B64), W::B64),
+            &nv(),
+            CallPolicy::no_relax(),
+            rules,
+        );
 
         let mut j = e1;
         j.intersect_with(&e2, false);
@@ -3757,9 +4059,19 @@ mod tests {
         use crate::codegen::shared::asm_operand::Width as W;
         let rules = R_SEXT | R_COPY | R_SLOT | R_RAW;
         let mut wide = BlockState::default();
-        wide.observe_at_call(&insn_mov(mem(-64), O::Reg(12, W::B64), W::B64), &nv(), CallPolicy::no_relax(), rules);
+        wide.observe_at_call(
+            &insn_mov(mem(-64), O::Reg(12, W::B64), W::B64),
+            &nv(),
+            CallPolicy::no_relax(),
+            rules,
+        );
         let mut narrow = BlockState::default();
-        narrow.observe_at_call(&insn_mov(mem(-64), O::Reg(12, W::B32), W::B32), &nv(), CallPolicy::no_relax(), rules);
+        narrow.observe_at_call(
+            &insn_mov(mem(-64), O::Reg(12, W::B32), W::B32),
+            &nv(),
+            CallPolicy::no_relax(),
+            rules,
+        );
         wide.intersect_with(&narrow, false);
         assert_eq!(wide.slot_of(-64, 8), None, "8 字节读在「只写了 4 字节」那条边上是陈值");
         assert_eq!(wide.slot_of(-64, 4), Some(12), "4 字节以内两边都成立");
@@ -3862,7 +4174,11 @@ mod tests {
     #[test]
     fn raw_frame_separates_reg_mov_frame_slot_and_foreign_base() {
         // `mov %rbx, %rax`（48 8B C3）：mod=11，一个内存操作数也没有。
-        assert_eq!(raw_frame(&[0x48, 0x8B, 0xC3]), RawFrame::NoMem, "寄存器搬运不得被当成「可能碰帧」");
+        assert_eq!(
+            raw_frame(&[0x48, 0x8B, 0xC3]),
+            RawFrame::NoMem,
+            "寄存器搬运不得被当成「可能碰帧」"
+        );
         // `mov %rbx, -64(%r13)`（49 89 5D C0：rm=5 必须带 REX.B 才是 r13）：一次 8 字节的帧存出。
         match raw_frame(&[0x49, 0x89, 0x5D, 0xC0]) {
             RawFrame::Slot { disp, len, dir } => {
@@ -3880,9 +4196,17 @@ mod tests {
             other => panic!("帧载入必须解成 Slot，实际 {other:?}"),
         }
         // `cmp %rax, (%rdi)`（48 39 07）：基址不是 r13 ⇒ 与本帧无关。
-        assert_eq!(raw_frame(&[0x48, 0x39, 0x07]), RawFrame::Foreign, "非帧基址不得当成「可能碰帧」而拆家");
+        assert_eq!(
+            raw_frame(&[0x48, 0x39, 0x07]),
+            RawFrame::Foreign,
+            "非帧基址不得当成「可能碰帧」而拆家"
+        );
         // `mov (%r13,%rax,8), %rdx`（49 8B 54 C5 00）：SIB 带变址且基址是 r13 ⇒ 说不清。
-        assert_eq!(raw_frame(&[0x49, 0x8B, 0x54, 0xC5, 0x00]), RawFrame::Opaque, "下标序列访问的是整个对象，不能只算一个槽");
+        assert_eq!(
+            raw_frame(&[0x49, 0x8B, 0x54, 0xC5, 0x00]),
+            RawFrame::Opaque,
+            "下标序列访问的是整个对象，不能只算一个槽"
+        );
         // `0F B6 05 …`（movzx 双字节表）：本函数不解 ⇒ 必须报说不清而不是报 Foreign。
         assert_eq!(
             raw_frame(&[0x0F, 0xB6, 0x05, 0x00, 0x00, 0x00, 0x00]),
@@ -3908,7 +4232,11 @@ mod tests {
                 other => panic!("这一族必须解成帧槽：{other:?} bytes={bytes:02x?}"),
             }
         };
-        assert_eq!(digits(0x81, 7), MemDir::Read, "add/or/adc/sbb/and/sub/xor/cmp 的 /7 是 cmp，只读");
+        assert_eq!(
+            digits(0x81, 7),
+            MemDir::Read,
+            "add/or/adc/sbb/and/sub/xor/cmp 的 /7 是 cmp，只读"
+        );
         assert_eq!(digits(0x81, 0), MemDir::ReadWrite, "add [槽],imm 是读改写");
         assert_eq!(digits(0x83, 5), MemDir::ReadWrite, "sub [槽],imm8 是读改写");
         assert_eq!(digits(0xF7, 0), MemDir::Read, "test [槽],imm 只读");

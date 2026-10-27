@@ -88,7 +88,9 @@ pub fn definitely_assigned(func: &Function) -> HashSet<String> {
         }
         while let Some(i) = stack.pop() {
             let Some(name) = order.get(i) else { continue };
-            let Some(bb) = func.blocks.get(name) else { continue };
+            let Some(bb) = func.blocks.get(name) else {
+                continue;
+            };
             for s in crate::ssa::cfg::term_succs_pub(&bb.term) {
                 if let Some(&j) = index.get(s.as_str()) {
                     if !seen[j] {
@@ -186,7 +188,9 @@ pub fn definitely_assigned(func: &Function) -> HashSet<String> {
         if !avail.contains(&v.base) {
             bad.insert(v.base.clone());
             if dump {
-                bad_at.entry(v.base.clone()).or_insert_with(|| at.to_string());
+                bad_at
+                    .entry(v.base.clone())
+                    .or_insert_with(|| at.to_string());
             }
         }
     };
@@ -207,13 +211,7 @@ pub fn definitely_assigned(func: &Function) -> HashSet<String> {
         }
         for (k, inst) in bb.insts.iter().enumerate() {
             for v in kind_operand_ssa_vars(&inst.kind) {
-                first_use(
-                    &mut bad,
-                    &mut bad_at,
-                    &avail,
-                    &v,
-                    &format!("{name}:inst{k}"),
-                );
+                first_use(&mut bad, &mut bad_at, &avail, &v, &format!("{name}:inst{k}"));
             }
             if let Some(d) = &inst.dest {
                 avail.insert(d.base.clone());

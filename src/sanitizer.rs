@@ -957,10 +957,13 @@ fn instrument_expr(
             } else {
                 None
             };
-            // 标量赋值:不再 walk l (l 通常是 Ident / Index / Member)
-            if !matches!(l.as_ref(), Expr::Ident { .. }) {
-                instrument_expr(l, flags, ctx, guard_var, guard_base);
-            }
+            // 标量赋值的目标：本层访存是**写**（由上面的 target_kind 那一条 store 检查负责），
+            // 不能再给顶层套一层 load 检查；只下探地址计算里嵌的读。
+            // 旧写法直接 `instrument_expr(l)`，于是 `q->head = t` 的 LHS 被套成
+            // `Comma{__asan_load4(&q->head), q->head}`，而 store 检查的入参是
+            // `AddrOf{那个 Comma}` —— `AddrOf` 认不出这个形状，整条地址计算被吞掉，
+            // `__asan_store4` 收到的是上一条指令留在 %rax 里的残值（实测值错但不报）。
+            instrument_store_target(l, flags, ctx, guard_var, guard_base);
             ExprKind::Assign(target_kind)
         },
         Expr::Deref { e, ty, .. } => {
@@ -1549,10 +1552,7 @@ fn int_range(ty: &Type) -> (i128, i128) {
 
 /// 判断类型是否为 float/double/long double。
 fn is_float_ty(ty: &Type) -> bool {
-    matches!(
-        ty,
-        Type::Float | Type::Double | Type::LongDouble | Type::Float128
-    )
+    matches!(ty, Type::Float | Type::Double | Type::LongDouble | Type::Float128)
 }
 
 /// 判断 cast 是否为 float→int (UBSAN float-cast 触发条件)。
@@ -1704,6 +1704,37 @@ fn chain_mem_checks(checks: Vec<Expr>, inner: Expr, span: &Span, ty: Type) -> Ex
         };
     }
     acc
+}
+
+/// 赋值/自增目标的插桩：**顶层那一层的访存是写**（已有 store 检查负责），不得再
+/// 包一层 load 检查；但地址计算里嵌的读（`q->p[i] = x` 里对 `q->p` 的读、下标表达式
+/// 里的访存）必须照常插桩。
+///
+/// 点成员（`s.f` / `a[i].f`）的基座是 lvalue 而不是读，故同样下探；类型转换不改变
+/// 「是不是读」这个事实，跟着穿透。其余形状（`Ident` 等）本就没有顶层访存，直接走
+/// 通用路径。
+fn instrument_store_target(
+    l: &mut Expr,
+    flags: SanitizerFlags,
+    ctx: &mut InstrumentCtx,
+    guard_var: Option<&str>,
+    guard_base: u32,
+) {
+    match l {
+        // `*p = v`：读 `p` 本身不是访存（p 是个变量值），但 `p` 的表达式里可能有。
+        Expr::Deref { e, .. } => instrument_expr(e, flags, ctx, guard_var, guard_base),
+        Expr::Index { arr, idx, .. } => {
+            instrument_expr(arr, flags, ctx, guard_var, guard_base);
+            instrument_expr(idx, flags, ctx, guard_var, guard_base);
+        },
+        // `->`：基座是指针变量的**值**，不是访存；`.`：基座是 lvalue，也不是访存。
+        // 两者同处理，所以这里不拆开 `is_arrow`（它在本臂里用不到）。
+        Expr::Member { expr, .. } => {
+            instrument_expr(expr, flags, ctx, guard_var, guard_base);
+        },
+        Expr::Cast { e, .. } => instrument_store_target(e, flags, ctx, guard_var, guard_base),
+        other => instrument_expr(other, flags, ctx, guard_var, guard_base),
+    }
 }
 
 /// 根据当前启用的 sanitizer 生成内存访问检查调用列表 (按序执行)。
@@ -2566,9 +2597,9 @@ fn cfi_type_hash(ty: &Type) -> u64 {
     // 串用 `Type::identity_tag`（确定且有界）, 不用派生 `Debug`：`Debug` 按树展开
     // 聚合类型的字段, 内核那种共享 DAG 类型（`struct page` 等）会按层翻倍到 GB 级
     // 分配失败。身份串给不出（过大/成环）时退化到尺寸+对齐, 仍是确定的。
-    let s = ty.identity_tag().unwrap_or_else(|| {
-        format!("#sz{}#al{}", ty.size(), ty.align())
-    });
+    let s = ty
+        .identity_tag()
+        .unwrap_or_else(|| format!("#sz{}#al{}", ty.size(), ty.align()));
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in s.as_bytes() {
         hash ^= *b as u64;

@@ -381,8 +381,12 @@ fn jobs_flag_parsing() {
     assert!(stderr.contains("-j must be >= 1"), "expected -j error, got: {stderr}");
 
     // -j1 must succeed (sequential)
+    // 输出路径用临时文件而不是 /dev/null（原因见 harness::discard_out），用完删掉。
+    let out1 = discard_out("jobs-j1");
     let out = Command::new(dcc)
-        .args(["-j1", "-c", "-o", "/dev/null", src.to_str().unwrap()])
+        .args(["-j1", "-c", "-o"])
+        .arg(&out1)
+        .arg(src.to_str().unwrap())
         .output()
         .expect("run dcc");
     assert!(
@@ -390,10 +394,15 @@ fn jobs_flag_parsing() {
         "-j1 should succeed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    assert!(out1.exists(), "-j1 必须真的产出对象文件");
+    let _ = fs::remove_file(&out1);
 
     // -j4 must succeed
+    let out4 = discard_out("jobs-j4");
     let out = Command::new(dcc)
-        .args(["-j4", "-c", "-o", "/dev/null", src.to_str().unwrap()])
+        .args(["-j4", "-c", "-o"])
+        .arg(&out4)
+        .arg(src.to_str().unwrap())
         .output()
         .expect("run dcc");
     assert!(
@@ -401,10 +410,15 @@ fn jobs_flag_parsing() {
         "-j4 should succeed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    assert!(out4.exists(), "-j4 必须真的产出对象文件");
+    let _ = fs::remove_file(&out4);
 
     // --jobs=2 must succeed
+    let outj = discard_out("jobs-eq2");
     let out = Command::new(dcc)
-        .args(["--jobs=2", "-c", "-o", "/dev/null", src.to_str().unwrap()])
+        .args(["--jobs=2", "-c", "-o"])
+        .arg(&outj)
+        .arg(src.to_str().unwrap())
         .output()
         .expect("run dcc");
     assert!(
@@ -412,6 +426,8 @@ fn jobs_flag_parsing() {
         "--jobs=2 should succeed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    assert!(outj.exists(), "--jobs=2 必须真的产出对象文件");
+    let _ = fs::remove_file(&outj);
 
     let _ = fs::remove_file(&src);
 }
@@ -650,14 +666,6 @@ fn multi_file_parallel_compile() {
     }
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
-    cmd.args([
-        "-c",
-        "-j4",
-        "-o",
-        "/dev/null", // will be rejected; we use per-file output
-    ]);
-    // Actually, multi-file doesn't allow -o. Just pass the files.
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_dcc"));
     cmd.arg("-c").arg("-j4").current_dir(&work);
     for name in &["a", "b", "c", "d"] {
         cmd.arg(format!("{name}.c"));
@@ -763,4 +771,61 @@ fn multi_file_rejects_output_flag() {
     );
 
     let _ = fs::remove_dir_all(&work);
+}
+
+/// 重复 `-O` 必须**最后一个生效**（与 gcc 同口径），并且不同档的产物确实有区别。
+///
+/// 为什么必须有这条：Lua 的 `src/Makefile` 把优化号写在用户标志**之前**
+/// （`CFLAGS= -O2 -Wall -Wextra $(SYSCFLAGS) $(MYCFLAGS)`），所以 `MYCFLAGS="-O0"`
+/// 递到编译器手上是一条带两个 `-O` 的命令行（实测：`… -O2 -Wall -Wextra -std=gnu99 -O0 -c -o lapi.o lapi.c`）。
+/// 只有「后出现者胜」成立，“四个级别都测过”才不是“其实全是 -O2”。同时必须验
+/// 一档之间**字节不同**：否则若优化器完全忽略 `-O`，下面那组等式会空对空成立。
+#[test]
+#[cfg(unix)]
+fn repeated_opt_flag_last_wins() {
+    let dcc = env!("CARGO_BIN_EXE_dcc");
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let work = dir.join(format!("dcc-optlast-{pid}"));
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).expect("mkdir");
+    // 一个会被优化掉的东西：循环 + 乘法，-O0 与 -O2 的产物必然不同
+    fs::write(
+        work.join("l.c"),
+        "long f(long n){ long s=0; for(long i=0;i<n;i++) s+=i*2; return s; }\n",
+    )
+    .expect("write l.c");
+
+    let build = |name: &str, flags: &[&str]| -> Vec<u8> {
+        let out = Command::new(dcc)
+            .args(flags)
+            .args(["-c", "-o", name, "l.c"])
+            .current_dir(&work)
+            .output()
+            .unwrap_or_else(|_| panic!("run dcc {flags:?}"));
+        assert!(
+            out.status.success(),
+            "dcc {flags:?} 失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        fs::read(work.join(name)).unwrap_or_else(|_| panic!("读 {name}"))
+    };
+
+    let o0 = build("o0.o", &["-O0"]);
+    let o2 = build("o2.o", &["-O2"]);
+    let o2o0 = build("o2o0.o", &["-O2", "-O0"]);
+    let o0o2 = build("o0o2.o", &["-O0", "-O2"]);
+    let o2o0o0 = build("o2o0o0.o", &["-O2", "-O0", "-O0"]);
+    let _ = fs::remove_dir_all(&work);
+
+    assert_ne!(
+        o0, o2,
+        "-O0 与 -O2 产物逐字节相同 ⇒ 优化级别根本没作用，下面那组等式不成立"
+    );
+    assert_eq!(o2o0, o0, "`-O2 -O0` 必须等于 `-O0`（后出现的 -O 胜）");
+    assert_eq!(
+        o0o2, o2,
+        "`-O0 -O2` 必须等于 `-O2`（后出现的胜；既不是取首个也不是取最大）"
+    );
+    assert_eq!(o2o0o0, o0, "三个 -O 时仍以最后一个为准");
 }

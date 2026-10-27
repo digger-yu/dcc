@@ -840,14 +840,13 @@ pub fn count_init_elements(elem_ty: &Type, inits: &[InitItem]) -> usize {
     }
     let mut count = 0usize;
     let mut cursor = 0usize; // 当前元素内已吞的标量数
-    // 字符串字面量只有在**整个元素就是字符数组**时才是自完结项 (一行一个);
-    // 否则它只填字符数组字段那一个叶槽, 按 1 个标量计 (与
-    // group_for_brace_elision 的分组口径一致)。
+                             // 字符串字面量只有在**整个元素就是字符数组**时才是自完结项 (一行一个);
+                             // 否则它只填字符数组字段那一个叶槽, 按 1 个标量计 (与
+                             // group_for_brace_elision 的分组口径一致)。
     let elem_is_char_array = match elem_ty {
-        Type::Array(inner, _) => matches!(
-            inner.base,
-            Type::Char | Type::SChar | Type::UChar | Type::Char8
-        ),
+        Type::Array(inner, _) => {
+            matches!(inner.base, Type::Char | Type::SChar | Type::UChar | Type::Char8)
+        },
         _ => false,
     };
     for item in inits {
@@ -876,6 +875,50 @@ pub fn count_init_elements(elem_ty: &Type, inits: &[InitItem]) -> usize {
         count += 1;
     }
     count
+}
+
+/// 由初始化器补齐不完整数组维度（C11 6.7.9p22）。推导规则只有这一处：
+/// 数组分支与括号声明符分支都必须走它，否则「谁的维度被补」取决于声明符长什么样。
+///
+/// 为什么需要单独成函数：这条推导原本内嵌在「数组声明符」分支里，而**经括号声明符**
+/// 构造出来的数组走的是函数指针/指针分支，从来没人替它推导，维度就停在
+/// `ArraySize::Const(0)`：对象尺寸算成 0，`sizeof(t)/sizeof(t[0])` 也得 0。SQLite 的
+/// `static int (*const sqlite3BuiltinExtensions[])(sqlite3*) = {…}` 正是这个形状，
+/// 长度为 0 意味着内置扩展一个都不注册，dcc 产物里 `sqlite_dbpage` 一类虚表不存在。
+pub fn deduce_incomplete_array_dim(ty: Type, init: Option<&Expr>) -> Type {
+    let Some(init) = init else { return ty };
+    match (&ty, init) {
+        (Type::Array(elem, ArraySize::Const(0)), Expr::InitList { inits, .. }) => {
+            // 元素类型是聚合体时按 brace elision 数元素：扁平标量每
+            // `init_scalar_capacity` 个填满一个元素（pr80622）。
+            let count = count_init_elements(&elem.base, inits);
+            Type::Array(elem.clone(), ArraySize::Const(count))
+        },
+        (Type::Array(elem, ArraySize::Const(0)), Expr::String { data, .. }) => {
+            // 宽字符串 L"…" 的 data 是原始字节 (4 bytes/wchar_t)，数组大小应是元素个数。
+            let elem_sz = elem.size().max(1);
+            let num_elems = if elem_sz > 1 {
+                data.len().div_ceil(elem_sz)
+            } else {
+                data.len()
+            };
+            Type::Array(elem.clone(), ArraySize::Const(num_elems))
+        },
+        _ => ty,
+    }
+}
+
+/// sanitizer（ASan / KASAN）插桩会把 lvalue 包成 `Comma{ check, 真 lvalue }`：先跑
+/// shadow 检查调用，再对里面的 lvalue 走 store。发射点在 `Expr::Assign` 臂开头就是逐层
+/// 剥开再分派的。**任何按形状判断 lvalue 的代码都必须先过这一道**，否则同一个 LHS 在
+/// 两边算出不同答案：帧规划期漏算一个晚分配槽就是 `E1133`（实测 `-fsanitize=address`
+/// 编 SQLite 的 `sqlite3ExprListDup` / `sqlite3SrcListDup` 编不外）。
+pub fn peel_instrumented_lvalue(e: &Expr) -> &Expr {
+    let mut cur = e;
+    while let Expr::Comma { r, .. } = cur {
+        cur = r;
+    }
+    cur
 }
 
 /// 指定符
@@ -1438,11 +1481,12 @@ fn type_eq(a: &Type, b: &Type, assuming: &mut AssumingRecords, depth: u32) -> bo
         if !n1.is_empty() && (v1.is_empty() || v2.is_empty()) {
             return true;
         }
-        return v1 == v2 && match (u1, u2) {
-            (Some(x), Some(y)) => qual_eq(x, y, assuming, depth),
-            (None, None) => true,
-            _ => false,
-        };
+        return v1 == v2
+            && match (u1, u2) {
+                (Some(x), Some(y)) => qual_eq(x, y, assuming, depth),
+                (None, None) => true,
+                _ => false,
+            };
     }
     match (a, b) {
         (Type::Ptr(x), Type::Ptr(y))
@@ -1450,9 +1494,7 @@ fn type_eq(a: &Type, b: &Type, assuming: &mut AssumingRecords, depth: u32) -> bo
         | (Type::Imaginary(x), Type::Imaginary(y))
         | (Type::Atomic(x), Type::Atomic(y)) => qual_eq(x, y, assuming, depth),
         (Type::Array(x, s1), Type::Array(y, s2)) => s1 == s2 && qual_eq(x, y, assuming, depth),
-        (Type::Vector(x, n1), Type::Vector(y, n2)) => {
-            n1 == n2 && qual_eq(x, y, assuming, depth)
-        },
+        (Type::Vector(x, n1), Type::Vector(y, n2)) => n1 == n2 && qual_eq(x, y, assuming, depth),
         (Type::Func(r1, p1), Type::Func(r2, p2)) => {
             p1.len() == p2.len()
                 && qual_eq(r1, r2, assuming, depth)

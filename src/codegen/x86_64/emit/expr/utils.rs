@@ -143,7 +143,7 @@ impl Codegen {
                 } else {
                     Self::scalar_load_shape(inner)
                 }
-            }
+            },
             Expr::Member { expr, .. } => {
                 !matches!(expr.ty(), Type::Struct(_, _, _, _) | Type::Union(_, _, _, _))
                     && Self::scalar_load_shape(expr)
@@ -194,7 +194,11 @@ impl Codegen {
     /// `Deref` 放行的前置条件：发射路径没改之前，判据不得先按「计划中的行为」放行。
     pub(crate) fn dest_deref_enabled() -> bool {
         static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *V.get_or_init(|| std::env::var("DCC_DEST_DEREF").map(|s| s != "0").unwrap_or(false))
+        *V.get_or_init(|| {
+            std::env::var("DCC_DEST_DEREF")
+                .map(|s| s != "0")
+                .unwrap_or(false)
+        })
     }
 
     /// 「后缀自增与解引用合成一次访存 + 一次加法」是否启用（`DCC_POSTINC_FOLD`，默认关）。
@@ -203,7 +207,11 @@ impl Codegen {
     /// 本条改的是「自增与载入的**先后」**，两者错开的形状不同，量验时必须能单独关。
     pub(crate) fn postinc_fold_enabled() -> bool {
         static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *V.get_or_init(|| std::env::var("DCC_POSTINC_FOLD").map(|s| s != "0").unwrap_or(false))
+        *V.get_or_init(|| {
+            std::env::var("DCC_POSTINC_FOLD")
+                .map(|s| s != "0")
+                .unwrap_or(false)
+        })
     }
 
     /// 「这个类型的值能否用一条 GP 装载/存完」——与下面几个臂共用的标量门。
@@ -257,13 +265,12 @@ impl Codegen {
     pub(crate) fn rhs_only_writes_stage(r: &Expr) -> bool {
         match r {
             // 编译期常量：求值不写任何号（或被折成一条 `mov imm` 只写 dst）。
-            Expr::Int { .. } | Expr::Char { .. } | Expr::SizeofTy { .. } | Expr::AlignofTy { .. } => {
-                Self::stage_scalar_ty(&r.ty())
-            },
+            Expr::Int { .. }
+            | Expr::Char { .. }
+            | Expr::SizeofTy { .. }
+            | Expr::AlignofTy { .. } => Self::stage_scalar_ty(&r.ty()),
             Expr::Ident { .. } => Self::stage_scalar_ty(&r.ty()),
-            Expr::Cast { ty, e, .. } => {
-                Self::stage_scalar_ty(ty) && Self::rhs_only_writes_stage(e)
-            },
+            Expr::Cast { ty, e, .. } => Self::stage_scalar_ty(ty) && Self::rhs_only_writes_stage(e),
             Expr::Unary { op, e, .. } => {
                 matches!(op, UnOp::Neg | UnOp::Not | UnOp::BitNot | UnOp::Plus)
                     && Self::stage_scalar_ty(&r.ty())
@@ -276,18 +283,20 @@ impl Codegen {
             },
             // 解引用：只有 `DCC_DEST_DEREF` 开着时才不碰 rax（见 `lvalue.rs` 那条快道）。
             Expr::Deref { e, ty, .. } => {
-                Self::dest_deref_enabled() && Self::stage_scalar_ty(ty)
+                Self::dest_deref_enabled()
+                    && Self::stage_scalar_ty(ty)
                     && Self::rhs_only_writes_stage(e)
             },
             Expr::Binop {
-                op: op @ (BinOp::Add
-                | BinOp::Sub
-                | BinOp::And
-                | BinOp::Or
-                | BinOp::Xor
-                | BinOp::Shl
-                | BinOp::Shr
-                | BinOp::Mul),
+                op:
+                    op @ (BinOp::Add
+                    | BinOp::Sub
+                    | BinOp::And
+                    | BinOp::Or
+                    | BinOp::Xor
+                    | BinOp::Shl
+                    | BinOp::Shr
+                    | BinOp::Mul),
                 l,
                 r: rr,
                 ..
@@ -296,9 +305,7 @@ impl Codegen {
                     return false;
                 }
                 // 指针加减的标量那一侧也必须是标量。
-                if matches!(r.ty(), Type::Ptr(_))
-                    && !matches!(op, BinOp::Add | BinOp::Sub)
-                {
+                if matches!(r.ty(), Type::Ptr(_)) && !matches!(op, BinOp::Add | BinOp::Sub) {
                     return false;
                 }
                 // 移位计数必须是常量：变量计数要走 `%cl`，那是另一个号。
@@ -311,7 +318,11 @@ impl Codegen {
                 // 指针算术的一侧必须是指针、另一侧是标量。
                 let ptr_ok = !matches!(r.ty(), Type::Ptr(_))
                     || (Self::stage_scalar_ty(&rr.ty()) || Self::stage_scalar_ty(&l.ty()));
-                count_ok && mul_ok && ptr_ok && Self::rhs_only_writes_stage(l) && Self::rhs_only_writes_stage(rr)
+                count_ok
+                    && mul_ok
+                    && ptr_ok
+                    && Self::rhs_only_writes_stage(l)
+                    && Self::rhs_only_writes_stage(rr)
             },
             _ => false,
         }
@@ -541,10 +552,7 @@ impl Codegen {
                 Self::expr_may_write_name(e, name)
             },
             Expr::Cond {
-                cond,
-                then_,
-                else_,
-                ..
+                cond, then_, else_, ..
             } => {
                 Self::expr_may_write_name(cond, name)
                     || Self::expr_may_write_name(then_, name)
@@ -739,7 +747,10 @@ impl Codegen {
                     // 第二个实参是提示值；字面量/名字无副作用，值本来就没人要，整条丢。
                     // 其它形态（`++x`、call）可能带副作用，退回材料化路径。
                     let hint_dead = args.len() < 2
-                        || matches!(&args[1], Expr::Int { .. } | Expr::Char { .. } | Expr::Ident { .. });
+                        || matches!(
+                            &args[1],
+                            Expr::Int { .. } | Expr::Char { .. } | Expr::Ident { .. }
+                        );
                     if hint_dead && Self::truth_test_emittable(&args[0].ty()) {
                         self.gen_cond_jump_to(&args[0], target, jump_if_true);
                         return;
@@ -1729,8 +1740,7 @@ impl Codegen {
                     };
                     if let Some((off, sec)) = rel {
                         let rel_type = if width <= 4 { R_X86_64_32 } else { R_X86_64_64 };
-                        self.pending_data64_rels
-                            .push((off, sym, sec, rel_type, 0));
+                        self.pending_data64_rels.push((off, sym, sec, rel_type, 0));
                     }
                     vec![0u8; width.max(8)]
                 },
@@ -1758,13 +1768,8 @@ impl Codegen {
                             if let Some((off, sec)) = rel {
                                 let rel_type = if width <= 4 { R_X86_64_32 } else { R_X86_64_64 };
                                 let addend = (i as i64) * elem_ty.size().max(1) as i64;
-                                self.pending_data64_rels.push((
-                                    off,
-                                    sym,
-                                    sec,
-                                    rel_type,
-                                    addend,
-                                ));
+                                self.pending_data64_rels
+                                    .push((off, sym, sec, rel_type, addend));
                             }
                             vec![0u8; width.max(8)]
                         } else if let (Expr::String { data, .. }, Ok(i)) =
@@ -2466,12 +2471,12 @@ impl Codegen {
                 prelude.iter().any(|item| match item {
                     BlockItem::Stmt(s) => Self::stmt_contains_label(s),
                     BlockItem::Decl(_) => false,
-                }) || cases
-                    .iter()
-                    .any(|c| c.body.items.iter().any(|item| match item {
+                }) || cases.iter().any(|c| {
+                    c.body.items.iter().any(|item| match item {
                         BlockItem::Stmt(s) => Self::stmt_contains_label(s),
                         BlockItem::Decl(_) => false,
-                    }))
+                    })
+                })
             },
             Stmt::Invoke { call, .. } => Self::stmt_contains_label(call),
             _ => false,
@@ -2585,11 +2590,14 @@ impl Codegen {
         match stmt {
             Stmt::Expr { e, .. } => Self::expr_may_hold_asm(e),
             Stmt::Return { val, .. } => val.as_ref().is_some_and(Self::expr_may_hold_asm),
-            Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Goto { .. } | Stmt::Fallthrough { .. } => {
-                false
-            },
+            Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::Goto { .. }
+            | Stmt::Fallthrough { .. } => false,
             Stmt::Label { stmt, .. } => Self::cold_outline_blocked(stmt),
-            Stmt::If { cond, then_, else_, .. } => {
+            Stmt::If {
+                cond, then_, else_, ..
+            } => {
                 Self::expr_may_hold_asm(cond)
                     || Self::cold_outline_blocked(then_)
                     || else_
@@ -2600,7 +2608,11 @@ impl Codegen {
                 Self::expr_may_hold_asm(cond) || Self::cold_outline_blocked(body)
             },
             Stmt::For {
-                init, cond, step, body, ..
+                init,
+                cond,
+                step,
+                body,
+                ..
             } => {
                 init.as_ref().is_some_and(|s| Self::cold_outline_blocked(s))
                     || cond.as_ref().is_some_and(Self::expr_may_hold_asm)

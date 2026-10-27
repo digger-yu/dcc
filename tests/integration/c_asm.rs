@@ -3496,14 +3496,19 @@ fn global_register_binding_on_call_clobbered_reg_warns_like_gcc() {
     assert!(fixture.exists(), "夹具不存在：{}", fixture.display());
 
     let count_on = |bin: &str, args: &[&str], src: &std::path::Path| -> (usize, bool) {
+        // 输出路径必须是真临时文件：这个助手**也会跑 gcc**，而 `-o /dev/null` 会先把
+        // /dev/null unlink 再按 umask 重建（参 harness::discard_out），一个警告类用例
+        // 不该把全局设备节点碰坏。
+        let out_path = discard_out("regwarn");
         let out = Command::new(bin)
             .args(args)
             .arg("-c")
             .arg("-o")
-            .arg("/dev/null")
+            .arg(&out_path)
             .arg(src)
             .output()
             .unwrap_or_else(|_| panic!("run {bin}"));
+        let _ = fs::remove_file(&out_path);
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
         (stderr.matches(MSG).count(), out.status.success())
     };

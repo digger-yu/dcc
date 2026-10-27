@@ -524,9 +524,7 @@ impl Codegen {
                 {
                     let radix = if c == b'b' || c == b'B' { 2u32 } else { 16u32 };
                     let mut j = i + 1;
-                    while j < bytes.len()
-                        && (bytes[j] as char).to_digit(radix).is_some()
-                    {
+                    while j < bytes.len() && (bytes[j] as char).to_digit(radix).is_some() {
                         j += 1;
                     }
                     if j == i + 1 {
@@ -749,11 +747,8 @@ impl Codegen {
                     if start == *pos {
                         return None;
                     }
-                    return i64::from_str_radix(
-                        std::str::from_utf8(&b[start..*pos]).ok()?,
-                        16,
-                    )
-                    .ok();
+                    return i64::from_str_radix(std::str::from_utf8(&b[start..*pos]).ok()?, 16)
+                        .ok();
                 }
                 if c == b'0' && *pos + 1 < b.len() && matches!(b[*pos + 1], b'b' | b'B') {
                     *pos += 2;
@@ -764,11 +759,7 @@ impl Codegen {
                     if start == *pos {
                         return None;
                     }
-                    return i64::from_str_radix(
-                        std::str::from_utf8(&b[start..*pos]).ok()?,
-                        2,
-                    )
-                    .ok();
+                    return i64::from_str_radix(std::str::from_utf8(&b[start..*pos]).ok()?, 2).ok();
                 }
                 let start = *pos;
                 while *pos < b.len() && b[*pos].is_ascii_digit() {

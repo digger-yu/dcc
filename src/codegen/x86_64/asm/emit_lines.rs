@@ -3916,7 +3916,10 @@ impl Codegen {
             if !(t.starts_with(".skip") || t.starts_with(".space")) {
                 return false;
             }
-            let rest = &t[t.find(char::is_whitespace).map(|i| i + 1).unwrap_or(t.len())..];
+            let rest = &t[t
+                .find(char::is_whitespace)
+                .map(|i| i + 1)
+                .unwrap_or(t.len())..];
             let b = rest.as_bytes();
             let mut i = 0usize;
             while i < b.len() {
@@ -3929,10 +3932,8 @@ impl Codegen {
                     i += 1;
                 }
                 // `0x…` / `0b…` 是进位前缀（填充字节就写成 0x90），不是标签引用
-                let is_radix_prefix = i == s + 1
-                    && b[s] == b'0'
-                    && i < b.len()
-                    && matches!(b[i] | 0x20, b'x' | b'b');
+                let is_radix_prefix =
+                    i == s + 1 && b[s] == b'0' && i < b.len() && matches!(b[i] | 0x20, b'x' | b'b');
                 if is_radix_prefix {
                     i += 1;
                     while i < b.len() && (b[i] as char).is_ascii_alphanumeric() {

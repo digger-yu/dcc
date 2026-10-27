@@ -95,7 +95,10 @@ pub fn eval_full(expr: &Expr, fenv_access: bool) -> Result<ConstValue, ConstEval
             name,
             ty: Type::Func(..),
             ..
-        } => Ok(ConstValue::Addr { name: name.name.clone(), offset: 0 }),
+        } => Ok(ConstValue::Addr {
+            name: name.name.clone(),
+            offset: 0,
+        }),
         Expr::String { data, .. } => {
             // 字符串字面量: 编译器生成的 label 与 codegen 中的 rodata 标签对齐
             // 调用方需要确保同源字符串复用同一 label
@@ -1650,10 +1653,26 @@ pub fn is_constant(expr: &Expr) -> bool {
     // `arch/x86/include/asm/irq_stack.h` 的 `call_on_stack(func, ...)` 传的是
     // `[__func] "i" (func)`，GCC 在这里折成符号名后发 `call handle_stack_overflow`。
     // 只看 `eval`（返回 i128）会把它当成非常量，于是只立即数约束硬失败。
-    if matches!(expr, Expr::Ident { ty: crate::ast::Type::Func(..), .. }) {
+    if matches!(
+        expr,
+        Expr::Ident {
+            ty: crate::ast::Type::Func(..),
+            ..
+        }
+    ) {
         return true;
     }
     eval(expr).is_ok()
+}
+
+/// `__builtin_constant_p(x)` 专用的判据：比 `is_constant` 多算一类 —— **字符串字面量**。
+///
+/// 为什么不直接改 `is_constant`：那个函数还喂给内联汇编的立即数约束与 `_Static_assert`，
+/// 那边要的确实是「能算出一个数值」；字符串是链接期地址，算不出 `i128`，把它当常量会
+/// 让那些消费点在“拿值”的那一步硬失败。而 gcc 对 `__builtin_constant_p("hi")` 给 1
+/// （字面量就是一个静态对象地址），实测差这一条直接打坏 gcc-torture 的 `bcp-1.c`。
+pub fn is_constant_p_arg(expr: &Expr) -> bool {
+    matches!(expr, Expr::String { .. }) || is_constant(expr)
 }
 
 /// 把表达式渲染为可读文本 (用于 `_Static_assert` 失败时的诊断)。

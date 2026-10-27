@@ -4023,10 +4023,8 @@ fn apply_into(
                     targets: targets.clone(),
                     default: default.clone(),
                 },
-                crate::ssa::Terminator::Dispatch { targets } => {
-                    crate::ssa::Terminator::Dispatch {
-                        targets: targets.clone(),
-                    }
+                crate::ssa::Terminator::Dispatch { targets } => crate::ssa::Terminator::Dispatch {
+                    targets: targets.clone(),
                 },
                 crate::ssa::Terminator::Unreachable => crate::ssa::Terminator::Unreachable,
             };

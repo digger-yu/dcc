@@ -102,7 +102,10 @@ impl Codegen {
     /// 只取声明、不取表达式：本函数只用来统计「这个名字在函数里被声明了几次」。
     /// `Switch` 的两块（`prelude` 与各 `case.body`）都要走 —— 漏了一处，
     /// 同一名字在两处声明就会被误判成「唯一」。
-    fn collect_local_decls<'a>(items: &'a [crate::ast::BlockItem], out: &mut Vec<&'a crate::ast::VarDecl>) {
+    fn collect_local_decls<'a>(
+        items: &'a [crate::ast::BlockItem],
+        out: &mut Vec<&'a crate::ast::VarDecl>,
+    ) {
         use crate::ast::{BlockItem, Decl};
         for it in items {
             match it {
@@ -254,8 +257,8 @@ impl Codegen {
     /// 号 → 家。复用 `parse_reg_home` 的名字表，避免在这里再编一份「几号对应谁」。
     fn reg_home_location(reg: u8) -> Option<crate::location::Location> {
         const NAMES: [&str; 16] = [
-            "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10",
-            "r11", "r12", "r13", "r14", "r15",
+            "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11",
+            "r12", "r13", "r14", "r15",
         ];
         Self::parse_reg_home(NAMES.get(reg as usize)?)
     }
@@ -346,7 +349,8 @@ impl Codegen {
         // 块内等价事实同理：上一函数末的基本块与函数边界隔开了。volatile 登记表是
         // 本帧坐标/本帧声明，泄漏到下一个函数会把别人的槽当成屏障（少削一条）或把
         // 真 volatile 槽漏掉（静默错值）—— 后者才是必须逐函数清空的原因。
-        self.block_state.reset_at(crate::codegen::x86_64::blockopt::stat::site("reset_fn_boundary"));
+        self.block_state
+            .reset_at(crate::codegen::x86_64::blockopt::stat::site("reset_fn_boundary"));
         // `DCC_KILL_ALL_STAT=1`：逐函数归因，计数器在本函数开头清零。
         if crate::codegen::x86_64::blockopt::stat::enabled() {
             crate::codegen::x86_64::blockopt::stat::zero();
@@ -415,6 +419,11 @@ impl Codegen {
         self.current_sret_offset = None;
         // 记录当前函数名 (用于嵌套函数重命名作用域)
         self.current_func_name = f.name.name.clone();
+        // static local 的可见绑定同样是逐函数状态。嵌套函数在本函数体内**就地**
+        // 编译, 所以只清本函数自己那一格 —— 清整张表会把父函数已绑的名字抹掉,
+        // 回到无绑定的父体内后引用就只能按名字猜了。(`static_scope_undo` 不能
+        // 在这里清: 那上面还有父函数正在使用的块帧。)
+        self.static_visible.remove(&self.current_func_name);
         // 记录当前函数返回类型 (用于 return 语句截断)
         self.current_func_ret_ty = f.ret_ty.clone();
         // 设置嵌套函数状态
@@ -637,11 +646,11 @@ impl Codegen {
                 self.variadic_named_gp = 1;
             }
             let mut param_stores: Vec<(u8, i64)> = Vec::new(); // (gp reg, offset)
-            // 形参有 callee-saved 家时，入站值直接搬进那个号而不是存槽。
-            // 只出现在 `DCC_HOME_PARAMS=1` 且该形参确实拿到家时；默认表为空。
+                                                               // 形参有 callee-saved 家时，入站值直接搬进那个号而不是存槽。
+                                                               // 只出现在 `DCC_HOME_PARAMS=1` 且该形参确实拿到家时；默认表为空。
             let mut param_home_moves: Vec<(u8, u8)> = Vec::new(); // (入站号, 家号)
-                                                               // (xmm reg, offset, ty, wide128): wide128=true 表示该 Sse chunk
-                                                               // 与紧随的 SseUp 共用同一 xmm, 一次性保存完整 16 字节。
+                                                                  // (xmm reg, offset, ty, wide128): wide128=true 表示该 Sse chunk
+                                                                  // 与紧随的 SseUp 共用同一 xmm, 一次性保存完整 16 字节。
             let mut xmm_param_stores: Vec<(u8, i64, Type, bool)> = Vec::new();
             // (栈上字节偏移, var offset)。SysV 栈参数按类型对齐:
             // long double / __int128 / 16 字节对齐聚合体须落在 16 的
@@ -1083,10 +1092,12 @@ impl Codegen {
                     -8,
                 ));
             }
-            // KASAN 栈红区: 毒化整个帧, 然后解除变量区域的毒化
+            // KASAN/ASan 栈插桩：进函数先清整帧的陈旧毒，再只毒真实红区。
+            // 旧写法「毒整帧 + 只解具名变量」会让晚分配带（发射期才登记）、spill 槽与
+            // 对象尾部终身带毒，未插桩库正常写入就报 use-after-poison 假阳性
+            // （判据本体见 `special/sanitizer.rs::emit_kasan_stack_poison_redzones`）。
             if self.kasan && self.frame_layout.frame_size > 0 {
-                self.emit_kasan_stack_poison_all();
-                self.emit_kasan_stack_unpoison_vars();
+                self.emit_kasan_stack_poison_redzones();
             }
             // 被调用者保存寄存器: rbx, r12, r14, r15 保存在帧顶部
             // (r13-16 到 r13-40), 用作表达式求值的额外暂存寄存器.
@@ -1395,10 +1406,12 @@ impl Codegen {
                     -8,
                 ));
             }
-            // KASAN 栈红区: 毒化整个帧, 然后解除变量区域的毒化
+            // KASAN/ASan 栈插桩：进函数先清整帧的陈旧毒，再只毒真实红区。
+            // 旧写法「毒整帧 + 只解具名变量」会让晚分配带（发射期才登记）、spill 槽与
+            // 对象尾部终身带毒，未插桩库正常写入就报 use-after-poison 假阳性
+            // （判据本体见 `special/sanitizer.rs::emit_kasan_stack_poison_redzones`）。
             if self.kasan && self.frame_layout.frame_size > 0 {
-                self.emit_kasan_stack_poison_all();
-                self.emit_kasan_stack_unpoison_vars();
+                self.emit_kasan_stack_poison_redzones();
             }
         }
         // P13 阶段6：帧规划到此结束 —— 「哪些局部的帧槽读写每一次都是可观察事件」
@@ -1518,6 +1531,9 @@ impl Codegen {
                     },
                     BlockItem::Decl(Decl::Var(v)) => {
                         let mark = self.save_sret_watermark();
+                        // 函数顶层的 static 同样要在**声明点**绑定: 下面两条
+                        // `continue` 之后就没有发射点了, 再往后引用只能按名字猜。
+                        self.bind_static_local(v);
                         // extern 声明不分配栈槽 (与 gen_block_items / collect_frame_var_decls 口径一致)
                         if v.is_extern && v.init.is_none() {
                             continue;
@@ -1580,22 +1596,12 @@ impl Codegen {
                                 self.gen_init_list(&v.name.name, &v.ty, inits);
                             } else if let Expr::String { data: str_data, .. } = init {
                                 // 字符数组用字符串字面量初始化: char s[N] = "str";
-                                // 复制字符串内容到数组，剩余元素零填充
-                                // 注意: 指针初始化 (char *p = "str") 不走此路径
+                                // 注意: 指针初始化 (char *p = "str") 不走此路径。
+                                // 生成入口与块内声明共用，两处口径不一致就是把指针字节
+                                // 当数组内容的起点 (见 `gen_char_array_str_init`)。
                                 if matches!(&v.ty, Type::Array(_, _)) {
-                                    let arr_size = v.ty.size();
-                                    let off = self.var_offset(&v.name.name);
-                                    let copy_len = str_data.len().min(arr_size);
-                                    // 复制字符串字节到栈上数组
-                                    for (i, &byte) in str_data[..copy_len].iter().enumerate() {
-                                        self.mov_imm(0, byte as i128);
-                                        self.emit_store(0, off + i as i64, 1);
-                                    }
-                                    // 零填充剩余元素
-                                    for i in copy_len..arr_size {
-                                        self.mov_imm(0, 0i128);
-                                        self.emit_store(0, off + i as i64, 1);
-                                    }
+                                    let (name, ty) = (v.name.name.clone(), v.ty.clone());
+                                    self.gen_char_array_str_init(&name, &ty, str_data);
                                 } else {
                                     // 指针初始化: 生成字符串地址
                                     self.gen_expr(init, Self::EVAL_BASE);
@@ -1690,7 +1696,10 @@ impl Codegen {
                                     let init_ty = init.ty();
                                     if matches!(
                                         &init_ty,
-                                        Type::Float | Type::Double | Type::LongDouble | Type::Float128
+                                        Type::Float
+                                            | Type::Double
+                                            | Type::LongDouble
+                                            | Type::Float128
                                     ) && Self::is_integer_type(&v.ty)
                                     {
                                         self.emit_implicit_float_to_int(0, &init_ty, &v.ty);
@@ -1776,13 +1785,16 @@ impl Codegen {
             crate::codegen::x86_64::blockopt::shadow::zero();
         }
         if crate::codegen::x86_64::blockopt::stat::enabled() {
-            for (site, hits, slots_lost, copies_lost) in crate::codegen::x86_64::blockopt::stat::dump() {
+            for (site, hits, slots_lost, copies_lost) in
+                crate::codegen::x86_64::blockopt::stat::dump()
+            {
                 eprintln!(
                     "killstat fn={} site={} hits={} slots_lost={} copies_lost={}",
                     f.name.name, site, hits, slots_lost, copies_lost
                 );
             }
-            let mut vs: Vec<(String, u64, u64, u64)> = crate::codegen::x86_64::blockopt::stat::dump_variants();
+            let mut vs: Vec<(String, u64, u64, u64)> =
+                crate::codegen::x86_64::blockopt::stat::dump_variants();
             vs.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
             for (variant, hits, slots_lost, copies_lost) in vs {
                 eprintln!(

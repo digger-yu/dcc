@@ -284,23 +284,28 @@ pub fn compute_lvalue_address<R: ObjectResolver>(
     lvalue_address(resolver, expr)
 }
 
-/// 下标基座是否是「内存里的指针左值」—— 其 lvalue 地址描述符指向
-/// 「指针槽地址」(`&s.p` / `&a[i]` / `&*pp`), 取指针值必须补一次 LOAD。
+/// 下标基座是否是「描述符已经落在指针**值**上」还是「落在指针槽地址上」。
 ///
-/// 覆盖 `Member`(非 arrow) / `Index` / `Deref`; `Cast` 透明穿透 ——
-/// `((char*)foo[0])[0]` 的基座就是 `Cast(Index)`, 而 Cast arm 原样
-/// 返回内层描述符 (槽地址)。Cast 递归时要求内层操作数也是指针类型:
-/// `((char(*)[4])a[0])[0]` 这种「槽里存的是数组对象」的形状穿后不是
-/// 指针, 其值即地址, 再补 LOAD 会把数组内容当前针解引用。
-/// Ident 指针不在此列: 它的描述符本就是 StackSlotLoad/GlobalSlotLoad
-/// (求值即加载); Call / String 等 rvalue 指针同理 (ComputedAddr)。
+/// 需要补一次 LOAD 的只有 `Index` / `Deref`：
+/// - `X[i]` 的描述符恒是第 i 个元素的**地址**（哪怕基座自己已经是
+///   PointerValue —— 那层下标是在「已 load 出的指针值」上叠加的）；
+/// - `*p` 的描述符是 ExprAddr，即对象地址本身。
+///
+/// 不在此列（描述符就是值，再补 LOAD 会多数一次解引用）：
+/// - `Member`（arrow 与 dot 两臂都对指针字段包了 PointerValue，见下方
+///   `lvalue_address`）—— dot 臂以前不包、只靠本函数的补偿，现在两侧
+///   同时生效就会多 load 一次（SQLite `sqlite3Autoext.aExt[nExt] = xInit`
+///   被发成 `**(…)` 写空指针，启动即段错误）；
+/// - `Ident` 指针：StackSlotLoad/GlobalSymbolLoad/HomeLoad 求值即加载；
+/// - Call / String 等 rvalue 指针：ComputedAddr，其值即地址。
+///
+/// `Cast` 透明穿透 —— `((char*)foo[0])[0]` 的基座就是 `Cast(Index)`，而
+/// Cast arm 原样返回内层描述符（槽地址）。Cast 递归时要求内层操作数
+/// 也是指针类型：`((char(*)[4])a[0])[0]` 这种「槽里存的是数组对象」的形状
+/// 穿后不是指针，其值即地址，再补 LOAD 会把数组内容当指针解引用。
 fn is_memory_ptr_lvalue_base(e: &Expr) -> bool {
     match e {
-        Expr::Member {
-            is_arrow: false, ..
-        }
-        | Expr::Index { .. }
-        | Expr::Deref { .. } => true,
+        Expr::Index { .. } | Expr::Deref { .. } => true,
         Expr::Cast { e, .. } => {
             matches!(e.ty(), Type::Ptr(_)) && is_memory_ptr_lvalue_base(e.as_ref())
         },
@@ -327,20 +332,17 @@ fn lvalue_address<R: ObjectResolver>(resolver: &R, expr: &Expr) -> AddressDescri
             // 指针下标分两种:
             // - arr 是 Ident Ptr (如 p[0], ep->rx_ring[i]): lvalue_address 已
             //   StackSlotLoad 出指针值本身, 直接加下标即可, 无需补 LOAD。
-            // - arr 是 Member (非 arrow, 如 s.p[i]): lvalue_address 给出的是
-            //   「该指针所在字段的地址」(即 &s.p), 需 LOAD 一次取到指针值。
-            // - arr 是 Index (嵌套下标, 如 argv[n][0], 其中 argv: char**): 外层
+            // - arr 是 Member (arrow 或 dot, 如 s.p[i] / row->cells[i]): 两个
+            //   member arm 都对指针字段包了 PointerValue, 描述符就是指针值,
+            //   同样无需补 LOAD。
+            // - arr 是 Index (嵌套下标, 如 argv[n][0], 其中 argv: char**): 内层
             //   Index 返回的是「&argv[n]」(指针槽地址), 不是 argv[n] 这个 char*
             //   值; 需 LOAD 一次 8 字节才能拿到内层字符串地址.
-            // - arr 是 Member arrow Ptr (如 row->cells[i]): Member arrow arm
-            //   对指针/数组字段已包过 PointerValue, 此处 base_addr.base 即为
-            //   PointerValue, guard 会跳过重复 LOAD。
             let base_addr = lvalue_address(resolver, arr);
-            // 是否需要补一次 LOAD 才能拿到指针值?
+            // 是否需要补一次 LOAD 才能拿到指针值? 判据单一入口见
+            // [`is_memory_ptr_lvalue_base`]。
             // 适用场景:
-            //   - arr 是 Member(非 arrow, 如 s.p[i]) —— lvalue_address
-            //     返回的是「&s.p」(字段地址), 需再 load 一次取指针值.
-            //   - arr 是 Index (嵌套下标, 如 argv[n][0]) —— 外层 Index
+            //   - arr 是 Index (嵌套下标, 如 argv[n][0]) —— 内层 Index
             //     给出「&argv[n]」(指针槽地址), 需再 load 8 字节取 char*.
             //   - arr 是 Deref (如 (*f())[i], 其中 f(): T**) —— lvalue_address
             //     给出的是「&(*f())」(即 f() 返回的 T* 指针所在槽的地址),
@@ -351,13 +353,21 @@ fn lvalue_address<R: ObjectResolver>(resolver: &R, expr: &Expr) -> AddressDescri
             //     本身, 少一次解引用 (921019-1.c 段错误/abort 的根因).
             // 不适用:
             //   - arr 是 Ident Ptr (p[i]) —— StackSlotLoad 已 load 出指针值
-            //   - arr 是 Member arrow Ptr (row->cells[i]) —— arrow arm 已包过
+            //   - arr 是 Member Ptr (s.p[i] / row->cells[i]) —— member 臂已包
+            //     PointerValue, 在这里再补一次就是多一次解引用
             //   - arr 是 String / Call / 其他 rvalue 指针 —— 其值本身就是地址,
             //     套上 PointerValue 会多 load 一次 (把字符串首 8 字节当指针,
             //     导致 L"..."[i] 解引用垃圾地址 segfault).
-            let needs_pointer_load = matches!(arr.ty(), Type::Ptr(_))
-                && is_memory_ptr_lvalue_base(arr.as_ref())
-                && !matches!(base_addr.base, AddressBase::PointerValue { .. });
+            //
+            // 这里**不能**再加「基址已是 PointerValue 就跳过」的守卫: PointerValue
+            // 只有配合 Constant 偏移时才表示「已 load 出的指针值」; 一旦本描述符
+            // 还带运行时下标 (`p->pp[i]` / `s.pp[i]`), 它表示的是**第 i 个指针槽的
+            // 地址**, 下一层 [j] 必须先 load 那个槽。旧守卫把这层区分吞掉, 于是
+            // `volatile u32 **ap; ap[i][j]` 被物化成 `*(u32*)(ap + i*8 + j*4)` ——
+            // 少一次解引用, 读到的是指针数组自己的字节 (SQLite walFramePgno 返回
+            // 指针高低半当页号, walfault-10 九例「wrong # of entries in index」根因)。
+            let needs_pointer_load =
+                matches!(arr.ty(), Type::Ptr(_)) && is_memory_ptr_lvalue_base(arr.as_ref());
             let base_addr = if needs_pointer_load {
                 AddressDescriptor {
                     base: AddressBase::PointerValue {
@@ -602,56 +612,56 @@ fn address_from_storage(storage: StorageInfo, ty: &Type, name: &str) -> AddressD
         }
     } else {
         match (&storage.class, ty) {
-        // VLA / VM 聚合: 帧里的那个槽是**元数据槽**，它的内容才是动态数据区
-        // 基址（`gen_vla_alloc` 发 `mov %rsp,[off]`）。它与下面「槽位即对象
-        // 地址」的普通栈上聚合形状相反：这里走 StackFrame 会 `lea` 出描述符本身，
-        // 于是 a[i] 的读写全部落回固定帧区，先踩掉自己的 stride/size 槽。
-        // 后端侧同类判断见 mem/access.rs::emit_ident_base_addr 与 lvalue.rs：
-        // 判据取两份的并 —— `obj_type` 是解析器给出的身份，`ty.has_vla()` 直接
-        // 描述类型（它能兼顾 `int a[2][n]` 这种外层常量、内层运行时的形状，
-        // `storage_type_from_ast` 对它们只报 Array）。
-        (StorageClass::Stack, _)
-            if matches!(storage.obj_type, StorageType::Vla { .. }) || ty.has_vla() =>
-        {
-            AddressBase::StackSlotLoad {
+            // VLA / VM 聚合: 帧里的那个槽是**元数据槽**，它的内容才是动态数据区
+            // 基址（`gen_vla_alloc` 发 `mov %rsp,[off]`）。它与下面「槽位即对象
+            // 地址」的普通栈上聚合形状相反：这里走 StackFrame 会 `lea` 出描述符本身，
+            // 于是 a[i] 的读写全部落回固定帧区，先踩掉自己的 stride/size 槽。
+            // 后端侧同类判断见 mem/access.rs::emit_ident_base_addr 与 lvalue.rs：
+            // 判据取两份的并 —— `obj_type` 是解析器给出的身份，`ty.has_vla()` 直接
+            // 描述类型（它能兼顾 `int a[2][n]` 这种外层常量、内层运行时的形状，
+            // `storage_type_from_ast` 对它们只报 Array）。
+            (StorageClass::Stack, _)
+                if matches!(storage.obj_type, StorageType::Vla { .. }) || ty.has_vla() =>
+            {
+                AddressBase::StackSlotLoad {
+                    offset: storage.stack_offset.unwrap_or(0),
+                }
+            },
+            // 栈上数组/向量/结构体/联合体: 槽位即对象地址, 取地址 (LEA FP+offset)。
+            // 聚合是 lvalue, 标识符的值约定为其栈槽地址 (见 x86_64 gen_lvalue_addr
+            // 的 Ident 分支)。若误走 StackSlotLoad 会把槽内数据当指针解引用
+            // (如 s.v[0] 对含向量字段的结构体参数访问时段错误)。
+            (StorageClass::Stack, Type::Array(_, _))
+            | (StorageClass::Stack, Type::Vector(_, _))
+            | (StorageClass::Stack, Type::Struct(_, _, _, _))
+            | (StorageClass::Stack, Type::Union(_, _, _, _)) => AddressBase::StackFrame {
                 offset: storage.stack_offset.unwrap_or(0),
-            }
-        },
-        // 栈上数组/向量/结构体/联合体: 槽位即对象地址, 取地址 (LEA FP+offset)。
-        // 聚合是 lvalue, 标识符的值约定为其栈槽地址 (见 x86_64 gen_lvalue_addr
-        // 的 Ident 分支)。若误走 StackSlotLoad 会把槽内数据当指针解引用
-        // (如 s.v[0] 对含向量字段的结构体参数访问时段错误)。
-        (StorageClass::Stack, Type::Array(_, _))
-        | (StorageClass::Stack, Type::Vector(_, _))
-        | (StorageClass::Stack, Type::Struct(_, _, _, _))
-        | (StorageClass::Stack, Type::Union(_, _, _, _)) => AddressBase::StackFrame {
-            offset: storage.stack_offset.unwrap_or(0),
-        },
-        // 栈上标量/指针: 需要加载值 (LOAD [FP+offset])
-        (StorageClass::Stack, _) => AddressBase::StackSlotLoad {
-            offset: storage.stack_offset.unwrap_or(0),
-        },
-        // 全局数组/聚合: 取符号地址 (RIP-relative LEA)
-        (StorageClass::GlobalData, Type::Array(_, _))
-        | (StorageClass::GlobalData, Type::Vector(_, _))
-        | (StorageClass::GlobalData, Type::Struct(_, _, _, _))
-        | (StorageClass::GlobalData, Type::Union(_, _, _, _))
-        | (StorageClass::GlobalTLS, Type::Array(_, _))
-        | (StorageClass::GlobalTLS, Type::Vector(_, _))
-        | (StorageClass::GlobalTLS, Type::Struct(_, _, _, _))
-        | (StorageClass::GlobalTLS, Type::Union(_, _, _, _)) => AddressBase::GlobalSymbolAddr {
-            symbol_key: storage.symbol_key.unwrap_or_default(),
-        },
-        // 全局标量/指针: 加载符号值
-        (StorageClass::GlobalData, _) | (StorageClass::GlobalTLS, _) => {
-            AddressBase::GlobalSymbolLoad {
+            },
+            // 栈上标量/指针: 需要加载值 (LOAD [FP+offset])
+            (StorageClass::Stack, _) => AddressBase::StackSlotLoad {
+                offset: storage.stack_offset.unwrap_or(0),
+            },
+            // 全局数组/聚合: 取符号地址 (RIP-relative LEA)
+            (StorageClass::GlobalData, Type::Array(_, _))
+            | (StorageClass::GlobalData, Type::Vector(_, _))
+            | (StorageClass::GlobalData, Type::Struct(_, _, _, _))
+            | (StorageClass::GlobalData, Type::Union(_, _, _, _))
+            | (StorageClass::GlobalTLS, Type::Array(_, _))
+            | (StorageClass::GlobalTLS, Type::Vector(_, _))
+            | (StorageClass::GlobalTLS, Type::Struct(_, _, _, _))
+            | (StorageClass::GlobalTLS, Type::Union(_, _, _, _)) => AddressBase::GlobalSymbolAddr {
                 symbol_key: storage.symbol_key.unwrap_or_default(),
-            }
-        },
-        // Upvar: 从父帧加载
-        (StorageClass::Upvar, _) => AddressBase::UpvarLoad {
-            offset: storage.stack_offset.unwrap_or(0),
-        },
+            },
+            // 全局标量/指针: 加载符号值
+            (StorageClass::GlobalData, _) | (StorageClass::GlobalTLS, _) => {
+                AddressBase::GlobalSymbolLoad {
+                    symbol_key: storage.symbol_key.unwrap_or_default(),
+                }
+            },
+            // Upvar: 从父帧加载
+            (StorageClass::Upvar, _) => AddressBase::UpvarLoad {
+                offset: storage.stack_offset.unwrap_or(0),
+            },
         }
     };
 

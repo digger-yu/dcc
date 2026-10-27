@@ -376,17 +376,17 @@ pub struct Parser<'a> {
     /// 而不是 WEAK（gcc 是 WEAK）。内核用大量这种写法的弱桩，与架构侧的强定义
     /// 同名，`ld -r vmlinux.o` 因此报 multiple definition。声明符入口清零、出口合并。
     declarator_attrs: ParsedAttrs,
-    nodiscard_fns: HashSet<String>,            // C23 [[nodiscard]] 函数名集合
-    in_function: bool,                         // 是否在函数体内
-    current_function: Option<String>,          // 当前函数名 (供 __func__/__builtin_FUNCTION 等使用)
-    pub last_variadic: bool,                   // parse_params 是否遇到 ...
-    decl_storage: StorageClass,                // 最近一次声明说明符中的存储类
-    decl_attrs: ParsedAttrs,                   // 类型说明符之间出现的 GNU 属性
-    decl_auto_type: bool,                      // __auto_type：类型由初始化表达式推导
-    allow_named_type: bool,                    // typeof 等上下文允许 Type::Named
-    spec_quals: QualifierFlags,                // 当前声明说明符中捕获的限定符
-    decl_quals: QualifierFlags,                // 声明符中捕获的限定符 (如 * const 中的 const)
-    spec_addr_space: AddrSpace,                // 当前声明说明符中捕获的地址空间
+    nodiscard_fns: HashSet<String>,   // C23 [[nodiscard]] 函数名集合
+    in_function: bool,                // 是否在函数体内
+    current_function: Option<String>, // 当前函数名 (供 __func__/__builtin_FUNCTION 等使用)
+    pub last_variadic: bool,          // parse_params 是否遇到 ...
+    decl_storage: StorageClass,       // 最近一次声明说明符中的存储类
+    decl_attrs: ParsedAttrs,          // 类型说明符之间出现的 GNU 属性
+    decl_auto_type: bool,             // __auto_type：类型由初始化表达式推导
+    allow_named_type: bool,           // typeof 等上下文允许 Type::Named
+    spec_quals: QualifierFlags,       // 当前声明说明符中捕获的限定符
+    decl_quals: QualifierFlags,       // 声明符中捕获的限定符 (如 * const 中的 const)
+    spec_addr_space: AddrSpace,       // 当前声明说明符中捕获的地址空间
     opts: ParseOptions,
     shadow_counter: i32,         // 嵌套块遮蔽重命名计数器
     parse_depth: u32,            // 递归深度计数器 (防止栈溢出)
@@ -399,6 +399,10 @@ pub struct Parser<'a> {
     // shadow_map 移入此处, 使其对 parse_cases 随后收集的、词法上仍在同一块内
     // 的 case 体及块内共享 label (如 next_tail) 继续生效, 直到匹配的 '}' 被消费。
     duff_shadow_stack: Vec<Vec<(String, String)>>,
+    /// 体内 **块作用域 extern 声明**上提成文件作用域的那批声明（按名字去重）。
+    /// 详见 `hoist_block_extern`。
+    hoisted_externs: Vec<Decl>,
+    hoisted_extern_names: std::collections::HashSet<String>,
     pub token_count: u64, // 已消费的 token 数量 (供 profile 使用)
 }
 
@@ -463,6 +467,8 @@ impl<'a> Parser<'a> {
             block_ended_with_case: false,
             pending_close_brace: 0,
             duff_shadow_stack: Vec::new(),
+            hoisted_externs: Vec::new(),
+            hoisted_extern_names: std::collections::HashSet::new(),
             token_count: 2, // cur + peek are pre-fetched
         };
         // C23 nullptr_t: 内置类型 (等价 nullptr 表达式所对应的 (void*)0)
@@ -3043,6 +3049,33 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// 把体内「块作用域的 extern 声明」复制一份到文件作用域，按名字去重。
+    ///
+    /// 为什么要上提（C11 6.2.2p4 + 6.7p2-3：`{ extern int x; … }` 指明外层全局对象，
+    /// 链接是 external，本块不创建对象）：这条声明留在体内时，SSA 侧已经按「不是局部」
+    /// 处理它（`ssa::build::lower_block` / `ssa::lower::collect_local_decls` 都跳过 extern），
+    /// 重建函数体时就把这条声明丢了；codegen 随后再看时既不知道全局表里有这个名字，
+    /// 只能在「体内被引用的未知名字」兜底臂上把它当成局部分一个栈槽 ——
+    /// `{ extern int gt; p = &gt; }` 于是交出栈地址。SQLite 测试套的 `Sqlitetest2_Init`
+    /// 正好用这种声明把六个 io-error 变量 `Tcl_LinkVar` 给 Tcl，链错后 io-error 故障注入
+    /// 整体失效（单跑 altermalloc2 的 ioerr 循环只剩 1 个用例，gcc 是 20；在 quick.test
+    /// 里同一个循环反而失控到 100 万+ 用例）。
+    ///
+    /// 上提到文件作用域后，codegen 的全局采集本来就会把 `extern` 纯声明登成
+    /// SHN_UNDEF 条目，于是“这个名字属于全局”在**任何一档、任何一条入口**上都成立；
+    /// 体内那条声明继续留着（名称解析与调试信息需要它），它不占存储也不占帧内槽。
+    fn hoist_block_extern(&mut self, d: &Decl) {
+        let Decl::Var(v) = d else { return };
+        if !(v.is_extern && v.init.is_none() && self.in_function) {
+            return;
+        }
+        if self.hoisted_extern_names.contains(&v.name.name) {
+            return;
+        }
+        self.hoisted_extern_names.insert(v.name.name.clone());
+        self.hoisted_externs.push(Decl::Var(v.clone()));
+    }
+
     pub fn program(&mut self) -> (Program, Vec<Diagnostic>) {
         let mut decls = vec![];
         while self.cur.kind != TokKind::Eof {
@@ -3063,6 +3096,8 @@ impl<'a> Parser<'a> {
                 },
             }
         }
+        // 体内块作用域 extern 声明的上提结果补到文件作用域（先于任何后续 pass）
+        decls.extend(std::mem::take(&mut self.hoisted_externs));
         // C23 [[fallthrough]] 诊断: 在 switch case 末尾缺失标注时给出提示.
         self.check_implicit_fallthrough(&decls);
         (
@@ -4196,10 +4231,7 @@ impl<'a> Parser<'a> {
         // 解析变量/函数名前的 __attribute__: 如 int __attribute__((unused)) x;
         // 并把指针链里撞到的属性（`int *__weak f(void)`）一并合进来。
         let mut pre_attrs = Self::merge_attrs(
-            Self::merge_attrs(
-                Self::merge_attrs(leading_attrs, mid_attrs),
-                self.parse_attributes(),
-            ),
+            Self::merge_attrs(Self::merge_attrs(leading_attrs, mid_attrs), self.parse_attributes()),
             std::mem::take(&mut self.declarator_attrs),
         );
         self.skip_asm_label();
@@ -4831,31 +4863,11 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            // 从 InitList 推断最外层数组大小: data[] = {1,2,3} → data[3]
-            // 元素类型是聚合体时按 brace elision 数元素: 扁平标量每
-            // `init_scalar_capacity` 个填满一个元素 (pr80622:
-            // `struct S b[][1] = {68 标量}` → 17 行, 不是 68 行)。
-            if let (Type::Array(elem, ArraySize::Const(0)), Some(Expr::InitList { inits, .. })) =
-                (&arr_ty, &init)
-            {
-                let count = crate::ast::count_init_elements(&elem.base, inits);
-                arr_ty = Type::Array(elem.clone(), ArraySize::Const(count));
-            }
-            // 从 String 推断字符数组大小: data[] = "string" → data[7]
-            // 宽字符串 L"..." 的 data 是原始字节 (4 bytes/wchar_t),
-            // 数组大小应为元素个数, 非字节数.
-            if let (Type::Array(elem, ArraySize::Const(0)), Some(Expr::String { data, .. })) =
-                (&arr_ty, &init)
-            {
-                let elem_sz = elem.size().max(1);
-                let num_elems = if elem_sz > 1 {
-                    // 宽字符数组: data.len() 是字节数, 除以元素大小得元素个数
-                    data.len().div_ceil(elem_sz)
-                } else {
-                    data.len()
-                };
-                arr_ty = Type::Array(elem.clone(), ArraySize::Const(num_elems));
-            }
+            // 从初始化器补齐不完整维度：`data[] = {1,2,3}` → `data[3]`，
+            // `char s[] = "str"` → 带 NUL 的长度。规则本体在
+            // `ast::deduce_incomplete_array_dim`（单一真源，brace elision 按
+            // `init_scalar_capacity` 分组，pr80622），括号声明符那两条分支共用它。
+            arr_ty = crate::ast::deduce_incomplete_array_dim(arr_ty, init.as_ref());
             self.locals
                 .insert(name_for_decl.name.clone(), arr_ty.clone());
             if !self.in_function {
@@ -5964,6 +5976,14 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
+            // 经括号声明符构造的数组（`static int (*ext[])(sqlite3*) = {…}`）同样要按
+            // 初始化器补维度。5957 那次登记用的是推导前（Const(0)）的类型，这里推导完
+            // 再登记一次，让符号表与 VarDecl 持同一个类型 —— 否则存储尺寸与 sizeof 分叉。
+            ptr_ty = crate::ast::deduce_incomplete_array_dim(ptr_ty, init.as_ref());
+            self.locals.insert(name.name.clone(), ptr_ty.clone());
+            if !self.in_function {
+                self.globals.insert(name.name.clone(), ptr_ty.clone());
+            }
             // 多声明符支持: int (*b)(), (*c)();
             // 只在不是多声明符（下一个 token 不是逗号）时才消费分号
             if self.cur.kind != TokKind::Comma && !self.expect(TokKind::Semi, "';'") {
@@ -5998,11 +6018,11 @@ impl<'a> Parser<'a> {
                 asm_label: attrs.asm_label.clone(),
             })]);
         }
-        // 不是函数指针, 只是带括号的指针变量 (罕见)
+        // 不是函数指针, 只是带括号的声明符 (罕见)
         // 处理 `(*name)[N]` 形式: 指向数组的指针
         attrs.merge(self.parse_attributes());
         self.skip_asm_label();
-        let ptr_ty = if !outer_array_sizes.is_empty() {
+        let mut ptr_ty = if !outer_array_sizes.is_empty() {
             // 先构造内层数组类型: Array(ty, N1, N2, ...)
             let mut inner_ty = ty;
             for sz in outer_array_sizes.into_iter().rev() {
@@ -6013,12 +6033,24 @@ impl<'a> Parser<'a> {
         } else {
             Type::Ptr(Box::new(ty.into()))
         };
+        // 括号**内**的维度（`int (*ap[])[2]` 里那个 `[]`）说的是“ap 本身是数组”，必须套
+        // 在 Ptr 外面。旧实现把它丢了，ap 被当成一个指针：`sizeof(ap)/sizeof(ap[0])` 得 1
+        // 而不是 2，从第 2 个元素起读到的是相邻内存。
+        for sz in array_sizes.into_iter().rev() {
+            ptr_ty = Type::Array(Box::new(ptr_ty.into()), sz);
+        }
         let init = if self.cur.kind == TokKind::Assign {
             self.advance();
             Some(self.parse_expr_bp(2)?)
         } else {
             None
         };
+        // 与函数指针分支同理：按初始化器补不完整维度，并把这个类型同步登记到符号表。
+        ptr_ty = crate::ast::deduce_incomplete_array_dim(ptr_ty, init.as_ref());
+        self.locals.insert(name.name.clone(), ptr_ty.clone());
+        if !self.in_function {
+            self.globals.insert(name.name.clone(), ptr_ty.clone());
+        }
         if !self.expect(TokKind::Semi, "';'") {
             return None;
         }
@@ -7677,8 +7709,7 @@ impl<'a> Parser<'a> {
             if self.cur.text == "__attribute__" {
                 // 属性不能丢：它属于本声明符（见 `declarator_attrs` 的理由说明）。
                 let seen = self.parse_attributes();
-                self.declarator_attrs =
-                    Self::merge_attrs(self.declarator_attrs.clone(), seen);
+                self.declarator_attrs = Self::merge_attrs(self.declarator_attrs.clone(), seen);
             } else {
                 // Capture const/volatile/atomic/restrict qualifiers
                 // that appear after * in the declarator
@@ -8679,9 +8710,9 @@ impl<'a> Parser<'a> {
                 // **先**作用于名字 (p1 是"函数指针的数组"), 之后外层
                 // `(params)` 才作用于被指向类型 (C 声明符从内向外结合)。
                 // 此前这里只认 `(`/`)`, 遇到 `[` 直接 E0001 拒解析 (pr90553)。
-                let mut name_is_array = false;
+                // 「是不是数组」由 `name_arr_dims` 是否为空表达（包裹数组后缀的那一步就按它判），
+                // 不另设冗余标志位：旧写法那个 `name_is_array` 只写不读，已删。
                 if self.cur.kind == TokKind::LBracket {
-                    name_is_array = true;
                     // 先按原名收集维度; 真正的类型包裹推迟到指针链构造
                     // 完成后进行 (数组后缀不属于被指向类型)。
                     let mut dims = Vec::new();
@@ -9133,6 +9164,7 @@ impl<'a> Parser<'a> {
                                 if let Some((old, new)) = new_mapping {
                                     shadow_map.push((old, new));
                                 }
+                                self.hoist_block_extern(&d);
                                 items.push(BlockItem::Decl(d));
                             }
                         },
@@ -9165,6 +9197,7 @@ impl<'a> Parser<'a> {
                             if let Some((old, new)) = new_mapping {
                                 shadow_map.push((old, new));
                             }
+                            self.hoist_block_extern(&d);
                             items.push(BlockItem::Decl(d));
                         }
                     },
@@ -10265,6 +10298,7 @@ impl<'a> Parser<'a> {
                         match self.parse_decl() {
                             Some(ds) => {
                                 for d in ds {
+                                    self.hoist_block_extern(&d);
                                     items.push(BlockItem::Decl(d));
                                 }
                             },
@@ -10347,6 +10381,7 @@ impl<'a> Parser<'a> {
                                     let m = self.active_duff_map();
                                     Self::apply_shadow_map_decl(&mut d, &m);
                                 }
+                                self.hoist_block_extern(&d);
                                 items.push(BlockItem::Decl(d));
                             }
                         },
@@ -10753,8 +10788,14 @@ impl<'a> Parser<'a> {
                     let is_ib = matches!(&rt, Type::Imaginary(_));
                     let is_va = matches!(&lt, Type::Vector(_, _));
                     let is_vb = matches!(&rt, Type::Vector(_, _));
-                    let is_fa = matches!(&lt, Type::Float | Type::Double | Type::LongDouble | Type::Float128);
-                    let is_fb = matches!(&rt, Type::Float | Type::Double | Type::LongDouble | Type::Float128);
+                    let is_fa = matches!(
+                        &lt,
+                        Type::Float | Type::Double | Type::LongDouble | Type::Float128
+                    );
+                    let is_fb = matches!(
+                        &rt,
+                        Type::Float | Type::Double | Type::LongDouble | Type::Float128
+                    );
                     if is_va || is_vb {
                         if is_va {
                             lt
@@ -11014,6 +11055,13 @@ impl<'a> Parser<'a> {
                 let e = self.parse_unary()?;
                 let ty = if let Type::Ptr(inner) = &e.ty() {
                     inner.base.clone()
+                } else if let Type::Array(elem, _) = &e.ty() {
+                    // 数组在 `*e` 里先退化再解引用（C11 6.5.3.2p2 + 6.3.2.1p3）：`*arr`
+                    // 就是首元素。旧写法只认 `Ptr`，其余一律退到 `int_t()` —— 于是
+                    // `sizeof(*t)`（`t` 是函数指针数组）算成 4 而不是 8。gcc-torture 的
+                    // `bcp-1.c` 用 `N(arr) = sizeof(arr)/sizeof(*arr)` 数元素，维度一旦
+                    // 按初始化器推对，循环就多跑一倍 → 调到数组外 → `abort()`。
+                    elem.base.clone()
                 } else {
                     int_t()
                 };
@@ -12186,9 +12234,7 @@ impl<'a> Parser<'a> {
                                 Ok(crate::const_eval::ConstValue::Float(f)) => Some(f),
                                 _ => None,
                             };
-                            if let (Some(real), Some(imag)) =
-                                (as_fc(&args[0]), as_fc(&args[1]))
-                            {
+                            if let (Some(real), Some(imag)) = (as_fc(&args[0]), as_fc(&args[1])) {
                                 e = Expr::ComplexLit {
                                     real,
                                     imag,
@@ -12413,8 +12459,7 @@ impl<'a> Parser<'a> {
                                 // `__builtin_memcpy` 报「返回类型未知」）。拆成独立 `||`
                                 // 后，字面量名单只看自身命中，后缀判据只兜住 `q/f/l` 等
                                 // 变体，名单内建不再误报。
-                                || Self::float_builtin_suffix(name.name.as_str()).is_some()
-                            )
+                                || Self::float_builtin_suffix(name.name.as_str()).is_some())
                         {
                             self.warn_here(
                                 "W1015",
@@ -14316,7 +14361,6 @@ mod tests {
         // 无后缀返回 None (调用方据此回落为 double)
         assert!(strip_float_suffix("1.5").is_none());
     }
-
 
     #[test]
     fn wide_str_escape() {

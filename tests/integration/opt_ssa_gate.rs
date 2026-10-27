@@ -1069,15 +1069,17 @@ int main(void) { long r = f(7); return (int)(r % 251); }
     let dir = std::env::temp_dir();
     let sp = dir.join(format!("dcc-extoff-{}.c", std::process::id()));
     fs::write(&sp, src).expect("写夹具");
+    let asm_out = discard_out("extoff-s");
     let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
         .arg("-O2")
         .arg("-S")
         .arg("-o")
-        .arg("/dev/null")
+        .arg(&asm_out)
         .arg(&sp)
         .env("DCC_REGALLOC_DUMP", "1")
         .output()
         .expect("跑 dcc");
+    let _ = fs::remove_file(&asm_out);
     let diag = String::from_utf8_lossy(&out.stderr).to_string();
     // 池必须真的满：callee-saved + 延伸池不够分，后面那批必须走 spill。
     // （否则下面「延伸池当 home」是在测一条不会触发的路径，空跑。）

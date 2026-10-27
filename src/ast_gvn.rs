@@ -362,9 +362,7 @@ fn collect_scope_stmt(st: &Stmt, s: &mut FnScope) {
             collect_scope_stmt(body, s);
         },
         Stmt::Label { stmt, .. } => collect_scope_stmt(stmt, s),
-        Stmt::Switch {
-            cases, prelude, ..
-        } => {
+        Stmt::Switch { cases, prelude, .. } => {
             // `prelude`（第一个 `case` 之前的那些语句/声明）也是本函数的事实：漏了它，
             // GVN 会把「prelude 里被写过的名字」当成没被写过（错值那一族）。
             //

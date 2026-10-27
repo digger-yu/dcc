@@ -732,3 +732,84 @@ int main(void) { return run(5) == 5 ? 0 : 1; }
         b_on.len()
     );
 }
+
+// ===== 调用点栈对齐（SysV AMD64：`call` 指令处 rsp ≡ 0 mod 16）=====
+//
+// 红法：删掉 `emit_insn` 里 `stack_shift` 对 `sub/add rsp, imm` 的记账
+// （instructions.rs 的 `rsp_imm_delta`）⇒ 外层调用已下推出参区之后，内层调用
+// 仍按陈旧的偏移再补一次 8 ⇒ 本条在第一个 `call` 处读到 rsp ≡ 8 ⇒ 变红。
+//
+// 语料取自 SQLite amalgamation 第 47589 行
+// `pPath->rc = unixLogError(SQLITE_CANTOPEN_BKPT, "lstat", zIn);` 的形状：
+// 左值地址要跨调用活着（push），外层调用的实参里还有一次内层调用。
+// 这正是 testfixture 在 oserror-1.4.1 崩在 libtcl 的 `movaps` 上的那个形状。
+const NESTED_CALL_ALIGN_SRC: &str = r#"
+struct P { int rc; };
+int lasterr(int e);
+int logerr(int code, const char *fn, const char *path, int line);
+int f(struct P *p, const char *path, int line) {
+    p->rc = logerr(lasterr(line), "lstat", path, line);
+    return p->rc;
+}
+int main(void) { return 0; }
+"#;
+
+/// 按 `-S` 文本逐行累加 rsp 偏移，返回每个 `call` 处的偏移。
+///
+/// 起点取 8：ABI 规定 `call` 刚执行的函数入口 rsp ≡ 8 (mod 16)。只认本后端
+/// 对「改变 rsp」的四种写法（`push`/`pop`/`sub $N, %rsp`/`add $N, %rsp`）。
+/// 遇到 `mov %r13, %rsp` 这类把 rsp 拉回帧基的复位就不再累加 —— 判据只对
+/// 累加段成立，含糊的地方不猜（实测 f 的形状里没有它）。
+fn call_site_rsp_offsets(asm: &str) -> Vec<i64> {
+    let mut off = 8i64;
+    let mut calls = Vec::new();
+    for line in asm.lines() {
+        let l = line.trim();
+        if l == "mov %r13, %rsp" {
+            break;
+        }
+        if let Some(n) = l
+            .strip_prefix("sub $")
+            .and_then(|r| r.strip_suffix(", %rsp"))
+        {
+            off -= n.trim().parse::<i64>().expect("sub rsp 立即数");
+        } else if let Some(n) = l
+            .strip_prefix("add $")
+            .and_then(|r| r.strip_suffix(", %rsp"))
+        {
+            off += n.trim().parse::<i64>().expect("add rsp 立即数");
+        } else if l.starts_with("push ") {
+            off -= 8;
+        } else if l.starts_with("pop ") {
+            off += 8;
+        } else if l.starts_with("call ") {
+            calls.push(off);
+        }
+    }
+    calls
+}
+
+#[test]
+fn nested_call_sites_are_16_byte_aligned() {
+    let (out, asm) =
+        run_asm_output_test_flags("nested-call-align", NESTED_CALL_ALIGN_SRC, "-O1");
+    assert!(
+        out.status.success(),
+        "dcc -O1 -S 失败: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let body = extract_function_body(&asm, "f");
+    assert!(!body.is_empty(), "汇编里找不到 f:\n{asm}");
+    let offs = call_site_rsp_offsets(&body);
+    assert_eq!(
+        offs.len(),
+        2,
+        "预期 f 里两次调用（内层 lasterr + 外层 logerr），实际 {} 次:\n{body}",
+        offs.len()
+    );
+    let bad: Vec<i64> = offs.iter().copied().filter(|o| o.rem_euclid(16) != 0).collect();
+    assert!(
+        bad.is_empty(),
+        "call 处 rsp 未 16 对齐（偏移 {bad:?}；合法值只有 0）:\n{body}"
+    );
+}

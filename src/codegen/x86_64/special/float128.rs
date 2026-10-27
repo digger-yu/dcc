@@ -71,10 +71,8 @@ impl Codegen {
                         | Type::ULong
                         | Type::ULongLong
                 );
-                let is_64 = matches!(
-                    src_ty,
-                    Type::Long | Type::LongLong | Type::ULong | Type::ULongLong
-                );
+                let is_64 =
+                    matches!(src_ty, Type::Long | Type::LongLong | Type::ULong | Type::ULongLong);
                 if !is_64 {
                     if unsigned {
                         // mov %eax, %eax：32 位写自动清零高 32 位
@@ -85,11 +83,7 @@ impl Codegen {
                     }
                 }
                 self.mov(7, 0); // mov rdi, rax
-                self.emit_call_extern(if unsigned {
-                    "__floatunditf"
-                } else {
-                    "__floatditf"
-                });
+                self.emit_call_extern(if unsigned { "__floatunditf" } else { "__floatditf" });
             },
         }
     }
@@ -119,9 +113,7 @@ impl Codegen {
                 // `gen_float128_cmp`）。
                 self.emit_insn(&Insn::raw_with_gas(&[0x85, 0xC0], "testl %eax, %eax"));
                 // al = (返回值 != 0)
-                self.emit_insn(
-                    &Insn::setcc_reg(CondCode::Ne, 0).with_gas("setne %al".to_string()),
-                );
+                self.emit_insn(&Insn::setcc_reg(CondCode::Ne, 0).with_gas("setne %al".to_string()));
                 self.emit_insn(
                     &Insn::mov_ext(false, Width::B8, Width::B64, 0, 0)
                         .with_gas("movzbq %al, %rax".to_string()),
@@ -132,17 +124,9 @@ impl Codegen {
                 //（libgcc 返回的 SItype 只保证 eax 的低 32 位）。
                 let unsigned = matches!(
                     dst_ty,
-                    Type::UChar
-                        | Type::UShort
-                        | Type::UInt
-                        | Type::Char16
-                        | Type::Char32
+                    Type::UChar | Type::UShort | Type::UInt | Type::Char16 | Type::Char32
                 );
-                self.emit_call_extern(if unsigned {
-                    "__fixunstfsi"
-                } else {
-                    "__fixtfsi"
-                });
+                self.emit_call_extern(if unsigned { "__fixunstfsi" } else { "__fixtfsi" });
                 if unsigned {
                     self.emit_insn(&Insn::mov_rm_reg(Width::B32, 0, 0)); // mov %eax, %eax
                 } else {
@@ -319,7 +303,7 @@ impl Codegen {
         self.emit_to_float128(&l_ty);
         self.emit_insn(&Insn::sub_rsp_imm(16));
         self.emit_insn(&Insn::simd_mov_mem(true, SimdWidth::PS, 0, 0)); // movups %xmm0, (%rsp)
-        // 右操作数 → xmm0（binary128）
+                                                                        // 右操作数 → xmm0（binary128）
         self.expr_depth += 1;
         self.gen_expr(r, Self::EVAL_BASE);
         self.emit_to_float128(&r_ty);
@@ -351,8 +335,7 @@ impl Codegen {
         // `rodata_entry_bytes` 的十六进制反推对 16 字节同样成立。
         let key = format!(
             "f_{}",
-            mask
-                .iter()
+            mask.iter()
                 .map(|b| format!("{:02x}", b))
                 .collect::<String>()
         );
@@ -395,7 +378,7 @@ impl Codegen {
         self.emit_to_float128(&l_ty);
         self.emit_insn(&Insn::sub_rsp_imm(16));
         self.emit_insn(&Insn::simd_mov_mem(true, SimdWidth::PS, 0, 0)); // movups %xmm0, (%rsp)
-        // 右操作数 → xmm0（binary128）
+                                                                        // 右操作数 → xmm0（binary128）
         self.expr_depth += 1;
         self.gen_expr(r, Self::EVAL_BASE);
         self.emit_to_float128(&r_ty);

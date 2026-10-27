@@ -717,6 +717,27 @@ pub(crate) enum X86_64Opcode {
     },
 }
 
+/// ModRM.mod 的选择里最容易踩空的一条 ISA 事实：**基址低 3 位是 101 时
+/// （`rbp`=5 与 `r13`=13），`mod=00` 不表示「[基址 + 0]」**。
+///
+/// * ModRM.rm=101 且无 SIB ⇒ `mod=00` 是 RIP 相对；
+/// * 带 SIB 时 SIB 的 base 字段 101 同样表示「无基址 + disp32」—— 这是最
+///   容易漏的一支：以为「有 SIB 就无所谓」，于是 `mov (%rbp,%rcx,8),%rax`
+///   被编成 `mod=00 + SIB` 且**一个位移字节都不发**，解码器接着把后面指令的
+///   字节吃掉当 disp32，整条指令流错位（实测：`-O2` 把跳转表基址常驻 `%rbp`
+///   后，SQLite 的 `goto *disptab[i]` 启动即 SIGSEGV）。
+/// * `rsp`/`r12`（低 3 位 100）只在**本条指令不发 SIB** 时才需要强制 mod=01
+///   （rm=100 + mod=00 的意思是「后面有 SIB」）。
+///
+/// 返 `true` ⇒ `disp=0` 也必须落 mod=01 + disp8=0（超出 i8 时 mod=10 + disp32，
+/// 由各调用点原有的分支给）。判据只留这一份：以前六个编码分支各写一遍，
+/// 写出 `base != 5`（漏 13）与 `base != 5 || need_sib`（漏「有 SIB 也一样」）
+/// 两种缺口。
+pub(crate) fn modrm_needs_disp(base: u8, sib_follows: bool) -> bool {
+    let f = base & 7;
+    f == 5 || (f == 4 && !sib_follows)
+}
+
 impl X86_64Opcode {
     /// 编码为字节序列. None 表示该形态尚未实现, 发射方继续走 raw_bytes 兜底.
     pub(crate) fn encode(&self) -> Option<Vec<u8>> {
@@ -887,11 +908,11 @@ impl X86_64Opcode {
                         rex |= 0x01;
                     }
                     let need_rex = is_b64 || *dst_idx >= 8 || base >= 8;
-                    // disp 长度: base=rbp(5) mod=00 → rip-relative, 需 disp=0 时走 mod=01.
-                    // base=rsp(4) 必须 SIB (rm_field=4).
+                    // disp 长度: base=rbp(5)/r13(13) mod=00 → rip-relative, 需 disp=0 时走 mod=01.
+                    // base=rsp(4) 在本分支不产 SIB (rm=100 在 mod=00 是 SIB 标记) ⇒ 同样要 disp.
                     let disp = mem.disp;
                     let (modrm_mod, disp_bytes): (u8, &[u8]) =
-                        if disp == 0 && base != 5 && base != 4 {
+                        if disp == 0 && !modrm_needs_disp(base, false) {
                             (0, &[])
                         } else if let Ok(d) = i8::try_from(disp) {
                             (1, &[d as u8])
@@ -1488,16 +1509,15 @@ impl X86_64Opcode {
 
                 // ModRM / SIB / disp: 有 index 时必须发 SIB; 无 index 时仅 base=rsp(4)
                 // 必须发 SIB; 其余 base 走普通 ModRM.
-                // base=rbp(5) 在 mod=00 时是 rip-relative, 但当有 SIB 时 (rsp / index)
-                // mod=00 仍合法. base=rbp(5) 且无 SIB 时必须发 disp (mod=01/10).
+                // base 低 3 位是 101 (rbp/r13) 时 mod=00 不是「[基址+0]」——带 SIB
+                // 也一样（单一判据见 [`modrm_needs_disp`]）。
                 let disp = mem.disp;
                 let need_sib = index_reg.is_some() || (base & 7) == 4;
                 let modrm_mod: u8;
                 let disp_bytes: [u8; 4];
                 let disp_len: usize;
-                if disp == 0 && (base != 5 || need_sib) {
-                    // mod=00, 无 disp. base=rbp(5) 且无 SIB 时 mod=00 = rip-relative,
-                    // 必须走 disp.
+                if disp == 0 && !modrm_needs_disp(base, need_sib) {
+                    // mod=00, 无 disp.
                     modrm_mod = 0;
                     disp_len = 0;
                     disp_bytes = [0; 4];
@@ -1683,17 +1703,16 @@ impl X86_64Opcode {
                             || *dst_idx >= 8
                             || base >= 8
                             || index_reg.map_or(false, |ir| ir >= 8);
-                        // ModRM mod / disp 长度: base=rbp(5) 在 mod=00 时是 rip-relative,
-                        // 这里只接显式 disp, 因此 disp=0 且 base=5 时走 disp32 (mod=10) 以
-                        // 避免被解释成 [rip+disp32]. 但若有 SIB (index 或 rsp) 则 mod=00 合法.
+                        // ModRM mod / disp 长度: 基址低 3 位是 101 (rbp/r13) 时 mod=00 不是
+                        // 「[基址+0]」（带 SIB 也一样），必须落 disp；判据单一入口见
+                        // [`modrm_needs_disp`]。旧写法在这里额外开了一个
+                        // `disp==0 && base==5 → mod=10 disp32` 的分叉，与下面 i8 分支同义
+                        // 但多三个字节，且漏了 base=13。
                         let disp = mem.disp;
                         let need_sib = index_reg.is_some() || (base & 7) == 4;
                         let (modrm_mod, disp_len, disp_bytes): (u8, usize, [u8; 4]) =
-                            if disp == 0 && (base != 5 || need_sib) {
+                            if disp == 0 && !modrm_needs_disp(base, need_sib) {
                                 (0, 0, [0; 4])
-                            } else if disp == 0 && base == 5 {
-                                // rbp/r13 且无 SIB: 强制 disp32 (mod=10) 避免 rip-relative.
-                                (2, 4, [0; 4])
                             } else if let Ok(d) = i8::try_from(disp) {
                                 (1, 1, [d as u8, 0, 0, 0])
                             } else {
@@ -1958,21 +1977,15 @@ impl X86_64Opcode {
                         }
                         out.push(escap);
                         // P11 Bucket H2: 按 disp 大小选 mod, 支持任意 base (含 r12).
-                        //   disp=0 且 base!=5(rbp) → mod=00; base=5 强制 disp8=0.
-                        //   i8 范围 → mod=01 + disp8.
-                        //   其余 → mod=10 + disp32.
-                        // rm=4 (rsp/r12) 必须插 SIB (SIB base=base&7=4=rsp or 4=r12).
-                        // rm=5 (rbp/r13) 在 mod=00 时是 rip-relative, 因此 disp=0 且 base=5
-                        //   时强制 mod=01 disp8=0.
-                        // P11 Bucket AE: 有 index 时必须发 SIB, modrm.rm=4 (SIB follow).
+                        //   disp=0 且基址低 3 位不是 101 → mod=00; 否则强制 disp.
+                        //   i8 范围 → mod=01 + disp8. 其余 → mod=10 + disp32.
+                        // rm=4 (rsp/r12) 必须插 SIB; rm=5 (rbp/r13) 在 mod=00 下无论
+                        //   有没有 SIB 都不是「[基址+0]」—— 单一判据见 [`modrm_needs_disp`]。
                         let rm = base & 7;
                         let need_sib = index_reg.is_some() || rm == 4;
                         let (modrm_mod, disp_bytes): (u8, Vec<u8>) =
-                            if disp == 0 && (rm != 5 || need_sib) {
+                            if disp == 0 && !modrm_needs_disp(base, need_sib) {
                                 (0u8, Vec::new())
-                            } else if disp == 0 && rm == 5 {
-                                // rbp/r13: mod=00 会被解码成 rip-relative, 故强制 mod=01 disp8=0.
-                                (1u8, vec![0u8])
                             } else if let Ok(d) = i8::try_from(disp) {
                                 (1u8, vec![d as u8])
                             } else {
@@ -2030,17 +2043,17 @@ impl X86_64Opcode {
                         }
                         out.push(escap);
                         // P11 Bucket H2: 按 disp 大小选 mod, 支持任意 base (含 r12).
+                        // rm=100 时下面会补一个 SIB(0x24)，所以只有 101 (rbp/r13) 要强制 disp。
                         let rm = base & 7;
                         let disp = mem.disp;
-                        let (modrm_mod, disp_bytes): (u8, Vec<u8>) = if disp == 0 && rm != 5 {
-                            (0u8, Vec::new())
-                        } else if disp == 0 && rm == 5 {
-                            (1u8, vec![0u8])
-                        } else if let Ok(d) = i8::try_from(disp) {
-                            (1u8, vec![d as u8])
-                        } else {
-                            (2u8, disp.to_le_bytes().to_vec())
-                        };
+                        let (modrm_mod, disp_bytes): (u8, Vec<u8>) =
+                            if disp == 0 && !modrm_needs_disp(base, rm == 4) {
+                                (0u8, Vec::new())
+                            } else if let Ok(d) = i8::try_from(disp) {
+                                (1u8, vec![d as u8])
+                            } else {
+                                (2u8, disp.to_le_bytes().to_vec())
+                            };
                         out.push((modrm_mod << 6) | (reg_field << 3) | rm);
                         if rm == 4 {
                             out.push(0x24);
@@ -2187,19 +2200,19 @@ impl X86_64Opcode {
                     }
                 };
                 let disp = mem.disp;
-                // ModRM mod / disp 长度. base=rbp(5) 在 mod=00 是 rip-relative,
-                // 但当有 SIB (rsp / index) 时 mod=00 仍合法. base=rbp(5) 且无 SIB
-                // 时必须走 mod=01 (disp8=0) 避免被解释成 rip.
+                // ModRM mod / disp 长度: 基址低 3 位是 101 (rbp/r13) 时 mod=00 不是
+                // 「[基址+0]」，带 SIB 也一样（单一判据见 [`modrm_needs_disp`]）。
                 // base=rsp(4) 必须 SIB; 当 disp=0 时 SIB(base=rsp,index=none) 配合
                 // mod=00 即编码为 `modrm=0x04|xmm<<3, sib=0x24` (G10 快照约定).
                 let need_sib = index_reg.is_some() || (base & 7) == 4;
-                let (modrm_mod, disp_bytes): (u8, &[u8]) = if disp == 0 && (base != 5 || need_sib) {
-                    (0, &[])
-                } else if let Ok(d) = i8::try_from(disp) {
-                    (1, &[d as u8])
-                } else {
-                    (2, &disp.to_le_bytes())
-                };
+                let (modrm_mod, disp_bytes): (u8, &[u8]) =
+                    if disp == 0 && !modrm_needs_disp(base, need_sib) {
+                        (0, &[])
+                    } else if let Ok(d) = i8::try_from(disp) {
+                        (1, &[d as u8])
+                    } else {
+                        (2, &disp.to_le_bytes())
+                    };
                 let rm_field = base & 7;
                 let mut out = Vec::with_capacity(16);
                 if pfx != 0 {
@@ -2599,18 +2612,16 @@ impl X86_64Opcode {
                         return None;
                     }
                 }
-                // mod=00 if disp=0 and base!=rbp(5); base=rbp(5) at mod=00 is
-                // rip-relative, so force mod=01 disp8=0 to keep [rbp+disp].
-                // 有 SIB 时同理：base 字段 101 在 mod=00 下意思是「无基址 + disp32」。
-                let (modrm_mod, disp_bytes): (u8, Vec<u8>) = if *disp == 0 && rm_field != 5 {
-                    (0u8, Vec::new())
-                } else if *disp == 0 && rm_field == 5 {
-                    (1u8, vec![0u8])
-                } else if let Ok(d) = i8::try_from(*disp) {
-                    (1u8, vec![d as u8])
-                } else {
-                    (2u8, disp.to_le_bytes().to_vec())
-                };
+                // mod/disp 的判据单一入口见 [`modrm_needs_disp`]：`mod=00` 在基址低 3 位
+                // 是 101 (rbp/r13) 时不是「[基址+0]」，带 SIB 也一样，必须 mod=01 disp8=0。
+                let (modrm_mod, disp_bytes): (u8, Vec<u8>) =
+                    if *disp == 0 && !modrm_needs_disp(*base, need_sib) {
+                        (0u8, Vec::new())
+                    } else if let Ok(d) = i8::try_from(*disp) {
+                        (1u8, vec![d as u8])
+                    } else {
+                        (2u8, disp.to_le_bytes().to_vec())
+                    };
                 let mut out = Vec::with_capacity(8);
                 // REX: index>=8 要 REX.X(0x02)、base>=8 要 REX.B(0x01)，两者独立取位。
                 let mut rex = 0x40u8;
@@ -3708,10 +3719,18 @@ impl X86_64Opcode {
                 };
                 match (dst, src) {
                     (Operand::Reg(d, _), Operand::Reg(s, _)) if *to_xmm => {
-                        format!("{m}\t{}, {}", fmt_reg(*s, gw), fmt_reg(*d, crate::codegen::shared::asm_operand::Width::B128))
+                        format!(
+                            "{m}\t{}, {}",
+                            fmt_reg(*s, gw),
+                            fmt_reg(*d, crate::codegen::shared::asm_operand::Width::B128)
+                        )
                     },
                     (Operand::Reg(d, _), Operand::Reg(s, _)) => {
-                        format!("{m}\t{}, {}", fmt_reg(*s, crate::codegen::shared::asm_operand::Width::B128), fmt_reg(*d, gw))
+                        format!(
+                            "{m}\t{}, {}",
+                            fmt_reg(*s, crate::codegen::shared::asm_operand::Width::B128),
+                            fmt_reg(*d, gw)
+                        )
                     },
                     _ => format!("{m}\t{}, {}", fmt_operand(src), fmt_operand(dst)),
                 }

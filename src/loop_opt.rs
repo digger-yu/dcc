@@ -504,14 +504,23 @@ fn expr_mentions(e: &Expr, scan: &NameScan, ctx: &LicmCtx) -> bool {
         // 数组元素的稳定读：只接受"数组对象名[不变下标]"。指针下标 `p[i]` 指向的对象
         // 没有名字可记进栅栏，无法排除被循环内其它写（或调用）改动。
         Expr::Index { arr, idx, .. } => {
-            !stable_object_read(arr, scan, ctx) || expr_mentions(idx, scan, ctx)
+            !stable_object_read(arr, scan, ctx)
+                || mentions_unstable_index(arr, scan, ctx)
+                || expr_mentions(idx, scan, ctx)
         },
         // `.` 成员读可判定（根对象有名字）；`->` 经指针，同 `p[i]` 一样不可判定。
+        // 但「根对象稳定」不等于整个基址稳定：`aQ[iMid].iFirst` 的下标也得查，
+        // 否则 Member 分支就把每轮重算的下标读当成了不变式（见
+        // [`mentions_unstable_index`]）。
         Expr::Member {
             expr: base,
             is_arrow,
             ..
-        } => *is_arrow || !stable_object_read(base, scan, ctx),
+        } => {
+            *is_arrow
+                || !stable_object_read(base, scan, ctx)
+                || mentions_unstable_index(base, scan, ctx)
+        },
         // 以下形态都无法用名字栅栏表达其读写集合 ⇒ 不是不变式（根因 3 的 fail-safe）。
         Expr::Deref { .. } | Expr::AddrOf { .. } => true,
         Expr::Call { .. } | Expr::AsmExpr { .. } => true,
@@ -542,6 +551,33 @@ fn stable_object_read(e: &Expr, scan: &NameScan, ctx: &LicmCtx) -> bool {
             is_arrow,
             ..
         } => !is_arrow && stable_object_read(base, scan, ctx),
+        _ => false,
+    }
+}
+
+/// 基址链上的**下标表达式**是否读了栅栏内的名字（极性同 [`expr_mentions`]：
+/// true = 不是不变式的成分）。
+///
+/// [`stable_object_read`] 只回答「根对象稳不稳定」，它沿 `Index`/`Member` 往下走时
+/// 天然不看下标。于是 `aQ[iMid].iFirst` 这种「数组元素再取成员」的形状，在
+/// `Expr::Member` 分支里查到「aQ 是文件级 const、没人写」就放行了，而下标里的
+/// `iMid` 是循环体每轮重新赋值的局部量 —— 漏判的后果是把
+/// `int cMid = aQ[iMid].iFirst;` 外提到循环之前，那里 `iMid` 还没被定义过。
+/// 实测 `shell.c` 的 `sqlite3_qrf_wcwidth()`（二分查这张 151 项的宽字符表）在
+/// `-O2` 下拿未初始化槽位当索引：小夹具是错值，`qrf01-1.10` 的 `db format`
+/// 直接野指针段错误。
+fn mentions_unstable_index(e: &Expr, scan: &NameScan, ctx: &LicmCtx) -> bool {
+    match e {
+        Expr::Index { arr, idx, .. } => {
+            mentions_unstable_index(arr, scan, ctx) || expr_mentions(idx, scan, ctx)
+        },
+        // `->` 的基址已经由 `stable_object_read` 判否，这里再保一层守（默认保守）。
+        Expr::Member {
+            expr: base,
+            is_arrow,
+            ..
+        } => *is_arrow || mentions_unstable_index(base, scan, ctx),
+        Expr::Cast { e: inner, .. } => mentions_unstable_index(inner, scan, ctx),
         _ => false,
     }
 }

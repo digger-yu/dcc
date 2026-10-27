@@ -16,7 +16,10 @@ use std::path::Path;
 
 /// 被点名的形态：`env::set_var(` / `env::remove_var(`。
 /// 字面量在这里是**拆开**写的 —— 本用例会扫自己的源文件，写成连续文本就会自匹配。
-const NEEDLES: [&str; 2] = [concat!("env::set_", "var("), concat!("env::remove_", "var(")];
+const NEEDLES: [&str; 2] = [
+    concat!("env::set_", "var("),
+    concat!("env::remove_", "var("),
+];
 
 /// 纯函数：给一段 Rust 文本，返回其中真正改进程环境的行 (1-based 行号 + 原文)。
 /// 跳过两类：注释行 (行首 `//` / `/*` / `*`), 以及带 `ok-env-mutation:` 标记的行
@@ -33,7 +36,9 @@ fn scan_env_mutations(text: &str) -> Vec<(usize, String)> {
             continue;
         }
         let marked_here = raw.contains("ok-env-mutation:");
-        let marked_prev = idx.checked_sub(1).map_or(false, |p| lines[p].contains("ok-env-mutation:"));
+        let marked_prev = idx
+            .checked_sub(1)
+            .map_or(false, |p| lines[p].contains("ok-env-mutation:"));
         if marked_here || marked_prev {
             continue;
         }
@@ -106,9 +111,11 @@ fn env_mutation_detector_fires_on_poisoned_snippets() {
     assert!(scan_env_mutations(documented).is_empty(), "注释被误伤");
 
     // 3) 带理由的显式豁免 → 不算
-    let opted_out = "fn t() {\n    // ok-env-mutation: 自举需要\n    std::env::remove_var(\"CC1\");\n}\n";
+    let opted_out =
+        "fn t() {\n    // ok-env-mutation: 自举需要\n    std::env::remove_var(\"CC1\");\n}\n";
     assert!(scan_env_mutations(opted_out).is_empty(), "行上/行上的标记没生效");
-    let marked_same_line = "fn t() { std::env::set_var(\"CC1\", \"x\") } // ok-env-mutation: 自举\n";
+    let marked_same_line =
+        "fn t() { std::env::set_var(\"CC1\", \"x\") } // ok-env-mutation: 自举\n";
     assert!(scan_env_mutations(marked_same_line).is_empty(), "同行标记没生效");
 
     // 4) remove_var 与 set_var 同等对待

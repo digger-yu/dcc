@@ -1878,3 +1878,422 @@ fn mt_flag_uses_literal_target() {
         "-MT target should appear literally: {dep_text}"
     );
 }
+
+/// sanitizer 插桩包住的 LHS 必须在帧规划期也被认成「聚合成员赋值」。
+///
+/// 缺陷形状：ASan/KASAN 把 `pi->fg = po->fg` 的 LHS 改写成
+/// `Comma{ __asan_load8(&pi->fg), pi->fg }`。发射点先剥壳再分派，而规划期的
+/// `agg_member_scratch_used` 直接拿原形状判「不是 Member」，于是那 16 字节的
+/// `<agg_member_tmp>` 没进晚分配预算 ⇒ `E1133: late frame allocation ... 2 slots
+/// used, 0 reserved`。实测这一条直接挡住整颗 SQLite amalgamation 的
+/// `-fsanitize=address` 构建（`sqlite3ExprListDup` / `sqlite3SrcListDup`）。
+#[test]
+#[cfg(unix)]
+fn sanitizer_wrapped_lvalue_keeps_late_frame_budget() {
+    let source = "\
+struct Item { int n; struct { unsigned f; unsigned g; } fg; };
+struct List { int nExpr; struct Item a[4]; };
+long dup(struct List *p, struct List *q){
+  struct Item *pi; const struct Item *po; int i;
+  q->nExpr = p->nExpr; pi = q->a; po = p->a;
+  for(i=0;i<p->nExpr;i++,pi++,po++){ pi->n = po->n; pi->fg = po->fg; }
+  return q->a[0].fg.f;
+}
+";
+    let dir = std::env::temp_dir();
+    let sp = dir.join(format!("dcc-san-lhs-{}.c", std::process::id()));
+    let op = dir.join(format!("dcc-san-lhs-{}.o", std::process::id()));
+    fs::write(&sp, source).expect("write fixture");
+    for extra in [
+        vec!["-fsanitize=address"],
+        vec!["-fsanitize=address", "-O2"],
+        vec!["-fsanitize=kernel-address"],
+        vec!["-fsanitize=address", "-fsanitize=kernel-address"],
+    ] {
+        let mut args: Vec<&str> = vec!["-O0", "-c", "-o"];
+        args.push(op.to_str().unwrap());
+        args.extend(extra.iter().copied());
+        args.push(sp.to_str().unwrap());
+        let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(&args)
+            .output()
+            .expect("run dcc");
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            out.status.success(),
+            "sanitizer 插桩不得打爆帧预算（{extra:?}）: {stderr}"
+        );
+        assert!(
+            !stderr.contains("E1133"),
+            "不得出现晚分配预算超出（{extra:?}）: {stderr}"
+        );
+    }
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+}
+
+/// 序言的 poison/unpoison 插桩不得踩掉尚未落栈的入参寄存器（运行期判据）。
+///
+/// 缺陷形状：`__asan_poison_memory_region` / `__asan_unpoison_memory_region` 是真调用，
+/// 而参数落栈发生在函数体开头（比插桩晚）；不屏蔽 rdi/rsi/rdx/rcx/r8/r9 与 xmm0-7 的话，
+/// 被调方（libasan）一踩参数就变垃圾 —— 实测 ASan 下 `sqlite3_snprintf` 的指针参数成了
+/// `0x1`，第一个 `%s` 就 SEGV（整颗 SQLite amalgamation 因此根本进不到被测路径）。
+#[test]
+#[cfg(all(unix, not(target_os = "macos")))]
+fn asan_prologue_poison_preserves_incoming_args() {
+    let dir = std::env::temp_dir();
+    let sp = dir.join(format!("dcc-asan-args-{}.c", std::process::id()));
+    let exe = dir.join(format!("dcc-asan-args-{}", std::process::id()));
+    let source = "\
+#include <stdio.h>\n\
+#include <stdarg.h>\n\
+#include <string.h>\n\
+static int sink;\n\
+long fmt(char *out, int n, const char *tag, int a, int b, int c, ...) {\n\
+  char local[32];\n\
+  va_list ap;\n\
+  va_start(ap, c);\n\
+  int d = va_arg(ap, int);\n\
+  va_end(ap);\n\
+  snprintf(out, n, \"%s|%d,%d,%d,%d\", tag, a, b, c, d);\n\
+  memcpy(local, tag, strlen(tag) + 1);\n\
+  sink = local[0];\n\
+  return (long)strlen(out);\n\
+}\n\
+int main(void) {\n\
+  char buf[64];\n\
+  fmt(buf, sizeof buf, \"TAG\", 11, 22, 33, 44);\n\
+  printf(\"%s\\n\", buf);\n\
+  return strcmp(buf, \"TAG|11,22,33,44\") == 0 ? 0 : 1;\n\
+}\n";
+    fs::write(&sp, source).expect("write fixture");
+    let compile = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O0", "-fsanitize=address", "-c", "-o"])
+        .arg(dir.join(format!("dcc-asan-args-{}.o", std::process::id())))
+        .arg(&sp)
+        .output()
+        .expect("compile with asan");
+    assert!(
+        compile.status.success(),
+        "ASan 编译失败: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let link = Command::new("gcc")
+        .args(["-fsanitize=address", "-no-pie", "-o"])
+        .arg(&exe)
+        .arg(dir.join(format!("dcc-asan-args-{}.o", std::process::id())))
+        .output()
+        .expect("link");
+    assert!(
+        link.status.success(),
+        "链接失败: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = Command::new(&exe).output().expect("run");
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(dir.join(format!("dcc-asan-args-{}.o", std::process::id())));
+    let _ = fs::remove_file(&exe);
+    assert!(
+        run.status.success(),
+        "ASan 构建里入参被插桩踩坏（崩溃或非零退出）: stdout={} stderr={}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "TAG|11,22,33,44",
+        "变参函数在 ASan 下必须拿到完整入参（stderr={}）",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+/// ASan 不得把**自己框架里的活内存**当成红区（运行期判据）。
+///
+/// 缺陷形状（两重）：旧插桩在序言里毒整个帧，再只解除 `var_map` 里具名变量的毒；
+/// 发射期才登记的晚分配带（`<agg_member_tmp>` 等）不在那里，于是终身带毒。改成
+/// 「只毒 `__kasan_rz_*` 条目」后又撞上第二重：那个条目的算术与排布推进不同步，
+/// 实测 `struct S s; char b[8];` 里红区条目正好落在 `b` 的槽上 —— libc 的 `memcpy`
+/// 正常写入被报 `use-after-poison`（同一源码 gcc 的 ASan 构建干净）。最终判据是几何
+/// 事实：与任何活区间相交的红区条目一律不毒。本用例钉住这个结论。
+#[test]
+#[cfg(all(unix, not(target_os = "macos")))]
+fn asan_stack_poison_does_not_flag_live_slots() {
+    let source = "\
+#include <stdio.h>
+#include <string.h>
+struct S { int n; struct { unsigned f, g; } fg; };
+int main(void){
+  struct S s; char b[8]; char *p = b;
+  s.fg.f = 7; s.fg.g = 8; s.n = 9;
+  /* 让未插桩的 libc 往帧内活对象里写：旧模型下这里报 use-after-poison */
+  memcpy(b, \"abcd\", 5);
+  memset(p + 5, 'z', 2);
+  if (s.fg.f != 7 || s.fg.g != 8 || s.n != 9) { return 1; }
+  if (b[0] != 'a' || b[3] != 'd' || b[5] != 'z' || b[6] != 'z' || b[7] != 0) { return 2; }
+  printf(\"ok\\n\");
+  return 0;
+}
+";
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-asan-live-{pid}.c"));
+    let op = dir.join(format!("dcc-asan-live-{pid}.o"));
+    let exe = dir.join(format!("dcc-asan-live-{pid}"));
+    fs::write(&sp, source).expect("write fixture");
+    let compile = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O0", "-g", "-fsanitize=address", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("compile");
+    assert!(
+        compile.status.success(),
+        "ASan 编译失败: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let link = Command::new("gcc")
+        .args(["-fsanitize=address", "-no-pie", "-o"])
+        .arg(&exe)
+        .arg(&op)
+        .output()
+        .expect("link");
+    assert!(
+        link.status.success(),
+        "链接失败: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = Command::new(&exe).output().expect("run");
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+    let _ = fs::remove_file(&exe);
+    assert!(
+        !stderr.contains("AddressSanitizer"),
+        "不得把自己的帧内活对象报成红区: {stderr}"
+    );
+    assert!(
+        run.status.success(),
+        "ASan 构建里局部存/取错值或崩溃: stderr={stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "ok",
+        "成员赋值与 memcpy/memset 必须写入同一位（stderr={stderr}）"
+    );
+}
+
+/// ASan 下「成员写入的目标地址」必须真算出来，不能取上一条指令的残值。
+///
+/// 现象（2026-10-27 重新收窄，三条独立最小复现都已量过）：`-O0 -fsanitize=address` 下
+/// 连 **一维静态数组的一层成员写** 都错 —— `static struct S A[4]; A[0].f = 10;`
+/// 运行期写空指针（写地址成了 0）；把 `f` 换成成员里的 `int n` 则不崩但**读回 4211512**
+/// （写飘到别处）。同一份源码 `-O0` 无插桩、`-O2 -fsanitize=address`、gcc 的 ASan 构建
+/// 全对；`static struct I g1; g1.fg.f = 10;`（非数组）也对 —— 所以触发条件是
+/// **「数组元素」作成员基座**，与循环/嵌套层数/是否聚合 RHS 无关（原先钉的
+/// `pi->fg = (probe(), po->fg)` 只是它的一个特例）。
+///
+/// 读数（`dcc -O0 -fsanitize=address -S` 对 `A[0].f = 10`）：插桩把基座 `A[0]` 包成
+/// `Comma{ __asan_load8(&A[0]), A[0] }`（**基座被当成一次 8 字节读**），随后写 `.f`
+/// 的那一步取基座地址时没有看穿这层 Comma，而是按**右值**约定取值：
+///   `lea A(%rip),%rax; movq (%rax),%rax; mov %rax,%rcx; movl %eax,(%rcx)`
+/// 无插桩的同一条是 `lea A(%rip),%rax; mov %rax,%rcx; movl %eax,(%rcx)`。即「该取
+/// 地址的地方取了值」——多出来的一次 `movq (%rax)` 就是错处。
+///
+/// 修它需要同时动三处（都已改）：
+///   1. `sanitizer.rs::instrument_store_target` —— 赋值目标的**顶层**访存是写，已由
+///      store 检查负责，不得再套一层 load 检查（gcc 对 `A[0].f = x` 只发一笔
+///      `__asan_store4(&A[0].f)`）；否则 store 检查的入参就成了 `AddrOf{Comma{…}}`。
+///   2. `dispatch.rs` 的 `Expr::AddrOf` 补兜底 —— 旧写法对认不出的形状**什么都不发**，
+///      `%rax` 里的残值直接被当成地址交给 `__asan_store4`（「静默不发音」比报错难查）。
+///   3. `mem/addr.rs::gen_lvalue_addr` 看穿 `Comma` —— 基座被包成逗号后，点成员取址
+///      会退回右值约定，凭空多一次 `movq (%rax)`。
+///
+/// 同形状的最小复现已缩到三行：`static struct S A[4]; A[0].f = 10;` 在
+/// `-O0 -fsanitize=address` 下写空指针。本用例（聚合 RHS 那一条）与它一起构成判据。
+#[test]
+#[cfg(all(unix, not(target_os = "macos")))]
+fn asan_aggregate_member_assign_store_addr() {
+    // 预期值：a[0].fg.f = 10，a[1].fg.g = 101，probe 被调用 2 次 ⇒ 10 + 101 + 2 = 113
+    let source = "\
+#include <stdio.h>
+struct Item { int n; struct { unsigned f; unsigned g; } fg; };
+struct List { int nExpr; struct Item a[4]; };
+static int probe_cnt;
+static int probe(void){ return ++probe_cnt; }
+static long dup(struct List *p, struct List *q){
+  struct Item *pi; const struct Item *po; int i;
+  q->nExpr = p->nExpr; pi = q->a; po = p->a;
+  /* RHS 是逗号表达式 ⇒ 发射点走「一般 RHS」那臂，必经 `<agg_member_tmp>` */
+  for(i=0;i<p->nExpr;i++,pi++,po++){ pi->n = po->n; pi->fg = (probe(), po->fg); }
+  return (long)(q->a[0].fg.f + q->a[1].fg.g + probe_cnt);
+}
+int main(void){
+  struct List A, B; int i; long got;
+  A.nExpr = 2;
+  for(i=0;i<2;i++){ A.a[i].n = i+1; A.a[i].fg.f = (unsigned)(10+i); A.a[i].fg.g = (unsigned)(100+i); }
+  got = dup(&A, &B);
+  printf(\"got=%ld\\n\", got);
+  return got == 113 ? 0 : 1;
+}
+";
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-asan-agg-{pid}.c"));
+    let op = dir.join(format!("dcc-asan-agg-{pid}.o"));
+    let exe = dir.join(format!("dcc-asan-agg-{pid}"));
+    fs::write(&sp, source).expect("write fixture");
+    let compile = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O0", "-g", "-fsanitize=address", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("compile");
+    assert!(
+        compile.status.success(),
+        "ASan 编译失败: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let link = Command::new("gcc")
+        .args(["-fsanitize=address", "-no-pie", "-o"])
+        .arg(&exe)
+        .arg(&op)
+        .output()
+        .expect("link");
+    assert!(link.status.success(), "链接失败: {}", String::from_utf8_lossy(&link.stderr));
+    let run = Command::new(&exe).output().expect("run");
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+    let _ = fs::remove_file(&exe);
+    assert!(
+        run.status.success() && !stderr.contains("AddressSanitizer"),
+        "聚合成员拷贝不得崩溃或报假阳性: stderr={stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "got=113",
+        "聚合成员拷贝必须搬对内容（stderr={stderr}）"
+    );
+}
+
+/// 同一条缺陷的三行最小形状：「数组元素作成员基座」的标量写入。
+///
+/// 修前：`-O0 -fsanitize=address` 下 `A[0].f = 10` 把 10 写到残值地址（实测写空指针）；
+/// 去掉插桩、换 `-O2`、或把数组换成非数组对象都对，gcc 的 ASan 构建也对。
+#[test]
+#[cfg(all(unix, not(target_os = "macos")))]
+fn asan_array_element_member_store_addr() {
+    let source = "\
+struct S { unsigned f; unsigned g; };
+static struct S A[4];
+static struct S B;
+unsigned sink;
+int main(void){
+  A[0].f = 10u;
+  A[1].g = 20u;
+  B.f = 30u;
+  sink = A[0].f + A[1].g + B.f;
+  return sink == 60u ? 0 : 1;
+}
+";
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-asan-arrbase-{pid}.c"));
+    let op = dir.join(format!("dcc-asan-arrbase-{pid}.o"));
+    let exe = dir.join(format!("dcc-asan-arrbase-{pid}"));
+    fs::write(&sp, source).expect("write fixture");
+    let compile = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O0", "-g", "-fsanitize=address", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("compile");
+    assert!(
+        compile.status.success(),
+        "ASan 编译失败: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let link = Command::new("gcc")
+        .args(["-fsanitize=address", "-no-pie", "-o"])
+        .arg(&exe)
+        .arg(&op)
+        .output()
+        .expect("link");
+    assert!(
+        link.status.success(),
+        "链接失败: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = Command::new(&exe).output().expect("run");
+    let stderr = String::from_utf8_lossy(&run.stderr).to_string();
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+    let _ = fs::remove_file(&exe);
+    assert!(
+        run.status.success() && !stderr.contains("AddressSanitizer"),
+        "数组元素的成员写入不得崩溃或报假阳性: stderr={stderr}"
+    );
+}
+
+/// `dcc` 自己链接多输入时也必须透传 `-fsanitize=*`。
+///
+/// 旧缺口：单 .o 那条链接路径有 `sanitizer_flags` 参数，多文件那条（
+/// `link_objects_with_host_cc`）没有——两条各写一遍时漂了。于是
+/// `dcc -fsanitize=address a.o b.o -o exe` 不给宿主 cc 传 `-fsanitize=address`，
+/// 直接 `undefined reference to __asan_load8/__asan_store4`。本仓常态是「逐 TU 编译
+/// 后一次链接」，而现有 ASan 用例都用宿主 `gcc -fsanitize=address` 链接 ⇒ 正好盖住了
+/// 这条路径，所以判据必须走 dcc 自己。
+#[test]
+#[cfg(all(unix, not(target_os = "macos")))]
+fn dcc_link_forwards_sanitizer_flags_multi_input() {
+    let source = "\
+#include <stdio.h>
+struct L { int n; };
+static int sink;
+static void bump(struct L *p){ sink += p->n; }
+int main(void){ struct L a; a.n = 6; bump(&a); printf(\"%d\\n\", sink); return sink == 6 ? 0 : 1; }
+";
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-asan-linkfwd-{pid}.c"));
+    let op = dir.join(format!("dcc-asan-linkfwd-{pid}.o"));
+    let exe = dir.join(format!("dcc-asan-linkfwd-{pid}"));
+    fs::write(&sp, source).expect("write fixture");
+    let compile = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O0", "-g", "-fsanitize=address", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("compile");
+    assert!(
+        compile.status.success(),
+        "ASan 编译失败: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    // 关键一步：用 **dcc 自己**把 .o 链成可执行（多输入路径）
+    let link = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-fsanitize=address", "-o"])
+        .arg(&exe)
+        .arg(&op)
+        .output()
+        .expect("link");
+    let link_err = String::from_utf8_lossy(&link.stderr).to_string();
+    assert!(
+        link.status.success(),
+        "dcc 链接 ASan 产物失败（sanitize 标志没透传给宿主 cc？）: {link_err}"
+    );
+    assert!(
+        !link_err.contains("undefined reference"),
+        "链接报 undefined reference，说明没链上 asan runtime: {link_err}"
+    );
+    let run = Command::new(&exe).output().expect("run");
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+    let _ = fs::remove_file(&exe);
+    assert!(
+        run.status.success(),
+        "ASan 产物运行失败: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "6");
+}

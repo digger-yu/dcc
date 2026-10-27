@@ -17,10 +17,10 @@
 use crate::ast::*;
 use crate::codegen::shared::asm_operand::Width;
 use crate::codegen::x86_64::codegen::JumpKind;
-use crate::float80;
 use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::opcode::{MemOperand, Operand, SimdWidth, X86_64Opcode, X87Op};
 use crate::codegen::x86_64::Codegen;
+use crate::float80;
 
 impl Codegen {
     // ════════════════════════════════════════════════════════════════════════════
@@ -547,14 +547,8 @@ impl Codegen {
                                                                // 现在 st(0) = l, st(1) = r
         self.emit_insn(&Insn::x87_fixed(0xDF, 0xF1)); // fcomip st(0), st(1) — 信令
         self.emit_x87_fstp_st0(); // 弹掉残留的右操作数 (不改 EFLAGS)
-        self.emit_insn(&Insn::setcc_reg(
-            crate::codegen::x86_64::opcode::CondCode::Eq,
-            0,
-        )); // sete al (ZF=1)
-        self.emit_insn(&Insn::setcc_reg(
-            crate::codegen::x86_64::opcode::CondCode::Np,
-            3,
-        )); // setnp bl (PF=0 ⇒ 非 NaN)
+        self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Eq, 0)); // sete al (ZF=1)
+        self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Np, 3)); // setnp bl (PF=0 ⇒ 非 NaN)
         self.emit_insn(&Insn::alu_rm_reg_reg(
             crate::codegen::x86_64::opcode::AluOp::And,
             crate::codegen::shared::asm_operand::Width::B8,
@@ -586,8 +580,8 @@ impl Codegen {
         // 固定 16 字节: 够装 tbyte, 且嵌套求值里 call 时 rsp 仍 16 字节对齐。
         self.emit_insn(&Insn::sub_rsp_imm(16)); // sub rsp, 16
         self.emit_x87_fstp_at(4, 0, &Type::LongDouble); // fstp tbyte [rsp]
-        // mov rax, [rsp] —— MovRm 的 dst=Reg / src=Mem 形态才是**载入**
-        // (mov_rm_mem 助手是 reg→mem 的存储, 用错会把 rax 写进槽里)。
+                                                        // mov rax, [rsp] —— MovRm 的 dst=Reg / src=Mem 形态才是**载入**
+                                                        // (mov_rm_mem 助手是 reg→mem 的存储, 用错会把 rax 写进槽里)。
         self.emit_insn(&Insn::new(
             crate::codegen::x86_64::opcode::X86_64Opcode::MovRm {
                 rip_relative: false,
@@ -644,7 +638,7 @@ impl Codegen {
                 self.emit_insn(&Insn::shift_reg_imm8_c1_b64(0b100, 9, 1)); // shl r9, 1
                 self.emit_insn(&Insn::alu_rm_reg_imm32_b64(7, 8, 0x7FFF)); // cmp r8, 0x7FFF
                 self.emit_insn(&Insn::setcc_reg(CC::Eq, 0)); // sete al (指数全 1)
-                // 小数非全 0 ⇔ (rax << 1) != 0 (左移一位丢掉整数位)
+                                                             // 小数非全 0 ⇔ (rax << 1) != 0 (左移一位丢掉整数位)
                 self.emit_insn(&Insn::test_rm_reg(W::B64, 9, 9)); // test r9, r9
                 if kind == 0 {
                     self.emit_insn(&Insn::setcc_reg(CC::Ne, 3)); // setne bl (有小数 ⇒ NaN)
@@ -704,21 +698,26 @@ impl Codegen {
         self.emit_insn(&Insn::sub_rsp_imm(48));
         // 先把 x 落盘，避免 fild/fistp 的栈式操作丢失它。
         self.emit_x87_fstp_at(4, 24, &Type::LongDouble); // fstp tbyte [rsp+24]; st0 弹空
-        // 写截断 CW 0x0F3F 到 [rsp+16]
+                                                         // 写截断 CW 0x0F3F 到 [rsp+16]
         self.mov_imm(0, 0x0F3F);
         self.emit_insn(&Insn::new(
             X86_64Opcode::MovRm {
                 rip_relative: false,
                 width: Width::B16,
-                dst: Operand::Mem(MemOperand { disp: 16, base: Some(4), index: None, seg: None }),
+                dst: Operand::Mem(MemOperand {
+                    disp: 16,
+                    base: Some(4),
+                    index: None,
+                    seg: None,
+                }),
                 src: Operand::Reg(0, Width::B16),
             },
             &[],
         )); // mov [rsp+16], ax
-        // 保存原 CW，并切到截断模式
+            // 保存原 CW，并切到截断模式
         self.emit_insn(&Insn::fcw_mem(true, 4, 0)); // fnstcw [rsp]
         self.emit_insn(&Insn::fcw_mem(false, 4, 16)); // fldcw [rsp+16]
-        // 第一次 fistp：x 截断到 [rsp+8]，并据符号位区分区间。
+                                                      // 第一次 fistp：x 截断到 [rsp+8]，并据符号位区分区间。
         self.emit_x87_fld_at(4, 24, &Type::LongDouble); // fld tbyte [rsp+24]  → st0=x
         self.emit_x87_mem_at(0xDF, 7, 4, 8, true); // fistp qword [rsp+8]       → st0 弹空
         self.emit_insn(&Insn::new(
@@ -726,13 +725,18 @@ impl Codegen {
                 rip_relative: false,
                 width: Width::B64,
                 dst: Operand::Reg(dst, Width::B64),
-                src: Operand::Mem(MemOperand { disp: 8, base: Some(4), index: None, seg: None }),
+                src: Operand::Mem(MemOperand {
+                    disp: 8,
+                    base: Some(4),
+                    index: None,
+                    seg: None,
+                }),
             },
             &[],
         )); // mov dst, [rsp+8]
         self.emit_insn(&Insn::test_rm_reg(Width::B64, dst, dst)); // test dst, dst
-        // 非非负 (SF=1，即 x >= 2^63) 时落入 .hi 做 2^63 补偿；
-        // 否则直接落到 .lo（dst 已是正确结果）。
+                                                                  // 非非负 (SF=1，即 x >= 2^63) 时落入 .hi 做 2^63 补偿；
+                                                                  // 否则直接落到 .lo（dst 已是正确结果）。
         self.jmp_rel32(&l_lo, JumpKind::Jns);
         // .hi: x >= 2^63
         self.label(&l_hi);
@@ -748,11 +752,16 @@ impl Codegen {
                 rip_relative: false,
                 width: Width::B64,
                 dst: Operand::Reg(dst, Width::B64),
-                src: Operand::Mem(MemOperand { disp: 8, base: Some(4), index: None, seg: None }),
+                src: Operand::Mem(MemOperand {
+                    disp: 8,
+                    base: Some(4),
+                    index: None,
+                    seg: None,
+                }),
             },
             &[],
         )); // mov dst, [rsp+8]
-        // 补偿 2^63：置 bit 63。
+            // 补偿 2^63：置 bit 63。
         let bts_modrm = 0xE8 | (dst & 7);
         let mut bts = vec![0x48u8]; // REX.W
         if dst >= 8 {
@@ -790,7 +799,12 @@ impl Codegen {
             X86_64Opcode::MovRm {
                 rip_relative: false,
                 width: Width::B16,
-                dst: Operand::Mem(MemOperand { disp: 16, base: Some(4), index: None, seg: None }),
+                dst: Operand::Mem(MemOperand {
+                    disp: 16,
+                    base: Some(4),
+                    index: None,
+                    seg: None,
+                }),
                 src: Operand::Reg(0, Width::B16),
             },
             &[],
@@ -805,7 +819,12 @@ impl Codegen {
                 rip_relative: false,
                 width: Width::B64,
                 dst: Operand::Reg(dst, Width::B64),
-                src: Operand::Mem(MemOperand { disp: 8, base: Some(4), index: None, seg: None }),
+                src: Operand::Mem(MemOperand {
+                    disp: 8,
+                    base: Some(4),
+                    index: None,
+                    seg: None,
+                }),
             },
             &[],
         )); // mov dst, [rsp+8]

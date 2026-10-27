@@ -105,8 +105,11 @@ impl FrameGuard {
         // 我们的帧槽，所以与本轮函数的局部名集求交，避免「文件里有个 `&g`」就把整条
         //  relaxation 关掉。
         let escaped = crate::ast_gvn::addr_escaped_names(body);
-        let escaped_local: HashSet<String> =
-            escaped.iter().filter(|n| locals.contains(*n)).cloned().collect();
+        let escaped_local: HashSet<String> = escaped
+            .iter()
+            .filter(|n| locals.contains(*n))
+            .cloned()
+            .collect();
         let g = FrameGuard {
             returns_twice: self_has_returns_twice(f),
             addr_escaped: !escaped_local.is_empty(),
@@ -179,7 +182,9 @@ pub struct JumpEdges {
 
 impl Default for JumpEdges {
     fn default() -> Self {
-        Self { counts: HashMap::new() }
+        Self {
+            counts: HashMap::new(),
+        }
     }
 }
 

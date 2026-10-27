@@ -237,10 +237,7 @@ pub fn run(cfg: Config) -> Result<(), Vec<Diagnostic>> {
     // (gcc `dcc a.c b.c -o prog` 行为)。必须放在 needs_host_cc_link 之前, 否则
     // 多源场景会被 needs_host_cc_link 的 inputs.len()!=1 分支漏成"只编第一个"。
     let is_object_like = |p: &std::path::PathBuf| {
-        matches!(
-            p.extension().and_then(|e| e.to_str()),
-            Some("o") | Some("a") | Some("obj")
-        )
+        matches!(p.extension().and_then(|e| e.to_str()), Some("o") | Some("a") | Some("obj"))
     };
     if cfg.inputs.len() > 1
         && !cfg.relocatable
@@ -3171,6 +3168,7 @@ fn run_with_host_link(mut cfg: Config) -> Result<(), Vec<Diagnostic>> {
             sysroot.as_deref(),
             verbose,
             &cfg.host_link_args,
+            &host_sanitizer_flags(&cfg),
         );
         if link_result.is_ok() {
             eprintln!("dcc: {}", final_output.display());
@@ -3525,10 +3523,8 @@ fn compile_and_link_multiple(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
     let mut tmp_guard = TmpObjCleanup(Vec::new());
     let mut objs: Vec<std::path::PathBuf> = Vec::with_capacity(cfg.inputs.len());
     for inp in &cfg.inputs {
-        let is_obj = matches!(
-            inp.extension().and_then(|e| e.to_str()),
-            Some("o") | Some("a") | Some("obj")
-        );
+        let is_obj =
+            matches!(inp.extension().and_then(|e| e.to_str()), Some("o") | Some("a") | Some("obj"));
         if is_obj {
             objs.push(inp.clone());
             continue;
@@ -3556,6 +3552,7 @@ fn compile_and_link_multiple(cfg: &Config) -> Result<(), Vec<Diagnostic>> {
         cfg.sysroot.as_deref(),
         cfg.verbose,
         &cfg.host_link_args,
+        &host_sanitizer_flags(cfg),
     )?;
     if cfg.verbose {
         eprintln!("dcc: {} (via host cc)", cfg.output.display());
@@ -3637,6 +3634,12 @@ fn link_with_host_cc(
 
 /// 多个 .o/.a 文件纯链接: 委托 host cc 完成链接.
 /// 与 link_with_host_cc 相同逻辑, 但接受多个输入文件.
+///
+/// `sanitizer_flags` 不能省：这一条路径以前没有这个参数（与单 .o 那条各写一遍
+/// 时漂了），于是 `dcc -fsanitize=address a.o b.o -o exe` 不给 host cc 透传
+/// `-fsanitize=address` ⇒ 直接 `undefined reference to __asan_load8/__asan_store4`
+/// （插桩产生的运行时调用根本没有库可解析）。多文件链接是本仓常态（逐 TU 编译
+/// 后一次链接），这个缺口会让「用 dcc 自己链一个 ASan 产物」这件事做不成。
 fn link_objects_with_host_cc(
     objects: &[std::path::PathBuf],
     output: &Path,
@@ -3645,6 +3648,7 @@ fn link_objects_with_host_cc(
     sysroot: Option<&Path>,
     verbose: bool,
     host_link_args: &[String],
+    sanitizer_flags: &[String],
 ) -> Result<(), Vec<Diagnostic>> {
     let (cc, cc_args) = host_cc_command();
     let mut cmd = Command::new(&cc);
@@ -3677,6 +3681,10 @@ fn link_objects_with_host_cc(
         if whole_archive_libs.contains(lib) {
             cmd.arg("-Wl,--no-whole-archive");
         }
+    }
+    // 与单 .o 那条同口径：插桩产生的 __asan_*/__tsan_*/__ubsan_* 引用必须有 runtime。
+    for sf in sanitizer_flags {
+        cmd.arg(sf);
     }
     if verbose {
         eprintln!("dcc: invoking {}: {:?}", cc, cmd);

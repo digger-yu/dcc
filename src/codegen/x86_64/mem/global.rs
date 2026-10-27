@@ -345,9 +345,7 @@ pub fn global_init_bytes(init: &Expr, sz: usize, is_float: bool, ty: &Type) -> O
                 // 分支给出的是**真 80-bit x87** 编码, 那是 long double 的
                 // 对象表示, 与 binary128 的字节布局完全不同。
                 if matches!(ty, Type::Float128) {
-                    return Some(
-                        crate::codegen::x86_64::Codegen::float128_data_bytes(f, sz),
-                    );
+                    return Some(crate::codegen::x86_64::Codegen::float128_data_bytes(f, sz));
                 }
                 // 目标不是 binary128: 常量先转换到目标精度 —— binary128 的
                 // 16 字节位型写进 long double 槽（x87 80-bit）会被读成垃圾

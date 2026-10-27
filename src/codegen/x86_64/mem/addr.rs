@@ -184,6 +184,17 @@ impl Codegen {
                 true
             },
             Expr::Cast { e: inner, .. } => self.gen_lvalue_addr(inner, dst),
+            // 逗号：插桩（ASan/UBSan）会把 lvalue 的**基座**包成
+            // `Comma{检查, 原表达式}`（见 `sanitizer.rs::instrument_expr` 的
+            // Index/Deref 臂）。取地址必须看穿这层逗号：左半是必须发生的副作用
+            // （只发生一次，且先于地址计算），右半才是要算地址的 lvalue。
+            // 不接这一臂就退回调用方的 `gen_expr` **右值**约定：8 字节的 `A[0]`
+            // 被当指针读出来再解引用，`-fsanitize=address` 下 `A[0].f = 10`
+            // 实测把 10 写到空指针（多出的正是 `movq (%rax),%rax`）。
+            Expr::Comma { l, r, .. } => {
+                self.gen_expr(l, Self::EVAL_BASE);
+                self.gen_lvalue_addr(r, dst)
+            },
             // 复合字面量的 rvalue 按约定就是「它在栈上那个槽的地址」（
             // `gen_expr_compound_lit` 以 `lea dst, [r13 + base]` 收尾），所以取址直接
             // 走 `gen_expr`。以前本函数没有这一臂，`gen_lvalue_addr(Member{CompoundLit})`

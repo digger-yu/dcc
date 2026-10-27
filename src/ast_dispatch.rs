@@ -217,7 +217,10 @@ fn walk_stmt(st: &Stmt, out: &mut DispatchFacts) {
             walk_expr(object, out);
             walk_expr(selector, out);
         },
-        Stmt::Goto { .. } | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Fallthrough { .. } => {},
+        Stmt::Goto { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::Fallthrough { .. } => {},
     }
 }
 
@@ -295,7 +298,9 @@ fn walk_expr(e: &Expr, out: &mut DispatchFacts) {
         },
         Expr::VaArg { ap, .. } => walk_expr(ap, out),
         Expr::VaArgPack { .. } => {},
-        Expr::AsmExpr { outputs, inputs, .. } => {
+        Expr::AsmExpr {
+            outputs, inputs, ..
+        } => {
             out.any_asm = true;
             for x in outputs.iter().chain(inputs.iter()) {
                 walk_expr(x, out);
@@ -406,18 +411,14 @@ mod tests {
             got
         };
         assert_eq!(
-            f(
-                "void *a[4]; void *b[4];\n\
-                 long f(long i){ goto *a[i]; goto *a[i]; goto *b[i]; return i; }"
-            )
+            f("void *a[4]; void *b[4];\n\
+                 long f(long i){ goto *a[i]; goto *a[i]; goto *b[i]; return i; }")
             .as_deref(),
             Some("a")
         );
         assert_eq!(
-            f(
-                "void *a[4]; void *b[4];\n\
-                 long f(long i){ goto *a[i]; goto *b[i]; return i; }"
-            )
+            f("void *a[4]; void *b[4];\n\
+                 long f(long i){ goto *a[i]; goto *b[i]; return i; }")
             .as_deref(),
             Some("a")
         );

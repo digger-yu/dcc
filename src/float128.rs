@@ -22,14 +22,7 @@
 ///
 /// 返回该格式的**原始位模式**（不含字节序转换）。舍入规则为「最近偶数」
 /// （round-to-nearest, ties-to-even），与 C 默认浮点舍入一致。
-fn round_to_float(
-    sign: u8,
-    h: u128,
-    e: i64,
-    frac_bits: u32,
-    bias: i64,
-    exp_max: i64,
-) -> u128 {
+fn round_to_float(sign: u8, h: u128, e: i64, frac_bits: u32, bias: i64, exp_max: i64) -> u128 {
     if h == 0 {
         // ±0：符号位保留，其余全 0。
         return (sign as u128) << 127;
@@ -219,7 +212,11 @@ pub fn from_hex(s: &str) -> Option<[u8; 16]> {
         h |= 1;
     }
 
-    let frac = if frac_digits == -1 { 0 } else { total_digits - frac_digits };
+    let frac = if frac_digits == -1 {
+        0
+    } else {
+        total_digits - frac_digits
+    };
     // 精确值 = H × 2^(exp - 4·frac)。
     let e = exp - 4 * frac;
     let v = round_to_float(sign, h, e, 112, 16383, 16383);
@@ -424,7 +421,11 @@ pub fn to_f80(b: &[u8; 16]) -> crate::float80::Bits {
     let biased = ((w >> 63) & 0x7FFF) as u16;
     let frac = (w & ((1u128 << 63) - 1)) as u64;
     // x87 的整数位是**显式**的：正规数置 1，次正规数（biased == 0）保持 0。
-    let sig = if biased == 0 { frac } else { frac | 0x8000_0000_0000_0000 };
+    let sig = if biased == 0 {
+        frac
+    } else {
+        frac | 0x8000_0000_0000_0000
+    };
     out[0..8].copy_from_slice(&sig.to_le_bytes());
     out[8] = (biased & 0xFF) as u8;
     // x87 指数域是 15 位：低 8 位在 byte8，高 7 位在 byte9 的低 7 位
@@ -523,5 +524,3 @@ mod tests {
         assert_eq!(to_f64(&b), 3.5);
     }
 }
-
-

@@ -360,6 +360,14 @@ impl Codegen {
         // frame_bytes 补上同样的偏移, sub 后 rsp 恢复 16 对齐。
         let misalign = self.stack_shift.rem_euclid(16) as usize;
         let frame_bytes = ((raw_bytes + frame_align - 1) & !(frame_align - 1)) + misalign;
+        // 本次调用的出参区在参数求值期间是**活着的**: 那段时间 rsp 已经下推了
+        // frame_bytes, 若不对内层调用交代, 内层会按陈旧的 stack_shift 再补偿
+        // 一次 (oserror-1.4.1: 外层 unixLogError 的实参里又调 sqlite3CantopenError,
+        // 内层 sub 多补 8 → call 处 rsp ≡ 8 → libtcl 的 movaps 崩)。
+        // 静态路径的 sub/add 由 `emit_insn` 记账, 这里只需记住恢复点;
+        // 动态对齐路径 (`and rsp, mask` + `mov rsp, r10`) rsp 的临时值无法
+        // 静态表示, 一律在结尾按恢复点写回。
+        let shift_before = self.stack_shift;
         // 当 frame_align > 16 (例如 vector_size(32) 的 32 字节对齐参数),
         // 静态 sub frame_bytes 只能保证 rsp 16 对齐. 必须动态对齐 rsp 到
         // frame_align, 否则 force_mem 槽位的 32 对齐保证被破坏.
@@ -458,8 +466,7 @@ impl Codegen {
                         break;
                     }
                     loc_iter.next();
-                    let src_off =
-                        self.variadic_reg_save_offset + 48 + src_fp_idx as i64 * 16;
+                    let src_off = self.variadic_reg_save_offset + 48 + src_fp_idx as i64 * 16;
                     self.load_xmm128_stack(0, src_off);
                     self.emit_xmm_store_rsp(0xF2, 0, stage);
                     staged.push((loc, stage, false, false));
@@ -1234,7 +1241,10 @@ impl Codegen {
             .copied()
             == Some(false);
         if fp != 0 || !callee_known_not_variadic {
-            self.emit_insn(&Insn::raw_with_gas(&[0xB0, fp as u8], &format!("mov ${}, %al", fp as u8)));
+            self.emit_insn(&Insn::raw_with_gas(
+                &[0xB0, fp as u8],
+                &format!("mov ${}, %al", fp as u8),
+            ));
         }
         if let Some(name) = direct {
             // 解析嵌套函数引用 (沿作用域链上溯: 支持从后代嵌套函数
@@ -1284,6 +1294,9 @@ impl Codegen {
         } else {
             self.emit_add_rsp(frame_bytes as i64);
         }
+        // 出参区已整体退掉: 无论走哪条路径, 都回到下推之前那个偏移。
+        // (静态路径的 add 已让计数回零, 此处写回是幂等的; 动态路径必须靠它。)
+        self.stack_shift = shift_before;
     }
 
     /// 「缓冲地址已在 rcx」的聚合按值实参装载: 逐 8 字节块从 `[rcx + chunk*8]`

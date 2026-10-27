@@ -314,10 +314,14 @@ impl Codegen {
             // 被写，满足死写回删对 `MovImm` 的唯一要求（「完整写了 dst」）。不补这一臂
             // 就是方案 §10 点名的那个坑：回删对这一形变瞎，体量省下来的又长回去。
             if bytes.len() == 5 && (0xB8..=0xBF).contains(&bytes[0]) {
-                return PeepKind::MovImm { dst: bytes[0] - 0xB8 };
+                return PeepKind::MovImm {
+                    dst: bytes[0] - 0xB8,
+                };
             }
             if bytes.len() == 6 && bytes[0] == 0x41 && (0xB8..=0xBF).contains(&bytes[1]) {
-                return PeepKind::MovImm { dst: 8 + (bytes[1] - 0xB8) };
+                return PeepKind::MovImm {
+                    dst: 8 + (bytes[1] - 0xB8),
+                };
             }
             // 32 位 reg←reg：0x89 /r（r/m ← reg）与 0x8B /r（reg ← r/m），
             // 无 REX.W。两者的 REX.R/REX.B 各自对应 ModRM.reg / ModRM.r/m。
@@ -458,7 +462,8 @@ impl Codegen {
         self.emit_bytes(b);
         // 裸字节（序言/epilogue/内联 asm/nop 填充）不是「上一条逻辑指令」，也不是
         // 块内优化的可跟踪形态：跨过它的相邻关系与等价事实一概不再成立。
-        self.block_state.reset_at(crate::codegen::x86_64::blockopt::stat::site("reset_bare_emit"));
+        self.block_state
+            .reset_at(crate::codegen::x86_64::blockopt::stat::site("reset_bare_emit"));
     }
 
     /// 字节追写的**唯一**落点（`emit` 与 `emit_insn` 共用）。
@@ -494,7 +499,8 @@ impl Codegen {
         // 位图必须和 `emit_insn` 那侧取的是同一个：两条臂（处置 / 记账）按不同位图
         // 走就是「削了一条又拿旧写集记账」，产物与仪表会同时对不上。
         let bo_rules = crate::codegen::x86_64::blockopt::rules();
-        self.block_state.observe_at_call(insn, &self.volatile_frames, cp, bo_rules);
+        self.block_state
+            .observe_at_call(insn, &self.volatile_frames, cp, bo_rules);
     }
 
     /// 发射一条指令并返回它**实际**的起始 pc；整条被削掉（没发字节）时返回 `None`。
@@ -504,7 +510,10 @@ impl Codegen {
     /// 补丁就落到上一条指令中间（实测是 percpu/seg 两个夹具的 SIGILL）。
     /// 本后端所有「RIP 相对 disp32 事后修补」的登记点都必须走这里，否则“能插入”这个
     /// 前提会让那些位置全都变假。
-    pub(crate) fn emit_insn_head(&mut self, insn: &crate::codegen::x86_64::insn::Insn) -> Option<u64> {
+    pub(crate) fn emit_insn_head(
+        &mut self,
+        insn: &crate::codegen::x86_64::insn::Insn,
+    ) -> Option<u64> {
         let before = self.code.len();
         let handled = self.emit_insn(insn);
         if !handled || self.code.len() == before {
@@ -697,9 +706,7 @@ impl Codegen {
                         {
                             Some(pc)
                         },
-                        PeepKind::LoadSlot { dst, .. } | PeepKind::MovImm { dst }
-                            if dst == d =>
-                        {
+                        PeepKind::LoadSlot { dst, .. } | PeepKind::MovImm { dst } if dst == d => {
                             Some(pc)
                         },
                         _ => None,
@@ -781,6 +788,17 @@ impl Codegen {
                         ..
                     } => self.stack_shift -= 8,
                     _ => {},
+                }
+                // 出参区 / 临时区的 `sub rsp, imm` 与 `add rsp, imm` 属于同一本账:
+                // `stack_shift` 记的是「相对 16 对齐基线的偏移」, 不只是 push/pop。
+                // 漏记这一族会让**嵌套调用**重复补偿: 外层调用已 `sub frame_bytes`
+                // 把 rsp 送回对齐, 内层调用却还按陈旧的 shift=8 再补 8, call 处
+                // rsp 就差 8 字节。testfixture 的 oserror-1.4.1 崩溃正是它:
+                // `unixLogError(SQLITE_CANTOPEN_BKPT, ...)` 的实参求值里又调了
+                // sqlite3CantopenError, libtcl 的 movaps 落地即 #GP。
+                // 构造子 (`Insn::sub_rsp_imm`/`add_rsp_imm`) 走裸字节, 按编码识别。
+                if let Some(delta) = Self::rsp_imm_delta(&bytes) {
+                    self.stack_shift += delta;
                 }
                 // P9 fallback 清零: gas_text 为 None 时, 现场用 op.render() 兜底填充.
                 // 这样 -S 渲染器 100% 走 record 直出, 不再需要 disasm_one 反推.
@@ -2037,6 +2055,23 @@ impl Codegen {
     // RSP manipulation
     // ========================================================================
 
+    /// `sub rsp, imm` / `add rsp, imm` 对 rsp 的**有符号下推量**（正 = rsp 变小）。
+    ///
+    /// 这一族在本后端全部走裸字节构造子（`Insn::sub_rsp_imm`/`add_rsp_imm`
+    /// 及其 `_gas` 变体、`emit_sub_rsp`/`emit_add_rsp`），没有类型化 opcode 可
+    /// match，所以按最终编码识别 —— `48 83 EC ib` / `48 81 EC id`（sub）与
+    /// `48 83 C4 ib` / `48 81 C4 id`（add），这四种字节序列只可能是对 rsp 的
+    /// 立即数加减，不存在误判。`emit_insn` 用它把出参区一并记进 `stack_shift`。
+    fn rsp_imm_delta(bytes: &[u8]) -> Option<i64> {
+        match *bytes {
+            [0x48, 0x83, 0xEC, imm] => Some(-((imm as i8) as i64)),
+            [0x48, 0x81, 0xEC, a, b, c, d] => Some(-(i32::from_le_bytes([a, b, c, d]) as i64)),
+            [0x48, 0x83, 0xC4, imm] => Some((imm as i8) as i64),
+            [0x48, 0x81, 0xC4, a, b, c, d] => Some(i32::from_le_bytes([a, b, c, d]) as i64),
+            _ => None,
+        }
+    }
+
     pub fn emit_sub_rsp(&mut self, bytes: i64) {
         if bytes <= 0 {
             return;
@@ -2251,10 +2286,7 @@ impl Codegen {
         // 本检查把那个**静默错值**变成可见、可归因的失败（同一函数里已有窗口开着时不会误报）。
         // 延伸池默认关着 ⇒ `ext_home_saves` 为空 ⇒ 不进这条分支，今天的产物一字不变。
         // noreturn 调用点由 `call_label_noreturn` 走 `guard_ext_homes = false`（理由见彼处）。
-        if guard_ext_homes
-            && !self.ext_home_saves.is_empty()
-            && self.home_overrides.is_empty()
-        {
+        if guard_ext_homes && !self.ext_home_saves.is_empty() && self.home_overrides.is_empty() {
             self.report_internal_bug(
                 "E1136",
                 format!(
@@ -2307,6 +2339,35 @@ impl Codegen {
 
     pub fn is_global_var(&self, name: &str) -> bool {
         self.is_global_object(name)
+    }
+
+    /// 登记一个「本 TU 只有声明、定义在别处」的外部对象：不分配存储，条目记成
+    /// `SHN_UNDEF`，引用走全局符号，由链接器解析。
+    ///
+    /// 两类声明共用这一份口径：文件作用域的 `extern int x;`，以及**块作用域**的
+    /// `extern int x;`（C11 6.2.2p4/6.7p2-3：块内 extern 声明指明外层全局对象，
+    /// 链接是 external，本块并不创建对象）。
+    ///
+    /// 已有定义（非 UNDEF 条目）时不覆盖：`int x = 1; extern int x;` 是合法重声明，
+    /// 纯声明不得把已分配好的存储降级成未定义引用。
+    pub fn register_extern_object(&mut self, name: &str, ty: &Type) {
+        if let Some(g) = self.globals_raw.get(name) {
+            if g.section != crate::codegen::shared::elf::SHN_UNDEF {
+                return;
+            }
+        }
+        self.globals_raw.insert(
+            name.to_string(),
+            crate::codegen::x86_64::GlobalVar {
+                offset: 0,
+                size: ty.size().max(1),
+                ty: ty.clone(),
+                init: None,
+                section: crate::codegen::shared::elf::SHN_UNDEF,
+                is_tls: false,
+                in_data_section: false,
+            },
+        );
     }
 
     /// 查「这个全局符号属于哪个段」→ x86 legacy 段前缀字节（`%fs`=0x64 / `%gs`=0x65）。
@@ -2568,7 +2629,8 @@ impl Codegen {
             return;
         }
         for i in 0..slots.max(1) {
-            self.escaped_frames.insert(off.saturating_add(i.saturating_mul(8)));
+            self.escaped_frames
+                .insert(off.saturating_add(i.saturating_mul(8)));
         }
     }
 
@@ -3251,10 +3313,96 @@ impl Codegen {
     // Resolvers and helpers
     // ========================================================================
 
+    /// 进入一个块作用域: 本块内的 static 绑定在出块时按 LIFO 还原。
+    pub fn push_static_scope(&mut self) {
+        self.static_scope_undo.push(Vec::new());
+    }
+
+    /// 离开一个块作用域: 还原本块内建立/覆盖的 static 绑定。
+    pub fn pop_static_scope(&mut self) {
+        let Some(frame) = self.static_scope_undo.pop() else {
+            return;
+        };
+        for (func, name, old) in frame.into_iter().rev() {
+            let entry = self.static_visible.entry(func).or_default();
+            match old {
+                Some(m) => {
+                    entry.insert(name, m);
+                },
+                None => {
+                    entry.remove(&name);
+                },
+            }
+        }
+    }
+
+    /// 在声明处把源码名绑到**这一次声明**的 mangled 名上。
+    ///
+    /// 定位靠**声明位置 + 源码名**（见 `StaticLocalMap::resolve_at`）：同名 static 在同一
+    /// 函数里可以有多份（分处不同块），按名字查只能猜；而不同名却同位置的多份（展开器
+    /// 复制函数体、合成跳表标识符造出来的形状）只按位置查会串到别人的 mangled 名上。
+    /// 查不到就什么也不做 —— 此时 `resolve_static_name` 逸到「本函数唯一」那条路上，
+    /// 与旧行为等价。
+    pub fn bind_static_local(&mut self, v: &crate::ast::VarDecl) {
+        if !v.is_static {
+            return;
+        }
+        let func = self.current_func_name.clone();
+        let Some(info) = self.static_local_map.resolve_at(
+            &func,
+            &v.name.name,
+            v.name.span.line,
+            v.name.span.col,
+        ) else {
+            return;
+        };
+        let mangled = info.mangled_name.clone();
+        let name = v.name.name.clone();
+        let old = self
+            .static_visible
+            .entry(func.clone())
+            .or_default()
+            .insert(name.clone(), mangled);
+        if let Some(frame) = self.static_scope_undo.last_mut() {
+            frame.push((func, name, old));
+        }
+    }
+
+    /// 源码名 → 当前作用域下可见的 mangled 名 (不是 static local 返 `None`)。
+    ///
+    /// 优先读**声明点绑定** (`static_visible`)。没绑过时只能在「本函数里
+    /// 这个名字只有一份 static」的前提下按名字解析 —— 同名多份时宁可返
+    /// `None` 也不能猜: 猜错就是拿 A 的地址当 B (trace3.test 的错就是这样
+    /// 把 trace_v2 的类型表解析成 transaction 那张)。
+    pub fn resolve_static_name<'a>(&'a self, name: &'a str) -> Option<&'a str> {
+        if let Some(m) = self
+            .static_visible
+            .get(&self.current_func_name)
+            .and_then(|m| m.get(name))
+        {
+            return Some(m.as_str());
+        }
+        if self
+            .static_local_map
+            .count_by_name(&self.current_func_name, name)
+            != 1
+        {
+            return None;
+        }
+        self.static_local_map.resolve(&self.current_func_name, name)
+    }
+
     pub fn resolve_global_key<'a>(&'a self, name: &'a str) -> &'a str {
-        self.static_local_map
-            .resolve(&self.current_func_name, name)
-            .unwrap_or(name)
+        self.resolve_static_name(name).unwrap_or(name)
+    }
+
+    /// 报障闸门 `DCC_DUMP_JT=1`（跳表基址判定的两侧名字）。**只读一次 env**：本判定
+    /// 在每一次全局变址装载上都会被问，直接 `env::var` 就是把它变成
+    /// getenv 热路径（也会污染配对计时）。与 `blockopt::level()` / `inline_walk_enabled()`
+    /// 同一纪律。
+    pub(crate) fn dump_jt_enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var("DCC_DUMP_JT").is_ok())
     }
 
     pub fn resolve_asm_label<'a>(&'a self, c_name: &'a str) -> &'a str {
@@ -4586,9 +4734,7 @@ mod tests {
     /// 立（实测 `100000000000UL + (unsigned)v` 四档错值）。
     fn movsxd_from_r13_slot(sign: bool, dst: u8) -> Insn {
         use crate::codegen::shared::asm_operand::Width;
-        use crate::codegen::x86_64::opcode::{
-            MemOperand, Operand as O, X86_64Opcode as Op,
-        };
+        use crate::codegen::x86_64::opcode::{MemOperand, Operand as O, X86_64Opcode as Op};
         Insn::new(
             Op::MovExt {
                 rip_relative: false,
@@ -4596,7 +4742,12 @@ mod tests {
                 from: Width::B32,
                 to: Width::B64,
                 dst: O::Reg(dst, Width::B64),
-                src: O::Mem(MemOperand { disp: -64, base: Some(13), index: None, seg: None }),
+                src: O::Mem(MemOperand {
+                    disp: -64,
+                    base: Some(13),
+                    index: None,
+                    seg: None,
+                }),
             },
             &[],
         )
@@ -4605,15 +4756,18 @@ mod tests {
     /// `mov dst32, [r13-64]`：目的整字被写、高 32 位自动为零的那条装载。
     fn mov32_from_r13_slot(dst: u8) -> Insn {
         use crate::codegen::shared::asm_operand::Width;
-        use crate::codegen::x86_64::opcode::{
-            MemOperand, Operand as O, X86_64Opcode as Op,
-        };
+        use crate::codegen::x86_64::opcode::{MemOperand, Operand as O, X86_64Opcode as Op};
         Insn::new(
             Op::MovRm {
                 rip_relative: false,
                 width: Width::B32,
                 dst: O::Reg(dst, Width::B32),
-                src: O::Mem(MemOperand { disp: -64, base: Some(13), index: None, seg: None }),
+                src: O::Mem(MemOperand {
+                    disp: -64,
+                    base: Some(13),
+                    index: None,
+                    seg: None,
+                }),
             },
             &[],
         )
@@ -4675,11 +4829,7 @@ mod tests {
             cg.code
         };
         assert_eq!(one(0, 5), vec![0xB8, 0x05, 0x00, 0x00, 0x00], "rax: 5 字节 B8 id");
-        assert_eq!(
-            one(8, 1),
-            vec![0x41, 0xB8, 0x01, 0x00, 0x00, 0x00],
-            "r8: 带 REX.B 的 6 字节"
-        );
+        assert_eq!(one(8, 1), vec![0x41, 0xB8, 0x01, 0x00, 0x00, 0x00], "r8: 带 REX.B 的 6 字节");
         assert_eq!(one(0, i32::MAX as i128).len(), 5, "i32::MAX 仍是短形（非负边界）");
         assert_eq!(
             one(0, -1),

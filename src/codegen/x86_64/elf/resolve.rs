@@ -282,8 +282,7 @@ impl Codegen {
         // 如 Lua `luaV_execute` 的 `disptab`）。槽里现在是 0 占位；标号偏移在
         // `self.labels`（相对代码段起点），加段基址即运行期绝对地址 —— 与
         // `label_addr_refs` 同一个换算，只是写在 data 而不是 code。
-        for (data_off, label_name, addend) in
-            std::mem::take(&mut self.pending_data_textlabel_rels)
+        for (data_off, label_name, addend) in std::mem::take(&mut self.pending_data_textlabel_rels)
         {
             let Some(&label_off) = self.labels.get(&label_name) else {
                 continue;

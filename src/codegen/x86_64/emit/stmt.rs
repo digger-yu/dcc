@@ -172,9 +172,20 @@ impl Codegen {
         let Some(site) = crate::ast_dispatch::indirect_table_site(expr) else {
             return false;
         };
+        // 报障用（`DCC_DUMP_JT=1`，只读一次 env）：两个常驻基址判定只在这一条路上发生，
+        // 把两边的名字都打出来才能看出「站点自己的表」与「常驻表」是否真的同一张
+        // （本轮就是靠这两行定到「不同名、同位置 ⇒ 绑错 mangled」这条链的）。
+        let resolved_site = self
+            .static_local_map
+            .resolve(&self.current_func_name, site.table);
+        if Self::dump_jt_enabled() {
+            eprintln!(
+                "JT| fn={} site_table={} resolved={:?} hoisted={:?}",
+                self.current_func_name, site.table, resolved_site, sym
+            );
+        }
         // 站点读的那张表必须就是被常驻的那一张（源码名 → mangled 同一入口）。
-        if self.static_local_map.resolve(&self.current_func_name, site.table) != Some(sym.as_str())
-        {
+        if resolved_site != Some(sym.as_str()) {
             return false;
         }
         // 段限定前缀只由原路那侧处理（`emit_load_global_indexed`），这里不抢。
@@ -197,7 +208,10 @@ impl Codegen {
         let (stride, idx) = match (desc.base, desc.offset) {
             (
                 AddressBase::GlobalSymbolAddr { symbol_key },
-                ByteOffset::Runtime { mut terms, addend: 0 },
+                ByteOffset::Runtime {
+                    mut terms,
+                    addend: 0,
+                },
             ) => {
                 if symbol_key != sym || terms.len() != 1 {
                     return false;
@@ -1043,14 +1057,15 @@ impl Codegen {
                         self.gen_cond_jump_to(cond, &le, true);
                         // `lend` 就在原地：热路 fall-through 到它，冷块从函数尾跳回它。
                         self.label(&lend);
-                        self.cold_arms.push(crate::codegen::x86_64::codegen::ColdArm {
-                            entry: le,
-                            body: (**then_).clone(),
-                            join: Some(lend),
-                            loop_continue: self.loop_continue.clone(),
-                            loop_break: self.loop_break.clone(),
-                            break_targets: self.break_targets.clone(),
-                        });
+                        self.cold_arms
+                            .push(crate::codegen::x86_64::codegen::ColdArm {
+                                entry: le,
+                                body: (**then_).clone(),
+                                join: Some(lend),
+                                loop_continue: self.loop_continue.clone(),
+                                loop_break: self.loop_break.clone(),
+                                break_targets: self.break_targets.clone(),
+                            });
                     } else {
                         self.gen_cond_jump_to(cond, &le, false);
                         self.gen_stmt(then_);
@@ -1597,6 +1612,9 @@ impl Codegen {
     }
 
     pub fn gen_block_items(&mut self, items: &[BlockItem]) {
+        // static local 的可见性也是块作用域的: 声明处绑定、出块还原。
+        // 不还原就是「内层同名 static 胜出后一直霸着外层引用」(与 var_map 同构)。
+        self.push_static_scope();
         for it in items {
             // 每个 block-item 从当前水位开始, 结束时回收其新增槽位
             // (与 max_sret_bytes 静态扫描的 item 边界一一对应)。
@@ -1604,6 +1622,7 @@ impl Codegen {
             self.gen_block_item(it);
             self.restore_sret_watermark(mark);
         }
+        self.pop_static_scope();
     }
 
     /// 把记下的冷块发到当前位置。调用点必须是**函数尾声之后、`func_end` 之前**：
@@ -1702,6 +1721,27 @@ impl Codegen {
         }
     }
 
+    /// `char arr[N] = "literal"`：把字面量的**内容**逐字节写进数组，余下零填充。
+    ///
+    /// 不能走 `gen_aggregate_assign`：那条路把 `Expr::String` 求值成一个地址
+    /// （.rodata 里的指针值），再按聚合体整体搬运，于是数组里装的是**指针的字节**
+    /// 而不是字符串——`zipfileGetMode` 就是这么把 `-rw-r--r--` 读成 `@` 的。
+    pub(crate) fn gen_char_array_str_init(&mut self, name: &str, ty: &Type, data: &[u8]) {
+        let arr_size = ty.size();
+        let off = self.var_offset(name);
+        let copy_len = data.len().min(arr_size);
+        // 复制字符串字节到栈上数组
+        for (i, &byte) in data[..copy_len].iter().enumerate() {
+            self.mov_imm(0, byte as i128);
+            self.emit_store(0, off + i as i64, 1);
+        }
+        // 零填充剩余元素
+        for i in copy_len..arr_size {
+            self.mov_imm(0, 0i128);
+            self.emit_store(0, off + i as i64, 1);
+        }
+    }
+
     fn gen_block_item(&mut self, it: &BlockItem) {
         if let BlockItem::Decl(Decl::Var(v)) = it {
             self.note_src_line(v.span.line);
@@ -1709,6 +1749,9 @@ impl Codegen {
         match it {
             BlockItem::Stmt(s) => self.gen_stmt(s),
             BlockItem::Decl(Decl::Var(v)) => {
+                // 先把名字绑到**这一份** static 上 (若有), 再走下面的早返。
+                // 绑在早返之后就是死代码: 纯静态初始化的 static 只走这一个点。
+                self.bind_static_local(v);
                 // extern 声明不分配栈槽, 仅作为全局符号引用标记
                 if v.is_extern && v.init.is_none() {
                     return;
@@ -1777,6 +1820,16 @@ impl Codegen {
                 } else if let Some(init) = &v.init {
                     if let Expr::InitList { inits, .. } = init {
                         self.gen_init_list(&v.name.name, &v.ty, inits);
+                    } else if let Expr::String { data: str_data, .. } = init {
+                        // 字符数组用字符串字面量初始化 (char s[N] = "str";) 必须复制
+                        // **内容**；指针初始化 (char *p = "str") 仍走下面的值路径。
+                        if matches!(&v.ty, Type::Array(_, _)) {
+                            let (name, ty) = (v.name.name.clone(), v.ty.clone());
+                            self.gen_char_array_str_init(&name, &ty, str_data);
+                        } else {
+                            self.gen_expr(init, Self::EVAL_BASE);
+                            self.mov_to_stack(0, &v.name.name);
+                        }
                     } else {
                         let is_agg = matches!(
                             &v.ty,

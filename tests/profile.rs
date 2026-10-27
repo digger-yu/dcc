@@ -22,6 +22,7 @@ mod harness;
 
 // 别名保留 profile 原有调用点写法，避免改动任何测试正文与断言。
 use harness::dcc_cmd as dcc;
+use harness::discard_out;
 use harness::fixtures_dir as fixtures;
 
 fn profile_src() -> std::path::PathBuf {
@@ -51,11 +52,18 @@ fn cli_profile_generate_is_accepted() {
 fn cli_profile_use_missing_path_rejects() {
     // 必须以 -fprofile-use 单独结尾, 不带后续 arg, 才能命中错误路径
     // (如果后面跟 .c 文件, 当前 cli 会把它当 path 吞下, 这与 GCC 行为一致)
+    let out_path = discard_out("pgo-use");
     let out = dcc()
-        .args(["-std=gnu23", "-c", "-o", "/dev/null", "-fprofile-use"])
+        .args(["-std=gnu23", "-c", "-o"])
+        .arg(&out_path)
+        .arg("-fprofile-use")
         .output()
         .expect("运行 dcc");
     assert!(!out.status.success(), "缺路径时应失败");
+    assert!(
+        !out_path.exists(),
+        "被拒的命令行不得留下产物（留下就说明写盘发生在参数校验之前）"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("fprofile-use") || stderr.contains("profile data path"),
@@ -298,11 +306,15 @@ fn cli_autofdo_binary_profile_accepted() {
 /// AutoFDO 缺失路径应报错.
 #[test]
 fn cli_autofdo_missing_path_rejects() {
+    let out_path = discard_out("autofdo");
     let out = dcc()
-        .args(["-std=gnu23", "-c", "-o", "/dev/null", "-fauto-profile"])
+        .args(["-std=gnu23", "-c", "-o"])
+        .arg(&out_path)
+        .arg("-fauto-profile")
         .output()
         .expect("运行 dcc");
     assert!(!out.status.success(), "缺路径时应失败");
+    assert!(!out_path.exists(), "被拒的命令行不得留下产物");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("fauto-profile") || stderr.contains("missing file"),
@@ -337,11 +349,15 @@ fn cli_lbr_profile_text_accepted() {
 /// LBR 缺失路径应报错.
 #[test]
 fn cli_lbr_profile_missing_path_rejects() {
+    let out_path = discard_out("lbr-missing");
     let out = dcc()
-        .args(["-std=gnu23", "-c", "-o", "/dev/null", "-flbr-profile"])
+        .args(["-std=gnu23", "-c", "-o"])
+        .arg(&out_path)
+        .arg("-flbr-profile")
         .output()
         .expect("运行 dcc");
     assert!(!out.status.success(), "缺路径时应失败");
+    assert!(!out_path.exists(), "被拒的命令行不得留下产物");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("flbr-profile") || stderr.contains("missing file"),
@@ -386,17 +402,15 @@ fn cli_memprof_use_binary_accepted() {
 /// MemProf 缺失路径应报错.
 #[test]
 fn cli_memprof_use_missing_path_rejects() {
+    let out_path = discard_out("memprof");
     let out = dcc()
-        .args([
-            "-std=gnu23",
-            "-c",
-            "-o",
-            "/dev/null",
-            "-fmemory-profile-use",
-        ])
+        .args(["-std=gnu23", "-c", "-o"])
+        .arg(&out_path)
+        .arg("-fmemory-profile-use")
         .output()
         .expect("运行 dcc");
     assert!(!out.status.success(), "缺路径时应失败");
+    assert!(!out_path.exists(), "被拒的命令行不得留下产物");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("memory-profile-use") || stderr.contains("missing file"),
@@ -1072,11 +1086,15 @@ fn offload_runtime_kernel_not_found_returns_correct_error() {
 #[test]
 fn cli_record_profile_rejects_missing_path() {
     // -frecord-profile 必须带 dir; 无后续 arg 才报错
+    let out_path = discard_out("record-profile");
     let out = dcc()
-        .args(["-std=gnu23", "-c", "-o", "/dev/null", "-frecord-profile"])
+        .args(["-std=gnu23", "-c", "-o"])
+        .arg(&out_path)
+        .arg("-frecord-profile")
         .output()
         .expect("运行 dcc");
     assert!(!out.status.success(), "缺路径时应失败");
+    assert!(!out_path.exists(), "被拒的命令行不得留下产物");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("record-profile") || stderr.contains("missing dir"),
@@ -1270,11 +1288,15 @@ fn cli_topdownmetrics_accepted() {
 #[test]
 fn cli_lbr_profile_rejects_missing() {
     // -flbr-profile 必须带 file; 无后续 arg 才报错
+    let out_path = discard_out("lbr-reject");
     let out = dcc()
-        .args(["-std=gnu23", "-c", "-o", "/dev/null", "-flbr-profile"])
+        .args(["-std=gnu23", "-c", "-o"])
+        .arg(&out_path)
+        .arg("-flbr-profile")
         .output()
         .expect("运行 dcc");
     assert!(!out.status.success(), "缺路径时应失败");
+    assert!(!out_path.exists(), "被拒的命令行不得留下产物");
 }
 
 // ---------------------------------------------------------------------------

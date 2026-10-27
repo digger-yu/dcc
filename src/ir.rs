@@ -840,9 +840,10 @@ fn is_supported_float_cast(from: &ValueType, to: &ValueType) -> bool {
     // 与 float/double 的那一族同权（`is_float_ty` 已含 `Float128`）。
     matches!(
         (from, to),
-        (ValueType::Float { .. } | ValueType::Float128,
-         ValueType::Float { .. } | ValueType::Float128)
-            | (ValueType::Float { .. } | ValueType::Float128, ValueType::Integer { .. })
+        (
+            ValueType::Float { .. } | ValueType::Float128,
+            ValueType::Float { .. } | ValueType::Float128
+        ) | (ValueType::Float { .. } | ValueType::Float128, ValueType::Integer { .. })
             | (ValueType::Integer { .. }, ValueType::Float { .. } | ValueType::Float128)
     )
 }
@@ -1822,10 +1823,7 @@ fn is_static_initializer(expr: &Expr) -> bool {
     }
     // 浮点常量表达式 (如 __builtin_nan("") / __builtin_inf()) 折叠为
     // ConstValue::Float, 也是合法的静态初始化器。
-    if matches!(
-        const_eval::eval_full(expr, false),
-        Ok(const_eval::ConstValue::Float(_))
-    ) {
+    if matches!(const_eval::eval_full(expr, false), Ok(const_eval::ConstValue::Float(_))) {
         return true;
     }
     // 地址常量 (ConstValue::Addr): 指针算术/成员偏移折叠成功即为

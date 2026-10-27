@@ -335,7 +335,16 @@ impl Codegen {
         let table = facts.primary_table()?;
         // 必须是本函数的**静态局部**：只有它的地址是 data 段里的一个符号。
         // 栈上的数组（自动存储期）地址每次调用都不同，常驻一个寄存器就是错值。
-        let mangled = self.static_local_map.resolve(&f.name.name, table)?.to_string();
+        // 同名 static 多份时这里**按名字**分不清是哪一张表 (常驻错基址 =
+        // 跳到另一张表), 而 `emit_hoisted_jumptable_jump` 侧的判据同样按名字。
+        // 两张表同名时最优做法是不削这条 —— 宁可少优化一条。
+        if self.static_local_map.count_by_name(&f.name.name, table) != 1 {
+            return None;
+        }
+        let mangled = self
+            .static_local_map
+            .resolve(&f.name.name, table)?
+            .to_string();
         Some(mangled)
     }
 
@@ -550,9 +559,7 @@ impl Codegen {
                 Self::collect_local_labels_stmt(body, out);
             },
             Stmt::For { body, .. } => Self::collect_local_labels_stmt(body, out),
-            Stmt::Switch {
-                cases, prelude, ..
-            } => {
+            Stmt::Switch { cases, prelude, .. } => {
                 // `prelude` 里也能带标签（`switch (x) { out: case 1: … }`）：漏了它 E1102
                 // 那一族就会以另一种形式回来（标签没被登记 ⇒ 发射期解析不到）。
                 for item in prelude {
@@ -717,7 +724,10 @@ impl Codegen {
                 .max(Self::sret_bytes_stmt(body)),
             Stmt::Block { b, .. } => Self::max_sret_bytes(&b.items),
             Stmt::Switch {
-                expr, cases, prelude, ..
+                expr,
+                cases,
+                prelude,
+                ..
             } => {
                 // expr 槽 (16+8) 存活至所有 case 体结束
                 let base = Self::sret_bytes_expr(expr) + 24;
@@ -864,11 +874,7 @@ impl Codegen {
         Self::collect_frame_var_decls(items, static_local_map, func_name, &mut decls);
         let mut max_align: usize = 0;
         for v in &decls {
-            let eff = v
-                .alignment
-                .unwrap_or(0)
-                .max(v.ty.align())
-                .max(1);
+            let eff = v.alignment.unwrap_or(0).max(v.ty.align()).max(1);
             if eff > max_align {
                 max_align = eff;
             }
@@ -1004,7 +1010,10 @@ impl Codegen {
                 Self::late_need_stmt(body, need);
             },
             Stmt::Switch {
-                expr, cases, prelude, ..
+                expr,
+                cases,
+                prelude,
+                ..
             } => {
                 Self::late_need_expr(expr, need);
                 // `switch (x) { int y = 1; case 0: … }` 里那个 `y` 也是本帧的晚期分配对象：
@@ -1147,29 +1156,36 @@ impl Codegen {
     }
 
     /// 发射点那条「聚合成员赋值 + 一般 RHS」分支在规划期的静态对应（判据见
-    /// `emit/expr/dispatch.rs` 里写 `<agg_member_tmp>` 的那一段）：LHS 是成员访问、
-    /// RHS 是聚合类型，且 RHS 不是那四条「直接拿地址」的形状。
+    /// `emit/expr/dispatch.rs` 里写 `<agg_member_tmp>` 的那一段）。三条必须和发射点一一对齐：
+    ///   * LHS 是成员访问，且**字段类型**（`Member` 节点自带的 `ty`）是聚合 —— 就是发射点的
+    ///     `field_is_aggregate`；
+    ///   * RHS 不在那五族「直接拿地址」的形状里 —— 就是发射点的
+    ///     `rhs_is_lvalue || rhs_is_ident || rhs_is_compound`。
     ///
-    /// 宁多不少：多计只是多 16 字节，少计就是 `E1133`。因此这里把 `Type::Named`（还没
-    /// 解开的 typedef）也算作聚合；发射点的判据看的是 LHS 字段类型，两者靠「RHS 与字段
-    /// 类型在合法 C 里必须兼容」这条语言规则对齐。
+    /// 宁多不少：多计只是多 16 字节，少计就是 `E1133`。旧写法拿 **RHS 自己的类型**
+    /// 当「是不是聚合赋值」的代理，而发射点看的是 LHS 字段类型：ASan 把一次读改写成
+    /// `(__asan_loadN(&x), x)` 后，逗号节点的 `ty` 不是聚合类型，代理失效 → 实测
+    /// `sqlite3ExprListDup` / `sqlite3SrcListDup` 报「2 slots used, 0 reserved」，
+    /// `-fsanitize=address` 下整颗 amalgamation 编不外。
     fn agg_member_scratch_used(l: &Expr, r: &Expr) -> bool {
+        // LHS 先剥掉 sanitizer 包上的 `Comma{check, lvalue}`：发射点也是先剥再分派，
+        // 否则插桩后的 LHS 在这里“不是成员访问”，规划期就会少算一槽（E1133）。
+        let l = crate::ast::peel_instrumented_lvalue(l);
         if !matches!(l, Expr::Member { .. }) {
             return false;
         }
-        if matches!(
+        if !matches!(l.ty(), Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) | Type::Array(_, _))
+        {
+            return false;
+        }
+        // RHS 落在这五族形状时发射点走 `gen_lvalue_addr`/直接取地址，不需要暂存
+        !matches!(
             r,
             Expr::Member { .. }
                 | Expr::Index { .. }
                 | Expr::Deref { .. }
                 | Expr::Ident { .. }
                 | Expr::CompoundLit { .. }
-        ) {
-            return false;
-        }
-        matches!(
-            r.ty(),
-            Type::Struct(_, _, _, _) | Type::Union(_, _, _, _) | Type::Array(_, _) | Type::Named(_)
         )
     }
 
@@ -1299,6 +1315,10 @@ impl Codegen {
                 // 函数名被当值用：发射期走 `emit_func_addr`，不该占对象槽
                 continue;
             }
+            // 仍未被规划的名字：块作用域的 extern 声明不再会落到这里 —— 解析器已把它们
+            // 上提成文件作用域声明（`parser::hoist_block_extern`），全局表里有名字，上面
+            // 那条 `is_global_not_local` 就拦下了。剩下的只是嵌套函数 upvar（靠静态链
+            // 访问）与其它未规划局部，归本帧。
             self.register_var(&name, &ty);
         }
         // 规划到此为止：此后的新名字登记就是发射期晚分配，只能吃上面那份预算
@@ -1382,7 +1402,8 @@ impl Codegen {
             return Vec::new();
         }
         wins.sort_by_key(|(b, _, _)| *b);
-        let mut out: Vec<crate::codegen::x86_64::codegen::DebugVarRange> = Vec::with_capacity(wins.len() * 2);
+        let mut out: Vec<crate::codegen::x86_64::codegen::DebugVarRange> =
+            Vec::with_capacity(wins.len() * 2);
         let mut cur = fn_base;
         for (b, e, l) in &wins {
             // 重叠窗口（嵌套 call 共用一个号）：跳过去，内层那一轮的终点才是真值边界。
@@ -1393,13 +1414,25 @@ impl Codegen {
                 continue;
             }
             if *b > cur {
-                out.push(crate::codegen::x86_64::codegen::DebugVarRange { begin_pc: cur, end_pc: *b, loc: base });
+                out.push(crate::codegen::x86_64::codegen::DebugVarRange {
+                    begin_pc: cur,
+                    end_pc: *b,
+                    loc: base,
+                });
             }
-            out.push(crate::codegen::x86_64::codegen::DebugVarRange { begin_pc: *b, end_pc: *e, loc: *l });
+            out.push(crate::codegen::x86_64::codegen::DebugVarRange {
+                begin_pc: *b,
+                end_pc: *e,
+                loc: *l,
+            });
             cur = *e;
         }
         if cur < fn_end {
-            out.push(crate::codegen::x86_64::codegen::DebugVarRange { begin_pc: cur, end_pc: fn_end, loc: base });
+            out.push(crate::codegen::x86_64::codegen::DebugVarRange {
+                begin_pc: cur,
+                end_pc: fn_end,
+                loc: base,
+            });
         }
         if out.iter().all(|r| r.loc == base) {
             return Vec::new();
@@ -1528,7 +1561,10 @@ impl Codegen {
                 Self::collect_free_idents_stmt(body, out);
             },
             Stmt::Switch {
-                expr, cases, prelude, ..
+                expr,
+                cases,
+                prelude,
+                ..
             } => {
                 Self::collect_free_idents_expr(expr, out);
                 Self::collect_free_idents_items(prelude, out);
@@ -1695,6 +1731,8 @@ impl Codegen {
             match item {
                 BlockItem::Decl(Decl::Var(v)) => {
                     if v.is_extern && v.init.is_none() {
+                        // 纯声明：不占帧内槽。名字已在解析器里上提成文件作用域声明
+                        // （`parser::hoist_block_extern`），全局表里有它，不靠这里登记。
                         continue;
                     }
                     if v.is_static && static_local_map.is_static_local(func_name, &v.name.name) {
@@ -1771,7 +1809,10 @@ impl Codegen {
                 Self::collect_frame_var_decls_stmt(body, static_local_map, func_name, out);
             },
             Stmt::Switch {
-                expr, cases, prelude, ..
+                expr,
+                cases,
+                prelude,
+                ..
             } => {
                 Self::collect_frame_var_decls_expr(expr, static_local_map, func_name, out);
                 // 同上：prelude 里的声明也必须拿到自己的帧槽，不然发射期会懒注册成另一个槽
@@ -2323,11 +2364,11 @@ impl Codegen {
             // __stack_chk_fail is emitted as an undefined global
             // symbol (provided by libc / kernel runtime).
             self.emit_insn(&Insn::short_jump_rel8(0x74, 0x05)); // je .+5 (canary OK → skip)
-            // noreturn 调用：上面那条 `je` 跳过的就是本条 call，成功路径不会执行它，
-            // 失败路径再不会回到本函数 —— 所以这里不需要（也不能）caller-saved 家的
-            // 存/取窗口：窗口会多发指令，而 `je` 的位移是按 call 恰 5 字节硬编码的。
-            // 实测证据：内核开 `-fstack-protector-strong` + 延伸池后，`lib/list_sort.c`
-            // 在旧路上直接命中 E1136 而整 TU 失败。
+                                                                // noreturn 调用：上面那条 `je` 跳过的就是本条 call，成功路径不会执行它，
+                                                                // 失败路径再不会回到本函数 —— 所以这里不需要（也不能）caller-saved 家的
+                                                                // 存/取窗口：窗口会多发指令，而 `je` 的位移是按 call 恰 5 字节硬编码的。
+                                                                // 实测证据：内核开 `-fstack-protector-strong` + 延伸池后，`lib/list_sort.c`
+                                                                // 在旧路上直接命中 E1136 而整 TU 失败。
             self.call_label_noreturn("__stack_chk_fail");
         }
         // 恢复被调用者保存寄存器: rbx, r12, r14, r15
@@ -2367,14 +2408,8 @@ impl Codegen {
         // 的时刻，而多个 return 站点内联展开尾声时每一条都要带上这一步。
         if self.disptab_base_reg_sym.is_some() {
             self.emit_insn(
-                &Insn::mov_rm_mem(
-                    true,
-                    crate::codegen::shared::asm_operand::Width::B64,
-                    5,
-                    13,
-                    -8,
-                )
-                .with_gas("mov -8(%r13), %rbp".to_string()),
+                &Insn::mov_rm_mem(true, crate::codegen::shared::asm_operand::Width::B64, 5, 13, -8)
+                    .with_gas("mov -8(%r13), %rbp".to_string()),
             );
         }
         // mov rsp, r13: 恢复栈指针
@@ -2509,9 +2544,7 @@ mod tests {
             Stmt::While { body, .. } | Stmt::Do { body, .. } | Stmt::For { body, .. } => {
                 set_home_stmt(body, name, slot, hit)
             },
-            Stmt::Switch {
-                cases, prelude, ..
-            } => {
+            Stmt::Switch { cases, prelude, .. } => {
                 // prelude 里的声明也是同一个变量的宿主，漏了它家绑定只改了 case 体那份。
                 set_home(prelude, name, slot, hit);
                 for c in cases {
@@ -2634,6 +2667,23 @@ mod tests {
         assert!(
             !Codegen::late_need(&body_of(no_tmp_src, "f")).agg_tmp,
             "排除形状不得置位（否则预算不是算准而是宁可多给）"
+        );
+        // 判据基准必须是 **LHS 字段类型**，不是 RHS 类型：逗号包裹的 RHS（ASan 读改写
+        // 成的 `(__asan_loadN(&x), x)` 就是这个形状）RHS 自己不是聚合类型，但仍走一般臂。
+        let comma_src = "struct S{long a,b;}; struct T{struct S q; long g;}; \
+                         int probe(void); \
+                         long f(struct T t, struct S x){ t.q = (probe(), x); return t.g; }";
+        assert!(
+            Codegen::late_need(&body_of(comma_src, "f")).agg_tmp,
+            "逗号 RHS 的聚合成员赋值必须计费（旧写法看 RHS 类型，在这里算少 ⇒ E1133）"
+        );
+        // 反向对照：字段是标量时，即使 RHS 是一般表达式也不走聚合臂（否则就是乱多给）
+        let scalar_src = "struct S{long a,b;}; struct T{struct S q; long g;}; \
+                          int probe(void); \
+                          long f(struct T t){ t.g = probe(); return t.g; }";
+        assert!(
+            !Codegen::late_need(&body_of(scalar_src, "f")).agg_tmp,
+            "标量字段不得当聚合成员赋值计费"
         );
     }
 }

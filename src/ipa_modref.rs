@@ -124,11 +124,20 @@ fn is_int_scalar(ty: &Type) -> bool {
 /// 指针值的来源 (保守: 只认形参、cast/comma/assign 透传、指针算术基址、同源 Cond)。
 fn ptr_prov(e: &Expr, params: &HashMap<String, usize>) -> Prov {
     match e {
-        Expr::Ident { name, .. } => params.get(&name.name).copied().map(Prov::Param).unwrap_or(Prov::Unknown),
+        Expr::Ident { name, .. } => params
+            .get(&name.name)
+            .copied()
+            .map(Prov::Param)
+            .unwrap_or(Prov::Unknown),
         Expr::Cast { e, .. } => ptr_prov(e, params),
         Expr::Comma { r, .. } => ptr_prov(r, params),
         Expr::Assign { r, .. } => ptr_prov(r, params),
-        Expr::Binop { op: BinOp::Add | BinOp::Sub, l, r, .. } => {
+        Expr::Binop {
+            op: BinOp::Add | BinOp::Sub,
+            l,
+            r,
+            ..
+        } => {
             if is_ptr(&l.ty()) {
                 ptr_prov(l, params)
             } else if is_ptr(&r.ty()) {
@@ -140,7 +149,11 @@ fn ptr_prov(e: &Expr, params: &HashMap<String, usize>) -> Prov {
         Expr::Cond { then_, else_, .. } => {
             let a = ptr_prov(then_, params);
             let b = ptr_prov(else_, params);
-            if a == b { a } else { Prov::Unknown }
+            if a == b {
+                a
+            } else {
+                Prov::Unknown
+            }
         },
         _ => Prov::Unknown,
     }
@@ -155,11 +168,19 @@ fn classify_store_target(l: &Expr, params: &HashMap<String, usize>) -> StoreBase
             Prov::Param(j) => StoreBase::ViaParam(j),
             Prov::Unknown => StoreBase::Unknown,
         },
-        Expr::Member { expr, is_arrow: true, .. } => match ptr_prov(expr, params) {
+        Expr::Member {
+            expr,
+            is_arrow: true,
+            ..
+        } => match ptr_prov(expr, params) {
             Prov::Param(j) => StoreBase::ViaParam(j),
             Prov::Unknown => StoreBase::Unknown,
         },
-        Expr::Member { expr, is_arrow: false, .. } => classify_store_target(expr, params),
+        Expr::Member {
+            expr,
+            is_arrow: false,
+            ..
+        } => classify_store_target(expr, params),
         Expr::Index { arr, .. } => {
             if matches!(arr.ty(), Type::Array(_, _)) {
                 classify_store_target(arr, params)
@@ -190,7 +211,11 @@ fn note_object_write(l: &Expr, facts: &mut BodyFacts) {
         Expr::Ident { name, .. } => {
             *facts.object_writes.entry(name.name.clone()).or_insert(0) += 1;
         },
-        Expr::Member { expr, is_arrow: false, .. } => note_object_write(expr, facts),
+        Expr::Member {
+            expr,
+            is_arrow: false,
+            ..
+        } => note_object_write(expr, facts),
         Expr::Index { arr, .. } if matches!(arr.ty(), Type::Array(_, _)) => {
             note_object_write(arr, facts)
         },
@@ -249,7 +274,9 @@ fn scan_expr(e: &Expr, ctx: Ctx, params: &HashMap<String, usize>, facts: &mut Bo
             scan_expr(r, Ctx::Store, params, facts);
             scan_expr(l, Ctx::Value, params, facts);
         },
-        Expr::Cond { cond, then_, else_, .. } => {
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
             scan_expr(cond, Ctx::Value, params, facts);
             scan_expr(then_, ctx, params, facts);
             scan_expr(else_, ctx, params, facts);
@@ -305,7 +332,9 @@ fn scan_expr(e: &Expr, ctx: Ctx, params: &HashMap<String, usize>, facts: &mut Bo
             scan_expr(inner, Ctx::Value, params, facts);
         },
         Expr::VaArg { ap, .. } => scan_expr(ap, Ctx::Value, params, facts),
-        Expr::AsmExpr { inputs, outputs, .. } => {
+        Expr::AsmExpr {
+            inputs, outputs, ..
+        } => {
             // asm 输入/输出都是"指针/值逃逸点": 输出视为 Store (note 会同时记
             // mod+escape), 输入保守记 opaque; 输入里的形参派生指针同样可能
             // 被 asm 存到任何地方 ⇒ 记 escape。
@@ -329,11 +358,18 @@ fn scan_expr(e: &Expr, ctx: Ctx, params: &HashMap<String, usize>, facts: &mut Bo
             }
         },
         Expr::StmtExpr { block, .. } => scan_block(block, params, facts),
-        Expr::SizeofTy { .. } | Expr::AlignofTy { .. } | Expr::VaArgPack { .. } | Expr::Offsetof { .. } => {},
+        Expr::SizeofTy { .. }
+        | Expr::AlignofTy { .. }
+        | Expr::VaArgPack { .. }
+        | Expr::Offsetof { .. } => {},
     }
 }
 
-fn scan_init_item(it: &crate::ast::InitItem, params: &HashMap<String, usize>, facts: &mut BodyFacts) {
+fn scan_init_item(
+    it: &crate::ast::InitItem,
+    params: &HashMap<String, usize>,
+    facts: &mut BodyFacts,
+) {
     use crate::ast::InitItem;
     match it {
         InitItem::Expr(e) => scan_expr(e, Ctx::Store, params, facts),
@@ -362,7 +398,10 @@ fn scan_call(callee: &Expr, args: &[Expr], params: &HashMap<String, usize>, fact
             },
             _ => None,
         };
-        site.args.push(CallArg { src_param, addr_name });
+        site.args.push(CallArg {
+            src_param,
+            addr_name,
+        });
         scan_expr(a, Ctx::Value, params, facts);
     }
     scan_expr(callee, Ctx::Value, params, facts);
@@ -374,7 +413,9 @@ fn scan_stmt(s: &Stmt, params: &HashMap<String, usize>, facts: &mut BodyFacts) {
         Stmt::Expr { e, .. } => scan_expr(e, Ctx::Value, params, facts),
         Stmt::Return { val: Some(e), .. } => scan_expr(e, Ctx::Store, params, facts),
         Stmt::Return { val: None, .. } => {},
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             scan_expr(cond, Ctx::Value, params, facts);
             scan_stmt(then_, params, facts);
             if let Some(e) = else_ {
@@ -385,7 +426,13 @@ fn scan_stmt(s: &Stmt, params: &HashMap<String, usize>, facts: &mut BodyFacts) {
             scan_expr(cond, Ctx::Value, params, facts);
             scan_stmt(body, params, facts);
         },
-        Stmt::For { init, cond, step, body, .. } => {
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(i) = init {
                 scan_stmt(i, params, facts);
             }
@@ -407,7 +454,9 @@ fn scan_stmt(s: &Stmt, params: &HashMap<String, usize>, facts: &mut BodyFacts) {
         Stmt::Label { stmt, .. } => scan_stmt(stmt, params, facts),
         Stmt::GotoIndirect { expr, .. } => scan_expr(expr, Ctx::Value, params, facts),
         Stmt::Invoke { call, .. } => scan_stmt(call, params, facts),
-        Stmt::EhLandingPad { object, selector, .. } => {
+        Stmt::EhLandingPad {
+            object, selector, ..
+        } => {
             scan_expr(object, Ctx::Value, params, facts);
             scan_expr(selector, Ctx::Value, params, facts);
         },
@@ -441,7 +490,10 @@ fn scan_item(it: &BlockItem, params: &HashMap<String, usize>, facts: &mut BodyFa
 fn scan_decl(d: &Decl, params: &HashMap<String, usize>, facts: &mut BodyFacts) {
     match d {
         Decl::Var(v) => {
-            *facts.local_decl_counts.entry(v.name.name.clone()).or_insert(0) += 1;
+            *facts
+                .local_decl_counts
+                .entry(v.name.name.clone())
+                .or_insert(0) += 1;
             if let Some(init) = &v.init {
                 scan_expr(init, Ctx::Store, params, facts);
             }
@@ -451,7 +503,9 @@ fn scan_decl(d: &Decl, params: &HashMap<String, usize>, facts: &mut BodyFacts) {
             let _ = nested;
             facts.opaque_store = true;
         },
-        Decl::GlobalAsm { outputs, inputs, .. } => {
+        Decl::GlobalAsm {
+            outputs, inputs, ..
+        } => {
             for o in outputs {
                 scan_expr(o, Ctx::Store, params, facts);
             }
@@ -496,7 +550,9 @@ fn is_analyzable(f: &FuncDecl) -> bool {
 }
 
 /// 计算所有函数的 modref 摘要 (不动点, 处理递归)。
-fn compute_summaries(prog: &Program) -> (HashMap<String, ModRefSummary>, HashMap<String, BodyFacts>) {
+fn compute_summaries(
+    prog: &Program,
+) -> (HashMap<String, ModRefSummary>, HashMap<String, BodyFacts>) {
     // known 表: 函数名 -> (decl 序, n_params, param_is_ptr).
     let mut known: BTreeSet<String> = BTreeSet::new();
     let mut n_params: HashMap<String, usize> = HashMap::new();
@@ -508,10 +564,8 @@ fn compute_summaries(prog: &Program) -> (HashMap<String, ModRefSummary>, HashMap
                 known.insert(f.name.name.clone());
                 order.push(f.name.name.clone());
                 n_params.insert(f.name.name.clone(), f.params.len());
-                param_is_ptr.insert(
-                    f.name.name.clone(),
-                    f.params.iter().map(|p| is_ptr(&p.ty)).collect(),
-                );
+                param_is_ptr
+                    .insert(f.name.name.clone(), f.params.iter().map(|p| is_ptr(&p.ty)).collect());
             }
         }
     }
@@ -644,7 +698,9 @@ fn compute_summaries(prog: &Program) -> (HashMap<String, ModRefSummary>, HashMap
 
     let mut summaries: HashMap<String, ModRefSummary> = HashMap::new();
     for name in &order {
-        let m: Vec<bool> = (0..n_params[name]).map(|i| mods[name].contains(&i)).collect();
+        let m: Vec<bool> = (0..n_params[name])
+            .map(|i| mods[name].contains(&i))
+            .collect();
         let esc: Vec<bool> = (0..n_params[name])
             .map(|i| escapes[name].contains(&i))
             .collect();
@@ -671,7 +727,9 @@ fn safe_arg_counts(
     let mut counts: HashMap<String, usize> = HashMap::new();
     for site in &bf.calls {
         let Some(g) = &site.callee else { continue };
-        let Some(sum) = summaries.get(g) else { continue };
+        let Some(sum) = summaries.get(g) else {
+            continue;
+        };
         for (i, a) in site.args.iter().enumerate() {
             let Some(name) = &a.addr_name else { continue };
             let param_ok = i < sum.n_params
@@ -809,13 +867,22 @@ fn subst_proven_locals(e: &Expr, proven: &HashMap<String, i128>) -> Expr {
             span: span.clone(),
             ty: ty.clone(),
         },
-        Expr::Unary { op, e: inner, span, ty } => Expr::Unary {
+        Expr::Unary {
+            op,
+            e: inner,
+            span,
+            ty,
+        } => Expr::Unary {
             op: *op,
             e: Box::new(subst_proven_locals(inner, proven)),
             span: span.clone(),
             ty: ty.clone(),
         },
-        Expr::Cast { ty: cty, e: inner, span } => Expr::Cast {
+        Expr::Cast {
+            ty: cty,
+            e: inner,
+            span,
+        } => Expr::Cast {
             ty: cty.clone(),
             e: Box::new(subst_proven_locals(inner, proven)),
             span: span.clone(),
@@ -826,7 +893,12 @@ fn subst_proven_locals(e: &Expr, proven: &HashMap<String, i128>) -> Expr {
 
 fn fold_constant_p_expr(e: &mut Expr, proven: &HashMap<String, i128>) {
     match e {
-        Expr::Call { callee, args, span, ty } => {
+        Expr::Call {
+            callee,
+            args,
+            span,
+            ty,
+        } => {
             if let Expr::Ident { name, .. } = callee.as_ref() {
                 if name.name == "__builtin_constant_p" && args.len() == 1 {
                     // 在 AST 层把 __builtin_constant_p 完全解析 (必须赶在 SSA/SCCP 之前:
@@ -835,13 +907,16 @@ fn fold_constant_p_expr(e: &mut Expr, proven: &HashMap<String, i128>) {
                     //    把 proven 局部替换成字面量后成为常量 (modref-5:
                     //    `__builtin_constant_p (b == 2)`, b 已证不变)。
                     // 二者皆非 ⇒ 0 (与 GCC 对"变量实参返回 0"一致, 也是 constp.c 的断言)。
-                    let is_c = const_eval::is_constant(&args[0]);
-                    let proven_local =
-                        matches!(&args[0], Expr::Ident { name: vn, .. } if proven.contains_key(&vn.name));
+                    let is_c = const_eval::is_constant_p_arg(&args[0]);
+                    let proven_local = matches!(&args[0], Expr::Ident { name: vn, .. } if proven.contains_key(&vn.name));
                     let folded_expr_const = !is_c
                         && !proven_local
                         && const_eval::is_constant(&subst_proven_locals(&args[0], proven));
-                    let v = if is_c || proven_local || folded_expr_const { 1 } else { 0 };
+                    let v = if is_c || proven_local || folded_expr_const {
+                        1
+                    } else {
+                        0
+                    };
                     *e = Expr::Int {
                         v,
                         span: span.clone(),
@@ -866,7 +941,9 @@ fn fold_constant_p_expr(e: &mut Expr, proven: &HashMap<String, i128>) {
         },
         Expr::Unary { e: inner, .. } => fold_constant_p_expr(inner, proven),
         Expr::Cast { e: inner, .. } => fold_constant_p_expr(inner, proven),
-        Expr::Cond { cond, then_, else_, .. } => {
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
             fold_constant_p_expr(cond, proven);
             fold_constant_p_expr(then_, proven);
             fold_constant_p_expr(else_, proven);
@@ -902,7 +979,9 @@ fn fold_constant_p_stmt(s: &mut Stmt, proven: &HashMap<String, i128>) {
         Stmt::Expr { e, .. } => fold_constant_p_expr(e, proven),
         Stmt::Return { val: Some(e), .. } => fold_constant_p_expr(e, proven),
         Stmt::Return { val: None, .. } => {},
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             fold_constant_p_expr(cond, proven);
             fold_constant_p_stmt(then_, proven);
             if let Some(e) = else_ {
@@ -913,7 +992,13 @@ fn fold_constant_p_stmt(s: &mut Stmt, proven: &HashMap<String, i128>) {
             fold_constant_p_expr(cond, proven);
             fold_constant_p_stmt(body, proven);
         },
-        Stmt::For { init, cond, step, body, .. } => {
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(i) = init {
                 fold_constant_p_stmt(i, proven);
             }
@@ -968,7 +1053,13 @@ pub fn run(module: &mut Module, level: u8) {
     let names: Vec<String> = prog
         .decls
         .iter()
-        .filter_map(|d| if let Decl::Func(f) = d { Some(f.name.name.clone()) } else { None })
+        .filter_map(|d| {
+            if let Decl::Func(f) = d {
+                Some(f.name.name.clone())
+            } else {
+                None
+            }
+        })
         .collect();
     // 先算每个函数的 proven (不可变借用 facts/summaries).
     let mut proven_by_fn: HashMap<String, HashMap<String, i128>> = HashMap::new();

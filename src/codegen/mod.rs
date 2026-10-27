@@ -831,6 +831,19 @@ pub fn qual_type_to_dwarf(
 
 /// Convert AST Type to DWARF type for BTF generation
 pub(crate) fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
+    ast_type_to_dwarf_ex(ty, true)
+}
+
+/// 与 `ast_type_to_dwarf` 同一套名字规则，但聚合类型的成员表**不展开**。
+///
+/// 只用来做类型缓存的名字键：`struct T` 的 DIE 名字/size 在 AST 里就能 O(1) 拿到，
+/// 没必要为了取个名字把整棵成员树（可能上万节点）也造一遍。名字与 `ast_type_to_dwarf`
+/// 由同一份代码产生，不会漂移。
+pub(crate) fn ast_type_to_dwarf_shallow(ty: &crate::ast::Type) -> debug::DwarfType {
+    ast_type_to_dwarf_ex(ty, false)
+}
+
+fn ast_type_to_dwarf_ex(ty: &crate::ast::Type, expand_members: bool) -> debug::DwarfType {
     use crate::ast::Type;
     match ty {
         Type::Void => debug::DwarfType {
@@ -944,7 +957,7 @@ pub(crate) fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
             kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Boolean),
         },
         Type::Ptr(inner) => {
-            let inner_dw = ast_type_to_dwarf(&inner.base);
+            let inner_dw = ast_type_to_dwarf_ex(&inner.base, expand_members);
             debug::DwarfType {
                 name: format!("{}*", inner_dw.name),
                 byte_size: 8,
@@ -952,7 +965,7 @@ pub(crate) fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
             }
         },
         Type::Array(elem, count) => {
-            let elem_dw = ast_type_to_dwarf(&elem.base);
+            let elem_dw = ast_type_to_dwarf_ex(&elem.base, expand_members);
             let cnt = match count {
                 crate::ast::ArraySize::Const(n) => *n as u64,
                 crate::ast::ArraySize::Var(_) => 0,
@@ -972,6 +985,7 @@ pub(crate) fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
             kind: debug::DwarfTypeKind::Void, // 占位
         },
         Type::Struct(name, fields, size, _) => {
+            let fields: &[_] = if expand_members { fields } else { &[] };
             let members: Vec<debug::DwarfMember> = fields
                 .iter()
                 .map(|f| {
@@ -996,6 +1010,7 @@ pub(crate) fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
             }
         },
         Type::Union(name, fields, size, _) => {
+            let fields: &[_] = if expand_members { fields } else { &[] };
             let members: Vec<debug::DwarfMember> = fields
                 .iter()
                 .map(|f| {
@@ -1010,6 +1025,7 @@ pub(crate) fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
             }
         },
         Type::Enum(name, variants, _underlying) => {
+            let variants: &[_] = if expand_members { variants } else { &[] };
             let members: Vec<(String, i128)> = variants
                 .iter()
                 .map(|(n, v)| (n.clone(), *v as i128))
@@ -1031,21 +1047,28 @@ pub(crate) fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
             name: "function".to_string(),
             byte_size: 0,
             kind: debug::DwarfTypeKind::Func {
-                ret: Box::new(ast_type_to_dwarf(&ret.base)),
-                params: params.iter().map(|p| ast_type_to_dwarf(&p.base)).collect(),
+                ret: Box::new(ast_type_to_dwarf_ex(&ret.base, expand_members)),
+                params: if expand_members {
+                    params
+                        .iter()
+                        .map(|p| ast_type_to_dwarf_ex(&p.base, expand_members))
+                        .collect()
+                } else {
+                    Vec::new()
+                },
             },
         },
         Type::Complex(inner) => debug::DwarfType {
-            name: format!("_Complex {}", ast_type_to_dwarf(&inner.base).name),
-            byte_size: ast_type_to_dwarf(&inner.base).byte_size * 2,
+            name: format!("_Complex {}", ast_type_to_dwarf_ex(&inner.base, expand_members).name),
+            byte_size: ast_type_to_dwarf_ex(&inner.base, expand_members).byte_size * 2,
             kind: debug::DwarfTypeKind::Struct { members: vec![] },
         },
         Type::Imaginary(inner) => debug::DwarfType {
-            name: format!("_Imaginary {}", ast_type_to_dwarf(&inner.base).name),
-            byte_size: ast_type_to_dwarf(&inner.base).byte_size,
+            name: format!("_Imaginary {}", ast_type_to_dwarf_ex(&inner.base, expand_members).name),
+            byte_size: ast_type_to_dwarf_ex(&inner.base, expand_members).byte_size,
             kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Float),
         },
-        Type::Atomic(inner) => ast_type_to_dwarf(&inner.base),
+        Type::Atomic(inner) => ast_type_to_dwarf_ex(&inner.base, expand_members),
         Type::Fract => debug::DwarfType {
             name: "_Fract".to_string(),
             byte_size: 4,
@@ -1057,7 +1080,7 @@ pub(crate) fn ast_type_to_dwarf(ty: &crate::ast::Type) -> debug::DwarfType {
             kind: debug::DwarfTypeKind::Base(debug::TypeEncoding::Float),
         },
         Type::Vector(elem, count) => {
-            let elem_dw = ast_type_to_dwarf(&elem.base);
+            let elem_dw = ast_type_to_dwarf_ex(&elem.base, expand_members);
             debug::DwarfType {
                 name: format!("vector({},{})", elem_dw.name, count),
                 byte_size: elem_dw.byte_size * (*count as u64),
@@ -1133,10 +1156,12 @@ fn build_dwarf_cu(
         })
         .collect();
 
+    debug::dbg_mem("cu:functions");
     let low_pc = functions.first().map(|f| f.low_pc).unwrap_or(0);
     let high_pc = functions.last().map(|f| f.high_pc).unwrap_or(0);
     let func_ranges: Vec<(u64, u64)> = functions.iter().map(|f| (f.low_pc, f.high_pc)).collect();
 
+    debug::dbg_mem("cu:before_types");
     // 从 AST 声明中收集类型信息（struct/union/enum/typedef）
     let mut types: Vec<debug::DwarfType> = Vec::new();
     for decl in &module.source().decls {
@@ -1223,6 +1248,7 @@ fn build_dwarf_cu(
         }
     }
 
+    debug::dbg_mem("cu:types");
     debug::CompileUnit {
         source_name: source_name.to_string(),
         comp_dir: None,

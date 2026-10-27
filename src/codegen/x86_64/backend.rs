@@ -359,6 +359,17 @@ fn fill_dwarf_local_vars(
     }
     let cfa = cfa_frame_offset(target.frame_pointer) as i64;
     let arch = crate::debug::ArchKind::X86_64;
+    // 类型按「名字 + 字节数」缓存并共享：`ast_type_to_dwarf` 会把 `struct T` 的成员表
+    // 整棵展开（大结构体上百 KB），而这里每个局部变量都调一次。`sqlite3.c -g -O0` 实测
+    // 光这一步就吃掉 4.2GB（650MB → 5191MB）。
+    //
+    // 产物不受影响：局部变量的类型 DIE 一律经 `ensure_type_die`，那里本来就按名字全局
+    // 去重（先来先得），同名类型的第二棵树从来不会发射；这里只是把那棵永远不会被读到的
+    // 树省掉。键用「浅转换」取名字，与正式转换同一份代码、不展开成员，所以 O(1) 且
+    // 不会和 `ast_type_to_dwarf` 的名字漂移；再并上 byte_size 把同名的匿名声明的碰撞面
+    // 收窄（块作用域同名 tag 之类）。
+    let mut ty_cache: std::collections::HashMap<String, std::sync::Arc<crate::debug::DwarfType>> =
+        std::collections::HashMap::new();
     for f in cu.functions.iter_mut() {
         let Some((_, list)) = facts.iter().find(|(n, _)| *n == f.name) else {
             continue;
@@ -372,9 +383,19 @@ fn fill_dwarf_local_vars(
                 },
                 _ => continue,
             };
+            let shallow = crate::codegen::ast_type_to_dwarf_shallow(&v.ty);
+            let key = format!("{}\u{0}{}", shallow.name, shallow.byte_size);
+            let ty = match ty_cache.get(&key) {
+                Some(t) => t.clone(),
+                None => {
+                    let t = std::sync::Arc::new(crate::codegen::ast_type_to_dwarf(&v.ty));
+                    ty_cache.insert(key, t.clone());
+                    t
+                },
+            };
             f.local_vars.push(crate::debug::DwarfLocalVar {
                 name: v.name.clone(),
-                ty: crate::codegen::ast_type_to_dwarf(&v.ty),
+                ty,
                 location: loc,
                 // 分段位置（loclist）：同一个号只在一段 PC 里成立时，剩下的区间要回
                 // 到栈槽上。没分段位置时这一张表为空 ⇒ DWARF 侧照旧发单 exprloc。
@@ -386,9 +407,11 @@ fn fill_dwarf_local_vars(
                             crate::location::Location::Stack(off) => {
                                 crate::debug::DwarfParamLocation::fbreg(off - cfa)
                             },
-                            crate::location::Location::Reg(rr) => match arch.dwarf_reg_of_gp_hw(rr.n) {
-                                Some(dr) => crate::debug::DwarfParamLocation::reg(dr),
-                                None => return None,
+                            crate::location::Location::Reg(rr) => {
+                                match arch.dwarf_reg_of_gp_hw(rr.n) {
+                                    Some(dr) => crate::debug::DwarfParamLocation::reg(dr),
+                                    None => return None,
+                                }
                             },
                             _ => return None,
                         };
@@ -477,6 +500,7 @@ fn build_debug_sections(
             .then_with(|| a.discriminator.cmp(&b.discriminator))
     });
 
+    debug::dbg_mem("aux:before_cu");
     let mut cu = build_dwarf_cu(module, &opts.source_name, &func_pcs, combined_line_entries);
     // Phase 6.2：把发射器采集的「局部 → 帧内位置」表填进 DWARF。以前这一步根本不存在
     // （`local_vars` 恒空），于是 `-g` 下变量一个 DIE 都没有，而 `src/ssa/regalloc.rs` 也
@@ -484,13 +508,15 @@ fn build_debug_sections(
     // 翻译成 DWARF 的说法：`%r13+off` → `DW_OP_fbreg(off - cfa)`，寄存器 → `DW_OP_regN`，
     // 溢出槽 → 它在帧里的实际偏移（与读/写路同一个 `spill_off`，不另算一份）。
     fill_dwarf_local_vars(&mut cu, &cg.debug_var_facts, target);
+    debug::dbg_mem("aux:after_cu+locals");
     let debug_opts = debug::DebugOptions {
         level: opts.debug_level,
         dwarf_version: opts.dwarf_version,
         source_name: opts.source_name.clone(),
         ..Default::default()
     };
-    let dbg = debug::build_dwarf_full(&cu, &debug_opts);
+    let dbg = debug::build_dwarf_full(cu, &debug_opts);
+    debug::dbg_mem("aux:after_full");
     cg.extra_sections.extend(debug::dwarf_elf_sections(&dbg));
 
     // .rela.debug_* —— 为 debug 节里的函数地址生成绝对重定位
@@ -502,7 +528,11 @@ fn build_debug_sections(
     // 目标节索引与 ElfRela 的构造走同一个口子：loclist 那一组只是多一个加数，
     // 不允许另写一份解析（否则两处对「.debug_loc 在第几个额外节」的答案会飘）。
     let sec_index_of = |name: &str| -> u32 {
-        cg.extra_sections.iter().position(|s| s.name == name).map(|i| 7 + i as u32).unwrap_or(8)
+        cg.extra_sections
+            .iter()
+            .position(|s| s.name == name)
+            .map(|i| 7 + i as u32)
+            .unwrap_or(8)
     };
     for (src, sec_name, fallback_idx) in relocs.iter() {
         if src.is_empty() {

@@ -20,7 +20,11 @@ use crate::codegen::x86_64::opcode::X86_64Opcode;
 /// 因此中途改环境不会改变已在跑的编译器的产物（可复现性判据 5454 组合依赖这一条）。
 pub(crate) fn imm32_short_mov_on() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("DCC_IMM32_SHORT_MOV").map(|s| s != "0").unwrap_or(true))
+    *V.get_or_init(|| {
+        std::env::var("DCC_IMM32_SHORT_MOV")
+            .map(|s| s != "0")
+            .unwrap_or(true)
+    })
 }
 
 /// P12-A: explicit expect on `emit_insn() -> bool`.
@@ -818,13 +822,16 @@ impl Insn {
         let rm_field = base & 7;
         // SIB: base 物理号 = 4 (rsp) 时必须发 SIB; 其余 base 走普通 ModRM.
         let need_sib = rm_field == 4;
-        // mod=00/01/10 选择: base=rbp(5) 且无 SIB 时 mod=00 = rip-relative,
-        // 必须走 disp. 其余 disp=0 可走 mod=00.
+        // mod=00/01/10 的判据单一入口见
+        // [`crate::codegen::x86_64::opcode::modrm_needs_disp`]。旧写法是
+        // `disp == 0 && rm_field != 5 || need_sib`：`&&` 比 `||` 紧，所以
+        // base=rsp/r12 时**无论 disp 是否为 0** 都走 mod=00 且不发位移，
+        // 非零 disp 被整个丢掉（写到 [%rsp] 而不是 [%rsp+disp]）。
         let modrm_mod: u8;
         let disp_bytes: [u8; 4];
         let disp_len: usize;
-        if disp == 0 && rm_field != 5 || need_sib {
-            // mod=00, 无 disp. base=rbp(5) 有 SIB 时 mod=00 仍合法.
+        if disp == 0 && !crate::codegen::x86_64::opcode::modrm_needs_disp(base, need_sib) {
+            // mod=00, 无 disp.
             modrm_mod = 0;
             disp_len = 0;
             disp_bytes = [0; 4];
@@ -2532,6 +2539,82 @@ mod tests {
         // 不得退化成「换个形态发出」——那会跳向错误的地址。
         assert_eq!(Insn::jmp_rm_mem_sib(5, 4, 8).encode_bytes(), None);
         assert_eq!(Insn::jmp_rm_mem_sib(5, 1, 3).encode_bytes(), None);
+    }
+
+    /// `mod=00` 下「基址低 3 位 = 101」（rbp=5 与 r13=13）不是 `[基址+0]`：无 SIB 时是
+    /// RIP 相对，带 SIB 时 SIB 的 base 字段 101 是「无基址 + disp32」。两条 mov 一侧的
+    /// 构造子以前只修了前一半（`base != 5 || need_sib`），于是
+    /// `mov (%rbp,%rcx,8),%rax` 被编成 `48 8B 04 CD` 且**不发任何位移**，解码器把
+    /// 后一条指令的字节吃掉当 disp32（整条指令流错位；-O2 跳转表基址常驻 %rbp
+    /// 后 SQLite `goto *disptab[i]` 启动即 SIGSEGV 的根因）。
+    #[test]
+    fn mov_rm_mem_sib_rbp_needs_disp8() {
+        use crate::codegen::shared::asm_operand::Width::*;
+        // mov 0x0(%rbp,%rcx,8),%rax: 48 8B 44 CD 00 （mod=01 + disp8=0）
+        assert_eq!(
+            Insn::mov_rm_mem_sib(true, B64, 0, 5, 1, 8).encode_bytes(),
+            Some(vec![0x48, 0x8B, 0x44, 0xCD, 0x00]),
+        );
+        // mov %rax,0x0(%rbp,%rcx,8): 48 89 44 CD 00 （存侧同一条规则）
+        assert_eq!(
+            Insn::mov_rm_mem_sib(false, B64, 0, 5, 1, 8).encode_bytes(),
+            Some(vec![0x48, 0x89, 0x44, 0xCD, 0x00]),
+        );
+        // r13 与 rbp 同占基址字段 101：只多一个 REX.B，mod 也必须抬到 01。
+        assert_eq!(
+            Insn::mov_rm_mem_sib(true, B64, 0, 13, 1, 8).encode_bytes(),
+            Some(vec![0x49, 0x8B, 0x44, 0xCD, 0x00]),
+        );
+        // rsp/r12（基址字段 100）配 SIB 时 mod=00 就是「[基址+0]」，不得多一个字节。
+        assert_eq!(
+            Insn::mov_rm_mem_sib(true, B64, 0, 4, 1, 8).encode_bytes(),
+            Some(vec![0x48, 0x8B, 0x04, 0xCC]),
+        );
+        assert_eq!(
+            Insn::mov_rm_mem_sib(true, B64, 0, 12, 0, 8).encode_bytes(),
+            Some(vec![0x49, 0x8B, 0x04, 0xC4]),
+        );
+        // MovExt（movzx/movsx/movsxd 一族）也是同一张表：旧写法在这里额外开了
+        // `disp==0 && base==5 → mod=10 disp32` 的分叉（同义但多三字节）且漏了 r13。
+        // movsxd rax, int [0x0(%rbp,%rcx,8)]: 48 63 44 CD 00
+        assert_eq!(
+            Insn::mov_ext_mem_sib(true, B32, B64, 0, 5, 1, 8).encode_bytes(),
+            Some(vec![0x48, 0x63, 0x44, 0xCD, 0x00]),
+        );
+        // movzx rax, byte [0x0(%rbp,%rcx,8)]: 48 0F B6 44 CD 00
+        assert_eq!(
+            Insn::mov_ext_mem_sib(false, B8, B64, 0, 5, 1, 8).encode_bytes(),
+            Some(vec![0x48, 0x0F, 0xB6, 0x44, 0xCD, 0x00]),
+        );
+    }
+
+    /// `store_imm_mem` 的旧条件是 `disp == 0 && rm_field != 5 || need_sib`：`&&` 比 `||`
+    /// 紧，所 base=rsp/r12 时不论 disp 是多少都走 mod=00 且不发位移 —— 非零 disp
+    /// 被整个丢掉，写到 `[%rsp]` 而不是 `[%rsp+disp]`。
+    #[test]
+    fn store_imm_mem_keeps_nonzero_disp_with_sib() {
+        use crate::codegen::shared::asm_operand::Width::*;
+        // movq $5,0x8(%rsp): 48 C7 44 24 08 05 00 00 00
+        assert_eq!(
+            Insn::store_imm_mem(B64, 4, 8, 5).encode_bytes(),
+            Some(vec![0x48, 0xC7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00]),
+        );
+        // movq $5,(%rsp): 48 C7 04 24 ... —— SIB 且 disp=0，mod=00 才是正确形态。
+        assert_eq!(
+            Insn::store_imm_mem(B64, 4, 0, 5).encode_bytes(),
+            Some(vec![0x48, 0xC7, 0x04, 0x24, 0x05, 0x00, 0x00, 0x00]),
+        );
+        // movq $5,0x0(%rbp): 48 C7 45 00 ...（无 SIB，基址 101 强制 mod=01）
+        assert_eq!(
+            Insn::store_imm_mem(B64, 5, 0, 5).encode_bytes(),
+            Some(vec![0x48, 0xC7, 0x45, 0x00, 0x05, 0x00, 0x00, 0x00]),
+        );
+        // movq $5,0x0(%r13): 49 C7 45 00 ... —— 旧写法看的是 `base != 5`，漏了 r13，
+        // 会编成 mod=00 rm=101 的 RIP 相对形态。
+        assert_eq!(
+            Insn::store_imm_mem(B64, 13, 0, 5).encode_bytes(),
+            Some(vec![0x49, 0xC7, 0x45, 0x00, 0x05, 0x00, 0x00, 0x00]),
+        );
     }
 
     /// P11 Bucket P11R: ud2 (0F 0B).

@@ -415,6 +415,25 @@ pub(super) fn inst_to_expr_resolved(
                     }
                 }
             }
+            // 移位的结果类型在 C 里就是「左操作数整数提升后的类型」（右操作数只是计数）。
+            // 左操作数若是字面量，这份事实在 SSA 里已经没了：`Operand::Int` 只记值不记类型，
+            // `(Bitmask)1` 降到 IR 就是裸 `Int(1)`（上面比较操作要另开一张按 `dest` 名索引的
+            // 表，正是因为这类信息会被 SCCP 抹掉；移位只有左侧会中招）。于是
+            // `infer_binop_type` 只能推出 `Int`，codegen 按 32 位记账再符号扩展。实测 -O2 下
+            // `((unsigned long long)1) << i`：i=31 得 0xffffffff80000000（该是 0x80000000）、
+            // i>=32 得 0（该是 0x100000000 起）。
+            // 目的变量上的类型是前端在还看得见 AST 类型时当场记下的（`fresh("bin", ty)`），
+            // 而对移位来说移位结果类型 == 左操作数类型，所以直接拿它补回左操作数，不新增表。
+            // 真实受害者：`sqlite3WhereGetMask()` 的 `return MASKBIT(i);` —— 第 33 号游标的
+            // maskSelf 记成 0，查询规划器把同一个游标开两遍、最后一个游标从未打开，字节码在
+            // OP_Column 读 [NULL+0x50] 段错误（docs §7 的 H）。
+            if matches!(op, BinOp::Shl | BinOp::Shr) {
+                if let Some(ty) = dest_ty {
+                    if ty.is_int() {
+                        restore_int_operand_ty(&mut l_expr, ty);
+                    }
+                }
+            }
             let binop_ty = infer_binop_type(op, &l_expr, &r_expr);
             Expr::Binop {
                 op: *op,
@@ -462,7 +481,11 @@ pub(super) fn inst_to_expr_resolved(
                 },
             }
         },
-        InstKind::Store { e, src, is_volatile } => {
+        InstKind::Store {
+            e,
+            src,
+            is_volatile,
+        } => {
             let addr = resolve_operand(e, &fake_env, subst, func);
             let val = resolve_operand(src, &fake_env, subst, func);
             let dty = store_pointee_ty(&addr);

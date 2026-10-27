@@ -875,6 +875,211 @@ int use(int x) { return f1(x) + f2(x); }
     assert_eq!(bss_size, 0, "函数声明不得占用 .bss，实际 {bss_size} 字节: {syms}");
 }
 
+/// `extern` 重声明写在定义**之后**不得把全局对象降级成未定义引用。
+///
+/// 缺陷形状：codegen 收集全局变量时，`is_extern && init.is_none()` 那条分支无条件把
+/// 名字记成 SHN_UNDEF，于是「先定义、再 extern 重声明」这对合法声明里，后一条把
+/// 前一条已经分配好的存储条目覆盖掉，符号退化成 `U`、重定位指向 0，链接期报
+/// undefined reference。SQLite amalgamation 的 `sqlite3_io_error_pending`（27675 行
+/// 定义、62858 行再 extern）就是这么把 testfixture 卡住的；数组、结构体、
+/// `_Thread_local`、`__attribute__((section(...)))` 走同一条分支，全部受影响。
+/// C11 6.2.2p5 / 6.9.2p4：重复声明不改变对象的定义与存储。
+#[test]
+#[cfg(unix)]
+fn extern_redeclaration_after_definition_keeps_definition() {
+    fn sym_line(obj: &std::path::Path, name: &str) -> String {
+        let readelf = Command::new("readelf")
+            .args(["-sW"])
+            .arg(obj)
+            .output()
+            .expect("readelf");
+        let syms = String::from_utf8_lossy(&readelf.stdout).to_string();
+        syms
+            .lines()
+            .find(|l| l.split_whitespace().last() == Some(name))
+            .unwrap_or_else(|| panic!("{name} 应出现在符号表: {syms}"))
+            .to_string()
+    }
+
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    // (标记, 源, 期望的定义符号名)：每种形状都在旧实现里丢过定义
+    let cases = [
+        ("def_int", "int d = 7;\nextern int d;\nint get_d(void) { return d; }\n", "d"),
+        (
+            "def_array",
+            "int a[3] = {1, 2, 3};\nextern int a[];\nint sum_a(void) { return a[0] + a[1] + a[2]; }\n",
+            "a",
+        ),
+        (
+            "def_struct",
+            "struct S { int x; long y; };\nstruct S s = {4, 4000000000L};\nextern struct S s;\nlong get_s(void) { return s.x + s.y; }\n",
+            "s",
+        ),
+        (
+            "def_tls",
+            "_Thread_local int tl = 5;\nextern _Thread_local int tl;\nint get_tl(void) { return tl; }\n",
+            "tl",
+        ),
+        (
+            "def_section",
+            "__attribute__((section(\".mydata\"))) int sd = 3;\nextern int sd;\nint get_sd(void) { return sd; }\n",
+            "sd",
+        ),
+        (
+            "def_ptr_init",
+            "int tgt = 11;\nint *p = &tgt;\nextern int *p;\nint get_p(void) { return *p; }\n",
+            "p",
+        ),
+        (
+            "tentative",
+            "int t;\nextern int t;\nint get_t(void) { return t; }\n",
+            "t",
+        ),
+    ];
+    for (tag, src, name) in cases {
+        let sp = dir.join(format!("dcc-extern-redecl-{tag}-{pid}.c"));
+        let op = dir.join(format!("dcc-extern-redecl-{tag}-{pid}.o"));
+        fs::write(&sp, src).expect("write fixture");
+        let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+            .args(["-O2", "-c", "-o"])
+            .arg(&op)
+            .arg(&sp)
+            .output()
+            .expect("run dcc -c");
+        assert!(
+            out.status.success(),
+            "{tag} compile: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let line = sym_line(&op, name);
+        // TLS 对象的符号类型是 TLS（与 gcc 同形），不是 OBJECT
+        assert!(
+            line.contains("OBJECT") || line.contains("TLS"),
+            "{tag}: {name} 应是数据对象: {line}"
+        );
+        assert!(!line.contains("UND"), "{tag}: {name} 是定义而不是引用: {line}");
+        assert!(
+            line.contains("GLOBAL"),
+            "{tag}: {name} 应是外部链接的定义: {line}"
+        );
+        let _ = fs::remove_file(&sp);
+        let _ = fs::remove_file(&op);
+    }
+
+    // 运行期与跨 TU：完整重演 SQLite 的形状（定义 → 使用 → 再 extern 重声明 →
+    // 继续使用），旧实现下这一步直接链接失败（undefined reference）。
+    let ta = dir.join(format!("dcc-extern-redecl-x-a-{pid}.c"));
+    let tb = dir.join(format!("dcc-extern-redecl-x-b-{pid}.c"));
+    let tx = dir.join(format!("dcc-extern-redecl-x-{pid}"));
+    fs::write(
+        &ta,
+        "int io_pending = 0;\nint bump(void) { return ++io_pending; }\nextern int io_pending;\nint peek(void) { return io_pending; }\n",
+    )
+    .expect("write fixture a");
+    fs::write(
+        &tb,
+        "int bump(void);\nint peek(void);\nint main(void) {\n  bump();\n  bump();\n  return (bump() == 3 && peek() == 3) ? 0 : 1;\n}\n",
+    )
+    .expect("write fixture b");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-o"])
+        .arg(&tx)
+        .arg(&ta)
+        .arg(&tb)
+        .output()
+        .expect("run dcc link");
+    assert!(
+        out.status.success(),
+        "定义后的 extern 重声明不得破坏链接: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let run = Command::new(&tx).output().expect("run cross-TU binary");
+    let _ = fs::remove_file(&ta);
+    let _ = fs::remove_file(&tb);
+    let _ = fs::remove_file(&tx);
+    assert!(
+        run.status.success(),
+        "跨 TU 读写同一个对象必须得到定义处的存储: rc={:?}",
+        run.status.code()
+    );
+
+    // 反向自证：只有 extern 声明时仍必须留未定义引用，修复不得把声明变成定义
+    let sp = dir.join(format!("dcc-extern-redecl-only-{pid}.c"));
+    let op = dir.join(format!("dcc-extern-redecl-only-{pid}.o"));
+    fs::write(&sp, "extern int missing;\nint get_m(void) { return missing; }\n")
+        .expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("run dcc -c");
+    assert!(
+        out.status.success(),
+        "only-extern compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let line = sym_line(&op, "missing");
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+    assert!(line.contains("UND"), "纯 extern 声明只能是引用: {line}");
+    assert!(!line.contains("OBJECT GLOBAL"), "纯 extern 声明不得占用定义: {line}");
+}
+
+/// 块作用域 `extern` 声明取址必须发**未定义外部引用**，不得在帧内另建对象。
+///
+/// 缺陷形状：规划期把「不在本帧规划表也不在本 TU 全局表」的名字一律当局部
+/// `register_var`，于是 `{ extern int gt; setlink(&gt); }` 编译成 `lea -0x50(%r13)`：
+/// 目标文件里既没有 `U gt` 也没有指向它的重定位，链接器无从解析。SQLite 测试
+/// 套的 `Tcl_LinkVar(interp, "sqlite_io_error_pending", (char*)&sqlite3_io_error_pending, …)`
+/// 就死在这一句上（六个 io-error 变量全部链到栈槽）。
+#[test]
+#[cfg(unix)]
+fn block_scope_extern_takes_address_emits_undefined_reference() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let sp = dir.join(format!("dcc-block-extern-{pid}.c"));
+    let op = dir.join(format!("dcc-block-extern-{pid}.o"));
+    fs::write(
+        &sp,
+        "extern void setlink(void *);\nvoid mk(void){ extern int gt; setlink(&gt); }\n",
+    )
+    .expect("write fixture");
+    let out = Command::new(env!("CARGO_BIN_EXE_dcc"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&op)
+        .arg(&sp)
+        .output()
+        .expect("run dcc -c");
+    assert!(
+        out.status.success(),
+        "compile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let readelf = Command::new("readelf")
+        .args(["-sW"])
+        .arg(&op)
+        .output()
+        .expect("readelf");
+    let syms = String::from_utf8_lossy(&readelf.stdout).to_string();
+    let relocs = Command::new("readelf")
+        .args(["-rW"])
+        .arg(&op)
+        .output()
+        .expect("readelf -r");
+    let rel = String::from_utf8_lossy(&relocs.stdout).to_string();
+    let _ = fs::remove_file(&sp);
+    let _ = fs::remove_file(&op);
+    let line = syms
+        .lines()
+        .find(|l| l.split_whitespace().last() == Some("gt"))
+        .unwrap_or_else(|| panic!("块内 extern 取址应作为未定义引用出现: {syms}"));
+    assert!(line.contains("UND"), "gt 只能是引用: {line}");
+    assert!(line.contains("OBJECT"), "gt 是对象不可能是函数: {line}");
+    assert!(rel.contains("gt"), "必须留下指向 gt 的重定位: {rel}");
+}
+
 /// CET/IBT: -z ibt 编译 PIE 应生成 .plt.sec 节和 .gnu.property 节
 #[test]
 fn cet_ibt_plt_sec_and_gnu_property_sections() {

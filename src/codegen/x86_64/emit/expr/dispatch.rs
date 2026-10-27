@@ -18,7 +18,11 @@ use crate::const_eval;
 /// 默认 0 ⇒ 产物逐字节不变（由 `lvm.o`/`sqlite3.c` 的零漂移对照与全量用例把守）。
 fn dest_assign_enabled() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("DCC_DEST_ASSIGN").map(|s| s != "0").unwrap_or(false))
+    *V.get_or_init(|| {
+        std::env::var("DCC_DEST_ASSIGN")
+            .map(|s| s != "0")
+            .unwrap_or(false)
+    })
 }
 
 /// `DCC_RHS_PURE`：把 Binop 左值暂存的「右值不会写 dst」判据从叶子形态扩到整棵纯算术树。
@@ -705,8 +709,13 @@ impl Codegen {
                 // 打出来聚合。不写这个就只能猜「为什么 248 条链里只消掉了 13 条」。
                 if need_save_lhs && std::env::var_os("DCC_RHS_PROBE").is_some() {
                     let s = format!("{r:?}");
-                    let cut = s.find(", ty:").unwrap_or_else(|| s.find("span:").unwrap_or(s.len()));
-                    eprintln!("RHSPROBE dst={dst} iso={rhs_isolated} pure={rhs_pure} {}", &s[..cut]);
+                    let cut = s
+                        .find(", ty:")
+                        .unwrap_or_else(|| s.find("span:").unwrap_or(s.len()));
+                    eprintln!(
+                        "RHSPROBE dst={dst} iso={rhs_isolated} pure={rhs_pure} {}",
+                        &s[..cut]
+                    );
                 }
                 let callee_reg = if use_callee_saved && need_save_lhs {
                     self.alloc_callee_saved()
@@ -723,7 +732,9 @@ impl Codegen {
                     // 挂 gas 与本文件其他地方同口径：`-S` 文本与字节必须同源，否则
                     // P12 的文本平价检查（scripts/check_asm_text_parity.sh）对这一类
                     // 高频发射点只能靠默认反推。
-                    use crate::codegen::x86_64::emit::gas::{mem_disp as gas_mem_disp, REG64 as GAS_REG64};
+                    use crate::codegen::x86_64::emit::gas::{
+                        mem_disp as gas_mem_disp, REG64 as GAS_REG64,
+                    };
                     let gas = format!(
                         "mov {}, %{}",
                         GAS_REG64[(dst & 15) as usize],
@@ -1032,7 +1043,9 @@ impl Codegen {
                 }
                 // sanitizer 插桩可能把 LHS 包成 Comma(check, lvalue):
                 // 先执行 check 调用, 再对真实 lvalue 走 store 路径, 否则
-                // 形态匹配失败会导致 store 静默丢失 (KASAN 下 *p = v 空操作)
+                // 形态匹配失败会导致 store 静默丢失 (KASAN 下 *p = v 空操作)。
+                // 剥法本身住在 `ast::peel_instrumented_lvalue`（帧规划期按形状判断
+                // lvalue 时用同一个），这里的循环多做的只是逐个发出 check 调用。
                 let mut lv: &Expr = l.as_ref();
                 while let Expr::Comma {
                     l: check, r: inner, ..
@@ -1203,8 +1216,7 @@ impl Codegen {
                         {
                             match self.home_for(&name.name) {
                                 crate::location::Location::Reg(rid)
-                                    if rid.bank == crate::location::RegBank::Gp
-                                        && rid.n != dst =>
+                                    if rid.bank == crate::location::RegBank::Gp && rid.n != dst =>
                                 {
                                     Some(rid.n)
                                 },
@@ -1215,8 +1227,8 @@ impl Codegen {
                         };
                         let wdst = direct_home.unwrap_or(dst);
                         self.gen_expr_decay(r, wdst); // 数组衰减: int *p = arr
-                                                     // Implicit float→int conversion when RHS is
-                                                     // float but LHS is integer (e.g. `a = 0.0;`).
+                                                      // Implicit float→int conversion when RHS is
+                                                      // float but LHS is integer (e.g. `a = 0.0;`).
                         let r_ty = r.ty();
                         if matches!(
                             &r_ty,
@@ -2295,6 +2307,9 @@ impl Codegen {
                             // gen_expr does NOT materialize the struct value in
                             // rax:rdx (struct > 8B has no scalar rvalue). Instead
                             // we must use gen_lvalue_addr to get the address.
+                            // ⚠ 这三条形状判据与规划期的
+                            // `func_setup::agg_member_scratch_used` 是同一事实的两面：改任何
+                            // 一边都必须同步另一边，否则就是「预算算少 → E1133」那一类假硬错。
                             let rhs_is_lvalue = matches!(
                                 &**r,
                                 Expr::Member { .. } | Expr::Index { .. } | Expr::Deref { .. }
@@ -2631,9 +2646,9 @@ impl Codegen {
                                 AddrKeep::OnStack => self.push(0), // 保存目标地址
                             }
                             self.gen_expr(r, Self::EVAL_BASE); // rax = val (浮点: xmm0)
-                            // 值没人要 ⇒ 只做到存之前必要的那一段转换，不再把 rax 归约到
-                            // 左值类型（store 自己就按左值宽度截断）。寄存器家里的赋值走另外
-                            // 那条臂，那里寄存器内容就是变量的表示，必须保持规范形态。
+                                                               // 值没人要 ⇒ 只做到存之前必要的那一段转换，不再把 rax 归约到
+                                                               // 左值类型（store 自己就按左值宽度截断）。寄存器家里的赋值走另外
+                                                               // 那条臂，那里寄存器内容就是变量的表示，必须保持规范形态。
                             if dead_here {
                                 self.convert_assign_rhs_in_reg_for_store(0, &assign_l_ty, &r.ty());
                             } else {
@@ -3521,6 +3536,9 @@ impl Codegen {
                 // 语句表达式 ({...}): 执行块内语句, 最后表达式值留在 dst
                 let items = &block.items;
                 let cleanup_base = self.begin_cleanup_scope();
+                // static local 的可见性也是块作用域的。这里是 `gen_block_items`
+                // 在语句表达式上的那份副本, 两端必须与它同步。
+                self.push_static_scope();
                 let last_idx = items.len().saturating_sub(1);
                 for (i, item) in items.iter().enumerate() {
                     match item {
@@ -3538,6 +3556,8 @@ impl Codegen {
                         },
                         BlockItem::Stmt(s) => self.gen_stmt(s),
                         BlockItem::Decl(Decl::Var(v)) => {
+                            // 绑在两条 `continue` 之前 (同 `gen_block_item`)。
+                            self.bind_static_local(v);
                             // static 局部变量已在全局数据段分配
                             if v.is_static
                                 && self
@@ -3605,8 +3625,17 @@ impl Codegen {
                                 self.gen_vla_alloc(v);
                             }
                             if let Some(init) = &v.init {
-                                // 浮点: 结果在 xmm0, 必须用 movsd/movss 存回栈 (同 Stmt::Decl 路径)
-                                if matches!(
+                                // 字符数组 + 字符串字面量：复制内容而不是指针 (同 `gen_block_item`)。
+                                if let Expr::String { data, .. } = init {
+                                    if matches!(&v.ty, Type::Array(_, _)) {
+                                        let (name, ty) = (v.name.name.clone(), v.ty.clone());
+                                        self.gen_char_array_str_init(&name, &ty, data);
+                                    } else {
+                                        self.gen_expr(init, Self::EVAL_BASE);
+                                        self.mov_to_stack(0, &v.name.name);
+                                    }
+                                } else if matches!(
+                                    // 浮点: 结果在 xmm0, 必须用 movsd/movss 存回栈 (同 Stmt::Decl 路径)
                                     &v.ty,
                                     Type::Float | Type::Double | Type::LongDouble | Type::Float128
                                 ) {
@@ -3660,6 +3689,8 @@ impl Codegen {
                 } else {
                     self.end_cleanup_scope(cleanup_base);
                 }
+                // 语句表达式也是一个块作用域: static 绑定同样要还原。
+                self.pop_static_scope();
             },
             Expr::Cast { ty, e, .. } => {
                 // 单一入口：本 arm 曾是 `gen_expr_cast` 的逐字副本。此处模式
@@ -3938,6 +3969,15 @@ impl Codegen {
                             inner_sz as i32,
                             &gas,
                         ));
+                    }
+                } else {
+                    // 兜底：上面几条具名形状之外，也必须把地址算出来。旧写法在这里
+                    // **什么都不发**，于是 `%dst`（通常就是 EVAL_BASE=%rax）带着上一条
+                    // 指令的残值被当成地址交出去 —— ASan 的 store 检查因此检查一个随机
+                    // 地址（实测 `q->head = t` 的 `__asan_store4` 入参没算过）。「静默
+                    // 不发音」比报错难查一个量级，这里不允许再出现。
+                    if !self.gen_lvalue_addr(e, dst) {
+                        self.gen_expr(e, dst);
                     }
                 }
             },

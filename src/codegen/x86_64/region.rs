@@ -54,7 +54,7 @@
 // 服务为零」那个读数（见报告 §6.16.1）。
 
 use crate::codegen::shared::asm_operand::Width;
-use crate::codegen::x86_64::blockopt::{MemDir, RawFrame, RegWrites, raw_frame, written_gp};
+use crate::codegen::x86_64::blockopt::{raw_frame, written_gp, MemDir, RawFrame, RegWrites};
 use crate::codegen::x86_64::insn::Insn;
 use crate::codegen::x86_64::opcode::{MemOperand, Operand as O, X86_64Opcode};
 use std::collections::{HashMap, HashSet};
@@ -216,7 +216,12 @@ fn frame_use(insn: &Insn) -> FrameUse {
         }
     };
     match &insn.op {
-        Op::MovRm { width, dst, src, rip_relative } => {
+        Op::MovRm {
+            width,
+            dst,
+            src,
+            rip_relative,
+        } => {
             let w = wb(*width);
             match (dst, src) {
                 (O::Mem(m), _) if *rip_relative => out.opaque = true,
@@ -225,14 +230,19 @@ fn frame_use(insn: &Insn) -> FrameUse {
                 _ => {},
             }
         },
-        Op::MovExt { from, to, dst, src, .. } => {
-            match (dst, src) {
-                (O::Mem(m), _) => note(&mut out, m, wb(*to), MemDir::Write),
-                (_, O::Mem(m)) => note(&mut out, m, wb(*from), MemDir::Read),
-                _ => {},
-            }
+        Op::MovExt {
+            from, to, dst, src, ..
+        } => match (dst, src) {
+            (O::Mem(m), _) => note(&mut out, m, wb(*to), MemDir::Write),
+            (_, O::Mem(m)) => note(&mut out, m, wb(*from), MemDir::Read),
+            _ => {},
         },
-        Op::AluRm { op, width, dst, src } => {
+        Op::AluRm {
+            op,
+            width,
+            dst,
+            src,
+        } => {
             let w = wb(*width);
             // `cmp`/`test` 两个源都是只读；其余是「读改写目的」。
             let pure_read = matches!(op, AluOp::Cmp | AluOp::Test);
@@ -287,7 +297,11 @@ fn frame_use(insn: &Insn) -> FrameUse {
             // 所有 `[r13+disp]` 之下）；`dst` 是内存时（`pop [槽]`）才与帧有关。
             let w = wb(*width);
             if let O::Mem(m) = dst {
-                let dir = if matches!(op, StackOp::Pop) { MemDir::Write } else { MemDir::Read };
+                let dir = if matches!(op, StackOp::Pop) {
+                    MemDir::Write
+                } else {
+                    MemDir::Read
+                };
                 note(&mut out, m, w, dir);
             }
         },
@@ -330,7 +344,11 @@ fn frame_use(insn: &Insn) -> FrameUse {
             RawFrame::NoMem | RawFrame::Foreign => {},
             RawFrame::Opaque => out.opaque = true,
             RawFrame::Slot { disp, len, dir } => {
-                out.exact.push(Access { slot: disp as i64, len, dir });
+                out.exact.push(Access {
+                    slot: disp as i64,
+                    len,
+                    dir,
+                });
             },
         },
         // 控制流与无操作数形：它们不碰帧内存。（区的边界另有专门入口处理。）
@@ -350,10 +368,11 @@ fn frame_use(insn: &Insn) -> FrameUse {
 fn promotable_store(insn: &Insn) -> Option<(i64, u8)> {
     match &insn.op {
         X86_64Opcode::MovRm {
-            width, dst: O::Mem(m), src: O::Reg(s, _), rip_relative,
-        } if !*rip_relative && matches!(width, Width::B64) => {
-            frame_slot(m).map(|slot| (slot, *s))
-        },
+            width,
+            dst: O::Mem(m),
+            src: O::Reg(s, _),
+            rip_relative,
+        } if !*rip_relative && matches!(width, Width::B64) => frame_slot(m).map(|slot| (slot, *s)),
         _ => None,
     }
 }
@@ -363,9 +382,20 @@ enum ReadForm {
     /// `mov [槽],dst`
     MovRm { dst: u8, width: Width, len: u8 },
     /// `movsxd/movzx [槽],dst`
-    MovExt { dst: u8, sign: bool, from: Width, to: Width, len: u8 },
+    MovExt {
+        dst: u8,
+        sign: bool,
+        from: Width,
+        to: Width,
+        len: u8,
+    },
     /// `cmp/test [槽],src`：只读，换成家号语义完全相同，但它不产生新的家（没有目的地号）。
-    AluRm { op: crate::codegen::x86_64::opcode::AluOp, width: Width, dst: u8, len: u8 },
+    AluRm {
+        op: crate::codegen::x86_64::opcode::AluOp,
+        width: Width,
+        dst: u8,
+        len: u8,
+    },
 }
 
 impl ReadForm {
@@ -389,26 +419,63 @@ impl ReadForm {
 fn readable_load(insn: &Insn) -> Option<(ReadForm, i64)> {
     use crate::codegen::x86_64::opcode::AluOp;
     match &insn.op {
-        X86_64Opcode::MovRm { width, dst: O::Reg(d, _), src: O::Mem(m), rip_relative }
-            if !*rip_relative && (1..=8).contains(&wb(*width)) =>
-        {
+        X86_64Opcode::MovRm {
+            width,
+            dst: O::Reg(d, _),
+            src: O::Mem(m),
+            rip_relative,
+        } if !*rip_relative && (1..=8).contains(&wb(*width)) => {
             let len = wb(*width);
-            frame_slot(m).map(|slot| (ReadForm::MovRm { dst: *d, width: *width, len }, slot))
+            frame_slot(m).map(|slot| {
+                (
+                    ReadForm::MovRm {
+                        dst: *d,
+                        width: *width,
+                        len,
+                    },
+                    slot,
+                )
+            })
         },
         X86_64Opcode::MovExt {
-            sign, from, to, dst: O::Reg(d, _), src: O::Mem(m), rip_relative
+            sign,
+            from,
+            to,
+            dst: O::Reg(d, _),
+            src: O::Mem(m),
+            rip_relative,
         } if !*rip_relative && (1..=8).contains(&wb(*from)) => {
             let len = wb(*from);
             frame_slot(m).map(|slot| {
-                (ReadForm::MovExt { dst: *d, sign: *sign, from: *from, to: *to, len }, slot)
+                (
+                    ReadForm::MovExt {
+                        dst: *d,
+                        sign: *sign,
+                        from: *from,
+                        to: *to,
+                        len,
+                    },
+                    slot,
+                )
             })
         },
         X86_64Opcode::AluRm {
-            op, width, dst: O::Reg(d, _), src: O::Mem(m)
+            op,
+            width,
+            dst: O::Reg(d, _),
+            src: O::Mem(m),
         } if (1..=8).contains(&wb(*width)) && matches!(op, AluOp::Cmp | AluOp::Test) => {
             let len = wb(*width);
             frame_slot(m).map(|slot| {
-                (ReadForm::AluRm { op: *op, width: *width, dst: *d, len }, slot)
+                (
+                    ReadForm::AluRm {
+                        op: *op,
+                        width: *width,
+                        dst: *d,
+                        len,
+                    },
+                    slot,
+                )
             })
         },
         _ => None,
@@ -461,7 +528,9 @@ impl crate::codegen::x86_64::codegen::Codegen {
         }
         self.region_flush();
         self.region.id = self.region.id.wrapping_add(1);
-        self.region.by_label.insert(name.to_string(), self.region.id);
+        self.region
+            .by_label
+            .insert(name.to_string(), self.region.id);
     }
 
     /// 区出口：把所有活着的家丢掉。四个边界（`label()`、任何跳转、`goto *表[…]`、
@@ -491,8 +560,13 @@ impl crate::codegen::x86_64::codegen::Codegen {
         if self.region.live > 0 {
             // 条件 1：家号被这条踩到 ⇒ 丢家。
             let rw = written_gp(insn);
-            let clobbered: Vec<i64> =
-                self.region.homes.values().filter(|h| !rw.keeps(h.reg)).map(|h| h.slot).collect();
+            let clobbered: Vec<i64> = self
+                .region
+                .homes
+                .values()
+                .filter(|h| !rw.keeps(h.reg))
+                .map(|h| h.slot)
+                .collect();
             if !clobbered.is_empty() {
                 self.region.stats.drops_clobber += 1;
             }
@@ -542,7 +616,14 @@ impl crate::codegen::x86_64::codegen::Codegen {
             // 已有同一个槽的家：把家改绑到本条的源号上（内存刚刚被本条写过，改绑后两者
             // 仍然等价）。没有就新建。
             if self.region_heat_ok(slot) {
-                self.region.homes.insert(slot, RegionHome { reg: src, slot, vlen: 8 });
+                self.region.homes.insert(
+                    slot,
+                    RegionHome {
+                        reg: src,
+                        slot,
+                        vlen: 8,
+                    },
+                );
                 self.region.live = self.region.homes.len() as u32;
                 self.region.stats.promoted += 1;
             }
@@ -568,9 +649,13 @@ impl crate::codegen::x86_64::codegen::Codegen {
                         }
                         Insn::mov_rm_reg(width, dst, h.reg)
                     },
-                    ReadForm::MovExt { dst, sign, from, to, .. } => {
-                        Insn::mov_ext(sign, from, to, dst, h.reg)
-                    },
+                    ReadForm::MovExt {
+                        dst,
+                        sign,
+                        from,
+                        to,
+                        ..
+                    } => Insn::mov_ext(sign, from, to, dst, h.reg),
                     ReadForm::AluRm { op, width, dst, .. } => Insn::new(
                         X86_64Opcode::AluRm {
                             op,
@@ -596,7 +681,11 @@ impl crate::codegen::x86_64::codegen::Codegen {
             }
             self.region.homes.insert(
                 slot,
-                RegionHome { reg: dst, slot, vlen: form.needs() },
+                RegionHome {
+                    reg: dst,
+                    slot,
+                    vlen: form.needs(),
+                },
             );
             self.region.live = self.region.homes.len() as u32;
             self.region.stats.promoted += 1;
@@ -730,7 +819,11 @@ impl crate::codegen::x86_64::codegen::Codegen {
 /// `DCC_REGION_HOME` 旋钮（默认关）。
 pub fn region_knob_on() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("DCC_REGION_HOME").map(|s| s != "0").unwrap_or(false))
+    *V.get_or_init(|| {
+        std::env::var("DCC_REGION_HOME")
+            .map(|s| s != "0")
+            .unwrap_or(false)
+    })
 }
 
 /// 「家号必须是 callee-saved」那道门（`DCC_REGION_CALLEE=0` 关掉）。
@@ -741,7 +834,9 @@ pub fn region_knob_on() -> bool {
 pub fn callee_gate_on() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
-        std::env::var("DCC_REGION_CALLEE").map(|s| s != "0").unwrap_or(true)
+        std::env::var("DCC_REGION_CALLEE")
+            .map(|s| s != "0")
+            .unwrap_or(true)
     })
 }
 

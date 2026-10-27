@@ -1329,9 +1329,7 @@ pub fn strip_int_suffix(s: &str) -> &str {
             t = &t[..n - 2];
             continue;
         }
-        match t.strip_suffix(|c: char| {
-            matches!(c, 'u' | 'U' | 'l' | 'L' | 'i' | 'I' | 'j' | 'J')
-        }) {
+        match t.strip_suffix(|c: char| matches!(c, 'u' | 'U' | 'l' | 'L' | 'i' | 'I' | 'j' | 'J')) {
             Some(rest) => t = rest,
             None => break,
         }
@@ -1614,7 +1612,7 @@ mod tests {
             ("0x1'fuwb", "0x1'f"),
             ("5WB", "5"),
             ("123uwb", "123"),
-            ("0xb", "0xb"),  // b 是十六进制数字, 不可剥
+            ("0xb", "0xb"), // b 是十六进制数字, 不可剥
             ("0xB", "0xB"),
             ("0xff", "0xff"),
             ("42uLL", "42"),

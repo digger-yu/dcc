@@ -72,39 +72,104 @@ impl Codegen {
 
     // ===== KASAN 栈红区插桩 =====
 
-    /// KASAN: 毒化整个栈帧 (shadow bytes 设为 0xF8 = stack mid redzone)
-    /// 调用 __asan_poison_memory_region(addr, size)
-    /// addr = r13 - frame_size, size = frame_size
-    pub fn emit_kasan_stack_poison_all(&mut self) {
-        // rdi = r13 - frame_size (帧基址，读解算表)
-        let fs = self.frame_layout.frame_size;
-        self.emit_lea_r13(7, self.frame_layout.frame_base());
-        // mov esi, frame_size
-        self.emit_insn(&Insn::raw_bytes(&[0xbe]));
-        self.emit_insn(&Insn::raw_bytes(&(fs as i32).to_le_bytes()));
-        // call __asan_poison_memory_region (PLT)
-        self.emit_call_extern("__asan_poison_memory_region");
-    }
-
-    /// KASAN: 解除变量区域的毒化 (shadow bytes 设为 0)
-    /// 对 var_map 中每个非 Void 变量调用 __asan_unpoison_memory_region(addr, size)
-    pub fn emit_kasan_stack_unpoison_vars(&mut self) {
-        // 收集非 Void 变量 (跳过 padding 和红区占位)
-        let vars: Vec<(i64, usize)> = self
+    /// KASAN/ASan 栈插桩：进函数时先把整个帧的 shadow 清零，再**只毒真实红区**。
+    ///
+    /// 为什么不是旧那样「毒整个帧 → 只解除 `var_map` 里具名变量的毒」：那条模型下
+    /// 一大片活内存终身带毒 —— 发射期才登记的晚分配带（`<agg_member_tmp>` /
+    /// `__compound_lit_*` / `__vmsize_*` / ap 槽，序言跑时它们还不在 `var_map` 里）、
+    /// spill 带、以及按 `ty.size()` 只解了一半的对象尾部。把这类槽的地址交给未插桩的
+    /// 库（Tcl / libc）正常写入，就报 `use-after-poison` 假阳性（实测：SQLite
+    /// `oserror.test` 在 ASan 构建里报的写者是 libtcl，而地址在当时的 sp 之上，
+    /// 即落在活帧里）。退出路径也不加 unpoison 调用 —— 那会踩坏 rax/rdx/xmm0
+    /// 里的返回值；「进则先清」已经覆盖了陈旧毒的回收。
+    ///
+    /// 红区条目由 `collect_frame_var_decls` 一侧建在 `var_map` 里（`__kasan_rz_*`，每个
+    /// 8 字节，紧跟在对应变量下方）。这里只毒那些**确实没被任何活对象占据**的条目；
+    /// 按（偏移, 名字）排序后发射，否则 HashMap 迭代序会泄进产物（不可复现）。
+    ///
+    /// 为什么不直接信红区条目自己的算术：那个算术是「本变量起始地址往下 8 字节 × j」，
+    /// 而排布推进是另一条路径（带同名去重、对齐补齐、跳 padding 等多条分支），两边并非
+    /// 总是同步 —— 实测一个只有 `struct S s; char b[8];` 的 `main` 里，红区条目正好落在
+    /// `b` 的槽上，于是 libc 的 `memcpy` 正常写入被报 `use-after-poison`（同一源码
+    /// gcc 的 ASan 构建干净）。红区在几何上就是「未被占用的帧字节」，所以把判据
+    /// 定在几何事实上：与任何活区间相交的红区条目一律不毒。
+    pub fn emit_kasan_stack_poison_redzones(&mut self) {
+        // 活区间：`var_map` 里除红区条目以外的每一个对象（按槽数取整，保守地当作全占）
+        let mut live: Vec<(i64, i64)> = self
             .var_map
             .iter()
-            .filter(|(name, (_, ty))| {
-                !name.starts_with("__pad_") && !name.starts_with("__kasan_rz_") && *ty != Type::Void
-            })
-            .map(|(_, (off, ty))| (*off, ty.size()))
+            .filter(|(name, _)| !name.starts_with("__kasan_rz_"))
+            .map(|(_, (off, ty))| (*off, off + Self::var_alloc_slots(ty).saturating_mul(8)))
             .collect();
-        for (off, sz) in vars {
+        live.sort_unstable();
+        // 红区候选（排序后发射，保证产物可复现）
+        let mut rzs: Vec<(i64, String)> = self
+            .var_map
+            .iter()
+            .filter(|(name, (_, ty))| name.starts_with("__kasan_rz_") && *ty == Type::Void)
+            .map(|(name, (off, _))| (*off, name.clone()))
+            .collect();
+        rzs.sort();
+        self.shield_arg_regs_begin();
+        // 1) 先清整帧（包括上一位住户留下的陈旧毒）
+        let fs = self.frame_layout.frame_size;
+        self.emit_lea_r13(7, self.frame_layout.frame_base());
+        self.emit_insn(&Insn::raw_bytes(&[0xbe]));
+        self.emit_insn(&Insn::raw_bytes(&(fs as u32).to_le_bytes()));
+        self.emit_call_extern("__asan_unpoison_memory_region");
+        // 2) 再只毒那些真的是空隙的红区
+        for (off, _) in rzs {
+            let end = off + 8;
+            if live.iter().any(|&(ls, le)| ls < end && le > off) {
+                continue; // 这个条目与某个活对象重叠 ⇒ 不是红区，毒它就是假阳性
+            }
             self.emit_lea_r13(7, off);
-            // mov esi, size
             self.emit_insn(&Insn::raw_bytes(&[0xbe]));
-            self.emit_insn(&Insn::raw_bytes(&(sz as u32).to_le_bytes()));
-            // call __asan_unpoison_memory_region
-            self.emit_call_extern("__asan_unpoison_memory_region");
+            self.emit_insn(&Insn::raw_bytes(&8u32.to_le_bytes()));
+            self.emit_call_extern("__asan_poison_memory_region");
+        }
+        self.shield_arg_regs_end();
+    }
+
+    /// 序言插桩用的**入参寄存器屏蔽**：开始处把 SysV 的六个整数参数号与 xmm0-7 存好，
+    /// 结束处原样恢复。
+    ///
+    /// 为什么必须有：这段插桩发在序言里，而参数落栈发生在**函数体开头**，比这里晚；
+    /// `__asan_poison_memory_region` / `__asan_unpoison_memory_region` 是真调用，被调方对
+    /// 这些号没有保留义务 —— 不屏蔽就是把参数当垃圾用（实测：ASan 下
+    /// `sqlite3_snprintf` 看到的指针参数成了 0x1，第一个 `%s` 就 SEGV）。
+    /// 量上配平：6 个 push = 48 字节、xmm 区 128 字节，都是 16 的倍数 ⇒ 调用点的
+    /// rsp 对齐与改前一致；r13 相对寻址也不受影响（本帧基址存在 r13 里）。
+    fn shield_arg_regs_begin(&mut self) {
+        for reg in [7u8, 6, 2, 1, 8, 9] {
+            self.push(reg);
+        }
+        self.emit_insn(&Insn::raw_with_gas(
+            &[0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00],
+            "sub $0x80, %rsp",
+        ));
+        for i in 0..8u8 {
+            self.emit_insn(&Insn::raw_with_gas(
+                &[0x0F, 0x11, 0x44 + (i << 3), 0x24, (i as i8 * 16) as u8],
+                &format!("movaps %xmm{}, {}(%rsp)", i, i * 16),
+            ));
+        }
+    }
+
+    /// 与 `shield_arg_regs_begin` 严格反向配平（先恢复 xmm，再 pop 整数号）。
+    fn shield_arg_regs_end(&mut self) {
+        for i in (0..8u8).rev() {
+            self.emit_insn(&Insn::raw_with_gas(
+                &[0x0F, 0x10, 0x44 + (i << 3), 0x24, (i as i8 * 16) as u8],
+                &format!("movaps {}(%rsp), %xmm{}", i * 16, i),
+            ));
+        }
+        self.emit_insn(&Insn::raw_with_gas(
+            &[0x48, 0x81, 0xC4, 0x80, 0x00, 0x00, 0x00],
+            "add $0x80, %rsp",
+        ));
+        for reg in [9u8, 8, 1, 2, 6, 7] {
+            self.pop(reg);
         }
     }
 

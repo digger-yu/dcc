@@ -319,6 +319,9 @@ mod tests {
             defines: vec![],
             dump_ast: false,
             verbose: false,
+            // `Config` 新增了链接期透传参数（见 `cli.rs`），测试夹具跟着补齐，
+            // 否则 `cargo test` 连编译都过不去（本次只补字段，不改用例语义）。
+            host_link_args: vec![],
             relocatable: true,
             link_mode: false,
             emit_asm: false,

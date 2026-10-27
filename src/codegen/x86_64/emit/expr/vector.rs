@@ -1406,7 +1406,7 @@ impl Codegen {
             match (elem_size, op) {
                 (4, BinOp::Add) => Plan::Arith(SimdArithOp::PAdd, SimdWidth::D), // paddd
                 (4, BinOp::Sub) => Plan::Arith(SimdArithOp::PSub, SimdWidth::D), // psubd
-                (4, BinOp::Mul) => Plan::Pmulld,                                // pmulld
+                (4, BinOp::Mul) => Plan::Pmulld,                                 // pmulld
                 (8, BinOp::Add) => Plan::Arith(SimdArithOp::PAdd, SimdWidth::Q), // paddq
                 (8, BinOp::Sub) => Plan::Arith(SimdArithOp::PSub, SimdWidth::Q), // psubq
                 (2, BinOp::Add) => Plan::Arith(SimdArithOp::PAdd, SimdWidth::W), // paddw
@@ -1414,7 +1414,7 @@ impl Codegen {
                 (1, BinOp::Add) => Plan::Arith(SimdArithOp::PAdd, SimdWidth::B), // paddb
                 (1, BinOp::Sub) => Plan::Arith(SimdArithOp::PSub, SimdWidth::B), // psubb
                 (_, BinOp::And) => Plan::Arith(SimdArithOp::Pand, SimdWidth::O), // pand
-                (_, BinOp::Or) => Plan::Arith(SimdArithOp::Por, SimdWidth::O),  // por
+                (_, BinOp::Or) => Plan::Arith(SimdArithOp::Por, SimdWidth::O),   // por
                 (_, BinOp::Xor) => Plan::Arith(SimdArithOp::Pxor, SimdWidth::O), // pxor
                 _ => return false, // 不支持的组合回退标量路径
             }

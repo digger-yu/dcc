@@ -76,7 +76,10 @@ impl MacroParam {
             Some((n, _kind)) => n,
             None => head,
         };
-        Self { name: name.trim().to_string(), default }
+        Self {
+            name: name.trim().to_string(),
+            default,
+        }
     }
 }
 
@@ -416,7 +419,9 @@ impl AsmDirectiveExpander {
         // 左边必须是个名字，且不能是 `==`/`!=`/`<=`/`>=` 这类比较式的一部分。
         if sym.is_empty()
             || expr.is_empty()
-            || !sym.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '_')
+            || !sym
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '.' || c == '_')
             || sym.ends_with('!')
             || sym.ends_with('<')
             || sym.ends_with('>')
@@ -849,7 +854,13 @@ impl AsmDirectiveExpander {
                 if op == '>' && (i > 0 && b[i - 1] == b'>' || i + 1 < b.len() && b[i + 1] == b'>') {
                     continue;
                 }
-                if op == '=' && (i > 0 && (b[i - 1] == b'=' || b[i - 1] == b'!' || b[i - 1] == b'<' || b[i - 1] == b'>')) {
+                if op == '='
+                    && (i > 0
+                        && (b[i - 1] == b'='
+                            || b[i - 1] == b'!'
+                            || b[i - 1] == b'<'
+                            || b[i - 1] == b'>'))
+                {
                     continue;
                 }
                 if op == '&' && i + 1 < b.len() && b[i + 1] == b'&' {
@@ -1069,7 +1080,8 @@ mod tests {
             ".Lfound == 1 时 .error 分支不该被拉进来: {out:?}"
         );
         assert!(
-            !out.iter().any(|l| l.starts_with(".macro") || l.starts_with(".irp")),
+            !out.iter()
+                .any(|l| l.starts_with(".macro") || l.starts_with(".irp")),
             "宏定义与循环结构不得落到发射端: {out:?}"
         );
     }

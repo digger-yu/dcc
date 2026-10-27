@@ -2071,7 +2071,8 @@ impl Codegen {
                 // InitList); 保险: 按标量单元素取首值写内存
                 if let Some(InitItem::Expr(e)) = inits.first() {
                     self.gen_expr(e, Self::EVAL_BASE);
-                    if matches!(ty, Type::Float | Type::Double | Type::LongDouble | Type::Float128) {
+                    if matches!(ty, Type::Float | Type::Double | Type::LongDouble | Type::Float128)
+                    {
                         self.emit_scalar_to_xmm0_if_needed(e, ty);
                         if matches!(ty, Type::Float) {
                             self.store_xmm32_stack(0, base);

@@ -152,7 +152,9 @@ impl Codegen {
                         // 如 char w[][6] = {"hello","world"}）——整个字符串填入该元素，
                         // 尾部补零到 elem_size。不能走 eval_const_expr，否则字符串会被
                         // 当标量只取首字节（实测将两行错写为 "hw"）。
-                        let Expr::String { data, .. } = value else { unreachable!() };
+                        let Expr::String { data, .. } = value else {
+                            unreachable!()
+                        };
                         let mut row = vec![0u8; elem_size];
                         let n = data.len().min(elem_size);
                         row[..n].copy_from_slice(&data[..n]);
@@ -170,8 +172,7 @@ impl Codegen {
                         Some(if let Some(b) = complex_data {
                             b
                         } else if matches!(&elem_ty.base, Type::Ptr(_)) {
-                            if let Expr::String { data, .. } =
-                                const_eval::unwrap_string_cast(value)
+                            if let Expr::String { data, .. } = const_eval::unwrap_string_cast(value)
                             {
                                 self.emit_string_ptr_slot(elem_rel, data, rodata_slots)
                             } else {

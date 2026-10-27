@@ -182,11 +182,14 @@ impl Codegen {
                 }
             },
             AddressBase::PointerValue { sub } => {
-                if matches!(&sub.offset, ByteOffset::Runtime { .. } | ByteOffset::VlaRuntime { .. })
-                {
-                    return false;
-                }
-                if !self.emit_address_descriptor(sub, original_expr, BASE) {
+                // 子描述符自带运行时下标时必须递归物化, 不能退回: 那层下标叠加
+                // 在「已 load 出的指针值」上, 得到的是**本层要 load 的那个指针槽
+                // 地址** (`p->pp[i][j]` 中的 `&p->pp[i]`)。旧实现在这里见到
+                // Runtime/VlaRuntime 就 return false, 上层 Index 臂的「基址已是
+                // PointerValue 则不补 LOAD」守卫又吞掉了那次解引用, 两者合起来
+                // 把 `ap[i][j]` 发成 `*(u32*)(ap + i*8 + j*4)` —— 读到指针数组自己
+                // 的字节(SQLite walFramePgno 因此把堆指针当页号返回)。
+                if !self.emit_address_descriptor_with_index(sub, original_expr, BASE) {
                     return false;
                 }
                 self.emit_load_mem(8);
@@ -846,6 +849,14 @@ impl Codegen {
         // 维持原形状：`lea` 进 `%r11`（帧寻址 scratch）+ 以 11 为基的变址访问。
         let hoisted_base = self.disptab_base_reg_sym.as_deref() == Some(global);
         let base: u8 = if hoisted_base { 5 } else { 11 };
+        // 报障用（`DCC_DUMP_JT=1`，只读一次 env）：这一条是「全局数组下标」族的单一入口，
+        // 基址号选 5 还是 11 全看这个比较；把它和站点自己的符号一起打出来。
+        if Self::dump_jt_enabled() {
+            eprintln!(
+                "JT-LOAD| fn={} global={} hoisted={:?} base={} lea={}",
+                self.current_func_name, global, self.disptab_base_reg_sym, base, !hoisted_base
+            );
+        }
         // lea r11, [rip + disp32] (RIP-relative, 链接时修补 PC 相对位移)
         // P11: typed Lea RIP-relative (encoder 字节: 4C 8D 1D disp32).
         // 参考 emit_global_addr (instructions.rs:1380) 的做法: 必须在此显式挂 gas_text,

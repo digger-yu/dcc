@@ -112,6 +112,7 @@ pub fn optimize_with_full_target(
     // 内联: O0-O2 仅 always_inline/flatten; O3 额外启发式
     if !opt_skipped("function_inline") {
         function_inline(module, level);
+        dump_after_pass("function_inline", module);
     }
     // asm 只立即数操作数的常量代回：必须紧跟内联（内联产生的形参临时量就是它的主客户），
     // 而且必须在 `level == 0` 提前返回**之前** —— `-O0` 下 `always_inline` 照样会被展开，
@@ -128,9 +129,11 @@ pub fn optimize_with_full_target(
     // 折出的 Int(1) 之后的 fold_expr / SCCP 才能把 `!1` 折成 0、删掉 `if(!1) abort();`。
     if level >= 2 && !opt_skipped("ipa_modref") {
         crate::ipa_modref::run(module, level);
+        dump_after_pass("ipa_modref", module);
     }
     if !opt_skipped("fold_constants") {
         fold_constants(module);
+        dump_after_pass("fold_constants", module);
     }
     if level >= 2 {
         if !opt_skipped("prune_dead_stores") {
@@ -142,12 +145,15 @@ pub fn optimize_with_full_target(
         // asm and asm with side effects are always preserved.
         if !opt_skipped("fold_constant_branches") {
             fold_constant_branches(module);
+            dump_after_pass("fold_constant_branches", module);
         }
         if !opt_skipped("eliminate_unreachable") {
             eliminate_unreachable(module);
+            dump_after_pass("eliminate_unreachable", module);
         }
         if !opt_skipped("ast_gvn") {
             crate::ast_gvn::run(module, level);
+            dump_after_pass("ast_gvn", module);
         }
         if !opt_skipped("loop_opt") {
             crate::loop_opt::run_with_target(module, level, has_vnni, vec_bits);
@@ -179,6 +185,48 @@ fn opt_skipped(name: &str) -> bool {
     std::env::var("DCC_OPT_SKIP")
         .map(|v| v.split(',').any(|s| s.trim() == name))
         .unwrap_or(false)
+}
+
+/// 报障用：在**指定 pass 之后**把点名的函数 AST 打到 stderr。
+/// `DCC_DUMP_PASS=function_inline,ast_gvn` 配 `DCC_DUMP_FN=sqlite3VdbeDelete`
+/// （后者留空 = 一切函数）。只读不改：不参与任何判据、不进产物字节。
+///
+/// 为什么需要它：`-O2` 的「static body inline」展开后，某个空指针卫兵在产物里
+/// 成了常量真（实测 `mov $1,%eax; test %eax,%eax`，于是 `aOp==0` 时照算
+/// `&aOp[nOp-1]`，读野地址）。要定「是展开自己错还是后面某个 pass 折错」，
+/// 靠逐 pass 关掉重编要十几轮（每轮一次全量重编）；直接看每个 pass 之后的树，
+/// 一次编译就够。
+pub(crate) fn dump_after_pass(name: &str, module: &mut Module) {
+    // 与其余 `DCC_INLINE_*` 闸门同一纪律：`OnceLock` 只读一次 env。本函数在**每个函数×
+    // 每个 pass** 上都会被叫一次，直接 `env::var` 就是上万次 getenv，会把配对计时的
+    // 现场搅乱（而对计时无关的开关来说，那是白白改变待测量）。
+    static SPEC: std::sync::OnceLock<(Vec<String>, String)> = std::sync::OnceLock::new();
+    let (passes, want_fn) = SPEC.get_or_init(|| {
+        let p = std::env::var("DCC_DUMP_PASS")
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        (p, std::env::var("DCC_DUMP_FN").unwrap_or_default())
+    });
+    if passes.is_empty() || !passes.iter().any(|s| s == name) {
+        return;
+    }
+    let prog = module.source_mut();
+    for decl in prog.decls.iter() {
+        if let Decl::Func(f) = decl {
+            if !want_fn.is_empty() && f.name.name != *want_fn {
+                continue;
+            }
+            if f.body.is_some() {
+                eprintln!("DUMP| pass={name} fn={}", f.name.name);
+                eprintln!("{:#?}", f.body);
+            }
+        }
+    }
 }
 
 /// `DCC_HOME_PARAMS=1` 的判据：哪些形参可以当家。
@@ -262,8 +310,10 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_i
             });
     // returns_twice 函数名全集: 已知 libc 名字 ∪ 声明上带 returns_twice 属性的函数。
     let rt_names: std::collections::HashSet<String> = {
-        let mut s: std::collections::HashSet<String> =
-            KNOWN_RETURNS_TWICE.iter().map(|n| (*n).to_string()).collect();
+        let mut s: std::collections::HashSet<String> = KNOWN_RETURNS_TWICE
+            .iter()
+            .map(|n| (*n).to_string())
+            .collect();
         for d in &prog.decls {
             if let Decl::Func(f) = d {
                 if f.returns_twice {
@@ -503,7 +553,12 @@ fn run_ssa_passes(module: &mut Module, level: u8, strict_aliasing: bool, debug_i
                     if let (Some(mut plan), Some(body)) = (regalloc_plan, f.body.as_mut()) {
                         // 交付（重建之后）：先校验后置事实（拿的就是重建后的体），再把位置表写进 AST。
                         // 决策阶段已经用完重建前的体，这里不再需要它（Phase 5.0 的顺序证据）。
-                        crate::ssa::regalloc::deliver(&ssa, &mut plan, body, f.params.as_mut_slice());
+                        crate::ssa::regalloc::deliver(
+                            &ssa,
+                            &mut plan,
+                            body,
+                            f.params.as_mut_slice(),
+                        );
                     }
                     if memdbg {
                         memdbg_marks.push(("post-deliver", memdbg_rss_kb()));
@@ -550,7 +605,7 @@ fn dbg_dup_call_args(func_name: &str, b: &crate::ast::Block) {
     fn walk_item<'a>(bi: &'a BlockItem, out: &mut Vec<&'a Expr>) {
         match bi {
             BlockItem::Stmt(s) => walk_stmt(s, out),
-            BlockItem::Decl(_) => {}
+            BlockItem::Decl(_) => {},
         }
     }
     fn walk_stmt<'a>(s: &'a Stmt, out: &mut Vec<&'a Expr>) {
@@ -559,24 +614,32 @@ fn dbg_dup_call_args(func_name: &str, b: &crate::ast::Block) {
                 if let Some(v) = val {
                     walk_expr(v, out);
                 }
-            }
+            },
             Stmt::Expr { e, .. } => walk_expr(e, out),
-            Stmt::If { cond, then_, else_, .. } => {
+            Stmt::If {
+                cond, then_, else_, ..
+            } => {
                 walk_expr(cond, out);
                 walk_stmt(then_, out);
                 if let Some(x) = else_ {
                     walk_stmt(x, out);
                 }
-            }
+            },
             Stmt::While { cond, body, .. } => {
                 walk_expr(cond, out);
                 walk_stmt(body, out);
-            }
+            },
             Stmt::Do { body, cond, .. } => {
                 walk_stmt(body, out);
                 walk_expr(cond, out);
-            }
-            Stmt::For { init, cond, step, body, .. } => {
+            },
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+                ..
+            } => {
                 if let Some(x) = init {
                     walk_stmt(x, out);
                 }
@@ -587,10 +650,15 @@ fn dbg_dup_call_args(func_name: &str, b: &crate::ast::Block) {
                     walk_expr(x, out);
                 }
                 walk_stmt(body, out);
-            }
+            },
             Stmt::Block { b, .. } => walk_block(b, out),
             Stmt::Label { stmt, .. } => walk_stmt(stmt, out),
-            Stmt::Switch { expr, cases, prelude, .. } => {
+            Stmt::Switch {
+                expr,
+                cases,
+                prelude,
+                ..
+            } => {
                 walk_expr(expr, out);
                 for p in prelude {
                     walk_item(p, out);
@@ -604,17 +672,19 @@ fn dbg_dup_call_args(func_name: &str, b: &crate::ast::Block) {
                     }
                     walk_block(&c.body, out);
                 }
-            }
+            },
             Stmt::Invoke { call, .. } => walk_stmt(call, out),
-            Stmt::AsmGoto { outputs, inputs, .. } => {
+            Stmt::AsmGoto {
+                outputs, inputs, ..
+            } => {
                 for o in outputs {
                     walk_expr(o, out);
                 }
                 for i in inputs {
                     walk_expr(i, out);
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
     fn walk_expr<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
@@ -625,11 +695,11 @@ fn dbg_dup_call_args(func_name: &str, b: &crate::ast::Block) {
                 for a in args {
                     walk_expr(a, out);
                 }
-            }
+            },
             Expr::Binop { l, r, .. } => {
                 walk_expr(l, out);
                 walk_expr(r, out);
-            }
+            },
             Expr::Unary { e: x, .. } => walk_expr(x, out),
             Expr::Cast { e: x, .. } => walk_expr(x, out),
             Expr::AddrOf { e: x, .. } => walk_expr(x, out),
@@ -637,27 +707,29 @@ fn dbg_dup_call_args(func_name: &str, b: &crate::ast::Block) {
             Expr::Index { arr, idx, .. } => {
                 walk_expr(arr, out);
                 walk_expr(idx, out);
-            }
+            },
             Expr::Member { expr, .. } => walk_expr(expr, out),
             Expr::Assign { l, r, .. } => {
                 walk_expr(l, out);
                 walk_expr(r, out);
-            }
-            Expr::Cond { cond, then_, else_, .. } => {
+            },
+            Expr::Cond {
+                cond, then_, else_, ..
+            } => {
                 walk_expr(cond, out);
                 walk_expr(then_, out);
                 walk_expr(else_, out);
-            }
+            },
             Expr::Comma { l, r, .. } => {
                 walk_expr(l, out);
                 walk_expr(r, out);
-            }
+            },
             Expr::StmtExpr { block, .. } => walk_block(block, out),
             Expr::PostInc { e: x, .. }
             | Expr::PostDec { e: x, .. }
             | Expr::PreInc { e: x, .. }
             | Expr::PreDec { e: x, .. } => walk_expr(x, out),
-            _ => {}
+            _ => {},
         }
     }
     let mut all = Vec::new();
@@ -686,8 +758,7 @@ fn dbg_dup_call_args(func_name: &str, b: &crate::ast::Block) {
                         Expr::Ident { name, .. } => name.name.clone(),
                         _ => "<?>".to_string(),
                     };
-                    let sigs: Vec<String> =
-                        args.iter().map(|a| dbg_short_arg(a)).collect();
+                    let sigs: Vec<String> = args.iter().map(|a| dbg_short_arg(a)).collect();
                     eprintln!(
                         "[DUPARGS] {}: callee={} args=[{}]",
                         func_name,
@@ -813,12 +884,13 @@ fn stmt_refs_volatile(s: &Stmt, vol: &std::collections::HashSet<String>) -> bool
         // `prelude` 也是体的一部分：`switch (x) { v = *vp; case 1: … }` 里那次 volatile 读
         // 漏了就等于允许这一条语句被当成可移动/可删的参与其他变换。
         Stmt::Switch {
-            expr, cases, prelude, ..
+            expr,
+            cases,
+            prelude,
+            ..
         } => {
             expr_refs_volatile(expr, vol)
-                || prelude
-                    .iter()
-                    .any(|i| block_item_refs_volatile(i, vol))
+                || prelude.iter().any(|i| block_item_refs_volatile(i, vol))
                 || cases.iter().any(|c| {
                     c.body
                         .items
@@ -917,9 +989,10 @@ fn block_item_contains_rt_call(
 ) -> bool {
     match item {
         BlockItem::Stmt(s) => stmt_contains_rt_call(s, rt_names),
-        BlockItem::Decl(Decl::Var(v)) => {
-            v.init.as_ref().is_some_and(|e| expr_contains_rt_call(e, rt_names))
-        },
+        BlockItem::Decl(Decl::Var(v)) => v
+            .init
+            .as_ref()
+            .is_some_and(|e| expr_contains_rt_call(e, rt_names)),
         _ => false,
     }
 }
@@ -934,22 +1007,36 @@ fn stmt_contains_rt_call(s: &Stmt, rt_names: &std::collections::HashSet<String>)
         } => {
             expr_contains_rt_call(cond, rt_names)
                 || stmt_contains_rt_call(then_, rt_names)
-                || else_.as_ref().is_some_and(|e| stmt_contains_rt_call(e, rt_names))
+                || else_
+                    .as_ref()
+                    .is_some_and(|e| stmt_contains_rt_call(e, rt_names))
         },
         Stmt::While { cond, body, .. } | Stmt::Do { cond, body, .. } => {
             expr_contains_rt_call(cond, rt_names) || stmt_contains_rt_call(body, rt_names)
         },
         Stmt::For {
-            init, cond, step, body, ..
+            init,
+            cond,
+            step,
+            body,
+            ..
         } => {
-            init.as_ref().is_some_and(|i| stmt_contains_rt_call(i, rt_names))
-                || cond.as_ref().is_some_and(|c| expr_contains_rt_call(c, rt_names))
-                || step.as_ref().is_some_and(|s| expr_contains_rt_call(s, rt_names))
+            init.as_ref()
+                .is_some_and(|i| stmt_contains_rt_call(i, rt_names))
+                || cond
+                    .as_ref()
+                    .is_some_and(|c| expr_contains_rt_call(c, rt_names))
+                || step
+                    .as_ref()
+                    .is_some_and(|s| expr_contains_rt_call(s, rt_names))
                 || stmt_contains_rt_call(body, rt_names)
         },
         Stmt::Block { b, .. } => block_contains_rt_call(b, rt_names),
         Stmt::Switch {
-            expr, cases, prelude, ..
+            expr,
+            cases,
+            prelude,
+            ..
         } => {
             expr_contains_rt_call(expr, rt_names)
                 || prelude
@@ -977,9 +1064,7 @@ fn expr_contains_rt_call(e: &Expr, rt_names: &std::collections::HashSet<String>)
             callee_rt_name(callee).map_or(false, |n| rt_names.contains(&n))
                 || args.iter().any(|a| expr_contains_rt_call(a, rt_names))
         },
-        Expr::Binop { l, r, .. }
-        | Expr::Assign { l, r, .. }
-        | Expr::Comma { l, r, .. } => {
+        Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } | Expr::Comma { l, r, .. } => {
             expr_contains_rt_call(l, rt_names) || expr_contains_rt_call(r, rt_names)
         },
         Expr::Unary { e: x, .. }
@@ -1046,7 +1131,7 @@ fn collect_callees_block(b: &Block, out: &mut std::collections::HashSet<String>)
                     collect_callees_expr(e, out);
                 }
             },
-            _ => {}
+            _ => {},
         }
     }
 }
@@ -1054,7 +1139,9 @@ fn collect_callees_block(b: &Block, out: &mut std::collections::HashSet<String>)
 fn collect_callees_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
     match s {
         Stmt::Return { val: Some(e), .. } | Stmt::Expr { e, .. } => collect_callees_expr(e, out),
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             collect_callees_expr(cond, out);
             collect_callees_stmt(then_, out);
             if let Some(e) = else_ {
@@ -1065,7 +1152,13 @@ fn collect_callees_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
             collect_callees_expr(cond, out);
             collect_callees_stmt(body, out);
         },
-        Stmt::For { init, cond, step, body, .. } => {
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(i) = init {
                 collect_callees_stmt(i, out);
             }
@@ -1079,7 +1172,10 @@ fn collect_callees_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
         },
         Stmt::Block { b, .. } => collect_callees_block(b, out),
         Stmt::Switch {
-            expr, cases, prelude, ..
+            expr,
+            cases,
+            prelude,
+            ..
         } => {
             collect_callees_expr(expr, out);
             // prelude 里的调用点也是调用点：漏了就与 `ssa::passes::walk_items_refs` 那次
@@ -1094,11 +1190,13 @@ fn collect_callees_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
             }
         },
         Stmt::Invoke { call, .. } => collect_callees_stmt(call, out),
-        Stmt::EhLandingPad { object, selector, .. } => {
+        Stmt::EhLandingPad {
+            object, selector, ..
+        } => {
             collect_callees_expr(object, out);
             collect_callees_expr(selector, out);
         },
-        _ => {}
+        _ => {},
     }
 }
 
@@ -1110,7 +1208,7 @@ fn collect_callees_block_item(i: &BlockItem, out: &mut std::collections::HashSet
                 collect_callees_expr(e, out);
             }
         },
-        _ => {}
+        _ => {},
     }
 }
 
@@ -1124,9 +1222,7 @@ fn collect_callees_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
                 collect_callees_expr(a, out);
             }
         },
-        Expr::Binop { l, r, .. }
-        | Expr::Assign { l, r, .. }
-        | Expr::Comma { l, r, .. } => {
+        Expr::Binop { l, r, .. } | Expr::Assign { l, r, .. } | Expr::Comma { l, r, .. } => {
             collect_callees_expr(l, out);
             collect_callees_expr(r, out);
         },
@@ -1163,7 +1259,7 @@ fn collect_callees_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
                 }
             }
         },
-        _ => {}
+        _ => {},
     }
 }
 
@@ -1316,7 +1412,10 @@ fn check_stmt_for_const_stores(stmt: &Stmt, const_globals: &std::collections::Ha
         },
         Stmt::Block { b, .. } => check_stores_to_const_globals(b, const_globals),
         Stmt::Switch {
-            expr, cases, prelude, ..
+            expr,
+            cases,
+            prelude,
+            ..
         } => {
             check_expr_for_const_stores(expr, const_globals);
             check_items_for_const_stores(prelude, const_globals);
@@ -1487,9 +1586,7 @@ fn stmt_has_unsafe_ssa_pattern(s: &Stmt, allow_static_locals: bool) -> bool {
                 .is_some_and(|i| stmt_has_unsafe_ssa_pattern(i, allow_static_locals))
                 || stmt_has_unsafe_ssa_pattern(body, allow_static_locals)
         },
-        Stmt::Switch {
-            cases, prelude, ..
-        } => {
+        Stmt::Switch { cases, prelude, .. } => {
             // prelude 里也能带「 unsafe 形态」（位域 RMW、可取址局部、VLA……），漏了它
             // 这个函数就会进到 SSA 并在重建时错值。
             items_have_unsafe_ssa_pattern(prelude, allow_static_locals)
@@ -1838,7 +1935,7 @@ fn fold_expr(e: Expr, fenv_access: bool) -> Expr {
                     // 但变量参数**不在此急切折 0**: 留给后续 -O2 的 SCCP —— 参数被
                     // 常量传播成常量后这里应折 1 (修复 modref-2)；若没有 SCCP
                     // (如 -O0) 则保留调用，由后端兜底 (变量参数 → 0)。
-                    if const_eval::is_constant(&args[0]) {
+                    if const_eval::is_constant_p_arg(&args[0]) {
                         return Expr::Int { v: 1, span, ty };
                     }
                     // 非常量参数: 保留调用, 不折 0.
@@ -2335,6 +2432,11 @@ fn function_inline(module: &mut Module, level: u8) {
             let caller_flatten = f.is_flatten;
             let caller_is_hot = f.is_hot;
             if let Some(body) = &mut f.body {
+                // 判决行只带 callee 名，而同一 callee 可能在十几个 caller 里展开；
+                // 报障时要能把每条 INLINE 归到具体 caller（同一个 caller 的判决是连着的）。
+                if inline_trace_enabled() {
+                    eprintln!("CALLER| {}", f.name.name);
+                }
                 // 闸门关着时这一条通道什么都不管，不必再付一次全树量尺与站点收集。
                 let walk_arms = inline_walk_enabled() && arms_walkable(body);
                 if inline_trace_enabled() && inline_walk_enabled() {
@@ -2491,7 +2593,10 @@ fn stmt_node_count(s: &Stmt) -> usize {
         // `prelude` 也是体的一部分：`switch (x) { int y = f(); case 0: ... }` 里那段不在
         // `cases` 下，漏计它等于给预算开一个绕过口。
         Stmt::Switch {
-            expr, cases, prelude, ..
+            expr,
+            cases,
+            prelude,
+            ..
         } => {
             1 + expr_node_count(expr)
                 + prelude.iter().map(item_node_count).sum::<usize>()
@@ -2515,14 +2620,19 @@ fn stmt_node_count(s: &Stmt) -> usize {
         Stmt::EhLandingPad {
             object, selector, ..
         } => 1 + expr_node_count(object) + expr_node_count(selector),
-        Stmt::AsmGoto { outputs, inputs, .. } => {
+        Stmt::AsmGoto {
+            outputs, inputs, ..
+        } => {
             1 + outputs
                 .iter()
                 .chain(inputs.iter())
                 .map(expr_node_count)
                 .sum::<usize>()
         },
-        Stmt::Goto { .. } | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Fallthrough { .. } => 1,
+        Stmt::Goto { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::Fallthrough { .. } => 1,
     }
 }
 
@@ -2759,6 +2869,29 @@ fn inline_walk_enabled() -> bool {
     *ON.get_or_init(|| parse_gate("DCC_INLINE_WALK", true))
 }
 
+/// 报障用的**按名字否决**名单：`DCC_INLINE_NOT=releasePage,foo` 里点名的 callee 在任何
+/// 一条内联通道都不展开（等价于给它临时挂上 `noinline`）。
+///
+/// 为什么需要它：`-O2` 有一条成本模型驱动的通用体内联通道，验一个假设要重编一次全量；
+/// 而 trace 只报 callee 不报 caller，「哪一次展开把代码弄错」从日志里看不出。有了名字
+/// 名单就能按**半区**二拍：否决一批 → 重编一次 → 症状消失就说明 culprit 在这半里。
+/// 与 `DCC_OPT_SKIP`/`DCC_SSA_OFF` 同一纪律：只在报障时设置，不参与任何判据，不进产物。
+fn inline_not_listed(name: &str) -> bool {
+    static LIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        std::env::var("DCC_INLINE_NOT")
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+    .iter()
+    .any(|n| n == name)
+}
+
 /// 「臂体展开」预算的默认节点上限（caller 体的 AST 节点数）。`usize::MAX` = 不设预算。
 ///
 /// 定值靠格阵扫描（方案 §15.10.8 的四臂格阵）：上限只影响「哪些 caller 能走进臂体」，而预算量尺本身
@@ -2922,10 +3055,7 @@ fn inline_forced_call_as_stmt_expr(
     };
     // 单 `return 表达式;` 的体已由 `try_inline_call` 逐表达式替换做过（更贴源码，
     // 也不多开一个块），这里不抢。
-    if matches!(body.items.as_slice(), [BlockItem::Stmt(Stmt::Return {
-        val: Some(_),
-        ..
-    })]) {
+    if matches!(body.items.as_slice(), [BlockItem::Stmt(Stmt::Return { val: Some(_), .. })]) {
         return None;
     }
     //  callee 自己的准入与那条臂一致（全部失败关闭）。
@@ -2946,7 +3076,10 @@ fn inline_forced_call_as_stmt_expr(
         );
         return None;
     }
-    if f.params.iter().any(|p| p.name.is_none() || p.vla_dim.is_some() || type_has_vla_dim(&p.ty)) {
+    if f.params
+        .iter()
+        .any(|p| p.name.is_none() || p.vla_dim.is_some() || type_has_vla_dim(&p.ty))
+    {
         trace_inline_decision(callee, "REJECT", "expr-inline: 形参无名或带 VLA");
         return None;
     }
@@ -3018,11 +3151,7 @@ fn inline_forced_call_as_stmt_expr(
         &span,
     )))];
     if !try_static_inline_general(&mut s, funcs, level, depth) {
-        trace_inline_decision(
-            callee,
-            "REJECT",
-            "expr-inline: 借道语句被通用臂拒了",
-        );
+        trace_inline_decision(callee, "REJECT", "expr-inline: 借道语句被通用臂拒了");
         return None;
     }
     let expanded = match s {
@@ -3472,7 +3601,9 @@ fn rename_idents_in_stmt(s: &mut Stmt, map: &HashMap<String, String>) {
         // 内联汇编语句的操作数表达式必须跟着改名：`asm` 的输入/输出都是普通 C 表达式，
         // callee 形参被重命名成 `__inlN_...` 后，操作数还读旧名字就会读到 caller 的
         // 同名变量（或一个不存在的名字）。
-        Stmt::AsmGoto { outputs, inputs, .. } => {
+        Stmt::AsmGoto {
+            outputs, inputs, ..
+        } => {
             for e in outputs.iter_mut().chain(inputs.iter_mut()) {
                 rename_idents_in_expr(e, map);
             }
@@ -3482,7 +3613,12 @@ fn rename_idents_in_stmt(s: &mut Stmt, map: &HashMap<String, String>) {
         //（实测 Lua `ldo.c` 内联后直接段错误）。以前的调用者（always_inline 那条臂）
         // 只接直线性 body，这两臂从未被走到。
         Stmt::Label { stmt, .. } => rename_idents_in_stmt(stmt, map),
-        Stmt::Switch { expr, cases, prelude, .. } => {
+        Stmt::Switch {
+            expr,
+            cases,
+            prelude,
+            ..
+        } => {
             rename_idents_in_expr(expr, map);
             for it in prelude {
                 if let BlockItem::Stmt(st) = it {
@@ -3625,7 +3761,11 @@ impl InlineTable {
     fn build(funcs: HashMap<String, FuncDecl>, prog: &Program) -> Self {
         let sites = count_direct_call_sites(&funcs);
         let asm_names = collect_asm_names(prog);
-        InlineTable { sites, asm_names, funcs }
+        InlineTable {
+            sites,
+            asm_names,
+            funcs,
+        }
     }
 
     fn get(&self, name: &str) -> Option<&FuncDecl> {
@@ -3699,7 +3839,9 @@ fn asm_names_in_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
     match s {
         Stmt::AsmGoto { asm_str, .. } => push_asm_idents(asm_str, out),
         Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => asm_names_in_expr(e, out),
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             asm_names_in_expr(cond, out);
             asm_names_in_stmt(then_, out);
             if let Some(x) = else_ {
@@ -3710,7 +3852,13 @@ fn asm_names_in_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
             asm_names_in_expr(cond, out);
             asm_names_in_stmt(body, out);
         },
-        Stmt::For { init, cond, step, body, .. } => {
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(i) = init {
                 asm_names_in_stmt(i, out);
             }
@@ -3724,7 +3872,12 @@ fn asm_names_in_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
         },
         Stmt::Block { b, .. } => asm_names_in_block(b, out),
         Stmt::Label { stmt, .. } => asm_names_in_stmt(stmt, out),
-        Stmt::Switch { expr, cases, prelude, .. } => {
+        Stmt::Switch {
+            expr,
+            cases,
+            prelude,
+            ..
+        } => {
             asm_names_in_expr(expr, out);
             for it in prelude {
                 asm_names_in_item(it, out);
@@ -3830,16 +3983,22 @@ fn scan_stmt(s: &Stmt, acc: &mut InlineScan) {
         // 内联后才退化成 `&全局变量` 这种链接期常量，不内联就落成寄存器，模板里的
         // `.long %c0 + %c1 - .` 变成指向寄存器名的野重定位（`__jump_table`/`.altinstructions`
         // 条目整片坏掉，要到 objtool 才暴露）。操作数仍是普通 C 表达式，照常扫调用。
-        Stmt::AsmGoto { outputs, inputs, .. } => {
+        Stmt::AsmGoto {
+            outputs, inputs, ..
+        } => {
             for e in outputs.iter().chain(inputs.iter()) {
                 scan_expr(e, acc);
             }
         },
         Stmt::Expr { e, .. } => scan_expr(e, acc),
         Stmt::Return { val: Some(e), .. } => scan_expr(e, acc),
-        Stmt::Return { val: None, .. } | Stmt::Goto { .. } | Stmt::Break { .. }
+        Stmt::Return { val: None, .. }
+        | Stmt::Goto { .. }
+        | Stmt::Break { .. }
         | Stmt::Continue { .. } => {},
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             scan_expr(cond, acc);
             scan_stmt(then_, acc);
             if let Some(e) = else_ {
@@ -3854,7 +4013,13 @@ fn scan_stmt(s: &Stmt, acc: &mut InlineScan) {
             scan_expr(cond, acc);
             scan_stmt(body, acc);
         },
-        Stmt::For { init, cond, step, body, .. } => {
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(i) = init {
                 scan_stmt(i, acc);
             }
@@ -3868,7 +4033,12 @@ fn scan_stmt(s: &Stmt, acc: &mut InlineScan) {
         },
         Stmt::Block { b, .. } => scan_block(b, acc),
         Stmt::Label { stmt, .. } => scan_stmt(stmt, acc),
-        Stmt::Switch { expr, cases, prelude, .. } => {
+        Stmt::Switch {
+            expr,
+            cases,
+            prelude,
+            ..
+        } => {
             scan_expr(expr, acc);
             scan_items(prelude, acc);
             for c in cases {
@@ -3931,7 +4101,9 @@ fn scan_expr(e: &Expr, acc: &mut InlineScan) {
         | Expr::PreDec { e: x, .. }
         | Expr::SizeofExpr { e: x, .. }
         | Expr::AlignofExpr { e: x, .. } => scan_expr(x, acc),
-        Expr::Cond { cond, then_, else_, .. } => {
+        Expr::Cond {
+            cond, then_, else_, ..
+        } => {
             scan_expr(cond, acc);
             scan_expr(then_, acc);
             scan_expr(else_, acc);
@@ -3972,11 +4144,7 @@ fn collect_direct_calls(body: &Block) -> Vec<String> {
 }
 
 /// `funcs[from]` 的调用闭包能否回到 `target`（间接递归也算）。
-fn calls_graph_reaches(
-    funcs: &InlineTable,
-    from: &str,
-    target: &str,
-) -> bool {
+fn calls_graph_reaches(funcs: &InlineTable, from: &str, target: &str) -> bool {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut work: Vec<String> = vec![from.to_string()];
     while let Some(name) = work.pop() {
@@ -4082,7 +4250,11 @@ fn prefix_labels_in_stmt(s: &mut Stmt, prefix: &str) {
         // 替换按新名去找旧名文本，模板里剩下没人认领的 `%l[l_yes]` —— 展开出来的
         // 汇编直接引用一个不存在的标签。文本匹配带完整 `]` 收尾，不会误伤同名前缀
         // （`l_yes` 与 `l_yes_all` 各自只匹配自己那一种写法）。
-        Stmt::AsmGoto { asm_str, goto_labels, .. } => {
+        Stmt::AsmGoto {
+            asm_str,
+            goto_labels,
+            ..
+        } => {
             for label in goto_labels.iter_mut() {
                 let old = label.name.clone();
                 label.name = format!("{}{}", prefix, old);
@@ -4150,7 +4322,11 @@ fn ident_root_name(e: &Expr) -> Option<String> {
 ///
 /// 与 [`rename_idents_in_expr`] 走同一批变体臂：漏一条只是少一次代回（失败关闭），
 /// 不会把已经脏了的候选代回去。
-fn collect_cand_writes_expr(e: &Expr, cands: &HashMap<String, Expr>, out: &mut std::collections::HashSet<String>) {
+fn collect_cand_writes_expr(
+    e: &Expr,
+    cands: &HashMap<String, Expr>,
+    out: &mut std::collections::HashSet<String>,
+) {
     let mark = |x: &Expr, out: &mut std::collections::HashSet<String>| {
         if let Some(n) = ident_root_name(x) {
             if cands.contains_key(&n) {
@@ -4266,7 +4442,11 @@ fn collect_cand_writes_items(
     }
 }
 
-fn collect_cand_writes_stmt(s: &Stmt, cands: &HashMap<String, Expr>, out: &mut std::collections::HashSet<String>) {
+fn collect_cand_writes_stmt(
+    s: &Stmt,
+    cands: &HashMap<String, Expr>,
+    out: &mut std::collections::HashSet<String>,
+) {
     match s {
         Stmt::AsmGoto {
             outputs,
@@ -4292,8 +4472,11 @@ fn collect_cand_writes_stmt(s: &Stmt, cands: &HashMap<String, Expr>, out: &mut s
         Stmt::Expr { e, .. } | Stmt::Return { val: Some(e), .. } => {
             collect_cand_writes_expr(e, cands, out)
         },
-        Stmt::Return { val: None, .. } | Stmt::Goto { .. } | Stmt::Break { .. }
-        | Stmt::Continue { .. } | Stmt::Fallthrough { .. } => {},
+        Stmt::Return { val: None, .. }
+        | Stmt::Goto { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::Fallthrough { .. } => {},
         Stmt::If { then_, else_, .. } => {
             collect_cand_writes_stmt(then_, cands, out);
             if let Some(e) = else_ {
@@ -4304,7 +4487,13 @@ fn collect_cand_writes_stmt(s: &Stmt, cands: &HashMap<String, Expr>, out: &mut s
             collect_cand_writes_expr(cond, cands, out);
             collect_cand_writes_stmt(body, cands, out);
         },
-        Stmt::For { init, cond, step, body, .. } => {
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             if let Some(i) = init {
                 collect_cand_writes_stmt(i, cands, out);
             }
@@ -4318,7 +4507,12 @@ fn collect_cand_writes_stmt(s: &Stmt, cands: &HashMap<String, Expr>, out: &mut s
         },
         Stmt::Block { b, .. } => collect_cand_writes_items(&b.items, cands, out),
         Stmt::Label { stmt, .. } => collect_cand_writes_stmt(stmt, cands, out),
-        Stmt::Switch { expr, cases, prelude, .. } => {
+        Stmt::Switch {
+            expr,
+            cases,
+            prelude,
+            ..
+        } => {
             collect_cand_writes_expr(expr, cands, out);
             for it in prelude {
                 if let BlockItem::Stmt(st) = it {
@@ -4399,7 +4593,10 @@ fn subst_asm_immediate_ops_in_expr(
 ) {
     match e {
         Expr::AsmExpr {
-            inputs, input_constraints, outputs, ..
+            inputs,
+            input_constraints,
+            outputs,
+            ..
         } => {
             for (op, c) in inputs.iter_mut().zip(input_constraints.iter()) {
                 if crate::codegen::shared::asm_constraints::constraint_is_immediate_only(c) {
@@ -4507,7 +4704,10 @@ fn subst_cand_reads_stmt(
             // 内核 `__flags` 一类写法有「先声明再赋常量」的形状，只作废会让这些点
             // 重新落回寄存器（GCC 会跟着传播那个常量）。
             if let Expr::Assign {
-                op: BinOp::Add, l, r, ..
+                op: BinOp::Add,
+                l,
+                r,
+                ..
             } = &*e
             {
                 if let Some(n) = ident_root_name(l) {
@@ -4518,7 +4718,9 @@ fn subst_cand_reads_stmt(
                 }
             }
         },
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             subst_asm_immediate_ops_in_expr(cond, cands, dirty);
             let mut w = std::collections::HashSet::new();
             collect_cand_writes_expr(cond, cands, &mut w);
@@ -4543,7 +4745,13 @@ fn subst_cand_reads_stmt(
             subst_asm_immediate_ops_in_expr(cond, cands, dirty);
             subst_cand_reads_stmt(body, cands, dirty);
         },
-        Stmt::For { init, cond, step, body, .. } => {
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            ..
+        } => {
             let mut w = std::collections::HashSet::new();
             if let Some(i) = init {
                 collect_cand_writes_stmt(i, cands, &mut w);
@@ -4567,7 +4775,12 @@ fn subst_cand_reads_stmt(
             }
             subst_cand_reads_stmt(body, cands, dirty);
         },
-        Stmt::Switch { expr, cases, prelude, .. } => {
+        Stmt::Switch {
+            expr,
+            cases,
+            prelude,
+            ..
+        } => {
             let mut w = std::collections::HashSet::new();
             collect_cand_writes_expr(expr, cands, &mut w);
             for it in prelude.iter() {
@@ -4689,7 +4902,10 @@ fn rewrite_returns_discarded(s: &mut Stmt, end_label: &str, span: &Span) {
                 Some(e) => Stmt::Block {
                     b: Block {
                         items: vec![
-                            BlockItem::Stmt(Stmt::Expr { e, span: span.clone() }),
+                            BlockItem::Stmt(Stmt::Expr {
+                                e,
+                                span: span.clone(),
+                            }),
                             BlockItem::Stmt(goto),
                         ],
                         span: span.clone(),
@@ -4938,14 +5154,16 @@ fn call_site_shape(s: &Stmt) -> Option<(String, Vec<Expr>, Dest)> {
                 }
             }
             None
-        }
+        },
         Stmt::Return { val: Some(v), .. } => match call_of(v) {
             Some((n, a)) => Some((n, a, Dest::ReturnValue)),
             None => None,
         },
         // `if (f(...)) …`：条件整体就是一个调用，因此把求值提到 `if` 之前不改变
         // 任何可观察顺序（短路组合里嵌的调用不属于这一条，那里 cond 不是 Call）。
-        Stmt::If { cond, then_, else_, .. } => {
+        Stmt::If {
+            cond, then_, else_, ..
+        } => {
             let (n, a) = call_of(cond)?;
             Some((
                 n,
@@ -4955,7 +5173,7 @@ fn call_site_shape(s: &Stmt) -> Option<(String, Vec<Expr>, Dest)> {
                     else_: else_.as_ref().map(|e| (**e).clone()),
                 },
             ))
-        }
+        },
         _ => None,
     }
 }
@@ -4993,17 +5211,15 @@ fn rewrite_returns_to_dest(s: &mut Stmt, end_label: &str, rv: Option<&str>, span
                         },
                         span: span.clone(),
                     })
-                }
+                },
                 (Some(e), None) => Some(Stmt::Expr {
                     e,
                     span: span.clone(),
                 }),
                 (None, _) => None,
             };
-            let mut items: Vec<BlockItem> = step
-                .into_iter()
-                .map(BlockItem::Stmt)
-                .collect::<Vec<_>>();
+            let mut items: Vec<BlockItem> =
+                step.into_iter().map(BlockItem::Stmt).collect::<Vec<_>>();
             items.push(BlockItem::Stmt(goto));
             *s = Stmt::Block {
                 b: Block {
@@ -5029,11 +5245,7 @@ fn rewrite_returns_to_dest(s: &mut Stmt, end_label: &str, rv: Option<&str>, span
                 }
             }
         },
-        Stmt::Switch {
-            cases,
-            prelude,
-            ..
-        } => {
+        Stmt::Switch { cases, prelude, .. } => {
             // prelude 也是 callee 体的一部分（`switch (x) { return 5; case 1: … }` 里那个
             // return 虽然今天不可达，但同一文件里另四个遍历器都走 prelude）—— 不递归进去
             // 就会把 callee 的 `return` 原样带进 caller，变成 caller 的 return。
@@ -5067,12 +5279,7 @@ fn rewrite_returns_to_dest(s: &mut Stmt, end_label: &str, rv: Option<&str>, span
 /// 之后才写目的地」的次序就是本函数下半部分的内容。仍然不接：嵌在更大表达式里的
 /// 调用（需要语句表达式包装）、`x op= f(...)`（callee 可能改掉 `x`，读-改-写次序要
 /// 重讲）、实参里带调用的点，以及返回 void 却被赋值的情形。
-fn try_static_inline_general(
-    s: &mut Stmt,
-    funcs: &InlineTable,
-    level: u8,
-    depth: u32,
-) -> bool {
+fn try_static_inline_general(s: &mut Stmt, funcs: &InlineTable, level: u8, depth: u32) -> bool {
     if level < 2 || depth >= INLINE_MAX_DEPTH {
         return false;
     }
@@ -5080,6 +5287,11 @@ fn try_static_inline_general(
         Some(x) => x,
         None => return false,
     };
+    // 报障名单：点名的 callee 一律不展开（见 [`inline_not_listed`]）。
+    if inline_not_listed(&callee_name) {
+        trace_inline_decision(&callee_name, "REJECT", "DCC_INLINE_NOT 点名否决");
+        return false;
+    }
     let f = match funcs.get(&callee_name) {
         Some(f) => f,
         None => return false,
@@ -5121,11 +5333,7 @@ fn try_static_inline_general(
     }
     for p in &f.params {
         if p.name.is_none() || p.vla_dim.is_some() || type_has_vla_dim(&p.ty) {
-            trace_inline_decision(
-                &callee_name,
-                "REJECT",
-                "static-inline: 形参无名或带 VLA 维度",
-            );
+            trace_inline_decision(&callee_name, "REJECT", "static-inline: 形参无名或带 VLA 维度");
             return false;
         }
     }
@@ -5141,13 +5349,7 @@ fn try_static_inline_general(
     // 反汇编快照的口径），本条插进去只会多出标签与 goto。
     if f.is_always_inline
         && matches!(s, Stmt::Expr { .. } | Stmt::Return { .. })
-        && matches!(
-            body.items.as_slice(),
-            [BlockItem::Stmt(Stmt::Return {
-                val: Some(_),
-                ..
-            })]
-        )
+        && matches!(body.items.as_slice(), [BlockItem::Stmt(Stmt::Return { val: Some(_), .. })])
     {
         return false;
     }
@@ -5186,15 +5388,16 @@ fn try_static_inline_general(
         return false;
     }
     let rspan: Span = match s {
-        Stmt::Expr { span, .. }
-        | Stmt::Return { span, .. }
-        | Stmt::If { span, .. } => span.clone(),
+        Stmt::Expr { span, .. } | Stmt::Return { span, .. } | Stmt::If { span, .. } => span.clone(),
         _ => return false,
     };
     // 需要结果的形状要先声明一个结果临时量；callee 返回 void 时这形状本身就不合法，直接不接。
     let needs_rv = matches!(
         dest,
-        Dest::Assign(_) | Dest::AssignChain { .. } | Dest::Cond { .. } | Dest::CompoundAssign { .. }
+        Dest::Assign(_)
+            | Dest::AssignChain { .. }
+            | Dest::Cond { .. }
+            | Dest::CompoundAssign { .. }
     );
     if needs_rv && matches!(f.ret_ty, Type::Void) {
         return false;
@@ -5259,11 +5462,7 @@ fn try_static_inline_general(
     if !matches!(dest, Dest::ReturnValue) {
         // 值要么丢弃、要么存进结果临时量；两种都要把 `return` 改成「先做完这一步
         // 再跳到展开块出口」。
-        let rv: Option<&str> = if needs_rv {
-            Some(rv_name.as_str())
-        } else {
-            None
-        };
+        let rv: Option<&str> = if needs_rv { Some(rv_name.as_str()) } else { None };
         let mut rewritten: Vec<BlockItem> = Vec::new();
         for it in moved.drain(..) {
             match it {
@@ -5281,7 +5480,10 @@ fn try_static_inline_general(
                 span: rspan.clone(),
             },
             stmt: Box::new(Stmt::Block {
-                b: Block { items: vec![], span: rspan.clone() },
+                b: Block {
+                    items: vec![],
+                    span: rspan.clone(),
+                },
                 span: rspan.clone(),
             }),
             span: rspan.clone(),
@@ -5428,7 +5630,10 @@ fn try_static_inline_general(
         Dest::Discard | Dest::ReturnValue => {},
     }
     *s = Stmt::Block {
-        b: Block { items, span: rspan.clone() },
+        b: Block {
+            items,
+            span: rspan.clone(),
+        },
         span: rspan.clone(),
     };
     trace_inline_decision(
@@ -5464,6 +5669,11 @@ fn try_stmt_inline_call(
         },
         _ => return false,
     };
+    // 报障名单：点名的 callee 一律不展开（见 [`inline_not_listed`]）。
+    if inline_not_listed(&callee_name) {
+        trace_inline_decision(&callee_name, "REJECT", "DCC_INLINE_NOT 点名否决");
+        return false;
+    }
     let f = match funcs.get(&callee_name) {
         Some(f) => f,
         None => return false,
@@ -5659,16 +5869,7 @@ fn try_stmt_inline_call(
         // 原 caller 小），每次展开都重新拿一份预算等于给超上限的 caller 开了一个绕过口。
         // 今天这条路径只接平坦体（结构检查在上面），臂体走不到，但下一步放宽平坦限制时
         // 它就会成立，所以现在就把不变式钉住。
-        inline_calls_in_block(
-            b,
-            funcs,
-            0,
-            caller_flatten,
-            false,
-            false,
-            depth + 1,
-            walk_arms,
-        );
+        inline_calls_in_block(b, funcs, 0, caller_flatten, false, false, depth + 1, walk_arms);
     }
     true
 }
@@ -5793,6 +5994,11 @@ fn try_inline_call(
     depth: u32,
 ) -> Option<Expr> {
     let f = funcs.get(name)?;
+    // 报障名单：点名的 callee 一律不展开（见 [`inline_not_listed`]）。
+    if inline_not_listed(name) {
+        trace_inline_decision(name, "REJECT", "DCC_INLINE_NOT 点名否决");
+        return None;
+    }
     // returns_twice 函数 (setjmp 族/vfork/getcontext) 绝不能内联: 内联会把
     // 「二次返回」点复制进调用方, 破坏调用方的栈/寄存器恢复语义。即使
     // always_inline/flatten 也拒绝 (与 GCC 行为一致)。
@@ -5963,15 +6169,14 @@ fn inline_body_return_expr(body: &Block) -> Option<Expr> {
     if let [BlockItem::Stmt(Stmt::Return { val: Some(ret), .. })] = body.items.as_slice() {
         return Some(ret.clone());
     }
-    if let [
-        BlockItem::Stmt(Stmt::If {
-            cond,
-            then_,
-            else_: None,
-            span,
-        }),
-        BlockItem::Stmt(Stmt::Return { val: Some(ret2), .. }),
-    ] = body.items.as_slice()
+    if let [BlockItem::Stmt(Stmt::If {
+        cond,
+        then_,
+        else_: None,
+        span,
+    }), BlockItem::Stmt(Stmt::Return {
+        val: Some(ret2), ..
+    })] = body.items.as_slice()
     {
         let then_ret = match then_.as_ref() {
             Stmt::Return { val: Some(v), .. } => v.clone(),
@@ -5999,9 +6204,7 @@ fn expr_contains_va_arg_pack(e: &Expr) -> bool {
         Expr::Call { callee, args, .. } => {
             expr_contains_va_arg_pack(callee) || args.iter().any(expr_contains_va_arg_pack)
         },
-        Expr::Binop { l, r, .. } => {
-            expr_contains_va_arg_pack(l) || expr_contains_va_arg_pack(r)
-        },
+        Expr::Binop { l, r, .. } => expr_contains_va_arg_pack(l) || expr_contains_va_arg_pack(r),
         Expr::Unary { e, .. } | Expr::Cast { e, .. } => expr_contains_va_arg_pack(e),
         Expr::Cond {
             cond, then_, else_, ..
@@ -6010,12 +6213,8 @@ fn expr_contains_va_arg_pack(e: &Expr) -> bool {
                 || expr_contains_va_arg_pack(then_)
                 || expr_contains_va_arg_pack(else_)
         },
-        Expr::Comma { l, r, .. } => {
-            expr_contains_va_arg_pack(l) || expr_contains_va_arg_pack(r)
-        },
-        Expr::Assign { l, r, .. } => {
-            expr_contains_va_arg_pack(l) || expr_contains_va_arg_pack(r)
-        },
+        Expr::Comma { l, r, .. } => expr_contains_va_arg_pack(l) || expr_contains_va_arg_pack(r),
+        Expr::Assign { l, r, .. } => expr_contains_va_arg_pack(l) || expr_contains_va_arg_pack(r),
         _ => false,
     }
 }
@@ -6188,11 +6387,7 @@ fn inline_expr(
         // 但 `SizeofExpr`/`AlignofExpr`/`Offsetof` **不下探**：C 里它们的操作数根本不
         // 求值，把带 asm 的体展开进去等于凭空多一次副作用（与 `is_side_effect_free`
         // 把它们归为常量同一理由）。
-        Expr::Cast {
-            ty,
-            e: inner,
-            span,
-        } => Expr::Cast {
+        Expr::Cast { ty, e: inner, span } => Expr::Cast {
             ty,
             e: Box::new(inline_expr(
                 *inner,
@@ -6257,12 +6452,7 @@ fn inline_expr(
             ty,
             span,
         },
-        Expr::Index {
-            arr,
-            idx,
-            ty,
-            span,
-        } => Expr::Index {
+        Expr::Index { arr, idx, ty, span } => Expr::Index {
             arr: Box::new(inline_expr(
                 *arr,
                 funcs,
@@ -7298,8 +7488,10 @@ mod tests {
                 })
                 .expect("夹具里应有一个带体的函数")
         }
-        let (prog, _) =
-            crate::parser::parse(b"int g; int f(int x){ if (x) g = 1; else g = 2; return g; }\n", "budget-small.c");
+        let (prog, _) = crate::parser::parse(
+            b"int g; int f(int x){ if (x) g = 1; else g = 2; return g; }\n",
+            "budget-small.c",
+        );
         assert!(
             arm_budget_ok_for(first_func(&prog).body.as_ref().unwrap()),
             "几行的小函数必须能走臂体展开"
@@ -7349,20 +7541,22 @@ mod tests {
         labeled.push_str("} return a;}");
         let (pf, _) = crate::parser::parse(flat.as_bytes(), "budget-flat.c");
         let (pl, _) = crate::parser::parse(labeled.as_bytes(), "budget-label.c");
-        let n_flat = arm_body_nodes(pf.decls.iter().find_map(|d| match d {
-            Decl::Func(f) => f.body.as_ref(),
-            _ => None,
-        }).unwrap());
+        let n_flat = arm_body_nodes(
+            pf.decls
+                .iter()
+                .find_map(|d| match d {
+                    Decl::Func(f) => f.body.as_ref(),
+                    _ => None,
+                })
+                .unwrap(),
+        );
         let body_l = first_func(&pl).body.as_ref().unwrap();
         let n_label = arm_body_nodes(body_l);
         assert!(
             n_label.saturating_mul(2) >= n_flat,
             "标签形不得只量出平铺形的一半以下（实得 标签={n_label} 平铺={n_flat}）"
         );
-        assert!(
-            n_label > INLINE_ARM_BODY_NODES_DEFAULT,
-            "夹具得真的超上限（实得 {n_label}）"
-        );
+        assert!(n_label > INLINE_ARM_BODY_NODES_DEFAULT, "夹具得真的超上限（实得 {n_label}）");
         assert!(!arm_budget_ok_for(body_l), "括在标签里的巨大体同样必须被预算挡住");
     }
 
@@ -7384,8 +7578,12 @@ mod tests {
         // 两份同体积的体：一份平铺在 switch 之前，一份真的放进 `prelude`。漏计 `prelude`
         // 时两者的节点数会差出一整个 pad（而不是像旧版本那样只测平铺那一份 —— 它对
         // 「prelude 进不进账」零约束）。
-        let flat = format!("int f(int x){{ int a = 0; {pad} switch (a) {{ case 1: return 2; }} return a;}}");
-        let pre = format!("int f(int x){{ int a = 0; switch (a) {{ {pad} case 1: return 2; }} return a;}}");
+        let flat = format!(
+            "int f(int x){{ int a = 0; {pad} switch (a) {{ case 1: return 2; }} return a;}}"
+        );
+        let pre = format!(
+            "int f(int x){{ int a = 0; switch (a) {{ {pad} case 1: return 2; }} return a;}}"
+        );
         let (pf, _) = crate::parser::parse(flat.as_bytes(), "budget-flat2.c");
         let (pp, _) = crate::parser::parse(pre.as_bytes(), "budget-prelude.c");
         let n_flat = arm_body_nodes(body_of(&pf));
@@ -7394,10 +7592,7 @@ mod tests {
             n_pre.saturating_mul(2) >= n_flat,
             "prelude 里那 1200 条必须与平铺同量级（实得 prelude={n_pre} 平铺={n_flat} ⇒ prelude 被漏计）"
         );
-        assert!(
-            n_pre > INLINE_ARM_BODY_NODES_DEFAULT,
-            "夹具得真的超上限（实得 {n_pre}）"
-        );
+        assert!(n_pre > INLINE_ARM_BODY_NODES_DEFAULT, "夹具得真的超上限（实得 {n_pre}）");
         assert!(!arm_budget_ok_for(body_of(&pp)), "prelude 巨大的 caller 必须被预算挡住");
     }
 

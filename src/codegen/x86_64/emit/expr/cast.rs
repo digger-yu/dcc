@@ -274,10 +274,7 @@ impl Codegen {
                 // 例外：64 位 (有/无符号) 直接走 x87 精确整数转换，必须保持
                 // st(0) 不动——经 f64 会丢掉 >= 2^52 的精度。
                 _ => {
-                    if !matches!(
-                        ty,
-                        Type::ULong | Type::ULongLong | Type::Long | Type::LongLong
-                    ) {
+                    if !matches!(ty, Type::ULong | Type::ULongLong | Type::Long | Type::LongLong) {
                         self.emit_x87_to_xmm0();
                     }
                 },
@@ -290,7 +287,10 @@ impl Codegen {
         match (&src_ty, ty) {
             // __int128 → 浮点（显式转换）：128 位无法单条 cvtsi2sd，拆分高低
             // 64 位会双重舍入，交 libgcc soft-fp helper 保证全舍入模式正确。
-            (src @ (Type::Int128 | Type::UInt128), Type::Float | Type::Double | Type::LongDouble) => {
+            (
+                src @ (Type::Int128 | Type::UInt128),
+                Type::Float | Type::Double | Type::LongDouble,
+            ) => {
                 self.emit_int128_to_float(src, ty);
             },
             (src, Type::Int128 | Type::UInt128) if !matches!(src, Type::Int128 | Type::UInt128) => {

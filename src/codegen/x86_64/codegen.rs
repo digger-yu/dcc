@@ -435,6 +435,20 @@ pub struct Codegen {
     pub current_no_instrument: bool, // 当前函数标了 __attribute__((no_instrument_function))
     /// 静态局部变量分析 pass 的结果 (由 compile() 预计算，后端消费)
     pub static_local_map: StaticLocalMap,
+    /// 当前**可见**的 static local 绑定: 函数名 → (源码名 → mangled 名)。
+    ///
+    /// 为什么不能只靠 `static_local_map.resolve()`: 那张表是全函数预扫描的,
+    /// 查法是「同名取最后一个」—— 而 C 的块作用域是**位置相关**的。同一个
+    /// 函数里两个块各有一份 `static const char *TTYPES[]` 时, 表里两条都对,
+    /// 却无法判断「此处引用的是哪一份」, 于是所有引用都落到最后一个, 前一张
+    /// 表成了无人引用的死数据 (sqlite trace3.test: trace_v2 的类型表被解析成
+    /// transaction 那张, 报错文本与索引越界全错, 整套 fixture abort)。
+    /// 这里按**发射序**在声明点绑定、出块还原, 与 `var_map` 的作用域同构。
+    /// 外层 key 是函数名: 嵌套函数在本函数体内就地编译, 不能互相清表。
+    pub static_visible: HashMap<String, HashMap<String, String>>,
+    /// 块作用域的还原记录 (每个 `push_static_scope` 压一帧):
+    /// (函数名, 源码名, 该名字在本帧之前的绑定)。
+    pub static_scope_undo: Vec<Vec<(String, String, Option<String>)>>,
     pub real_global_names: std::collections::HashSet<String>, // 真实全局变量名 (不含 static local), 用于避免 static local 覆盖真实全局
     /// 函数形参类型表（SysV 实参按形参类型分类）
     pub func_param_types: HashMap<String, Vec<Type>>,
@@ -1170,6 +1184,8 @@ impl Codegen {
             static_local_label_owner: None,
             current_func_ret_ty: Type::Int,
             static_local_map: crate::static_locals::StaticLocalMap::default(),
+            static_visible: HashMap::new(),
+            static_scope_undo: Vec::new(),
             real_global_names: std::collections::HashSet::new(),
             func_param_types: HashMap::new(),
             current_func_is_nested: false,
@@ -1443,8 +1459,17 @@ impl Codegen {
                 if let Some(body) = &f.body {
                     let found = Self::collect_seg_statics(body);
                     for (src, addr) in found {
-                        if let Some(m) = self.static_local_map.resolve(&f.name.name, &src) {
-                            let m = m.to_string();
+                        // 同名 static 在本函数里可以有多份: **每一份**都要登记段限定。
+                        // 只按「最后声明」那一份登记的话, 前面那张表的寻址会丢掉
+                        // 段前缀 —— 段限定是逐符号属性, 不是逐名字属性。
+                        let names: Vec<String> = self
+                            .static_local_map
+                            .func_static_locals(&f.name.name)
+                            .iter()
+                            .filter(|i| i.source_name == src)
+                            .map(|i| i.mangled_name.clone())
+                            .collect();
+                        for m in names {
                             self.global_seg.insert(m, addr);
                         }
                     }
@@ -1910,18 +1935,14 @@ impl Codegen {
                 let sz = sz_raw;
                 let align = v.alignment.unwrap_or(v.ty.align()).max(1);
                 if v.is_extern && v.init.is_none() {
-                    self.globals_raw.insert(
-                        v.name.name.clone(),
-                        GlobalVar {
-                            offset: 0,
-                            size: sz,
-                            ty: v.ty.clone(),
-                            init: None,
-                            section: crate::codegen::shared::elf::SHN_UNDEF,
-                            is_tls: false,
-                            in_data_section: false,
-                        },
-                    );
+                    // `extern int x;` 写在 `int x = 1;` **之后**是合法重声明（C11 6.9.2p4
+                    // 的 tentative/external 链接规则 + 6.2.2p5：重复声明不改变对象的定义与
+                    // 存储）。旧实现在这里无条件 insert，于是这条纯声明把**已经分配好存储**
+                    // 的条目覆盖成 SHN_UNDEF：符号退化成未定义引用，重定位也指向 0。SQLite
+                    // amalgamation 的 `sqlite3_io_error_pending`（27675 行定义、62858 行再
+                    // extern）就是被这一步吃掉，testfixture 链接不过。
+                    // 登记口径与块作用域 extern 声明共用一份（`register_extern_object`）。
+                    self.register_extern_object(&v.name.name, &v.ty);
                     continue;
                 }
                 if v.is_thread_local {

@@ -347,7 +347,12 @@ pub fn plan_and_split(func: &mut Function, original: &Block, ctx: &Ctx) -> Plan 
 ///
 /// 不回滚决策：一旦“后置发现→取消已算出的家”，分裂表与实际发射就会不一致（多一个
 /// 声明却没家的局部会改变帧内布局）。校验只负责把这类事说出来，让判据能往前修。
-pub fn deliver(func: &Function, plan: &mut Plan, body: &mut Block, params: &mut [crate::ast::Param]) {
+pub fn deliver(
+    func: &Function,
+    plan: &mut Plan,
+    body: &mut Block,
+    params: &mut [crate::ast::Param],
+) {
     validate_against_rebuilt(func, plan, body);
     if !plan.loc.is_empty() {
         apply_bindings(body, plan, &func.local_splits, params);
@@ -586,51 +591,50 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
         // 实测 `seg_qualifier.c` 的 main 一度把四个临时值全绑走了：既挤掉了真正的热
         // 变量，又把「合成临时值」这条后端专门有约定（`is_synthetic_temp_base`，见
         // §7 的第 5 轮补记）的名字推进了绑定表。
-        let why: Option<&'static str> = if !func.original_locals.contains(name)
-            && !ctx.home_params.contains(name)
-        {
-            Some("not-a-user-local")
-        } else if sc.has_nested_fn {
-            // Phase 5.2 嵌套函数干涉：upvar 经 r13 静态链逐层访问（emit/nested.rs
-            // load_upvar），本作用域内自动池号（rbx/r12/r14/r15/r8/r9）被整体拒绑，
-            // 等价于「外层变量全 spill」这一保守闸门。无需逐点 liveness 干涉：
-            // upvar 访问路径用的 r10/r11/r13 与自动池不相交（见 regbank 排除理由）。
-            Some("nested-function-in-scope")
-        } else if !info.bindable_ty {
-            Some("type-not-bindable")
-        } else if !info.plain_local {
-            Some("static/tls/extern/volatile/atomic/cleanup/asm-label")
-        } else if info.user_bound {
-            Some("already-register-asm")
-        } else if sc.shadowed.contains(name) {
-            Some("shadowed-with-different-type")
-        } else if escaped.contains(name) {
-            Some("address-escaped")
-        } else if sc.asm_names.contains(name) {
-            Some("inline-asm-operand")
-        } else {
-            match spans.get(name) {
-                // IR 里没有这个基名的任何读写：没有生命期可言，也就无从判断
-                // 「定义是否在 entry 块」，一律不绑。
-                None => Some("no-ir-presence"),
-                Some(sp) => {
-                    let defined = if ctx.unstructured {
-                        assigned.contains(name)
-                    } else {
-                        // 结构化通道走 `entry_def`（「第一次出现就是 entry 块里的定义」），
-                        // 但形参在 IR 里**没有定义点**（它的定义就是调用约定本身），所以
-                        // 这一条永远拒掉形参。`home_params` 名单里的名字自己就是定义，
-                        // 不需要 `entry_def` 再背书。
-                        sp.entry_def || ctx.home_params.contains(name)
-                    };
-                    if !defined {
-                        Some("not-defined-in-entry-block")
-                    } else {
-                        None
-                    }
-                },
-            }
-        };
+        let why: Option<&'static str> =
+            if !func.original_locals.contains(name) && !ctx.home_params.contains(name) {
+                Some("not-a-user-local")
+            } else if sc.has_nested_fn {
+                // Phase 5.2 嵌套函数干涉：upvar 经 r13 静态链逐层访问（emit/nested.rs
+                // load_upvar），本作用域内自动池号（rbx/r12/r14/r15/r8/r9）被整体拒绑，
+                // 等价于「外层变量全 spill」这一保守闸门。无需逐点 liveness 干涉：
+                // upvar 访问路径用的 r10/r11/r13 与自动池不相交（见 regbank 排除理由）。
+                Some("nested-function-in-scope")
+            } else if !info.bindable_ty {
+                Some("type-not-bindable")
+            } else if !info.plain_local {
+                Some("static/tls/extern/volatile/atomic/cleanup/asm-label")
+            } else if info.user_bound {
+                Some("already-register-asm")
+            } else if sc.shadowed.contains(name) {
+                Some("shadowed-with-different-type")
+            } else if escaped.contains(name) {
+                Some("address-escaped")
+            } else if sc.asm_names.contains(name) {
+                Some("inline-asm-operand")
+            } else {
+                match spans.get(name) {
+                    // IR 里没有这个基名的任何读写：没有生命期可言，也就无从判断
+                    // 「定义是否在 entry 块」，一律不绑。
+                    None => Some("no-ir-presence"),
+                    Some(sp) => {
+                        let defined = if ctx.unstructured {
+                            assigned.contains(name)
+                        } else {
+                            // 结构化通道走 `entry_def`（「第一次出现就是 entry 块里的定义」），
+                            // 但形参在 IR 里**没有定义点**（它的定义就是调用约定本身），所以
+                            // 这一条永远拒掉形参。`home_params` 名单里的名字自己就是定义，
+                            // 不需要 `entry_def` 再背书。
+                            sp.entry_def || ctx.home_params.contains(name)
+                        };
+                        if !defined {
+                            Some("not-defined-in-entry-block")
+                        } else {
+                            None
+                        }
+                    },
+                }
+            };
         match why {
             Some(w) => plan.rejected.push((name.clone(), w)),
             None => {
@@ -641,7 +645,8 @@ fn plan_for(func: &Function, original: &Block, ctx: &Ctx) -> Plan {
                 if ctx.unstructured {
                     if let Ok(list) = std::env::var("DCC_REGALLOC_ONLY") {
                         if !list.split(',').any(|s| s.trim() == name.as_str()) {
-                            plan.rejected.push((name.clone(), "not-in-DCC_REGALLOC_ONLY"));
+                            plan.rejected
+                                .push((name.clone(), "not-in-DCC_REGALLOC_ONLY"));
                             continue;
                         }
                     }
@@ -1327,7 +1332,9 @@ fn apply_bindings(
     // 不相交，所以下面 `functions.rs` 形参入库那一步无需考虑搬移顺序。
     for p in params.iter_mut() {
         let Some(nm) = p.name.as_ref() else { continue };
-        let Some((_rn, loc)) = map.get(nm.name.as_str()) else { continue };
+        let Some((_rn, loc)) = map.get(nm.name.as_str()) else {
+            continue;
+        };
         let Location::Reg(r) = loc else { continue };
         if !POOL.iter().any(|(_, v)| *v == r.n) {
             continue;
@@ -1432,7 +1439,10 @@ fn volatile_touched_names(func: &Function) -> HashSet<String> {
                     }
                 },
                 crate::ssa::ir::InstKind::IndexLoad {
-                    arr, idx, is_volatile, ..
+                    arr,
+                    idx,
+                    is_volatile,
+                    ..
                 } => {
                     if *is_volatile {
                         push_op(&mut out, arr);
@@ -1440,7 +1450,11 @@ fn volatile_touched_names(func: &Function) -> HashSet<String> {
                     }
                 },
                 crate::ssa::ir::InstKind::IndexStore {
-                    arr, idx, src, is_volatile, ..
+                    arr,
+                    idx,
+                    src,
+                    is_volatile,
+                    ..
                 } => {
                     if *is_volatile {
                         push_op(&mut out, arr);
@@ -1450,12 +1464,19 @@ fn volatile_touched_names(func: &Function) -> HashSet<String> {
                 },
                 // 成员访问同样带 `is_volatile`（`struct { volatile int f; }` 的形参、
                 // 以及 `volatile` 聚合整体）。基名在 `obj` 上，保守连 `src` 一起排除。
-                crate::ssa::ir::InstKind::MemberLoad { obj, is_volatile, .. } => {
+                crate::ssa::ir::InstKind::MemberLoad {
+                    obj, is_volatile, ..
+                } => {
                     if *is_volatile {
                         push_op(&mut out, obj);
                     }
                 },
-                crate::ssa::ir::InstKind::MemberStore { obj, src, is_volatile, .. } => {
+                crate::ssa::ir::InstKind::MemberStore {
+                    obj,
+                    src,
+                    is_volatile,
+                    ..
+                } => {
                     if *is_volatile {
                         push_op(&mut out, obj);
                         push_op(&mut out, src);
@@ -2329,10 +2350,12 @@ mod tests {
             ty: Type::Long,
             span: crate::diagnostics::Span::point("t.c", 1, 1),
         };
-        let gp = |n: u8| Location::Reg(crate::location::RegId {
-            bank: crate::location::RegBank::Gp,
-            n,
-        });
+        let gp = |n: u8| {
+            Location::Reg(crate::location::RegId {
+                bank: crate::location::RegBank::Gp,
+                n,
+            })
+        };
         let mut m = LocMap::empty();
         m.bind(&mk("n", 1), gp(3)); // rbx：POOL 内，应当交到 Param::home
         m.bind(&mk("m", 1), gp(8)); // r8：延伸池，必须被拒
@@ -2340,7 +2363,10 @@ mod tests {
         let sp = crate::diagnostics::Span::point("t.c", 1, 1);
         let param = |nm: &str| crate::ast::Param {
             ty: Type::Long,
-            name: Some(crate::ast::Ident { name: nm.to_string(), span: sp.clone() }),
+            name: Some(crate::ast::Ident {
+                name: nm.to_string(),
+                span: sp.clone(),
+            }),
             span: sp.clone(),
             quals: crate::ast::QualifierFlags::NONE,
             vla_dim: None,
@@ -2348,11 +2374,7 @@ mod tests {
         };
         let mut params = vec![param("n"), param("m")];
         apply_bindings(&mut body, &mut plan, &Splits::default(), params.as_mut_slice());
-        assert_eq!(
-            params[0].home,
-            Some(gp(3)),
-            "POOL 内的号应当交给形参当载体"
-        );
+        assert_eq!(params[0].home, Some(gp(3)), "POOL 内的号应当交给形参当载体");
         assert_eq!(params[1].home, None, "r8 属于延伸池，不得当形参的家（与入站号相撞）");
     }
 

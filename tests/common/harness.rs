@@ -36,6 +36,21 @@ pub(crate) fn run_syntax_test(name: &str, source: &str) -> std::process::Output 
     output
 }
 
+/// 只断言 stderr/退出码、不消费产物的用例所用的**占位输出路径**。
+///
+/// 为什么不能用 `/dev/null`：编译器写产物都是「先 unlink 再新建」，所以 `-o /dev/null`
+/// 会把系统的 `/dev/null` 节点替换成按调用方 umask 生成的权限（实测 755）的字符设备；
+/// 之后任何以非特权用户跑的构建/测试都写不了它，而症状完全看不出是权限问题（SQLite
+/// 套件的 `configure` 只会先报 `cannot create /dev/null`，再接一句 `No working C
+/// compiler found`，看上去像工具链坏了）。路径带 pid 与序号，同进程内并行用例也不会
+/// 互相覆盖。
+/// 产物路径归调用方负责：要么根本不该被创建（拒收类断言），要么用完 `remove_file`。
+pub(crate) fn discard_out(tag: &str) -> std::path::PathBuf {
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("dcc-discard-{tag}-{}-{n}.o", std::process::id()))
+}
+
 pub(crate) fn run_object_test(
     name: &str,
     source: &str,
@@ -130,7 +145,12 @@ fn env_tag(envs: &[(&str, &str)]) -> String {
         }
         safe.truncate(24);
         safe.push('_');
-        safe.push_str(&h.to_le_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>());
+        safe.push_str(
+            &h.to_le_bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
+        );
     }
     safe
 }
@@ -856,7 +876,12 @@ pub(crate) fn run_compile_object_env(
     for (k, v) in envs {
         cmd.env(k, v);
     }
-    let output = cmd.args(["-o"]).arg(&obj_path).arg(&source_path).output().expect("run dcc");
+    let output = cmd
+        .args(["-o"])
+        .arg(&obj_path)
+        .arg(&source_path)
+        .output()
+        .expect("run dcc");
     let _ = fs::remove_file(source_path);
     let bytes = fs::read(&obj_path).unwrap_or_default();
     let _ = fs::remove_file(obj_path);
@@ -1570,7 +1595,9 @@ pub(crate) fn count_mnemonic_prefix(body: &str, prefix: &str) -> usize {
 
 /// 条件跳转条数（`jmp` 是无条件跳转，不算）。
 pub(crate) fn count_cond_jump(body: &str) -> usize {
-    mnemonics(body).filter(|m| m.starts_with('j') && *m != "jmp").count()
+    mnemonics(body)
+        .filter(|m| m.starts_with('j') && *m != "jmp")
+        .count()
 }
 
 /// 除帧指针 `%r13` 之外的押栈/出栈条数。

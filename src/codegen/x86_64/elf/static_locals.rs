@@ -182,13 +182,8 @@ impl Codegen {
                             // 标量 `static void *p = &&lab;`：走 eval_const_expr 的
                             // LabelAddr 分支（登记 pending_data_textlabel_rels）。
                             let base = self.data_section.len() as u64;
-                            let bytes = self.eval_const_expr(
-                                init,
-                                Some((base, None)),
-                                sz,
-                                &info.ty,
-                                false,
-                            );
+                            let bytes =
+                                self.eval_const_expr(init, Some((base, None)), sz, &info.ty, false);
                             self.data_section.extend_from_slice(&bytes);
                             for _ in bytes.len()..sz {
                                 self.data_section.push(0);

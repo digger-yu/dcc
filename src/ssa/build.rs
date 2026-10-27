@@ -35,7 +35,9 @@ pub fn label_bb_name(source_label: &str) -> String {
 /// 再手拼一次前缀 —— 手拼错了不是崩溃，是「静默没命中」。两侧收在同一处之后，
 /// 前缀只有一个定义，而反向映射可单测。
 pub fn source_label_of(bb_name: &str) -> Option<&str> {
-    bb_name.strip_prefix(LABEL_BB_PREFIX).filter(|s| !s.is_empty())
+    bb_name
+        .strip_prefix(LABEL_BB_PREFIX)
+        .filter(|s| !s.is_empty())
 }
 
 pub(super) struct Builder {
@@ -2374,7 +2376,7 @@ fn build_ssa(f: &FuncDecl, addr_taken: HashSet<String>, analysis_only: bool) -> 
 
 #[cfg(test)]
 mod label_name_tests {
-    use super::{LABEL_BB_PREFIX, label_bb_name, source_label_of};
+    use super::{label_bb_name, source_label_of, LABEL_BB_PREFIX};
 
     /// 正反向必须严格互逆：`unique_bb` 直接拿这个名字当 BB 键，而反向映射是给
     /// 诊断/dump 用的，两边差一个字符就是「静默没命中」。

@@ -1130,7 +1130,7 @@ impl Codegen {
             "__builtin_constant_p" => {
                 let value = args
                     .first()
-                    .map_or(0, |arg| const_eval::is_constant(arg) as i128);
+                    .map_or(0, |arg| const_eval::is_constant_p_arg(arg) as i128);
                 self.mov_imm(dst, value);
                 true
             },
@@ -1858,11 +1858,7 @@ impl Codegen {
                     return true;
                 }
                 let is_f = matches!(arg_ty, Type::Float);
-                let width = if is_f {
-                    SimdWidth::SS
-                } else {
-                    SimdWidth::SD
-                };
+                let width = if is_f { SimdWidth::SS } else { SimdWidth::SD };
                 let mov_xmm = |s: &mut Self, d: u8, r: u8| {
                     if is_f {
                         s.emit_insn(&Insn::movss_xmm(d, r));
@@ -1878,14 +1874,8 @@ impl Codegen {
                 self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Comi, width, 0, 1));
                 // comisd xmm0, xmm1 (信令): ZF=1 ∧ PF=0 ⇒ 有序且相等。
                 // 任一为 NaN 时 ZF=PF=CF=1, setnp 掩掉 → 0。
-                self.emit_insn(&Insn::setcc_reg(
-                    crate::codegen::x86_64::opcode::CondCode::Eq,
-                    0,
-                )); // sete al (ZF=1)
-                self.emit_insn(&Insn::setcc_reg(
-                    crate::codegen::x86_64::opcode::CondCode::Np,
-                    3,
-                )); // setnp bl (PF=0 ⇒ 非 NaN)
+                self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Eq, 0)); // sete al (ZF=1)
+                self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Np, 3)); // setnp bl (PF=0 ⇒ 非 NaN)
                 self.emit_insn(&Insn::alu_rm_reg_reg(
                     crate::codegen::x86_64::opcode::AluOp::And,
                     crate::codegen::shared::asm_operand::Width::B8,
@@ -2263,25 +2253,40 @@ impl Codegen {
             "__builtin_huge_val"
             | "__builtin_huge_valf"
             | "__builtin_huge_vall"
-            | "__builtin_huge_valf16" | "__builtin_huge_valf32" | "__builtin_huge_valf32x"
-            | "__builtin_huge_valf64" | "__builtin_huge_valf64x" | "__builtin_huge_valf128" | "__builtin_huge_valf128x"
+            | "__builtin_huge_valf16"
+            | "__builtin_huge_valf32"
+            | "__builtin_huge_valf32x"
+            | "__builtin_huge_valf64"
+            | "__builtin_huge_valf64x"
+            | "__builtin_huge_valf128"
+            | "__builtin_huge_valf128x"
             | "__builtin_inf"
             | "__builtin_inff"
             | "__builtin_infl"
-            | "__builtin_inff16" | "__builtin_inff32" | "__builtin_inff32x"
-            | "__builtin_inff64" | "__builtin_inff64x" | "__builtin_inff128" | "__builtin_inff128x"
-            | "__builtin_infq" | "__builtin_huge_valq" => {
+            | "__builtin_inff16"
+            | "__builtin_inff32"
+            | "__builtin_inff32x"
+            | "__builtin_inff64"
+            | "__builtin_inff64x"
+            | "__builtin_inff128"
+            | "__builtin_inff128x"
+            | "__builtin_infq"
+            | "__builtin_huge_valq" => {
                 // 宽度: 4=单精度, 8=双精度/long double 近似, 16=binary128。
                 let (width, bytes) = match name {
-                    "__builtin_huge_valf" | "__builtin_inff"
-                    | "__builtin_huge_valf16" | "__builtin_huge_valf32"
-                    | "__builtin_inff16" | "__builtin_inff32" => {
-                        (4u8, 0x7F800000u32.to_le_bytes().to_vec())
-                    },
+                    "__builtin_huge_valf"
+                    | "__builtin_inff"
+                    | "__builtin_huge_valf16"
+                    | "__builtin_huge_valf32"
+                    | "__builtin_inff16"
+                    | "__builtin_inff32" => (4u8, 0x7F800000u32.to_le_bytes().to_vec()),
                     // binary128 +Inf: 0x7FFF_0000_0000_0000_0000_0000_0000_0000
-                    "__builtin_huge_valf128" | "__builtin_huge_valf128x"
-                    | "__builtin_inff128" | "__builtin_inff128x"
-                    | "__builtin_infq" | "__builtin_huge_valq" => {
+                    "__builtin_huge_valf128"
+                    | "__builtin_huge_valf128x"
+                    | "__builtin_inff128"
+                    | "__builtin_inff128x"
+                    | "__builtin_infq"
+                    | "__builtin_huge_valq" => {
                         let mut b = [0u8; 16];
                         b[8..16].copy_from_slice(&0x7FFF_0000_0000_0000u64.to_le_bytes());
                         (16u8, b.to_vec())
@@ -2326,14 +2331,13 @@ impl Codegen {
             //   float:   0x7FC0_0000
             //   long double: 0x7FFF_C000_0000_0000_0000 (dcc 8 字节近似)
             // emit 8 字节 movsd/movss xmm0, [rip+disp32], disp32 在 code_pos+4.
-            "__builtin_nan" | "__builtin_nanf" | "__builtin_nanl"
-            | "__builtin_nanq"
+            "__builtin_nan" | "__builtin_nanf" | "__builtin_nanl" | "__builtin_nanq"
             | "__builtin_nanf16" | "__builtin_nanf32" | "__builtin_nanf32x"
-            | "__builtin_nanf64" | "__builtin_nanf64x" | "__builtin_nanf128" | "__builtin_nanf128x" => {
+            | "__builtin_nanf64" | "__builtin_nanf64x" | "__builtin_nanf128"
+            | "__builtin_nanf128x" => {
                 // 宽度: 4=单精度, 8=双精度/long double 近似, 16=binary128。
                 let (width, bytes) = match name {
-                    "__builtin_nanf"
-                    | "__builtin_nanf16" | "__builtin_nanf32" => {
+                    "__builtin_nanf" | "__builtin_nanf16" | "__builtin_nanf32" => {
                         (4u8, 0x7FC00000u32.to_le_bytes().to_vec())
                     },
                     // binary128 qNaN: 0x7FFF_8000_0000_0000_0000_0000_0000_0000
@@ -2374,9 +2378,16 @@ impl Codegen {
             // 统一用 setp 检测 PF=1 → NaN.
             // 类型由实参决定, 而非函数名后缀: __builtin_isnan(float) 也应
             // 使用 ucomiss; 否则 movss 后高位 0 会使 ucomisd 行为不一致.
-            "__builtin_isnan" | "__builtin_isnanf" | "__builtin_isnanl"
-            | "__builtin_isnanf16" | "__builtin_isnanf32" | "__builtin_isnanf32x"
-            | "__builtin_isnanf64" | "__builtin_isnanf64x" | "__builtin_isnanf128" | "__builtin_isnanf128x" => {
+            "__builtin_isnan"
+            | "__builtin_isnanf"
+            | "__builtin_isnanl"
+            | "__builtin_isnanf16"
+            | "__builtin_isnanf32"
+            | "__builtin_isnanf32x"
+            | "__builtin_isnanf64"
+            | "__builtin_isnanf64x"
+            | "__builtin_isnanf128"
+            | "__builtin_isnanf128x" => {
                 if args.is_empty() {
                     self.mov_imm(dst, 0);
                     return true;
@@ -2452,9 +2463,16 @@ impl Codegen {
             // 位检查: exp = (bits >> shift) & mask; normal iff exp ∈ [1, max-1],
             // 用无符号 (exp-1) <= (max-2) (setbe) 一次判定. 类型按实参 (mirror isnan):
             // float 用 movd/shr23/mask0xFF, 其余 (double/long double) 用 movq/shr52/mask0x7FF.
-            "__builtin_isnormal" | "__builtin_isnormalf" | "__builtin_isnormall"
-            | "__builtin_isnormalf16" | "__builtin_isnormalf32" | "__builtin_isnormalf32x"
-            | "__builtin_isnormalf64" | "__builtin_isnormalf64x" | "__builtin_isnormalf128" | "__builtin_isnormalf128x" => {
+            "__builtin_isnormal"
+            | "__builtin_isnormalf"
+            | "__builtin_isnormall"
+            | "__builtin_isnormalf16"
+            | "__builtin_isnormalf32"
+            | "__builtin_isnormalf32x"
+            | "__builtin_isnormalf64"
+            | "__builtin_isnormalf64x"
+            | "__builtin_isnormalf128"
+            | "__builtin_isnormalf128x" => {
                 if args.is_empty() {
                     self.mov_imm(dst, 0);
                     return true;
@@ -2505,10 +2523,7 @@ impl Codegen {
                     self.emit_insn(&Insn::cmp_eax_imm32(0x7FD)); // cmp eax, 0x7FD (max-2)
                 }
                 // setbe al: (exp-1) <= (max-2) ⇒ exp ∈ [1, max-1] ⇒ normal
-                self.emit_insn(&Insn::setcc_reg(
-                    crate::codegen::x86_64::opcode::CondCode::Be,
-                    0,
-                ));
+                self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::Be, 0));
                 self.emit_insn(&Insn::new(
                     crate::codegen::x86_64::opcode::X86_64Opcode::MovExt {
                         rip_relative: false,
@@ -2533,12 +2548,26 @@ impl Codegen {
             //   sign=1: result = -isinf
             // 排除 NaN: setnp (NOT PF). NaN 时 PF=1, setnp=0 → 整体被清零.
             // 类型按实参, 不用函数名后缀.
-            "__builtin_isinf" | "__builtin_isinff" | "__builtin_isinfl"
-            | "__builtin_isinff16" | "__builtin_isinff32" | "__builtin_isinff32x"
-            | "__builtin_isinff64" | "__builtin_isinff64x" | "__builtin_isinff128" | "__builtin_isinff128x"
-            | "__builtin_isinf_sign" | "__builtin_isinf_signf" | "__builtin_isinf_signl"
-            | "__builtin_isinf_signf16" | "__builtin_isinf_signf32" | "__builtin_isinf_signf32x"
-            | "__builtin_isinf_signf64" | "__builtin_isinf_signf64x" | "__builtin_isinf_signf128" | "__builtin_isinf_signf128x" => {
+            "__builtin_isinf"
+            | "__builtin_isinff"
+            | "__builtin_isinfl"
+            | "__builtin_isinff16"
+            | "__builtin_isinff32"
+            | "__builtin_isinff32x"
+            | "__builtin_isinff64"
+            | "__builtin_isinff64x"
+            | "__builtin_isinff128"
+            | "__builtin_isinff128x"
+            | "__builtin_isinf_sign"
+            | "__builtin_isinf_signf"
+            | "__builtin_isinf_signl"
+            | "__builtin_isinf_signf16"
+            | "__builtin_isinf_signf32"
+            | "__builtin_isinf_signf32x"
+            | "__builtin_isinf_signf64"
+            | "__builtin_isinf_signf64x"
+            | "__builtin_isinf_signf128"
+            | "__builtin_isinf_signf128x" => {
                 if args.is_empty() {
                     self.mov_imm(dst, 0);
                     return true;
@@ -2836,16 +2865,20 @@ impl Codegen {
             // 优先把两个实参对齐到 double (用 cvtps2pd/cvtss2sd).
             // 较新 Intel CPU 在 NaN 时 ZF=1, PF=1, CF=1 → setp 仍可识别.
             "__builtin_isunordered"
-            | "__builtin_isunorderedf16" | "__builtin_isunorderedf32" | "__builtin_isunorderedf32x"
-            | "__builtin_isunorderedf64" | "__builtin_isunorderedf64x" | "__builtin_isunorderedf128" | "__builtin_isunorderedf128x" => {
+            | "__builtin_isunorderedf16"
+            | "__builtin_isunorderedf32"
+            | "__builtin_isunorderedf32x"
+            | "__builtin_isunorderedf64"
+            | "__builtin_isunorderedf64x"
+            | "__builtin_isunorderedf128"
+            | "__builtin_isunorderedf128x" => {
                 if args.len() < 2 {
                     self.mov_imm(dst, 0);
                     return true;
                 }
                 // binary128: 走 libgcc 的 __lttf2 —— 实测**无序时返回 2**
                 // (有序时 a<b→-1, a==b→0, a>b→1), 2 是无序的唯一取值。
-                if matches!(args[0].ty(), Type::Float128)
-                    || matches!(args[1].ty(), Type::Float128)
+                if matches!(args[0].ty(), Type::Float128) || matches!(args[1].ty(), Type::Float128)
                 {
                     self.gen_float128_cmp2("__lttf2", &args[0], &args[1]);
                     self.emit_insn(&Insn::alu_rm_reg_imm32_b64(7, 0, 2)); // cmp rax, 2
@@ -2924,7 +2957,7 @@ impl Codegen {
                 self.emit_insn(&Insn::movsd_xmm(1, 0)); // movsd xmm1, xmm0 (b)
                 self.emit_insn(&Insn::movsd_xmm(0, 2)); // movsd xmm0, xmm2 (a)
                                                         // ucomisd xmm0, xmm1
-                // P11 Bucket N11: typed simd_arith_reg(Ucomi, SD).
+                                                        // P11 Bucket N11: typed simd_arith_reg(Ucomi, SD).
                 self.emit_insn(&Insn::simd_arith_reg(SimdArithOp::Ucomi, SimdWidth::SD, 0, 1)); // ucomisd xmm0, xmm1
                                                                                                 // setp al
                 self.emit_insn(&Insn::setcc_reg(crate::codegen::x86_64::opcode::CondCode::P, 0));
@@ -2958,8 +2991,13 @@ impl Codegen {
             //   Zero → args[2]
             //   其他 (含 Subnormal) → args[4]  (跳过 Subnormal args[3])
             "__builtin_fpclassify"
-            | "__builtin_fpclassifyf16" | "__builtin_fpclassifyf32" | "__builtin_fpclassifyf32x"
-            | "__builtin_fpclassifyf64" | "__builtin_fpclassifyf64x" | "__builtin_fpclassifyf128" | "__builtin_fpclassifyf128x" => {
+            | "__builtin_fpclassifyf16"
+            | "__builtin_fpclassifyf32"
+            | "__builtin_fpclassifyf32x"
+            | "__builtin_fpclassifyf64"
+            | "__builtin_fpclassifyf64x"
+            | "__builtin_fpclassifyf128"
+            | "__builtin_fpclassifyf128x" => {
                 if args.len() < 6 {
                     self.mov_imm(dst, 0);
                     return true;
@@ -3776,15 +3814,15 @@ impl Codegen {
                                 crate::codegen::x86_64::opcode::CondCode::O
                             };
                             self.emit_insn(&Insn::setcc_reg(cc, 0)); // setb/seto al
-                        }
+                        },
                         2 => {
                             // 128 位乘: 计算完整 256 位积的高 128 位, 据符号判溢出。
                             // 约定: rcx=a0, r8=a1 (左); r9=b0, r11=b1 (右)
                             self.push(14);
                             self.push(15); // 保护被调用者保存寄存器
-                            // 保存 a0,a1,b0,b1: H 计算途中这些值会被覆盖,
-                            // 而有符号高位校正 H_signed = H - (a<0?b:0) - (b<0?a:0)
-                            // 需要原始操作数, 故提前压栈, 校正前再 pop 还原。
+                                           // 保存 a0,a1,b0,b1: H 计算途中这些值会被覆盖,
+                                           // 而有符号高位校正 H_signed = H - (a<0?b:0) - (b<0?a:0)
+                                           // 需要原始操作数, 故提前压栈, 校正前再 pop 还原。
                             self.push(1); // a0
                             self.push(8); // a1
                             self.push(9); // b0
@@ -3820,7 +3858,7 @@ impl Codegen {
                             )); // mul r11
                             self.mov(8, 0); // r8 = l3 (a1*b1 低)
                             self.mov(11, 2); // r11 = h3 (a1*b1 高)
-                            // mid = h0 + l1 + l2; 捕获进位 carry_mid ∈ {0,1,2}
+                                             // mid = h0 + l1 + l2; 捕获进位 carry_mid ∈ {0,1,2}
                             self.mov(0, 14); // rax = h0
                             self.emit_alu_rm_reg64(
                                 crate::codegen::x86_64::opcode::AluOp::Add,
@@ -3851,14 +3889,14 @@ impl Codegen {
                                 10,
                                 2,
                             ); // r10 = c0 + c1 = carry_mid
-                            // s = 低 128 位符号位 (bit127) = mid_low 的 bit63
+                               // s = 低 128 位符号位 (bit127) = mid_low 的 bit63
                             self.mov(0, 14); // rax = mid_low
                             self.emit_insn(&Insn::shift_reg_imm8_c1_b64(5, 0, 63)); // shr rax, 63
                             self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 0, 1)); // rax = s (0/1)
                             self.mov(14, 0); // r14 = s
-                            // carry_mid 转入 rcx, 释放 r10 供 H 计算
+                                             // carry_mid 转入 rcx, 释放 r10 供 H 计算
                             self.mov(1, 10); // rcx = carry_mid
-                            // H = h1 + h2 + l3 + carry_mid; 捕获进位 carry_H ∈ {0,1,2,3}
+                                             // H = h1 + h2 + l3 + carry_mid; 捕获进位 carry_H ∈ {0,1,2,3}
                             self.mov(0, 15); // rax = h1
                             self.emit_alu_rm_reg64(
                                 crate::codegen::x86_64::opcode::AluOp::Add,
@@ -3906,16 +3944,16 @@ impl Codegen {
                                 2,
                                 11,
                             ); // rdx = carry_H + h3 = Hhi
-                            // 有符号校正: H_signed = H - (a<0?b:0) - (b<0?a:0)
-                            // 无符号 256 位积的高 128 位 H, 与有符号积高 128 位相差
-                            // (a<0 ? b : 0) + (b<0 ? a : 0) (模 2^128); 下方溢出判定
-                            // 公式要求输入为有符号积的高 128 位, 故此处先校正。
-                            // 还原原始操作数 a=(a0,a1), b=(b0,b1) (H 计算途中已被覆盖)。
+                               // 有符号校正: H_signed = H - (a<0?b:0) - (b<0?a:0)
+                               // 无符号 256 位积的高 128 位 H, 与有符号积高 128 位相差
+                               // (a<0 ? b : 0) + (b<0 ? a : 0) (模 2^128); 下方溢出判定
+                               // 公式要求输入为有符号积的高 128 位, 故此处先校正。
+                               // 还原原始操作数 a=(a0,a1), b=(b0,b1) (H 计算途中已被覆盖)。
                             self.pop(11); // b1
                             self.pop(9); // b0
                             self.pop(8); // a1
                             self.pop(1); // a0
-                            // mask_a (0 或全 1) ← a 的符号位 (bit127 = a1=r8 的 bit63)
+                                         // mask_a (0 或全 1) ← a 的符号位 (bit127 = a1=r8 的 bit63)
                             self.mov(0, 8);
                             self.emit_insn(&Insn::shift_reg_imm8_c1_b64(5, 0, 63)); // shr rax, 63
                             self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 0, 1)); // eax = a_neg (0/1)
@@ -3930,7 +3968,7 @@ impl Codegen {
                                 0,
                             ); // rax = mask_a (0 或全 1)
                             self.mov(15, 0); // r15 = mask_a
-                            // mask_b (0 或全 1) ← b 的符号位 (bit127 = b1=r11 的 bit63), 暂存栈
+                                             // mask_b (0 或全 1) ← b 的符号位 (bit127 = b1=r11 的 bit63), 暂存栈
                             self.mov(0, 11);
                             self.emit_insn(&Insn::shift_reg_imm8_c1_b64(5, 0, 63)); // shr rax, 63
                             self.emit_insn(&Insn::alu_rm_reg_imm32_b64(4, 0, 1)); // eax = b_neg (0/1)
@@ -3945,7 +3983,7 @@ impl Codegen {
                                 0,
                             ); // rax = mask_b (0 或全 1)
                             self.push(0); // 保存 mask_b
-                            // term_a = mask_a ? b : 0, 再从 H 减去
+                                          // term_a = mask_a ? b : 0, 再从 H 减去
                             self.mov(0, 9); // rax = b0
                             self.emit_alu_rm_reg64(
                                 crate::codegen::x86_64::opcode::AluOp::And,
@@ -3970,7 +4008,7 @@ impl Codegen {
                                 2,
                                 11,
                             ); // rdx = Hhi - term_a_hi - CF
-                            // term_b = mask_b ? a : 0, 再从 H 减去
+                               // term_b = mask_b ? a : 0, 再从 H 减去
                             self.pop(0); // rax = mask_b
                             self.mov(15, 0); // r15 = mask_b
                             self.mov(0, 1); // rax = a0
@@ -3997,13 +4035,9 @@ impl Codegen {
                                 2,
                                 8,
                             ); // rdx = Hhi - term_b_hi - CF
-                            // a = (Hlo | Hhi != 0) → 无符号溢出标志 (已对 H 做符号校正)
+                               // a = (Hlo | Hhi != 0) → 无符号溢出标志 (已对 H 做符号校正)
                             self.mov(0, 10); // rax = Hlo
-                            self.emit_alu_rm_reg64(
-                                crate::codegen::x86_64::opcode::AluOp::Or,
-                                0,
-                                2,
-                            ); // or rax, rdx (Hhi)
+                            self.emit_alu_rm_reg64(crate::codegen::x86_64::opcode::AluOp::Or, 0, 2); // or rax, rdx (Hhi)
                             self.emit_insn(&Insn::setcc_reg(
                                 crate::codegen::x86_64::opcode::CondCode::Ne,
                                 0,
@@ -4052,7 +4086,7 @@ impl Codegen {
                             }
                             self.pop(15);
                             self.pop(14); // 恢复
-                        }
+                        },
                         _ => unreachable!(),
                     }
                     self.emit_insn(&Insn::new(
@@ -4082,7 +4116,7 @@ impl Codegen {
                 self.push(0);
                 self.gen_expr(&args[1], Self::EVAL_BASE);
                 self.pop(1); // rcx = lhs, rax = rhs
-                // P11 helper: AluRm{Add|Sub, rcx, rax} 按 sz 选择宽度.
+                             // P11 helper: AluRm{Add|Sub, rcx, rax} 按 sz 选择宽度.
                 let mk_addsub =
                     |op: u8, sz: usize| -> crate::codegen::x86_64::opcode::X86_64Opcode {
                         use crate::codegen::shared::asm_operand::Width;
@@ -5729,7 +5763,7 @@ impl Codegen {
                         2,
                     )); // cmove rax, rdx
                     self.emit_insn(&Insn::mov_reg_imm_compact(2, 62)); // mov rdx, 62
-                                                                     // P11: 收敛到 AluRm{Sub, B64, rdx, rax}.
+                                                                       // P11: 收敛到 AluRm{Sub, B64, rdx, rax}.
                     {
                         let insn = Insn::new(
                             crate::codegen::x86_64::opcode::X86_64Opcode::AluRm {
@@ -6728,9 +6762,16 @@ impl Codegen {
                 true
             },
             // __builtin_isfinite / isfinitef / isfinitel: 等价于 __builtin_finite
-            "__builtin_isfinite" | "__builtin_isfinitef" | "__builtin_isfinitel"
-            | "__builtin_isfinitef16" | "__builtin_isfinitef32" | "__builtin_isfinitef32x"
-            | "__builtin_isfinitef64" | "__builtin_isfinitef64x" | "__builtin_isfinitef128" | "__builtin_isfinitef128x" => {
+            "__builtin_isfinite"
+            | "__builtin_isfinitef"
+            | "__builtin_isfinitel"
+            | "__builtin_isfinitef16"
+            | "__builtin_isfinitef32"
+            | "__builtin_isfinitef32x"
+            | "__builtin_isfinitef64"
+            | "__builtin_isfinitef64x"
+            | "__builtin_isfinitef128"
+            | "__builtin_isfinitef128x" => {
                 if args.is_empty() {
                     self.mov_imm(dst, 0);
                     return true;
@@ -6857,40 +6898,27 @@ impl Codegen {
                 //   __gttf2/__getf2: a<b→-1, a==b→0, a>b→1, **无序→-2**
                 // C 的 is* 谓词在任一为 NaN 时必须为 0, 所以用返回码的符号/取值
                 // 把无序那一档筛掉 (无序的返回值在 lt 侧是 2、gt 侧是 -2)。
-                if matches!(args[0].ty(), Type::Float128)
-                    || matches!(args[1].ty(), Type::Float128)
+                if matches!(args[0].ty(), Type::Float128) || matches!(args[1].ty(), Type::Float128)
                 {
                     let is_llg = name == "__builtin_islessgreater";
                     let (rname, cc, imm) = match name {
                         // a > b ⇔ __gttf2 == 1 (无序为 -2) ⇒ ret > 0
-                        "__builtin_isgreater" => (
-                            "__gttf2",
-                            crate::codegen::x86_64::opcode::CondCode::Gt,
-                            0i64,
-                        ),
+                        "__builtin_isgreater" => {
+                            ("__gttf2", crate::codegen::x86_64::opcode::CondCode::Gt, 0i64)
+                        },
                         // a >= b ⇔ __getf2 ∈ {0,1} (无序为 -2) ⇒ ret >= 0
-                        "__builtin_isgreaterequal" => (
-                            "__getf2",
-                            crate::codegen::x86_64::opcode::CondCode::Ge,
-                            0i64,
-                        ),
+                        "__builtin_isgreaterequal" => {
+                            ("__getf2", crate::codegen::x86_64::opcode::CondCode::Ge, 0i64)
+                        },
                         // a < b ⇔ __lttf2 == -1 (无序为 2) ⇒ ret < 0
-                        "__builtin_isless" => (
-                            "__lttf2",
-                            crate::codegen::x86_64::opcode::CondCode::Lt,
-                            0i64,
-                        ),
+                        "__builtin_isless" => {
+                            ("__lttf2", crate::codegen::x86_64::opcode::CondCode::Lt, 0i64)
+                        },
                         // a <= b ⇔ __letf2 ∈ {-1,0} (无序为 2) ⇒ ret < 1
-                        "__builtin_islessequal" => (
-                            "__letf2",
-                            crate::codegen::x86_64::opcode::CondCode::Lt,
-                            1i64,
-                        ),
-                        _ => (
-                            "__lttf2",
-                            crate::codegen::x86_64::opcode::CondCode::Ne,
-                            0i64,
-                        ),
+                        "__builtin_islessequal" => {
+                            ("__letf2", crate::codegen::x86_64::opcode::CondCode::Lt, 1i64)
+                        },
+                        _ => ("__lttf2", crate::codegen::x86_64::opcode::CondCode::Ne, 0i64),
                     };
                     self.gen_float128_cmp2(rname, &args[0], &args[1]);
                     if is_llg {
@@ -7100,10 +7128,16 @@ impl Codegen {
             //   binary32 sNaN : 0x7F80_0001
             //   binary64 sNaN : 0x7FF0_0000_0000_0001
             //   long double   : 8 字节近似 (与 __builtin_nanl 同一表示)
-            "__builtin_nans" | "__builtin_nansf" | "__builtin_nansl"
+            "__builtin_nans"
+            | "__builtin_nansf"
+            | "__builtin_nansl"
             | "__builtin_nansq"
-            | "__builtin_nansf16" | "__builtin_nansf32" | "__builtin_nansf32x"
-            | "__builtin_nansf64" | "__builtin_nansf64x" | "__builtin_nansf128"
+            | "__builtin_nansf16"
+            | "__builtin_nansf32"
+            | "__builtin_nansf32x"
+            | "__builtin_nansf64"
+            | "__builtin_nansf64x"
+            | "__builtin_nansf128"
             | "__builtin_nansf128x" => {
                 // 宽度: 4=单精度, 8=双精度/long double 近似, 16=binary128。
                 let (width, bytes) = match name {
@@ -8047,7 +8081,7 @@ impl Codegen {
                 } else {
                     false
                 }
-            }
+            },
         }
     }
     fn gen_builtin_fn_ptr(&mut self, e: &Expr, dst: u8) {

@@ -2193,7 +2193,10 @@ struct PPInt {
 
 impl PPInt {
     const fn signed(v: i64) -> Self {
-        Self { v: v as u64, uns: false }
+        Self {
+            v: v as u64,
+            uns: false,
+        }
     }
 
     fn unsigned(v: u64) -> Self {
@@ -7021,7 +7024,10 @@ impl Preprocessor {
                 *pos += 1;
                 let v = Self::parse_unary(bytes, pos);
                 // 一元负号保持操作数的符号性（C11 6.5.3.3）。
-                return PPInt { v: v.v.wrapping_neg(), uns: v.uns };
+                return PPInt {
+                    v: v.v.wrapping_neg(),
+                    uns: v.uns,
+                };
             }
             if bytes[*pos] == b'+' {
                 *pos += 1;
@@ -7030,7 +7036,10 @@ impl Preprocessor {
             if bytes[*pos] == b'~' {
                 *pos += 1;
                 let v = Self::parse_unary(bytes, pos);
-                return PPInt { v: !v.v, uns: v.uns };
+                return PPInt {
+                    v: !v.v,
+                    uns: v.uns,
+                };
             }
             if bytes[*pos] == b'(' {
                 *pos += 1;
@@ -8418,7 +8427,7 @@ impl Drop for CacheRootGuard {
 #[cfg(test)]
 mod tests {
     use super::preprocess;
-    use super::{MacroDef, PchBundle, PchOptions, set_cache_root};
+    use super::{set_cache_root, MacroDef, PchBundle, PchOptions};
     use crate::cli::{Abi, Arch, Os, StdMode, TargetTriple};
     use std::path::PathBuf;
 

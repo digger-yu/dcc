@@ -1170,10 +1170,10 @@ impl super::super::super::Codegen {
         self.emit_insn(&Insn::mov_rm_mem(true, Width::B64, 0, 4, 16)); // rax = [rsp+16]
                                                                        // 8. 按类型存
         self.emit_store_scalar_float_at(eff_ty, eff_ty, 0); // 把 xmm0/st(0) 写到 [rax]
-        // x87 路径的 store 是 `fstp` (弹栈): 前缀表达式的值约定在 st(0),
-        // 弹空之后调用方 (如实参暂存 `fstpt (%rsp)`) 会从空 x87 栈弹出
-        // indefinite NaN —— `g (++v5)` 传 -nan (va-arg-pack-1 case 1)。
-        // 从刚写回的槽重新 fld, 让新值留在 st(0)。
+                                                            // x87 路径的 store 是 `fstp` (弹栈): 前缀表达式的值约定在 st(0),
+                                                            // 弹空之后调用方 (如实参暂存 `fstpt (%rsp)`) 会从空 x87 栈弹出
+                                                            // indefinite NaN —— `g (++v5)` 传 -nan (va-arg-pack-1 case 1)。
+                                                            // 从刚写回的槽重新 fld, 让新值留在 st(0)。
         if is_pre && self.float_in_st0(eff_ty) {
             self.emit_x87_fld_at(0, 0, eff_ty); // fld tbyte [rax]
         }

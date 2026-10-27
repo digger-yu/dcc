@@ -29,11 +29,7 @@ impl Codegen {
     /// 的原文长/替换长都算成 0，`vmlinux.o` 在 objtool 那关报 `empty alternative entry`。
     pub(crate) fn emit_asm_xsave(&mut self, op: &AsmOperand, opcode: u8, ext: u8, rexw: bool) {
         let emit_mem = |c: &mut Self, disp: i32, base: u8, index: Option<u8>, scale: u8| {
-            c.emit_insn(&Insn::raw(&[
-                Self::rex(rexw, 0, index.unwrap_or(0), base),
-                0x0F,
-                opcode,
-            ]));
+            c.emit_insn(&Insn::raw(&[Self::rex(rexw, 0, index.unwrap_or(0), base), 0x0F, opcode]));
             c.emit_asm_modrm_mem_only(ext, disp, base, index, scale);
         };
         match op {

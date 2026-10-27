@@ -186,13 +186,22 @@ pub fn compute(func: &Function) -> Interference {
                 }
             }
         }
-        let live_ins: Vec<String> =
-            uses.iter().filter(|u| !defs.contains(*u)).map(|u| (*u).to_string()).collect();
+        let live_ins: Vec<String> = uses
+            .iter()
+            .filter(|u| !defs.contains(*u))
+            .map(|u| (*u).to_string())
+            .collect();
         if let Some(&ebi) = idx.get(func.entry.as_str()) {
             for li in &live_ins {
                 kills[ebi].insert(li.clone());
                 gens[ebi].remove(li);
-                points[ebi].insert(0, Point { uses: BTreeSet::new(), def: Some(li.clone()) });
+                points[ebi].insert(
+                    0,
+                    Point {
+                        uses: BTreeSet::new(),
+                        def: Some(li.clone()),
+                    },
+                );
             }
         }
     }

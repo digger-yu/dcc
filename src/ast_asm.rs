@@ -121,7 +121,10 @@ fn walk_stmt(st: &Stmt, out: &mut HashSet<String>) {
             walk_stmt(body, out);
         },
         Stmt::Switch {
-            expr, cases, prelude, ..
+            expr,
+            cases,
+            prelude,
+            ..
         } => {
             walk_expr(expr, out);
             walk_items(prelude, out);

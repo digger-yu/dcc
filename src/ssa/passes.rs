@@ -1235,11 +1235,19 @@ pub fn speculative_execution(func: &mut Function) -> bool {
         let cond_names: Option<Vec<String>> = match &b.term {
             Terminator::Branch { cond, .. } => {
                 let n = operand_uses_op(cond);
-                if n.is_empty() { None } else { Some(n) }
+                if n.is_empty() {
+                    None
+                } else {
+                    Some(n)
+                }
             },
             Terminator::SwitchTable { idx, .. } => {
                 let n = operand_uses_op(idx);
-                if n.is_empty() { None } else { Some(n) }
+                if n.is_empty() {
+                    None
+                } else {
+                    Some(n)
+                }
             },
             _ => None,
         };
@@ -1576,9 +1584,15 @@ fn vrp_full_range(ty: &Type) -> Option<VrpRange> {
         return None;
     }
     Some(if is_unsigned_ty(ty) {
-        VrpRange { lo: 0, hi: (1i128 << bits) - 1 }
+        VrpRange {
+            lo: 0,
+            hi: (1i128 << bits) - 1,
+        }
     } else {
-        VrpRange { lo: -(1i128 << (bits - 1)), hi: (1i128 << (bits - 1)) - 1 }
+        VrpRange {
+            lo: -(1i128 << (bits - 1)),
+            hi: (1i128 << (bits - 1)) - 1,
+        }
     })
 }
 
@@ -1750,22 +1764,39 @@ fn vrp_eval_inst_range(kind: &InstKind, m: &VrpMap, dest_ty: &Type) -> Option<Vr
 }
 
 /// 取 Bin 两个操作数的区间，带类型一致性守卫（混合符号 ⇒ 放弃；Int 字面量按对侧类型解释）。
-fn vrp_bin_operands(l: &Operand, r: &Operand, m: &VrpMap, dest_ty: &Type) -> Option<(VrpRange, VrpRange)> {
+fn vrp_bin_operands(
+    l: &Operand,
+    r: &Operand,
+    m: &VrpMap,
+    dest_ty: &Type,
+) -> Option<(VrpRange, VrpRange)> {
     match (l, r) {
         (Operand::Var(lv), Operand::Var(rv)) => {
             if is_unsigned_ty(&lv.ty) != is_unsigned_ty(&rv.ty) {
                 return None;
             }
-            let lr = m.get(&lv.name()).copied().or_else(|| vrp_full_range(&lv.ty))?;
-            let rr = m.get(&rv.name()).copied().or_else(|| vrp_full_range(&rv.ty))?;
+            let lr = m
+                .get(&lv.name())
+                .copied()
+                .or_else(|| vrp_full_range(&lv.ty))?;
+            let rr = m
+                .get(&rv.name())
+                .copied()
+                .or_else(|| vrp_full_range(&rv.ty))?;
             Some((lr, rr))
         },
         (Operand::Int(c), Operand::Var(rv)) => {
-            let rr = m.get(&rv.name()).copied().or_else(|| vrp_full_range(&rv.ty))?;
+            let rr = m
+                .get(&rv.name())
+                .copied()
+                .or_else(|| vrp_full_range(&rv.ty))?;
             Some((VrpRange::point(mask_to_type(*c, &rv.ty)), rr))
         },
         (Operand::Var(lv), Operand::Int(c)) => {
-            let lr = m.get(&lv.name()).copied().or_else(|| vrp_full_range(&lv.ty))?;
+            let lr = m
+                .get(&lv.name())
+                .copied()
+                .or_else(|| vrp_full_range(&lv.ty))?;
             Some((lr, VrpRange::point(mask_to_type(*c, &lv.ty))))
         },
         (Operand::Int(a), Operand::Int(b)) => {
@@ -1803,7 +1834,13 @@ fn vrp_cmp_range<F: Fn(i128, i128) -> bool>(pred: F, a: VrpRange, b: VrpRange) -
     }
 }
 
-fn vrp_bin_range(op: BinOp, l: &Operand, r: &Operand, m: &VrpMap, dest_ty: &Type) -> Option<VrpRange> {
+fn vrp_bin_range(
+    op: BinOp,
+    l: &Operand,
+    r: &Operand,
+    m: &VrpMap,
+    dest_ty: &Type,
+) -> Option<VrpRange> {
     // 同一 SSA 名的自比较（x==x / x!=x / x<=x ...）：整数恒可判定。
     if let (Operand::Var(lv), Operand::Var(rv)) = (l, r) {
         if lv.name() == rv.name() && type_bits(&lv.ty).is_some() {
@@ -1883,7 +1920,10 @@ fn vrp_bin_range(op: BinOp, l: &Operand, r: &Operand, m: &VrpMap, dest_ty: &Type
 
 fn vrp_un_range(op: UnOp, e: &Operand, m: &VrpMap, dest_ty: &Type) -> Option<VrpRange> {
     let er = match e {
-        Operand::Var(v) => m.get(&v.name()).copied().or_else(|| vrp_full_range(&v.ty))?,
+        Operand::Var(v) => m
+            .get(&v.name())
+            .copied()
+            .or_else(|| vrp_full_range(&v.ty))?,
         Operand::Int(c) => VrpRange::point(*c),
         _ => return None,
     };
@@ -2054,13 +2094,10 @@ fn vrp_provable_branch_value(
         Operand::Int(v) => Some(if *v != 0 { 1 } else { 0 }),
         Operand::Var(v) => {
             let name = v.name();
-            let r = out
-                .get(&name)
-                .copied()
-                .or_else(|| {
-                    defs.get(&name)
-                        .and_then(|k| vrp_eval_inst_range(k, out, ty_map.get(&name).unwrap_or(&v.ty)))
-                })?;
+            let r = out.get(&name).copied().or_else(|| {
+                defs.get(&name)
+                    .and_then(|k| vrp_eval_inst_range(k, out, ty_map.get(&name).unwrap_or(&v.ty)))
+            })?;
             if r.lo == 0 && r.hi == 0 {
                 Some(0)
             } else if r.lo > 0 || r.hi < 0 {
@@ -2624,11 +2661,13 @@ fn walk_items_refs(
                     calls.push(cf.clone());
                 }
             },
-            BlockItem::Decl(Decl::StructDef(_)
-            | Decl::UnionDef(_)
-            | Decl::EnumDef(_)
-            | Decl::Typedef { .. }
-            | Decl::GlobalAsm { .. }) => {},
+            BlockItem::Decl(
+                Decl::StructDef(_)
+                | Decl::UnionDef(_)
+                | Decl::EnumDef(_)
+                | Decl::Typedef { .. }
+                | Decl::GlobalAsm { .. },
+            ) => {},
         }
     }
 }
@@ -2676,7 +2715,10 @@ fn walk_stmt_refs(
         },
         Stmt::Block { b, .. } => walk_block_refs(b, func_names, calls, address_taken),
         Stmt::Switch {
-            expr, cases, prelude, ..
+            expr,
+            cases,
+            prelude,
+            ..
         } => {
             walk_expr_refs(expr, func_names, calls, address_taken);
             // prelude 里可能有全仓唯一的某个 callee 的调用点，漏了它 DCE 就会删掉被调者。
@@ -3191,7 +3233,7 @@ fn operand_identity(o: &Operand) -> String {
             // 浮点字面量的类型必是叶子标量, 身份串不会失败; `unwrap_or_default`
             // 只是把「理论上不到」的分支收敛成「不参与值编号」, 不引入 panic。
             format!("#f{:?}{}", f, type_tag_of(ty).unwrap_or_default())
-        }
+        },
         Operand::Str(s) => format!("#s{:?}", s),
         Operand::SymAddr(n, _) => format!("#sym{n}"),
         Operand::FnAddr(n, _) => format!("#fn{n}"),

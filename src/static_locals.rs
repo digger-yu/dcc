@@ -27,6 +27,15 @@ pub struct StaticLocalInfo {
     pub size: usize,
     /// 所属函数名
     pub owner_func: String,
+    /// 声明处**标识符**的源码行列 (`v.name.span`)。
+    ///
+    /// 存在理由: 同一个函数里可以有多份同名 static (分处不同的块作用域),
+    /// 而每份的 mangled 名不同。按源码名查表只能猜「哪一份」, 按声明位置
+    /// 才能唯一确定 —— 后端在声明点用 `resolve_at` 把名字绑到这一份上。
+    /// 用 `name.span` 而不是 `v.span`: 后者是整条声明的起点,
+    /// `static int a, b;` 的两个声明符会重位。
+    pub span_line: u32,
+    pub span_col: u32,
     /// 全局源码序序号 (由 `analyze_static_locals` 的 counter 分配, 跨函数唯一递增)。
     /// 存在理由: `StaticLocalMap` 内部全是 `HashMap`，必须有一个与哈希迭代序无关的
     /// 全序键才能保证产物可复现 (见 `iter_all`)。
@@ -74,8 +83,46 @@ impl StaticLocalMap {
 
     /// 查询变量的 mangled 名 (从后向前扫描, 内层作用域优先).
     /// 如果 name 不是 static local, 返回 None.
+    ///
+    /// **位置无关**: 同名多份时返回「最后声明」的那一份。这只适合
+    /// 「本函数里该名字唯一」或「函数级预分析」的场合; 有位置信息的
+    /// 发射点请用 [`Self::resolve_at`]。
     pub fn resolve(&self, func_name: &str, source_name: &str) -> Option<&str> {
         Self::lookup_mangled(&self.rename_map, func_name, source_name)
+    }
+
+    /// 按**声明位置**查 static local: 源码名 + 标识符的行列。
+    ///
+    /// 这是唯一能区分「同一函数里多个同名 static」的查法。
+    /// 按**声明位置**定位这一次 static 声明 —— 但位置只能缩小候选，**名字必须同时相等**。
+    ///
+    /// 为什么必须比名字：展开器（`opt.rs::function_inline`）复制函数体时保留原 `Span`，
+    /// 而合成标识符（`ssa/structure.rs` 给 switch 跳表造的 `__swt_n*` 用的是该 switch 的
+    /// span）会在同一个函数里出现「不同名、同位置」的两份声明。只按位置查会把后一份
+    /// 绑到前一份的 mangled 名上 ⇒ 第二个 switch 拿第一张表的基址派发 ⇒ 跳进错的臂体
+    /// （实测：一个 `while(1)` 永不退出；SQLite 里就是 `sqlite3VdbeDelete` 倒着走 `Op`
+    /// 数组的那个循环，`-O2`/`-O3` 的 `walfault.test` 因此跑不完）。
+    /// 名字与位置都相等才是「这一次声明」；同名同位置的多份是今天的歧义形状（与修前一致，
+    /// 取首份），本函数不假装能分辨它 —— 那种情形由 `count_by_name` 在另一侧把关。
+    pub fn resolve_at(
+        &self,
+        func_name: &str,
+        source_name: &str,
+        line: u32,
+        col: u32,
+    ) -> Option<&StaticLocalInfo> {
+        self.by_function.get(func_name).and_then(|v| {
+            v.iter()
+                .find(|i| i.source_name == source_name && i.span_line == line && i.span_col == col)
+        })
+    }
+
+    /// 本函数里该源码名有几份 static 声明。
+    pub fn count_by_name(&self, func_name: &str, source_name: &str) -> usize {
+        self.func_static_locals(func_name)
+            .iter()
+            .filter(|i| i.source_name == source_name)
+            .count()
     }
 
     /// 判断某源码名在某函数中是否是 static local.
@@ -177,6 +224,8 @@ fn collect_from_block(
                     alignment: align,
                     size: sz,
                     owner_func: func_name.to_string(),
+                    span_line: v.name.span.line,
+                    span_col: v.name.span.col,
                     order,
                     needs_runtime_init: false,
                 };

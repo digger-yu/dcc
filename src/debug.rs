@@ -644,7 +644,12 @@ pub struct DwarfLocRange {
 #[derive(Debug, Clone)]
 pub struct DwarfLocalVar {
     pub name: String,
-    pub ty: DwarfType,
+    /// 用 `Arc` 共享而不是内联整棵类型树：`ast_type_to_dwarf` 对 `struct T` 会把成员表
+    /// 完整展开（`sqlite3.c` 里单个 `struct Parse`/`Vdbe` 展开就是上百 KB），而同一种类型
+    /// 会在成千上万个局部变量里重复出现 —— 内联拷贝实测把 `-g` 编译推到 6GB 以上。
+    /// 共享后每个变量只多一份指针，DWARF 侧的 `ensure_type_die` 本来就按名字去重，
+    /// 产物逐字节不变。
+    pub ty: std::sync::Arc<DwarfType>,
     /// DWARF 位置表达式 (DW_OP_fbreg offset 等)
     pub location: DwarfParamLocation,
     /// **分段位置**（loclist）。空或单条 ⇒ 仍按 `location` 发 `DW_FORM_exprloc`，与今天
@@ -1234,7 +1239,7 @@ pub fn build_dwarf(source: &str, functions: &[(&str, u64)]) -> DebugSections {
         source_name: source.to_string(),
         ..Default::default()
     };
-    build_dwarf_full(&cu, &opts)
+    build_dwarf_full(cu.clone(), &opts)
 }
 
 /// 指定目标架构的 DWARF 生成（AArch64 / RISC-V 等）
@@ -1284,7 +1289,7 @@ pub fn build_dwarf_arch(source: &str, functions: &[(&str, u64)], arch: ArchKind)
         arch,
         ..Default::default()
     };
-    build_dwarf_full(&cu, &opts)
+    build_dwarf_full(cu.clone(), &opts)
 }
 
 /// `.debug_*` 各子节的**唯一口径**：把输入 CU 的函数表整理成「一条一函数、按地址升序、
@@ -1312,12 +1317,16 @@ pub fn build_dwarf_arch(source: &str, functions: &[(&str, u64)], arch: ArchKind)
 ///
 /// 没有函数时（只有 `func_ranges` 或只有行表的输入）一律**不改** `low_pc`/`high_pc`/
 /// `func_ranges`：这三个字段是输入的一部分，不能因为本函数「看起来该管它们」就被清空。
-pub fn normalize_cu(cu: &CompileUnit) -> CompileUnit {
-    let mut out = cu.clone();
+pub fn normalize_cu(cu: CompileUnit) -> CompileUnit {
+    // 就地取走而不是 `cu.clone()`：`cu.types` 是逐声明展开的完整类型树（`sqlite3.c`
+    // 实测 287MB），整体克隆等于把它再来一份。归一化本来就要独占这份数据，按值传入后
+    // 直接搬移即可，产物逐字节不变。
+    let mut out = cu; // 下面只改 `functions`/`low_pc`/`high_pc`/`func_ranges`
 
     // 1) 同名合并（保持首次出现的顺序，排序留给下一步）
-    let mut merged: Vec<DwarfFuncInfo> = Vec::with_capacity(cu.functions.len());
-    for f in cu.functions.iter() {
+    let funcs = std::mem::take(&mut out.functions);
+    let mut merged: Vec<DwarfFuncInfo> = Vec::with_capacity(funcs.len());
+    for mut f in funcs {
         if let Some(prev) = merged.iter_mut().find(|p| p.name == f.name) {
             prev.low_pc = prev.low_pc.min(f.low_pc);
             prev.high_pc = prev.high_pc.max(f.high_pc);
@@ -1325,23 +1334,23 @@ pub fn normalize_cu(cu: &CompileUnit) -> CompileUnit {
                 prev.decl_line = f.decl_line;
             }
             if prev.linkage_name.is_none() {
-                prev.linkage_name = f.linkage_name.clone();
+                prev.linkage_name = f.linkage_name.take();
             }
             if prev.local_vars.is_empty() {
-                prev.local_vars = f.local_vars.clone();
+                prev.local_vars = std::mem::take(&mut f.local_vars);
             }
             if prev.param_locations.is_empty() {
-                prev.param_locations = f.param_locations.clone();
+                prev.param_locations = std::mem::take(&mut f.param_locations);
             }
             if prev.lexical_blocks.is_empty() {
-                prev.lexical_blocks = f.lexical_blocks.clone();
+                prev.lexical_blocks = std::mem::take(&mut f.lexical_blocks);
             }
             if prev.params.is_empty() {
-                prev.params = f.params.clone();
+                prev.params = std::mem::take(&mut f.params);
             }
             prev.is_external |= f.is_external;
         } else {
-            merged.push(f.clone());
+            merged.push(f);
         }
     }
 
@@ -1358,10 +1367,33 @@ pub fn normalize_cu(cu: &CompileUnit) -> CompileUnit {
     out
 }
 
+/// 诊断用内存打点：`DCC_DBG_MEM=1` 时在 stderr 打印当前 RSS。
+///
+/// 调试信息这一段的峰值内存对大文件极敏感（`sqlite3.c -O0 -g` 曾经 >6.5GB 被 OOM），
+/// 而它由好几步拼起来，光看总峰值分不清是哪一步。只在环境变量存在时读一次
+/// `/proc/self/statm`，不参与任何判据、不进产物字节。
+pub(crate) fn dbg_mem(tag: &str) {
+    if std::env::var_os("DCC_DBG_MEM").is_none() {
+        return;
+    }
+    let kb = std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|s| {
+            s.split_whitespace()
+                .nth(1)
+                .and_then(|p| p.parse::<u64>().ok())
+        })
+        .map(|pages| pages * 4)
+        .unwrap_or(0);
+    eprintln!("DBGMEM {tag}: {} MB", kb / 1024);
+}
+
 /// 完整 DWARF v4/v5 + 辅助节生成（主入口）
-pub fn build_dwarf_full(cu: &CompileUnit, opts: &DebugOptions) -> DebugSections {
+pub fn build_dwarf_full(cu: CompileUnit, opts: &DebugOptions) -> DebugSections {
     // 四个消费者（info / line / aranges / frame）一律只读归一化后的这一份，见 `normalize_cu`。
+    dbg_mem("full:start");
     let cu = &normalize_cu(cu);
+    dbg_mem("full:normalized");
     let mut sec = DebugSections::default();
 
     let mut strs = StringTable::new();
@@ -1369,9 +1401,12 @@ pub fn build_dwarf_full(cu: &CompileUnit, opts: &DebugOptions) -> DebugSections 
 
     // 1) .debug_str —— 先按已知名字定下顺序（下面的第 2 步会复用同一张表，不会重排）
     sec.str = strl_section(&mut strs, cu, opts);
+    dbg_mem("full:str");
 
     // 2) .debug_abbrev + .debug_info
-    let (abbrev, info, relocs, loc, loc_relocs) = build_abbrev_and_info(cu, opts, &mut strs, &mut abb);
+    let (abbrev, info, relocs, loc, loc_relocs) =
+        build_abbrev_and_info(cu, opts, &mut strs, &mut abb);
+    dbg_mem("full:info");
     sec.loc = loc;
     sec.loc_relocs = loc_relocs;
     // 节内容必须在这一步**之后**重新取。`StringTable::intern` 是「去重 + 往后追加」，
@@ -1389,16 +1424,19 @@ pub fn build_dwarf_full(cu: &CompileUnit, opts: &DebugOptions) -> DebugSections 
 
     // 3) .debug_line
     let (line, line_relocs) = build_line_program(cu, opts);
+    dbg_mem("full:line");
     sec.line = line;
     sec.debug_line_relocs = line_relocs;
 
     // 4) .debug_aranges
     let (aranges, aranges_relocs) = build_aranges(cu, opts);
+    dbg_mem("full:aranges");
     sec.aranges = aranges;
     sec.debug_aranges_relocs = aranges_relocs;
 
     // 5) .debug_frame
     sec.frame = build_debug_frame(cu, opts);
+    dbg_mem("full:frame");
 
     // 6) -gpubnames: .debug_pubnames + .debug_pubtypes + .debug_names
     if opts.pubnames {
@@ -1436,9 +1474,11 @@ pub fn build_dwarf_full(cu: &CompileUnit, opts: &DebugOptions) -> DebugSections 
 
     // 10) BTF - 生成完整类型信息
     sec.btf = build_btf_full(cu);
+    dbg_mem("full:btf");
 
     // 11) .BTF.ext - func_info + line_info (BPF verifier 需要)
     sec.btf_ext = build_btf_ext(cu);
+    dbg_mem("full:btf_ext");
 
     sec
 }
@@ -1795,8 +1835,13 @@ fn build_abbrev_and_info(
             };
             // DWARF5 不带 loclist（见 `LocSink` 的注释）：那时传 `None`，变量退回单 exprloc。
             emit_local_var_die(
-                &mut info, abb, strs, cu, var, *ty_off,
-                if dwarf_ver >= 5 { None } else { Some(&mut sk) }
+                &mut info,
+                abb,
+                strs,
+                cu,
+                var,
+                *ty_off,
+                if dwarf_ver >= 5 { None } else { Some(&mut sk) },
             );
         }
 
@@ -1827,8 +1872,13 @@ fn build_abbrev_and_info(
                     addr_size: opts.arch.address_size(),
                 };
                 emit_local_var_die(
-                    &mut info, abb, strs, cu, var, *ty_off,
-                    if dwarf_ver >= 5 { None } else { Some(&mut sk) }
+                    &mut info,
+                    abb,
+                    strs,
+                    cu,
+                    var,
+                    *ty_off,
+                    if dwarf_ver >= 5 { None } else { Some(&mut sk) },
                 );
             }
             if block_has_vars {
@@ -1916,7 +1966,8 @@ impl<'a> LocSink<'a> {
             let off2 = self.bytes.len() as u64;
             self.push_addr(eo as u64);
             self.relocs.push((off2, self.fn_name.to_string(), eo));
-            self.bytes.extend_from_slice(&(expr.len() as u16).to_le_bytes());
+            self.bytes
+                .extend_from_slice(&(expr.len() as u16).to_le_bytes());
             self.bytes.extend_from_slice(&expr);
         }
         if wrote == 0 {
@@ -1935,7 +1986,7 @@ impl<'a> LocSink<'a> {
             8 => self.bytes.extend_from_slice(&v.to_le_bytes()),
             4 => self.bytes.extend_from_slice(&(v as u32).to_le_bytes()),
             // 其它地址宽度本 target 不发；写零长度会让整段表错位，所以直接跳过本条。
-            _ => {}
+            _ => {},
         }
     }
 }
@@ -4426,7 +4477,7 @@ mod tests {
             dwarf_version: 5,
             ..Default::default()
         };
-        let sec = build_dwarf_full(&cu, &opts);
+        let sec = build_dwarf_full(cu.clone(), &opts);
         // .debug_info header: unit_length(4) + version(2) = offset 4,5
         assert!(sec.info.len() > 6);
         assert_eq!(sec.info[4], 5); // version = 5
@@ -4460,7 +4511,7 @@ mod tests {
             dwarf_version: 5,
             ..Default::default()
         };
-        let sec = build_dwarf_full(&cu, &opts);
+        let sec = build_dwarf_full(cu.clone(), &opts);
         // .debug_line header: unit_length(4) + version(2) = offset 4,5
         assert!(sec.line.len() > 6);
         assert_eq!(sec.line[4], 5); // version = 5
@@ -4494,7 +4545,7 @@ mod tests {
             dwarf_version: 5,
             ..Default::default()
         };
-        let sec = build_dwarf_full(&cu, &opts);
+        let sec = build_dwarf_full(cu.clone(), &opts);
         // .debug_str_offsets should be present with v5 header
         assert!(!sec.str_offsets.is_empty());
         // Version = 5 at offset 4
@@ -4542,7 +4593,7 @@ mod tests {
             split_dwarf: true,
             ..Default::default()
         };
-        let sec = build_dwarf_full(&cu, &opts);
+        let sec = build_dwarf_full(cu.clone(), &opts);
         assert!(!sec.info_dwo.is_empty());
         assert!(!sec.skeleton.is_empty());
     }
@@ -4565,7 +4616,7 @@ mod tests {
             func_ranges: vec![(0, 16)],
             cfi_rows: vec![],
         };
-        let sec = build_dwarf_full(&cu, &DebugOptions::default());
+        let sec = build_dwarf_full(cu.clone(), &DebugOptions::default());
         assert!(!sec.frame.is_empty());
         let magic = u32::from_le_bytes([sec.frame[4], sec.frame[5], sec.frame[6], sec.frame[7]]);
         assert_eq!(magic, 0xFFFFFFFF);
@@ -4620,7 +4671,7 @@ mod tests {
             pubnames: true,
             ..Default::default()
         };
-        let sec = build_dwarf_full(&cu, &opts);
+        let sec = build_dwarf_full(cu.clone(), &opts);
         assert!(!sec.pubnames.is_empty());
         assert!(!sec.pubtypes.is_empty());
         assert!(!sec.names.is_empty());
@@ -4665,7 +4716,7 @@ mod tests {
             func_ranges: vec![],
             cfi_rows: vec![],
         };
-        let sec = build_dwarf_full(&cu, &DebugOptions::default());
+        let sec = build_dwarf_full(cu.clone(), &DebugOptions::default());
         assert!(!sec.line.is_empty());
     }
 
@@ -4713,7 +4764,7 @@ mod tests {
             func_ranges: vec![],
             cfi_rows: vec![],
         };
-        let sec = build_dwarf_full(&cu, &DebugOptions::default());
+        let sec = build_dwarf_full(cu.clone(), &DebugOptions::default());
         assert!(!sec.info.is_empty());
         assert!(!sec.abbrev.is_empty());
         assert!(!sec.str.is_empty());
@@ -4767,7 +4818,7 @@ mod tests {
             func_ranges: vec![],
             cfi_rows: vec![],
         };
-        let sec = build_dwarf_full(&cu, &DebugOptions::default());
+        let sec = build_dwarf_full(cu.clone(), &DebugOptions::default());
         // 缩略表 + 信息表都应非空
         assert!(!sec.abbrev.is_empty());
         assert!(!sec.info.is_empty());
@@ -4836,7 +4887,7 @@ mod tests {
             func_ranges: vec![],
             cfi_rows: vec![],
         };
-        let sec = build_dwarf_full(&cu, &DebugOptions::default());
+        let sec = build_dwarf_full(cu.clone(), &DebugOptions::default());
         // 缩略表不应出现 DW_AT_bit_size
         let mut has_bit_size = false;
         for w in sec.abbrev.windows(2) {
@@ -4918,14 +4969,14 @@ mod tests {
         ];
         let cu = make_line_cu(entries);
         let sec_g1 = build_dwarf_full(
-            &cu,
+            cu.clone(),
             &DebugOptions {
                 level: 1,
                 ..Default::default()
             },
         );
         let sec_g3 = build_dwarf_full(
-            &cu,
+            cu.clone(),
             &DebugOptions {
                 level: 3,
                 ..Default::default()
@@ -4978,7 +5029,7 @@ mod tests {
         ];
         let cu = make_line_cu(entries);
         let sec = build_dwarf_full(
-            &cu,
+            cu.clone(),
             &DebugOptions {
                 level: 3,
                 ..Default::default()
@@ -4987,7 +5038,7 @@ mod tests {
         // -g3 下 3 条 entry 全部保留 (每条都用 DW_LNS_copy 标记新行起点)
         // 简化判断: .debug_line 字节数应比 g1 版本大或相等
         let sec_g1 = build_dwarf_full(
-            &cu,
+            cu.clone(),
             &DebugOptions {
                 level: 1,
                 ..Default::default()
@@ -5143,7 +5194,7 @@ mod tests {
         ];
         let cu = make_line_cu(entries);
         let opts = DebugOptions::default();
-        let sec = build_dwarf_full(&cu, &opts);
+        let sec = build_dwarf_full(cu.clone(), &opts);
         // 应有 special opcode (>= opcode_base 的字节)
         let specials = count_special_opcodes(&sec.line, opts.opcode_base);
         assert!(
@@ -5185,7 +5236,7 @@ mod tests {
         ];
         let cu = make_line_cu(entries);
         let opts = DebugOptions::default();
-        let sec = build_dwarf_full(&cu, &opts);
+        let sec = build_dwarf_full(cu.clone(), &opts);
         let specials = count_special_opcodes(&sec.line, opts.opcode_base);
         assert!(
             specials >= 1,
@@ -5225,7 +5276,7 @@ mod tests {
         ];
         let cu = make_line_cu(entries);
         let opts = DebugOptions::default();
-        let sec = build_dwarf_full(&cu, &opts);
+        let sec = build_dwarf_full(cu.clone(), &opts);
         // 应使用 DW_LNS_advance_line + DW_LNS_advance_pc + DW_LNS_copy
         assert!(
             count_advance_pc(&sec.line, opts.opcode_base) >= 1,
@@ -5258,7 +5309,7 @@ mod tests {
             },
         ];
         let cu = make_line_cu(entries);
-        let sec = build_dwarf_full(&cu, &DebugOptions::default());
+        let sec = build_dwarf_full(cu.clone(), &DebugOptions::default());
         // special opcode 路径: 第 1 个 entry 用 special op (1 字节),
         // 第 2 个 entry 也用 special op (1 字节).
         // 标准序列: advance_line(2) + advance_pc(2) + copy(1) = 5 字节.
@@ -5303,7 +5354,7 @@ mod tests {
             },
         ];
         let cu = make_line_cu(entries);
-        let sec = build_dwarf_full(&cu, &DebugOptions::default());
+        let sec = build_dwarf_full(cu.clone(), &DebugOptions::default());
         // 验证 .debug_line 包含 DW_LNE_set_discriminator (0x04)
         // DW_LNE_set_discriminator 编码: 0x00 (extended_op), len, 0x04, ULEB128(value)
         let has_discriminator = sec
@@ -5638,14 +5689,14 @@ mod tests {
                 param_locations: vec![DwarfParamLocation::fbreg(-16)],
                 local_vars: vec![DwarfLocalVar {
                     name: "a".to_string(),
-                    ty: DwarfType {
+                    ty: std::sync::Arc::new(DwarfType {
                         name: "int[4]".to_string(),
                         byte_size: 16,
                         kind: DwarfTypeKind::Array {
                             element: Box::new(int_ty.clone()),
                             count: 4,
                         },
-                    },
+                    }),
                     location: DwarfParamLocation::fbreg(-32),
                     ranges: Vec::new(),
                     decl_line: 2,
@@ -5665,7 +5716,7 @@ mod tests {
             func_ranges: vec![],
             cfi_rows: vec![],
         };
-        let sec = build_dwarf_full(&cu, &DebugOptions::default());
+        let sec = build_dwarf_full(cu.clone(), &DebugOptions::default());
         let info = &sec.info;
         // 在字节流里找 array DIE：它的属性是 [ref4(元素)][data4(count=4)]，两者紧邻。
         let count_at = info.windows(4).position(|w| w == 4u32.to_le_bytes());
@@ -5719,7 +5770,7 @@ mod tests {
                     local_vars: if with_local {
                         vec![DwarfLocalVar {
                             name: "zz_local_name".to_string(),
-                            ty: int_ty.clone(),
+                            ty: std::sync::Arc::new(int_ty.clone()),
                             location: DwarfParamLocation::fbreg(-80),
                             ranges: Vec::new(),
                             decl_line: 2,
@@ -5744,8 +5795,8 @@ mod tests {
             }
         };
         let opts = DebugOptions::default();
-        let without = build_dwarf_full(&base_cu(false), &opts);
-        let with = build_dwarf_full(&base_cu(true), &opts);
+        let without = build_dwarf_full(base_cu(false), &opts);
+        let with = build_dwarf_full(base_cu(true), &opts);
         // 1) 变量名必须在表里（不在此时，`.debug_info` 里那个 strp 就是节外指针）
         let needle = b"zz_local_name\0";
         assert!(
@@ -5933,7 +5984,7 @@ mod tests {
             level: 2,
             ..Default::default()
         };
-        let sec = build_dwarf_full(&cu, &opts);
+        let sec = build_dwarf_full(cu.clone(), &opts);
 
         // CU 的 low_pc 就在第一条 reloc 的位置上（`build_abbrev_and_info` 先推 CU 再推函数）
         let (cu_lo_off, cu_lo_sym) = &sec.debug_info_relocs[0];
@@ -5976,7 +6027,7 @@ mod tests {
         let mut defined = fn_info("sink", 0x400, 0x450, 5);
         defined.local_vars.push(DwarfLocalVar {
             name: "only_on_one_side".to_string(),
-            ty: declared.return_type.clone(),
+            ty: std::sync::Arc::new(declared.return_type.clone()),
             location: DwarfParamLocation::fbreg(-16),
             ranges: Vec::new(),
             decl_line: 2,
@@ -5988,7 +6039,7 @@ mod tests {
             "对照输入本身就得是两条同名条目，否则下面全是空转"
         );
 
-        let norm = normalize_cu(&cu);
+        let norm = normalize_cu(cu.clone());
         assert_eq!(norm.functions.len(), 1, "同名条目必须合成一条");
         assert_eq!(norm.functions[0].local_vars.len(), 1, "合并不得丢掉另一侧的非空表");
 
@@ -6025,7 +6076,7 @@ mod tests {
         );
 
         // 走主入口（= 四个消费者共用同一份归一化口径）：三处都必须只剩一份。
-        let sec = build_dwarf_full(&cu, &opts);
+        let sec = build_dwarf_full(cu.clone(), &opts);
         assert_eq!(
             func_low_pc_relocs(&sec.debug_info_relocs)
                 .iter()
@@ -6051,7 +6102,7 @@ mod tests {
         ];
         let cu = cu_with(vec![fn_info("f", 0x100, 0x400, 3)], entries.clone());
         let sec = build_dwarf_full(
-            &cu,
+            cu.clone(),
             &DebugOptions {
                 level: 3,
                 ..Default::default()
@@ -6084,7 +6135,12 @@ mod tests {
     ///      "There are 2 unused bytes at the end of section .debug_loc"。
     #[test]
     fn loclist_only_for_multi_range_vars_with_relocatable_offsets() {
-        let opts = DebugOptions { level: 2, dwarf_version: 4, source_name: "x.c".to_string(), ..Default::default() };
+        let opts = DebugOptions {
+            level: 2,
+            dwarf_version: 4,
+            source_name: "x.c".to_string(),
+            ..Default::default()
+        };
         let int_ty = DwarfType {
             name: "int".to_string(),
             byte_size: 4,
@@ -6094,17 +6150,21 @@ mod tests {
         // 一个只有单一位置的变量（今天的全部形状）与一个分段的变量。
         f.local_vars.push(DwarfLocalVar {
             name: "plain".to_string(),
-            ty: int_ty.clone(),
+            ty: std::sync::Arc::new(int_ty.clone()),
             location: DwarfParamLocation::fbreg(-16),
             ranges: Vec::new(),
             decl_line: 4,
         });
         f.local_vars.push(DwarfLocalVar {
             name: "movd".to_string(),
-            ty: int_ty.clone(),
+            ty: std::sync::Arc::new(int_ty.clone()),
             location: DwarfParamLocation::reg(8),
             ranges: vec![
-                DwarfLocRange { begin_pc: 0x400, end_pc: 0x440, loc: DwarfParamLocation::reg(8) },
+                DwarfLocRange {
+                    begin_pc: 0x400,
+                    end_pc: 0x440,
+                    loc: DwarfParamLocation::reg(8),
+                },
                 DwarfLocRange {
                     begin_pc: 0x440,
                     end_pc: 0x480,
@@ -6113,7 +6173,7 @@ mod tests {
             ],
             decl_line: 5,
         });
-        let sec = build_dwarf_full(&cu_with(vec![f], vec![]), &opts);
+        let sec = build_dwarf_full(cu_with(vec![f], vec![]), &opts);
 
         // 两条区间各 8+8 地址 + 2 长度 + 表达式（reg8 是 1 字节，fbreg(-896) 是 1+2 字节），
         // 再加 16 字节表尾。
@@ -6145,7 +6205,12 @@ mod tests {
     /// 反向对照：单区间（只有一段位置）不得开表——那等于用新机制改旧字节。
     #[test]
     fn single_range_variable_stays_byte_identical() {
-        let opts = DebugOptions { level: 2, dwarf_version: 4, source_name: "x.c".to_string(), ..Default::default() };
+        let opts = DebugOptions {
+            level: 2,
+            dwarf_version: 4,
+            source_name: "x.c".to_string(),
+            ..Default::default()
+        };
         let int_ty = DwarfType {
             name: "int".to_string(),
             byte_size: 4,
@@ -6155,12 +6220,12 @@ mod tests {
             let mut f = fn_info("one", 0x400, 0x500, 3);
             f.local_vars.push(DwarfLocalVar {
                 name: "v".to_string(),
-                ty: int_ty.clone(),
+                ty: std::sync::Arc::new(int_ty.clone()),
                 location: DwarfParamLocation::fbreg(-24),
                 ranges,
                 decl_line: 4,
             });
-            build_dwarf_full(&cu_with(vec![f], vec![]), &opts)
+            build_dwarf_full(cu_with(vec![f], vec![]), &opts)
         };
         let none = build(Vec::new());
         let one = build(vec![DwarfLocRange {
@@ -6176,7 +6241,12 @@ mod tests {
     /// 单 `exprloc` 而不是发一个读不了的节。
     #[test]
     fn dwarf5_falls_back_to_exprloc_instead_of_unreadable_loclists() {
-        let opts = DebugOptions { level: 2, dwarf_version: 5, source_name: "x.c".to_string(), ..Default::default() };
+        let opts = DebugOptions {
+            level: 2,
+            dwarf_version: 5,
+            source_name: "x.c".to_string(),
+            ..Default::default()
+        };
         let int_ty = DwarfType {
             name: "int".to_string(),
             byte_size: 4,
@@ -6185,10 +6255,14 @@ mod tests {
         let mut f = fn_info("v5", 0x400, 0x500, 3);
         f.local_vars.push(DwarfLocalVar {
             name: "v".to_string(),
-            ty: int_ty,
+            ty: std::sync::Arc::new(int_ty),
             location: DwarfParamLocation::reg(3),
             ranges: vec![
-                DwarfLocRange { begin_pc: 0x400, end_pc: 0x440, loc: DwarfParamLocation::reg(3) },
+                DwarfLocRange {
+                    begin_pc: 0x400,
+                    end_pc: 0x440,
+                    loc: DwarfParamLocation::reg(3),
+                },
                 DwarfLocRange {
                     begin_pc: 0x440,
                     end_pc: 0x480,
@@ -6197,7 +6271,7 @@ mod tests {
             ],
             decl_line: 4,
         });
-        let sec = build_dwarf_full(&cu_with(vec![f], vec![]), &opts);
+        let sec = build_dwarf_full(cu_with(vec![f], vec![]), &opts);
         assert!(sec.loc.is_empty() && sec.loc_relocs.is_empty(), "DWARF5 不发 .debug_loc");
         assert!(sec.info.iter().any(|b| *b == DW_OP_reg0 + 3), "退回单 exprloc：号必须仍发出去");
     }

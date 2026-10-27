@@ -86,7 +86,9 @@ impl Codegen {
         self.pushsection_code_ranges
             .iter()
             .find(|(start, size, _, _)| pos >= *start && pos < *start + *size)
-            .map(|(start, _size, sec_idx, sec_off)| ((*sec_idx + 7) as u16, *sec_off + (pos - start)))
+            .map(|(start, _size, sec_idx, sec_off)| {
+                ((*sec_idx + 7) as u16, *sec_off + (pos - start))
+            })
             .unwrap_or((1u16, pos))
     }
 
