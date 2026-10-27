@@ -1,24 +1,54 @@
 name: SQLite Test Suite
 
 # 手工执行，不挂 push/pull_request 触发器 —— 和 torture.yml 一样，只有
-# workflow_dispatch。SQLite 套件单档构建要 1-3 分钟、四档近 10 分钟，且
-# 官方 quick.test 依赖 tcl8.6-dev，不适合每次提交都跑。
+# workflow_dispatch。实测成本（2026-10-27，4 核主机，SQLite 3.54.0）：单档 88 个 TU
+# 逐 TU 独立进程构建 13~20 分钟，一档 quick.test 跑完 12~13 分钟，gcc 参照约
+# 7+8 分钟；四个档位加参照 ≈ 2 小时。官方 quick.test 还依赖 tcl 开发头文件，
+# 所以不适合每次提交都跑。
+#
+# 非 root 是硬前提，不是偶然：test/attach.test 的 attach-6.2 把文件 chmod 0000
+# 再断言打不开，root 无视权限，该用例会 puts "Tests do not work when run as root"
+# 并 exit 1，整套提前结束。hosted runner 的 job 用户是 runner（非 root），脚本走
+# 「不降权」分支，因此这里既不 useradd 也不 sudo，只要保证 runner 对工作区里的
+# dcc 真的能执行（见 Check suite preconditions）。
 on:
   workflow_dispatch:
     inputs:
       levels:
-        description: "dcc 优化档位（空格分隔）"
+        description: "dcc 优化档位（空格或逗号分隔，如 0 1 2 3 或 0,1,2,3）"
         required: false
         default: "2"
       suite:
-        description: "要跑的测试文件（可多个，空格分隔）"
+        description: "要跑的测试文件（可多个，空格或逗号分隔）"
         required: false
         default: "test/quick.test"
+      strict:
+        description: "套件中途停止（SUITE-INCOMPLETE）是否判红"
+        required: false
+        type: choice
+        default: "false"
+        options:
+          - "false"
+          - "true"
 
 jobs:
   sqlite-suite:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # 外层上限必须套得住内层的逐段挂起保护，否则真挂起时是 job 被页面超时
+    # 砍掉、日志无处可看。按下表的内层超时算最坏情形（LEVELS="0 1 2 3" ⇒ 5 次构建
+    # + 5 次跑）：5 × BUILD_TIMEOUT_S(2400) + 5 × TEST_TIMEOUT_S(1500) = 19500s ≈ 325
+    # 分钟，留 15 分钟余量取 340。正常跑完约 2 小时。
+    # BUILD_TIMEOUT_S 从 1200 提到 2400 的理由：实测单档 88 TU 的逐 TU 构建已达
+    # 13~20 分钟（-O2/-O3 档尤其接近 1200s），再留着就等于在 CI 上抛一个
+    # 假 TU-BUILD-TIMEOUT；而它本来就是“构建挂住”的护栏，不是性能预算。
+    timeout-minutes: 340
+    env:
+      DCC: ${{ github.workspace }}/target/release/dcc
+      OUT: /tmp/sqlite_suite
+      # 套件语料落在 runner.temp：可写、且在仓库外，不会污染 git status
+      SQLITE_SRC: ${{ runner.temp }}/sqlite-src-3540000
+      SQLITE_ZIP: ${{ runner.temp }}/sqlite-src-3540000.zip
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -38,29 +68,49 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y tcl-dev unzip
 
+      - name: Check suite preconditions
+        # 这几条都属于「压根没跑起来」：缺了就得当场判红，不能让它们到 configure
+        # 或 attach.test 里换一副面孔再冒出来（历史上「/dev/null 不可写」报的就是
+        # 「No working C compiler found」）。
+        run: |
+          echo "job user: $(id -un) uid=$(id -u)"
+          "$DCC" --version || { echo "::error::$DCC 无法执行（权限/缺共享库）"; exit 1; }
+          command -v flock >/dev/null || { echo "::error::flock 缺失（util-linux）"; exit 1; }
+          command -v timeout >/dev/null || { echo "::error::timeout 缺失（coreutils）"; exit 1; }
+          command -v runuser >/dev/null || { echo "::error::runuser 缺失（util-linux）"; exit 1; }
+          test -w /dev/null || { echo "::error::/dev/null 不可写"; exit 1; }
+          test -w /tmp || { echo "::error::/tmp 不可写"; exit 1; }
+          # 换成 root 的容器/自托管 runner 时，脚本会走降权分支：那条分支需要
+          # useradd 建新用户。这里先查一遍，别让它在跑到一半时才炸。
+          if [ "$(id -u)" -eq 0 ]; then
+            command -v useradd >/dev/null ||
+              { echo "::error::root 下需降权，但 useradd 缺失"; exit 1; }
+            echo "root runner：脚本将自动降权到 \$SUITE_USER"
+          fi
+
       - name: Download SQLite suite
-        # runner.temp 可写；放在工作区外，不进 git status
-        env:
-          SQLITE_SRC: ${{ runner.temp }}/sqlite-src-3540000
-          SQLITE_ZIP: ${{ runner.temp }}/sqlite-src-3540000.zip
+        # 本地与 CI 同一个入口，避免两边拿到的树不一致
         run: bash scripts/setup_sqlite_suite.sh
 
       - name: Run suite
         # 与 torture.yml 同一条纪律：先证明脚本存在且能解析，再抓真实 rc。
         # 套件本身的失败不在这里吞掉，交给脚本的退出码表达；但「压根没跑
         # 起来」（缺文件、语法错、不可执行）必须显式判红。
+        # LEVELS/SUITE 直接透传：脚本自己把逗号/分号归一成空格并校验档位，
+        # 所以输入框写 "0,1,2,3" 不会变成 -O0,1,2,3 传给编译器。
         env:
           LEVELS: ${{ inputs.levels }}
           SUITE: ${{ inputs.suite }}
-          DCC: ${{ github.workspace }}/target/release/dcc
-          SQLITE_SRC: ${{ runner.temp }}/sqlite-src-3540000
+          STRICT: ${{ inputs.strict }}
+          BUILD_TIMEOUT_S: 2400
+          TEST_TIMEOUT_S: 1500
         run: |
           s=scripts/check_sqlite_suite.sh
           [ -f "$s" ] || { echo "::error::$s 不存在"; exit 1; }
           bash -n "$s" || { echo "::error::$s 语法错误"; exit 1; }
           rc=0
           bash "$s" > suite.log 2>&1 || rc=$?
-          tail -40 suite.log
+          tail -60 suite.log
           echo "check_sqlite_suite.sh rc=$rc"
           if [ "$rc" -ge 126 ]; then
             echo "::error::$s 无法执行 (rc=$rc)"
@@ -68,4 +118,50 @@ jobs:
           fi
           echo "rc=$rc" >> "$GITHUB_STEP_SUMMARY"
           sed -n '/=== summary ===/,$p' suite.log >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -eq 4 ]; then
+            # rc=4 = 只有「没跑到汇总行」，且**无新增失败名**、无 BUILD-FAIL。历史上这一档
+            # 容的是「dcc 在 quick.test 中途 SIGSEGV」那族缺陷，最后一个已在 2026-10-27
+            # 修完（四档都能跑到汇总行，docs/dcc-lua-sqlite-build-verify-report.md §4.4），
+            # 所以今天看到 rc=4 应当先查日志再决定；仍不直接判红是因为超时/机器抖动也走
+            # 这一档，把它混进 DCC-BUILD-FAIL / SUITE-DIFF 会让真回归看不出。证据依旧
+            # 打进日志与 artifact；strict=true 时按红处理。
+            sed -n '/SUITE-INCOMPLETE/p' suite.log | head -8 | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ "$STRICT" = "true" ]; then
+              echo "::error::SUITE-INCOMPLETE 且 strict=true → 判红"
+              exit 4
+            fi
+            echo "::warning::套件中途停止（无新增失败名）→ 黄牌放行，需查原因"
+            exit 0
+          fi
           exit "$rc"
+
+      - name: Collect logs
+        # 脚本的判红行都写着「see /tmp/sqlite_suite/xxx.log」，而那些文件在 CI 上
+        # 没人看得到；不搬进 artifact 就等于把真实原因留在被销毁的 runner 里。
+        # 只要日志与失败名清单：$OUT/run/src 是整棵源码树 + 每档 obj 目录，几百 MB 起。
+        if: always()
+        run: |
+          dst=suite-artifacts
+          rm -rf "$dst"
+          mkdir -p "$dst"
+          for f in "$OUT"/*.log "$OUT"/fails-*.txt "$OUT"/newfails-*.txt; do
+            if [ -f "$f" ]; then
+              # run-*.log 是整套 61.8 万行的原始输出，几十 MB；崩溃/汇总证据都在尾部，
+              # 取最后 2 MB 足够定位（失败测试名另有 fails-*.txt 全量清单）。
+              tail -c 2000000 "$f" >"$dst/$(basename "$f")"
+            fi
+          done
+          [ -f suite.log ] && cp suite.log "$dst/" || true
+          # artifact 目录为空会让 upload-artifact 自己报红，把真正的失败原因顶掉。
+          if [ -z "$(ls -A "$dst")" ]; then
+            echo "脚本没产出任何日志（$OUT 不存在或未跑起来）" >"$dst/NOTICE.txt"
+          fi
+          ls -l "$dst"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-suite-logs
+          path: suite-artifacts
+          retention-days: 7

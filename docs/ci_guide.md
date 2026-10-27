@@ -76,7 +76,7 @@ Tier 0  PR 必绿（本地等价：make test）
         + scripts/check_fixtures_selftest.sh（对上述门禁本身做反向注入的元门禁）
 
 Tier 1  Linux CI（.github/workflows）
-        ci.yml / gcc-dg.yml / torture.yml
+        ci.yml / gcc-dg.yml / torture.yml / sqlite-suite.yml
         └─ ci.yml = build 一次 → test / reproducibility / e2e / parity / matrix 五个
            job 并行 needs: build。原先 e2e.yml / check_asm_text_parity.yml /
            check_feature_matrix.yml 各编一遍 release（同一 push 编 3 遍），已合并；
@@ -99,7 +99,7 @@ Tier 3  可选深测
 | Tier | 何时必须跑 | 是否挡合并 | 触发入口 |
 |------|------------|------------|----------|
 | Tier 0 | 每个 PR / 提交前 | **挡**（任一条红即不可合并） | `make test`（= §9 四条逐字对应：`cargo build --tests` → `cargo test --release` → `scripts/check_fixtures.sh` → 元门禁 `scripts/check_fixtures_selftest.sh`）；`make test-all` = Tier 0 全量 + `scripts/test_all.sh`（examples 端到端冒烟） |
-| Tier 1 | push / PR 自动跑（外部套件按需手动） | `ci.yml` 挡（build / test / reproducibility / e2e / parity / matrix 六个 job 全为 required）；`gcc-dg.yml`、`torture.yml` 是 `workflow_dispatch` 手动作业（不挡单个 PR） | `.github/workflows/ci.yml`（push/PR）＋ `gcc-dg.yml`、`torture.yml`（手动） |
+| Tier 1 | push / PR 自动跑（外部套件按需手动） | `ci.yml` 挡（build / test / reproducibility / e2e / parity / matrix 六个 job 全为 required）；`gcc-dg.yml`、`torture.yml`、`sqlite-suite.yml` 是 `workflow_dispatch` 手动作业（不挡单个 PR） | `.github/workflows/ci.yml`（push/PR）＋ `gcc-dg.yml`、`torture.yml`、`sqlite-suite.yml`（手动） |
 | Tier 2 | 需要内核级回归时（手动/定时） | 不挡单个 PR | `scripts/kernel_full_check.sh`、`kernel-bench.yml` |
 | Tier 3 | 深测/取证 | 不挡 | `GCC_SRC=~/gcc-src cargo test`、`STRICT_FULL_BUILD=1` |
 
