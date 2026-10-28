@@ -45,9 +45,14 @@ jobs:
     env:
       DCC: ${{ github.workspace }}/target/release/dcc
       OUT: /tmp/sqlite_suite
-      # 套件语料落在 runner.temp：可写、且在仓库外，不会污染 git status
-      SQLITE_SRC: ${{ runner.temp }}/sqlite-src-3540000
-      SQLITE_ZIP: ${{ runner.temp }}/sqlite-src-3540000.zip
+      # 套件语料落在 /tmp：可写、且在仓库外，不会污染 git status。这里写死字面
+      # 路径，不用 runner 上下文变量（它在 Linux runner 上指向 /home/runner/work/_temp，
+      # 性质相同）：runner 上下文只能用在 step 级，写进 job 级 env 会让整份 workflow
+      # 直接判非法（Unrecognized named-value: 'runner'）。
+      # 两个脚本都接受外部覆盖，本地不设这两个变量时的默认值是
+      # $HOME/sqlite-src-3540000，故本地与 CI 只需各自保证 setup / check 拿到同一个值。
+      SQLITE_SRC: /tmp/sqlite-src-3540000
+      SQLITE_ZIP: /tmp/sqlite-src-3540000.zip
 
     steps:
       - name: Checkout repository
